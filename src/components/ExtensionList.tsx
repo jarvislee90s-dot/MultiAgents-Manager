@@ -27,6 +27,7 @@ export function ExtensionList() {
   const [installPath, setInstallPath] = useState("");
   const [installName, setInstallName] = useState("");
   const [rescanning, setRescanning] = useState(false);
+  const [repoSkills, setRepoSkills] = useState<string[]>([]);
 
   const load = async () => {
     try {
@@ -41,6 +42,13 @@ export function ExtensionList() {
     load();
   }, []);
 
+  // 窗口获焦时重新加载（用户从 Claude Code 装了新 skill 后切回看板时立即可见）
+  useEffect(() => {
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
   const skills = extensions.filter((e) => e.kind === "skill");
   const mcps = extensions.filter((e) => e.kind === "mcp");
 
@@ -51,6 +59,15 @@ export function ExtensionList() {
       load();
     } catch (e) {
       toast.error(`操作失败: ${e}`);
+    }
+  };
+
+  const loadRepoSkills = async () => {
+    try {
+      const data = await invoke<string[]>("list_repo_skills");
+      setRepoSkills(data);
+    } catch (e) {
+      console.error("Failed to load repo skills:", e);
     }
   };
 
@@ -110,14 +127,22 @@ export function ExtensionList() {
             <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${rescanning ? "animate-spin" : ""}`} />
             重新扫描
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setShowInstall(!showInstall)}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              const next = !showInstall;
+              setShowInstall(next);
+              if (next) loadRepoSkills();
+            }}
+          >
             <FolderPlus className="mr-1.5 h-3.5 w-3.5" />
             安装
           </Button>
         </div>
 
         {showInstall && (
-          <Card className="mb-2 p-3">
+          <Card className="mb-2 space-y-2 p-3">
             <div className="flex gap-2">
               <Input
                 placeholder="源目录路径（如 /Users/jarvis/skills/my-skill）"
@@ -131,10 +156,27 @@ export function ExtensionList() {
                 onChange={(e) => setInstallName(e.currentTarget.value)}
                 className="w-32"
               />
-              <Button size="sm" onClick={handleInstall}>
+              <Button size="sm" onClick={handleInstall} disabled={!installPath || !installName}>
                 确认
               </Button>
             </div>
+            {repoSkills.length > 0 && (
+              <div className="text-muted-foreground flex flex-wrap items-center gap-1 text-[10px]">
+                <span>从仓库选：</span>
+                {repoSkills.map((name) => (
+                  <button
+                    key={name}
+                    className="hover:bg-accent rounded border px-1.5 py-0.5"
+                    onClick={() => {
+                      setInstallPath(`~/.mam/skills/${name}`);
+                      setInstallName(name);
+                    }}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            )}
           </Card>
         )}
 

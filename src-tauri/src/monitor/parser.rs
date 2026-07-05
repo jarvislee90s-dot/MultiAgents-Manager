@@ -373,6 +373,7 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
 /// Codex JSONL 条目
 #[derive(Deserialize)]
 struct CodexEntry {
+    pub timestamp: Option<String>,
     #[serde(rename = "type")]
     entry_type: Option<String>,
     payload: Option<serde_json::Value>,
@@ -487,7 +488,8 @@ fn parse_codex_jsonl(jsonl_path: &Path) -> Option<Session> {
     let file_age = jsonl_path.metadata().and_then(|m| m.modified()).ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
         .map(|d| d.as_secs_f32());
-    let file_recently_modified = file_age.map(|a| a < 3.0).unwrap_or(false);
+    // Codex APP 单步工具调用之间可能 10-30s 无文件改动；3s 太短会误判为 Idle
+    let file_recently_modified = file_age.map(|a| a < 60.0).unwrap_or(false);
 
     let file = File::open(jsonl_path).ok()?;
     let file_size = file.metadata().ok()?.len();
@@ -509,10 +511,17 @@ fn parse_codex_jsonl(jsonl_path: &Path) -> Option<Session> {
     let mut last_role = None;
     let mut last_entry_type: Option<String> = None;
     let mut last_has_tool_use = false;
+    let mut last_timestamp: Option<String> = None;
     let mut found_status = false;
 
     for line in &recent {
         if let Ok(entry) = serde_json::from_str::<CodexEntry>(&line) {
+            // 顶层 timestamp 作为最后活动时间（最近一条 entry）
+            if last_timestamp.is_none() {
+                if let Some(ts) = &entry.timestamp {
+                    last_timestamp = Some(ts.clone());
+                }
+            }
             match entry.entry_type.as_deref() {
                 Some("session_meta") => {
                     if session_id.is_none() {
@@ -601,7 +610,7 @@ fn parse_codex_jsonl(jsonl_path: &Path) -> Option<Session> {
         status,
         last_message,
         last_message_role: last_role,
-        last_activity_at: "Unknown".to_string(), // TODO: 从 Codex 日志提取时间戳
+        last_activity_at: last_timestamp.unwrap_or_else(|| "Unknown".to_string()),
         pid: 0, // 由调用方设置
         cpu_usage: 0.0,
         active_subagent_count: 0,

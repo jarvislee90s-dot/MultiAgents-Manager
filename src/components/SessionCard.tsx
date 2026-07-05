@@ -50,6 +50,7 @@ export function SessionCard({ session }: { session: Session }) {
         !session.jumpSupported && "cursor-default opacity-80"
       )}
       onClick={handleClick}
+      title={session.jumpSupported ? "点击跳转到终端" : "桌面 APP 形态：不可跳转终端"}
     >
       {/* 顶部：工具标签 + 项目名 + 状态灯 */}
       <div className="mb-2 flex items-center justify-between gap-2">
@@ -63,7 +64,12 @@ export function SessionCard({ session }: { session: Session }) {
             <Icon className="h-3 w-3" />
             {badge.label}
             {session.form === "app" && (
-              <span className="text-[9px] opacity-60">APP</span>
+              <span
+                className="text-[9px] opacity-60"
+                title="桌面 APP 形态：不可跳转终端，仅可监控"
+              >
+                APP
+              </span>
             )}
           </span>
           <span className="truncate text-sm font-medium">
