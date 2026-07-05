@@ -17,6 +17,7 @@ const TOOLS = [
 
 interface ImportStats {
   imported: number;
+  newlyAdded: number;
   skippedDup: number;
   sourceCounts: [string, number][];
 }
@@ -83,10 +84,12 @@ export function ExtensionList() {
     try {
       const stats = await invoke<ImportStats>("rescan_skills");
       const totalFound = stats.sourceCounts.reduce((a, [, n]) => a + n, 0);
-      if (stats.imported > 0) {
-        toast.success(`已导入 ${stats.imported} 个新 skill（扫描 ${totalFound} 个，跳过 ${stats.skippedDup} 个重复）`);
+      if (stats.newlyAdded > 0) {
+        toast.success(`发现 ${stats.newlyAdded} 个新 skill（扫描 ${totalFound} 个，跳过 ${stats.skippedDup} 个重复）`);
+      } else if (stats.imported > 0) {
+        toast.info(`已扫描 ${stats.imported} 个 skill（无新增）`);
       } else if (totalFound === 0) {
-        toast.info("未发现新 skill");
+        toast.info("未发现 skill");
       } else {
         toast.info(`扫描完成：${totalFound} 个 skill，无新增`);
       }

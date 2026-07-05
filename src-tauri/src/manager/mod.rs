@@ -266,7 +266,11 @@ fn scan_skills_recursive(dir: &std::path::Path, skills_root: &std::path::Path) -
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportStats {
+    /// 本次处理的 skill 数（去重后）— 包含新增和覆盖
     pub imported: usize,
+    /// 真正新增到仓库的 skill 数（重扫时 = 数据库增加的数量）
+    pub newly_added: usize,
+    /// 跳过的同名重复（不同工具目录下同名 skill）
     pub skipped_dup: usize,
     /// 每个工具找到的 skill 数 [(tool_id, count)]
     pub source_counts: Vec<(String, usize)>,
@@ -277,13 +281,15 @@ pub struct ImportStats {
 pub fn auto_import_skills(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
 
-    if !force {
-        // 首次启动：已导入过就跳过
-        let existing = crate::store::list_extensions();
-        if !existing.is_empty() {
-            log::debug!("Skills already imported ({} in DB), skipping auto-import", existing.len());
-            return ImportStats { imported: 0, skipped_dup: 0, source_counts: Vec::new() };
-        }
+    // 记录扫描前已有的 skill 名字集合，用于计算"真正新增"
+    let existing_before: std::collections::HashSet<String> = crate::store::list_extensions()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+
+    if !force && !existing_before.is_empty() {
+        log::debug!("Skills already imported ({} in DB), skipping auto-import", existing_before.len());
+        return ImportStats { imported: 0, newly_added: 0, skipped_dup: 0, source_counts: Vec::new() };
     }
 
     // 各工具的 skill 目录
@@ -344,8 +350,15 @@ pub fn auto_import_skills(force: bool) -> ImportStats {
         }
     }
 
+    // 计算真正新增：扫描后 extensions 数量 vs 扫描前
+    let existing_after: std::collections::HashSet<String> = crate::store::list_extensions()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    let newly_added = existing_after.difference(&existing_before).count();
+
     if imported > 0 {
-        log::info!("首次导入完成: {} 个 skill (跳过 {} 个重复)", imported, skipped_dup);
+        log::info!("扫描完成: 处理 {} 个（新增 {} 个，跳过 {} 个重复）", imported, newly_added, skipped_dup);
     }
-    ImportStats { imported, skipped_dup, source_counts }
+    ImportStats { imported, newly_added, skipped_dup, source_counts }
 }

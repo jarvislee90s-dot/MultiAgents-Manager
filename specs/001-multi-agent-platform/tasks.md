@@ -381,10 +381,13 @@ T057-T061 (子Agent)
 - [x] T067 [US1] Codex parser 从 rollout JSONL 顶层 timestamp 提取 last_activity_at（已完成）
 - [ ] T068 [US2] HookEvent 数据结构补 `last_event_at` 字段，事件时间纳入 Session 状态推导（missing，关联 F1 已修但没暴露给前端）
 - [ ] T069 [US2] Stop 事件 grace period 持续时间做成可配置（默认 5 秒），允许用户调到 10-30 秒（missing）
-- [ ] T070 [US2] Codex APP 与 Codex CLI 区分：APP 的 `stop` 事件触发条件可能更频繁（每个工具步骤一次），需要根据 form 字段采用不同 grace period（partial）
-- [ ] T071 [US5] Skill 面板支持搜索/过滤（超过 50 个 skill 时难以定位），按 name/description/source_tool 过滤（missing）
+- [x] T070 [US2] APP 形态 grace 5s→30s（subagent 调度场景，单步间隔长），CLI 保持 5s（已完成）
+- [x] T071 [US5] ExtensionList 加搜索框（按 name/description/sourceTool/suite 模糊匹配），徽章显示过滤后/总数（已完成）
 - [x] T072 [US5] ExtensionList 加 window focus 监听，自动 reload（已完成）
 - [x] T073 [US5] 安装对话框加"从仓库选"快捷按钮，复用 list_repo_skills（已完成）
 - [ ] T074 [US5] preset_items 表支持 MCP/Plugin（当前 tasks.md T049 写支持，实际后端 check_conflict 对 mcp 返回 None，加注释说明但未真正约束冲突）— 已在 2025-07-05 review 中用注释覆盖（partial，constitution VII 透明性原则）
 - [x] T075 [US8] SessionCard 在 form=app 时给 APP 徽章和整张卡加 title tooltip（已完成）
 - [x] T076 [US2] file_recently_modified 阈值 3s→60s（Codex APP 友好），避免长时运行被误判为 Idle（已完成）
+- [x] T077 [US2/FR-2 #12] 通知 action "查看会话"按钮：注册 registerActionTypes + onAction 监听，sendNotification 带 actionTypeId+extra.pid，点击触发 focus_session（已完成）
+- [x] T078 [US5] ImportStats 加 newlyAdded 字段，扫描前后 extensions 差集；前端 toast 区分"发现新"vs"无新增"（已完成）
+- [ ] T079 [US2] Codex APP 长时间 idle（文件 60s 没改）→ JSONL 推导会变 Waiting。需要在 grace 逻辑里：APP 形态 + 文件 60s+ 没改 + 5 分钟内无 stop 事件 → 才转 Waiting（否则保持 Idle/Processing）（missing）
