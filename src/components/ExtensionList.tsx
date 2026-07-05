@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Package, Link2, FolderPlus, Info } from "lucide-react";
+import { Package, Link2, FolderPlus, Info, RefreshCw } from "lucide-react";
 import type { ExtensionWithAssignments } from "@/types/extension";
 import { PresetList } from "@/components/PresetList";
 
@@ -14,11 +14,19 @@ const TOOLS = [
   { id: "opencode", label: "OpenCode" },
 ];
 
+
+interface ImportStats {
+  imported: number;
+  skippedDup: number;
+  sourceCounts: [string, number][];
+}
+
 export function ExtensionList() {
   const [extensions, setExtensions] = useState<ExtensionWithAssignments[]>([]);
   const [showInstall, setShowInstall] = useState(false);
   const [installPath, setInstallPath] = useState("");
   const [installName, setInstallName] = useState("");
+  const [rescanning, setRescanning] = useState(false);
 
   const load = async () => {
     try {
@@ -43,6 +51,26 @@ export function ExtensionList() {
       load();
     } catch (e) {
       toast.error(`操作失败: ${e}`);
+    }
+  };
+
+  const handleRescan = async () => {
+    setRescanning(true);
+    try {
+      const stats = await invoke<ImportStats>("rescan_skills");
+      const totalFound = stats.sourceCounts.reduce((a, [, n]) => a + n, 0);
+      if (stats.imported > 0) {
+        toast.success(`已导入 ${stats.imported} 个新 skill（扫描 ${totalFound} 个，跳过 ${stats.skippedDup} 个重复）`);
+      } else if (totalFound === 0) {
+        toast.info("未发现新 skill");
+      } else {
+        toast.info(`扫描完成：${totalFound} 个 skill，无新增`);
+      }
+      await load();
+    } catch (e) {
+      toast.error(`扫描失败: ${e}`);
+    } finally {
+      setRescanning(false);
     }
   };
 
@@ -72,6 +100,16 @@ export function ExtensionList() {
             <Package className="h-4 w-4" />
             Skill ({skills.length})
           </h3>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleRescan}
+            disabled={rescanning}
+            title="从 ~/.claude/skills/、~/.agents/skills/、~/.config/opencode/skills/ 重新扫描并导入新 skill"
+          >
+            <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${rescanning ? "animate-spin" : ""}`} />
+            重新扫描
+          </Button>
           <Button size="sm" variant="outline" onClick={() => setShowInstall(!showInstall)}>
             <FolderPlus className="mr-1.5 h-3.5 w-3.5" />
             安装

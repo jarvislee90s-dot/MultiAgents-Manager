@@ -10,5 +10,7 @@ export interface ExtensionWithAssignments {
   name: string;
   description: string | null;
   sourcePath: string;
+  sourceTool: string | null;
+  suite: string | null;
   assignments: AssignmentSummary[];
 }

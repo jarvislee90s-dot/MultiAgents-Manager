@@ -371,3 +371,20 @@ T057-T061 (子Agent)
 - T045（ExtensionList 组件独立）
 - T052（PresetBar 组件独立）
 - T063, T064, T065（安全/热键/Hook检查独立）
+
+---
+
+## Phase 2: Convergence
+
+按 speckit-converge 流程对照 spec/plan/tasks 与当前实现差距，追加未完成项。已完成：F1（Codex Stop grace period）、F2（rescan_skills IPC + 前端"重新扫描"按钮 + description/source_tool 显示）。
+
+- [ ] T067 [US1] Codex parser 写死 `last_activity_at: "Unknown"`（parser.rs:600），影响按时间排序。从 Codex rollout JSONL 提取 timestamp 字段（partial）
+- [ ] T068 [US2] HookEvent 数据结构补 `last_event_at` 字段，事件时间纳入 Session 状态推导（missing，关联 F1 已修但没暴露给前端）
+- [ ] T069 [US2] Stop 事件 grace period 持续时间做成可配置（默认 5 秒），允许用户调到 10-30 秒（missing）
+- [ ] T070 [US2] Codex APP 与 Codex CLI 区分：APP 的 `stop` 事件触发条件可能更频繁（每个工具步骤一次），需要根据 form 字段采用不同 grace period（partial）
+- [ ] T071 [US5] Skill 面板支持搜索/过滤（超过 50 个 skill 时难以定位），按 name/description/source_tool 过滤（missing）
+- [ ] T072 [US5] ExtensionList 在 focus 切换 tab 或收到 preset 变化事件时重新 load 数据，目前只 mount 时 load 一次（missing）
+- [ ] T073 [US5] Skill 安装对话框支持从全局仓库直接勾选（而非手动输入路径），复用 list_repo_skills（missing）
+- [ ] T074 [US5] preset_items 表支持 MCP/Plugin（当前 tasks.md T049 写支持，实际后端 check_conflict 对 mcp 返回 None，加注释说明但未真正约束冲突）— 已在 2025-07-05 review 中用注释覆盖（partial，constitution VII 透明性原则）
+- [ ] T075 [US8] Codex APP 不可跳转的提示在 SessionCard 上以小图标 + tooltip 显示（仅当 form=App），目前只通过 `jumpSupported=false` 字段体现（missing，可视化）
+- [ ] T076 [US2] Codex APP 状态指示需要更精细的"工作 vs 空闲"区分：CPU > 5% OR 60s 内有文件修改 → Processing，否则走 JSONL 推导。Codex APP 可能长时间 idle 但 session 文件未变，停留在 Idle 状态（missing）

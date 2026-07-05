@@ -6,9 +6,17 @@ pub mod codex;
 pub mod opencode;
 
 use crate::session::{status_sort_priority, AgentType, ProcessForm, Session, SessionStatus, SessionsResponse};
-use std::collections::HashSet;
+use once_cell::sync::Lazy;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+
+/// Stop 事件 grace period 秒数。
+/// Codex APP 完成单步工具调用就会触发 Stop，为避免误判为"等用户"，在 grace 期内保持黄灯。
+const STOP_GRACE_SECS: i64 = 5;
+
+/// 记录每个 PID 最近一次 Stop 事件的时间戳，用于 grace period 判定
+static STOP_GRACE: Lazy<Mutex<HashMap<u32, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// 通用进程信息
 #[derive(Debug, Clone)]
@@ -112,20 +120,49 @@ pub fn get_all_sessions() -> SessionsResponse {
 
     // Hook 事件集成：用新鲜事件（<30s）更新会话状态
     let hook_events = crate::monitor::hooks::read_hook_events();
+    let now_ts = chrono::Utc::now().timestamp();
+    let mut grace = STOP_GRACE.lock().unwrap();
     for session in &mut all_sessions {
         if let Some(event) = hook_events.get(&session.pid) {
-            // 根据 Hook 事件类型更新状态
-            let new_status = match event.event.as_str() {
-                "Stop" | "stop" => Some(SessionStatus::Waiting),
-                "PreToolUse" | "preToolUse" => Some(SessionStatus::Processing),
-                "UserPromptSubmit" | "userPromptSubmit" => Some(SessionStatus::Thinking),
-                "SessionStart" | "sessionStart" => Some(SessionStatus::Idle),
-                "SessionEnd" | "sessionEnd" => Some(SessionStatus::Finished),
-                _ => None,
-            };
-            if let Some(status) = new_status {
-                log::debug!("Hook event {} → {:?} for pid={}", event.event, status, session.pid);
-                session.status = status;
+            match event.event.as_str() {
+                "Stop" | "stop" => {
+                    // 记录 grace 时间戳，不直接改 status — 由 grace 判定综合决定
+                    grace.insert(session.pid, event.ts);
+                    if now_ts - event.ts < STOP_GRACE_SECS {
+                        // grace 期内：保持黄灯（覆盖 JSONL 推导的 Waiting/Idle）
+                        if !matches!(session.status,
+                            SessionStatus::Processing
+                            | SessionStatus::Thinking
+                            | SessionStatus::Compacting)
+                        {
+                            log::debug!("Stop grace 期内（{}s）保持黄灯: pid={}", STOP_GRACE_SECS, session.pid);
+                            session.status = SessionStatus::Processing;
+                        }
+                    } else {
+                        // 过期：Agent 已停止活动超过 grace 期，进入等待用户态
+                        session.status = SessionStatus::Waiting;
+                    }
+                }
+                _ => {
+                    // 其他事件：清 grace，正常映射
+                    grace.remove(&session.pid);
+                    let new_status = match event.event.as_str() {
+                        "PreToolUse" | "preToolUse" => Some(SessionStatus::Processing),
+                        "UserPromptSubmit" | "userPromptSubmit" => Some(SessionStatus::Thinking),
+                        "SessionStart" | "sessionStart" => Some(SessionStatus::Idle),
+                        "SessionEnd" | "sessionEnd" => Some(SessionStatus::Finished),
+                        _ => None,
+                    };
+                    if let Some(status) = new_status {
+                        log::debug!("Hook event {} → {:?} for pid={}", event.event, status, session.pid);
+                        session.status = status;
+                    }
+                }
+            }
+        } else if let Some(&stop_ts) = grace.get(&session.pid) {
+            // 没有新事件但有过 Stop 记录 — 过期则清掉，让 JSONL 推导
+            if now_ts - stop_ts >= STOP_GRACE_SECS {
+                grace.remove(&session.pid);
             }
         }
     }

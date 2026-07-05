@@ -232,3 +232,9 @@ pub fn detect_tools() -> Vec<crate::linker::detector::ToolDetection> {
 pub fn assign_skill_to_subagent(skill_name: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
     crate::manager::assign_skill_to_subagent(&skill_name, &tool_id, &sub_agent_id)
 }
+
+/// 重新扫描各工具的 skill 目录，导入新增的 skill（前端"重新扫描"按钮调用）
+#[tauri::command]
+pub fn rescan_skills() -> crate::manager::ImportStats {
+    crate::manager::auto_import_skills(true)
+}

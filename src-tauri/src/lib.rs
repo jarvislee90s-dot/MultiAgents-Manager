@@ -30,7 +30,7 @@ pub fn run() {
         env_logger::Env::default().default_filter_or("info")
     ).try_init();
     store::init();
-    manager::auto_import_skills();
+    manager::auto_import_skills(false);  // 首次启动，不强制
     monitor::hooks::register_all_hooks();
 
     let builder = tauri::Builder::default()
@@ -68,7 +68,8 @@ pub fn run() {
             commands::write_mcp_server,
             commands::remove_mcp_server,
             commands::detect_tools,
-            commands::assign_skill_to_subagent
+            commands::assign_skill_to_subagent,
+            commands::rescan_skills,
         ]);
 
     #[cfg(not(debug_assertions))]

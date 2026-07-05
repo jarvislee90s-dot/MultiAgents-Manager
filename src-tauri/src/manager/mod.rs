@@ -262,15 +262,28 @@ fn scan_skills_recursive(dir: &std::path::Path, skills_root: &std::path::Path) -
     results
 }
 
+/// 技能导入统计
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStats {
+    pub imported: usize,
+    pub skipped_dup: usize,
+    /// 每个工具找到的 skill 数 [(tool_id, count)]
+    pub source_counts: Vec<(String, usize)>,
+}
+
 /// 扫描各工具的 skill 目录，递归导入到全局仓库（含去重）
-pub fn auto_import_skills() {
+/// force=true 时跳过"已导入过"检查，用于前端"重新扫描"按钮
+pub fn auto_import_skills(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
 
-    // 检查是否已经导入过（数据库中有记录就跳过）
-    let existing = crate::store::list_extensions();
-    if !existing.is_empty() {
-        log::debug!("Skills already imported ({} in DB), skipping auto-import", existing.len());
-        return;
+    if !force {
+        // 首次启动：已导入过就跳过
+        let existing = crate::store::list_extensions();
+        if !existing.is_empty() {
+            log::debug!("Skills already imported ({} in DB), skipping auto-import", existing.len());
+            return ImportStats { imported: 0, skipped_dup: 0, source_counts: Vec::new() };
+        }
     }
 
     // 各工具的 skill 目录
@@ -282,14 +295,16 @@ pub fn auto_import_skills() {
 
     // 收集所有 skill：name → (path, source_tool, suite)
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut imported = 0;
-    let mut skipped_dup = 0;
+    let mut imported: usize = 0;
+    let mut skipped_dup: usize = 0;
+    let mut source_counts: Vec<(String, usize)> = Vec::new();
 
     for (tool_id, skills_dir) in &skill_sources {
         if !skills_dir.exists() { continue; }
 
         let found = scan_skills_recursive(skills_dir, skills_dir);
         log::info!("扫描 {} ({}): 找到 {} 个 SKILL.md", tool_id, skills_dir.display(), found.len());
+        source_counts.push((tool_id.to_string(), found.len()));
 
         for (skill_path, skill_name) in &found {
             // 去重：同名 skill 只导入一次
@@ -332,4 +347,5 @@ pub fn auto_import_skills() {
     if imported > 0 {
         log::info!("首次导入完成: {} 个 skill (跳过 {} 个重复)", imported, skipped_dup);
     }
+    ImportStats { imported, skipped_dup, source_counts }
 }
