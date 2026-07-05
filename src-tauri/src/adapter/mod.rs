@@ -128,14 +128,16 @@ pub fn get_all_sessions() -> SessionsResponse {
                 "Stop" | "stop" => {
                     // 记录 grace 时间戳，不直接改 status — 由 grace 判定综合决定
                     grace.insert(session.pid, event.ts);
-                    if now_ts - event.ts < STOP_GRACE_SECS {
+                    // APP 形态 grace 更长（subagent 调度场景，单步间隔长），CLI 较短
+                    let grace_secs = if matches!(session.form, ProcessForm::App) { 30 } else { STOP_GRACE_SECS };
+                    if now_ts - event.ts < grace_secs {
                         // grace 期内：保持黄灯（覆盖 JSONL 推导的 Waiting/Idle）
                         if !matches!(session.status,
                             SessionStatus::Processing
                             | SessionStatus::Thinking
                             | SessionStatus::Compacting)
                         {
-                            log::debug!("Stop grace 期内（{}s）保持黄灯: pid={}", STOP_GRACE_SECS, session.pid);
+                            log::debug!("Stop grace 期内（{}s）保持黄灯: pid={}, form={:?}", grace_secs, session.pid, session.form);
                             session.status = SessionStatus::Processing;
                         }
                     } else {

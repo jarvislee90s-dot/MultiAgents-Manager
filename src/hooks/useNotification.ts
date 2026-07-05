@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { sendNotification, isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
+import { sendNotification, isPermissionGranted, requestPermission, onAction, registerActionTypes } from "@tauri-apps/plugin-notification";
 import { useSessionStore } from "@/stores/sessionStore";
 import { playSoundForStatus } from "@/lib/audio";
 
@@ -62,6 +62,27 @@ export function useNotification() {
       } catch {
         notificationsEnabled.current = true;
       }
+
+      // 注册"查看会话"通知 action + 监听点击（满足 FR-2 #12）
+      try {
+        await registerActionTypes([{
+          id: "focus-session",
+          actions: [{ id: "focus", title: "查看会话" }],
+        }]);
+        await onAction(async (notification) => {
+          if (notification.actionTypeId !== "focus-session") return;
+          const pid = (notification.extra?.pid as number) ?? 0;
+          if (pid > 0) {
+            try {
+              await invoke("focus_session", { pid });
+            } catch (e) {
+              console.error("focus_session failed:", e);
+            }
+          }
+        });
+      } catch (e) {
+        console.error("register action types failed:", e);
+      }
     };
     init();
   }, []);
@@ -112,6 +133,8 @@ export function useNotification() {
         sendNotification({
           title: `${toolLabel}${formTag} — ${session.projectName}`,
           body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
+          actionTypeId: "focus-session",
+          extra: { pid: session.pid, sessionId: session.id },
         });
       }
     }

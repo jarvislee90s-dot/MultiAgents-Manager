@@ -28,6 +28,7 @@ export function ExtensionList() {
   const [installName, setInstallName] = useState("");
   const [rescanning, setRescanning] = useState(false);
   const [repoSkills, setRepoSkills] = useState<string[]>([]);
+  const [search, setSearch] = useState("");
 
   const load = async () => {
     try {
@@ -49,7 +50,13 @@ export function ExtensionList() {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  const skills = extensions.filter((e) => e.kind === "skill");
+  const skillFilter = (e: ExtensionWithAssignments) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return [e.name, e.description ?? "", e.sourceTool ?? "", e.suite ?? ""]
+      .some((s) => s.toLowerCase().includes(q));
+  };
+  const skills = extensions.filter((e) => e.kind === "skill" && skillFilter(e));
   const mcps = extensions.filter((e) => e.kind === "mcp");
 
   const toggleMcp = async (mcpName: string, toolId: string, enabled: boolean) => {
@@ -112,11 +119,17 @@ export function ExtensionList() {
     <div className="space-y-4">
       {/* Skills */}
       <div>
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2 flex items-center justify-between gap-2">
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <Package className="h-4 w-4" />
-            Skill ({skills.length})
+            Skill ({skills.length}{extensions.filter((e) => e.kind === "skill").length !== skills.length ? ` / ${extensions.filter((e) => e.kind === "skill").length}` : ""})
           </h3>
+          <Input
+            placeholder="搜索 skill..."
+            value={search}
+            onChange={(e) => setSearch(e.currentTarget.value)}
+            className="h-7 w-40 text-xs"
+          />
           <Button
             size="sm"
             variant="ghost"
