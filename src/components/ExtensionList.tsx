@@ -7,7 +7,6 @@ import { Card } from "@/components/ui/card";
 import { Package, Link2, FolderPlus, Info, RefreshCw, Plug } from "lucide-react";
 import type { ExtensionWithAssignments } from "@/types/extension";
 import { PresetList } from "@/components/PresetList";
-import { McpManager } from "@/components/McpManager";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -278,15 +277,6 @@ export function ExtensionList() {
             ))}
           </div>
         )}
-      </div>
-
-      {/* MCP 管理面板 */}
-      <div className="mt-2">
-        {TOOLS.map((tool) => (
-          <div key={tool.id} className="mb-2">
-            <McpManager toolId={tool.id} />
-          </div>
-        ))}
       </div>
 
       {/* Plugin */}

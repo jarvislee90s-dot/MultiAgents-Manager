@@ -182,6 +182,8 @@ pub fn get_all_sessions() -> SessionsResponse {
         } else if let Some(&(stop_ts, grace_secs)) = grace.get(&session.pid) {
             // 没有新事件但有过 Stop 记录 — 使用存储的 grace duration 判断过期
             if now_ts - stop_ts >= grace_secs {
+                // grace 已过期：Agent 已停止活动，进入 Idle 状态
+                session.status = SessionStatus::Idle;
                 grace.remove(&session.pid);
             }
         }

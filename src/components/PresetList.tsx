@@ -32,8 +32,12 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
   useEffect(() => { load(); }, []);
 
   const handleCreate = async () => {
-    if (!name || selected.size === 0) {
-      toast.error("请填写名称并选择至少一个资源");
+    if (!name) {
+      toast.error("请填写预设组名称");
+      return;
+    }
+    if (selected.size === 0) {
+      toast.error("请至少选择一个资源（skill、MCP 或插件）");
       return;
     }
     const items = Array.from(selected).map((id) => {

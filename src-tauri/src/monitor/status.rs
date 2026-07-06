@@ -104,7 +104,8 @@ pub fn determine_status(
             } else if file_recently_modified {
                 SessionStatus::Processing
             } else {
-                SessionStatus::Waiting
+                // Assistant finished responding, no pending tool calls → idle
+                SessionStatus::Idle
             }
         }
         Some("user") => {

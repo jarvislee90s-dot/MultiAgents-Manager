@@ -320,7 +320,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
     // 各工具的 skill 目录
     let skill_sources = [
         ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
-        ("codex", dirs::home_dir().unwrap_or_default().join(".agents").join("skills")),
+        ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("skills")),
         ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
     ];
 
