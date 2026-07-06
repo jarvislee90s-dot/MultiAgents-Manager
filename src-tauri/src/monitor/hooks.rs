@@ -18,7 +18,8 @@ EVENT=$(echo "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]
 SESSION_ID=$(echo "$INPUT" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 CWD=$(echo "$INPUT" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 TS=$(date +%s)
-echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS}" > "$EVENTS_DIR/$PPID.json"
+LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
 "#;
 
 /// 确保 Hook 脚本和事件目录存在
@@ -170,6 +171,7 @@ pub fn read_hook_events() -> HashMap<u32, HookEvent> {
 pub struct HookEvent {
     pub event: String,
     pub ts: i64,
+    pub last_event_at: String,
 }
 
 /// 为所有支持 Hook 的工具注册 Hook（在应用启动时调用）

@@ -77,7 +77,43 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
             }
             None
         }
-        "mcp" => None, // MCP 是配置型写入，重复存在不视为错误；write_mcp_toml/json 会用同名 key 覆盖
+        "mcp" => {
+            let name = ext_id.strip_prefix("mcp-").unwrap_or(ext_id);
+            let adapter: Box<dyn crate::adapter::AgentAdapter> = match tool_id {
+                "claude" => Box::new(crate::adapter::claude::ClaudeAdapter),
+                "codex" => Box::new(crate::adapter::codex::CodexAdapter),
+                "opencode" => Box::new(crate::adapter::opencode::OpenCodeAdapter),
+                _ => return None,
+            };
+            if let Some(config_path) = adapter.mcp_config_path() {
+                if config_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&config_path) {
+                        // Check if the MCP name already exists in the config
+                        let has_conflict = match adapter.mcp_format() {
+                            crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
+                                if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                                    let servers = root.get("mcpServers").or_else(|| root.get("mcp"));
+                                    servers.map(|s| s.get(name).is_some()).unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            }
+                            crate::adapter::McpFormat::Toml => {
+                                if let Ok(doc) = content.parse::<toml_edit::DocumentMut>() {
+                                    doc.get("mcp_servers").and_then(|s| s.get(name)).is_some()
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+                        if has_conflict {
+                            return Some(format!("MCP {} 已在 {} 配置中存在", name, tool_id));
+                        }
+                    }
+                }
+            }
+            None
+        }
         _ => None,
     }
 }

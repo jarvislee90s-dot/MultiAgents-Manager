@@ -392,9 +392,9 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let jsonl_files = collect_codex_session_files(&sessions_dir);
     debug!("Codex: found {} session files", jsonl_files.len());
 
-    // 解析所有会话文件，提取 cwd
+    // 解析所有会话文件，提取 cwd（用 Cli 默认值获取 project_path 用于匹配）
     let parsed: Vec<(PathBuf, Option<Session>)> = jsonl_files.iter()
-        .map(|f| (f.clone(), parse_codex_jsonl(f)))
+        .map(|f| (f.clone(), parse_codex_jsonl(f, ProcessForm::Cli)))
         .collect();
 
     // cwd -> processes 映射（用于精确匹配）
@@ -417,11 +417,13 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let mut matched_file_indices: HashSet<usize> = HashSet::new();
 
     // Phase 1: 按 cwd 精确匹配
-    for (idx, (_, session_opt)) in parsed.iter().enumerate() {
+    for (idx, (file_path, session_opt)) in parsed.iter().enumerate() {
         if let Some(session) = session_opt {
             if let Some(procs) = cwd_to_processes.get(&session.project_path) {
                 if let Some(proc) = procs.first() {
-                    let mut session = session.clone();
+                    // 用实际 process_form 重新解析以获取正确状态
+                    let mut session = parse_codex_jsonl(file_path, proc.form)
+                        .unwrap_or_else(|| session.clone());
                     session.pid = proc.pid;
                     session.cpu_usage = proc.cpu_usage;
                     session.form = proc.form;
@@ -435,12 +437,14 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 
     // Phase 2: 未匹配的进程（如 APP 形态 cwd="/")回退到最近的未匹配会话文件
     for process in &unmatched_processes {
-        for (idx, (_, session_opt)) in parsed.iter().enumerate() {
+        for (idx, (file_path, session_opt)) in parsed.iter().enumerate() {
             if matched_file_indices.contains(&idx) {
                 continue;
             }
             if let Some(session) = session_opt {
-                let mut session = session.clone();
+                // 用实际 process_form 重新解析以获取正确状态
+                let mut session = parse_codex_jsonl(file_path, process.form)
+                    .unwrap_or_else(|| session.clone());
                 session.pid = process.pid;
                 session.cpu_usage = process.cpu_usage;
                 session.form = process.form;
@@ -482,14 +486,18 @@ fn collect_codex_files_inner(dir: &Path, files: &mut Vec<(PathBuf, std::time::Sy
 }
 
 /// 解析单个 Codex JSONL 文件
-fn parse_codex_jsonl(jsonl_path: &Path) -> Option<Session> {
+fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Session> {
     use std::time::SystemTime;
 
     let file_age = jsonl_path.metadata().and_then(|m| m.modified()).ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
         .map(|d| d.as_secs_f32());
-    // Codex APP 单步工具调用之间可能 10-30s 无文件改动；3s 太短会误判为 Idle
-    let file_recently_modified = file_age.map(|a| a < 60.0).unwrap_or(false);
+    // Codex APP 单步工具调用之间可能 10-30s 无文件改动；60s 对 APP 太短
+    // APP 形态使用更大的阈值（300s = 5分钟），CLI 保持 60s
+    let file_recently_modified = match process_form {
+        ProcessForm::App => file_age.map(|a| a < 300.0).unwrap_or(false),
+        ProcessForm::Cli => file_age.map(|a| a < 60.0).unwrap_or(false),
+    };
 
     let file = File::open(jsonl_path).ok()?;
     let file_size = file.metadata().ok()?.len();

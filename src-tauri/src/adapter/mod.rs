@@ -11,6 +11,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
+/// 读取 CLI grace period（秒），默认 5
+fn get_cli_grace_secs() -> i64 {
+    crate::store::get_setting("cli_grace_secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
+/// 读取 APP grace period（秒），默认 30
+fn get_app_grace_secs() -> i64 {
+    crate::store::get_setting("app_grace_secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30)
+}
+
 /// Stop 事件 grace period 秒数。
 /// Codex APP 完成单步工具调用就会触发 Stop，为避免误判为"等用户"，在 grace 期内保持黄灯。
 const STOP_GRACE_SECS: i64 = 5;
@@ -131,7 +145,7 @@ pub fn get_all_sessions() -> SessionsResponse {
             match event.event.as_str() {
                 "Stop" | "stop" => {
                     // 按形态计算 grace 时长：APP 形态更长（subagent 调度场景，单步间隔长），CLI 较短
-                    let grace_secs = if matches!(session.form, ProcessForm::App) { 30 } else { STOP_GRACE_SECS };
+                    let grace_secs = if matches!(session.form, ProcessForm::App) { get_app_grace_secs() } else { get_cli_grace_secs() };
                     // 记录 grace 时间戳和时长，不直接改 status — 由 grace 判定综合决定
                     grace.insert(session.pid, (event.ts, grace_secs));
                     if now_ts - event.ts < grace_secs {
