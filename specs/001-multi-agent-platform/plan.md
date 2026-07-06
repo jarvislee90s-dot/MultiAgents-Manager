@@ -6,7 +6,7 @@
 
 ## 摘要
 
-构建一个 Tauri 2 桌面应用，解决两个核心痛点：(1) 多终端 AI 编程工具的运行状态不可见 — 通过红绿灯看板、声音通知、快速跳转解决；(2) 跨工具 skill/MCP/插件重复安装 — 通过全局仓库 + 三层映射 + 预设组解决。MVP 支持三个工具（Claude Code + Codex CLI + OpenCode），包含完整资源管理（skill/MCP/插件统一仓库 + 预设组 + 子 Agent 分配）。
+构建一个 Tauri 2 桌面应用，解决两个核心痛点：(1) 多终端 AI 编程工具的运行状态不可见 — 通过红绿灯看板、声音通知、快速跳转解决；(2) 跨工具 skill/MCP/插件重复安装 — 通过全局仓库 + 三层映射 + 预设组解决。MVP 支持四个工具（Claude Code + Codex CLI + OpenCode + OpenClaw），包含完整资源管理（skill/MCP/插件统一仓库 + 预设组 + 子 Agent 分配）。
 
 技术路径：以 tauri-app-template 为脚手架，移植 agent-sessions 的核心监控模块（AgentDetector trait + 进程发现 + JSONL/JSON 解析 + 终端跳转），移植 skills-manager-jw 的 linker 模块（symlink/Junction/copy），参考 HarnessKit 的 AgentAdapter trait 设计和 MCP 格式转换。
 
@@ -43,9 +43,9 @@
 |------|--------|------|------|
 | I. 统一技术栈 | 所有依赖是否在宪法清单内 | ✅ 通过 | 全部使用 Tauri 2 + Rust + React 19 + shadcn/ui + Tailwind v4，无混用 |
 | II. Adapter 模式 | 是否使用 AgentAdapter trait 抽象 | ✅ 通过 | 移植 agent-sessions 的 AgentDetector trait，改名为 AgentAdapter，只有 name()/detect() 必须，其余默认实现 |
-| III. 渐进式交付 | 阶段一是否为三工具 MVP | ✅ 通过 | 阶段一 Claude Code + Codex CLI + OpenCode 三工具，包含完整资源管理 |
-| IV. Hook 优先 | 有 Hook 的工具是否优先用 Hook | ✅ 通过 | Claude Code + Codex CLI 用 Hook（事件名大小写通过 hook_event_case() 转换），OpenCode 回退进程扫描 + 数据文件解析 |
-| V. 统一资源管理 | 是否用全局仓库 + 三层映射 | ✅ 通过 | Layer 1 SSOT + Layer 2 工具级 + Layer 3 子Agent级；Hermes/OpenCode 支持子Agent独立目录 |
+| III. 渐进式交付 | 阶段一是否为三工具 MVP | ✅ 通过 | 阶段一 Claude Code + Codex CLI + OpenCode + OpenClaw 四工具，包含完整资源管理 |
+| IV. Hook 优先 | 有 Hook 的工具是否优先用 Hook | ✅ 通过 | Claude Code + Codex CLI 用 Hook（事件名大小写通过 hook_event_case() 转换），OpenCode/OpenClaw 回退进程扫描 + 数据文件解析 |
+| V. 统一资源管理 | 是否用全局仓库 + 三层映射 | ✅ 通过 | Layer 1 SSOT + Layer 2 工具级 + Layer 3 子Agent级；Hermes/OpenCode/OpenClaw 支持子Agent独立目录 |
 | VI. 非侵入式体验 | 是否用托盘 + 悬浮窗 + 热键 | ✅ 通过 | Tauri tray-icon + always-on-top 窗口 + global-shortcut 插件 |
 | VII. 安全透明 | 敏感路径是否排除 | ✅ 通过 | 9 个敏感路径列入排除列表，所有操作本地完成 |
 
@@ -79,6 +79,7 @@ src-tauri/src/
 │   ├── claude.rs        # Claude Code adapter（进程: claude, Hook: PascalCase, MCP: JSON）
 │   ├── codex.rs         # Codex CLI adapter（进程: codex, Hook: camelCase, MCP: TOML）
 │   ├── opencode.rs      # OpenCode adapter（进程: opencode, 无 Hook, MCP: JSONC）
+│   ├── openclaw.rs      # OpenClaw adapter（进程: openclaw, 无 Hook, MCP: JSON, skill 目录: ~/.openclaw/skills/）
 │   └── hermes.rs        # Hermes adapter（进程: hermes, 无 Hook, 支持子Agent独立目录）
 ├── monitor/             # 会话监控
 │   ├── mod.rs           # 会话发现 + 轮询调度（active 50ms / idle 5s + notify 文件监听）
@@ -192,7 +193,7 @@ src/                     # React 前端
     └── reviewer/
 ```
 
-- 仅 Hermes 和 OpenCode 等支持子 Agent 独立 skill 目录的工具有此层
+- 仅 Hermes、OpenCode 和 OpenClaw 等支持子 Agent 独立 skill 目录的工具有此层
 - Claude Code 和 Codex CLI 不支持子 Agent 独立目录，此层对其为"仅 UI 记录"
 - 子 Agent 实际 skill 目录（如 `~/.hermes/agents/researcher/skills/`）symlink 到对应的 Layer 3 目录
 
@@ -289,7 +290,7 @@ echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"tr
 
 ### OpenCode/Hermes（无 Hook）
 
-OpenCode 和 Hermes 不支持 Hook 系统，完全依赖进程扫描 + 数据文件解析。monitor 模块的轮询逻辑同时检查：
+OpenCode、OpenClaw 和 Hermes 不支持 Hook 系统，完全依赖进程扫描 + 数据文件解析。monitor 模块的轮询逻辑同时检查：
 - Hook 事件文件（Claude/Codex）— 新鲜则用 Hook
 - 进程表（所有工具）— Hook 过期（>30s）则回退进程扫描
 
