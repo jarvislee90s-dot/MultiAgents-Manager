@@ -23,7 +23,22 @@ pub struct PluginConfig {
 
 /// 安装插件到全局仓库
 pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
-    linker::install_to_repo(source, name)
+    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
+    let _ = std::fs::create_dir_all(&repo);
+    let dest = repo.join(name);
+    if dest.exists() {
+        if dest.is_dir() {
+            let _ = std::fs::remove_dir_all(&dest);
+        } else {
+            let _ = std::fs::remove_file(&dest);
+        }
+    }
+    if source.is_dir() {
+        crate::linker::copy_dir_recursive(source, &dest)
+    } else {
+        std::fs::copy(source, &dest).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 /// 为工具启用文件型插件（创建 symlink）
@@ -119,8 +134,40 @@ pub fn enable_config_plugin(plugin_name: &str, tool_id: &str, entries: &BTreeMap
                 doc["plugins"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
             let plugin_table = &mut doc["plugins"][plugin_name];
+/// 将 serde_json::Value 转换为 toml_edit::Value
+fn json_to_toml_value(v: &serde_json::Value) -> toml_edit::Value {
+    match v {
+        serde_json::Value::Null => toml_edit::Value::from(""),
+        serde_json::Value::Bool(b) => toml_edit::Value::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                toml_edit::Value::from(i)
+            } else if let Some(f) = n.as_f64() {
+                toml_edit::Value::from(f)
+            } else {
+                toml_edit::Value::from(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => toml_edit::Value::from(s.clone()),
+        serde_json::Value::Array(arr) => {
+            let mut toml_arr = toml_edit::Array::new();
+            for item in arr {
+                toml_arr.push(json_to_toml_value(item));
+            }
+            toml_edit::Value::Array(toml_arr)
+        }
+        serde_json::Value::Object(map) => {
+            let mut table = toml_edit::InlineTable::new();
+            for (k, v) in map {
+                table.insert(k, json_to_toml_value(v));
+            }
+            toml_edit::Value::InlineTable(table)
+        }
+    }
+}
+
             for (k, v) in entries {
-                plugin_table[k] = toml_edit::value(&v.to_string());
+                plugin_table[k] = toml_edit::value(json_to_toml_value(v));
             }
             let toml_str = doc.to_string();
             linker::write_atomic(config_path, &toml_str)?;

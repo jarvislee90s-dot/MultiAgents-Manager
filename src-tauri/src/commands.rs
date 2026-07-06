@@ -55,6 +55,7 @@ pub struct ExtensionWithAssignments {
     pub source_path: String,
     pub suite: Option<String>,
     pub source_tool: Option<String>,
+    pub tags: Option<String>,
     pub assignments: Vec<AssignmentSummary>,
 }
 
@@ -89,6 +90,7 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
             source_path: ext.source_path.clone(),
             suite: ext.suite.clone(),
             source_tool: ext.source_tool.clone(),
+            tags: ext.tags.clone(),
             assignments: ext_assignments,
         }
     }).collect()
@@ -204,6 +206,7 @@ pub fn list_sub_agents(tool_id: String) -> Vec<SubAgentRecord> {
 }
 
 /// 读取工具的 MCP 服务器列表
+/// 返回统一格式: { "servers": { name: { command, args, env }, ... } }
 #[tauri::command]
 pub fn read_mcp_servers(tool_id: String) -> Result<serde_json::Value, String> {
     use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter};
@@ -215,16 +218,26 @@ pub fn read_mcp_servers(tool_id: String) -> Result<serde_json::Value, String> {
     };
     let path = adapter.mcp_config_path().ok_or("工具不支持 MCP")?;
     let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
-    match adapter.mcp_format() {
+    let raw: serde_json::Value = match adapter.mcp_format() {
         crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
-            serde_json::from_str(&content).map_err(|e| e.to_string())
+            serde_json::from_str(&content).map_err(|e| e.to_string())?
         }
         crate::adapter::McpFormat::Toml => {
             let toml_val: toml::Value = content.parse().map_err(|e: toml::de::Error| e.to_string())?;
             let json_str = serde_json::to_string(&toml_val).map_err(|e| e.to_string())?;
-            serde_json::from_str(&json_str).map_err(|e| e.to_string())
+            serde_json::from_str(&json_str).map_err(|e| e.to_string())?
         }
-    }
+    };
+
+    // 统一提取 servers 对象，支持多种键名
+    let servers = raw.get("mcpServers")
+        .or_else(|| raw.get("mcp_servers"))
+        .or_else(|| raw.get("mcp"))
+        .or_else(|| raw.get("servers"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Ok(serde_json::json!({ "servers": servers }))
 }
 
 /// 写入单个 MCP 服务器配置到工具

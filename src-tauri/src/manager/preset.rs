@@ -37,11 +37,11 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
             }
             "plugin" => {
                 let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
-                // 从 extensions 表读取 plugin 的 kind 字段（file 或 config）
+                // 从 extensions 表读取 plugin 的 tags 字段（存储了 "file" 或 "config" 子类型）
                 let plugin_kind = crate::store::list_extensions()
                     .iter()
                     .find(|e| e.id == *ext_id)
-                    .and_then(|e| e.kind.clone().into())
+                    .and_then(|e| e.tags.clone())
                     .unwrap_or_else(|| "file".to_string());
                 crate::manager::plugin::toggle_plugin(name, tool_id, true, &plugin_kind)
             }
@@ -101,7 +101,7 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
                 let plugin_kind = crate::store::list_extensions()
                     .iter()
                     .find(|e| e.id == *ext_id)
-                    .map(|e| e.kind.clone())
+                    .and_then(|e| e.tags.clone())
                     .unwrap_or_else(|| "file".to_string());
                 crate::manager::plugin::toggle_plugin(name, tool_id, false, &plugin_kind)
             }

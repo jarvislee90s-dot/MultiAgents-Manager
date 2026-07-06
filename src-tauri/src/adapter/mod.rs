@@ -15,8 +15,9 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 /// Codex APP 完成单步工具调用就会触发 Stop，为避免误判为"等用户"，在 grace 期内保持黄灯。
 const STOP_GRACE_SECS: i64 = 5;
 
-/// 记录每个 PID 最近一次 Stop 事件的时间戳，用于 grace period 判定
-static STOP_GRACE: Lazy<Mutex<HashMap<u32, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+/// 记录每个 PID 最近一次 Stop 事件的 (时间戳, grace_duration_secs)，用于 grace period 判定
+/// grace_duration 按进程形态区分：App 形态更长（30s），CLI 形态更短（5s）
+static STOP_GRACE: Lazy<Mutex<HashMap<u32, (i64, i64)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// 通用进程信息
 #[derive(Debug, Clone)]
@@ -129,10 +130,10 @@ pub fn get_all_sessions() -> SessionsResponse {
         if let Some(event) = hook_events.get(&session.pid) {
             match event.event.as_str() {
                 "Stop" | "stop" => {
-                    // 记录 grace 时间戳，不直接改 status — 由 grace 判定综合决定
-                    grace.insert(session.pid, event.ts);
-                    // APP 形态 grace 更长（subagent 调度场景，单步间隔长），CLI 较短
+                    // 按形态计算 grace 时长：APP 形态更长（subagent 调度场景，单步间隔长），CLI 较短
                     let grace_secs = if matches!(session.form, ProcessForm::App) { 30 } else { STOP_GRACE_SECS };
+                    // 记录 grace 时间戳和时长，不直接改 status — 由 grace 判定综合决定
+                    grace.insert(session.pid, (event.ts, grace_secs));
                     if now_ts - event.ts < grace_secs {
                         // grace 期内：保持黄灯（覆盖 JSONL 推导的 Waiting/Idle）
                         if !matches!(session.status,
@@ -164,9 +165,9 @@ pub fn get_all_sessions() -> SessionsResponse {
                     }
                 }
             }
-        } else if let Some(&stop_ts) = grace.get(&session.pid) {
-            // 没有新事件但有过 Stop 记录 — 过期则清掉，让 JSONL 推导
-            if now_ts - stop_ts >= STOP_GRACE_SECS {
+        } else if let Some(&(stop_ts, grace_secs)) = grace.get(&session.pid) {
+            // 没有新事件但有过 Stop 记录 — 使用存储的 grace duration 判断过期
+            if now_ts - stop_ts >= grace_secs {
                 grace.remove(&session.pid);
             }
         }

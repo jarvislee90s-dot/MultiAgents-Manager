@@ -317,13 +317,15 @@ export function ExtensionList() {
                   {TOOLS.map((tool) => {
                     const assignment = plugin.assignments.find((a) => a.agentToolId === tool.id);
                     const enabled = assignment?.enabled ?? false;
+                    // Plugin subtype is stored in tags as "file" or "config"
+                    const pluginSubtype = plugin.tags || "file";
                     return (
                       <Button
                         key={tool.id}
                         variant={enabled ? "default" : "outline"}
                         size="sm"
                         className="h-6 px-2 text-[10px]"
-                        onClick={() => togglePlugin(plugin.name, tool.id, !enabled, plugin.kind)}
+                        onClick={() => togglePlugin(plugin.name, tool.id, !enabled, pluginSubtype)}
                       >
                         {tool.label}
                       </Button>

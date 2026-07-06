@@ -392,7 +392,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 seen_names.insert(name.clone());
 
                 // 判断是文件型还是配置型：有子文件/目录 → file，只有单个 .json → config
-                let _kind = if path.is_dir() { "file" } else { "config" };
+                let kind = if path.is_dir() { "file" } else { "config" };
 
                 // 复制到全局仓库 ~/.mam/plugins/
                 let plugin_repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
@@ -415,7 +415,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                     source_path: path.to_string_lossy().to_string(),
                     source_url: None,
                     version: None,
-                    tags: Some(tool_id.to_string()),
+                    tags: Some(kind.to_string()),
                     suite: None,
                     source_tool: Some(tool_id.to_string()),
                 };

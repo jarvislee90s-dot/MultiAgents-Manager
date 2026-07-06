@@ -15,11 +15,8 @@ export function McpManager({ toolId }: { toolId: string }) {
 
   const load = useCallback(async () => {
     try {
-      const data = await invoke<Record<string, McpServerConfig>>("read_mcp_servers", { toolId });
-      // 后端返回的可能是 { mcpServers: {...} } 或 { mcp_servers: {...} } 或 { mcp: {...} }
-      // 需要提取实际的 servers 对象
-      const serversObj = (data as any).mcpServers || (data as any).mcp_servers || (data as any).mcp || data;
-      setServers(typeof serversObj === "object" && serversObj !== null ? serversObj : {});
+      const data = await invoke<{ servers: Record<string, McpServerConfig> }>("read_mcp_servers", { toolId });
+      setServers(data.servers || {});
     } catch (e) {
       console.error("Failed to load MCP servers:", e);
       setServers({});
@@ -117,10 +114,10 @@ export function McpManager({ toolId }: { toolId: string }) {
             <DialogTitle className="text-sm">{editingName ? `编辑 ${editingName}` : "添加 MCP 服务器"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-2">
-            {!editingName && (
+            {editingName === "" && (
               <Input
                 placeholder="名称（如 filesystem）"
-                value={editingName ?? ""}
+                value={editingName}
                 onChange={(e) => setEditingName(e.currentTarget.value)}
                 className="text-xs"
               />
