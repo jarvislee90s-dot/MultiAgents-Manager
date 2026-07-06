@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { Layers, Plus, Trash2, Play, X } from "lucide-react";
 import type { PresetRecord, PresetApplyResult } from "@/types/preset";
 import type { ExtensionWithAssignments } from "@/types/extension";
+import { CompatibilityDialog } from "./CompatibilityDialog";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -19,6 +20,12 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [compatibilityDialog, setCompatibilityDialog] = useState<{
+    open: boolean;
+    presetId: string;
+    presetName: string;
+    toolId: string;
+  } | null>(null);
 
   const load = async () => {
     try {
@@ -57,18 +64,35 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
   };
 
   const handleApply = async (presetId: string, presetName: string, toolId: string) => {
+    setCompatibilityDialog({
+      open: true,
+      presetId,
+      presetName,
+      toolId,
+    });
+  };
+
+  const confirmApply = async () => {
+    if (!compatibilityDialog) return;
+
     try {
-      const result = await invoke<PresetApplyResult>("apply_preset", { presetId, toolId });
+      const result = await invoke<PresetApplyResult>("apply_preset", {
+        presetId: compatibilityDialog.presetId,
+        toolId: compatibilityDialog.toolId,
+      });
       if (result.failures.length > 0) {
         toast.warning(`部分成功: ${result.successCount} 项成功, ${result.failures.length} 项失败`);
       } else if (result.conflicts.length > 0) {
         toast.info(`已应用 ${result.successCount} 项, ${result.conflicts.length} 项冲突跳过`);
       } else {
-        toast.success(`"${presetName}" 已应用到 ${toolId}`);
+        toast.success(`"${compatibilityDialog.presetName}" 已应用到 ${compatibilityDialog.toolId}`);
       }
+      load();
     } catch (e) {
       toast.error(`应用失败: ${e}`);
     }
+
+    setCompatibilityDialog(null);
   };
 
   const handleDeactivate = async (presetId: string, presetName: string, toolId: string) => {
@@ -163,6 +187,17 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
             </div>
           ))}
         </div>
+      )}
+
+      {compatibilityDialog && (
+        <CompatibilityDialog
+          open={compatibilityDialog.open}
+          presetId={compatibilityDialog.presetId}
+          toolId={compatibilityDialog.toolId}
+          toolName={TOOLS.find((t) => t.id === compatibilityDialog.toolId)?.label || compatibilityDialog.toolId}
+          onClose={() => setCompatibilityDialog(null)}
+          onConfirm={confirmApply}
+        />
       )}
     </div>
   );
