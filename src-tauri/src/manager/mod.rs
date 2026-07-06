@@ -5,7 +5,7 @@ pub mod mcp;
 pub mod preset;
 pub mod plugin;
 
-use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, AgentAdapter};
+use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
 use crate::linker;
 use crate::store;
 use log::info;
@@ -16,6 +16,7 @@ fn get_tool_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return None,
     };
     adapter.skill_dirs().into_iter().next()
@@ -323,6 +324,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
         ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("skills")),
         ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
+        ("openclaw", dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
     ];
 
     // 收集所有 skill：name → (path, source_tool, suite)
@@ -382,6 +384,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("plugins")),
         ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("plugins")),
         ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("plugins")),
+        ("openclaw", dirs::home_dir().unwrap_or_default().join(".openclaw").join("plugins")),
     ];
 
     for (tool_id, plugins_dir) in &plugin_sources {
