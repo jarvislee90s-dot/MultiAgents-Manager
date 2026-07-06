@@ -43,6 +43,7 @@ fn init_schema(conn: &Connection) {
             tags        TEXT,
             suite       TEXT,
             source_tool TEXT,
+            is_native   INTEGER NOT NULL DEFAULT 0,
             installed_at TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
@@ -92,6 +93,16 @@ fn init_schema(conn: &Connection) {
             sub_agent_id  TEXT,
             applied_at    TEXT NOT NULL,
             active        INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS native_extensions (
+            id          TEXT PRIMARY KEY,
+            kind        TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            description TEXT,
+            source_path TEXT NOT NULL,
+            source_tool TEXT NOT NULL,
+            detected_at TEXT NOT NULL,
+            imported    INTEGER NOT NULL DEFAULT 0
         );
         "#,
     )
@@ -197,6 +208,7 @@ pub struct ExtensionRecord {
     pub tags: Option<String>,
     pub suite: Option<String>,
     pub source_tool: Option<String>,
+    pub is_native: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,14 +226,14 @@ pub fn insert_extension(ext: &ExtensionRecord) -> Result<(), String> {
     let conn = DB.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT OR REPLACE INTO extensions (id, kind, name, description, source_path, source_url, version, tags, suite, source_tool, installed_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![ext.id, ext.kind, ext.name, ext.description, ext.source_path, ext.source_url, ext.version, ext.tags, ext.suite, ext.source_tool, &now, &now],
+        "INSERT OR REPLACE INTO extensions (id, kind, name, description, source_path, source_url, version, tags, suite, source_tool, is_native, installed_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![ext.id, ext.kind, ext.name, ext.description, ext.source_path, ext.source_url, ext.version, ext.tags, ext.suite, ext.source_tool, ext.is_native as i64, &now, &now],
     ).map_err(|e| e.to_string()).map(|_| ())
 }
 
 pub fn list_extensions() -> Vec<ExtensionRecord> {
     let conn = DB.lock().unwrap();
-    conn.prepare("SELECT id, kind, name, description, source_path, source_url, version, tags, suite, source_tool FROM extensions")
+    conn.prepare("SELECT id, kind, name, description, source_path, source_url, version, tags, suite, source_tool, is_native FROM extensions")
         .ok()
         .map(|mut stmt| {
             stmt.query_map([], |row| {
@@ -236,6 +248,7 @@ pub fn list_extensions() -> Vec<ExtensionRecord> {
                     tags: row.get(7)?,
                     suite: row.get(8)?,
                     source_tool: row.get(9)?,
+                    is_native: row.get::<_, i64>(10)? != 0,
                 })
             })
             .ok()
@@ -463,4 +476,86 @@ pub fn list_sub_agents(tool_id: &str) -> Vec<SubAgentRecord> {
             .unwrap_or_default()
         })
         .unwrap_or_default()
+}
+
+// ===== 原生扩展资源 CRUD =====
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeExtensionRecord {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source_path: String,
+    pub source_tool: String,
+    pub detected_at: String,
+    pub imported: bool,
+}
+
+pub fn insert_native_extension(ext: &NativeExtensionRecord) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO native_extensions (id, kind, name, description, source_path, source_tool, detected_at, imported) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![ext.id, ext.kind, ext.name, ext.description, ext.source_path, ext.source_tool, ext.detected_at, ext.imported as i64],
+    ).map_err(|e| e.to_string()).map(|_| ())
+}
+
+pub fn list_native_extensions(tool_id: Option<&str>) -> Vec<NativeExtensionRecord> {
+    let conn = DB.lock().unwrap();
+    let result = if let Some(tool) = tool_id {
+        conn.prepare("SELECT id, kind, name, description, source_path, source_tool, detected_at, imported FROM native_extensions WHERE source_tool = ?1 AND imported = 0 ORDER BY detected_at DESC")
+            .ok()
+            .map(|mut stmt| {
+                stmt.query_map([tool], |row| {
+                    Ok(NativeExtensionRecord {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        name: row.get(2)?,
+                        description: row.get(3)?,
+                        source_path: row.get(4)?,
+                        source_tool: row.get(5)?,
+                        detected_at: row.get(6)?,
+                        imported: row.get::<_, i64>(7)? != 0,
+                    })
+                })
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    } else {
+        conn.prepare("SELECT id, kind, name, description, source_path, source_tool, detected_at, imported FROM native_extensions WHERE imported = 0 ORDER BY detected_at DESC")
+            .ok()
+            .map(|mut stmt| {
+                stmt.query_map([], |row| {
+                    Ok(NativeExtensionRecord {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        name: row.get(2)?,
+                        description: row.get(3)?,
+                        source_path: row.get(4)?,
+                        source_tool: row.get(5)?,
+                        detected_at: row.get(6)?,
+                        imported: row.get::<_, i64>(7)? != 0,
+                    })
+                })
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    };
+    result
+}
+
+pub fn mark_native_imported(ids: &[String]) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    for id in ids {
+        conn.execute(
+            "UPDATE native_extensions SET imported = 1 WHERE id = ?1",
+            params![id],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

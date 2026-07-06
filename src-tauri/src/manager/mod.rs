@@ -39,6 +39,7 @@ pub fn install_skill(source_path: &str, name: &str) -> Result<(), String> {
         tags: None,
         suite: None,
         source_tool: None,
+        is_native: false,
     };
     store::insert_extension(&ext)?;
     info!("Skill 安装到全局仓库: {}", name);
@@ -369,6 +370,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 tags: Some(tool_id.to_string()),
                 suite: suite.clone(),
                 source_tool: Some(tool_id.to_string()),
+                is_native: false,
             };
             let _ = crate::store::insert_extension(&ext);
             imported += 1;
@@ -418,6 +420,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                     tags: Some(kind.to_string()),
                     suite: None,
                     source_tool: Some(tool_id.to_string()),
+                    is_native: false,
                 };
                 let _ = crate::store::insert_extension(&ext);
                 imported += 1;
