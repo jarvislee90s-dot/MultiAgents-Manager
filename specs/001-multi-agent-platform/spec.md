@@ -64,11 +64,11 @@
 
 ### 用户故事 4 — Skill/MCP/插件 统一仓库管理 (优先级: P4)
 
-用户在 Claude Code、Codex CLI、OpenCode 等多个工具中重复安装相同的 skill、MCP 服务器和插件，占用空间、版本不同步、切换工具时需重新配置。用户希望在一个统一仓库中集中管理这三类资源，然后按需映射到各工具。
+用户在 Claude Code、Codex CLI、OpenCode、OpenClaw 等多个工具中重复安装相同的 skill、MCP 服务器和插件，占用空间、版本不同步、切换工具时需重新配置。用户希望在一个统一仓库中集中管理这三类资源，然后按需映射到各工具。
 
 **优先级理由**：这是需求二的核心。统一管理 skill（文件映射）、MCP（配置写入）和插件（文件/配置混合），消除跨工具重复安装。
 
-**独立测试**：在统一仓库中安装一个 skill 和一个 MCP 服务器，为 Claude Code 启用 skill、为 Codex CLI 启用 MCP，验证 Claude Code 的 skill 目录包含该 skill、Codex CLI 的 config.toml 包含该 MCP 配置。
+**独立测试**：在统一仓库中安装一个 skill 和一个 MCP 服务器，为 Claude Code 启用 skill、为 Codex CLI 启用 MCP、为 OpenClaw 启用 skill，验证 Claude Code 的 skill 目录包含该 skill、Codex CLI 的 config.toml 包含该 MCP 配置、OpenClaw 的 skills 目录包含该 skill。
 
 **验收场景**：
 
@@ -79,6 +79,7 @@
 5. **给定** 用户为 Claude Code 启用了一个 MCP 服务器，**当** 启用操作完成，**则** Claude Code 的 ~/.claude.json 中自动写入 mcpServers 配置（JSON 格式），且 Codex CLI 的 config.toml 不受影响
 6. **给定** 用户为某个工具禁用了一个 MCP 服务器，**当** 禁用操作完成，**则** 该工具的配置文件中移除对应条目，但统一仓库中的 MCP 配置记录保留
 7. **给定** 用户为 OpenCode 启用了一个 MCP 服务器，**当** 启用操作完成，**则** OpenCode 的 opencode.json 中写入 mcp 配置（JSONC 格式，含 type/command/environment 字段）
+8. **给定** 用户为 OpenClaw 启用了 2 个 skill，**当** 启用操作完成，**则** OpenClaw 的 ~/.openclaw/skills/ 目录中出现那 2 个 skill 的链接，且 OpenClaw 的 openclaw.json 中 mcp.servers 配置不受影响
 
 ### 用户故事 5 — 预设组一键切换 (优先级: P5)
 
@@ -114,7 +115,7 @@
 
 ### FR-1: 会话发现与状态检测
 
-1. 系统必须自动发现所有正在运行的 AI 编程工具会话（MVP 支持 Claude Code、Codex CLI 和 OpenCode）。同一工具的 CLI 形态与桌面 APP 形态（如 Codex CLI 与 Codex 桌面 APP）通过进程名区分为不同会话，均纳入监控；APP 形态不支持终端跳转，仅展示状态与通知
+1. 系统必须自动发现所有正在运行的 AI 编程工具会话（MVP 支持 Claude Code、Codex CLI、OpenCode 和 OpenClaw）。同一工具的 CLI 形态与桌面 APP 形态（如 Codex CLI 与 Codex 桌面 APP）通过进程名区分为不同会话，均纳入监控；APP 形态不支持终端跳转，仅展示状态与通知
 2. 系统必须实时检测每个会话的运行状态，状态分为：运行中（生成/工具执行）、等待用户输入、空闲、已完成
 3. 有 Hook 系统的工具必须通过 Hook 事件捕获状态变更；无 Hook 的工具回退到进程扫描
 4. 状态检测失败时不得崩溃，必须降级为"未知"状态并继续运行
@@ -177,7 +178,7 @@
 
 ## 成功标准
 
-1. 用户能在单一看板中同时监控 Claude Code、Codex CLI 和 OpenCode 的会话状态，无需切换终端窗口
+1. 用户能在单一看板中同时监控 Claude Code、Codex CLI、OpenCode 和 OpenClaw 的会话状态，无需切换终端窗口
 2. 会话状态变更后 3 秒内，用户收到桌面通知
 3. 用户点击看板中的会话后 1 秒内，对应终端窗口被激活
 4. 在统一仓库中安装一个 skill 后，10 秒内可完成到 2 个以上工具的映射
@@ -192,15 +193,15 @@
 |------|------|---------|
 | 会话 (Session) | 一次 AI 编程工具的运行实例 | ID、工具类型、项目路径、状态、PID、CPU |
 | Agent 工具 (AgentTool) | 被监控的 AI 编程工具 | 名称、进程标识、Hook 支持、MCP 格式、Skill 目录、子 Agent 列表、是否支持子 Agent 独立目录 |
-| 扩展资源 (Extension) | Skill/MCP/插件三类资源的统一抽象 | 类型(Skill/MCP/Plugin)、名称、来源、版本、已分配工具 |
-| 预设组 (Preset) | 扩展资源的命名组合（可含 Skill+MCP+插件） | 名称、资源列表（含类型+引用）、目标工具/子Agent |
+| 扩展资源 (Extension) | Skill/MCP/插件三类资源的统一抽象 | 类型(Skill/MCP/Plugin)、名称、来源、版本、已分配工具、支持工具列表（Claude/Codex/OpenCode/OpenClaw） |
+| 预设组 (Preset) | 扩展资源的命名组合（可含 Skill+MCP+插件） | 名称、资源列表（含类型+引用+兼容性标记）、目标工具/子Agent |
 | 子 Agent (SubAgent) | 多 Agent 工具内部的子角色 | ID、名称、所属工具、资源分配范围（工具级子集）、独立 skill 目录路径 |
 
 ## 假设
 
-1. 用户已在机器上安装了至少一种支持的 AI 编程工具（Claude Code 或 Codex CLI）
+1. 用户已在机器上安装了至少一种支持的 AI 编程工具（Claude Code、Codex CLI、OpenCode 或 OpenClaw）
 2. macOS 为主要开发和测试平台，Linux 和 Windows 为后续扩展
 3. 用户有基本的终端使用能力
 4. 支持的工具会持续更新其 Hook/日志/MCP 格式，平台需要跟进适配
-5. 阶段一（MVP）聚焦 Claude Code + Codex CLI + OpenCode 三工具，包含完整资源管理（skill/MCP/插件统一仓库 + 预设组 + 子 Agent 分配），后续阶段逐步扩展更多工具
+5. 阶段一（MVP）聚焦 Claude Code + Codex CLI + OpenCode + OpenClaw 四工具，包含完整资源管理（skill/MCP/插件统一仓库 + 预设组 + 子 Agent 分配），后续阶段逐步扩展更多工具
 6. 技术栈约束已在项目宪法（`.specify/memory/constitution.md` v1.2.0）中定义
