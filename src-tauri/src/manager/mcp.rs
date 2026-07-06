@@ -1,6 +1,6 @@
 // MCP 配置格式转换器 — JSON (Claude) / TOML (Codex) / JSONC (OpenCode)
 
-use crate::adapter::{McpFormat, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, AgentAdapter};
+use crate::adapter::{McpFormat, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -41,6 +41,7 @@ fn get_tool_mcp_info(tool_id: &str) -> Result<(McpFormat, std::path::PathBuf), S
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
     let path = adapter.mcp_config_path().ok_or("工具不支持 MCP 配置")?;
