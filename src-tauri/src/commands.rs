@@ -381,3 +381,9 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
         "native": native,
     })
 }
+
+/// 检查预设组与工具的兼容性
+#[tauri::command]
+pub fn check_preset_compatibility(preset_id: String, tool_id: String) -> crate::manager::preset::CompatibilityReport {
+    crate::manager::preset::check_compatibility(&preset_id, &tool_id)
+}

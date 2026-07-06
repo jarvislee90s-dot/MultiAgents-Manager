@@ -76,6 +76,7 @@ pub fn run() {
             commands::scan_native_resources,
             commands::import_native_resources,
             commands::list_tool_resources,
+            commands::check_preset_compatibility,
         ]);
 
     #[cfg(not(debug_assertions))]

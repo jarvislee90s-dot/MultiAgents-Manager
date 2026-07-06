@@ -189,7 +189,61 @@ pub fn apply_preset_to_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &s
     ApplyResult { success, failures, conflicts }
 }
 
-/// 取消激活子 Agent 级预设组
+/// 兼容性检查结果
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibilityReport {
+    pub compatible: Vec<CompatibleItem>,
+    pub incompatible: Vec<IncompatibleItem>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibleItem {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompatibleItem {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub reason: String,
+}
+
+/// 检查预设组与工具的兼容性
+pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityReport {
+    let items = store::get_preset_items(preset_id);
+    let mut compatible = Vec::new();
+    let mut incompatible = Vec::new();
+
+    for (ext_id, kind) in items {
+        // 获取资源信息
+        let ext = store::list_extensions().into_iter().find(|e| e.id == ext_id);
+        let name = ext.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| ext_id.clone());
+
+        // 检查兼容性：tags 字段包含目标工具 ID
+        let is_compatible = ext.as_ref().and_then(|e| e.tags.as_ref())
+            .map(|tags| tags.split(',').any(|t| t.trim() == tool_id))
+            .unwrap_or(true); // 默认兼容（无标记则兼容所有工具）
+
+        if is_compatible {
+            compatible.push(CompatibleItem { id: ext_id.clone(), name, kind });
+        } else {
+            incompatible.push(IncompatibleItem {
+                id: ext_id,
+                name,
+                kind,
+                reason: format!("不支持 {}", tool_id),
+            });
+        }
+    }
+
+    CompatibilityReport { compatible, incompatible }
+}
 pub fn deactivate_preset_from_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
     let items = store::get_preset_items(preset_id);
     let mut errors = Vec::new();
