@@ -7,6 +7,7 @@ pub enum AgentType {
     Claude,
     Codex,
     OpenCode,
+    OpenClaw,
 }
 
 /// 会话状态（红绿灯五态 + Finished）

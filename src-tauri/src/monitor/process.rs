@@ -139,3 +139,8 @@ pub fn find_codex_processes(system: &System) -> Vec<AgentProcess> {
 pub fn find_opencode_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(system, &["opencode"], &["multi-agents-manager"])
 }
+
+/// 发现 OpenClaw 进程
+pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
+    find_processes_by_names(system, &["openclaw"], &["multi-agents-manager"])
+}
