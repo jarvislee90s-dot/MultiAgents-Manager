@@ -24,3 +24,4 @@ Thumbs.db
 
 # 本地参考项目快照（调研用，不入库）
 reference/
+.worktrees/
