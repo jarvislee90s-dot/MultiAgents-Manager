@@ -1,7 +1,7 @@
 // Plugin 管理 — 文件型 symlink + 配置型写入工具配置
 // 与 MCP 不同：Plugin 可能是文件/目录（用 symlink）或配置条目（写入 JSON/TOML）
 
-use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter};
+use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter};
 use crate::linker;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -53,6 +53,7 @@ pub fn enable_file_plugin(plugin_name: &str, tool_id: &str) -> Result<(), String
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 
@@ -78,6 +79,7 @@ pub fn disable_file_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Strin
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 
@@ -102,6 +104,7 @@ pub fn enable_config_plugin(plugin_name: &str, tool_id: &str, entries: &BTreeMap
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 
@@ -186,6 +189,7 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 
