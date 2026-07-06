@@ -73,6 +73,9 @@ pub fn run() {
             commands::detect_tools,
             commands::assign_skill_to_subagent,
             commands::rescan_skills,
+            commands::scan_native_resources,
+            commands::import_native_resources,
+            commands::list_tool_resources,
         ]);
 
     #[cfg(not(debug_assertions))]
