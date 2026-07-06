@@ -139,19 +139,89 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
               </div>
               <div className="flex flex-wrap gap-1">
                 {TOOLS.map((tool) => (
-                  <div key={tool.id} className="flex gap-0.5">
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
-                      onClick={() => handleApply(preset.id, preset.name, tool.id)}>
-                      <Play className="mr-1 h-2.5 w-2.5" />
-                      {tool.label}
-                    </Button>
-                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-[10px]"
-                      onClick={() => handleDeactivate(preset.id, preset.name, tool.id)}>
-                      <X className="h-2.5 w-2.5" />
-                    </Button>
+                  <div key={tool.id} className="space-y-1">
+                    <div className="flex gap-0.5">
+                      <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
+                        onClick={() => handleApply(preset.id, preset.name, tool.id)}>
+                        <Play className="mr-1 h-2.5 w-2.5" />
+                        {tool.label}
+                      </Button>
+                      <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-[10px]"
+                        onClick={() => handleDeactivate(preset.id, preset.name, tool.id)}>
+                        <X className="h-2.5 w-2.5" />
+                      </Button>
+                    </div>
+                    {/* 子 Agent 级操作 */}
+                    <SubAgentPresetActions presetId={preset.id} presetName={preset.name} toolId={tool.id} />
                   </div>
                 ))}
               </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubAgentPresetActions({ presetId, presetName, toolId }: { presetId: string; presetName: string; toolId: string }) {
+  const [subAgents, setSubAgents] = useState<string[]>([]);
+  const [expanded, setExpanded] = useState(false);
+
+  const loadSubAgents = async () => {
+    try {
+      const data = await invoke<string[]>("detect_subagents", { toolId });
+      setSubAgents(data);
+    } catch (e) {
+      console.error("Failed to load subagents:", e);
+    }
+  };
+
+  const handleApplyToSubagent = async (subAgentId: string) => {
+    try {
+      const result = await invoke<PresetApplyResult>("apply_preset_to_subagent", { presetId, toolId, subAgentId });
+      if (result.failures.length > 0) {
+        toast.warning(`部分成功: ${result.successCount} 项成功, ${result.failures.length} 项失败`);
+      } else {
+        toast.success(`"${presetName}" 已应用到 ${toolId}:${subAgentId}`);
+      }
+    } catch (e) {
+      toast.error(`应用失败: ${e}`);
+    }
+  };
+
+  const handleDeactivateFromSubagent = async (subAgentId: string) => {
+    try {
+      await invoke("deactivate_preset_from_subagent", { presetId, toolId, subAgentId });
+      toast.success(`"${presetName}" 已从 ${toolId}:${subAgentId} 取消`);
+    } catch (e) {
+      toast.error(`取消失败: ${e}`);
+    }
+  };
+
+  if (subAgents.length === 0) return null;
+
+  return (
+    <div>
+      <button
+        onClick={() => { setExpanded(!expanded); if (!expanded) loadSubAgents(); }}
+        className="text-muted-foreground text-[10px] hover:text-foreground"
+      >
+        {expanded ? "收起子 Agent" : "子 Agent ▼"}
+      </button>
+      {expanded && (
+        <div className="ml-2 space-y-0.5 border-l pl-2">
+          {subAgents.map((sa) => (
+            <div key={sa} className="flex items-center gap-1 text-[10px]">
+              <span className="text-muted-foreground">{sa}</span>
+              <Button size="sm" variant="ghost" className="h-4 px-1 text-[9px]"
+                onClick={() => handleApplyToSubagent(sa)}>
+                <Play className="mr-0.5 h-2 w-2" />应用
+              </Button>
+              <Button size="sm" variant="ghost" className="h-4 w-4 p-0 text-[9px]"
+                onClick={() => handleDeactivateFromSubagent(sa)}>
+                <X className="h-2 w-2" />
+              </Button>
             </div>
           ))}
         </div>

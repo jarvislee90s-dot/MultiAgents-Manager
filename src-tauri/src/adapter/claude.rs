@@ -43,4 +43,11 @@ impl AgentAdapter for ClaudeAdapter {
     fn subagent_dir(&self) -> Option<std::path::PathBuf> {
         Some(self.base_dir().join("agents"))
     }
+
+    fn plugin_dirs(&self) -> Vec<std::path::PathBuf> {
+        vec![self.base_dir().join("plugins")]
+    }
+    fn plugin_config_paths(&self) -> Vec<std::path::PathBuf> {
+        vec![self.base_dir().join("settings.json")]
+    }
 }

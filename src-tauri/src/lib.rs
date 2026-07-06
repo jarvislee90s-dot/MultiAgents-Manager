@@ -30,7 +30,7 @@ pub fn run() {
         env_logger::Env::default().default_filter_or("info")
     ).try_init();
     store::init();
-    manager::auto_import_skills(false);  // 首次启动，不强制
+    manager::auto_import_extensions(false);  // 首次启动，不强制
     monitor::hooks::register_all_hooks();
 
     let builder = tauri::Builder::default()
@@ -56,11 +56,14 @@ pub fn run() {
             commands::list_repo_skills,
             commands::install_skill,
             commands::toggle_mcp_for_tool,
+            commands::toggle_plugin_for_tool,
             commands::list_presets,
             commands::create_preset,
             commands::delete_preset,
             commands::apply_preset,
             commands::deactivate_preset,
+            commands::apply_preset_to_subagent,
+            commands::deactivate_preset_from_subagent,
             commands::detect_subagents,
             commands::kill_session,
             commands::list_sub_agents,

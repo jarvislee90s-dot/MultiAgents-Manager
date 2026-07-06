@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/components/theme-provider";
 import { TitleBar } from "@/components/title-bar";
@@ -10,7 +11,7 @@ import { ShortcutInput } from "@/components/shortcut-input";
 import { Moon, Sun, Monitor, Palette, Keyboard, Bell, Volume2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { sendNotification } from "@tauri-apps/plugin-notification";
-import { playTestSound } from "@/lib/audio";
+import { playTestSound, getAudioConfig, saveUserFrequencies, playWaitingSound, playFinishedSound } from "@/lib/audio";
 import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
 import { toast } from "sonner";
@@ -24,6 +25,7 @@ type SettingSection = "appearance" | "shortcut" | "notifications";
 export default function SettingsPage() {
   const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [audioConfig, setAudioConfig] = useState(getAudioConfig());
   const [activeSection, setActiveSection] = useState<SettingSection>("appearance");
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
@@ -31,6 +33,18 @@ export default function SettingsPage() {
   const handleShowMainWindow = useCallback(async () => {
     await toggleWindow("main");
   }, []);
+
+  const updateAudioConfig = (status: "waiting" | "finished", key: "primary" | "secondary", value: number) => {
+    const next = {
+      ...audioConfig,
+      [status]: {
+        ...audioConfig[status],
+        [key]: value,
+      },
+    };
+    setAudioConfig(next);
+    saveUserFrequencies(next);
+  };
 
   useEffect(() => {
     // Load saved shortcut
@@ -240,6 +254,49 @@ export default function SettingsPage() {
                     <Volume2 className="mr-1.5 h-3.5 w-3.5" />
                     播放
                   </Button>
+                </div>
+                <div className="border-t" />
+                <div className="space-y-2 py-2.5">
+                  <label className="text-sm font-medium">提示音频率配置</label>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground w-20 text-xs">等待状态</span>
+                      <Input
+                        type="number"
+                        className="h-7 w-24 text-xs"
+                        value={audioConfig.waiting.primary}
+                        onChange={(e) => updateAudioConfig("waiting", "primary", parseFloat(e.currentTarget.value) || 880)}
+                      />
+                      <span className="text-muted-foreground text-xs">Hz</span>
+                      <Input
+                        type="number"
+                        className="h-7 w-24 text-xs"
+                        value={audioConfig.waiting.secondary}
+                        onChange={(e) => updateAudioConfig("waiting", "secondary", parseFloat(e.currentTarget.value) || 1174.66)}
+                      />
+                      <span className="text-muted-foreground text-xs">Hz</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground w-20 text-xs">完成状态</span>
+                      <Input
+                        type="number"
+                        className="h-7 w-24 text-xs"
+                        value={audioConfig.finished.primary}
+                        onChange={(e) => updateAudioConfig("finished", "primary", parseFloat(e.currentTarget.value) || 440)}
+                      />
+                      <span className="text-muted-foreground text-xs">Hz</span>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => playWaitingSound()}>
+                      <Volume2 className="mr-1.5 h-3.5 w-3.5" />
+                      测试等待音
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => playFinishedSound()}>
+                      <Volume2 className="mr-1.5 h-3.5 w-3.5" />
+                      测试完成音
+                    </Button>
+                  </div>
                 </div>
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">

@@ -4,9 +4,10 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Package, Link2, FolderPlus, Info, RefreshCw } from "lucide-react";
+import { Package, Link2, FolderPlus, Info, RefreshCw, Plug } from "lucide-react";
 import type { ExtensionWithAssignments } from "@/types/extension";
 import { PresetList } from "@/components/PresetList";
+import { McpManager } from "@/components/McpManager";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -59,11 +60,22 @@ export function ExtensionList() {
   };
   const skills = extensions.filter((e) => e.kind === "skill" && skillFilter(e));
   const mcps = extensions.filter((e) => e.kind === "mcp");
+  const plugins = extensions.filter((e) => e.kind === "plugin");
 
   const toggleMcp = async (mcpName: string, toolId: string, enabled: boolean) => {
     try {
       await invoke("toggle_mcp_for_tool", { mcpName, toolId, enabled });
       toast.success(`${mcpName} 已${enabled ? "启用" : "禁用"} for ${toolId}`);
+      load();
+    } catch (e) {
+      toast.error(`操作失败: ${e}`);
+    }
+  };
+
+  const togglePlugin = async (pluginName: string, toolId: string, enabled: boolean, kind: string) => {
+    try {
+      await invoke("toggle_plugin_for_tool", { pluginName, toolId, enabled, kind });
+      toast.success(`${pluginName} 已${enabled ? "启用" : "禁用"} for ${toolId}`);
       load();
     } catch (e) {
       toast.error(`操作失败: ${e}`);
@@ -256,6 +268,62 @@ export function ExtensionList() {
                         size="sm"
                         className="h-6 px-2 text-[10px]"
                         onClick={() => toggleMcp(mcp.name, tool.id, !enabled)}
+                      >
+                        {tool.label}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* MCP 管理面板 */}
+      <div className="mt-2">
+        {TOOLS.map((tool) => (
+          <div key={tool.id} className="mb-2">
+            <McpManager toolId={tool.id} />
+          </div>
+        ))}
+      </div>
+
+      {/* Plugin */}
+      <div>
+        <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+          <Plug className="h-4 w-4" />
+          插件 ({plugins.length})
+        </h3>
+        {plugins.length === 0 ? (
+          <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
+            <Info className="h-3.5 w-3.5" />
+            暂无插件
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {plugins.map((plugin) => (
+              <div
+                key={plugin.id}
+                className="flex items-center justify-between rounded border p-2 text-sm"
+              >
+                <div className="min-w-0">
+                  <span className="font-medium">{plugin.name}</span>
+                  {plugin.description && (
+                    <span className="text-muted-foreground ml-2 text-xs">{plugin.description}</span>
+                  )}
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  {TOOLS.map((tool) => {
+                    const assignment = plugin.assignments.find((a) => a.agentToolId === tool.id);
+                    const enabled = assignment?.enabled ?? false;
+                    return (
+                      <Button
+                        key={tool.id}
+                        variant={enabled ? "default" : "outline"}
+                        size="sm"
+                        className="h-6 px-2 text-[10px]"
+                        onClick={() => togglePlugin(plugin.name, tool.id, !enabled, plugin.kind)}
                       >
                         {tool.label}
                       </Button>

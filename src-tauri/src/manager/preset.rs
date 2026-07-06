@@ -35,6 +35,16 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
                 let name = ext_id.strip_prefix("mcp-").unwrap_or(ext_id);
                 manager::toggle_mcp(name, tool_id, true)
             }
+            "plugin" => {
+                let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
+                // 从 extensions 表读取 plugin 的 kind 字段（file 或 config）
+                let plugin_kind = crate::store::list_extensions()
+                    .iter()
+                    .find(|e| e.id == *ext_id)
+                    .and_then(|e| e.kind.clone().into())
+                    .unwrap_or_else(|| "file".to_string());
+                crate::manager::plugin::toggle_plugin(name, tool_id, true, &plugin_kind)
+            }
             _ => Err(format!("未知类型: {}", kind)),
         };
         match result {
@@ -86,6 +96,15 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
                 let name = ext_id.strip_prefix("mcp-").unwrap_or(ext_id);
                 manager::toggle_mcp(name, tool_id, false)
             }
+            "plugin" => {
+                let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
+                let plugin_kind = crate::store::list_extensions()
+                    .iter()
+                    .find(|e| e.id == *ext_id)
+                    .map(|e| e.kind.clone())
+                    .unwrap_or_else(|| "file".to_string());
+                crate::manager::plugin::toggle_plugin(name, tool_id, false, &plugin_kind)
+            }
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -97,5 +116,61 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
         log::warn!("deactivate_preset 部分失败: {:?}", errors);
     }
     info!("预设组 {} 从 {} 取消激活", preset_id, tool_id);
+    Ok(())
+}
+
+/// 应用预设组到子 Agent
+pub fn apply_preset_to_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str) -> ApplyResult {
+    let items = store::get_preset_items(preset_id);
+    let mut success = 0;
+    let mut failures = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for (ext_id, kind) in &items {
+        // 子 Agent 级只支持 skill（MCP 和 Plugin 是工具级配置）
+        if kind != "skill" {
+            conflicts.push(format!("{} 类型 {} 不支持子 Agent 级分配", ext_id, kind));
+            continue;
+        }
+
+        // 检查是否在工具级范围内
+        let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
+        if !crate::manager::is_skill_in_tool_range(name, tool_id) {
+            failures.push(format!("{}: 该 skill 未在工具级启用", ext_id));
+            continue;
+        }
+
+        let result = crate::manager::assign_skill_to_subagent(name, tool_id, sub_agent_id);
+        match result {
+            Ok(()) => success += 1,
+            Err(e) => failures.push(format!("{}: {}", ext_id, e)),
+        }
+    }
+
+    let _ = store::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, true);
+    info!("预设组 {} -> {}:{} -- 成功 {} 失败 {} 冲突 {}",
+        preset_id, tool_id, sub_agent_id, success, failures.len(), conflicts.len());
+    ApplyResult { success, failures, conflicts }
+}
+
+/// 取消激活子 Agent 级预设组
+pub fn deactivate_preset_from_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
+    let items = store::get_preset_items(preset_id);
+    let mut errors = Vec::new();
+    for (ext_id, kind) in &items {
+        if kind != "skill" { continue; }
+        let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
+        let result = crate::linker::layer3::unlink_skill_from_layer3(name, tool_id, sub_agent_id);
+        if let Err(e) = result {
+            errors.push(format!("{}: {}", ext_id, e));
+        }
+        // 更新数据库记录
+        let _ = crate::store::disable_subagent_assignment(ext_id, tool_id, sub_agent_id);
+    }
+    store::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, false)?;
+    if !errors.is_empty() {
+        log::warn!("deactivate_preset_from_subagent 部分失败: {:?}", errors);
+    }
+    info!("预设组 {} 从 {}:{} 取消激活", preset_id, tool_id, sub_agent_id);
     Ok(())
 }

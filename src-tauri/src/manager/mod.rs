@@ -3,6 +3,7 @@
 
 pub mod mcp;
 pub mod preset;
+pub mod plugin;
 
 use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, AgentAdapter};
 use crate::linker;
@@ -44,37 +45,53 @@ pub fn install_skill(source_path: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 为工具启用 skill（创建 symlink）
+/// 为工具启用 skill（创建 Layer 2 symlink）
 pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), String> {
-    let repo = linker::ensure_repo_dir();
-    let source = repo.join(skill_name);
-    if !source.exists() {
-        return Err(format!("Skill 不在全局仓库中: {}", skill_name));
+    let layer2_path = crate::linker::layer2::link_skill_to_layer2(skill_name, tool_id)?;
+
+    // 同时创建到工具实际目录的 symlink（保持向后兼容）
+    if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
+        let _ = std::fs::create_dir_all(&tool_skill_dir);
+        let tool_target = tool_skill_dir.join(skill_name);
+        // 如果工具目录已有同名链接，先移除
+        if tool_target.exists() || tool_target.is_symlink() {
+            let _ = crate::linker::remove_link(&tool_target);
+        }
+        // 工具目录 symlink 指向 Layer 2（而非直接指向 Layer 1）
+        crate::linker::create_link(&layer2_path, &tool_target)?;
     }
-    let target_dir = get_tool_skill_dir(tool_id)
-        .ok_or(format!("工具 {} 无 skill 目录", tool_id))?;
-    let _ = std::fs::create_dir_all(&target_dir);
-    let target = target_dir.join(skill_name);
-    linker::create_link(&source, &target)?;
+
     let ext_id = format!("skill-{}", skill_name);
     store::upsert_assignment(&ext_id, tool_id, true, "valid")?;
-    info!("Skill {} 已为 {} 启用", skill_name, tool_id);
+    info!("Skill {} 已为 {} 启用（Layer 2）", skill_name, tool_id);
     Ok(())
 }
 
-/// 为工具禁用 skill（移除 symlink）
+/// 为工具禁用 skill（移除 Layer 2 symlink + 工具目录 symlink）
 pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), String> {
-    let target_dir = get_tool_skill_dir(tool_id)
-        .ok_or(format!("工具 {} 无 skill 目录", tool_id))?;
-    let target = target_dir.join(skill_name);
-    linker::remove_link(&target)?;
+    // 移除工具实际目录的 symlink
+    if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
+        let tool_target = tool_skill_dir.join(skill_name);
+        let _ = crate::linker::remove_link(&tool_target);
+    }
+
+    // 清理 Layer 3（所有子 Agent）
+    let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(skill_name, tool_id);
+
+    // 移除 Layer 2 symlink
+    crate::linker::layer2::unlink_skill_from_layer2(skill_name, tool_id)?;
+
     let ext_id = format!("skill-{}", skill_name);
     store::upsert_assignment(&ext_id, tool_id, false, "missing")?;
     info!("Skill {} 已为 {} 禁用", skill_name, tool_id);
     Ok(())
 }
 
-/// 为工具启用/禁用 MCP 服务器
+/// 为工具启用/禁用 Plugin
+pub fn toggle_plugin(plugin_name: &str, tool_id: &str, enabled: bool, kind: &str) -> Result<(), String> {
+    plugin::toggle_plugin(plugin_name, tool_id, enabled, kind)
+}
+
 pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), String> {
     if enabled {
         // 从全局仓库读取 MCP 配置
@@ -131,7 +148,7 @@ pub fn is_skill_in_tool_range(skill_name: &str, tool_id: &str) -> bool {
     assignments.iter().any(|a| a.extension_id == ext_id && a.enabled)
 }
 
-/// 为子 Agent 分配 skill（带约束检查）
+/// 为子 Agent 分配 skill（带约束检查，走 Layer 3）
 pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
     // 约束：必须在工具级范围内
     if !is_skill_in_tool_range(skill_name, tool_id) {
@@ -145,23 +162,31 @@ pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 
-    let repo = linker::ensure_repo_dir();
-    let source = repo.join(skill_name);
-    if !source.exists() {
-        return Err(format!("Skill 不在全局仓库中: {}", skill_name));
+    // 对于不支持子 Agent 独立目录的工具（Claude, Codex），仅记录到数据库
+    let has_subagent_dir = adapter.subagent_dir().is_some();
+
+    if has_subagent_dir {
+        // 走 Layer 3 目录结构
+        crate::linker::layer3::link_skill_to_layer3(skill_name, tool_id, sub_agent_id)?;
+
+        // 同时创建到工具子 Agent 实际目录的 symlink
+        if let Some(skill_dir) = adapter.skill_dirs().into_iter().next() {
+            let subagent_dir = skill_dir.join("subagents").join(sub_agent_id);
+            let _ = std::fs::create_dir_all(&subagent_dir);
+            let tool_target = subagent_dir.join(skill_name);
+            let layer3_path = crate::linker::layer3::subagent_active_dir(tool_id, sub_agent_id).join(skill_name);
+            if tool_target.exists() || tool_target.is_symlink() {
+                let _ = crate::linker::remove_link(&tool_target);
+            }
+            crate::linker::create_link(&layer3_path, &tool_target)?;
+        }
     }
 
-    // 子 Agent 目录：工具 skill 目录下的子目录
-    if let Some(skill_dir) = adapter.skill_dirs().into_iter().next() {
-        let subagent_dir = skill_dir.join("subagents").join(sub_agent_id);
-        let _ = std::fs::create_dir_all(&subagent_dir);
-        let target = subagent_dir.join(skill_name);
-        linker::create_link(&source, &target)?;
+    let ext_id = format!("skill-{}", skill_name);
+    // 子 Agent 分配记录到 assignments 表（sub_agent_id 字段）
+    crate::store::upsert_assignment_with_subagent(&ext_id, tool_id, sub_agent_id, true, if has_subagent_dir { "valid" } else { "ui-only" })?;
 
-        let ext_id = format!("skill-{}", skill_name);
-        crate::store::upsert_assignment(&ext_id, tool_id, true, "valid")?;
-        info!("Skill {} 已分配给子 Agent {}", skill_name, sub_agent_id);
-    }
+    info!("Skill {} 已分配给子 Agent {}（{}）", skill_name, sub_agent_id, if has_subagent_dir { "Layer 3" } else { "UI-only" });
     Ok(())
 }
 
@@ -278,7 +303,7 @@ pub struct ImportStats {
 
 /// 扫描各工具的 skill 目录，递归导入到全局仓库（含去重）
 /// force=true 时跳过"已导入过"检查，用于前端"重新扫描"按钮
-pub fn auto_import_skills(force: bool) -> ImportStats {
+pub fn auto_import_extensions(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
 
     // 记录扫描前已有的 skill 名字集合，用于计算"真正新增"
@@ -347,6 +372,56 @@ pub fn auto_import_skills(force: bool) -> ImportStats {
             };
             let _ = crate::store::insert_extension(&ext);
             imported += 1;
+        }
+    }
+
+    // ===== Plugin 扫描 =====
+    let plugin_sources = [
+        ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("plugins")),
+        ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("plugins")),
+        ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("plugins")),
+    ];
+
+    for (tool_id, plugins_dir) in &plugin_sources {
+        if !plugins_dir.exists() { continue; }
+        if let Ok(entries) = std::fs::read_dir(plugins_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if seen_names.contains(&name) { continue; }
+                seen_names.insert(name.clone());
+
+                // 判断是文件型还是配置型：有子文件/目录 → file，只有单个 .json → config
+                let _kind = if path.is_dir() { "file" } else { "config" };
+
+                // 复制到全局仓库 ~/.mam/plugins/
+                let plugin_repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
+                let _ = std::fs::create_dir_all(&plugin_repo);
+                let dest = plugin_repo.join(&name);
+                if dest.exists() {
+                    let _ = std::fs::remove_dir_all(&dest);
+                }
+                if path.is_dir() {
+                    let _ = crate::linker::copy_dir_recursive(&path, &dest);
+                } else {
+                    let _ = std::fs::copy(&path, &dest);
+                }
+
+                let ext = crate::store::ExtensionRecord {
+                    id: format!("plugin-{}", name),
+                    kind: "plugin".to_string(),
+                    name: name.clone(),
+                    description: None,
+                    source_path: path.to_string_lossy().to_string(),
+                    source_url: None,
+                    version: None,
+                    tags: Some(tool_id.to_string()),
+                    suite: None,
+                    source_tool: Some(tool_id.to_string()),
+                };
+                let _ = crate::store::insert_extension(&ext);
+                imported += 1;
+            }
         }
     }
 

@@ -14,3 +14,14 @@ export interface ExtensionWithAssignments {
   suite: string | null;
   assignments: AssignmentSummary[];
 }
+
+export interface McpServerConfig {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+export interface McpServer {
+  name: string;
+  config: McpServerConfig;
+}

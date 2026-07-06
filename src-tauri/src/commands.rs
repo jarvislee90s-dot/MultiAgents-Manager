@@ -112,6 +112,25 @@ pub fn toggle_mcp_for_tool(mcp_name: String, tool_id: String, enabled: bool) -> 
     crate::manager::toggle_mcp(&mcp_name, &tool_id, enabled)
 }
 
+/// 为工具启用/禁用 Plugin
+#[tauri::command]
+pub fn toggle_plugin_for_tool(plugin_name: String, tool_id: String, enabled: bool, kind: String) -> Result<(), String> {
+    crate::manager::plugin::toggle_plugin(&plugin_name, &tool_id, enabled, &kind)
+}
+
+/// 应用预设组到子 Agent
+#[tauri::command]
+pub fn apply_preset_to_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> PresetApplyResult {
+    let result = crate::manager::preset::apply_preset_to_subagent(&preset_id, &tool_id, &sub_agent_id);
+    PresetApplyResult { success_count: result.success, failures: result.failures, conflicts: result.conflicts }
+}
+
+/// 取消激活子 Agent 级预设组
+#[tauri::command]
+pub fn deactivate_preset_from_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
+    crate::manager::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
+}
+
 
 
 
@@ -236,5 +255,5 @@ pub fn assign_skill_to_subagent(skill_name: String, tool_id: String, sub_agent_i
 /// 重新扫描各工具的 skill 目录，导入新增的 skill（前端"重新扫描"按钮调用）
 #[tauri::command]
 pub fn rescan_skills() -> crate::manager::ImportStats {
-    crate::manager::auto_import_skills(true)
+    crate::manager::auto_import_extensions(true)
 }

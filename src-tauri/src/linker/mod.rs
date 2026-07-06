@@ -3,6 +3,8 @@
 
 use log::debug;
 pub mod detector;
+pub mod layer2;
+pub mod layer3;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -120,7 +122,7 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
+pub fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;

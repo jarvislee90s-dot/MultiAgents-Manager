@@ -70,6 +70,9 @@ pub trait AgentAdapter: Send + Sync {
 
     fn subagent_dir(&self) -> Option<std::path::PathBuf> { None }
 
+    fn plugin_dirs(&self) -> Vec<std::path::PathBuf> { Vec::new() }
+    fn plugin_config_paths(&self) -> Vec<std::path::PathBuf> { Vec::new() }
+
 }
 
 /// 共享 System 实例 — 每轮询周期刷新一次，所有 adapter 共用
