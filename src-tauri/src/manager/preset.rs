@@ -67,6 +67,7 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
                 "claude" => Box::new(crate::adapter::claude::ClaudeAdapter),
                 "codex" => Box::new(crate::adapter::codex::CodexAdapter),
                 "opencode" => Box::new(crate::adapter::opencode::OpenCodeAdapter),
+                "openclaw" => Box::new(crate::adapter::openclaw::OpenClawAdapter),
                 _ => return None,
             };
             if let Some(dir) = adapter.skill_dirs().into_iter().next() {
@@ -83,6 +84,7 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
                 "claude" => Box::new(crate::adapter::claude::ClaudeAdapter),
                 "codex" => Box::new(crate::adapter::codex::CodexAdapter),
                 "opencode" => Box::new(crate::adapter::opencode::OpenCodeAdapter),
+                "openclaw" => Box::new(crate::adapter::openclaw::OpenClawAdapter),
                 _ => return None,
             };
             if let Some(config_path) = adapter.mcp_config_path() {

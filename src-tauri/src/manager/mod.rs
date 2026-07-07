@@ -122,6 +122,7 @@ pub fn detect_subagents(tool_id: &str) -> Vec<String> {
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Vec::new(),
     };
     if let Some(dir) = adapter.subagent_dir() {
@@ -161,6 +162,7 @@ pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 

@@ -288,13 +288,14 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::store::NativeExtensi
     if let Some(dir) = skill_dir {
         if dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
+                let existing = crate::store::list_extensions();
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         // 检查是否已在全局仓库中
                         let ext_id = format!("skill-{}", name);
-                        let exists = crate::store::list_extensions().iter().any(|e| e.id == ext_id);
+                        let exists = existing.iter().any(|e| e.id == ext_id);
                         if !exists {
                             results.push(crate::store::NativeExtensionRecord {
                                 id: ext_id,

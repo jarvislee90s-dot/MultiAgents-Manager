@@ -13,6 +13,7 @@ const TOOLS = [
   { id: "claude", label: "Claude" },
   { id: "codex", label: "Codex" },
   { id: "opencode", label: "OpenCode" },
+  { id: "openclaw", label: "OpenClaw" },
 ];
 
 export function PresetList({ extensions }: { extensions: ExtensionWithAssignments[] }) {
