@@ -4,7 +4,7 @@
 
 **多 Agent 编程工具统一管理平台**
 
-一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode 的桌面应用
+一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw 的桌面应用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,7 +28,7 @@ Real-time traffic-light status board for all active AI coding tool sessions — 
 | 🟡 Yellow | Processing / Thinking |
 | 🟢 Green | Idle / Finished |
 
-- Auto-discovers running **Claude Code**, **Codex CLI/APP**, and **OpenCode** sessions
+- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, and **OpenClaw** sessions
 - Distinguishes CLI vs. desktop APP form (APP shows status only, no terminal jump)
 - Shows project name, git branch, last message preview, CPU usage, runtime
 - Sorts by priority: waiting → running → idle
@@ -127,20 +127,25 @@ src-tauri/src/
 │   ├── claude.rs      #   Claude Code (JSONL + Hook)
 │   ├── codex.rs       #   Codex CLI/APP (JSONL + Hook)
 │   ├── opencode.rs    #   OpenCode (SQLite)
+│   ├── openclaw.rs    #   OpenClaw (state.json)
 │   └── mod.rs         #   AgentAdapter trait + session discovery scheduler
 ├── monitor/
 │   ├── process.rs     #   Process discovery (sysinfo scan)
 │   ├── parser.rs      #   Claude & Codex JSONL parser
 │   ├── opencode_parser.rs # OpenCode SQLite parser
+│   ├── openclaw_parser.rs # OpenClaw state.json parser
 │   ├── status.rs      #   Pure-message status determination
 │   └── hooks.rs       #   Hook registration + event file reader
 ├── manager/
 │   ├── mod.rs         #   Skill install/enable/disable + auto-import
 │   ├── mcp.rs         #   MCP config writer (JSON/TOML/JSONC)
-│   └── preset.rs      #   Preset apply/deactivate logic
+│   ├── preset.rs      #   Preset apply/deactivate + compatibility check
+│   └── plugin.rs      #   Plugin management
 ├── linker/
 │   ├── mod.rs         #   Symlink/Junction management + security checks
-│   └── detector.rs    #   Tool installation detection
+│   ├── detector.rs    #   Tool installation detection
+│   ├── layer2.rs      #   Layer 2 tool-level active directory
+│   └── layer3.rs      #   Layer 3 sub-agent-level active directory
 ├── terminal/          #   Terminal focus (iTerm2/Terminal.app/tmux)
 ├── plugins/
 │   └── system_tray.rs #   System tray with status + preset menu
@@ -154,9 +159,12 @@ src/
 ├── components/
 │   ├── SessionCard.tsx #   Session card with status light
 │   ├── SessionGrid.tsx #   Dashboard grid
-│   ├── ExtensionList.tsx # Skill/MCP/sub-agent management
+│   ├── ExtensionList.tsx # Dual-view (byKind/byTool) resource management
+│   ├── ResourceByKindView.tsx # Skills/MCP/Plugins three-section view
+│   ├── ResourceByToolView.tsx # Four-tool card view
+│   ├── ImportDialog.tsx  #   Native resource scan & import
+│   ├── CompatibilityDialog.tsx # Preset compatibility check
 │   ├── PresetList.tsx  #   Preset group CRUD
-│   ├── StatusLight.tsx #   Traffic light indicator
 │   └── ui/            #   shadcn/ui primitives
 ├── hooks/             #   useSessions, useNotification, useUpdater
 ├── stores/            #   Zustand session store
@@ -223,6 +231,7 @@ The app stores its data in `~/.mam/`:
 | Claude Code | `~/.claude/skills/` | `~/.claude.json` | JSON | ✅ (PascalCase) |
 | Codex CLI | `~/.agents/skills/` | `~/.codex/config.toml` | TOML | ✅ (camelCase) |
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
+| OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
 
 ## Roadmap
 
@@ -232,13 +241,14 @@ The app stores its data in `~/.mam/`:
 - [x] US4 — Skill/MCP/Plugin unified repository management
 - [x] US5 — Preset group one-click switching
 - [x] US6 — Sub-agent level resource allocation
-- [ ] Plugin management (file/config hybrid)
-- [ ] Linux & Windows support (currently macOS primary)
-- [ ] Kitty & WezTerm terminal jump support
-- [ ] Custom notification sounds per status
-- [ ] Dark/light theme sync with system
+- [x] Resource dashboard redesign (dual-view + import + compatibility)
+- [x] OpenClaw support (4th tool)
+- [x] Plugin management (file/config hybrid)
 - [x] i18n (Chinese + English)
 - [x] Auto-update via GitHub Releases
+- [x] Dark/light theme sync with system
+- [ ] Linux & Windows support (currently macOS primary)
+- [ ] Kitty & WezTerm terminal jump support
 
 ## Contributing
 

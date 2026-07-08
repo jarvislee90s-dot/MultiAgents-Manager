@@ -22,6 +22,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Test / Screenshots
+TEST/
+
 # 本地参考项目快照（调研用，不入库）
 reference/
 .worktrees/
+
+# Playwright MCP
+.playwright-mcp/
