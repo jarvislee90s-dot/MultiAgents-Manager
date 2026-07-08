@@ -23,11 +23,10 @@ if (!isTauri) {
       return mockInvoke(cmd, args);
     },
     convertFileSrc: (path: string) => path,
-    transformCallback: (callback: Function, once?: boolean) => {
-      const id = Math.random().toString(36).slice(2);
-      return id;
+    transformCallback: (_callback: Function, _once?: boolean) => {
+      return Math.random().toString(36).slice(2);
     },
-    unregisterCallback: (id: string) => {},
+    unregisterCallback: (_id: string) => {},
     postMessage: () => {},
   };
 
