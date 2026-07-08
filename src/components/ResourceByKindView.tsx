@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ToolIcon } from "@/components/ToolIcon";
 import { Button } from "@/components/ui/button";
 import { Package, Link2, Plug, Info } from "lucide-react";
 import type { ExtensionWithAssignments } from "@/types/extension";
@@ -76,6 +77,7 @@ export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: 
                         className="h-6 px-2 text-[10px]"
                         title={`${tool.label}: ${enabled ? "已启用" : "未启用"}`}
                       >
+                        <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
                       </Button>
                     );
@@ -115,6 +117,7 @@ export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: 
                         className="h-6 px-2 text-[10px]"
                         onClick={() => onToggleMcp(mcp.name, tool.id, !enabled)}
                       >
+                        <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
                       </Button>
                     );
@@ -155,6 +158,7 @@ export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: 
                         className="h-6 px-2 text-[10px]"
                         onClick={() => onTogglePlugin(plugin.name, tool.id, !enabled, pluginSubtype)}
                       >
+                        <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
                       </Button>
                     );

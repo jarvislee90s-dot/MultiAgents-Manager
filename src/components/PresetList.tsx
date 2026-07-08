@@ -8,6 +8,7 @@ import { Layers, Plus, Trash2, Play, X } from "lucide-react";
 import type { PresetRecord, PresetApplyResult } from "@/types/preset";
 import type { ExtensionWithAssignments } from "@/types/extension";
 import { CompatibilityDialog } from "./CompatibilityDialog";
+import { ToolIcon } from "@/components/ToolIcon";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -173,6 +174,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
                       <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
                         onClick={() => handleApply(preset.id, preset.name, tool.id)}>
                         <Play className="mr-1 h-2.5 w-2.5" />
+                        <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
                       </Button>
                       <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-[10px]"

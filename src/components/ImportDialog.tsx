@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { NativeExtension } from "@/types/extension";
+import { ToolIcon } from "@/components/ToolIcon";
 
 const TOOLS = [
   { id: "claude", label: "Claude Code" },
@@ -117,7 +118,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
               if (toolResources.length === 0) return null;
               return (
                 <div key={tool.id}>
-                  <h4 className="text-xs font-medium mb-1">{tool.label}</h4>
+                  <h4 className="text-xs font-medium mb-1 flex items-center gap-1.5">
+                    <ToolIcon toolId={tool.id} size={14} />
+                    {tool.label}
+                  </h4>
                   <div className="space-y-1">
                     {toolResources.map((res) => (
                       <label key={res.id} className="flex items-center gap-2 text-xs cursor-pointer">

@@ -3,13 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Scan, Import } from "lucide-react";
+import { ToolIcon } from "@/components/ToolIcon";
 import type { NativeExtension, ToolResources } from "@/types/extension";
 
 const TOOLS = [
-  { id: "claude", label: "Claude Code", icon: "🤖" },
-  { id: "codex", label: "Codex CLI", icon: "📝" },
-  { id: "opencode", label: "OpenCode", icon: "🖥️" },
-  { id: "openclaw", label: "OpenClaw", icon: "🦾" },
+  { id: "claude", label: "Claude Code" },
+  { id: "codex", label: "Codex CLI" },
+  { id: "opencode", label: "OpenCode" },
+  { id: "openclaw", label: "OpenClaw" },
 ];
 
 export function ResourceByToolView() {
@@ -48,7 +49,7 @@ export function ResourceByToolView() {
         <div key={tool.id} className="rounded border p-3">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <span>{tool.icon}</span>
+              <ToolIcon toolId={tool.id} size={18} />
               {tool.label}
             </h3>
             <Button
