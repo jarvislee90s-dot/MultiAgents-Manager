@@ -162,7 +162,7 @@ src/
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/MultiAgents-Manager.git
+git clone https://github.com/jarvislee90s-dot/MultiAgents-Manager.git
 cd MultiAgents-Manager
 
 # Install frontend dependencies

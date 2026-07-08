@@ -162,7 +162,7 @@ src/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/MultiAgents-Manager.git
+git clone https://github.com/jarvislee90s-dot/MultiAgents-Manager.git
 cd MultiAgents-Manager
 
 # 安装前端依赖
