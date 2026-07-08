@@ -32,5 +32,12 @@ TEST/
 reference/
 .worktrees/
 
+# Codex / Claude 本地配置（非项目代码）
+.agents/
+.claude/
+
+# 项目配置模板 / 内部工具
+.specify/
+
 # Playwright MCP
 .playwright-mcp/
