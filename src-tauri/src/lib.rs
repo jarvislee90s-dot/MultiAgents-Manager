@@ -92,7 +92,14 @@ pub fn run() {
         ]);
 
     #[cfg(not(debug_assertions))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = {
+        // 仅在设置了签名密钥时才注册 updater，否则占位 URL 会 panic
+        if std::env::var("TAURI_SIGNING_PRIVATE_KEY").is_ok() {
+            builder.plugin(tauri_plugin_updater::Builder::new().build())
+        } else {
+            builder
+        }
+    };
 
     builder
         .run(tauri::generate_context!())
