@@ -270,3 +270,273 @@ pub fn assign_skill_to_subagent(skill_name: String, tool_id: String, sub_agent_i
 pub fn rescan_skills() -> crate::manager::ImportStats {
     crate::manager::auto_import_extensions(true)
 }
+
+/// 扫描指定工具的原生资源（尚未导入全局仓库）
+#[tauri::command]
+pub fn scan_native_resources(tool_id: String) -> Vec<crate::store::NativeExtensionRecord> {
+    let mut results = Vec::new();
+
+    // 扫描工具的 skill 目录
+    let skill_dir = match tool_id.as_str() {
+        "claude" => Some(dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
+        "codex" => Some(dirs::home_dir().unwrap_or_default().join(".codex").join("skills")),
+        "opencode" => Some(dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
+        "openclaw" => Some(dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
+        _ => None,
+    };
+
+    if let Some(dir) = skill_dir {
+        if dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                let existing = crate::store::list_extensions();
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        // 检查是否已在全局仓库中
+                        let ext_id = format!("skill-{}", name);
+                        let exists = existing.iter().any(|e| e.id == ext_id);
+                        if !exists {
+                            results.push(crate::store::NativeExtensionRecord {
+                                id: ext_id,
+                                kind: "skill".to_string(),
+                                name: name.clone(),
+                                description: None,
+                                source_path: path.to_string_lossy().to_string(),
+                                source_tool: tool_id.clone(),
+                                detected_at: chrono::Utc::now().to_rfc3339(),
+                                imported: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// 将原生资源导入全局仓库
+#[tauri::command]
+pub fn import_native_resources(items: Vec<(String, String)>) -> crate::manager::ImportStats {
+    let mut imported = 0;
+    let mut skipped = 0;
+
+    for (source_path, name) in items {
+        let path = std::path::Path::new(&source_path);
+        if !path.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        // 复制到全局仓库
+        if let Err(e) = crate::linker::install_to_repo(path, &name) {
+            log::warn!("导入 {} 失败: {}", name, e);
+            skipped += 1;
+            continue;
+        }
+
+        // 记录到数据库
+        let ext = crate::store::ExtensionRecord {
+            id: format!("skill-{}", name),
+            kind: "skill".to_string(),
+            name: name.clone(),
+            description: None,
+            source_path: source_path.clone(),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: None,
+            is_native: true,
+        };
+        let _ = crate::store::insert_extension(&ext);
+        imported += 1;
+    }
+
+    crate::manager::ImportStats {
+        imported,
+        newly_added: imported,
+        skipped_dup: skipped,
+        source_counts: vec![],
+    }
+}
+
+/// 获取工具的所有资源（全局 + 原生）
+#[tauri::command]
+pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
+    let global = crate::store::list_extensions();
+    let native = scan_native_resources(tool_id.clone());
+
+    // 过滤出分配给该工具且启用的全局资源
+    let assignments = crate::store::list_assignments(&tool_id);
+    let global_filtered: Vec<_> = global.iter()
+        .filter(|e| {
+            assignments.iter().any(|a| a.extension_id == e.id && a.enabled)
+        })
+        .collect();
+
+    serde_json::json!({
+        "global": global_filtered,
+        "native": native,
+    })
+}
+
+/// 检查预设组与工具的兼容性
+#[tauri::command]
+pub fn check_preset_compatibility(preset_id: String, tool_id: String) -> crate::manager::preset::CompatibilityReport {
+    crate::manager::preset::check_compatibility(&preset_id, &tool_id)
+}
+
+// ===== 截图功能 =====
+
+/// 截图结果
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotResult {
+    pub success: bool,
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 捕获应用窗口截图（macOS）
+#[tauri::command]
+pub fn capture_window_screenshot(app: tauri::AppHandle) -> ScreenshotResult {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // 生成截图文件路径
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let screenshot_dir = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".mam")
+            .join("screenshots");
+
+        if let Err(e) = std::fs::create_dir_all(&screenshot_dir) {
+            return ScreenshotResult {
+                success: false,
+                path: None,
+                error: Some(format!("创建截图目录失败: {}", e)),
+            };
+        }
+
+        let screenshot_path = screenshot_dir.join(format!("screenshot_{}.png", timestamp));
+        let path_str = screenshot_path.to_string_lossy().to_string();
+
+        // 使用 screencapture 命令截图
+        // -x: 不播放截图声音
+        // -o: 不包含窗口阴影
+        // -W: 截取窗口（需要用户选择）
+        // 或者使用 -l <window_id> 指定窗口
+
+        // 先尝试通过窗口标题找到应用窗口
+        let window_id_output = Command::new("sh")
+            .args([
+                "-c",
+                "osascript -e 'tell application \"System Events\" to get id of first process whose name contains \"multi-agents-manager\"' 2>/dev/null || echo ''"
+            ])
+            .output();
+
+        let capture_result = if let Ok(output) = window_id_output {
+            let window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !window_id.is_empty() && window_id.parse::<u32>().is_ok() {
+                // 使用窗口 ID 截图
+                Command::new("screencapture")
+                    .args(["-x", "-o", "-l", &window_id, &path_str])
+                    .output()
+            } else {
+                // 回退到全屏截图
+                Command::new("screencapture")
+                    .args(["-x", "-o", &path_str])
+                    .output()
+            }
+        } else {
+            // 回退到全屏截图
+            Command::new("screencapture")
+                .args(["-x", "-o", &path_str])
+                .output()
+        };
+
+        match capture_result {
+            Ok(output) if output.status.success() => {
+                log::info!("截图已保存到: {}", path_str);
+                ScreenshotResult {
+                    success: true,
+                    path: Some(path_str),
+                    error: None,
+                }
+            }
+            Ok(output) => {
+                let error_msg = String::from_utf8_lossy(&output.stderr).to_string();
+                log::error!("截图失败: {}", error_msg);
+                ScreenshotResult {
+                    success: false,
+                    path: None,
+                    error: Some(format!("截图命令失败: {}", error_msg)),
+                }
+            }
+            Err(e) => {
+                log::error!("截图命令执行失败: {}", e);
+                ScreenshotResult {
+                    success: false,
+                    path: None,
+                    error: Some(format!("截图命令执行失败: {}", e)),
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        ScreenshotResult {
+            success: false,
+            path: None,
+            error: Some("截图功能目前仅支持 macOS".to_string()),
+        }
+    }
+}
+
+/// 获取最近的截图文件列表
+#[tauri::command]
+pub fn list_screenshots() -> Vec<String> {
+    let screenshot_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("screenshots");
+
+    if !screenshot_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut paths: Vec<String> = std::fs::read_dir(&screenshot_dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("png")
+                })
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 按修改时间排序（最新的在前）
+    paths.sort_by(|a, b| {
+        let meta_a = std::fs::metadata(a).ok();
+        let meta_b = std::fs::metadata(b).ok();
+        match (meta_a, meta_b) {
+            (Some(a), Some(b)) => b.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH).cmp(
+                &a.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            ),
+            _ => std::cmp::Ordering::Equal,
+        }
+    });
+
+    paths
+}

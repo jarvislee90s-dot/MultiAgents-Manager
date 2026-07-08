@@ -4,6 +4,7 @@
 pub mod claude;
 pub mod codex;
 pub mod opencode;
+pub mod openclaw;
 
 use crate::session::{status_sort_priority, AgentType, ProcessForm, Session, SessionStatus, SessionsResponse};
 use once_cell::sync::Lazy;
@@ -99,6 +100,7 @@ pub fn get_all_sessions() -> SessionsResponse {
         Box::new(claude::ClaudeAdapter),
         Box::new(codex::CodexAdapter),
         Box::new(opencode::OpenCodeAdapter),
+        Box::new(openclaw::OpenClawAdapter),
     ];
 
     // Phase 1: 刷新共享 System 快照，发现所有进程

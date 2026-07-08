@@ -41,6 +41,16 @@ pub fn run() {
                 let _ = window.show();
             }
         }))
+        .setup(|app| {
+            // 在 dev 模式下自动打开 devtools，启用 CDP 远程调试
+            #[cfg(debug_assertions)]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
@@ -73,6 +83,12 @@ pub fn run() {
             commands::detect_tools,
             commands::assign_skill_to_subagent,
             commands::rescan_skills,
+            commands::scan_native_resources,
+            commands::import_native_resources,
+            commands::list_tool_resources,
+            commands::check_preset_compatibility,
+            commands::capture_window_screenshot,
+            commands::list_screenshots,
         ]);
 
     #[cfg(not(debug_assertions))]

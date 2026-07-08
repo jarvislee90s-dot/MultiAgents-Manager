@@ -5,7 +5,7 @@ pub mod mcp;
 pub mod preset;
 pub mod plugin;
 
-use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, AgentAdapter};
+use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
 use crate::linker;
 use crate::store;
 use log::info;
@@ -16,6 +16,7 @@ fn get_tool_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return None,
     };
     adapter.skill_dirs().into_iter().next()
@@ -39,6 +40,7 @@ pub fn install_skill(source_path: &str, name: &str) -> Result<(), String> {
         tags: None,
         suite: None,
         source_tool: None,
+        is_native: false,
     };
     store::insert_extension(&ext)?;
     info!("Skill 安装到全局仓库: {}", name);
@@ -120,6 +122,7 @@ pub fn detect_subagents(tool_id: &str) -> Vec<String> {
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Vec::new(),
     };
     if let Some(dir) = adapter.subagent_dir() {
@@ -159,6 +162,7 @@ pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "openclaw" => Box::new(OpenClawAdapter),
         _ => return Err(format!("未知工具: {}", tool_id)),
     };
 
@@ -322,6 +326,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
         ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("skills")),
         ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
+        ("openclaw", dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
     ];
 
     // 收集所有 skill：name → (path, source_tool, suite)
@@ -369,6 +374,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 tags: Some(tool_id.to_string()),
                 suite: suite.clone(),
                 source_tool: Some(tool_id.to_string()),
+                is_native: false,
             };
             let _ = crate::store::insert_extension(&ext);
             imported += 1;
@@ -380,6 +386,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("plugins")),
         ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("plugins")),
         ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("plugins")),
+        ("openclaw", dirs::home_dir().unwrap_or_default().join(".openclaw").join("plugins")),
     ];
 
     for (tool_id, plugins_dir) in &plugin_sources {
@@ -418,6 +425,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                     tags: Some(kind.to_string()),
                     suite: None,
                     source_tool: Some(tool_id.to_string()),
+                    is_native: false,
                 };
                 let _ = crate::store::insert_extension(&ext);
                 imported += 1;
