@@ -9,7 +9,6 @@ mod plugins;
 mod session;
 
 use tauri::Manager;
-
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -55,41 +54,11 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(plugins::system_tray::init())
-        .invoke_handler(tauri::generate_handler![
-            greet,
-            update_tray_menu,
-            commands::get_all_sessions,
-            commands::focus_session,
-            commands::get_setting,
-            commands::set_setting,
-            commands::list_extensions_with_assignments,
-            commands::list_repo_skills,
-            commands::install_skill,
-            commands::toggle_mcp_for_tool,
-            commands::toggle_plugin_for_tool,
-            commands::list_presets,
-            commands::create_preset,
-            commands::delete_preset,
-            commands::apply_preset,
-            commands::deactivate_preset,
-            commands::apply_preset_to_subagent,
-            commands::deactivate_preset_from_subagent,
-            commands::detect_subagents,
-            commands::kill_session,
-            commands::list_sub_agents,
-            commands::read_mcp_servers,
-            commands::write_mcp_server,
-            commands::remove_mcp_server,
-            commands::detect_tools,
-            commands::assign_skill_to_subagent,
-            commands::rescan_skills,
-            commands::scan_native_resources,
-            commands::import_native_resources,
-            commands::list_tool_resources,
-            commands::check_preset_compatibility,
-            commands::capture_window_screenshot,
-            commands::list_screenshots,
-        ]);
+        ;
+    let builder = commands::add_commands(builder);
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        greet, update_tray_menu, commands::session::get_all_sessions, commands::screenshot::capture_window_screenshot
+    ]);
 
     #[cfg(not(debug_assertions))]
     let builder = {
