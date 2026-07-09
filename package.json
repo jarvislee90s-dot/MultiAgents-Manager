@@ -17,7 +17,10 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\"",
     "lint": "eslint src/**/*.{ts,tsx} vite.config.ts",
     "lint:fix": "eslint src/**/*.{ts,tsx} vite.config.ts --fix",
-    "check": "pnpm format:check && pnpm lint && pnpm build"
+    "check": "pnpm format:check && pnpm lint && pnpm build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",
@@ -47,20 +50,27 @@
   "devDependencies": {
     "@eslint/js": "^9.38.0",
     "@tauri-apps/cli": "^2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^25.5.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9.38.0",
     "eslint-plugin-react-hooks": "^7.0.0",
     "globals": "^16.4.0",
     "husky": "^9.1.7",
+    "jsdom": "^29.1.1",
     "lint-staged": "^17.0.8",
+    "msw": "^2.15.0",
     "prettier": "^3.8.1",
     "prettier-plugin-tailwindcss": "^0.7.2",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.46.1",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.10"
   },
   "lint-staged": {
     "src/**/*.{ts,tsx}": [
