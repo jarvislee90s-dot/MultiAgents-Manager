@@ -4,6 +4,8 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./index.css";
 import "./i18n";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "@/lib/query/queryClient";
 
 const HomePage = lazy(() => import("./pages/home"));
 const AboutPage = lazy(() => import("./pages/about"));
@@ -33,8 +35,10 @@ function AppWrapper() {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <Suspense fallback={null}>
-      <AppWrapper />
-    </Suspense>
+    <QueryClientProvider client={queryClient}>
+      <Suspense fallback={null}>
+        <AppWrapper />
+      </Suspense>
+    </QueryClientProvider>
   </React.StrictMode>
 );
