@@ -14,14 +14,14 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// 读取 CLI grace period（秒），默认 5
 fn get_cli_grace_secs() -> i64 {
-    crate::store::get_setting("cli_grace_secs")
+    crate::database::get_setting("cli_grace_secs")
         .and_then(|s| s.parse().ok())
         .unwrap_or(5)
 }
 
 /// 读取 APP grace period（秒），默认 30
 fn get_app_grace_secs() -> i64 {
-    crate::store::get_setting("app_grace_secs")
+    crate::database::get_setting("app_grace_secs")
         .and_then(|s| s.parse().ok())
         .unwrap_or(30)
 }
@@ -208,7 +208,7 @@ pub fn get_all_sessions() -> SessionsResponse {
 
     // 更新会话状态缓存（通知去重用）
     for session in &all_sessions {
-        let _ = crate::store::update_session_status(
+        let _ = crate::database::update_session_status(
             &session.id,
             &format!("{:?}", session.agent_type),
             &format!("{:?}", session.status),
@@ -216,7 +216,7 @@ pub fn get_all_sessions() -> SessionsResponse {
     }
     // 清理不再活跃的会话缓存
     let active_ids: HashSet<String> = all_sessions.iter().map(|s| s.id.clone()).collect();
-    crate::store::cleanup_stale_sessions(&active_ids);
+    crate::database::cleanup_stale_sessions(&active_ids);
 
     SessionsResponse {
         total_count: all_sessions.len(),

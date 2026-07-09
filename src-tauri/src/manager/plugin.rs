@@ -68,7 +68,7 @@ pub fn enable_file_plugin(plugin_name: &str, tool_id: &str) -> Result<(), String
     linker::create_link(&source, &target)?;
 
     let ext_id = format!("plugin-{}", plugin_name);
-    crate::store::upsert_assignment(&ext_id, tool_id, true, "valid")?;
+    crate::database::upsert_assignment(&ext_id, tool_id, true, "valid")?;
     log::info!("文件型 Plugin {} 已为 {} 启用", plugin_name, tool_id);
     Ok(())
 }
@@ -92,7 +92,7 @@ pub fn disable_file_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Strin
     linker::remove_link(&target)?;
 
     let ext_id = format!("plugin-{}", plugin_name);
-    crate::store::upsert_assignment(&ext_id, tool_id, false, "missing")?;
+    crate::database::upsert_assignment(&ext_id, tool_id, false, "missing")?;
     log::info!("文件型 Plugin {} 已为 {} 禁用", plugin_name, tool_id);
     Ok(())
 }
@@ -178,7 +178,7 @@ fn json_to_toml_value(v: &serde_json::Value) -> toml_edit::Value {
     }
 
     let ext_id = format!("plugin-{}", plugin_name);
-    crate::store::upsert_assignment(&ext_id, tool_id, true, "valid")?;
+    crate::database::upsert_assignment(&ext_id, tool_id, true, "valid")?;
     log::info!("配置型 Plugin {} 已为 {} 启用", plugin_name, tool_id);
     Ok(())
 }
@@ -224,7 +224,7 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
     }
 
     let ext_id = format!("plugin-{}", plugin_name);
-    crate::store::upsert_assignment(&ext_id, tool_id, false, "missing")?;
+    crate::database::upsert_assignment(&ext_id, tool_id, false, "missing")?;
     log::info!("配置型 Plugin {} 已为 {} 禁用", plugin_name, tool_id);
     Ok(())
 }

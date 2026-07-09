@@ -131,7 +131,7 @@ pub fn update_tray_status(
 pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 
-    let presets = crate::store::list_presets();
+    let presets = crate::database::list_presets();
 
     // 创建菜单项（owned，存活于本函数作用域内）
     let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>).map_err(|e| e.to_string())?;

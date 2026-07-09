@@ -7,7 +7,7 @@ pub mod plugin;
 
 use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
 use crate::linker;
-use crate::store;
+use crate::database;
 use log::info;
 
 /// 获取工具的 skill 目录
@@ -29,7 +29,7 @@ pub fn install_skill(source_path: &str, name: &str) -> Result<(), String> {
         return Err(format!("源路径不存在: {}", source_path));
     }
     linker::install_to_repo(source, name)?;
-    let ext = store::ExtensionRecord {
+    let ext = database::ExtensionRecord {
         id: format!("skill-{}", name),
         kind: "skill".to_string(),
         name: name.to_string(),
@@ -42,7 +42,7 @@ pub fn install_skill(source_path: &str, name: &str) -> Result<(), String> {
         source_tool: None,
         is_native: false,
     };
-    store::insert_extension(&ext)?;
+    database::insert_extension(&ext)?;
     info!("Skill 安装到全局仓库: {}", name);
     Ok(())
 }
@@ -64,7 +64,7 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
     }
 
     let ext_id = format!("skill-{}", skill_name);
-    store::upsert_assignment(&ext_id, tool_id, true, "valid")?;
+    database::upsert_assignment(&ext_id, tool_id, true, "valid")?;
     info!("Skill {} 已为 {} 启用（Layer 2）", skill_name, tool_id);
     Ok(())
 }
@@ -84,7 +84,7 @@ pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Str
     crate::linker::layer2::unlink_skill_from_layer2(skill_name, tool_id)?;
 
     let ext_id = format!("skill-{}", skill_name);
-    store::upsert_assignment(&ext_id, tool_id, false, "missing")?;
+    database::upsert_assignment(&ext_id, tool_id, false, "missing")?;
     info!("Skill {} 已为 {} 禁用", skill_name, tool_id);
     Ok(())
 }
@@ -109,7 +109,7 @@ pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), St
         mcp::remove_mcp(tool_id, mcp_name)?;
     }
     let ext_id = format!("mcp-{}", mcp_name);
-    store::upsert_assignment(&ext_id, tool_id, enabled, if enabled { "valid" } else { "missing" })?;
+    database::upsert_assignment(&ext_id, tool_id, enabled, if enabled { "valid" } else { "missing" })?;
     info!("MCP {} 已为 {} {}", mcp_name, tool_id, if enabled { "启用" } else { "禁用" });
     Ok(())
 }
@@ -147,7 +147,7 @@ pub fn detect_subagents(tool_id: &str) -> Vec<String> {
 /// 检查 skill 是否在工具级范围内
 pub fn is_skill_in_tool_range(skill_name: &str, tool_id: &str) -> bool {
     let ext_id = format!("skill-{}", skill_name);
-    let assignments = crate::store::list_assignments(tool_id);
+    let assignments = crate::database::list_assignments(tool_id);
     assignments.iter().any(|a| a.extension_id == ext_id && a.enabled)
 }
 
@@ -188,7 +188,7 @@ pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &
 
     let ext_id = format!("skill-{}", skill_name);
     // 子 Agent 分配记录到 assignments 表（sub_agent_id 字段）
-    crate::store::upsert_assignment_with_subagent(&ext_id, tool_id, sub_agent_id, true, if has_subagent_dir { "valid" } else { "ui-only" })?;
+    crate::database::upsert_assignment_with_subagent(&ext_id, tool_id, sub_agent_id, true, if has_subagent_dir { "valid" } else { "ui-only" })?;
 
     info!("Skill {} 已分配给子 Agent {}（{}）", skill_name, sub_agent_id, if has_subagent_dir { "Layer 3" } else { "UI-only" });
     Ok(())
@@ -311,7 +311,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
 
     // 记录扫描前已有的 skill 名字集合，用于计算"真正新增"
-    let existing_before: std::collections::HashSet<String> = crate::store::list_extensions()
+    let existing_before: std::collections::HashSet<String> = crate::database::list_extensions()
         .iter()
         .map(|e| e.name.clone())
         .collect();
@@ -363,7 +363,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
             }
 
             // 记录到数据库
-            let ext = crate::store::ExtensionRecord {
+            let ext = crate::database::ExtensionRecord {
                 id: format!("skill-{}", skill_name),
                 kind: "skill".to_string(),
                 name: skill_name.clone(),
@@ -376,7 +376,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 source_tool: Some(tool_id.to_string()),
                 is_native: false,
             };
-            let _ = crate::store::insert_extension(&ext);
+            let _ = crate::database::insert_extension(&ext);
             imported += 1;
         }
     }
@@ -414,7 +414,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                     let _ = std::fs::copy(&path, &dest);
                 }
 
-                let ext = crate::store::ExtensionRecord {
+                let ext = crate::database::ExtensionRecord {
                     id: format!("plugin-{}", name),
                     kind: "plugin".to_string(),
                     name: name.clone(),
@@ -427,14 +427,14 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                     source_tool: Some(tool_id.to_string()),
                     is_native: false,
                 };
-                let _ = crate::store::insert_extension(&ext);
+                let _ = crate::database::insert_extension(&ext);
                 imported += 1;
             }
         }
     }
 
     // 计算真正新增：扫描后 extensions 数量 vs 扫描前
-    let existing_after: std::collections::HashSet<String> = crate::store::list_extensions()
+    let existing_after: std::collections::HashSet<String> = crate::database::list_extensions()
         .iter()
         .map(|e| e.name.clone())
         .collect();

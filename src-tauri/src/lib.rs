@@ -1,6 +1,6 @@
 mod adapter;
 mod monitor;
-mod store;
+mod database;
 mod terminal;
 mod linker;
 mod manager;
@@ -29,7 +29,7 @@ pub fn run() {
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")
     ).try_init();
-    store::init();
+    database::init();
     manager::auto_import_extensions(false);  // 首次启动，不强制
     monitor::hooks::register_all_hooks();
 

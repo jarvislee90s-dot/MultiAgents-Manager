@@ -16,11 +16,11 @@ pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
         &app, response.waiting_count, response.total_count, has_processing,
     );
     // 仅在预设组数量变化时重建托盘菜单（避免每 1.5s 重建）
-    let preset_count = crate::store::list_presets().len();
-    let last_count = crate::store::get_setting("last_preset_count").and_then(|s| s.parse::<usize>().ok()).unwrap_or(usize::MAX);
+    let preset_count = crate::database::list_presets().len();
+    let last_count = crate::database::get_setting("last_preset_count").and_then(|s| s.parse::<usize>().ok()).unwrap_or(usize::MAX);
     if preset_count != last_count {
         let _ = crate::plugins::system_tray::update_tray_with_presets(&app);
-        crate::store::set_setting("last_preset_count", &preset_count.to_string());
+        crate::database::set_setting("last_preset_count", &preset_count.to_string());
     }
     response
 }
@@ -34,13 +34,13 @@ pub fn focus_session(pid: u32) -> Result<(), String> {
 /// 读取设置
 #[tauri::command]
 pub fn get_setting(key: String) -> Option<String> {
-    crate::store::get_setting(&key)
+    crate::database::get_setting(&key)
 }
 
 /// 写入设置
 #[tauri::command]
 pub fn set_setting(key: String, value: String) {
-    crate::store::set_setting(&key, &value);
+    crate::database::set_setting(&key, &value);
 }
 
 
@@ -70,8 +70,8 @@ pub struct AssignmentSummary {
 /// 列出所有扩展及其分配状态
 #[tauri::command]
 pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
-    let extensions = crate::store::list_extensions();
-    let assignments = crate::store::list_all_assignments();
+    let extensions = crate::database::list_extensions();
+    let assignments = crate::database::list_all_assignments();
 
     extensions.iter().map(|ext| {
         let ext_assignments: Vec<AssignmentSummary> = assignments.iter()
@@ -139,17 +139,17 @@ pub fn deactivate_preset_from_subagent(preset_id: String, tool_id: String, sub_a
 /// 创建预设组
 #[tauri::command]
 pub fn create_preset(name: String, items: Vec<(String, String)>) -> Result<String, String> {
-    crate::store::create_preset(&name, &items)
+    crate::database::create_preset(&name, &items)
 }
 
 /// 删除预设组
 #[tauri::command]
 pub fn delete_preset(preset_id: String) -> Result<(), String> {
-    crate::store::delete_preset(&preset_id)
+    crate::database::delete_preset(&preset_id)
 }
 
 /// 应用预设组到工具
-use crate::store::PresetRecord;
+use crate::database::PresetRecord;
 
 /// 预设组应用结果
 #[derive(serde::Serialize)]
@@ -163,7 +163,7 @@ pub struct PresetApplyResult {
 /// 列出所有预设组
 #[tauri::command]
 pub fn list_presets() -> Vec<PresetRecord> {
-    crate::store::list_presets()
+    crate::database::list_presets()
 }
 
 /// 应用预设组到工具
@@ -185,7 +185,7 @@ pub fn detect_subagents(tool_id: String) -> Vec<String> {
     crate::manager::detect_subagents(&tool_id)
 }
 
-use crate::store::SubAgentRecord;
+use crate::database::SubAgentRecord;
 
 /// 终止会话进程
 #[tauri::command]
@@ -202,7 +202,7 @@ pub fn kill_session(pid: u32) -> Result<(), String> {
 /// 列出工具的子 Agent
 #[tauri::command]
 pub fn list_sub_agents(tool_id: String) -> Vec<SubAgentRecord> {
-    crate::store::list_sub_agents(&tool_id)
+    crate::database::list_sub_agents(&tool_id)
 }
 
 /// 读取工具的 MCP 服务器列表
@@ -273,7 +273,7 @@ pub fn rescan_skills() -> crate::manager::ImportStats {
 
 /// 扫描指定工具的原生资源（尚未导入全局仓库）
 #[tauri::command]
-pub fn scan_native_resources(tool_id: String) -> Vec<crate::store::NativeExtensionRecord> {
+pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExtensionRecord> {
     let mut results = Vec::new();
 
     // 扫描工具的 skill 目录
@@ -288,7 +288,7 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::store::NativeExtensi
     if let Some(dir) = skill_dir {
         if dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
-                let existing = crate::store::list_extensions();
+                let existing = crate::database::list_extensions();
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_dir() {
@@ -297,7 +297,7 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::store::NativeExtensi
                         let ext_id = format!("skill-{}", name);
                         let exists = existing.iter().any(|e| e.id == ext_id);
                         if !exists {
-                            results.push(crate::store::NativeExtensionRecord {
+                            results.push(crate::database::NativeExtensionRecord {
                                 id: ext_id,
                                 kind: "skill".to_string(),
                                 name: name.clone(),
@@ -338,7 +338,7 @@ pub fn import_native_resources(items: Vec<(String, String)>) -> crate::manager::
         }
 
         // 记录到数据库
-        let ext = crate::store::ExtensionRecord {
+        let ext = crate::database::ExtensionRecord {
             id: format!("skill-{}", name),
             kind: "skill".to_string(),
             name: name.clone(),
@@ -351,7 +351,7 @@ pub fn import_native_resources(items: Vec<(String, String)>) -> crate::manager::
             source_tool: None,
             is_native: true,
         };
-        let _ = crate::store::insert_extension(&ext);
+        let _ = crate::database::insert_extension(&ext);
         imported += 1;
     }
 
@@ -366,11 +366,11 @@ pub fn import_native_resources(items: Vec<(String, String)>) -> crate::manager::
 /// 获取工具的所有资源（全局 + 原生）
 #[tauri::command]
 pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
-    let global = crate::store::list_extensions();
+    let global = crate::database::list_extensions();
     let native = scan_native_resources(tool_id.clone());
 
     // 过滤出分配给该工具且启用的全局资源
-    let assignments = crate::store::list_assignments(&tool_id);
+    let assignments = crate::database::list_assignments(&tool_id);
     let global_filtered: Vec<_> = global.iter()
         .filter(|e| {
             assignments.iter().any(|a| a.extension_id == e.id && a.enabled)

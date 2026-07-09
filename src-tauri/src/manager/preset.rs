@@ -1,7 +1,7 @@
 // 预设组应用逻辑 — 增量应用 + 精确移除 + 部分成功处理
 
 use crate::manager;
-use crate::store;
+use crate::database;
 use log::info;
 
 /// 应用预设组到工具
@@ -13,7 +13,7 @@ pub struct ApplyResult {
 }
 
 pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
-    let items = store::get_preset_items(preset_id);
+    let items = database::get_preset_items(preset_id);
     let mut success = 0;
     let mut failures = Vec::new();
     let mut conflicts = Vec::new();
@@ -38,7 +38,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
             "plugin" => {
                 let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
                 // 从 extensions 表读取 plugin 的 tags 字段（存储了 "file" 或 "config" 子类型）
-                let plugin_kind = crate::store::list_extensions()
+                let plugin_kind = crate::database::list_extensions()
                     .iter()
                     .find(|e| e.id == *ext_id)
                     .and_then(|e| e.tags.clone())
@@ -53,7 +53,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
         }
     }
 
-    let _ = store::record_preset_application(preset_id, tool_id, true);
+    let _ = database::record_preset_application(preset_id, tool_id, true);
     info!("预设组 {} → {} — 成功 {} 失败 {} 冲突 {}", preset_id, tool_id, success, failures.len(), conflicts.len());
     ApplyResult { success, failures, conflicts }
 }
@@ -122,7 +122,7 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
 
 /// 取消激活预设组
 pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
-    let items = store::get_preset_items(preset_id);
+    let items = database::get_preset_items(preset_id);
     let mut errors = Vec::new();
     for (ext_id, kind) in &items {
         let result = match kind.as_str() {
@@ -136,7 +136,7 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
             }
             "plugin" => {
                 let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
-                let plugin_kind = crate::store::list_extensions()
+                let plugin_kind = crate::database::list_extensions()
                     .iter()
                     .find(|e| e.id == *ext_id)
                     .and_then(|e| e.tags.clone())
@@ -149,7 +149,7 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
             errors.push(format!("{}: {}", ext_id, e));
         }
     }
-    store::record_preset_application(preset_id, tool_id, false)?;
+    database::record_preset_application(preset_id, tool_id, false)?;
     if !errors.is_empty() {
         log::warn!("deactivate_preset 部分失败: {:?}", errors);
     }
@@ -159,7 +159,7 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
 
 /// 应用预设组到子 Agent
 pub fn apply_preset_to_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str) -> ApplyResult {
-    let items = store::get_preset_items(preset_id);
+    let items = database::get_preset_items(preset_id);
     let mut success = 0;
     let mut failures = Vec::new();
     let mut conflicts = Vec::new();
@@ -185,7 +185,7 @@ pub fn apply_preset_to_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &s
         }
     }
 
-    let _ = store::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, true);
+    let _ = database::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, true);
     info!("预设组 {} -> {}:{} -- 成功 {} 失败 {} 冲突 {}",
         preset_id, tool_id, sub_agent_id, success, failures.len(), conflicts.len());
     ApplyResult { success, failures, conflicts }
@@ -218,13 +218,13 @@ pub struct IncompatibleItem {
 
 /// 检查预设组与工具的兼容性
 pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityReport {
-    let items = store::get_preset_items(preset_id);
+    let items = database::get_preset_items(preset_id);
     let mut compatible = Vec::new();
     let mut incompatible = Vec::new();
 
     for (ext_id, kind) in items {
         // 获取资源信息
-        let ext = store::list_extensions().into_iter().find(|e| e.id == ext_id);
+        let ext = database::list_extensions().into_iter().find(|e| e.id == ext_id);
         let name = ext.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| ext_id.clone());
 
         // 检查兼容性：tags 字段包含目标工具 ID
@@ -247,7 +247,7 @@ pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityRepor
     CompatibilityReport { compatible, incompatible }
 }
 pub fn deactivate_preset_from_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
-    let items = store::get_preset_items(preset_id);
+    let items = database::get_preset_items(preset_id);
     let mut errors = Vec::new();
     for (ext_id, kind) in &items {
         if kind != "skill" { continue; }
@@ -257,9 +257,9 @@ pub fn deactivate_preset_from_subagent(preset_id: &str, tool_id: &str, sub_agent
             errors.push(format!("{}: {}", ext_id, e));
         }
         // 更新数据库记录
-        let _ = crate::store::disable_subagent_assignment(ext_id, tool_id, sub_agent_id);
+        let _ = crate::database::disable_subagent_assignment(ext_id, tool_id, sub_agent_id);
     }
-    store::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, false)?;
+    database::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, false)?;
     if !errors.is_empty() {
         log::warn!("deactivate_preset_from_subagent 部分失败: {:?}", errors);
     }

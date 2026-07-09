@@ -177,7 +177,7 @@ pub struct HookEvent {
 /// 为所有支持 Hook 的工具注册 Hook（在应用启动时调用）
 pub fn register_all_hooks() {
     // 检查是否已注册过（避免每次启动都读写用户配置）
-    if let Some(val) = crate::store::get_setting("hooks_registered") {
+    if let Some(val) = crate::database::get_setting("hooks_registered") {
         if val == "true" {
             debug!("Hooks already registered, skipping");
             // 仍确保脚本存在
@@ -203,7 +203,7 @@ pub fn register_all_hooks() {
             match register_hooks_for_tool(&config_path, &events, is_pascal) {
                 Ok(()) => {
             info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
-            crate::store::set_setting("hooks_registered", "true");
+            crate::database::set_setting("hooks_registered", "true");
         }
                 Err(e) => warn!("Hook 注册失败 {} → {:?}: {}", adapter.name(), config_path, e),
             }
