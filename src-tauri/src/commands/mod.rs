@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod plugin;
 pub mod settings;
 pub mod screenshot;
+pub mod manifest;
 
 pub use session::get_all_sessions;
 pub use screenshot::capture_window_screenshot;
@@ -24,5 +25,6 @@ pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     let builder = plugin::add_commands(builder);
     let builder = settings::add_commands(builder);
     let builder = screenshot::add_commands(builder);
+    let builder = manifest::add_commands(builder);
     builder
 }

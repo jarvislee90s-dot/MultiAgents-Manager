@@ -32,4 +32,7 @@ pub use dao::agent_tool::list_sub_agents;
 /// 初始化数据库（兼容旧 store::init() 调用）
 pub fn init() {
     connection::init();
+    if let Ok(conn) = connection::open() {
+        let _ = migration::migrate(&conn);
+    }
 }

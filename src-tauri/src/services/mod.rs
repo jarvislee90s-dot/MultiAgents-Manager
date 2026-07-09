@@ -5,6 +5,7 @@ pub mod resource;
 pub mod preset;
 pub mod mcp;
 pub mod plugin;
+pub mod manifest;
 
 use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
 use log::info;

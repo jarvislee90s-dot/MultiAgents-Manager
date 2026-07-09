@@ -28,7 +28,10 @@ pub fn init(conn: &Connection) {
             source_tool TEXT,
             is_native   INTEGER NOT NULL DEFAULT 0,
             installed_at TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            manifest_path TEXT,
+            permissions TEXT,
+            min_runtime TEXT
         );
         CREATE TABLE IF NOT EXISTS extension_assignments (
             id            TEXT PRIMARY KEY,
