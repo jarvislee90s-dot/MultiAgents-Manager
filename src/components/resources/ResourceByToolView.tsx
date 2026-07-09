@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Scan, Import } from "lucide-react";
-import { ToolIcon } from "@/components/ToolIcon";
+import { ToolIcon } from "@/components/common/ToolIcon";
 import type { NativeExtension, ToolResources } from "@/types/extension";
 
 const TOOLS = [

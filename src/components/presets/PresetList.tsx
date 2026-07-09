@@ -7,8 +7,8 @@ import { Card } from "@/components/ui/card";
 import { Layers, Plus, Trash2, Play, X } from "lucide-react";
 import type { PresetRecord, PresetApplyResult } from "@/types/preset";
 import type { ExtensionWithAssignments } from "@/types/extension";
-import { CompatibilityDialog } from "./CompatibilityDialog";
-import { ToolIcon } from "@/components/ToolIcon";
+import { CompatibilityDialog } from "../resources/CompatibilityDialog";
+import { ToolIcon } from "@/components/common/ToolIcon";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },

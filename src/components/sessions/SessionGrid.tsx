@@ -1,4 +1,4 @@
-import { SessionCard } from "@/components/SessionCard";
+import { SessionCard } from "@/components/sessions/SessionCard";
 import type { Session } from "@/types/session";
 import { Monitor } from "lucide-react";
 

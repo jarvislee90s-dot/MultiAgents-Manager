@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { WindowFrame } from "@/components/window-frame";
-import { MainTitleBar } from "@/components/main-title-bar";
-import { UpdaterDialog } from "@/components/updater-dialog";
+import { WindowFrame } from "@/components/common/window-frame";
+import { MainTitleBar } from "@/components/common/main-title-bar";
+import { UpdaterDialog } from "@/components/common/updater-dialog";
 import { Toaster } from "@/components/ui/sonner";
-import { SessionGrid } from "@/components/SessionGrid";
-import { ExtensionList } from "@/components/ExtensionList";
+import { SessionGrid } from "@/components/sessions/SessionGrid";
+import { ExtensionList } from "@/components/resources/ExtensionList";
 import { Monitor, Package } from "lucide-react";
 import { useSessions } from "@/hooks/useSessions";
 import { useNotification } from "@/hooks/useNotification";

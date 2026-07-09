@@ -1,8 +1,8 @@
 import { Moon, Sun, Info, Settings } from "lucide-react";
-import { useTheme } from "@/components/theme-provider";
+import { useTheme } from "@/components/common/theme-provider";
 import { createWindow } from "@/lib/window";
-import { TitleBar } from "@/components/title-bar";
-import { LanguageToggle } from "@/components/language-toggle";
+import { TitleBar } from "@/components/common/title-bar";
+import { LanguageToggle } from "@/components/common/language-toggle";
 import { useTranslation } from "react-i18next";
 
 export function MainTitleBar() {

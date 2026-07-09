@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ToolIcon } from "@/components/ToolIcon";
+import { ToolIcon } from "@/components/common/ToolIcon";
 import { Button } from "@/components/ui/button";
 import { Package, Link2, Plug, Info } from "lucide-react";
 import type { ExtensionWithAssignments } from "@/types/extension";

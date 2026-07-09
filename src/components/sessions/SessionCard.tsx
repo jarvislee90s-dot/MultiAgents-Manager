@@ -3,7 +3,7 @@ import { Terminal, Cpu, Clock, Bot, FolderGit2, ChevronRight } from "lucide-reac
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
-import { StatusLight } from "@/components/StatusLight";
+import { StatusLight } from "@/components/sessions/StatusLight";
 import type { Session, AgentType } from "@/types/session";
 
 const AGENT_BADGE: Record<AgentType, { label: string; className: string; icon: typeof Bot }> = {

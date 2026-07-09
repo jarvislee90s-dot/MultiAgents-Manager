@@ -7,7 +7,7 @@ import type { ExtensionWithAssignments } from "@/types/extension";
 import { ResourceByKindView } from "./ResourceByKindView";
 import { ResourceByToolView } from "./ResourceByToolView";
 import { ImportDialog } from "./ImportDialog";
-import { PresetList } from "./PresetList";
+import { PresetList } from "../presets/PresetList";
 
 export function ExtensionList() {
   const [view, setView] = useState<"byKind" | "byTool">("byKind");

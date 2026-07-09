@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { NativeExtension } from "@/types/extension";
-import { ToolIcon } from "@/components/ToolIcon";
+import { ToolIcon } from "@/components/common/ToolIcon";
 
 const TOOLS = [
   { id: "claude", label: "Claude Code" },
