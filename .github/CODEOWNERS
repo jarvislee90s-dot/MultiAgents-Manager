@@ -1,0 +1,5 @@
+/src-tauri/  @backend-maintainers
+/src/        @frontend-maintainers
+/docs/       @docs-maintainers
+/specs/      @docs-maintainers
+/.github/    @devops-maintainers

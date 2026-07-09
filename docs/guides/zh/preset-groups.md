@@ -1,0 +1,30 @@
+# Preset Groups
+
+本指南介绍 MultiAgents Manager 的 Preset Groups 功能。
+
+## 概述
+
+MultiAgents Manager 是一个多 Agent 编程工具统一管理平台，支持 Claude Code、Codex CLI、OpenCode 和 OpenClaw 四种工具的会话监控、资源管理和预设组切换。
+
+## 安装
+
+### macOS
+1. 下载最新 DMG 文件
+2. 拖拽到 Applications 目录
+3. 首次启动时允许辅助功能权限（用于终端跳转）
+
+### Linux
+1. 下载 AppImage 文件
+2. 添加执行权限：
+3. 运行：
+
+## 使用方法
+
+启动应用后，看板会自动扫描已安装的 AI 编程工具并显示活跃会话。你可以通过看板查看所有会话的状态、点击会话卡片跳转到对应终端、在资源管理页面启用/禁用 Skill/MCP/插件，以及创建预设组实现一键切换。
+
+## 常见问题
+
+如果看板没有显示会话，请确认：
+1. 至少一个 AI 编程工具正在运行
+2. 应用有权限访问终端进程信息
+3. 检查设置页面中的工具检测是否启用
