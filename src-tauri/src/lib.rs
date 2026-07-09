@@ -1,12 +1,12 @@
-mod adapter;
-mod monitor;
-mod database;
-mod window;
-mod linker;
-mod services;
-mod commands;
-mod plugins;
-mod session;
+pub mod adapter;
+pub mod monitor;
+pub mod database;
+pub mod window;
+pub mod linker;
+pub mod services;
+pub mod commands;
+pub mod plugins;
+pub mod session;
 
 use tauri::Manager;
 #[tauri::command]
