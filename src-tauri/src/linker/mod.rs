@@ -7,6 +7,7 @@ pub mod layer2;
 pub mod layer3;
 use std::fs;
 use std::path::{Path, PathBuf};
+use fs2::FileExt;
 
 
 /// 确保全局仓库目录存在，返回路径
@@ -120,6 +121,29 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     fs::write(&temp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
     fs::rename(&temp, path).map_err(|e| format!("重命名失败: {}", e))?;
     Ok(())
+}
+
+/// 对配置文件加排他锁后执行原子写入，防止多个 MAM 实例并发写同一配置
+pub fn write_config_locked(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(path)
+        .map_err(|e| format!("打开配置文件失败: {}", e))?;
+    file.lock_exclusive()
+        .map_err(|e| format!("获取文件锁失败: {}", e))?;
+    let result = (|| {
+        let temp = path.with_extension("tmp");
+        fs::write(&temp, content).map_err(|e| format!("写入临时文件失败: {}", e))?;
+        fs::rename(&temp, path).map_err(|e| format!("重命名失败: {}", e))?;
+        Ok(())
+    })();
+    let _ = file.unlock();
+    result
 }
 
 pub fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {

@@ -126,7 +126,7 @@ pub fn enable_config_plugin(plugin_name: &str, tool_id: &str, entries: &BTreeMap
             root["plugins"][plugin_name] = serde_json::to_value(entries)
                 .map_err(|e| e.to_string())?;
             let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-            linker::write_atomic(config_path, &pretty)?;
+            linker::write_config_locked(config_path, &pretty)?;
         }
         crate::adapter::McpFormat::Toml => {
             // TOML 格式：写入 [plugins.<name>] 段
@@ -173,7 +173,7 @@ fn json_to_toml_value(v: &serde_json::Value) -> toml_edit::Value {
                 plugin_table[k] = toml_edit::value(json_to_toml_value(v));
             }
             let toml_str = doc.to_string();
-            linker::write_atomic(config_path, &toml_str)?;
+            linker::write_config_locked(config_path, &toml_str)?;
         }
     }
 
@@ -209,7 +209,7 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
                 plugins.remove(plugin_name);
             }
             let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-            linker::write_atomic(config_path, &pretty)?;
+            linker::write_config_locked(config_path, &pretty)?;
         }
         crate::adapter::McpFormat::Toml => {
             let content = std::fs::read_to_string(config_path).unwrap_or_default();
@@ -219,7 +219,7 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
                 plugins.remove(plugin_name);
             }
             let toml_str = doc.to_string();
-            linker::write_atomic(config_path, &toml_str)?;
+            linker::write_config_locked(config_path, &toml_str)?;
         }
     }
 

@@ -127,7 +127,7 @@ pub fn register_hooks_for_tool(
         }
         let pretty = serde_json::to_string_pretty(&config)
             .map_err(|e| format!("序列化配置失败: {}", e))?;
-        crate::linker::write_atomic(config_path, &pretty)
+        crate::linker::write_config_locked(config_path, &pretty)
             .map_err(|e| format!("写入配置文件失败: {}", e))?;
         info!("已注册 {} 个 Hook 到 {:?}", added, config_path);
     }

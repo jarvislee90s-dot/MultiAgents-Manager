@@ -63,7 +63,7 @@ fn write_mcp_json(path: &std::path::Path, name: &str, config: &McpConfig) -> Res
         "env": config.env,
     });
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::linker::write_atomic(path, &pretty)
+    crate::linker::write_config_locked(path, &pretty)
 }
 
 fn remove_mcp_json(path: &std::path::Path, name: &str) -> Result<(), String> {
@@ -74,7 +74,7 @@ fn remove_mcp_json(path: &std::path::Path, name: &str) -> Result<(), String> {
         servers.remove(name);
     }
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::linker::write_atomic(path, &pretty)
+    crate::linker::write_config_locked(path, &pretty)
 }
 
 // ===== TOML (Codex CLI: config.toml mcp_servers) =====
@@ -108,7 +108,7 @@ fn write_mcp_toml(path: &std::path::Path, name: &str, config: &McpConfig) -> Res
     }
 
     let toml_str = doc.to_string();
-    crate::linker::write_atomic(path, &toml_str)
+    crate::linker::write_config_locked(path, &toml_str)
 }
 
 fn remove_mcp_toml(path: &std::path::Path, name: &str) -> Result<(), String> {
@@ -119,7 +119,7 @@ fn remove_mcp_toml(path: &std::path::Path, name: &str) -> Result<(), String> {
         servers.remove(name);
     }
     let toml_str = doc.to_string();
-    crate::linker::write_atomic(path, &toml_str)
+    crate::linker::write_config_locked(path, &toml_str)
 }
 
 // ===== JSONC (OpenCode: opencode.json mcp) =====
@@ -140,7 +140,7 @@ fn write_mcp_jsonc(path: &std::path::Path, name: &str, config: &McpConfig) -> Re
         "environment": config.env,
     });
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::linker::write_atomic(path, &pretty)
+    crate::linker::write_config_locked(path, &pretty)
 }
 
 fn remove_mcp_jsonc(path: &std::path::Path, name: &str) -> Result<(), String> {
@@ -151,5 +151,5 @@ fn remove_mcp_jsonc(path: &std::path::Path, name: &str) -> Result<(), String> {
         servers.remove(name);
     }
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::linker::write_atomic(path, &pretty)
+    crate::linker::write_config_locked(path, &pretty)
 }
