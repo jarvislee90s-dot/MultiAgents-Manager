@@ -28,7 +28,7 @@ pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
 /// 跳转到指定会话的终端窗口（US3）
 #[tauri::command]
 pub fn focus_session(pid: u32) -> Result<(), String> {
-    crate::terminal::focus_terminal_for_pid(pid)
+    crate::window::focus_terminal_for_pid(pid)
 }
 
 /// 读取设置

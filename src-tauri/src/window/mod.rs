@@ -3,6 +3,21 @@ mod iterm;
 mod terminal_app;
 mod tmux;
 
+/// 终端窗口管理抽象
+pub trait WindowManager {
+    /// 聚焦到指定 PID 对应的终端窗口
+    fn focus(&self, pid: u32) -> Result<(), String>;
+}
+
+/// 默认实现：按平台分发
+pub struct DefaultWindowManager;
+
+impl WindowManager for DefaultWindowManager {
+    fn focus(&self, pid: u32) -> Result<(), String> {
+        focus_terminal_for_pid(pid)
+    }
+}
+
 /// 通过 PID 聚焦对应的终端窗口
 pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
     // Wayland 降级检测

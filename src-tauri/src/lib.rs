@@ -1,7 +1,7 @@
 mod adapter;
 mod monitor;
 mod database;
-mod terminal;
+mod window;
 mod linker;
 mod services;
 mod commands;
