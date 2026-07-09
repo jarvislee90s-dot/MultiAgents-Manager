@@ -60,7 +60,9 @@ export default function SettingsPage() {
       try {
         const value = await invoke<string | null>("get_setting", { key: "notifications_enabled" });
         setNotificationsEnabled(value !== "false");
-      } catch {}
+      } catch {
+        // 忽略错误
+      }
     };
     loadNotificationSetting();
   }, []);

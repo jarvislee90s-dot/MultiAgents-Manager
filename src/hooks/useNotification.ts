@@ -116,7 +116,9 @@ export function useNotification() {
       try {
         const val = await invoke<string | null>("get_setting", { key: "notifications_enabled" });
         notificationsEnabled.current = val !== "false";
-      } catch {}
+      } catch {
+        // 忽略错误
+      }
       if (!notificationsEnabled.current) continue;
 
       // 颜色变化时通知（红→黄→绿 任意切换）
