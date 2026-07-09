@@ -3,7 +3,7 @@ mod monitor;
 mod database;
 mod terminal;
 mod linker;
-mod manager;
+mod services;
 mod commands;
 mod plugins;
 mod session;
@@ -30,7 +30,7 @@ pub fn run() {
         env_logger::Env::default().default_filter_or("info")
     ).try_init();
     database::init();
-    manager::auto_import_extensions(false);  // 首次启动，不强制
+    services::auto_import_extensions(false);  // 首次启动，不强制
     monitor::hooks::register_all_hooks();
 
     let builder = tauri::Builder::default()

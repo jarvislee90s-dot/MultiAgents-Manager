@@ -1,6 +1,6 @@
 // 预设组应用逻辑 — 增量应用 + 精确移除 + 部分成功处理
 
-use crate::manager;
+use crate::services;
 use crate::database;
 use log::info;
 
@@ -29,11 +29,11 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
         let result = match kind.as_str() {
             "skill" => {
                 let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
-                manager::enable_skill_for_tool(name, tool_id)
+                services::enable_skill_for_tool(name, tool_id)
             }
             "mcp" => {
                 let name = ext_id.strip_prefix("mcp-").unwrap_or(ext_id);
-                manager::toggle_mcp(name, tool_id, true)
+                services::toggle_mcp(name, tool_id, true)
             }
             "plugin" => {
                 let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
@@ -43,7 +43,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
                     .find(|e| e.id == *ext_id)
                     .and_then(|e| e.tags.clone())
                     .unwrap_or_else(|| "file".to_string());
-                crate::manager::plugin::toggle_plugin(name, tool_id, true, &plugin_kind)
+                crate::services::plugin::toggle_plugin(name, tool_id, true, &plugin_kind)
             }
             _ => Err(format!("未知类型: {}", kind)),
         };
@@ -128,11 +128,11 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
         let result = match kind.as_str() {
             "skill" => {
                 let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
-                manager::disable_skill_for_tool(name, tool_id)
+                services::disable_skill_for_tool(name, tool_id)
             }
             "mcp" => {
                 let name = ext_id.strip_prefix("mcp-").unwrap_or(ext_id);
-                manager::toggle_mcp(name, tool_id, false)
+                services::toggle_mcp(name, tool_id, false)
             }
             "plugin" => {
                 let name = ext_id.strip_prefix("plugin-").unwrap_or(ext_id);
@@ -141,7 +141,7 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
                     .find(|e| e.id == *ext_id)
                     .and_then(|e| e.tags.clone())
                     .unwrap_or_else(|| "file".to_string());
-                crate::manager::plugin::toggle_plugin(name, tool_id, false, &plugin_kind)
+                crate::services::plugin::toggle_plugin(name, tool_id, false, &plugin_kind)
             }
             _ => Ok(()),
         };
@@ -173,12 +173,12 @@ pub fn apply_preset_to_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &s
 
         // 检查是否在工具级范围内
         let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
-        if !crate::manager::is_skill_in_tool_range(name, tool_id) {
+        if !crate::services::is_skill_in_tool_range(name, tool_id) {
             failures.push(format!("{}: 该 skill 未在工具级启用", ext_id));
             continue;
         }
 
-        let result = crate::manager::assign_skill_to_subagent(name, tool_id, sub_agent_id);
+        let result = crate::services::assign_skill_to_subagent(name, tool_id, sub_agent_id);
         match result {
             Ok(()) => success += 1,
             Err(e) => failures.push(format!("{}: {}", ext_id, e)),

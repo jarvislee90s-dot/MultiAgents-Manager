@@ -105,32 +105,32 @@ pub fn list_repo_skills() -> Vec<String> {
 /// 安装 skill 到全局仓库
 #[tauri::command]
 pub fn install_skill(source_path: String, name: String) -> Result<(), String> {
-    crate::manager::install_skill(&source_path, &name)
+    crate::services::install_skill(&source_path, &name)
 }
 
 /// 为工具启用/禁用 MCP 服务器
 #[tauri::command]
 pub fn toggle_mcp_for_tool(mcp_name: String, tool_id: String, enabled: bool) -> Result<(), String> {
-    crate::manager::toggle_mcp(&mcp_name, &tool_id, enabled)
+    crate::services::toggle_mcp(&mcp_name, &tool_id, enabled)
 }
 
 /// 为工具启用/禁用 Plugin
 #[tauri::command]
 pub fn toggle_plugin_for_tool(plugin_name: String, tool_id: String, enabled: bool, kind: String) -> Result<(), String> {
-    crate::manager::plugin::toggle_plugin(&plugin_name, &tool_id, enabled, &kind)
+    crate::services::plugin::toggle_plugin(&plugin_name, &tool_id, enabled, &kind)
 }
 
 /// 应用预设组到子 Agent
 #[tauri::command]
 pub fn apply_preset_to_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> PresetApplyResult {
-    let result = crate::manager::preset::apply_preset_to_subagent(&preset_id, &tool_id, &sub_agent_id);
+    let result = crate::services::preset::apply_preset_to_subagent(&preset_id, &tool_id, &sub_agent_id);
     PresetApplyResult { success_count: result.success, failures: result.failures, conflicts: result.conflicts }
 }
 
 /// 取消激活子 Agent 级预设组
 #[tauri::command]
 pub fn deactivate_preset_from_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
-    crate::manager::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
+    crate::services::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
 }
 
 
@@ -169,20 +169,20 @@ pub fn list_presets() -> Vec<PresetRecord> {
 /// 应用预设组到工具
 #[tauri::command]
 pub fn apply_preset(preset_id: String, tool_id: String) -> PresetApplyResult {
-    let result = crate::manager::preset::apply_preset(&preset_id, &tool_id);
+    let result = crate::services::preset::apply_preset(&preset_id, &tool_id);
     PresetApplyResult { success_count: result.success, failures: result.failures, conflicts: result.conflicts }
 }
 
 /// 取消激活预设组
 #[tauri::command]
 pub fn deactivate_preset(preset_id: String, tool_id: String) -> Result<(), String> {
-    crate::manager::preset::deactivate_preset(&preset_id, &tool_id)
+    crate::services::preset::deactivate_preset(&preset_id, &tool_id)
 }
 
 /// 检测工具的子 Agent 列表
 #[tauri::command]
 pub fn detect_subagents(tool_id: String) -> Vec<String> {
-    crate::manager::detect_subagents(&tool_id)
+    crate::services::detect_subagents(&tool_id)
 }
 
 use crate::database::SubAgentRecord;
@@ -243,14 +243,14 @@ pub fn read_mcp_servers(tool_id: String) -> Result<serde_json::Value, String> {
 /// 写入单个 MCP 服务器配置到工具
 #[tauri::command]
 pub fn write_mcp_server(tool_id: String, mcp_name: String, command: String, args: Vec<String>, env: std::collections::BTreeMap<String, String>) -> Result<(), String> {
-    let config = crate::manager::mcp::McpConfig { command, args, env };
-    crate::manager::mcp::write_mcp(&tool_id, &mcp_name, &config)
+    let config = crate::services::mcp::McpConfig { command, args, env };
+    crate::services::mcp::write_mcp(&tool_id, &mcp_name, &config)
 }
 
 /// 移除单个 MCP 服务器配置
 #[tauri::command]
 pub fn remove_mcp_server(tool_id: String, mcp_name: String) -> Result<(), String> {
-    crate::manager::mcp::remove_mcp(&tool_id, &mcp_name)
+    crate::services::mcp::remove_mcp(&tool_id, &mcp_name)
 }
 
 /// 检测已安装的工具
@@ -262,13 +262,13 @@ pub fn detect_tools() -> Vec<crate::linker::detector::ToolDetection> {
 /// 为子 Agent 分配 skill
 #[tauri::command]
 pub fn assign_skill_to_subagent(skill_name: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
-    crate::manager::assign_skill_to_subagent(&skill_name, &tool_id, &sub_agent_id)
+    crate::services::assign_skill_to_subagent(&skill_name, &tool_id, &sub_agent_id)
 }
 
 /// 重新扫描各工具的 skill 目录，导入新增的 skill（前端"重新扫描"按钮调用）
 #[tauri::command]
-pub fn rescan_skills() -> crate::manager::ImportStats {
-    crate::manager::auto_import_extensions(true)
+pub fn rescan_skills() -> crate::services::ImportStats {
+    crate::services::auto_import_extensions(true)
 }
 
 /// 扫描指定工具的原生资源（尚未导入全局仓库）
@@ -319,7 +319,7 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
 
 /// 将原生资源导入全局仓库
 #[tauri::command]
-pub fn import_native_resources(items: Vec<(String, String)>) -> crate::manager::ImportStats {
+pub fn import_native_resources(items: Vec<(String, String)>) -> crate::services::ImportStats {
     let mut imported = 0;
     let mut skipped = 0;
 
@@ -355,7 +355,7 @@ pub fn import_native_resources(items: Vec<(String, String)>) -> crate::manager::
         imported += 1;
     }
 
-    crate::manager::ImportStats {
+    crate::services::ImportStats {
         imported,
         newly_added: imported,
         skipped_dup: skipped,
@@ -385,8 +385,8 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
 
 /// 检查预设组与工具的兼容性
 #[tauri::command]
-pub fn check_preset_compatibility(preset_id: String, tool_id: String) -> crate::manager::preset::CompatibilityReport {
-    crate::manager::preset::check_compatibility(&preset_id, &tool_id)
+pub fn check_preset_compatibility(preset_id: String, tool_id: String) -> crate::services::preset::CompatibilityReport {
+    crate::services::preset::check_compatibility(&preset_id, &tool_id)
 }
 
 // ===== 截图功能 =====
