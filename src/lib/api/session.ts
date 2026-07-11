@@ -1,4 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-export async function getAllSessions() { return await invoke("get_all_sessions"); }
-export async function focusSession(pid: number) { return await invoke("focus_session", { pid }); }
-export async function killSession(pid: number) { return await invoke("kill_session", { pid }); }
+import type { SessionsResponse } from "@/types/session";
+
+export async function getAllSessions(): Promise<SessionsResponse> {
+  return await invoke<SessionsResponse>("get_all_sessions");
+}
+export async function focusSession(pid: number): Promise<void> {
+  return await invoke("focus_session", { pid });
+}
+export async function killSession(pid: number): Promise<void> {
+  return await invoke("kill_session", { pid });
+}
