@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { Button } from "@/components/ui/button";
 import { Package, Link2, Plug, Info } from "lucide-react";
-import { listSsotResources } from "@/lib/api/resource";
+import { listSsotResources, checkSkillTargetType, disableSkillForTool, enableSkillForTool } from "@/lib/api/resource";
 import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
@@ -58,6 +58,50 @@ export function ResourceByKindView() {
     }
   };
 
+  const handleSkillToggle = async (skillName: string, toolId: string, enabled: boolean) => {
+    if (!enabled) {
+      // 灰 → 亮：直接启用
+      try {
+        await enableSkillForTool(skillName, toolId);
+        toast.success(`"${formatSkillName(skillName)}" 已在 ${TOOLS.find(t => t.id === toolId)?.label} 中启用`);
+        const fresh = await listSsotResources();
+        setResources(fresh);
+      } catch (e) {
+        toast.error(`启用失败: ${e}`);
+      }
+    } else {
+      // 亮 → 灰：弹窗确认
+      try {
+        const targetType = await checkSkillTargetType(toolId, skillName);
+        const toolLabel = TOOLS.find(t => t.id === toolId)?.label || toolId;
+        const displayName = formatSkillName(skillName);
+
+        if (targetType === "native") {
+          const confirmed = window.confirm(
+            `⚠️ 删除原生 skill\n\n` +
+            `此操作将删除你手动安装的 "${displayName}" 目录，文件将移至回收站。\n\n` +
+            `${toolLabel} 将不再加载此 skill。你可以从回收站恢复。\n\n` +
+            `确定继续吗？`
+          );
+          if (!confirmed) return;
+        } else {
+          const confirmed = window.confirm(
+            `移除链接\n\n` +
+            `确定要移除 "${displayName}" 在 ${toolLabel} 中的链接吗？`
+          );
+          if (!confirmed) return;
+        }
+
+        await disableSkillForTool(toolId, skillName);
+        toast.success(`"${displayName}" 已在 ${toolLabel} 中移除`);
+        const fresh = await listSsotResources();
+        setResources(fresh);
+      } catch (e) {
+        toast.error(`移除失败: ${e}`);
+      }
+    }
+  };
+
   return (
     <div className="rounded-lg border bg-card p-4">
       <h3 className="mb-3 text-sm font-semibold">MAM 仓库</h3>
@@ -97,6 +141,7 @@ export function ResourceByKindView() {
                         size="sm"
                         className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
                         title={`${tool.label}: ${enabled ? "已启用" : "未启用"}`}
+                        onClick={() => handleSkillToggle(skill.name, tool.id, enabled)}
                       >
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
