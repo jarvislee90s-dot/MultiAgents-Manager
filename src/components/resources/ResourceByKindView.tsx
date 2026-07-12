@@ -14,6 +14,10 @@ const TOOLS = [
   { id: "openclaw", label: "OpenClaw" },
 ];
 
+function formatSkillName(name: string): string {
+  return name.includes("/") ? name.replace("/", ": ") : name;
+}
+
 export function ResourceByKindView() {
   const [resources, setResources] = useState<SsotResources | null>(null);
   const [search, setSearch] = useState("");
@@ -82,7 +86,7 @@ export function ResourceByKindView() {
           <div className="space-y-1">
             {filteredSkills.map((skill) => (
               <div key={skill.name} className="flex items-center justify-between rounded border p-2 text-sm">
-                <span className="font-medium">{skill.name}</span>
+                <span className="font-medium">{formatSkillName(skill.name)}</span>
                 <div className="flex gap-1">
                   {TOOLS.map((tool) => {
                     const enabled = skill.enabledTools.includes(tool.id);

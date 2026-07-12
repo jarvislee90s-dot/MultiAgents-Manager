@@ -14,6 +14,10 @@ const TOOLS = [
   { id: "openclaw", label: "OpenClaw" },
 ];
 
+function formatSkillName(name: string): string {
+  return name.includes("/") ? name.replace("/", ": ") : name;
+}
+
 export function ResourceByToolView() {
   const [toolResources, setToolResources] = useState<Record<string, ToolResources>>({});
   const [scanning, setScanning] = useState<Record<string, boolean>>({});
@@ -152,7 +156,7 @@ export function ResourceByToolView() {
               <div className="space-y-0.5">
                 {duplicates[tool.id]!.map((name) => (
                   <div key={name} className="flex items-center justify-between text-xs">
-                    <span className="text-muted-foreground">{name}</span>
+                    <span className="text-muted-foreground">{formatSkillName(name)}</span>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -200,12 +204,12 @@ function ToolResourceList({
         <div className="space-y-1">
           {globalSkills.map((s) => (
             <div key={s.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
-              <span>{s.name} <span className="text-green-600">✓ 全局仓库</span></span>
+              <span>{formatSkillName(s.name)} <span className="text-green-600">✓ 全局仓库</span></span>
             </div>
           ))}
           {nativeSkills.map((s) => (
             <div key={s.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
-              <span>{s.name} <span className="text-orange-500">⚠ 原生</span></span>
+              <span>{formatSkillName(s.name)} <span className="text-orange-500">⚠ 原生</span></span>
               <Button
                 size="sm"
                 variant="ghost"
