@@ -59,6 +59,7 @@ export function ResourceByToolView() {
       if (result.imported > 0) {
         toast.success(`"${item.name}" 导入成功`);
         await loadToolResources(toolId);
+        await loadDuplicates(toolId);
       } else {
         toast.info(`"${item.name}" 已存在`);
       }

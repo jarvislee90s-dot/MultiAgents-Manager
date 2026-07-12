@@ -49,7 +49,7 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
     let mut results = Vec::new();
     let skill_dir = match tool_id.as_str() {
         "claude" => Some(dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
-        "codex" => Some(dirs::home_dir().unwrap_or_default().join(".codex").join("skills")),
+        "codex" => Some(dirs::home_dir().unwrap_or_default().join(".agents").join("skills")),
         "opencode" => Some(dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
         "openclaw" => Some(dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
         _ => None,
