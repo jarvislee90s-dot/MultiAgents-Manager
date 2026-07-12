@@ -8,6 +8,7 @@ import { ResourceByKindView } from "./ResourceByKindView";
 import { ResourceByToolView } from "./ResourceByToolView";
 import { ImportDialog } from "./ImportDialog";
 import { PresetList } from "../presets/PresetList";
+import { SsotRepoOverview } from "./SsotRepoOverview";
 
 export function ExtensionList() {
   const [view, setView] = useState<"byKind" | "byTool">("byKind");
@@ -49,6 +50,7 @@ export function ExtensionList() {
 
   return (
     <div className="space-y-4">
+      <SsotRepoOverview />
       {/* Toolbar */}
       <div className="flex items-center justify-between">
         <div className="flex gap-1">
