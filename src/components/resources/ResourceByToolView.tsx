@@ -192,9 +192,7 @@ function ToolResourceList({
   const globalSkills = resources.global.filter((e) => e.kind === "skill");
   const nativeSkills = resources.native.filter((n) => n.kind === "skill");
   const globalMcps = resources.global.filter((e) => e.kind === "mcp");
-  const nativeMcps = resources.native.filter((n) => n.kind === "mcp");
   const globalPlugins = resources.global.filter((e) => e.kind === "plugin");
-  const nativePlugins = resources.native.filter((n) => n.kind === "plugin");
 
   return (
     <div className="space-y-2">
@@ -225,27 +223,13 @@ function ToolResourceList({
       </div>
 
       {/* MCP */}
-      {(globalMcps.length > 0 || nativeMcps.length > 0) && (
+      {(globalMcps.length > 0) && (
         <div>
-          <h4 className="text-xs font-medium text-muted-foreground mb-1">MCP ({globalMcps.length + nativeMcps.length})</h4>
+          <h4 className="text-xs font-medium text-muted-foreground mb-1">MCP ({globalMcps.length})</h4>
           <div className="space-y-1">
             {globalMcps.map((m) => (
               <div key={m.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
                 <span>{m.name} <span className="text-green-600">✓</span></span>
-              </div>
-            ))}
-            {nativeMcps.map((m) => (
-              <div key={m.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
-                <span>{m.name} <span className="text-orange-500">⚠ 原生</span></span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-5 px-1 text-[10px]"
-                  onClick={() => onImport(toolId, m)}
-                >
-                  <Import className="h-3 w-3" />
-                  导入
-                </Button>
               </div>
             ))}
           </div>
@@ -253,27 +237,13 @@ function ToolResourceList({
       )}
 
       {/* Plugins */}
-      {(globalPlugins.length > 0 || nativePlugins.length > 0) && (
+      {(globalPlugins.length > 0) && (
         <div>
-          <h4 className="text-xs font-medium text-muted-foreground mb-1">Plugins ({globalPlugins.length + nativePlugins.length})</h4>
+          <h4 className="text-xs font-medium text-muted-foreground mb-1">Plugins ({globalPlugins.length})</h4>
           <div className="space-y-1">
             {globalPlugins.map((p) => (
               <div key={p.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
                 <span>{p.name} <span className="text-green-600">✓</span></span>
-              </div>
-            ))}
-            {nativePlugins.map((p) => (
-              <div key={p.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
-                <span>{p.name} <span className="text-orange-500">⚠ 原生</span></span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-5 px-1 text-[10px]"
-                  onClick={() => onImport(toolId, p)}
-                >
-                  <Import className="h-3 w-3" />
-                  导入
-                </Button>
               </div>
             ))}
           </div>
