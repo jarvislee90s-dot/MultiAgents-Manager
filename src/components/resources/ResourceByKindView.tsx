@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Package, Link2, Plug, Info } from "lucide-react";
-import { listSsotResources, checkSkillTargetType, disableSkillForTool, enableSkillForTool } from "@/lib/api/resource";
+import { listSsotResources, checkSkillTargetType, disableSkillForTool, enableSkillForTool, importMcpToSsot } from "@/lib/api/resource";
 import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
@@ -56,6 +56,14 @@ export function ResourceByKindView() {
 
   const handleToggleMcp = async (name: string, toolId: string, enabled: boolean) => {
     try {
+      if (enabled) {
+        // 启用前尝试自动导入到 SSOT（如果还未导入）
+        try {
+          await importMcpToSsot(name);
+        } catch (_) {
+          // 可能已导入或找不到配置，继续尝试启用
+        }
+      }
       await invoke("toggle_mcp_for_tool", { mcpName: name, toolId, enabled });
       toast.success(`${name} 已${enabled ? "启用" : "禁用"}`);
       const fresh = await listSsotResources();

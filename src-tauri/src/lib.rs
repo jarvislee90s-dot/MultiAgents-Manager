@@ -71,6 +71,7 @@ pub fn run() {
         commands::resource::check_skill_target_type,
         commands::resource::disable_skill_for_tool,
         commands::resource::enable_skill_for_tool_cmd,
+        commands::resource::import_mcp_to_ssot,
         commands::preset::create_preset,
         commands::preset::delete_preset,
         commands::preset::list_presets,

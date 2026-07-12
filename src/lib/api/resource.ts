@@ -11,3 +11,4 @@ export async function cleanupDuplicateSkills(toolId: string, names: string[]) { 
 export async function checkSkillTargetType(toolId: string, skillName: string) { return await invoke<string>("check_skill_target_type", { toolId, skillName }); }
 export async function disableSkillForTool(toolId: string, skillName: string) { return await invoke<string>("disable_skill_for_tool", { toolId, skillName }); }
 export async function enableSkillForTool(skillName: string, toolId: string) { return await invoke("enable_skill_for_tool_cmd", { skillName, toolId }); }
+export async function importMcpToSsot(mcpName: string) { return await invoke("import_mcp_to_ssot", { mcpName }); }

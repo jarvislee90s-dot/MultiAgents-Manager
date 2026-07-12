@@ -469,3 +469,55 @@ pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<Str
 pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<(), String> {
     crate::services::enable_skill_for_tool(&skill_name, &tool_id)
 }
+
+/// 从任意工具配置文件中提取 MCP 配置并保存到 SSOT 仓库
+/// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.mam/mcp/<name>.json
+#[tauri::command]
+pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
+    use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter};
+
+    let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
+        (Box::new(ClaudeAdapter), "claude"),
+        (Box::new(CodexAdapter), "codex"),
+        (Box::new(OpenCodeAdapter), "opencode"),
+        (Box::new(OpenClawAdapter), "openclaw"),
+    ];
+
+    for (adapter, _tool_id) in &adapters {
+        let config_path = match adapter.mcp_config_path() {
+            Some(p) => p,
+            None => continue,
+        };
+        let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let servers: serde_json::Value = match adapter.mcp_format() {
+            crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
+                serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+            }
+            crate::adapter::McpFormat::Toml => {
+                let toml_val: Result<toml::Value, _> = content.parse();
+                toml_val.map(|v| {
+                    let json_str = serde_json::to_string(&v).unwrap_or_default();
+                    serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
+                }).unwrap_or(serde_json::json!({}))
+            }
+        };
+        let mcp_obj = servers.get("mcpServers")
+            .or_else(|| servers.get("mcp_servers"))
+            .or_else(|| servers.get("mcp"))
+            .and_then(|v| v.get(&mcp_name));
+
+        if let Some(config) = mcp_obj {
+            let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+            let _ = std::fs::create_dir_all(&repo);
+            let dest = repo.join(&mcp_name);
+            let _ = std::fs::create_dir_all(&dest);
+            let config_file = dest.join("mcp.json");
+            let pretty = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+            std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
+            log::info!("MCP {} 配置已导入到 SSOT: {}", mcp_name, config_file.display());
+            return Ok(());
+        }
+    }
+
+    Err(format!("未在任何工具配置中找到 MCP: {}", mcp_name))
+}
