@@ -312,3 +312,75 @@ pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(
         Ok(())
     }
 }
+
+/// 检查 skill 在工具目录中的类型：symlink | native | missing
+#[tauri::command]
+pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
+    let tool_skill_dir = match tool_id.as_str() {
+        "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("skills"),
+        "codex" => dirs::home_dir().unwrap_or_default().join(".agents").join("skills"),
+        "opencode" => dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills"),
+        "openclaw" => dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills"),
+        _ => return "missing".to_string(),
+    };
+    let target = tool_skill_dir.join(&skill_name);
+    if !target.exists() {
+        "missing".to_string()
+    } else if target.is_symlink() {
+        "symlink".to_string()
+    } else {
+        "native".to_string()
+    }
+}
+
+/// 取消 skill 的工具配置：移至回收站 + 更新 DB
+#[tauri::command]
+pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<String, String> {
+    let tool_skill_dir = match tool_id.as_str() {
+        "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("skills"),
+        "codex" => dirs::home_dir().unwrap_or_default().join(".agents").join("skills"),
+        "opencode" => dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills"),
+        "openclaw" => dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills"),
+        _ => return Err(format!("未知工具: {}", tool_id)),
+    };
+    let target = tool_skill_dir.join(&skill_name);
+    if !target.exists() {
+        return Err("目标路径不存在".to_string());
+    }
+
+    let target_type = if target.is_symlink() { "symlink" } else { "native" };
+
+    // 尝试用 trash 命令移至回收站
+    let result = std::process::Command::new("trash")
+        .arg(&target)
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
+            let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
+            let ext_id = format!("skill-{}", skill_name);
+            let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
+            Ok(target_type.to_string())
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("移入回收站失败: {}", stderr))
+        }
+        Err(e) => {
+            log::warn!("trash 命令不可用，回退到直接删除: {}", e);
+            crate::linker::remove_link(&target)?;
+            let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
+            let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
+            let ext_id = format!("skill-{}", skill_name);
+            let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
+            Ok(format!("{}-fallback-rm", target_type))
+        }
+    }
+}
+
+/// 为工具启用 skill（创建符号链接 + DB 记录）
+#[tauri::command]
+pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<(), String> {
+    crate::services::enable_skill_for_tool(&skill_name, &tool_id)
+}
