@@ -128,7 +128,7 @@ pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
         }
     }
     // 验证目标名称不含路径穿越字符
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
+    if name.contains("..") || name.contains('\\') {
         return Err("Skill 名称包含非法字符".to_string());
     }
 
