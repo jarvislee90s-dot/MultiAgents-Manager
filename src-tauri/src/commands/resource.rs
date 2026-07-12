@@ -216,6 +216,64 @@ pub fn list_ssot_resources() -> SsotResources {
         }).collect()
     };
 
+    // 构建工具 → MCP 配置路径映射，用于扫描各工具已有的 MCP 服务器
+    let tool_mcp_configs: Vec<(&str, std::path::PathBuf, crate::adapter::McpFormat)> = {
+        use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
+        let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
+            (Box::new(ClaudeAdapter), "claude"),
+            (Box::new(CodexAdapter), "codex"),
+            (Box::new(OpenCodeAdapter), "opencode"),
+            (Box::new(OpenClawAdapter), "openclaw"),
+        ];
+        adapters.into_iter()
+            .filter_map(|(a, id)| {
+                let path = a.mcp_config_path()?;
+                Some((id, path, a.mcp_format()))
+            })
+            .collect()
+    };
+
+    // MCP 扫描：从各工具配置文件中提取 MCP 服务器列表 + DB assignment
+    let scan_mcp = || -> Vec<SsotResource> {
+        let mut all_mcps: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for (tool_id, config_path, format) in &tool_mcp_configs {
+            let content = std::fs::read_to_string(config_path).unwrap_or_default();
+            let servers: serde_json::Value = match format {
+                crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
+                    serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+                }
+                crate::adapter::McpFormat::Toml => {
+                    let toml_val: Result<toml::Value, _> = content.parse();
+                    toml_val.map(|v| {
+                        let json_str = serde_json::to_string(&v).unwrap_or_default();
+                        serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
+                    }).unwrap_or(serde_json::json!({}))
+                }
+            };
+            let mcp_obj = servers.get("mcpServers")
+                .or_else(|| servers.get("mcp_servers"))
+                .or_else(|| servers.get("mcp"))
+                .and_then(|v| v.as_object());
+            if let Some(obj) = mcp_obj {
+                for name in obj.keys() {
+                    all_mcps.entry(name.clone()).or_default().push(tool_id.to_string());
+                }
+            }
+        }
+        // 合并 DB assignment
+        for assignment in &assignments {
+            if assignment.extension_id.starts_with("mcp-") && assignment.enabled {
+                let name = assignment.extension_id.strip_prefix("mcp-").unwrap_or("");
+                all_mcps.entry(name.to_string()).or_default().push(assignment.agent_tool_id.clone());
+            }
+        }
+        let mut resources: Vec<SsotResource> = all_mcps.into_iter().map(|(name, tools)| {
+            SsotResource { name, kind: "mcp".to_string(), enabled_tools: tools }
+        }).collect();
+        resources.sort_by(|a, b| a.name.cmp(&b.name));
+        resources
+    };
+
     let scan_simple = |dir: &std::path::Path, kind: &str| -> Vec<SsotResource> {
         let mut resources = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -236,7 +294,7 @@ pub fn list_ssot_resources() -> SsotResources {
 
     SsotResources {
         skills: scan_skills(&mam.join("skills")),
-        mcp: scan_simple(&mam.join("mcp"), "mcp"),
+        mcp: scan_mcp(),
         plugins: scan_simple(&mam.join("plugins"), "plugin"),
     }
 }
