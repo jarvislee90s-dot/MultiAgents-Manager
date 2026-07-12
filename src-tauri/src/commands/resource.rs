@@ -131,8 +131,11 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     let global = crate::database::list_extensions();
     let native = scan_native_resources(tool_id.clone());
     let assignments = crate::database::list_assignments(&tool_id);
-    // 返回所有全局资源，带 assignment 状态标记，前端决定是否显示已禁用的
-    let global_with_status: Vec<_> = global.iter()
+
+    // 补充 SSOT 仓库中已有但未在 DB extensions 中的 skill
+    let mam_skills = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
+    let ssot_skill_names = scan_skill_dirs(&mam_skills);
+    let mut global_with_status: Vec<_> = global.iter()
         .map(|e| {
             let assignment = assignments.iter().find(|a| a.extension_id == e.id);
             serde_json::json!({
@@ -152,6 +155,30 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
             })
         })
         .collect();
+
+    // 补充 SSOT 中的 skill（不在 DB extensions 里的）
+    for name in &ssot_skill_names {
+        let ext_id = format!("skill-{}", name);
+        if !global_with_status.iter().any(|g| g["id"].as_str() == Some(&ext_id)) {
+            let assignment = assignments.iter().find(|a| a.extension_id == ext_id);
+            global_with_status.push(serde_json::json!({
+                "id": ext_id,
+                "kind": "skill",
+                "name": name,
+                "description": null,
+                "sourcePath": mam_skills.join(name).to_string_lossy(),
+                "sourceTool": null,
+                "suite": null,
+                "tags": null,
+                "assignments": assignment.map(|a| vec![serde_json::json!({
+                    "agentToolId": a.agent_tool_id,
+                    "enabled": a.enabled,
+                    "linkStatus": a.link_status,
+                })]).unwrap_or_default(),
+            }));
+        }
+    }
+
     serde_json::json!({ "global": global_with_status, "native": native })
 }
 
