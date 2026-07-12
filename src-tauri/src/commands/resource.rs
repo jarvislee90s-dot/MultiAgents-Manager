@@ -182,14 +182,36 @@ pub fn list_ssot_resources() -> SsotResources {
     let mam = dirs::home_dir().unwrap_or_default().join(".mam");
     let assignments = crate::database::list_all_assignments();
 
+    // 构建工具 → skill 目录映射，用于检测原生生效的 skill
+    let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = {
+        use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
+        let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
+            (Box::new(ClaudeAdapter), "claude"),
+            (Box::new(CodexAdapter), "codex"),
+            (Box::new(OpenCodeAdapter), "opencode"),
+            (Box::new(OpenClawAdapter), "openclaw"),
+        ];
+        adapters.into_iter()
+            .filter_map(|(a, id)| a.skill_dirs().into_iter().next().map(|d| (id, d)))
+            .collect()
+    };
+
     let scan_skills = |dir: &std::path::Path| -> Vec<SsotResource> {
         let names = scan_skill_dirs(dir);
         names.into_iter().map(|name| {
             let ext_id = format!("skill-{}", name);
-            let enabled_tools: Vec<String> = assignments.iter()
+            // 1) DB 中有 enabled=true 的记录
+            let mut enabled_tools: Vec<String> = assignments.iter()
                 .filter(|a| a.extension_id == ext_id && a.enabled)
                 .map(|a| a.agent_tool_id.clone())
                 .collect();
+            // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）
+            for (tool_id, tool_dir) in &tool_skill_dirs {
+                if enabled_tools.iter().any(|t| t == tool_id) { continue; }
+                if tool_dir.join(&name).exists() {
+                    enabled_tools.push(tool_id.to_string());
+                }
+            }
             SsotResource { name, kind: "skill".to_string(), enabled_tools }
         }).collect()
     };
