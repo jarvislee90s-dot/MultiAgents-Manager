@@ -67,3 +67,15 @@ export interface ImportStats {
   skippedDup: number;
   sourceCounts: [string, number][];
 }
+
+export interface SsotResource {
+  name: string;
+  kind: string;
+  enabledTools: string[];
+}
+
+export interface SsotResources {
+  skills: SsotResource[];
+  mcp: SsotResource[];
+  plugins: SsotResource[];
+}
