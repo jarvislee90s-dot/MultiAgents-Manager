@@ -93,9 +93,9 @@ export function ResourceByKindView() {
                     return (
                       <Button
                         key={tool.id}
-                        variant={enabled ? "default" : "outline"}
+                        variant={enabled ? "default" : "ghost"}
                         size="sm"
-                        className="h-6 px-2 text-[10px]"
+                        className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
                         title={`${tool.label}: ${enabled ? "已启用" : "未启用"}`}
                       >
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
@@ -132,9 +132,9 @@ export function ResourceByKindView() {
                     return (
                       <Button
                         key={tool.id}
-                        variant={enabled ? "default" : "outline"}
+                        variant={enabled ? "default" : "ghost"}
                         size="sm"
-                        className="h-6 px-2 text-[10px]"
+                        className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
                         onClick={() => handleToggleMcp(mcp.name, tool.id, !enabled)}
                       >
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
@@ -171,9 +171,9 @@ export function ResourceByKindView() {
                     return (
                       <Button
                         key={tool.id}
-                        variant={enabled ? "default" : "outline"}
+                        variant={enabled ? "default" : "ghost"}
                         size="sm"
-                        className="h-6 px-2 text-[10px]"
+                        className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
                         onClick={() => handleTogglePlugin(plugin.name, tool.id, !enabled, "file")}
                       >
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
