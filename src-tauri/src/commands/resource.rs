@@ -1,5 +1,32 @@
 // 资源管理命令
 
+/// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
+/// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
+fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
+    let mut results = Vec::new();
+    fn recurse(dir: &std::path::Path, base: &std::path::Path, results: &mut Vec<String>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') { continue; }
+                    if path.join("SKILL.md").exists() {
+                        if let Ok(rel) = path.strip_prefix(base) {
+                            results.push(rel.to_string_lossy().to_string());
+                        }
+                    } else {
+                        recurse(&path, base, results);
+                    }
+                }
+            }
+        }
+    }
+    recurse(base, base, &mut results);
+    results.sort();
+    results
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionWithAssignments {
@@ -56,23 +83,19 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
     };
     if let Some(dir) = skill_dir {
         if dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                let existing = crate::database::list_extensions();
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let ext_id = format!("skill-{}", name);
-                        let exists = existing.iter().any(|e| e.id == ext_id);
-                        if !exists {
-                            results.push(crate::database::NativeExtensionRecord {
-                                id: ext_id, kind: "skill".to_string(), name: name.clone(),
-                                description: None, source_path: path.to_string_lossy().to_string(),
-                                source_tool: tool_id.clone(), detected_at: chrono::Utc::now().to_rfc3339(),
-                                imported: false,
-                            });
-                        }
-                    }
+            let existing = crate::database::list_extensions();
+            let skill_names = scan_skill_dirs(&dir);
+            for name in skill_names {
+                let path = dir.join(&name);
+                let ext_id = format!("skill-{}", name);
+                let exists = existing.iter().any(|e| e.id == ext_id);
+                if !exists {
+                    results.push(crate::database::NativeExtensionRecord {
+                        id: ext_id, kind: "skill".to_string(), name: name.clone(),
+                        description: None, source_path: path.to_string_lossy().to_string(),
+                        source_tool: tool_id.clone(), detected_at: chrono::Utc::now().to_rfc3339(),
+                        imported: false,
+                    });
                 }
             }
         }
@@ -159,7 +182,19 @@ pub fn list_ssot_resources() -> SsotResources {
     let mam = dirs::home_dir().unwrap_or_default().join(".mam");
     let assignments = crate::database::list_all_assignments();
 
-    let scan_dir = |dir: &std::path::Path, kind: &str| -> Vec<SsotResource> {
+    let scan_skills = |dir: &std::path::Path| -> Vec<SsotResource> {
+        let names = scan_skill_dirs(dir);
+        names.into_iter().map(|name| {
+            let ext_id = format!("skill-{}", name);
+            let enabled_tools: Vec<String> = assignments.iter()
+                .filter(|a| a.extension_id == ext_id && a.enabled)
+                .map(|a| a.agent_tool_id.clone())
+                .collect();
+            SsotResource { name, kind: "skill".to_string(), enabled_tools }
+        }).collect()
+    };
+
+    let scan_simple = |dir: &std::path::Path, kind: &str| -> Vec<SsotResource> {
         let mut resources = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -170,11 +205,7 @@ pub fn list_ssot_resources() -> SsotResources {
                     .filter(|a| a.extension_id == ext_id && a.enabled)
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
-                resources.push(SsotResource {
-                    name,
-                    kind: kind.to_string(),
-                    enabled_tools,
-                });
+                resources.push(SsotResource { name, kind: kind.to_string(), enabled_tools });
             }
         }
         resources.sort_by(|a, b| a.name.cmp(&b.name));
@@ -182,9 +213,9 @@ pub fn list_ssot_resources() -> SsotResources {
     };
 
     SsotResources {
-        skills: scan_dir(&mam.join("skills"), "skill"),
-        mcp: scan_dir(&mam.join("mcp"), "mcp"),
-        plugins: scan_dir(&mam.join("plugins"), "plugin"),
+        skills: scan_skills(&mam.join("skills")),
+        mcp: scan_simple(&mam.join("mcp"), "mcp"),
+        plugins: scan_simple(&mam.join("plugins"), "plugin"),
     }
 }
 
@@ -210,14 +241,11 @@ pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
     }
 
     let mut duplicates = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&repo) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') { continue; }
-            let tool_path = tool_skill_dir.join(&name);
-            if tool_path.exists() && !tool_path.is_symlink() {
-                duplicates.push(name);
-            }
+    let ssot_skills = scan_skill_dirs(&repo);
+    for name in ssot_skills {
+        let tool_path = tool_skill_dir.join(&name);
+        if tool_path.exists() && !tool_path.is_symlink() {
+            duplicates.push(name);
         }
     }
     duplicates.sort();
