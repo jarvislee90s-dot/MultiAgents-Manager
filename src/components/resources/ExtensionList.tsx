@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Scan, LayoutGrid, List } from "lucide-react";
 import type { ExtensionWithAssignments } from "@/types/extension";
@@ -8,7 +7,6 @@ import { ResourceByKindView } from "./ResourceByKindView";
 import { ResourceByToolView } from "./ResourceByToolView";
 import { ImportDialog } from "./ImportDialog";
 import { PresetList } from "../presets/PresetList";
-import { SsotRepoOverview } from "./SsotRepoOverview";
 
 export function ExtensionList() {
   const [view, setView] = useState<"byKind" | "byTool">("byKind");
@@ -28,29 +26,8 @@ export function ExtensionList() {
     load();
   }, []);
 
-  const handleToggleMcp = async (mcpName: string, toolId: string, enabled: boolean) => {
-    try {
-      await invoke("toggle_mcp_for_tool", { mcpName, toolId, enabled });
-      toast.success(`${mcpName} 已${enabled ? "启用" : "禁用"}`);
-      load();
-    } catch (e) {
-      toast.error(`操作失败: ${e}`);
-    }
-  };
-
-  const handleTogglePlugin = async (pluginName: string, toolId: string, enabled: boolean, kind: string) => {
-    try {
-      await invoke("toggle_plugin_for_tool", { pluginName, toolId, enabled, kind });
-      toast.success(`${pluginName} 已${enabled ? "启用" : "禁用"}`);
-      load();
-    } catch (e) {
-      toast.error(`操作失败: ${e}`);
-    }
-  };
-
   return (
     <div className="space-y-4">
-      <SsotRepoOverview />
       {/* Toolbar */}
       <div className="flex items-center justify-between">
         <div className="flex gap-1">
@@ -86,11 +63,7 @@ export function ExtensionList() {
 
       {/* View content */}
       {view === "byKind" ? (
-        <ResourceByKindView
-          extensions={extensions}
-          onToggleMcp={handleToggleMcp}
-          onTogglePlugin={handleTogglePlugin}
-        />
+        <ResourceByKindView />
       ) : (
         <ResourceByToolView />
       )}

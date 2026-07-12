@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { Button } from "@/components/ui/button";
 import { Package, Link2, Plug, Info } from "lucide-react";
-import type { ExtensionWithAssignments } from "@/types/extension";
+import { listSsotResources } from "@/lib/api/resource";
+import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -11,35 +14,57 @@ const TOOLS = [
   { id: "openclaw", label: "OpenClaw" },
 ];
 
-interface Props {
-  extensions: ExtensionWithAssignments[];
-  onToggleMcp: (name: string, toolId: string, enabled: boolean) => Promise<void>;
-  onTogglePlugin: (name: string, toolId: string, enabled: boolean, kind: string) => Promise<void>;
-}
-
-export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: Props) {
+export function ResourceByKindView() {
+  const [resources, setResources] = useState<SsotResources | null>(null);
   const [search, setSearch] = useState("");
 
-  const skillFilter = (e: ExtensionWithAssignments) => {
+  useEffect(() => {
+    listSsotResources().then(setResources).catch(console.error);
+  }, []);
+
+  if (!resources) {
+    return <div className="text-muted-foreground py-4 text-xs">加载中…</div>;
+  }
+
+  const filteredSkills = resources.skills.filter((s) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
-    return [e.name, e.description ?? "", e.sourceTool ?? "", e.suite ?? ""]
-      .some((s) => s.toLowerCase().includes(q));
+    return [s.name, ...s.enabledTools].some((x) => x.toLowerCase().includes(q));
+  });
+
+  const handleToggleMcp = async (name: string, toolId: string, enabled: boolean) => {
+    try {
+      await invoke("toggle_mcp_for_tool", { mcpName: name, toolId, enabled });
+      toast.success(`${name} 已${enabled ? "启用" : "禁用"}`);
+      const fresh = await listSsotResources();
+      setResources(fresh);
+    } catch (e) {
+      toast.error(`操作失败: ${e}`);
+    }
   };
 
-  const skills = extensions.filter((e) => e.kind === "skill" && skillFilter(e));
-  const mcps = extensions.filter((e) => e.kind === "mcp");
-  const plugins = extensions.filter((e) => e.kind === "plugin");
+  const handleTogglePlugin = async (name: string, toolId: string, enabled: boolean, kind: string) => {
+    try {
+      await invoke("toggle_plugin_for_tool", { pluginName: name, toolId, enabled, kind });
+      toast.success(`${name} 已${enabled ? "启用" : "禁用"}`);
+      const fresh = await listSsotResources();
+      setResources(fresh);
+    } catch (e) {
+      toast.error(`操作失败: ${e}`);
+    }
+  };
 
   return (
-    <div className="space-y-4">
+    <div className="rounded-lg border bg-card p-4">
+      <h3 className="mb-3 text-sm font-semibold">MAM 仓库</h3>
+
       {/* Skills */}
-      <div>
+      <div className="mb-4">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <h4 className="flex items-center gap-2 text-sm font-semibold">
             <Package className="h-4 w-4" />
-            Skill ({skills.length})
-          </h3>
+            Skill ({filteredSkills.length})
+          </h4>
           <input
             type="text"
             placeholder="搜索 skill..."
@@ -48,27 +73,19 @@ export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: 
             className="h-7 w-40 rounded border px-2 text-xs"
           />
         </div>
-        {skills.length === 0 ? (
+        {filteredSkills.length === 0 ? (
           <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
             <Info className="h-3.5 w-3.5" />
             暂无 skill。点击"扫描原生资源"导入。
           </div>
         ) : (
           <div className="space-y-1">
-            {skills.map((skill) => (
-              <div key={skill.id} className="flex items-center justify-between rounded border p-2 text-sm">
-                <div>
-                  <span className="font-medium">{skill.name}</span>
-                  {skill.tags && (
-                    <span className="text-muted-foreground ml-2 text-[10px]">
-                      支持: {skill.tags}
-                    </span>
-                  )}
-                </div>
+            {filteredSkills.map((skill) => (
+              <div key={skill.name} className="flex items-center justify-between rounded border p-2 text-sm">
+                <span className="font-medium">{skill.name}</span>
                 <div className="flex gap-1">
                   {TOOLS.map((tool) => {
-                    const assignment = skill.assignments.find((a) => a.agentToolId === tool.id);
-                    const enabled = assignment?.enabled ?? false;
+                    const enabled = skill.enabledTools.includes(tool.id);
                     return (
                       <Button
                         key={tool.id}
@@ -90,32 +107,31 @@ export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: 
       </div>
 
       {/* MCP */}
-      <div>
-        <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+      <div className="mb-4">
+        <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
           <Link2 className="h-4 w-4" />
-          MCP 服务器 ({mcps.length})
-        </h3>
-        {mcps.length === 0 ? (
+          MCP 服务器 ({resources.mcp.length})
+        </h4>
+        {resources.mcp.length === 0 ? (
           <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
             <Info className="h-3.5 w-3.5" />
             暂无 MCP 服务器
           </div>
         ) : (
           <div className="space-y-1">
-            {mcps.map((mcp) => (
-              <div key={mcp.id} className="flex items-center justify-between rounded border p-2 text-sm">
+            {resources.mcp.map((mcp) => (
+              <div key={mcp.name} className="flex items-center justify-between rounded border p-2 text-sm">
                 <span className="font-medium">{mcp.name}</span>
                 <div className="flex gap-1">
                   {TOOLS.map((tool) => {
-                    const assignment = mcp.assignments.find((a) => a.agentToolId === tool.id);
-                    const enabled = assignment?.enabled ?? false;
+                    const enabled = mcp.enabledTools.includes(tool.id);
                     return (
                       <Button
                         key={tool.id}
                         variant={enabled ? "default" : "outline"}
                         size="sm"
                         className="h-6 px-2 text-[10px]"
-                        onClick={() => onToggleMcp(mcp.name, tool.id, !enabled)}
+                        onClick={() => handleToggleMcp(mcp.name, tool.id, !enabled)}
                       >
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
@@ -131,32 +147,30 @@ export function ResourceByKindView({ extensions, onToggleMcp, onTogglePlugin }: 
 
       {/* Plugins */}
       <div>
-        <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+        <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
           <Plug className="h-4 w-4" />
-          插件 ({plugins.length})
-        </h3>
-        {plugins.length === 0 ? (
+          插件 ({resources.plugins.length})
+        </h4>
+        {resources.plugins.length === 0 ? (
           <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
             <Info className="h-3.5 w-3.5" />
             暂无插件
           </div>
         ) : (
           <div className="space-y-1">
-            {plugins.map((plugin) => (
-              <div key={plugin.id} className="flex items-center justify-between rounded border p-2 text-sm">
+            {resources.plugins.map((plugin) => (
+              <div key={plugin.name} className="flex items-center justify-between rounded border p-2 text-sm">
                 <span className="font-medium">{plugin.name}</span>
                 <div className="flex gap-1">
                   {TOOLS.map((tool) => {
-                    const assignment = plugin.assignments.find((a) => a.agentToolId === tool.id);
-                    const enabled = assignment?.enabled ?? false;
-                    const pluginSubtype = plugin.tags || "file";
+                    const enabled = plugin.enabledTools.includes(tool.id);
                     return (
                       <Button
                         key={tool.id}
                         variant={enabled ? "default" : "outline"}
                         size="sm"
                         className="h-6 px-2 text-[10px]"
-                        onClick={() => onTogglePlugin(plugin.name, tool.id, !enabled, pluginSubtype)}
+                        onClick={() => handleTogglePlugin(plugin.name, tool.id, !enabled, "file")}
                       >
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
