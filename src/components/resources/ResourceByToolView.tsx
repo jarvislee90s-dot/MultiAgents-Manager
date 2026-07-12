@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Scan, Import } from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
+import { detectDuplicateSkills, cleanupDuplicateSkills } from "@/lib/api/resource";
 import type { NativeExtension, ToolResources, ImportStats } from "@/types/extension";
 
 const TOOLS = [
@@ -66,6 +67,48 @@ export function ResourceByToolView() {
     }
   };
 
+  const [duplicates, setDuplicates] = useState<Record<string, string[]>>({});
+
+  const loadDuplicates = useCallback(async (toolId: string) => {
+    try {
+      const dups = await detectDuplicateSkills(toolId);
+      setDuplicates((prev) => ({ ...prev, [toolId]: dups }));
+    } catch (e) {
+      console.error(`Failed to detect duplicates for ${toolId}:`, e);
+    }
+  }, []);
+
+  // 挂载时检测所有工具的重复
+  useEffect(() => {
+    TOOLS.forEach((tool) => {
+      loadDuplicates(tool.id);
+    });
+  }, [loadDuplicates]);
+
+  const handleCleanupSingle = async (toolId: string, name: string) => {
+    try {
+      await cleanupDuplicateSkills(toolId, [name]);
+      toast.success(`"${name}" 已清理`);
+      await loadDuplicates(toolId);
+      await loadToolResources(toolId);
+    } catch (e) {
+      toast.error(`清理失败: ${e}`);
+    }
+  };
+
+  const handleCleanupAll = async (toolId: string) => {
+    const dups = duplicates[toolId] || [];
+    if (dups.length === 0) return;
+    try {
+      await cleanupDuplicateSkills(toolId, dups);
+      toast.success(`已清理 ${dups.length} 个重复 skill`);
+      await loadDuplicates(toolId);
+      await loadToolResources(toolId);
+    } catch (e) {
+      toast.error(`清理失败: ${e}`);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {TOOLS.map((tool) => (
@@ -88,6 +131,40 @@ export function ResourceByToolView() {
           </div>
 
           <ToolResourceList toolId={tool.id} resources={toolResources[tool.id]} onImport={handleImport} />
+
+          {/* 重复 skill 清理区 */}
+          {(duplicates[tool.id]?.length ?? 0) > 0 && (
+            <div className="mt-2 rounded border border-orange-500/30 bg-orange-500/5 p-2">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="text-xs font-medium text-orange-600">
+                  ⚠ {duplicates[tool.id]!.length} 个重复 skill（SSOT 和本地同时存在）
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-5 px-1 text-[10px] text-orange-600"
+                  onClick={() => handleCleanupAll(tool.id)}
+                >
+                  全部清理
+                </Button>
+              </div>
+              <div className="space-y-0.5">
+                {duplicates[tool.id]!.map((name) => (
+                  <div key={name} className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">{name}</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-5 px-1 text-[10px]"
+                      onClick={() => handleCleanupSingle(tool.id, name)}
+                    >
+                      清理
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ))}
     </div>
