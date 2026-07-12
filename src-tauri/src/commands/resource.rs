@@ -260,9 +260,25 @@ pub fn list_ssot_resources() -> SsotResources {
             .collect()
     };
 
-    // MCP 扫描：从各工具配置文件中提取 MCP 服务器列表 + DB assignment
+    // MCP 扫描：以 ~/.mam/mcp/ 为基础数据源，工具配置文件仅作补充
     let scan_mcp = || -> Vec<SsotResource> {
         let mut all_mcps: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+
+        // 1) 从 ~/.mam/mcp/ 目录扫描 SSOT 管理的 MCP（排除 DB assignment 中已禁用的）
+        let mcp_repo = mam.join("mcp");
+        if let Ok(entries) = std::fs::read_dir(&mcp_repo) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".json") {
+                    let name = fname.strip_suffix(".json").unwrap_or(&fname).to_string();
+                    if !name.starts_with('.') {
+                        all_mcps.entry(name).or_default();
+                    }
+                }
+            }
+        }
+
+        // 2) 从各工具配置文件中读取已有 MCP（补充 SSOT 中尚未记录的）
         for (tool_id, config_path, format) in &tool_mcp_configs {
             let content = std::fs::read_to_string(config_path).unwrap_or_default();
             let servers: serde_json::Value = match format {
@@ -283,17 +299,29 @@ pub fn list_ssot_resources() -> SsotResources {
                 .and_then(|v| v.as_object());
             if let Some(obj) = mcp_obj {
                 for name in obj.keys() {
-                    all_mcps.entry(name.clone()).or_default().push(tool_id.to_string());
+                    let entry = all_mcps.entry(name.clone()).or_default();
+                    if !entry.contains(&tool_id.to_string()) {
+                        entry.push((*tool_id).to_string());
+                    }
                 }
             }
         }
-        // 合并 DB assignment
+
+        // 3) 合并 DB assignment（覆盖工具配置文件扫描结果）
         for assignment in &assignments {
-            if assignment.extension_id.starts_with("mcp-") && assignment.enabled {
+            if assignment.extension_id.starts_with("mcp-") {
                 let name = assignment.extension_id.strip_prefix("mcp-").unwrap_or("");
-                all_mcps.entry(name.to_string()).or_default().push(assignment.agent_tool_id.clone());
+                let entry = all_mcps.entry(name.to_string()).or_default();
+                if assignment.enabled {
+                    if !entry.contains(&assignment.agent_tool_id) {
+                        entry.push(assignment.agent_tool_id.clone());
+                    }
+                } else {
+                    entry.retain(|t| t != &assignment.agent_tool_id);
+                }
             }
         }
+
         let mut resources: Vec<SsotResource> = all_mcps.into_iter().map(|(name, tools)| {
             SsotResource { name, kind: "mcp".to_string(), enabled_tools: tools }
         }).collect();
@@ -509,9 +537,7 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
         if let Some(config) = mcp_obj {
             let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
             let _ = std::fs::create_dir_all(&repo);
-            let dest = repo.join(&mcp_name);
-            let _ = std::fs::create_dir_all(&dest);
-            let config_file = dest.join("mcp.json");
+            let config_file = repo.join(format!("{}.json", mcp_name));
             let pretty = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
             std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
             log::info!("MCP {} 配置已导入到 SSOT: {}", mcp_name, config_file.display());
