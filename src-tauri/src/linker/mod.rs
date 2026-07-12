@@ -82,6 +82,35 @@ pub fn remove_link(target: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 将原始目录替换为指向 SSOT 仓库的符号链接
+///
+/// 安全校验：target 必须存在且不是符号链接（防止重复清理）
+/// 操作流程：删除 target 目录 → 创建符号链接 target → source
+pub fn replace_with_symlink(source: &Path, target: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return Err(format!("目标路径不存在: {}", target.display()));
+    }
+    if target.is_symlink() {
+        return Err(format!("目标已是符号链接，无需清理: {}", target.display()));
+    }
+    if !source.exists() {
+        return Err(format!("源路径不存在: {}", source.display()));
+    }
+
+    // 删除原始目录
+    if target.is_dir() {
+        std::fs::remove_dir_all(target)
+            .map_err(|e| format!("删除原始目录失败: {}", e))?;
+    } else {
+        std::fs::remove_file(target)
+            .map_err(|e| format!("删除原始文件失败: {}", e))?;
+    }
+
+    // 创建符号链接
+    create_link(source, target)
+}
+
 /// 安装 skill 到全局仓库（从源路径复制）
 /// 安全检查：验证源路径不在敏感目录内（防止路径穿越）
 pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
