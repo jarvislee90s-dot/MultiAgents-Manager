@@ -41,9 +41,16 @@ pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
     }
 }
 
+/// 返回 Plugin 的 SSOT 仓库目录 `~/.mam/plugins/`，不存在则创建
+fn ensure_plugin_repo_dir() -> std::path::PathBuf {
+    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
+    let _ = std::fs::create_dir_all(&repo);
+    repo
+}
+
 /// 为工具启用文件型插件（创建 symlink）
 pub fn enable_file_plugin(plugin_name: &str, tool_id: &str) -> Result<(), String> {
-    let repo = linker::ensure_repo_dir();
+    let repo = ensure_plugin_repo_dir();
     let source = repo.join(plugin_name);
     if !source.exists() {
         return Err(format!("Plugin 不在全局仓库中: {}", plugin_name));
