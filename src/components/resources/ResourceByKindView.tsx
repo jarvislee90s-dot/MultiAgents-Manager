@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Package, Link2, Plug, Info } from "lucide-react";
-import { listSsotResources, checkSkillTargetType, disableSkillForTool, enableSkillForTool, importMcpToSsot } from "@/lib/api/resource";
+import { listSsotResources, checkSkillTargetType, disableSkillForTool, enableSkillForTool, importMcpToSsot, saveMcpConfig } from "@/lib/api/resource";
 import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
@@ -39,6 +39,8 @@ export function ResourceByKindView() {
   const [search, setSearch] = useState("");
   const [pending, setPending] = useState<PendingDisable | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
+  const [newMcp, setNewMcp] = useState({ name: "", command: "", args: "", env: "" });
 
   useEffect(() => {
     listSsotResources().then(setResources).catch(console.error);
@@ -129,6 +131,31 @@ export function ResourceByKindView() {
     }
   };
 
+  const handleAddMcp = async () => {
+    if (!newMcp.name.trim() || !newMcp.command.trim()) {
+      toast.error("MCP 名称和命令不能为空");
+      return;
+    }
+    try {
+      const args = newMcp.args.trim() ? newMcp.args.split(/\s+/).filter(Boolean) : [];
+      let env: Record<string, string> = {};
+      if (newMcp.env.trim()) {
+        newMcp.env.split("\n").forEach((line) => {
+          const idx = line.indexOf("=");
+          if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+        });
+      }
+      await saveMcpConfig(newMcp.name.trim(), newMcp.command.trim(), args, env);
+      toast.success(`MCP "${newMcp.name}" 已添加到 SSOT 仓库`);
+      setMcpDialogOpen(false);
+      setNewMcp({ name: "", command: "", args: "", env: "" });
+      const fresh = await listSsotResources();
+      setResources(fresh);
+    } catch (e) {
+      toast.error(`添加 MCP 失败: ${e}`);
+    }
+  };
+
   return (
     <>
       <div className="rounded-lg border bg-card p-4">
@@ -188,6 +215,9 @@ export function ResourceByKindView() {
           <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
             <Link2 className="h-4 w-4" />
             MCP 服务器 ({resources.mcp.length})
+            <Button size="sm" variant="ghost" className="ml-auto h-6 px-2 text-[10px]" onClick={() => setMcpDialogOpen(true)}>
+              + 添加
+            </Button>
           </h4>
           {resources.mcp.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
@@ -305,6 +335,64 @@ export function ResourceByKindView() {
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 添加 MCP 弹窗 */}
+      <Dialog open={mcpDialogOpen} onOpenChange={setMcpDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>添加 MCP 服务器</DialogTitle>
+            <DialogDescription className="pt-2 text-xs">
+              配置将保存到 MAM SSOT 仓库，随后可以为各工具启用。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <label className="text-xs font-medium">名称</label>
+              <input
+                value={newMcp.name}
+                onChange={(e) => setNewMcp({ ...newMcp, name: e.currentTarget.value })}
+                placeholder="firecrawl"
+                className="h-8 w-full rounded border px-2 text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium">命令</label>
+              <input
+                value={newMcp.command}
+                onChange={(e) => setNewMcp({ ...newMcp, command: e.currentTarget.value })}
+                placeholder="npx"
+                className="h-8 w-full rounded border px-2 text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium">参数（空格分隔）</label>
+              <input
+                value={newMcp.args}
+                onChange={(e) => setNewMcp({ ...newMcp, args: e.currentTarget.value })}
+                placeholder="-y firecrawl-mcp"
+                className="h-8 w-full rounded border px-2 text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium">环境变量（每行一个 KEY=VALUE）</label>
+              <textarea
+                value={newMcp.env}
+                onChange={(e) => setNewMcp({ ...newMcp, env: e.currentTarget.value })}
+                placeholder="API_KEY=xxx"
+                className="h-16 w-full rounded border px-2 text-xs"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => { setMcpDialogOpen(false); setNewMcp({ name: "", command: "", args: "", env: "" }); }}>
+              取消
+            </Button>
+            <Button size="sm" onClick={handleAddMcp}>
+              添加到仓库
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>

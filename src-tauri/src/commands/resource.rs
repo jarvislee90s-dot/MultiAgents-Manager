@@ -547,3 +547,20 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
 
     Err(format!("未在任何工具配置中找到 MCP: {}", mcp_name))
 }
+
+/// 创建/更新 MCP 配置到 SSOT 仓库
+#[tauri::command]
+pub fn save_mcp_config(name: String, command: String, args: Vec<String>, env: std::collections::BTreeMap<String, String>) -> Result<(), String> {
+    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+    let _ = std::fs::create_dir_all(&repo);
+    let config_file = repo.join(format!("{}.json", name));
+    let config = serde_json::json!({
+        "command": command,
+        "args": args,
+        "env": env,
+    });
+    let pretty = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
+    log::info!("MCP 配置已保存: {}", config_file.display());
+    Ok(())
+}
