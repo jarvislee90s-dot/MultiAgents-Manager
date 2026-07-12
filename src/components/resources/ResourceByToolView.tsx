@@ -222,33 +222,37 @@ function ToolResourceList({
         </div>
       </div>
 
-      {/* MCP */}
-      {(globalMcps.length > 0) && (
-        <div>
-          <h4 className="text-xs font-medium text-muted-foreground mb-1">MCP ({globalMcps.length})</h4>
-          <div className="space-y-1">
-            {globalMcps.map((m) => (
+            {/* MCP */}
+      <div>
+        <h4 className="text-xs font-medium text-muted-foreground mb-1">MCP ({globalMcps.length})</h4>
+        <div className="space-y-1">
+          {globalMcps.length === 0 ? (
+            <div className="text-muted-foreground px-2 py-1 text-[11px]">暂无 MCP，前往「MAM 仓库」面板管理</div>
+          ) : (
+            globalMcps.map((m) => (
               <div key={m.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
-                <span>{m.name} <span className="text-green-600">✓</span></span>
+                <span>{m.name} <span className="text-green-600">✓ 全局仓库</span></span>
               </div>
-            ))}
-          </div>
+            ))
+          )}
         </div>
-      )}
+      </div>
 
       {/* Plugins */}
-      {(globalPlugins.length > 0) && (
-        <div>
-          <h4 className="text-xs font-medium text-muted-foreground mb-1">Plugins ({globalPlugins.length})</h4>
-          <div className="space-y-1">
-            {globalPlugins.map((p) => (
+      <div>
+        <h4 className="text-xs font-medium text-muted-foreground mb-1">Plugins ({globalPlugins.length})</h4>
+        <div className="space-y-1">
+          {globalPlugins.length === 0 ? (
+            <div className="text-muted-foreground px-2 py-1 text-[11px]">暂无插件，前往「MAM 仓库」面板管理</div>
+          ) : (
+            globalPlugins.map((p) => (
               <div key={p.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
-                <span>{p.name} <span className="text-green-600">✓</span></span>
+                <span>{p.name} <span className="text-green-600">✓ 全局仓库</span></span>
               </div>
-            ))}
-          </div>
+            ))
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
