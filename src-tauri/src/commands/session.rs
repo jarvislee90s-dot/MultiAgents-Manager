@@ -2,7 +2,6 @@
 
 use crate::adapter;
 use crate::session::SessionsResponse;
-use tauri::{Builder, Runtime};
 
 #[tauri::command]
 pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
@@ -38,10 +37,4 @@ pub fn kill_session(pid: u32) -> Result<(), String> {
     } else {
         Err(format!("进程 {} 不存在", pid))
     }
-}
-
-pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        focus_session, kill_session
-    ])
 }

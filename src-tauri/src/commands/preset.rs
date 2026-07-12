@@ -1,7 +1,6 @@
 // 预设组命令
 
 use crate::database::PresetRecord;
-use tauri::{Builder, Runtime};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,11 +45,4 @@ pub fn apply_preset_to_subagent(preset_id: String, tool_id: String, sub_agent_id
 #[tauri::command]
 pub fn deactivate_preset_from_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
     crate::services::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
-}
-
-pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        create_preset, delete_preset, list_presets, apply_preset, deactivate_preset,
-        apply_preset_to_subagent, deactivate_preset_from_subagent
-    ])
 }

@@ -55,9 +55,43 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(plugins::system_tray::init())
         ;
-    let builder = commands::add_commands(builder);
     let builder = builder.invoke_handler(tauri::generate_handler![
-        greet, update_tray_menu, commands::session::get_all_sessions, commands::screenshot::capture_window_screenshot
+        greet, update_tray_menu,
+        commands::session::get_all_sessions,
+        commands::session::focus_session,
+        commands::session::kill_session,
+        commands::resource::list_extensions_with_assignments,
+        commands::resource::scan_native_resources,
+        commands::resource::import_native_resources,
+        commands::resource::list_tool_resources,
+        commands::resource::check_preset_compatibility,
+        commands::preset::create_preset,
+        commands::preset::delete_preset,
+        commands::preset::list_presets,
+        commands::preset::apply_preset,
+        commands::preset::deactivate_preset,
+        commands::preset::apply_preset_to_subagent,
+        commands::preset::deactivate_preset_from_subagent,
+        commands::skill::list_repo_skills,
+        commands::skill::install_skill,
+        commands::skill::rescan_skills,
+        commands::skill::assign_skill_to_subagent,
+        commands::mcp::toggle_mcp_for_tool,
+        commands::mcp::read_mcp_servers,
+        commands::mcp::write_mcp_server,
+        commands::mcp::remove_mcp_server,
+        commands::plugin::toggle_plugin_for_tool,
+        commands::settings::get_setting,
+        commands::settings::set_setting,
+        commands::settings::detect_tools,
+        commands::settings::detect_subagents,
+        commands::settings::list_sub_agents,
+        commands::screenshot::capture_window_screenshot,
+        commands::screenshot::list_screenshots,
+        commands::manifest::validate_manifest,
+        commands::manifest::install_resource_from_manifest,
+        commands::manifest::uninstall_resource,
+        commands::manifest::get_store_index,
     ]);
 
     #[cfg(not(debug_assertions))]

@@ -1,7 +1,5 @@
 // 截图命令
 
-use tauri::{Builder, Runtime};
-
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotResult {
@@ -76,10 +74,4 @@ pub fn list_screenshots() -> Vec<String> {
         }
     });
     paths
-}
-
-pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        list_screenshots
-    ])
 }

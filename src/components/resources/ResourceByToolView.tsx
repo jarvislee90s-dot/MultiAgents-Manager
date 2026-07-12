@@ -1,10 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Scan, Import } from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
-import type { NativeExtension, ToolResources } from "@/types/extension";
+import type { NativeExtension, ToolResources, ImportStats } from "@/types/extension";
 
 const TOOLS = [
   { id: "claude", label: "Claude Code" },
@@ -26,6 +26,13 @@ export function ResourceByToolView() {
     }
   }, []);
 
+  // 挂载时自动加载所有工具的已有全局资源
+  useEffect(() => {
+    TOOLS.forEach((tool) => {
+      loadToolResources(tool.id);
+    });
+  }, [loadToolResources]);
+
   const handleScan = async (toolId: string) => {
     setScanning((prev) => ({ ...prev, [toolId]: true }));
     try {
@@ -40,6 +47,22 @@ export function ResourceByToolView() {
       toast.error(`扫描失败: ${e}`);
     } finally {
       setScanning((prev) => ({ ...prev, [toolId]: false }));
+    }
+  };
+
+  const handleImport = async (toolId: string, item: NativeExtension) => {
+    try {
+      const result = await invoke<ImportStats>("import_native_resources", {
+        items: [[item.sourcePath, item.name]],
+      });
+      if (result.imported > 0) {
+        toast.success(`"${item.name}" 导入成功`);
+        await loadToolResources(toolId);
+      } else {
+        toast.info(`"${item.name}" 已存在`);
+      }
+    } catch (e) {
+      toast.error(`导入失败: ${e}`);
     }
   };
 
@@ -64,16 +87,24 @@ export function ResourceByToolView() {
             </Button>
           </div>
 
-          <ToolResourceList toolId={tool.id} resources={toolResources[tool.id]} />
+          <ToolResourceList toolId={tool.id} resources={toolResources[tool.id]} onImport={handleImport} />
         </div>
       ))}
     </div>
   );
 }
 
-function ToolResourceList({ resources }: { toolId: string; resources?: ToolResources }) {
+function ToolResourceList({
+  toolId,
+  resources,
+  onImport,
+}: {
+  toolId: string;
+  resources?: ToolResources;
+  onImport: (toolId: string, item: NativeExtension) => void;
+}) {
   if (!resources) {
-    return <div className="text-muted-foreground py-2 text-xs">点击"扫描"加载资源</div>;
+    return <div className="text-muted-foreground py-2 text-xs">加载中…</div>;
   }
 
   const globalSkills = resources.global.filter((e) => e.kind === "skill");
@@ -97,7 +128,12 @@ function ToolResourceList({ resources }: { toolId: string; resources?: ToolResou
           {nativeSkills.map((s) => (
             <div key={s.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
               <span>{s.name} <span className="text-orange-500">⚠ 原生</span></span>
-              <Button size="sm" variant="ghost" className="h-5 px-1 text-[10px]">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-5 px-1 text-[10px]"
+                onClick={() => onImport(toolId, s)}
+              >
                 <Import className="h-3 w-3" />
                 导入
               </Button>
@@ -119,7 +155,12 @@ function ToolResourceList({ resources }: { toolId: string; resources?: ToolResou
             {nativeMcps.map((m) => (
               <div key={m.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
                 <span>{m.name} <span className="text-orange-500">⚠ 原生</span></span>
-                <Button size="sm" variant="ghost" className="h-5 px-1 text-[10px]">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-5 px-1 text-[10px]"
+                  onClick={() => onImport(toolId, m)}
+                >
                   <Import className="h-3 w-3" />
                   导入
                 </Button>
@@ -142,7 +183,12 @@ function ToolResourceList({ resources }: { toolId: string; resources?: ToolResou
             {nativePlugins.map((p) => (
               <div key={p.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
                 <span>{p.name} <span className="text-orange-500">⚠ 原生</span></span>
-                <Button size="sm" variant="ghost" className="h-5 px-1 text-[10px]">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-5 px-1 text-[10px]"
+                  onClick={() => onImport(toolId, p)}
+                >
                   <Import className="h-3 w-3" />
                   导入
                 </Button>

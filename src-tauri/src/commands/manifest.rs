@@ -2,7 +2,6 @@
 
 use crate::services::manifest::{ManifestValidator, ValidationError};
 use serde::Serialize;
-use tauri::{Builder, Runtime};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,10 +89,4 @@ pub fn uninstall_resource(ext_id: String, kind: String) -> Result<(), String> {
 #[tauri::command]
 pub fn get_store_index() -> Result<serde_json::Value, String> {
     crate::services::manifest::store::read_index()
-}
-
-pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        validate_manifest, install_resource_from_manifest, uninstall_resource, get_store_index
-    ])
 }

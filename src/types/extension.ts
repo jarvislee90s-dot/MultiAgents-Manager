@@ -60,3 +60,10 @@ export interface McpServer {
   name: string;
   config: McpServerConfig;
 }
+
+export interface ImportStats {
+  imported: number;
+  newlyAdded: number;
+  skippedDup: number;
+  sourceCounts: [string, number][];
+}

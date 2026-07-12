@@ -1,7 +1,5 @@
 // 资源管理命令
 
-use tauri::{Builder, Runtime};
-
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionWithAssignments {
@@ -110,20 +108,31 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     let global = crate::database::list_extensions();
     let native = scan_native_resources(tool_id.clone());
     let assignments = crate::database::list_assignments(&tool_id);
-    let global_filtered: Vec<_> = global.iter()
-        .filter(|e| assignments.iter().any(|a| a.extension_id == e.id && a.enabled))
+    // 返回所有全局资源，带 assignment 状态标记，前端决定是否显示已禁用的
+    let global_with_status: Vec<_> = global.iter()
+        .map(|e| {
+            let assignment = assignments.iter().find(|a| a.extension_id == e.id);
+            serde_json::json!({
+                "id": e.id,
+                "kind": e.kind,
+                "name": e.name,
+                "description": e.description,
+                "sourcePath": e.source_path,
+                "sourceTool": e.source_tool,
+                "suite": e.suite,
+                "tags": e.tags,
+                "assignments": assignment.map(|a| vec![serde_json::json!({
+                    "agentToolId": a.agent_tool_id,
+                    "enabled": a.enabled,
+                    "linkStatus": a.link_status,
+                })]).unwrap_or_default(),
+            })
+        })
         .collect();
-    serde_json::json!({ "global": global_filtered, "native": native })
+    serde_json::json!({ "global": global_with_status, "native": native })
 }
 
 #[tauri::command]
 pub fn check_preset_compatibility(preset_id: String, tool_id: String) -> crate::services::preset::CompatibilityReport {
     crate::services::preset::check_compatibility(&preset_id, &tool_id)
-}
-
-pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        list_extensions_with_assignments, scan_native_resources, import_native_resources,
-        list_tool_resources, check_preset_compatibility
-    ])
 }

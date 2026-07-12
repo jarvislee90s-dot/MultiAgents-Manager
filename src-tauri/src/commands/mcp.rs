@@ -1,7 +1,5 @@
 // MCP 管理命令
 
-use tauri::{Builder, Runtime};
-
 #[tauri::command]
 pub fn toggle_mcp_for_tool(mcp_name: String, tool_id: String, enabled: bool) -> Result<(), String> {
     crate::services::toggle_mcp(&mcp_name, &tool_id, enabled)
@@ -46,10 +44,4 @@ pub fn write_mcp_server(tool_id: String, mcp_name: String, command: String, args
 #[tauri::command]
 pub fn remove_mcp_server(tool_id: String, mcp_name: String) -> Result<(), String> {
     crate::services::mcp::remove_mcp(&tool_id, &mcp_name)
-}
-
-pub fn add_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    builder.invoke_handler(tauri::generate_handler![
-        toggle_mcp_for_tool, read_mcp_servers, write_mcp_server, remove_mcp_server
-    ])
 }
