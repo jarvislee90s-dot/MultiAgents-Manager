@@ -74,7 +74,11 @@ concurrency:
 needs: release
 ```
 - `actions/download-artifact`（merge-multiple）合并各平台产物
-- `softprops/action-gh-release`：`tag_name: ${{ github.ref_name }}`，`body_path` 读取 release notes 文件，上传全部产物
+- `softprops/action-gh-release`：`tag_name: ${{ github.ref_name }}`，上传全部产物
+- **Release body 自动拼接**（cc-switch 风格）：模板头部 + 下载清单 + 更新内容
+  - 下载清单固定生成（产物文件名确定，模板化即可）：`macOS: MultiAgents-Manager-{v}-macOS.dmg（推荐）`、`Windows: MultiAgents-Manager-{v}-Windows-x64-setup.exe` 等，带一句说明
+  - 更新内容从 `docs/release-notes/v{ver}.md` 读取（`body_path` 拼接在下载清单之后）
+  - 效果：GitHub Release 页面上方是"本次更新内容"，下方是各平台下载包
 - `prerelease: false`（保证 `releases/latest` 指向它，updater 端点依赖）
 
 ### 3.4 manifest job（`assemble-latest-json`）
@@ -113,8 +117,9 @@ needs: publish-release
 ## 5. Release notes 约定
 
 - 新目录 `docs/release-notes/`，每版 `vX.Y.Z.md`（中文先上；未来如需双语仿 cc-switch 加 `-en.md` 等）
+- **该文件只写"更新内容"**；下载清单由 `publish-release` job 模板化自动生成（见 §3.3），发布人无需手写
 - 发布流程：`pnpm release:version`（升版本）→ 写 `docs/release-notes/vX.Y.Z.md` → 提交 + 打 tag → push → CI
-- `publish-release` job 用 `body_path` 读取该文件作 Release body；`assemble-latest-json` 把内容写入 latest.json 的 `notes`
+- `publish-release` job 把该文件内容拼进 Release body；`assemble-latest-json` 把内容写入 latest.json 的 `notes`
 - 现有 `scripts/release.sh` 生成的 notes 模板位置从 `release/release-notes-v{ver}.md` 对齐到 `docs/release-notes/v{ver}.md`（小改，保持单一路径）
 
 ## 6. CI 验证流水线增强（修改 `.github/workflows/ci.yml`）
