@@ -40,11 +40,11 @@ else
 fi
 
 # 生成 release notes 模板（如果不存在）
-NOTES_FILE="$RELEASE_DIR/release-notes-v${VERSION}.md"
+NOTES_DIR="$PROJECT_DIR/docs/release-notes"
+mkdir -p "$NOTES_DIR"
+NOTES_FILE="$NOTES_DIR/v${VERSION}.md"
 if [ ! -f "$NOTES_FILE" ]; then
   cat > "$NOTES_FILE" << EOF
-# Release Notes
-
 ## v${VERSION} ($(date +%Y-%m-%d))
 
 ### 🚀 新增
