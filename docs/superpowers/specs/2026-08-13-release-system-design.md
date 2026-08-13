@@ -66,7 +66,7 @@ concurrency:
 
 **Tauri minisign 签名（始终开启）**：构建时注入 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（Secret）。签名密钥格式兼容处理参考 cc-switch 的 "Prepare Tauri signing key" step（原始两行 / base64 包裹 / 单行 base64 三种格式都可识别）。无密钥时构建失败（自动更新依赖签名，属预期硬约束）。
 
-**Apple 签名（条件闸门，默认关闭）**：macOS job 首步检查 `APPLE_CERTIFICATE` 等 Secret 是否为空；非空才执行：导入证书到临时 keychain → 用 `APPLE_SIGNING_IDENTITY` 签名 → `xcrun notarytool submit` 公证 → `codesign/spctl/stapler` 三重验证（带重试）；为空则跳过并打印 warning。未签名 DMG 发布后 macOS 首次打开会有 Gatekeeper 提醒（当前预期行为）。将来补 Secret 即自动升级为签名版，无需改流水线。
+**Apple 签名（条件闸门，当前为占位）**：macOS job 首步检查 `APPLE_CERTIFICATE` 等 Secret；当前未配置 → 打印 warning 并跳过，构建未签名 DMG（Gatekeeper 首次打开提醒为预期行为）。**完整签名+公证流程（导入证书到临时 keychain → 签名 → notarize → 三重验证）暂不作为代码落地**，写入 `docs/RELEASE.md` 作为将来启用指引——避免把未经实测的签名代码上线；有账号时再作为独立小任务激活并用真实 release 实测。
 
 ### 3.3 发布 job（`publish-release`）
 
@@ -118,7 +118,10 @@ needs: publish-release
 
 - 新目录 `docs/release-notes/`，每版 `vX.Y.Z.md`（中文先上；未来如需双语仿 cc-switch 加 `-en.md` 等）
 - **该文件只写"更新内容"**；下载清单由 `publish-release` job 模板化自动生成（见 §3.3），发布人无需手写
-- 发布流程：`pnpm release:version`（升版本）→ 写 `docs/release-notes/vX.Y.Z.md` → 提交 + 打 tag → push → CI
+- 发布流程（顺序由 `release-version.mjs` 约束：要求工作树干净、只提交版本 4 文件）：
+  1. 写 `docs/release-notes/vX.Y.Z.md`（本次更新内容），单独提交
+  2. 跑 `pnpm release:version`，选择同一版本号 → 它负责改版本号、提交 4 个版本文件、打 tag、push
+  3. CI 自动构建发布（tag 指向的提交已含 notes 文件）
 - `publish-release` job 把该文件内容拼进 Release body；`assemble-latest-json` 把内容写入 latest.json 的 `notes`
 - 现有 `scripts/release.sh` 生成的 notes 模板位置从 `release/release-notes-v{ver}.md` 对齐到 `docs/release-notes/v{ver}.md`（小改，保持单一路径）
 
