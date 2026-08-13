@@ -1,22 +1,248 @@
 name: Release
+
 on:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  release:
+    runs-on: ${{ matrix.os }}
+    environment: release
     strategy:
+      fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.platform }}
+        include:
+          - os: windows-latest
+          - os: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
           cache: pnpm
-      - run: pnpm install
-      - run: pnpm tauri build
-      - uses: tauri-apps/tauri-action@v0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS universal targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare Tauri signing key
+        shell: bash
+        run: |
+          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+          if [ -z "$RAW" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set. Add it under Settings > Secrets and variables > Actions." >&2
+            exit 1
+          fi
+          KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
+          if printf '%s' "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$RAW" > "$KEY_PATH"
+          elif DECODED=$(printf '%s' "$RAW" | base64 --decode 2>/dev/null) \
+               && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$DECODED" > "$KEY_PATH"
+          else
+            printf '%s\n%s\n' "untrusted comment: tauri signing key" "$RAW" > "$KEY_PATH"
+          fi
+          echo "TAURI_SIGNING_PRIVATE_KEY=$(base64 < "$KEY_PATH" | tr -d '\r\n')" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Apple signing readiness check
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.APPLE_CERTIFICATE }}" ]; then
+            echo "::warning::Apple signing secrets detected but the signing pipeline is not enabled yet. Building unsigned DMG. See docs/RELEASE.md."
+          else
+            echo "Building unsigned DMG (Apple signing secrets not configured, expected)."
+          fi
+
+      - name: Build Tauri App (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: pnpm tauri build --bundles dmg --target universal-apple-darwin
+
+      - name: Build Tauri App (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pnpm tauri build --bundles nsis
+
+      - name: Prepare macOS Assets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG=$(find src-tauri/target -name "*.dmg" -type f | head -1 || true)
+          TAR=$(find src-tauri/target -name "*.app.tar.gz" -type f | head -1 || true)
+          if [ -z "$DMG" ]; then
+            echo "::error::No macOS DMG found" >&2
+            exit 1
+          fi
+          cp "$DMG" "release-assets/MultiAgents-Manager-${VERSION}-macOS.dmg"
+          [ -f "${DMG}.sig" ] && cp "${DMG}.sig" "release-assets/MultiAgents-Manager-${VERSION}-macOS.dmg.sig" || true
+          if [ -n "$TAR" ]; then
+            cp "$TAR" "release-assets/MultiAgents-Manager-${VERSION}-macOS.tar.gz"
+            [ -f "${TAR}.sig" ] && cp "${TAR}.sig" "release-assets/MultiAgents-Manager-${VERSION}-macOS.tar.gz.sig" || true
+          fi
+          ls -la release-assets/
+
+      - name: Prepare Windows Assets
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $VERSION = $env:GITHUB_REF_NAME.Substring(1)
+          $setup = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Recurse -Include *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $setup) { throw 'No NSIS setup.exe found' }
+          Copy-Item $setup.FullName "release-assets/MultiAgents-Manager-$VERSION-Windows-x64-setup.exe"
+          if (Test-Path "$($setup.FullName).sig") {
+            Copy-Item "$($setup.FullName).sig" "release-assets/MultiAgents-Manager-$VERSION-Windows-x64-setup.exe.sig"
+          }
+          Get-ChildItem release-assets | Format-Table Name, Length
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ runner.os }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Build release body
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BODY="$RUNNER_TEMP/body.md"
+          {
+            echo "## MultiAgents Manager ${GITHUB_REF_NAME}"
+            echo ""
+            echo "### 下载"
+            echo ""
+            echo "- **macOS**: \`MultiAgents-Manager-${VERSION}-macOS.dmg\`"
+            echo "- **macOS (updater)**: \`MultiAgents-Manager-${VERSION}-macOS.tar.gz\`（自动更新专用，无需手动下载）"
+            echo "- **Windows (x86_64)**: \`MultiAgents-Manager-${VERSION}-Windows-x64-setup.exe\`"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 更新内容"
+            echo ""
+            if [ -f "docs/release-notes/v${VERSION}.md" ]; then
+              cat "docs/release-notes/v${VERSION}.md"
+            else
+              echo "_本次更新内容见上方下载清单。_"
+            fi
+          } > "$BODY"
+          echo "RELEASE_BODY_PATH=$BODY" >> "$GITHUB_ENV"
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ env.RELEASE_BODY_PATH }}
+          prerelease: false
+          files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  assemble-latest-json:
+    name: Assemble latest.json
+    runs-on: ubuntu-latest
+    needs: publish-release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          gh release download "$GITHUB_REF_NAME" --dir dl --repo "$GITHUB_REPOSITORY"
+          ls -la dl/
+
+      - name: Generate latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs"), path = require("path");
+          const tag = process.env.TAG;
+          const repo = process.env.REPO;
+          const base = `https://github.com/${repo}/releases/download/${tag}`;
+          const version = tag.replace(/^v/i, "");
+          const sigFiles = fs.readdirSync("dl").filter((f) => f.endsWith(".sig"));
+          const platforms = {};
+          for (const f of sigFiles) {
+            const asset = f.slice(0, -4);
+            const url = `${base}/${encodeURIComponent(asset)}`;
+            const signature = fs.readFileSync(path.join("dl", f), "utf8").trim();
+            if (asset.endsWith("-macOS.tar.gz")) {
+              platforms["darwin-aarch64"] = { signature, url };
+              platforms["darwin-x86_64"] = { signature, url };
+            } else if (asset.endsWith("-Windows-x64-setup.exe")) {
+              platforms["windows-x86_64"] = { signature, url };
+            }
+          }
+          let notes = `Release ${tag}`;
+          const notesFile = `docs/release-notes/v${version}.md`;
+          if (fs.existsSync(notesFile)) {
+            notes = fs.readFileSync(notesFile, "utf8");
+          }
+          const pubDate = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+          const payload = { version, notes, pub_date: pubDate, platforms };
+          fs.writeFileSync("latest.json", JSON.stringify(payload, null, 2) + "\n");
+          console.log(fs.readFileSync("latest.json", "utf8"));
+          NODE
+
+      - name: Upload latest.json to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"
