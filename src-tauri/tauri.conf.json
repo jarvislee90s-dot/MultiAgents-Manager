@@ -12,9 +12,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "__TAURI_UPDATER_PUBKEY__",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4RUVGNjc2NzI5NDZEQwpSV1RjUmlsblorK09CbkNkb1Q1WWZuRUtDdmpWNXhmdjRGblB1REZmYmRmODNmNUErWlNtVG5hZAo=",
       "endpoints": [
-        "__TAURI_UPDATER_ENDPOINT__"
+        "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
