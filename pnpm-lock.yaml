@@ -121,8 +121,8 @@ importers:
         specifier: ^7.0.0
         version: 7.1.1(eslint@9.39.4(jiti@2.7.0))
       globals:
-        specifier: ^16.4.0
-        version: 16.4.0
+        specifier: ^17.11.0
+        version: 17.11.0
       husky:
         specifier: ^9.1.7
         version: 9.1.7
@@ -2352,8 +2352,8 @@ packages:
     resolution: {integrity: sha512-oahGvuMGQlPw/ivIYBjVSrWAfWLBeku5tpPE2fOPLi+WHffIWbuh2tCjhyQhTBPMf5E9jDEH4FOmTYgYwbKwtQ==}
     engines: {node: '>=18'}
 
-  globals@16.4.0:
-    resolution: {integrity: sha512-ob/2LcVVaVGCYN+r14cnwnoDPUufjiYgSqRhiFD0Q1iI4Odora5RE8Iv1D24hAz5oMophRGkGz+yuvQmmUMnMw==}
+  globals@17.11.0:
+    resolution: {integrity: sha512-Z2I8hM+PbJDXQDq3Icgpzv+mPdwr68iZUU9d5WW4FuXfDUQfkZaZuvjMv42/5crNyw154+9+VWXbYrUgDXbxNw==}
     engines: {node: '>=18'}
 
   graceful-fs@4.2.11:
@@ -5552,7 +5552,7 @@ snapshots:
 
   globals@14.0.0: {}
 
-  globals@16.4.0: {}
+  globals@17.11.0: {}
 
   graceful-fs@4.2.11: {}
 
