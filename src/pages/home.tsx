@@ -77,7 +77,7 @@ export default function HomePage() {
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-muted-foreground" />
+            <Activity className="text-muted-foreground h-4 w-4" />
             <span className="text-sm font-semibold">{totalCount}</span>
             <span className="text-muted-foreground text-xs">会话</span>
           </div>
@@ -89,9 +89,7 @@ export default function HomePage() {
             </div>
           )}
         </div>
-        {loading && (
-          <span className="text-muted-foreground text-xs">加载中…</span>
-        )}
+        {loading && <span className="text-muted-foreground text-xs">加载中…</span>}
       </div>
 
       {/* 标签栏 */}
@@ -122,11 +120,7 @@ export default function HomePage() {
 
       {/* 内容区 */}
       <div className="flex-1 overflow-y-auto">
-        {activeTab === "dashboard" ? (
-          <SessionGrid sessions={sessions} />
-        ) : (
-          <ExtensionList />
-        )}
+        {activeTab === "dashboard" ? <SessionGrid sessions={sessions} /> : <ExtensionList />}
       </div>
     </WindowFrame>
   );

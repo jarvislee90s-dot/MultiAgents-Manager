@@ -7,9 +7,21 @@ import { StatusLight } from "@/components/sessions/StatusLight";
 import type { Session, AgentType } from "@/types/session";
 
 const AGENT_BADGE: Record<AgentType, { label: string; className: string; icon: typeof Bot }> = {
-  claude: { label: "Claude", className: "bg-purple-500/15 text-purple-400 border-purple-500/30", icon: Bot },
-  codex: { label: "Codex", className: "bg-green-500/15 text-green-400 border-green-500/30", icon: Terminal },
-  opencode: { label: "OpenCode", className: "bg-orange-500/15 text-orange-400 border-orange-500/30", icon: FolderGit2 },
+  claude: {
+    label: "Claude",
+    className: "bg-purple-500/15 text-purple-400 border-purple-500/30",
+    icon: Bot,
+  },
+  codex: {
+    label: "Codex",
+    className: "bg-green-500/15 text-green-400 border-green-500/30",
+    icon: Terminal,
+  },
+  opencode: {
+    label: "OpenCode",
+    className: "bg-orange-500/15 text-orange-400 border-orange-500/30",
+    icon: FolderGit2,
+  },
 };
 
 function formatRuntime(lastActivityAt: string): string {
@@ -45,7 +57,7 @@ export function SessionCard({ session }: { session: Session }) {
   return (
     <Card
       className={cn(
-        "group relative cursor-pointer border p-3 transition-colors hover:bg-accent/50",
+        "group hover:bg-accent/50 relative cursor-pointer border p-3 transition-colors",
         session.status === "waiting" && "border-red-500/40",
         !session.jumpSupported && "cursor-default opacity-80"
       )}
@@ -64,24 +76,19 @@ export function SessionCard({ session }: { session: Session }) {
             <Icon className="h-3 w-3" />
             {badge.label}
             {session.form === "app" && (
-              <span
-                className="text-[9px] opacity-60"
-                title="桌面 APP 形态：不可跳转终端，仅可监控"
-              >
+              <span className="text-[9px] opacity-60" title="桌面 APP 形态：不可跳转终端，仅可监控">
                 APP
               </span>
             )}
           </span>
-          <span className="truncate text-sm font-medium">
-            {session.projectName}
-          </span>
+          <span className="truncate text-sm font-medium">{session.projectName}</span>
           {(session.title || session.id) && (
-            <span className="text-muted-foreground/60 truncate text-[10px] font-mono">
+            <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
               {session.title || session.id.slice(0, 12)}
             </span>
           )}
           {session.gitBranch && (
-            <span className="text-muted-foreground shrink-0 text-[10px] font-mono">
+            <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
               {session.gitBranch}
             </span>
           )}

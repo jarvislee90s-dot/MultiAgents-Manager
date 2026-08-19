@@ -62,21 +62,13 @@ export function ExtensionList() {
       </div>
 
       {/* View content */}
-      {view === "byKind" ? (
-        <ResourceByKindView />
-      ) : (
-        <ResourceByToolView />
-      )}
+      {view === "byKind" ? <ResourceByKindView /> : <ResourceByToolView />}
 
       {/* Presets */}
       <PresetList extensions={extensions} />
 
       {/* Import dialog */}
-      <ImportDialog
-        open={showImport}
-        onClose={() => setShowImport(false)}
-        onImported={load}
-      />
+      <ImportDialog open={showImport} onClose={() => setShowImport(false)} onImported={load} />
     </div>
   );
 }

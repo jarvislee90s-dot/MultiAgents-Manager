@@ -3,12 +3,7 @@
 export type AgentType = "claude" | "codex" | "opencode";
 
 export type SessionStatus =
-  | "waiting"
-  | "processing"
-  | "thinking"
-  | "compacting"
-  | "idle"
-  | "finished";
+  "waiting" | "processing" | "thinking" | "compacting" | "idle" | "finished";
 
 export type ProcessForm = "cli" | "app";
 

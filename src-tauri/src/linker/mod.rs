@@ -159,6 +159,7 @@ pub fn write_config_locked(path: &Path, content: &str) -> Result<(), String> {
     }
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .read(true)
         .open(path)

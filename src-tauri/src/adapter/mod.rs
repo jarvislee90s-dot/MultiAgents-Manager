@@ -26,10 +26,6 @@ fn get_app_grace_secs() -> i64 {
         .unwrap_or(30)
 }
 
-/// Stop 事件 grace period 秒数。
-/// Codex APP 完成单步工具调用就会触发 Stop，为避免误判为"等用户"，在 grace 期内保持黄灯。
-const STOP_GRACE_SECS: i64 = 5;
-
 /// 记录每个 PID 最近一次 Stop 事件的 (时间戳, grace_duration_secs)，用于 grace period 判定
 /// grace_duration 按进程形态区分：App 形态更长（30s），CLI 形态更短（5s）
 static STOP_GRACE: Lazy<Mutex<HashMap<u32, (i64, i64)>>> = Lazy::new(|| Mutex::new(HashMap::new()));

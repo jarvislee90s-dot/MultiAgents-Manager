@@ -15,7 +15,9 @@ export function McpManager({ toolId }: { toolId: string }) {
 
   const load = useCallback(async () => {
     try {
-      const data = await invoke<{ servers: Record<string, McpServerConfig> }>("read_mcp_servers", { toolId });
+      const data = await invoke<{ servers: Record<string, McpServerConfig> }>("read_mcp_servers", {
+        toolId,
+      });
       setServers(data.servers || {});
     } catch (e) {
       console.error("Failed to load MCP servers:", e);
@@ -90,16 +92,29 @@ export function McpManager({ toolId }: { toolId: string }) {
       ) : (
         <div className="space-y-1">
           {Object.entries(servers).map(([name, config]) => (
-            <div key={name} className="flex items-center justify-between rounded border px-2 py-1 text-xs">
+            <div
+              key={name}
+              className="flex items-center justify-between rounded border px-2 py-1 text-xs"
+            >
               <div className="min-w-0">
                 <span className="font-medium">{name}</span>
                 <span className="text-muted-foreground ml-1 text-[10px]">{config.command}</span>
               </div>
               <div className="flex shrink-0 gap-1">
-                <Button size="sm" variant="ghost" className="h-5 w-5 p-0" onClick={() => openEdit(name, config)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-5 w-5 p-0"
+                  onClick={() => openEdit(name, config)}
+                >
                   <Edit2 className="h-3 w-3" />
                 </Button>
-                <Button size="sm" variant="ghost" className="h-5 w-5 p-0 text-red-500" onClick={() => handleDelete(name)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-5 w-5 p-0 text-red-500"
+                  onClick={() => handleDelete(name)}
+                >
                   <Trash2 className="h-3 w-3" />
                 </Button>
               </div>
@@ -111,7 +126,9 @@ export function McpManager({ toolId }: { toolId: string }) {
       <Dialog open={showAdd} onOpenChange={setShowAdd}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-sm">{editingName ? `编辑 ${editingName}` : "添加 MCP 服务器"}</DialogTitle>
+            <DialogTitle className="text-sm">
+              {editingName ? `编辑 ${editingName}` : "添加 MCP 服务器"}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-2">
             {editingName === "" && (
@@ -131,12 +148,18 @@ export function McpManager({ toolId }: { toolId: string }) {
             <Input
               placeholder="参数（逗号分隔，如 -y,@modelcontextprotocol/server-filesystem）"
               value={form.args.join(",")}
-              onChange={(e) => setForm((f) => ({ ...f, args: e.currentTarget.value.split(",").filter(Boolean) }))}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, args: e.currentTarget.value.split(",").filter(Boolean) }))
+              }
               className="text-xs"
             />
             <div className="flex justify-end gap-2">
-              <Button size="sm" variant="outline" onClick={() => setShowAdd(false)}>取消</Button>
-              <Button size="sm" onClick={handleAdd}>保存</Button>
+              <Button size="sm" variant="outline" onClick={() => setShowAdd(false)}>
+                取消
+              </Button>
+              <Button size="sm" onClick={handleAdd}>
+                保存
+              </Button>
             </div>
           </div>
         </DialogContent>

@@ -39,7 +39,7 @@ fn focus_tmux_client_terminal() -> Result<(), String> {
     if client_tty.is_empty() {
         return focus_any_terminal_with_tmux();
     }
-    let tty_name = client_tty.split('/').last().unwrap_or(&client_tty);
+    let tty_name = client_tty.split('/').next_back().unwrap_or(&client_tty);
     if iterm::focus_iterm_by_tty(tty_name).is_ok() {
         return Ok(());
     }

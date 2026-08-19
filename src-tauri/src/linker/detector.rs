@@ -27,7 +27,7 @@ pub fn detect_all_tools() -> Vec<ToolDetection> {
         let base = adapter.base_dir();
         let dir_exists = base.exists();
         // 检测 CLI 可用性：检查进程名的第一个字符
-        let cli_available = which(&adapter.process_names()[0]);
+        let cli_available = which(adapter.process_names()[0]);
 
         debug!("{}: dir={}, cli={}", adapter.name(), dir_exists, cli_available);
 

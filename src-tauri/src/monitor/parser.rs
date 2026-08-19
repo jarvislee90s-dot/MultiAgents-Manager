@@ -177,7 +177,7 @@ fn get_recent_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
             Some((path, modified))
         })
         .collect();
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files.into_iter().map(|(p, _)| p).collect()
 }
 
@@ -259,7 +259,7 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
         let _ = reader.read_line(&mut _partial);
     }
 
-    let lines: Vec<_> = reader.lines().flatten().collect();
+    let lines: Vec<_> = reader.lines().map_while(Result::ok).collect();
     let recent: Vec<_> = lines.iter().rev().take(500).collect();
 
     let mut session_id = None;
@@ -318,7 +318,7 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
 
     // 找最后一条有文本的消息作为预览
     for line in &recent {
-        if let Ok(msg) = serde_json::from_str::<JsonlMessage>(&line) {
+        if let Ok(msg) = serde_json::from_str::<JsonlMessage>(line) {
             if let Some(content) = &msg.message {
                 if let Some(c) = &content.content {
                     let text = match c {
@@ -343,7 +343,7 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
                          last_is_local, last_is_interrupted, last_is_user_input, file_recently_modified)
     };
 
-    let project_name = project_path.split('/').filter(|s| !s.is_empty()).last().unwrap_or("Unknown").to_string();
+    let project_name = project_path.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string();
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 { format!("{}...", m.chars().take(100).collect::<String>()) } else { m }
     });
@@ -464,7 +464,7 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 fn collect_codex_session_files(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     collect_codex_files_inner(dir, &mut files);
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files.into_iter().map(|(p, _)| p).collect()
 }
 
@@ -510,7 +510,7 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         let _ = reader.read_line(&mut _partial);
     }
 
-    let lines: Vec<_> = reader.lines().flatten().collect();
+    let lines: Vec<_> = reader.lines().map_while(Result::ok).collect();
     let recent: Vec<_> = lines.iter().rev().take(500).collect();
 
     let mut session_id = None;
@@ -523,7 +523,7 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
     let mut found_status = false;
 
     for line in &recent {
-        if let Ok(entry) = serde_json::from_str::<CodexEntry>(&line) {
+        if let Ok(entry) = serde_json::from_str::<CodexEntry>(line) {
             // 顶层 timestamp 作为最后活动时间（最近一条 entry）
             if last_timestamp.is_none() {
                 if let Some(ts) = &entry.timestamp {
@@ -602,7 +602,7 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         msg_type, last_has_tool_use, false, false, false, false, file_recently_modified
     );
 
-    let project_name = project_path.split('/').filter(|s| !s.is_empty()).last().unwrap_or("Unknown").to_string();
+    let project_name = project_path.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string();
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 { format!("{}...", m.chars().take(100).collect::<String>()) } else { m }
     });

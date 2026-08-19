@@ -12,7 +12,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Package, Link2, Plug, Info } from "lucide-react";
-import { listSsotResources, checkSkillTargetType, disableSkillForTool, enableSkillForTool, importMcpToSsot, saveMcpConfig } from "@/lib/api/resource";
+import {
+  listSsotResources,
+  checkSkillTargetType,
+  disableSkillForTool,
+  enableSkillForTool,
+  importMcpToSsot,
+  saveMcpConfig,
+} from "@/lib/api/resource";
 import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
@@ -75,7 +82,12 @@ export function ResourceByKindView() {
     }
   };
 
-  const handleTogglePlugin = async (name: string, toolId: string, enabled: boolean, kind: string) => {
+  const handleTogglePlugin = async (
+    name: string,
+    toolId: string,
+    enabled: boolean,
+    kind: string
+  ) => {
     try {
       await invoke("toggle_plugin_for_tool", { pluginName: name, toolId, enabled, kind });
       toast.success(`${name} 已${enabled ? "启用" : "禁用"}`);
@@ -91,7 +103,9 @@ export function ResourceByKindView() {
       // 灰 → 亮：直接启用
       try {
         await enableSkillForTool(skillName, toolId);
-        toast.success(`"${formatSkillName(skillName)}" 已在 ${TOOLS.find(t => t.id === toolId)?.label} 中启用`);
+        toast.success(
+          `"${formatSkillName(skillName)}" 已在 ${TOOLS.find((t) => t.id === toolId)?.label} 中启用`
+        );
         const fresh = await listSsotResources();
         setResources(fresh);
       } catch (e) {
@@ -101,7 +115,7 @@ export function ResourceByKindView() {
       // 亮 → 灰：先检查类型，再弹窗
       try {
         const targetType = await checkSkillTargetType(toolId, skillName);
-        const toolLabel = TOOLS.find(t => t.id === toolId)?.label || toolId;
+        const toolLabel = TOOLS.find((t) => t.id === toolId)?.label || toolId;
         setPending({
           skillName,
           toolId,
@@ -138,7 +152,7 @@ export function ResourceByKindView() {
     }
     try {
       const args = newMcp.args.trim() ? newMcp.args.split(/\s+/).filter(Boolean) : [];
-      let env: Record<string, string> = {};
+      const env: Record<string, string> = {};
       if (newMcp.env.trim()) {
         newMcp.env.split("\n").forEach((line) => {
           const idx = line.indexOf("=");
@@ -158,7 +172,7 @@ export function ResourceByKindView() {
 
   return (
     <>
-      <div className="rounded-lg border bg-card p-4">
+      <div className="bg-card rounded-lg border p-4">
         <h3 className="mb-3 text-sm font-semibold">MAM 仓库</h3>
 
         {/* Skills */}
@@ -184,7 +198,10 @@ export function ResourceByKindView() {
           ) : (
             <div className="space-y-1">
               {filteredSkills.map((skill) => (
-                <div key={skill.name} className="flex items-center justify-between rounded border p-2 text-sm">
+                <div
+                  key={skill.name}
+                  className="flex items-center justify-between rounded border p-2 text-sm"
+                >
                   <span className="font-medium">{formatSkillName(skill.name)}</span>
                   <div className="flex gap-1">
                     {TOOLS.map((tool) => {
@@ -215,7 +232,12 @@ export function ResourceByKindView() {
           <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
             <Link2 className="h-4 w-4" />
             MCP 服务器 ({resources.mcp.length})
-            <Button size="sm" variant="ghost" className="ml-auto h-6 px-2 text-[10px]" onClick={() => setMcpDialogOpen(true)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto h-6 px-2 text-[10px]"
+              onClick={() => setMcpDialogOpen(true)}
+            >
               + 添加
             </Button>
           </h4>
@@ -227,7 +249,10 @@ export function ResourceByKindView() {
           ) : (
             <div className="space-y-1">
               {resources.mcp.map((mcp) => (
-                <div key={mcp.name} className="flex items-center justify-between rounded border p-2 text-sm">
+                <div
+                  key={mcp.name}
+                  className="flex items-center justify-between rounded border p-2 text-sm"
+                >
                   <span className="font-medium">{mcp.name}</span>
                   <div className="flex gap-1">
                     {TOOLS.map((tool) => {
@@ -266,7 +291,10 @@ export function ResourceByKindView() {
           ) : (
             <div className="space-y-1">
               {resources.plugins.map((plugin) => (
-                <div key={plugin.name} className="flex items-center justify-between rounded border p-2 text-sm">
+                <div
+                  key={plugin.name}
+                  className="flex items-center justify-between rounded border p-2 text-sm"
+                >
                   <span className="font-medium">{plugin.name}</span>
                   <div className="flex gap-1">
                     {TOOLS.map((tool) => {
@@ -301,15 +329,21 @@ export function ResourceByKindView() {
                 <DialogTitle className="text-red-600">⚠️ 删除原生 skill</DialogTitle>
                 <DialogDescription className="space-y-2 pt-2 text-sm">
                   <p className="text-red-500">
-                    此操作将删除你手动安装的 <strong>"{pending?.displayName}"</strong> 目录，文件将移至回收站。
+                    此操作将删除你手动安装的 <strong>"{pending?.displayName}"</strong>{" "}
+                    目录，文件将移至回收站。
                   </p>
-                  <p>
-                    {pending?.toolLabel} 将不再加载此 skill。你可以从回收站恢复。
-                  </p>
+                  <p>{pending?.toolLabel} 将不再加载此 skill。你可以从回收站恢复。</p>
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter className="gap-2">
-                <Button variant="outline" size="sm" onClick={() => { setDialogOpen(false); setPending(null); }}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setDialogOpen(false);
+                    setPending(null);
+                  }}
+                >
                   取消
                 </Button>
                 <Button variant="destructive" size="sm" onClick={confirmDisable}>
@@ -322,11 +356,19 @@ export function ResourceByKindView() {
               <DialogHeader>
                 <DialogTitle>移除链接</DialogTitle>
                 <DialogDescription className="pt-2 text-sm">
-                  确定要移除 <strong>"{pending?.displayName}"</strong> 在 {pending?.toolLabel} 中的链接吗？
+                  确定要移除 <strong>"{pending?.displayName}"</strong> 在 {pending?.toolLabel}{" "}
+                  中的链接吗？
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter className="gap-2">
-                <Button variant="outline" size="sm" onClick={() => { setDialogOpen(false); setPending(null); }}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setDialogOpen(false);
+                    setPending(null);
+                  }}
+                >
                   取消
                 </Button>
                 <Button variant="default" size="sm" onClick={confirmDisable}>
@@ -386,7 +428,14 @@ export function ResourceByKindView() {
             </div>
           </div>
           <DialogFooter className="gap-2">
-            <Button variant="outline" size="sm" onClick={() => { setMcpDialogOpen(false); setNewMcp({ name: "", command: "", args: "", env: "" }); }}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setMcpDialogOpen(false);
+                setNewMcp({ name: "", command: "", args: "", env: "" });
+              }}
+            >
               取消
             </Button>
             <Button size="sm" onClick={handleAddMcp}>

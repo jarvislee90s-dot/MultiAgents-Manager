@@ -43,7 +43,9 @@ export function ResourceByToolView() {
     try {
       const native = await invoke<NativeExtension[]>("scan_native_resources", { toolId });
       if (native.length > 0) {
-        toast.info(`${TOOLS.find(t => t.id === toolId)?.label} 发现 ${native.length} 个原生资源，点击导入`);
+        toast.info(
+          `${TOOLS.find((t) => t.id === toolId)?.label} 发现 ${native.length} 个原生资源，点击导入`
+        );
       } else {
         toast.info("未发现新的原生资源");
       }
@@ -135,7 +137,11 @@ export function ResourceByToolView() {
             </Button>
           </div>
 
-          <ToolResourceList toolId={tool.id} resources={toolResources[tool.id]} onImport={handleImport} />
+          <ToolResourceList
+            toolId={tool.id}
+            resources={toolResources[tool.id]}
+            onImport={handleImport}
+          />
 
           {/* 重复 skill 清理区 */}
           {(duplicates[tool.id]?.length ?? 0) > 0 && (
@@ -198,16 +204,28 @@ function ToolResourceList({
     <div className="space-y-2">
       {/* Skills */}
       <div>
-        <h4 className="text-xs font-medium text-muted-foreground mb-1">Skills ({globalSkills.length + nativeSkills.length})</h4>
+        <h4 className="text-muted-foreground mb-1 text-xs font-medium">
+          Skills ({globalSkills.length + nativeSkills.length})
+        </h4>
         <div className="space-y-1">
           {globalSkills.map((s) => (
-            <div key={s.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
-              <span>{formatSkillName(s.name)} <span className="text-green-600">✓ 全局仓库</span></span>
+            <div
+              key={s.id}
+              className="bg-accent/50 flex items-center justify-between rounded px-2 py-1 text-xs"
+            >
+              <span>
+                {formatSkillName(s.name)} <span className="text-green-600">✓ 全局仓库</span>
+              </span>
             </div>
           ))}
           {nativeSkills.map((s) => (
-            <div key={s.id} className="flex items-center justify-between rounded bg-muted px-2 py-1 text-xs">
-              <span>{formatSkillName(s.name)} <span className="text-orange-500">⚠ 原生</span></span>
+            <div
+              key={s.id}
+              className="bg-muted flex items-center justify-between rounded px-2 py-1 text-xs"
+            >
+              <span>
+                {formatSkillName(s.name)} <span className="text-orange-500">⚠ 原生</span>
+              </span>
               <Button
                 size="sm"
                 variant="ghost"
@@ -222,16 +240,25 @@ function ToolResourceList({
         </div>
       </div>
 
-            {/* MCP */}
+      {/* MCP */}
       <div>
-        <h4 className="text-xs font-medium text-muted-foreground mb-1">MCP ({globalMcps.length})</h4>
+        <h4 className="text-muted-foreground mb-1 text-xs font-medium">
+          MCP ({globalMcps.length})
+        </h4>
         <div className="space-y-1">
           {globalMcps.length === 0 ? (
-            <div className="text-muted-foreground px-2 py-1 text-[11px]">暂无 MCP，前往「MAM 仓库」面板管理</div>
+            <div className="text-muted-foreground px-2 py-1 text-[11px]">
+              暂无 MCP，前往「MAM 仓库」面板管理
+            </div>
           ) : (
             globalMcps.map((m) => (
-              <div key={m.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
-                <span>{m.name} <span className="text-green-600">✓ 全局仓库</span></span>
+              <div
+                key={m.id}
+                className="bg-accent/50 flex items-center justify-between rounded px-2 py-1 text-xs"
+              >
+                <span>
+                  {m.name} <span className="text-green-600">✓ 全局仓库</span>
+                </span>
               </div>
             ))
           )}
@@ -240,14 +267,23 @@ function ToolResourceList({
 
       {/* Plugins */}
       <div>
-        <h4 className="text-xs font-medium text-muted-foreground mb-1">Plugins ({globalPlugins.length})</h4>
+        <h4 className="text-muted-foreground mb-1 text-xs font-medium">
+          Plugins ({globalPlugins.length})
+        </h4>
         <div className="space-y-1">
           {globalPlugins.length === 0 ? (
-            <div className="text-muted-foreground px-2 py-1 text-[11px]">暂无插件，前往「MAM 仓库」面板管理</div>
+            <div className="text-muted-foreground px-2 py-1 text-[11px]">
+              暂无插件，前往「MAM 仓库」面板管理
+            </div>
           ) : (
             globalPlugins.map((p) => (
-              <div key={p.id} className="flex items-center justify-between rounded bg-accent/50 px-2 py-1 text-xs">
-                <span>{p.name} <span className="text-green-600">✓ 全局仓库</span></span>
+              <div
+                key={p.id}
+                className="bg-accent/50 flex items-center justify-between rounded px-2 py-1 text-xs"
+              >
+                <span>
+                  {p.name} <span className="text-green-600">✓ 全局仓库</span>
+                </span>
               </div>
             ))
           )}

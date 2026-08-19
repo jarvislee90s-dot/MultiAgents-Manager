@@ -10,7 +10,10 @@ export function PermissionBadge({ permission }: { permission: string }) {
   const risk = PERMISSION_RISK[permission] ?? "low";
   const desc = PERMISSION_DESCRIPTION[permission] ?? permission;
   return (
-    <span className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${RISK_STYLES[risk]}`} title={desc}>
+    <span
+      className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${RISK_STYLES[risk]}`}
+      title={desc}
+    >
       {permission}
     </span>
   );

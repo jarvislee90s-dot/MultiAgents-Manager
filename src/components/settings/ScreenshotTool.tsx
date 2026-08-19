@@ -54,12 +54,7 @@ export function ScreenshotTool() {
           <Camera className={`mr-1 h-3 w-3 ${capturing ? "animate-spin" : ""}`} />
           {capturing ? "截图中..." : "截图"}
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 text-[10px]"
-          onClick={loadScreenshots}
-        >
+        <Button size="sm" variant="ghost" className="h-7 text-[10px]" onClick={loadScreenshots}>
           <Image className="mr-1 h-3 w-3" />
           刷新列表
         </Button>
@@ -67,11 +62,11 @@ export function ScreenshotTool() {
 
       {screenshots.length > 0 && (
         <div className="space-y-1">
-          <h4 className="text-xs font-medium text-muted-foreground">最近截图</h4>
+          <h4 className="text-muted-foreground text-xs font-medium">最近截图</h4>
           <div className="space-y-1">
             {screenshots.slice(0, 5).map((path) => (
               <div key={path} className="flex items-center gap-2 text-xs">
-                <Image className="h-3 w-3 text-muted-foreground" />
+                <Image className="text-muted-foreground h-3 w-3" />
                 <span className="truncate text-[10px]">{path}</span>
               </div>
             ))}

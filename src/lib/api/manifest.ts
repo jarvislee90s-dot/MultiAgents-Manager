@@ -1,7 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export interface ValidationError { field: string; message: string; code: string; }
-export interface ValidateResult { valid: boolean; manifest?: unknown; errors?: ValidationError[]; }
+export interface ValidationError {
+  field: string;
+  message: string;
+  code: string;
+}
+export interface ValidateResult {
+  valid: boolean;
+  manifest?: unknown;
+  errors?: ValidationError[];
+}
 
 export async function validateManifestPath(path: string): Promise<ValidateResult> {
   return await invoke("validate_manifest", { path });

@@ -99,9 +99,7 @@ pub fn determine_status(
         Some("assistant") => {
             if has_tool_use && is_user_input_tool {
                 SessionStatus::Waiting
-            } else if has_tool_use {
-                SessionStatus::Processing
-            } else if file_recently_modified {
+            } else if has_tool_use || file_recently_modified {
                 SessionStatus::Processing
             } else {
                 // Assistant finished responding, no pending tool calls → idle

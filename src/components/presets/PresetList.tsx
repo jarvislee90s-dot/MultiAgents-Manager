@@ -38,7 +38,9 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+  }, []);
 
   const handleCreate = async () => {
     if (!name) {
@@ -138,52 +140,81 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
 
       {showCreate && (
         <Card className="space-y-2 p-3">
-          <Input placeholder="预设组名称（如：前端开发）" value={name} onChange={(e) => setName(e.currentTarget.value)} />
+          <Input
+            placeholder="预设组名称（如：前端开发）"
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+          />
           <div className="max-h-40 space-y-1 overflow-y-auto">
             {extensions.map((ext) => (
               <label key={ext.id} className="flex cursor-pointer items-center gap-2 text-xs">
-                <input type="checkbox" checked={selected.has(ext.id)} onChange={() => toggleSelect(ext.id)} />
-                <span className="rounded bg-muted px-1.5 py-0.5 text-[10px]">{ext.kind}</span>
+                <input
+                  type="checkbox"
+                  checked={selected.has(ext.id)}
+                  onChange={() => toggleSelect(ext.id)}
+                />
+                <span className="bg-muted rounded px-1.5 py-0.5 text-[10px]">{ext.kind}</span>
                 <span>{ext.name}</span>
               </label>
             ))}
           </div>
-          <Button size="sm" onClick={handleCreate}>确认创建</Button>
+          <Button size="sm" onClick={handleCreate}>
+            确认创建
+          </Button>
         </Card>
       )}
 
       {presets.length === 0 ? (
-        <p className="text-muted-foreground py-2 text-xs">暂无预设组。创建一个将多个 skill/MCP 打包为组合。</p>
+        <p className="text-muted-foreground py-2 text-xs">
+          暂无预设组。创建一个将多个 skill/MCP 打包为组合。
+        </p>
       ) : (
         <div className="space-y-1">
           {presets.map((preset) => (
             <div key={preset.id} className="rounded border p-2">
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-sm font-medium">{preset.name}</span>
-                <button onClick={() => handleDelete(preset.id)} className="text-muted-foreground hover:text-red-500">
+                <button
+                  onClick={() => handleDelete(preset.id)}
+                  className="text-muted-foreground hover:text-red-500"
+                >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               </div>
               <div className="text-muted-foreground mb-1.5 text-[10px]">
-                {preset.items.map((i) => `${i.extensionName || i.extensionId} (${i.kind})`).join(" · ")}
+                {preset.items
+                  .map((i) => `${i.extensionName || i.extensionId} (${i.kind})`)
+                  .join(" · ")}
               </div>
               <div className="flex flex-wrap gap-1">
                 {TOOLS.map((tool) => (
                   <div key={tool.id} className="space-y-1">
                     <div className="flex gap-0.5">
-                      <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]"
-                        onClick={() => handleApply(preset.id, preset.name, tool.id)}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2 text-[10px]"
+                        onClick={() => handleApply(preset.id, preset.name, tool.id)}
+                      >
                         <Play className="mr-1 h-2.5 w-2.5" />
                         <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                         {tool.label}
                       </Button>
-                      <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-[10px]"
-                        onClick={() => handleDeactivate(preset.id, preset.name, tool.id)}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 w-6 p-0 text-[10px]"
+                        onClick={() => handleDeactivate(preset.id, preset.name, tool.id)}
+                      >
                         <X className="h-2.5 w-2.5" />
                       </Button>
                     </div>
                     {/* 子 Agent 级操作 */}
-                    <SubAgentPresetActions presetId={preset.id} presetName={preset.name} toolId={tool.id} />
+                    <SubAgentPresetActions
+                      presetId={preset.id}
+                      presetName={preset.name}
+                      toolId={tool.id}
+                    />
                   </div>
                 ))}
               </div>
@@ -197,7 +228,10 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
           open={compatibilityDialog.open}
           presetId={compatibilityDialog.presetId}
           toolId={compatibilityDialog.toolId}
-          toolName={TOOLS.find((t) => t.id === compatibilityDialog.toolId)?.label || compatibilityDialog.toolId}
+          toolName={
+            TOOLS.find((t) => t.id === compatibilityDialog.toolId)?.label ||
+            compatibilityDialog.toolId
+          }
           onClose={() => setCompatibilityDialog(null)}
           onConfirm={confirmApply}
         />
@@ -206,7 +240,15 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
   );
 }
 
-function SubAgentPresetActions({ presetId, presetName, toolId }: { presetId: string; presetName: string; toolId: string }) {
+function SubAgentPresetActions({
+  presetId,
+  presetName,
+  toolId,
+}: {
+  presetId: string;
+  presetName: string;
+  toolId: string;
+}) {
   const [subAgents, setSubAgents] = useState<string[]>([]);
   const [expanded, setExpanded] = useState(false);
 
@@ -221,7 +263,11 @@ function SubAgentPresetActions({ presetId, presetName, toolId }: { presetId: str
 
   const handleApplyToSubagent = async (subAgentId: string) => {
     try {
-      const result = await invoke<PresetApplyResult>("apply_preset_to_subagent", { presetId, toolId, subAgentId });
+      const result = await invoke<PresetApplyResult>("apply_preset_to_subagent", {
+        presetId,
+        toolId,
+        subAgentId,
+      });
       if (result.failures.length > 0) {
         toast.warning(`部分成功: ${result.successCount} 项成功, ${result.failures.length} 项失败`);
       } else {
@@ -246,8 +292,11 @@ function SubAgentPresetActions({ presetId, presetName, toolId }: { presetId: str
   return (
     <div>
       <button
-        onClick={() => { setExpanded(!expanded); if (!expanded) loadSubAgents(); }}
-        className="text-muted-foreground text-[10px] hover:text-foreground"
+        onClick={() => {
+          setExpanded(!expanded);
+          if (!expanded) loadSubAgents();
+        }}
+        className="text-muted-foreground hover:text-foreground text-[10px]"
       >
         {expanded ? "收起子 Agent" : "子 Agent ▼"}
       </button>
@@ -256,12 +305,21 @@ function SubAgentPresetActions({ presetId, presetName, toolId }: { presetId: str
           {subAgents.map((sa) => (
             <div key={sa} className="flex items-center gap-1 text-[10px]">
               <span className="text-muted-foreground">{sa}</span>
-              <Button size="sm" variant="ghost" className="h-4 px-1 text-[9px]"
-                onClick={() => handleApplyToSubagent(sa)}>
-                <Play className="mr-0.5 h-2 w-2" />应用
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-4 px-1 text-[9px]"
+                onClick={() => handleApplyToSubagent(sa)}
+              >
+                <Play className="mr-0.5 h-2 w-2" />
+                应用
               </Button>
-              <Button size="sm" variant="ghost" className="h-4 w-4 p-0 text-[9px]"
-                onClick={() => handleDeactivateFromSubagent(sa)}>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-4 w-4 p-0 text-[9px]"
+                onClick={() => handleDeactivateFromSubagent(sa)}
+              >
                 <X className="h-2 w-2" />
               </Button>
             </div>

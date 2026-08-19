@@ -1,7 +1,6 @@
 // 资源管理服务 - 自动扫描导入 skills 和 plugins
 
 use crate::linker;
-use log::info;
 
 /// SKILL.md 元数据
 struct SkillMeta {
@@ -12,13 +11,8 @@ struct SkillMeta {
 /// 从 SKILL.md 提取 name 和 description（YAML front matter）
 fn parse_skill_meta(skill_md_path: &std::path::Path) -> Option<SkillMeta> {
     let content = std::fs::read_to_string(skill_md_path).ok()?;
-    let front_matter = if content.starts_with("---") {
-        let after = &content[3..];
-        if let Some(end) = after.find("---") {
-            &after[..end]
-        } else {
-            return None;
-        }
+    let front_matter = if let Some(after) = content.strip_prefix("---") {
+        &after[..after.find("---")?]
     } else {
         &content[..]
     };

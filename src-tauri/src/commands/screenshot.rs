@@ -9,7 +9,7 @@ pub struct ScreenshotResult {
 }
 
 #[tauri::command]
-pub fn capture_window_screenshot(app: tauri::AppHandle) -> ScreenshotResult {
+pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;

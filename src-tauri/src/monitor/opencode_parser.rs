@@ -141,13 +141,11 @@ fn get_latest_session_for_project(
         .map(String::from)
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| {
-            directory.split('/').filter(|s| !s.is_empty()).last().unwrap_or("Unknown").to_string()
+            directory.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string()
         });
 
     let session_title = title.clone();
-    let display_message = last_message.or_else(|| {
-        if !title.is_empty() { Some(title) } else { None }
-    });
+    let display_message = last_message.or(if !title.is_empty() { Some(title) } else { None });
 
     Some(Session {
         id: session_id,
@@ -190,7 +188,7 @@ fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> O
     let status = determine_opencode_status(process.cpu_usage, last_role.as_deref(), last_msg_time, time_updated);
     let last_activity_at = ms_to_iso(time_updated);
 
-    let project_name = directory.split('/').filter(|s| !s.is_empty()).last().unwrap_or("Unknown").to_string();
+    let project_name = directory.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string();
     let display_message = last_message.or_else(|| {
         if !title.is_empty() { Some(title.clone()) } else { None }
     });
@@ -264,15 +262,11 @@ fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
         for row in rows.flatten() {
             if let Ok(part) = serde_json::from_str::<PartData>(&row) {
                 match part.part_type.as_deref() {
-                    Some("text") => {
-                        if text_content.is_none() {
-                            text_content = part.text;
-                        }
+                    Some("text") if text_content.is_none() => {
+                        text_content = part.text;
                     }
-                    Some("reasoning") => {
-                        if reasoning_content.is_none() {
-                            reasoning_content = part.text;
-                        }
+                    Some("reasoning") if reasoning_content.is_none() => {
+                        reasoning_content = part.text;
                     }
                     _ => {}
                 }

@@ -25,6 +25,11 @@ export default tseslint.config(
       "no-undef": "off",
       "react-hooks/set-state-in-effect": "off",
       "react-hooks/immutability": "off",
+      // 下划线前缀的参数/变量/捕获错误视为"有意不用"，跳过检查
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
+      ],
     },
   },
 );

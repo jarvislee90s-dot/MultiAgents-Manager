@@ -14,7 +14,14 @@ interface Props {
   onConfirm: () => void;
 }
 
-export function CompatibilityDialog({ open, presetId, toolId, toolName, onClose, onConfirm }: Props) {
+export function CompatibilityDialog({
+  open,
+  presetId,
+  toolId,
+  toolName,
+  onClose,
+  onConfirm,
+}: Props) {
   const [report, setReport] = useState<CompatibilityReport | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -27,7 +34,10 @@ export function CompatibilityDialog({ open, presetId, toolId, toolName, onClose,
   const loadReport = async () => {
     setLoading(true);
     try {
-      const data = await invoke<CompatibilityReport>("check_preset_compatibility", { presetId, toolId });
+      const data = await invoke<CompatibilityReport>("check_preset_compatibility", {
+        presetId,
+        toolId,
+      });
       setReport(data);
     } catch (e) {
       console.error("Failed to check compatibility:", e);
@@ -44,20 +54,22 @@ export function CompatibilityDialog({ open, presetId, toolId, toolName, onClose,
         </DialogHeader>
 
         {loading ? (
-          <div className="text-center py-4 text-xs text-muted-foreground">检查兼容性...</div>
+          <div className="text-muted-foreground py-4 text-center text-xs">检查兼容性...</div>
         ) : report ? (
           <div className="space-y-3">
             {/* Compatible resources */}
             {report.compatible.length > 0 && (
               <div>
-                <h4 className="text-xs font-medium text-green-600 mb-1">
-                  <CheckCircle className="inline h-3 w-3 mr-1" />
+                <h4 className="mb-1 text-xs font-medium text-green-600">
+                  <CheckCircle className="mr-1 inline h-3 w-3" />
                   兼容的资源 ({report.compatible.length})
                 </h4>
                 <div className="space-y-1">
                   {report.compatible.map((item) => (
                     <div key={item.id} className="flex items-center gap-2 text-xs">
-                      <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px]">{item.kind}</span>
+                      <span className="rounded bg-green-50 px-1.5 py-0.5 text-[10px]">
+                        {item.kind}
+                      </span>
                       <span>{item.name}</span>
                     </div>
                   ))}
@@ -68,14 +80,16 @@ export function CompatibilityDialog({ open, presetId, toolId, toolName, onClose,
             {/* Incompatible resources */}
             {report.incompatible.length > 0 && (
               <div>
-                <h4 className="text-xs font-medium text-orange-600 mb-1">
-                  <XCircle className="inline h-3 w-3 mr-1" />
+                <h4 className="mb-1 text-xs font-medium text-orange-600">
+                  <XCircle className="mr-1 inline h-3 w-3" />
                   不兼容的资源 ({report.incompatible.length})
                 </h4>
                 <div className="space-y-1">
                   {report.incompatible.map((item) => (
                     <div key={item.id} className="flex items-center gap-2 text-xs">
-                      <span className="rounded bg-orange-50 px-1.5 py-0.5 text-[10px]">{item.kind}</span>
+                      <span className="rounded bg-orange-50 px-1.5 py-0.5 text-[10px]">
+                        {item.kind}
+                      </span>
                       <span>{item.name}</span>
                       <span className="text-muted-foreground text-[10px]">({item.reason})</span>
                     </div>
@@ -84,8 +98,10 @@ export function CompatibilityDialog({ open, presetId, toolId, toolName, onClose,
               </div>
             )}
 
-            <div className="flex justify-end gap-2 mt-4">
-              <Button size="sm" variant="outline" onClick={onClose}>取消</Button>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={onClose}>
+                取消
+              </Button>
               <Button size="sm" onClick={onConfirm} disabled={report.compatible.length === 0}>
                 确认应用 ({report.compatible.length} 项)
               </Button>

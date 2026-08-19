@@ -8,7 +8,7 @@ pub mod hooks;
 
 // ===== notify 文件监听集成（FR-5c）=====
 
-use notify::{Watcher, RecursiveMode, EventKind, RecommendedWatcher};
+use notify::{Watcher, RecursiveMode, EventKind};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 

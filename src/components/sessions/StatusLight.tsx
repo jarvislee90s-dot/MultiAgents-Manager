@@ -68,9 +68,7 @@ export function StatusLight({
         )}
       />
       {size === "md" && (
-        <span className="text-muted-foreground text-xs font-medium">
-          {config.label}
-        </span>
+        <span className="text-muted-foreground text-xs font-medium">{config.label}</span>
       )}
     </div>
   );

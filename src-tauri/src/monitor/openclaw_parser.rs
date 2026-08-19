@@ -23,8 +23,6 @@ struct AgentEntry {
     id: String,
     name: Option<String>,
     workspace: Option<String>,
-    #[serde(rename = "agentDir")]
-    agent_dir: Option<String>,
 }
 
 /// 获取 OpenClaw 会话

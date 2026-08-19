@@ -55,7 +55,9 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
 
   const selectAll = () => {
     const all = new Set<string>();
-    Object.values(resources).flat().forEach((r) => all.add(r.id));
+    Object.values(resources)
+      .flat()
+      .forEach((r) => all.add(r.id));
     setSelected(all);
   };
 
@@ -79,8 +81,13 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     }
 
     try {
-      const stats = await invoke<{ imported: number; skippedDup: number }>("import_native_resources", { items });
-      toast.success(`成功导入 ${stats.imported} 个资源${stats.skippedDup > 0 ? `，跳过 ${stats.skippedDup} 个` : ""}`);
+      const stats = await invoke<{ imported: number; skippedDup: number }>(
+        "import_native_resources",
+        { items }
+      );
+      toast.success(
+        `成功导入 ${stats.imported} 个资源${stats.skippedDup > 0 ? `，跳过 ${stats.skippedDup} 个` : ""}`
+      );
       onImported();
       onClose();
     } catch (e) {
@@ -93,12 +100,12 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
+      <DialogContent className="max-h-[80vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-sm">导入原生资源</DialogTitle>
         </DialogHeader>
 
-        <div className="flex gap-2 mb-2">
+        <div className="mb-2 flex gap-2">
           <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={selectAll}>
             全选
           </Button>
@@ -108,9 +115,9 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
         </div>
 
         {loading ? (
-          <div className="text-center py-4 text-xs text-muted-foreground">扫描中...</div>
+          <div className="text-muted-foreground py-4 text-center text-xs">扫描中...</div>
         ) : totalCount === 0 ? (
-          <div className="text-center py-4 text-xs text-muted-foreground">未发现原生资源</div>
+          <div className="text-muted-foreground py-4 text-center text-xs">未发现原生资源</div>
         ) : (
           <div className="space-y-3">
             {TOOLS.map((tool) => {
@@ -118,18 +125,23 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
               if (toolResources.length === 0) return null;
               return (
                 <div key={tool.id}>
-                  <h4 className="text-xs font-medium mb-1 flex items-center gap-1.5">
+                  <h4 className="mb-1 flex items-center gap-1.5 text-xs font-medium">
                     <ToolIcon toolId={tool.id} size={14} />
                     {tool.label}
                   </h4>
                   <div className="space-y-1">
                     {toolResources.map((res) => (
-                      <label key={res.id} className="flex items-center gap-2 text-xs cursor-pointer">
+                      <label
+                        key={res.id}
+                        className="flex cursor-pointer items-center gap-2 text-xs"
+                      >
                         <Checkbox
                           checked={selected.has(res.id)}
                           onCheckedChange={() => toggleSelect(res.id)}
                         />
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px]">{res.kind}</span>
+                        <span className="bg-muted rounded px-1.5 py-0.5 text-[10px]">
+                          {res.kind}
+                        </span>
                         <span>{res.name}</span>
                       </label>
                     ))}
@@ -140,8 +152,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
           </div>
         )}
 
-        <div className="flex justify-end gap-2 mt-4">
-          <Button size="sm" variant="outline" onClick={onClose}>取消</Button>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={onClose}>
+            取消
+          </Button>
           <Button size="sm" onClick={handleImport} disabled={selectedCount === 0}>
             导入选中 ({selectedCount})
           </Button>

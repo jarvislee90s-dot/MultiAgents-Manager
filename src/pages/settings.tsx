@@ -11,7 +11,13 @@ import { ShortcutInput } from "@/components/common/shortcut-input";
 import { Moon, Sun, Monitor, Palette, Keyboard, Bell, Volume2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { sendNotification } from "@tauri-apps/plugin-notification";
-import { playTestSound, getAudioConfig, saveUserFrequencies, playWaitingSound, playFinishedSound } from "@/lib/audio";
+import {
+  playTestSound,
+  getAudioConfig,
+  saveUserFrequencies,
+  playWaitingSound,
+  playFinishedSound,
+} from "@/lib/audio";
 import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
 import { toast } from "sonner";
@@ -34,7 +40,11 @@ export default function SettingsPage() {
     await toggleWindow("main");
   }, []);
 
-  const updateAudioConfig = (status: "waiting" | "finished", key: "primary" | "secondary", value: number) => {
+  const updateAudioConfig = (
+    status: "waiting" | "finished",
+    key: "primary" | "secondary",
+    value: number
+  ) => {
     const next = {
       ...audioConfig,
       [status]: {
@@ -55,7 +65,7 @@ export default function SettingsPage() {
     }
   }, [handleShowMainWindow]);
 
-   useEffect(() => {
+  useEffect(() => {
     const loadNotificationSetting = async () => {
       try {
         const value = await invoke<string | null>("get_setting", { key: "notifications_enabled" });
@@ -224,9 +234,7 @@ export default function SettingsPage() {
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">通知设置</h2>
-                <p className="text-muted-foreground text-sm">
-                  配置会话状态变更的提醒方式
-                </p>
+                <p className="text-muted-foreground text-sm">配置会话状态变更的提醒方式</p>
               </div>
               <div className="space-y-0">
                 <div className="flex items-center justify-between py-2.5">
@@ -248,9 +256,7 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
                     <label className="text-sm font-medium">提示音测试</label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      播放等待状态的提示音
-                    </p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">播放等待状态的提示音</p>
                   </div>
                   <Button variant="outline" size="sm" onClick={() => playTestSound()}>
                     <Volume2 className="mr-1.5 h-3.5 w-3.5" />
@@ -267,14 +273,26 @@ export default function SettingsPage() {
                         type="number"
                         className="h-7 w-24 text-xs"
                         value={audioConfig.waiting.primary}
-                        onChange={(e) => updateAudioConfig("waiting", "primary", parseFloat(e.currentTarget.value) || 880)}
+                        onChange={(e) =>
+                          updateAudioConfig(
+                            "waiting",
+                            "primary",
+                            parseFloat(e.currentTarget.value) || 880
+                          )
+                        }
                       />
                       <span className="text-muted-foreground text-xs">Hz</span>
                       <Input
                         type="number"
                         className="h-7 w-24 text-xs"
                         value={audioConfig.waiting.secondary}
-                        onChange={(e) => updateAudioConfig("waiting", "secondary", parseFloat(e.currentTarget.value) || 1174.66)}
+                        onChange={(e) =>
+                          updateAudioConfig(
+                            "waiting",
+                            "secondary",
+                            parseFloat(e.currentTarget.value) || 1174.66
+                          )
+                        }
                       />
                       <span className="text-muted-foreground text-xs">Hz</span>
                     </div>
@@ -284,7 +302,13 @@ export default function SettingsPage() {
                         type="number"
                         className="h-7 w-24 text-xs"
                         value={audioConfig.finished.primary}
-                        onChange={(e) => updateAudioConfig("finished", "primary", parseFloat(e.currentTarget.value) || 440)}
+                        onChange={(e) =>
+                          updateAudioConfig(
+                            "finished",
+                            "primary",
+                            parseFloat(e.currentTarget.value) || 440
+                          )
+                        }
                       />
                       <span className="text-muted-foreground text-xs">Hz</span>
                     </div>
@@ -304,9 +328,7 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
                     <label className="text-sm font-medium">桌面通知测试</label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      发送一条测试通知
-                    </p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">发送一条测试通知</p>
                   </div>
                   <Button
                     variant="outline"
