@@ -12,7 +12,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4RUVGNjc2NzI5NDZEQwpSV1RjUmlsblorK09CbkNkb1Q1WWZuRUtDdmpWNXhmdjRGblB1REZmYmRmODNmNUErWlNtVG5hZAo=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFNUM2ODkzRkYzNjQwRjgKUldUNFFEYi9rMmhjWHRoN1IvMERlOEw4aEpSV25tdDl3TCtDMkZsL2wycGtqbnRraXdUb3BxV2wK",
       "endpoints": [
         "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/latest/download/latest.json"
       ],
