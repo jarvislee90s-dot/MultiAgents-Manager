@@ -14,7 +14,6 @@ concurrency:
 jobs:
   release:
     runs-on: ${{ matrix.os }}
-    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +30,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: pnpm
 
       - name: Setup Rust
@@ -44,36 +43,31 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Prepare Tauri signing key
+      - name: Configure Tauri signing
         shell: bash
         run: |
-          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
-          if [ -z "$RAW" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set. Add it under Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
-          KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
-          if printf '%s' "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
-            printf '%s\n' "$RAW" > "$KEY_PATH"
-          elif DECODED=$(printf '%s' "$RAW" | base64 --decode 2>/dev/null) \
-               && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
-            printf '%s\n' "$DECODED" > "$KEY_PATH"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is set — updater artifacts will be signed."
+            RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+            KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
+            if printf '%s' "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
+              printf '%s\n' "$RAW" > "$KEY_PATH"
+            elif DECODED=$(printf '%s' "$RAW" | base64 --decode 2>/dev/null) \
+                 && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+              printf '%s\n' "$DECODED" > "$KEY_PATH"
+            else
+              printf '%s\n%s\n' "untrusted comment: tauri signing key" "$RAW" > "$KEY_PATH"
+            fi
+            echo "TAURI_SIGNING_PRIVATE_KEY=$(base64 < "$KEY_PATH" | tr -d '\r\n')" >> "$GITHUB_ENV"
+            if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+            fi
           else
-            printf '%s\n%s\n' "untrusted comment: tauri signing key" "$RAW" > "$KEY_PATH"
-          fi
-          echo "TAURI_SIGNING_PRIVATE_KEY=$(base64 < "$KEY_PATH" | tr -d '\r\n')" >> "$GITHUB_ENV"
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
-          fi
-
-      - name: Apple signing readiness check
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          if [ -n "${{ secrets.APPLE_CERTIFICATE }}" ]; then
-            echo "::warning::Apple signing secrets detected but the signing pipeline is not enabled yet. Building unsigned DMG. See docs/RELEASE.md."
-          else
-            echo "Building unsigned DMG (Apple signing secrets not configured, expected)."
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set. Disabling updater artifacts for this build."
+            echo "::warning::Generate one with: pnpm tauri signer generate -w ~/.tauri/multiagents-manager.key"
+            echo "::warning::Then add the private key to GitHub Secrets as TAURI_SIGNING_PRIVATE_KEY."
+            jq '.bundle.createUpdaterArtifacts = false' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
+            mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
           fi
 
       - name: Build Tauri App (macOS)
@@ -238,11 +232,16 @@ jobs:
           }
           const pubDate = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
           const payload = { version, notes, pub_date: pubDate, platforms };
-          fs.writeFileSync("latest.json", JSON.stringify(payload, null, 2) + "\n");
-          console.log(fs.readFileSync("latest.json", "utf8"));
+          if (Object.keys(platforms).length > 0) {
+            fs.writeFileSync("latest.json", JSON.stringify(payload, null, 2) + "\n");
+            console.log(fs.readFileSync("latest.json", "utf8"));
+          } else {
+            console.log("No signed assets found, skipping latest.json (TAURI_SIGNING_PRIVATE_KEY not configured)");
+          }
           NODE
 
       - name: Upload latest.json to release
+        if: hashFiles('latest.json') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"
