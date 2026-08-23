@@ -2,7 +2,7 @@ version: 2
 updates:
   - package-ecosystem: npm
     directory: /
-    schedule: { interval: monthly }
+    schedule: { interval: quarterly }
     open-pull-requests-limit: 5
     labels: [dependencies, frontend]
     groups:
@@ -10,7 +10,7 @@ updates:
         update-types: [minor, patch]
   - package-ecosystem: cargo
     directory: /src-tauri/
-    schedule: { interval: monthly }
+    schedule: { interval: quarterly }
     open-pull-requests-limit: 5
     labels: [dependencies, backend]
     groups:
