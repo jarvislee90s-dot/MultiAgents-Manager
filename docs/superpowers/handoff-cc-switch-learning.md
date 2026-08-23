@@ -85,8 +85,7 @@ cc-switch/
 ```
 MultiAgents-Manager/
 ├── .gitignore                # 需添加 TEST/ .playwright-mcp/
-├── AGENTS.md                 # 存在，简短
-├── CLAUDE.md                 # ✅ 刚创建
+├── AGENTS.md                 # ✅ 合并后的项目指令/架构说明
 ├── README.md                 # ✅ 刚更新
 ├── src-tauri/src/
 │   ├── commands.rs           # ❌ 单文件 800+ 行
@@ -239,7 +238,7 @@ MultiAgents-Manager/
 
 - 项目宪法: `.specify/memory/constitution.md`
 - 项目指令: `AGENTS.md`
-- 项目说明: `CLAUDE.md`
+- 项目说明: `AGENTS.md`
 - 已有 Spec 模板: `specs/001-multi-agent-platform/spec.md`
 - cc-switch 仓库: https://github.com/farion1231/cc-switch
 - cc-switch GitHub API 目录树: `https://api.github.com/repos/farion1231/cc-switch/git/trees/main?recursive=1`

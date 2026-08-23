@@ -42,12 +42,13 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 │   └── src/
 │       ├── adapter/       #   Agent 适配器（Claude / Codex / OpenCode / OpenClaw）
 │       ├── monitor/       #   进程扫描、会话解析、状态判定
-│       ├── manager/       #   Skill/MCP/Plugin 管理、预设组、兼容性检查
+│       ├── services/      #   按功能域拆分的业务服务（skill/resource/mcp/preset/plugin/manifest）
 │       ├── linker/        #   三层符号链接映射（SSOT → Tool → SubAgent）
-│       ├── terminal/      #   终端聚焦（iTerm2 / Terminal.app / tmux）
+│       ├── commands/      #   按模块拆分的 Tauri IPC 命令
+│       ├── database/      #   SQLite 数据层（schema/migration/dao）
+│       ├── window/        #   终端聚焦（iTerm2 / Terminal.app / tmux）
 │       ├── plugins/       #   系统托盘
-│       ├── store.rs       #   SQLite 数据层
-│       └── commands.rs    #   Tauri IPC 命令
+│       └── session/       #   会话模型与状态枚举
 ├── docs/                  # 开发文档
 ├── scripts/               # 构建/发布脚本
 ├── research/              # 早期调研文档（本地参考，不入库）
@@ -65,14 +66,14 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 
 - **`adapter/`** — 工具适配器，实现 `AgentAdapter` trait。每个适配器负责发现进程、解析会话、读写配置、管理 skill 目录。
 - **`monitor/`** — 进程扫描、JSONL 会话解析、Hook 事件读取、状态判定。
-- **`manager/`** — Skill 安装/启用/禁用、MCP 配置写入（JSON/TOML/JSONC）、预设组应用/取消、插件管理。
+- **`services/`** — 按功能域拆分：`skill/`（安装/启用/禁用）、`resource/`（扫描/导入/补链）、`mcp/`（JSON/TOML/JSONC）、`preset/`、`plugin/`、`manifest/`。
 - **`linker/`** — 符号链接/交接点管理，三层映射：
   - **Layer 1**: SSOT 全局仓库 `~/.mam/skills/`
   - **Layer 2**: 工具级激活目录 `~/.mam/active/<tool>/skills/`
   - **Layer 3**: 子 Agent 级激活目录 `~/.mam/active/<tool>/<sub-agent>/skills/`
-- **`store.rs`** — SQLite 数据层（`~/.mam/mam.db`）。
-- **`commands.rs`** — 所有 `#[tauri::command]` IPC 处理器。
-- **`terminal/`** — 通过 AppleScript 聚焦终端（iTerm2/Terminal.app）和 tmux。
+- **`database/`** — SQLite 数据层（`~/.mam/mam.db`，schema/migration/dao）。
+- **`commands/`** — 所有 `#[tauri::command]` IPC 处理器，按模块拆分。
+- **`window/`** — 通过 AppleScript 聚焦终端（iTerm2/Terminal.app）和 tmux。
 - **`plugins/system_tray.rs`** — 系统托盘（状态指示 + 预设菜单）。
 
 ### 前端（React/TypeScript）— `src/`
@@ -88,7 +89,7 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 ### IPC 数据流
 
 ```
-前端 (invoke) → commands.rs → manager/linker/adapter → store.rs (SQLite)
+前端 (invoke) → commands/ → services/linker/adapter → database/ (SQLite)
                                       ↓
                                 文件系统（符号链接、配置文件）
 ```

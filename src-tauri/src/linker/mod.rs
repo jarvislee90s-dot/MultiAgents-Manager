@@ -38,6 +38,13 @@ pub fn list_repo_skills() -> Vec<String> {
 pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
     // 如果目标已存在，先移除
     if target.exists() || target.is_symlink() {
+        // 安全保护：若目标经父级 symlink 穿透到 SSOT 仓库，说明已被套件链接接管，
+        // 此时不应删除真实 SSOT 目录，直接返回即可。
+        if !target.is_symlink()
+            && source.canonicalize().ok() == target.canonicalize().ok()
+        {
+            return Ok(());
+        }
         remove_link(target)?;
     }
 

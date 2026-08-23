@@ -66,11 +66,11 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
   };
 
   const handleImport = async () => {
-    const items: [string, string][] = [];
+    const items: [string, string, string][] = [];
     for (const toolId of Object.keys(resources)) {
       for (const res of resources[toolId]) {
         if (selected.has(res.id)) {
-          items.push([res.sourcePath, res.name]);
+          items.push([res.sourcePath, res.name, toolId]);
         }
       }
     }

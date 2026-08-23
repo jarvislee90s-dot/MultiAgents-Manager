@@ -6,7 +6,7 @@ export async function listExtensionsWithAssignments() {
 export async function scanNativeResources(toolId: string) {
   return await invoke("scan_native_resources", { toolId });
 }
-export async function importNativeResources(items: [string, string][]) {
+export async function importNativeResources(items: [string, string, string][]) {
   return await invoke<ImportStats>("import_native_resources", { items });
 }
 export async function listToolResources(toolId: string) {

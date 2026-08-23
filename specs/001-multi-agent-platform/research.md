@@ -38,7 +38,7 @@
 **Skill 目录**：`~/.claude/skills/`
 **Plugin 目录**：`~/.claude/plugins/`（registry at `installed_plugins.json`）
 **子 Agent**：`~/.claude/agents/*.md`
-**Rules**：`CLAUDE.md`
+**Rules**：`AGENTS.md`
 **项目标记**：`.claude/` 目录
 
 **参考实现**：agent-sessions `process/claude.rs`（164行）、`session/parser.rs`（690行）、`session/status.rs`（192行）

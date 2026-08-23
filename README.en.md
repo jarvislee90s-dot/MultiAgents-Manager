@@ -110,22 +110,24 @@ src-tauri/src/
 │   ├── openclaw_parser.rs # OpenClaw state.json parser
 │   ├── status.rs      #   Pure-message status determination
 │   └── hooks.rs       #   Hook registration + event file reader
-├── manager/
-│   ├── mod.rs         #   Skill install/enable/disable + auto-import
-│   ├── mcp.rs         #   MCP config writer (JSON/TOML/JSONC)
-│   ├── preset.rs      #   Preset apply/deactivate + compatibility check
-│   └── plugin.rs      #   Plugin management
+├── services/          #   Business services split by domain
+│   ├── skill/         #   Skill install/enable/disable + auto-import
+│   ├── resource/      #   Resource scan, SSOT import, link sync
+│   ├── mcp/           #   MCP config writer (JSON/TOML/JSONC)
+│   ├── preset/        #   Preset apply/deactivate + compatibility check
+│   ├── plugin/        #   Plugin management
+│   └── manifest/      #   Extension manifest validation + update check
 ├── linker/
 │   ├── mod.rs         #   Symlink/Junction management + security checks
 │   ├── detector.rs    #   Tool installation detection
 │   ├── layer2.rs      #   Layer 2 tool-level active directory
 │   └── layer3.rs      #   Layer 3 sub-agent-level active directory
-├── terminal/          #   Terminal focus (iTerm2/Terminal.app/tmux)
+├── commands/          #   Tauri IPC commands split by module
+├── database/          #   SQLite data layer (schema/migration/dao)
+├── session/           #   Session model + status enum
+├── window/            #   Terminal focus (iTerm2 / Terminal.app / tmux)
 ├── plugins/
 │   └── system_tray.rs #   System tray with status + preset menu
-├── store.rs           #   SQLite data layer
-├── commands.rs        #   Tauri IPC commands
-├── session/           #   Session model + status enum
 └── lib.rs             #   App entry + plugin registration
 
 src/
@@ -242,7 +244,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-Please read [CLAUDE.md](CLAUDE.md) for project architecture and development guidelines.
+Please read [AGENTS.md](AGENTS.md) for project architecture and development guidelines.
 
 ---
 

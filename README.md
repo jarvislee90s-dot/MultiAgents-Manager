@@ -110,22 +110,24 @@ src-tauri/src/
 │   ├── openclaw_parser.rs # OpenClaw state.json 解析器
 │   ├── status.rs      #   纯消息状态判定
 │   └── hooks.rs       #   Hook 注册 + 事件文件读取
-├── manager/
-│   ├── mod.rs         #   Skill 安装/启用/禁用 + 自动导入
-│   ├── mcp.rs         #   MCP 配置写入（JSON/TOML/JSONC）
-│   ├── preset.rs      #   预设应用/取消 + 兼容性检查
-│   └── plugin.rs      #   插件管理
+├── services/          #   业务服务（按功能域拆分）
+│   ├── skill/         #   Skill 安装/启用/禁用 + 自动导入
+│   ├── resource/      #   资源扫描、SSOT 导入、补链
+│   ├── mcp/           #   MCP 配置写入（JSON/TOML/JSONC）
+│   ├── preset/        #   预设应用/取消 + 兼容性检查
+│   ├── plugin/        #   插件管理
+│   └── manifest/      #   扩展清单校验与更新检查
 ├── linker/
 │   ├── mod.rs         #   符号链接/交接点管理 + 安全检查
 │   ├── detector.rs    #   工具安装检测
 │   ├── layer2.rs      #   Layer 2 工具级激活目录
 │   └── layer3.rs      #   Layer 3 子 Agent 级激活目录
-├── terminal/          #   终端聚焦（iTerm2/Terminal.app/tmux）
+├── commands/          #   按模块拆分的 Tauri IPC 命令
+├── database/          #   SQLite 数据层（schema/migration/dao）
+├── session/           #   会话模型 + 状态枚举
+├── window/            #   终端聚焦（iTerm2/Terminal.app/tmux）
 ├── plugins/
 │   └── system_tray.rs #   系统托盘（状态 + 预设菜单）
-├── store.rs           #   SQLite 数据层
-├── commands.rs        #   Tauri IPC 命令
-├── session/           #   会话模型 + 状态枚举
 └── lib.rs             #   应用入口 + 插件注册
 
 src/
@@ -242,7 +244,7 @@ pnpm lint:fix     # ESLint 自动修复
 4. 推送到分支（`git push origin feature/amazing-feature`）
 5. 打开 Pull Request
 
-请阅读 [CLAUDE.md](CLAUDE.md) 了解项目架构与开发规范。
+请阅读 [AGENTS.md](AGENTS.md) 了解项目架构与开发规范。
 
 ---
 

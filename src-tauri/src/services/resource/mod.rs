@@ -83,6 +83,78 @@ pub struct ImportStats {
     pub source_counts: Vec<(String, usize)>,
 }
 
+/// 从源路径推断 skill 所属工具
+fn detect_source_tool(source_path: &str) -> Option<String> {
+    let path = std::path::Path::new(source_path);
+    for tool_id in ["claude", "codex", "opencode", "openclaw"] {
+        if let Some(dir) = crate::adapter::primary_skill_dir(tool_id) {
+            if path.starts_with(&dir) {
+                return Some(tool_id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 为已导入但尚未建立工具链接的 skill 补链（尊重用户显式禁用）
+pub fn sync_imported_skill_links() {
+    for ext in crate::database::list_extensions() {
+        if ext.kind != "skill" {
+            continue;
+        }
+
+        let source_tool = ext.source_tool.clone()
+            .or_else(|| detect_source_tool(&ext.source_path));
+        let Some(tool_id) = source_tool else {
+            continue;
+        };
+
+        let assignments = crate::database::list_assignments(&tool_id);
+        if assignments.iter().any(|a| a.extension_id == ext.id && !a.enabled) {
+            continue;
+        }
+
+        let already_linked = crate::adapter::primary_skill_dir(&tool_id)
+            .map(|dir| dir.join(&ext.name).is_symlink())
+            .unwrap_or(false);
+        if already_linked {
+            continue;
+        }
+
+        if let Err(e) = crate::services::enable_skill_for_tool(&ext.name, &tool_id) {
+            log::warn!("补链 {} 到 {} 失败: {}", ext.name, tool_id, e);
+        }
+    }
+
+    // 兼容历史数据：assignment 表里可能已有 skill 记录，但 extensions 表没有对应行
+    let mut assignments: Vec<_> = crate::database::list_all_assignments();
+    // 先建顶层套件链接，再补嵌套子 skill，避免父目录先被创建成真实目录
+    assignments.sort_by_key(|a| a.extension_id.matches('/').count());
+    for assignment in assignments {
+        if !assignment.enabled {
+            continue;
+        }
+        let Some(skill_name) = assignment.extension_id.strip_prefix("skill-") else {
+            continue;
+        };
+        let repo_skill = crate::linker::ensure_repo_dir().join(skill_name);
+        if !repo_skill.exists() {
+            continue;
+        }
+
+        let already_linked = crate::adapter::primary_skill_dir(&assignment.agent_tool_id)
+            .map(|dir| dir.join(skill_name).is_symlink())
+            .unwrap_or(false);
+        if already_linked {
+            continue;
+        }
+
+        if let Err(e) = crate::services::enable_skill_for_tool(skill_name, &assignment.agent_tool_id) {
+            log::warn!("补链 {} 到 {} 失败: {}", skill_name, assignment.agent_tool_id, e);
+        }
+    }
+}
+
 /// 扫描各工具的 skill 目录，递归导入到全局仓库（含去重）
 pub fn auto_import_extensions(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
@@ -96,12 +168,12 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         return ImportStats { imported: 0, newly_added: 0, skipped_dup: 0, source_counts: Vec::new() };
     }
 
-    let skill_sources = [
-        ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
-        ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("skills")),
-        ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
-        ("openclaw", dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
-    ];
+    let skill_sources: Vec<(&str, std::path::PathBuf)> = [
+        "claude", "codex", "opencode", "openclaw",
+    ].into_iter().filter_map(|tool_id| {
+        crate::adapter::primary_skill_dir(tool_id)
+            .map(|dir| (tool_id, dir))
+    }).collect();
 
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut imported: usize = 0;
@@ -144,6 +216,10 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 is_native: false,
             };
             let _ = crate::database::insert_extension(&ext);
+            // 默认按来源工具自动创建工具目录链接，让 harness 立即可用
+            if let Err(e) = crate::services::enable_skill_for_tool(skill_name, tool_id) {
+                log::warn!("导入 {} 后为 {} 创建链接失败: {}", skill_name, tool_id, e);
+            }
             imported += 1;
         }
     }

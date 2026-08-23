@@ -8,7 +8,7 @@
 - **OpenClaw 支持**: 新增第四工具支持 — 进程扫描、会话解析（state.json）、Skill 映射
 - **原生资源扫描导入**: 扫描本机已安装的 Skill/MCP/Plugin，一键导入统一仓库
 - **兼容性检查**: 预设组应用前检查哪些资源可用于目标工具
-- **CLAUDE.md**: 添加项目架构文档，方便 AI 工具理解代码库
+- **AGENTS.md**: 合并项目指令与架构文档，方便 AI 工具理解代码库
 - **Tauri DevTools**: 启用 `devtools` feature，支持 Safari Web Inspector 调试
 - **浏览器渲染 Mock**: 创建 `tauri-mock.ts`，支持在浏览器中预览应用 UI
 

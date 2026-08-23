@@ -7,14 +7,7 @@ use log::info;
 
 /// 获取工具的 skill 目录
 fn get_tool_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
-    let adapter: Box<dyn AgentAdapter> = match tool_id {
-        "claude" => Box::new(ClaudeAdapter),
-        "codex" => Box::new(CodexAdapter),
-        "opencode" => Box::new(OpenCodeAdapter),
-        "openclaw" => Box::new(OpenClawAdapter),
-        _ => return None,
-    };
-    adapter.skill_dirs().into_iter().next()
+    crate::adapter::primary_skill_dir(tool_id)
 }
 
 /// 安装 skill 到全局仓库
@@ -49,10 +42,23 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
         let _ = std::fs::create_dir_all(&tool_skill_dir);
         let tool_target = tool_skill_dir.join(skill_name);
+        let mut should_create_tool_link = true;
         if tool_target.exists() || tool_target.is_symlink() {
-            let _ = crate::linker::remove_link(&tool_target);
+            // 若父级已是链接（如 superpowers 套件），目标路径可能穿透到 SSOT；
+            // 此时子技能已经可用，不应再次删除 SSOT 中的真实目录。
+            let repo_skill = crate::linker::ensure_repo_dir().join(skill_name);
+            let reaches_ssot = !tool_target.is_symlink()
+                && tool_target.canonicalize().ok()
+                    == repo_skill.canonicalize().ok();
+            if reaches_ssot {
+                should_create_tool_link = false;
+            } else {
+                let _ = crate::linker::remove_link(&tool_target);
+            }
         }
-        crate::linker::create_link(&layer2_path, &tool_target)?;
+        if should_create_tool_link {
+            crate::linker::create_link(&layer2_path, &tool_target)?;
+        }
     }
 
     let ext_id = format!("skill-{}", skill_name);

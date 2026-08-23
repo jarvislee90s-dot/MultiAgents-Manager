@@ -14,6 +14,7 @@ use log::info;
 pub use skill::{install_skill, enable_skill_for_tool, disable_skill_for_tool, is_skill_in_tool_range, assign_skill_to_subagent};
 // 重新导出 resource 函数
 pub use resource::{auto_import_extensions, ImportStats};
+pub use resource::sync_imported_skill_links;
 
 /// 为工具启用/禁用 Plugin（委托到 plugin 子模块）
 pub fn toggle_plugin(plugin_name: &str, tool_id: &str, enabled: bool, kind: &str) -> Result<(), String> {

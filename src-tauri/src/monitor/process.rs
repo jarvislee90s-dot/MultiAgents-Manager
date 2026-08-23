@@ -78,6 +78,8 @@ fn find_processes_by_names(
         // 判断进程形态（CLI 还是 APP）
         // APP 形态：可执行文件首字母大写（如 "Codex"），CLI 首字母小写（如 "codex"）
         // 例：CLI 路径 ~/.cargo/bin/codex → base "codex"；APP 路径 /Applications/Codex.app/Contents/MacOS/Codex → base "Codex"
+        // 注：新版 Codex 桌面端内嵌于 ChatGPT.app（/Applications/ChatGPT.app/Contents/Resources/codex app-server），
+        // basename 是小写 "codex"，但位于 .app 包内，同样应判为 APP 形态
         let form = if process_names.len() > 1 {
             // 多形态工具（如 Codex 有 CLI "codex" 和 APP "Codex"）
             let first = first_arg.unwrap().to_string_lossy();
@@ -87,8 +89,10 @@ fn find_processes_by_names(
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             // exe_base 第一个字符大写 → APP
-            let is_app = exe_base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-            if is_app { ProcessForm::App } else { ProcessForm::Cli }
+            let exe_upper = exe_base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+            // 可执行文件位于 .app 包内（如 ChatGPT.app 内嵌的 codex app-server）→ APP
+            let in_app_bundle = first.to_lowercase().contains(".app/contents");
+            if exe_upper || in_app_bundle { ProcessForm::App } else { ProcessForm::Cli }
         } else {
             ProcessForm::Cli
         };

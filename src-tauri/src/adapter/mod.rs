@@ -239,3 +239,39 @@ mod tests {
         eprintln!("=== END ===");
     }
 }
+/// 统一维护每个工具的原生 skill 根目录，避免扫描、清理和启用各自硬编码路径
+pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    match tool_id {
+        "claude" => Some(home_dir.join(".claude").join("skills")),
+        // Codex CLI 实际读取 ~/.agents/skills（项目约定 + 当前会话技能来源）
+        "codex" => Some(home_dir.join(".agents").join("skills")),
+        "opencode" => Some(home_dir.join(".config").join("opencode").join("skills")),
+        "openclaw" => Some(home_dir.join(".openclaw").join("skills")),
+        _ => None,
+    }
+}
+
+/// 获取当前用户环境下工具的主 skill 目录
+pub fn primary_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
+    skill_dir_for_tool(tool_id, &dirs::home_dir().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod skill_dir_tests {
+    use super::*;
+
+    #[test]
+    fn codex_skill_dir_uses_real_cli_directory() {
+        let dir = skill_dir_for_tool("codex", std::path::Path::new("/home/test"))
+            .expect("codex skill dir must be registered");
+        assert_eq!(dir, std::path::Path::new("/home/test/.agents/skills"));
+    }
+
+    #[test]
+    fn unknown_tool_has_no_skill_dir() {
+        assert_eq!(
+            skill_dir_for_tool("unknown", std::path::Path::new("/home/test")),
+            None
+        );
+    }
+}

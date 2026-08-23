@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Github, RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TitleBar } from "@/components/common/title-bar";
 import { WindowFrame } from "@/components/common/window-frame";
@@ -81,7 +81,7 @@ export default function AboutPage() {
         </div>
 
         <Button onClick={handleOpenGithub} className="w-full" variant="outline">
-          <Github className="mr-2 h-4 w-4" />
+          <ExternalLink className="mr-2 h-4 w-4" />
           GitHub
         </Button>
 

@@ -30,6 +30,7 @@ pub fn run() {
     ).try_init();
     database::init();
     services::auto_import_extensions(false);  // 首次启动，不强制
+    services::sync_imported_skill_links();    // 为历史导入的 skill 补建工具链接
     monitor::hooks::register_all_hooks();
 
     let builder = tauri::Builder::default()

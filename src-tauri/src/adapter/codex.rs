@@ -37,8 +37,10 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
-        // Codex CLI 使用 ~/.agents/skills/（与 AGENTS.md 约定一致）
-        vec![dirs::home_dir().unwrap_or_default().join(".agents").join("skills")]
+        // Codex CLI 实际读取 ~/.agents/skills，保持与扫描、启用一致
+        super::primary_skill_dir("codex")
+            .map(|dir| vec![dir])
+            .unwrap_or_else(|| vec![self.base_dir().join("skills")])
     }
 
     fn subagent_dir(&self) -> Option<std::path::PathBuf> {

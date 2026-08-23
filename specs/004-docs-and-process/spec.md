@@ -402,7 +402,7 @@
    - 插件系统：过于复杂，MVP 阶段过度设计，拒绝
    ```
 
-4. 将现有设计决策（来自 CLAUDE.md、项目宪法）逐步迁移到 ADR 格式
+4. 将现有设计决策（来自 AGENTS.md、项目宪法）逐步迁移到 ADR 格式
 
 **codex-plusplus 参考**：`docs/ARCHITECTURE.md` — 详细的架构决策文档，包含"为什么这样选"的理由
 

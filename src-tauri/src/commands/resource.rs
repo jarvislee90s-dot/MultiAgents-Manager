@@ -74,13 +74,7 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
 #[tauri::command]
 pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExtensionRecord> {
     let mut results = Vec::new();
-    let skill_dir = match tool_id.as_str() {
-        "claude" => Some(dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
-        "codex" => Some(dirs::home_dir().unwrap_or_default().join(".agents").join("skills")),
-        "opencode" => Some(dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
-        "openclaw" => Some(dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
-        _ => None,
-    };
+    let skill_dir = crate::adapter::primary_skill_dir(&tool_id);
     if let Some(dir) = skill_dir {
         if dir.exists() {
             let existing = crate::database::list_extensions();
@@ -104,10 +98,10 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
 }
 
 #[tauri::command]
-pub fn import_native_resources(items: Vec<(String, String)>) -> crate::services::ImportStats {
+pub fn import_native_resources(items: Vec<(String, String, String)>) -> crate::services::ImportStats {
     let mut imported = 0;
     let mut skipped = 0;
-    for (source_path, name) in items {
+    for (source_path, name, source_tool) in items {
         let path = std::path::Path::new(&source_path);
         if !path.exists() { skipped += 1; continue; }
         if let Err(e) = crate::linker::install_to_repo(path, &name) {
@@ -116,9 +110,14 @@ pub fn import_native_resources(items: Vec<(String, String)>) -> crate::services:
         let ext = crate::database::ExtensionRecord {
             id: format!("skill-{}", name), kind: "skill".to_string(), name: name.clone(),
             description: None, source_path: source_path.clone(), source_url: None,
-            version: None, tags: None, suite: None, source_tool: None, is_native: true,
+            version: None, tags: None, suite: None, source_tool: Some(source_tool.clone()), is_native: true,
         };
         let _ = crate::database::insert_extension(&ext);
+        // 默认按来源工具自动创建工具目录链接，让 harness 立即读取 SSOT 中的 skill
+        // 用户主动导入时，按来源工具自动把原生目录替换为 MAM 软链接
+        if let Err(e) = crate::services::enable_skill_for_tool(&name, &source_tool) {
+            log::warn!("导入 {} 后为 {} 创建链接失败: {}", name, source_tool, e);
+        }
         imported += 1;
     }
     crate::services::ImportStats {
@@ -358,17 +357,8 @@ pub fn list_ssot_resources() -> SsotResources {
 #[tauri::command]
 pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
     let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
-    let tool_skill_dir = match tool_id.as_str() {
-        "claude" => Some(dirs::home_dir().unwrap_or_default().join(".claude").join("skills")),
-        "codex" => Some(dirs::home_dir().unwrap_or_default().join(".agents").join("skills")),
-        "opencode" => Some(dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills")),
-        "openclaw" => Some(dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills")),
-        _ => None,
-    };
-
-    let tool_skill_dir = match tool_skill_dir {
-        Some(d) => d,
-        None => return Vec::new(),
+    let Some(tool_skill_dir) = crate::adapter::primary_skill_dir(&tool_id) else {
+        return Vec::new();
     };
 
     if !repo.exists() || !tool_skill_dir.exists() {
@@ -391,13 +381,8 @@ pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
 #[tauri::command]
 pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(), String> {
     let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
-    let tool_skill_dir = match tool_id.as_str() {
-        "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("skills"),
-        "codex" => dirs::home_dir().unwrap_or_default().join(".agents").join("skills"),
-        "opencode" => dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills"),
-        "openclaw" => dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills"),
-        _ => return Err(format!("未知工具: {}", tool_id)),
-    };
+    let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
+        .ok_or_else(|| format!("未知工具: {}", tool_id))?;
 
     let mut cleaned = 0;
     let mut errors = Vec::new();
@@ -429,12 +414,8 @@ pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(
 /// 检查 skill 在工具目录中的类型：symlink | native | missing
 #[tauri::command]
 pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
-    let tool_skill_dir = match tool_id.as_str() {
-        "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("skills"),
-        "codex" => dirs::home_dir().unwrap_or_default().join(".agents").join("skills"),
-        "opencode" => dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills"),
-        "openclaw" => dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills"),
-        _ => return "missing".to_string(),
+    let Some(tool_skill_dir) = crate::adapter::primary_skill_dir(&tool_id) else {
+        return "missing".to_string();
     };
     let target = tool_skill_dir.join(&skill_name);
     if !target.exists() {
@@ -449,13 +430,8 @@ pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
 /// 取消 skill 的工具配置：移至回收站 + 更新 DB
 #[tauri::command]
 pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<String, String> {
-    let tool_skill_dir = match tool_id.as_str() {
-        "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("skills"),
-        "codex" => dirs::home_dir().unwrap_or_default().join(".agents").join("skills"),
-        "opencode" => dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("skills"),
-        "openclaw" => dirs::home_dir().unwrap_or_default().join(".openclaw").join("skills"),
-        _ => return Err(format!("未知工具: {}", tool_id)),
-    };
+    let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
+        .ok_or_else(|| format!("未知工具: {}", tool_id))?;
     let target = tool_skill_dir.join(&skill_name);
     if !target.exists() {
         return Err("目标路径不存在".to_string());

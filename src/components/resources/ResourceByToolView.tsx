@@ -60,7 +60,7 @@ export function ResourceByToolView() {
   const handleImport = async (toolId: string, item: NativeExtension) => {
     try {
       const result = await invoke<ImportStats>("import_native_resources", {
-        items: [[item.sourcePath, item.name]],
+        items: [[item.sourcePath, item.name, toolId]],
       });
       if (result.imported > 0) {
         toast.success(`"${item.name}" 导入成功`);
