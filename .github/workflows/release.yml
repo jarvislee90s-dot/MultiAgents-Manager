@@ -177,6 +177,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body_path: ${{ env.RELEASE_BODY_PATH }}
           prerelease: false
+          update: true
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
