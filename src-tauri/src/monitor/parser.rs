@@ -253,9 +253,14 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let mut expected_dir_names: HashSet<String> = HashSet::new();
     for process in processes {
         if let Some(cwd) = &process.cwd {
-            let cwd_str = cwd.to_string_lossy().to_string();
-            expected_dir_names.insert(convert_path_to_dir_name(&cwd_str));
-            cwd_to_processes.entry(cwd_str).or_default().push(process);
+            let normalized = normalize_cwd_for_match(&cwd.to_string_lossy());
+            // 目录名比较大小写不敏感：Claude 保留用户 cd 时敲入的盘符/路径大小写
+            // （实机同时存在 E--xxx 与 e--xxx 两种目录），sysinfo 返回的可能是另一种
+            expected_dir_names.insert(convert_path_to_dir_name(&normalized).to_lowercase());
+            cwd_to_processes
+                .entry(normalized)
+                .or_default()
+                .push(process);
         }
     }
 
@@ -273,7 +278,7 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                 continue;
             }
             let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !expected_dir_names.contains(dir_name) {
+            if !expected_dir_names.contains(&dir_name.to_lowercase()) {
                 continue;
             }
 
@@ -286,7 +291,11 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             for f in &jsonl_files {
                 let file_cwd =
                     extract_cwd_from_jsonl(f).unwrap_or_else(|| convert_dir_name_to_path(dir_name));
-                cwd_to_files.entry(file_cwd).or_default().push(f.clone());
+                // 与进程 cwd 同一归一化域（Windows 下小写、无尾部分隔符），两侧才可比
+                cwd_to_files
+                    .entry(normalize_cwd_for_match(&file_cwd))
+                    .or_default()
+                    .push(f.clone());
             }
 
             for (project_path, files) in &cwd_to_files {
