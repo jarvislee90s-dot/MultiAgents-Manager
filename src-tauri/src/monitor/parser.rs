@@ -145,6 +145,20 @@ fn is_valid_cwd(cwd: &str) -> bool {
     cwd.starts_with('/') || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
+/// 归一化 cwd 字符串用于"进程 cwd ↔ 会话 cwd"匹配：
+/// - 去尾部路径分隔符（Windows 下 sysinfo 返回的 cwd 带尾部反斜杠，如 "E:\x\y\"）
+/// - Windows 下整体转小写（盘符/路径大小写随用户 cd 写法不同，文件系统实际不区分；
+///   Unix 文件系统大小写敏感，保持原样）
+/// - 根路径（"/"）归一化为空串，调用方按无有效 cwd 处理
+fn normalize_cwd_for_match(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// 从项目路径提取项目名（跨平台：兼容 / 和 \ 分隔符）
 pub fn project_name_from_path(project_path: &str) -> String {
     project_path
@@ -892,5 +906,48 @@ mod git_url_tests {
     fn test_get_github_url_none_for_plain_dir() {
         let temp = tempfile::tempdir().unwrap();
         assert_eq!(get_github_url(temp.path().to_str().unwrap()), None);
+    }
+}
+
+#[cfg(test)]
+mod normalize_cwd_tests {
+    use super::normalize_cwd_for_match;
+
+    #[test]
+    fn trims_trailing_separators() {
+        // Windows 下 sysinfo 返回的 cwd 带尾部反斜杠
+        let expected = if cfg!(windows) {
+            "e:\\x\\y"
+        } else {
+            "E:\\x\\y"
+        };
+        assert_eq!(normalize_cwd_for_match("E:\\x\\y\\"), expected);
+        assert_eq!(normalize_cwd_for_match("E:\\x\\y"), expected);
+    }
+
+    #[test]
+    fn unix_paths_trim_only() {
+        let expected = if cfg!(windows) {
+            "/users/x/proj"
+        } else {
+            "/Users/x/proj"
+        };
+        assert_eq!(normalize_cwd_for_match("/Users/x/proj/"), expected);
+    }
+
+    #[test]
+    fn drive_letter_case_normalized_on_windows_only() {
+        if cfg!(windows) {
+            assert_eq!(
+                normalize_cwd_for_match("E:\\X"),
+                normalize_cwd_for_match("e:\\x")
+            );
+        }
+    }
+
+    #[test]
+    fn root_normalizes_to_empty() {
+        // 根路径归一化为空串，调用方按"无有效 cwd"处理（进入 unmatched 分支）
+        assert_eq!(normalize_cwd_for_match("/"), "");
     }
 }
