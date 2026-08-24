@@ -128,6 +128,9 @@ pub fn get_all_sessions() -> SessionsResponse {
                     ProcessRefreshKind::new()
                         .with_cmd(sysinfo::UpdateKind::Always)
                         .with_cwd(sysinfo::UpdateKind::Always)
+                        // exe 路径是 Windows MSIX 形态判定（classify_form）的关键输入：
+                        // 缺失时 ChatGPT 内嵌 codex.exe 会被误判为 CLI（提权进程 cmd 也读不到）
+                        .with_exe(sysinfo::UpdateKind::Always)
                         .with_cpu(),
                 ),
             )
@@ -138,6 +141,7 @@ pub fn get_all_sessions() -> SessionsResponse {
             ProcessRefreshKind::new()
                 .with_cmd(sysinfo::UpdateKind::Always)
                 .with_cwd(sysinfo::UpdateKind::Always)
+                .with_exe(sysinfo::UpdateKind::Always)
                 .with_cpu(),
         );
 
