@@ -41,11 +41,32 @@ pub fn detect_all_tools() -> Vec<ToolDetection> {
     }).collect()
 }
 
-/// 简易 which 命令 — 检测可执行文件是否在 PATH 中
+/// 检测可执行文件是否在 PATH 中（纯路径扫描，不 spawn 子进程，跨平台）
+/// Windows 下额外尝试 .exe 扩展名
 fn which(cmd: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let candidates: Vec<String> = if cfg!(windows) {
+        vec![format!("{}.exe", cmd), cmd.to_string()]
+    } else {
+        vec![cmd.to_string()]
+    };
+    std::env::split_paths(&path_env).any(|dir| {
+        candidates.iter().any(|name| dir.join(name).is_file())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_which_finds_git() {
+        // CI 与开发机均安装 git
+        assert!(which("git"));
+    }
+
+    #[test]
+    fn test_which_rejects_missing_cmd() {
+        assert!(!which("mam-definitely-missing-cmd"));
+    }
 }
