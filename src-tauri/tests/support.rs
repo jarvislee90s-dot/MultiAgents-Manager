@@ -9,6 +9,8 @@ pub fn setup() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().to_path_buf();
         std::env::set_var("HOME", &home);
+        // Windows 下 dirs::home_dir 忽略 HOME 环境变量，用专用覆盖变量 MAM_HOME 重定向应用数据目录
+        std::env::set_var("MAM_HOME", &home);
         // 创建 ~/.mam 目录结构
         std::fs::create_dir_all(home.join(".mam/skills")).unwrap();
         std::fs::create_dir_all(home.join(".mam/mcp")).unwrap();

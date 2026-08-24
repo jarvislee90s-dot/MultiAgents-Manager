@@ -97,6 +97,7 @@ mod tests {
     #[test]
     fn test_subagent_active_dir() {
         let dir = subagent_active_dir("opencode", "researcher");
-        assert!(dir.to_string_lossy().contains(".mam/active/opencode/researcher"));
+        // Windows 路径分隔符是 \，统一转 / 再断言，保持跨平台
+        assert!(dir.to_string_lossy().replace('\\', "/").contains(".mam/active/opencode/researcher"));
     }
 }
