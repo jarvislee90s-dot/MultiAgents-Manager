@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::status::*;
 use crate::adapter::AgentProcess;
 use crate::session::model::JsonlMessage;
-use crate::session::ProcessForm;
+use crate::session::{jump_supported_for, ProcessForm};
 use crate::session::{AgentType, Session, SessionStatus};
 use log::{debug, info};
 use once_cell::sync::Lazy;
@@ -478,7 +478,7 @@ fn parse_claude_jsonl(
         cpu_usage: process.cpu_usage,
         active_subagent_count: 0,
         form: process.form,
-        jump_supported: matches!(process.form, ProcessForm::Cli),
+        jump_supported: jump_supported_for(process.form),
         title: Some(session_title),
     })
 }
@@ -551,7 +551,7 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                     session.pid = proc.pid;
                     session.cpu_usage = proc.cpu_usage;
                     session.form = proc.form;
-                    session.jump_supported = matches!(proc.form, ProcessForm::Cli);
+                    session.jump_supported = jump_supported_for(proc.form);
                     session.github_url = get_github_url(&session.project_path);
                     sessions.push(session);
                     matched_file_indices.insert(idx);
@@ -573,7 +573,7 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                 session.pid = process.pid;
                 session.cpu_usage = process.cpu_usage;
                 session.form = process.form;
-                session.jump_supported = matches!(process.form, ProcessForm::Cli);
+                session.jump_supported = jump_supported_for(process.form);
                 session.github_url = get_github_url(&session.project_path);
                 sessions.push(session);
                 matched_file_indices.insert(idx);
@@ -786,8 +786,8 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         pid: 0, // 由调用方设置
         cpu_usage: 0.0,
         active_subagent_count: 0,
-        form: ProcessForm::Cli, // 由调用方设置
-        jump_supported: true,
+        form: ProcessForm::Cli,                               // 由调用方设置
+        jump_supported: jump_supported_for(ProcessForm::Cli), // 由调用方按进程形态覆盖
         title: Some(codex_title),
     })
 }

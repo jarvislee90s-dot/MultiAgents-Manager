@@ -2,7 +2,7 @@
 // OpenClaw 使用 Node.js gateway 进程，会话信息从 ~/.openclaw/openclaw.json 的 agents 列表解析
 
 use crate::adapter::AgentProcess;
-use crate::session::{AgentType, ProcessForm, Session, SessionStatus};
+use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -158,7 +158,7 @@ fn build_session(
         cpu_usage: process.cpu_usage,
         active_subagent_count: 0,
         form: process.form,
-        jump_supported: matches!(process.form, ProcessForm::Cli),
+        jump_supported: jump_supported_for(process.form),
         title: Some(display_name.to_string()),
     })
 }

@@ -2,7 +2,7 @@
 // OpenCode 1.17+ 使用 SQLite 替代分散 JSON 文件，此模块查询数据库获取会话状态
 
 use crate::adapter::AgentProcess;
-use crate::session::{AgentType, ProcessForm, Session, SessionStatus};
+use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
@@ -191,7 +191,7 @@ fn get_latest_session_for_project(
         cpu_usage: process.cpu_usage,
         active_subagent_count: 0,
         form: process.form,
-        jump_supported: matches!(process.form, ProcessForm::Cli),
+        jump_supported: jump_supported_for(process.form),
         title: Some(session_title),
     })
 }
@@ -252,7 +252,7 @@ fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> O
         cpu_usage: process.cpu_usage,
         active_subagent_count: 0,
         form: process.form,
-        jump_supported: matches!(process.form, ProcessForm::Cli),
+        jump_supported: jump_supported_for(process.form),
         title: Some(title),
     })
 }
