@@ -436,6 +436,7 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                     session.cpu_usage = proc.cpu_usage;
                     session.form = proc.form;
                     session.jump_supported = matches!(proc.form, ProcessForm::Cli);
+                    session.github_url = get_github_url(&session.project_path);
                     sessions.push(session);
                     matched_file_indices.insert(idx);
                 }
@@ -457,6 +458,7 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                 session.cpu_usage = process.cpu_usage;
                 session.form = process.form;
                 session.jump_supported = matches!(process.form, ProcessForm::Cli);
+                session.github_url = get_github_url(&session.project_path);
                 sessions.push(session);
                 matched_file_indices.insert(idx);
                 break; // 每个未匹配进程只取一个会话
@@ -622,7 +624,7 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         project_name,
         project_path: project_path.clone(),
         git_branch: None,
-        github_url: get_github_url(&project_path),
+        github_url: None, // 延迟到进程匹配后填充（见 get_codex_sessions），避免批量解析时风暴式 spawn git
         status,
         last_message,
         last_message_role: last_role,
