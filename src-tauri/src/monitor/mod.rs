@@ -1,14 +1,13 @@
-pub mod process;
-pub mod parser;
-pub mod status;
-pub mod opencode_parser;
-pub mod openclaw_parser;
 pub mod hooks;
-
+pub mod openclaw_parser;
+pub mod opencode_parser;
+pub mod parser;
+pub mod process;
+pub mod status;
 
 // ===== notify 文件监听集成（FR-5c）=====
 
-use notify::{Watcher, RecursiveMode, EventKind};
+use notify::{EventKind, RecursiveMode, Watcher};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -37,7 +36,9 @@ where
         // notify 事件 + 30s 轮询兜底
         loop {
             match rx.recv_timeout(Duration::from_secs(30)) {
-                Ok(Ok(event)) if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) => {
+                Ok(Ok(event))
+                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) =>
+                {
                     on_change();
                 }
                 Ok(Ok(_)) => {} // 忽略其他事件类型

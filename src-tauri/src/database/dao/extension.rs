@@ -90,7 +90,13 @@ pub fn list_assignments(tool_id: &str) -> Vec<AssignmentRecord> {
         .unwrap_or_default()
 }
 
-pub fn upsert_assignment_with_subagent(ext_id: &str, tool_id: &str, sub_agent_id: &str, enabled: bool, link_status: &str) -> Result<(), String> {
+pub fn upsert_assignment_with_subagent(
+    ext_id: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+    enabled: bool,
+    link_status: &str,
+) -> Result<(), String> {
     let conn = DB.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("{}-{}-{}", ext_id, tool_id, sub_agent_id);
@@ -100,7 +106,12 @@ pub fn upsert_assignment_with_subagent(ext_id: &str, tool_id: &str, sub_agent_id
     ).map_err(|e| e.to_string()).map(|_| ())
 }
 
-pub fn upsert_assignment(ext_id: &str, tool_id: &str, enabled: bool, link_status: &str) -> Result<(), String> {
+pub fn upsert_assignment(
+    ext_id: &str,
+    tool_id: &str,
+    enabled: bool,
+    link_status: &str,
+) -> Result<(), String> {
     let conn = DB.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("{}-{}", ext_id, tool_id);
@@ -132,13 +143,18 @@ pub fn list_all_assignments() -> Vec<AssignmentRecord> {
         .unwrap_or_default()
 }
 
-pub fn disable_subagent_assignment(ext_id: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
+pub fn disable_subagent_assignment(
+    ext_id: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+) -> Result<(), String> {
     let conn = DB.lock().unwrap();
     let id = format!("{}-{}-{}", ext_id, tool_id, sub_agent_id);
     conn.execute(
         "UPDATE extension_assignments SET enabled = 0, link_status = 'missing' WHERE id = ?1",
         params![id],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -219,7 +235,8 @@ pub fn mark_native_imported(ids: &[String]) -> Result<(), String> {
         conn.execute(
             "UPDATE native_extensions SET imported = 1 WHERE id = ?1",
             params![id],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

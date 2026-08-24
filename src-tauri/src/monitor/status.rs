@@ -21,15 +21,22 @@ pub fn has_tool_use(content: &serde_json::Value) -> bool {
 pub fn is_waiting_for_user_input(content: &serde_json::Value) -> bool {
     let user_input_tools = ["AskUserQuestion"];
     if let serde_json::Value::Array(arr) = content {
-        let tool_use_blocks: Vec<_> = arr.iter()
+        let tool_use_blocks: Vec<_> = arr
+            .iter()
             .filter(|item| {
-                item.get("type").and_then(|t| t.as_str()).map(|t| t == "tool_use").unwrap_or(false)
+                item.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "tool_use")
+                    .unwrap_or(false)
             })
             .collect();
-        !tool_use_blocks.is_empty() && tool_use_blocks.iter().all(|item| {
-            item.get("name").and_then(|n| n.as_str())
-                .map(|name| user_input_tools.contains(&name)).unwrap_or(false)
-        })
+        !tool_use_blocks.is_empty()
+            && tool_use_blocks.iter().all(|item| {
+                item.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|name| user_input_tools.contains(&name))
+                    .unwrap_or(false)
+            })
     } else {
         false
     }
@@ -39,7 +46,10 @@ pub fn is_waiting_for_user_input(content: &serde_json::Value) -> bool {
 pub fn has_tool_result(content: &serde_json::Value) -> bool {
     if let serde_json::Value::Array(arr) = content {
         arr.iter().any(|item| {
-            item.get("type").and_then(|t| t.as_str()).map(|t| t == "tool_result").unwrap_or(false)
+            item.get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "tool_result")
+                .unwrap_or(false)
         })
     } else {
         false
@@ -49,9 +59,10 @@ pub fn has_tool_result(content: &serde_json::Value) -> bool {
 fn extract_text_content(content: &serde_json::Value) -> &str {
     match content {
         serde_json::Value::String(s) => s.as_str(),
-        serde_json::Value::Array(arr) => {
-            arr.iter().find_map(|v| v.get("text").and_then(|t| t.as_str())).unwrap_or("")
-        }
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .find_map(|v| v.get("text").and_then(|t| t.as_str()))
+            .unwrap_or(""),
         _ => "",
     }
 }
@@ -66,24 +77,41 @@ pub fn is_local_slash_command(content: &serde_json::Value) -> bool {
     let text = extract_text_content(content);
     let trimmed = text.trim();
     let local_commands = [
-        "/clear", "/compact", "/help", "/config", "/cost", "/doctor",
-        "/init", "/login", "/logout", "/memory", "/model", "/permissions",
-        "/pr-comments", "/review", "/status", "/terminal-setup", "/vim",
+        "/clear",
+        "/compact",
+        "/help",
+        "/config",
+        "/cost",
+        "/doctor",
+        "/init",
+        "/login",
+        "/logout",
+        "/memory",
+        "/model",
+        "/permissions",
+        "/pr-comments",
+        "/review",
+        "/status",
+        "/terminal-setup",
+        "/vim",
     ];
-    if local_commands.iter().any(|cmd| trimmed == *cmd || trimmed.starts_with(&format!("{} ", cmd))) {
+    if local_commands
+        .iter()
+        .any(|cmd| trimmed == *cmd || trimmed.starts_with(&format!("{} ", cmd)))
+    {
         return true;
     }
     if let Some(start) = trimmed.find("<command-name>") {
         let after = &trimmed[start + "<command-name>".len()..];
         if let Some(end) = after.find("</command-name>") {
             let cmd_name = after[..end].trim();
-            return local_commands.iter().any(|cmd| cmd_name == *cmd || cmd_name.starts_with(&format!("{} ", cmd)));
+            return local_commands
+                .iter()
+                .any(|cmd| cmd_name == *cmd || cmd_name.starts_with(&format!("{} ", cmd)));
         }
     }
     false
 }
-
-
 
 /// 根据最后一条消息推导会话状态
 pub fn determine_status(

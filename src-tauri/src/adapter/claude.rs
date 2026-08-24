@@ -6,9 +6,15 @@ use crate::monitor;
 pub struct ClaudeAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
-    fn name(&self) -> &'static str { "Claude Code" }
-    fn agent_type(&self) -> AgentType { AgentType::Claude }
-    fn process_names(&self) -> &'static [&'static str] { &["claude"] }
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
+    fn agent_type(&self) -> AgentType {
+        AgentType::Claude
+    }
+    fn process_names(&self) -> &'static [&'static str] {
+        &["claude"]
+    }
 
     fn find_processes(&self, system: &System) -> Vec<AgentProcess> {
         monitor::process::find_claude_processes(system)
@@ -22,16 +28,29 @@ impl AgentAdapter for ClaudeAdapter {
         dirs::home_dir().unwrap_or_default().join(".claude")
     }
 
-    fn hook_supported(&self) -> bool { true }
-    fn hook_event_case(&self) -> HookEventCase { HookEventCase::PascalCase }
+    fn hook_supported(&self) -> bool {
+        true
+    }
+    fn hook_event_case(&self) -> HookEventCase {
+        HookEventCase::PascalCase
+    }
     fn hook_events(&self) -> Vec<&'static str> {
-        vec!["Stop", "UserPromptSubmit", "SessionStart", "SessionEnd", "PreToolUse", "PostToolUse"]
+        vec![
+            "Stop",
+            "UserPromptSubmit",
+            "SessionStart",
+            "SessionEnd",
+            "PreToolUse",
+            "PostToolUse",
+        ]
     }
     fn hook_config_path(&self) -> Option<std::path::PathBuf> {
         Some(self.base_dir().join("settings.json"))
     }
 
-    fn mcp_format(&self) -> McpFormat { McpFormat::Json }
+    fn mcp_format(&self) -> McpFormat {
+        McpFormat::Json
+    }
     fn mcp_config_path(&self) -> Option<std::path::PathBuf> {
         Some(dirs::home_dir().unwrap_or_default().join(".claude.json"))
     }

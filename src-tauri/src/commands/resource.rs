@@ -10,7 +10,9 @@ fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
                 let path = entry.path();
                 if path.is_dir() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') { continue; }
+                    if name.starts_with('.') {
+                        continue;
+                    }
                     if path.join("SKILL.md").exists() {
                         if let Ok(rel) = path.strip_prefix(base) {
                             results.push(rel.to_string_lossy().to_string());
@@ -53,22 +55,31 @@ pub struct AssignmentSummary {
 pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
     let extensions = crate::database::list_extensions();
     let assignments = crate::database::list_all_assignments();
-    extensions.iter().map(|ext| {
-        let ext_assignments: Vec<AssignmentSummary> = assignments.iter()
-            .filter(|a| a.extension_id == ext.id)
-            .map(|a| AssignmentSummary {
-                agent_tool_id: a.agent_tool_id.clone(),
-                enabled: a.enabled,
-                link_status: a.link_status.clone(),
-            })
-            .collect();
-        ExtensionWithAssignments {
-            id: ext.id.clone(), kind: ext.kind.clone(), name: ext.name.clone(),
-            description: ext.description.clone(), source_path: ext.source_path.clone(),
-            suite: ext.suite.clone(), source_tool: ext.source_tool.clone(),
-            tags: ext.tags.clone(), assignments: ext_assignments,
-        }
-    }).collect()
+    extensions
+        .iter()
+        .map(|ext| {
+            let ext_assignments: Vec<AssignmentSummary> = assignments
+                .iter()
+                .filter(|a| a.extension_id == ext.id)
+                .map(|a| AssignmentSummary {
+                    agent_tool_id: a.agent_tool_id.clone(),
+                    enabled: a.enabled,
+                    link_status: a.link_status.clone(),
+                })
+                .collect();
+            ExtensionWithAssignments {
+                id: ext.id.clone(),
+                kind: ext.kind.clone(),
+                name: ext.name.clone(),
+                description: ext.description.clone(),
+                source_path: ext.source_path.clone(),
+                suite: ext.suite.clone(),
+                source_tool: ext.source_tool.clone(),
+                tags: ext.tags.clone(),
+                assignments: ext_assignments,
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -85,9 +96,13 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
                 let exists = existing.iter().any(|e| e.id == ext_id);
                 if !exists {
                     results.push(crate::database::NativeExtensionRecord {
-                        id: ext_id, kind: "skill".to_string(), name: name.clone(),
-                        description: None, source_path: path.to_string_lossy().to_string(),
-                        source_tool: tool_id.clone(), detected_at: chrono::Utc::now().to_rfc3339(),
+                        id: ext_id,
+                        kind: "skill".to_string(),
+                        name: name.clone(),
+                        description: None,
+                        source_path: path.to_string_lossy().to_string(),
+                        source_tool: tool_id.clone(),
+                        detected_at: chrono::Utc::now().to_rfc3339(),
                         imported: false,
                     });
                 }
@@ -98,19 +113,34 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
 }
 
 #[tauri::command]
-pub fn import_native_resources(items: Vec<(String, String, String)>) -> crate::services::ImportStats {
+pub fn import_native_resources(
+    items: Vec<(String, String, String)>,
+) -> crate::services::ImportStats {
     let mut imported = 0;
     let mut skipped = 0;
     for (source_path, name, source_tool) in items {
         let path = std::path::Path::new(&source_path);
-        if !path.exists() { skipped += 1; continue; }
+        if !path.exists() {
+            skipped += 1;
+            continue;
+        }
         if let Err(e) = crate::linker::install_to_repo(path, &name) {
-            log::warn!("导入 {} 失败: {}", name, e); skipped += 1; continue;
+            log::warn!("导入 {} 失败: {}", name, e);
+            skipped += 1;
+            continue;
         }
         let ext = crate::database::ExtensionRecord {
-            id: format!("skill-{}", name), kind: "skill".to_string(), name: name.clone(),
-            description: None, source_path: source_path.clone(), source_url: None,
-            version: None, tags: None, suite: None, source_tool: Some(source_tool.clone()), is_native: true,
+            id: format!("skill-{}", name),
+            kind: "skill".to_string(),
+            name: name.clone(),
+            description: None,
+            source_path: source_path.clone(),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: Some(source_tool.clone()),
+            is_native: true,
         };
         let _ = crate::database::insert_extension(&ext);
         // 默认按来源工具自动创建工具目录链接，让 harness 立即读取 SSOT 中的 skill
@@ -121,7 +151,10 @@ pub fn import_native_resources(items: Vec<(String, String, String)>) -> crate::s
         imported += 1;
     }
     crate::services::ImportStats {
-        imported, newly_added: imported, skipped_dup: skipped, source_counts: vec![],
+        imported,
+        newly_added: imported,
+        skipped_dup: skipped,
+        source_counts: vec![],
     }
 }
 
@@ -132,9 +165,13 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     let assignments = crate::database::list_assignments(&tool_id);
 
     // 补充 SSOT 仓库中已有但未在 DB extensions 中的 skill
-    let mam_skills = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
+    let mam_skills = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("skills");
     let ssot_skill_names = scan_skill_dirs(&mam_skills);
-    let mut global_with_status: Vec<_> = global.iter()
+    let mut global_with_status: Vec<_> = global
+        .iter()
         .map(|e| {
             let assignment = assignments.iter().find(|a| a.extension_id == e.id);
             serde_json::json!({
@@ -158,7 +195,10 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     // 补充 SSOT 中的 skill（不在 DB extensions 里的）
     for name in &ssot_skill_names {
         let ext_id = format!("skill-{}", name);
-        if !global_with_status.iter().any(|g| g["id"].as_str() == Some(&ext_id)) {
+        if !global_with_status
+            .iter()
+            .any(|g| g["id"].as_str() == Some(&ext_id))
+        {
             let assignment = assignments.iter().find(|a| a.extension_id == ext_id);
             global_with_status.push(serde_json::json!({
                 "id": ext_id,
@@ -182,7 +222,10 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn check_preset_compatibility(preset_id: String, tool_id: String) -> crate::services::preset::CompatibilityReport {
+pub fn check_preset_compatibility(
+    preset_id: String,
+    tool_id: String,
+) -> crate::services::preset::CompatibilityReport {
     crate::services::preset::check_compatibility(&preset_id, &tool_id)
 }
 
@@ -210,48 +253,66 @@ pub fn list_ssot_resources() -> SsotResources {
 
     // 构建工具 → skill 目录映射，用于检测原生生效的 skill
     let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = {
-        use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
+        use crate::adapter::{
+            claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+            opencode::OpenCodeAdapter, AgentAdapter,
+        };
         let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
             (Box::new(ClaudeAdapter), "claude"),
             (Box::new(CodexAdapter), "codex"),
             (Box::new(OpenCodeAdapter), "opencode"),
             (Box::new(OpenClawAdapter), "openclaw"),
         ];
-        adapters.into_iter()
+        adapters
+            .into_iter()
             .filter_map(|(a, id)| a.skill_dirs().into_iter().next().map(|d| (id, d)))
             .collect()
     };
 
     let scan_skills = |dir: &std::path::Path| -> Vec<SsotResource> {
         let names = scan_skill_dirs(dir);
-        names.into_iter().map(|name| {
-            let ext_id = format!("skill-{}", name);
-            // 1) DB 中有 enabled=true 的记录
-            let mut enabled_tools: Vec<String> = assignments.iter()
-                .filter(|a| a.extension_id == ext_id && a.enabled)
-                .map(|a| a.agent_tool_id.clone())
-                .collect();
-            // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）
-            for (tool_id, tool_dir) in &tool_skill_dirs {
-                if enabled_tools.iter().any(|t| t == tool_id) { continue; }
-                if tool_dir.join(&name).exists() {
-                    enabled_tools.push(tool_id.to_string());
+        names
+            .into_iter()
+            .map(|name| {
+                let ext_id = format!("skill-{}", name);
+                // 1) DB 中有 enabled=true 的记录
+                let mut enabled_tools: Vec<String> = assignments
+                    .iter()
+                    .filter(|a| a.extension_id == ext_id && a.enabled)
+                    .map(|a| a.agent_tool_id.clone())
+                    .collect();
+                // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）
+                for (tool_id, tool_dir) in &tool_skill_dirs {
+                    if enabled_tools.iter().any(|t| t == tool_id) {
+                        continue;
+                    }
+                    if tool_dir.join(&name).exists() {
+                        enabled_tools.push(tool_id.to_string());
+                    }
                 }
-            }
-            SsotResource { name, kind: "skill".to_string(), enabled_tools }
-        }).collect()
+                SsotResource {
+                    name,
+                    kind: "skill".to_string(),
+                    enabled_tools,
+                }
+            })
+            .collect()
     };
 
     // 构建工具 → MCP 配置路径映射，用于扫描各工具已有的 MCP 服务器
     let tool_mcp_configs: Vec<(&str, std::path::PathBuf, crate::adapter::McpFormat)> = {
-        use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
+        use crate::adapter::{
+            claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+            opencode::OpenCodeAdapter, AgentAdapter,
+        };
         let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
             (Box::new(ClaudeAdapter), "claude"),
             (Box::new(CodexAdapter), "codex"),
             (Box::new(OpenCodeAdapter), "opencode"),
             (Box::new(OpenClawAdapter), "openclaw"),
         ];
-        adapters.into_iter()
+        adapters
+            .into_iter()
             .filter_map(|(a, id)| {
                 let path = a.mcp_config_path()?;
                 Some((id, path, a.mcp_format()))
@@ -261,7 +322,8 @@ pub fn list_ssot_resources() -> SsotResources {
 
     // MCP 扫描：以 ~/.mam/mcp/ 为基础数据源，工具配置文件仅作补充
     let scan_mcp = || -> Vec<SsotResource> {
-        let mut all_mcps: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        let mut all_mcps: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
 
         // 1) 从 ~/.mam/mcp/ 目录扫描 SSOT 管理的 MCP（排除 DB assignment 中已禁用的）
         let mcp_repo = mam.join("mcp");
@@ -286,13 +348,16 @@ pub fn list_ssot_resources() -> SsotResources {
                 }
                 crate::adapter::McpFormat::Toml => {
                     let toml_val: Result<toml::Value, _> = content.parse();
-                    toml_val.map(|v| {
-                        let json_str = serde_json::to_string(&v).unwrap_or_default();
-                        serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
-                    }).unwrap_or(serde_json::json!({}))
+                    toml_val
+                        .map(|v| {
+                            let json_str = serde_json::to_string(&v).unwrap_or_default();
+                            serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
+                        })
+                        .unwrap_or(serde_json::json!({}))
                 }
             };
-            let mcp_obj = servers.get("mcpServers")
+            let mcp_obj = servers
+                .get("mcpServers")
                 .or_else(|| servers.get("mcp_servers"))
                 .or_else(|| servers.get("mcp"))
                 .and_then(|v| v.as_object());
@@ -321,9 +386,14 @@ pub fn list_ssot_resources() -> SsotResources {
             }
         }
 
-        let mut resources: Vec<SsotResource> = all_mcps.into_iter().map(|(name, tools)| {
-            SsotResource { name, kind: "mcp".to_string(), enabled_tools: tools }
-        }).collect();
+        let mut resources: Vec<SsotResource> = all_mcps
+            .into_iter()
+            .map(|(name, tools)| SsotResource {
+                name,
+                kind: "mcp".to_string(),
+                enabled_tools: tools,
+            })
+            .collect();
         resources.sort_by(|a, b| a.name.cmp(&b.name));
         resources
     };
@@ -333,13 +403,20 @@ pub fn list_ssot_resources() -> SsotResources {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
+                if name.starts_with('.') {
+                    continue;
+                }
                 let ext_id = format!("{}-{}", kind, name);
-                let enabled_tools: Vec<String> = assignments.iter()
+                let enabled_tools: Vec<String> = assignments
+                    .iter()
                     .filter(|a| a.extension_id == ext_id && a.enabled)
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
-                resources.push(SsotResource { name, kind: kind.to_string(), enabled_tools });
+                resources.push(SsotResource {
+                    name,
+                    kind: kind.to_string(),
+                    enabled_tools,
+                });
             }
         }
         resources.sort_by(|a, b| a.name.cmp(&b.name));
@@ -356,7 +433,10 @@ pub fn list_ssot_resources() -> SsotResources {
 /// 检测指定工具下所有在 SSOT 和原始目录中都存在的重复 skill
 #[tauri::command]
 pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
-    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
+    let repo = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("skills");
     let Some(tool_skill_dir) = crate::adapter::primary_skill_dir(&tool_id) else {
         return Vec::new();
     };
@@ -380,7 +460,10 @@ pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
 /// 清理指定工具下的重复 skill（delete 原始目录，替换为符号链接）
 #[tauri::command]
 pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(), String> {
-    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
+    let repo = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("skills");
     let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
         .ok_or_else(|| format!("未知工具: {}", tool_id))?;
 
@@ -405,7 +488,12 @@ pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(
     }
 
     if !errors.is_empty() {
-        Err(format!("部分清理失败 (成功 {}/{}): {}", cleaned, cleaned + errors.len(), errors.join("; ")))
+        Err(format!(
+            "部分清理失败 (成功 {}/{}): {}",
+            cleaned,
+            cleaned + errors.len(),
+            errors.join("; ")
+        ))
     } else {
         Ok(())
     }
@@ -437,12 +525,14 @@ pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<Str
         return Err("目标路径不存在".to_string());
     }
 
-    let target_type = if target.is_symlink() { "symlink" } else { "native" };
+    let target_type = if target.is_symlink() {
+        "symlink"
+    } else {
+        "native"
+    };
 
     // 尝试用 trash 命令移至回收站
-    let result = std::process::Command::new("trash")
-        .arg(&target)
-        .output();
+    let result = std::process::Command::new("trash").arg(&target).output();
 
     match result {
         Ok(output) if output.status.success() => {
@@ -478,7 +568,10 @@ pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<
 /// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.mam/mcp/<name>.json
 #[tauri::command]
 pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
-    use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter};
+    use crate::adapter::{
+        claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+        opencode::OpenCodeAdapter, AgentAdapter,
+    };
 
     let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
         (Box::new(ClaudeAdapter), "claude"),
@@ -499,24 +592,34 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
             }
             crate::adapter::McpFormat::Toml => {
                 let toml_val: Result<toml::Value, _> = content.parse();
-                toml_val.map(|v| {
-                    let json_str = serde_json::to_string(&v).unwrap_or_default();
-                    serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
-                }).unwrap_or(serde_json::json!({}))
+                toml_val
+                    .map(|v| {
+                        let json_str = serde_json::to_string(&v).unwrap_or_default();
+                        serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
+                    })
+                    .unwrap_or(serde_json::json!({}))
             }
         };
-        let mcp_obj = servers.get("mcpServers")
+        let mcp_obj = servers
+            .get("mcpServers")
             .or_else(|| servers.get("mcp_servers"))
             .or_else(|| servers.get("mcp"))
             .and_then(|v| v.get(&mcp_name));
 
         if let Some(config) = mcp_obj {
-            let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+            let repo = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".mam")
+                .join("mcp");
             let _ = std::fs::create_dir_all(&repo);
             let config_file = repo.join(format!("{}.json", mcp_name));
             let pretty = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
             std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
-            log::info!("MCP {} 配置已导入到 SSOT: {}", mcp_name, config_file.display());
+            log::info!(
+                "MCP {} 配置已导入到 SSOT: {}",
+                mcp_name,
+                config_file.display()
+            );
             return Ok(());
         }
     }
@@ -526,8 +629,16 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
 
 /// 创建/更新 MCP 配置到 SSOT 仓库
 #[tauri::command]
-pub fn save_mcp_config(name: String, command: String, args: Vec<String>, env: std::collections::BTreeMap<String, String>) -> Result<(), String> {
-    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+pub fn save_mcp_config(
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let repo = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("mcp");
     let _ = std::fs::create_dir_all(&repo);
     let config_file = repo.join(format!("{}.json", name));
     let config = serde_json::json!({

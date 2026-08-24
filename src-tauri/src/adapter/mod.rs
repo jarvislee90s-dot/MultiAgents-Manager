@@ -3,10 +3,12 @@
 
 pub mod claude;
 pub mod codex;
-pub mod opencode;
 pub mod openclaw;
+pub mod opencode;
 
-use crate::session::{status_sort_priority, AgentType, ProcessForm, Session, SessionStatus, SessionsResponse};
+use crate::session::{
+    status_sort_priority, AgentType, ProcessForm, Session, SessionStatus, SessionsResponse,
+};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -55,8 +57,6 @@ pub enum McpFormat {
     Jsonc,
 }
 
-
-
 /// Agent 适配器 trait — 每个工具实现此接口
 pub trait AgentAdapter: Send + Sync {
     fn name(&self) -> &'static str;
@@ -70,21 +70,40 @@ pub trait AgentAdapter: Send + Sync {
         Vec::new()
     }
 
-    fn hook_supported(&self) -> bool { false }
-    fn hook_event_case(&self) -> HookEventCase { HookEventCase::None }
-    fn hook_events(&self) -> Vec<&'static str> { Vec::new() }
-    fn hook_config_path(&self) -> Option<std::path::PathBuf> { None }
+    fn hook_supported(&self) -> bool {
+        false
+    }
+    fn hook_event_case(&self) -> HookEventCase {
+        HookEventCase::None
+    }
+    fn hook_events(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+    fn hook_config_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 
-    fn mcp_format(&self) -> McpFormat { McpFormat::Json }
-    fn mcp_config_path(&self) -> Option<std::path::PathBuf> { None }
+    fn mcp_format(&self) -> McpFormat {
+        McpFormat::Json
+    }
+    fn mcp_config_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 
-    fn skill_dirs(&self) -> Vec<std::path::PathBuf> { Vec::new() }
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 
-    fn subagent_dir(&self) -> Option<std::path::PathBuf> { None }
+    fn subagent_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 
-    fn plugin_dirs(&self) -> Vec<std::path::PathBuf> { Vec::new() }
-    fn plugin_config_paths(&self) -> Vec<std::path::PathBuf> { Vec::new() }
-
+    fn plugin_dirs(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    fn plugin_config_paths(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 }
 
 /// 共享 System 实例 — 每轮询周期刷新一次，所有 adapter 共用
@@ -109,8 +128,8 @@ pub fn get_all_sessions() -> SessionsResponse {
                     ProcessRefreshKind::new()
                         .with_cmd(sysinfo::UpdateKind::Always)
                         .with_cwd(sysinfo::UpdateKind::Always)
-                        .with_cpu()
-                )
+                        .with_cpu(),
+                ),
             )
         });
         system.refresh_processes_specifics(
@@ -119,7 +138,7 @@ pub fn get_all_sessions() -> SessionsResponse {
             ProcessRefreshKind::new()
                 .with_cmd(sysinfo::UpdateKind::Always)
                 .with_cwd(sysinfo::UpdateKind::Always)
-                .with_cpu()
+                .with_cpu(),
         );
 
         adapters.iter().map(|a| a.find_processes(system)).collect()
@@ -129,8 +148,12 @@ pub fn get_all_sessions() -> SessionsResponse {
     let mut all_sessions: Vec<Session> = Vec::new();
     for (adapter, processes) in adapters.iter().zip(all_processes.iter()) {
         let sessions = adapter.find_sessions(processes);
-        log::info!("{}: {} processes, {} sessions",
-            adapter.name(), processes.len(), sessions.len());
+        log::info!(
+            "{}: {} processes, {} sessions",
+            adapter.name(),
+            processes.len(),
+            sessions.len()
+        );
         all_sessions.extend(sessions);
     }
 
@@ -143,17 +166,27 @@ pub fn get_all_sessions() -> SessionsResponse {
             match event.event.as_str() {
                 "Stop" | "stop" => {
                     // 按形态计算 grace 时长：APP 形态更长（subagent 调度场景，单步间隔长），CLI 较短
-                    let grace_secs = if matches!(session.form, ProcessForm::App) { get_app_grace_secs() } else { get_cli_grace_secs() };
+                    let grace_secs = if matches!(session.form, ProcessForm::App) {
+                        get_app_grace_secs()
+                    } else {
+                        get_cli_grace_secs()
+                    };
                     // 记录 grace 时间戳和时长，不直接改 status — 由 grace 判定综合决定
                     grace.insert(session.pid, (event.ts, grace_secs));
                     if now_ts - event.ts < grace_secs {
                         // grace 期内：保持黄灯（覆盖 JSONL 推导的 Waiting/Idle）
-                        if !matches!(session.status,
+                        if !matches!(
+                            session.status,
                             SessionStatus::Processing
-                            | SessionStatus::Thinking
-                            | SessionStatus::Compacting)
-                        {
-                            log::debug!("Stop grace 期内（{}s）保持黄灯: pid={}, form={:?}", grace_secs, session.pid, session.form);
+                                | SessionStatus::Thinking
+                                | SessionStatus::Compacting
+                        ) {
+                            log::debug!(
+                                "Stop grace 期内（{}s）保持黄灯: pid={}, form={:?}",
+                                grace_secs,
+                                session.pid,
+                                session.form
+                            );
                             session.status = SessionStatus::Processing;
                         }
                     } else {
@@ -172,7 +205,12 @@ pub fn get_all_sessions() -> SessionsResponse {
                         _ => None,
                     };
                     if let Some(status) = new_status {
-                        log::debug!("Hook event {} → {:?} for pid={}", event.event, status, session.pid);
+                        log::debug!(
+                            "Hook event {} → {:?} for pid={}",
+                            event.event,
+                            status,
+                            session.pid
+                        );
                         session.status = status;
                     }
                 }
@@ -198,7 +236,8 @@ pub fn get_all_sessions() -> SessionsResponse {
         }
     });
 
-    let waiting_count = all_sessions.iter()
+    let waiting_count = all_sessions
+        .iter()
         .filter(|s| matches!(s.status, SessionStatus::Waiting))
         .count();
 
@@ -229,12 +268,22 @@ mod tests {
     fn test_get_all_sessions() {
         let response = get_all_sessions();
         eprintln!("=== SESSION SCAN ===");
-        eprintln!("Total: {}, Waiting: {}", response.total_count, response.waiting_count);
+        eprintln!(
+            "Total: {}, Waiting: {}",
+            response.total_count, response.waiting_count
+        );
         for session in &response.sessions {
-            eprintln!("  [{:?}] {} {:?} pid={} form={:?} jump={} status={:?} msg={}",
-                session.agent_type, session.project_name, session.status,
-                session.pid, session.form, session.jump_supported, session.status,
-                session.last_message.as_deref().unwrap_or("(none)"));
+            eprintln!(
+                "  [{:?}] {} {:?} pid={} form={:?} jump={} status={:?} msg={}",
+                session.agent_type,
+                session.project_name,
+                session.status,
+                session.pid,
+                session.form,
+                session.jump_supported,
+                session.status,
+                session.last_message.as_deref().unwrap_or("(none)")
+            );
         }
         eprintln!("=== END ===");
     }

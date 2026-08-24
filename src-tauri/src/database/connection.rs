@@ -32,8 +32,6 @@ pub fn init() {
 
 /// 打开新连接（少数场景使用）
 pub fn open() -> Result<Connection, String> {
-    let db_path = app_data_home()
-        .join(".mam")
-        .join("mam.db");
+    let db_path = app_data_home().join(".mam").join("mam.db");
     Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {}", e))
 }

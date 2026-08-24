@@ -16,6 +16,10 @@ pub fn rescan_skills() -> crate::services::ImportStats {
 }
 
 #[tauri::command]
-pub fn assign_skill_to_subagent(skill_name: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
+pub fn assign_skill_to_subagent(
+    skill_name: String,
+    tool_id: String,
+    sub_agent_id: String,
+) -> Result<(), String> {
     crate::services::assign_skill_to_subagent(&skill_name, &tool_id, &sub_agent_id)
 }

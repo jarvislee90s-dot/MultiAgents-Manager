@@ -6,9 +6,15 @@ use crate::monitor;
 pub struct OpenCodeAdapter;
 
 impl AgentAdapter for OpenCodeAdapter {
-    fn name(&self) -> &'static str { "OpenCode" }
-    fn agent_type(&self) -> AgentType { AgentType::OpenCode }
-    fn process_names(&self) -> &'static [&'static str] { &["opencode"] }
+    fn name(&self) -> &'static str {
+        "OpenCode"
+    }
+    fn agent_type(&self) -> AgentType {
+        AgentType::OpenCode
+    }
+    fn process_names(&self) -> &'static [&'static str] {
+        &["opencode"]
+    }
 
     fn find_processes(&self, system: &System) -> Vec<AgentProcess> {
         monitor::process::find_opencode_processes(system)
@@ -19,12 +25,19 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     fn base_dir(&self) -> std::path::PathBuf {
-        dirs::home_dir().unwrap_or_default().join(".config").join("opencode")
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".config")
+            .join("opencode")
     }
 
-    fn hook_supported(&self) -> bool { false }
+    fn hook_supported(&self) -> bool {
+        false
+    }
 
-    fn mcp_format(&self) -> McpFormat { McpFormat::Jsonc }
+    fn mcp_format(&self) -> McpFormat {
+        McpFormat::Jsonc
+    }
     fn mcp_config_path(&self) -> Option<std::path::PathBuf> {
         Some(self.base_dir().join("opencode.json"))
     }

@@ -1,7 +1,10 @@
 // 工具检测器 — 检测已安装的 AI 编程工具
 // 简化版（无 rayon，3 个工具顺序检测足够快）
 
-use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter};
+use crate::adapter::{
+    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+    opencode::OpenCodeAdapter, AgentAdapter,
+};
 use log::debug;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -23,22 +26,30 @@ pub fn detect_all_tools() -> Vec<ToolDetection> {
         Box::new(OpenClawAdapter),
     ];
 
-    adapters.iter().map(|adapter| {
-        let base = adapter.base_dir();
-        let dir_exists = base.exists();
-        // 检测 CLI 可用性：检查进程名的第一个字符
-        let cli_available = which(adapter.process_names()[0]);
+    adapters
+        .iter()
+        .map(|adapter| {
+            let base = adapter.base_dir();
+            let dir_exists = base.exists();
+            // 检测 CLI 可用性：检查进程名的第一个字符
+            let cli_available = which(adapter.process_names()[0]);
 
-        debug!("{}: dir={}, cli={}", adapter.name(), dir_exists, cli_available);
+            debug!(
+                "{}: dir={}, cli={}",
+                adapter.name(),
+                dir_exists,
+                cli_available
+            );
 
-        ToolDetection {
-            tool_id: format!("{:?}", adapter.agent_type()).to_lowercase(),
-            name: adapter.name().to_string(),
-            base_dir: base.to_string_lossy().to_string(),
-            dir_exists,
-            cli_available,
-        }
-    }).collect()
+            ToolDetection {
+                tool_id: format!("{:?}", adapter.agent_type()).to_lowercase(),
+                name: adapter.name().to_string(),
+                base_dir: base.to_string_lossy().to_string(),
+                dir_exists,
+                cli_available,
+            }
+        })
+        .collect()
 }
 
 /// 检测可执行文件是否在 PATH 中（纯路径扫描，不 spawn 子进程，跨平台）
@@ -50,9 +61,8 @@ fn which(cmd: &str) -> bool {
     } else {
         vec![cmd.to_string()]
     };
-    std::env::split_paths(&path_env).any(|dir| {
-        candidates.iter().any(|name| dir.join(name).is_file())
-    })
+    std::env::split_paths(&path_env)
+        .any(|dir| candidates.iter().any(|name| dir.join(name).is_file()))
 }
 
 #[cfg(test)]

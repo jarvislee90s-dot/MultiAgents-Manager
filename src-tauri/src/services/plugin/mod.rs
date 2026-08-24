@@ -1,7 +1,10 @@
 // Plugin 管理 — 文件型 symlink + 配置型写入工具配置
 // 与 MCP 不同：Plugin 可能是文件/目录（用 symlink）或配置条目（写入 JSON/TOML）
 
-use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter};
+use crate::adapter::{
+    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+    opencode::OpenCodeAdapter, AgentAdapter,
+};
 use crate::linker;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -23,7 +26,10 @@ pub struct PluginConfig {
 
 /// 安装插件到全局仓库
 pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
-    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
+    let repo = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("plugins");
     let _ = std::fs::create_dir_all(&repo);
     let dest = repo.join(name);
     if dest.exists() {
@@ -43,7 +49,10 @@ pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
 
 /// 返回 Plugin 的 SSOT 仓库目录 `~/.mam/plugins/`，不存在则创建
 fn ensure_plugin_repo_dir() -> std::path::PathBuf {
-    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
+    let repo = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("plugins");
     let _ = std::fs::create_dir_all(&repo);
     repo
 }
@@ -106,7 +115,11 @@ pub fn disable_file_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Strin
 
 /// 为工具启用配置型插件（写入工具配置文件的 plugins 段）
 /// 目前仅支持 JSON 格式（Claude / OpenCode），TOML 格式（Codex）后续扩展
-pub fn enable_config_plugin(plugin_name: &str, tool_id: &str, entries: &BTreeMap<String, serde_json::Value>) -> Result<(), String> {
+pub fn enable_config_plugin(
+    plugin_name: &str,
+    tool_id: &str,
+    entries: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), String> {
     let adapter: Box<dyn AgentAdapter> = match tool_id {
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
@@ -125,56 +138,57 @@ pub fn enable_config_plugin(plugin_name: &str, tool_id: &str, entries: &BTreeMap
 
     match adapter.mcp_format() {
         crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
-            let mut root: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
+            let mut root: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
             if root.get("plugins").is_none() {
                 root["plugins"] = serde_json::json!({});
             }
-            root["plugins"][plugin_name] = serde_json::to_value(entries)
-                .map_err(|e| e.to_string())?;
+            root["plugins"][plugin_name] =
+                serde_json::to_value(entries).map_err(|e| e.to_string())?;
             let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
             linker::write_config_locked(config_path, &pretty)?;
         }
         crate::adapter::McpFormat::Toml => {
             // TOML 格式：写入 [plugins.<name>] 段
             let content = std::fs::read_to_string(config_path).unwrap_or_default();
-            let mut doc: toml_edit::DocumentMut = content.parse()
+            let mut doc: toml_edit::DocumentMut = content
+                .parse()
                 .map_err(|e| format!("解析 TOML 失败: {}", e))?;
             if doc.get("plugins").is_none() {
                 doc["plugins"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
             let plugin_table = &mut doc["plugins"][plugin_name];
-/// 将 serde_json::Value 转换为 toml_edit::Value
-fn json_to_toml_value(v: &serde_json::Value) -> toml_edit::Value {
-    match v {
-        serde_json::Value::Null => toml_edit::Value::from(""),
-        serde_json::Value::Bool(b) => toml_edit::Value::from(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                toml_edit::Value::from(i)
-            } else if let Some(f) = n.as_f64() {
-                toml_edit::Value::from(f)
-            } else {
-                toml_edit::Value::from(n.to_string())
+            /// 将 serde_json::Value 转换为 toml_edit::Value
+            fn json_to_toml_value(v: &serde_json::Value) -> toml_edit::Value {
+                match v {
+                    serde_json::Value::Null => toml_edit::Value::from(""),
+                    serde_json::Value::Bool(b) => toml_edit::Value::from(*b),
+                    serde_json::Value::Number(n) => {
+                        if let Some(i) = n.as_i64() {
+                            toml_edit::Value::from(i)
+                        } else if let Some(f) = n.as_f64() {
+                            toml_edit::Value::from(f)
+                        } else {
+                            toml_edit::Value::from(n.to_string())
+                        }
+                    }
+                    serde_json::Value::String(s) => toml_edit::Value::from(s.clone()),
+                    serde_json::Value::Array(arr) => {
+                        let mut toml_arr = toml_edit::Array::new();
+                        for item in arr {
+                            toml_arr.push(json_to_toml_value(item));
+                        }
+                        toml_edit::Value::Array(toml_arr)
+                    }
+                    serde_json::Value::Object(map) => {
+                        let mut table = toml_edit::InlineTable::new();
+                        for (k, v) in map {
+                            table.insert(k, json_to_toml_value(v));
+                        }
+                        toml_edit::Value::InlineTable(table)
+                    }
+                }
             }
-        }
-        serde_json::Value::String(s) => toml_edit::Value::from(s.clone()),
-        serde_json::Value::Array(arr) => {
-            let mut toml_arr = toml_edit::Array::new();
-            for item in arr {
-                toml_arr.push(json_to_toml_value(item));
-            }
-            toml_edit::Value::Array(toml_arr)
-        }
-        serde_json::Value::Object(map) => {
-            let mut table = toml_edit::InlineTable::new();
-            for (k, v) in map {
-                table.insert(k, json_to_toml_value(v));
-            }
-            toml_edit::Value::InlineTable(table)
-        }
-    }
-}
 
             for (k, v) in entries {
                 plugin_table[k] = toml_edit::value(json_to_toml_value(v));
@@ -210,8 +224,8 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
     match adapter.mcp_format() {
         crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
             let content = std::fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
-            let mut root: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
+            let mut root: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
             if let Some(plugins) = root.get_mut("plugins").and_then(|p| p.as_object_mut()) {
                 plugins.remove(plugin_name);
             }
@@ -220,7 +234,8 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
         }
         crate::adapter::McpFormat::Toml => {
             let content = std::fs::read_to_string(config_path).unwrap_or_default();
-            let mut doc: toml_edit::DocumentMut = content.parse()
+            let mut doc: toml_edit::DocumentMut = content
+                .parse()
                 .map_err(|e| format!("解析 TOML 失败: {}", e))?;
             if let Some(plugins) = doc.get_mut("plugins").and_then(|p| p.as_table_mut()) {
                 plugins.remove(plugin_name);
@@ -237,7 +252,12 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
 }
 
 /// 统一 toggle 入口
-pub fn toggle_plugin(plugin_name: &str, tool_id: &str, enabled: bool, kind: &str) -> Result<(), String> {
+pub fn toggle_plugin(
+    plugin_name: &str,
+    tool_id: &str,
+    enabled: bool,
+    kind: &str,
+) -> Result<(), String> {
     match kind {
         "file" => {
             if enabled {
@@ -249,7 +269,11 @@ pub fn toggle_plugin(plugin_name: &str, tool_id: &str, enabled: bool, kind: &str
         "config" => {
             if enabled {
                 // config 型 toggle 需要 entries，这里简化：entries 从全局仓库读取
-                let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins").join(format!("{}.json", plugin_name));
+                let repo = dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".mam")
+                    .join("plugins")
+                    .join(format!("{}.json", plugin_name));
                 let entries: BTreeMap<String, serde_json::Value> = if repo.exists() {
                     let content = std::fs::read_to_string(&repo).map_err(|e| e.to_string())?;
                     serde_json::from_str(&content).map_err(|e| e.to_string())?

@@ -1,7 +1,7 @@
 // 预设组应用逻辑 — 增量应用 + 精确移除 + 部分成功处理
 
-use crate::services;
 use crate::database;
+use crate::services;
 use log::info;
 
 /// 应用预设组到工具
@@ -54,8 +54,19 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> ApplyResult {
     }
 
     let _ = database::record_preset_application(preset_id, tool_id, true);
-    info!("预设组 {} → {} — 成功 {} 失败 {} 冲突 {}", preset_id, tool_id, success, failures.len(), conflicts.len());
-    ApplyResult { success, failures, conflicts }
+    info!(
+        "预设组 {} → {} — 成功 {} 失败 {} 冲突 {}",
+        preset_id,
+        tool_id,
+        success,
+        failures.len(),
+        conflicts.len()
+    );
+    ApplyResult {
+        success,
+        failures,
+        conflicts,
+    }
 }
 
 /// 检查冲突：MCP 已存在或 skill symlink 已 valid 则跳过
@@ -93,8 +104,11 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
                         // Check if the MCP name already exists in the config
                         let has_conflict = match adapter.mcp_format() {
                             crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
-                                if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                                    let servers = root.get("mcpServers").or_else(|| root.get("mcp"));
+                                if let Ok(root) =
+                                    serde_json::from_str::<serde_json::Value>(&content)
+                                {
+                                    let servers =
+                                        root.get("mcpServers").or_else(|| root.get("mcp"));
                                     servers.map(|s| s.get(name).is_some()).unwrap_or(false)
                                 } else {
                                     false
@@ -186,9 +200,20 @@ pub fn apply_preset_to_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &s
     }
 
     let _ = database::record_preset_application_subagent(preset_id, tool_id, sub_agent_id, true);
-    info!("预设组 {} -> {}:{} -- 成功 {} 失败 {} 冲突 {}",
-        preset_id, tool_id, sub_agent_id, success, failures.len(), conflicts.len());
-    ApplyResult { success, failures, conflicts }
+    info!(
+        "预设组 {} -> {}:{} -- 成功 {} 失败 {} 冲突 {}",
+        preset_id,
+        tool_id,
+        sub_agent_id,
+        success,
+        failures.len(),
+        conflicts.len()
+    );
+    ApplyResult {
+        success,
+        failures,
+        conflicts,
+    }
 }
 
 /// 兼容性检查结果
@@ -224,16 +249,27 @@ pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityRepor
 
     for (ext_id, kind) in items {
         // 获取资源信息
-        let ext = database::list_extensions().into_iter().find(|e| e.id == ext_id);
-        let name = ext.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| ext_id.clone());
+        let ext = database::list_extensions()
+            .into_iter()
+            .find(|e| e.id == ext_id);
+        let name = ext
+            .as_ref()
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| ext_id.clone());
 
         // 检查兼容性：tags 字段包含目标工具 ID
-        let is_compatible = ext.as_ref().and_then(|e| e.tags.as_ref())
+        let is_compatible = ext
+            .as_ref()
+            .and_then(|e| e.tags.as_ref())
             .map(|tags| tags.split(',').any(|t| t.trim() == tool_id))
             .unwrap_or(true); // 默认兼容（无标记则兼容所有工具）
 
         if is_compatible {
-            compatible.push(CompatibleItem { id: ext_id.clone(), name, kind });
+            compatible.push(CompatibleItem {
+                id: ext_id.clone(),
+                name,
+                kind,
+            });
         } else {
             incompatible.push(IncompatibleItem {
                 id: ext_id,
@@ -244,13 +280,22 @@ pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityRepor
         }
     }
 
-    CompatibilityReport { compatible, incompatible }
+    CompatibilityReport {
+        compatible,
+        incompatible,
+    }
 }
-pub fn deactivate_preset_from_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
+pub fn deactivate_preset_from_subagent(
+    preset_id: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+) -> Result<(), String> {
     let items = database::get_preset_items(preset_id);
     let mut errors = Vec::new();
     for (ext_id, kind) in &items {
-        if kind != "skill" { continue; }
+        if kind != "skill" {
+            continue;
+        }
         let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
         let result = crate::linker::layer3::unlink_skill_from_layer3(name, tool_id, sub_agent_id);
         if let Err(e) = result {
@@ -263,6 +308,9 @@ pub fn deactivate_preset_from_subagent(preset_id: &str, tool_id: &str, sub_agent
     if !errors.is_empty() {
         log::warn!("deactivate_preset_from_subagent 部分失败: {:?}", errors);
     }
-    info!("预设组 {} 从 {}:{} 取消激活", preset_id, tool_id, sub_agent_id);
+    info!(
+        "预设组 {} 从 {}:{} 取消激活",
+        preset_id, tool_id, sub_agent_id
+    );
     Ok(())
 }

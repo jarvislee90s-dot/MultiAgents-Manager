@@ -1,12 +1,12 @@
 pub mod adapter;
-pub mod monitor;
-pub mod database;
-pub mod window;
-pub mod linker;
-pub mod services;
 pub mod commands;
+pub mod database;
+pub mod linker;
+pub mod monitor;
 pub mod plugins;
+pub mod services;
 pub mod session;
+pub mod window;
 
 use tauri::Manager;
 #[tauri::command]
@@ -25,12 +25,11 @@ fn update_tray_menu(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
     database::init();
-    services::auto_import_extensions(false);  // 首次启动，不强制
-    services::sync_imported_skill_links();    // 为历史导入的 skill 补建工具链接
+    services::auto_import_extensions(false); // 首次启动，不强制
+    services::sync_imported_skill_links(); // 为历史导入的 skill 补建工具链接
     monitor::hooks::register_all_hooks();
 
     let builder = tauri::Builder::default()
@@ -54,10 +53,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
-        .plugin(plugins::system_tray::init())
-        ;
+        .plugin(plugins::system_tray::init());
     let builder = builder.invoke_handler(tauri::generate_handler![
-        greet, update_tray_menu,
+        greet,
+        update_tray_menu,
         commands::session::get_all_sessions,
         commands::session::focus_session,
         commands::session::kill_session,

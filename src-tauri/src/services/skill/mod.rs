@@ -1,8 +1,11 @@
 // Skill 管理服务 - 安装、启用、禁用、子 Agent 分配
 
-use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
-use crate::linker;
+use crate::adapter::{
+    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+    opencode::OpenCodeAdapter, AgentAdapter,
+};
 use crate::database;
+use crate::linker;
 use log::info;
 
 /// 获取工具的 skill 目录
@@ -48,8 +51,7 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
             // 此时子技能已经可用，不应再次删除 SSOT 中的真实目录。
             let repo_skill = crate::linker::ensure_repo_dir().join(skill_name);
             let reaches_ssot = !tool_target.is_symlink()
-                && tool_target.canonicalize().ok()
-                    == repo_skill.canonicalize().ok();
+                && tool_target.canonicalize().ok() == repo_skill.canonicalize().ok();
             if reaches_ssot {
                 should_create_tool_link = false;
             } else {
@@ -86,13 +88,22 @@ pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Str
 pub fn is_skill_in_tool_range(skill_name: &str, tool_id: &str) -> bool {
     let ext_id = format!("skill-{}", skill_name);
     let assignments = crate::database::list_assignments(tool_id);
-    assignments.iter().any(|a| a.extension_id == ext_id && a.enabled)
+    assignments
+        .iter()
+        .any(|a| a.extension_id == ext_id && a.enabled)
 }
 
 /// 为子 Agent 分配 skill（带约束检查，走 Layer 3）
-pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
+pub fn assign_skill_to_subagent(
+    skill_name: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+) -> Result<(), String> {
     if !is_skill_in_tool_range(skill_name, tool_id) {
-        return Err(format!("Skill {} 未在 {} 的工具级分配中启用，无法分配给子 Agent", skill_name, tool_id));
+        return Err(format!(
+            "Skill {} 未在 {} 的工具级分配中启用，无法分配给子 Agent",
+            skill_name, tool_id
+        ));
     }
 
     let adapter: Box<dyn AgentAdapter> = match tool_id {
@@ -111,7 +122,8 @@ pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &
             let subagent_dir = skill_dir.join("subagents").join(sub_agent_id);
             let _ = std::fs::create_dir_all(&subagent_dir);
             let tool_target = subagent_dir.join(skill_name);
-            let layer3_path = crate::linker::layer3::subagent_active_dir(tool_id, sub_agent_id).join(skill_name);
+            let layer3_path =
+                crate::linker::layer3::subagent_active_dir(tool_id, sub_agent_id).join(skill_name);
             if tool_target.exists() || tool_target.is_symlink() {
                 let _ = crate::linker::remove_link(&tool_target);
             }
@@ -120,7 +132,22 @@ pub fn assign_skill_to_subagent(skill_name: &str, tool_id: &str, sub_agent_id: &
     }
 
     let ext_id = format!("skill-{}", skill_name);
-    crate::database::upsert_assignment_with_subagent(&ext_id, tool_id, sub_agent_id, true, if has_subagent_dir { "valid" } else { "ui-only" })?;
-    info!("Skill {} 已分配给子 Agent {}（{}）", skill_name, sub_agent_id, if has_subagent_dir { "Layer 3" } else { "UI-only" });
+    crate::database::upsert_assignment_with_subagent(
+        &ext_id,
+        tool_id,
+        sub_agent_id,
+        true,
+        if has_subagent_dir { "valid" } else { "ui-only" },
+    )?;
+    info!(
+        "Skill {} 已分配给子 Agent {}（{}）",
+        skill_name,
+        sub_agent_id,
+        if has_subagent_dir {
+            "Layer 3"
+        } else {
+            "UI-only"
+        }
+    );
     Ok(())
 }

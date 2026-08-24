@@ -59,19 +59,16 @@ pub fn register_hooks_for_tool(
 
     // 读取现有配置（不存在则创建空对象）
     let existing = fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
-    let mut config: serde_json::Value = serde_json::from_str(&existing)
-        .map_err(|e| format!("解析配置文件失败: {}", e))?;
+    let mut config: serde_json::Value =
+        serde_json::from_str(&existing).map_err(|e| format!("解析配置文件失败: {}", e))?;
 
     // 确保 hooks 对象存在
     // 确保 hooks 对象存在
     if config.get("hooks").is_none() {
         config["hooks"] = serde_json::json!({});
     }
-    let hooks = config.get_mut("hooks")
-        .ok_or("hooks 字段不存在")?;
-    let hooks_obj = hooks
-        .as_object_mut()
-        .ok_or("hooks 字段不是对象")?;
+    let hooks = config.get_mut("hooks").ok_or("hooks 字段不存在")?;
+    let hooks_obj = hooks.as_object_mut().ok_or("hooks 字段不是对象")?;
 
     let mut added = 0;
     for &event in events {
@@ -90,14 +87,17 @@ pub fn register_hooks_for_tool(
         if let Some(existing_arr) = hooks_obj.get(&event_name) {
             if let Some(arr) = existing_arr.as_array() {
                 let already = arr.iter().any(|entry| {
-                    entry.get("hooks")
+                    entry
+                        .get("hooks")
                         .and_then(|h| h.as_array())
-                        .map(|hooks| hooks.iter().any(|h| {
-                            h.get("command")
-                                .and_then(|c| c.as_str())
-                                .map(|c| c.contains("status-hook.sh"))
-                                .unwrap_or(false)
-                        }))
+                        .map(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map(|c| c.contains("status-hook.sh"))
+                                    .unwrap_or(false)
+                            })
+                        })
                         .unwrap_or(false)
                 });
                 if already {
@@ -125,8 +125,8 @@ pub fn register_hooks_for_tool(
             let backup = config_path.with_extension("json.bak");
             let _ = fs::copy(config_path, &backup);
         }
-        let pretty = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("序列化配置失败: {}", e))?;
+        let pretty =
+            serde_json::to_string_pretty(&config).map_err(|e| format!("序列化配置失败: {}", e))?;
         crate::linker::write_config_locked(config_path, &pretty)
             .map_err(|e| format!("写入配置文件失败: {}", e))?;
         info!("已注册 {} 个 Hook 到 {:?}", added, config_path);
@@ -138,7 +138,10 @@ pub fn register_hooks_for_tool(
 /// 读取所有 Hook 事件文件，返回 PPID → 事件数据的映射
 pub fn read_hook_events() -> HashMap<u32, HookEvent> {
     let mut events = HashMap::new();
-    let events_dir = dirs::home_dir().unwrap_or_default().join(".mam").join("events");
+    let events_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("events");
 
     if !events_dir.exists() {
         return events;
@@ -185,13 +188,11 @@ pub fn register_all_hooks() {
             return;
         }
     }
-    use crate::adapter::{AgentAdapter, HookEventCase};
     use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter};
+    use crate::adapter::{AgentAdapter, HookEventCase};
 
-    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
-        Box::new(ClaudeAdapter),
-        Box::new(CodexAdapter),
-    ];
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)];
 
     for adapter in &adapters {
         if !adapter.hook_supported() {
@@ -202,10 +203,15 @@ pub fn register_all_hooks() {
             let is_pascal = matches!(adapter.hook_event_case(), HookEventCase::PascalCase);
             match register_hooks_for_tool(&config_path, &events, is_pascal) {
                 Ok(()) => {
-            info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
-            crate::database::set_setting("hooks_registered", "true");
-        }
-                Err(e) => warn!("Hook 注册失败 {} → {:?}: {}", adapter.name(), config_path, e),
+                    info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
+                    crate::database::set_setting("hooks_registered", "true");
+                }
+                Err(e) => warn!(
+                    "Hook 注册失败 {} → {:?}: {}",
+                    adapter.name(),
+                    config_path,
+                    e
+                ),
             }
         }
     }

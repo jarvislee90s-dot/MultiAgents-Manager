@@ -26,13 +26,15 @@ pub fn create_preset(name: &str, items: &[(String, String)]) -> Result<String, S
     conn.execute(
         "INSERT INTO presets (id, name, created_at) VALUES (?1, ?2, ?3)",
         params![id, name, now],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     for (ext_id, kind) in items {
         let item_id = format!("{}-{}", id, ext_id);
         conn.execute(
             "INSERT INTO preset_items (id, preset_id, extension_id, kind) VALUES (?1, ?2, ?3, ?4)",
             params![item_id, id, ext_id, kind],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(id)
 }
@@ -73,9 +75,15 @@ pub fn list_presets() -> Vec<PresetRecord> {
 
 pub fn delete_preset(preset_id: &str) -> Result<(), String> {
     let conn = DB.lock().unwrap();
-    conn.execute("DELETE FROM preset_items WHERE preset_id = ?1", [preset_id]).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM preset_applications WHERE preset_id = ?1", [preset_id]).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM presets WHERE id = ?1", [preset_id]).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM preset_items WHERE preset_id = ?1", [preset_id])
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM preset_applications WHERE preset_id = ?1",
+        [preset_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM presets WHERE id = ?1", [preset_id])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -92,7 +100,11 @@ pub fn get_preset_items(preset_id: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-pub fn record_preset_application(preset_id: &str, tool_id: &str, active: bool) -> Result<(), String> {
+pub fn record_preset_application(
+    preset_id: &str,
+    tool_id: &str,
+    active: bool,
+) -> Result<(), String> {
     let conn = DB.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("{}-{}", preset_id, tool_id);
@@ -103,7 +115,12 @@ pub fn record_preset_application(preset_id: &str, tool_id: &str, active: bool) -
     Ok(())
 }
 
-pub fn record_preset_application_subagent(preset_id: &str, tool_id: &str, sub_agent_id: &str, active: bool) -> Result<(), String> {
+pub fn record_preset_application_subagent(
+    preset_id: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+    active: bool,
+) -> Result<(), String> {
     let conn = DB.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     let id = format!("{}-{}-{}", preset_id, tool_id, sub_agent_id);

@@ -7,7 +7,9 @@ pub fn toggle_mcp_for_tool(mcp_name: String, tool_id: String, enabled: bool) -> 
 
 #[tauri::command]
 pub fn read_mcp_servers(tool_id: String) -> Result<serde_json::Value, String> {
-    use crate::adapter::{AgentAdapter, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter};
+    use crate::adapter::{
+        claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, AgentAdapter,
+    };
     let adapter: Box<dyn AgentAdapter> = match tool_id.as_str() {
         "claude" => Box::new(ClaudeAdapter),
         "codex" => Box::new(CodexAdapter),
@@ -21,12 +23,15 @@ pub fn read_mcp_servers(tool_id: String) -> Result<serde_json::Value, String> {
             serde_json::from_str(&content).map_err(|e| e.to_string())?
         }
         crate::adapter::McpFormat::Toml => {
-            let toml_val: toml::Value = content.parse().map_err(|e: toml::de::Error| e.to_string())?;
+            let toml_val: toml::Value = content
+                .parse()
+                .map_err(|e: toml::de::Error| e.to_string())?;
             let json_str = serde_json::to_string(&toml_val).map_err(|e| e.to_string())?;
             serde_json::from_str(&json_str).map_err(|e| e.to_string())?
         }
     };
-    let servers = raw.get("mcpServers")
+    let servers = raw
+        .get("mcpServers")
         .or_else(|| raw.get("mcp_servers"))
         .or_else(|| raw.get("mcp"))
         .or_else(|| raw.get("servers"))
@@ -36,7 +41,13 @@ pub fn read_mcp_servers(tool_id: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn write_mcp_server(tool_id: String, mcp_name: String, command: String, args: Vec<String>, env: std::collections::BTreeMap<String, String>) -> Result<(), String> {
+pub fn write_mcp_server(
+    tool_id: String,
+    mcp_name: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
     let config = crate::services::mcp::McpConfig { command, args, env };
     crate::services::mcp::write_mcp(&tool_id, &mcp_name, &config)
 }

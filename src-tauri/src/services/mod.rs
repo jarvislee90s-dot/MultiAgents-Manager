@@ -1,30 +1,44 @@
 // Services 统一入口 - 业务逻辑按功能域拆分到子目录
 
-pub mod skill;
-pub mod resource;
-pub mod preset;
+pub mod manifest;
 pub mod mcp;
 pub mod plugin;
-pub mod manifest;
+pub mod preset;
+pub mod resource;
+pub mod skill;
 
-use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
+use crate::adapter::{
+    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+    opencode::OpenCodeAdapter, AgentAdapter,
+};
 use log::info;
 
 // 重新导出 skill 函数（保持 crate::services::install_skill 向后兼容）
-pub use skill::{install_skill, enable_skill_for_tool, disable_skill_for_tool, is_skill_in_tool_range, assign_skill_to_subagent};
+pub use skill::{
+    assign_skill_to_subagent, disable_skill_for_tool, enable_skill_for_tool, install_skill,
+    is_skill_in_tool_range,
+};
 // 重新导出 resource 函数
-pub use resource::{auto_import_extensions, ImportStats};
 pub use resource::sync_imported_skill_links;
+pub use resource::{auto_import_extensions, ImportStats};
 
 /// 为工具启用/禁用 Plugin（委托到 plugin 子模块）
-pub fn toggle_plugin(plugin_name: &str, tool_id: &str, enabled: bool, kind: &str) -> Result<(), String> {
+pub fn toggle_plugin(
+    plugin_name: &str,
+    tool_id: &str,
+    enabled: bool,
+    kind: &str,
+) -> Result<(), String> {
     plugin::toggle_plugin(plugin_name, tool_id, enabled, kind)
 }
 
 /// 为工具启用/禁用 MCP（委托到 mcp 子模块）
 pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), String> {
     if enabled {
-        let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+        let repo = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".mam")
+            .join("mcp");
         let config_path = repo.join(format!("{}.json", mcp_name));
         if !config_path.exists() {
             return Err(format!("MCP 配置不在全局仓库中: {}", mcp_name));
@@ -36,8 +50,18 @@ pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), St
         mcp::remove_mcp(tool_id, mcp_name)?;
     }
     let ext_id = format!("mcp-{}", mcp_name);
-    crate::database::upsert_assignment(&ext_id, tool_id, enabled, if enabled { "valid" } else { "missing" })?;
-    info!("MCP {} 已为 {} {}", mcp_name, tool_id, if enabled { "启用" } else { "禁用" });
+    crate::database::upsert_assignment(
+        &ext_id,
+        tool_id,
+        enabled,
+        if enabled { "valid" } else { "missing" },
+    )?;
+    info!(
+        "MCP {} 已为 {} {}",
+        mcp_name,
+        tool_id,
+        if enabled { "启用" } else { "禁用" }
+    );
     Ok(())
 }
 
@@ -53,9 +77,11 @@ pub fn detect_subagents(tool_id: &str) -> Vec<String> {
     if let Some(dir) = adapter.subagent_dir() {
         if dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
-                return entries.flatten()
+                return entries
+                    .flatten()
                     .filter_map(|e| {
-                        e.path().file_stem()
+                        e.path()
+                            .file_stem()
                             .and_then(|s| s.to_str())
                             .map(String::from)
                     })

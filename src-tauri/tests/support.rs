@@ -22,20 +22,3 @@ pub fn setup() {
         std::mem::forget(temp);
     });
 }
-
-/// 创建测试用 ExtensionRecord
-pub fn create_test_extension() -> multi_agents_manager_lib::database::ExtensionRecord {
-    multi_agents_manager_lib::database::ExtensionRecord {
-        id: "test-skill-1".to_string(),
-        kind: "skill".to_string(),
-        name: "Test Skill".to_string(),
-        description: Some("测试用 skill".to_string()),
-        source_path: "/tmp/test-skill".to_string(),
-        source_url: None,
-        version: None,
-        tags: None,
-        suite: None,
-        source_tool: None,
-        is_native: false,
-    }
-}

@@ -2,21 +2,22 @@ use serde::Deserialize;
 // JSONL 解析器 — Claude Code (message.role + content[]) 和 Codex CLI (type + payload)
 // Claude 部分移植自 agent-sessions session/parser.rs
 
+use super::status::*;
 use crate::adapter::AgentProcess;
+use crate::session::model::JsonlMessage;
 use crate::session::ProcessForm;
 use crate::session::{AgentType, Session, SessionStatus};
-use crate::session::model::JsonlMessage;
-use super::status::*;
 use log::{debug, info};
+use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
 
-static GIT_URL_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static GIT_URL_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 // ===== 路径编码（Claude projects 目录名 <-> 实际路径）=====
 
@@ -48,7 +49,9 @@ pub fn convert_dir_name_to_path(dir_name: &str) -> String {
     if parts.is_empty() {
         return String::new();
     }
-    let projects_idx = parts.iter().position(|&p| p == "Projects" || p == "UnityProjects");
+    let projects_idx = parts
+        .iter()
+        .position(|&p| p == "Projects" || p == "UnityProjects");
     if let Some(idx) = projects_idx {
         let path_parts = &parts[..=idx];
         let project_parts = &parts[idx + 1..];
@@ -104,7 +107,8 @@ fn get_github_url(project_path: &str) -> Option<String> {
     }
     let result = (|| {
         let mut cmd = Command::new("git");
-        cmd.args(["remote", "get-url", "origin"]).current_dir(project_path);
+        cmd.args(["remote", "get-url", "origin"])
+            .current_dir(project_path);
         // Windows 下 GUI 进程 spawn 控制台程序会闪黑窗，必须加 CREATE_NO_WINDOW
         #[cfg(windows)]
         {
@@ -113,7 +117,9 @@ fn get_github_url(project_path: &str) -> Option<String> {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let output = cmd.output().ok()?;
-        if !output.status.success() { return None; }
+        if !output.status.success() {
+            return None;
+        }
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if let Some(p) = url.strip_prefix("git@github.com:") {
             let p = p.strip_suffix(".git").unwrap_or(p);
@@ -124,7 +130,10 @@ fn get_github_url(project_path: &str) -> Option<String> {
             None
         }
     })();
-    GIT_URL_CACHE.lock().unwrap().insert(project_path.to_string(), result.clone());
+    GIT_URL_CACHE
+        .lock()
+        .unwrap()
+        .insert(project_path.to_string(), result.clone());
     result
 }
 
@@ -133,8 +142,7 @@ fn get_github_url(project_path: &str) -> Option<String> {
 /// 校验 cwd 字符串形态：Unix 绝对路径（/ 开头）或 Windows 盘符路径（如 C:\... 或 c:/...）
 fn is_valid_cwd(cwd: &str) -> bool {
     let bytes = cwd.as_bytes();
-    cwd.starts_with('/')
-        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    cwd.starts_with('/') || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// 从项目路径提取项目名（跨平台：兼容 / 和 \ 分隔符）
@@ -152,7 +160,9 @@ fn extract_cwd_from_jsonl(jsonl_path: &Path) -> Option<String> {
     for line in reader.lines().take(20).flatten() {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(&line) {
             if let Some(cwd) = msg.cwd {
-                if is_valid_cwd(&cwd) { return Some(cwd); }
+                if is_valid_cwd(&cwd) {
+                    return Some(cwd);
+                }
             }
         }
     }
@@ -160,7 +170,8 @@ fn extract_cwd_from_jsonl(jsonl_path: &Path) -> Option<String> {
 }
 
 fn is_subagent_file(path: &Path) -> bool {
-    path.file_name().and_then(|n| n.to_str())
+    path.file_name()
+        .and_then(|n| n.to_str())
         .map(|name| name.starts_with("agent-") && name.ends_with(".jsonl"))
         .unwrap_or(false)
 }
@@ -169,27 +180,40 @@ fn count_active_subagents(project_dir: &Path, parent_session_id: &str) -> usize 
     use std::time::{Duration, SystemTime};
     let threshold = Duration::from_secs(30);
     let now = SystemTime::now();
-    fs::read_dir(project_dir).into_iter().flatten().flatten()
+    fs::read_dir(project_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
         .filter(|e| is_subagent_file(&e.path()))
         .filter(|e| {
-            e.metadata().and_then(|m| m.modified()).ok()
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
                 .and_then(|m| now.duration_since(m).ok())
-                .map(|d| d < threshold).unwrap_or(false)
+                .map(|d| d < threshold)
+                .unwrap_or(false)
         })
         .filter(|e| {
             let file = File::open(e.path()).ok();
             file.and_then(|f| {
-                BufReader::new(f).lines().take(5).flatten()
+                BufReader::new(f)
+                    .lines()
+                    .take(5)
+                    .flatten()
                     .find_map(|line| serde_json::from_str::<JsonlMessage>(&line).ok())
                     .and_then(|m| m.session_id)
                     .map(|id| id == parent_session_id)
-            }).unwrap_or(false)
+            })
+            .unwrap_or(false)
         })
         .count()
 }
 
 fn get_recent_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<_> = fs::read_dir(project_dir).into_iter().flatten().flatten()
+    let mut files: Vec<_> = fs::read_dir(project_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
         .filter(|e| {
             let p = e.path();
             p.extension().map(|ext| ext == "jsonl").unwrap_or(false) && !is_subagent_file(&p)
@@ -221,7 +245,9 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     }
 
-    let claude_dir = dirs::home_dir().map(|h| h.join(".claude").join("projects")).unwrap_or_default();
+    let claude_dir = dirs::home_dir()
+        .map(|h| h.join(".claude").join("projects"))
+        .unwrap_or_default();
     if !claude_dir.exists() {
         return sessions;
     }
@@ -229,17 +255,23 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     if let Ok(entries) = fs::read_dir(&claude_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() { continue; }
+            if !path.is_dir() {
+                continue;
+            }
             let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !expected_dir_names.contains(dir_name) { continue; }
+            if !expected_dir_names.contains(dir_name) {
+                continue;
+            }
 
             let jsonl_files = get_recent_jsonl_files(&path);
-            if jsonl_files.is_empty() { continue; }
+            if jsonl_files.is_empty() {
+                continue;
+            }
 
             let mut cwd_to_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
             for f in &jsonl_files {
-                let file_cwd = extract_cwd_from_jsonl(f)
-                    .unwrap_or_else(|| convert_dir_name_to_path(dir_name));
+                let file_cwd =
+                    extract_cwd_from_jsonl(f).unwrap_or_else(|| convert_dir_name_to_path(dir_name));
                 cwd_to_files.entry(file_cwd).or_default().push(f.clone());
             }
 
@@ -248,7 +280,8 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                     for (idx, proc) in procs.iter().enumerate() {
                         if let Some(f) = files.get(idx) {
                             if let Some(mut session) = parse_claude_jsonl(f, project_path, proc) {
-                                session.active_subagent_count = count_active_subagents(&path, &session.id);
+                                session.active_subagent_count =
+                                    count_active_subagents(&path, &session.id);
                                 sessions.push(session);
                             }
                         }
@@ -258,15 +291,26 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     }
 
-    info!("Claude: {} sessions from {} processes", sessions.len(), processes.len());
+    info!(
+        "Claude: {} sessions from {} processes",
+        sessions.len(),
+        processes.len()
+    );
     sessions
 }
 
 /// 解析单个 Claude JSONL 文件
-fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProcess) -> Option<Session> {
+fn parse_claude_jsonl(
+    jsonl_path: &Path,
+    project_path: &str,
+    process: &AgentProcess,
+) -> Option<Session> {
     use std::time::SystemTime;
 
-    let file_age_secs = jsonl_path.metadata().and_then(|m| m.modified()).ok()
+    let file_age_secs = jsonl_path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
         .map(|d| d.as_secs_f32());
     let file_recently_modified = file_age_secs.map(|a| a < 3.0).unwrap_or(false);
@@ -301,9 +345,15 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
 
     for line in &recent {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(line) {
-            if session_id.is_none() { session_id = msg.session_id; }
-            if git_branch.is_none() { git_branch = msg.git_branch; }
-            if last_timestamp.is_none() { last_timestamp = msg.timestamp; }
+            if session_id.is_none() {
+                session_id = msg.session_id;
+            }
+            if git_branch.is_none() {
+                git_branch = msg.git_branch;
+            }
+            if last_timestamp.is_none() {
+                last_timestamp = msg.timestamp;
+            }
 
             if !found_status && !is_compacting {
                 if msg.is_compact_summary == Some(true) {
@@ -335,7 +385,9 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
                 }
             }
 
-            if session_id.is_some() && found_status { break; }
+            if session_id.is_some() && found_status {
+                break;
+            }
         }
     }
 
@@ -347,11 +399,17 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
                     let text = match c {
                         serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
                         serde_json::Value::Array(arr) => arr.iter().find_map(|v| {
-                            v.get("text").and_then(|t| t.as_str()).filter(|s| !s.is_empty()).map(String::from)
+                            v.get("text")
+                                .and_then(|t| t.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(String::from)
                         }),
                         _ => None,
                     };
-                    if text.is_some() { last_message = text; break; }
+                    if text.is_some() {
+                        last_message = text;
+                        break;
+                    }
                 }
             }
         }
@@ -362,13 +420,24 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
     let status = if is_compacting {
         SessionStatus::Compacting
     } else {
-        determine_status(last_msg_type.as_deref(), last_has_tool_use, last_has_tool_result,
-                         last_is_local, last_is_interrupted, last_is_user_input, file_recently_modified)
+        determine_status(
+            last_msg_type.as_deref(),
+            last_has_tool_use,
+            last_has_tool_result,
+            last_is_local,
+            last_is_interrupted,
+            last_is_user_input,
+            file_recently_modified,
+        )
     };
 
     let project_name = project_name_from_path(project_path);
     let last_message = last_message.map(|m| {
-        if m.chars().count() > 100 { format!("{}...", m.chars().take(100).collect::<String>()) } else { m }
+        if m.chars().count() > 100 {
+            format!("{}...", m.chars().take(100).collect::<String>())
+        } else {
+            m
+        }
     });
 
     Some(Session {
@@ -407,7 +476,9 @@ struct CodexEntry {
 pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let mut sessions = Vec::new();
 
-    let sessions_dir = dirs::home_dir().map(|h| h.join(".codex").join("sessions")).unwrap_or_default();
+    let sessions_dir = dirs::home_dir()
+        .map(|h| h.join(".codex").join("sessions"))
+        .unwrap_or_default();
     if !sessions_dir.exists() {
         return sessions;
     }
@@ -416,7 +487,8 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     debug!("Codex: found {} session files", jsonl_files.len());
 
     // 解析所有会话文件，提取 cwd（用 Cli 默认值获取 project_path 用于匹配）
-    let parsed: Vec<(PathBuf, Option<Session>)> = jsonl_files.iter()
+    let parsed: Vec<(PathBuf, Option<Session>)> = jsonl_files
+        .iter()
         .map(|f| (f.clone(), parse_codex_jsonl(f, ProcessForm::Cli)))
         .collect();
 
@@ -445,8 +517,8 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             if let Some(procs) = cwd_to_processes.get(&session.project_path) {
                 if let Some(proc) = procs.first() {
                     // 用实际 process_form 重新解析以获取正确状态
-                    let mut session = parse_codex_jsonl(file_path, proc.form)
-                        .unwrap_or_else(|| session.clone());
+                    let mut session =
+                        parse_codex_jsonl(file_path, proc.form).unwrap_or_else(|| session.clone());
                     session.pid = proc.pid;
                     session.cpu_usage = proc.cpu_usage;
                     session.form = proc.form;
@@ -467,8 +539,8 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             }
             if let Some(session) = session_opt {
                 // 用实际 process_form 重新解析以获取正确状态
-                let mut session = parse_codex_jsonl(file_path, process.form)
-                    .unwrap_or_else(|| session.clone());
+                let mut session =
+                    parse_codex_jsonl(file_path, process.form).unwrap_or_else(|| session.clone());
                 session.pid = process.pid;
                 session.cpu_usage = process.cpu_usage;
                 session.form = process.form;
@@ -481,7 +553,11 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     }
 
-    info!("Codex: {} sessions from {} processes", sessions.len(), processes.len());
+    info!(
+        "Codex: {} sessions from {} processes",
+        sessions.len(),
+        processes.len()
+    );
     sessions
 }
 
@@ -499,8 +575,11 @@ fn collect_codex_files_inner(dir: &Path, files: &mut Vec<(PathBuf, std::time::Sy
             let path = entry.path();
             if path.is_dir() {
                 collect_codex_files_inner(&path, files);
-            } else if path.file_name().and_then(|n| n.to_str())
-                .map(|n| n.starts_with("rollout") && n.ends_with(".jsonl")).unwrap_or(false)
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("rollout") && n.ends_with(".jsonl"))
+                .unwrap_or(false)
             {
                 if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
                     files.push((path, modified));
@@ -514,7 +593,10 @@ fn collect_codex_files_inner(dir: &Path, files: &mut Vec<(PathBuf, std::time::Sy
 fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Session> {
     use std::time::SystemTime;
 
-    let file_age = jsonl_path.metadata().and_then(|m| m.modified()).ok()
+    let file_age = jsonl_path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
         .map(|d| d.as_secs_f32());
     // Codex APP 单步工具调用之间可能 10-30s 无文件改动；60s 对 APP 太短
@@ -558,12 +640,21 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
             match entry.entry_type.as_deref() {
                 Some("session_meta") => {
                     if session_id.is_none() {
-                        session_id = entry.payload.as_ref()
-                            .and_then(|p| p.get("id")).and_then(|v| v.as_str()).map(String::from);
+                        session_id = entry
+                            .payload
+                            .as_ref()
+                            .and_then(|p| p.get("id"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                     }
                     if project_path.is_empty() {
-                        project_path = entry.payload.as_ref()
-                            .and_then(|p| p.get("cwd")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        project_path = entry
+                            .payload
+                            .as_ref()
+                            .and_then(|p| p.get("cwd"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                     }
                 }
                 Some("response_item") => {
@@ -582,7 +673,9 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
                                 };
                                 if has_content {
                                     // Codex 的 type 字段: response_item 中的 payload 有 type
-                                    let item_type = payload.and_then(|p| p.get("type")).and_then(|v| v.as_str());
+                                    let item_type = payload
+                                        .and_then(|p| p.get("type"))
+                                        .and_then(|v| v.as_str());
                                     last_entry_type = Some(item_type.unwrap_or(role).to_string());
                                     last_has_tool_use = has_tool_use(c);
                                     found_status = true;
@@ -598,11 +691,16 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
                             let text = match c {
                                 serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
                                 serde_json::Value::Array(arr) => arr.iter().find_map(|v| {
-                                    v.get("text").and_then(|t| t.as_str()).filter(|s| !s.is_empty()).map(String::from)
+                                    v.get("text")
+                                        .and_then(|t| t.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .map(String::from)
                                 }),
                                 _ => None,
                             };
-                            if text.is_some() { last_message = text; }
+                            if text.is_some() {
+                                last_message = text;
+                            }
                         }
                     }
                 }
@@ -612,7 +710,9 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
     }
 
     let session_id = session_id?;
-    if project_path.is_empty() { return None; }
+    if project_path.is_empty() {
+        return None;
+    }
 
     // Codex 状态判断：复用 determine_status 的逻辑
     // response_item with role=assistant + tool_use -> Processing
@@ -624,12 +724,22 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         _ => last_entry_type.as_deref(),
     };
     let status = determine_status(
-        msg_type, last_has_tool_use, false, false, false, false, file_recently_modified
+        msg_type,
+        last_has_tool_use,
+        false,
+        false,
+        false,
+        false,
+        file_recently_modified,
     );
 
     let project_name = project_name_from_path(&project_path);
     let last_message = last_message.map(|m| {
-        if m.chars().count() > 100 { format!("{}...", m.chars().take(100).collect::<String>()) } else { m }
+        if m.chars().count() > 100 {
+            format!("{}...", m.chars().take(100).collect::<String>())
+        } else {
+            m
+        }
     });
 
     let codex_title = session_id[..session_id.len().min(12)].to_string();
@@ -655,27 +765,34 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
 
 #[cfg(test)]
 mod path_tests {
-    use super::*;
-
     mod dir_name {
         use super::super::convert_path_to_dir_name;
 
         #[test]
         fn unix_paths_keep_old_behavior() {
             assert_eq!(convert_path_to_dir_name("/Users/x/proj"), "-Users-x-proj");
-            assert_eq!(convert_path_to_dir_name("/Users/x/.agents/skills"), "-Users-x--agents-skills");
+            assert_eq!(
+                convert_path_to_dir_name("/Users/x/.agents/skills"),
+                "-Users-x--agents-skills"
+            );
         }
 
         #[test]
         fn windows_paths() {
-            assert_eq!(convert_path_to_dir_name("C:\\Users\\bunny\\Desktop"), "C--Users-bunny-Desktop");
+            assert_eq!(
+                convert_path_to_dir_name("C:\\Users\\bunny\\Desktop"),
+                "C--Users-bunny-Desktop"
+            );
             assert_eq!(
                 convert_path_to_dir_name("C:\\Users\\bunny\\.agents\\skills\\extract-report"),
                 "C--Users-bunny--agents-skills-extract-report"
             );
             // 非 ASCII 字符逐字符替换为 '-'：分隔符 1 个 + 2 个中文 = 3 个 '-'
             // （注意：计划原文预期 2 个 '-' 与实际逐字符规则不符，已按规则修正为 3 个）
-            assert_eq!(convert_path_to_dir_name("C:\\Users\\bunny\\Desktop\\桌面"), "C--Users-bunny-Desktop---");
+            assert_eq!(
+                convert_path_to_dir_name("C:\\Users\\bunny\\Desktop\\桌面"),
+                "C--Users-bunny-Desktop---"
+            );
         }
     }
 
@@ -684,7 +801,10 @@ mod path_tests {
 
         #[test]
         fn windows_drive_letter() {
-            assert_eq!(convert_dir_name_to_path("C--Users-bunny-Desktop"), "C:\\Users\\bunny\\Desktop");
+            assert_eq!(
+                convert_dir_name_to_path("C--Users-bunny-Desktop"),
+                "C:\\Users\\bunny\\Desktop"
+            );
         }
 
         #[test]
@@ -716,7 +836,10 @@ mod path_tests {
 
         #[test]
         fn cross_platform_basename() {
-            assert_eq!(project_name_from_path("C:\\Users\\bunny\\Desktop"), "Desktop");
+            assert_eq!(
+                project_name_from_path("C:\\Users\\bunny\\Desktop"),
+                "Desktop"
+            );
             assert_eq!(project_name_from_path("/Users/x/proj"), "proj");
             assert_eq!(project_name_from_path("/"), "Unknown");
         }
@@ -740,9 +863,17 @@ mod git_url_tests {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             init.creation_flags(CREATE_NO_WINDOW);
         }
-        init.output().expect("git init 失败（CI/开发机均应安装 git）");
+        init.output()
+            .expect("git init 失败（CI/开发机均应安装 git）");
         let mut remote = std::process::Command::new("git");
-        remote.args(["remote", "add", "origin", "git@github.com:some-org/some-repo.git"]).current_dir(&dir);
+        remote
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:some-org/some-repo.git",
+            ])
+            .current_dir(&dir);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

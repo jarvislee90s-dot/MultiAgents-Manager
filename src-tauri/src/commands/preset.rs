@@ -28,7 +28,11 @@ pub fn list_presets() -> Vec<PresetRecord> {
 #[tauri::command]
 pub fn apply_preset(preset_id: String, tool_id: String) -> PresetApplyResult {
     let result = crate::services::preset::apply_preset(&preset_id, &tool_id);
-    PresetApplyResult { success_count: result.success, failures: result.failures, conflicts: result.conflicts }
+    PresetApplyResult {
+        success_count: result.success,
+        failures: result.failures,
+        conflicts: result.conflicts,
+    }
 }
 
 #[tauri::command]
@@ -37,12 +41,25 @@ pub fn deactivate_preset(preset_id: String, tool_id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn apply_preset_to_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> PresetApplyResult {
-    let result = crate::services::preset::apply_preset_to_subagent(&preset_id, &tool_id, &sub_agent_id);
-    PresetApplyResult { success_count: result.success, failures: result.failures, conflicts: result.conflicts }
+pub fn apply_preset_to_subagent(
+    preset_id: String,
+    tool_id: String,
+    sub_agent_id: String,
+) -> PresetApplyResult {
+    let result =
+        crate::services::preset::apply_preset_to_subagent(&preset_id, &tool_id, &sub_agent_id);
+    PresetApplyResult {
+        success_count: result.success,
+        failures: result.failures,
+        conflicts: result.conflicts,
+    }
 }
 
 #[tauri::command]
-pub fn deactivate_preset_from_subagent(preset_id: String, tool_id: String, sub_agent_id: String) -> Result<(), String> {
+pub fn deactivate_preset_from_subagent(
+    preset_id: String,
+    tool_id: String,
+    sub_agent_id: String,
+) -> Result<(), String> {
     crate::services::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
 }

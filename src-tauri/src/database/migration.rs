@@ -1,7 +1,8 @@
 use rusqlite::Connection;
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    conn.prepare(&format!("SELECT {} FROM {} LIMIT 0", column, table)).is_ok()
+    conn.prepare(&format!("SELECT {} FROM {} LIMIT 0", column, table))
+        .is_ok()
 }
 
 pub fn migrate(conn: &Connection) -> Result<(), String> {
@@ -29,8 +30,11 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("迁移扩展资源字段失败: {}", e))?;
     }
     if !column_exists(conn, "extensions", "is_native") {
-        conn.execute("ALTER TABLE extensions ADD COLUMN is_native INTEGER NOT NULL DEFAULT 0", [])
-            .map_err(|e| format!("迁移扩展资源字段失败: {}", e))?;
+        conn.execute(
+            "ALTER TABLE extensions ADD COLUMN is_native INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("迁移扩展资源字段失败: {}", e))?;
     }
 
     // 根据旧表记录回填来源工具
@@ -48,8 +52,9 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
               AND (source_path LIKE '%/.config/opencode/skills/%' OR tags = 'opencode');
          UPDATE extensions SET source_tool = 'openclaw'
             WHERE kind = 'skill' AND source_tool IS NULL
-              AND (source_path LIKE '%/.openclaw/skills/%' OR tags = 'openclaw');"
-    ).map_err(|e| format!("回填来源工具失败: {}", e))?;
+              AND (source_path LIKE '%/.openclaw/skills/%' OR tags = 'openclaw');",
+    )
+    .map_err(|e| format!("回填来源工具失败: {}", e))?;
     Ok(())
 }
 
@@ -72,11 +77,16 @@ mod tests {
                 tags TEXT,
                 installed_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );"
-        ).unwrap();
+            );",
+        )
+        .unwrap();
         migrate(&conn).unwrap();
-        assert!(conn.prepare("SELECT source_tool FROM extensions LIMIT 0").is_ok());
-        assert!(conn.prepare("SELECT is_native FROM extensions LIMIT 0").is_ok());
+        assert!(conn
+            .prepare("SELECT source_tool FROM extensions LIMIT 0")
+            .is_ok());
+        assert!(conn
+            .prepare("SELECT is_native FROM extensions LIMIT 0")
+            .is_ok());
     }
 
     #[test]

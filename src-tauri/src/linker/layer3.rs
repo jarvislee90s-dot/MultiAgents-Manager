@@ -19,7 +19,11 @@ pub fn ensure_subagent_active_dir(tool_id: &str, sub_agent_id: &str) -> PathBuf 
 
 /// 创建 Layer 3 symlink：从 Layer 1 源文件 → Layer 3 子 Agent 目录
 /// 约束：Layer 3 只能链接 Layer 2 中已存在的 skill（工具级范围的子集）
-pub fn link_skill_to_layer3(skill_name: &str, tool_id: &str, sub_agent_id: &str) -> Result<PathBuf, String> {
+pub fn link_skill_to_layer3(
+    skill_name: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+) -> Result<PathBuf, String> {
     // 检查工具级是否已启用
     let layer2_skills = super::layer2::list_layer2_skills(tool_id);
     if !layer2_skills.contains(&skill_name.to_string()) {
@@ -38,7 +42,11 @@ pub fn link_skill_to_layer3(skill_name: &str, tool_id: &str, sub_agent_id: &str)
 }
 
 /// 从 Layer 3 移除 skill 链接
-pub fn unlink_skill_from_layer3(skill_name: &str, tool_id: &str, sub_agent_id: &str) -> Result<(), String> {
+pub fn unlink_skill_from_layer3(
+    skill_name: &str,
+    tool_id: &str,
+    sub_agent_id: &str,
+) -> Result<(), String> {
     let target = subagent_active_dir(tool_id, sub_agent_id).join(skill_name);
     super::remove_link(&target)
 }
@@ -98,6 +106,9 @@ mod tests {
     fn test_subagent_active_dir() {
         let dir = subagent_active_dir("opencode", "researcher");
         // Windows 路径分隔符是 \，统一转 / 再断言，保持跨平台
-        assert!(dir.to_string_lossy().replace('\\', "/").contains(".mam/active/opencode/researcher"));
+        assert!(dir
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains(".mam/active/opencode/researcher"));
     }
 }

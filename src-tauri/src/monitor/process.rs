@@ -52,7 +52,11 @@ fn classify_form(candidate: &str) -> ProcessForm {
     let base_stem = normalized.rsplit('/').next().unwrap_or("");
     let base_stem = base_stem.strip_suffix(".exe").unwrap_or(base_stem);
     // basename 首字母大写 → APP（保留原始大小写判断，不能先 lowercase）
-    let exe_upper = base_stem.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+    let exe_upper = base_stem
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false);
     let lower = normalized.to_lowercase();
     let in_app_bundle = lower.contains(".app/contents");
     let in_msix = lower.contains("windowsapps/openai.codex_");
@@ -111,7 +115,11 @@ fn find_processes_by_names(
         // 排除自身应用
         let process_name = process.name().to_string_lossy();
         if our_app_names.iter().any(|&app| process_name.contains(app)) {
-            trace!("Skipping our own app: pid={}, name={}", pid.as_u32(), process_name);
+            trace!(
+                "Skipping our own app: pid={}, name={}",
+                pid.as_u32(),
+                process_name
+            );
             continue;
         }
 
@@ -127,7 +135,11 @@ fn find_processes_by_names(
         // 跳过子 Agent（父进程也是同工具进程）
         if let Some(parent_pid) = process.parent() {
             if matched_pids.contains(&parent_pid) {
-                debug!("Skipping sub-agent: pid={}, parent={}", pid.as_u32(), parent_pid.as_u32());
+                debug!(
+                    "Skipping sub-agent: pid={}, parent={}",
+                    pid.as_u32(),
+                    parent_pid.as_u32()
+                );
                 continue;
             }
         }
@@ -140,7 +152,11 @@ fn find_processes_by_names(
 
         debug!(
             "Found process: name={:?}, pid={}, cwd={:?}, cpu={:.1}%, form={:?}",
-            process_name, pid.as_u32(), cwd, process.cpu_usage(), form
+            process_name,
+            pid.as_u32(),
+            cwd,
+            process.cpu_usage(),
+            form
         );
 
         processes.push(AgentProcess {
@@ -156,7 +172,11 @@ fn find_processes_by_names(
 
 /// 发现 Claude Code 进程
 pub fn find_claude_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["claude"], &["multi-agents-manager", "agent-sessions"])
+    find_processes_by_names(
+        system,
+        &["claude"],
+        &["multi-agents-manager", "agent-sessions"],
+    )
 }
 
 /// 发现 Codex CLI + 桌面 APP 进程
@@ -176,8 +196,6 @@ pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     mod exe_matches {
         use super::super::exe_matches;
 
@@ -195,7 +213,10 @@ mod tests {
                 "/Applications/ChatGPT.app/Contents/Resources/codex",
                 &["codex", "Codex"]
             ));
-            assert!(exe_matches("/Users/x/.cargo/bin/codex", &["codex", "Codex"]));
+            assert!(exe_matches(
+                "/Users/x/.cargo/bin/codex",
+                &["codex", "Codex"]
+            ));
         }
 
         #[test]
@@ -236,7 +257,10 @@ mod tests {
         #[test]
         fn mac_standalone_capitalized_binary_is_app() {
             // 旧行为兼容：独立 Codex.app 的可执行文件首字母大写
-            assert_eq!(classify_form("/Applications/Codex.app/Contents/MacOS/Codex"), ProcessForm::App);
+            assert_eq!(
+                classify_form("/Applications/Codex.app/Contents/MacOS/Codex"),
+                ProcessForm::App
+            );
         }
 
         #[test]
@@ -261,7 +285,10 @@ mod tests {
 
         #[test]
         fn windows_and_unix_cli_paths_are_cli() {
-            assert_eq!(classify_form("C:\\Users\\x\\.local\\bin\\claude.exe"), ProcessForm::Cli);
+            assert_eq!(
+                classify_form("C:\\Users\\x\\.local\\bin\\claude.exe"),
+                ProcessForm::Cli
+            );
             assert_eq!(classify_form("/Users/x/.cargo/bin/codex"), ProcessForm::Cli);
             assert_eq!(classify_form("codex.exe"), ProcessForm::Cli);
         }

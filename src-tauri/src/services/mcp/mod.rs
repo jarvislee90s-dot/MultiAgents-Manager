@@ -1,6 +1,9 @@
 // MCP 配置格式转换器 — JSON (Claude) / TOML (Codex) / JSONC (OpenCode)
 
-use crate::adapter::{McpFormat, claude::ClaudeAdapter, codex::CodexAdapter, opencode::OpenCodeAdapter, openclaw::OpenClawAdapter, AgentAdapter};
+use crate::adapter::{
+    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
+    opencode::OpenCodeAdapter, AgentAdapter, McpFormat,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -52,8 +55,8 @@ fn get_tool_mcp_info(tool_id: &str) -> Result<(McpFormat, std::path::PathBuf), S
 
 fn write_mcp_json(path: &std::path::Path, name: &str, config: &McpConfig) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
     if root.get("mcpServers").is_none() {
         root["mcpServers"] = serde_json::json!({});
     }
@@ -68,8 +71,8 @@ fn write_mcp_json(path: &std::path::Path, name: &str, config: &McpConfig) -> Res
 
 fn remove_mcp_json(path: &std::path::Path, name: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
     if let Some(servers) = root.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
         servers.remove(name);
     }
@@ -82,7 +85,8 @@ fn remove_mcp_json(path: &std::path::Path, name: &str) -> Result<(), String> {
 fn write_mcp_toml(path: &std::path::Path, name: &str, config: &McpConfig) -> Result<(), String> {
     // 使用 toml_edit 保留原文件注释和格式
     let content = std::fs::read_to_string(path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = content.parse()
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
         .map_err(|e| format!("解析 TOML 失败: {}", e))?;
 
     // 确保 mcp_servers 段存在
@@ -94,7 +98,9 @@ fn write_mcp_toml(path: &std::path::Path, name: &str, config: &McpConfig) -> Res
     {
         let server = &mut doc["mcp_servers"][name];
         server["command"] = toml_edit::value(&config.command);
-        let args_array: toml_edit::Array = config.args.iter()
+        let args_array: toml_edit::Array = config
+            .args
+            .iter()
             .map(|a| toml_edit::Value::String(toml_edit::Formatted::new(a.clone())))
             .collect();
         server["args"] = toml_edit::Item::Value(toml_edit::Value::Array(args_array));
@@ -113,7 +119,8 @@ fn write_mcp_toml(path: &std::path::Path, name: &str, config: &McpConfig) -> Res
 
 fn remove_mcp_toml(path: &std::path::Path, name: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = content.parse()
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
         .map_err(|e| format!("解析 TOML 失败: {}", e))?;
     if let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_mut()) {
         servers.remove(name);
@@ -126,8 +133,8 @@ fn remove_mcp_toml(path: &std::path::Path, name: &str) -> Result<(), String> {
 
 fn write_mcp_jsonc(path: &std::path::Path, name: &str, config: &McpConfig) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 JSONC 配置失败: {}", e))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 JSONC 配置失败: {}", e))?;
     if root.get("mcp").is_none() {
         root["mcp"] = serde_json::json!({});
     }
@@ -145,8 +152,8 @@ fn write_mcp_jsonc(path: &std::path::Path, name: &str, config: &McpConfig) -> Re
 
 fn remove_mcp_jsonc(path: &std::path::Path, name: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 JSONC 配置失败: {}", e))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 JSONC 配置失败: {}", e))?;
     if let Some(servers) = root.get_mut("mcp").and_then(|s| s.as_object_mut()) {
         servers.remove(name);
     }

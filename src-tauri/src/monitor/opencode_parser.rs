@@ -30,7 +30,11 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     }
 
     let db_path = match dirs::home_dir() {
-        Some(h) => h.join(".local").join("share").join("opencode").join("opencode.db"),
+        Some(h) => h
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db"),
         None => return Vec::new(),
     };
 
@@ -66,7 +70,11 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         .ok()
         .map(|mut stmt| {
             stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })
             .ok()
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -79,14 +87,20 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 
     // 匹配项目到运行中的进程
     for (project_id, worktree, name) in &projects {
-        let matching_process = cwd_to_process.iter().find(|(cwd, _)| {
-            *cwd == worktree || cwd.starts_with(&format!("{}/", worktree))
-        }).map(|(_, p)| *p);
+        let matching_process = cwd_to_process
+            .iter()
+            .find(|(cwd, _)| *cwd == worktree || cwd.starts_with(&format!("{}/", worktree)))
+            .map(|(_, p)| *p);
 
         if let Some(process) = matching_process {
-            debug!("OpenCode project {} matched to pid={}", worktree, process.pid);
+            debug!(
+                "OpenCode project {} matched to pid={}",
+                worktree, process.pid
+            );
             matched_pids.insert(process.pid);
-            if let Some(session) = get_latest_session_for_project(&conn, project_id, name.as_deref(), process) {
+            if let Some(session) =
+                get_latest_session_for_project(&conn, project_id, name.as_deref(), process)
+            {
                 sessions.push(session);
             }
         }
@@ -105,7 +119,11 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     }
 
-    info!("OpenCode: {} sessions from {} processes", sessions.len(), processes.len());
+    info!(
+        "OpenCode: {} sessions from {} processes",
+        sessions.len(),
+        processes.len()
+    );
     sessions
 }
 
@@ -120,28 +138,39 @@ fn get_latest_session_for_project(
         .prepare("SELECT id, directory, title, time_updated FROM session WHERE project_id = ? ORDER BY time_updated DESC LIMIT 1")
         .ok()?;
 
-    let result = stmt.query_row([project_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,    // id
-            row.get::<_, String>(1)?,    // directory
-            row.get::<_, String>(2)?,    // title
-            row.get::<_, i64>(3)?,       // time_updated (ms)
-        ))
-    }).ok()?;
+    let result = stmt
+        .query_row([project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?, // id
+                row.get::<_, String>(1)?, // directory
+                row.get::<_, String>(2)?, // title
+                row.get::<_, i64>(3)?,    // time_updated (ms)
+            ))
+        })
+        .ok()?;
 
     let (session_id, directory, title, time_updated) = result;
 
     let (last_role, last_message) = get_last_message_info(conn, &session_id);
     let last_msg_time = get_last_message_time(conn, &session_id);
 
-    let status = determine_opencode_status(process.cpu_usage, last_role.as_deref(), last_msg_time, time_updated);
+    let status = determine_opencode_status(
+        process.cpu_usage,
+        last_role.as_deref(),
+        last_msg_time,
+        time_updated,
+    );
     let last_activity_at = ms_to_iso(time_updated);
 
     let project_name = project_name
         .map(String::from)
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| {
-            directory.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string()
+            directory
+                .split('/')
+                .rfind(|s| !s.is_empty())
+                .unwrap_or("Unknown")
+                .to_string()
         });
 
     let session_title = title.clone();
@@ -173,24 +202,39 @@ fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> O
         .prepare("SELECT id, directory, title, time_updated FROM session WHERE project_id = 'global' AND directory = ? ORDER BY time_updated DESC LIMIT 1")
         .ok()?;
 
-    let result = stmt.query_row([cwd], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-        ))
-    }).ok()?;
+    let result = stmt
+        .query_row([cwd], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .ok()?;
 
     let (session_id, directory, title, time_updated) = result;
     let (last_role, last_message) = get_last_message_info(conn, &session_id);
     let last_msg_time = get_last_message_time(conn, &session_id);
-    let status = determine_opencode_status(process.cpu_usage, last_role.as_deref(), last_msg_time, time_updated);
+    let status = determine_opencode_status(
+        process.cpu_usage,
+        last_role.as_deref(),
+        last_msg_time,
+        time_updated,
+    );
     let last_activity_at = ms_to_iso(time_updated);
 
-    let project_name = directory.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string();
+    let project_name = directory
+        .split('/')
+        .rfind(|s| !s.is_empty())
+        .unwrap_or("Unknown")
+        .to_string();
     let display_message = last_message.or_else(|| {
-        if !title.is_empty() { Some(title.clone()) } else { None }
+        if !title.is_empty() {
+            Some(title.clone())
+        } else {
+            None
+        }
     });
 
     Some(Session {
@@ -219,13 +263,16 @@ fn get_last_message_time(conn: &Connection, session_id: &str) -> i64 {
         "SELECT time_created FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
         [session_id],
         |row| row.get::<_, i64>(0),
-    ).unwrap_or(0)
+    )
+    .unwrap_or(0)
 }
 
 /// 获取会话最后一条消息的角色和文本
 fn get_last_message_info(conn: &Connection, session_id: &str) -> (Option<String>, Option<String>) {
     // 查最后一条消息
-    let mut stmt = match conn.prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1") {
+    let mut stmt = match conn.prepare(
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
+    ) {
         Ok(s) => s,
         Err(_) => return (None, None),
     };
@@ -252,7 +299,9 @@ fn get_last_message_info(conn: &Connection, session_id: &str) -> (Option<String>
 
 /// 获取消息的文本内容（优先 text 类型，其次 reasoning）
 fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
-    let mut stmt = conn.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC").ok()?;
+    let mut stmt = conn
+        .prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC")
+        .ok()?;
 
     let mut text_content: Option<String> = None;
     let mut reasoning_content: Option<String> = None;
@@ -284,14 +333,22 @@ fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
 
     // 截断过长的消息
     if content.chars().count() > 100 {
-        Some(format!("{}...", content.chars().take(100).collect::<String>()))
+        Some(format!(
+            "{}...",
+            content.chars().take(100).collect::<String>()
+        ))
     } else {
         Some(content)
     }
 }
 
 /// OpenCode 状态判断：CPU > 5% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
-fn determine_opencode_status(cpu: f32, last_role: Option<&str>, last_msg_time: i64, session_updated: i64) -> SessionStatus {
+fn determine_opencode_status(
+    cpu: f32,
+    last_role: Option<&str>,
+    last_msg_time: i64,
+    session_updated: i64,
+) -> SessionStatus {
     if cpu > 5.0 {
         SessionStatus::Processing
     } else {

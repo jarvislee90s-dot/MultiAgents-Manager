@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 /// 获取 Layer 2 基础目录
 pub fn active_base_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".mam").join("active")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("active")
 }
 
 /// 获取指定工具的 Layer 2 目录
@@ -65,7 +68,10 @@ mod tests {
     fn test_tool_active_dir() {
         let dir = tool_active_dir("claude");
         // Windows 路径分隔符是 \，统一转 / 再断言，保持跨平台
-        assert!(dir.to_string_lossy().replace('\\', "/").contains(".mam/active/claude"));
+        assert!(dir
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains(".mam/active/claude"));
     }
 
     #[test]
@@ -73,7 +79,10 @@ mod tests {
         let dir = ensure_tool_active_dir("test_tool");
         // Windows 下 dirs::home_dir 指向真实用户目录，测试环境可能不可写，
         // 仅断言路径结构，不依赖真实目录创建成功
-        assert!(dir.to_string_lossy().replace('\\', "/").contains(".mam/active/test_tool"));
+        assert!(dir
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains(".mam/active/test_tool"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

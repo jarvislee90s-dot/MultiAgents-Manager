@@ -14,24 +14,42 @@ pub struct ValidateResult {
 #[tauri::command]
 pub fn validate_manifest(path: String) -> ValidateResult {
     match ManifestValidator::validate_file(std::path::Path::new(&path)) {
-        Ok(manifest) => ValidateResult { valid: true, manifest: Some(manifest), errors: None },
-        Err(errors) => ValidateResult { valid: false, manifest: None, errors: Some(errors) },
+        Ok(manifest) => ValidateResult {
+            valid: true,
+            manifest: Some(manifest),
+            errors: None,
+        },
+        Err(errors) => ValidateResult {
+            valid: false,
+            manifest: None,
+            errors: Some(errors),
+        },
     }
 }
 
 #[tauri::command]
 pub fn install_resource_from_manifest(path: String) -> Result<(), String> {
-    let manifest = ManifestValidator::validate_file(std::path::Path::new(&path))
-        .map_err(|errors| errors.iter().map(|e| format!("{}: {}", e.field, e.message)).collect::<Vec<_>>().join("; "))?;
+    let manifest =
+        ManifestValidator::validate_file(std::path::Path::new(&path)).map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
 
     let mam_dir = dirs::home_dir().unwrap_or_default().join(".mam");
     let dest_dir = match manifest.common.kind {
         crate::services::manifest::Kind::Skill => mam_dir.join("skills").join(&manifest.common.id),
         crate::services::manifest::Kind::Mcp => mam_dir.join("mcp").join(&manifest.common.id),
-        crate::services::manifest::Kind::Plugin => mam_dir.join("plugins").join(&manifest.common.id),
+        crate::services::manifest::Kind::Plugin => {
+            mam_dir.join("plugins").join(&manifest.common.id)
+        }
     };
 
-    let source = std::path::Path::new(&path).parent().ok_or("无法获取资源目录")?;
+    let source = std::path::Path::new(&path)
+        .parent()
+        .ok_or("无法获取资源目录")?;
     crate::linker::copy_dir_recursive(source, &dest_dir)?;
 
     let manifest_dest = dest_dir.join("mam.json");
@@ -71,9 +89,23 @@ pub fn uninstall_resource(ext_id: String, kind: String) -> Result<(), String> {
     let assignments = crate::database::list_all_assignments();
     for assignment in assignments.iter().filter(|a| a.extension_id == ext_id) {
         match kind.as_str() {
-            "skill" => { let _ = crate::services::skill::disable_skill_for_tool(&ext_id, &assignment.agent_tool_id); }
-            "mcp" => { let _ = crate::services::mcp::remove_mcp(&assignment.agent_tool_id, &ext_id); }
-            "plugin" => { let _ = crate::services::plugin::toggle_plugin(&ext_id, &assignment.agent_tool_id, false, "file"); }
+            "skill" => {
+                let _ = crate::services::skill::disable_skill_for_tool(
+                    &ext_id,
+                    &assignment.agent_tool_id,
+                );
+            }
+            "mcp" => {
+                let _ = crate::services::mcp::remove_mcp(&assignment.agent_tool_id, &ext_id);
+            }
+            "plugin" => {
+                let _ = crate::services::plugin::toggle_plugin(
+                    &ext_id,
+                    &assignment.agent_tool_id,
+                    false,
+                    "file",
+                );
+            }
             _ => {}
         }
     }

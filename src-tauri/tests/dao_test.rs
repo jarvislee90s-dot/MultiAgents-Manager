@@ -2,20 +2,43 @@ mod support;
 
 use multi_agents_manager_lib::database;
 
+/// 创建测试用 ExtensionRecord
+fn create_test_extension() -> multi_agents_manager_lib::database::ExtensionRecord {
+    multi_agents_manager_lib::database::ExtensionRecord {
+        id: "test-skill-1".to_string(),
+        kind: "skill".to_string(),
+        name: "Test Skill".to_string(),
+        description: Some("测试用 skill".to_string()),
+        source_path: "/tmp/test-skill".to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    }
+}
+
 #[test]
 fn test_settings_get_set() {
     support::setup();
     assert!(database::get_setting("nonexistent").is_none());
     database::set_setting("test_key", "test_value");
-    assert_eq!(database::get_setting("test_key"), Some("test_value".to_string()));
+    assert_eq!(
+        database::get_setting("test_key"),
+        Some("test_value".to_string())
+    );
     database::set_setting("test_key", "updated");
-    assert_eq!(database::get_setting("test_key"), Some("updated".to_string()));
+    assert_eq!(
+        database::get_setting("test_key"),
+        Some("updated".to_string())
+    );
 }
 
 #[test]
 fn test_extension_crud() {
     support::setup();
-    let ext = support::create_test_extension();
+    let ext = create_test_extension();
     database::insert_extension(&ext).unwrap();
     let list = database::list_extensions();
     assert!(list.iter().any(|e| e.id == "test-skill-1"));
@@ -30,10 +53,14 @@ fn test_extension_crud() {
 #[test]
 fn test_preset_crud() {
     support::setup();
-    let preset_id = database::create_preset("测试组", &[
-        ("skill-a".to_string(), "skill".to_string()),
-        ("mcp-b".to_string(), "mcp".to_string()),
-    ]).unwrap();
+    let preset_id = database::create_preset(
+        "测试组",
+        &[
+            ("skill-a".to_string(), "skill".to_string()),
+            ("mcp-b".to_string(), "mcp".to_string()),
+        ],
+    )
+    .unwrap();
     assert!(!preset_id.is_empty());
     let presets = database::list_presets();
     assert!(presets.iter().any(|p| p.name == "测试组"));
@@ -51,7 +78,7 @@ fn test_session_status() {
     assert!(prev.is_none()); // 首次记录
     let prev = database::update_session_status("session-1", "claude", "waiting");
     assert_eq!(prev, Some("running".to_string())); // 状态变化
-    // 清理
+                                                   // 清理
     let mut active = std::collections::HashSet::new();
     active.insert("session-1".to_string());
     database::cleanup_stale_sessions(&active);

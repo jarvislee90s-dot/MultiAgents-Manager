@@ -4,11 +4,7 @@ use std::collections::HashSet;
 use crate::database::connection::DB;
 
 /// 更新会话状态，返回是否状态发生了变化（用于通知去重）
-pub fn update_session_status(
-    session_id: &str,
-    agent_type: &str,
-    status: &str,
-) -> Option<String> {
+pub fn update_session_status(session_id: &str, agent_type: &str, status: &str) -> Option<String> {
     let conn = DB.lock().unwrap();
     let previous: Option<String> = conn
         .query_row(

@@ -1,11 +1,16 @@
-use std::process::Command;
 use super::applescript::execute_applescript;
 use super::{iterm, terminal_app};
+use std::process::Command;
 
 /// 通过 TTY 匹配并聚焦 tmux pane
 pub fn focus_tmux_pane_by_tty(tty: &str) -> Result<(), String> {
     let output = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{pane_tty} #{session_name}:#{window_index}.#{pane_index}"])
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_tty} #{session_name}:#{window_index}.#{pane_index}",
+        ])
         .output()
         .map_err(|e| format!("Failed to run tmux: {}", e))?;
     if !output.status.success() {
@@ -18,8 +23,12 @@ pub fn focus_tmux_pane_by_tty(tty: &str) -> Result<(), String> {
             let pane_tty = parts[0];
             let target = parts[1];
             if pane_tty.contains(tty) || pane_tty.ends_with(tty) {
-                let _ = Command::new("tmux").args(["select-window", "-t", target]).output();
-                let _ = Command::new("tmux").args(["select-pane", "-t", target]).output();
+                let _ = Command::new("tmux")
+                    .args(["select-window", "-t", target])
+                    .output();
+                let _ = Command::new("tmux")
+                    .args(["select-pane", "-t", target])
+                    .output();
                 focus_tmux_client_terminal()?;
                 return Ok(());
             }
@@ -31,7 +40,8 @@ pub fn focus_tmux_pane_by_tty(tty: &str) -> Result<(), String> {
 fn focus_tmux_client_terminal() -> Result<(), String> {
     let output = Command::new("tmux")
         .args(["display-message", "-p", "#{client_tty}"])
-        .output().map_err(|e| format!("Failed to get tmux client tty: {}", e))?;
+        .output()
+        .map_err(|e| format!("Failed to get tmux client tty: {}", e))?;
     if !output.status.success() {
         return focus_any_terminal_with_tmux();
     }

@@ -6,9 +6,15 @@ use crate::monitor;
 pub struct OpenClawAdapter;
 
 impl AgentAdapter for OpenClawAdapter {
-    fn name(&self) -> &'static str { "OpenClaw" }
-    fn agent_type(&self) -> AgentType { AgentType::OpenClaw }
-    fn process_names(&self) -> &'static [&'static str] { &["openclaw"] }
+    fn name(&self) -> &'static str {
+        "OpenClaw"
+    }
+    fn agent_type(&self) -> AgentType {
+        AgentType::OpenClaw
+    }
+    fn process_names(&self) -> &'static [&'static str] {
+        &["openclaw"]
+    }
 
     fn find_processes(&self, system: &System) -> Vec<AgentProcess> {
         monitor::process::find_openclaw_processes(system)
@@ -24,9 +30,13 @@ impl AgentAdapter for OpenClawAdapter {
             .join(".openclaw")
     }
 
-    fn hook_supported(&self) -> bool { false }
+    fn hook_supported(&self) -> bool {
+        false
+    }
 
-    fn mcp_format(&self) -> McpFormat { McpFormat::Json }
+    fn mcp_format(&self) -> McpFormat {
+        McpFormat::Json
+    }
     fn mcp_config_path(&self) -> Option<std::path::PathBuf> {
         Some(self.base_dir().join("openclaw.json"))
     }

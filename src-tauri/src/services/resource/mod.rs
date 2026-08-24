@@ -16,26 +16,33 @@ fn parse_skill_meta(skill_md_path: &std::path::Path) -> Option<SkillMeta> {
     } else {
         &content[..]
     };
-    let name = front_matter.lines()
+    let name = front_matter.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("name:")
+            .map(|v| v.trim().trim_matches(char::from(34)).to_string())
+    })?;
+    if name.is_empty() {
+        return None;
+    }
+    let description = front_matter
+        .lines()
         .find_map(|line| {
             let trimmed = line.trim();
-            trimmed.strip_prefix("name:").map(|v| {
-                v.trim().trim_matches(char::from(34)).to_string()
-            })
-        })?;
-    if name.is_empty() { return None; }
-    let description = front_matter.lines()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            trimmed.strip_prefix("description:").map(|v| {
-                v.trim().trim_matches(char::from(34)).to_string()
-            })
-        }).filter(|s| !s.is_empty());
+            trimmed
+                .strip_prefix("description:")
+                .map(|v| v.trim().trim_matches(char::from(34)).to_string())
+        })
+        .filter(|s| !s.is_empty());
     Some(SkillMeta { name, description })
 }
 
 /// 检测套件名称
-fn detect_suite(skill_name: &str, skill_path: &std::path::Path, skills_root: &std::path::Path) -> Option<String> {
+fn detect_suite(
+    skill_name: &str,
+    skill_path: &std::path::Path,
+    skills_root: &std::path::Path,
+) -> Option<String> {
     if let Ok(relative) = skill_path.strip_prefix(skills_root) {
         let components: Vec<_> = relative.components().collect();
         if components.len() > 1 {
@@ -53,7 +60,10 @@ fn detect_suite(skill_name: &str, skill_path: &std::path::Path, skills_root: &st
 }
 
 /// 递归扫描目录下的所有 SKILL.md 文件
-fn scan_skills_recursive(dir: &std::path::Path, skills_root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+fn scan_skills_recursive(
+    dir: &std::path::Path,
+    skills_root: &std::path::Path,
+) -> Vec<(std::path::PathBuf, String)> {
     let mut results = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -103,14 +113,19 @@ pub fn sync_imported_skill_links() {
             continue;
         }
 
-        let source_tool = ext.source_tool.clone()
+        let source_tool = ext
+            .source_tool
+            .clone()
             .or_else(|| detect_source_tool(&ext.source_path));
         let Some(tool_id) = source_tool else {
             continue;
         };
 
         let assignments = crate::database::list_assignments(&tool_id);
-        if assignments.iter().any(|a| a.extension_id == ext.id && !a.enabled) {
+        if assignments
+            .iter()
+            .any(|a| a.extension_id == ext.id && !a.enabled)
+        {
             continue;
         }
 
@@ -149,8 +164,15 @@ pub fn sync_imported_skill_links() {
             continue;
         }
 
-        if let Err(e) = crate::services::enable_skill_for_tool(skill_name, &assignment.agent_tool_id) {
-            log::warn!("补链 {} 到 {} 失败: {}", skill_name, assignment.agent_tool_id, e);
+        if let Err(e) =
+            crate::services::enable_skill_for_tool(skill_name, &assignment.agent_tool_id)
+        {
+            log::warn!(
+                "补链 {} 到 {} 失败: {}",
+                skill_name,
+                assignment.agent_tool_id,
+                e
+            );
         }
     }
 }
@@ -164,16 +186,25 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         .collect();
 
     if !force && !existing_before.is_empty() {
-        log::debug!("Skills already imported ({} in DB), skipping auto-import", existing_before.len());
-        return ImportStats { imported: 0, newly_added: 0, skipped_dup: 0, source_counts: Vec::new() };
+        log::debug!(
+            "Skills already imported ({} in DB), skipping auto-import",
+            existing_before.len()
+        );
+        return ImportStats {
+            imported: 0,
+            newly_added: 0,
+            skipped_dup: 0,
+            source_counts: Vec::new(),
+        };
     }
 
-    let skill_sources: Vec<(&str, std::path::PathBuf)> = [
-        "claude", "codex", "opencode", "openclaw",
-    ].into_iter().filter_map(|tool_id| {
-        crate::adapter::primary_skill_dir(tool_id)
-            .map(|dir| (tool_id, dir))
-    }).collect();
+    let skill_sources: Vec<(&str, std::path::PathBuf)> =
+        ["claude", "codex", "opencode", "openclaw"]
+            .into_iter()
+            .filter_map(|tool_id| {
+                crate::adapter::primary_skill_dir(tool_id).map(|dir| (tool_id, dir))
+            })
+            .collect();
 
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut imported: usize = 0;
@@ -181,9 +212,16 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
     let mut source_counts: Vec<(String, usize)> = Vec::new();
 
     for (tool_id, skills_dir) in &skill_sources {
-        if !skills_dir.exists() { continue; }
+        if !skills_dir.exists() {
+            continue;
+        }
         let found = scan_skills_recursive(skills_dir, skills_dir);
-        log::info!("扫描 {} ({}): 找到 {} 个 SKILL.md", tool_id, skills_dir.display(), found.len());
+        log::info!(
+            "扫描 {} ({}): 找到 {} 个 SKILL.md",
+            tool_id,
+            skills_dir.display(),
+            found.len()
+        );
         source_counts.push((tool_id.to_string(), found.len()));
 
         for (skill_path, skill_name) in &found {
@@ -226,23 +264,55 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
 
     // Plugin 扫描
     let plugin_sources = [
-        ("claude", dirs::home_dir().unwrap_or_default().join(".claude").join("plugins")),
-        ("codex", dirs::home_dir().unwrap_or_default().join(".codex").join("plugins")),
-        ("opencode", dirs::home_dir().unwrap_or_default().join(".config").join("opencode").join("plugins")),
-        ("openclaw", dirs::home_dir().unwrap_or_default().join(".openclaw").join("plugins")),
+        (
+            "claude",
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".claude")
+                .join("plugins"),
+        ),
+        (
+            "codex",
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".codex")
+                .join("plugins"),
+        ),
+        (
+            "opencode",
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config")
+                .join("opencode")
+                .join("plugins"),
+        ),
+        (
+            "openclaw",
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".openclaw")
+                .join("plugins"),
+        ),
     ];
 
     for (tool_id, plugins_dir) in &plugin_sources {
-        if !plugins_dir.exists() { continue; }
+        if !plugins_dir.exists() {
+            continue;
+        }
         if let Ok(entries) = std::fs::read_dir(plugins_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if seen_names.contains(&name) { continue; }
+                if seen_names.contains(&name) {
+                    continue;
+                }
                 seen_names.insert(name.clone());
 
                 let kind = if path.is_dir() { "file" } else { "config" };
-                let plugin_repo = dirs::home_dir().unwrap_or_default().join(".mam").join("plugins");
+                let plugin_repo = dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".mam")
+                    .join("plugins");
                 let _ = std::fs::create_dir_all(&plugin_repo);
                 let dest = plugin_repo.join(&name);
                 if dest.exists() {
@@ -280,7 +350,17 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
     let newly_added = existing_after.difference(&existing_before).count();
 
     if imported > 0 {
-        log::info!("扫描完成: 处理 {} 个（新增 {} 个，跳过 {} 个重复）", imported, newly_added, skipped_dup);
+        log::info!(
+            "扫描完成: 处理 {} 个（新增 {} 个，跳过 {} 个重复）",
+            imported,
+            newly_added,
+            skipped_dup
+        );
     }
-    ImportStats { imported, newly_added, skipped_dup, source_counts }
+    ImportStats {
+        imported,
+        newly_added,
+        skipped_dup,
+        source_counts,
+    }
 }

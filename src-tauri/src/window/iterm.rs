@@ -2,7 +2,8 @@ use super::applescript::execute_applescript;
 
 /// 通过 TTY 聚焦 iTerm2 标签页
 pub fn focus_iterm_by_tty(tty: &str) -> Result<(), String> {
-    let script = format!(r#"
+    let script = format!(
+        r#"
         tell application "System Events"
             if not (exists process "iTerm2") then
                 error "iTerm2 not running"
@@ -24,6 +25,8 @@ pub fn focus_iterm_by_tty(tty: &str) -> Result<(), String> {
             end repeat
         end tell
         return "not found"
-    "#, tty);
+    "#,
+        tty
+    );
     execute_applescript(&script)
 }

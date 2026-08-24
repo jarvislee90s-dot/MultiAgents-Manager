@@ -73,9 +73,10 @@ pub fn get_openclaw_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             continue;
         }
 
-        let matching_process = cwd_to_process.iter().find(|(cwd, _)| {
-            *cwd == workspace || cwd.starts_with(&format!("{}/", workspace))
-        }).map(|(_, p)| *p);
+        let matching_process = cwd_to_process
+            .iter()
+            .find(|(cwd, _)| *cwd == workspace || cwd.starts_with(&format!("{}/", workspace)))
+            .map(|(_, p)| *p);
 
         if let Some(process) = matching_process {
             debug!("OpenClaw agent {} matched to pid={}", agent.id, process.pid);
@@ -102,7 +103,11 @@ pub fn get_openclaw_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     }
 
-    info!("OpenClaw: {} sessions from {} processes", sessions.len(), processes.len());
+    info!(
+        "OpenClaw: {} sessions from {} processes",
+        sessions.len(),
+        processes.len()
+    );
     sessions
 }
 
@@ -111,7 +116,11 @@ fn read_openclaw_config(path: &std::path::Path) -> Option<OpenClawConfig> {
     serde_json::from_str(&content).ok()
 }
 
-fn build_session(agent: &AgentEntry, project_path: &str, process: &AgentProcess) -> Option<Session> {
+fn build_session(
+    agent: &AgentEntry,
+    project_path: &str,
+    process: &AgentProcess,
+) -> Option<Session> {
     let project_name = std::path::Path::new(project_path)
         .file_name()
         .and_then(|s| s.to_str())

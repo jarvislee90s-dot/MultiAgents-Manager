@@ -1,6 +1,6 @@
 pub mod model;
 
-pub use model::{AgentType, Session, SessionStatus, SessionsResponse, ProcessForm};
+pub use model::{AgentType, ProcessForm, Session, SessionStatus, SessionsResponse};
 
 /// 状态排序优先级（数字越小越靠前）
 pub fn status_sort_priority(status: &SessionStatus) -> u8 {

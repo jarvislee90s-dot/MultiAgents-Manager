@@ -5,14 +5,16 @@ use log::debug;
 pub mod detector;
 pub mod layer2;
 pub mod layer3;
+use fs2::FileExt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use fs2::FileExt;
-
 
 /// 确保全局仓库目录存在，返回路径
 pub fn ensure_repo_dir() -> PathBuf {
-    let repo = dirs::home_dir().unwrap_or_default().join(".mam").join("skills");
+    let repo = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("skills");
     let _ = fs::create_dir_all(&repo);
     repo
 }
@@ -40,9 +42,7 @@ pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
     if target.exists() || target.is_symlink() {
         // 安全保护：若目标经父级 symlink 穿透到 SSOT 仓库，说明已被套件链接接管，
         // 此时不应删除真实 SSOT 目录，直接返回即可。
-        if !target.is_symlink()
-            && source.canonicalize().ok() == target.canonicalize().ok()
-        {
+        if !target.is_symlink() && source.canonicalize().ok() == target.canonicalize().ok() {
             return Ok(());
         }
         remove_link(target)?;
@@ -63,8 +63,7 @@ pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
     {
         // Windows: 目录用 Junction（纯 API 调用，不走 cmd，避免闪控制台窗口），文件用 copy
         if source.is_dir() {
-            junction::create(source, target)
-                .map_err(|e| format!("创建 Junction 失败: {}", e))?;
+            junction::create(source, target).map_err(|e| format!("创建 Junction 失败: {}", e))?;
         } else {
             fs::copy(source, target).map_err(|e| format!("复制文件失败: {}", e))?;
         }
@@ -113,11 +112,9 @@ pub fn replace_with_symlink(source: &Path, target: &Path) -> Result<(), String> 
 
     // 删除原始目录
     if target.is_dir() {
-        std::fs::remove_dir_all(target)
-            .map_err(|e| format!("删除原始目录失败: {}", e))?;
+        std::fs::remove_dir_all(target).map_err(|e| format!("删除原始目录失败: {}", e))?;
     } else {
-        std::fs::remove_file(target)
-            .map_err(|e| format!("删除原始文件失败: {}", e))?;
+        std::fs::remove_file(target).map_err(|e| format!("删除原始文件失败: {}", e))?;
     }
 
     // 创建符号链接
@@ -128,10 +125,19 @@ pub fn replace_with_symlink(source: &Path, target: &Path) -> Result<(), String> 
 /// 安全检查：验证源路径不在敏感目录内（防止路径穿越）
 pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
     // 路径穿越检查：解析源路径，验证不在敏感目录内
-    let canonical = source.canonicalize().map_err(|e| format!("路径解析失败: {}", e))?;
+    let canonical = source
+        .canonicalize()
+        .map_err(|e| format!("路径解析失败: {}", e))?;
     let sensitive_paths = [
-        ".ssh", ".gnupg", ".aws", ".kube", ".netrc",
-        ".npmrc", ".docker", ".config/gcloud", ".config/gh",
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".kube",
+        ".netrc",
+        ".npmrc",
+        ".docker",
+        ".config/gcloud",
+        ".config/gh",
     ];
     let home = dirs::home_dir().unwrap_or_default();
     for sensitive in &sensitive_paths {

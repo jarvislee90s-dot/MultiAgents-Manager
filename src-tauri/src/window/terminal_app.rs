@@ -8,13 +8,16 @@ pub fn focus_terminal_app_by_tty(tty: &str) -> Result<(), String> {
         end tell
     "#;
     let check_output = std::process::Command::new("osascript")
-        .arg("-e").arg(check_script)
-        .output().map_err(|e| format!("Failed to check Terminal: {}", e))?;
+        .arg("-e")
+        .arg(check_script)
+        .output()
+        .map_err(|e| format!("Failed to check Terminal: {}", e))?;
     let is_running = String::from_utf8_lossy(&check_output.stdout).trim() == "true";
     if !is_running {
         return Err("Terminal is not running".to_string());
     }
-    let script = format!(r#"
+    let script = format!(
+        r#"
         tell application "Terminal"
             activate
             repeat with w in windows
@@ -30,6 +33,8 @@ pub fn focus_terminal_app_by_tty(tty: &str) -> Result<(), String> {
             end repeat
         end tell
         return "not found"
-    "#, tty);
+    "#,
+        tty
+    );
     execute_applescript(&script)
 }

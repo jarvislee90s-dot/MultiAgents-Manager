@@ -51,7 +51,7 @@ fn test_create_link_does_not_delete_through_parent_symlink() {
     std::os::unix::fs::symlink(repo.join("suite"), tool_dir.join("suite")).unwrap();
     // Windows 下目录符号链接需要特权，改用 Junction（无需特权），效果等价
     #[cfg(windows)]
-    junction::create(&repo.join("suite"), &tool_dir.join("suite")).unwrap();
+    junction::create(repo.join("suite"), tool_dir.join("suite")).unwrap();
 
     let target = tool_dir.join("suite").join("child");
     assert!(target.exists());
@@ -71,17 +71,19 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
     std::fs::create_dir_all(source.join("SKILL.md").parent().unwrap()).unwrap();
     std::fs::write(source.join("SKILL.md"), "name: demo-skill\n").unwrap();
 
-    multi_agents_manager_lib::services::install_skill(
-        source.to_str().unwrap(),
-        "demo-skill",
-    )
-    .unwrap();
+    multi_agents_manager_lib::services::install_skill(source.to_str().unwrap(), "demo-skill")
+        .unwrap();
     multi_agents_manager_lib::services::enable_skill_for_tool("demo-skill", "codex").unwrap();
 
     let harness_link = home.join(".agents").join("skills").join("demo-skill");
     assert!(harness_link.is_symlink());
     assert!(harness_link.exists());
-    assert!(home.join(".mam").join("active").join("codex").join("demo-skill").exists());
+    assert!(home
+        .join(".mam")
+        .join("active")
+        .join("codex")
+        .join("demo-skill")
+        .exists());
 }
 
 #[cfg(windows)]

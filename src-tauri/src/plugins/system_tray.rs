@@ -52,7 +52,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } = event {
+                    } = event
+                    {
                         // Left click to show main window
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
@@ -115,14 +116,16 @@ pub fn update_tray_status(
         let tooltip = if total_count == 0 {
             "MultiAgents Manager".to_string()
         } else if waiting_count > 0 {
-            format!("MultiAgents Manager \u{2014} {} sessions, {} waiting", total_count, waiting_count)
+            format!(
+                "MultiAgents Manager \u{2014} {} sessions, {} waiting",
+                total_count, waiting_count
+            )
         } else {
             format!("MultiAgents Manager \u{2014} {} sessions", total_count)
         };
         let _ = tray.set_tooltip(Some(&tooltip));
     }
 }
-
 
 /// 更新托盘菜单，加入预设组列表
 pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
@@ -131,9 +134,11 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     let presets = crate::database::list_presets();
 
     // 创建菜单项（owned，存活于本函数作用域内）
-    let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>).map_err(|e| e.to_string())?;
+    let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
     let sep1 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
+    let quit =
+        MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
 
     let mut preset_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
     let mut sep2: Option<PredefinedMenuItem<tauri::Wry>> = None;
@@ -142,7 +147,10 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
         for preset in &presets {
             let id = format!("preset-{}", preset.id);
             let label = format!("预设: {}", preset.name);
-            preset_items.push(MenuItem::with_id(app, &id, &label, true, None::<&str>).map_err(|e| e.to_string())?);
+            preset_items.push(
+                MenuItem::with_id(app, &id, &label, true, None::<&str>)
+                    .map_err(|e| e.to_string())?,
+            );
         }
         sep2 = Some(PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?);
     }
