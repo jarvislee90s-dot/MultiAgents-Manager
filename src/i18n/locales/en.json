@@ -70,7 +70,11 @@
       "showMainDesc": "Use shortcut to quickly show the main window",
       "setSuccess": "Shortcut set to {{shortcut}}!",
       "cleared": "Shortcut cleared!"
-    }
+    },
+    "useSystemNotification": "Use system notifications",
+    "useSystemNotificationDesc": "Off by default — uses the in-app toast; enable for system toasts",
+    "useSystemNotificationOn": "On",
+    "useSystemNotificationOff": "Off"
   },
   "releaseVersion": {
     "options": {

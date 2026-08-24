@@ -11,6 +11,8 @@ const HomePage = lazy(() => import("./pages/home"));
 const AboutPage = lazy(() => import("./pages/about"));
 const SettingsPage = lazy(() => import("./pages/settings"));
 
+const NotificationPage = lazy(() => import("./pages/notification"));
+
 const pageMap = {
   "/": HomePage,
   "/about": AboutPage,
@@ -18,10 +20,16 @@ const pageMap = {
 };
 
 const pathname = window.location.pathname;
-const PageComponent = pageMap[pathname as keyof typeof pageMap] ?? HomePage;
+// 通知浮窗通过 hash 路由分流，与主窗口页面互不干扰
+const isNotificationWindow = window.location.hash === "#/notification";
+const PageComponent = isNotificationWindow
+  ? NotificationPage
+  : (pageMap[pathname as keyof typeof pageMap] ?? HomePage);
 
 function AppWrapper() {
   useEffect(() => {
+    // 通知浮窗的显隐由 notification:new 事件驱动，创建时保持隐藏（避免空白窗抢显示）
+    if (isNotificationWindow) return;
     // Show window after React is ready (safe in browser too)
     try {
       getCurrentWindow().show();

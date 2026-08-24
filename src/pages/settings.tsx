@@ -31,6 +31,7 @@ type SettingSection = "appearance" | "shortcut" | "notifications";
 export default function SettingsPage() {
   const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [useSystemNotification, setUseSystemNotification] = useState(false);
   const [audioConfig, setAudioConfig] = useState(getAudioConfig());
   const [activeSection, setActiveSection] = useState<SettingSection>("appearance");
   const { t } = useAppTranslation();
@@ -75,7 +76,20 @@ export default function SettingsPage() {
       }
     };
     loadNotificationSetting();
+    // 读取系统通知开关（localStorage：'1' 开 / 其余关）
+    setUseSystemNotification(localStorage.getItem("mam.useSystemNotification") === "1");
   }, []);
+
+  const toggleUseSystemNotification = () => {
+    const newValue = !useSystemNotification;
+    setUseSystemNotification(newValue);
+    // 存储约定与 useNotification 读取侧一致：'1' 开 / 移除即关
+    if (newValue) {
+      localStorage.setItem("mam.useSystemNotification", "1");
+    } else {
+      localStorage.removeItem("mam.useSystemNotification");
+    }
+  };
 
   const handleShortcutChange = async (newShortcut: string) => {
     const oldShortcut = shortcut;
@@ -250,6 +264,26 @@ export default function SettingsPage() {
                     onClick={toggleNotifications}
                   >
                     {notificationsEnabled ? "已开启" : "已关闭"}
+                  </Button>
+                </div>
+                <div className="border-t" />
+                <div className="flex items-center justify-between py-2.5">
+                  <div className="flex-1">
+                    <label className="text-sm font-medium">
+                      {t("settings.useSystemNotification")}
+                    </label>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {t("settings.useSystemNotificationDesc")}
+                    </p>
+                  </div>
+                  <Button
+                    variant={useSystemNotification ? "default" : "outline"}
+                    size="sm"
+                    onClick={toggleUseSystemNotification}
+                  >
+                    {useSystemNotification
+                      ? t("settings.useSystemNotificationOn")
+                      : t("settings.useSystemNotificationOff")}
                   </Button>
                 </div>
                 <div className="border-t" />

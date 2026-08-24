@@ -61,6 +61,7 @@ pub fn run() {
         commands::session::focus_session,
         commands::session::focus_hwnd,
         commands::session::kill_session,
+        commands::notification::show_notification_window,
         commands::resource::list_extensions_with_assignments,
         commands::resource::scan_native_resources,
         commands::resource::import_native_resources,

@@ -70,7 +70,11 @@
       "showMainDesc": "使用快捷键快速显示主窗口",
       "setSuccess": "已将快捷键设为 {{shortcut}}！",
       "cleared": "已取消快捷键！"
-    }
+    },
+    "useSystemNotification": "使用系统通知",
+    "useSystemNotificationDesc": "默认关闭，使用应用内浮窗；开启后走系统 toast 通知",
+    "useSystemNotificationOn": "已开启",
+    "useSystemNotificationOff": "已关闭"
   },
   "releaseVersion": {
     "options": {

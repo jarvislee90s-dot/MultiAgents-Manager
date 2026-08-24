@@ -138,18 +138,37 @@ export function useNotification() {
         // 播放提示音
         playSoundForStatus(session.status);
 
-        // 发送桌面通知
-        if (permissionGranted.current) {
+        // 发送通知：系统 toast 或应用内浮窗（mam.useSystemNotification 开关控制）
+        {
           const toolLabel = AGENT_LABELS[session.agentType] ?? session.agentType;
           const statusLabel = STATUS_LABELS[session.status] ?? session.status;
           const formTag = session.form === "app" ? " (APP)" : "";
-
-          sendNotification({
-            title: `${toolLabel}${formTag} — ${session.projectName}`,
-            body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
-            actionTypeId: "focus-session",
-            extra: { pid: session.pid, sessionId: session.id },
-          });
+          const useSystemToast =
+            localStorage.getItem("mam.useSystemNotification") === "1";
+          if (useSystemToast) {
+            // 系统通知路径（需要通知权限）
+            if (permissionGranted.current) {
+              sendNotification({
+                title: `${toolLabel}${formTag} — ${session.projectName}`,
+                body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
+                actionTypeId: "focus-session",
+                extra: { pid: session.pid, sessionId: session.id },
+              });
+            }
+          } else {
+            // 应用内浮窗路径（无需系统权限，不夺焦点）
+            await invoke("show_notification_window", {
+              payload: {
+                agentType: toolLabel,
+                projectName: session.projectName,
+                statusColor: statusToColor(session.status),
+                statusLabel,
+                lastMessage: session.lastMessage ?? "",
+                pid: session.pid,
+                sessionId: session.id,
+              },
+            });
+          }
         }
       }
 
