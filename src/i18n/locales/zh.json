@@ -121,5 +121,13 @@
       "tauriVersionInvalid": "src-tauri/tauri.conf.json 中的版本号缺失或无效",
       "invalidLang": "无效的 --lang 参数，请使用 zh 或 en。"
     }
+  },
+  "sessions": {
+    "jumpToTerminal": "点击跳转到终端",
+    "jumpUnsupported": "当前平台或形态不支持跳转",
+    "jumpFailed": "跳转失败: {{error}}",
+    "noMessage": "（无消息）",
+    "justNow": "刚刚",
+    "appBadge": "桌面 App 会话"
   }
 }

@@ -121,5 +121,13 @@
       "tauriVersionInvalid": "src-tauri/tauri.conf.json version is missing or invalid",
       "invalidLang": "Invalid --lang value. Use zh or en."
     }
+  },
+  "sessions": {
+    "jumpToTerminal": "Click to jump to terminal",
+    "jumpUnsupported": "Jump is not supported for this session type on this platform",
+    "jumpFailed": "Jump failed: {{error}}",
+    "noMessage": "(no message)",
+    "justNow": "just now",
+    "appBadge": "Desktop App session"
   }
 }
