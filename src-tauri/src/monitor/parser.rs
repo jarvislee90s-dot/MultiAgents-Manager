@@ -445,7 +445,8 @@ fn parse_claude_jsonl(
     }
 
     let session_id = session_id?;
-    let session_title = session_id[..session_id.len().min(12)].to_string();
+    // 卡片前缀统一 8 位，与 hook marker（MAM:<id 前 8 位>）保持一致
+    let session_title = session_id[..session_id.len().min(8)].to_string();
     let status = if is_compacting {
         SessionStatus::Compacting
     } else {
@@ -777,7 +778,8 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         }
     });
 
-    let codex_title = session_id[..session_id.len().min(12)].to_string();
+    // 卡片前缀统一 8 位，与 hook marker（MAM:<id 前 8 位>）保持一致
+    let codex_title = session_id[..session_id.len().min(8)].to_string();
     Some(Session {
         id: session_id,
         agent_type: AgentType::Codex,
