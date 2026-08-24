@@ -27,6 +27,22 @@ pub fn is_orphaned_process(system: &System, process: &sysinfo::Process) -> bool 
     false
 }
 
+/// 归一化候选字符串：统一为 / 分隔、转小写，取 basename，去 Windows .exe 扩展名
+/// （先小写再 strip，保证 "CLAUDE.EXE" 这类大写扩展名也能剥掉）
+fn normalized_base(candidate: &str) -> String {
+    let normalized = candidate.replace('\\', "/").to_lowercase();
+    let base = normalized.rsplit('/').next().unwrap_or("");
+    base.strip_suffix(".exe").unwrap_or(base).to_string()
+}
+
+/// 判断可执行文件路径 / 进程名 / argv[0] 是否匹配工具名列表（跨平台）
+/// - Windows: "C:\\...\\codex.exe"、"codex.exe" 均匹配 "codex"
+/// - Unix:    "/Applications/ChatGPT.app/Contents/Resources/codex"、"codex" 均匹配 "codex"
+fn exe_matches(candidate: &str, process_names: &[&str]) -> bool {
+    let base = normalized_base(candidate);
+    !base.is_empty() && process_names.iter().any(|name| name.to_lowercase() == base)
+}
+
 /// 通用进程发现：扫描指定进程名列表，过滤子 Agent 和孤儿
 /// process_names[0] 是 CLI 名，后续可以是 APP 名
 fn find_processes_by_names(
@@ -147,4 +163,60 @@ pub fn find_opencode_processes(system: &System) -> Vec<AgentProcess> {
 /// 发现 OpenClaw 进程
 pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(system, &["openclaw"], &["multi-agents-manager"])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod exe_matches {
+        use super::super::exe_matches;
+
+        #[test]
+        fn matches_bare_unix_name() {
+            // 旧行为兼容：裸名（argv[0] 恰好是命令名）
+            assert!(exe_matches("codex", &["codex", "Codex"]));
+            assert!(exe_matches("claude", &["claude"]));
+        }
+
+        #[test]
+        fn matches_unix_path_without_extension() {
+            // 旧行为兼容：macOS 内嵌 codex app-server
+            assert!(exe_matches(
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+                &["codex", "Codex"]
+            ));
+            assert!(exe_matches("/Users/x/.cargo/bin/codex", &["codex", "Codex"]));
+        }
+
+        #[test]
+        fn matches_windows_path_with_backslash_and_exe() {
+            // 本次修复的核心场景
+            assert!(exe_matches(
+                "C:\\Users\\bunny\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Anthropic.ClaudeCode_xxx\\claude.exe",
+                &["claude"]
+            ));
+            assert!(exe_matches(
+                "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0\\app\\codex.exe",
+                &["codex", "Codex"]
+            ));
+        }
+
+        #[test]
+        fn matches_process_name_only() {
+            // 提权进程命令行读不到时，只剩 process.name()
+            assert!(exe_matches("codex.exe", &["codex", "Codex"]));
+            assert!(exe_matches("CLAUDE.EXE", &["claude"]));
+            assert!(exe_matches("Codex", &["codex", "Codex"]));
+        }
+
+        #[test]
+        fn rejects_partial_and_unrelated_names() {
+            // 防误伤：名字相近但 basename 不同的进程不得命中
+            assert!(!exe_matches("codex-plus-plus.exe", &["codex", "Codex"]));
+            assert!(!exe_matches("ChatGPT.exe", &["codex", "Codex"]));
+            assert!(!exe_matches("node.exe", &["claude"]));
+            assert!(!exe_matches("", &["codex"]));
+        }
+    }
 }
