@@ -3,12 +3,15 @@ use once_cell::sync::Lazy;
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-/// 应用数据主目录：优先取 MAM_HOME 环境变量（测试重定向用），否则用 dirs::home_dir()
-/// Windows 下 dirs::home_dir 指向真实用户目录且无法用 HOME 重定向，故提供专用覆盖变量
+/// 应用数据主目录：MAM_HOME 环境变量仅在 debug/test 构建（debug_assertions）生效，
+/// 用于集成测试重定向数据目录（Windows 下 dirs::home_dir 无法用 HOME 重定向）；
+/// release 生产构建一律使用真实用户目录，防止环境变量误设导致 DB 与 skills/plugins 数据割裂
 fn app_data_home() -> std::path::PathBuf {
-    if let Some(home) = std::env::var_os("MAM_HOME") {
-        if !home.is_empty() {
-            return std::path::PathBuf::from(home);
+    if cfg!(debug_assertions) {
+        if let Some(home) = std::env::var_os("MAM_HOME") {
+            if !home.is_empty() {
+                return std::path::PathBuf::from(home);
+            }
         }
     }
     dirs::home_dir().unwrap_or_default()
