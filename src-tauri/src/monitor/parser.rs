@@ -521,11 +521,15 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     for process in processes {
         match &process.cwd {
             Some(cwd) => {
-                let cwd_str = cwd.to_string_lossy().to_string();
-                if cwd_str == "/" || cwd_str.is_empty() {
+                // 归一化：去尾部分隔符、Windows 下转小写（与 rollout 中记录的 cwd 保持可比）
+                let normalized = normalize_cwd_for_match(&cwd.to_string_lossy());
+                if normalized.is_empty() {
                     unmatched_processes.push(process);
                 } else {
-                    cwd_to_processes.entry(cwd_str).or_default().push(process);
+                    cwd_to_processes
+                        .entry(normalized)
+                        .or_default()
+                        .push(process);
                 }
             }
             None => unmatched_processes.push(process),
@@ -537,7 +541,9 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     // Phase 1: 按 cwd 精确匹配
     for (idx, (file_path, session_opt)) in parsed.iter().enumerate() {
         if let Some(session) = session_opt {
-            if let Some(procs) = cwd_to_processes.get(&session.project_path) {
+            if let Some(procs) =
+                cwd_to_processes.get(&normalize_cwd_for_match(&session.project_path))
+            {
                 if let Some(proc) = procs.first() {
                     // 用实际 process_form 重新解析以获取正确状态
                     let mut session =
