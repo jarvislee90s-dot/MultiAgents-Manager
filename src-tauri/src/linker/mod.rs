@@ -61,14 +61,9 @@ pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        // Windows: 目录用 Junction，文件用 copy
+        // Windows: 目录用 Junction（纯 API 调用，不走 cmd，避免闪控制台窗口），文件用 copy
         if source.is_dir() {
-            // 使用 cmd 创建 Junction
-            let source_str = source.to_string_lossy();
-            let target_str = target.to_string_lossy();
-            std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J", &target_str, &source_str])
-                .output()
+            junction::create(source, target)
                 .map_err(|e| format!("创建 Junction 失败: {}", e))?;
         } else {
             fs::copy(source, target).map_err(|e| format!("复制文件失败: {}", e))?;
@@ -82,10 +77,21 @@ pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
 /// 移除链接
 pub fn remove_link(target: &Path) -> Result<(), String> {
     if target.is_symlink() {
+        // Windows 上目录 Junction / 目录符号链接用 remove_file 会报"拒绝访问"（os error 5），
+        // 须改用 remove_dir_all —— 它对 reparse point 只删除链接本身，不会递归进目标目录
+        #[cfg(windows)]
+        if target.is_dir() {
+            fs::remove_dir_all(target).map_err(|e| format!("移除目录链接失败: {}", e))?;
+            return Ok(());
+        }
         fs::remove_file(target).map_err(|e| format!("移除 symlink 失败: {}", e))?;
     } else if target.exists() {
-        // 可能是 Junction 或实际目录
-        fs::remove_dir_all(target).map_err(|e| format!("移除目录失败: {}", e))?;
+        // 普通文件用 remove_file，目录 / Junction 用 remove_dir_all
+        if target.is_dir() {
+            fs::remove_dir_all(target).map_err(|e| format!("移除目录失败: {}", e))?;
+        } else {
+            fs::remove_file(target).map_err(|e| format!("移除文件失败: {}", e))?;
+        }
     }
     Ok(())
 }
