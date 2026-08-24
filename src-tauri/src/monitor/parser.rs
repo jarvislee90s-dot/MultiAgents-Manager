@@ -20,30 +20,29 @@ static GIT_URL_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> = Lazy::new(|
 
 // ===== 路径编码（Claude projects 目录名 <-> 实际路径）=====
 
-/// 将路径转换为 Claude projects 目录名（如 /Users/x/proj -> -Users-x-proj）
+/// 将路径转换为 Claude projects 目录名
+/// Claude Code 规则：路径中每个非 ASCII 字母数字字符（分隔符、盘符冒号、点、空格、非 ASCII）
+/// 逐字符替换为 '-'
+/// Unix: /Users/x/proj -> -Users-x-proj；Windows: C:\Users\x\proj -> C--Users-x-proj
 pub fn convert_path_to_dir_name(path: &str) -> String {
-    let path = path.strip_prefix('/').unwrap_or(path);
-    let mut result = String::from("-");
-    let mut chars = path.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '/' => {
-                if chars.peek() == Some(&'.') {
-                    result.push('-');
-                    result.push('-');
-                    chars.next();
-                } else {
-                    result.push('-');
-                }
-            }
-            _ => result.push(c),
-        }
-    }
-    result
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// 将 Claude projects 目录名还原为路径
 pub fn convert_dir_name_to_path(dir_name: &str) -> String {
+    // Windows 盘符目录名（如 C--Users-bunny）→ C:\Users\bunny
+    // 注意：目录名中 '.' 与 '-' 不可区分，还原结果仅作兜底显示，精确 cwd 以 jsonl 内记录为准
+    // 实现说明：rest 由 skip(2) 得到（形如 "-Users-bunny"），首字符 '-' 替换为 '\\' 后即路径分隔符，
+    // 因此格式串只需 "{}:{}"，若写成 "{}:\\{}" 会在盘符后产生双反斜杠
+    let mut chars = dir_name.chars();
+    if let (Some(first), Some(second)) = (chars.next(), chars.next()) {
+        if first.is_ascii_alphabetic() && second == '-' {
+            let rest: String = dir_name.chars().skip(2).collect();
+            return format!("{}:{}", first, rest.replace('-', "\\"));
+        }
+    }
     let name = dir_name.strip_prefix('-').unwrap_or(dir_name);
     let parts: Vec<&str> = name.split('-').collect();
     if parts.is_empty() {
@@ -131,13 +130,29 @@ fn get_github_url(project_path: &str) -> Option<String> {
 
 // ===== 通用辅助 =====
 
+/// 校验 cwd 字符串形态：Unix 绝对路径（/ 开头）或 Windows 盘符路径（如 C:\... 或 c:/...）
+fn is_valid_cwd(cwd: &str) -> bool {
+    let bytes = cwd.as_bytes();
+    cwd.starts_with('/')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+/// 从项目路径提取项目名（跨平台：兼容 / 和 \ 分隔符）
+pub fn project_name_from_path(project_path: &str) -> String {
+    project_path
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
 fn extract_cwd_from_jsonl(jsonl_path: &Path) -> Option<String> {
     let file = File::open(jsonl_path).ok()?;
     let reader = BufReader::new(file);
     for line in reader.lines().take(20).flatten() {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(&line) {
             if let Some(cwd) = msg.cwd {
-                if cwd.starts_with('/') { return Some(cwd); }
+                if is_valid_cwd(&cwd) { return Some(cwd); }
             }
         }
     }
@@ -351,7 +366,7 @@ fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProc
                          last_is_local, last_is_interrupted, last_is_user_input, file_recently_modified)
     };
 
-    let project_name = project_path.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string();
+    let project_name = project_name_from_path(project_path);
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 { format!("{}...", m.chars().take(100).collect::<String>()) } else { m }
     });
@@ -612,7 +627,7 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         msg_type, last_has_tool_use, false, false, false, false, file_recently_modified
     );
 
-    let project_name = project_path.split('/').rfind(|s| !s.is_empty()).unwrap_or("Unknown").to_string();
+    let project_name = project_name_from_path(&project_path);
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 { format!("{}...", m.chars().take(100).collect::<String>()) } else { m }
     });
@@ -636,6 +651,76 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         jump_supported: true,
         title: Some(codex_title),
     })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    mod dir_name {
+        use super::super::convert_path_to_dir_name;
+
+        #[test]
+        fn unix_paths_keep_old_behavior() {
+            assert_eq!(convert_path_to_dir_name("/Users/x/proj"), "-Users-x-proj");
+            assert_eq!(convert_path_to_dir_name("/Users/x/.agents/skills"), "-Users-x--agents-skills");
+        }
+
+        #[test]
+        fn windows_paths() {
+            assert_eq!(convert_path_to_dir_name("C:\\Users\\bunny\\Desktop"), "C--Users-bunny-Desktop");
+            assert_eq!(
+                convert_path_to_dir_name("C:\\Users\\bunny\\.agents\\skills\\extract-report"),
+                "C--Users-bunny--agents-skills-extract-report"
+            );
+            // 非 ASCII 字符逐字符替换为 '-'：分隔符 1 个 + 2 个中文 = 3 个 '-'
+            // （注意：计划原文预期 2 个 '-' 与实际逐字符规则不符，已按规则修正为 3 个）
+            assert_eq!(convert_path_to_dir_name("C:\\Users\\bunny\\Desktop\\桌面"), "C--Users-bunny-Desktop---");
+        }
+    }
+
+    mod dir_name_reverse {
+        use super::super::convert_dir_name_to_path;
+
+        #[test]
+        fn windows_drive_letter() {
+            assert_eq!(convert_dir_name_to_path("C--Users-bunny-Desktop"), "C:\\Users\\bunny\\Desktop");
+        }
+
+        #[test]
+        fn unix_keeps_old_behavior() {
+            assert_eq!(convert_dir_name_to_path("-Users-x-proj"), "/Users/x/proj");
+        }
+    }
+
+    mod valid_cwd {
+        use super::super::is_valid_cwd;
+
+        #[test]
+        fn accepts_unix_and_windows_absolute() {
+            assert!(is_valid_cwd("/Users/x/proj"));
+            assert!(is_valid_cwd("C:\\Users\\x"));
+            assert!(is_valid_cwd("c:/Users/x"));
+        }
+
+        #[test]
+        fn rejects_relative_and_empty() {
+            assert!(!is_valid_cwd("relative/path"));
+            assert!(!is_valid_cwd(""));
+            assert!(!is_valid_cwd("C"));
+        }
+    }
+
+    mod project_name {
+        use super::super::project_name_from_path;
+
+        #[test]
+        fn cross_platform_basename() {
+            assert_eq!(project_name_from_path("C:\\Users\\bunny\\Desktop"), "Desktop");
+            assert_eq!(project_name_from_path("/Users/x/proj"), "proj");
+            assert_eq!(project_name_from_path("/"), "Unknown");
+        }
+    }
 }
 
 #[cfg(test)]
