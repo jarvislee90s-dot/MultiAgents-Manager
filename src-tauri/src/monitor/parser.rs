@@ -104,8 +104,16 @@ fn get_github_url(project_path: &str) -> Option<String> {
         }
     }
     let result = (|| {
-        let output = Command::new("git").args(["remote", "get-url", "origin"])
-            .current_dir(project_path).output().ok()?;
+        let mut cmd = Command::new("git");
+        cmd.args(["remote", "get-url", "origin"]).current_dir(project_path);
+        // Windows 下 GUI 进程 spawn 控制台程序会闪黑窗，必须加 CREATE_NO_WINDOW
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = cmd.output().ok()?;
         if !output.status.success() { return None; }
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if let Some(p) = url.strip_prefix("git@github.com:") {
@@ -626,4 +634,45 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         jump_supported: true,
         title: Some(codex_title),
     })
+}
+
+#[cfg(test)]
+mod git_url_tests {
+    use super::*;
+
+    /// 在临时目录构造一个带 origin remote 的 git 仓库，验证 get_github_url 的完整调用链
+    #[test]
+    fn test_get_github_url_reads_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_str().unwrap().to_string();
+        let mut init = std::process::Command::new("git");
+        init.args(["init"]).current_dir(&dir);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            init.creation_flags(CREATE_NO_WINDOW);
+        }
+        init.output().expect("git init 失败（CI/开发机均应安装 git）");
+        let mut remote = std::process::Command::new("git");
+        remote.args(["remote", "add", "origin", "git@github.com:some-org/some-repo.git"]).current_dir(&dir);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            remote.creation_flags(CREATE_NO_WINDOW);
+        }
+        remote.output().expect("git remote add 失败");
+
+        assert_eq!(
+            get_github_url(&dir).as_deref(),
+            Some("https://github.com/some-org/some-repo")
+        );
+    }
+
+    #[test]
+    fn test_get_github_url_none_for_plain_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(get_github_url(temp.path().to_str().unwrap()), None);
+    }
 }
