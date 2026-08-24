@@ -309,6 +309,14 @@
     "empty": "暂无活跃会话",
     "emptyHint": "在终端中运行 Claude Code、Codex CLI 或 OpenCode 即可在此监控",
     "subagents": "{{n}} 子Agent",
-    "untitledWindow": "(无标题)"
+    "untitledWindow": "(无标题)",
+    "statusLabels": {
+      "waiting": "等待操作",
+      "processing": "运行中",
+      "thinking": "思考中",
+      "compacting": "压缩中",
+      "idle": "空闲",
+      "finished": "已结束"
+    }
   }
 }

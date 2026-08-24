@@ -309,6 +309,14 @@
     "empty": "No active sessions",
     "emptyHint": "Run Claude Code, Codex CLI or OpenCode in a terminal to monitor here",
     "subagents": "{{n}} subagents",
-    "untitledWindow": "(untitled)"
+    "untitledWindow": "(untitled)",
+    "statusLabels": {
+      "waiting": "Waiting for input",
+      "processing": "Running",
+      "thinking": "Thinking",
+      "compacting": "Compacting",
+      "idle": "Idle",
+      "finished": "Finished"
+    }
   }
 }

@@ -86,7 +86,12 @@ export function useNotification() {
           const pid = (notification.extra?.pid as number) ?? 0;
           if (pid > 0) {
             try {
-              await invoke("focus_session", { pid });
+              await invoke("focus_session", {
+                pid,
+                sessionId: (notification.extra?.sessionId as string) ?? undefined,
+                agentType: (notification.extra?.agentType as string) ?? undefined,
+                projectName: (notification.extra?.projectName as string) ?? undefined,
+              });
             } catch (e) {
               console.error("focus_session failed:", e);
             }
@@ -151,22 +156,46 @@ export function useNotification() {
                 title: `${toolLabel}${formTag} — ${session.projectName}`,
                 body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
                 actionTypeId: "focus-session",
-                extra: { pid: session.pid, sessionId: session.id },
+                extra: {
+                  pid: session.pid,
+                  sessionId: session.id,
+                  agentType: session.agentType,
+                  projectName: session.projectName,
+                },
               });
             }
           } else {
             // 应用内浮窗路径（无需系统权限，不夺焦点）
-            await invoke("show_notification_window", {
-              payload: {
-                agentType: toolLabel,
-                projectName: session.projectName,
-                statusColor: statusToColor(session.status),
-                statusLabel,
-                lastMessage: session.lastMessage ?? "",
-                pid: session.pid,
-                sessionId: session.id,
-              },
-            });
+            try {
+              await invoke("show_notification_window", {
+                payload: {
+                  agentType: session.agentType,
+                  agentLabel: toolLabel,
+                  projectName: session.projectName,
+                  statusColor: statusToColor(session.status),
+                  status: session.status,
+                  lastMessage: session.lastMessage ?? "",
+                  pid: session.pid,
+                  sessionId: session.id,
+                },
+              });
+            } catch (e) {
+              // 浮窗失败降级系统 toast，保证通知不丢（spec 008 错误处理要求）
+              console.error("show_notification_window failed:", e);
+              if (permissionGranted.current) {
+                sendNotification({
+                  title: `${toolLabel}${formTag} — ${session.projectName}`,
+                  body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
+                  actionTypeId: "focus-session",
+                  extra: {
+                    pid: session.pid,
+                    sessionId: session.id,
+                    agentType: session.agentType,
+                    projectName: session.projectName,
+                  },
+                });
+              }
+            }
           }
         }
       }
