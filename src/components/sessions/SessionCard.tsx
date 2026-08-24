@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal, Cpu, Clock, Bot, FolderGit2, ChevronRight } from "lucide-react";
@@ -43,6 +44,10 @@ export function SessionCard({ session }: { session: Session }) {
   const { t } = useTranslation();
   const badge = AGENT_BADGE[session.agentType];
   const Icon = badge.icon;
+  // 歧义候选窗口（跳转命中多个窗口时弹出选择器）
+  const [pendingWindows, setPendingWindows] = useState<
+    { hwnd: number; title: string; process: string }[] | null
+  >(null);
 
   const handleClick = async () => {
     if (!session.jumpSupported) {
@@ -50,22 +55,34 @@ export function SessionCard({ session }: { session: Session }) {
       return;
     }
     try {
-      await invoke("focus_session", { pid: session.pid });
+      const result = await invoke<{
+        type: string;
+        windows?: { hwnd: number; title: string; process: string }[];
+      }>("focus_session", {
+        pid: session.pid,
+        sessionId: session.id,
+        agentType: session.agentType,
+        projectName: session.projectName,
+      });
+      if (result.type === "ambiguous" && result.windows && result.windows.length > 0) {
+        setPendingWindows(result.windows);
+      }
     } catch (e) {
       toast.error(t("sessions.jumpFailed", { error: e }));
     }
   };
 
   return (
-    <Card
-      className={cn(
-        "group hover:bg-accent/50 relative cursor-pointer border p-3 transition-colors",
-        session.status === "waiting" && "border-red-500/40",
-        !session.jumpSupported && "cursor-default opacity-80"
-      )}
-      onClick={handleClick}
-      title={session.jumpSupported ? t("sessions.jumpToTerminal") : t("sessions.jumpUnsupported")}
-    >
+    <>
+      <Card
+        className={cn(
+          "group hover:bg-accent/50 relative cursor-pointer border p-3 transition-colors",
+          session.status === "waiting" && "border-red-500/40",
+          !session.jumpSupported && "cursor-default opacity-80"
+        )}
+        onClick={handleClick}
+        title={session.jumpSupported ? t("sessions.jumpToTerminal") : t("sessions.jumpUnsupported")}
+      >
       {/* 顶部：工具标签 + 项目名 + 状态灯 */}
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
@@ -123,6 +140,40 @@ export function SessionCard({ session }: { session: Session }) {
           <ChevronRight className="ml-auto h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
         )}
       </div>
-    </Card>
+      </Card>
+      {/* 窗口选择器：跳转歧义时由用户点选目标窗口 */}
+      {pendingWindows && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => setPendingWindows(null)}
+        >
+          <div
+            className="w-96 rounded-lg border bg-card p-4 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="mb-3 text-sm font-medium">{t("sessions.pickWindow")}</p>
+            <div className="flex flex-col gap-2">
+              {pendingWindows.map((w) => (
+                <button
+                  key={w.hwnd}
+                  className="truncate rounded border px-3 py-2 text-left text-xs hover:bg-accent"
+                  onClick={async () => {
+                    setPendingWindows(null);
+                    try {
+                      await invoke("focus_hwnd", { hwnd: w.hwnd });
+                    } catch (e) {
+                      toast.error(t("sessions.jumpFailed", { error: e }));
+                    }
+                  }}
+                  title={w.title}
+                >
+                  {w.title || "(无标题)"} — {w.process}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

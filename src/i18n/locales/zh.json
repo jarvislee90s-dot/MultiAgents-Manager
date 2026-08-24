@@ -126,6 +126,7 @@
     "jumpToTerminal": "点击跳转到终端",
     "jumpUnsupported": "当前平台或形态不支持跳转",
     "jumpFailed": "跳转失败: {{error}}",
+    "pickWindow": "多个窗口匹配，请选择目标窗口",
     "noMessage": "（无消息）",
     "justNow": "刚刚",
     "appBadge": "桌面 App 会话"
