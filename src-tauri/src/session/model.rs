@@ -30,10 +30,13 @@ pub enum ProcessForm {
     App,
 }
 
-/// 跳转终端是否可用：仅 CLI 形态，且仅 macOS
-/// （window/ 模块的终端聚焦只实现了 macOS 的 iTerm2/Terminal.app/tmux；
-/// 其他平台点击会调用 Unix ps 命令而失败，故直接禁用）
+/// 跳转终端是否可用：Windows 下 CLI 与 App 均可窗口级聚焦（见 window/win32.rs）；
+/// macOS 仅 CLI（TTY 链路，window/ 模块的 iTerm2/Terminal.app/tmux）；其他平台不支持
 pub fn jump_supported_for(form: ProcessForm) -> bool {
+    if cfg!(windows) {
+        // Windows：CLI 与 App 均可窗口级聚焦（见 window/win32.rs）
+        return true;
+    }
     matches!(form, ProcessForm::Cli) && cfg!(target_os = "macos")
 }
 
@@ -98,9 +101,12 @@ mod jump_tests {
     use super::*;
 
     #[test]
-    fn jump_only_supported_for_cli_on_macos() {
-        // 终端聚焦（window/ 模块）目前只实现 macOS；其他平台任何形态都不可跳转
-        if cfg!(target_os = "macos") {
+    fn jump_supported_matches_platform_matrix() {
+        // Windows：CLI 与 App 均可窗口级聚焦；macOS：仅 CLI（TTY 链路）；其他平台：不支持
+        if cfg!(windows) {
+            assert!(jump_supported_for(ProcessForm::Cli));
+            assert!(jump_supported_for(ProcessForm::App));
+        } else if cfg!(target_os = "macos") {
             assert!(jump_supported_for(ProcessForm::Cli));
             assert!(!jump_supported_for(ProcessForm::App));
         } else {
