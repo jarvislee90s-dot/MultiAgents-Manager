@@ -160,6 +160,11 @@ pub(crate) fn normalize_cwd_for_match(cwd: &str) -> String {
     }
 }
 
+/// 判断两个 cwd 字符串归一化后是否指向同一目录（用于进程 cwd ↔ 会话 directory 匹配）
+pub(crate) fn cwd_equivalent(a: &str, b: &str) -> bool {
+    normalize_cwd_for_match(a) == normalize_cwd_for_match(b)
+}
+
 /// 从项目路径提取项目名（跨平台：兼容 / 和 \ 分隔符）
 pub fn project_name_from_path(project_path: &str) -> String {
     project_path
@@ -968,5 +973,32 @@ mod normalize_cwd_tests {
     fn root_normalizes_to_empty() {
         // 根路径归一化为空串，调用方按"无有效 cwd"处理（进入 unmatched 分支）
         assert_eq!(normalize_cwd_for_match("/"), "");
+    }
+}
+
+#[cfg(test)]
+mod cwd_equivalent_tests {
+    use super::cwd_equivalent;
+
+    #[test]
+    fn separator_direction_and_trailing_are_equivalent() {
+        assert!(cwd_equivalent("E:\\LLMproject\\x\\", "E:/LLMproject/x"));
+        assert!(cwd_equivalent("e:/llmproject/x", "E:\\LLMproject\\x\\"));
+    }
+
+    #[test]
+    fn case_rules_follow_platform() {
+        if cfg!(windows) {
+            assert!(cwd_equivalent("E:/X", "e:/x"));
+        } else {
+            assert!(!cwd_equivalent("/Users/X", "/Users/x"));
+        }
+    }
+
+    #[test]
+    fn different_paths_are_not_equivalent() {
+        assert!(!cwd_equivalent("E:/a", "E:/b"));
+        assert!(!cwd_equivalent("E:/a", "E:/a/sub"));
+        assert!(!cwd_equivalent("", "E:/a"));
     }
 }
