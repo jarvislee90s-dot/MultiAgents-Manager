@@ -1,6 +1,7 @@
 // OpenClaw 会话解析器 — 基于 openclaw.json 配置 + 进程信息
 // OpenClaw 使用 Node.js gateway 进程，会话信息从 ~/.openclaw/openclaw.json 的 agents 列表解析
 
+use super::parser::normalize_cwd_for_match;
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
@@ -55,11 +56,11 @@ pub fn get_openclaw_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     };
 
-    // cwd -> process 映射
+    // cwd -> process 映射（归一化：统一分隔符、去尾部、Windows 下小写）
     let mut cwd_to_process: HashMap<String, &AgentProcess> = HashMap::new();
     for process in processes {
         if let Some(cwd) = &process.cwd {
-            cwd_to_process.insert(cwd.to_string_lossy().to_string(), process);
+            cwd_to_process.insert(normalize_cwd_for_match(&cwd.to_string_lossy()), process);
         }
     }
 
@@ -73,9 +74,10 @@ pub fn get_openclaw_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             continue;
         }
 
+        let ws = normalize_cwd_for_match(workspace);
         let matching_process = cwd_to_process
             .iter()
-            .find(|(cwd, _)| *cwd == workspace || cwd.starts_with(&format!("{}/", workspace)))
+            .find(|(cwd, _)| **cwd == ws || cwd.starts_with(&format!("{}/", ws)))
             .map(|(_, p)| *p);
 
         if let Some(process) = matching_process {
