@@ -59,6 +59,7 @@ pub fn run() {
         update_tray_menu,
         commands::session::get_all_sessions,
         commands::session::focus_session,
+        commands::session::focus_hwnd,
         commands::session::kill_session,
         commands::resource::list_extensions_with_assignments,
         commands::resource::scan_native_resources,
