@@ -43,6 +43,26 @@ fn exe_matches(candidate: &str, process_names: &[&str]) -> bool {
     !base.is_empty() && process_names.iter().any(|name| name.to_lowercase() == base)
 }
 
+/// 判断进程形态（CLI 还是 APP），依据命中候选（exe 路径 / 进程名 / argv[0]）的特征
+/// - basename 首字母大写（如独立 Codex.app 的 "Codex"）→ APP
+/// - 位于 macOS .app 包内（如 ChatGPT.app 内嵌的 codex app-server）→ APP
+/// - 位于 Windows MSIX 安装目录（ChatGPT 合并版 Codex 桌面端）→ APP
+fn classify_form(candidate: &str) -> ProcessForm {
+    let normalized = candidate.replace('\\', "/");
+    let base_stem = normalized.rsplit('/').next().unwrap_or("");
+    let base_stem = base_stem.strip_suffix(".exe").unwrap_or(base_stem);
+    // basename 首字母大写 → APP（保留原始大小写判断，不能先 lowercase）
+    let exe_upper = base_stem.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+    let lower = normalized.to_lowercase();
+    let in_app_bundle = lower.contains(".app/contents");
+    let in_msix = lower.contains("windowsapps/openai.codex_");
+    if exe_upper || in_app_bundle || in_msix {
+        ProcessForm::App
+    } else {
+        ProcessForm::Cli
+    }
+}
+
 /// 通用进程发现：扫描指定进程名列表，过滤子 Agent 和孤儿
 /// process_names[0] 是 CLI 名，后续可以是 APP 名
 fn find_processes_by_names(
@@ -52,63 +72,52 @@ fn find_processes_by_names(
 ) -> Vec<AgentProcess> {
     use std::collections::HashSet;
 
-    // 收集所有匹配的 PID（用于子 Agent 过滤）
-    let mut matched_pids: HashSet<Pid> = HashSet::new();
-    for (pid, process) in system.processes() {
-        let cmd = process.cmd();
-        if let Some(first_arg) = cmd.first() {
-            let first = first_arg.to_string_lossy().to_lowercase();
-            if process_names.iter().any(|&name| {
-                let name_lower = name.to_lowercase();
-                first == name_lower || first.ends_with(&format!("/{}", name_lower))
-            }) {
-                matched_pids.insert(*pid);
+    // 对单个进程做匹配：依次尝试 exe 路径 > 进程名 > 命令行首参数，返回命中候选
+    // （提权进程的命令行可能读不到，exe/name 仍可读，因此 exe/name 优先）
+    fn match_candidate(process: &sysinfo::Process, names: &[&str]) -> Option<String> {
+        if let Some(exe) = process.exe() {
+            let exe_str = exe.to_string_lossy().to_string();
+            if exe_matches(&exe_str, names) {
+                return Some(exe_str);
             }
         }
+        let name = process.name().to_string_lossy().to_string();
+        if exe_matches(&name, names) {
+            return Some(name);
+        }
+        if let Some(first) = process.cmd().first() {
+            let first = first.to_string_lossy().to_string();
+            if exe_matches(&first, names) {
+                return Some(first);
+            }
+        }
+        None
     }
+
+    // 收集所有匹配的 PID（用于子 Agent 过滤）
+    let matched_pids: HashSet<Pid> = system
+        .processes()
+        .iter()
+        .filter(|(_, p)| match_candidate(p, process_names).is_some())
+        .map(|(pid, _)| *pid)
+        .collect();
 
     let mut processes = Vec::new();
     for (pid, process) in system.processes() {
-        let cmd = process.cmd();
-        let process_name = process.name().to_string_lossy();
-
-        let first_arg = cmd.first();
-        let is_match = first_arg.map(|arg| {
-            let first = arg.to_string_lossy().to_lowercase();
-            process_names.iter().any(|&name| {
-                let name_lower = name.to_lowercase();
-                first == name_lower || first.ends_with(&format!("/{}", name_lower))
-            })
-        }).unwrap_or(false);
-
-        if !is_match {
+        let Some(candidate) = match_candidate(process, process_names) else {
             continue;
-        }
+        };
 
         // 排除自身应用
+        let process_name = process.name().to_string_lossy();
         if our_app_names.iter().any(|&app| process_name.contains(app)) {
             trace!("Skipping our own app: pid={}, name={}", pid.as_u32(), process_name);
             continue;
         }
 
-        // 判断进程形态（CLI 还是 APP）
-        // APP 形态：可执行文件首字母大写（如 "Codex"），CLI 首字母小写（如 "codex"）
-        // 例：CLI 路径 ~/.cargo/bin/codex → base "codex"；APP 路径 /Applications/Codex.app/Contents/MacOS/Codex → base "Codex"
-        // 注：新版 Codex 桌面端内嵌于 ChatGPT.app（/Applications/ChatGPT.app/Contents/Resources/codex app-server），
-        // basename 是小写 "codex"，但位于 .app 包内，同样应判为 APP 形态
+        // 判断进程形态（CLI 还是 APP），依据命中候选的路径特征（Task 3 实现 classify_form）
         let form = if process_names.len() > 1 {
-            // 多形态工具（如 Codex 有 CLI "codex" 和 APP "Codex"）
-            let first = first_arg.unwrap().to_string_lossy();
-            // 取可执行文件的 basename（去掉路径和扩展名）
-            let exe_base = std::path::Path::new(first.as_ref())
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            // exe_base 第一个字符大写 → APP
-            let exe_upper = exe_base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-            // 可执行文件位于 .app 包内（如 ChatGPT.app 内嵌的 codex app-server）→ APP
-            let in_app_bundle = first.to_lowercase().contains(".app/contents");
-            if exe_upper || in_app_bundle { ProcessForm::App } else { ProcessForm::Cli }
+            classify_form(&candidate)
         } else {
             ProcessForm::Cli
         };
@@ -123,7 +132,7 @@ fn find_processes_by_names(
             }
         }
 
-        // 跳过孤儿进程（仅 CLI 形态检查 — APP 形态由 launchd 启动是正常的）
+        // 跳过孤儿进程（仅 CLI 形态检查 — APP 形态由 launchd / 系统启动是正常的）
         if matches!(form, ProcessForm::Cli) && is_orphaned_process(system, process) {
             warn!("Skipping orphaned CLI: pid={}, cwd={:?}", pid.as_u32(), cwd);
             continue;
@@ -217,6 +226,44 @@ mod tests {
             assert!(!exe_matches("ChatGPT.exe", &["codex", "Codex"]));
             assert!(!exe_matches("node.exe", &["claude"]));
             assert!(!exe_matches("", &["codex"]));
+        }
+    }
+
+    mod classify_form {
+        use super::super::classify_form;
+        use crate::session::ProcessForm;
+
+        #[test]
+        fn mac_standalone_capitalized_binary_is_app() {
+            // 旧行为兼容：独立 Codex.app 的可执行文件首字母大写
+            assert_eq!(classify_form("/Applications/Codex.app/Contents/MacOS/Codex"), ProcessForm::App);
+        }
+
+        #[test]
+        fn mac_chatgpt_embedded_codex_is_app() {
+            // 旧行为兼容（commit 41adeaa）：ChatGPT.app 内嵌 codex app-server
+            assert_eq!(
+                classify_form("/Applications/ChatGPT.app/Contents/Resources/codex"),
+                ProcessForm::App
+            );
+        }
+
+        #[test]
+        fn windows_msix_codex_is_app() {
+            // 本次新增：ChatGPT 合并版 Codex 桌面端（Windows MSIX 安装目录）
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0\\app\\codex.exe"
+                ),
+                ProcessForm::App
+            );
+        }
+
+        #[test]
+        fn windows_and_unix_cli_paths_are_cli() {
+            assert_eq!(classify_form("C:\\Users\\x\\.local\\bin\\claude.exe"), ProcessForm::Cli);
+            assert_eq!(classify_form("/Users/x/.cargo/bin/codex"), ProcessForm::Cli);
+            assert_eq!(classify_form("codex.exe"), ProcessForm::Cli);
         }
     }
 }
