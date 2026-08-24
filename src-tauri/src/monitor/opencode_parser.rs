@@ -1,6 +1,7 @@
 // OpenCode 会话解析器 — 基于 SQLite 数据库（opencode.db）
 // OpenCode 1.17+ 使用 SQLite 替代分散 JSON 文件，此模块查询数据库获取会话状态
 
+use super::parser::{cwd_equivalent, normalize_cwd_for_match};
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
@@ -56,15 +57,62 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     };
     let _ = conn.busy_timeout(Duration::from_millis(1000));
 
-    // cwd -> process 映射
+    // 归一化 cwd -> process 映射（统一分隔符、去尾部、Windows 下小写）
     let mut cwd_to_process: HashMap<String, &AgentProcess> = HashMap::new();
     for process in processes {
         if let Some(cwd) = &process.cwd {
-            cwd_to_process.insert(cwd.to_string_lossy().to_string(), process);
+            cwd_to_process.insert(normalize_cwd_for_match(&cwd.to_string_lossy()), process);
         }
     }
 
-    // 查询所有项目（非 global）
+    // 最近会话行（主匹配数据源，归一化比较在 Rust 侧做）
+    let recent: Vec<(String, String, Option<String>, i64)> = conn
+        .prepare("SELECT id, directory, title, time_updated FROM session ORDER BY time_updated DESC LIMIT 200")
+        .ok()
+        .map(|mut stmt| {
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
+    let mut sessions = Vec::new();
+    let mut matched_pids: HashSet<u32> = HashSet::new();
+
+    // ---- 主匹配：session.directory（会话启动目录）与进程 cwd 归一化相等 ----
+    // （含 global 会话；取代原按 directory 精确 SQL 的 global 回退——SQL 精确匹配无法
+    //   处理分隔符/大小写差异，归一化比较必须在 Rust 侧做）
+    for process in processes {
+        let Some(cwd) = &process.cwd else { continue };
+        let cwd_str = cwd.to_string_lossy();
+        if let Some((session_id, directory, title, time_updated)) = recent
+            .iter()
+            .find(|(_, dir, _, _)| cwd_equivalent(dir, &cwd_str))
+        {
+            matched_pids.insert(process.pid);
+            if let Some(session) = build_session_from_row(
+                &conn,
+                session_id,
+                directory,
+                title.as_deref(),
+                None,
+                *time_updated,
+                process,
+            ) {
+                sessions.push(session);
+            }
+        }
+    }
+
+    // ---- 回退匹配：project worktree 前缀（进程 cwd 等于或在 worktree 之下）----
     let projects: Vec<(String, String, Option<String>)> = conn
         .prepare("SELECT id, worktree, name FROM project WHERE id != 'global'")
         .ok()
@@ -82,14 +130,14 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         })
         .unwrap_or_default();
 
-    let mut sessions = Vec::new();
-    let mut matched_pids: HashSet<u32> = HashSet::new();
-
-    // 匹配项目到运行中的进程
     for (project_id, worktree, name) in &projects {
+        let wt = normalize_cwd_for_match(worktree);
         let matching_process = cwd_to_process
             .iter()
-            .find(|(cwd, _)| *cwd == worktree || cwd.starts_with(&format!("{}/", worktree)))
+            .find(|(cwd, proc)| {
+                !matched_pids.contains(&proc.pid)
+                    && (*cwd == wt.as_str() || cwd.starts_with(&format!("{}/", wt)))
+            })
             .map(|(_, p)| *p);
 
         if let Some(process) = matching_process {
@@ -101,19 +149,6 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             if let Some(session) =
                 get_latest_session_for_project(&conn, project_id, name.as_deref(), process)
             {
-                sessions.push(session);
-            }
-        }
-    }
-
-    // 未匹配的进程：查 global 会话（按 directory 匹配）
-    for process in processes {
-        if matched_pids.contains(&process.pid) {
-            continue;
-        }
-        if let Some(cwd) = &process.cwd {
-            let cwd_str = cwd.to_string_lossy().to_string();
-            if let Some(session) = get_global_session(&conn, &cwd_str, process) {
                 sessions.push(session);
             }
         }
@@ -134,76 +169,10 @@ fn get_latest_session_for_project(
     project_name: Option<&str>,
     process: &AgentProcess,
 ) -> Option<Session> {
-    let mut stmt = conn
+    let (session_id, directory, title, time_updated) = conn
         .prepare("SELECT id, directory, title, time_updated FROM session WHERE project_id = ? ORDER BY time_updated DESC LIMIT 1")
-        .ok()?;
-
-    let result = stmt
+        .ok()?
         .query_row([project_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?, // id
-                row.get::<_, String>(1)?, // directory
-                row.get::<_, String>(2)?, // title
-                row.get::<_, i64>(3)?,    // time_updated (ms)
-            ))
-        })
-        .ok()?;
-
-    let (session_id, directory, title, time_updated) = result;
-
-    let (last_role, last_message) = get_last_message_info(conn, &session_id);
-    let last_msg_time = get_last_message_time(conn, &session_id);
-
-    let status = determine_opencode_status(
-        process.cpu_usage,
-        last_role.as_deref(),
-        last_msg_time,
-        time_updated,
-    );
-    let last_activity_at = ms_to_iso(time_updated);
-
-    let project_name = project_name
-        .map(String::from)
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| {
-            directory
-                .split('/')
-                .rfind(|s| !s.is_empty())
-                .unwrap_or("Unknown")
-                .to_string()
-        });
-
-    let session_title = title.clone();
-    let display_message = last_message.or(if !title.is_empty() { Some(title) } else { None });
-
-    Some(Session {
-        id: session_id,
-        agent_type: AgentType::OpenCode,
-        project_name,
-        project_path: directory,
-        git_branch: None,
-        github_url: None,
-        status,
-        last_message: display_message,
-        last_message_role: last_role,
-        last_activity_at,
-        pid: process.pid,
-        cpu_usage: process.cpu_usage,
-        active_subagent_count: 0,
-        form: process.form,
-        jump_supported: jump_supported_for(process.form),
-        title: Some(session_title),
-    })
-}
-
-/// 查 global 会话（按 directory 字段匹配）
-fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> Option<Session> {
-    let mut stmt = conn
-        .prepare("SELECT id, directory, title, time_updated FROM session WHERE project_id = 'global' AND directory = ? ORDER BY time_updated DESC LIMIT 1")
-        .ok()?;
-
-    let result = stmt
-        .query_row([cwd], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -213,9 +182,31 @@ fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> O
         })
         .ok()?;
 
-    let (session_id, directory, title, time_updated) = result;
-    let (last_role, last_message) = get_last_message_info(conn, &session_id);
-    let last_msg_time = get_last_message_time(conn, &session_id);
+    build_session_from_row(
+        conn,
+        &session_id,
+        &directory,
+        // title 为 String（行内值），转 Option<&str> 传给共用构造
+        Some(title.as_str()),
+        project_name,
+        time_updated,
+        process,
+    )
+}
+
+/// 由会话行构造 Session（主匹配与项目匹配共用）
+fn build_session_from_row(
+    conn: &Connection,
+    session_id: &str,
+    directory: &str,
+    title: Option<&str>,
+    project_name_override: Option<&str>,
+    time_updated: i64,
+    process: &AgentProcess,
+) -> Option<Session> {
+    let (last_role, last_message) = get_last_message_info(conn, session_id);
+    let last_msg_time = get_last_message_time(conn, session_id);
+
     let status = determine_opencode_status(
         process.cpu_usage,
         last_role.as_deref(),
@@ -224,11 +215,17 @@ fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> O
     );
     let last_activity_at = ms_to_iso(time_updated);
 
-    let project_name = directory
-        .split('/')
-        .rfind(|s| !s.is_empty())
-        .unwrap_or("Unknown")
-        .to_string();
+    let title = title.unwrap_or("").to_string();
+    let project_name = project_name_override
+        .map(String::from)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| {
+            directory
+                .rsplit(['/', '\\'])
+                .find(|s| !s.is_empty())
+                .unwrap_or("Unknown")
+                .to_string()
+        });
     let display_message = last_message.or_else(|| {
         if !title.is_empty() {
             Some(title.clone())
@@ -238,10 +235,10 @@ fn get_global_session(conn: &Connection, cwd: &str, process: &AgentProcess) -> O
     });
 
     Some(Session {
-        id: session_id,
+        id: session_id.to_string(),
         agent_type: AgentType::OpenCode,
         project_name,
-        project_path: directory,
+        project_path: directory.to_string(),
         git_branch: None,
         github_url: None,
         status,
