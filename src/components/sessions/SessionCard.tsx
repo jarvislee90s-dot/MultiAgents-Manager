@@ -103,7 +103,7 @@ export function SessionCard({ session }: { session: Session }) {
             <span className="truncate text-sm font-medium">{session.projectName}</span>
             {(session.title || session.id) && (
               <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
-                {session.title || session.id.slice(0, 12)}
+                {session.title || session.id.slice(0, 8)}
               </span>
             )}
             {session.gitBranch && (
