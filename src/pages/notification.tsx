@@ -54,7 +54,7 @@ export default function NotificationPage() {
 
   return (
     <div
-      className="flex h-screen w-screen cursor-pointer items-center gap-3 rounded-lg border bg-card p-3 shadow-2xl"
+      className="bg-card flex h-screen w-screen cursor-pointer items-center gap-3 rounded-lg border p-3 shadow-2xl"
       onMouseEnter={() => timerRef.current && window.clearTimeout(timerRef.current)}
       onMouseLeave={() => {
         if (timerRef.current) window.clearTimeout(timerRef.current);
@@ -62,10 +62,7 @@ export default function NotificationPage() {
       }}
       onClick={jump}
     >
-      <span
-        className="h-3 w-3 shrink-0 rounded-full"
-        style={{ background: payload.statusColor }}
-      />
+      <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: payload.statusColor }} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs font-semibold">
           {payload.agentType} · {payload.projectName} · {payload.statusLabel}

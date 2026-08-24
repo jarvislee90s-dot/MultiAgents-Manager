@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 interface Props {
   children: ReactNode;
@@ -6,6 +7,23 @@ interface Props {
 interface State {
   hasError: boolean;
 }
+
+// 类组件内使用翻译：错误视图抽为函数组件（useTranslation 仅限函数组件）
+function PageErrorFallback({ onRetry }: { onRetry: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
+      <p className="text-lg font-medium">{t("errorBoundary.pageCrashed")}</p>
+      <div className="flex gap-2">
+        <Button onClick={onRetry}>{t("common.retry")}</Button>
+        <Button variant="outline" onClick={() => window.location.reload()}>
+          {t("common.refreshPage")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export class PageErrorBoundary extends Component<Props, State> {
   state: State = { hasError: false };
   static getDerivedStateFromError(): State {
@@ -13,17 +31,7 @@ export class PageErrorBoundary extends Component<Props, State> {
   }
   render() {
     if (this.state.hasError) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-          <p className="text-lg font-medium">出错了</p>
-          <div className="flex gap-2">
-            <Button onClick={() => this.setState({ hasError: false })}>重试</Button>
-            <Button variant="outline" onClick={() => window.location.reload()}>
-              刷新页面
-            </Button>
-          </div>
-        </div>
-      );
+      return <PageErrorFallback onRetry={() => this.setState({ hasError: false })} />;
     }
     return this.props.children;
   }

@@ -79,17 +79,17 @@ export default function HomePage() {
           <div className="flex items-center gap-2">
             <Activity className="text-muted-foreground h-4 w-4" />
             <span className="text-sm font-semibold">{totalCount}</span>
-            <span className="text-muted-foreground text-xs">会话</span>
+            <span className="text-muted-foreground text-xs">{t("home.sessions")}</span>
           </div>
           {waitingCount > 0 && (
             <div className="flex items-center gap-2">
               <AlertCircle className="h-4 w-4 text-red-500" />
               <span className="text-sm font-semibold text-red-500">{waitingCount}</span>
-              <span className="text-muted-foreground text-xs">待处理</span>
+              <span className="text-muted-foreground text-xs">{t("home.waiting")}</span>
             </div>
           )}
         </div>
-        {loading && <span className="text-muted-foreground text-xs">加载中…</span>}
+        {loading && <span className="text-muted-foreground text-xs">{t("home.loading")}</span>}
       </div>
 
       {/* 标签栏 */}
@@ -103,7 +103,7 @@ export default function HomePage() {
           }`}
         >
           <Monitor className="h-3.5 w-3.5" />
-          看板
+          {t("home.tabDashboard")}
         </button>
         <button
           onClick={() => setActiveTab("extensions")}
@@ -114,7 +114,7 @@ export default function HomePage() {
           }`}
         >
           <Package className="h-3.5 w-3.5" />
-          资源
+          {t("home.tabResources")}
         </button>
       </div>
 

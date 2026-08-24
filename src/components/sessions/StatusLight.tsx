@@ -1,6 +1,8 @@
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { SessionStatus } from "@/types/session";
 
+// label 为 i18n 键，渲染时经 t() 翻译
 const STATUS_CONFIG: Record<
   SessionStatus,
   { color: string; glow: string; label: string; animation: string }
@@ -9,39 +11,39 @@ const STATUS_CONFIG: Record<
   waiting: {
     color: "bg-red-500",
     glow: "shadow-[0_0_8px_2px_rgba(239,68,68,0.6)]",
-    label: "待处理",
+    label: "status.waiting",
     animation: "animate-pulse",
   },
   // 黄灯 = 正在运行
   processing: {
     color: "bg-yellow-500",
     glow: "shadow-[0_0_8px_2px_rgba(234,179,8,0.5)]",
-    label: "运行中",
+    label: "status.running",
     animation: "",
   },
   thinking: {
     color: "bg-yellow-500",
     glow: "shadow-[0_0_8px_2px_rgba(234,179,8,0.5)]",
-    label: "运行中",
+    label: "status.running",
     animation: "",
   },
   compacting: {
     color: "bg-yellow-500",
     glow: "shadow-[0_0_8px_2px_rgba(234,179,8,0.5)]",
-    label: "运行中",
+    label: "status.running",
     animation: "",
   },
   // 绿灯 = 已完成/无交互
   idle: {
     color: "bg-green-500",
     glow: "",
-    label: "已完成",
+    label: "status.done",
     animation: "",
   },
   finished: {
     color: "bg-green-500",
     glow: "",
-    label: "已完成",
+    label: "status.done",
     animation: "",
   },
 };
@@ -53,6 +55,7 @@ export function StatusLight({
   status: SessionStatus;
   size?: "sm" | "md";
 }) {
+  const { t } = useTranslation();
   const config = STATUS_CONFIG[status];
   const sizeClass = size === "sm" ? "h-2 w-2" : "h-3 w-3";
 
@@ -68,7 +71,7 @@ export function StatusLight({
         )}
       />
       {size === "md" && (
-        <span className="text-muted-foreground text-xs font-medium">{config.label}</span>
+        <span className="text-muted-foreground text-xs font-medium">{t(config.label)}</span>
       )}
     </div>
   );

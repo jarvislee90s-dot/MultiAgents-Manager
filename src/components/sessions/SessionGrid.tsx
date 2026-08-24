@@ -1,17 +1,17 @@
+import { useTranslation } from "react-i18next";
 import { SessionCard } from "@/components/sessions/SessionCard";
 import type { Session } from "@/types/session";
 import { Monitor } from "lucide-react";
 
 export function SessionGrid({ sessions }: { sessions: Session[] }) {
+  const { t } = useTranslation();
   if (sessions.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 py-20 text-center">
         <Monitor className="text-muted-foreground/40 h-12 w-12" />
         <div>
-          <p className="text-muted-foreground text-sm">暂无活跃会话</p>
-          <p className="text-muted-foreground/60 mt-1 text-xs">
-            在终端中运行 Claude Code、Codex CLI 或 OpenCode 即可在此监控
-          </p>
+          <p className="text-muted-foreground text-sm">{t("sessions.empty")}</p>
+          <p className="text-muted-foreground/60 mt-1 text-xs">{t("sessions.emptyHint")}</p>
         </div>
       </div>
     );

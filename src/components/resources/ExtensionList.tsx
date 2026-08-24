@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Scan, LayoutGrid, List } from "lucide-react";
@@ -9,6 +10,7 @@ import { ImportDialog } from "./ImportDialog";
 import { PresetList } from "../presets/PresetList";
 
 export function ExtensionList() {
+  const { t } = useTranslation();
   const [view, setView] = useState<"byKind" | "byTool">("byKind");
   const [extensions, setExtensions] = useState<ExtensionWithAssignments[]>([]);
   const [showImport, setShowImport] = useState(false);
@@ -38,7 +40,7 @@ export function ExtensionList() {
             onClick={() => setView("byKind")}
           >
             <List className="mr-1 h-3 w-3" />
-            按资源
+            {t("resources.byKind")}
           </Button>
           <Button
             size="sm"
@@ -47,7 +49,7 @@ export function ExtensionList() {
             onClick={() => setView("byTool")}
           >
             <LayoutGrid className="mr-1 h-3 w-3" />
-            按工具
+            {t("resources.byTool")}
           </Button>
         </div>
         <Button
@@ -57,7 +59,7 @@ export function ExtensionList() {
           onClick={() => setShowImport(true)}
         >
           <Scan className="mr-1 h-3 w-3" />
-          扫描原生资源
+          {t("resources.scanNative")}
         </Button>
       </div>
 

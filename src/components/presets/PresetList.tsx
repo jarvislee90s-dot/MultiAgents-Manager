@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ const TOOLS = [
 ];
 
 export function PresetList({ extensions }: { extensions: ExtensionWithAssignments[] }) {
+  const { t } = useTranslation();
   const [presets, setPresets] = useState<PresetRecord[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
@@ -44,11 +46,11 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
 
   const handleCreate = async () => {
     if (!name) {
-      toast.error("请填写预设组名称");
+      toast.error(t("presets.nameRequired"));
       return;
     }
     if (selected.size === 0) {
-      toast.error("请至少选择一个资源（skill、MCP 或插件）");
+      toast.error(t("presets.selectAtLeastOne"));
       return;
     }
     const items = Array.from(selected).map((id) => {
@@ -57,13 +59,13 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
     });
     try {
       await invoke("create_preset", { name, items });
-      toast.success(`预设组 "${name}" 创建成功`);
+      toast.success(t("presets.created", { name }));
       setName("");
       setSelected(new Set());
       setShowCreate(false);
       load();
     } catch (e) {
-      toast.error(`创建失败: ${e}`);
+      toast.error(t("common.createFailed", { error: e }));
     }
   };
 
@@ -85,15 +87,27 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
         toolId: compatibilityDialog.toolId,
       });
       if (result.failures.length > 0) {
-        toast.warning(`部分成功: ${result.successCount} 项成功, ${result.failures.length} 项失败`);
+        toast.warning(
+          t("presets.partialSuccess", { n: result.successCount, failed: result.failures.length })
+        );
       } else if (result.conflicts.length > 0) {
-        toast.info(`已应用 ${result.successCount} 项, ${result.conflicts.length} 项冲突跳过`);
+        toast.info(
+          t("presets.appliedWithConflicts", {
+            n: result.successCount,
+            skipped: result.conflicts.length,
+          })
+        );
       } else {
-        toast.success(`"${compatibilityDialog.presetName}" 已应用到 ${compatibilityDialog.toolId}`);
+        toast.success(
+          t("presets.appliedTo", {
+            name: compatibilityDialog.presetName,
+            tool: compatibilityDialog.toolId,
+          })
+        );
       }
       load();
     } catch (e) {
-      toast.error(`应用失败: ${e}`);
+      toast.error(t("presets.applyFailed", { error: e }));
     }
 
     setCompatibilityDialog(null);
@@ -102,19 +116,19 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
   const handleDeactivate = async (presetId: string, presetName: string, toolId: string) => {
     try {
       await invoke("deactivate_preset", { presetId, toolId });
-      toast.success(`"${presetName}" 已从 ${toolId} 取消`);
+      toast.success(t("presets.deactivatedFrom", { name: presetName, tool: toolId }));
     } catch (e) {
-      toast.error(`取消失败: ${e}`);
+      toast.error(t("presets.deactivateFailed", { error: e }));
     }
   };
 
   const handleDelete = async (presetId: string) => {
     try {
       await invoke("delete_preset", { presetId });
-      toast.success("已删除");
+      toast.success(t("common.deleted"));
       load();
     } catch (e) {
-      toast.error(`删除失败: ${e}`);
+      toast.error(t("common.deleteFailed", { error: e }));
     }
   };
 
@@ -130,18 +144,18 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
       <div className="flex items-center justify-between">
         <h3 className="flex items-center gap-2 text-sm font-semibold">
           <Layers className="h-4 w-4" />
-          预设组 ({presets.length})
+          {t("presets.titleCount", { n: presets.length })}
         </h3>
         <Button size="sm" variant="outline" onClick={() => setShowCreate(!showCreate)}>
           <Plus className="mr-1.5 h-3.5 w-3.5" />
-          创建
+          {t("common.create")}
         </Button>
       </div>
 
       {showCreate && (
         <Card className="space-y-2 p-3">
           <Input
-            placeholder="预设组名称（如：前端开发）"
+            placeholder={t("presets.namePlaceholder")}
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
           />
@@ -159,15 +173,13 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
             ))}
           </div>
           <Button size="sm" onClick={handleCreate}>
-            确认创建
+            {t("presets.confirmCreate")}
           </Button>
         </Card>
       )}
 
       {presets.length === 0 ? (
-        <p className="text-muted-foreground py-2 text-xs">
-          暂无预设组。创建一个将多个 skill/MCP 打包为组合。
-        </p>
+        <p className="text-muted-foreground py-2 text-xs">{t("presets.empty")}</p>
       ) : (
         <div className="space-y-1">
           {presets.map((preset) => (
@@ -249,6 +261,7 @@ function SubAgentPresetActions({
   presetName: string;
   toolId: string;
 }) {
+  const { t } = useTranslation();
   const [subAgents, setSubAgents] = useState<string[]>([]);
   const [expanded, setExpanded] = useState(false);
 
@@ -269,21 +282,31 @@ function SubAgentPresetActions({
         subAgentId,
       });
       if (result.failures.length > 0) {
-        toast.warning(`部分成功: ${result.successCount} 项成功, ${result.failures.length} 项失败`);
+        toast.warning(
+          t("presets.partialSuccess", { n: result.successCount, failed: result.failures.length })
+        );
       } else {
-        toast.success(`"${presetName}" 已应用到 ${toolId}:${subAgentId}`);
+        toast.success(
+          t("presets.appliedToSubagent", { name: presetName, tool: toolId, subAgent: subAgentId })
+        );
       }
     } catch (e) {
-      toast.error(`应用失败: ${e}`);
+      toast.error(t("presets.applyFailed", { error: e }));
     }
   };
 
   const handleDeactivateFromSubagent = async (subAgentId: string) => {
     try {
       await invoke("deactivate_preset_from_subagent", { presetId, toolId, subAgentId });
-      toast.success(`"${presetName}" 已从 ${toolId}:${subAgentId} 取消`);
+      toast.success(
+        t("presets.deactivatedFromSubagent", {
+          name: presetName,
+          tool: toolId,
+          subAgent: subAgentId,
+        })
+      );
     } catch (e) {
-      toast.error(`取消失败: ${e}`);
+      toast.error(t("presets.deactivateFailed", { error: e }));
     }
   };
 
@@ -298,7 +321,7 @@ function SubAgentPresetActions({
         }}
         className="text-muted-foreground hover:text-foreground text-[10px]"
       >
-        {expanded ? "收起子 Agent" : "子 Agent ▼"}
+        {expanded ? t("presets.collapseSubAgents") : t("presets.expandSubAgents")}
       </button>
       {expanded && (
         <div className="ml-2 space-y-0.5 border-l pl-2">
@@ -312,7 +335,7 @@ function SubAgentPresetActions({
                 onClick={() => handleApplyToSubagent(sa)}
               >
                 <Play className="mr-0.5 h-2 w-2" />
-                应用
+                {t("presets.apply")}
               </Button>
               <Button
                 size="sm"

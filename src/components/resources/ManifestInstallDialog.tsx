@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -18,6 +19,7 @@ interface Props {
 }
 
 export function ManifestInstallDialog({ path, open, onOpenChange, onInstalled }: Props) {
+  const { t } = useTranslation();
   const [result, setResult] = useState<ValidateResult | null>(null);
   const [installing, setInstalling] = useState(false);
 
@@ -54,7 +56,7 @@ export function ManifestInstallDialog({ path, open, onOpenChange, onInstalled }:
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>安装确认</DialogTitle>
+          <DialogTitle>{t("manifest.installConfirm")}</DialogTitle>
         </DialogHeader>
         {result?.valid && manifest ? (
           <div className="space-y-4">
@@ -62,11 +64,13 @@ export function ManifestInstallDialog({ path, open, onOpenChange, onInstalled }:
               <p className="font-medium">
                 {manifest.name} v{manifest.version}
               </p>
-              <p className="text-muted-foreground text-sm">类型: {manifest.kind}</p>
+              <p className="text-muted-foreground text-sm">
+                {t("manifest.kindLabel", { kind: manifest.kind })}
+              </p>
             </div>
             {manifest.permissions && manifest.permissions.length > 0 && (
               <div>
-                <p className="mb-1 text-sm font-medium">权限声明:</p>
+                <p className="mb-1 text-sm font-medium">{t("manifest.permissions")}</p>
                 <div className="flex flex-wrap gap-1">
                   {manifest.permissions.map((p) => (
                     <PermissionBadge key={p} permission={p} />
@@ -76,7 +80,7 @@ export function ManifestInstallDialog({ path, open, onOpenChange, onInstalled }:
             )}
             {manifest.compatibility && (
               <div>
-                <p className="mb-1 text-sm font-medium">兼容工具:</p>
+                <p className="mb-1 text-sm font-medium">{t("manifest.compatibleTools")}</p>
                 <p className="text-muted-foreground text-sm">
                   {manifest.compatibility.map((c) => c.tool).join(", ")}
                 </p>
@@ -85,14 +89,14 @@ export function ManifestInstallDialog({ path, open, onOpenChange, onInstalled }:
             {hasHighRisk && (
               <div className="rounded border border-red-300 bg-red-50 p-3 dark:border-red-700 dark:bg-red-950">
                 <p className="text-sm text-red-700 dark:text-red-300">
-                  此资源声明了高风险权限，请确认你信任此资源的来源。
+                  {t("manifest.highRiskWarning")}
                 </p>
               </div>
             )}
           </div>
         ) : (
           <div className="space-y-2">
-            <p className="text-sm text-red-600">Manifest 校验失败:</p>
+            <p className="text-sm text-red-600">{t("manifest.validationFailed")}</p>
             {result?.errors?.map((e, i) => (
               <p key={i} className="text-muted-foreground text-sm">
                 {e.field}: {e.message} ({e.code})
@@ -102,11 +106,11 @@ export function ManifestInstallDialog({ path, open, onOpenChange, onInstalled }:
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            取消
+            {t("common.cancel")}
           </Button>
           {result?.valid && (
             <Button onClick={handleInstall} disabled={installing}>
-              {installing ? "安装中..." : "确认安装"}
+              {installing ? t("manifest.installing") : t("manifest.confirmInstall")}
             </Button>
           )}
         </DialogFooter>

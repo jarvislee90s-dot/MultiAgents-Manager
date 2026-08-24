@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -22,6 +23,7 @@ export function CompatibilityDialog({
   onClose,
   onConfirm,
 }: Props) {
+  const { t } = useTranslation();
   const [report, setReport] = useState<CompatibilityReport | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -50,11 +52,13 @@ export function CompatibilityDialog({
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-sm">应用预设组到 {toolName}</DialogTitle>
+          <DialogTitle className="text-sm">{t("presets.applyTo", { tool: toolName })}</DialogTitle>
         </DialogHeader>
 
         {loading ? (
-          <div className="text-muted-foreground py-4 text-center text-xs">检查兼容性...</div>
+          <div className="text-muted-foreground py-4 text-center text-xs">
+            {t("common.checking")}
+          </div>
         ) : report ? (
           <div className="space-y-3">
             {/* Compatible resources */}
@@ -62,7 +66,7 @@ export function CompatibilityDialog({
               <div>
                 <h4 className="mb-1 text-xs font-medium text-green-600">
                   <CheckCircle className="mr-1 inline h-3 w-3" />
-                  兼容的资源 ({report.compatible.length})
+                  {t("presets.compatibleCount", { n: report.compatible.length })}
                 </h4>
                 <div className="space-y-1">
                   {report.compatible.map((item) => (
@@ -82,7 +86,7 @@ export function CompatibilityDialog({
               <div>
                 <h4 className="mb-1 text-xs font-medium text-orange-600">
                   <XCircle className="mr-1 inline h-3 w-3" />
-                  不兼容的资源 ({report.incompatible.length})
+                  {t("presets.incompatibleCount", { n: report.incompatible.length })}
                 </h4>
                 <div className="space-y-1">
                   {report.incompatible.map((item) => (
@@ -100,10 +104,10 @@ export function CompatibilityDialog({
 
             <div className="mt-4 flex justify-end gap-2">
               <Button size="sm" variant="outline" onClick={onClose}>
-                取消
+                {t("common.cancel")}
               </Button>
               <Button size="sm" onClick={onConfirm} disabled={report.compatible.length === 0}>
-                确认应用 ({report.compatible.length} 项)
+                {t("presets.confirmApply", { n: report.compatible.length })}
               </Button>
             </div>
           </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ interface Props {
 }
 
 export function ImportDialog({ open, onClose, onImported }: Props) {
+  const { t } = useTranslation();
   const [resources, setResources] = useState<Record<string, NativeExtension[]>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
@@ -76,7 +78,7 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     }
 
     if (items.length === 0) {
-      toast.error("请选择至少一个资源");
+      toast.error(t("resources.selectAtLeastOne"));
       return;
     }
 
@@ -86,12 +88,14 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
         { items }
       );
       toast.success(
-        `成功导入 ${stats.imported} 个资源${stats.skippedDup > 0 ? `，跳过 ${stats.skippedDup} 个` : ""}`
+        stats.skippedDup > 0
+          ? t("resources.importedWithSkipped", { n: stats.imported, skipped: stats.skippedDup })
+          : t("resources.importedCount", { n: stats.imported })
       );
       onImported();
       onClose();
     } catch (e) {
-      toast.error(`导入失败: ${e}`);
+      toast.error(t("resources.importFailed", { error: e }));
     }
   };
 
@@ -102,22 +106,26 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-h-[80vh] max-w-lg overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="text-sm">导入原生资源</DialogTitle>
+          <DialogTitle className="text-sm">{t("resources.importDialogTitle")}</DialogTitle>
         </DialogHeader>
 
         <div className="mb-2 flex gap-2">
           <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={selectAll}>
-            全选
+            {t("resources.selectAll")}
           </Button>
           <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={selectNone}>
-            全不选
+            {t("resources.selectNone")}
           </Button>
         </div>
 
         {loading ? (
-          <div className="text-muted-foreground py-4 text-center text-xs">扫描中...</div>
+          <div className="text-muted-foreground py-4 text-center text-xs">
+            {t("common.scanning")}
+          </div>
         ) : totalCount === 0 ? (
-          <div className="text-muted-foreground py-4 text-center text-xs">未发现原生资源</div>
+          <div className="text-muted-foreground py-4 text-center text-xs">
+            {t("resources.noNativeFound")}
+          </div>
         ) : (
           <div className="space-y-3">
             {TOOLS.map((tool) => {
@@ -154,10 +162,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
 
         <div className="mt-4 flex justify-end gap-2">
           <Button size="sm" variant="outline" onClick={onClose}>
-            取消
+            {t("common.cancel")}
           </Button>
           <Button size="sm" onClick={handleImport} disabled={selectedCount === 0}>
-            导入选中 ({selectedCount})
+            {t("resources.importSelected", { n: selectedCount })}
           </Button>
         </div>
       </DialogContent>

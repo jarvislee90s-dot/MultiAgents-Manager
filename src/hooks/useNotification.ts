@@ -143,8 +143,7 @@ export function useNotification() {
           const toolLabel = AGENT_LABELS[session.agentType] ?? session.agentType;
           const statusLabel = STATUS_LABELS[session.status] ?? session.status;
           const formTag = session.form === "app" ? " (APP)" : "";
-          const useSystemToast =
-            localStorage.getItem("mam.useSystemNotification") === "1";
+          const useSystemToast = localStorage.getItem("mam.useSystemNotification") === "1";
           if (useSystemToast) {
             // 系统通知路径（需要通知权限）
             if (permissionGranted.current) {

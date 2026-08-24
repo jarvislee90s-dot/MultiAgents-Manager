@@ -83,63 +83,63 @@ export function SessionCard({ session }: { session: Session }) {
         onClick={handleClick}
         title={session.jumpSupported ? t("sessions.jumpToTerminal") : t("sessions.jumpUnsupported")}
       >
-      {/* 顶部：工具标签 + 项目名 + 状态灯 */}
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold",
-              badge.className
-            )}
-          >
-            <Icon className="h-3 w-3" />
-            {badge.label}
-            {session.form === "app" && (
-              <span className="text-[9px] opacity-60" title={t("sessions.appBadge")}>
-                APP
+        {/* 顶部：工具标签 + 项目名 + 状态灯 */}
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold",
+                badge.className
+              )}
+            >
+              <Icon className="h-3 w-3" />
+              {badge.label}
+              {session.form === "app" && (
+                <span className="text-[9px] opacity-60" title={t("sessions.appBadge")}>
+                  APP
+                </span>
+              )}
+            </span>
+            <span className="truncate text-sm font-medium">{session.projectName}</span>
+            {(session.title || session.id) && (
+              <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
+                {session.title || session.id.slice(0, 12)}
               </span>
             )}
+            {session.gitBranch && (
+              <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
+                {session.gitBranch}
+              </span>
+            )}
+          </div>
+          <StatusLight status={session.status} size="sm" />
+        </div>
+
+        {/* 中间：最后消息预览 */}
+        <p className="text-muted-foreground mb-2 line-clamp-2 min-h-[2.5rem] text-xs">
+          {session.lastMessage || t("sessions.noMessage")}
+        </p>
+
+        {/* 底部：CPU + PID + 运行时长 */}
+        <div className="text-muted-foreground flex items-center gap-3 text-[10px]">
+          <span className="flex items-center gap-1">
+            <Cpu className="h-3 w-3" />
+            {session.cpuUsage.toFixed(1)}%
           </span>
-          <span className="truncate text-sm font-medium">{session.projectName}</span>
-          {(session.title || session.id) && (
-            <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
-              {session.title || session.id.slice(0, 12)}
+          <span className="flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            {formatRuntime(session.lastActivityAt, t)}
+          </span>
+          {session.activeSubagentCount > 0 && (
+            <span className="flex items-center gap-1">
+              <Bot className="h-3 w-3" />
+              {t("sessions.subagents", { n: session.activeSubagentCount })}
             </span>
           )}
-          {session.gitBranch && (
-            <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
-              {session.gitBranch}
-            </span>
+          {session.jumpSupported && (
+            <ChevronRight className="ml-auto h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
           )}
         </div>
-        <StatusLight status={session.status} size="sm" />
-      </div>
-
-      {/* 中间：最后消息预览 */}
-      <p className="text-muted-foreground mb-2 line-clamp-2 min-h-[2.5rem] text-xs">
-        {session.lastMessage || t("sessions.noMessage")}
-      </p>
-
-      {/* 底部：CPU + PID + 运行时长 */}
-      <div className="text-muted-foreground flex items-center gap-3 text-[10px]">
-        <span className="flex items-center gap-1">
-          <Cpu className="h-3 w-3" />
-          {session.cpuUsage.toFixed(1)}%
-        </span>
-        <span className="flex items-center gap-1">
-          <Clock className="h-3 w-3" />
-          {formatRuntime(session.lastActivityAt, t)}
-        </span>
-        {session.activeSubagentCount > 0 && (
-          <span className="flex items-center gap-1">
-            <Bot className="h-3 w-3" />
-            {session.activeSubagentCount} 子Agent
-          </span>
-        )}
-        {session.jumpSupported && (
-          <ChevronRight className="ml-auto h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
-        )}
-      </div>
       </Card>
       {/* 窗口选择器：跳转歧义时由用户点选目标窗口 */}
       {pendingWindows && (
@@ -148,7 +148,7 @@ export function SessionCard({ session }: { session: Session }) {
           onClick={() => setPendingWindows(null)}
         >
           <div
-            className="w-96 rounded-lg border bg-card p-4 shadow-xl"
+            className="bg-card w-96 rounded-lg border p-4 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <p className="mb-3 text-sm font-medium">{t("sessions.pickWindow")}</p>
@@ -156,7 +156,7 @@ export function SessionCard({ session }: { session: Session }) {
               {pendingWindows.map((w) => (
                 <button
                   key={w.hwnd}
-                  className="truncate rounded border px-3 py-2 text-left text-xs hover:bg-accent"
+                  className="hover:bg-accent truncate rounded border px-3 py-2 text-left text-xs"
                   onClick={async () => {
                     setPendingWindows(null);
                     try {
@@ -167,7 +167,7 @@ export function SessionCard({ session }: { session: Session }) {
                   }}
                   title={w.title}
                 >
-                  {w.title || "(无标题)"} — {w.process}
+                  {w.title || t("sessions.untitledWindow")} — {w.process}
                 </button>
               ))}
             </div>

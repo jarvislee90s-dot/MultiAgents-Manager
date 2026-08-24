@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ function formatSkillName(name: string): string {
 }
 
 export function ResourceByToolView() {
+  const { t } = useTranslation();
   const [toolResources, setToolResources] = useState<Record<string, ToolResources>>({});
   const [scanning, setScanning] = useState<Record<string, boolean>>({});
 
@@ -44,14 +46,17 @@ export function ResourceByToolView() {
       const native = await invoke<NativeExtension[]>("scan_native_resources", { toolId });
       if (native.length > 0) {
         toast.info(
-          `${TOOLS.find((t) => t.id === toolId)?.label} 发现 ${native.length} 个原生资源，点击导入`
+          t("resources.foundNative", {
+            tool: TOOLS.find((tool) => tool.id === toolId)?.label,
+            n: native.length,
+          })
         );
       } else {
-        toast.info("未发现新的原生资源");
+        toast.info(t("resources.noNewNative"));
       }
       await loadToolResources(toolId);
     } catch (e) {
-      toast.error(`扫描失败: ${e}`);
+      toast.error(t("common.scanFailed", { error: e }));
     } finally {
       setScanning((prev) => ({ ...prev, [toolId]: false }));
     }
@@ -63,14 +68,14 @@ export function ResourceByToolView() {
         items: [[item.sourcePath, item.name, toolId]],
       });
       if (result.imported > 0) {
-        toast.success(`"${item.name}" 导入成功`);
+        toast.success(t("resources.importSuccess", { name: item.name }));
         await loadToolResources(toolId);
         await loadDuplicates(toolId);
       } else {
-        toast.info(`"${item.name}" 已存在`);
+        toast.info(t("resources.alreadyExists", { name: item.name }));
       }
     } catch (e) {
-      toast.error(`导入失败: ${e}`);
+      toast.error(t("resources.importFailed", { error: e }));
     }
   };
 
@@ -95,11 +100,11 @@ export function ResourceByToolView() {
   const handleCleanupSingle = async (toolId: string, name: string) => {
     try {
       await cleanupDuplicateSkills(toolId, [name]);
-      toast.success(`"${name}" 已清理`);
+      toast.success(t("resources.cleanedOne", { name }));
       await loadDuplicates(toolId);
       await loadToolResources(toolId);
     } catch (e) {
-      toast.error(`清理失败: ${e}`);
+      toast.error(t("resources.cleanupFailed", { error: e }));
     }
   };
 
@@ -108,11 +113,11 @@ export function ResourceByToolView() {
     if (dups.length === 0) return;
     try {
       await cleanupDuplicateSkills(toolId, dups);
-      toast.success(`已清理 ${dups.length} 个重复 skill`);
+      toast.success(t("resources.cleanedCount", { n: dups.length }));
       await loadDuplicates(toolId);
       await loadToolResources(toolId);
     } catch (e) {
-      toast.error(`清理失败: ${e}`);
+      toast.error(t("resources.cleanupFailed", { error: e }));
     }
   };
 
@@ -133,7 +138,7 @@ export function ResourceByToolView() {
               disabled={scanning[tool.id]}
             >
               <Scan className={`mr-1 h-3 w-3 ${scanning[tool.id] ? "animate-spin" : ""}`} />
-              扫描
+              {t("common.scan")}
             </Button>
           </div>
 
@@ -148,7 +153,7 @@ export function ResourceByToolView() {
             <div className="mt-2 rounded border border-orange-500/30 bg-orange-500/5 p-2">
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-xs font-medium text-orange-600">
-                  ⚠ {duplicates[tool.id]!.length} 个重复 skill（SSOT 和本地同时存在）
+                  {t("resources.duplicatesWarning", { n: duplicates[tool.id]!.length })}
                 </span>
                 <Button
                   size="sm"
@@ -156,7 +161,7 @@ export function ResourceByToolView() {
                   className="h-5 px-1 text-[10px] text-orange-600"
                   onClick={() => handleCleanupAll(tool.id)}
                 >
-                  全部清理
+                  {t("common.cleanupAll")}
                 </Button>
               </div>
               <div className="space-y-0.5">
@@ -169,7 +174,7 @@ export function ResourceByToolView() {
                       className="h-5 px-1 text-[10px]"
                       onClick={() => handleCleanupSingle(tool.id, name)}
                     >
-                      清理
+                      {t("common.cleanup")}
                     </Button>
                   </div>
                 ))}
@@ -191,8 +196,9 @@ function ToolResourceList({
   resources?: ToolResources;
   onImport: (toolId: string, item: NativeExtension) => void;
 }) {
+  const { t } = useTranslation();
   if (!resources) {
-    return <div className="text-muted-foreground py-2 text-xs">加载中…</div>;
+    return <div className="text-muted-foreground py-2 text-xs">{t("common.loading")}</div>;
   }
 
   const globalSkills = resources.global.filter((e) => e.kind === "skill");
@@ -214,7 +220,8 @@ function ToolResourceList({
               className="bg-accent/50 flex items-center justify-between rounded px-2 py-1 text-xs"
             >
               <span>
-                {formatSkillName(s.name)} <span className="text-green-600">✓ 全局仓库</span>
+                {formatSkillName(s.name)}{" "}
+                <span className="text-green-600">{t("resources.inRepo")}</span>
               </span>
             </div>
           ))}
@@ -224,7 +231,8 @@ function ToolResourceList({
               className="bg-muted flex items-center justify-between rounded px-2 py-1 text-xs"
             >
               <span>
-                {formatSkillName(s.name)} <span className="text-orange-500">⚠ 原生</span>
+                {formatSkillName(s.name)}{" "}
+                <span className="text-orange-500">{t("resources.nativeTag")}</span>
               </span>
               <Button
                 size="sm"
@@ -233,7 +241,7 @@ function ToolResourceList({
                 onClick={() => onImport(toolId, s)}
               >
                 <Import className="h-3 w-3" />
-                导入
+                {t("common.import")}
               </Button>
             </div>
           ))}
@@ -248,7 +256,7 @@ function ToolResourceList({
         <div className="space-y-1">
           {globalMcps.length === 0 ? (
             <div className="text-muted-foreground px-2 py-1 text-[11px]">
-              暂无 MCP，前往「MAM 仓库」面板管理
+              {t("resources.noMcpHint")}
             </div>
           ) : (
             globalMcps.map((m) => (
@@ -257,7 +265,7 @@ function ToolResourceList({
                 className="bg-accent/50 flex items-center justify-between rounded px-2 py-1 text-xs"
               >
                 <span>
-                  {m.name} <span className="text-green-600">✓ 全局仓库</span>
+                  {m.name} <span className="text-green-600">{t("resources.inRepo")}</span>
                 </span>
               </div>
             ))
@@ -273,7 +281,7 @@ function ToolResourceList({
         <div className="space-y-1">
           {globalPlugins.length === 0 ? (
             <div className="text-muted-foreground px-2 py-1 text-[11px]">
-              暂无插件，前往「MAM 仓库」面板管理
+              {t("resources.noPluginHint")}
             </div>
           ) : (
             globalPlugins.map((p) => (
@@ -282,7 +290,7 @@ function ToolResourceList({
                 className="bg-accent/50 flex items-center justify-between rounded px-2 py-1 text-xs"
               >
                 <span>
-                  {p.name} <span className="text-green-600">✓ 全局仓库</span>
+                  {p.name} <span className="text-green-600">{t("resources.inRepo")}</span>
                 </span>
               </div>
             ))

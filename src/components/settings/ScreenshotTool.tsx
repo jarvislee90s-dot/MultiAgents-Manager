@@ -1,10 +1,12 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { captureScreenshot, listScreenshots } from "@/lib/screenshot";
 import { Button } from "@/components/ui/button";
 import { Camera, Image } from "lucide-react";
 import { toast } from "sonner";
 
 export function ScreenshotTool() {
+  const { t } = useTranslation();
   const [capturing, setCapturing] = useState(false);
   const [screenshots, setScreenshots] = useState<string[]>([]);
 
@@ -13,15 +15,15 @@ export function ScreenshotTool() {
     try {
       const result = await captureScreenshot();
       if (result.success && result.path) {
-        toast.success(`截图已保存: ${result.path}`);
+        toast.success(t("screenshot.saved", { path: result.path }));
         // 刷新截图列表
         const list = await listScreenshots();
         setScreenshots(list);
       } else {
-        toast.error(`截图失败: ${result.error || "未知错误"}`);
+        toast.error(t("screenshot.failed", { error: result.error || t("common.unknown") }));
       }
     } catch (e) {
-      toast.error(`截图失败: ${e}`);
+      toast.error(t("screenshot.failed", { error: e }));
     } finally {
       setCapturing(false);
     }
@@ -40,7 +42,7 @@ export function ScreenshotTool() {
     <div className="space-y-3 rounded border p-3">
       <h3 className="flex items-center gap-2 text-sm font-semibold">
         <Camera className="h-4 w-4" />
-        截图工具
+        {t("screenshot.title")}
       </h3>
 
       <div className="flex gap-2">
@@ -52,17 +54,17 @@ export function ScreenshotTool() {
           disabled={capturing}
         >
           <Camera className={`mr-1 h-3 w-3 ${capturing ? "animate-spin" : ""}`} />
-          {capturing ? "截图中..." : "截图"}
+          {capturing ? t("screenshot.capturing") : t("screenshot.capture")}
         </Button>
         <Button size="sm" variant="ghost" className="h-7 text-[10px]" onClick={loadScreenshots}>
           <Image className="mr-1 h-3 w-3" />
-          刷新列表
+          {t("screenshot.refreshList")}
         </Button>
       </div>
 
       {screenshots.length > 0 && (
         <div className="space-y-1">
-          <h4 className="text-muted-foreground text-xs font-medium">最近截图</h4>
+          <h4 className="text-muted-foreground text-xs font-medium">{t("screenshot.recent")}</h4>
           <div className="space-y-1">
             {screenshots.slice(0, 5).map((path) => (
               <div key={path} className="flex items-center gap-2 text-xs">

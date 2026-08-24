@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -42,6 +43,7 @@ type PendingDisable = {
 };
 
 export function ResourceByKindView() {
+  const { t } = useTranslation();
   const [resources, setResources] = useState<SsotResources | null>(null);
   const [search, setSearch] = useState("");
   const [pending, setPending] = useState<PendingDisable | null>(null);
@@ -54,7 +56,7 @@ export function ResourceByKindView() {
   }, []);
 
   if (!resources) {
-    return <div className="text-muted-foreground py-4 text-xs">加载中…</div>;
+    return <div className="text-muted-foreground py-4 text-xs">{t("common.loading")}</div>;
   }
 
   const filteredSkills = resources.skills.filter((s) => {
@@ -74,11 +76,11 @@ export function ResourceByKindView() {
         }
       }
       await invoke("toggle_mcp_for_tool", { mcpName: name, toolId, enabled });
-      toast.success(`${name} 已${enabled ? "启用" : "禁用"}`);
+      toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
       const fresh = await listSsotResources();
       setResources(fresh);
     } catch (e) {
-      toast.error(`操作失败: ${e}`);
+      toast.error(t("common.operationFailed", { error: e }));
     }
   };
 
@@ -90,11 +92,11 @@ export function ResourceByKindView() {
   ) => {
     try {
       await invoke("toggle_plugin_for_tool", { pluginName: name, toolId, enabled, kind });
-      toast.success(`${name} 已${enabled ? "启用" : "禁用"}`);
+      toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
       const fresh = await listSsotResources();
       setResources(fresh);
     } catch (e) {
-      toast.error(`操作失败: ${e}`);
+      toast.error(t("common.operationFailed", { error: e }));
     }
   };
 
@@ -104,18 +106,21 @@ export function ResourceByKindView() {
       try {
         await enableSkillForTool(skillName, toolId);
         toast.success(
-          `"${formatSkillName(skillName)}" 已在 ${TOOLS.find((t) => t.id === toolId)?.label} 中启用`
+          t("resources.enabledInTool", {
+            name: formatSkillName(skillName),
+            tool: TOOLS.find((tool) => tool.id === toolId)?.label,
+          })
         );
         const fresh = await listSsotResources();
         setResources(fresh);
       } catch (e) {
-        toast.error(`启用失败: ${e}`);
+        toast.error(t("resources.enableFailed", { error: e }));
       }
     } else {
       // 亮 → 灰：先检查类型，再弹窗
       try {
         const targetType = await checkSkillTargetType(toolId, skillName);
-        const toolLabel = TOOLS.find((t) => t.id === toolId)?.label || toolId;
+        const toolLabel = TOOLS.find((tool) => tool.id === toolId)?.label || toolId;
         setPending({
           skillName,
           toolId,
@@ -125,7 +130,7 @@ export function ResourceByKindView() {
         });
         setDialogOpen(true);
       } catch (e) {
-        toast.error(`检查失败: ${e}`);
+        toast.error(t("resources.checkFailed", { error: e }));
       }
     }
   };
@@ -134,11 +139,13 @@ export function ResourceByKindView() {
     if (!pending) return;
     try {
       await disableSkillForTool(pending.toolId, pending.skillName);
-      toast.success(`"${pending.displayName}" 已在 ${pending.toolLabel} 中移除`);
+      toast.success(
+        t("resources.removedFromTool", { name: pending.displayName, tool: pending.toolLabel })
+      );
       const fresh = await listSsotResources();
       setResources(fresh);
     } catch (e) {
-      toast.error(`移除失败: ${e}`);
+      toast.error(t("resources.removeFailed", { error: e }));
     } finally {
       setDialogOpen(false);
       setPending(null);
@@ -147,7 +154,7 @@ export function ResourceByKindView() {
 
   const handleAddMcp = async () => {
     if (!newMcp.name.trim() || !newMcp.command.trim()) {
-      toast.error("MCP 名称和命令不能为空");
+      toast.error(t("mcp.nameAndCommandRequired"));
       return;
     }
     try {
@@ -160,31 +167,31 @@ export function ResourceByKindView() {
         });
       }
       await saveMcpConfig(newMcp.name.trim(), newMcp.command.trim(), args, env);
-      toast.success(`MCP "${newMcp.name}" 已添加到 SSOT 仓库`);
+      toast.success(t("resources.mcpAddedToRepo", { name: newMcp.name }));
       setMcpDialogOpen(false);
       setNewMcp({ name: "", command: "", args: "", env: "" });
       const fresh = await listSsotResources();
       setResources(fresh);
     } catch (e) {
-      toast.error(`添加 MCP 失败: ${e}`);
+      toast.error(t("resources.addMcpFailed", { error: e }));
     }
   };
 
   return (
     <>
       <div className="bg-card rounded-lg border p-4">
-        <h3 className="mb-3 text-sm font-semibold">MAM 仓库</h3>
+        <h3 className="mb-3 text-sm font-semibold">{t("resources.repoTitle")}</h3>
 
         {/* Skills */}
         <div className="mb-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h4 className="flex items-center gap-2 text-sm font-semibold">
               <Package className="h-4 w-4" />
-              Skill ({filteredSkills.length})
+              {t("resources.skillsCount", { n: filteredSkills.length })}
             </h4>
             <input
               type="text"
-              placeholder="搜索 skill..."
+              placeholder={t("resources.searchPlaceholder")}
               value={search}
               onChange={(e) => setSearch(e.currentTarget.value)}
               className="h-7 w-40 rounded border px-2 text-xs"
@@ -193,7 +200,7 @@ export function ResourceByKindView() {
           {filteredSkills.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
-              暂无 skill。点击"扫描原生资源"导入。
+              {t("resources.noSkillsHint")}
             </div>
           ) : (
             <div className="space-y-1">
@@ -212,7 +219,7 @@ export function ResourceByKindView() {
                           variant={enabled ? "default" : "ghost"}
                           size="sm"
                           className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
-                          title={`${tool.label}: ${enabled ? "已启用" : "未启用"}`}
+                          title={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
                           onClick={() => handleSkillToggle(skill.name, tool.id, enabled)}
                         >
                           <ToolIcon toolId={tool.id} size={14} className="mr-1" />
@@ -231,20 +238,20 @@ export function ResourceByKindView() {
         <div className="mb-4">
           <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
             <Link2 className="h-4 w-4" />
-            MCP 服务器 ({resources.mcp.length})
+            {t("resources.mcpsCount", { n: resources.mcp.length })}
             <Button
               size="sm"
               variant="ghost"
               className="ml-auto h-6 px-2 text-[10px]"
               onClick={() => setMcpDialogOpen(true)}
             >
-              + 添加
+              {t("resources.addWithPlus")}
             </Button>
           </h4>
           {resources.mcp.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
-              暂无 MCP 服务器
+              {t("mcp.empty")}
             </div>
           ) : (
             <div className="space-y-1">
@@ -281,12 +288,12 @@ export function ResourceByKindView() {
         <div>
           <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
             <Plug className="h-4 w-4" />
-            插件 ({resources.plugins.length})
+            {t("resources.pluginsCount", { n: resources.plugins.length })}
           </h4>
           {resources.plugins.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
-              暂无插件
+              {t("resources.noPlugins")}
             </div>
           ) : (
             <div className="space-y-1">
@@ -326,13 +333,14 @@ export function ResourceByKindView() {
           {pending?.targetType === "native" ? (
             <>
               <DialogHeader>
-                <DialogTitle className="text-red-600">⚠️ 删除原生 skill</DialogTitle>
+                <DialogTitle className="text-red-600">
+                  {t("resources.deleteNativeTitle")}
+                </DialogTitle>
                 <DialogDescription className="space-y-2 pt-2 text-sm">
                   <p className="text-red-500">
-                    此操作将删除你手动安装的 <strong>"{pending?.displayName}"</strong>{" "}
-                    目录，文件将移至回收站。
+                    {t("resources.deleteNativeDesc1", { name: pending?.displayName })}
                   </p>
-                  <p>{pending?.toolLabel} 将不再加载此 skill。你可以从回收站恢复。</p>
+                  <p>{t("resources.deleteNativeDesc2", { tool: pending?.toolLabel })}</p>
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter className="gap-2">
@@ -344,20 +352,22 @@ export function ResourceByKindView() {
                     setPending(null);
                   }}
                 >
-                  取消
+                  {t("common.cancel")}
                 </Button>
                 <Button variant="destructive" size="sm" onClick={confirmDisable}>
-                  移至回收站并移除
+                  {t("resources.trashAndRemove")}
                 </Button>
               </DialogFooter>
             </>
           ) : (
             <>
               <DialogHeader>
-                <DialogTitle>移除链接</DialogTitle>
+                <DialogTitle>{t("resources.removeLinkTitle")}</DialogTitle>
                 <DialogDescription className="pt-2 text-sm">
-                  确定要移除 <strong>"{pending?.displayName}"</strong> 在 {pending?.toolLabel}{" "}
-                  中的链接吗？
+                  {t("resources.removeLinkDesc", {
+                    name: pending?.displayName,
+                    tool: pending?.toolLabel,
+                  })}
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter className="gap-2">
@@ -369,10 +379,10 @@ export function ResourceByKindView() {
                     setPending(null);
                   }}
                 >
-                  取消
+                  {t("common.cancel")}
                 </Button>
                 <Button variant="default" size="sm" onClick={confirmDisable}>
-                  移除链接
+                  {t("resources.removeLink")}
                 </Button>
               </DialogFooter>
             </>
@@ -384,14 +394,14 @@ export function ResourceByKindView() {
       <Dialog open={mcpDialogOpen} onOpenChange={setMcpDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>添加 MCP 服务器</DialogTitle>
+            <DialogTitle>{t("mcp.addTitle")}</DialogTitle>
             <DialogDescription className="pt-2 text-xs">
-              配置将保存到 MAM SSOT 仓库，随后可以为各工具启用。
+              {t("resources.addMcpDesc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
             <div>
-              <label className="text-xs font-medium">名称</label>
+              <label className="text-xs font-medium">{t("mcp.nameLabel")}</label>
               <input
                 value={newMcp.name}
                 onChange={(e) => setNewMcp({ ...newMcp, name: e.currentTarget.value })}
@@ -400,7 +410,7 @@ export function ResourceByKindView() {
               />
             </div>
             <div>
-              <label className="text-xs font-medium">命令</label>
+              <label className="text-xs font-medium">{t("mcp.commandLabel")}</label>
               <input
                 value={newMcp.command}
                 onChange={(e) => setNewMcp({ ...newMcp, command: e.currentTarget.value })}
@@ -409,7 +419,7 @@ export function ResourceByKindView() {
               />
             </div>
             <div>
-              <label className="text-xs font-medium">参数（空格分隔）</label>
+              <label className="text-xs font-medium">{t("mcp.argsLabelSpace")}</label>
               <input
                 value={newMcp.args}
                 onChange={(e) => setNewMcp({ ...newMcp, args: e.currentTarget.value })}
@@ -418,7 +428,7 @@ export function ResourceByKindView() {
               />
             </div>
             <div>
-              <label className="text-xs font-medium">环境变量（每行一个 KEY=VALUE）</label>
+              <label className="text-xs font-medium">{t("mcp.envLabel")}</label>
               <textarea
                 value={newMcp.env}
                 onChange={(e) => setNewMcp({ ...newMcp, env: e.currentTarget.value })}
@@ -436,10 +446,10 @@ export function ResourceByKindView() {
                 setNewMcp({ name: "", command: "", args: "", env: "" });
               }}
             >
-              取消
+              {t("common.cancel")}
             </Button>
             <Button size="sm" onClick={handleAddMcp}>
-              添加到仓库
+              {t("resources.addToRepo")}
             </Button>
           </DialogFooter>
         </DialogContent>

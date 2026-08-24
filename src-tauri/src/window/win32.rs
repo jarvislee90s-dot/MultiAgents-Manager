@@ -10,10 +10,7 @@ use std::collections::HashMap;
 
 /// 沿父进程链收集 PID 序列（含起始 PID 自身），保持插入顺序即近→远
 /// 遇到环（重复 PID）或父进程缺失即停止；64 层防御异常深链。父进程查询由闭包注入便于单测
-fn collect_ancestor_pids_with(
-    pid: u32,
-    mut parent_of: impl FnMut(u32) -> Option<u32>,
-) -> Vec<u32> {
+fn collect_ancestor_pids_with(pid: u32, mut parent_of: impl FnMut(u32) -> Option<u32>) -> Vec<u32> {
     let mut chain = Vec::new();
     let mut current = pid;
     for _ in 0..64 {
@@ -42,8 +39,8 @@ fn collect_ancestor_pids(system: &sysinfo::System, pid: u32) -> Vec<u32> {
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, GWL_EXSTYLE,
-    SW_MINIMIZE, SW_RESTORE, WS_EX_TOOLWINDOW,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, GWL_EXSTYLE, SW_MINIMIZE,
+    SW_RESTORE, WS_EX_TOOLWINDOW,
 };
 
 /// 不可作为跳转宿主的系统 shell / 服务进程（其窗口与目标会话无关，

@@ -116,7 +116,11 @@ export default function SettingsPage() {
     const newValue = !notificationsEnabled;
     setNotificationsEnabled(newValue);
     await invoke("set_setting", { key: "notifications_enabled", value: String(newValue) });
-    toast.success(newValue ? "通知已开启" : "通知已关闭");
+    toast.success(
+      newValue
+        ? t("settings.notifications.enabledToast")
+        : t("settings.notifications.disabledToast")
+    );
   };
 
   const menuItems = [
@@ -132,7 +136,7 @@ export default function SettingsPage() {
     },
     {
       id: "notifications" as SettingSection,
-      label: "通知",
+      label: t("settings.notifications.title"),
       icon: Bell,
     },
   ];
@@ -247,15 +251,21 @@ export default function SettingsPage() {
           {activeSection === "notifications" && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">通知设置</h2>
-                <p className="text-muted-foreground text-sm">配置会话状态变更的提醒方式</p>
+                <h2 className="mb-1 text-lg font-semibold">
+                  {t("settings.notifications.heading")}
+                </h2>
+                <p className="text-muted-foreground text-sm">
+                  {t("settings.notifications.description")}
+                </p>
               </div>
               <div className="space-y-0">
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">桌面通知</label>
+                    <label className="text-sm font-medium">
+                      {t("settings.notifications.desktop")}
+                    </label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
-                      会话变为等待或完成时发送系统通知
+                      {t("settings.notifications.desktopDesc")}
                     </p>
                   </div>
                   <Button
@@ -263,7 +273,9 @@ export default function SettingsPage() {
                     size="sm"
                     onClick={toggleNotifications}
                   >
-                    {notificationsEnabled ? "已开启" : "已关闭"}
+                    {notificationsEnabled
+                      ? t("settings.notifications.on")
+                      : t("settings.notifications.off")}
                   </Button>
                 </div>
                 <div className="border-t" />
@@ -282,27 +294,35 @@ export default function SettingsPage() {
                     onClick={toggleUseSystemNotification}
                   >
                     {useSystemNotification
-                      ? t("settings.useSystemNotificationOn")
-                      : t("settings.useSystemNotificationOff")}
+                      ? t("settings.notifications.on")
+                      : t("settings.notifications.off")}
                   </Button>
                 </div>
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">提示音测试</label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">播放等待状态的提示音</p>
+                    <label className="text-sm font-medium">
+                      {t("settings.notifications.soundTest")}
+                    </label>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {t("settings.notifications.soundTestDesc")}
+                    </p>
                   </div>
                   <Button variant="outline" size="sm" onClick={() => playTestSound()}>
                     <Volume2 className="mr-1.5 h-3.5 w-3.5" />
-                    播放
+                    {t("settings.notifications.play")}
                   </Button>
                 </div>
                 <div className="border-t" />
                 <div className="space-y-2 py-2.5">
-                  <label className="text-sm font-medium">提示音频率配置</label>
+                  <label className="text-sm font-medium">
+                    {t("settings.notifications.frequencyConfig")}
+                  </label>
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-muted-foreground w-20 text-xs">等待状态</span>
+                      <span className="text-muted-foreground w-20 text-xs">
+                        {t("settings.notifications.waitingStatus")}
+                      </span>
                       <Input
                         type="number"
                         className="h-7 w-24 text-xs"
@@ -331,7 +351,9 @@ export default function SettingsPage() {
                       <span className="text-muted-foreground text-xs">Hz</span>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-muted-foreground w-20 text-xs">完成状态</span>
+                      <span className="text-muted-foreground w-20 text-xs">
+                        {t("settings.notifications.finishedStatus")}
+                      </span>
                       <Input
                         type="number"
                         className="h-7 w-24 text-xs"
@@ -350,19 +372,23 @@ export default function SettingsPage() {
                   <div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={() => playWaitingSound()}>
                       <Volume2 className="mr-1.5 h-3.5 w-3.5" />
-                      测试等待音
+                      {t("settings.notifications.testWaitingSound")}
                     </Button>
                     <Button variant="outline" size="sm" onClick={() => playFinishedSound()}>
                       <Volume2 className="mr-1.5 h-3.5 w-3.5" />
-                      测试完成音
+                      {t("settings.notifications.testFinishedSound")}
                     </Button>
                   </div>
                 </div>
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">桌面通知测试</label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">发送一条测试通知</p>
+                    <label className="text-sm font-medium">
+                      {t("settings.notifications.desktopTest")}
+                    </label>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {t("settings.notifications.desktopTestDesc")}
+                    </p>
                   </div>
                   <Button
                     variant="outline"
@@ -370,12 +396,12 @@ export default function SettingsPage() {
                     onClick={() =>
                       sendNotification({
                         title: "MultiAgents Manager",
-                        body: "测试通知 — 通知功能正常",
+                        body: t("settings.notifications.testBody"),
                       })
                     }
                   >
                     <Bell className="mr-1.5 h-3.5 w-3.5" />
-                    发送
+                    {t("settings.notifications.send")}
                   </Button>
                 </div>
               </div>
