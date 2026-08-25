@@ -18,9 +18,10 @@ pub use dao::preset::{PresetItemRecord, PresetRecord};
 // 重新导出公共函数
 pub use dao::agent_tool::list_sub_agents;
 pub use dao::extension::{
-    disable_subagent_assignment, insert_extension, insert_native_extension, list_all_assignments,
-    list_assignments, list_extensions, list_native_extensions, mark_native_imported,
-    upsert_assignment, upsert_assignment_with_subagent,
+    delete_assignments_for, delete_extension, disable_subagent_assignment, insert_extension,
+    insert_native_extension, list_all_assignments, list_assignments, list_extensions,
+    list_native_extensions, mark_native_imported, upsert_assignment,
+    upsert_assignment_with_subagent,
 };
 pub use dao::preset::{
     create_preset, delete_preset, get_preset_items, list_presets, record_preset_application,

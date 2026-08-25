@@ -158,6 +158,35 @@ pub fn disable_subagent_assignment(
     Ok(())
 }
 
+pub fn delete_extension(ext_id: &str) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    delete_extension_on(&conn, ext_id)
+}
+
+pub fn delete_extension_on(conn: &rusqlite::Connection, ext_id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM extensions WHERE id = ?1", params![ext_id])
+        .map_err(|e| e.to_string())
+        .map(|_| ())
+}
+
+/// 删除某资源的全部 assignment（含子 Agent 维度）
+pub fn delete_assignments_for(ext_id: &str) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    delete_assignments_for_on(&conn, ext_id)
+}
+
+pub fn delete_assignments_for_on(
+    conn: &rusqlite::Connection,
+    ext_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM extension_assignments WHERE extension_id = ?1",
+        params![ext_id],
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
+}
+
 // ===== 原生扩展资源 =====
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,4 +268,62 @@ pub fn mark_native_imported(ids: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use crate::database::schema;
+
+    fn mem_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        schema::init(&conn);
+        conn
+    }
+
+    #[test]
+    fn delete_extension_removes_row() {
+        let conn = mem_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn
+            .execute(
+                "INSERT INTO extensions (id, kind, name, source_path, installed_at, updated_at) \
+             VALUES ('skill-x','skill','x','/tmp/x',?1,?1)",
+                [&now],
+            )
+            .unwrap();
+        delete_extension_on(&conn, "skill-x").unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extensions WHERE id='skill-x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn delete_assignments_covers_subagent_rows() {
+        let conn = mem_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn
+            .execute(
+                "INSERT INTO extension_assignments \
+                 (id, extension_id, agent_tool_id, sub_agent_id, enabled, link_status, assigned_at) VALUES \
+                 ('a','skill-x','claude',NULL,1,'valid',?1),\
+                 ('b','skill-x','claude','sub1',1,'valid',?1)",
+                [&now],
+            )
+            .unwrap();
+        delete_assignments_for_on(&conn, "skill-x").unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extension_assignments WHERE extension_id='skill-x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
 }
