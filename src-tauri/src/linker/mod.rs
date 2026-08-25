@@ -167,7 +167,8 @@ pub fn replace_with_symlink(source: &Path, target: &Path) -> Result<(), String> 
 
 /// 安装 skill 到全局仓库（从源路径复制）
 /// 安全检查：验证源路径不在敏感目录内（防止路径穿越）
-pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
+/// 若目标同名资源已存在：overwrite=false 直接报错，overwrite=true 先按类型清理再复制
+pub fn install_to_repo(source: &Path, name: &str, overwrite: bool) -> Result<(), String> {
     // 路径穿越检查：解析源路径，验证不在敏感目录内
     let canonical = source
         .canonicalize()
@@ -199,7 +200,15 @@ pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
     let dest = repo.join(name);
 
     if dest.exists() {
-        fs::remove_dir_all(&dest).map_err(|e| format!("清理旧目录失败: {}", e))?;
+        if !overwrite {
+            return Err(format!("已存在同名资源: {}", name));
+        }
+        // 按 dest 类型清理：目录用 remove_dir_all，文件用 remove_file
+        if dest.is_dir() {
+            fs::remove_dir_all(&dest).map_err(|e| format!("清理旧目录失败: {}", e))?;
+        } else {
+            fs::remove_file(&dest).map_err(|e| format!("清理旧文件失败: {}", e))?;
+        }
     }
 
     copy_dir_recursive(&canonical, &dest)?;

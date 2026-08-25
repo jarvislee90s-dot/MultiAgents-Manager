@@ -133,7 +133,7 @@ pub fn import_native_resources(
             skipped += 1;
             continue;
         }
-        if let Err(e) = crate::linker::install_to_repo(path, &name) {
+        if let Err(e) = crate::linker::install_to_repo(path, &name, false) {
             log::warn!("导入 {} 失败: {}", name, e);
             skipped += 1;
             continue;

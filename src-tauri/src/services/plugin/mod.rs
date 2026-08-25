@@ -25,7 +25,7 @@ pub struct PluginConfig {
 }
 
 /// 安装插件到全局仓库
-pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
+pub fn install_plugin_to_repo(source: &Path, name: &str, overwrite: bool) -> Result<(), String> {
     let repo = dirs::home_dir()
         .unwrap_or_default()
         .join(".mam")
@@ -33,6 +33,9 @@ pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
     let _ = std::fs::create_dir_all(&repo);
     let dest = repo.join(name);
     if dest.exists() {
+        if !overwrite {
+            return Err(format!("已存在同名资源: {}", name));
+        }
         if dest.is_dir() {
             let _ = std::fs::remove_dir_all(&dest);
         } else {

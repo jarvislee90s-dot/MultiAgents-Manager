@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 export async function listRepoSkills() {
   return await invoke("list_repo_skills");
 }
-export async function installSkill(sourcePath: string, name: string) {
-  return await invoke("install_skill", { sourcePath, name });
+export async function installSkill(sourcePath: string, name: string, overwrite = false) {
+  return await invoke("install_skill", { sourcePath, name, overwrite });
 }
 export async function rescanSkills() {
   return await invoke("rescan_skills");

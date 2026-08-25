@@ -14,12 +14,12 @@ fn get_tool_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
 }
 
 /// 安装 skill 到全局仓库
-pub fn install_skill(source_path: &str, name: &str) -> Result<(), String> {
+pub fn install_skill(source_path: &str, name: &str, overwrite: bool) -> Result<(), String> {
     let source = std::path::Path::new(source_path);
     if !source.exists() {
         return Err(format!("源路径不存在: {}", source_path));
     }
-    linker::install_to_repo(source, name)?;
+    linker::install_to_repo(source, name, overwrite)?;
     let ext = database::ExtensionRecord {
         id: format!("skill-{}", name),
         kind: "skill".to_string(),

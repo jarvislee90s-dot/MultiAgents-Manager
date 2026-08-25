@@ -6,8 +6,12 @@ pub fn list_repo_skills() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn install_skill(source_path: String, name: String) -> Result<(), String> {
-    crate::services::install_skill(&source_path, &name)
+pub fn install_skill(
+    source_path: String,
+    name: String,
+    overwrite: Option<bool>,
+) -> Result<(), String> {
+    crate::services::install_skill(&source_path, &name, overwrite.unwrap_or(false))
 }
 
 #[tauri::command]

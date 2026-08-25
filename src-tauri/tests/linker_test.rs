@@ -71,8 +71,12 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
     std::fs::create_dir_all(source.join("SKILL.md").parent().unwrap()).unwrap();
     std::fs::write(source.join("SKILL.md"), "name: demo-skill\n").unwrap();
 
-    multi_agents_manager_lib::services::install_skill(source.to_str().unwrap(), "demo-skill")
-        .unwrap();
+    multi_agents_manager_lib::services::install_skill(
+        source.to_str().unwrap(),
+        "demo-skill",
+        false,
+    )
+    .unwrap();
     multi_agents_manager_lib::services::enable_skill_for_tool("demo-skill", "codex").unwrap();
 
     let harness_link = home.join(".agents").join("skills").join("demo-skill");

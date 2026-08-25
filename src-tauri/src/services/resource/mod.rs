@@ -293,7 +293,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                     let description = meta.as_ref().and_then(|m| m.description.clone());
                     let suite = detect_suite(skill_name, skill_path, skills_dir);
 
-                    if let Err(e) = linker::install_to_repo(skill_path, skill_name) {
+                    if let Err(e) = linker::install_to_repo(skill_path, skill_name, force) {
                         log::warn!("导入 skill {} 失败: {}", skill_name, e);
                         continue;
                     }
