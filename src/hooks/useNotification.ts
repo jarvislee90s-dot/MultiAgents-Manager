@@ -8,7 +8,7 @@ import {
   registerActionTypes,
 } from "@tauri-apps/plugin-notification";
 import { useSessionStore } from "@/stores/sessionStore";
-import { playSoundForStatus } from "@/lib/audio";
+import { playCompletionSound } from "@/lib/audio";
 
 const AGENT_LABELS: Record<string, string> = {
   claude: "Claude Code",
@@ -151,8 +151,8 @@ export function useNotification() {
 
         // 颜色变化时通知（红→黄→绿 任意切换）；记录本次通知用于时间去重
 
-        // 播放提示音
-        playSoundForStatus(session.status);
+        // 方向过滤：仅变为绿（任务完成）时按工具播放提示音
+        if (currColor === "green") playCompletionSound(session.agentType);
         lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
 
         // 发送通知：系统 toast 或应用内浮窗（mam.useSystemNotification 开关控制）

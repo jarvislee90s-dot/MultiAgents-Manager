@@ -1,99 +1,86 @@
-// Web Audio API 提示音 — 支持用户配置频率
+// 文件音效系统 — 12 个内置音效，全局默认 + 每工具覆盖（localStorage: mam-sound-config）
 
+export interface SoundConfig {
+  default: string; // 音效 id 或 "mute"
+  tools: Partial<Record<"claude" | "codex" | "opencode" | "openclaw", string>>; // 音效 id 或 "mute"
+}
+
+export const SOUND_IDS = [
+  "notification_accomplished_04",
+  "notification_accomplished_06",
+  "notification_activated_05",
+  "notification_message_02",
+  "notification_message_04",
+  "notification_operation_failed_03",
+  "notification_operation_succeed_01",
+  "notification_operation_succeed_03",
+  "notification_operation_succeed_06",
+  "notification_operation_succeed_09",
+  "notification_searching_03",
+  "notification_wrong_02",
+] as const;
+
+const STORAGE_KEY = "mam-sound-config";
+// 旧合成音配置键，读取时忽略并清理
+const LEGACY_KEY = "mam-audio-frequencies";
+
+export function getSoundConfig(): SoundConfig {
+  try {
+    localStorage.removeItem(LEGACY_KEY);
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved)
+      return { default: "notification_operation_succeed_01", tools: {}, ...JSON.parse(saved) };
+  } catch {
+    // ignore
+  }
+  return { default: "notification_operation_succeed_01", tools: {} };
+}
+
+export function saveSoundConfig(config: SoundConfig) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+}
+
+// === 播放引擎（解码缓存） ===
 let audioCtx: AudioContext | null = null;
+const bufferCache = new Map<string, AudioBuffer>();
 
-function getAudioContext(): AudioContext | null {
+function getContext(): AudioContext | null {
   if (typeof window === "undefined") return null;
-  if (!audioCtx) {
-    audioCtx = new AudioContext();
-  }
-  if (audioCtx.state === "suspended") {
-    audioCtx.resume();
-  }
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === "suspended") audioCtx.resume();
   return audioCtx;
 }
 
-/** 播放单音 */
-function playTone(frequency: number, duration: number, delay: number = 0) {
-  const ctx = getAudioContext();
-  if (!ctx) return;
-
-  const oscillator = ctx.createOscillator();
-  const gain = ctx.createGain();
-
-  oscillator.connect(gain);
-  gain.connect(ctx.destination);
-
-  const startTime = ctx.currentTime + delay;
-  oscillator.frequency.value = frequency;
-  oscillator.type = "sine";
-
-  gain.gain.setValueAtTime(0, startTime);
-  gain.gain.linearRampToValueAtTime(0.3, startTime + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
-
-  oscillator.start(startTime);
-  oscillator.stop(startTime + duration);
-}
-
-// === 默认频率配置 ===
-const DEFAULT_FREQUENCIES = {
-  waiting: { primary: 880, secondary: 1174.66 },
-  finished: { primary: 440 },
-};
-
-/** 从 localStorage 读取用户配置 */
-function getUserFrequencies() {
+async function loadBuffer(id: string): Promise<AudioBuffer | null> {
+  if (bufferCache.has(id)) return bufferCache.get(id)!;
   try {
-    const saved = localStorage.getItem("mam-audio-frequencies");
-    if (saved) {
-      return { ...DEFAULT_FREQUENCIES, ...JSON.parse(saved) };
-    }
+    const res = await fetch(`/sounds/${id}.wav`);
+    const data = await res.arrayBuffer();
+    const ctx = getContext();
+    if (!ctx) return null;
+    const buf = await ctx.decodeAudioData(data);
+    bufferCache.set(id, buf);
+    return buf;
   } catch {
-    // ignore parse error
+    return null;
   }
-  return DEFAULT_FREQUENCIES;
 }
 
-/** 保存用户配置到 localStorage */
-export function saveUserFrequencies(config: typeof DEFAULT_FREQUENCIES) {
-  localStorage.setItem("mam-audio-frequencies", JSON.stringify(config));
+/** 播放指定音效（试听与实际触发共用） */
+export async function playSound(id: string) {
+  if (!SOUND_IDS.includes(id as (typeof SOUND_IDS)[number])) return;
+  const ctx = getContext();
+  const buf = await loadBuffer(id);
+  if (!ctx || !buf) return;
+  const source = ctx.createBufferSource();
+  source.buffer = buf;
+  source.connect(ctx.destination);
+  source.start();
 }
 
-/** 获取当前频率配置 */
-export function getAudioConfig() {
-  return getUserFrequencies();
-}
-
-/** 等待用户输入 — 双音 chime */
-export function playWaitingSound() {
-  const cfg = getUserFrequencies().waiting;
-  playTone(cfg.primary, 0.15, 0);
-  playTone(cfg.secondary, 0.3, 0.12);
-}
-
-/** 任务完成 — 低音单音 */
-export function playFinishedSound() {
-  const cfg = getUserFrequencies().finished;
-  playTone(cfg.primary, 0.4, 0);
-}
-
-/** 测试提示音 */
-export function playTestSound() {
-  playTone(660, 0.15, 0);
-  playTone(880, 0.2, 0.1);
-}
-
-/** 按状态播放对应提示音 */
-export function playSoundForStatus(status: string) {
-  switch (status) {
-    case "waiting":
-      playWaitingSound();
-      break;
-    case "finished":
-      playFinishedSound();
-      break;
-    default:
-      break;
-  }
+/** 任务完成（→绿）时按工具播放：专属覆盖 → 全局默认；mute 跳过 */
+export function playCompletionSound(agentType: string) {
+  const cfg = getSoundConfig();
+  const id = cfg.tools[agentType as keyof SoundConfig["tools"]] ?? cfg.default;
+  if (id && id !== "mute") playSound(id);
 }

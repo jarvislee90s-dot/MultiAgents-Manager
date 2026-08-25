@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/components/common/theme-provider";
 import { TitleBar } from "@/components/common/title-bar";
@@ -12,11 +11,11 @@ import { Moon, Sun, Monitor, Palette, Keyboard, Bell, Volume2 } from "lucide-rea
 import { invoke } from "@tauri-apps/api/core";
 import { sendNotification } from "@tauri-apps/plugin-notification";
 import {
-  playTestSound,
-  getAudioConfig,
-  saveUserFrequencies,
-  playWaitingSound,
-  playFinishedSound,
+  SOUND_IDS,
+  getSoundConfig,
+  saveSoundConfig,
+  playSound,
+  type SoundConfig,
 } from "@/lib/audio";
 import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
@@ -32,7 +31,7 @@ export default function SettingsPage() {
   const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [useSystemNotification, setUseSystemNotification] = useState(false);
-  const [audioConfig, setAudioConfig] = useState(getAudioConfig());
+  const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
   const [activeSection, setActiveSection] = useState<SettingSection>("appearance");
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
@@ -41,20 +40,11 @@ export default function SettingsPage() {
     await toggleWindow("main");
   }, []);
 
-  const updateAudioConfig = (
-    status: "waiting" | "finished",
-    key: "primary" | "secondary",
-    value: number
-  ) => {
-    const next = {
-      ...audioConfig,
-      [status]: {
-        ...audioConfig[status],
-        [key]: value,
-      },
-    };
-    setAudioConfig(next);
-    saveUserFrequencies(next);
+  // 更新音效配置并持久化
+  const updateSound = (patch: Partial<SoundConfig>) => {
+    const next = { ...soundConfig, ...patch };
+    setSoundConfig(next);
+    saveSoundConfig(next);
   };
 
   useEffect(() => {
@@ -299,86 +289,80 @@ export default function SettingsPage() {
                   </Button>
                 </div>
                 <div className="border-t" />
-                <div className="flex items-center justify-between py-2.5">
-                  <div className="flex-1">
+                <div className="space-y-3 py-2.5">
+                  {/* 全局完成音：所有工具默认播放的音效 */}
+                  <div className="flex items-center justify-between gap-2">
                     <label className="text-sm font-medium">
-                      {t("settings.notifications.soundTest")}
+                      {t("settings.notifications.soundGlobalDefault")}
                     </label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      {t("settings.notifications.soundTestDesc")}
-                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        className="bg-background h-7 rounded border px-1.5 text-xs"
+                        value={soundConfig.default}
+                        onChange={(e) => updateSound({ default: e.currentTarget.value })}
+                      >
+                        {SOUND_IDS.map((id) => (
+                          <option key={id} value={id}>
+                            {id}
+                          </option>
+                        ))}
+                        <option value="mute">{t("settings.notifications.soundMute")}</option>
+                      </select>
+                      {soundConfig.default !== "mute" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => playSound(soundConfig.default)}
+                        >
+                          <Volume2 className="mr-1 h-3 w-3" />
+                          {t("settings.notifications.soundTest")}
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                  <Button variant="outline" size="sm" onClick={() => playTestSound()}>
-                    <Volume2 className="mr-1.5 h-3.5 w-3.5" />
-                    {t("settings.notifications.play")}
-                  </Button>
-                </div>
-                <div className="border-t" />
-                <div className="space-y-2 py-2.5">
+                  {/* 工具专属音：覆盖全局默认，空值=跟随全局 */}
                   <label className="text-sm font-medium">
-                    {t("settings.notifications.frequencyConfig")}
+                    {t("settings.notifications.soundToolOverride")}
                   </label>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-muted-foreground w-20 text-xs">
-                        {t("settings.notifications.waitingStatus")}
-                      </span>
-                      <Input
-                        type="number"
-                        className="h-7 w-24 text-xs"
-                        value={audioConfig.waiting.primary}
-                        onChange={(e) =>
-                          updateAudioConfig(
-                            "waiting",
-                            "primary",
-                            parseFloat(e.currentTarget.value) || 880
-                          )
-                        }
-                      />
-                      <span className="text-muted-foreground text-xs">Hz</span>
-                      <Input
-                        type="number"
-                        className="h-7 w-24 text-xs"
-                        value={audioConfig.waiting.secondary}
-                        onChange={(e) =>
-                          updateAudioConfig(
-                            "waiting",
-                            "secondary",
-                            parseFloat(e.currentTarget.value) || 1174.66
-                          )
-                        }
-                      />
-                      <span className="text-muted-foreground text-xs">Hz</span>
+                  {(["claude", "codex", "opencode", "openclaw"] as const).map((tool) => (
+                    <div key={tool} className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground text-xs capitalize">{tool}</span>
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          className="bg-background h-7 rounded border px-1.5 text-xs"
+                          value={soundConfig.tools[tool] ?? ""}
+                          onChange={(e) =>
+                            updateSound({
+                              tools: {
+                                ...soundConfig.tools,
+                                [tool]: e.currentTarget.value || undefined,
+                              },
+                            })
+                          }
+                        >
+                          <option value="">{t("settings.notifications.soundFollowGlobal")}</option>
+                          {SOUND_IDS.map((id) => (
+                            <option key={id} value={id}>
+                              {id}
+                            </option>
+                          ))}
+                          <option value="mute">{t("settings.notifications.soundMute")}</option>
+                        </select>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            // 试听：优先该工具当前生效音（未配置则回退全局）
+                            const id = soundConfig.tools[tool] || soundConfig.default;
+                            if (id !== "mute") playSound(id);
+                          }}
+                        >
+                          <Volume2 className="mr-1 h-3 w-3" />
+                          {t("settings.notifications.soundTest")}
+                        </Button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-muted-foreground w-20 text-xs">
-                        {t("settings.notifications.finishedStatus")}
-                      </span>
-                      <Input
-                        type="number"
-                        className="h-7 w-24 text-xs"
-                        value={audioConfig.finished.primary}
-                        onChange={(e) =>
-                          updateAudioConfig(
-                            "finished",
-                            "primary",
-                            parseFloat(e.currentTarget.value) || 440
-                          )
-                        }
-                      />
-                      <span className="text-muted-foreground text-xs">Hz</span>
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => playWaitingSound()}>
-                      <Volume2 className="mr-1.5 h-3.5 w-3.5" />
-                      {t("settings.notifications.testWaitingSound")}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => playFinishedSound()}>
-                      <Volume2 className="mr-1.5 h-3.5 w-3.5" />
-                      {t("settings.notifications.testFinishedSound")}
-                    </Button>
-                  </div>
+                  ))}
                 </div>
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">
