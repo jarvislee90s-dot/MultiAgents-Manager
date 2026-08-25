@@ -65,7 +65,14 @@ pub fn install_resource_from_manifest(path: String) -> Result<(), String> {
         source_path: dest_dir.to_string_lossy().to_string(),
         source_url: manifest.common.homepage.clone(),
         version: None,
-        tags: manifest.common.tags.as_ref().map(|t| t.join(",")),
+        // 插件按约定（见 preset/mod.rs:40 注释）在 tags 存 "file"/"config" 子类型，
+        // 供 toggle_plugin 识别；其余 kind 存 manifest 元数据标签
+        tags: match manifest.common.kind {
+            crate::services::manifest::Kind::Plugin => {
+                manifest.plugin.as_ref().map(|p| p.plugin_type.clone())
+            }
+            _ => manifest.common.tags.as_ref().map(|t| t.join(",")),
+        },
         suite: None,
         source_tool: None,
         is_native: false,
@@ -110,7 +117,8 @@ pub fn uninstall_resource(kind: String, name: String) -> Result<(), String> {
         .find(|e| e.kind == kind && e.name == name);
 
     // 1) 按工具清理（一律用 name，assignment 键约定为 kind-name）
-    let tools: Vec<String> = crate::database::list_all_assignments()
+    // 同一工具可能有多条 assignment（含子 Agent 维度），用 BTreeSet 去重避免重复清理
+    let tools: std::collections::BTreeSet<String> = crate::database::list_all_assignments()
         .iter()
         .filter(|a| a.extension_id == ext_id)
         .map(|a| a.agent_tool_id.clone())
@@ -136,12 +144,34 @@ pub fn uninstall_resource(kind: String, name: String) -> Result<(), String> {
     // 2) 删除 SSOT 文件/目录（取第一个存在的候选）
     for path in resolve_ssot_paths(&kind, &name, record.as_ref().map(|r| r.id.as_str())) {
         if path.is_file() {
-            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("删除 SSOT 路径失败 {}: {}", path.display(), e);
+            }
             break;
         }
         if path.is_dir() {
-            let _ = std::fs::remove_dir_all(&path);
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                log::warn!("删除 SSOT 路径失败 {}: {}", path.display(), e);
+            }
             break;
+        }
+    }
+
+    // 2.1) manifest 安装的 MCP 以目录形式存放于 ~/.mam/mcp/<id>/（而非 <name>.json 文件），
+    //      上面文件/目录候选循环不会命中，这里按 manifest 安装布局补充目录清理
+    if kind == "mcp" {
+        let mam_mcp = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+        let mut dir_candidates = vec![mam_mcp.join(&name)];
+        if let Some(r) = record.as_ref() {
+            dir_candidates.push(mam_mcp.join(&r.id));
+        }
+        for dir in dir_candidates {
+            if dir.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                    log::warn!("删除 SSOT 路径失败 {}: {}", dir.display(), e);
+                }
+                break;
+            }
         }
     }
 
