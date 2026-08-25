@@ -52,15 +52,18 @@ export default function NotificationPage() {
       "notification:new",
       (e) => {
         setPayload(e.payload);
-        // 新通知到达时清掉旧候选列表，避免与卡片同时出现
+        // 新通知到达时清掉旧候选列表，避免与卡片同时出现（先还原高度再显示，避免闪帧）
         setCandidates(null);
-        void applyHeight(null);
-        win.show();
+        void (async () => {
+          await applyHeight(null);
+          win.show();
+        })();
         armTimer(10000);
       },
       { target: win.label }
     ).then((fn) => (unlisten = fn));
     return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armTimer/applyHeight 仅依赖稳定的 timerRef
   }, []);
 
   if (!payload) return <div className="h-full w-full" />;
@@ -76,10 +79,10 @@ export default function NotificationPage() {
         projectName: payload.projectName,
         lastMessage: payload.lastMessage,
       });
-      // 多窗口歧义：在通知窗内联渲染候选，避免静默失败
+      // 多窗口歧义：在通知窗内联渲染候选，避免静默失败（先调高度再显示，避免闪帧）
       if (ambiguous) {
+        await applyHeight(ambiguous.length);
         getCurrentWindow().show();
-        void applyHeight(ambiguous.length);
         // 候选列表不操作 15 秒自动隐藏，避免无限驻留
         armTimer(15000);
       }

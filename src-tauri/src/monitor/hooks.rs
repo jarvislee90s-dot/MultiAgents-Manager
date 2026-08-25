@@ -21,9 +21,17 @@ TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
 # 注入窗口标题 marker（MAM:<session_id 前 8 位>）。/dev/tty 在 hook（原生进程 spawn 的 bash）
-# 上下文不可达，改写 Windows 控制台设备 CONOUT$（hook 子进程继承宿主控制台）
-MID=$(printf '%s' "$SESSION_ID" | cut -c1-8)
-powershell -NoProfile -Command "[IO.File]::WriteAllText('CONOUT$',[char]27+\"]0;MAM:$MID\"+[char]7)" >/dev/null 2>&1 || true
+# 上下文不可达，改写 Windows 控制台设备 CONOUT$（hook 子进程继承宿主控制台）。
+# 仅低频事件注入（避免每次工具调用 spawn powershell 拖慢 agent 循环）；
+# MAM_MARKER=0 可整体禁用；无 powershell 环境（macOS 等）零开销跳过
+if [ "${MAM_MARKER:-1}" = "1" ] && command -v powershell >/dev/null 2>&1; then
+  case "$EVENT" in
+    [Ss]top|[Pp]ostToolUse|[Ss]essionEnd|[Uu]serPromptSubmit)
+      MID=$(printf '%s' "$SESSION_ID" | cut -c1-8)
+      powershell -NoProfile -Command "[IO.File]::WriteAllText('CONOUT$',[char]27+\"]0;MAM:$MID\"+[char]7)" >/dev/null 2>&1 || true
+      ;;
+  esac
+fi
 "#;
 
 /// 确保 Hook 脚本和事件目录存在

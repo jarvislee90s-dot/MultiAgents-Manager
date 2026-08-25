@@ -210,8 +210,9 @@ fn read_window_text(hwnd_val: isize) -> Option<String> {
             // 终端可见正文远长于装饰性短文本（实测 WT 标题 len=3 vs 正文 len=366）
             let cond: IUIAutomationCondition = automation.CreateTrueCondition().ok()?;
             let arr = root.FindAll(TreeScope_Descendants, &cond).ok()?;
+            let count = arr.Length().ok()?; // 循环外取一次：单次失败不应丢弃已收集结果
             let mut best: Option<String> = None;
-            for i in 0..arr.Length().ok()? {
+            for i in 0..count {
                 if let Ok(el) = arr.GetElement(i) {
                     if let Some(s) = try_text(&el) {
                         if best
@@ -232,7 +233,8 @@ fn read_window_text(hwnd_val: isize) -> Option<String> {
     }
 }
 
-/// 带超时的读取（单窗口 200ms）：UIA 调用可能被无响应窗口阻塞，超时即放弃该窗口
+/// 带超时的读取（单窗口 200ms）：UIA 调用可能被无响应窗口阻塞，超时即放弃该窗口。
+/// 已知权衡：超时后该线程可能永久挂起（跨进程 COM 无强制取消），泄漏有界（≤8 线程/次点击）
 fn read_window_text_timeout(hwnd_val: isize) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -298,9 +300,12 @@ pub fn resolve_and_focus(
         if let Some(msg) = last_message {
             if !msg.is_empty() {
                 let tail = normalized_tail(msg, 40);
+                // 总预算 800ms：单窗 200ms × 顺序最多 8 窗，超预算即停止（宁 miss 勿拖慢点击）
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
                 let hits: Vec<isize> = cands
                     .iter()
                     .take(8)
+                    .take_while(|_| std::time::Instant::now() < deadline)
                     .filter(|(hwnd, _)| {
                         read_window_text_timeout(*hwnd)
                             .map(|text| normalized_contains(&text, &tail))
@@ -314,7 +319,22 @@ pub fn resolve_and_focus(
                 }
             }
         }
-        // ② 标题打分：项目名 +2、工具名 +1，最高分唯一才锁定
+        // ② 标题打分：项目名 +2、工具名 +1，最高分唯一才锁定。
+        // 打分与候选列表共用"认领过滤候选池"：他工具认领的窗口无条件出局
+        // （防止打分层凭项目名错锁他工具窗口）；池空（目标工具可能一个窗口都不在）
+        // 时回退全量防御，保证仍有得选；agent 为空（兼容入口）时不过滤
+        let agent = agent_keyword.unwrap_or_default().to_lowercase();
+        let pool: Vec<&(isize, String)> = {
+            let filtered: Vec<&(isize, String)> = cands
+                .iter()
+                .filter(|(_, t)| claim_owner(t).is_none_or(|o| o == agent.as_str()))
+                .collect();
+            if filtered.is_empty() {
+                cands.iter().collect()
+            } else {
+                filtered
+            }
+        };
         let score = |title: &str| -> i32 {
             let t = title.to_lowercase();
             let mut s = 0;
@@ -330,15 +350,14 @@ pub fn resolve_and_focus(
             }
             s
         };
-        let mut scored: Vec<_> = cands.iter().map(|c| (score(&c.1), c)).collect();
+        let mut scored: Vec<_> = pool.into_iter().map(|c| (score(&c.1), c)).collect();
         scored.sort_by_key(|c| std::cmp::Reverse(c.0));
         if scored.len() >= 2 && scored[0].0 > scored[1].0 && scored[0].0 > 0 {
             force_foreground(scored[0].1 .0);
             return Ok(FocusOutcome::Focused);
         }
-        // ③ 候选池认领过滤：本工具认领的窗口 + 中立窗口；其他工具认领的窗口无条件排除。
-        // 排序：先本工具认领、后中立，组内按现有打分降序。
-        let agent = agent_keyword.unwrap_or_default().to_lowercase();
+        // ③ 候选排序：先本工具认领、后中立，组内按打分降序（他工具已在池构建时排除；
+        // 池为全量回退时此处的排除分支兜底）
         let mut mine: Vec<&(i32, &(isize, String))> = Vec::new();
         let mut neutral: Vec<&(i32, &(isize, String))> = Vec::new();
         for item in scored.iter() {

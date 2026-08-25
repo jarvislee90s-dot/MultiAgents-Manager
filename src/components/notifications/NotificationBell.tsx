@@ -1,5 +1,5 @@
 // 通知历史铃铛 — 未读角标 + 历史面板（点击条目跳转对应会话）
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -24,10 +24,16 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [unread, setUnread] = useState(0);
-  const { focus } = useSessionJump();
+  const openRef = useRef(false);
+  const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
 
   useEffect(() => {
     const refresh = () => {
+      // 面板打开期间新到的通知直接视为已读（角标不堆积）；unread>0 守卫防事件循环
+      if (openRef.current && getUnreadCount() > 0) {
+        markAllRead();
+        return; // markAllRead 会再次触发本事件
+      }
       setEntries(getHistory());
       setUnread(getUnreadCount());
     };
@@ -38,6 +44,7 @@ export function NotificationBell() {
 
   const toggle = () => {
     const next = !open;
+    openRef.current = next;
     setOpen(next);
     if (next) markAllRead();
   };
@@ -73,6 +80,28 @@ export function NotificationBell() {
       {open && (
         <div className="bg-card absolute right-0 z-50 mt-2 w-96 rounded-lg border p-2 shadow-xl">
           <p className="mb-2 px-1 text-xs font-semibold">{t("notifications.historyTitle")}</p>
+          {candidates && candidates.length > 0 && (
+            <div className="mb-2 space-y-1 rounded border p-1.5">
+              <p className="px-1 text-[10px] font-semibold">{t("sessions.pickWindow")}</p>
+              {candidates.map((w) => (
+                <button
+                  key={w.hwnd}
+                  className="hover:bg-accent w-full truncate rounded px-2 py-1 text-left text-[11px]"
+                  title={w.title}
+                  onClick={async () => {
+                    setCandidates(null);
+                    try {
+                      await focusHwnd(w.hwnd);
+                    } catch {
+                      toast.error(t("notifications.jumpFailed"));
+                    }
+                  }}
+                >
+                  {w.title || t("sessions.untitledWindow")} — {w.process}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="max-h-80 overflow-y-auto">
             {entries.length === 0 && (
               <p className="text-muted-foreground p-4 text-center text-xs">
@@ -96,7 +125,8 @@ export function NotificationBell() {
                     </span>
                   )}
                   <span className="min-w-0 flex-1 truncate text-[11px]">
-                    {e.projectName} — {e.lastMessage || t("sessions.noMessage")}
+                    {e.projectName} · {t(`sessions.statusLabels.${e.status}`, e.status)} —{" "}
+                    {e.lastMessage || t("sessions.noMessage")}
                   </span>
                   <span className="text-muted-foreground shrink-0 text-[10px]">
                     {timeAgo(e.at, t)}
