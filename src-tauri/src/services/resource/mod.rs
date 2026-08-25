@@ -333,7 +333,16 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
 
     // Plugin 扫描
     // Plugin 去重使用独立集合，避免与 skill 同名互相吞掉
-    let mut plugin_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut plugin_seen: std::collections::HashSet<String> = if force {
+        std::collections::HashSet::new()
+    } else {
+        // 增量模式：只按 plugin 的 name 播种，已导入的插件不重导（避免每次启动覆写 SSOT）
+        crate::database::list_extensions()
+            .iter()
+            .filter(|e| e.kind == "plugin")
+            .map(|e| e.name.clone())
+            .collect()
+    };
     let plugin_sources = [
         (
             "claude",
@@ -387,6 +396,11 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 let _ = std::fs::create_dir_all(&plugin_repo);
                 let dest = plugin_repo.join(&name);
                 if dest.exists() {
+                    if !force {
+                        // 增量模式：SSOT 已有同名插件目录（孤儿/未纳管），不覆盖
+                        skipped_dup += 1;
+                        continue;
+                    }
                     let _ = std::fs::remove_dir_all(&dest);
                 }
                 if path.is_dir() {
