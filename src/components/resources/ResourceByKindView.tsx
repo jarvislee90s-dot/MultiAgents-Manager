@@ -136,7 +136,7 @@ export function ResourceByKindView() {
             pluginName: res.name,
             toolId: tool.id,
             enabled: enable,
-            kind: "file",
+            kind: res.pluginType ?? "file",
           });
         }
         ok++;
@@ -510,7 +510,14 @@ export function ResourceByKindView() {
                           variant={enabled ? "default" : "ghost"}
                           size="sm"
                           className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
-                          onClick={() => handleTogglePlugin(plugin.name, tool.id, !enabled, "file")}
+                          onClick={() =>
+                            handleTogglePlugin(
+                              plugin.name,
+                              tool.id,
+                              !enabled,
+                              plugin.pluginType ?? "file"
+                            )
+                          }
                         >
                           <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                           {tool.label}

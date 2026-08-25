@@ -265,6 +265,9 @@ pub struct SsotResource {
     pub enabled_tools: Vec<String>,
     #[serde(rename = "brokenTools")]
     pub broken_tools: Vec<String>,
+    /// plugin 子类型（file | config），仅 kind == "plugin" 时有值
+    #[serde(rename = "pluginType", skip_serializing_if = "Option::is_none")]
+    pub plugin_type: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -280,6 +283,7 @@ pub struct SsotResources {
 pub fn list_ssot_resources() -> SsotResources {
     let mam = dirs::home_dir().unwrap_or_default().join(".mam");
     let assignments = crate::database::list_all_assignments();
+    let extensions = crate::database::list_extensions();
 
     // 构建工具 → skill 目录映射，用于检测原生生效的 skill
     let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = {
@@ -333,6 +337,7 @@ pub fn list_ssot_resources() -> SsotResources {
                     kind: "skill".to_string(),
                     enabled_tools,
                     broken_tools,
+                    plugin_type: None,
                 }
             })
             .collect()
@@ -432,6 +437,7 @@ pub fn list_ssot_resources() -> SsotResources {
                 kind: "mcp".to_string(),
                 enabled_tools: tools,
                 broken_tools: vec![],
+                plugin_type: None,
             })
             .collect();
         resources.sort_by(|a, b| a.name.cmp(&b.name));
@@ -452,11 +458,21 @@ pub fn list_ssot_resources() -> SsotResources {
                     .filter(|a| a.extension_id == ext_id && a.enabled)
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
+                // plugin 子类型从 DB tags 读出（file | config），缺失时前端回退 file
+                let plugin_type = if kind == "plugin" {
+                    extensions
+                        .iter()
+                        .find(|e| e.kind == "plugin" && e.name == name)
+                        .and_then(|e| e.tags.clone())
+                } else {
+                    None
+                };
                 resources.push(SsotResource {
                     name,
                     kind: kind.to_string(),
                     enabled_tools,
                     broken_tools: vec![],
+                    plugin_type,
                 });
             }
         }

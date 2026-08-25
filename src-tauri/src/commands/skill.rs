@@ -16,7 +16,10 @@ pub fn install_skill(
 
 #[tauri::command]
 pub fn rescan_skills() -> crate::services::ImportStats {
-    crate::services::auto_import_extensions(true)
+    let stats = crate::services::auto_import_extensions(true);
+    // rescan 同步触发补链与断链修复（spec 015 故事 6 场景 1）
+    crate::services::sync_imported_skill_links();
+    stats
 }
 
 #[tauri::command]
