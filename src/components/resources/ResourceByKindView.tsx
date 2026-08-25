@@ -618,8 +618,12 @@ export function ResourceByKindView() {
         open={installDlgOpen}
         onOpenChange={setInstallDlgOpen}
         onInstalled={async () => {
-          const fresh = await listSsotResources();
-          setResources(fresh);
+          try {
+            const fresh = await listSsotResources();
+            setResources(fresh);
+          } catch (e) {
+            toast.error(t("common.operationFailed", { error: e }));
+          }
         }}
       />
     </>
