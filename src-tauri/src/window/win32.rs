@@ -60,13 +60,40 @@ const SHELL_BLACKLIST: &[&str] = &[
 ];
 
 /// 工具认领关键词：窗口标题（不区分大小写）命中某工具任一关键词 → 该窗口被视为该工具的。
-/// opencode 的终端标题是缩写 "OC | <会话标题>"，故含别名。
+/// opencode 的终端标题是缩写 "OC | <会话标题>"；codex App（ChatGPT 桌面版）窗口标题为 "ChatGPT"。
+/// codex CLI 的终端标题是项目目录名（无 "codex" 字样），由"面板反推"（running_projects）补充认领。
 const TOOL_CLAIM_KEYWORDS: &[(&str, &[&str])] = &[
     ("claude", &["claude"]),
-    ("codex", &["codex"]),
+    ("codex", &["codex", "chatgpt"]),
     ("opencode", &["opencode", "oc |"]),
     ("openclaw", &["openclaw"]),
 ];
+
+/// 归一化窗口标题用于项目名比对：剥离 spinner 前缀（codex 运行时标题形态 "⠙ 项目名"，
+/// 盲文区 U+2800–U+28FF）、去空白、转小写
+fn normalize_title_for_project(title: &str) -> String {
+    let stripped = title
+        .trim()
+        .trim_start_matches(|c: char| ('\u{2800}'..='\u{28FF}').contains(&c));
+    stripped.trim().to_lowercase()
+}
+
+/// 计算 needle 在 haystack（均已空白归一化）中的最长可命中前缀字符数。
+/// 终端渲染会消费 markdown 结构（粗体星号、列表符、波浪号），整串匹配常在尾部断裂，
+/// 前缀评分可容忍渲染差异（实测断裂点在 16/40 处，阈值取 12）
+fn longest_prefix_len(haystack_norm: &str, needle_norm: &str) -> usize {
+    let chars: Vec<char> = needle_norm.chars().collect();
+    let mut best = 0usize;
+    for end in 1..=chars.len() {
+        let cand: String = chars[..end].iter().collect();
+        if haystack_norm.contains(&cand) {
+            best = end;
+        } else {
+            break;
+        }
+    }
+    best
+}
 
 /// 明显的空终端窗口标题（无 CLI 会话在跑），从候选池排除；
 /// 池空回退全量时仍可能出现（保底有得选）
@@ -172,13 +199,6 @@ fn normalized_tail(s: &str, n: usize) -> String {
     }
 }
 
-/// 空白归一化后的子串包含判断
-fn normalized_contains(haystack: &str, needle: &str) -> bool {
-    let h: String = haystack.split_whitespace().collect::<Vec<_>>().join(" ");
-    let n: String = needle.split_whitespace().collect::<Vec<_>>().join(" ");
-    !n.is_empty() && h.contains(&n)
-}
-
 /// 读取窗口的终端可见文本（UI Automation TextPattern，屏幕阅读器通道）。
 /// 尝试顺序：根元素直取 → 查找 Document 类型后代（Windows Terminal 的 TermControl）。
 /// COM 初始化失败 / 模式不可用 / 超时 → None（视为 miss，不报错）
@@ -253,6 +273,8 @@ pub enum FocusOutcome {
 
 /// 解析并聚焦（CLI 与 App 统一入口，路径差异见模块头注释）
 /// session_marker: 如 "MAM:1ba8e2f7"（hook 注入的标题标记，精确匹配用）
+/// running_projects: 当前运行会话的 (工具id, 项目名) 列表——用于"面板反推"排除
+/// 其他工具的终端窗口（codex 终端标题=项目名，无 "codex" 关键词可认领）
 pub fn resolve_and_focus(
     system: &sysinfo::System,
     pid: u32,
@@ -260,6 +282,7 @@ pub fn resolve_and_focus(
     agent_keyword: Option<&str>,
     project_name: Option<&str>,
     last_message: Option<&str>,
+    running_projects: &[(String, String)],
 ) -> Result<FocusOutcome, String> {
     let windows = all_windows();
 
@@ -312,7 +335,7 @@ pub fn resolve_and_focus(
                     });
                     rxs.push((hwnd, rx));
                 }
-                let mut hits: Vec<isize> = Vec::new();
+                let mut scored_hits: Vec<(isize, usize)> = Vec::new();
                 for (h, rx) in rxs {
                     // 超预算即放弃等待（挂起线程泄漏有界 ≤8/次点击，已知权衡）
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -320,24 +343,33 @@ pub fn resolve_and_focus(
                         break;
                     }
                     if let Ok(Some(text)) = rx.recv_timeout(remaining) {
-                        if normalized_contains(&text, &tail) {
-                            hits.push(h);
+                        // 前缀评分代替整串匹配：终端渲染消费 markdown 结构（粗体星号、
+                        // 列表符），整串常在尾部断裂；最长命中前缀 ≥12 且唯一最高 → 锁定
+                        let hn: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let s = longest_prefix_len(&hn, &tail);
+                        if s >= 12 {
+                            scored_hits.push((h, s));
                         }
                     }
                 }
-                if hits.len() == 1 {
-                    force_foreground(hits[0]);
-                    return Ok(FocusOutcome::Focused);
+                if !scored_hits.is_empty() {
+                    scored_hits.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
+                    let unique_top = scored_hits.len() == 1 || scored_hits[0].1 > scored_hits[1].1;
+                    if unique_top {
+                        force_foreground(scored_hits[0].0);
+                        return Ok(FocusOutcome::Focused);
+                    }
                 }
             }
         }
-        // ①6 项目名精确匹配：窗口标题恰为项目目录名（codex CLI 的终端标题形态）且唯一 → 锁定
+        // ①6 项目名精确匹配：标题（剥离 spinner 前缀后）恰为项目目录名（codex CLI 终端
+        // 标题形态：空闲=项目名，运行="⠙ 项目名"）且唯一 → 锁定
         if let Some(p) = project_name {
             if !p.is_empty() {
-                let pl = p.to_lowercase();
+                let pl = p.trim().to_lowercase();
                 let exact: Vec<isize> = cands
                     .iter()
-                    .filter(|(_, t)| t.trim().to_lowercase() == pl)
+                    .filter(|(_, t)| normalize_title_for_project(t) == pl)
                     .map(|(h, _)| *h)
                     .collect();
                 if exact.len() == 1 {
@@ -356,9 +388,21 @@ pub fn resolve_and_focus(
                 .iter()
                 .filter(|(_, t)| {
                     let tl = t.trim().to_lowercase();
-                    // 排除他工具认领的窗口与明显空终端（PowerShell/命令提示符等）
-                    claim_owner(t).is_none_or(|o| o == agent.as_str())
-                        && !IDLE_TERMINAL_TITLES.contains(&tl.as_str())
+                    // 排除：他工具认领（关键词）、明显空终端、其他工具运行会话的项目名窗口
+                    // （codex 终端标题=项目名无 "codex" 字样，由面板数据反推认领）
+                    if !claim_owner(t).is_none_or(|o| o == agent.as_str()) {
+                        return false;
+                    }
+                    if IDLE_TERMINAL_TITLES.contains(&tl.as_str()) {
+                        return false;
+                    }
+                    let nt = normalize_title_for_project(t);
+                    if running_projects.iter().any(|(a, p)| {
+                        a != agent.as_str() && !p.is_empty() && nt == p.trim().to_lowercase()
+                    }) {
+                        return false;
+                    }
+                    true
                 })
                 .collect();
             if filtered.is_empty() {
@@ -426,7 +470,7 @@ pub fn focus_hwnd(hwnd_val: isize) -> Result<(), String> {
 /// 兼容旧入口（mod.rs 的 focus_terminal_for_pid 内部使用）
 pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
     let system = sysinfo::System::new_all();
-    match resolve_and_focus(&system, pid, None, None, None, None) {
+    match resolve_and_focus(&system, pid, None, None, None, None, &[]) {
         Ok(FocusOutcome::Focused) => Ok(()),
         Ok(FocusOutcome::Ambiguous(_)) => Err("存在多个候选窗口，请重试以打开选择器".to_string()),
         Err(e) => Err(e),
@@ -435,7 +479,37 @@ pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_owner, collect_ancestor_pids_with};
+    use super::{
+        claim_owner, collect_ancestor_pids_with, longest_prefix_len, normalize_title_for_project,
+    };
+
+    #[test]
+    fn normalize_title_strips_spinner_prefix() {
+        // codex 运行态标题 "⠙ 项目名"（盲文 spinner）与空闲态 "项目名" 归一化后一致
+        assert_eq!(
+            normalize_title_for_project("⠙ MinerU_Convert"),
+            "mineru_convert"
+        );
+        assert_eq!(
+            normalize_title_for_project("MinerU_Convert"),
+            "mineru_convert"
+        );
+        assert_eq!(
+            normalize_title_for_project("  local-datasource "),
+            "local-datasource"
+        );
+    }
+
+    #[test]
+    fn longest_prefix_tolerates_render_diff() {
+        // 消息尾 40 字在终端渲染后尾部断裂（markdown 符号被消费），前缀 16 字仍可命中
+        let hay = "前面一大段内容 项目。 需要我帮你做什么吗 比如查看代码";
+        let needle =
+            "项目。 需要我帮你做什么吗 比如查看代码、调试问题、或者继续某个功能开发都可以。";
+        assert_eq!(longest_prefix_len(hay, needle), 20);
+        assert_eq!(longest_prefix_len("完全不相关", needle), 0);
+        assert_eq!(longest_prefix_len("整串都在 完全命中", "完全命中"), 4);
+    }
 
     #[test]
     fn collects_chain_until_no_parent() {

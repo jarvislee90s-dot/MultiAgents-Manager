@@ -522,48 +522,50 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         .map(|f| (f.clone(), parse_codex_jsonl(f, ProcessForm::Cli)))
         .collect();
 
-    // cwd -> processes 映射（用于精确匹配）
-    let mut cwd_to_processes: HashMap<String, Vec<&AgentProcess>> = HashMap::new();
+    // 无有效 cwd 的进程（如 APP 形态 cwd="/"）走 Phase 2 回退
     let mut unmatched_processes: Vec<&AgentProcess> = Vec::new();
     for process in processes {
-        match &process.cwd {
-            Some(cwd) => {
-                // 归一化：去尾部分隔符、Windows 下转小写（与 rollout 中记录的 cwd 保持可比）
-                let normalized = normalize_cwd_for_match(&cwd.to_string_lossy());
-                if normalized.is_empty() {
-                    unmatched_processes.push(process);
-                } else {
-                    cwd_to_processes
-                        .entry(normalized)
-                        .or_default()
-                        .push(process);
-                }
-            }
-            None => unmatched_processes.push(process),
+        let has_cwd = process
+            .cwd
+            .as_ref()
+            .map(|c| !normalize_cwd_for_match(&c.to_string_lossy()).is_empty())
+            .unwrap_or(false);
+        if !has_cwd {
+            unmatched_processes.push(process);
         }
     }
 
     let mut matched_file_indices: HashSet<usize> = HashSet::new();
 
-    // Phase 1: 按 cwd 精确匹配
-    for (idx, (file_path, session_opt)) in parsed.iter().enumerate() {
-        if let Some(session) = session_opt {
-            if let Some(procs) =
-                cwd_to_processes.get(&normalize_cwd_for_match(&session.project_path))
-            {
-                if let Some(proc) = procs.first() {
-                    // 用实际 process_form 重新解析以获取正确状态
-                    let mut session =
-                        parse_codex_jsonl(file_path, proc.form).unwrap_or_else(|| session.clone());
-                    session.pid = proc.pid;
-                    session.cpu_usage = proc.cpu_usage;
-                    session.form = proc.form;
-                    session.jump_supported = jump_supported_for(proc.form);
-                    session.github_url = get_github_url(&session.project_path);
-                    sessions.push(session);
-                    matched_file_indices.insert(idx);
-                }
+    // Phase 1: 按 cwd 精确匹配——每个进程一张卡，取目录匹配中 mtime 最新的 rollout。
+    // codex CLI 每轮对话写新 rollout（session_id 变），若按文件循环会把同一进程
+    // 挂成多张卡（用户实测同一窗口被识别为重复会话）
+    for process in processes {
+        let Some(cwd) = &process.cwd else { continue };
+        let normalized = normalize_cwd_for_match(&cwd.to_string_lossy());
+        if normalized.is_empty() {
+            continue;
+        }
+        // parsed 按 mtime 倒序，找第一个目录匹配且未被其他进程占用的文件
+        for (idx, (file_path, session_opt)) in parsed.iter().enumerate() {
+            if matched_file_indices.contains(&idx) {
+                continue;
             }
+            let Some(session) = session_opt else { continue };
+            if normalize_cwd_for_match(&session.project_path) != normalized {
+                continue;
+            }
+            // 用实际 process_form 重新解析以获取正确状态
+            let mut session =
+                parse_codex_jsonl(file_path, process.form).unwrap_or_else(|| session.clone());
+            session.pid = process.pid;
+            session.cpu_usage = process.cpu_usage;
+            session.form = process.form;
+            session.jump_supported = jump_supported_for(process.form);
+            session.github_url = get_github_url(&session.project_path);
+            sessions.push(session);
+            matched_file_indices.insert(idx);
+            break; // 每进程只取最新一个
         }
     }
 
