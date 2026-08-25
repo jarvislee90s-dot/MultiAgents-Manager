@@ -36,16 +36,17 @@ pub async fn show_notification_window(
     app: AppHandle,
     payload: NotificationPayload,
 ) -> Result<(), String> {
-    // 窗口创建必须放在独立线程：Windows 上在同步命令内直接创建 webview 会阻塞
-    // 主线程消息循环，webview 卡在 about:blank 不导航（wry#583）。Tauri 文档明确要求
-    // "use async commands and separate threads when creating webviews"，故命令改为
-    // async 并在 spawn 的线程内建房。
+    // 建房必须放独立线程（Windows 上在命令内直接创建 webview 会死锁，wry#583）；
+    // 结果经 oneshot 回收向上传播：失败时前端 catch 到 Err、降级系统 toast，通知不丢。
+    // await 发生在异步运行时线程，不阻塞主循环，不会复活死锁。
+    let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        if let Err(e) = create_notification_window(&app, payload) {
-            log::error!("创建通知窗口失败: {}", e);
-        }
+        let _ = tx.send(create_notification_window(&app, payload));
     });
-    Ok(())
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Err("创建通知窗口线程异常".to_string()),
+    }
 }
 
 /// 实际创建/复用通知窗口并发送事件（在独立线程执行）
