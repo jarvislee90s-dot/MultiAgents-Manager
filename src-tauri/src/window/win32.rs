@@ -68,6 +68,18 @@ const TOOL_CLAIM_KEYWORDS: &[(&str, &[&str])] = &[
     ("openclaw", &["openclaw"]),
 ];
 
+/// 明显的空终端窗口标题（无 CLI 会话在跑），从候选池排除；
+/// 池空回退全量时仍可能出现（保底有得选）
+const IDLE_TERMINAL_TITLES: &[&str] = &[
+    "windows powershell",
+    "powershell",
+    "pwsh",
+    "命令提示符",
+    "cmd",
+    "cmd.exe",
+    "windows terminal",
+];
+
 /// 判定窗口标题被哪个工具认领；命中多个工具（罕见）视为中立返回 None
 fn claim_owner(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
@@ -233,18 +245,6 @@ fn read_window_text(hwnd_val: isize) -> Option<String> {
     }
 }
 
-/// 带超时的读取（单窗口 200ms）：UIA 调用可能被无响应窗口阻塞，超时即放弃该窗口。
-/// 已知权衡：超时后该线程可能永久挂起（跨进程 COM 无强制取消），泄漏有界（≤8 线程/次点击）
-fn read_window_text_timeout(hwnd_val: isize) -> Option<String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(read_window_text(hwnd_val));
-    });
-    rx.recv_timeout(std::time::Duration::from_millis(200))
-        .ok()
-        .flatten()
-}
-
 /// 跳转解析结果
 pub enum FocusOutcome {
     Focused,
@@ -300,21 +300,48 @@ pub fn resolve_and_focus(
         if let Some(msg) = last_message {
             if !msg.is_empty() {
                 let tail = normalized_tail(msg, 40);
-                // 总预算 800ms：单窗 200ms × 顺序最多 8 窗，超预算即停止（宁 miss 勿拖慢点击）
+                // 并行读取（每窗独立线程，COM 各自初始化），总预算 800ms。
+                // 实测单窗全缓冲读取 127-400ms：顺序读最坏超预算，并行墙钟≈最慢单窗。
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-                let hits: Vec<isize> = cands
-                    .iter()
-                    .take(8)
-                    .take_while(|_| std::time::Instant::now() < deadline)
-                    .filter(|(hwnd, _)| {
-                        read_window_text_timeout(*hwnd)
-                            .map(|text| normalized_contains(&text, &tail))
-                            .unwrap_or(false)
-                    })
-                    .map(|(hwnd, _)| *hwnd)
-                    .collect();
+                let mut rxs: Vec<(isize, std::sync::mpsc::Receiver<Option<String>>)> = Vec::new();
+                for (h, _) in cands.iter().take(8) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let hwnd = *h;
+                    std::thread::spawn(move || {
+                        let _ = tx.send(read_window_text(hwnd));
+                    });
+                    rxs.push((hwnd, rx));
+                }
+                let mut hits: Vec<isize> = Vec::new();
+                for (h, rx) in rxs {
+                    // 超预算即放弃等待（挂起线程泄漏有界 ≤8/次点击，已知权衡）
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    if let Ok(Some(text)) = rx.recv_timeout(remaining) {
+                        if normalized_contains(&text, &tail) {
+                            hits.push(h);
+                        }
+                    }
+                }
                 if hits.len() == 1 {
                     force_foreground(hits[0]);
+                    return Ok(FocusOutcome::Focused);
+                }
+            }
+        }
+        // ①6 项目名精确匹配：窗口标题恰为项目目录名（codex CLI 的终端标题形态）且唯一 → 锁定
+        if let Some(p) = project_name {
+            if !p.is_empty() {
+                let pl = p.to_lowercase();
+                let exact: Vec<isize> = cands
+                    .iter()
+                    .filter(|(_, t)| t.trim().to_lowercase() == pl)
+                    .map(|(h, _)| *h)
+                    .collect();
+                if exact.len() == 1 {
+                    force_foreground(exact[0]);
                     return Ok(FocusOutcome::Focused);
                 }
             }
@@ -327,7 +354,12 @@ pub fn resolve_and_focus(
         let pool: Vec<&(isize, String)> = {
             let filtered: Vec<&(isize, String)> = cands
                 .iter()
-                .filter(|(_, t)| claim_owner(t).is_none_or(|o| o == agent.as_str()))
+                .filter(|(_, t)| {
+                    let tl = t.trim().to_lowercase();
+                    // 排除他工具认领的窗口与明显空终端（PowerShell/命令提示符等）
+                    claim_owner(t).is_none_or(|o| o == agent.as_str())
+                        && !IDLE_TERMINAL_TITLES.contains(&tl.as_str())
+                })
                 .collect();
             if filtered.is_empty() {
                 cands.iter().collect()

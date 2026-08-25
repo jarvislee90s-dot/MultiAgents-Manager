@@ -20,11 +20,11 @@ CWD=$(echo "$INPUT" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.
 TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
-# 注入窗口标题 marker（MAM:<session_id 前 8 位>）。/dev/tty 在 hook（原生进程 spawn 的 bash）
-# 上下文不可达，改写 Windows 控制台设备 CONOUT$（hook 子进程继承宿主控制台）。
-# 仅低频事件注入（避免每次工具调用 spawn powershell 拖慢 agent 循环）；
-# MAM_MARKER=0 可整体禁用；无 powershell 环境（macOS 等）零开销跳过
-if [ "${MAM_MARKER:-1}" = "1" ] && command -v powershell >/dev/null 2>&1; then
+# 注入窗口标题 marker（MAM:<session_id 前 8 位>）。实测 /dev/tty 与 CONOUT$ 两条通道在
+# hook（原生进程 spawn 的 bash）上下文均不可达（2026-08-25 用户交互终端复测仍无 marker，
+# 判决 no-go），默认禁用、代码保留待新通道（如轻量 helper 可执行文件）。
+# MAM_MARKER=1 可重新启用试验；仅低频事件注入；无 powershell 环境零开销跳过
+if [ "${MAM_MARKER:-0}" = "1" ] && command -v powershell >/dev/null 2>&1; then
   case "$EVENT" in
     [Ss]top|[Pp]ostToolUse|[Ss]essionEnd|[Uu]serPromptSubmit)
       MID=$(printf '%s' "$SESSION_ID" | cut -c1-8)

@@ -461,6 +461,7 @@ git commit -m "feat(ui): window picker for ambiguous jump targets"
   > **spike 结论（2026-08-24 补录）**：前提 A 不成立（实跑 claude 会话成功、生成了 session_id，但 `~/.mam/events` 无新事件文件——根因是 claude `settings.json` 无 hooks 段、hook 脚本未被执行，DB 中 hooks_registered=true 却未实际注册到 claude）/ 前提 B 成立（子进程向控制台写 `ESC]0;MAM:test1234 BEL` 序列后，窗口标题实测变为 `MAM:test1234`）。判定 no-go，marker 层保持未启用，窗口歧义由标题打分 + 选择器兜底。
   > **2026-08-25 更新**：前提 A 根因（注册假阳性）已修复——dev 启动即注册 hooks 段（命令形态 `bash "...status-hook.sh"`），实跑 claude 会话后 `~/.mam/events/` 正常产出事件文件；marker 已随脚本启用，hook 内 `/dev/tty` 写入在本轮自动化（无头管道）环境报 "No such device or address"、交互终端下的标题效果待用户验证，窗口歧义仍由候选打分过滤兜底。
   > **2026-08-25 二次更新（CONOUT$ spike，spec 013）**：marker 注入改走 CONOUT$（`powershell [IO.File]::WriteAllText('CONOUT$', ESC + "]0;MAM:<8位>" + BEL)`）。实测：脚本刷新机制正常（dev 启动即幂等重写）；hook 事件产出不受影响（`~/.mam/events/` 出现 spike 会话事件文件 session_id=spike7a3b…）；但**标题是否出现 MAM: 前缀无法在本自动化环境确证**（无交互终端可观测；wt→bash 引号链路的模拟靶窗口不可靠）。另修正计划笔误：bash 双引号内 `] 前的反斜杠会被保留致 OSC 序列退化为 ST+字面文本，已去除。判定 **no-go（未确证）**：marker 代码保留不回滚，精确匹配主力切换为 UIA 正文匹配、认领池过滤兜底；交互终端实测留待用户执行。
+  > **2026-08-25 终审（用户交互终端复测）**：hook 事件正常触发（含 Stop 事件）但终端标题始终无 `MAM:` 前缀——CONOUT$ 通道在 hook 上下文同样不可达。**最终判决 no-go，marker 默认禁用**（`MAM_MARKER:-0`，代码保留待轻量 helper 等新通道）；精确匹配主力 = UIA 正文匹配（已并行化，实测单窗 127-400ms）+ 项目名精确层（codex 标题=项目目录名形态）。
 
 前提 A（hook 在本机实际生效）：跑一个 claude 会话发条消息，检查 `~/.mam/events/` 是否出现新事件文件——没有则 hook 通道未工作，marker 无从注入，no-go。
 前提 B（子进程写标题可达）：在 Git Bash 终端执行：

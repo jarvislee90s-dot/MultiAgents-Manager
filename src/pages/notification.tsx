@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { LogicalSize } from "@tauri-apps/api/dpi";
+import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { useTranslation } from "react-i18next";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import { AGENT_BADGE } from "@/lib/agentBadge";
@@ -33,11 +33,16 @@ export default function NotificationPage() {
     timerRef.current = window.setTimeout(() => getCurrentWindow().hide(), ms);
   };
 
-  // 候选列表动态高度：N 个候选按 60+N*34+16 计算，上限 400（超出内部滚动）；null 还原 110
+  // 候选列表动态高度：N 个候选按 60+N*34+16 计算，上限 400（超出内部滚动）；null 还原 110。
+  // 底边锚定：窗口 y 是按 110 高定位的，增高时同步上移，避免底边溢出屏幕/任务栏
   const applyHeight = async (count: number | null) => {
     const h = count === null ? 110 : Math.min(60 + count * 34 + 16, 400);
     try {
-      await getCurrentWindow().setSize(new LogicalSize(360, h));
+      const win = getCurrentWindow();
+      const scale = await win.scaleFactor();
+      const pos = await win.outerPosition();
+      await win.setSize(new LogicalSize(360, h));
+      await win.setPosition(new PhysicalPosition(pos.x, Math.round(pos.y - (h - 110) * scale)));
     } catch {
       // 非 Tauri 环境忽略
     }
