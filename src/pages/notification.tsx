@@ -37,13 +37,19 @@ export default function NotificationPage() {
       if (timerRef.current) window.clearTimeout(timerRef.current);
       timerRef.current = window.setTimeout(() => win.hide(), 6000);
     };
-    listen<NotificationPayload>("notification:new", (e) => {
-      setPayload(e.payload);
-      // 新通知到达时清掉旧候选列表，避免与卡片同时出现
-      setCandidates(null);
-      win.show();
-      armTimer();
-    }).then((fn) => (unlisten = fn));
+    // 监听必须限定本窗口：不指定 target 时监听器目标为 Any，会收到所有槽位窗口的
+    // notification:new（emit_to 定向发送被 Any 监听器全收），导致每个浮窗都显示最后一条内容
+    listen<NotificationPayload>(
+      "notification:new",
+      (e) => {
+        setPayload(e.payload);
+        // 新通知到达时清掉旧候选列表，避免与卡片同时出现
+        setCandidates(null);
+        win.show();
+        armTimer();
+      },
+      { target: win.label }
+    ).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   }, []);
 
