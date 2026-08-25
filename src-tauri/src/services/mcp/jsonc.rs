@@ -15,7 +15,11 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn new(s: &'a str) -> Self {
-        Cursor { s, b: s.as_bytes(), pos: 0 }
+        Cursor {
+            s,
+            b: s.as_bytes(),
+            pos: 0,
+        }
     }
 
     /// 跳过空白与注释
@@ -144,7 +148,10 @@ impl<'a> Cursor<'a> {
                 }
             }
         }
-        Some(Span { start: value_start, end: self.pos })
+        Some(Span {
+            start: value_start,
+            end: self.pos,
+        })
     }
 }
 
@@ -176,13 +183,23 @@ fn walk_object(cur: &mut Cursor) -> Option<(Span, Vec<Entry>)> {
         }
         cur.pos += 1;
         let value = cur.skip_value()?;
-        entries.push(Entry { key, key_start, value });
+        entries.push(Entry {
+            key,
+            key_start,
+            value,
+        });
         cur.skip_trivia();
         if cur.pos < cur.b.len() && cur.b[cur.pos] == b',' {
             cur.pos += 1;
         }
     }
-    Some((Span { start: obj_start, end: cur.pos }, entries))
+    Some((
+        Span {
+            start: obj_start,
+            end: cur.pos,
+        },
+        entries,
+    ))
 }
 
 fn parse_root(content: &str) -> Result<(Span, Vec<Entry>), String> {
@@ -195,7 +212,12 @@ fn parse_root(content: &str) -> Result<(Span, Vec<Entry>), String> {
 }
 
 /// 在顶层对象的 section 中插入/覆盖 entry（值为紧凑 JSON 字符串）
-pub fn upsert_entry(content: &str, section: &str, key: &str, value_json: &str) -> Result<String, String> {
+pub fn upsert_entry(
+    content: &str,
+    section: &str,
+    key: &str,
+    value_json: &str,
+) -> Result<String, String> {
     let (root, root_entries) = parse_root(content)?;
     let section_entry = root_entries.iter().find(|e| e.key == section);
     let mut out = String::new();
@@ -231,7 +253,10 @@ pub fn upsert_entry(content: &str, section: &str, key: &str, value_json: &str) -
             if !root_entries.is_empty() {
                 out.push(',');
             }
-            out.push_str(&format!(" \"{}\": {{\"{}\": {}}} ", section, key, value_json));
+            out.push_str(&format!(
+                " \"{}\": {{\"{}\": {}}} ",
+                section, key, value_json
+            ));
             out.push_str(&content[close..]);
         }
     }
@@ -273,7 +298,9 @@ pub fn remove_entry(content: &str, section: &str, key: &str) -> Result<String, S
         // 首个 entry 且后面还有：向右吃掉逗号
         let mut j = remove_end;
         let bytes = content.as_bytes();
-        while j < se.value.end && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r' || bytes[j] == b'\n') {
+        while j < se.value.end
+            && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r' || bytes[j] == b'\n')
+        {
             j += 1;
         }
         if j < se.value.end && bytes[j] == b',' {
@@ -305,13 +332,16 @@ mod tests {
 
     #[test]
     fn upsert_new_entry_keeps_comments() {
-        let out = upsert_entry(SAMPLE, "mcp", "new", r#"{"type":"local","command":["b"]}"#).unwrap();
+        let out =
+            upsert_entry(SAMPLE, "mcp", "new", r#"{"type":"local","command":["b"]}"#).unwrap();
         assert!(out.contains("// top comment"));
         assert!(out.contains("/* block comment */"));
         assert!(out.contains("\"new\": {\"type\":\"local\",\"command\":[\"b\"]}"));
         assert!(out.contains("\"old\""));
         // 结果仍是合法 JSON（测试样本无注释干扰新段）
-        let json_only = out.replace("// top comment", "").replace("/* block comment */", "");
+        let json_only = out
+            .replace("// top comment", "")
+            .replace("/* block comment */", "");
         let v: serde_json::Value = serde_json::from_str(&json_only).unwrap();
         assert_eq!(v["mcp"]["new"]["command"][0], "b");
     }

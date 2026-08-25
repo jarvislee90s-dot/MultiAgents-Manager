@@ -20,7 +20,12 @@ pub struct NativeExtensionRecord {
 fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
     const SCAN_MAX_DEPTH: usize = 4;
     let mut results = Vec::new();
-    fn recurse(dir: &std::path::Path, base: &std::path::Path, depth: usize, results: &mut Vec<String>) {
+    fn recurse(
+        dir: &std::path::Path,
+        base: &std::path::Path,
+        depth: usize,
+        results: &mut Vec<String>,
+    ) {
         if depth > SCAN_MAX_DEPTH {
             log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
             return;
@@ -318,7 +323,9 @@ pub fn list_ssot_resources() -> SsotResources {
                 // 断链检测：DB 中 enabled 且链接状态为 dangling 的工具
                 let broken_tools: Vec<String> = assignments
                     .iter()
-                    .filter(|a| a.extension_id == ext_id && a.enabled && a.link_status == "dangling")
+                    .filter(|a| {
+                        a.extension_id == ext_id && a.enabled && a.link_status == "dangling"
+                    })
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
                 SsotResource {
@@ -552,7 +559,11 @@ pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
 /// 移除工具目录中的 skill 目标：链接直接移除（无数据可丢），原生目录移入系统回收站。
 /// 回收站失败返回错误，绝不静默降级为永久删除。
 fn remove_skill_target(target: &std::path::Path) -> Result<String, String> {
-    let target_type = if target.is_symlink() { "symlink" } else { "native" };
+    let target_type = if target.is_symlink() {
+        "symlink"
+    } else {
+        "native"
+    };
     if target_type == "symlink" {
         crate::linker::remove_link(target)?;
     } else {

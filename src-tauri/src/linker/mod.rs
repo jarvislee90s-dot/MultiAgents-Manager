@@ -310,7 +310,10 @@ mod link_health_tests {
     #[test]
     fn missing_and_native_paths() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(check_link_health(&tmp.path().join("none")), LinkHealth::Missing);
+        assert_eq!(
+            check_link_health(&tmp.path().join("none")),
+            LinkHealth::Missing
+        );
         let native = tmp.path().join("real");
         std::fs::create_dir_all(&native).unwrap();
         assert_eq!(check_link_health(&native), LinkHealth::NotLink);

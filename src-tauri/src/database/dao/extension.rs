@@ -175,10 +175,7 @@ pub fn delete_assignments_for(ext_id: &str) -> Result<(), String> {
     delete_assignments_for_on(&conn, ext_id)
 }
 
-pub fn delete_assignments_for_on(
-    conn: &rusqlite::Connection,
-    ext_id: &str,
-) -> Result<(), String> {
+pub fn delete_assignments_for_on(conn: &rusqlite::Connection, ext_id: &str) -> Result<(), String> {
     conn.execute(
         "DELETE FROM extension_assignments WHERE extension_id = ?1",
         params![ext_id],
@@ -202,13 +199,12 @@ mod delete_tests {
     fn delete_extension_removes_row() {
         let conn = mem_conn();
         let now = chrono::Utc::now().to_rfc3339();
-        conn
-            .execute(
-                "INSERT INTO extensions (id, kind, name, source_path, installed_at, updated_at) \
+        conn.execute(
+            "INSERT INTO extensions (id, kind, name, source_path, installed_at, updated_at) \
              VALUES ('skill-x','skill','x','/tmp/x',?1,?1)",
-                [&now],
-            )
-            .unwrap();
+            [&now],
+        )
+        .unwrap();
         delete_extension_on(&conn, "skill-x").unwrap();
         let n: i64 = conn
             .query_row(

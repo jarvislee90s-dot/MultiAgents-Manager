@@ -155,7 +155,12 @@ pub fn enable_config_plugin(
             let value = serde_json::to_value(entries)
                 .map_err(|e| e.to_string())?
                 .to_string();
-            let next = crate::services::mcp::jsonc::upsert_entry(&content, "plugins", plugin_name, &value)?;
+            let next = crate::services::mcp::jsonc::upsert_entry(
+                &content,
+                "plugins",
+                plugin_name,
+                &value,
+            )?;
             linker::write_config_locked(config_path, &next)?;
         }
         crate::adapter::McpFormat::Toml => {

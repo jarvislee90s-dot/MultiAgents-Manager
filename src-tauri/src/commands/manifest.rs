@@ -160,7 +160,10 @@ pub fn uninstall_resource(kind: String, name: String) -> Result<(), String> {
     // 2.1) manifest 安装的 MCP 以目录形式存放于 ~/.mam/mcp/<id>/（而非 <name>.json 文件），
     //      上面文件/目录候选循环不会命中，这里按 manifest 安装布局补充目录清理
     if kind == "mcp" {
-        let mam_mcp = dirs::home_dir().unwrap_or_default().join(".mam").join("mcp");
+        let mam_mcp = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".mam")
+            .join("mcp");
         let mut dir_candidates = vec![mam_mcp.join(&name)];
         if let Some(r) = record.as_ref() {
             dir_candidates.push(mam_mcp.join(&r.id));
