@@ -210,19 +210,6 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         .map(|e| e.name.clone())
         .collect();
 
-    if !force && !existing_before.is_empty() {
-        log::debug!(
-            "Skills already imported ({} in DB), skipping auto-import",
-            existing_before.len()
-        );
-        return ImportStats {
-            imported: 0,
-            newly_added: 0,
-            skipped_dup: 0,
-            source_counts: Vec::new(),
-        };
-    }
-
     let skill_sources: Vec<(&str, std::path::PathBuf)> =
         ["claude", "codex", "opencode", "openclaw"]
             .into_iter()
@@ -231,7 +218,13 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
             })
             .collect();
 
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 增量模式（force=false 且 DB 已有数据）：已存在的 name 只补链不重导（Task 6 的 LinkOnly）；
+    // force=true 全量重扫保持覆盖导入语义
+    let mut seen_names: std::collections::HashSet<String> = if force {
+        std::collections::HashSet::new()
+    } else {
+        existing_before.iter().cloned().collect()
+    };
     let mut imported: usize = 0;
     let mut skipped_dup: usize = 0;
     let mut source_counts: Vec<(String, usize)> = Vec::new();
@@ -411,19 +404,31 @@ mod import_plan_tests {
     #[test]
     fn new_name_imports_and_links() {
         let seen = std::collections::HashSet::new();
-        assert_eq!(plan_skill_import("foo", &seen, None), SkillImportPlan::ImportAndLink);
+        assert_eq!(
+            plan_skill_import("foo", &seen, None),
+            SkillImportPlan::ImportAndLink
+        );
     }
 
     #[test]
     fn known_name_links_second_tool() {
         let seen: std::collections::HashSet<String> = ["foo".to_string()].into_iter().collect();
-        assert_eq!(plan_skill_import("foo", &seen, None), SkillImportPlan::LinkOnly);
-        assert_eq!(plan_skill_import("foo", &seen, Some(true)), SkillImportPlan::LinkOnly);
+        assert_eq!(
+            plan_skill_import("foo", &seen, None),
+            SkillImportPlan::LinkOnly
+        );
+        assert_eq!(
+            plan_skill_import("foo", &seen, Some(true)),
+            SkillImportPlan::LinkOnly
+        );
     }
 
     #[test]
     fn known_name_respects_explicit_disable() {
         let seen: std::collections::HashSet<String> = ["foo".to_string()].into_iter().collect();
-        assert_eq!(plan_skill_import("foo", &seen, Some(false)), SkillImportPlan::Skip);
+        assert_eq!(
+            plan_skill_import("foo", &seen, Some(false)),
+            SkillImportPlan::Skip
+        );
     }
 }
