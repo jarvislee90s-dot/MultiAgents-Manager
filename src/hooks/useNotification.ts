@@ -56,6 +56,8 @@ export function useNotification() {
   // 初始化：请求通知权限 + 读取设置
   useEffect(() => {
     const init = async () => {
+      // 渠道统一（spec 014）：清理旧系统通知开关的遗留键
+      localStorage.removeItem("mam.useSystemNotification");
       try {
         let granted = await isPermissionGranted();
         if (!granted) {
@@ -156,14 +158,27 @@ export function useNotification() {
         if (currColor === "green") playCompletionSound(session.agentType);
         lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
 
-        // 发送通知：系统 toast 或应用内浮窗（mam.useSystemNotification 开关控制）
+        // 发送通知：应用内浮窗为唯一主路径（spec 014 渠道统一），失败降级系统 toast
         {
           const toolLabel = AGENT_LABELS[session.agentType] ?? session.agentType;
           const statusLabel = STATUS_LABELS[session.status] ?? session.status;
           const formTag = session.form === "app" ? " (APP)" : "";
-          const useSystemToast = localStorage.getItem("mam.useSystemNotification") === "1";
-          if (useSystemToast) {
-            // 系统通知路径（需要通知权限）
+          try {
+            await invoke("show_notification_window", {
+              payload: {
+                agentType: session.agentType,
+                agentLabel: toolLabel,
+                projectName: session.projectName,
+                statusColor: statusToColor(session.status),
+                status: session.status,
+                lastMessage: session.lastMessage ?? "",
+                pid: session.pid,
+                sessionId: session.id,
+              },
+            });
+          } catch (e) {
+            // 浮窗失败降级系统 toast，保证通知不丢（spec 008 错误处理要求）
+            console.error("show_notification_window failed:", e);
             if (permissionGranted.current) {
               sendNotification({
                 title: `${toolLabel}${formTag} — ${session.projectName}`,
@@ -177,39 +192,6 @@ export function useNotification() {
                   lastMessage: session.lastMessage ?? "",
                 },
               });
-            }
-          } else {
-            // 应用内浮窗路径（无需系统权限，不夺焦点）
-            try {
-              await invoke("show_notification_window", {
-                payload: {
-                  agentType: session.agentType,
-                  agentLabel: toolLabel,
-                  projectName: session.projectName,
-                  statusColor: statusToColor(session.status),
-                  status: session.status,
-                  lastMessage: session.lastMessage ?? "",
-                  pid: session.pid,
-                  sessionId: session.id,
-                },
-              });
-            } catch (e) {
-              // 浮窗失败降级系统 toast，保证通知不丢（spec 008 错误处理要求）
-              console.error("show_notification_window failed:", e);
-              if (permissionGranted.current) {
-                sendNotification({
-                  title: `${toolLabel}${formTag} — ${session.projectName}`,
-                  body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
-                  actionTypeId: "focus-session",
-                  extra: {
-                    pid: session.pid,
-                    sessionId: session.id,
-                    agentType: session.agentType,
-                    projectName: session.projectName,
-                    lastMessage: session.lastMessage ?? "",
-                  },
-                });
-              }
             }
           }
         }

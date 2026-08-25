@@ -71,8 +71,6 @@
       "setSuccess": "已将快捷键设为 {{shortcut}}！",
       "cleared": "已取消快捷键！"
     },
-    "useSystemNotification": "使用系统通知",
-    "useSystemNotificationDesc": "默认关闭，使用应用内浮窗；开启后走系统 toast 通知",
     "notifications": {
       "title": "通知",
       "heading": "通知设置",
@@ -88,10 +86,11 @@
       "soundFollowGlobal": "跟随全局",
       "soundMute": "静音",
       "soundTest": "试听",
-      "desktopTest": "桌面通知测试",
-      "desktopTestDesc": "发送一条测试通知",
-      "send": "发送",
-      "testBody": "测试通知 — 通知功能正常"
+      "floatTest": "浮窗预览测试",
+      "floatTestDesc": "弹出应用内通知浮窗预览效果",
+      "testFloat": "预览浮窗",
+      "testProject": "通知测试",
+      "testMessage": "这是一条测试通知（浮窗预览）"
     }
   },
   "home": {

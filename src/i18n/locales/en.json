@@ -71,8 +71,6 @@
       "setSuccess": "Shortcut set to {{shortcut}}!",
       "cleared": "Shortcut cleared!"
     },
-    "useSystemNotification": "Use system notifications",
-    "useSystemNotificationDesc": "Off by default — uses the in-app toast; enable for system toasts",
     "notifications": {
       "title": "Notifications",
       "heading": "Notification Settings",
@@ -88,10 +86,11 @@
       "soundFollowGlobal": "Follow global",
       "soundMute": "Mute",
       "soundTest": "Preview",
-      "desktopTest": "Desktop notification test",
-      "desktopTestDesc": "Send a test notification",
-      "send": "Send",
-      "testBody": "Test notification — notifications are working"
+      "floatTest": "Float preview test",
+      "floatTestDesc": "Show an in-app notification float preview",
+      "testFloat": "Preview float",
+      "testProject": "Notification test",
+      "testMessage": "This is a test notification (float preview)"
     }
   },
   "home": {

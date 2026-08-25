@@ -9,7 +9,6 @@ import { LanguageToggle } from "@/components/common/language-toggle";
 import { ShortcutInput } from "@/components/common/shortcut-input";
 import { Moon, Sun, Monitor, Palette, Keyboard, Bell, Volume2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { sendNotification } from "@tauri-apps/plugin-notification";
 import {
   SOUND_IDS,
   getSoundConfig,
@@ -30,7 +29,6 @@ type SettingSection = "appearance" | "shortcut" | "notifications";
 export default function SettingsPage() {
   const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
-  const [useSystemNotification, setUseSystemNotification] = useState(false);
   const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
   const [activeSection, setActiveSection] = useState<SettingSection>("appearance");
   const { t } = useAppTranslation();
@@ -66,20 +64,7 @@ export default function SettingsPage() {
       }
     };
     loadNotificationSetting();
-    // 读取系统通知开关（localStorage：'1' 开 / 其余关）
-    setUseSystemNotification(localStorage.getItem("mam.useSystemNotification") === "1");
   }, []);
-
-  const toggleUseSystemNotification = () => {
-    const newValue = !useSystemNotification;
-    setUseSystemNotification(newValue);
-    // 存储约定与 useNotification 读取侧一致：'1' 开 / 移除即关
-    if (newValue) {
-      localStorage.setItem("mam.useSystemNotification", "1");
-    } else {
-      localStorage.removeItem("mam.useSystemNotification");
-    }
-  };
 
   const handleShortcutChange = async (newShortcut: string) => {
     const oldShortcut = shortcut;
@@ -269,26 +254,6 @@ export default function SettingsPage() {
                   </Button>
                 </div>
                 <div className="border-t" />
-                <div className="flex items-center justify-between py-2.5">
-                  <div className="flex-1">
-                    <label className="text-sm font-medium">
-                      {t("settings.useSystemNotification")}
-                    </label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      {t("settings.useSystemNotificationDesc")}
-                    </p>
-                  </div>
-                  <Button
-                    variant={useSystemNotification ? "default" : "outline"}
-                    size="sm"
-                    onClick={toggleUseSystemNotification}
-                  >
-                    {useSystemNotification
-                      ? t("settings.notifications.on")
-                      : t("settings.notifications.off")}
-                  </Button>
-                </div>
-                <div className="border-t" />
                 <div className="space-y-3 py-2.5">
                   {/* 全局完成音：所有工具默认播放的音效 */}
                   <div className="flex items-center justify-between gap-2">
@@ -368,24 +333,36 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
                     <label className="text-sm font-medium">
-                      {t("settings.notifications.desktopTest")}
+                      {t("settings.notifications.floatTest")}
                     </label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
-                      {t("settings.notifications.desktopTestDesc")}
+                      {t("settings.notifications.floatTestDesc")}
                     </p>
                   </div>
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
-                      sendNotification({
-                        title: "MultiAgents Manager",
-                        body: t("settings.notifications.testBody"),
-                      })
-                    }
+                    onClick={async () => {
+                      try {
+                        await invoke("show_notification_window", {
+                          payload: {
+                            agentType: "claude",
+                            agentLabel: "Claude",
+                            projectName: t("settings.notifications.testProject"),
+                            statusColor: "yellow",
+                            status: "waiting",
+                            lastMessage: t("settings.notifications.testMessage"),
+                            pid: 0,
+                            sessionId: "test",
+                          },
+                        });
+                      } catch (e) {
+                        console.error("float preview failed:", e);
+                      }
+                    }}
                   >
                     <Bell className="mr-1.5 h-3.5 w-3.5" />
-                    {t("settings.notifications.send")}
+                    {t("settings.notifications.testFloat")}
                   </Button>
                 </div>
               </div>
