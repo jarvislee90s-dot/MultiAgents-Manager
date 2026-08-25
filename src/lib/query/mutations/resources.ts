@@ -12,6 +12,6 @@ export function useToggleMcpMutation() {
       toolId: string;
       enabled: boolean;
     }) => toggleMcpForTool(mcpName, toolId, enabled),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["extensions"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ssotResources"] }),
   });
 }

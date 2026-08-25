@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -14,16 +15,16 @@ import {
 } from "@/components/ui/dialog";
 import { Package, Link2, Plug, Info, Trash2, FileJson } from "lucide-react";
 import {
-  listSsotResources,
   checkSkillTargetType,
   disableSkillForTool,
   enableSkillForTool,
   importMcpToSsot,
   saveMcpConfig,
 } from "@/lib/api/resource";
+import { useSsotResourcesQuery } from "@/lib/query/queries/resources";
+import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
 import { uninstallResource } from "@/lib/api/manifest";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
-import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -46,7 +47,9 @@ type PendingDisable = {
 
 export function ResourceByKindView() {
   const { t } = useTranslation();
-  const [resources, setResources] = useState<SsotResources | null>(null);
+  const qc = useQueryClient();
+  const { data: resources } = useSsotResourcesQuery();
+  const toggleMcp = useToggleMcpMutation();
   const [search, setSearch] = useState("");
   const [pending, setPending] = useState<PendingDisable | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -62,9 +65,7 @@ export function ResourceByKindView() {
   const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
   const [installDlgOpen, setInstallDlgOpen] = useState(false);
 
-  useEffect(() => {
-    listSsotResources().then(setResources).catch(console.error);
-  }, []);
+  const refresh = () => qc.invalidateQueries({ queryKey: ["ssotResources"] });
 
   if (!resources) {
     return <div className="text-muted-foreground py-4 text-xs">{t("common.loading")}</div>;
@@ -86,10 +87,9 @@ export function ResourceByKindView() {
           // 可能已导入或找不到配置，继续尝试启用
         }
       }
-      await invoke("toggle_mcp_for_tool", { mcpName: name, toolId, enabled });
+      await toggleMcp.mutateAsync({ mcpName: name, toolId, enabled });
       toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
-      const fresh = await listSsotResources();
-      setResources(fresh);
+      await refresh();
     } catch (e) {
       toast.error(t("common.operationFailed", { error: e }));
     }
@@ -104,8 +104,7 @@ export function ResourceByKindView() {
     try {
       await invoke("toggle_plugin_for_tool", { pluginName: name, toolId, enabled, kind });
       toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
-      const fresh = await listSsotResources();
-      setResources(fresh);
+      await refresh();
     } catch (e) {
       toast.error(t("common.operationFailed", { error: e }));
     }
@@ -122,8 +121,7 @@ export function ResourceByKindView() {
             tool: TOOLS.find((tool) => tool.id === toolId)?.label,
           })
         );
-        const fresh = await listSsotResources();
-        setResources(fresh);
+        await refresh();
       } catch (e) {
         toast.error(t("resources.enableFailed", { error: e }));
       }
@@ -153,8 +151,7 @@ export function ResourceByKindView() {
       toast.success(
         t("resources.removedFromTool", { name: pending.displayName, tool: pending.toolLabel })
       );
-      const fresh = await listSsotResources();
-      setResources(fresh);
+      await refresh();
     } catch (e) {
       toast.error(t("resources.removeFailed", { error: e }));
     } finally {
@@ -168,8 +165,7 @@ export function ResourceByKindView() {
     try {
       await uninstallResource(pendingUninstall.kind, pendingUninstall.name);
       toast.success(t("resources.uninstallSuccess", { name: pendingUninstall.name }));
-      const fresh = await listSsotResources();
-      setResources(fresh);
+      await refresh();
     } catch (e) {
       toast.error(t("common.operationFailed", { error: e }));
     } finally {
@@ -195,8 +191,7 @@ export function ResourceByKindView() {
       toast.success(t("resources.mcpAddedToRepo", { name: newMcp.name }));
       setMcpDialogOpen(false);
       setNewMcp({ name: "", command: "", args: "", env: "" });
-      const fresh = await listSsotResources();
-      setResources(fresh);
+      await refresh();
     } catch (e) {
       toast.error(t("resources.addMcpFailed", { error: e }));
     }
@@ -619,8 +614,7 @@ export function ResourceByKindView() {
         onOpenChange={setInstallDlgOpen}
         onInstalled={async () => {
           try {
-            const fresh = await listSsotResources();
-            setResources(fresh);
+            await refresh();
           } catch (e) {
             toast.error(t("common.operationFailed", { error: e }));
           }
