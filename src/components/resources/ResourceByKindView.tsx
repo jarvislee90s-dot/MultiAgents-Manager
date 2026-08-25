@@ -25,6 +25,7 @@ import { useSsotResourcesQuery, SSOT_RESOURCES_KEY } from "@/lib/query/queries/r
 import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
 import { uninstallResource } from "@/lib/api/manifest";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
+import type { SsotResource } from "@/types/extension";
 
 const TOOLS = [
   { id: "claude", label: "Claude" },
@@ -71,11 +72,14 @@ export function ResourceByKindView() {
     return <div className="text-muted-foreground py-4 text-xs">{t("common.loading")}</div>;
   }
 
-  const filteredSkills = resources.skills.filter((s) => {
+  const filterFn = (r: { name: string; enabledTools: string[] }) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
-    return [s.name, ...s.enabledTools].some((x) => x.toLowerCase().includes(q));
-  });
+    return [r.name, ...r.enabledTools].some((x) => x.toLowerCase().includes(q));
+  };
+  const filteredSkills = resources.skills.filter(filterFn);
+  const filteredMcp = resources.mcp.filter(filterFn);
+  const filteredPlugins = resources.plugins.filter(filterFn);
 
   const handleToggleMcp = async (name: string, toolId: string, enabled: boolean) => {
     try {
@@ -93,6 +97,57 @@ export function ResourceByKindView() {
     } catch (e) {
       toast.error(t("common.operationFailed", { error: e }));
     }
+  };
+
+  const handleToggleAll = async (res: SsotResource, enable: boolean) => {
+    let ok = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const tool of TOOLS) {
+      const isEnabled = res.enabledTools.includes(tool.id);
+      if (enable === isEnabled) continue;
+      try {
+        if (res.kind === "skill") {
+          if (enable) {
+            await enableSkillForTool(res.name, tool.id);
+          } else {
+            const ty = await checkSkillTargetType(tool.id, res.name);
+            if (ty === "native") {
+              skipped++; // 原生目录不批量删除，跳过
+              continue;
+            }
+            await disableSkillForTool(tool.id, res.name);
+          }
+        } else if (res.kind === "mcp") {
+          if (enable) {
+            try {
+              await importMcpToSsot(res.name);
+            } catch (_) {
+              /* 已导入 */
+            }
+          }
+          await invoke("toggle_mcp_for_tool", {
+            mcpName: res.name,
+            toolId: tool.id,
+            enabled: enable,
+          });
+        } else {
+          await invoke("toggle_plugin_for_tool", {
+            pluginName: res.name,
+            toolId: tool.id,
+            enabled: enable,
+            kind: "file",
+          });
+        }
+        ok++;
+      } catch (e) {
+        failed++;
+        console.error(e);
+      }
+    }
+    if (failed > 0) toast.error(t("resources.batchFailed", { n: failed }));
+    toast.success(t("resources.batchDone", { ok, skipped }));
+    await refresh();
   };
 
   const handleTogglePlugin = async (
@@ -202,7 +257,14 @@ export function ResourceByKindView() {
       <div className="bg-card rounded-lg border p-4">
         <h3 className="mb-3 text-sm font-semibold">{t("resources.repoTitle")}</h3>
 
-        <div className="mb-3 flex justify-end">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <input
+            type="text"
+            placeholder={t("resources.searchPlaceholder")}
+            value={search}
+            onChange={(e) => setSearch(e.currentTarget.value)}
+            className="h-7 w-40 rounded border px-2 text-xs"
+          />
           <Button
             size="sm"
             variant="outline"
@@ -216,19 +278,10 @@ export function ResourceByKindView() {
 
         {/* Skills */}
         <div className="mb-4">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h4 className="flex items-center gap-2 text-sm font-semibold">
-              <Package className="h-4 w-4" />
-              {t("resources.skillsCount", { n: filteredSkills.length })}
-            </h4>
-            <input
-              type="text"
-              placeholder={t("resources.searchPlaceholder")}
-              value={search}
-              onChange={(e) => setSearch(e.currentTarget.value)}
-              className="h-7 w-40 rounded border px-2 text-xs"
-            />
-          </div>
+          <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+            <Package className="h-4 w-4" />
+            {t("resources.skillsCount", { n: filteredSkills.length })}
+          </h4>
           {filteredSkills.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
@@ -271,6 +324,23 @@ export function ResourceByKindView() {
                     </Button>
                   </div>
                   <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      title={
+                        skill.enabledTools.length === TOOLS.length
+                          ? t("resources.allToolsOff")
+                          : t("resources.allToolsOn")
+                      }
+                      onClick={() =>
+                        handleToggleAll(skill, skill.enabledTools.length !== TOOLS.length)
+                      }
+                    >
+                      {skill.enabledTools.length === TOOLS.length
+                        ? t("resources.allToolsOff")
+                        : t("resources.allToolsOn")}
+                    </Button>
                     {TOOLS.map((tool) => {
                       const enabled = skill.enabledTools.includes(tool.id);
                       return (
@@ -298,7 +368,7 @@ export function ResourceByKindView() {
         <div className="mb-4">
           <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
             <Link2 className="h-4 w-4" />
-            {t("resources.mcpsCount", { n: resources.mcp.length })}
+            {t("resources.mcpsCount", { n: filteredMcp.length })}
             <Button
               size="sm"
               variant="ghost"
@@ -308,14 +378,14 @@ export function ResourceByKindView() {
               {t("resources.addWithPlus")}
             </Button>
           </h4>
-          {resources.mcp.length === 0 ? (
+          {filteredMcp.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
               {t("mcp.empty")}
             </div>
           ) : (
             <div className="space-y-1">
-              {resources.mcp.map((mcp) => (
+              {filteredMcp.map((mcp) => (
                 <div
                   key={mcp.name}
                   className="flex items-center justify-between rounded border p-2 text-sm"
@@ -340,6 +410,21 @@ export function ResourceByKindView() {
                     </Button>
                   </div>
                   <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      title={
+                        mcp.enabledTools.length === TOOLS.length
+                          ? t("resources.allToolsOff")
+                          : t("resources.allToolsOn")
+                      }
+                      onClick={() => handleToggleAll(mcp, mcp.enabledTools.length !== TOOLS.length)}
+                    >
+                      {mcp.enabledTools.length === TOOLS.length
+                        ? t("resources.allToolsOff")
+                        : t("resources.allToolsOn")}
+                    </Button>
                     {TOOLS.map((tool) => {
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
@@ -366,16 +451,16 @@ export function ResourceByKindView() {
         <div>
           <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
             <Plug className="h-4 w-4" />
-            {t("resources.pluginsCount", { n: resources.plugins.length })}
+            {t("resources.pluginsCount", { n: filteredPlugins.length })}
           </h4>
-          {resources.plugins.length === 0 ? (
+          {filteredPlugins.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
               {t("resources.noPlugins")}
             </div>
           ) : (
             <div className="space-y-1">
-              {resources.plugins.map((plugin) => (
+              {filteredPlugins.map((plugin) => (
                 <div
                   key={plugin.name}
                   className="flex items-center justify-between rounded border p-2 text-sm"
@@ -400,6 +485,23 @@ export function ResourceByKindView() {
                     </Button>
                   </div>
                   <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      title={
+                        plugin.enabledTools.length === TOOLS.length
+                          ? t("resources.allToolsOff")
+                          : t("resources.allToolsOn")
+                      }
+                      onClick={() =>
+                        handleToggleAll(plugin, plugin.enabledTools.length !== TOOLS.length)
+                      }
+                    >
+                      {plugin.enabledTools.length === TOOLS.length
+                        ? t("resources.allToolsOff")
+                        : t("resources.allToolsOn")}
+                    </Button>
                     {TOOLS.map((tool) => {
                       const enabled = plugin.enabledTools.includes(tool.id);
                       return (
