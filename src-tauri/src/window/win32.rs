@@ -59,6 +59,30 @@ const SHELL_BLACKLIST: &[&str] = &[
     "dwm.exe",
 ];
 
+/// 工具认领关键词：窗口标题（不区分大小写）命中某工具任一关键词 → 该窗口被视为该工具的。
+/// opencode 的终端标题是缩写 "OC | <会话标题>"，故含别名。
+const TOOL_CLAIM_KEYWORDS: &[(&str, &[&str])] = &[
+    ("claude", &["claude"]),
+    ("codex", &["codex"]),
+    ("opencode", &["opencode", "oc |"]),
+    ("openclaw", &["openclaw"]),
+];
+
+/// 判定窗口标题被哪个工具认领；命中多个工具（罕见）视为中立返回 None
+fn claim_owner(title: &str) -> Option<&'static str> {
+    let t = title.to_lowercase();
+    let owners: Vec<&str> = TOOL_CLAIM_KEYWORDS
+        .iter()
+        .filter(|(_, kws)| kws.iter().any(|k| t.contains(k)))
+        .map(|(tool, _)| *tool)
+        .collect();
+    if owners.len() == 1 {
+        Some(owners[0])
+    } else {
+        None
+    }
+}
+
 /// 候选窗口（歧义时返回给前端选择器）
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,30 +220,28 @@ pub fn resolve_and_focus(
             force_foreground(scored[0].1 .0);
             return Ok(FocusOutcome::Focused);
         }
-        // ③ 仍歧义 → 返回候选列表交给前端选择器（用户点选，永远正确）
-        // 候选过滤：优先仅返回打分 > 0（标题含项目名/工具名）的窗口，避免无关终端混入；
-        // 全零时回退全量候选（按分数降序），保证"永远有得选"
-        let mut candidates: Vec<WindowCandidate> = scored
-            .iter()
-            .filter(|(s, _)| *s > 0)
+        // ③ 候选池认领过滤：本工具认领的窗口 + 中立窗口；其他工具认领的窗口无条件排除。
+        // 排序：先本工具认领、后中立，组内按现有打分降序。
+        let agent = agent_keyword.unwrap_or_default().to_lowercase();
+        let mut mine: Vec<&(i32, &(isize, String))> = Vec::new();
+        let mut neutral: Vec<&(i32, &(isize, String))> = Vec::new();
+        for item in scored.iter() {
+            match claim_owner(&(item.1).1) {
+                Some(owner) if owner != agent.as_str() => continue, // 他工具认领 → 排除
+                Some(_) => mine.push(item),
+                None => neutral.push(item),
+            }
+        }
+        let candidates: Vec<WindowCandidate> = mine
+            .into_iter()
+            .chain(neutral)
             .map(|(s, (hwnd, title))| WindowCandidate {
                 hwnd: *hwnd,
-                title: (*title).clone(),
+                title: title.clone(),
                 process: proc_name.clone(),
                 score: *s,
             })
             .collect();
-        if candidates.is_empty() {
-            candidates = scored
-                .iter()
-                .map(|(s, (hwnd, title))| WindowCandidate {
-                    hwnd: *hwnd,
-                    title: (*title).clone(),
-                    process: proc_name.clone(),
-                    score: *s,
-                })
-                .collect();
-        }
         return Ok(FocusOutcome::Ambiguous(candidates));
     }
     Err("未找到可聚焦的窗口（终端可能已关闭）".to_string())
@@ -246,7 +268,7 @@ pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_ancestor_pids_with;
+    use super::{claim_owner, collect_ancestor_pids_with};
 
     #[test]
     fn collects_chain_until_no_parent() {
@@ -271,5 +293,17 @@ mod tests {
     fn includes_self_when_no_parent() {
         let chain = collect_ancestor_pids_with(42, |_| None);
         assert_eq!(chain, vec![42]);
+    }
+
+    #[test]
+    fn claim_owner_matches_keywords() {
+        assert_eq!(claim_owner("✳ Claude Code"), Some("claude"));
+        assert_eq!(claim_owner("OC | 问候与开场"), Some("opencode"));
+        assert_eq!(claim_owner("codex: working"), Some("codex"));
+        // 中立：无命中
+        assert_eq!(claim_owner("Windows PowerShell"), None);
+        assert_eq!(claim_owner("MultiAgents-Manager"), None);
+        // 多工具命中 → 中立
+        assert_eq!(claim_owner("claude and codex"), None);
     }
 }
