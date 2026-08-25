@@ -57,7 +57,7 @@ export function SessionCard({ session }: { session: Session }) {
     try {
       const result = await invoke<{
         type: string;
-        windows?: { hwnd: number; title: string; process: string }[];
+        windows?: { hwnd: number; title: string; process: string; score?: number }[];
       }>("focus_session", {
         pid: session.pid,
         sessionId: session.id,

@@ -66,6 +66,7 @@ pub struct WindowCandidate {
     pub hwnd: isize,
     pub title: String,
     pub process: String,
+    pub score: i32,
 }
 
 struct AllWindows {
@@ -196,14 +197,29 @@ pub fn resolve_and_focus(
             return Ok(FocusOutcome::Focused);
         }
         // ③ 仍歧义 → 返回候选列表交给前端选择器（用户点选，永远正确）
-        let candidates = cands
+        // 候选过滤：优先仅返回打分 > 0（标题含项目名/工具名）的窗口，避免无关终端混入；
+        // 全零时回退全量候选（按分数降序），保证"永远有得选"
+        let mut candidates: Vec<WindowCandidate> = scored
             .iter()
-            .map(|(hwnd, title)| WindowCandidate {
+            .filter(|(s, _)| *s > 0)
+            .map(|(s, (hwnd, title))| WindowCandidate {
                 hwnd: *hwnd,
-                title: title.clone(),
+                title: (*title).clone(),
                 process: proc_name.clone(),
+                score: *s,
             })
             .collect();
+        if candidates.is_empty() {
+            candidates = scored
+                .iter()
+                .map(|(s, (hwnd, title))| WindowCandidate {
+                    hwnd: *hwnd,
+                    title: (*title).clone(),
+                    process: proc_name.clone(),
+                    score: *s,
+                })
+                .collect();
+        }
         return Ok(FocusOutcome::Ambiguous(candidates));
     }
     Err("未找到可聚焦的窗口（终端可能已关闭）".to_string())

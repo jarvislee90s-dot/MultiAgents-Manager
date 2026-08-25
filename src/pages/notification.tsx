@@ -19,6 +19,7 @@ interface WindowCandidate {
   hwnd: number;
   title: string;
   process: string;
+  score?: number;
 }
 
 // 自定义通知浮窗页面 — 由 Rust 侧 show_notification_window 创建的独立小窗加载，
