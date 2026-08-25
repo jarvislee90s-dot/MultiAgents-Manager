@@ -74,7 +74,7 @@ export function ResourceByKindView() {
 
   const filterFn = (r: { name: string; enabledTools: string[] }) => {
     if (!search.trim()) return true;
-    const q = search.toLowerCase();
+    const q = search.trim().toLowerCase();
     return [r.name, ...r.enabledTools].some((x) => x.toLowerCase().includes(q));
   };
   const filteredSkills = resources.skills.filter(filterFn);
@@ -146,7 +146,7 @@ export function ResourceByKindView() {
       }
     }
     if (failed > 0) toast.error(t("resources.batchFailed", { n: failed }));
-    toast.success(t("resources.batchDone", { ok, skipped }));
+    if (ok > 0) toast.success(t("resources.batchDone", { ok, skipped }));
     await refresh();
   };
 
