@@ -231,6 +231,16 @@ export function ResourceByKindView() {
                 >
                   <div className="flex items-center gap-1">
                     <span className="font-medium">{formatSkillName(skill.name)}</span>
+                    {skill.brokenTools && skill.brokenTools.length > 0 && (
+                      <span
+                        className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-500"
+                        title={t("resources.linkBrokenTooltip", {
+                          tools: skill.brokenTools.join(", "),
+                        })}
+                      >
+                        {t("resources.linkBroken")}
+                      </span>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"

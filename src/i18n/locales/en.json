@@ -192,7 +192,9 @@
     "uninstall": "Uninstall",
     "uninstallTitle": "Uninstall resource",
     "uninstallDesc": "This removes \"{{name}}\" from all tools and deletes the MAM repo copy ({{n}} tool(s) affected). This cannot be undone.",
-    "uninstallSuccess": "Uninstalled {{name}}"
+    "uninstallSuccess": "Uninstalled {{name}}",
+    "linkBroken": "Broken link",
+    "linkBrokenTooltip": "Links are broken for: {{tools}}. Rescan will auto-repair."
   },
   "mcp": {
     "nameAndCommandRequired": "Name and command are required",

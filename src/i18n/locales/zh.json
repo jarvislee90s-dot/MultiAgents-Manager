@@ -192,7 +192,9 @@
     "uninstall": "卸载",
     "uninstallTitle": "卸载资源",
     "uninstallDesc": "将从所有工具移除「{{name}}」并删除 MAM 仓库副本（影响 {{n}} 个工具）。此操作不可撤销。",
-    "uninstallSuccess": "已卸载 {{name}}"
+    "uninstallSuccess": "已卸载 {{name}}",
+    "linkBroken": "链接损坏",
+    "linkBrokenTooltip": "以下工具的链接已断开：{{tools}}，重新扫描可自动修复"
   },
   "mcp": {
     "nameAndCommandRequired": "请填写名称和命令",

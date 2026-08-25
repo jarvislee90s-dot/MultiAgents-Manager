@@ -235,6 +235,8 @@ pub struct SsotResource {
     pub name: String,
     pub kind: String,
     pub enabled_tools: Vec<String>,
+    #[serde(rename = "brokenTools")]
+    pub broken_tools: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -290,10 +292,17 @@ pub fn list_ssot_resources() -> SsotResources {
                         enabled_tools.push(tool_id.to_string());
                     }
                 }
+                // 断链检测：DB 中 enabled 且链接状态为 dangling 的工具
+                let broken_tools: Vec<String> = assignments
+                    .iter()
+                    .filter(|a| a.extension_id == ext_id && a.enabled && a.link_status == "dangling")
+                    .map(|a| a.agent_tool_id.clone())
+                    .collect();
                 SsotResource {
                     name,
                     kind: "skill".to_string(),
                     enabled_tools,
+                    broken_tools,
                 }
             })
             .collect()
@@ -392,6 +401,7 @@ pub fn list_ssot_resources() -> SsotResources {
                 name,
                 kind: "mcp".to_string(),
                 enabled_tools: tools,
+                broken_tools: vec![],
             })
             .collect();
         resources.sort_by(|a, b| a.name.cmp(&b.name));
@@ -416,6 +426,7 @@ pub fn list_ssot_resources() -> SsotResources {
                     name,
                     kind: kind.to_string(),
                     enabled_tools,
+                    broken_tools: vec![],
                 });
             }
         }

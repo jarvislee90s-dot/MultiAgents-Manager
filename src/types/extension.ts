@@ -72,6 +72,7 @@ export interface SsotResource {
   name: string;
   kind: string;
   enabledTools: string[];
+  brokenTools?: string[];
 }
 
 export interface SsotResources {

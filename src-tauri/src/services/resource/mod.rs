@@ -154,6 +154,25 @@ pub fn sync_imported_skill_links() {
             continue;
         }
 
+        // 断链检测与自动修复：SSOT 仍在则重建，SSOT 缺失则清链接并标记
+        let tool_target = crate::adapter::primary_skill_dir(&tool_id).map(|d| d.join(&ext.name));
+        if let Some(t) = &tool_target {
+            if crate::linker::check_link_health(t) == crate::linker::LinkHealth::Dangling {
+                let repo_exists = crate::linker::ensure_repo_dir().join(&ext.name).exists();
+                let _ = crate::linker::remove_link(t);
+                if repo_exists {
+                    if let Err(e) = crate::services::enable_skill_for_tool(&ext.name, &tool_id) {
+                        log::warn!("重建 {} → {} 断链失败: {}", ext.name, tool_id, e);
+                        let _ = crate::database::upsert_assignment(&ext.id, &tool_id, true, "dangling");
+                    }
+                } else {
+                    let _ = crate::linker::layer2::unlink_skill_from_layer2(&ext.name, &tool_id);
+                    let _ = crate::database::upsert_assignment(&ext.id, &tool_id, false, "missing");
+                }
+                continue;
+            }
+        }
+
         let already_linked = crate::adapter::primary_skill_dir(&tool_id)
             .map(|dir| dir.join(&ext.name).is_symlink())
             .unwrap_or(false);

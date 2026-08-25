@@ -9,6 +9,34 @@ use fs2::FileExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 链接健康状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkHealth {
+    /// 链接存在且目标可达
+    Valid,
+    /// 链接存在但目标不可达（SSOT 被删/移动）
+    Dangling,
+    /// 路径存在但不是链接（原生目录/文件）
+    NotLink,
+    /// 路径不存在
+    Missing,
+}
+
+/// 判定链接健康状态
+pub fn check_link_health(target: &Path) -> LinkHealth {
+    if !target.exists() && !target.is_symlink() {
+        return LinkHealth::Missing;
+    }
+    if !target.is_symlink() {
+        return LinkHealth::NotLink;
+    }
+    if fs::metadata(target).is_ok() {
+        LinkHealth::Valid
+    } else {
+        LinkHealth::Dangling
+    }
+}
+
 /// 确保全局仓库目录存在，返回路径
 pub fn ensure_repo_dir() -> PathBuf {
     let repo = dirs::home_dir()
@@ -208,4 +236,44 @@ pub fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod link_health_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_dangling_junction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("lnk");
+        junction::create(&src, &link).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Valid);
+        std::fs::remove_dir_all(&src).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_dangling_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("lnk");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Valid);
+        std::fs::remove_dir_all(&src).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+    }
+
+    #[test]
+    fn missing_and_native_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(check_link_health(&tmp.path().join("none")), LinkHealth::Missing);
+        let native = tmp.path().join("real");
+        std::fs::create_dir_all(&native).unwrap();
+        assert_eq!(check_link_health(&native), LinkHealth::NotLink);
+    }
 }
