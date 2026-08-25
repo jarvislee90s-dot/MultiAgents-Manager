@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
+import { useSessionJump } from "@/hooks/useSessionJump";
 
 interface NotificationPayload {
   agentType: string;
@@ -15,18 +15,12 @@ interface NotificationPayload {
   sessionId: string;
 }
 
-interface WindowCandidate {
-  hwnd: number;
-  title: string;
-  process: string;
-  score?: number;
-}
-
 // 自定义通知浮窗页面 — 由 Rust 侧 show_notification_window 创建的独立小窗加载，
-// 收到 notification:new 事件后显示，6 秒无交互自动隐藏（悬停保留）
+// 收到 notification:new 事件后显示，10 秒无交互自动隐藏（悬停保留）
 export default function NotificationPage() {
   const [payload, setPayload] = useState<NotificationPayload | null>(null);
-  const [candidates, setCandidates] = useState<WindowCandidate[] | null>(null);
+  // 跳转共享逻辑（歧义候选窗口内联渲染）
+  const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
   const { t } = useTranslation();
   const timerRef = useRef<number | null>(null);
 
@@ -48,7 +42,7 @@ export default function NotificationPage() {
         // 新通知到达时清掉旧候选列表，避免与卡片同时出现
         setCandidates(null);
         win.show();
-        armTimer(6000);
+        armTimer(10000);
       },
       { target: win.label }
     ).then((fn) => (unlisten = fn));
@@ -57,19 +51,18 @@ export default function NotificationPage() {
 
   if (!payload) return <div className="h-full w-full" />;
 
-  // 点击通知卡 → 隐藏浮窗并跳转到对应会话终端
+  // 点击通知卡 → 隐藏浮窗并跳转到对应会话终端（与主界面卡片同一实现）
   const jump = async () => {
     getCurrentWindow().hide();
     try {
-      const result = await invoke<{ type: string; windows?: WindowCandidate[] }>("focus_session", {
+      const ambiguous = await focus({
         pid: payload.pid,
-        sessionId: payload.sessionId,
+        id: payload.sessionId,
         agentType: payload.agentType,
         projectName: payload.projectName,
       });
       // 多窗口歧义：在通知窗内联渲染候选，避免静默失败
-      if (result.type === "ambiguous" && result.windows && result.windows.length > 0) {
-        setCandidates(result.windows);
+      if (ambiguous) {
         getCurrentWindow().show();
         // 候选列表不操作 15 秒自动隐藏，避免无限驻留
         armTimer(15000);
@@ -85,7 +78,7 @@ export default function NotificationPage() {
         <div
           className="bg-card flex h-screen w-screen cursor-pointer items-center gap-3 rounded-lg border p-3 shadow-2xl"
           onMouseEnter={() => timerRef.current && window.clearTimeout(timerRef.current)}
-          onMouseLeave={() => armTimer(3000)}
+          onMouseLeave={() => armTimer(5000)}
           onClick={jump}
         >
           <span
@@ -116,7 +109,7 @@ export default function NotificationPage() {
               onClick={() => {
                 setCandidates(null);
                 getCurrentWindow().hide();
-                invoke("focus_hwnd", { hwnd: w.hwnd }).catch(() => {});
+                focusHwnd(w.hwnd).catch(() => {});
               }}
             >
               {w.title || t("sessions.untitledWindow")} — {w.process}

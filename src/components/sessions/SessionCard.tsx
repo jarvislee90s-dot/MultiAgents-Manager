@@ -1,11 +1,10 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke } from "@tauri-apps/api/core";
 import { Terminal, Cpu, Clock, Bot, FolderGit2, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { StatusLight } from "@/components/sessions/StatusLight";
+import { useSessionJump } from "@/hooks/useSessionJump";
 import type { Session, AgentType } from "@/types/session";
 
 const AGENT_BADGE: Record<AgentType, { label: string; className: string; icon: typeof Bot }> = {
@@ -44,10 +43,8 @@ export function SessionCard({ session }: { session: Session }) {
   const { t } = useTranslation();
   const badge = AGENT_BADGE[session.agentType];
   const Icon = badge.icon;
-  // 歧义候选窗口（跳转命中多个窗口时弹出选择器）
-  const [pendingWindows, setPendingWindows] = useState<
-    { hwnd: number; title: string; process: string }[] | null
-  >(null);
+  // 跳转共享逻辑（歧义候选窗口由 hook 状态承载，命中多个窗口时弹出选择器）
+  const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
 
   const handleClick = async () => {
     if (!session.jumpSupported) {
@@ -55,18 +52,12 @@ export function SessionCard({ session }: { session: Session }) {
       return;
     }
     try {
-      const result = await invoke<{
-        type: string;
-        windows?: { hwnd: number; title: string; process: string; score?: number }[];
-      }>("focus_session", {
+      await focus({
         pid: session.pid,
-        sessionId: session.id,
+        id: session.id,
         agentType: session.agentType,
         projectName: session.projectName,
       });
-      if (result.type === "ambiguous" && result.windows && result.windows.length > 0) {
-        setPendingWindows(result.windows);
-      }
     } catch (e) {
       toast.error(t("sessions.jumpFailed", { error: e }));
     }
@@ -142,10 +133,10 @@ export function SessionCard({ session }: { session: Session }) {
         </div>
       </Card>
       {/* 窗口选择器：跳转歧义时由用户点选目标窗口 */}
-      {pendingWindows && (
+      {candidates && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => setPendingWindows(null)}
+          onClick={() => setCandidates(null)}
         >
           <div
             className="bg-card w-96 rounded-lg border p-4 shadow-xl"
@@ -153,14 +144,14 @@ export function SessionCard({ session }: { session: Session }) {
           >
             <p className="mb-3 text-sm font-medium">{t("sessions.pickWindow")}</p>
             <div className="flex flex-col gap-2">
-              {pendingWindows.map((w) => (
+              {candidates.map((w) => (
                 <button
                   key={w.hwnd}
                   className="hover:bg-accent truncate rounded border px-3 py-2 text-left text-xs"
                   onClick={async () => {
-                    setPendingWindows(null);
+                    setCandidates(null);
                     try {
-                      await invoke("focus_hwnd", { hwnd: w.hwnd });
+                      await focusHwnd(w.hwnd);
                     } catch (e) {
                       toast.error(t("sessions.jumpFailed", { error: e }));
                     }
