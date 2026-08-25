@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
 import { useSessionJump } from "@/hooks/useSessionJump";
+import { AGENT_BADGE } from "@/lib/agentBadge";
+import { cn } from "@/lib/utils";
 
 interface NotificationPayload {
   agentType: string;
@@ -87,7 +89,23 @@ export default function NotificationPage() {
           />
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-semibold">
-              {payload.agentLabel} · {payload.projectName} ·{" "}
+              {(() => {
+                const badge = AGENT_BADGE[payload.agentType];
+                return badge ? (
+                  <span
+                    className={cn(
+                      "mr-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5",
+                      badge.className
+                    )}
+                  >
+                    <badge.Icon className="h-3 w-3" />
+                    {payload.agentLabel}
+                  </span>
+                ) : (
+                  payload.agentLabel
+                );
+              })()}{" "}
+              · {payload.projectName} ·{" "}
               {t(`sessions.statusLabels.${payload.status}`, payload.status)}
             </p>
             <p className="mt-1 line-clamp-2 text-[11px] opacity-70">{payload.lastMessage}</p>

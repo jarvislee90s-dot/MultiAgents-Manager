@@ -1,29 +1,12 @@
 import { useTranslation } from "react-i18next";
-import { Terminal, Cpu, Clock, Bot, FolderGit2, ChevronRight } from "lucide-react";
+import { Cpu, Clock, Bot, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { StatusLight } from "@/components/sessions/StatusLight";
 import { useSessionJump } from "@/hooks/useSessionJump";
-import type { Session, AgentType } from "@/types/session";
-
-const AGENT_BADGE: Record<AgentType, { label: string; className: string; icon: typeof Bot }> = {
-  claude: {
-    label: "Claude",
-    className: "bg-purple-500/15 text-purple-400 border-purple-500/30",
-    icon: Bot,
-  },
-  codex: {
-    label: "Codex",
-    className: "bg-green-500/15 text-green-400 border-green-500/30",
-    icon: Terminal,
-  },
-  opencode: {
-    label: "OpenCode",
-    className: "bg-orange-500/15 text-orange-400 border-orange-500/30",
-    icon: FolderGit2,
-  },
-};
+import { AGENT_BADGE } from "@/lib/agentBadge";
+import type { Session } from "@/types/session";
 
 function formatRuntime(lastActivityAt: string, t: (key: string) => string): string {
   if (!lastActivityAt || lastActivityAt === "Unknown") return "--";
@@ -42,7 +25,7 @@ function formatRuntime(lastActivityAt: string, t: (key: string) => string): stri
 export function SessionCard({ session }: { session: Session }) {
   const { t } = useTranslation();
   const badge = AGENT_BADGE[session.agentType];
-  const Icon = badge.icon;
+  const Icon = badge.Icon;
   // 跳转共享逻辑（歧义候选窗口由 hook 状态承载，命中多个窗口时弹出选择器）
   const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
 
