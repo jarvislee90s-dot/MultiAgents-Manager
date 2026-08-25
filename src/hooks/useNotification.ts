@@ -95,6 +95,7 @@ export function useNotification() {
                 sessionId: (notification.extra?.sessionId as string) ?? undefined,
                 agentType: (notification.extra?.agentType as string) ?? undefined,
                 projectName: (notification.extra?.projectName as string) ?? undefined,
+                lastMessage: (notification.extra?.lastMessage as string) ?? undefined,
               });
             } catch (e) {
               console.error("focus_session failed:", e);
@@ -173,6 +174,7 @@ export function useNotification() {
                   sessionId: session.id,
                   agentType: session.agentType,
                   projectName: session.projectName,
+                  lastMessage: session.lastMessage ?? "",
                 },
               });
             }
@@ -204,6 +206,7 @@ export function useNotification() {
                     sessionId: session.id,
                     agentType: session.agentType,
                     projectName: session.projectName,
+                    lastMessage: session.lastMessage ?? "",
                   },
                 });
               }

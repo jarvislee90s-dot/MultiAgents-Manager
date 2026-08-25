@@ -149,6 +149,93 @@ fn force_foreground(hwnd_val: isize) -> bool {
     }
 }
 
+/// 空白归一化后取尾部 n 个字符（UIA 正文匹配用：终端渲染与 jsonl 原文的差异主要在空白与折行）
+fn normalized_tail(s: &str, n: usize) -> String {
+    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = collapsed.chars().collect();
+    if chars.len() <= n {
+        collapsed
+    } else {
+        chars[chars.len() - n..].iter().collect()
+    }
+}
+
+/// 空白归一化后的子串包含判断
+fn normalized_contains(haystack: &str, needle: &str) -> bool {
+    let h: String = haystack.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n: String = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+    !n.is_empty() && h.contains(&n)
+}
+
+/// 读取窗口的终端可见文本（UI Automation TextPattern，屏幕阅读器通道）。
+/// 尝试顺序：根元素直取 → 查找 Document 类型后代（Windows Terminal 的 TermControl）。
+/// COM 初始化失败 / 模式不可用 / 超时 → None（视为 miss，不报错）
+fn read_window_text(hwnd_val: isize) -> Option<String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+        IUIAutomationTextPattern, TreeScope_Descendants, UIA_TextPatternId,
+    };
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let co_initialized = hr.is_ok();
+        let result = (|| -> Option<String> {
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let root: IUIAutomationElement = automation.ElementFromHandle(HWND(hwnd_val)).ok()?;
+
+            let try_text = |el: &IUIAutomationElement| -> Option<String> {
+                let pattern = el
+                    .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                    .ok()?;
+                let range = pattern.DocumentRange().ok()?;
+                let text = range.GetText(-1).ok()?;
+                let s = text.to_string();
+                if s.is_empty() { None } else { Some(s) }
+            };
+
+            if let Some(s) = try_text(&root) {
+                return Some(s);
+            }
+            // 遍历全部后代，逐个尝试 TextPattern（Windows Terminal 的 TermControl 携带
+            // ControlType.Text 的正文；按类型过滤会漏/误判，TrueCondition 全量遍历最可靠）。
+            // 同窗口存在窗口标题等装饰性短文本与终端正文并存，取最长者——
+            // 终端可见正文远长于装饰性短文本（实测 WT 标题 len=3 vs 正文 len=366）
+            let cond: IUIAutomationCondition = automation.CreateTrueCondition().ok()?;
+            let arr = root.FindAll(TreeScope_Descendants, &cond).ok()?;
+            let mut best: Option<String> = None;
+            for i in 0..arr.Length().ok()? {
+                if let Ok(el) = arr.GetElement(i) {
+                    if let Some(s) = try_text(&el) {
+                        if best.as_ref().is_none_or(|b| s.chars().count() > b.chars().count()) {
+                            best = Some(s);
+                        }
+                    }
+                }
+            }
+            best
+        })();
+        if co_initialized {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+/// 带超时的读取（单窗口 200ms）：UIA 调用可能被无响应窗口阻塞，超时即放弃该窗口
+fn read_window_text_timeout(hwnd_val: isize) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_window_text(hwnd_val));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(200))
+        .ok()
+        .flatten()
+}
+
 /// 跳转解析结果
 pub enum FocusOutcome {
     Focused,
@@ -163,6 +250,7 @@ pub fn resolve_and_focus(
     session_marker: Option<&str>,
     agent_keyword: Option<&str>,
     project_name: Option<&str>,
+    last_message: Option<&str>,
 ) -> Result<FocusOutcome, String> {
     let windows = all_windows();
 
@@ -196,6 +284,27 @@ pub fn resolve_and_focus(
             if hits.len() == 1 {
                 force_foreground(hits[0].0);
                 return Ok(FocusOutcome::Focused);
+            }
+        }
+        // ①5 UIA 正文匹配：候选窗口的终端可见文本含卡片最新消息尾部（归一化后）
+        // 且唯一命中 → 锁定。点击跳转通常发生在任务刚结束（最终回复仍在屏幕上），命中率高。
+        if let Some(msg) = last_message {
+            if !msg.is_empty() {
+                let tail = normalized_tail(msg, 40);
+                let hits: Vec<isize> = cands
+                    .iter()
+                    .take(8)
+                    .filter(|(hwnd, _)| {
+                        read_window_text_timeout(*hwnd)
+                            .map(|text| normalized_contains(&text, &tail))
+                            .unwrap_or(false)
+                    })
+                    .map(|(hwnd, _)| *hwnd)
+                    .collect();
+                if hits.len() == 1 {
+                    force_foreground(hits[0]);
+                    return Ok(FocusOutcome::Focused);
+                }
             }
         }
         // ② 标题打分：项目名 +2、工具名 +1，最高分唯一才锁定
@@ -259,7 +368,7 @@ pub fn focus_hwnd(hwnd_val: isize) -> Result<(), String> {
 /// 兼容旧入口（mod.rs 的 focus_terminal_for_pid 内部使用）
 pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
     let system = sysinfo::System::new_all();
-    match resolve_and_focus(&system, pid, None, None, None) {
+    match resolve_and_focus(&system, pid, None, None, None, None) {
         Ok(FocusOutcome::Focused) => Ok(()),
         Ok(FocusOutcome::Ambiguous(_)) => Err("存在多个候选窗口，请重试以打开选择器".to_string()),
         Err(e) => Err(e),
@@ -305,5 +414,15 @@ mod tests {
         assert_eq!(claim_owner("MultiAgents-Manager"), None);
         // 多工具命中 → 中立
         assert_eq!(claim_owner("claude and codex"), None);
+    }
+
+    #[test]
+    fn normalized_tail_collapses_whitespace() {
+        use super::normalized_tail;
+        assert_eq!(normalized_tail("你好  世界\n\n下一行", 3), "下一行");
+        assert_eq!(normalized_tail("short", 40), "short");
+        // 长文本取尾部 n 个字符
+        let long = "a ".repeat(60);
+        assert_eq!(normalized_tail(&long, 10).chars().count(), 10);
     }
 }

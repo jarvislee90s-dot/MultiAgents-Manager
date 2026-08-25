@@ -40,6 +40,7 @@ export function SessionCard({ session }: { session: Session }) {
         id: session.id,
         agentType: session.agentType,
         projectName: session.projectName,
+        lastMessage: session.lastMessage ?? undefined,
       });
     } catch (e) {
       toast.error(t("sessions.jumpFailed", { error: e }));

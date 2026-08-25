@@ -14,6 +14,7 @@ export interface JumpTarget {
   id: string;
   agentType: string;
   projectName: string;
+  lastMessage?: string;
 }
 
 export function useSessionJump() {
@@ -27,6 +28,7 @@ export function useSessionJump() {
         sessionId: target.id,
         agentType: target.agentType,
         projectName: target.projectName,
+        lastMessage: target.lastMessage,
       }
     );
     const ambiguous = result.type === "ambiguous" && result.windows ? result.windows : null;

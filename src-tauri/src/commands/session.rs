@@ -37,6 +37,7 @@ pub fn focus_session(
     session_id: Option<String>,
     agent_type: Option<String>,
     project_name: Option<String>,
+    last_message: Option<String>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
@@ -51,6 +52,7 @@ pub fn focus_session(
             marker.as_deref(),
             agent_type.as_deref(),
             project_name.as_deref(),
+            last_message.as_deref(),
         ) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
                 Ok(serde_json::json!({ "type": "focused" }))
@@ -63,7 +65,7 @@ pub fn focus_session(
     }
     #[cfg(not(windows))]
     {
-        let _ = (session_id, agent_type, project_name);
+        let _ = (session_id, agent_type, project_name, last_message);
         crate::window::focus_terminal_for_pid(pid).map(|_| serde_json::json!({ "type": "focused" }))
     }
 }

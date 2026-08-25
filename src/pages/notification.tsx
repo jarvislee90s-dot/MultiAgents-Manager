@@ -62,6 +62,7 @@ export default function NotificationPage() {
         id: payload.sessionId,
         agentType: payload.agentType,
         projectName: payload.projectName,
+        lastMessage: payload.lastMessage,
       });
       // 多窗口歧义：在通知窗内联渲染候选，避免静默失败
       if (ambiguous) {
