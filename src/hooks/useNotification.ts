@@ -9,6 +9,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { useSessionStore } from "@/stores/sessionStore";
 import { playCompletionSound } from "@/lib/audio";
+import { addHistory } from "@/lib/notificationHistory";
 
 const AGENT_LABELS: Record<string, string> = {
   claude: "Claude Code",
@@ -153,6 +154,17 @@ export function useNotification() {
         if (!notificationsEnabled.current) continue;
 
         // 颜色变化时通知（红→黄→绿 任意切换）；记录本次通知用于时间去重
+
+        // 记录到通知历史（spec 014）
+        addHistory({
+          agentType: session.agentType,
+          projectName: session.projectName,
+          status: session.status,
+          lastMessage: session.lastMessage ?? "",
+          pid: session.pid,
+          sessionId: session.id,
+          at: Date.now(),
+        });
 
         // 方向过滤：仅变为绿（任务完成）时按工具播放提示音
         if (currColor === "green") playCompletionSound(session.agentType);

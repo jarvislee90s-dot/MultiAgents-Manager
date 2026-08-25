@@ -32,6 +32,11 @@
     "en": "English",
     "zh": "中文"
   },
+  "notifications": {
+    "historyTitle": "通知历史",
+    "historyEmpty": "暂无通知",
+    "jumpFailed": "会话已结束或不可跳转"
+  },
   "tray": {
     "show": "显示窗口",
     "quit": "退出"

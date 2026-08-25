@@ -32,6 +32,11 @@
     "en": "English",
     "zh": "中文"
   },
+  "notifications": {
+    "historyTitle": "Notification history",
+    "historyEmpty": "No notifications yet",
+    "jumpFailed": "Session ended or not jumpable"
+  },
   "tray": {
     "show": "Show Window",
     "quit": "Quit"

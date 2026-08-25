@@ -15,6 +15,7 @@ import { registerShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 import { Activity, AlertCircle } from "lucide-react";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 
 const SHORTCUT_KEY = "global-shortcut-show-main";
 
@@ -93,29 +94,32 @@ export default function HomePage() {
       </div>
 
       {/* 标签栏 */}
-      <div className="flex gap-1 border-b pb-1">
-        <button
-          onClick={() => setActiveTab("dashboard")}
-          className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm transition-colors ${
-            activeTab === "dashboard"
-              ? "bg-accent text-accent-foreground font-medium"
-              : "text-muted-foreground hover:bg-accent/50"
-          }`}
-        >
-          <Monitor className="h-3.5 w-3.5" />
-          {t("home.tabDashboard")}
-        </button>
-        <button
-          onClick={() => setActiveTab("extensions")}
-          className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm transition-colors ${
-            activeTab === "extensions"
-              ? "bg-accent text-accent-foreground font-medium"
-              : "text-muted-foreground hover:bg-accent/50"
-          }`}
-        >
-          <Package className="h-3.5 w-3.5" />
-          {t("home.tabResources")}
-        </button>
+      <div className="flex items-center justify-between border-b pb-1">
+        <div className="flex gap-1">
+          <button
+            onClick={() => setActiveTab("dashboard")}
+            className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm transition-colors ${
+              activeTab === "dashboard"
+                ? "bg-accent text-accent-foreground font-medium"
+                : "text-muted-foreground hover:bg-accent/50"
+            }`}
+          >
+            <Monitor className="h-3.5 w-3.5" />
+            {t("home.tabDashboard")}
+          </button>
+          <button
+            onClick={() => setActiveTab("extensions")}
+            className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm transition-colors ${
+              activeTab === "extensions"
+                ? "bg-accent text-accent-foreground font-medium"
+                : "text-muted-foreground hover:bg-accent/50"
+            }`}
+          >
+            <Package className="h-3.5 w-3.5" />
+            {t("home.tabResources")}
+          </button>
+        </div>
+        <NotificationBell />
       </div>
 
       {/* 内容区 */}
