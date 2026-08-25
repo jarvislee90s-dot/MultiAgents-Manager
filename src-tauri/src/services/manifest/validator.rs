@@ -144,8 +144,7 @@ impl ManifestValidator {
 }
 
 fn is_valid_semver(v: &str) -> bool {
-    let parts: Vec<&str> = v.split('.').collect();
-    parts.len() >= 3 && parts.iter().take(3).all(|p| p.parse::<u32>().is_ok())
+    v.trim_start_matches('v').parse::<semver::Version>().is_ok()
 }
 
 #[cfg(test)]
@@ -185,5 +184,20 @@ mod tests {
         let json = r#"{"id":"t","name":"T","version":"1.0.0","kind":"mcp","mcp":{"command":"npx","formats":["json"]},"compatibility":[{"tool":"codex","mcpFormat":"toml"}]}"#;
         let errors = ManifestValidator::validate_json(json).unwrap_err();
         assert!(errors.iter().any(|e| e.code == "FORMAT_MISMATCH"));
+    }
+}
+
+#[cfg(test)]
+mod semver_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_v_prefix_prerelease_and_build() {
+        for ok in ["1.2.3", "v1.2.3", "0.0.1", "1.2.3-alpha.1", "v2.0.0-rc.1+build.5"] {
+            assert!(is_valid_semver(ok), "应通过: {}", ok);
+        }
+        for bad in ["1.2", "1", "abc", "1.2.x", "1.2.3.4"] {
+            assert!(!is_valid_semver(bad), "应拒绝: {}", bad);
+        }
     }
 }

@@ -33,6 +33,7 @@ notify = "7"
 toml = "0.8"
 toml_edit = "0.22"
 trash = "5"
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"

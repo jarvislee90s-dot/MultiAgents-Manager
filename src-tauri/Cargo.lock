@@ -2498,6 +2498,7 @@ dependencies = [
  "notify",
  "once_cell",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sysinfo",
