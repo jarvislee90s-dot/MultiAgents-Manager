@@ -46,6 +46,9 @@ pub fn focus_session(
         let marker = session_id
             .as_deref()
             .map(|id| format!("MAM:{}", id.chars().take(8).collect::<String>()));
+        // 面板反推：当前所有运行会话的 (工具id, 项目名)，用于排除其他工具的终端窗口
+        // （codex 终端标题=项目名，无 "codex" 关键词可静态认领）。进程扫描即可，无文件解析开销
+        let running_projects = running_projects_from_processes(&system);
         match crate::window::win32::resolve_and_focus(
             &system,
             pid,
@@ -53,6 +56,7 @@ pub fn focus_session(
             agent_type.as_deref(),
             project_name.as_deref(),
             last_message.as_deref(),
+            &running_projects,
         ) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
                 Ok(serde_json::json!({ "type": "focused" }))
@@ -82,6 +86,33 @@ pub fn focus_hwnd(hwnd: isize) -> Result<(), String> {
         let _ = hwnd;
         Err("当前平台不支持".to_string())
     }
+}
+
+/// 从进程快照收集运行会话的 (工具id, 项目目录名)——仅进程扫描，无文件解析开销
+#[cfg(windows)]
+fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, String)> {
+    use crate::monitor::process as monitor_process;
+    let mut v = Vec::new();
+    for (agent, procs) in [
+        ("claude", monitor_process::find_claude_processes(system)),
+        ("codex", monitor_process::find_codex_processes(system)),
+        ("opencode", monitor_process::find_opencode_processes(system)),
+        ("openclaw", monitor_process::find_openclaw_processes(system)),
+    ] {
+        for p in procs {
+            if let Some(name) = p
+                .cwd
+                .as_ref()
+                .and_then(|c| c.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+            {
+                if !name.is_empty() {
+                    v.push((agent.to_string(), name));
+                }
+            }
+        }
+    }
+    v
 }
 
 #[tauri::command]
