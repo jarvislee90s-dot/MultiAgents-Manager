@@ -236,6 +236,7 @@ export function ResourceByKindView() {
                       size="sm"
                       className="text-destructive h-6 px-1.5 text-[10px]"
                       title={t("resources.uninstall")}
+                      aria-label={t("resources.uninstall")}
                       onClick={() =>
                         setPendingUninstall({
                           kind: "skill",
@@ -304,6 +305,7 @@ export function ResourceByKindView() {
                       size="sm"
                       className="text-destructive h-6 px-1.5 text-[10px]"
                       title={t("resources.uninstall")}
+                      aria-label={t("resources.uninstall")}
                       onClick={() =>
                         setPendingUninstall({
                           kind: "mcp",
@@ -363,6 +365,7 @@ export function ResourceByKindView() {
                       size="sm"
                       className="text-destructive h-6 px-1.5 text-[10px]"
                       title={t("resources.uninstall")}
+                      aria-label={t("resources.uninstall")}
                       onClick={() =>
                         setPendingUninstall({
                           kind: "plugin",
