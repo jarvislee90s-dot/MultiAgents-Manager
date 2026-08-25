@@ -188,7 +188,11 @@
     "removeLinkDesc": "确定要移除 {{name}} 在 {{tool}} 中的链接吗？",
     "removeLink": "移除链接",
     "addMcpDesc": "配置将保存到 MAM SSOT 仓库，随后可以为各工具启用。",
-    "addToRepo": "添加到仓库"
+    "addToRepo": "添加到仓库",
+    "uninstall": "卸载",
+    "uninstallTitle": "卸载资源",
+    "uninstallDesc": "将从所有工具移除「{{name}}」并删除 MAM 仓库副本（影响 {{n}} 个工具）。此操作不可撤销。",
+    "uninstallSuccess": "已卸载 {{name}}"
   },
   "mcp": {
     "nameAndCommandRequired": "请填写名称和命令",

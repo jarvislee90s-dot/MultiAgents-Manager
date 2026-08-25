@@ -188,7 +188,11 @@
     "removeLinkDesc": "Remove the link of {{name}} in {{tool}}?",
     "removeLink": "Remove link",
     "addMcpDesc": "The config will be saved to the MAM SSOT repo and can then be enabled per tool.",
-    "addToRepo": "Add to repo"
+    "addToRepo": "Add to repo",
+    "uninstall": "Uninstall",
+    "uninstallTitle": "Uninstall resource",
+    "uninstallDesc": "This removes \"{{name}}\" from all tools and deletes the MAM repo copy ({{n}} tool(s) affected). This cannot be undone.",
+    "uninstallSuccess": "Uninstalled {{name}}"
   },
   "mcp": {
     "nameAndCommandRequired": "Name and command are required",

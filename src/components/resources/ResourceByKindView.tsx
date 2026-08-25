@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Package, Link2, Plug, Info } from "lucide-react";
+import { Package, Link2, Plug, Info, Trash2 } from "lucide-react";
 import {
   listSsotResources,
   checkSkillTargetType,
@@ -21,6 +21,7 @@ import {
   importMcpToSsot,
   saveMcpConfig,
 } from "@/lib/api/resource";
+import { uninstallResource } from "@/lib/api/manifest";
 import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
@@ -50,6 +51,11 @@ export function ResourceByKindView() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
   const [newMcp, setNewMcp] = useState({ name: "", command: "", args: "", env: "" });
+  const [pendingUninstall, setPendingUninstall] = useState<{
+    kind: string;
+    name: string;
+    count: number;
+  } | null>(null);
 
   useEffect(() => {
     listSsotResources().then(setResources).catch(console.error);
@@ -152,6 +158,20 @@ export function ResourceByKindView() {
     }
   };
 
+  const confirmUninstall = async () => {
+    if (!pendingUninstall) return;
+    try {
+      await uninstallResource(pendingUninstall.kind, pendingUninstall.name);
+      toast.success(t("resources.uninstallSuccess", { name: pendingUninstall.name }));
+      const fresh = await listSsotResources();
+      setResources(fresh);
+    } catch (e) {
+      toast.error(t("common.operationFailed", { error: e }));
+    } finally {
+      setPendingUninstall(null);
+    }
+  };
+
   const handleAddMcp = async () => {
     if (!newMcp.name.trim() || !newMcp.command.trim()) {
       toast.error(t("mcp.nameAndCommandRequired"));
@@ -209,7 +229,24 @@ export function ResourceByKindView() {
                   key={skill.name}
                   className="flex items-center justify-between rounded border p-2 text-sm"
                 >
-                  <span className="font-medium">{formatSkillName(skill.name)}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="font-medium">{formatSkillName(skill.name)}</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive h-6 px-1.5 text-[10px]"
+                      title={t("resources.uninstall")}
+                      onClick={() =>
+                        setPendingUninstall({
+                          kind: "skill",
+                          name: skill.name,
+                          count: skill.enabledTools.length,
+                        })
+                      }
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
                   <div className="flex gap-1">
                     {TOOLS.map((tool) => {
                       const enabled = skill.enabledTools.includes(tool.id);
@@ -260,7 +297,24 @@ export function ResourceByKindView() {
                   key={mcp.name}
                   className="flex items-center justify-between rounded border p-2 text-sm"
                 >
-                  <span className="font-medium">{mcp.name}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="font-medium">{mcp.name}</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive h-6 px-1.5 text-[10px]"
+                      title={t("resources.uninstall")}
+                      onClick={() =>
+                        setPendingUninstall({
+                          kind: "mcp",
+                          name: mcp.name,
+                          count: mcp.enabledTools.length,
+                        })
+                      }
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
                   <div className="flex gap-1">
                     {TOOLS.map((tool) => {
                       const enabled = mcp.enabledTools.includes(tool.id);
@@ -302,7 +356,24 @@ export function ResourceByKindView() {
                   key={plugin.name}
                   className="flex items-center justify-between rounded border p-2 text-sm"
                 >
-                  <span className="font-medium">{plugin.name}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="font-medium">{plugin.name}</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive h-6 px-1.5 text-[10px]"
+                      title={t("resources.uninstall")}
+                      onClick={() =>
+                        setPendingUninstall({
+                          kind: "plugin",
+                          name: plugin.name,
+                          count: plugin.enabledTools.length,
+                        })
+                      }
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
                   <div className="flex gap-1">
                     {TOOLS.map((tool) => {
                       const enabled = plugin.enabledTools.includes(tool.id);
@@ -450,6 +521,29 @@ export function ResourceByKindView() {
             </Button>
             <Button size="sm" onClick={handleAddMcp}>
               {t("resources.addToRepo")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 卸载确认弹窗 */}
+      <Dialog open={!!pendingUninstall} onOpenChange={(o) => !o && setPendingUninstall(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-red-600">{t("resources.uninstallTitle")}</DialogTitle>
+            <DialogDescription className="pt-2 text-sm">
+              {t("resources.uninstallDesc", {
+                name: pendingUninstall?.name,
+                n: pendingUninstall?.count ?? 0,
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setPendingUninstall(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" size="sm" onClick={confirmUninstall}>
+              {t("resources.uninstall")}
             </Button>
           </DialogFooter>
         </DialogContent>
