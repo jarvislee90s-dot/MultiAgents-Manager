@@ -159,7 +159,9 @@ pub fn sync_imported_skill_links() {
         if let Some(t) = &tool_target {
             if crate::linker::check_link_health(t) == crate::linker::LinkHealth::Dangling {
                 let repo_exists = crate::linker::ensure_repo_dir().join(&ext.name).exists();
-                let _ = crate::linker::remove_link(t);
+                if let Err(e) = crate::linker::remove_link(t) {
+                    log::warn!("移除断链 {} 失败: {}", t.display(), e);
+                }
                 if repo_exists {
                     if let Err(e) = crate::services::enable_skill_for_tool(&ext.name, &tool_id) {
                         log::warn!("重建 {} → {} 断链失败: {}", ext.name, tool_id, e);

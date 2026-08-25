@@ -104,14 +104,30 @@ pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
 /// 移除链接
 pub fn remove_link(target: &Path) -> Result<(), String> {
     if target.is_symlink() {
-        // Windows 上目录 Junction / 目录符号链接用 remove_file 会报"拒绝访问"（os error 5），
-        // 须改用 remove_dir_all —— 它对 reparse point 只删除链接本身，不会递归进目标目录
+        // 判断链接是否为目录型。关键点：不跟随链接的 symlink_metadata 在 Windows 上对
+        // 目录 Junction 的 FileType::is_dir() 恒为 false（reparse point 被视作 symlink），
+        // 须用 FileTypeExt::is_symlink_dir() 判定（对 dangling junction 同样返回 true）；
+        // 目录型链接用 remove_file 会报"拒绝访问"（os error 5），须改用 remove_dir_all ——
+        // 它对 reparse point 只删除链接本身，不会递归进目标目录。
         #[cfg(windows)]
-        if target.is_dir() {
+        let link_is_dir = target
+            .symlink_metadata()
+            .map(|m| {
+                use std::os::windows::fs::FileTypeExt;
+                m.file_type().is_symlink_dir()
+            })
+            .unwrap_or(false);
+        // Unix 上 symlink_metadata 的 is_dir() 对 symlink 恒为 false，链接本体用 remove_file 即可
+        #[cfg(not(windows))]
+        let link_is_dir = target
+            .symlink_metadata()
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if link_is_dir {
             fs::remove_dir_all(target).map_err(|e| format!("移除目录链接失败: {}", e))?;
-            return Ok(());
+        } else {
+            fs::remove_file(target).map_err(|e| format!("移除 symlink 失败: {}", e))?;
         }
-        fs::remove_file(target).map_err(|e| format!("移除 symlink 失败: {}", e))?;
     } else if target.exists() {
         // 普通文件用 remove_file，目录 / Junction 用 remove_dir_all
         if target.is_dir() {
@@ -253,6 +269,20 @@ mod link_health_tests {
         assert_eq!(check_link_health(&link), LinkHealth::Valid);
         std::fs::remove_dir_all(&src).unwrap();
         assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_junction_removed_by_remove_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("lnk");
+        junction::create(&src, &link).unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+        remove_link(&link).unwrap();
+        assert!(!link.exists() && !link.is_symlink());
     }
 
     #[cfg(unix)]
