@@ -459,6 +459,7 @@ git commit -m "feat(ui): window picker for ambiguous jump targets"
 - [x] **Step 1: Spike — 验证两条前提（人工，任一不成立则本任务跳过、仅做 Step 4）**
 
   > **spike 结论（2026-08-24 补录）**：前提 A 不成立（实跑 claude 会话成功、生成了 session_id，但 `~/.mam/events` 无新事件文件——根因是 claude `settings.json` 无 hooks 段、hook 脚本未被执行，DB 中 hooks_registered=true 却未实际注册到 claude）/ 前提 B 成立（子进程向控制台写 `ESC]0;MAM:test1234 BEL` 序列后，窗口标题实测变为 `MAM:test1234`）。判定 no-go，marker 层保持未启用，窗口歧义由标题打分 + 选择器兜底。
+  > **2026-08-25 更新**：前提 A 根因（注册假阳性）已修复——dev 启动即注册 hooks 段（命令形态 `bash "...status-hook.sh"`），实跑 claude 会话后 `~/.mam/events/` 正常产出事件文件；marker 已随脚本启用，hook 内 `/dev/tty` 写入在本轮自动化（无头管道）环境报 "No such device or address"、交互终端下的标题效果待用户验证，窗口歧义仍由候选打分过滤兜底。
 
 前提 A（hook 在本机实际生效）：跑一个 claude 会话发条消息，检查 `~/.mam/events/` 是否出现新事件文件——没有则 hook 通道未工作，marker 无从注入，no-go。
 前提 B（子进程写标题可达）：在 Git Bash 终端执行：

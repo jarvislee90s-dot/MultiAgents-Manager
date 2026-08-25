@@ -20,6 +20,8 @@ CWD=$(echo "$INPUT" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.
 TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
+# 注入窗口标题 marker（MAM:<session_id 前 8 位>），供 MultiAgents Manager 跳转精确定位
+printf '\033]0;MAM:%s\007' "$(printf '%s' "$SESSION_ID" | cut -c1-8)" > /dev/tty 2>/dev/null || true
 "#;
 
 /// 确保 Hook 脚本和事件目录存在
@@ -31,18 +33,16 @@ pub fn ensure_hook_script() -> PathBuf {
     let _ = fs::create_dir_all(&events_dir);
 
     let script_path = hooks_dir.join("status-hook.sh");
-    if !script_path.exists() {
-        let _ = fs::write(&script_path, HOOK_SCRIPT);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(&script_path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o755);
-                let _ = fs::set_permissions(&script_path, perms);
-            }
+    // 无条件重写：脚本由应用托管，幂等重写保证升级后新 marker 生效
+    let _ = fs::write(&script_path, HOOK_SCRIPT);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(&script_path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            let _ = fs::set_permissions(&script_path, perms);
         }
-        info!("Hook 脚本已创建: {:?}", script_path);
     }
     script_path
 }
@@ -56,6 +56,13 @@ pub fn register_hooks_for_tool(
 ) -> Result<(), String> {
     let script_path = ensure_hook_script();
     let script_path_str = script_path.to_string_lossy().to_string();
+
+    // Windows 无法直接执行 .sh，hook 命令经 bash 调用（Git Bash 随开发/使用环境存在）
+    let command_str = if cfg!(windows) {
+        format!("bash \"{}\"", script_path_str)
+    } else {
+        script_path_str.clone()
+    };
 
     // 读取现有配置（不存在则创建空对象）
     let existing = fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
@@ -107,15 +114,22 @@ pub fn register_hooks_for_tool(
             }
         }
 
-        // 添加 Hook 条目
-        let hook_entry = serde_json::json!([{
+        // 合并式追加：用户已有同事件 hooks 时保留其条目，仅追加我们的（不整组替换）
+        let our_entry = serde_json::json!({
             "matcher": "",
             "hooks": [{
                 "type": "command",
-                "command": &script_path_str
+                "command": &command_str
             }]
-        }]);
-        hooks_obj.insert(event_name, hook_entry);
+        });
+        match hooks_obj.get_mut(&event_name) {
+            Some(arr) if arr.is_array() => {
+                arr.as_array_mut().unwrap().push(our_entry);
+            }
+            _ => {
+                hooks_obj.insert(event_name, serde_json::json!([our_entry]));
+            }
+        }
         added += 1;
     }
 
@@ -178,41 +192,44 @@ pub struct HookEvent {
 }
 
 /// 为所有支持 Hook 的工具注册 Hook（在应用启动时调用）
+/// 核验实际配置状态而非信任 DB 标志：修复"全局单标志 + 永不核验"导致的假阳性
+/// （此前 claude 注册失败后因 codex 成功置位而永不重试）
 pub fn register_all_hooks() {
-    // 检查是否已注册过（避免每次启动都读写用户配置）
-    if let Some(val) = crate::database::get_setting("hooks_registered") {
-        if val == "true" {
-            debug!("Hooks already registered, skipping");
-            // 仍确保脚本存在
-            ensure_hook_script();
-            return;
-        }
-    }
     use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter};
     use crate::adapter::{AgentAdapter, HookEventCase};
 
-    let adapters: Vec<Box<dyn AgentAdapter>> =
-        vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)];
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)];
+    let script_path = ensure_hook_script();
 
     for adapter in &adapters {
         if !adapter.hook_supported() {
             continue;
         }
-        if let Some(config_path) = adapter.hook_config_path() {
-            let events = adapter.hook_events();
-            let is_pascal = matches!(adapter.hook_event_case(), HookEventCase::PascalCase);
-            match register_hooks_for_tool(&config_path, &events, is_pascal) {
-                Ok(()) => {
-                    info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
-                    crate::database::set_setting("hooks_registered", "true");
-                }
-                Err(e) => warn!(
-                    "Hook 注册失败 {} → {:?}: {}",
-                    adapter.name(),
-                    config_path,
-                    e
-                ),
+        let Some(config_path) = adapter.hook_config_path() else { continue };
+        let tool_key = format!(
+            "hooks_registered_{}",
+            format!("{:?}", adapter.agent_type()).to_lowercase()
+        );
+
+        // 启动核验：配置文件实际包含 status-hook 引用且脚本存在才跳过
+        let verified = fs::read_to_string(&config_path)
+            .map(|c| c.contains("status-hook.sh"))
+            .unwrap_or(false)
+            && script_path.exists();
+        if verified {
+            crate::database::set_setting(&tool_key, "true");
+            debug!("{} Hook 已确认: {:?}", adapter.name(), config_path);
+            continue;
+        }
+
+        let events = adapter.hook_events();
+        let is_pascal = matches!(adapter.hook_event_case(), HookEventCase::PascalCase);
+        match register_hooks_for_tool(&config_path, &events, is_pascal) {
+            Ok(()) => {
+                info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
+                crate::database::set_setting(&tool_key, "true");
             }
+            Err(e) => warn!("Hook 注册失败 {} → {:?}: {}", adapter.name(), config_path, e),
         }
     }
 }
