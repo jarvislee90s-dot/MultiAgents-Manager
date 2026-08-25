@@ -127,7 +127,7 @@ pub fn determine_status(
         Some("assistant") => {
             if has_tool_use && is_user_input_tool {
                 SessionStatus::Waiting
-            } else if has_tool_use || file_recently_modified {
+            } else if has_tool_use {
                 SessionStatus::Processing
             } else {
                 // Assistant finished responding, no pending tool calls → idle
@@ -148,5 +148,43 @@ pub fn determine_status(
                 SessionStatus::Waiting
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_text_is_idle_even_if_file_recent() {
+        // 明确完成信号优先：assistant 纯文本 + 文件仍在年龄窗口内 → Idle（不再被拉回 Processing）
+        assert_eq!(
+            determine_status(Some("assistant"), false, false, false, false, false, true),
+            SessionStatus::Idle
+        );
+        assert_eq!(
+            determine_status(Some("assistant"), false, false, false, false, false, false),
+            SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn assistant_tool_use_is_processing() {
+        assert_eq!(
+            determine_status(Some("assistant"), true, false, false, false, false, false),
+            SessionStatus::Processing
+        );
+        // 用户输入类工具（AskUserQuestion）→ Waiting
+        assert_eq!(
+            determine_status(Some("assistant"), true, false, false, false, true, false),
+            SessionStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn fallback_branch_still_uses_file_age() {
+        // 兜底分支保留 file_recently_modified 语义
+        assert_eq!(determine_status(None, false, false, false, false, false, true), SessionStatus::Processing);
+        assert_eq!(determine_status(None, false, false, false, false, false, false), SessionStatus::Waiting);
     }
 }

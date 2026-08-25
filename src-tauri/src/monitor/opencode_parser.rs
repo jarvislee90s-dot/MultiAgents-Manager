@@ -339,14 +339,16 @@ fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
     }
 }
 
-/// OpenCode 状态判断：CPU > 5% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
+/// OpenCode 状态判断：非 assistant 回复完且 CPU > 15% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
 fn determine_opencode_status(
     cpu: f32,
     last_role: Option<&str>,
     last_msg_time: i64,
     session_updated: i64,
 ) -> SessionStatus {
-    if cpu > 5.0 {
+    // CPU 为瞬时采样噪声大：仅当会话不是"assistant 已回复完"且 CPU 明显高（阈值提高至 15%）
+    // 才升级为 Processing，避免任务结束后后台活动（GC/索引）导致绿黄横跳
+    if cpu > 15.0 && last_role != Some("assistant") {
         SessionStatus::Processing
     } else {
         // 检查是否近期活跃（最后消息时间或会话更新时间在 60s 内）
@@ -366,4 +368,31 @@ fn ms_to_iso(ms: i64) -> String {
     chrono::DateTime::from_timestamp(ms / 1000, 0)
         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_else(|| "Unknown".to_string())
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_spike_after_assistant_reply_is_not_processing() {
+        // assistant 已回复完：CPU 抖动（后台 GC/索引）不得把状态拉回 Processing
+        let now = chrono::Utc::now().timestamp_millis();
+        // 消息时间取 60 秒活跃窗口之外，避开既有 Waiting 分支（其余分支语义不动）
+        let old = now - 61_000;
+        assert_eq!(
+            determine_opencode_status(50.0, Some("assistant"), old, old),
+            SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn cpu_still_marks_processing_before_reply() {
+        // 尚未回复完（最后消息是 user）：高 CPU 正常判 Processing
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_eq!(
+            determine_opencode_status(50.0, Some("user"), now, now),
+            SessionStatus::Processing
+        );
+    }
 }
