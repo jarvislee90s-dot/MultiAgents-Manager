@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { useTranslation } from "react-i18next";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import { AGENT_BADGE } from "@/lib/agentBadge";
@@ -32,6 +33,16 @@ export default function NotificationPage() {
     timerRef.current = window.setTimeout(() => getCurrentWindow().hide(), ms);
   };
 
+  // 候选列表动态高度：N 个候选按 60+N*34+16 计算，上限 400（超出内部滚动）；null 还原 110
+  const applyHeight = async (count: number | null) => {
+    const h = count === null ? 110 : Math.min(60 + count * 34 + 16, 400);
+    try {
+      await getCurrentWindow().setSize(new LogicalSize(360, h));
+    } catch {
+      // 非 Tauri 环境忽略
+    }
+  };
+
   useEffect(() => {
     const win = getCurrentWindow();
     let unlisten: (() => void) | null = null;
@@ -43,6 +54,7 @@ export default function NotificationPage() {
         setPayload(e.payload);
         // 新通知到达时清掉旧候选列表，避免与卡片同时出现
         setCandidates(null);
+        void applyHeight(null);
         win.show();
         armTimer(10000);
       },
@@ -67,6 +79,7 @@ export default function NotificationPage() {
       // 多窗口歧义：在通知窗内联渲染候选，避免静默失败
       if (ambiguous) {
         getCurrentWindow().show();
+        void applyHeight(ambiguous.length);
         // 候选列表不操作 15 秒自动隐藏，避免无限驻留
         armTimer(15000);
       }
@@ -120,20 +133,23 @@ export default function NotificationPage() {
           onMouseLeave={() => armTimer(5000)}
         >
           <p className="text-xs font-semibold">{t("sessions.pickWindow")}</p>
-          {candidates.map((w) => (
-            <button
-              key={w.hwnd}
-              className="hover:bg-accent truncate rounded border px-2 py-1.5 text-left text-[11px]"
-              title={w.title}
-              onClick={() => {
-                setCandidates(null);
-                getCurrentWindow().hide();
-                focusHwnd(w.hwnd).catch(() => {});
-              }}
-            >
-              {w.title || t("sessions.untitledWindow")} — {w.process}
-            </button>
-          ))}
+          <div className="max-h-full overflow-y-auto">
+            {candidates.map((w) => (
+              <button
+                key={w.hwnd}
+                className="hover:bg-accent truncate rounded border px-2 py-1.5 text-left text-[11px]"
+                title={w.title}
+                onClick={() => {
+                  setCandidates(null);
+                  void applyHeight(null);
+                  getCurrentWindow().hide();
+                  focusHwnd(w.hwnd).catch(() => {});
+                }}
+              >
+                {w.title || t("sessions.untitledWindow")} — {w.process}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </>
