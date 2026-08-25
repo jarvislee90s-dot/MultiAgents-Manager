@@ -198,14 +198,17 @@ pub fn register_all_hooks() {
     use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter};
     use crate::adapter::{AgentAdapter, HookEventCase};
 
-    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)];
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter)];
     let script_path = ensure_hook_script();
 
     for adapter in &adapters {
         if !adapter.hook_supported() {
             continue;
         }
-        let Some(config_path) = adapter.hook_config_path() else { continue };
+        let Some(config_path) = adapter.hook_config_path() else {
+            continue;
+        };
         let tool_key = format!(
             "hooks_registered_{}",
             format!("{:?}", adapter.agent_type()).to_lowercase()
@@ -229,7 +232,12 @@ pub fn register_all_hooks() {
                 info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
                 crate::database::set_setting(&tool_key, "true");
             }
-            Err(e) => warn!("Hook 注册失败 {} → {:?}: {}", adapter.name(), config_path, e),
+            Err(e) => warn!(
+                "Hook 注册失败 {} → {:?}: {}",
+                adapter.name(),
+                config_path,
+                e
+            ),
         }
     }
 }

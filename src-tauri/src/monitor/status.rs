@@ -184,7 +184,13 @@ mod tests {
     #[test]
     fn fallback_branch_still_uses_file_age() {
         // 兜底分支保留 file_recently_modified 语义
-        assert_eq!(determine_status(None, false, false, false, false, false, true), SessionStatus::Processing);
-        assert_eq!(determine_status(None, false, false, false, false, false, false), SessionStatus::Waiting);
+        assert_eq!(
+            determine_status(None, false, false, false, false, false, true),
+            SessionStatus::Processing
+        );
+        assert_eq!(
+            determine_status(None, false, false, false, false, false, false),
+            SessionStatus::Waiting
+        );
     }
 }
