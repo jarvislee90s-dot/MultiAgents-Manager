@@ -114,6 +114,7 @@
     "retry": "重试",
     "refreshPage": "刷新页面",
     "cancel": "取消",
+    "confirm": "确定",
     "checking": "检查兼容性...",
     "scanning": "扫描中...",
     "loading": "加载中…",
@@ -194,7 +195,10 @@
     "uninstallDesc": "将从所有工具移除「{{name}}」并删除 MAM 仓库副本（影响 {{n}} 个工具）。此操作不可撤销。",
     "uninstallSuccess": "已卸载 {{name}}",
     "linkBroken": "链接损坏",
-    "linkBrokenTooltip": "以下工具的链接已断开：{{tools}}，重新扫描可自动修复"
+    "linkBrokenTooltip": "以下工具的链接已断开：{{tools}}，重新扫描可自动修复",
+    "installFromManifest": "从 Manifest 安装",
+    "manifestPathLabel": "资源目录中 mam.json 的路径",
+    "manifestPathPlaceholder": "D:\\resources\\my-skill\\mam.json"
   },
   "mcp": {
     "nameAndCommandRequired": "请填写名称和命令",

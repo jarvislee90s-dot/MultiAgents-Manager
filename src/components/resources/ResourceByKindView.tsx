@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Package, Link2, Plug, Info, Trash2 } from "lucide-react";
+import { Package, Link2, Plug, Info, Trash2, FileJson } from "lucide-react";
 import {
   listSsotResources,
   checkSkillTargetType,
@@ -22,6 +22,7 @@ import {
   saveMcpConfig,
 } from "@/lib/api/resource";
 import { uninstallResource } from "@/lib/api/manifest";
+import { ManifestInstallDialog } from "./ManifestInstallDialog";
 import type { SsotResources } from "@/types/extension";
 
 const TOOLS = [
@@ -56,6 +57,10 @@ export function ResourceByKindView() {
     name: string;
     count: number;
   } | null>(null);
+  const [manifestDlgOpen, setManifestDlgOpen] = useState(false);
+  const [manifestPath, setManifestPath] = useState("");
+  const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
+  const [installDlgOpen, setInstallDlgOpen] = useState(false);
 
   useEffect(() => {
     listSsotResources().then(setResources).catch(console.error);
@@ -201,6 +206,18 @@ export function ResourceByKindView() {
     <>
       <div className="bg-card rounded-lg border p-4">
         <h3 className="mb-3 text-sm font-semibold">{t("resources.repoTitle")}</h3>
+
+        <div className="mb-3 flex justify-end">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px]"
+            onClick={() => setManifestDlgOpen(true)}
+          >
+            <FileJson className="mr-1 h-3 w-3" />
+            {t("resources.installFromManifest")}
+          </Button>
+        </div>
 
         {/* Skills */}
         <div className="mb-4">
@@ -561,6 +578,50 @@ export function ResourceByKindView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 从 Manifest 安装路径弹窗 */}
+      <Dialog open={manifestDlgOpen} onOpenChange={setManifestDlgOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("resources.installFromManifest")}</DialogTitle>
+          </DialogHeader>
+          <div className="py-2">
+            <label className="text-xs font-medium">{t("resources.manifestPathLabel")}</label>
+            <input
+              value={manifestPath}
+              onChange={(e) => setManifestPath(e.currentTarget.value)}
+              placeholder={t("resources.manifestPathPlaceholder")}
+              className="h-8 w-full rounded border px-2 text-xs"
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setManifestDlgOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              disabled={!manifestPath.trim()}
+              onClick={() => {
+                setInstallDlgPath(manifestPath.trim());
+                setInstallDlgOpen(true);
+                setManifestDlgOpen(false);
+              }}
+            >
+              {t("common.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ManifestInstallDialog
+        path={installDlgPath}
+        open={installDlgOpen}
+        onOpenChange={setInstallDlgOpen}
+        onInstalled={async () => {
+          const fresh = await listSsotResources();
+          setResources(fresh);
+        }}
+      />
     </>
   );
 }
