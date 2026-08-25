@@ -29,14 +29,15 @@ export default function NotificationPage() {
   const { t } = useTranslation();
   const timerRef = useRef<number | null>(null);
 
+  // 自动隐藏计时器（组件级，参数化时长）：通知卡片与候选列表复用
+  const armTimer = (ms: number) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => getCurrentWindow().hide(), ms);
+  };
+
   useEffect(() => {
     const win = getCurrentWindow();
     let unlisten: (() => void) | null = null;
-    // 自动隐藏计时器：每次新通知重置
-    const armTimer = () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => win.hide(), 6000);
-    };
     // 监听必须限定本窗口：不指定 target 时监听器目标为 Any，会收到所有槽位窗口的
     // notification:new（emit_to 定向发送被 Any 监听器全收），导致每个浮窗都显示最后一条内容
     listen<NotificationPayload>(
@@ -46,7 +47,7 @@ export default function NotificationPage() {
         // 新通知到达时清掉旧候选列表，避免与卡片同时出现
         setCandidates(null);
         win.show();
-        armTimer();
+        armTimer(6000);
       },
       { target: win.label }
     ).then((fn) => (unlisten = fn));
@@ -69,6 +70,8 @@ export default function NotificationPage() {
       if (result.type === "ambiguous" && result.windows && result.windows.length > 0) {
         setCandidates(result.windows);
         getCurrentWindow().show();
+        // 候选列表不操作 15 秒自动隐藏，避免无限驻留
+        armTimer(15000);
       }
     } catch {
       // 跳转失败不弹新提示（通知窗口环境无 toast 容器）
@@ -81,10 +84,7 @@ export default function NotificationPage() {
         <div
           className="bg-card flex h-screen w-screen cursor-pointer items-center gap-3 rounded-lg border p-3 shadow-2xl"
           onMouseEnter={() => timerRef.current && window.clearTimeout(timerRef.current)}
-          onMouseLeave={() => {
-            if (timerRef.current) window.clearTimeout(timerRef.current);
-            timerRef.current = window.setTimeout(() => getCurrentWindow().hide(), 3000);
-          }}
+          onMouseLeave={() => armTimer(3000)}
           onClick={jump}
         >
           <span
@@ -101,7 +101,11 @@ export default function NotificationPage() {
         </div>
       )}
       {candidates && (
-        <div className="bg-card flex h-screen w-screen flex-col gap-1 rounded-lg border p-3 shadow-2xl">
+        <div
+          className="bg-card flex h-screen w-screen flex-col gap-1 rounded-lg border p-3 shadow-2xl"
+          onMouseEnter={() => timerRef.current && window.clearTimeout(timerRef.current)}
+          onMouseLeave={() => armTimer(5000)}
+        >
           <p className="text-xs font-semibold">{t("sessions.pickWindow")}</p>
           {candidates.map((w) => (
             <button
