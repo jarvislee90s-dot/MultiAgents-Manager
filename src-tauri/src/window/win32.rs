@@ -194,7 +194,11 @@ fn read_window_text(hwnd_val: isize) -> Option<String> {
                 let range = pattern.DocumentRange().ok()?;
                 let text = range.GetText(-1).ok()?;
                 let s = text.to_string();
-                if s.is_empty() { None } else { Some(s) }
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
             };
 
             if let Some(s) = try_text(&root) {
@@ -210,7 +214,10 @@ fn read_window_text(hwnd_val: isize) -> Option<String> {
             for i in 0..arr.Length().ok()? {
                 if let Ok(el) = arr.GetElement(i) {
                     if let Some(s) = try_text(&el) {
-                        if best.as_ref().is_none_or(|b| s.chars().count() > b.chars().count()) {
+                        if best
+                            .as_ref()
+                            .is_none_or(|b| s.chars().count() > b.chars().count())
+                        {
                             best = Some(s);
                         }
                     }
