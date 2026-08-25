@@ -45,7 +45,11 @@ function statusToColor(status: string): string {
 
 export function useNotification() {
   const sessions = useSessionStore((s) => s.sessions);
-  const prevStatuses = useRef<Map<string, string>>(new Map());
+  const prevStatuses = useRef<Map<string, { status: string; color: string; at: number }>>(
+    new Map()
+  );
+  // 上次实际通知记录：同会话 5 秒内重复翻转到同一目标颜色只弹一次（兜底状态抖动）
+  const lastNotified = useRef<Map<string, { color: string; at: number }>>(new Map());
   const permissionGranted = useRef(false);
   const notificationsEnabled = useRef(true);
 
@@ -107,26 +111,33 @@ export function useNotification() {
   useEffect(() => {
     (async () => {
       for (const session of sessions) {
-        const prevStatus = prevStatuses.current.get(session.id);
+        const prev = prevStatuses.current.get(session.id);
 
         // 首次加载不通知
-        if (!prevStatus) {
-          prevStatuses.current.set(session.id, session.status);
+        if (!prev) {
+          prevStatuses.current.set(session.id, {
+            status: session.status,
+            color: statusToColor(session.status),
+            at: Date.now(),
+          });
           continue;
         }
 
-        // 比较颜色变化（非状态变化）
-        const prevColor = statusToColor(prevStatus);
         const currColor = statusToColor(session.status);
+        prevStatuses.current.set(session.id, {
+          status: session.status,
+          color: currColor,
+          at: Date.now(),
+        });
 
         // 颜色未变 → 不通知（即使状态变了，如 Processing → Thinking 都是黄色）
-        if (prevColor === currColor) {
-          prevStatuses.current.set(session.id, session.status);
+        if (prev.color === currColor) continue;
+
+        // 时间去重：5 秒内同目标颜色不重复弹（兜底状态抖动）
+        const notified = lastNotified.current.get(session.id);
+        if (notified && notified.color === currColor && Date.now() - notified.at < 5000) {
           continue;
         }
-
-        // 更新上一个状态
-        prevStatuses.current.set(session.id, session.status);
 
         // 通知
         // 每次轮询时刷新通知开关设置（支持运行时切换）
@@ -138,10 +149,11 @@ export function useNotification() {
         }
         if (!notificationsEnabled.current) continue;
 
-        // 颜色变化时通知（红→黄→绿 任意切换）
+        // 颜色变化时通知（红→黄→绿 任意切换）；记录本次通知用于时间去重
 
         // 播放提示音
         playSoundForStatus(session.status);
+        lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
 
         // 发送通知：系统 toast 或应用内浮窗（mam.useSystemNotification 开关控制）
         {
@@ -205,6 +217,7 @@ export function useNotification() {
       for (const id of prevStatuses.current.keys()) {
         if (!activeIds.has(id)) {
           prevStatuses.current.delete(id);
+          lastNotified.current.delete(id);
         }
       }
     })();
