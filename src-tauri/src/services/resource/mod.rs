@@ -211,6 +211,11 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         .filter(|e| e.kind == "skill")
         .map(|e| e.name.clone())
         .collect();
+    // 指标用：全部 kind 的导入前 name 基线（与播种集分离，避免被 kind 过滤影响）
+    let all_names_before: std::collections::HashSet<String> = crate::database::list_extensions()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
 
     let skill_sources: Vec<(&str, std::path::PathBuf)> =
         ["claude", "codex", "opencode", "openclaw"]
@@ -381,7 +386,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         .iter()
         .map(|e| e.name.clone())
         .collect();
-    let newly_added = existing_after.difference(&existing_before).count();
+    let newly_added = existing_after.difference(&all_names_before).count();
 
     if imported > 0 {
         log::info!(
