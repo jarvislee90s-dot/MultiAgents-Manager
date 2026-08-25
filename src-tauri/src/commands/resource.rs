@@ -1,5 +1,19 @@
 // 资源管理命令
 
+/// 原生（未纳管）资源的扫描结果 DTO
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeExtensionRecord {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source_path: String,
+    pub source_tool: String,
+    pub detected_at: String,
+    pub imported: bool,
+}
+
 /// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
 /// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
 /// 深度上限 4 层，symlink 目录不跟随（防循环）
@@ -92,7 +106,7 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
 }
 
 #[tauri::command]
-pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExtensionRecord> {
+pub fn scan_native_resources(tool_id: String) -> Vec<NativeExtensionRecord> {
     let mut results = Vec::new();
     let skill_dir = crate::adapter::primary_skill_dir(&tool_id);
     if let Some(dir) = skill_dir {
@@ -104,7 +118,7 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
                 let ext_id = format!("skill-{}", name);
                 let exists = existing.iter().any(|e| e.id == ext_id);
                 if !exists {
-                    results.push(crate::database::NativeExtensionRecord {
+                    results.push(NativeExtensionRecord {
                         id: ext_id,
                         kind: "skill".to_string(),
                         name: name.clone(),

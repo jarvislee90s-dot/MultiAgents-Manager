@@ -12,15 +12,14 @@ pub use dao::settings;
 
 // 重新导出公共类型（保持 crate::database::Type -> crate::database::Type 兼容）
 pub use dao::agent_tool::SubAgentRecord;
-pub use dao::extension::{AssignmentRecord, ExtensionRecord, NativeExtensionRecord};
+pub use dao::extension::{AssignmentRecord, ExtensionRecord};
 pub use dao::preset::{PresetItemRecord, PresetRecord};
 
 // 重新导出公共函数
 pub use dao::agent_tool::list_sub_agents;
 pub use dao::extension::{
     delete_assignments_for, delete_extension, disable_subagent_assignment, insert_extension,
-    insert_native_extension, list_all_assignments, list_assignments, list_extensions,
-    list_native_extensions, mark_native_imported, upsert_assignment,
+    list_all_assignments, list_assignments, list_extensions, upsert_assignment,
     upsert_assignment_with_subagent,
 };
 pub use dao::preset::{
