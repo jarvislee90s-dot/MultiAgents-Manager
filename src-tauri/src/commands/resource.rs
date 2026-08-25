@@ -515,47 +515,34 @@ pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
     }
 }
 
-/// 取消 skill 的工具配置：移至回收站 + 更新 DB
+/// 移除工具目录中的 skill 目标：链接直接移除（无数据可丢），原生目录移入系统回收站。
+/// 回收站失败返回错误，绝不静默降级为永久删除。
+fn remove_skill_target(target: &std::path::Path) -> Result<String, String> {
+    let target_type = if target.is_symlink() { "symlink" } else { "native" };
+    if target_type == "symlink" {
+        crate::linker::remove_link(target)?;
+    } else {
+        trash::delete(target).map_err(|e| format!("移入回收站失败: {}", e))?;
+    }
+    Ok(target_type.to_string())
+}
+
+/// 取消 skill 的工具配置：回收站/移除链接 + 更新 DB
 #[tauri::command]
 pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<String, String> {
     let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
         .ok_or_else(|| format!("未知工具: {}", tool_id))?;
     let target = tool_skill_dir.join(&skill_name);
-    if !target.exists() {
+    if !target.exists() && !target.is_symlink() {
         return Err("目标路径不存在".to_string());
     }
 
-    let target_type = if target.is_symlink() {
-        "symlink"
-    } else {
-        "native"
-    };
-
-    // 尝试用 trash 命令移至回收站
-    let result = std::process::Command::new("trash").arg(&target).output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
-            let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
-            let ext_id = format!("skill-{}", skill_name);
-            let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
-            Ok(target_type.to_string())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("移入回收站失败: {}", stderr))
-        }
-        Err(e) => {
-            log::warn!("trash 命令不可用，回退到直接删除: {}", e);
-            crate::linker::remove_link(&target)?;
-            let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
-            let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
-            let ext_id = format!("skill-{}", skill_name);
-            let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
-            Ok(format!("{}-fallback-rm", target_type))
-        }
-    }
+    let target_type = remove_skill_target(&target)?;
+    let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
+    let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
+    let ext_id = format!("skill-{}", skill_name);
+    let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
+    Ok(target_type)
 }
 
 /// 为工具启用 skill（创建符号链接 + DB 记录）
@@ -650,4 +637,36 @@ pub fn save_mcp_config(
     std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
     log::info!("MCP 配置已保存: {}", config_file.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod remove_target_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn symlink_target_removed_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("skill-link");
+        junction::create(&src, &link).unwrap();
+        assert!(link.is_symlink());
+        let ty = remove_skill_target(&link).unwrap();
+        assert_eq!(ty, "symlink");
+        assert!(!link.exists() && !link.is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_removed_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("skill-link");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        let ty = remove_skill_target(&link).unwrap();
+        assert_eq!(ty, "symlink");
+        assert!(!link.exists() && !link.is_symlink());
+    }
 }
