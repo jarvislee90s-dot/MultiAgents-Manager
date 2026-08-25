@@ -1,5 +1,7 @@
 // MCP 配置格式转换器 — JSON (Claude) / TOML (Codex) / JSONC (OpenCode)
 
+pub mod jsonc;
+
 use crate::adapter::{
     claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
     opencode::OpenCodeAdapter, AgentAdapter, McpFormat,
@@ -133,30 +135,20 @@ fn remove_mcp_toml(path: &std::path::Path, name: &str) -> Result<(), String> {
 
 fn write_mcp_jsonc(path: &std::path::Path, name: &str, config: &McpConfig) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("解析 JSONC 配置失败: {}", e))?;
-    if root.get("mcp").is_none() {
-        root["mcp"] = serde_json::json!({});
-    }
     // OpenCode 格式：command 是数组，env 是 environment
     let mut cmd_array = vec![config.command.clone()];
     cmd_array.extend(config.args.iter().cloned());
-    root["mcp"][name] = serde_json::json!({
+    let value = serde_json::json!({
         "type": "local",
         "command": cmd_array,
         "environment": config.env,
     });
-    let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::linker::write_config_locked(path, &pretty)
+    let next = jsonc::upsert_entry(&content, "mcp", name, &value.to_string())?;
+    crate::linker::write_config_locked(path, &next)
 }
 
 fn remove_mcp_jsonc(path: &std::path::Path, name: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let mut root: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("解析 JSONC 配置失败: {}", e))?;
-    if let Some(servers) = root.get_mut("mcp").and_then(|s| s.as_object_mut()) {
-        servers.remove(name);
-    }
-    let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    crate::linker::write_config_locked(path, &pretty)
+    let next = jsonc::remove_entry(&content, "mcp", name)?;
+    crate::linker::write_config_locked(path, &next)
 }
