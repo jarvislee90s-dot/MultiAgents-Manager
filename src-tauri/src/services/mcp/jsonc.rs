@@ -256,7 +256,6 @@ pub fn remove_entry(content: &str, section: &str, key: &str) -> Result<String, S
     // 删除范围：entry key 前（含前导逗号）到 value 结束（含后导逗号）
     let mut remove_start = target.key_start;
     let mut remove_end = target.value.end;
-    let has_prev = entries.iter().any(|e| e.value.end <= target.key_start);
     let has_next = entries.iter().any(|e| e.key_start >= target.value.end);
     // 向左吃掉逗号 + 紧邻空白
     let mut i = remove_start;
@@ -281,7 +280,6 @@ pub fn remove_entry(content: &str, section: &str, key: &str) -> Result<String, S
             remove_end = j + 1;
         }
     }
-    let _ = has_prev;
     let mut out = String::new();
     out.push_str(&content[..remove_start]);
     out.push_str(&content[remove_end..]);
@@ -350,5 +348,106 @@ mod tests {
     #[test]
     fn non_object_root_is_rejected() {
         assert!(upsert_entry("[1,2]", "mcp", "n", "{}").is_err());
+    }
+
+    /// 删除 `//` 与 `/* */` 注释，得到可被 serde_json 解析的纯 JSON
+    fn strip_comments(s: &str) -> String {
+        let mut out = String::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+    // 3 个 entry 的 section，含注释
+    const THREE: &str = r#"{
+  "mcp": {
+    // keep one
+    "srv1": { "port": 1 },
+    // vanish me
+    "srv2": { "port": 2 },
+    "srv3": { "port": 3 }
+  },
+  "other": 1
+}
+"#;
+
+    #[test]
+    fn remove_middle_entry_absorbs_left_comma_keeps_comments() {
+        let out = remove_entry(THREE, "mcp", "srv2").unwrap();
+        assert!(out.contains("\"srv1\""));
+        assert!(out.contains("\"srv3\""));
+        assert!(!out.contains("\"srv2\""));
+        assert!(!out.contains(",,"));
+        // 注释全部保留
+        assert!(out.contains("// keep one"));
+        assert!(out.contains("// vanish me"));
+        let v: serde_json::Value = serde_json::from_str(&strip_comments(&out)).unwrap();
+        assert_eq!(v["mcp"]["srv1"]["port"], 1);
+        assert_eq!(v["mcp"]["srv3"]["port"], 3);
+    }
+
+    #[test]
+    fn remove_first_entry_absorbs_comma_rightward() {
+        let out = remove_entry(THREE, "mcp", "srv1").unwrap();
+        assert!(out.contains("\"srv2\""));
+        assert!(out.contains("\"srv3\""));
+        assert!(!out.contains("\"srv1\""));
+        assert!(!out.contains(",,"));
+        // 注释全部保留
+        assert!(out.contains("// keep one"));
+        assert!(out.contains("// vanish me"));
+        let v: serde_json::Value = serde_json::from_str(&strip_comments(&out)).unwrap();
+        assert_eq!(v["mcp"]["srv2"]["port"], 2);
+        assert_eq!(v["mcp"]["srv3"]["port"], 3);
+    }
+
+    #[test]
+    fn remove_last_entry_absorbs_comma_leftward() {
+        let out = remove_entry(THREE, "mcp", "srv3").unwrap();
+        assert!(out.contains("\"srv1\""));
+        assert!(out.contains("\"srv2\""));
+        assert!(!out.contains("\"srv3\""));
+        assert!(!out.contains(",,"));
+        assert!(out.contains("// keep one"));
+        let v: serde_json::Value = serde_json::from_str(&strip_comments(&out)).unwrap();
+        assert_eq!(v["mcp"]["srv1"]["port"], 1);
+        assert_eq!(v["mcp"]["srv2"]["port"], 2);
+    }
+
+    #[test]
+    fn remove_last_entry_leaves_empty_object() {
+        const SINGLE: &str = r#"{
+  "mcp": {
+    "only": true
+  },
+  "other": 1
+}
+"#;
+        let out = remove_entry(SINGLE, "mcp", "only").unwrap();
+        assert!(!out.contains("\"only\""));
+        assert!(!out.contains(",,"));
+        // 空 section 仍为合法 JSON 对象
+        assert!(out.contains("\"mcp\""));
+        let v: serde_json::Value = serde_json::from_str(&strip_comments(&out)).unwrap();
+        assert_eq!(v["mcp"], serde_json::Value::Object(Default::default()));
+        assert_eq!(v["other"], 1);
     }
 }
