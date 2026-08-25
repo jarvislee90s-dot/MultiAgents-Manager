@@ -2,12 +2,21 @@
 
 /// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
 /// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
+/// 深度上限 4 层，symlink 目录不跟随（防循环）
 fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
+    const SCAN_MAX_DEPTH: usize = 4;
     let mut results = Vec::new();
-    fn recurse(dir: &std::path::Path, base: &std::path::Path, results: &mut Vec<String>) {
+    fn recurse(dir: &std::path::Path, base: &std::path::Path, depth: usize, results: &mut Vec<String>) {
+        if depth > SCAN_MAX_DEPTH {
+            log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                if path.is_symlink() {
+                    continue;
+                }
                 if path.is_dir() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.starts_with('.') {
@@ -18,13 +27,13 @@ fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
                             results.push(rel.to_string_lossy().to_string());
                         }
                     } else {
-                        recurse(&path, base, results);
+                        recurse(&path, base, depth + 1, results);
                     }
                 }
             }
         }
     }
-    recurse(base, base, &mut results);
+    recurse(base, base, 0, &mut results);
     results.sort();
     results
 }

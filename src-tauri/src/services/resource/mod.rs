@@ -59,15 +59,25 @@ fn detect_suite(
     None
 }
 
-/// 递归扫描目录下的所有 SKILL.md 文件
+/// 递归扫描目录下的所有 SKILL.md 文件；深度上限 4 层，symlink 目录不跟随（防循环）
+const SCAN_MAX_DEPTH: usize = 4;
+
 fn scan_skills_recursive(
     dir: &std::path::Path,
     skills_root: &std::path::Path,
+    depth: usize,
 ) -> Vec<(std::path::PathBuf, String)> {
     let mut results = Vec::new();
+    if depth > SCAN_MAX_DEPTH {
+        log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
+        return results;
+    }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.is_symlink() {
+                continue;
+            }
             if path.is_dir() {
                 let skill_md = path.join("SKILL.md");
                 if skill_md.exists() {
@@ -76,7 +86,7 @@ fn scan_skills_recursive(
                         results.push((path.clone(), meta.name));
                     }
                 }
-                results.extend(scan_skills_recursive(&path, skills_root));
+                results.extend(scan_skills_recursive(&path, skills_root, depth + 1));
             }
         }
     }
@@ -261,7 +271,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         if !skills_dir.exists() {
             continue;
         }
-        let found = scan_skills_recursive(skills_dir, skills_dir);
+        let found = scan_skills_recursive(skills_dir, skills_dir, 0);
         log::info!(
             "扫描 {} ({}): 找到 {} 个 SKILL.md",
             tool_id,
@@ -458,5 +468,23 @@ mod import_plan_tests {
             plan_skill_import("foo", &seen, Some(false)),
             SkillImportPlan::Skip
         );
+    }
+}
+
+#[cfg(test)]
+mod scan_depth_tests {
+    use super::*;
+
+    #[test]
+    fn deep_nesting_stops_at_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dir = tmp.path().to_path_buf();
+        for i in 0..7 {
+            dir = dir.join(format!("d{}", i));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: too-deep\n---\n").unwrap();
+        }
+        let found = scan_skills_recursive(tmp.path(), tmp.path(), 0);
+        assert!(found.iter().all(|(p, _)| p.components().count() <= tmp.path().components().count() + 5));
     }
 }
