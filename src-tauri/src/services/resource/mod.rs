@@ -205,8 +205,10 @@ pub fn sync_imported_skill_links() {
 /// 扫描各工具的 skill 目录，递归导入到全局仓库（含去重）
 pub fn auto_import_extensions(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
+    // 只按 skill 的 name 播种 seen_names，避免跨类型同名（plugin/mcp/native 与 skill 共用一张表）误判为已导入
     let existing_before: std::collections::HashSet<String> = crate::database::list_extensions()
         .iter()
+        .filter(|e| e.kind == "skill")
         .map(|e| e.name.clone())
         .collect();
 
