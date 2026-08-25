@@ -32,10 +32,24 @@ static SLOT_OCCUPANCY: once_cell::sync::Lazy<
 const SLOT_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tauri::command]
-pub fn show_notification_window(
+pub async fn show_notification_window(
     app: AppHandle,
     payload: NotificationPayload,
 ) -> Result<(), String> {
+    // 窗口创建必须放在独立线程：Windows 上在同步命令内直接创建 webview 会阻塞
+    // 主线程消息循环，webview 卡在 about:blank 不导航（wry#583）。Tauri 文档明确要求
+    // "use async commands and separate threads when creating webviews"，故命令改为
+    // async 并在 spawn 的线程内建房。
+    std::thread::spawn(move || {
+        if let Err(e) = create_notification_window(&app, payload) {
+            log::error!("创建通知窗口失败: {}", e);
+        }
+    });
+    Ok(())
+}
+
+/// 实际创建/复用通知窗口并发送事件（在独立线程执行）
+fn create_notification_window(app: &AppHandle, payload: NotificationPayload) -> Result<(), String> {
     // 槽位选择：空闲优先；全忙则顶替最早占用的（时间戳判定，规避可见性竞态）
     let now = std::time::Instant::now();
     let slot = {
@@ -70,7 +84,7 @@ pub fn show_notification_window(
         }
         None => {
             let _ = WebviewWindowBuilder::new(
-                &app,
+                app,
                 &label,
                 WebviewUrl::App("index.html#/notification".into()),
             )
