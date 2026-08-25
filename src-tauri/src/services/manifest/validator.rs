@@ -196,7 +196,7 @@ mod semver_tests {
         for ok in ["1.2.3", "v1.2.3", "0.0.1", "1.2.3-alpha.1", "v2.0.0-rc.1+build.5"] {
             assert!(is_valid_semver(ok), "应通过: {}", ok);
         }
-        for bad in ["1.2", "1", "abc", "1.2.x", "1.2.3.4"] {
+        for bad in ["1.2", "1", "abc", "1.2.x", "1.2.3.4", "01.2.3", "1.2.3 "] {
             assert!(!is_valid_semver(bad), "应拒绝: {}", bad);
         }
     }
