@@ -21,7 +21,7 @@ import {
   importMcpToSsot,
   saveMcpConfig,
 } from "@/lib/api/resource";
-import { useSsotResourcesQuery } from "@/lib/query/queries/resources";
+import { useSsotResourcesQuery, SSOT_RESOURCES_KEY } from "@/lib/query/queries/resources";
 import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
 import { uninstallResource } from "@/lib/api/manifest";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
@@ -65,7 +65,7 @@ export function ResourceByKindView() {
   const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
   const [installDlgOpen, setInstallDlgOpen] = useState(false);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["ssotResources"] });
+  const refresh = () => qc.invalidateQueries({ queryKey: SSOT_RESOURCES_KEY });
 
   if (!resources) {
     return <div className="text-muted-foreground py-4 text-xs">{t("common.loading")}</div>;
