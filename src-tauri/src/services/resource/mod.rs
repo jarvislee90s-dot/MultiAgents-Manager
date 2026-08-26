@@ -59,15 +59,25 @@ fn detect_suite(
     None
 }
 
-/// 递归扫描目录下的所有 SKILL.md 文件
+/// 递归扫描目录下的所有 SKILL.md 文件；深度上限 4 层，symlink 目录不跟随（防循环）
+const SCAN_MAX_DEPTH: usize = 4;
+
 fn scan_skills_recursive(
     dir: &std::path::Path,
     skills_root: &std::path::Path,
+    depth: usize,
 ) -> Vec<(std::path::PathBuf, String)> {
     let mut results = Vec::new();
+    if depth > SCAN_MAX_DEPTH {
+        log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
+        return results;
+    }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.is_symlink() {
+                continue;
+            }
             if path.is_dir() {
                 let skill_md = path.join("SKILL.md");
                 if skill_md.exists() {
@@ -76,7 +86,7 @@ fn scan_skills_recursive(
                         results.push((path.clone(), meta.name));
                     }
                 }
-                results.extend(scan_skills_recursive(&path, skills_root));
+                results.extend(scan_skills_recursive(&path, skills_root, depth + 1));
             }
         }
     }
@@ -91,6 +101,31 @@ pub struct ImportStats {
     pub newly_added: usize,
     pub skipped_dup: usize,
     pub source_counts: Vec<(String, usize)>,
+}
+
+/// 单次导入决策：SSOT 有无 + 工具显式禁用状态决定复制/补链/跳过
+#[derive(Debug, PartialEq)]
+enum SkillImportPlan {
+    /// SSOT 无此 name：复制入库 + 建链
+    ImportAndLink,
+    /// SSOT 已有：跳过复制，仅为当前工具补链（未被显式禁用时）
+    LinkOnly,
+    /// 已有且该工具被显式禁用：不动
+    Skip,
+}
+
+fn plan_skill_import(
+    name: &str,
+    seen: &std::collections::HashSet<String>,
+    tool_enabled: Option<bool>,
+) -> SkillImportPlan {
+    if !seen.contains(name) {
+        SkillImportPlan::ImportAndLink
+    } else if tool_enabled == Some(false) {
+        SkillImportPlan::Skip
+    } else {
+        SkillImportPlan::LinkOnly
+    }
 }
 
 /// 从源路径推断 skill 所属工具
@@ -127,6 +162,28 @@ pub fn sync_imported_skill_links() {
             .any(|a| a.extension_id == ext.id && !a.enabled)
         {
             continue;
+        }
+
+        // 断链检测与自动修复：SSOT 仍在则重建，SSOT 缺失则清链接并标记
+        let tool_target = crate::adapter::primary_skill_dir(&tool_id).map(|d| d.join(&ext.name));
+        if let Some(t) = &tool_target {
+            if crate::linker::check_link_health(t) == crate::linker::LinkHealth::Dangling {
+                let repo_exists = crate::linker::ensure_repo_dir().join(&ext.name).exists();
+                if let Err(e) = crate::linker::remove_link(t) {
+                    log::warn!("移除断链 {} 失败: {}", t.display(), e);
+                }
+                if repo_exists {
+                    if let Err(e) = crate::services::enable_skill_for_tool(&ext.name, &tool_id) {
+                        log::warn!("重建 {} → {} 断链失败: {}", ext.name, tool_id, e);
+                        let _ =
+                            crate::database::upsert_assignment(&ext.id, &tool_id, true, "dangling");
+                    }
+                } else {
+                    let _ = crate::linker::layer2::unlink_skill_from_layer2(&ext.name, &tool_id);
+                    let _ = crate::database::upsert_assignment(&ext.id, &tool_id, false, "missing");
+                }
+                continue;
+            }
         }
 
         let already_linked = crate::adapter::primary_skill_dir(&tool_id)
@@ -180,23 +237,17 @@ pub fn sync_imported_skill_links() {
 /// 扫描各工具的 skill 目录，递归导入到全局仓库（含去重）
 pub fn auto_import_extensions(force: bool) -> ImportStats {
     let _repo = linker::ensure_repo_dir();
+    // 只按 skill 的 name 播种 seen_names，避免跨类型同名（plugin/mcp/native 与 skill 共用一张表）误判为已导入
     let existing_before: std::collections::HashSet<String> = crate::database::list_extensions()
+        .iter()
+        .filter(|e| e.kind == "skill")
+        .map(|e| e.name.clone())
+        .collect();
+    // 指标用：全部 kind 的导入前 name 基线（与播种集分离，避免被 kind 过滤影响）
+    let all_names_before: std::collections::HashSet<String> = crate::database::list_extensions()
         .iter()
         .map(|e| e.name.clone())
         .collect();
-
-    if !force && !existing_before.is_empty() {
-        log::debug!(
-            "Skills already imported ({} in DB), skipping auto-import",
-            existing_before.len()
-        );
-        return ImportStats {
-            imported: 0,
-            newly_added: 0,
-            skipped_dup: 0,
-            source_counts: Vec::new(),
-        };
-    }
 
     let skill_sources: Vec<(&str, std::path::PathBuf)> =
         ["claude", "codex", "opencode", "openclaw"]
@@ -206,7 +257,13 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
             })
             .collect();
 
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 增量模式（force=false 且 DB 已有数据）：已存在的 name 只补链不重导（Task 6 的 LinkOnly）；
+    // force=true 全量重扫保持覆盖导入语义
+    let mut seen_names: std::collections::HashSet<String> = if force {
+        std::collections::HashSet::new()
+    } else {
+        existing_before.iter().cloned().collect()
+    };
     let mut imported: usize = 0;
     let mut skipped_dup: usize = 0;
     let mut source_counts: Vec<(String, usize)> = Vec::new();
@@ -215,7 +272,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         if !skills_dir.exists() {
             continue;
         }
-        let found = scan_skills_recursive(skills_dir, skills_dir);
+        let found = scan_skills_recursive(skills_dir, skills_dir, 0);
         log::info!(
             "扫描 {} ({}): 找到 {} 个 SKILL.md",
             tool_id,
@@ -225,44 +282,67 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         source_counts.push((tool_id.to_string(), found.len()));
 
         for (skill_path, skill_name) in &found {
-            if seen_names.contains(skill_name) {
-                skipped_dup += 1;
-                continue;
-            }
-            seen_names.insert(skill_name.clone());
+            let tool_enabled = crate::database::list_assignments(tool_id)
+                .iter()
+                .find(|a| a.extension_id == format!("skill-{}", skill_name))
+                .map(|a| a.enabled);
+            match plan_skill_import(skill_name, &seen_names, tool_enabled) {
+                SkillImportPlan::ImportAndLink => {
+                    seen_names.insert(skill_name.clone());
 
-            let meta = parse_skill_meta(&skill_path.join("SKILL.md"));
-            let description = meta.as_ref().and_then(|m| m.description.clone());
-            let suite = detect_suite(skill_name, skill_path, skills_dir);
+                    let meta = parse_skill_meta(&skill_path.join("SKILL.md"));
+                    let description = meta.as_ref().and_then(|m| m.description.clone());
+                    let suite = detect_suite(skill_name, skill_path, skills_dir);
 
-            if let Err(e) = linker::install_to_repo(skill_path, skill_name) {
-                log::warn!("导入 skill {} 失败: {}", skill_name, e);
-                continue;
-            }
+                    if let Err(e) = linker::install_to_repo(skill_path, skill_name, force) {
+                        log::warn!("导入 skill {} 失败: {}", skill_name, e);
+                        continue;
+                    }
 
-            let ext = crate::database::ExtensionRecord {
-                id: format!("skill-{}", skill_name),
-                kind: "skill".to_string(),
-                name: skill_name.clone(),
-                description: description.clone(),
-                source_path: skill_path.to_string_lossy().to_string(),
-                source_url: None,
-                version: None,
-                tags: Some(tool_id.to_string()),
-                suite: suite.clone(),
-                source_tool: Some(tool_id.to_string()),
-                is_native: false,
-            };
-            let _ = crate::database::insert_extension(&ext);
-            // 默认按来源工具自动创建工具目录链接，让 harness 立即可用
-            if let Err(e) = crate::services::enable_skill_for_tool(skill_name, tool_id) {
-                log::warn!("导入 {} 后为 {} 创建链接失败: {}", skill_name, tool_id, e);
+                    let ext = crate::database::ExtensionRecord {
+                        id: format!("skill-{}", skill_name),
+                        kind: "skill".to_string(),
+                        name: skill_name.clone(),
+                        description,
+                        source_path: skill_path.to_string_lossy().to_string(),
+                        source_url: None,
+                        version: None,
+                        tags: Some(tool_id.to_string()),
+                        suite,
+                        source_tool: Some(tool_id.to_string()),
+                        is_native: false,
+                    };
+                    let _ = crate::database::insert_extension(&ext);
+                    // 默认按来源工具自动创建工具目录链接，让 harness 立即可用
+                    if let Err(e) = crate::services::enable_skill_for_tool(skill_name, tool_id) {
+                        log::warn!("导入 {} 后为 {} 创建链接失败: {}", skill_name, tool_id, e);
+                    }
+                    imported += 1;
+                }
+                SkillImportPlan::LinkOnly => {
+                    if let Err(e) = crate::services::enable_skill_for_tool(skill_name, tool_id) {
+                        log::warn!("为 {} 补建 {} 链接失败: {}", skill_name, tool_id, e);
+                    }
+                }
+                SkillImportPlan::Skip => {
+                    skipped_dup += 1;
+                }
             }
-            imported += 1;
         }
     }
 
     // Plugin 扫描
+    // Plugin 去重使用独立集合，避免与 skill 同名互相吞掉
+    let mut plugin_seen: std::collections::HashSet<String> = if force {
+        std::collections::HashSet::new()
+    } else {
+        // 增量模式：只按 plugin 的 name 播种，已导入的插件不重导（避免每次启动覆写 SSOT）
+        crate::database::list_extensions()
+            .iter()
+            .filter(|e| e.kind == "plugin")
+            .map(|e| e.name.clone())
+            .collect()
+    };
     let plugin_sources = [
         (
             "claude",
@@ -303,10 +383,10 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if seen_names.contains(&name) {
+                if plugin_seen.contains(&name) {
                     continue;
                 }
-                seen_names.insert(name.clone());
+                plugin_seen.insert(name.clone());
 
                 let kind = if path.is_dir() { "file" } else { "config" };
                 let plugin_repo = dirs::home_dir()
@@ -316,6 +396,11 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 let _ = std::fs::create_dir_all(&plugin_repo);
                 let dest = plugin_repo.join(&name);
                 if dest.exists() {
+                    if !force {
+                        // 增量模式：SSOT 已有同名插件目录（孤儿/未纳管），不覆盖
+                        skipped_dup += 1;
+                        continue;
+                    }
                     let _ = std::fs::remove_dir_all(&dest);
                 }
                 if path.is_dir() {
@@ -347,7 +432,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         .iter()
         .map(|e| e.name.clone())
         .collect();
-    let newly_added = existing_after.difference(&existing_before).count();
+    let newly_added = existing_after.difference(&all_names_before).count();
 
     if imported > 0 {
         log::info!(
@@ -362,5 +447,61 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         newly_added,
         skipped_dup,
         source_counts,
+    }
+}
+
+#[cfg(test)]
+mod import_plan_tests {
+    use super::*;
+
+    #[test]
+    fn new_name_imports_and_links() {
+        let seen = std::collections::HashSet::new();
+        assert_eq!(
+            plan_skill_import("foo", &seen, None),
+            SkillImportPlan::ImportAndLink
+        );
+    }
+
+    #[test]
+    fn known_name_links_second_tool() {
+        let seen: std::collections::HashSet<String> = ["foo".to_string()].into_iter().collect();
+        assert_eq!(
+            plan_skill_import("foo", &seen, None),
+            SkillImportPlan::LinkOnly
+        );
+        assert_eq!(
+            plan_skill_import("foo", &seen, Some(true)),
+            SkillImportPlan::LinkOnly
+        );
+    }
+
+    #[test]
+    fn known_name_respects_explicit_disable() {
+        let seen: std::collections::HashSet<String> = ["foo".to_string()].into_iter().collect();
+        assert_eq!(
+            plan_skill_import("foo", &seen, Some(false)),
+            SkillImportPlan::Skip
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_depth_tests {
+    use super::*;
+
+    #[test]
+    fn deep_nesting_stops_at_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dir = tmp.path().to_path_buf();
+        for i in 0..7 {
+            dir = dir.join(format!("d{}", i));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: too-deep\n---\n").unwrap();
+        }
+        let found = scan_skills_recursive(tmp.path(), tmp.path(), 0);
+        assert!(found
+            .iter()
+            .all(|(p, _)| p.components().count() <= tmp.path().components().count() + 5));
     }
 }

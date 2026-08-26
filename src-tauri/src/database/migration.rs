@@ -55,6 +55,10 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
               AND (source_path LIKE '%/.openclaw/skills/%' OR tags = 'openclaw');",
     )
     .map_err(|e| format!("回填来源工具失败: {}", e))?;
+
+    // 015：native_extensions 表从未被业务写入，移除（历史库中 DROP）
+    conn.execute_batch("DROP TABLE IF EXISTS native_extensions;")
+        .map_err(|e| format!("移除 native_extensions 失败: {}", e))?;
     Ok(())
 }
 
@@ -119,5 +123,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(source_tool.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn migrate_drops_native_extensions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE extensions (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                source_path TEXT NOT NULL,
+                source_url TEXT,
+                version TEXT,
+                tags TEXT,
+                installed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE native_extensions (id TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='native_extensions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!exists);
     }
 }

@@ -9,6 +9,34 @@ use fs2::FileExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 链接健康状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkHealth {
+    /// 链接存在且目标可达
+    Valid,
+    /// 链接存在但目标不可达（SSOT 被删/移动）
+    Dangling,
+    /// 路径存在但不是链接（原生目录/文件）
+    NotLink,
+    /// 路径不存在
+    Missing,
+}
+
+/// 判定链接健康状态
+pub fn check_link_health(target: &Path) -> LinkHealth {
+    if !target.exists() && !target.is_symlink() {
+        return LinkHealth::Missing;
+    }
+    if !target.is_symlink() {
+        return LinkHealth::NotLink;
+    }
+    if fs::metadata(target).is_ok() {
+        LinkHealth::Valid
+    } else {
+        LinkHealth::Dangling
+    }
+}
+
 /// 确保全局仓库目录存在，返回路径
 pub fn ensure_repo_dir() -> PathBuf {
     let repo = dirs::home_dir()
@@ -76,14 +104,30 @@ pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
 /// 移除链接
 pub fn remove_link(target: &Path) -> Result<(), String> {
     if target.is_symlink() {
-        // Windows 上目录 Junction / 目录符号链接用 remove_file 会报"拒绝访问"（os error 5），
-        // 须改用 remove_dir_all —— 它对 reparse point 只删除链接本身，不会递归进目标目录
+        // 判断链接是否为目录型。关键点：不跟随链接的 symlink_metadata 在 Windows 上对
+        // 目录 Junction 的 FileType::is_dir() 恒为 false（reparse point 被视作 symlink），
+        // 须用 FileTypeExt::is_symlink_dir() 判定（对 dangling junction 同样返回 true）；
+        // 目录型链接用 remove_file 会报"拒绝访问"（os error 5），须改用 remove_dir_all ——
+        // 它对 reparse point 只删除链接本身，不会递归进目标目录。
         #[cfg(windows)]
-        if target.is_dir() {
+        let link_is_dir = target
+            .symlink_metadata()
+            .map(|m| {
+                use std::os::windows::fs::FileTypeExt;
+                m.file_type().is_symlink_dir()
+            })
+            .unwrap_or(false);
+        // Unix 上 symlink_metadata 的 is_dir() 对 symlink 恒为 false，链接本体用 remove_file 即可
+        #[cfg(not(windows))]
+        let link_is_dir = target
+            .symlink_metadata()
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if link_is_dir {
             fs::remove_dir_all(target).map_err(|e| format!("移除目录链接失败: {}", e))?;
-            return Ok(());
+        } else {
+            fs::remove_file(target).map_err(|e| format!("移除 symlink 失败: {}", e))?;
         }
-        fs::remove_file(target).map_err(|e| format!("移除 symlink 失败: {}", e))?;
     } else if target.exists() {
         // 普通文件用 remove_file，目录 / Junction 用 remove_dir_all
         if target.is_dir() {
@@ -123,7 +167,8 @@ pub fn replace_with_symlink(source: &Path, target: &Path) -> Result<(), String> 
 
 /// 安装 skill 到全局仓库（从源路径复制）
 /// 安全检查：验证源路径不在敏感目录内（防止路径穿越）
-pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
+/// 若目标同名资源已存在：overwrite=false 直接报错，overwrite=true 先按类型清理再复制
+pub fn install_to_repo(source: &Path, name: &str, overwrite: bool) -> Result<(), String> {
     // 路径穿越检查：解析源路径，验证不在敏感目录内
     let canonical = source
         .canonicalize()
@@ -155,7 +200,15 @@ pub fn install_to_repo(source: &Path, name: &str) -> Result<(), String> {
     let dest = repo.join(name);
 
     if dest.exists() {
-        fs::remove_dir_all(&dest).map_err(|e| format!("清理旧目录失败: {}", e))?;
+        if !overwrite {
+            return Err(format!("已存在同名资源: {}", name));
+        }
+        // 按 dest 类型清理：目录用 remove_dir_all，文件用 remove_file
+        if dest.is_dir() {
+            fs::remove_dir_all(&dest).map_err(|e| format!("清理旧目录失败: {}", e))?;
+        } else {
+            fs::remove_file(&dest).map_err(|e| format!("清理旧文件失败: {}", e))?;
+        }
     }
 
     copy_dir_recursive(&canonical, &dest)?;
@@ -208,4 +261,61 @@ pub fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod link_health_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_dangling_junction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("lnk");
+        junction::create(&src, &link).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Valid);
+        std::fs::remove_dir_all(&src).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_junction_removed_by_remove_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("lnk");
+        junction::create(&src, &link).unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+        remove_link(&link).unwrap();
+        assert!(!link.exists() && !link.is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_dangling_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("lnk");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Valid);
+        std::fs::remove_dir_all(&src).unwrap();
+        assert_eq!(check_link_health(&link), LinkHealth::Dangling);
+    }
+
+    #[test]
+    fn missing_and_native_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            check_link_health(&tmp.path().join("none")),
+            LinkHealth::Missing
+        );
+        let native = tmp.path().join("real");
+        std::fs::create_dir_all(&native).unwrap();
+        assert_eq!(check_link_health(&native), LinkHealth::NotLink);
+    }
 }

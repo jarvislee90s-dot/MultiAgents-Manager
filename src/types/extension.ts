@@ -72,6 +72,9 @@ export interface SsotResource {
   name: string;
   kind: string;
   enabledTools: string[];
+  brokenTools?: string[];
+  /** plugin 子类型（file | config），仅 kind === "plugin" 时由后端返回 */
+  pluginType?: string;
 }
 
 export interface SsotResources {

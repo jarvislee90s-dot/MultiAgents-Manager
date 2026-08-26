@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toggleMcpForTool } from "@/lib/api/mcp";
+import { SSOT_RESOURCES_KEY } from "@/lib/query/queries/resources";
 export function useToggleMcpMutation() {
   const qc = useQueryClient();
   return useMutation({
@@ -12,6 +13,6 @@ export function useToggleMcpMutation() {
       toolId: string;
       enabled: boolean;
     }) => toggleMcpForTool(mcpName, toolId, enabled),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["extensions"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: SSOT_RESOURCES_KEY }),
   });
 }

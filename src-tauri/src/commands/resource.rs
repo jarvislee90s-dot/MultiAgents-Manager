@@ -1,13 +1,41 @@
 // 资源管理命令
 
+/// 原生（未纳管）资源的扫描结果 DTO
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeExtensionRecord {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source_path: String,
+    pub source_tool: String,
+    pub detected_at: String,
+    pub imported: bool,
+}
+
 /// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
 /// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
+/// 深度上限 4 层，symlink 目录不跟随（防循环）
 fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
+    const SCAN_MAX_DEPTH: usize = 4;
     let mut results = Vec::new();
-    fn recurse(dir: &std::path::Path, base: &std::path::Path, results: &mut Vec<String>) {
+    fn recurse(
+        dir: &std::path::Path,
+        base: &std::path::Path,
+        depth: usize,
+        results: &mut Vec<String>,
+    ) {
+        if depth > SCAN_MAX_DEPTH {
+            log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                if path.is_symlink() {
+                    continue;
+                }
                 if path.is_dir() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.starts_with('.') {
@@ -18,13 +46,13 @@ fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
                             results.push(rel.to_string_lossy().to_string());
                         }
                     } else {
-                        recurse(&path, base, results);
+                        recurse(&path, base, depth + 1, results);
                     }
                 }
             }
         }
     }
-    recurse(base, base, &mut results);
+    recurse(base, base, 0, &mut results);
     results.sort();
     results
 }
@@ -83,7 +111,7 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
 }
 
 #[tauri::command]
-pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExtensionRecord> {
+pub fn scan_native_resources(tool_id: String) -> Vec<NativeExtensionRecord> {
     let mut results = Vec::new();
     let skill_dir = crate::adapter::primary_skill_dir(&tool_id);
     if let Some(dir) = skill_dir {
@@ -95,7 +123,7 @@ pub fn scan_native_resources(tool_id: String) -> Vec<crate::database::NativeExte
                 let ext_id = format!("skill-{}", name);
                 let exists = existing.iter().any(|e| e.id == ext_id);
                 if !exists {
-                    results.push(crate::database::NativeExtensionRecord {
+                    results.push(NativeExtensionRecord {
                         id: ext_id,
                         kind: "skill".to_string(),
                         name: name.clone(),
@@ -124,7 +152,7 @@ pub fn import_native_resources(
             skipped += 1;
             continue;
         }
-        if let Err(e) = crate::linker::install_to_repo(path, &name) {
+        if let Err(e) = crate::linker::install_to_repo(path, &name, false) {
             log::warn!("导入 {} 失败: {}", name, e);
             skipped += 1;
             continue;
@@ -235,6 +263,11 @@ pub struct SsotResource {
     pub name: String,
     pub kind: String,
     pub enabled_tools: Vec<String>,
+    #[serde(rename = "brokenTools")]
+    pub broken_tools: Vec<String>,
+    /// plugin 子类型（file | config），仅 kind == "plugin" 时有值
+    #[serde(rename = "pluginType", skip_serializing_if = "Option::is_none")]
+    pub plugin_type: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -250,6 +283,7 @@ pub struct SsotResources {
 pub fn list_ssot_resources() -> SsotResources {
     let mam = dirs::home_dir().unwrap_or_default().join(".mam");
     let assignments = crate::database::list_all_assignments();
+    let extensions = crate::database::list_extensions();
 
     // 构建工具 → skill 目录映射，用于检测原生生效的 skill
     let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = {
@@ -290,10 +324,20 @@ pub fn list_ssot_resources() -> SsotResources {
                         enabled_tools.push(tool_id.to_string());
                     }
                 }
+                // 断链检测：DB 中 enabled 且链接状态为 dangling 的工具
+                let broken_tools: Vec<String> = assignments
+                    .iter()
+                    .filter(|a| {
+                        a.extension_id == ext_id && a.enabled && a.link_status == "dangling"
+                    })
+                    .map(|a| a.agent_tool_id.clone())
+                    .collect();
                 SsotResource {
                     name,
                     kind: "skill".to_string(),
                     enabled_tools,
+                    broken_tools,
+                    plugin_type: None,
                 }
             })
             .collect()
@@ -392,6 +436,8 @@ pub fn list_ssot_resources() -> SsotResources {
                 name,
                 kind: "mcp".to_string(),
                 enabled_tools: tools,
+                broken_tools: vec![],
+                plugin_type: None,
             })
             .collect();
         resources.sort_by(|a, b| a.name.cmp(&b.name));
@@ -412,10 +458,21 @@ pub fn list_ssot_resources() -> SsotResources {
                     .filter(|a| a.extension_id == ext_id && a.enabled)
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
+                // plugin 子类型从 DB tags 读出（file | config），缺失时前端回退 file
+                let plugin_type = if kind == "plugin" {
+                    extensions
+                        .iter()
+                        .find(|e| e.kind == "plugin" && e.name == name)
+                        .and_then(|e| e.tags.clone())
+                } else {
+                    None
+                };
                 resources.push(SsotResource {
                     name,
                     kind: kind.to_string(),
                     enabled_tools,
+                    broken_tools: vec![],
+                    plugin_type,
                 });
             }
         }
@@ -515,47 +572,38 @@ pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
     }
 }
 
-/// 取消 skill 的工具配置：移至回收站 + 更新 DB
-#[tauri::command]
-pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<String, String> {
-    let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
-        .ok_or_else(|| format!("未知工具: {}", tool_id))?;
-    let target = tool_skill_dir.join(&skill_name);
-    if !target.exists() {
-        return Err("目标路径不存在".to_string());
-    }
-
+/// 移除工具目录中的 skill 目标：链接直接移除（无数据可丢），原生目录移入系统回收站。
+/// 回收站失败返回错误，绝不静默降级为永久删除。
+fn remove_skill_target(target: &std::path::Path) -> Result<String, String> {
     let target_type = if target.is_symlink() {
         "symlink"
     } else {
         "native"
     };
-
-    // 尝试用 trash 命令移至回收站
-    let result = std::process::Command::new("trash").arg(&target).output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
-            let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
-            let ext_id = format!("skill-{}", skill_name);
-            let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
-            Ok(target_type.to_string())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("移入回收站失败: {}", stderr))
-        }
-        Err(e) => {
-            log::warn!("trash 命令不可用，回退到直接删除: {}", e);
-            crate::linker::remove_link(&target)?;
-            let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
-            let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
-            let ext_id = format!("skill-{}", skill_name);
-            let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
-            Ok(format!("{}-fallback-rm", target_type))
-        }
+    if target_type == "symlink" {
+        crate::linker::remove_link(target)?;
+    } else {
+        trash::delete(target).map_err(|e| format!("移入回收站失败: {}", e))?;
     }
+    Ok(target_type.to_string())
+}
+
+/// 取消 skill 的工具配置：回收站/移除链接 + 更新 DB
+#[tauri::command]
+pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<String, String> {
+    let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
+        .ok_or_else(|| format!("未知工具: {}", tool_id))?;
+    let target = tool_skill_dir.join(&skill_name);
+    if !target.exists() && !target.is_symlink() {
+        return Err("目标路径不存在".to_string());
+    }
+
+    let target_type = remove_skill_target(&target)?;
+    let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(&skill_name, &tool_id);
+    let _ = crate::linker::layer2::unlink_skill_from_layer2(&skill_name, &tool_id);
+    let ext_id = format!("skill-{}", skill_name);
+    let _ = crate::database::upsert_assignment(&ext_id, &tool_id, false, "missing");
+    Ok(target_type)
 }
 
 /// 为工具启用 skill（创建符号链接 + DB 记录）
@@ -650,4 +698,36 @@ pub fn save_mcp_config(
     std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
     log::info!("MCP 配置已保存: {}", config_file.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod remove_target_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn symlink_target_removed_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("skill-link");
+        junction::create(&src, &link).unwrap();
+        assert!(link.is_symlink());
+        let ty = remove_skill_target(&link).unwrap();
+        assert_eq!(ty, "symlink");
+        assert!(!link.exists() && !link.is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_removed_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let link = tmp.path().join("skill-link");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        let ty = remove_skill_target(&link).unwrap();
+        assert_eq!(ty, "symlink");
+        assert!(!link.exists() && !link.is_symlink());
+    }
 }

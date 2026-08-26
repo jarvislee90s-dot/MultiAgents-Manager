@@ -71,8 +71,12 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
     std::fs::create_dir_all(source.join("SKILL.md").parent().unwrap()).unwrap();
     std::fs::write(source.join("SKILL.md"), "name: demo-skill\n").unwrap();
 
-    multi_agents_manager_lib::services::install_skill(source.to_str().unwrap(), "demo-skill")
-        .unwrap();
+    multi_agents_manager_lib::services::install_skill(
+        source.to_str().unwrap(),
+        "demo-skill",
+        false,
+    )
+    .unwrap();
     multi_agents_manager_lib::services::enable_skill_for_tool("demo-skill", "codex").unwrap();
 
     let harness_link = home.join(".agents").join("skills").join("demo-skill");
@@ -103,4 +107,56 @@ fn test_create_junction_for_dir() {
     assert!(!target.exists());
     // 源目录不受影响
     assert!(source.join("SKILL.md").exists());
+}
+
+// install_to_repo 经 ensure_repo_dir 用 dirs::home_dir 定位 ~/.mam/skills；
+// Unix 下 dirs::home_dir 读 HOME 环境变量，support::setup 已把 HOME 重定向到临时目录，
+// 仓库根随之落在临时目录；Windows 下 dirs::home_dir 走 FOLDERID_Profile（忽略 HOME），
+// 无法重定向，故仅 Unix 编译运行（与 test_enable_skill_for_tool_creates_codex_harness_link 一致）。
+#[cfg(unix)]
+#[test]
+fn test_install_to_repo_existing_without_overwrite_errors() {
+    support::setup();
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("demo-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("SKILL.md"), "# new").unwrap();
+
+    let dest = home.join(".mam").join("skills").join("demo-skill");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("SKILL.md"), "# old").unwrap();
+
+    let err = linker::install_to_repo(&source, "demo-skill", false).unwrap_err();
+    assert!(err.contains("已存在同名资源"), "unexpected error: {err}");
+    // 未覆盖：旧内容保留
+    assert_eq!(
+        std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+        "# old"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_install_to_repo_existing_with_overwrite_replaces() {
+    support::setup();
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("demo-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("SKILL.md"), "# new").unwrap();
+
+    let dest = home.join(".mam").join("skills").join("demo-skill");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("SKILL.md"), "# old").unwrap();
+
+    linker::install_to_repo(&source, "demo-skill", true).unwrap();
+    // 目录被清理重建，内容替换为新源
+    assert!(dest.join("SKILL.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+        "# new"
+    );
 }

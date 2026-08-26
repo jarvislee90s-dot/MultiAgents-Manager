@@ -25,7 +25,7 @@ pub struct PluginConfig {
 }
 
 /// 安装插件到全局仓库
-pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
+pub fn install_plugin_to_repo(source: &Path, name: &str, overwrite: bool) -> Result<(), String> {
     let repo = dirs::home_dir()
         .unwrap_or_default()
         .join(".mam")
@@ -33,6 +33,9 @@ pub fn install_plugin_to_repo(source: &Path, name: &str) -> Result<(), String> {
     let _ = std::fs::create_dir_all(&repo);
     let dest = repo.join(name);
     if dest.exists() {
+        if !overwrite {
+            return Err(format!("已存在同名资源: {}", name));
+        }
         if dest.is_dir() {
             let _ = std::fs::remove_dir_all(&dest);
         } else {
@@ -137,7 +140,7 @@ pub fn enable_config_plugin(
     let content = std::fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
 
     match adapter.mcp_format() {
-        crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
+        crate::adapter::McpFormat::Json => {
             let mut root: serde_json::Value =
                 serde_json::from_str(&content).map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
             if root.get("plugins").is_none() {
@@ -147,6 +150,18 @@ pub fn enable_config_plugin(
                 serde_json::to_value(entries).map_err(|e| e.to_string())?;
             let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
             linker::write_config_locked(config_path, &pretty)?;
+        }
+        crate::adapter::McpFormat::Jsonc => {
+            let value = serde_json::to_value(entries)
+                .map_err(|e| e.to_string())?
+                .to_string();
+            let next = crate::services::mcp::jsonc::upsert_entry(
+                &content,
+                "plugins",
+                plugin_name,
+                &value,
+            )?;
+            linker::write_config_locked(config_path, &next)?;
         }
         crate::adapter::McpFormat::Toml => {
             // TOML 格式：写入 [plugins.<name>] 段
@@ -222,7 +237,7 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
     let config_path = &config_paths[0];
 
     match adapter.mcp_format() {
-        crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
+        crate::adapter::McpFormat::Json => {
             let content = std::fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
             let mut root: serde_json::Value =
                 serde_json::from_str(&content).map_err(|e| format!("解析 JSON 配置失败: {}", e))?;
@@ -231,6 +246,11 @@ pub fn disable_config_plugin(plugin_name: &str, tool_id: &str) -> Result<(), Str
             }
             let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
             linker::write_config_locked(config_path, &pretty)?;
+        }
+        crate::adapter::McpFormat::Jsonc => {
+            let content = std::fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
+            let next = crate::services::mcp::jsonc::remove_entry(&content, "plugins", plugin_name)?;
+            linker::write_config_locked(config_path, &next)?;
         }
         crate::adapter::McpFormat::Toml => {
             let content = std::fs::read_to_string(config_path).unwrap_or_default();

@@ -11,3 +11,7 @@
 ## 后果
 - 正面：消除竞态条件，缓存命中时瞬时渲染
 - 负面：引入新依赖（~12KB gzip）
+
+## 状态更新（2026-08-25）
+
+资源页（ResourceByKindView）已接入 React Query：`useSsotResourcesQuery`（queryKey `ssotResources`）+ `useToggleMcpMutation`，写操作后按 key invalidate。会话轮询仍为自定义 hook，维持原结论"会话场景保留轮询"。

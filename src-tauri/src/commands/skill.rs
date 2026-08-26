@@ -6,13 +6,20 @@ pub fn list_repo_skills() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn install_skill(source_path: String, name: String) -> Result<(), String> {
-    crate::services::install_skill(&source_path, &name)
+pub fn install_skill(
+    source_path: String,
+    name: String,
+    overwrite: Option<bool>,
+) -> Result<(), String> {
+    crate::services::install_skill(&source_path, &name, overwrite.unwrap_or(false))
 }
 
 #[tauri::command]
 pub fn rescan_skills() -> crate::services::ImportStats {
-    crate::services::auto_import_extensions(true)
+    let stats = crate::services::auto_import_extensions(true);
+    // rescan 同步触发补链与断链修复（spec 015 故事 6 场景 1）
+    crate::services::sync_imported_skill_links();
+    stats
 }
 
 #[tauri::command]

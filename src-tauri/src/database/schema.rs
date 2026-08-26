@@ -80,16 +80,6 @@ pub fn init(conn: &Connection) {
             applied_at    TEXT NOT NULL,
             active        INTEGER NOT NULL DEFAULT 1
         );
-        CREATE TABLE IF NOT EXISTS native_extensions (
-            id          TEXT PRIMARY KEY,
-            kind        TEXT NOT NULL,
-            name        TEXT NOT NULL,
-            description TEXT,
-            source_path TEXT NOT NULL,
-            source_tool TEXT NOT NULL,
-            detected_at TEXT NOT NULL,
-            imported    INTEGER NOT NULL DEFAULT 0
-        );
         "#,
     )
     .expect("Failed to initialize database schema");
