@@ -257,6 +257,15 @@ fn read_window_texts_parallel(cands: &[&(isize, String)]) -> HashMap<isize, Stri
     out
 }
 
+/// 单幸存者演绎锁定：候选仅剩一个且未被他工具认领时返回它（否则 None）
+fn single_survivor<'a>(cands: &[&'a (isize, String)], agent: &str) -> Option<&'a (isize, String)> {
+    if cands.len() == 1 && claim_owner(&cands[0].1).is_none_or(|o| o == agent) {
+        Some(cands[0])
+    } else {
+        None
+    }
+}
+
 /// 硬排除 + 洋葱回退（返回幸存窗口，保序）：
 /// L1 他工具认领（全部已知标题形态）→ L2 空终端标题 → L3 面板反推（标题规范化后
 /// ==其他工具运行中项目名，覆盖 ⠙spinner/停留目录/长任务改名三形态）。
@@ -433,8 +442,8 @@ pub fn resolve_and_focus(
         let agent = agent_keyword.unwrap_or_default().to_lowercase();
         let cand_refs: Vec<&(isize, String)> = cands.iter().collect();
         let survivors = hard_survivors(&cand_refs, &agent, running_projects);
-        if survivors.len() == 1 && claim_owner(&survivors[0].1).is_none_or(|o| o == agent) {
-            return try_lock(survivors[0].0);
+        if let Some((hwnd, _)) = single_survivor(&survivors, &agent) {
+            return try_lock(*hwnd);
         }
         // ③ UIA 阶段（仅幸存 ≥2 才读，候选已被硬排除缩小）
         let msg = last_message.unwrap_or_default();
@@ -461,8 +470,8 @@ pub fn resolve_and_focus(
                 ns
             }
         };
-        if after_shell.len() == 1 && claim_owner(&after_shell[0].1).is_none_or(|o| o == agent) {
-            return try_lock(after_shell[0].0);
+        if let Some((hwnd, _)) = single_survivor(&after_shell, &agent) {
+            return try_lock(*hwnd);
         }
         // ④ 完整尾串包含且唯一 → 锁定（最强正向证据：会话正文完整出现在哪个窗口哪个就是它；
         //    渲染差异导致整串断裂时不自动锁定，交选择器）

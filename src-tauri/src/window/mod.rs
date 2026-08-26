@@ -9,28 +9,10 @@ mod tmux;
 #[cfg(windows)]
 pub mod win32;
 
-/// 终端窗口管理抽象
-pub trait WindowManager {
-    /// 聚焦到指定 PID 对应的终端窗口
-    fn focus(&self, pid: u32) -> Result<(), String>;
-}
-
-/// 默认实现：按平台分发
-pub struct DefaultWindowManager;
-
-impl WindowManager for DefaultWindowManager {
-    fn focus(&self, pid: u32) -> Result<(), String> {
-        focus_terminal_for_pid(pid)
-    }
-}
-
-/// 通过 PID 聚焦对应的终端/应用窗口
+/// 通过 PID 聚焦对应的终端/应用窗口（macOS TTY 链路 / Linux 不支持）。
+/// Windows 不走此入口——commands/session.rs 直接调用 win32 判定链（resolve_and_focus）
+#[cfg(not(windows))]
 pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        // 尾表达式即返回值（clippy: needless_return）
-        win32::focus_window_for_pid(pid)
-    }
     #[cfg(target_os = "macos")]
     {
         // 获取进程的 TTY
