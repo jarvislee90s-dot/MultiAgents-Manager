@@ -38,9 +38,9 @@ fn collect_ancestor_pids(system: &sysinfo::System, pid: u32) -> Vec<u32> {
 
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, GWL_EXSTYLE, SW_MINIMIZE,
-    SW_RESTORE, WS_EX_TOOLWINDOW,
+    EnumWindows, GetForegroundWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, GWL_EXSTYLE,
+    SW_MINIMIZE, SW_RESTORE, WS_EX_TOOLWINDOW,
 };
 
 /// 不可作为跳转宿主的系统 shell / 服务进程（其窗口与目标会话无关，
@@ -130,6 +130,8 @@ pub struct WindowCandidate {
     pub title: String,
     pub process: String,
     pub score: i32,
+    /// UIA 正文前缀命中长度（部分命中只作选择器排序依据，不作自动锁定）
+    pub uia_prefix: i32,
 }
 
 struct AllWindows {
@@ -167,6 +169,7 @@ fn all_windows() -> AllWindows {
 
 /// 聚焦单个窗口：恢复最小化 → 置前，多级降级
 fn force_foreground(hwnd_val: isize) -> bool {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     let hwnd = HWND(hwnd_val);
     unsafe {
         if IsIconic(hwnd).as_bool() {
@@ -174,6 +177,23 @@ fn force_foreground(hwnd_val: isize) -> bool {
         }
         if SetForegroundWindow(hwnd).as_bool() {
             return true;
+        }
+        // AttachThreadInput 前台强抢：把当前线程挂到前台线程输入队列，取得置前资格。
+        // 对症：浮窗 focusable(false) 点击不激活本进程（非前台发起）、目标为提权窗口（ChatGPT 链）
+        let fg = GetForegroundWindow();
+        if fg.0 != 0 {
+            let fg_tid = GetWindowThreadProcessId(fg, None);
+            let cur_tid = GetCurrentThreadId();
+            if fg_tid != 0
+                && fg_tid != cur_tid
+                && AttachThreadInput(cur_tid, fg_tid, true).as_bool()
+            {
+                let ok = SetForegroundWindow(hwnd).as_bool();
+                let _ = AttachThreadInput(cur_tid, fg_tid, false);
+                if ok {
+                    return true;
+                }
+            }
         }
         // 降级：SwitchToThisWindow（Win32 标记为 deprecated 但仍可用）
         #[allow(deprecated)]
@@ -188,9 +208,103 @@ fn force_foreground(hwnd_val: isize) -> bool {
     }
 }
 
+/// 锁定并聚焦：置前失败返回错误（不再静默报成功，错误可传到前端 toast）
+fn try_lock(hwnd_val: isize) -> Result<FocusOutcome, String> {
+    if force_foreground(hwnd_val) {
+        Ok(FocusOutcome::Focused)
+    } else {
+        Err("窗口聚焦被系统拒绝（目标窗口可能提权或被系统锁定）".to_string())
+    }
+}
+
+/// 空白归一化：连续空白/换行压为单空格（UIA 正文匹配的预处理，两侧同规）
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 空壳终端判定（按内容而非标题——"标题=项目名"有 codex 运行态/PowerShell 停留/claude 长任务
+/// 改名三种来源不可信）。依据：TUI 会话（claude REPL 等）用备用缓冲区，文档文本以 REPL UI 开头
+/// （实测样本 "⏸ manual mode on…"）；空 PowerShell 停留主缓冲区，头部是控制台 banner
+/// （实测样本 "Windows PowerShell…"）
+fn is_shell_console(text: &str) -> bool {
+    let head: String = text.chars().take(120).collect::<String>().to_lowercase();
+    head.contains("windows powershell") || head.contains("命令提示符")
+}
+
+/// 并行读取候选窗口文本（每窗独立线程，COM 各自初始化），800ms 总预算；
+/// 32 为防御上限而非 Z 序截断。超预算的线程放弃等待（挂起泄漏有界，已知权衡）
+fn read_window_texts_parallel(cands: &[&(isize, String)]) -> HashMap<isize, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    let mut rxs = Vec::new();
+    for (h, _) in cands.iter().take(32) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let hwnd = *h;
+        std::thread::spawn(move || {
+            let _ = tx.send(read_window_text(hwnd));
+        });
+        rxs.push((hwnd, rx));
+    }
+    let mut out = HashMap::new();
+    for (h, rx) in rxs {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if let Ok(Some(t)) = rx.recv_timeout(remaining) {
+            out.insert(h, t);
+        }
+    }
+    out
+}
+
+/// 硬排除 + 洋葱回退（返回幸存窗口，保序）：
+/// L1 他工具认领（全部已知标题形态）→ L2 空终端标题 → L3 面板反推（标题规范化后
+/// ==其他工具运行中项目名，覆盖 ⠙spinner/停留目录/长任务改名三形态）。
+/// 三层全开排空则从最软层逐层撤销（L3 → L2），仍空回退全量（连 L1 都排空=极端异常）
+fn hard_survivors<'a>(
+    cands: &[&'a (isize, String)],
+    agent: &str,
+    running_projects: &[(String, String)],
+) -> Vec<&'a (isize, String)> {
+    fn filter_ss<'a>(
+        cands: &[&'a (isize, String)],
+        agent: &str,
+        running_projects: &[(String, String)],
+        use_l3: bool,
+        use_l2: bool,
+    ) -> Vec<&'a (isize, String)> {
+        let l1 = |t: &str| claim_owner(t).is_some_and(|o| o != agent);
+        let l2 = |t: &str| IDLE_TERMINAL_TITLES.contains(&t.trim().to_lowercase().as_str());
+        let l3 = |t: &str| {
+            let nt = normalize_title_for_project(t);
+            running_projects
+                .iter()
+                .any(|(a, p)| a.as_str() != agent && !p.is_empty() && nt == p.trim().to_lowercase())
+        };
+        cands
+            .iter()
+            .filter(|(_, t)| !l1(t) && !(use_l2 && l2(t)) && !(use_l3 && l3(t)))
+            .copied()
+            .collect()
+    }
+    let s = filter_ss(cands, agent, running_projects, true, true);
+    if !s.is_empty() {
+        return s;
+    }
+    let s = filter_ss(cands, agent, running_projects, false, true); // 撤 L3（最软层），L1/L2 成果保留
+    if !s.is_empty() {
+        return s;
+    }
+    let s = filter_ss(cands, agent, running_projects, false, false); // 再撤 L2，L1 仍生效
+    if !s.is_empty() {
+        return s;
+    }
+    cands.to_vec() // 极端异常：全量回退
+}
+
 /// 空白归一化后取尾部 n 个字符（UIA 正文匹配用：终端渲染与 jsonl 原文的差异主要在空白与折行）
 fn normalized_tail(s: &str, n: usize) -> String {
-    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed: String = collapse_ws(s);
     let chars: Vec<char> = collapsed.chars().collect();
     if chars.len() <= n {
         collapsed
@@ -302,157 +416,99 @@ pub fn resolve_and_focus(
             continue;
         }
         if cands.len() == 1 {
-            let (hwnd, _) = cands[0];
-            force_foreground(hwnd);
-            return Ok(FocusOutcome::Focused);
+            return try_lock(cands[0].0);
         }
-        // 多窗口消歧（Windows Terminal 单进程多窗口场景）
-        // ① marker 精确匹配：标题含 hook 注入的 "MAM:<id 前 8 位>" 即锁定
+        // ===== 多窗口消歧：硬逻辑先行 + 排除制 + 洋葱回退 =====
+        // ① marker 精确匹配（hook 注入标题标记；通道当前 no-go，代码保留）
         if let Some(marker) = session_marker {
             let hits: Vec<_> = cands
                 .iter()
                 .filter(|(_, t)| t.to_lowercase().contains(&marker.to_lowercase()))
                 .collect();
             if hits.len() == 1 {
-                force_foreground(hits[0].0);
-                return Ok(FocusOutcome::Focused);
+                return try_lock(hits[0].0);
             }
         }
-        // ①5 UIA 正文匹配：候选窗口的终端可见文本含卡片最新消息尾部（归一化后）
-        // 且唯一命中 → 锁定。点击跳转通常发生在任务刚结束（最终回复仍在屏幕上），命中率高。
-        if let Some(msg) = last_message {
-            if !msg.is_empty() {
-                let tail = normalized_tail(msg, 40);
-                // 并行读取（每窗独立线程，COM 各自初始化），总预算 800ms。
-                // 实测单窗全缓冲读取 127-400ms：顺序读最坏超预算，并行墙钟≈最慢单窗。
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-                let mut rxs: Vec<(isize, std::sync::mpsc::Receiver<Option<String>>)> = Vec::new();
-                for (h, _) in cands.iter().take(8) {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let hwnd = *h;
-                    std::thread::spawn(move || {
-                        let _ = tx.send(read_window_text(hwnd));
-                    });
-                    rxs.push((hwnd, rx));
-                }
-                let mut scored_hits: Vec<(isize, usize)> = Vec::new();
-                for (h, rx) in rxs {
-                    // 超预算即放弃等待（挂起线程泄漏有界 ≤8/次点击，已知权衡）
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    if let Ok(Some(text)) = rx.recv_timeout(remaining) {
-                        // 前缀评分代替整串匹配：终端渲染消费 markdown 结构（粗体星号、
-                        // 列表符），整串常在尾部断裂；最长命中前缀 ≥12 且唯一最高 → 锁定
-                        let hn: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                        let s = longest_prefix_len(&hn, &tail);
-                        if s >= 12 {
-                            scored_hits.push((h, s));
-                        }
-                    }
-                }
-                if !scored_hits.is_empty() {
-                    scored_hits.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
-                    let unique_top = scored_hits.len() == 1 || scored_hits[0].1 > scored_hits[1].1;
-                    if unique_top {
-                        force_foreground(scored_hits[0].0);
-                        return Ok(FocusOutcome::Focused);
-                    }
-                }
-            }
-        }
-        // ①6 项目名精确匹配：标题（剥离 spinner 前缀后）恰为项目目录名（codex CLI 终端
-        // 标题形态：空闲=项目名，运行="⠙ 项目名"）且唯一 → 锁定
-        if let Some(p) = project_name {
-            if !p.is_empty() {
-                let pl = p.trim().to_lowercase();
-                let exact: Vec<isize> = cands
-                    .iter()
-                    .filter(|(_, t)| normalize_title_for_project(t) == pl)
-                    .map(|(h, _)| *h)
-                    .collect();
-                if exact.len() == 1 {
-                    force_foreground(exact[0]);
-                    return Ok(FocusOutcome::Focused);
-                }
-            }
-        }
-        // ② 标题打分：项目名 +2、工具名 +1，最高分唯一才锁定。
-        // 打分与候选列表共用"认领过滤候选池"：他工具认领的窗口无条件出局
-        // （防止打分层凭项目名错锁他工具窗口）；池空（目标工具可能一个窗口都不在）
-        // 时回退全量防御，保证仍有得选；agent 为空（兼容入口）时不过滤
+        // ② 硬排除（L1 认领/L2 空终端/L3 面板反推，洋葱回退）→ 幸存 1 且非他工具认领 → 演绎锁定
         let agent = agent_keyword.unwrap_or_default().to_lowercase();
-        let pool: Vec<&(isize, String)> = {
-            let filtered: Vec<&(isize, String)> = cands
+        let cand_refs: Vec<&(isize, String)> = cands.iter().collect();
+        let survivors = hard_survivors(&cand_refs, &agent, running_projects);
+        if survivors.len() == 1 && claim_owner(&survivors[0].1).is_none_or(|o| o == agent) {
+            return try_lock(survivors[0].0);
+        }
+        // ③ UIA 阶段（仅幸存 ≥2 才读，候选已被硬排除缩小）
+        let msg = last_message.unwrap_or_default();
+        let tail = if msg.is_empty() {
+            String::new()
+        } else {
+            normalized_tail(msg, 40)
+        };
+        let texts: HashMap<isize, String> = if tail.is_empty() {
+            HashMap::new()
+        } else {
+            read_window_texts_parallel(&survivors)
+        };
+        // L4 壳窗口排除（内容级；未读到文本的窗口不按壳排除）；排空只撤 L4、硬排除成果保留
+        let after_shell: Vec<&(isize, String)> = {
+            let ns: Vec<&(isize, String)> = survivors
                 .iter()
-                .filter(|(_, t)| {
-                    let tl = t.trim().to_lowercase();
-                    // 排除：他工具认领（关键词）、明显空终端、其他工具运行会话的项目名窗口
-                    // （codex 终端标题=项目名无 "codex" 字样，由面板数据反推认领）
-                    if !claim_owner(t).is_none_or(|o| o == agent.as_str()) {
-                        return false;
-                    }
-                    if IDLE_TERMINAL_TITLES.contains(&tl.as_str()) {
-                        return false;
-                    }
-                    let nt = normalize_title_for_project(t);
-                    if running_projects.iter().any(|(a, p)| {
-                        a != agent.as_str() && !p.is_empty() && nt == p.trim().to_lowercase()
-                    }) {
-                        return false;
-                    }
-                    true
-                })
+                .filter(|(h, _)| texts.get(h).map(|t| !is_shell_console(t)).unwrap_or(true))
+                .copied()
                 .collect();
-            if filtered.is_empty() {
-                cands.iter().collect()
+            if ns.is_empty() {
+                survivors.clone()
             } else {
-                filtered
+                ns
             }
         };
-        let score = |title: &str| -> i32 {
+        if after_shell.len() == 1 && claim_owner(&after_shell[0].1).is_none_or(|o| o == agent) {
+            return try_lock(after_shell[0].0);
+        }
+        // ④ 完整尾串包含且唯一 → 锁定（最强正向证据：会话正文完整出现在哪个窗口哪个就是它；
+        //    渲染差异导致整串断裂时不自动锁定，交选择器）
+        if !tail.is_empty() {
+            let full: Vec<isize> = after_shell
+                .iter()
+                .filter(|(h, _)| {
+                    texts
+                        .get(h)
+                        .map(|t| collapse_ws(t).contains(&tail))
+                        .unwrap_or(false)
+                })
+                .map(|(h, _)| *h)
+                .collect();
+            if full.len() == 1 {
+                return try_lock(full[0]);
+            }
+        }
+        // ⑤ 选择器：按 UIA 前缀命中长度降序 → 标题分（项目名+2/工具名+1）降序；交人工
+        let title_score = |title: &str| -> i32 {
             let t = title.to_lowercase();
-            let mut s = 0;
-            if let Some(p) = project_name {
-                if !p.is_empty() && t.contains(&p.to_lowercase()) {
-                    s += 2;
+            let mut sc = 0;
+            if let Some(pn) = project_name {
+                if !pn.is_empty() && t.contains(&pn.to_lowercase()) {
+                    sc += 2;
                 }
             }
-            if let Some(a) = agent_keyword {
-                if !a.is_empty() && t.contains(&a.to_lowercase()) {
-                    s += 1;
-                }
+            if !agent.is_empty() && t.contains(&agent) {
+                sc += 1;
             }
-            s
+            sc
         };
-        let mut scored: Vec<_> = pool.into_iter().map(|c| (score(&c.1), c)).collect();
-        scored.sort_by_key(|c| std::cmp::Reverse(c.0));
-        if scored.len() >= 2 && scored[0].0 > scored[1].0 && scored[0].0 > 0 {
-            force_foreground(scored[0].1 .0);
-            return Ok(FocusOutcome::Focused);
-        }
-        // ③ 候选排序：先本工具认领、后中立，组内按打分降序（他工具已在池构建时排除；
-        // 池为全量回退时此处的排除分支兜底）
-        let mut mine: Vec<&(i32, &(isize, String))> = Vec::new();
-        let mut neutral: Vec<&(i32, &(isize, String))> = Vec::new();
-        for item in scored.iter() {
-            match claim_owner(&(item.1).1) {
-                Some(owner) if owner != agent.as_str() => continue, // 他工具认领 → 排除
-                Some(_) => mine.push(item),
-                None => neutral.push(item),
-            }
-        }
-        let candidates: Vec<WindowCandidate> = mine
-            .into_iter()
-            .chain(neutral)
-            .map(|(s, (hwnd, title))| WindowCandidate {
-                hwnd: *hwnd,
-                title: title.clone(),
+        let mut candidates: Vec<WindowCandidate> = after_shell
+            .iter()
+            .map(|(h, t)| WindowCandidate {
+                hwnd: *h,
+                title: t.clone(),
                 process: proc_name.clone(),
-                score: *s,
+                score: title_score(t),
+                uia_prefix: texts
+                    .get(h)
+                    .map(|t2| longest_prefix_len(&collapse_ws(t2), &tail) as i32)
+                    .unwrap_or(0),
             })
             .collect();
+        candidates.sort_by(|a, b| b.uia_prefix.cmp(&a.uia_prefix).then(b.score.cmp(&a.score)));
         return Ok(FocusOutcome::Ambiguous(candidates));
     }
     Err("未找到可聚焦的窗口（终端可能已关闭）".to_string())
@@ -480,7 +536,8 @@ pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_owner, collect_ancestor_pids_with, longest_prefix_len, normalize_title_for_project,
+        claim_owner, collapse_ws, collect_ancestor_pids_with, hard_survivors, is_shell_console,
+        longest_prefix_len, normalize_title_for_project,
     };
 
     #[test]
@@ -546,6 +603,64 @@ mod tests {
         assert_eq!(claim_owner("MultiAgents-Manager"), None);
         // 多工具命中 → 中立
         assert_eq!(claim_owner("claude and codex"), None);
+    }
+
+    #[test]
+    fn collapse_ws_normalizes() {
+        assert_eq!(
+            collapse_ws(
+                "你好  世界
+
+下一行"
+            ),
+            "你好 世界 下一行"
+        );
+        assert_eq!(collapse_ws("  spaced 	 out "), "spaced out");
+    }
+
+    #[test]
+    fn shell_console_detected_by_banner_head() {
+        // 实测样本：壳窗口头部是控制台 banner（主缓冲区）；TUI 会话头部是 REPL UI（备用缓冲区）
+        assert!(is_shell_console(
+            "Windows PowerShell
+版权所有 (C) Microsoft Corporation。
+PS E:/proj> "
+        ));
+        assert!(is_shell_console(
+            "命令提示符
+Microsoft Windows [版本 10.0.26200]"
+        ));
+        assert!(!is_shell_console(
+            "⏸ manual mode on · ? for shortcuts · ← for agents"
+        ));
+        assert!(!is_shell_console("一段不含 banner 的长会话正文……"));
+    }
+
+    #[test]
+    fn hard_survivors_onion_fallback_order() {
+        let claude_win = (1isize, "✳ Claude Code".to_string()); // L1 排除（codex 卡视角）
+        let idle_win = (2isize, "Windows PowerShell".to_string()); // L2 排除
+        let panel_win = (3isize, "华为投资".to_string()); // L3 排除（面板反推：claude 正跑该项目）
+        let target_win = (4isize, "⠙ 我的项目".to_string()); // 目标（不被任何层排除）
+        let running = vec![("claude".to_string(), "华为投资".to_string())];
+
+        // 常规：三层排除后仅剩目标 → 演绎锁定路径
+        let cands: Vec<&(isize, String)> = vec![&claude_win, &idle_win, &panel_win, &target_win];
+        let s = hard_survivors(&cands, "codex", &running);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].0, 4);
+
+        // L3 排空（只剩 L1/L2/L3 排除对象）→ 撤 L3：L3 窗口回来，L1/L2 成果保留
+        let all_l3: Vec<&(isize, String)> = vec![&claude_win, &idle_win, &panel_win];
+        let s2 = hard_survivors(&all_l3, "codex", &running);
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].0, 3);
+
+        // 连 L2 撤掉后仍空（只剩 L1 排除对象）→ 全量回退（极端异常）
+        let only_l1: Vec<&(isize, String)> = vec![&claude_win];
+        let s3 = hard_survivors(&only_l1, "codex", &running);
+        assert_eq!(s3.len(), 1);
+        assert_eq!(s3[0].0, 1);
     }
 
     #[test]

@@ -7,6 +7,7 @@ export interface JumpWindowCandidate {
   title: string;
   process: string;
   score?: number;
+  uiaPrefix?: number;
 }
 
 export interface JumpTarget {
