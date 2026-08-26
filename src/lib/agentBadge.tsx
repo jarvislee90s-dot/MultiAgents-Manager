@@ -8,6 +8,16 @@ export interface AgentBadge {
   Icon: ComponentType<{ className?: string }>;
 }
 
+/** 会话显示名的唯一命名源：主界面徽标、通知浮窗、历史面板统一引用。
+ *  codex 区分桌面版（Codex APP）与命令行（Codex CLI），其余工具单一名称。 */
+export function getAgentLabel(agentType: string, form?: string): string {
+  if (agentType === "codex") return form === "app" ? "Codex APP" : "Codex CLI";
+  if (agentType === "claude") return "Claude";
+  if (agentType === "opencode") return "OpenCode";
+  if (agentType === "openclaw") return "OpenClaw";
+  return agentType;
+}
+
 export const AGENT_BADGE: Record<string, AgentBadge> = {
   claude: {
     label: "Claude",

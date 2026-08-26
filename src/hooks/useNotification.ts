@@ -9,13 +9,8 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { useSessionStore } from "@/stores/sessionStore";
 import { playCompletionSound } from "@/lib/audio";
+import { getAgentLabel } from "@/lib/agentBadge";
 import { addHistory } from "@/lib/notificationHistory";
-
-const AGENT_LABELS: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex CLI",
-  opencode: "OpenCode",
-};
 
 const STATUS_LABELS: Record<string, string> = {
   waiting: "等待操作",
@@ -158,6 +153,7 @@ export function useNotification() {
         // 记录到通知历史（spec 014）
         addHistory({
           agentType: session.agentType,
+          form: session.form,
           projectName: session.projectName,
           status: session.status,
           lastMessage: session.lastMessage ?? "",
@@ -172,9 +168,8 @@ export function useNotification() {
 
         // 发送通知：应用内浮窗为唯一主路径（spec 014 渠道统一），失败降级系统 toast
         {
-          const toolLabel = AGENT_LABELS[session.agentType] ?? session.agentType;
+          const toolLabel = getAgentLabel(session.agentType, session.form);
           const statusLabel = STATUS_LABELS[session.status] ?? session.status;
-          const formTag = session.form === "app" ? " (APP)" : "";
           try {
             await invoke("show_notification_window", {
               payload: {
@@ -193,7 +188,7 @@ export function useNotification() {
             console.error("show_notification_window failed:", e);
             if (permissionGranted.current) {
               sendNotification({
-                title: `${toolLabel}${formTag} — ${session.projectName}`,
+                title: `${toolLabel} — ${session.projectName}`,
                 body: `${statusLabel}${session.lastMessage ? ": " + session.lastMessage.slice(0, 80) : ""}`,
                 actionTypeId: "focus-session",
                 extra: {

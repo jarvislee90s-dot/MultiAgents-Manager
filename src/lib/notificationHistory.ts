@@ -1,6 +1,7 @@
 // 通知历史 — localStorage 持久化（最新在前，容量 50）
 export interface HistoryEntry {
   agentType: string;
+  form?: string;
   projectName: string;
   status: string;
   lastMessage: string;

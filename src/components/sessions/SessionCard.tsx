@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { StatusLight } from "@/components/sessions/StatusLight";
 import { useSessionJump } from "@/hooks/useSessionJump";
-import { AGENT_BADGE } from "@/lib/agentBadge";
+import { AGENT_BADGE, getAgentLabel } from "@/lib/agentBadge";
 import type { Session } from "@/types/session";
 
 function formatRuntime(lastActivityAt: string, t: (key: string) => string): string {
@@ -68,12 +68,7 @@ export function SessionCard({ session }: { session: Session }) {
               )}
             >
               <Icon className="h-3 w-3" />
-              {badge.label}
-              {session.form === "app" && (
-                <span className="text-[9px] opacity-60" title={t("sessions.appBadge")}>
-                  APP
-                </span>
-              )}
+              {getAgentLabel(session.agentType, session.form)}
             </span>
             <span className="truncate text-sm font-medium">{session.projectName}</span>
             {(session.title || session.id) && (

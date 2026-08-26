@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { AGENT_BADGE } from "@/lib/agentBadge";
+import { AGENT_BADGE, getAgentLabel } from "@/lib/agentBadge";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import {
   getHistory,
@@ -121,7 +121,7 @@ export function NotificationBell() {
                       className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] ${badge.className}`}
                     >
                       <badge.Icon className="h-2.5 w-2.5" />
-                      {badge.label}
+                      {getAgentLabel(e.agentType, e.form)}
                     </span>
                   )}
                   <span className="min-w-0 flex-1 truncate text-[11px]">
