@@ -109,6 +109,14 @@ pub trait AgentAdapter: Send + Sync {
 /// 共享 System 实例 — 每轮询周期刷新一次，所有 adapter 共用
 static SHARED_SYSTEM: Mutex<Option<System>> = Mutex::new(None);
 
+/// 会话级去重：同一 (工具, session id) 只保留首张卡。
+/// 全局防线：任何解析器的"文件级/进程级复制"型 bug（如 opencode 多进程同会话、
+/// codex 每轮新 rollout）在这里统一兜住，一处修复覆盖全部工具
+pub fn dedup_sessions(sessions: &mut Vec<Session>) {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    sessions.retain(|s| seen.insert((format!("{:?}", s.agent_type), s.id.clone())));
+}
+
 /// 获取所有注册 adapter 的会话
 pub fn get_all_sessions() -> SessionsResponse {
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
@@ -160,6 +168,9 @@ pub fn get_all_sessions() -> SessionsResponse {
         );
         all_sessions.extend(sessions);
     }
+
+    // 会话级去重（见 dedup_sessions 注释）
+    dedup_sessions(&mut all_sessions);
 
     // Hook 事件集成：用新鲜事件（<30s）更新会话状态
     let hook_events = crate::monitor::hooks::read_hook_events();
@@ -326,5 +337,42 @@ mod skill_dir_tests {
             skill_dir_for_tool("unknown", std::path::Path::new("/home/test")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::dedup_sessions;
+    use crate::session::model::{AgentType, ProcessForm, Session, SessionStatus};
+
+    fn fake(id: &str, pid: u32) -> Session {
+        Session {
+            id: id.to_string(),
+            agent_type: AgentType::OpenCode,
+            project_name: "p".into(),
+            project_path: "p".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: String::new(),
+            pid,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::Cli,
+            jump_supported: true,
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_first_per_agent_and_session_id() {
+        // 同 (工具, session id) 双 pid（opencode 多进程同会话实测形态）+ 一条不同 id
+        let mut sessions = vec![fake("ses_A", 111), fake("ses_A", 222), fake("ses_B", 333)];
+        dedup_sessions(&mut sessions);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].pid, 111); // 保留首张
+        assert_eq!(sessions[1].id, "ses_B");
     }
 }
