@@ -44,3 +44,28 @@ reference/
 
 # 早期调研文档（本地参考，不入库）
 research/
+
+# pnpm 本地存储
+.pnpm-store/
+
+# ZCode 本地状态
+.zcode/
+
+# 临时输出
+check-output.txt
+
+# 音效源文件副本（正式音效在 public/sounds/）
+assets/NoticeSound/
+
+# cargo 离线调试产物（本机 TLS 绕行时的一次性文件，勿入库）
+scripts/cargo-master.tar.gz
+scripts/cargo-registry-src/
+scripts/cargo-src-sources_*.rs
+scripts/cargo-vv*.txt
+scripts/fetch-log*.txt
+scripts/trash-index-raw.json
+scripts/fetch-crates.py
+scripts/preseed-crate.py
+scripts/check-trash-index.py
+scripts/get-cargo-src.py
+scripts/extract-registry-src.py
