@@ -249,13 +249,11 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         .map(|e| e.name.clone())
         .collect();
 
-    let skill_sources: Vec<(&str, std::path::PathBuf)> =
-        ["claude", "codex", "opencode", "openclaw"]
-            .into_iter()
-            .filter_map(|tool_id| {
-                crate::adapter::primary_skill_dir(tool_id).map(|dir| (tool_id, dir))
-            })
-            .collect();
+    let skill_sources: Vec<(&str, std::path::PathBuf)> = crate::adapter::TOOL_IDS
+        .iter()
+        .copied()
+        .filter_map(|tool_id| crate::adapter::primary_skill_dir(tool_id).map(|dir| (tool_id, dir)))
+        .collect();
 
     // 增量模式（force=false 且 DB 已有数据）：已存在的 name 只补链不重导（Task 6 的 LinkOnly）；
     // force=true 全量重扫保持覆盖导入语义
@@ -343,37 +341,18 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
             .map(|e| e.name.clone())
             .collect()
     };
-    let plugin_sources = [
-        (
-            "claude",
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".claude")
-                .join("plugins"),
-        ),
-        (
-            "codex",
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".codex")
-                .join("plugins"),
-        ),
-        (
-            "opencode",
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config")
-                .join("opencode")
-                .join("plugins"),
-        ),
-        (
-            "openclaw",
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".openclaw")
-                .join("plugins"),
-        ),
-    ];
+    // 各工具插件目录取 adapter.plugin_dirs() 首项（与既有硬编码路径逐工具一致），
+    // 新增工具登记 adapter 后自动纳入扫描
+    let plugin_sources: Vec<(String, std::path::PathBuf)> = crate::adapter::all_adapters_with_ids()
+        .into_iter()
+        .filter_map(|(tool_id, adapter)| {
+            adapter
+                .plugin_dirs()
+                .into_iter()
+                .next()
+                .map(|dir| (tool_id.to_string(), dir))
+        })
+        .collect();
 
     for (tool_id, plugins_dir) in &plugin_sources {
         if !plugins_dir.exists() {

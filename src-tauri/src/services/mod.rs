@@ -7,10 +7,6 @@ pub mod preset;
 pub mod resource;
 pub mod skill;
 
-use crate::adapter::{
-    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-    opencode::OpenCodeAdapter, AgentAdapter,
-};
 use log::info;
 
 // 重新导出 skill 函数（保持 crate::services::install_skill 向后兼容）
@@ -67,12 +63,8 @@ pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), St
 
 /// 检测工具的子 Agent 列表
 pub fn detect_subagents(tool_id: &str) -> Vec<String> {
-    let adapter: Box<dyn AgentAdapter> = match tool_id {
-        "claude" => Box::new(ClaudeAdapter),
-        "codex" => Box::new(CodexAdapter),
-        "opencode" => Box::new(OpenCodeAdapter),
-        "openclaw" => Box::new(OpenClawAdapter),
-        _ => return Vec::new(),
+    let Some(adapter) = crate::adapter::adapter_by_id(tool_id) else {
+        return Vec::new();
     };
     if let Some(dir) = adapter.subagent_dir() {
         if dir.exists() {

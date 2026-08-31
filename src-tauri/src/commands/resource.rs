@@ -286,22 +286,10 @@ pub fn list_ssot_resources() -> SsotResources {
     let extensions = crate::database::list_extensions();
 
     // 构建工具 → skill 目录映射，用于检测原生生效的 skill
-    let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = {
-        use crate::adapter::{
-            claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-            opencode::OpenCodeAdapter, AgentAdapter,
-        };
-        let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
-            (Box::new(ClaudeAdapter), "claude"),
-            (Box::new(CodexAdapter), "codex"),
-            (Box::new(OpenCodeAdapter), "opencode"),
-            (Box::new(OpenClawAdapter), "openclaw"),
-        ];
-        adapters
-            .into_iter()
-            .filter_map(|(a, id)| a.skill_dirs().into_iter().next().map(|d| (id, d)))
-            .collect()
-    };
+    let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = crate::adapter::all_adapters_with_ids()
+        .into_iter()
+        .filter_map(|(id, a)| a.skill_dirs().into_iter().next().map(|d| (id, d)))
+        .collect();
 
     let scan_skills = |dir: &std::path::Path| -> Vec<SsotResource> {
         let names = scan_skill_dirs(dir);
@@ -344,25 +332,14 @@ pub fn list_ssot_resources() -> SsotResources {
     };
 
     // 构建工具 → MCP 配置路径映射，用于扫描各工具已有的 MCP 服务器
-    let tool_mcp_configs: Vec<(&str, std::path::PathBuf, crate::adapter::McpFormat)> = {
-        use crate::adapter::{
-            claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-            opencode::OpenCodeAdapter, AgentAdapter,
-        };
-        let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
-            (Box::new(ClaudeAdapter), "claude"),
-            (Box::new(CodexAdapter), "codex"),
-            (Box::new(OpenCodeAdapter), "opencode"),
-            (Box::new(OpenClawAdapter), "openclaw"),
-        ];
-        adapters
+    let tool_mcp_configs: Vec<(&str, std::path::PathBuf, crate::adapter::McpFormat)> =
+        crate::adapter::all_adapters_with_ids()
             .into_iter()
-            .filter_map(|(a, id)| {
+            .filter_map(|(id, a)| {
                 let path = a.mcp_config_path()?;
                 Some((id, path, a.mcp_format()))
             })
-            .collect()
-    };
+            .collect();
 
     // MCP 扫描：以 ~/.mam/mcp/ 为基础数据源，工具配置文件仅作补充
     let scan_mcp = || -> Vec<SsotResource> {
@@ -616,19 +593,9 @@ pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<
 /// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.mam/mcp/<name>.json
 #[tauri::command]
 pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
-    use crate::adapter::{
-        claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-        opencode::OpenCodeAdapter, AgentAdapter,
-    };
+    let adapters = crate::adapter::all_adapters_with_ids();
 
-    let adapters: Vec<(Box<dyn AgentAdapter>, &str)> = vec![
-        (Box::new(ClaudeAdapter), "claude"),
-        (Box::new(CodexAdapter), "codex"),
-        (Box::new(OpenCodeAdapter), "opencode"),
-        (Box::new(OpenClawAdapter), "openclaw"),
-    ];
-
-    for (adapter, _tool_id) in &adapters {
+    for (_tool_id, adapter) in &adapters {
         let config_path = match adapter.mcp_config_path() {
             Some(p) => p,
             None => continue,
