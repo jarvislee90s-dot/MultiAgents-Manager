@@ -987,7 +987,12 @@ mod cwd_equivalent_tests {
     #[test]
     fn separator_direction_and_trailing_are_equivalent() {
         assert!(cwd_equivalent("E:\\LLMproject\\x\\", "E:/LLMproject/x"));
-        assert!(cwd_equivalent("e:/llmproject/x", "E:\\LLMproject\\x\\"));
+        // 大小写规则随平台（与 case_rules_follow_platform 一致）：Windows 不区分，Unix 区分
+        if cfg!(windows) {
+            assert!(cwd_equivalent("e:/llmproject/x", "E:\\LLMproject\\x\\"));
+        } else {
+            assert!(!cwd_equivalent("e:/llmproject/x", "E:\\LLMproject\\x\\"));
+        }
     }
 
     #[test]
