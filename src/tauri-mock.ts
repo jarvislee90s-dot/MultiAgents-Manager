@@ -362,6 +362,7 @@ if (!isTauri) {
           { id: "codex", name: "Codex CLI", available: true, path: "/usr/local/bin/codex" },
           { id: "opencode", name: "OpenCode", available: false, path: "" },
           { id: "openclaw", name: "OpenClaw", available: true, path: "/usr/local/bin/openclaw" },
+          { id: "kimi", name: "Kimi Code", available: false, path: "" },
         ]);
 
       case "list_sub_agents":
