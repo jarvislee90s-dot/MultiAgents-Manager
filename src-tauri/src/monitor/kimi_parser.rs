@@ -707,4 +707,37 @@ mod tests {
             "state.json 标题可用"
         );
     }
+
+    /// MCP 映射全链路：registry → KimiAdapter(mcp_format/path) → JSON 写入 ~/.kimi-code/mcp.json
+    /// （官方文档格式：mcpServers 段；注意 config.toml 是 TOML 但不放 MCP）
+    #[test]
+    fn mcp_write_and_remove_roundtrip() {
+        use crate::services::mcp::{write_mcp, McpConfig};
+        use std::collections::BTreeMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        run_with_home(&home, || {
+            let config = McpConfig {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "demo-server".to_string()],
+                env: BTreeMap::new(),
+            };
+            write_mcp("kimi", "demo", &config).unwrap();
+            let mcp_json = home.join("mcp.json");
+            let value: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&mcp_json).unwrap()).unwrap();
+            assert_eq!(value["mcpServers"]["demo"]["command"], "npx");
+            assert_eq!(value["mcpServers"]["demo"]["args"][0], "-y");
+
+            crate::services::mcp::remove_mcp("kimi", "demo").unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&mcp_json).unwrap()).unwrap();
+            assert!(
+                value["mcpServers"]["demo"].is_null(),
+                "移除后 mcpServers 段不应再含该服务器"
+            );
+        });
+    }
 }
