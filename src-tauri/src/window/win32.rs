@@ -67,6 +67,7 @@ const TOOL_CLAIM_KEYWORDS: &[(&str, &[&str])] = &[
     ("codex", &["codex", "chatgpt"]),
     ("opencode", &["opencode", "oc |"]),
     ("openclaw", &["openclaw"]),
+    ("kimi", &["kimi"]),
 ];
 
 /// 归一化窗口标题用于项目名比对：剥离 spinner 前缀（codex 运行时标题形态 "⠙ 项目名"，

@@ -6,6 +6,7 @@ pub mod cwd;
 pub mod git;
 pub mod hooks;
 pub mod jsonl;
+pub mod kimi_parser;
 pub mod openclaw_parser;
 pub mod opencode_parser;
 pub mod path_codec;

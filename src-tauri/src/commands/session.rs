@@ -98,6 +98,7 @@ fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, Str
         ("codex", monitor_process::find_codex_processes(system)),
         ("opencode", monitor_process::find_opencode_processes(system)),
         ("openclaw", monitor_process::find_openclaw_processes(system)),
+        ("kimi", monitor_process::find_kimi_processes(system)),
     ] {
         for p in procs {
             if let Some(name) = p
