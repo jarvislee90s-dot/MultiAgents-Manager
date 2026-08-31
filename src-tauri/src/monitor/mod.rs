@@ -1,8 +1,16 @@
+// 监控解析层：每个工具一个解析器模块（新增工具只需新增 *_parser.rs + 本处一行），
+// 跨工具公共设施下沉到 cwd/path_codec/git/project/jsonl 五个职责单一的模块
+pub mod claude_parser;
+pub mod codex_parser;
+pub mod cwd;
+pub mod git;
 pub mod hooks;
+pub mod jsonl;
 pub mod openclaw_parser;
 pub mod opencode_parser;
-pub mod parser;
+pub mod path_codec;
 pub mod process;
+pub mod project;
 pub mod status;
 
 // ===== notify 文件监听集成（FR-5c）=====

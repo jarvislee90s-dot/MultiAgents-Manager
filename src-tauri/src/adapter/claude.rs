@@ -21,7 +21,7 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     fn find_sessions(&self, processes: &[AgentProcess]) -> Vec<Session> {
-        monitor::parser::get_claude_sessions(processes)
+        monitor::claude_parser::get_claude_sessions(processes)
     }
 
     fn base_dir(&self) -> std::path::PathBuf {
