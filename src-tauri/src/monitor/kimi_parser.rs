@@ -37,22 +37,45 @@ pub(crate) fn kimi_home() -> PathBuf {
             return PathBuf::from(h);
         }
     }
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".kimi-code")
+    dirs::home_dir().unwrap_or_default().join(".kimi-code")
 }
 
-/// 会话根目录：$KIMI_CODE_HOME/sessions；主目录不存在时回退早期版本 ~/.kimi/sessions
-fn kimi_sessions_root() -> Option<PathBuf> {
-    let primary = kimi_home().join("sessions");
-    if primary.exists() {
-        return Some(primary);
+/// 选定的 Kimi 数据根：session_index.jsonl 所在的 home 与 sessions/ 目录必须同源，
+/// 否则会出现"sessions 取自 A、索引取自 B"的混搭（原 legacy 回退断裂的根源）
+struct KimiDataRoot {
+    home: PathBuf,
+    sessions: PathBuf,
+}
+
+/// 数据根选择规则（纯函数便于测试）：
+/// 1. KIMI_CODE_HOME 显式设置时以其为准，sessions 缺失即整体不可用（不回落 legacy）；
+/// 2. 否则优先 ~/.kimi-code/sessions；
+/// 3. 主目录不存在时回退早期版本 ~/.kimi（home 与 sessions 一起切到 legacy 根）
+fn resolve_data_root(env_home: Option<&str>, user_home: &Path) -> Option<KimiDataRoot> {
+    if let Some(h) = env_home.filter(|h| !h.is_empty()) {
+        let home = PathBuf::from(h);
+        let sessions = home.join("sessions");
+        return sessions.exists().then_some(KimiDataRoot { home, sessions });
     }
-    let legacy = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".kimi")
-        .join("sessions");
-    legacy.exists().then_some(legacy)
+    let primary_home = user_home.join(".kimi-code");
+    let primary_sessions = primary_home.join("sessions");
+    if primary_sessions.exists() {
+        return Some(KimiDataRoot {
+            home: primary_home,
+            sessions: primary_sessions,
+        });
+    }
+    let legacy_home = user_home.join(".kimi");
+    let legacy_sessions = legacy_home.join("sessions");
+    legacy_sessions.exists().then_some(KimiDataRoot {
+        home: legacy_home,
+        sessions: legacy_sessions,
+    })
+}
+
+fn kimi_data_root() -> Option<KimiDataRoot> {
+    let env_home = std::env::var("KIMI_CODE_HOME").ok();
+    resolve_data_root(env_home.as_deref(), &dirs::home_dir().unwrap_or_default())
 }
 
 /// session_index.jsonl 条目（字段名以官方文档为准；alias 容忍 snake_case 变体）
@@ -115,12 +138,12 @@ pub fn get_kimi_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     if processes.is_empty() {
         return sessions;
     }
-    let Some(sessions_root) = kimi_sessions_root() else {
-        debug!("Kimi: sessions root not found, skipping");
+    let Some(root) = kimi_data_root() else {
+        debug!("Kimi: data root (sessions + index) not found, skipping");
         return sessions;
     };
 
-    let index = read_session_index(&sessions_root, &kimi_home());
+    let index = read_session_index(&root);
     if index.is_empty() {
         debug!("Kimi: session_index.jsonl missing or empty");
         return sessions;
@@ -181,8 +204,8 @@ pub fn get_kimi_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 }
 
 /// 解析 session_index.jsonl（按 wire.jsonl mtime 倒序；无 wire 的条目丢弃）
-fn read_session_index(sessions_root: &Path, home: &Path) -> Vec<IndexedSession> {
-    let index_path = home.join("session_index.jsonl");
+fn read_session_index(root: &KimiDataRoot) -> Vec<IndexedSession> {
+    let index_path = root.home.join("session_index.jsonl");
     let content = match fs::read_to_string(&index_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -191,7 +214,7 @@ fn read_session_index(sessions_root: &Path, home: &Path) -> Vec<IndexedSession> 
         .lines()
         .filter_map(|line| {
             let entry: KimiIndexEntry = serde_json::from_str(line).ok()?;
-            let session_dir = resolve_session_dir(home, sessions_root, &entry.session_dir);
+            let session_dir = resolve_session_dir(root, &entry.session_dir);
             let wire = session_dir.join("agents").join("main").join("wire.jsonl");
             let wire_mtime = fs::metadata(&wire).and_then(|m| m.modified()).ok()?;
             Some(IndexedSession {
@@ -207,16 +230,16 @@ fn read_session_index(sessions_root: &Path, home: &Path) -> Vec<IndexedSession> 
 }
 
 /// sessionDir 可能是绝对路径，也可能相对 sessions/ 或数据根目录
-fn resolve_session_dir(home: &Path, sessions_root: &Path, session_dir: &str) -> PathBuf {
+fn resolve_session_dir(root: &KimiDataRoot, session_dir: &str) -> PathBuf {
     let p = PathBuf::from(session_dir);
     if p.is_absolute() {
         return p;
     }
-    let in_sessions = sessions_root.join(&p);
+    let in_sessions = root.sessions.join(&p);
     if in_sessions.exists() {
         return in_sessions;
     }
-    home.join(&p)
+    root.home.join(&p)
 }
 
 /// 解析单个 Kimi 会话：state.json 元数据 + wire.jsonl 尾部状态
@@ -322,7 +345,9 @@ fn entry_status(e: &KimiWireEntry) -> Option<SessionStatus> {
         // 压缩进行中（未见 complete/cancel 即停在 begin）
         "full_compaction.begin" => Some(Compacting),
         // 压缩已完成/取消：压缩点本身不是状态信号，继续前扫
-        "full_compaction.complete" | "full_compaction.cancel" | "context.apply_compaction"
+        "full_compaction.complete"
+        | "full_compaction.cancel"
+        | "context.apply_compaction"
         | "micro_compaction.apply" => None,
         "context.append_loop_event" => {
             let event = e.event.as_ref()?;
@@ -437,11 +462,7 @@ mod tests {
     }
 
     /// 在临时目录构造一个 Kimi 会话（session_index.jsonl + wire.jsonl），返回 (home, 期望 workDir)
-    fn fixture_session(
-        home: &Path,
-        work_dir: &str,
-        wire_lines: &[&str],
-    ) -> (PathBuf, String) {
+    fn fixture_session(home: &Path, work_dir: &str, wire_lines: &[&str]) -> (PathBuf, String) {
         let sessions = home.join("sessions");
         let session_dir = sessions
             .join("wd_demo_0123456789ab")
@@ -486,6 +507,61 @@ mod tests {
         let home = tmp.path().join("missing-kimi-home");
         let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, "/work")]));
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn legacy_kimi_home_uses_same_root_for_index_and_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_home = tmp.path().join("user");
+        // 仅有早期版本 ~/.kimi 布局（无 ~/.kimi-code、无 env）
+        let legacy = user_home.join(".kimi");
+        let session_dir = legacy
+            .join("sessions")
+            .join("wd_demo_0123456789ab")
+            .join("session_11111111-1111-1111-1111-111111111111");
+        fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
+        fs::write(
+            session_dir.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+        )
+        .unwrap();
+        fs::write(
+            legacy.join("session_index.jsonl"),
+            format!(
+                "{{\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n",
+                session_dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let root = resolve_data_root(None, &user_home).expect("仅有 ~/.kimi 时应选中 legacy 根");
+        assert_eq!(root.home, legacy);
+        assert_eq!(root.sessions, legacy.join("sessions"));
+        // 索引必须与 sessions 同根读取（修复前固定从 ~/.kimi-code 读 → 永远为空）
+        let index = read_session_index(&root);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].session_id, "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn primary_kimi_code_home_wins_over_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_home = tmp.path().join("user");
+        fs::create_dir_all(user_home.join(".kimi-code").join("sessions")).unwrap();
+        fs::create_dir_all(user_home.join(".kimi").join("sessions")).unwrap();
+        let root = resolve_data_root(None, &user_home).expect("主目录存在时应选中 ~/.kimi-code");
+        assert_eq!(root.home, user_home.join(".kimi-code"));
+    }
+
+    #[test]
+    fn env_home_without_sessions_disables_kimi_entirely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_home = tmp.path().join("user");
+        // env 显式重定向后以 env 为准：其 sessions 缺失即整体不可用，不回落 legacy
+        //（避免 sessions 取自 ~/.kimi 而索引取自 env 的混搭状态）
+        fs::create_dir_all(user_home.join(".kimi").join("sessions")).unwrap();
+        let missing = tmp.path().join("missing").to_string_lossy().to_string();
+        assert!(resolve_data_root(Some(&missing), &user_home).is_none());
     }
 
     #[test]
@@ -537,9 +613,7 @@ mod tests {
                 r#"{"type":"usage.record","model":"m","usage":{"output":1},"time":1782300906000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Waiting);
         assert_eq!(sessions[0].last_message.as_deref(), Some("done!"));
@@ -559,9 +633,7 @@ mod tests {
                 r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"Bash_1","name":"Bash"},"time":1782300901000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions[0].status, SessionStatus::Processing);
     }
 
@@ -573,11 +645,11 @@ mod tests {
         let (_, work_dir) = fixture_session(
             &home,
             "/work/demo",
-            &[r#"{"type":"context.append_loop_event","event":{"type":"step.end","finishReason":"tool_use"},"time":1782300901000}"#],
+            &[
+                r#"{"type":"context.append_loop_event","event":{"type":"step.end","finishReason":"tool_use"},"time":1782300901000}"#,
+            ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions[0].status, SessionStatus::Processing);
     }
 
@@ -589,11 +661,11 @@ mod tests {
         let (_, work_dir) = fixture_session(
             &home,
             "/work/demo",
-            &[r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"reasoning"}},"time":1782300901000}"#],
+            &[
+                r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"reasoning"}},"time":1782300901000}"#,
+            ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions[0].status, SessionStatus::Thinking);
     }
 
@@ -610,9 +682,7 @@ mod tests {
                 r#"{"type":"turn.cancel","time":1782300901000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions[0].status, SessionStatus::Waiting);
     }
 
@@ -629,9 +699,7 @@ mod tests {
                 r#"{"type":"full_compaction.begin","source":"manual","time":1782300901000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions[0].status, SessionStatus::Compacting);
     }
 
@@ -648,9 +716,7 @@ mod tests {
                 r#"{"type":"full_compaction.complete","time":1782300901000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         // full_compaction.complete 不是状态信号，继续前扫到 usage.record → Waiting
         assert_eq!(sessions[0].status, SessionStatus::Waiting);
     }
@@ -663,7 +729,9 @@ mod tests {
         let (_, _) = fixture_session(
             &home,
             "/work/demo",
-            &[r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#],
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+            ],
         );
         let sessions = run_with_home(&home, || {
             get_kimi_sessions(&[fake_process(1, "/other/project")])
@@ -679,13 +747,13 @@ mod tests {
         let (_, work_dir) = fixture_session(
             &home,
             "/work/demo",
-            &[r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#],
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+            ],
         );
         // 追加一行损坏数据，解析应容忍
         fs::write(home.join("session_index.jsonl"), format!("not json\n{{\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"sessionDir\":\"{}\",\"workDir\":\"{}\"}}\n", home.join("sessions/wd_demo_0123456789ab/session_11111111-1111-1111-1111-111111111111").to_string_lossy(), work_dir)).unwrap();
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
     }
 
@@ -695,9 +763,7 @@ mod tests {
         let home = tmp.path().join("kimi-home");
         fs::create_dir_all(&home).unwrap();
         let (_, work_dir) = fixture_session(&home, "/work/demo", &[]);
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         // 空 wire 无信号：文件刚写入（<60s）→ Processing
         assert_eq!(sessions[0].status, SessionStatus::Processing);
         assert_eq!(sessions[0].last_message, None);
