@@ -61,11 +61,9 @@ impl AgentAdapter for KimiAdapter {
 
     fn plugin_dirs(&self) -> Vec<std::path::PathBuf> {
         // 官方文档：本地插件安装到 $KIMI_CODE_HOME/plugins/managed/<id>/（kimi.plugin.json 清单）
-        vec![
-            monitor::kimi_parser::kimi_home()
-                .join("plugins")
-                .join("managed"),
-        ]
+        vec![monitor::kimi_parser::kimi_home()
+            .join("plugins")
+            .join("managed")]
     }
     fn plugin_config_paths(&self) -> Vec<std::path::PathBuf> {
         // 插件为 manifest 目录型，非配置段型，不支持 config 型插件写入

@@ -4,7 +4,9 @@
 
 use super::cwd::normalize_cwd_for_match;
 use super::git::get_github_url;
-use super::jsonl::{count_active_subagents, extract_cwd_from_jsonl, get_recent_jsonl_files, read_recent_lines};
+use super::jsonl::{
+    count_active_subagents, extract_cwd_from_jsonl, get_recent_jsonl_files, read_recent_lines,
+};
 use super::path_codec::{convert_dir_name_to_path, convert_path_to_dir_name};
 use super::project::project_name_from_path;
 use super::status::*;
@@ -97,7 +99,11 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 }
 
 /// 解析单个 Claude JSONL 文件
-fn parse_claude_jsonl(jsonl_path: &Path, project_path: &str, process: &AgentProcess) -> Option<Session> {
+fn parse_claude_jsonl(
+    jsonl_path: &Path,
+    project_path: &str,
+    process: &AgentProcess,
+) -> Option<Session> {
     use std::time::SystemTime;
 
     let file_age_secs = jsonl_path

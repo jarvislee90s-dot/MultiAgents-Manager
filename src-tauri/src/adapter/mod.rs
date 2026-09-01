@@ -125,7 +125,10 @@ pub fn adapter_by_id(tool_id: &str) -> Option<Box<dyn AgentAdapter>> {
 
 /// 全部已注册 adapter（会话扫描、工具检测的调度入口）
 pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
-    TOOL_IDS.iter().filter_map(|&id| adapter_by_id(id)).collect()
+    TOOL_IDS
+        .iter()
+        .filter_map(|&id| adapter_by_id(id))
+        .collect()
 }
 
 /// 全部已注册 (工具 id, adapter)（资源扫描等需要 id 的场景）

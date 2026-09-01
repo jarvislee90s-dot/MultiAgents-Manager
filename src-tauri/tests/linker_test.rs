@@ -69,7 +69,10 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
     // 用独立 skill 名：与 install_to_repo 的两个用例（共用 demo-skill 名 + 共享
     // Once 重定向的 HOME）隔离，避免并行执行时"已存在同名资源"互相干扰
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
-    let source = home.join(".agents").join("skills").join("demo-skill-codex-link");
+    let source = home
+        .join(".agents")
+        .join("skills")
+        .join("demo-skill-codex-link");
     std::fs::create_dir_all(source.join("SKILL.md").parent().unwrap()).unwrap();
     std::fs::write(source.join("SKILL.md"), "name: demo-skill-codex-link\n").unwrap();
 
@@ -131,7 +134,10 @@ fn test_install_to_repo_existing_without_overwrite_errors() {
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), "# new").unwrap();
 
-    let dest = home.join(".mam").join("skills").join("demo-skill-no-clobber");
+    let dest = home
+        .join(".mam")
+        .join("skills")
+        .join("demo-skill-no-clobber");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("SKILL.md"), "# old").unwrap();
 
