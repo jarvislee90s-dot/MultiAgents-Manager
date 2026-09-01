@@ -411,8 +411,11 @@ fn entry_status(e: &KimiWireEntry) -> Option<SessionStatus> {
         "turn.prompt" | "turn.steer" => Some(Thinking),
         // 用户打断，回到输入态
         "turn.cancel" => Some(Waiting),
-        // 一轮结束（usage.record 是每轮最后一个事件）：等待用户输入
-        "usage.record" => Some(Waiting),
+        // 一轮结束：等待用户输入。真实 v0.39.x 轮尾序列为 … → usage.record（出现在
+        // 流式输出之前）→ content.part → step.end(end_turn) → turn.ended →
+        // token_counting.turn_recorded——终止信号是 turn.ended；usage.record 保留
+        // 作旧版本兼容路径
+        "usage.record" | "turn.ended" => Some(Waiting),
         // LLM 请求在飞
         "llm.request" => Some(Processing),
         // 权限放行后继续执行
@@ -664,6 +667,61 @@ mod tests {
         assert_eq!(sessions[0].status, SessionStatus::Waiting);
         assert_eq!(sessions[0].last_message.as_deref(), Some("done!"));
         assert_eq!(sessions[0].last_message_role.as_deref(), Some("assistant"));
+    }
+
+    #[test]
+    fn turn_ended_after_streaming_means_waiting() {
+        // 回归（真机 v0.39.x 实录）：轮尾序列 usage.record 出现在流式输出之前，
+        // 终止事件是 turn.ended。修复前 turn.ended 未映射，反向扫描落到
+        // content.part(text) → Processing，答完永远卡黄。
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        let (_, work_dir) = fixture_session(
+            &home,
+            "/work/demo",
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"step.begin"},"time":1782300901000}"#,
+                r#"{"type":"llm.request","model":"m","time":1782300902000}"#,
+                r#"{"type":"usage.record","model":"m","usage":{"output":1},"time":1782300903000}"#,
+                r#"{"type":"token_counting.measured","time":1782300904000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"done!"}},"time":1782300905000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"step.end","finishReason":"end_turn"},"time":1782300906000}"#,
+                r#"{"type":"turn.ended","time":1782300907000}"#,
+                r#"{"type":"token_counting.turn_recorded","time":1782300908000}"#,
+            ],
+        );
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, &work_dir)])
+        });
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Waiting);
+        assert_eq!(sessions[0].last_message.as_deref(), Some("done!"));
+    }
+
+    #[test]
+    fn errored_turn_end_means_waiting() {
+        // step.end(finishReason=error) 后随 turn.ended：异常轮次结束仍等用户处置
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        let (_, work_dir) = fixture_session(
+            &home,
+            "/work/demo",
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"step.begin"},"time":1782300901000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"step.end","finishReason":"error"},"time":1782300902000}"#,
+                r#"{"type":"turn.ended","time":1782300903000}"#,
+                r#"{"type":"token_counting.turn_recorded","time":1782300904000}"#,
+            ],
+        );
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, &work_dir)])
+        });
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Waiting);
     }
 
     #[test]
