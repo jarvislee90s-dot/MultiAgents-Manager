@@ -413,9 +413,11 @@ fn entry_status(e: &KimiWireEntry) -> Option<SessionStatus> {
         "turn.cancel" => Some(Waiting),
         // 一轮结束：等待用户输入。真实 v0.39.x 轮尾序列为 … → usage.record（出现在
         // 流式输出之前）→ content.part → step.end(end_turn) → turn.ended →
-        // token_counting.turn_recorded——终止信号是 turn.ended；usage.record 保留
-        // 作旧版本兼容路径
-        "usage.record" | "turn.ended" => Some(Waiting),
+        // token_counting.turn_recorded——turn.ended 是唯一的轮次终止信号。
+        // usage.record 不映射：它先于流式输出出现，映射会让轮次进行中瞬态误标
+        // Waiting（红灯闪一下）；只产生 usage.record 的旧版本轮尾将保持
+        // Processing，属已知的旧版限制。
+        "turn.ended" => Some(Waiting),
         // LLM 请求在飞
         "llm.request" => Some(Processing),
         // 权限放行后继续执行
@@ -649,7 +651,10 @@ mod tests {
     }
 
     #[test]
-    fn usage_record_last_means_waiting() {
+    fn usage_record_alone_keeps_processing() {
+        // 旧版已知限制：旧版本轮尾只产生 usage.record（无 turn.ended）。因
+        // usage.record 在 v0.39.x 先于流式输出出现、映射它会让轮次进行中瞬态
+        // 误标 Waiting，故不再映射——旧版轮尾将保持 Processing（见 entry_status）。
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("kimi-home");
         fs::create_dir_all(&home).unwrap();
@@ -664,7 +669,7 @@ mod tests {
         );
         let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Waiting);
+        assert_eq!(sessions[0].status, SessionStatus::Processing);
         assert_eq!(sessions[0].last_message.as_deref(), Some("done!"));
         assert_eq!(sessions[0].last_message_role.as_deref(), Some("assistant"));
     }
@@ -816,12 +821,12 @@ mod tests {
             &home,
             "/work/demo",
             &[
-                r#"{"type":"usage.record","model":"m","usage":{"output":1},"time":1782300900000}"#,
+                r#"{"type":"turn.ended","time":1782300900000}"#,
                 r#"{"type":"full_compaction.complete","time":1782300901000}"#,
             ],
         );
         let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
-        // full_compaction.complete 不是状态信号，继续前扫到 usage.record → Waiting
+        // full_compaction.complete 不是状态信号，继续前扫到 turn.ended → Waiting
         assert_eq!(sessions[0].status, SessionStatus::Waiting);
     }
 
