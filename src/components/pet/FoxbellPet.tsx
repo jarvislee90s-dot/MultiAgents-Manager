@@ -2,6 +2,7 @@
 // Task 9：指针交互（拖拽方向动画/松手物理/单击/双击）+ 语音字幕；Task 10：状态卡片 + 跳转/歧义候选；Task 12 追加事件接线。
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
 import { JumpWindowCandidate } from "@/hooks/useSessionJump";
@@ -10,6 +11,8 @@ import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimat
 import { loadConfig, subscribeConfig, type PetConfig } from "./petConfig";
 import { ackDone, cardsFromState, computePetStatus, type PetCard, type PetStatusState } from "./petStatus";
 import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
+import { PetMenu } from "./PetMenu";
+import { saveVisible } from "./petConfig";
 import { usePetWindow } from "./usePetWindow";
 
 export function FoxbellPet() {
@@ -173,9 +176,13 @@ export function FoxbellPet() {
   const sessionIndexRef = useRef<Map<string, Session>>(new Map());
   const cardsWrapRef = useRef<HTMLDivElement | null>(null);
   const pendingAckRef = useRef(""); // 歧义跳转：点击卡片时先记待 ack 的会话 id（spec D12）
-  useEffect(() => pet.registerInteractive(cardsWrapRef.current), [pet]);
+  // 稳定回调引用作依赖（与精灵 effect 同款），避免依赖整个 pet 对象每次渲染导致反复注销/登记
+  useEffect(() => registerInteractive(cardsWrapRef.current), [registerInteractive]);
+  const jumpCandidatesRef = useRef<HTMLDivElement | null>(null); // 候选浮层实测高度并入窗口几何（Task 11 评审遗留）
 
   const { data } = useSessionsQuery();
+  const lastApprovalAtRef = useRef(0); // approval 语音 10s 限频窗口起点（spec D3）
+  const previewLoopRef = useRef<number | null>(null); // 动作绑定子页预览循环句柄（spec B4）
   useEffect(() => {
     if (!data) return;
     sessionIndexRef.current = new Map(data.sessions.map((s) => [s.id, s]));
@@ -183,7 +190,23 @@ export function FoxbellPet() {
     statusStateRef.current = r.state;
     setCards(r.cards);
     setMoreCount(r.moreCount);
-    // 事件接线在 Task 12 补充（newWaiting/newCompletion → 语音）
+
+    // ---- 事件差分 → 语音（spec §5/§6.2）----
+    if (r.events.newCompletion.length > 0) {
+      playVoiceRef.current("done", cfgRef.current.doneAction);
+    }
+    if (r.events.newWaiting.length > 0 && Date.now() - lastApprovalAtRef.current > 10_000) {
+      lastApprovalAtRef.current = Date.now();
+      playVoiceRef.current("approval", cfgRef.current.approvalAction);
+    }
+
+    // ---- 任务姿态：waiting > review(完成未读) > running，无则回落 idle/look（spec D4）----
+    const anyWaiting = r.cards.some((c) => c.light === "waiting");
+    const anyDoneUnread = r.cards.some((c) => c.light === "done" && c.unread);
+    const anyRunning = r.cards.some((c) => c.light === "running");
+    stateRef.current.task = anyWaiting ? "waiting" : anyDoneUnread ? "review" : anyRunning ? "running" : null;
+    refreshAnim(); // 组件内稳定闭包（仅读写 ref + setState），勿入依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   /** 点击卡片跳转终端；歧义时弹候选浮层；失败静默保留卡片（spec C2/§13） */
@@ -319,19 +342,31 @@ export function FoxbellPet() {
     playVoice("general", cfgRef.current.dblAction); // 双击说话（spec A2）
   };
 
-  // ---- 窗口几何同步（spec §4.2）：宽度恒 340×scale；高度 = 气泡区 + 精灵 + 间隙 + max(卡片区, 菜单) ----
-  // Task 10 引入 cardsWrapRef、Task 12 引入 PetMenu（挂 menuWrapRef）后，把实测高度并入 Math.max；
-  // menuWrapRef 本任务已测量（无菜单时高度为 0，与前向公式一致）
+  // ---- 窗口几何同步（spec §4.2）：宽度恒 340×scale；高度 = 气泡区 + 精灵 + 间隙 + max(卡片区, 菜单, 候选浮层) ----
+  // Task 12 引入 PetMenu（挂 menuWrapRef）；候选浮层挂 jumpCandidatesRef 一并实测并入 Math.max（Task 11 评审遗留）
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null); // Task 12 使用
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null); // 右键菜单位置（spec A6）
   useLayoutEffect(() => {
     const baseH = px(50 + FRAME_H + 10);
     const menuH = menuWrapRef.current?.getBoundingClientRect().height ?? 0;
     const cardsH = cardsWrapRef.current?.getBoundingClientRect().height ?? 0;
-    void pet.syncSize(px(340), Math.ceil(baseH + Math.max(cardsH, menuH)));
+    const candidatesH = jumpCandidatesRef.current?.getBoundingClientRect().height ?? 0;
+    void pet.syncSize(px(340), Math.ceil(baseH + Math.max(cardsH, menuH, candidatesH)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg.scale, menu, cards, moreCount, candidates, pet.syncSize]);
-  void setMenu; // Task 12 接线菜单开合时使用（先声明以满足 tsc noUnusedLocals）
+
+  /** 停止动作预览循环（幂等：无循环时 no-op） */
+  const stopPreview = () => {
+    if (previewLoopRef.current !== null) {
+      window.clearInterval(previewLoopRef.current);
+      previewLoopRef.current = null;
+    }
+  };
+
+  /** 显隐广播给主窗口/托盘（PetPage 已监听回写 localStorage；主窗口入口 Task 13 统一监听） */
+  const emitPetVisibility = (visible: boolean) => {
+    emit("pet-visibility-changed", { visible }).catch(() => {});
+  };
 
   const px = (v: number) => Math.round(v * cfg.scale);
   const style = frameStyle(anim, frame, lookFrame, cfg.scale);
@@ -361,6 +396,11 @@ export function FoxbellPet() {
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
+        onContextMenu={(e) => {
+          e.preventDefault(); // 屏蔽系统菜单（spec A6）
+          setMenu({ x: e.clientX, y: e.clientY });
+          pet.setMenuOpen(true); // 菜单打开期间关闭穿透
+        }}
       />
       {subtitle && (
         <div
@@ -433,18 +473,46 @@ export function FoxbellPet() {
       </div>
       {/* 歧义候选浮层（spec D12）：选中按 hwnd 聚焦并 ack 发起跳转的卡片 */}
       {candidates && (
-        <div data-testid="pet-jump-candidates" style={{
+        <div ref={jumpCandidatesRef} data-testid="pet-jump-candidates" style={{
           position: "absolute", bottom: px(50 + FRAME_H + 10), left: "50%", transform: "translateX(-50%)",
           width: px(320), maxHeight: px(240), overflowY: "auto", zIndex: 5,
           background: "rgba(30,30,34,0.96)", color: "#eee", borderRadius: px(10),
           fontSize: px(12), padding: `${px(4)}px 0`,
         }}>
           {candidates.map((w) => (
-            <div key={w.hwnd} onClick={() => { void invoke("focus_hwnd", { hwnd: w.hwnd }); setCandidates(null); ackDone(statusStateRef.current ?? {}, pendingAckRef.current); setCards(cardsFromState(statusStateRef.current ?? {})); }}
+            <div key={w.hwnd} onClick={() => { invoke("focus_hwnd", { hwnd: w.hwnd }).catch(() => {}); setCandidates(null); ackDone(statusStateRef.current ?? {}, pendingAckRef.current); setCards(cardsFromState(statusStateRef.current ?? {})); }}
               style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}>
               {w.title}<span style={{ color: "#a1a1aa" }}> · {w.process}</span>
             </div>
           ))}
+        </div>
+      )}
+      {/* 右键菜单（spec §9/B10）：position: fixed 按光标锚定；包裹层仅作高度实测用 */}
+      {menu && (
+        <div ref={menuWrapRef}>
+          <PetMenu
+            anchor={menu}
+            onClose={() => { setMenu(null); pet.setMenuOpen(false); stopPreview(); }}
+            onPreview={(action) => {
+              // PetMenu 返回主菜单时以 onPreview(null) 通知停止预览（运行时契约含 null）
+              if (action) {
+                stopPreview();
+                const loop = () => { playTransient(action, 1600); };
+                loop(); // 进入子页立即预览一次
+                previewLoopRef.current = window.setInterval(loop, 1700); // 子页循环预览（spec B4）
+              } else {
+                stopPreview();
+              }
+            }}
+            onHide={() => {
+              setMenu(null);
+              pet.setMenuOpen(false);
+              stopPreview();
+              saveVisible(false); // 本地状态 + 订阅同步（spec §10）
+              invoke("set_pet_visible", { visible: false }).catch(() => {});
+              emitPetVisibility(false); // 广播给主窗口/托盘同步（spec §10.2）
+            }}
+          />
         </div>
       )}
     </div>
