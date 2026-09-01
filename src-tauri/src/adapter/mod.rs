@@ -3,6 +3,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod kimi;
 pub mod openclaw;
 pub mod opencode;
 
@@ -106,6 +107,35 @@ pub trait AgentAdapter: Send + Sync {
     }
 }
 
+/// 已注册工具 id 列表（登记顺序即扫描/展示顺序）
+pub const TOOL_IDS: &[&str] = &["claude", "codex", "opencode", "openclaw", "kimi"];
+
+/// 工具 id → adapter 的唯一登记处。新增工具只需在此加一行（+ 其 adapter 文件），
+/// 服务层（mcp/skill/plugin/preset/resource/detector）统一经此分发，无需各自加 arm
+pub fn adapter_by_id(tool_id: &str) -> Option<Box<dyn AgentAdapter>> {
+    match tool_id {
+        "claude" => Some(Box::new(claude::ClaudeAdapter)),
+        "codex" => Some(Box::new(codex::CodexAdapter)),
+        "opencode" => Some(Box::new(opencode::OpenCodeAdapter)),
+        "openclaw" => Some(Box::new(openclaw::OpenClawAdapter)),
+        "kimi" => Some(Box::new(kimi::KimiAdapter)),
+        _ => None,
+    }
+}
+
+/// 全部已注册 adapter（会话扫描、工具检测的调度入口）
+pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
+    TOOL_IDS.iter().filter_map(|&id| adapter_by_id(id)).collect()
+}
+
+/// 全部已注册 (工具 id, adapter)（资源扫描等需要 id 的场景）
+pub fn all_adapters_with_ids() -> Vec<(&'static str, Box<dyn AgentAdapter>)> {
+    TOOL_IDS
+        .iter()
+        .filter_map(|&id| adapter_by_id(id).map(|a| (id, a)))
+        .collect()
+}
+
 /// 共享 System 实例 — 每轮询周期刷新一次，所有 adapter 共用
 static SHARED_SYSTEM: Mutex<Option<System>> = Mutex::new(None);
 
@@ -119,12 +149,7 @@ pub fn dedup_sessions(sessions: &mut Vec<Session>) {
 
 /// 获取所有注册 adapter 的会话
 pub fn get_all_sessions() -> SessionsResponse {
-    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
-        Box::new(claude::ClaudeAdapter),
-        Box::new(codex::CodexAdapter),
-        Box::new(opencode::OpenCodeAdapter),
-        Box::new(openclaw::OpenClawAdapter),
-    ];
+    let adapters: Vec<Box<dyn AgentAdapter>> = all_adapters();
 
     // Phase 1: 刷新共享 System 快照，发现所有进程
     let all_processes: Vec<Vec<AgentProcess>> = {
@@ -311,6 +336,9 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
         "codex" => Some(home_dir.join(".agents").join("skills")),
         "opencode" => Some(home_dir.join(".config").join("opencode").join("skills")),
         "openclaw" => Some(home_dir.join(".openclaw").join("skills")),
+        // Kimi Code 读取 $KIMI_CODE_HOME/skills（默认 ~/.kimi-code/skills），
+        // 经 kimi_home() 保持 KIMI_CODE_HOME 重定向与 adapter 同源
+        "kimi" => Some(crate::monitor::kimi_parser::kimi_home().join("skills")),
         _ => None,
     }
 }

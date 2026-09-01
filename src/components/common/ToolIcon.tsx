@@ -114,9 +114,27 @@ function OpenClawIcon({ size }: { size: number }) {
   );
 }
 
+// Kimi Code — Moonshot 弦月
+function KimiIcon({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <rect width="20" height="20" rx="5" fill="#0B0E1A" />
+      {/* 弦月：外弧 + 内弧咬出月形（Feather moon 路径 24→20 等比缩放） */}
+      <path d="M17.5 10.66A7.5 7.5 0 1 1 9.34 2.5 5.83 5.83 0 0 0 17.5 10.66Z" fill="white" />
+    </svg>
+  );
+}
+
 const TOOL_SVGS: Record<string, React.FC<{ size: number }>> = {
   claude: ClaudeIcon,
   codex: CodexIcon,
   opencode: OpenCodeIcon,
   openclaw: OpenClawIcon,
+  kimi: KimiIcon,
 };

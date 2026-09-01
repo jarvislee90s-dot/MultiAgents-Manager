@@ -21,7 +21,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn find_sessions(&self, processes: &[AgentProcess]) -> Vec<Session> {
-        monitor::parser::get_codex_sessions(processes)
+        monitor::codex_parser::get_codex_sessions(processes)
     }
 
     fn base_dir(&self) -> std::path::PathBuf {

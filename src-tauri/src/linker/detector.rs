@@ -1,10 +1,7 @@
 // 工具检测器 — 检测已安装的 AI 编程工具
 // 简化版（无 rayon，3 个工具顺序检测足够快）
 
-use crate::adapter::{
-    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-    opencode::OpenCodeAdapter, AgentAdapter,
-};
+use crate::adapter::{all_adapters, AgentAdapter};
 use log::debug;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -19,12 +16,7 @@ pub struct ToolDetection {
 
 /// 检测所有已安装的工具
 pub fn detect_all_tools() -> Vec<ToolDetection> {
-    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
-        Box::new(ClaudeAdapter),
-        Box::new(CodexAdapter),
-        Box::new(OpenCodeAdapter),
-        Box::new(OpenClawAdapter),
-    ];
+    let adapters: Vec<Box<dyn AgentAdapter>> = all_adapters();
 
     adapters
         .iter()

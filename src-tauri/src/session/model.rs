@@ -8,6 +8,7 @@ pub enum AgentType {
     Codex,
     OpenCode,
     OpenClaw,
+    Kimi,
 }
 
 /// 会话状态（红绿灯五态 + Finished）

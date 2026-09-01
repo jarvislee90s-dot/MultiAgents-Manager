@@ -42,3 +42,22 @@ export function OpenCodeIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+export function KimiIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      role="img"
+      aria-label="Kimi Code"
+    >
+      {/* 弦月（Feather moon）：Moonshot/Kimi 品牌意象 */}
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}

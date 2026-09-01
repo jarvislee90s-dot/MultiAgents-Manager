@@ -40,7 +40,7 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 │   └── types/             #   TypeScript 类型定义
 ├── src-tauri/             # Tauri Rust 后端
 │   └── src/
-│       ├── adapter/       #   Agent 适配器（Claude / Codex / OpenCode / OpenClaw）
+│       ├── adapter/       #   Agent 适配器（Claude / Codex / OpenCode / OpenClaw / Kimi Code）
 │       ├── monitor/       #   进程扫描、会话解析、状态判定
 │       ├── services/      #   按功能域拆分的业务服务（skill/resource/mcp/preset/plugin/manifest）
 │       ├── linker/        #   三层符号链接映射（SSOT → Tool → SubAgent）

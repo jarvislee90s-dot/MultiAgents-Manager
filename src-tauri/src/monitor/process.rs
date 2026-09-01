@@ -194,6 +194,11 @@ pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(system, &["openclaw"], &["multi-agents-manager"])
 }
 
+/// 发现 Kimi Code 进程（主进程 kimi；kimi-code-worker 等子进程经父链过滤剔除）
+pub fn find_kimi_processes(system: &System) -> Vec<AgentProcess> {
+    find_processes_by_names(system, &["kimi"], &["multi-agents-manager"])
+}
+
 #[cfg(test)]
 mod tests {
     mod exe_matches {
