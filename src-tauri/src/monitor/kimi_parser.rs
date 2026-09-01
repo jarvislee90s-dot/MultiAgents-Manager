@@ -215,6 +215,15 @@ fn read_session_index(root: &KimiDataRoot) -> Vec<IndexedSession> {
         .filter_map(|line| {
             let entry: KimiIndexEntry = serde_json::from_str(line).ok()?;
             let session_dir = resolve_session_dir(root, &entry.session_dir);
+            // 信任边界：sessionDir 只允许落在 sessions 根之下，越界（含 ../ 逃逸、
+            // 指向任意绝对路径）的索引行跳过——与"损坏行跳过"同语义，不误报
+            if !session_dir.starts_with(&root.sessions) {
+                debug!(
+                    "Kimi: sessionDir outside sessions root, skipping: {}",
+                    session_dir.display()
+                );
+                return None;
+            }
             let wire = session_dir.join("agents").join("main").join("wire.jsonl");
             let wire_mtime = fs::metadata(&wire).and_then(|m| m.modified()).ok()?;
             Some(IndexedSession {
@@ -803,6 +812,37 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         // 标题按字符（非字节）取前 8 位：会 话 🔥 i d - 1 2
         assert_eq!(sessions[0].title.as_deref(), Some("会话🔥id-12"));
+    }
+
+    #[test]
+    fn out_of_root_absolute_sessiondir_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        // wire 放在数据根之外的目录，模拟被污染/越界的索引行
+        let outside = tmp.path().join("outside").join("session_evil");
+        fs::create_dir_all(outside.join("agents").join("main")).unwrap();
+        fs::write(
+            outside.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{{\"sessionId\":\"evil-1111\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n",
+                outside.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, "/work/demo")])
+        });
+        assert!(
+            sessions.is_empty(),
+            "越界 sessionDir 应被跳过，实际得到 {:?}",
+            sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        );
     }
 
     /// MCP 映射全链路：registry → KimiAdapter(mcp_format/path) → JSON 写入 ~/.kimi-code/mcp.json
