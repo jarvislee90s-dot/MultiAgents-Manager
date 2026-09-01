@@ -1,0 +1,82 @@
+// tests/pet/petStatus.test.ts
+import { describe, expect, it } from "vitest";
+import type { Session } from "@/types/session";
+import { computePetStatus, ackDone, cardsFromState } from "@/components/pet/petStatus";
+
+const mk = (id: string, status: Session["status"], over: Partial<Session> = {}): Session => ({
+  id, agentType: "claude", projectName: "P", projectPath: "/p", title: null, gitBranch: null,
+  githubUrl: null, status, lastMessage: "msg", lastMessageRole: null, lastActivityAt: "",
+  pid: 1, cpuUsage: 0, activeSubagentCount: 0, form: "cli", jumpSupported: true, ...over,
+});
+
+describe("computePetStatus", () => {
+  it("灯色映射：waiting红 / 运行三态黄 / idle·finished绿（spec D2）", () => {
+    const first = computePetStatus([mk("a", "waiting"), mk("b", "thinking"), mk("c", "idle")], null, 0);
+    const lights = Object.fromEntries(first.cards.map((c) => [c.id, c.light]));
+    expect(lights).toEqual({ a: "waiting", b: "running" }); // 绿无未读不显示卡
+  });
+
+  it("首帧不触发任何事件（spec §5）", () => {
+    const first = computePetStatus([mk("a", "waiting"), mk("c", "idle")], null, 0);
+    expect(first.events.newWaiting).toEqual([]);
+    expect(first.events.newCompletion).toEqual([]);
+  });
+
+  it("完成差分：黄→绿 触发 newCompletion + 绿卡未读；稳态绿不触发", () => {
+    const s1 = computePetStatus([mk("c", "thinking")], null, 0);
+    const s2 = computePetStatus([mk("c", "idle")], s1.state, 1000);
+    expect(s2.events.newCompletion).toEqual(["c"]);
+    expect(s2.cards.find((x) => x.id === "c")).toMatchObject({ light: "done", unread: true, lines: ["已完成"] });
+    const s3 = computePetStatus([mk("c", "idle")], s2.state, 2000);
+    expect(s3.events.newCompletion).toEqual([]);
+    expect(s3.cards.find((x) => x.id === "c")?.unread).toBe(true); // 未读保留（C4）
+  });
+
+  it("waiting 差分触发 newWaiting；红卡持续显示", () => {
+    const s1 = computePetStatus([mk("a", "thinking")], null, 0);
+    const s2 = computePetStatus([mk("a", "waiting")], s1.state, 1000);
+    expect(s2.events.newWaiting).toEqual(["a"]);
+    const s3 = computePetStatus([mk("a", "waiting")], s2.state, 2000);
+    expect(s3.events.newWaiting).toEqual([]);
+    expect(s3.cards.find((x) => x.id === "a")?.light).toBe("waiting");
+  });
+
+  it("ackDone 后绿卡消失；再次完成重新亮起（C2/C4）", () => {
+    const s1 = computePetStatus([mk("c", "thinking")], null, 0);
+    const s2 = computePetStatus([mk("c", "idle")], s1.state, 1000);
+    ackDone(s2.state, "c");
+    expect(cardsFromState(s2.state).find((x) => x.id === "c")).toBeUndefined();
+    const s3 = computePetStatus([mk("c", "thinking")], s2.state, 2000);
+    const s4 = computePetStatus([mk("c", "idle")], s3.state, 3000);
+    expect(s4.cards.find((x) => x.id === "c")?.unread).toBe(true);
+  });
+
+  it("会话消失：卡片保留 60s 后清理，不亮断联灯（H4/D9）", () => {
+    const s1 = computePetStatus([mk("a", "waiting")], null, 0);
+    const s2 = computePetStatus([], s1.state, 30_000);
+    expect(s2.cards.find((x) => x.id === "a")?.light).toBe("waiting");
+    const s3 = computePetStatus([], s1.state, 90_000);
+    expect(s3.cards.find((x) => x.id === "a")).toBeUndefined();
+  });
+
+  it("排序 waiting>running>done，最多 6 张 + moreCount（H5/C3）", () => {
+    const mkDone = (i: string) => {
+      const a = computePetStatus([mk(i, "thinking")], null, 0);
+      return computePetStatus([mk(i, "idle")], a.state, 10).state;
+    };
+    let state = { ...mkDone("d1"), ...mkDone("d2") };
+    const sess = [mk("w", "waiting"), mk("r1", "processing"), mk("r2", "compacting"), ...["d1", "d2"].map((i) => mk(i, "idle"))];
+    const r = computePetStatus(sess, state, 100);
+    expect(r.cards.slice(0, 3).map((c) => c.light)).toEqual(["waiting", "running", "running"]);
+    expect(r.cards.length).toBeLessThanOrEqual(6);
+    expect(r.cards.length + r.moreCount).toBe(5);
+  });
+
+  it("卡片标题与摘要：title 优先，lastMessage 截断（H3）", () => {
+    const r = computePetStatus([mk("a", "processing", { title: "自定义标题", lastMessage: "x".repeat(200) })], null, 0);
+    const card = r.cards[0];
+    expect(card.title).toBe("自定义标题");
+    expect(card.lines[0].length).toBeLessThan(60);
+    expect(card.lines[0].endsWith("…")).toBe(true);
+  });
+});
