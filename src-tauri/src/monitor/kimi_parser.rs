@@ -32,12 +32,18 @@ const FILE_RECENT_SECS: f32 = 60.0;
 
 /// Kimi Code 数据根目录：KIMI_CODE_HOME 环境变量优先，否则 ~/.kimi-code
 pub(crate) fn kimi_home() -> PathBuf {
+    kimi_home_with(&dirs::home_dir().unwrap_or_default())
+}
+
+/// kimi_home 的可注入版本：env 优先，否则在给定用户目录下取 .kimi-code。
+/// skill_dir_for_tool 等接收 home_dir 参数的入口用它，保持与其他工具一致的注入语义
+pub(crate) fn kimi_home_with(user_home: &Path) -> PathBuf {
     if let Ok(h) = std::env::var("KIMI_CODE_HOME") {
         if !h.is_empty() {
             return PathBuf::from(h);
         }
     }
-    dirs::home_dir().unwrap_or_default().join(".kimi-code")
+    user_home.join(".kimi-code")
 }
 
 /// 选定的 Kimi 数据根：session_index.jsonl 所在的 home 与 sessions/ 目录必须同源，
@@ -932,6 +938,20 @@ mod tests {
             sessions[0].id.starts_with("bbbbbbbb"),
             "应取 mtime 最新的会话，实际 {}",
             sessions[0].id
+        );
+    }
+
+    #[test]
+    fn skill_dir_for_tool_kimi_respects_injected_home() {
+        // 与其他工具 arm 一致：skill_dir_for_tool 应基于传入的 home_dir 拼路径，
+        // 而不是绕过参数直接读真实 ~/.kimi-code（测试注入会失效）
+        let _guard = HOME_LOCK.lock().unwrap();
+        std::env::remove_var("KIMI_CODE_HOME");
+        let dir = crate::adapter::skill_dir_for_tool("kimi", std::path::Path::new("/custom/home"))
+            .expect("kimi 应返回 skill 目录");
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/custom/home/.kimi-code/skills")
         );
     }
 

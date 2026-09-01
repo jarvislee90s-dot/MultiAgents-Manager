@@ -339,9 +339,9 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
         "codex" => Some(home_dir.join(".agents").join("skills")),
         "opencode" => Some(home_dir.join(".config").join("opencode").join("skills")),
         "openclaw" => Some(home_dir.join(".openclaw").join("skills")),
-        // Kimi Code 读取 $KIMI_CODE_HOME/skills（默认 ~/.kimi-code/skills），
-        // 经 kimi_home() 保持 KIMI_CODE_HOME 重定向与 adapter 同源
-        "kimi" => Some(crate::monitor::kimi_parser::kimi_home().join("skills")),
+        // Kimi Code 读取 $KIMI_CODE_HOME/skills（默认 <home_dir>/.kimi-code/skills），
+        // 经 kimi_home_with 保持 KIMI_CODE_HOME 重定向与 adapter 同源，同时尊重注入的 home_dir
+        "kimi" => Some(crate::monitor::kimi_parser::kimi_home_with(home_dir).join("skills")),
         _ => None,
     }
 }
