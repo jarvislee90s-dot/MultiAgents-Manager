@@ -143,11 +143,36 @@ pub fn get_kimi_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         return sessions;
     };
 
-    let index = read_session_index(&root);
-    if index.is_empty() {
+    let raw_entries = parse_session_index(&root);
+    if raw_entries.is_empty() {
         debug!("Kimi: session_index.jsonl missing or empty");
         return sessions;
     }
+
+    let has_valid_cwd = |p: &AgentProcess| {
+        p.cwd
+            .as_ref()
+            .map(|c| !normalize_cwd_for_match(&c.to_string_lossy()).is_empty())
+            .unwrap_or(false)
+    };
+    // 候选预过滤：无"无 cwd 进程"时只 stat workDir 命中的条目（索引只增不减，
+    // 全量 stat 会随历史会话数线性放大）；有回退进程时保留全部候选供 Phase 2 挑最新
+    let cwd_set: HashSet<String> = processes
+        .iter()
+        .filter(|p| has_valid_cwd(p))
+        .filter_map(|p| p.cwd.as_ref())
+        .map(|c| normalize_cwd_for_match(&c.to_string_lossy()))
+        .collect();
+    let has_fallback_processes = processes.iter().any(|p| !has_valid_cwd(p));
+
+    let mut index: Vec<IndexedSession> = raw_entries
+        .iter()
+        .filter(|e| {
+            has_fallback_processes || cwd_set.contains(&normalize_cwd_for_match(&e.work_dir))
+        })
+        .filter_map(|e| stat_index_entry(&root, e))
+        .collect();
+    index.sort_by_key(|s| std::cmp::Reverse(s.wire_mtime));
 
     let mut matched: HashSet<usize> = HashSet::new();
 
@@ -175,12 +200,7 @@ pub fn get_kimi_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 
     // Phase 2: 无有效 cwd 的进程回退到最新未匹配会话（与 codex 解析器同策略）
     for process in processes {
-        let has_cwd = process
-            .cwd
-            .as_ref()
-            .map(|c| !normalize_cwd_for_match(&c.to_string_lossy()).is_empty())
-            .unwrap_or(false);
-        if has_cwd {
+        if has_valid_cwd(process) {
             continue;
         }
         for (idx, entry) in index.iter().enumerate() {
@@ -203,39 +223,39 @@ pub fn get_kimi_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     sessions
 }
 
-/// 解析 session_index.jsonl（按 wire.jsonl mtime 倒序；无 wire 的条目丢弃）
-fn read_session_index(root: &KimiDataRoot) -> Vec<IndexedSession> {
+/// 解析 session_index.jsonl 原始条目（纯解析，不触碰 wire 文件；
+/// stat 延迟到候选过滤之后，避免每轮轮询 stat 全部历史会话）
+fn parse_session_index(root: &KimiDataRoot) -> Vec<KimiIndexEntry> {
     let index_path = root.home.join("session_index.jsonl");
-    let content = match fs::read_to_string(&index_path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let mut index: Vec<IndexedSession> = content
-        .lines()
-        .filter_map(|line| {
-            let entry: KimiIndexEntry = serde_json::from_str(line).ok()?;
-            let session_dir = resolve_session_dir(root, &entry.session_dir);
-            // 信任边界：sessionDir 只允许落在 sessions 根之下，越界（含 ../ 逃逸、
-            // 指向任意绝对路径）的索引行跳过——与"损坏行跳过"同语义，不误报
-            if !session_dir.starts_with(&root.sessions) {
-                debug!(
-                    "Kimi: sessionDir outside sessions root, skipping: {}",
-                    session_dir.display()
-                );
-                return None;
-            }
-            let wire = session_dir.join("agents").join("main").join("wire.jsonl");
-            let wire_mtime = fs::metadata(&wire).and_then(|m| m.modified()).ok()?;
-            Some(IndexedSession {
-                session_id: entry.session_id,
-                work_dir: entry.work_dir,
-                session_dir,
-                wire_mtime,
-            })
-        })
-        .collect();
-    index.sort_by_key(|s| std::cmp::Reverse(s.wire_mtime));
-    index
+    match fs::read_to_string(&index_path) {
+        Ok(content) => content
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 为索引条目补充 wire mtime（含越界校验）；sessionDir 越界或 wire 缺失返回 None
+fn stat_index_entry(root: &KimiDataRoot, entry: &KimiIndexEntry) -> Option<IndexedSession> {
+    let session_dir = resolve_session_dir(root, &entry.session_dir);
+    // 信任边界：sessionDir 只允许落在 sessions 根之下，越界（含 ../ 逃逸、
+    // 指向任意绝对路径）的索引行跳过——与"损坏行跳过"同语义，不误报
+    if !session_dir.starts_with(&root.sessions) {
+        debug!(
+            "Kimi: sessionDir outside sessions root, skipping: {}",
+            session_dir.display()
+        );
+        return None;
+    }
+    let wire = session_dir.join("agents").join("main").join("wire.jsonl");
+    let wire_mtime = fs::metadata(&wire).and_then(|m| m.modified()).ok()?;
+    Some(IndexedSession {
+        session_id: entry.session_id.clone(),
+        work_dir: entry.work_dir.clone(),
+        session_dir,
+        wire_mtime,
+    })
 }
 
 /// sessionDir 可能是绝对路径，也可能相对 sessions/ 或数据根目录
@@ -547,7 +567,12 @@ mod tests {
         assert_eq!(root.home, legacy);
         assert_eq!(root.sessions, legacy.join("sessions"));
         // 索引必须与 sessions 同根读取（修复前固定从 ~/.kimi-code 读 → 永远为空）
-        let index = read_session_index(&root);
+        let raw = parse_session_index(&root);
+        assert_eq!(raw.len(), 1);
+        let index: Vec<_> = raw
+            .iter()
+            .filter_map(|e| stat_index_entry(&root, e))
+            .collect();
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].session_id, "11111111-1111-1111-1111-111111111111");
     }
@@ -842,6 +867,71 @@ mod tests {
             sessions.is_empty(),
             "越界 sessionDir 应被跳过，实际得到 {:?}",
             sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// 构造多会话布局：两个 workDir 各一个会话（wire 写入有先后，后者 mtime 更新）
+    fn write_two_sessions(home: &Path, first: &str, second: &str) {
+        let s1 = home
+            .join("sessions")
+            .join("wd_demo_0123456789ab")
+            .join(first);
+        fs::create_dir_all(s1.join("agents").join("main")).unwrap();
+        fs::write(
+            s1.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"one"}],"time":1782300900000}"#,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let s2 = home
+            .join("sessions")
+            .join("wd_other_0123456789ab")
+            .join(second);
+        fs::create_dir_all(s2.join("agents").join("main")).unwrap();
+        fs::write(
+            s2.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"two"}],"time":1782300901000}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{{\"sessionId\":\"{}\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n{{\"sessionId\":\"{}\",\"sessionDir\":\"{}\",\"workDir\":\"/work/other\"}}\n",
+                first.trim_start_matches("session_"),
+                s1.to_string_lossy(),
+                second.trim_start_matches("session_"),
+                s2.to_string_lossy()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn only_entries_matching_process_cwd_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        write_two_sessions(&home, "session_aaaaaaaa-1111", "session_bbbbbbbb-2222");
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, "/work/demo")])
+        });
+        assert_eq!(sessions.len(), 1, "只应出现 cwd 匹配 workDir 的会话");
+        assert!(sessions[0].id.starts_with("aaaaaaaa"));
+    }
+
+    #[test]
+    fn no_cwd_process_gets_newest_unmatched_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        write_two_sessions(&home, "session_aaaaaaaa-1111", "session_bbbbbbbb-2222");
+        // 无有效 cwd（"/" 归一化为空）的进程走 Phase 2 回退：拿 wire mtime 最新的未匹配会话
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, "/")]));
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sessions[0].id.starts_with("bbbbbbbb"),
+            "应取 mtime 最新的会话，实际 {}",
+            sessions[0].id
         );
     }
 
