@@ -1,8 +1,9 @@
 // FoxbellPet — 桌宠本体（spec §7/§8/§9）。Task 8：精灵 + 帧步进 + look 环顾 + 缩放；
-// Task 9 追加交互（拖拽/物理/点击/菜单）；Task 10 追加卡片；Task 12 追加事件接线。
-import { useEffect, useRef, useState } from "react";
+// Task 9：指针交互（拖拽方向动画/松手物理/单击/双击）+ 语音字幕；Task 10 追加卡片；Task 12 追加事件接线。
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import { loadConfig, subscribeConfig, type PetConfig } from "./petConfig";
+import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { usePetWindow } from "./usePetWindow";
 
 export function FoxbellPet() {
@@ -26,8 +27,16 @@ export function FoxbellPet() {
   const animRef = useRef<PetAnimKey>("idle");
   const frameRef = useRef(0);
   const stepTimer = useRef<number | null>(null);
-  const stateRef = useRef<{ drag: PetAnimKey | null; transient: PetAnimKey | null; task: PetAnimKey | null; look: boolean }>({
-    drag: null, transient: null, task: null, look: false,
+  const stateRef = useRef<{
+    drag: PetAnimKey | null;
+    transient: PetAnimKey | null;
+    task: PetAnimKey | null;
+    look: boolean;
+  }>({
+    drag: null,
+    transient: null,
+    task: null,
+    look: false,
   });
   const lookStop = useRef<(() => void) | null>(null);
   const genRef = useRef({ transient: 0, look: 0 });
@@ -60,6 +69,8 @@ export function FoxbellPet() {
     animRef.current = key;
     setAnim(key);
     cancelStep();
+    // 离开 look（更高优先级状态抢占）时完整停掉扫视：interval + 状态位 + 帧号复位（Task 8 评审遗留）
+    if (animRef.current !== "look") stopLook();
     frameRef.current = 0;
     setFrame(0);
     stepLoop();
@@ -70,7 +81,7 @@ export function FoxbellPet() {
     applyAnim(s.drag ?? s.transient ?? s.task ?? (s.look ? "look" : "idle"));
   };
 
-  /** 瞬时动作（代数计数防过期覆盖，spec F4）—— Task 9 交互接线时启用 */
+  /** 瞬时动作（代数计数防过期覆盖，spec F4） */
   const playTransient = useRef((key: PetAnimKey, ms: number) => {
     const gen = ++genRef.current.transient;
     stateRef.current.transient = key;
@@ -82,8 +93,70 @@ export function FoxbellPet() {
       }
     }, ms);
   }).current;
-  // 骨架阶段尚未接线（Task 9 使用）：显式引用以满足 tsc noUnusedLocals
-  void playTransient;
+
+  // ---- 语音与字幕（Task 12 事件接线复用，spec §6.2）----
+  const [subtitle, setSubtitle] = useState<string | null>(null);
+  const bubbleGen = useRef(0);
+  const voiceRef = useRef<VoicePlayer | null>(null);
+  const manifestLoaded = useRef(false);
+  const unlockedRef = useRef(false);
+
+  // manifest 拉取一次；素材缺失/解析失败 → 语音静默降级，动作与字幕不受影响（spec §13）。
+  // StrictMode 双挂载：卸载时复位 loaded 标记并丢弃过期响应，保证重挂载后仍会重新拉取
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/pet/manifest.json")
+      .then((r) => r.json())
+      .then((raw) => {
+        if (cancelled) return;
+        const entries = parseManifest(raw);
+        const player = new VoicePlayer();
+        player.load(entries);
+        voiceRef.current = player;
+      })
+      .catch(() => {
+        /* 素材缺失：语音静默降级（spec §13） */
+      });
+    return () => {
+      cancelled = true;
+      voiceRef.current?.dispose();
+      voiceRef.current = null;
+      manifestLoaded.current = false;
+    };
+  }, []);
+
+  const showBubble = (text: string, ms: number) => {
+    const gen = ++bubbleGen.current;
+    setSubtitle(text);
+    later(() => {
+      if (bubbleGen.current === gen) setSubtitle(null);
+    }, ms);
+  };
+
+  /** 播一组语音 + 动作 + 字幕（muted 只拦声音不拦动作/字幕，spec D5） */
+  const playVoice = (group: VoiceGroup, action: PetAnimKey) => {
+    playTransient(action, 1700);
+    const player = voiceRef.current;
+    if (!player) return;
+    const entry = player.pick(group);
+    if (!entry) return; // 空组静默跳过（spec E5）
+    // 字幕独立于声音闸门：talkative 即显示，最短 2.5s（spec D5 + E4）；声音由 muted 单独拦截
+    if (cfgRef.current.talkative) showBubble(entry.name, MIN_SPEECH_MS);
+    player.play(entry, {
+      muted: cfgRef.current.muted,
+      onSubtitle: (name, ms) => {
+        // 声音路径的字幕仅在非静音时生效，且时长与真实音频对齐（> 2.5s 时覆盖上面的兜底时长）
+        if (!cfgRef.current.muted && cfgRef.current.talkative && ms > MIN_SPEECH_MS) {
+          showBubble(name, ms);
+        }
+      },
+    });
+  };
+  // 渲染期禁止写 ref（react-hooks/refs）：改在每次渲染后的 effect 中同步，供 Task 12 事件接线调用
+  const playVoiceRef = useRef<(g: VoiceGroup, a: PetAnimKey) => void>(() => {});
+  useEffect(() => {
+    playVoiceRef.current = playVoice;
+  });
 
   // ---- look 环顾：空闲 6s 触发，16 向 250ms/帧，任何状态打断（spec F2）----
   const stopLook = () => {
@@ -123,15 +196,92 @@ export function FoxbellPet() {
     }, 6000);
   };
 
+  /** 使在途的 look 调度链失效（卸载清理用）：链式续期回调按代数自检后全部 no-op（Task 8 评审遗留） */
+  const invalidateLookChain = () => {
+    genRef.current.look += 1;
+  };
+
   useEffect(() => {
     stepLoop();
     scheduleNextLook();
     return () => {
       cancelStep();
       stopLook();
+      invalidateLookChain();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ---- 指针交互（spec A1/A2/A3/§8）----
+  const lastDeltaRef = useRef({ dx: 0, dy: 0 });
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return; // 右键留给菜单（spec A6）
+    stopLook();
+    if (!unlockedRef.current) {
+      unlockedRef.current = true;
+      voiceRef.current?.unlock(); // 手势内解锁自动播放（spec E6）
+    }
+    lastDeltaRef.current = { dx: 0, dy: 0 }; // 重置采样增量，避免上一次拖拽残留误判为「移动过」
+    pet.beginDrag(e);
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const r = pet.trackDrag(e);
+    if (!r) return;
+    void pet.moveBy(r.dx - lastDeltaRef.current.dx, r.dy - lastDeltaRef.current.dy);
+    lastDeltaRef.current = { dx: r.dx, dy: r.dy };
+    // 方向动画按 150ms 采样窗增量判定（原版逐帧增量语义，spec A3 阈值同原版）
+    const dir: PetAnimKey | null =
+      r.movedY < -8 ? "jumping" : r.movedX < -6 ? "run-left" : r.movedX > 6 ? "run-right" : null;
+    const s = stateRef.current;
+    if (dir) s.drag = dir;
+    refreshAnim();
+  };
+
+  const onPointerUp = (_e: React.PointerEvent) => {
+    const moved = lastDeltaRef.current.dx !== 0 || lastDeltaRef.current.dy !== 0;
+    stateRef.current.drag = null;
+    if (!moved) playTransient("waving", 1700); // 单击：固定挥手（spec A1）
+    refreshAnim();
+    pet.releaseDrag({
+      gravity: cfgRef.current.gravity,
+      onLand: () => {
+        // 落地压扁回弹 + 补跳（spec §8）；transform 追加/移除 scaleY，基础 translateX(-50%) 不受影响
+        const el = spriteRef.current;
+        if (!el) return;
+        el.style.transition = "transform 60ms ease-out";
+        el.style.transform += " scaleY(0.55)";
+        later(() => {
+          el.style.transition = "transform 240ms cubic-bezier(.34,1.56,.64,1)";
+          el.style.transform = el.style.transform.replace(" scaleY(0.55)", "");
+          later(() => {
+            el.style.transition = "";
+            playTransient("jumping", 1500);
+          }, 260);
+        }, 60);
+      },
+    });
+    lastDeltaRef.current = { dx: 0, dy: 0 };
+  };
+
+  const onDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    playVoice("general", cfgRef.current.dblAction); // 双击说话（spec A2）
+  };
+
+  // ---- 窗口几何同步（spec §4.2）：宽度恒 340×scale；高度 = 气泡区 + 精灵 + 间隙 + max(卡片区, 菜单) ----
+  // Task 10 引入 cardsWrapRef、Task 12 引入 PetMenu（挂 menuWrapRef）后，把实测高度并入 Math.max；
+  // menuWrapRef 本任务已测量（无菜单时高度为 0，与前向公式一致）
+  const menuWrapRef = useRef<HTMLDivElement | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null); // Task 12 使用
+  useLayoutEffect(() => {
+    const baseH = px(50 + FRAME_H + 10);
+    const menuH = menuWrapRef.current?.getBoundingClientRect().height ?? 0;
+    void pet.syncSize(px(340), Math.ceil(baseH + Math.max(0, menuH)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg.scale, menu, pet.syncSize]);
+  void setMenu; // Task 12 接线菜单开合时使用（先声明以满足 tsc noUnusedLocals）
 
   const px = (v: number) => Math.round(v * cfg.scale);
   const style = frameStyle(anim, frame, lookFrame, cfg.scale);
@@ -156,7 +306,39 @@ export function FoxbellPet() {
           touchAction: "none",
           userSelect: "none",
         }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onDoubleClick={onDoubleClick}
       />
+      {subtitle && (
+        <div
+          data-testid="pet-bubble"
+          style={{
+            position: "absolute",
+            left: "50%",
+            transform: "translateX(-50%)",
+            bottom: 8,
+            maxWidth: px(320),
+            padding: `${px(6)}px ${px(12)}px`,
+            fontSize: px(13),
+            lineHeight: 1.4,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            borderRadius: px(12),
+            pointerEvents: "none",
+            background: "rgba(255,255,255,0.96)",
+            color: "#7a4a2b",
+            border: "1px solid rgba(122,74,43,0.35)",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.18)",
+            zIndex: 2,
+          }}
+        >
+          {subtitle}
+        </div>
+      )}
     </div>
   );
 }
