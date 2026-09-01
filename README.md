@@ -4,7 +4,7 @@
 
 **多 Agent 编程工具统一管理平台**
 
-一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw 的桌面应用
+一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code 的桌面应用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,7 +28,7 @@
 | 🟡 黄色 | 处理中 / 思考中 |
 | 🟢 绿色 | 空闲 / 已完成 |
 
-- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw** 会话
+- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code** 会话
 - 区分 CLI 与桌面 APP 形态（APP 仅显示状态，不支持终端跳转）
 - 显示项目名称、Git 分支、最后消息预览、CPU 占用、运行时长
 - 按优先级排序：等待中 → 运行中 → 空闲
@@ -57,7 +57,7 @@
 Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 
 - **Skill**：符号链接（Unix）/ 交接点（Windows）映射到各工具的 skill 目录
-- **MCP 服务器**：自动格式转换 —— JSON（Claude）/ TOML（Codex）/ JSONC（OpenCode）
+- **MCP 服务器**：自动格式转换 —— JSON（Claude / Kimi）/ TOML（Codex）/ JSONC（OpenCode）
 - **插件**：文件/配置混合管理
 - 首次启动自动导入已有 skill（从 `~/.claude/skills/`、`~/.agents/skills/`、`~/.config/opencode/skills/`）
 - 重新扫描按钮发现新安装的 skill
@@ -102,12 +102,20 @@ src-tauri/src/
 │   ├── codex.rs       #   Codex CLI/APP（JSONL + Hook）
 │   ├── opencode.rs    #   OpenCode（SQLite）
 │   ├── openclaw.rs    #   OpenClaw（state.json）
-│   └── mod.rs         #   AgentAdapter trait + 会话发现调度器
+│   ├── kimi.rs        #   Kimi Code（session_index + wire.jsonl）
+│   └── mod.rs         #   AgentAdapter trait + 工具注册表 + 会话发现调度器
 ├── monitor/
 │   ├── process.rs     #   进程发现（sysinfo 扫描）
-│   ├── parser.rs      #   Claude & Codex JSONL 解析器
+│   ├── claude_parser.rs   # Claude 解析器（message.role 协议）
+│   ├── codex_parser.rs    # Codex 解析器（rollout JSONL 协议）
 │   ├── opencode_parser.rs # OpenCode SQLite 解析器
 │   ├── openclaw_parser.rs # OpenClaw state.json 解析器
+│   ├── kimi_parser.rs     # Kimi Code 解析器（session_index + wire.jsonl）
+│   ├── jsonl.rs       #   JSONL 读取公共件（尾部读取、文件枚举）
+│   ├── cwd.rs         #   cwd 归一化（进程 ↔ 会话匹配公共设施）
+│   ├── git.rs         #   GitHub URL 查询（进程内缓存）
+│   ├── path_codec.rs  #   Claude projects 目录名编解码
+│   ├── project.rs     #   项目名提取与 cwd 形态校验
 │   ├── status.rs      #   纯消息状态判定
 │   └── hooks.rs       #   Hook 注册 + 事件文件读取
 ├── services/          #   业务服务（按功能域拆分）
@@ -233,6 +241,7 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 - [x] US6 — 子 Agent 级资源分配
 - [x] 资源看板重设计（双视图 + 导入 + 兼容性）
 - [x] OpenClaw 支持（第四工具）
+- [x] Kimi Code 支持（第五工具：会话监控 + MCP 管理 + `KIMI_CODE_HOME` 数据目录重定向）
 - [x] 插件管理（文件/配置混合）
 - [x] i18n（中文 + English）
 - [x] GitHub Releases 自动更新

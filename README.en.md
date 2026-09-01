@@ -4,7 +4,7 @@
 
 **Unified Management Platform for Multi-Agent Programming Tools**
 
-A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw sessions
+A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code sessions
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,7 +28,7 @@ Real-time traffic-light status board for all active AI coding tool sessions.
 | 🟡 Yellow | Processing / Thinking |
 | 🟢 Green | Idle / Finished |
 
-- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, and **OpenClaw** sessions
+- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, and **Kimi Code** sessions
 - Distinguishes CLI vs. desktop APP form (APP shows status only, no terminal jump)
 - Shows project name, git branch, last message preview, CPU usage, runtime
 - Sorts by priority: waiting → running → idle
@@ -57,7 +57,7 @@ Click a session card to instantly focus the corresponding terminal tab:
 Unified repository for Skills, MCP servers, and Plugins across tools:
 
 - **Skills**: Symlink (Unix) / Junction (Windows) mapping to each tool's skill directory
-- **MCP Servers**: Auto-format conversion — JSON (Claude) / TOML (Codex) / JSONC (OpenCode)
+- **MCP Servers**: Auto-format conversion — JSON (Claude / Kimi) / TOML (Codex) / JSONC (OpenCode)
 - **Plugins**: File/config hybrid management
 - Auto-import existing skills on first launch (from `~/.claude/skills/`, `~/.agents/skills/`, `~/.config/opencode/skills/`)
 - Rescan button for discovering newly installed skills
@@ -102,12 +102,20 @@ src-tauri/src/
 │   ├── codex.rs       #   Codex CLI/APP (JSONL + Hook)
 │   ├── opencode.rs    #   OpenCode (SQLite)
 │   ├── openclaw.rs    #   OpenClaw (state.json)
-│   └── mod.rs         #   AgentAdapter trait + session discovery scheduler
+│   ├── kimi.rs        #   Kimi Code (session_index + wire.jsonl)
+│   └── mod.rs         #   AgentAdapter trait + tool registry + session discovery scheduler
 ├── monitor/
 │   ├── process.rs     #   Process discovery (sysinfo scan)
-│   ├── parser.rs      #   Claude & Codex JSONL parser
+│   ├── claude_parser.rs   # Claude parser (message.role protocol)
+│   ├── codex_parser.rs    # Codex parser (rollout JSONL protocol)
 │   ├── opencode_parser.rs # OpenCode SQLite parser
 │   ├── openclaw_parser.rs # OpenClaw state.json parser
+│   ├── kimi_parser.rs     # Kimi Code parser (session_index + wire.jsonl)
+│   ├── jsonl.rs       #   Shared JSONL reading (tail read, file enumeration)
+│   ├── cwd.rs         #   cwd normalization (process ↔ session matching)
+│   ├── git.rs         #   GitHub URL lookup (in-process cache)
+│   ├── path_codec.rs  #   Claude projects dir-name codec
+│   ├── project.rs     #   Project name extraction + cwd shape validation
 │   ├── status.rs      #   Pure-message status determination
 │   └── hooks.rs       #   Hook registration + event file reader
 ├── services/          #   Business services split by domain
@@ -225,6 +233,7 @@ The app stores its data in `~/.mam/`:
 - [x] US6 — Sub-agent level resource allocation
 - [x] Resource dashboard redesign (dual-view + import + compatibility)
 - [x] OpenClaw support (4th tool)
+- [x] Kimi Code support (5th tool: session monitoring + MCP management + `KIMI_CODE_HOME` data directory redirection)
 - [x] Plugin management (file/config hybrid)
 - [x] i18n (Chinese + English)
 - [x] Auto-update via GitHub Releases

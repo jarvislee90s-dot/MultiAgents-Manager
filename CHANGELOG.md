@@ -1,6 +1,19 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Kimi Code 第五工具支持：会话监控、Skill/MCP 管理、`KIMI_CODE_HOME` 数据目录重定向（自动回退旧版 `~/.kimi`）
+- 资源管理增强：逐行批量启用/禁用、全类型搜索、扩展清单安装对话框与严格 semver 版本校验
+### Fixed
+- Kimi：修复轮次答完后状态灯一直卡黄（`turn.ended` 事件未映射）；`turn.ended` 现为唯一轮次结束信号，`usage.record` 不再映射以消除轮中进行中的瞬态误标
+- Kimi：会话索引根目录一致性、越界索引项跳过、非 ASCII 会话标题截断 panic 等多项修复
+- 修复 pull_request CI 因 `GITHUB_TOKEN` 缺少 `pull-requests: read` 权限而一直静默失败的问题
+- 修复 Windows 终端跳转链（每进程 Codex 独立卡片、前台聚焦与逐层回退）
+- 修复多工具上报同一会话时的重复卡片（按工具 + 会话 ID 聚合去重）
+- macOS 启用 private API 修复透明窗口显示
+### Changed
+- monitor 解析器按工具拆分（claude/codex/kimi 等），抽出 cwd/JSONL/git 公共设施
+- 适配器统一经中央工具注册表分发服务层调用
 
 ## [0.2.2] - 2026-07-08
 ### Added
