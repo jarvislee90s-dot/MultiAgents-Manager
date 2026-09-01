@@ -212,6 +212,14 @@ pnpm lint:fix     # ESLint 自动修复
 | Codex CLI | `~/.agents/skills/` | `~/.codex/config.toml` | TOML | ✅（camelCase） |
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
+| Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌（状态经 wire 解析） |
+
+### Kimi Code 数据目录重定向
+
+Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.kimi-code`，早期版本为 `~/.kimi`，应用会自动回退）。注意本应用读取的是**自身 GUI 进程**的环境变量：
+
+- macOS 从 Dock / Spotlight 启动的应用**不继承** shell 配置（`.zshrc` 等）中的 `export KIMI_CODE_HOME=...`；
+- 需要 GUI 侧生效时，可执行 `launchctl setenv KIMI_CODE_HOME <路径>` 后重启本应用，或直接为用户设置全局级环境变量。
 
 ---
 
