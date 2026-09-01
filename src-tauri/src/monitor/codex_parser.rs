@@ -292,8 +292,8 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         }
     });
 
-    // 卡片前缀统一 8 位，与 hook marker（MAM:<id 前 8 位>）保持一致
-    let codex_title = session_id[..session_id.len().min(8)].to_string();
+    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（MAM:<id 前 8 位>）保持一致
+    let codex_title = session_id.chars().take(8).collect::<String>();
     Some(Session {
         id: session_id,
         agent_type: AgentType::Codex,
@@ -312,4 +312,23 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         jump_supported: jump_supported_for(ProcessForm::Cli), // 由调用方按进程形态覆盖
         title: Some(codex_title),
     })
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    /// sessionId 含多字节字符时，标题回退按字符取前 8 位，不得 panic
+    #[test]
+    fn multibyte_session_id_title_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("rollout-2026-01-01.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"会话🔥x","cwd":"/work/demo"}}"#,
+        )
+        .unwrap();
+        let session = parse_codex_jsonl(&jsonl, ProcessForm::Cli).expect("应解析出会话");
+        assert_eq!(session.title.as_deref(), Some("会话🔥x"));
+    }
 }

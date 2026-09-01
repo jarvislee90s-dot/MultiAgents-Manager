@@ -203,8 +203,8 @@ fn parse_claude_jsonl(
     }
 
     let session_id = session_id?;
-    // 卡片前缀统一 8 位，与 hook marker（MAM:<id 前 8 位>）保持一致
-    let session_title = session_id[..session_id.len().min(8)].to_string();
+    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（MAM:<id 前 8 位>）保持一致
+    let session_title = session_id.chars().take(8).collect::<String>();
     let status = if is_compacting {
         SessionStatus::Compacting
     } else {
@@ -246,4 +246,38 @@ fn parse_claude_jsonl(
         jump_supported: jump_supported_for(process.form),
         title: Some(session_title),
     })
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    use crate::session::ProcessForm;
+
+    fn fake_process(pid: u32) -> AgentProcess {
+        AgentProcess {
+            pid,
+            cpu_usage: 0.0,
+            cwd: Some(std::path::PathBuf::from("/work/demo")),
+            form: ProcessForm::Cli,
+        }
+    }
+
+    /// sessionId 含多字节字符时，标题回退按字符取前 8 位，不得 panic
+    #[test]
+    fn multibyte_session_id_title_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &jsonl,
+            concat!(
+                r#"{"sessionId":"会话🔥x","cwd":"/work/demo","timestamp":"2026-01-01T00:00:00Z","#,
+                r#""type":"user","message":{"role":"user","content":"hi"}}"#
+            ),
+        )
+        .unwrap();
+        let session =
+            parse_claude_jsonl(&jsonl, "/work/demo", &fake_process(1)).expect("应解析出会话");
+        // "会话🔥x" 共 4 个字符，不足 8 位时整串即标题
+        assert_eq!(session.title.as_deref(), Some("会话🔥x"));
+    }
 }

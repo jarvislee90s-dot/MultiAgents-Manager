@@ -312,7 +312,7 @@ fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<
         .as_ref()
         .and_then(|s| s.title.clone())
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| entry.session_id[..entry.session_id.len().min(8)].to_string());
+        .unwrap_or_else(|| entry.session_id.chars().take(8).collect());
     let last_activity_at = last_ts
         .map(ms_to_iso)
         .or_else(|| state.and_then(|s| s.updated_at))
@@ -772,6 +772,37 @@ mod tests {
             Some("Demo Session"),
             "state.json 标题可用"
         );
+    }
+
+    #[test]
+    fn multibyte_session_id_title_falls_back_by_chars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        // 手工构造无 state.json 的会话，迫使标题回退到 id 前缀
+        let session_dir = home
+            .join("sessions")
+            .join("wd_demo_0123456789ab")
+            .join("session_会话🔥id-1234567890");
+        fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
+        fs::write(
+            session_dir.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{{\"sessionId\":\"会话🔥id-1234567890\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n",
+                session_dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, "/work/demo")])
+        });
+        assert_eq!(sessions.len(), 1);
+        // 标题按字符（非字节）取前 8 位：会 话 🔥 i d - 1 2
+        assert_eq!(sessions[0].title.as_deref(), Some("会话🔥id-12"));
     }
 
     /// MCP 映射全链路：registry → KimiAdapter(mcp_format/path) → JSON 写入 ~/.kimi-code/mcp.json
