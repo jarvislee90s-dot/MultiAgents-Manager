@@ -326,5 +326,42 @@
       "idle": "Idle",
       "finished": "Finished"
     }
+  },
+  "pet": {
+    "menu": {
+      "sound": "🔊 Sound",
+      "subtitle": "💬 Voice subtitles",
+      "physics": "🧲 Drop physics",
+      "onTop": "📌 Always on top",
+      "size": "📏 Size",
+      "dblAction": "🖱️ Double-click action",
+      "redAction": "🔴 Red light action",
+      "greenAction": "🟢 Green light action",
+      "hide": "🦊 Hide pet",
+      "about": "ℹ️ About",
+      "back": "← Back",
+      "on": "On",
+      "off": "Off",
+      "aboutText": "Foxbell Pet for MultiAgents Manager v1.0.0"
+    },
+    "scale": {
+      "small": "Small",
+      "medium": "Medium",
+      "large": "Large"
+    },
+    "action": {
+      "jumping": "Jump",
+      "waving": "Wave",
+      "failed": "Sulking",
+      "waiting": "Waiting",
+      "review": "Review",
+      "running": "Working"
+    },
+    "card": {
+      "done": "Done",
+      "waiting": "Waiting",
+      "running": "Running",
+      "more": "More"
+    }
   }
 }
