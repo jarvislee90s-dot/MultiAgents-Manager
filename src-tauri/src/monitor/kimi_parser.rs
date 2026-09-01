@@ -636,7 +636,13 @@ mod tests {
         assert_eq!(s.title.as_deref(), Some("Demo Session"));
         assert_eq!(s.last_message.as_deref(), Some("帮我写个函数"));
         assert_eq!(s.last_message_role.as_deref(), Some("user"));
-        assert!(s.jump_supported);
+        // 跳转支持随平台矩阵（Windows/macOS CLI 可跳，Linux 不支持，
+        // 与 jump_supported_for 一致；PR #27 曾在此无条件断言 true 导致 Linux CI 红）
+        if cfg!(any(target_os = "macos", windows)) {
+            assert!(s.jump_supported);
+        } else {
+            assert!(!s.jump_supported);
+        }
     }
 
     #[test]
