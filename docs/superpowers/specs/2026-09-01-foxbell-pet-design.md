@@ -28,6 +28,9 @@
 | D11 | 点击穿透 | macOS `setIgnoreCursorEvents(true, { forward: true })` + 悬停命中切换（§4.4） |
 | D12 | 跳转歧义 | 多候选时在宠物旁弹出迷你候选浮层，点选聚焦 |
 | D13 | 平台范围 | v1 仅 macOS 完整支持 |
+| D14 | 动作场景重映射 | 原蓝灯(done)→🟢绿灯、原黄灯(approval)→🔴红灯(waiting)；error 子页从菜单移除（配置键保留占位）。菜单显示三个绑定场景：双击 / 红灯 / 绿灯；运行中（黄灯）沿用原版固定工作姿态，不可绑定 |
+| D15 | 桌宠缩放 | 三档预设：小 0.75 / 中 1.0 / 大 1.25；精灵、字幕气泡、卡片等比例联动；右键菜单 + 看板设置两处入口。Codex pet 官方无缩放标准（仅固定图集契约 8×9、192×208/帧），其社区正请求 S/M/L 预设（openai/codex#21864），本设计与该提案对齐 |
+| D16 | 卡片尺寸模型 | 多卡等宽；每行单行省略号截断，卡片高度不随文字长度变化、仅随行数（标题+最多 2 行）微变；窗口尺寸按内容实测（ResizeObserver），随卡片数 / 每卡行数 / 缩放档位统一伸缩 |
 
 ## 3. 总体架构
 
@@ -60,17 +63,19 @@ Rust 侧（仅窗口管理，无业务逻辑）
 - 宠物页面（`#/pet`）加载后读 localStorage 显隐配置，自行 `show()`；保证启动时窗口不闪现。
 - "关闭"= 隐藏窗口（webview 保活，恢复即时）；应用退出随进程销毁。
 
-### 4.2 动态尺寸（D10）
+### 4.2 动态尺寸（D10/D15/D16）
 
-| 状态 | 窗口尺寸 |
-|---|---|
-| 0 卡片 | 宽 340 × 高 260（精灵 192×208 底部居中 + 底部 50px 字幕气泡区） |
-| N 卡片（1–6） | 高 = 260 + 10(间隙) + N 张卡片实际高度；宽度不变 |
-| 右键菜单打开 | 高 ≥ max(当前, 380)；菜单在窗口内渲染，关闭后还原 |
+尺寸模型 = **统一缩放乘子 + 内容实测**：
 
-- 卡片增减 → `setSize(LogicalSize)` + `setPosition`（**底部锚定**：`newY = oldY + oldH − newH`，精灵不动）。
-- 窗口全透明，伸缩不可见；用户感知与原版网页内一致。
-- 屏幕顶截断：窗口顶部不得越过 `workArea.top`，卡片层内部裁剪（原版同样最多显示 6 张 + "+N 更多"徽章）。
+**缩放**：配置 `scale` 三档（小 0.75 / 中 1.0 / 大 1.25）。所有视觉常量由单一乘子派生 `px(v) = v × scale`——精灵 192×208×s（`background-size` 与帧偏移同步 ×s）、字幕气泡字号 13×s 与内边距 ×s、卡片宽 320×s、卡片字号 12×s、卡片间隙 5×s、卡片与精灵间隙 10×s、底部气泡区 50×s。调整精灵大小时，气泡与卡片**等比例联动**，观感比例与原版 1.0 档完全一致。
+
+**卡片尺寸规则**（沿用原版）：多卡**等宽**（列宽 = 320×s）；每卡 = 加粗标题行 + 最多 2 行摘要，**每行单行省略号截断**——卡片高度不随文字长度增长，仅随行数（1–3 行文本）微变。
+
+**窗口尺寸 = 内容实测**：ResizeObserver 监听内容根元素实际渲染尺寸，高度 = 底部气泡区 + 精灵 + 间隙 + Σ 各卡实际高度，宽度 = max(精灵宽, 卡片宽) + 边距。卡片增减、每卡行数变化、缩放档位变化统一走同一条 resize 路径（防抖 50ms → `setSize` + 底部锚定 `setPosition`：`newY = oldY + oldH − newH`，精灵不动的锚点稳定）。
+
+**上限保护**：窗口总高不超过 `workArea` 高度 − 余量；超出时卡片层内部裁剪（缩放档位越大可见张数越少），"+N 更多"徽章兜底，沿用原版最多显示 6 张规则。
+
+**右键菜单**：打开时窗口临时扩展至菜单实际高度，关闭还原（窗口全透明，伸缩不可见）。
 
 ### 4.3 位置记忆
 
@@ -115,8 +120,19 @@ Rust 侧（仅窗口管理，无业务逻辑）
 
 ### 6.1 素材
 
-- 一次性搬运：`public/pet/spritesheet.webp`（2.5MB，Codex V2 图集 8 列×11 行，每帧 192×208）、`public/pet/voice/{general,approval,done,error}/*.m4a`（31 条；error 组保留占位不触发，D9）、`public/pet/manifest.json`（构建期 `scripts/copy-pet-assets.mjs` 生成：`[{index, group, name, file}]`，浏览器无法列目录必须有清单）。
+- 一次性搬运：`public/pet/spritesheet.webp`（2.5MB，Codex V2 图集 8 列×11 行，每帧 192×208）、`public/pet/voice/{general,approval,done,error}/*.m4a`（31 条）、`public/pet/manifest.json`（构建期 `scripts/copy-pet-assets.mjs` 生成：`[{index, group, name, file}]`，浏览器无法列目录必须有清单）。
 - 字幕 = 语音文件名（原版语义，中文台词原样）。
+
+**语音组 ↔ 场景映射表**（文件夹即状态分组，触发语义与灯色对齐 D2/D14）：
+
+| 素材文件夹 | 触发场景（MAM） | 灯色 | 动作配置键 |
+|---|---|---|---|
+| `general/`（11 条） | 双击形象闲聊 | — | `dblAction` |
+| `approval/`（6 条） | waiting 差分出现（原"待批准"，撒娇催促，10s 限频） | 🔴 红 | `approvalAction` |
+| `done/`（7 条） | 非绿→绿 差分（原"完成"，求夸/元气） | 🟢 绿 | `doneAction` |
+| `error/`（7 条） | **占位保留，v1 无触发场景**（原"报错"，MAM 无数据源 D9） | — | `errorAction`（占位） |
+
+运行中（黄灯）不播语音（原版绿灯同样不播）。
 
 ### 6.2 播放机制（1:1 复刻原版）
 
@@ -192,7 +208,7 @@ Rust 侧（仅窗口管理，无业务逻辑）
 | B1 | 🔊 出声开关（=自身设置 2a） | 1:1 |
 | B2 | 💬 语音字幕开关 | 1:1（D5，独立于出声） |
 | B3 | 🧲 物理坠落开关 | 1:1 |
-| B4-B7 | 双击/黄灯/红灯/蓝灯四场景动作子页，6 动作可选（跳/挥手/委屈/等待/审查/工作），进入即循环预览、点选即时切换、返回停止 | 1:1（红灯项保留占位） |
+| B4-B7 | 动作绑定子页：🖱️ 双击动作 / 🔴 红灯动作（等待操作）/ 🟢 绿灯动作（完成），6 动作可选（跳/挥手/委屈/等待/审查/工作），进入即循环预览、点选即时切换、返回停止 | 等价（D14 语义重映射：原蓝灯 done→绿灯、原黄灯 approval→红灯；error 场景无数据源，子页移除、配置键保留占位） |
 | B8 | 🦊 隐藏桌宠 | 1:1（=看板开关关闭，同一配置） |
 | B9 | ℹ️ 关于 | 1:1（显示 MAM 桌宠版本） |
 | B10 | 菜单外点击 / Esc 关闭 | 1:1 |
@@ -273,9 +289,10 @@ Rust 侧（仅窗口管理，无业务逻辑）
 | `muted` | bool | `false` | 出声（自身设置 2a） |
 | `talkative` | bool | `true` | 语音字幕 |
 | `gravity` | bool | `true` | 物理坠落（自身设置 2b） |
+| `scale` | 0.75 / 1.0 / 1.25 | `1.0` | 桌宠大小三档（小/中/大），精灵/气泡/卡片等比例联动（D15） |
 | `dblAction` | Action | `waving` | 双击动作 |
 | `approvalAction` | Action | `waiting` | 红灯（waiting）动作 |
-| `errorAction` | Action | `failed` | 占位保留（无触发场景） |
+| `errorAction` | Action | `failed` | 占位保留（不在菜单显示，无触发场景，D14） |
 | `doneAction` | Action | `jumping` | 绿灯（完成）动作 |
 
 Action 枚举：`jumping` 跳一跳 / `waving` 挥挥手 / `failed` 委屈 / `waiting` 等待 / `review` 审查 / `running` 工作。
@@ -286,8 +303,8 @@ Action 枚举：`jumping` 跳一跳 / `waving` 挥挥手 / `failed` 委屈 / `wa
 
 | 入口 | 控制 | 实现 |
 |---|---|---|
-| 看板设置页"桌宠"分区 | visible + alwaysOnTop | React 组件读写 localStorage + invoke `set_pet_visible` / `set_pet_always_on_top` |
-| 宠物右键菜单 | muted / talkative / gravity / alwaysOnTop / 四动作 / 隐藏 / 关于 | 宠物窗口内直接读写 + invoke |
+| 看板设置页"桌宠"分区 | visible + alwaysOnTop + scale（大小三档） | React 组件读写 localStorage + invoke `set_pet_visible` / `set_pet_always_on_top` |
+| 宠物右键菜单 | muted / talkative / gravity / alwaysOnTop / 大小三档 / 三动作绑定（双击·红灯·绿灯）/ 隐藏 / 关于 | 宠物窗口内直接读写 + invoke |
 | 主窗口 🦊 快捷按钮 | visible | 同设置页开关（图标灰化表示隐藏态，沿用原版） |
 | 托盘菜单"显示/隐藏桌宠" | visible | Rust 侧直接控制窗口 + emit 事件同步前端 localStorage |
 
