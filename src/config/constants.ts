@@ -8,4 +8,4 @@ export const SESSION_STATUS = {
   UNKNOWN: "unknown",
 } as const;
 export const EXTENSION_KIND = { SKILL: "skill", MCP: "mcp", PLUGIN: "plugin" } as const;
-export const SUPPORTED_TOOLS = ["claude", "codex", "opencode", "openclaw"] as const;
+export const SUPPORTED_TOOLS = ["claude", "codex", "opencode", "openclaw", "kimi"] as const;

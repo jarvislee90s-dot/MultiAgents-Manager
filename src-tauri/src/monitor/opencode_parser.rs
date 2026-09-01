@@ -1,7 +1,7 @@
 // OpenCode 会话解析器 — 基于 SQLite 数据库（opencode.db）
 // OpenCode 1.17+ 使用 SQLite 替代分散 JSON 文件，此模块查询数据库获取会话状态
 
-use super::parser::{cwd_equivalent, normalize_cwd_for_match};
+use super::cwd::{cwd_equivalent, normalize_cwd_for_match};
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};

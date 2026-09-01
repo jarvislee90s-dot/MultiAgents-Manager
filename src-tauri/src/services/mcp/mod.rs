@@ -2,10 +2,7 @@
 
 pub mod jsonc;
 
-use crate::adapter::{
-    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-    opencode::OpenCodeAdapter, AgentAdapter, McpFormat,
-};
+use crate::adapter::{adapter_by_id, McpFormat};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -42,13 +39,7 @@ pub fn remove_mcp(tool_id: &str, mcp_name: &str) -> Result<(), String> {
 }
 
 fn get_tool_mcp_info(tool_id: &str) -> Result<(McpFormat, std::path::PathBuf), String> {
-    let adapter: Box<dyn AgentAdapter> = match tool_id {
-        "claude" => Box::new(ClaudeAdapter),
-        "codex" => Box::new(CodexAdapter),
-        "opencode" => Box::new(OpenCodeAdapter),
-        "openclaw" => Box::new(OpenClawAdapter),
-        _ => return Err(format!("未知工具: {}", tool_id)),
-    };
+    let adapter = adapter_by_id(tool_id).ok_or_else(|| format!("未知工具: {}", tool_id))?;
     let path = adapter.mcp_config_path().ok_or("工具不支持 MCP 配置")?;
     Ok((adapter.mcp_format(), path))
 }

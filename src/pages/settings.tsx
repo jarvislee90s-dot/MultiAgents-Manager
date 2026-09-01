@@ -289,7 +289,7 @@ export default function SettingsPage() {
                   <label className="text-sm font-medium">
                     {t("settings.notifications.soundToolOverride")}
                   </label>
-                  {(["claude", "codex", "opencode", "openclaw"] as const).map((tool) => (
+                  {(["claude", "codex", "opencode", "openclaw", "kimi"] as const).map((tool) => (
                     <div key={tool} className="flex items-center justify-between gap-2">
                       <span className="text-muted-foreground text-xs capitalize">{tool}</span>
                       <div className="flex items-center gap-1.5">

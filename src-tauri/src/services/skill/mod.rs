@@ -1,9 +1,5 @@
 // Skill 管理服务 - 安装、启用、禁用、子 Agent 分配
 
-use crate::adapter::{
-    claude::ClaudeAdapter, codex::CodexAdapter, openclaw::OpenClawAdapter,
-    opencode::OpenCodeAdapter, AgentAdapter,
-};
 use crate::database;
 use crate::linker;
 use log::info;
@@ -106,13 +102,8 @@ pub fn assign_skill_to_subagent(
         ));
     }
 
-    let adapter: Box<dyn AgentAdapter> = match tool_id {
-        "claude" => Box::new(ClaudeAdapter),
-        "codex" => Box::new(CodexAdapter),
-        "opencode" => Box::new(OpenCodeAdapter),
-        "openclaw" => Box::new(OpenClawAdapter),
-        _ => return Err(format!("未知工具: {}", tool_id)),
-    };
+    let adapter = crate::adapter::adapter_by_id(tool_id)
+        .ok_or_else(|| format!("未知工具: {}", tool_id))?;
 
     let has_subagent_dir = adapter.subagent_dir().is_some();
 

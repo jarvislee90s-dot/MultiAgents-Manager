@@ -74,13 +74,7 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
     match kind {
         "skill" => {
             let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
-            let adapter: Box<dyn crate::adapter::AgentAdapter> = match tool_id {
-                "claude" => Box::new(crate::adapter::claude::ClaudeAdapter),
-                "codex" => Box::new(crate::adapter::codex::CodexAdapter),
-                "opencode" => Box::new(crate::adapter::opencode::OpenCodeAdapter),
-                "openclaw" => Box::new(crate::adapter::openclaw::OpenClawAdapter),
-                _ => return None,
-            };
+            let adapter = crate::adapter::adapter_by_id(tool_id)?;
             if let Some(dir) = adapter.skill_dirs().into_iter().next() {
                 let target = dir.join(name);
                 if target.exists() || target.is_symlink() {
@@ -91,13 +85,7 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
         }
         "mcp" => {
             let name = ext_id.strip_prefix("mcp-").unwrap_or(ext_id);
-            let adapter: Box<dyn crate::adapter::AgentAdapter> = match tool_id {
-                "claude" => Box::new(crate::adapter::claude::ClaudeAdapter),
-                "codex" => Box::new(crate::adapter::codex::CodexAdapter),
-                "opencode" => Box::new(crate::adapter::opencode::OpenCodeAdapter),
-                "openclaw" => Box::new(crate::adapter::openclaw::OpenClawAdapter),
-                _ => return None,
-            };
+            let adapter = crate::adapter::adapter_by_id(tool_id)?;
             if let Some(config_path) = adapter.mcp_config_path() {
                 if config_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&config_path) {

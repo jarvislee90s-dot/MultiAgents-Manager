@@ -1,7 +1,7 @@
 // OpenClaw 会话解析器 — 基于 openclaw.json 配置 + 进程信息
 // OpenClaw 使用 Node.js gateway 进程，会话信息从 ~/.openclaw/openclaw.json 的 agents 列表解析
 
-use super::parser::normalize_cwd_for_match;
+use super::cwd::normalize_cwd_for_match;
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
