@@ -51,6 +51,10 @@ pub fn run() {
                     window.open_devtools();
                 }
             }
+            // 桌宠窗口：启动即创建（隐藏），前端按配置决定显隐（spec §4.1）
+            if let Err(e) = commands::pet::create_pet_window(app.handle()) {
+                log::warn!("pet window create failed: {}", e);
+            }
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -65,6 +69,8 @@ pub fn run() {
         commands::session::focus_hwnd,
         commands::session::kill_session,
         commands::notification::show_notification_window,
+        commands::pet::set_pet_visible,
+        commands::pet::set_pet_always_on_top,
         commands::resource::list_extensions_with_assignments,
         commands::resource::scan_native_resources,
         commands::resource::import_native_resources,
