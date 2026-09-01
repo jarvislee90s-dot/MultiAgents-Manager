@@ -1,12 +1,19 @@
 // FoxbellPet — 桌宠本体（spec §7/§8/§9）。Task 8：精灵 + 帧步进 + look 环顾 + 缩放；
-// Task 9：指针交互（拖拽方向动画/松手物理/单击/双击）+ 语音字幕；Task 10 追加卡片；Task 12 追加事件接线。
+// Task 9：指针交互（拖拽方向动画/松手物理/单击/双击）+ 语音字幕；Task 10：状态卡片 + 跳转/歧义候选；Task 12 追加事件接线。
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
+import type { Session } from "@/types/session";
+import { JumpWindowCandidate } from "@/hooks/useSessionJump";
+import { useSessionsQuery } from "@/lib/query/queries/sessions";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import { loadConfig, subscribeConfig, type PetConfig } from "./petConfig";
+import { ackDone, cardsFromState, computePetStatus, type PetCard, type PetStatusState } from "./petStatus";
 import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { usePetWindow } from "./usePetWindow";
 
 export function FoxbellPet() {
+  const { t } = useTranslation();
   const [cfg, setCfg] = useState<PetConfig>(() => loadConfig());
   const cfgRef = useRef(cfg);
   // 渲染期禁止写 ref（react-hooks/refs）：改在 effect 中同步，供 Task 9 交互读取最新配置
@@ -98,11 +105,10 @@ export function FoxbellPet() {
   const [subtitle, setSubtitle] = useState<string | null>(null);
   const bubbleGen = useRef(0);
   const voiceRef = useRef<VoicePlayer | null>(null);
-  const manifestLoaded = useRef(false);
   const unlockedRef = useRef(false);
 
   // manifest 拉取一次；素材缺失/解析失败 → 语音静默降级，动作与字幕不受影响（spec §13）。
-  // StrictMode 双挂载：卸载时复位 loaded 标记并丢弃过期响应，保证重挂载后仍会重新拉取
+  // StrictMode 双挂载：卸载时丢弃过期响应，保证重挂载后仍会重新拉取
   useEffect(() => {
     let cancelled = false;
     fetch("/pet/manifest.json")
@@ -113,6 +119,8 @@ export function FoxbellPet() {
         const player = new VoicePlayer();
         player.load(entries);
         voiceRef.current = player;
+        // E6 竞态修复：手势解锁先于 manifest 就绪时，补一次 unlock，避免播放器解锁位丢失
+        if (unlockedRef.current) player.unlock();
       })
       .catch(() => {
         /* 素材缺失：语音静默降级（spec §13） */
@@ -121,7 +129,6 @@ export function FoxbellPet() {
       cancelled = true;
       voiceRef.current?.dispose();
       voiceRef.current = null;
-      manifestLoaded.current = false;
     };
   }, []);
 
@@ -157,6 +164,48 @@ export function FoxbellPet() {
   useEffect(() => {
     playVoiceRef.current = playVoice;
   });
+
+  // ---- 状态卡片（Task 10；spec §5/C1-C4）----
+  const [cards, setCards] = useState<PetCard[]>([]);
+  const [moreCount, setMoreCount] = useState(0);
+  const [candidates, setCandidates] = useState<JumpWindowCandidate[] | null>(null);
+  const statusStateRef = useRef<PetStatusState | null>(null);
+  const sessionIndexRef = useRef<Map<string, Session>>(new Map());
+  const cardsWrapRef = useRef<HTMLDivElement | null>(null);
+  const pendingAckRef = useRef(""); // 歧义跳转：点击卡片时先记待 ack 的会话 id（spec D12）
+  useEffect(() => pet.registerInteractive(cardsWrapRef.current), [pet]);
+
+  const { data } = useSessionsQuery();
+  useEffect(() => {
+    if (!data) return;
+    sessionIndexRef.current = new Map(data.sessions.map((s) => [s.id, s]));
+    const r = computePetStatus(data.sessions, statusStateRef.current, Date.now());
+    statusStateRef.current = r.state;
+    setCards(r.cards);
+    setMoreCount(r.moreCount);
+    // 事件接线在 Task 12 补充（newWaiting/newCompletion → 语音）
+  }, [data]);
+
+  /** 点击卡片跳转终端；歧义时弹候选浮层；失败静默保留卡片（spec C2/§13） */
+  const jump = async (card: PetCard) => {
+    const s = sessionIndexRef.current.get(card.id);
+    if (!s) return;
+    pendingAckRef.current = card.id; // 候选选中后按此 id ack
+    try {
+      const result = await invoke<{ type: string; windows?: JumpWindowCandidate[] }>("focus_session", {
+        pid: s.pid, sessionId: s.id, agentType: s.agentType,
+        projectName: s.projectName, lastMessage: s.lastMessage ?? undefined,
+      });
+      if (result.type === "ambiguous" && result.windows?.length) {
+        setCandidates(result.windows); // 歧义候选浮层（spec D12）
+        return;
+      }
+    } catch {
+      return; // 跳转失败：卡片保留（spec §13）
+    }
+    ackDone(statusStateRef.current ?? {}, card.id); // 点击已读即消（spec C2）
+    setCards(cardsFromState(statusStateRef.current ?? {}));
+  };
 
   // ---- look 环顾：空闲 6s 触发，16 向 250ms/帧，任何状态打断（spec F2）----
   const stopLook = () => {
@@ -278,9 +327,10 @@ export function FoxbellPet() {
   useLayoutEffect(() => {
     const baseH = px(50 + FRAME_H + 10);
     const menuH = menuWrapRef.current?.getBoundingClientRect().height ?? 0;
-    void pet.syncSize(px(340), Math.ceil(baseH + Math.max(0, menuH)));
+    const cardsH = cardsWrapRef.current?.getBoundingClientRect().height ?? 0;
+    void pet.syncSize(px(340), Math.ceil(baseH + Math.max(cardsH, menuH)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.scale, menu, pet.syncSize]);
+  }, [cfg.scale, menu, cards, moreCount, candidates, pet.syncSize]);
   void setMenu; // Task 12 接线菜单开合时使用（先声明以满足 tsc noUnusedLocals）
 
   const px = (v: number) => Math.round(v * cfg.scale);
@@ -337,6 +387,64 @@ export function FoxbellPet() {
           }}
         >
           {subtitle}
+        </div>
+      )}
+      {/* 状态卡片区（spec §5）：精灵上方居中，点击跳转终端 */}
+      <div
+        ref={cardsWrapRef}
+        data-testid="pet-cards"
+        style={{
+          position: "absolute", bottom: px(50 + FRAME_H + 10), left: "50%",
+          transform: "translateX(-50%)", display: "flex", flexDirection: "column",
+          alignItems: "center", gap: px(5), width: px(320), zIndex: 3,
+        }}
+      >
+        {cards.map((c) => (
+          <div
+            key={c.id}
+            data-testid={`pet-card-${c.id}`}
+            onClick={(e) => { e.stopPropagation(); void jump(c); }}
+            style={{
+              display: "flex", alignItems: "flex-start", gap: px(7), width: "100%",
+              boxSizing: "border-box", padding: `${px(5)}px ${px(10)}px`, borderRadius: px(10),
+              cursor: "pointer", fontSize: px(12), lineHeight: 1.45,
+              background: "rgba(255,252,248,0.97)", border: "1px solid rgba(122,74,43,0.3)",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.14)",
+            }}
+          >
+            <span style={{
+              width: px(8), height: px(8), borderRadius: "50%", flex: "none", marginTop: px(4),
+              background: c.light === "waiting" ? "#ef4444" : c.light === "running" ? "#eab308" : "#60a5fa",
+              boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(96,165,250,.25)"}`,
+            }} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 700, color: "#7a4a2b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</div>
+              {c.lines.map((l, i) => (
+                <div key={i} style={{ color: "#a07050", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l}</div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {moreCount > 0 && (
+          <div style={{ color: "#a07050", fontSize: px(11), background: "rgba(255,252,248,0.9)", borderRadius: 999, padding: `${px(2)}px ${px(8)}px` }}>
+            +{moreCount} {t("pet.card.more")}
+          </div>
+        )}
+      </div>
+      {/* 歧义候选浮层（spec D12）：选中按 hwnd 聚焦并 ack 发起跳转的卡片 */}
+      {candidates && (
+        <div data-testid="pet-jump-candidates" style={{
+          position: "absolute", bottom: px(50 + FRAME_H + 10), left: "50%", transform: "translateX(-50%)",
+          width: px(320), maxHeight: px(240), overflowY: "auto", zIndex: 5,
+          background: "rgba(30,30,34,0.96)", color: "#eee", borderRadius: px(10),
+          fontSize: px(12), padding: `${px(4)}px 0`,
+        }}>
+          {candidates.map((w) => (
+            <div key={w.hwnd} onClick={() => { void invoke("focus_hwnd", { hwnd: w.hwnd }); setCandidates(null); ackDone(statusStateRef.current ?? {}, pendingAckRef.current); setCards(cardsFromState(statusStateRef.current ?? {})); }}
+              style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}>
+              {w.title}<span style={{ color: "#a1a1aa" }}> · {w.process}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>
