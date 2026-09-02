@@ -214,7 +214,12 @@
     "linkBrokenTooltip": "Links are broken for: {{tools}}. Rescan will auto-repair.",
     "installFromManifest": "Install from manifest",
     "manifestPathLabel": "Path to mam.json in the resource directory",
-    "manifestPathPlaceholder": "D:\\resources\\my-skill\\mam.json"
+    "manifestPathPlaceholder": "D:\\resources\\my-skill\\mam.json",
+    "nameHeader": "Name",
+    "sortByName": "Sort by name",
+    "openDir": "Open folder",
+    "openToolDir": "Open {{tool}}'s {{kind}} folder",
+    "openMcpConfig": "Open {{tool}}'s MCP config file"
   },
   "mcp": {
     "nameAndCommandRequired": "Name and command are required",

@@ -79,6 +79,7 @@ pub fn run() {
         commands::pet::set_pet_visible,
         commands::pet::set_pet_always_on_top,
         commands::resource::list_extensions_with_assignments,
+        commands::resource::open_tool_resource,
         commands::resource::scan_native_resources,
         commands::resource::import_native_resources,
         commands::resource::list_tool_resources,

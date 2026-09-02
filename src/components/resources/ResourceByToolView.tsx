@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Scan, Import } from "lucide-react";
+import { Scan, Import, FolderOpen } from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { detectDuplicateSkills, cleanupDuplicateSkills } from "@/lib/api/resource";
 import type { NativeExtension, ToolResources, ImportStats } from "@/types/extension";
@@ -122,6 +122,15 @@ export function ResourceByToolView() {
     }
   };
 
+  const handleOpenDir = async (toolId: string) => {
+    try {
+      const path = await invoke<string>("open_tool_resource", { toolId, kind: "skill" });
+      toast.success(path);
+    } catch (e) {
+      toast.error(t("common.operationFailed", { error: e }));
+    }
+  };
+
   return (
     <div className="space-y-4">
       {TOOLS.map((tool) => (
@@ -131,16 +140,28 @@ export function ResourceByToolView() {
               <ToolIcon toolId={tool.id} size={18} />
               {tool.label}
             </h3>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-6 px-2 text-[10px]"
-              onClick={() => handleScan(tool.id)}
-              disabled={scanning[tool.id]}
-            >
-              <Scan className={`mr-1 h-3 w-3 ${scanning[tool.id] ? "animate-spin" : ""}`} />
-              {t("common.scan")}
-            </Button>
+            <div className="flex gap-1">
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-[10px]"
+                title={t("resources.openToolDir", { tool: tool.label, kind: "skills" })}
+                onClick={() => handleOpenDir(tool.id)}
+              >
+                <FolderOpen className="mr-1 h-3 w-3" />
+                {t("resources.openDir")}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-[10px]"
+                onClick={() => handleScan(tool.id)}
+                disabled={scanning[tool.id]}
+              >
+                <Scan className={`mr-1 h-3 w-3 ${scanning[tool.id] ? "animate-spin" : ""}`} />
+                {t("common.scan")}
+              </Button>
+            </div>
           </div>
 
           <ToolResourceList

@@ -667,6 +667,104 @@ pub fn save_mcp_config(
     Ok(())
 }
 
+/// 解析"工具 × 资源类型"对应的目标位置：skill → 工具 skills 目录、mcp → 配置文件、
+/// plugin → 工具插件目录（adapter.plugin_dirs[0]，与启用插件的 symlink 目标同源）。
+/// 返回 (路径, 是否为文件)；目录类调用方负责 create_dir_all。
+/// mcp/plugin 的路径由 adapter 内部基于真实用户目录解析
+fn resolve_tool_resource_path(tool_id: &str, kind: &str) -> Result<(std::path::PathBuf, bool), String> {
+    match kind {
+        "skill" => crate::adapter::primary_skill_dir(tool_id)
+            .map(|p| (p, false))
+            .ok_or_else(|| format!("未知工具: {}", tool_id)),
+        "mcp" => crate::services::mcp::tool_mcp_config_path(tool_id).map(|p| (p, true)),
+        "plugin" => {
+            let adapter = crate::adapter::adapter_by_id(tool_id)
+                .ok_or_else(|| format!("未知工具: {}", tool_id))?;
+            let dir = adapter
+                .plugin_dirs()
+                .first()
+                .ok_or_else(|| format!("工具 {} 不支持插件", tool_id))?
+                .clone();
+            Ok((dir, false))
+        }
+        _ => Err(format!("未知资源类型: {}", kind)),
+    }
+}
+
+/// 用系统文件管理器打开目录（Explorer / Finder / xdg-open）
+fn open_dir_in_system(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开目录失败: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开目录失败: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开目录失败: {}", e))?;
+    }
+    let _ = path;
+    Ok(())
+}
+
+/// 用系统默认程序打开文件（如 MCP 配置 JSON/TOML）
+fn open_file_in_system(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // start 的首个带引号参数会被当作窗口标题，须补空标题
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .spawn()
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+    }
+    let _ = path;
+    Ok(())
+}
+
+/// 打开某工具对应资源的位置（资源管理器表头的目录定位按钮）：
+/// skill → 工具 skills 目录（不存在则自动创建）；mcp → 配置文件（系统默认程序，
+/// 不存在则报错）；plugin → 工具插件目录（同 symlink 目标，不存在则自动创建）。
+/// 返回实际打开的路径供前端 toast 展示
+#[tauri::command]
+pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String, String> {
+    let (path, is_file) = resolve_tool_resource_path(&tool_id, &kind)?;
+    if is_file {
+        if !path.exists() {
+            return Err(format!("配置文件尚未创建: {}", path.display()));
+        }
+        open_file_in_system(&path)?;
+    } else {
+        std::fs::create_dir_all(&path).map_err(|e| format!("创建目录失败: {}", e))?;
+        open_dir_in_system(&path)?;
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod remove_target_tests {
     use super::*;
@@ -696,5 +794,40 @@ mod remove_target_tests {
         let ty = remove_skill_target(&link).unwrap();
         assert_eq!(ty, "symlink");
         assert!(!link.exists() && !link.is_symlink());
+    }
+}
+
+#[cfg(test)]
+mod resolve_tool_resource_tests {
+    use super::*;
+
+    #[test]
+    fn skill_resolves_to_tool_skills_dir() {
+        let home = dirs::home_dir().unwrap_or_default();
+        let (p, is_file) = resolve_tool_resource_path("claude", "skill").unwrap();
+        assert_eq!(p, home.join(".claude").join("skills"));
+        assert!(!is_file);
+    }
+
+    #[test]
+    fn plugin_resolves_to_tool_plugin_dir() {
+        let home = dirs::home_dir().unwrap_or_default();
+        let (p, is_file) = resolve_tool_resource_path("claude", "plugin").unwrap();
+        assert_eq!(p, home.join(".claude").join("plugins"));
+        assert!(!is_file);
+    }
+
+    #[test]
+    fn mcp_resolves_to_config_file() {
+        let home = dirs::home_dir().unwrap_or_default();
+        let (p, is_file) = resolve_tool_resource_path("claude", "mcp").unwrap();
+        assert_eq!(p, home.join(".claude.json"));
+        assert!(is_file);
+    }
+
+    #[test]
+    fn unknown_tool_or_kind_is_rejected() {
+        assert!(resolve_tool_resource_path("nope", "skill").is_err());
+        assert!(resolve_tool_resource_path("claude", "nope").is_err());
     }
 }

@@ -44,6 +44,11 @@ fn get_tool_mcp_info(tool_id: &str) -> Result<(McpFormat, std::path::PathBuf), S
     Ok((adapter.mcp_format(), path))
 }
 
+/// 工具的 MCP 配置文件路径（供"打开配置文件"等入口使用）
+pub fn tool_mcp_config_path(tool_id: &str) -> Result<std::path::PathBuf, String> {
+    get_tool_mcp_info(tool_id).map(|(_, path)| path)
+}
+
 // ===== JSON (Claude Code: ~/.claude.json mcpServers) =====
 
 fn write_mcp_json(path: &std::path::Path, name: &str, config: &McpConfig) -> Result<(), String> {

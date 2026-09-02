@@ -214,7 +214,12 @@
     "linkBrokenTooltip": "以下工具的链接已断开：{{tools}}，重新扫描可自动修复",
     "installFromManifest": "从 Manifest 安装",
     "manifestPathLabel": "资源目录中 mam.json 的路径",
-    "manifestPathPlaceholder": "D:\\resources\\my-skill\\mam.json"
+    "manifestPathPlaceholder": "D:\\resources\\my-skill\\mam.json",
+    "nameHeader": "名字",
+    "sortByName": "按名字排序",
+    "openDir": "打开目录",
+    "openToolDir": "打开 {{tool}} 的 {{kind}} 目录",
+    "openMcpConfig": "打开 {{tool}} 的 MCP 配置文件"
   },
   "mcp": {
     "nameAndCommandRequired": "请填写名称和命令",

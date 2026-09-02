@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Package, Link2, Plug, Info, Trash2, FileJson } from "lucide-react";
+import { Package, Link2, Plug, Info, Trash2, FileJson, FolderOpen, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import {
   checkSkillTargetType,
   disableSkillForTool,
@@ -35,8 +35,65 @@ const TOOLS = [
   { id: "kimi", label: "Kimi Code" },
 ];
 
+type ResourceKind = "skill" | "mcp" | "plugin";
+type SortDir = "none" | "asc" | "desc";
+
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
+}
+
+/** 表头行：左侧"名字 + 三态排序按钮"，右侧与行内工具列对齐的目录定位按钮。
+ *  MCP 打开的是配置文件（FileJson 图标），Skill/插件打开目录（FolderOpen 图标）。 */
+function SectionTableHeader(props: {
+  kind: ResourceKind;
+  sortDir: SortDir;
+  onToggleSort: () => void;
+  onOpen: (toolId: string) => void;
+}) {
+  const { kind, sortDir, onToggleSort, onOpen } = props;
+  const { t } = useTranslation();
+  const SortIco = sortDir === "asc" ? ArrowUp : sortDir === "desc" ? ArrowDown : ArrowUpDown;
+  const isFile = kind === "mcp";
+  const Ico = isFile ? FileJson : FolderOpen;
+  const tooltip = isFile
+    ? (tool: string) => t("resources.openMcpConfig", { tool })
+    : (tool: string) => t("resources.openToolDir", { tool, kind });
+  return (
+    <div className="mb-1 flex items-center justify-between rounded border bg-muted/30 px-2 py-1">
+      <div className="flex items-center gap-1">
+        <span className="text-xs font-medium">{t("resources.nameHeader")}</span>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={`h-6 px-1.5 text-[10px] ${sortDir !== "none" ? "text-foreground" : "text-muted-foreground"}`}
+          title={t("resources.sortByName")}
+          aria-label={t("resources.sortByName")}
+          onClick={onToggleSort}
+        >
+          <SortIco className="h-3 w-3" />
+          {sortDir !== "none" && <span>{sortDir === "asc" ? "↑" : "↓"}</span>}
+        </Button>
+      </div>
+      <div className="flex gap-1">
+        {/* 占位：与行内"全部启用"按钮列对齐 */}
+        <div className="h-6 w-[52px]" />
+        {TOOLS.map((tool) => (
+          <Button
+            key={tool.id}
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground h-6 px-2 text-[10px]"
+            title={tooltip(tool.label)}
+            aria-label={tooltip(tool.label)}
+            onClick={() => onOpen(tool.id)}
+          >
+            <Ico className="mr-1 h-3 w-3" />
+            {tool.label}
+          </Button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 type PendingDisable = {
@@ -66,6 +123,39 @@ export function ResourceByKindView() {
   const [manifestPath, setManifestPath] = useState("");
   const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
   const [installDlgOpen, setInstallDlgOpen] = useState(false);
+  // 名字排序：三态循环（默认扫描序 → 升序 → 降序），三种资源各自独立记忆
+  const [sortDirs, setSortDirs] = useState<Record<ResourceKind, SortDir>>({
+    skill: "none",
+    mcp: "none",
+    plugin: "none",
+  });
+
+  const toggleSort = (kind: ResourceKind) => {
+    setSortDirs((prev) => {
+      const order: SortDir[] = ["none", "asc", "desc"];
+      const next = order[(order.indexOf(prev[kind]) + 1) % order.length];
+      return { ...prev, [kind]: next };
+    });
+  };
+
+  const applySort = <T extends { name: string }>(items: T[], kind: ResourceKind): T[] => {
+    const dir = sortDirs[kind];
+    if (dir === "none") return items;
+    return [...items].sort((a, b) => {
+      const cmp = a.name.localeCompare(b.name, "zh");
+      return dir === "asc" ? cmp : -cmp;
+    });
+  };
+
+  /** 打开工具对应资源位置（skill/plugin = 目录，mcp = 配置文件） */
+  const handleOpenResource = async (kind: ResourceKind, toolId: string) => {
+    try {
+      const path = await invoke<string>("open_tool_resource", { toolId, kind });
+      toast.success(path);
+    } catch (e) {
+      toast.error(t("common.operationFailed", { error: e }));
+    }
+  };
 
   const refresh = () => qc.invalidateQueries({ queryKey: SSOT_RESOURCES_KEY });
 
@@ -78,9 +168,9 @@ export function ResourceByKindView() {
     const q = search.trim().toLowerCase();
     return [r.name, ...r.enabledTools].some((x) => x.toLowerCase().includes(q));
   };
-  const filteredSkills = resources.skills.filter(filterFn);
-  const filteredMcp = resources.mcp.filter(filterFn);
-  const filteredPlugins = resources.plugins.filter(filterFn);
+  const filteredSkills = applySort(resources.skills.filter(filterFn), "skill");
+  const filteredMcp = applySort(resources.mcp.filter(filterFn), "mcp");
+  const filteredPlugins = applySort(resources.plugins.filter(filterFn), "plugin");
 
   const handleToggleMcp = async (name: string, toolId: string, enabled: boolean) => {
     try {
@@ -290,6 +380,12 @@ export function ResourceByKindView() {
             </div>
           ) : (
             <div className="space-y-1">
+              <SectionTableHeader
+                kind="skill"
+                sortDir={sortDirs.skill}
+                onToggleSort={() => toggleSort("skill")}
+                onOpen={(toolId) => handleOpenResource("skill", toolId)}
+              />
               {filteredSkills.map((skill) => (
                 <div
                   key={skill.name}
@@ -386,6 +482,12 @@ export function ResourceByKindView() {
             </div>
           ) : (
             <div className="space-y-1">
+              <SectionTableHeader
+                kind="mcp"
+                sortDir={sortDirs.mcp}
+                onToggleSort={() => toggleSort("mcp")}
+                onOpen={(toolId) => handleOpenResource("mcp", toolId)}
+              />
               {filteredMcp.map((mcp) => (
                 <div
                   key={mcp.name}
@@ -461,6 +563,12 @@ export function ResourceByKindView() {
             </div>
           ) : (
             <div className="space-y-1">
+              <SectionTableHeader
+                kind="plugin"
+                sortDir={sortDirs.plugin}
+                onToggleSort={() => toggleSort("plugin")}
+                onOpen={(toolId) => handleOpenResource("plugin", toolId)}
+              />
               {filteredPlugins.map((plugin) => (
                 <div
                   key={plugin.name}
