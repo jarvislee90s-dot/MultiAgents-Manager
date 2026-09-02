@@ -16,7 +16,9 @@ export function LanguageToggle() {
       await invoke("update_tray_menu", {
         showText: t("tray.show", { lng: newLang }),
         quitText: t("tray.quit", { lng: newLang }),
-        petText: loadVisible() ? t("tray.petHide", { lng: newLang }) : t("tray.petShow", { lng: newLang }),
+        petText: loadVisible()
+          ? t("tray.petHide", { lng: newLang })
+          : t("tray.petShow", { lng: newLang }),
       });
     } catch (error) {
       console.error("Failed to update tray menu:", error);
