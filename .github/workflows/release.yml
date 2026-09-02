@@ -176,6 +176,9 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           body_path: ${{ env.RELEASE_BODY_PATH }}
+          # 草稿优先：云端编译产物先落 draft release，人工下载验收后再发布；
+          # 发布前 latest.json 不会被 updater 的 releases/latest 端点拾取（草稿不可见）
+          draft: true
           prerelease: false
           update: true
           files: release-assets/*
