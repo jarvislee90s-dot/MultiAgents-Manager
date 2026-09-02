@@ -100,7 +100,7 @@ export function usePetWindow() {
     samples: { t: number; x: number; y: number }[];
   } | null>(null);
   const geoRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
-  const ignoringRef = useRef(true);
+  const ignoringRef = useRef(false); // 窗口常驻交互（穿透禁用），见 onMove 处的降级说明
   const menuOpenRef = useRef(false);
   const fallRafRef = useRef(0);
   const resizeTimer = useRef<number | null>(null);
@@ -170,11 +170,11 @@ export function usePetWindow() {
           /* ignore */
         }
       }
-      await setIgnoring(true);
+      await setIgnoring(false); // 显式落定交互态（重复调用经 ref 去重为 no-op）
     })();
   }, [readGeometry, setIgnoring]);
 
-  // forward mousemove → 命中切换穿透（spec §4.4）
+  // forward mousemove → 命中检测（spec §4.4；穿透切换已按 §16 预案降级，见 onMove 内注释）
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (dragRef.current || menuOpenRef.current) {
@@ -189,7 +189,10 @@ export function usePetWindow() {
           rects.push({ x: r.x, y: r.y, w: r.width, h: r.height });
         }
         const hit = hitTest(rects, e.clientX, e.clientY);
-        void setIgnoring(!hit);
+        // Tauri 2.11 无 forward 选项，忽略态一旦生效事件流即断、无法悬停恢复（spec D11 风险命中），
+        // 按 spec §16 预案降级为窗口常驻交互（穿透禁用），待 Tauri 提供 forward API 后恢复悬停切换。
+        if (!hit) return; // 未命中（透明区）不切穿透，保持 ignore=false
+        void setIgnoring(false);
       }
     };
     window.addEventListener("mousemove", onMove);
