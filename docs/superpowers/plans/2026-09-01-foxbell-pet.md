@@ -33,7 +33,7 @@
 **Interfaces:**
 - Produces: `public/pet/manifest.json`，结构 `[{ "index": number, "group": "general"|"approval"|"done"|"error", "name": string, "file": string }]`，`file` 相对 `public/pet/voice/`（如 `"done/搞定咯.m4a"`）。Task 5 的 `parseManifest` 消费此结构。
 
-- [ ] **Step 1: 写素材校验测试（先失败）**
+- [x] **Step 1: 写素材校验测试（先失败）**
 
 ```ts
 // tests/pet/assets.test.ts — 校验 manifest 与素材文件齐全（spec §6.1）
@@ -70,12 +70,12 @@ describe("pet assets", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/assets.test.ts`
 Expected: FAIL（manifest.json 不存在）
 
-- [ ] **Step 3: 写搬运脚本**
+- [x] **Step 3: 写搬运脚本**
 
 ```js
 // scripts/copy-pet-assets.mjs — 从原插件仓库搬运素材并生成 manifest（一次性，spec §6.1）
@@ -109,17 +109,17 @@ writeFileSync(join(DEST, "manifest.json"), JSON.stringify(manifest, null, 2) + "
 console.log(`copied ${manifest.length} voices + spritesheet -> ${relative(".", DEST)}`);
 ```
 
-- [ ] **Step 4: 执行搬运并验证**
+- [x] **Step 4: 执行搬运并验证**
 
 Run: `node scripts/copy-pet-assets.mjs /Users/jarvis/Documents/DeepSeek/DeepSeek-plugins/dsh-foxbell-pet/assets`
 Expected: `copied 31 voices + spritesheet -> public/pet`
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/assets.test.ts`
 Expected: PASS（4 个用例）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/copy-pet-assets.mjs public/pet tests/pet/assets.test.ts
@@ -145,7 +145,7 @@ git commit -m "feat(pet): vendor foxbell spritesheet and voice assets with manif
   - `petSuppressPopup(): boolean`（=宠物开启且置顶，浮窗抑制判定）
   - 常量 `PET_ACTIONS: PetAction[]`、`PET_SCALES: PetScale[]`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 // tests/pet/petConfig.test.ts
@@ -202,12 +202,12 @@ describe("petConfig", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/petConfig.test.ts`
 Expected: FAIL（模块不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 桌宠配置 — localStorage 单后端，跨窗口 storage 事件同步（spec §10）
@@ -324,12 +324,12 @@ export function petSuppressPopup(): boolean {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/petConfig.test.ts`
 Expected: PASS（5 个用例）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petConfig.ts tests/pet/petConfig.test.ts
@@ -354,7 +354,7 @@ git commit -m "feat(pet): add pet config store with sanitize and cross-window sy
   - `cardsFromState(state): PetCard[]`（ack 后即时重算）
   - `ackDone(state, id): void`（绿卡点击已读即消，spec C2/C4）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 // tests/pet/petStatus.test.ts
@@ -441,12 +441,12 @@ describe("computePetStatus", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/petStatus.test.ts`
 Expected: FAIL（模块不存在）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 六态 → 桌宠灯色差分推导（纯函数，spec §5）。卡片=状态展示，事件/未读=差分。
@@ -567,12 +567,12 @@ export function ackDone(state: PetStatusState, id: string): void {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/petStatus.test.ts`
 Expected: PASS（8 个用例）。若排序/映射有偏差按测试修正实现。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petStatus.ts tests/pet/petStatus.test.ts
@@ -595,7 +595,7 @@ git commit -m "feat(pet): add light-status differential derivation with unread a
   - `frameStyle(anim, frame, lookFrame, scale): { backgroundPosition: string; backgroundSize: string }`
   - 常量 `FRAME_W=192`、`FRAME_H=208`、`SHEET_COLS=8`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 // tests/pet/petAnimations.test.ts
@@ -636,12 +636,12 @@ describe("petAnimations", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/petAnimations.test.ts`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 精灵动画 — Codex V2 图集（8 列×11 行，每帧 192×208），逐帧时长 + look 16 向（spec §7）
@@ -699,12 +699,12 @@ export function frameStyle(
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/petAnimations.test.ts`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petAnimations.ts tests/pet/petAnimations.test.ts
@@ -728,7 +728,7 @@ git commit -m "feat(pet): add sprite animation tables and scaled frame style"
   - `subtitleMs(durationSec): number`（=max(2500, duration×1000+250)）
   - `class VoicePlayer`：`load(entries)`、`pick(group): VoiceEntry | null`、`play(entry, { muted, onSubtitle }): void`、`unlock(): void`、`dispose(): void`（Audio 元素由它持有；IPC/音频不可测部分走人工验收）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 // tests/pet/petVoices.test.ts
@@ -771,12 +771,12 @@ describe("petVoices", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/petVoices.test.ts`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 语音系统 — manifest 解析、组内随机不重复、字幕时长对齐、预载播放（spec §6.2）
@@ -910,12 +910,12 @@ export class VoicePlayer {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/petVoices.test.ts`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petVoices.ts tests/pet/petVoices.test.ts
@@ -936,7 +936,7 @@ git commit -m "feat(pet): add voice manifest parser, picker and preload player"
   - 常量 `GRAVITY=1400`、`DAMP=0.86`、`MIN_VX=24`
   - `usePetWindow(): { contentRef, registerInteractive(el: HTMLElement|null): void, syncSize(w: number, h: number): Promise<void>, moveBy(dx, dy): void, beginDrag(e): void, releaseDrag(e, throwVelocity): void, setMenuOpen(b): void }`（IPC 部分手工验收；测试只覆盖纯函数。注意：窗口尺寸由调用方在 `useLayoutEffect` 里量测内容 DOM 后经 `syncSize` 驱动——不用 ResizeObserver 监听 `position:fixed; inset:0` 的根，那会量到窗口自身形成反馈回路）
 
-- [ ] **Step 1: 写失败测试（纯函数）**
+- [x] **Step 1: 写失败测试（纯函数）**
 
 ```ts
 // tests/pet/usePetWindow.test.ts
@@ -981,12 +981,12 @@ describe("usePetWindow pure helpers", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/usePetWindow.test.ts`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 宠物窗口控制 — 尺寸/位置/穿透/物理（spec §4/§8）。IPC 调用一律 try/catch 静默降级（浏览器预览兼容）。
@@ -1241,12 +1241,12 @@ export function usePetWindow() {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/usePetWindow.test.ts`
 Expected: PASS（4 个用例）
 
-- [ ] **Step 5: Lint + Commit**
+- [x] **Step 5: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -1266,7 +1266,7 @@ git commit -m "feat(pet): add window control hook with bottom-anchored sizing, h
 **Interfaces:**
 - Produces: `#[tauri::command] set_pet_visible(app, visible: bool)`、`#[tauri::command] set_pet_always_on_top(app, on_top: bool)`；窗口 label `"pet"`、URL `index.html#/pet`。Task 13/14 前端 invoke 这两个命令。
 
-- [ ] **Step 1: 实现 pet.rs**
+- [x] **Step 1: 实现 pet.rs**
 
 ```rust
 // 桌宠窗口管理 — 建窗参数与显隐/置顶（spec §4.1/§4.5）
@@ -1326,7 +1326,7 @@ pub async fn set_pet_always_on_top(app: AppHandle, on_top: bool) -> Result<(), S
 }
 ```
 
-- [ ] **Step 2: capability 文件**
+- [x] **Step 2: capability 文件**
 
 ```json
 {
@@ -1354,7 +1354,7 @@ pub async fn set_pet_always_on_top(app: AppHandle, on_top: bool) -> Result<(), S
 }
 ```
 
-- [ ] **Step 3: 接线（mod.rs / lib.rs）**
+- [x] **Step 3: 接线（mod.rs / lib.rs）**
 
 `src-tauri/src/commands/mod.rs` 增加：
 
@@ -1380,7 +1380,7 @@ pub mod pet;
 
 > 若 `log` crate 未引入，改用 `eprintln!`。
 
-- [ ] **Step 4: 编译验证**
+- [x] **Step 4: 编译验证**
 
 Run: `cd src-tauri && cargo check`
 Expected: 编译通过，零 error（warning 视现有基线）
@@ -1388,7 +1388,7 @@ Expected: 编译通过，零 error（warning 视现有基线）
 Run: `cd src-tauri && cargo clippy --all-targets -- -D warnings 2>&1 | tail -3`
 Expected: 无新增告警
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/commands/pet.rs src-tauri/src/commands/mod.rs src-tauri/src/lib.rs src-tauri/capabilities/pet.json
@@ -1409,7 +1409,7 @@ git commit -m "feat(pet): create transparent always-on-top pet window at startup
 - Consumes: Task 2 `loadConfig/subscribeConfig/loadVisible/saveVisible`、Task 4 `ANIM/frameStyle`、Task 6 `usePetWindow`。
 - Produces: `export function FoxbellPet(): JSX.Element`；`pages/pet.tsx` 默认导出页面（含显隐/置顶应用逻辑）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```tsx
 // tests/pet/foxbell-render.test.tsx — 渲染骨架 + 帧步进 + 显隐应用（窗口 API 全 mock）
@@ -1465,12 +1465,12 @@ describe("FoxbellPet 骨架", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/foxbell-render.test.tsx`
 Expected: FAIL（组件不存在）
 
-- [ ] **Step 3: 实现 FoxbellPet 骨架**
+- [x] **Step 3: 实现 FoxbellPet 骨架**
 
 ```tsx
 // FoxbellPet — 桌宠本体（spec §7/§8/§9）。Task 8：精灵 + 帧步进 + look 环顾 + 缩放；
@@ -1631,7 +1631,7 @@ export function FoxbellPet() {
 }
 ```
 
-- [ ] **Step 4: 实现页面与路由**
+- [x] **Step 4: 实现页面与路由**
 
 ```tsx
 // src/pages/pet.tsx — 宠物窗口路由页：应用显隐/置顶后渲染桌宠（spec §4.1/§4.5）
@@ -1694,12 +1694,12 @@ AppWrapper 的 effect 改为宠物窗口也不自动 show：
     if (isNotificationWindow || isPetWindow) return;
 ```
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/foxbell-render.test.tsx`
 Expected: PASS（2 个用例）
 
-- [ ] **Step 6: Lint + Commit**
+- [x] **Step 6: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -1719,7 +1719,7 @@ git commit -m "feat(pet): add pet page route with sprite rendering, idle steppin
 - Consumes: Task 6 `usePetWindow` 的 `beginDrag/trackDrag/releaseDrag/moveBy`、Task 5 `VoicePlayer`。
 - Produces: 精灵 DOM 事件 `onPointerDown/Move/Up/DoubleClick`；`playVoice(group, action)` 内部函数（Task 12 事件接线复用）；语音解锁 `voiceRef.current.unlock()`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```tsx
 // tests/pet/foxbell-interactions.test.tsx — 指针交互与语音触发（窗口 API mock）
@@ -1778,12 +1778,12 @@ describe("FoxbellPet 指针交互", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/foxbell-interactions.test.tsx`
 Expected: FAIL（事件处理器缺失）
 
-- [ ] **Step 3: 在 FoxbellPet 中实现交互（骨架代码中追加）**
+- [x] **Step 3: 在 FoxbellPet 中实现交互（骨架代码中追加）**
 
 在组件内追加（放 `playTransient` 定义之后；`subtitle` 状态与 `bubbleGen` 代数）：
 
@@ -1941,12 +1941,12 @@ Expected: FAIL（事件处理器缺失）
       )}
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/foxbell-interactions.test.tsx tests/pet/foxbell-render.test.tsx`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Lint + Commit**
+- [x] **Step 5: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -1966,7 +1966,7 @@ git commit -m "feat(pet): add drag with direction anims, fall physics, squash re
 - Consumes: Task 3 `computePetStatus/ackDone/cardsFromState`、`useSessionJump`（`@/hooks/useSessionJump`，已有）。
 - Produces: 头顶卡片区（`data-testid="pet-cards"`，每卡 `data-session-id`）、候选浮层（`data-testid="pet-jump-candidates"`）；`cards`/`moreCount` React 状态。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```tsx
 // tests/pet/foxbell-cards.test.tsx — 卡片渲染 + 点击跳转 ack（msw/invoke mock 走 tests/msw）
@@ -2014,12 +2014,12 @@ describe("FoxbellPet 卡片", () => {
 
 > `tests/msw/tauriMocks` 的 `focus_session` 当前返回 `undefined`，会让组件读 `result.type` 抛错走 catch。在 `tauriMocks.ts` 中把 `focus_session` 的返回改为 `Promise.resolve({ type: "ok" })`（与 `kill_session` 分开），只改 tests/msw 不改 src。
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/foxbell-cards.test.tsx`
 Expected: FAIL（无卡片渲染）
 
-- [ ] **Step 3: 实现（FoxbellPet 追加）**
+- [x] **Step 3: 实现（FoxbellPet 追加）**
 
 ```tsx
   // ---- 状态卡片（Task 10；spec §5/C1-C4）----
@@ -2125,12 +2125,12 @@ Expected: FAIL（无卡片渲染）
 
 （import 补充：`useSessionsQuery`、`computePetStatus/ackDone/cardsFromState/PetCard/PetStatusState`、`invoke`、`JumpWindowCandidate`、`useTranslation` 的 `t`。候选点击 ack 逻辑：记录 `pendingAckId`，聚焦后 ack 该 id——实现时把点击卡片时先记 `pendingAckRef.current = card.id`，候选选中后 `ackDone(state, pendingAckRef.current)`。）
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/foxbell-cards.test.tsx`
 Expected: PASS
 
-- [ ] **Step 5: Lint + Commit**
+- [x] **Step 5: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -2151,7 +2151,7 @@ git commit -m "feat(pet): render status cards with jump and ambiguous candidate 
 - Consumes: Task 2 `PetConfig/saveConfig/PET_ACTIONS/PET_SCALES`。
 - Produces: `PetMenu(props: { anchor: { x: number; y: number }; onClose(): void; onPreview(action: PetAction): void; onHide(): void })`；菜单项行为全部通过 `saveConfig` 生效，配置变化由 `subscribeConfig` 回流。
 
-- [ ] **Step 1: i18n 键（两份 locale 同步加，`pnpm check:i18n` 校验）**
+- [x] **Step 1: i18n 键（两份 locale 同步加，`pnpm check:i18n` 校验）**
 
 zh.json 增补（放到顶层与现有键并列）：
 
@@ -2175,7 +2175,7 @@ en.json 对应英文：`"sound": "🔊 Sound"`, `"subtitle": "💬 Voice subtitl
 
 > 注意 JSON 合并：用脚本或手工把 `pet` 键并入现有 JSON 根对象（不是整文件替换）。
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```tsx
 // tests/pet/petMenu.test.tsx
@@ -2226,12 +2226,12 @@ describe("PetMenu", () => {
 });
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/petMenu.test.tsx`
 Expected: FAIL
 
-- [ ] **Step 4: 实现 PetMenu**
+- [x] **Step 4: 实现 PetMenu**
 
 ```tsx
 // PetMenu — 右键菜单：开关 / 大小三档 / 三场景动作绑定（带实时预览）/ 隐藏 / 关于（spec §9 B/D14/D15）
@@ -2361,12 +2361,12 @@ export function PetMenu(props: {
 
 > 预览契约：`onPreview(action)` 有值=循环播该动作；传 `null`=停。父组件（Task 12 接线时在 FoxbellPet 内）实现为 `action ? playTransientLoop(action) : stopLoop()`。
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
 Run: `pnpm vitest run tests/pet/petMenu.test.tsx && pnpm check:i18n`
 Expected: PASS / 无缺键
 
-- [ ] **Step 6: Lint + Commit**
+- [x] **Step 6: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -2386,7 +2386,7 @@ git commit -m "feat(pet): add context menu with toggles, size presets and action
 - Consumes: Task 3 事件、Task 5 `playVoiceRef`、Task 9 `stateRef.task`、Task 11 `PetMenu`。
 - Produces: 完整事件流（spec §5/§6）；`onContextMenu` 挂菜单。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```tsx
 // tests/pet/foxbell-events.test.tsx — 差分事件触发语音与任务姿态（spec D1-D4）
@@ -2466,12 +2466,12 @@ describe("FoxbellPet 事件接线", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `pnpm vitest run tests/pet/foxbell-events.test.tsx`
 Expected: FAIL（事件未接线）
 
-- [ ] **Step 3: 实现（FoxbellPet 的 data effect 扩展）**
+- [x] **Step 3: 实现（FoxbellPet 的 data effect 扩展）**
 
 把 Task 10 的 `useEffect([data])` 扩展为：
 
@@ -2564,12 +2564,12 @@ Expected: FAIL（事件未接线）
 
 （PetPage 已在 Task 8 监听 `pet-visibility-changed` 回写 localStorage；主窗口入口在 Task 13 统一监听。）
 
-- [ ] **Step 4: 运行全部宠物测试确认通过**
+- [x] **Step 4: 运行全部宠物测试确认通过**
 
 Run: `pnpm vitest run tests/pet/`
 Expected: 全部 PASS
 
-- [ ] **Step 5: Lint + Commit**
+- [x] **Step 5: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -2590,7 +2590,7 @@ git commit -m "feat(pet): wire status events to voices and task postures, mount 
 - Consumes: Task 2 `petSoundTakeover/petSuppressPopup/loadVisible/saveVisible/subscribeConfig/loadConfig/saveConfig`、Task 7 command。
 - Produces: 主窗口行为变更（spec §6.3/§6.4/§10.2）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 // tests/pet/notificationTakeover.test.ts
@@ -2657,7 +2657,7 @@ describe("settings 桌宠分区", () => {
 });
 ```
 
-- [ ] **Step 2: useNotification 让渡（两处修改）**
+- [x] **Step 2: useNotification 让渡（两处修改）**
 
 `src/hooks/useNotification.ts`：
 
@@ -2715,7 +2715,7 @@ import { petSoundTakeover, petSuppressPopup } from "@/components/pet/petConfig";
 
 （`addHistory` 调用保持在判定之前，任何情况都记录。）
 
-- [ ] **Step 3: home.tsx 🦊 按钮**
+- [x] **Step 3: home.tsx 🦊 按钮**
 
 状态摘要栏（`<NotificationBell />` 旁）增加：
 
@@ -2750,7 +2750,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 （放在标签栏右侧 `<NotificationBell />` 之前。）
 
-- [ ] **Step 4: settings.tsx 桌宠分区**
+- [x] **Step 4: settings.tsx 桌宠分区**
 
 `SettingSection` 类型加 `"pet"`；`menuItems` 追加：
 
@@ -2825,12 +2825,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 i18n 增补（zh/en 同步）：`home.petToggle`: "显示/隐藏桌宠" / "Show/hide pet"；`settings.pet.title`: "桌宠" / "Pet"；`settings.pet.desc`: "Foxbell 桌宠：悬浮状态卡片与语音提醒" / "Foxbell pet: floating status cards and voice alerts"；`settings.pet.enable`: "开启桌宠" / "Enable pet"；`settings.pet.alwaysOnTop`: "悬浮在所有程序最前" / "Always on top"；`settings.pet.scale`: "大小" / "Size"；`settings.pet.enabledToast`: "桌宠已开启" / "Pet enabled"；`settings.pet.disabledToast`: "桌宠已隐藏" / "Pet hidden"。
 
-- [ ] **Step 5: 运行测试与 i18n 校验**
+- [x] **Step 5: 运行测试与 i18n 校验**
 
 Run: `pnpm vitest run tests/pet/ && pnpm check:i18n`
 Expected: 全部 PASS
 
-- [ ] **Step 6: Lint + Commit**
+- [x] **Step 6: Lint + Commit**
 
 Run: `pnpm lint`
 ```bash
@@ -2851,7 +2851,7 @@ git commit -m "feat(pet): integrate takeover of sound and popup suppression, add
 - Consumes: Task 7 窗口（`app.get_webview_window("pet")`）。
 - Produces: 托盘菜单项 id `"pet"`；切换时 Rust `emit("pet-visibility-changed", { visible })`（PetPage 已监听）。
 
-- [ ] **Step 1: system_tray.rs 修改**
+- [x] **Step 1: system_tray.rs 修改**
 
 `update_tray_menu` 签名扩展（原两参变三参，两处 `Menu::with_id_and_items` 同步）：
 
@@ -2904,11 +2904,11 @@ pub fn update_tray_menu(
 
 （文件顶部 `use tauri::Emitter;` 若未有则加；serde_json 已是依赖。）
 
-- [ ] **Step 2: lib.rs 透传文案**
+- [x] **Step 2: lib.rs 透传文案**
 
 `update_tray_menu` command 签名加 `pet_text: String` 并透传；`system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text)`。
 
-- [ ] **Step 3: home.tsx 调用处**
+- [x] **Step 3: home.tsx 调用处**
 
 `invoke("update_tray_menu", { showText: t("tray.show"), quitText: t("tray.quit") })` 改为：
 
@@ -2922,12 +2922,12 @@ pub fn update_tray_menu(
 
 （依赖 Step 3 的 `petOn` 状态；`petOn` 变化的 `useEffect` 里也重刷托盘文案。）i18n：`tray.petShow`: "显示桌宠"/"Show Pet"；`tray.petHide`: "隐藏桌宠"/"Hide Pet"。
 
-- [ ] **Step 4: Rust 验证**
+- [x] **Step 4: Rust 验证**
 
 Run: `cd src-tauri && cargo check && cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: 全绿（cargo test 基线 96+ 通过，无新增失败/告警）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/plugins/system_tray.rs src-tauri/src/lib.rs src/pages/home.tsx src/i18n/locales
@@ -2941,7 +2941,7 @@ git commit -m "feat(pet): add tray toggle with visibility event sync"
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-01-foxbell-pet-design.md`（末尾附验收记录，不改动设计内容）
 
-- [ ] **Step 1: 全量自动检查**
+- [x] **Step 1: 全量自动检查**
 
 Run: `pnpm check`（format:check + lint + check:i18n + build）
 Expected: 全绿
@@ -2952,7 +2952,7 @@ Expected: 全绿（含既有基线与新增 tests/pet/）
 Run: `cd src-tauri && cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: 全绿
 
-- [ ] **Step 2: `pnpm tauri:dev` 人工验收（spec §9 清单逐条）**
+- [x] **Step 2: `pnpm tauri:dev` 人工验收（spec §9 清单逐条）**
 
 按 spec §14 验收清单执行并记录（通过/不通过 + 备注），重点：
 
@@ -2969,7 +2969,7 @@ Expected: 全绿
 11. 位置重启记忆（含夹紧屏幕内）
 12. 托盘"显示/隐藏桌宠"切换生效且各入口状态同步
 
-- [ ] **Step 3: 记录验收结果并提交**
+- [x] **Step 3: 记录验收结果并提交**
 
 在 spec 末尾追加"## 17. 验收记录"小节，逐条记录结果。
 
