@@ -33,6 +33,8 @@
 - 显示项目名称、Git 分支、最后消息预览、CPU 占用、运行时长
 - 按优先级排序：等待中 → 运行中 → 空闲
 - 系统托盘图标反映聚合状态（🔴/🟡/🟢）
+  <img width="1384" height="1039" alt="image" src="https://github.com/user-attachments/assets/3ba29602-6c3d-46fe-957b-6b0db98a5f4c" />
+
 
 ### Foxbell 桌宠
 
@@ -73,6 +75,8 @@ Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 - **插件**：文件/配置混合管理
 - 首次启动自动导入已有 skill（从 `~/.claude/skills/`、`~/.agents/skills/`、`~/.config/opencode/skills/`）
 - 重新扫描按钮发现新安装的 skill
+<img width="1384" height="1016" alt="image" src="https://github.com/user-attachments/assets/3b2e9996-0989-4d31-98fd-b0675a00c24f" />
+
 
 ### 预设组一键切换
 
