@@ -1,6 +1,11 @@
 // 语音系统 — manifest 解析、组内随机不重复、字幕时长对齐、预载播放（spec §6.2）
 export type VoiceGroup = "general" | "approval" | "done" | "error";
-export interface VoiceEntry { index: number; group: VoiceGroup; name: string; file: string }
+export interface VoiceEntry {
+  index: number;
+  group: VoiceGroup;
+  name: string;
+  file: string;
+}
 
 const GROUPS: VoiceGroup[] = ["general", "approval", "done", "error"];
 
@@ -12,7 +17,10 @@ export function parseManifest(raw: unknown): VoiceEntry[] {
     const items = raw.filter(
       // 断言 file: string（而非 unknown）：谓词内已校验 typeof file === "string"，否则 tsc TS2322
       (v): v is { group: string; name?: unknown; file: string } =>
-        !!v && typeof v === "object" && (v as { group?: unknown }).group === g && typeof (v as { file?: unknown }).file === "string"
+        !!v &&
+        typeof v === "object" &&
+        (v as { group?: unknown }).group === g &&
+        typeof (v as { file?: unknown }).file === "string"
     );
     items.sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? ""), "zh"));
     for (const it of items) {
@@ -78,7 +86,10 @@ export class VoicePlayer {
   }
 
   /** 播放 + 字幕回调（ms 后隐藏字幕由调用方定时） */
-  play(entry: VoiceEntry, opts: { muted: boolean; onSubtitle?: (name: string, ms: number) => void }): void {
+  play(
+    entry: VoiceEntry,
+    opts: { muted: boolean; onSubtitle?: (name: string, ms: number) => void }
+  ): void {
     if (opts.muted) return;
     const el = this.els[entry.index];
     try {
@@ -86,7 +97,10 @@ export class VoicePlayer {
         for (const a of this.els) if (a !== el && !a.paused) a.pause();
         el.currentTime = 0;
         const pr = el.play();
-        if (pr && typeof pr.catch === "function") pr.catch(() => { /* blocked：等 unlock */ });
+        if (pr && typeof pr.catch === "function")
+          pr.catch(() => {
+            /* blocked：等 unlock */
+          });
         // 元数据已就绪→按时长对齐；未就绪→按最短 2.5s 兜底立即出字幕（spec E4）
         const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 0;
         opts.onSubtitle?.(entry.name, subtitleMs(dur));
@@ -94,7 +108,10 @@ export class VoicePlayer {
         if (!this.shared) this.shared = new Audio();
         this.shared.src = `/pet/voice/${encodeURI(entry.file)}`;
         const pr = this.shared.play();
-        if (pr && typeof pr.catch === "function") pr.catch(() => { /* ignore */ });
+        if (pr && typeof pr.catch === "function")
+          pr.catch(() => {
+            /* ignore */
+          });
         const s = this.shared;
         const dur = Number.isFinite(s.duration) && s.duration > 0 ? s.duration : 0;
         opts.onSubtitle?.(entry.name, subtitleMs(dur));
@@ -123,7 +140,14 @@ export class VoicePlayer {
   }
 
   dispose(): void {
-    for (const a of this.els) { try { a.pause(); a.src = ""; } catch { /* ignore */ } }
+    for (const a of this.els) {
+      try {
+        a.pause();
+        a.src = "";
+      } catch {
+        /* ignore */
+      }
+    }
     this.els = [];
     this.entries = [];
     this.lastIdx = {};

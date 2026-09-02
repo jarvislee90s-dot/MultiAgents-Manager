@@ -8,8 +8,20 @@ import type { Session } from "@/types/session";
 import { JumpWindowCandidate } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
-import { loadConfig, saveVisible, subscribeConfig, type PetAction, type PetConfig } from "./petConfig";
-import { ackDone, cardsFromState, computePetStatus, type PetCard, type PetStatusState } from "./petStatus";
+import {
+  loadConfig,
+  saveVisible,
+  subscribeConfig,
+  type PetAction,
+  type PetConfig,
+} from "./petConfig";
+import {
+  ackDone,
+  cardsFromState,
+  computePetStatus,
+  type PetCard,
+  type PetStatusState,
+} from "./petStatus";
 import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { PetMenu } from "./PetMenu";
 import { usePetWindow } from "./usePetWindow";
@@ -217,7 +229,13 @@ export function FoxbellPet() {
     const anyWaiting = r.cards.some((c) => c.light === "waiting");
     const anyDoneUnread = r.cards.some((c) => c.light === "done"); // light==="done" 蕴含 unread（已读即消卡）
     const anyRunning = r.cards.some((c) => c.light === "running");
-    stateRef.current.task = anyWaiting ? "waiting" : anyDoneUnread ? "review" : anyRunning ? "running" : null;
+    stateRef.current.task = anyWaiting
+      ? "waiting"
+      : anyDoneUnread
+        ? "review"
+        : anyRunning
+          ? "running"
+          : null;
     refreshAnim(); // 组件内稳定闭包（仅读写 ref + setState），勿入依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
@@ -228,10 +246,16 @@ export function FoxbellPet() {
     if (!s) return;
     pendingAckRef.current = card.id; // 候选选中后按此 id ack
     try {
-      const result = await invoke<{ type: string; windows?: JumpWindowCandidate[] }>("focus_session", {
-        pid: s.pid, sessionId: s.id, agentType: s.agentType,
-        projectName: s.projectName, lastMessage: s.lastMessage ?? undefined,
-      });
+      const result = await invoke<{ type: string; windows?: JumpWindowCandidate[] }>(
+        "focus_session",
+        {
+          pid: s.pid,
+          sessionId: s.id,
+          agentType: s.agentType,
+          projectName: s.projectName,
+          lastMessage: s.lastMessage ?? undefined,
+        }
+      );
       if (result.type === "ambiguous" && result.windows?.length) {
         setCandidates(result.windows); // 歧义候选浮层（spec D12）
         return;
@@ -386,7 +410,9 @@ export function FoxbellPet() {
     (action: PetAction | null) => {
       if (action) {
         stopPreview();
-        const loop = () => { playTransient(action, 1600); };
+        const loop = () => {
+          playTransient(action, 1600);
+        };
         loop(); // 进入子页立即预览一次
         previewLoopRef.current = window.setInterval(loop, 1700); // 子页循环预览（spec B4）
       } else {
@@ -405,7 +431,6 @@ export function FoxbellPet() {
     invoke("set_pet_visible", { visible: false }).catch(() => {});
     emitPetVisibility(false); // 广播给主窗口/托盘同步（spec §10.2）
   }, [emitPetVisibility, setMenuOpen, stopPreview]);
-
 
   return (
     <div ref={contentRef} style={{ position: "fixed", inset: 0, overflow: "visible" }}>
@@ -476,55 +501,130 @@ export function FoxbellPet() {
         ref={cardsWrapRef}
         data-testid="pet-cards"
         style={{
-          position: "absolute", bottom: px(50 + FRAME_H + 10), left: "50%",
-          transform: "translateX(-50%)", display: "flex", flexDirection: "column",
-          alignItems: "center", gap: px(5), width: px(320), zIndex: 3,
+          position: "absolute",
+          bottom: px(50 + FRAME_H + 10),
+          left: "50%",
+          transform: "translateX(-50%)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: px(5),
+          width: px(320),
+          zIndex: 3,
         }}
       >
         {cards.map((c) => (
           <div
             key={c.id}
             data-testid={`pet-card-${c.id}`}
-            onClick={(e) => { e.stopPropagation(); void jump(c); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              void jump(c);
+            }}
             style={{
-              display: "flex", alignItems: "flex-start", gap: px(7), width: "100%",
-              boxSizing: "border-box", padding: `${px(5)}px ${px(10)}px`, borderRadius: px(10),
-              cursor: "pointer", fontSize: px(12), lineHeight: 1.45,
-              background: "rgba(255,252,248,0.97)", border: "1px solid rgba(122,74,43,0.3)",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: px(7),
+              width: "100%",
+              boxSizing: "border-box",
+              padding: `${px(5)}px ${px(10)}px`,
+              borderRadius: px(10),
+              cursor: "pointer",
+              fontSize: px(12),
+              lineHeight: 1.45,
+              background: "rgba(255,252,248,0.97)",
+              border: "1px solid rgba(122,74,43,0.3)",
               boxShadow: "0 2px 8px rgba(0,0,0,0.14)",
             }}
           >
-            <span style={{
-              width: px(8), height: px(8), borderRadius: "50%", flex: "none", marginTop: px(4),
-              background: c.light === "waiting" ? "#ef4444" : c.light === "running" ? "#eab308" : "#60a5fa",
-              boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(96,165,250,.25)"}`,
-            }} />
+            <span
+              style={{
+                width: px(8),
+                height: px(8),
+                borderRadius: "50%",
+                flex: "none",
+                marginTop: px(4),
+                background:
+                  c.light === "waiting" ? "#ef4444" : c.light === "running" ? "#eab308" : "#60a5fa",
+                boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(96,165,250,.25)"}`,
+              }}
+            />
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 700, color: "#7a4a2b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</div>
+              <div
+                style={{
+                  fontWeight: 700,
+                  color: "#7a4a2b",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {c.title}
+              </div>
               {c.lines.map((l, i) => (
-                <div key={i} style={{ color: "#a07050", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l}</div>
+                <div
+                  key={i}
+                  style={{
+                    color: "#a07050",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {l}
+                </div>
               ))}
             </div>
           </div>
         ))}
         {moreCount > 0 && (
-          <div style={{ color: "#a07050", fontSize: px(11), background: "rgba(255,252,248,0.9)", borderRadius: 999, padding: `${px(2)}px ${px(8)}px` }}>
+          <div
+            style={{
+              color: "#a07050",
+              fontSize: px(11),
+              background: "rgba(255,252,248,0.9)",
+              borderRadius: 999,
+              padding: `${px(2)}px ${px(8)}px`,
+            }}
+          >
             +{moreCount} {t("pet.card.more")}
           </div>
         )}
       </div>
       {/* 歧义候选浮层（spec D12）：选中按 hwnd 聚焦并 ack 发起跳转的卡片 */}
       {candidates && (
-        <div ref={jumpCandidatesRef} data-testid="pet-jump-candidates" style={{
-          position: "absolute", bottom: px(50 + FRAME_H + 10), left: "50%", transform: "translateX(-50%)",
-          width: px(320), maxHeight: px(240), overflowY: "auto", zIndex: 5,
-          background: "rgba(30,30,34,0.96)", color: "#eee", borderRadius: px(10),
-          fontSize: px(12), padding: `${px(4)}px 0`,
-        }}>
+        <div
+          ref={jumpCandidatesRef}
+          data-testid="pet-jump-candidates"
+          style={{
+            position: "absolute",
+            bottom: px(50 + FRAME_H + 10),
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: px(320),
+            maxHeight: px(240),
+            overflowY: "auto",
+            zIndex: 5,
+            background: "rgba(30,30,34,0.96)",
+            color: "#eee",
+            borderRadius: px(10),
+            fontSize: px(12),
+            padding: `${px(4)}px 0`,
+          }}
+        >
           {candidates.map((w) => (
-            <div key={w.hwnd} onClick={() => { invoke("focus_hwnd", { hwnd: w.hwnd }).catch(() => {}); setCandidates(null); ackDone(statusStateRef.current ?? {}, pendingAckRef.current); setCards(cardsFromState(statusStateRef.current ?? {})); }}
-              style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}>
-              {w.title}<span style={{ color: "#a1a1aa" }}> · {w.process}</span>
+            <div
+              key={w.hwnd}
+              onClick={() => {
+                invoke("focus_hwnd", { hwnd: w.hwnd }).catch(() => {});
+                setCandidates(null);
+                ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
+                setCards(cardsFromState(statusStateRef.current ?? {}));
+              }}
+              style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}
+            >
+              {w.title}
+              <span style={{ color: "#a1a1aa" }}> · {w.process}</span>
             </div>
           ))}
         </div>
@@ -536,7 +636,11 @@ export function FoxbellPet() {
           ref={menuWrapRef}
           style={{ position: "absolute", left: menu.x, bottom: px(50) + menu.lift, zIndex: 10 }}
         >
-          <PetMenu onClose={handleMenuClose} onPreview={handleMenuPreview} onHide={handleMenuHide} />
+          <PetMenu
+            onClose={handleMenuClose}
+            onPreview={handleMenuPreview}
+            onHide={handleMenuHide}
+          />
         </div>
       )}
     </div>

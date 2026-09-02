@@ -18,12 +18,26 @@ export const CONFIG_KEY = "mam-pet-config";
 export const VISIBLE_KEY = "mam-pet-visible";
 export const POSITION_KEY = "mam-pet-position";
 
-export const PET_ACTIONS: PetAction[] = ["jumping", "waving", "failed", "waiting", "review", "running"];
+export const PET_ACTIONS: PetAction[] = [
+  "jumping",
+  "waving",
+  "failed",
+  "waiting",
+  "review",
+  "running",
+];
 export const PET_SCALES: PetScale[] = [0.75, 1, 1.25];
 
 const DEFAULT_CONFIG: PetConfig = {
-  alwaysOnTop: true, muted: false, talkative: true, gravity: true, scale: 1,
-  dblAction: "waving", approvalAction: "waiting", errorAction: "failed", doneAction: "jumping",
+  alwaysOnTop: true,
+  muted: false,
+  talkative: true,
+  gravity: true,
+  scale: 1,
+  dblAction: "waving",
+  approvalAction: "waiting",
+  errorAction: "failed",
+  doneAction: "jumping",
 };
 
 const ACTION_KEYS = ["dblAction", "approvalAction", "errorAction", "doneAction"] as const;
@@ -35,7 +49,8 @@ function sanitize(raw: unknown): PetConfig {
     const p = raw as Record<string, unknown>;
     for (const k of BOOL_KEYS) if (typeof p[k] === "boolean") out[k] = p[k] as boolean;
     if (PET_SCALES.includes(p.scale as PetScale)) out.scale = p.scale as PetScale;
-    for (const k of ACTION_KEYS) if (PET_ACTIONS.includes(p[k] as PetAction)) out[k] = p[k] as PetAction;
+    for (const k of ACTION_KEYS)
+      if (PET_ACTIONS.includes(p[k] as PetAction)) out[k] = p[k] as PetAction;
   }
   return out;
 }
@@ -83,7 +98,10 @@ export function saveVisible(v: boolean): void {
   emit();
 }
 
-export interface PetPosition { x: number; y: number }
+export interface PetPosition {
+  x: number;
+  y: number;
+}
 
 export function loadPosition(): PetPosition | null {
   try {
@@ -98,7 +116,10 @@ export function loadPosition(): PetPosition | null {
 }
 
 export function savePosition(pos: PetPosition): void {
-  localStorage.setItem(POSITION_KEY, JSON.stringify({ x: Math.round(pos.x), y: Math.round(pos.y) }));
+  localStorage.setItem(
+    POSITION_KEY,
+    JSON.stringify({ x: Math.round(pos.x), y: Math.round(pos.y) })
+  );
 }
 
 /** 完成提示音接管：宠物开启即接管（静音则整体静默，spec D3） */

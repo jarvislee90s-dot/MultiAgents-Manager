@@ -8,16 +8,37 @@ export const GRAVITY = 1400; // px/s²（spec §8，原版同值）
 export const DAMP = 0.86;
 export const MIN_VX = 24;
 
-export interface Rect { x: number; y: number; w: number; h: number }
-export interface FallState { x: number; y: number; vx: number; vy: number }
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export interface FallState {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+}
 /** 工作区（逻辑像素，排除任务栏/Dock） */
-export interface WorkArea { x: number; y: number; width: number; height: number }
+export interface WorkArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export function bottomAnchoredY(oldY: number, oldH: number, newH: number): number {
   return oldY + oldH - newH;
 }
 
-export function clampToWorkArea(x: number, y: number, w: number, h: number, work: WorkArea): { x: number; y: number } {
+export function clampToWorkArea(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  work: WorkArea
+): { x: number; y: number } {
   return {
     x: Math.min(Math.max(x, work.x), work.x + work.width - w),
     y: Math.min(Math.max(y, work.y), work.y + work.height - h),
@@ -28,7 +49,11 @@ export function hitTest(rects: Rect[], px: number, py: number): boolean {
   return rects.some((r) => px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
 }
 
-export function stepFall(s: FallState, dt: number, groundY: number): FallState & { landed: boolean; rest: boolean } {
+export function stepFall(
+  s: FallState,
+  dt: number,
+  groundY: number
+): FallState & { landed: boolean; rest: boolean } {
   // 半隐式欧拉积分：先更新速度，位移用「新速度 × dt」与「½gt²」等价需取平均速度修正，此处按恒加速度精确积分
   const vy = s.vy + GRAVITY * dt;
   let y = s.y + s.vy * dt + 0.5 * GRAVITY * dt * dt;
@@ -46,7 +71,12 @@ async function getWorkArea(): Promise<WorkArea | null> {
     if (!mon?.workArea) return null;
     const k = mon.scaleFactor || 1;
     const wa = mon.workArea; // 物理像素 → 逻辑
-    return { x: wa.position.x / k, y: wa.position.y / k, width: wa.size.width / k, height: wa.size.height / k };
+    return {
+      x: wa.position.x / k,
+      y: wa.position.y / k,
+      width: wa.size.width / k,
+      height: wa.size.height / k,
+    };
   } catch {
     return null;
   }
@@ -61,7 +91,14 @@ async function getWorkArea(): Promise<WorkArea | null> {
 export function usePetWindow() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const interactiveEls = useRef(new Set<HTMLElement>());
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; winX: number; winY: number; samples: { t: number; x: number; y: number }[] } | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    winX: number;
+    winY: number;
+    samples: { t: number; x: number; y: number }[];
+  } | null>(null);
   const geoRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
   const ignoringRef = useRef(true);
   const menuOpenRef = useRef(false);
@@ -94,26 +131,29 @@ export function usePetWindow() {
   }, []);
 
   /** 内容实测尺寸 → 窗口 setSize + 底部锚定 setPosition（防抖 50ms，spec §4.2） */
-  const syncSize = useCallback(async (w: number, h: number) => {
-    if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
-    resizeTimer.current = window.setTimeout(async () => {
-      if (w <= 0 || h <= 0) return;
-      try {
-        const win = getCurrentWindow();
-        const geo = (await readGeometry()) ?? { x: 0, y: 0, w, h };
-        if (geo.w === w && geo.h === h) return;
-        const work = await getWorkArea();
-        let nx = geo.x;
-        let ny = bottomAnchoredY(geo.y, geo.h, h); // 底部锚定：精灵不动
-        if (work) ({ x: nx, y: ny } = clampToWorkArea(nx, ny, w, h, work));
-        await win.setSize(new LogicalSize(w, h));
-        await win.setPosition(new LogicalPosition(nx, ny));
-        geoRef.current = { x: nx, y: ny, w, h };
-      } catch {
-        // ignore
-      }
-    }, 50);
-  }, [readGeometry]);
+  const syncSize = useCallback(
+    async (w: number, h: number) => {
+      if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
+      resizeTimer.current = window.setTimeout(async () => {
+        if (w <= 0 || h <= 0) return;
+        try {
+          const win = getCurrentWindow();
+          const geo = (await readGeometry()) ?? { x: 0, y: 0, w, h };
+          if (geo.w === w && geo.h === h) return;
+          const work = await getWorkArea();
+          let nx = geo.x;
+          let ny = bottomAnchoredY(geo.y, geo.h, h); // 底部锚定：精灵不动
+          if (work) ({ x: nx, y: ny } = clampToWorkArea(nx, ny, w, h, work));
+          await win.setSize(new LogicalSize(w, h));
+          await win.setPosition(new LogicalPosition(nx, ny));
+          geoRef.current = { x: nx, y: ny, w, h };
+        } catch {
+          // ignore
+        }
+      }, 50);
+    },
+    [readGeometry]
+  );
 
   // 启动：恢复记忆位置 + 初始置底
   useEffect(() => {
@@ -126,7 +166,9 @@ export function usePetWindow() {
         const target = work ? clampToWorkArea(saved.x, saved.y, geo.w, geo.h, work) : saved;
         try {
           await getCurrentWindow().setPosition(new LogicalPosition(target.x, target.y));
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       await setIgnoring(true);
     })();
@@ -161,37 +203,50 @@ export function usePetWindow() {
     };
   }, []);
 
-  const moveBy = useCallback(async (dx: number, dy: number) => {
-    const geo = (await readGeometry()) ?? geoRef.current;
-    if (!geo) return;
-    const nx = geo.x + dx;
-    const ny = geo.y + dy;
-    geoRef.current = { ...geo, x: nx, y: ny };
-    try {
-      await getCurrentWindow().setPosition(new LogicalPosition(nx, ny));
-    } catch { /* ignore */ }
-  }, [readGeometry]);
-
-  const beginDrag = useCallback((e: React.PointerEvent) => {
-    void readGeometry().then((geo) => {
+  const moveBy = useCallback(
+    async (dx: number, dy: number) => {
+      const geo = (await readGeometry()) ?? geoRef.current;
       if (!geo) return;
-      dragRef.current = {
-        pointerId: e.pointerId,
-        startX: e.clientX,
-        startY: e.clientY,
-        winX: geo.x,
-        winY: geo.y,
-        samples: [],
-      };
-    });
-  }, [readGeometry]);
+      const nx = geo.x + dx;
+      const ny = geo.y + dy;
+      geoRef.current = { ...geo, x: nx, y: ny };
+      try {
+        await getCurrentWindow().setPosition(new LogicalPosition(nx, ny));
+      } catch {
+        /* ignore */
+      }
+    },
+    [readGeometry]
+  );
+
+  const beginDrag = useCallback(
+    (e: React.PointerEvent) => {
+      void readGeometry().then((geo) => {
+        if (!geo) return;
+        dragRef.current = {
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          winX: geo.x,
+          winY: geo.y,
+          samples: [],
+        };
+      });
+    },
+    [readGeometry]
+  );
 
   const trackDrag = useCallback((e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d || d.pointerId !== e.pointerId) return null;
     d.samples.push({ t: performance.now(), x: e.clientX, y: e.clientY });
     while (d.samples.length > 0 && performance.now() - d.samples[0].t > 150) d.samples.shift();
-    return { dx: e.clientX - d.startX, dy: e.clientY - d.startY, movedX: e.clientX - (d.samples[0]?.x ?? e.clientX), movedY: e.clientY - (d.samples[0]?.y ?? e.clientY) };
+    return {
+      dx: e.clientX - d.startX,
+      dy: e.clientY - d.startY,
+      movedX: e.clientX - (d.samples[0]?.x ?? e.clientX),
+      movedY: e.clientY - (d.samples[0]?.y ?? e.clientY),
+    };
   }, []);
 
   /** 松手：gravity 开→抛物坠落（rAF 循环 moveWindow）；否则停驻记忆（spec §8） */
@@ -224,7 +279,9 @@ export function usePetWindow() {
       geoRef.current = { ...geoNow, x: r.x, y: r.y };
       try {
         await getCurrentWindow().setPosition(new LogicalPosition(r.x, r.y));
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       if (r.landed && !landedFired) {
         landedFired = true;
         opts.onLand?.();
@@ -239,16 +296,32 @@ export function usePetWindow() {
     fallRafRef.current = requestAnimationFrame(tick);
   }, []);
 
-  const setMenuOpen = useCallback((open: boolean) => {
-    menuOpenRef.current = open;
-    if (open) void setIgnoring(false);
-  }, [setIgnoring]);
+  const setMenuOpen = useCallback(
+    (open: boolean) => {
+      menuOpenRef.current = open;
+      if (open) void setIgnoring(false);
+    },
+    [setIgnoring]
+  );
 
   // 卸载清理
-  useEffect(() => () => {
-    if (fallRafRef.current) cancelAnimationFrame(fallRafRef.current);
-    if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
-  }, []);
+  useEffect(
+    () => () => {
+      if (fallRafRef.current) cancelAnimationFrame(fallRafRef.current);
+      if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
+    },
+    []
+  );
 
-  return { contentRef, registerInteractive, syncSize, beginDrag, trackDrag, releaseDrag, moveBy, setMenuOpen, readGeometry };
+  return {
+    contentRef,
+    registerInteractive,
+    syncSize,
+    beginDrag,
+    trackDrag,
+    releaseDrag,
+    moveBy,
+    setMenuOpen,
+    readGeometry,
+  };
 }

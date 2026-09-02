@@ -5,8 +5,16 @@ export const SHEET_COLS = 8;
 export const SHEET_ROWS = 11;
 
 export type PetAnimKey =
-  | "idle" | "run-right" | "run-left" | "waving" | "jumping"
-  | "failed" | "waiting" | "running" | "review" | "look";
+  | "idle"
+  | "run-right"
+  | "run-left"
+  | "waving"
+  | "jumping"
+  | "failed"
+  | "waiting"
+  | "running"
+  | "review"
+  | "look";
 
 export const ANIM: Record<Exclude<PetAnimKey, "look">, { row: number; d: number[] }> = {
   idle: { row: 0, d: [280, 110, 110, 140, 140, 320] },

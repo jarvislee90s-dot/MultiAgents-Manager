@@ -24,7 +24,9 @@ export default function PetPage() {
     }).catch(() => Promise.resolve(() => {}));
     const un2 = subscribeConfig(() => {
       const cfg = loadConfig();
-      getCurrentWindow().setAlwaysOnTop(cfg.alwaysOnTop).catch(() => {});
+      getCurrentWindow()
+        .setAlwaysOnTop(cfg.alwaysOnTop)
+        .catch(() => {});
     });
     // 兜底：窗口存活但从未显式 show（如首次开启）
     invoke("set_pet_visible", { visible: loadVisible() }).catch(() => {});
