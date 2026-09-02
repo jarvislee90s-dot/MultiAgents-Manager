@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- Release 工作流：macOS 补建 `app` bundle，修复 updater 产物（`.app.tar.gz`）从未生成、`latest.json` 缺 darwin 平台导致 macOS 自动更新不生效的问题
 
 ## [0.2.0] - 2026-09-02
 ### Added

@@ -75,7 +75,9 @@ jobs:
       - name: Build Tauri App (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: pnpm tauri build --bundles dmg --target universal-apple-darwin
+        # app bundle 必须与 dmg 一起构建：macOS updater 产物（*.app.tar.gz + .sig）
+        # 由 app bundle 派生，只打 dmg 不会生成（v0.1.0/v0.2.0 均因此缺 darwin 平台）
+        run: pnpm tauri build --bundles app,dmg --target universal-apple-darwin
 
       - name: Build Tauri App (Windows)
         if: runner.os == 'Windows'
