@@ -128,10 +128,12 @@ export function computePetStatus(
     if (!first && color === "red" && p?.prevColor !== "red") events.newWaiting.push(s.id);
   }
 
-  // 消失会话：自最后见到起保留 60s（未读绿卡不瞬间消失），不亮断联灯（spec D9/H4）
+  // 消失会话（对应终端已关闭）：仅"完成未读"绿卡自最后见到起保留 60s（完成通知
+  // 给用户留点击阅读的时间，spec D9/H4）；其余卡片立即消失，与看板行为一致（用户反馈）
   for (const [id, p] of Object.entries(prev ?? {})) {
     if (state[id]) continue;
-    if (p.vanishedAt !== null && now - p.vanishedAt > VANISH_TTL_MS) continue; // 清理
+    if (!(p.light === "done" && p.unread)) continue; // 红/黄或已读绿卡：立即清理
+    if (p.vanishedAt !== null && now - p.vanishedAt > VANISH_TTL_MS) continue;
     state[id] = { ...p, vanishedAt: p.vanishedAt ?? now };
   }
 

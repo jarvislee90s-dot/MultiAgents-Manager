@@ -51,12 +51,19 @@ describe("computePetStatus", () => {
     expect(s4.cards.find((x) => x.id === "c")?.unread).toBe(true);
   });
 
-  it("会话消失：卡片保留 60s 后清理，不亮断联灯（H4/D9）", () => {
-    const s1 = computePetStatus([mk("a", "waiting")], null, 0);
-    const s2 = computePetStatus([], s1.state, 30_000);
-    expect(s2.cards.find((x) => x.id === "a")?.light).toBe("waiting");
-    const s3 = computePetStatus([], s1.state, 90_000);
-    expect(s3.cards.find((x) => x.id === "a")).toBeUndefined();
+  it("会话消失：红/黄卡立即消失与看板一致；未读绿卡保留 60s 后清理（H4/D9+用户反馈）", () => {
+    // 红（等待操作）：终端关闭 → 下一轮立即消失，不再空挂 60s
+    const r1 = computePetStatus([mk("a", "waiting")], null, 0);
+    const r2 = computePetStatus([], r1.state, 30_000);
+    expect(r2.cards.find((x) => x.id === "a")).toBeUndefined();
+    // 未读绿卡（完成未读）：保留 60s（自最后见到起算）后清理
+    const g1 = computePetStatus([mk("c", "thinking")], null, 0);
+    const g2 = computePetStatus([mk("c", "idle")], g1.state, 1000);
+    expect(g2.cards.find((x) => x.id === "c")?.light).toBe("done");
+    const g3 = computePetStatus([], g2.state, 31_000);
+    expect(g3.cards.find((x) => x.id === "c")?.light).toBe("done");
+    const g4 = computePetStatus([], g2.state, 62_000);
+    expect(g4.cards.find((x) => x.id === "c")).toBeUndefined();
   });
 
   it("排序 waiting>running>done，最多 6 张 + moreCount（H5/C3）", () => {
