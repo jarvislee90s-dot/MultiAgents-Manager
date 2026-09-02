@@ -39,7 +39,9 @@
   },
   "tray": {
     "show": "Show Window",
-    "quit": "Quit"
+    "quit": "Quit",
+    "petShow": "Show Pet",
+    "petHide": "Hide Pet"
   },
   "updater": {
     "checkForUpdates": "Check for Updates",

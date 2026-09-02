@@ -2,16 +2,23 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     plugin::{Builder, TauriPlugin},
-    AppHandle, Manager, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 // Update tray menu with localized text
-pub fn update_tray_menu(app: &AppHandle, show_text: &str, quit_text: &str) -> Result<(), String> {
+pub fn update_tray_menu(
+    app: &AppHandle,
+    show_text: &str,
+    quit_text: &str,
+    pet_text: &str,
+) -> Result<(), String> {
     let menu = Menu::with_id_and_items(
         app,
         "system-tray",
         &[
             &MenuItem::with_id(app, "show", show_text, true, None::<&str>)
+                .map_err(|e| e.to_string())?,
+            &MenuItem::with_id(app, "pet", pet_text, true, None::<&str>)
                 .map_err(|e| e.to_string())?,
             &PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?,
             &MenuItem::with_id(app, "quit", quit_text, true, None::<&str>)
@@ -36,6 +43,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 "system-tray",
                 &[
                     &MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "pet", "Show Pet", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
                 ],
@@ -69,6 +77,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_focus();
+                        }
+                    }
+                    "pet" => {
+                        // 托盘切换桌宠显隐：以窗口实际可见性为准，并广播给前端同步（spec §10.2）
+                        if let Some(w) = app.get_webview_window("pet") {
+                            let visible = w.is_visible().unwrap_or(false);
+                            let next = !visible;
+                            if next {
+                                let _ = w.show();
+                            } else {
+                                let _ = w.hide();
+                            }
+                            let _ = app.emit(
+                                "pet-visibility-changed",
+                                serde_json::json!({ "visible": next }),
+                            );
                         }
                     }
                     "quit" => {

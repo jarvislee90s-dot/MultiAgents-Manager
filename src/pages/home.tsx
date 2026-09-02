@@ -60,6 +60,7 @@ export default function HomePage() {
         await invoke("update_tray_menu", {
           showText: t("tray.show"),
           quitText: t("tray.quit"),
+          petText: petOn ? t("tray.petHide") : t("tray.petShow"),
         });
       } catch (error) {
         console.error("Failed to initialize tray menu:", error);
@@ -80,7 +81,8 @@ export default function HomePage() {
     return () => {
       unlistenShortcutChanged.then((fn) => fn());
     };
-  }, [t]);
+    // petOn 变化时重跑本 effect，托盘桌宠文案随开关/语言刷新
+  }, [t, petOn]);
 
   return (
     <WindowFrame

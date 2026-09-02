@@ -39,7 +39,9 @@
   },
   "tray": {
     "show": "显示窗口",
-    "quit": "退出"
+    "quit": "退出",
+    "petShow": "显示桌宠",
+    "petHide": "隐藏桌宠"
   },
   "updater": {
     "checkForUpdates": "检查更新",
