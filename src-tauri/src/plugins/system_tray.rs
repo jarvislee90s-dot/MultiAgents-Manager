@@ -160,6 +160,10 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     // 创建菜单项（owned，存活于本函数作用域内）
     let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)
         .map_err(|e| e.to_string())?;
+    // 桌宠显隐项（与 update_tray_menu 同序：show → pet → separator...）；
+    // 前端轮询/语言切换会用本地化文本重建菜单，此处占位中文标签保持一致
+    let pet = MenuItem::with_id(app, "pet", "显示/隐藏桌宠", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
     let sep1 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let quit =
         MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
@@ -182,6 +186,7 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     // 收集引用
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
     items.push(&show);
+    items.push(&pet);
     items.push(&sep1);
     for item in &preset_items {
         items.push(item);
