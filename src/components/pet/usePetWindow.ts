@@ -84,7 +84,7 @@ async function getWorkArea(): Promise<WorkArea | null> {
 
 /**
  * 窗口几何与穿透控制：
- * - registerInteractive 登记交互实体（精灵/卡片/菜单）；forward mousemove 命中切换穿透（spec §4.4）
+ * - registerInteractive 登记交互实体（精灵/卡片/菜单）；窗口常驻交互（穿透已按 spec §16 预案降级，见 onMove 说明）
  * - syncSize(w, h)：调用方在 useLayoutEffect 量测内容 DOM 后驱动窗口尺寸（防抖 50ms + 底部锚定，spec §4.2）
  * - beginDrag/releaseDrag 拖拽窗口与抛掷物理
  */
