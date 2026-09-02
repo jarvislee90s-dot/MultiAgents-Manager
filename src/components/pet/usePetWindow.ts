@@ -123,7 +123,8 @@ export function usePetWindow() {
     if (ignoringRef.current === ignore) return;
     ignoringRef.current = ignore;
     try {
-      // Tauri 2 的 setIgnoreCursorEvents(ignore) 无 options 参数；mousemove 转发由 Webview 自身事件处理（spec D11 意图）
+      // Tauri 2 的 setIgnoreCursorEvents(ignore) 无 forward 选项；当前恒为 false（整窗常驻交互，穿透禁用）。
+      // true 分支仅为将来恢复穿透保留：恢复路径是 cursorPosition() 轮询 + hitTest（见 onMove 注释）。
       await getCurrentWindow().setIgnoreCursorEvents(ignore);
     } catch {
       // 浏览器预览/旧版本：跳过
@@ -174,7 +175,7 @@ export function usePetWindow() {
     })();
   }, [readGeometry, setIgnoring]);
 
-  // forward mousemove → 命中检测（spec §4.4；穿透切换已按 §16 预案降级，见 onMove 内注释）
+  // 命中检测（spec §4.4 原设计；穿透当前禁用，本监听实际为 no-op，保留作恢复路径）
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (dragRef.current || menuOpenRef.current) {
@@ -189,8 +190,11 @@ export function usePetWindow() {
           rects.push({ x: r.x, y: r.y, w: r.width, h: r.height });
         }
         const hit = hitTest(rects, e.clientX, e.clientY);
-        // Tauri 2.11 无 forward 选项，忽略态一旦生效事件流即断、无法悬停恢复（spec D11 风险命中），
-        // 按 spec §16 预案降级为窗口常驻交互（穿透禁用），待 Tauri 提供 forward API 后恢复悬停切换。
+        // Tauri 2.11 无 forward 选项：忽略态一旦生效 webview 收不到任何鼠标事件（含 mousemove），
+        // 事件流即断、无法悬停恢复——§16 的"静态划分"预案同样不可行（setIgnoreCursorEvents 是整窗开关）。
+        // 实际采用：整窗常驻交互、穿透禁用（ignoringRef 恒 false，setIgnoring(true) 不可达）。
+        // 恢复路径：@tauri-apps/api 2.11 的模块级 cursorPosition() 轮询（~30Hz）+ 下方 hitTest，
+        // 或 Tauri 提供 forward 选项后本监听即可直接生效。
         if (!hit) return; // 未命中（透明区）不切穿透，保持 ignore=false
         void setIgnoring(false);
       }

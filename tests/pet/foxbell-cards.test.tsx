@@ -38,4 +38,33 @@ describe("FoxbellPet 卡片", () => {
       expect(invoke).toHaveBeenCalledWith("focus_session", expect.objectContaining({ pid: 42, sessionId: "s1" }))
     );
   });
+
+  it("歧义候选浮层：点外/Esc 关闭且不 ack，点内不关闭（spec §11）", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "focus_session") {
+        return Promise.resolve({
+          type: "ambiguous",
+          windows: [{ hwnd: 1, title: "win-a", process: "iTerm2" }, { hwnd: 2, title: "win-b", process: "iTerm2" }],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<FoxbellPet />);
+    fireEvent.click(await screen.findByTestId("pet-card-s1"));
+    const overlay = await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 3000 });
+    // 点浮层内部：不关闭
+    fireEvent.pointerDown(overlay.firstChild as HTMLElement);
+    expect(screen.getByTestId("pet-jump-candidates")).toBeTruthy();
+    // 点外：关闭（不 ack，卡片保留）
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 3000 });
+    expect(screen.getByTestId("pet-card-s1")).toBeTruthy();
+    // 再次触发歧义 → Esc 关闭
+    fireEvent.click(screen.getByTestId("pet-card-s1"));
+    await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 3000 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 3000 });
+    expect(screen.getByTestId("pet-card-s1")).toBeTruthy();
+    vi.mocked(invoke).mockClear();
+  });
 });

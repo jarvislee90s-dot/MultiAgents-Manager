@@ -191,6 +191,24 @@ export function FoxbellPet() {
   useEffect(() => registerInteractive(cardsWrapRef.current), [registerInteractive]);
   const jumpCandidatesRef = useRef<HTMLDivElement | null>(null); // 候选浮层实测高度并入窗口几何（Task 11 评审遗留）
 
+  // 候选浮层关闭路径（spec §11）：Esc/点外关闭，不 ack、卡片保留（与 PetMenu 的 B10 同款监听）
+  useEffect(() => {
+    if (!candidates) return;
+    const onDown = (e: PointerEvent) => {
+      if (jumpCandidatesRef.current?.contains(e.target as Node)) return;
+      setCandidates(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCandidates(null);
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [candidates]);
+
   const { data } = useSessionsQuery();
   const lastApprovalAtRef = useRef(0); // approval 语音 10s 限频窗口起点（spec D3）
   const previewLoopRef = useRef<number | null>(null); // 动作绑定子页预览循环句柄（spec B4）
