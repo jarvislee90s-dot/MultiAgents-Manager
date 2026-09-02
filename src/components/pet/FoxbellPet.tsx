@@ -1,6 +1,6 @@
 // FoxbellPet — 桌宠本体（spec §7/§8/§9）。Task 8：精灵 + 帧步进 + look 环顾 + 缩放；
 // Task 9：指针交互（拖拽方向动画/松手物理/单击/双击）+ 语音字幕；Task 10：状态卡片 + 跳转/歧义候选；Task 12 追加事件接线。
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
@@ -8,11 +8,10 @@ import type { Session } from "@/types/session";
 import { JumpWindowCandidate } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
-import { loadConfig, subscribeConfig, type PetConfig } from "./petConfig";
+import { loadConfig, saveVisible, subscribeConfig, type PetAction, type PetConfig } from "./petConfig";
 import { ackDone, cardsFromState, computePetStatus, type PetCard, type PetStatusState } from "./petStatus";
 import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { PetMenu } from "./PetMenu";
-import { saveVisible } from "./petConfig";
 import { usePetWindow } from "./usePetWindow";
 
 export function FoxbellPet() {
@@ -26,7 +25,7 @@ export function FoxbellPet() {
   useEffect(() => subscribeConfig(() => setCfg(loadConfig())), []);
 
   const pet = usePetWindow();
-  const { registerInteractive, contentRef } = pet; // useCallback/useRef 稳定引用，避免依赖整个 pet 对象（每次渲染重建）
+  const { registerInteractive, contentRef, setMenuOpen } = pet; // useCallback/useRef 稳定引用，避免依赖整个 pet 对象（每次渲染重建）
   const spriteRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => registerInteractive(spriteRef.current), [registerInteractive]);
 
@@ -183,6 +182,20 @@ export function FoxbellPet() {
   const { data } = useSessionsQuery();
   const lastApprovalAtRef = useRef(0); // approval 语音 10s 限频窗口起点（spec D3）
   const previewLoopRef = useRef<number | null>(null); // 动作绑定子页预览循环句柄（spec B4）
+
+  /** 停止动作预览循环（幂等：无循环时 no-op）。仅读写 ref，依赖为空（Fix 3：稳定身份供菜单回调复用） */
+  const stopPreview = useCallback(() => {
+    if (previewLoopRef.current !== null) {
+      window.clearInterval(previewLoopRef.current);
+      previewLoopRef.current = null;
+    }
+  }, []);
+
+  /** 显隐广播给主窗口/托盘（PetPage 已监听回写 localStorage；主窗口入口 Task 13 统一监听） */
+  const emitPetVisibility = useCallback((visible: boolean) => {
+    emit("pet-visibility-changed", { visible }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!data) return;
     sessionIndexRef.current = new Map(data.sessions.map((s) => [s.id, s]));
@@ -202,7 +215,7 @@ export function FoxbellPet() {
 
     // ---- 任务姿态：waiting > review(完成未读) > running，无则回落 idle/look（spec D4）----
     const anyWaiting = r.cards.some((c) => c.light === "waiting");
-    const anyDoneUnread = r.cards.some((c) => c.light === "done" && c.unread);
+    const anyDoneUnread = r.cards.some((c) => c.light === "done"); // light==="done" 蕴含 unread（已读即消卡）
     const anyRunning = r.cards.some((c) => c.light === "running");
     stateRef.current.task = anyWaiting ? "waiting" : anyDoneUnread ? "review" : anyRunning ? "running" : null;
     refreshAnim(); // 组件内稳定闭包（仅读写 ref + setState），勿入依赖
@@ -280,6 +293,7 @@ export function FoxbellPet() {
       cancelStep();
       stopLook();
       invalidateLookChain();
+      stopPreview(); // 预览循环 interval 卸载清理（Fix 1 评审随附：previewLoopRef 泄漏）
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -345,7 +359,8 @@ export function FoxbellPet() {
   // ---- 窗口几何同步（spec §4.2）：宽度恒 340×scale；高度 = 气泡区 + 精灵 + 间隙 + max(卡片区, 菜单, 候选浮层) ----
   // Task 12 引入 PetMenu（挂 menuWrapRef）；候选浮层挂 jumpCandidatesRef 一并实测并入 Math.max（Task 11 评审遗留）
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null); // 右键菜单位置（spec A6）
+  // 右键菜单位置（spec A6）：x=夹紧后的光标横坐标；lift=光标高于精灵底边的距离（菜单向上展开的锚距）
+  const [menu, setMenu] = useState<{ x: number; lift: number } | null>(null);
   useLayoutEffect(() => {
     const baseH = px(50 + FRAME_H + 10);
     const menuH = menuWrapRef.current?.getBoundingClientRect().height ?? 0;
@@ -355,21 +370,42 @@ export function FoxbellPet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg.scale, menu, cards, moreCount, candidates, pet.syncSize]);
 
-  /** 停止动作预览循环（幂等：无循环时 no-op） */
-  const stopPreview = () => {
-    if (previewLoopRef.current !== null) {
-      window.clearInterval(previewLoopRef.current);
-      previewLoopRef.current = null;
-    }
-  };
-
-  /** 显隐广播给主窗口/托盘（PetPage 已监听回写 localStorage；主窗口入口 Task 13 统一监听） */
-  const emitPetVisibility = (visible: boolean) => {
-    emit("pet-visibility-changed", { visible }).catch(() => {});
-  };
-
   const px = (v: number) => Math.round(v * cfg.scale);
   const style = frameStyle(anim, frame, lookFrame, cfg.scale);
+
+  // ---- 菜单回调（Fix 3：useCallback 稳定身份，避免 PetMenu 预览 effect 每次渲染重触发 → interval 抖动）----
+  /** 关闭菜单（外点/Esc/关于行）：停预览 + 恢复穿透 */
+  const handleMenuClose = useCallback(() => {
+    setMenu(null);
+    setMenuOpen(false);
+    stopPreview();
+  }, [setMenuOpen, stopPreview]);
+
+  /** 动作子页预览循环（spec B4）：进入子页立即播一次，~1700ms 循环；返回主菜单（null）即停 */
+  const handleMenuPreview = useCallback(
+    (action: PetAction | null) => {
+      if (action) {
+        stopPreview();
+        const loop = () => { playTransient(action, 1600); };
+        loop(); // 进入子页立即预览一次
+        previewLoopRef.current = window.setInterval(loop, 1700); // 子页循环预览（spec B4）
+      } else {
+        stopPreview();
+      }
+    },
+    [playTransient, stopPreview]
+  );
+
+  /** 隐藏桌宠（spec §10/§10.2）：关菜单 + 本地持久化 + invoke + 广播 */
+  const handleMenuHide = useCallback(() => {
+    setMenu(null);
+    setMenuOpen(false);
+    stopPreview();
+    saveVisible(false); // 本地状态 + 订阅同步（spec §10）
+    invoke("set_pet_visible", { visible: false }).catch(() => {});
+    emitPetVisibility(false); // 广播给主窗口/托盘同步（spec §10.2）
+  }, [emitPetVisibility, setMenuOpen, stopPreview]);
+
 
   return (
     <div ref={contentRef} style={{ position: "fixed", inset: 0, overflow: "visible" }}>
@@ -398,8 +434,14 @@ export function FoxbellPet() {
         onDoubleClick={onDoubleClick}
         onContextMenu={(e) => {
           e.preventDefault(); // 屏蔽系统菜单（spec A6）
-          setMenu({ x: e.clientX, y: e.clientY });
-          pet.setMenuOpen(true); // 菜单打开期间关闭穿透
+          // Fix 1（向上展开 + A6 夹紧）：记录光标相对精灵底边的高度 lift——精灵 bottom 锚定，
+          // 窗口向上生长后 lift 不变，菜单 BOTTOM = px(50)+lift 恒贴光标；x 左移夹紧保证菜单不出窗
+          const spriteBottom = spriteRef.current?.getBoundingClientRect().bottom ?? 0;
+          setMenu({
+            x: Math.min(e.clientX, px(340) - 180), // minWidth≈170，窗宽 px(340)
+            lift: Math.max(0, spriteBottom - e.clientY),
+          });
+          setMenuOpen(true); // 菜单打开期间关闭穿透
         }}
       />
       {subtitle && (
@@ -487,32 +529,14 @@ export function FoxbellPet() {
           ))}
         </div>
       )}
-      {/* 右键菜单（spec §9/B10）：position: fixed 按光标锚定；包裹层仅作高度实测用 */}
+      {/* 右键菜单（spec §9/B10）：Fix 1 — 包裹层 absolute 参与布局，menuWrapRef 才能实测到真实高度；
+          菜单 BOTTOM 锚在光标处向上展开，窗口底部锚定向上生长后整份菜单可见（spec §4.2） */}
       {menu && (
-        <div ref={menuWrapRef}>
-          <PetMenu
-            anchor={menu}
-            onClose={() => { setMenu(null); pet.setMenuOpen(false); stopPreview(); }}
-            onPreview={(action) => {
-              // PetMenu 返回主菜单时以 onPreview(null) 通知停止预览（运行时契约含 null）
-              if (action) {
-                stopPreview();
-                const loop = () => { playTransient(action, 1600); };
-                loop(); // 进入子页立即预览一次
-                previewLoopRef.current = window.setInterval(loop, 1700); // 子页循环预览（spec B4）
-              } else {
-                stopPreview();
-              }
-            }}
-            onHide={() => {
-              setMenu(null);
-              pet.setMenuOpen(false);
-              stopPreview();
-              saveVisible(false); // 本地状态 + 订阅同步（spec §10）
-              invoke("set_pet_visible", { visible: false }).catch(() => {});
-              emitPetVisibility(false); // 广播给主窗口/托盘同步（spec §10.2）
-            }}
-          />
+        <div
+          ref={menuWrapRef}
+          style={{ position: "absolute", left: menu.x, bottom: px(50) + menu.lift, zIndex: 10 }}
+        >
+          <PetMenu onClose={handleMenuClose} onPreview={handleMenuPreview} onHide={handleMenuHide} />
         </div>
       )}
     </div>

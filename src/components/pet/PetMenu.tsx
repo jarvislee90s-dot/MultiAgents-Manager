@@ -1,5 +1,7 @@
 // PetMenu — 右键菜单：开关 / 大小三档 / 三场景动作绑定（带实时预览）/ 隐藏 / 关于（spec §9 B/D14/D15）
 // D14：菜单只有三个动作绑定场景（双击/红灯/绿灯），errorAction 保留在配置但不进菜单
+// Fix 1：根节点改为 in-flow（static）——外层包裹 div（FoxbellPet menuWrapRef）absolute 定位并
+// 以 BOTTOM 对齐光标向上展开；本组件只负责内容高度，定位职责全部上移到包裹层。
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -21,9 +23,8 @@ const ACTION_PAGE: Record<"Dbl" | "Red" | "Green", keyof PetConfig> = {
 };
 
 export function PetMenu(props: {
-  anchor: { x: number; y: number };
   onClose(): void;
-  onPreview(action: PetAction): void;
+  onPreview(action: PetAction | null): void;
   onHide(): void;
 }) {
   const { t } = useTranslation();
@@ -32,13 +33,15 @@ export function PetMenu(props: {
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => subscribeConfig(() => setCfg(loadConfig())), []);
 
-  // 菜单外点击 / Esc 关闭（spec B10）
+  // 菜单外点击 / Esc 关闭（spec B10）。pointerdown 捕获阶段监听：点精灵（菜单外）同样命中
+  // contains 判定 → 关闭；精灵自身的 onContextMenu 可在随后重新打开
+  const { onClose, onPreview } = props;
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) props.onClose();
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
+      if (e.key === "Escape") onClose();
     };
     window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey);
@@ -46,14 +49,16 @@ export function PetMenu(props: {
       window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("keydown", onKey);
     };
-  }, [props]);
+  }, [onClose]);
 
   // 动作子页实时预览：进入/切选项都触发，返回主菜单停（父组件以 onPreview(null) 停，Task 12 接线）
+  // Fix 3：依赖收窄到 [page, cfg, onPreview]——配合父组件的 useCallback 稳定身份，
+  // 消除「每次渲染新 props 对象 → effect 重触发 → stop/setInterval 抖动」的循环
   useEffect(() => {
     if (page && page in ACTION_PAGE)
-      props.onPreview(cfg[ACTION_PAGE[page as keyof typeof ACTION_PAGE]] as PetAction);
-    else if (page === null) props.onPreview(null as unknown as PetAction);
-  }, [page, cfg, props]);
+      onPreview(cfg[ACTION_PAGE[page as keyof typeof ACTION_PAGE]] as PetAction);
+    else if (page === null) onPreview(null);
+  }, [page, cfg, onPreview]);
 
   const rowStyle: React.CSSProperties = {
     display: "flex",
@@ -93,9 +98,6 @@ export function PetMenu(props: {
       ref={ref}
       data-testid="pet-menu"
       style={{
-        position: "fixed",
-        left: props.anchor.x,
-        top: props.anchor.y,
         minWidth: 170,
         background: "rgba(30,30,34,0.96)",
         color: "#eee",

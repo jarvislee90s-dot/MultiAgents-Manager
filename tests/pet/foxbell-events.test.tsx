@@ -65,22 +65,23 @@ describe("FoxbellPet 事件接线", () => {
   });
 
   it("waiting 持续：10s 内再次出现不重复播（spec D3 限频）", async () => {
-    data = { sessions: [mk("a", "idle")], totalCount: 1, waitingCount: 0 };
+    // Fix 2：序列改为 waiting → processing → waiting（无 completion 腿，避免完成气泡顶掉首个审批气泡
+    // 造成「任意 2500ms 气泡都会过期」的假阳性）。判别窗口推导：
+    //   t≈50 首次 waiting → 气泡1 至 ≈2550；t≈2100 二次 waiting（10s 闸门内）；
+    //   断言点 t≈3100 ∈ (2550, 4600)：无闸门时气泡2（≈2100 起、至 ≈4600）仍在 → 测试失败；有闸门 → 通过
+    data = { sessions: [mk("a", "processing")], totalCount: 1, waitingCount: 0 };
     const { rerender } = render(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); }); // 首帧 + manifest
     data = { sessions: [mk("a", "waiting")], totalCount: 1, waitingCount: 1 };
     rerender(<FoxbellPet />);
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
-    const first = screen.queryByTestId("pet-bubble");
-    expect(first?.textContent).toBe("快批快批");
-    data = { sessions: [mk("a", "idle")], totalCount: 1, waitingCount: 0 };
+    expect(screen.queryByTestId("pet-bubble")?.textContent).toBe("快批快批");
+    data = { sessions: [mk("a", "processing")], totalCount: 1, waitingCount: 0 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // t≈2100，仍处 10s 限频窗
     data = { sessions: [mk("a", "waiting")], totalCount: 1, waitingCount: 1 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
-    // 2s < 10s 限频窗口：无新字幕
-    await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); // t≈3100：气泡1 已过期、气泡2（若有）未过期
     expect(screen.queryByTestId("pet-bubble")).toBeNull();
   });
 });
