@@ -34,6 +34,18 @@ Real-time traffic-light status board for all active AI coding tool sessions.
 - Sorts by priority: waiting → running → idle
 - System tray icon reflects aggregate status (🔴/🟡/🟢)
 
+### Foxbell Desktop Pet
+
+A talking fox companion that lives in the corner of your screen and watches every session in real time.
+
+![Foxbell Desktop Pet](docs/images/foxbell-pet.png)
+
+- Status cards above the pet mirror the dashboard: 🔴 waiting / 🟡 running / 🟢 finished — click a card to jump to its terminal
+- Voice alerts (31 built-in clips): playful nudges on waiting approvals, cheers on completion, small talk on double-click, subtitles synced to audio length
+- Drag physics: pinned-to-cursor dragging, gravity fall on release, throw inertia, squash-and-bounce landing (optional)
+- Single-click waves, double-click talks, right-click menu: sound / subtitles / physics / always-on-top / size / per-scene action binding / hide
+- Dashboard integration: takes over completion chimes, suppresses toast popups while always-on-top; toggle from the dashboard 🦊 button, system tray, or settings
+
 ### Desktop Notifications & Sound Alerts
 
 - Color-change-based notifications (red↔yellow↔green) with deduplication
@@ -234,6 +246,7 @@ The app stores its data in `~/.mam/`:
 - [x] Resource dashboard redesign (dual-view + import + compatibility)
 - [x] OpenClaw support (4th tool)
 - [x] Kimi Code support (5th tool: session monitoring + MCP management + `KIMI_CODE_HOME` data directory redirection)
+- [x] Foxbell desktop pet (status cards + voice alerts + drag physics)
 - [x] Plugin management (file/config hybrid)
 - [x] i18n (Chinese + English)
 - [x] Auto-update via GitHub Releases
