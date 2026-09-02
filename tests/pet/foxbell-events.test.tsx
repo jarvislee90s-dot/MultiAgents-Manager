@@ -36,6 +36,8 @@ describe("FoxbellPet 事件接线", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    // 语音线闸门（问题 6）：桌宠可见时 playVoice 才生效，事件/双击语音用例需显式开启
+    localStorage.setItem("mam-pet-visible", "1");
     // tests/setup.ts 的 beforeAll(server.listen) 运行时机晚于模块级 stubGlobal，
     // 会用 MSW 拦截器重写 globalThis.fetch —— 每个用例前重打桩保证 fetchMock 生效（Task 9 同款处理）
     vi.stubGlobal("fetch", fetchMock);

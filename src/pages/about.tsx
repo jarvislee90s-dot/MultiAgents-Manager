@@ -48,7 +48,7 @@ export default function AboutPage() {
   }, []);
 
   const handleOpenGithub = async () => {
-    await openUrl("https://github.com/kitlib/tauri-app-template");
+    await openUrl("https://github.com/jarvislee90s-dot/MultiAgents-Manager");
   };
 
   return (

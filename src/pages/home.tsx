@@ -13,7 +13,7 @@ import { useNotification } from "@/hooks/useNotification";
 import { useSessionStore } from "@/stores/sessionStore";
 import { registerShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
-import { loadVisible, saveVisible, subscribeConfig } from "@/components/pet/petConfig";
+import { loadVisible, subscribeConfig } from "@/components/pet/petConfig";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 import { Activity, AlertCircle } from "lucide-react";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
@@ -27,20 +27,10 @@ export default function HomePage() {
   const { sessions, totalCount, waitingCount, loading } = useSessionStore();
   const { t } = useAppTranslation();
 
-  // 桌宠开关状态：与 petConfig 双向同步（其它窗口/菜单改动经 subscribeConfig 回流）
+  // 桌宠开关状态：与 petConfig 双向同步（标题栏开关/设置页/托盘改动经订阅回流）；
+  // 开关本体在 MainTitleBar，此处状态仅供托盘菜单文案
   const [petOn, setPetOn] = useState(() => loadVisible());
   useEffect(() => subscribeConfig(() => setPetOn(loadVisible())), []);
-
-  const togglePet = async () => {
-    const next = !petOn;
-    saveVisible(next);
-    setPetOn(next);
-    try {
-      await invoke("set_pet_visible", { visible: next });
-    } catch (e) {
-      console.error("set_pet_visible failed:", e);
-    }
-  };
 
   useEffect(() => {
     const unlistenShortcutChanged = listen<{ shortcut: string }>(
@@ -137,14 +127,7 @@ export default function HomePage() {
             {t("home.tabResources")}
           </button>
         </div>
-        {/* 桌宠开关：开启即接管完成音/抑制浮窗（spec D3/D4） */}
-        <button
-          onClick={togglePet}
-          title={t("home.petToggle")}
-          className={`rounded px-2 py-1 text-sm transition-colors ${petOn ? "" : "opacity-45 grayscale"}`}
-        >
-          🦊
-        </button>
+        {/* 桌宠开关已上移至标题栏（MainTitleBar 齿轮右侧）；此处不再保留副本 */}
         <NotificationBell />
       </div>
 

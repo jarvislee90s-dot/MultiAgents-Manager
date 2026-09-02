@@ -52,10 +52,16 @@ pub fn run() {
                     window.open_devtools();
                 }
             }
-            // 桌宠窗口：启动即创建（隐藏），前端按配置决定显隐（spec §4.1）
-            if let Err(e) = commands::pet::create_pet_window(app.handle()) {
-                log::warn!("pet window create failed: {}", e);
-            }
+            // 桌宠窗口：延迟创建（spec §4.1）。不能在 setup 里立即建——Windows 上主窗口
+            // WebView2 控制器初始化期存在竞态，立即创建会偶发 E_INVALIDARG 且被
+            // tauri 吞错成幽灵窗口（详见 commands/pet.rs 模块注释）；延迟 800ms 避开
+            let pet_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                if let Err(e) = commands::pet::create_pet_window(&pet_handle) {
+                    log::warn!("pet window create failed: {}", e);
+                }
+            });
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())

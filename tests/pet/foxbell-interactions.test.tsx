@@ -34,6 +34,8 @@ describe("FoxbellPet 指针交互", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    // 双击说话走 playVoice（问题 6 闸门）：显式开启桌宠可见
+    localStorage.setItem("mam-pet-visible", "1");
     // tests/setup.ts 的 beforeAll(server.listen) 会用 MSW 拦截器重写 globalThis.fetch，
     // 且其运行时机晚于本文件的模块级 stubGlobal —— 这里在每个用例前重打桩保证 fetchMock 生效
     vi.stubGlobal("fetch", fetchMock);
@@ -71,13 +73,15 @@ describe("FoxbellPet 指针交互", () => {
   it("拖拽方向动画：上拖跳跃（spec A3）", async () => {
     render(<FoxbellPet />);
     const sprite = screen.getByTestId("pet-sprite");
-    fireEvent.pointerDown(sprite, { pointerId: 1, button: 0, clientX: 100, clientY: 300 });
-    // beginDrag 异步读取窗口几何：先推进微任务让 dragRef 就绪
+    // 先排空挂载期 readGeometry 的微任务链，让 geoRef 有缓存、beginDrag 必走同步铆钉路径
+    // （并行跑测高负载下，若缓存未就绪则走异步兜底，10ms 内可能未 resolve 导致偶发失败）
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(20);
     });
-    fireEvent.pointerMove(sprite, { pointerId: 1, clientX: 100, clientY: 300 }); // 建立采样基线（movedY=0）
-    fireEvent.pointerMove(sprite, { pointerId: 1, clientX: 100, clientY: 250 }); // dy=-50, movedY=-50
+    // 铆钉式拖动（问题 1 修复）：增量基于 screenX/screenY，jsdom 默认 0 需显式传
+    fireEvent.pointerDown(sprite, { pointerId: 1, button: 0, clientX: 100, clientY: 300, screenX: 500, screenY: 700 });
+    fireEvent.pointerMove(sprite, { pointerId: 1, clientX: 100, clientY: 300, screenX: 500, screenY: 700 }); // 建立采样基线（movedY=0）
+    fireEvent.pointerMove(sprite, { pointerId: 1, clientX: 100, clientY: 250, screenX: 500, screenY: 650 }); // movedY=-50
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10);
     });

@@ -10,6 +10,7 @@ import { useSessionsQuery } from "@/lib/query/queries/sessions";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import {
   loadConfig,
+  loadVisible,
   saveVisible,
   subscribeConfig,
   type PetAction,
@@ -25,6 +26,7 @@ import {
 import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { PetMenu } from "./PetMenu";
 import { usePetWindow } from "./usePetWindow";
+import "./pet-cursor.css";
 
 export function FoxbellPet() {
   const { t } = useTranslation();
@@ -154,8 +156,11 @@ export function FoxbellPet() {
     }, ms);
   };
 
-  /** 播一组语音 + 动作 + 字幕（muted 只拦声音不拦动作/字幕，spec D5） */
+  /** 播一组语音 + 动作 + 字幕（muted 只拦声音不拦动作/字幕，spec D5）。
+   *  桌宠关闭（窗口隐藏）时整条语音线不生效——隐藏窗口组件仍挂载、轮询照跑，
+   *  不加闸门会在用户以为「关了桌宠」时继续出声（问题 6） */
   const playVoice = (group: VoiceGroup, action: PetAnimKey) => {
+    if (!loadVisible()) return;
     playTransient(action, 1700);
     const player = voiceRef.current;
     if (!player) return;
@@ -243,17 +248,12 @@ export function FoxbellPet() {
       playVoiceRef.current("approval", cfgRef.current.approvalAction);
     }
 
-    // ---- 任务姿态：waiting > review(完成未读) > running，无则回落 idle/look（spec D4）----
+    // ---- 任务姿态：waiting > running；全绿（全部完成）或无卡回落 idle/look 站立 ----
+    // 实测反馈 1：卡片全绿即任务都已做完，无需保持忙碌姿态，与无卡状态一致站立；
+    // review 动画保留给菜单动作绑定（PET_ACTIONS），不再用作任务姿态
     const anyWaiting = r.cards.some((c) => c.light === "waiting");
-    const anyDoneUnread = r.cards.some((c) => c.light === "done"); // light==="done" 蕴含 unread（已读即消卡）
     const anyRunning = r.cards.some((c) => c.light === "running");
-    stateRef.current.task = anyWaiting
-      ? "waiting"
-      : anyDoneUnread
-        ? "review"
-        : anyRunning
-          ? "running"
-          : null;
+    stateRef.current.task = anyWaiting ? "waiting" : anyRunning ? "running" : null;
     refreshAnim(); // 组件内稳定闭包（仅读写 ref + setState），勿入依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
@@ -342,6 +342,8 @@ export function FoxbellPet() {
 
   // ---- 指针交互（spec A1/A2/A3/§8）----
   const lastDeltaRef = useRef({ dx: 0, dy: 0 });
+  // 拖动中握拳、悬停张开手掌（问题 2 实测反馈：grab/grabbing 仅是系统手型，不足以区分按住态）
+  const [dragging, setDragging] = useState(false);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return; // 右键留给菜单（spec A6）
@@ -351,14 +353,16 @@ export function FoxbellPet() {
       voiceRef.current?.unlock(); // 手势内解锁自动播放（spec E6）
     }
     lastDeltaRef.current = { dx: 0, dy: 0 }; // 重置采样增量，避免上一次拖拽残留误判为「移动过」
+    setDragging(true);
     pet.beginDrag(e);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     const r = pet.trackDrag(e);
     if (!r) return;
-    void pet.moveBy(r.dx - lastDeltaRef.current.dx, r.dy - lastDeltaRef.current.dy);
-    lastDeltaRef.current = { dx: r.dx, dy: r.dy };
+    // 铆钉式：直接以按下时的窗口位置 + 屏幕位移定位（trackDrag 返回的 dx/dy 即屏幕绝对增量），
+    // 不再逐帧读窗口几何（旧实现每帧 3 次 IPC + moveBy 累加，既延迟又受 setPosition 落地竞态影响）
+    pet.dragTo(r.dx, r.dy);
     // 方向动画按 150ms 采样窗增量判定（原版逐帧增量语义，spec A3 阈值同原版）
     const dir: PetAnimKey | null =
       r.movedY < -8 ? "jumping" : r.movedX < -6 ? "run-left" : r.movedX > 6 ? "run-right" : null;
@@ -370,6 +374,7 @@ export function FoxbellPet() {
   const onPointerUp = (_e: React.PointerEvent) => {
     const moved = lastDeltaRef.current.dx !== 0 || lastDeltaRef.current.dy !== 0;
     stateRef.current.drag = null;
+    setDragging(false);
     if (!moved) playTransient("waving", 1700); // 单击：固定挥手（spec A1）
     refreshAnim();
     pet.releaseDrag({
@@ -455,6 +460,8 @@ export function FoxbellPet() {
       <div
         ref={spriteRef}
         data-testid="pet-sprite"
+        // 悬停张开手掌 / 按住拖动握拳（pet-cursor.css，问题 1 附带需求）
+        className={dragging ? "pet-cursor-fist" : "pet-cursor-hand"}
         style={{
           position: "absolute",
           left: "50%",
@@ -466,7 +473,6 @@ export function FoxbellPet() {
           backgroundPosition: style.backgroundPosition,
           backgroundSize: style.backgroundSize,
           backgroundRepeat: "no-repeat",
-          cursor: "grab",
           touchAction: "none",
           userSelect: "none",
         }}
@@ -563,8 +569,8 @@ export function FoxbellPet() {
                 flex: "none",
                 marginTop: px(4),
                 background:
-                  c.light === "waiting" ? "#ef4444" : c.light === "running" ? "#eab308" : "#60a5fa",
-                boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(96,165,250,.25)"}`,
+                  c.light === "waiting" ? "#ef4444" : c.light === "running" ? "#eab308" : "#22c55e",
+                boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(34,197,94,.25)"}`,
               }}
             />
             <div style={{ minWidth: 0 }}>

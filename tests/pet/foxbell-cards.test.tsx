@@ -31,6 +31,9 @@ describe("FoxbellPet 卡片", () => {
   it("waiting 会话渲染红卡；点击调用 focus_session（spec C1）", async () => {
     render(<FoxbellPet />);
     const card = await screen.findByTestId("pet-card-s1");
+    // 题头与看板一致：工具名 + 项目 + 会话名（问题 3）
+    expect(card.textContent).toContain("Claude");
+    expect(card.textContent).toContain("项目A");
     expect(card.textContent).toContain("标题A");
     expect(card.textContent).toContain("等待操作");
     fireEvent.click(card);

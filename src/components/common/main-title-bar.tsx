@@ -1,13 +1,37 @@
 import { Moon, Sun, Info, Settings } from "lucide-react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "@/components/common/theme-provider";
 import { createWindow } from "@/lib/window";
 import { TitleBar } from "@/components/common/title-bar";
 import { LanguageToggle } from "@/components/common/language-toggle";
 import { useTranslation } from "react-i18next";
+import { loadVisible, saveVisible, subscribeConfig } from "@/components/pet/petConfig";
+import packageJson from "../../../package.json";
 
 export function MainTitleBar() {
   const { theme, setTheme } = useTheme();
   const { t } = useTranslation();
+  // 桌宠开关状态：与 petConfig 双向同步（设置页/宠物菜单/托盘改动经订阅回流）
+  const [petOn, setPetOn] = useState(() => loadVisible());
+  useEffect(
+    () =>
+      subscribeConfig(() => {
+        setPetOn(loadVisible());
+      }),
+    []
+  );
+
+  const handleTogglePet = async () => {
+    const next = !petOn;
+    saveVisible(next);
+    setPetOn(next);
+    try {
+      await invoke("set_pet_visible", { visible: next });
+    } catch (e) {
+      console.error("set_pet_visible failed:", e);
+    }
+  };
 
   const handleToggleTheme = () => {
     setTheme(theme === "dark" ? "light" : "dark");
@@ -48,7 +72,7 @@ export function MainTitleBar() {
 
   return (
     <TitleBar
-      title={t("app.title")}
+      title={`${t("app.title")} v${packageJson.version}`}
       rightActions={
         <>
           <button
@@ -58,6 +82,16 @@ export function MainTitleBar() {
             tabIndex={-1}
           >
             <Settings className="h-4 w-4" />
+          </button>
+
+          <button
+            onClick={handleTogglePet}
+            className="title-bar-btn mr-1 text-base leading-none"
+            aria-label={t("home.petToggle")}
+            title={t("home.petToggle")}
+            tabIndex={-1}
+          >
+            <span className={petOn ? "" : "opacity-45 grayscale"}>🦊</span>
           </button>
 
           <button

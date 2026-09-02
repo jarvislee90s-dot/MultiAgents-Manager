@@ -72,11 +72,17 @@ describe("computePetStatus", () => {
     expect(r.cards.length + r.moreCount).toBe(5);
   });
 
-  it("卡片标题与摘要：title 优先，lastMessage 截断（H3）", () => {
+  it("卡片题头与摘要：题头=工具名+项目+会话名（问题 3），lastMessage 截断（H3）", () => {
     const r = computePetStatus([mk("a", "processing", { title: "自定义标题", lastMessage: "x".repeat(200) })], null, 0);
     const card = r.cards[0];
-    expect(card.title).toBe("自定义标题");
+    // 题头与看板 SessionCard 一致：agentLabel + projectName + 会话名
+    expect(card.title).toBe("Claude    P    自定义标题");
     expect(card.lines[0].length).toBeLessThan(60);
     expect(card.lines[0].endsWith("…")).toBe(true);
+  });
+
+  it("无会话名时题头回退 id 前 8 位；codex 区分 APP/CLI 形态", () => {
+    const r = computePetStatus([mk("abcdefgh1234", "waiting", { agentType: "codex", form: "app" })], null, 0);
+    expect(r.cards[0].title).toBe("Codex APP    P    abcdefgh");
   });
 });

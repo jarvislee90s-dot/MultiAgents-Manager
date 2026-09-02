@@ -100,6 +100,9 @@ export function usePetWindow() {
     samples: { t: number; x: number; y: number }[];
   } | null>(null);
   const geoRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  // dragTo 发送合并（in-flight 合并）：同一时刻仅一个 setPosition 在飞，见 dragTo 注释
+  const dragInFlightRef = useRef(false);
+  const dragTargetRef = useRef<{ x: number; y: number } | null>(null);
   const ignoringRef = useRef(false); // 窗口常驻交互（穿透禁用），见 onMove 处的降级说明
   const menuOpenRef = useRef(false);
   const fallRafRef = useRef(0);
@@ -226,14 +229,80 @@ export function usePetWindow() {
     [readGeometry]
   );
 
+  /** 铆钉式拖动定位：以 beginDrag 记录的按下时刻窗口位置 + 屏幕绝对位移直接定位。
+   *  无逐帧几何读取（旧 moveBy 每帧 3 次 IPC 且受 setPosition 落地竞态影响）；
+   *  geoRef 乐观更新，拖动结束时 releaseDrag 仍按最新值落定。
+   *  发送合并：同一时刻仅允许一个 setPosition 在飞，飞行期间的新位置只记最新值，
+   *  落地后立即补发。快速反向拖拽时 pointermove 事件频率可达每秒数百个，逐个
+   *  发 IPC 会在 WebView→Rust 队列里积压（实测问题 2：全程按住拖第二段方向时
+   *  窗口慢约 1s 才"闪现"到位）；合并后队列最多排 1 个，始终追最新目标。 */
+  const dragTo = useCallback((dx: number, dy: number) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const nx = d.winX + dx;
+    const ny = d.winY + dy;
+    geoRef.current = { x: nx, y: ny, w: geoRef.current?.w ?? 0, h: geoRef.current?.h ?? 0 };
+    dragTargetRef.current = { x: nx, y: ny };
+    if (dragInFlightRef.current) return;
+    dragInFlightRef.current = true;
+    const flush = (target: { x: number; y: number }) => {
+      try {
+        // setPosition 正常返回 Promise；但 mock/降级环境可能返回 undefined，统一吞掉
+        void Promise.resolve(
+          getCurrentWindow().setPosition(new LogicalPosition(target.x, target.y))
+        )
+          .catch(() => {
+            /* ignore */
+          })
+          .then(() => {
+            // 上一发落地：若期间又有新目标则立即补发，否则清空在飞位
+            dragInFlightRef.current = false;
+            const next = dragTargetRef.current;
+            if (next && (next.x !== target.x || next.y !== target.y)) {
+              dragInFlightRef.current = true;
+              flush(next);
+            } else {
+              dragTargetRef.current = null;
+            }
+          });
+      } catch {
+        dragInFlightRef.current = false;
+      }
+    };
+    flush({ x: nx, y: ny });
+  }, []);
+
   const beginDrag = useCallback(
     (e: React.PointerEvent) => {
+      // 铆钉从按下点建立：pointer capture 保证指针离开精灵后 move/up 事件仍派发给
+      // 精灵（松手信号不丢）；屏幕绝对坐标增量不受窗口自身移动影响（无反馈循环）。
+      // 中断在途的坠落物理：松手后的 rAF 坠落循环若不取消，会与新一轮 dragTo
+      // 每帧互相覆盖窗口位置（实测问题 2：第二次拖拽不跟手、约 1s 后才"闪现"）
+      if (fallRafRef.current) {
+        cancelAnimationFrame(fallRafRef.current);
+        fallRafRef.current = 0;
+      }
+      // 同步取 geoRef 缓存建铆钉（立即生效，按下后首帧 move 不丢）；异步 readGeometry
+      // 仅在缓存缺失时兜底。jsdom 无 setPointerCapture：特性检测跳过（真机 WebView 有）
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      const cached = geoRef.current;
+      if (cached) {
+        dragRef.current = {
+          pointerId: e.pointerId,
+          startX: e.screenX,
+          startY: e.screenY,
+          winX: cached.x,
+          winY: cached.y,
+          samples: [],
+        };
+        return;
+      }
       void readGeometry().then((geo) => {
         if (!geo) return;
         dragRef.current = {
           pointerId: e.pointerId,
-          startX: e.clientX,
-          startY: e.clientY,
+          startX: e.screenX,
+          startY: e.screenY,
           winX: geo.x,
           winY: geo.y,
           samples: [],
@@ -246,13 +315,14 @@ export function usePetWindow() {
   const trackDrag = useCallback((e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d || d.pointerId !== e.pointerId) return null;
-    d.samples.push({ t: performance.now(), x: e.clientX, y: e.clientY });
+    d.samples.push({ t: performance.now(), x: e.screenX, y: e.screenY });
     while (d.samples.length > 0 && performance.now() - d.samples[0].t > 150) d.samples.shift();
     return {
-      dx: e.clientX - d.startX,
-      dy: e.clientY - d.startY,
-      movedX: e.clientX - (d.samples[0]?.x ?? e.clientX),
-      movedY: e.clientY - (d.samples[0]?.y ?? e.clientY),
+      // 铆钉式：窗口位置 = 按下时窗口位置 + 屏幕指针位移（绝对，无累积误差）
+      dx: e.screenX - d.startX,
+      dy: e.screenY - d.startY,
+      movedX: e.screenX - (d.samples[0]?.x ?? e.screenX),
+      movedY: e.screenY - (d.samples[0]?.y ?? e.screenY),
     };
   }, []);
 
@@ -260,6 +330,9 @@ export function usePetWindow() {
   const releaseDrag = useCallback((opts: { gravity: boolean; onLand?: () => void }) => {
     const d = dragRef.current;
     dragRef.current = null;
+    // 清掉 dragTo 的待发目标：在飞的最后一发落地后链路自然终止，
+    // 不再补发（geoRef 已是最新目标位，坠落从该位起算）
+    dragTargetRef.current = null;
     if (!d) return;
     const geo = geoRef.current;
     if (!geo) return;
@@ -275,6 +348,9 @@ export function usePetWindow() {
     let landedFired = false;
     let last = performance.now();
     const tick = async (t: number) => {
+      // 新拖拽已把本循环取消（beginDrag cancelAnimationFrame + 清零）：立即退出，
+      // 不再续期。没有本检查时，cancel 后在途 tick 仍会 requestAnimationFrame 续期复活
+      if (fallRafRef.current === 0) return;
       const dts = Math.min(0.05, (t - last) / 1000);
       last = t;
       const work = await getWorkArea();
@@ -328,6 +404,7 @@ export function usePetWindow() {
     trackDrag,
     releaseDrag,
     moveBy,
+    dragTo,
     setMenuOpen,
     readGeometry,
   };

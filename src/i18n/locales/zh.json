@@ -1,8 +1,8 @@
 {
   "app": {
-    "title": "Tauri 应用模板",
+    "title": "MultiAgents-Manager",
     "welcome": "欢迎使用 Tauri + React",
-    "description": "基于 Tauri v2、React 19 和 shadcn/ui 的现代桌面应用模板"
+    "description": "多 Agent 编程工具统一管理平台"
   },
   "greet": {
     "title": "来自 Rust 的问候",
@@ -13,9 +13,9 @@
   "about": {
     "title": "关于",
     "button": "关于",
-    "appName": "Tauri 应用模板",
+    "appName": "MultiAgents-Manager",
     "version": "版本",
-    "description": "基于 Tauri v2、React 19 和 shadcn/ui 构建的现代桌面应用模板。",
+    "description": "多 Agent 编程工具统一管理平台",
     "features": "特性",
     "feature1": "Tauri v2 - 轻量级桌面应用框架",
     "feature2": "React 19 - 最新的 React 版本",

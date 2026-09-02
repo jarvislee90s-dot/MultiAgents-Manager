@@ -1,5 +1,6 @@
 // 六态 → 桌宠灯色差分推导（纯函数，spec §5）。卡片=状态展示，事件/未读=差分。
 import type { Session, SessionStatus } from "@/types/session";
+import { getAgentLabel } from "@/lib/agentBadge";
 
 export type PetLight = "waiting" | "running" | "done";
 export type StatusColor = "red" | "yellow" | "green";
@@ -82,6 +83,16 @@ function cardLines(color: StatusColor, session: Session): string[] {
   return [session.lastMessage ? truncate(session.lastMessage) : "运行中"];
 }
 
+/** 卡片题头与看板一致（问题 3）：工具名 + 项目文件夹 + 会话名/聊天 hash，
+ *  如 "Kimi Code    core   session..."；无会话名时回退项目名 */
+export function cardTitle(session: Session): string {
+  const agent = getAgentLabel(session.agentType, session.form);
+  const parts = [agent, session.projectName];
+  const name = session.title || session.id.slice(0, 8);
+  if (name) parts.push(name);
+  return parts.filter(Boolean).join("    ");
+}
+
 export function computePetStatus(
   sessions: Session[],
   prev: PetStatusState | null,
@@ -103,7 +114,7 @@ export function computePetStatus(
     const unread = first ? false : completion || (!!p && p.light === "done" && p.unread);
     const light: PetLight | null =
       color === "red" ? "waiting" : color === "yellow" ? "running" : unread ? "done" : null;
-    const title = s.title || s.projectName || s.id;
+    const title = cardTitle(s);
     // vanishedAt 记录「最后见到该会话」的时间，消失 TTL 以此起算（spec D9/H4）
     state[s.id] = {
       light,

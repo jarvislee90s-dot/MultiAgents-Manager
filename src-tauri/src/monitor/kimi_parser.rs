@@ -411,13 +411,18 @@ fn entry_status(e: &KimiWireEntry) -> Option<SessionStatus> {
         "turn.prompt" | "turn.steer" => Some(Thinking),
         // 用户打断，回到输入态
         "turn.cancel" => Some(Waiting),
-        // 一轮结束：等待用户输入。真实 v0.39.x 轮尾序列为 … → usage.record（出现在
-        // 流式输出之前）→ content.part → step.end(end_turn) → turn.ended →
-        // token_counting.turn_recorded——turn.ended 是唯一的轮次终止信号。
+        // 一轮结束：与 Claude 解析器对齐（assistant 纯文本完成 → Idle），
+        // 不再映射 Waiting——旧映射导致每轮正常回答结束都亮红灯（实测反馈问题 4）。
+        // 真实 v0.39.x 轮尾序列为 … → content.part → step.end(end_turn) → turn.ended →
+        // token_counting.turn_recorded；turn.ended(reason=completed) 即「答完待输入」。
         // usage.record 不映射：它先于流式输出出现，映射会让轮次进行中瞬态误标
-        // Waiting（红灯闪一下）；只产生 usage.record 的旧版本轮尾将保持
-        // Processing，属已知的旧版限制。
-        "turn.ended" => Some(Waiting),
+        // （闪一下）；只产生 usage.record 的旧版本轮尾将保持 Processing，属已知旧版限制。
+        "turn.ended" => Some(Idle),
+        // 真正的「等待用户批准/回答提问」信号（实机 wire.jsonl 取证）：
+        // kind=approval（工具审批）/ kind=question（向用户提问）→ 红灯
+        "interaction.request" => Some(Waiting),
+        // 用户已处理（批准/回答/拒绝）：恢复执行
+        "interaction.resolved" => Some(Processing),
         // LLM 请求在飞
         "llm.request" => Some(Processing),
         // 权限放行后继续执行
@@ -432,7 +437,7 @@ fn entry_status(e: &KimiWireEntry) -> Option<SessionStatus> {
                     if msg.tool_calls.as_ref().is_some_and(|t| !t.is_empty()) {
                         Some(Processing) // 带工具调用的 assistant 消息 → 工具将执行
                     } else {
-                        Some(Waiting) // 纯文本回复 → 轮次结束，等待输入
+                        Some(Idle) // 纯文本回复完成，等待输入（与 turn.ended 同语义）
                     }
                 }
                 _ => None,
@@ -501,6 +506,18 @@ mod tests {
         }
     }
 
+    /// 索引行构造：sessionDir 在 Windows 临时目录下含反斜杠（如 C:\Users\...），
+    /// 必须经 serde_json 转义——format! 手拼会产生 \U 等非法 JSON 转义，
+    /// 整行被 parse_session_index 静默丢弃，导致 Windows 上测试全挂
+    fn index_line(session_id: &str, session_dir: &Path, work_dir: &str) -> String {
+        serde_json::json!({
+            "sessionId": session_id,
+            "sessionDir": session_dir.to_string_lossy(),
+            "workDir": work_dir,
+        })
+        .to_string()
+    }
+
     /// 在临时目录构造一个 Kimi 会话（session_index.jsonl + wire.jsonl），返回 (home, 期望 workDir)
     fn fixture_session(home: &Path, work_dir: &str, wire_lines: &[&str]) -> (PathBuf, String) {
         let sessions = home.join("sessions");
@@ -521,9 +538,12 @@ mod tests {
         fs::write(
             home.join("session_index.jsonl"),
             format!(
-                "{{\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"sessionDir\":\"{}\",\"workDir\":\"{}\"}}\n",
-                session_dir.to_string_lossy(),
-                work_dir
+                "{}\n",
+                index_line(
+                    "11111111-1111-1111-1111-111111111111",
+                    &session_dir,
+                    work_dir
+                )
             ),
         )
         .unwrap();
@@ -568,8 +588,8 @@ mod tests {
         fs::write(
             legacy.join("session_index.jsonl"),
             format!(
-                "{{\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n",
-                session_dir.to_string_lossy()
+                "{}\n",
+                index_line("11111111-1111-1111-1111-111111111111", &session_dir, "/work/demo")
             ),
         )
         .unwrap();
@@ -675,10 +695,10 @@ mod tests {
     }
 
     #[test]
-    fn turn_ended_after_streaming_means_waiting() {
+    fn turn_ended_after_streaming_means_idle() {
         // 回归（真机 v0.39.x 实录）：轮尾序列 usage.record 出现在流式输出之前，
-        // 终止事件是 turn.ended。修复前 turn.ended 未映射，反向扫描落到
-        // content.part(text) → Processing，答完永远卡黄。
+        // 终止事件是 turn.ended。turn.ended 映射 Idle（与 Claude「assistant 纯文本
+        // 完成 → Idle」对齐）——映射 Waiting 会让每轮正常答完都亮红灯（实测反馈问题 4）。
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("kimi-home");
         fs::create_dir_all(&home).unwrap();
@@ -701,13 +721,55 @@ mod tests {
             get_kimi_sessions(&[fake_process(1, &work_dir)])
         });
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Waiting);
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
         assert_eq!(sessions[0].last_message.as_deref(), Some("done!"));
     }
 
     #[test]
-    fn errored_turn_end_means_waiting() {
-        // step.end(finishReason=error) 后随 turn.ended：异常轮次结束仍等用户处置
+    fn interaction_request_means_waiting_and_resolved_recovers() {
+        // 真正的审批红灯信号（真机 wire.jsonl 实录）：tool.call 之后 interaction.request
+        // （kind=approval/question）挂起等待用户；interaction.resolved 后恢复执行。
+        // turn.ended(completed) 不再构成红灯——回答完直接 Idle。
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        let (_, work_dir) = fixture_session(
+            &home,
+            "/work/demo",
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Bash"},"time":1782300901000}"#,
+                r#"{"type":"interaction.request","kind":"approval","toolCallId":"c1","time":1782300902000}"#,
+            ],
+        );
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, &work_dir)])
+        });
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Waiting);
+
+        // 用户批准后：interaction.resolved 是最新信号 → Processing
+        let (_, work_dir) = fixture_session(
+            &home,
+            "/work/demo",
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1782300900000}"#,
+                r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Bash"},"time":1782300901000}"#,
+                r#"{"type":"interaction.request","kind":"approval","toolCallId":"c1","time":1782300902000}"#,
+                r#"{"type":"interaction.resolved","time":1782300903000}"#,
+            ],
+        );
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(1, &work_dir)])
+        });
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Processing);
+    }
+
+    #[test]
+    fn errored_turn_end_means_idle() {
+        // step.end(finishReason=error) 后随 turn.ended(completed)：异常轮次结束也是
+        // 「答完等输入」——红灯只留给 interaction.request（审批/提问挂起）
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("kimi-home");
         fs::create_dir_all(&home).unwrap();
@@ -726,7 +788,7 @@ mod tests {
             get_kimi_sessions(&[fake_process(1, &work_dir)])
         });
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].status, SessionStatus::Waiting);
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
     }
 
     #[test]
@@ -813,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_complete_falls_through_to_waiting() {
+    fn compaction_complete_falls_through_to_idle() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("kimi-home");
         fs::create_dir_all(&home).unwrap();
@@ -826,8 +888,8 @@ mod tests {
             ],
         );
         let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
-        // full_compaction.complete 不是状态信号，继续前扫到 turn.ended → Waiting
-        assert_eq!(sessions[0].status, SessionStatus::Waiting);
+        // full_compaction.complete 不是状态信号，继续前扫到 turn.ended → Idle
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
     }
 
     #[test]
@@ -861,7 +923,18 @@ mod tests {
             ],
         );
         // 追加一行损坏数据，解析应容忍
-        fs::write(home.join("session_index.jsonl"), format!("not json\n{{\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"sessionDir\":\"{}\",\"workDir\":\"{}\"}}\n", home.join("sessions/wd_demo_0123456789ab/session_11111111-1111-1111-1111-111111111111").to_string_lossy(), work_dir)).unwrap();
+        fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "not json\n{}\n",
+                index_line(
+                    "11111111-1111-1111-1111-111111111111",
+                    &home.join("sessions/wd_demo_0123456789ab/session_11111111-1111-1111-1111-111111111111"),
+                    &work_dir
+                )
+            ),
+        )
+        .unwrap();
         let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
     }
@@ -901,8 +974,8 @@ mod tests {
         fs::write(
             home.join("session_index.jsonl"),
             format!(
-                "{{\"sessionId\":\"会话🔥id-1234567890\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n",
-                session_dir.to_string_lossy()
+                "{}\n",
+                index_line("会话🔥id-1234567890", &session_dir, "/work/demo")
             ),
         )
         .unwrap();
@@ -930,8 +1003,8 @@ mod tests {
         fs::write(
             home.join("session_index.jsonl"),
             format!(
-                "{{\"sessionId\":\"evil-1111\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n",
-                outside.to_string_lossy()
+                "{}\n",
+                index_line("evil-1111", &outside, "/work/demo")
             ),
         )
         .unwrap();
@@ -971,11 +1044,9 @@ mod tests {
         fs::write(
             home.join("session_index.jsonl"),
             format!(
-                "{{\"sessionId\":\"{}\",\"sessionDir\":\"{}\",\"workDir\":\"/work/demo\"}}\n{{\"sessionId\":\"{}\",\"sessionDir\":\"{}\",\"workDir\":\"/work/other\"}}\n",
-                first.trim_start_matches("session_"),
-                s1.to_string_lossy(),
-                second.trim_start_matches("session_"),
-                s2.to_string_lossy()
+                "{}\n{}\n",
+                index_line(first.trim_start_matches("session_"), &s1, "/work/demo"),
+                index_line(second.trim_start_matches("session_"), &s2, "/work/other"),
             ),
         )
         .unwrap();
