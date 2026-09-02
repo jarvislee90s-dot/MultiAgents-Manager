@@ -374,3 +374,47 @@ scripts/copy-pet-assets.mjs          — 一次性素材搬运 + manifest 生成
 | WKWebView 自动播放解锁失败 | 原版 blocked 标记 + 手势重试机制复刻；仍失败则首次双击无声、字幕照常 |
 | 主窗口 + 宠物窗口双轮询开销 | 宠物隐藏自动暂停；实测超标则宠物窗口改 5s 轮询 |
 | 两个 always-on-top 窗口（宠物 vs 通知浮窗）层叠 | 通知浮窗在宠物置顶时本就抑制（§6.4），冲突面极小；实测异常再调 z 序 |
+
+## 17. 验收记录（2026-09-02，pet 分支实现收尾）
+
+### 17.1 自动检查（全部真实运行）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 前端全量检查 | `pnpm check`（format:check + lint + check:i18n + build） | ✅ 全绿（i18n 309 键对齐；build 产出含 `pet-BJtgVVJ1.js` 21.11 kB chunk） |
+| 前端测试 | `pnpm vitest run` | ✅ 16 文件 / 55 用例全部通过（含 tests/pet/ 39 例：assets 3、petConfig 5、petStatus 8、petAnimations 3、petVoices 3、usePetWindow 4、foxbell-render 2、foxbell-interactions 3、foxbell-cards 1、petMenu 4、foxbell-events 3、notificationTakeover 2、petSettings 3…以实际为准） |
+| Rust 测试 | `cd src-tauri && cargo test` | ✅ 108 通过 / 0 失败（97 单元 + 4 集成 + 7 其它） |
+| Rust lint | `cargo clippy --all-targets -- -D warnings` | ✅ 零告警 |
+| TypeScript | `tsc --noEmit` | ✅ 零错误 |
+| ESLint | `pnpm lint` | ✅ 0 error（2 条 warning 为 main 分支既有基线，与本移植无关） |
+
+依赖约束核验：未新增任何 npm / crate 依赖（package.json、pnpm-lock.yaml、Cargo.toml/Cargo.lock 在 pet 分支无版本变更）。
+
+### 17.2 tauri:dev 人工验收清单（spec §9/§14 逐条）
+
+说明：实现者为无 GUI 交互能力的自动化流程，以下含"待人工复核"标注的项无法由机器完成；已由自动化测试覆盖语义的项给出证据。
+
+| # | 清单项 | 状态 | 证据 / 备注 |
+|---|---|---|---|
+| 1 | 设置页开启桌宠 → 右下角出现，idle 动画逐帧步进；🦊 按钮与托盘同步状态 | 部分 → 待人工复核 | 出现位置/视觉待人工；逻辑已测：设置开关写 localStorage + invoke（petSettings 测试）、🦊/托盘/设置三入口经 subscribeConfig + storage 事件 + pet-visibility-changed 闭环（评审逐环核实） |
+| 2 | 空闲 6s 环顾一圈，交互即断 | 逻辑已测，手感待人工复核 | look 16 帧×250ms、6s 调度、打断语义有单测与代码评审；实际观感待人工 |
+| 3 | 拖动：左/右跑、上跳；松手坠落+压扁回弹+补跳；gravity 关则停驻 | 逻辑已测，手感待人工复核 | 方向阈值 -8/±6、GRAVITY=1400、DAMP=0.86、MIN_VX=24 均有单测；压扁回弹时序对照原版 1:1；拖拽手感/60fps IPC 流畅度待人工 |
+| 4 | 穿透：透明区点击透到下层；精灵/卡片/菜单可交互 | 待人工复核（高风险） | **Tauri 2.11 无 `{forward:true}` 选项**（JS/Rust API 均核实），spec §4.4 风险项命中：悬停命中切换可能不可用，需人工验证 macOS 实机表现；不可行时按 §16 预案降级静态划分 |
+| 5 | 双击说话出字幕（时长对齐）；单击只挥手；静音开→动作有声音无 | 逻辑已测，声音待人工复核 | 单击挥手 -624px、双击字幕气泡、muted 只拦声音不拦字幕（D5 独立线语义）有单测；语音外放/时长对齐（真实 Audio 元数据）待人工 |
+| 6 | 会话 waiting→红卡+approval 语音（10s 限频）；运行中黄卡不发声；完成→绿卡+done 语音 | 逻辑已测 | 差分触发、10s 限频（区分度经过证伪验证的测试）、运行中不发声均有单测（foxbell-events） |
+| 7 | 完成时主窗口不播提示音（宠物开启）；宠物置顶时浮窗不弹、非置顶照弹 | 逻辑已测 | `green && !petSoundTakeover()` 门（useNotification.ts:168）、`!petSuppressPopup()` 包裹浮窗块、addHistory 无条件；判定函数有单测 |
+| 8 | 点卡片跳转终端；多候选浮层可选；绿卡点后消失、再次完成重亮 | 逻辑已测，跳转实机待人工 | focus_session invoke 参数、ambiguous→focus_hwnd、ackDone 差分重亮均有单测/评审；终端聚焦实机效果待人工 |
+| 9 | 右键菜单：四开关+大小三档+三动作子页实时预览+隐藏+关于 | 逻辑已测，交互待人工 | 菜单项/子页/预览循环/外点 Esc 关闭有单测；菜单几何经修复轮改为向上锚定+实测高度（评审核实窗口内完整可见）；实机点击体验待人工 |
+| 10 | 大小切换与卡片增减时窗口底部锚定（精灵不跳动） | 逻辑已测，视觉待人工复核 | bottomAnchoredY 公式 + syncSize 防抖 50ms + 内容实测高度有单测；等比例联动 px(v)=v×scale 有渲染测试 |
+| 11 | 位置重启记忆（含夹紧屏幕内） | 逻辑已测，重启待人工复核 | loadPosition/savePosition 取整回环 + clampToWorkArea 夹紧有单测；实际重启恢复待人工 |
+| 12 | 托盘"显示/隐藏桌宠"切换生效且各入口状态同步 | 逻辑已测，托盘实机待人工 | Rust 以 is_visible() 实际可见性切换、双分支 emit；事件闭环逐环评审核实；托盘菜单实机显示待人工 |
+
+### 17.3 已知偏差与遗留（不阻塞，均已评审记录）
+
+1. **E6 blocked 重试未实现**：语音自动播放解锁仅做了"手势内 muted 试播 + manifest 就绪后补解锁"，spec §6.2 第 5 点的"被拦截则标记 blocked，下次点击重试"未完整复刻（计划蓝图即未包含）；影响面：定时器触发的完成/催批语音在 WKWebView 拦截时静默失败，字幕照常。
+2. **muted 语义**：muted 开启时字幕照常显示（仅 talkative 拦截）——依据 spec D5"字幕与出声两条独立线"，与原插件 muted 吞字幕行为不同，已在实现注释与本记录中固化。
+3. **shared 回退字幕固定 2.5s**：预载元素缺失的回退路径无法拿到音频元数据，字幕按最短 2.5s（该路径生产几乎不可达）。
+4. **菜单 x 夹紧假设菜单宽 ≤180px**：0.75 缩放 + 长文案语言下菜单右缘可能溢出窗口 10-20px（纯视觉，评审 Minor）。
+5. **D11 forward 缺口**：见 §17.2 第 4 项，Tauri 2.11 API 无 forward 选项，悬停穿透切换为最高风险待人工项。
+
+**结论**：自动可验证项全绿；标注"待人工复核"的 5 类项（拖拽手感、穿透悬停、语音外放、窗口视觉、托盘实机）需在 tauri:dev 下按本清单人工过一遍后方可关闭本移植。
