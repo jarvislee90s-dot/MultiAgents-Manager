@@ -11,6 +11,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { playCompletionSound } from "@/lib/audio";
 import { getAgentLabel } from "@/lib/agentBadge";
 import { addHistory } from "@/lib/notificationHistory";
+import { petSoundTakeover, petSuppressPopup } from "@/components/pet/petConfig";
 
 const STATUS_LABELS: Record<string, string> = {
   waiting: "等待操作",
@@ -163,11 +164,13 @@ export function useNotification() {
         });
 
         // 方向过滤：仅变为绿（任务完成）时按工具播放提示音
-        if (currColor === "green") playCompletionSound(session.agentType);
+        // 宠物开启即接管完成提示音（静音则整体静默，spec D3）
+        if (currColor === "green" && !petSoundTakeover()) playCompletionSound(session.agentType);
         lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
 
         // 发送通知：应用内浮窗为唯一主路径（spec 014 渠道统一），失败降级系统 toast
-        {
+        // 宠物置顶时抑制浮窗：头顶状态栏常显（spec D4）；历史与 toast 降级不受影响
+        if (!petSuppressPopup()) {
           const toolLabel = getAgentLabel(session.agentType, session.form);
           const statusLabel = STATUS_LABELS[session.status] ?? session.status;
           try {

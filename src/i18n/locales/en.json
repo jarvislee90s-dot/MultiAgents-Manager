@@ -39,7 +39,9 @@
   },
   "tray": {
     "show": "Show Window",
-    "quit": "Quit"
+    "quit": "Quit",
+    "petShow": "Show Pet",
+    "petHide": "Hide Pet"
   },
   "updater": {
     "checkForUpdates": "Check for Updates",
@@ -96,6 +98,15 @@
       "testFloat": "Preview float",
       "testProject": "Notification test",
       "testMessage": "This is a test notification (float preview)"
+    },
+    "pet": {
+      "title": "Pet",
+      "desc": "Foxbell pet: floating status cards and voice alerts",
+      "enable": "Enable pet",
+      "alwaysOnTop": "Always on top",
+      "scale": "Size",
+      "enabledToast": "Pet enabled",
+      "disabledToast": "Pet hidden"
     }
   },
   "home": {
@@ -103,7 +114,8 @@
     "waiting": "Waiting",
     "loading": "Loading…",
     "tabDashboard": "Dashboard",
-    "tabResources": "Resources"
+    "tabResources": "Resources",
+    "petToggle": "Show/hide pet"
   },
   "status": {
     "waiting": "Waiting",
@@ -325,6 +337,43 @@
       "compacting": "Compacting",
       "idle": "Idle",
       "finished": "Finished"
+    }
+  },
+  "pet": {
+    "menu": {
+      "sound": "🔊 Sound",
+      "subtitle": "💬 Voice subtitles",
+      "physics": "🧲 Drop physics",
+      "onTop": "📌 Always on top",
+      "size": "📏 Size",
+      "dblAction": "🖱️ Double-click action",
+      "redAction": "🔴 Red light action",
+      "greenAction": "🟢 Green light action",
+      "hide": "🦊 Hide pet",
+      "about": "ℹ️ About",
+      "back": "← Back",
+      "on": "On",
+      "off": "Off",
+      "aboutText": "Foxbell Pet for MultiAgents Manager v1.0.0"
+    },
+    "scale": {
+      "small": "Small",
+      "medium": "Medium",
+      "large": "Large"
+    },
+    "action": {
+      "jumping": "Jump",
+      "waving": "Wave",
+      "failed": "Sulking",
+      "waiting": "Waiting",
+      "review": "Review",
+      "running": "Working"
+    },
+    "card": {
+      "done": "Done",
+      "waiting": "Waiting",
+      "running": "Running",
+      "more": "More"
     }
   }
 }

@@ -1,0 +1,188 @@
+[
+  {
+    "index": 0,
+    "group": "general",
+    "name": "贝贝给你跳个舞吧~",
+    "file": "general/贝贝给你跳个舞吧~.m4a"
+  },
+  {
+    "index": 1,
+    "group": "general",
+    "name": "嘿嘿，被你抓到啦~",
+    "file": "general/嘿嘿，被你抓到啦~.m4a"
+  },
+  {
+    "index": 2,
+    "group": "general",
+    "name": "今天也要一起加油哦！",
+    "file": "general/今天也要一起加油哦！.m4a"
+  },
+  {
+    "index": 3,
+    "group": "general",
+    "name": "摸摸头…贝贝会更厉害哦~",
+    "file": "general/摸摸头…贝贝会更厉害哦~.m4a"
+  },
+  {
+    "index": 4,
+    "group": "general",
+    "name": "你今天辛苦啦，贝贝给你加油！",
+    "file": "general/你今天辛苦啦，贝贝给你加油！.m4a"
+  },
+  {
+    "index": 5,
+    "group": "general",
+    "name": "你是世界上最好的麻~",
+    "file": "general/你是世界上最好的麻~.m4a"
+  },
+  {
+    "index": 6,
+    "group": "general",
+    "name": "你下班了嘛~",
+    "file": "general/你下班了嘛~.m4a"
+  },
+  {
+    "index": 7,
+    "group": "general",
+    "name": "你要给贝贝吃鸡腿嘛~",
+    "file": "general/你要给贝贝吃鸡腿嘛~.m4a"
+  },
+  {
+    "index": 8,
+    "group": "general",
+    "name": "我就要赖着你",
+    "file": "general/我就要赖着你.m4a"
+  },
+  {
+    "index": 9,
+    "group": "general",
+    "name": "小飞棍来喽",
+    "file": "general/小飞棍来喽.m4a"
+  },
+  {
+    "index": 10,
+    "group": "general",
+    "name": "小狐狸要努力变强",
+    "file": "general/小狐狸要努力变强.m4a"
+  },
+  {
+    "index": 11,
+    "group": "approval",
+    "name": "奥陆都追上来了，快点嘛",
+    "file": "approval/奥陆都追上来了，快点嘛.m4a"
+  },
+  {
+    "index": 12,
+    "group": "approval",
+    "name": "等你哦，贝贝去啃个鸡腿先~",
+    "file": "approval/等你哦，贝贝去啃个鸡腿先~.m4a"
+  },
+  {
+    "index": 13,
+    "group": "approval",
+    "name": "强者不会停止学习",
+    "file": "approval/强者不会停止学习.m4a"
+  },
+  {
+    "index": 14,
+    "group": "approval",
+    "name": "审批通过就允许你请贝贝吃鸡腿~",
+    "file": "approval/审批通过就允许你请贝贝吃鸡腿~.m4a"
+  },
+  {
+    "index": 15,
+    "group": "approval",
+    "name": "星黛露还等贝贝呢，快批快批！",
+    "file": "approval/星黛露还等贝贝呢，快批快批！.m4a"
+  },
+  {
+    "index": 16,
+    "group": "approval",
+    "name": "这么好的阳光 我只能在工位上",
+    "file": "approval/这么好的阳光 我只能在工位上.m4a"
+  },
+  {
+    "index": 17,
+    "group": "done",
+    "name": "表现不错，奖励你陪贝贝玩~",
+    "file": "done/表现不错，奖励你陪贝贝玩~.m4a"
+  },
+  {
+    "index": 18,
+    "group": "done",
+    "name": "成功啦！贝贝是不是超厉害~",
+    "file": "done/成功啦！贝贝是不是超厉害~.m4a"
+  },
+  {
+    "index": 19,
+    "group": "done",
+    "name": "搞定咯~ 今晚吃鸡腿好不好？",
+    "file": "done/搞定咯~ 今晚吃鸡腿好不好？.m4a"
+  },
+  {
+    "index": 20,
+    "group": "done",
+    "name": "今天这个班就到此结束",
+    "file": "done/今天这个班就到此结束.m4a"
+  },
+  {
+    "index": 21,
+    "group": "done",
+    "name": "事已至此，先吃饭吧",
+    "file": "done/事已至此，先吃饭吧.m4a"
+  },
+  {
+    "index": 22,
+    "group": "done",
+    "name": "我的实力大家有目共睹",
+    "file": "done/我的实力大家有目共睹.m4a"
+  },
+  {
+    "index": 23,
+    "group": "done",
+    "name": "小意思啦，贝贝可是探险家呢~",
+    "file": "done/小意思啦，贝贝可是探险家呢~.m4a"
+  },
+  {
+    "index": 24,
+    "group": "error",
+    "name": "放心吧 交给我一定会搞砸的",
+    "file": "error/放心吧 交给我一定会搞砸的.m4a"
+  },
+  {
+    "index": 25,
+    "group": "error",
+    "name": "你报警吧，把可爱的我抓走吧",
+    "file": "error/你报警吧，把可爱的我抓走吧.m4a"
+  },
+  {
+    "index": 26,
+    "group": "error",
+    "name": "失败了…要抱抱才能继续~",
+    "file": "error/失败了…要抱抱才能继续~.m4a"
+  },
+  {
+    "index": 27,
+    "group": "error",
+    "name": "私密马赛，哇达西不是故意的",
+    "file": "error/私密马赛，哇达西不是故意的.m4a"
+  },
+  {
+    "index": 28,
+    "group": "error",
+    "name": "算了 我什么都不说了",
+    "file": "error/算了 我什么都不说了.m4a"
+  },
+  {
+    "index": 29,
+    "group": "error",
+    "name": "再错就把你丢鳄鱼池哦",
+    "file": "error/再错就把你丢鳄鱼池哦.m4a"
+  },
+  {
+    "index": 30,
+    "group": "error",
+    "name": "这日子是没法过了",
+    "file": "error/这日子是没法过了.m4a"
+  }
+]

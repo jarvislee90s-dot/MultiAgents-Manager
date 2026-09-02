@@ -2,6 +2,7 @@ import { Languages } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { loadVisible } from "@/components/pet/petConfig";
 
 export function LanguageToggle() {
   const { i18n, t } = useTranslation();
@@ -15,6 +16,9 @@ export function LanguageToggle() {
       await invoke("update_tray_menu", {
         showText: t("tray.show", { lng: newLang }),
         quitText: t("tray.quit", { lng: newLang }),
+        petText: loadVisible()
+          ? t("tray.petHide", { lng: newLang })
+          : t("tray.petShow", { lng: newLang }),
       });
     } catch (error) {
       console.error("Failed to update tray menu:", error);

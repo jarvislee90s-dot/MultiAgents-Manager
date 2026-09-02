@@ -2,16 +2,23 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     plugin::{Builder, TauriPlugin},
-    AppHandle, Manager, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 // Update tray menu with localized text
-pub fn update_tray_menu(app: &AppHandle, show_text: &str, quit_text: &str) -> Result<(), String> {
+pub fn update_tray_menu(
+    app: &AppHandle,
+    show_text: &str,
+    quit_text: &str,
+    pet_text: &str,
+) -> Result<(), String> {
     let menu = Menu::with_id_and_items(
         app,
         "system-tray",
         &[
             &MenuItem::with_id(app, "show", show_text, true, None::<&str>)
+                .map_err(|e| e.to_string())?,
+            &MenuItem::with_id(app, "pet", pet_text, true, None::<&str>)
                 .map_err(|e| e.to_string())?,
             &PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?,
             &MenuItem::with_id(app, "quit", quit_text, true, None::<&str>)
@@ -36,6 +43,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 "system-tray",
                 &[
                     &MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "pet", "Show Pet", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
                 ],
@@ -69,6 +77,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                             let _ = window.show();
                             let _ = window.unminimize();
                             let _ = window.set_focus();
+                        }
+                    }
+                    "pet" => {
+                        // 托盘切换桌宠显隐：以窗口实际可见性为准，并广播给前端同步（spec §10.2）
+                        if let Some(w) = app.get_webview_window("pet") {
+                            let visible = w.is_visible().unwrap_or(false);
+                            let next = !visible;
+                            if next {
+                                let _ = w.show();
+                            } else {
+                                let _ = w.hide();
+                            }
+                            let _ = app.emit(
+                                "pet-visibility-changed",
+                                serde_json::json!({ "visible": next }),
+                            );
                         }
                     }
                     "quit" => {
@@ -136,6 +160,10 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     // 创建菜单项（owned，存活于本函数作用域内）
     let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)
         .map_err(|e| e.to_string())?;
+    // 桌宠显隐项（与 update_tray_menu 同序：show → pet → separator...）；
+    // 前端轮询/语言切换会用本地化文本重建菜单，此处占位中文标签保持一致
+    let pet = MenuItem::with_id(app, "pet", "显示/隐藏桌宠", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
     let sep1 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let quit =
         MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
@@ -158,6 +186,7 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     // 收集引用
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
     items.push(&show);
+    items.push(&pet);
     items.push(&sep1);
     for item in &preset_items {
         items.push(item);

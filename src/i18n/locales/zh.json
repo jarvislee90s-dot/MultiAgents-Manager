@@ -39,7 +39,9 @@
   },
   "tray": {
     "show": "显示窗口",
-    "quit": "退出"
+    "quit": "退出",
+    "petShow": "显示桌宠",
+    "petHide": "隐藏桌宠"
   },
   "updater": {
     "checkForUpdates": "检查更新",
@@ -96,6 +98,15 @@
       "testFloat": "预览浮窗",
       "testProject": "通知测试",
       "testMessage": "这是一条测试通知（浮窗预览）"
+    },
+    "pet": {
+      "title": "桌宠",
+      "desc": "Foxbell 桌宠：悬浮状态卡片与语音提醒",
+      "enable": "开启桌宠",
+      "alwaysOnTop": "悬浮在所有程序最前",
+      "scale": "大小",
+      "enabledToast": "桌宠已开启",
+      "disabledToast": "桌宠已隐藏"
     }
   },
   "home": {
@@ -103,7 +114,8 @@
     "waiting": "待处理",
     "loading": "加载中…",
     "tabDashboard": "看板",
-    "tabResources": "资源"
+    "tabResources": "资源",
+    "petToggle": "显示/隐藏桌宠"
   },
   "status": {
     "waiting": "待处理",
@@ -325,6 +337,43 @@
       "compacting": "压缩中",
       "idle": "空闲",
       "finished": "已结束"
+    }
+  },
+  "pet": {
+    "menu": {
+      "sound": "🔊 出声",
+      "subtitle": "💬 语音字幕",
+      "physics": "🧲 物理坠落",
+      "onTop": "📌 悬浮最前",
+      "size": "📏 大小",
+      "dblAction": "🖱️ 双击动作",
+      "redAction": "🔴 红灯动作",
+      "greenAction": "🟢 绿灯动作",
+      "hide": "🦊 隐藏桌宠",
+      "about": "ℹ️ 关于",
+      "back": "← 返回",
+      "on": "开",
+      "off": "关",
+      "aboutText": "Foxbell 桌宠 for MultiAgents Manager v1.0.0"
+    },
+    "scale": {
+      "small": "小",
+      "medium": "中",
+      "large": "大"
+    },
+    "action": {
+      "jumping": "跳一跳",
+      "waving": "挥挥手",
+      "failed": "委屈",
+      "waiting": "等待",
+      "review": "审查",
+      "running": "工作"
+    },
+    "card": {
+      "done": "已完成",
+      "waiting": "等待操作",
+      "running": "运行中",
+      "more": "更多"
     }
   }
 }

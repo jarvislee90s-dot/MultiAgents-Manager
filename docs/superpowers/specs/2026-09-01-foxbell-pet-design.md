@@ -19,7 +19,7 @@
 | D2 | 完成语义 | 严格按 MAM 颜色：变绿→done 组语音+绿卡；变红(waiting)→approval 组语音+红卡（10s 限频）。与看板及 PR #28 语义一致 |
 | D3 | 声音接管 | 宠物开启即接管完成提示音；宠物声音开关关闭则静默，不回落 MAM 音效 |
 | D4 | 浮窗策略 | 宠物置顶 → 通知浮窗不弹（头顶状态栏常显）；宠物非置顶 → 浮窗照弹。以置顶开关为判断条件（macOS 无法可靠检测真实遮挡） |
-| D5 | 字幕开关 | 保留右键菜单；字幕与出声两条独立线（muted / talkative 语义沿用原版） |
+| D5 | 字幕开关 | 保留右键菜单；字幕与出声两条独立线（muted 只拦声音、talkative 只拦字幕；实现取独立线读法，与原版 muted 连带吞字幕略有差异，见 §17.3-2） |
 | D6 | 自定义素材 | v1 内置打包，不做外部素材目录 |
 | D7 | 重新打开入口 | 主窗口状态摘要栏 🦊 快捷按钮 + 托盘菜单"显示/隐藏桌宠" |
 | D8 | 看板设置分区 | 开启/关闭开关 + 悬浮最前开关 |
@@ -28,6 +28,9 @@
 | D11 | 点击穿透 | macOS `setIgnoreCursorEvents(true, { forward: true })` + 悬停命中切换（§4.4） |
 | D12 | 跳转歧义 | 多候选时在宠物旁弹出迷你候选浮层，点选聚焦 |
 | D13 | 平台范围 | v1 仅 macOS 完整支持 |
+| D14 | 动作场景重映射 | 原蓝灯(done)→🟢绿灯、原黄灯(approval)→🔴红灯(waiting)；error 子页从菜单移除（配置键保留占位）。菜单显示三个绑定场景：双击 / 红灯 / 绿灯；运行中（黄灯）沿用原版固定工作姿态，不可绑定 |
+| D15 | 桌宠缩放 | 三档预设：小 0.75 / 中 1.0 / 大 1.25；精灵、字幕气泡、卡片等比例联动；右键菜单 + 看板设置两处入口。Codex pet 官方无缩放标准（仅固定图集契约 8×9、192×208/帧），其社区正请求 S/M/L 预设（openai/codex#21864），本设计与该提案对齐 |
+| D16 | 卡片尺寸模型 | 多卡等宽；每行单行省略号截断，卡片高度不随文字长度变化、仅随行数（标题+最多 2 行）微变；窗口尺寸按内容实测（ResizeObserver），随卡片数 / 每卡行数 / 缩放档位统一伸缩 |
 
 ## 3. 总体架构
 
@@ -60,17 +63,19 @@ Rust 侧（仅窗口管理，无业务逻辑）
 - 宠物页面（`#/pet`）加载后读 localStorage 显隐配置，自行 `show()`；保证启动时窗口不闪现。
 - "关闭"= 隐藏窗口（webview 保活，恢复即时）；应用退出随进程销毁。
 
-### 4.2 动态尺寸（D10）
+### 4.2 动态尺寸（D10/D15/D16）
 
-| 状态 | 窗口尺寸 |
-|---|---|
-| 0 卡片 | 宽 340 × 高 260（精灵 192×208 底部居中 + 底部 50px 字幕气泡区） |
-| N 卡片（1–6） | 高 = 260 + 10(间隙) + N 张卡片实际高度；宽度不变 |
-| 右键菜单打开 | 高 ≥ max(当前, 380)；菜单在窗口内渲染，关闭后还原 |
+尺寸模型 = **统一缩放乘子 + 内容实测**：
 
-- 卡片增减 → `setSize(LogicalSize)` + `setPosition`（**底部锚定**：`newY = oldY + oldH − newH`，精灵不动）。
-- 窗口全透明，伸缩不可见；用户感知与原版网页内一致。
-- 屏幕顶截断：窗口顶部不得越过 `workArea.top`，卡片层内部裁剪（原版同样最多显示 6 张 + "+N 更多"徽章）。
+**缩放**：配置 `scale` 三档（小 0.75 / 中 1.0 / 大 1.25）。所有视觉常量由单一乘子派生 `px(v) = v × scale`——精灵 192×208×s（`background-size` 与帧偏移同步 ×s）、字幕气泡字号 13×s 与内边距 ×s、卡片宽 320×s、卡片字号 12×s、卡片间隙 5×s、卡片与精灵间隙 10×s、底部气泡区 50×s。调整精灵大小时，气泡与卡片**等比例联动**，观感比例与原版 1.0 档完全一致。
+
+**卡片尺寸规则**（沿用原版）：多卡**等宽**（列宽 = 320×s）；每卡 = 加粗标题行 + 最多 2 行摘要，**每行单行省略号截断**——卡片高度不随文字长度增长，仅随行数（1–3 行文本）微变。
+
+**窗口尺寸 = 内容实测**：ResizeObserver 监听内容根元素实际渲染尺寸，高度 = 底部气泡区 + 精灵 + 间隙 + Σ 各卡实际高度，宽度 = max(精灵宽, 卡片宽) + 边距。卡片增减、每卡行数变化、缩放档位变化统一走同一条 resize 路径（防抖 50ms → `setSize` + 底部锚定 `setPosition`：`newY = oldY + oldH − newH`，精灵不动的锚点稳定）。
+
+**上限保护**：窗口总高不超过 `workArea` 高度 − 余量；超出时卡片层内部裁剪（缩放档位越大可见张数越少），"+N 更多"徽章兜底，沿用原版最多显示 6 张规则。
+
+**右键菜单**：打开时窗口临时扩展至菜单实际高度，关闭还原（窗口全透明，伸缩不可见）。
 
 ### 4.3 位置记忆
 
@@ -115,8 +120,19 @@ Rust 侧（仅窗口管理，无业务逻辑）
 
 ### 6.1 素材
 
-- 一次性搬运：`public/pet/spritesheet.webp`（2.5MB，Codex V2 图集 8 列×11 行，每帧 192×208）、`public/pet/voice/{general,approval,done,error}/*.m4a`（31 条；error 组保留占位不触发，D9）、`public/pet/manifest.json`（构建期 `scripts/copy-pet-assets.mjs` 生成：`[{index, group, name, file}]`，浏览器无法列目录必须有清单）。
+- 一次性搬运：`public/pet/spritesheet.webp`（2.5MB，Codex V2 图集 8 列×11 行，每帧 192×208）、`public/pet/voice/{general,approval,done,error}/*.m4a`（31 条）、`public/pet/manifest.json`（构建期 `scripts/copy-pet-assets.mjs` 生成：`[{index, group, name, file}]`，浏览器无法列目录必须有清单）。
 - 字幕 = 语音文件名（原版语义，中文台词原样）。
+
+**语音组 ↔ 场景映射表**（文件夹即状态分组，触发语义与灯色对齐 D2/D14）：
+
+| 素材文件夹 | 触发场景（MAM） | 灯色 | 动作配置键 |
+|---|---|---|---|
+| `general/`（11 条） | 双击形象闲聊 | — | `dblAction` |
+| `approval/`（6 条） | waiting 差分出现（原"待批准"，撒娇催促，10s 限频） | 🔴 红 | `approvalAction` |
+| `done/`（7 条） | 非绿→绿 差分（原"完成"，求夸/元气） | 🟢 绿 | `doneAction` |
+| `error/`（7 条） | **占位保留，v1 无触发场景**（原"报错"，MAM 无数据源 D9） | — | `errorAction`（占位） |
+
+运行中（黄灯）不播语音（原版绿灯同样不播）。
 
 ### 6.2 播放机制（1:1 复刻原版）
 
@@ -192,7 +208,7 @@ Rust 侧（仅窗口管理，无业务逻辑）
 | B1 | 🔊 出声开关（=自身设置 2a） | 1:1 |
 | B2 | 💬 语音字幕开关 | 1:1（D5，独立于出声） |
 | B3 | 🧲 物理坠落开关 | 1:1 |
-| B4-B7 | 双击/黄灯/红灯/蓝灯四场景动作子页，6 动作可选（跳/挥手/委屈/等待/审查/工作），进入即循环预览、点选即时切换、返回停止 | 1:1（红灯项保留占位） |
+| B4-B7 | 动作绑定子页：🖱️ 双击动作 / 🔴 红灯动作（等待操作）/ 🟢 绿灯动作（完成），6 动作可选（跳/挥手/委屈/等待/审查/工作），进入即循环预览、点选即时切换、返回停止 | 等价（D14 语义重映射：原蓝灯 done→绿灯、原黄灯 approval→红灯；error 场景无数据源，子页移除、配置键保留占位） |
 | B8 | 🦊 隐藏桌宠 | 1:1（=看板开关关闭，同一配置） |
 | B9 | ℹ️ 关于 | 1:1（显示 MAM 桌宠版本） |
 | B10 | 菜单外点击 / Esc 关闭 | 1:1 |
@@ -273,9 +289,10 @@ Rust 侧（仅窗口管理，无业务逻辑）
 | `muted` | bool | `false` | 出声（自身设置 2a） |
 | `talkative` | bool | `true` | 语音字幕 |
 | `gravity` | bool | `true` | 物理坠落（自身设置 2b） |
+| `scale` | 0.75 / 1.0 / 1.25 | `1.0` | 桌宠大小三档（小/中/大），精灵/气泡/卡片等比例联动（D15） |
 | `dblAction` | Action | `waving` | 双击动作 |
 | `approvalAction` | Action | `waiting` | 红灯（waiting）动作 |
-| `errorAction` | Action | `failed` | 占位保留（无触发场景） |
+| `errorAction` | Action | `failed` | 占位保留（不在菜单显示，无触发场景，D14） |
 | `doneAction` | Action | `jumping` | 绿灯（完成）动作 |
 
 Action 枚举：`jumping` 跳一跳 / `waving` 挥挥手 / `failed` 委屈 / `waiting` 等待 / `review` 审查 / `running` 工作。
@@ -286,8 +303,8 @@ Action 枚举：`jumping` 跳一跳 / `waving` 挥挥手 / `failed` 委屈 / `wa
 
 | 入口 | 控制 | 实现 |
 |---|---|---|
-| 看板设置页"桌宠"分区 | visible + alwaysOnTop | React 组件读写 localStorage + invoke `set_pet_visible` / `set_pet_always_on_top` |
-| 宠物右键菜单 | muted / talkative / gravity / alwaysOnTop / 四动作 / 隐藏 / 关于 | 宠物窗口内直接读写 + invoke |
+| 看板设置页"桌宠"分区 | visible + alwaysOnTop + scale（大小三档） | React 组件读写 localStorage + invoke `set_pet_visible` / `set_pet_always_on_top` |
+| 宠物右键菜单 | muted / talkative / gravity / alwaysOnTop / 大小三档 / 三动作绑定（双击·红灯·绿灯）/ 隐藏 / 关于 | 宠物窗口内直接读写 + invoke |
 | 主窗口 🦊 快捷按钮 | visible | 同设置页开关（图标灰化表示隐藏态，沿用原版） |
 | 托盘菜单"显示/隐藏桌宠" | visible | Rust 侧直接控制窗口 + emit 事件同步前端 localStorage |
 
@@ -352,8 +369,52 @@ scripts/copy-pet-assets.mjs          — 一次性素材搬运 + manifest 生成
 
 | 风险 | 预案 |
 |---|---|
-| forward mousemove 转发不可靠 | 降级为静态划分：精灵区常驻接收、其余常驻穿透（无悬停切换） |
+| forward mousemove 转发不可靠 | **已命中并降级**：Tauri 2.11 无 forward 选项（JS/Rust 均核实），且原预案"静态划分"同样不可行——`setIgnoreCursorEvents` 是整窗开关，忽略态下 webview 收不到任何鼠标事件，无法实现按区域接收。实际降级：**整窗常驻交互、穿透禁用**（透明矩形遮挡下层点击）。恢复路径：`cursorPosition()` 模块级 API（@tauri-apps/api 2.11 已有）~30Hz 轮询 + hitTest 切换，或 Tauri 提供 forward 后 §4.4 原设计直接生效 |
 | 60fps setPosition IPC 性能不足 | 降到 30fps（半帧 16ms→33ms，坠落视觉差异微小） |
 | WKWebView 自动播放解锁失败 | 原版 blocked 标记 + 手势重试机制复刻；仍失败则首次双击无声、字幕照常 |
 | 主窗口 + 宠物窗口双轮询开销 | 宠物隐藏自动暂停；实测超标则宠物窗口改 5s 轮询 |
 | 两个 always-on-top 窗口（宠物 vs 通知浮窗）层叠 | 通知浮窗在宠物置顶时本就抑制（§6.4），冲突面极小；实测异常再调 z 序 |
+
+## 17. 验收记录（2026-09-02，pet 分支实现收尾）
+
+### 17.1 自动检查（全部真实运行）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 前端全量检查 | `pnpm check`（format:check + lint + check:i18n + build） | ✅ 全绿（i18n 309 键对齐；build 产出含 `pet-BJtgVVJ1.js` 21.11 kB chunk） |
+| 前端测试 | `pnpm vitest run` | ✅ 16 文件 / 55 用例全部通过（含 tests/pet/ 39 例：assets 3、petConfig 5、petStatus 8、petAnimations 3、petVoices 3、usePetWindow 4、foxbell-render 2、foxbell-interactions 3、foxbell-cards 1、petMenu 4、foxbell-events 3、notificationTakeover 2、petSettings 3…以实际为准） |
+| Rust 测试 | `cd src-tauri && cargo test` | ✅ 108 通过 / 0 失败（97 单元 + 4 集成 + 7 其它） |
+| Rust lint | `cargo clippy --all-targets -- -D warnings` | ✅ 零告警 |
+| TypeScript | `tsc --noEmit` | ✅ 零错误 |
+| ESLint | `pnpm lint` | ✅ 0 error（2 条 warning 为 main 分支既有基线，与本移植无关） |
+
+依赖约束核验：未新增任何 npm / crate 依赖（package.json、pnpm-lock.yaml、Cargo.toml/Cargo.lock 在 pet 分支无版本变更）。
+
+### 17.2 tauri:dev 人工验收清单（spec §9/§14 逐条）
+
+说明：实现者为无 GUI 交互能力的自动化流程，以下含"待人工复核"标注的项无法由机器完成；已由自动化测试覆盖语义的项给出证据。
+
+| # | 清单项 | 状态 | 证据 / 备注 |
+|---|---|---|---|
+| 1 | 设置页开启桌宠 → 右下角出现，idle 动画逐帧步进；🦊 按钮与托盘同步状态 | 部分 → 待人工复核 | 出现位置/视觉待人工；逻辑已测：设置开关写 localStorage + invoke（petSettings 测试）、🦊/托盘/设置三入口经 subscribeConfig + storage 事件 + pet-visibility-changed 闭环（评审逐环核实） |
+| 2 | 空闲 6s 环顾一圈，交互即断 | 逻辑已测，手感待人工复核 | look 16 帧×250ms、6s 调度、打断语义有单测与代码评审；实际观感待人工 |
+| 3 | 拖动：左/右跑、上跳；松手坠落+压扁回弹+补跳；gravity 关则停驻 | 逻辑已测，手感待人工复核 | 方向阈值 -8/±6、GRAVITY=1400、DAMP=0.86、MIN_VX=24 均有单测；压扁回弹时序对照原版 1:1；拖拽手感/60fps IPC 流畅度待人工 |
+| 4 | 穿透：透明区点击透到下层；精灵/卡片/菜单可交互 | **穿透禁用（降级）** | D11 forward 穿透不可实现：Tauri 2.11 无 `{forward:true}` 选项（JS/Rust API 均核实），忽略态一旦生效事件流即断、无法悬停恢复，§16"静态划分"预案也因整窗开关限制不可行。实际采用**整窗常驻交互、穿透禁用**：精灵/卡片/菜单常驻可交互，代价是透明矩形（两侧各 ~74px、底部 50px、顶部 10px @scale=1）遮挡下层应用点击。恢复路径见 §16 |
+| 5 | 双击说话出字幕（时长对齐）；单击只挥手；静音开→动作有声音无 | 逻辑已测，声音待人工复核 | 单击挥手 -624px、双击字幕气泡、muted 只拦声音不拦字幕（D5 独立线语义）有单测；语音外放/时长对齐（真实 Audio 元数据）待人工 |
+| 6 | 会话 waiting→红卡+approval 语音（10s 限频）；运行中黄卡不发声；完成→绿卡+done 语音 | 逻辑已测 | 差分触发、10s 限频（区分度经过证伪验证的测试）、运行中不发声均有单测（foxbell-events） |
+| 7 | 完成时主窗口不播提示音（宠物开启）；宠物置顶时浮窗不弹、非置顶照弹 | 逻辑已测 | `green && !petSoundTakeover()` 门（useNotification.ts:168）、`!petSuppressPopup()` 包裹浮窗块、addHistory 无条件；判定函数有单测 |
+| 8 | 点卡片跳转终端；多候选浮层可选；绿卡点后消失、再次完成重亮 | 逻辑已测，跳转实机待人工 | focus_session invoke 参数、ambiguous→focus_hwnd、ackDone 差分重亮均有单测/评审；终端聚焦实机效果待人工 |
+| 9 | 右键菜单：四开关+大小三档+三动作子页实时预览+隐藏+关于 | 逻辑已测，交互待人工 | 菜单项/子页/预览循环/外点 Esc 关闭有单测；菜单几何经修复轮改为向上锚定+实测高度（评审核实窗口内完整可见）；实机点击体验待人工 |
+| 10 | 大小切换与卡片增减时窗口底部锚定（精灵不跳动） | 逻辑已测，视觉待人工复核 | bottomAnchoredY 公式 + syncSize 防抖 50ms + 内容实测高度有单测；等比例联动 px(v)=v×scale 有渲染测试 |
+| 11 | 位置重启记忆（含夹紧屏幕内） | 逻辑已测，重启待人工复核 | loadPosition/savePosition 取整回环 + clampToWorkArea 夹紧有单测；实际重启恢复待人工 |
+| 12 | 托盘"显示/隐藏桌宠"切换生效且各入口状态同步 | 逻辑已测，托盘实机待人工 | Rust 以 is_visible() 实际可见性切换、双分支 emit；事件闭环逐环评审核实；托盘菜单实机显示待人工 |
+
+### 17.3 已知偏差与遗留（不阻塞，均已评审记录）
+
+1. **E6 blocked 重试未实现**：语音自动播放解锁仅做了"手势内 muted 试播 + manifest 就绪后补解锁"，spec §6.2 第 5 点的"被拦截则标记 blocked，下次点击重试"未完整复刻（计划蓝图即未包含）；影响面：定时器触发的完成/催批语音在 WKWebView 拦截时静默失败，字幕照常。
+2. **muted 语义**：muted 开启时字幕照常显示（仅 talkative 拦截）——依据 spec D5"字幕与出声两条独立线"，与原插件 muted 吞字幕行为不同，已在实现注释与本记录中固化。
+3. **shared 回退字幕固定 2.5s**：预载元素缺失的回退路径无法拿到音频元数据，字幕按最短 2.5s（该路径生产几乎不可达）。
+4. **菜单 x 夹紧假设菜单宽 ≤180px**：0.75 缩放 + 长文案语言下菜单右缘可能溢出窗口 10-20px（纯视觉，评审 Minor）。
+5. **D11 forward 缺口（已降级，用户已确认接受）**：Tauri 2.11 API 无 forward 选项，忽略态一旦生效事件流即断、无法悬停恢复（spec §4.4 风险命中），§16 原预案"静态划分"也因整窗开关限制不可行；实际降级为**整窗常驻交互、穿透禁用**（透明矩形遮挡下层点击，影响范围见 §17.2 第 4 项）。**2026-09-02 用户显式确认接受此降级**；恢复路径（cursorPosition() 轮询 + hitTest，API 已存在未实现）与"等 Tauri 提供 forward"均已入跟进账，需要时再启用。
+
+**结论**：自动可验证项全绿；标注"待人工复核"的 5 类项（拖拽手感、穿透悬停、语音外放、窗口视觉、托盘实机）需在 tauri:dev 下按本清单人工过一遍后方可关闭本移植。

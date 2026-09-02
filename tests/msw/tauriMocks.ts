@@ -65,9 +65,11 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
       return Promise.resolve(mockExtensions);
     case "list_presets":
       return Promise.resolve(mockPresets);
-    case "focus_session":
     case "kill_session":
       return Promise.resolve();
+    case "focus_session":
+      // 与 Rust focus_session 返回契约一致（focused | ambiguous）；undefined 会让调用方读 result.type 抛错
+      return Promise.resolve({ type: "focused" });
     case "get_setting":
       return Promise.resolve(null);
     case "set_setting":
