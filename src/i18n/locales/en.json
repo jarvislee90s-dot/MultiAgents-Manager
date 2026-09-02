@@ -96,6 +96,15 @@
       "testFloat": "Preview float",
       "testProject": "Notification test",
       "testMessage": "This is a test notification (float preview)"
+    },
+    "pet": {
+      "title": "Pet",
+      "desc": "Foxbell pet: floating status cards and voice alerts",
+      "enable": "Enable pet",
+      "alwaysOnTop": "Always on top",
+      "scale": "Size",
+      "enabledToast": "Pet enabled",
+      "disabledToast": "Pet hidden"
     }
   },
   "home": {
@@ -103,7 +112,8 @@
     "waiting": "Waiting",
     "loading": "Loading…",
     "tabDashboard": "Dashboard",
-    "tabResources": "Resources"
+    "tabResources": "Resources",
+    "petToggle": "Show/hide pet"
   },
   "status": {
     "waiting": "Waiting",

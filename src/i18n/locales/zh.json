@@ -96,6 +96,15 @@
       "testFloat": "预览浮窗",
       "testProject": "通知测试",
       "testMessage": "这是一条测试通知（浮窗预览）"
+    },
+    "pet": {
+      "title": "桌宠",
+      "desc": "Foxbell 桌宠：悬浮状态卡片与语音提醒",
+      "enable": "开启桌宠",
+      "alwaysOnTop": "悬浮在所有程序最前",
+      "scale": "大小",
+      "enabledToast": "桌宠已开启",
+      "disabledToast": "桌宠已隐藏"
     }
   },
   "home": {
@@ -103,7 +112,8 @@
     "waiting": "待处理",
     "loading": "加载中…",
     "tabDashboard": "看板",
-    "tabResources": "资源"
+    "tabResources": "资源",
+    "petToggle": "显示/隐藏桌宠"
   },
   "status": {
     "waiting": "待处理",
