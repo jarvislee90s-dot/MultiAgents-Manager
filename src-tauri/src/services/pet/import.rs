@@ -204,6 +204,13 @@ pub fn stage_from_folder_in(root: &Path, src: &Path) -> Result<StagedPet, String
 
 /// 安全解压：enclosed_name 防 zip-slip + 文件数/总大小上限（spec §13）
 pub fn safe_unzip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    safe_unzip_with_limit(zip_path, dest, MAX_ZIP_TOTAL_BYTES)
+}
+
+/// 解压内核：总大小上限参数化（便于小上限单测），按 io::copy 的实际字节数累计（FIX-5，
+/// 原实现累加 entry.size() 是压缩前声明值，可被 zip 头谎报绕过）；单条目读取用 take
+/// 限制在剩余额度内，防止谎报小尺寸的大文件把磁盘写爆
+fn safe_unzip_with_limit(zip_path: &Path, dest: &Path, max_total: u64) -> Result<(), String> {
     let f = std::fs::File::open(zip_path).map_err(|e| format!("打开压缩包失败: {}", e))?;
     let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("读取压缩包失败: {}", e))?;
     if zip.len() > MAX_ZIP_FILES {
@@ -221,16 +228,19 @@ pub fn safe_unzip(zip_path: &Path, dest: &Path) -> Result<(), String> {
             std::fs::create_dir_all(dest.join(rel)).map_err(|e| e.to_string())?;
             continue;
         }
-        total += entry.size();
-        if total > MAX_ZIP_TOTAL_BYTES {
-            return Err("压缩包解压总量超限（>100MB）".into());
-        }
         let out_path = dest.join(rel);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let mut out = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        // take(剩余额度+1)：多读 1 字节用于区分"恰好填满"与"超限"
+        let mut limited = std::io::Read::take(&mut entry, max_total - total + 1);
+        let written = std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+        total += written;
+        if total > max_total {
+            let _ = std::fs::remove_file(&out_path); // 超限即拒绝：不留半截文件
+            return Err(format!("压缩包解压总量超限（>{}B）", max_total));
+        }
     }
     Ok(())
 }
@@ -480,6 +490,25 @@ mod tests {
             Err(_) => {}
             Ok(()) => assert!(!root.path().join("evil.txt").exists()),
         }
+    }
+
+    #[test]
+    fn zip_size_cap_on_actual_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let zp = root.path().join("big.zip");
+        // 压缩后条目实际解出 20 字节，上限 10 → 必须按解压实际字节数拒绝（FIX-5）
+        write_zip(&zp, &[("a.bin", "01234567890123456789")]);
+        let dest = root.path().join("dest2");
+        let r = safe_unzip_with_limit(&zp, &dest, 10);
+        assert!(r.is_err(), "20 字节条目应超 10 字节上限");
+        // 失败时 dest 不留残留文件
+        let leftover = std::fs::read_dir(&dest)
+            .map(|rd| rd.flatten().any(|e| e.path().is_file()))
+            .unwrap_or(false);
+        assert!(!leftover, "上限拒绝后 dest 不应有残留文件");
+        // 同一包 20 字节上限正常通过
+        let dest_ok = root.path().join("dest3");
+        assert!(safe_unzip_with_limit(&zp, &dest_ok, 20).is_ok());
     }
 
     #[test]

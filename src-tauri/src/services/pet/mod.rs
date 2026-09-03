@@ -21,7 +21,9 @@ pub fn staging_root(root: &Path) -> PathBuf {
     root.join(".import-staging")
 }
 
-/// 重命名宠物 = 目录重命名 + manifest.id 同步（备份旧 manifest，spec §10-1）
+/// 重命名宠物 = 目录重命名 + manifest.id 同步（备份旧 manifest，spec §10-1）。
+/// FIX-5 顺序：先 rename 目录再写 manifest——rename 失败零副作用；写失败时目录已改名、
+/// manifest 保持旧 id，重试 rename 为 no-op 后仅补写 manifest，可重试
 pub fn rename_pet_in(root: &Path, old_id: &str, new_id: &str) -> Result<(), String> {
     if old_id == new_id {
         return Ok(());
@@ -31,11 +33,13 @@ pub fn rename_pet_in(root: &Path, old_id: &str, new_id: &str) -> Result<(), Stri
         return Err(format!("宠物不存在: {}", old_id));
     }
     import::validate_pet_name(root, new_id)?;
-    if let Some(mut m) = manifest::load(&old_dir) {
+    let new_dir = pet_dir(root, new_id);
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| format!("重命名失败: {}", e))?;
+    if let Some(mut m) = manifest::load(&new_dir) {
         m.id = new_id.to_string();
-        manifest::write_with_backup(&old_dir, &m, true)?;
+        manifest::write_with_backup(&new_dir, &m, true)?;
     }
-    std::fs::rename(&old_dir, pet_dir(root, new_id)).map_err(|e| format!("重命名失败: {}", e))
+    Ok(())
 }
 
 /// 删除宠物：整目录移入回收站（spec §10；trash crate 已是项目依赖）
@@ -91,5 +95,26 @@ mod tests {
         assert!(rename_pet_in(root.path(), "a", "b").is_err());
         // 重命名为自身是 no-op
         assert!(rename_pet_in(root.path(), "a", "a").is_ok());
+        // FIX-5：rename 失败（目标已存在）时旧目录 manifest 未被改写（零副作用）
+        let old_manifest = manifest::load(&pet_dir(root.path(), "a")).unwrap_or_else(|| {
+            let m = manifest::PetManifest {
+                schema_version: 1,
+                id: "a".into(),
+                display_name: "A".into(),
+                description: String::new(),
+                source: "folder".into(),
+                sprite_version_number: 1,
+                spritesheet_size_bytes: 1,
+                has_voice: false,
+                has_subtitle: false,
+                voices: vec![],
+            };
+            manifest::write_with_backup(&pet_dir(root.path(), "a"), &m, false).unwrap();
+            m
+        });
+        assert!(rename_pet_in(root.path(), "a", "b").is_err());
+        let after = manifest::load(&pet_dir(root.path(), "a")).unwrap();
+        assert_eq!(after.id, old_manifest.id, "rename 失败不应改写旧 manifest");
+        assert_eq!(after.id, "a");
     }
 }
