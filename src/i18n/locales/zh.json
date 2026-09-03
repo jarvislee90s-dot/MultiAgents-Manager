@@ -398,7 +398,8 @@
       "mismatchIgnore": "忽略，按磁盘降级运行",
       "mismatchCancel": "取消切换",
       "pendingFirstCheck": "待首次激活校验",
-      "error": "操作失败：{{msg}}"
+      "error": "操作失败：{{msg}}",
+      "ignoredDiff": "已忽略差异，按当前素材运行（下次校验仍会提示）"
     },
     "startup": {
       "title": "宠物素材校验",

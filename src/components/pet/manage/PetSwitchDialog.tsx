@@ -55,7 +55,13 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
       });
       setMismatch(null);
       if (r.status === "activated") {
-        toast.success(r.repaired ? t("pet.switch.updated") : r.message ?? t("pet.switch.activated", { name: id }));
+        toast.success(
+          r.repaired
+            ? t("pet.switch.updated")
+            : r.ignoredDiff
+              ? t("pet.switch.ignoredDiff")
+              : t("pet.switch.activated", { name: id })
+        );
         setActiveId(loadActiveId());
         if (r.manifestBuilt) void reload(); // 直投首激活后徽标刷新
       } else if (r.status === "invalid-sheet") {

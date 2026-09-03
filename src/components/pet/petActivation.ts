@@ -22,6 +22,8 @@ export interface ActivationResult {
   status: "activated" | "invalid-sheet" | "mismatch" | "error";
   manifestBuilt?: boolean;
   repaired?: boolean;
+  /** ignore 降级激活标记（UI 据此用 ignoredDiff 文案 toast，FIX-3） */
+  ignoredDiff?: boolean;
   message?: string;
   issues?: ValidationIssue[];
 }
@@ -162,10 +164,16 @@ export async function activatePet(id: string, confirm: MismatchConfirm): Promise
       notifyPetChanged();
       return { status: "activated", repaired: true };
     }
-    // ignore：按磁盘降级运行（时长未探测，无法验证 1-20s → 保守无语音，spec §6-3）
-    saveActiveId(id, false, manifest.displayName);
+    // ignore：按磁盘现状运行，不重写 manifest（FIX-3 诚实语义）。
+    // voice-cap 按 manifest 语音条目在磁盘的存在性判定：全部存在 → 保留 manifest 能力；
+    // 任一缺失 → 保守无语音（时长未探测无法验证 1-20s，spec §6-3）
+    const manifestEntriesOnDisk =
+      manifest.voices.length > 0 &&
+      manifest.voices.every((v) => scan.voiceFiles.some((f) => f.rel === v.file && f.exists));
+    const voiceCap = manifestEntriesOnDisk ? manifest.hasVoice : false;
+    saveActiveId(id, voiceCap, manifest.displayName);
     notifyPetChanged();
-    return { status: "activated", message: "已按降级模式激活（无语音）" };
+    return { status: "activated", ignoredDiff: true };
   } catch (e) {
     return { status: "error", message: (e as Error).message };
   }

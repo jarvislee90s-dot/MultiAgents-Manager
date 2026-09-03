@@ -398,7 +398,8 @@
       "mismatchIgnore": "Ignore, run degraded from disk",
       "mismatchCancel": "Cancel switch",
       "pendingFirstCheck": "Pending first activation check",
-      "error": "Failed: {{msg}}"
+      "error": "Failed: {{msg}}",
+      "ignoredDiff": "Differences ignored — running with current assets (you'll be prompted again next check)"
     },
     "startup": {
       "title": "Pet Assets Check",

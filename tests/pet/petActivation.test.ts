@@ -92,19 +92,43 @@ describe("activatePet", () => {
     expect(call?.[1]?.backup).toBe(true);
   });
 
-  it("manifest 不一致 + 用户选忽略：无语音降级激活", async () => {
+  it("manifest 不一致 + 用户选忽略：voice-cap 按 manifest 条目在磁盘的存在性判定（FIX-3）", async () => {
     const manifest: PetManifestView = {
-      id: "p1", displayName: "P", hasVoice: false, hasSubtitle: false,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100, voices: [],
+      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
+      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      voices: [
+        { group: "general", name: "a", file: g("general"), sizeBytes: 10, durationMs: 3000 },
+        { group: "done", name: "b", file: g("done"), sizeBytes: 10, durationMs: 3000 },
+      ],
     };
     tauriInvokeMock.mockImplementation((cmd: string) => {
+      // 磁盘仅 general 一条（done 缺失）→ 任一缺失 → voice-cap false
       if (cmd === "pet_scan") return Promise.resolve(scanOf([fourGroups[0]], 999)); // 图集也变了
       if (cmd === "pet_read_manifest") return Promise.resolve(manifest);
       return Promise.resolve(undefined);
     });
     const r = await activatePet("p1", async () => "ignore");
     expect(r.status).toBe("activated");
-    expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0");
+    expect(r.ignoredDiff).toBe(true); // 结构化标记（替代硬编码中文 message）
+    expect(r.message).toBeUndefined();
+    expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0"); // done 缺失 → 无语音
+  });
+
+  it("manifest 不一致 + 忽略：manifest 条目全部在磁盘 → voice-cap 保留 true", async () => {
+    const manifest: PetManifestView = {
+      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
+      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 10, durationMs: 3000 }],
+    };
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan") return Promise.resolve(scanOf([fourGroups[0]], 999));
+      if (cmd === "pet_read_manifest") return Promise.resolve(manifest);
+      return Promise.resolve(undefined);
+    });
+    const r = await activatePet("p1", async () => "ignore");
+    expect(r.status).toBe("activated");
+    expect(r.ignoredDiff).toBe(true);
+    expect(localStorage.getItem("mam-pet-voice-cap")).toBe("1"); // 条目齐全 → 按 manifest 能力保留
   });
 
   it("用户选取消：不激活", async () => {
