@@ -46,3 +46,50 @@ pub fn delete_pet_in(root: &Path, id: &str) -> Result<(), String> {
     }
     trash::delete(&dir).map_err(|e| format!("删除失败: {}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mkpet(root: &std::path::Path, id: &str) {
+        let dir = pet_dir(root, id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("spritesheet.webp"), b"s").unwrap();
+    }
+
+    #[test]
+    fn rename_updates_dir_and_manifest_id() {
+        let root = tempfile::tempdir().unwrap();
+        mkpet(root.path(), "old-name");
+        let m = manifest::PetManifest {
+            schema_version: 1,
+            id: "old-name".into(),
+            display_name: "D".into(),
+            description: String::new(),
+            source: "folder".into(),
+            sprite_version_number: 1,
+            spritesheet_size_bytes: 1,
+            has_voice: false,
+            has_subtitle: false,
+            voices: vec![],
+        };
+        manifest::write_with_backup(&pet_dir(root.path(), "old-name"), &m, false).unwrap();
+        rename_pet_in(root.path(), "old-name", "new-name").unwrap();
+        assert!(pet_dir(root.path(), "new-name").is_dir());
+        assert!(!pet_dir(root.path(), "old-name").exists());
+        let m2 = manifest::load(&pet_dir(root.path(), "new-name")).unwrap();
+        assert_eq!(m2.id, "new-name");
+        // 备份存在且记录旧 id
+        assert!(pet_dir(root.path(), "new-name").join(manifest::BACKUP_FILE).is_file());
+    }
+
+    #[test]
+    fn rename_conflict_errs() {
+        let root = tempfile::tempdir().unwrap();
+        mkpet(root.path(), "a");
+        mkpet(root.path(), "b");
+        assert!(rename_pet_in(root.path(), "a", "b").is_err());
+        // 重命名为自身是 no-op
+        assert!(rename_pet_in(root.path(), "a", "a").is_ok());
+    }
+}
