@@ -458,6 +458,21 @@
       "finish": "Done",
       "errorStage": "Stage failed: {{msg}}",
       "errorFinalize": "Import failed: {{msg}}"
+    },
+    "manage": {
+      "title": "Manage Pets",
+      "pick": "Pick a pet to manage",
+      "rename": "New name (folder)",
+      "renameBtn": "Rename",
+      "renamedToast": "Renamed to {{name}}",
+      "subtitle": "Import subtitles",
+      "save": "Save changes",
+      "savedToast": "Saved (manifest backed up & updated)",
+      "activeSwitchNotice": "Pet in use; switched back to foxbell first",
+      "openFolder": "Open folder",
+      "delete": "Delete pet",
+      "deleteConfirm": "Delete? The whole folder goes to recycle bin",
+      "deletedToast": "Deleted {{name}}"
     }
   }
 }

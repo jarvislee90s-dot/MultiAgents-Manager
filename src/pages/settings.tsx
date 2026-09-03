@@ -30,6 +30,7 @@ import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
 import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
 import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
+import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
 import { loadActiveId, loadActiveName } from "@/components/pet/petRuntime";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
@@ -49,6 +50,7 @@ export default function SettingsPage() {
   const [petCfg, setPetCfg] = useState(() => loadConfig());
   const [switchOpen, setSwitchOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const [activePetName, setActivePetName] = useState(loadActiveName());
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
@@ -485,6 +487,9 @@ export default function SettingsPage() {
                     <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
                       {t("settings.pet.importPet")}
                     </Button>
+                    <Button size="sm" variant="outline" onClick={() => setManageOpen(true)}>
+                      {t("settings.pet.managePet")}
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -494,6 +499,7 @@ export default function SettingsPage() {
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
       <PetImportDialog open={importOpen} onOpenChange={setImportOpen} />
+      <PetManageDialog open={manageOpen} onOpenChange={setManageOpen} />
     </WindowFrame>
   );
 }

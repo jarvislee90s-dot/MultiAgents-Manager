@@ -458,6 +458,21 @@
       "finish": "完成",
       "errorStage": "暂存失败：{{msg}}",
       "errorFinalize": "导入失败：{{msg}}"
+    },
+    "manage": {
+      "title": "修改宠物",
+      "pick": "选择要管理的宠物",
+      "rename": "新名称（文件夹名）",
+      "renameBtn": "重命名",
+      "renamedToast": "已重命名为 {{name}}",
+      "subtitle": "同步导入字幕",
+      "save": "保存修改",
+      "savedToast": "已保存（manifest 已备份更新）",
+      "activeSwitchNotice": "该宠物正在使用，已自动切回 foxbell",
+      "openFolder": "打开文件夹",
+      "delete": "删除宠物",
+      "deleteConfirm": "确认删除？整個文件夹将移入回收站",
+      "deletedToast": "已删除 {{name}}"
     }
   }
 }
