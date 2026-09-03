@@ -140,7 +140,7 @@ function PetCard(props: {
   t: (k: string) => string;
 }) {
   const { info, t } = props;
-  const thumb = info.builtin
+  const thumb = props.builtin
     ? "url(/pet/spritesheet.webp)"
     : info.dir
       ? `url(${convertFileSrc(`${info.dir}/spritesheet.webp`)})`

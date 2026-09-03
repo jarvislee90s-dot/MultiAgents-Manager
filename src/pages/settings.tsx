@@ -31,7 +31,7 @@ import { toggleWindow } from "@/lib/window";
 import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
 import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
 import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
-import { loadActiveId, loadActiveName } from "@/components/pet/petRuntime";
+import { loadActiveName } from "@/components/pet/petRuntime";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { useAppTranslation } from "@/hooks/use-app-translation";

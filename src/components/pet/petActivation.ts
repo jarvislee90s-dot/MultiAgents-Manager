@@ -23,6 +23,7 @@ export interface ActivationResult {
   manifestBuilt?: boolean;
   repaired?: boolean;
   message?: string;
+  issues?: ValidationIssue[];
 }
 
 function notifyPetChanged(): void {
