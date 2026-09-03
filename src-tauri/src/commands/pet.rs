@@ -141,3 +141,121 @@ pub async fn set_pet_always_on_top(app: AppHandle, on_top: bool) -> Result<(), S
     }
     Ok(())
 }
+
+// ===== 外部宠物 IPC（spec 2026-09-03-external-pet-import §5.1）=====
+use crate::services::pet::{self, import, manifest, petdex, scan};
+
+fn root() -> std::path::PathBuf {
+    pet::pets_root()
+}
+
+#[tauri::command]
+pub async fn pet_list_pets() -> Result<Vec<scan::PetSummary>, String> {
+    Ok(scan::list_pets_in(&root()))
+}
+
+#[tauri::command]
+pub async fn pet_list_codex_pets() -> Result<Vec<scan::CodexPetInfo>, String> {
+    let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
+    Ok(scan::list_codex_pets_in(&codex, &root()))
+}
+
+#[tauri::command]
+pub async fn pet_scan(id: String) -> Result<scan::PetScan, String> {
+    scan::scan_pet_in(&root(), &id)
+}
+
+#[tauri::command]
+pub async fn pet_read_manifest(id: String) -> Result<Option<manifest::PetManifest>, String> {
+    Ok(manifest::load(&pet::pet_dir(&root(), &id)))
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_folder(path: String) -> Result<import::StagedPet, String> {
+    import::stage_from_folder_in(&root(), std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_zip(path: String) -> Result<import::StagedPet, String> {
+    import::stage_from_zip_in(&root(), std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_codex(codex_id: String) -> Result<import::StagedPet, String> {
+    let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
+    import::stage_from_codex_in(&root(), &codex, &codex_id)
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_petdex(url: String) -> Result<import::StagedPet, String> {
+    petdex::stage_from_url(&root(), &url).await
+}
+
+#[tauri::command]
+pub async fn pet_stage_audio(
+    staging_id: String,
+    src_paths: Vec<String>,
+    group: String,
+) -> Result<Vec<import::StagedVoiceFile>, String> {
+    import::stage_audio_in(&root(), &staging_id, &src_paths, &group)
+}
+
+#[tauri::command]
+pub async fn pet_remove_staged_audio(staging_id: String, rel: String) -> Result<(), String> {
+    import::remove_audio_in(&root(), &staging_id, &rel, true)
+}
+
+#[tauri::command]
+pub async fn pet_finalize_import(
+    staging_id: String,
+    name: String,
+    manifest: manifest::PetManifest,
+) -> Result<scan::PetSummary, String> {
+    import::finalize_in(&root(), &staging_id, &name, manifest)
+}
+
+#[tauri::command]
+pub async fn pet_cancel_import(staging_id: String) -> Result<(), String> {
+    import::cancel_in(&root(), &staging_id)
+}
+
+#[tauri::command]
+pub async fn pet_update_manifest(
+    id: String,
+    mut manifest: manifest::PetManifest,
+    backup: bool,
+) -> Result<(), String> {
+    manifest.id = id.clone();
+    manifest::write_with_backup(&pet::pet_dir(&root(), &id), &manifest, backup)
+}
+
+#[tauri::command]
+pub async fn pet_rename_pet(old_id: String, new_id: String) -> Result<(), String> {
+    pet::rename_pet_in(&root(), &old_id, &new_id)
+}
+
+#[tauri::command]
+pub async fn pet_delete_pet(id: String) -> Result<(), String> {
+    pet::delete_pet_in(&root(), &id)
+}
+
+#[tauri::command]
+pub async fn pet_add_voice_files(
+    id: String,
+    src_paths: Vec<String>,
+    group: String,
+) -> Result<Vec<import::StagedVoiceFile>, String> {
+    import::add_voice_files_in(&root(), &id, &src_paths, &group)
+}
+
+#[tauri::command]
+pub async fn pet_remove_voice_file(id: String, rel: String) -> Result<(), String> {
+    import::remove_audio_in(&root(), &id, &rel, false)
+}
+
+#[tauri::command]
+pub async fn pet_reveal_folder(id: String) -> Result<(), String> {
+    let dir = pet::pet_dir(&root(), &id);
+    tauri_plugin_opener::open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
