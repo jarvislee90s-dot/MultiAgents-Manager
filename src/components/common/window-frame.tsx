@@ -1,4 +1,3 @@
-import { ThemeProvider } from "@/components/common/theme-provider";
 import { cn } from "@/lib/utils";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useState, type ReactNode } from "react";
@@ -28,18 +27,17 @@ export function WindowFrame({ titleBar, children, className, contentClassName }:
     };
   }, []);
 
+  // 主题由 theme-provider 的全局 store 管理（无 Provider，模块加载即应用）
   return (
-    <ThemeProvider defaultTheme="system" storageKey="tauri-ui-theme">
-      <div
-        className={cn(
-          "bg-background flex h-screen w-screen flex-col overflow-hidden",
-          isMaximized ? "" : "border-border rounded-lg border",
-          className
-        )}
-      >
-        {titleBar}
-        <main className={contentClassName}>{children}</main>
-      </div>
-    </ThemeProvider>
+    <div
+      className={cn(
+        "bg-background flex h-screen w-screen flex-col overflow-hidden",
+        isMaximized ? "" : "border-border rounded-lg border",
+        className
+      )}
+    >
+      {titleBar}
+      <main className={contentClassName}>{children}</main>
+    </div>
   );
 }
