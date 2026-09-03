@@ -29,6 +29,7 @@ import {
 import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
 import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
+import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
 import { loadActiveId, loadActiveName } from "@/components/pet/petRuntime";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
@@ -47,6 +48,7 @@ export default function SettingsPage() {
   const [petVisible, setPetVisible] = useState(() => loadVisible());
   const [petCfg, setPetCfg] = useState(() => loadConfig());
   const [switchOpen, setSwitchOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [activePetName, setActivePetName] = useState(loadActiveName());
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
@@ -476,9 +478,14 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between gap-2 py-2.5">
                   <label className="text-sm font-medium">{t("settings.pet.currentPet")}</label>
                   <span className="text-muted-foreground mr-auto pl-2 text-sm">{activePetName}</span>
-                  <Button size="sm" variant="outline" onClick={() => setSwitchOpen(true)}>
-                    {t("settings.pet.switchPet")}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setSwitchOpen(true)}>
+                      {t("settings.pet.switchPet")}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+                      {t("settings.pet.importPet")}
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -486,6 +493,7 @@ export default function SettingsPage() {
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
+      <PetImportDialog open={importOpen} onOpenChange={setImportOpen} />
     </WindowFrame>
   );
 }
