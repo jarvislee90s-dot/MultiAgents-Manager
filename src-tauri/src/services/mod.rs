@@ -2,6 +2,7 @@
 
 pub mod manifest;
 pub mod mcp;
+pub mod pet;
 pub mod plugin;
 pub mod preset;
 pub mod resource;
