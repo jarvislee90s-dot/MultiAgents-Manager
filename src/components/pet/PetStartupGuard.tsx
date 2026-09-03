@@ -6,8 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { loadActiveId, probeSheetRows, saveActiveId } from "./petRuntime";
-import { repairManifest } from "./petActivation";
+import { loadActiveId, probeSheetRows, saveActiveId, type PetRows } from "./petRuntime";
+import { buildManifestFromScan, repairManifest } from "./petActivation";
 import { diffManifestVsScan, type PetManifestView, type PetScan, type ValidationIssue } from "./petValidation";
 import { saveVisible } from "./petConfig";
 
@@ -21,7 +21,9 @@ export function PetStartupGuard() {
   const { t } = useTranslation();
   const [fatal, setFatal] = useState<string | null>(null);
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
-  const [ctx, setCtx] = useState<{ scan: PetScan; manifest: PetManifestView } | null>(null);
+  const [ctx, setCtx] = useState<{ scan: PetScan; manifest: PetManifestView | null } | null>(null);
+  // 图集探测到的行数（doUpdate 优先用探测值，探测失败才回退 manifest 记录，FIX-4）
+  const [probedRows, setProbedRows] = useState<PetRows | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -40,15 +42,19 @@ export function PetStartupGuard() {
         if (sizeChanged) {
           try {
             const { convertFileSrc } = await import("@tauri-apps/api/core");
-            await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
+            const rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
+            if (!disposed) setProbedRows(rows);
           } catch (e) {
             if (!disposed) setFatal((e as Error).message);
             return;
           }
+        } else if (manifest) {
+          // 大小未变：按 manifest 记录还原行数（校验时信任缓存，spec §4.2）
+          if (!disposed) setProbedRows(manifest.spriteVersionNumber === 2 ? 11 : 9);
         }
         if (!manifest) {
           if (!disposed) setIssues([{ kind: "voice-extra", detail: "manifest.json 缺失（待首次激活校验生成）" }]);
-          if (!disposed) setCtx({ scan, manifest: { id, displayName: id, hasVoice: false, hasSubtitle: false, spriteVersionNumber: 0, spritesheetSizeBytes: 0, voices: [] } });
+          if (!disposed) setCtx({ scan, manifest: null });
           return;
         }
         const list = diffManifestVsScan(manifest, scan);
@@ -56,8 +62,9 @@ export function PetStartupGuard() {
           setIssues(list);
           setCtx({ scan, manifest });
         }
-      } catch {
-        // 扫描失败（如宠物目录被整体删除）：宠物窗口自行降级，不打扰启动
+      } catch (e) {
+        // 扫描失败（如宠物目录被整体删除）：宠物窗口自行降级渲染，但主窗口仍需弹窗确认（EP2，FIX-4）
+        if (!disposed) setFatal((e as Error).message || "宠物素材扫描失败");
       }
     })();
     return () => {
@@ -67,9 +74,21 @@ export function PetStartupGuard() {
 
   const doUpdate = async () => {
     if (!ctx) return;
-    // rows 未知时按 manifest 记录；manifest 无记录（直投）按 9 保守（生成后下次激活会复核）
-    const rows = ctx.manifest.spriteVersionNumber === 2 ? 11 : 9;
-    const repaired = await repairManifest(ctx.manifest, ctx.scan, rows);
+    if (!ctx.manifest) {
+      // 直投（manifest 缺失）：走与切换一致的生成路径——字幕默认=有语音即有字幕（spec §6-2，FIX-4）
+      const rows: PetRows = probedRows ?? 9;
+      const built = await buildManifestFromScan(ctx.scan.id, ctx.scan, rows, "folder", true);
+      await invoke("pet_update_manifest", { id: ctx.scan.id, manifest: built, backup: false });
+      saveActiveId(ctx.scan.id, built.hasVoice, built.displayName);
+      emit("pet-active-changed", {}).catch(() => {});
+      toast.success(t("pet.startup.updated"));
+      setIssues(null);
+      return;
+    }
+    const manifest = ctx.manifest;
+    // rows 优先用探测值；未探测过才回退 manifest 记录（FIX-4）
+    const rows: PetRows = probedRows ?? (manifest.spriteVersionNumber === 2 ? 11 : 9);
+    const repaired = await repairManifest(manifest, ctx.scan, rows);
     await invoke("pet_update_manifest", { id: ctx.scan.id, manifest: repaired, backup: true });
     saveActiveId(ctx.scan.id, repaired.hasVoice, repaired.displayName);
     emit("pet-active-changed", {}).catch(() => {});
