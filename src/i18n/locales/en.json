@@ -411,6 +411,25 @@
       "updated": "Manifest updated",
       "switched": "Switched back to foxbell",
       "petHidden": "Pet hidden"
+    },
+    "import": {
+      "groupGeneral": "General chat (double-click)",
+      "groupApproval": "Approval needed (red)",
+      "groupDone": "Task done (green)",
+      "groupError": "Error",
+      "addAudio": "Add audio",
+      "remove": "Remove",
+      "duration": "{{ms}}s",
+      "problems": {
+        "too-short": "≤1s",
+        "too-long": "≥20s",
+        "no-duration": "unreadable duration",
+        "too-big": ">10MB"
+      },
+      "coverageOk": "All four groups present, voice enabled",
+      "coverageMissing": "Missing groups: {{groups}} (pet will have no voice)",
+      "totalSize": "Total voice size: {{size}}",
+      "tooLargeWarn": "Voice is large (>30MB), consider trimming"
     }
   }
 }

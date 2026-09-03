@@ -411,6 +411,25 @@
       "updated": "manifest 已更新",
       "switched": "已切回 foxbell",
       "petHidden": "宠物已关闭"
+    },
+    "import": {
+      "groupGeneral": "日常闲聊（双击说话）",
+      "groupApproval": "需要审批（红灯）",
+      "groupDone": "任务完成（绿灯）",
+      "groupError": "出错",
+      "addAudio": "添加音频",
+      "remove": "移除",
+      "duration": "{{ms}}s",
+      "problems": {
+        "too-short": "时长 ≤1s",
+        "too-long": "时长 ≥20s",
+        "too-big": "大于 10MB",
+        "no-duration": "无法读取时长"
+      },
+      "coverageOk": "四组齐全，语音可用",
+      "coverageMissing": "缺少分组：{{groups}}（该宠物将无语音）",
+      "totalSize": "语音总大小：{{size}}",
+      "tooLargeWarn": "语音总量较大（>30MB），建议精简"
     }
   }
 }
