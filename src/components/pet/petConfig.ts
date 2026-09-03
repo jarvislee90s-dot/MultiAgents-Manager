@@ -1,4 +1,6 @@
 // 桌宠配置 — localStorage 单后端，跨窗口 storage 事件同步（spec §10）
+import { loadVoiceCap } from "./petRuntime";
+
 export type PetAction = "jumping" | "waving" | "failed" | "waiting" | "review" | "running";
 export type PetScale = 0.75 | 1 | 1.25;
 
@@ -122,9 +124,9 @@ export function savePosition(pos: PetPosition): void {
   );
 }
 
-/** 完成提示音接管：宠物开启即接管（静音则整体静默，spec D3） */
+/** 完成提示音接管：宠物开启且当前宠物具备语音能力（无语音外部宠物回落主看板，spec §5.2） */
 export function petSoundTakeover(): boolean {
-  return loadVisible();
+  return loadVisible() && loadVoiceCap();
 }
 
 /** 通知浮窗抑制：宠物开启且置顶（spec D4） */

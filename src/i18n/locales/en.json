@@ -359,7 +359,9 @@
       "back": "← Back",
       "on": "On",
       "off": "Off",
-      "aboutText": "Foxbell Pet for MultiAgents Manager v1.0.0"
+      "aboutText": "Foxbell Pet for MultiAgents Manager v1.0.0",
+      "soundNoCap": "This pet has no voice assets (requires all four groups)",
+      "subtitleNoCap": "Subtitles disabled for this pet (subtitle = audio filename)"
     },
     "scale": {
       "small": "Small",

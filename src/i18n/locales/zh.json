@@ -359,7 +359,9 @@
       "back": "← 返回",
       "on": "开",
       "off": "关",
-      "aboutText": "Foxbell 桌宠 for MultiAgents Manager v1.0.0"
+      "aboutText": "Foxbell 桌宠 for MultiAgents Manager v1.0.0",
+      "soundNoCap": "该宠物没有可用语音（需四组音频齐全）",
+      "subtitleNoCap": "该宠物未启用字幕（字幕=音频文件名）"
     },
     "scale": {
       "small": "小",

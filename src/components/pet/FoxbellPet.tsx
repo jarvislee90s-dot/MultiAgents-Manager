@@ -2,12 +2,13 @@
 // Task 9：指针交互（拖拽方向动画/松手物理/单击/双击）+ 语音字幕；Task 10：状态卡片 + 跳转/歧义候选；Task 12 追加事件接线。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
 import { JumpWindowCandidate } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
+import { FOXBELL, resolveActivePet, type ActivePet } from "./petRuntime";
 import {
   loadConfig,
   loadVisible,
@@ -23,7 +24,7 @@ import {
   type PetCard,
   type PetStatusState,
 } from "./petStatus";
-import { MIN_SPEECH_MS, parseManifest, VoicePlayer, type VoiceGroup } from "./petVoices";
+import { MIN_SPEECH_MS, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { PetMenu } from "./PetMenu";
 import { usePetWindow } from "./usePetWindow";
 import "./pet-cursor.css";
@@ -37,6 +38,15 @@ export function FoxbellPet() {
     cfgRef.current = cfg;
   }, [cfg]);
   useEffect(() => subscribeConfig(() => setCfg(loadConfig())), []);
+
+  // ---- 激活宠物（外部宠物热切换，spec §12）----
+  const [active, setActive] = useState<ActivePet>(FOXBELL);
+  const activeRef = useRef(active);
+  const rowsRef = useRef<9 | 11>(11);
+  useEffect(() => {
+    activeRef.current = active;
+    rowsRef.current = active.rows;
+  }, [active]);
 
   const pet = usePetWindow();
   const { registerInteractive, contentRef, setMenuOpen } = pet; // useCallback/useRef 稳定引用，避免依赖整个 pet 对象（每次渲染重建）
@@ -123,30 +133,42 @@ export function FoxbellPet() {
   const voiceRef = useRef<VoicePlayer | null>(null);
   const unlockedRef = useRef(false);
 
-  // manifest 拉取一次；素材缺失/解析失败 → 语音静默降级，动作与字幕不受影响（spec §13）。
+  // 激活宠物解析：启动一次 + 监听热切换事件（失败回落 foxbell，spec §5.2/§12）。
   // StrictMode 双挂载：卸载时丢弃过期响应，保证重挂载后仍会重新拉取
   useEffect(() => {
-    let cancelled = false;
-    fetch("/pet/manifest.json")
-      .then((r) => r.json())
-      .then((raw) => {
-        if (cancelled) return;
-        const entries = parseManifest(raw);
-        const player = new VoicePlayer();
-        player.load(entries);
-        voiceRef.current = player;
-        // E6 竞态修复：手势解锁先于 manifest 就绪时，补一次 unlock，避免播放器解锁位丢失
-        if (unlockedRef.current) player.unlock();
-      })
-      .catch(() => {
-        /* 素材缺失：语音静默降级（spec §13） */
-      });
+    let disposed = false;
+    const refresh = () => {
+      resolveActivePet()
+        .then((p) => {
+          if (!disposed) setActive(p);
+        })
+        .catch(() => {
+          if (!disposed) setActive(FOXBELL);
+        });
+    };
+    refresh();
+    let un: (() => void) | null = null;
+    void listen("pet-active-changed", refresh).then((f) => {
+      if (disposed) f();
+      else un = f;
+    });
     return () => {
-      cancelled = true;
-      voiceRef.current?.dispose();
-      voiceRef.current = null;
+      disposed = true;
+      un?.();
     };
   }, []);
+
+  // VoicePlayer 随激活宠物重建（外部宠物 = blob 快照 URL，EP6）
+  useEffect(() => {
+    const player = new VoicePlayer();
+    player.load(active.voices, active.resolveVoiceUrl);
+    voiceRef.current = player;
+    if (unlockedRef.current) player.unlock();
+    return () => {
+      player.dispose();
+      voiceRef.current = null;
+    };
+  }, [active]);
 
   const showBubble = (text: string, ms: number) => {
     const gen = ++bubbleGen.current;
@@ -161,18 +183,24 @@ export function FoxbellPet() {
    *  不加闸门会在用户以为「关了桌宠」时继续出声（问题 6） */
   const playVoice = (group: VoiceGroup, action: PetAnimKey) => {
     if (!loadVisible()) return;
+    if (!activeRef.current.hasVoice) return; // 无语音宠物：动作照播、不出声不出字幕（spec §5.2）
     playTransient(action, 1700);
     const player = voiceRef.current;
     if (!player) return;
     const entry = player.pick(group);
     if (!entry) return; // 空组静默跳过（spec E5）
     // 字幕独立于声音闸门：talkative 即显示，最短 2.5s（spec D5 + E4）；声音由 muted 单独拦截
-    if (cfgRef.current.talkative) showBubble(entry.name, MIN_SPEECH_MS);
+    if (cfgRef.current.talkative && activeRef.current.hasSubtitle) showBubble(entry.name, MIN_SPEECH_MS);
     player.play(entry, {
       muted: cfgRef.current.muted,
       onSubtitle: (name, ms) => {
         // 声音路径的字幕仅在非静音时生效，且时长与真实音频对齐（> 2.5s 时覆盖上面的兜底时长）
-        if (!cfgRef.current.muted && cfgRef.current.talkative && ms > MIN_SPEECH_MS) {
+        if (
+          !cfgRef.current.muted &&
+          cfgRef.current.talkative &&
+          activeRef.current.hasSubtitle &&
+          ms > MIN_SPEECH_MS
+        ) {
           showBubble(name, ms);
         }
       },
@@ -298,6 +326,10 @@ export function FoxbellPet() {
     const gen = ++genRef.current.look;
     later(() => {
       if (genRef.current.look !== gen) return;
+      if (rowsRef.current !== 11) {
+        scheduleNextLook(); // v1 无环视行：静默续期（EP1）
+        return;
+      }
       const s = stateRef.current;
       if (!s.drag && !s.transient && !s.task) {
         s.look = true;
@@ -418,7 +450,7 @@ export function FoxbellPet() {
   }, [cfg.scale, menu, cards, moreCount, candidates, pet.syncSize]);
 
   const px = (v: number) => Math.round(v * cfg.scale);
-  const style = frameStyle(anim, frame, lookFrame, cfg.scale);
+  const style = frameStyle(anim, frame, lookFrame, cfg.scale, active.rows);
 
   // ---- 菜单回调（Fix 3：useCallback 稳定身份，避免 PetMenu 预览 effect 每次渲染重触发 → interval 抖动）----
   /** 关闭菜单（外点/Esc/关于行）：停预览 + 恢复穿透 */
@@ -469,7 +501,7 @@ export function FoxbellPet() {
           bottom: px(50), // 底部气泡区（spec §4.2）
           width: px(FRAME_W),
           height: px(FRAME_H),
-          backgroundImage: "url(/pet/spritesheet.webp)",
+          backgroundImage: `url(${active.spritesheetUrl})`,
           backgroundPosition: style.backgroundPosition,
           backgroundSize: style.backgroundSize,
           backgroundRepeat: "no-repeat",
@@ -664,6 +696,8 @@ export function FoxbellPet() {
             onClose={handleMenuClose}
             onPreview={handleMenuPreview}
             onHide={handleMenuHide}
+            voiceCapable={active.hasVoice}
+            subtitleCapable={active.hasSubtitle}
           />
         </div>
       )}
