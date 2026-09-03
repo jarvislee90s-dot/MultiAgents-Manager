@@ -17,6 +17,8 @@ export interface ActivePet {
   hasSubtitle: boolean;
   voices: VoiceEntry[];
   resolveVoiceUrl: (file: string) => string;
+  /** 释放运行时资源（外部宠物 = 逐个 revoke 音频 blob URL）；foxbell 无快照故无 dispose */
+  dispose?: () => void;
 }
 
 /** 内置 foxbell 描述符（voices 由 manifest.json 拉取后填充，spec EP10） */
@@ -136,18 +138,22 @@ interface ManifestDto {
   voices: ManifestVoiceDto[];
 }
 
-/** 音频内存快照：激活时全量 fetch → blob URL（EP6；任一失败整体降级为无语音） */
+/** 音频内存快照：激活时全量 fetch → blob URL（EP6；任一失败整体降级为无语音）。
+ *  返回的 dispose 逐个 revoke 创建的 objectURL（FIX-2：切换/卸载时防泄漏） */
 async function snapshotVoices(
   dir: string,
   voices: ManifestVoiceDto[]
-): Promise<{ entries: VoiceEntry[]; resolve: (file: string) => string } | null> {
+): Promise<{ entries: VoiceEntry[]; resolve: (file: string) => string; dispose: () => void } | null> {
+  const blobs = new Map<string, string>();
+  const created: string[] = [];
   try {
-    const blobs = new Map<string, string>();
     await Promise.all(
       voices.map(async (v) => {
         const res = await fetch(convertFileSrc(`${dir}/${v.file}`));
         if (!res.ok) throw new Error(`快照失败: ${v.file}`);
-        blobs.set(v.file, URL.createObjectURL(await res.blob()));
+        const url = URL.createObjectURL(await res.blob());
+        created.push(url);
+        blobs.set(v.file, url);
       })
     );
     return {
@@ -159,8 +165,26 @@ async function snapshotVoices(
         file: v.file,
       })),
       resolve: (file) => blobs.get(file) ?? "",
+      dispose: () => {
+        for (const url of created) {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            /* ignore */
+          }
+        }
+        created.length = 0;
+      },
     };
   } catch {
+    // 快照中途失败：撤销已创建的 URL，不留泄漏
+    for (const url of created) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        /* ignore */
+      }
+    }
     return null;
   }
 }
@@ -207,5 +231,6 @@ export async function resolveActivePet(): Promise<ActivePet> {
     hasSubtitle: manifest.hasSubtitle && !!snap,
     voices: snap?.entries ?? [],
     resolveVoiceUrl: snap?.resolve ?? (() => ""),
+    dispose: snap?.dispose,
   };
 }

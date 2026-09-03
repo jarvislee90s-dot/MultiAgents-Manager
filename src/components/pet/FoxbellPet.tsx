@@ -43,10 +43,26 @@ export function FoxbellPet() {
   const [active, setActive] = useState<ActivePet>(FOXBELL);
   const activeRef = useRef(active);
   const rowsRef = useRef<9 | 11>(11);
+  // 上一个 ActivePet（blob 快照防泄漏，FIX-2）：切换时 revoke 旧快照；
+  // StrictMode 双挂载各持独立快照，第一个被下一次 refresh 替换时 dispose 是正确行为
+  const prevActiveRef = useRef<ActivePet | null>(null);
+  const applyActive = (next: ActivePet) => {
+    const prev = prevActiveRef.current;
+    if (prev && prev !== next) prev.dispose?.();
+    prevActiveRef.current = next;
+    setActive(next);
+  };
   useEffect(() => {
     activeRef.current = active;
     rowsRef.current = active.rows;
   }, [active]);
+  // 组件卸载：释放当前快照（refresh effect 的 disposed 闸门保证不会在卸载后 setActive）
+  useEffect(
+    () => () => {
+      prevActiveRef.current?.dispose?.();
+    },
+    []
+  );
 
   const pet = usePetWindow();
   const { registerInteractive, contentRef, setMenuOpen } = pet; // useCallback/useRef 稳定引用，避免依赖整个 pet 对象（每次渲染重建）
@@ -140,10 +156,10 @@ export function FoxbellPet() {
     const refresh = () => {
       resolveActivePet()
         .then((p) => {
-          if (!disposed) setActive(p);
+          if (!disposed) applyActive(p);
         })
         .catch(() => {
-          if (!disposed) setActive(FOXBELL);
+          if (!disposed) applyActive(FOXBELL);
         });
     };
     refresh();

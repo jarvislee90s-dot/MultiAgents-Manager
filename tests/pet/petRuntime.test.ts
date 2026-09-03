@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadActiveId, saveActiveId, loadVoiceCap, rowsFromSize, FOXBELL } from "@/components/pet/petRuntime";
 
 describe("petRuntime", () => {
@@ -23,5 +23,70 @@ describe("petRuntime", () => {
     expect(FOXBELL.rows).toBe(11);
     expect(FOXBELL.hasVoice).toBe(true);
     expect(FOXBELL.resolveVoiceUrl("a.m4a")).toBe("/pet/voice/a.m4a");
+    expect(FOXBELL.dispose).toBeUndefined(); // foxbell 无 blob 快照，无需回收
+  });
+
+  describe("音频快照 blob URL 生命周期（spec §7/EP6）", () => {
+    beforeEach(() => {
+      // fetch blob 快照链路 mock：ok + blob()
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true, blob: async () => ({}) }))
+      );
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("resolveActivePet：dispose 撤销全部创建的 objectURL", async () => {
+      // stub Image：probeSheetRows 走 new Image().src 加载，jsdom 无解码能力 → 直接回 1536×2288
+      class FakeImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        naturalWidth = 1536;
+        naturalHeight = 2288;
+        set src(_v: string) {
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      vi.stubGlobal("Image", FakeImage);
+      // jsdom（Node 后端）的 createObjectURL 要求真 Blob：spy 拦截并返回合成 URL
+      let seq = 0;
+      vi.spyOn(URL, "createObjectURL").mockImplementation(() => `blob:mock-${++seq}`);
+      const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      const { resolveActivePet, saveActiveId: save } = await import("@/components/pet/petRuntime");
+      save("p1", true, "P1");
+      const { tauriInvokeMock } = await import("../msw/tauriMocks");
+      tauriInvokeMock.mockImplementation((cmd: string) => {
+        if (cmd === "pet_scan")
+          return Promise.resolve({
+            id: "p1",
+            dir: "/x/p1",
+            spritesheet: { rel: "spritesheet.webp", exists: true, size: 1 },
+            voiceFiles: [],
+          });
+        if (cmd === "pet_read_manifest")
+          return Promise.resolve({
+            id: "p1",
+            displayName: "P",
+            hasVoice: true,
+            hasSubtitle: true,
+            spriteVersionNumber: 2,
+            voices: [
+              { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 3000 },
+              { group: "done", name: "b", file: "voice/done/b.m4a", sizeBytes: 1, durationMs: 3000 },
+            ],
+          });
+        return Promise.resolve(undefined);
+      });
+      const pet = await resolveActivePet();
+      expect(pet.rows).toBe(11); // FakeImage 1536×2288 → v2
+      expect(pet.voices).toHaveLength(2); // 两条语音 → 两个 blob URL
+      expect(pet.dispose).toBeTypeOf("function");
+      pet.dispose!();
+      expect(revokeSpy).toHaveBeenCalledTimes(2);
+      tauriInvokeMock.mockRestore();
+    });
   });
 });
