@@ -72,7 +72,7 @@ tests/
 - Modify: `src-tauri/capabilities/default.json`
 - Modify: `package.json`（经 pnpm）
 
-- [ ] **Step 1: 添加 Rust 依赖**
+- [x] **Step 1: 添加 Rust 依赖**
 
 `src-tauri/Cargo.toml` 的 `[dependencies]` 末尾（`semver = "1"` 之后）追加：
 
@@ -82,13 +82,13 @@ zip = "2"
 tauri-plugin-dialog = "2"
 ```
 
-- [ ] **Step 2: 添加前端依赖**
+- [x] **Step 2: 添加前端依赖**
 
 ```bash
 pnpm add @tauri-apps/plugin-dialog
 ```
 
-- [ ] **Step 3: 启用 asset 协议**
+- [x] **Step 3: 启用 asset 协议**
 
 `src-tauri/tauri.conf.json` 中 `"security"` 块（第 39-41 行）改为：
 
@@ -102,7 +102,7 @@ pnpm add @tauri-apps/plugin-dialog
     }
 ```
 
-- [ ] **Step 4: 注册 dialog 插件**
+- [x] **Step 4: 注册 dialog 插件**
 
 `src-tauri/src/lib.rs` 在 `.plugin(tauri_plugin_notification::init())`（第 69 行）后追加一行：
 
@@ -110,7 +110,7 @@ pnpm add @tauri-apps/plugin-dialog
         .plugin(tauri_plugin_dialog::init())
 ```
 
-- [ ] **Step 5: 主窗口 dialog 权限**
+- [x] **Step 5: 主窗口 dialog 权限**
 
 `src-tauri/capabilities/default.json` 的 `permissions` 数组末尾追加：
 
@@ -118,7 +118,7 @@ pnpm add @tauri-apps/plugin-dialog
     "dialog:allow-open"
 ```
 
-- [ ] **Step 6: 编译验证**
+- [x] **Step 6: 编译验证**
 
 ```bash
 cd src-tauri && cargo check
@@ -130,7 +130,7 @@ cd .. && pnpm build
 ```
 Expected: TypeScript 编译 + Vite 打包通过。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json src-tauri/src/lib.rs src-tauri/capabilities/default.json package.json pnpm-lock.yaml
@@ -146,7 +146,7 @@ git commit -m "chore(pet): add reqwest/zip/dialog deps and asset protocol scope"
 - Create: `src-tauri/src/services/pet/manifest.rs`
 - Modify: `src-tauri/src/services/mod.rs:8`（`pub mod preset;` 后加一行）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `src-tauri/src/services/pet/manifest.rs`，先只写测试骨架（实现部分留空会编译失败，即为"失败测试"）：
 
@@ -282,7 +282,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 创建服务模块入口**
+- [x] **Step 2: 创建服务模块入口**
 
 创建 `src-tauri/src/services/pet/mod.rs`：
 
@@ -339,7 +339,7 @@ pub fn delete_pet_in(root: &Path, id: &str) -> Result<(), String> {
 
 > 注：此时 `import` / `scan` / `petdex` 子模块尚未创建，为让本任务编译通过，先创建三个占位文件（后续任务替换内容）：`pub fn validate_pet_name(_root: &std::path::Path, _name: &str) -> Result<(), String> { unimplemented!() }` 放在临时 `import.rs`；`scan.rs` / `petdex.rs` 为空模块体。
 
-- [ ] **Step 3: 注册模块**
+- [x] **Step 3: 注册模块**
 
 `src-tauri/src/services/mod.rs` 第 8 行 `pub mod preset;` 后追加：
 
@@ -347,14 +347,14 @@ pub fn delete_pet_in(root: &Path, id: &str) -> Result<(), String> {
 pub mod pet;
 ```
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
 ```bash
 cd src-tauri && cargo test pet::manifest
 ```
 Expected: 4 个测试 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/services/
@@ -370,7 +370,7 @@ git commit -m "feat(pet): manifest module with camelCase serde and .bak backup"
 **Files:**
 - Modify: `src-tauri/src/services/pet/scan.rs`（替换占位）
 
-- [ ] **Step 1: 写实现与测试**
+- [x] **Step 1: 写实现与测试**
 
 ```rust
 // 扫描 — 单宠物 stat 快扫、仓库清单、codex 目录清单（spec §6-1/§8.1）
@@ -621,14 +621,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试**
+- [x] **Step 2: 运行测试**
 
 ```bash
 cd src-tauri && cargo test pet::scan
 ```
 Expected: 4 个测试 PASS。
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src-tauri/src/services/pet/scan.rs
@@ -642,7 +642,7 @@ git commit -m "feat(pet): scan module with stat fast-scan and codex listing"
 **Files:**
 - Modify: `src-tauri/src/services/pet/import.rs`（替换占位）
 
-- [ ] **Step 1: 写实现**
+- [x] **Step 1: 写实现**
 
 ```rust
 // 导入 — 暂存区、来源落地（文件夹/zip/codex）、音频暂存、finalize 原子落地（spec §8/§13）
@@ -1030,7 +1030,7 @@ pub fn cancel_in(root: &Path, staging_id: &str) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 2: 追加测试（同文件末尾）**
+- [x] **Step 2: 追加测试（同文件末尾）**
 
 ```rust
 #[cfg(test)]
@@ -1192,14 +1192,14 @@ mod tests {
 
 > 注意 `zip_slip_rejected`：zip 2.x 的 `ZipWriter::start_file` 对 `../` 名称可能自动规范化为安全名（此时断言"落点必须在 dest 内"）。两条断言路径覆盖两种实现行为，避免对 zip 内部规范化策略过度耦合。
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 ```bash
 cd src-tauri && cargo test pet::import
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/services/pet/import.rs
@@ -1214,7 +1214,7 @@ git commit -m "feat(pet): staging pipeline with safe unzip, audio staging and at
 - Modify: `src-tauri/src/services/pet/petdex.rs`（替换占位）
 - Modify: `src-tauri/src/services/pet/mod.rs`（rename/delete 已在 Task 2 写入，本任务补测试）
 
-- [ ] **Step 1: 写 petdex 实现**
+- [x] **Step 1: 写 petdex 实现**
 
 ```rust
 // petdex 在线导入 — 链接解析、清单匹配、zip 下载（spec §8.3/§13 域名白名单）
@@ -1320,7 +1320,7 @@ pub async fn stage_from_url(root: &Path, url: &str) -> Result<StagedPet, String>
 }
 ```
 
-- [ ] **Step 2: 写测试（petdex 测试 + mod.rs 的 rename/delete 测试）**
+- [x] **Step 2: 写测试（petdex 测试 + mod.rs 的 rename/delete 测试）**
 
 `petdex.rs` 末尾追加：
 
@@ -1411,14 +1411,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
 ```bash
 cd src-tauri && cargo test pet::
 ```
 Expected: 全部 PASS（含 Task 2/3/4）。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/services/pet/
@@ -1433,7 +1433,7 @@ git commit -m "feat(pet): petdex fetch with host whitelist and rename/delete tes
 - Modify: `src-tauri/src/commands/pet.rs`（文件末尾追加）
 - Modify: `src-tauri/src/lib.rs:71-122`（invoke_handler）
 
-- [ ] **Step 1: 追加命令**
+- [x] **Step 1: 追加命令**
 
 `src-tauri/src/commands/pet.rs` 末尾追加：
 
@@ -1557,7 +1557,7 @@ pub async fn pet_reveal_folder(id: String) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 2: 注册命令**
+- [x] **Step 2: 注册命令**
 
 `src-tauri/src/lib.rs` 的 `generate_handler!` 列表中，`commands::pet::set_pet_always_on_top,`（第 80 行）之后插入：
 
@@ -1582,14 +1582,14 @@ pub async fn pet_reveal_folder(id: String) -> Result<(), String> {
         commands::pet::pet_reveal_folder,
 ```
 
-- [ ] **Step 3: 验证**
+- [x] **Step 3: 验证**
 
 ```bash
 cd src-tauri && cargo check && cargo test pet:: && cargo clippy -- -D warnings
 ```
 Expected: 编译、测试、clippy 全过。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/commands/pet.rs src-tauri/src/lib.rs
@@ -1606,7 +1606,7 @@ git commit -m "feat(pet): register 18 external pet IPC commands"
 - Modify: `src/components/pet/petAnimations.ts`
 - Test: `tests/pet/petAnimations.test.ts`（追加用例）
 
-- [ ] **Step 1: 追加失败测试**
+- [x] **Step 1: 追加失败测试**
 
 在 `tests/pet/petAnimations.test.ts` 末尾追加（先读现有文件确认导入）：
 
@@ -1628,14 +1628,14 @@ describe("frameStyle rows 参数（v1/v2，spec EP1）", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petAnimations.test.ts
 ```
 Expected: FAIL（`frameStyle` 第 5 个参数不存在，TS 报错或断言不等）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/components/pet/petAnimations.ts` 的 `frameStyle` 改为：
 
@@ -1670,14 +1670,14 @@ export function frameStyle(
 
 （文件头注释补一行：`// rows 参数：v1=9（无 look 行）/ v2=11（默认），spec EP1`）
 
-- [ ] **Step 4: 运行测试通过**
+- [x] **Step 4: 运行测试通过**
 
 ```bash
 pnpm test tests/pet/petAnimations.test.ts
 ```
 Expected: 全部 PASS（旧用例默认 11 行不受影响）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petAnimations.ts tests/pet/petAnimations.test.ts
@@ -1692,7 +1692,7 @@ git commit -m "feat(pet): frameStyle accepts sheet rows for v1 pets"
 - Modify: `src/components/pet/petVoices.ts`
 - Test: `tests/pet/petVoices.test.ts`（追加用例）
 
-- [ ] **Step 1: 追加失败测试**
+- [x] **Step 1: 追加失败测试**
 
 ```ts
 describe("VoicePlayer resolveUrl（外部宠物 blob 快照，spec EP6）", () => {
@@ -1719,14 +1719,14 @@ describe("VoicePlayer resolveUrl（外部宠物 blob 快照，spec EP6）", () =
 
 （文件顶部导入补 `VoicePlayer`、`VoiceEntry`）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petVoices.test.ts
 ```
 Expected: FAIL（load 无第二参数——TS 编译期即报错）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `petVoices.ts` 中 `VoicePlayer` 的改动（其余不变）：
 
@@ -1763,14 +1763,14 @@ export class VoicePlayer {
         this.shared.src = this.resolve(entry.file);
 ```
 
-- [ ] **Step 4: 运行测试通过**
+- [x] **Step 4: 运行测试通过**
 
 ```bash
 pnpm test tests/pet/petVoices.test.ts
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petVoices.ts tests/pet/petVoices.test.ts
@@ -1786,7 +1786,7 @@ git commit -m "feat(pet): VoicePlayer accepts injected voice URL resolver"
 - Modify: `tests/msw/tauriMocks.ts`、`tests/setup.ts`
 - Test: `tests/pet/petRuntime.test.ts`
 
-- [ ] **Step 1: 扩展测试基础设施**
+- [x] **Step 1: 扩展测试基础设施**
 
 `tests/msw/tauriMocks.ts`：`export const tauriInvokeMock = vi.fn(...)` 之前加导出、switch 中加默认分支：
 
@@ -1824,7 +1824,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 创建 `tests/pet/petRuntime.test.ts`：
 
@@ -1858,14 +1858,14 @@ describe("petRuntime", () => {
 });
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petRuntime.test.ts
 ```
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 创建 `src/components/pet/petRuntime.ts`：
 
@@ -2083,14 +2083,14 @@ export async function resolveActivePet(): Promise<ActivePet> {
 }
 ```
 
-- [ ] **Step 5: 运行测试通过**
+- [x] **Step 5: 运行测试通过**
 
 ```bash
 pnpm test tests/pet/petRuntime.test.ts
 ```
 Expected: 3 个用例 PASS。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/components/pet/petRuntime.ts tests/pet/petRuntime.test.ts tests/msw/tauriMocks.ts tests/setup.ts
@@ -2107,7 +2107,7 @@ git commit -m "feat(pet): active pet runtime with probes and blob voice snapshot
 - Modify: `src/components/pet/petConfig.ts:126-128`
 - Test: `tests/pet/petMenu.test.tsx`、`tests/pet/notificationTakeover.test.ts`（追加）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/pet/petMenu.test.tsx` 追加：
 
@@ -2160,14 +2160,14 @@ describe("语音能力闸门（spec §5.2）", () => {
 
 （两个测试文件按需补 import：`PetMenu`、`fireEvent`、`render`、`screen`、`petSoundTakeover`——与现有文件一致）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petMenu.test.tsx tests/pet/notificationTakeover.test.ts
 ```
 Expected: FAIL（PetMenu 无 voiceCapable 属性 / takeover 不读能力键）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 **petConfig.ts** —— `petSoundTakeover` 改为：
 
@@ -2324,7 +2324,7 @@ import { FOXBELL, resolveActivePet, type ActivePet } from "./petRuntime";
           />
 ```
 
-- [ ] **Step 4: i18n 键**
+- [x] **Step 4: i18n 键**
 
 `zh.json` 的 `pet.menu` 对象内追加：
 
@@ -2340,14 +2340,14 @@ import { FOXBELL, resolveActivePet, type ActivePet } from "./petRuntime";
       "subtitleNoCap": "Subtitles disabled for this pet (subtitle = audio filename)"
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 ```bash
 pnpm test tests/pet/
 ```
 Expected: 全部 PASS（含既有 foxbell 系列回归——若既有用例因 PetMenu 新必填 props 报 TS 错，为其 render 调用补 `voiceCapable subtitleCapable`）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/components/pet/ src/i18n/locales/ tests/pet/
@@ -2364,7 +2364,7 @@ git commit -m "feat(pet): integrate active pet runtime with v1 degrade and capab
 - Create: `src/components/pet/petValidation.ts`
 - Test: `tests/pet/petValidation.test.ts`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -2440,14 +2440,14 @@ describe("petValidation", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petValidation.test.ts
 ```
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 统一校验纯函数 — manifest×磁盘 diff、音频合法性、三档判定（spec §6；探测由 petRuntime 提供）
@@ -2588,14 +2588,14 @@ export function spriteVersionOf(rows: 9 | 11): 1 | 2 {
 }
 ```
 
-- [ ] **Step 4: 运行测试通过**
+- [x] **Step 4: 运行测试通过**
 
 ```bash
 pnpm test tests/pet/petValidation.test.ts
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petValidation.ts tests/pet/petValidation.test.ts
@@ -2610,7 +2610,7 @@ git commit -m "feat(pet): unified validation pure functions"
 - Create: `src/components/pet/petActivation.ts`
 - Test: `tests/pet/petActivation.test.ts`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -2767,14 +2767,14 @@ describe("buildManifestFromScan / repairManifest", () => {
 });
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petActivation.test.ts
 ```
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 // 激活编排 — 统一校验算法交互层：直投生成 / 不一致修复 / 忽略降级 / 激活指针（spec §6）
@@ -2952,14 +2952,14 @@ export async function activatePet(id: string, confirm: MismatchConfirm): Promise
 
 > 注：`buildManifestFromScan` 中的 display/overrides 供 PetManageDialog 对直投宠物保存时复用（Task 17）。
 
-- [ ] **Step 4: 运行测试通过**
+- [x] **Step 4: 运行测试通过**
 
 ```bash
 pnpm test tests/pet/petActivation.test.ts
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petActivation.ts tests/pet/petActivation.test.ts
@@ -2976,7 +2976,7 @@ git commit -m "feat(pet): activation orchestration with manifest build/repair/de
 - Modify: `src/i18n/locales/zh.json`、`en.json`
 - Test: `tests/pet/petSettings.test.tsx`（追加）
 
-- [ ] **Step 1: i18n 键**
+- [x] **Step 1: i18n 键**
 
 `zh.json` 的 `settings.pet` 对象内追加：
 
@@ -3032,7 +3032,7 @@ git commit -m "feat(pet): activation orchestration with manifest build/repair/de
     }
 ```
 
-- [ ] **Step 2: 写 PetSwitchDialog**
+- [x] **Step 2: 写 PetSwitchDialog**
 
 ```tsx
 // PetSwitchDialog — 切换宠物：卡片列表 + 统一校验激活（spec §9）
@@ -3221,7 +3221,7 @@ function PetCard(props: {
 
 > 实现注意：`PetCard` 缩略图需真实 asset URL——在文件顶部 `import { convertFileSrc } from "@tauri-apps/api/core";` 并把占位行替换为 `url(${convertFileSrc(`${info.dir}/spritesheet.webp`)})`（上面的 `asset://mock` 占位仅示意，落地时必须用 convertFileSrc）。`backgroundSize` 固定 384×572（2×192、(11/4)×208 近似首帧预览即可）。
 
-- [ ] **Step 3: 设置页接线**
+- [x] **Step 3: 设置页接线**
 
 `src/pages/settings.tsx`：
 
@@ -3261,7 +3261,7 @@ import { loadActiveId, loadActiveName } from "@/components/pet/petRuntime";
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
 ```
 
-- [ ] **Step 4: 写失败测试（先于 Step 2/3 亦可，此处一并跑）**
+- [x] **Step 4: 写失败测试（先于 Step 2/3 亦可，此处一并跑）**
 
 `tests/pet/petSettings.test.tsx` 追加（按现有文件的 render 方式对齐，必要时补 import）：
 
@@ -3279,14 +3279,14 @@ describe("外部宠物三入口（spec §11）", () => {
 
 > 执行者注意：若现有 `petSettings.test.tsx` 使用 `t("...")` 实际键渲染（中文 locale），按钮名匹配用中文分支；先读该文件确认 helper 命名（`renderSettings` 为示意，以实际为准），保持一致。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 ```bash
 pnpm test tests/pet/petSettings.test.tsx
 ```
 Expected: PASS（含既有回归）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/components/pet/manage/PetSwitchDialog.tsx src/pages/settings.tsx src/i18n/locales/ tests/pet/petSettings.test.tsx
@@ -3303,7 +3303,7 @@ git commit -m "feat(pet): switch dialog with unified validation and settings ent
 - Modify: `src/i18n/locales/zh.json`、`en.json`
 - Test: `tests/pet/petStartupGuard.test.tsx`
 
-- [ ] **Step 1: i18n 键**
+- [x] **Step 1: i18n 键**
 
 `zh.json` 顶层 `pet` 内追加：
 
@@ -3339,7 +3339,7 @@ git commit -m "feat(pet): switch dialog with unified validation and settings ent
     }
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```tsx
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -3411,14 +3411,14 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
 });
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petStartupGuard.test.tsx
 ```
 Expected: FAIL（组件不存在）。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 ```tsx
 // PetStartupGuard — 主窗口启动校验弹窗（EP2）：素材异常时确认处理，宠物窗口自身永不弹窗
@@ -3557,7 +3557,7 @@ export function PetStartupGuard() {
 
 > 执行者注意：shadcn `DialogContent` 若不支持 `onInteractOutside` 透传，改为外层包一层（radix Dialog 支持该 prop；先读 `src/components/ui/dialog.tsx` 确认）。`toFoxbell` 的 toast 参数直接传文案字符串。
 
-- [ ] **Step 5: 挂载到主窗口**
+- [x] **Step 5: 挂载到主窗口**
 
 读 `src/pages/home.tsx`，在页面根组件返回的 JSX 最外层（或与现有并列的 Fragment）加入：
 
@@ -3567,14 +3567,14 @@ import { PetStartupGuard } from "@/components/pet/PetStartupGuard";
       <PetStartupGuard />
 ```
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 ```bash
 pnpm test tests/pet/petStartupGuard.test.tsx
 ```
 Expected: 3 个用例 PASS。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/components/pet/PetStartupGuard.tsx src/pages/home.tsx src/i18n/locales/ tests/pet/petStartupGuard.test.tsx
@@ -3592,7 +3592,7 @@ git commit -m "feat(pet): startup validation dialog on main window"
 - Modify: `src/i18n/locales/zh.json`、`en.json`
 - Test: `tests/pet/voiceGroupEditor.test.tsx`
 
-- [ ] **Step 1: i18n 键**
+- [x] **Step 1: i18n 键**
 
 `zh.json` 顶层 `pet` 内追加：
 
@@ -3642,7 +3642,7 @@ git commit -m "feat(pet): startup validation dialog on main window"
     }
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```tsx
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -3693,14 +3693,14 @@ describe("VoiceGroupEditor", () => {
 });
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/voiceGroupEditor.test.tsx
 ```
 Expected: FAIL。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 ```tsx
 // VoiceGroupEditor — 四分组音频编辑器（导入向导暂存模式 / 修改面板直写模式共用，spec §8.4-3/§10-3）
@@ -3809,14 +3809,14 @@ export function VoiceGroupEditor(props: {
 }
 ```
 
-- [ ] **Step 5: 运行测试通过**
+- [x] **Step 5: 运行测试通过**
 
 ```bash
 pnpm test tests/pet/voiceGroupEditor.test.tsx
 ```
 Expected: 全部 PASS。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/components/pet/manage/VoiceGroupEditor.tsx src/i18n/locales/ tests/pet/voiceGroupEditor.test.tsx
@@ -3833,7 +3833,7 @@ git commit -m "feat(pet): shared voice group editor with inline validation"
 - Modify: `src/i18n/locales/zh.json`、`en.json`
 - Test: `tests/pet/petImportDialog.test.tsx`
 
-- [ ] **Step 1: i18n 键（追加到 `pet.import`）**
+- [x] **Step 1: i18n 键（追加到 `pet.import`）**
 
 `zh.json`：
 
@@ -3901,7 +3901,7 @@ git commit -m "feat(pet): shared voice group editor with inline validation"
       "errorFinalize": "Import failed: {{msg}}"
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```tsx
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -3987,14 +3987,14 @@ describe("PetImportDialog", () => {
 });
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petImportDialog.test.tsx
 ```
 Expected: FAIL。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 ```tsx
 // PetImportDialog — 导入向导：来源（codex/本地/petdex）→ 配置确认 → 完成（spec §8）
@@ -4375,7 +4375,7 @@ export function PetImportDialog(props: {
 
 > 执行者注意：shadcn `Input`/`Switch`/`Button` 若与本文件属性用法有出入，以 `src/components/ui/` 实际导出为准微调。
 
-- [ ] **Step 5: 设置页补导入入口**
+- [x] **Step 5: 设置页补导入入口**
 
 `settings.tsx`：import `PetImportDialog`；新增 `const [importOpen, setImportOpen] = useState(false);`；三入口行在"切换宠物"按钮旁加：
 
@@ -4387,14 +4387,14 @@ export function PetImportDialog(props: {
 
 （"修改宠物"按钮在 Task 17 接线，本任务先渲染 disabled 占位或直接留到 Task 17——选择：本任务不加修改按钮，Task 17 一并加，避免 disabled 占位。）`<Toaster />` 后挂 `<PetImportDialog open={importOpen} onOpenChange={setImportOpen} />`。
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 ```bash
 pnpm test tests/pet/petImportDialog.test.tsx tests/pet/petSettings.test.tsx
 ```
 Expected: PASS。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/components/pet/manage/PetImportDialog.tsx src/pages/settings.tsx src/i18n/locales/ tests/pet/
@@ -4411,7 +4411,7 @@ git commit -m "feat(pet): import wizard with codex/local/petdex sources"
 - Modify: `src/i18n/locales/zh.json`、`en.json`
 - Test: `tests/pet/petManageDialog.test.tsx`
 
-- [ ] **Step 1: i18n 键**
+- [x] **Step 1: i18n 键**
 
 `zh.json` 顶层 `pet` 内追加：
 
@@ -4453,7 +4453,7 @@ git commit -m "feat(pet): import wizard with codex/local/petdex sources"
     }
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```tsx
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -4541,14 +4541,14 @@ describe("PetManageDialog", () => {
 });
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 ```bash
 pnpm test tests/pet/petManageDialog.test.tsx
 ```
 Expected: FAIL。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 ```tsx
 // PetManageDialog — 修改宠物：重命名/展示名/音频/字幕/删除/打开文件夹（spec §10；激活中先切回 foxbell，EP5）
@@ -4794,7 +4794,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 }
 ```
 
-- [ ] **Step 5: 设置页补修改入口**
+- [x] **Step 5: 设置页补修改入口**
 
 `settings.tsx`：import `PetManageDialog`；`const [manageOpen, setManageOpen] = useState(false);`；切换/导入按钮旁加：
 
@@ -4806,14 +4806,14 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 
 挂 `<PetManageDialog open={manageOpen} onOpenChange={setManageOpen} />`。
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 ```bash
 pnpm test tests/pet/petManageDialog.test.tsx tests/pet/petSettings.test.tsx
 ```
 Expected: PASS。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/components/pet/manage/PetManageDialog.tsx src/pages/settings.tsx src/i18n/locales/ tests/pet/
@@ -4826,7 +4826,7 @@ git commit -m "feat(pet): manage dialog with rename/audio/subtitle/delete"
 
 **Files:** 无新文件（验证任务）
 
-- [ ] **Step 1: 全量自动化检查**
+- [x] **Step 1: 全量自动化检查**
 
 ```bash
 cd src-tauri && cargo test && cargo clippy -- -D warnings
@@ -4834,7 +4834,7 @@ cd .. && pnpm test && pnpm check
 ```
 Expected: 全部通过。若有 lint/format 报错：`pnpm format` + `pnpm lint:fix` 后重跑。
 
-- [ ] **Step 2: i18n 键校对**
+- [x] **Step 2: i18n 键校对**
 
 人工比对 `zh.json` 与 `en.json`：`settings.pet.*`、`pet.menu.soundNoCap/subtitleNoCap`、`pet.switch.*`、`pet.startup.*`、`pet.import.*`、`pet.manage.*` 两组键完全一致（键集合相同）。可用命令辅助：
 
@@ -4855,7 +4855,7 @@ print('zh-only:',sorted(a-b)); print('en-only:',sorted(b-a))
 ```
 Expected: 两组输出均为空。
 
-- [ ] **Step 3: 手动 E2E 验收（对照 spec §15.2 AC1-AC10）**
+- [ ] **Step 3: 手动 E2E 验收（对照 spec §15.2 AC1-AC10）**——待人工执行（实施环境无法操作实机 GUI；自动化检查已全过：cargo test 145 通过、clippy 干净、pnpm test 100 通过、pnpm build 通过、i18n 键比对一致）
 
 `pnpm tauri:dev` 启动，逐项执行并在本文件勾选：
 
@@ -4870,7 +4870,7 @@ Expected: 两组输出均为空。
 - [ ] AC9：修改宠物 → 重命名/删除非激活宠物 → manifest 同步 / 目录进回收站
 - [ ] AC10：切回 foxbell → 对照 `2026-09-01-foxbell-pet-design.md` §9 交互清单抽查：拖拽物理、单击挥手、双击说话、红灯/绿灯语音、右键菜单各页、显隐、位置记忆
 
-- [ ] **Step 4: 修复发现的问题并提交**
+- [x] **Step 4: 修复发现的问题并提交**
 
 任何 AC 失败：修复 → 补测试 → 重新执行对应 AC。
 
@@ -4879,7 +4879,7 @@ git add -A
 git commit -m "test(pet): manual E2E acceptance pass for external pets"
 ```
 
-- [ ] **Step 5: 汇总**
+- [x] **Step 5: 汇总**
 
 在 PR/分支说明中列出：完成任务数、测试统计（`pnpm test 2>&1 | tail -5`、`cargo test 2>&1 | tail -5` 输出）、AC 通过状态。
 
