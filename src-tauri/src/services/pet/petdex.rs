@@ -32,9 +32,24 @@ pub struct PetdexEntry {
     pub sprite_version_number: u8,
 }
 
+/// 完整 URL 合法性：强制 https + host 白名单（spec §13；重定向每跳同样适用）
+fn url_allowed(url: &reqwest::Url) -> bool {
+    url.scheme() == "https" && url.host_str().map(allowed_host).unwrap_or(false)
+}
+
 fn client(secs: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(secs))
+        // 每跳重定向都重新校验白名单：防 http 明文降级与跳转到非 petdex 域
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("重定向次数过多")
+            } else if url_allowed(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("重定向目标不在 petdex 白名单内")
+            }
+        }))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -56,14 +71,11 @@ pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, String> {
         .ok_or_else(|| format!("petdex 上未找到宠物: {}", slug))
 }
 
-/// 下载 zip 字节（域名白名单校验，spec §8.3）
+/// 下载 zip 字节（首跳 https + 域名白名单校验，重定向每跳由 client 策略校验，spec §8.3）
 pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, String> {
-    let host = reqwest::Url::parse(zip_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
-        .unwrap_or_default();
-    if !allowed_host(&host) {
-        return Err(format!("拒绝非 petdex 域下载: {}", host));
+    let url = reqwest::Url::parse(zip_url).map_err(|e| format!("下载地址非法: {}", e))?;
+    if !url_allowed(&url) {
+        return Err(format!("拒绝非 petdex 域下载: {}", url.as_str()));
     }
     let bytes = client(120)?
         .get(zip_url)
@@ -120,6 +132,20 @@ mod tests {
         assert!(allowed_host("assets.petdex.dev"));
         assert!(!allowed_host("evil.dev"));
         assert!(!allowed_host("petdex.dev.evil.com"));
+    }
+
+    #[test]
+    fn url_allowed_requires_https_and_whitelist() {
+        let mk = |u: &str| reqwest::Url::parse(u).unwrap();
+        // http 明文拒绝（spec §13 强制 https）
+        assert!(!url_allowed(&mk("http://petdex.dev/x.zip")));
+        // https 白名单域通过
+        assert!(url_allowed(&mk("https://petdex.dev/x.zip")));
+        // 域名相似但非白名单
+        assert!(!url_allowed(&mk("https://evil-petdex.dev/x.zip")));
+        assert!(!url_allowed(&mk("https://petdex.dev.evil.com/x.zip")));
+        // 多级子域仍在白名单内（allowed_host 前缀匹配 .petdex.dev）
+        assert!(url_allowed(&mk("https://sub.assets.petdex.dev/x.zip")));
     }
 
     #[test]
