@@ -13,7 +13,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Package, Link2, Plug, Info, Trash2, FileJson, FolderOpen, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import {
+  Package,
+  Link2,
+  Plug,
+  Info,
+  Trash2,
+  FileJson,
+  FolderOpen,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
 import {
   checkSkillTargetType,
   disableSkillForTool,
@@ -59,7 +70,7 @@ function SectionTableHeader(props: {
     ? (tool: string) => t("resources.openMcpConfig", { tool })
     : (tool: string) => t("resources.openToolDir", { tool, kind });
   return (
-    <div className="mb-1 flex items-center justify-between rounded border bg-muted/30 px-2 py-1">
+    <div className="bg-muted/30 mb-1 flex items-center justify-between rounded border px-2 py-1">
       <div className="flex items-center gap-1">
         <span className="text-xs font-medium">{t("resources.nameHeader")}</span>
         <Button
