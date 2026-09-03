@@ -69,3 +69,19 @@ describe("settings 桌宠分区", () => {
     await waitFor(() => expect(loadConfig().scale).toBe(1.25));
   });
 });
+
+describe("外部宠物三入口（spec §11）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(invoke).mockClear();
+  });
+
+  it("渲染当前宠物行与切换按钮", async () => {
+    render(<SettingsPage />);
+    fireEvent.click(screen.getByText("Pet")); // i18n 固定 en：英文分支断言
+    expect(await screen.findByText(/当前宠物|Current pet/)).toBeInTheDocument();
+    const switchBtn = await screen.findByRole("button", { name: /切换宠物|Switch pet/ });
+    fireEvent.click(switchBtn);
+    expect(await screen.findByTestId("pet-switch-list")).toBeInTheDocument();
+  });
+});

@@ -106,7 +106,11 @@
       "alwaysOnTop": "悬浮在所有程序最前",
       "scale": "大小",
       "enabledToast": "桌宠已开启",
-      "disabledToast": "桌宠已隐藏"
+      "disabledToast": "桌宠已隐藏",
+      "currentPet": "当前宠物",
+      "switchPet": "切换宠物",
+      "importPet": "导入宠物",
+      "managePet": "修改宠物"
     }
   },
   "home": {
@@ -381,6 +385,20 @@
       "waiting": "等待操作",
       "running": "运行中",
       "more": "更多"
+    },
+    "switch": {
+      "title": "切换宠物",
+      "builtin": "内置",
+      "activated": "已切换到 {{name}}",
+      "invalidSheet": "该宠物图集缺失或非法，无法激活",
+      "updated": "已根据现有素材更新 manifest 并激活",
+      "degraded": "已按降级模式激活（无语音）",
+      "mismatchTitle": "素材与 manifest 不一致",
+      "mismatchUpdate": "根据现有素材更新（自动备份）",
+      "mismatchIgnore": "忽略，按磁盘降级运行",
+      "mismatchCancel": "取消切换",
+      "pendingFirstCheck": "待首次激活校验",
+      "error": "操作失败：{{msg}}"
     }
   }
 }

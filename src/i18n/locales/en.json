@@ -106,7 +106,11 @@
       "alwaysOnTop": "Always on top",
       "scale": "Size",
       "enabledToast": "Pet enabled",
-      "disabledToast": "Pet hidden"
+      "disabledToast": "Pet hidden",
+      "currentPet": "Current pet",
+      "switchPet": "Switch pet",
+      "importPet": "Import pet",
+      "managePet": "Manage pets"
     }
   },
   "home": {
@@ -381,6 +385,20 @@
       "waiting": "Waiting",
       "running": "Running",
       "more": "More"
+    },
+    "switch": {
+      "title": "Switch Pet",
+      "builtin": "Built-in",
+      "activated": "Switched to {{name}}",
+      "invalidSheet": "Spritesheet missing or invalid, cannot activate",
+      "updated": "Manifest updated from assets and activated",
+      "degraded": "Activated in degraded mode (no voice)",
+      "mismatchTitle": "Assets differ from manifest",
+      "mismatchUpdate": "Update manifest from assets (auto backup)",
+      "mismatchIgnore": "Ignore, run degraded from disk",
+      "mismatchCancel": "Cancel switch",
+      "pendingFirstCheck": "Pending first activation check",
+      "error": "Failed: {{msg}}"
     }
   }
 }

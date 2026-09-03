@@ -28,6 +28,8 @@ import {
 } from "@/lib/audio";
 import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
+import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
+import { loadActiveId, loadActiveName } from "@/components/pet/petRuntime";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { useAppTranslation } from "@/hooks/use-app-translation";
@@ -44,6 +46,8 @@ export default function SettingsPage() {
   // 桌宠状态：复用 petConfig（localStorage 单后端），跨窗口改动经 subscribeConfig 回流
   const [petVisible, setPetVisible] = useState(() => loadVisible());
   const [petCfg, setPetCfg] = useState(() => loadConfig());
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const [activePetName, setActivePetName] = useState(loadActiveName());
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
 
@@ -84,6 +88,7 @@ export default function SettingsPage() {
       subscribeConfig(() => {
         setPetVisible(loadVisible());
         setPetCfg(loadConfig());
+        setActivePetName(loadActiveName());
       }),
     []
   );
@@ -466,11 +471,21 @@ export default function SettingsPage() {
                     ))}
                   </div>
                 </div>
+                <div className="border-t" />
+                {/* 当前宠物 + 三入口（spec §11）：切换在 Task 13，导入在 Task 16，修改在 Task 17 */}
+                <div className="flex items-center justify-between gap-2 py-2.5">
+                  <label className="text-sm font-medium">{t("settings.pet.currentPet")}</label>
+                  <span className="text-muted-foreground mr-auto pl-2 text-sm">{activePetName}</span>
+                  <Button size="sm" variant="outline" onClick={() => setSwitchOpen(true)}>
+                    {t("settings.pet.switchPet")}
+                  </Button>
+                </div>
               </div>
             </div>
           )}
         </div>
       </div>
+      <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
     </WindowFrame>
   );
 }
