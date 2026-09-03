@@ -399,6 +399,18 @@
       "mismatchCancel": "Cancel switch",
       "pendingFirstCheck": "Pending first activation check",
       "error": "Failed: {{msg}}"
+    },
+    "startup": {
+      "title": "Pet Assets Check",
+      "fatal": "Spritesheet missing or invalid: {{msg}}",
+      "issuesTitle": "The following assets differ from manifest:",
+      "update": "Update manifest from assets (auto backup)",
+      "foxbell": "Switch back to foxbell",
+      "ignore": "Ignore and continue",
+      "hidePet": "Hide pet",
+      "updated": "Manifest updated",
+      "switched": "Switched back to foxbell",
+      "petHidden": "Pet hidden"
     }
   }
 }

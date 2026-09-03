@@ -399,6 +399,18 @@
       "mismatchCancel": "取消切换",
       "pendingFirstCheck": "待首次激活校验",
       "error": "操作失败：{{msg}}"
+    },
+    "startup": {
+      "title": "宠物素材校验",
+      "fatal": "图集缺失或非法：{{msg}}",
+      "issuesTitle": "以下素材与 manifest 不一致：",
+      "update": "根据现有素材更新 manifest（自动备份）",
+      "foxbell": "切回 foxbell",
+      "ignore": "忽略并继续",
+      "hidePet": "关闭宠物",
+      "updated": "manifest 已更新",
+      "switched": "已切回 foxbell",
+      "petHidden": "宠物已关闭"
     }
   }
 }
