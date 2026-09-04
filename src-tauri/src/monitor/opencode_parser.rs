@@ -5,10 +5,9 @@ use super::cwd::{cwd_equivalent, normalize_cwd_for_match};
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 /// message.data JSON 结构
 #[derive(Deserialize)]
@@ -44,18 +43,14 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         return Vec::new();
     }
 
-    // 只读连接，避免锁冲突
-    let conn = match Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            debug!("Failed to open OpenCode database: {}", e);
+    // 只读连接 + busy_timeout（共享 helper，P1-4 消根：opencode/workbuddy 同规）
+    let conn = match super::sqlite::open_readonly_with_timeout(&db_path) {
+        Some(c) => c,
+        None => {
+            debug!("Failed to open OpenCode database: {:?}", db_path);
             return Vec::new();
         }
     };
-    let _ = conn.busy_timeout(Duration::from_millis(1000));
 
     // 归一化 cwd -> process 映射（统一分隔符、去尾部、Windows 下小写）
     let mut cwd_to_process: HashMap<String, &AgentProcess> = HashMap::new();

@@ -166,13 +166,13 @@ pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
     }
 }
 
-/// 会话标题：只读打开 workbuddy.db 读 sessions.title；失败降级 None（调用方再降级首条 user 消息）
+/// 会话标题：只读打开 workbuddy.db 读 sessions 标题（P2-1：custom_title 非空优先，否则 title）；
+/// 失败降级 None（调用方再降级首条 user 消息）。共享 helper 打开（只读 + busy_timeout，P1-4）
 pub fn title_from_db(home: &Path, session_id: &str) -> Option<String> {
-    use rusqlite::OpenFlags;
     let db = home.join(".workbuddy").join("workbuddy.db");
-    let conn = rusqlite::Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = super::sqlite::open_readonly_with_timeout(&db)?;
     conn.query_row(
-        "SELECT title FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
+        "SELECT COALESCE(NULLIF(custom_title,''), title) FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
         [session_id],
         |row| row.get::<_, Option<String>>(0),
     )
@@ -484,9 +484,8 @@ pub fn compensate_vanished_heartbeats() {
 
 /// 补偿用：只读打开 workbuddy.db 反查会话 cwd；列缺失/打开失败一律 None（防御）
 fn workbuddy_cwd_from_db(home: &Path, session_id: &str) -> Option<String> {
-    use rusqlite::OpenFlags;
     let db = home.join(".workbuddy").join("workbuddy.db");
-    let conn = rusqlite::Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = super::sqlite::open_readonly_with_timeout(&db)?;
     conn.query_row(
         "SELECT cwd FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
         [session_id],
@@ -1062,6 +1061,102 @@ mod tests {
             assert_eq!(found[0].cpu_usage, 3.5);
             assert_eq!(found[0].exe.as_deref(), Some(exe.as_path()));
             assert_eq!(found[0].form, ProcessForm::App);
+        }
+    }
+
+    // ---- workbuddy.db 标题读取（P2-1：custom_title 优先；P1-4：共享只读 helper） ----
+
+    mod title_db_tests {
+        use super::*;
+
+        const SID: &str = "ecbf3d35-76e9-42df-b71d-89409ec156ea";
+
+        /// 构造最小 workbuddy.db（sessions 表含 title/custom_title/deleted_at）
+        fn seed_db(home: &Path, title: &str, custom_title: Option<&str>) {
+            let dir = home.join(".workbuddy");
+            std::fs::create_dir_all(&dir).unwrap();
+            let conn = rusqlite::Connection::open(dir.join("workbuddy.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    cwd TEXT,
+                    title TEXT,
+                    custom_title TEXT,
+                    status TEXT,
+                    deleted_at INTEGER
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, title, custom_title, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                rusqlite::params![SID, "C:\\Users\\bunny\\proj", title, custom_title],
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn custom_title_takes_priority_over_title() {
+            let home = tempfile::tempdir().unwrap();
+            seed_db(home.path(), "系统生成标题", Some("用户自定义"));
+            assert_eq!(
+                title_from_db(home.path(), SID).as_deref(),
+                Some("用户自定义")
+            );
+        }
+
+        #[test]
+        fn empty_custom_title_falls_back_to_title() {
+            // NULLIF('', ...) → NULL → 回退 title
+            let home = tempfile::tempdir().unwrap();
+            seed_db(home.path(), "系统生成标题", Some(""));
+            assert_eq!(
+                title_from_db(home.path(), SID).as_deref(),
+                Some("系统生成标题")
+            );
+        }
+
+        #[test]
+        fn no_custom_title_uses_title() {
+            let home = tempfile::tempdir().unwrap();
+            seed_db(home.path(), "仅系统标题", None);
+            assert_eq!(
+                title_from_db(home.path(), SID).as_deref(),
+                Some("仅系统标题")
+            );
+        }
+
+        #[test]
+        fn missing_db_returns_none() {
+            // 库文件不存在 → None（不 panic，调用方降级首条 user 消息）
+            let home = tempfile::tempdir().unwrap();
+            assert!(title_from_db(home.path(), SID).is_none());
+        }
+
+        #[test]
+        fn deleted_session_returns_none() {
+            let home = tempfile::tempdir().unwrap();
+            let dir = home.path().join(".workbuddy");
+            std::fs::create_dir_all(&dir).unwrap();
+            let conn = rusqlite::Connection::open(dir.join("workbuddy.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    cwd TEXT,
+                    title TEXT,
+                    custom_title TEXT,
+                    status TEXT,
+                    deleted_at INTEGER
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, title, custom_title, deleted_at)
+                 VALUES (?1, ?2, ?3, NULL, 1)",
+                rusqlite::params![SID, "C:\\Users\\bunny\\proj", "已删会话"],
+            )
+            .unwrap();
+            assert!(title_from_db(home.path(), SID).is_none());
         }
     }
 }
