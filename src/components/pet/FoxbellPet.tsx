@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
+import { setupSessionReadListener } from "@/lib/query/sessionReadSync";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import {
   loadConfig,
@@ -199,6 +200,28 @@ export function FoxbellPet() {
   // 稳定回调引用作依赖（与精灵 effect 同款），避免依赖整个 pet 对象每次渲染导致反复注销/登记
   useEffect(() => registerInteractive(cardsWrapRef.current), [registerInteractive]);
   const jumpCandidatesRef = useRef<HTMLDivElement | null>(null); // 候选浮层实测高度并入窗口几何（Task 11 评审遗留）
+
+  // T1 跨窗口已读同步：看板点掉未读卡（X 关闭 / 跳转成功）后，后端广播 session-read，
+  // 本窗口对状态机做与 ackDone 等价的已读置位（unread=false、绿卡 light=null）→
+  // 卡片立即消隐，与看板一致。此前宠物感知不到别处的已读，头顶卡晚 ~60s 才消。
+  // 组件内接线（宠物状态机是唯一消费者；unlisten 随组件卸载自动清理）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void setupSessionReadListener((_, sessionId) => {
+      const state = statusStateRef.current;
+      if (!state) return;
+      ackDone(state, sessionId);
+      setCards(cardsFromState(state));
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // 候选浮层关闭路径（spec §11）：Esc/点外关闭，不 ack、卡片保留（与 PetMenu 的 B10 同款监听）
   useEffect(() => {

@@ -236,3 +236,18 @@
 | P2-7 | 评估为可选增强，维持不实施（JSONL 尾部 + mtime 阈值已覆盖实测场景，db status 交叉校验仅在"mtime 不可知"的假想场景有增益，避免过度设计） | 关闭 |
 
 遗留（非阻塞）：P2-10 WorkBuddy 品牌图标素材（待设计资源）；行尾治本（`.gitattributes` + renormalize）按需求方要求独立 PR 单独决策。
+
+## 7. 分支收尾第二轮（2026-09-05，Windows 实机）：卡片行为统一 + X 关闭 + codex 深链修复
+
+背景：P2-10 品牌图标已补齐（a0cbcc1）后，实机复测发现三处行为不一致/bug，本轮统一处置。
+
+| # | 问题 | 根因 | 处置 |
+|---|------|------|------|
+| F-A | vitest 出现 Unhandled Errors（`win.close is not a function`） | settings.tsx 关窗守卫三选决议回调里 `void win.close()` 在 mock 环境（jsdom 无 close 方法）未捕获异常 | **已修**（T0）：包 try/catch 静默（放行标记已置位，真实 Tauri 环境重发 close 正常放行） |
+| B-1 | 看板点掉未读卡后，宠物头顶卡晚 ~60s 才消 | 双根因叠加：① petStatus 对 done+unread 绿卡有 `VANISH_TTL_MS=60s` 消失保留；② 宠物窗口感知不到看板侧的已读（跨窗口无同步通道） | **已修**（T1）：①后端 `mark_session_read` / `focus_session::mark_read_on_jump` 删行后广播 `session-read` 事件（复用 N2 tools-changed 模式）；②前端 `sessionReadSync.ts` 监听并回调 FoxbellPet 对状态机执行 ackDone 等价置位（卡片立即消隐）；③**删除宠物本地 60s TTL**——会话从 payload 消失即清卡，与看板一致（绿未读的持续可见由后端 unread pool 保证，App 类会话本来就在 payload 里）；事件差分（语音/姿态 prev 对比）不受影响。**卡片生命周期统一到后端事实源** |
+| B-2 | App 类活跃卡（黄/红）没有 X 按钮 | W4 的 X 仅覆盖未读卡（mark_session_read 语义），活跃卡无「暂离不提示」通道 | **已修**（T2）：monitor 层新增进程内 `SESSION_DISMISALS`（key=(tool_id, session_id, status)），`get_all_sessions` 组装末尾按 key 过滤；新 IPC `dismiss_session_card` 写入（不碰 unread_sessions 表，已读逻辑不变）；状态变化后 key 不匹配自然重现；MAM 重启清空（内存语义）。前端 SessionCard 的 X 扩展到全部 App 形态卡（unread 卡维持 mark_session_read，活跃卡走 dismiss）；宠物头顶卡同步加 X |
+| B-3 | codex 深链被 A 门误拦，永远降级 App 级聚焦 | `scheme_handler_exists` 判据为「shell\open\command 非空」，而 ChatGPT MSIX 的协议关联走 AppModel，注册表仅有 `URL Protocol` 标记、无 command——**判据假阴性**（实测派发 `codex://threads/<uuid>` 三次均成功前台化且 OCR 证实导航到具体会话） | **已修**（T3）：判据放宽为「command 非空 **或 `URL Protocol` 值存在**」；macOS output() 退出码判据不动；派发后既有 B 前台验证（2s 双连击）继续兜底——真无 handler 导致未前台化时落回近祖聚焦、不误标已读（分层防御） |
+
+测试教训（B-1 用例）：mock `useSessionsQuery` 若每次渲染返回新 data 对象，FoxbellPet 的 `[data]` effect 会 setCards → 无限重渲染 → vitest 进程挂死；mock 必须返回稳定引用（预建两帧常量，测试内切换）。
+
+本轮门禁（Windows 实机）：cargo test 219+ / clippy 0 警告 / pnpm check ✓ / vitest ≥74（含 session-read、dismiss、handler 判据新增用例）。

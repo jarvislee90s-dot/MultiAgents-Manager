@@ -2,6 +2,7 @@
 
 use crate::adapter;
 use crate::session::SessionsResponse;
+use tauri::Emitter;
 
 #[tauri::command]
 pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
@@ -31,15 +32,23 @@ pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
     response
 }
 
-/// 跳转成功 → 标记该会话已读（仅删除对应未读行；同工具其他未读卡保留，spec W4）
-fn mark_read_on_jump(session_id: &Option<String>, agent_type: &Option<String>) {
+/// 跳转成功 → 标记该会话已读（仅删除对应未读行；同工具其他未读卡保留，spec W4）。
+/// T1：删行后广播 session-read，宠物等辅助窗口据此同步已读置位（卡片行为与看板一致）
+fn mark_read_on_jump(app: &tauri::AppHandle, session_id: &Option<String>, agent_type: &Option<String>) {
     if let (Some(sid), Some(agent)) = (session_id, agent_type) {
         crate::database::dao::unread::delete(&agent.to_lowercase(), sid);
+        let _ = app.emit(
+            "session-read",
+            serde_json::json!({ "agentType": agent, "sessionId": sid }),
+        );
     }
 }
 
+// 参数即 Tauri IPC 契约（前端 invoke 逐名传参），不宜打包为结构体
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn focus_session(
+    app: tauri::AppHandle,
     pid: u32,
     session_id: Option<String>,
     agent_type: Option<String>,
@@ -72,7 +81,7 @@ pub fn focus_session(
                                 250,
                             )
                         {
-                            mark_read_on_jump(&session_id, &agent_type);
+                            mark_read_on_jump(&app, &session_id, &agent_type);
                             return Ok(serde_json::json!({
                                 "type": "focused",
                                 "via": "deep-link"
@@ -99,7 +108,7 @@ pub fn focus_session(
             &running_projects,
         ) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
-                mark_read_on_jump(&session_id, &agent_type);
+                mark_read_on_jump(&app, &session_id, &agent_type);
                 Ok(serde_json::json!({ "type": "focused" }))
             }
             Ok(crate::window::win32::FocusOutcome::Ambiguous(windows)) => {
@@ -112,7 +121,7 @@ pub fn focus_session(
                     && crate::window::win32::reactivate_tool_app(&system, agent_type.as_deref())
                         .is_ok()
                 {
-                    mark_read_on_jump(&session_id, &agent_type);
+                    mark_read_on_jump(&app, &session_id, &agent_type);
                     Ok(serde_json::json!({ "type": "focused" }))
                 } else {
                     Err(e)
@@ -125,7 +134,7 @@ pub fn focus_session(
         let _ = (project_name, last_message, form, unread);
         // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
         if crate::window::focus_terminal_for_pid(pid).is_ok() {
-            mark_read_on_jump(&session_id, &agent_type);
+            mark_read_on_jump(&app, &session_id, &agent_type);
             return Ok(serde_json::json!({ "type": "focused", "via": "tty" }));
         }
         // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）。
@@ -134,7 +143,7 @@ pub fn focus_session(
         if let Some(mut out) =
             crate::window::activate_agent_app(pid, agent_type.as_deref(), session_id.as_deref())
         {
-            mark_read_on_jump(&session_id, &agent_type);
+            mark_read_on_jump(&app, &session_id, &agent_type);
             out["via"] = serde_json::Value::String("app-fallback".into());
             return Ok(out);
         }

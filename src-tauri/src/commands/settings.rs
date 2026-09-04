@@ -28,10 +28,16 @@ pub fn list_sub_agents(tool_id: String) -> Vec<SubAgentRecord> {
     crate::database::list_sub_agents(&tool_id)
 }
 
-/// 手动关闭未读卡（X 按钮）→ 标记已读（删除未读行）
+/// 手动关闭未读卡（X 按钮）→ 标记已读（删除未读行）。
+/// T1：删行后广播 session-read——看板/宠物是独立 WebView，宠物窗口凭此事件
+/// 同步已读置位（否则宠物头顶卡在别处已读后仍滞留，与看板不一致）
 #[tauri::command]
-pub fn mark_session_read(agent_type: String, session_id: String) {
+pub fn mark_session_read(app: tauri::AppHandle, agent_type: String, session_id: String) {
     crate::database::dao::unread::delete(&agent_type.to_lowercase(), &session_id);
+    let _ = app.emit(
+        "session-read",
+        serde_json::json!({ "agentType": agent_type, "sessionId": session_id }),
+    );
 }
 
 /// 工具勾选列表（含 managed 标志：是否存在启用的分配）
