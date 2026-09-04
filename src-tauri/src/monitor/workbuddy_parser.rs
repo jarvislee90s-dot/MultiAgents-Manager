@@ -77,8 +77,24 @@ pub fn heartbeat_is_alive(hb: &Heartbeat, now_ms: u64) -> bool {
     now_ms.saturating_sub(hb.last_heartbeat_ms) < HEARTBEAT_FRESH_MS
 }
 
-/// 项目路径编码：去首分隔符后 / 与 \ 统一替换为 -
+/// 项目路径编码（2026-09-04 双平台实测规则，spec §4 / P0-2）：
+/// - Windows 盘符形态：`<字母>:<分隔符>rest` → 盘符小写 + `-` + 余下 `/`、`\` 替换 `-`。
+///   实测目录 `C:\Users\bunny\WorkBuddy\2026-08-06-15-57-15` → `c-Users-bunny-WorkBuddy-...`，
+///   盘符小写、去冒号——旧实现保留冒号与大小写导致 JSONL 永不命中
+/// - POSIX：维持现状（去首 `/`，`/`→`-`）
+/// - UNC（`\\...`）等未实测形态：不猜规则，交 find_session_jsonl 的目录扫描兜底
 pub fn mangle_project_path(cwd: &str) -> String {
+    let bytes = cwd.as_bytes();
+    // Windows 盘符形态：单字母 + ':' + 分隔符（/ 或 \）开头
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+    {
+        let drive = cwd[..1].to_ascii_lowercase();
+        let rest = &cwd[3..];
+        return format!("{}-{}", drive, rest.replace(['/', '\\'], "-"));
+    }
     let trimmed = cwd.trim_start_matches('/');
     trimmed.replace(['/', '\\'], "-")
 }
@@ -88,6 +104,31 @@ pub fn session_jsonl_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .join("projects")
         .join(mangle_project_path(cwd))
         .join(format!("{}.jsonl", session_id))
+}
+
+/// 共享查找函数（P0-2）：定位会话 JSONL。
+/// 1. 先试 mangle(cwd)/<sessionId>.jsonl；
+/// 2. 未命中 → 扫描 ~/.workbuddy/projects/*/ 查找 <sessionId>.jsonl（会话可能换过项目目录，
+///    或 cwd 属 UNC 等未实测形态，mangle 无法命中）；
+/// 3. 仍无 → None（调用方跳过该会话）。
+///
+/// 与 W4 心跳消失补偿共用（compensate_vanished_heartbeats_in 内联扫描抽于此）
+pub fn find_session_jsonl(home: &Path, cwd: &str, session_id: &str) -> Option<PathBuf> {
+    let primary = session_jsonl_path(home, cwd, session_id);
+    if primary.exists() {
+        return Some(primary);
+    }
+    // 目录扫描兜底：projects 下任意子目录中的 <sessionId>.jsonl
+    let projects_dir = home.join(".workbuddy").join("projects");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return None; // 目录缺失/不可读 → 防御性 None
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .find_map(|dir| {
+            let p = dir.path().join(format!("{}.jsonl", session_id));
+            p.exists().then_some(p)
+        })
 }
 
 /// mtime 阈值叠加（spec §4）：函数调用类尾部停更 >= 300s 降级 Waiting；
@@ -246,10 +287,10 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             continue;
         }
 
-        let jsonl = session_jsonl_path(&home, &hb.cwd, &hb.session_id);
-        if !jsonl.exists() {
-            continue; // 会话文件未落盘（防御）
-        }
+        let jsonl = find_session_jsonl(&home, &hb.cwd, &hb.session_id);
+        let Some(jsonl) = jsonl else {
+            continue; // 会话文件未落盘/未命中（防御；mangle 兜底扫描也失败）
+        };
 
         // 尾部解析（复用通用 JSONL 尾读设施；行数与 codex 一致 500）
         let lines = read_recent_lines(&jsonl, 500);
@@ -382,16 +423,13 @@ pub fn compensate_vanished_heartbeats_in(
     for (pid, session_id) in vanished {
         // 逐个短暂重锁移除（不做额外清理，未消失条目保留供下轮参考）
         last_seen.lock().unwrap().remove(&pid);
-        // 找该会话的 JSONL：遍历 projects 下所有 <sessionId>.jsonl（会话可能换过项目目录）
-        let projects_dir = home.join(".workbuddy").join("projects");
-        let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-            continue; // 防御：目录读取失败只跳过该 pid，不中断其余补偿
+        // 找该会话的 JSONL（与主路径共用 find_session_jsonl）：
+        // 先 mangle(cwd)/<id>.jsonl，未命中再扫描 projects 下所有 <sessionId>.jsonl
+        //（会话可能换过项目目录；cwd 未知时直接用空串让兜底扫描接管）
+        let cwd = workbuddy_cwd_from_db(home, &session_id).unwrap_or_default();
+        let Some(jsonl) = find_session_jsonl(home, &cwd, &session_id) else {
+            continue; // 全无 → 跳过该 pid，不中断其余补偿
         };
-        let target = entries.filter_map(|e| e.ok()).find_map(|dir| {
-            let p = dir.path().join(format!("{}.jsonl", session_id));
-            p.exists().then_some(p)
-        });
-        let Some(jsonl) = target else { continue };
         let lines = read_recent_lines(&jsonl, 500);
         if derive_status_from_tail(&lines) != SessionStatus::Idle {
             continue; // 非完成态（运行中被杀等）→ 不补
@@ -404,8 +442,6 @@ pub fn compensate_vanished_heartbeats_in(
         ) {
             continue;
         }
-        // cwd 直接用 WorkBuddy DB 的 cwd 字段反查
-        let cwd = workbuddy_cwd_from_db(home, &session_id).unwrap_or_default();
         let last_message = lines.iter().rev().find_map(|l| extract_message_text(l));
         compensated.push(crate::database::dao::unread::UnreadSessionRecord {
             tool_id: "workbuddy".into(),
@@ -495,15 +531,79 @@ mod tests {
 
     #[test]
     fn mangle_strips_leading_slash_and_replaces_separators() {
+        // POSIX 回归：去首 /，/ 替换 -
         assert_eq!(
             mangle_project_path("/Users/jarvis/Documents/MultiAgents-Manager"),
             "Users-jarvis-Documents-MultiAgents-Manager"
         );
-        // Windows 形态容错：反斜杠路径同样编码
+    }
+
+    // ---- Windows 盘符形态（P0-2）：盘符小写 + 去冒号 + 分隔符→-（实测目录名） ----
+
+    #[test]
+    fn mangle_windows_drive_lowercase_no_colon() {
+        // 实测（附录 A）：C:\Users\bunny\WorkBuddy\2026-08-06-15-57-15 → c-Users-bunny-WorkBuddy-...
         assert_eq!(
-            mangle_project_path("C:\\Users\\jarvis\\proj"),
-            "C:-Users-jarvis-proj"
+            mangle_project_path("C:\\Users\\bunny\\WorkBuddy\\2026-08-06-15-57-15"),
+            "c-Users-bunny-WorkBuddy-2026-08-06-15-57-15"
         );
+        // 实测：E:\LLMproject\0807 → e-LLMproject-0807
+        assert_eq!(mangle_project_path("E:\\LLMproject\\0807"), "e-LLMproject-0807");
+        // 前导 / 形态的 Windows 盘符（git-bash 归一化）同样处理
+        assert_eq!(mangle_project_path("C:/Users/bunny/proj"), "c-Users-bunny-proj");
+    }
+
+    #[test]
+    fn mangle_windows_uppercase_drive_also_lowercased() {
+        // 盘符大写同样转小写（心跳 cwd 中的大写盘符在编码时统一转小写）
+        assert_eq!(mangle_project_path("C:\\Users\\x"), "c-Users-x");
+    }
+
+    // ---- find_session_jsonl（P0-2 容错兜底） ----
+
+    #[test]
+    fn find_session_jsonl_primary_mangle_path_hits() {
+        let home = tempfile::tempdir().unwrap();
+        // 按新 mangle 规则写盘（c-Users-jarvis-proj），cwd 传 Windows 大写盘符形态
+        let dir = home
+            .path()
+            .join(".workbuddy/projects/c-Users-jarvis-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"), "x").unwrap();
+        let found = find_session_jsonl(
+            home.path(),
+            "C:\\Users\\jarvis\\proj",
+            "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c",
+        )
+        .unwrap();
+        assert_eq!(found, dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"));
+    }
+
+    #[test]
+    fn find_session_jsonl_falls_back_to_directory_scan() {
+        // mangle 路径未命中但 projects/其他目录/<sessionId>.jsonl 存在 → 兜底命中
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".workbuddy/projects/other-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"), "x").unwrap();
+        // cwd 传未知/不可 mangle 命中形态（如 UNC 未实测形态）
+        let found = find_session_jsonl(
+            home.path(),
+            "\\\\server\\share\\proj",
+            "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c",
+        )
+        .unwrap();
+        assert_eq!(found, dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"));
+    }
+
+    #[test]
+    fn find_session_jsonl_none_when_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let found = find_session_jsonl(home.path(), "/Users/jarvis/proj", "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c");
+        assert!(found.is_none());
+        // projects 目录缺失 → None（不 panic）
+        let found2 = find_session_jsonl(home.path(), "/p", "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c");
+        assert!(found2.is_none());
     }
 
     #[test]
