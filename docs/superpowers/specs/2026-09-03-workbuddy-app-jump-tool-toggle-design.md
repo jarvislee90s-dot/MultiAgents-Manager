@@ -1,6 +1,6 @@
 # 设计规格：WorkBuddy 适配 + APP 跳转与已读机制 + 工具勾选管理
 
-- 日期：2026-09-03
+- 日期：2026-09-03（2026-09-04 按 Windows 实机测试修订，见 §11 修订记录）
 - 分支：`feat/workbuddy-app-jump-tool-toggle`
 - 状态：已与需求方逐项对齐（本文档为对齐结果的书面化）
 - 实现顺序：W1 → W2 → W3 → W4 → W5（小→大依赖序，单分支分阶段 commit）
@@ -18,15 +18,15 @@
 
 | 事实 | 来源 |
 |------|------|
-| WorkBuddy 是 Electron APP（`/Applications/WorkBuddy.app`，VSCode 同源架构），agent 运行时为内嵌 `cli/bin/codebuddy` | 本机进程观测 |
+| WorkBuddy 是 Electron APP（macOS `/Applications/WorkBuddy.app`，VSCode 同源架构），agent 运行时为内嵌 `cli/bin/codebuddy`。<br>**Windows 实测（2026-09-04，v2.115.0）**：独立目录安装（NSIS 形态，如 `D:\Program Files\WorkBuddy`，非 MSIX），宿主 `WorkBuddy.exe`；`cli/bin/codebuddy` 为 Node 脚本（无 .exe），由 `WorkBuddy.exe` 以 Electron/Node 模式重新执行自身来运行（日志证据 `[Sidecar] Creating session … — …\WorkBuddy.exe`）——**Windows 上不存在名为 codebuddy 的进程，会话宿主进程名与 APP 主进程同为 WorkBuddy.exe** | 本机进程观测 + Windows 实测（日志/进程表/文件头） |
 | `~/.workbuddy/sessions/<PID>.json` 心跳文件写明 `pid ↔ sessionId ↔ cwd ↔ lastHeartbeat`，是进程-会话关联的权威来源 | 本机文件 |
-| 会话历史在 `~/.workbuddy/projects/<路径编码>/<sessionId>.jsonl`（`/` 替换为 `-`），OpenAI 风格 `type/role/content` 格式 | 本机文件 |
+| 会话历史在 `~/.workbuddy/projects/<路径编码>/<sessionId>.jsonl`，OpenAI 风格 `type/role/content` 格式（实测行类型 `message`/`function_call`/`function_call_result`/`reasoning`，角色 user/assistant，与解析器状态映射一致）。<br>**路径编码实测**：POSIX 为去首 `/` 后 `/`→`-`；Windows 为**盘符小写 + 去冒号 + 分隔符→`-`**——`C:\Users\bunny\WorkBuddy\2026-08-06-15-57-15` → `c-Users-bunny-WorkBuddy-2026-08-06-15-57-15`，`E:\LLMproject\0807` → `e-LLMproject-0807`（编码以 WorkBuddy 自身写盘形态为准，心跳 cwd 中的大写盘符在编码时统一转小写） | 本机文件 + Windows 实测目录 |
 | 会话标题在 `~/.workbuddy/workbuddy.db`（SQLite）`sessions.title` | 本机数据库 |
 | `~/.workbuddy/mcp.json` 为标准 `mcpServers` JSON（与 Claude 同构）；skills 在 `~/.workbuddy/skills/<name>/SKILL.md` | 本机文件 |
 | WorkBuddy 无 hook 机制，状态提取只能轮询（与 Codex 实际以轮询 JSONL 为主一致） | 文档+配置核查 |
-| 干扰进程：`codebuddy --serve` 常驻服务（心跳 sessionId 为 `interactive-*`）与 `--prewarm` 预热进程池（空闲时无心跳/心跳过期，被领取干活后心跳更新为真实 UUID） | 本机进程+文件 |
+| 干扰进程两类，Windows 实测（v2.115.0，14 份心跳样本）**均写心跳文件**：<br>① `--serve`/CLI 宿主服务：sessionId 为 `interactive-<pid>`（`kind:"interactive"`，cwd 在临时 `workbuddy-host-cli` 目录）；<br>② prewarm 池：**心跳持续新鲜**（非原文假设的「空闲时无心跳/心跳过期」），sessionId 形如 `prewarm-wb-pool-<13位ms>-<6位hex>`——**恰为 36 字符 4 连字符，仅凭「长度 36 + 连字符 4」判定 UUID 会被骗过**——心跳含 `kind:"prewarm"`、`meta.status:"idle"`；<br>真实任务会话：sessionId 为标准 UUID（8-4-4-4-12 **hex** 字符集）、`kind:"interactive"`、cwd 为真实工作区。<br>→ 过滤必须用**严格 UUID 形态**（hex 字符集校验），建议叠加 `kind != "prewarm"` 防御 | 本机进程+文件 + Windows 实测心跳样本 |
 | Codex APP 原生宠物可跳转的原因：宠物是 APP 自身窗口（同进程激活无限制）。外部进程的等价能力：Windows 用 `SetForegroundWindow`（MAM `win32.rs` 已实现且覆盖 App 类）；macOS 用 AppleScript `activate application`（本次新增） | 代码+原理分析 |
-| ChatGPT.app 注册了 `codex://` URL scheme；WorkBuddy.app 注册了 `workbuddy://` Deep Links scheme → 深度链接为 session 级直达的**第一顺位**（路由格式实现期探测，APP 级激活保底） | Info.plist 核查 |
+| ChatGPT.app 注册了 `codex://` URL scheme；WorkBuddy.app 注册了 `workbuddy://` Deep Links scheme → 深度链接为 session 级直达的**第一顺位**（路由格式实现期探测，APP 级激活保底）。<br>**Windows 注册表实测（2026-09-04）**：`workbuddy://` 在 HKCR/HKCU 均有 handler（`"…\WorkBuddy.exe" "%1"`）——Windows 具备深度链接可用条件（本次按 §7 仍走近祖聚焦，深度链接列为 Windows 升级项）；`codex://` 在未安装 ChatGPT 桌面版的机器**仅有协议标记、无 handler**——派发前必须校验 handler 存在性，「spawn 成功」不代表路由成功 | Info.plist 核查 + Windows 注册表实测 |
 | 「用户键入但未发送」在 Codex/WorkBuddy 均无法可靠检测（实验证伪：Codex global-state 无归因变化；WorkBuddy localStorage 为 675KB gzip React 状态块） | 双端对照实验 |
 | Codex++（进程名 `CodexPlusPlus`）不纳入监控（需求方明确决定） | 需求对齐 |
 
@@ -78,17 +78,21 @@
 
 ### 进程与会话规则
 
-- `process_names() = ["codebuddy"]`（Windows `codebuddy.exe` 归一化后同名匹配）。注：独立安装的腾讯 CodeBuddy CLI 进程同名也会被扫到，但其在 `~/.workbuddy` 下无心跳文件，被下述过滤规则天然排除，不会误认。
-- **过滤规则**（排除干扰进程，依据心跳文件 `~/.workbuddy/sessions/<PID>.json`）：
-  - 心跳文件存在，且 `sessionId` 为 UUID 格式（排除 `--serve` 的 `interactive-*`），且 `lastHeartbeat` 距今 < 30s → 活跃会话进程（阈值取 MAM 轮询周期的 2~3 倍，防止轮询间隙卡片闪烁，实现期校准）。
-  - 其余（无心跳 / 心跳过期 / interactive 服务）→ 不产生会话卡。
-- `find_sessions()`：心跳 → `sessionId` + `cwd` → 定位 `~/.workbuddy/projects/<mangle(cwd)>/<sessionId>.jsonl`（mangle：去除首 `/` 后将 `/` 替换为 `-`，以实测为准并容错）。
+- **会话进程发现以心跳目录为权威来源**（2026-09-04 Windows 实测修订）：枚举 `~/.workbuddy/sessions/*.json` 并逐个解析，符合下述过滤规则的 pid 即会话进程；再以 pid 回查进程表补充 CPU/exe 构装 `AgentProcess`（进程表查无此 pid → 跳过，消失场景由 W4 补偿处理）。**不使用进程名匹配**——Windows 上会话宿主与 APP 主进程同名（均为 `WorkBuddy.exe`，Electron 以自身作 Node 运行 `cli/bin/codebuddy` 脚本，无 `codebuddy` 进程），且「父进程同名」会被通用子代理过滤误杀；macOS 的 `codebuddy` 进程名匹配一并移除，双平台统一心跳驱动（macOS 心跳文件同样存在）。
+- **过滤规则**（排除干扰进程，依据心跳文件 `~/.workbuddy/sessions/<PID>.json`；两类干扰进程实测均写心跳）：
+  - 心跳文件存在，且 `sessionId` 为**严格 UUID**（8-4-4-4-12 分段且每段均为 hex 字符集——prewarm 池的 `prewarm-wb-pool-<13位ms>-<6位hex>` 恰为 36 字符 4 连字符，仅凭「长度 36 + 连字符 4」判定会被骗过），且心跳 `kind` 非 `prewarm`（防御性双保险，字段缺失视为通过），且 `lastHeartbeat` 距今 < 90s（= 30s 轮询周期 × 3，实现校准值；原文 30s 为初值）→ 活跃会话进程。
+  - 其余（无心跳 / 心跳过期 / `interactive-*` 服务 / prewarm 池）→ 不产生会话卡。
+  - 注：独立安装的腾讯 CodeBuddy CLI 在 `~/.workbuddy` 下无心跳文件，天然排除，不会误认。
+- `find_sessions()`：心跳 → `sessionId` + `cwd` → 定位 `~/.workbuddy/projects/<mangle(cwd)>/<sessionId>.jsonl`。mangle 规则（2026-09-04 双平台实测）：
+  - POSIX：去除首 `/`，`/` 替换为 `-`（macOS 原有形态，不变）；
+  - Windows：**盘符小写 + 去冒号**，再 `/`、`\` 统一替换 `-`——`C:\Users\bunny\WorkBuddy\2026-08-06-15-57-15` → `c-Users-bunny-WorkBuddy-2026-08-06-15-57-15`，`E:\LLMproject\0807` → `e-LLMproject-0807`；
+  - **容错兜底（硬性）**：mangle 路径未命中时，扫描 `~/.workbuddy/projects/*/` 查找 `<sessionId>.jsonl`（与 W4 心跳消失补偿共用同一实现）；仍无 → 跳过该会话。UNC 等未实测形态由兜底覆盖。
 - **状态推导**（解析 JSONL 尾部，复用 `monitor/status.rs` 的 `determine_status` 语义）：
   - 最后有效条目为 `user` message → Thinking（黄）；
   - `function_call` / `function_call_result` → Processing（红）；
   - `assistant` message 纯文本 → Idle（绿）；
   - 叠加 mtime 阈值（App 形态 300s，与 Codex APP 一致）。
-- **会话标题**：只读打开 `workbuddy.db`（URI `mode=ro`）读 `sessions.title`；读失败降级为会话首条 user 消息截断。
+- **会话标题**：只读打开 `workbuddy.db`（URI `mode=ro`，连接设 `busy_timeout` 防应用写入高峰期查询失败，与 opencode 解析器对齐）读 `sessions.title`（用户自定义名 `custom_title` 非空时优先）；读失败降级为会话首条 user 消息截断。
 - `base_dir()` = `~/.workbuddy`；`mcp_format()` = Json，`mcp_config_path()` = `~/.workbuddy/mcp.json`；`skill_dirs()` = `[~/.workbuddy/skills]`；`plugin_dirs()` / `plugin_config_paths()` = 空（插件不纳入）；`hook_supported()` = false；`subagent_dir()` = None。
 
 ### 资源接入
@@ -197,8 +201,8 @@
 ## 7. 跨平台要求（硬性）
 
 - DB 层（`agent_tools` / `unread_sessions`）天然跨平台。
-- APP 激活：macOS 用深度链接（第一顺位）/ AppleScript（保底）；Windows 近祖聚焦沿用 + **新增 pid 失效兜底的窗口枚举逻辑**（验证 WorkBuddy 近祖链 `codebuddy.exe → WorkBuddy.exe` 可达）。
-- WorkBuddy 进程匹配：路径归一化兼容 Windows 形态（`WorkBuddy.exe` / `codebuddy.exe`，含 MSIX 路径可能，实现期实测）。
+- APP 激活：macOS 用深度链接（第一顺位）/ AppleScript（保底）；Windows 近祖聚焦沿用 + pid 失效兜底。Windows 近祖链实测形态（2026-09-04）为 `WorkBuddy.exe（CLI 宿主，无窗口）→ WorkBuddy.exe（主进程，持窗口）`——首祖即主进程，聚焦可达，无需按原设想的 `codebuddy.exe → WorkBuddy.exe` 链验证。`workbuddy://` 在 Windows 注册表已注册 handler，Windows 深度链接列为后续升级项（若启用，派发前必须校验 handler，见 §9）。
+- WorkBuddy 进程匹配（2026-09-04 实测修订）：Windows 安装形态为独立目录 NSIS（如 `D:\Program Files\WorkBuddy`，未观测到 MSIX）；会话进程发现不依赖进程名，双平台统一心跳驱动（见 §4）；宿主存活判定按 exe basename 前缀 `workbuddy` 且路径不含 `codebuddy`（实测匹配 `D:\Program Files\WorkBuddy\WorkBuddy.exe`）。
 - 心跳/JSONL/DB 路径两端一致（`~/.workbuddy/`），无平台分支；Windows 下 `~` 展开沿用现有 `home_dir` 机制。
 - 所有条件编译改动在两平台 `cargo check` + `pnpm check` 通过。
 
@@ -213,10 +217,10 @@
 | 风险/限制 | 应对 |
 |-----------|------|
 | WorkBuddy 私有格式无文档，版本升级可能破坏 | 防御性解析 + 降级显示；fixture 测试锁格式假设 |
-| 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付。实测结论（2026-09-04）：已探明并接线 —— WorkBuddy `workbuddy://chat/<sessionId>`（app.asar 源码证据）、Codex `codex://threads/<threadId>`（asar 模板证据）；threadId 与 rollout UUID 同源性待 GUI 实测确认，直达失败则回退 None 走 APP 级保底 |
+| 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付。实测结论（2026-09-04）：已探明并接线 —— WorkBuddy `workbuddy://chat/<sessionId>`（app.asar 源码证据）、Codex `codex://threads/<threadId>`（asar 模板证据）；threadId 与 rollout UUID 同源性待 GUI 实测确认，直达失败则回退 None 走 APP 级保底。**Windows 补充实测（同日）**：`workbuddy://` 已注册 handler；`codex://` 在未装 ChatGPT 桌面版的机器仅有协议标记、无 handler——「spawn 成功」不代表路由成功，派发前应校验 handler 存在性（Windows 查注册表 `\<scheme>\shell\open\command`，macOS 用 `LSCopyDefaultHandlerForURLScheme`），校验失败走保底且**不得标已读** |
 | 外部进程无法 APP 内部导航到具体会话 | 已确认接受（APP 前台级别） |
 | Codex++ 不被监控 | 明确不纳入本次范围 |
-| Windows 上 WorkBuddy 安装形态未实测 | 实现期实测进程路径，必要时补匹配规则 |
+| ~~Windows 上 WorkBuddy 安装形态未实测~~（已实测） | 2026-09-04 实测结论已回写本文档：NSIS 独立目录 + `WorkBuddy.exe`，会话宿主与主进程同名、无 `codebuddy` 进程 → §4 发现机制改心跳驱动；mangle 与 prewarm 心跳两处原调研结论有误，已更正。由此产生的代码偏差由整改方案处理：`docs/superpowers/plans/2026-09-04-windows-p0-remediation.md` |
 | 取消勾选时 SSOT 缺失导致还原不完整 | 跳过并在保存结果中逐项报告，不中断 |
 
 ## 10. Commit 划分（单分支分阶段）
@@ -226,3 +230,12 @@
 3. `feat(adapter): WorkBuddy 适配器（会话监控 + Skills/MCP 资源接入）`
 4. `feat(sessions): APP 类已读机制（持久未读卡 + 每会话一卡）`
 5. `feat(settings): 工具勾选管理（批量保存 + 确认弹窗 + 全量还原 + 后端下发工具列表）`
+
+## 11. 修订记录
+
+- **2026-09-04（Windows 实机测试修订）**：测试环境 WorkBuddy v2.115.0 / Windows 11 / `D:\Program Files\WorkBuddy`（数据目录 `~/.workbuddy` 含 14 份心跳、4 个项目目录、多会话 workbuddy.db）。按实测更正四项调研结论，并联动修订 §4/§7/§9：
+  1. Windows 会话宿主进程 = `WorkBuddy.exe` 自身（Electron 以 Node 模式重执行自身运行 `cli/bin/codebuddy` 脚本，无 `codebuddy` 进程）→ §4 进程发现改为**心跳目录驱动**，弃用进程名匹配（macOS 同步）；
+  2. prewarm 池**心跳持续新鲜**且 sessionId `prewarm-wb-pool-*` 恰为 36 字符 4 连字符 → §4 过滤规则改为**严格 UUID（hex 字符集）+ `kind` 防御**；心跳新鲜度阈值由 30s（初值）校准为 **90s**；
+  3. Windows mangle 实测为**盘符小写 + 去冒号** → §4 更正规则并新增**目录扫描容错兜底**（硬性要求）；
+  4. `workbuddy://` 在 Windows 注册表已注册 handler（列为 Windows 深度链接升级项）；`codex://` 可能仅有协议标记无 handler → §9 增补「派发前校验 handler、失败走保底且不标已读」。
+  - 本轮修订揭示的既有代码偏差（进程名匹配、宽松 UUID 判定、错误 mangle 及其锁定测试、DB 连接无 busy_timeout）由整改方案处理：`docs/superpowers/plans/2026-09-04-windows-p0-remediation.md`。
