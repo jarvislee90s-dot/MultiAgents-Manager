@@ -116,7 +116,13 @@ export function PetStartupGuard() {
         </DialogHeader>
         {fatal !== null ? (
           <div className="space-y-3">
-            <p className="text-sm">{t("pet.startup.fatal", { msg: petErrMsg(fatal, t) })}</p>
+            {/* 前缀拆分（第七轮）：rpc（扫描类）走 fatalScan，PetError（图集类）走原 fatal，
+                消除"图集缺失：Pet not found"的自相矛盾 */}
+            <p className="text-sm">
+              {isPetRpcError(fatal)
+                ? t("pet.startup.fatalScan", { msg: petErrMsg(fatal, t) })
+                : t("pet.startup.fatal", { msg: petErrMsg(fatal, t) })}
+            </p>
             <div className="flex gap-2">
               <Button size="sm" data-testid="pet-startup-foxbell" onClick={() => { toFoxbell(t("pet.startup.switched")); setFatal(null); }}>
                 {t("pet.startup.foxbell")}

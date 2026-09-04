@@ -28,6 +28,54 @@ export interface PetRpcErrorLike {
   detail?: string;
 }
 
+/** 已知 RpcError 码白名单（与 locales 的 pet.rpc.* 键一一对应，防止两处漂移） */
+export const KNOWN_RPC_CODES = [
+  "audio-format-unsupported",
+  "audio-not-found",
+  "audio-relpath-invalid",
+  "copy-failed",
+  "delete-failed",
+  "download-failed",
+  "download-status",
+  "download-url-invalid",
+  "finalize-move-failed",
+  "finalize-scan-failed",
+  "group-invalid",
+  "host-forbidden",
+  "internal",
+  "manifest-backup-failed",
+  "manifest-parse-failed",
+  "manifest-request-failed",
+  "manifest-status",
+  "manifest-write-failed",
+  "pet-dir-missing",
+  "pet-exists",
+  "pet-name-dot-prefix",
+  "pet-name-empty",
+  "pet-name-illegal",
+  "pet-name-reserved",
+  "pet-not-found",
+  "pet-not-on-petdex",
+  "petdex-no-zip",
+  "redirect-forbidden",
+  "redirect-too-many",
+  "rename-failed",
+  "reveal-failed",
+  "sheet-not-found",
+  "slug-parse-failed",
+  "source-not-folder",
+  "staging-create-failed",
+  "staging-id-invalid",
+  "staging-missing-sheet",
+  "staging-not-found",
+  "tmp-write-failed",
+  "zip-entry-illegal-path",
+  "zip-open-failed",
+  "zip-read-failed",
+  "zip-too-many-entries",
+  "zip-total-over-limit",
+] as const;
+
 export function isPetRpcError(e: unknown): e is PetRpcErrorLike {
   return (
     typeof e === "object" &&
@@ -45,11 +93,11 @@ export function petErrMsg(
 ): string {
   if (e instanceof PetError) return t(`pet.err.${e.code}`, e.params);
   if (isPetRpcError(e)) {
-    const key = `pet.rpc.${e.code}`;
-    const msg = t(key, e.params ?? {});
-    // 未知 code（i18n 键缺失时 i18next 返回键名）：回退 internal 并保留开发者原文
-    if (msg === key) return t("pet.rpc.internal", { err: e.detail ?? "" });
-    return msg;
+    // 白名单判定（第七轮）：不依赖 i18next 缺键回键名的默认行为，未知码显式收敛 internal
+    if (!(KNOWN_RPC_CODES as readonly string[]).includes(e.code)) {
+      return t("pet.rpc.internal", { err: e.detail ?? "" });
+    }
+    return t(`pet.rpc.${e.code}`, e.params ?? {});
   }
   if (e instanceof Error && e.message) return e.message;
   return t("pet.err.scan-fail");

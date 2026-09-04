@@ -398,7 +398,6 @@
       "mismatchIgnore": "Ignore, run degraded from disk",
       "mismatchCancel": "Cancel switch",
       "pendingFirstCheck": "Pending first activation check",
-      "error": "Failed: {{msg}}",
       "ignoredDiff": "Differences ignored — running with current assets (you'll be prompted again next check)"
     },
     "startup": {
@@ -411,7 +410,8 @@
       "hidePet": "Hide pet",
       "updated": "Manifest updated",
       "switched": "Switched back to foxbell",
-      "petHidden": "Pet hidden"
+      "petHidden": "Pet hidden",
+      "fatalScan": "Pet assets scan failed: {{msg}}"
     },
     "import": {
       "groupGeneral": "General chat (double-click)",
@@ -533,7 +533,10 @@
       "redirect-forbidden": "Redirect target not in petdex whitelist",
       "download-failed": "Download failed",
       "download-status": "Download response error",
-      "tmp-write-failed": "Failed to write temp file"
+      "tmp-write-failed": "Failed to write temp file",
+      "pet-name-dot-prefix": "Pet name cannot start with a dot",
+      "download-url-invalid": "Invalid download URL",
+      "finalize-scan-failed": "Failed to read pet info after finalize"
     }
   }
 }

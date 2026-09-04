@@ -398,7 +398,6 @@
       "mismatchIgnore": "忽略，按磁盘降级运行",
       "mismatchCancel": "取消切换",
       "pendingFirstCheck": "待首次激活校验",
-      "error": "操作失败：{{msg}}",
       "ignoredDiff": "已忽略差异，按当前素材运行（下次校验仍会提示）"
     },
     "startup": {
@@ -411,7 +410,8 @@
       "hidePet": "关闭宠物",
       "updated": "manifest 已更新",
       "switched": "已切回 foxbell",
-      "petHidden": "宠物已关闭"
+      "petHidden": "宠物已关闭",
+      "fatalScan": "宠物素材扫描失败：{{msg}}"
     },
     "import": {
       "groupGeneral": "日常闲聊（双击说话）",
@@ -533,7 +533,10 @@
       "redirect-forbidden": "重定向目标不在 petdex 白名单内",
       "download-failed": "下载失败",
       "download-status": "下载响应异常",
-      "tmp-write-failed": "临时文件写入失败"
+      "tmp-write-failed": "临时文件写入失败",
+      "pet-name-dot-prefix": "宠物名不能以点开头",
+      "download-url-invalid": "下载地址非法",
+      "finalize-scan-failed": "导入落地后读取宠物信息失败"
     }
   }
 }

@@ -80,10 +80,9 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     await screen.findByTestId("pet-startup-dialog");
     expect(screen.queryByTestId("pet-startup-update")).toBeNull(); // 致命分支无更新按钮
     expect(await screen.findByTestId("pet-startup-foxbell")).toBeInTheDocument();
-    // 映射链路：RpcError 经 petErrMsg → t("pet.startup.fatal", { msg: t("pet.rpc.pet-not-found", {id:"p1"}) })。
-    // 测试环境 i18next 未初始化时 fatal 行渲染为键名（插值未展开），映射语义由 petErrors.test.ts 钉死；
-    // 此处断言 fatal 行存在且更新按钮不在（致命三分支形态不变）
-    expect(screen.getByTestId("pet-startup-dialog").textContent).toContain("pet.startup.fatal");
+    // 映射链路（第七轮前缀拆分）：RpcError 走 pet.startup.fatalScan 前缀，msg 内含 pet.rpc.pet-not-found。
+    // 测试环境 i18next 未初始化时渲染为键名（插值未展开），映射语义由 petErrors.test.ts 钉死
+    expect(screen.getByTestId("pet-startup-dialog").textContent).toContain("pet.startup.fatalScan");
   });
 
   it("直投（无 manifest）更新 → buildManifestFromScan，字幕默认跟随 hasVoice（FIX-4）", async () => {
