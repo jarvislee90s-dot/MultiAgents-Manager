@@ -74,6 +74,8 @@ export default function SettingsPage() {
   const [savedToolEnabled, setSavedToolEnabled] = useState<Record<string, boolean>>({});
   // 离开拦截选「保存」时缓存跳转，应用成功后执行
   const pendingJumpRef = useRef<(() => void) | null>(null);
+  // 关窗守卫放行标记：三选（保存/放弃）尘埃落定后重发 close，此时不拦截（M1）
+  const closeApprovedRef = useRef(false);
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
   const queryClient = useQueryClient();
@@ -157,10 +159,19 @@ export default function SettingsPage() {
     }
     (async () => {
       const fn = await win.onCloseRequested((event) => {
+        // M1：三选决议后重发的 close 不拦截，放行原生关闭
+        if (closeApprovedRef.current) {
+          closeApprovedRef.current = false;
+          return;
+        }
         event.preventDefault();
-        // 关窗口与切分区共用同一三选守卫（保存缓存跳转 → 应用成功后执行）
+        // 关窗口与切分区共用同一三选守卫（保存缓存跳转 → 应用成功后执行）。
+        // 守卫回调在三选决议（保存应用成功 / 放弃更改）后执行：清脏并重发 close，
+        // 否则 preventDefault 已吞掉本次关闭，用户需再点一次 X
         setLeaveGuard(() => () => {
           setToolDirty(false);
+          closeApprovedRef.current = true;
+          void win.close();
         });
       });
       if (disposed) fn();
