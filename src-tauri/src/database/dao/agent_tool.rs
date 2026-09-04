@@ -70,8 +70,7 @@ pub fn get_tool_enabled_conn(conn: &rusqlite::Connection, tool_id: &str) -> bool
 
 /// 启用工具的 id 列表（按种子顺序）
 pub fn enabled_tool_ids_conn(conn: &rusqlite::Connection) -> Vec<String> {
-    let Ok(mut stmt) =
-        conn.prepare("SELECT id FROM agent_tools WHERE enabled = 1 ORDER BY rowid")
+    let Ok(mut stmt) = conn.prepare("SELECT id FROM agent_tools WHERE enabled = 1 ORDER BY rowid")
     else {
         return Vec::new();
     };

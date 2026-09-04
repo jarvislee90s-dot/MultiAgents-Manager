@@ -28,12 +28,12 @@ pub use dao::preset::{
     create_preset, delete_preset, get_preset_items, list_presets, record_preset_application,
     record_preset_application_subagent,
 };
-pub use dao::session::{cleanup_stale_sessions, update_session_status};
+pub use dao::session::{cleanup_stale_sessions, find_status, update_session_status};
 pub use dao::settings::{get_setting, set_setting};
+pub use dao::unread::UnreadSessionRecord;
 pub use dao::unread::{
     clear_tool as clear_unread_tool, delete as delete_unread, list as list_unread_sessions,
 };
-pub use dao::unread::UnreadSessionRecord;
 
 /// 初始化数据库（兼容旧 store::init() 调用）
 pub fn init() {

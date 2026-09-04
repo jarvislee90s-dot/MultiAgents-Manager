@@ -55,6 +55,8 @@ export function SessionCard({ session }: { session: Session }) {
         agentType: session.agentType,
         projectName: session.projectName,
         lastMessage: session.lastMessage ?? undefined,
+        unread: session.unread, // 歧义选择器点选成功后回标已读用（spec W4 已读信号 1）
+        form: session.form, // review M3：CLI 会话 APP 级保底激活时的 UX 提示依据
       });
     } catch (e) {
       toast.error(t("sessions.jumpFailed", { error: e }));

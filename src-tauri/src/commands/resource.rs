@@ -687,7 +687,10 @@ pub fn save_mcp_config(
 /// plugin → 工具插件目录（adapter.plugin_dirs[0]，与启用插件的 symlink 目标同源）。
 /// 返回 (路径, 是否为文件)；目录类调用方负责 create_dir_all。
 /// mcp/plugin 的路径由 adapter 内部基于真实用户目录解析
-fn resolve_tool_resource_path(tool_id: &str, kind: &str) -> Result<(std::path::PathBuf, bool), String> {
+fn resolve_tool_resource_path(
+    tool_id: &str,
+    kind: &str,
+) -> Result<(std::path::PathBuf, bool), String> {
     match kind {
         "skill" => crate::adapter::primary_skill_dir(tool_id)
             .map(|p| (p, false))

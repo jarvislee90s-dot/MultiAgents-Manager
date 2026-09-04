@@ -122,7 +122,9 @@ export default function SettingsPage() {
 
   const loadToolSettings = useCallback(async () => {
     try {
-      const rows = await invoke<ToolRow[]>("get_tool_settings");
+      // 兜底 null：浏览器/Playwright mock 下未注册命令会 resolve null（同 useEnabledToolsQuery
+      // 的 `?? []` 防御），防止 toolRows.map / rows.map 崩溃
+      const rows = (await invoke<ToolRow[]>("get_tool_settings")) ?? [];
       setToolRows(rows);
       // 记录快照，供 changedRows diff 与保存后复位
       setSavedToolEnabled(Object.fromEntries(rows.map((r) => [r.toolId, r.enabled])));
@@ -179,12 +181,17 @@ export default function SettingsPage() {
         restored: string[];
         restoredMcps: string[];
         rebuildFailed: string[];
+        skipped: string[];
       }>("update_tool_settings", {
         changes: changedRows.map((r) => ({ toolId: r.toolId, enabled: r.enabled })),
       });
       toast.success(t("settings.tools.applied"));
       if (result.rebuildFailed.length) {
         toast.warning(`rebuild failed: ${result.rebuildFailed.join(", ")}`);
+      }
+      // SSOT 缺失/暂存失败的项逐项报告（spec W5 清理语义 1 + §9），不中断整体保存
+      if (result.skipped.length) {
+        toast.warning(t("settings.tools.skippedItems", { items: result.skipped.join(", ") }));
       }
       setConfirmOpen(false);
       await loadToolSettings();

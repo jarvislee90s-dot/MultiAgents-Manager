@@ -641,7 +641,19 @@ export function FoxbellPet() {
             <div
               key={w.hwnd}
               onClick={() => {
-                invoke("focus_hwnd", { hwnd: w.hwnd }).catch(() => {});
+                invoke("focus_hwnd", { hwnd: w.hwnd })
+                  .then(() => {
+                    // 歧义点选跳转成功 → 标记发起跳转的那张未读卡已读（spec W4 已读信号 1；
+                    // 与后端 focus_session 直达成功路径的回标对齐）。fire-and-forget 不阻塞跳转 UX
+                    const s = sessionIndexRef.current.get(pendingAckRef.current);
+                    if (s?.unread) {
+                      invoke("mark_session_read", {
+                        agentType: s.agentType,
+                        sessionId: s.id,
+                      }).catch((err) => console.error("mark_session_read failed:", err));
+                    }
+                  })
+                  .catch(() => {});
                 setCandidates(null);
                 ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
                 setCards(cardsFromState(statusStateRef.current ?? {}));

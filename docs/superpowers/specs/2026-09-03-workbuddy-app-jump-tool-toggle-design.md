@@ -162,6 +162,7 @@
 - 看板：活跃卡（现状渲染）+ 未读卡（复用 SessionCard 样式，带未读徽标 + X 按钮），未读卡排后。
 - 宠物头顶卡片与看板同一数据源，已读联动消失。
 - 新增 IPC：`list_unread_sessions` / `mark_session_read`；`get_all_sessions` 返回值不变，前端 query 合并。
+  - 实现期调整（计划架构）：未读卡由后端 `sync_unread_sessions` 直接合并进 `get_all_sessions` 返回值（`Session.unread` 标记），看板/宠物/通知管线零改造；不设独立 `list_unread_sessions` IPC，仅保留 `mark_session_read`。
 
 ## 6. W5：工具勾选管理
 

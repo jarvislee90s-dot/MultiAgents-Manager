@@ -125,7 +125,8 @@
       "disableItem": "Stop monitoring only (no managed files to restore)",
       "confirm": "Apply",
       "cancel": "Cancel",
-      "applied": "Applied"
+      "applied": "Applied",
+      "skippedItems": "The following items were not restored (SSOT missing or staging failed, links left unchanged): {{items}}"
     }
   },
   "home": {
@@ -350,6 +351,7 @@
     "noMessage": "(no message)",
     "unread": "Unread",
     "markRead": "Mark read and dismiss",
+    "appFallbackHint": "CLI terminal not located; host app brought to front",
     "justNow": "just now",
     "appBadge": "Desktop App session",
     "empty": "No active sessions",

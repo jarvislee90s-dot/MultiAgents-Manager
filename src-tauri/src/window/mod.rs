@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
-mod applescript;
-#[cfg(target_os = "macos")]
 pub mod app_activation;
+#[cfg(target_os = "macos")]
+mod applescript;
 #[cfg(any(target_os = "macos", windows))]
 pub mod deep_link;
 #[cfg(target_os = "macos")]
@@ -58,6 +58,13 @@ fn get_tty_for_pid(pid: u32) -> Result<String, String> {
     }
 }
 
+/// 深度链接前置条件（review F3）：仅未读卡兜底（pid=0）或 pid 可提取 .app bundle
+/// （APP 会话）时才尝试 session 级深链。CLI 会话（pid 存活、exe 无 bundle）走 TTY
+/// 链路，若 TTY 失败也不得用 codex:// 深链误拉起 ChatGPT.app
+fn should_try_deep_link(pid: u32, pid_bundle: Option<&str>) -> bool {
+    pid == 0 || pid_bundle.is_some()
+}
+
 /// APP 激活入口（W2）：优先深度链接直达会话 → pid 提取 bundle → 按工具枚举兜底。
 /// 返回 Some(json) 表示跳转成功，None 表示无法激活
 #[cfg(target_os = "macos")]
@@ -68,15 +75,6 @@ pub fn activate_agent_app(
 ) -> Option<serde_json::Value> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-    // 1) 第一顺位：深度链接直达 session（路由格式由 deep_link 模块决定，未探明则跳过）
-    if let (Some(agent), Some(sid)) = (agent_type, session_id) {
-        if let Some(url) = deep_link::session_url(agent, sid) {
-            if deep_link::open_url(&url).is_ok() {
-                return Some(serde_json::json!({ "type": "focused" }));
-            }
-        }
-    }
-
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -84,16 +82,32 @@ pub fn activate_agent_app(
         ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
     );
 
-    // 2) pid 仍存活：取其 exe 提取 .app bundle 激活（pid=0/已退出时自然跳过）
-    if pid > 0 {
-        if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid)) {
-            if let Some(exe) = proc.exe() {
-                if let Some(bundle) = app_activation::app_bundle_from_exe(&exe.to_string_lossy()) {
-                    if app_activation::activate_app_bundle(&bundle).is_ok() {
-                        return Some(serde_json::json!({ "type": "focused" }));
-                    }
+    // pid 存活时先提取其 .app bundle（深度链接前置条件判定 + 阶段 2 复用）
+    let pid_bundle = if pid > 0 {
+        system
+            .process(sysinfo::Pid::from_u32(pid))
+            .and_then(|proc| proc.exe())
+            .and_then(|exe| app_activation::app_bundle_from_exe(&exe.to_string_lossy()))
+    } else {
+        None
+    };
+
+    // 1) 第一顺位：深度链接直达 session（路由格式由 deep_link 模块决定，未探明则跳过）。
+    //    前置条件见 should_try_deep_link（review F3：CLI pid 不触发深链）
+    if should_try_deep_link(pid, pid_bundle.as_deref()) {
+        if let (Some(agent), Some(sid)) = (agent_type, session_id) {
+            if let Some(url) = deep_link::session_url(agent, sid) {
+                if deep_link::open_url(&url).is_ok() {
+                    return Some(serde_json::json!({ "type": "focused" }));
                 }
             }
+        }
+    }
+
+    // 2) pid 仍存活：取其 exe 提取 .app bundle 激活（pid=0/已退出时自然跳过）
+    if let Some(bundle) = &pid_bundle {
+        if app_activation::activate_app_bundle(bundle).is_ok() {
+            return Some(serde_json::json!({ "type": "focused" }));
         }
     }
 
@@ -114,4 +128,32 @@ pub fn activate_agent_app(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod deep_link_guard_tests {
+    use super::*;
+
+    #[test]
+    fn unread_card_pid_zero_tries_deep_link() {
+        // 未读卡兜底（pid=0）：深度链接是第一顺位
+        assert!(should_try_deep_link(0, None));
+        assert!(should_try_deep_link(0, Some("/Applications/ChatGPT.app")));
+    }
+
+    #[test]
+    fn app_session_pid_with_bundle_tries_deep_link() {
+        // APP 会话：pid 的 exe 能提取出 .app bundle → 深链可达对应 APP
+        assert!(should_try_deep_link(
+            1234,
+            Some("/Applications/WorkBuddy.app")
+        ));
+    }
+
+    #[test]
+    fn cli_pid_never_tries_deep_link() {
+        // CLI 会话（F3 回归锁）：pid 存活但 exe 无 .app bundle（TTY 链路失败场景）
+        // 不得触发 codex:// 深链误拉起 ChatGPT.app
+        assert!(!should_try_deep_link(1234, None));
+    }
 }

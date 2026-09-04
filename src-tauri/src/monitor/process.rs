@@ -163,6 +163,7 @@ fn find_processes_by_names(
             pid: pid.as_u32(),
             cpu_usage: process.cpu_usage(),
             cwd,
+            exe: process.exe().map(|e| e.to_path_buf()),
             form,
         });
     }

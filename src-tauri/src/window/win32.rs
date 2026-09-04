@@ -68,6 +68,9 @@ const TOOL_CLAIM_KEYWORDS: &[(&str, &[&str])] = &[
     ("opencode", &["opencode", "oc |"]),
     ("openclaw", &["openclaw"]),
     ("kimi", &["kimi"]),
+    // WorkBuddy 桌面 APP（Electron）窗口标题即 "WorkBuddy"，缺失会导致
+    // 多窗口消歧无法认领、无谓落入 Ambiguous 选择器（spec W2/W7 Windows 侧）
+    ("workbuddy", &["workbuddy"]),
 ];
 
 /// 归一化窗口标题用于项目名比对：剥离 spinner 前缀（codex 运行时标题形态 "⠙ 项目名"，
@@ -641,6 +644,10 @@ mod tests {
         assert_eq!(claim_owner("✳ Claude Code"), Some("claude"));
         assert_eq!(claim_owner("OC | 问候与开场"), Some("opencode"));
         assert_eq!(claim_owner("codex: working"), Some("codex"));
+        // WorkBuddy 窗口（App 标题即 "WorkBuddy"）必须被 workbuddy 认领，
+        // 否则多窗口消歧无法锁定 WorkBuddy、误入 Ambiguous 选择器
+        assert_eq!(claim_owner("WorkBuddy"), Some("workbuddy"));
+        assert_eq!(claim_owner("WorkBuddy - 项目设置"), Some("workbuddy"));
         // 中立：无命中
         assert_eq!(claim_owner("Windows PowerShell"), None);
         assert_eq!(claim_owner("MultiAgents-Manager"), None);

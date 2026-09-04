@@ -131,10 +131,40 @@ function KimiIcon({ size }: { size: number }) {
   );
 }
 
+// WorkBuddy — 腾讯蓝工作台占位（窗口轮廓 + 标题栏圆点，中性图形避免品牌混淆）
+function WorkBuddyIcon({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <rect width="20" height="20" rx="5" fill="#0052D9" />
+      {/* 工作台窗口轮廓 */}
+      <rect
+        x="4.75"
+        y="5.75"
+        width="10.5"
+        height="8.5"
+        rx="1.75"
+        stroke="white"
+        strokeWidth="1.5"
+      />
+      {/* 标题栏分隔线与圆点 */}
+      <path d="M4.75 8.75H15.25" stroke="white" strokeWidth="1.2" />
+      <circle cx="6.9" cy="7.25" r="0.7" fill="white" />
+      <circle cx="9" cy="7.25" r="0.7" fill="white" />
+    </svg>
+  );
+}
+
 const TOOL_SVGS: Record<string, React.FC<{ size: number }>> = {
   claude: ClaudeIcon,
   codex: CodexIcon,
   opencode: OpenCodeIcon,
   openclaw: OpenClawIcon,
   kimi: KimiIcon,
+  workbuddy: WorkBuddyIcon,
 };

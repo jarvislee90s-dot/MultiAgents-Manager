@@ -93,16 +93,16 @@ pub fn focus_session(
         // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
         if crate::window::focus_terminal_for_pid(pid).is_ok() {
             mark_read_on_jump(&session_id, &agent_type);
-            return Ok(serde_json::json!({ "type": "focused" }));
+            return Ok(serde_json::json!({ "type": "focused", "via": "tty" }));
         }
-        // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）
+        // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）。
+        // via=app-fallback：CLI 会话 TTY 聚焦失败走到这里的 UX 提示依据（review M3）
         #[cfg(target_os = "macos")]
-        if let Some(out) = crate::window::activate_agent_app(
-            pid,
-            agent_type.as_deref(),
-            session_id.as_deref(),
-        ) {
+        if let Some(mut out) =
+            crate::window::activate_agent_app(pid, agent_type.as_deref(), session_id.as_deref())
+        {
             mark_read_on_jump(&session_id, &agent_type);
+            out["via"] = serde_json::Value::String("app-fallback".into());
             return Ok(out);
         }
         // 非 macOS 桌面平台无 APP 激活链路，防未使用告警

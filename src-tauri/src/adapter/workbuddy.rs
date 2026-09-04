@@ -28,9 +28,7 @@ impl AgentAdapter for WorkBuddyAdapter {
     }
 
     fn base_dir(&self) -> std::path::PathBuf {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".workbuddy")
+        dirs::home_dir().unwrap_or_default().join(".workbuddy")
     }
 
     fn mcp_format(&self) -> McpFormat {

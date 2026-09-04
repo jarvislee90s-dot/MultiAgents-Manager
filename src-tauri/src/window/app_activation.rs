@@ -20,10 +20,7 @@ fn bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool {
 
 /// 激活 APP（AppleScript，bundle 路径精确指定，避免同名歧义）
 pub fn activate_app_bundle(bundle: &str) -> Result<(), String> {
-    let script = format!(
-        "activate application \"{}\"",
-        bundle.replace('\"', "\\\"")
-    );
+    let script = format!("activate application \"{}\"", bundle.replace('\"', "\\\""));
     super::applescript::execute_applescript(&script)
 }
 
@@ -68,7 +65,10 @@ mod tests {
     fn takes_last_app_segment_for_nested_apps() {
         // 路径含多个 .app 段时取最内层（离可执行文件最近的）
         assert_eq!(
-            app_bundle_from_exe("/Applications/WorkBuddy.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper").as_deref(),
+            app_bundle_from_exe(
+                "/Applications/WorkBuddy.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper"
+            )
+            .as_deref(),
             Some("/Applications/WorkBuddy.app/Contents/Frameworks/Helper.app")
         );
     }
@@ -77,8 +77,14 @@ mod tests {
     fn bundle_matches_agent_rules() {
         assert!(bundle_matches_agent("/applications/chatgpt.app", "codex"));
         assert!(bundle_matches_agent("/applications/codex.app", "codex"));
-        assert!(!bundle_matches_agent("/applications/workbuddy.app", "codex"));
-        assert!(bundle_matches_agent("/applications/workbuddy.app", "workbuddy"));
+        assert!(!bundle_matches_agent(
+            "/applications/workbuddy.app",
+            "codex"
+        ));
+        assert!(bundle_matches_agent(
+            "/applications/workbuddy.app",
+            "workbuddy"
+        ));
         assert!(!bundle_matches_agent("/applications/chatgpt.app", "claude"));
     }
 }

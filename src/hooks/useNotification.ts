@@ -41,6 +41,25 @@ function statusToColor(status: string): string {
   }
 }
 
+// 首见未读卡补发通知的新鲜度门控（review F5）：重启/补偿场景下，转绿时间
+// （lastActivityAt）距今超过 2 分钟的老卡静默显示，不重放历史通知。
+// 时间无法解析（空串/异常）时保守静默
+export const FIRST_SEEN_UNREAD_FRESH_MS = 2 * 60 * 1000;
+
+export function isFreshFirstSeenUnread(
+  session: Pick<Session, "unread" | "status" | "lastActivityAt">,
+  nowMs: number = Date.now()
+): boolean {
+  if (!session.unread || statusToColor(session.status) !== "green") {
+    return false;
+  }
+  const greenAt = Date.parse(session.lastActivityAt);
+  if (Number.isNaN(greenAt)) {
+    return false;
+  }
+  return nowMs - greenAt <= FIRST_SEEN_UNREAD_FRESH_MS;
+}
+
 export function useNotification() {
   const sessions = useSessionStore((s) => s.sessions);
   const prevStatuses = useRef<Map<string, { status: string; color: string; at: number }>>(
@@ -193,7 +212,8 @@ export function useNotification() {
             color: statusToColor(session.status),
             at: Date.now(),
           });
-          if (session.unread && statusToColor(session.status) === "green") {
+          // review F5：新鲜度门控——老未读卡（转绿 > 2 分钟）静默显示，不重放通知
+          if (isFreshFirstSeenUnread(session)) {
             const notified = lastNotified.current.get(session.id);
             if (!notified || notified.color !== "green" || Date.now() - notified.at >= 5000) {
               // 走统一通知流（与常规颜色变化同一路径）

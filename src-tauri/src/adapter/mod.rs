@@ -41,6 +41,8 @@ pub struct AgentProcess {
     pub pid: u32,
     pub cpu_usage: f32,
     pub cwd: Option<std::path::PathBuf>,
+    /// 可执行路径（宿主判定 / classify_form 的关键输入；review F2 起 App 宿主判定依赖）
+    pub exe: Option<std::path::PathBuf>,
     pub form: ProcessForm,
 }
 
@@ -111,7 +113,12 @@ pub trait AgentAdapter: Send + Sync {
 
 /// 已注册工具 id 列表（登记顺序即扫描/展示顺序）
 pub const TOOL_IDS: &[&str] = &[
-    "claude", "codex", "opencode", "openclaw", "kimi", "workbuddy",
+    "claude",
+    "codex",
+    "opencode",
+    "openclaw",
+    "kimi",
+    "workbuddy",
 ];
 
 /// 工具 id → adapter 的唯一登记处。新增工具只需在此加一行（+ 其 adapter 文件），
@@ -221,6 +228,18 @@ pub fn get_all_sessions() -> SessionsResponse {
     // 会话级去重（见 dedup_sessions 注释）
     dedup_sessions(&mut all_sessions);
 
+    // review F2：宿主 APP 已死的孤儿会话进程不得产出活跃卡。
+    // 复用 SHARED_SYSTEM 快照（Phase 1 已带 exe 刷新），不另起全量扫描
+    {
+        let guard = SHARED_SYSTEM.lock().unwrap();
+        filter_host_dead_cards(&mut all_sessions, &|tool_id| {
+            guard
+                .as_ref()
+                .map(|system| crate::monitor::host::tool_host_alive_in(system, tool_id))
+                .unwrap_or(true) // 快照不可用时防御性放行（与旧行为一致）
+        });
+    }
+
     // W4：APP 类未读卡合并 + 未读池维护（宿主存活检查 / 变黄删除 / 过期清理）
     sync_unread_sessions(&mut all_sessions);
 
@@ -292,16 +311,8 @@ pub fn get_all_sessions() -> SessionsResponse {
         }
     }
 
-    // 按状态优先级排序
-    all_sessions.sort_by(|a, b| {
-        let pa = status_sort_priority(&a.status);
-        let pb = status_sort_priority(&b.status);
-        if pa != pb {
-            pa.cmp(&pb)
-        } else {
-            b.last_activity_at.cmp(&a.last_activity_at)
-        }
-    });
+    // 按状态优先级排序（比较器见 session_sort_cmp）
+    all_sessions.sort_by(session_sort_cmp);
 
     let waiting_count = all_sessions
         .iter()
@@ -355,6 +366,53 @@ mod tests {
         eprintln!("=== END ===");
     }
 }
+/// 看板排序比较器：状态优先级 → 同状态组内未读卡排后（spec §5 前端「未读卡排后」）
+/// → 最近活动倒序。Rust sort_by 稳定，键全等时保持原相对次序
+fn session_sort_cmp(a: &Session, b: &Session) -> std::cmp::Ordering {
+    let pa = status_sort_priority(&a.status);
+    let pb = status_sort_priority(&b.status);
+    pa.cmp(&pb)
+        .then_with(|| a.unread.cmp(&b.unread)) // false(活跃) 在前、true(未读) 排后
+        .then_with(|| b.last_activity_at.cmp(&a.last_activity_at))
+}
+
+/// review F2：宿主 APP 已死 → App 形态活跃卡全部清除（孤儿 codebuddy 心跳未过期
+/// 也不得出卡）；CLI 卡不依赖宿主；未读卡（unread=true）归池/宿主退出清池管线治理，
+/// 本过滤器不碰。host_alive 经参数注入，复用 SHARED_SYSTEM 快照避免重复全量扫描
+fn filter_host_dead_cards(sessions: &mut Vec<Session>, host_alive: &dyn Fn(&str) -> bool) {
+    sessions.retain(|s| {
+        !matches!(s.form, ProcessForm::App)
+            || s.unread
+            || host_alive(&format!("{:?}", s.agent_type).to_lowercase())
+    });
+}
+
+/// 未读池动作（review F1：迁移触发语义，替代电平 upsert——
+/// 电平 upsert 会让「跳转已读」删掉的行在下一轮复活，已读永远不生效）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnreadPoolAction {
+    /// 上一轮非绿 → 本轮绿（状态迁移）：插入/覆盖池行
+    Insert,
+    /// 持续绿色：仅刷新在场行展示字段（不重插已删行，转绿时间不滑动）
+    RefreshDisplay,
+    /// 非绿：池无动作（行删除由调用方无条件执行）
+    None,
+}
+
+/// 判定未读池动作。prev_status 为状态缓存中的上一轮状态
+/// （Debug 格式，与 get_all_sessions 末尾的统一更新一致）
+fn unread_pool_action(prev_status: Option<&str>, idle: bool) -> UnreadPoolAction {
+    if !idle {
+        return UnreadPoolAction::None;
+    }
+    let was_idle = matches!(prev_status, Some("Idle") | Some("Finished"));
+    if was_idle {
+        UnreadPoolAction::RefreshDisplay
+    } else {
+        UnreadPoolAction::Insert
+    }
+}
+
 /// W4 未读机制核心：把 DB 中的未读会话合并为 Session 卡，并维护未读池
 /// - 会话当前非空闲（黄/红）→ 删未读行（活跃卡可见，防同会话双卡）
 /// - 转绿（Idle/Finished）→ upsert 未读行（未在池中时）
@@ -371,7 +429,11 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
         let tool = format!("{:?}", s.agent_type).to_lowercase();
         let idle = matches!(s.status, SessionStatus::Idle | SessionStatus::Finished);
         if idle {
-            crate::database::dao::unread::upsert(&crate::database::dao::unread::UnreadSessionRecord {
+            // review F1：迁移触发——状态缓存此刻存的是上一轮状态（回合末尾才统一更新），
+            // 仅「上一轮非绿 → 本轮绿」才插入；持续绿色只刷新在场行展示字段，
+            // 「跳转已读」删掉的行不再被电平 upsert 复活
+            let prev = crate::database::find_status(&s.id);
+            let record = crate::database::dao::unread::UnreadSessionRecord {
                 tool_id: tool,
                 session_id: s.id.clone(),
                 project_name: s.project_name.clone(),
@@ -379,7 +441,14 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
                 last_message: s.last_message.clone(),
                 turned_green_at_ms: now_ms,
                 expires_at_ms: now_ms + 24 * 3600 * 1000,
-            });
+            };
+            match unread_pool_action(prev.as_deref(), true) {
+                UnreadPoolAction::Insert => crate::database::dao::unread::upsert(&record),
+                UnreadPoolAction::RefreshDisplay => {
+                    crate::database::dao::unread::refresh_display(&record)
+                }
+                UnreadPoolAction::None => {}
+            }
         } else {
             // 变黄/红：删未读（状态迁移，非重置机制）
             crate::database::dao::unread::delete(&tool, &s.id);
@@ -404,21 +473,42 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
         crate::database::dao::unread::cleanup_expired_unread(&conn, now_ms);
     }
 
-    // 4) 未读池合并为卡（跳过当前已在板的活跃会话；按转绿时间倒序追加在末尾）
+    // 4) 未读池合并为卡（纯映射见 build_unread_cards；追加在末尾，最终顺序由 session_sort_cmp 决定）
+    let final_unread = crate::database::dao::unread::list(now_ms);
+    let cards = build_unread_cards(&final_unread, active, &|id| {
+        crate::database::dao::agent_tool::get_tool_enabled(id)
+    });
+    active.extend(cards);
+}
+
+/// 未读池 → 未读卡（纯函数，spec §8 可测试；启用判定经参数注入，测试不触库）：
+/// - 跳过当前已在板的活跃会话（活跃卡由进程监控渲染，防同会话双卡）
+/// - 未注册工具 id 的行丢弃（防御）
+/// - 已停用工具的行丢弃（W5 纵深防御：即使其他路径让行残留池中，也不得复活为卡/通知）
+/// - 卡字段：status=Idle / unread=true / pid=0（pid 失效，跳转走按工具兜底）/ form=App
+fn build_unread_cards(
+    pool: &[crate::database::dao::unread::UnreadSessionRecord],
+    active: &[Session],
+    tool_enabled: &dyn Fn(&str) -> bool,
+) -> Vec<Session> {
     let active_keys: HashSet<(String, String)> = active
         .iter()
         .map(|s| (format!("{:?}", s.agent_type).to_lowercase(), s.id.clone()))
         .collect();
-    let final_unread = crate::database::dao::unread::list(now_ms);
-    for r in final_unread {
+    let mut cards = Vec::new();
+    for r in pool {
         if active_keys.contains(&(r.tool_id.clone(), r.session_id.clone())) {
+            continue;
+        }
+        // W5 门禁：停用工具（彻底隐藏/通知静音）的池行不得合并为未读卡
+        if !tool_enabled(&r.tool_id) {
             continue;
         }
         let Ok(agent_type) = serde_json::from_value::<AgentType>(serde_json::json!(r.tool_id))
         else {
             continue;
         };
-        active.push(Session {
+        cards.push(Session {
             id: r.session_id.clone(),
             agent_type,
             project_name: r.project_name.clone(),
@@ -439,6 +529,95 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
             jump_supported: jump_supported_for(ProcessForm::App),
             unread: true,
         });
+    }
+    cards
+}
+
+#[cfg(test)]
+mod unread_pool_action_tests {
+    use super::*;
+
+    /// review F1：未读池动作必须是「迁移触发」而非「电平触发」——
+    /// 仅上一轮非绿 → 本轮绿才插入；持续绿色只刷新展示字段（不重插已读删掉的行）
+    #[test]
+    fn unread_pool_action_is_edge_triggered() {
+        use UnreadPoolAction::{Insert, RefreshDisplay};
+        // 首次观测（无缓存）：转绿 → 插入
+        assert_eq!(unread_pool_action(None, true), Insert);
+        // 上一轮非绿（黄/红/未知）→ 本轮绿：状态迁移，插入
+        assert_eq!(unread_pool_action(Some("Thinking"), true), Insert);
+        assert_eq!(unread_pool_action(Some("Processing"), true), Insert);
+        assert_eq!(unread_pool_action(Some("Waiting"), true), Insert);
+        // 上一轮已绿 → 本轮仍绿：仅刷新展示字段
+        assert_eq!(unread_pool_action(Some("Idle"), true), RefreshDisplay);
+        assert_eq!(unread_pool_action(Some("Finished"), true), RefreshDisplay);
+        // 非绿：池无动作（行删除由调用方无条件执行）
+        assert_eq!(
+            unread_pool_action(Some("Idle"), false),
+            UnreadPoolAction::None
+        );
+        assert_eq!(unread_pool_action(None, false), UnreadPoolAction::None);
+    }
+}
+
+#[cfg(test)]
+mod host_liveness_filter_tests {
+    use super::*;
+
+    fn fake(id: &str, form: ProcessForm, unread: bool) -> Session {
+        Session {
+            id: id.into(),
+            agent_type: AgentType::WorkBuddy,
+            project_name: "P".into(),
+            project_path: String::new(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: String::new(),
+            pid: 7,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form,
+            jump_supported: true,
+            unread,
+        }
+    }
+
+    /// review F2：宿主 APP 已死（孤儿 codebuddy 心跳仍新鲜）时，App 形态活跃卡
+    /// 必须消失；CLI 卡不依赖宿主；未读卡由池管线（宿主退出清池）单独治理
+    #[test]
+    fn host_dead_removes_active_app_cards_only() {
+        let mut sessions = vec![
+            fake("wb-active", ProcessForm::App, false),
+            fake("cli", ProcessForm::Cli, false),
+            fake("unread-card", ProcessForm::App, true),
+        ];
+        filter_host_dead_cards(&mut sessions, &|_| false);
+        assert!(
+            !sessions.iter().any(|s| s.id == "wb-active"),
+            "宿主死的活跃卡必须清掉"
+        );
+        assert!(
+            sessions.iter().any(|s| s.id == "cli"),
+            "CLI 卡不依赖宿主存活"
+        );
+        assert!(
+            sessions.iter().any(|s| s.id == "unread-card"),
+            "未读卡归池管线治理，此过滤器不碰"
+        );
+    }
+
+    #[test]
+    fn host_alive_keeps_everything() {
+        let mut sessions = vec![
+            fake("wb-active", ProcessForm::App, false),
+            fake("cli", ProcessForm::Cli, false),
+        ];
+        filter_host_dead_cards(&mut sessions, &|_| true);
+        assert_eq!(sessions.len(), 2);
     }
 }
 
@@ -519,5 +698,137 @@ mod dedup_tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].pid, 111); // 保留首张
         assert_eq!(sessions[1].id, "ses_B");
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::session_sort_cmp;
+    use crate::session::model::{AgentType, ProcessForm, Session, SessionStatus};
+
+    fn card(id: &str, unread: bool, activity: &str) -> Session {
+        Session {
+            id: id.into(),
+            agent_type: AgentType::WorkBuddy,
+            project_name: "p".into(),
+            project_path: "p".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: activity.into(),
+            pid: 0,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::App,
+            jump_supported: true,
+            unread,
+        }
+    }
+
+    #[test]
+    fn unread_cards_sort_after_active_within_same_status() {
+        // spec §5 前端「未读卡排后」：同状态组内活跃卡（unread=false）在前，
+        // 未读卡排后（组内未读之间仍按最近活动倒序）
+        let mut sessions = [
+            card("old-active", false, "2026-09-04T09:00:00Z"),
+            card("unread-new", true, "2026-09-04T10:00:00Z"),
+            card("unread-old", true, "2026-09-04T08:00:00Z"),
+        ];
+        sessions.sort_by(session_sort_cmp);
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["old-active", "unread-new", "unread-old"]);
+    }
+
+    #[test]
+    fn status_priority_still_dominates_unread_flag() {
+        // 未读标记只在同状态组内生效，不得跨状态提前（黄/红仍在绿前）
+        let mut sessions = [
+            card("unread-idle", true, "2026-09-04T10:00:00Z"),
+            card("active-thinking", false, "2026-09-04T09:00:00Z"),
+        ];
+        sessions[1].status = SessionStatus::Thinking;
+        sessions.sort_by(session_sort_cmp);
+        assert_eq!(sessions[0].id, "active-thinking");
+    }
+}
+
+#[cfg(test)]
+mod unread_card_tests {
+    use super::build_unread_cards;
+    use crate::database::dao::unread::UnreadSessionRecord;
+    use crate::session::model::{AgentType, ProcessForm, Session, SessionStatus};
+
+    fn record(tool: &str, sid: &str) -> UnreadSessionRecord {
+        UnreadSessionRecord {
+            tool_id: tool.into(),
+            session_id: sid.into(),
+            project_name: "proj".into(),
+            title: Some("标题".into()),
+            last_message: Some("消息".into()),
+            turned_green_at_ms: 1000,
+            expires_at_ms: 1000 + 24 * 3600 * 1000,
+        }
+    }
+
+    fn active_card(agent: AgentType, sid: &str) -> Session {
+        Session {
+            id: sid.into(),
+            agent_type: agent,
+            project_name: "proj".into(),
+            project_path: "p".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Thinking,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: String::new(),
+            pid: 42,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::App,
+            jump_supported: true,
+            unread: false,
+        }
+    }
+
+    #[test]
+    fn merges_pool_skipping_active_and_mapping_fields() {
+        // 在板活跃会话（WorkBuddy/live）跳过（活跃卡已由进程监控渲染，防双卡）；
+        // 其余映射为未读卡：tool_id → AgentType、unread=true、pid=0（跳转走按工具兜底）、
+        // form=App、status=Idle
+        let active = vec![active_card(AgentType::WorkBuddy, "live")];
+        let pool = vec![record("workbuddy", "live"), record("codex", "done")];
+        let cards = build_unread_cards(&pool, &active, &|_| true);
+        assert_eq!(cards.len(), 1);
+        let c = &cards[0];
+        assert_eq!(c.id, "done");
+        assert_eq!(c.agent_type, AgentType::Codex);
+        assert!(c.unread);
+        assert_eq!(c.pid, 0);
+        assert_eq!(c.form, ProcessForm::App);
+        assert_eq!(c.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn unknown_tool_row_is_dropped() {
+        // 未注册工具 id（防御）→ 丢弃该行，不产出卡
+        let cards = build_unread_cards(&[record("ghost", "s1")], &[], &|_| true);
+        assert!(cards.is_empty());
+    }
+
+    #[test]
+    fn disabled_tool_row_is_dropped() {
+        // W5 纵深防御：已停用工具的池行不得合并为未读卡（停用 = 彻底隐藏/通知静音，
+        // 防止补偿等残留路径把未读卡「复活」并触发完成通知）
+        let pool = [record("workbuddy", "s1"), record("codex", "s2")];
+        let cards = build_unread_cards(&pool, &[], &|id| id != "workbuddy");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "s2");
+        assert_eq!(cards[0].agent_type, AgentType::Codex);
+        assert!(cards[0].unread);
     }
 }

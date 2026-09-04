@@ -17,6 +17,9 @@ pub struct UnreadSessionRecord {
 }
 
 /// 插入或覆盖（同 tool_id + session_id 直接更新，无软删标记）
+/// 冲突时仅刷新展示快照（project_name/title/last_message）；
+/// turned_green_at/expires_at 保留首次转绿值——spec §5 口径：turned_green_at＝转绿时间、
+/// expires_at＝首绿 +24h 兜底，若随每轮轮询刷新会让 24h 窗口无限滑动、永不过期
 pub fn upsert_unread(conn: &Connection, r: &UnreadSessionRecord) {
     let _ = conn.execute(
         "INSERT INTO unread_sessions
@@ -25,9 +28,7 @@ pub fn upsert_unread(conn: &Connection, r: &UnreadSessionRecord) {
          ON CONFLICT(tool_id, session_id) DO UPDATE SET
             project_name = excluded.project_name,
             title = excluded.title,
-            last_message = excluded.last_message,
-            turned_green_at = excluded.turned_green_at,
-            expires_at = excluded.expires_at",
+            last_message = excluded.last_message",
         params![
             r.tool_id,
             r.session_id,
@@ -73,6 +74,23 @@ pub fn list_unread(conn: &Connection, now_ms: i64) -> Vec<UnreadSessionRecord> {
 }
 
 /// 清空指定工具的全部未读（工具取消勾选等场景）
+/// review F1：仅刷新在场行的展示字段（UPDATE 无插入）——「跳转已读」删掉的行
+/// 不得复活，转绿时间不得滑动。「持续绿色」路径专用；插入路径走 upsert_unread
+pub fn refresh_display_unread(conn: &Connection, r: &UnreadSessionRecord) {
+    let _ = conn.execute(
+        "UPDATE unread_sessions
+         SET project_name = ?3, title = ?4, last_message = ?5
+         WHERE tool_id = ?1 AND session_id = ?2",
+        params![
+            r.tool_id,
+            r.session_id,
+            r.project_name,
+            r.title,
+            r.last_message
+        ],
+    );
+}
+
 pub fn clear_unread_for_tool(conn: &Connection, tool_id: &str) {
     let _ = conn.execute(
         "DELETE FROM unread_sessions WHERE tool_id = ?1",
@@ -103,6 +121,11 @@ pub fn delete(tool_id: &str, session_id: &str) {
 pub fn list(now_ms: i64) -> Vec<UnreadSessionRecord> {
     let conn = DB.lock().unwrap();
     list_unread(&conn, now_ms)
+}
+
+pub fn refresh_display(r: &UnreadSessionRecord) {
+    let conn = crate::database::connection::DB.lock().unwrap();
+    refresh_display_unread(&conn, r);
 }
 
 pub fn clear_tool(tool_id: &str) {
@@ -136,9 +159,18 @@ mod tests {
     fn upsert_then_list_and_dedupe() {
         let conn = mem();
         upsert_unread(&conn, &rec("workbuddy", "s1", 1000));
-        upsert_unread(&conn, &rec("workbuddy", "s1", 2000)); // 同键覆盖
+        // 二次 upsert 仅刷新展示字段；turned_green_at/expires_at 保留首绿值
+        // （spec §5：turned_green_at＝转绿时间，24h 兜底过期自首绿起算，禁止逐轮滑动）
+        let mut updated = rec("workbuddy", "s1", 2000);
+        updated.last_message = Some("新消息".into());
+        updated.title = Some("新标题".into());
+        upsert_unread(&conn, &updated);
         assert_eq!(list_unread(&conn, 3000).len(), 1);
-        assert_eq!(list_unread(&conn, 3000)[0].turned_green_at_ms, 2000);
+        let row = &list_unread(&conn, 3000)[0];
+        assert_eq!(row.turned_green_at_ms, 1000); // 首绿时间不被每轮轮询刷新
+        assert_eq!(row.expires_at_ms, 1000 + 24 * 3600 * 1000); // 兜底过期随之固定
+        assert_eq!(row.last_message.as_deref(), Some("新消息")); // 展示快照仍更新
+        assert_eq!(row.title.as_deref(), Some("新标题"));
     }
 
     #[test]
@@ -167,5 +199,31 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM unread_sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// review F1 回归锁：refresh_display 仅更新在场行的展示字段，
+    /// 绝不复活「跳转已读」删掉的行（电平 upsert 会导致已读冲销）
+    #[test]
+    fn refresh_display_never_reinserts_deleted_row() {
+        let conn = mem();
+        let mut r = rec("workbuddy", "s1", 1000);
+        upsert_unread(&conn, &r);
+        delete_unread(&conn, "workbuddy", "s1"); // 跳转已读 → 删行
+        r.title = Some("刷新后的标题".into());
+        refresh_display_unread(&conn, &r);
+        assert!(list_unread(&conn, 2000).is_empty(), "已删行不得复活");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM unread_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "已删行不得复活（物理行数）");
+        // 在场行：仅刷新展示字段，转绿时间不得滑动
+        upsert_unread(&conn, &rec("workbuddy", "s2", 5000));
+        refresh_display_unread(&conn, &rec("workbuddy", "s2", 9999));
+        let rows = list_unread(&conn, 10000);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].turned_green_at_ms, 5000,
+            "刷新展示字段不得滑动转绿时间"
+        );
     }
 }

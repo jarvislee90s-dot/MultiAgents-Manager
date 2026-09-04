@@ -125,7 +125,8 @@
       "disableItem": "仅停止监控（无托管文件需要还原）",
       "confirm": "确认应用",
       "cancel": "取消",
-      "applied": "已应用"
+      "applied": "已应用",
+      "skippedItems": "以下项未能还原（SSOT 缺失或暂存失败，链接保持不变）：{{items}}"
     }
   },
   "home": {
@@ -350,6 +351,7 @@
     "noMessage": "（无消息）",
     "unread": "未读",
     "markRead": "标记已读并关闭",
+    "appFallbackHint": "未能定位 CLI 终端，已将宿主 APP 激活到前台",
     "justNow": "刚刚",
     "appBadge": "桌面 App 会话",
     "empty": "暂无活跃会话",

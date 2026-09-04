@@ -504,6 +504,7 @@ mod tests {
             cpu_usage: 0.0,
             cwd: Some(PathBuf::from(cwd)),
             form: ProcessForm::Cli,
+            exe: None,
         }
     }
 
@@ -590,7 +591,11 @@ mod tests {
             legacy.join("session_index.jsonl"),
             format!(
                 "{}\n",
-                index_line("11111111-1111-1111-1111-111111111111", &session_dir, "/work/demo")
+                index_line(
+                    "11111111-1111-1111-1111-111111111111",
+                    &session_dir,
+                    "/work/demo"
+                )
             ),
         )
         .unwrap();
@@ -718,9 +723,7 @@ mod tests {
                 r#"{"type":"token_counting.turn_recorded","time":1782300908000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Idle);
         assert_eq!(sessions[0].last_message.as_deref(), Some("done!"));
@@ -743,9 +746,7 @@ mod tests {
                 r#"{"type":"interaction.request","kind":"approval","toolCallId":"c1","time":1782300902000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Waiting);
 
@@ -760,9 +761,7 @@ mod tests {
                 r#"{"type":"interaction.resolved","time":1782300903000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Processing);
     }
@@ -785,9 +784,7 @@ mod tests {
                 r#"{"type":"token_counting.turn_recorded","time":1782300904000}"#,
             ],
         );
-        let sessions = run_with_home(&home, || {
-            get_kimi_sessions(&[fake_process(1, &work_dir)])
-        });
+        let sessions = run_with_home(&home, || get_kimi_sessions(&[fake_process(1, &work_dir)]));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Idle);
     }
@@ -1003,10 +1000,7 @@ mod tests {
         .unwrap();
         fs::write(
             home.join("session_index.jsonl"),
-            format!(
-                "{}\n",
-                index_line("evil-1111", &outside, "/work/demo")
-            ),
+            format!("{}\n", index_line("evil-1111", &outside, "/work/demo")),
         )
         .unwrap();
         let sessions = run_with_home(&home, || {

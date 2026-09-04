@@ -32,7 +32,7 @@
 - Consumes: 无
 - Produces: `petSuppressPopup(): boolean`（语义：宠物可见即压制浮窗+系统通知）
 
-- [ ] **Step 1: 修改 petSuppressPopup**
+- [x] **Step 1: 修改 petSuppressPopup**
 
 `src/components/pet/petConfig.ts` 中（注意：`petSoundTakeover` 已是 visible-only，无需改动）：
 
@@ -44,7 +44,7 @@ export function petSuppressPopup(): boolean {
 }
 ```
 
-- [ ] **Step 2: 气泡点击失败也清除**
+- [x] **Step 2: 气泡点击失败也清除**
 
 `src/components/pet/FoxbellPet.tsx` 的 `jump()`（第 262-286 行），将：
 
@@ -67,7 +67,7 @@ export function petSuppressPopup(): boolean {
     setCards(cardsFromState(statusStateRef.current ?? {}));
 ```
 
-- [ ] **Step 3: 修正 useNotification 误导注释**
+- [x] **Step 3: 修正 useNotification 误导注释**
 
 `src/hooks/useNotification.ts:171-172` 的注释改为（代码本身不用改，系统通知降级本来就在 `petSuppressPopup()` 守卫内部）：
 
@@ -76,14 +76,14 @@ export function petSuppressPopup(): boolean {
         // 宠物可见时全部静默：头顶气泡是唯一通知面（spec W1）
 ```
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 Run: `pnpm check`
 Expected: PASS
 
 手动验证（`pnpm tauri:dev`）：① 宠物可见（不置顶）时触发会话状态变化 → 右下角浮窗与系统通知均不出现，宠物头顶出卡片；② 宠物可见 + 点击 Codex APP 会话气泡（macOS 当前跳转必失败）→ 气泡消失不卡死；③ 宠物隐藏 → 浮窗恢复出现。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/components/pet/petConfig.ts src/components/pet/FoxbellPet.tsx src/hooks/useNotification.ts
@@ -108,7 +108,7 @@ git commit -m "fix(pet): dismiss bubble on click regardless of jump result; pet-
   - `bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool`（纯函数）
   - `activate_app_bundle(bundle: &str) -> Result<(), String>`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `src-tauri/src/window/app_activation.rs`（先只含测试，函数未定义则编译失败即"失败测试"）：
 
@@ -173,12 +173,12 @@ mod tests {
 pub mod app_activation;
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test app_activation`
 Expected: 编译失败（`app_bundle_from_exe` 未定义）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `app_activation.rs` 顶部（测试模块之前）加入：
 
@@ -220,12 +220,12 @@ pub fn bundle_matches_agent_pub(bundle_lower: &str, agent_type: &str) -> bool {
 
 （若 `execute_applescript` 当前非 `pub`，在 `window/applescript.rs` 将其声明改为 `pub fn`。测试中的 `bundle_matches_agent` 调用同步改名为 `bundle_matches_agent_pub`。）
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test app_activation`
 Expected: 5 个测试 PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/window/app_activation.rs src-tauri/src/window/mod.rs src-tauri/src/window/applescript.rs
@@ -250,7 +250,7 @@ git commit -m "feat(jump): macOS app bundle extraction and activation module"
   - `window::deep_link::session_url(agent_type: &str, session_id: &str) -> Option<String>`（本任务恒 `None`，Task 4 填充）
   - `window::deep_link::open_url(url: &str) -> Result<(), String>`
 
-- [ ] **Step 1: 更新 jump_supported_for 及其测试（失败测试）**
+- [x] **Step 1: 更新 jump_supported_for 及其测试（失败测试）**
 
 `session/model.rs:34-42` 改为：
 
@@ -292,12 +292,12 @@ mod jump_tests {
 
 同时 `Session` 结构体注释（第 62-65 行）更新：`/// 进程形态（CLI / 桌面 APP）` `/// 是否支持跳转（CLI=TTY 链路，App=APP 激活）`。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test jump_supported`
 Expected: macOS 上 FAIL（App 现在应为 true）——本步骤仅改测试先行；随后实现已在 Step 1 同步给出（矩阵函数本体），因此本任务测试与实现同改，Step 2 运行应直接 PASS（红-绿合并为一轮，因纯配置矩阵无独立实现空间）。记录实际输出。
 
-- [ ] **Step 3: 创建 deep_link 骨架**
+- [x] **Step 3: 创建 deep_link 骨架**
 
 创建 `src-tauri/src/window/deep_link.rs`：
 
@@ -348,7 +348,7 @@ pub fn session_url(_agent_type: &str, _session_id: &str) -> Option<String> {
 pub mod deep_link;
 ```
 
-- [ ] **Step 4: 实现 activate_agent_app（macOS）**
+- [x] **Step 4: 实现 activate_agent_app（macOS）**
 
 `window/mod.rs` 末尾追加：
 
@@ -413,7 +413,7 @@ pub fn activate_agent_app(
 }
 ```
 
-- [ ] **Step 5: Windows pid 失效兜底**
+- [x] **Step 5: Windows pid 失效兜底**
 
 `window/win32.rs` 末尾追加（复用 `all_windows()`/`force_foreground()` 若可见性不足则按编译器提示调整）：
 
@@ -446,7 +446,7 @@ pub fn reactivate_tool_app(
 
 注意：`all_windows()` 返回的内部结构（`AllWindows`）字段名以实际代码为准——实现时先读 `win32.rs:159-170` 的 `all_windows` 与 `AllWindows` 定义，按其真实字段（窗口→PID 分组）改写上面循环的迭代方式；`force_foreground` 若为私有则改 `pub(crate)`。语义不变：找 owner 进程 exe 含 marker 的可见窗口 → 前置。
 
-- [ ] **Step 6: 接线 focus_session**
+- [x] **Step 6: 接线 focus_session**
 
 `commands/session.rs:34-75` 两分支改造。
 
@@ -491,14 +491,14 @@ Windows 分支（第 42-69 行）在 `match resolve_and_focus(...)` 的 `Err(e)`
     }
 ```
 
-- [ ] **Step 7: 验证**
+- [x] **Step 7: 验证**
 
 Run: `cd src-tauri && cargo test && cargo clippy`
 Expected: 全部 PASS（macOS 实测机）；Windows 分支经 `cargo check --target` 不可行则依赖 CI/实现期在 Windows 验证（计划注记：win32 改动需在 Windows 机器 `cargo test` 一次）。
 
 手动验证：macOS 上打开 WorkBuddy/ChatGPT，看板点 Codex APP 会话卡 → 目标 APP 到前台（不再弹"不支持跳转"toast）。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src-tauri/src/window/ src-tauri/src/session/model.rs src-tauri/src/commands/session.rs
@@ -515,7 +515,7 @@ git commit -m "feat(jump): app-level activation with pid-dead fallback on both p
 - Consumes: Task 3 的 `session_url` 骨架
 - Produces: `session_url` 的真实路由表（或维持 None 的结论记录）
 
-- [ ] **Step 1: 探测路由格式（Spike）**
+- [x] **Step 1: 探测路由格式（Spike）**（由控制器执行；实测路由：`workbuddy://chat/<sessionId>`、`codex://threads/<threadId>`，证据与注意事项见 `session_url` 文档注释及 spec 第 9 节回写）
 
 依次执行并记录输出：
 
@@ -531,7 +531,7 @@ find "/Applications/ChatGPT.app/Contents/Resources" -name "*.asar" -exec strings
 
 判定规则：若找到形如 `workbuddy://session/<xxx>` / `codex://thread/<xxx>` 的**带参数路由**（而非仅裸 scheme），进入 Step 2 接线；若只找到裸 scheme 或无结果，`session_url` 维持 `None`，直接跳 Step 4 回写结论。
 
-- [ ] **Step 2: 填充路由表（条件执行）**
+- [x] **Step 2: 填充路由表（条件执行）**
 
 `deep_link.rs` 的 `session_url` 改为（路由以 Step 1 实测为准，下方为占位结构示例——**必须用实测值替换后提交**；若实测无路由则本步骤整体跳过）：
 
@@ -549,21 +549,22 @@ pub fn session_url(agent_type: &str, session_id: &str) -> Option<String> {
 }
 ```
 
-- [ ] **Step 3: 验证（条件执行）**
+- [ ] **Step 3: 验证（条件执行）**（手动 GUI 直达验证 deferred to GUI phase）
 
 Run: `cd src-tauri && cargo test && cargo clippy && pnpm tauri:dev`
 手动：macOS 点 WorkBuddy 未读卡 → 是否直达对应会话界面。若直达失败（APP 打开但停在原界面），说明路由猜测错误——回退 Step 2 为 None 并记录，APP 级保底不受影响。
 
-- [ ] **Step 4: 回写探测结论到 spec 风险表**
+- [x] **Step 4: 回写探测结论到 spec 风险表**
 
 在 spec 第 9 节风险表「深度链接路由格式未知」一行的"应对"列追加实测结论（找到/未找到 + 具体格式或"以 APP 级保底交付"）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/window/deep_link.rs docs/superpowers/specs/2026-09-03-workbuddy-app-jump-tool-toggle-design.md
 git commit -m "feat(jump): wire session-level deep links if route format discovered"
 ```
+（已完成：commit 5bd2a39）
 
 ---
 
@@ -583,7 +584,7 @@ git commit -m "feat(jump): wire session-level deep links if route format discove
 **Interfaces:**
 - Produces: `AgentType::WorkBuddy`（serde `workbuddy`）、`TOOL_IDS` 含 `"workbuddy"`、`find_workbuddy_processes(system) -> Vec<AgentProcess>`、`monitor::workbuddy_parser::get_workbuddy_sessions(&[AgentProcess]) -> Vec<Session>`（本任务返回空）
 
-- [ ] **Step 1: AgentType 与注册**
+- [x] **Step 1: AgentType 与注册**
 
 `session/model.rs` 枚举加变体（保持 serde lowercase）：
 
@@ -613,7 +614,7 @@ pub const TOOL_IDS: &[&str] = &[
 
 `adapter_by_id` match 加臂：`"workbuddy" => Some(Box::new(workbuddy::WorkBuddyAdapter)),`
 
-- [ ] **Step 2: 最小 adapter**
+- [x] **Step 2: 最小 adapter**
 
 创建 `src-tauri/src/adapter/workbuddy.rs`：
 
@@ -665,7 +666,7 @@ impl AgentAdapter for WorkBuddyAdapter {
 }
 ```
 
-- [ ] **Step 3: 空解析器 + 进程发现 + skill 目录**
+- [x] **Step 3: 空解析器 + 进程发现 + skill 目录**
 
 创建 `src-tauri/src/monitor/workbuddy_parser.rs`：
 
@@ -706,12 +707,12 @@ pub fn find_workbuddy_processes(system: &System) -> Vec<AgentProcess> {
 export type AgentType = "claude" | "codex" | "opencode" | "openclaw" | "kimi" | "workbuddy";
 ```
 
-- [ ] **Step 4: 验证编译（含穷尽匹配修复）**
+- [x] **Step 4: 验证编译（含穷尽匹配修复）**
 
 Run: `cd src-tauri && cargo check`
 Expected: 若 Rust 端存在对 `AgentType` 的穷尽 match 导致编译错误，按编译器指引在对应位置补 `AgentType::WorkBuddy` 臂（预期场景：无——既有代码多用 `format!("{:?}")` 与字符串键，不穷尽匹配）。PASS 后运行 `cargo test`。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/ src/types/session.ts
@@ -737,7 +738,7 @@ git commit -m "feat(adapter): WorkBuddy skeleton registration (agent type, proce
   - `LAST_SEEN_SESSIONS: Lazy<Mutex<HashMap<u32, String>>>`（Task 10 补偿用）
   - `get_workbuddy_sessions(&[AgentProcess]) -> Vec<Session>`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `workbuddy_parser.rs` 测试模块（真实格式 fixture，来自 2026-09-03 实机抓取）：
 
@@ -855,12 +856,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test workbuddy_parser`
 Expected: 编译失败（函数未定义）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `workbuddy_parser.rs` 占位函数替换为完整实现：
 
@@ -1091,17 +1092,17 @@ fn first_user_text(lines: &[String]) -> Option<String> {
 
 同样，`read_recent_lines` 的实际签名以 `monitor/jsonl.rs` 为准（codex_parser 用法是 `read_recent_lines(path, RECENT_LINES)` 或仅 path——实现时对照 `codex_parser.rs:17` 的调用方式调整）。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test workbuddy_parser`
-Expected: 9 个测试 PASS
+Expected: 9 个测试 PASS（实际 Step 1 代码块含 10 个测试，10 个全部 PASS）
 
-- [ ] **Step 5: 实机冒烟**
+- [ ] **Step 5: 实机冒烟**（延后至 GUI 阶段执行：WorkBuddy APP 保持开启、跑一个真实任务）
 
 Run: `cd src-tauri && cargo test test_get_all_sessions -- --nocapture`（WorkBuddy APP 保持开启、跑一个真实任务）
 Expected: 输出含 `[WorkBuddy] <项目名> Idle/Processing pid=<心跳pid> form=App jump=true`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/monitor/workbuddy_parser.rs
@@ -1120,7 +1121,7 @@ git commit -m "feat(adapter): WorkBuddy session parser with heartbeat filtering 
 - Consumes: Task 5 的 `AgentType "workbuddy"`
 - Produces: 前端展示 WorkBuddy 徽标/名称/资源列
 
-- [ ] **Step 1: agentBadge 与标签**
+- [x] **Step 1: agentBadge 与标签**
 
 `agentBadge.tsx`：`getAgentLabel` 加 `if (agentType === "workbuddy") return "WorkBuddy";`；`AGENT_BADGE` 加：
 
@@ -1133,16 +1134,16 @@ git commit -m "feat(adapter): WorkBuddy session parser with heartbeat filtering 
   },
 ```
 
-- [ ] **Step 2: 三处 TOOLS 列表补条目**
+- [x] **Step 2: 三处 TOOLS 列表补条目**
 
 `ResourceByKindView.tsx:30-36`、`ResourceByToolView.tsx:11-17`、settings.tsx 声音配置处，各加 `{ id: "workbuddy", label: "WorkBuddy" },`（byTool 视图标签风格与既有一致）。Task 15 会把前两处改为后端下发，此处先按现状接入保证 W3 独立可验证。
 
-- [ ] **Step 3: 验证**
+- [x] **Step 3: 验证**（`pnpm check` 全绿；手动 GUI 验证项顺延至 GUI 阶段）
 
 Run: `pnpm check`
 手动（`pnpm tauri:dev`，WorkBuddy 装有 markitdown-skill、mcp.json 有 context7）：① 看板出现 WorkBuddy 会话卡（徽标+项目名+状态色）；② 资源管理「按工具」视图出现 WorkBuddy 列且能扫描出 markitdown-skill 与 context7；③ 设置-通知声音区出现 WorkBuddy。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/lib/agentBadge.tsx src/components/resources/ src/pages/settings.tsx
@@ -1167,7 +1168,7 @@ git commit -m "feat(ui): WorkBuddy badge, labels and resource columns"
   - `upsert_unread(conn, &record)`、`delete_unread(conn, tool_id, session_id)`、`list_unread(conn) -> Vec<record>`（未过期）、`clear_unread_for_tool(conn, tool_id)`、`cleanup_expired_unread(conn, now_ms)`
   - 全局连接包装：`unread::upsert(&record)` 等（内部锁 `DB`）
 
-- [ ] **Step 1: schema 加表**
+- [x] **Step 1: schema 加表**
 
 `schema.rs` 的 execute_batch 内追加（既有库经 `CREATE TABLE IF NOT EXISTS` 自动建表——`connection.rs` 的 `DB` Lazy 每次启动都会跑 `schema::init`）：
 
@@ -1184,7 +1185,7 @@ git commit -m "feat(ui): WorkBuddy badge, labels and resource columns"
         );
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 创建 `dao/unread.rs`：
 
@@ -1251,12 +1252,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: 运行测试确认失败**
+- [x] **Step 3: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test dao::unread`
 Expected: 编译失败
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 `dao/unread.rs` 顶部加：
 
@@ -1368,12 +1369,12 @@ pub use dao::unread::{
 pub use dao::unread::UnreadSessionRecord;
 ```
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
 Run: `cd src-tauri && cargo test dao::unread`
 Expected: 3 个测试 PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/database/
@@ -1397,7 +1398,7 @@ git commit -m "feat(sessions): unread_sessions table and DAO with single-track d
   - `monitor::host::is_host_process(exe_lower: &str, tool_id: &str) -> bool`（纯函数）、`tool_host_alive(tool_id: &str) -> bool`
   - `adapter::sync_unread_sessions(&mut Vec<Session>)`（合并 + 维护，供 get_all_sessions 调用）
 
-- [ ] **Step 1: 写 host 判定失败测试**
+- [x] **Step 1: 写 host 判定失败测试**
 
 创建 `monitor/host.rs`：
 
@@ -1449,12 +1450,12 @@ mod tests {
 
 `monitor/mod.rs` 加 `pub mod host;`
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test host`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现 host + Session.unread**
+- [x] **Step 3: 实现 host + Session.unread**
 
 `monitor/host.rs` 顶部实现：
 
@@ -1501,12 +1502,12 @@ pub fn tool_host_alive(tool_id: &str) -> bool {
 
 `src/types/session.ts` 的 `Session` 接口加 `unread: boolean;`。
 
-- [ ] **Step 4: 测试 host 通过**
+- [x] **Step 4: 测试 host 通过**
 
 Run: `cd src-tauri && cargo test host`
 Expected: 2 个测试 PASS
 
-- [ ] **Step 5: 实现 sync_unread_sessions 并接线**
+- [x] **Step 5: 实现 sync_unread_sessions 并接线**
 
 `adapter/mod.rs`：`get_all_sessions` 在 `dedup_sessions(&mut all_sessions);`（第 201 行）之后加一行：
 
@@ -1611,12 +1612,12 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
 
 （`use` 补充：`ProcessForm`、`SessionStatus`、`jump_supported_for`、`AgentType` 已在文件头 `crate::session::{...}` 引入列表中，按需追加。`serde_json::from_value::<AgentType>(json!(r.tool_id))` 依赖 AgentType 的 lowercase serde——`"workbuddy"`/`"codex"` 均合法。）
 
-- [ ] **Step 6: 验证**
+- [x] **Step 6: 验证**
 
 Run: `cd src-tauri && cargo test && cargo clippy`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src-tauri/src/
@@ -1637,9 +1638,9 @@ git commit -m "feat(sessions): merge persistent unread cards into session scan w
   - `codex_parser::aggregate_app_sessions(parsed: &[(PathBuf, Option<Session>)], mtimes: &[std::time::SystemTime], app_processes: &[AgentProcess]) -> Vec<Session>`（纯函数）
   - `workbuddy_parser::compensate_vanished_heartbeats()`
 
-- [ ] **Step 1: 写聚合失败测试**
+- [x] **Step 1: 写聚合失败测试**
 
-`codex_parser.rs` 测试模块加：
+`codex_parser.rs` 测试模块加：（实际落在独立 `aggregate_tests` 模块；测试 1 的 mtime 由 UNIX_EPOCH 改为 now-1h/now-1min——实现的 24h 新鲜窗口以 `SystemTime::now()` 为基准，UNIX_EPOCH 样本必被过滤，测试 2 的"窗口外"断言亦证窗口为 now 基准；另用 title 区分 s1 新旧文件使"取最新"可观测）
 
 ```rust
     #[test]
@@ -1724,12 +1725,12 @@ git commit -m "feat(sessions): merge persistent unread cards into session scan w
 
 （测试文件顶部补 `use std::path::PathBuf;` 与 `use crate::adapter::AgentProcess;`——后者已有。）
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test aggregate`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现聚合并重构 Phase 2**
+- [x] **Step 3: 实现聚合并重构 Phase 2**（顺带删除已无消费者的 `unmatched_processes` 收集段）
 
 `codex_parser.rs` 在 `get_codex_sessions` 之前加纯函数：
 
@@ -1826,7 +1827,7 @@ pub fn aggregate_app_sessions(
 
 （`AgentProcess` 需 `Clone`——第 37-43 行结构体已派生 `Debug, Clone`，无需改。）
 
-- [ ] **Step 4: WorkBuddy 心跳消失补偿**
+- [x] **Step 4: WorkBuddy 心跳消失补偿**（锁内仅做内存快照，心跳文件判定移到锁外；`read_dir` 失败改 `continue` 只跳过该 pid，不中断其余补偿）
 
 `workbuddy_parser.rs` 末尾加：
 
@@ -1910,14 +1911,14 @@ fn workbuddy_cwd_from_db(home: &Path, session_id: &str) -> Option<String> {
     monitor::workbuddy_parser::compensate_vanished_heartbeats();
 ```
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**（`cargo test` 138 全过含 2 个新 aggregate 测试、`cargo clippy --all-targets -- -D warnings` 全绿；手动冒烟验证项顺延至 GUI 阶段）
 
 Run: `cd src-tauri && cargo test && cargo clippy`
 Expected: PASS（含 aggregate 2 个新测试）
 
 手动：WorkBuddy 跑一个短任务等它完成回池 → 看板出现绿色未读卡且跨 MAM 重启仍在；直接退出 WorkBuddy APP → 未读卡下一轮消失。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/
@@ -1938,7 +1939,7 @@ git commit -m "feat(sessions): per-session cards for Codex APP and WorkBuddy hea
 - Consumes: Task 8 `dao::unread::delete`、Task 9 `Session.unread`
 - Produces: IPC `mark_session_read(agent_type: String, session_id: String)`
 
-- [ ] **Step 1: 后端标记已读**
+- [x] **Step 1: 后端标记已读**
 
 `commands/session.rs`：两个平台的成功返回点之前统一插入（Windows `Focused` 臂与非 Windows 的两个成功 return 前各一次；抽小函数避免重复）：
 
@@ -1964,7 +1965,7 @@ pub fn mark_session_read(agent_type: String, session_id: String) {
 
 `lib.rs` invoke_handler 列表 `commands::settings::list_sub_agents,` 后加 `commands::settings::mark_session_read,`。
 
-- [ ] **Step 2: SessionCard 未读徽标与关闭按钮**
+- [x] **Step 2: SessionCard 未读徽标与关闭按钮**
 
 `src/components/sessions/SessionCard.tsx`：import `X`（lucide-react）与 `invoke`；`handleClick` 前加关闭函数：
 
@@ -2002,7 +2003,7 @@ pub fn mark_session_read(agent_type: String, session_id: String) {
 
 （插入位置：以文件内项目名渲染 JSX 为锚点，`grep -n "projectName" SessionCard.tsx` 定位。）
 
-- [ ] **Step 3: 首见绿未读触发通知**
+- [x] **Step 3: 首见绿未读触发通知**
 
 `useNotification.ts` 的会话循环中，"首次加载不通知"分支（第 117-124 行）改为：
 
@@ -2032,7 +2033,7 @@ pub fn mark_session_read(agent_type: String, session_id: String) {
 
 同时把原循环体中"通知"段（第 142-207 行，从开关刷新到浮窗发送）抽为 `const notifyCompletion = async (session: Session) => { ... }`（逻辑原样搬移，供两处调用；原路径调用改为 `await notifyCompletion(session)`）。`Session` 类型从 `@/types/session` 导入。
 
-- [ ] **Step 4: i18n 键**
+- [x] **Step 4: i18n 键**
 
 `zh.json` 的 `sessions` 段加：
 
@@ -2053,7 +2054,7 @@ pub fn mark_session_read(agent_type: String, session_id: String) {
 Run: `pnpm check`；`cd src-tauri && cargo test`
 手动：① WorkBuddy 完成任务 → 绿卡带未读点；② 点卡跳转 WorkBuddy 前台 → 卡消失（同工具另一未读卡保留）；③ 点 X → 卡消失；④ 重启 MAM → 未读卡仍在；⑤ 退出 WorkBuddy → 卡消失。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/ src-tauri/src/ src/i18n/
@@ -2081,7 +2082,7 @@ git commit -m "feat(sessions): unread badge, dismiss action and jump-marks-read 
   - `services::tool_settings::{get_tool_settings() -> Vec<ToolSetting>, apply_tool_changes(Vec<ToolSettingChange>) -> ApplyResult}`（含 `managed` 标志与还原/重建）
   - IPC：`get_tool_settings` / `update_tool_settings`
 
-- [ ] **Step 1: DAO 失败测试**
+- [x] **Step 1: DAO 失败测试**
 
 `dao/agent_tool.rs` 测试模块加：
 
@@ -2101,12 +2102,12 @@ git commit -m "feat(sessions): unread badge, dismiss action and jump-marks-read 
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tauri && cargo test enabled_tool_ids`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现 DAO**
+- [x] **Step 3: 实现 DAO**
 
 `dao/agent_tool.rs` 加（连接参数风格同 unread，便于内存库测试；`adapter_by_id` 提供 name/base_dir）：
 
@@ -2182,12 +2183,12 @@ pub fn set_tool_enabled(tool_id: &str, enabled: bool) {
 
 `database/mod.rs` 导出追加；并在 `database::init()`（`migration::migrate` 之后）加 `dao::agent_tool::ensure_tool_rows();`。
 
-- [ ] **Step 4: 测试通过**
+- [x] **Step 4: 测试通过**
 
 Run: `cd src-tauri && cargo test enabled_tool_ids`
 Expected: PASS
 
-- [ ] **Step 5: 还原/重建服务与 IPC**
+- [x] **Step 5: 还原/重建服务与 IPC**
 
 创建 `services/tool_settings.rs`：
 
@@ -2384,12 +2385,12 @@ pub fn update_tool_settings(
 
 `lib.rs` invoke_handler 注册两命令。
 
-- [ ] **Step 6: 验证**
+- [x] **Step 6: 验证**
 
 Run: `cd src-tauri && cargo test && cargo clippy`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src-tauri/src/
@@ -2407,7 +2408,7 @@ git commit -m "feat(settings): tool enable/disable with SSOT restore, MCP remova
 - Consumes: Task 12 `dao::agent_tool::enabled_tool_ids`
 - Produces: `adapter::enabled_adapters() -> Vec<Box<dyn AgentAdapter>>`；`services::tool_settings::ensure_tool_enabled(tool_id) -> Result<(), String>`
 
-- [ ] **Step 1: 会话扫描过滤**
+- [x] **Step 1: 会话扫描过滤**（实际产出 `adapter::enabled_adapters()`，`get_all_sessions` 改用之；`all_adapters()` 保持原样供管理入口使用）
 
 `adapter/mod.rs`：`get_all_sessions` 第 155 行 `let adapters: Vec<Box<dyn AgentAdapter>> = all_adapters();` 改为：
 
@@ -2420,7 +2421,7 @@ git commit -m "feat(settings): tool enable/disable with SSOT restore, MCP remova
         .collect();
 ```
 
-- [ ] **Step 2: 资源分布过滤 + 命令守卫**
+- [x] **Step 2: 资源分布过滤 + 命令守卫**（守卫点按真实代码定位：`commands/resource.rs` 的 `enable_skill_for_tool_cmd`/`disable_skill_for_tool`、`commands/mcp.rs` 的 `toggle_mcp_for_tool`、`commands/plugin.rs` 的 `toggle_plugin_for_tool`、`commands/skill.rs` 的 `assign_skill_to_subagent`）
 
 `commands/resource.rs` 的 `list_ssot_resources`：以 `grep -n "enabledTools\|enabled_tools" src-tauri/src/commands/resource.rs` 定位组装点，将工具集合与 `dao::agent_tool::enabled_tool_ids()` 求交集（未勾选工具的列不返回；分配数据本身保留在 DB）。
 
@@ -2439,12 +2440,12 @@ pub fn ensure_tool_enabled(tool_id: &str) -> Result<(), String> {
 
 在 `commands/skill.rs`（`enable_skill_for_tool_cmd`）、`commands/mcp.rs`（`toggle_mcp_for_tool`）、`commands/plugin.rs`（`toggle_plugin_for_tool`）的入口各加 `crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;`（以各命令实际参数名为准）。
 
-- [ ] **Step 3: 验证**
+- [x] **Step 3: 验证**（`cargo test` 142 通过 + `cargo clippy --all-targets -- -D warnings` 全绿；手动 GUI 验证项顺延至 GUI 阶段）
 
 Run: `cd src-tauri && cargo test && cargo clippy`
 手动：设置里取消勾选 OpenCode 保存（先启用状态）→ 看板无 OpenCode 卡、资源分布无 OpenCode 列、对 OpenCode 的 toggle 命令报错；skill 目录被还原为真实文件（`ls -la ~/.config/opencode/skills` 验证非 `->` 链接）。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**（ab96d2d）
 
 ```bash
 git add src-tauri/src/
@@ -2461,7 +2462,7 @@ git commit -m "feat(settings): enforce tool enablement in scan, resources and to
 - Consumes: IPC `get_tool_settings` / `update_tool_settings`（Task 12）
 - Produces: 设置分区 `"tools"`（行式开关列表 + 保存按钮 + 确认 Dialog + 未保存离开拦截）
 
-- [ ] **Step 1: i18n 键**
+- [x] **Step 1: i18n 键**
 
 `zh.json` 的 `settings` 段加：
 
@@ -2509,7 +2510,7 @@ git commit -m "feat(settings): enforce tool enablement in scan, resources and to
     },
 ```
 
-- [ ] **Step 2: 分区与状态**
+- [x] **Step 2: 分区与状态**
 
 `settings.tsx`：`SettingSection` 联合类型加 `"tools"`；`SECTIONS` 数组（第 146-161 行区域）加：
 
@@ -2552,7 +2553,7 @@ git commit -m "feat(settings): enforce tool enablement in scan, resources and to
   }, [activeSection, loadToolSettings]);
 ```
 
-- [ ] **Step 3: 分区渲染（行式开关）**
+- [x] **Step 3: 分区渲染（行式开关）**
 
 在既有分区渲染 switch/条件中加 `"tools"` 分支：
 
@@ -2597,7 +2598,7 @@ git commit -m "feat(settings): enforce tool enablement in scan, resources and to
 </div>
 ```
 
-- [ ] **Step 4: 保存确认弹窗**
+- [x] **Step 4: 保存确认弹窗**
 
 用既有 `Dialog` 组件（`@/components/ui/dialog`）实现 `confirmOpen`：内容列出 `changedRows`，每行按变更方向标注——开启 → `t("settings.tools.enableItem")`；关闭且 `managed` → `t("settings.tools.restoreItem")`；关闭且非 managed → 仅"停止监控"。确认执行：
 
@@ -2626,7 +2627,7 @@ git commit -m "feat(settings): enforce tool enablement in scan, resources and to
 
 （`invalidateMamQueries`：`queryClient.invalidateQueries()` 全量失效——import 自既有 query client 工具，以 `src/lib/query/` 现有导出为准，无则直接 `useQueryClient().invalidateQueries()`。）
 
-- [ ] **Step 5: 未保存离开拦截**
+- [x] **Step 5: 未保存离开拦截**
 
 分区切换处（`setActiveSection` 的调用点）包一层守卫函数：
 
@@ -2646,12 +2647,12 @@ git commit -m "feat(settings): enforce tool enablement in scan, resources and to
 
 `leaveGuard` 渲染 Dialog 三按钮：确认保存（关闭 leaveGuard → 打开 confirmOpen，应用成功后再执行缓存的跳转）/ `t("settings.tools.discard")`（丢弃：`setToolDirty(false)` + 执行跳转）/ `t("settings.tools.keepEditing")`（关闭弹窗留在本页）。另加 `window.addEventListener("beforeunload")`（toolDirty 时 `e.preventDefault()`）覆盖关窗口场景。页面内所有调用 `setActiveSection` 的 UI 一律改走 `switchSection`。
 
-- [ ] **Step 6: 验证**
+- [x] **Step 6: 验证**
 
 Run: `pnpm check`
 手动：① 开关切换 → 不立即生效（看板不变），出现保存按钮；② 保存 → 确认弹窗列出变更与还原提示 → 确认后看板/资源分布立即变化；③ 改开关后切分区 → 三选弹窗；④ 取消保存 → 变更丢弃。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/pages/settings.tsx src/i18n/
@@ -2668,7 +2669,7 @@ git commit -m "feat(settings): tool management section with batch save, confirm 
 **Interfaces:**
 - Produces: IPC `list_enabled_tools() -> Vec<{id: String, label: String}>`；FE `useEnabledToolsQuery`
 
-- [ ] **Step 1: IPC**
+- [x] **Step 1: IPC**
 
 `commands/settings.rs` 加：
 
@@ -2698,7 +2699,7 @@ pub fn list_enabled_tools() -> Vec<EnabledTool> {
 
 `lib.rs` 注册。注意 adapter.name() 返回 "Codex CLI"/"WorkBuddy" 等——资源视图标签以 name 直出（与 byTool 现状标签风格一致，byKind 视图原用短标签 "Claude"/"Codex"，统一为 name 可接受，视觉差异已含在本任务验收）。
 
-- [ ] **Step 2: FE query 与三处替换**
+- [x] **Step 2: FE query 与三处替换**
 
 创建 `src/lib/query/queries/tools.ts`（对照 `queries/sessions.ts` 的既有写法）：
 
@@ -2721,12 +2722,12 @@ export function useEnabledToolsQuery() {
 
 `ResourceByKindView.tsx` / `ResourceByToolView.tsx`：删除本地 `TOOLS` 常量，`const { data: tools = [] } = useEnabledToolsQuery();`，原 `TOOLS.map(...)` 改 `tools.map(...)`；byTool 的挂载加载 effect 同步改为 `tools.forEach(...)` 并把 `tools` 加入依赖。`settings.tsx` 声音区硬编码列表同法替换。加载中 `tools` 为空数组 → 列区短暂空白可接受（query 秒回）。
 
-- [ ] **Step 3: 验证与收尾**
+- [x] **Step 3: 验证与收尾**（`pnpm check` + `cargo test` + `cargo clippy --all-targets -- -D warnings` 全绿；手动全链路验证项顺延至 GUI 阶段）
 
 Run: `pnpm check`；`cd src-tauri && cargo test && cargo clippy`
 手动全链路（spec 第 8 节清单）：取消勾选一个工具 → 资源分布列消失、看板无其卡片；重新勾选 → 列恢复、分配重建。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**（fdc5d2b）
 
 ```bash
 git add src/ src-tauri/src/

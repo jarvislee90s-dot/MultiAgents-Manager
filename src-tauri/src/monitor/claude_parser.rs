@@ -260,6 +260,7 @@ mod title_tests {
             cpu_usage: 0.0,
             cwd: Some(std::path::PathBuf::from("/work/demo")),
             form: ProcessForm::Cli,
+            exe: None,
         }
     }
 
