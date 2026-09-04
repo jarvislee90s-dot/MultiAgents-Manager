@@ -84,7 +84,7 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
         {mismatch ? (
           <div className="space-y-3" data-testid="pet-switch-mismatch">
             <div className="text-sm font-medium">{t("pet.switch.mismatchTitle")}</div>
-            <ul className="text-muted-foreground max-h-40 overflow-auto list-disc pl-5 text-xs">
+            <ul className="text-muted-foreground max-h-40 list-disc overflow-auto pl-5 text-xs">
               {mismatch.issues.map((i) => (
                 <li key={i.detail}>
                   {t(`pet.issue.${i.kind}`)}: {i.detail}
@@ -95,10 +95,18 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
               <Button size="sm" onClick={() => mismatchResolveRef.current("update")}>
                 {t("pet.switch.mismatchUpdate")}
               </Button>
-              <Button size="sm" variant="outline" onClick={() => mismatchResolveRef.current("ignore")}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => mismatchResolveRef.current("ignore")}
+              >
                 {t("pet.switch.mismatchIgnore")}
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => mismatchResolveRef.current("cancel")}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => mismatchResolveRef.current("cancel")}
+              >
                 {t("pet.switch.mismatchCancel")}
               </Button>
             </div>
@@ -163,24 +171,39 @@ function PetCard(props: {
     >
       <div
         className="mb-1 h-[52px] w-[48px] rounded bg-contain"
-        style={thumb ? { backgroundImage: thumb, backgroundPosition: "0 0", backgroundSize: "384px 572px" } : undefined}
+        style={
+          thumb
+            ? { backgroundImage: thumb, backgroundPosition: "0 0", backgroundSize: "384px 572px" }
+            : undefined
+        }
       />
       <div className="flex items-center gap-1 text-sm font-medium">
         {info.displayName}
-        {props.builtin && <span className="rounded bg-muted px-1 text-[10px]">{t("pet.switch.builtin")}</span>}
+        {props.builtin && (
+          <span className="bg-muted rounded px-1 text-[10px]">{t("pet.switch.builtin")}</span>
+        )}
         {info.spriteVersionNumber > 0 ? (
-          <span className="rounded bg-muted px-1 text-[10px]">v{info.spriteVersionNumber}</span>
+          <span className="bg-muted rounded px-1 text-[10px]">v{info.spriteVersionNumber}</span>
         ) : (
-          <span className="rounded bg-muted px-1 text-[10px]" title={t("pet.switch.pendingFirstCheck")}>
+          <span
+            className="bg-muted rounded px-1 text-[10px]"
+            title={t("pet.switch.pendingFirstCheck")}
+          >
             v?
           </span>
         )}
       </div>
       <div className="text-muted-foreground flex gap-1 text-[10px]">
-        <span title={t("pet.menu.soundNoCap")} className={info.hasVoice ? "text-primary" : "opacity-40"}>
+        <span
+          title={t("pet.menu.soundNoCap")}
+          className={info.hasVoice ? "text-primary" : "opacity-40"}
+        >
           🔊
         </span>
-        <span title={t("pet.menu.subtitleNoCap")} className={info.hasSubtitle ? "text-primary" : "opacity-40"}>
+        <span
+          title={t("pet.menu.subtitleNoCap")}
+          className={info.hasSubtitle ? "text-primary" : "opacity-40"}
+        >
           💬
         </span>
       </div>

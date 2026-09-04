@@ -79,7 +79,13 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         .filter((f) => f.rel.startsWith("voice/") && !known.has(f.rel))
         .map((f) => {
           const seg = f.rel.split("/");
-          return { group: seg[1], name: nameFromRel(f.rel), file: f.rel, sizeBytes: f.size, durationMs: null };
+          return {
+            group: seg[1],
+            name: nameFromRel(f.rel),
+            file: f.rel,
+            sizeBytes: f.size,
+            durationMs: null,
+          };
         });
       setVoiceRows([...rows, ...extra]);
     } catch {
@@ -135,7 +141,16 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       const rows: PetRows = selected.spriteVersionNumber === 2 ? 11 : 9;
       const old = await invoke<PetManifestView | null>("pet_read_manifest", { id: selected.id });
       const base = old
-        ? await repairManifest({ ...old, displayName, description: old.description, hasSubtitle: subtitle && old.hasVoice }, scan, rows)
+        ? await repairManifest(
+            {
+              ...old,
+              displayName,
+              description: old.description,
+              hasSubtitle: subtitle && old.hasVoice,
+            },
+            scan,
+            rows
+          )
         : await buildManifestFromScan(selected.id, scan, rows, "folder", subtitle, { displayName });
       const manifest = { ...base, displayName, hasSubtitle: base.hasVoice && subtitle };
       await invoke("pet_update_manifest", { id: selected.id, manifest, backup: true });
@@ -191,7 +206,9 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
                   {p.displayName}
                   <span className="text-muted-foreground ml-1 text-xs">{p.id}</span>
                 </span>
-                <span className="bg-muted rounded px-1 text-[10px]">v{p.spriteVersionNumber || "?"}</span>
+                <span className="bg-muted rounded px-1 text-[10px]">
+                  v{p.spriteVersionNumber || "?"}
+                </span>
               </button>
             ))}
           </div>
@@ -210,7 +227,12 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
                     onChange={(e) => setRenameTo(e.target.value)}
                   />
                 </div>
-                <Button size="sm" disabled={busy || !renameTo} data-testid="manage-rename-btn" onClick={() => void doRename()}>
+                <Button
+                  size="sm"
+                  disabled={busy || !renameTo}
+                  data-testid="manage-rename-btn"
+                  onClick={() => void doRename()}
+                >
                   {t("pet.manage.renameBtn")}
                 </Button>
               </div>
@@ -223,11 +245,13 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
                 busy={busy}
                 onAdd={async (group, paths) => {
                   ensureNotActive(); // 直写正式目录前冻结保护
-                  const added = await invoke<{ group: string; name: string; file: string; sizeBytes: number }[]>(
-                    "pet_add_voice_files",
-                    { id: selected.id, srcPaths: paths, group }
-                  );
-                  setVoiceRows((prev) => [...prev, ...added.map((a) => ({ ...a, durationMs: null }))]);
+                  const added = await invoke<
+                    { group: string; name: string; file: string; sizeBytes: number }[]
+                  >("pet_add_voice_files", { id: selected.id, srcPaths: paths, group });
+                  setVoiceRows((prev) => [
+                    ...prev,
+                    ...added.map((a) => ({ ...a, durationMs: null })),
+                  ]);
                 }}
                 onRemove={async (rel) => {
                   ensureNotActive();
@@ -241,13 +265,29 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
               </div>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
-              <Button size="sm" variant="outline" onClick={() => void invoke("pet_reveal_folder", { id: selected.id }).catch(() => {})}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  void invoke("pet_reveal_folder", { id: selected.id }).catch(() => {})
+                }
+              >
                 {t("pet.manage.openFolder")}
               </Button>
-              <Button size="sm" variant="destructive" data-testid="manage-delete" onClick={() => setDeleting(true)}>
+              <Button
+                size="sm"
+                variant="destructive"
+                data-testid="manage-delete"
+                onClick={() => setDeleting(true)}
+              >
                 {t("pet.manage.delete")}
               </Button>
-              <Button size="sm" disabled={busy} data-testid="manage-save" onClick={() => void doSave()}>
+              <Button
+                size="sm"
+                disabled={busy}
+                data-testid="manage-save"
+                onClick={() => void doSave()}
+              >
                 {t("pet.manage.save")}
               </Button>
             </div>
@@ -255,7 +295,12 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
               <div className="border-destructive/40 bg-destructive/5 flex items-center justify-between gap-2 rounded border p-2">
                 <span className="text-xs">{t("pet.manage.deleteConfirm")}</span>
                 <div className="flex gap-2">
-                  <Button size="sm" variant="destructive" data-testid="manage-delete-confirm" onClick={() => void doDelete()}>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    data-testid="manage-delete-confirm"
+                    onClick={() => void doDelete()}
+                  >
                     {t("pet.manage.delete")}
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setDeleting(false)}>

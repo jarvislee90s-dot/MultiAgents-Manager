@@ -43,7 +43,9 @@ async function probeCandidates(
     candidates.map(async (f) => ({
       rel: f.rel,
       size: f.size,
-      durationMs: await probeAudioDurationMs(convertFileSrc(`${scan.dir}/${f.rel}`)).catch(() => null),
+      durationMs: await probeAudioDurationMs(convertFileSrc(`${scan.dir}/${f.rel}`)).catch(
+        () => null
+      ),
     }))
   );
 }
@@ -77,7 +79,10 @@ export async function buildManifestFromScan(
     spritesheetSizeBytes: scan.spritesheet.size,
     voices: valid.map((p) => ({
       group: p.rel.split("/")[1],
-      name: p.rel.split("/").pop()!.replace(/\.[^.]+$/, ""),
+      name: p.rel
+        .split("/")
+        .pop()!
+        .replace(/\.[^.]+$/, ""),
       file: p.rel,
       sizeBytes: p.size,
       durationMs: p.durationMs!,
@@ -91,8 +96,8 @@ export async function repairManifest(
   scan: PetScan,
   rows: 9 | 11
 ): Promise<PetManifestView> {
-  const keep = old.voices.filter(
-    (v) => scan.voiceFiles.some((f) => f.rel === v.file && f.size === v.sizeBytes)
+  const keep = old.voices.filter((v) =>
+    scan.voiceFiles.some((f) => f.rel === v.file && f.size === v.sizeBytes)
   );
   const changedOrNew = scan.voiceFiles
     .filter(isAudioCandidate)
@@ -101,18 +106,25 @@ export async function repairManifest(
     changedOrNew.map(async (f) => ({
       rel: f.rel,
       size: f.size,
-      durationMs: await probeAudioDurationMs(convertFileSrc(`${scan.dir}/${f.rel}`)).catch(() => null),
+      durationMs: await probeAudioDurationMs(convertFileSrc(`${scan.dir}/${f.rel}`)).catch(
+        () => null
+      ),
     }))
   );
   const validNew = probed.filter(isValid).map((p) => ({
     group: p.rel.split("/")[1],
-    name: p.rel.split("/").pop()!.replace(/\.[^.]+$/, ""),
+    name: p.rel
+      .split("/")
+      .pop()!
+      .replace(/\.[^.]+$/, ""),
     file: p.rel,
     sizeBytes: p.size,
     durationMs: p.durationMs!,
   }));
   const voices = [...keep, ...validNew];
-  const hasVoice = judgeVoiceTier(voices.map((v) => ({ rel: v.file, size: v.sizeBytes, durationMs: v.durationMs }))).hasVoice;
+  const hasVoice = judgeVoiceTier(
+    voices.map((v) => ({ rel: v.file, size: v.sizeBytes, durationMs: v.durationMs }))
+  ).hasVoice;
   return {
     ...old,
     spriteVersionNumber: spriteVersionOf(rows),

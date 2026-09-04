@@ -144,7 +144,11 @@ interface ManifestDto {
 async function snapshotVoices(
   dir: string,
   voices: ManifestVoiceDto[]
-): Promise<{ entries: VoiceEntry[]; resolve: (file: string) => string; dispose: () => void } | null> {
+): Promise<{
+  entries: VoiceEntry[];
+  resolve: (file: string) => string;
+  dispose: () => void;
+} | null> {
   const blobs = new Map<string, string>();
   const created: string[] = [];
   try {

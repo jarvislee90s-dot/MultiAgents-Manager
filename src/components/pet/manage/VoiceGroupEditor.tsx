@@ -26,7 +26,9 @@ export function VoiceGroupEditor(props: {
   const { t } = useTranslation();
   const totalBytes = props.rows.reduce((s, r) => s + r.sizeBytes, 0);
   const valid = props.rows.filter((r) => !voiceRowProblem(r));
-  const judge = judgeVoiceTier(valid.map((r) => ({ rel: r.file, size: r.sizeBytes, durationMs: r.durationMs })));
+  const judge = judgeVoiceTier(
+    valid.map((r) => ({ rel: r.file, size: r.sizeBytes, durationMs: r.durationMs }))
+  );
   const missing = GROUPS.filter((g) => judge.coverage[g] === 0);
 
   const add = async (group: string) => {
@@ -67,12 +69,14 @@ export function VoiceGroupEditor(props: {
                   <span className="max-w-[60%] truncate">
                     {r.name}
                     {r.durationMs !== null && (
-                      <span className="ml-1">({t("pet.import.duration", { ms: (r.durationMs / 1000).toFixed(1) })})</span>
+                      <span className="ml-1">
+                        ({t("pet.import.duration", { ms: (r.durationMs / 1000).toFixed(1) })})
+                      </span>
                     )}
                   </span>
                   <span className="flex items-center gap-2">
                     {problem && (
-                      <span className="rounded bg-destructive/15 px-1 text-destructive">
+                      <span className="bg-destructive/15 text-destructive rounded px-1">
                         {t(`pet.import.problems.${problem}`)}
                       </span>
                     )}
@@ -94,10 +98,16 @@ export function VoiceGroupEditor(props: {
         {missing.length === 0 ? (
           <span className="text-primary">{t("pet.import.coverageOk")}</span>
         ) : (
-          <span className="text-muted-foreground">{t("pet.import.coverageMissing", { groups: missing.join(", ") })}</span>
+          <span className="text-muted-foreground">
+            {t("pet.import.coverageMissing", { groups: missing.join(", ") })}
+          </span>
         )}
-        <span className="ml-2">{t("pet.import.totalSize", { size: `${(totalBytes / 1024 / 1024).toFixed(1)}MB` })}</span>
-        {totalBytes > 30 * 1024 * 1024 && <span className="text-destructive ml-1">{t("pet.import.tooLargeWarn")}</span>}
+        <span className="ml-2">
+          {t("pet.import.totalSize", { size: `${(totalBytes / 1024 / 1024).toFixed(1)}MB` })}
+        </span>
+        {totalBytes > 30 * 1024 * 1024 && (
+          <span className="text-destructive ml-1">{t("pet.import.tooLargeWarn")}</span>
+        )}
       </div>
     </div>
   );

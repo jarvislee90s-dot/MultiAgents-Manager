@@ -8,7 +8,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { loadActiveId, probeSheetRows, saveActiveId, type PetRows } from "./petRuntime";
 import { buildManifestFromScan, repairManifest } from "./petActivation";
-import { diffManifestVsScan, type PetManifestView, type PetScan, type ValidationIssue } from "./petValidation";
+import {
+  diffManifestVsScan,
+  type PetManifestView,
+  type PetScan,
+  type ValidationIssue,
+} from "./petValidation";
 import { saveVisible } from "./petConfig";
 import { isPetRpcError, petErrMsg, PetError } from "./petErrors";
 
@@ -40,7 +45,10 @@ export function PetStartupGuard() {
         }
         const manifest = await invoke<PetManifestView | null>("pet_read_manifest", { id });
         // 图集尺寸校验：大小与缓存一致时信任记录，否则探测（spec §6.1）
-        const sizeChanged = !manifest || manifest.spritesheetSizeBytes !== scan.spritesheet.size || manifest.spriteVersionNumber === 0;
+        const sizeChanged =
+          !manifest ||
+          manifest.spritesheetSizeBytes !== scan.spritesheet.size ||
+          manifest.spriteVersionNumber === 0;
         if (sizeChanged) {
           try {
             const rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
@@ -67,7 +75,8 @@ export function PetStartupGuard() {
       } catch (e) {
         // 扫描失败（如宠物目录被整体删除）：宠物窗口自行降级渲染，但主窗口仍需弹窗确认（EP2，FIX-4）。
         // RpcError/普通 Error 原样存（petErrMsg 分流翻译）；字符串/其它形态收敛 scan-fail（第六轮）
-        if (!disposed) setFatal(isPetRpcError(e) || e instanceof Error ? e : new PetError("scan-fail"));
+        if (!disposed)
+          setFatal(isPetRpcError(e) || e instanceof Error ? e : new PetError("scan-fail"));
       }
     })();
     return () => {
@@ -109,7 +118,11 @@ export function PetStartupGuard() {
   const open = fatal !== null || issues !== null;
   return (
     <Dialog open={open}>
-      <DialogContent data-testid="pet-startup-dialog" className="max-w-md" onInteractOutside={(e) => e.preventDefault()}>
+      <DialogContent
+        data-testid="pet-startup-dialog"
+        className="max-w-md"
+        onInteractOutside={(e) => e.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle>{t("pet.startup.title")}</DialogTitle>
         </DialogHeader>
@@ -123,7 +136,14 @@ export function PetStartupGuard() {
                 : t("pet.startup.fatal", { msg: petErrMsg(fatal, t) })}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" data-testid="pet-startup-foxbell" onClick={() => { toFoxbell(t("pet.startup.switched")); setFatal(null); }}>
+              <Button
+                size="sm"
+                data-testid="pet-startup-foxbell"
+                onClick={() => {
+                  toFoxbell(t("pet.startup.switched"));
+                  setFatal(null);
+                }}
+              >
                 {t("pet.startup.foxbell")}
               </Button>
               <Button size="sm" variant="outline" onClick={hidePet}>
@@ -134,7 +154,10 @@ export function PetStartupGuard() {
         ) : (
           <div className="space-y-3">
             <p className="text-sm">{t("pet.startup.issuesTitle")}</p>
-            <ul className="text-muted-foreground max-h-40 overflow-auto list-disc pl-5 text-xs" data-testid="pet-startup-issues">
+            <ul
+              className="text-muted-foreground max-h-40 list-disc overflow-auto pl-5 text-xs"
+              data-testid="pet-startup-issues"
+            >
               {issues?.map((i) => (
                 <li key={i.kind + i.detail}>
                   {t(`pet.issue.${i.kind}`)}: {i.detail}
@@ -145,7 +168,15 @@ export function PetStartupGuard() {
               <Button size="sm" data-testid="pet-startup-update" onClick={() => void doUpdate()}>
                 {t("pet.startup.update")}
               </Button>
-              <Button size="sm" variant="outline" data-testid="pet-startup-foxbell" onClick={() => { toFoxbell(t("pet.startup.switched")); setIssues(null); }}>
+              <Button
+                size="sm"
+                variant="outline"
+                data-testid="pet-startup-foxbell"
+                onClick={() => {
+                  toFoxbell(t("pet.startup.switched"));
+                  setIssues(null);
+                }}
+              >
                 {t("pet.startup.foxbell")}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setIssues(null)}>

@@ -214,7 +214,8 @@ export function FoxbellPet() {
     const entry = player.pick(group);
     if (!entry) return; // 空组静默跳过（spec E5）
     // 字幕独立于声音闸门：talkative 即显示，最短 2.5s（spec D5 + E4）；声音由 muted 单独拦截
-    if (cfgRef.current.talkative && activeRef.current.hasSubtitle) showBubble(entry.name, MIN_SPEECH_MS);
+    if (cfgRef.current.talkative && activeRef.current.hasSubtitle)
+      showBubble(entry.name, MIN_SPEECH_MS);
     player.play(entry, {
       muted: cfgRef.current.muted,
       onSubtitle: (name, ms) => {

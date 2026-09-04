@@ -87,11 +87,22 @@ export interface TierJudge {
 }
 
 /** 声音档判定：四组各 ≥1 合法文件（全有或全无，spec §5.1） */
-export function judgeVoiceTier(files: { rel: string; size: number; durationMs: number | null }[]): TierJudge {
+export function judgeVoiceTier(
+  files: { rel: string; size: number; durationMs: number | null }[]
+): TierJudge {
   const coverage: Record<string, number> = {};
   for (const g of GROUPS) coverage[g] = 0;
   for (const f of files) {
-    if (voiceRowProblem({ group: "", name: "", file: f.rel, sizeBytes: f.size, durationMs: f.durationMs })) continue;
+    if (
+      voiceRowProblem({
+        group: "",
+        name: "",
+        file: f.rel,
+        sizeBytes: f.size,
+        durationMs: f.durationMs,
+      })
+    )
+      continue;
     const g = groupOfRel(f.rel);
     if (g) coverage[g] += 1;
   }
@@ -118,16 +129,21 @@ export function diffManifestVsScan(m: PetManifestView, s: PetScan): ValidationIs
   if (!s.spritesheet.exists) {
     issues.push({ kind: "spritesheet-missing", detail: "spritesheet.webp" });
   } else if (m.spritesheetSizeBytes > 0 && s.spritesheet.size !== m.spritesheetSizeBytes) {
-    issues.push({ kind: "spritesheet-changed", detail: `${m.spritesheetSizeBytes} → ${s.spritesheet.size}` });
+    issues.push({
+      kind: "spritesheet-changed",
+      detail: `${m.spritesheetSizeBytes} → ${s.spritesheet.size}`,
+    });
   }
   const onDisk = new Map(s.voiceFiles.map((f) => [f.rel, f.size]));
   for (const v of m.voices) {
     if (!onDisk.has(v.file)) issues.push({ kind: "voice-missing", detail: v.file });
-    else if (onDisk.get(v.file) !== v.sizeBytes) issues.push({ kind: "voice-changed", detail: v.file });
+    else if (onDisk.get(v.file) !== v.sizeBytes)
+      issues.push({ kind: "voice-changed", detail: v.file });
   }
   const known = new Set(m.voices.map((v) => v.file));
   for (const f of s.voiceFiles) {
-    if (isAudioCandidate(f) && !known.has(f.rel)) issues.push({ kind: "voice-extra", detail: f.rel });
+    if (isAudioCandidate(f) && !known.has(f.rel))
+      issues.push({ kind: "voice-extra", detail: f.rel });
   }
   return issues;
 }

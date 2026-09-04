@@ -479,7 +479,9 @@ export default function SettingsPage() {
                 {/* 当前宠物 + 三入口（spec §11）：切换在 Task 13，导入在 Task 16，修改在 Task 17 */}
                 <div className="flex items-center justify-between gap-2 py-2.5">
                   <label className="text-sm font-medium">{t("settings.pet.currentPet")}</label>
-                  <span className="text-muted-foreground mr-auto pl-2 text-sm">{activePetName}</span>
+                  <span className="text-muted-foreground mr-auto pl-2 text-sm">
+                    {activePetName}
+                  </span>
                   <div className="flex gap-2">
                     <Button size="sm" variant="outline" onClick={() => setSwitchOpen(true)}>
                       {t("settings.pet.switchPet")}

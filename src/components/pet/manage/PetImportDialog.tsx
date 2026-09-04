@@ -34,10 +34,7 @@ interface CodexPetDto {
 
 type Step = "source" | "config" | "done";
 
-export function PetImportDialog(props: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-}) {
+export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const { t } = useTranslation();
   const [step, setStep] = useState<Step>("source");
   const [tab, setTab] = useState<"codex" | "local" | "petdex">("codex");
@@ -108,7 +105,9 @@ export function PetImportDialog(props: {
     setBusy(true);
     try {
       const valid = voiceRows.filter((r) => !voiceRowProblem(r));
-      const hasVoice = judgeVoiceTier(valid.map((r) => ({ rel: r.file, size: r.sizeBytes, durationMs: r.durationMs }))).hasVoice;
+      const hasVoice = judgeVoiceTier(
+        valid.map((r) => ({ rel: r.file, size: r.sizeBytes, durationMs: r.durationMs }))
+      ).hasVoice;
       const manifest = {
         schemaVersion: 1,
         id: name,
@@ -146,11 +145,18 @@ export function PetImportDialog(props: {
   const validCount = voiceRows.filter((r) => !voiceRowProblem(r)).length;
 
   return (
-    <Dialog open={props.open} onOpenChange={(v) => (v ? props.onOpenChange(true) : void cancelAll())}>
+    <Dialog
+      open={props.open}
+      onOpenChange={(v) => (v ? props.onOpenChange(true) : void cancelAll())}
+    >
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>
-            {step === "source" ? t("pet.import.title") : step === "config" ? t("pet.import.configTitle") : t("pet.import.doneTitle")}
+            {step === "source"
+              ? t("pet.import.title")
+              : step === "config"
+                ? t("pet.import.configTitle")
+                : t("pet.import.doneTitle")}
           </DialogTitle>
         </DialogHeader>
 
@@ -165,29 +171,48 @@ export function PetImportDialog(props: {
                   data-testid={`import-tab-${k}`}
                   onClick={() => setTab(k)}
                 >
-                  {t(`pet.import.tab${k === "codex" ? "Codex" : k === "local" ? "Local" : "Petdex"}`)}
+                  {t(
+                    `pet.import.tab${k === "codex" ? "Codex" : k === "local" ? "Local" : "Petdex"}`
+                  )}
                 </Button>
               ))}
             </div>
             {tab === "codex" && (
               <div className="max-h-64 space-y-1 overflow-auto" data-testid="import-codex-list">
-                {codexList.length === 0 && <p className="text-muted-foreground text-sm">{t("pet.import.codexEmpty")}</p>}
+                {codexList.length === 0 && (
+                  <p className="text-muted-foreground text-sm">{t("pet.import.codexEmpty")}</p>
+                )}
                 {codexList.map((c) => (
-                  <div key={c.id} className="flex items-center justify-between rounded border px-2 py-1 text-sm">
+                  <div
+                    key={c.id}
+                    className="flex items-center justify-between rounded border px-2 py-1 text-sm"
+                  >
                     <span>
                       {c.id}
-                      {c.displayName && <span className="text-muted-foreground ml-1">{c.displayName}</span>}
-                      {c.spriteVersionNumber > 0 && <span className="bg-muted ml-1 rounded px-1 text-[10px]">v{c.spriteVersionNumber}</span>}
+                      {c.displayName && (
+                        <span className="text-muted-foreground ml-1">{c.displayName}</span>
+                      )}
+                      {c.spriteVersionNumber > 0 && (
+                        <span className="bg-muted ml-1 rounded px-1 text-[10px]">
+                          v{c.spriteVersionNumber}
+                        </span>
+                      )}
                     </span>
                     {c.imported ? (
-                      <span className="text-muted-foreground text-xs">{t("pet.import.codexImported")}</span>
+                      <span className="text-muted-foreground text-xs">
+                        {t("pet.import.codexImported")}
+                      </span>
                     ) : (
                       <Button
                         size="sm"
                         variant="outline"
                         disabled={busy}
                         data-testid={`import-stage-${c.id}`}
-                        onClick={() => void stageFrom(() => invoke<StagedPetDto>("pet_stage_from_codex", { codexId: c.id }))}
+                        onClick={() =>
+                          void stageFrom(() =>
+                            invoke<StagedPetDto>("pet_stage_from_codex", { codexId: c.id })
+                          )
+                        }
                       >
                         {t("pet.import.stage")}
                       </Button>
@@ -204,7 +229,10 @@ export function PetImportDialog(props: {
                   data-testid="import-pick-folder"
                   onClick={() =>
                     void openDialog({ directory: true }).then((p) => {
-                      if (p) void stageFrom(() => invoke<StagedPetDto>("pet_stage_from_folder", { path: p as string }));
+                      if (p)
+                        void stageFrom(() =>
+                          invoke<StagedPetDto>("pet_stage_from_folder", { path: p as string })
+                        );
                     })
                   }
                 >
@@ -214,9 +242,14 @@ export function PetImportDialog(props: {
                   size="sm"
                   disabled={busy}
                   onClick={() =>
-                    void openDialog({ filters: [{ name: "ZIP", extensions: ["zip"] }] }).then((p) => {
-                      if (p) void stageFrom(() => invoke<StagedPetDto>("pet_stage_from_zip", { path: p as string }));
-                    })
+                    void openDialog({ filters: [{ name: "ZIP", extensions: ["zip"] }] }).then(
+                      (p) => {
+                        if (p)
+                          void stageFrom(() =>
+                            invoke<StagedPetDto>("pet_stage_from_zip", { path: p as string })
+                          );
+                      }
+                    )
                   }
                 >
                   {t("pet.import.pickZip")}
@@ -233,7 +266,11 @@ export function PetImportDialog(props: {
                     value={petdexUrl}
                     onChange={(e) => setPetdexUrl(e.target.value)}
                   />
-                  <Button size="sm" variant="outline" onClick={() => void openUrl("https://petdex.dev/collections")}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void openUrl("https://petdex.dev/collections")}
+                  >
                     {t("pet.import.petdexBrowse")}
                   </Button>
                 </div>
@@ -241,7 +278,11 @@ export function PetImportDialog(props: {
                   size="sm"
                   disabled={busy || !petdexUrl}
                   data-testid="import-petdex-download"
-                  onClick={() => void stageFrom(() => invoke<StagedPetDto>("pet_stage_from_petdex", { url: petdexUrl }))}
+                  onClick={() =>
+                    void stageFrom(() =>
+                      invoke<StagedPetDto>("pet_stage_from_petdex", { url: petdexUrl })
+                    )
+                  }
                 >
                   {t("pet.import.petdexDownload")}
                 </Button>
@@ -257,7 +298,8 @@ export function PetImportDialog(props: {
             <div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
               <div className="flex gap-4">
                 <div className="flex-none">
-                  <div className="bg-muted/40 mb-1 h-[104px] w-[96px] rounded"
+                  <div
+                    className="bg-muted/40 mb-1 h-[104px] w-[96px] rounded"
                     style={{
                       backgroundImage: `url(${convertFileSrc(`${staged.dir}/spritesheet.webp`)})`,
                       backgroundPosition: "0 0",
@@ -268,11 +310,17 @@ export function PetImportDialog(props: {
                   />
                   <div className="text-center">
                     {rows ? (
-                      <span data-testid="import-sheet-badge" className="bg-muted rounded px-1 text-[10px]">
+                      <span
+                        data-testid="import-sheet-badge"
+                        className="bg-muted rounded px-1 text-[10px]"
+                      >
                         v{rows === 9 ? 1 : 2}
                       </span>
                     ) : (
-                      <span data-testid="import-sheet-badge" className="text-destructive text-[10px]">
+                      <span
+                        data-testid="import-sheet-badge"
+                        className="text-destructive text-[10px]"
+                      >
                         {t("pet.import.sheetInvalid")}
                       </span>
                     )}
@@ -284,7 +332,9 @@ export function PetImportDialog(props: {
                       {t("pet.import.name")}
                     </label>
                     <Input value={name} onChange={(e) => setName(e.target.value)} />
-                    {!nameOk && <p className="text-destructive text-xs">{t("pet.import.nameHint")}</p>}
+                    {!nameOk && (
+                      <p className="text-destructive text-xs">{t("pet.import.nameHint")}</p>
+                    )}
                   </div>
                   <div>
                     <label className="text-sm">{t("pet.import.displayName")}</label>
@@ -305,7 +355,10 @@ export function PetImportDialog(props: {
                     srcPaths: paths,
                     group,
                   });
-                  setVoiceRows((prev) => [...prev, ...added.map((a) => ({ ...a, durationMs: null }))]);
+                  setVoiceRows((prev) => [
+                    ...prev,
+                    ...added.map((a) => ({ ...a, durationMs: null })),
+                  ]);
                 }}
                 onRemove={async (rel) => {
                   await invoke("pet_remove_staged_audio", { stagingId: staged.stagingId, rel });
@@ -313,15 +366,29 @@ export function PetImportDialog(props: {
                 }}
               />
               <div className="flex items-center gap-2" title={t("pet.import.subtitle")}>
-                <Switch checked={subtitle} disabled={validCount === 0} onCheckedChange={setSubtitle} />
+                <Switch
+                  checked={subtitle}
+                  disabled={validCount === 0}
+                  onCheckedChange={setSubtitle}
+                />
                 <span className="text-sm">{t("pet.import.subtitle")}</span>
               </div>
             </div>
             <div className="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" data-testid="import-cancel" onClick={() => void cancelAll()}>
+              <Button
+                size="sm"
+                variant="ghost"
+                data-testid="import-cancel"
+                onClick={() => void cancelAll()}
+              >
                 {t("pet.import.cancelImport")}
               </Button>
-              <Button size="sm" disabled={!nameOk || !rows || busy} data-testid="import-execute" onClick={() => void execute()}>
+              <Button
+                size="sm"
+                disabled={!nameOk || !rows || busy}
+                data-testid="import-execute"
+                onClick={() => void execute()}
+              >
                 {t("pet.import.execute")}
               </Button>
             </div>
@@ -337,7 +404,8 @@ export function PetImportDialog(props: {
                 onClick={async () => {
                   const { activatePet } = await import("../petActivation");
                   const r = await activatePet(importedId, async () => "update");
-                  if (r.status === "activated") toast.success(t("pet.switch.activated", { name: importedId }));
+                  if (r.status === "activated")
+                    toast.success(t("pet.switch.activated", { name: importedId }));
                   props.onOpenChange(false);
                 }}
               >

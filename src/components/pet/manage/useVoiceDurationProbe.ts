@@ -19,7 +19,9 @@ export function useVoiceDurationProbe(
     void Promise.all(
       pending.map(async (r) => ({
         file: r.file,
-        durationMs: await probeAudioDurationMs(convertFileSrc(`${dir}/${r.file}`)).catch(() => null),
+        durationMs: await probeAudioDurationMs(convertFileSrc(`${dir}/${r.file}`)).catch(
+          () => null
+        ),
       }))
     ).then((probed) => {
       if (cancelled) return;
