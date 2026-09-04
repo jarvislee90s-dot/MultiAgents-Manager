@@ -248,8 +248,10 @@ export function FoxbellPet() {
   useEffect(() => registerInteractive(cardsWrapRef.current), [registerInteractive]);
   const jumpCandidatesRef = useRef<HTMLDivElement | null>(null); // 候选浮层实测高度并入窗口几何（Task 11 评审遗留）
 
-  // 候选浮层关闭路径（spec §11）：Esc/点外关闭，不 ack、卡片保留（与 PetMenu 的 B10 同款监听）
-  useEffect(() => {
+  // 候选浮层关闭路径（spec §11）：Esc/点外关闭，不 ack、卡片保留（与 PetMenu 的 B10 同款监听）。
+  // 用 layout effect：提交阶段同步注册监听，浮层 DOM 可被观察之前必然已挂上
+  // （useEffect 是提交后另排的被动任务，测试 findByTestId 观察到 DOM 即 pointerDown 会输给它，FIX-11）
+  useLayoutEffect(() => {
     if (!candidates) return;
     const onDown = (e: PointerEvent) => {
       if (jumpCandidatesRef.current?.contains(e.target as Node)) return;
