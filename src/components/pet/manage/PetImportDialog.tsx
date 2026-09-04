@@ -259,66 +259,70 @@ export function PetImportDialog(props: {
 
         {step === "config" && staged && (
           <div className="space-y-3" data-testid="import-config">
-            <div className="flex gap-4">
-              <div className="flex-none">
-                <div className="bg-muted/40 mb-1 h-[104px] w-[96px] rounded"
-                  style={{
-                    backgroundImage: `url(${convertFileSrc(`${staged.dir}/spritesheet.webp`)})`,
-                    backgroundPosition: "0 0",
-                    backgroundSize: "768px 1144px",
-                  }}
-                  data-testid="import-preview"
-                  title={t("pet.import.preview")}
-                />
-                <div className="text-center">
-                  {rows ? (
-                    <span data-testid="import-sheet-badge" className="bg-muted rounded px-1 text-[10px]">
-                      v{rows === 9 ? 1 : 2}
-                    </span>
-                  ) : (
-                    <span data-testid="import-sheet-badge" className="text-destructive text-[10px]">
-                      {t("pet.import.sheetInvalid")}
-                    </span>
-                  )}
+            {/* 内容区限高滚动（与修改面板同款）：音频行多时配置页不再无限增高，
+                取消/执行按钮固定在滚动区外始终可见 */}
+            <div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
+              <div className="flex gap-4">
+                <div className="flex-none">
+                  <div className="bg-muted/40 mb-1 h-[104px] w-[96px] rounded"
+                    style={{
+                      backgroundImage: `url(${convertFileSrc(`${staged.dir}/spritesheet.webp`)})`,
+                      backgroundPosition: "0 0",
+                      backgroundSize: "768px 1144px",
+                    }}
+                    data-testid="import-preview"
+                    title={t("pet.import.preview")}
+                  />
+                  <div className="text-center">
+                    {rows ? (
+                      <span data-testid="import-sheet-badge" className="bg-muted rounded px-1 text-[10px]">
+                        v{rows === 9 ? 1 : 2}
+                      </span>
+                    ) : (
+                      <span data-testid="import-sheet-badge" className="text-destructive text-[10px]">
+                        {t("pet.import.sheetInvalid")}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-1 space-y-2">
+                  <div>
+                    <label className="text-sm" title={t("pet.import.nameHint")}>
+                      {t("pet.import.name")}
+                    </label>
+                    <Input value={name} onChange={(e) => setName(e.target.value)} />
+                    {!nameOk && <p className="text-destructive text-xs">{t("pet.import.nameHint")}</p>}
+                  </div>
+                  <div>
+                    <label className="text-sm">{t("pet.import.displayName")}</label>
+                    <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="text-sm">{t("pet.import.description")}</label>
+                    <Input value={description} onChange={(e) => setDescription(e.target.value)} />
+                  </div>
                 </div>
               </div>
-              <div className="flex-1 space-y-2">
-                <div>
-                  <label className="text-sm" title={t("pet.import.nameHint")}>
-                    {t("pet.import.name")}
-                  </label>
-                  <Input value={name} onChange={(e) => setName(e.target.value)} />
-                  {!nameOk && <p className="text-destructive text-xs">{t("pet.import.nameHint")}</p>}
-                </div>
-                <div>
-                  <label className="text-sm">{t("pet.import.displayName")}</label>
-                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-                </div>
-                <div>
-                  <label className="text-sm">{t("pet.import.description")}</label>
-                  <Input value={description} onChange={(e) => setDescription(e.target.value)} />
-                </div>
+              <VoiceGroupEditor
+                rows={voiceRows}
+                busy={busy}
+                onAdd={async (group, paths) => {
+                  const added = await invoke<StagedPetDto["voiceFiles"]>("pet_stage_audio", {
+                    stagingId: staged.stagingId,
+                    srcPaths: paths,
+                    group,
+                  });
+                  setVoiceRows((prev) => [...prev, ...added.map((a) => ({ ...a, durationMs: null }))]);
+                }}
+                onRemove={async (rel) => {
+                  await invoke("pet_remove_staged_audio", { stagingId: staged.stagingId, rel });
+                  setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
+                }}
+              />
+              <div className="flex items-center gap-2" title={t("pet.import.subtitle")}>
+                <Switch checked={subtitle} disabled={validCount === 0} onCheckedChange={setSubtitle} />
+                <span className="text-sm">{t("pet.import.subtitle")}</span>
               </div>
-            </div>
-            <VoiceGroupEditor
-              rows={voiceRows}
-              busy={busy}
-              onAdd={async (group, paths) => {
-                const added = await invoke<StagedPetDto["voiceFiles"]>("pet_stage_audio", {
-                  stagingId: staged.stagingId,
-                  srcPaths: paths,
-                  group,
-                });
-                setVoiceRows((prev) => [...prev, ...added.map((a) => ({ ...a, durationMs: null }))]);
-              }}
-              onRemove={async (rel) => {
-                await invoke("pet_remove_staged_audio", { stagingId: staged.stagingId, rel });
-                setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
-              }}
-            />
-            <div className="flex items-center gap-2" title={t("pet.import.subtitle")}>
-              <Switch checked={subtitle} disabled={validCount === 0} onCheckedChange={setSubtitle} />
-              <span className="text-sm">{t("pet.import.subtitle")}</span>
             </div>
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="ghost" data-testid="import-cancel" onClick={() => void cancelAll()}>
