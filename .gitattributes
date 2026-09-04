@@ -1,0 +1,26 @@
+# 统一文本文件为 LF（与 .editorconfig / Prettier endOfLine=lf 对齐）
+* text=auto eol=lf
+
+# 二进制类型：绝不参与行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.gif binary
+*.wav binary
+*.m4a binary
+*.mp3 binary
+*.ogg binary
+*.opus binary
+*.flac binary
+*.aac binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.db binary
+*.zip binary
+*.exe binary
+*.dll binary
