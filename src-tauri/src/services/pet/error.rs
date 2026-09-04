@@ -20,8 +20,8 @@ impl PetRpcError {
         self.params.insert(key.into(), val.into());
         self
     }
-    /// 未映射的底层 IO/网络错误统一收敛（接受 String 以便直接作 map_err 函数指针：
-    /// io::Error/serde 错误经 ToString 转换）
+    /// 未映射的底层 IO/网络错误统一收敛（接受 String：统一调用点形态 |e| internal(e.to_string())，
+    /// 保持类型简单）
     pub fn internal(detail: String) -> Self {
         Self::new("internal", detail)
     }

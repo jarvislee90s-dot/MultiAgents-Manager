@@ -371,7 +371,7 @@ pub fn validate_pet_name(root: &Path, name: &str) -> Result<(), PetRpcError> {
         return Err(PetRpcError::new("pet-name-empty", "宠物名不能为空"));
     }
     if name.starts_with('.') {
-        return Err(PetRpcError::new("pet-name-illegal", "宠物名不能以点开头"));
+        return Err(PetRpcError::new("pet-name-dot-prefix", "宠物名不能以点开头"));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(PetRpcError::new("pet-name-illegal", "宠物名仅支持字母/数字/连字符/下划线"));
@@ -401,7 +401,7 @@ pub fn finalize_in(root: &Path, staging_id: &str, name: &str, mut m: manifest::P
     scan::list_pets_in(root)
         .into_iter()
         .find(|s| s.id == name)
-        .ok_or_else(|| PetRpcError::internal("落地后读取宠物信息失败".to_string()))
+        .ok_or_else(|| PetRpcError::new("finalize-scan-failed", "落地后读取宠物信息失败"))
 }
 
 /// 取消导入：清理暂存区（spec §8.4-6）
@@ -571,6 +571,11 @@ mod tests {
         assert!(validate_pet_name(root.path(), "../hack").is_err());
         assert!(validate_pet_name(root.path(), "foxbell").is_err());
         assert!(validate_pet_name(root.path(), "FoxBell").is_err());
+        // 点开头拒绝为独立码（第七轮拆码）
+        assert!(matches!(
+            validate_pet_name(root.path(), ".hidden"),
+            Err(e) if e.code == "pet-name-dot-prefix"
+        ));
         std::fs::create_dir_all(root.path().join("dup")).unwrap();
         assert!(validate_pet_name(root.path(), "dup").is_err());
         // 结构化错误代表性断言：稳定错误码 + 插值参数（第六轮）

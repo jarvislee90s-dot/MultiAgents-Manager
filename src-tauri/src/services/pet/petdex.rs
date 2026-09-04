@@ -38,17 +38,44 @@ fn url_allowed(url: &reqwest::Url) -> bool {
     url.scheme() == "https" && url.host_str().map(allowed_host).unwrap_or(false)
 }
 
+/// redirect Policy 的 ASCII 标记 → 稳定错误码（Policy API 只能传字符串，第六轮偏差 1 的收口）
+fn redirect_code_of(s: &str) -> Option<&'static str> {
+    if s.contains("MAM_REDIRECT_TOO_MANY") {
+        Some("redirect-too-many")
+    } else if s.contains("MAM_REDIRECT_FORBIDDEN") {
+        Some("redirect-forbidden")
+    } else {
+        None
+    }
+}
+
+/// send 阶段错误映射：redirect 标记 → 对应结构化码（detail 保留完整原因）；
+/// 其余 → download-failed{err}。download_zip 与 fetch_entry 的 send().map_err 共用
+pub fn map_send_err(e: reqwest::Error) -> PetRpcError {
+    match redirect_code_of(&e.to_string()) {
+        Some("redirect-too-many") => {
+            PetRpcError::new("redirect-too-many", format!("重定向次数过多: {}", e))
+        }
+        Some("redirect-forbidden") => PetRpcError::new(
+            "redirect-forbidden",
+            format!("重定向目标不在 petdex 白名单内: {}", e),
+        ),
+        _ => PetRpcError::new("download-failed", format!("下载失败: {}", e)).with("err", e.to_string()),
+    }
+}
+
 fn client(secs: u64) -> Result<reqwest::Client, PetRpcError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(secs))
         // 每跳重定向都重新校验白名单：防 http 明文降级与跳转到非 petdex 域
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 {
-                attempt.error("重定向次数过多")
+                // 稳定 ASCII 标记经 map_send_err 映射为结构化 redirect-* 错误码（中文原因留在 detail）
+                attempt.error("MAM_REDIRECT_TOO_MANY")
             } else if url_allowed(attempt.url()) {
                 attempt.follow()
             } else {
-                attempt.error("重定向目标不在 petdex 白名单内")
+                attempt.error("MAM_REDIRECT_FORBIDDEN")
             }
         }))
         .build()
@@ -61,7 +88,9 @@ pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
         .get(MANIFEST_URL)
         .send()
         .await
-        .map_err(|e| PetRpcError::new("manifest-request-failed", format!("petdex 清单请求失败: {}", e)).with("err", e.to_string()))?
+        // redirect 标记先经 map_send_err 得结构化码；非 redirect 错误覆写为清单请求码
+        .map_err(map_send_err)
+        .map_err(|e| if e.code.starts_with("redirect-") { e } else { PetRpcError::new("manifest-request-failed", format!("petdex 清单请求失败: {}", e.detail)).with("err", e.detail.clone()) })?
         .error_for_status()
         .map_err(|e| PetRpcError::new("manifest-status", format!("petdex 清单响应异常: {}", e)).with("err", e.to_string()))?
         .json::<Vec<PetdexEntry>>()
@@ -74,7 +103,7 @@ pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
 
 /// 下载 zip 字节（首跳 https + 域名白名单校验，重定向每跳由 client 策略校验，spec §8.3）
 pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, PetRpcError> {
-    let url = reqwest::Url::parse(zip_url).map_err(|e| PetRpcError::new("slug-parse-failed", format!("下载地址非法: {}", e)).with("err", e.to_string()))?;
+    let url = reqwest::Url::parse(zip_url).map_err(|e| PetRpcError::new("download-url-invalid", format!("下载地址非法: {}", e)).with("err", e.to_string()))?;
     if !url_allowed(&url) {
         let host = url.host_str().unwrap_or("").to_string();
         return Err(PetRpcError::new("host-forbidden", format!("拒绝非 petdex 域下载: {}", url.as_str())).with("host", host));
@@ -83,7 +112,7 @@ pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, PetRpcError> {
         .get(zip_url)
         .send()
         .await
-        .map_err(|e| PetRpcError::new("download-failed", format!("下载失败: {}", e)).with("err", e.to_string()))?
+        .map_err(map_send_err)?
         .error_for_status()
         .map_err(|e| PetRpcError::new("download-status", format!("下载响应异常: {}", e)).with("err", e.to_string()))?
         .bytes()
@@ -156,6 +185,14 @@ mod tests {
         assert!(!url_allowed(&mk("https://petdex.dev.evil.com/x.zip")));
         // 多级子域仍在白名单内（allowed_host 前缀匹配 .petdex.dev）
         assert!(url_allowed(&mk("https://sub.assets.petdex.dev/x.zip")));
+    }
+
+    #[test]
+    fn redirect_code_of_markers() {
+        assert_eq!(redirect_code_of("error sending request for url (...): MAM_REDIRECT_TOO_MANY"), Some("redirect-too-many"));
+        assert_eq!(redirect_code_of("MAM_REDIRECT_FORBIDDEN at hop"), Some("redirect-forbidden"));
+        assert_eq!(redirect_code_of("connection refused"), None);
+        assert_eq!(redirect_code_of(""), None);
     }
 
     #[test]
