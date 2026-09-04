@@ -602,7 +602,7 @@ export function FoxbellPet() {
                 boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(34,197,94,.25)"}`,
               }}
             />
-            <div style={{ minWidth: 0 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
               <div
                 style={{
                   fontWeight: 700,
@@ -628,6 +628,44 @@ export function FoxbellPet() {
                 </div>
               ))}
             </div>
+            {/* T2：宠物卡 X——与看板同语义。未读绿卡走已读，其余走 dismiss
+               （status 取 sessionIndexRef 的精确状态传后端）；点击不触发跳转 */}
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                const s = sessionIndexRef.current.get(c.id);
+                if (!s) return;
+                if (c.light === "done" && c.unread) {
+                  invoke("mark_session_read", {
+                    agentType: s.agentType,
+                    sessionId: s.id,
+                  }).catch(() => {});
+                } else {
+                  invoke("dismiss_session_card", {
+                    agentType: s.agentType,
+                    sessionId: s.id,
+                    status: s.status,
+                  }).catch(() => {});
+                }
+                // 本地立即消卡（后端 dismiss 在下一轮扫描过滤生效，payload 随之不含该卡）
+                const state = statusStateRef.current;
+                if (state?.[c.id]) {
+                  state[c.id].light = null;
+                  setCards(cardsFromState(state));
+                }
+              }}
+              style={{
+                flex: "none",
+                cursor: "pointer",
+                color: "#a07050",
+                padding: px(2),
+                lineHeight: 1,
+                borderRadius: px(4),
+              }}
+              title={t("sessions.dismissCard")}
+            >
+              ✕
+            </span>
           </div>
         ))}
         {moreCount > 0 && (

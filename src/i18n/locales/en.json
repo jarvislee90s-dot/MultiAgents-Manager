@@ -352,6 +352,7 @@
     "noMessage": "(no message)",
     "unread": "Unread",
     "markRead": "Mark read and dismiss",
+    "dismissCard": "Hide for now (reappears on status change)",
     "appFallbackHint": "CLI terminal not located; host app brought to front",
     "justNow": "just now",
     "appBadge": "Desktop App session",

@@ -311,6 +311,15 @@ pub fn get_all_sessions() -> SessionsResponse {
         }
     }
 
+    // T2：用户 X 掉的 App 形态卡按 (tool, session, status) 过滤——放在 Hook 状态更新
+    // 之后（status 已是最终值），排序之前。状态变化后 key 不匹配自然重现
+    {
+        let dismissals = crate::monitor::SESSION_DISMISALS.lock().unwrap();
+        crate::monitor::filter_dismissed_cards(&mut all_sessions, &|tool, sid, status| {
+            dismissals.contains(&(tool.to_string(), sid.to_string(), status.to_string()))
+        });
+    }
+
     // 按状态优先级排序（比较器见 session_sort_cmp）
     all_sessions.sort_by(session_sort_cmp);
 

@@ -171,6 +171,19 @@ pub fn focus_hwnd(hwnd: isize) -> Result<(), String> {
     }
 }
 
+/// 手动关闭活跃 App 卡（T2 X 按钮，「暂离不提示」）：写入进程内 dismiss 集合，
+/// 从看板与宠物隐藏；同一会话状态变化后 key 不匹配自然重现。
+/// 不碰 unread_sessions 表（未读卡的 X 走 mark_session_read 已读语义）。
+/// status 用前端 SessionStatus 字符串（serde lowercase，如 "waiting"），
+/// 与 filter_dismissed_cards 的归一化（Debug 形态转小写）一致
+#[tauri::command]
+pub fn dismiss_session_card(agent_type: String, session_id: String, status: String) {
+    crate::monitor::SESSION_DISMISALS
+        .lock()
+        .unwrap()
+        .insert((agent_type.to_lowercase(), session_id, status.to_lowercase()));
+}
+
 /// 从进程快照收集运行会话的 (工具id, 项目目录名)——仅进程扫描，无文件解析开销
 #[cfg(windows)]
 fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, String)> {

@@ -75,6 +75,7 @@ pub fn run() {
         commands::session::focus_session,
         commands::session::focus_hwnd,
         commands::session::kill_session,
+        commands::session::dismiss_session_card,
         commands::notification::show_notification_window,
         commands::pet::set_pet_visible,
         commands::pet::set_pet_always_on_top,
