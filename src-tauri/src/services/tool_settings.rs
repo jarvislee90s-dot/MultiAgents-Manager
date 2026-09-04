@@ -284,9 +284,16 @@ fn rebuild_tool_links(tool_id: &str, result: &mut ApplyResult) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod restore_tests {
     use super::*;
+
+    /// 目录型链接的平台无关建链：Unix 走 symlink、Windows 走 junction（P1-3 A：create_link 抽象）。
+    /// 注意 create_link 对「单文件」在 Windows 上是 fs::copy 而非链接——文件型还原测试因此
+    /// 只断言「还原为真实文件」的结果（不要求先存在链接，见 restores_single_file_link_to_real_file）
+    fn create_dir_link(source: &std::path::Path, target: &std::path::Path) {
+        crate::linker::create_link(source, target).unwrap();
+    }
 
     /// 目录型 SSOT：链接还原为真实目录（含内容），返回 Restored，临时目录不残留
     #[test]
@@ -297,13 +304,16 @@ mod restore_tests {
         std::fs::write(ssot.join("SKILL.md"), "hello").unwrap();
         let target = tmp.path().join("tools").join("skill-a");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&ssot, &target).unwrap();
+        create_dir_link(&ssot, &target);
 
         let outcome = restore_mam_link(&ssot, &target, "skill-a");
 
         assert_eq!(outcome, RestoreOutcome::Restored);
-        assert!(!target.is_symlink());
         assert!(target.is_dir());
+        assert!(
+            !crate::linker::link_marker_is_present(&target),
+            "还原后应不再是链接"
+        );
         assert_eq!(
             std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
             "hello"
@@ -315,7 +325,9 @@ mod restore_tests {
             .exists());
     }
 
-    /// 单文件型 SSOT（配置型插件 .json）：走 fs::copy 暂存后还原为真实文件
+    /// 单文件型 SSOT（配置型插件 .json）：走 fs::copy 暂存后还原为真实文件。
+    /// 说明：Windows 上 create_link 对文件目标即 fs::copy（无文件链接），因此本测试
+    /// 在双平台都以「还原为真实文件且内容正确」为断言，不依赖先存在链接
     #[test]
     fn restores_single_file_link_to_real_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -324,32 +336,58 @@ mod restore_tests {
         std::fs::write(&ssot, r#"{"k":"v"}"#).unwrap();
         let target = tmp.path().join("tools").join("my-plugin.json");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // Windows 上 create_link 对文件是 copy（不是链接），restore 视为 NotApplicable——
+        // 直接测「文件目标由 copy 建链后 restore 为真实文件」的等价行为：Unix 建 symlink，
+        // Windows 建 copy 目标，restore 后都是真实文件
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&ssot, &target).unwrap();
+        #[cfg(windows)]
+        std::fs::copy(&ssot, &target).unwrap();
 
-        let outcome = restore_mam_link(&ssot, &target, "my-plugin.json");
-
-        assert_eq!(outcome, RestoreOutcome::Restored);
-        assert!(!target.is_symlink());
+        // Unix：链接 → 还原为真实文件；Windows：已是真实副本 → NotApplicable（不报告）
+        #[cfg(unix)]
+        {
+            let outcome = restore_mam_link(&ssot, &target, "my-plugin.json");
+            assert_eq!(outcome, RestoreOutcome::Restored);
+        }
+        #[cfg(windows)]
+        {
+            let outcome = restore_mam_link(&ssot, &target, "my-plugin.json");
+            assert_eq!(outcome, RestoreOutcome::NotApplicable);
+        }
         assert!(target.is_file());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), r#"{"k":"v"}"#);
     }
 
-    /// 暂存失败（SSOT 目录含悬空 symlink）：链接保持原样，返回 Skipped（调用方计入 skipped 逐项报告）
+    /// 暂存失败（SSOT 目录含悬空链接）：链接保持原样，返回 Skipped（调用方计入 skipped 逐项报告）
     #[test]
     fn keeps_link_when_staging_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let ssot = tmp.path().join("repo").join("broken");
         std::fs::create_dir_all(&ssot).unwrap();
-        // 目录内含悬空 symlink → copy_dir_recursive 的 fs::copy 必然失败
-        std::os::unix::fs::symlink(tmp.path().join("no-such-file"), ssot.join("bad")).unwrap();
+        // 目录内含悬空链接 → copy_dir_recursive 的 fs::copy 必然失败
+        let dangling_target = tmp.path().join("no-such-file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dangling_target, ssot.join("bad")).unwrap();
+        #[cfg(windows)]
+        {
+            // Windows 无 dangling symlink 直接构造；junction 须指向真实存在的源——
+            // 用「先建后删」制造悬空 junction 目标
+            std::fs::create_dir_all(&dangling_target).unwrap();
+            crate::linker::create_link(&dangling_target, &ssot.join("bad")).unwrap();
+            std::fs::remove_dir_all(&dangling_target).unwrap();
+        }
         let target = tmp.path().join("tools").join("broken");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&ssot, &target).unwrap();
+        create_dir_link(&ssot, &target);
 
         let outcome = restore_mam_link(&ssot, &target, "broken");
 
         assert_eq!(outcome, RestoreOutcome::Skipped);
-        assert!(target.is_symlink(), "暂存失败时链接不应被移除");
+        assert!(
+            crate::linker::link_marker_is_present(&target),
+            "暂存失败时链接不应被移除"
+        );
     }
 
     /// SSOT 缺失（spec W5 清理语义 1 + §9）：链接保持原样，返回 Skipped 供调用方逐项报告
@@ -360,16 +398,22 @@ mod restore_tests {
         let ssot = tmp.path().join("repo").join("gone");
         let target = tmp.path().join("tools").join("gone");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&ssot, &target).unwrap();
+        #[cfg(windows)]
+        {
+            // junction 须指向存在的源：先建目录再建 junction 后删除源 → 悬空
+            std::fs::create_dir_all(&ssot).unwrap();
+            create_dir_link(&ssot, &target);
+            std::fs::remove_dir_all(&ssot).unwrap();
+        }
 
         let outcome = restore_mam_link(&ssot, &target, "gone");
 
         assert_eq!(outcome, RestoreOutcome::Skipped);
-        assert!(target.is_symlink(), "SSOT 缺失时链接不应被动");
-        assert_eq!(
-            std::fs::read_link(&target).unwrap(),
-            ssot,
-            "悬空链接目标应保持不变"
+        assert!(
+            crate::linker::link_marker_is_present(&target),
+            "SSOT 缺失时链接不应被动"
         );
     }
 
@@ -386,7 +430,79 @@ mod restore_tests {
 
         assert_eq!(outcome, RestoreOutcome::NotApplicable);
         assert!(target.is_dir());
-        assert!(!target.is_symlink());
+        assert!(!crate::linker::link_marker_is_present(&target));
+    }
+
+    // ---- P1-3 B：Windows junction 专项（#[cfg(windows)]） ----
+
+    /// junction 的 Valid/Dangling 健康判定 + remove_link 只删链接不删 SSOT 内容
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_health_and_remove_only_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssot = tmp.path().join("repo").join("skill");
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "ssot content").unwrap();
+        let target = tmp.path().join("tools").join("skill");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        create_dir_link(&ssot, &target);
+
+        // Valid：junction 目标可达
+        assert_eq!(
+            crate::linker::check_link_health(&target),
+            crate::linker::LinkHealth::Valid
+        );
+        // 删除 SSOT → Dangling
+        std::fs::remove_dir_all(&ssot).unwrap();
+        assert_eq!(
+            crate::linker::check_link_health(&target),
+            crate::linker::LinkHealth::Dangling
+        );
+        // remove_link 只删链接本身，不碰 SSOT（SSOT 已被删，验证不误删）
+        crate::linker::remove_link(&target).unwrap();
+        assert!(!target.exists() && !target.is_symlink());
+    }
+
+    /// 跨 junction 的 restore_mam_link：暂存 + rename 落位为真实内容
+    #[cfg(windows)]
+    #[test]
+    fn windows_restore_across_junction_materializes_real_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssot = tmp.path().join("repo").join("skill-a");
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "hello").unwrap();
+        let target = tmp.path().join("tools").join("skill-a");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        create_dir_link(&ssot, &target); // junction
+
+        let outcome = restore_mam_link(&ssot, &target, "skill-a");
+
+        assert_eq!(outcome, RestoreOutcome::Restored);
+        assert!(target.is_dir());
+        assert!(!crate::linker::link_marker_is_present(&target));
+        assert_eq!(
+            std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "hello"
+        );
+    }
+
+    /// SSOT 缺失时 Windows junction 还原报告 Skipped 且链接不动
+    #[cfg(windows)]
+    #[test]
+    fn windows_ssot_missing_reports_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssot = tmp.path().join("repo").join("gone");
+        let target = tmp.path().join("tools").join("gone");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // 先建源再建 junction，随后删源 → 悬空 junction（Windows 不能直接建悬空 junction）
+        std::fs::create_dir_all(&ssot).unwrap();
+        create_dir_link(&ssot, &target);
+        std::fs::remove_dir_all(&ssot).unwrap();
+
+        let outcome = restore_mam_link(&ssot, &target, "gone");
+
+        assert_eq!(outcome, RestoreOutcome::Skipped);
+        assert!(crate::linker::link_marker_is_present(&target));
     }
 }
 
