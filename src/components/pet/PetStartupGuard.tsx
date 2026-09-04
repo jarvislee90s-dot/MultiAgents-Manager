@@ -10,6 +10,7 @@ import { loadActiveId, probeSheetRows, saveActiveId, type PetRows } from "./petR
 import { buildManifestFromScan, repairManifest } from "./petActivation";
 import { diffManifestVsScan, type PetManifestView, type PetScan, type ValidationIssue } from "./petValidation";
 import { saveVisible } from "./petConfig";
+import { petErrMsg, PetError } from "./petErrors";
 
 function toFoxbell(msgKey: string) {
   saveActiveId("foxbell", true, "Foxbell");
@@ -19,7 +20,8 @@ function toFoxbell(msgKey: string) {
 
 export function PetStartupGuard() {
   const { t } = useTranslation();
-  const [fatal, setFatal] = useState<string | null>(null);
+  // fatal 存原始异常（PetError/普通 Error/字符串），渲染时经 petErrMsg 按语言翻译（P3-6）
+  const [fatal, setFatal] = useState<unknown | null>(null);
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
   const [ctx, setCtx] = useState<{ scan: PetScan; manifest: PetManifestView | null } | null>(null);
   // 图集探测到的行数（doUpdate 优先用探测值，探测失败才回退 manifest 记录，FIX-4）
@@ -33,7 +35,7 @@ export function PetStartupGuard() {
       try {
         const scan = await invoke<PetScan>("pet_scan", { id });
         if (!scan.spritesheet.exists) {
-          if (!disposed) setFatal("spritesheet.webp 缺失");
+          if (!disposed) setFatal(new PetError("sheet-missing"));
           return;
         }
         const manifest = await invoke<PetManifestView | null>("pet_read_manifest", { id });
@@ -45,7 +47,7 @@ export function PetStartupGuard() {
             const rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
             if (!disposed) setProbedRows(rows);
           } catch (e) {
-            if (!disposed) setFatal((e as Error).message);
+            if (!disposed) setFatal(e);
             return;
           }
         } else if (manifest) {
@@ -53,7 +55,8 @@ export function PetStartupGuard() {
           if (!disposed) setProbedRows(manifest.spriteVersionNumber === 2 ? 11 : 9);
         }
         if (!manifest) {
-          if (!disposed) setIssues([{ kind: "voice-extra", detail: "manifest.json 缺失（待首次激活校验生成）" }]);
+          // 直投场景：manifest 缺失是独立 issue kind，不再借用 voice-extra（P3-6）
+          if (!disposed) setIssues([{ kind: "manifest-missing", detail: "manifest.json" }]);
           if (!disposed) setCtx({ scan, manifest: null });
           return;
         }
@@ -63,8 +66,9 @@ export function PetStartupGuard() {
           setCtx({ scan, manifest });
         }
       } catch (e) {
-        // 扫描失败（如宠物目录被整体删除）：宠物窗口自行降级渲染，但主窗口仍需弹窗确认（EP2，FIX-4）
-        if (!disposed) setFatal((e as Error).message || "宠物素材扫描失败");
+        // 扫描失败（如宠物目录被整体删除）：宠物窗口自行降级渲染，但主窗口仍需弹窗确认（EP2，FIX-4）。
+        // invoke 抛错为字符串而非 Error 实例：包装为 PetError("scan-fail") 走 i18n
+        if (!disposed) setFatal(e instanceof Error ? e : new PetError("scan-fail"));
       }
     })();
     return () => {
@@ -112,7 +116,7 @@ export function PetStartupGuard() {
         </DialogHeader>
         {fatal !== null ? (
           <div className="space-y-3">
-            <p className="text-sm">{t("pet.startup.fatal", { msg: fatal })}</p>
+            <p className="text-sm">{t("pet.startup.fatal", { msg: petErrMsg(fatal, t) })}</p>
             <div className="flex gap-2">
               <Button size="sm" data-testid="pet-startup-foxbell" onClick={() => { toFoxbell(t("pet.startup.switched")); setFatal(null); }}>
                 {t("pet.startup.foxbell")}
@@ -128,7 +132,7 @@ export function PetStartupGuard() {
             <ul className="text-muted-foreground max-h-40 overflow-auto list-disc pl-5 text-xs" data-testid="pet-startup-issues">
               {issues?.map((i) => (
                 <li key={i.kind + i.detail}>
-                  {i.kind}: {i.detail}
+                  {t(`pet.issue.${i.kind}`)}: {i.detail}
                 </li>
               ))}
             </ul>

@@ -474,6 +474,23 @@
       "delete": "删除宠物",
       "deleteConfirm": "确认删除？整個文件夹将移入回收站",
       "deletedToast": "已删除 {{name}}"
+    },
+    "err": {
+      "sheet-missing": "图集文件缺失",
+      "sheet-bad-size": "图集尺寸非法: {{w}}×{{h}}",
+      "sheet-load-fail": "图集加载失败",
+      "audio-timeout": "音频探测超时",
+      "audio-bad-duration": "音频时长不可用",
+      "audio-load-fail": "音频加载失败",
+      "scan-fail": "宠物素材扫描失败"
+    },
+    "issue": {
+      "spritesheet-missing": "图集缺失",
+      "spritesheet-changed": "图集已变更",
+      "voice-missing": "语音文件缺失",
+      "voice-changed": "语音文件已变更",
+      "voice-extra": "未登记的语音文件",
+      "manifest-missing": "manifest 缺失"
     }
   }
 }

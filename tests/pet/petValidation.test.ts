@@ -67,5 +67,8 @@ describe("petValidation", () => {
     expect(missing.map((i) => i.kind)).toContain("voice-missing");
     const noSheet = diffManifestVsScan(m, scan([{ rel: "voice/general/a.m4a", size: 10 }], 0));
     expect(noSheet.map((i) => i.kind)).toContain("spritesheet-missing");
+    // detail 为语言中性数据（P3-6）：标签翻译在展示层经 pet.issue.<kind>
+    expect(noSheet.find((i) => i.kind === "spritesheet-missing")?.detail).toBe("spritesheet.webp");
+    expect(issues.find((i) => i.kind === "spritesheet-changed")?.detail).toBe("100 → 999");
   });
 });

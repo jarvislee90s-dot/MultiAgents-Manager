@@ -474,6 +474,23 @@
       "delete": "Delete pet",
       "deleteConfirm": "Delete? The whole folder goes to recycle bin",
       "deletedToast": "Deleted {{name}}"
+    },
+    "err": {
+      "sheet-missing": "Spritesheet missing",
+      "sheet-bad-size": "Invalid sheet size: {{w}}x{{h}}",
+      "sheet-load-fail": "Spritesheet failed to load",
+      "audio-timeout": "Audio probe timed out",
+      "audio-bad-duration": "Audio duration unavailable",
+      "audio-load-fail": "Audio failed to load",
+      "scan-fail": "Pet assets scan failed"
+    },
+    "issue": {
+      "spritesheet-missing": "Spritesheet missing",
+      "spritesheet-changed": "Spritesheet changed",
+      "voice-missing": "Voice file missing",
+      "voice-changed": "Voice file changed",
+      "voice-extra": "Unregistered voice file",
+      "manifest-missing": "Manifest missing"
     }
   }
 }

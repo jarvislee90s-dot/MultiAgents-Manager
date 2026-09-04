@@ -86,7 +86,7 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
             <ul className="text-muted-foreground max-h-40 overflow-auto list-disc pl-5 text-xs">
               {mismatch.issues.map((i) => (
                 <li key={i.detail}>
-                  {i.kind}: {i.detail}
+                  {t(`pet.issue.${i.kind}`)}: {i.detail}
                 </li>
               ))}
             </ul>

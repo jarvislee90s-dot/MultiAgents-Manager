@@ -103,10 +103,12 @@ export type IssueKind =
   | "spritesheet-changed"
   | "voice-missing"
   | "voice-changed"
-  | "voice-extra";
+  | "voice-extra"
+  | "manifest-missing";
 
 export interface ValidationIssue {
   kind: IssueKind;
+  /** 语言中性数据（路径/纯数字），展示标签由 pet.issue.<kind> 提供（P3-6） */
   detail: string;
 }
 
@@ -114,9 +116,9 @@ export interface ValidationIssue {
 export function diffManifestVsScan(m: PetManifestView, s: PetScan): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   if (!s.spritesheet.exists) {
-    issues.push({ kind: "spritesheet-missing", detail: "spritesheet.webp 不存在" });
+    issues.push({ kind: "spritesheet-missing", detail: "spritesheet.webp" });
   } else if (m.spritesheetSizeBytes > 0 && s.spritesheet.size !== m.spritesheetSizeBytes) {
-    issues.push({ kind: "spritesheet-changed", detail: `图集大小 ${m.spritesheetSizeBytes} → ${s.spritesheet.size}` });
+    issues.push({ kind: "spritesheet-changed", detail: `${m.spritesheetSizeBytes} → ${s.spritesheet.size}` });
   }
   const onDisk = new Map(s.voiceFiles.map((f) => [f.rel, f.size]));
   for (const v of m.voices) {

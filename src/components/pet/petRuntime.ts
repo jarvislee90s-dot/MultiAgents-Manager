@@ -1,6 +1,7 @@
 // 激活宠物运行时 — 指针持久化、foxbell 描述符、外部宠物解析、媒体探测与音频内存快照（spec §7/§12）
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { parseManifest, type VoiceEntry } from "./petVoices";
+import { PetError } from "./petErrors";
 
 export const ACTIVE_KEY = "mam-pet-active";
 export const ACTIVE_NAME_KEY = "mam-pet-active-name";
@@ -80,9 +81,9 @@ export function probeSheetRows(url: string): Promise<PetRows> {
     img.onload = () => {
       const r = rowsFromSize(img.naturalWidth, img.naturalHeight);
       if (r) resolve(r);
-      else reject(new Error(`spritesheet 尺寸非法: ${img.naturalWidth}x${img.naturalHeight}`));
+      else reject(new PetError("sheet-bad-size", { w: img.naturalWidth, h: img.naturalHeight }));
     };
-    img.onerror = () => reject(new Error("spritesheet 加载失败"));
+    img.onerror = () => reject(new PetError("sheet-load-fail"));
     img.src = url;
   });
 }
@@ -94,18 +95,18 @@ export function probeAudioDurationMs(url: string, timeoutMs = 8000): Promise<num
     a.preload = "metadata";
     const timer = window.setTimeout(() => {
       a.src = "";
-      reject(new Error("音频探测超时"));
+      reject(new PetError("audio-timeout"));
     }, timeoutMs);
     a.onloadedmetadata = () => {
       window.clearTimeout(timer);
       const d = a.duration;
       a.src = "";
       if (Number.isFinite(d) && d > 0) resolve(Math.round(d * 1000));
-      else reject(new Error("音频时长不可用"));
+      else reject(new PetError("audio-bad-duration"));
     };
     a.onerror = () => {
       window.clearTimeout(timer);
-      reject(new Error("音频加载失败"));
+      reject(new PetError("audio-load-fail"));
     };
     a.src = url;
   });
@@ -205,7 +206,7 @@ export async function resolveActivePet(): Promise<ActivePet> {
     }
   }
   const scan = await invoke<PetScanDto>("pet_scan", { id });
-  if (!scan.spritesheet.exists) throw new Error("spritesheet.webp 缺失");
+  if (!scan.spritesheet.exists) throw new PetError("sheet-missing");
   const rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
   const manifest = await invoke<ManifestDto | null>("pet_read_manifest", { id });
   if (!manifest) {
