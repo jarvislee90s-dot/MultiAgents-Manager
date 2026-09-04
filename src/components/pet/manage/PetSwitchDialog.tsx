@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { loadActiveId } from "../petRuntime";
 import { activatePet, type MismatchChoice } from "../petActivation";
+import { petErrMsg } from "../petErrors";
 import type { ValidationIssue } from "../petValidation";
 
 export interface PetCardInfo {
@@ -67,7 +68,7 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
       } else if (r.status === "invalid-sheet") {
         toast.error(t("pet.switch.invalidSheet"));
       } else if (r.status === "error") {
-        toast.error(t("pet.switch.error", { msg: r.message ?? "" }));
+        toast.error(petErrMsg(r.err ?? undefined, t));
       }
     } finally {
       setBusy(false);

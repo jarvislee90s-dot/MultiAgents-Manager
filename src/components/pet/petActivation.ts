@@ -1,6 +1,7 @@
 // 激活编排 — 统一校验算法交互层：直投生成 / 不一致修复 / 忽略降级 / 激活指针（spec §6）
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { PetError } from "./petErrors";
 import { probeAudioDurationMs, probeSheetRows, saveActiveId } from "./petRuntime";
 import {
   diffManifestVsScan,
@@ -24,7 +25,8 @@ export interface ActivationResult {
   repaired?: boolean;
   /** ignore 降级激活标记（UI 据此用 ignoredDiff 文案 toast，FIX-3） */
   ignoredDiff?: boolean;
-  message?: string;
+  /** 原始异常（PetError/RpcError/普通 Error），展示层经 petErrMsg 翻译（P3-1） */
+  err?: unknown;
   issues?: ValidationIssue[];
 }
 
@@ -131,13 +133,13 @@ export async function activatePet(id: string, confirm: MismatchConfirm): Promise
     }
     const scan = await invoke<PetScan>("pet_scan", { id });
     if (!scan.spritesheet.exists) {
-      return { status: "invalid-sheet", message: "spritesheet.webp 缺失，无法激活" };
+      return { status: "invalid-sheet", err: new PetError("sheet-missing") };
     }
     let rows: 9 | 11;
     try {
       rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
     } catch (e) {
-      return { status: "invalid-sheet", message: (e as Error).message };
+      return { status: "invalid-sheet", err: e };
     }
     const manifest = await invoke<PetManifestView | null>("pet_read_manifest", { id });
     if (!manifest) {
@@ -177,6 +179,6 @@ export async function activatePet(id: string, confirm: MismatchConfirm): Promise
     notifyPetChanged();
     return { status: "activated", ignoredDiff: true };
   } catch (e) {
-    return { status: "error", message: (e as Error).message };
+    return { status: "error", err: e };
   }
 }

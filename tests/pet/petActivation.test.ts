@@ -109,8 +109,8 @@ describe("activatePet", () => {
     });
     const r = await activatePet("p1", async () => "ignore");
     expect(r.status).toBe("activated");
-    expect(r.ignoredDiff).toBe(true); // 结构化标记（替代硬编码中文 message）
-    expect(r.message).toBeUndefined();
+    expect(r.ignoredDiff).toBe(true); // 结构化标记（err 字段仅 error/invalid-sheet 分支携带）
+    expect(r.err).toBeUndefined();
     expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0"); // done 缺失 → 无语音
   });
 
