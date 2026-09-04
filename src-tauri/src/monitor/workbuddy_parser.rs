@@ -20,8 +20,10 @@ pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
 /// JSONL mtime 停更超过该时长时，函数调用类尾部（Processing）降级为 Waiting
 pub const APP_STATUS_STALE_MS: u64 = 300_000;
 
-/// 每轮观测到的 pid → sessionId（Task 10 心跳消失补偿的依据）
-pub static LAST_SEEN_SESSIONS: Lazy<Mutex<HashMap<u32, String>>> =
+/// 每轮观测到的 pid → (tool_id, sessionId)（心跳消失补偿的依据）。
+/// 值含 tool_id（P2-3 按工具隔离）：停用工具时只清对应工具条目，避免未来第二个
+/// 心跳驱动工具（如 Codex APP 若改心跳机制）接入后被全量 clear 误伤
+pub static LAST_SEEN_SESSIONS: Lazy<Mutex<HashMap<u32, (String, String)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Deserialize)]
@@ -345,11 +347,11 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
         });
 
-        // 记录本轮 pid→session（心跳消失补偿依据）
+        // 记录本轮 pid→(tool, session)（心跳消失补偿依据；含工具归属便于按工具隔离清理）
         LAST_SEEN_SESSIONS
             .lock()
             .unwrap()
-            .insert(process.pid, hb.session_id.clone());
+            .insert(process.pid, ("workbuddy".to_string(), hb.session_id.clone()));
     }
     sessions
 }
@@ -393,20 +395,20 @@ fn first_user_text(lines: &[String]) -> Option<String> {
 pub fn compensate_vanished_heartbeats_in(
     home: &Path,
     now_ms: u64,
-    last_seen: &Mutex<HashMap<u32, String>>,
+    last_seen: &Mutex<HashMap<u32, (String, String)>>,
     status_of: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<crate::database::dao::unread::UnreadSessionRecord> {
     let mut compensated = Vec::new();
 
     // 锁内只做纯内存快照（锁 hygiene：绝不持锁跨文件 I/O），判定消失在锁外进行
-    let candidates: Vec<(u32, String)> = {
+    let candidates: Vec<(u32, (String, String))> = {
         let last_seen = last_seen.lock().unwrap();
         last_seen
             .iter()
-            .map(|(pid, sid)| (*pid, sid.clone()))
+            .map(|(pid, (tool, sid))| (*pid, (tool.clone(), sid.clone())))
             .collect()
     };
-    let vanished: Vec<(u32, String)> = candidates
+    let vanished: Vec<(u32, (String, String))> = candidates
         .into_iter()
         .filter(|(pid, _)| {
             // 心跳文件没了 = 回池/退出；过期同样视为消失
@@ -420,9 +422,13 @@ pub fn compensate_vanished_heartbeats_in(
         })
         .collect();
 
-    for (pid, session_id) in vanished {
+    for (pid, (tool_id, session_id)) in vanished {
         // 逐个短暂重锁移除（不做额外清理，未消失条目保留供下轮参考）
         last_seen.lock().unwrap().remove(&pid);
+        // 防御：观测条目不属于本工具（未来多工具接入）→ 跳过，不代他工具补偿
+        if tool_id != "workbuddy" {
+            continue;
+        }
         // 找该会话的 JSONL（与主路径共用 find_session_jsonl）：
         // 先 mangle(cwd)/<id>.jsonl，未命中再扫描 projects 下所有 <sessionId>.jsonl
         //（会话可能换过项目目录；cwd 未知时直接用空串让兜底扫描接管）
@@ -872,7 +878,8 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL); // 终态 = assistant 完成
                                                            // 心跳文件缺席（prewarm 回池/退出）+ 上一轮观测表记录过该 pid
-            let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
             let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].session_id, SID);
@@ -886,7 +893,8 @@ mod tests {
         fn vanished_but_killed_mid_run_is_not_compensated() {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, RUNNING_TAIL); // 终态 = 运行中被杀
-            let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
             let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
             assert!(out.is_empty());
             // 消失即移除观测表条目（即便不补），防止陈旧 pid 长期滞留
@@ -898,12 +906,17 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL);
             write_heartbeat(home.path(), 11952, 9_999); // 心跳存在且新鲜（10000-9999 < 90s）
-            let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
             let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
             assert!(out.is_empty());
             // 未消失条目保留，供下轮补偿参考
             assert_eq!(
-                last_seen.lock().unwrap().get(&11952).map(String::as_str),
+                last_seen
+                    .lock()
+                    .unwrap()
+                    .get(&11952)
+                    .map(|(_, sid)| sid.as_str()),
                 Some(SID)
             );
         }
@@ -913,7 +926,8 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL);
             write_heartbeat(home.path(), 11952, 0); // 心跳文件在但早已过期（now-0 >= 90s）
-            let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
             let out =
                 compensate_vanished_heartbeats_in(home.path(), 100_000, &last_seen, &|_| None);
             assert_eq!(out.len(), 1); // 过期 = 视为消失，终态完成 → 补
@@ -925,7 +939,8 @@ mod tests {
         fn read_dismissed_green_session_is_not_resurrected() {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL);
-            let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
             let status_of = |sid: &str| (sid == SID).then(|| "Idle".to_string());
             let out =
                 compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &status_of);
@@ -938,9 +953,24 @@ mod tests {
         fn vanished_without_jsonl_is_ignored() {
             // 观测表有记录但会话文件不存在（防御）→ 不产出、不 panic
             let home = tempfile::tempdir().unwrap();
-            let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
             let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
             assert!(out.is_empty());
+        }
+
+        /// P2-3 按工具隔离：观测表条目携带工具归属，非 workbuddy 条目不代偿
+        #[test]
+        fn foreign_tool_entry_is_skipped_not_compensated() {
+            let home = tempfile::tempdir().unwrap();
+            write_jsonl(home.path(), SID, ASSISTANT_TAIL); // JSONL 终态完成
+            // 但条目归属 codex（未来工具接入观测表的场景）→ 不得由 workbuddy 补偿代插
+            let last_seen =
+                Mutex::new(HashMap::from([(11952u32, ("codex".to_string(), SID.to_string()))]));
+            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            assert!(out.is_empty(), "非 workbuddy 条目不得经 workbuddy 补偿复活");
+            // 消失条目照常移除（语义：谁消失谁出表）
+            assert!(last_seen.lock().unwrap().is_empty());
         }
     }
 

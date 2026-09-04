@@ -145,13 +145,12 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
     crate::database::dao::unread::clear_tool(tool_id);
     // 同步清空 W4 心跳消失补偿的观测表：只清未读表不够——停用后任务随即完成、prewarm
     // 回池删除心跳文件时，下一轮补偿会凭残留的 pid→session 记录为已停用工具重新
-    // upsert 未读行，让刚清掉的未读卡「复活」。全量 clear 语义安全：LAST_SEEN 按
-    // 构造仅存 WorkBuddy 的 pid→session（其他工具不写入）；未来若有其他工具接入
-    // 观测表，此处需改为按工具过滤
+    // upsert 未读行，让刚清掉的未读卡「复活」。按工具隔离清理（P2-3）：只移除属于
+    // 该工具的条目，保留其他工具（未来心跳驱动工具）的观测记录
     crate::monitor::workbuddy_parser::LAST_SEEN_SESSIONS
         .lock()
         .unwrap()
-        .clear();
+        .retain(|_, (tool, _)| tool != tool_id);
 }
 
 /// 还原单项结果（spec W5 清理语义 1 + §9：SSOT 缺失跳过并在保存结果中逐项报告）
