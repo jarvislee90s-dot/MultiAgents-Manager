@@ -199,6 +199,12 @@ pub fn find_kimi_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(system, &["kimi"], &["multi-agents-manager"])
 }
 
+/// 发现 WorkBuddy 会话进程（codebuddy；活跃性由心跳文件过滤，见 workbuddy_parser）
+/// 注：独立安装的腾讯 CodeBuddy CLI 同名进程无 ~/.workbuddy 心跳，由解析器天然排除
+pub fn find_workbuddy_processes(system: &System) -> Vec<AgentProcess> {
+    find_processes_by_names(system, &["codebuddy"], &["multi-agents-manager"])
+}
+
 #[cfg(test)]
 mod tests {
     mod exe_matches {

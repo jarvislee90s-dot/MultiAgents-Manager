@@ -13,6 +13,7 @@ pub mod path_codec;
 pub mod process;
 pub mod project;
 pub mod status;
+pub mod workbuddy_parser;
 
 // ===== notify 文件监听集成（FR-5c）=====
 

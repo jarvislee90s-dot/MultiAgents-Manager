@@ -337,45 +337,49 @@ export default function SettingsPage() {
                   <label className="text-sm font-medium">
                     {t("settings.notifications.soundToolOverride")}
                   </label>
-                  {(["claude", "codex", "opencode", "openclaw", "kimi"] as const).map((tool) => (
-                    <div key={tool} className="flex items-center justify-between gap-2">
-                      <span className="text-muted-foreground text-xs capitalize">{tool}</span>
-                      <div className="flex items-center gap-1.5">
-                        <select
-                          className="bg-background h-7 rounded border px-1.5 text-xs"
-                          value={soundConfig.tools[tool] ?? ""}
-                          onChange={(e) =>
-                            updateSound({
-                              tools: {
-                                ...soundConfig.tools,
-                                [tool]: e.currentTarget.value || undefined,
-                              },
-                            })
-                          }
-                        >
-                          <option value="">{t("settings.notifications.soundFollowGlobal")}</option>
-                          {SOUND_IDS.map((id) => (
-                            <option key={id} value={id}>
-                              {id}
+                  {(["claude", "codex", "opencode", "openclaw", "kimi", "workbuddy"] as const).map(
+                    (tool) => (
+                      <div key={tool} className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground text-xs capitalize">{tool}</span>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            className="bg-background h-7 rounded border px-1.5 text-xs"
+                            value={soundConfig.tools[tool] ?? ""}
+                            onChange={(e) =>
+                              updateSound({
+                                tools: {
+                                  ...soundConfig.tools,
+                                  [tool]: e.currentTarget.value || undefined,
+                                },
+                              })
+                            }
+                          >
+                            <option value="">
+                              {t("settings.notifications.soundFollowGlobal")}
                             </option>
-                          ))}
-                          <option value="mute">{t("settings.notifications.soundMute")}</option>
-                        </select>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            // 试听：优先该工具当前生效音（未配置则回退全局）
-                            const id = soundConfig.tools[tool] || soundConfig.default;
-                            if (id !== "mute") playSound(id);
-                          }}
-                        >
-                          <Volume2 className="mr-1 h-3 w-3" />
-                          {t("settings.notifications.soundTest")}
-                        </Button>
+                            {SOUND_IDS.map((id) => (
+                              <option key={id} value={id}>
+                                {id}
+                              </option>
+                            ))}
+                            <option value="mute">{t("settings.notifications.soundMute")}</option>
+                          </select>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              // 试听：优先该工具当前生效音（未配置则回退全局）
+                              const id = soundConfig.tools[tool] || soundConfig.default;
+                              if (id !== "mute") playSound(id);
+                            }}
+                          >
+                            <Volume2 className="mr-1 h-3 w-3" />
+                            {t("settings.notifications.soundTest")}
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    )
+                  )}
                 </div>
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">

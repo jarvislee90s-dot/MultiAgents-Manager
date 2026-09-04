@@ -14,6 +14,7 @@ const TOOLS = [
   { id: "opencode", label: "OpenCode" },
   { id: "openclaw", label: "OpenClaw" },
   { id: "kimi", label: "Kimi Code" },
+  { id: "workbuddy", label: "WorkBuddy" },
 ];
 
 function formatSkillName(name: string): string {

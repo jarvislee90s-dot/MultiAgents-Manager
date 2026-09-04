@@ -2,7 +2,9 @@
 
 export interface SoundConfig {
   default: string; // 音效 id 或 "mute"
-  tools: Partial<Record<"claude" | "codex" | "opencode" | "openclaw" | "kimi", string>>; // 音效 id 或 "mute"
+  tools: Partial<
+    Record<"claude" | "codex" | "opencode" | "openclaw" | "kimi" | "workbuddy", string>
+  >; // 音效 id 或 "mute"
 }
 
 export const SOUND_IDS = [

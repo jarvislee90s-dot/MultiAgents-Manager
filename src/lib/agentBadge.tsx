@@ -1,4 +1,4 @@
-// 工具徽标映射 — SessionCard 与通知浮窗共用（配色：codex 紫 / claude 橙 / opencode 灰白 / openclaw 灰 / kimi 天蓝）
+// 工具徽标映射 — SessionCard 与通知浮窗共用（配色：codex 紫 / claude 橙 / opencode 灰白 / openclaw 灰 / kimi 天蓝 / workbuddy 腾讯蓝）
 import type { ComponentType } from "react";
 import { ClaudeIcon, KimiIcon, OpenAIIcon, OpenCodeIcon } from "@/components/icons/BrandIcons";
 
@@ -16,6 +16,7 @@ export function getAgentLabel(agentType: string, form?: string): string {
   if (agentType === "opencode") return "OpenCode";
   if (agentType === "openclaw") return "OpenClaw";
   if (agentType === "kimi") return "Kimi Code";
+  if (agentType === "workbuddy") return "WorkBuddy";
   return agentType;
 }
 
@@ -44,5 +45,11 @@ export const AGENT_BADGE: Record<string, AgentBadge> = {
     label: "Kimi Code",
     className: "border-sky-500/30 bg-sky-500/15 text-sky-400",
     Icon: KimiIcon,
+  },
+  workbuddy: {
+    label: "WorkBuddy",
+    // 腾讯蓝；无品牌素材暂用占位图标（同 openclaw 约定）
+    className: "border-blue-500/30 bg-blue-500/15 text-blue-400",
+    Icon: OpenCodeIcon,
   },
 };

@@ -6,6 +6,7 @@ pub mod codex;
 pub mod kimi;
 pub mod openclaw;
 pub mod opencode;
+pub mod workbuddy;
 
 use crate::session::{
     status_sort_priority, AgentType, ProcessForm, Session, SessionStatus, SessionsResponse,
@@ -108,7 +109,9 @@ pub trait AgentAdapter: Send + Sync {
 }
 
 /// 已注册工具 id 列表（登记顺序即扫描/展示顺序）
-pub const TOOL_IDS: &[&str] = &["claude", "codex", "opencode", "openclaw", "kimi"];
+pub const TOOL_IDS: &[&str] = &[
+    "claude", "codex", "opencode", "openclaw", "kimi", "workbuddy",
+];
 
 /// 工具 id → adapter 的唯一登记处。新增工具只需在此加一行（+ 其 adapter 文件），
 /// 服务层（mcp/skill/plugin/preset/resource/detector）统一经此分发，无需各自加 arm
@@ -119,6 +122,7 @@ pub fn adapter_by_id(tool_id: &str) -> Option<Box<dyn AgentAdapter>> {
         "opencode" => Some(Box::new(opencode::OpenCodeAdapter)),
         "openclaw" => Some(Box::new(openclaw::OpenClawAdapter)),
         "kimi" => Some(Box::new(kimi::KimiAdapter)),
+        "workbuddy" => Some(Box::new(workbuddy::WorkBuddyAdapter)),
         _ => None,
     }
 }
@@ -342,6 +346,8 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
         // Kimi Code 读取 $KIMI_CODE_HOME/skills（默认 <home_dir>/.kimi-code/skills），
         // 经 kimi_home_with 保持 KIMI_CODE_HOME 重定向与 adapter 同源，同时尊重注入的 home_dir
         "kimi" => Some(crate::monitor::kimi_parser::kimi_home_with(home_dir).join("skills")),
+        // WorkBuddy 读取 ~/.workbuddy/skills（数据根目录 ~/.workbuddy）
+        "workbuddy" => Some(home_dir.join(".workbuddy").join("skills")),
         _ => None,
     }
 }
