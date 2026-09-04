@@ -1,11 +1,17 @@
-// 工具徽标映射 — SessionCard 与通知浮窗共用（配色：codex 紫 / claude 橙 / opencode 灰白 / openclaw 灰 / kimi 天蓝 / workbuddy 腾讯蓝）
+// 工具徽标映射 — SessionCard 与通知浮窗共用（配色：codex 紫 / claude 橙 / opencode 灰白 / openclaw 灰 / kimi 天蓝 / workbuddy 品牌绿）
 import type { ComponentType } from "react";
 import { ClaudeIcon, KimiIcon, OpenAIIcon, OpenCodeIcon } from "@/components/icons/BrandIcons";
+import { ToolIcon } from "@/components/common/ToolIcon";
 
 export interface AgentBadge {
   label: string;
   className: string;
   Icon: ComponentType<{ className?: string }>;
+}
+
+/** ToolIcon(toolId) → AgentBadge.Icon（className 形参）适配：WorkBuddy 专属品牌图标 */
+function ToolIconworkbuddyAdapter({ className: _className }: { className?: string }) {
+  return <ToolIcon toolId="workbuddy" size={14} />;
 }
 
 /** 会话显示名的唯一命名源：主界面徽标、通知浮窗、历史面板统一引用。
@@ -48,8 +54,8 @@ export const AGENT_BADGE: Record<string, AgentBadge> = {
   },
   workbuddy: {
     label: "WorkBuddy",
-    // 腾讯蓝；无品牌素材暂用占位图标（同 openclaw 约定）
-    className: "border-blue-500/30 bg-blue-500/15 text-blue-400",
-    Icon: OpenCodeIcon,
+    // 品牌绿（P2-10：官方图标几何重绘，与 ToolIcon 同源）
+    className: "border-emerald-500/30 bg-emerald-500/15 text-emerald-400",
+    Icon: ToolIconworkbuddyAdapter,
   },
 };

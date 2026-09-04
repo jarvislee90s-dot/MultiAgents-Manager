@@ -131,7 +131,8 @@ function KimiIcon({ size }: { size: number }) {
   );
 }
 
-// WorkBuddy — 腾讯蓝工作台占位（窗口轮廓 + 标题栏圆点，中性图形避免品牌混淆）
+// WorkBuddy — 官方图标几何重绘（P2-10）：绿色渐变圆角方块 + 猫耳 + 双圆点眼，
+// 取自 WorkBuddy.app/Contents/Resources/icon.icns（2026-09-04 实机取样）
 function WorkBuddyIcon({ size }: { size: number }) {
   return (
     <svg
@@ -141,21 +142,22 @@ function WorkBuddyIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" fill="#0052D9" />
-      {/* 工作台窗口轮廓 */}
-      <rect
-        x="4.75"
-        y="5.75"
-        width="10.5"
-        height="8.5"
-        rx="1.75"
-        stroke="white"
-        strokeWidth="1.5"
+      <defs>
+        <linearGradient id="wb-g" x1="3" y1="2" x2="17" y2="18" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#4AD06A" />
+          <stop offset="1" stopColor="#0FBF8F" />
+        </linearGradient>
+      </defs>
+      {/* 圆角方块底 */}
+      <rect width="20" height="20" rx="5" fill="url(#wb-g)" />
+      {/* 猫头轮廓（含双耳） */}
+      <path
+        d="M4.6 7.2 4.2 3.4c0-.4.4-.7.8-.5l3.4 1.9a7.6 7.6 0 0 1 2.9-.57c1.1 0 2.1.2 3 .57l3.4-1.9c.4-.2.8.1.8.5l-.4 3.8c.6 1 1 2.2 1 3.4 0 4.14-3.36 6.9-7.5 6.9S4.6 14.74 4.6 10.6c0-1.2.4-2.4 1-3.4Z"
+        fill="white"
       />
-      {/* 标题栏分隔线与圆点 */}
-      <path d="M4.75 8.75H15.25" stroke="white" strokeWidth="1.2" />
-      <circle cx="6.9" cy="7.25" r="0.7" fill="white" />
-      <circle cx="9" cy="7.25" r="0.7" fill="white" />
+      {/* 双圆点眼 */}
+      <circle cx="8.2" cy="11.4" r="1.05" fill="url(#wb-g)" />
+      <circle cx="12.6" cy="11.4" r="1.05" fill="url(#wb-g)" />
     </svg>
   );
 }
