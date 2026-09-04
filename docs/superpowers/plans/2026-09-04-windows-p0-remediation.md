@@ -223,3 +223,16 @@
 - **workbuddy.db**：`sessions(id, cwd, title, custom_title, status, deleted_at, ...)`，PR 查询列全部存在；运行中 readonly 打开成功（WAL sidecar 正常）；样本行 title 为用户首条消息截断、custom_title 为 NULL。
 - **注册表**：`HKCR\workbuddy\shell\open\command = "D:\Program Files\WorkBuddy\WorkBuddy.exe" "%1"`（HKCU 同）；`HKCR\codex` 仅有 `URL Protocol` 标记、**无 shell\open\command**。
 - **MCP**：`cli/dist/codebuddy.js` 引用 `.workbuddy/mcp.json`（`~/.workbuddy/mcp.json` 当前不存在，MAM 首次写入时创建即可）。
+
+## 6. 收尾轮处置记录（2026-09-04 晚，macOS 侧）
+
+| # | 处置 | 结果 |
+|---|------|------|
+| N2 | 用户指认：**资源管理分布**列表需切页才刷新。systematic-debugging 定位根因：设置是独立 WebviewWindow，`applyChanges` 的 `invalidateQueries()` 只作用于设置窗口自己的 QueryClient，主窗口缓存不感知；"切页才刷新"是视图 remount 时 stale refetch 的侥幸路径 | **已修**（TDD）：后端 `update_tool_settings` 成功后 `app.emit("tools-changed")`；主/设置窗口 `setupToolsChangedListener`（`src/lib/query/toolsChangedSync.ts`）监听并全量失效本窗口缓存。 vitest `toolsChangedSync.test.tsx` 锁定「事件→refetch」行为 |
+| N3 | 用户确认**未**运行过 claude。代码审计：claude 出卡需三重条件同时满足（进程 basename 精确=`claude` 的存活进程 + 可读 cwd + `~/.claude/projects` 真实会话文件），三处匹配均为精确比对，无跨工具误标通路 → 卡片闪现必然有真实 claude 进程短暂存活。结合事发项目名 deepseek-harness（测试 harness 可能自行拉起 claude 子进程），最可能是 harness 拉起而非用户手动运行 | 挂起待 Windows 机取证（PowerShell：`Get-WinEvent -FilterHashtable @{LogName='Security';Id=4688} -MaxEvents 2000 | Where-Object {$_.Message -match 'claude.exe'}` 或 sysmon；亦可在 `~/.claude/projects/` 看事发时段新增会话文件）。若复现：MAM 探针 + 任务管理器同时盯 |
+| macOS 回归 | 门禁：cargo test 206/0、clippy 0、vitest 72/72、pnpm check ✓。临时探针（examples/detect_probe.rs，用后已删）验证：Codex APP 进程发现+每会话一卡聚合正常；无 handler scheme 经 `open` output() **正确快速失败**（退出码 1）；WorkBuddy 心跳驱动在 mac 上等价（serve `interactive-*` 与过期心跳均正确过滤，processes=0 而宿主 alive=true） | 通过 |
+| P2-11 | codex threadId↔rollout UUID 同源性 GUI 实测：派发 `codex://threads/01a067b5…` 用户目击**直达 vision-relay 会话**；派发 `codex://threads/01a067b4…` 截图证实**直达 Personal_Infro 会话**（会话内容与 rollout 元数据一致）。两个不同 sessionId 均一对一导航 | **同源性确认，codex 深链保留**，P2-11 关闭 |
+| M6 | 登记：Windows 文件目标（`create_link` 降级 `fs::copy`）disable 还原后工具侧遗留副本、且 `NotApplicable` 不进 skipped 报告；语义面改造（hardlink 方案）按 §0.1 决策**不本轮实施**，列后续单独决策 | 已登记本节，待需求方决策 |
+| P2-7 | 评估为可选增强，维持不实施（JSONL 尾部 + mtime 阈值已覆盖实测场景，db status 交叉校验仅在"mtime 不可知"的假想场景有增益，避免过度设计） | 关闭 |
+
+遗留（非阻塞）：P2-10 WorkBuddy 品牌图标素材（待设计资源）；行尾治本（`.gitattributes` + renormalize）按需求方要求独立 PR 单独决策。
