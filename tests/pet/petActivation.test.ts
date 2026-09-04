@@ -114,11 +114,12 @@ describe("activatePet", () => {
     expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0"); // done 缺失 → 无语音
   });
 
-  it("manifest 不一致 + 忽略：manifest 条目全部在磁盘 → voice-cap 保留 true", async () => {
+  it("manifest 不一致 + 忽略：manifest 条目全部在磁盘（含大小一致）→ voice-cap 保留 true", async () => {
     const manifest: PetManifestView = {
       id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
       spriteVersionNumber: 2, spritesheetSizeBytes: 100,
-      voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 10, durationMs: 3000 }],
+      // FIX-7：条目大小须与磁盘一致（5 = fourGroups[0].size）才视为可信
+      voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 5, durationMs: 3000 }],
     };
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan") return Promise.resolve(scanOf([fourGroups[0]], 999));
@@ -128,7 +129,27 @@ describe("activatePet", () => {
     const r = await activatePet("p1", async () => "ignore");
     expect(r.status).toBe("activated");
     expect(r.ignoredDiff).toBe(true);
-    expect(localStorage.getItem("mam-pet-voice-cap")).toBe("1"); // 条目齐全 → 按 manifest 能力保留
+    expect(localStorage.getItem("mam-pet-voice-cap")).toBe("1"); // 条目齐全且大小一致 → 按 manifest 能力保留
+  });
+
+  it("manifest 不一致 + 忽略：文件存在但大小与 manifest 不一致 → voice-cap=0（即便条目覆盖四组，FIX-7）", async () => {
+    // 磁盘四组文件都在（大小 5），manifest 记录 sizeBytes=99（大小已变）→ 缓存不可信 → 保守无语音
+    const manifest: PetManifestView = {
+      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
+      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      voices: ["general", "approval", "done", "error"].map((n) => ({
+        group: n, name: n, file: g(n), sizeBytes: 10, durationMs: 3000,
+      })),
+    };
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan") return Promise.resolve(scanOf(fourGroups, 999));
+      if (cmd === "pet_read_manifest") return Promise.resolve(manifest);
+      return Promise.resolve(undefined);
+    });
+    const r = await activatePet("p1", async () => "ignore");
+    expect(r.status).toBe("activated");
+    expect(r.ignoredDiff).toBe(true);
+    expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0");
   });
 
   it("用户选取消：不激活", async () => {
