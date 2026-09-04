@@ -1,14 +1,21 @@
 // tests/pet/foxbell-refresh.test.tsx — 激活宠物刷新"后到者胜"闸门 + 丢弃结果回收（FIX-6）
 // 并发两次 pet-active-changed：旧解析后到不得回滚显示、不得 dispose 新宠物的活跃快照；
 // 被丢弃的解析（过期或卸载）其 blob 快照必须回收。
-import { render, screen, act, waitFor } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    show: vi.fn(), hide: vi.fn(), setAlwaysOnTop: vi.fn(), setIgnoreCursorEvents: vi.fn(),
-    setPosition: vi.fn(), setSize: vi.fn(), outerPosition: vi.fn(), outerSize: vi.fn(),
-    scaleFactor: vi.fn(), currentMonitor: vi.fn(),
+    show: vi.fn(),
+    hide: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
+    setIgnoreCursorEvents: vi.fn(),
+    setPosition: vi.fn(),
+    setSize: vi.fn(),
+    outerPosition: vi.fn(),
+    outerSize: vi.fn(),
+    scaleFactor: vi.fn(),
+    currentMonitor: vi.fn(),
   }),
 }));
 // listen 由测试手动控制触发；emit 补齐导出避免 mock 代理缺属性
@@ -25,7 +32,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 // resolveActivePet 返回手动控制的 deferred：测试依次 resolve，制造"旧结果后到"
-let deferredChain: Array<(v: Awaited<ReturnType<typeof import("@/components/pet/petRuntime").resolveActivePet>>) => void> = [];
+let deferredChain: Array<
+  (v: Awaited<ReturnType<typeof import("@/components/pet/petRuntime").resolveActivePet>>) => void
+> = [];
 vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petRuntime")>();
   return {
@@ -44,7 +53,6 @@ let data: unknown = undefined;
 vi.mock("@/lib/query/queries/sessions", () => ({ useSessionsQuery: () => ({ data }) }));
 
 import { FoxbellPet } from "@/components/pet/FoxbellPet";
-import { emit } from "@tauri-apps/api/event";
 
 const mkPet = (id: string) => ({
   id,
@@ -79,19 +87,28 @@ describe("FoxbellPet 刷新后到者胜（FIX-6）", () => {
     expect(deferredChain.length).toBe(1);
 
     // 连续两次事件 → 第 2、3 个挂起 promise
-    await act(async () => { await fire(); });
+    await act(async () => {
+      await fire();
+    });
     expect(deferredChain.length).toBe(3);
 
     const [p1, p2, p3] = deferredChain;
     const first = mkPet("first");
     const second = mkPet("second");
+    const third = mkPet("third-unused");
 
     // 先 resolve 第 3 次（最新 gen）刷新 → 生效
-    await act(async () => { p3(second); });
+    await act(async () => {
+      p3(second);
+    });
     // 后 resolve 第 1 次启动刷新（旧结果后到，必须被丢弃并回收）
-    await act(async () => { p1(first); });
+    await act(async () => {
+      p1(first);
+    });
     // 再后 resolve 第 2 次（也是过期结果，同样被丢弃回收）
-    await act(async () => { p2(mkPet("third-unused")); });
+    await act(async () => {
+      p2(third);
+    });
 
     // ① 最终显示是第二个结果（后到者胜：旧结果不得回滚）
     const sprite = screen.getByTestId("pet-sprite") as HTMLElement;
@@ -103,6 +120,11 @@ describe("FoxbellPet 刷新后到者胜（FIX-6）", () => {
     // ③ 第二个结果（当前活跃）的 dispose 未被调用
     expect(second.dispose).not.toHaveBeenCalled();
 
-    void p1; void p2; void p3;
+    // ④ 每个被丢弃的快照都回收（FIX-12：第三个过期结果同样恰好一次）
+    expect(third.dispose).toHaveBeenCalledTimes(1);
+
+    void p1;
+    void p2;
+    void p3;
   });
 });
