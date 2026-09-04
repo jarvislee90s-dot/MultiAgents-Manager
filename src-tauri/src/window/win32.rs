@@ -579,6 +579,102 @@ pub fn reactivate_tool_app(
     Err("未找到该工具的可聚焦窗口".to_string())
 }
 
+// ===== P1-2 B：深度链接派发后的前台验证（仅 Windows） =====
+//
+// 背景：URL 协议派发是异步无回执交互，spawn 成功 ≠ 路由成功。实测（2026-09-04）：
+// 派发瞬间第三方窗口会闪现 ~200ms（如 Weixin 短暂置前）后才稳定到目标 APP——
+// 因此验证判定必须以窗口期终点为准，不能见到非目标窗口即判失败。
+// 机制：轮询 GetForegroundWindow → GetWindowThreadProcessId → 该 pid 进程是否属于
+// 目标工具宿主（复用 monitor/host.rs::is_host_process 语义），最后两次轮询连续命中
+// 才判成功（消除闪现噪声）。UIA 不可用于 Electron（Chromium 不暴露文本树，实测），
+// 故只用前台窗口归属判定，不读内容。
+
+/// 前台验证状态机（纯函数，可测）：喂入「前台窗口归属工具?」样本序列，判定是否成功。
+/// 规则：满 2 次轮询连续命中 → 成功；序列结束仍未达 2 连中 → 失败（超时）。
+/// last 连续命中计数与 seen_success 状态由此状态机维护，闪现（非目标一次）不会
+/// 打断已达成的 2 连中（窗口期终点语义）。
+struct ForegroundVerifyState {
+    consecutive_hits: u32,
+    done: bool,
+    success: bool,
+}
+
+fn foreground_verify_step(state: &mut ForegroundVerifyState, is_target: bool) {
+    if state.done {
+        return;
+    }
+    if is_target {
+        state.consecutive_hits += 1;
+        if state.consecutive_hits >= 2 {
+            state.done = true;
+            state.success = true;
+        }
+    } else {
+        state.consecutive_hits = 0;
+    }
+}
+
+/// 驱动状态机跑完整样本序列（测试入口）
+#[cfg(test)]
+fn foreground_verify_with_samples(samples: &[bool]) -> bool {
+    let mut state = ForegroundVerifyState {
+        consecutive_hits: 0,
+        done: false,
+        success: false,
+    };
+    for &s in samples {
+        foreground_verify_step(&mut state, s);
+    }
+    state.success
+}
+
+/// 目标进程 pid 是否属于工具宿主：exe 路径小写后经 is_host_process 判定。
+/// system 复用调用方快照（不另起全量扫描）
+fn foreground_pid_is_tool(system: &sysinfo::System, pid: u32, tool_id: &str) -> bool {
+    system
+        .process(sysinfo::Pid::from_u32(pid))
+        .and_then(|p| p.exe())
+        .map(|e| crate::monitor::host::is_host_process(&e.to_string_lossy().to_lowercase(), tool_id))
+        .unwrap_or(false)
+}
+
+/// 深度链接派发后前台验证（Windows）：轮询前台窗口归属，最后两次连续命中该工具宿主
+/// → true。timeout 内未达成 → false（调用方落回保底聚焦、不标已读）。
+/// interval 轮询间隔；判定以窗口期终点为准（见模块注释：闪现噪声不误判）
+pub fn verify_foreground_tool(
+    system: &sysinfo::System,
+    tool_id: &str,
+    timeout_ms: u64,
+    interval_ms: u64,
+) -> bool {
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut state = ForegroundVerifyState {
+        consecutive_hits: 0,
+        done: false,
+        success: false,
+    };
+    while Instant::now() < deadline {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0 != 0 {
+                let mut pid: u32 = 0;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                let is_target = pid != 0 && foreground_pid_is_tool(system, pid, tool_id);
+                foreground_verify_step(&mut state, is_target);
+                if state.done {
+                    return state.success;
+                }
+            }
+        }
+        sleep(Duration::from_millis(interval_ms));
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -721,5 +817,45 @@ Microsoft Windows [版本 10.0.26200]"
         // 长文本取尾部 n 个字符
         let long = "a ".repeat(60);
         assert_eq!(normalized_tail(&long, 10).chars().count(), 10);
+    }
+
+    // ---- P1-2 B：前台验证状态机（喂样本序列断言判定） ----
+
+    mod foreground_verify {
+        use super::super::foreground_verify_with_samples;
+
+        #[test]
+        fn two_consecutive_hits_success() {
+            assert!(foreground_verify_with_samples(&[true, true]));
+            assert!(foreground_verify_with_samples(&[false, true, true]));
+            assert!(foreground_verify_with_samples(&[true, false, true, true]));
+        }
+
+        #[test]
+        fn single_hit_then_other_window_fails() {
+            // 目标窗口只出现一次即被第三方窗口顶掉（闪现噪声，无后续确认）→ 失败
+            assert!(!foreground_verify_with_samples(&[true, false, false]));
+            assert!(!foreground_verify_with_samples(&[false]));
+            assert!(!foreground_verify_with_samples(&[true]));
+        }
+
+        #[test]
+        fn flash_noise_before_stable_target_still_succeeds() {
+            // 实测序列（附录 A）：+203ms Weixin 瞬时闪现 → +1235ms WorkBuddy 稳定前台。
+            // 窗口期终点为准：闪现（非目标）不判失败，最后两次连续命中才成功
+            assert!(foreground_verify_with_samples(&[false, false, false, true, true]));
+            assert!(foreground_verify_with_samples(&[true, false, true, true]));
+        }
+
+        #[test]
+        fn target_then_never_confirmed_fails() {
+            // 目标出现过但未达 2 连中（如又被顶掉）→ 失败
+            assert!(!foreground_verify_with_samples(&[true, false, true, false, true, false]));
+        }
+
+        #[test]
+        fn empty_sequence_fails() {
+            assert!(!foreground_verify_with_samples(&[]));
+        }
     }
 }
