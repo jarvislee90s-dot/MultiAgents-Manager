@@ -207,6 +207,16 @@ pub fn safe_unzip(zip_path: &Path, dest: &Path) -> Result<(), String> {
     safe_unzip_with_limit(zip_path, dest, MAX_ZIP_TOTAL_BYTES)
 }
 
+/// 上限的人类可读格式：整除 MiB → "NMB"，否则 "NB"（FIX-9）
+fn fmt_limit(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes.is_multiple_of(MIB) {
+        format!("{}MB", bytes / MIB)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 /// 解压内核：总大小上限参数化（便于小上限单测），按 io::copy 的实际字节数累计（FIX-5，
 /// 原实现累加 entry.size() 是压缩前声明值，可被 zip 头谎报绕过）；单条目读取用 take
 /// 限制在剩余额度内，防止谎报小尺寸的大文件把磁盘写爆
@@ -239,7 +249,7 @@ fn safe_unzip_with_limit(zip_path: &Path, dest: &Path, max_total: u64) -> Result
         total += written;
         if total > max_total {
             let _ = std::fs::remove_file(&out_path); // 超限即拒绝：不留半截文件
-            return Err(format!("压缩包解压总量超限（>{}B）", max_total));
+            return Err(format!("压缩包解压总量超限（>{}）", fmt_limit(max_total)));
         }
     }
     Ok(())
@@ -509,6 +519,19 @@ mod tests {
         // 同一包 20 字节上限正常通过
         let dest_ok = root.path().join("dest3");
         assert!(safe_unzip_with_limit(&zp, &dest_ok, 20).is_ok());
+        // 错误信息人类可读（FIX-9）：小上限显示 ">10B"，公开上限显示 ">100MB"
+        assert!(r.unwrap_err().contains(">10B"));
+    }
+
+    #[test]
+    fn fmt_limit_human_readable() {
+        // 整除 MiB → MB；否则字节（FIX-9）
+        assert_eq!(fmt_limit(100 * 1024 * 1024), "100MB");
+        assert_eq!(fmt_limit(1024 * 1024), "1MB");
+        assert_eq!(fmt_limit(10), "10B");
+        assert_eq!(fmt_limit(1024 * 1024 + 1), "1048577B"); // 非整除走 B
+        // 公开路径错误信息由 fmt_limit(MAX_ZIP_TOTAL_BYTES) 生成 → 恢复 ">100MB"
+        assert_eq!(fmt_limit(MAX_ZIP_TOTAL_BYTES), "100MB");
     }
 
     #[test]
