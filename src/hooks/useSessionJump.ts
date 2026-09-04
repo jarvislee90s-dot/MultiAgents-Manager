@@ -39,6 +39,9 @@ export function useSessionJump() {
         agentType: target.agentType,
         projectName: target.projectName,
         lastMessage: target.lastMessage,
+        // P1-1：进程形态/未读标记传入后端，Windows App 会话优先深度链接直达（T8）
+        form: target.form,
+        unread: target.unread,
       }
     );
     const ambiguous = result.type === "ambiguous" && result.windows ? result.windows : null;

@@ -45,10 +45,43 @@ pub fn focus_session(
     agent_type: Option<String>,
     project_name: Option<String>,
     last_message: Option<String>,
+    form: Option<String>,
+    unread: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
         let system = sysinfo::System::new_all();
+        // unread 参数（未读标记）在 Windows 深度链接路径暂不消费（已读回标统一在
+        // 跳转成功分支执行）；保留签名以与前端 JumpTarget.unread 对齐
+        let _ = unread;
+        // P1-1（Windows）：App 形态且带 sessionId 且工具为 workbuddy/codex 时，
+        // 深度链接为第一顺位（session 级直达）：handler 校验通过 → 派发 → 前台验证成功
+        // → 标已读返回；任一步失败无缝落回现有 resolve_and_focus → reactivate_tool_app 链路。
+        // codex 由 handler 校验天然门控（无 handler 机器自动跳过，实测语义见 P1-2）
+        if form.as_deref() == Some("app") {
+            if let (Some(sid), Some(agent)) = (session_id.as_deref(), agent_type.as_deref()) {
+                if matches!(agent, "workbuddy" | "codex")
+                    && crate::window::deep_link::scheme_handler_exists(agent)
+                {
+                    if let Some(url) = crate::window::deep_link::session_url(agent, sid) {
+                        if crate::window::deep_link::open_url(&url).is_ok()
+                            && crate::window::win32::verify_foreground_tool(
+                                &system,
+                                agent,
+                                2_000,
+                                250,
+                            )
+                        {
+                            mark_read_on_jump(&session_id, &agent_type);
+                            return Ok(serde_json::json!({
+                                "type": "focused",
+                                "via": "deep-link"
+                            }));
+                        }
+                    }
+                }
+            }
+        }
         // marker 与 hook 注入的标题标记一致：MAM:<session_id 前 8 位>
         let marker = session_id
             .as_deref()
@@ -89,7 +122,7 @@ pub fn focus_session(
     }
     #[cfg(not(windows))]
     {
-        let _ = (project_name, last_message);
+        let _ = (project_name, last_message, form, unread);
         // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
         if crate::window::focus_terminal_for_pid(pid).is_ok() {
             mark_read_on_jump(&session_id, &agent_type);

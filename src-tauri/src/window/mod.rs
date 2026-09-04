@@ -61,6 +61,9 @@ fn get_tty_for_pid(pid: u32) -> Result<String, String> {
 /// 深度链接前置条件（review F3）：仅未读卡兜底（pid=0）或 pid 可提取 .app bundle
 /// （APP 会话）时才尝试 session 级深链。CLI 会话（pid 存活、exe 无 bundle）走 TTY
 /// 链路，若 TTY 失败也不得用 codex:// 深链误拉起 ChatGPT.app
+/// 仅 macOS activate_agent_app 使用；Windows 走 commands/session.rs 的深度链接分支
+/// （T8，P1-1），此函数不参与，故 cfg 门到 macOS 避免跨平台死代码告警
+#[cfg(target_os = "macos")]
 fn should_try_deep_link(pid: u32, pid_bundle: Option<&str>) -> bool {
     pid == 0 || pid_bundle.is_some()
 }
@@ -130,7 +133,7 @@ pub fn activate_agent_app(
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod deep_link_guard_tests {
     use super::*;
 
