@@ -43,7 +43,6 @@ pub struct CodexPetInfo {
     pub display_name: String,
     pub sprite_version_number: u8,
     pub imported: bool,
-    pub sheet_exists: bool,
 }
 
 fn stat_rel(root: &Path, rel: &str) -> FileStat {
@@ -141,8 +140,7 @@ pub fn list_codex_pets_in(codex_root: &Path, mam_root: &Path) -> Vec<CodexPetInf
             continue;
         }
         let Some(id) = p.file_name().and_then(|n| n.to_str()) else { continue };
-        let sheet_exists = p.join("spritesheet.webp").exists();
-        if !sheet_exists {
+        if !p.join("spritesheet.webp").is_file() {
             continue;
         }
         let meta = std::fs::read_to_string(p.join("pet.json"))
@@ -153,7 +151,6 @@ pub fn list_codex_pets_in(codex_root: &Path, mam_root: &Path) -> Vec<CodexPetInf
             display_name: meta.as_ref().map(|m| m.display_name.clone()).unwrap_or_default(),
             sprite_version_number: meta.as_ref().map(|m| m.sprite_version_number).unwrap_or(0),
             imported: pet_dir(mam_root, id).exists(),
-            sheet_exists,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

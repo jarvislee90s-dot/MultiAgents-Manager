@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { loadActiveId, saveActiveId, type PetRows } from "../petRuntime";
 import { petErrMsg } from "../petErrors";
 import { buildManifestFromScan, repairManifest } from "../petActivation";
-import type { PetManifestView, PetScan, VoiceRow } from "../petValidation";
+import { nameFromRel, type PetManifestView, type PetScan, type VoiceRow } from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
 import { useVoiceDurationProbe } from "./useVoiceDurationProbe";
 
@@ -79,7 +79,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         .filter((f) => f.rel.startsWith("voice/") && !known.has(f.rel))
         .map((f) => {
           const seg = f.rel.split("/");
-          return { group: seg[1], name: seg[2]?.replace(/\.[^.]+$/, "") ?? "", file: f.rel, sizeBytes: f.size, durationMs: null };
+          return { group: seg[1], name: nameFromRel(f.rel), file: f.rel, sizeBytes: f.size, durationMs: null };
         });
       setVoiceRows([...rows, ...extra]);
     } catch {

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -43,7 +43,6 @@ export function PetStartupGuard() {
         const sizeChanged = !manifest || manifest.spritesheetSizeBytes !== scan.spritesheet.size || manifest.spriteVersionNumber === 0;
         if (sizeChanged) {
           try {
-            const { convertFileSrc } = await import("@tauri-apps/api/core");
             const rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
             if (!disposed) setProbedRows(rows);
           } catch (e) {

@@ -37,7 +37,6 @@ type Step = "source" | "config" | "done";
 export function PetImportDialog(props: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  onImported?: (id: string) => void;
 }) {
   const { t } = useTranslation();
   const [step, setStep] = useState<Step>("source");
@@ -60,12 +59,7 @@ export function PetImportDialog(props: {
     setStaged(null);
     setRows(null);
     setVoiceRows([]);
-    if (tab === "codex") {
-      invoke<CodexPetDto[]>("pet_list_codex_pets")
-        .then((l) => setCodexList(Array.isArray(l) ? l : []))
-        .catch(() => setCodexList([]));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // codex 列表由下方 [open, step, tab] effect 统一拉取
   }, [props.open]);
 
   // codex 列表按需刷新
@@ -141,7 +135,6 @@ export function PetImportDialog(props: {
       setImportedId(sum.id);
       setStaged(null);
       setStep("done");
-      props.onImported?.(sum.id);
     } catch (e) {
       toast.error(t("pet.import.errorFinalize", { msg: petErrMsg(e, t) }));
     } finally {
