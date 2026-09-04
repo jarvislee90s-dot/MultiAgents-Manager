@@ -46,6 +46,9 @@ export function FoxbellPet() {
   // 上一个 ActivePet（blob 快照防泄漏，FIX-2）：切换时 revoke 旧快照；
   // StrictMode 双挂载各持独立快照，第一个被下一次 refresh 替换时 dispose 是正确行为
   const prevActiveRef = useRef<ActivePet | null>(null);
+  // 刷新代数（FIX-6 后到者胜）：并发 refresh 时旧解析后到不得回滚显示、不得 dispose 活跃快照；
+  // 被丢弃的解析（过期/卸载）结果回收其 blob 快照
+  const refreshGen = useRef(0);
   const applyActive = (next: ActivePet) => {
     const prev = prevActiveRef.current;
     if (prev && prev !== next) prev.dispose?.();
@@ -154,12 +157,17 @@ export function FoxbellPet() {
   useEffect(() => {
     let disposed = false;
     const refresh = () => {
+      const gen = ++refreshGen.current;
       resolveActivePet()
         .then((p) => {
-          if (!disposed) applyActive(p);
+          if (disposed || gen !== refreshGen.current) {
+            p.dispose?.(); // 组件卸载或过期结果：回收其 blob 快照，防泄漏（P3-1）
+            return;
+          }
+          applyActive(p);
         })
         .catch(() => {
-          if (!disposed) applyActive(FOXBELL);
+          if (!disposed && gen === refreshGen.current) applyActive(FOXBELL);
         });
     };
     refresh();
