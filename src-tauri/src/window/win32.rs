@@ -543,6 +543,39 @@ pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
     }
 }
 
+/// pid 失效兜底（W2）：枚举该工具 App 进程的可见顶层窗口并聚焦。
+/// Electron 单实例应用直接重拉 exe 亦可聚焦，但窗口枚举不引入子进程，优先采用
+pub fn reactivate_tool_app(
+    system: &sysinfo::System,
+    agent_type: Option<&str>,
+) -> Result<(), String> {
+    let marker = match agent_type.map(|a| a.to_lowercase()).as_deref() {
+        Some("workbuddy") => "workbuddy",
+        Some("codex") => "chatgpt",
+        _ => return Err("未知工具，无法兜底激活".to_string()),
+    };
+    let wins = all_windows();
+    // AllWindows.by_pid：pid → 该进程名下全部可见顶层窗口 (hwnd, title)，按 pid 分组迭代
+    for (pid, hwnds) in wins.by_pid.iter() {
+        let Some(proc) = system.process(sysinfo::Pid::from_u32(*pid)) else {
+            continue;
+        };
+        let exe = proc
+            .exe()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !exe.contains(marker) {
+            continue;
+        }
+        for (hwnd, _) in hwnds {
+            if force_foreground(*hwnd) {
+                return Ok(());
+            }
+        }
+    }
+    Err("未找到该工具的可聚焦窗口".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

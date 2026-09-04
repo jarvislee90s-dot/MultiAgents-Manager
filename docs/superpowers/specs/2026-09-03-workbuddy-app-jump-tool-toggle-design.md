@@ -212,7 +212,7 @@
 | 风险/限制 | 应对 |
 |-----------|------|
 | WorkBuddy 私有格式无文档，版本升级可能破坏 | 防御性解析 + 降级显示；fixture 测试锁格式假设 |
-| 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付 |
+| 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付。实测结论（2026-09-04）：已探明并接线 —— WorkBuddy `workbuddy://chat/<sessionId>`（app.asar 源码证据）、Codex `codex://threads/<threadId>`（asar 模板证据）；threadId 与 rollout UUID 同源性待 GUI 实测确认，直达失败则回退 None 走 APP 级保底 |
 | 外部进程无法 APP 内部导航到具体会话 | 已确认接受（APP 前台级别） |
 | Codex++ 不被监控 | 明确不纳入本次范围 |
 | Windows 上 WorkBuddy 安装形态未实测 | 实现期实测进程路径，必要时补匹配规则 |

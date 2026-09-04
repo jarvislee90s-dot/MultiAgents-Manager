@@ -1,6 +1,10 @@
 #[cfg(target_os = "macos")]
 mod applescript;
 #[cfg(target_os = "macos")]
+pub mod app_activation;
+#[cfg(any(target_os = "macos", windows))]
+pub mod deep_link;
+#[cfg(target_os = "macos")]
 mod iterm;
 #[cfg(target_os = "macos")]
 mod terminal_app;
@@ -52,4 +56,62 @@ fn get_tty_for_pid(pid: u32) -> Result<String, String> {
     } else {
         Err("Failed to get TTY for process".to_string())
     }
+}
+
+/// APP 激活入口（W2）：优先深度链接直达会话 → pid 提取 bundle → 按工具枚举兜底。
+/// 返回 Some(json) 表示跳转成功，None 表示无法激活
+#[cfg(target_os = "macos")]
+pub fn activate_agent_app(
+    pid: u32,
+    agent_type: Option<&str>,
+    session_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+    // 1) 第一顺位：深度链接直达 session（路由格式由 deep_link 模块决定，未探明则跳过）
+    if let (Some(agent), Some(sid)) = (agent_type, session_id) {
+        if let Some(url) = deep_link::session_url(agent, sid) {
+            if deep_link::open_url(&url).is_ok() {
+                return Some(serde_json::json!({ "type": "focused" }));
+            }
+        }
+    }
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+    );
+
+    // 2) pid 仍存活：取其 exe 提取 .app bundle 激活（pid=0/已退出时自然跳过）
+    if pid > 0 {
+        if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid)) {
+            if let Some(exe) = proc.exe() {
+                if let Some(bundle) = app_activation::app_bundle_from_exe(&exe.to_string_lossy()) {
+                    if app_activation::activate_app_bundle(&bundle).is_ok() {
+                        return Some(serde_json::json!({ "type": "focused" }));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3) pid 失效兜底：枚举该工具任一 App 形态进程，激活其宿主 bundle
+    //    （自洽保证：未读卡存在 ⇒ 宿主进程必存活 ⇒ 此步必有目标）
+    // pid 失效兜底要求明确的工具归属（spec W2「按工具降级」）；无工具信息则放弃兜底
+    let target = agent_type.map(|a| a.to_lowercase())?;
+    for proc in system.processes().values() {
+        let Some(exe) = proc.exe() else { continue };
+        let Some(bundle) = app_activation::app_bundle_from_exe(&exe.to_string_lossy()) else {
+            continue;
+        };
+        if !app_activation::bundle_matches_agent_pub(&bundle.to_lowercase(), &target) {
+            continue;
+        }
+        if app_activation::activate_app_bundle(&bundle).is_ok() {
+            return Some(serde_json::json!({ "type": "focused" }));
+        }
+    }
+    None
 }

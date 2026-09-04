@@ -64,13 +64,43 @@ pub fn focus_session(
             Ok(crate::window::win32::FocusOutcome::Ambiguous(windows)) => {
                 Ok(serde_json::json!({ "type": "ambiguous", "windows": windows }))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // pid 失效兜底（W2）：pid 已死时按工具激活宿主 APP 窗口
+                let pid_dead = system.process(sysinfo::Pid::from_u32(pid)).is_none();
+                if pid_dead
+                    && crate::window::win32::reactivate_tool_app(&system, agent_type.as_deref())
+                        .is_ok()
+                {
+                    Ok(serde_json::json!({ "type": "focused" }))
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = (session_id, agent_type, project_name, last_message);
-        crate::window::focus_terminal_for_pid(pid).map(|_| serde_json::json!({ "type": "focused" }))
+        let _ = (project_name, last_message);
+        // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
+        if crate::window::focus_terminal_for_pid(pid).is_ok() {
+            return Ok(serde_json::json!({ "type": "focused" }));
+        }
+        // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）
+        #[cfg(target_os = "macos")]
+        if let Some(out) = crate::window::activate_agent_app(
+            pid,
+            agent_type.as_deref(),
+            session_id.as_deref(),
+        ) {
+            return Ok(out);
+        }
+        // 非 macOS 桌面平台无 APP 激活链路，防未使用告警
+        #[cfg(not(target_os = "macos"))]
+        let _ = (agent_type, session_id);
+        Err(format!(
+            "无法聚焦目标（pid={}）：进程无 TTY 且未找到宿主 APP",
+            pid
+        ))
     }
 }
 
