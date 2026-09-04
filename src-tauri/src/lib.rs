@@ -113,6 +113,7 @@ pub fn run() {
         commands::settings::detect_tools,
         commands::settings::detect_subagents,
         commands::settings::list_sub_agents,
+        commands::settings::mark_session_read,
         commands::screenshot::capture_window_screenshot,
         commands::screenshot::list_screenshots,
         commands::manifest::validate_manifest,

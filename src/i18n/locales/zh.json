@@ -329,6 +329,8 @@
     "jumpFailed": "跳转失败: {{error}}",
     "pickWindow": "多个窗口匹配，请选择目标窗口",
     "noMessage": "（无消息）",
+    "unread": "未读",
+    "markRead": "标记已读并关闭",
     "justNow": "刚刚",
     "appBadge": "桌面 App 会话",
     "empty": "暂无活跃会话",

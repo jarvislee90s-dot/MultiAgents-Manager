@@ -329,6 +329,8 @@
     "jumpFailed": "Jump failed: {{error}}",
     "pickWindow": "Multiple windows matched — pick the target",
     "noMessage": "(no message)",
+    "unread": "Unread",
+    "markRead": "Mark read and dismiss",
     "justNow": "just now",
     "appBadge": "Desktop App session",
     "empty": "No active sessions",

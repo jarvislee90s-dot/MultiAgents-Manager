@@ -179,6 +179,7 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             active_subagent_count: 0,
             form: ProcessForm::App,
             jump_supported: jump_supported_for(ProcessForm::App),
+            unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
         });
 
         // 记录本轮 pid→session（心跳消失补偿依据）
@@ -220,6 +221,84 @@ fn first_user_text(lines: &[String]) -> Option<String> {
             }
         })
         .next()
+}
+
+/// 转绿竞态补偿（spec W4）：任务完成 → prewarm 回池（心跳删除）可能只隔几秒，
+/// 若两轮扫描间完成，「转绿」从未被观测 → 未读漏插。此处对上一轮见过、本轮心跳
+/// 消失的 pid 读其 JSONL 终态：完成 → 补插未读；运行中被杀 → 不插
+pub fn compensate_vanished_heartbeats() {
+    let Some(home) = dirs::home_dir() else { return };
+    let now = now_ms();
+
+    // 锁内只做纯内存快照（锁 hygiene：绝不持锁跨文件 I/O），判定消失在锁外进行
+    let candidates: Vec<(u32, String)> = {
+        let last_seen = LAST_SEEN_SESSIONS.lock().unwrap();
+        last_seen
+            .iter()
+            .map(|(pid, sid)| (*pid, sid.clone()))
+            .collect()
+    };
+    let vanished: Vec<(u32, String)> = candidates
+        .into_iter()
+        .filter(|(pid, _)| {
+            // 心跳文件没了 = 回池/退出；过期同样视为消失
+            match std::fs::read_to_string(heartbeat_path(&home, *pid))
+                .ok()
+                .and_then(|s| parse_heartbeat(&s))
+            {
+                Some(hb) => !heartbeat_is_alive(&hb, now),
+                None => true,
+            }
+        })
+        .collect();
+
+    for (pid, session_id) in vanished {
+        // 逐个短暂重锁移除（不做额外清理，未消失条目保留供下轮参考）
+        LAST_SEEN_SESSIONS.lock().unwrap().remove(&pid);
+        // 找该会话的 JSONL：遍历 projects 下所有 <sessionId>.jsonl（会话可能换过项目目录）
+        let projects_dir = home.join(".workbuddy").join("projects");
+        let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+            continue; // 防御：目录读取失败只跳过该 pid，不中断其余补偿
+        };
+        let target = entries.filter_map(|e| e.ok()).find_map(|dir| {
+            let p = dir.path().join(format!("{}.jsonl", session_id));
+            p.exists().then_some(p)
+        });
+        let Some(jsonl) = target else { continue };
+        let lines = read_recent_lines(&jsonl, 500);
+        if derive_status_from_tail(&lines) != SessionStatus::Idle {
+            continue; // 非完成态（运行中被杀等）→ 不补
+        }
+        // cwd 直接用 WorkBuddy DB 的 cwd 字段反查
+        let cwd = workbuddy_cwd_from_db(&home, &session_id).unwrap_or_default();
+        let last_message = lines.iter().rev().find_map(|l| extract_message_text(l));
+        crate::database::dao::unread::upsert(&crate::database::dao::unread::UnreadSessionRecord {
+            tool_id: "workbuddy".into(),
+            session_id: session_id.clone(),
+            project_name: if cwd.is_empty() {
+                "WorkBuddy".into()
+            } else {
+                project_name_from_path(&cwd)
+            },
+            title: title_from_db(&home, &session_id),
+            last_message,
+            turned_green_at_ms: now as i64,
+            expires_at_ms: now as i64 + 24 * 3600 * 1000,
+        });
+    }
+}
+
+/// 补偿用：只读打开 workbuddy.db 反查会话 cwd；列缺失/打开失败一律 None（防御）
+fn workbuddy_cwd_from_db(home: &Path, session_id: &str) -> Option<String> {
+    use rusqlite::OpenFlags;
+    let db = home.join(".workbuddy").join("workbuddy.db");
+    let conn = rusqlite::Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row(
+        "SELECT cwd FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
+        [session_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
 }
 
 #[cfg(test)]

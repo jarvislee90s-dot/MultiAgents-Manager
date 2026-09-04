@@ -24,6 +24,8 @@ export interface Session {
   activeSubagentCount: number;
   form: ProcessForm;
   jumpSupported: boolean;
+  /** 未读标记（W4）：绿色已完成且用户未查看的持久未读卡（APP 类专用） */
+  unread: boolean;
 }
 
 export interface SessionsResponse {

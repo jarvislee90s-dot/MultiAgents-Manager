@@ -3,3 +3,4 @@ pub mod extension;
 pub mod preset;
 pub mod session;
 pub mod settings;
+pub mod unread;

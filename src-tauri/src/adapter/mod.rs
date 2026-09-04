@@ -9,7 +9,8 @@ pub mod opencode;
 pub mod workbuddy;
 
 use crate::session::{
-    status_sort_priority, AgentType, ProcessForm, Session, SessionStatus, SessionsResponse,
+    jump_supported_for, status_sort_priority, AgentType, ProcessForm, Session, SessionStatus,
+    SessionsResponse,
 };
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -201,8 +202,14 @@ pub fn get_all_sessions() -> SessionsResponse {
         all_sessions.extend(sessions);
     }
 
+    // W4：WorkBuddy 心跳消失补偿（转绿未被观测的会话补插未读，随本轮合并为绿卡）
+    crate::monitor::workbuddy_parser::compensate_vanished_heartbeats();
+
     // 会话级去重（见 dedup_sessions 注释）
     dedup_sessions(&mut all_sessions);
+
+    // W4：APP 类未读卡合并 + 未读池维护（宿主存活检查 / 变黄删除 / 过期清理）
+    sync_unread_sessions(&mut all_sessions);
 
     // Hook 事件集成：用新鲜事件（<30s）更新会话状态
     let hook_events = crate::monitor::hooks::read_hook_events();
@@ -335,6 +342,93 @@ mod tests {
         eprintln!("=== END ===");
     }
 }
+/// W4 未读机制核心：把 DB 中的未读会话合并为 Session 卡，并维护未读池
+/// - 会话当前非空闲（黄/红）→ 删未读行（活跃卡可见，防同会话双卡）
+/// - 转绿（Idle/Finished）→ upsert 未读行（未在池中时）
+/// - 宿主 APP 进程全部退出 → 清空该工具未读行与在板未读卡
+/// - 过期（24h）→ 清理
+fn sync_unread_sessions(active: &mut Vec<Session>) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    // 1) 活跃会话驱动未读池变更
+    for s in active.iter() {
+        if !matches!(s.form, ProcessForm::App) {
+            continue; // 仅 APP 类参与（spec W4 范围）
+        }
+        let tool = format!("{:?}", s.agent_type).to_lowercase();
+        let idle = matches!(s.status, SessionStatus::Idle | SessionStatus::Finished);
+        if idle {
+            crate::database::dao::unread::upsert(&crate::database::dao::unread::UnreadSessionRecord {
+                tool_id: tool,
+                session_id: s.id.clone(),
+                project_name: s.project_name.clone(),
+                title: s.title.clone(),
+                last_message: s.last_message.clone(),
+                turned_green_at_ms: now_ms,
+                expires_at_ms: now_ms + 24 * 3600 * 1000,
+            });
+        } else {
+            // 变黄/红：删未读（状态迁移，非重置机制）
+            crate::database::dao::unread::delete(&tool, &s.id);
+        }
+    }
+
+    // 2) 宿主进程退出 → 清该工具全部未读（运行中被关 + 重启残留检查统一规则）
+    let unread_now = crate::database::dao::unread::list(now_ms);
+    let mut dead_tools: Vec<String> = Vec::new();
+    for r in &unread_now {
+        if !dead_tools.contains(&r.tool_id) && !crate::monitor::host::tool_host_alive(&r.tool_id) {
+            dead_tools.push(r.tool_id.clone());
+        }
+    }
+    for t in &dead_tools {
+        crate::database::dao::unread::clear_tool(t);
+    }
+
+    // 3) 过期清理
+    {
+        let conn = crate::database::connection::DB.lock().unwrap();
+        crate::database::dao::unread::cleanup_expired_unread(&conn, now_ms);
+    }
+
+    // 4) 未读池合并为卡（跳过当前已在板的活跃会话；按转绿时间倒序追加在末尾）
+    let active_keys: HashSet<(String, String)> = active
+        .iter()
+        .map(|s| (format!("{:?}", s.agent_type).to_lowercase(), s.id.clone()))
+        .collect();
+    let final_unread = crate::database::dao::unread::list(now_ms);
+    for r in final_unread {
+        if active_keys.contains(&(r.tool_id.clone(), r.session_id.clone())) {
+            continue;
+        }
+        let Ok(agent_type) = serde_json::from_value::<AgentType>(serde_json::json!(r.tool_id))
+        else {
+            continue;
+        };
+        active.push(Session {
+            id: r.session_id.clone(),
+            agent_type,
+            project_name: r.project_name.clone(),
+            project_path: String::new(),
+            title: r.title.clone(),
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Idle,
+            last_message: r.last_message.clone(),
+            last_message_role: None,
+            last_activity_at: chrono::DateTime::from_timestamp_millis(r.turned_green_at_ms)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+            pid: 0, // pid 失效场景：跳转走 activate_agent_app 的按工具兜底
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::App,
+            jump_supported: jump_supported_for(ProcessForm::App),
+            unread: true,
+        });
+    }
+}
+
 /// 统一维护每个工具的原生 skill 根目录，避免扫描、清理和启用各自硬编码路径
 pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     match tool_id {
@@ -400,6 +494,7 @@ mod dedup_tests {
             active_subagent_count: 0,
             form: ProcessForm::Cli,
             jump_supported: true,
+            unread: false,
         }
     }
 

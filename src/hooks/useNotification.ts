@@ -12,6 +12,7 @@ import { playCompletionSound } from "@/lib/audio";
 import { getAgentLabel } from "@/lib/agentBadge";
 import { addHistory } from "@/lib/notificationHistory";
 import { petSoundTakeover, petSuppressPopup } from "@/components/pet/petConfig";
+import type { Session } from "@/types/session";
 
 const STATUS_LABELS: Record<string, string> = {
   waiting: "等待操作",
@@ -110,46 +111,19 @@ export function useNotification() {
 
   useEffect(() => {
     (async () => {
-      for (const session of sessions) {
-        const prev = prevStatuses.current.get(session.id);
-
-        // 首次加载不通知
-        if (!prev) {
-          prevStatuses.current.set(session.id, {
-            status: session.status,
-            color: statusToColor(session.status),
-            at: Date.now(),
-          });
-          continue;
-        }
-
-        const currColor = statusToColor(session.status);
-        prevStatuses.current.set(session.id, {
-          status: session.status,
-          color: currColor,
-          at: Date.now(),
-        });
-
-        // 颜色未变 → 不通知（即使状态变了，如 Processing → Thinking 都是黄色）
-        if (prev.color === currColor) continue;
-
-        // 时间去重：5 秒内同目标颜色不重复弹（兜底状态抖动）
-        const notified = lastNotified.current.get(session.id);
-        if (notified && notified.color === currColor && Date.now() - notified.at < 5000) {
-          continue;
-        }
-
-        // 通知
-        // 每次轮询时刷新通知开关设置（支持运行时切换）
+      // 统一通知流：开关刷新 → 历史记录 → 提示音 → 浮窗/系统降级
+      // 供两处调用：常规颜色变化 + 首见未读绿卡补偿通知
+      const notifyCompletion = async (session: Session) => {
+        // 每次通知前刷新通知开关设置（支持运行时切换）
         try {
           const val = await invoke<string | null>("get_setting", { key: "notifications_enabled" });
           notificationsEnabled.current = val !== "false";
         } catch {
           // 忽略错误
         }
-        if (!notificationsEnabled.current) continue;
+        if (!notificationsEnabled.current) return;
 
-        // 颜色变化时通知（红→黄→绿 任意切换）；记录本次通知用于时间去重
+        const currColor = statusToColor(session.status);
 
         // 记录到通知历史（spec 014）
         addHistory({
@@ -166,6 +140,7 @@ export function useNotification() {
         // 方向过滤：仅变为绿（任务完成）时按工具播放提示音
         // 宠物开启即接管完成提示音（静音则整体静默，spec D3）
         if (currColor === "green" && !petSoundTakeover()) playCompletionSound(session.agentType);
+        // 记录本次通知用于时间去重
         lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
 
         // 发送通知：应用内浮窗为主路径，失败降级系统 toast（两者都在宠物压制守卫内）
@@ -179,7 +154,7 @@ export function useNotification() {
                 agentType: session.agentType,
                 agentLabel: toolLabel,
                 projectName: session.projectName,
-                statusColor: statusToColor(session.status),
+                statusColor: currColor,
                 status: session.status,
                 lastMessage: session.lastMessage ?? "",
                 pid: session.pid,
@@ -205,6 +180,47 @@ export function useNotification() {
             }
           }
         }
+      };
+
+      for (const session of sessions) {
+        const prev = prevStatuses.current.get(session.id);
+
+        // 首次加载不通知——除非是「未读绿卡」：补偿/重启场景下它从未被观测过转绿，
+        // 需补一次完成通知（spec W4；5 秒同色去重防双弹）
+        if (!prev) {
+          prevStatuses.current.set(session.id, {
+            status: session.status,
+            color: statusToColor(session.status),
+            at: Date.now(),
+          });
+          if (session.unread && statusToColor(session.status) === "green") {
+            const notified = lastNotified.current.get(session.id);
+            if (!notified || notified.color !== "green" || Date.now() - notified.at >= 5000) {
+              // 走统一通知流（与常规颜色变化同一路径）
+              await notifyCompletion(session);
+            }
+          }
+          continue;
+        }
+
+        const currColor = statusToColor(session.status);
+        prevStatuses.current.set(session.id, {
+          status: session.status,
+          color: currColor,
+          at: Date.now(),
+        });
+
+        // 颜色未变 → 不通知（即使状态变了，如 Processing → Thinking 都是黄色）
+        if (prev.color === currColor) continue;
+
+        // 时间去重：5 秒内同目标颜色不重复弹（兜底状态抖动）
+        const notified = lastNotified.current.get(session.id);
+        if (notified && notified.color === currColor && Date.now() - notified.at < 5000) {
+          continue;
+        }
+
+        // 颜色变化 → 走统一通知流
+        await notifyCompletion(session);
       }
 
       // 清理已消失的会话

@@ -4,6 +4,7 @@ pub mod claude_parser;
 pub mod codex_parser;
 pub mod cwd;
 pub mod git;
+pub mod host;
 pub mod hooks;
 pub mod jsonl;
 pub mod kimi_parser;

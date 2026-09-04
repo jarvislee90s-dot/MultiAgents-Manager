@@ -31,6 +31,13 @@ pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
     response
 }
 
+/// 跳转成功 → 标记该会话已读（仅删除对应未读行；同工具其他未读卡保留，spec W4）
+fn mark_read_on_jump(session_id: &Option<String>, agent_type: &Option<String>) {
+    if let (Some(sid), Some(agent)) = (session_id, agent_type) {
+        crate::database::dao::unread::delete(&agent.to_lowercase(), sid);
+    }
+}
+
 #[tauri::command]
 pub fn focus_session(
     pid: u32,
@@ -59,6 +66,7 @@ pub fn focus_session(
             &running_projects,
         ) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
+                mark_read_on_jump(&session_id, &agent_type);
                 Ok(serde_json::json!({ "type": "focused" }))
             }
             Ok(crate::window::win32::FocusOutcome::Ambiguous(windows)) => {
@@ -71,6 +79,7 @@ pub fn focus_session(
                     && crate::window::win32::reactivate_tool_app(&system, agent_type.as_deref())
                         .is_ok()
                 {
+                    mark_read_on_jump(&session_id, &agent_type);
                     Ok(serde_json::json!({ "type": "focused" }))
                 } else {
                     Err(e)
@@ -83,6 +92,7 @@ pub fn focus_session(
         let _ = (project_name, last_message);
         // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
         if crate::window::focus_terminal_for_pid(pid).is_ok() {
+            mark_read_on_jump(&session_id, &agent_type);
             return Ok(serde_json::json!({ "type": "focused" }));
         }
         // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）
@@ -92,6 +102,7 @@ pub fn focus_session(
             agent_type.as_deref(),
             session_id.as_deref(),
         ) {
+            mark_read_on_jump(&session_id, &agent_type);
             return Ok(out);
         }
         // 非 macOS 桌面平台无 APP 激活链路，防未使用告警

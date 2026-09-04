@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
-import { Cpu, Clock, Bot, ChevronRight } from "lucide-react";
+import { Cpu, Clock, Bot, ChevronRight, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
@@ -28,6 +29,19 @@ export function SessionCard({ session }: { session: Session }) {
   const Icon = badge.Icon;
   // 跳转共享逻辑（歧义候选窗口由 hook 状态承载，命中多个窗口时弹出选择器）
   const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
+
+  // 手动关闭未读卡（X）：标记已读，不触发卡片跳转
+  const handleCloseUnread = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // 不触发卡片跳转
+    try {
+      await invoke("mark_session_read", {
+        agentType: session.agentType,
+        sessionId: session.id,
+      });
+    } catch (err) {
+      console.error("mark_session_read failed:", err);
+    }
+  };
 
   const handleClick = async () => {
     if (!session.jumpSupported) {
@@ -71,6 +85,22 @@ export function SessionCard({ session }: { session: Session }) {
               {getAgentLabel(session.agentType, session.form)}
             </span>
             <span className="truncate text-sm font-medium">{session.projectName}</span>
+            {session.unread && (
+              <span className="inline-flex items-center gap-1">
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-emerald-400"
+                  aria-label={t("sessions.unread")}
+                />
+                <button
+                  onClick={handleCloseUnread}
+                  className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
+                  title={t("sessions.markRead")}
+                  aria-label={t("sessions.markRead")}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            )}
             {(session.title || session.id) && (
               <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
                 {session.title || session.id.slice(0, 8)}

@@ -64,6 +64,8 @@ pub struct Session {
     pub form: ProcessForm,
     /// 是否支持跳转（CLI=TTY 链路，App=APP 激活）
     pub jump_supported: bool,
+    /// 未读标记（W4）：true = 绿色已完成且用户未查看的持久未读卡（APP 类专用）
+    pub unread: bool,
 }
 
 /// 全部会话的聚合响应
@@ -105,16 +107,9 @@ mod jump_tests {
     #[test]
     fn jump_supported_matches_platform_matrix() {
         // Windows：CLI 与 App 均可窗口级聚焦；macOS：CLI 走 TTY、App 走 APP 激活（W2）；
-        // 其他平台：不支持
-        if cfg!(windows) {
-            assert!(jump_supported_for(ProcessForm::Cli));
-            assert!(jump_supported_for(ProcessForm::App));
-        } else if cfg!(target_os = "macos") {
-            assert!(jump_supported_for(ProcessForm::Cli));
-            assert!(jump_supported_for(ProcessForm::App));
-        } else {
-            assert!(!jump_supported_for(ProcessForm::Cli));
-            assert!(!jump_supported_for(ProcessForm::App));
-        }
+        // 其他平台：不支持。两平台结果一致（均支持），故合并断言
+        let expected = cfg!(windows) || cfg!(target_os = "macos");
+        assert_eq!(jump_supported_for(ProcessForm::Cli), expected);
+        assert_eq!(jump_supported_for(ProcessForm::App), expected);
     }
 }
