@@ -9,6 +9,9 @@ vi.mock("@/components/pet/petActivation", async (importOriginal) => {
   return { ...orig, buildManifestFromScan: vi.fn(), repairManifest: vi.fn().mockResolvedValue({ hasVoice: true, displayName: "P" }) };
 });
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn().mockResolvedValue(["C:/a.mp3"]) }));
+vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn(async () => {}), listen: vi.fn(async () => () => {}) }));
+import { emit } from "@tauri-apps/api/event";
+const emitMock = vi.mocked(emit);
 vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petRuntime")>();
   return { ...orig, probeSheetRows: vi.fn().mockResolvedValue(9), probeAudioDurationMs: vi.fn().mockResolvedValue(3000) };
@@ -46,7 +49,7 @@ describe("PetManageDialog", () => {
     expect(await screen.findByTestId("manage-rename-input")).toBeInTheDocument();
   });
 
-  it("重命名激活中的宠物：先切回 foxbell 再 pet_rename_pet（EP5）", async () => {
+  it("重命名激活中的宠物：经 foxbell 闪切，完成后指针回到新 id（EP5 修订/Bug3）", async () => {
     localStorage.setItem("mam-pet-active", "starry-dew");
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
@@ -58,10 +61,31 @@ describe("PetManageDialog", () => {
         newId: "dew",
       })
     );
-    expect(localStorage.getItem("mam-pet-active")).toBe("foxbell"); // 已先切回
+    // 闪切路径：rename 成功后自动切回（指针 = 新 id，事件已发出）
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("dew"));
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
   });
 
-  it("保存：重建 manifest 并 pet_update_manifest(backup=true)", async () => {
+  it("重命名非激活宠物：指针不被动、无事件（Bug3）", async () => {
+    localStorage.setItem("mam-pet-active", "foxbell");
+    emitMock.mockClear();
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.change(await screen.findByTestId("manage-rename-input"), { target: { value: "dew" } });
+    fireEvent.click(await screen.findByTestId("manage-rename-btn"));
+    await waitFor(() =>
+      expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_rename_pet")?.[1]).toEqual({
+        oldId: "starry-dew",
+        newId: "dew",
+      })
+    );
+    expect(localStorage.getItem("mam-pet-active")).toBe("foxbell"); // 未激活：不切回、不广播
+    expect(emitMock).not.toHaveBeenCalledWith("pet-active-changed", {});
+  });
+
+  it("保存激活宠物：重建 manifest（backup=true）后指针回到原 id 并广播（Bug3）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
     fireEvent.click(await screen.findByTestId("manage-save"));
@@ -69,6 +93,22 @@ describe("PetManageDialog", () => {
       const call = tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_update_manifest");
       expect(call?.[1]?.backup).toBe(true);
     });
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("保存非激活宠物：指针不被动、无事件（Bug3）", async () => {
+    localStorage.setItem("mam-pet-active", "foxbell");
+    emitMock.mockClear();
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("manage-save"));
+    await waitFor(() => {
+      const call = tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_update_manifest");
+      expect(call?.[1]?.backup).toBe(true);
+    });
+    expect(localStorage.getItem("mam-pet-active")).toBe("foxbell");
+    expect(emitMock).not.toHaveBeenCalledWith("pet-active-changed", {});
   });
 
   it("删除：确认后 pet_delete_pet", async () => {

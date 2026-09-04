@@ -93,10 +93,18 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 
   const doRename = async () => {
     if (!selected || !renameTo || renameTo === selected.id) return;
+    // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）
+    const wasActive = loadActiveId() === selected.id;
     setBusy(true);
     try {
       ensureNotActive();
       await invoke("pet_rename_pet", { oldId: selected.id, newId: renameTo });
+      if (wasActive) {
+        // 重命名后 manifest 尚未重写（保存才会写），能力取面板已知状态；
+        // 展示名用输入框现值（未保存也仅是展示层缓存）
+        saveActiveId(renameTo, selected.hasVoice, displayName || selected.displayName);
+        emit("pet-active-changed", {}).catch(() => {});
+      }
       toast.success(t("pet.manage.renamedToast", { name: renameTo }));
       await reload();
       setSelected(null);
@@ -109,6 +117,8 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 
   const doSave = async () => {
     if (!selected) return;
+    // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）
+    const wasActive = loadActiveId() === selected.id;
     setBusy(true);
     try {
       ensureNotActive();
@@ -120,6 +130,11 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         : await buildManifestFromScan(selected.id, scan, rows, "folder", subtitle, { displayName });
       const manifest = { ...base, displayName, hasSubtitle: base.hasVoice && subtitle };
       await invoke("pet_update_manifest", { id: selected.id, manifest, backup: true });
+      if (wasActive) {
+        // 保存完成自动切回原宠物（经 foxbell 闪切 + 热重载同宠物的全新素材快照）
+        saveActiveId(selected.id, manifest.hasVoice, displayName);
+        emit("pet-active-changed", {}).catch(() => {});
+      }
       toast.success(t("pet.manage.savedToast"));
       await reload();
     } catch (e) {
