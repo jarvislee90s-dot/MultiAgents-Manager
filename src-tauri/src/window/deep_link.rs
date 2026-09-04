@@ -44,41 +44,55 @@ pub fn open_url(url: &str) -> Result<(), String> {
     }
 }
 
-/// Windows 注册表查询 scheme 的 shell\open\command 默认值（可注入闭包的纯判定核心）。
-/// 依次查 HKCU\Software\Classes\<scheme> 与 HKCR\<scheme>，任一存在非空默认值 → true。
-/// 实测语义（2026-09-04，附录 A）：workbuddy 两处均有 handler、codex 两处均无
-/// （仅 URL Protocol 标记，无 shell\open\command）→ codex 在无 handler 机器上被天然门控
+/// Windows 注册表查询 scheme 的 handler 存在性（可注入闭包的纯判定核心，T3 判据放宽）。
+/// 依次查 HKCU\Software\Classes\<scheme> 与 HKCR\<scheme>，满足任一即 true：
+/// ① `shell\open\command` 默认值非空（NSIS/经典注册形态，如 WorkBuddy）；或
+/// ② scheme 键下存在 `URL Protocol` 值（MSIX AppModel 关联只写标记，如 ChatGPT/codex——
+///    实测 2026-09-05：标记值通常为空串，但派发 `codex://threads/<uuid>` 成功且路由正确，
+///    旧判据只查 command 产生假阴性，把 codex 深链永久降级为 App 级聚焦，属 bug）。
+/// 假阳性兜底：派发后 B 前台验证（2s 双连击）仍会把「标记在但实际无 handler」的派发
+/// 落回近祖聚焦、不误标已读——分层防御，A 门只负责廉价前置过滤
 #[cfg(windows)]
-fn scheme_handler_exists_in<F>(scheme: &str, read_default: &F) -> bool
+fn scheme_handler_exists_in<F>(scheme: &str, reg_get: &F) -> bool
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str, &str) -> Option<String>,
 {
     ["HKCU\\Software\\Classes", "HKCR"]
         .iter()
         .any(|root| {
-            let key = format!(r"{root}\{}\shell\open\command", scheme);
-            read_default(&key)
+            // ① 经典形态：shell\open\command 默认值非空
+            let command_key = format!(r"{root}\{}\shell\open\command", scheme);
+            if reg_get(&command_key, "")
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false)
+            {
+                return true;
+            }
+            // ② MSIX AppModel 形态：scheme 键下存在 URL Protocol 值（标记可为空串）
+            let scheme_key = format!(r"{root}\{scheme}");
+            reg_get(&scheme_key, "URL Protocol").is_some()
         })
 }
 
-/// Windows 查注册表默认值（HKCU\Software\Classes\<scheme>\shell\open\command 与
-/// HKCR\<scheme>\shell\open\command），任一非空 → handler 存在。注册表打开失败视为无 handler
+/// Windows 查注册表（HKCU\Software\Classes 与 HKCR 两root），打开失败视为无 handler
 #[cfg(windows)]
 pub fn scheme_handler_exists(scheme: &str) -> bool {
-    scheme_handler_exists_in(scheme, &|key| {
+    scheme_handler_exists_in(scheme, &|subkey, value_name| {
         use winreg::enums::{HKEY_CLASSES_ROOT, HKEY_CURRENT_USER};
         use winreg::RegKey;
         // 先试 HKCU（用户级覆盖），再试 HKCR
-        let (hive, subkey) = key
+        let (hive, rest) = subkey
             .strip_prefix("HKCU\\Software\\Classes\\")
-            .map(|rest| (HKEY_CURRENT_USER, rest))
-            .or_else(|| key.strip_prefix("HKCR\\").map(|rest| (HKEY_CLASSES_ROOT, rest)))?;
+            .map(|r| (HKEY_CURRENT_USER, r))
+            .or_else(|| subkey.strip_prefix("HKCR\\").map(|r| (HKEY_CLASSES_ROOT, r)))?;
         let root = RegKey::predef(hive);
-        root.open_subkey(subkey)
-            .and_then(|k| k.get_value::<String, _>(""))
-            .ok()
+        let key = root.open_subkey(rest).ok()?;
+        if value_name.is_empty() {
+            key.get_value::<String, _>("").ok()
+        } else {
+            // URL Protocol 标记值通常为空串——存在即 Some（空串也算）
+            key.get_raw_value(value_name).ok().map(|_| String::new())
+        }
     })
 }
 
@@ -136,63 +150,85 @@ mod tests {
     #[cfg(windows)]
     mod scheme_handler_tests {
         use super::super::scheme_handler_exists_in;
+        use std::collections::HashMap;
 
-        /// 构造注册表模拟：key → 默认值
+        /// 构造注册表模拟：(子键, 值名) → 值。command 用默认值名 ""（HKCU/HKCR 可分别指定），
+        /// URL Protocol 标记为 scheme 键下的独立值（MSIX AppModel 实测为空串，两 root 同写）
         fn reg(
             scheme: &str,
-            hkcu: Option<&str>,
-            hkcr: Option<&str>,
-        ) -> impl Fn(&str) -> Option<String> {
-            let hkcu_key = format!(r"HKCU\Software\Classes\{scheme}\shell\open\command");
-            let hkcr_key = format!(r"HKCR\{scheme}\shell\open\command");
-            let hkcu = hkcu.map(|v| v.to_string());
-            let hkcr = hkcr.map(|v| v.to_string());
-            move |key: &str| {
-                if key == hkcu_key {
-                    hkcu.clone()
-                } else if key == hkcr_key {
-                    hkcr.clone()
-                } else {
-                    None
+            hkcu_command: Option<&str>,
+            hkcr_command: Option<&str>,
+            url_protocol: bool,
+        ) -> impl Fn(&str, &str) -> Option<String> {
+            let mut map: HashMap<(String, String), String> = HashMap::new();
+            for (root, command) in [
+                ("HKCU\\Software\\Classes", hkcu_command),
+                ("HKCR", hkcr_command),
+            ] {
+                if let Some(cmd) = command {
+                    map.insert(
+                        (format!(r"{root}\{scheme}\shell\open\command"), String::new()),
+                        cmd.to_string(),
+                    );
                 }
             }
+            if url_protocol {
+                for root in ["HKCU\\Software\\Classes", "HKCR"] {
+                    map.insert((format!(r"{root}\{scheme}"), "URL Protocol".to_string()), String::new());
+                }
+            }
+            move |subkey: &str, value_name: &str| map.get(&(subkey.to_string(), value_name.to_string())).cloned()
         }
 
         #[test]
         fn handler_in_either_hive_is_found() {
-            // 实测（附录 A）：workbuddy 在 HKCR/HKCU 均有 handler → true
+            // 实测（附录 A）：workbuddy 在 HKCR/HKCU 均有 handler（NSIS 经典形态）→ true
             let both = reg(
                 "workbuddy",
                 Some(r#""D:\Program Files\WorkBuddy\WorkBuddy.exe" "%1""#),
                 Some(r#""D:\Program Files\WorkBuddy\WorkBuddy.exe" "%1""#),
+                false,
             );
             assert!(scheme_handler_exists_in("workbuddy", &both));
             // 仅 HKCU 有 → true（用户级覆盖）
-            let only_hkcu = reg("workbuddy", Some("\"x\" \"%1\""), None);
+            let only_hkcu = reg("workbuddy", Some("\"x\" \"%1\""), None, false);
             assert!(scheme_handler_exists_in("workbuddy", &only_hkcu));
             // 仅 HKCR 有 → true
-            let only_hkcr = reg("workbuddy", None, Some("\"x\" \"%1\""));
+            let only_hkcr = reg("workbuddy", None, Some("\"x\" \"%1\""), false);
             assert!(scheme_handler_exists_in("workbuddy", &only_hkcr));
+        }
+
+        /// T3 回归锁：MSIX AppModel 形态——注册表仅有 `URL Protocol` 标记、无
+        /// shell\open\command（实测 ChatGPT/codex 如此）。旧判据判「无 handler」是
+        /// 假阴性（实测派发 codex://threads/<uuid> 三次均成功前台化且 OCR 证实导航
+        /// 到具体会话）→ 放宽后标记存在即视为有 handler
+        #[test]
+        fn url_protocol_marker_alone_counts_as_handler() {
+            let msix = reg("codex", None, None, true);
+            assert!(
+                scheme_handler_exists_in("codex", &msix),
+                "仅 URL Protocol 标记（MSIX AppModel）应判为有 handler"
+            );
         }
 
         #[test]
         fn no_handler_in_any_hive_is_not_found() {
-            // 实测（附录 A）：codex 两处均无 handler（仅 URL Protocol 标记）→ false
-            let none = reg("codex", None, None);
+            // 两处均无 command 也无标记 → false（真正无 handler 的机器）
+            let none = reg("codex", None, None, false);
             assert!(!scheme_handler_exists_in("codex", &none));
         }
 
         #[test]
-        fn empty_command_value_counts_as_no_handler() {
-            // 命令默认值为空串 → 视为无 handler（防御：注册表值存在但空）
-            let empty = reg("workbuddy", Some(""), Some(""));
+        fn empty_command_value_with_no_marker_counts_as_no_handler() {
+            // command 默认值为空串且无标记 → 视为无 handler（防御：值存在但空）
+            let empty = reg("workbuddy", Some(""), Some(""), false);
             assert!(!scheme_handler_exists_in("workbuddy", &empty));
         }
 
         #[test]
         fn missing_scheme_is_not_found() {
-            // 未注册 scheme → 两 key 都不存在 → false
-            let missing = reg("ghost", None, None);
+            // 未注册 scheme → 两 root 都不存在 → false
+            let missing = reg("ghost", None, None, false);
             assert!(!scheme_handler_exists_in("ghost", &missing));
         }
     }

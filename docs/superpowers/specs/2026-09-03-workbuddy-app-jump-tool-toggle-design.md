@@ -218,7 +218,7 @@
 | 风险/限制 | 应对 |
 |-----------|------|
 | WorkBuddy 私有格式无文档，版本升级可能破坏 | 防御性解析 + 降级显示；fixture 测试锁格式假设 |
-| 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付。实测结论（2026-09-04）：已探明并接线 —— WorkBuddy `workbuddy://chat/<sessionId>`（app.asar 源码证据）、Codex `codex://threads/<threadId>`（asar 模板证据）；threadId 与 rollout UUID 同源性待 GUI 实测确认，直达失败则回退 None 走 APP 级保底。**Windows 补充实测（同日）**：`workbuddy://` 已注册 handler；`codex://` 在未装 ChatGPT 桌面版的机器仅有协议标记、无 handler——「spawn 成功」不代表路由成功，派发前应校验 handler 存在性（Windows 查注册表 `\<scheme>\shell\open\command`，macOS 用 `LSCopyDefaultHandlerForURLScheme`），校验失败走保底且**不得标已读** |
+| 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付。实测结论（2026-09-04）：已探明并接线 —— WorkBuddy `workbuddy://chat/<sessionId>`（app.asar 源码证据）、Codex `codex://threads/<threadId>`（asar 模板证据）；threadId 与 rollout UUID 同源性待 GUI 实测确认，直达失败则回退 None 走 APP 级保底。**Windows 补充实测（同日）**：`workbuddy://` 已注册 handler；`codex://` 在未装 ChatGPT 桌面版的机器仅有协议标记、无 handler——「spawn 成功」不代表路由成功，派发前应校验 handler 存在性（Windows 查注册表 `\<scheme>\shell\open\command`，macOS 用 `LSCopyDefaultHandlerForURLScheme`），校验失败走保底且**不得标已读**。**Windows 判据修订（2026-09-05）**：ChatGPT 为 MSIX 安装时协议关联走 AppModel，注册表仅有 `URL Protocol` 标记、无 `shell\open\command`——仅查 command 产生**假阴性**（实测派发 `codex://threads/<uuid>` 三次均成功前台化且 OCR 证实会话级导航），判据放宽为「command 非空 **或 `URL Protocol` 值存在**」；假阳性风险由派发后 B 前台验证兜底（未前台化 → 落回保底聚焦、不标已读），分层防御 |
 | 外部进程无法 APP 内部导航到具体会话 | 已确认接受（APP 前台级别） |
 | Codex++ 不被监控 | 明确不纳入本次范围 |
 | ~~Windows 上 WorkBuddy 安装形态未实测~~（已实测） | 2026-09-04 实测结论已回写本文档：NSIS 独立目录 + `WorkBuddy.exe`，会话宿主与主进程同名、无 `codebuddy` 进程 → §4 发现机制改心跳驱动；mangle 与 prewarm 心跳两处原调研结论有误，已更正。由此产生的代码偏差由整改方案处理：`docs/superpowers/plans/2026-09-04-windows-p0-remediation.md` |
