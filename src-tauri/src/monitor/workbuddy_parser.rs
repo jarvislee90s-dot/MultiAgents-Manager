@@ -32,15 +32,45 @@ pub struct Heartbeat {
     pub cwd: String,
     #[serde(rename = "lastHeartbeat")]
     pub last_heartbeat_ms: u64,
+    /// 会话类型（serve/prewarm/interactive 等）；字段缺失视为通过（防御私有格式演进）
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 pub fn parse_heartbeat(json: &str) -> Option<Heartbeat> {
     serde_json::from_str(json).ok()
 }
 
-/// sessionId 为 UUID（非 interactive-*）才是真实任务会话；--serve 常驻服务排除
+/// ASCII hex 字符判断（大小写均可）
+fn is_hex(b: u8) -> bool {
+    b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b)
+}
+
+/// sessionId 严格 UUID 形态判定：8-4-4-4-12 五段、每段均为 ASCII hex。
+/// 纯字节实现（不引入 regex 依赖）。prewarm 池的 `prewarm-wb-pool-<13位ms>-<6位hex>`
+/// 恰为 36 字符 4 连字符，仅凭「长度 36 + 连字符 4」判定会被骗过——必须逐段校验 hex 字符集
 pub fn heartbeat_session_id_is_uuid(hb: &Heartbeat) -> bool {
-    hb.session_id.len() == 36 && hb.session_id.bytes().filter(|c| *c == b'-').count() == 4
+    let id = hb.session_id.as_bytes();
+    if id.len() != 36 {
+        return false;
+    }
+    // 五段长度：8-4-4-4-12（合计 32 个 hex + 4 个连字符）
+    let segs = [8usize, 4, 4, 4, 12];
+    let mut pos = 0usize;
+    for (i, len) in segs.iter().enumerate() {
+        let end = pos + len;
+        if !id[pos..end].iter().all(|&b| is_hex(b)) {
+            return false;
+        }
+        pos = end;
+        if i < segs.len() - 1 {
+            if id.get(pos) != Some(&b'-') {
+                return false;
+            }
+            pos += 1;
+        }
+    }
+    true
 }
 
 pub fn heartbeat_is_alive(hb: &Heartbeat, now_ms: u64) -> bool {
@@ -139,7 +169,11 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         else {
             continue;
         };
-        if !heartbeat_session_id_is_uuid(&hb) || !heartbeat_is_alive(&hb, now) {
+        // 过滤：严格 UUID 形态（真实任务会话）+ 心跳新鲜 + kind 非 prewarm（双保险，字段缺失视为通过）
+        if !heartbeat_session_id_is_uuid(&hb)
+            || hb.kind.as_deref() == Some("prewarm")
+            || !heartbeat_is_alive(&hb, now)
+        {
             continue;
         }
 
@@ -379,6 +413,17 @@ mod tests {
       "url": "http://127.0.0.1:50027"
     }"#;
 
+    // Windows 实测 prewarm 池样本（附录 A）：sessionId 恰为 36 字符 4 连字符，
+    // 仅凭「长度+连字符计数」会被误判为 UUID；须逐段 hex 校验拒绝 + kind=prewarm 双保险
+    const HEARTBEAT_PREWARM: &str = r#"{
+      "pid": 17692,
+      "lastHeartbeat": 1788496419201,
+      "sessionId": "prewarm-wb-pool-1788496419201-bb1050",
+      "cwd": "C:\\Users\\bunny\\WorkBuddy",
+      "kind": "prewarm",
+      "meta": {"status": "idle"}
+    }"#;
+
     #[test]
     fn mangle_strips_leading_slash_and_replaces_separators() {
         assert_eq!(
@@ -399,6 +444,116 @@ mod tests {
         assert!(heartbeat_session_id_is_uuid(&hb));
         let serve = parse_heartbeat(HEARTBEAT_SERVE).unwrap();
         assert!(!heartbeat_session_id_is_uuid(&serve)); // --serve 排除
+    }
+
+    // ---- 严格 UUID 形态判定（P0-3）：prewarm 池 36 字符/4 连字符骗不过逐段 hex 校验 ----
+
+    #[test]
+    fn uuid_accepts_real_and_uppercase_hex() {
+        // 真实任务会话样本（Windows 实测，附录 A）
+        let hb = parse_heartbeat(HEARTBEAT_ACTIVE).unwrap();
+        assert!(heartbeat_session_id_is_uuid(&hb));
+        // 全大写 hex 同样合法（UUID 不区分大小写）
+        let upper = Heartbeat {
+            pid: 1,
+            session_id: "ECBF3D35-76E9-42DF-B71D-89409EC156EA".into(),
+            cwd: "/tmp".into(),
+            last_heartbeat_ms: 0,
+            kind: None,
+        };
+        assert!(heartbeat_session_id_is_uuid(&upper));
+    }
+
+    #[test]
+    fn uuid_rejects_prewarm_pool_pseudo_uuid() {
+        // Windows 实测样本：`prewarm-wb-pool-<13位ms>-<6位hex>` 恰为 36 字符 4 连字符，
+        // 旧「长度 36 + 连字符 4」判定会误放行——逐段 hex 校验必须拒绝
+        let hb = parse_heartbeat(HEARTBEAT_PREWARM).unwrap();
+        assert_eq!(hb.session_id.len(), 36);
+        assert_eq!(hb.session_id.bytes().filter(|c| *c == b'-').count(), 4);
+        assert!(!heartbeat_session_id_is_uuid(&hb));
+    }
+
+    #[test]
+    fn uuid_rejects_interactive_serve_id() {
+        let serve = parse_heartbeat(HEARTBEAT_SERVE).unwrap();
+        assert!(!heartbeat_session_id_is_uuid(&serve)); // interactive-<pid> 排除
+    }
+
+    #[test]
+    fn uuid_rejects_non_hex_segment() {
+        // 8-4-4-4-12 形态但含非 hex 字符（如 g/h 等超出 a-f 的字母）→ 拒绝
+        let bad = Heartbeat {
+            pid: 1,
+            session_id: "ecbf3d35-76e9-42df-b71d-89409ec156ea".into(),
+            cwd: "/tmp".into(),
+            last_heartbeat_ms: 0,
+            kind: None,
+        };
+        assert!(heartbeat_session_id_is_uuid(&bad));
+        let g8hh = Heartbeat {
+            pid: 1,
+            session_id: "g8hh3d35-76e9-42df-b71d-89409ec156ea".into(),
+            cwd: "/tmp".into(),
+            last_heartbeat_ms: 0,
+            kind: None,
+        };
+        assert!(!heartbeat_session_id_is_uuid(&g8hh)); // 首段含 g（非 hex）
+        // 连字符位置错误：8-4-4-4-12 的分段长度不对 → 拒绝
+        let wrong_segs = Heartbeat {
+            pid: 1,
+            session_id: "ecbf3d35-76e9-42df-b71d-89409ec156e".into(), // 末段 11 字符
+            cwd: "/tmp".into(),
+            last_heartbeat_ms: 0,
+            kind: None,
+        };
+        assert!(!heartbeat_session_id_is_uuid(&wrong_segs));
+    }
+
+    // ---- kind 防御（P0-3 双保险）：kind=prewarm 拒绝，缺失视为通过 ----
+
+    #[test]
+    fn kind_prewarm_is_filtered_out() {
+        // 即使 sessionId 真为 UUID 形态，kind=prewarm 也必须排除（双保险防线独立生效）：
+        // 私有格式演进后 prewarm 若改用 UUID 命名，严格 UUID 判定会放行，kind 仍能拦截
+        let prewarm_uuid_shaped = Heartbeat {
+            pid: 1,
+            session_id: "ecbf3d35-76e9-42df-b71d-89409ec156ea".into(),
+            cwd: "C:\\Users\\bunny\\WorkBuddy".into(),
+            last_heartbeat_ms: 0,
+            kind: Some("prewarm".into()),
+        };
+        assert!(heartbeat_session_id_is_uuid(&prewarm_uuid_shaped));
+        assert!(prewarm_uuid_shaped.kind.as_deref() == Some("prewarm"));
+        // 真实 prewarm 样本本身也不满足严格 UUID（段长 7-2-4-13-6）
+        let hb = parse_heartbeat(HEARTBEAT_PREWARM).unwrap();
+        assert!(!heartbeat_session_id_is_uuid(&hb));
+        assert!(hb.kind.as_deref() == Some("prewarm"));
+    }
+
+    #[test]
+    fn kind_missing_is_allowed() {
+        // 字段缺失（旧格式/演进防御）视为通过
+        let hb = parse_heartbeat(HEARTBEAT_ACTIVE).unwrap();
+        assert!(hb.kind.is_some()); // 现行格式带 kind
+        let no_kind = Heartbeat {
+            pid: 1,
+            session_id: "ecbf3d35-76e9-42df-b71d-89409ec156ea".into(),
+            cwd: "/tmp".into(),
+            last_heartbeat_ms: 0,
+            kind: None,
+        };
+        assert!(no_kind.kind.is_none());
+        assert!(heartbeat_session_id_is_uuid(&no_kind));
+        // 非 prewarm 的 kind（interactive）放行
+        let interactive = Heartbeat {
+            pid: 1,
+            session_id: "ecbf3d35-76e9-42df-b71d-89409ec156ea".into(),
+            cwd: "/tmp".into(),
+            last_heartbeat_ms: 0,
+            kind: Some("interactive".into()),
+        };
+        assert!(interactive.kind.as_deref() != Some("prewarm"));
     }
 
     #[test]
