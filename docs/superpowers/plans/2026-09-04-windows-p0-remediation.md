@@ -202,9 +202,20 @@
 
 ---
 
-## 4. 附录 A：Windows 实机证据摘要（2026-09-04）
+## 4. 实机验证回归与新发现（2026-09-04 晚，整改实施后）
 
-- **环境**：Windows 11，WorkBuddy v2.115.0，安装于 `D:\Program Files\WorkBuddy`（NSIS，非 MSIX），运行中（主进程 pid 2420，窗口标题 `WorkBuddy`）。
+实机验证结果：**WorkBuddy 检测/跳转完全符合验收**（会话级直达、关闭按键、窗口键入识别关卡均通过）。新发现并处置：
+
+| # | 发现 | 根因 | 处置 |
+|---|------|------|------|
+| N1 | **Codex APP 会话不出卡（大问题）** | 原 PR 仅按 macOS 拓扑设计：Windows 上 Codex 桌面端为 MSIX（`WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe`），会话运行时为独立 codex.exe（AppData bin），**宿主不叫 codex** → `find_codex_processes(["codex","Codex"])` 永远发现不了 App 形态宿主 → `codex_host_process` 恒 None → W4 聚合不执行 | 已修：`codex_process_names()` 平台分支，Windows 追加 `chatgpt`（Electron 子进程经通用子代理过滤后仅主进程存活，classify_form 判 App）；探针实机验证：发现宿主 pid 3936 + 2 张 deepseek-harness 会话卡（19:03/19:04 rollout）。**非整改批次回归，是原 PR 的 Windows 设计缺口**（与 P0-1 同类） |
+| N2 | 设置页增减工具后某列表需切页才刷新（小问题） | 待定位：`applyChanges` 已 `loadToolSettings()` + `invalidateQueries()`，后端 `list_enabled_tools` 无缓存——机制上应实时刷新；需用户指认具体是哪个列表（声音覆盖行/预设/资源分布） | 待用户复现指认后修 |
+| N3 | 「deepseek 窗口被瞬间识别成 claude」闪现 | 探针时点 claude 发现为 0 进程；推测为用户在 deepseek-harness 窗口短暂运行过 claude（短命进程 → 卡片闪现即消失，属正常行为）。状态缓存同期有一条真实 Kimi 会话记录 | 待用户确认当时是否运行过 claude；无代码层异常证据 |
+| N4 | review F1 | 14 文件 LF→CRLF 翻转进入实施 commit（~3400 行噪声） | 已修：`chore` commit 转回 LF，PR 净 diff 恢复 +1513/-162 |
+
+另：M1（关窗守卫决议后重发 close）、M5（foxbell 测试超时 3s→10s）本轮一并修复。
+
+## 5. 附录 A：Windows 实机证据摘要（2026-09-04）- **环境**：Windows 11，WorkBuddy v2.115.0，安装于 `D:\Program Files\WorkBuddy`（NSIS，非 MSIX），运行中（主进程 pid 2420，窗口标题 `WorkBuddy`）。
 - **进程**：进程表仅 `WorkBuddy.exe`（11 个），无任何 codebuddy 进程；`cli/bin/codebuddy` 为 Node 脚本（`#!/usr/bin/env node`）；主日志（2026-08-06~09-04 多条）：`[Sidecar] Creating session __workbuddy_cli_host__-1-221d7536 — D:\Program Files\WorkBuddy\WorkBuddy.exe`。
 - **心跳**（`~/.workbuddy/sessions/`，14 份）：serve 进程 `sessionId:"interactive-12032"`（cwd 在 `Temp\workbuddy-host-cli\...`）；prewarm 进程 `sessionId:"prewarm-wb-pool-1788496419201-bb1050"`（36 字符/4 连字符，`kind:"prewarm"`，心跳新鲜）；真实任务 `sessionId:"ecbf3d35-76e9-42df-b71d-89409ec156ea"`（cwd 为真实工作区，`kind:"interactive"`）。
 - **项目目录**（`~/.workbuddy/projects/`）：`c-Users-bunny-WorkBuddy-2026-08-06-15-57-15`、`e-LLMproject-0807` 等 → mangle 规则 = 盘符小写 + 去冒号 + 分隔符→`-`；JSONL 内 `cwd` 字段亦为小写盘符形态。
