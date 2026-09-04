@@ -6,6 +6,7 @@ import "./index.css";
 import "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query/queryClient";
+import { setupToolsChangedListener } from "@/lib/query/toolsChangedSync";
 
 const HomePage = lazy(() => import("./pages/home"));
 const AboutPage = lazy(() => import("./pages/about"));
@@ -40,6 +41,12 @@ function AppWrapper() {
     } catch {
       // Not in Tauri environment — ignore
     }
+    // N2：设置窗口（独立 WebView）保存工具勾选后，后端广播 tools-changed，
+    // 本窗口据此失效 enabled-tools / ssot-resources 等缓存——跨窗口缓存同步的唯一通道
+    const disposed = setupToolsChangedListener(queryClient);
+    return () => {
+      void disposed.then((unlisten) => unlisten());
+    };
   }, []);
 
   return <PageComponent />;

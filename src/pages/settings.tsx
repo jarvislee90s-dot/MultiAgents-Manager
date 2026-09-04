@@ -230,7 +230,8 @@ export default function SettingsPage() {
       }
       setConfirmOpen(false);
       await loadToolSettings();
-      // 全量失效 react-query 缓存：看板 / 资源分布立即刷新
+      // 全量失效本窗口（设置窗口）的 react-query 缓存；主窗口/看板的缓存由后端广播的
+      // tools-changed 事件失效（toolsChangedSync，N2 根因修复）——两者是独立 WebView
       await queryClient.invalidateQueries();
       const jump = pendingJumpRef.current;
       pendingJumpRef.current = null;

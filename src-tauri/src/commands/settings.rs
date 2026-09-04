@@ -1,6 +1,7 @@
 // 设置、工具检测、子 Agent 命令
 
 use crate::database::SubAgentRecord;
+use tauri::Emitter;
 
 #[tauri::command]
 pub fn get_setting(key: String) -> Option<String> {
@@ -42,9 +43,14 @@ pub fn get_tool_settings() -> Vec<crate::services::tool_settings::ToolSetting> {
 /// 批量保存工具勾选（取消勾选清理 / 重新勾选重建，返回明细）
 #[tauri::command]
 pub fn update_tool_settings(
+    app: tauri::AppHandle,
     changes: Vec<crate::services::tool_settings::ToolSettingChange>,
 ) -> crate::services::tool_settings::ApplyResult {
-    crate::services::tool_settings::apply_tool_changes(changes)
+    let result = crate::services::tool_settings::apply_tool_changes(changes);
+    // N2：跨窗口广播工具勾选变化。设置窗口与主窗口是独立 WebView、各持 QueryClient，
+    // 设置页本地的 invalidateQueries 触达不到主窗口——主窗口靠此事件失效缓存
+    let _ = app.emit("tools-changed", ());
+    result
 }
 
 /// 前端工具列下发项（资源视图 / 设置声音区的唯一样式来源）
