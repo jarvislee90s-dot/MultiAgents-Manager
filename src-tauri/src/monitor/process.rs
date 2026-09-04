@@ -184,9 +184,25 @@ pub fn find_claude_processes(system: &System) -> Vec<AgentProcess> {
     )
 }
 
+/// Codex 进程匹配名单（平台差异，2026-09-04 Windows 实测）：
+/// - macOS：内嵌 codex 运行时（ChatGPT.app/Contents/Resources/codex），名单 codex 即覆盖；
+/// - Windows：Codex 桌面端为 MSIX（`WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe`），会话运行时是
+///   独立 codex.exe（AppData\Local\OpenAI\Codex\bin，父进程为 ChatGPT.exe），**宿主不叫 codex**——
+///   缺 chatgpt 名单则 codex_parser::codex_host_process 恒为 None，APP 卡聚合（W4）不出。
+///   Electron 子进程父链同名，通用子代理过滤后仅 ChatGPT 主进程存活（App 形态，聚合宿主）。
+#[cfg(windows)]
+pub fn codex_process_names() -> &'static [&'static str] {
+    &["codex", "Codex", "chatgpt"]
+}
+
+#[cfg(not(windows))]
+pub fn codex_process_names() -> &'static [&'static str] {
+    &["codex", "Codex"]
+}
+
 /// 发现 Codex CLI + 桌面 APP 进程
 pub fn find_codex_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["codex", "Codex"], &["multi-agents-manager"])
+    find_processes_by_names(system, codex_process_names(), &["multi-agents-manager"])
 }
 
 /// 发现 OpenCode 进程
@@ -338,6 +354,35 @@ mod tests {
             );
             assert_eq!(classify_form("/Users/x/.cargo/bin/codex"), ProcessForm::Cli);
             assert_eq!(classify_form("codex.exe"), ProcessForm::Cli);
+        }
+
+        #[test]
+        fn windows_msix_chatgpt_host_is_app_form() {
+            // 2026-09-04 实机路径：MSIX Codex 桌面端宿主 ChatGPT.exe 必须判为 App——
+            // 它是 codex_parser APP 聚合（W4）的宿主来源；basename 首字母大写与
+            // WindowsApps 规则双命中，任一成立即可
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.901.2854.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe"
+                ),
+                ProcessForm::App
+            );
+        }
+    }
+
+    mod codex_names {
+        use super::super::codex_process_names;
+
+        #[test]
+        fn windows_includes_chatgpt_host_macos_not() {
+            // Windows 宿主缺口回归锁：MSIX 桌面端宿主名 chatgpt 必须进匹配名单，
+            // 否则 codex_host_process 恒 None → APP 卡聚合不出（2026-09-04 实机故障）
+            #[cfg(windows)]
+            assert!(codex_process_names().contains(&"chatgpt"));
+            #[cfg(not(windows))]
+            assert!(!codex_process_names().contains(&"chatgpt"));
+            // 双平台都保留 codex（CLI 与 macOS 内嵌运行时）
+            assert!(codex_process_names().contains(&"codex"));
         }
     }
 }
