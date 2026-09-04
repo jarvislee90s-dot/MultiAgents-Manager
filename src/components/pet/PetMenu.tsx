@@ -26,6 +26,8 @@ export function PetMenu(props: {
   onClose(): void;
   onPreview(action: PetAction | null): void;
   onHide(): void;
+  voiceCapable: boolean;
+  subtitleCapable: boolean;
 }) {
   const { t } = useTranslation();
   const [cfg, setCfg] = useState<PetConfig>(() => loadConfig());
@@ -157,21 +159,48 @@ export function PetMenu(props: {
         </>
       ) : (
         <>
-          {/* 开关行整行可点（spec B1 用例点击行文案即翻转）；按钮内 stopPropagation 防止双重切换 */}
-          <div style={rowStyle} onClick={() => saveConfig({ muted: !cfg.muted })}>
+          {/* 开关行整行可点（spec B1 用例点击行文案即翻转）；按钮内 stopPropagation 防止双重切换。
+              能力门控（spec §5.2）：不具备语音/字幕能力时置灰不可切换 + tooltip 说明原因（EP9） */}
+          <div
+            data-testid="pet-menu-row-sound"
+            title={!props.voiceCapable ? t("pet.menu.soundNoCap") : undefined}
+            style={{
+              ...rowStyle,
+              opacity: props.voiceCapable ? 1 : 0.5,
+              cursor: props.voiceCapable ? "pointer" : "not-allowed",
+            }}
+            onClick={() => {
+              if (props.voiceCapable) saveConfig({ muted: !cfg.muted });
+            }}
+          >
             <span>{t("pet.menu.sound")}</span>
             {btn(
               !cfg.muted,
-              () => saveConfig({ muted: !cfg.muted }),
-              !cfg.muted ? t("pet.menu.on") : t("pet.menu.off")
+              () => {
+                if (props.voiceCapable) saveConfig({ muted: !cfg.muted });
+              },
+              !cfg.muted && props.voiceCapable ? t("pet.menu.on") : t("pet.menu.off")
             )}
           </div>
-          <div style={rowStyle} onClick={() => saveConfig({ talkative: !cfg.talkative })}>
+          <div
+            data-testid="pet-menu-row-subtitle"
+            title={!props.subtitleCapable ? t("pet.menu.subtitleNoCap") : undefined}
+            style={{
+              ...rowStyle,
+              opacity: props.subtitleCapable ? 1 : 0.5,
+              cursor: props.subtitleCapable ? "pointer" : "not-allowed",
+            }}
+            onClick={() => {
+              if (props.subtitleCapable) saveConfig({ talkative: !cfg.talkative });
+            }}
+          >
             <span>{t("pet.menu.subtitle")}</span>
             {btn(
               cfg.talkative,
-              () => saveConfig({ talkative: !cfg.talkative }),
-              cfg.talkative ? t("pet.menu.on") : t("pet.menu.off")
+              () => {
+                if (props.subtitleCapable) saveConfig({ talkative: !cfg.talkative });
+              },
+              cfg.talkative && props.subtitleCapable ? t("pet.menu.on") : t("pet.menu.off")
             )}
           </div>
           <div style={rowStyle} onClick={() => saveConfig({ gravity: !cfg.gravity })}>
