@@ -197,44 +197,48 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
           </div>
         ) : (
           <div className="space-y-3" data-testid="manage-panel">
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <label className="text-sm">{t("pet.manage.rename")}</label>
-                <Input
-                  data-testid="manage-rename-input"
-                  placeholder={selected.id}
-                  value={renameTo}
-                  onChange={(e) => setRenameTo(e.target.value)}
-                />
+            {/* 内容区限高滚动（UI 反馈修复）：音频行多时面板不再无限增高，
+                保存/删除按钮与删除确认条固定在滚动区外，始终可见可点 */}
+            <div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
+              <div className="flex items-end gap-2">
+                <div className="flex-1">
+                  <label className="text-sm">{t("pet.manage.rename")}</label>
+                  <Input
+                    data-testid="manage-rename-input"
+                    placeholder={selected.id}
+                    value={renameTo}
+                    onChange={(e) => setRenameTo(e.target.value)}
+                  />
+                </div>
+                <Button size="sm" disabled={busy || !renameTo} data-testid="manage-rename-btn" onClick={() => void doRename()}>
+                  {t("pet.manage.renameBtn")}
+                </Button>
               </div>
-              <Button size="sm" disabled={busy || !renameTo} data-testid="manage-rename-btn" onClick={() => void doRename()}>
-                {t("pet.manage.renameBtn")}
-              </Button>
-            </div>
-            <div>
-              <label className="text-sm">{t("pet.import.displayName")}</label>
-              <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-            </div>
-            <VoiceGroupEditor
-              rows={voiceRows}
-              busy={busy}
-              onAdd={async (group, paths) => {
-                ensureNotActive(); // 直写正式目录前冻结保护
-                const added = await invoke<{ group: string; name: string; file: string; sizeBytes: number }[]>(
-                  "pet_add_voice_files",
-                  { id: selected.id, srcPaths: paths, group }
-                );
-                setVoiceRows((prev) => [...prev, ...added.map((a) => ({ ...a, durationMs: null }))]);
-              }}
-              onRemove={async (rel) => {
-                ensureNotActive();
-                await invoke("pet_remove_voice_file", { id: selected.id, rel });
-                setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
-              }}
-            />
-            <div className="flex items-center gap-2">
-              <Switch checked={subtitle} onCheckedChange={setSubtitle} />
-              <span className="text-sm">{t("pet.manage.subtitle")}</span>
+              <div>
+                <label className="text-sm">{t("pet.import.displayName")}</label>
+                <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+              </div>
+              <VoiceGroupEditor
+                rows={voiceRows}
+                busy={busy}
+                onAdd={async (group, paths) => {
+                  ensureNotActive(); // 直写正式目录前冻结保护
+                  const added = await invoke<{ group: string; name: string; file: string; sizeBytes: number }[]>(
+                    "pet_add_voice_files",
+                    { id: selected.id, srcPaths: paths, group }
+                  );
+                  setVoiceRows((prev) => [...prev, ...added.map((a) => ({ ...a, durationMs: null }))]);
+                }}
+                onRemove={async (rel) => {
+                  ensureNotActive();
+                  await invoke("pet_remove_voice_file", { id: selected.id, rel });
+                  setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
+                }}
+              />
+              <div className="flex items-center gap-2">
+                <Switch checked={subtitle} onCheckedChange={setSubtitle} />
+                <span className="text-sm">{t("pet.manage.subtitle")}</span>
+              </div>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <Button size="sm" variant="outline" onClick={() => void invoke("pet_reveal_folder", { id: selected.id }).catch(() => {})}>
