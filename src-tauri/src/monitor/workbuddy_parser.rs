@@ -153,6 +153,75 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 心跳目录驱动的会话进程发现核心（P0-1）：
+/// 枚举 ~/.workbuddy/sessions/<PID>.json，逐个防御性解析心跳，按过滤规则（严格 UUID +
+/// kind 非 prewarm + 心跳新鲜 < 90s）判定活跃会话进程，再以 pid 回查进程表补充
+/// cpu/exe 构装 AgentProcess；进程表查无此 pid → 跳过（消失场景由 W4 补偿经
+/// LAST_SEEN_SESSIONS 处理，语义不变）。
+/// 不使用进程名匹配——Windows 上会话宿主与主进程同名 WorkBuddy.exe（Electron 以自身
+/// 作 Node 运行 cli/bin/codebuddy 脚本，无 codebuddy 进程），进程名匹配恒空且「父进程
+/// 同名」会被通用子代理过滤误杀。任何文件缺失/损坏/解析失败一律跳过，不 panic。
+/// process_info 以闭包注入（pid → (cpu_usage, exe)），可测核心不依赖 sysinfo 进程表构造
+fn discover_workbuddy_processes_with(
+    home: &Path,
+    process_info: &dyn Fn(u32) -> Option<(f32, Option<PathBuf>)>,
+    now_ms: u64,
+) -> Vec<AgentProcess> {
+    let sessions_dir = home.join(".workbuddy").join("sessions");
+    let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
+        return Vec::new(); // 目录缺失/不可读 → 空集，不 panic
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // 文件名须为 <PID>.json；其余文件（如 README/临时文件）跳过
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(pid) = stem.parse::<u32>() else {
+            continue;
+        };
+        // 防御：心跳文件缺失/损坏 → 跳过该 pid
+        let Some(hb) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| parse_heartbeat(&s))
+        else {
+            continue;
+        };
+        // 过滤：严格 UUID + kind 非 prewarm + 心跳新鲜（与 get_workbuddy_sessions 同规）
+        if !heartbeat_session_id_is_uuid(&hb)
+            || hb.kind.as_deref() == Some("prewarm")
+            || !heartbeat_is_alive(&hb, now_ms)
+        {
+            continue;
+        }
+        // 以 pid 回查进程表：查无 → 跳过（进程已消失，不产出进程）
+        let Some((cpu_usage, exe)) = process_info(pid) else {
+            continue;
+        };
+        found.push(AgentProcess {
+            pid,
+            cpu_usage,
+            cwd: Some(PathBuf::from(&hb.cwd)),
+            exe,
+            form: ProcessForm::App,
+        });
+    }
+    found
+}
+
+/// 真实 home / 真实时钟 + sysinfo 进程表的薄包装（discover_workbuddy_processes_with 的可测核心）
+pub fn discover_workbuddy_processes(system: &sysinfo::System) -> Vec<AgentProcess> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    discover_workbuddy_processes_with(&home, &|pid| {
+        system
+            .process(sysinfo::Pid::from_u32(pid))
+            .map(|p| (p.cpu_usage(), p.exe().map(|e| e.to_path_buf())))
+    }, now_ms())
+}
+
 /// 主入口：活跃心跳的 WorkBuddy 进程 → 每会话一张卡
 pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let mut sessions = Vec::new();
@@ -773,6 +842,126 @@ mod tests {
             let last_seen = Mutex::new(HashMap::from([(11952u32, SID.to_string())]));
             let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
             assert!(out.is_empty());
+        }
+    }
+
+    // ---- 心跳目录驱动的进程发现（P0-1）：tempdir 驱动 + 构造进程表（闭包注入） ----
+
+    mod discovery_tests {
+        use super::*;
+
+        const SID: &str = "ecbf3d35-76e9-42df-b71d-89409ec156ea";
+
+        fn write_heartbeat_json(home: &Path, pid: u32, json: &str) {
+            let dir = home.join(".workbuddy/sessions");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{pid}.json")), json).unwrap();
+        }
+
+        fn active_hb(pid: u32, last_heartbeat_ms: u64) -> String {
+            format!(
+                r#"{{"pid":{pid},"sessionId":"{SID}","cwd":"/Users/jarvis/proj","lastHeartbeat":{last_heartbeat_ms},"kind":"interactive"}}"#
+            )
+        }
+
+        /// 构造「进程表」：只含指定 pid（cpu=0.0、exe=None），其余 pid 查无
+        fn process_table(pids: &[u32]) -> impl Fn(u32) -> Option<(f32, Option<PathBuf>)> + '_ {
+            move |pid: u32| pids.contains(&pid).then_some((0.0, None))
+        }
+
+        #[test]
+        fn fresh_real_task_produces_process() {
+            let home = tempfile::tempdir().unwrap();
+            write_heartbeat_json(home.path(), 11952, &active_hb(11952, 1_000));
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 10_000);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].pid, 11952);
+            assert_eq!(found[0].form, ProcessForm::App);
+            assert_eq!(found[0].cwd.as_deref(), Some(Path::new("/Users/jarvis/proj")));
+        }
+
+        #[test]
+        fn serve_heartbeat_is_skipped() {
+            // --serve 服务心跳（interactive-<pid>）→ 不产进程
+            let home = tempfile::tempdir().unwrap();
+            write_heartbeat_json(
+                home.path(),
+                8979,
+                r#"{"pid":8979,"sessionId":"interactive-8979","cwd":"/tmp/host-cli","lastHeartbeat":9000,"kind":"interactive"}"#,
+            );
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[8979]), 10_000);
+            assert!(found.is_empty());
+        }
+
+        #[test]
+        fn prewarm_heartbeat_is_skipped() {
+            // prewarm 池心跳：kind=prewarm（且 UUID 形态不满足）→ 不产进程
+            let home = tempfile::tempdir().unwrap();
+            write_heartbeat_json(
+                home.path(),
+                17692,
+                r#"{"pid":17692,"sessionId":"prewarm-wb-pool-1788496419201-bb1050","cwd":"C:\\Users\\bunny\\WorkBuddy","lastHeartbeat":9000,"kind":"prewarm"}"#,
+            );
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[17692]), 10_000);
+            assert!(found.is_empty());
+        }
+
+        #[test]
+        fn stale_heartbeat_is_skipped() {
+            // 心跳过期（now - lastHeartbeat >= 90s）→ 不产进程
+            let home = tempfile::tempdir().unwrap();
+            write_heartbeat_json(home.path(), 11952, &active_hb(11952, 0));
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 100_000);
+            assert!(found.is_empty());
+        }
+
+        #[test]
+        fn pid_not_in_process_table_is_skipped() {
+            // 心跳新鲜但 pid 不在进程表 → 不产进程（且不动 LAST_SEEN_SESSIONS——
+            // 发现阶段不写观测表，消失场景由 W4 补偿处理）
+            let home = tempfile::tempdir().unwrap();
+            write_heartbeat_json(home.path(), 11952, &active_hb(11952, 1_000));
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[]), 10_000);
+            assert!(found.is_empty());
+        }
+
+        #[test]
+        fn missing_sessions_dir_is_empty_not_panic() {
+            // 心跳目录不存在/不可读 → 空集，不 panic
+            let home = tempfile::tempdir().unwrap();
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[1]), 10_000);
+            assert!(found.is_empty());
+        }
+
+        #[test]
+        fn malformed_and_non_pid_files_are_skipped() {
+            // 目录里混入非 <PID>.json / 损坏 JSON → 跳过，不影响合法心跳
+            let home = tempfile::tempdir().unwrap();
+            let dir = home.path().join(".workbuddy/sessions");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("README.md"), "not a heartbeat").unwrap();
+            std::fs::write(dir.join("abc.json"), "garbage").unwrap();
+            write_heartbeat_json(home.path(), 11952, &active_hb(11952, 1_000));
+            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 10_000);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].pid, 11952);
+        }
+
+        #[test]
+        fn cpu_and_exe_come_from_process_table() {
+            // 构装字段：cpu_usage/exe 取自进程表回查，cwd 取自心跳
+            let home = tempfile::tempdir().unwrap();
+            write_heartbeat_json(home.path(), 42, &active_hb(42, 1_000));
+            let exe = PathBuf::from("C:\\Program Files\\WorkBuddy\\WorkBuddy.exe");
+            let found = discover_workbuddy_processes_with(
+                home.path(),
+                &|pid| (pid == 42).then_some((3.5f32, Some(exe.clone()))),
+                10_000,
+            );
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].cpu_usage, 3.5);
+            assert_eq!(found[0].exe.as_deref(), Some(exe.as_path()));
+            assert_eq!(found[0].form, ProcessForm::App);
         }
     }
 }

@@ -23,8 +23,13 @@ pub fn detect_all_tools() -> Vec<ToolDetection> {
         .map(|adapter| {
             let base = adapter.base_dir();
             let dir_exists = base.exists();
-            // 检测 CLI 可用性：检查进程名的第一个字符
-            let cli_available = which(adapter.process_names()[0]);
+            // 检测 CLI 可用性：检查进程名的第一个字符。
+            // 防御空切片：心跳驱动工具（workbuddy）无进程名 → cli_available=false
+            let cli_available = adapter
+                .process_names()
+                .first()
+                .map(|name| which(name))
+                .unwrap_or(false);
 
             debug!(
                 "{}: dir={}, cli={}",

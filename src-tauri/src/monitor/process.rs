@@ -199,12 +199,9 @@ pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
 pub fn find_kimi_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(system, &["kimi"], &["multi-agents-manager"])
 }
-
-/// 发现 WorkBuddy 会话进程（codebuddy；活跃性由心跳文件过滤，见 workbuddy_parser）
-/// 注：独立安装的腾讯 CodeBuddy CLI 同名进程无 ~/.workbuddy 心跳，由解析器天然排除
-pub fn find_workbuddy_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["codebuddy"], &["multi-agents-manager"])
-}
+// WorkBuddy 不在此处做进程名发现（P0-1）：会话进程发现已改为心跳目录驱动，
+// 见 workbuddy_parser::discover_workbuddy_processes——Windows 上会话宿主与主进程同名
+// WorkBuddy.exe，进程名匹配不可用，且父进程同名会被通用子代理过滤误杀
 
 #[cfg(test)]
 mod tests {

@@ -14,13 +14,16 @@ impl AgentAdapter for WorkBuddyAdapter {
         AgentType::WorkBuddy
     }
     fn process_names(&self) -> &'static [&'static str] {
-        // APP 内嵌运行时进程；独立安装的腾讯 CodeBuddy CLI 同名进程
-        // 无 ~/.workbuddy 心跳，由解析器天然排除
-        &["codebuddy"]
+        // P0-1：进程发现改心跳目录驱动，不使用进程名匹配——Windows 上会话宿主与主进程
+        // 同名 WorkBuddy.exe（Electron 以自身作 Node 运行 cli/bin/codebuddy 脚本，无
+        // codebuddy 进程），进程名匹配恒空且「父进程同名」会被通用子代理过滤误杀。
+        // 返回空切片：detect_all_tools 等入口已防御空切片（见 linker/detector.rs）
+        &[]
     }
 
     fn find_processes(&self, system: &System) -> Vec<AgentProcess> {
-        monitor::process::find_workbuddy_processes(system)
+        // 心跳目录驱动：枚举 ~/.workbuddy/sessions/<PID>.json 按过滤规则发现会话进程
+        monitor::workbuddy_parser::discover_workbuddy_processes(system)
     }
 
     fn find_sessions(&self, processes: &[AgentProcess]) -> Vec<Session> {
