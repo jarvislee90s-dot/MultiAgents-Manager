@@ -9,9 +9,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { probeAudioDurationMs, probeSheetRows, type PetRows } from "../petRuntime";
+import { probeSheetRows, type PetRows } from "../petRuntime";
 import { judgeVoiceTier, voiceRowProblem, type VoiceRow } from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
+import { useVoiceDurationProbe } from "./useVoiceDurationProbe";
 import { petErrMsg } from "../petErrors";
 
 interface StagedPetDto {
@@ -87,30 +88,8 @@ export function PetImportDialog(props: {
       .catch(() => setRows(null));
   }, []);
 
-  // 未探测时长的文件补探测（并行）
-  useEffect(() => {
-    if (!staged || step !== "config") return;
-    const pending = voiceRows.filter((r) => r.durationMs === null);
-    if (pending.length === 0) return;
-    let cancelled = false;
-    void Promise.all(
-      pending.map(async (r) => ({
-        file: r.file,
-        durationMs: await probeAudioDurationMs(convertFileSrc(`${staged.dir}/${r.file}`)).catch(() => null),
-      }))
-    ).then((probed) => {
-      if (cancelled) return;
-      setVoiceRows((prev) =>
-        prev.map((r) => {
-          const hit = probed.find((p) => p.file === r.file);
-          return hit ? { ...r, durationMs: hit.durationMs } : r;
-        })
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [staged, step, voiceRows]);
+  // 未探测时长的文件补探测（并行；失败保持 null）——共享 hook 封装
+  useVoiceDurationProbe(voiceRows, setVoiceRows, staged?.dir ?? null);
 
   const stageFrom = async (fn: () => Promise<StagedPetDto>) => {
     setBusy(true);

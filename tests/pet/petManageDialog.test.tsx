@@ -1,8 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { beforeEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { render } from "@testing-library/react";
 import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
+import { probeAudioDurationMs } from "@/components/pet/petRuntime";
 import { tauriInvokeMock } from "../msw/tauriMocks";
+// tests/setup.ts 未初始化 i18n：徽标/时长文案需真实 i18n 渲染
+import i18n from "@/i18n";
+
+beforeAll(async () => {
+  await i18n.changeLanguage("zh");
+});
 
 vi.mock("@/components/pet/petActivation", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petActivation")>();
@@ -119,5 +126,46 @@ describe("PetManageDialog", () => {
     await waitFor(() =>
       expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_delete_pet")?.[1]?.id).toBe("starry-dew")
     );
+  });
+
+  it("选中宠物：manifest 未缓存时长的行经共享 hook 探测后徽标从 no-duration 变为时长", async () => {
+    // manifest 返回 voices（durationMs 缺失），磁盘 scan 同文件在 manifest 中（不产生 extra 重复）
+    let resolveProbe: ((v: number) => void) | null = null;
+    vi.mocked(probeAudioDurationMs).mockImplementation(
+      () => new Promise<number>((res) => (resolveProbe = res))
+    );
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets") return Promise.resolve(pets);
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "starry-dew", dir: "/x/starry-dew",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [{ rel: "voice/general/greet.mp3", exists: true, size: 1000 }],
+        });
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve({
+          id: "starry-dew", displayName: "Starry Dew", hasVoice: false, hasSubtitle: false,
+          spriteVersionNumber: 1, spritesheetSizeBytes: 100,
+          voices: [{ group: "general", name: "greet", file: "voice/general/greet.mp3", sizeBytes: 1000, durationMs: null as unknown as number }],
+        });
+      return Promise.resolve(undefined);
+    });
+
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+
+    // 探测 pending：徽标为 no-duration
+    const row = await screen.findByTestId("voice-row-voice/general/greet.mp3");
+    expect(row).toHaveTextContent(/无法读取时长/);
+    expect(probeAudioDurationMs).toHaveBeenCalled();
+
+    // 探测 resolve（3s）：徽标消解，行内出现时长
+    await act(async () => {
+      resolveProbe?.(3000);
+    });
+    await waitFor(() => {
+      expect(row).not.toHaveTextContent(/无法读取时长/);
+      expect(row).toHaveTextContent(/3\.0s/);
+    });
   });
 });

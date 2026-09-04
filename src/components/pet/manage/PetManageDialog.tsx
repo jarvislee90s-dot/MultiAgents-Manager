@@ -13,6 +13,7 @@ import { petErrMsg } from "../petErrors";
 import { buildManifestFromScan, repairManifest } from "../petActivation";
 import type { PetManifestView, PetScan, VoiceRow } from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
+import { useVoiceDurationProbe } from "./useVoiceDurationProbe";
 
 interface PetSummaryDto {
   id: string;
@@ -33,6 +34,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
   const [displayName, setDisplayName] = useState("");
   const [subtitle, setSubtitle] = useState(false);
   const [voiceRows, setVoiceRows] = useState<VoiceRow[]>([]);
+  const [petDir, setPetDir] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -48,6 +50,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
   useEffect(() => {
     if (props.open) {
       setSelected(null);
+      setPetDir(null);
       void reload();
     }
   }, [props.open, reload]);
@@ -58,8 +61,10 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     setDisplayName(p.displayName);
     setSubtitle(p.hasSubtitle);
     setVoiceRows([]);
+    setPetDir(null);
     try {
       const scan = await invoke<PetScan>("pet_scan", { id: p.id });
+      setPetDir(scan.dir);
       const m = await invoke<PetManifestView | null>("pet_read_manifest", { id: p.id });
       const rows = (m?.voices ?? []).map((v) => ({
         group: v.group,
@@ -81,6 +86,9 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       /* 面板仍可用，保存时按扫描兜底 */
     }
   };
+
+  // 未探测时长（manifest 无缓存 / 磁盘新文件）并行探测回填，失败保持 null
+  useVoiceDurationProbe(voiceRows, setVoiceRows, petDir);
 
   /** 激活中宠物先自动切回 foxbell（EP5），返回是否执行了切换 */
   const ensureNotActive = (): boolean => {
@@ -108,6 +116,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       toast.success(t("pet.manage.renamedToast", { name: renameTo }));
       await reload();
       setSelected(null);
+      setPetDir(null);
     } catch (e) {
       toast.error(petErrMsg(e, t));
     } finally {
@@ -153,6 +162,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       toast.success(t("pet.manage.deletedToast", { name: selected.displayName }));
       setDeleting(false);
       setSelected(null);
+      setPetDir(null);
       await reload();
     } catch (e) {
       toast.error(petErrMsg(e, t));

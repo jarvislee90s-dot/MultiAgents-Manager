@@ -33,5 +33,5 @@ export function useVoiceDurationProbe(
     return () => {
       cancelled = true;
     };
-  }, [dir, rows]);
+  }, [dir, rows, setRows]);
 }
