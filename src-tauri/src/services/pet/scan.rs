@@ -1,4 +1,5 @@
 // 扫描 — 单宠物 stat 快扫、仓库清单、codex 目录清单（spec §6-1/§8.1）
+use super::error::PetRpcError;
 use super::{manifest, pet_dir};
 use serde::Serialize;
 use std::path::Path;
@@ -77,10 +78,10 @@ fn walk_voice(root: &Path) -> Vec<FileStat> {
 }
 
 /// 单宠物 stat 快扫（统一校验算法的 Rust 侧输入，spec §6-1）
-pub fn scan_pet_in(root: &Path, id: &str) -> Result<PetScan, String> {
+pub fn scan_pet_in(root: &Path, id: &str) -> Result<PetScan, PetRpcError> {
     let dir = pet_dir(root, id);
     if !dir.is_dir() {
-        return Err(format!("宠物不存在: {}", id));
+        return Err(PetRpcError::new("pet-not-found", format!("宠物不存在: {}", id)).with("id", id.to_string()));
     }
     Ok(PetScan {
         id: id.to_string(),

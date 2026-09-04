@@ -1,4 +1,5 @@
 // manifest.json — 结构、读取与备份写入（spec §4.2）。写入前自动备份 manifest.json.bak（仅保留最近一份）
+use super::error::PetRpcError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -49,14 +50,14 @@ pub fn load(dir: &Path) -> Option<PetManifest> {
 }
 
 /// 写 manifest.json；backup=true 且旧文件存在时先复制为 manifest.json.bak（spec §4.1）
-pub fn write_with_backup(dir: &Path, m: &PetManifest, backup: bool) -> Result<(), String> {
+pub fn write_with_backup(dir: &Path, m: &PetManifest, backup: bool) -> Result<(), PetRpcError> {
     let path = dir.join(MANIFEST_FILE);
     if backup && path.exists() {
         std::fs::copy(&path, dir.join(BACKUP_FILE))
-            .map_err(|e| format!("备份 manifest 失败: {}", e))?;
+            .map_err(|e| PetRpcError::new("manifest-backup-failed", format!("备份 manifest 失败: {}", e)).with("err", e.to_string()))?;
     }
-    let text = serde_json::to_string_pretty(m).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("写入 manifest 失败: {}", e))
+    let text = serde_json::to_string_pretty(m).map_err(|e| PetRpcError::internal(e.to_string()))?;
+    std::fs::write(&path, text).map_err(|e| PetRpcError::new("manifest-write-failed", format!("写入 manifest 失败: {}", e)).with("err", e.to_string()))
 }
 
 #[cfg(test)]
