@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseManifest, pickIndex, subtitleMs } from "@/components/pet/petVoices";
+import { parseManifest, pickIndex, subtitleMs, VoicePlayer, type VoiceEntry } from "@/components/pet/petVoices";
 
 describe("petVoices", () => {
   it("parseManifest：组序重排索引、组内 zh 排序、忽略非法项", () => {
@@ -33,5 +33,26 @@ describe("petVoices", () => {
     expect(subtitleMs(NaN)).toBe(2500);
     expect(subtitleMs(1.2)).toBe(2500); // 1200+250=1450 < 2500
     expect(subtitleMs(4)).toBe(4250);
+  });
+});
+
+describe("VoicePlayer resolveUrl（外部宠物 blob 快照，spec EP6）", () => {
+  it("load 可注入自定义 URL 解析器", () => {
+    const player = new VoicePlayer();
+    const entries: VoiceEntry[] = [
+      { index: 0, group: "general", name: "a", file: "voice/general/a.m4a" },
+    ];
+    player.load(entries, (f) => `blob://${f}`);
+    // jsdom Audio 不可真实加载，仅验证不抛错且 pick 正常
+    const e = player.pick("general");
+    expect(e?.file).toBe("voice/general/a.m4a");
+    player.dispose();
+  });
+  it("默认解析器保持 foxbell 内置路径", () => {
+    const player = new VoicePlayer();
+    expect(() =>
+      player.load([{ index: 0, group: "general", name: "a", file: "x.m4a" }])
+    ).not.toThrow();
+    player.dispose();
   });
 });

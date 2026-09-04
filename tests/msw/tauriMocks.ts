@@ -57,8 +57,24 @@ export const mockPresets = [
   { id: "preset-1", name: "前端开发", items: [["brainstorming", "skill"]] },
 ];
 
+// convertFileSrc：asset 协议路径转换（petRuntime/向导预览用）
+export const convertFileSrcMock = (path: string) => `asset://mock/${path}`;
+
 export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
   switch (cmd) {
+    case "pet_list_pets":
+      return Promise.resolve([]);
+    case "pet_list_codex_pets":
+      return Promise.resolve([]);
+    case "pet_scan":
+      return Promise.resolve({
+        id: "x",
+        dir: "/home/u/.mam/pets/x",
+        spritesheet: { rel: "spritesheet.webp", exists: true, size: 1 },
+        voiceFiles: [],
+      });
+    case "pet_read_manifest":
+      return Promise.resolve(null);
     case "get_all_sessions":
       return Promise.resolve(mockSessions);
     case "list_extensions_with_assignments":

@@ -58,14 +58,16 @@ export class VoicePlayer {
   private lastIdx: Partial<Record<VoiceGroup, number>> = {};
   private shared: HTMLAudioElement | null = null;
   private unlocked = false;
+  private resolve: (file: string) => string = (f) => `/pet/voice/${encodeURI(f)}`;
 
-  load(entries: VoiceEntry[]): void {
+  load(entries: VoiceEntry[], resolveUrl?: (file: string) => string): void {
     this.dispose();
     this.entries = entries;
+    if (resolveUrl) this.resolve = resolveUrl;
     try {
       this.els = entries.map((v) => {
-        // 文件名含中文/空格/~：encodeURI 编码路径段（保留 /），避免未编码 URL 在部分环境失效
-        const a = new Audio(`/pet/voice/${encodeURI(v.file)}`);
+        // 文件名含中文/空格/~：外部宠物用注入的解析器（blob 快照），内置走 encodeURI 路径
+        const a = new Audio(this.resolve(v.file));
         a.preload = "auto";
         a.load();
         return a;
@@ -106,7 +108,7 @@ export class VoicePlayer {
         opts.onSubtitle?.(entry.name, subtitleMs(dur));
       } else {
         if (!this.shared) this.shared = new Audio();
-        this.shared.src = `/pet/voice/${encodeURI(entry.file)}`;
+        this.shared.src = this.resolve(entry.file);
         const pr = this.shared.play();
         if (pr && typeof pr.catch === "function")
           pr.catch(() => {

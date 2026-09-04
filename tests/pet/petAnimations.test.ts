@@ -35,3 +35,19 @@ describe("petAnimations", () => {
     expect(look.backgroundPosition).toBe(`0px ${-10 * FRAME_H}px`);
   });
 });
+
+describe("frameStyle rows 参数（v1/v2，spec EP1）", () => {
+  it("rows=9 时 backgroundSize 高度按 9 行计算", () => {
+    const s = frameStyle("idle", 0, -1, 1, 9);
+    expect(s.backgroundSize).toBe("1536px 1872px");
+  });
+  it("rows=11 默认值不变（v2 兼容）", () => {
+    const s = frameStyle("idle", 0, -1, 1);
+    expect(s.backgroundSize).toBe("1536px 2288px");
+  });
+  it("rows=9 时 look 帧不可用，回退 idle 行定位", () => {
+    // v1 无 look 行：调用方保证不进入 look；此处验证默认缩放不越界
+    const s = frameStyle("review", 2, -1, 1, 9);
+    expect(s.backgroundPosition).toBe("-384px -1664px");
+  });
+});

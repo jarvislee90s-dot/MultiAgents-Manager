@@ -1,4 +1,5 @@
 // 精灵动画 — Codex V2 图集（8 列×11 行，每帧 192×208），逐帧时长 + look 16 向（spec §7）
+// rows 参数：v1=9（无 look 行）/ v2=11（默认），spec EP1
 export const FRAME_W = 192;
 export const FRAME_H = 208;
 export const SHEET_COLS = 8;
@@ -39,7 +40,8 @@ export function frameStyle(
   anim: PetAnimKey,
   frame: number,
   lookFrame: number,
-  scale: number
+  scale: number,
+  rows: 9 | 11 = 11
 ): { backgroundPosition: string; backgroundSize: string } {
   const w = FRAME_W * scale;
   const h = FRAME_H * scale;
@@ -57,6 +59,6 @@ export function frameStyle(
   }
   return {
     backgroundPosition: `${x}px ${y}px`,
-    backgroundSize: `${w * SHEET_COLS}px ${h * SHEET_ROWS}px`,
+    backgroundSize: `${w * SHEET_COLS}px ${h * rows}px`,
   };
 }
