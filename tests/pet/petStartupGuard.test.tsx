@@ -68,16 +68,22 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("foxbell"));
   });
 
-  it("pet_scan reject → 致命弹窗（目录被整删也必须弹窗，FIX-4/EP2）", async () => {
+  it("pet_scan reject（结构化 RpcError）→ 致命弹窗走 pet.rpc 映射文案（第六轮）", async () => {
     localStorage.setItem("mam-pet-active", "p1");
+    // i18n 未初始化时 t() 返回键名：断言 fatal 行走映射键 pet.startup.fatal + pet.rpc.pet-not-found
     tauriInvokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "pet_scan") return Promise.reject(new Error("宠物不存在: p1"));
+      if (cmd === "pet_scan")
+        return Promise.reject({ code: "pet-not-found", params: { id: "p1" }, detail: "宠物不存在: p1" });
       return Promise.resolve(undefined);
     });
     render(<PetStartupGuard />);
     await screen.findByTestId("pet-startup-dialog");
     expect(screen.queryByTestId("pet-startup-update")).toBeNull(); // 致命分支无更新按钮
     expect(await screen.findByTestId("pet-startup-foxbell")).toBeInTheDocument();
+    // 映射链路：RpcError 经 petErrMsg → t("pet.startup.fatal", { msg: t("pet.rpc.pet-not-found", {id:"p1"}) })。
+    // 测试环境 i18next 未初始化时 fatal 行渲染为键名（插值未展开），映射语义由 petErrors.test.ts 钉死；
+    // 此处断言 fatal 行存在且更新按钮不在（致命三分支形态不变）
+    expect(screen.getByTestId("pet-startup-dialog").textContent).toContain("pet.startup.fatal");
   });
 
   it("直投（无 manifest）更新 → buildManifestFromScan，字幕默认跟随 hasVoice（FIX-4）", async () => {

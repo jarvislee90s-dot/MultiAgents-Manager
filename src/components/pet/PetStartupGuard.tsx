@@ -10,7 +10,7 @@ import { loadActiveId, probeSheetRows, saveActiveId, type PetRows } from "./petR
 import { buildManifestFromScan, repairManifest } from "./petActivation";
 import { diffManifestVsScan, type PetManifestView, type PetScan, type ValidationIssue } from "./petValidation";
 import { saveVisible } from "./petConfig";
-import { petErrMsg, PetError } from "./petErrors";
+import { isPetRpcError, petErrMsg, PetError } from "./petErrors";
 
 function toFoxbell(msgKey: string) {
   saveActiveId("foxbell", true, "Foxbell");
@@ -67,8 +67,8 @@ export function PetStartupGuard() {
         }
       } catch (e) {
         // 扫描失败（如宠物目录被整体删除）：宠物窗口自行降级渲染，但主窗口仍需弹窗确认（EP2，FIX-4）。
-        // invoke 抛错为字符串而非 Error 实例：包装为 PetError("scan-fail") 走 i18n
-        if (!disposed) setFatal(e instanceof Error ? e : new PetError("scan-fail"));
+        // RpcError/普通 Error 原样存（petErrMsg 分流翻译）；字符串/其它形态收敛 scan-fail（第六轮）
+        if (!disposed) setFatal(isPetRpcError(e) || e instanceof Error ? e : new PetError("scan-fail"));
       }
     })();
     return () => {

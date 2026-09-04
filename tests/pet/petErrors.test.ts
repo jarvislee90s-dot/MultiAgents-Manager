@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { PetError, petErrMsg } from "@/components/pet/petErrors";
+import { isPetRpcError, PetError, petErrMsg } from "@/components/pet/petErrors";
 
 // i18n 替身：键 + JSON 参数按 petErrors 约定渲染
 const t = vi.fn((k: string, p?: Record<string, unknown>) => {
   if (p && "w" in p) return `${k}:${p.w}x${p.h}`;
+  if (p && "name" in p) return `${k}:${p.name}`;
   return k;
 });
 
@@ -35,5 +36,31 @@ describe("petErrMsg（P3-6 错误码 → i18n）", () => {
 
   it("message 为空的 Error → 兜底 scan-fail 键", () => {
     expect(petErrMsg(new Error(""), t)).toBe("pet.err.scan-fail");
+  });
+
+  describe("PetRpcError 分支（第六轮 Commit 3）", () => {
+    it("结构化 RpcError → t(pet.rpc.<code>, params) 正常映射", () => {
+      const msg = petErrMsg({ code: "pet-exists", params: { name: "dup" }, detail: "宠物已存在: dup" }, t);
+      expect(msg).toBe("pet.rpc.pet-exists:dup");
+      expect(t).toHaveBeenCalledWith("pet.rpc.pet-exists", { name: "dup" });
+    });
+
+    it("未知 code（i18next 回键名）→ 兜底 pet.rpc.internal 且 detail 进 err", () => {
+      const tUnknown = vi.fn((k: string, p?: Record<string, unknown>) =>
+        p && "err" in p ? `${k}:${p.err}` : k
+      ); // 模拟键缺失时 i18next 返回键名
+      const msg = petErrMsg({ code: "never-coded", detail: "原始错误原文" }, tUnknown);
+      expect(msg).toBe("pet.rpc.internal:原始错误原文");
+      expect(tUnknown).toHaveBeenCalledWith("pet.rpc.internal", { err: "原始错误原文" });
+    });
+
+    it("isPetRpcError 类型守卫：仅接受 code 为非空 string 的对象", () => {
+      expect(isPetRpcError({ code: "pet-exists" })).toBe(true);
+      expect(isPetRpcError({ code: "" })).toBe(false);
+      expect(isPetRpcError({ nope: 1 })).toBe(false);
+      expect(isPetRpcError("plain string")).toBe(false);
+      expect(isPetRpcError(null)).toBe(false);
+      expect(isPetRpcError(new Error("x"))).toBe(false); // 普通 Error 无 code 属性
+    });
   });
 });

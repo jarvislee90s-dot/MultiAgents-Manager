@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { loadActiveId, saveActiveId, type PetRows } from "../petRuntime";
+import { petErrMsg } from "../petErrors";
 import { buildManifestFromScan, repairManifest } from "../petActivation";
 import type { PetManifestView, PetScan, VoiceRow } from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
@@ -100,7 +101,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       await reload();
       setSelected(null);
     } catch (e) {
-      toast.error((e as Error).message);
+      toast.error(petErrMsg(e, t));
     } finally {
       setBusy(false);
     }
@@ -122,7 +123,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       toast.success(t("pet.manage.savedToast"));
       await reload();
     } catch (e) {
-      toast.error((e as Error).message);
+      toast.error(petErrMsg(e, t));
     } finally {
       setBusy(false);
     }
@@ -139,7 +140,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       setSelected(null);
       await reload();
     } catch (e) {
-      toast.error((e as Error).message);
+      toast.error(petErrMsg(e, t));
     } finally {
       setBusy(false);
     }

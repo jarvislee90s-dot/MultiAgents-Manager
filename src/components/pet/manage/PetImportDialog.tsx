@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { probeAudioDurationMs, probeSheetRows, type PetRows } from "../petRuntime";
 import { judgeVoiceTier, voiceRowProblem, type VoiceRow } from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
+import { petErrMsg } from "../petErrors";
 
 interface StagedPetDto {
   stagingId: string;
@@ -116,7 +117,7 @@ export function PetImportDialog(props: {
     try {
       enterConfig(await fn());
     } catch (e) {
-      toast.error(t("pet.import.errorStage", { msg: (e as Error).message }));
+      toast.error(t("pet.import.errorStage", { msg: petErrMsg(e, t) }));
     } finally {
       setBusy(false);
     }
@@ -163,7 +164,7 @@ export function PetImportDialog(props: {
       setStep("done");
       props.onImported?.(sum.id);
     } catch (e) {
-      toast.error(t("pet.import.errorFinalize", { msg: (e as Error).message }));
+      toast.error(t("pet.import.errorFinalize", { msg: petErrMsg(e, t) }));
     } finally {
       setBusy(false);
     }
