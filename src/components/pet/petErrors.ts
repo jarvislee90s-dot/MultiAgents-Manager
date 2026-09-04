@@ -77,6 +77,9 @@ export const KNOWN_RPC_CODES = [
 ] as const;
 
 export function isPetRpcError(e: unknown): e is PetRpcErrorLike {
+  // PetError 也携带 string 类型的 code 属性，必须在开头显式排除：
+  // 否则 fatal 分流会把图集类 PetError 误判为 rpc 走 fatalScan 前缀（第八轮）
+  if (e instanceof PetError) return false;
   return (
     typeof e === "object" &&
     e !== null &&

@@ -27,6 +27,57 @@ impl PetRpcError {
     }
 }
 
+/// 全量错误码单一清单（测试基准，44 码）：新增错误码须同步登记到此处与前端
+/// locales 的 pet.rpc.* 键（zh/en 两份）；rpc_codes_have_i18n_keys 测试负责锁住两侧不漂移。
+/// 登记依据：42 个单行构造站点 + internal 兜底 + redirect-too-many/redirect-forbidden。
+#[cfg(test)]
+pub const ALL_RPC_CODES: &[&str] = &[
+    "audio-format-unsupported",
+    "audio-not-found",
+    "audio-relpath-invalid",
+    "copy-failed",
+    "delete-failed",
+    "download-failed",
+    "download-status",
+    "download-url-invalid",
+    "finalize-move-failed",
+    "finalize-scan-failed",
+    "group-invalid",
+    "host-forbidden",
+    "internal",
+    "manifest-backup-failed",
+    "manifest-parse-failed",
+    "manifest-request-failed",
+    "manifest-status",
+    "manifest-write-failed",
+    "pet-dir-missing",
+    "pet-exists",
+    "pet-name-dot-prefix",
+    "pet-name-empty",
+    "pet-name-illegal",
+    "pet-name-reserved",
+    "pet-not-found",
+    "pet-not-on-petdex",
+    "petdex-no-zip",
+    "redirect-forbidden",
+    "redirect-too-many",
+    "rename-failed",
+    "reveal-failed",
+    "sheet-not-found",
+    "slug-parse-failed",
+    "source-not-folder",
+    "staging-create-failed",
+    "staging-id-invalid",
+    "staging-missing-sheet",
+    "staging-not-found",
+    "tmp-write-failed",
+    "zip-entry-illegal-path",
+    "zip-open-failed",
+    "zip-read-failed",
+    "zip-too-many-entries",
+    "zip-total-over-limit",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +102,29 @@ mod tests {
         assert!(json.contains("\"code\":\"internal\""));
         // params 空表也要序列化为 {}（前端 e.params ?? {} 分支依赖形状稳定）
         assert!(json.contains("\"params\":{}"));
+    }
+
+    /// 码表闭环（第八轮）：ALL_RPC_CODES 每个码都必须在前端 zh.json 有 pet.rpc.<code> 键。
+    /// 文件读不到时 panic 带明确信息（不静默跳过）。
+    #[test]
+    fn rpc_codes_have_i18n_keys() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/i18n/locales/zh.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("无法读取 zh.json（{}）: {}——码表一致性测试要求该文件存在", path.display(), e));
+        let root: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("zh.json 不是合法 JSON: {}", e));
+        let rpc = root
+            .get("pet")
+            .and_then(|p| p.get("rpc"))
+            .and_then(|r| r.as_object())
+            .unwrap_or_else(|| panic!("zh.json 缺少 pet.rpc 对象——i18n 键结构与码表约定不符"));
+        for code in ALL_RPC_CODES {
+            assert!(
+                rpc.contains_key(*code),
+                "错误码 `{}` 在 zh.json 的 pet.rpc.* 中没有对应 i18n 键（新增错误码须同步登记 locales）",
+                code
+            );
+        }
     }
 }

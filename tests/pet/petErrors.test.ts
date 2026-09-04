@@ -68,6 +68,8 @@ describe("petErrMsg（P3-6 错误码 → i18n）", () => {
       expect(isPetRpcError("plain string")).toBe(false);
       expect(isPetRpcError(null)).toBe(false);
       expect(isPetRpcError(new Error("x"))).toBe(false); // 普通 Error 无 code 属性
+      // PetError 也携带 code 属性：必须显式排除，否则 fatal 分流误走 fatalScan（第八轮）
+      expect(isPetRpcError(new PetError("sheet-missing"))).toBe(false);
     });
   });
 });

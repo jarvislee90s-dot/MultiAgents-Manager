@@ -70,7 +70,7 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
 
   it("pet_scan reject（结构化 RpcError）→ 致命弹窗走 pet.rpc 映射文案（第六轮）", async () => {
     localStorage.setItem("mam-pet-active", "p1");
-    // i18n 未初始化时 t() 返回键名：断言 fatal 行走映射键 pet.startup.fatal + pet.rpc.pet-not-found
+    // i18n 未初始化时 t() 返回键名：断言 fatal 行走映射键 pet.startup.fatalScan + pet.rpc.pet-not-found
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan")
         return Promise.reject({ code: "pet-not-found", params: { id: "p1" }, detail: "宠物不存在: p1" });
@@ -83,6 +83,25 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     // 映射链路（第七轮前缀拆分）：RpcError 走 pet.startup.fatalScan 前缀，msg 内含 pet.rpc.pet-not-found。
     // 测试环境 i18next 未初始化时渲染为键名（插值未展开），映射语义由 petErrors.test.ts 钉死
     expect(screen.getByTestId("pet-startup-dialog").textContent).toContain("pet.startup.fatalScan");
+  });
+
+  it("图集缺失（PetError）→ 致命弹窗走原 pet.startup.fatal 前缀（第八轮分流）", async () => {
+    localStorage.setItem("mam-pet-active", "p1");
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "p1", dir: "/x/p1",
+          spritesheet: { rel: "spritesheet.webp", exists: false, size: 0 },
+          voiceFiles: [],
+        });
+      return Promise.resolve(undefined);
+    });
+    render(<PetStartupGuard />);
+    await screen.findByTestId("pet-startup-dialog");
+    expect(screen.queryByTestId("pet-startup-update")).toBeNull(); // 致命分支无更新按钮
+    // PetError（sheet-missing）经 petErrMsg → pet.err.sheet-missing，前缀走原 fatal 而非 fatalScan
+    expect(screen.getByTestId("pet-startup-dialog").textContent).toContain("pet.startup.fatal");
+    expect(screen.getByTestId("pet-startup-dialog").textContent).not.toContain("pet.startup.fatalScan");
   });
 
   it("直投（无 manifest）更新 → buildManifestFromScan，字幕默认跟随 hasVoice（FIX-4）", async () => {
