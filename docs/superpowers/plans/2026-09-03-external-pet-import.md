@@ -4862,7 +4862,7 @@ Expected: 两组输出均为空。
 - [ ] AC1：设置 → 导入宠物 → 本地文件夹 → 选 `docs/pet-gallery/starry-dew` → 配置页显示 v1 徽标 → 执行导入 → 立即激活 → 宠物动画正常、无空闲环视、右键"声音/字幕"置灰、任务完成提示音走主看板
 - [ ] AC2：修改宠物 → starry-dew → 四组各加 1 条合法音频（1-20s、<10MB）→ 保存 → 重新激活 → 语音/字幕能力点亮，字幕 = 文件名
 - [ ] AC3：导入宠物 → 从 codex → linabell-peach（v2）→ 激活 → 空闲 6 秒后出现 16 帧环视
-- [ ] AC4：导入宠物 → petdex → 粘贴 `https://petdex.dev/pets/capvolt` → 下载暂存 → 导入激活
+- [ ] AC4：导入宠物 → petdex → 粘贴 `https://petdex.dev/pets/capvolt` → 下载暂存 → 导入激活（验收时留意重定向与网络超时表现——每跳白名单策略经代码审查保证，无自动化测试（不为此引入 mock server 依赖））
 - [ ] AC5：激活 starry-dew → 文件管理器删其 voice 目录 → 重启应用 → 启动弹窗出现，三分支（更新/切回/忽略）各自可走通
 - [ ] AC6：关闭应用 → 手动把 `~/.codex/pets/bajie` 复制为 `~/.mam/pets/bajie` → 启动 → 切换宠物 → bajie 卡片无能力徽标（v?）→ 点击 → 自动生成 manifest 并激活
 - [ ] AC7：修改宠物 → 选中当前激活的宠物 → 改名/保存 → 观察 toast"已自动切回 foxbell"且宠物即时变回 foxbell
