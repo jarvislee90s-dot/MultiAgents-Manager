@@ -279,7 +279,8 @@ export function FoxbellPet() {
         return;
       }
     } catch {
-      return; // 跳转失败：卡片保留（spec §13）
+      // 跳转失败也清除气泡（spec W1）：气泡是瞬时提醒，不因跳转失败卡死；
+      // 看板上的未读状态由 W4 已读机制独立管理，不在此处丢
     }
     ackDone(statusStateRef.current ?? {}, card.id); // 点击已读即消（spec C2）
     setCards(cardsFromState(statusStateRef.current ?? {}));

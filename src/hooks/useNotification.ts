@@ -168,8 +168,8 @@ export function useNotification() {
         if (currColor === "green" && !petSoundTakeover()) playCompletionSound(session.agentType);
         lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
 
-        // 发送通知：应用内浮窗为唯一主路径（spec 014 渠道统一），失败降级系统 toast
-        // 宠物置顶时抑制浮窗：头顶状态栏常显（spec D4）；历史与 toast 降级不受影响
+        // 发送通知：应用内浮窗为主路径，失败降级系统 toast（两者都在宠物压制守卫内）
+        // 宠物可见时全部静默：头顶气泡是唯一通知面（spec W1）
         if (!petSuppressPopup()) {
           const toolLabel = getAgentLabel(session.agentType, session.form);
           const statusLabel = STATUS_LABELS[session.status] ?? session.status;
