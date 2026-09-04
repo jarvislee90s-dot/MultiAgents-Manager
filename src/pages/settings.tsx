@@ -171,7 +171,13 @@ export default function SettingsPage() {
         setLeaveGuard(() => () => {
           setToolDirty(false);
           closeApprovedRef.current = true;
-          void win.close();
+          // F-A：mock 环境（jsdom）的 window 对象无 close 方法 → 静默；
+          // 放行标记已在上方置位，真实 Tauri 环境重发的 close 正常放行
+          try {
+            void win.close();
+          } catch {
+            /* mock 环境无 close：静默 */
+          }
         });
       });
       if (disposed) fn();
