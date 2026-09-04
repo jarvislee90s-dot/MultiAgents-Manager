@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 # macos-private-api：Tauri v2/macOS 下透明窗口（主窗 + 通知浮窗均 transparent: true）的
 # feature 门，须与 tauri.conf.json 的 app.macOSPrivateApi 成对出现；
 # 该 feature 在 tauri 内部由 cfg(target_os = "macos") 门控，非 macOS 平台为空操作
-tauri = { version = "2", features = ["tray-icon", "image-png", "devtools", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools", "macos-private-api", "protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
@@ -37,6 +37,9 @@ toml = "0.8"
 toml_edit = "0.22"
 trash = "5"
 semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+zip = "2"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"
