@@ -6,6 +6,7 @@ pub mod plugin;
 pub mod preset;
 pub mod resource;
 pub mod skill;
+pub mod tool_settings;
 
 use log::info;
 

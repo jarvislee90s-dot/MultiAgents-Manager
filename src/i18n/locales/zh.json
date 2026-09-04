@@ -107,6 +107,25 @@
       "scale": "大小",
       "enabledToast": "桌宠已开启",
       "disabledToast": "桌宠已隐藏"
+    },
+    "tools": {
+      "title": "工具管理",
+      "hint": "取消勾选的工具将在会话监控、通知与资源管理中隐藏；被 MAM 管理的文件会还原为真实文件",
+      "installed": "已安装",
+      "notInstalled": "未检测到",
+      "save": "保存设置",
+      "discard": "放弃更改",
+      "keepEditing": "继续编辑",
+      "unsavedTitle": "有未保存的更改",
+      "unsavedDesc": "工具开关有变更尚未保存，离开将丢失这些更改。",
+      "confirmTitle": "确认应用更改",
+      "confirmDesc": "即将对以下工具应用变更：",
+      "enableItem": "新纳入监控（影响较小）",
+      "restoreItem": "还原/回溯：skill/插件链接还原为真实文件、MCP 条目从工具配置移除",
+      "disableItem": "仅停止监控（无托管文件需要还原）",
+      "confirm": "确认应用",
+      "cancel": "取消",
+      "applied": "已应用"
     }
   },
   "home": {

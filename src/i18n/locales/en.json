@@ -107,6 +107,25 @@
       "scale": "Size",
       "enabledToast": "Pet enabled",
       "disabledToast": "Pet hidden"
+    },
+    "tools": {
+      "title": "Tool Management",
+      "hint": "Unchecked tools are hidden from session monitoring, notifications and resource management; MAM-managed files are restored to real files",
+      "installed": "Installed",
+      "notInstalled": "Not detected",
+      "save": "Save Settings",
+      "discard": "Discard Changes",
+      "keepEditing": "Keep Editing",
+      "unsavedTitle": "Unsaved Changes",
+      "unsavedDesc": "Tool toggles have unsaved changes. Leaving now will discard them.",
+      "confirmTitle": "Apply Changes",
+      "confirmDesc": "The following tool changes will be applied:",
+      "enableItem": "Start monitoring (minor impact)",
+      "restoreItem": "Restore/rollback: skill/plugin links restored to real files, MCP entries removed from tool config",
+      "disableItem": "Stop monitoring only (no managed files to restore)",
+      "confirm": "Apply",
+      "cancel": "Cancel",
+      "applied": "Applied"
     }
   },
   "home": {

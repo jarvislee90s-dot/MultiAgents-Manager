@@ -28,5 +28,7 @@ pub fn assign_skill_to_subagent(
     tool_id: String,
     sub_agent_id: String,
 ) -> Result<(), String> {
+    // W5：未勾选工具的分配操作直接拒绝（数据保留在 DB）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::assign_skill_to_subagent(&skill_name, &tool_id, &sub_agent_id)
 }

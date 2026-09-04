@@ -285,9 +285,17 @@ pub fn list_ssot_resources() -> SsotResources {
     let assignments = crate::database::list_all_assignments();
     let extensions = crate::database::list_extensions();
 
-    // 构建工具 → skill 目录映射，用于检测原生生效的 skill
+    // W5：工具列与已勾选工具求交集 — 未勾选工具的「按资源分布」列不返回，
+    // 分配数据本身保留在 DB（重新勾选后按原分配恢复显示）
+    let enabled_ids: std::collections::HashSet<String> =
+        crate::database::dao::agent_tool::enabled_tool_ids()
+            .into_iter()
+            .collect();
+
+    // 构建工具 → skill 目录映射，用于检测原生生效的 skill（仅已勾选工具参与）
     let tool_skill_dirs: Vec<(&str, std::path::PathBuf)> = crate::adapter::all_adapters_with_ids()
         .into_iter()
+        .filter(|(id, _)| enabled_ids.contains(*id))
         .filter_map(|(id, a)| a.skill_dirs().into_iter().next().map(|d| (id, d)))
         .collect();
 
@@ -297,10 +305,11 @@ pub fn list_ssot_resources() -> SsotResources {
             .into_iter()
             .map(|name| {
                 let ext_id = format!("skill-{}", name);
-                // 1) DB 中有 enabled=true 的记录
+                // 1) DB 中有 enabled=true 的记录（仅已勾选工具的列）
                 let mut enabled_tools: Vec<String> = assignments
                     .iter()
                     .filter(|a| a.extension_id == ext_id && a.enabled)
+                    .filter(|a| enabled_ids.contains(&a.agent_tool_id))
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
                 // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）
@@ -312,12 +321,13 @@ pub fn list_ssot_resources() -> SsotResources {
                         enabled_tools.push(tool_id.to_string());
                     }
                 }
-                // 断链检测：DB 中 enabled 且链接状态为 dangling 的工具
+                // 断链检测：DB 中 enabled 且链接状态为 dangling 的工具（仅已勾选工具的列）
                 let broken_tools: Vec<String> = assignments
                     .iter()
                     .filter(|a| {
                         a.extension_id == ext_id && a.enabled && a.link_status == "dangling"
                     })
+                    .filter(|a| enabled_ids.contains(&a.agent_tool_id))
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
                 SsotResource {
@@ -331,10 +341,11 @@ pub fn list_ssot_resources() -> SsotResources {
             .collect()
     };
 
-    // 构建工具 → MCP 配置路径映射，用于扫描各工具已有的 MCP 服务器
+    // 构建工具 → MCP 配置路径映射，用于扫描各工具已有的 MCP 服务器（仅已勾选工具参与）
     let tool_mcp_configs: Vec<(&str, std::path::PathBuf, crate::adapter::McpFormat)> =
         crate::adapter::all_adapters_with_ids()
             .into_iter()
+            .filter(|(id, _)| enabled_ids.contains(*id))
             .filter_map(|(id, a)| {
                 let path = a.mcp_config_path()?;
                 Some((id, path, a.mcp_format()))
@@ -392,18 +403,18 @@ pub fn list_ssot_resources() -> SsotResources {
             }
         }
 
-        // 3) 合并 DB assignment（覆盖工具配置文件扫描结果）
-        for assignment in &assignments {
-            if assignment.extension_id.starts_with("mcp-") {
-                let name = assignment.extension_id.strip_prefix("mcp-").unwrap_or("");
-                let entry = all_mcps.entry(name.to_string()).or_default();
-                if assignment.enabled {
-                    if !entry.contains(&assignment.agent_tool_id) {
-                        entry.push(assignment.agent_tool_id.clone());
-                    }
-                } else {
-                    entry.retain(|t| t != &assignment.agent_tool_id);
+        // 3) 合并 DB assignment（覆盖工具配置文件扫描结果；仅已勾选工具的列）
+        for assignment in assignments.iter().filter(|a| {
+            a.extension_id.starts_with("mcp-") && enabled_ids.contains(&a.agent_tool_id)
+        }) {
+            let name = assignment.extension_id.strip_prefix("mcp-").unwrap_or("");
+            let entry = all_mcps.entry(name.to_string()).or_default();
+            if assignment.enabled {
+                if !entry.contains(&assignment.agent_tool_id) {
+                    entry.push(assignment.agent_tool_id.clone());
                 }
+            } else {
+                entry.retain(|t| t != &assignment.agent_tool_id);
             }
         }
 
@@ -433,6 +444,7 @@ pub fn list_ssot_resources() -> SsotResources {
                 let enabled_tools: Vec<String> = assignments
                     .iter()
                     .filter(|a| a.extension_id == ext_id && a.enabled)
+                    .filter(|a| enabled_ids.contains(&a.agent_tool_id))
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
                 // plugin 子类型从 DB tags 读出（file | config），缺失时前端回退 file
@@ -568,6 +580,8 @@ fn remove_skill_target(target: &std::path::Path) -> Result<String, String> {
 /// 取消 skill 的工具配置：回收站/移除链接 + 更新 DB
 #[tauri::command]
 pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<String, String> {
+    // W5：未勾选工具的资源管理操作直接拒绝（数据保留在 DB）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
         .ok_or_else(|| format!("未知工具: {}", tool_id))?;
     let target = tool_skill_dir.join(&skill_name);
@@ -586,6 +600,8 @@ pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<Str
 /// 为工具启用 skill（创建符号链接 + DB 记录）
 #[tauri::command]
 pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<(), String> {
+    // W5：未勾选工具的资源管理操作直接拒绝（数据保留在 DB）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::enable_skill_for_tool(&skill_name, &tool_id)
 }
 

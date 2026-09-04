@@ -6,16 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Scan, Import, FolderOpen } from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { detectDuplicateSkills, cleanupDuplicateSkills } from "@/lib/api/resource";
+import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import type { NativeExtension, ToolResources, ImportStats } from "@/types/extension";
-
-const TOOLS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex CLI" },
-  { id: "opencode", label: "OpenCode" },
-  { id: "openclaw", label: "OpenClaw" },
-  { id: "kimi", label: "Kimi Code" },
-  { id: "workbuddy", label: "WorkBuddy" },
-];
 
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
@@ -23,6 +15,8 @@ function formatSkillName(name: string): string {
 
 export function ResourceByToolView() {
   const { t } = useTranslation();
+  // 工具列由后端下发（勾选状态驱动，W5）
+  const { data: tools = [] } = useEnabledToolsQuery();
   const [toolResources, setToolResources] = useState<Record<string, ToolResources>>({});
   const [scanning, setScanning] = useState<Record<string, boolean>>({});
 
@@ -35,12 +29,12 @@ export function ResourceByToolView() {
     }
   }, []);
 
-  // 挂载时自动加载所有工具的已有全局资源
+  // 挂载时（及工具勾选变化后）自动加载所有启用工具的已有全局资源
   useEffect(() => {
-    TOOLS.forEach((tool) => {
+    tools.forEach((tool) => {
       loadToolResources(tool.id);
     });
-  }, [loadToolResources]);
+  }, [tools, loadToolResources]);
 
   const handleScan = async (toolId: string) => {
     setScanning((prev) => ({ ...prev, [toolId]: true }));
@@ -49,7 +43,7 @@ export function ResourceByToolView() {
       if (native.length > 0) {
         toast.info(
           t("resources.foundNative", {
-            tool: TOOLS.find((tool) => tool.id === toolId)?.label,
+            tool: tools.find((tool) => tool.id === toolId)?.label,
             n: native.length,
           })
         );
@@ -92,12 +86,12 @@ export function ResourceByToolView() {
     }
   }, []);
 
-  // 挂载时检测所有工具的重复
+  // 挂载时（及工具勾选变化后）检测所有启用工具的重复
   useEffect(() => {
-    TOOLS.forEach((tool) => {
+    tools.forEach((tool) => {
       loadDuplicates(tool.id);
     });
-  }, [loadDuplicates]);
+  }, [tools, loadDuplicates]);
 
   const handleCleanupSingle = async (toolId: string, name: string) => {
     try {
@@ -134,7 +128,7 @@ export function ResourceByToolView() {
 
   return (
     <div className="space-y-4">
-      {TOOLS.map((tool) => (
+      {tools.map((tool) => (
         <div key={tool.id} className="rounded border p-3">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="flex items-center gap-2 text-sm font-semibold">

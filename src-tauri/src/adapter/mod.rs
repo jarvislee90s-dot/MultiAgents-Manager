@@ -136,6 +136,18 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         .collect()
 }
 
+/// 仅已启用（设置-工具管理中勾选）工具的 adapter。
+/// W5：会话扫描等用户可见入口使用；管理类入口（工具设置/资源扫描）仍走
+/// all_adapters()/all_adapters_with_ids()，保证未勾选工具可重新开启。
+/// 行缺失视为启用（get_tool_enabled 的防御语义），老用户升级零感知
+pub fn enabled_adapters() -> Vec<Box<dyn AgentAdapter>> {
+    TOOL_IDS
+        .iter()
+        .filter(|id| crate::database::dao::agent_tool::get_tool_enabled(id))
+        .filter_map(|id| adapter_by_id(id))
+        .collect()
+}
+
 /// 全部已注册 (工具 id, adapter)（资源扫描等需要 id 的场景）
 pub fn all_adapters_with_ids() -> Vec<(&'static str, Box<dyn AgentAdapter>)> {
     TOOL_IDS
@@ -157,7 +169,8 @@ pub fn dedup_sessions(sessions: &mut Vec<Session>) {
 
 /// 获取所有注册 adapter 的会话
 pub fn get_all_sessions() -> SessionsResponse {
-    let adapters: Vec<Box<dyn AgentAdapter>> = all_adapters();
+    // W5：未勾选工具不参与会话扫描（看板卡/通知随之静默）
+    let adapters: Vec<Box<dyn AgentAdapter>> = enabled_adapters();
 
     // Phase 1: 刷新共享 System 快照，发现所有进程
     let all_processes: Vec<Vec<AgentProcess>> = {

@@ -33,19 +33,11 @@ import {
   saveMcpConfig,
 } from "@/lib/api/resource";
 import { useSsotResourcesQuery, SSOT_RESOURCES_KEY } from "@/lib/query/queries/resources";
+import { useEnabledToolsQuery, type EnabledTool } from "@/lib/query/queries/tools";
 import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
 import { uninstallResource } from "@/lib/api/manifest";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
 import type { SsotResource } from "@/types/extension";
-
-const TOOLS = [
-  { id: "claude", label: "Claude" },
-  { id: "codex", label: "Codex" },
-  { id: "opencode", label: "OpenCode" },
-  { id: "openclaw", label: "OpenClaw" },
-  { id: "kimi", label: "Kimi Code" },
-  { id: "workbuddy", label: "WorkBuddy" },
-];
 
 type ResourceKind = "skill" | "mcp" | "plugin";
 type SortDir = "none" | "asc" | "desc";
@@ -58,11 +50,12 @@ function formatSkillName(name: string): string {
  *  MCP 打开的是配置文件（FileJson 图标），Skill/插件打开目录（FolderOpen 图标）。 */
 function SectionTableHeader(props: {
   kind: ResourceKind;
+  tools: EnabledTool[];
   sortDir: SortDir;
   onToggleSort: () => void;
   onOpen: (toolId: string) => void;
 }) {
-  const { kind, sortDir, onToggleSort, onOpen } = props;
+  const { kind, tools, sortDir, onToggleSort, onOpen } = props;
   const { t } = useTranslation();
   const SortIco = sortDir === "asc" ? ArrowUp : sortDir === "desc" ? ArrowDown : ArrowUpDown;
   const isFile = kind === "mcp";
@@ -89,7 +82,7 @@ function SectionTableHeader(props: {
       <div className="flex gap-1">
         {/* 占位：与行内"全部启用"按钮列对齐 */}
         <div className="h-6 w-[52px]" />
-        {TOOLS.map((tool) => (
+        {tools.map((tool) => (
           <Button
             key={tool.id}
             variant="ghost"
@@ -119,6 +112,8 @@ type PendingDisable = {
 export function ResourceByKindView() {
   const { t } = useTranslation();
   const qc = useQueryClient();
+  // 工具列由后端下发（勾选状态驱动，W5）
+  const { data: tools = [] } = useEnabledToolsQuery();
   const { data: resources } = useSsotResourcesQuery();
   const toggleMcp = useToggleMcpMutation();
   const [search, setSearch] = useState("");
@@ -206,7 +201,7 @@ export function ResourceByKindView() {
     let ok = 0;
     let skipped = 0;
     let failed = 0;
-    for (const tool of TOOLS) {
+    for (const tool of tools) {
       const isEnabled = res.enabledTools.includes(tool.id);
       if (enable === isEnabled) continue;
       try {
@@ -276,7 +271,7 @@ export function ResourceByKindView() {
         toast.success(
           t("resources.enabledInTool", {
             name: formatSkillName(skillName),
-            tool: TOOLS.find((tool) => tool.id === toolId)?.label,
+            tool: tools.find((tool) => tool.id === toolId)?.label,
           })
         );
         await refresh();
@@ -287,7 +282,7 @@ export function ResourceByKindView() {
       // 亮 → 灰：先检查类型，再弹窗
       try {
         const targetType = await checkSkillTargetType(toolId, skillName);
-        const toolLabel = TOOLS.find((tool) => tool.id === toolId)?.label || toolId;
+        const toolLabel = tools.find((tool) => tool.id === toolId)?.label || toolId;
         setPending({
           skillName,
           toolId,
@@ -394,6 +389,7 @@ export function ResourceByKindView() {
             <div className="space-y-1">
               <SectionTableHeader
                 kind="skill"
+                tools={tools}
                 sortDir={sortDirs.skill}
                 onToggleSort={() => toggleSort("skill")}
                 onOpen={(toolId) => handleOpenResource("skill", toolId)}
@@ -438,19 +434,19 @@ export function ResourceByKindView() {
                       size="sm"
                       className="h-6 px-1.5 text-[10px]"
                       title={
-                        skill.enabledTools.length === TOOLS.length
+                        skill.enabledTools.length === tools.length
                           ? t("resources.allToolsOff")
                           : t("resources.allToolsOn")
                       }
                       onClick={() =>
-                        handleToggleAll(skill, skill.enabledTools.length !== TOOLS.length)
+                        handleToggleAll(skill, skill.enabledTools.length !== tools.length)
                       }
                     >
-                      {skill.enabledTools.length === TOOLS.length
+                      {skill.enabledTools.length === tools.length
                         ? t("resources.allToolsOff")
                         : t("resources.allToolsOn")}
                     </Button>
-                    {TOOLS.map((tool) => {
+                    {tools.map((tool) => {
                       const enabled = skill.enabledTools.includes(tool.id);
                       return (
                         <Button
@@ -496,6 +492,7 @@ export function ResourceByKindView() {
             <div className="space-y-1">
               <SectionTableHeader
                 kind="mcp"
+                tools={tools}
                 sortDir={sortDirs.mcp}
                 onToggleSort={() => toggleSort("mcp")}
                 onOpen={(toolId) => handleOpenResource("mcp", toolId)}
@@ -530,17 +527,17 @@ export function ResourceByKindView() {
                       size="sm"
                       className="h-6 px-1.5 text-[10px]"
                       title={
-                        mcp.enabledTools.length === TOOLS.length
+                        mcp.enabledTools.length === tools.length
                           ? t("resources.allToolsOff")
                           : t("resources.allToolsOn")
                       }
-                      onClick={() => handleToggleAll(mcp, mcp.enabledTools.length !== TOOLS.length)}
+                      onClick={() => handleToggleAll(mcp, mcp.enabledTools.length !== tools.length)}
                     >
-                      {mcp.enabledTools.length === TOOLS.length
+                      {mcp.enabledTools.length === tools.length
                         ? t("resources.allToolsOff")
                         : t("resources.allToolsOn")}
                     </Button>
-                    {TOOLS.map((tool) => {
+                    {tools.map((tool) => {
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
                         <Button
@@ -577,6 +574,7 @@ export function ResourceByKindView() {
             <div className="space-y-1">
               <SectionTableHeader
                 kind="plugin"
+                tools={tools}
                 sortDir={sortDirs.plugin}
                 onToggleSort={() => toggleSort("plugin")}
                 onOpen={(toolId) => handleOpenResource("plugin", toolId)}
@@ -611,19 +609,19 @@ export function ResourceByKindView() {
                       size="sm"
                       className="h-6 px-1.5 text-[10px]"
                       title={
-                        plugin.enabledTools.length === TOOLS.length
+                        plugin.enabledTools.length === tools.length
                           ? t("resources.allToolsOff")
                           : t("resources.allToolsOn")
                       }
                       onClick={() =>
-                        handleToggleAll(plugin, plugin.enabledTools.length !== TOOLS.length)
+                        handleToggleAll(plugin, plugin.enabledTools.length !== tools.length)
                       }
                     >
-                      {plugin.enabledTools.length === TOOLS.length
+                      {plugin.enabledTools.length === tools.length
                         ? t("resources.allToolsOff")
                         : t("resources.allToolsOn")}
                     </Button>
-                    {TOOLS.map((tool) => {
+                    {tools.map((tool) => {
                       const enabled = plugin.enabledTools.includes(tool.id);
                       return (
                         <Button
