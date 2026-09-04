@@ -46,7 +46,10 @@ fn exe_matches(candidate: &str, process_names: &[&str]) -> bool {
 /// 判断进程形态（CLI 还是 APP），依据命中候选（exe 路径 / 进程名 / argv[0]）的特征
 /// - basename 首字母大写（如独立 Codex.app 的 "Codex"）→ APP
 /// - 位于 macOS .app 包内（如 ChatGPT.app 内嵌的 codex app-server）→ APP
-/// - 位于 Windows MSIX 安装目录（ChatGPT 合并版 Codex 桌面端）→ APP
+/// - 位于 Windows MSIX 安装目录（ChatGPT 合并版 Codex 桌面端）→ APP。
+///   P2-6：`WindowsApps/<publisher>.<app>_<version>_...` 的版本段随升级变化，硬编码
+///   `openai.codex_` 前缀会在 MSIX 版本升级后静默失效（误判 CLI 而非 APP）——
+///   放宽为「路径位于 WindowsApps/ 且路径/basename 含 codex」双条件
 fn classify_form(candidate: &str) -> ProcessForm {
     let normalized = candidate.replace('\\', "/");
     let base_stem = normalized.rsplit('/').next().unwrap_or("");
@@ -59,7 +62,8 @@ fn classify_form(candidate: &str) -> ProcessForm {
         .unwrap_or(false);
     let lower = normalized.to_lowercase();
     let in_app_bundle = lower.contains(".app/contents");
-    let in_msix = lower.contains("windowsapps/openai.codex_");
+    // MSIX：路径位于 WindowsApps 且含 codex（P2-6 去版本耦化）
+    let in_msix = lower.contains("windowsapps/") && lower.contains("codex");
     if exe_upper || in_app_bundle || in_msix {
         ProcessForm::App
     } else {
@@ -289,6 +293,40 @@ mod tests {
                     "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0\\app\\codex.exe"
                 ),
                 ProcessForm::App
+            );
+        }
+
+        #[test]
+        fn windows_msix_codex_any_version_is_app() {
+            // P2-6 回归锁：MSIX 版本段随升级变化，不得硬编码 openai.codex_ 前缀——
+            // 路径在 WindowsApps/ 且含 codex 即判 APP（版本升级后不静默失效）
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_99.0.0.0_x64__2p2nqsd0c76g0\\app\\codex.exe"
+                ),
+                ProcessForm::App
+            );
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\openai.codex_1.2.3.4_x64__2p2nqsd0c76g0\\Codex.exe"
+                ),
+                ProcessForm::App
+            );
+        }
+
+        #[test]
+        fn windows_apps_non_codex_path_is_cli() {
+            // P2-6 宽松化的边界：WindowsApps 下不含 codex 的路径（如其他应用自带的
+            // 同名工具）不误判为 APP；WindowsApps 之外含 codex 的路径仍按 CLI 处理
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.0.0_x64__x\\wt.exe"
+                ),
+                ProcessForm::Cli
+            );
+            assert_eq!(
+                classify_form("C:\\Users\\x\\.local\\bin\\codex.exe"),
+                ProcessForm::Cli
             );
         }
 
