@@ -126,6 +126,7 @@
       "confirm": "确认应用",
       "cancel": "取消",
       "applied": "已应用",
+      "rebuildFailed": "以下项重建失败（需重新勾选后重试）：{{items}}",
       "skippedItems": "以下项未能还原（SSOT 缺失或暂存失败，链接保持不变）：{{items}}"
     }
   },

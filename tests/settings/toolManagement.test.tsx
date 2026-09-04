@@ -6,6 +6,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+// P2-2：settings 页改用 getCurrentWindow().onCloseRequested 拦截窗口关闭（代替 beforeunload）。
+// jsdom 无 __TAURI_INTERNALS__，此处 mock window API 供测试捕获 close 回调
+const { closeRequestedHandler } = vi.hoisted(() => ({
+  closeRequestedHandler: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    onCloseRequested: vi.fn(async (cb: (e: { preventDefault: () => void }) => void) => {
+      // 记录回调供测试触发（mockImplementation 不产生调用记录，这里显式调用包装 fn）
+      closeRequestedHandler(cb);
+      return () => {};
+    }),
+  }),
+}));
 // WindowFrame/TitleBar 依赖 Tauri 窗口 API，jsdom 下全 mock（与 petSettings 同模式）
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
@@ -112,5 +126,26 @@ describe("工具管理（review F7①②）", () => {
     const row = opencode.closest("div[class*='justify-between']") as HTMLElement;
     expect(row.querySelector('[role="switch"]')).toHaveAttribute("data-state", "checked");
     expect(screen.queryByText("Save Settings")).not.toBeInTheDocument();
+  });
+
+  it("P2-2 脏标记时关窗口 → onCloseRequested 拦截并弹三选", async () => {
+    await gotoToolsAndToggleOpenCode();
+    // 模拟窗口关闭请求（onCloseRequested 回调注册是异步的，等它挂上）
+    await waitFor(() => expect(closeRequestedHandler).toHaveBeenCalled());
+    const preventDefault = vi.fn();
+    closeRequestedHandler.mock.calls[0][0]({ preventDefault });
+    expect(preventDefault).toHaveBeenCalled();
+    // 三选弹窗出现（保存 / 放弃更改 / 继续编辑）
+    expect(await screen.findByText("Unsaved Changes")).toBeInTheDocument();
+    expect(screen.getByText("Keep Editing")).toBeInTheDocument();
+    // 选「放弃更改」→ 关闭拦截解除、弹窗消失、不落盘
+    fireEvent.click(screen.getByText("Discard Changes"));
+    await waitFor(() =>
+      expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument()
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "update_tool_settings",
+      expect.anything()
+    );
   });
 });

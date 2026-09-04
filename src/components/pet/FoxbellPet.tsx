@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
-import { JumpWindowCandidate } from "@/hooks/useSessionJump";
+import { useSessionJump } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import {
@@ -187,7 +187,11 @@ export function FoxbellPet() {
   // ---- 状态卡片（Task 10；spec §5/C1-C4）----
   const [cards, setCards] = useState<PetCard[]>([]);
   const [moreCount, setMoreCount] = useState(0);
-  const [candidates, setCandidates] = useState<JumpWindowCandidate[] | null>(null);
+  const [candidates, setCandidates] = useState<
+    import("@/hooks/useSessionJump").JumpWindowCandidate[] | null
+  >(null);
+  // P2-4：跳转统一走 useSessionJump（与看板同一实现，含歧义候选返回与 via=app-fallback 的 M3 提示）
+  const { focus: sessionJumpFocus, focusHwnd: sessionJumpFocusHwnd } = useSessionJump();
   const statusStateRef = useRef<PetStatusState | null>(null);
   const sessionIndexRef = useRef<Map<string, Session>>(new Map());
   const cardsWrapRef = useRef<HTMLDivElement | null>(null);
@@ -258,24 +262,25 @@ export function FoxbellPet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
-  /** 点击卡片跳转终端；歧义时弹候选浮层；失败静默保留卡片（spec C2/§13） */
+  /** 点击卡片跳转终端；歧义时弹候选浮层；失败静默保留卡片（spec C2/§13）。
+   *  P2-4：统一走 useSessionJump（与看板一致）——含歧义候选返回、以及 CLI 会话
+   *  TTY 聚焦失败走 APP 级保底时的 M3 提示（via=app-fallback） */
   const jump = async (card: PetCard) => {
     const s = sessionIndexRef.current.get(card.id);
     if (!s) return;
     pendingAckRef.current = card.id; // 候选选中后按此 id ack
     try {
-      const result = await invoke<{ type: string; windows?: JumpWindowCandidate[] }>(
-        "focus_session",
-        {
-          pid: s.pid,
-          sessionId: s.id,
-          agentType: s.agentType,
-          projectName: s.projectName,
-          lastMessage: s.lastMessage ?? undefined,
-        }
-      );
-      if (result.type === "ambiguous" && result.windows?.length) {
-        setCandidates(result.windows); // 歧义候选浮层（spec D12）
+      const ambiguous = await sessionJumpFocus({
+        pid: s.pid,
+        id: s.id,
+        agentType: s.agentType,
+        projectName: s.projectName,
+        lastMessage: s.lastMessage ?? undefined,
+        unread: s.unread, // 歧义点选回标已读（spec W4 已读信号 1）
+        form: s.form, // M3：CLI 会话 APP 级保底时的 UX 提示依据
+      });
+      if (ambiguous && ambiguous.length) {
+        setCandidates(ambiguous); // 歧义候选浮层（spec D12）
         return;
       }
     } catch {
@@ -641,22 +646,13 @@ export function FoxbellPet() {
             <div
               key={w.hwnd}
               onClick={() => {
-                invoke("focus_hwnd", { hwnd: w.hwnd })
-                  .then(() => {
-                    // 歧义点选跳转成功 → 标记发起跳转的那张未读卡已读（spec W4 已读信号 1；
-                    // 与后端 focus_session 直达成功路径的回标对齐）。fire-and-forget 不阻塞跳转 UX
-                    const s = sessionIndexRef.current.get(pendingAckRef.current);
-                    if (s?.unread) {
-                      invoke("mark_session_read", {
-                        agentType: s.agentType,
-                        sessionId: s.id,
-                      }).catch((err) => console.error("mark_session_read failed:", err));
-                    }
-                  })
-                  .catch(() => {});
+                // 歧义点选：经 useSessionJump.focusHwnd 聚焦并回标已读（spec W4 已读信号 1，
+                // 与看板歧义分支一致）；随后 pet 自己的卡片 ack 消气泡
+                void sessionJumpFocusHwnd(w.hwnd).then(() => {
+                  ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
+                  setCards(cardsFromState(statusStateRef.current ?? {}));
+                });
                 setCandidates(null);
-                ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
-                setCards(cardsFromState(statusStateRef.current ?? {}));
               }}
               style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}
             >

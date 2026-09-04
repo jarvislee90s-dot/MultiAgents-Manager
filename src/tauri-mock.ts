@@ -45,6 +45,12 @@ if (!isTauri) {
   // Mock invoke responses for different commands
   function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
     switch (cmd) {
+      // P2-2：settings 页窗口关闭拦截改用 getCurrentWindow().onCloseRequested。
+      // 该 API 依赖上方 __TAURI_INTERNALS__ 的 metadata/transformCallback/postMessage
+      //（本 mock 已提供），浏览器渲染下注册为 no-op 监听、永不触发，页面不崩溃——
+      // 无需额外 mock 模块；真实关闭拦截仅在 Tauri WebView 内生效
+      case "list_enabled_tools":
+        return Promise.resolve([]);
       case "get_all_sessions":
         return Promise.resolve({
           sessions: [

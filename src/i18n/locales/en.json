@@ -126,6 +126,7 @@
       "confirm": "Apply",
       "cancel": "Cancel",
       "applied": "Applied",
+      "rebuildFailed": "The following items failed to rebuild (re-enable to retry): {{items}}",
       "skippedItems": "The following items were not restored (SSOT missing or staging failed, links left unchanged): {{items}}"
     }
   },

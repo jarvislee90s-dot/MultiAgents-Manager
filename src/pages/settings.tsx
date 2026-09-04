@@ -18,6 +18,7 @@ import { LanguageToggle } from "@/components/common/language-toggle";
 import { ShortcutInput } from "@/components/common/shortcut-input";
 import { Moon, Sun, Monitor, Palette, Keyboard, Bell, Volume2, Dog, Wrench } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Switch } from "@/components/ui/switch";
 import {
   loadVisible,
@@ -76,8 +77,10 @@ export default function SettingsPage() {
   const { t } = useAppTranslation();
   const { theme, setTheme } = useTheme();
   const queryClient = useQueryClient();
-  // 启用工具列表（后端下发，勾选状态驱动；声音覆盖行随勾选增减）
-  const { data: enabledTools = [] } = useEnabledToolsQuery();
+  // 启用工具列表（后端下发，勾选状态驱动；声音覆盖行随勾选增减）。
+  // P2-8：查询未就绪/失败时用上一次数据或空占位，不渲染「全部停用」的瞬时误态
+  const enabledToolsQuery = useEnabledToolsQuery();
+  const enabledTools = enabledToolsQuery.data ?? [];
 
   const handleShowMainWindow = useCallback(async () => {
     await toggleWindow("main");
@@ -139,15 +142,34 @@ export default function SettingsPage() {
     if (activeSection === "tools") void loadToolSettings();
   }, [activeSection, loadToolSettings]);
 
-  // 脏标记时拦截窗口关闭（标签页/窗口 beforeunload 场景）
+  // 脏标记时拦截窗口关闭（P2-2）：Tauri 2 onCloseRequested → preventDefault 后走既有
+  // 三选弹窗（保存 / 放弃更改 / 继续编辑）。浏览器/jsdom 下 getCurrentWindow 未实现
+  // 或 onCloseRequested 不可用 → 防御性跳过（Tauri 外无真实窗口关闭语义）
   useEffect(() => {
     if (!toolDirty) return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let win: ReturnType<typeof getCurrentWindow> | undefined;
+    try {
+      win = getCurrentWindow();
+    } catch {
+      return; // 非 Tauri 环境（浏览器/Playwright mock）：无窗口关闭事件可拦截
+    }
+    (async () => {
+      const fn = await win.onCloseRequested((event) => {
+        event.preventDefault();
+        // 关窗口与切分区共用同一三选守卫（保存缓存跳转 → 应用成功后执行）
+        setLeaveGuard(() => () => {
+          setToolDirty(false);
+        });
+      });
+      if (disposed) fn();
+      else unlisten = fn;
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
   }, [toolDirty]);
 
   // 开关点击仅改本地草稿（不立即生效），保存时批量应用
@@ -187,7 +209,9 @@ export default function SettingsPage() {
       });
       toast.success(t("settings.tools.applied"));
       if (result.rebuildFailed.length) {
-        toast.warning(`rebuild failed: ${result.rebuildFailed.join(", ")}`);
+        toast.warning(
+          t("settings.tools.rebuildFailed", { items: result.rebuildFailed.join(", ") })
+        );
       }
       // SSOT 缺失/暂存失败的项逐项报告（spec W5 清理语义 1 + §9），不中断整体保存
       if (result.skipped.length) {
@@ -460,8 +484,9 @@ export default function SettingsPage() {
                     {t("settings.notifications.soundToolOverride")}
                   </label>
                   {enabledTools.map((tool) => {
-                    // 后端工具 id 与 audio.ts 的 SoundConfig.tools 键一致
-                    const key = tool.id as keyof SoundConfig["tools"];
+                    // 后端工具 id 与 audio.ts 的 SoundConfig.tools 键同源（P2-9：均由
+                    // AgentType 联合派生，tool.id 已具类型，无需 as keyof 强转）
+                    const key = tool.id;
                     return (
                       <div key={key} className="flex items-center justify-between gap-2">
                         <span className="text-muted-foreground text-xs">{tool.label}</span>
