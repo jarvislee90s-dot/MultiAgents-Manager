@@ -212,6 +212,23 @@ mod tests {
         assert_eq!(redirect_code_of(""), None);
     }
 
+    /// 用真实抓取的全量清单（1.67MB / 4674 条）验证当前解析逻辑（诊断后保留为回归锚）
+    #[test]
+    fn real_manifest_payload_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../petdex-manifest.real.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return; // 真实数据文件不存在（未抓取）时静默跳过，不阻塞 CI
+        };
+        let shape: PetdexManifestShape = serde_json::from_str(&text).expect("真实清单必须可解析");
+        let list = match shape {
+            PetdexManifestShape::Wrapped { pets } => pets,
+            PetdexManifestShape::Bare(v) => v,
+        };
+        assert!(list.len() > 4000, "条目数异常: {}", list.len());
+        assert!(list.iter().any(|e| e.slug == "capybaralulu"), "capbaralulu 必须在清单中");
+        assert!(list.iter().any(|e| e.slug == "homelander"));
+    }
+
     #[test]
     fn entry_deserializes_manifest_shape() {
         // 与 petdex.dev/api/manifest 实测字段一致（spec §3）
