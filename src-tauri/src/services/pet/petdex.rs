@@ -33,6 +33,18 @@ pub struct PetdexEntry {
     pub sprite_version_number: u8,
 }
 
+/// 清单响应双形态（第九轮 Bug1）：上游 2026-09-04 起返回包装对象 {"generatedAt","total","pets":[...]}，
+/// 旧版为裸数组。untagged 先试包装、回退裸数组，对上游结构再漂移免疫。
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub enum PetdexManifestShape {
+    Wrapped {
+        #[serde(default)]
+        pets: Vec<PetdexEntry>,
+    },
+    Bare(Vec<PetdexEntry>),
+}
+
 /// 完整 URL 合法性：强制 https + host 白名单（spec §13；重定向每跳同样适用）
 fn url_allowed(url: &reqwest::Url) -> bool {
     url.scheme() == "https" && url.host_str().map(allowed_host).unwrap_or(false)
@@ -84,7 +96,7 @@ fn client(secs: u64) -> Result<reqwest::Client, PetRpcError> {
 
 /// 拉全量清单并按 slug 匹配（petdex 文档化的稳定接口，spec §3）
 pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
-    let list = client(30)?
+    let shape = client(30)?
         .get(MANIFEST_URL)
         .send()
         .await
@@ -93,9 +105,14 @@ pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
         .map_err(|e| if e.code.starts_with("redirect-") { e } else { PetRpcError::new("manifest-request-failed", format!("petdex 清单请求失败: {}", e.detail)).with("err", e.detail.clone()) })?
         .error_for_status()
         .map_err(|e| PetRpcError::new("manifest-status", format!("petdex 清单响应异常: {}", e)).with("err", e.to_string()))?
-        .json::<Vec<PetdexEntry>>()
+        .json::<PetdexManifestShape>()
         .await
         .map_err(|e| PetRpcError::new("manifest-parse-failed", format!("petdex 清单解析失败: {}", e)).with("err", e.to_string()))?;
+    // Wrapped 优先、裸数组兼容（Bug1 双形态）
+    let list = match shape {
+        PetdexManifestShape::Wrapped { pets } => pets,
+        PetdexManifestShape::Bare(v) => v,
+    };
     list.into_iter()
         .find(|e| e.slug == slug)
         .ok_or_else(|| PetRpcError::new("pet-not-on-petdex", format!("petdex 上未找到宠物: {}", slug)).with("slug", slug.to_string()))
@@ -204,5 +221,35 @@ mod tests {
         .unwrap();
         assert_eq!(e.slug, "capvolt");
         assert!(e.zip_url.contains("assets.petdex.dev"));
+    }
+
+    /// 清单双形态反序列化（第九轮 Bug1）：上游 2026-09-04 实测改为包装对象
+    /// {"generatedAt","total","pets":[...]}，旧实现按裸数组反序列化必然失败。
+    /// 两种形态都要提取出同一批 entry（包装优先、裸数组向后兼容）。
+    #[test]
+    fn manifest_accepts_wrapped_and_bare_shapes() {
+        // 包装形态（当前上游实际返回）
+        let wrapped = r#"{"generatedAt":"2026-09-04T10:16:13.368Z","total":1,"pets":[{"slug":"capvolt","displayName":"Pikachu","zipUrl":"https://assets.petdex.dev/pets/x/zip.zip","spriteVersionNumber":1}]}"#;
+        let shape: PetdexManifestShape = serde_json::from_str(wrapped)
+            .expect("包装形态必须可反序列化");
+        let list = match shape {
+            PetdexManifestShape::Wrapped { pets } => pets,
+            PetdexManifestShape::Bare(v) => v,
+        };
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].slug, "capvolt");
+        assert!(list[0].zip_url.contains("assets.petdex.dev"));
+
+        // 裸数组形态（向后兼容）
+        let bare: PetdexManifestShape = serde_json::from_str(
+            r#"[{"slug":"capvolt","displayName":"Pikachu","zipUrl":"https://assets.petdex.dev/pets/x/zip.zip","spriteVersionNumber":1}]"#,
+        )
+        .unwrap();
+        let list = match bare {
+            PetdexManifestShape::Wrapped { pets } => pets,
+            PetdexManifestShape::Bare(v) => v,
+        };
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].slug, "capvolt");
     }
 }
