@@ -22,8 +22,10 @@ pub fn staging_root(root: &Path) -> PathBuf {
 }
 
 /// 重命名宠物 = 目录重命名 + manifest.id 同步（备份旧 manifest，spec §10-1）。
-/// FIX-5 顺序：先 rename 目录再写 manifest——rename 失败零副作用；写失败时目录已改名、
-/// manifest 保持旧 id，重试 rename 为 no-op 后仅补写 manifest，可重试
+/// 顺序：先 rename 目录再写 manifest——rename 失败零副作用。
+/// manifest 写失败为非致命：manifest.id 仅是展示字段，宠物身份以文件夹名为准
+/// （校验/匹配/激活均用文件夹名），目录已改名即主操作已完成；返回 Err 会让 UI 把
+/// 已成功的改名报成失败，且用户重试会命中"宠物不存在: old_id"的死路。
 pub fn rename_pet_in(root: &Path, old_id: &str, new_id: &str) -> Result<(), String> {
     if old_id == new_id {
         return Ok(());
@@ -37,7 +39,10 @@ pub fn rename_pet_in(root: &Path, old_id: &str, new_id: &str) -> Result<(), Stri
     std::fs::rename(&old_dir, &new_dir).map_err(|e| format!("重命名失败: {}", e))?;
     if let Some(mut m) = manifest::load(&new_dir) {
         m.id = new_id.to_string();
-        manifest::write_with_backup(&new_dir, &m, true)?;
+        if let Err(e) = manifest::write_with_backup(&new_dir, &m, true) {
+            // 目录已改名（主操作完成），仅 id 展示字段未同步：记日志、不判失败（下次激活/修复会兜底）
+            log::warn!("manifest.id 同步失败（目录已改名 {} → {}）: {}", old_id, new_id, e);
+        }
     }
     Ok(())
 }
