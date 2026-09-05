@@ -2,6 +2,7 @@
 import { useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { Toaster } from "@/components/ui/sonner";
 import { FoxbellPet } from "@/components/pet/FoxbellPet";
 import { loadConfig, loadVisible, saveVisible, subscribeConfig } from "@/components/pet/petConfig";
 import { invoke } from "@tauri-apps/api/core";
@@ -35,5 +36,12 @@ export default function PetPage() {
       un2();
     };
   }, []);
-  return <FoxbellPet />;
+  return (
+    <>
+      <FoxbellPet />
+      {/* P2-7（issue #34）：宠物窗口此前未挂 Toaster，useSessionJump 的 M3 兜底
+          提示与跳转失败提示在此窗口静默丢弃；顶部居中避免被桌宠本体遮挡 */}
+      <Toaster position="top-center" />
+    </>
+  );
 }

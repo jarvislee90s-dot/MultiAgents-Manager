@@ -552,10 +552,15 @@ pub fn reactivate_tool_app(
     system: &sysinfo::System,
     agent_type: Option<&str>,
 ) -> Result<(), String> {
-    let marker = match agent_type.map(|a| a.to_lowercase()).as_deref() {
-        Some("workbuddy") => "workbuddy",
-        Some("codex") => "chatgpt",
-        _ => return Err("未知工具，无法兜底激活".to_string()),
+    // P2-4（issue #34）：宿主判定统一走 monitor::host::is_host_process（与前台验证
+    // 同口径）。原整路径子串匹配（exe.contains("chatgpt")）会误命中路径含关键词的
+    // 无关进程（如 D:\tools\chatgpt-clone\app.exe）；is_host_process 按可执行文件名
+    // 判定，并排除会话进程（codebuddy）与内嵌框架进程，聚焦的是真正的宿主窗口
+    let Some(tool_id) = agent_type
+        .map(|a| a.to_lowercase())
+        .filter(|t| matches!(t.as_str(), "workbuddy" | "codex"))
+    else {
+        return Err("未知工具，无法兜底激活".to_string());
     };
     let wins = all_windows();
     // AllWindows.by_pid：pid → 该进程名下全部可见顶层窗口 (hwnd, title)，按 pid 分组迭代
@@ -567,7 +572,7 @@ pub fn reactivate_tool_app(
             .exe()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        if !exe.contains(marker) {
+        if !crate::monitor::host::is_host_process(&exe, &tool_id) {
             continue;
         }
         for (hwnd, _) in hwnds {
@@ -629,7 +634,8 @@ fn foreground_verify_with_samples(samples: &[bool]) -> bool {
 }
 
 /// 目标进程 pid 是否属于工具宿主：exe 路径小写后经 is_host_process 判定。
-/// system 复用调用方快照（不另起全量扫描）
+/// system 复用调用方快照（不另起全量扫描）；新鲜度由调用方维护
+/// （P2-1：验证轮询每轮刷新，兜底前由 commands/session.rs 重刷）
 fn foreground_pid_is_tool(system: &sysinfo::System, pid: u32, tool_id: &str) -> bool {
     system
         .process(sysinfo::Pid::from_u32(pid))
@@ -642,9 +648,12 @@ fn foreground_pid_is_tool(system: &sysinfo::System, pid: u32, tool_id: &str) -> 
 
 /// 深度链接派发后前台验证（Windows）：轮询前台窗口归属，最后两次连续命中该工具宿主
 /// → true。timeout 内未达成 → false（调用方落回保底聚焦、不标已读）。
-/// interval 轮询间隔；判定以窗口期终点为准（见模块注释：闪现噪声不误判）
+/// interval 轮询间隔；判定以窗口期终点为准（见模块注释：闪现噪声不误判）。
+/// P2-1（issue #34）：每轮轮询前刷新进程表——深链可能冷启动宿主，新 pid 不在派发前
+/// 的快照里，持旧快照轮询恒 miss（APP 已在前台仍整链报失败）；仅刷进程+exe（判定
+/// 只消费 exe），判定标准本身不变
 pub fn verify_foreground_tool(
-    system: &sysinfo::System,
+    system: &mut sysinfo::System,
     tool_id: &str,
     timeout_ms: u64,
     interval_ms: u64,
@@ -660,6 +669,11 @@ pub fn verify_foreground_tool(
         success: false,
     };
     while Instant::now() < deadline {
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+        );
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.0 != 0 {
@@ -683,6 +697,14 @@ mod tests {
         claim_owner, collapse_ws, collect_ancestor_pids_with, hard_survivors, is_shell_console,
         longest_prefix_len, normalize_title_for_project,
     };
+
+    #[test]
+    fn reactivate_rejects_tools_without_app_form() {
+        // P2-4 门：无 APP 形态/未知工具在窗口枚举前即拒绝（不得触碰 Win32 枚举）；
+        // 宿主匹配口径统一见 reactivate_tool_app（is_host_process，host.rs 已有测试）
+        assert!(super::reactivate_tool_app(&sysinfo::System::new(), None).is_err());
+        assert!(super::reactivate_tool_app(&sysinfo::System::new(), Some("claude")).is_err());
+    }
 
     #[test]
     fn normalize_title_strips_spinner_prefix() {

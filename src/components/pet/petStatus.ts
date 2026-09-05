@@ -110,7 +110,11 @@ export function computePetStatus(
     const color = statusColor(s.status);
     const p = prev?.[s.id];
     const completion = !first && !!p?.prevColor && p.prevColor !== "green" && color === "green";
-    const unread = first ? false : completion || (!!p && p.light === "done" && p.unread);
+    // P2-6（issue #34）：首帧消费后端权威未读——宠物窗口重建/MAM 重启后既存未读卡
+    // 没有本地转绿差分可回放，只能靠 payload 的 unread 点亮（此前 first 强制 false
+    // → 通知静默盲区）；后续帧仍走本地差分：ack 置位不被 s.unread 闪回，已读的
+    // 最终事实由 session-read 广播/池删除收敛
+    const unread = first ? s.unread : completion || (!!p && p.light === "done" && p.unread);
     const light: PetLight | null =
       color === "red" ? "waiting" : color === "yellow" ? "running" : unread ? "done" : null;
     const title = cardTitle(s);

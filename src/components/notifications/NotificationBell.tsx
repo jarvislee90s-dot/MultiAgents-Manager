@@ -57,6 +57,9 @@ export function NotificationBell() {
         agentType: e.agentType,
         projectName: e.projectName,
         lastMessage: e.lastMessage,
+        // review（PR #38）：历史条目带 form 却未透传 → 铃铛跳 App 会话进不了
+        // 深链第一顺位（与 P2-5 同族、换入口）。form 仅由 session.form 写入
+        form: e.form as "cli" | "app" | undefined,
       });
     } catch {
       toast.error(t("notifications.jumpFailed"));

@@ -91,4 +91,28 @@ describe("computePetStatus", () => {
     const r = computePetStatus([mk("abcdefgh1234", "waiting", { agentType: "codex", form: "app" })], null, 0);
     expect(r.cards[0].title).toBe("Codex APP    P    abcdefgh");
   });
+
+  it("P2-6：首帧消费后端 s.unread 点亮恢复的未读卡；首帧仍零事件", () => {
+    // MAM 重启/宠物窗口重建后 prev=null：既存未读卡没有本地转绿差分可回放，
+    // 只有消费 payload 的 unread 才能点亮（此前 first 强制 false → 通知静默盲区）
+    const first = computePetStatus([mk("c", "idle", { unread: true, form: "app" })], null, 0);
+    expect(first.cards.find((x) => x.id === "c")).toMatchObject({ light: "done", unread: true });
+    // 首帧仍零事件：只点亮显示，不重放通知（F5 老卡静默语义）
+    expect(first.events.newCompletion).toEqual([]);
+    // 后端已读的绿卡首帧不点亮
+    const read = computePetStatus([mk("d", "idle", { unread: false, form: "app" })], null, 0);
+    expect(read.cards.find((x) => x.id === "d")).toBeUndefined();
+    // 后续帧本地差分接管：持续亮（不依赖 payload 继续携带 unread）
+    const second = computePetStatus([mk("c", "idle", { unread: false, form: "app" })], first.state, 1000);
+    expect(second.cards.find((x) => x.id === "c")).toMatchObject({ light: "done", unread: true });
+  });
+
+  it("P2-6：已读置位后不被 s.unread 闪回（仅首帧消费后端未读）", () => {
+    // 点击已读（ackDone）后、后端池删除落地的窗口期 payload 仍带 unread=true，
+    // 本地差分必须优先——否则已消卡闪回
+    const first = computePetStatus([mk("c", "idle", { unread: true, form: "app" })], null, 0);
+    ackDone(first.state, "c");
+    const second = computePetStatus([mk("c", "idle", { unread: true, form: "app" })], first.state, 1000);
+    expect(second.cards.find((x) => x.id === "c")).toBeUndefined();
+  });
 });

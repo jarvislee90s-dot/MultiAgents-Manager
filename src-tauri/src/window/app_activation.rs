@@ -9,6 +9,11 @@ pub fn app_bundle_from_exe(exe: &str) -> Option<String> {
 }
 
 /// bundle 路径（小写）是否属于该工具的宿主 APP（W2 pid 失效兜底的匹配规则）
+///
+/// 已知局限（暂不收严，issue #34 P2 侧注）：按 bundle 名后缀匹配而非完整路径或
+/// bundle id，理论上同名后缀的无关应用（如 NotWorkBuddy.app 之于 workbuddy）
+/// 会被误命中。当前仅 codex/ChatGPT 为 CLI+APP 双形态、WorkBuddy 为纯 APP 形态，
+/// 误命中风险可接受；接入更多双形态/APP 形态工具时再评估收严口径。
 fn bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool {
     match agent_type {
         "codex" => bundle_lower.ends_with("chatgpt.app") || bundle_lower.ends_with("codex.app"),
@@ -18,9 +23,16 @@ fn bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool {
     }
 }
 
+/// AppleScript 字符串字面量转义：先转反斜杠再转引号（顺序不可换——若先转引号，
+/// 后续补的反斜杠会被引号步骤二次处理）。P2-3（issue #34）：原实现只转义引号，
+/// bundle 路径含 `\` 时产生非法 AppleScript 字面量 → osascript 报错落兜底
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\"', "\\\"")
+}
+
 /// 激活 APP（AppleScript，bundle 路径精确指定，避免同名歧义）
 pub fn activate_app_bundle(bundle: &str) -> Result<(), String> {
-    let script = format!("activate application \"{}\"", bundle.replace('\"', "\\\""));
+    let script = format!("activate application \"{}\"", applescript_escape(bundle));
     super::applescript::execute_applescript(&script)
 }
 
@@ -86,5 +98,12 @@ mod tests {
             "workbuddy"
         ));
         assert!(!bundle_matches_agent("/applications/chatgpt.app", "claude"));
+    }
+
+    #[test]
+    fn applescript_escape_handles_backslash_and_quote() {
+        // P2-3 回归锁：反斜杠与引号均需转义，且顺序正确（先 \ 后 "）
+        assert_eq!(applescript_escape("/a/b.app"), "/a/b.app");
+        assert_eq!(applescript_escape("/a\\b\"c.app"), "/a\\\\b\\\"c.app");
     }
 }

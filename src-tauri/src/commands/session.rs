@@ -66,7 +66,8 @@ pub fn focus_session(
 ) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
-        let system = sysinfo::System::new_all();
+        // mut：P2-1 验证轮询/兜底前会在原地刷新进程表（快照不再是一次性照片）
+        let mut system = sysinfo::System::new_all();
         // unread 参数（未读标记）在 Windows 深度链接路径暂不消费（已读回标统一在
         // 跳转成功分支执行）；保留签名以与前端 JumpTarget.unread 对齐
         let _ = unread;
@@ -80,16 +81,26 @@ pub fn focus_session(
                     && crate::window::deep_link::scheme_handler_exists(agent)
                 {
                     if let Some(url) = crate::window::deep_link::session_url(agent, sid) {
-                        if crate::window::deep_link::open_url(&url).is_ok()
-                            && crate::window::win32::verify_foreground_tool(
-                                &system, agent, 2_000, 250,
-                            )
-                        {
-                            mark_read_on_jump(&app, &session_id, &agent_type);
-                            return Ok(serde_json::json!({
-                                "type": "focused",
-                                "via": "deep-link"
-                            }));
+                        if crate::window::deep_link::open_url(&url).is_ok() {
+                            if crate::window::win32::verify_foreground_tool(
+                                &mut system, agent, 2_000, 250,
+                            ) {
+                                mark_read_on_jump(&app, &session_id, &agent_type);
+                                return Ok(serde_json::json!({
+                                    "type": "focused",
+                                    "via": "deep-link"
+                                }));
+                            }
+                            // P2-1（B 兜底保险，issue #34）：派发已发生但前台验证未确认
+                            // ——宿主可能恰在验证窗口后被冷启动。落保底链路前重刷快照，
+                            // 使 running_projects / resolve_and_focus / reactivate_
+                            // tool_app 能认出派发期间新出现的宿主进程；everything 全量
+                            // 刷新，下游消费的 cwd/exe 均取最新
+                            system.refresh_processes_specifics(
+                                sysinfo::ProcessesToUpdate::All,
+                                true,
+                                sysinfo::ProcessRefreshKind::everything(),
+                            );
                         }
                     }
                 }
@@ -160,10 +171,9 @@ pub fn focus_session(
         // 非 macOS 桌面平台无 APP 激活链路，防未使用告警
         #[cfg(not(target_os = "macos"))]
         let _ = (agent_type, session_id);
-        Err(format!(
-            "无法聚焦目标（pid={}）：进程无 TTY 且未找到宿主 APP",
-            pid
-        ))
+        // 措辞兼容两种场景：pid 存活的 CLI 会话（有 TTY 但聚焦失败，P2-2 后不再做
+        // APP 兜底）与 pid=0/已死（TTY 无从聚焦 + 宿主 APP 枚举未命中）
+        Err(format!("无法聚焦目标（pid={}）：终端与宿主 APP 均未能聚焦", pid))
     }
 }
 
