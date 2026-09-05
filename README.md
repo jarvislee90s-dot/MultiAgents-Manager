@@ -4,7 +4,7 @@
 
 **多 Agent 编程工具统一管理平台**
 
-一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code 的桌面应用
+一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy 的桌面应用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,8 +28,8 @@
 | 🟡 黄色 | 处理中 / 思考中 |
 | 🟢 绿色 | 空闲 / 已完成 |
 
-- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code** 会话
-- 区分 CLI 与桌面 APP 形态（APP 仅显示状态，不支持终端跳转）
+- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code**、**WorkBuddy** 会话
+- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底）与持久未读卡（转绿跨重启保留、宿主退出自动清理）
 - 显示项目名称、Git 分支、最后消息预览、CPU 占用、运行时长
 - 按优先级排序：等待中 → 运行中 → 空闲
 - 系统托盘图标反映聚合状态（🔴/🟡/🟢）
@@ -48,6 +48,14 @@
 - 单击挥手、双击说话、右键菜单：出声 / 字幕 / 物理 / 悬浮最前 / 大小三档 / 场景动作绑定 / 隐藏
 - 与看板联动：桌宠开启时接管完成提示音、悬浮最前时抑制通知浮窗；看板 🦊 按钮、系统托盘、设置页多入口开关互通
 
+#### 外部桌宠
+
+v0.3.0 起桌宠格式开放，不再只有 Foxbell：
+
+- **导入自定义宠物**：本地 zip / 目录导入，或从 Petdex 在线仓库下载；manifest 结构、帧率、尺寸、语音清单全量校验
+- **管理面板**：导入 / 描述编辑 / 重命名 / 删除 / 一键切换，宠物窗口热切换无需重启；删除或切换后活动宠物自动恢复
+- **能力门控**：无语音的宠物自动降级为纯动画（瞬态动作保留），语音能力双向同步
+
 ### 桌面通知与提示音
 
 - 状态颜色变化时发送桌面通知（红↔黄↔绿），带去重机制
@@ -65,6 +73,8 @@
 | Terminal.app | ✅ AppleScript |
 | tmux | ✅ pane 选择 + 终端聚焦 |
 | Wayland | ❌ 优雅降级提示 |
+
+桌面 APP 类工具（Codex APP、WorkBuddy）支持会话级深度链接直达：`codex://threads/<id>`、`workbuddy://chat/<id>`，派发前校验协议 handler、派发后验证前台化，失败自动落 APP 级前台保底（macOS AppleScript / Windows 近祖聚焦），且不误标已读。
 
 ### 扩展资源统一管理
 
@@ -93,6 +103,14 @@ Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 
 - 子 Agent 分配受工具级启用范围约束
 - 工具级禁用自动级联到所有子 Agent
+
+### 工具勾选管理
+
+设置页独立分区，按工具决定是否纳入 MAM 监控与管理：
+
+- 行式开关列表：图标 + 名称 + 安装状态 badge，本地暂存、批量保存，保存前确认弹窗列出还原/回溯清单，未保存离开自动拦截
+- 取消勾选 = 彻底还原：符号链接还原为真实文件、MCP 条目从工具配置移除、未读卡清空；SSOT 仓库与 DB 分配关系保留，重新勾选按原分配整体重建（失败自动回滚，重新保存即幂等重试）
+- 未勾选工具彻底隐藏：会话扫描跳过、通知静音、资源/预设界面不出现，相关写命令返回明确错误（结构化错误码 + 中英文案）
 
 ---
 
@@ -237,6 +255,7 @@ pnpm lint:fix     # ESLint 自动修复
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌（状态经 wire 解析） |
+| WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌（状态经心跳 + JSONL 推导） |
 
 ### Kimi Code 数据目录重定向
 
@@ -258,12 +277,17 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 - [x] 资源看板重设计（双视图 + 导入 + 兼容性）
 - [x] OpenClaw 支持（第四工具）
 - [x] Kimi Code 支持（第五工具：会话监控 + MCP 管理 + `KIMI_CODE_HOME` 数据目录重定向）
+- [x] WorkBuddy 支持（第六工具：心跳驱动监控 + 深度链接跳转 + 资源管理）
 - [x] Foxbell 桌宠（状态卡片 + 语音提醒 + 拖拽物理）
+- [x] 外部桌宠开放（本地/Petdex 导入 + 管理面板热切换 + 能力门控）
+- [x] 工具勾选管理（批量保存 + 还原/重建 + 彻底隐藏）
+- [x] APP 类工具会话卡与深度链接跳转
 - [x] 插件管理（文件/配置混合）
 - [x] i18n（中文 + English）
 - [x] GitHub Releases 自动更新
 - [x] 暗色/亮色主题跟随系统
-- [ ] Linux & Windows 支持（当前以 macOS 为主）
+- [x] Windows 支持（NSIS 安装包 + 深度链接 + 近祖窗口聚焦）
+- [ ] Linux 支持
 - [ ] Kitty & WezTerm 终端跳转支持
 
 ---

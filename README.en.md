@@ -4,7 +4,7 @@
 
 **Unified Management Platform for Multi-Agent Programming Tools**
 
-A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code sessions
+A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy sessions
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,8 +28,8 @@ Real-time traffic-light status board for all active AI coding tool sessions.
 | 🟡 Yellow | Processing / Thinking |
 | 🟢 Green | Idle / Finished |
 
-- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, and **Kimi Code** sessions
-- Distinguishes CLI vs. desktop APP form (APP shows status only, no terminal jump)
+- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, **Kimi Code**, and **WorkBuddy** sessions
+- Distinguishes CLI vs. desktop APP form: APP sessions support session-level deep-link jumps (`workbuddy://chat/<id>`, `codex://threads/<id>`, with APP-foreground fallback) and persistent unread cards (kept across restarts, cleared when the host exits)
 - Shows project name, git branch, last message preview, CPU usage, runtime
 - Sorts by priority: waiting → running → idle
 - System tray icon reflects aggregate status (🔴/🟡/🟢)
@@ -45,6 +45,14 @@ A talking fox companion that lives in the corner of your screen and watches ever
 - Drag physics: pinned-to-cursor dragging, gravity fall on release, throw inertia, squash-and-bounce landing (optional)
 - Single-click waves, double-click talks, right-click menu: sound / subtitles / physics / always-on-top / size / per-scene action binding / hide
 - Dashboard integration: takes over completion chimes, suppresses toast popups while always-on-top; toggle from the dashboard 🦊 button, system tray, or settings
+
+#### External Pets
+
+Since v0.3.0 the pet format is open — Foxbell is no longer the only companion:
+
+- **Import custom pets**: from a local zip / directory, or download from the Petdex online repository; manifest structure, frame rate, dimensions and voice manifests are fully validated
+- **Manage panel**: import / edit description / rename / delete / one-click hot swap — no app restart needed; the active pet is auto-restored after deletion or switching
+- **Capability gating**: pets without voices gracefully degrade to animation-only (transient actions kept); voice capabilities stay in two-way sync
 
 ### Desktop Notifications & Sound Alerts
 
@@ -63,6 +71,8 @@ Click a session card to instantly focus the corresponding terminal tab:
 | Terminal.app | ✅ AppleScript |
 | tmux | ✅ pane selection + terminal focus |
 | Wayland | ❌ Graceful fallback message |
+
+Desktop APP tools (Codex APP, WorkBuddy) support session-level deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>`. The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read.
 
 ### Extension Resource Management
 
@@ -89,6 +99,14 @@ For multi-agent tools (Hermes, OpenCode, etc.), allocate resource subsets to sub
 
 - Sub-agent allocation is constrained to the tool-level enabled range
 - Tool-level disable cascades down to all sub-agents
+
+### Tool Toggle Management
+
+A dedicated settings section to decide which tools MAM monitors and manages:
+
+- Row-style toggle list: icon + name + installed badge; changes are staged locally and batch-saved, with a confirmation dialog listing restore/rollback items and an unsaved-changes leave guard
+- Unchecking = full restore: symlinks become real files, MCP entries are removed from tool configs, unread cards are cleared; the SSOT repository and DB assignments are kept, and re-checking rebuilds everything per the original assignments (partial failures auto-rollback — re-saving retries idempotently)
+- Unchecked tools are fully hidden: session scanning skips them, notifications are muted, resource/preset UIs hide them, and guarded commands return structured, localized errors
 
 ---
 
@@ -232,6 +250,8 @@ The app stores its data in `~/.mam/`:
 | Codex CLI | `~/.agents/skills/` | `~/.codex/config.toml` | TOML | ✅ (camelCase) |
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
+| Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌ (status parsed from wire) |
+| WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌ (status derived from heartbeat + JSONL) |
 
 ---
 
@@ -246,12 +266,17 @@ The app stores its data in `~/.mam/`:
 - [x] Resource dashboard redesign (dual-view + import + compatibility)
 - [x] OpenClaw support (4th tool)
 - [x] Kimi Code support (5th tool: session monitoring + MCP management + `KIMI_CODE_HOME` data directory redirection)
+- [x] WorkBuddy support (6th tool: heartbeat-driven monitoring + deep-link jumps + resource management)
 - [x] Foxbell desktop pet (status cards + voice alerts + drag physics)
+- [x] External pets (local/Petdex import + manage panel hot swap + capability gating)
+- [x] Tool toggle management (batch save + restore/rebuild + full hiding)
+- [x] APP-form session cards and deep-link jumps
 - [x] Plugin management (file/config hybrid)
 - [x] i18n (Chinese + English)
 - [x] Auto-update via GitHub Releases
 - [x] Dark/light theme sync with system
-- [ ] Linux & Windows support (currently macOS primary)
+- [x] Windows support (NSIS installer + deep links + nearest-ancestor window focus)
+- [ ] Linux support
 - [ ] Kitty & WezTerm terminal jump support
 
 ---
