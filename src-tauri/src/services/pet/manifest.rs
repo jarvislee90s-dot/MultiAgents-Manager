@@ -10,6 +10,18 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// 四个固定语音分组（与 foxbell 语音系统一致，spec §5.1）
 pub const VOICE_GROUPS: [&str; 4] = ["general", "approval", "done", "error"];
 
+/// voice 相对路径唯一合规形态：voice/<group>/<file> 三段且分组 ∈ VOICE_GROUPS。
+/// scan/暂存收集/复制/remove 四处共用（issue #32-7：一处定义防漂移；
+/// 深层子目录与非分组目录的文件对宠物系统不可见）。含 `..`/反斜杠的 rel 会因
+/// 段数或分组不匹配被拒，但调用方叠加显式拒绝更清晰
+pub fn is_voice_rel(rel: &str) -> bool {
+    let mut segs = rel.split('/');
+    segs.next() == Some("voice")
+        && segs.next().is_some_and(|g| VOICE_GROUPS.contains(&g))
+        && segs.next().is_some_and(|f| !f.is_empty())
+        && segs.next().is_none()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceEntry {
@@ -57,7 +69,13 @@ pub fn write_with_backup(dir: &Path, m: &PetManifest, backup: bool) -> Result<()
             .map_err(|e| PetRpcError::new("manifest-backup-failed", format!("备份 manifest 失败: {}", e)).with("err", e.to_string()))?;
     }
     let text = serde_json::to_string_pretty(m).map_err(|e| PetRpcError::internal(e.to_string()))?;
-    std::fs::write(&path, text).map_err(|e| PetRpcError::new("manifest-write-failed", format!("写入 manifest 失败: {}", e)).with("err", e.to_string()))
+    // 原子写（issue #32-6）：先写同目录临时文件再 rename 替换——原 fs::write 截断写，
+    // 进程中途被杀会留半截 manifest（backup=false 路径无 .bak 兜底）
+    let tmp = dir.join(format!("{MANIFEST_FILE}.tmp"));
+    std::fs::write(&tmp, text)
+        .map_err(|e| PetRpcError::new("manifest-write-failed", format!("写入 manifest 失败: {}", e)).with("err", e.to_string()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| PetRpcError::new("manifest-write-failed", format!("替换 manifest 失败: {}", e)).with("err", e.to_string()))
 }
 
 #[cfg(test)]
@@ -126,5 +144,24 @@ mod tests {
         let bak = std::fs::read_to_string(tmp.path().join(BACKUP_FILE)).unwrap();
         assert!(bak.contains("Starry Dew")); // bak 是旧内容
         assert_eq!(load(tmp.path()).unwrap().display_name, "v2");
+    }
+
+    /// issue #32-6：原子写（tmp + rename）——覆盖替换成功、无 .tmp 残留。
+    /// 原实现 fs::write 截断写，进程中途被杀会留半截 manifest（backup=false 路径无 bak 兜底）
+    #[test]
+    fn write_leaves_no_tmp_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut m = sample();
+        write_with_backup(tmp.path(), &m, false).unwrap();
+        m.display_name = "v2".into();
+        write_with_backup(tmp.path(), &m, true).unwrap();
+        assert_eq!(load(tmp.path()).unwrap().display_name, "v2");
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不应残留临时文件: {leftovers:?}");
     }
 }

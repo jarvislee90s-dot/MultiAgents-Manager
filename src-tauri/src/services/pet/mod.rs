@@ -19,6 +19,17 @@ pub fn pet_dir(root: &Path, id: &str) -> PathBuf {
     root.join(id)
 }
 
+/// 宠物 id（=文件夹名）长度上限：64 已远超实际 slug 形态，并为路径深度留足余量
+/// （issue #32-1，原实现无上限）
+pub const MAX_PET_ID_LEN: usize = 64;
+
+/// Windows 保留设备名（大小写不敏感，任意扩展名形态均保留）。宠物 id 白名单
+/// 字符集不含点，仅需全名匹配（issue #32-1）
+const WINDOWS_RESERVED_DEVICES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
 /// IPC 传入的宠物 id 统一白名单校验：id 即文件夹名，`pet_dir` 是裸 join，
 /// 不设卡则 `../`、`..\`、绝对路径均可逃逸出仓库（如 pet_delete_pet("..") 会把
 /// ~/.mam 整目录送回收站）。静态规则与 validate_pet_name 一致（复用 pet-name-* 错误码，
@@ -33,10 +44,39 @@ pub fn validate_pet_id(id: &str) -> Result<(), PetRpcError> {
     if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(PetRpcError::new("pet-name-illegal", "宠物名仅支持字母/数字/连字符/下划线"));
     }
+    if id.len() > MAX_PET_ID_LEN {
+        return Err(PetRpcError::new("pet-name-too-long", format!("宠物名过长（≤{MAX_PET_ID_LEN} 字符）")).with("max", MAX_PET_ID_LEN.to_string()));
+    }
+    if WINDOWS_RESERVED_DEVICES.iter().any(|d| id.eq_ignore_ascii_case(d)) {
+        return Err(PetRpcError::new("pet-name-reserved-device", "宠物名与 Windows 保留设备名冲突"));
+    }
     if id.eq_ignore_ascii_case("foxbell") {
         return Err(PetRpcError::new("pet-name-reserved", "foxbell 为内置宠物保留名"));
     }
     Ok(())
+}
+
+/// 启动清扫 .import-staging 残留（崩溃/强杀留下的半截导入与 petdex 解压中间产物，
+/// issue #32-3，spec §8.4-6 要求取消/失败无残留）。仅清暂存区不触碰宠物目录；
+/// 调用时机=应用启动后台线程，此时不存在运行中的导入，清扫是安全的
+pub fn sweep_staging_in(root: &Path) -> std::io::Result<()> {
+    let sroot = staging_root(root);
+    let Ok(rd) = std::fs::read_dir(&sroot) else { return Ok(()) };
+    for e in rd.flatten() {
+        let p = e.path();
+        let res = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        if let Err(err) = res {
+            log::warn!("清扫暂存区残留失败 {}: {err}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// sweep_staging_in 的全局仓库包装（lib.rs 启动线程调用）
+pub fn sweep_staging() {
+    if let Err(err) = sweep_staging_in(&pets_root()) {
+        log::warn!("清扫导入暂存区失败: {err}");
+    }
 }
 
 /// 导入暂存区根目录 ~/.mam/pets/.import-staging（隐藏目录，清单扫描自动跳过）
@@ -173,5 +213,45 @@ mod tests {
         for ok in ["starry-dew", "abc_123-X", "A9"] {
             validate_pet_id(ok).unwrap_or_else(|e| panic!("合法 id {ok:?} 被误拒: {:?}", e.code));
         }
+    }
+
+    /// issue #32-1：Windows 保留设备名拒绝（大小写不敏感；白名单字符集不含点，
+    /// 故无需考虑 con.txt 形态）+ 长度上限（MAX_PET_ID_LEN，预留路径深度余量）
+    #[test]
+    fn validate_pet_id_rejects_windows_reserved_device_and_overlong() {
+        for bad in ["con", "CON", "Nul", "aux", "PRN", "nul", "com1", "Com9", "lpt1", "LPT9"] {
+            match validate_pet_id(bad) {
+                Err(e) => assert_eq!(e.code, "pet-name-reserved-device", "id {bad:?}"),
+                Ok(()) => panic!("保留设备名 {bad:?} 应被拒绝"),
+            }
+        }
+        let long = "a".repeat(super::MAX_PET_ID_LEN + 1);
+        match validate_pet_id(&long) {
+            Err(e) => {
+                assert_eq!(e.code, "pet-name-too-long");
+                assert_eq!(e.params.get("max").map(String::as_str), Some("64"));
+            }
+            Ok(()) => panic!("超长 id 应被拒绝"),
+        }
+        assert!(validate_pet_id(&"a".repeat(super::MAX_PET_ID_LEN)).is_ok());
+    }
+
+    /// issue #32-3：启动清扫 .import-staging 残留（崩溃/强杀遗留），不触碰宠物目录
+    #[test]
+    fn sweep_staging_clears_leftovers_only() {
+        let root = tempfile::tempdir().unwrap();
+        let pet = root.path().join("real-pet");
+        std::fs::create_dir_all(pet.join("voice/general")).unwrap();
+        std::fs::write(pet.join("spritesheet.webp"), b"s").unwrap();
+        let sroot = staging_root(root.path());
+        for leftover in ["leftover-1", "extract-abc"] {
+            std::fs::create_dir_all(sroot.join(leftover).join("voice/general")).unwrap();
+            std::fs::write(sroot.join(leftover).join("spritesheet.webp"), b"s").unwrap();
+        }
+        sweep_staging_in(root.path()).unwrap();
+        assert!(!sroot.join("leftover-1").exists(), "暂存残留应被清扫");
+        assert!(!sroot.join("extract-abc").exists(), "petdex 解压残留应被清扫");
+        assert!(pet.is_dir(), "正常宠物目录不得被触碰");
+        assert!(pet.join("voice/general").is_dir());
     }
 }

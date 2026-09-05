@@ -31,6 +31,9 @@ pub fn run() {
     database::init();
     // 后台增量导入（仅导入 DB 中不存在的 name）+ 补链，不阻塞启动
     std::thread::spawn(|| {
+        // 清扫 .import-staging 崩溃残留（issue #32-3）：必须先于增量导入/补链执行，
+        // 二者可能耗时数秒，期间 IPC 已可用、用户可能已发起导入，晚清扫会误删活跃暂存区
+        services::pet::sweep_staging();
         services::auto_import_extensions(false);
         services::sync_imported_skill_links();
     });

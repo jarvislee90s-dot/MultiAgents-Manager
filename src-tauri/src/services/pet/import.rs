@@ -32,16 +32,18 @@ pub struct StagedPet {
     pub voice_files: Vec<StagedVoiceFile>,
 }
 
-/// 简易唯一 id：时间戳 + 进程内计数（避免引入 uuid 依赖）
+/// 简易唯一 id：时间戳-pid-计数 三段（issue #32-2：pid 段防跨进程/重启后的
+/// 同毫秒碰撞复用——原实现仅 时间戳+进程内计数，重启归零可撞出同名暂存目录）
 fn uid() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "{}-{}",
+        "{}-{}-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis(),
+        std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -80,11 +82,17 @@ pub fn locate_sheet(src: &Path) -> Option<PathBuf> {
     None
 }
 
-/// 复制 voice/ 子树：仅四分组目录下的合法音频（spec §8.2 自动带入）
+/// 复制 voice/ 子树：仅 voice/<group>/<file> 三段合规的合法音频（spec §8.2 自动带入，
+/// issue #32-7 三段规则与 remove/scan 同源）。entry.file_type() 不跟随符号链接
+/// （issue #32-5）：目录型链接不入递归防环，链接文件不复制
 fn copy_voice_tree(base: &Path, dir: &Path, dest_base: &Path) -> Result<(), PetRpcError> {
     for entry in std::fs::read_dir(dir).map_err(|e| PetRpcError::internal(e.to_string()))?.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
         let p = entry.path();
-        if p.is_dir() {
+        if ft.is_dir() {
             copy_voice_tree(base, &p, dest_base)?;
             continue;
         }
@@ -92,6 +100,11 @@ fn copy_voice_tree(base: &Path, dir: &Path, dest_base: &Path) -> Result<(), PetR
             continue;
         }
         let Ok(rel) = p.strip_prefix(base) else { continue };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        // rel 相对 voice 根（无 voice/ 前缀），补前缀后走同一三段规则（issue #32-7）
+        if !manifest::is_voice_rel(&format!("voice/{rel_str}")) {
+            continue;
+        }
         let dest = dest_base.join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| PetRpcError::internal(e.to_string()))?;
@@ -101,27 +114,31 @@ fn copy_voice_tree(base: &Path, dir: &Path, dest_base: &Path) -> Result<(), PetR
     Ok(())
 }
 
-/// 暂存区内收集 voice 文件清单
+/// 暂存区内收集 voice 文件清单（仅 voice/<group>/<file> 三段，issue #32-7；
+/// 三段规则保证 name=文件名去扩展名不再错位）。symlink 跳过（issue #32-5）
 fn list_staged_voice(staging: &Path) -> Vec<StagedVoiceFile> {
     let mut out = Vec::new();
     let mut stack = vec![staging.join("voice")];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
             let p = entry.path();
-            if p.is_dir() {
+            if ft.is_dir() {
                 stack.push(p);
                 continue;
             }
             let Ok(rel) = p.strip_prefix(staging) else { continue };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            let mut segs = rel.split('/');
-            let (_v, group, file) = (segs.next(), segs.next().unwrap_or(""), segs.next().unwrap_or(""));
-            if !valid_group(group) {
+            if !manifest::is_voice_rel(&rel) {
                 continue;
             }
+            let file = rel.split('/').nth(2).unwrap_or("");
             out.push(StagedVoiceFile {
-                group: group.to_string(),
+                group: rel.split('/').nth(1).unwrap_or("").to_string(),
                 name: Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string(),
                 file: rel,
                 size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
@@ -347,13 +364,10 @@ pub fn add_voice_files_in(root: &Path, pet_id: &str, src_paths: &[String], group
 }
 
 /// 音频路径安全校验：必须形如 voice/<group>/<file>、分组 ∈ 四固定分组且无穿越
-/// （staged=true 为暂存区）。分组段不设卡则 voice/ 下任意子目录文件可被删（P1-2）
+/// （staged=true 为暂存区）。分组段不设卡则 voice/ 下任意子目录文件可被删（P1-2）；
+/// 三段规则统一走 manifest::is_voice_rel（issue #32-7），`..`/反斜杠显式拒绝为纵深防御
 pub fn remove_audio_in(root: &Path, base_id: &str, rel: &str, staged: bool) -> Result<(), PetRpcError> {
-    if !rel.starts_with("voice/") || rel.contains("..") || rel.contains('\\') {
-        return Err(PetRpcError::new("audio-relpath-invalid", "非法音频路径"));
-    }
-    let segs: Vec<&str> = rel.split('/').collect();
-    if segs.len() != 3 || !valid_group(segs[1]) {
+    if rel.contains("..") || rel.contains('\\') || !manifest::is_voice_rel(rel) {
         return Err(PetRpcError::new("audio-relpath-invalid", "非法音频路径"));
     }
     let base = if staged { staging_dir(root, base_id)? } else { pet_dir(root, base_id) };
@@ -629,5 +643,75 @@ mod tests {
         std::fs::write(legal.join("ok.mp3"), b"o").unwrap();
         remove_audio_in(root.path(), "pet", "voice/general/ok.mp3", false).unwrap();
         assert!(!legal.join("ok.mp3").exists());
+    }
+
+    /// issue #32-2：uid = 时间戳-pid-计数 三段——pid 段防跨进程/重启同毫秒碰撞复用
+    #[test]
+    fn uid_has_pid_segment_and_is_unique() {
+        let a = uid();
+        let b = uid();
+        assert_ne!(a, b);
+        assert_eq!(a.split('-').count(), 3, "uid 应为 时间戳-pid-计数 三段: {a:?}");
+        assert_eq!(a.split('-').nth(1), Some(std::process::id().to_string()).as_deref());
+    }
+
+    /// issue #32-7：voice/ 只认 voice/<group>/<file> 三段——深层子目录与非法分组
+    /// 不进暂存清单、不被复制带入（与 remove_audio_in 的三段规则同源）
+    #[test]
+    fn nested_and_non_group_voice_excluded_from_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = mkpet(root.path(), "src");
+        std::fs::create_dir_all(dir.join("voice/general/sub")).unwrap();
+        std::fs::write(dir.join("voice/general/sub/deep.mp3"), b"d").unwrap();
+        std::fs::create_dir_all(dir.join("voice/backup")).unwrap();
+        std::fs::write(dir.join("voice/backup/x.m4a"), b"x").unwrap();
+        let s = stage_from_folder_in(root.path(), &dir).unwrap();
+        assert_eq!(s.voice_files.len(), 1, "仅 voice/general/休息一下吧.m4a 应收录");
+        assert_eq!(s.voice_files[0].file, "voice/general/休息一下吧.m4a");
+        // 深层/非法分组文件也不得被复制进暂存区
+        let staged_voice = staging_root(root.path()).join(&s.staging_id).join("voice");
+        assert!(!staged_voice.join("general").join("sub").exists(), "深层子目录不得带入");
+        assert!(!staged_voice.join("backup").exists(), "非分组目录不得带入");
+    }
+
+    /// issue #32-5：voice/ 下的符号链接文件跳过（不收录、不复制）；
+    /// 目录型链接不入遍历栈（防 self->. 环死循环，机制同 file_type 不跟随）
+    #[cfg(unix)]
+    #[test]
+    fn voice_symlink_file_skipped() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let dir = mkpet(root.path(), "src");
+        let target = root.path().join("elsewhere.m4a");
+        std::fs::write(&target, b"t").unwrap();
+        symlink(&target, dir.join("voice/general/link.m4a")).unwrap();
+        let s = stage_from_folder_in(root.path(), &dir).unwrap();
+        assert_eq!(s.voice_files.len(), 1, "symlink 文件不得收录");
+        assert!(scan::scan_pet_in(root.path(), "src").unwrap().voice_files.iter().all(|f| !f.rel.contains("link.m4a")));
+    }
+
+    /// issue #32-5 Windows 变体：目录链接不入遍历栈——voice/self-junction → voice
+    /// 的自环必须在有限步终止，且链接内层不产出重复清单。symlink_dir 需要开发者
+    /// 模式/管理员权限，权限不足（os error 1314）时跳过断言（与 linker 测试同先例）
+    #[cfg(windows)]
+    #[test]
+    fn voice_symlink_dir_loop_terminated() {
+        use std::os::windows::fs::symlink_dir;
+        let root = tempfile::tempdir().unwrap();
+        let dir = mkpet(root.path(), "src");
+        if let Err(e) = symlink_dir(dir.join("voice"), dir.join("voice/self-junction")) {
+            // 1314 = ERROR_PRIVILEGE_NOT_HELD（未开开发者模式），kind() 不稳定，按原始码判
+            if e.raw_os_error() == Some(1314) {
+                eprintln!("跳过：当前环境无符号链接创建特权（{e}）");
+                return;
+            }
+            panic!("创建目录链接失败: {e}");
+        }
+        // 修复前这里无限递归/栈溢出挂死；修复后立即返回
+        let scan = scan::scan_pet_in(root.path(), "src").unwrap();
+        assert_eq!(scan.voice_files.len(), 1, "目录链接不应产出额外清单项");
+        assert!(scan.voice_files.iter().all(|f| !f.rel.contains("self-junction")));
+        let s = stage_from_folder_in(root.path(), &dir).unwrap();
+        assert_eq!(s.voice_files.len(), 1);
     }
 }
