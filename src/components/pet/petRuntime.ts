@@ -6,6 +6,9 @@ import { PetError } from "./petErrors";
 export const ACTIVE_KEY = "mam-pet-active";
 export const ACTIVE_NAME_KEY = "mam-pet-active-name";
 export const VOICE_CAP_KEY = "mam-pet-voice-cap";
+/** 同窗口激活变更通知：storage 事件只发给其它窗口，本窗口写入方（切换/管理对话框）
+ *  经此 DOM 事件让同窗口订阅者（设置页"当前宠物"标签等）即时刷新（P1-6） */
+export const ACTIVE_LOCAL_EVENT = "mam-pet-active-local-changed";
 
 export type PetRows = 9 | 11;
 
@@ -55,6 +58,7 @@ export function saveActiveId(id: string, voiceCap: boolean, displayName?: string
   localStorage.setItem(ACTIVE_KEY, id);
   localStorage.setItem(VOICE_CAP_KEY, voiceCap ? "1" : "0");
   if (displayName) localStorage.setItem(ACTIVE_NAME_KEY, displayName);
+  window.dispatchEvent(new Event(ACTIVE_LOCAL_EVENT));
 }
 
 /** 语音能力：未写入时视为 true（foxbell / 旧版本升级兼容） */

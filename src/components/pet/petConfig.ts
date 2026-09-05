@@ -1,5 +1,10 @@
 // 桌宠配置 — localStorage 单后端，跨窗口 storage 事件同步（spec §10）
-import { loadVoiceCap } from "./petRuntime";
+import {
+  loadVoiceCap,
+  ACTIVE_KEY,
+  ACTIVE_NAME_KEY,
+  ACTIVE_LOCAL_EVENT,
+} from "./petRuntime";
 
 export type PetAction = "jumping" | "waving" | "failed" | "waiting" | "review" | "running";
 export type PetScale = 0.75 | 1 | 1.25;
@@ -76,14 +81,26 @@ export function saveConfig(patch: Partial<PetConfig>): void {
 
 export function subscribeConfig(fn: () => void): () => void {
   listeners.add(fn);
-  // storage 事件只在"其它窗口"修改时触发；本窗口修改靠 emit
+  // storage 事件只在"其它窗口"修改时触发；本窗口修改靠 emit。
+  // 激活指针/展示名键纳入监听（P1-6）：同窗口切换/管理对话框改指针后，设置页
+  // "当前宠物"标签经 ACTIVE_LOCAL_EVENT 即时刷新，跨窗口改动则经 storage 键过滤触达
   const onStorage = (e: StorageEvent) => {
-    if (e.key === null || e.key === CONFIG_KEY || e.key === VISIBLE_KEY) fn();
+    if (
+      e.key === null ||
+      e.key === CONFIG_KEY ||
+      e.key === VISIBLE_KEY ||
+      e.key === ACTIVE_KEY ||
+      e.key === ACTIVE_NAME_KEY
+    )
+      fn();
   };
+  const onActiveLocal = () => fn();
   window.addEventListener("storage", onStorage);
+  window.addEventListener(ACTIVE_LOCAL_EVENT, onActiveLocal);
   return () => {
     listeners.delete(fn);
     window.removeEventListener("storage", onStorage);
+    window.removeEventListener(ACTIVE_LOCAL_EVENT, onActiveLocal);
   };
 }
 
