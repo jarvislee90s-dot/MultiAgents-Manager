@@ -19,6 +19,26 @@ pub fn pet_dir(root: &Path, id: &str) -> PathBuf {
     root.join(id)
 }
 
+/// IPC 传入的宠物 id 统一白名单校验：id 即文件夹名，`pet_dir` 是裸 join，
+/// 不设卡则 `../`、`..\`、绝对路径均可逃逸出仓库（如 pet_delete_pet("..") 会把
+/// ~/.mam 整目录送回收站）。静态规则与 validate_pet_name 一致（复用 pet-name-* 错误码，
+/// 前端码表/i18n 无需新增）；存在性检查留给各命令自身的语义。
+pub fn validate_pet_id(id: &str) -> Result<(), PetRpcError> {
+    if id.is_empty() {
+        return Err(PetRpcError::new("pet-name-empty", "宠物名不能为空"));
+    }
+    if id.starts_with('.') {
+        return Err(PetRpcError::new("pet-name-dot-prefix", "宠物名不能以点开头"));
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(PetRpcError::new("pet-name-illegal", "宠物名仅支持字母/数字/连字符/下划线"));
+    }
+    if id.eq_ignore_ascii_case("foxbell") {
+        return Err(PetRpcError::new("pet-name-reserved", "foxbell 为内置宠物保留名"));
+    }
+    Ok(())
+}
+
 /// 导入暂存区根目录 ~/.mam/pets/.import-staging（隐藏目录，清单扫描自动跳过）
 pub fn staging_root(root: &Path) -> PathBuf {
     root.join(".import-staging")
@@ -125,5 +145,33 @@ mod tests {
         let after = manifest::load(&pet_dir(root.path(), "a")).unwrap();
         assert_eq!(after.id, old_manifest.id, "rename 失败不应改写旧 manifest");
         assert_eq!(after.id, "a");
+    }
+
+    /// P0-1：id 白名单码级断言（../、..\、绝对路径、空串、点、点前缀、foxbell 变体）
+    #[test]
+    fn validate_pet_id_rejects_escape_and_reserved() {
+        let cases: &[(&str, &str)] = &[
+            ("", "pet-name-empty"),
+            (".", "pet-name-dot-prefix"),
+            ("..", "pet-name-dot-prefix"),
+            (".hidden", "pet-name-dot-prefix"),
+            // 点前缀规则先于字符白名单命中（拒绝顺序）
+            ("../skills", "pet-name-dot-prefix"),
+            ("..\\skills", "pet-name-dot-prefix"),
+            ("/etc", "pet-name-illegal"),
+            ("C:\\Windows", "pet-name-illegal"),
+            ("a/b", "pet-name-illegal"),
+            ("foxbell", "pet-name-reserved"),
+            ("FoxBell", "pet-name-reserved"),
+        ];
+        for (id, code) in cases {
+            match validate_pet_id(id) {
+                Err(e) => assert_eq!(&e.code, code, "id {id:?} 应命中 {code}"),
+                Ok(()) => panic!("id {id:?} 应被拒绝"),
+            }
+        }
+        for ok in ["starry-dew", "abc_123-X", "A9"] {
+            validate_pet_id(ok).unwrap_or_else(|e| panic!("合法 id {ok:?} 被误拒: {:?}", e.code));
+        }
     }
 }

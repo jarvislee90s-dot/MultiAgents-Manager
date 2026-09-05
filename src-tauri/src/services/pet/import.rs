@@ -365,20 +365,9 @@ pub fn remove_audio_in(root: &Path, base_id: &str, rel: &str, staged: bool) -> R
     Ok(())
 }
 
-/// 宠物名（= 文件夹名）严格校验（spec §8.4-1）
+/// 宠物名（= 文件夹名）严格校验（spec §8.4-1）：静态规则同 validate_pet_id，外加仓库内查重
 pub fn validate_pet_name(root: &Path, name: &str) -> Result<(), PetRpcError> {
-    if name.is_empty() {
-        return Err(PetRpcError::new("pet-name-empty", "宠物名不能为空"));
-    }
-    if name.starts_with('.') {
-        return Err(PetRpcError::new("pet-name-dot-prefix", "宠物名不能以点开头"));
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(PetRpcError::new("pet-name-illegal", "宠物名仅支持字母/数字/连字符/下划线"));
-    }
-    if name.eq_ignore_ascii_case("foxbell") {
-        return Err(PetRpcError::new("pet-name-reserved", "foxbell 为内置宠物保留名"));
-    }
+    super::validate_pet_id(name)?;
     if pet_dir(root, name).exists() {
         return Err(PetRpcError::new("pet-exists", format!("宠物已存在: {}", name)).with("name", name.to_string()));
     }
