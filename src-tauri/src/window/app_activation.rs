@@ -23,9 +23,16 @@ fn bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool {
     }
 }
 
+/// AppleScript 字符串字面量转义：先转反斜杠再转引号（顺序不可换——若先转引号，
+/// 后续补的反斜杠会被引号步骤二次处理）。P2-3（issue #34）：原实现只转义引号，
+/// bundle 路径含 `\` 时产生非法 AppleScript 字面量 → osascript 报错落兜底
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\"', "\\\"")
+}
+
 /// 激活 APP（AppleScript，bundle 路径精确指定，避免同名歧义）
 pub fn activate_app_bundle(bundle: &str) -> Result<(), String> {
-    let script = format!("activate application \"{}\"", bundle.replace('\"', "\\\""));
+    let script = format!("activate application \"{}\"", applescript_escape(bundle));
     super::applescript::execute_applescript(&script)
 }
 
@@ -91,5 +98,12 @@ mod tests {
             "workbuddy"
         ));
         assert!(!bundle_matches_agent("/applications/chatgpt.app", "claude"));
+    }
+
+    #[test]
+    fn applescript_escape_handles_backslash_and_quote() {
+        // P2-3 回归锁：反斜杠与引号均需转义，且顺序正确（先 \ 后 "）
+        assert_eq!(applescript_escape("/a/b.app"), "/a/b.app");
+        assert_eq!(applescript_escape("/a\\b\"c.app"), "/a\\\\b\\\"c.app");
     }
 }
