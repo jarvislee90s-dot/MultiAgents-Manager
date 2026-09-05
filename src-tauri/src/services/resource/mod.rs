@@ -141,8 +141,36 @@ fn detect_source_tool(source_path: &str) -> Option<String> {
     None
 }
 
+/// 补链门（P0-1 可测核心）：工具停用 → 一律不补链不修链——W5 停用已把工具 skill 目录
+/// 还原为真实内容（用户可能已就地修改），此时目标非链接态、already_linked 不成立，
+/// 若放行重建会 remove_link 删除用户真实目录并重挂链接，用户数据静默丢失；
+/// 已链接 → 无需处理；否则执行 enable 重建。返回是否执行了重建
+fn ensure_skill_relink(
+    tool_id: &str,
+    tool_enabled: &dyn Fn(&str) -> bool,
+    already_linked: &dyn Fn() -> bool,
+    enable: &dyn Fn() -> Result<(), String>,
+) -> Result<bool, String> {
+    if !tool_enabled(tool_id) {
+        return Ok(false);
+    }
+    if already_linked() {
+        return Ok(false);
+    }
+    enable()?;
+    Ok(true)
+}
+
 /// 为已导入但尚未建立工具链接的 skill 补链（尊重用户显式禁用）
 pub fn sync_imported_skill_links() {
+    let tool_enabled = |tool_id: &str| {
+        crate::database::dao::agent_tool::get_tool_enabled(tool_id)
+    };
+    sync_imported_skill_links_with(&tool_enabled);
+}
+
+/// 可测核心（P0-1）：tool_enabled 注入。真实实现读 agent_tools 表（W5 单一事实源）
+pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
     for ext in crate::database::list_extensions() {
         if ext.kind != "skill" {
             continue;
@@ -155,6 +183,12 @@ pub fn sync_imported_skill_links() {
         let Some(tool_id) = source_tool else {
             continue;
         };
+
+        // P0-1：工具已停用（W5 勾选门）→ 跳过该工具的全部补链与断链修复。
+        // 停用还原出的真实目录被重建 = 用户数据丢失（见 ensure_skill_relink 注释）
+        if !tool_enabled(&tool_id) {
+            continue;
+        }
 
         let assignments = crate::database::list_assignments(&tool_id);
         if assignments
@@ -189,13 +223,14 @@ pub fn sync_imported_skill_links() {
         let already_linked = crate::adapter::primary_skill_dir(&tool_id)
             .map(|dir| dir.join(&ext.name).is_symlink())
             .unwrap_or(false);
-        if already_linked {
-            continue;
-        }
-
-        if let Err(e) = crate::services::enable_skill_for_tool(&ext.name, &tool_id) {
-            log::warn!("补链 {} 到 {} 失败: {}", ext.name, tool_id, e);
-        }
+        // P0-1：补链统一走勾选门（停用工具不得重建，见 ensure_skill_relink）
+        let _ = ensure_skill_relink(
+            &tool_id,
+            &tool_enabled,
+            &|| already_linked,
+            &|| crate::services::enable_skill_for_tool(&ext.name, &tool_id),
+        )
+        .inspect_err(|e| log::warn!("补链 {} 到 {} 失败: {}", ext.name, tool_id, e));
     }
 
     // 兼容历史数据：assignment 表里可能已有 skill 记录，但 extensions 表没有对应行
@@ -204,6 +239,10 @@ pub fn sync_imported_skill_links() {
     assignments.sort_by_key(|a| a.extension_id.matches('/').count());
     for assignment in assignments {
         if !assignment.enabled {
+            continue;
+        }
+        // P0-1：勾选门同样适用于历史 assignment 行（停用工具不得重建）
+        if !tool_enabled(&assignment.agent_tool_id) {
             continue;
         }
         let Some(skill_name) = assignment.extension_id.strip_prefix("skill-") else {
@@ -217,19 +256,13 @@ pub fn sync_imported_skill_links() {
         let already_linked = crate::adapter::primary_skill_dir(&assignment.agent_tool_id)
             .map(|dir| dir.join(skill_name).is_symlink())
             .unwrap_or(false);
-        if already_linked {
-            continue;
-        }
-
-        if let Err(e) =
-            crate::services::enable_skill_for_tool(skill_name, &assignment.agent_tool_id)
-        {
-            log::warn!(
-                "补链 {} 到 {} 失败: {}",
-                skill_name,
-                assignment.agent_tool_id,
-                e
-            );
+        if let Err(e) = ensure_skill_relink(
+            &assignment.agent_tool_id,
+            &tool_enabled,
+            &|| already_linked,
+            &|| crate::services::enable_skill_for_tool(skill_name, &assignment.agent_tool_id),
+        ) {
+            log::warn!("补链 {} 到 {} 失败: {}", skill_name, assignment.agent_tool_id, e);
         }
     }
 }
@@ -482,5 +515,58 @@ mod scan_depth_tests {
         assert!(found
             .iter()
             .all(|(p, _)| p.components().count() <= tmp.path().components().count() + 5));
+    }
+}
+
+// ---- P0-1 回归锁：停用工具的补链不得重建 ----
+// W5 停用把工具 skill 目录还原为真实目录；启动补链若不查工具勾选状态，会把真实目录
+// remove_link 删除并重建链接（用户就地修改静默丢失）。评审复核时测试清单恰缺此用例
+#[cfg(test)]
+mod relink_gate_tests {
+    use super::ensure_skill_relink;
+
+    #[test]
+    fn disabled_tool_never_relinks() {
+        let enable_called = std::cell::Cell::new(0);
+        let out = ensure_skill_relink(
+            "workbuddy",
+            &|tool| tool != "workbuddy", // workbuddy 已停用
+            &|| false,                   // 还原出的真实目录：非链接态
+            &|| {
+                enable_called.set(enable_called.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(out, Ok(false));
+        assert_eq!(
+            enable_called.get(),
+            0,
+            "停用工具不得触发补链（否则删除用户还原目录）"
+        );
+    }
+
+    #[test]
+    fn enabled_unlinked_tool_relinks() {
+        let out = ensure_skill_relink(
+            "claude",
+            &|_| true,
+            &|| false,
+            &|| Ok(()),
+        );
+        assert_eq!(out, Ok(true));
+    }
+
+    #[test]
+    fn already_linked_skips_relink() {
+        let out = ensure_skill_relink("claude", &|_| true, &|| true, &|| Ok(()));
+        assert_eq!(out, Ok(false));
+    }
+
+    #[test]
+    fn enable_failure_propagates() {
+        let out = ensure_skill_relink("claude", &|_| true, &|| false, &|| {
+            Err("boom".into())
+        });
+        assert_eq!(out, Err("boom".into()));
     }
 }
