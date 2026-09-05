@@ -62,7 +62,11 @@ pub async fn update_tool_settings(
         crate::services::tool_settings::apply_tool_changes(changes)
     })
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        // JoinError（后台任务 panic）不得伪装成「已应用」：记日志并返回空结果
+        log::error!("update_tool_settings 后台任务失败: {e}");
+        Default::default()
+    });
     // N2：跨窗口广播工具勾选变化。设置窗口与主窗口是独立 WebView、各持 QueryClient，
     // 设置页本地的 invalidateQueries 触达不到主窗口——主窗口靠此事件失效缓存
     let _ = app.emit("tools-changed", ());

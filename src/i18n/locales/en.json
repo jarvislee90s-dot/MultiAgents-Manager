@@ -573,6 +573,6 @@
     }
   },
   "errors": {
-    "toolDisabled": "Tool(s) {{tools}} are disabled — enable them in Settings → Tool Management first"
+    "toolDisabled": "Tool {{tools}} is disabled — enable them in Settings → Tool Management first"
   }
 }

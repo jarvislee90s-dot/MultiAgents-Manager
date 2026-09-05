@@ -96,10 +96,14 @@ pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
             // issue #36-8：文件操作成功后再写 DB——重建全部成功才置 enabled；
             // 部分失败则回滚本次产物（对刚建的链接/MCP 条目执行一次停用清理，
             // 恰为 W5 还原语义）并保持 DB 未启用，用户重新勾选即整体幂等重试，
-            // 不再需要「先关再开」。services 层不读工具启用态（已核验），
-            // 故先文件后 DB 的次序对重建链路无影响
+            // 不再需要「先关再开」。重建链路不读工具启用态（已逐一核验
+            // enable_skill_for_tool / assign_skill_to_subagent / toggle_plugin /
+            // write_mcp），故先文件后 DB 的次序对重建链路无影响。
+            // 门控只看本次工具的失败增量：rebuild_failed 在整个批量保存中跨工具
+            // 累积，直接 is_empty() 会让前面工具的失败错误回滚后面成功的工具
+            let failed_before = result.rebuild_failed.len();
             rebuild_tool_links(&c.tool_id, &mut result);
-            if result.rebuild_failed.is_empty() {
+            if enable_allowed(failed_before, result.rebuild_failed.len()) {
                 agent_tool::set_tool_enabled(&c.tool_id, true);
             } else {
                 disable_tool_cleanup(&c.tool_id, &mut result);
@@ -107,6 +111,12 @@ pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
         }
     }
     result
+}
+
+/// 启用门控纯核（review Critical 回归锁）：仅当本次重建零新增失败才置 enabled。
+/// rebuild_failed 跨工具累积，门控必须对比本次前后的失败数而非判全表为空
+fn enable_allowed(failed_before: usize, failed_after: usize) -> bool {
+    failed_after == failed_before
 }
 
 /// 取消勾选：链接还原 + MCP 条目移除 + 未读卡清除（spec W5 清理语义）
@@ -250,6 +260,10 @@ fn restore_mam_link(
         );
         return RestoreOutcome::SkippedKept;
     }
+    // 记录原链接目标（review Important）：工具级目标原链 Layer 2、子 Agent 目标原链
+    // Layer 3——恢复必须重建到原目标以保持层级拓扑，直连 SSOT 会静默绕过层级间接
+    //（工具级断链不再隐藏该内容）。read_link 读链接本身，Dangling 亦可得
+    let original_target = std::fs::read_link(target).ok();
     let tmp = target.with_extension("mam_restore_tmp");
     // 清理可能的历史残留，保证后续 rename 可落位
     let _ = crate::linker::remove_link(&tmp);
@@ -273,29 +287,29 @@ fn restore_mam_link(
         return RestoreOutcome::SkippedKept;
     }
     if let Err(e) = std::fs::rename(&tmp, target) {
-        // issue #36-4：此刻链接已被移除、现场缺失——先尝试重建链接恢复原状
-        //（SSOT 仍在，create_link 重新指回即可）；恢复成功等同「链接保持不变」，
-        // 仅恢复也失败才计入 SkippedLost（真丢失，需重新勾选重建）
+        // issue #36-4：此刻链接已被移除、现场缺失——先按原链接目标重建恢复原状
+        //（保持 Layer2/3 拓扑），原目标不可知或重建失败再兜底直连 SSOT；
+        // 恢复成功等同「链接保持不变」，仅两次恢复都失败才计入 SkippedLost
+        //（真丢失，需重新勾选重建）
         let _ = crate::linker::remove_link(&tmp);
-        match crate::linker::create_link(ssot, target) {
-            Ok(()) => {
-                log::warn!(
-                    "还原 {} 落位失败（{}），已重建链接恢复现场，链接保持不变",
-                    name,
-                    e
-                );
-                return RestoreOutcome::SkippedKept;
-            }
-            Err(recover_err) => {
-                log::warn!(
-                    "还原 {} 落位失败（{}）且链接恢复失败（{}），工具目录空缺，需重新勾选后重建",
-                    name,
-                    e,
-                    recover_err
-                );
-                return RestoreOutcome::SkippedLost;
-            }
+        let recovered = match original_target.as_deref() {
+            Some(orig) if crate::linker::create_link(orig, target).is_ok() => true,
+            _ => crate::linker::create_link(ssot, target).is_ok(),
+        };
+        if recovered {
+            log::warn!(
+                "还原 {} 落位失败（{}），已重建链接恢复现场，链接保持不变",
+                name,
+                e
+            );
+            return RestoreOutcome::SkippedKept;
         }
+        log::warn!(
+            "还原 {} 落位失败（{}）且链接恢复失败，工具目录空缺，需重新勾选后重建",
+            name,
+            e
+        );
+        return RestoreOutcome::SkippedLost;
     }
     RestoreOutcome::Restored
 }
@@ -607,6 +621,17 @@ mod ensure_guard_tests {
         // 重新启用 → 放行
         agent_tool::set_tool_enabled_conn(&conn, "opencode", true);
         assert!(ensure_tool_enabled_conn(&conn, "opencode").is_ok());
+    }
+
+    /// review Critical 回归锁：启用门控看本次失败增量而非累积全表——
+    /// 批量保存中前面工具的 rebuild_failed 不得回滚后面重建成功的工具
+    #[test]
+    fn enable_gate_uses_increment_not_accumulated_table() {
+        assert!(enable_allowed(0, 0));
+        assert!(!enable_allowed(0, 1));
+        // 前面工具已贡献 2 个失败，本次零新增 → 仍放行
+        assert!(enable_allowed(2, 2));
+        assert!(!enable_allowed(2, 3));
     }
 }
 
