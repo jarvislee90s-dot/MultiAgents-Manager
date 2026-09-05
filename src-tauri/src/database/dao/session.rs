@@ -78,6 +78,49 @@ pub fn cleanup_stale_sessions_conn(conn: &rusqlite::Connection, active_ids: &Has
     }
 }
 
+/// Session 数据访问标准接口
+pub trait SessionDao {
+    fn find_all_statuses(&self) -> Vec<(String, String, String)>;
+    fn find_status(&self, session_id: &str) -> Option<String>;
+    fn upsert_status(&self, session_id: &str, agent_type: &str, status: &str) -> Option<String>;
+    fn delete(&self, session_id: &str);
+}
+
+pub struct SessionDaoImpl;
+impl SessionDao for SessionDaoImpl {
+    fn find_all_statuses(&self) -> Vec<(String, String, String)> {
+        let conn = DB.lock().unwrap();
+        conn.prepare("SELECT session_id, agent_type, status FROM session_status_cache")
+            .ok()
+            .map(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+    fn find_status(&self, session_id: &str) -> Option<String> {
+        let conn = DB.lock().unwrap();
+        conn.query_row(
+            "SELECT status FROM session_status_cache WHERE session_id = ?",
+            [session_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+    fn upsert_status(&self, session_id: &str, agent_type: &str, status: &str) -> Option<String> {
+        update_session_status(session_id, agent_type, status)
+    }
+    fn delete(&self, session_id: &str) {
+        let conn = DB.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM session_status_cache WHERE session_id = ?",
+            [session_id],
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,48 +164,5 @@ mod tests {
         assert!(exists(&conn, "active"), "活跃行不得清理");
         assert!(exists(&conn, "fresh-gone"), "TTL 内的离板行不得清理");
         assert!(!exists(&conn, "aged-gone"), "超龄离板行应被清理");
-    }
-}
-
-/// Session 数据访问标准接口
-pub trait SessionDao {
-    fn find_all_statuses(&self) -> Vec<(String, String, String)>;
-    fn find_status(&self, session_id: &str) -> Option<String>;
-    fn upsert_status(&self, session_id: &str, agent_type: &str, status: &str) -> Option<String>;
-    fn delete(&self, session_id: &str);
-}
-
-pub struct SessionDaoImpl;
-impl SessionDao for SessionDaoImpl {
-    fn find_all_statuses(&self) -> Vec<(String, String, String)> {
-        let conn = DB.lock().unwrap();
-        conn.prepare("SELECT session_id, agent_type, status FROM session_status_cache")
-            .ok()
-            .map(|mut stmt| {
-                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default()
-    }
-    fn find_status(&self, session_id: &str) -> Option<String> {
-        let conn = DB.lock().unwrap();
-        conn.query_row(
-            "SELECT status FROM session_status_cache WHERE session_id = ?",
-            [session_id],
-            |row| row.get(0),
-        )
-        .ok()
-    }
-    fn upsert_status(&self, session_id: &str, agent_type: &str, status: &str) -> Option<String> {
-        update_session_status(session_id, agent_type, status)
-    }
-    fn delete(&self, session_id: &str) {
-        let conn = DB.lock().unwrap();
-        let _ = conn.execute(
-            "DELETE FROM session_status_cache WHERE session_id = ?",
-            [session_id],
-        );
     }
 }

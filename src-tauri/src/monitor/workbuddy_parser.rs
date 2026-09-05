@@ -3,7 +3,7 @@
 // 所有文件均为未文档化私有格式：解析失败一律跳过/降级，禁止 panic（spec W3 防御性要求）
 
 use super::git::get_github_url;
-use super::jsonl::read_recent_lines;
+use super::jsonl::{read_first_lines, read_recent_lines};
 use super::project::project_name_from_path;
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, ProcessForm, Session, SessionStatus};
@@ -19,6 +19,10 @@ pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
 /// App 形态状态叠加阈值（spec §4「叠加 mtime 阈值（App 形态 300s，与 Codex APP 一致）」）：
 /// JSONL mtime 停更超过该时长时，函数调用类尾部（Processing）降级为 Waiting
 pub const APP_STATUS_STALE_MS: u64 = 300_000;
+
+/// 标题降级的首部读取行数（issue #35-6）：首条 user 消息从文件头找——
+/// 只搜尾部 500 行窗口时，超长会话的降级标题恒为 None（卡片回退显示 sessionId）
+const TITLE_HEAD_LINES: usize = 200;
 
 /// 每轮观测到的 pid → (tool_id, sessionId)（心跳消失补偿的依据）。
 /// 值含 tool_id（P2-3 按工具隔离）：停用工具时只清对应工具条目，避免未来第二个
@@ -114,6 +118,13 @@ pub fn session_jsonl_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .join(format!("{}.jsonl", session_id))
 }
 
+/// 兜底扫描命中缓存（issue #35-7）：WorkBuddy 升级改编码后 mangle 恒未命中时，
+/// 每会话每轮的 projects 全目录扫描按 (home, cwd, sessionId) 缓存命中路径，
+/// 避免每 30s 一轮的全量扫描。键含 home——单测多 tempdir 并存，不得跨 home 串路径
+type FallbackHitKey = (PathBuf, String, String);
+static FALLBACK_JSONL_HITS: Lazy<Mutex<HashMap<FallbackHitKey, PathBuf>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// 共享查找函数（P0-2）：定位会话 JSONL。
 /// 1. 先试 mangle(cwd)/<sessionId>.jsonl；
 /// 2. 未命中 → 扫描 ~/.workbuddy/projects/*/ 查找 <sessionId>.jsonl（会话可能换过项目目录，
@@ -126,15 +137,27 @@ pub fn find_session_jsonl(home: &Path, cwd: &str, session_id: &str) -> Option<Pa
     if primary.exists() {
         return Some(primary);
     }
+    // issue #35-7：先查兜底命中缓存（键含 home，防单测多 tempdir 串路径）；
+    // 命中前校验文件仍在（会话目录可能被清理），失效则重扫
+    let key = (home.to_path_buf(), cwd.to_string(), session_id.to_string());
+    if let Some(p) = FALLBACK_JSONL_HITS.lock().unwrap().get(&key) {
+        if p.exists() {
+            return Some(p.clone());
+        }
+    }
     // 目录扫描兜底：projects 下任意子目录中的 <sessionId>.jsonl
     let projects_dir = home.join(".workbuddy").join("projects");
     let Ok(entries) = std::fs::read_dir(&projects_dir) else {
         return None; // 目录缺失/不可读 → 防御性 None
     };
-    entries.filter_map(|e| e.ok()).find_map(|dir| {
+    let hit = entries.filter_map(|e| e.ok()).find_map(|dir| {
         let p = dir.path().join(format!("{}.jsonl", session_id));
         p.exists().then_some(p)
-    })
+    });
+    if let Some(ref p) = hit {
+        FALLBACK_JSONL_HITS.lock().unwrap().insert(key, p.clone());
+    }
+    hit
 }
 
 /// mtime 阈值叠加（spec §4）：函数调用类尾部停更 >= 300s 降级 Waiting；
@@ -177,6 +200,12 @@ pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
 pub fn title_from_db(home: &Path, session_id: &str) -> Option<String> {
     let db = home.join(".workbuddy").join("workbuddy.db");
     let conn = super::sqlite::open_readonly_with_timeout(&db)?;
+    title_from_conn(&conn, session_id)
+}
+
+/// 共享连接版标题查询（issue #35 nit）：单轮内复用一条只读连接，
+/// 消除每会话每轮各开一次 SQLite 的开销
+fn title_from_conn(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT COALESCE(NULLIF(custom_title,''), title) FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
         [session_id],
@@ -185,6 +214,20 @@ pub fn title_from_db(home: &Path, session_id: &str) -> Option<String> {
     .ok()
     .flatten()
     .filter(|t| !t.trim().is_empty())
+}
+
+/// 标题解析链（可测核心，issue #35-6）：DB 标题优先；降级首条 user 消息改从
+/// 文件头读取（尾部 500 行窗口外的长会话不再恒为 None），仅在 DB 无标题时
+/// 才产生头部 I/O；统一截断 60 字符
+fn resolve_title(
+    db_conn: Option<&rusqlite::Connection>,
+    session_id: &str,
+    jsonl: &Path,
+) -> Option<String> {
+    db_conn
+        .and_then(|c| title_from_conn(c, session_id))
+        .or_else(|| first_user_text(&read_first_lines(jsonl, TITLE_HEAD_LINES)))
+        .map(|t| t.chars().take(60).collect::<String>())
 }
 
 fn heartbeat_path(home: &Path, pid: u32) -> PathBuf {
@@ -236,9 +279,12 @@ fn discover_workbuddy_processes_with(
             continue;
         };
         // 过滤：严格 UUID + kind 非 prewarm + 心跳新鲜（与 get_workbuddy_sessions 同规）
+        // + pid 交叉校验（issue #35 nit）：pid 复用竞态窗口内文件名与内容 pid 可能
+        // 不一致，视为无效心跳，不为无关进程出卡（下轮真实心跳自愈）
         if !heartbeat_session_id_is_uuid(&hb)
             || hb.kind.as_deref() == Some("prewarm")
             || !heartbeat_is_alive(&hb, now_ms)
+            || hb.pid != pid
         {
             continue;
         }
@@ -280,6 +326,9 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         return sessions;
     };
     let now = now_ms();
+    // issue #35 nit：单轮复用一条只读连接（title_from_db 原先每会话各开一次 SQLite）
+    let db_conn =
+        super::sqlite::open_readonly_with_timeout(&home.join(".workbuddy").join("workbuddy.db"));
 
     for process in processes {
         // 防御：心跳文件缺失/损坏 → 跳过该进程（含独立 CLI、空闲 prewarm）
@@ -290,9 +339,11 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             continue;
         };
         // 过滤：严格 UUID 形态（真实任务会话）+ 心跳新鲜 + kind 非 prewarm（双保险，字段缺失视为通过）
+        // + pid 交叉校验（issue #35 nit：文件名 pid 与内容 pid 不一致 = 竞态/损坏心跳）
         if !heartbeat_session_id_is_uuid(&hb)
             || hb.kind.as_deref() == Some("prewarm")
             || !heartbeat_is_alive(&hb, now)
+            || hb.pid != process.pid
         {
             continue;
         }
@@ -321,9 +372,7 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             .find_map(|l| extract_message_text(l))
             .unwrap_or_default();
 
-        let title = title_from_db(&home, &hb.session_id)
-            .or_else(|| first_user_text(&lines))
-            .map(|t| t.chars().take(60).collect::<String>());
+        let title = resolve_title(db_conn.as_ref(), &hb.session_id, &jsonl);
 
         sessions.push(Session {
             id: hb.session_id.clone(),
@@ -430,6 +479,10 @@ pub fn compensate_vanished_heartbeats_in(
             }
         })
         .collect();
+    // issue #35 nit：单轮复用一条只读连接（cwd 反查 + 标题查询共用；
+    // workbuddy.db 缺失/不可读 → None，调用方防御性降级）
+    let db_conn =
+        super::sqlite::open_readonly_with_timeout(&home.join(".workbuddy").join("workbuddy.db"));
 
     for (pid, (tool_id, session_id)) in vanished {
         // 逐个短暂重锁移除（不做额外清理，未消失条目保留供下轮参考）
@@ -441,7 +494,10 @@ pub fn compensate_vanished_heartbeats_in(
         // 找该会话的 JSONL（与主路径共用 find_session_jsonl）：
         // 先 mangle(cwd)/<id>.jsonl，未命中再扫描 projects 下所有 <sessionId>.jsonl
         //（会话可能换过项目目录；cwd 未知时直接用空串让兜底扫描接管）
-        let cwd = workbuddy_cwd_from_db(home, &session_id).unwrap_or_default();
+        let cwd = db_conn
+            .as_ref()
+            .and_then(|c| workbuddy_cwd_from_conn(c, &session_id))
+            .unwrap_or_default();
         let Some(jsonl) = find_session_jsonl(home, &cwd, &session_id) else {
             continue; // 全无 → 跳过该 pid，不中断其余补偿
         };
@@ -469,7 +525,9 @@ pub fn compensate_vanished_heartbeats_in(
             } else {
                 project_name_from_path(&cwd)
             },
-            title: title_from_db(home, &session_id),
+            title: db_conn
+                .as_ref()
+                .and_then(|c| title_from_conn(c, &session_id)),
             last_message,
             // 以补偿时刻为转绿时间：转绿从未被观测，此刻即首绿
             turned_green_at_ms: now_ms as i64,
@@ -553,10 +611,8 @@ pub fn compensate_vanished_heartbeats() {
     sync_observations_to_db(now);
 }
 
-/// 补偿用：只读打开 workbuddy.db 反查会话 cwd；列缺失/打开失败一律 None（防御）
-fn workbuddy_cwd_from_db(home: &Path, session_id: &str) -> Option<String> {
-    let db = home.join(".workbuddy").join("workbuddy.db");
-    let conn = super::sqlite::open_readonly_with_timeout(&db)?;
+/// 补偿用：会话 cwd 反查（共享连接版，issue #35 nit：与标题查询同轮复用连接）
+fn workbuddy_cwd_from_conn(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT cwd FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
         [session_id],
@@ -674,6 +730,32 @@ mod tests {
             found,
             dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl")
         );
+    }
+
+    /// issue #35-7：兜底命中按 (home, cwd, sessionId) 缓存——注入 projects 扫描
+    /// 范围之外的路径也能命中（证明先查缓存）；文件被清后缓存失效回落重扫；
+    /// 不同 home 不串缓存
+    #[test]
+    fn fallback_scan_hit_is_cached_and_invalidated() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let file = outside.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl");
+        std::fs::write(&file, "x").unwrap();
+        let cwd = "\\\\server\\share\\proj";
+        let sid = "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c";
+        FALLBACK_JSONL_HITS.lock().unwrap().insert(
+            (home.path().to_path_buf(), cwd.to_string(), sid.to_string()),
+            file.clone(),
+        );
+        // 该路径在 projects 扫描范围之外 → 命中只能来自缓存
+        assert_eq!(find_session_jsonl(home.path(), cwd, sid).unwrap(), file);
+        // 缓存路径上的文件被清 → 失效重扫 → None（home 无 projects 目录）
+        std::fs::remove_file(&file).unwrap();
+        assert!(find_session_jsonl(home.path(), cwd, sid).is_none());
+        // 不同 home 同 (cwd, sid)：键隔离，不得命中他 home 的缓存
+        let other = tempfile::tempdir().unwrap();
+        assert!(find_session_jsonl(other.path(), cwd, sid).is_none());
     }
 
     #[test]
@@ -1129,6 +1211,67 @@ mod tests {
         }
     }
 
+    // ---- 标题降级（issue #35-6）：首条 user 消息从文件头读取 ----
+
+    mod title_fallback_tests {
+        use super::*;
+
+        const SID: &str = "ecbf3d35-76e9-42df-b71d-89409ec156ea";
+
+        fn user_msg(text: &str) -> String {
+            format!(
+                r#"{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}"#
+            )
+        }
+
+        fn assistant_msg(text: &str) -> String {
+            format!(
+                r#"{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}"#
+            )
+        }
+
+        fn write_long_session(home: &Path, name: &str, first_user: &str) -> PathBuf {
+            let mut lines = vec![user_msg(first_user)];
+            lines.extend((0..1200).map(|i| assistant_msg(&format!("填充 {i}"))));
+            let jsonl = home.join(name);
+            std::fs::write(&jsonl, lines.join("\n")).unwrap();
+            jsonl
+        }
+
+        /// 长会话（>500 行）：首条 user 消息远在尾部窗口之外，降级标题不再恒为 None
+        #[test]
+        fn long_session_title_reads_first_user_message_from_head() {
+            let home = tempfile::tempdir().unwrap();
+            let jsonl = write_long_session(home.path(), "s1.jsonl", "帮我写个爬虫");
+            // DB 无标题（连接注入 None）→ 降级文件头首条 user 消息
+            assert_eq!(
+                resolve_title(None, SID, &jsonl).as_deref(),
+                Some("帮我写个爬虫")
+            );
+        }
+
+        /// 降级标题统一截断 60 字符（与旧尾部链路的展示口径一致）
+        #[test]
+        fn fallback_title_is_truncated_to_60_chars() {
+            let home = tempfile::tempdir().unwrap();
+            let long = "长".repeat(80);
+            let jsonl = write_long_session(home.path(), "s2.jsonl", &long);
+            let title = resolve_title(None, SID, &jsonl).unwrap();
+            assert_eq!(title.chars().count(), 60);
+        }
+
+        /// 头部无 user 消息（防御形态）→ 降级 None，不 panic
+        #[test]
+        fn head_without_user_message_yields_none() {
+            let home = tempfile::tempdir().unwrap();
+            let mut lines = vec![assistant_msg("只有 assistant")];
+            lines.extend((0..600).map(|i| assistant_msg(&format!("填充 {i}"))));
+            let jsonl = home.path().join("s3.jsonl");
+            std::fs::write(&jsonl, lines.join("\n")).unwrap();
+            assert!(resolve_title(None, SID, &jsonl).is_none());
+        }
+    }
+
     // ---- 心跳目录驱动的进程发现（P0-1）：tempdir 驱动 + 构造进程表（闭包注入） ----
 
     mod discovery_tests {
@@ -1213,6 +1356,18 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_heartbeat_json(home.path(), 11952, &active_hb(11952, 1_000));
             let found = discover_workbuddy_processes_with(home.path(), &process_table(&[]), 10_000);
+            assert!(found.is_empty());
+        }
+
+        /// issue #35 nit：pid 交叉校验——文件名 pid 与内容 pid 不一致视为无效心跳，
+        /// pid 复用竞态窗口内不得为无关进程出卡（下轮真实心跳自愈）
+        #[test]
+        fn heartbeat_pid_mismatch_is_skipped() {
+            let home = tempfile::tempdir().unwrap();
+            // 文件名 111.json，内容声称 pid=222（竞态窗口产物形态）
+            write_heartbeat_json(home.path(), 111, &active_hb(222, 1_000));
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[111, 222]), 10_000);
             assert!(found.is_empty());
         }
 

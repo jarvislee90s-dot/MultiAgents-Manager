@@ -30,6 +30,20 @@ pub(crate) fn read_recent_lines(path: &Path, max_lines: usize) -> Vec<String> {
     lines[start..].to_vec()
 }
 
+/// 读取 JSONL 文件头部最多 max_lines 行（按文件顺序返回）。
+/// 「取首条」场景专用（issue #35-6）：长会话的首条 user 消息不在尾部窗口内，
+/// 标题降级需从文件头读取；文件缺失/不可读 → 空集
+pub(crate) fn read_first_lines(path: &Path, max_lines: usize) -> Vec<String> {
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    BufReader::new(file)
+        .lines()
+        .take(max_lines)
+        .map_while(Result::ok)
+        .collect()
+}
+
 /// 从 JSONL 文件头部提取首个有效 cwd（Claude 协议消息携带 cwd 字段）
 pub(crate) fn extract_cwd_from_jsonl(jsonl_path: &Path) -> Option<String> {
     let file = File::open(jsonl_path).ok()?;
@@ -106,4 +120,25 @@ pub(crate) fn get_recent_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files.into_iter().map(|(p, _)| p).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// issue #35-6：头部读取按文件顺序返回，行数上限生效，缺失文件 → 空集
+    #[test]
+    fn read_first_lines_returns_head_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
+        assert_eq!(
+            read_first_lines(&path, 2),
+            vec!["l1".to_string(), "l2".to_string()]
+        );
+        // 上限宽于文件行数 → 全量返回
+        assert_eq!(read_first_lines(&path, 10).len(), 4);
+        // 文件缺失 → 空集（不 panic）
+        assert!(read_first_lines(&dir.path().join("missing.jsonl"), 5).is_empty());
+    }
 }
