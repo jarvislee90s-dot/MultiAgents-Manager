@@ -509,7 +509,18 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
                 expires_at_ms: now_ms + 24 * 3600 * 1000,
             };
             match unread_pool_action(prev.as_deref(), true) {
-                UnreadPoolAction::Insert => crate::database::dao::unread::upsert(&record),
+                UnreadPoolAction::Insert => {
+                    // issue #35-1：prev=None 且近期已读墓碑在场 = 缓存失忆的已读会话
+                    // （长间隙跨过缓存 TTL / MAM 重启），不得复插已删未读行；
+                    // prev 有值（非绿）是真实的新回合状态迁移，正常插行
+                    if prev.is_none()
+                        && crate::database::dao::unread::was_read_recently(&tool, &s.id, now_ms)
+                    {
+                        // 已读会话：跳过插行（墓碑防复活）
+                    } else {
+                        crate::database::dao::unread::upsert(&record);
+                    }
+                }
                 UnreadPoolAction::RefreshDisplay => {
                     crate::database::dao::unread::refresh_display(&record)
                 }
@@ -552,6 +563,8 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
     {
         let conn = crate::database::connection::DB.lock().unwrap();
         crate::database::dao::unread::cleanup_expired_unread(&conn, now_ms);
+        // issue #35-1：已读墓碑超龄行随轮物理清理
+        crate::database::dao::unread::cleanup_expired_read_tombstones_conn(&conn, now_ms);
     }
 
     // 4) 未读池合并为卡（纯映射见 build_unread_cards；追加在末尾，最终顺序由 session_sort_cmp 决定）

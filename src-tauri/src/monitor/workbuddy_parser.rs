@@ -405,6 +405,7 @@ pub fn compensate_vanished_heartbeats_in(
     now_ms: u64,
     last_seen: &Mutex<HashMap<u32, (String, String)>>,
     status_of: &dyn Fn(&str) -> Option<String>,
+    was_read: &dyn Fn(&str) -> bool,
 ) -> Vec<crate::database::dao::unread::UnreadSessionRecord> {
     let mut compensated = Vec::new();
 
@@ -449,11 +450,14 @@ pub fn compensate_vanished_heartbeats_in(
             continue; // 非完成态（运行中被杀等）→ 不补
         }
         // review M1：状态缓存已记录「绿已被 sync 观测」（Idle/Finished）时，行缺席
-        // 是因为用户已读删行——补偿不得复活（否则一次性复活未读卡）
+        // 是因为用户已读删行——补偿不得复活（否则一次性复活未读卡）。
+        // issue #35-1：缓存可能已失忆（离板 TTL 清理 / MAM 重启），近期已读墓碑
+        // 提供不依赖缓存的已读信号，同样不得复活
         if matches!(
             status_of(&session_id).as_deref(),
             Some("Idle") | Some("Finished")
-        ) {
+        ) || was_read(&session_id)
+        {
             continue;
         }
         let last_message = lines.iter().rev().find_map(|l| extract_message_text(l));
@@ -489,9 +493,14 @@ pub fn compensate_vanished_heartbeats() {
     }
     let Some(home) = dirs::home_dir() else { return };
     let now = now_ms();
-    for record in compensate_vanished_heartbeats_in(&home, now, &LAST_SEEN_SESSIONS, &|sid| {
-        crate::database::find_status(sid)
-    }) {
+    for record in compensate_vanished_heartbeats_in(
+        &home,
+        now,
+        &LAST_SEEN_SESSIONS,
+        &|sid| crate::database::find_status(sid),
+        // issue #35-1：已读墓碑判据（不依赖状态缓存的存活期）
+        &|sid| crate::database::dao::unread::was_read_recently("workbuddy", sid, now as i64),
+    ) {
         crate::database::dao::unread::upsert(&record);
     }
 }
@@ -904,7 +913,13 @@ mod tests {
                 11952u32,
                 ("workbuddy".to_string(), SID.to_string()),
             )]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].session_id, SID);
             assert_eq!(out[0].tool_id, "workbuddy");
@@ -921,7 +936,13 @@ mod tests {
                 11952u32,
                 ("workbuddy".to_string(), SID.to_string()),
             )]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty());
             // 消失即移除观测表条目（即便不补），防止陈旧 pid 长期滞留
             assert!(last_seen.lock().unwrap().is_empty());
@@ -936,7 +957,13 @@ mod tests {
                 11952u32,
                 ("workbuddy".to_string(), SID.to_string()),
             )]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty());
             // 未消失条目保留，供下轮补偿参考
             assert_eq!(
@@ -958,8 +985,13 @@ mod tests {
                 11952u32,
                 ("workbuddy".to_string(), SID.to_string()),
             )]));
-            let out =
-                compensate_vanished_heartbeats_in(home.path(), 100_000, &last_seen, &|_| None);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                100_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert_eq!(out.len(), 1); // 过期 = 视为消失，终态完成 → 补
         }
 
@@ -974,9 +1006,36 @@ mod tests {
                 ("workbuddy".to_string(), SID.to_string()),
             )]));
             let status_of = |sid: &str| (sid == SID).then(|| "Idle".to_string());
-            let out =
-                compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &status_of);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &status_of,
+                &|_| false,
+            );
             assert!(out.is_empty(), "已观测绿的会话不得经补偿复活未读行");
+            // 消失条目照常移除，不滞留
+            assert!(last_seen.lock().unwrap().is_empty());
+        }
+
+        /// issue #35-1 回归锁：状态缓存失忆（status_of=None，跨过缓存 TTL / MAM
+        /// 重启）但近期已读墓碑在场 → 补偿同样不得复活已读会话
+        #[test]
+        fn compensation_skips_recently_read_session_with_forgotten_cache() {
+            let home = tempfile::tempdir().unwrap();
+            write_jsonl(home.path(), SID, ASSISTANT_TAIL);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,         // 缓存失忆：读不到上一轮状态
+                &|sid| sid == SID, // 但已读墓碑在场
+            );
+            assert!(out.is_empty(), "缓存失忆的已读会话不得经补偿复活未读行");
             // 消失条目照常移除，不滞留
             assert!(last_seen.lock().unwrap().is_empty());
         }
@@ -989,7 +1048,13 @@ mod tests {
                 11952u32,
                 ("workbuddy".to_string(), SID.to_string()),
             )]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty());
         }
 
@@ -1003,7 +1068,13 @@ mod tests {
                 11952u32,
                 ("codex".to_string(), SID.to_string()),
             )]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty(), "非 workbuddy 条目不得经 workbuddy 补偿复活");
             // 消失条目照常移除（语义：谁消失谁出表）
             assert!(last_seen.lock().unwrap().is_empty());

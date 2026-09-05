@@ -90,6 +90,18 @@ pub fn init(conn: &Connection) {
             expires_at       INTEGER NOT NULL,
             PRIMARY KEY (tool_id, session_id)
         );
+        CREATE TABLE IF NOT EXISTS unread_read_tombstones (
+            tool_id     TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            read_at     INTEGER NOT NULL,
+            PRIMARY KEY (tool_id, session_id)
+        );
+        CREATE TABLE IF NOT EXISTS heartbeat_observations (
+            pid           INTEGER PRIMARY KEY,
+            tool_id       TEXT NOT NULL,
+            session_id    TEXT NOT NULL,
+            last_seen_at  INTEGER NOT NULL
+        );
         "#,
     )
     .expect("Failed to initialize database schema");

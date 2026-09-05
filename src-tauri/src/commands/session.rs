@@ -41,6 +41,9 @@ fn mark_read_on_jump(
 ) {
     if let (Some(sid), Some(agent)) = (session_id, agent_type) {
         crate::database::dao::unread::delete(&agent.to_lowercase(), sid);
+        // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / MAM 重启）后
+        // Insert 边沿与补偿据此不再复活已读未读卡
+        crate::database::dao::unread::mark_read(&agent.to_lowercase(), sid);
         let _ = app.emit(
             "session-read",
             serde_json::json!({ "agentType": agent, "sessionId": sid }),

@@ -34,6 +34,9 @@ pub fn list_sub_agents(tool_id: String) -> Vec<SubAgentRecord> {
 #[tauri::command]
 pub fn mark_session_read(app: tauri::AppHandle, agent_type: String, session_id: String) {
     crate::database::dao::unread::delete(&agent_type.to_lowercase(), &session_id);
+    // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / MAM 重启）后
+    // Insert 边沿与补偿据此不再复活已读未读卡
+    crate::database::dao::unread::mark_read(&agent_type.to_lowercase(), &session_id);
     let _ = app.emit(
         "session-read",
         serde_json::json!({ "agentType": agent_type, "sessionId": session_id }),
