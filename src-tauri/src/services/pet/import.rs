@@ -346,12 +346,14 @@ pub fn add_voice_files_in(root: &Path, pet_id: &str, src_paths: &[String], group
     Ok(out)
 }
 
-/// 音频路径安全校验：必须形如 voice/<group>/<file> 且无穿越（staged=true 为暂存区）
+/// 音频路径安全校验：必须形如 voice/<group>/<file>、分组 ∈ 四固定分组且无穿越
+/// （staged=true 为暂存区）。分组段不设卡则 voice/ 下任意子目录文件可被删（P1-2）
 pub fn remove_audio_in(root: &Path, base_id: &str, rel: &str, staged: bool) -> Result<(), PetRpcError> {
     if !rel.starts_with("voice/") || rel.contains("..") || rel.contains('\\') {
         return Err(PetRpcError::new("audio-relpath-invalid", "非法音频路径"));
     }
-    if Path::new(rel).components().count() != 3 {
+    let segs: Vec<&str> = rel.split('/').collect();
+    if segs.len() != 3 || !valid_group(segs[1]) {
         return Err(PetRpcError::new("audio-relpath-invalid", "非法音频路径"));
     }
     let base = if staged { staging_dir(root, base_id)? } else { pet_dir(root, base_id) };
@@ -603,5 +605,29 @@ mod tests {
         let s = stage_from_folder_in(root.path(), &src).unwrap();
         cancel_in(root.path(), &s.staging_id).unwrap();
         assert!(!staging_root(root.path()).join(&s.staging_id).exists());
+    }
+
+    /// P1-2：分组段必须 ∈ 四固定分组——voice/ 下任意子目录文件不得借 remove 通道删除
+    #[test]
+    fn remove_audio_rejects_non_group_segment() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = mkpet(root.path(), "pet");
+        // 磁盘上确实存在 voice/backup/x.m4a（合法结构外的事实文件）
+        let foreign = dir.join("voice").join("backup");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("x.m4a"), b"x").unwrap();
+        for bad in ["voice/backup/x.m4a", "voice//x.m4a", "voice/general/../../x.m4a"] {
+            match remove_audio_in(root.path(), "pet", bad, false) {
+                Err(e) => assert_eq!(e.code, "audio-relpath-invalid", "rel {bad:?}"),
+                Ok(()) => panic!("rel {bad:?} 应被拒绝"),
+            }
+        }
+        assert!(foreign.join("x.m4a").is_file(), "非分组文件不得被删");
+        // 合法分组照常删除
+        let legal = dir.join("voice").join("general");
+        std::fs::create_dir_all(&legal).unwrap();
+        std::fs::write(legal.join("ok.mp3"), b"o").unwrap();
+        remove_audio_in(root.path(), "pet", "voice/general/ok.mp3", false).unwrap();
+        assert!(!legal.join("ok.mp3").exists());
     }
 }
