@@ -32,6 +32,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
   const [selected, setSelected] = useState<PetSummaryDto | null>(null);
   const [renameTo, setRenameTo] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [description, setDescription] = useState("");
   const [subtitle, setSubtitle] = useState(false);
   const [voiceRows, setVoiceRows] = useState<VoiceRow[]>([]);
   const [petDir, setPetDir] = useState<string | null>(null);
@@ -62,6 +63,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     setSelected(p);
     setRenameTo("");
     setDisplayName(p.displayName);
+    setDescription(p.description ?? "");
     setSubtitle(p.hasSubtitle);
     setVoiceRows([]);
     setPetDir(null);
@@ -153,13 +155,16 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
             {
               ...old,
               displayName,
-              description: old.description,
+              description,
               hasSubtitle: subtitle && old.hasVoice,
             },
             scan,
             rows
           )
-        : await buildManifestFromScan(selected.id, scan, rows, "folder", subtitle, { displayName });
+        : await buildManifestFromScan(selected.id, scan, rows, "folder", subtitle, {
+            displayName,
+            description,
+          });
       const manifest = { ...base, displayName, hasSubtitle: base.hasVoice && subtitle };
       await invoke("pet_update_manifest", { id: selected.id, manifest, backup: true });
       if (wasActive) {
@@ -248,6 +253,14 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
               <div>
                 <label className="text-sm">{t("pet.import.displayName")}</label>
                 <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+              </div>
+              <div>
+                <label className="text-sm">{t("pet.import.description")}</label>
+                <Input
+                  data-testid="manage-desc-input"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
               </div>
               <VoiceGroupEditor
                 rows={voiceRows}

@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { render } from "@testing-library/react";
 import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
 import { probeAudioDurationMs } from "@/components/pet/petRuntime";
+import { repairManifest } from "@/components/pet/petActivation";
 import { tauriInvokeMock } from "../msw/tauriMocks";
 // tests/setup.ts 未初始化 i18n：徽标/时长文案需真实 i18n 渲染
 import i18n from "@/i18n";
@@ -142,6 +143,25 @@ describe("PetManageDialog", () => {
     // 保存完成自动切回原宠物
     await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
     await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("描述可编辑并随保存写入 manifest（P1-7）", async () => {
+    const repairMock = vi.mocked(repairManifest);
+    repairMock.mockClear();
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.change(await screen.findByTestId("manage-desc-input"), { target: { value: "新的描述" } });
+    fireEvent.click(screen.getByTestId("manage-save"));
+    // 编辑后的 description 经 repairManifest 入参传入（repairManifest 展开透传，最终写入 manifest）
+    await waitFor(() => {
+      expect(repairMock).toHaveBeenCalledWith(
+        expect.objectContaining({ description: "新的描述" }),
+        expect.anything(),
+        9
+      );
+    });
+    const call = tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_update_manifest");
+    expect(call).toBeTruthy();
   });
 
   it("选中宠物：manifest 未缓存时长的行经共享 hook 探测后徽标从 no-duration 变为时长", async () => {
