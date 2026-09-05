@@ -106,19 +106,20 @@ export function useNotification() {
         ]);
         await onAction(async (notification) => {
           if (notification.actionTypeId !== "focus-session") return;
-          const pid = (notification.extra?.pid as number) ?? 0;
-          if (pid > 0) {
-            try {
-              await invoke("focus_session", {
-                pid,
-                sessionId: (notification.extra?.sessionId as string) ?? undefined,
-                agentType: (notification.extra?.agentType as string) ?? undefined,
-                projectName: (notification.extra?.projectName as string) ?? undefined,
-                lastMessage: (notification.extra?.lastMessage as string) ?? undefined,
-              });
-            } catch (e) {
-              console.error("focus_session failed:", e);
-            }
+          // P2-5（issue #34）：放开 pid>0 门并透传 form——App 形态未读卡 pid=0，
+          // 原门直接吞掉点击致"查看会话"死路；缺 form 则 Windows 深链分支永不可达。
+          // pid 失效/为 0 时后端自有兜底链（pid_dead → reactivate / activate_agent_app）
+          try {
+            await invoke("focus_session", {
+              pid: (notification.extra?.pid as number) ?? 0,
+              sessionId: (notification.extra?.sessionId as string) ?? undefined,
+              agentType: (notification.extra?.agentType as string) ?? undefined,
+              projectName: (notification.extra?.projectName as string) ?? undefined,
+              lastMessage: (notification.extra?.lastMessage as string) ?? undefined,
+              form: (notification.extra?.form as string) ?? undefined,
+            });
+          } catch (e) {
+            console.error("focus_session failed:", e);
           }
         });
       } catch (e) {
@@ -192,6 +193,8 @@ export function useNotification() {
                   pid: session.pid,
                   sessionId: session.id,
                   agentType: session.agentType,
+                  // P2-5（issue #34）：降级系统通知补带 form，点击跳转才能走对链路
+                  form: session.form,
                   projectName: session.projectName,
                   lastMessage: session.lastMessage ?? "",
                 },
