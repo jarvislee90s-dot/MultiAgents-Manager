@@ -192,7 +192,11 @@ fn report_restore(outcome: RestoreOutcome, name: &str, result: &mut ApplyResult)
 /// 先把 SSOT 内容暂存到目标旁的临时路径（目录走 copy_dir_recursive，
 /// 子 Agent 分配的 Layer 3 用户可见目标（与 services::skill::assign_skill_to_subagent
 /// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<name>，P1-4 停用还原用）
-fn subagent_skill_target(tool_skill_dir: &std::path::Path, sub_agent_id: &str, skill_name: &str) -> std::path::PathBuf {
+fn subagent_skill_target(
+    tool_skill_dir: &std::path::Path,
+    sub_agent_id: &str,
+    skill_name: &str,
+) -> std::path::PathBuf {
     tool_skill_dir
         .join("subagents")
         .join(sub_agent_id)
@@ -587,7 +591,10 @@ mod subagent_assign_tests {
         assert_eq!(outcome, RestoreOutcome::Restored);
         assert!(target.is_dir());
         assert!(!crate::linker::link_marker_is_present(&target));
-        assert_eq!(std::fs::read_to_string(target.join("SKILL.md")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "hello"
+        );
     }
 
     /// 目标路径布局与 services::skill::assign_skill_to_subagent 的落位一致

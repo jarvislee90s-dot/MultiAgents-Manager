@@ -50,7 +50,6 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
-
 /// 启动文件监听，检测 Hook/进程事件文件变化时触发会话刷新
 /// notify 事件优先触发，30s 超时回退轮询兜底
 pub fn start_file_watcher<F>(paths: Vec<std::path::PathBuf>, on_change: F)
@@ -124,9 +123,24 @@ mod dismissed_filter_tests {
     #[test]
     fn dismissed_app_card_filtered_until_status_changes() {
         let mut sessions = vec![
-            card("s1", AgentType::WorkBuddy, ProcessForm::App, SessionStatus::Processing),
-            card("s2", AgentType::Codex, ProcessForm::App, SessionStatus::Idle),
-            card("cli", AgentType::Claude, ProcessForm::Cli, SessionStatus::Processing),
+            card(
+                "s1",
+                AgentType::WorkBuddy,
+                ProcessForm::App,
+                SessionStatus::Processing,
+            ),
+            card(
+                "s2",
+                AgentType::Codex,
+                ProcessForm::App,
+                SessionStatus::Idle,
+            ),
+            card(
+                "cli",
+                AgentType::Claude,
+                ProcessForm::Cli,
+                SessionStatus::Processing,
+            ),
         ];
         // 模拟用户 X 掉 s1（当时红/运行中）——IPC 存储为小写 key
         let dismissed_keys = std::collections::HashSet::from([(
@@ -140,7 +154,10 @@ mod dismissed_filter_tests {
 
         // 命中：App 卡被剔除（key 全匹配，Debug 形态转小写后一致）
         filter_dismissed_cards(&mut sessions, &dismissed);
-        assert!(!sessions.iter().any(|s| s.id == "s1"), "dismiss 的卡应被过滤");
+        assert!(
+            !sessions.iter().any(|s| s.id == "s1"),
+            "dismiss 的卡应被过滤"
+        );
         assert!(sessions.iter().any(|s| s.id == "s2"), "未 dismiss 的卡保留");
         assert!(
             sessions.iter().any(|s| s.id == "cli"),
