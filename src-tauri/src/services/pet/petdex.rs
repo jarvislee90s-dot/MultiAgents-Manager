@@ -50,6 +50,54 @@ fn url_allowed(url: &reqwest::Url) -> bool {
     url.scheme() == "https" && url.host_str().map(allowed_host).unwrap_or(false)
 }
 
+/// 下载/清单响应体积上限（P1-1）：超时只限时间不限体积，白名单域返回异常大响应时
+/// 可在超时窗口内灌爆内存。合法 petdex zip 约 2MB、全量清单约 1.7MB，上限已极宽裕。
+const MAX_ZIP_BYTES: usize = 50 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 20 * 1024 * 1024;
+
+/// Content-Length 预检（纯函数便于单测；无该头时交给流式累计封顶）
+fn len_over_limit(len: Option<u64>, cap: usize) -> bool {
+    len.map_or(false, |l| l as usize > cap)
+}
+
+/// 流式读取响应体并封顶：Content-Length 预检 + 按块累计，超限即中断（防 OOM）
+async fn read_capped(
+    resp: &mut reqwest::Response,
+    cap: usize,
+    too_large_code: &'static str,
+    what: &str,
+) -> Result<Vec<u8>, PetRpcError> {
+    if len_over_limit(resp.content_length(), cap) {
+        let len = resp.content_length().unwrap_or(0);
+        return Err(PetRpcError::new(
+            too_large_code,
+            format!("{}体积超限: {} 字节（上限 {}）", what, len, cap),
+        )
+        .with("actual", len.to_string())
+        .with("limit", cap.to_string()));
+    }
+    let mut buf = Vec::new();
+    loop {
+        let chunk = resp
+            .chunk()
+            .await
+            .map_err(|e| {
+                PetRpcError::new("download-failed", format!("{}读取失败: {}", what, e)).with("err", e.to_string())
+            })?;
+        let Some(chunk) = chunk else { break };
+        if buf.len() + chunk.len() > cap {
+            return Err(PetRpcError::new(
+                too_large_code,
+                format!("{}体积超限（上限 {} 字节）", what, cap),
+            )
+            .with("actual", (buf.len() + chunk.len()).to_string())
+            .with("limit", cap.to_string()));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// redirect Policy 的 ASCII 标记 → 稳定错误码（Policy API 只能传字符串，第六轮偏差 1 的收口）
 fn redirect_code_of(s: &str) -> Option<&'static str> {
     if s.contains("MAM_REDIRECT_TOO_MANY") {
@@ -96,7 +144,7 @@ fn client(secs: u64) -> Result<reqwest::Client, PetRpcError> {
 
 /// 拉全量清单并按 slug 匹配（petdex 文档化的稳定接口，spec §3）
 pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
-    let shape = client(30)?
+    let mut resp = client(30)?
         .get(MANIFEST_URL)
         .send()
         .await
@@ -104,9 +152,10 @@ pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
         .map_err(map_send_err)
         .map_err(|e| if e.code.starts_with("redirect-") { e } else { PetRpcError::new("manifest-request-failed", format!("petdex 清单请求失败: {}", e.detail)).with("err", e.detail.clone()) })?
         .error_for_status()
-        .map_err(|e| PetRpcError::new("manifest-status", format!("petdex 清单响应异常: {}", e)).with("err", e.to_string()))?
-        .json::<PetdexManifestShape>()
-        .await
+        .map_err(|e| PetRpcError::new("manifest-status", format!("petdex 清单响应异常: {}", e)).with("err", e.to_string()))?;
+    // .json() 全量缓冲无界（P1-1）→ 流式封顶读取后再解析
+    let bytes = read_capped(&mut resp, MAX_MANIFEST_BYTES, "manifest-too-large", "petdex 清单").await?;
+    let shape: PetdexManifestShape = serde_json::from_slice(&bytes)
         .map_err(|e| PetRpcError::new("manifest-parse-failed", format!("petdex 清单解析失败: {}", e)).with("err", e.to_string()))?;
     // Wrapped 优先、裸数组兼容（Bug1 双形态）
     let list = match shape {
@@ -125,17 +174,15 @@ pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, PetRpcError> {
         let host = url.host_str().unwrap_or("").to_string();
         return Err(PetRpcError::new("host-forbidden", format!("拒绝非 petdex 域下载: {}", url.as_str())).with("host", host));
     }
-    let bytes = client(120)?
+    let mut resp = client(120)?
         .get(zip_url)
         .send()
         .await
         .map_err(map_send_err)?
         .error_for_status()
-        .map_err(|e| PetRpcError::new("download-status", format!("下载响应异常: {}", e)).with("err", e.to_string()))?
-        .bytes()
-        .await
-        .map_err(|e| PetRpcError::new("download-failed", format!("下载读取失败: {}", e)).with("err", e.to_string()))?;
-    Ok(bytes.to_vec())
+        .map_err(|e| PetRpcError::new("download-status", format!("下载响应异常: {}", e)).with("err", e.to_string()))?;
+    // .bytes() 全量缓冲无界（P1-1）→ 流式封顶读取
+    read_capped(&mut resp, MAX_ZIP_BYTES, "download-too-large", "下载内容").await
 }
 
 /// 链接 → 暂存：解析 slug → 清单匹配 → 下载 zip → 统一 zip 管线（spec §8.3 仅下载压缩包）
@@ -210,6 +257,15 @@ mod tests {
         assert_eq!(redirect_code_of("MAM_REDIRECT_FORBIDDEN at hop"), Some("redirect-forbidden"));
         assert_eq!(redirect_code_of("connection refused"), None);
         assert_eq!(redirect_code_of(""), None);
+    }
+
+    /// P1-1：Content-Length 预检逻辑（无头时交给流式累计封顶）
+    #[test]
+    fn len_over_limit_preflight() {
+        assert!(!len_over_limit(None, MAX_ZIP_BYTES));
+        assert!(!len_over_limit(Some(2 * 1024 * 1024), MAX_ZIP_BYTES));
+        assert!(len_over_limit(Some((MAX_ZIP_BYTES as u64) + 1), MAX_ZIP_BYTES));
+        assert!(len_over_limit(Some((MAX_MANIFEST_BYTES as u64) + 1), MAX_MANIFEST_BYTES));
     }
 
     /// 用真实抓取的全量清单（1.67MB / 4674 条）验证当前解析逻辑（诊断后保留为回归锚）

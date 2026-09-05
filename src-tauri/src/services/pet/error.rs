@@ -27,9 +27,10 @@ impl PetRpcError {
     }
 }
 
-/// 全量错误码单一清单（测试基准，44 码）：新增错误码须同步登记到此处与前端
+/// 全量错误码单一清单（测试基准，46 码）：新增错误码须同步登记到此处与前端
 /// locales 的 pet.rpc.* 键（zh/en 两份）；rpc_codes_have_i18n_keys 测试负责锁住两侧不漂移。
-/// 登记依据：42 个单行构造站点 + internal 兜底 + redirect-too-many/redirect-forbidden。
+/// 登记依据：42 个单行构造站点 + internal 兜底 + redirect-too-many/redirect-forbidden
+/// + download-too-large/manifest-too-large（P1-1 下载封顶）。
 #[cfg(test)]
 pub const ALL_RPC_CODES: &[&str] = &[
     "audio-format-unsupported",
@@ -39,6 +40,7 @@ pub const ALL_RPC_CODES: &[&str] = &[
     "delete-failed",
     "download-failed",
     "download-status",
+    "download-too-large",
     "download-url-invalid",
     "finalize-move-failed",
     "finalize-scan-failed",
@@ -49,6 +51,7 @@ pub const ALL_RPC_CODES: &[&str] = &[
     "manifest-parse-failed",
     "manifest-request-failed",
     "manifest-status",
+    "manifest-too-large",
     "manifest-write-failed",
     "pet-dir-missing",
     "pet-exists",
