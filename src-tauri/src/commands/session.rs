@@ -83,7 +83,10 @@ pub fn focus_session(
                     if let Some(url) = crate::window::deep_link::session_url(agent, sid) {
                         if crate::window::deep_link::open_url(&url).is_ok() {
                             if crate::window::win32::verify_foreground_tool(
-                                &mut system, agent, 2_000, 250,
+                                &mut system,
+                                agent,
+                                2_000,
+                                250,
                             ) {
                                 mark_read_on_jump(&app, &session_id, &agent_type);
                                 return Ok(serde_json::json!({
@@ -173,7 +176,10 @@ pub fn focus_session(
         let _ = (agent_type, session_id);
         // 措辞兼容两种场景：pid 存活的 CLI 会话（有 TTY 但聚焦失败，P2-2 后不再做
         // APP 兜底）与 pid=0/已死（TTY 无从聚焦 + 宿主 APP 枚举未命中）
-        Err(format!("无法聚焦目标（pid={}）：终端与宿主 APP 均未能聚焦", pid))
+        Err(format!(
+            "无法聚焦目标（pid={}）：终端与宿主 APP 均未能聚焦",
+            pid
+        ))
     }
 }
 
