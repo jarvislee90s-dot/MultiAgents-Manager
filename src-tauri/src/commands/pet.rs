@@ -186,6 +186,9 @@ pub async fn pet_stage_from_zip(path: String) -> Result<import::StagedPet, PetRp
 
 #[tauri::command]
 pub async fn pet_stage_from_codex(codex_id: String) -> Result<import::StagedPet, PetRpcError> {
+    // N3：codex_id 同样是路径拼接参数（codex_root 裸 join），须与其他 id 命令同一门禁，
+    // 否则 "../x" 可把 ~/.codex/pets 外任意目录的图集暂存进导入区（读侧逃逸）
+    pet::validate_pet_id(&codex_id)?;
     let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
     import::stage_from_codex_in(&root(), &codex, &codex_id)
 }
@@ -296,7 +299,7 @@ mod tests {
         }
     }
 
-    /// 8 个带 id 的 IPC 命令对恶意 id 全部拒绝（在触碰文件系统/opener 之前）
+    /// 9 个带 id 的 IPC 命令对恶意 id 全部拒绝（在触碰文件系统/opener 之前）
     #[tokio::test]
     async fn id_taking_commands_reject_unsafe_pet_ids() {
         for id in BAD_IDS {
@@ -325,6 +328,8 @@ mod tests {
                     .is_err(),
                 "pet_remove_voice_file({id:?})"
             );
+            // N3：codex 来源的 id 同为路径拼接参数，纳入同一门禁
+            assert!(pet_stage_from_codex(id.to_string()).await.is_err(), "pet_stage_from_codex({id:?})");
             assert!(pet_reveal_folder(id.to_string()).await.is_err(), "pet_reveal_folder({id:?})");
         }
     }
