@@ -38,7 +38,7 @@ toml_edit = "0.22"
 trash = "5"
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-zip = "2"
+zip = "4"
 tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
