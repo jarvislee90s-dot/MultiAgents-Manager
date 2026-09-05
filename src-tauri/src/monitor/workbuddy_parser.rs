@@ -21,8 +21,10 @@ pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
 pub const APP_STATUS_STALE_MS: u64 = 300_000;
 
 /// 标题降级的首部读取行数（issue #35-6）：首条 user 消息从文件头找——
-/// 只搜尾部 500 行窗口时，超长会话的降级标题恒为 None（卡片回退显示 sessionId）
-const TITLE_HEAD_LINES: usize = 200;
+/// 只搜尾部 500 行窗口时，超长会话的降级标题恒为 None（卡片回退显示 sessionId）。
+/// 取 500 与旧尾部窗口等宽：≤500 行会话覆盖完整文件（旧实现对 ≤500 行文件恰为
+/// 全文搜索，取 200 会造成 200-500 行会话的覆盖收窄），更长会话则远优于旧实现
+const TITLE_HEAD_LINES: usize = 500;
 
 /// 每轮观测到的 pid → (tool_id, sessionId)（心跳消失补偿的依据）。
 /// 值含 tool_id（P2-3 按工具隔离）：停用工具时只清对应工具条目，避免未来第二个
@@ -120,7 +122,10 @@ pub fn session_jsonl_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
 
 /// 兜底扫描命中缓存（issue #35-7）：WorkBuddy 升级改编码后 mangle 恒未命中时，
 /// 每会话每轮的 projects 全目录扫描按 (home, cwd, sessionId) 缓存命中路径，
-/// 避免每 30s 一轮的全量扫描。键含 home——单测多 tempdir 并存，不得跨 home 串路径
+/// 避免每 30s 一轮的全量扫描。键含 home——单测多 tempdir 并存，不得跨 home 串路径。
+/// 容量上限：长驻进程无淘汰会缓慢无界增长（每条目仅路径量级），超限整体清空即可
+/// ——条目失效有 exists() 前置校验兜底，清空后下一轮重扫自然重建，无需 LRU
+const FALLBACK_HITS_CAP: usize = 1024;
 type FallbackHitKey = (PathBuf, String, String);
 static FALLBACK_JSONL_HITS: Lazy<Mutex<HashMap<FallbackHitKey, PathBuf>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -155,7 +160,11 @@ pub fn find_session_jsonl(home: &Path, cwd: &str, session_id: &str) -> Option<Pa
         p.exists().then_some(p)
     });
     if let Some(ref p) = hit {
-        FALLBACK_JSONL_HITS.lock().unwrap().insert(key, p.clone());
+        let mut hits = FALLBACK_JSONL_HITS.lock().unwrap();
+        if hits.len() >= FALLBACK_HITS_CAP {
+            hits.clear();
+        }
+        hits.insert(key, p.clone());
     }
     hit
 }
@@ -480,9 +489,13 @@ pub fn compensate_vanished_heartbeats_in(
         })
         .collect();
     // issue #35 nit：单轮复用一条只读连接（cwd 反查 + 标题查询共用；
-    // workbuddy.db 缺失/不可读 → None，调用方防御性降级）
-    let db_conn =
-        super::sqlite::open_readonly_with_timeout(&home.join(".workbuddy").join("workbuddy.db"));
+    // workbuddy.db 缺失/不可读 → None，调用方防御性降级）。
+    // 无消失条目时跳过打开（workbuddy 未安装时避免每轮一次必败 open）
+    let db_conn = if vanished.is_empty() {
+        None
+    } else {
+        super::sqlite::open_readonly_with_timeout(&home.join(".workbuddy").join("workbuddy.db"))
+    };
 
     for (pid, (tool_id, session_id)) in vanished {
         // 逐个短暂重锁移除（不做额外清理，未消失条目保留供下轮参考）
@@ -544,7 +557,15 @@ const OBSERVATION_TTL_MS: i64 = 24 * 3600 * 1000;
 /// 启动后首轮：把 DB 影子表中的近期观测还原进进程内 LAST_SEEN（issue #35-2）。
 /// MAM 重启清空进程内观测表后，停机期间「完成 + prewarm 回池删心跳文件」的会话
 /// 无观测则补偿永不触发、未读提醒静默丢失；观测落库后跨重启仍可补偿。
-/// or_insert 不覆盖本轮已发现的更新条目（pid 复用时新会话胜出）
+/// or_insert 不覆盖本轮已发现的更新条目（pid 复用时新会话胜出，见 restore_observations）。
+///
+/// 已知取舍（review 复核，W5 张力）：停用期间影子表冻结（sync_observations_to_db
+/// 在 W5 门禁之后执行），工具停用 → 24h 内重新启用后，此处还原的观测可能覆盖
+/// 「停用期间完成」的会话并触发补偿插行——严格读 spec W5「停用后任务完成不得复活
+/// 未读」是违例。接受理由：①「重新启用」合理解读为用户要求恢复监控，补上停用窗口
+/// 内静默丢失的提醒符合意图；②不重启的同型场景（停用 → 完成 → 启用，LAST_SEEN
+/// 内存条目同样跨停用存活）在本 PR 之前即存在，非本 PR 引入；③按「停用时刻」过滤
+/// 观测需引入工具停用时间戳记录（schema 变更），收益不匹配成本
 fn load_persisted_observations_once(now_ms: i64) {
     static LOAD_ONCE: std::sync::Once = std::sync::Once::new();
     LOAD_ONCE.call_once(|| {
@@ -554,10 +575,19 @@ fn load_persisted_observations_once(now_ms: i64) {
             return;
         }
         let mut last_seen = LAST_SEEN_SESSIONS.lock().unwrap();
-        for (pid, tool_id, session_id) in recent {
-            last_seen.entry(pid as u32).or_insert((tool_id, session_id));
-        }
+        restore_observations(&mut last_seen, recent);
     });
+}
+
+/// 观测还原纯核（可测）：or_insert 保证「活发现胜出」——Phase 2 活跃发现先于
+/// 补偿执行，pid 复用时本轮在场的活发现条目不得被陈旧落库观测覆盖
+fn restore_observations(
+    last_seen: &mut HashMap<u32, (String, String)>,
+    recent: Vec<(i64, String, String)>,
+) {
+    for (pid, tool_id, session_id) in recent {
+        last_seen.entry(pid as u32).or_insert((tool_id, session_id));
+    }
 }
 
 /// 观测表影子同步（issue #35-2）：全量 upsert 进程内观测 + 移除已被补偿消费的
@@ -1507,5 +1537,27 @@ mod tests {
             .unwrap();
             assert!(title_from_db(home.path(), SID).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_restore_tests {
+    use super::*;
+
+    /// issue #35-2 回归锁：还原不覆盖活发现——pid 复用时本轮已发现的
+    /// 新会话条目胜出，陈旧落库观测不得覆盖；无冲突条目正常还原
+    #[test]
+    fn observation_restore_keeps_live_discovery() {
+        let mut last_seen = HashMap::new();
+        last_seen.insert(7u32, ("workbuddy".to_string(), "live-session".to_string()));
+        restore_observations(
+            &mut last_seen,
+            vec![
+                (7, "workbuddy".to_string(), "stale-persisted".to_string()),
+                (8, "workbuddy".to_string(), "restored".to_string()),
+            ],
+        );
+        assert_eq!(last_seen.get(&7).unwrap().1, "live-session");
+        assert_eq!(last_seen.get(&8).unwrap().1, "restored");
     }
 }

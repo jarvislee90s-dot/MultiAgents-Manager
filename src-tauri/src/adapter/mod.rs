@@ -476,6 +476,15 @@ fn unread_pool_action(prev_status: Option<&str>, idle: bool) -> UnreadPoolAction
     }
 }
 
+/// issue #35-1 主修复路径（纯判定，可测）：Insert 边沿是否允许插行。
+/// prev=None（缓存失忆：长间隙跨过缓存 TTL / MAM 重启）且近期已读墓碑在场 =
+/// 已读会话失忆后回板，不得复插已删未读行（复活主洞）；
+/// prev 有值（非绿 → 绿）是真实的新回合状态迁移，墓碑不参与判定——
+/// 已读后会话转黄再转绿的新回合通知不受污染
+fn insert_allowed(prev_status: Option<&str>, was_read_recently: bool) -> bool {
+    !(prev_status.is_none() && was_read_recently)
+}
+
 /// W4 未读机制核心：把 DB 中的未读会话合并为 Session 卡，并维护未读池
 /// - 会话当前非空闲（黄/红）→ 删未读行（活跃卡可见，防同会话双卡）
 /// - 转绿（Idle/Finished）→ upsert 未读行（未在池中时）
@@ -510,14 +519,9 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
             };
             match unread_pool_action(prev.as_deref(), true) {
                 UnreadPoolAction::Insert => {
-                    // issue #35-1：prev=None 且近期已读墓碑在场 = 缓存失忆的已读会话
-                    // （长间隙跨过缓存 TTL / MAM 重启），不得复插已删未读行；
-                    // prev 有值（非绿）是真实的新回合状态迁移，正常插行
-                    if prev.is_none()
-                        && crate::database::dao::unread::was_read_recently(&tool, &s.id, now_ms)
-                    {
-                        // 已读会话：跳过插行（墓碑防复活）
-                    } else {
+                    let was_read =
+                        crate::database::dao::unread::was_read_recently(&tool, &s.id, now_ms);
+                    if insert_allowed(prev.as_deref(), was_read) {
                         crate::database::dao::unread::upsert(&record);
                     }
                 }
@@ -959,5 +963,22 @@ mod codex_green_read_tests {
         // 未读在场：池有行 → 保留
         assert!(!codex_green_card_should_drop(true, true));
         assert!(!codex_green_card_should_drop(false, true));
+    }
+}
+
+#[cfg(test)]
+mod insert_allowed_tests {
+    use super::insert_allowed;
+
+    /// issue #35-1 回归锁（复活主洞）：缓存失忆（prev=None）的已读会话
+    /// 不得复插未读行；真实新回合（prev 有值 / 无墓碑）不受墓碑污染
+    #[test]
+    fn blocks_resurrection_but_not_new_rounds() {
+        // prev=None + 墓碑在场（长间隙/重启后已读会话回板）→ 阻断
+        assert!(!insert_allowed(None, true));
+        // prev=None + 无墓碑 → 真实新回合（重启后首个回合完成）→ 放行
+        assert!(insert_allowed(None, false));
+        // prev 有值 → 真实状态迁移，已读后会话转黄再转绿的通知不丢
+        assert!(insert_allowed(Some("Processing"), true));
     }
 }
