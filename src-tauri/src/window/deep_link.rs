@@ -114,7 +114,8 @@ pub fn session_url(agent_type: &str, session_id: &str) -> Option<String> {
     // 无形态校验），而 Windows 派发经 `cmd /C start`——Rust std 对不含空格/引号的参数
     // 不加引号，sessionId 含 & ^ % 等 cmd 元字符时会被命令解释器执行（注入面）。
     // 两个 scheme 的会话 id 实测均为严格 UUID 形态（workbuddy 心跳侧本就有严格过滤、
-    // codex threadId 与 rollout UUID 同源性已 GUI 实测确认，见 plan §6 P2-11）→
+    // codex threadId 与 rollout UUID 同源性已 GUI 实测确认，
+    // 见 plan「Step 1: 探测路由格式（Spike）」记录）→
     // 派发前统一强制校验：非 UUID 一律 None 走 APP 级保底，注入面随之消除
     //（UUID 字符集 [0-9a-f-] 不含任何 shell 元字符，无需再 percent-encode）
     if !crate::monitor::workbuddy_parser::is_strict_uuid_form(session_id) {
