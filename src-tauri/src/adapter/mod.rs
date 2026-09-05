@@ -264,7 +264,10 @@ pub fn get_all_sessions() -> SessionsResponse {
                 crate::database::find_status(&s.id).as_deref(),
                 Some("Idle") | Some("Finished")
             );
-            !codex_green_card_should_drop(was_green_prev, pool.contains(&("codex".into(), s.id.clone())))
+            !codex_green_card_should_drop(
+                was_green_prev,
+                pool.contains(&("codex".into(), s.id.clone())),
+            )
         });
     }
 
@@ -432,6 +435,21 @@ fn filter_host_dead_cards(sessions: &mut Vec<Session>, host_alive: &dyn Fn(&str)
     });
 }
 
+/// 未读池中「宿主确认死亡」的工具名单（issue #35-3）：
+/// 快照不可用（None）或空进程表 = 状态未知 → 返回空名单，本轮不清池。
+/// 进程枚举瞬态失败与宿主真死在空结果上不可区分，而 clear_tool 物理删除
+/// 不可恢复；误清由下一轮重扫自然纠正，误清未读无法找回
+fn dead_tools_from_pool(pool_tools: &[String], snapshot: Option<&sysinfo::System>) -> Vec<String> {
+    let Some(system) = snapshot.filter(|s| !s.processes().is_empty()) else {
+        return Vec::new();
+    };
+    pool_tools
+        .iter()
+        .filter(|t| !crate::monitor::host::tool_host_alive_in(system, t))
+        .cloned()
+        .collect()
+}
+
 /// 未读池动作（review F1：迁移触发语义，替代电平 upsert——
 /// 电平 upsert 会让「跳转已读」删掉的行在下一轮复活，已读永远不生效）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,13 +527,23 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
     }
 
     // 2) 宿主进程退出 → 清该工具全部未读（运行中被关 + 重启残留检查统一规则）
+    //    issue #35-3/4：复用 Phase 1 的 SHARED_SYSTEM 快照（每轮已带 exe/cmd 全量刷新），
+    //    不再对池中每个工具各起一次全量进程扫描；快照不可用/空 = 状态未知 → 本轮
+    //    不清池（与活跃卡过滤的防御放行对称：进程枚举瞬态失败与宿主真死不可区分，
+    //    物理清空不可恢复，宁可等下一轮确认）
     let unread_now = crate::database::dao::unread::list(now_ms);
-    let mut dead_tools: Vec<String> = Vec::new();
-    for r in &unread_now {
-        if !dead_tools.contains(&r.tool_id) && !crate::monitor::host::tool_host_alive(&r.tool_id) {
-            dead_tools.push(r.tool_id.clone());
-        }
-    }
+    let pool_tools: Vec<String> = {
+        let mut seen = HashSet::new();
+        unread_now
+            .iter()
+            .filter(|r| seen.insert(r.tool_id.clone()))
+            .map(|r| r.tool_id.clone())
+            .collect()
+    };
+    let dead_tools = {
+        let guard = SHARED_SYSTEM.lock().unwrap();
+        dead_tools_from_pool(&pool_tools, guard.as_ref())
+    };
     for t in &dead_tools {
         crate::database::dao::unread::clear_tool(t);
     }
@@ -610,6 +638,23 @@ mod unread_pool_action_tests {
             UnreadPoolAction::None
         );
         assert_eq!(unread_pool_action(None, false), UnreadPoolAction::None);
+    }
+}
+
+#[cfg(test)]
+mod dead_tools_from_pool_tests {
+    use super::*;
+
+    /// issue #35-3 回归锁：快照不可用/空进程表 = 状态未知 → 不产出死工具名单，
+    /// 本轮不清池（进程枚举瞬态失败不得物理删除全部未读行）
+    #[test]
+    fn unknown_snapshot_clears_nothing() {
+        assert!(dead_tools_from_pool(&["workbuddy".into()], None).is_empty());
+        // System::new() = 空进程表：枚举失败/空结果与「宿主真死」不可区分
+        let empty = sysinfo::System::new();
+        assert!(
+            dead_tools_from_pool(&["workbuddy".into(), "codex".into()], Some(&empty)).is_empty()
+        );
     }
 }
 
