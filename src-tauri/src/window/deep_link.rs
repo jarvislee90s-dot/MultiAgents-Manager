@@ -110,6 +110,16 @@ pub fn scheme_handler_exists(scheme: &str) -> bool {
 /// 但仅能通过 GUI 点击实测确认；若实测直达失败（APP 打开但停留在原界面），
 /// 按 plan Step 3 回退规则将 codex 分支改回 None。
 pub fn session_url(agent_type: &str, session_id: &str) -> Option<String> {
+    // P1-1（review）：sessionId 属外部输入（codex 侧取自 rollout session_meta 原始字符串，
+    // 无形态校验），而 Windows 派发经 `cmd /C start`——Rust std 对不含空格/引号的参数
+    // 不加引号，sessionId 含 & ^ % 等 cmd 元字符时会被命令解释器执行（注入面）。
+    // 两个 scheme 的会话 id 实测均为严格 UUID 形态（workbuddy 心跳侧本就有严格过滤、
+    // codex threadId 与 rollout UUID 同源性已 GUI 实测确认，见 plan §6 P2-11）→
+    // 派发前统一强制校验：非 UUID 一律 None 走 APP 级保底，注入面随之消除
+    //（UUID 字符集 [0-9a-f-] 不含任何 shell 元字符，无需再 percent-encode）
+    if !crate::monitor::workbuddy_parser::is_strict_uuid_form(session_id) {
+        return None;
+    }
     match agent_type {
         // 实测（2026-09-04，WorkBuddy app.asar）：workbuddy://chat/<sessionId>
         "workbuddy" => Some(format!("workbuddy://chat/{}", session_id)),
@@ -143,6 +153,20 @@ mod tests {
     fn unknown_tool_returns_none() {
         assert_eq!(session_url("claude", "abc-123"), None);
         assert_eq!(session_url("", "abc-123"), None);
+    }
+
+    // ---- P1-1 回归锁：sessionId 无校验直接拼 URL 的 cmd 元字符注入面 ----
+
+    #[test]
+    fn non_uuid_session_id_is_rejected_before_dispatch() {
+        // 注入载荷（& 命令分隔符 / ^ 转义 / % 变量展开）必须被 UUID 门拦截 → None
+        //（None 使 focus_session 跳过深链派发、落回 APP 级保底，不产生子进程命令）
+        assert_eq!(session_url("codex", "abc&calc"), None);
+        assert_eq!(session_url("codex", "x^y"), None);
+        assert_eq!(session_url("codex", "%PATH%"), None);
+        assert_eq!(session_url("workbuddy", "a b c"), None);
+        // 合法 UUID 照常构造
+        assert!(session_url("codex", "0f1e2d3c-4b5a-4948-8276-9a0b8c7d6e5f").is_some());
     }
 
     // ---- P1-2 A：派发前 handler 校验（纯函数注入闭包，Windows） ----

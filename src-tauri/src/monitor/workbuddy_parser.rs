@@ -48,11 +48,12 @@ fn is_hex(b: u8) -> bool {
     b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b)
 }
 
-/// sessionId 严格 UUID 形态判定：8-4-4-4-12 五段、每段均为 ASCII hex。
-/// 纯字节实现（不引入 regex 依赖）。prewarm 池的 `prewarm-wb-pool-<13位ms>-<6位hex>`
-/// 恰为 36 字符 4 连字符，仅凭「长度 36 + 连字符 4」判定会被骗过——必须逐段校验 hex 字符集
-pub fn heartbeat_session_id_is_uuid(hb: &Heartbeat) -> bool {
-    let id = hb.session_id.as_bytes();
+/// sessionId 严格 UUID 形态判定（通用，P1-1 起 deep_link 派发前同用此门）：
+/// 8-4-4-4-12 五段、每段均为 ASCII hex。纯字节实现（不引入 regex 依赖）。
+/// prewarm 池的 `prewarm-wb-pool-<13位ms>-<6位hex>` 恰为 36 字符 4 连字符，
+/// 仅凭「长度 36 + 连字符 4」判定会被骗过——必须逐段校验 hex 字符集
+pub fn is_strict_uuid_form(s: &str) -> bool {
+    let id = s.as_bytes();
     if id.len() != 36 {
         return false;
     }
@@ -73,6 +74,11 @@ pub fn heartbeat_session_id_is_uuid(hb: &Heartbeat) -> bool {
         }
     }
     true
+}
+
+/// 心跳 sessionId 严格 UUID 判定（is_strict_uuid_form 的 Heartbeat 便捷封装）
+pub fn heartbeat_session_id_is_uuid(hb: &Heartbeat) -> bool {
+    is_strict_uuid_form(&hb.session_id)
 }
 
 pub fn heartbeat_is_alive(hb: &Heartbeat, now_ms: u64) -> bool {
