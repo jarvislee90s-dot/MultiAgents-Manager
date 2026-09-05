@@ -207,8 +207,8 @@ export function FoxbellPet() {
    *  不加闸门会在用户以为「关了桌宠」时继续出声（问题 6） */
   const playVoice = (group: VoiceGroup, action: PetAnimKey) => {
     if (!loadVisible()) return;
-    if (!activeRef.current.hasVoice) return; // 无语音宠物：动作照播、不出声不出字幕（spec §5.2）
-    playTransient(action, 1700);
+    playTransient(action, 1700); // 动作照播（spec §5.1 最低档）：置于语音闸门之前，无语音宠物也要有动作动画
+    if (!activeRef.current.hasVoice) return; // 无语音宠物：不出声不出字幕（spec §5.2）
     const player = voiceRef.current;
     if (!player) return;
     const entry = player.pick(group);
