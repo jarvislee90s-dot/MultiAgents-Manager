@@ -7,6 +7,7 @@ export type PetErrCode =
   | "sheet-missing"
   | "sheet-bad-size"
   | "sheet-load-fail"
+  | "sheet-timeout"
   | "audio-timeout"
   | "audio-bad-duration"
   | "audio-load-fail"

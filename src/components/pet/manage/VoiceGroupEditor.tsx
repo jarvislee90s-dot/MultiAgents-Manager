@@ -45,9 +45,10 @@ export function VoiceGroupEditor(props: {
       {GROUPS.map((g) => {
         const list = props.rows.filter((r) => r.group === g);
         return (
-          <div key={g} data-testid={`voice-group-${g}`} title={t(GROUP_LABEL_KEY[g])}>
+          // 可见标签本地化（EP9，issue #33-6）：翻译文案上屏，原始分组键作 tooltip 供对照
+          <div key={g} data-testid={`voice-group-${g}`} title={g}>
             <div className="mb-1 flex items-center justify-between">
-              <span className="text-sm font-medium">{g}</span>
+              <span className="text-sm font-medium">{t(GROUP_LABEL_KEY[g])}</span>
               <Button
                 size="sm"
                 variant="outline"
@@ -99,7 +100,10 @@ export function VoiceGroupEditor(props: {
           <span className="text-primary">{t("pet.import.coverageOk")}</span>
         ) : (
           <span className="text-muted-foreground">
-            {t("pet.import.coverageMissing", { groups: missing.join(", ") })}
+            {/* 缺组名单同样本地化（EP9，issue #33-6），不再拼接原始分组键 */}
+            {t("pet.import.coverageMissing", {
+              groups: missing.map((g) => t(GROUP_LABEL_KEY[g])).join(", "),
+            })}
           </span>
         )}
         <span className="ml-2">

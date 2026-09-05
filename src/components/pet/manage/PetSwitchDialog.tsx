@@ -64,6 +64,17 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
               : t("pet.switch.activated", { name: id })
         );
         setActiveId(loadActiveId());
+        if (typeof r.voiceCap === "boolean") {
+          // 所见即所得（spec §9，issue #33-8）：activatePet 实际写入指针的能力即时反映到卡片徽标
+          // （ignore 降级不重写 manifest，重拉列表反而回滚；以结果为准本地修补）
+          setPets((prev) =>
+            prev.map((p) =>
+              p.id === id
+                ? { ...p, hasVoice: r.voiceCap!, hasSubtitle: p.hasSubtitle && r.voiceCap! }
+                : p
+            )
+          );
+        }
         if (r.manifestBuilt) void reload(); // 直投首激活后徽标刷新
       } else if (r.status === "invalid-sheet") {
         toast.error(t("pet.switch.invalidSheet"));
@@ -74,6 +85,16 @@ export function PetSwitchDialog(props: { open: boolean; onOpenChange: (v: boolea
       setBusy(false);
     }
   };
+
+  // 对话框关闭时放弃待决三选（issue #33-4）：按 cancel 结算 activatePet、复位 busy。
+  // 走 effect 而非仅 onOpenChange：父组件直接置 open=false（Esc/遮罩/其它入口）同样覆盖；
+  // resolve 幂等，与 doActivate 的 setMismatch(null) 双路径无冲突
+  useEffect(() => {
+    if (!props.open && mismatch) {
+      mismatchResolveRef.current("cancel");
+      setMismatch(null);
+    }
+  }, [props.open, mismatch]);
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -173,7 +194,12 @@ function PetCard(props: {
         className="mb-1 h-[52px] w-[48px] rounded bg-contain"
         style={
           thumb
-            ? { backgroundImage: thumb, backgroundPosition: "0 0", backgroundSize: "384px 572px" }
+            ? {
+                backgroundImage: thumb,
+                backgroundPosition: "0 0",
+                // 1/4 显示比例（帧 192×208 → 48×52）：v1 全高 468，v2 572（issue #33-5）
+                backgroundSize: info.spriteVersionNumber === 1 ? "384px 468px" : "384px 572px",
+              }
             : undefined
         }
       />

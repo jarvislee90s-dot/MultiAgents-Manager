@@ -2,16 +2,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { loadActiveId, saveActiveId, type PetRows } from "../petRuntime";
+import { loadActiveId, probeSheetRows, saveActiveId, type PetRows } from "../petRuntime";
 import { petErrMsg } from "../petErrors";
 import { buildManifestFromScan, repairManifest } from "../petActivation";
-import { nameFromRel, type PetManifestView, type PetScan, type VoiceRow } from "../petValidation";
+import {
+  manifestVoiceCapOnDisk,
+  nameFromRel,
+  petNameProblem,
+  petNameProblemKey,
+  type PetManifestView,
+  type PetScan,
+  type VoiceRow,
+} from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
 import { useVoiceDurationProbe } from "./useVoiceDurationProbe";
 
@@ -114,6 +122,8 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 
   const doRename = async () => {
     if (!selected || !renameTo || renameTo === selected.id) return;
+    // 实时校验兜底（issue #33-7）：非法字符/保留名/超长/重名不发给后端（按钮态由 renameProblem 驱动）
+    if (renameProblem) return;
     // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）；
     // frozeActive 兜底增删音频先行触发过闪切的场景（P1-4）
     const wasActive = loadActiveId() === selected.id || frozeActive;
@@ -122,9 +132,18 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       ensureNotActive();
       await invoke("pet_rename_pet", { oldId: selected.id, newId: renameTo });
       if (wasActive) {
-        // 重命名后 manifest 尚未重写（保存才会写），能力取面板已知状态；
+        // 重命名切回：manifest 未随重命名重写，且面板可能有未保存的直写增删，
+        // 能力按磁盘现状重判（issue #33-12）；扫描失败才退回面板快照值
+        let cap = selected.hasVoice;
+        try {
+          const scan = await invoke<PetScan>("pet_scan", { id: renameTo });
+          const m = await invoke<PetManifestView | null>("pet_read_manifest", { id: renameTo });
+          cap = m ? manifestVoiceCapOnDisk(m, scan) : false;
+        } catch {
+          /* 维持面板快照值 */
+        }
         // 展示名用输入框现值（未保存也仅是展示层缓存）
-        saveActiveId(renameTo, selected.hasVoice, displayName || selected.displayName);
+        saveActiveId(renameTo, cap, displayName || selected.displayName);
         emit("pet-active-changed", {}).catch(() => {});
       }
       toast.success(t("pet.manage.renamedToast", { name: renameTo }));
@@ -148,7 +167,14 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     try {
       ensureNotActive();
       const scan = await invoke<PetScan>("pet_scan", { id: selected.id });
-      const rows: PetRows = selected.spriteVersionNumber === 2 ? 11 : 9;
+      let rows: PetRows;
+      if (selected.spriteVersionNumber === 2) rows = 11;
+      else if (selected.spriteVersionNumber === 1) rows = 9;
+      else {
+        // 版本未知（直投未激活 = 0）先探测图集再定 rows（issue #33-2）：0 → 恒 9 会把 v2 写成 v1；
+        // 探测失败（尺寸非法/挂起超时）按错误退出，不得猜 9
+        rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
+      }
       const old = await invoke<PetManifestView | null>("pet_read_manifest", { id: selected.id });
       const base = old
         ? await repairManifest(
@@ -200,6 +226,16 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     }
   };
 
+  // 重命名实时校验（issue #33-7，spec §10-1）：非法字符/保留名/超长/重名即时提示并禁用按钮
+  // （重名为前端预检，含内置 foxbell；selfId 豁免保持自身名）
+  const renameProblem =
+    selected && renameTo
+      ? petNameProblem(renameTo, {
+          existingIds: [...pets.map((p) => p.id), "foxbell"],
+          selfId: selected.id,
+        })
+      : null;
+
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="max-w-xl">
@@ -240,10 +276,15 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
                     value={renameTo}
                     onChange={(e) => setRenameTo(e.target.value)}
                   />
+                  {renameProblem && (
+                    <p className="text-destructive text-xs" data-testid="manage-rename-problem">
+                      {t(petNameProblemKey(renameProblem))}
+                    </p>
+                  )}
                 </div>
                 <Button
                   size="sm"
-                  disabled={busy || !renameTo}
+                  disabled={busy || !renameTo || renameProblem !== null}
                   data-testid="manage-rename-btn"
                   onClick={() => void doRename()}
                 >

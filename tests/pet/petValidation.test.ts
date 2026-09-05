@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIO_EXTS, MAX_AUDIO_BYTES, MIN_DURATION_MS, MAX_DURATION_MS,
   groupOfRel, nameFromRel, isAudioCandidate, diffManifestVsScan, judgeVoiceTier, voiceRowProblem,
+  manifestVoiceCapOnDisk, petNameProblem, petNameProblemKey,
   type PetScan, type PetManifestView,
 } from "@/components/pet/petValidation";
 
@@ -70,5 +71,52 @@ describe("petValidation", () => {
     // detail 为语言中性数据（P3-6）：标签翻译在展示层经 pet.issue.<kind>
     expect(noSheet.find((i) => i.kind === "spritesheet-missing")?.detail).toBe("spritesheet.webp");
     expect(issues.find((i) => i.kind === "spritesheet-changed")?.detail).toBe("100 → 999");
+  });
+});
+
+describe("petNameProblem / manifestVoiceCapOnDisk（issue #33-7/#33-8/#33-12）", () => {
+  it("petNameProblem：字符集/保留设备名（大小写不敏感）/超长/重名（selfId 豁免）", () => {
+    expect(petNameProblem("abc_-1")).toBeNull();
+    expect(petNameProblem("a b")).toBe("charset");
+    expect(petNameProblem("")).toBe("charset");
+    expect(petNameProblem("con")).toBe("reserved-device");
+    expect(petNameProblem("Com1")).toBe("reserved-device");
+    expect(petNameProblem("lpt9")).toBe("reserved-device");
+    expect(petNameProblem("prn")).toBe("reserved-device");
+    expect(petNameProblem("conway")).toBeNull(); // 保留名仅全词匹配
+    expect(petNameProblem("a".repeat(65))).toBe("too-long");
+    expect(petNameProblem("a".repeat(64))).toBeNull();
+    expect(petNameProblem("dew", { existingIds: ["Dew"] })).toBe("duplicate"); // 大小写不敏感
+    expect(petNameProblem("dew", { existingIds: ["dew"], selfId: "dew" })).toBeNull();
+    expect(petNameProblemKey("duplicate")).toBe("pet.import.nameDup");
+    expect(petNameProblemKey("reserved-device")).toBe("pet.import.nameReserved");
+    expect(petNameProblemKey("too-long")).toBe("pet.import.nameTooLong");
+    expect(petNameProblemKey("charset")).toBe("pet.import.nameHint");
+  });
+
+  it("manifestVoiceCapOnDisk：条目齐全且大小一致 → hasVoice 可信；缺失/大小变 → 保守 false", () => {
+    const manifestWith = (voices: PetManifestView["voices"]): PetManifestView => ({
+      id: "p", displayName: "P", hasVoice: true, hasSubtitle: true,
+      spriteVersionNumber: 2, spritesheetSizeBytes: 100, voices,
+    });
+    const voice = (sizeBytes: number) => ({
+      group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes, durationMs: 3000,
+    });
+    // 齐全且大小一致 → manifest.hasVoice
+    expect(
+      manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([{ rel: "voice/general/a.m4a", size: 10 }]))
+    ).toBe(true);
+    // manifest 本身无语音 → false
+    expect(
+      manifestVoiceCapOnDisk(manifestWith([]), scan([]))
+    ).toBe(false);
+    // 条目缺失 → false
+    expect(
+      manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([]))
+    ).toBe(false);
+    // 大小已变（缓存前提破坏）→ false
+    expect(
+      manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([{ rel: "voice/general/a.m4a", size: 99 }]))
+    ).toBe(false);
   });
 });

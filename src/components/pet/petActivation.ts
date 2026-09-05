@@ -7,6 +7,7 @@ import {
   diffManifestVsScan,
   isAudioCandidate,
   judgeVoiceTier,
+  manifestVoiceCapOnDisk,
   spriteVersionOf,
   type PetManifestView,
   type PetScan,
@@ -25,6 +26,8 @@ export interface ActivationResult {
   repaired?: boolean;
   /** ignore 降级激活标记（UI 据此用 ignoredDiff 文案 toast，FIX-3） */
   ignoredDiff?: boolean;
+  /** 激活后实际写入指针的语音能力：UI 据此即时刷新卡片能力徽标（§9 所见即所得，issue #33-8） */
+  voiceCap?: boolean;
   /** 原始异常（PetError/RpcError/普通 Error），展示层经 petErrMsg 翻译（P3-1） */
   err?: unknown;
   issues?: ValidationIssue[];
@@ -147,25 +150,35 @@ export async function activatePet(id: string, confirm: MismatchConfirm): Promise
     if (!scan.spritesheet.exists) {
       return { status: "invalid-sheet", err: new PetError("sheet-missing") };
     }
-    let rows: 9 | 11;
-    try {
-      rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
-    } catch (e) {
-      return { status: "invalid-sheet", err: e };
-    }
     const manifest = await invoke<PetManifestView | null>("pet_read_manifest", { id });
+    // 稳态快路径（issue #33-11，与 PetStartupGuard spec §4.2 同策略）：manifest 存在、
+    // 图集大小一致且版本已知 → 信任记录行数，跳过 50-150ms 的 Image 解码（EP7 稳态 <100ms）
+    const rowsTrusted =
+      !!manifest &&
+      manifest.spriteVersionNumber !== 0 &&
+      manifest.spritesheetSizeBytes === scan.spritesheet.size;
+    let rows: 9 | 11;
+    if (rowsTrusted && manifest) {
+      rows = manifest.spriteVersionNumber === 2 ? 11 : 9;
+    } else {
+      try {
+        rows = await probeSheetRows(convertFileSrc(`${scan.dir}/spritesheet.webp`));
+      } catch (e) {
+        return { status: "invalid-sheet", err: e };
+      }
+    }
     if (!manifest) {
       const built = await buildManifestFromScan(id, scan, rows, "folder", true);
       await invoke("pet_update_manifest", { id, manifest: built, backup: false });
       saveActiveId(id, built.hasVoice, built.displayName);
       notifyPetChanged();
-      return { status: "activated", manifestBuilt: true };
+      return { status: "activated", manifestBuilt: true, voiceCap: built.hasVoice };
     }
     const issues = diffManifestVsScan(manifest, scan);
     if (issues.length === 0) {
       saveActiveId(id, manifest.hasVoice, manifest.displayName);
       notifyPetChanged();
-      return { status: "activated" };
+      return { status: "activated", voiceCap: manifest.hasVoice };
     }
     const choice = await confirm(issues, manifest);
     if (choice === "cancel") {
@@ -176,20 +189,15 @@ export async function activatePet(id: string, confirm: MismatchConfirm): Promise
       await invoke("pet_update_manifest", { id, manifest: repaired, backup: true });
       saveActiveId(id, repaired.hasVoice, repaired.displayName);
       notifyPetChanged();
-      return { status: "activated", repaired: true };
+      return { status: "activated", repaired: true, voiceCap: repaired.hasVoice };
     }
     // ignore：按磁盘现状运行，不重写 manifest（FIX-3 诚实语义）。
-    // voice-cap 按 manifest 语音条目与磁盘的比对判定（FIX-7）：存在且大小与缓存一致 → 可信；
+    // voice-cap 判定共享 manifestVoiceCapOnDisk（issue #33-8）：存在且大小与缓存一致 → 可信；
     // 任一缺失或大小已变 → 缓存时长失效（spec §4.2 缓存语义前提被破坏），保守无语音（spec §6-3）
-    const manifestEntriesOnDisk =
-      manifest.voices.length > 0 &&
-      manifest.voices.every((v) =>
-        scan.voiceFiles.some((f) => f.rel === v.file && f.exists && f.size === v.sizeBytes)
-      );
-    const voiceCap = manifestEntriesOnDisk ? manifest.hasVoice : false;
+    const voiceCap = manifestVoiceCapOnDisk(manifest, scan);
     saveActiveId(id, voiceCap, manifest.displayName);
     notifyPetChanged();
-    return { status: "activated", ignoredDiff: true };
+    return { status: "activated", ignoredDiff: true, voiceCap };
   } catch (e) {
     return { status: "error", err: e };
   }

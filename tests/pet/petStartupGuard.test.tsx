@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { toast } from "sonner";
 import { PetStartupGuard } from "@/components/pet/PetStartupGuard";
 import { tauriInvokeMock } from "../msw/tauriMocks";
 
@@ -139,6 +140,34 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
       });
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+});
+describe("PetStartupGuard 更新失败处理（issue #33-1）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    tauriInvokeMock.mockClear();
+  });
+
+  it("pet_update_manifest reject → toast 错误、弹窗保持、issues 不清理（不再静默吞错）", async () => {
+    localStorage.setItem("mam-pet-active", "p1");
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan") return Promise.resolve(scanOk);
+      if (cmd === "pet_read_manifest") return Promise.resolve(manifest);
+      if (cmd === "pet_update_manifest")
+        return Promise.reject({ code: "manifest-write-failed" });
+      return Promise.resolve(undefined);
+    });
+    const errSpy = vi.spyOn(toast, "error").mockImplementation(() => {});
+    try {
+      render(<PetStartupGuard />);
+      fireEvent.click(await screen.findByTestId("pet-startup-update"));
+      await waitFor(() => expect(errSpy).toHaveBeenCalled());
+      // 弹窗保持打开且更新按钮仍在（issues 未被清理，用户可重试或改选其它处理）
+      expect(screen.getByTestId("pet-startup-dialog")).toBeInTheDocument();
+      expect(screen.getByTestId("pet-startup-update")).toBeInTheDocument();
+    } finally {
+      errSpy.mockRestore();
     }
   });
 });

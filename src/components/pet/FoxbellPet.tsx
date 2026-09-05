@@ -60,7 +60,10 @@ export function FoxbellPet() {
     activeRef.current = active;
     rowsRef.current = active.rows;
   }, [active]);
-  // 组件卸载：释放当前快照（refresh effect 的 disposed 闸门保证不会在卸载后 setActive）
+  // 组件卸载：释放当前快照（refresh effect 的 disposed 闸门保证不会在卸载后 setActive）。
+  // 已知 dev-only 行为（issue #33-13）：StrictMode 双挂载时第一棵树的 cleanup 会 dispose
+  // 仍被 state 引用显示的快照 → 重挂载 refresh 完成前音频 blob URL 短暂失效（图像走
+  // convertFileSrc 静态路径不受影响）。生产不双挂载，无影响；勿据此调整 prevActiveRef 生命周期。
   useEffect(
     () => () => {
       prevActiveRef.current?.dispose?.();
