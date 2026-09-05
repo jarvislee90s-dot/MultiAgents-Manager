@@ -6,10 +6,12 @@
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string;
 
 const TOOL_DISABLED_CODE = /^W5_TOOL_DISABLED:(.+)$/;
+const APPLY_IN_PROGRESS_CODE = /^W5_APPLY_IN_PROGRESS/;
 
 export function formatInvokeError(e: unknown, t: TranslateFn): string {
   const raw = typeof e === "string" ? e : String(e);
   const m = raw.match(TOOL_DISABLED_CODE);
   if (m) return t("errors.toolDisabled", { tools: m[1] });
+  if (APPLY_IN_PROGRESS_CODE.test(raw)) return t("errors.applyInProgress");
   return raw;
 }

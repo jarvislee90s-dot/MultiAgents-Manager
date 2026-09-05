@@ -131,7 +131,7 @@
       "cancel": "取消",
       "applied": "已应用",
       "rebuildFailed": "以下项重建失败（需重新勾选后重试）：{{items}}",
-      "skippedKeptItems": "以下项未能还原（SSOT 缺失或暂存失败，链接保持不变）：{{items}}",
+      "skippedKeptItems": "以下项未能还原（链接保持原状；落位失败项已自动恢复链接）：{{items}}",
       "skippedLostItems": "以下项还原中断且现场缺失（需重新勾选后重建）：{{items}}"
     }
   },
@@ -573,6 +573,7 @@
     }
   },
   "errors": {
-    "toolDisabled": "工具 {{tools}} 未启用，请先在设置-工具管理中开启"
+    "toolDisabled": "工具 {{tools}} 未启用，请先在设置-工具管理中开启",
+    "applyInProgress": "工具设置正在保存中，请稍候"
   }
 }

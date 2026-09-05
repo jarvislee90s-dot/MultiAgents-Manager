@@ -597,6 +597,50 @@ mod restore_tests {
         assert_eq!(outcome, RestoreOutcome::SkippedKept);
         assert!(crate::linker::link_marker_is_present(&target));
     }
+
+    /// review-2 Important 3 回归锁（rename 失败恢复分支）：暂存目录被句柄钉住时
+    /// rename 必然失败（Windows 子树存在打开句柄）→ 恢复分支按原目标重建链接 →
+    /// SkippedKept 且链接恢复在场
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_failure_recovers_link_reports_kept() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ssot = tmp.path().join("repo").join("skill-a");
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "hello").unwrap();
+        let target = tmp.path().join("tools").join("skill-a");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        create_dir_link(&ssot, &target); // junction，原链接目标即 SSOT
+
+        // 预置暂存目录并独占打开其中文件（share_mode(0)）：
+        // restore 开头的 remove_link(tmp) 删不掉它，rename(暂存→目标) 因子树句柄失败
+        let staging = target.with_extension("mam_restore_tmp");
+        std::fs::create_dir_all(&staging).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(staging.join("lock.txt"))
+            .unwrap();
+
+        let outcome = restore_mam_link(&ssot, &target, "skill-a");
+
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&staging); // 清理测试残留（被钉住的暂存目录）
+
+        assert_eq!(outcome, RestoreOutcome::SkippedKept);
+        assert!(
+            crate::linker::link_marker_is_present(&target),
+            "恢复分支应重建链接"
+        );
+        assert_eq!(
+            crate::linker::check_link_health(&target),
+            crate::linker::LinkHealth::Valid
+        );
+    }
 }
 
 #[cfg(test)]

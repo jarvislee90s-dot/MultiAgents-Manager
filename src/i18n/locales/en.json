@@ -131,7 +131,7 @@
       "cancel": "Cancel",
       "applied": "Applied",
       "rebuildFailed": "The following items failed to rebuild (re-enable to retry): {{items}}",
-      "skippedKeptItems": "The following items were not restored (SSOT missing or staging failed, links left unchanged): {{items}}",
+      "skippedKeptItems": "The following items were not restored (links kept intact; failed placements had their links re-created): {{items}}",
       "skippedLostItems": "The following items were interrupted mid-restore and the target is missing (re-enable to rebuild): {{items}}"
     }
   },
@@ -573,6 +573,7 @@
     }
   },
   "errors": {
-    "toolDisabled": "Tool {{tools}} is disabled — enable them in Settings → Tool Management first"
+    "toolDisabled": "Tool {{tools}} is disabled — enable it in Settings → Tool Management first",
+    "applyInProgress": "A tool settings save is already in progress"
   }
 }

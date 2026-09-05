@@ -224,8 +224,12 @@ export default function SettingsPage() {
     setActiveSection(next);
   };
 
-  // 批量应用变更；成功后复位草稿、失效缓存并执行缓存跳转
+  // 批量应用变更；成功后复位草稿、失效缓存并执行缓存跳转。
+  // saving 态禁用确认按钮（review-2 Important 1：异步保存后双击会触发并发保存）
+  const [toolSaving, setToolSaving] = useState(false);
   const applyChanges = async () => {
+    if (toolSaving) return;
+    setToolSaving(true);
     try {
       const result = await invoke<{
         restored: string[];
@@ -263,6 +267,8 @@ export default function SettingsPage() {
       jump?.();
     } catch (e) {
       toast.error(formatInvokeError(e, t));
+    } finally {
+      setToolSaving(false);
     }
   };
 
@@ -762,7 +768,9 @@ export default function SettingsPage() {
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>
               {t("settings.tools.cancel")}
             </Button>
-            <Button onClick={() => void applyChanges()}>{t("settings.tools.confirm")}</Button>
+            <Button onClick={() => void applyChanges()} disabled={toolSaving}>
+              {t("settings.tools.confirm")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
