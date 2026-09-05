@@ -21,4 +21,17 @@ describe("通知让渡判定（spec W1）", () => {
     localStorage.setItem("mam-pet-config", JSON.stringify({ alwaysOnTop: true }));
     expect(petSuppressPopup()).toBe(true);
   });
+
+  describe("语音能力闸门（spec §5.2）", () => {
+    it("无语音外部宠物不接管完成提示音", () => {
+      localStorage.setItem("mam-pet-visible", "1");
+      localStorage.setItem("mam-pet-voice-cap", "0");
+      expect(petSoundTakeover()).toBe(false);
+    });
+    it("foxbell（未写能力缓存）保持接管", () => {
+      localStorage.setItem("mam-pet-visible", "1");
+      localStorage.removeItem("mam-pet-voice-cap");
+      expect(petSoundTakeover()).toBe(true);
+    });
+  });
 });

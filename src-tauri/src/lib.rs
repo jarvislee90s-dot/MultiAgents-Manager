@@ -67,6 +67,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(plugins::system_tray::init());
     let builder = builder.invoke_handler(tauri::generate_handler![
         greet,
@@ -79,6 +80,24 @@ pub fn run() {
         commands::notification::show_notification_window,
         commands::pet::set_pet_visible,
         commands::pet::set_pet_always_on_top,
+        commands::pet::pet_list_pets,
+        commands::pet::pet_list_codex_pets,
+        commands::pet::pet_scan,
+        commands::pet::pet_read_manifest,
+        commands::pet::pet_stage_from_folder,
+        commands::pet::pet_stage_from_zip,
+        commands::pet::pet_stage_from_codex,
+        commands::pet::pet_stage_from_petdex,
+        commands::pet::pet_stage_audio,
+        commands::pet::pet_remove_staged_audio,
+        commands::pet::pet_finalize_import,
+        commands::pet::pet_cancel_import,
+        commands::pet::pet_update_manifest,
+        commands::pet::pet_rename_pet,
+        commands::pet::pet_delete_pet,
+        commands::pet::pet_add_voice_files,
+        commands::pet::pet_remove_voice_file,
+        commands::pet::pet_reveal_folder,
         commands::resource::list_extensions_with_assignments,
         commands::resource::open_tool_resource,
         commands::resource::scan_native_resources,

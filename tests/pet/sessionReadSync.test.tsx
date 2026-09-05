@@ -30,9 +30,16 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    show: vi.fn(), hide: vi.fn(), setAlwaysOnTop: vi.fn(), setIgnoreCursorEvents: vi.fn(),
-    setPosition: vi.fn(), setSize: vi.fn(), outerPosition: vi.fn(), outerSize: vi.fn(),
-    scaleFactor: vi.fn(), currentMonitor: vi.fn(),
+    show: vi.fn(),
+    hide: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
+    setIgnoreCursorEvents: vi.fn(),
+    setPosition: vi.fn(),
+    setSize: vi.fn(),
+    outerPosition: vi.fn(),
+    outerSize: vi.fn(),
+    scaleFactor: vi.fn(),
+    currentMonitor: vi.fn(),
   }),
 }));
 vi.mock("@/lib/query/queries/sessions", () => ({
@@ -76,9 +83,12 @@ describe("session-read 跨窗口已读同步（T1）", () => {
     expect(card.textContent).toContain("已完成");
 
     // 看板点掉未读卡 → 后端广播 session-read → 宠物已读置位 → 卡片立即消失。
-    // listen 的 handler 从 mock 调用记录中取（setupSessionReadListener 注册的回调）
+    // listen 的 handler 按事件名取：合并后 FoxbellPet 还注册了 pet-active-changed
+    // （热切换）等其他监听，calls[0] 不再保证是 session-read（合并实测回归）
     await waitFor(() => expect(listenMock).toHaveBeenCalled());
-    const handler = listenMock.mock.calls[0][1] as (e: unknown) => void;
+    const srCall = listenMock.mock.calls.find(([name]) => name === "session-read");
+    expect(srCall, "session-read 监听未注册").toBeTruthy();
+    const handler = srCall![1] as (e: unknown) => void;
     await act(async () => {
       handler({ payload: { agentType: "claude", sessionId: "s1" } });
     });

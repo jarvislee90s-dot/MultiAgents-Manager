@@ -14,6 +14,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { registerShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
 import { loadVisible, subscribeConfig } from "@/components/pet/petConfig";
+import { PetStartupGuard } from "@/components/pet/PetStartupGuard";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 import { Activity, AlertCircle } from "lucide-react";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
@@ -135,6 +136,8 @@ export default function HomePage() {
       <div className="flex-1 overflow-y-auto">
         {activeTab === "dashboard" ? <SessionGrid sessions={sessions} /> : <ExtensionList />}
       </div>
+      {/* 启动校验弹窗（EP2）：外部宠物素材异常时主窗口确认，宠物窗口先行降级 */}
+      <PetStartupGuard />
     </WindowFrame>
   );
 }

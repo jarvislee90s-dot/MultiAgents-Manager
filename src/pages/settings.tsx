@@ -38,6 +38,10 @@ import {
 } from "@/lib/audio";
 import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
 import { toggleWindow } from "@/lib/window";
+import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
+import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
+import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
+import { loadActiveName } from "@/components/pet/petRuntime";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
@@ -64,6 +68,10 @@ export default function SettingsPage() {
   // 桌宠状态：复用 petConfig（localStorage 单后端），跨窗口改动经 subscribeConfig 回流
   const [petVisible, setPetVisible] = useState(() => loadVisible());
   const [petCfg, setPetCfg] = useState(() => loadConfig());
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
+  const [activePetName, setActivePetName] = useState(loadActiveName());
   // 工具管理状态（spec W5）：本地草稿 + 脏标记，保存时统一批量应用
   const [toolRows, setToolRows] = useState<ToolRow[]>([]);
   const [toolDirty, setToolDirty] = useState(false);
@@ -121,6 +129,7 @@ export default function SettingsPage() {
       subscribeConfig(() => {
         setPetVisible(loadVisible());
         setPetCfg(loadConfig());
+        setActivePetName(loadActiveName());
       }),
     []
   );
@@ -637,6 +646,25 @@ export default function SettingsPage() {
                     ))}
                   </div>
                 </div>
+                <div className="border-t" />
+                {/* 当前宠物 + 三入口（spec §11）：切换在 Task 13，导入在 Task 16，修改在 Task 17 */}
+                <div className="flex items-center justify-between gap-2 py-2.5">
+                  <label className="text-sm font-medium">{t("settings.pet.currentPet")}</label>
+                  <span className="text-muted-foreground mr-auto pl-2 text-sm">
+                    {activePetName}
+                  </span>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setSwitchOpen(true)}>
+                      {t("settings.pet.switchPet")}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+                      {t("settings.pet.importPet")}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setManageOpen(true)}>
+                      {t("settings.pet.managePet")}
+                    </Button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -677,6 +705,9 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+      <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
+      <PetImportDialog open={importOpen} onOpenChange={setImportOpen} />
+      <PetManageDialog open={manageOpen} onOpenChange={setManageOpen} />
 
       {/* 保存确认弹窗：列出变更行并按变更方向提示影响 */}
       <Dialog

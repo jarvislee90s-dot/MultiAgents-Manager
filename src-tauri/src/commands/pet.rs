@@ -141,3 +141,205 @@ pub async fn set_pet_always_on_top(app: AppHandle, on_top: bool) -> Result<(), S
     }
     Ok(())
 }
+
+// ===== 外部宠物 IPC（spec 2026-09-03-external-pet-import §5.1）=====
+// id 类参数一律先过 validate_pet_id：pet_dir 是裸 join，不设卡可经 ../ 或绝对路径
+// 逃逸出仓库（如 pet_delete_pet("..") 会把 ~/.mam 整目录送回收站，P0-1）
+use crate::services::pet::{self, error::PetRpcError, import, manifest, petdex, scan};
+
+fn root() -> std::path::PathBuf {
+    pet::pets_root()
+}
+
+#[tauri::command]
+pub async fn pet_list_pets() -> Result<Vec<scan::PetSummary>, PetRpcError> {
+    Ok(scan::list_pets_in(&root()))
+}
+
+#[tauri::command]
+pub async fn pet_list_codex_pets() -> Result<Vec<scan::CodexPetInfo>, PetRpcError> {
+    let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
+    Ok(scan::list_codex_pets_in(&codex, &root()))
+}
+
+#[tauri::command]
+pub async fn pet_scan(id: String) -> Result<scan::PetScan, PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    scan::scan_pet_in(&root(), &id)
+}
+
+#[tauri::command]
+pub async fn pet_read_manifest(id: String) -> Result<Option<manifest::PetManifest>, PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    Ok(manifest::load(&pet::pet_dir(&root(), &id)))
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_folder(path: String) -> Result<import::StagedPet, PetRpcError> {
+    import::stage_from_folder_in(&root(), std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_zip(path: String) -> Result<import::StagedPet, PetRpcError> {
+    import::stage_from_zip_in(&root(), std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_codex(codex_id: String) -> Result<import::StagedPet, PetRpcError> {
+    // N3：codex_id 同样是路径拼接参数（codex_root 裸 join），须与其他 id 命令同一门禁，
+    // 否则 "../x" 可把 ~/.codex/pets 外任意目录的图集暂存进导入区（读侧逃逸）
+    pet::validate_pet_id(&codex_id)?;
+    let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
+    import::stage_from_codex_in(&root(), &codex, &codex_id)
+}
+
+#[tauri::command]
+pub async fn pet_stage_from_petdex(url: String) -> Result<import::StagedPet, PetRpcError> {
+    petdex::stage_from_url(&root(), &url).await
+}
+
+#[tauri::command]
+pub async fn pet_stage_audio(
+    staging_id: String,
+    src_paths: Vec<String>,
+    group: String,
+) -> Result<Vec<import::StagedVoiceFile>, PetRpcError> {
+    import::stage_audio_in(&root(), &staging_id, &src_paths, &group)
+}
+
+#[tauri::command]
+pub async fn pet_remove_staged_audio(staging_id: String, rel: String) -> Result<(), PetRpcError> {
+    import::remove_audio_in(&root(), &staging_id, &rel, true)
+}
+
+#[tauri::command]
+pub async fn pet_finalize_import(
+    staging_id: String,
+    name: String,
+    manifest: manifest::PetManifest,
+) -> Result<scan::PetSummary, PetRpcError> {
+    import::finalize_in(&root(), &staging_id, &name, manifest)
+}
+
+#[tauri::command]
+pub async fn pet_cancel_import(staging_id: String) -> Result<(), PetRpcError> {
+    import::cancel_in(&root(), &staging_id)
+}
+
+#[tauri::command]
+pub async fn pet_update_manifest(
+    id: String,
+    mut manifest: manifest::PetManifest,
+    backup: bool,
+) -> Result<(), PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    manifest.id = id.clone();
+    manifest::write_with_backup(&pet::pet_dir(&root(), &id), &manifest, backup)
+}
+
+#[tauri::command]
+pub async fn pet_rename_pet(old_id: String, new_id: String) -> Result<(), PetRpcError> {
+    pet::validate_pet_id(&old_id)?; // new_id 由 rename_pet_in 经 validate_pet_name 校验（含查重）
+    pet::rename_pet_in(&root(), &old_id, &new_id)
+}
+
+#[tauri::command]
+pub async fn pet_delete_pet(id: String) -> Result<(), PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    pet::delete_pet_in(&root(), &id)
+}
+
+#[tauri::command]
+pub async fn pet_add_voice_files(
+    id: String,
+    src_paths: Vec<String>,
+    group: String,
+) -> Result<Vec<import::StagedVoiceFile>, PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    import::add_voice_files_in(&root(), &id, &src_paths, &group)
+}
+
+#[tauri::command]
+pub async fn pet_remove_voice_file(id: String, rel: String) -> Result<(), PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    import::remove_audio_in(&root(), &id, &rel, false)
+}
+
+#[tauri::command]
+pub async fn pet_reveal_folder(id: String) -> Result<(), PetRpcError> {
+    pet::validate_pet_id(&id)?;
+    let dir = pet::pet_dir(&root(), &id);
+    tauri_plugin_opener::open_path(dir.to_string_lossy().to_string(), None::<&str>).map_err(|e| {
+        PetRpcError::new("reveal-failed", format!("打开文件夹失败: {}", e)).with("err", e.to_string())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P0-1 参数化恶意 id 样本：穿越（两种分隔符）、绝对路径（POSIX/Windows）、
+    /// 空串、点、点前缀、保留名及其大小写变体
+    const BAD_IDS: [&str; 9] = [
+        "", ".", "..", "../skills", r"..\skills", "/etc/passwd", r"C:\Windows", ".hidden", "foxbell",
+    ];
+
+    fn dummy_manifest(id: &str) -> manifest::PetManifest {
+        manifest::PetManifest {
+            schema_version: 1,
+            id: id.to_string(),
+            display_name: "D".into(),
+            description: String::new(),
+            source: "folder".into(),
+            sprite_version_number: 1,
+            spritesheet_size_bytes: 1,
+            has_voice: false,
+            has_subtitle: false,
+            voices: vec![],
+        }
+    }
+
+    /// 9 个带 id 的 IPC 命令对恶意 id 全部拒绝（在触碰文件系统/opener 之前）
+    #[tokio::test]
+    async fn id_taking_commands_reject_unsafe_pet_ids() {
+        for id in BAD_IDS {
+            assert!(pet_scan(id.to_string()).await.is_err(), "pet_scan({id:?})");
+            assert!(pet_read_manifest(id.to_string()).await.is_err(), "pet_read_manifest({id:?})");
+            assert!(
+                pet_update_manifest(id.to_string(), dummy_manifest(id), true)
+                    .await
+                    .is_err(),
+                "pet_update_manifest({id:?})"
+            );
+            assert!(
+                pet_rename_pet(id.to_string(), "renamed-x".into()).await.is_err(),
+                "pet_rename_pet({id:?})"
+            );
+            assert!(pet_delete_pet(id.to_string()).await.is_err(), "pet_delete_pet({id:?})");
+            assert!(
+                pet_add_voice_files(id.to_string(), vec![], "general".into())
+                    .await
+                    .is_err(),
+                "pet_add_voice_files({id:?})"
+            );
+            assert!(
+                pet_remove_voice_file(id.to_string(), "voice/general/a.mp3".into())
+                    .await
+                    .is_err(),
+                "pet_remove_voice_file({id:?})"
+            );
+            // N3：codex 来源的 id 同为路径拼接参数，纳入同一门禁
+            assert!(pet_stage_from_codex(id.to_string()).await.is_err(), "pet_stage_from_codex({id:?})");
+            assert!(pet_reveal_folder(id.to_string()).await.is_err(), "pet_reveal_folder({id:?})");
+        }
+    }
+
+    /// 拒绝走结构化错误码（pet-name-* 白名单内，前端可翻译），而非裸字符串
+    #[tokio::test]
+    async fn rejection_is_structured_rpc_error() {
+        let e = pet_delete_pet("/etc".into()).await.unwrap_err();
+        assert_eq!(e.code, "pet-name-illegal");
+        let e = pet_delete_pet("foxbell".into()).await.unwrap_err();
+        assert_eq!(e.code, "pet-name-reserved");
+    }
+}

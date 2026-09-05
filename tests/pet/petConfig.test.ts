@@ -1,9 +1,17 @@
 // tests/pet/petConfig.test.ts
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  loadConfig, saveConfig, loadVisible, saveVisible,
-  loadPosition, savePosition, petSoundTakeover, petSuppressPopup,
+  loadConfig,
+  saveConfig,
+  loadVisible,
+  saveVisible,
+  loadPosition,
+  savePosition,
+  petSoundTakeover,
+  petSuppressPopup,
+  subscribeConfig,
 } from "@/components/pet/petConfig";
+import { saveActiveId, loadActiveName } from "@/components/pet/petRuntime";
 
 describe("petConfig", () => {
   beforeEach(() => localStorage.clear());
@@ -11,15 +19,25 @@ describe("petConfig", () => {
   it("无存储时返回默认值（spec §10.1）", () => {
     const c = loadConfig();
     expect(c).toMatchObject({
-      alwaysOnTop: true, muted: false, talkative: true, gravity: true, scale: 1,
-      dblAction: "waving", approvalAction: "waiting", errorAction: "failed", doneAction: "jumping",
+      alwaysOnTop: true,
+      muted: false,
+      talkative: true,
+      gravity: true,
+      scale: 1,
+      dblAction: "waving",
+      approvalAction: "waiting",
+      errorAction: "failed",
+      doneAction: "jumping",
     });
     expect(loadVisible()).toBe(false);
     expect(loadPosition()).toBeNull();
   });
 
   it("非法值回落默认（sanitize）", () => {
-    localStorage.setItem("mam-pet-config", JSON.stringify({ scale: 9, dblAction: "hack", muted: "yes" }));
+    localStorage.setItem(
+      "mam-pet-config",
+      JSON.stringify({ scale: 9, dblAction: "hack", muted: "yes" })
+    );
     const c = loadConfig();
     expect(c.scale).toBe(1);
     expect(c.dblAction).toBe("waving");
@@ -50,5 +68,26 @@ describe("petConfig", () => {
     expect(petSuppressPopup()).toBe(true);
     saveConfig({ alwaysOnTop: true });
     expect(petSuppressPopup()).toBe(true);
+  });
+});
+
+describe("petConfig 激活指针订阅（P1-6）", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("同窗口 saveActiveId 经本地事件即时触发 subscribeConfig 回调", () => {
+    const fn = vi.fn();
+    const unsub = subscribeConfig(fn);
+    fn.mockClear();
+    saveActiveId("starry-dew", true, "Starry Dew");
+    expect(fn).toHaveBeenCalledTimes(1); // storage 事件只跨窗口：本窗口写入靠本地事件触达
+    expect(loadActiveName()).toBe("Starry Dew");
+    // 跨窗口 storage 事件同样触达（激活键/展示名键已纳入过滤）
+    window.dispatchEvent(new StorageEvent("storage", { key: "mam-pet-active" }));
+    expect(fn).toHaveBeenCalledTimes(2);
+    window.dispatchEvent(new StorageEvent("storage", { key: "mam-pet-active-name" }));
+    expect(fn).toHaveBeenCalledTimes(3);
+    unsub();
+    saveActiveId("foxbell", true);
+    expect(fn).toHaveBeenCalledTimes(3); // 退订后不再触达
   });
 });
