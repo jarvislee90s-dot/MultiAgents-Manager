@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
 import { useSessionJump } from "@/hooks/useSessionJump";
@@ -771,10 +772,18 @@ export function FoxbellPet() {
               onClick={() => {
                 // 歧义点选：经 useSessionJump.focusHwnd 聚焦并回标已读（spec W4 已读信号 1，
                 // 与看板歧义分支一致）；随后 pet 自己的卡片 ack 消气泡
-                void sessionJumpFocusHwnd(w.hwnd).then(() => {
-                  ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
-                  setCards(cardsFromState(statusStateRef.current ?? {}));
-                });
+                void sessionJumpFocusHwnd(w.hwnd)
+                  .then(() => {
+                    ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
+                    setCards(cardsFromState(statusStateRef.current ?? {}));
+                  })
+                  .catch((e) => {
+                    // P2-7（issue #34）：点选聚焦失败（窗口可能已关）——不产生
+                    // unhandled rejection、不 ack（卡保留可重试）；候选层已无条件
+                    // 关闭（spec W1 无论成败清除）。提示与看板同款文案
+                    console.error("sessionJumpFocusHwnd failed:", e);
+                    toast.error(t("sessions.jumpFailed", { error: e }));
+                  });
                 setCandidates(null);
               }}
               style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}
