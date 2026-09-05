@@ -574,6 +574,7 @@
   },
   "errors": {
     "toolDisabled": "Tool {{tools}} is disabled — enable it in Settings → Tool Management first",
-    "applyInProgress": "A tool settings save is already in progress"
+    "applyInProgress": "A tool settings save is already in progress",
+    "applyTaskFailed": "Tool settings save task crashed — please retry"
   }
 }

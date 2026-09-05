@@ -574,6 +574,7 @@
   },
   "errors": {
     "toolDisabled": "工具 {{tools}} 未启用，请先在设置-工具管理中开启",
-    "applyInProgress": "工具设置正在保存中，请稍候"
+    "applyInProgress": "工具设置正在保存中，请稍候",
+    "applyTaskFailed": "工具设置保存任务异常，请重试"
   }
 }
