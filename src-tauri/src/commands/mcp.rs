@@ -2,6 +2,8 @@
 
 #[tauri::command]
 pub fn toggle_mcp_for_tool(mcp_name: String, tool_id: String, enabled: bool) -> Result<(), String> {
+    // W5：未勾选工具的 toggle 操作直接拒绝（数据保留在 DB）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::toggle_mcp(&mcp_name, &tool_id, enabled)
 }
 

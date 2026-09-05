@@ -7,14 +7,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Checkbox } from "@/components/ui/checkbox";
 import type { NativeExtension } from "@/types/extension";
 import { ToolIcon } from "@/components/common/ToolIcon";
-
-const TOOLS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex CLI" },
-  { id: "opencode", label: "OpenCode" },
-  { id: "openclaw", label: "OpenClaw" },
-  { id: "kimi", label: "Kimi Code" },
-];
+// review M2：工具列改后端下发（勾选状态驱动），与 PresetList/资源视图同源
+import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 
 interface Props {
   open: boolean;
@@ -24,6 +18,7 @@ interface Props {
 
 export function ImportDialog({ open, onClose, onImported }: Props) {
   const { t } = useTranslation();
+  const { data: enabledTools = [] } = useEnabledToolsQuery();
   const [resources, setResources] = useState<Record<string, NativeExtension[]>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
@@ -37,7 +32,7 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
   const loadAllResources = async () => {
     setLoading(true);
     const all: Record<string, NativeExtension[]> = {};
-    for (const tool of TOOLS) {
+    for (const tool of enabledTools) {
       try {
         const data = await invoke<NativeExtension[]>("scan_native_resources", { toolId: tool.id });
         all[tool.id] = data;
@@ -129,7 +124,7 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
           </div>
         ) : (
           <div className="space-y-3">
-            {TOOLS.map((tool) => {
+            {enabledTools.map((tool) => {
               const toolResources = resources[tool.id] || [];
               if (toolResources.length === 0) return null;
               return (

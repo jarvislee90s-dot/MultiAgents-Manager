@@ -244,6 +244,7 @@ fn parse_claude_jsonl(
         active_subagent_count: 0,
         form: process.form,
         jump_supported: jump_supported_for(process.form),
+        unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
         title: Some(session_title),
     })
 }
@@ -259,6 +260,7 @@ mod title_tests {
             cpu_usage: 0.0,
             cwd: Some(std::path::PathBuf::from("/work/demo")),
             form: ProcessForm::Cli,
+            exe: None,
         }
     }
 

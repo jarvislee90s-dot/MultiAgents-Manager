@@ -161,6 +161,7 @@ fn build_session(
         active_subagent_count: 0,
         form: process.form,
         jump_supported: jump_supported_for(process.form),
+        unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
         title: Some(display_name.to_string()),
     })
 }

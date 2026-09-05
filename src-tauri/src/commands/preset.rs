@@ -26,17 +26,20 @@ pub fn list_presets() -> Vec<PresetRecord> {
 }
 
 #[tauri::command]
-pub fn apply_preset(preset_id: String, tool_id: String) -> PresetApplyResult {
+pub fn apply_preset(preset_id: String, tool_id: String) -> Result<PresetApplyResult, String> {
+    // review F4：停用工具的预设写操作一律拒绝（W5 生效范围）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let result = crate::services::preset::apply_preset(&preset_id, &tool_id);
-    PresetApplyResult {
+    Ok(PresetApplyResult {
         success_count: result.success,
         failures: result.failures,
         conflicts: result.conflicts,
-    }
+    })
 }
 
 #[tauri::command]
 pub fn deactivate_preset(preset_id: String, tool_id: String) -> Result<(), String> {
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::preset::deactivate_preset(&preset_id, &tool_id)
 }
 
@@ -45,14 +48,15 @@ pub fn apply_preset_to_subagent(
     preset_id: String,
     tool_id: String,
     sub_agent_id: String,
-) -> PresetApplyResult {
+) -> Result<PresetApplyResult, String> {
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let result =
         crate::services::preset::apply_preset_to_subagent(&preset_id, &tool_id, &sub_agent_id);
-    PresetApplyResult {
+    Ok(PresetApplyResult {
         success_count: result.success,
         failures: result.failures,
         conflicts: result.conflicts,
-    }
+    })
 }
 
 #[tauri::command]
@@ -61,5 +65,6 @@ pub fn deactivate_preset_from_subagent(
     tool_id: String,
     sub_agent_id: String,
 ) -> Result<(), String> {
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
 }

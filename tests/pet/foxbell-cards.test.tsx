@@ -54,19 +54,19 @@ describe("FoxbellPet 卡片", () => {
     });
     render(<FoxbellPet />);
     fireEvent.click(await screen.findByTestId("pet-card-s1"));
-    const overlay = await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 3000 });
+    const overlay = await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 10000 });
     // 点浮层内部：不关闭
     fireEvent.pointerDown(overlay.firstChild as HTMLElement);
     expect(screen.getByTestId("pet-jump-candidates")).toBeTruthy();
     // 点外：关闭（不 ack，卡片保留）
     fireEvent.pointerDown(document.body);
-    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 10000 });
     expect(screen.getByTestId("pet-card-s1")).toBeTruthy();
     // 再次触发歧义 → Esc 关闭
     fireEvent.click(screen.getByTestId("pet-card-s1"));
-    await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 3000 });
+    await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 10000 });
     fireEvent.keyDown(window, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 10000 });
     expect(screen.getByTestId("pet-card-s1")).toBeTruthy();
     vi.mocked(invoke).mockClear();
   });

@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
-import { Cpu, Clock, Bot, ChevronRight } from "lucide-react";
+import { Cpu, Clock, Bot, ChevronRight, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
@@ -29,6 +30,30 @@ export function SessionCard({ session }: { session: Session }) {
   // 跳转共享逻辑（歧义候选窗口由 hook 状态承载，命中多个窗口时弹出选择器）
   const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
 
+  // 手动关闭卡（X）：不触发卡片跳转。
+  // 未读卡 = 标记已读（mark_session_read，spec W4 已读信号 2）；
+  // 活跃 App 卡（黄/红）= 暂离不提示（dismiss_session_card，T2）——写入进程内
+  // dismiss 集合从看板与宠物隐藏，同一会话状态变化后自然重现
+  const handleClose = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // 不触发卡片跳转
+    try {
+      if (session.unread) {
+        await invoke("mark_session_read", {
+          agentType: session.agentType,
+          sessionId: session.id,
+        });
+      } else {
+        await invoke("dismiss_session_card", {
+          agentType: session.agentType,
+          sessionId: session.id,
+          status: session.status,
+        });
+      }
+    } catch (err) {
+      console.error("session card close failed:", err);
+    }
+  };
+
   const handleClick = async () => {
     if (!session.jumpSupported) {
       toast.info(t("sessions.jumpUnsupported"));
@@ -41,6 +66,8 @@ export function SessionCard({ session }: { session: Session }) {
         agentType: session.agentType,
         projectName: session.projectName,
         lastMessage: session.lastMessage ?? undefined,
+        unread: session.unread, // 歧义选择器点选成功后回标已读用（spec W4 已读信号 1）
+        form: session.form, // review M3：CLI 会话 APP 级保底激活时的 UX 提示依据
       });
     } catch (e) {
       toast.error(t("sessions.jumpFailed", { error: e }));
@@ -71,6 +98,24 @@ export function SessionCard({ session }: { session: Session }) {
               {getAgentLabel(session.agentType, session.form)}
             </span>
             <span className="truncate text-sm font-medium">{session.projectName}</span>
+            {(session.unread || session.form === "app") && (
+              <span className="inline-flex items-center gap-1">
+                {session.unread && (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-emerald-400"
+                    aria-label={t("sessions.unread")}
+                  />
+                )}
+                <button
+                  onClick={handleClose}
+                  className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
+                  title={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
+                  aria-label={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            )}
             {(session.title || session.id) && (
               <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
                 {session.title || session.id.slice(0, 8)}

@@ -10,17 +10,12 @@ import type { PresetRecord, PresetApplyResult } from "@/types/preset";
 import type { ExtensionWithAssignments } from "@/types/extension";
 import { CompatibilityDialog } from "../resources/CompatibilityDialog";
 import { ToolIcon } from "@/components/common/ToolIcon";
-
-const TOOLS = [
-  { id: "claude", label: "Claude" },
-  { id: "codex", label: "Codex" },
-  { id: "opencode", label: "OpenCode" },
-  { id: "openclaw", label: "OpenClaw" },
-  { id: "kimi", label: "Kimi Code" },
-];
+// review F4：工具列改后端下发（勾选状态驱动），停用工具不再出现在预设组选择中
+import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 
 export function PresetList({ extensions }: { extensions: ExtensionWithAssignments[] }) {
   const { t } = useTranslation();
+  const { data: enabledTools = [] } = useEnabledToolsQuery();
   const [presets, setPresets] = useState<PresetRecord[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
@@ -200,7 +195,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
                   .join(" · ")}
               </div>
               <div className="flex flex-wrap gap-1">
-                {TOOLS.map((tool) => (
+                {enabledTools.map((tool) => (
                   <div key={tool.id} className="space-y-1">
                     <div className="flex gap-0.5">
                       <Button
@@ -242,7 +237,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
           presetId={compatibilityDialog.presetId}
           toolId={compatibilityDialog.toolId}
           toolName={
-            TOOLS.find((t) => t.id === compatibilityDialog.toolId)?.label ||
+            enabledTools.find((t) => t.id === compatibilityDialog.toolId)?.label ||
             compatibilityDialog.toolId
           }
           onClose={() => setCompatibilityDialog(null)}
