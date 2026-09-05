@@ -57,7 +57,7 @@ const MAX_MANIFEST_BYTES: usize = 20 * 1024 * 1024;
 
 /// Content-Length 预检（纯函数便于单测；无该头时交给流式累计封顶）
 fn len_over_limit(len: Option<u64>, cap: usize) -> bool {
-    len.map_or(false, |l| l as usize > cap)
+    len.is_some_and(|l| l as usize > cap)
 }
 
 /// 流式读取响应体并封顶：Content-Length 预检 + 按块累计，超限即中断（防 OOM）
