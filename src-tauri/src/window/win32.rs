@@ -634,7 +634,9 @@ fn foreground_pid_is_tool(system: &sysinfo::System, pid: u32, tool_id: &str) -> 
     system
         .process(sysinfo::Pid::from_u32(pid))
         .and_then(|p| p.exe())
-        .map(|e| crate::monitor::host::is_host_process(&e.to_string_lossy().to_lowercase(), tool_id))
+        .map(|e| {
+            crate::monitor::host::is_host_process(&e.to_string_lossy().to_lowercase(), tool_id)
+        })
         .unwrap_or(false)
 }
 
@@ -843,14 +845,18 @@ Microsoft Windows [版本 10.0.26200]"
         fn flash_noise_before_stable_target_still_succeeds() {
             // 实测序列（附录 A）：+203ms Weixin 瞬时闪现 → +1235ms WorkBuddy 稳定前台。
             // 窗口期终点为准：闪现（非目标）不判失败，最后两次连续命中才成功
-            assert!(foreground_verify_with_samples(&[false, false, false, true, true]));
+            assert!(foreground_verify_with_samples(&[
+                false, false, false, true, true
+            ]));
             assert!(foreground_verify_with_samples(&[true, false, true, true]));
         }
 
         #[test]
         fn target_then_never_confirmed_fails() {
             // 目标出现过但未达 2 连中（如又被顶掉）→ 失败
-            assert!(!foreground_verify_with_samples(&[true, false, true, false, true, false]));
+            assert!(!foreground_verify_with_samples(&[
+                true, false, true, false, true, false
+            ]));
         }
 
         #[test]

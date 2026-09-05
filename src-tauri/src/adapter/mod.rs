@@ -264,7 +264,10 @@ pub fn get_all_sessions() -> SessionsResponse {
                 crate::database::find_status(&s.id).as_deref(),
                 Some("Idle") | Some("Finished")
             );
-            !codex_green_card_should_drop(was_green_prev, pool.contains(&("codex".into(), s.id.clone())))
+            !codex_green_card_should_drop(
+                was_green_prev,
+                pool.contains(&("codex".into(), s.id.clone())),
+            )
         });
     }
 
@@ -432,6 +435,21 @@ fn filter_host_dead_cards(sessions: &mut Vec<Session>, host_alive: &dyn Fn(&str)
     });
 }
 
+/// 未读池中「宿主确认死亡」的工具名单（issue #35-3）：
+/// 快照不可用（None）或空进程表 = 状态未知 → 返回空名单，本轮不清池。
+/// 进程枚举瞬态失败与宿主真死在空结果上不可区分，而 clear_tool 物理删除
+/// 不可恢复；误清由下一轮重扫自然纠正，误清未读无法找回
+fn dead_tools_from_pool(pool_tools: &[String], snapshot: Option<&sysinfo::System>) -> Vec<String> {
+    let Some(system) = snapshot.filter(|s| !s.processes().is_empty()) else {
+        return Vec::new();
+    };
+    pool_tools
+        .iter()
+        .filter(|t| !crate::monitor::host::tool_host_alive_in(system, t))
+        .cloned()
+        .collect()
+}
+
 /// 未读池动作（review F1：迁移触发语义，替代电平 upsert——
 /// 电平 upsert 会让「跳转已读」删掉的行在下一轮复活，已读永远不生效）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,6 +474,15 @@ fn unread_pool_action(prev_status: Option<&str>, idle: bool) -> UnreadPoolAction
     } else {
         UnreadPoolAction::Insert
     }
+}
+
+/// issue #35-1 主修复路径（纯判定，可测）：Insert 边沿是否允许插行。
+/// prev=None（缓存失忆：长间隙跨过缓存 TTL / MAM 重启）且近期已读墓碑在场 =
+/// 已读会话失忆后回板，不得复插已删未读行（复活主洞）；
+/// prev 有值（非绿 → 绿）是真实的新回合状态迁移，墓碑不参与判定——
+/// 已读后会话转黄再转绿的新回合通知不受污染
+fn insert_allowed(prev_status: Option<&str>, was_read_recently: bool) -> bool {
+    !(prev_status.is_none() && was_read_recently)
 }
 
 /// W4 未读机制核心：把 DB 中的未读会话合并为 Session 卡，并维护未读池
@@ -491,7 +518,13 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
                 expires_at_ms: now_ms + 24 * 3600 * 1000,
             };
             match unread_pool_action(prev.as_deref(), true) {
-                UnreadPoolAction::Insert => crate::database::dao::unread::upsert(&record),
+                UnreadPoolAction::Insert => {
+                    let was_read =
+                        crate::database::dao::unread::was_read_recently(&tool, &s.id, now_ms);
+                    if insert_allowed(prev.as_deref(), was_read) {
+                        crate::database::dao::unread::upsert(&record);
+                    }
+                }
                 UnreadPoolAction::RefreshDisplay => {
                     crate::database::dao::unread::refresh_display(&record)
                 }
@@ -509,13 +542,23 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
     }
 
     // 2) 宿主进程退出 → 清该工具全部未读（运行中被关 + 重启残留检查统一规则）
+    //    issue #35-3/4：复用 Phase 1 的 SHARED_SYSTEM 快照（每轮已带 exe/cmd 全量刷新），
+    //    不再对池中每个工具各起一次全量进程扫描；快照不可用/空 = 状态未知 → 本轮
+    //    不清池（与活跃卡过滤的防御放行对称：进程枚举瞬态失败与宿主真死不可区分，
+    //    物理清空不可恢复，宁可等下一轮确认）
     let unread_now = crate::database::dao::unread::list(now_ms);
-    let mut dead_tools: Vec<String> = Vec::new();
-    for r in &unread_now {
-        if !dead_tools.contains(&r.tool_id) && !crate::monitor::host::tool_host_alive(&r.tool_id) {
-            dead_tools.push(r.tool_id.clone());
-        }
-    }
+    let pool_tools: Vec<String> = {
+        let mut seen = HashSet::new();
+        unread_now
+            .iter()
+            .filter(|r| seen.insert(r.tool_id.clone()))
+            .map(|r| r.tool_id.clone())
+            .collect()
+    };
+    let dead_tools = {
+        let guard = SHARED_SYSTEM.lock().unwrap();
+        dead_tools_from_pool(&pool_tools, guard.as_ref())
+    };
     for t in &dead_tools {
         crate::database::dao::unread::clear_tool(t);
     }
@@ -524,6 +567,8 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
     {
         let conn = crate::database::connection::DB.lock().unwrap();
         crate::database::dao::unread::cleanup_expired_unread(&conn, now_ms);
+        // issue #35-1：已读墓碑超龄行随轮物理清理
+        crate::database::dao::unread::cleanup_expired_read_tombstones_conn(&conn, now_ms);
     }
 
     // 4) 未读池合并为卡（纯映射见 build_unread_cards；追加在末尾，最终顺序由 session_sort_cmp 决定）
@@ -610,6 +655,23 @@ mod unread_pool_action_tests {
             UnreadPoolAction::None
         );
         assert_eq!(unread_pool_action(None, false), UnreadPoolAction::None);
+    }
+}
+
+#[cfg(test)]
+mod dead_tools_from_pool_tests {
+    use super::*;
+
+    /// issue #35-3 回归锁：快照不可用/空进程表 = 状态未知 → 不产出死工具名单，
+    /// 本轮不清池（进程枚举瞬态失败不得物理删除全部未读行）
+    #[test]
+    fn unknown_snapshot_clears_nothing() {
+        assert!(dead_tools_from_pool(&["workbuddy".into()], None).is_empty());
+        // System::new() = 空进程表：枚举失败/空结果与「宿主真死」不可区分
+        let empty = sysinfo::System::new();
+        assert!(
+            dead_tools_from_pool(&["workbuddy".into(), "codex".into()], Some(&empty)).is_empty()
+        );
     }
 }
 
@@ -901,5 +963,22 @@ mod codex_green_read_tests {
         // 未读在场：池有行 → 保留
         assert!(!codex_green_card_should_drop(true, true));
         assert!(!codex_green_card_should_drop(false, true));
+    }
+}
+
+#[cfg(test)]
+mod insert_allowed_tests {
+    use super::insert_allowed;
+
+    /// issue #35-1 回归锁（复活主洞）：缓存失忆（prev=None）的已读会话
+    /// 不得复插未读行；真实新回合（prev 有值 / 无墓碑）不受墓碑污染
+    #[test]
+    fn blocks_resurrection_but_not_new_rounds() {
+        // prev=None + 墓碑在场（长间隙/重启后已读会话回板）→ 阻断
+        assert!(!insert_allowed(None, true));
+        // prev=None + 无墓碑 → 真实新回合（重启后首个回合完成）→ 放行
+        assert!(insert_allowed(None, false));
+        // prev 有值 → 真实状态迁移，已读后会话转黄再转绿的通知不丢
+        assert!(insert_allowed(Some("Processing"), true));
     }
 }

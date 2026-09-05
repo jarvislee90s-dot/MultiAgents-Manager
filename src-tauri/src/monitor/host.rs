@@ -32,26 +32,33 @@ pub fn is_host_process(exe_lower: &str, tool_id: &str) -> bool {
     }
 }
 
-/// 同 tool_host_alive，但复用外部传入的 System 快照（review F2：
-/// adapter 的 SHARED_SYSTEM 每轮已带 exe 全量刷新，活跃卡过滤不得另起扫描）
+/// 复用外部传入的 System 快照判定宿主存活（review F2：
+/// adapter 的 SHARED_SYSTEM 每轮已带 exe/cmd 全量刷新，活跃卡过滤与未读池检查
+/// 都复用该快照，不另起扫描——issue #35-4）
 pub fn tool_host_alive_in(system: &sysinfo::System, tool_id: &str) -> bool {
     system.processes().iter().any(|(_, p)| {
+        // 会话 sidecar 不判宿主（issue #35-5，spec §5 孤儿防线）：Windows 上 sidecar
+        // 与主进程 exe 同名（均为 WorkBuddy.exe），exe 路径判据区分不了，只能按
+        // cmdline 里的 cli/bin/codebuddy 脚本路径排除；macOS 该路径在 exe 内，
+        // is_host_process 已排除，此判据对结果无影响
+        if tool_id == "workbuddy" && is_session_runtime_cmdline(p.cmd()) {
+            return false;
+        }
         p.exe()
             .map(|e| is_host_process(&e.to_string_lossy().to_lowercase(), tool_id))
             .unwrap_or(false)
     })
 }
 
-/// 该工具宿主 APP 是否存活（独立 sysinfo 扫描，用未过滤的原始进程集）
-pub fn tool_host_alive(tool_id: &str) -> bool {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-    );
-    tool_host_alive_in(&system, tool_id)
+/// cmdline 是否为 WorkBuddy 会话运行时（Electron 以自身作 Node 运行 cli/bin/codebuddy）。
+/// 分隔符归一化后匹配，Windows 反斜杠与 POSIX 斜杠统一；大小写不敏感
+fn is_session_runtime_cmdline(cmd: &[std::ffi::OsString]) -> bool {
+    cmd.iter().any(|arg| {
+        arg.to_string_lossy()
+            .to_lowercase()
+            .replace('\\', "/")
+            .contains("cli/bin/codebuddy")
+    })
 }
 
 #[cfg(test)]
@@ -127,6 +134,33 @@ mod tests {
         let system = sysinfo::System::new();
         assert!(!tool_host_alive_in(&system, "workbuddy"));
         assert!(!tool_host_alive_in(&system, "codex"));
+    }
+
+    /// issue #35-5：cmdline 级 sidecar 排除（Windows 上 sidecar exe 与主进程同名，
+    /// 只能凭 cli/bin/codebuddy 脚本路径区分会话运行时与宿主）
+    #[test]
+    fn session_runtime_cmdline_detection() {
+        use std::ffi::OsString;
+        let os = |s: &str| OsString::from(s);
+        // Windows 形态：sidecar 以 WorkBuddy.exe 自身运行 codebuddy 脚本（反斜杠）
+        assert!(is_session_runtime_cmdline(&[
+            os("C:\\Users\\u\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe"),
+            os("C:\\Users\\u\\AppData\\Local\\Programs\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\bin\\codebuddy"),
+        ]));
+        // POSIX 形态（macOS sidecar）
+        assert!(is_session_runtime_cmdline(&[os(
+            "/applications/workbuddy.app/contents/resources/app.asar.unpacked/cli/bin/codebuddy"
+        )]));
+        // 主进程 electron 启动参数：不含 codebuddy 脚本 → 不误排
+        assert!(!is_session_runtime_cmdline(&[
+            os("C:\\Users\\u\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe"),
+            os("--user-data-dir=C:\\Users\\u\\AppData\\Roaming\\WorkBuddy"),
+        ]));
+        assert!(!is_session_runtime_cmdline(&[]));
+        // 大小写不敏感（Windows 路径大小写不定）
+        assert!(is_session_runtime_cmdline(&[os(
+            "C:\\Prog\\CLI\\BIN\\CodeBuddy"
+        )]));
     }
 
     #[test]

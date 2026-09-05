@@ -163,9 +163,7 @@ fn ensure_skill_relink(
 
 /// 为已导入但尚未建立工具链接的 skill 补链（尊重用户显式禁用）
 pub fn sync_imported_skill_links() {
-    let tool_enabled = |tool_id: &str| {
-        crate::database::dao::agent_tool::get_tool_enabled(tool_id)
-    };
+    let tool_enabled = |tool_id: &str| crate::database::dao::agent_tool::get_tool_enabled(tool_id);
     sync_imported_skill_links_with(&tool_enabled);
 }
 
@@ -224,12 +222,9 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
             .map(|dir| dir.join(&ext.name).is_symlink())
             .unwrap_or(false);
         // P0-1：补链统一走勾选门（停用工具不得重建，见 ensure_skill_relink）
-        let _ = ensure_skill_relink(
-            &tool_id,
-            &tool_enabled,
-            &|| already_linked,
-            &|| crate::services::enable_skill_for_tool(&ext.name, &tool_id),
-        )
+        let _ = ensure_skill_relink(&tool_id, &tool_enabled, &|| already_linked, &|| {
+            crate::services::enable_skill_for_tool(&ext.name, &tool_id)
+        })
         .inspect_err(|e| log::warn!("补链 {} 到 {} 失败: {}", ext.name, tool_id, e));
     }
 
@@ -262,7 +257,12 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
             &|| already_linked,
             &|| crate::services::enable_skill_for_tool(skill_name, &assignment.agent_tool_id),
         ) {
-            log::warn!("补链 {} 到 {} 失败: {}", skill_name, assignment.agent_tool_id, e);
+            log::warn!(
+                "补链 {} 到 {} 失败: {}",
+                skill_name,
+                assignment.agent_tool_id,
+                e
+            );
         }
     }
 }
@@ -547,12 +547,7 @@ mod relink_gate_tests {
 
     #[test]
     fn enabled_unlinked_tool_relinks() {
-        let out = ensure_skill_relink(
-            "claude",
-            &|_| true,
-            &|| false,
-            &|| Ok(()),
-        );
+        let out = ensure_skill_relink("claude", &|_| true, &|| false, &|| Ok(()));
         assert_eq!(out, Ok(true));
     }
 
@@ -564,9 +559,7 @@ mod relink_gate_tests {
 
     #[test]
     fn enable_failure_propagates() {
-        let out = ensure_skill_relink("claude", &|_| true, &|| false, &|| {
-            Err("boom".into())
-        });
+        let out = ensure_skill_relink("claude", &|_| true, &|| false, &|| Err("boom".into()));
         assert_eq!(out, Err("boom".into()));
     }
 }

@@ -106,6 +106,54 @@ pub fn cleanup_expired_unread(conn: &Connection, now_ms: i64) {
     );
 }
 
+// ---- 已读墓碑（issue #35-1）----
+// 状态缓存（session_status_cache）对离板会话只保留有限时长，长间隙（系统睡眠唤醒 /
+// sidecar 挂起 / MAM 重启）后 prev=None 无法区分「首次转绿」与「缓存失忆的已读会话」，
+// Insert 边沿据此复活已读未读卡并重播完成通知。墓碑是「该会话已被用户读过」的持久
+// 信号，不依赖任何内存/缓存存活期
+
+/// 已读墓碑 TTL：7 天——覆盖未读池 24h 窗口加长睡眠/假期场景；
+/// 过龄墓碑无意义（补偿/插行窗口早已关闭），随轮询物理清理
+pub const READ_TOMBSTONE_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+
+/// 记录已读墓碑（同会话重复已读刷新时间）
+pub fn mark_read_tombstone_conn(
+    conn: &Connection,
+    tool_id: &str,
+    session_id: &str,
+    read_at_ms: i64,
+) {
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO unread_read_tombstones (tool_id, session_id, read_at)
+         VALUES (?1, ?2, ?3)",
+        params![tool_id, session_id, read_at_ms],
+    );
+}
+
+/// TTL 内是否已读过该会话（真 = Insert 边沿不得为其复插未读行）
+pub fn was_read_recently_conn(
+    conn: &Connection,
+    tool_id: &str,
+    session_id: &str,
+    now_ms: i64,
+) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM unread_read_tombstones
+         WHERE tool_id = ?1 AND session_id = ?2 AND read_at > ?3 LIMIT 1",
+        params![tool_id, session_id, now_ms - READ_TOMBSTONE_TTL_MS],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// 物理清理超龄墓碑（read_at <= now - TTL）
+pub fn cleanup_expired_read_tombstones_conn(conn: &Connection, now_ms: i64) {
+    let _ = conn.execute(
+        "DELETE FROM unread_read_tombstones WHERE read_at <= ?1",
+        params![now_ms - READ_TOMBSTONE_TTL_MS],
+    );
+}
+
 // ---- 全局连接包装（业务侧零锁代码） ----
 
 pub fn upsert(r: &UnreadSessionRecord) {
@@ -131,6 +179,19 @@ pub fn refresh_display(r: &UnreadSessionRecord) {
 pub fn clear_tool(tool_id: &str) {
     let conn = DB.lock().unwrap();
     clear_unread_for_tool(&conn, tool_id);
+}
+
+/// 记录已读墓碑（读取当前时钟；跳转已读 / 手动关闭未读卡的命令层调用）
+pub fn mark_read(tool_id: &str, session_id: &str) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let conn = DB.lock().unwrap();
+    mark_read_tombstone_conn(&conn, tool_id, session_id, now);
+}
+
+/// TTL 内是否已读过该会话（Insert 边沿的防复活判据）
+pub fn was_read_recently(tool_id: &str, session_id: &str, now_ms: i64) -> bool {
+    let conn = DB.lock().unwrap();
+    was_read_recently_conn(&conn, tool_id, session_id, now_ms)
 }
 
 #[cfg(test)]
@@ -225,5 +286,31 @@ mod tests {
             rows[0].turned_green_at_ms, 5000,
             "刷新展示字段不得滑动转绿时间"
         );
+    }
+
+    /// issue #35-1 回归锁：已读墓碑写读、同键刷新、隔离性与 TTL 过期清理
+    #[test]
+    fn read_tombstone_lifecycle() {
+        let conn = mem();
+        let now = 10_000_000i64;
+        assert!(!was_read_recently_conn(&conn, "workbuddy", "s1", now));
+        mark_read_tombstone_conn(&conn, "workbuddy", "s1", now);
+        assert!(was_read_recently_conn(&conn, "workbuddy", "s1", now));
+        // 其他会话 / 其他工具不受影响
+        assert!(!was_read_recently_conn(&conn, "workbuddy", "s2", now));
+        assert!(!was_read_recently_conn(&conn, "codex", "s1", now));
+        // 二次已读刷新时间戳（重复已读不产生第二行，TTL 自刷新时刻重新起算）
+        mark_read_tombstone_conn(&conn, "workbuddy", "s1", now + 1000);
+        assert!(was_read_recently_conn(&conn, "workbuddy", "s1", now + 1000));
+        // TTL 过期 → 不再算已读，物理清理后行数归零（过期点自刷新时刻起算）
+        let beyond = now + 1000 + READ_TOMBSTONE_TTL_MS + 1;
+        assert!(!was_read_recently_conn(&conn, "workbuddy", "s1", beyond));
+        cleanup_expired_read_tombstones_conn(&conn, beyond);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM unread_read_tombstones", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

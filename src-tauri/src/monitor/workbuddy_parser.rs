@@ -3,7 +3,7 @@
 // 所有文件均为未文档化私有格式：解析失败一律跳过/降级，禁止 panic（spec W3 防御性要求）
 
 use super::git::get_github_url;
-use super::jsonl::read_recent_lines;
+use super::jsonl::{read_first_lines, read_recent_lines};
 use super::project::project_name_from_path;
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, ProcessForm, Session, SessionStatus};
@@ -19,6 +19,12 @@ pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
 /// App 形态状态叠加阈值（spec §4「叠加 mtime 阈值（App 形态 300s，与 Codex APP 一致）」）：
 /// JSONL mtime 停更超过该时长时，函数调用类尾部（Processing）降级为 Waiting
 pub const APP_STATUS_STALE_MS: u64 = 300_000;
+
+/// 标题降级的首部读取行数（issue #35-6）：首条 user 消息从文件头找——
+/// 只搜尾部 500 行窗口时，超长会话的降级标题恒为 None（卡片回退显示 sessionId）。
+/// 取 500 与旧尾部窗口等宽：≤500 行会话覆盖完整文件（旧实现对 ≤500 行文件恰为
+/// 全文搜索，取 200 会造成 200-500 行会话的覆盖收窄），更长会话则远优于旧实现
+const TITLE_HEAD_LINES: usize = 500;
 
 /// 每轮观测到的 pid → (tool_id, sessionId)（心跳消失补偿的依据）。
 /// 值含 tool_id（P2-3 按工具隔离）：停用工具时只清对应工具条目，避免未来第二个
@@ -114,6 +120,16 @@ pub fn session_jsonl_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .join(format!("{}.jsonl", session_id))
 }
 
+/// 兜底扫描命中缓存（issue #35-7）：WorkBuddy 升级改编码后 mangle 恒未命中时，
+/// 每会话每轮的 projects 全目录扫描按 (home, cwd, sessionId) 缓存命中路径，
+/// 避免每 30s 一轮的全量扫描。键含 home——单测多 tempdir 并存，不得跨 home 串路径。
+/// 容量上限：长驻进程无淘汰会缓慢无界增长（每条目仅路径量级），超限整体清空即可
+/// ——条目失效有 exists() 前置校验兜底，清空后下一轮重扫自然重建，无需 LRU
+const FALLBACK_HITS_CAP: usize = 1024;
+type FallbackHitKey = (PathBuf, String, String);
+static FALLBACK_JSONL_HITS: Lazy<Mutex<HashMap<FallbackHitKey, PathBuf>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// 共享查找函数（P0-2）：定位会话 JSONL。
 /// 1. 先试 mangle(cwd)/<sessionId>.jsonl；
 /// 2. 未命中 → 扫描 ~/.workbuddy/projects/*/ 查找 <sessionId>.jsonl（会话可能换过项目目录，
@@ -126,17 +142,31 @@ pub fn find_session_jsonl(home: &Path, cwd: &str, session_id: &str) -> Option<Pa
     if primary.exists() {
         return Some(primary);
     }
+    // issue #35-7：先查兜底命中缓存（键含 home，防单测多 tempdir 串路径）；
+    // 命中前校验文件仍在（会话目录可能被清理），失效则重扫
+    let key = (home.to_path_buf(), cwd.to_string(), session_id.to_string());
+    if let Some(p) = FALLBACK_JSONL_HITS.lock().unwrap().get(&key) {
+        if p.exists() {
+            return Some(p.clone());
+        }
+    }
     // 目录扫描兜底：projects 下任意子目录中的 <sessionId>.jsonl
     let projects_dir = home.join(".workbuddy").join("projects");
     let Ok(entries) = std::fs::read_dir(&projects_dir) else {
         return None; // 目录缺失/不可读 → 防御性 None
     };
-    entries
-        .filter_map(|e| e.ok())
-        .find_map(|dir| {
-            let p = dir.path().join(format!("{}.jsonl", session_id));
-            p.exists().then_some(p)
-        })
+    let hit = entries.filter_map(|e| e.ok()).find_map(|dir| {
+        let p = dir.path().join(format!("{}.jsonl", session_id));
+        p.exists().then_some(p)
+    });
+    if let Some(ref p) = hit {
+        let mut hits = FALLBACK_JSONL_HITS.lock().unwrap();
+        if hits.len() >= FALLBACK_HITS_CAP {
+            hits.clear();
+        }
+        hits.insert(key, p.clone());
+    }
+    hit
 }
 
 /// mtime 阈值叠加（spec §4）：函数调用类尾部停更 >= 300s 降级 Waiting；
@@ -179,6 +209,12 @@ pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
 pub fn title_from_db(home: &Path, session_id: &str) -> Option<String> {
     let db = home.join(".workbuddy").join("workbuddy.db");
     let conn = super::sqlite::open_readonly_with_timeout(&db)?;
+    title_from_conn(&conn, session_id)
+}
+
+/// 共享连接版标题查询（issue #35 nit）：单轮内复用一条只读连接，
+/// 消除每会话每轮各开一次 SQLite 的开销
+fn title_from_conn(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT COALESCE(NULLIF(custom_title,''), title) FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
         [session_id],
@@ -187,6 +223,20 @@ pub fn title_from_db(home: &Path, session_id: &str) -> Option<String> {
     .ok()
     .flatten()
     .filter(|t| !t.trim().is_empty())
+}
+
+/// 标题解析链（可测核心，issue #35-6）：DB 标题优先；降级首条 user 消息改从
+/// 文件头读取（尾部 500 行窗口外的长会话不再恒为 None），仅在 DB 无标题时
+/// 才产生头部 I/O；统一截断 60 字符
+fn resolve_title(
+    db_conn: Option<&rusqlite::Connection>,
+    session_id: &str,
+    jsonl: &Path,
+) -> Option<String> {
+    db_conn
+        .and_then(|c| title_from_conn(c, session_id))
+        .or_else(|| first_user_text(&read_first_lines(jsonl, TITLE_HEAD_LINES)))
+        .map(|t| t.chars().take(60).collect::<String>())
 }
 
 fn heartbeat_path(home: &Path, pid: u32) -> PathBuf {
@@ -238,9 +288,12 @@ fn discover_workbuddy_processes_with(
             continue;
         };
         // 过滤：严格 UUID + kind 非 prewarm + 心跳新鲜（与 get_workbuddy_sessions 同规）
+        // + pid 交叉校验（issue #35 nit）：pid 复用竞态窗口内文件名与内容 pid 可能
+        // 不一致，视为无效心跳，不为无关进程出卡（下轮真实心跳自愈）
         if !heartbeat_session_id_is_uuid(&hb)
             || hb.kind.as_deref() == Some("prewarm")
             || !heartbeat_is_alive(&hb, now_ms)
+            || hb.pid != pid
         {
             continue;
         }
@@ -264,11 +317,15 @@ pub fn discover_workbuddy_processes(system: &sysinfo::System) -> Vec<AgentProces
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    discover_workbuddy_processes_with(&home, &|pid| {
-        system
-            .process(sysinfo::Pid::from_u32(pid))
-            .map(|p| (p.cpu_usage(), p.exe().map(|e| e.to_path_buf())))
-    }, now_ms())
+    discover_workbuddy_processes_with(
+        &home,
+        &|pid| {
+            system
+                .process(sysinfo::Pid::from_u32(pid))
+                .map(|p| (p.cpu_usage(), p.exe().map(|e| e.to_path_buf())))
+        },
+        now_ms(),
+    )
 }
 
 /// 主入口：活跃心跳的 WorkBuddy 进程 → 每会话一张卡
@@ -278,6 +335,9 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         return sessions;
     };
     let now = now_ms();
+    // issue #35 nit：单轮复用一条只读连接（title_from_db 原先每会话各开一次 SQLite）
+    let db_conn =
+        super::sqlite::open_readonly_with_timeout(&home.join(".workbuddy").join("workbuddy.db"));
 
     for process in processes {
         // 防御：心跳文件缺失/损坏 → 跳过该进程（含独立 CLI、空闲 prewarm）
@@ -288,9 +348,11 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             continue;
         };
         // 过滤：严格 UUID 形态（真实任务会话）+ 心跳新鲜 + kind 非 prewarm（双保险，字段缺失视为通过）
+        // + pid 交叉校验（issue #35 nit：文件名 pid 与内容 pid 不一致 = 竞态/损坏心跳）
         if !heartbeat_session_id_is_uuid(&hb)
             || hb.kind.as_deref() == Some("prewarm")
             || !heartbeat_is_alive(&hb, now)
+            || hb.pid != process.pid
         {
             continue;
         }
@@ -319,9 +381,7 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             .find_map(|l| extract_message_text(l))
             .unwrap_or_default();
 
-        let title = title_from_db(&home, &hb.session_id)
-            .or_else(|| first_user_text(&lines))
-            .map(|t| t.chars().take(60).collect::<String>());
+        let title = resolve_title(db_conn.as_ref(), &hb.session_id, &jsonl);
 
         sessions.push(Session {
             id: hb.session_id.clone(),
@@ -354,10 +414,10 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         });
 
         // 记录本轮 pid→(tool, session)（心跳消失补偿依据；含工具归属便于按工具隔离清理）
-        LAST_SEEN_SESSIONS
-            .lock()
-            .unwrap()
-            .insert(process.pid, ("workbuddy".to_string(), hb.session_id.clone()));
+        LAST_SEEN_SESSIONS.lock().unwrap().insert(
+            process.pid,
+            ("workbuddy".to_string(), hb.session_id.clone()),
+        );
     }
     sessions
 }
@@ -403,6 +463,7 @@ pub fn compensate_vanished_heartbeats_in(
     now_ms: u64,
     last_seen: &Mutex<HashMap<u32, (String, String)>>,
     status_of: &dyn Fn(&str) -> Option<String>,
+    was_read: &dyn Fn(&str) -> bool,
 ) -> Vec<crate::database::dao::unread::UnreadSessionRecord> {
     let mut compensated = Vec::new();
 
@@ -427,6 +488,14 @@ pub fn compensate_vanished_heartbeats_in(
             }
         })
         .collect();
+    // issue #35 nit：单轮复用一条只读连接（cwd 反查 + 标题查询共用；
+    // workbuddy.db 缺失/不可读 → None，调用方防御性降级）。
+    // 无消失条目时跳过打开（workbuddy 未安装时避免每轮一次必败 open）
+    let db_conn = if vanished.is_empty() {
+        None
+    } else {
+        super::sqlite::open_readonly_with_timeout(&home.join(".workbuddy").join("workbuddy.db"))
+    };
 
     for (pid, (tool_id, session_id)) in vanished {
         // 逐个短暂重锁移除（不做额外清理，未消失条目保留供下轮参考）
@@ -438,7 +507,10 @@ pub fn compensate_vanished_heartbeats_in(
         // 找该会话的 JSONL（与主路径共用 find_session_jsonl）：
         // 先 mangle(cwd)/<id>.jsonl，未命中再扫描 projects 下所有 <sessionId>.jsonl
         //（会话可能换过项目目录；cwd 未知时直接用空串让兜底扫描接管）
-        let cwd = workbuddy_cwd_from_db(home, &session_id).unwrap_or_default();
+        let cwd = db_conn
+            .as_ref()
+            .and_then(|c| workbuddy_cwd_from_conn(c, &session_id))
+            .unwrap_or_default();
         let Some(jsonl) = find_session_jsonl(home, &cwd, &session_id) else {
             continue; // 全无 → 跳过该 pid，不中断其余补偿
         };
@@ -447,11 +519,14 @@ pub fn compensate_vanished_heartbeats_in(
             continue; // 非完成态（运行中被杀等）→ 不补
         }
         // review M1：状态缓存已记录「绿已被 sync 观测」（Idle/Finished）时，行缺席
-        // 是因为用户已读删行——补偿不得复活（否则一次性复活未读卡）
+        // 是因为用户已读删行——补偿不得复活（否则一次性复活未读卡）。
+        // issue #35-1：缓存可能已失忆（离板 TTL 清理 / MAM 重启），近期已读墓碑
+        // 提供不依赖缓存的已读信号，同样不得复活
         if matches!(
             status_of(&session_id).as_deref(),
             Some("Idle") | Some("Finished")
-        ) {
+        ) || was_read(&session_id)
+        {
             continue;
         }
         let last_message = lines.iter().rev().find_map(|l| extract_message_text(l));
@@ -463,7 +538,9 @@ pub fn compensate_vanished_heartbeats_in(
             } else {
                 project_name_from_path(&cwd)
             },
-            title: title_from_db(home, &session_id),
+            title: db_conn
+                .as_ref()
+                .and_then(|c| title_from_conn(c, &session_id)),
             last_message,
             // 以补偿时刻为转绿时间：转绿从未被观测，此刻即首绿
             turned_green_at_ms: now_ms as i64,
@@ -471,6 +548,67 @@ pub fn compensate_vanished_heartbeats_in(
         });
     }
     compensated
+}
+
+/// 观测还原窗口（issue #35-2）：与未读池 24h 窗口一致——更老的完成早已超出
+/// 可提醒窗口，还原陈旧观测只会带来「复活远古会话」的误报风险
+const OBSERVATION_TTL_MS: i64 = 24 * 3600 * 1000;
+
+/// 启动后首轮：把 DB 影子表中的近期观测还原进进程内 LAST_SEEN（issue #35-2）。
+/// MAM 重启清空进程内观测表后，停机期间「完成 + prewarm 回池删心跳文件」的会话
+/// 无观测则补偿永不触发、未读提醒静默丢失；观测落库后跨重启仍可补偿。
+/// or_insert 不覆盖本轮已发现的更新条目（pid 复用时新会话胜出，见 restore_observations）。
+///
+/// 已知取舍（review 复核，W5 张力）：停用期间影子表冻结（sync_observations_to_db
+/// 在 W5 门禁之后执行），工具停用 → 24h 内重新启用后，此处还原的观测可能覆盖
+/// 「停用期间完成」的会话并触发补偿插行——严格读 spec W5「停用后任务完成不得复活
+/// 未读」是违例。接受理由：①「重新启用」合理解读为用户要求恢复监控，补上停用窗口
+/// 内静默丢失的提醒符合意图；②不重启的同型场景（停用 → 完成 → 启用，LAST_SEEN
+/// 内存条目同样跨停用存活）在本 PR 之前即存在，非本 PR 引入；③按「停用时刻」过滤
+/// 观测需引入工具停用时间戳记录（schema 变更），收益不匹配成本
+fn load_persisted_observations_once(now_ms: i64) {
+    static LOAD_ONCE: std::sync::Once = std::sync::Once::new();
+    LOAD_ONCE.call_once(|| {
+        let recent =
+            crate::database::dao::heartbeat_seen::list_recent_seen(now_ms - OBSERVATION_TTL_MS);
+        if recent.is_empty() {
+            return;
+        }
+        let mut last_seen = LAST_SEEN_SESSIONS.lock().unwrap();
+        restore_observations(&mut last_seen, recent);
+    });
+}
+
+/// 观测还原纯核（可测）：or_insert 保证「活发现胜出」——Phase 2 活跃发现先于
+/// 补偿执行，pid 复用时本轮在场的活发现条目不得被陈旧落库观测覆盖
+fn restore_observations(
+    last_seen: &mut HashMap<u32, (String, String)>,
+    recent: Vec<(i64, String, String)>,
+) {
+    for (pid, tool_id, session_id) in recent {
+        last_seen.entry(pid as u32).or_insert((tool_id, session_id));
+    }
+}
+
+/// 观测表影子同步（issue #35-2）：全量 upsert 进程内观测 + 移除已被补偿消费的
+/// pid + 清理超龄行。在补偿之后调用，此时内存表即本轮终态；upsert 行数 =
+/// 活跃会话数，量级极小
+fn sync_observations_to_db(now_ms: u64) {
+    let now = now_ms as i64;
+    let snapshot: Vec<(u32, String, String)> = {
+        let last_seen = LAST_SEEN_SESSIONS.lock().unwrap();
+        last_seen
+            .iter()
+            .map(|(pid, (tool, sid))| (*pid, tool.clone(), sid.clone()))
+            .collect()
+    };
+    for (pid, tool_id, session_id) in &snapshot {
+        crate::database::dao::heartbeat_seen::upsert_seen(*pid, tool_id, session_id, now);
+    }
+    let live: std::collections::HashSet<i64> =
+        snapshot.iter().map(|(pid, _, _)| *pid as i64).collect();
+    crate::database::dao::heartbeat_seen::retain_pids(&live);
+    crate::database::dao::heartbeat_seen::cleanup_before(now - OBSERVATION_TTL_MS);
 }
 
 /// 主入口：真实 home / 真实时钟 / 全局 LAST_SEEN_SESSIONS 的薄包装（补偿行在此落库）。
@@ -487,17 +625,24 @@ pub fn compensate_vanished_heartbeats() {
     }
     let Some(home) = dirs::home_dir() else { return };
     let now = now_ms();
-    for record in compensate_vanished_heartbeats_in(&home, now, &LAST_SEEN_SESSIONS, &|sid| {
-        crate::database::find_status(sid)
-    }) {
+    // issue #35-2：重启后还原近期观测，跨重启补偿「停机期间完成」的会话
+    load_persisted_observations_once(now as i64);
+    for record in compensate_vanished_heartbeats_in(
+        &home,
+        now,
+        &LAST_SEEN_SESSIONS,
+        &|sid| crate::database::find_status(sid),
+        // issue #35-1：已读墓碑判据（不依赖状态缓存的存活期）
+        &|sid| crate::database::dao::unread::was_read_recently("workbuddy", sid, now as i64),
+    ) {
         crate::database::dao::unread::upsert(&record);
     }
+    // issue #35-2：本轮终态落库（upsert 在场观测 + 删除已被补偿消费的 pid + 超龄清理）
+    sync_observations_to_db(now);
 }
 
-/// 补偿用：只读打开 workbuddy.db 反查会话 cwd；列缺失/打开失败一律 None（防御）
-fn workbuddy_cwd_from_db(home: &Path, session_id: &str) -> Option<String> {
-    let db = home.join(".workbuddy").join("workbuddy.db");
-    let conn = super::sqlite::open_readonly_with_timeout(&db)?;
+/// 补偿用：会话 cwd 反查（共享连接版，issue #35 nit：与标题查询同轮复用连接）
+fn workbuddy_cwd_from_conn(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT cwd FROM sessions WHERE id = ?1 AND deleted_at IS NULL",
         [session_id],
@@ -559,9 +704,15 @@ mod tests {
             "c-Users-bunny-WorkBuddy-2026-08-06-15-57-15"
         );
         // 实测：E:\LLMproject\0807 → e-LLMproject-0807
-        assert_eq!(mangle_project_path("E:\\LLMproject\\0807"), "e-LLMproject-0807");
+        assert_eq!(
+            mangle_project_path("E:\\LLMproject\\0807"),
+            "e-LLMproject-0807"
+        );
         // 前导 / 形态的 Windows 盘符（git-bash 归一化）同样处理
-        assert_eq!(mangle_project_path("C:/Users/bunny/proj"), "c-Users-bunny-proj");
+        assert_eq!(
+            mangle_project_path("C:/Users/bunny/proj"),
+            "c-Users-bunny-proj"
+        );
     }
 
     #[test]
@@ -576,9 +727,7 @@ mod tests {
     fn find_session_jsonl_primary_mangle_path_hits() {
         let home = tempfile::tempdir().unwrap();
         // 按新 mangle 规则写盘（c-Users-jarvis-proj），cwd 传 Windows 大写盘符形态
-        let dir = home
-            .path()
-            .join(".workbuddy/projects/c-Users-jarvis-proj");
+        let dir = home.path().join(".workbuddy/projects/c-Users-jarvis-proj");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"), "x").unwrap();
         let found = find_session_jsonl(
@@ -587,7 +736,10 @@ mod tests {
             "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c",
         )
         .unwrap();
-        assert_eq!(found, dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"));
+        assert_eq!(
+            found,
+            dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl")
+        );
     }
 
     #[test]
@@ -604,13 +756,46 @@ mod tests {
             "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c",
         )
         .unwrap();
-        assert_eq!(found, dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl"));
+        assert_eq!(
+            found,
+            dir.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl")
+        );
+    }
+
+    /// issue #35-7：兜底命中按 (home, cwd, sessionId) 缓存——注入 projects 扫描
+    /// 范围之外的路径也能命中（证明先查缓存）；文件被清后缓存失效回落重扫；
+    /// 不同 home 不串缓存
+    #[test]
+    fn fallback_scan_hit_is_cached_and_invalidated() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let file = outside.join("7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c.jsonl");
+        std::fs::write(&file, "x").unwrap();
+        let cwd = "\\\\server\\share\\proj";
+        let sid = "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c";
+        FALLBACK_JSONL_HITS.lock().unwrap().insert(
+            (home.path().to_path_buf(), cwd.to_string(), sid.to_string()),
+            file.clone(),
+        );
+        // 该路径在 projects 扫描范围之外 → 命中只能来自缓存
+        assert_eq!(find_session_jsonl(home.path(), cwd, sid).unwrap(), file);
+        // 缓存路径上的文件被清 → 失效重扫 → None（home 无 projects 目录）
+        std::fs::remove_file(&file).unwrap();
+        assert!(find_session_jsonl(home.path(), cwd, sid).is_none());
+        // 不同 home 同 (cwd, sid)：键隔离，不得命中他 home 的缓存
+        let other = tempfile::tempdir().unwrap();
+        assert!(find_session_jsonl(other.path(), cwd, sid).is_none());
     }
 
     #[test]
     fn find_session_jsonl_none_when_absent() {
         let home = tempfile::tempdir().unwrap();
-        let found = find_session_jsonl(home.path(), "/Users/jarvis/proj", "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c");
+        let found = find_session_jsonl(
+            home.path(),
+            "/Users/jarvis/proj",
+            "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c",
+        );
         assert!(found.is_none());
         // projects 目录缺失 → None（不 panic）
         let found2 = find_session_jsonl(home.path(), "/p", "7005f4cd-ef8b-4b7c-bcc5-b0f914c8a58c");
@@ -679,7 +864,7 @@ mod tests {
             kind: None,
         };
         assert!(!heartbeat_session_id_is_uuid(&g8hh)); // 首段含 g（非 hex）
-        // 连字符位置错误：8-4-4-4-12 的分段长度不对 → 拒绝
+                                                       // 连字符位置错误：8-4-4-4-12 的分段长度不对 → 拒绝
         let wrong_segs = Heartbeat {
             pid: 1,
             session_id: "ecbf3d35-76e9-42df-b71d-89409ec156e".into(), // 末段 11 字符
@@ -884,9 +1069,17 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL); // 终态 = assistant 完成
                                                            // 心跳文件缺席（prewarm 回池/退出）+ 上一轮观测表记录过该 pid
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].session_id, SID);
             assert_eq!(out[0].tool_id, "workbuddy");
@@ -899,9 +1092,17 @@ mod tests {
         fn vanished_but_killed_mid_run_is_not_compensated() {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, RUNNING_TAIL); // 终态 = 运行中被杀
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty());
             // 消失即移除观测表条目（即便不补），防止陈旧 pid 长期滞留
             assert!(last_seen.lock().unwrap().is_empty());
@@ -912,9 +1113,17 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL);
             write_heartbeat(home.path(), 11952, 9_999); // 心跳存在且新鲜（10000-9999 < 90s）
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty());
             // 未消失条目保留，供下轮补偿参考
             assert_eq!(
@@ -932,10 +1141,17 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL);
             write_heartbeat(home.path(), 11952, 0); // 心跳文件在但早已过期（now-0 >= 90s）
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
-            let out =
-                compensate_vanished_heartbeats_in(home.path(), 100_000, &last_seen, &|_| None);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                100_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert_eq!(out.len(), 1); // 过期 = 视为消失，终态完成 → 补
         }
 
@@ -945,12 +1161,41 @@ mod tests {
         fn read_dismissed_green_session_is_not_resurrected() {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL);
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
             let status_of = |sid: &str| (sid == SID).then(|| "Idle".to_string());
-            let out =
-                compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &status_of);
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &status_of,
+                &|_| false,
+            );
             assert!(out.is_empty(), "已观测绿的会话不得经补偿复活未读行");
+            // 消失条目照常移除，不滞留
+            assert!(last_seen.lock().unwrap().is_empty());
+        }
+
+        /// issue #35-1 回归锁：状态缓存失忆（status_of=None，跨过缓存 TTL / MAM
+        /// 重启）但近期已读墓碑在场 → 补偿同样不得复活已读会话
+        #[test]
+        fn compensation_skips_recently_read_session_with_forgotten_cache() {
+            let home = tempfile::tempdir().unwrap();
+            write_jsonl(home.path(), SID, ASSISTANT_TAIL);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,         // 缓存失忆：读不到上一轮状态
+                &|sid| sid == SID, // 但已读墓碑在场
+            );
+            assert!(out.is_empty(), "缓存失忆的已读会话不得经补偿复活未读行");
             // 消失条目照常移除，不滞留
             assert!(last_seen.lock().unwrap().is_empty());
         }
@@ -959,9 +1204,17 @@ mod tests {
         fn vanished_without_jsonl_is_ignored() {
             // 观测表有记录但会话文件不存在（防御）→ 不产出、不 panic
             let home = tempfile::tempdir().unwrap();
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("workbuddy".to_string(), SID.to_string()))]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("workbuddy".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty());
         }
 
@@ -970,13 +1223,82 @@ mod tests {
         fn foreign_tool_entry_is_skipped_not_compensated() {
             let home = tempfile::tempdir().unwrap();
             write_jsonl(home.path(), SID, ASSISTANT_TAIL); // JSONL 终态完成
-            // 但条目归属 codex（未来工具接入观测表的场景）→ 不得由 workbuddy 补偿代插
-            let last_seen =
-                Mutex::new(HashMap::from([(11952u32, ("codex".to_string(), SID.to_string()))]));
-            let out = compensate_vanished_heartbeats_in(home.path(), 10_000, &last_seen, &|_| None);
+                                                           // 但条目归属 codex（未来工具接入观测表的场景）→ 不得由 workbuddy 补偿代插
+            let last_seen = Mutex::new(HashMap::from([(
+                11952u32,
+                ("codex".to_string(), SID.to_string()),
+            )]));
+            let out = compensate_vanished_heartbeats_in(
+                home.path(),
+                10_000,
+                &last_seen,
+                &|_| None,
+                &|_| false,
+            );
             assert!(out.is_empty(), "非 workbuddy 条目不得经 workbuddy 补偿复活");
             // 消失条目照常移除（语义：谁消失谁出表）
             assert!(last_seen.lock().unwrap().is_empty());
+        }
+    }
+
+    // ---- 标题降级（issue #35-6）：首条 user 消息从文件头读取 ----
+
+    mod title_fallback_tests {
+        use super::*;
+
+        const SID: &str = "ecbf3d35-76e9-42df-b71d-89409ec156ea";
+
+        fn user_msg(text: &str) -> String {
+            format!(
+                r#"{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}"#
+            )
+        }
+
+        fn assistant_msg(text: &str) -> String {
+            format!(
+                r#"{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}"#
+            )
+        }
+
+        fn write_long_session(home: &Path, name: &str, first_user: &str) -> PathBuf {
+            let mut lines = vec![user_msg(first_user)];
+            lines.extend((0..1200).map(|i| assistant_msg(&format!("填充 {i}"))));
+            let jsonl = home.join(name);
+            std::fs::write(&jsonl, lines.join("\n")).unwrap();
+            jsonl
+        }
+
+        /// 长会话（>500 行）：首条 user 消息远在尾部窗口之外，降级标题不再恒为 None
+        #[test]
+        fn long_session_title_reads_first_user_message_from_head() {
+            let home = tempfile::tempdir().unwrap();
+            let jsonl = write_long_session(home.path(), "s1.jsonl", "帮我写个爬虫");
+            // DB 无标题（连接注入 None）→ 降级文件头首条 user 消息
+            assert_eq!(
+                resolve_title(None, SID, &jsonl).as_deref(),
+                Some("帮我写个爬虫")
+            );
+        }
+
+        /// 降级标题统一截断 60 字符（与旧尾部链路的展示口径一致）
+        #[test]
+        fn fallback_title_is_truncated_to_60_chars() {
+            let home = tempfile::tempdir().unwrap();
+            let long = "长".repeat(80);
+            let jsonl = write_long_session(home.path(), "s2.jsonl", &long);
+            let title = resolve_title(None, SID, &jsonl).unwrap();
+            assert_eq!(title.chars().count(), 60);
+        }
+
+        /// 头部无 user 消息（防御形态）→ 降级 None，不 panic
+        #[test]
+        fn head_without_user_message_yields_none() {
+            let home = tempfile::tempdir().unwrap();
+            let mut lines = vec![assistant_msg("只有 assistant")];
+            lines.extend((0..600).map(|i| assistant_msg(&format!("填充 {i}"))));
+            let jsonl = home.path().join("s3.jsonl");
+            std::fs::write(&jsonl, lines.join("\n")).unwrap();
+            assert!(resolve_title(None, SID, &jsonl).is_none());
         }
     }
 
@@ -1008,11 +1330,15 @@ mod tests {
         fn fresh_real_task_produces_process() {
             let home = tempfile::tempdir().unwrap();
             write_heartbeat_json(home.path(), 11952, &active_hb(11952, 1_000));
-            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 10_000);
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 10_000);
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].pid, 11952);
             assert_eq!(found[0].form, ProcessForm::App);
-            assert_eq!(found[0].cwd.as_deref(), Some(Path::new("/Users/jarvis/proj")));
+            assert_eq!(
+                found[0].cwd.as_deref(),
+                Some(Path::new("/Users/jarvis/proj"))
+            );
         }
 
         #[test]
@@ -1024,7 +1350,8 @@ mod tests {
                 8979,
                 r#"{"pid":8979,"sessionId":"interactive-8979","cwd":"/tmp/host-cli","lastHeartbeat":9000,"kind":"interactive"}"#,
             );
-            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[8979]), 10_000);
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[8979]), 10_000);
             assert!(found.is_empty());
         }
 
@@ -1037,7 +1364,8 @@ mod tests {
                 17692,
                 r#"{"pid":17692,"sessionId":"prewarm-wb-pool-1788496419201-bb1050","cwd":"C:\\Users\\bunny\\WorkBuddy","lastHeartbeat":9000,"kind":"prewarm"}"#,
             );
-            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[17692]), 10_000);
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[17692]), 10_000);
             assert!(found.is_empty());
         }
 
@@ -1046,7 +1374,8 @@ mod tests {
             // 心跳过期（now - lastHeartbeat >= 90s）→ 不产进程
             let home = tempfile::tempdir().unwrap();
             write_heartbeat_json(home.path(), 11952, &active_hb(11952, 0));
-            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 100_000);
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 100_000);
             assert!(found.is_empty());
         }
 
@@ -1060,11 +1389,24 @@ mod tests {
             assert!(found.is_empty());
         }
 
+        /// issue #35 nit：pid 交叉校验——文件名 pid 与内容 pid 不一致视为无效心跳，
+        /// pid 复用竞态窗口内不得为无关进程出卡（下轮真实心跳自愈）
+        #[test]
+        fn heartbeat_pid_mismatch_is_skipped() {
+            let home = tempfile::tempdir().unwrap();
+            // 文件名 111.json，内容声称 pid=222（竞态窗口产物形态）
+            write_heartbeat_json(home.path(), 111, &active_hb(222, 1_000));
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[111, 222]), 10_000);
+            assert!(found.is_empty());
+        }
+
         #[test]
         fn missing_sessions_dir_is_empty_not_panic() {
             // 心跳目录不存在/不可读 → 空集，不 panic
             let home = tempfile::tempdir().unwrap();
-            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[1]), 10_000);
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[1]), 10_000);
             assert!(found.is_empty());
         }
 
@@ -1077,7 +1419,8 @@ mod tests {
             std::fs::write(dir.join("README.md"), "not a heartbeat").unwrap();
             std::fs::write(dir.join("abc.json"), "garbage").unwrap();
             write_heartbeat_json(home.path(), 11952, &active_hb(11952, 1_000));
-            let found = discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 10_000);
+            let found =
+                discover_workbuddy_processes_with(home.path(), &process_table(&[11952]), 10_000);
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].pid, 11952);
         }
@@ -1194,5 +1537,27 @@ mod tests {
             .unwrap();
             assert!(title_from_db(home.path(), SID).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_restore_tests {
+    use super::*;
+
+    /// issue #35-2 回归锁：还原不覆盖活发现——pid 复用时本轮已发现的
+    /// 新会话条目胜出，陈旧落库观测不得覆盖；无冲突条目正常还原
+    #[test]
+    fn observation_restore_keeps_live_discovery() {
+        let mut last_seen = HashMap::new();
+        last_seen.insert(7u32, ("workbuddy".to_string(), "live-session".to_string()));
+        restore_observations(
+            &mut last_seen,
+            vec![
+                (7, "workbuddy".to_string(), "stale-persisted".to_string()),
+                (8, "workbuddy".to_string(), "restored".to_string()),
+            ],
+        );
+        assert_eq!(last_seen.get(&7).unwrap().1, "live-session");
+        assert_eq!(last_seen.get(&8).unwrap().1, "restored");
     }
 }

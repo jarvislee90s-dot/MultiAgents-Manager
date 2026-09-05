@@ -34,9 +34,16 @@ pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
 
 /// 跳转成功 → 标记该会话已读（仅删除对应未读行；同工具其他未读卡保留，spec W4）。
 /// T1：删行后广播 session-read，宠物等辅助窗口据此同步已读置位（卡片行为与看板一致）
-fn mark_read_on_jump(app: &tauri::AppHandle, session_id: &Option<String>, agent_type: &Option<String>) {
+fn mark_read_on_jump(
+    app: &tauri::AppHandle,
+    session_id: &Option<String>,
+    agent_type: &Option<String>,
+) {
     if let (Some(sid), Some(agent)) = (session_id, agent_type) {
         crate::database::dao::unread::delete(&agent.to_lowercase(), sid);
+        // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / MAM 重启）后
+        // Insert 边沿与补偿据此不再复活已读未读卡
+        crate::database::dao::unread::mark_read(&agent.to_lowercase(), sid);
         let _ = app.emit(
             "session-read",
             serde_json::json!({ "agentType": agent, "sessionId": sid }),
@@ -75,10 +82,7 @@ pub fn focus_session(
                     if let Some(url) = crate::window::deep_link::session_url(agent, sid) {
                         if crate::window::deep_link::open_url(&url).is_ok()
                             && crate::window::win32::verify_foreground_tool(
-                                &system,
-                                agent,
-                                2_000,
-                                250,
+                                &system, agent, 2_000, 250,
                             )
                         {
                             mark_read_on_jump(&app, &session_id, &agent_type);
@@ -191,10 +195,11 @@ pub fn focus_hwnd(hwnd: isize) -> Result<(), String> {
 /// 与 filter_dismissed_cards 的归一化（Debug 形态转小写）一致
 #[tauri::command]
 pub fn dismiss_session_card(agent_type: String, session_id: String, status: String) {
-    crate::monitor::SESSION_DISMISALS
-        .lock()
-        .unwrap()
-        .insert((agent_type.to_lowercase(), session_id, status.to_lowercase()));
+    crate::monitor::SESSION_DISMISALS.lock().unwrap().insert((
+        agent_type.to_lowercase(),
+        session_id,
+        status.to_lowercase(),
+    ));
 }
 
 /// 从进程快照收集运行会话的 (工具id, 项目目录名)——仅进程扫描，无文件解析开销

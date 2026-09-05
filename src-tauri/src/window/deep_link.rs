@@ -57,21 +57,19 @@ fn scheme_handler_exists_in<F>(scheme: &str, reg_get: &F) -> bool
 where
     F: Fn(&str, &str) -> Option<String>,
 {
-    ["HKCU\\Software\\Classes", "HKCR"]
-        .iter()
-        .any(|root| {
-            // ① 经典形态：shell\open\command 默认值非空
-            let command_key = format!(r"{root}\{}\shell\open\command", scheme);
-            if reg_get(&command_key, "")
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-            {
-                return true;
-            }
-            // ② MSIX AppModel 形态：scheme 键下存在 URL Protocol 值（标记可为空串）
-            let scheme_key = format!(r"{root}\{scheme}");
-            reg_get(&scheme_key, "URL Protocol").is_some()
-        })
+    ["HKCU\\Software\\Classes", "HKCR"].iter().any(|root| {
+        // ① 经典形态：shell\open\command 默认值非空
+        let command_key = format!(r"{root}\{}\shell\open\command", scheme);
+        if reg_get(&command_key, "")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        // ② MSIX AppModel 形态：scheme 键下存在 URL Protocol 值（标记可为空串）
+        let scheme_key = format!(r"{root}\{scheme}");
+        reg_get(&scheme_key, "URL Protocol").is_some()
+    })
 }
 
 /// Windows 查注册表（HKCU\Software\Classes 与 HKCR 两root），打开失败视为无 handler
@@ -84,7 +82,11 @@ pub fn scheme_handler_exists(scheme: &str) -> bool {
         let (hive, rest) = subkey
             .strip_prefix("HKCU\\Software\\Classes\\")
             .map(|r| (HKEY_CURRENT_USER, r))
-            .or_else(|| subkey.strip_prefix("HKCR\\").map(|r| (HKEY_CLASSES_ROOT, r)))?;
+            .or_else(|| {
+                subkey
+                    .strip_prefix("HKCR\\")
+                    .map(|r| (HKEY_CLASSES_ROOT, r))
+            })?;
         let root = RegKey::predef(hive);
         let key = root.open_subkey(rest).ok()?;
         if value_name.is_empty() {
@@ -192,17 +194,26 @@ mod tests {
             ] {
                 if let Some(cmd) = command {
                     map.insert(
-                        (format!(r"{root}\{scheme}\shell\open\command"), String::new()),
+                        (
+                            format!(r"{root}\{scheme}\shell\open\command"),
+                            String::new(),
+                        ),
                         cmd.to_string(),
                     );
                 }
             }
             if url_protocol {
                 for root in ["HKCU\\Software\\Classes", "HKCR"] {
-                    map.insert((format!(r"{root}\{scheme}"), "URL Protocol".to_string()), String::new());
+                    map.insert(
+                        (format!(r"{root}\{scheme}"), "URL Protocol".to_string()),
+                        String::new(),
+                    );
                 }
             }
-            move |subkey: &str, value_name: &str| map.get(&(subkey.to_string(), value_name.to_string())).cloned()
+            move |subkey: &str, value_name: &str| {
+                map.get(&(subkey.to_string(), value_name.to_string()))
+                    .cloned()
+            }
         }
 
         #[test]
