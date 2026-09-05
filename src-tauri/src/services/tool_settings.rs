@@ -118,11 +118,24 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
                 if let Some(dir) = crate::adapter::skill_dir_for_tool(tool_id, &home) {
                     // SSOT skill 仓库即 ensure_repo_dir()（~/.mam/skills/<name>）
                     let ssot = crate::linker::ensure_repo_dir().join(&ext.name);
-                    report_restore(
-                        restore_mam_link(&ssot, &dir.join(&ext.name), &ext.name),
-                        &ext.name,
-                        result,
-                    );
+                    // P1-4：子 Agent 分配的 Layer 3 目标（skill_dir/subagents/<sub>/<name>，
+                    // 经 ~/.mam/active/<tool>/<sub>/ 直通 SSOT）同样要还原——工具级还原后
+                    // 该链仍可解析，「彻底隐藏」被绕过
+                    match a.sub_agent_id.as_deref() {
+                        Some(sub) => {
+                            let target = subagent_skill_target(&dir, sub, &ext.name);
+                            report_restore(
+                                restore_mam_link(&ssot, &target, &ext.name),
+                                &format!("{}/{}", ext.name, sub),
+                                result,
+                            );
+                        }
+                        None => report_restore(
+                            restore_mam_link(&ssot, &dir.join(&ext.name), &ext.name),
+                            &ext.name,
+                            result,
+                        ),
+                    }
                 }
             }
             "plugin" => {
@@ -177,6 +190,15 @@ fn report_restore(outcome: RestoreOutcome, name: &str, result: &mut ApplyResult)
 /// 原生目录（NotLink）与不存在（Missing）不动（NotApplicable）；
 /// SSOT 缺失或还原中途失败 → Skipped（链接保持不变），由调用方逐项报告给用户。
 /// 先把 SSOT 内容暂存到目标旁的临时路径（目录走 copy_dir_recursive，
+/// 子 Agent 分配的 Layer 3 用户可见目标（与 services::skill::assign_skill_to_subagent
+/// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<name>，P1-4 停用还原用）
+fn subagent_skill_target(tool_skill_dir: &std::path::Path, sub_agent_id: &str, skill_name: &str) -> std::path::PathBuf {
+    tool_skill_dir
+        .join("subagents")
+        .join(sub_agent_id)
+        .join(skill_name)
+}
+
 /// 单文件如配置型插件的 .json 走 fs::copy），暂存成功才移除链接并原子落位；
 /// 任一步失败保持现场并 log::warn。
 fn restore_mam_link(
@@ -235,10 +257,13 @@ fn restore_mam_link(
 
 /// 重新勾选：按原分配重建（幂等；失败项记录 rebuild_failed 不中断）
 fn rebuild_tool_links(tool_id: &str, result: &mut ApplyResult) {
-    let assignments: Vec<_> = extension::list_all_assignments()
+    let mut assignments: Vec<_> = extension::list_all_assignments()
         .into_iter()
         .filter(|a| a.agent_tool_id == tool_id && a.enabled)
         .collect();
+    // P1-4：先重建工具级（sub_agent_id 空）、再重建子 Agent 分配——
+    // assign_skill_to_subagent 的 is_skill_in_tool_range 依赖工具级行已启用
+    assignments.sort_by_key(|a| a.sub_agent_id.is_some());
     let extensions = extension::list_extensions();
 
     for a in &assignments {
@@ -265,7 +290,16 @@ fn rebuild_tool_links(tool_id: &str, result: &mut ApplyResult) {
             continue;
         };
         let ok = match ext.kind.as_str() {
-            "skill" => crate::services::skill::enable_skill_for_tool(&ext.name, tool_id).is_ok(),
+            // P1-4：带子 Agent 分配的行走 Layer 3 重建（assign_skill_to_subagent：
+            // 链 ~/.mam/active/<tool>/<sub>/ + 工具 skill 目录 subagents/<sub>/<name>），
+            // 工具级行走 enable_skill_for_tool（Layer 2 + 工具级目标）
+            "skill" => match a.sub_agent_id.as_deref() {
+                Some(sub) => {
+                    crate::services::skill::assign_skill_to_subagent(&ext.name, tool_id, sub)
+                        .is_ok()
+                }
+                None => crate::services::skill::enable_skill_for_tool(&ext.name, tool_id).is_ok(),
+            },
             // 插件重建按 extensions.tags 区分子类型（"file" | "config"），缺失/歧义回退 file
             // （与 preset/mod.rs 的 plugin_kind 读取一致）
             "plugin" => {
@@ -525,5 +559,46 @@ mod ensure_guard_tests {
         // 重新启用 → 放行
         agent_tool::set_tool_enabled_conn(&conn, "opencode", true);
         assert!(ensure_tool_enabled_conn(&conn, "opencode").is_ok());
+    }
+}
+
+// ---- P1-4 回归锁：子 Agent（Layer 3）分配的还原/重建 ----
+
+#[cfg(test)]
+mod subagent_assign_tests {
+    use super::*;
+
+    /// 还原往返：Layer 3 用户可见目标（subagents/<sub>/<name>，junction 指向 SSOT）
+    /// 经 restore_mam_link 还原为真实内容——与工具级目标同语义
+    #[test]
+    fn layer3_target_restores_to_real_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssot = tmp.path().join("repo").join("skill-a");
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "hello").unwrap();
+        // Layer 3 目标：tools/subagents/sub-1/skill-a（junction 链，Windows 自动 junction）
+        let tool_dir = tmp.path().join("tools");
+        let target = subagent_skill_target(&tool_dir, "sub-1", "skill-a");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        crate::linker::create_link(&ssot, &target).unwrap();
+
+        let outcome = restore_mam_link(&ssot, &target, "skill-a");
+
+        assert_eq!(outcome, RestoreOutcome::Restored);
+        assert!(target.is_dir());
+        assert!(!crate::linker::link_marker_is_present(&target));
+        assert_eq!(std::fs::read_to_string(target.join("SKILL.md")).unwrap(), "hello");
+    }
+
+    /// 目标路径布局与 services::skill::assign_skill_to_subagent 的落位一致
+    ///（subagents/<sub>/<name>），保证还原与重建作用于同一路径
+    #[test]
+    fn subagent_target_layout_matches_assign_service() {
+        let dir = std::path::Path::new("/home/u/.claude/skills");
+        let t = subagent_skill_target(dir, "reviewer", "brainstorming");
+        assert_eq!(
+            t,
+            std::path::PathBuf::from("/home/u/.claude/skills/subagents/reviewer/brainstorming")
+        );
     }
 }
