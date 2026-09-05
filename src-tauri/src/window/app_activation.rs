@@ -9,6 +9,11 @@ pub fn app_bundle_from_exe(exe: &str) -> Option<String> {
 }
 
 /// bundle 路径（小写）是否属于该工具的宿主 APP（W2 pid 失效兜底的匹配规则）
+///
+/// 已知局限（暂不收严，issue #34 P2 侧注）：按 bundle 名后缀匹配而非完整路径或
+/// bundle id，理论上同名后缀的无关应用（如 NotWorkBuddy.app 之于 workbuddy）
+/// 会被误命中。当前仅 codex/ChatGPT 为 CLI+APP 双形态、WorkBuddy 为纯 APP 形态，
+/// 误命中风险可接受；接入更多双形态/APP 形态工具时再评估收严口径。
 fn bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool {
     match agent_type {
         "codex" => bundle_lower.ends_with("chatgpt.app") || bundle_lower.ends_with("codex.app"),
