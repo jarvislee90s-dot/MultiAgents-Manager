@@ -2,7 +2,7 @@
 use super::error::PetRpcError;
 use super::import::{self, StagedPet};
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const MANIFEST_URL: &str = "https://petdex.dev/api/manifest";
 
@@ -185,6 +185,25 @@ pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, PetRpcError> {
     read_capped(&mut resp, MAX_ZIP_BYTES, "download-too-large", "下载内容").await
 }
 
+/// 临时 zip 落盘路径（issue #32-4）：文件名带 pid+进程内计数随机段——同 slug
+/// 并发导入不再互踩；slug 过字符白名单 [a-z0-9-]（petdex 实际生态形态），
+/// 原实现直拼进 temp 文件名，含路径分隔符的 slug 可写出 temp 目录外
+fn tmp_zip_path(slug: &str) -> Result<PathBuf, PetRpcError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    if slug.is_empty()
+        || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(PetRpcError::new("slug-invalid", "无效的 petdex 标识（仅支持小写字母/数字/连字符）").with("slug", slug.to_string()));
+    }
+    Ok(std::env::temp_dir().join(format!(
+        "mam-petdex-{}-{}-{}.zip",
+        slug,
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )))
+}
+
 /// 链接 → 暂存：解析 slug → 清单匹配 → 下载 zip → 统一 zip 管线（spec §8.3 仅下载压缩包）
 pub async fn stage_from_url(root: &Path, url: &str) -> Result<StagedPet, PetRpcError> {
     let slug = parse_slug(url)
@@ -194,7 +213,7 @@ pub async fn stage_from_url(root: &Path, url: &str) -> Result<StagedPet, PetRpcE
         return Err(PetRpcError::new("petdex-no-zip", "该宠物没有可下载的压缩包"));
     }
     let bytes = download_zip(&entry.zip_url).await?;
-    let tmp = std::env::temp_dir().join(format!("mam-petdex-{}.zip", slug));
+    let tmp = tmp_zip_path(&slug)?;
     std::fs::write(&tmp, &bytes).map_err(|e| PetRpcError::new("tmp-write-failed", format!("临时文件写入失败: {}", e)).with("err", e.to_string()))?;
     let staged = import::stage_from_zip_in(root, &tmp);
     let _ = std::fs::remove_file(&tmp);
@@ -324,5 +343,20 @@ mod tests {
         };
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].slug, "capvolt");
+    }
+
+    /// issue #32-4：临时 zip 文件名含 pid+计数随机段——同 slug 并发导入不互踩；
+    /// slug 来自用户 URL/外部清单，字符白名单防路径注入（原实现直拼进 temp 文件名）
+    #[test]
+    fn tmp_zip_path_unique_and_injection_safe() {
+        let a = tmp_zip_path("capvolt").unwrap();
+        let b = tmp_zip_path("capvolt").unwrap();
+        assert_ne!(a, b, "同 slug 两次调用应得不同临时路径");
+        assert!(a.file_name().unwrap().to_string_lossy().contains("capvolt"));
+        // petdex slug 实际字符集为 [a-z0-9-]，路径分隔符/空白/点号一律拒绝（防 temp 文件名注入）
+        for evil in ["../evil", "a/b", r"a\b", "a b", "a.b", "a:b"] {
+            let e = tmp_zip_path(evil).unwrap_err();
+            assert_eq!(e.code, "slug-invalid", "slug {evil:?} 应被拒");
+        }
     }
 }

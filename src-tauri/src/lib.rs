@@ -33,6 +33,8 @@ pub fn run() {
     std::thread::spawn(|| {
         services::auto_import_extensions(false);
         services::sync_imported_skill_links();
+        // 清扫 .import-staging 崩溃残留（issue #32-3）：启动时机无运行中导入，安全
+        services::pet::sweep_staging();
     });
     monitor::hooks::register_all_hooks();
 

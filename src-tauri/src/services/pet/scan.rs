@@ -52,21 +52,32 @@ fn stat_rel(root: &Path, rel: &str) -> FileStat {
     }
 }
 
-/// 递归收集 voice/ 下全部文件（相对路径统一 / 分隔），目录不存在返回空
+/// 递归收集 voice/ 下合规文件（仅 voice/<group>/<file> 三段，issue #32-7，
+/// 规则与暂存/remove 同源走 manifest::is_voice_rel；深层子目录与非分组目录的
+/// 文件对宠物系统不可见）。entry.file_type() 不跟随符号链接（issue #32-5）：
+/// 目录型链接不入栈防环，链接文件一律跳过
 fn walk_voice(root: &Path) -> Vec<FileStat> {
     let mut out = Vec::new();
     let mut stack = vec![root.join("voice")];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
             let p = entry.path();
-            if p.is_dir() {
+            if ft.is_dir() {
                 stack.push(p);
                 continue;
             }
             let Ok(rel) = p.strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !manifest::is_voice_rel(&rel) {
+                continue;
+            }
             out.push(FileStat {
-                rel: rel.to_string_lossy().replace('\\', "/"),
+                rel,
                 exists: true,
                 size: entry.metadata().map(|m| m.len()).unwrap_or(0),
             });
@@ -200,6 +211,22 @@ mod tests {
     fn scan_missing_pet_errs() {
         let root = tempfile::tempdir().unwrap();
         assert!(scan_pet_in(root.path(), "nope").is_err());
+    }
+
+    /// issue #32-7：scan 只认 voice/<group>/<file> 三段——深层子目录与非法分组
+    /// 不进 stat 清单（与暂存/复制/remove 的三段规则同源，避免 diff 误报）
+    #[test]
+    fn scan_voice_only_three_segments() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), "p1", false);
+        let dir = pet_dir(root.path(), "p1");
+        std::fs::create_dir_all(dir.join("voice/general/sub")).unwrap();
+        std::fs::write(dir.join("voice/general/sub/deep.mp3"), b"d").unwrap();
+        std::fs::create_dir_all(dir.join("voice/backup")).unwrap();
+        std::fs::write(dir.join("voice/backup/x.m4a"), b"x").unwrap();
+        let s = scan_pet_in(root.path(), "p1").unwrap();
+        assert_eq!(s.voice_files.len(), 1, "仅三段合规文件应收录");
+        assert_eq!(s.voice_files[0].rel, "voice/general/a.m4a");
     }
 
     #[test]
