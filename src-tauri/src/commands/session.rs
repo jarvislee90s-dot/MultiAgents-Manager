@@ -160,10 +160,9 @@ pub fn focus_session(
         // 非 macOS 桌面平台无 APP 激活链路，防未使用告警
         #[cfg(not(target_os = "macos"))]
         let _ = (agent_type, session_id);
-        Err(format!(
-            "无法聚焦目标（pid={}）：进程无 TTY 且未找到宿主 APP",
-            pid
-        ))
+        // 措辞兼容两种场景：pid 存活的 CLI 会话（有 TTY 但聚焦失败，P2-2 后不再做
+        // APP 兜底）与 pid=0/已死（TTY 无从聚焦 + 宿主 APP 枚举未命中）
+        Err(format!("无法聚焦目标（pid={}）：终端与宿主 APP 均未能聚焦", pid))
     }
 }
 

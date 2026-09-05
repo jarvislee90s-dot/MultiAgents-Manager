@@ -68,6 +68,16 @@ fn should_try_deep_link(pid: u32, pid_bundle: Option<&str>) -> bool {
     pid == 0 || pid_bundle.is_some()
 }
 
+/// 阶段 3「按工具枚举激活宿主 APP」的门（P2-2，issue #34）：仅 pid=0（未读卡无 pid，
+/// spec W2/W3 视同进程不存在）或 pid 已死时放行；pid 存活的 CLI 会话 TTY 聚焦失败
+/// 不得拉起宿主 APP——工具跳对、会话跳错也是错，用户要找的会话还在终端里。
+/// 存活的 APP 会话由阶段 2（自身 bundle）覆盖，不受此门影响。
+/// cfg(any(macos, test))：macOS 实际接线，Windows 侧仅测判定规则（同 P1-2 模式）
+#[cfg(any(target_os = "macos", test))]
+fn tool_enumeration_allowed(pid: u32, pid_process_exists: bool) -> bool {
+    pid == 0 || !pid_process_exists
+}
+
 /// APP 激活入口（W2）：优先深度链接直达会话 → pid 提取 bundle → 按工具枚举兜底。
 /// 返回 Some(json) 表示跳转成功，None 表示无法激活
 #[cfg(target_os = "macos")]
@@ -119,18 +129,23 @@ pub fn activate_agent_app(
 
     // 3) pid 失效兜底：枚举该工具任一 App 形态进程，激活其宿主 bundle
     //    （自洽保证：未读卡存在 ⇒ 宿主进程必存活 ⇒ 此步必有目标）
-    // pid 失效兜底要求明确的工具归属（spec W2「按工具降级」）；无工具信息则放弃兜底
-    let target = agent_type.map(|a| a.to_lowercase())?;
-    for proc in system.processes().values() {
-        let Some(exe) = proc.exe() else { continue };
-        let Some(bundle) = app_activation::app_bundle_from_exe(&exe.to_string_lossy()) else {
-            continue;
-        };
-        if !app_activation::bundle_matches_agent_pub(&bundle.to_lowercase(), &target) {
-            continue;
-        }
-        if app_activation::activate_app_bundle(&bundle).is_ok() {
-            return Some(serde_json::json!({ "type": "focused" }));
+    //    P2-2（issue #34）：本阶段仅限 pid=0（未读卡）或 pid 已死（spec §3「pid 不存在
+    //    才兜底」）；pid 存活的 CLI 会话 TTY 失败到此为止，交由上层报聚焦失败
+    let pid_process_exists = pid > 0 && system.process(sysinfo::Pid::from_u32(pid)).is_some();
+    if tool_enumeration_allowed(pid, pid_process_exists) {
+        // pid 失效兜底要求明确的工具归属（spec W2「按工具降级」）；无工具信息则放弃兜底
+        let target = agent_type.map(|a| a.to_lowercase())?;
+        for proc in system.processes().values() {
+            let Some(exe) = proc.exe() else { continue };
+            let Some(bundle) = app_activation::app_bundle_from_exe(&exe.to_string_lossy()) else {
+                continue;
+            };
+            if !app_activation::bundle_matches_agent_pub(&bundle.to_lowercase(), &target) {
+                continue;
+            }
+            if app_activation::activate_app_bundle(&bundle).is_ok() {
+                return Some(serde_json::json!({ "type": "focused" }));
+            }
         }
     }
     None
@@ -161,5 +176,23 @@ mod deep_link_guard_tests {
         // CLI 会话（F3 回归锁）：pid 存活但 exe 无 .app bundle（TTY 链路失败场景）
         // 不得触发 codex:// 深链误拉起 ChatGPT.app
         assert!(!should_try_deep_link(1234, None));
+    }
+}
+
+#[cfg(test)]
+mod stage3_gate_tests {
+    use super::tool_enumeration_allowed;
+
+    /// P2-2 回归锁（issue #34）：按工具枚举激活宿主 APP 的兜底仅限 pid 不存活。
+    /// pid 存活的 CLI 会话（如 iTerm2 里的 codex）TTY 聚焦失败后不得拉起宿主 APP
+    /// ——工具跳对、会话跳错也是错（spec §3「pid 不存在才兜底」）。
+    #[test]
+    fn live_pid_never_triggers_tool_enumeration() {
+        // pid=0：未读卡无 pid，视同进程不存在，兜底放行（spec W2/W3）
+        assert!(tool_enumeration_allowed(0, false));
+        // pid 已死：宿主 APP 枚举兜底放行（W2 原始场景）
+        assert!(tool_enumeration_allowed(1234, false));
+        // pid 存活（CLI 会话 TTY 失败场景）：一律不放行
+        assert!(!tool_enumeration_allowed(1234, true));
     }
 }
