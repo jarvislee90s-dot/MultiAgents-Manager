@@ -45,6 +45,8 @@ describe("PetManageDialog", () => {
           id: "starry-dew", displayName: "Starry Dew", hasVoice: false, hasSubtitle: false,
           spriteVersionNumber: 1, spritesheetSizeBytes: 100, voices: [],
         });
+      if (cmd === "pet_add_voice_files")
+        return Promise.resolve([{ group: "general", name: "x", file: "voice/general/x.mp3", sizeBytes: 1 }]);
       return Promise.resolve(undefined);
     });
   });
@@ -126,6 +128,20 @@ describe("PetManageDialog", () => {
     await waitFor(() =>
       expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_delete_pet")?.[1]?.id).toBe("starry-dew")
     );
+  });
+
+  it("先增删音频再保存：仍自动切回原宠物（EP5 修订，P1-4）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    // 添加音频触发直写保护：指针闪切回 foxbell（此后 doSave 若只读调用时点指针会恒判未激活）
+    fireEvent.click(await screen.findByTestId("voice-add-general"));
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("foxbell"));
+    fireEvent.click(screen.getByTestId("manage-save"));
+    // 保存完成自动切回原宠物
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
   });
 
   it("选中宠物：manifest 未缓存时长的行经共享 hook 探测后徽标从 no-duration 变为时长", async () => {

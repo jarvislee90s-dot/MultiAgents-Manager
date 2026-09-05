@@ -37,6 +37,9 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
   const [petDir, setPetDir] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 本次会话中该宠物曾因增删音频被闪切回 foxbell（P1-4）：增删后 doSave 再读激活指针
+  // 已是 foxbell，仅靠调用时点判断 wasActive 会恒 false、保存后无法自动切回原宠物
+  const [frozeActive, setFrozeActive] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -62,6 +65,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     setSubtitle(p.hasSubtitle);
     setVoiceRows([]);
     setPetDir(null);
+    setFrozeActive(false);
     try {
       const scan = await invoke<PetScan>("pet_scan", { id: p.id });
       setPetDir(scan.dir);
@@ -101,14 +105,16 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     if (loadActiveId() !== selected?.id) return false;
     saveActiveId("foxbell", true, "Foxbell");
     emit("pet-active-changed", {}).catch(() => {});
+    setFrozeActive(true); // 记录闪切：随后的保存/重命名据此自动切回（EP5 修订，P1-4）
     toast.info(t("pet.manage.activeSwitchNotice"));
     return true;
   };
 
   const doRename = async () => {
     if (!selected || !renameTo || renameTo === selected.id) return;
-    // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）
-    const wasActive = loadActiveId() === selected.id;
+    // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）；
+    // frozeActive 兜底增删音频先行触发过闪切的场景（P1-4）
+    const wasActive = loadActiveId() === selected.id || frozeActive;
     setBusy(true);
     try {
       ensureNotActive();
@@ -120,6 +126,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         emit("pet-active-changed", {}).catch(() => {});
       }
       toast.success(t("pet.manage.renamedToast", { name: renameTo }));
+      setFrozeActive(false);
       await reload();
       setSelected(null);
       setPetDir(null);
@@ -132,8 +139,9 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 
   const doSave = async () => {
     if (!selected) return;
-    // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）
-    const wasActive = loadActiveId() === selected.id;
+    // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）；
+    // frozeActive 兜底增删音频先行触发过闪切的场景（P1-4）
+    const wasActive = loadActiveId() === selected.id || frozeActive;
     setBusy(true);
     try {
       ensureNotActive();
@@ -160,6 +168,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         emit("pet-active-changed", {}).catch(() => {});
       }
       toast.success(t("pet.manage.savedToast"));
+      setFrozeActive(false);
       await reload();
     } catch (e) {
       toast.error(petErrMsg(e, t));
