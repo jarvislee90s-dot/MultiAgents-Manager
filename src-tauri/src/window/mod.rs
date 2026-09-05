@@ -96,12 +96,15 @@ pub fn activate_agent_app(
     };
 
     // 1) 第一顺位：深度链接直达 session（路由格式由 deep_link 模块决定，未探明则跳过）。
-    //    前置条件见 should_try_deep_link（review F3：CLI pid 不触发深链）
+    //    前置条件见 should_try_deep_link（review F3：CLI pid 不触发深链）。
+    //    P1-2（review）：macOS 无前台验证（NSWorkspace 轮询未实现），「open 退出码 0」
+    //    不能证实路由成功（threadId 同源性未在 mac 实测、无 LSCopyDefaultHandler 校验）
+    //    → via=deep-link 标记返回，由调用方跳过已读回标（Windows 有 B 层前台验证故不受限）
     if should_try_deep_link(pid, pid_bundle.as_deref()) {
         if let (Some(agent), Some(sid)) = (agent_type, session_id) {
             if let Some(url) = deep_link::session_url(agent, sid) {
                 if deep_link::open_url(&url).is_ok() {
-                    return Some(serde_json::json!({ "type": "focused" }));
+                    return Some(serde_json::json!({ "type": "focused", "via": "deep-link" }));
                 }
             }
         }

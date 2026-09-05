@@ -143,8 +143,14 @@ pub fn focus_session(
         if let Some(mut out) =
             crate::window::activate_agent_app(pid, agent_type.as_deref(), session_id.as_deref())
         {
-            mark_read_on_jump(&app, &session_id, &agent_type);
-            out["via"] = serde_json::Value::String("app-fallback".into());
+            // P1-2（review）：macOS 深链无前台验证，路由成败不可证 → 不标已读
+            //（宁可让用户再点一次/X 关闭，不可误删未读卡）；bundle/枚举兜底激活
+            // 仍按 spec §5「兜底激活同样算跳转成功」回标已读
+            let via = out.get("via").and_then(|v| v.as_str());
+            if macos_deep_link_marks_read(via) {
+                mark_read_on_jump(&app, &session_id, &agent_type);
+                out["via"] = serde_json::Value::String("app-fallback".into());
+            }
             return Ok(out);
         }
         // 非 macOS 桌面平台无 APP 激活链路，防未使用告警
@@ -155,6 +161,13 @@ pub fn focus_session(
             pid
         ))
     }
+}
+
+/// macOS 深链成功是否回标已读（P1-2 判定核心，cfg(test) 使其 Windows 侧可测）：
+/// via=deep-link → 不标（无前台验证，路由成败不可证）；其余（bundle/枚举兜底）→ 标
+#[cfg(any(target_os = "macos", test))]
+fn macos_deep_link_marks_read(via: Option<&str>) -> bool {
+    via != Some("deep-link")
 }
 
 /// 窗口选择器点选后按句柄聚焦
@@ -220,5 +233,20 @@ pub fn kill_session(pid: u32) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("进程 {} 不存在", pid))
+    }
+}
+
+#[cfg(test)]
+mod macos_deep_link_read_tests {
+    use super::macos_deep_link_marks_read;
+
+    /// P1-2 回归锁：macOS 深链（无前台验证，路由成败不可证）成功也不得回标已读；
+    /// bundle/枚举兜底激活（spec §5「同样算跳转成功」）与 TTY 直达照旧标已读
+    #[test]
+    fn deep_link_via_never_marks_read() {
+        assert!(!macos_deep_link_marks_read(Some("deep-link")));
+        assert!(macos_deep_link_marks_read(None)); // bundle/枚举兜底（无 via 标记）
+        assert!(macos_deep_link_marks_read(Some("tty")));
+        assert!(macos_deep_link_marks_read(Some("app-fallback")));
     }
 }
