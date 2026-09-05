@@ -14,7 +14,11 @@ pub struct PetRpcError {
 
 impl PetRpcError {
     pub fn new(code: &str, detail: impl Into<String>) -> Self {
-        Self { code: code.into(), params: BTreeMap::new(), detail: detail.into() }
+        Self {
+            code: code.into(),
+            params: BTreeMap::new(),
+            detail: detail.into(),
+        }
     }
     pub fn with(mut self, key: &str, val: impl Into<String>) -> Self {
         self.params.insert(key.into(), val.into());
@@ -114,12 +118,17 @@ mod tests {
     /// 文件读不到时 panic 带明确信息（不静默跳过）。
     #[test]
     fn rpc_codes_have_i18n_keys() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../src/i18n/locales/zh.json");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("无法读取 zh.json（{}）: {}——码表一致性测试要求该文件存在", path.display(), e));
-        let root: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("zh.json 不是合法 JSON: {}", e));
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/i18n/locales/zh.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "无法读取 zh.json（{}）: {}——码表一致性测试要求该文件存在",
+                path.display(),
+                e
+            )
+        });
+        let root: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("zh.json 不是合法 JSON: {}", e));
         let rpc = root
             .get("pet")
             .and_then(|p| p.get("rpc"))

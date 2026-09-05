@@ -47,8 +47,16 @@ pub struct CodexPetInfo {
 
 fn stat_rel(root: &Path, rel: &str) -> FileStat {
     match std::fs::metadata(root.join(rel)) {
-        Ok(md) => FileStat { rel: rel.to_string(), exists: true, size: md.len() },
-        Err(_) => FileStat { rel: rel.to_string(), exists: false, size: 0 },
+        Ok(md) => FileStat {
+            rel: rel.to_string(),
+            exists: true,
+            size: md.len(),
+        },
+        Err(_) => FileStat {
+            rel: rel.to_string(),
+            exists: false,
+            size: 0,
+        },
     }
 }
 
@@ -60,7 +68,9 @@ fn walk_voice(root: &Path) -> Vec<FileStat> {
     let mut out = Vec::new();
     let mut stack = vec![root.join("voice")];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_symlink() {
@@ -71,7 +81,9 @@ fn walk_voice(root: &Path) -> Vec<FileStat> {
                 stack.push(p);
                 continue;
             }
-            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let Ok(rel) = p.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
             if !manifest::is_voice_rel(&rel) {
                 continue;
@@ -91,7 +103,10 @@ fn walk_voice(root: &Path) -> Vec<FileStat> {
 pub fn scan_pet_in(root: &Path, id: &str) -> Result<PetScan, PetRpcError> {
     let dir = pet_dir(root, id);
     if !dir.is_dir() {
-        return Err(PetRpcError::new("pet-not-found", format!("宠物不存在: {}", id)).with("id", id.to_string()));
+        return Err(
+            PetRpcError::new("pet-not-found", format!("宠物不存在: {}", id))
+                .with("id", id.to_string()),
+        );
     }
     Ok(PetScan {
         id: id.to_string(),
@@ -104,21 +119,31 @@ pub fn scan_pet_in(root: &Path, id: &str) -> Result<PetScan, PetRpcError> {
 /// 仓库清单（跳过点开头的隐藏目录如 .import-staging，spec §9）
 pub fn list_pets_in(root: &Path) -> Vec<PetSummary> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(root) else { return out };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return out;
+    };
     for entry in rd.flatten() {
         let p = entry.path();
         if !p.is_dir() {
             continue;
         }
-        let Some(id) = p.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(id) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if id.starts_with('.') {
             continue;
         }
         let m = manifest::load(&p);
         out.push(PetSummary {
             id: id.to_string(),
-            display_name: m.as_ref().map(|m| m.display_name.clone()).unwrap_or_else(|| id.to_string()),
-            description: m.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            display_name: m
+                .as_ref()
+                .map(|m| m.display_name.clone())
+                .unwrap_or_else(|| id.to_string()),
+            description: m
+                .as_ref()
+                .map(|m| m.description.clone())
+                .unwrap_or_default(),
             source: m.as_ref().map(|m| m.source.clone()).unwrap_or_default(),
             sprite_version_number: m.as_ref().map(|m| m.sprite_version_number).unwrap_or(0),
             has_voice: m.as_ref().map(|m| m.has_voice).unwrap_or(false),
@@ -144,13 +169,17 @@ struct CodexPetJson {
 /// codex 宠物清单（导入向导渠道 A，spec §8.1）：仅返回含 spritesheet.webp 的宠物，并标注是否已导入
 pub fn list_codex_pets_in(codex_root: &Path, mam_root: &Path) -> Vec<CodexPetInfo> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(codex_root) else { return out };
+    let Ok(rd) = std::fs::read_dir(codex_root) else {
+        return out;
+    };
     for entry in rd.flatten() {
         let p = entry.path();
         if !p.is_dir() {
             continue;
         }
-        let Some(id) = p.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(id) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if !p.join("spritesheet.webp").is_file() {
             continue;
         }
@@ -159,7 +188,10 @@ pub fn list_codex_pets_in(codex_root: &Path, mam_root: &Path) -> Vec<CodexPetInf
             .and_then(|t| serde_json::from_str::<CodexPetJson>(&t).ok());
         out.push(CodexPetInfo {
             id: id.to_string(),
-            display_name: meta.as_ref().map(|m| m.display_name.clone()).unwrap_or_default(),
+            display_name: meta
+                .as_ref()
+                .map(|m| m.display_name.clone())
+                .unwrap_or_default(),
             sprite_version_number: meta.as_ref().map(|m| m.sprite_version_number).unwrap_or(0),
             imported: pet_dir(mam_root, id).exists(),
         });
@@ -236,7 +268,10 @@ mod tests {
         fixture(root.path(), "a-pet", false);
         std::fs::create_dir_all(super::super::staging_root(root.path()).join("x")).unwrap();
         let list = list_pets_in(root.path());
-        assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a-pet", "b-pet"]);
+        assert_eq!(
+            list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["a-pet", "b-pet"]
+        );
         assert!(!list[0].manifest_exists);
         assert_eq!(list[0].display_name, "a-pet"); // 无 manifest 用 id
         assert!(list[1].manifest_exists);

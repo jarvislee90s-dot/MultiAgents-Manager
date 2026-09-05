@@ -158,7 +158,10 @@ pub async fn pet_list_pets() -> Result<Vec<scan::PetSummary>, PetRpcError> {
 
 #[tauri::command]
 pub async fn pet_list_codex_pets() -> Result<Vec<scan::CodexPetInfo>, PetRpcError> {
-    let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
+    let codex = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".codex")
+        .join("pets");
     Ok(scan::list_codex_pets_in(&codex, &root()))
 }
 
@@ -189,7 +192,10 @@ pub async fn pet_stage_from_codex(codex_id: String) -> Result<import::StagedPet,
     // N3：codex_id 同样是路径拼接参数（codex_root 裸 join），须与其他 id 命令同一门禁，
     // 否则 "../x" 可把 ~/.codex/pets 外任意目录的图集暂存进导入区（读侧逃逸）
     pet::validate_pet_id(&codex_id)?;
-    let codex = dirs::home_dir().unwrap_or_default().join(".codex").join("pets");
+    let codex = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".codex")
+        .join("pets");
     import::stage_from_codex_in(&root(), &codex, &codex_id)
 }
 
@@ -270,7 +276,8 @@ pub async fn pet_reveal_folder(id: String) -> Result<(), PetRpcError> {
     pet::validate_pet_id(&id)?;
     let dir = pet::pet_dir(&root(), &id);
     tauri_plugin_opener::open_path(dir.to_string_lossy().to_string(), None::<&str>).map_err(|e| {
-        PetRpcError::new("reveal-failed", format!("打开文件夹失败: {}", e)).with("err", e.to_string())
+        PetRpcError::new("reveal-failed", format!("打开文件夹失败: {}", e))
+            .with("err", e.to_string())
     })
 }
 
@@ -281,7 +288,15 @@ mod tests {
     /// P0-1 参数化恶意 id 样本：穿越（两种分隔符）、绝对路径（POSIX/Windows）、
     /// 空串、点、点前缀、保留名及其大小写变体
     const BAD_IDS: [&str; 9] = [
-        "", ".", "..", "../skills", r"..\skills", "/etc/passwd", r"C:\Windows", ".hidden", "foxbell",
+        "",
+        ".",
+        "..",
+        "../skills",
+        r"..\skills",
+        "/etc/passwd",
+        r"C:\Windows",
+        ".hidden",
+        "foxbell",
     ];
 
     fn dummy_manifest(id: &str) -> manifest::PetManifest {
@@ -304,7 +319,10 @@ mod tests {
     async fn id_taking_commands_reject_unsafe_pet_ids() {
         for id in BAD_IDS {
             assert!(pet_scan(id.to_string()).await.is_err(), "pet_scan({id:?})");
-            assert!(pet_read_manifest(id.to_string()).await.is_err(), "pet_read_manifest({id:?})");
+            assert!(
+                pet_read_manifest(id.to_string()).await.is_err(),
+                "pet_read_manifest({id:?})"
+            );
             assert!(
                 pet_update_manifest(id.to_string(), dummy_manifest(id), true)
                     .await
@@ -312,10 +330,15 @@ mod tests {
                 "pet_update_manifest({id:?})"
             );
             assert!(
-                pet_rename_pet(id.to_string(), "renamed-x".into()).await.is_err(),
+                pet_rename_pet(id.to_string(), "renamed-x".into())
+                    .await
+                    .is_err(),
                 "pet_rename_pet({id:?})"
             );
-            assert!(pet_delete_pet(id.to_string()).await.is_err(), "pet_delete_pet({id:?})");
+            assert!(
+                pet_delete_pet(id.to_string()).await.is_err(),
+                "pet_delete_pet({id:?})"
+            );
             assert!(
                 pet_add_voice_files(id.to_string(), vec![], "general".into())
                     .await
@@ -329,8 +352,14 @@ mod tests {
                 "pet_remove_voice_file({id:?})"
             );
             // N3：codex 来源的 id 同为路径拼接参数，纳入同一门禁
-            assert!(pet_stage_from_codex(id.to_string()).await.is_err(), "pet_stage_from_codex({id:?})");
-            assert!(pet_reveal_folder(id.to_string()).await.is_err(), "pet_reveal_folder({id:?})");
+            assert!(
+                pet_stage_from_codex(id.to_string()).await.is_err(),
+                "pet_stage_from_codex({id:?})"
+            );
+            assert!(
+                pet_reveal_folder(id.to_string()).await.is_err(),
+                "pet_reveal_folder({id:?})"
+            );
         }
     }
 

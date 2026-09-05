@@ -18,7 +18,11 @@ pub fn parse_slug(url: &str) -> Option<String> {
     let i = segs.iter().position(|s| *s == "pets")?;
     let slug = segs.get(i + 1)?;
     let ok = !slug.is_empty() && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-    if ok { Some(slug.to_string()) } else { None }
+    if ok {
+        Some(slug.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,12 +82,10 @@ async fn read_capped(
     }
     let mut buf = Vec::new();
     loop {
-        let chunk = resp
-            .chunk()
-            .await
-            .map_err(|e| {
-                PetRpcError::new("download-failed", format!("{}读取失败: {}", what, e)).with("err", e.to_string())
-            })?;
+        let chunk = resp.chunk().await.map_err(|e| {
+            PetRpcError::new("download-failed", format!("{}读取失败: {}", what, e))
+                .with("err", e.to_string())
+        })?;
         let Some(chunk) = chunk else { break };
         if buf.len() + chunk.len() > cap {
             return Err(PetRpcError::new(
@@ -120,7 +122,8 @@ pub fn map_send_err(e: reqwest::Error) -> PetRpcError {
             "redirect-forbidden",
             format!("重定向目标不在 petdex 白名单内: {}", e),
         ),
-        _ => PetRpcError::new("download-failed", format!("下载失败: {}", e)).with("err", e.to_string()),
+        _ => PetRpcError::new("download-failed", format!("下载失败: {}", e))
+            .with("err", e.to_string()),
     }
 }
 
@@ -150,29 +153,64 @@ pub async fn fetch_entry(slug: &str) -> Result<PetdexEntry, PetRpcError> {
         .await
         // redirect 标记先经 map_send_err 得结构化码；非 redirect 错误覆写为清单请求码
         .map_err(map_send_err)
-        .map_err(|e| if e.code.starts_with("redirect-") { e } else { PetRpcError::new("manifest-request-failed", format!("petdex 清单请求失败: {}", e.detail)).with("err", e.detail.clone()) })?
+        .map_err(|e| {
+            if e.code.starts_with("redirect-") {
+                e
+            } else {
+                PetRpcError::new(
+                    "manifest-request-failed",
+                    format!("petdex 清单请求失败: {}", e.detail),
+                )
+                .with("err", e.detail.clone())
+            }
+        })?
         .error_for_status()
-        .map_err(|e| PetRpcError::new("manifest-status", format!("petdex 清单响应异常: {}", e)).with("err", e.to_string()))?;
+        .map_err(|e| {
+            PetRpcError::new("manifest-status", format!("petdex 清单响应异常: {}", e))
+                .with("err", e.to_string())
+        })?;
     // .json() 全量缓冲无界（P1-1）→ 流式封顶读取后再解析
-    let bytes = read_capped(&mut resp, MAX_MANIFEST_BYTES, "manifest-too-large", "petdex 清单").await?;
-    let shape: PetdexManifestShape = serde_json::from_slice(&bytes)
-        .map_err(|e| PetRpcError::new("manifest-parse-failed", format!("petdex 清单解析失败: {}", e)).with("err", e.to_string()))?;
+    let bytes = read_capped(
+        &mut resp,
+        MAX_MANIFEST_BYTES,
+        "manifest-too-large",
+        "petdex 清单",
+    )
+    .await?;
+    let shape: PetdexManifestShape = serde_json::from_slice(&bytes).map_err(|e| {
+        PetRpcError::new(
+            "manifest-parse-failed",
+            format!("petdex 清单解析失败: {}", e),
+        )
+        .with("err", e.to_string())
+    })?;
     // Wrapped 优先、裸数组兼容（Bug1 双形态）
     let list = match shape {
         PetdexManifestShape::Wrapped { pets } => pets,
         PetdexManifestShape::Bare(v) => v,
     };
-    list.into_iter()
-        .find(|e| e.slug == slug)
-        .ok_or_else(|| PetRpcError::new("pet-not-on-petdex", format!("petdex 上未找到宠物: {}", slug)).with("slug", slug.to_string()))
+    list.into_iter().find(|e| e.slug == slug).ok_or_else(|| {
+        PetRpcError::new(
+            "pet-not-on-petdex",
+            format!("petdex 上未找到宠物: {}", slug),
+        )
+        .with("slug", slug.to_string())
+    })
 }
 
 /// 下载 zip 字节（首跳 https + 域名白名单校验，重定向每跳由 client 策略校验，spec §8.3）
 pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, PetRpcError> {
-    let url = reqwest::Url::parse(zip_url).map_err(|e| PetRpcError::new("download-url-invalid", format!("下载地址非法: {}", e)).with("err", e.to_string()))?;
+    let url = reqwest::Url::parse(zip_url).map_err(|e| {
+        PetRpcError::new("download-url-invalid", format!("下载地址非法: {}", e))
+            .with("err", e.to_string())
+    })?;
     if !url_allowed(&url) {
         let host = url.host_str().unwrap_or("").to_string();
-        return Err(PetRpcError::new("host-forbidden", format!("拒绝非 petdex 域下载: {}", url.as_str())).with("host", host));
+        return Err(PetRpcError::new(
+            "host-forbidden",
+            format!("拒绝非 petdex 域下载: {}", url.as_str()),
+        )
+        .with("host", host));
     }
     let mut resp = client(120)?
         .get(zip_url)
@@ -180,7 +218,10 @@ pub async fn download_zip(zip_url: &str) -> Result<Vec<u8>, PetRpcError> {
         .await
         .map_err(map_send_err)?
         .error_for_status()
-        .map_err(|e| PetRpcError::new("download-status", format!("下载响应异常: {}", e)).with("err", e.to_string()))?;
+        .map_err(|e| {
+            PetRpcError::new("download-status", format!("下载响应异常: {}", e))
+                .with("err", e.to_string())
+        })?;
     // .bytes() 全量缓冲无界（P1-1）→ 流式封顶读取
     read_capped(&mut resp, MAX_ZIP_BYTES, "download-too-large", "下载内容").await
 }
@@ -192,9 +233,15 @@ fn tmp_zip_path(slug: &str) -> Result<PathBuf, PetRpcError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     if slug.is_empty()
-        || !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        return Err(PetRpcError::new("slug-invalid", "无效的 petdex 标识（仅支持小写字母/数字/连字符）").with("slug", slug.to_string()));
+        return Err(PetRpcError::new(
+            "slug-invalid",
+            "无效的 petdex 标识（仅支持小写字母/数字/连字符）",
+        )
+        .with("slug", slug.to_string()));
     }
     Ok(std::env::temp_dir().join(format!(
         "mam-petdex-{}-{}-{}.zip",
@@ -206,15 +253,25 @@ fn tmp_zip_path(slug: &str) -> Result<PathBuf, PetRpcError> {
 
 /// 链接 → 暂存：解析 slug → 清单匹配 → 下载 zip → 统一 zip 管线（spec §8.3 仅下载压缩包）
 pub async fn stage_from_url(root: &Path, url: &str) -> Result<StagedPet, PetRpcError> {
-    let slug = parse_slug(url)
-        .ok_or_else(|| PetRpcError::new("slug-parse-failed", "无法从链接解析宠物标识（期望 https://petdex.dev/pets/<slug>）"))?;
+    let slug = parse_slug(url).ok_or_else(|| {
+        PetRpcError::new(
+            "slug-parse-failed",
+            "无法从链接解析宠物标识（期望 https://petdex.dev/pets/<slug>）",
+        )
+    })?;
     let entry = fetch_entry(&slug).await?;
     if entry.zip_url.is_empty() {
-        return Err(PetRpcError::new("petdex-no-zip", "该宠物没有可下载的压缩包"));
+        return Err(PetRpcError::new(
+            "petdex-no-zip",
+            "该宠物没有可下载的压缩包",
+        ));
     }
     let bytes = download_zip(&entry.zip_url).await?;
     let tmp = tmp_zip_path(&slug)?;
-    std::fs::write(&tmp, &bytes).map_err(|e| PetRpcError::new("tmp-write-failed", format!("临时文件写入失败: {}", e)).with("err", e.to_string()))?;
+    std::fs::write(&tmp, &bytes).map_err(|e| {
+        PetRpcError::new("tmp-write-failed", format!("临时文件写入失败: {}", e))
+            .with("err", e.to_string())
+    })?;
     let staged = import::stage_from_zip_in(root, &tmp);
     let _ = std::fs::remove_file(&tmp);
     let mut staged = staged?;
@@ -232,12 +289,24 @@ mod tests {
 
     #[test]
     fn parse_slug_variants() {
-        assert_eq!(parse_slug("https://petdex.dev/pets/capvolt").as_deref(), Some("capvolt"));
-        assert_eq!(parse_slug("https://petdex.dev/en/pets/capvolt/").as_deref(), Some("capvolt"));
-        assert_eq!(parse_slug("https://petdex.dev/pets/capvolt?x=1").as_deref(), Some("capvolt"));
+        assert_eq!(
+            parse_slug("https://petdex.dev/pets/capvolt").as_deref(),
+            Some("capvolt")
+        );
+        assert_eq!(
+            parse_slug("https://petdex.dev/en/pets/capvolt/").as_deref(),
+            Some("capvolt")
+        );
+        assert_eq!(
+            parse_slug("https://petdex.dev/pets/capvolt?x=1").as_deref(),
+            Some("capvolt")
+        );
         assert_eq!(parse_slug("https://petdex.dev/collections"), None);
         assert_eq!(parse_slug("https://petdex.dev/pets/"), None);
-        assert_eq!(parse_slug("https://evil.com/pets/abc").as_deref(), Some("abc")); // 域名不限（只解析 slug），下载域在 download_zip 校验
+        assert_eq!(
+            parse_slug("https://evil.com/pets/abc").as_deref(),
+            Some("abc")
+        ); // 域名不限（只解析 slug），下载域在 download_zip 校验
     }
 
     #[test]
@@ -272,8 +341,14 @@ mod tests {
 
     #[test]
     fn redirect_code_of_markers() {
-        assert_eq!(redirect_code_of("error sending request for url (...): MAM_REDIRECT_TOO_MANY"), Some("redirect-too-many"));
-        assert_eq!(redirect_code_of("MAM_REDIRECT_FORBIDDEN at hop"), Some("redirect-forbidden"));
+        assert_eq!(
+            redirect_code_of("error sending request for url (...): MAM_REDIRECT_TOO_MANY"),
+            Some("redirect-too-many")
+        );
+        assert_eq!(
+            redirect_code_of("MAM_REDIRECT_FORBIDDEN at hop"),
+            Some("redirect-forbidden")
+        );
         assert_eq!(redirect_code_of("connection refused"), None);
         assert_eq!(redirect_code_of(""), None);
     }
@@ -283,14 +358,21 @@ mod tests {
     fn len_over_limit_preflight() {
         assert!(!len_over_limit(None, MAX_ZIP_BYTES));
         assert!(!len_over_limit(Some(2 * 1024 * 1024), MAX_ZIP_BYTES));
-        assert!(len_over_limit(Some((MAX_ZIP_BYTES as u64) + 1), MAX_ZIP_BYTES));
-        assert!(len_over_limit(Some((MAX_MANIFEST_BYTES as u64) + 1), MAX_MANIFEST_BYTES));
+        assert!(len_over_limit(
+            Some((MAX_ZIP_BYTES as u64) + 1),
+            MAX_ZIP_BYTES
+        ));
+        assert!(len_over_limit(
+            Some((MAX_MANIFEST_BYTES as u64) + 1),
+            MAX_MANIFEST_BYTES
+        ));
     }
 
     /// 用真实抓取的全量清单（1.67MB / 4674 条）验证当前解析逻辑（诊断后保留为回归锚）
     #[test]
     fn real_manifest_payload_parses() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../petdex-manifest.real.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../petdex-manifest.real.json");
         let Ok(text) = std::fs::read_to_string(&path) else {
             return; // 真实数据文件不存在（未抓取）时静默跳过，不阻塞 CI
         };
@@ -300,7 +382,10 @@ mod tests {
             PetdexManifestShape::Bare(v) => v,
         };
         assert!(list.len() > 4000, "条目数异常: {}", list.len());
-        assert!(list.iter().any(|e| e.slug == "capybaralulu"), "capbaralulu 必须在清单中");
+        assert!(
+            list.iter().any(|e| e.slug == "capybaralulu"),
+            "capbaralulu 必须在清单中"
+        );
         assert!(list.iter().any(|e| e.slug == "homelander"));
     }
 
@@ -322,8 +407,8 @@ mod tests {
     fn manifest_accepts_wrapped_and_bare_shapes() {
         // 包装形态（当前上游实际返回）
         let wrapped = r#"{"generatedAt":"2026-09-04T10:16:13.368Z","total":1,"pets":[{"slug":"capvolt","displayName":"Pikachu","zipUrl":"https://assets.petdex.dev/pets/x/zip.zip","spriteVersionNumber":1}]}"#;
-        let shape: PetdexManifestShape = serde_json::from_str(wrapped)
-            .expect("包装形态必须可反序列化");
+        let shape: PetdexManifestShape =
+            serde_json::from_str(wrapped).expect("包装形态必须可反序列化");
         let list = match shape {
             PetdexManifestShape::Wrapped { pets } => pets,
             PetdexManifestShape::Bare(v) => v,

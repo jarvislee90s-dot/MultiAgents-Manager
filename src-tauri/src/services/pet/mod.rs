@@ -11,7 +11,10 @@ use self::error::PetRpcError;
 
 /// 宠物仓库根目录 ~/.mam/pets
 pub fn pets_root() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".mam").join("pets")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("pets")
 }
 
 /// 指定宠物的目录
@@ -39,19 +42,41 @@ pub fn validate_pet_id(id: &str) -> Result<(), PetRpcError> {
         return Err(PetRpcError::new("pet-name-empty", "宠物名不能为空"));
     }
     if id.starts_with('.') {
-        return Err(PetRpcError::new("pet-name-dot-prefix", "宠物名不能以点开头"));
+        return Err(PetRpcError::new(
+            "pet-name-dot-prefix",
+            "宠物名不能以点开头",
+        ));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(PetRpcError::new("pet-name-illegal", "宠物名仅支持字母/数字/连字符/下划线"));
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(PetRpcError::new(
+            "pet-name-illegal",
+            "宠物名仅支持字母/数字/连字符/下划线",
+        ));
     }
     if id.len() > MAX_PET_ID_LEN {
-        return Err(PetRpcError::new("pet-name-too-long", format!("宠物名过长（≤{MAX_PET_ID_LEN} 字符）")).with("max", MAX_PET_ID_LEN.to_string()));
+        return Err(PetRpcError::new(
+            "pet-name-too-long",
+            format!("宠物名过长（≤{MAX_PET_ID_LEN} 字符）"),
+        )
+        .with("max", MAX_PET_ID_LEN.to_string()));
     }
-    if WINDOWS_RESERVED_DEVICES.iter().any(|d| id.eq_ignore_ascii_case(d)) {
-        return Err(PetRpcError::new("pet-name-reserved-device", "宠物名与 Windows 保留设备名冲突"));
+    if WINDOWS_RESERVED_DEVICES
+        .iter()
+        .any(|d| id.eq_ignore_ascii_case(d))
+    {
+        return Err(PetRpcError::new(
+            "pet-name-reserved-device",
+            "宠物名与 Windows 保留设备名冲突",
+        ));
     }
     if id.eq_ignore_ascii_case("foxbell") {
-        return Err(PetRpcError::new("pet-name-reserved", "foxbell 为内置宠物保留名"));
+        return Err(PetRpcError::new(
+            "pet-name-reserved",
+            "foxbell 为内置宠物保留名",
+        ));
     }
     Ok(())
 }
@@ -61,10 +86,16 @@ pub fn validate_pet_id(id: &str) -> Result<(), PetRpcError> {
 /// 调用时机=应用启动后台线程，此时不存在运行中的导入，清扫是安全的
 pub fn sweep_staging_in(root: &Path) -> std::io::Result<()> {
     let sroot = staging_root(root);
-    let Ok(rd) = std::fs::read_dir(&sroot) else { return Ok(()) };
+    let Ok(rd) = std::fs::read_dir(&sroot) else {
+        return Ok(());
+    };
     for e in rd.flatten() {
         let p = e.path();
-        let res = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        let res = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
         if let Err(err) = res {
             log::warn!("清扫暂存区残留失败 {}: {err}", p.display());
         }
@@ -95,17 +126,26 @@ pub fn rename_pet_in(root: &Path, old_id: &str, new_id: &str) -> Result<(), PetR
     }
     let old_dir = pet_dir(root, old_id);
     if !old_dir.is_dir() {
-        return Err(PetRpcError::new("pet-not-found", format!("宠物不存在: {}", old_id)).with("id", old_id.to_string()));
+        return Err(
+            PetRpcError::new("pet-not-found", format!("宠物不存在: {}", old_id))
+                .with("id", old_id.to_string()),
+        );
     }
     import::validate_pet_name(root, new_id)?;
     let new_dir = pet_dir(root, new_id);
-    std::fs::rename(&old_dir, &new_dir)
-        .map_err(|e| PetRpcError::new("rename-failed", format!("重命名失败: {}", e)).with("err", e.to_string()))?;
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| {
+        PetRpcError::new("rename-failed", format!("重命名失败: {}", e)).with("err", e.to_string())
+    })?;
     if let Some(mut m) = manifest::load(&new_dir) {
         m.id = new_id.to_string();
         if let Err(e) = manifest::write_with_backup(&new_dir, &m, true) {
             // 目录已改名（主操作完成），仅 id 展示字段未同步：记日志、不判失败（下次激活/修复会兜底）
-            log::warn!("manifest.id 同步失败（目录已改名 {} → {}）: {:?}", old_id, new_id, e);
+            log::warn!(
+                "manifest.id 同步失败（目录已改名 {} → {}）: {:?}",
+                old_id,
+                new_id,
+                e
+            );
         }
     }
     Ok(())
@@ -115,9 +155,14 @@ pub fn rename_pet_in(root: &Path, old_id: &str, new_id: &str) -> Result<(), PetR
 pub fn delete_pet_in(root: &Path, id: &str) -> Result<(), PetRpcError> {
     let dir = pet_dir(root, id);
     if !dir.is_dir() {
-        return Err(PetRpcError::new("pet-not-found", format!("宠物不存在: {}", id)).with("id", id.to_string()));
+        return Err(
+            PetRpcError::new("pet-not-found", format!("宠物不存在: {}", id))
+                .with("id", id.to_string()),
+        );
     }
-    trash::delete(&dir).map_err(|e| PetRpcError::new("delete-failed", format!("删除失败: {}", e)).with("err", e.to_string()))
+    trash::delete(&dir).map_err(|e| {
+        PetRpcError::new("delete-failed", format!("删除失败: {}", e)).with("err", e.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -153,7 +198,9 @@ mod tests {
         let m2 = manifest::load(&pet_dir(root.path(), "new-name")).unwrap();
         assert_eq!(m2.id, "new-name");
         // 备份存在且记录旧 id
-        assert!(pet_dir(root.path(), "new-name").join(manifest::BACKUP_FILE).is_file());
+        assert!(pet_dir(root.path(), "new-name")
+            .join(manifest::BACKUP_FILE)
+            .is_file());
     }
 
     #[test]
@@ -219,7 +266,9 @@ mod tests {
     /// 故无需考虑 con.txt 形态）+ 长度上限（MAX_PET_ID_LEN，预留路径深度余量）
     #[test]
     fn validate_pet_id_rejects_windows_reserved_device_and_overlong() {
-        for bad in ["con", "CON", "Nul", "aux", "PRN", "nul", "com1", "Com9", "lpt1", "LPT9"] {
+        for bad in [
+            "con", "CON", "Nul", "aux", "PRN", "nul", "com1", "Com9", "lpt1", "LPT9",
+        ] {
             match validate_pet_id(bad) {
                 Err(e) => assert_eq!(e.code, "pet-name-reserved-device", "id {bad:?}"),
                 Ok(()) => panic!("保留设备名 {bad:?} 应被拒绝"),
@@ -250,7 +299,10 @@ mod tests {
         }
         sweep_staging_in(root.path()).unwrap();
         assert!(!sroot.join("leftover-1").exists(), "暂存残留应被清扫");
-        assert!(!sroot.join("extract-abc").exists(), "petdex 解压残留应被清扫");
+        assert!(
+            !sroot.join("extract-abc").exists(),
+            "petdex 解压残留应被清扫"
+        );
         assert!(pet.is_dir(), "正常宠物目录不得被触碰");
         assert!(pet.join("voice/general").is_dir());
     }

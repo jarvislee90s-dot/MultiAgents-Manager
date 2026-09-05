@@ -49,7 +49,10 @@ fn uid() -> String {
 }
 
 fn ext_lower(p: &Path) -> String {
-    p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+    p.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 fn is_audio(p: &Path) -> bool {
@@ -62,7 +65,10 @@ fn valid_group(g: &str) -> bool {
 
 fn new_staging(root: &Path) -> Result<PathBuf, PetRpcError> {
     let dir = staging_root(root).join(uid());
-    std::fs::create_dir_all(&dir).map_err(|e| PetRpcError::new("staging-create-failed", format!("创建暂存区失败: {}", e)).with("err", e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        PetRpcError::new("staging-create-failed", format!("创建暂存区失败: {}", e))
+            .with("err", e.to_string())
+    })?;
     Ok(dir)
 }
 
@@ -72,7 +78,9 @@ pub fn locate_sheet(src: &Path) -> Option<PathBuf> {
     if direct.is_file() {
         return Some(direct);
     }
-    let Ok(rd) = std::fs::read_dir(src) else { return None };
+    let Ok(rd) = std::fs::read_dir(src) else {
+        return None;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() && p.join(SHEET_FILE).is_file() {
@@ -86,7 +94,10 @@ pub fn locate_sheet(src: &Path) -> Option<PathBuf> {
 /// issue #32-7 三段规则与 remove/scan 同源）。entry.file_type() 不跟随符号链接
 /// （issue #32-5）：目录型链接不入递归防环，链接文件不复制
 fn copy_voice_tree(base: &Path, dir: &Path, dest_base: &Path) -> Result<(), PetRpcError> {
-    for entry in std::fs::read_dir(dir).map_err(|e| PetRpcError::internal(e.to_string()))?.flatten() {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| PetRpcError::internal(e.to_string()))?
+        .flatten()
+    {
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_symlink() {
             continue;
@@ -99,7 +110,9 @@ fn copy_voice_tree(base: &Path, dir: &Path, dest_base: &Path) -> Result<(), PetR
         if !is_audio(&p) {
             continue;
         }
-        let Ok(rel) = p.strip_prefix(base) else { continue };
+        let Ok(rel) = p.strip_prefix(base) else {
+            continue;
+        };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         // rel 相对 voice 根（无 voice/ 前缀），补前缀后走同一三段规则（issue #32-7）
         if !manifest::is_voice_rel(&format!("voice/{rel_str}")) {
@@ -109,7 +122,10 @@ fn copy_voice_tree(base: &Path, dir: &Path, dest_base: &Path) -> Result<(), PetR
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| PetRpcError::internal(e.to_string()))?;
         }
-        std::fs::copy(&p, &dest).map_err(|e| PetRpcError::new("copy-failed", format!("复制音频失败: {}", e)).with("err", e.to_string()))?;
+        std::fs::copy(&p, &dest).map_err(|e| {
+            PetRpcError::new("copy-failed", format!("复制音频失败: {}", e))
+                .with("err", e.to_string())
+        })?;
     }
     Ok(())
 }
@@ -120,7 +136,9 @@ fn list_staged_voice(staging: &Path) -> Vec<StagedVoiceFile> {
     let mut out = Vec::new();
     let mut stack = vec![staging.join("voice")];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_symlink() {
@@ -131,7 +149,9 @@ fn list_staged_voice(staging: &Path) -> Vec<StagedVoiceFile> {
                 stack.push(p);
                 continue;
             }
-            let Ok(rel) = p.strip_prefix(staging) else { continue };
+            let Ok(rel) = p.strip_prefix(staging) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
             if !manifest::is_voice_rel(&rel) {
                 continue;
@@ -139,7 +159,11 @@ fn list_staged_voice(staging: &Path) -> Vec<StagedVoiceFile> {
             let file = rel.split('/').nth(2).unwrap_or("");
             out.push(StagedVoiceFile {
                 group: rel.split('/').nth(1).unwrap_or("").to_string(),
-                name: Path::new(file).file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                name: Path::new(file)
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
                 file: rel,
                 size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
             });
@@ -172,7 +196,13 @@ fn codex_meta(dir: &Path) -> (String, u8) {
 /// 建议名合法化：非法字符折叠为 '-'（最终名称在 finalize 时严格校验）
 fn sanitize_name(raw: &str) -> String {
     raw.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -183,12 +213,18 @@ fn finish_staged(
     sprite_version_number: u8,
 ) -> Result<StagedPet, PetRpcError> {
     Ok(StagedPet {
-        staging_id: staging.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+        staging_id: staging
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string(),
         dir: staging.to_string_lossy().to_string(),
         suggested_name,
         suggested_display_name,
         sprite_version_number,
-        spritesheet_size: std::fs::metadata(staging.join(SHEET_FILE)).map(|m| m.len()).unwrap_or(0),
+        spritesheet_size: std::fs::metadata(staging.join(SHEET_FILE))
+            .map(|m| m.len())
+            .unwrap_or(0),
         voice_files: list_staged_voice(staging),
     })
 }
@@ -198,11 +234,19 @@ pub fn stage_from_folder_in(root: &Path, src: &Path) -> Result<StagedPet, PetRpc
     if !src.is_dir() {
         return Err(PetRpcError::new("source-not-folder", "来源不是文件夹"));
     }
-    let sheet = locate_sheet(src).ok_or_else(|| PetRpcError::new("sheet-not-found", "未找到 spritesheet.webp（根目录或一层子目录）"))?;
+    let sheet = locate_sheet(src).ok_or_else(|| {
+        PetRpcError::new(
+            "sheet-not-found",
+            "未找到 spritesheet.webp（根目录或一层子目录）",
+        )
+    })?;
     let sheet_root = sheet.parent().unwrap_or(src).to_path_buf();
     let staging = new_staging(root)?;
     let copy = (|| -> Result<(), PetRpcError> {
-        std::fs::copy(&sheet, staging.join(SHEET_FILE)).map_err(|e| PetRpcError::new("copy-failed", format!("复制图集失败: {}", e)).with("err", e.to_string()))?;
+        std::fs::copy(&sheet, staging.join(SHEET_FILE)).map_err(|e| {
+            PetRpcError::new("copy-failed", format!("复制图集失败: {}", e))
+                .with("err", e.to_string())
+        })?;
         let voice_root = sheet_root.join("voice");
         if voice_root.is_dir() {
             copy_voice_tree(&voice_root, &voice_root, &staging.join("voice"))?;
@@ -215,7 +259,10 @@ pub fn stage_from_folder_in(root: &Path, src: &Path) -> Result<StagedPet, PetRpc
     }
     let (disp, ver) = codex_meta(&sheet_root);
     let suggested_name = sanitize_name(
-        sheet_root.file_name().and_then(|n| n.to_str()).unwrap_or("pet"),
+        sheet_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pet"),
     );
     finish_staged(&staging, suggested_name, disp, ver)
 }
@@ -239,35 +286,58 @@ fn fmt_limit(bytes: u64) -> String {
 /// 原实现累加 entry.size() 是压缩前声明值，可被 zip 头谎报绕过）；单条目读取用 take
 /// 限制在剩余额度内，防止谎报小尺寸的大文件把磁盘写爆
 fn safe_unzip_with_limit(zip_path: &Path, dest: &Path, max_total: u64) -> Result<(), PetRpcError> {
-    let f = std::fs::File::open(zip_path).map_err(|e| PetRpcError::new("zip-open-failed", format!("打开压缩包失败: {}", e)).with("err", e.to_string()))?;
-    let mut zip = zip::ZipArchive::new(f).map_err(|e| PetRpcError::new("zip-read-failed", format!("读取压缩包失败: {}", e)).with("err", e.to_string()))?;
+    let f = std::fs::File::open(zip_path).map_err(|e| {
+        PetRpcError::new("zip-open-failed", format!("打开压缩包失败: {}", e))
+            .with("err", e.to_string())
+    })?;
+    let mut zip = zip::ZipArchive::new(f).map_err(|e| {
+        PetRpcError::new("zip-read-failed", format!("读取压缩包失败: {}", e))
+            .with("err", e.to_string())
+    })?;
     if zip.len() > MAX_ZIP_FILES {
-        return Err(PetRpcError::new("zip-too-many-entries", format!("压缩包文件数超限（>{}）", MAX_ZIP_FILES)).with("limit", MAX_ZIP_FILES.to_string()));
+        return Err(PetRpcError::new(
+            "zip-too-many-entries",
+            format!("压缩包文件数超限（>{}）", MAX_ZIP_FILES),
+        )
+        .with("limit", MAX_ZIP_FILES.to_string()));
     }
     std::fs::create_dir_all(dest).map_err(|e| PetRpcError::internal(e.to_string()))?;
     let mut total: u64 = 0;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| PetRpcError::internal(e.to_string()))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| PetRpcError::internal(e.to_string()))?;
         // enclosed_name 已拒绝绝对路径与 .. 穿越；None 即非法条目
         let Some(rel) = entry.enclosed_name() else {
-            return Err(PetRpcError::new("zip-entry-illegal-path", format!("压缩包含非法路径条目: {}", entry.name())).with("name", entry.name().to_string()));
+            return Err(PetRpcError::new(
+                "zip-entry-illegal-path",
+                format!("压缩包含非法路径条目: {}", entry.name()),
+            )
+            .with("name", entry.name().to_string()));
         };
         if entry.is_dir() {
-            std::fs::create_dir_all(dest.join(rel)).map_err(|e| PetRpcError::internal(e.to_string()))?;
+            std::fs::create_dir_all(dest.join(rel))
+                .map_err(|e| PetRpcError::internal(e.to_string()))?;
             continue;
         }
         let out_path = dest.join(rel);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| PetRpcError::internal(e.to_string()))?;
         }
-        let mut out = std::fs::File::create(&out_path).map_err(|e| PetRpcError::internal(e.to_string()))?;
+        let mut out =
+            std::fs::File::create(&out_path).map_err(|e| PetRpcError::internal(e.to_string()))?;
         // take(剩余额度+1)：多读 1 字节用于区分"恰好填满"与"超限"
         let mut limited = std::io::Read::take(&mut entry, max_total - total + 1);
-        let written = std::io::copy(&mut limited, &mut out).map_err(|e| PetRpcError::internal(e.to_string()))?;
+        let written = std::io::copy(&mut limited, &mut out)
+            .map_err(|e| PetRpcError::internal(e.to_string()))?;
         total += written;
         if total > max_total {
             let _ = std::fs::remove_file(&out_path); // 超限即拒绝：不留半截文件
-            return Err(PetRpcError::new("zip-total-over-limit", format!("压缩包解压总量超限（>{}）", fmt_limit(max_total))).with("limit", fmt_limit(max_total)));
+            return Err(PetRpcError::new(
+                "zip-total-over-limit",
+                format!("压缩包解压总量超限（>{}）", fmt_limit(max_total)),
+            )
+            .with("limit", fmt_limit(max_total)));
         }
     }
     Ok(())
@@ -289,32 +359,64 @@ pub fn stage_from_zip_in(root: &Path, zip_path: &Path) -> Result<StagedPet, PetR
 }
 
 /// codex 来源暂存（spec §8.1）：仅取 spritesheet.webp（+ 自动带入 voice/ 若存在）
-pub fn stage_from_codex_in(root: &Path, codex_root: &Path, codex_id: &str) -> Result<StagedPet, PetRpcError> {
+pub fn stage_from_codex_in(
+    root: &Path,
+    codex_root: &Path,
+    codex_id: &str,
+) -> Result<StagedPet, PetRpcError> {
     let src = codex_root.join(codex_id);
     if !src.is_dir() {
-        return Err(PetRpcError::new("pet-not-found", format!("codex 宠物不存在: {}", codex_id)).with("id", codex_id.to_string()));
+        return Err(
+            PetRpcError::new("pet-not-found", format!("codex 宠物不存在: {}", codex_id))
+                .with("id", codex_id.to_string()),
+        );
     }
     stage_from_folder_in(root, &src)
 }
 
 /// 单个音频复制进目标 voice/<group>/（暂存与正式目录共用）
-fn copy_audio_into(dest_voice: &Path, src: &Path, group: &str) -> Result<StagedVoiceFile, PetRpcError> {
+fn copy_audio_into(
+    dest_voice: &Path,
+    src: &Path,
+    group: &str,
+) -> Result<StagedVoiceFile, PetRpcError> {
     if !valid_group(group) {
-        return Err(PetRpcError::new("group-invalid", format!("非法分组: {}", group)).with("group", group.to_string()));
+        return Err(
+            PetRpcError::new("group-invalid", format!("非法分组: {}", group))
+                .with("group", group.to_string()),
+        );
     }
     if !src.is_file() {
-        return Err(PetRpcError::new("audio-not-found", format!("音频文件不存在: {}", src.display())).with("path", src.display().to_string()));
+        return Err(PetRpcError::new(
+            "audio-not-found",
+            format!("音频文件不存在: {}", src.display()),
+        )
+        .with("path", src.display().to_string()));
     }
     if !is_audio(src) {
-        return Err(PetRpcError::new("audio-format-unsupported", format!("不支持的音频格式: {}", src.display())).with("path", src.display().to_string()));
+        return Err(PetRpcError::new(
+            "audio-format-unsupported",
+            format!("不支持的音频格式: {}", src.display()),
+        )
+        .with("path", src.display().to_string()));
     }
-    let name = src.file_stem().and_then(|n| n.to_str()).unwrap_or("audio").to_string();
-    let file_name = src.file_name().and_then(|n| n.to_str()).unwrap_or("audio").to_string();
+    let name = src
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio")
+        .to_string();
+    let file_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio")
+        .to_string();
     let dest = dest_voice.join(group).join(&file_name);
     if let Some(p) = dest.parent() {
         std::fs::create_dir_all(p).map_err(|e| PetRpcError::internal(e.to_string()))?;
     }
-    std::fs::copy(src, &dest).map_err(|e| PetRpcError::new("copy-failed", format!("复制音频失败: {}", e)).with("err", e.to_string()))?;
+    std::fs::copy(src, &dest).map_err(|e| {
+        PetRpcError::new("copy-failed", format!("复制音频失败: {}", e)).with("err", e.to_string())
+    })?;
     Ok(StagedVoiceFile {
         group: group.to_string(),
         name,
@@ -335,26 +437,49 @@ fn staging_dir(root: &Path, staging_id: &str) -> Result<PathBuf, PetRpcError> {
 }
 
 /// 向导音频暂存（spec §8.4-3）
-pub fn stage_audio_in(root: &Path, staging_id: &str, src_paths: &[String], group: &str) -> Result<Vec<StagedVoiceFile>, PetRpcError> {
+pub fn stage_audio_in(
+    root: &Path,
+    staging_id: &str,
+    src_paths: &[String],
+    group: &str,
+) -> Result<Vec<StagedVoiceFile>, PetRpcError> {
     if !valid_group(group) {
-        return Err(PetRpcError::new("group-invalid", format!("非法分组: {}", group)).with("group", group.to_string()));
+        return Err(
+            PetRpcError::new("group-invalid", format!("非法分组: {}", group))
+                .with("group", group.to_string()),
+        );
     }
     let staging = staging_dir(root, staging_id)?;
     let mut out = Vec::new();
     for p in src_paths {
-        out.push(copy_audio_into(&staging.join("voice"), Path::new(p), group)?);
+        out.push(copy_audio_into(
+            &staging.join("voice"),
+            Path::new(p),
+            group,
+        )?);
     }
     Ok(out)
 }
 
 /// 修改面板直接向正式目录添加音频（spec §10-3）
-pub fn add_voice_files_in(root: &Path, pet_id: &str, src_paths: &[String], group: &str) -> Result<Vec<StagedVoiceFile>, PetRpcError> {
+pub fn add_voice_files_in(
+    root: &Path,
+    pet_id: &str,
+    src_paths: &[String],
+    group: &str,
+) -> Result<Vec<StagedVoiceFile>, PetRpcError> {
     if !valid_group(group) {
-        return Err(PetRpcError::new("group-invalid", format!("非法分组: {}", group)).with("group", group.to_string()));
+        return Err(
+            PetRpcError::new("group-invalid", format!("非法分组: {}", group))
+                .with("group", group.to_string()),
+        );
     }
     let dir = pet_dir(root, pet_id);
     if !dir.is_dir() {
-        return Err(PetRpcError::new("pet-not-found", format!("宠物不存在: {}", pet_id)).with("id", pet_id.to_string()));
+        return Err(
+            PetRpcError::new("pet-not-found", format!("宠物不存在: {}", pet_id))
+                .with("id", pet_id.to_string()),
+        );
     }
     let mut out = Vec::new();
     for p in src_paths {
@@ -366,17 +491,29 @@ pub fn add_voice_files_in(root: &Path, pet_id: &str, src_paths: &[String], group
 /// 音频路径安全校验：必须形如 voice/<group>/<file>、分组 ∈ 四固定分组且无穿越
 /// （staged=true 为暂存区）。分组段不设卡则 voice/ 下任意子目录文件可被删（P1-2）；
 /// 三段规则统一走 manifest::is_voice_rel（issue #32-7），`..`/反斜杠显式拒绝为纵深防御
-pub fn remove_audio_in(root: &Path, base_id: &str, rel: &str, staged: bool) -> Result<(), PetRpcError> {
+pub fn remove_audio_in(
+    root: &Path,
+    base_id: &str,
+    rel: &str,
+    staged: bool,
+) -> Result<(), PetRpcError> {
     if rel.contains("..") || rel.contains('\\') || !manifest::is_voice_rel(rel) {
         return Err(PetRpcError::new("audio-relpath-invalid", "非法音频路径"));
     }
-    let base = if staged { staging_dir(root, base_id)? } else { pet_dir(root, base_id) };
+    let base = if staged {
+        staging_dir(root, base_id)?
+    } else {
+        pet_dir(root, base_id)
+    };
     if !base.is_dir() {
         return Err(PetRpcError::new("pet-dir-missing", "目录不存在"));
     }
     let p = base.join(rel);
     if p.is_file() {
-        std::fs::remove_file(&p).map_err(|e| PetRpcError::new("delete-failed", format!("删除音频失败: {}", e)).with("err", e.to_string()))?;
+        std::fs::remove_file(&p).map_err(|e| {
+            PetRpcError::new("delete-failed", format!("删除音频失败: {}", e))
+                .with("err", e.to_string())
+        })?;
     }
     Ok(())
 }
@@ -385,24 +522,37 @@ pub fn remove_audio_in(root: &Path, base_id: &str, rel: &str, staged: bool) -> R
 pub fn validate_pet_name(root: &Path, name: &str) -> Result<(), PetRpcError> {
     super::validate_pet_id(name)?;
     if pet_dir(root, name).exists() {
-        return Err(PetRpcError::new("pet-exists", format!("宠物已存在: {}", name)).with("name", name.to_string()));
+        return Err(
+            PetRpcError::new("pet-exists", format!("宠物已存在: {}", name))
+                .with("name", name.to_string()),
+        );
     }
     Ok(())
 }
 
 /// finalize：写 manifest（前端已探测 voices）→ 同盘 rename 原子落地（spec §8.4-5）
-pub fn finalize_in(root: &Path, staging_id: &str, name: &str, mut m: manifest::PetManifest) -> Result<scan::PetSummary, PetRpcError> {
+pub fn finalize_in(
+    root: &Path,
+    staging_id: &str,
+    name: &str,
+    mut m: manifest::PetManifest,
+) -> Result<scan::PetSummary, PetRpcError> {
     validate_pet_name(root, name)?;
     let staging = staging_dir(root, staging_id)?;
     if !staging.join(SHEET_FILE).is_file() {
-        return Err(PetRpcError::new("staging-missing-sheet", "暂存区缺少 spritesheet.webp"));
+        return Err(PetRpcError::new(
+            "staging-missing-sheet",
+            "暂存区缺少 spritesheet.webp",
+        ));
     }
     m.schema_version = manifest::SCHEMA_VERSION;
     m.id = name.to_string();
     manifest::write_with_backup(&staging, &m, false)?;
     let dest = pet_dir(root, name);
-    std::fs::rename(&staging, &dest)
-        .map_err(|e| PetRpcError::new("finalize-move-failed", format!("落地失败: {}", e)).with("err", e.to_string()))?;
+    std::fs::rename(&staging, &dest).map_err(|e| {
+        PetRpcError::new("finalize-move-failed", format!("落地失败: {}", e))
+            .with("err", e.to_string())
+    })?;
     scan::list_pets_in(root)
         .into_iter()
         .find(|s| s.id == name)
@@ -411,7 +561,9 @@ pub fn finalize_in(root: &Path, staging_id: &str, name: &str, mut m: manifest::P
 
 /// 取消导入：清理暂存区（spec §8.4-6）
 pub fn cancel_in(root: &Path, staging_id: &str) -> Result<(), PetRpcError> {
-    let Ok(staging) = staging_dir(root, staging_id) else { return Ok(()) };
+    let Ok(staging) = staging_dir(root, staging_id) else {
+        return Ok(());
+    };
     std::fs::remove_dir_all(&staging).map_err(|e| PetRpcError::internal(e.to_string()))
 }
 
@@ -437,7 +589,10 @@ mod tests {
         assert_eq!(s.voice_files.len(), 1);
         assert_eq!(s.voice_files[0].group, "general");
         assert_eq!(s.voice_files[0].name, "休息一下吧");
-        assert!(staging_root(root.path()).join(&s.staging_id).join(SHEET_FILE).is_file());
+        assert!(staging_root(root.path())
+            .join(&s.staging_id)
+            .join(SHEET_FILE)
+            .is_file());
     }
 
     #[test]
@@ -455,7 +610,10 @@ mod tests {
         let src = root.path().join("empty");
         std::fs::create_dir_all(&src).unwrap();
         assert!(stage_from_folder_in(root.path(), &src).is_err());
-        assert!(staging_root(root.path()).read_dir().map(|mut d| d.next().is_none()).unwrap_or(true));
+        assert!(staging_root(root.path())
+            .read_dir()
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true));
     }
 
     #[test]
@@ -487,7 +645,13 @@ mod tests {
     fn zip_stage_unwraps_one_level() {
         let root = tempfile::tempdir().unwrap();
         let zp = root.path().join("p.zip");
-        write_zip(&zp, &[("inner/spritesheet.webp", "sheet"), ("inner/pet.json", "{}")]);
+        write_zip(
+            &zp,
+            &[
+                ("inner/spritesheet.webp", "sheet"),
+                ("inner/pet.json", "{}"),
+            ],
+        );
         let s = stage_from_zip_in(root.path(), &zp).unwrap();
         assert_eq!(s.suggested_name, "inner");
         assert_eq!(s.spritesheet_size, 5);
@@ -539,7 +703,7 @@ mod tests {
         assert_eq!(fmt_limit(1024 * 1024), "1MB");
         assert_eq!(fmt_limit(10), "10B");
         assert_eq!(fmt_limit(1024 * 1024 + 1), "1048577B"); // 非整除走 B
-        // 公开路径错误信息由 fmt_limit(MAX_ZIP_TOTAL_BYTES) 生成 → 恢复 ">100MB"
+                                                            // 公开路径错误信息由 fmt_limit(MAX_ZIP_TOTAL_BYTES) 生成 → 恢复 ">100MB"
         assert_eq!(fmt_limit(MAX_ZIP_TOTAL_BYTES), "100MB");
     }
 
@@ -562,7 +726,9 @@ mod tests {
         };
         let sum = finalize_in(root.path(), &s.staging_id, "starry-dew", m).unwrap();
         assert_eq!(sum.id, "starry-dew");
-        assert!(pet_dir(root.path(), "starry-dew").join("manifest.json").is_file());
+        assert!(pet_dir(root.path(), "starry-dew")
+            .join("manifest.json")
+            .is_file());
         // 暂存区已腾空
         assert!(!staging_root(root.path()).join(&s.staging_id).exists());
     }
@@ -604,7 +770,13 @@ mod tests {
         let s = stage_from_folder_in(root.path(), &src).unwrap();
         let audio_src = root.path().join("hi.mp3");
         std::fs::write(&audio_src, b"mp3-bytes").unwrap();
-        let added = stage_audio_in(root.path(), &s.staging_id, &[audio_src.to_string_lossy().to_string()], "done").unwrap();
+        let added = stage_audio_in(
+            root.path(),
+            &s.staging_id,
+            &[audio_src.to_string_lossy().to_string()],
+            "done",
+        )
+        .unwrap();
         assert_eq!(added[0].file, "voice/done/hi.mp3");
         assert_eq!(added[0].name, "hi");
         assert!(stage_audio_in(root.path(), &s.staging_id, &[], "bad-group").is_err());
@@ -630,7 +802,11 @@ mod tests {
         let foreign = dir.join("voice").join("backup");
         std::fs::create_dir_all(&foreign).unwrap();
         std::fs::write(foreign.join("x.m4a"), b"x").unwrap();
-        for bad in ["voice/backup/x.m4a", "voice//x.m4a", "voice/general/../../x.m4a"] {
+        for bad in [
+            "voice/backup/x.m4a",
+            "voice//x.m4a",
+            "voice/general/../../x.m4a",
+        ] {
             match remove_audio_in(root.path(), "pet", bad, false) {
                 Err(e) => assert_eq!(e.code, "audio-relpath-invalid", "rel {bad:?}"),
                 Ok(()) => panic!("rel {bad:?} 应被拒绝"),
@@ -651,8 +827,15 @@ mod tests {
         let a = uid();
         let b = uid();
         assert_ne!(a, b);
-        assert_eq!(a.split('-').count(), 3, "uid 应为 时间戳-pid-计数 三段: {a:?}");
-        assert_eq!(a.split('-').nth(1), Some(std::process::id().to_string()).as_deref());
+        assert_eq!(
+            a.split('-').count(),
+            3,
+            "uid 应为 时间戳-pid-计数 三段: {a:?}"
+        );
+        assert_eq!(
+            a.split('-').nth(1),
+            Some(std::process::id().to_string()).as_deref()
+        );
     }
 
     /// issue #32-7：voice/ 只认 voice/<group>/<file> 三段——深层子目录与非法分组
@@ -666,11 +849,18 @@ mod tests {
         std::fs::create_dir_all(dir.join("voice/backup")).unwrap();
         std::fs::write(dir.join("voice/backup/x.m4a"), b"x").unwrap();
         let s = stage_from_folder_in(root.path(), &dir).unwrap();
-        assert_eq!(s.voice_files.len(), 1, "仅 voice/general/休息一下吧.m4a 应收录");
+        assert_eq!(
+            s.voice_files.len(),
+            1,
+            "仅 voice/general/休息一下吧.m4a 应收录"
+        );
         assert_eq!(s.voice_files[0].file, "voice/general/休息一下吧.m4a");
         // 深层/非法分组文件也不得被复制进暂存区
         let staged_voice = staging_root(root.path()).join(&s.staging_id).join("voice");
-        assert!(!staged_voice.join("general").join("sub").exists(), "深层子目录不得带入");
+        assert!(
+            !staged_voice.join("general").join("sub").exists(),
+            "深层子目录不得带入"
+        );
         assert!(!staged_voice.join("backup").exists(), "非分组目录不得带入");
     }
 
@@ -687,7 +877,11 @@ mod tests {
         symlink(&target, dir.join("voice/general/link.m4a")).unwrap();
         let s = stage_from_folder_in(root.path(), &dir).unwrap();
         assert_eq!(s.voice_files.len(), 1, "symlink 文件不得收录");
-        assert!(scan::scan_pet_in(root.path(), "src").unwrap().voice_files.iter().all(|f| !f.rel.contains("link.m4a")));
+        assert!(scan::scan_pet_in(root.path(), "src")
+            .unwrap()
+            .voice_files
+            .iter()
+            .all(|f| !f.rel.contains("link.m4a")));
     }
 
     /// issue #32-5 Windows 变体：目录链接不入遍历栈——voice/self-junction → voice
@@ -710,7 +904,10 @@ mod tests {
         // 修复前这里无限递归/栈溢出挂死；修复后立即返回
         let scan = scan::scan_pet_in(root.path(), "src").unwrap();
         assert_eq!(scan.voice_files.len(), 1, "目录链接不应产出额外清单项");
-        assert!(scan.voice_files.iter().all(|f| !f.rel.contains("self-junction")));
+        assert!(scan
+            .voice_files
+            .iter()
+            .all(|f| !f.rel.contains("self-junction")));
         let s = stage_from_folder_in(root.path(), &dir).unwrap();
         assert_eq!(s.voice_files.len(), 1);
     }

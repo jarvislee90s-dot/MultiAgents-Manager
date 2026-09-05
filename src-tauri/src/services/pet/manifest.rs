@@ -65,17 +65,32 @@ pub fn load(dir: &Path) -> Option<PetManifest> {
 pub fn write_with_backup(dir: &Path, m: &PetManifest, backup: bool) -> Result<(), PetRpcError> {
     let path = dir.join(MANIFEST_FILE);
     if backup && path.exists() {
-        std::fs::copy(&path, dir.join(BACKUP_FILE))
-            .map_err(|e| PetRpcError::new("manifest-backup-failed", format!("备份 manifest 失败: {}", e)).with("err", e.to_string()))?;
+        std::fs::copy(&path, dir.join(BACKUP_FILE)).map_err(|e| {
+            PetRpcError::new(
+                "manifest-backup-failed",
+                format!("备份 manifest 失败: {}", e),
+            )
+            .with("err", e.to_string())
+        })?;
     }
     let text = serde_json::to_string_pretty(m).map_err(|e| PetRpcError::internal(e.to_string()))?;
     // 原子写（issue #32-6）：先写同目录临时文件再 rename 替换——原 fs::write 截断写，
     // 进程中途被杀会留半截 manifest（backup=false 路径无 .bak 兜底）
     let tmp = dir.join(format!("{MANIFEST_FILE}.tmp"));
-    std::fs::write(&tmp, text)
-        .map_err(|e| PetRpcError::new("manifest-write-failed", format!("写入 manifest 失败: {}", e)).with("err", e.to_string()))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| PetRpcError::new("manifest-write-failed", format!("替换 manifest 失败: {}", e)).with("err", e.to_string()))
+    std::fs::write(&tmp, text).map_err(|e| {
+        PetRpcError::new(
+            "manifest-write-failed",
+            format!("写入 manifest 失败: {}", e),
+        )
+        .with("err", e.to_string())
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        PetRpcError::new(
+            "manifest-write-failed",
+            format!("替换 manifest 失败: {}", e),
+        )
+        .with("err", e.to_string())
+    })
 }
 
 #[cfg(test)]
