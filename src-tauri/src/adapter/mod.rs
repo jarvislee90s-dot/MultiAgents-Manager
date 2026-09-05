@@ -240,6 +240,34 @@ pub fn get_all_sessions() -> SessionsResponse {
         });
     }
 
+    // P1-3（review）：Codex APP 聚合卡由 rollout mtime 驱动、完成态持续存在（最长 24h），
+    // 已读信号（未读池删行）无法清除它——违反 spec §5「被已读信号清除」与 §8 手动验证项
+    // 「点击跳转后消失」；且池行 24h 边界比聚合窗晚，会闪现迟到的真未读卡。
+    // 处置：上一轮状态缓存已绿 且 本轮未读池无行 ⇒ 用户已读（或池行已过期）→ 剔除聚合卡；
+    // 首次转绿（上一轮非绿/无缓存）→ 保留，由下方 sync_unread 正常插行。
+    // 注：仅作用于 Codex APP（文件驱动的聚合卡）；WorkBuddy 活跃卡由进程存活驱动、
+    // 进程退出后未读卡接管，语义本就自洽，不动
+    {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let pool: HashSet<(String, String)> = crate::database::dao::unread::list(now_ms)
+            .into_iter()
+            .map(|r| (r.tool_id, r.session_id))
+            .collect();
+        all_sessions.retain(|s| {
+            let is_codex_app_green = matches!(s.agent_type, AgentType::Codex)
+                && matches!(s.form, ProcessForm::App)
+                && matches!(s.status, SessionStatus::Idle | SessionStatus::Finished);
+            if !is_codex_app_green {
+                return true;
+            }
+            let was_green_prev = matches!(
+                crate::database::find_status(&s.id).as_deref(),
+                Some("Idle") | Some("Finished")
+            );
+            !codex_green_card_should_drop(was_green_prev, pool.contains(&("codex".into(), s.id.clone())))
+        });
+    }
+
     // W4：APP 类未读卡合并 + 未读池维护（宿主存活检查 / 变黄删除 / 过期清理）
     sync_unread_sessions(&mut all_sessions);
 
@@ -385,6 +413,14 @@ fn session_sort_cmp(a: &Session, b: &Session) -> std::cmp::Ordering {
         .then_with(|| b.last_activity_at.cmp(&a.last_activity_at))
 }
 
+/// P1-3 判定核心（可测）：Codex APP 绿态聚合卡是否应剔除。
+/// was_green_prev=上一轮状态缓存已绿；pool_has_row=本轮未读池仍有该会话行。
+/// 已绿 且 池无行 ⇒ 用户已读删行或池行过期 → 剔除（补齐「被已读信号清除」）；
+/// 上一轮非绿/无缓存 → 首次转绿，保留（sync_unread 正常插行）
+fn codex_green_card_should_drop(was_green_prev: bool, pool_has_row: bool) -> bool {
+    was_green_prev && !pool_has_row
+}
+
 /// review F2：宿主 APP 已死 → App 形态活跃卡全部清除（孤儿 codebuddy 心跳未过期
 /// 也不得出卡）；CLI 卡不依赖宿主；未读卡（unread=true）归池/宿主退出清池管线治理，
 /// 本过滤器不碰。host_alive 经参数注入，复用 SHARED_SYSTEM 快照避免重复全量扫描
@@ -427,11 +463,14 @@ fn unread_pool_action(prev_status: Option<&str>, idle: bool) -> UnreadPoolAction
 /// - 转绿（Idle/Finished）→ upsert 未读行（未在池中时）
 /// - 宿主 APP 进程全部退出 → 清空该工具未读行与在板未读卡
 /// - 过期（24h）→ 清理
+/// - Codex APP 绿卡（P1-3）：聚合卡即该会话的「未读卡」形态——池有行时标记
+///   unread=true（徽标/「未读卡排后」生效），已读删行后由 get_all_sessions 的
+///   前置过滤剔除，闭环「被已读信号清除」
 fn sync_unread_sessions(active: &mut Vec<Session>) {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     // 1) 活跃会话驱动未读池变更
-    for s in active.iter() {
+    for s in active.iter_mut() {
         if !matches!(s.form, ProcessForm::App) {
             continue; // 仅 APP 类参与（spec W4 范围）
         }
@@ -443,7 +482,7 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
             // 「跳转已读」删掉的行不再被电平 upsert 复活
             let prev = crate::database::find_status(&s.id);
             let record = crate::database::dao::unread::UnreadSessionRecord {
-                tool_id: tool,
+                tool_id: tool.clone(),
                 session_id: s.id.clone(),
                 project_name: s.project_name.clone(),
                 title: s.title.clone(),
@@ -457,6 +496,11 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
                     crate::database::dao::unread::refresh_display(&record)
                 }
                 UnreadPoolAction::None => {}
+            }
+            // P1-3：Codex APP 聚合卡持久在场（mtime 驱动），池行存在 ⇒ 未读态在板呈现。
+            // WorkBuddy 活跃卡不标（进程退出后由池接管渲染未读卡，spec §5 双形态语义）
+            if tool == "codex" {
+                s.unread = true;
             }
         } else {
             // 变黄/红：删未读（状态迁移，非重置机制）
@@ -839,5 +883,23 @@ mod unread_card_tests {
         assert_eq!(cards[0].id, "s2");
         assert_eq!(cards[0].agent_type, AgentType::Codex);
         assert!(cards[0].unread);
+    }
+}
+
+#[cfg(test)]
+mod codex_green_read_tests {
+    use super::codex_green_card_should_drop;
+
+    /// P1-3 回归锁：已读（上一轮已绿 + 池无行）→ 聚合卡剔除；
+    /// 首次转绿（上一轮非绿）保留；池有行（未读在场）保留
+    #[test]
+    fn green_card_drops_only_after_read_or_expiry() {
+        // 已读删行：上一轮已绿、池无行 → 剔除（此前聚合卡会滞留最长 24h）
+        assert!(codex_green_card_should_drop(true, false));
+        // 首次转绿：上一轮非绿（黄/红/无缓存）→ 保留（sync_unread 本轮插行）
+        assert!(!codex_green_card_should_drop(false, false));
+        // 未读在场：池有行 → 保留
+        assert!(!codex_green_card_should_drop(true, true));
+        assert!(!codex_green_card_should_drop(false, true));
     }
 }
