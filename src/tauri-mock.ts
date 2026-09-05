@@ -458,7 +458,6 @@ if (!isTauri) {
           { toolId: "openclaw", name: "OpenClaw", enabled: true, installed: false, managed: false },
         ]);
 
-
       case "list_repo_skills":
         return Promise.resolve([
           { name: "brainstorming", path: "/Users/jarvis/.mam/skills/brainstorming" },
