@@ -62,8 +62,10 @@ export function saveActiveId(id: string, voiceCap: boolean, displayName?: string
 }
 
 /** 仅回写语音能力缓存（不动激活指针/展示名）：运行时实际能力与激活时缓存背离时，
- *  让 petSoundTakeover 同步看到真实值（issue #33-10，spec §5.2 回落契约） */
+ *  让 petSoundTakeover 同步看到真实值（issue #33-10，spec §5.2 回落契约）。
+ *  双向同步（评审 N1）：丢失方向降 0，文件恢复方向也回升 1；已一致时免写入与事件派发 */
 export function persistVoiceCap(cap: boolean): void {
+  if (loadVoiceCap() === cap) return;
   try {
     localStorage.setItem(VOICE_CAP_KEY, cap ? "1" : "0");
   } catch {
@@ -251,7 +253,7 @@ export async function resolveActivePet(): Promise<ActivePet> {
     };
   }
   const snap = manifest.hasVoice ? await snapshotVoices(scan.dir, manifest.voices) : null;
-  if (manifest.hasVoice && !snap) persistVoiceCap(false);
+  if (manifest.hasVoice) persistVoiceCap(!!snap); // 双向：失败降 0，恢复回升 1
   return {
     id,
     displayName: manifest.displayName || id,

@@ -153,5 +153,49 @@ describe("petRuntime", () => {
       expect(pet.hasVoice).toBe(false); // 快照失败降级
       expect(loadVoiceCap()).toBe(false); // 缓存同步回写，petSoundTakeover 不再误判
     });
+
+    it("resolveActivePet：语音文件恢复后快照成功 → voice-cap 回升 1（双向同步，评审 N1）", async () => {
+      class FakeImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        naturalWidth = 1536;
+        naturalHeight = 2288;
+        set src(_v: string) {
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      vi.stubGlobal("Image", FakeImage);
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, blob: async () => ({}) })));
+      vi.spyOn(URL, "createObjectURL").mockImplementation(() => "blob:mock-ok");
+      vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      const { resolveActivePet, loadVoiceCap } = await import("@/components/pet/petRuntime");
+      const { tauriInvokeMock: mock } = await import("../msw/tauriMocks");
+      mock.mockReset();
+      saveActiveId("p1", false, "P1"); // 之前 ignore 降级缓存了 voice-cap=0
+      mock.mockImplementation((cmd: string) => {
+        if (cmd === "pet_scan")
+          return Promise.resolve({
+            id: "p1",
+            dir: "/x/p1",
+            spritesheet: { rel: "spritesheet.webp", exists: true, size: 1 },
+            voiceFiles: [],
+          });
+        if (cmd === "pet_read_manifest")
+          return Promise.resolve({
+            id: "p1",
+            displayName: "P",
+            hasVoice: true,
+            hasSubtitle: true,
+            spriteVersionNumber: 2,
+            voices: [
+              { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 3000 },
+            ],
+          });
+        return Promise.resolve(undefined);
+      });
+      const pet = await resolveActivePet();
+      expect(pet.hasVoice).toBe(true); // 快照成功
+      expect(loadVoiceCap()).toBe(true); // 缓存回升，主看板提示音接管恢复
+    });
   });
 });

@@ -122,14 +122,8 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
 
   const doRename = async () => {
     if (!selected || !renameTo || renameTo === selected.id) return;
-    // 实时校验兜底（issue #33-7）：非法字符/保留名/超长/重名不发给后端
-    if (
-      petNameProblem(renameTo, {
-        existingIds: [...pets.map((p) => p.id), "foxbell"],
-        selfId: selected.id,
-      })
-    )
-      return;
+    // 实时校验兜底（issue #33-7）：非法字符/保留名/超长/重名不发给后端（按钮态由 renameProblem 驱动）
+    if (renameProblem) return;
     // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）；
     // frozeActive 兜底增删音频先行触发过闪切的场景（P1-4）
     const wasActive = loadActiveId() === selected.id || frozeActive;
