@@ -552,10 +552,15 @@ pub fn reactivate_tool_app(
     system: &sysinfo::System,
     agent_type: Option<&str>,
 ) -> Result<(), String> {
-    let marker = match agent_type.map(|a| a.to_lowercase()).as_deref() {
-        Some("workbuddy") => "workbuddy",
-        Some("codex") => "chatgpt",
-        _ => return Err("未知工具，无法兜底激活".to_string()),
+    // P2-4（issue #34）：宿主判定统一走 monitor::host::is_host_process（与前台验证
+    // 同口径）。原整路径子串匹配（exe.contains("chatgpt")）会误命中路径含关键词的
+    // 无关进程（如 D:\tools\chatgpt-clone\app.exe）；is_host_process 按可执行文件名
+    // 判定，并排除会话进程（codebuddy）与内嵌框架进程，聚焦的是真正的宿主窗口
+    let Some(tool_id) = agent_type
+        .map(|a| a.to_lowercase())
+        .filter(|t| matches!(t.as_str(), "workbuddy" | "codex"))
+    else {
+        return Err("未知工具，无法兜底激活".to_string());
     };
     let wins = all_windows();
     // AllWindows.by_pid：pid → 该进程名下全部可见顶层窗口 (hwnd, title)，按 pid 分组迭代
@@ -567,7 +572,7 @@ pub fn reactivate_tool_app(
             .exe()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        if !exe.contains(marker) {
+        if !crate::monitor::host::is_host_process(&exe, &tool_id) {
             continue;
         }
         for (hwnd, _) in hwnds {
@@ -692,6 +697,14 @@ mod tests {
         claim_owner, collapse_ws, collect_ancestor_pids_with, hard_survivors, is_shell_console,
         longest_prefix_len, normalize_title_for_project,
     };
+
+    #[test]
+    fn reactivate_rejects_tools_without_app_form() {
+        // P2-4 门：无 APP 形态/未知工具在窗口枚举前即拒绝（不得触碰 Win32 枚举）；
+        // 宿主匹配口径统一见 reactivate_tool_app（is_host_process，host.rs 已有测试）
+        assert!(super::reactivate_tool_app(&sysinfo::System::new(), None).is_err());
+        assert!(super::reactivate_tool_app(&sysinfo::System::new(), Some("claude")).is_err());
+    }
 
     #[test]
     fn normalize_title_strips_spinner_prefix() {
