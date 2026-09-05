@@ -470,6 +470,9 @@
       "configTitle": "Configure",
       "name": "Pet name (folder)",
       "nameHint": "letters/digits/-/_ only",
+      "nameDup": "A pet with this name already exists",
+      "nameReserved": "Reserved Windows device name (CON/PRN/AUX/NUL/COM1-9/LPT1-9) is not allowed",
+      "nameTooLong": "Name must be at most 64 characters",
       "displayName": "Display name",
       "description": "Description (optional)",
       "preview": "Preview",
@@ -505,7 +508,8 @@
       "audio-timeout": "Audio probe timed out",
       "audio-bad-duration": "Audio duration unavailable",
       "audio-load-fail": "Audio failed to load",
-      "scan-fail": "Pet assets scan failed"
+      "scan-fail": "Pet assets scan failed",
+      "sheet-timeout": "Spritesheet load timed out"
     },
     "issue": {
       "spritesheet-missing": "Spritesheet missing",

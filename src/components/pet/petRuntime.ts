@@ -61,6 +61,17 @@ export function saveActiveId(id: string, voiceCap: boolean, displayName?: string
   window.dispatchEvent(new Event(ACTIVE_LOCAL_EVENT));
 }
 
+/** 仅回写语音能力缓存（不动激活指针/展示名）：运行时实际能力与激活时缓存背离时，
+ *  让 petSoundTakeover 同步看到真实值（issue #33-10，spec §5.2 回落契约） */
+export function persistVoiceCap(cap: boolean): void {
+  try {
+    localStorage.setItem(VOICE_CAP_KEY, cap ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new Event(ACTIVE_LOCAL_EVENT));
+}
+
 /** 语音能力：未写入时视为 true（foxbell / 旧版本升级兼容） */
 export function loadVoiceCap(): boolean {
   try {
@@ -78,16 +89,25 @@ export function rowsFromSize(w: number, h: number): PetRows | null {
   return null;
 }
 
-/** 图集行数探测（Image 解码，约 50-150ms） */
-export function probeSheetRows(url: string): Promise<PetRows> {
+/** 图集行数探测（Image 解码，约 50-150ms；8s 超时与音频探测对齐，spec §13——
+ *  图集挂起时 activatePet 不得永久 busy，issue #33-9） */
+export function probeSheetRows(url: string, timeoutMs = 8000): Promise<PetRows> {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    const timer = window.setTimeout(() => {
+      img.src = "";
+      reject(new PetError("sheet-timeout"));
+    }, timeoutMs);
     img.onload = () => {
+      window.clearTimeout(timer);
       const r = rowsFromSize(img.naturalWidth, img.naturalHeight);
       if (r) resolve(r);
       else reject(new PetError("sheet-bad-size", { w: img.naturalWidth, h: img.naturalHeight }));
     };
-    img.onerror = () => reject(new PetError("sheet-load-fail"));
+    img.onerror = () => {
+      window.clearTimeout(timer);
+      reject(new PetError("sheet-load-fail"));
+    };
     img.src = url;
   });
 }
@@ -231,6 +251,7 @@ export async function resolveActivePet(): Promise<ActivePet> {
     };
   }
   const snap = manifest.hasVoice ? await snapshotVoices(scan.dir, manifest.voices) : null;
+  if (manifest.hasVoice && !snap) persistVoiceCap(false);
   return {
     id,
     displayName: manifest.displayName || id,

@@ -79,3 +79,75 @@ describe("PetImportDialog", () => {
     );
   });
 });
+describe("PetImportDialog 探测竞态与校验（issue #33-3/#33-5/#33-7）", () => {
+  beforeEach(() => {
+    tauriInvokeMock.mockClear();
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_stage_from_folder") return Promise.resolve(staged);
+      if (cmd === "pet_finalize_import") return Promise.resolve({ id: staged.suggestedName });
+      return Promise.resolve(undefined);
+    });
+    pick.mockResolvedValue("C:/pets/starry-dew");
+  });
+
+  it("跨次暂存探测竞态：旧探测后到不得覆盖新暂存的行数（代数闸门）", async () => {
+    const { probeSheetRows } = await import("@/components/pet/petRuntime");
+    let resA: ((v: number) => void) | null = null;
+    const pendingA = new Promise<number>((res) => (resA = res));
+    vi.mocked(probeSheetRows)
+      .mockImplementationOnce(() => pendingA) // A 的探测挂起
+      .mockResolvedValueOnce(9); // B 的探测先回
+    const { act } = await import("@testing-library/react");
+    render(<PetImportDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("import-tab-local"));
+    fireEvent.click(await screen.findByTestId("import-pick-folder"));
+    await screen.findByTestId("import-config");
+    // 取消 A → 回来源页 → 暂存 B
+    fireEvent.click(await screen.findByTestId("import-cancel"));
+    await waitFor(() => expect(screen.queryByTestId("import-config")).toBeNull());
+    fireEvent.click(await screen.findByTestId("import-pick-folder"));
+    await screen.findByTestId("import-config");
+    expect(await screen.findByTestId("import-sheet-badge")).toHaveTextContent("v1"); // B = 9 行
+    // A 的过期探测后到 → 不得覆盖 B 的 9
+    await act(async () => resA?.(11));
+    expect(screen.getByTestId("import-sheet-badge")).toHaveTextContent("v1");
+  });
+
+  it("预览比例随探测行数：v1 → 936、v2 → 1144（不再恒用 v2 压扁 v1）", async () => {
+    const { probeSheetRows } = await import("@/components/pet/petRuntime");
+    const mocked = vi.mocked(probeSheetRows);
+    mocked.mockResolvedValue(9);
+    render(<PetImportDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("import-tab-local"));
+    fireEvent.click(await screen.findByTestId("import-pick-folder"));
+    await screen.findByTestId("import-config");
+    await waitFor(() =>
+      expect(screen.getByTestId("import-preview").style.backgroundSize).toBe("768px 936px")
+    );
+    // 重暂存探测为 v2 → 1144
+    mocked.mockResolvedValue(11);
+    fireEvent.click(await screen.findByTestId("import-cancel"));
+    await waitFor(() => expect(screen.queryByTestId("import-config")).toBeNull());
+    fireEvent.click(await screen.findByTestId("import-pick-folder"));
+    await screen.findByTestId("import-config");
+    await waitFor(() =>
+      expect(screen.getByTestId("import-preview").style.backgroundSize).toBe("768px 1144px")
+    );
+  });
+
+  it("重名实时校验：输入已导入 id → 提示并禁用执行（不再等 finalize 才报错）", async () => {
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets")
+        return Promise.resolve([{ id: "starry-dew", displayName: "Starry Dew" }]);
+      if (cmd === "pet_stage_from_folder") return Promise.resolve(staged);
+      return Promise.resolve(undefined);
+    });
+    render(<PetImportDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("import-tab-local"));
+    fireEvent.click(await screen.findByTestId("import-pick-folder"));
+    await screen.findByTestId("import-config");
+    // suggestedName 即已导入 id → 进入配置页立刻提示（测试环境 i18n 未初始化，渲染键名）
+    expect(await screen.findByTestId("import-name-problem")).toHaveTextContent("pet.import.nameDup");
+    expect(screen.getByTestId("import-execute")).toBeDisabled();
+  });
+});

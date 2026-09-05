@@ -256,3 +256,114 @@ describe("PetManageDialog", () => {
     });
   });
 });
+
+describe("PetManageDialog 校验与能力判定（issue #33-2/#33-7/#33-12）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    tauriInvokeMock.mockClear();
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets") return Promise.resolve(pets);
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "starry-dew",
+          dir: "/x/starry-dew",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [],
+        });
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve({
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: false,
+          hasSubtitle: false,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [],
+        });
+      return Promise.resolve(undefined);
+    });
+  });
+
+  it("直投未激活（版本 0）保存：先探测图集再定 rows，不恒写 9（issue #33-2）", async () => {
+    const { probeSheetRows } = await import("@/components/pet/petRuntime");
+    const { buildManifestFromScan } = await import("@/components/pet/petActivation");
+    vi.mocked(probeSheetRows).mockClear().mockResolvedValue(11);
+    vi.mocked(buildManifestFromScan).mockClear();
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets")
+        return Promise.resolve([{ ...pets[0], id: "v0-pet", spriteVersionNumber: 0, manifestExists: false }]);
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "v0-pet",
+          dir: "/x/v0-pet",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [],
+        });
+      if (cmd === "pet_read_manifest") return Promise.resolve(null);
+      return Promise.resolve(undefined);
+    });
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-v0-pet"));
+    fireEvent.click(await screen.findByTestId("manage-save"));
+    await waitFor(() => expect(buildManifestFromScan).toHaveBeenCalled());
+    // 探测 11 行 → v2 写入 manifest 生成路径（旧代码 0 → 恒 9 → v1）
+    expect(buildManifestFromScan).toHaveBeenCalledWith(
+      "v0-pet",
+      expect.anything(),
+      11,
+      "folder",
+      false,
+      expect.anything()
+    );
+  });
+
+  it("重命名实时校验：保留设备名/重名即时提示并禁用按钮（issue #33-7）", async () => {
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    const input = await screen.findByTestId("manage-rename-input");
+    fireEvent.change(input, { target: { value: "con" } });
+    expect(await screen.findByTestId("manage-rename-problem")).toHaveTextContent(/保留设备名/);
+    expect(screen.getByTestId("manage-rename-btn")).toBeDisabled();
+    fireEvent.change(input, { target: { value: "foxbell" } }); // 内置保留名 → 重名
+    expect(await screen.findByTestId("manage-rename-problem")).toHaveTextContent(/同名/);
+    expect(screen.getByTestId("manage-rename-btn")).toBeDisabled();
+    fireEvent.change(input, { target: { value: "dew" } });
+    await waitFor(() => expect(screen.getByTestId("manage-rename-btn")).toBeEnabled());
+  });
+
+  it("重命名切回：能力按磁盘现状重判，manifest 条目缺失 → voice-cap=0（issue #33-12）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    localStorage.setItem("mam-pet-voice-cap", "1"); // 面板快照/激活缓存声称有语音
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets") return Promise.resolve(pets);
+      // 磁盘 voiceFiles 为空：manifest 记录的条目已不在（面板未保存的直写删除）
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "starry-dew",
+          dir: "/x/starry-dew",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [],
+        });
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve({
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: true,
+          hasSubtitle: true,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [
+            { group: "general", name: "greet", file: "voice/general/greet.mp3", sizeBytes: 1000, durationMs: 3000 },
+          ],
+        });
+      return Promise.resolve(undefined);
+    });
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.change(await screen.findByTestId("manage-rename-input"), { target: { value: "dew" } });
+    fireEvent.click(screen.getByTestId("manage-rename-btn"));
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("dew"));
+    // 切回不再沿用 selected.hasVoice=true，按磁盘现状保守写 0
+    await waitFor(() => expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0"));
+  });
+});

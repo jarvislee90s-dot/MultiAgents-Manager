@@ -195,3 +195,83 @@ describe("buildManifestFromScan / repairManifest", () => {
     expect(m.source).toBe("petdex");
   });
 });
+describe("activatePet 稳态快路径与 voiceCap 结果（issue #33-8/#33-11）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    tauriInvokeMock.mockClear();
+  });
+
+  const manifestOf = (overrides: Partial<PetManifestView> = {}): PetManifestView => ({
+    id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
+    spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+    voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 5, durationMs: 3000 }],
+    ...overrides,
+  });
+
+  it("manifest 大小一致且版本已知 → 信任记录行数，跳过图集解码（EP7 稳态 <100ms）", async () => {
+    const { probeSheetRows } = await import("@/components/pet/petRuntime");
+    vi.mocked(probeSheetRows).mockClear();
+    // 磁盘与 manifest 完全一致 → 无 diff 直接激活，全程无需 Image 解码
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan")
+        return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }]));
+      if (cmd === "pet_read_manifest") return Promise.resolve(manifestOf());
+      return Promise.resolve(undefined);
+    });
+    const r = await activatePet("p1", async () => "cancel");
+    expect(r.status).toBe("activated");
+    expect(probeSheetRows).not.toHaveBeenCalled();
+  });
+
+  it("图集大小与 manifest 不一致 → 仍走探测（快路径不掩盖素材变化）", async () => {
+    const { probeSheetRows } = await import("@/components/pet/petRuntime");
+    vi.mocked(probeSheetRows).mockClear();
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan") return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }], 999));
+      if (cmd === "pet_read_manifest") return Promise.resolve(manifestOf());
+      return Promise.resolve(undefined);
+    });
+    const r = await activatePet("p1", async () => "cancel");
+    expect(r.status).toBe("mismatch"); // spritesheet-changed → 三选
+    expect(probeSheetRows).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignore 激活结果携带 voiceCap（任一条目缺失 → false；齐全且大小一致 → true）", async () => {
+    // manifest 列两条（general+done），磁盘仅 general → done 缺失 → 保守 false
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan")
+        return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }], 999));
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve(
+          manifestOf({
+            voices: [
+              { group: "general", name: "a", file: g("general"), sizeBytes: 5, durationMs: 3000 },
+              { group: "done", name: "b", file: g("done"), sizeBytes: 5, durationMs: 3000 },
+            ],
+          })
+        );
+      return Promise.resolve(undefined);
+    });
+    const missing = await activatePet("p1", async () => "ignore");
+    expect(missing.status).toBe("activated");
+    expect(missing.ignoredDiff).toBe(true);
+    expect(missing.voiceCap).toBe(false);
+
+    // manifest 条目全部在磁盘且大小一致 → 保留 manifest.hasVoice
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_scan") return Promise.resolve(scanOf(fourGroups, 999));
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve(
+          manifestOf({
+            voices: ["general", "approval", "done", "error"].map((n) => ({
+              group: n, name: n, file: g(n), sizeBytes: 5, durationMs: 3000,
+            })),
+          })
+        );
+      return Promise.resolve(undefined);
+    });
+    const intact = await activatePet("p1", async () => "ignore");
+    expect(intact.status).toBe("activated");
+    expect(intact.voiceCap).toBe(true);
+  });
+});

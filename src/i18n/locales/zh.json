@@ -470,6 +470,9 @@
       "configTitle": "配置确认",
       "name": "宠物名（文件夹名）",
       "nameHint": "仅字母/数字/连字符/下划线",
+      "nameDup": "已存在同名宠物",
+      "nameReserved": "Windows 保留设备名不可用（CON/PRN/AUX/NUL/COM1-9/LPT1-9）",
+      "nameTooLong": "名称不能超过 64 个字符",
       "displayName": "展示名",
       "description": "描述（可选）",
       "preview": "图集预览",
@@ -505,7 +508,8 @@
       "audio-timeout": "音频探测超时",
       "audio-bad-duration": "音频时长不可用",
       "audio-load-fail": "音频加载失败",
-      "scan-fail": "宠物素材扫描失败"
+      "scan-fail": "宠物素材扫描失败",
+      "sheet-timeout": "图集加载超时"
     },
     "issue": {
       "spritesheet-missing": "图集缺失",

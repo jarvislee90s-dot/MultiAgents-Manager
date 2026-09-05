@@ -86,26 +86,31 @@ export function PetStartupGuard() {
 
   const doUpdate = async () => {
     if (!ctx) return;
-    if (!ctx.manifest) {
-      // 直投（manifest 缺失）：走与切换一致的生成路径——字幕默认=有语音即有字幕（spec §6-2，FIX-4）
-      const rows: PetRows = probedRows ?? 9;
-      const built = await buildManifestFromScan(ctx.scan.id, ctx.scan, rows, "folder", true);
-      await invoke("pet_update_manifest", { id: ctx.scan.id, manifest: built, backup: false });
-      saveActiveId(ctx.scan.id, built.hasVoice, built.displayName);
+    try {
+      if (!ctx.manifest) {
+        // 直投（manifest 缺失）：走与切换一致的生成路径——字幕默认=有语音即有字幕（spec §6-2，FIX-4）
+        const rows: PetRows = probedRows ?? 9;
+        const built = await buildManifestFromScan(ctx.scan.id, ctx.scan, rows, "folder", true);
+        await invoke("pet_update_manifest", { id: ctx.scan.id, manifest: built, backup: false });
+        saveActiveId(ctx.scan.id, built.hasVoice, built.displayName);
+        emit("pet-active-changed", {}).catch(() => {});
+        toast.success(t("pet.startup.updated"));
+        setIssues(null);
+        return;
+      }
+      const manifest = ctx.manifest;
+      // rows 优先用探测值；未探测过才回退 manifest 记录（FIX-4）
+      const rows: PetRows = probedRows ?? (manifest.spriteVersionNumber === 2 ? 11 : 9);
+      const repaired = await repairManifest(manifest, ctx.scan, rows);
+      await invoke("pet_update_manifest", { id: ctx.scan.id, manifest: repaired, backup: true });
+      saveActiveId(ctx.scan.id, repaired.hasVoice, repaired.displayName);
       emit("pet-active-changed", {}).catch(() => {});
       toast.success(t("pet.startup.updated"));
       setIssues(null);
-      return;
+    } catch (e) {
+      // 更新失败不静默（issue #33-1）：petErrMsg toast 可见、弹窗保持、issues 不清理，可重试
+      toast.error(petErrMsg(e, t));
     }
-    const manifest = ctx.manifest;
-    // rows 优先用探测值；未探测过才回退 manifest 记录（FIX-4）
-    const rows: PetRows = probedRows ?? (manifest.spriteVersionNumber === 2 ? 11 : 9);
-    const repaired = await repairManifest(manifest, ctx.scan, rows);
-    await invoke("pet_update_manifest", { id: ctx.scan.id, manifest: repaired, backup: true });
-    saveActiveId(ctx.scan.id, repaired.hasVoice, repaired.displayName);
-    emit("pet-active-changed", {}).catch(() => {});
-    toast.success(t("pet.startup.updated"));
-    setIssues(null);
   };
 
   const hidePet = () => {

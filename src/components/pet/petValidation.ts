@@ -152,3 +152,61 @@ export function diffManifestVsScan(m: PetManifestView, s: PetScan): ValidationIs
 export function spriteVersionOf(rows: 9 | 11): 1 | 2 {
   return rows === 9 ? 1 : 2;
 }
+
+// ---- 宠物 id 前端实时校验（spec §8.4-1/§10-1，issue #33-7）----
+// 规则与后端 validate_pet_id 对齐（issue #32-1）：字符集 + 保留设备名 + 长度；重名为前端预检
+
+/** Windows 保留设备名（大小写不敏感），与 src-tauri validate_pet_id 同表 */
+const RESERVED_DEVICE_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  ...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`),
+  ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`),
+]);
+
+export const PET_NAME_MAX_LEN = 64;
+
+export type PetNameProblem = "charset" | "too-long" | "reserved-device" | "duplicate";
+
+/** 宠物 id 实时校验：返回首个问题，null = 合法。空串由调用方按「按钮禁用」处理；
+ *  selfId 用于重命名场景（保持自身名不算重名） */
+export function petNameProblem(
+  name: string,
+  opts: { existingIds?: string[]; selfId?: string; maxLength?: number } = {}
+): PetNameProblem | null {
+  const max = opts.maxLength ?? PET_NAME_MAX_LEN;
+  if (name.length > max) return "too-long";
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return "charset";
+  if (RESERVED_DEVICE_NAMES.has(name.toUpperCase())) return "reserved-device";
+  const others = (opts.existingIds ?? []).filter((id) => id !== opts.selfId);
+  if (others.some((id) => id.toLowerCase() === name.toLowerCase())) return "duplicate";
+  return null;
+}
+
+/** PetNameProblem → i18n 键（charset 复用通用 nameHint 文案），导入/重命名 UI 共用（issue #33-7） */
+export function petNameProblemKey(p: PetNameProblem): string {
+  switch (p) {
+    case "duplicate":
+      return "pet.import.nameDup";
+    case "reserved-device":
+      return "pet.import.nameReserved";
+    case "too-long":
+      return "pet.import.nameTooLong";
+    case "charset":
+      return "pet.import.nameHint";
+  }
+}
+
+/** manifest 语音条目在磁盘的可信度（spec §4.2 缓存语义）：全部条目存在且大小一致 → hasVoice
+ *  可信，任一缺失/大小已变 → 缓存前提被破坏，保守无语音（spec §6-3）。
+ *  ignore 降级激活与重命名切回共用同一判定（issue #33-8/#33-12） */
+export function manifestVoiceCapOnDisk(m: PetManifestView, s: PetScan): boolean {
+  const onDisk =
+    m.voices.length > 0 &&
+    m.voices.every((v) =>
+      s.voiceFiles.some((f) => f.rel === v.file && f.exists && f.size === v.sizeBytes)
+    );
+  return onDisk ? m.hasVoice : false;
+}

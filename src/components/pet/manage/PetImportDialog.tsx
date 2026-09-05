@@ -1,5 +1,5 @@
 // PetImportDialog — 导入向导：来源（codex/本地/petdex）→ 配置确认 → 完成（spec §8）
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
@@ -10,7 +10,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { probeSheetRows, type PetRows } from "../petRuntime";
-import { judgeVoiceTier, voiceRowProblem, type VoiceRow } from "../petValidation";
+import {
+  judgeVoiceTier,
+  petNameProblem,
+  petNameProblemKey,
+  voiceRowProblem,
+  type VoiceRow,
+} from "../petValidation";
 import { VoiceGroupEditor } from "./VoiceGroupEditor";
 import { useVoiceDurationProbe } from "./useVoiceDurationProbe";
 import { petErrMsg } from "../petErrors";
@@ -49,6 +55,10 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
   const [subtitle, setSubtitle] = useState(true);
   const [busy, setBusy] = useState(false);
   const [importedId, setImportedId] = useState("");
+  // 已导入宠物 id（重名实时预检，issue #33-7）；foxbell 为内置保留名
+  const [existingIds, setExistingIds] = useState<string[]>([]);
+  // 图集探测代数（issue #33-3）：跨次暂存时旧探测后到不得覆盖新结果
+  const probeGen = useRef(0);
 
   useEffect(() => {
     if (!props.open) return;
@@ -56,6 +66,9 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
     setStaged(null);
     setRows(null);
     setVoiceRows([]);
+    invoke<{ id: string }[]>("pet_list_pets")
+      .then((l) => setExistingIds(Array.isArray(l) ? l.map((p) => p.id) : []))
+      .catch(() => setExistingIds([]));
     // codex 列表由下方 [open, step, tab] effect 统一拉取
   }, [props.open]);
 
@@ -69,14 +82,20 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
   }, [props.open, step, tab]);
 
   const enterConfig = useCallback((s: StagedPetDto) => {
+    const gen = ++probeGen.current;
     setStaged(s);
     setName(s.suggestedName);
     setDisplayName(s.suggestedDisplayName || s.suggestedName);
     setVoiceRows(s.voiceFiles.map((v) => ({ ...v, durationMs: null })));
+    setRows(null); // 清旧值：新暂存未探测完成前不得沿用上一次的行数
     setStep("config");
     probeSheetRows(convertFileSrc(`${s.dir}/spritesheet.webp`))
-      .then(setRows)
-      .catch(() => setRows(null));
+      .then((r) => {
+        if (gen === probeGen.current) setRows(r);
+      })
+      .catch(() => {
+        if (gen === probeGen.current) setRows(null);
+      });
   }, []);
 
   // 未探测时长的文件补探测（并行；失败保持 null）——共享 hook 封装
@@ -141,7 +160,9 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
     }
   };
 
-  const nameOk = /^[A-Za-z0-9_-]+$/.test(name) && name.toLowerCase() !== "foxbell";
+  // 名称实时校验（issue #33-7，spec §8.4-1）：字符集/保留设备名/长度/重名（含内置 foxbell）
+  const nameProblem = petNameProblem(name, { existingIds: [...existingIds, "foxbell"] });
+  const nameOk = nameProblem === null;
   const validCount = voiceRows.filter((r) => !voiceRowProblem(r)).length;
 
   return (
@@ -303,7 +324,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                     style={{
                       backgroundImage: `url(${convertFileSrc(`${staged.dir}/spritesheet.webp`)})`,
                       backgroundPosition: "0 0",
-                      backgroundSize: "768px 1144px",
+                      // 半倍显示比例（帧 192×208 → 96×104）：v1 全高 936，v2 1144；未探测时按 v2 兜底
+                      backgroundSize: rows === 9 ? "768px 936px" : "768px 1144px",
                     }}
                     data-testid="import-preview"
                     title={t("pet.import.preview")}
@@ -332,8 +354,10 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                       {t("pet.import.name")}
                     </label>
                     <Input value={name} onChange={(e) => setName(e.target.value)} />
-                    {!nameOk && (
-                      <p className="text-destructive text-xs">{t("pet.import.nameHint")}</p>
+                    {nameProblem && (
+                      <p className="text-destructive text-xs" data-testid="import-name-problem">
+                        {t(petNameProblemKey(nameProblem))}
+                      </p>
                     )}
                   </div>
                   <div>

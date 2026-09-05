@@ -89,4 +89,69 @@ describe("petRuntime", () => {
       tauriInvokeMock.mockRestore();
     });
   });
+
+  describe("探测超时与能力回写（issue #33-9/#33-10）", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("probeSheetRows：图集永不加载 → 超时拒绝（sheet-timeout），activatePet 不再永久 busy", async () => {
+      class StalledImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        set src(_v: string) {
+          /* 永不回调 */
+        }
+      }
+      vi.stubGlobal("Image", StalledImage);
+      const { probeSheetRows } = await import("@/components/pet/petRuntime");
+      await expect(probeSheetRows("x://sheet", 20)).rejects.toMatchObject({
+        code: "sheet-timeout",
+      });
+    });
+
+    it("resolveActivePet：快照整体失败 → 运行时无语音且回写 voice-cap=0（spec §5.2 回落契约）", async () => {
+      class FakeImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        naturalWidth = 1536;
+        naturalHeight = 2288;
+        set src(_v: string) {
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      vi.stubGlobal("Image", FakeImage);
+      // fetch blob 失败（文件锁定/同大小损坏）→ snapshotVoices 整体降级 null
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, blob: async () => ({}) })));
+      const { resolveActivePet, loadVoiceCap } = await import("@/components/pet/petRuntime");
+      const { tauriInvokeMock: mock } = await import("../msw/tauriMocks");
+      mock.mockReset();
+      saveActiveId("p1", true, "P1"); // 激活时缓存 voice-cap=1
+      mock.mockImplementation((cmd: string) => {
+        if (cmd === "pet_scan")
+          return Promise.resolve({
+            id: "p1",
+            dir: "/x/p1",
+            spritesheet: { rel: "spritesheet.webp", exists: true, size: 1 },
+            voiceFiles: [],
+          });
+        if (cmd === "pet_read_manifest")
+          return Promise.resolve({
+            id: "p1",
+            displayName: "P",
+            hasVoice: true,
+            hasSubtitle: true,
+            spriteVersionNumber: 2,
+            voices: [
+              { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 3000 },
+            ],
+          });
+        return Promise.resolve(undefined);
+      });
+      const pet = await resolveActivePet();
+      expect(pet.hasVoice).toBe(false); // 快照失败降级
+      expect(loadVoiceCap()).toBe(false); // 缓存同步回写，petSoundTakeover 不再误判
+    });
+  });
 });
