@@ -410,28 +410,40 @@ if (!isTauri) {
           },
         ]);
 
+      // 真实命令返回 NativeExtensionRecord 数组（serde camelCase，resource.rs）
       case "scan_native_resources":
+        return Promise.resolve([
+          {
+            id: "skill-brainstorming",
+            kind: "skill",
+            name: "brainstorming",
+            sourcePath: "/Users/jarvis/.claude/skills/brainstorming",
+            sourceTool: "claude",
+            description: null,
+            detectedAt: new Date().toISOString(),
+            imported: false,
+          },
+          {
+            id: "skill-systematic-debugging",
+            kind: "skill",
+            name: "systematic-debugging",
+            sourcePath: "/Users/jarvis/.claude/skills/systematic-debugging",
+            sourceTool: "claude",
+            description: null,
+            detectedAt: new Date().toISOString(),
+            imported: false,
+          },
+        ]);
+
+      // ApplyResult 形状（tool_settings.rs，camelCase）；null 会让设置页
+      // result.rebuildFailed.length 抛 TypeError（issue #36 review Minor）
+      case "update_tool_settings":
         return Promise.resolve({
-          skills: [
-            {
-              name: "brainstorming",
-              path: "/Users/jarvis/.claude/skills/brainstorming/SKILL.md",
-              tool_id: "claude",
-            },
-            {
-              name: "systematic-debugging",
-              path: "/Users/jarvis/.claude/skills/systematic-debugging/SKILL.md",
-              tool_id: "claude",
-            },
-          ],
-          mcps: [
-            {
-              name: "context7",
-              config_path: "/Users/jarvis/.claude/settings.json",
-              tool_id: "claude",
-            },
-          ],
-          plugins: [],
+          restored: [],
+          restoredMcps: [],
+          rebuildFailed: [],
+          skippedKept: [],
+          skippedLost: [],
         });
 
       case "list_repo_skills":

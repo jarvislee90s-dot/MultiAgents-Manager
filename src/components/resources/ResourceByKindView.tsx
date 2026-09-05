@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { Button } from "@/components/ui/button";
 import {
@@ -160,7 +161,7 @@ export function ResourceByKindView() {
       const path = await invoke<string>("open_tool_resource", { toolId, kind });
       toast.success(path);
     } catch (e) {
-      toast.error(t("common.operationFailed", { error: e }));
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -193,7 +194,7 @@ export function ResourceByKindView() {
       toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
       await refresh();
     } catch (e) {
-      toast.error(t("common.operationFailed", { error: e }));
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -259,7 +260,7 @@ export function ResourceByKindView() {
       toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
       await refresh();
     } catch (e) {
-      toast.error(t("common.operationFailed", { error: e }));
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -276,7 +277,7 @@ export function ResourceByKindView() {
         );
         await refresh();
       } catch (e) {
-        toast.error(t("resources.enableFailed", { error: e }));
+        toast.error(t("resources.enableFailed", { error: formatInvokeError(e, t) }));
       }
     } else {
       // 亮 → 灰：先检查类型，再弹窗
@@ -292,7 +293,7 @@ export function ResourceByKindView() {
         });
         setDialogOpen(true);
       } catch (e) {
-        toast.error(t("resources.checkFailed", { error: e }));
+        toast.error(t("resources.checkFailed", { error: formatInvokeError(e, t) }));
       }
     }
   };
@@ -306,7 +307,7 @@ export function ResourceByKindView() {
       );
       await refresh();
     } catch (e) {
-      toast.error(t("resources.removeFailed", { error: e }));
+      toast.error(t("resources.removeFailed", { error: formatInvokeError(e, t) }));
     } finally {
       setDialogOpen(false);
       setPending(null);
@@ -320,7 +321,7 @@ export function ResourceByKindView() {
       toast.success(t("resources.uninstallSuccess", { name: pendingUninstall.name }));
       await refresh();
     } catch (e) {
-      toast.error(t("common.operationFailed", { error: e }));
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
     } finally {
       setPendingUninstall(null);
     }
@@ -346,7 +347,7 @@ export function ResourceByKindView() {
       setNewMcp({ name: "", command: "", args: "", env: "" });
       await refresh();
     } catch (e) {
-      toast.error(t("resources.addMcpFailed", { error: e }));
+      toast.error(t("resources.addMcpFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -844,7 +845,7 @@ export function ResourceByKindView() {
           try {
             await refresh();
           } catch (e) {
-            toast.error(t("common.operationFailed", { error: e }));
+            toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
           }
         }}
       />

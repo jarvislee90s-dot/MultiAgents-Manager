@@ -217,6 +217,7 @@
 
 | 风险/限制 | 应对 |
 |-----------|------|
+| W5 批量保存「重建部分失败 → **自动回滚本次产物 + DB 保持未启用**（重新勾选即幂等重试）」为 2026-09-05 新增语义（§6 原文未规定，PR #41 实现） | 回滚复用停用清理（`disable_tool_cleanup`），产物状态与正常停用完全一致（Layer2 junction 残留行为相同，重新勾选幂等重建）；配套 `enable_allowed` 失败增量门控 + 批量保存重入互斥（`W5_APPLY_IN_PROGRESS`）与 JoinError 结构化错误码（`W5_APPLY_TASK_FAILED`） |
 | WorkBuddy 私有格式无文档，版本升级可能破坏 | 防御性解析 + 降级显示；fixture 测试锁格式假设 |
 | 深度链接路由格式未知 | 第一顺位优先探测；探不明则以 APP 级激活保底交付。实测结论（2026-09-04）：已探明并接线 —— WorkBuddy `workbuddy://chat/<sessionId>`（app.asar 源码证据）、Codex `codex://threads/<threadId>`（asar 模板证据）；threadId 与 rollout UUID 同源性待 GUI 实测确认，直达失败则回退 None 走 APP 级保底。**Windows 补充实测（同日）**：`workbuddy://` 已注册 handler；`codex://` 在未装 ChatGPT 桌面版的机器仅有协议标记、无 handler——「spawn 成功」不代表路由成功，派发前应校验 handler 存在性（Windows 查注册表 `\<scheme>\shell\open\command`，macOS 用 `LSCopyDefaultHandlerForURLScheme`），校验失败走保底且**不得标已读**。**Windows 判据修订（2026-09-05）**：ChatGPT 为 MSIX 安装时协议关联走 AppModel，注册表仅有 `URL Protocol` 标记、无 `shell\open\command`——仅查 command 产生**假阴性**（实测派发 `codex://threads/<uuid>` 三次均成功前台化且 OCR 证实会话级导航），判据放宽为「command 非空 **或 `URL Protocol` 值存在**」；假阳性风险由派发后 B 前台验证兜底（未前台化 → 落回保底聚焦、不标已读），分层防御 |
 | 外部进程无法 APP 内部导航到具体会话 | 已确认接受（APP 前台级别） |

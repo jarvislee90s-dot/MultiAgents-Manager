@@ -111,7 +111,9 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
 }
 
 #[tauri::command]
-pub fn scan_native_resources(tool_id: String) -> Vec<NativeExtensionRecord> {
+pub fn scan_native_resources(tool_id: String) -> Result<Vec<NativeExtensionRecord>, String> {
+    // issue #36-1：与同文件 disable/enable_skill_for_tool 同守卫
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let mut results = Vec::new();
     let skill_dir = crate::adapter::primary_skill_dir(&tool_id);
     if let Some(dir) = skill_dir {
@@ -137,13 +139,20 @@ pub fn scan_native_resources(tool_id: String) -> Vec<NativeExtensionRecord> {
             }
         }
     }
-    results
+    Ok(results)
 }
 
 #[tauri::command]
 pub fn import_native_resources(
     items: Vec<(String, String, String)>,
-) -> crate::services::ImportStats {
+) -> Result<crate::services::ImportStats, String> {
+    // issue #36-1：按来源工具预检——任一禁用工具即整体拒绝，避免部分导入后状态混杂
+    let mut seen = std::collections::HashSet::new();
+    for (_, _, tool) in &items {
+        if seen.insert(tool.clone()) {
+            crate::services::tool_settings::ensure_tool_enabled(tool)?;
+        }
+    }
     let mut imported = 0;
     let mut skipped = 0;
     for (source_path, name, source_tool) in items {
@@ -178,18 +187,20 @@ pub fn import_native_resources(
         }
         imported += 1;
     }
-    crate::services::ImportStats {
+    Ok(crate::services::ImportStats {
         imported,
         newly_added: imported,
         skipped_dup: skipped,
         source_counts: vec![],
-    }
+    })
 }
 
 #[tauri::command]
 pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     let global = crate::database::list_extensions();
-    let native = scan_native_resources(tool_id.clone());
+    // issue #36-1：scan 现带 W5 守卫（返回 Result）——本列表仅对已勾选工具展示，
+    // 防御场景（禁用工具的直连调用）native 置空即可
+    let native = scan_native_resources(tool_id.clone()).unwrap_or_default();
     let assignments = crate::database::list_assignments(&tool_id);
 
     // 补充 SSOT 仓库中已有但未在 DB extensions 中的 skill
@@ -771,6 +782,8 @@ fn open_file_in_system(path: &std::path::Path) -> Result<(), String> {
 /// 返回实际打开的路径供前端 toast 展示
 #[tauri::command]
 pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String, String> {
+    // issue #36-1：未勾选工具的资源定位（含目录自动创建副作用）直接拒绝
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let (path, is_file) = resolve_tool_resource_path(&tool_id, &kind)?;
     if is_file {
         if !path.exists() {

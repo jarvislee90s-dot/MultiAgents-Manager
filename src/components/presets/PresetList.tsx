@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -61,7 +62,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
       setShowCreate(false);
       load();
     } catch (e) {
-      toast.error(t("common.createFailed", { error: e }));
+      toast.error(t("common.createFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -103,7 +104,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
       }
       load();
     } catch (e) {
-      toast.error(t("presets.applyFailed", { error: e }));
+      toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
     }
 
     setCompatibilityDialog(null);
@@ -114,7 +115,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
       await invoke("deactivate_preset", { presetId, toolId });
       toast.success(t("presets.deactivatedFrom", { name: presetName, tool: toolId }));
     } catch (e) {
-      toast.error(t("presets.deactivateFailed", { error: e }));
+      toast.error(t("presets.deactivateFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -124,7 +125,7 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
       toast.success(t("common.deleted"));
       load();
     } catch (e) {
-      toast.error(t("common.deleteFailed", { error: e }));
+      toast.error(t("common.deleteFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -287,7 +288,7 @@ function SubAgentPresetActions({
         );
       }
     } catch (e) {
-      toast.error(t("presets.applyFailed", { error: e }));
+      toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -302,7 +303,7 @@ function SubAgentPresetActions({
         })
       );
     } catch (e) {
-      toast.error(t("presets.deactivateFailed", { error: e }));
+      toast.error(t("presets.deactivateFailed", { error: formatInvokeError(e, t) }));
     }
   };
 

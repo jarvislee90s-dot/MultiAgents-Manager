@@ -44,6 +44,8 @@ import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
 import { loadActiveName } from "@/components/pet/petRuntime";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import { toast } from "sonner";
+import { formatInvokeError } from "@/lib/invokeError";
+import { ToolIcon } from "@/components/common/ToolIcon";
 import { Toaster } from "@/components/ui/sonner";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 
@@ -222,14 +224,20 @@ export default function SettingsPage() {
     setActiveSection(next);
   };
 
-  // 批量应用变更；成功后复位草稿、失效缓存并执行缓存跳转
+  // 批量应用变更；成功后复位草稿、失效缓存并执行缓存跳转。
+  // saving 态禁用确认按钮（review-2 Important 1：异步保存后双击会触发并发保存）
+  const [toolSaving, setToolSaving] = useState(false);
   const applyChanges = async () => {
+    if (toolSaving) return;
+    setToolSaving(true);
     try {
       const result = await invoke<{
         restored: string[];
         restoredMcps: string[];
         rebuildFailed: string[];
-        skipped: string[];
+        // issue #36-4：跳过项按现场分账——kept=链接保持不变，lost=现场缺失需重建
+        skippedKept: string[];
+        skippedLost: string[];
       }>("update_tool_settings", {
         changes: changedRows.map((r) => ({ toolId: r.toolId, enabled: r.enabled })),
       });
@@ -240,8 +248,14 @@ export default function SettingsPage() {
         );
       }
       // SSOT 缺失/暂存失败的项逐项报告（spec W5 清理语义 1 + §9），不中断整体保存
-      if (result.skipped.length) {
-        toast.warning(t("settings.tools.skippedItems", { items: result.skipped.join(", ") }));
+      if (result.skippedKept.length) {
+        toast.warning(
+          t("settings.tools.skippedKeptItems", { items: result.skippedKept.join(", ") })
+        );
+      }
+      // 现场已失（还原中断且链接恢复也失败）：更高级别提示，需重新勾选重建
+      if (result.skippedLost.length) {
+        toast.error(t("settings.tools.skippedLostItems", { items: result.skippedLost.join(", ") }));
       }
       setConfirmOpen(false);
       await loadToolSettings();
@@ -252,7 +266,9 @@ export default function SettingsPage() {
       pendingJumpRef.current = null;
       jump?.();
     } catch (e) {
-      toast.error(String(e));
+      toast.error(formatInvokeError(e, t));
+    } finally {
+      setToolSaving(false);
     }
   };
 
@@ -680,6 +696,8 @@ export default function SettingsPage() {
                 {toolRows.map((r) => (
                   <div key={r.toolId} className="flex items-center justify-between px-3 py-2">
                     <div className="flex items-center gap-2">
+                      {/* issue #36-6：行首补图标（spec §6「图标 + 名称 + badge + 开关」） */}
+                      <ToolIcon toolId={r.toolId} size={16} />
                       <span className="text-sm font-medium">{r.name}</span>
                       <span
                         className={cn(
@@ -750,7 +768,9 @@ export default function SettingsPage() {
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>
               {t("settings.tools.cancel")}
             </Button>
-            <Button onClick={() => void applyChanges()}>{t("settings.tools.confirm")}</Button>
+            <Button onClick={() => void applyChanges()} disabled={toolSaving}>
+              {t("settings.tools.confirm")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

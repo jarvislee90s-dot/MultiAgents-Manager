@@ -21,7 +21,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order（issue #36-5）：Map 用 IndexMap 保序——写回 ~/.claude.json 等
+# JSON 工具配置时不再把整个文件按字母序重排（TOML/JSONC 路径本就保序）
+serde_json = { version = "1", features = ["preserve_order"] }
 sysinfo = "0.32"
 dirs = "5.0"
 log = "0.4"
