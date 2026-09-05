@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
 import { Scan, Import, FolderOpen } from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -52,7 +53,7 @@ export function ResourceByToolView() {
       }
       await loadToolResources(toolId);
     } catch (e) {
-      toast.error(t("common.scanFailed", { error: e }));
+      toast.error(t("common.scanFailed", { error: formatInvokeError(e, t) }));
     } finally {
       setScanning((prev) => ({ ...prev, [toolId]: false }));
     }
@@ -71,7 +72,7 @@ export function ResourceByToolView() {
         toast.info(t("resources.alreadyExists", { name: item.name }));
       }
     } catch (e) {
-      toast.error(t("resources.importFailed", { error: e }));
+      toast.error(t("resources.importFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -100,7 +101,7 @@ export function ResourceByToolView() {
       await loadDuplicates(toolId);
       await loadToolResources(toolId);
     } catch (e) {
-      toast.error(t("resources.cleanupFailed", { error: e }));
+      toast.error(t("resources.cleanupFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -113,7 +114,7 @@ export function ResourceByToolView() {
       await loadDuplicates(toolId);
       await loadToolResources(toolId);
     } catch (e) {
-      toast.error(t("resources.cleanupFailed", { error: e }));
+      toast.error(t("resources.cleanupFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
@@ -122,7 +123,7 @@ export function ResourceByToolView() {
       const path = await invoke<string>("open_tool_resource", { toolId, kind: "skill" });
       toast.success(path);
     } catch (e) {
-      toast.error(t("common.operationFailed", { error: e }));
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
     }
   };
 

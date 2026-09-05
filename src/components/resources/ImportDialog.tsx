@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -91,7 +92,7 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
       onImported();
       onClose();
     } catch (e) {
-      toast.error(t("resources.importFailed", { error: e }));
+      toast.error(t("resources.importFailed", { error: formatInvokeError(e, t) }));
     }
   };
 

@@ -131,7 +131,8 @@
       "cancel": "取消",
       "applied": "已应用",
       "rebuildFailed": "以下项重建失败（需重新勾选后重试）：{{items}}",
-      "skippedItems": "以下项未能还原（SSOT 缺失或暂存失败，链接保持不变）：{{items}}"
+      "skippedKeptItems": "以下项未能还原（SSOT 缺失或暂存失败，链接保持不变）：{{items}}",
+      "skippedLostItems": "以下项还原中断且现场缺失（需重新勾选后重建）：{{items}}"
     }
   },
   "home": {
@@ -570,5 +571,8 @@
       "download-url-invalid": "下载地址非法",
       "finalize-scan-failed": "导入落地后读取宠物信息失败"
     }
+  },
+  "errors": {
+    "toolDisabled": "工具 {{tools}} 未启用，请先在设置-工具管理中开启"
   }
 }
