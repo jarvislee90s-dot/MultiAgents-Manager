@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +16,8 @@ vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
 });
 
 import { useVoiceDurationProbe } from "@/components/pet/manage/useVoiceDurationProbe";
+import { probeAudioDurationMs } from "@/components/pet/petRuntime";
+import type { VoiceRow } from "@/components/pet/petValidation";
 
 const mk = (file: string, durationMs: number | null) => ({
   group: "general",
@@ -48,5 +51,26 @@ describe("useVoiceDurationProbe（第九轮 Bug2）", () => {
     renderHook(() => useVoiceDurationProbe([mk("voice/general/ok.mp3", null)], setRows, null));
     await new Promise((r) => setTimeout(r, 50));
     expect(setRows).not.toHaveBeenCalled();
+  });
+
+  it("失败文件不重探（P1-3）：状态真实回流后探测次数收敛", async () => {
+    // renderHook 内自持 useState：探测结果经真实 setState 回流触发 effect 重跑，
+    // 与线上行为同构（旧实现中失败行 null→新数组→重跑→永远 pending，探测次数持续增长）
+    const { result } = renderHook(() => {
+      const [rows, setRows] = useState<VoiceRow[]>([
+        mk("voice/general/ok.mp3", null),
+        mk("voice/done/bad.mp3", null),
+      ]);
+      useVoiceDurationProbe(rows, setRows, "/x/p1");
+      return rows;
+    });
+    await waitFor(() =>
+      expect(result.current.find((r) => r.file.includes("ok"))?.durationMs).toBe(3000)
+    );
+    const calls = vi.mocked(probeAudioDurationMs).mock.calls.length;
+    expect(calls).toBe(2); // ok + bad 各一次
+    await new Promise((r) => setTimeout(r, 80));
+    expect(vi.mocked(probeAudioDurationMs).mock.calls.length).toBe(calls);
+    expect(result.current.find((r) => r.file.includes("bad"))?.durationMs).toBeNull();
   });
 });
