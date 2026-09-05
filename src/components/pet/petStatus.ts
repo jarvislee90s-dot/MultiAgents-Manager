@@ -17,7 +17,6 @@ export interface PetEntry {
   light: PetLight | null;
   prevColor: StatusColor | null;
   unread: boolean;
-  vanishedAt: number | null;
   title: string;
   lines: string[];
 }
@@ -26,7 +25,6 @@ export type PetStatusState = Record<string, PetEntry>;
 
 const RUNNING_SET: ReadonlySet<SessionStatus> = new Set(["processing", "thinking", "compacting"]);
 const MAX_CARDS = 6;
-const VANISH_TTL_MS = 60_000;
 
 export function statusColor(s: SessionStatus): StatusColor {
   if (s === "waiting") return "red";
@@ -96,7 +94,8 @@ export function cardTitle(session: Session): string {
 export function computePetStatus(
   sessions: Session[],
   prev: PetStatusState | null,
-  now: number
+  // 旧版消失 TTL 的时间基准；TTL 删除后保留占位（调用方签名不变）
+  _now: number
 ): {
   cards: PetCard[];
   moreCount: number;
@@ -115,12 +114,10 @@ export function computePetStatus(
     const light: PetLight | null =
       color === "red" ? "waiting" : color === "yellow" ? "running" : unread ? "done" : null;
     const title = cardTitle(s);
-    // vanishedAt 记录「最后见到该会话」的时间，消失 TTL 以此起算（spec D9/H4）
     state[s.id] = {
       light,
       prevColor: color,
       unread,
-      vanishedAt: now,
       title,
       lines: cardLines(color, s),
     };
@@ -128,14 +125,10 @@ export function computePetStatus(
     if (!first && color === "red" && p?.prevColor !== "red") events.newWaiting.push(s.id);
   }
 
-  // 消失会话（对应终端已关闭）：仅"完成未读"绿卡自最后见到起保留 60s（完成通知
-  // 给用户留点击阅读的时间，spec D9/H4）；其余卡片立即消失，与看板行为一致（用户反馈）
-  for (const [id, p] of Object.entries(prev ?? {})) {
-    if (state[id]) continue;
-    if (!(p.light === "done" && p.unread)) continue; // 红/黄或已读绿卡：立即清理
-    if (p.vanishedAt !== null && now - p.vanishedAt > VANISH_TTL_MS) continue;
-    state[id] = { ...p, vanishedAt: p.vanishedAt ?? now };
-  }
+  // 会话从 payload 消失（终端/APP 关闭）→ 立即清卡，与看板行为一致（T1 收敛）：
+  // 旧版「未读绿卡保留 60s」已删——绿未读的持续可见由后端 unread pool 保证
+  // （App 类会话一直在 payload 里），CLI 绿卡消失即消失；已读同步走 session-read
+  // 事件广播（跨窗口），不再依赖本地 TTL。
 
   const all = cardsFromState(state);
   return {

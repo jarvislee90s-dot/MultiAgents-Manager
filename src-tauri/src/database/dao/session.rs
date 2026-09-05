@@ -29,6 +29,18 @@ pub fn update_session_status(session_id: &str, agent_type: &str, status: &str) -
 }
 
 /// 清理不再活跃的会话缓存
+/// 读取缓存的上一轮状态（回合一末尾才统一更新缓存，轮中读取即「上一轮」值；
+/// review F1 未读迁移语义据此判定状态迁移边沿）
+pub fn find_status(session_id: &str) -> Option<String> {
+    let conn = DB.lock().unwrap();
+    conn.query_row(
+        "SELECT status FROM session_status_cache WHERE session_id = ?",
+        [session_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 pub fn cleanup_stale_sessions(active_ids: &HashSet<String>) {
     let conn = DB.lock().unwrap();
     let all: Vec<String> = conn

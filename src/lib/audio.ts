@@ -1,8 +1,11 @@
 // 文件音效系统 — 12 个内置音效，全局默认 + 每工具覆盖（localStorage: mam-sound-config）
+import type { AgentType } from "@/types/session";
 
 export interface SoundConfig {
   default: string; // 音效 id 或 "mute"
-  tools: Partial<Record<"claude" | "codex" | "opencode" | "openclaw" | "kimi", string>>; // 音效 id 或 "mute"
+  // 工具键类型由会话 AgentType 联合派生（P2-9：不再硬编码工具 id 列表，
+  // 与后端下发工具列表同源，避免新增工具时声音配置键漂移）
+  tools: Partial<Record<AgentType, string>>; // 音效 id 或 "mute"
 }
 
 export const SOUND_IDS = [
@@ -81,6 +84,7 @@ export async function playSound(id: string) {
 /** 任务完成（→绿）时按工具播放：专属覆盖 → 全局默认；mute 跳过 */
 export function playCompletionSound(agentType: string) {
   const cfg = getSoundConfig();
-  const id = cfg.tools[agentType as keyof SoundConfig["tools"]] ?? cfg.default;
+  // agentType 为后端下发的工具 id（与 AgentType 同源）；未知 id 防御性跳过
+  const id = cfg.tools[agentType as AgentType] ?? cfg.default;
   if (id && id !== "mute") playSound(id);
 }

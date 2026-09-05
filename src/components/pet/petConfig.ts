@@ -141,7 +141,8 @@ export function petSoundTakeover(): boolean {
   return loadVisible() && loadVoiceCap();
 }
 
-/** 通知浮窗抑制：宠物开启且置顶（spec D4） */
+/** 通知浮窗抑制：宠物开启即抑制——气泡是唯一通知面（spec W1，浮窗与系统通知降级路径
+ *  均在 useNotification 的同一 if 内，天然一并静默） */
 export function petSuppressPopup(): boolean {
-  return loadVisible() && loadConfig().alwaysOnTop;
+  return loadVisible();
 }

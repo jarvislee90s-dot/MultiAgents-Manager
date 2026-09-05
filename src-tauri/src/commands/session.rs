@@ -2,6 +2,7 @@
 
 use crate::adapter;
 use crate::session::SessionsResponse;
+use tauri::Emitter;
 
 #[tauri::command]
 pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
@@ -31,17 +32,65 @@ pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
     response
 }
 
+/// 跳转成功 → 标记该会话已读（仅删除对应未读行；同工具其他未读卡保留，spec W4）。
+/// T1：删行后广播 session-read，宠物等辅助窗口据此同步已读置位（卡片行为与看板一致）
+fn mark_read_on_jump(app: &tauri::AppHandle, session_id: &Option<String>, agent_type: &Option<String>) {
+    if let (Some(sid), Some(agent)) = (session_id, agent_type) {
+        crate::database::dao::unread::delete(&agent.to_lowercase(), sid);
+        let _ = app.emit(
+            "session-read",
+            serde_json::json!({ "agentType": agent, "sessionId": sid }),
+        );
+    }
+}
+
+// 参数即 Tauri IPC 契约（前端 invoke 逐名传参），不宜打包为结构体
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn focus_session(
+    app: tauri::AppHandle,
     pid: u32,
     session_id: Option<String>,
     agent_type: Option<String>,
     project_name: Option<String>,
     last_message: Option<String>,
+    form: Option<String>,
+    unread: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
         let system = sysinfo::System::new_all();
+        // unread 参数（未读标记）在 Windows 深度链接路径暂不消费（已读回标统一在
+        // 跳转成功分支执行）；保留签名以与前端 JumpTarget.unread 对齐
+        let _ = unread;
+        // P1-1（Windows）：App 形态且带 sessionId 且工具为 workbuddy/codex 时，
+        // 深度链接为第一顺位（session 级直达）：handler 校验通过 → 派发 → 前台验证成功
+        // → 标已读返回；任一步失败无缝落回现有 resolve_and_focus → reactivate_tool_app 链路。
+        // codex 由 handler 校验天然门控（无 handler 机器自动跳过，实测语义见 P1-2）
+        if form.as_deref() == Some("app") {
+            if let (Some(sid), Some(agent)) = (session_id.as_deref(), agent_type.as_deref()) {
+                if matches!(agent, "workbuddy" | "codex")
+                    && crate::window::deep_link::scheme_handler_exists(agent)
+                {
+                    if let Some(url) = crate::window::deep_link::session_url(agent, sid) {
+                        if crate::window::deep_link::open_url(&url).is_ok()
+                            && crate::window::win32::verify_foreground_tool(
+                                &system,
+                                agent,
+                                2_000,
+                                250,
+                            )
+                        {
+                            mark_read_on_jump(&app, &session_id, &agent_type);
+                            return Ok(serde_json::json!({
+                                "type": "focused",
+                                "via": "deep-link"
+                            }));
+                        }
+                    }
+                }
+            }
+        }
         // marker 与 hook 注入的标题标记一致：MAM:<session_id 前 8 位>
         let marker = session_id
             .as_deref()
@@ -59,19 +108,66 @@ pub fn focus_session(
             &running_projects,
         ) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
+                mark_read_on_jump(&app, &session_id, &agent_type);
                 Ok(serde_json::json!({ "type": "focused" }))
             }
             Ok(crate::window::win32::FocusOutcome::Ambiguous(windows)) => {
                 Ok(serde_json::json!({ "type": "ambiguous", "windows": windows }))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // pid 失效兜底（W2）：pid 已死时按工具激活宿主 APP 窗口
+                let pid_dead = system.process(sysinfo::Pid::from_u32(pid)).is_none();
+                if pid_dead
+                    && crate::window::win32::reactivate_tool_app(&system, agent_type.as_deref())
+                        .is_ok()
+                {
+                    mark_read_on_jump(&app, &session_id, &agent_type);
+                    Ok(serde_json::json!({ "type": "focused" }))
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = (session_id, agent_type, project_name, last_message);
-        crate::window::focus_terminal_for_pid(pid).map(|_| serde_json::json!({ "type": "focused" }))
+        let _ = (project_name, last_message, form, unread);
+        // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
+        if crate::window::focus_terminal_for_pid(pid).is_ok() {
+            mark_read_on_jump(&app, &session_id, &agent_type);
+            return Ok(serde_json::json!({ "type": "focused", "via": "tty" }));
+        }
+        // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）。
+        // via=app-fallback：CLI 会话 TTY 聚焦失败走到这里的 UX 提示依据（review M3）
+        #[cfg(target_os = "macos")]
+        if let Some(mut out) =
+            crate::window::activate_agent_app(pid, agent_type.as_deref(), session_id.as_deref())
+        {
+            // P1-2（review）：macOS 深链无前台验证，路由成败不可证 → 不标已读
+            //（宁可让用户再点一次/X 关闭，不可误删未读卡）；bundle/枚举兜底激活
+            // 仍按 spec §5「兜底激活同样算跳转成功」回标已读
+            let via = out.get("via").and_then(|v| v.as_str());
+            if macos_deep_link_marks_read(via) {
+                mark_read_on_jump(&app, &session_id, &agent_type);
+                out["via"] = serde_json::Value::String("app-fallback".into());
+            }
+            return Ok(out);
+        }
+        // 非 macOS 桌面平台无 APP 激活链路，防未使用告警
+        #[cfg(not(target_os = "macos"))]
+        let _ = (agent_type, session_id);
+        Err(format!(
+            "无法聚焦目标（pid={}）：进程无 TTY 且未找到宿主 APP",
+            pid
+        ))
     }
+}
+
+/// macOS 深链成功是否回标已读（P1-2 判定核心，cfg(test) 使其 Windows 侧可测）：
+/// via=deep-link → 不标（无前台验证，路由成败不可证）；其余（bundle/枚举兜底）→ 标
+#[cfg(any(target_os = "macos", test))]
+fn macos_deep_link_marks_read(via: Option<&str>) -> bool {
+    via != Some("deep-link")
 }
 
 /// 窗口选择器点选后按句柄聚焦
@@ -86,6 +182,19 @@ pub fn focus_hwnd(hwnd: isize) -> Result<(), String> {
         let _ = hwnd;
         Err("当前平台不支持".to_string())
     }
+}
+
+/// 手动关闭活跃 App 卡（T2 X 按钮，「暂离不提示」）：写入进程内 dismiss 集合，
+/// 从看板与宠物隐藏；同一会话状态变化后 key 不匹配自然重现。
+/// 不碰 unread_sessions 表（未读卡的 X 走 mark_session_read 已读语义）。
+/// status 用前端 SessionStatus 字符串（serde lowercase，如 "waiting"），
+/// 与 filter_dismissed_cards 的归一化（Debug 形态转小写）一致
+#[tauri::command]
+pub fn dismiss_session_card(agent_type: String, session_id: String, status: String) {
+    crate::monitor::SESSION_DISMISALS
+        .lock()
+        .unwrap()
+        .insert((agent_type.to_lowercase(), session_id, status.to_lowercase()));
 }
 
 /// 从进程快照收集运行会话的 (工具id, 项目目录名)——仅进程扫描，无文件解析开销
@@ -124,5 +233,20 @@ pub fn kill_session(pid: u32) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("进程 {} 不存在", pid))
+    }
+}
+
+#[cfg(test)]
+mod macos_deep_link_read_tests {
+    use super::macos_deep_link_marks_read;
+
+    /// P1-2 回归锁：macOS 深链（无前台验证，路由成败不可证）成功也不得回标已读；
+    /// bundle/枚举兜底激活（spec §5「同样算跳转成功」）与 TTY 直达照旧标已读
+    #[test]
+    fn deep_link_via_never_marks_read() {
+        assert!(!macos_deep_link_marks_read(Some("deep-link")));
+        assert!(macos_deep_link_marks_read(None)); // bundle/枚举兜底（无 via 标记）
+        assert!(macos_deep_link_marks_read(Some("tty")));
+        assert!(macos_deep_link_marks_read(Some("app-fallback")));
     }
 }

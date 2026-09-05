@@ -5,8 +5,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
-import { JumpWindowCandidate } from "@/hooks/useSessionJump";
+import { useSessionJump } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
+import { setupSessionReadListener } from "@/lib/query/sessionReadSync";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import { FOXBELL, resolveActivePet, type ActivePet } from "./petRuntime";
 import {
@@ -240,7 +241,11 @@ export function FoxbellPet() {
   // ---- 状态卡片（Task 10；spec §5/C1-C4）----
   const [cards, setCards] = useState<PetCard[]>([]);
   const [moreCount, setMoreCount] = useState(0);
-  const [candidates, setCandidates] = useState<JumpWindowCandidate[] | null>(null);
+  const [candidates, setCandidates] = useState<
+    import("@/hooks/useSessionJump").JumpWindowCandidate[] | null
+  >(null);
+  // P2-4：跳转统一走 useSessionJump（与看板同一实现，含歧义候选返回与 via=app-fallback 的 M3 提示）
+  const { focus: sessionJumpFocus, focusHwnd: sessionJumpFocusHwnd } = useSessionJump();
   const statusStateRef = useRef<PetStatusState | null>(null);
   const sessionIndexRef = useRef<Map<string, Session>>(new Map());
   const cardsWrapRef = useRef<HTMLDivElement | null>(null);
@@ -248,6 +253,28 @@ export function FoxbellPet() {
   // 稳定回调引用作依赖（与精灵 effect 同款），避免依赖整个 pet 对象每次渲染导致反复注销/登记
   useEffect(() => registerInteractive(cardsWrapRef.current), [registerInteractive]);
   const jumpCandidatesRef = useRef<HTMLDivElement | null>(null); // 候选浮层实测高度并入窗口几何（Task 11 评审遗留）
+
+  // T1 跨窗口已读同步：看板点掉未读卡（X 关闭 / 跳转成功）后，后端广播 session-read，
+  // 本窗口对状态机做与 ackDone 等价的已读置位（unread=false、绿卡 light=null）→
+  // 卡片立即消隐，与看板一致。此前宠物感知不到别处的已读，头顶卡晚 ~60s 才消。
+  // 组件内接线（宠物状态机是唯一消费者；unlisten 随组件卸载自动清理）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void setupSessionReadListener((_, sessionId) => {
+      const state = statusStateRef.current;
+      if (!state) return;
+      ackDone(state, sessionId);
+      setCards(cardsFromState(state));
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // 候选浮层关闭路径（spec §11）：Esc/点外关闭，不 ack、卡片保留（与 PetMenu 的 B10 同款监听）。
   // 用 layout effect：提交阶段同步注册监听，浮层 DOM 可被观察之前必然已挂上
@@ -313,28 +340,30 @@ export function FoxbellPet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
-  /** 点击卡片跳转终端；歧义时弹候选浮层；失败静默保留卡片（spec C2/§13） */
+  /** 点击卡片跳转终端；歧义时弹候选浮层；失败静默保留卡片（spec C2/§13）。
+   *  P2-4：统一走 useSessionJump（与看板一致）——含歧义候选返回、以及 CLI 会话
+   *  TTY 聚焦失败走 APP 级保底时的 M3 提示（via=app-fallback） */
   const jump = async (card: PetCard) => {
     const s = sessionIndexRef.current.get(card.id);
     if (!s) return;
     pendingAckRef.current = card.id; // 候选选中后按此 id ack
     try {
-      const result = await invoke<{ type: string; windows?: JumpWindowCandidate[] }>(
-        "focus_session",
-        {
-          pid: s.pid,
-          sessionId: s.id,
-          agentType: s.agentType,
-          projectName: s.projectName,
-          lastMessage: s.lastMessage ?? undefined,
-        }
-      );
-      if (result.type === "ambiguous" && result.windows?.length) {
-        setCandidates(result.windows); // 歧义候选浮层（spec D12）
+      const ambiguous = await sessionJumpFocus({
+        pid: s.pid,
+        id: s.id,
+        agentType: s.agentType,
+        projectName: s.projectName,
+        lastMessage: s.lastMessage ?? undefined,
+        unread: s.unread, // 歧义点选回标已读（spec W4 已读信号 1）
+        form: s.form, // M3：CLI 会话 APP 级保底时的 UX 提示依据
+      });
+      if (ambiguous && ambiguous.length) {
+        setCandidates(ambiguous); // 歧义候选浮层（spec D12）
         return;
       }
     } catch {
-      return; // 跳转失败：卡片保留（spec §13）
+      // 跳转失败也清除气泡（spec W1）：气泡是瞬时提醒，不因跳转失败卡死；
+      // 看板上的未读状态由 W4 已读机制独立管理，不在此处丢
     }
     ackDone(statusStateRef.current ?? {}, card.id); // 点击已读即消（spec C2）
     setCards(cardsFromState(statusStateRef.current ?? {}));
@@ -632,7 +661,7 @@ export function FoxbellPet() {
                 boxShadow: `0 0 0 2px ${c.light === "waiting" ? "rgba(239,68,68,.25)" : c.light === "running" ? "rgba(234,179,8,.25)" : "rgba(34,197,94,.25)"}`,
               }}
             />
-            <div style={{ minWidth: 0 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
               <div
                 style={{
                   fontWeight: 700,
@@ -658,6 +687,44 @@ export function FoxbellPet() {
                 </div>
               ))}
             </div>
+            {/* T2：宠物卡 X——与看板同语义。未读绿卡走已读，其余走 dismiss
+               （status 取 sessionIndexRef 的精确状态传后端）；点击不触发跳转 */}
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                const s = sessionIndexRef.current.get(c.id);
+                if (!s) return;
+                if (c.light === "done" && c.unread) {
+                  invoke("mark_session_read", {
+                    agentType: s.agentType,
+                    sessionId: s.id,
+                  }).catch(() => {});
+                } else {
+                  invoke("dismiss_session_card", {
+                    agentType: s.agentType,
+                    sessionId: s.id,
+                    status: s.status,
+                  }).catch(() => {});
+                }
+                // 本地立即消卡（后端 dismiss 在下一轮扫描过滤生效，payload 随之不含该卡）
+                const state = statusStateRef.current;
+                if (state?.[c.id]) {
+                  state[c.id].light = null;
+                  setCards(cardsFromState(state));
+                }
+              }}
+              style={{
+                flex: "none",
+                cursor: "pointer",
+                color: "#a07050",
+                padding: px(2),
+                lineHeight: 1,
+                borderRadius: px(4),
+              }}
+              title={t("sessions.dismissCard")}
+            >
+              ✕
+            </span>
           </div>
         ))}
         {moreCount > 0 && (
@@ -699,10 +766,13 @@ export function FoxbellPet() {
             <div
               key={w.hwnd}
               onClick={() => {
-                invoke("focus_hwnd", { hwnd: w.hwnd }).catch(() => {});
+                // 歧义点选：经 useSessionJump.focusHwnd 聚焦并回标已读（spec W4 已读信号 1，
+                // 与看板歧义分支一致）；随后 pet 自己的卡片 ack 消气泡
+                void sessionJumpFocusHwnd(w.hwnd).then(() => {
+                  ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
+                  setCards(cardsFromState(statusStateRef.current ?? {}));
+                });
                 setCandidates(null);
-                ackDone(statusStateRef.current ?? {}, pendingAckRef.current);
-                setCards(cardsFromState(statusStateRef.current ?? {}));
               }}
               style={{ padding: `${px(3)}px ${px(14)}px`, cursor: "pointer" }}
             >

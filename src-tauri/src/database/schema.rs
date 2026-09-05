@@ -80,6 +80,16 @@ pub fn init(conn: &Connection) {
             applied_at    TEXT NOT NULL,
             active        INTEGER NOT NULL DEFAULT 1
         );
+        CREATE TABLE IF NOT EXISTS unread_sessions (
+            tool_id          TEXT NOT NULL,
+            session_id       TEXT NOT NULL,
+            project_name     TEXT NOT NULL DEFAULT '',
+            title            TEXT,
+            last_message     TEXT,
+            turned_green_at  INTEGER NOT NULL,
+            expires_at       INTEGER NOT NULL,
+            PRIMARY KEY (tool_id, session_id)
+        );
         "#,
     )
     .expect("Failed to initialize database schema");

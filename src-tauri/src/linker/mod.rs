@@ -64,6 +64,13 @@ pub fn list_repo_skills() -> Vec<String> {
     skills
 }
 
+/// 判定路径是否为链接（symlink / Windows junction）。
+/// Windows 上 junction 的 is_symlink() 恒为 true（reparse point 被视作 symlink），
+/// 故直接以 is_symlink() 为判据即可双平台通用
+pub fn link_marker_is_present(target: &Path) -> bool {
+    target.is_symlink()
+}
+
 /// 创建链接：source（全局仓库）→ target（工具 skill 目录）
 pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
     // 如果目标已存在，先移除

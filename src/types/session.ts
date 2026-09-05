@@ -1,6 +1,6 @@
 // 会话类型定义 — 与 Rust Session 结构（camelCase 序列化）对应
 
-export type AgentType = "claude" | "codex" | "opencode" | "openclaw" | "kimi";
+export type AgentType = "claude" | "codex" | "opencode" | "openclaw" | "kimi" | "workbuddy";
 
 export type SessionStatus =
   "waiting" | "processing" | "thinking" | "compacting" | "idle" | "finished";
@@ -24,6 +24,8 @@ export interface Session {
   activeSubagentCount: number;
   form: ProcessForm;
   jumpSupported: boolean;
+  /** 未读标记（W4）：绿色已完成且用户未查看的持久未读卡（APP 类专用） */
+  unread: boolean;
 }
 
 export interface SessionsResponse {

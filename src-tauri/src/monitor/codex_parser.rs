@@ -25,8 +25,70 @@ struct CodexEntry {
     payload: Option<serde_json::Value>,
 }
 
+/// APP 形态每会话一卡（spec W4 通用规则的 Codex 落地）：
+/// 输入已按 mtime 倒序的 (文件, 会话) 与对应 mtime，取未被 CLI 认领的、24h 内有更新
+/// 的文件，按 sessionId 聚合（同会话多个 rollout 取最新），宿主 App 进程在场才出卡
+/// review F2：聚合宿主 = exe 匹配 monitor::host::is_host_process 的 App 进程
+/// （ChatGPT 主进程 / chatgpt.exe）；CLI 同名 exe、内嵌框架进程不算宿主，
+/// 防止孤儿框架进程让聚合卡在宿主死后继续出现
+fn codex_host_process(app_processes: &[AgentProcess]) -> Option<&AgentProcess> {
+    app_processes.iter().find(|p| {
+        p.exe
+            .as_ref()
+            .map(|e| {
+                crate::monitor::host::is_host_process(&e.to_string_lossy().to_lowercase(), "codex")
+            })
+            .unwrap_or(false)
+    })
+}
+
+pub fn aggregate_app_sessions(
+    parsed: &[(PathBuf, Option<Session>)],
+    mtimes: &[std::time::SystemTime],
+    host: &AgentProcess,
+) -> Vec<Session> {
+    use std::collections::HashMap;
+
+    let now = std::time::SystemTime::now();
+    let window = std::time::Duration::from_secs(24 * 3600);
+
+    // sessionId → (mtime, session)，保留同会话 mtime 最新者
+    let mut by_session: HashMap<String, (std::time::SystemTime, Session)> = HashMap::new();
+    for ((_, session_opt), mtime) in parsed.iter().zip(mtimes.iter()) {
+        let Some(session) = session_opt else { continue };
+        // 该文件已被 CLI 进程认领的判定由调用方通过 parsed 子集传入（见 get_codex_sessions）
+        let fresh = now
+            .duration_since(*mtime)
+            .map(|d| d < window)
+            .unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        by_session
+            .entry(session.id.clone())
+            .and_modify(|e| {
+                if *mtime > e.0 {
+                    *e = (*mtime, session.clone());
+                }
+            })
+            .or_insert_with(|| (*mtime, session.clone()));
+    }
+
+    by_session
+        .into_values()
+        .map(|(_, mut s)| {
+            s.pid = host.pid;
+            s.cpu_usage = host.cpu_usage;
+            s.form = ProcessForm::App;
+            s.jump_supported = jump_supported_for(ProcessForm::App);
+            s.github_url = get_github_url(&s.project_path);
+            s
+        })
+        .collect()
+}
+
 /// 扫描 ~/.codex/sessions，匹配运行中的 Codex 进程
-/// 1. 按 cwd 匹配 CLI 进程 2. 未匹配的 APP 进程回退到最近会话文件
+/// 1. 按 cwd 匹配 CLI 进程 2. 未被认领的近期 rollout 按 sessionId 聚合为 APP 卡
 pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let mut sessions = Vec::new();
 
@@ -45,19 +107,6 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         .iter()
         .map(|f| (f.clone(), parse_codex_jsonl(f, ProcessForm::Cli)))
         .collect();
-
-    // 无有效 cwd 的进程（如 APP 形态 cwd="/"）走 Phase 2 回退
-    let mut unmatched_processes: Vec<&AgentProcess> = Vec::new();
-    for process in processes {
-        let has_cwd = process
-            .cwd
-            .as_ref()
-            .map(|c| !normalize_cwd_for_match(&c.to_string_lossy()).is_empty())
-            .unwrap_or(false);
-        if !has_cwd {
-            unmatched_processes.push(process);
-        }
-    }
 
     let mut matched_file_indices: HashSet<usize> = HashSet::new();
 
@@ -93,26 +142,32 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         }
     }
 
-    // Phase 2: 未匹配的进程（如 APP 形态 cwd="/")回退到最近的未匹配会话文件
-    for process in &unmatched_processes {
-        for (idx, (file_path, session_opt)) in parsed.iter().enumerate() {
-            if matched_file_indices.contains(&idx) {
-                continue;
-            }
-            if let Some(session) = session_opt {
-                // 用实际 process_form 重新解析以获取正确状态
-                let mut session =
-                    parse_codex_jsonl(file_path, process.form).unwrap_or_else(|| session.clone());
-                session.pid = process.pid;
-                session.cpu_usage = process.cpu_usage;
-                session.form = process.form;
-                session.jump_supported = jump_supported_for(process.form);
-                session.github_url = get_github_url(&session.project_path);
-                sessions.push(session);
-                matched_file_indices.insert(idx);
-                break; // 每个未匹配进程只取一个会话
-            }
-        }
+    // Phase 2（W4 每会话一卡）：未被 CLI 认领的近期 rollout 按 sessionId 聚合，
+    // 每会话一张卡（宿主 App 进程在场才出活跃卡；完成转绿的持久未读由 DB 管线合并）
+    let app_processes: Vec<AgentProcess> = processes
+        .iter()
+        .filter(|p| matches!(p.form, ProcessForm::App))
+        .cloned()
+        .collect();
+    // review F2：宿主判定口径与 monitor::host::is_host_process 一致
+    // （ChatGPT 主进程/chatgpt.exe 才算宿主；CLI 同名 exe、内嵌框架进程不算）
+    if let Some(host) = codex_host_process(&app_processes) {
+        // CLI 认领 = Phase 1 已占用；剩余文件进入聚合。
+        // review F6：24h 新鲜过滤前移到二次 parse 之前——历史 rollout（通常占绝大多数）
+        // 不再重复尾读，只有窗口内的文件付出 App 形态重解析（300s 阈值语义）的 IO
+        let now = std::time::SystemTime::now();
+        let mtimes: Vec<std::time::SystemTime> = jsonl_files
+            .iter()
+            .map(|f| {
+                f.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
+            .collect();
+        let fresh = fresh_unclaimed_files(&jsonl_files, &mtimes, &matched_file_indices, now);
+        let unclaimed = unclaimed_app_parsed(&fresh);
+        let unclaimed_mtimes: Vec<std::time::SystemTime> = fresh.iter().map(|(_, m)| *m).collect();
+        sessions.extend(aggregate_app_sessions(&unclaimed, &unclaimed_mtimes, host));
     }
 
     info!(
@@ -121,6 +176,41 @@ pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         processes.len()
     );
     sessions
+}
+
+/// Phase 2 聚合输入构建：未被 CLI 认领且 24h 窗口内（已由 fresh_within_24h 前移过滤）
+/// 的 rollout 文件，按 APP 形态重新解析。旧实现（Task 10 重构前）会按实际进程形态
+/// 重解析，重构时丢失导致 APP 卡沿用 CLI 的 60s mtime 阈值——工具调用尾部停更
+/// 60-300s 被误判 Waiting（应为 Processing）。仅窗口内文件付出有界尾读（500 行）
+fn unclaimed_app_parsed(
+    fresh_files: &[(PathBuf, std::time::SystemTime)],
+) -> Vec<(PathBuf, Option<Session>)> {
+    fresh_files
+        .iter()
+        .map(|(f, _)| (f.clone(), parse_codex_jsonl(f, ProcessForm::App)))
+        .collect()
+}
+
+/// 未认领候选中 24h 窗口内的文件（review F6：纯函数，过滤前移到二次 parse 之前，
+/// 历史 rollout 不再重复尾读；mtimes 经参数注入，测试无需真实文件）
+fn fresh_unclaimed_files(
+    jsonl_files: &[PathBuf],
+    mtimes: &[std::time::SystemTime],
+    matched: &HashSet<usize>,
+    now: std::time::SystemTime,
+) -> Vec<(PathBuf, std::time::SystemTime)> {
+    let window = std::time::Duration::from_secs(24 * 3600);
+    jsonl_files
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !matched.contains(idx))
+        .filter_map(|(idx, f)| mtimes.get(idx).copied().map(|m| (f.clone(), m)))
+        .filter(|(_, mtime)| {
+            now.duration_since(*mtime)
+                .map(|age| age < window)
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 /// 递归收集 ~/.codex/sessions 下的 rollout-*.jsonl 文件（按修改时间倒序）
@@ -310,8 +400,105 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         active_subagent_count: 0,
         form: ProcessForm::Cli,                               // 由调用方设置
         jump_supported: jump_supported_for(ProcessForm::Cli), // 由调用方按进程形态覆盖
+        unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
         title: Some(codex_title),
     })
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::*;
+    use crate::session::SessionStatus;
+
+    fn mk(id: &str, proj: &str, title: Option<String>) -> Session {
+        Session {
+            id: id.into(),
+            agent_type: AgentType::Codex,
+            project_name: proj.into(),
+            project_path: format!("/tmp/{}", proj),
+            title,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: String::new(),
+            pid: 0,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::App,
+            jump_supported: true,
+            unread: false,
+        }
+    }
+
+    #[test]
+    fn aggregate_groups_by_session_id_and_picks_latest() {
+        // mtime 全部取过去 1h / 1min（实现按 now 起 24h 新鲜窗口过滤，UNIX_EPOCH 会被判过期）
+        let now = std::time::SystemTime::now();
+        let hour_ago = now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap_or(now);
+        let min_ago = now
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap_or(now);
+        // s1 两个 rollout，用 title 区分：最新文件（1min 前）应胜出
+        let parsed = vec![
+            (
+                PathBuf::from("/a-rollout-s1-old"),
+                Some(mk("s1", "P1", Some("old".into()))),
+            ),
+            (
+                PathBuf::from("/b-rollout-s1-new"),
+                Some(mk("s1", "P1", Some("new".into()))),
+            ),
+            (PathBuf::from("/c-rollout-s2"), Some(mk("s2", "P2", None))),
+        ];
+        // s1 最新文件是第 2 个（mtime 更大）
+        let mtimes = vec![hour_ago, min_ago, hour_ago];
+        let host = AgentProcess {
+            pid: 100,
+            cpu_usage: 0.0,
+            cwd: None,
+            exe: Some("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".into()),
+            form: ProcessForm::App,
+        };
+        let out = aggregate_app_sessions(&parsed, &mtimes, &host);
+        // 按 sessionId 聚合：s1 + s2 各一张，无重复
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|s| s.id == "s1"));
+        assert!(out.iter().any(|s| s.id == "s2"));
+        // 同会话多 rollout 取 mtime 最新者
+        assert_eq!(
+            out.iter().find(|s| s.id == "s1").unwrap().title.as_deref(),
+            Some("new")
+        );
+        // 宿主在场时卡归 App 形态、pid/cpu 取宿主进程
+        assert!(out.iter().all(|s| matches!(s.form, ProcessForm::App)));
+        assert!(out.iter().all(|s| s.pid == 100));
+    }
+
+    #[test]
+    fn aggregate_skips_matched_files_and_requires_host() {
+        let parsed = vec![(PathBuf::from("/x"), Some(mk("s1", "P", None)))];
+        let base = std::time::SystemTime::UNIX_EPOCH;
+        // 24h 窗口外 → 不出卡
+        let old = base + std::time::Duration::from_secs(1);
+        let now = std::time::SystemTime::now();
+        let hour_ago = now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap_or(now);
+        let host = AgentProcess {
+            pid: 100,
+            cpu_usage: 0.0,
+            cwd: None,
+            exe: Some("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".into()),
+            form: ProcessForm::App,
+        };
+        // 24h 窗口外 → 不出卡（宿主缺席不出卡的口径由 codex_host_criterion 测试锁定）
+        assert!(aggregate_app_sessions(&parsed, &[old], &host).is_empty());
+        let _ = hour_ago;
+    }
 }
 
 #[cfg(test)]
@@ -330,5 +517,134 @@ mod title_tests {
         .unwrap();
         let session = parse_codex_jsonl(&jsonl, ProcessForm::Cli).expect("应解析出会话");
         assert_eq!(session.title.as_deref(), Some("会话🔥x"));
+    }
+}
+
+#[cfg(test)]
+mod phase2_app_form_tests {
+    use super::*;
+    use crate::session::SessionStatus;
+
+    /// 夹具：仅 session_meta 的 rollout（无 role 条目 → determine_status 走兜底分支），
+    /// mtime 拨到 120s 前——落在 CLI 60s 与 APP 300s 阈值之间，可区分两种形态语义
+    fn write_meta_only_rollout(dir: &Path) -> PathBuf {
+        let path = dir.join("rollout-2026-01-01t00-00-00.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"meta-only-s1","cwd":"/work/demo"}}"#,
+        )
+        .unwrap();
+        let stale = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(120))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        path
+    }
+
+    /// 夹具区分度自检：同一文件，Cli 形态（60s）判 Waiting，App 形态（300s）判 Processing
+    #[test]
+    fn fixture_discriminates_cli_vs_app_mtime_thresholds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_meta_only_rollout(tmp.path());
+        let cli = parse_codex_jsonl(&f, ProcessForm::Cli).unwrap();
+        assert_eq!(cli.status, SessionStatus::Waiting);
+        let app = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(app.status, SessionStatus::Processing);
+    }
+
+    /// Phase 2 聚合输入必须按 App 形态解析（spec §4/§7）：未认领文件 60-300s 停更
+    /// 的工具调用尾部在 APP 卡上应为 Processing（红）而非 Waiting（黄）
+    #[test]
+    fn unclaimed_aggregate_input_is_parsed_with_app_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_meta_only_rollout(tmp.path());
+        let parsed = unclaimed_app_parsed(&[(f, std::time::SystemTime::now())]);
+        assert_eq!(parsed.len(), 1);
+        let session = parsed[0].1.as_ref().unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "聚合输入按 Cli 60s 阈值解析会把 APP 卡误判为 Waiting"
+        );
+    }
+
+    /// review F6：24h 新鲜过滤必须前移到二次 parse 之前——
+    /// 历史 rollout（mtime 超窗）不得进入重解析，消除重复尾读 IO
+    #[test]
+    fn fresh_filter_drops_stale_rollouts_before_reparse() {
+        let now = std::time::SystemTime::now();
+        let fresh = now - std::time::Duration::from_secs(3600);
+        let stale = now - std::time::Duration::from_secs(25 * 3600);
+        let files = vec![
+            PathBuf::from("/a-rollout-fresh"),
+            PathBuf::from("/b-rollout-stale"),
+        ];
+        let mtimes = vec![fresh, stale];
+        let out = fresh_unclaimed_files(&files, &mtimes, &HashSet::new(), now);
+        assert_eq!(
+            out,
+            vec![(PathBuf::from("/a-rollout-fresh"), fresh)],
+            "超窗文件必须在二次 parse 前被过滤"
+        );
+    }
+
+    /// review F2：聚合宿主判定口径与 monitor::host::is_host_process 一致——
+    /// ChatGPT 主进程可作宿主；CLI 同名 exe / 内嵌框架进程不得算宿主
+    #[test]
+    fn codex_host_criterion_matches_is_host_process() {
+        let chatgpt_main = AgentProcess {
+            pid: 1,
+            cpu_usage: 0.0,
+            cwd: None,
+            exe: Some("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".into()),
+            form: ProcessForm::App,
+        };
+        let cli_like = AgentProcess {
+            pid: 2,
+            cpu_usage: 0.0,
+            cwd: None,
+            exe: Some("/usr/local/bin/codex".into()),
+            form: ProcessForm::App,
+        };
+        let framework = AgentProcess {
+            pid: 3,
+            cpu_usage: 0.0,
+            cwd: None,
+            exe: Some(
+                "/Applications/ChatGPT.app/Contents/Frameworks/Codex.framework/Versions/A/Codex"
+                    .into(),
+            ),
+            form: ProcessForm::App,
+        };
+        assert_eq!(
+            codex_host_process(&[cli_like.clone(), chatgpt_main]).map(|p| p.pid),
+            Some(1),
+            "宿主 = exe 匹配 is_host_process 的 App 进程"
+        );
+        assert!(
+            codex_host_process(&[cli_like, framework]).is_none(),
+            "CLI 同名 exe 与内嵌框架进程都不是宿主"
+        );
+    }
+
+    /// 已被 CLI 认领的文件不得进入聚合输入（Phase 1 / Phase 2 不重复出卡）
+    #[test]
+    fn claimed_files_are_excluded_from_aggregate_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_meta_only_rollout(tmp.path());
+        let claimed: HashSet<usize> = HashSet::from([0]);
+        let files = vec![f, PathBuf::from("/other-fresh")];
+        let now = std::time::SystemTime::now();
+        let mtimes = vec![now, now];
+        assert_eq!(
+            fresh_unclaimed_files(&files, &mtimes, &claimed, now),
+            vec![(PathBuf::from("/other-fresh"), now)],
+            "被认领索引排除、未认领新鲜文件存活"
+        );
     }
 }

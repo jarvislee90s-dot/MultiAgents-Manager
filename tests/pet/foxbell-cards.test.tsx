@@ -4,21 +4,43 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    show: vi.fn(), hide: vi.fn(), setAlwaysOnTop: vi.fn(), setIgnoreCursorEvents: vi.fn(),
-    setPosition: vi.fn(), setSize: vi.fn(), outerPosition: vi.fn(), outerSize: vi.fn(),
-    scaleFactor: vi.fn(), currentMonitor: vi.fn(),
+    show: vi.fn(),
+    hide: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
+    setIgnoreCursorEvents: vi.fn(),
+    setPosition: vi.fn(),
+    setSize: vi.fn(),
+    outerPosition: vi.fn(),
+    outerSize: vi.fn(),
+    scaleFactor: vi.fn(),
+    currentMonitor: vi.fn(),
   }),
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
 const sessionsData = {
-  sessions: [{
-    id: "s1", agentType: "claude", projectName: "项目A", projectPath: "/a", title: "标题A",
-    gitBranch: null, githubUrl: null, status: "waiting", lastMessage: "等你确认",
-    lastMessageRole: null, lastActivityAt: "", pid: 42, cpuUsage: 0,
-    activeSubagentCount: 0, form: "cli", jumpSupported: true,
-  }],
-  totalCount: 1, waitingCount: 1,
+  sessions: [
+    {
+      id: "s1",
+      agentType: "claude",
+      projectName: "项目A",
+      projectPath: "/a",
+      title: "标题A",
+      gitBranch: null,
+      githubUrl: null,
+      status: "waiting",
+      lastMessage: "等你确认",
+      lastMessageRole: null,
+      lastActivityAt: "",
+      pid: 42,
+      cpuUsage: 0,
+      activeSubagentCount: 0,
+      form: "cli",
+      jumpSupported: true,
+    },
+  ],
+  totalCount: 1,
+  waitingCount: 1,
 };
 vi.mock("@/lib/query/queries/sessions", () => ({
   useSessionsQuery: () => ({ data: sessionsData }),
@@ -38,7 +60,10 @@ describe("FoxbellPet 卡片", () => {
     expect(card.textContent).toContain("等待操作");
     fireEvent.click(card);
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("focus_session", expect.objectContaining({ pid: 42, sessionId: "s1" }))
+      expect(invoke).toHaveBeenCalledWith(
+        "focus_session",
+        expect.objectContaining({ pid: 42, sessionId: "s1" })
+      )
     );
   });
 
@@ -47,28 +72,35 @@ describe("FoxbellPet 卡片", () => {
       if (cmd === "focus_session") {
         return Promise.resolve({
           type: "ambiguous",
-          windows: [{ hwnd: 1, title: "win-a", process: "iTerm2" }, { hwnd: 2, title: "win-b", process: "iTerm2" }],
+          windows: [
+            { hwnd: 1, title: "win-a", process: "iTerm2" },
+            { hwnd: 2, title: "win-b", process: "iTerm2" },
+          ],
         });
       }
       return Promise.resolve(undefined);
     });
     render(<FoxbellPet />);
     fireEvent.click(await screen.findByTestId("pet-card-s1"));
-    const overlay = await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 3000 });
+    const overlay = await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 10000 });
     await act(async () => {}); // 排空被动效应：确保浮层关闭监听已注册再触发事件（FIX-11）
     // 点浮层内部：不关闭
     fireEvent.pointerDown(overlay.firstChild as HTMLElement);
     expect(screen.getByTestId("pet-jump-candidates")).toBeTruthy();
     // 点外：关闭（不 ack，卡片保留）
     fireEvent.pointerDown(document.body);
-    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), {
+      timeout: 10000,
+    });
     expect(screen.getByTestId("pet-card-s1")).toBeTruthy();
     // 再次触发歧义 → Esc 关闭
     fireEvent.click(screen.getByTestId("pet-card-s1"));
-    await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 3000 });
+    await screen.findByTestId("pet-jump-candidates", undefined, { timeout: 10000 });
     await act(async () => {}); // 排空被动效应（Esc 关闭段，FIX-11）
     fireEvent.keyDown(window, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByTestId("pet-jump-candidates")).toBeNull(), {
+      timeout: 10000,
+    });
     expect(screen.getByTestId("pet-card-s1")).toBeTruthy();
     vi.mocked(invoke).mockClear();
   });

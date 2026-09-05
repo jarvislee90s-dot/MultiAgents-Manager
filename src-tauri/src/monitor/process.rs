@@ -46,7 +46,10 @@ fn exe_matches(candidate: &str, process_names: &[&str]) -> bool {
 /// 判断进程形态（CLI 还是 APP），依据命中候选（exe 路径 / 进程名 / argv[0]）的特征
 /// - basename 首字母大写（如独立 Codex.app 的 "Codex"）→ APP
 /// - 位于 macOS .app 包内（如 ChatGPT.app 内嵌的 codex app-server）→ APP
-/// - 位于 Windows MSIX 安装目录（ChatGPT 合并版 Codex 桌面端）→ APP
+/// - 位于 Windows MSIX 安装目录（ChatGPT 合并版 Codex 桌面端）→ APP。
+///   P2-6：`WindowsApps/<publisher>.<app>_<version>_...` 的版本段随升级变化，硬编码
+///   `openai.codex_` 前缀会在 MSIX 版本升级后静默失效（误判 CLI 而非 APP）——
+///   放宽为「路径位于 WindowsApps/ 且路径/basename 含 codex」双条件
 fn classify_form(candidate: &str) -> ProcessForm {
     let normalized = candidate.replace('\\', "/");
     let base_stem = normalized.rsplit('/').next().unwrap_or("");
@@ -59,7 +62,8 @@ fn classify_form(candidate: &str) -> ProcessForm {
         .unwrap_or(false);
     let lower = normalized.to_lowercase();
     let in_app_bundle = lower.contains(".app/contents");
-    let in_msix = lower.contains("windowsapps/openai.codex_");
+    // MSIX：路径位于 WindowsApps 且含 codex（P2-6 去版本耦化）
+    let in_msix = lower.contains("windowsapps/") && lower.contains("codex");
     if exe_upper || in_app_bundle || in_msix {
         ProcessForm::App
     } else {
@@ -163,6 +167,7 @@ fn find_processes_by_names(
             pid: pid.as_u32(),
             cpu_usage: process.cpu_usage(),
             cwd,
+            exe: process.exe().map(|e| e.to_path_buf()),
             form,
         });
     }
@@ -179,9 +184,25 @@ pub fn find_claude_processes(system: &System) -> Vec<AgentProcess> {
     )
 }
 
+/// Codex 进程匹配名单（平台差异，2026-09-04 Windows 实测）：
+/// - macOS：内嵌 codex 运行时（ChatGPT.app/Contents/Resources/codex），名单 codex 即覆盖；
+/// - Windows：Codex 桌面端为 MSIX（`WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe`），会话运行时是
+///   独立 codex.exe（AppData\Local\OpenAI\Codex\bin，父进程为 ChatGPT.exe），**宿主不叫 codex**——
+///   缺 chatgpt 名单则 codex_parser::codex_host_process 恒为 None，APP 卡聚合（W4）不出。
+///   Electron 子进程父链同名，通用子代理过滤后仅 ChatGPT 主进程存活（App 形态，聚合宿主）。
+#[cfg(windows)]
+pub fn codex_process_names() -> &'static [&'static str] {
+    &["codex", "Codex", "chatgpt"]
+}
+
+#[cfg(not(windows))]
+pub fn codex_process_names() -> &'static [&'static str] {
+    &["codex", "Codex"]
+}
+
 /// 发现 Codex CLI + 桌面 APP 进程
 pub fn find_codex_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["codex", "Codex"], &["multi-agents-manager"])
+    find_processes_by_names(system, codex_process_names(), &["multi-agents-manager"])
 }
 
 /// 发现 OpenCode 进程
@@ -198,6 +219,9 @@ pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
 pub fn find_kimi_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(system, &["kimi"], &["multi-agents-manager"])
 }
+// WorkBuddy 不在此处做进程名发现（P0-1）：会话进程发现已改为心跳目录驱动，
+// 见 workbuddy_parser::discover_workbuddy_processes——Windows 上会话宿主与主进程同名
+// WorkBuddy.exe，进程名匹配不可用，且父进程同名会被通用子代理过滤误杀
 
 #[cfg(test)]
 mod tests {
@@ -289,6 +313,40 @@ mod tests {
         }
 
         #[test]
+        fn windows_msix_codex_any_version_is_app() {
+            // P2-6 回归锁：MSIX 版本段随升级变化，不得硬编码 openai.codex_ 前缀——
+            // 路径在 WindowsApps/ 且含 codex 即判 APP（版本升级后不静默失效）
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_99.0.0.0_x64__2p2nqsd0c76g0\\app\\codex.exe"
+                ),
+                ProcessForm::App
+            );
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\openai.codex_1.2.3.4_x64__2p2nqsd0c76g0\\Codex.exe"
+                ),
+                ProcessForm::App
+            );
+        }
+
+        #[test]
+        fn windows_apps_non_codex_path_is_cli() {
+            // P2-6 宽松化的边界：WindowsApps 下不含 codex 的路径（如其他应用自带的
+            // 同名工具）不误判为 APP；WindowsApps 之外含 codex 的路径仍按 CLI 处理
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.0.0_x64__x\\wt.exe"
+                ),
+                ProcessForm::Cli
+            );
+            assert_eq!(
+                classify_form("C:\\Users\\x\\.local\\bin\\codex.exe"),
+                ProcessForm::Cli
+            );
+        }
+
+        #[test]
         fn windows_and_unix_cli_paths_are_cli() {
             assert_eq!(
                 classify_form("C:\\Users\\x\\.local\\bin\\claude.exe"),
@@ -296,6 +354,35 @@ mod tests {
             );
             assert_eq!(classify_form("/Users/x/.cargo/bin/codex"), ProcessForm::Cli);
             assert_eq!(classify_form("codex.exe"), ProcessForm::Cli);
+        }
+
+        #[test]
+        fn windows_msix_chatgpt_host_is_app_form() {
+            // 2026-09-04 实机路径：MSIX Codex 桌面端宿主 ChatGPT.exe 必须判为 App——
+            // 它是 codex_parser APP 聚合（W4）的宿主来源；basename 首字母大写与
+            // WindowsApps 规则双命中，任一成立即可
+            assert_eq!(
+                classify_form(
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.901.2854.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe"
+                ),
+                ProcessForm::App
+            );
+        }
+    }
+
+    mod codex_names {
+        use super::super::codex_process_names;
+
+        #[test]
+        fn windows_includes_chatgpt_host_macos_not() {
+            // Windows 宿主缺口回归锁：MSIX 桌面端宿主名 chatgpt 必须进匹配名单，
+            // 否则 codex_host_process 恒 None → APP 卡聚合不出（2026-09-04 实机故障）
+            #[cfg(windows)]
+            assert!(codex_process_names().contains(&"chatgpt"));
+            #[cfg(not(windows))]
+            assert!(!codex_process_names().contains(&"chatgpt"));
+            // 双平台都保留 codex（CLI 与 macOS 内嵌运行时）
+            assert!(codex_process_names().contains(&"codex"));
         }
     }
 }

@@ -16,7 +16,9 @@ pub use dao::extension::{AssignmentRecord, ExtensionRecord};
 pub use dao::preset::{PresetItemRecord, PresetRecord};
 
 // 重新导出公共函数
-pub use dao::agent_tool::list_sub_agents;
+pub use dao::agent_tool::{
+    enabled_tool_ids, ensure_tool_rows, get_tool_enabled, list_sub_agents, set_tool_enabled,
+};
 pub use dao::extension::{
     delete_assignments_for, delete_extension, disable_subagent_assignment, insert_extension,
     list_all_assignments, list_assignments, list_extensions, upsert_assignment,
@@ -26,8 +28,12 @@ pub use dao::preset::{
     create_preset, delete_preset, get_preset_items, list_presets, record_preset_application,
     record_preset_application_subagent,
 };
-pub use dao::session::{cleanup_stale_sessions, update_session_status};
+pub use dao::session::{cleanup_stale_sessions, find_status, update_session_status};
 pub use dao::settings::{get_setting, set_setting};
+pub use dao::unread::UnreadSessionRecord;
+pub use dao::unread::{
+    clear_tool as clear_unread_tool, delete as delete_unread, list as list_unread_sessions,
+};
 
 /// 初始化数据库（兼容旧 store::init() 调用）
 pub fn init() {
@@ -35,4 +41,6 @@ pub fn init() {
     if let Ok(conn) = connection::open() {
         let _ = migration::migrate(&conn);
     }
+    // 种子工具启用行（全部 enabled=1，幂等；缺行视为启用）
+    dao::agent_tool::ensure_tool_rows();
 }
