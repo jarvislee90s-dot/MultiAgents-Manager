@@ -27,8 +27,12 @@ pub struct ApplyResult {
     pub restored: Vec<String>,
     pub restored_mcps: Vec<String>,
     pub rebuild_failed: Vec<String>,
-    /// 未能还原的项（SSOT 缺失或暂存失败，链接保持不变）——保存结果中逐项报告（spec W5 清理语义 1 + §9）
-    pub skipped: Vec<String>,
+    /// 未能还原但现场完好（SSOT 缺失/暂存失败/移除链接失败，链接保持不变）——
+    /// 保存结果中逐项报告（spec W5 清理语义 1 + §9）
+    pub skipped_kept: Vec<String>,
+    /// 还原中断且现场已失（移除链接成功后落位失败、且重建链接恢复也失败，
+    /// 工具目录空缺）——逐项报告并提示需重新勾选重建（issue #36-4）
+    pub skipped_lost: Vec<String>,
 }
 
 pub fn get_tool_settings() -> Vec<ToolSetting> {
@@ -41,7 +45,9 @@ pub fn get_tool_settings() -> Vec<ToolSetting> {
                 tool_id: id.to_string(),
                 name: adapter.name().to_string(),
                 enabled: agent_tool::get_tool_enabled(id),
-                installed: adapter.base_dir().exists(),
+                // issue #36-7：与 detect_all_tools 同口径（dir OR CLI），装了 CLI
+                // 但从未运行过（无 base 目录）的工具不再显示「未检测到」
+                installed: crate::linker::detector::is_tool_installed(adapter.as_ref()),
                 managed: tool_has_managed_content(id),
             })
         })
@@ -63,10 +69,9 @@ pub fn ensure_tool_enabled_conn(conn: &rusqlite::Connection, tool_id: &str) -> R
     if agent_tool::get_tool_enabled_conn(conn, tool_id) {
         Ok(())
     } else {
-        Err(format!(
-            "工具 {} 未启用，请先在设置-工具管理中开启",
-            tool_id
-        ))
+        // issue #36-3：错误码 + 参数（前端 i18n 渲染），后端不再硬编码中文文案；
+        // 前端 formatInvokeError（src/lib/invokeError.ts）据此映射本地化文案
+        Err(format!("W5_TOOL_DISABLED:{}", tool_id))
     }
 }
 
@@ -83,11 +88,22 @@ pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
         if was == c.enabled {
             continue;
         }
-        agent_tool::set_tool_enabled(&c.tool_id, c.enabled);
         if !c.enabled {
+            // 取消勾选：清理为 best-effort（跳过项逐项报告，spec §9），随后落 DB
             disable_tool_cleanup(&c.tool_id, &mut result);
+            agent_tool::set_tool_enabled(&c.tool_id, false);
         } else {
+            // issue #36-8：文件操作成功后再写 DB——重建全部成功才置 enabled；
+            // 部分失败则回滚本次产物（对刚建的链接/MCP 条目执行一次停用清理，
+            // 恰为 W5 还原语义）并保持 DB 未启用，用户重新勾选即整体幂等重试，
+            // 不再需要「先关再开」。services 层不读工具启用态（已核验），
+            // 故先文件后 DB 的次序对重建链路无影响
             rebuild_tool_links(&c.tool_id, &mut result);
+            if result.rebuild_failed.is_empty() {
+                agent_tool::set_tool_enabled(&c.tool_id, true);
+            } else {
+                disable_tool_cleanup(&c.tool_id, &mut result);
+            }
         }
     }
     result
@@ -166,29 +182,38 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
         .retain(|_, (tool, _)| tool != tool_id);
 }
 
-/// 还原单项结果（spec W5 清理语义 1 + §9：SSOT 缺失跳过并在保存结果中逐项报告）
+/// 还原单项结果（spec W5 清理语义 1 + §9：SSOT 缺失跳过并在保存结果中逐项报告）。
+/// issue #36-4：区分「现场完好」与「现场已失」——原文案「链接保持不变」对
+/// 「移除链接成功后落位失败」子场景不成立，二阶段改为按真实现场分账
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RestoreOutcome {
     /// 已完整还原为真实内容
     Restored,
-    /// 未能还原且链接保持不变（SSOT 缺失 / 暂存失败 / 落位失败），由调用方计入 skipped 逐项报告
-    Skipped,
+    /// 未能还原且现场完好（链接保持不变），计入 skipped_kept 逐项报告
+    SkippedKept,
+    /// 还原中断且现场已失（链接已移除、内容落位失败、重建链接恢复也失败），
+    /// 计入 skipped_lost 逐项报告并提示重建
+    SkippedLost,
     /// 无需处理：目标非 MAM 链接态（原生目录或不存在），不报告也不计数
     NotApplicable,
 }
 
-/// 按还原结果归账：完全还原计入 restored；跳过/失败计入 skipped 供前端逐项提示
+/// 按还原结果归账：完全还原计入 restored；跳过按现场完好/已失分别计入
+/// skipped_kept / skipped_lost 供前端分级提示（kept=warning，lost=error）
 fn report_restore(outcome: RestoreOutcome, name: &str, result: &mut ApplyResult) {
     match outcome {
         RestoreOutcome::Restored => result.restored.push(name.to_string()),
-        RestoreOutcome::Skipped => result.skipped.push(name.to_string()),
+        RestoreOutcome::SkippedKept => result.skipped_kept.push(name.to_string()),
+        RestoreOutcome::SkippedLost => result.skipped_lost.push(name.to_string()),
         RestoreOutcome::NotApplicable => {}
     }
 }
 
 /// 还原单个「MAM 建的链接」为真实内容：仅链接态（Valid/Dangling）处理，
 /// 原生目录（NotLink）与不存在（Missing）不动（NotApplicable）；
-/// SSOT 缺失或还原中途失败 → Skipped（链接保持不变），由调用方逐项报告给用户。
+/// SSOT 缺失或还原中途失败 → SkippedKept（链接保持不变）；
+/// 移除链接成功后落位失败 → 先尝试重建链接恢复现场（issue #36-4），恢复成功
+/// 仍计 SkippedKept，恢复失败才是 SkippedLost（工具目录空缺），由调用方分级报告。
 /// 先把 SSOT 内容暂存到目标旁的临时路径（目录走 copy_dir_recursive，
 /// 子 Agent 分配的 Layer 3 用户可见目标（与 services::skill::assign_skill_to_subagent
 /// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<name>，P1-4 停用还原用）
@@ -223,7 +248,7 @@ fn restore_mam_link(
             name,
             ssot.display()
         );
-        return RestoreOutcome::Skipped;
+        return RestoreOutcome::SkippedKept;
     }
     let tmp = target.with_extension("mam_restore_tmp");
     // 清理可能的历史残留，保证后续 rename 可落位
@@ -240,21 +265,37 @@ fn restore_mam_link(
         // 暂存失败：不动链接，工具内容保持原样
         let _ = crate::linker::remove_link(&tmp);
         log::warn!("还原 {} 跳过：SSOT 暂存出错（{}），链接保持不变", name, e);
-        return RestoreOutcome::Skipped;
+        return RestoreOutcome::SkippedKept;
     }
     if let Err(e) = crate::linker::remove_link(target) {
         let _ = crate::linker::remove_link(&tmp);
         log::warn!("还原 {} 跳过：移除旧链接出错（{}），链接保持不变", name, e);
-        return RestoreOutcome::Skipped;
+        return RestoreOutcome::SkippedKept;
     }
     if let Err(e) = std::fs::rename(&tmp, target) {
+        // issue #36-4：此刻链接已被移除、现场缺失——先尝试重建链接恢复原状
+        //（SSOT 仍在，create_link 重新指回即可）；恢复成功等同「链接保持不变」，
+        // 仅恢复也失败才计入 SkippedLost（真丢失，需重新勾选重建）
         let _ = crate::linker::remove_link(&tmp);
-        log::warn!(
-            "还原 {} 跳过：临时内容落位出错（{}），需重新勾选后重建",
-            name,
-            e
-        );
-        return RestoreOutcome::Skipped;
+        match crate::linker::create_link(ssot, target) {
+            Ok(()) => {
+                log::warn!(
+                    "还原 {} 落位失败（{}），已重建链接恢复现场，链接保持不变",
+                    name,
+                    e
+                );
+                return RestoreOutcome::SkippedKept;
+            }
+            Err(recover_err) => {
+                log::warn!(
+                    "还原 {} 落位失败（{}）且链接恢复失败（{}），工具目录空缺，需重新勾选后重建",
+                    name,
+                    e,
+                    recover_err
+                );
+                return RestoreOutcome::SkippedLost;
+            }
+        }
     }
     RestoreOutcome::Restored
 }
@@ -421,7 +462,7 @@ mod restore_tests {
 
         let outcome = restore_mam_link(&ssot, &target, "broken");
 
-        assert_eq!(outcome, RestoreOutcome::Skipped);
+        assert_eq!(outcome, RestoreOutcome::SkippedKept);
         assert!(
             crate::linker::link_marker_is_present(&target),
             "暂存失败时链接不应被移除"
@@ -448,7 +489,7 @@ mod restore_tests {
 
         let outcome = restore_mam_link(&ssot, &target, "gone");
 
-        assert_eq!(outcome, RestoreOutcome::Skipped);
+        assert_eq!(outcome, RestoreOutcome::SkippedKept);
         assert!(
             crate::linker::link_marker_is_present(&target),
             "SSOT 缺失时链接不应被动"
@@ -539,7 +580,7 @@ mod restore_tests {
 
         let outcome = restore_mam_link(&ssot, &target, "gone");
 
-        assert_eq!(outcome, RestoreOutcome::Skipped);
+        assert_eq!(outcome, RestoreOutcome::SkippedKept);
         assert!(crate::linker::link_marker_is_present(&target));
     }
 }
@@ -548,7 +589,8 @@ mod restore_tests {
 mod ensure_guard_tests {
     use super::*;
 
-    /// review F4：守卫的连接参数变体——停用工具 → 明确错误；启用/缺行 → 放行
+    /// review F4：守卫的连接参数变体——停用工具 → 结构化错误码（issue #36-3，
+    /// 文案由前端 i18n 渲染）；启用/缺行 → 放行
     #[test]
     fn ensure_tool_enabled_conn_blocks_disabled_tool() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -556,8 +598,10 @@ mod ensure_guard_tests {
         agent_tool::ensure_tool_rows_conn(&conn);
         agent_tool::set_tool_enabled_conn(&conn, "opencode", false);
         let err = ensure_tool_enabled_conn(&conn, "opencode").unwrap_err();
-        assert!(err.contains("opencode"), "错误信息须包含工具 id：{err}");
-        assert!(err.contains("工具管理"), "错误信息须给出恢复路径：{err}");
+        assert_eq!(
+            err, "W5_TOOL_DISABLED:opencode",
+            "错误码须可被前端解析且携带工具 id"
+        );
         // 缺行防御视为启用
         assert!(ensure_tool_enabled_conn(&conn, "nonexistent").is_ok());
         // 重新启用 → 放行

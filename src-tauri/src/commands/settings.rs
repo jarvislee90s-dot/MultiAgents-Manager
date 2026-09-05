@@ -51,11 +51,18 @@ pub fn get_tool_settings() -> Vec<crate::services::tool_settings::ToolSetting> {
 
 /// 批量保存工具勾选（取消勾选清理 / 重新勾选重建，返回明细）
 #[tauri::command]
-pub fn update_tool_settings(
+pub async fn update_tool_settings(
     app: tauri::AppHandle,
     changes: Vec<crate::services::tool_settings::ToolSettingChange>,
 ) -> crate::services::tool_settings::ApplyResult {
-    let result = crate::services::tool_settings::apply_tool_changes(changes);
+    // issue #36-2：非 async 命令在主线程执行，apply 内含 copy_dir_recursive 等大目录
+    // 文件操作，保存期间会冻结全部窗口的 IPC——移到运行时阻塞线程池执行（Tauri 官方
+    // 对重活的建议），主线程与 async worker 均不受阻
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::services::tool_settings::apply_tool_changes(changes)
+    })
+    .await
+    .unwrap_or_default();
     // N2：跨窗口广播工具勾选变化。设置窗口与主窗口是独立 WebView、各持 QueryClient，
     // 设置页本地的 invalidateQueries 触达不到主窗口——主窗口靠此事件失效缓存
     let _ = app.emit("tools-changed", ());

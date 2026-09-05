@@ -50,11 +50,15 @@ pub fn write_mcp_server(
     args: Vec<String>,
     env: std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
+    // issue #36-1：与 toggle_mcp_for_tool 同守卫（纵深防御，当前 UI 未直达）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let config = crate::services::mcp::McpConfig { command, args, env };
     crate::services::mcp::write_mcp(&tool_id, &mcp_name, &config)
 }
 
 #[tauri::command]
 pub fn remove_mcp_server(tool_id: String, mcp_name: String) -> Result<(), String> {
+    // issue #36-1：与 toggle_mcp_for_tool 同守卫（纵深防御，当前 UI 未直达）
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::mcp::remove_mcp(&tool_id, &mcp_name)
 }
