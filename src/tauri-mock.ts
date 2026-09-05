@@ -446,6 +446,19 @@ if (!isTauri) {
           skippedLost: [],
         });
 
+      // 工具管理行（ToolSetting，camelCase）：六工具全量行，浏览器渲染下
+      // 设置页「工具管理」分区可出数据
+      case "get_tool_settings":
+        return Promise.resolve([
+          { toolId: "claude", name: "Claude Code", enabled: true, installed: true, managed: true },
+          { toolId: "codex", name: "Codex CLI", enabled: true, installed: true, managed: true },
+          { toolId: "workbuddy", name: "WorkBuddy", enabled: true, installed: true, managed: true },
+          { toolId: "kimi", name: "Kimi Code", enabled: true, installed: true, managed: true },
+          { toolId: "opencode", name: "OpenCode", enabled: true, installed: true, managed: false },
+          { toolId: "openclaw", name: "OpenClaw", enabled: true, installed: false, managed: false },
+        ]);
+
+
       case "list_repo_skills":
         return Promise.resolve([
           { name: "brainstorming", path: "/Users/jarvis/.mam/skills/brainstorming" },
