@@ -14,19 +14,41 @@ beforeAll(async () => {
 
 vi.mock("@/components/pet/petActivation", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petActivation")>();
-  return { ...orig, buildManifestFromScan: vi.fn(), repairManifest: vi.fn().mockResolvedValue({ hasVoice: true, displayName: "P" }) };
+  return {
+    ...orig,
+    buildManifestFromScan: vi.fn(),
+    repairManifest: vi.fn().mockResolvedValue({ hasVoice: true, displayName: "P" }),
+  };
 });
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn().mockResolvedValue(["C:/a.mp3"]) }));
-vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn(async () => {}), listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: vi.fn(async () => {}),
+  listen: vi.fn(async () => () => {}),
+}));
 import { emit } from "@tauri-apps/api/event";
 const emitMock = vi.mocked(emit);
 vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petRuntime")>();
-  return { ...orig, probeSheetRows: vi.fn().mockResolvedValue(9), probeAudioDurationMs: vi.fn().mockResolvedValue(3000) };
+  return {
+    ...orig,
+    probeSheetRows: vi.fn().mockResolvedValue(9),
+    probeAudioDurationMs: vi.fn().mockResolvedValue(3000),
+  };
 });
 
 const pets = [
-  { id: "starry-dew", displayName: "Starry Dew", spriteVersionNumber: 1, hasVoice: false, hasSubtitle: false, manifestExists: true, spritesheetExists: true, dir: "/x/starry-dew", source: "folder", description: "" },
+  {
+    id: "starry-dew",
+    displayName: "Starry Dew",
+    spriteVersionNumber: 1,
+    hasVoice: false,
+    hasSubtitle: false,
+    manifestExists: true,
+    spritesheetExists: true,
+    dir: "/x/starry-dew",
+    source: "folder",
+    description: "",
+  },
 ];
 
 describe("PetManageDialog", () => {
@@ -37,17 +59,25 @@ describe("PetManageDialog", () => {
       if (cmd === "pet_list_pets") return Promise.resolve(pets);
       if (cmd === "pet_scan")
         return Promise.resolve({
-          id: "starry-dew", dir: "/x/starry-dew",
+          id: "starry-dew",
+          dir: "/x/starry-dew",
           spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
           voiceFiles: [],
         });
       if (cmd === "pet_read_manifest")
         return Promise.resolve({
-          id: "starry-dew", displayName: "Starry Dew", hasVoice: false, hasSubtitle: false,
-          spriteVersionNumber: 1, spritesheetSizeBytes: 100, voices: [],
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: false,
+          hasSubtitle: false,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [],
         });
       if (cmd === "pet_add_voice_files")
-        return Promise.resolve([{ group: "general", name: "x", file: "voice/general/x.mp3", sizeBytes: 1 }]);
+        return Promise.resolve([
+          { group: "general", name: "x", file: "voice/general/x.mp3", sizeBytes: 1 },
+        ]);
       return Promise.resolve(undefined);
     });
   });
@@ -63,7 +93,9 @@ describe("PetManageDialog", () => {
     localStorage.setItem("mam-pet-active", "starry-dew");
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
-    fireEvent.change(await screen.findByTestId("manage-rename-input"), { target: { value: "dew" } });
+    fireEvent.change(await screen.findByTestId("manage-rename-input"), {
+      target: { value: "dew" },
+    });
     fireEvent.click(await screen.findByTestId("manage-rename-btn"));
     await waitFor(() =>
       expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_rename_pet")?.[1]).toEqual({
@@ -81,7 +113,9 @@ describe("PetManageDialog", () => {
     emitMock.mockClear();
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
-    fireEvent.change(await screen.findByTestId("manage-rename-input"), { target: { value: "dew" } });
+    fireEvent.change(await screen.findByTestId("manage-rename-input"), {
+      target: { value: "dew" },
+    });
     fireEvent.click(await screen.findByTestId("manage-rename-btn"));
     await waitFor(() =>
       expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_rename_pet")?.[1]).toEqual({
@@ -127,7 +161,9 @@ describe("PetManageDialog", () => {
     fireEvent.click(await screen.findByTestId("manage-delete"));
     fireEvent.click(await screen.findByTestId("manage-delete-confirm"));
     await waitFor(() =>
-      expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_delete_pet")?.[1]?.id).toBe("starry-dew")
+      expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_delete_pet")?.[1]?.id).toBe(
+        "starry-dew"
+      )
     );
   });
 
@@ -150,7 +186,9 @@ describe("PetManageDialog", () => {
     repairMock.mockClear();
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
-    fireEvent.change(await screen.findByTestId("manage-desc-input"), { target: { value: "新的描述" } });
+    fireEvent.change(await screen.findByTestId("manage-desc-input"), {
+      target: { value: "新的描述" },
+    });
     fireEvent.click(screen.getByTestId("manage-save"));
     // 编辑后的 description 经 repairManifest 入参传入（repairManifest 展开透传，最终写入 manifest）
     await waitFor(() => {
@@ -174,15 +212,28 @@ describe("PetManageDialog", () => {
       if (cmd === "pet_list_pets") return Promise.resolve(pets);
       if (cmd === "pet_scan")
         return Promise.resolve({
-          id: "starry-dew", dir: "/x/starry-dew",
+          id: "starry-dew",
+          dir: "/x/starry-dew",
           spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
           voiceFiles: [{ rel: "voice/general/greet.mp3", exists: true, size: 1000 }],
         });
       if (cmd === "pet_read_manifest")
         return Promise.resolve({
-          id: "starry-dew", displayName: "Starry Dew", hasVoice: false, hasSubtitle: false,
-          spriteVersionNumber: 1, spritesheetSizeBytes: 100,
-          voices: [{ group: "general", name: "greet", file: "voice/general/greet.mp3", sizeBytes: 1000, durationMs: null as unknown as number }],
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: false,
+          hasSubtitle: false,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [
+            {
+              group: "general",
+              name: "greet",
+              file: "voice/general/greet.mp3",
+              sizeBytes: 1000,
+              durationMs: null as unknown as number,
+            },
+          ],
         });
       return Promise.resolve(undefined);
     });

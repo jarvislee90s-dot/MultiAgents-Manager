@@ -1,10 +1,5 @@
 // 桌宠配置 — localStorage 单后端，跨窗口 storage 事件同步（spec §10）
-import {
-  loadVoiceCap,
-  ACTIVE_KEY,
-  ACTIVE_NAME_KEY,
-  ACTIVE_LOCAL_EVENT,
-} from "./petRuntime";
+import { loadVoiceCap, ACTIVE_KEY, ACTIVE_NAME_KEY, ACTIVE_LOCAL_EVENT } from "./petRuntime";
 
 export type PetAction = "jumping" | "waving" | "failed" | "waiting" | "review" | "running";
 export type PetScale = 0.75 | 1 | 1.25;

@@ -1,8 +1,15 @@
 // tests/pet/petConfig.test.ts
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  loadConfig, saveConfig, loadVisible, saveVisible,
-  loadPosition, savePosition, petSoundTakeover, petSuppressPopup, subscribeConfig,
+  loadConfig,
+  saveConfig,
+  loadVisible,
+  saveVisible,
+  loadPosition,
+  savePosition,
+  petSoundTakeover,
+  petSuppressPopup,
+  subscribeConfig,
 } from "@/components/pet/petConfig";
 import { saveActiveId, loadActiveName } from "@/components/pet/petRuntime";
 
@@ -12,15 +19,25 @@ describe("petConfig", () => {
   it("无存储时返回默认值（spec §10.1）", () => {
     const c = loadConfig();
     expect(c).toMatchObject({
-      alwaysOnTop: true, muted: false, talkative: true, gravity: true, scale: 1,
-      dblAction: "waving", approvalAction: "waiting", errorAction: "failed", doneAction: "jumping",
+      alwaysOnTop: true,
+      muted: false,
+      talkative: true,
+      gravity: true,
+      scale: 1,
+      dblAction: "waving",
+      approvalAction: "waiting",
+      errorAction: "failed",
+      doneAction: "jumping",
     });
     expect(loadVisible()).toBe(false);
     expect(loadPosition()).toBeNull();
   });
 
   it("非法值回落默认（sanitize）", () => {
-    localStorage.setItem("mam-pet-config", JSON.stringify({ scale: 9, dblAction: "hack", muted: "yes" }));
+    localStorage.setItem(
+      "mam-pet-config",
+      JSON.stringify({ scale: 9, dblAction: "hack", muted: "yes" })
+    );
     const c = loadConfig();
     expect(c.scale).toBe(1);
     expect(c.dblAction).toBe("waving");

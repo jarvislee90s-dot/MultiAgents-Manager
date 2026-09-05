@@ -31,7 +31,11 @@ describe("useVoiceDurationProbe（第九轮 Bug2）", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("dir 非空：null 行并行探测，成功回填、失败保持 null 且不抛错", async () => {
-    const rows = [mk("voice/general/ok.mp3", null), mk("voice/done/bad.mp3", null), mk("voice/error/done.m4a", 1500)];
+    const rows = [
+      mk("voice/general/ok.mp3", null),
+      mk("voice/done/bad.mp3", null),
+      mk("voice/error/done.m4a", 1500),
+    ];
     // hook 以 updater 形态异步调用 setRows：捕获 updater 后在 act 外手动执行，断言其转换逻辑（不依赖 mock.calls 时序）
     let captured: ((prev: (typeof rows)[number][]) => (typeof rows)[number][]) | null = null;
     const setRows = vi.fn((updater: (prev: (typeof rows)[number][]) => (typeof rows)[number][]) => {
