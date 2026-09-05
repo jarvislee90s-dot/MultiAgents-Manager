@@ -479,6 +479,50 @@ pub fn compensate_vanished_heartbeats_in(
     compensated
 }
 
+/// 观测还原窗口（issue #35-2）：与未读池 24h 窗口一致——更老的完成早已超出
+/// 可提醒窗口，还原陈旧观测只会带来「复活远古会话」的误报风险
+const OBSERVATION_TTL_MS: i64 = 24 * 3600 * 1000;
+
+/// 启动后首轮：把 DB 影子表中的近期观测还原进进程内 LAST_SEEN（issue #35-2）。
+/// MAM 重启清空进程内观测表后，停机期间「完成 + prewarm 回池删心跳文件」的会话
+/// 无观测则补偿永不触发、未读提醒静默丢失；观测落库后跨重启仍可补偿。
+/// or_insert 不覆盖本轮已发现的更新条目（pid 复用时新会话胜出）
+fn load_persisted_observations_once(now_ms: i64) {
+    static LOAD_ONCE: std::sync::Once = std::sync::Once::new();
+    LOAD_ONCE.call_once(|| {
+        let recent =
+            crate::database::dao::heartbeat_seen::list_recent_seen(now_ms - OBSERVATION_TTL_MS);
+        if recent.is_empty() {
+            return;
+        }
+        let mut last_seen = LAST_SEEN_SESSIONS.lock().unwrap();
+        for (pid, tool_id, session_id) in recent {
+            last_seen.entry(pid as u32).or_insert((tool_id, session_id));
+        }
+    });
+}
+
+/// 观测表影子同步（issue #35-2）：全量 upsert 进程内观测 + 移除已被补偿消费的
+/// pid + 清理超龄行。在补偿之后调用，此时内存表即本轮终态；upsert 行数 =
+/// 活跃会话数，量级极小
+fn sync_observations_to_db(now_ms: u64) {
+    let now = now_ms as i64;
+    let snapshot: Vec<(u32, String, String)> = {
+        let last_seen = LAST_SEEN_SESSIONS.lock().unwrap();
+        last_seen
+            .iter()
+            .map(|(pid, (tool, sid))| (*pid, tool.clone(), sid.clone()))
+            .collect()
+    };
+    for (pid, tool_id, session_id) in &snapshot {
+        crate::database::dao::heartbeat_seen::upsert_seen(*pid, tool_id, session_id, now);
+    }
+    let live: std::collections::HashSet<i64> =
+        snapshot.iter().map(|(pid, _, _)| *pid as i64).collect();
+    crate::database::dao::heartbeat_seen::retain_pids(&live);
+    crate::database::dao::heartbeat_seen::cleanup_before(now - OBSERVATION_TTL_MS);
+}
+
 /// 主入口：真实 home / 真实时钟 / 全局 LAST_SEEN_SESSIONS 的薄包装（补偿行在此落库）。
 /// 注：DAO upsert 冲突时仅刷新展示字段、保留原 turned_green_at/expires_at（见
 /// `upsert_unread`）——对已存在的行此处只起补展示快照作用；仅当行不存在（转绿从未
@@ -493,6 +537,8 @@ pub fn compensate_vanished_heartbeats() {
     }
     let Some(home) = dirs::home_dir() else { return };
     let now = now_ms();
+    // issue #35-2：重启后还原近期观测，跨重启补偿「停机期间完成」的会话
+    load_persisted_observations_once(now as i64);
     for record in compensate_vanished_heartbeats_in(
         &home,
         now,
@@ -503,6 +549,8 @@ pub fn compensate_vanished_heartbeats() {
     ) {
         crate::database::dao::unread::upsert(&record);
     }
+    // issue #35-2：本轮终态落库（upsert 在场观测 + 删除已被补偿消费的 pid + 超龄清理）
+    sync_observations_to_db(now);
 }
 
 /// 补偿用：只读打开 workbuddy.db 反查会话 cwd；列缺失/打开失败一律 None（防御）
