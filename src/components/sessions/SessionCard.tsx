@@ -85,7 +85,7 @@ export function SessionCard({ session }: { session: Session }) {
         onClick={handleClick}
         title={session.jumpSupported ? t("sessions.jumpToTerminal") : t("sessions.jumpUnsupported")}
       >
-        {/* 顶部：工具标签 + 项目名 + 状态灯 */}
+        {/* 顶部：工具标签 + 项目目录名 + 总结/hash + 分支 | 状态指示区 | 关闭 X 最右 */}
         <div className="mb-2 flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span
@@ -98,24 +98,6 @@ export function SessionCard({ session }: { session: Session }) {
               {getAgentLabel(session.agentType, session.form)}
             </span>
             <span className="truncate text-sm font-medium">{session.projectName}</span>
-            {(session.unread || session.form === "app") && (
-              <span className="inline-flex items-center gap-1">
-                {session.unread && (
-                  <span
-                    className="h-1.5 w-1.5 rounded-full bg-emerald-400"
-                    aria-label={t("sessions.unread")}
-                  />
-                )}
-                <button
-                  onClick={handleClose}
-                  className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
-                  title={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
-                  aria-label={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            )}
             {(session.title || session.id) && (
               <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
                 {session.title || session.id.slice(0, 8)}
@@ -127,7 +109,28 @@ export function SessionCard({ session }: { session: Session }) {
               </span>
             )}
           </div>
-          <StatusLight status={session.status} size="sm" />
+          {/* 状态指示区：状态灯与未读合并为单一指示（未读时绿点加光环，不再渲染独立小绿点） */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <div className="relative" title={session.unread ? t("sessions.unread") : undefined}>
+              <StatusLight status={session.status} size="sm" />
+              {session.unread && (
+                <span
+                  className="pointer-events-none absolute -inset-1 rounded-full ring-2 ring-emerald-400/80"
+                  aria-label={t("sessions.unread")}
+                />
+              )}
+            </div>
+            {(session.unread || session.form === "app") && (
+              <button
+                onClick={handleClose}
+                className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
+                title={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
+                aria-label={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* 中间：最后消息预览 */}
