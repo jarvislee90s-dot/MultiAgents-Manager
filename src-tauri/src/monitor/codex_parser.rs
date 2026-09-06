@@ -1,13 +1,13 @@
 // Codex CLI 会话解析 — type + payload 协议（rollout-*.jsonl）
 // 公共设施（cwd 归一化、git URL 缓存、JSONL 尾部读取）见 monitor::{cwd,git,jsonl,project}
 
+use super::app_status::{derive_app_status, overlay_mtime_stale, AppEntryKind};
 use super::cwd::normalize_cwd_for_match;
 use super::git::get_github_url;
 use super::jsonl::read_recent_lines;
 use super::project::project_name_from_path;
-use super::status::*;
 use crate::adapter::AgentProcess;
-use crate::session::{jump_supported_for, AgentType, ProcessForm, Session};
+use crate::session::{jump_supported_for, AgentType, ProcessForm, Session, SessionStatus};
 use log::{debug, info};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -23,6 +23,35 @@ struct CodexEntry {
     #[serde(rename = "type")]
     entry_type: Option<String>,
     payload: Option<serde_json::Value>,
+}
+
+/// Codex 条目 → 归一化 APP 条目（issue #6 格式翻译适配器）：
+/// 解包 response_item / event_msg 外壳，映射到共享判定核（monitor::app_status）的
+/// AppEntryKind。修复点：function_call / function_call_output 等不带 role 的条目
+/// 旧实现全被跳过（第二轮从第一条 assistant message 落盘起「最后带 role 的条目」
+/// 恒为 assistant 纯文本 → 恒判 Idle），现在工具调用条目参与判定；
+/// reasoning / token_count / item_completed 等记账条目 → Other（跳过，不参与判定）
+fn codex_entry_kind(entry: &CodexEntry) -> AppEntryKind {
+    let Some(payload) = entry.payload.as_ref() else {
+        return AppEntryKind::Other;
+    };
+    match entry.entry_type.as_deref() {
+        Some("response_item") => match payload.get("type").and_then(|v| v.as_str()) {
+            Some("message") => match payload.get("role").and_then(|v| v.as_str()) {
+                Some("user") => AppEntryKind::UserMessage,
+                Some("assistant") => AppEntryKind::AssistantMessage,
+                _ => AppEntryKind::Other, // developer 等系统角色不参与判定
+            },
+            Some("function_call") | Some("function_call_output") => AppEntryKind::ToolCall,
+            _ => AppEntryKind::Other, // reasoning 等记账条目
+        },
+        Some("event_msg") => match payload.get("type").and_then(|v| v.as_str()) {
+            Some("task_started") => AppEntryKind::TurnStart,
+            Some("task_complete") => AppEntryKind::TurnEnd,
+            _ => AppEntryKind::Other, // token_count / item_completed / thread_settings_applied 等
+        },
+        _ => AppEntryKind::Other, // session_meta / token_usage_record / world_state / turn_context
+    }
 }
 
 /// APP 形态每会话一卡（spec W4 通用规则的 Codex 落地）：
@@ -245,18 +274,13 @@ fn collect_codex_files_inner(dir: &Path, files: &mut Vec<(PathBuf, std::time::Sy
 fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Session> {
     use std::time::SystemTime;
 
-    let file_age = jsonl_path
+    // 文件年龄（秒）供共享核的 300s mtime 叠加使用；mtime 不可知 → None（按未过期处理）
+    let file_age_secs = jsonl_path
         .metadata()
         .and_then(|m| m.modified())
         .ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
         .map(|d| d.as_secs_f32());
-    // Codex APP 单步工具调用之间可能 10-30s 无文件改动；60s 对 APP 太短
-    // APP 形态使用更大的阈值（300s = 5分钟），CLI 保持 60s
-    let file_recently_modified = match process_form {
-        ProcessForm::App => file_age.map(|a| a < 300.0).unwrap_or(false),
-        ProcessForm::Cli => file_age.map(|a| a < 60.0).unwrap_or(false),
-    };
 
     let recent = read_recent_lines(jsonl_path, RECENT_LINES);
 
@@ -264,11 +288,9 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
     let mut project_path = String::new();
     let mut last_message = None;
     let mut last_role = None;
-    let mut last_entry_type: Option<String> = None;
-    let mut last_has_tool_use = false;
     let mut last_timestamp: Option<String> = None;
-    let mut found_status = false;
-
+    // 归一化条目序列（文件顺序），供共享判定核尾部倒扫
+    let mut kinds: Vec<AppEntryKind> = Vec::new();
     for line in recent.iter().rev() {
         if let Ok(entry) = serde_json::from_str::<CodexEntry>(line) {
             // 顶层 timestamp 作为最后活动时间（最近一条 entry）
@@ -298,32 +320,8 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
                     }
                 }
                 Some("response_item") => {
-                    if !found_status {
-                        let payload = entry.payload.as_ref();
-                        let role = payload.and_then(|p| p.get("role")).and_then(|v| v.as_str());
-                        let content = payload.and_then(|p| p.get("content"));
-                        if let Some(role) = role {
-                            last_entry_type = Some("assistant".to_string()); // Codex 用 role 而非 type
-                            last_role = Some(role.to_string());
-                            if let Some(c) = content {
-                                let has_content = match c {
-                                    serde_json::Value::String(s) => !s.is_empty(),
-                                    serde_json::Value::Array(arr) => !arr.is_empty(),
-                                    _ => false,
-                                };
-                                if has_content {
-                                    // Codex 的 type 字段: response_item 中的 payload 有 type
-                                    let item_type = payload
-                                        .and_then(|p| p.get("type"))
-                                        .and_then(|v| v.as_str());
-                                    last_entry_type = Some(item_type.unwrap_or(role).to_string());
-                                    last_has_tool_use = has_tool_use(c);
-                                    found_status = true;
-                                }
-                            }
-                        }
-                    }
-                    // 找最后一条文本消息
+                    // 找最后一条文本消息（含 role 记录，展示用 last_message_role；
+                    // 与旧实现一致：仅在有内容的消息上记录角色）
                     if last_message.is_none() {
                         let payload = entry.payload.as_ref();
                         let content = payload.and_then(|p| p.get("content"));
@@ -340,38 +338,53 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
                             };
                             if text.is_some() {
                                 last_message = text;
+                                last_role = payload
+                                    .and_then(|p| p.get("role"))
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
                             }
                         }
                     }
+                    // 记录归一化条目（含 role 的 message 与不带 role 的 function_call 等）
+                    kinds.push(codex_entry_kind(&entry));
+                }
+                Some("event_msg") => {
+                    // task_started / task_complete 参与判定；token_count / item_completed 等记账条目 → Other
+                    kinds.push(codex_entry_kind(&entry));
                 }
                 _ => {}
             }
         }
     }
+    // 倒扫时按文件顺序 push，此处反转回文件顺序（旧 → 新）供共享核尾部倒扫
+    kinds.reverse();
 
     let session_id = session_id?;
     if project_path.is_empty() {
         return None;
     }
 
-    // Codex 状态判断：复用 determine_status 的逻辑
-    // response_item with role=assistant + tool_use -> Processing
-    // response_item with role=assistant + text -> Waiting
-    // response_item with role=user -> Thinking
-    let msg_type: Option<&str> = match last_role.as_deref() {
-        Some("assistant") => Some("assistant"),
-        Some("user") => Some("user"),
-        _ => last_entry_type.as_deref(),
+    // 状态判定（issue #6）：共享核尾部倒扫取第一条有语义条目——
+    // user → Thinking；assistant 纯文本 → Idle；function_call/function_call_output →
+    // Processing；task_started → Processing；task_complete → Idle；记账条目跳过。
+    // 无任何语义条目（如仅 session_meta 的 rollout）→ None，兜底按形态：
+    // APP 形态文件新鲜（<300s）→ Processing，停更 → Waiting；CLI 保持 60s 阈值
+    let status = match derive_app_status(&kinds) {
+        Some(status) => status,
+        None => {
+            let fresh = match process_form {
+                ProcessForm::App => file_age_secs.map(|a| a < 300.0).unwrap_or(false),
+                ProcessForm::Cli => file_age_secs.map(|a| a < 60.0).unwrap_or(false),
+            };
+            if fresh {
+                SessionStatus::Processing
+            } else {
+                SessionStatus::Waiting
+            }
+        }
     };
-    let status = determine_status(
-        msg_type,
-        last_has_tool_use,
-        false,
-        false,
-        false,
-        false,
-        file_recently_modified,
-    );
+    // 叠加 300s 规则：Processing 且 JSONL mtime 停更 >= 300s → Waiting（与 WorkBuddy 一致）
+    let status = overlay_mtime_stale(status, file_age_secs.map_or(0, |a| (a * 1000.0) as u64));
 
     let project_name = project_name_from_path(&project_path);
     let last_message = last_message.map(|m| {
@@ -525,7 +538,7 @@ mod phase2_app_form_tests {
     use super::*;
     use crate::session::SessionStatus;
 
-    /// 夹具：仅 session_meta 的 rollout（无 role 条目 → determine_status 走兜底分支），
+    /// 夹具：仅 session_meta 的 rollout（无任何语义条目 → 共享核返回 None，走形态兜底），
     /// mtime 拨到 120s 前——落在 CLI 60s 与 APP 300s 阈值之间，可区分两种形态语义
     fn write_meta_only_rollout(dir: &Path) -> PathBuf {
         let path = dir.join("rollout-2026-01-01t00-00-00.jsonl");
@@ -646,5 +659,254 @@ mod phase2_app_form_tests {
             vec![(PathBuf::from("/other-fresh"), now)],
             "被认领索引排除、未认领新鲜文件存活"
         );
+    }
+}
+
+#[cfg(test)]
+mod app_status_fixture_tests {
+    use super::*;
+
+    /// 真实 rollout 脱敏片段（issue #6 实测样本
+    /// `~/.codex/sessions/2026/09/06/rollout-2026-09-06T13-40-16-01a0753b-*.jsonl`）：
+    /// 同一会话文件内含两轮（05:40:24-53 与 05:41:19-43），session_id 不变，
+    /// 尾部序列 user → reasoning → assistant message → function_call* → … → task_complete。
+    /// 字段按真实结构保留（type/payload.type/role/content/name），内容脱敏
+    const SESSION_ID: &str = "01a0753b-4fa9-7ab1-a245-7972b9ef2e41";
+    // 解析后的 cwd 值（单反斜杠）；嵌入 JSON 时经 json_escape 转义（真实 rollout 中
+    // 原始文本为 "E:\\LLMproject\\..." 形态）
+    const CWD: &str = "E:\\LLMproject\\demo";
+
+    /// JSON 字符串值转义（反斜杠 → \\），供 format! 拼 JSON 文本使用
+    fn json_escape(s: &str) -> String {
+        s.replace('\\', "\\\\")
+    }
+
+    fn meta() -> String {
+        format!(
+            r#"{{"timestamp":"2026-09-06T05:40:24.228Z","ordinal":0,"type":"session_meta","payload":{{"id":"{SESSION_ID}","cwd":"{}"}}}}"#,
+            json_escape(CWD)
+        )
+    }
+
+    fn task_started(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{{"type":"task_started","turn_id":"t1"}}}}"#
+        )
+    }
+
+    fn user_msg(ts: &str, ordinal: u32, text: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    fn assistant_msg(ts: &str, ordinal: u32, text: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{text}"}}]}}}}"#
+        )
+    }
+
+    fn function_call(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"function_call","id":"fc_1","name":"exec_command","arguments":"{{\"cmd\":\"git status\"}}"}}}}"#
+        )
+    }
+
+    fn function_call_output(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"function_call_output","call_id":"call_1","output":"ok"}}}}"#
+        )
+    }
+
+    fn reasoning(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"reasoning","summary":[]}}}}"#
+        )
+    }
+
+    fn token_count(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{{"type":"token_count","info":{{}}}}}}"#
+        )
+    }
+
+    fn item_completed(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{{"type":"item_completed","thread_id":"{SESSION_ID}"}}}}"#
+        )
+    }
+
+    fn task_complete(ts: &str, ordinal: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{{"type":"task_complete","turn_id":"t1"}}}}"#
+        )
+    }
+
+    fn write_rollout(dir: &Path, lines: &[String]) -> PathBuf {
+        let path =
+            dir.join("rollout-2026-09-06T13-40-16-01a0753b-4fa9-7ab1-a245-7972b9ef2e41.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    /// 第一轮完整序列（user → assistant → function_call → output → task_complete）
+    fn round_one() -> Vec<String> {
+        vec![
+            meta(),
+            task_started("2026-09-06T05:40:24.228Z", 1),
+            user_msg("2026-09-06T05:40:30.320Z", 2, "检查仓库状态"),
+            reasoning("2026-09-06T05:40:34.579Z", 3),
+            assistant_msg("2026-09-06T05:40:34.952Z", 4, "我先看一下"),
+            function_call("2026-09-06T05:40:34.953Z", 5),
+            function_call_output("2026-09-06T05:40:35.831Z", 6),
+            token_count("2026-09-06T05:40:35.887Z", 7),
+            task_complete("2026-09-06T05:40:53.976Z", 8),
+        ]
+    }
+
+    /// 第二轮运行期序列（追加写入同一文件：user → reasoning → assistant → function_call*）
+    fn round_two_running() -> Vec<String> {
+        vec![
+            meta(),
+            user_msg("2026-09-06T05:41:25.003Z", 9, "同步到本地"),
+            reasoning("2026-09-06T05:41:27.626Z", 10),
+            assistant_msg("2026-09-06T05:41:28.121Z", 11, "开始同步"),
+            function_call("2026-09-06T05:41:28.122Z", 12),
+            function_call("2026-09-06T05:41:28.123Z", 13),
+            function_call_output("2026-09-06T05:41:28.631Z", 14),
+            token_count("2026-09-06T05:41:28.679Z", 15),
+        ]
+    }
+
+    /// 第二轮完成序列（追加 task_complete 收尾）
+    fn round_two_complete() -> Vec<String> {
+        let mut lines = round_two_running();
+        lines.push(assistant_msg("2026-09-06T05:41:43.138Z", 16, "同步完成"));
+        lines.push(token_count("2026-09-06T05:41:43.140Z", 17));
+        lines.push(task_complete("2026-09-06T05:41:43.151Z", 18));
+        lines
+    }
+
+    /// 夹具自检：真实结构片段能解析出会话（session_id / cwd 正确）
+    #[test]
+    fn fixture_parses_session_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &round_one());
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.id, SESSION_ID);
+        assert_eq!(session.project_path, CWD);
+    }
+
+    /// 关键判定 1：function_call 在尾 → Processing（第二轮运行期可见，issue #6 修复点）
+    #[test]
+    fn function_call_tail_is_processing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &round_two_running());
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "第二轮工具执行期必须显示运行中（旧实现恒判 Idle）"
+        );
+    }
+
+    /// 关键判定 2：task_complete / assistant message 在尾 → Idle
+    #[test]
+    fn task_complete_tail_is_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &round_one());
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn assistant_message_tail_is_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 无 task_complete 的尾部（assistant 纯文本收尾）同样判 Idle
+        let mut lines = round_two_running();
+        lines.push(assistant_msg("2026-09-06T05:41:43.138Z", 16, "同步完成"));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    /// 关键判定 3：user message 在尾 → Thinking
+    #[test]
+    fn user_message_tail_is_thinking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(user_msg("2026-09-06T05:41:25.003Z", 9, "同步到本地"));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Thinking);
+    }
+
+    /// 关键判定 4：记账条目（token_count / item_completed / reasoning）在尾不改变判定
+    #[test]
+    fn bookkeeping_tail_does_not_change_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 工具调用尾部 + 纯记账条目 → 仍为 Processing
+        let mut lines = round_two_running();
+        lines.push(token_count("2026-09-06T05:41:41.367Z", 16));
+        lines.push(item_completed("2026-09-06T05:41:43.136Z", 17));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Processing);
+        // 回合结束尾部 + 纯记账条目 → 仍为 Idle（顺带改善：旧实现误显运行中）
+        let mut lines = round_two_complete();
+        lines.push(item_completed("2026-09-06T05:41:43.200Z", 19));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    /// 两轮同文件场景（用户实测）：第二轮运行期为 Processing、完成后为 Idle
+    #[test]
+    fn two_rounds_same_file_second_round_running_then_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 第二轮运行中（追加写入同一 rollout 文件、session_id 不变）
+        let mut lines = round_one();
+        lines.extend(round_two_running());
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "第二轮运行期必须显示运行中（issue #6 主修复）"
+        );
+        // 第二轮完成（task_complete 收尾）→ Idle
+        let mut lines = round_one();
+        lines.extend(round_two_complete());
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    /// 300s 叠加：Processing 且文件停更 >= 300s → Waiting（与 WorkBuddy 语义一致）
+    #[test]
+    fn processing_stale_downgrades_to_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &round_two_running());
+        let stale = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(301))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Waiting);
+    }
+
+    /// 兜底分侧保持：无语义条目（仅 session_meta）时，APP 形态文件新鲜 → Processing
+    /// （与 phase2_app_form_tests::fixture_discriminates_cli_vs_app_mtime_thresholds 互补）
+    #[test]
+    fn meta_only_fresh_app_form_is_processing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &[meta()]);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Processing);
     }
 }
