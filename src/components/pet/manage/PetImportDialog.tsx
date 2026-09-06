@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Loader2 } from "lucide-react";
 import { probeSheetRows, type PetRows } from "../petRuntime";
 import {
   judgeVoiceTier,
@@ -98,8 +99,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
       });
   }, []);
 
-  // 未探测时长的文件补探测（并行；失败保持 null）——共享 hook 封装
-  useVoiceDurationProbe(voiceRows, setVoiceRows, staged?.dir ?? null);
+  // 未探测时长的文件补探测（并行）：失败延迟自动重试（封顶），徽标可点击重测（#2）——共享 hook 封装
+  const reprobe = useVoiceDurationProbe(voiceRows, setVoiceRows, staged?.dir ?? null);
 
   const stageFrom = async (fn: () => Promise<StagedPetDto>) => {
     setBusy(true);
@@ -246,6 +247,7 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
               <div className="flex gap-2">
                 <Button
                   size="sm"
+                  variant="outline"
                   disabled={busy}
                   data-testid="import-pick-folder"
                   onClick={() =>
@@ -261,6 +263,7 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                 </Button>
                 <Button
                   size="sm"
+                  variant="outline"
                   disabled={busy}
                   onClick={() =>
                     void openDialog({ filters: [{ name: "ZIP", extensions: ["zip"] }] }).then(
@@ -290,7 +293,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => void openUrl("https://petdex.dev/collections")}
+                    data-testid="import-petdex-browse"
+                    onClick={() => void openUrl("https://petdex.dev")}
                   >
                     {t("pet.import.petdexBrowse")}
                   </Button>
@@ -305,7 +309,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                     )
                   }
                 >
-                  {t("pet.import.petdexDownload")}
+                  {busy && <Loader2 className="animate-spin" />}
+                  {busy ? t("pet.import.petdexDownloading") : t("pet.import.petdexDownload")}
                 </Button>
               </div>
             )}
@@ -388,6 +393,7 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                   await invoke("pet_remove_staged_audio", { stagingId: staged.stagingId, rel });
                   setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
                 }}
+                onReprobe={reprobe}
               />
               <div className="flex items-center gap-2" title={t("pet.import.subtitle")}>
                 <Switch

@@ -5,7 +5,10 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { AGENT_BADGE, getAgentLabel } from "@/lib/agentBadge";
 import { useSessionJump } from "@/hooks/useSessionJump";
+import { cn } from "@/lib/utils";
 import {
+  clearHistory,
+  clearRead,
   getHistory,
   getUnreadCount,
   markAllRead,
@@ -24,6 +27,9 @@ export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [unread, setUnread] = useState(0);
+  // #5b：清空全部的两步轻量确认（首次点击进入待确认态，3 秒内再点才执行）
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const confirmTimerRef = useRef<number | null>(null);
   const openRef = useRef(false);
   const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
 
@@ -39,14 +45,44 @@ export function NotificationBell() {
     };
     refresh();
     window.addEventListener("mam-history-updated", refresh);
-    return () => window.removeEventListener("mam-history-updated", refresh);
+    return () => {
+      window.removeEventListener("mam-history-updated", refresh);
+      if (confirmTimerRef.current) window.clearTimeout(confirmTimerRef.current);
+    };
   }, []);
 
   const toggle = () => {
     const next = !open;
     openRef.current = next;
     setOpen(next);
+    // 面板关闭时还原清空确认态，避免下次打开残留"确认清空？"
+    if (!next) {
+      if (confirmTimerRef.current) window.clearTimeout(confirmTimerRef.current);
+      setConfirmingClear(false);
+    }
     if (next) markAllRead();
+  };
+
+  // #5b：清空全部（两步确认：首次点击进入待确认态，3 秒内再点执行；超时自动还原）
+  const handleClearAll = () => {
+    if (!confirmingClear) {
+      setConfirmingClear(true);
+      confirmTimerRef.current = window.setTimeout(() => setConfirmingClear(false), 3000);
+      return;
+    }
+    if (confirmTimerRef.current) window.clearTimeout(confirmTimerRef.current);
+    setConfirmingClear(false);
+    clearHistory();
+    toast.success(t("notifications.clearedToast"));
+  };
+
+  // #5b：仅清理已读（未读保留，角标不变）；同时取消"清空全部"的待确认态，
+  // 避免武装态残留导致后续误触发二次清空
+  const handleClearRead = () => {
+    if (confirmTimerRef.current) window.clearTimeout(confirmTimerRef.current);
+    setConfirmingClear(false);
+    clearRead();
+    toast.success(t("notifications.readClearedToast"));
   };
 
   const jumpTo = async (e: HistoryEntry) => {
@@ -82,7 +118,30 @@ export function NotificationBell() {
       </button>
       {open && (
         <div className="bg-card absolute right-0 z-50 mt-2 w-96 rounded-lg border p-2 shadow-xl">
-          <p className="mb-2 px-1 text-xs font-semibold">{t("notifications.historyTitle")}</p>
+          <div className="mb-2 flex items-center justify-between gap-2 px-1">
+            <p className="text-xs font-semibold">{t("notifications.historyTitle")}</p>
+            <div className="flex items-center gap-1">
+              <button
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] transition-colors",
+                  confirmingClear
+                    ? "bg-destructive text-white"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                )}
+                onClick={handleClearAll}
+                title={t("notifications.clearAll")}
+              >
+                {confirmingClear ? t("notifications.clearAllConfirm") : t("notifications.clearAll")}
+              </button>
+              <button
+                className="text-muted-foreground hover:bg-accent hover:text-foreground rounded px-1.5 py-0.5 text-[10px] transition-colors"
+                onClick={handleClearRead}
+                title={t("notifications.clearRead")}
+              >
+                {t("notifications.clearRead")}
+              </button>
+            </div>
+          </div>
           {candidates && candidates.length > 0 && (
             <div className="mb-2 space-y-1 rounded border p-1.5">
               <p className="px-1 text-[10px] font-semibold">{t("sessions.pickWindow")}</p>

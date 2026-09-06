@@ -50,6 +50,25 @@ describe("VoiceGroupEditor", () => {
     // 仅 general 1 条合法 → 缺 approval/done/error
     expect(screen.getByTestId("voice-coverage")).toHaveTextContent(/approval|缺少分组/);
   });
+
+  it("no-duration 徽标可点击重测（#2）：回调该行 rel，tooltip 为本地化重测文案", () => {
+    const onReprobe = vi.fn();
+    render(
+      <VoiceGroupEditor rows={rows} onAdd={() => {}} onRemove={() => {}} onReprobe={onReprobe} />
+    );
+    const badge = screen.getByTestId("voice-reprobe-voice/approval/c.mp3");
+    expect(badge).toHaveTextContent(/无法读取时长/);
+    expect(badge.getAttribute("title")).toBe("重新读取时长");
+    fireEvent.click(badge);
+    expect(onReprobe).toHaveBeenCalledWith("voice/approval/c.mp3");
+  });
+
+  it("未提供 onReprobe 时 no-duration 徽标为静态展示（无点击行为）", () => {
+    render(<VoiceGroupEditor rows={rows} onAdd={() => {}} onRemove={() => {}} />);
+    const badge = screen.getByTestId("voice-row-voice/approval/c.mp3");
+    expect(badge.textContent).toContain("无法读取时长");
+    expect(screen.queryByTestId("voice-reprobe-voice/approval/c.mp3")).toBeNull();
+  });
 });
 describe("VoiceGroupEditor 分组标签本地化（EP9，issue #33-6）", () => {
   it("可见标签用翻译文案，原始分组键降级为 tooltip", () => {

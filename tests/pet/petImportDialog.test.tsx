@@ -5,8 +5,10 @@ import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
 import { tauriInvokeMock } from "../msw/tauriMocks";
 
 const pick = vi.fn();
+const openUrlMock = vi.fn();
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...a: unknown[]) => pick(...a) }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: (...a: unknown[]) => openUrlMock(...a) }));
 vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petRuntime")>();
   return { ...orig, probeSheetRows: vi.fn().mockResolvedValue(9), probeAudioDurationMs: vi.fn().mockResolvedValue(3000) };
@@ -25,6 +27,7 @@ const staged = {
 describe("PetImportDialog", () => {
   beforeEach(() => {
     tauriInvokeMock.mockClear();
+    openUrlMock.mockClear();
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_stage_from_folder") return Promise.resolve(staged);
       if (cmd === "pet_finalize_import") return Promise.resolve({ id: staged.suggestedName, displayName: staged.suggestedDisplayName });
@@ -65,6 +68,59 @@ describe("PetImportDialog", () => {
     expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_stage_from_petdex")?.[1]?.url).toBe(
       "https://petdex.dev/pets/capvolt"
     );
+  });
+
+  it("petdex 渠道：浏览按钮跳转 petdex.dev 首页（不再带 /collections）", async () => {
+    render(<PetImportDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("import-tab-petdex"));
+    fireEvent.click(await screen.findByTestId("import-petdex-browse"));
+    expect(openUrlMock).toHaveBeenCalledWith("https://petdex.dev");
+  });
+
+  it("petdex 渠道：下载中显示 spinner 与“下载中…”文案，完成后恢复", async () => {
+    let resolveStage: ((v: typeof staged) => void) | null = null;
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_stage_from_petdex")
+        return new Promise((res) => (resolveStage = res as (v: typeof staged) => void));
+      return Promise.resolve(undefined);
+    });
+    render(<PetImportDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("import-tab-petdex"));
+    fireEvent.change(await screen.findByTestId("import-petdex-url"), {
+      target: { value: "https://petdex.dev/pets/capvolt" },
+    });
+    fireEvent.click(await screen.findByTestId("import-petdex-download"));
+    // busy：按钮禁用、文案切换为“下载中…”、出现 spinner（测试环境 i18n 未初始化，渲染键名）
+    const btn = await screen.findByTestId("import-petdex-download");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveTextContent("pet.import.petdexDownloading");
+    expect(btn.querySelector(".animate-spin")).not.toBeNull();
+    // 完成：进入配置页（busy 结束，来源页按钮随之卸载）
+    const { act } = await import("@testing-library/react");
+    await act(async () => resolveStage?.(staged));
+    await screen.findByTestId("import-config");
+    expect(screen.queryByTestId("import-petdex-download")).toBeNull();
+  });
+
+  it("petdex 渠道：下载失败 → toast 报错、按钮恢复原文案", async () => {
+    const { toast } = await import("sonner");
+    const toastError = vi.spyOn(toast, "error").mockImplementation(() => "");
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_stage_from_petdex") return Promise.reject(new Error("boom"));
+      return Promise.resolve(undefined);
+    });
+    render(<PetImportDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("import-tab-petdex"));
+    fireEvent.change(await screen.findByTestId("import-petdex-url"), {
+      target: { value: "https://petdex.dev/pets/capvolt" },
+    });
+    fireEvent.click(await screen.findByTestId("import-petdex-download"));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const btn = screen.getByTestId("import-petdex-download");
+    expect(btn).not.toBeDisabled();
+    expect(btn).toHaveTextContent("pet.import.petdexDownload");
+    expect(btn.querySelector(".animate-spin")).toBeNull();
+    toastError.mockRestore();
   });
 
   it("配置页关闭对话框 → pet_cancel_import 清理", async () => {

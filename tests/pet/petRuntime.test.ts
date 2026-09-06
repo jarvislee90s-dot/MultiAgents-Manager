@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadActiveId, saveActiveId, loadVoiceCap, rowsFromSize, FOXBELL } from "@/components/pet/petRuntime";
+import {
+  loadActiveId,
+  saveActiveId,
+  loadVoiceCap,
+  rowsFromSize,
+  FOXBELL,
+  loadFlashSwitched,
+  saveFlashSwitched,
+  clearFlashSwitched,
+} from "@/components/pet/petRuntime";
 
 describe("petRuntime", () => {
   beforeEach(() => localStorage.clear());
@@ -9,6 +18,14 @@ describe("petRuntime", () => {
     saveActiveId("starry-dew", false, "Starry Dew");
     expect(loadActiveId()).toBe("starry-dew");
     expect(loadVoiceCap()).toBe(false);
+  });
+
+  it("闪切持久标记：默认无标记，可读写与清除（回环修复）", () => {
+    expect(loadFlashSwitched()).toBeNull();
+    saveFlashSwitched("starry-dew");
+    expect(loadFlashSwitched()).toBe("starry-dew");
+    clearFlashSwitched();
+    expect(loadFlashSwitched()).toBeNull();
   });
 
   it("rowsFromSize：v1/v2 识别与非法尺寸（EP1）", () => {

@@ -21,6 +21,8 @@ export function VoiceGroupEditor(props: {
   rows: VoiceRow[];
   onAdd: (group: string, paths: string[]) => void | Promise<void>;
   onRemove: (rel: string) => void | Promise<void>;
+  /** 无时长徽标点击重测入口（#2）：清除该行探测记账后立即重新探测 */
+  onReprobe?: (rel: string) => void | Promise<void>;
   busy?: boolean;
 }) {
   const { t } = useTranslation();
@@ -77,7 +79,17 @@ export function VoiceGroupEditor(props: {
                   </span>
                   <span className="flex items-center gap-2">
                     {problem && (
-                      <span className="bg-destructive/15 text-destructive rounded px-1">
+                      <span
+                        className="bg-destructive/15 text-destructive rounded px-1"
+                        {...(problem === "no-duration" && props.onReprobe
+                          ? {
+                              onClick: () => void props.onReprobe!(r.file),
+                              role: "button",
+                              title: t("pet.import.reprobeDuration"),
+                              "data-testid": `voice-reprobe-${r.file}`,
+                            }
+                          : {})}
+                      >
                         {t(`pet.import.problems.${problem}`)}
                       </span>
                     )}

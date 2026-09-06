@@ -37,6 +37,10 @@ export function MainTitleBar() {
     setTheme(theme === "dark" ? "light" : "dark");
   };
 
+  // 子窗口创建时按当前主题传 Tauri theme 选项（原生边框/标题栏与全局主题一致）；
+  // system 模式不传（Tauri 默认跟随系统）
+  const tauriTheme = theme === "system" ? undefined : theme;
+
   const handleOpenAbout = async () => {
     await createWindow("about", {
       title: t("about.title"),
@@ -51,6 +55,7 @@ export function MainTitleBar() {
       shadow: false,
       alwaysOnTop: true,
       parent: "main",
+      theme: tauriTheme,
     });
   };
 
@@ -67,6 +72,7 @@ export function MainTitleBar() {
       transparent: true,
       shadow: false,
       parent: "main",
+      theme: tauriTheme,
     });
   };
 

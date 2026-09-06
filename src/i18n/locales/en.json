@@ -35,7 +35,12 @@
   "notifications": {
     "historyTitle": "Notification history",
     "historyEmpty": "No notifications yet",
-    "jumpFailed": "Session ended or not jumpable"
+    "jumpFailed": "Session ended or not jumpable",
+    "clearAll": "Clear all",
+    "clearAllConfirm": "Confirm clear?",
+    "clearRead": "Clear read",
+    "clearedToast": "Notification history cleared",
+    "readClearedToast": "Read notifications cleared"
   },
   "tray": {
     "show": "Show Window",
@@ -452,6 +457,7 @@
         "no-duration": "unreadable duration",
         "too-big": ">10MB"
       },
+      "reprobeDuration": "Re-read duration",
       "coverageOk": "All four groups present, voice enabled",
       "coverageMissing": "Missing groups: {{groups}} (pet will have no voice)",
       "totalSize": "Total voice size: {{size}}",
@@ -468,6 +474,7 @@
       "petdexHint": "Browse petdex.dev, then paste a pet page link (e.g. https://petdex.dev/pets/capvolt)",
       "petdexBrowse": "Browse petdex.dev",
       "petdexDownload": "Download & stage",
+      "petdexDownloading": "Downloading…",
       "configTitle": "Configure",
       "name": "Pet name (folder)",
       "nameHint": "letters/digits/-/_ only",

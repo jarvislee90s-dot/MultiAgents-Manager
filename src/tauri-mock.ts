@@ -386,7 +386,11 @@ if (!isTauri) {
         if (args?.key === "notifications_enabled") return Promise.resolve(true);
         if (args?.key === "notification_sound") return Promise.resolve("default");
         if (args?.key === "global_shortcut") return Promise.resolve("Cmd+Shift+M");
+        if (args?.key === "ui_theme") return Promise.resolve(null);
         return Promise.resolve(null);
+
+      case "set_theme":
+        return Promise.resolve(undefined);
 
       case "read_mcp_servers":
         return Promise.resolve([

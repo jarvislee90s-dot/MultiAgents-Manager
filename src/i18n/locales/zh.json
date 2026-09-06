@@ -35,7 +35,12 @@
   "notifications": {
     "historyTitle": "通知历史",
     "historyEmpty": "暂无通知",
-    "jumpFailed": "会话已结束或不可跳转"
+    "jumpFailed": "会话已结束或不可跳转",
+    "clearAll": "清空全部",
+    "clearAllConfirm": "确认清空？",
+    "clearRead": "清理已读",
+    "clearedToast": "通知历史已清空",
+    "readClearedToast": "已读通知已清理"
   },
   "tray": {
     "show": "显示窗口",
@@ -452,6 +457,7 @@
         "too-big": "大于 10MB",
         "no-duration": "无法读取时长"
       },
+      "reprobeDuration": "重新读取时长",
       "coverageOk": "四组齐全，语音可用",
       "coverageMissing": "缺少分组：{{groups}}（该宠物将无语音）",
       "totalSize": "语音总大小：{{size}}",
@@ -468,6 +474,7 @@
       "petdexHint": "先去 petdex.dev 画廊挑选，把宠物页链接粘贴到下面（如 https://petdex.dev/pets/capvolt）",
       "petdexBrowse": "浏览 petdex.dev",
       "petdexDownload": "下载并暂存",
+      "petdexDownloading": "下载中…",
       "configTitle": "配置确认",
       "name": "宠物名（文件夹名）",
       "nameHint": "仅字母/数字/连字符/下划线",

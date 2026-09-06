@@ -8,7 +8,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { loadActiveId, probeSheetRows, saveActiveId, type PetRows } from "../petRuntime";
+import {
+  clearFlashSwitched,
+  loadActiveId,
+  loadFlashSwitched,
+  probeSheetRows,
+  saveActiveId,
+  saveFlashSwitched,
+  type PetRows,
+} from "../petRuntime";
 import { petErrMsg } from "../petErrors";
 import { buildManifestFromScan, repairManifest } from "../petActivation";
 import {
@@ -46,9 +54,8 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
   const [petDir, setPetDir] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [busy, setBusy] = useState(false);
-  // 本次会话中该宠物曾因增删音频被闪切回 foxbell（P1-4）：增删后 doSave 再读激活指针
-  // 已是 foxbell，仅靠调用时点判断 wasActive 会恒 false、保存后无法自动切回原宠物
-  const [frozeActive, setFrozeActive] = useState(false);
+  // 闪切持久标记（localStorage，跨对话框关闭/重开仍生效）：增删音频闪切回 foxbell 时记录
+  // 原宠物 id；保存成功/重命名成功/对话框关闭三个出口统一消费并清除（回环修复，P1-4 修订）
 
   const reload = useCallback(async () => {
     try {
@@ -75,7 +82,6 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     setSubtitle(p.hasSubtitle);
     setVoiceRows([]);
     setPetDir(null);
-    setFrozeActive(false);
     try {
       const scan = await invoke<PetScan>("pet_scan", { id: p.id });
       setPetDir(scan.dir);
@@ -107,16 +113,28 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     }
   };
 
-  // 未探测时长（manifest 无缓存 / 磁盘新文件）并行探测回填，失败保持 null
-  useVoiceDurationProbe(voiceRows, setVoiceRows, petDir);
+  // 未探测时长（manifest 无缓存 / 磁盘新文件）并行探测回填：失败延迟自动重试（封顶），
+  // 徽标可点击重测（返回的 reprobe 清除该行记账重新探测，#2）
+  const reprobe = useVoiceDurationProbe(voiceRows, setVoiceRows, petDir);
 
   /** 激活中宠物先自动切回 foxbell（EP5），返回是否执行了切换 */
   const ensureNotActive = (): boolean => {
     if (loadActiveId() !== selected?.id) return false;
     saveActiveId("foxbell", true, "Foxbell");
     emit("pet-active-changed", {}).catch(() => {});
-    setFrozeActive(true); // 记录闪切：随后的保存/重命名据此自动切回（EP5 修订，P1-4）
+    saveFlashSwitched(selected.id); // 持久标记：随后的保存/重命名/关对话框据此自动切回（回环修复）
     toast.info(t("pet.manage.activeSwitchNotice"));
+    return true;
+  };
+
+  /** 消费闪切持久标记：把激活指针切回被闪切的原宠物并广播（与"保存完成自动切回"同语义）。
+   *  返回是否执行了切回；无标记（未闪切过）时不动指针 */
+  const restoreFlashSwitched = (): boolean => {
+    const id = loadFlashSwitched();
+    if (!id) return false;
+    clearFlashSwitched();
+    saveActiveId(id, true, undefined); // 能力/展示名未知：仅回指针，不覆盖缓存
+    emit("pet-active-changed", {}).catch(() => {});
     return true;
   };
 
@@ -125,8 +143,8 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     // 实时校验兜底（issue #33-7）：非法字符/保留名/超长/重名不发给后端（按钮态由 renameProblem 驱动）
     if (renameProblem) return;
     // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）；
-    // frozeActive 兜底增删音频先行触发过闪切的场景（P1-4）
-    const wasActive = loadActiveId() === selected.id || frozeActive;
+    // 持久标记兜底增删音频先行触发过闪切的场景（P1-4 修订，跨对话框重开仍生效）
+    const wasActive = loadActiveId() === selected.id || !!loadFlashSwitched();
     setBusy(true);
     try {
       ensureNotActive();
@@ -147,12 +165,14 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         emit("pet-active-changed", {}).catch(() => {});
       }
       toast.success(t("pet.manage.renamedToast", { name: renameTo }));
-      setFrozeActive(false);
+      clearFlashSwitched(); // 重命名成功出口：消费并清除闪切标记
       await reload();
       setSelected(null);
       setPetDir(null);
     } catch (e) {
       toast.error(petErrMsg(e, t));
+      // 失败出口：指针仍停在 foxbell 时按标记恢复原宠物（回环修复）
+      if (wasActive) restoreFlashSwitched();
     } finally {
       setBusy(false);
     }
@@ -161,8 +181,8 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
   const doSave = async () => {
     if (!selected) return;
     // 捕获须在 ensureNotActive 翻指针之前（EP5 修订：编辑后自动切回，Bug3）；
-    // frozeActive 兜底增删音频先行触发过闪切的场景（P1-4）
-    const wasActive = loadActiveId() === selected.id || frozeActive;
+    // 持久标记兜底增删音频先行触发过闪切的场景（P1-4 修订，跨对话框重开仍生效）
+    const wasActive = loadActiveId() === selected.id || !!loadFlashSwitched();
     setBusy(true);
     try {
       ensureNotActive();
@@ -199,10 +219,12 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         emit("pet-active-changed", {}).catch(() => {});
       }
       toast.success(t("pet.manage.savedToast"));
-      setFrozeActive(false);
+      clearFlashSwitched(); // 保存成功出口：消费并清除闪切标记
       await reload();
     } catch (e) {
       toast.error(petErrMsg(e, t));
+      // 失败出口：指针仍停在 foxbell 时按标记恢复原宠物（回环修复）
+      if (wasActive) restoreFlashSwitched();
     } finally {
       setBusy(false);
     }
@@ -215,6 +237,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
       ensureNotActive();
       await invoke("pet_delete_pet", { id: selected.id });
       toast.success(t("pet.manage.deletedToast", { name: selected.displayName }));
+      clearFlashSwitched(); // 宠物已删除：闪切标记失去意义，一并清除
       setDeleting(false);
       setSelected(null);
       setPetDir(null);
@@ -236,8 +259,14 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
         })
       : null;
 
+  /** 对话框关闭出口：闪切标记在场 → 自动切回原宠物（不点保存直接关对话框也切回，回环修复） */
+  const handleOpenChange = (v: boolean) => {
+    if (!v) restoreFlashSwitched();
+    props.onOpenChange(v);
+  };
+
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+    <Dialog open={props.open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>{t("pet.manage.title")}</DialogTitle>
@@ -321,6 +350,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
                   await invoke("pet_remove_voice_file", { id: selected.id, rel });
                   setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
                 }}
+                onReprobe={reprobe}
               />
               <div className="flex items-center gap-2">
                 <Switch checked={subtitle} onCheckedChange={setSubtitle} />

@@ -2,6 +2,7 @@
 // 会话历史在 ~/.workbuddy/projects/<路径编码>/<sessionId>.jsonl（OpenAI 风格 type/role/content）
 // 所有文件均为未文档化私有格式：解析失败一律跳过/降级，禁止 panic（spec W3 防御性要求）
 
+use super::app_status::{derive_app_status, AppEntryKind};
 use super::git::get_github_url;
 use super::jsonl::{read_first_lines, read_recent_lines};
 use super::project::project_name_from_path;
@@ -16,9 +17,10 @@ use std::sync::Mutex;
 /// 心跳新鲜阈值：取 MAM 轮询周期（约 30s）的 3 倍，防止轮询间隙卡片闪烁
 pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
 
-/// App 形态状态叠加阈值（spec §4「叠加 mtime 阈值（App 形态 300s，与 Codex APP 一致）」）：
-/// JSONL mtime 停更超过该时长时，函数调用类尾部（Processing）降级为 Waiting
-pub const APP_STATUS_STALE_MS: u64 = 300_000;
+/// App 形态状态叠加阈值与叠加函数自共享核 re-export（issue #6 收敛后保持兼容）：
+/// 语义见 monitor::app_status——JSONL mtime 停更 >= 300s 时函数调用类尾部（Processing）
+/// 降级 Waiting；assistant 文本（Idle）等其余状态不受影响
+pub use super::app_status::{overlay_mtime_stale, APP_STATUS_STALE_MS};
 
 /// 标题降级的首部读取行数（issue #35-6）：首条 user 消息从文件头找——
 /// 只搜尾部 500 行窗口时，超长会话的降级标题恒为 None（卡片回退显示 sessionId）。
@@ -169,39 +171,33 @@ pub fn find_session_jsonl(home: &Path, cwd: &str, session_id: &str) -> Option<Pa
     hit
 }
 
-/// mtime 阈值叠加（spec §4）：函数调用类尾部停更 >= 300s 降级 Waiting；
-/// assistant 文本（Idle）等其余状态不受影响。mtime 年龄不可知时按未过期处理（防御）
-pub fn overlay_mtime_stale(status: SessionStatus, mtime_age_ms: u64) -> SessionStatus {
-    match status {
-        SessionStatus::Processing if mtime_age_ms >= APP_STATUS_STALE_MS => SessionStatus::Waiting,
-        other => other,
+/// 平铺 JSONL 条目 → 归一化 APP 条目（issue #6 格式翻译适配器）：
+/// OpenAI 风格 type/role/content 直接映射到共享判定核（monitor::app_status）的
+/// AppEntryKind；reasoning / file-history-snapshot 等中间条目 → Other（跳过）
+fn workbuddy_entry_kind(v: &serde_json::Value) -> AppEntryKind {
+    match v["type"].as_str().unwrap_or_default() {
+        "message" => match v["role"].as_str().unwrap_or_default() {
+            "user" => AppEntryKind::UserMessage,
+            _ => AppEntryKind::AssistantMessage, // assistant 完成
+        },
+        "function_call" | "function_call_result" => AppEntryKind::ToolCall,
+        _ => AppEntryKind::Other,
     }
 }
 
-/// JSONL 尾部状态推导：最后一条有效条目决定状态（spec W3 映射）
+/// JSONL 尾部状态推导（对外签名不变，issue #6 起为共享核的翻译适配器）：
+/// 收集全部条目的归一化 kind（保持既有逐行解析防御逻辑：`type` 字段存在才计入），
+/// 把完整切片交给共享核尾部倒扫——跳过 Other 记账条目，取第一条有语义条目定状态
+/// （spec W3 映射的推广）；无任何语义条目 → Waiting（兜底不变）
 pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
-    let mut last: Option<&String> = None;
+    let mut kinds: Vec<AppEntryKind> = Vec::new();
     for line in lines {
         match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(v) if v.get("type").is_some() => last = Some(line),
+            Ok(v) if v.get("type").is_some() => kinds.push(workbuddy_entry_kind(&v)),
             _ => continue,
         }
     }
-    let Some(line) = last else {
-        return SessionStatus::Waiting;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-        return SessionStatus::Waiting;
-    };
-    match v["type"].as_str().unwrap_or_default() {
-        "message" => match v["role"].as_str().unwrap_or_default() {
-            "user" => SessionStatus::Thinking,
-            _ => SessionStatus::Idle, // assistant 完成
-        },
-        "function_call" | "function_call_result" => SessionStatus::Processing,
-        // reasoning/file-history-snapshot 等中间条目按运行中处理
-        _ => SessionStatus::Processing,
-    }
+    derive_app_status(&kinds).unwrap_or(SessionStatus::Waiting)
 }
 
 /// 会话标题：只读打开 workbuddy.db 读 sessions 标题（P2-1：custom_title 非空优先，否则 title）；
@@ -987,6 +983,46 @@ mod tests {
     #[test]
     fn tail_empty_is_waiting() {
         assert_eq!(derive_status_from_tail(&[]), SessionStatus::Waiting);
+    }
+
+    // ---- 记账条目跳过（issue #6 共享核倒扫规则）：尾部 Other 不改变判定 ----
+
+    #[test]
+    fn tail_function_call_with_trailing_reasoning_is_processing() {
+        // 工具执行中 + 尾部记账条目（reasoning）→ 仍为 Processing（运行中不被误伤）
+        let lines = vec![
+            r#"{"type":"function_call","name":"shell"}"#.into(),
+            r#"{"type":"reasoning","providerData":{"messageId":"m1"}}"#.into(),
+        ];
+        assert_eq!(derive_status_from_tail(&lines), SessionStatus::Processing);
+    }
+
+    #[test]
+    fn tail_assistant_with_trailing_reasoning_is_idle() {
+        // 回合结束 + 尾部记账条目（reasoning）→ Idle（顺带改善：旧实现误显运行中）
+        let lines = vec![
+            r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"完成"}]}"#.into(),
+            r#"{"type":"reasoning","providerData":{"messageId":"m1"}}"#.into(),
+        ];
+        assert_eq!(derive_status_from_tail(&lines), SessionStatus::Idle);
+    }
+
+    #[test]
+    fn tail_bookkeeping_only_is_waiting() {
+        // 纯记账尾部（无任何语义条目）→ None 兜底 Waiting
+        let lines = vec![r#"{"type":"reasoning","providerData":{"messageId":"m1"}}"#.into()];
+        assert_eq!(derive_status_from_tail(&lines), SessionStatus::Waiting);
+    }
+
+    #[test]
+    fn tail_user_with_trailing_reasoning_is_thinking() {
+        // 用户消息 + 尾部记账条目 → Thinking（「最后一条说了什么就是什么」的推广）
+        let lines = vec![
+            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"跑测试"}]}"#
+                .into(),
+            r#"{"type":"reasoning","providerData":{"messageId":"m1"}}"#.into(),
+        ];
+        assert_eq!(derive_status_from_tail(&lines), SessionStatus::Thinking);
     }
 
     // ---- App 形态 mtime 阈值叠加（spec §4，与 Codex APP 语义一致）----
