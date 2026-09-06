@@ -413,6 +413,63 @@ describe("PetManageDialog", () => {
       expect(row).toHaveTextContent(/3\.0s/);
     });
   });
+
+  it("探测失败自动重试仍失败 → 点击 no-duration 徽标手动重测，成功消解徽标（#2）", async () => {
+    const probe = vi.mocked(probeAudioDurationMs);
+    probe.mockReset();
+    probe.mockImplementation(async () => {
+      throw new Error("fail");
+    });
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets") return Promise.resolve(pets);
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "starry-dew",
+          dir: "/x/starry-dew",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [{ rel: "voice/general/greet.mp3", exists: true, size: 1000 }],
+        });
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve({
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: false,
+          hasSubtitle: false,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [
+            {
+              group: "general",
+              name: "greet",
+              file: "voice/general/greet.mp3",
+              sizeBytes: 1000,
+              durationMs: null as unknown as number,
+            },
+          ],
+        });
+      return Promise.resolve(undefined);
+    });
+
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    const row = await screen.findByTestId("voice-row-voice/general/greet.mp3");
+    expect(row).toHaveTextContent(/无法读取时长/);
+    // 首探已失败（自动重试计时器已挂起）
+    await waitFor(() => expect(probe).toHaveBeenCalled());
+
+    // 点击徽标 → 立即重新探测（清记账），从失败转成功
+    probe.mockResolvedValue(3000);
+    const callsBefore = probe.mock.calls.length;
+    fireEvent.click(await screen.findByTestId("voice-reprobe-voice/general/greet.mp3"));
+    await waitFor(() => expect(probe).toHaveBeenCalledTimes(callsBefore + 1));
+    await waitFor(() => {
+      expect(row).not.toHaveTextContent(/无法读取时长/);
+      expect(row).toHaveTextContent(/3\.0s/);
+    });
+    // 其后挂起的自动重试批次对已回填行不再探测（P1-3 契约保持）
+    await new Promise((r) => setTimeout(r, 700));
+    expect(probe).toHaveBeenCalledTimes(callsBefore + 1);
+  });
 });
 
 describe("PetManageDialog 校验与能力判定（issue #33-2/#33-7/#33-12）", () => {

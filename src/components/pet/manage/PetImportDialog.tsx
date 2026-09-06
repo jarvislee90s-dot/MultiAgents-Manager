@@ -98,8 +98,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
       });
   }, []);
 
-  // 未探测时长的文件补探测（并行；失败保持 null）——共享 hook 封装
-  useVoiceDurationProbe(voiceRows, setVoiceRows, staged?.dir ?? null);
+  // 未探测时长的文件补探测（并行）：失败延迟自动重试（封顶），徽标可点击重测（#2）——共享 hook 封装
+  const reprobe = useVoiceDurationProbe(voiceRows, setVoiceRows, staged?.dir ?? null);
 
   const stageFrom = async (fn: () => Promise<StagedPetDto>) => {
     setBusy(true);
@@ -388,6 +388,7 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                   await invoke("pet_remove_staged_audio", { stagingId: staged.stagingId, rel });
                   setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
                 }}
+                onReprobe={reprobe}
               />
               <div className="flex items-center gap-2" title={t("pet.import.subtitle")}>
                 <Switch

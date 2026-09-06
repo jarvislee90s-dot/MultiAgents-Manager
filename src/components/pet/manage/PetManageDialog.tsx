@@ -113,8 +113,9 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
     }
   };
 
-  // 未探测时长（manifest 无缓存 / 磁盘新文件）并行探测回填，失败保持 null
-  useVoiceDurationProbe(voiceRows, setVoiceRows, petDir);
+  // 未探测时长（manifest 无缓存 / 磁盘新文件）并行探测回填：失败延迟自动重试（封顶），
+  // 徽标可点击重测（返回的 reprobe 清除该行记账重新探测，#2）
+  const reprobe = useVoiceDurationProbe(voiceRows, setVoiceRows, petDir);
 
   /** 激活中宠物先自动切回 foxbell（EP5），返回是否执行了切换 */
   const ensureNotActive = (): boolean => {
@@ -349,6 +350,7 @@ export function PetManageDialog(props: { open: boolean; onOpenChange: (v: boolea
                   await invoke("pet_remove_voice_file", { id: selected.id, rel });
                   setVoiceRows((prev) => prev.filter((r) => r.file !== rel));
                 }}
+                onReprobe={reprobe}
               />
               <div className="flex items-center gap-2">
                 <Switch checked={subtitle} onCheckedChange={setSubtitle} />

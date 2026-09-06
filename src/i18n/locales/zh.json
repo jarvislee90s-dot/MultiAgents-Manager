@@ -452,6 +452,7 @@
         "too-big": "大于 10MB",
         "no-duration": "无法读取时长"
       },
+      "reprobeDuration": "重新读取时长",
       "coverageOk": "四组齐全，语音可用",
       "coverageMissing": "缺少分组：{{groups}}（该宠物将无语音）",
       "totalSize": "语音总大小：{{size}}",

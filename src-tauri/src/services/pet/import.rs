@@ -374,7 +374,9 @@ pub fn stage_from_codex_in(
     stage_from_folder_in(root, &src)
 }
 
-/// 单个音频复制进目标 voice/<group>/（暂存与正式目录共用）
+/// 单个音频复制进目标 voice/<group>/（暂存与正式目录共用）。
+/// 目标已存在同名文件时自动序号去重（hi.mp3 → hi-2.mp3 → hi-3.mp3），
+/// 返回实际落盘 rel——避免 fs::copy 直接覆盖、前端以 rel 作 React key 产生重复行（#2）
 fn copy_audio_into(
     dest_voice: &Path,
     src: &Path,
@@ -410,19 +412,49 @@ fn copy_audio_into(
         .and_then(|n| n.to_str())
         .unwrap_or("audio")
         .to_string();
-    let dest = dest_voice.join(group).join(&file_name);
-    if let Some(p) = dest.parent() {
-        std::fs::create_dir_all(p).map_err(|e| PetRpcError::internal(e.to_string()))?;
-    }
+    let group_dir = dest_voice.join(group);
+    std::fs::create_dir_all(&group_dir).map_err(|e| PetRpcError::internal(e.to_string()))?;
+    // 目标已存在 → 序号去重（跳过已占位序号，覆盖/空洞都不会发生）
+    let dest = unique_dest(&group_dir, &file_name);
     std::fs::copy(src, &dest).map_err(|e| {
         PetRpcError::new("copy-failed", format!("复制音频失败: {}", e)).with("err", e.to_string())
     })?;
+    let dest_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_name)
+        .to_string();
     Ok(StagedVoiceFile {
         group: group.to_string(),
         name,
-        file: format!("voice/{}/{}", group, file_name),
+        file: format!("voice/{}/{}", group, dest_name),
         size_bytes: std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
     })
+}
+
+/// 在组目录内选一个不存在的落盘名：原名未占用就用原名，否则 -2、-3… 递增
+/// （跳过被占位的序号，不会覆盖用户文件、也不留空洞）
+fn unique_dest(group_dir: &Path, file_name: &str) -> PathBuf {
+    let candidate = group_dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e))
+        .unwrap_or_default();
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file_name);
+    for n in 2.. {
+        let candidate = group_dir.join(format!("{stem}-{n}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 fn staging_dir(root: &Path, staging_id: &str) -> Result<PathBuf, PetRpcError> {
@@ -882,6 +914,76 @@ mod tests {
             .voice_files
             .iter()
             .all(|f| !f.rel.contains("link.m4a")));
+    }
+
+    /// #2 同名去重（修改面板添加路径）：同一分组连续添加同名音频，目标已存在时
+    /// 自动序号后缀（hi-2.mp3、hi-3.mp3），三个文件都真实落盘——修复前 fs::copy
+    /// 直接覆盖旧文件、前端以 rel 作 React key 产生重复行
+    #[test]
+    fn add_voice_same_name_dedups_and_reports_actual_path() {
+        let root = tempfile::tempdir().unwrap();
+        mkpet(root.path(), "pet");
+        let audio_src = root.path().join("hi.mp3");
+        std::fs::write(&audio_src, b"mp3-bytes").unwrap();
+        for expect in ["hi.mp3", "hi-2.mp3", "hi-3.mp3"] {
+            let added = add_voice_files_in(
+                root.path(),
+                "pet",
+                &[audio_src.to_string_lossy().to_string()],
+                "general",
+            )
+            .unwrap();
+            assert_eq!(added[0].file, format!("voice/general/{}", expect));
+            assert_eq!(added[0].name, "hi");
+        }
+        // 三个文件都真实落盘，内容一致（无覆盖、无残留空位）
+        for f in ["hi.mp3", "hi-2.mp3", "hi-3.mp3"] {
+            assert_eq!(
+                std::fs::read(pet_dir(root.path(), "pet").join("voice/general").join(f)).unwrap(),
+                b"mp3-bytes"
+            );
+        }
+    }
+
+    /// #2 去重序号跳过已占位：目录中已有字面同名 "greet-2.mp3"（用户文件本名）时，
+    /// 空闲的 "greet.mp3" 按原名落盘（不强行进序号）；同名再次添加撞上已占位的
+    /// greet-2.mp3 才顺延为 greet-3.mp3——不覆盖任何现存文件
+    #[test]
+    fn add_voice_dedup_skips_occupied_seq() {
+        let root = tempfile::tempdir().unwrap();
+        mkpet(root.path(), "pet");
+        let src_a = root.path().join("greet-2.mp3");
+        std::fs::write(&src_a, b"a").unwrap();
+        let src_b = root.path().join("greet.mp3");
+        std::fs::write(&src_b, b"b").unwrap();
+        let first = add_voice_files_in(
+            root.path(),
+            "pet",
+            &[src_a.to_string_lossy().to_string()],
+            "general",
+        )
+        .unwrap();
+        assert_eq!(first[0].file, "voice/general/greet-2.mp3"); // 用户自己的文件，原名落盘
+        let second = add_voice_files_in(
+            root.path(),
+            "pet",
+            &[src_b.to_string_lossy().to_string()],
+            "general",
+        )
+        .unwrap();
+        assert_eq!(second[0].file, "voice/general/greet.mp3"); // 空闲原名不占序号
+        let third = add_voice_files_in(
+            root.path(),
+            "pet",
+            &[src_b.to_string_lossy().to_string()],
+            "general",
+        )
+        .unwrap();
+        assert_eq!(third[0].file, "voice/general/greet-3.mp3"); // greet-2 被占 → 顺延
+        let g = pet_dir(root.path(), "pet").join("voice/general");
+        assert_eq!(std::fs::read(g.join("greet-2.mp3")).unwrap(), b"a");
+        assert_eq!(std::fs::read(g.join("greet.mp3")).unwrap(), b"b");
+        assert_eq!(std::fs::read(g.join("greet-3.mp3")).unwrap(), b"b");
     }
 
     /// issue #32-5 Windows 变体：目录链接不入遍历栈——voice/self-junction → voice

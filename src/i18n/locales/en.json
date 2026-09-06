@@ -452,6 +452,7 @@
         "no-duration": "unreadable duration",
         "too-big": ">10MB"
       },
+      "reprobeDuration": "Re-read duration",
       "coverageOk": "All four groups present, voice enabled",
       "coverageMissing": "Missing groups: {{groups}} (pet will have no voice)",
       "totalSize": "Total voice size: {{size}}",
