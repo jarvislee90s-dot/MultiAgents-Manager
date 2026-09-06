@@ -181,6 +181,164 @@ describe("PetManageDialog", () => {
     await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
   });
 
+  it("增音频闪切后不点保存直接关对话框 → 自动切回原宠物（回环修复）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
+    const onOpenChange = vi.fn();
+    render(<PetManageDialog open onOpenChange={onOpenChange} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("voice-add-general"));
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("foxbell"));
+    // 持久标记已写入（跨对话框重开仍生效）
+    expect(localStorage.getItem("mam-pet-flash-switched")).toBe("starry-dew");
+    // 不点保存，直接关对话框（X 关闭按钮）
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    // 关闭出口自动切回：指针恢复 + 事件广播 + 标记清除
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    expect(localStorage.getItem("mam-pet-flash-switched")).toBeNull();
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("增音频 → 关对话框 → 重开管理 → 保存 → 仍切回原宠物（回环修复，跨重开）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<PetManageDialog open onOpenChange={onOpenChange} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("voice-add-general"));
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("foxbell"));
+    // 关对话框 → 自动切回（真实流程：onOpenChange(false) 由父级把 open 置 false）
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    rerender(<PetManageDialog open={false} onOpenChange={onOpenChange} />);
+    // 重开管理对话框 → 重新选中 → 保存
+    rerender(<PetManageDialog open onOpenChange={onOpenChange} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("manage-save"));
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("闪切标记在场（指针 foxbell）→ 重开保存 → 仍切回原宠物（回环修复，标记兜底）", async () => {
+    // 模拟：闪切标记已写入但指针仍停在 foxbell（如对话框关闭出口未消费标记的极端路径）
+    localStorage.setItem("mam-pet-active", "foxbell");
+    localStorage.setItem("mam-pet-flash-switched", "starry-dew");
+    emitMock.mockClear();
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("manage-save"));
+    // wasActive 经持久标记判 true：保存完成自动切回 + 标记清除
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    expect(localStorage.getItem("mam-pet-flash-switched")).toBeNull();
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("保存失败（pet_update_manifest 拒绝）→ 指针仍切回原宠物（回环修复）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets") return Promise.resolve(pets);
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "starry-dew",
+          dir: "/x/starry-dew",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [],
+        });
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve({
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: false,
+          hasSubtitle: false,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [],
+        });
+      if (cmd === "pet_update_manifest") return Promise.reject(new Error("disk full"));
+      return Promise.resolve(undefined);
+    });
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("manage-save"));
+    // 失败出口：指针恢复原宠物 + 事件广播 + 标记清除
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    expect(localStorage.getItem("mam-pet-flash-switched")).toBeNull();
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("重命名失败（pet_rename_pet 拒绝）→ 指针仍切回原宠物（回环修复）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
+    tauriInvokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "pet_list_pets") return Promise.resolve(pets);
+      if (cmd === "pet_scan")
+        return Promise.resolve({
+          id: "starry-dew",
+          dir: "/x/starry-dew",
+          spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
+          voiceFiles: [],
+        });
+      if (cmd === "pet_read_manifest")
+        return Promise.resolve({
+          id: "starry-dew",
+          displayName: "Starry Dew",
+          hasVoice: false,
+          hasSubtitle: false,
+          spriteVersionNumber: 1,
+          spritesheetSizeBytes: 100,
+          voices: [],
+        });
+      if (cmd === "pet_rename_pet") return Promise.reject(new Error("rename failed"));
+      return Promise.resolve(undefined);
+    });
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.change(await screen.findByTestId("manage-rename-input"), {
+      target: { value: "dew" },
+    });
+    fireEvent.click(await screen.findByTestId("manage-rename-btn"));
+    // 失败出口：指针恢复原宠物 + 事件广播 + 标记清除
+    await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("starry-dew"));
+    expect(localStorage.getItem("mam-pet-flash-switched")).toBeNull();
+    await waitFor(() => expect(emitMock).toHaveBeenCalledWith("pet-active-changed", {}));
+  });
+
+  it("删除激活中宠物：闪切标记清除、指针停在 foxbell 不切回（回环修复）", async () => {
+    localStorage.setItem("mam-pet-active", "starry-dew");
+    emitMock.mockClear();
+    render(<PetManageDialog open onOpenChange={() => {}} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("manage-delete"));
+    fireEvent.click(await screen.findByTestId("manage-delete-confirm"));
+    await waitFor(() =>
+      expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_delete_pet")?.[1]?.id).toBe(
+        "starry-dew"
+      )
+    );
+    // 删除成功：标记清除，指针停在 foxbell（宠物已不存在，不切回）
+    await waitFor(() => expect(localStorage.getItem("mam-pet-flash-switched")).toBeNull());
+    expect(localStorage.getItem("mam-pet-active")).toBe("foxbell");
+  });
+
+  it("未激活宠物增音频后关对话框：无标记、指针不被动（回环修复）", async () => {
+    localStorage.setItem("mam-pet-active", "foxbell");
+    emitMock.mockClear();
+    const onOpenChange = vi.fn();
+    render(<PetManageDialog open onOpenChange={onOpenChange} />);
+    fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
+    fireEvent.click(await screen.findByTestId("voice-add-general"));
+    await waitFor(() =>
+      expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_add_voice_files")).toBeTruthy()
+    );
+    expect(localStorage.getItem("mam-pet-flash-switched")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(localStorage.getItem("mam-pet-active")).toBe("foxbell");
+    expect(emitMock).not.toHaveBeenCalledWith("pet-active-changed", {});
+  });
+
   it("描述可编辑并随保存写入 manifest（P1-7）", async () => {
     const repairMock = vi.mocked(repairManifest);
     repairMock.mockClear();

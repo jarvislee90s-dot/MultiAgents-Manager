@@ -6,6 +6,9 @@ import { PetError } from "./petErrors";
 export const ACTIVE_KEY = "mam-pet-active";
 export const ACTIVE_NAME_KEY = "mam-pet-active-name";
 export const VOICE_CAP_KEY = "mam-pet-voice-cap";
+/** 闪切持久标记：管理对话框因编辑激活中宠物而闪切回 foxbell 时记录原宠物 id。
+ *  存 localStorage 而非组件 state——跨对话框关闭/重开仍生效（P1-4 修订，回环修复） */
+export const FLASH_SWITCHED_KEY = "mam-pet-flash-switched";
 /** 同窗口激活变更通知：storage 事件只发给其它窗口，本窗口写入方（切换/管理对话框）
  *  经此 DOM 事件让同窗口订阅者（设置页"当前宠物"标签等）即时刷新（P1-6） */
 export const ACTIVE_LOCAL_EVENT = "mam-pet-active-local-changed";
@@ -72,6 +75,33 @@ export function persistVoiceCap(cap: boolean): void {
     /* ignore */
   }
   window.dispatchEvent(new Event(ACTIVE_LOCAL_EVENT));
+}
+
+/** 读取闪切持久标记：被闪切的原宠物 id；无标记返回 null（含 localStorage 不可用） */
+export function loadFlashSwitched(): string | null {
+  try {
+    return localStorage.getItem(FLASH_SWITCHED_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** 写入闪切持久标记（记录被闪切的原宠物 id） */
+export function saveFlashSwitched(id: string): void {
+  try {
+    localStorage.setItem(FLASH_SWITCHED_KEY, id);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 清除闪切持久标记（保存成功/重命名成功/对话框关闭三个出口统一消费） */
+export function clearFlashSwitched(): void {
+  try {
+    localStorage.removeItem(FLASH_SWITCHED_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
 /** 语音能力：未写入时视为 true（foxbell / 旧版本升级兼容） */
