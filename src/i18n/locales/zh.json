@@ -35,7 +35,12 @@
   "notifications": {
     "historyTitle": "通知历史",
     "historyEmpty": "暂无通知",
-    "jumpFailed": "会话已结束或不可跳转"
+    "jumpFailed": "会话已结束或不可跳转",
+    "clearAll": "清空全部",
+    "clearAllConfirm": "确认清空？",
+    "clearRead": "清理已读",
+    "clearedToast": "通知历史已清空",
+    "readClearedToast": "已读通知已清理"
   },
   "tray": {
     "show": "显示窗口",

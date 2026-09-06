@@ -35,7 +35,12 @@
   "notifications": {
     "historyTitle": "Notification history",
     "historyEmpty": "No notifications yet",
-    "jumpFailed": "Session ended or not jumpable"
+    "jumpFailed": "Session ended or not jumpable",
+    "clearAll": "Clear all",
+    "clearAllConfirm": "Confirm clear?",
+    "clearRead": "Clear read",
+    "clearedToast": "Notification history cleared",
+    "readClearedToast": "Read notifications cleared"
   },
   "tray": {
     "show": "Show Window",

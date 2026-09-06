@@ -33,6 +33,18 @@ export function markAllRead() {
   window.dispatchEvent(new CustomEvent("mam-history-updated"));
 }
 
+// #5b：清空全部（含未读），照 markAllRead 模式落盘 + 派发事件
+export function clearHistory() {
+  localStorage.setItem(KEY, JSON.stringify([]));
+  window.dispatchEvent(new CustomEvent("mam-history-updated"));
+}
+
+// #5b：仅删除已读条目，未读保留（角标计数不变）
+export function clearRead() {
+  localStorage.setItem(KEY, JSON.stringify(getHistory().filter((e) => !e.read)));
+  window.dispatchEvent(new CustomEvent("mam-history-updated"));
+}
+
 export function getUnreadCount(): number {
   return getHistory().filter((e) => !e.read).length;
 }
