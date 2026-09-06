@@ -246,6 +246,7 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
               <div className="flex gap-2">
                 <Button
                   size="sm"
+                  variant="outline"
                   disabled={busy}
                   data-testid="import-pick-folder"
                   onClick={() =>
@@ -261,6 +262,7 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                 </Button>
                 <Button
                   size="sm"
+                  variant="outline"
                   disabled={busy}
                   onClick={() =>
                     void openDialog({ filters: [{ name: "ZIP", extensions: ["zip"] }] }).then(

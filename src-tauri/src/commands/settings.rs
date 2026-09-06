@@ -13,6 +13,16 @@ pub fn set_setting(key: String, value: String) {
     crate::database::set_setting(&key, &value);
 }
 
+/// 主题 SSOT 写入（issue #3）：主题事实源是 DB settings KV（`ui_theme`），
+/// 主窗口/设置窗口等所有窗口共享同一份。写库后广播全局事件 `mam-theme-changed`，
+/// 各窗口（独立 WebView，storage 事件不互通）凭此实时跟随；payload 为
+/// `{ theme: "dark"|"light"|"system" }`，与前端 theme-provider 的约定一致。
+#[tauri::command]
+pub fn set_theme(app: tauri::AppHandle, theme: String) {
+    crate::database::set_setting("ui_theme", &theme);
+    let _ = app.emit("mam-theme-changed", serde_json::json!({ "theme": theme }));
+}
+
 #[tauri::command]
 pub fn detect_tools() -> Vec<crate::linker::detector::ToolDetection> {
     crate::linker::detector::detect_all_tools()

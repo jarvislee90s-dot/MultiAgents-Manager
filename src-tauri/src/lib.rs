@@ -133,6 +133,7 @@ pub fn run() {
         commands::plugin::toggle_plugin_for_tool,
         commands::settings::get_setting,
         commands::settings::set_setting,
+        commands::settings::set_theme,
         commands::settings::detect_tools,
         commands::settings::detect_subagents,
         commands::settings::list_sub_agents,

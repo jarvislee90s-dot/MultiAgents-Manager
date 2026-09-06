@@ -185,6 +185,7 @@ export async function createWindow(
     skipTaskbar?: boolean;
     shadow?: boolean;
     parent?: string;
+    theme?: "dark" | "light";
   },
   handlers?: {
     onCreated?: () => void;

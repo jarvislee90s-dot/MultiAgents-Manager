@@ -4,6 +4,12 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./index.css";
 import "./i18n";
+// 主题全局接线（issue #3）：所有窗口（主窗口/设置/关于等子窗口）加载同一 SPA。
+// 侧效应导入保证模块级「首帧应用缓存主题 + 订阅全局主题事件」在每个窗口都执行；
+// 显式调用 initTheme() 从 DB 事实源拉取当前主题校正（覆盖不消费 useTheme 的窗口）
+import "@/components/common/theme-provider";
+import { initTheme } from "@/components/common/theme-provider";
+void initTheme();
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query/queryClient";
 import { setupToolsChangedListener } from "@/lib/query/toolsChangedSync";
