@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Loader2 } from "lucide-react";
 import { probeSheetRows, type PetRows } from "../petRuntime";
 import {
   judgeVoiceTier,
@@ -292,7 +293,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => void openUrl("https://petdex.dev/collections")}
+                    data-testid="import-petdex-browse"
+                    onClick={() => void openUrl("https://petdex.dev")}
                   >
                     {t("pet.import.petdexBrowse")}
                   </Button>
@@ -307,7 +309,8 @@ export function PetImportDialog(props: { open: boolean; onOpenChange: (v: boolea
                     )
                   }
                 >
-                  {t("pet.import.petdexDownload")}
+                  {busy && <Loader2 className="animate-spin" />}
+                  {busy ? t("pet.import.petdexDownloading") : t("pet.import.petdexDownload")}
                 </Button>
               </div>
             )}

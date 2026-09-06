@@ -469,6 +469,7 @@
       "petdexHint": "Browse petdex.dev, then paste a pet page link (e.g. https://petdex.dev/pets/capvolt)",
       "petdexBrowse": "Browse petdex.dev",
       "petdexDownload": "Download & stage",
+      "petdexDownloading": "Downloading…",
       "configTitle": "Configure",
       "name": "Pet name (folder)",
       "nameHint": "letters/digits/-/_ only",

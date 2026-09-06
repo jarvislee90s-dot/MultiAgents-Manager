@@ -469,6 +469,7 @@
       "petdexHint": "先去 petdex.dev 画廊挑选，把宠物页链接粘贴到下面（如 https://petdex.dev/pets/capvolt）",
       "petdexBrowse": "浏览 petdex.dev",
       "petdexDownload": "下载并暂存",
+      "petdexDownloading": "下载中…",
       "configTitle": "配置确认",
       "name": "宠物名（文件夹名）",
       "nameHint": "仅字母/数字/连字符/下划线",
