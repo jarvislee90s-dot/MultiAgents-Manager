@@ -102,7 +102,7 @@ WorkBuddy 一轮（2026-09-03 spec）已把「APP 形态工具」的全部通用
 
 1. **宿主判定**——输入：全量进程快照（MAM 每轮扫描已持有）；输出：ZCode 主进程（0 或 1 个）。它是 ZCode 全部卡片的总开关：宿主不在场不出活跃卡；宿主退出触发该工具全部卡片（含未读卡）清理。
 2. **会话枚举**——输入：两个 SQLite 库（只读连接，每轮打开即关，复用现有 `open_readonly_with_timeout` 共享 helper）；输出：符合条件的会话清单。每次轮询（30 秒周期）执行。
-3. **卡片生成**——每个枚举到的会话生成一张卡：标题（`tasks.title` → 降级 `session.title` → 降级首条用户消息截断）、项目名（`directory` 截路径尾段）、`pid = 宿主 pid`、`form = App`（挂接 APP 类全部通用规则的键）。
+3. **卡片生成**——每个枚举到的会话生成一张卡：标题（`tasks.title` → 降级 `session.title` → 降级首条用户消息截断）、项目名（复用 `monitor::project::project_name_from_path`）、`github_url`（复用 `monitor::git::get_github_url`，与 WorkBuddy/Codex 卡片字段对齐）、`last_message`（尾部正文条目截断，未读卡展示用）、`pid = 宿主 pid`、`form = App`（挂接 APP 类全部通用规则的键）。
 
 **关键函数与参数**：
 
@@ -156,7 +156,7 @@ WorkBuddy 一轮（2026-09-03 spec）已把「APP 形态工具」的全部通用
 
 ## 5. 提醒与跳转
 
-**定性**：任务从运行中翻为空闲（或 error）的瞬间，该会话进入 MAM 的**未读池**——一张持久绿卡 + 系统通知 + 声音 + 桌宠气泡，跨 MAM 重启保留，直到出现已读信号或 24 小时过期。此整套机制是 WorkBuddy 轮泛化的 APP 类通用规则（`unread_sessions` 表、`sync_unread_sessions` 管线、前端绿卡/X 按钮、桌宠气泡），**按 `form=App` 自动生效，ZCode 零新代码**。本节只定义 ZCode 特有的跳转与已读行为。
+**定性**：任务从运行中翻为空闲（或 error）的瞬间，该会话进入 MAM 的**未读池**——一张持久绿卡 + 系统通知 + 声音 + 桌宠气泡，跨 MAM 重启保留，直到出现已读信号或 24 小时过期。此整套机制是 WorkBuddy 轮泛化的 APP 类通用规则（`unread_sessions` 表、`sync_unread_sessions` 管线、前端绿卡/X 按钮、桌宠气泡），**按 `form=App` 自动生效**。本节定义 ZCode 特有的跳转、已读行为，以及一处必须随 Codex 同款扩展的在板未读态（第 6 条，未读链路唯一的新代码）。
 
 **功能内容**：
 
@@ -167,6 +167,7 @@ WorkBuddy 一轮（2026-09-03 spec）已把「APP 形态工具」的全部通用
 3. **标已读（D2）**：两级链中**任一级成功（前台验证通过）即标已读**（深链直达工作区或兜底激活拉前台，与 WorkBuddy/Codex 的「点卡跳转 / 兜底激活成功均算」口径一致）——绿卡消失、写墓碑防复插、广播 `session-read` 事件（桌宠等辅助窗口同步）；同项目其他未读卡保留。兜底信号：手动 X 关闭、24 小时过期。
 4. **宿主清理**：ZCode 主进程退出 → 该工具活跃卡 + 未读池全清（复用 `tool_host_alive_in` → `clear_tool`）。Windows 关窗驻留托盘时进程仍活，卡片正确保留。
 5. **不使用 ZCode 自带未读**：`tasks.unread_at` 是 ZCode 侧栏自己的未读标记，语义与 MAM 未读池不同步（用户在 ZCode 内查看不清 MAM 的卡，反之亦然）——按通用规则显式忽略，与 WorkBuddy 轮「不做 APP 内切换检测」的决策一致。
+6. **在板未读态（Codex 分支扩展，未读链路唯一的新代码）**：ZCode 聚合卡与 Codex 同为「完成后仍持久在板」（24h 窗口内、宿主存活即显示）。空闲卡在板期间必须呈现未读态（绿徽标 + 未读卡排后）——现行管线中该行为由 **Codex 专属分支**承担（`sync_unread_sessions` 内 `if tool == "codex" { s.unread = true; }`，代码注释明示「聚合卡即该会话的未读卡形态」），ZCode 接入 = 该分支扩展为 `matches!(tool, "codex" | "zcode")`。WorkBuddy 不需要此分支（其活跃卡随进程退出离板，由未读池接管渲染——spec §5 双形态语义）。
 
 **关键参数**：深链构造函数 `session_url` 现签名只接收会话 id，而 ZCode 的 path 参数来自会话的项目路径——**签名扩展为「会话 id + 项目路径」双参数**（唯一改动的深链公共函数；其余工具传 path 但不使用）。`sess_` 前缀 id 经 UUID 门校验（§3）。
 
@@ -185,7 +186,8 @@ WorkBuddy 一轮（2026-09-03 spec）已把「APP 形态工具」的全部通用
    - 新增 `McpFormat` 变体（如 `ZcodeConfigJson`）：读 = 展开 `mcp.servers` 条目入面板；写 = 增/删/改只动该子树；
    - 解析失败只报错不落盘（绝不写坏用户主配置）；
    - ZCode 可选字段 `enable: false`（停用标记，无字段 = 启用）：读取照实展示为停用，MAM 写入时不主动添加该字段；
-   - 与 ZCode 设置界面的写入交替发生，双方均为「读-改-写」，冲突窗口为一瞬间，可接受（风险条目见 §10）。
+   - 与 ZCode 设置界面的写入交替发生，双方均为「读-改-写」，冲突窗口为一瞬间，可接受（风险条目见 §10）；
+   - **面板读取链路（遗留硬编码，随本次接入顺带修复）**：MCP 面板的读取命令 `commands/mcp.rs::read_mcp_servers` 当前硬编码 claude/codex/opencode 三工具（`_ => Err("未知工具")`），**WorkBuddy 的 MCP 读取今天就已缺失**。ZCode 接入时将该函数改为 `adapter_by_id` 统一分发，一并修复 WorkBuddy。
 3. **Plugin / Hooks**：`plugin_dirs()` / `plugin_config_paths()` 返回空、`hook_supported()` = false（与 WorkBuddy 同款空实现；ZCode 插件是 marketplace + 版本化缓存 + `enabledPlugins` 三方结构，另行立项）。
 
 **关键参数**：ZCode MCP 条目形态（Windows 实测）：`"playwright": {"command": "…", "args": […], "env": {}}`——与 MAM 现有 MCP 模型同构。工具开关（W5）自动收纳：`TOOL_IDS` 注册后，设置页开关自动出现、默认启用；取消勾选的清理语义自动套用（skill 链接还原为真实文件、MCP 条目移除，SSOT 保留）。
@@ -196,9 +198,14 @@ WorkBuddy 一轮（2026-09-03 spec）已把「APP 形态工具」的全部通用
 
 WorkBuddy/Kimi 两轮已模板化，ZCode 按模板执行。**数据库零 schema 变更**（`agent_tools` 启动时按 `TOOL_IDS` 幂等种子行，`unread_sessions` 等以字符串 tool_id 为键）。
 
-**后端（约 12 处）**：`AgentType` 枚举加 `ZCode`（小写 = `"zcode"`）；`adapter/mod.rs` 的 `TOOL_IDS` / `adapter_by_id` / `skill_dir_for_tool`；新建 `adapter/zcode.rs` + `monitor/zcode_parser.rs`；`monitor/host.rs::is_host_process` 加臂；`window/deep_link.rs::session_url` 加臂（含签名扩展）+ 测试；`window/app_activation.rs::bundle_matches_agent` 加臂；`window/win32.rs` 窗口认赖关键字 + `reactivate_tool_app` 白名单；`commands/session.rs` Windows 深链白名单；`services/mcp` 新 McpFormat 变体。
+**后端（约 14 处）**：`AgentType` 枚举加 `ZCode`（小写 = `"zcode"`）；`adapter/mod.rs` 的 `TOOL_IDS` / `adapter_by_id` / `skill_dir_for_tool` / `sync_unread_sessions` 的 Codex 在板未读分支扩展（§5-6）；新建 `adapter/zcode.rs` + `monitor/zcode_parser.rs`（含 `monitor/mod.rs` 模块声明）；`monitor/host.rs::is_host_process` 加臂；`window/deep_link.rs::session_url` 加臂（含签名扩展）+ 测试；`window/app_activation.rs::bundle_matches_agent` 加臂；`window/win32.rs` 的 `TOOL_CLAIM_KEYWORDS` 窗口认领关键字 + `reactivate_tool_app` 白名单（`matches!(t, "workbuddy" | "codex")` 加 `"zcode"`）；`commands/session.rs:80` Windows 深链白名单；`services/mcp` 新 `McpFormat` 变体。
 
-**前端（约 5 处）**：`types/session.ts` AgentType 联合；`agentBadge.tsx` 徽标（label「ZCode」）；`ToolIcon.tsx` 官方图标（本机 `icon.icns` 取样重绘，同 WorkBuddy 轮做法）；i18n 无 per-tool 必需词条（工具名走后端）；`tauri-mock.ts` mock 行 + 测试用例。
+**遗留硬编码顺带修复（三处均现缺 workbuddy，随 zcode 接入一并补）**：
+1. `commands/mcp.rs::read_mcp_servers` — 硬编码 claude/codex/opencode → 改 `adapter_by_id` 分发（§6）；
+2. `services/resource/mod.rs::detect_source_tool` — 硬编码 `["claude","codex","opencode","openclaw"]` → 补 `workbuddy` + `zcode`（资源导入溯源用）；
+3. `src/config/constants.ts::SUPPORTED_TOOLS` — 现为五工具缺 `workbuddy` → 补 `workbuddy` + `zcode`（测试遍历断言用）。
+
+**前端（约 5 处）**：`types/session.ts` AgentType 联合；`agentBadge.tsx` 徽标（label「ZCode」）；`ToolIcon.tsx` 官方图标（本机 `icon.icns` 取样重绘，同 WorkBuddy 轮做法）；i18n 无 per-tool 必需词条（工具名走后端，`zh.json` 的 `emptyHint` 文案可选更新）；`tauri-mock.ts` mock 行 + 测试用例。另：README / README.en / CHANGELOG 工具表更新。
 
 ---
 
@@ -239,3 +246,4 @@ WorkBuddy/Kimi 两轮已模板化，ZCode 按模板执行。**数据库零 schem
 ## 12. 修订记录
 
 - 2026-09-08 初版：macOS 本机实测 + Windows 探测报告（`research/zcode-windows-probe-2026-09-07.md`）定稿；用户确认 D1–D5；子代理/长思考两个边界问题以实测数据闭环（§2.4、§4）。
+- 2026-09-08 二审（对照当前 main 实现逐项对账）：① 修正 §5「未读零新代码」表述——Codex 在板未读分支（`sync_unread_sessions` 的 `if tool == "codex"`）须扩展至 zcode（§5-6），ZCode 聚合卡与 Codex 同为持久在板形态；② 补齐三处遗留硬编码匹配点（`read_mcp_servers` / `detect_source_tool` / `SUPPORTED_TOOLS`，均现缺 workbuddy，随本次顺带修复，§7）；③ 补标复用函数 `project_name_from_path` / `get_github_url`（§3）；④ 全部接口名与现行实现对账无误（`is_host_process(exe_lower, tool_id)`、`session_url(agent_type, session_id)`、`bundle_matches_agent`、`TOOL_CLAIM_KEYWORDS`、`reactivate_tool_app` 白名单、`McpFormat::{Json,Toml,Jsonc}`、`open_readonly_with_timeout`、`is_strict_uuid_form`、`primary_skill_dir` 均核实存在且签名一致）。
