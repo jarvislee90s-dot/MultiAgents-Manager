@@ -596,6 +596,7 @@ export default function SettingsPage() {
                             statusColor: "yellow",
                             status: "waiting",
                             lastMessage: t("settings.notifications.testMessage"),
+                            title: "",
                             pid: 0,
                             sessionId: "test",
                           },

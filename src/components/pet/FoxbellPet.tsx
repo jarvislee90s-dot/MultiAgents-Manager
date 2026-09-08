@@ -358,6 +358,7 @@ export function FoxbellPet() {
         agentType: s.agentType,
         projectName: s.projectName,
         lastMessage: s.lastMessage ?? undefined,
+        title: s.title ?? undefined,
         unread: s.unread, // 歧义点选回标已读（spec W4 已读信号 1）
         form: s.form, // M3：CLI 会话 APP 级保底时的 UX 提示依据
       });

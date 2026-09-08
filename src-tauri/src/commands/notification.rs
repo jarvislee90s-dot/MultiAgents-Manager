@@ -13,6 +13,8 @@ pub struct NotificationPayload {
     pub status_color: String,
     pub status: String, // 原始状态枚举，由通知页 i18n 翻译
     pub last_message: String,
+    /// 会话标题：通知卡跳转走标题匹配层用（kimi/opencode）
+    pub title: String,
     pub pid: u32,
     pub session_id: String,
 }

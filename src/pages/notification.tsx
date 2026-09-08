@@ -14,6 +14,7 @@ interface NotificationPayload {
   statusColor: string;
   status: string;
   lastMessage: string;
+  title: string;
   pid: number;
   sessionId: string;
 }
@@ -83,6 +84,7 @@ export default function NotificationPage() {
         agentType: payload.agentType,
         projectName: payload.projectName,
         lastMessage: payload.lastMessage,
+        title: payload.title || undefined,
       });
       // 多窗口歧义：在通知窗内联渲染候选，避免静默失败（先调高度再显示，避免闪帧）
       if (ambiguous) {
