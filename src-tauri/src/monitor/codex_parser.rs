@@ -397,7 +397,8 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
 
     // 卡片前缀统一 12 位 hex（按字符截取，多字节 id 不 panic）：UUIDv7 前 8 hex 只编码
     // 65.5s 粒度，同分钟启动的会话撞车（实测 01a08083-5ca0 与 01a08083-2260）；
-    // 12 位编码到 ~4.7 天粒度 + 随机位，实际不撞。先剥连字符再截取——直接 take(12)
+    // 前 12 hex 是完整 48 位毫秒时间戳（毫秒级粒度），不同会话几乎必然错开，
+    // 再叠 4 位随机位兜底，实际不撞。先剥连字符再截取——直接 take(12)
     // 会让连字符占去一格只剩 11 位 hex。注意与 hook marker（MAM:<id 前 8 位>）口径
     // 解耦：marker 通道尚未启用，未来启用时应同步改为 12 位（issue 见 marker 复活提案）
     let codex_title = session_id

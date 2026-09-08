@@ -111,7 +111,7 @@ fn strip_oc_prefix(title: &str) -> &str {
 }
 
 /// 归一化标题用于匹配：剥 "OC | " 前缀 → 剥盲文 spinner（normalize_title_for_project）
-/// → 剥尾部省略号（… / ...）→ 压空白 → 小写
+/// → 压空白 → 剥尾部省略号（… / ...）→ 小写（小写由 normalize_title_for_project 内完成）
 fn normalize_window_title(title: &str) -> String {
     let stripped = strip_oc_prefix(title);
     let n = normalize_title_for_project(stripped);
@@ -312,7 +312,8 @@ fn single_survivor<'a>(cands: &[&'a (isize, String)], agent: &str) -> Option<&'a
 
 /// 标题匹配层（②′）：窗口标题（归一化）与会话标题键（归一化）相等或
 /// "窗口标题是键的前缀"（终端截断方向），且候选中恰好 1 个命中 → 锁定。
-/// 守卫：他工具认领的窗口绝不参与；空键跳过；命中 0 或 ≥2 都返回 None（落回下层）。
+/// 守卫：他工具认领的窗口绝不参与；空键与空窗口标题（归一化后为空串会成为一切键的
+/// "前缀"）都不参与；命中 0 或 ≥2 都返回 None（落回下层）。
 /// 键列表由调用方组装（opencode 需同时提供 DB title 等；kimi 传 state.title 一项即可）
 fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> Option<isize> {
     let keys_norm: Vec<String> = keys
@@ -333,6 +334,10 @@ fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> 
                 }
             }
             let wt = normalize_window_title(t);
+            // 空窗口标题守卫：空串是任何键的前缀，会假命中
+            if wt.is_empty() {
+                return false;
+            }
             keys_norm.iter().any(|k| wt == *k || k.starts_with(&wt))
         })
         .map(|(h, _)| *h)
@@ -1015,10 +1020,22 @@ Microsoft Windows [版本 10.0.26200]"
 
     #[test]
     fn title_match_other_tool_claim_never_hits() {
-        // 他工具认领守卫：kimi 的键不能锁进 claude 认领的窗口
-        let cands = vec![(80isize, "✳ Claude Code".to_string())];
-        // 构造一个恰含 "claude" 字样的 kimi title——键命中但窗口被 claude 认领
+        // 他工具认领守卫：kimi 的键不能锁进 claude 认领的窗口。
+        // 窗口标题与键相等（归一化后）——若删掉认领守卫，前缀/相等判定会命中，
+        // 本测试即红：守卫真正被测到（非靠前缀关系偶然通过）
+        let cands = vec![(80isize, "Claude Code 使用记录".to_string())];
         let keys = vec!["claude code 使用记录".to_string()];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
+        // 同一窗口对 claude 自己的键是合法命中（守卫只拦"他工具"）
+        assert_eq!(title_match_lock(&cands, "claude", &keys), Some(80));
+    }
+
+    #[test]
+    fn title_match_empty_window_title_never_hits() {
+        // 空窗口标题守卫：空标题归一化后为空串，是任何键的"前缀"（starts_with("") 恒真），
+        // 必须排除——否则键过期未命中 + 兄弟空标题窗口时会把空窗口当唯一命中锁错（P2-2）
+        let cands = vec![(120isize, String::new()), (121, "   ".to_string())];
+        let keys = vec!["（0）使用技能【ratingdog-report】，下载".to_string()];
         assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
     }
 
