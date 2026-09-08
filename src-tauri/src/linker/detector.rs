@@ -729,6 +729,9 @@ mod path_starts_with_ci_tests {
 
 #[cfg(test)]
 mod alias_dir_tests {
+    // 模块内测试全部 cfg(windows)：macOS 上 use super::* 会引入未用导入告警，
+    // 故仅 Windows 编译时引入（与下方测试同门控）
+    #[cfg(windows)]
     use super::*;
 
     /// WindowsApps 目录（正斜杠/反斜杠/尾斜杠形态）命中
