@@ -61,6 +61,7 @@ pub fn focus_session(
     agent_type: Option<String>,
     project_name: Option<String>,
     last_message: Option<String>,
+    title: Option<String>,
     form: Option<String>,
     unread: Option<bool>,
 ) -> Result<serde_json::Value, String> {
@@ -116,15 +117,14 @@ pub fn focus_session(
         // 面板反推：当前所有运行会话的 (工具id, 项目名)，用于排除其他工具的终端窗口
         // （codex 终端标题=项目名，无 "codex" 关键词可静态认领）。进程扫描即可，无文件解析开销
         let running_projects = running_projects_from_processes(&system);
-        match crate::window::win32::resolve_and_focus(
-            &system,
-            pid,
-            marker.as_deref(),
-            agent_type.as_deref(),
-            project_name.as_deref(),
-            last_message.as_deref(),
-            &running_projects,
-        ) {
+        let hints = crate::window::win32::JumpHints {
+            session_marker: marker.as_deref(),
+            agent_keyword: agent_type.as_deref(),
+            project_name: project_name.as_deref(),
+            last_message: last_message.as_deref(),
+            title: title.as_deref(),
+        };
+        match crate::window::win32::resolve_and_focus(&system, pid, &hints, &running_projects) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
                 mark_read_on_jump(&app, &session_id, &agent_type);
                 Ok(serde_json::json!({ "type": "focused" }))
@@ -149,7 +149,7 @@ pub fn focus_session(
     }
     #[cfg(not(windows))]
     {
-        let _ = (project_name, last_message, form, unread);
+        let _ = (project_name, last_message, title, form, unread);
         // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
         if crate::window::focus_terminal_for_pid(pid).is_ok() {
             mark_read_on_jump(&app, &session_id, &agent_type);
