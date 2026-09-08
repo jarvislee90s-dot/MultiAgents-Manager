@@ -395,8 +395,16 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         }
     });
 
-    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（MAM:<id 前 8 位>）保持一致
-    let codex_title = session_id.chars().take(8).collect::<String>();
+    // 卡片前缀统一 12 位 hex（按字符截取，多字节 id 不 panic）：UUIDv7 前 8 hex 只编码
+    // 65.5s 粒度，同分钟启动的会话撞车（实测 01a08083-5ca0 与 01a08083-2260）；
+    // 12 位编码到 ~4.7 天粒度 + 随机位，实际不撞。先剥连字符再截取——直接 take(12)
+    // 会让连字符占去一格只剩 11 位 hex。注意与 hook marker（MAM:<id 前 8 位>）口径
+    // 解耦：marker 通道尚未启用，未来启用时应同步改为 12 位（issue 见 marker 复活提案）
+    let codex_title = session_id
+        .chars()
+        .filter(|c| *c != '-')
+        .take(12)
+        .collect::<String>();
     Some(Session {
         id: session_id,
         agent_type: AgentType::Codex,
@@ -530,6 +538,30 @@ mod title_tests {
         .unwrap();
         let session = parse_codex_jsonl(&jsonl, ProcessForm::Cli).expect("应解析出会话");
         assert_eq!(session.title.as_deref(), Some("会话🔥x"));
+    }
+
+    /// 同分钟启动的两个 UUIDv7 会话（前 8 位相同）必须靠更长前缀区分
+    #[test]
+    fn same_minute_uuid7_sessions_get_distinct_titles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |name: &str, id: &str| {
+            let p = tmp.path().join(name);
+            std::fs::write(
+                &p,
+                format!(
+                    r#"{{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{{"id":"{}","cwd":"/work/demo"}}}}"#,
+                    id
+                ),
+            )
+            .unwrap();
+            p
+        };
+        let a = mk("a.jsonl", "01a08083-5ca0-74c2-97bf-6dfdd149fac5");
+        let b = mk("b.jsonl", "01a08083-2260-7462-beff-2212cffec36d");
+        let sa = parse_codex_jsonl(&a, ProcessForm::Cli).unwrap();
+        let sb = parse_codex_jsonl(&b, ProcessForm::Cli).unwrap();
+        assert_ne!(sa.title, sb.title, "同分钟双开的 codex 卡片标题不得相同");
+        assert_eq!(sa.title.as_deref(), Some("01a080835ca0"));
     }
 }
 
