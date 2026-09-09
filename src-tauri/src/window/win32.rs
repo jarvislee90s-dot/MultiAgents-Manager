@@ -82,6 +82,46 @@ fn normalize_title_for_project(title: &str) -> String {
     stripped.trim().to_lowercase()
 }
 
+/// 跳转消歧的会话侧身份线索包（由 focus_session IPC 透传组装）。
+/// 收拢为结构体避免 resolve_and_focus 参数超过 clippy too_many_arguments 阈值（7）
+pub struct JumpHints<'a> {
+    /// hook 注入的标题标记（如 "MAM:1ba8e2f7"），通道 no-go 但代码保留
+    pub session_marker: Option<&'a str>,
+    /// 工具 id 小写（"kimi"/"opencode"…），认领判定与打分用
+    pub agent_keyword: Option<&'a str>,
+    /// 项目目录名，选择器打分用
+    pub project_name: Option<&'a str>,
+    /// 最近一条消息，UIA 尾串匹配用
+    pub last_message: Option<&'a str>,
+    /// 会话标题（kimi=state.json.title / opencode=DB session.title / claude、codex=id 前缀），
+    /// 标题匹配层（②′）的键
+    pub title: Option<&'a str>,
+}
+
+/// 剥窗口标题的 "OC | " 工具前缀（opencode 终端标题形态 "OC | <会话标题>"）。
+/// 不含前缀的标题原样返回。大小写不敏感（实测 "OC | "，防御其他壳的大小写变体）。
+/// 用 `get(5..)` 按字符边界探测——`t[..5]` 字节切片在多字节标题（如全角括号开头的
+/// kimi 标题）上会切进字符中间 panic
+fn strip_oc_prefix(title: &str) -> &str {
+    let t = title.trim_start();
+    match t.get(0..5) {
+        Some(p) if p.eq_ignore_ascii_case("oc | ") => &t[5..],
+        _ => title,
+    }
+}
+
+/// 归一化标题用于匹配：剥 "OC | " 前缀 → 剥盲文 spinner（normalize_title_for_project）
+/// → 压空白 → 剥尾部省略号（… / ...）→ 小写（小写由 normalize_title_for_project 内完成）
+fn normalize_window_title(title: &str) -> String {
+    let stripped = strip_oc_prefix(title);
+    let n = normalize_title_for_project(stripped);
+    let n = collapse_ws(&n);
+    n.trim_end_matches("…")
+        .trim_end_matches("...")
+        .trim()
+        .to_string()
+}
+
 /// 计算 needle 在 haystack（均已空白归一化）中的最长可命中前缀字符数。
 /// 终端渲染会消费 markdown 结构（粗体星号、列表符、波浪号），整串匹配常在尾部断裂，
 /// 前缀评分可容忍渲染差异（实测断裂点在 16/40 处，阈值取 12）
@@ -270,6 +310,57 @@ fn single_survivor<'a>(cands: &[&'a (isize, String)], agent: &str) -> Option<&'a
     }
 }
 
+/// 标题匹配层（②′）：窗口标题（归一化）与会话标题键（归一化）相等或
+/// "窗口标题是键的前缀"（终端截断方向），且候选中恰好 1 个命中 → 锁定。
+/// 守卫：他工具认领的窗口绝不参与；空键与空窗口标题（归一化后为空串会成为一切键的
+/// "前缀"）都不参与；命中 0 或 ≥2 都返回 None（落回下层）。
+/// 键列表由调用方组装（opencode 需同时提供 DB title 等；kimi 传 state.title 一项即可）
+fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> Option<isize> {
+    let keys_norm: Vec<String> = keys
+        .iter()
+        .filter(|k| !k.trim().is_empty())
+        .map(|k| normalize_window_title(k))
+        .collect();
+    if keys_norm.is_empty() {
+        return None;
+    }
+    let hits: Vec<isize> = cands
+        .iter()
+        .filter(|(_, t)| {
+            // 他工具认领的窗口绝不参与命中
+            if let Some(owner) = claim_owner(t) {
+                if owner != agent {
+                    return false;
+                }
+            }
+            let wt = normalize_window_title(t);
+            // 空窗口标题守卫：空串是任何键的前缀，会假命中
+            if wt.is_empty() {
+                return false;
+            }
+            keys_norm.iter().any(|k| wt == *k || k.starts_with(&wt))
+        })
+        .map(|(h, _)| *h)
+        .collect();
+    if hits.len() == 1 {
+        Some(hits[0])
+    } else {
+        None
+    }
+}
+
+/// 会话标题键组装：仅标题里携带会话区分度信息的工具接入（kimi/opencode 已实测同源）。
+/// claude/codex/openclaw/workbuddy 返回空列表——本层对其自然跳过
+fn title_keys(agent: &str, title: Option<&str>) -> Vec<String> {
+    match agent {
+        "kimi" | "opencode" => title
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t.to_string()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// 硬排除 + 洋葱回退（返回幸存窗口，保序）：
 /// L1 他工具认领（全部已知标题形态）→ L2 空终端标题 → L3 面板反推（标题规范化后
 /// ==其他工具运行中项目名，覆盖 ⠙spinner/停留目录/长任务改名三形态）。
@@ -399,18 +490,17 @@ pub enum FocusOutcome {
 }
 
 /// 解析并聚焦（CLI 与 App 统一入口，路径差异见模块头注释）
-/// session_marker: 如 "MAM:1ba8e2f7"（hook 注入的标题标记，精确匹配用）
+/// hints: 会话侧身份线索（marker/工具/项目名/lastMessage/title）
 /// running_projects: 当前运行会话的 (工具id, 项目名) 列表——用于"面板反推"排除
 /// 其他工具的终端窗口（codex 终端标题=项目名，无 "codex" 关键词可认领）
 pub fn resolve_and_focus(
     system: &sysinfo::System,
     pid: u32,
-    session_marker: Option<&str>,
-    agent_keyword: Option<&str>,
-    project_name: Option<&str>,
-    last_message: Option<&str>,
+    hints: &JumpHints<'_>,
     running_projects: &[(String, String)],
 ) -> Result<FocusOutcome, String> {
+    let agent = hints.agent_keyword.unwrap_or_default().to_lowercase();
+    let keys = title_keys(&agent, hints.title);
     let windows = all_windows();
 
     for ancestor in collect_ancestor_pids(system, pid) {
@@ -433,7 +523,7 @@ pub fn resolve_and_focus(
         }
         // ===== 多窗口消歧：硬逻辑先行 + 排除制 + 洋葱回退 =====
         // ① marker 精确匹配（hook 注入标题标记；通道当前 no-go，代码保留）
-        if let Some(marker) = session_marker {
+        if let Some(marker) = hints.session_marker {
             let hits: Vec<_> = cands
                 .iter()
                 .filter(|(_, t)| t.to_lowercase().contains(&marker.to_lowercase()))
@@ -442,15 +532,21 @@ pub fn resolve_and_focus(
                 return try_lock(hits[0].0);
             }
         }
+        // ①′ 标题匹配：窗口标题（归一化，剥 "OC | " 前缀）≡ 会话标题键且唯一 → 锁定。
+        // 命中即返回，不触发 UIA 读取（省最多 800ms）；不命中完全落回下层，零回归
+        if !keys.is_empty() {
+            if let Some(hwnd) = title_match_lock(cands, &agent, &keys) {
+                return try_lock(hwnd);
+            }
+        }
         // ② 硬排除（L1 认领/L2 空终端/L3 面板反推，洋葱回退）→ 幸存 1 且非他工具认领 → 演绎锁定
-        let agent = agent_keyword.unwrap_or_default().to_lowercase();
         let cand_refs: Vec<&(isize, String)> = cands.iter().collect();
         let survivors = hard_survivors(&cand_refs, &agent, running_projects);
         if let Some((hwnd, _)) = single_survivor(&survivors, &agent) {
             return try_lock(*hwnd);
         }
         // ③ UIA 阶段（仅幸存 ≥2 才读，候选已被硬排除缩小）
-        let msg = last_message.unwrap_or_default();
+        let msg = hints.last_message.unwrap_or_default();
         let tail = if msg.is_empty() {
             String::new()
         } else {
@@ -498,7 +594,7 @@ pub fn resolve_and_focus(
         let title_score = |title: &str| -> i32 {
             let t = title.to_lowercase();
             let mut sc = 0;
-            if let Some(pn) = project_name {
+            if let Some(pn) = hints.project_name {
                 if !pn.is_empty() && t.contains(&pn.to_lowercase()) {
                     sc += 2;
                 }
@@ -539,7 +635,14 @@ pub fn focus_hwnd(hwnd_val: isize) -> Result<(), String> {
 /// 兼容旧入口（mod.rs 的 focus_terminal_for_pid 内部使用）
 pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
     let system = sysinfo::System::new_all();
-    match resolve_and_focus(&system, pid, None, None, None, None, &[]) {
+    let hints = JumpHints {
+        session_marker: None,
+        agent_keyword: None,
+        project_name: None,
+        last_message: None,
+        title: None,
+    };
+    match resolve_and_focus(&system, pid, &hints, &[]) {
         Ok(FocusOutcome::Focused) => Ok(()),
         Ok(FocusOutcome::Ambiguous(_)) => Err("存在多个候选窗口，请重试以打开选择器".to_string()),
         Err(e) => Err(e),
@@ -695,7 +798,7 @@ pub fn verify_foreground_tool(
 mod tests {
     use super::{
         claim_owner, collapse_ws, collect_ancestor_pids_with, hard_survivors, is_shell_console,
-        longest_prefix_len, normalize_title_for_project,
+        longest_prefix_len, normalize_title_for_project, title_keys, title_match_lock,
     };
 
     #[test]
@@ -841,6 +944,159 @@ Microsoft Windows [版本 10.0.26200]"
         // 长文本取尾部 n 个字符
         let long = "a ".repeat(60);
         assert_eq!(normalized_tail(&long, 10).chars().count(), 10);
+    }
+
+    // ---- 标题匹配层（②′）：窗口标题 ≡ 会话标题演绎锁定 ----
+
+    #[test]
+    fn title_match_equal_after_normalize() {
+        // 完全相等（归一化后）：spinner 前缀、空白差异、大小写均被归一化吸收
+        let cands = vec![
+            (
+                10isize,
+                "（1）使用技能【convert-excel-report】，把".to_string(),
+            ),
+            (
+                20,
+                "（0）使用技能【ratingdog-report】，下载【苏州市".to_string(),
+            ),
+        ];
+        let keys = vec!["（0）使用技能【ratingdog-report】，下载【苏州市农业发展集团有限公司】的 YY评级报告到项目本级目录".to_string()];
+        let hit = title_match_lock(&cands, "kimi", &keys);
+        assert_eq!(hit, Some(20));
+    }
+
+    #[test]
+    fn title_match_window_is_prefix_of_key() {
+        // 窗口标题是键的前缀（终端截断方向）
+        let cands = vec![(30isize, "OC | 公司资产查询".to_string())];
+        let keys = vec!["公司资产查询".to_string()];
+        let hit = title_match_lock(&cands, "opencode", &keys);
+        assert_eq!(hit, Some(30));
+    }
+
+    #[test]
+    fn title_match_strips_oc_prefix() {
+        // "OC | " 前缀被剥离后才比较；无前缀的标题不受影响
+        let cands = vec![
+            (40isize, "OC | 公司股东查询".to_string()),
+            (41, "（1）使用技能".to_string()),
+        ];
+        let keys = vec!["公司股东查询".to_string()];
+        let hit = title_match_lock(&cands, "opencode", &keys);
+        assert_eq!(hit, Some(40));
+    }
+
+    #[test]
+    fn title_match_two_hits_never_locks() {
+        // 唯一性守卫：两个窗口都命中 → 不锁（宁弹选择器）
+        let cands = vec![
+            (
+                50isize,
+                "（5）使用技能【信评-处理修改意见生成终稿】".to_string(),
+            ),
+            (51, "（5）使用技能【信评-处理修改意见生成终稿】".to_string()),
+        ];
+        let keys =
+            vec!["（5）使用技能【信评-处理修改意见生成终稿】 更新完之后股东、行业".to_string()];
+        // 归一化后两窗口标题都与键的前 22 字构成前缀关系 → 双命中
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
+    }
+
+    #[test]
+    fn title_match_zero_hits_returns_none() {
+        let cands = vec![(60isize, "完全不相关标题".to_string())];
+        let keys = vec!["（0）使用技能【ratingdog-report】".to_string()];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
+    }
+
+    #[test]
+    fn title_match_empty_key_skipped() {
+        // 空键守卫：title 缺失时不产生假命中
+        let cands = vec![(70isize, "任何标题".to_string())];
+        let keys = vec![String::new()];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
+    }
+
+    #[test]
+    fn title_match_other_tool_claim_never_hits() {
+        // 他工具认领守卫：kimi 的键不能锁进 claude 认领的窗口。
+        // 窗口标题与键相等（归一化后）——若删掉认领守卫，前缀/相等判定会命中，
+        // 本测试即红：守卫真正被测到（非靠前缀关系偶然通过）
+        let cands = vec![(80isize, "Claude Code 使用记录".to_string())];
+        let keys = vec!["claude code 使用记录".to_string()];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
+        // 同一窗口对 claude 自己的键是合法命中（守卫只拦"他工具"）
+        assert_eq!(title_match_lock(&cands, "claude", &keys), Some(80));
+    }
+
+    #[test]
+    fn title_match_empty_window_title_never_hits() {
+        // 空窗口标题守卫：空标题归一化后为空串，是任何键的"前缀"（starts_with("") 恒真），
+        // 必须排除——否则键过期未命中 + 兄弟空标题窗口时会把空窗口当唯一命中锁错（P2-2）
+        let cands = vec![(120isize, String::new()), (121, "   ".to_string())];
+        let keys = vec!["（0）使用技能【ratingdog-report】，下载".to_string()];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), None);
+    }
+
+    #[test]
+    fn title_match_key_prefix_of_window_not_matched() {
+        // 反向前缀（键是窗口标题前缀）不匹配：截断只在终端侧发生
+        // 键="公司资产查询" 而窗口="OC | 公司资产查询的更多内容"——不现实场景，不锁定
+        let cands = vec![(90isize, "OC | 公司资产查询的更多内容".to_string())];
+        let keys = vec!["公司资产查询".to_string()];
+        assert_eq!(title_match_lock(&cands, "opencode", &keys), None);
+    }
+
+    #[test]
+    fn title_match_strips_ellipsis() {
+        // 终端侧截断后可能带省略号尾巴
+        let cands = vec![(100isize, "（2）使用技能【extract-report技能】…".to_string())];
+        let keys = vec![
+            "（2）使用技能【extract-report技能】，把二级目录下 full.md 提取经营数据".to_string(),
+        ];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), Some(100));
+    }
+
+    #[test]
+    fn title_match_multibyte_title_no_panic() {
+        // strip_oc_prefix 的前缀探测必须按字符边界（全角"（"为 3 字节，
+        // 5 字节切片会切进字符中间 panic——回归锁）
+        let cands = vec![(110isize, "（0）使用技能【ratingdog-report】".to_string())];
+        let keys = vec!["（0）使用技能【ratingdog-report】，下载".to_string()];
+        assert_eq!(title_match_lock(&cands, "kimi", &keys), Some(110));
+    }
+
+    // ---- 键组装：仅携带会话区分度的工具接入标题匹配层 ----
+
+    #[test]
+    fn title_keys_kimi_single_key() {
+        // kimi：键 = [state.title]；title 缺失 → 空列表（层自然跳过）
+        assert_eq!(
+            title_keys("kimi", Some("（0）使用技能【ratingdog-report】，下载")),
+            vec!["（0）使用技能【ratingdog-report】，下载".to_string()]
+        );
+        assert!(title_keys("kimi", None).is_empty());
+    }
+
+    #[test]
+    fn title_keys_opencode_single_key() {
+        // opencode：键 = [session.title]（前缀剥离在窗口侧做，键保持原样）
+        assert_eq!(
+            title_keys("opencode", Some("公司资产查询")),
+            vec!["公司资产查询".to_string()]
+        );
+        assert!(title_keys("opencode", None).is_empty());
+    }
+
+    #[test]
+    fn title_keys_id_prefix_tools_get_empty_keys() {
+        // claude/codex 的 title 是 id 前 8/12 位，与终端标题无前缀关系；
+        // 传入也是无害 miss，但为省事直接不给键
+        assert!(title_keys("claude", Some("01a08083")).is_empty());
+        assert!(title_keys("codex", Some("01a08083")).is_empty());
+        assert!(title_keys("workbuddy", Some("WorkBuddy")).is_empty());
+        assert!(title_keys("openclaw", Some("my-agent")).is_empty());
     }
 
     // ---- P1-2 B：前台验证状态机（喂样本序列断言判定） ----

@@ -8,6 +8,7 @@ use log::{debug, info};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// message.data JSON 结构
 #[derive(Deserialize)]
@@ -23,20 +24,25 @@ struct PartData {
     text: Option<String>,
 }
 
-/// 获取 OpenCode 会话
+/// 获取 OpenCode 会话（生产入口：DB 固定在 ~/.local/share/opencode/opencode.db）
 pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
-    if processes.is_empty() {
+    let Some(h) = dirs::home_dir() else {
         return Vec::new();
-    }
-
-    let db_path = match dirs::home_dir() {
-        Some(h) => h
-            .join(".local")
+    };
+    get_opencode_sessions_with_db(
+        &h.join(".local")
             .join("share")
             .join("opencode")
             .join("opencode.db"),
-        None => return Vec::new(),
-    };
+        processes,
+    )
+}
+
+/// DB 路径注入版（单测用）：与生产入口同逻辑
+fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> Vec<Session> {
+    if processes.is_empty() {
+        return Vec::new();
+    }
 
     if !db_path.exists() {
         debug!("OpenCode database not found: {:?}", db_path);
@@ -44,7 +50,7 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     }
 
     // 只读连接 + busy_timeout（共享 helper，P1-4 消根：opencode/workbuddy 同规）
-    let conn = match super::sqlite::open_readonly_with_timeout(&db_path) {
+    let conn = match super::sqlite::open_readonly_with_timeout(db_path) {
         Some(c) => c,
         None => {
             debug!("Failed to open OpenCode database: {:?}", db_path);
@@ -81,6 +87,9 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 
     let mut sessions = Vec::new();
     let mut matched_pids: HashSet<u32> = HashSet::new();
+    // 已被某进程认领的 session 行下标（同目录双开防遮蔽：recent 按 time_updated DESC，
+    // 最新行配第一个进程、次新行配第二个——借鉴 kimi_parser Phase 1 的 matched 集合）
+    let mut matched_rows: HashSet<usize> = HashSet::new();
 
     // ---- 主匹配：session.directory（会话启动目录）与进程 cwd 归一化相等 ----
     // （含 global 会话；取代原按 directory 精确 SQL 的 global 回退——SQL 精确匹配无法
@@ -88,11 +97,12 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     for process in processes {
         let Some(cwd) = &process.cwd else { continue };
         let cwd_str = cwd.to_string_lossy();
-        if let Some((session_id, directory, title, time_updated)) = recent
+        if let Some((row_idx, row)) = recent
             .iter()
-            .find(|(_, dir, _, _)| cwd_equivalent(dir, &cwd_str))
+            .enumerate()
+            .find(|(i, (_, dir, _, _))| !matched_rows.contains(i) && cwd_equivalent(dir, &cwd_str))
         {
-            matched_pids.insert(process.pid);
+            let (session_id, directory, title, time_updated) = row;
             if let Some(session) = build_session_from_row(
                 &conn,
                 session_id,
@@ -103,6 +113,10 @@ pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
                 process,
             ) {
                 sessions.push(session);
+                // 构造成功才认领行与 pid（与 kimi Phase 1 同时序）：若将来构造可能
+                // 过滤返回 None，失败时不烧掉行/pid，该进程仍可走回退匹配
+                matched_rows.insert(row_idx);
+                matched_pids.insert(process.pid);
             }
         }
     }
@@ -390,5 +404,118 @@ mod status_tests {
             determine_opencode_status(50.0, Some("user"), now, now),
             SessionStatus::Processing
         );
+    }
+}
+
+#[cfg(test)]
+mod matching_tests {
+    use super::*;
+    use crate::session::ProcessForm;
+
+    fn fake_process(pid: u32, cwd: &str) -> AgentProcess {
+        AgentProcess {
+            pid,
+            cpu_usage: 0.0,
+            cwd: Some(std::path::PathBuf::from(cwd)),
+            form: ProcessForm::Cli,
+            exe: None,
+        }
+    }
+
+    /// 最小 schema 夹具 DB：仅建解析器 SQL 引用的表/列；message/part 允许为空。
+    /// project 表留空（session 行硬编码 project_id='p1' 但不插 project 行）= project 回退段不触发
+    fn fixture_db(path: &std::path::Path, sessions: &[(&str, &str, &str, i64)]) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT, time_updated INTEGER);
+             CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, name TEXT);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (message_id TEXT, data TEXT, time_created INTEGER);",
+        )
+        .unwrap();
+        for (id, dir, title, ts) in sessions {
+            conn.execute(
+                "INSERT INTO session (id, project_id, directory, title, time_updated) VALUES (?1,'p1',?2,?3,?4)",
+                rusqlite::params![id, dir, title, ts],
+            )
+            .unwrap();
+        }
+    }
+
+    /// 2026-09-09 事故回归锁：同目录双开两会话，两进程必须各得一张卡（id 各异）。
+    /// 修复前红：两进程 find() 命中同一条最新行，另一会话被遮蔽
+    #[test]
+    fn same_dir_dual_sessions_both_surfaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture_db(
+            &db,
+            &[
+                ("ses_new", "C:/Users/x/Desktop/苏州", "公司股东查询", 2000),
+                (
+                    "ses_old",
+                    "C:/Users/x/Desktop/苏州",
+                    "查看公司2025年末总资产",
+                    1000,
+                ),
+            ],
+        );
+        let procs = vec![
+            fake_process(11, "C:\\Users\\x\\Desktop\\苏州"),
+            fake_process(22, "C:\\Users\\x\\Desktop\\苏州"),
+        ];
+        let sessions = get_opencode_sessions_with_db(&db, &procs);
+        assert_eq!(sessions.len(), 2, "两个终端两张卡");
+        let ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["ses_new", "ses_old"].into_iter().collect(),
+            "两会话都出现，不再互相遮蔽"
+        );
+    }
+
+    /// 回归：不同目录双开各配各的（既有行为不回退）
+    #[test]
+    fn distinct_dirs_each_matched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture_db(
+            &db,
+            &[
+                ("ses_a", "C:/Users/x/A", "会话A", 2000),
+                ("ses_b", "C:/Users/x/B", "会话B", 1000),
+            ],
+        );
+        let procs = vec![
+            fake_process(11, "C:\\Users\\x\\A"),
+            fake_process(22, "C:\\Users\\x\\B"),
+        ];
+        let sessions = get_opencode_sessions_with_db(&db, &procs);
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|s| s.id == "ses_a"));
+        assert!(sessions.iter().any(|s| s.id == "ses_b"));
+    }
+
+    /// 回归：单进程 + 同目录多会话 → 取最新（配对顺序语义）
+    #[test]
+    fn single_process_gets_newest_same_dir_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture_db(
+            &db,
+            &[
+                ("ses_new", "C:/Users/x/Desktop/苏州", "公司股东查询", 2000),
+                (
+                    "ses_old",
+                    "C:/Users/x/Desktop/苏州",
+                    "查看公司2025年末总资产",
+                    1000,
+                ),
+            ],
+        );
+        let sessions =
+            get_opencode_sessions_with_db(&db, &[fake_process(11, "C:\\Users\\x\\Desktop\\苏州")]);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "ses_new");
     }
 }

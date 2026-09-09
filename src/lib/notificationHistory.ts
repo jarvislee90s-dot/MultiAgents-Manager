@@ -5,6 +5,8 @@ export interface HistoryEntry {
   projectName: string;
   status: string;
   lastMessage: string;
+  // 会话标题：铃铛历史跳转走标题匹配层用（kimi/opencode）；可选以兼容旧 localStorage 数据
+  title?: string;
   pid: number;
   sessionId: string;
   at: number;

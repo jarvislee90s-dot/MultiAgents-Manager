@@ -66,6 +66,7 @@ export function SessionCard({ session }: { session: Session }) {
         agentType: session.agentType,
         projectName: session.projectName,
         lastMessage: session.lastMessage ?? undefined,
+        title: session.title ?? undefined,
         unread: session.unread, // 歧义选择器点选成功后回标已读用（spec W4 已读信号 1）
         form: session.form, // review M3：CLI 会话 APP 级保底激活时的 UX 提示依据
       });
@@ -85,9 +86,12 @@ export function SessionCard({ session }: { session: Session }) {
         onClick={handleClick}
         title={session.jumpSupported ? t("sessions.jumpToTerminal") : t("sessions.jumpUnsupported")}
       >
-        {/* 顶部：工具标签 + 项目目录名 + 总结/hash + 分支 | 状态指示区 | 关闭 X 最右 */}
+        {/* 顶部：工具标签 + 项目目录名（自然宽度优先完整显示）+ 会话标题尾巴 + 分支 | 状态指示区 | 关闭 X 最右。
+            会话标题主要用于跳转匹配定位而非阅读，压缩为灰色尾巴（悬停 tooltip 看全文）；
+            空间不足时尾巴先截断（flex-shrink 5 倍让路），项目名最后才截——
+            kimi 长任务标题曾把项目名挤成单字（窄卡 + DPI 缩放下定宽尾巴同样会饿死项目名） */}
         <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <span
               className={cn(
                 "inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold",
@@ -97,9 +101,14 @@ export function SessionCard({ session }: { session: Session }) {
               <Icon className="h-3 w-3" />
               {getAgentLabel(session.agentType, session.form)}
             </span>
-            <span className="truncate text-sm font-medium">{session.projectName}</span>
+            <span className="min-w-0 truncate text-sm font-medium" title={session.projectName}>
+              {session.projectName}
+            </span>
             {(session.title || session.id) && (
-              <span className="text-muted-foreground/60 truncate font-mono text-[10px]">
+              <span
+                className="text-muted-foreground/60 max-w-[14em] min-w-0 [flex-shrink:5] truncate font-mono text-[10px]"
+                title={session.title || session.id.slice(0, 8)}
+              >
                 {session.title || session.id.slice(0, 8)}
               </span>
             )}

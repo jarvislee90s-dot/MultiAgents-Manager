@@ -18,6 +18,8 @@ export interface JumpTarget {
   agentType: string;
   projectName: string;
   lastMessage?: string;
+  // 会话标题（kimi/opencode 终端窗口标题同源）：标题匹配层（②′）的正向身份键
+  title?: string;
   // 未读标记：歧义选择器点选跳转成功后回标已读用（spec W4 已读信号 1）；未知时省略 → 无条件回标（删除不存在的行是 no-op）
   unread?: boolean;
   // 进程形态：CLI 会话在 TTY 聚焦失败走 APP 级保底时给出 UX 提示（review M3）
@@ -39,6 +41,7 @@ export function useSessionJump() {
         agentType: target.agentType,
         projectName: target.projectName,
         lastMessage: target.lastMessage,
+        title: target.title,
         // P1-1：进程形态/未读标记传入后端，Windows App 会话优先深度链接直达（T8）
         form: target.form,
         unread: target.unread,
