@@ -71,6 +71,9 @@ const TOOL_CLAIM_KEYWORDS: &[(&str, &[&str])] = &[
     // WorkBuddy 桌面 APP（Electron）窗口标题即 "WorkBuddy"，缺失会导致
     // 多窗口消歧无法认领、无谓落入 Ambiguous 选择器（spec W2/W7 Windows 侧）
     ("workbuddy", &["workbuddy"]),
+    // ZCode 桌面 APP（Electron）单窗口多标签，实机（2026-09-09）窗口标题恒为
+    // "ZCode"、不含工作区名——认领用于 reactivate_tool_app 兜底聚焦唯一窗口
+    ("zcode", &["zcode"]),
 ];
 
 /// 归一化窗口标题用于项目名比对：剥离 spinner 前缀（codex 运行时标题形态 "⠙ 项目名"，
@@ -661,7 +664,7 @@ pub fn reactivate_tool_app(
     // 判定，并排除会话进程（codebuddy）与内嵌框架进程，聚焦的是真正的宿主窗口
     let Some(tool_id) = agent_type
         .map(|a| a.to_lowercase())
-        .filter(|t| matches!(t.as_str(), "workbuddy" | "codex"))
+        .filter(|t| matches!(t.as_str(), "workbuddy" | "codex" | "zcode"))
     else {
         return Err("未知工具，无法兜底激活".to_string());
     };

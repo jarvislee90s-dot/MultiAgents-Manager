@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- **ZCode 第七工具支持**（智谱桌面 AI 编程助手，Electron APP 形态）：宿主判定（进程侧只回答「应用开没开」，Windows 全部可执行体同名 ZCode.exe 时按命令行区分主进程/辅助进程/会话运行时）+ 双 SQLite 会话聚合（tasks-index 任务索引 + session/message/part 消息流，每会话一卡、24h 窗口、archived/deleted 过滤、会话 id 严格 UUID 校验）；状态从消息流尾部按 sequence 倒扫推导（step-finish 懒落库时间戳不可靠、顺序可靠），todo_reminder 等记账消息识别跳过；子代理长任务经共享层「后代活跃度仲裁」保持运行中（主会话静默 + 子会话活跃 = 健康等待，停更且无后代活动 = 疑似卡住）；task_status=error 按完成转绿
+- **ZCode 跳转与资源管理**：工作区深链 `zcode://workspace/open?path=<URL编码的项目原生路径>`（会话级深链不存在，精度上限 = 直达项目工作区；Windows 反斜杠 + 大写盘符整段编码，派发前 handler 校验 + 派发后前台验证，失败落 APP 级激活保底）；skill 分发（SSOT → `~/.zcode/skills/` 建链/删链）+ MCP 配置读-改-写（`~/.zcode/cli/config.json` 仅 `mcp.servers` 子树，未知键与原键序保留，解析失败只报错不落盘，`enable:false` 条目如实展示为停用）
+- 共享层通用化（D5）：停更降级新增后代活跃度仲裁参数（空后代语义 = 现状，既有工具行为零变化并有逐边界回归测试）；数据驱动持久绿卡门（P1-3 剔除 + 未读态标记）从 Codex 特判泛化为工具能力判定，ZCode 聚合卡复用同款语义
+
+### Fixed
+- MCP 面板读取链路硬编码旧工具清单（仅 claude/codex/opencode，openclaw/kimi/workbuddy 的 MCP 读取一直落「未知工具」）——改走 adapter 注册表统一分发，段定位按 adapter 声明的键路径（兼容历史顶层键探测）
+- 资源导入溯源 `detect_source_tool` 硬编码四工具清单（kimi/workbuddy 来源历史行回溯恒空 → 跳过补链）——改走 TOOL_IDS 注册表
+- 前端 `SUPPORTED_TOOLS` 常量缺 workbuddy（徽标遍历测试覆盖面缺口）；浏览器 mock 的 detect_tools 缺 workbuddy 行
+
 ## [0.3.0] - 2026-09-06
 ### Added
 - **外部桌宠支持**：导入本地 zip/目录自定义宠物，或从 Petdex 在线仓库下载；管理面板支持导入/描述编辑/重命名/删除/一键热切换；manifest 结构、帧率、尺寸、语音清单全量校验，IPC 宠物 ID 路径逃逸防护；无语音宠物能力门控自动降级（动画照常），语音能力双向同步

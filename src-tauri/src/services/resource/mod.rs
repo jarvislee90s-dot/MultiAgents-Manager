@@ -128,10 +128,13 @@ fn plan_skill_import(
     }
 }
 
-/// 从源路径推断 skill 所属工具
+/// 从源路径推断 skill 所属工具。
+/// 债修复（ZCode 接入轮）：原实现硬编码 ["claude","codex","opencode","openclaw"]，
+/// kimi/workbuddy 来源的历史行回溯恒 None → 跳过补链；改走 TOOL_IDS 注册表
+/// （zcode 登记后自动纳入，新工具不再逐个补）
 fn detect_source_tool(source_path: &str) -> Option<String> {
     let path = std::path::Path::new(source_path);
-    for tool_id in ["claude", "codex", "opencode", "openclaw"] {
+    for tool_id in crate::adapter::TOOL_IDS {
         if let Some(dir) = crate::adapter::primary_skill_dir(tool_id) {
             if path.starts_with(&dir) {
                 return Some(tool_id.to_string());
@@ -561,5 +564,39 @@ mod relink_gate_tests {
     fn enable_failure_propagates() {
         let out = ensure_skill_relink("claude", &|_| true, &|| false, &|| Err("boom".into()));
         assert_eq!(out, Err("boom".into()));
+    }
+}
+
+#[cfg(test)]
+mod detect_source_tool_tests {
+    use super::detect_source_tool;
+
+    /// 债修复回归锁：溯源遍历 TOOL_IDS 注册表——kimi/workbuddy/zcode 来源路径
+    /// 不再回溯恒 None（原四工具硬编码清单的缺口）。纯路径前缀比较，零文件系统
+    /// 访问（primary_skill_dir 只做 home_dir 路径拼接）
+    #[test]
+    fn registry_covers_late_registered_tools() {
+        let home = dirs::home_dir().unwrap_or_default();
+        let case = |rel: &str, expect: &str| {
+            let path = home
+                .join(rel)
+                .join("my-skill")
+                .to_string_lossy()
+                .to_string();
+            assert_eq!(
+                detect_source_tool(&path).as_deref(),
+                Some(expect),
+                "源路径 {path} 应回溯到 {expect}"
+            );
+        };
+        case(".kimi-code/skills", "kimi");
+        case(".workbuddy/skills", "workbuddy");
+        case(".zcode/skills", "zcode");
+        // 既有工具零回归（原硬编码清单覆盖的四个）
+        case(".claude/skills", "claude");
+        case(".agents/skills", "codex");
+        case(".openclaw/skills", "openclaw");
+        // 无关路径 → None
+        assert_eq!(detect_source_tool("/tmp/nowhere/skill"), None);
     }
 }

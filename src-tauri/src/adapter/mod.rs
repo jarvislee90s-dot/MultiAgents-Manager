@@ -7,6 +7,7 @@ pub mod kimi;
 pub mod openclaw;
 pub mod opencode;
 pub mod workbuddy;
+pub mod zcode;
 
 use crate::session::{
     jump_supported_for, status_sort_priority, AgentType, ProcessForm, Session, SessionStatus,
@@ -94,6 +95,12 @@ pub trait AgentAdapter: Send + Sync {
     fn mcp_config_path(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// JSON 类配置中 MCP 服务器段的键路径（读-改-写只动该子树，未知键与原键序
+    /// 保留）。默认顶层 `mcpServers`（Claude/WorkBuddy/Kimi 同构）；OpenCode 为
+    /// 顶层 `mcp`；ZCode 为嵌套 `mcp.servers`。仅 McpFormat::Json/Jsonc 消费
+    fn mcp_json_section(&self) -> &'static [&'static str] {
+        &["mcpServers"]
+    }
 
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
@@ -119,6 +126,7 @@ pub const TOOL_IDS: &[&str] = &[
     "openclaw",
     "kimi",
     "workbuddy",
+    "zcode",
 ];
 
 /// 工具 id → adapter 的唯一登记处。新增工具只需在此加一行（+ 其 adapter 文件），
@@ -131,6 +139,7 @@ pub fn adapter_by_id(tool_id: &str) -> Option<Box<dyn AgentAdapter>> {
         "openclaw" => Some(Box::new(openclaw::OpenClawAdapter)),
         "kimi" => Some(Box::new(kimi::KimiAdapter)),
         "workbuddy" => Some(Box::new(workbuddy::WorkBuddyAdapter)),
+        "zcode" => Some(Box::new(zcode::ZCodeAdapter)),
         _ => None,
     }
 }
@@ -245,7 +254,8 @@ pub fn get_all_sessions() -> SessionsResponse {
     // 「点击跳转后消失」；且池行 24h 边界比聚合窗晚，会闪现迟到的真未读卡。
     // 处置：上一轮状态缓存已绿 且 本轮未读池无行 ⇒ 用户已读（或池行已过期）→ 剔除聚合卡；
     // 首次转绿（上一轮非绿/无缓存）→ 保留，由下方 sync_unread 正常插行。
-    // 注：仅作用于 Codex APP（文件驱动的聚合卡）；WorkBuddy 活跃卡由进程存活驱动、
+    // 注：作用于「数据驱动持久绿卡」工具（Codex APP 文件驱动 / ZCode 数据库驱动，
+    // 见 green_card_is_data_driven）；WorkBuddy 活跃卡由进程存活驱动、
     // 进程退出后未读卡接管，语义本就自洽，不动
     {
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -254,20 +264,18 @@ pub fn get_all_sessions() -> SessionsResponse {
             .map(|r| (r.tool_id, r.session_id))
             .collect();
         all_sessions.retain(|s| {
-            let is_codex_app_green = matches!(s.agent_type, AgentType::Codex)
+            let is_data_driven_green = green_card_is_data_driven(&s.agent_type)
                 && matches!(s.form, ProcessForm::App)
                 && matches!(s.status, SessionStatus::Idle | SessionStatus::Finished);
-            if !is_codex_app_green {
+            if !is_data_driven_green {
                 return true;
             }
             let was_green_prev = matches!(
                 crate::database::find_status(&s.id).as_deref(),
                 Some("Idle") | Some("Finished")
             );
-            !codex_green_card_should_drop(
-                was_green_prev,
-                pool.contains(&("codex".into(), s.id.clone())),
-            )
+            let tool = format!("{:?}", s.agent_type).to_lowercase();
+            !codex_green_card_should_drop(was_green_prev, pool.contains(&(tool, s.id.clone())))
         });
     }
 
@@ -424,6 +432,15 @@ fn codex_green_card_should_drop(was_green_prev: bool, pool_has_row: bool) -> boo
     was_green_prev && !pool_has_row
 }
 
+/// 「数据驱动持久绿卡」工具判定（P1-3 剔除与未读态标记的共同门）：
+/// 绿卡由工具侧数据（Codex=rollout 文件 mtime / ZCode=数据库 time_updated）驱动、
+/// 完成后仍在扫描窗口内持续出卡 → 需要「池行存在 ⇒ 未读态在板呈现、已读 ⇒ 剔除」
+/// 的聚合卡语义。WorkBuddy 活跃卡由进程/心跳存活驱动（进程退出后由未读池接管渲染），
+/// 不在此列——既有工具行为零变化
+fn green_card_is_data_driven(agent_type: &AgentType) -> bool {
+    matches!(agent_type, AgentType::Codex | AgentType::ZCode)
+}
+
 /// review F2：宿主 APP 已死 → App 形态活跃卡全部清除（孤儿 codebuddy 心跳未过期
 /// 也不得出卡）；CLI 卡不依赖宿主；未读卡（unread=true）归池/宿主退出清池管线治理，
 /// 本过滤器不碰。host_alive 经参数注入，复用 SHARED_SYSTEM 快照避免重复全量扫描
@@ -490,9 +507,9 @@ fn insert_allowed(prev_status: Option<&str>, was_read_recently: bool) -> bool {
 /// - 转绿（Idle/Finished）→ upsert 未读行（未在池中时）
 /// - 宿主 APP 进程全部退出 → 清空该工具未读行与在板未读卡
 /// - 过期（24h）→ 清理
-/// - Codex APP 绿卡（P1-3）：聚合卡即该会话的「未读卡」形态——池有行时标记
-///   unread=true（徽标/「未读卡排后」生效），已读删行后由 get_all_sessions 的
-///   前置过滤剔除，闭环「被已读信号清除」
+/// - 数据驱动持久绿卡工具（Codex APP / ZCode，P1-3 通用化）：聚合卡即该会话的
+///   「未读卡」形态——池有行时标记 unread=true（徽标/「未读卡排后」生效），
+///   已读删行后由 get_all_sessions 的前置过滤剔除，闭环「被已读信号清除」
 fn sync_unread_sessions(active: &mut Vec<Session>) {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -530,9 +547,10 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
                 }
                 UnreadPoolAction::None => {}
             }
-            // P1-3：Codex APP 聚合卡持久在场（mtime 驱动），池行存在 ⇒ 未读态在板呈现。
-            // WorkBuddy 活跃卡不标（进程退出后由池接管渲染未读卡，spec §5 双形态语义）
-            if tool == "codex" {
+            // P1-3：数据驱动持久绿卡（Codex APP 聚合卡 / ZCode 数据库聚合卡）在场时，
+            // 池行存在 ⇒ 未读态在板呈现。WorkBuddy 活跃卡不标（进程退出后由池接管
+            // 渲染未读卡，spec §5 双形态语义）
+            if green_card_is_data_driven(&s.agent_type) {
                 s.unread = true;
             }
         } else {
@@ -749,6 +767,9 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
         "kimi" => Some(crate::monitor::kimi_parser::kimi_home_with(home_dir).join("skills")),
         // WorkBuddy 读取 ~/.workbuddy/skills（数据根目录 ~/.workbuddy）
         "workbuddy" => Some(home_dir.join(".workbuddy").join("skills")),
+        // ZCode：官方文档声明的用户级 skill 目录 ~/.zcode/skills（Plan A，
+        // 目录真实性不确定与备选方案见 IMPLEMENTATION_NOTES）
+        "zcode" => Some(crate::monitor::zcode_parser::zcode_home_with(home_dir).join("skills")),
         _ => None,
     }
 }
@@ -770,11 +791,53 @@ mod skill_dir_tests {
     }
 
     #[test]
+    fn zcode_skill_dir_uses_official_user_level_directory() {
+        // Plan A：官方文档声明的 ~/.zcode/skills（是否被真实读取未经实测，
+        // 不确定性与备选方案见 IMPLEMENTATION_NOTES）；不采用跨工具共享目录
+        // ~/.agents/skills（其他工具同读，与每工具独立激活模型冲突）
+        let dir = skill_dir_for_tool("zcode", std::path::Path::new("/home/test"))
+            .expect("zcode skill dir must be registered");
+        assert_eq!(dir, std::path::Path::new("/home/test/.zcode/skills"));
+    }
+
+    #[test]
     fn unknown_tool_has_no_skill_dir() {
         assert_eq!(
             skill_dir_for_tool("unknown", std::path::Path::new("/home/test")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod green_card_gate_tests {
+    use super::green_card_is_data_driven;
+    use crate::session::model::AgentType;
+
+    /// P1-3 门的通用化（ZCode 接入轮）：数据驱动持久绿卡工具 = Codex（rollout 文件
+    /// mtime 驱动）+ ZCode（数据库 time_updated 驱动）——绿卡完成后仍在扫描窗口内
+    /// 持续出卡，需要「池行存在 ⇒ 未读态在板、已读删行 ⇒ 剔除」的聚合卡语义。
+    /// WorkBuddy（进程/心跳驱动，进程退出后由池接管渲染）与 CLI 工具行为零变化
+    #[test]
+    fn data_driven_persistent_green_card_tools() {
+        assert!(green_card_is_data_driven(&AgentType::Codex));
+        assert!(green_card_is_data_driven(&AgentType::ZCode));
+        // 既有工具零回归：WorkBuddy 与全部 CLI 工具不在门内
+        assert!(!green_card_is_data_driven(&AgentType::WorkBuddy));
+        assert!(!green_card_is_data_driven(&AgentType::Claude));
+        assert!(!green_card_is_data_driven(&AgentType::OpenCode));
+        assert!(!green_card_is_data_driven(&AgentType::OpenClaw));
+        assert!(!green_card_is_data_driven(&AgentType::Kimi));
+    }
+
+    /// 未读池 tool_id ↔ AgentType 往返（build_unread_cards 的 serde 反解依赖
+    /// rename_all=lowercase：Debug 形态转小写必须能被 serde 反解回同一变体）
+    #[test]
+    fn zcode_tool_id_serde_roundtrip() {
+        let tool = format!("{:?}", AgentType::ZCode).to_lowercase();
+        assert_eq!(tool, "zcode");
+        let back: AgentType = serde_json::from_value(serde_json::json!(tool)).unwrap();
+        assert_eq!(back, AgentType::ZCode);
     }
 }
 

@@ -17,6 +17,7 @@ pub mod project;
 pub mod sqlite;
 pub mod status;
 pub mod workbuddy_parser;
+pub mod zcode_parser;
 
 // ===== notify 文件监听集成（FR-5c）=====
 

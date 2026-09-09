@@ -4,7 +4,7 @@
 
 **多 Agent 编程工具统一管理平台**
 
-一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy 的桌面应用
+一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode 的桌面应用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,8 +28,8 @@
 | 🟡 黄色 | 处理中 / 思考中 |
 | 🟢 绿色 | 空闲 / 已完成 |
 
-- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code**、**WorkBuddy** 会话
-- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底）与持久未读卡（转绿跨重启保留、宿主退出自动清理）
+- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code**、**WorkBuddy**、**ZCode** 会话
+- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底；ZCode 无会话级深链，工作区级 `zcode://workspace/open?path=<项目路径>` 直达项目工作区）与持久未读卡（转绿跨重启保留、宿主退出自动清理）
 - 显示项目名称、Git 分支、最后消息预览、CPU 占用、运行时长
 - 按优先级排序：等待中 → 运行中 → 空闲
 - 系统托盘图标反映聚合状态（🔴/🟡/🟢）
@@ -74,14 +74,14 @@ v0.3.0 起桌宠格式开放，不再只有 Foxbell：
 | tmux | ✅ pane 选择 + 终端聚焦 |
 | Wayland | ❌ 优雅降级提示 |
 
-桌面 APP 类工具（Codex APP、WorkBuddy）支持会话级深度链接直达：`codex://threads/<id>`、`workbuddy://chat/<id>`，派发前校验协议 handler、派发后验证前台化，失败自动落 APP 级前台保底（macOS AppleScript / Windows 近祖聚焦），且不误标已读。
+桌面 APP 类工具（Codex APP、WorkBuddy、ZCode）支持深度链接直达：`codex://threads/<id>`、`workbuddy://chat/<id>`（会话级）、`zcode://workspace/open?path=<URL编码的项目原生路径>`（工作区级——ZCode 会话级深链不存在，跳转精度上限即直达项目工作区），派发前校验协议 handler、派发后验证前台化，失败自动落 APP 级前台保底（macOS AppleScript / Windows 近祖聚焦），且不误标已读。
 
 ### 扩展资源统一管理
 
 Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 
 - **Skill**：符号链接（Unix）/ 交接点（Windows）映射到各工具的 skill 目录
-- **MCP 服务器**：自动格式转换 —— JSON（Claude / Kimi）/ TOML（Codex）/ JSONC（OpenCode）
+- **MCP 服务器**：自动格式转换 —— JSON（Claude / Kimi / WorkBuddy）/ TOML（Codex）/ JSONC（OpenCode）/ JSON 嵌套子树（ZCode：`mcp.servers`，读-改-写只动该子树、未知键与原键序保留）
 - **插件**：文件/配置混合管理
 - 首次启动自动导入已有 skill（从 `~/.claude/skills/`、`~/.agents/skills/`、`~/.config/opencode/skills/`）
 - 重新扫描按钮发现新安装的 skill
@@ -137,6 +137,8 @@ src-tauri/src/
 │   ├── opencode.rs    #   OpenCode（SQLite）
 │   ├── openclaw.rs    #   OpenClaw（state.json）
 │   ├── kimi.rs        #   Kimi Code（session_index + wire.jsonl）
+│   ├── workbuddy.rs   #   WorkBuddy（心跳驱动 + JSONL）
+│   ├── zcode.rs       #   ZCode（宿主判定 + SQLite 会话聚合）
 │   └── mod.rs         #   AgentAdapter trait + 工具注册表 + 会话发现调度器
 ├── monitor/
 │   ├── process.rs     #   进程发现（sysinfo 扫描）
@@ -145,6 +147,8 @@ src-tauri/src/
 │   ├── opencode_parser.rs # OpenCode SQLite 解析器
 │   ├── openclaw_parser.rs # OpenClaw state.json 解析器
 │   ├── kimi_parser.rs     # Kimi Code 解析器（session_index + wire.jsonl）
+│   ├── workbuddy_parser.rs # WorkBuddy 解析器（心跳 + JSONL 尾部推导）
+│   ├── zcode_parser.rs    # ZCode 解析器（tasks-index + session/message/part 双 SQLite）
 │   ├── jsonl.rs       #   JSONL 读取公共件（尾部读取、文件枚举）
 │   ├── cwd.rs         #   cwd 归一化（进程 ↔ 会话匹配公共设施）
 │   ├── git.rs         #   GitHub URL 查询（进程内缓存）
@@ -256,6 +260,7 @@ pnpm lint:fix     # ESLint 自动修复
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌（状态经 wire 解析） |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌（状态经心跳 + JSONL 推导） |
+| ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON（`mcp.servers` 嵌套子树） | ❌（状态经 SQLite 消息流尾部推导） |
 
 ### Kimi Code 数据目录重定向
 
@@ -278,6 +283,7 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 - [x] OpenClaw 支持（第四工具）
 - [x] Kimi Code 支持（第五工具：会话监控 + MCP 管理 + `KIMI_CODE_HOME` 数据目录重定向）
 - [x] WorkBuddy 支持（第六工具：心跳驱动监控 + 深度链接跳转 + 资源管理）
+- [x] ZCode 支持（第七工具：SQLite 会话聚合监控 + 子代理活跃度仲裁 + 工作区深链跳转 + Skill/MCP 资源管理）
 - [x] Foxbell 桌宠（状态卡片 + 语音提醒 + 拖拽物理）
 - [x] 外部桌宠开放（本地/Petdex 导入 + 管理面板热切换 + 能力门控）
 - [x] 工具勾选管理（批量保存 + 还原/重建 + 彻底隐藏）

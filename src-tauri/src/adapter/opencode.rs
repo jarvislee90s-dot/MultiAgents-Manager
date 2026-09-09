@@ -41,6 +41,11 @@ impl AgentAdapter for OpenCodeAdapter {
     fn mcp_config_path(&self) -> Option<std::path::PathBuf> {
         Some(self.base_dir().join("opencode.json"))
     }
+    fn mcp_json_section(&self) -> &'static [&'static str] {
+        // OpenCode 的 MCP 段为顶层 "mcp"（jsonc::upsert_entry 的既有写入段，
+        // 显式声明与读取链路同源；此前读取靠探测链兜底命中）
+        &["mcp"]
+    }
 
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
         vec![self.base_dir().join("skills")]

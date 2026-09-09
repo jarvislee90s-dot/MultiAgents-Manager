@@ -369,6 +369,9 @@ if (!isTauri) {
           { id: "opencode", name: "OpenCode", available: false, path: "" },
           { id: "openclaw", name: "OpenClaw", available: true, path: "/usr/local/bin/openclaw" },
           { id: "kimi", name: "Kimi Code", available: false, path: "" },
+          // 债修复（ZCode 接入轮）：原 mock 缺 workbuddy 行（与后端 6 工具不对齐）
+          { id: "workbuddy", name: "WorkBuddy", available: true, path: "" },
+          { id: "zcode", name: "ZCode", available: true, path: "" },
         ]);
 
       case "list_sub_agents":
@@ -450,7 +453,7 @@ if (!isTauri) {
           skippedLost: [],
         });
 
-      // 工具管理行（ToolSetting，camelCase）：六工具全量行，浏览器渲染下
+      // 工具管理行（ToolSetting，camelCase）：七工具全量行，浏览器渲染下
       // 设置页「工具管理」分区可出数据
       case "get_tool_settings":
         return Promise.resolve([
@@ -460,6 +463,7 @@ if (!isTauri) {
           { toolId: "kimi", name: "Kimi Code", enabled: true, installed: true, managed: true },
           { toolId: "opencode", name: "OpenCode", enabled: true, installed: true, managed: false },
           { toolId: "openclaw", name: "OpenClaw", enabled: true, installed: false, managed: false },
+          { toolId: "zcode", name: "ZCode", enabled: true, installed: true, managed: false },
         ]);
 
       case "list_repo_skills":

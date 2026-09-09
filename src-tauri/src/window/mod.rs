@@ -112,7 +112,11 @@ pub fn activate_agent_app(
     //    → via=deep-link 标记返回，由调用方跳过已读回标（Windows 有 B 层前台验证故不受限）
     if should_try_deep_link(pid, pid_bundle.as_deref()) {
         if let (Some(agent), Some(sid)) = (agent_type, session_id) {
-            if let Some(url) = deep_link::session_url(agent, sid) {
+            // 会话级深链（workbuddy/codex）；zcode 无深链（2026-09-09 实机验收后
+            // 移出：workspace/open 落点为新会话 composer 且无条件弹信任确认，
+            // 跳转由下方 bundle 激活路径聚焦唯一窗口）
+            let url = deep_link::session_url(agent, sid);
+            if let Some(url) = url {
                 if deep_link::open_url(&url).is_ok() {
                     return Some(serde_json::json!({ "type": "focused", "via": "deep-link" }));
                 }

@@ -24,11 +24,47 @@ fn open_url_macos(url: &str) -> Result<(), String> {
 
 #[cfg(windows)]
 fn open_url_windows(url: &str) -> Result<(), String> {
+    // 首选 ShellExecuteW：经 Shell 直接派发给协议 handler，不经 cmd 解释——
+    // percent-encoded 路径中成对的 % 在 cmd /C 下会被当作环境变量展开
+    //（如 %2F..%3A 被清空），ZCode 工作区深链 path 整段编码，必须绕开 cmd；
+    // 该修复对经此派发的既有工具（WorkBuddy/Codex）深链同样生效。
+    // 无关联协议等失败时错误码 ≤32，落下方 cmd 兜底
+    if shell_execute_open(url).is_ok() {
+        return Ok(());
+    }
+    // 兜底：保留旧 cmd /C start 链路（无 Shell32 异常环境）
     std::process::Command::new("cmd")
         .args(["/C", "start", "", url])
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("start url failed: {}", e))
+}
+
+/// ShellExecuteW("open", url)：成功返回实例句柄（>32）；错误码（≤32）转 Err
+#[cfg(windows)]
+fn shell_execute_open(url: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let to_wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let verb = to_wide("open");
+    let file = to_wide(url);
+    let hinstance = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = hinstance.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(format!("ShellExecuteW 失败，错误码 {}", code))
+    }
 }
 
 /// 打开外部 URL（跨平台）
@@ -119,7 +155,11 @@ pub fn session_url(agent_type: &str, session_id: &str) -> Option<String> {
     // codex threadId 与 rollout UUID 同源性已 GUI 实测确认，
     // 见 plan「Step 1: 探测路由格式（Spike）」记录）→
     // 派发前统一强制校验：非 UUID 一律 None 走 APP 级保底，注入面随之消除
-    //（UUID 字符集 [0-9a-f-] 不含任何 shell 元字符，无需再 percent-encode）
+    //（UUID 字符集 [0-9a-f-] 不含任何 shell 元字符，无需再 percent-encode）。
+    // ZCode 无任何深链（2026-09-09 实机验收后整体移出跳转链：应用内路由仅
+    // workspace/open 一条，其语义 = 打开工作区 + 全新会话 composer，且每次派发
+    // 无条件弹信任确认、每次拉起一个转发进程——弹窗/新会话/进程开销三重副作用，
+    // 跳转改为直接聚焦唯一窗口，见 commands/session.rs 跳转链）
     if !crate::monitor::workbuddy_parser::is_strict_uuid_form(session_id) {
         return None;
     }
@@ -156,6 +196,20 @@ mod tests {
     fn unknown_tool_returns_none() {
         assert_eq!(session_url("claude", "abc-123"), None);
         assert_eq!(session_url("", "abc-123"), None);
+    }
+
+    // ---- ZCode：无任何深链（2026-09-09 实机验收后移出跳转链） ----
+
+    #[test]
+    fn zcode_has_no_session_level_url() {
+        // 应用内路由全量枚举仅 oauth/callback、payment/callback、workspace/open——
+        // session_url 不得为 zcode 产出任何链接（即使 id 是严格 UUID 形态）。
+        // workspace/open 曾以 workspace_url 形式接入，实测副作用（无条件信任弹窗、
+        // 落点为新会话 composer、每次拉起转发进程）后整体移除
+        assert_eq!(
+            session_url("zcode", "0f1e2d3c-4b5a-4948-8276-9a0b8c7d6e5f"),
+            None
+        );
     }
 
     // ---- P1-1 回归锁：sessionId 无校验直接拼 URL 的 cmd 元字符注入面 ----

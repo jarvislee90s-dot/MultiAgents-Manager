@@ -367,7 +367,7 @@
     "justNow": "刚刚",
     "appBadge": "桌面 App 会话",
     "empty": "暂无活跃会话",
-    "emptyHint": "在终端中运行 Claude Code、Codex CLI 或 OpenCode 即可在此监控",
+    "emptyHint": "在此监控 Claude Code、Codex CLI、OpenCode、OpenClaw、Kimi Code、WorkBuddy 或 ZCode 会话",
     "subagents": "{{n}} 子Agent",
     "untitledWindow": "(无标题)",
     "statusLabels": {

@@ -31,8 +31,41 @@ pub const APP_STATUS_STALE_MS: u64 = 300_000;
 /// mtime 阈值叠加（spec §4）：函数调用类尾部停更 >= 300s 降级 Waiting；
 /// assistant 文本（Idle）等其余状态不受影响。mtime 年龄不可知时按未过期处理（防御）
 pub fn overlay_mtime_stale(status: SessionStatus, mtime_age_ms: u64) -> SessionStatus {
+    overlay_stale_with_descendants(status, mtime_age_ms, DescendantActivity::Absent)
+}
+
+/// 后代（子代理）活跃度（D5 共享层通用能力）：会话自身停更时，其派生的后代
+/// 会话是否仍在活动。既有工具无后代语义 → [`DescendantActivity::Absent`]，
+/// 行为与 [`overlay_mtime_stale`] 完全一致（ZCode 接入轮的回归基线）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescendantActivity {
+    /// 至少一个后代会话在停更阈值窗口内有更新（如 ZCode 子代理执行期间主会话零写入）
+    Active,
+    /// 存在后代会话，但全部同样停更（后代窗口内无更新）
+    Stale,
+    /// 无后代会话（既有工具的空后代语义 = 现状行为不变）
+    Absent,
+}
+
+/// 停更降级 + 后代活跃度仲裁（D5，判定核纯函数）：
+/// - 非 Processing：透传（与 overlay_mtime_stale 一致）；
+/// - Processing 且停更 < 阈值：透传；
+/// - Processing 且停更 >= 阈值：
+///   - 后代活跃 → 保持 Processing（「主会话静默 = 健康等待子代理」，
+///     实测 ZCode 子代理执行期间主会话 17 分钟零写入，不得降级）；
+///   - 后代停更 / 无后代 → 降级 Waiting（疑似卡住）。
+///
+/// Absent 分支即 overlay_mtime_stale 原语义——既有工具（Codex/WorkBuddy）行为零变化
+pub fn overlay_stale_with_descendants(
+    status: SessionStatus,
+    mtime_age_ms: u64,
+    descendants: DescendantActivity,
+) -> SessionStatus {
     match status {
-        SessionStatus::Processing if mtime_age_ms >= APP_STATUS_STALE_MS => SessionStatus::Waiting,
+        SessionStatus::Processing if mtime_age_ms >= APP_STATUS_STALE_MS => match descendants {
+            DescendantActivity::Active => SessionStatus::Processing,
+            DescendantActivity::Stale | DescendantActivity::Absent => SessionStatus::Waiting,
+        },
         other => other,
     }
 }
@@ -192,5 +225,118 @@ mod tests {
             overlay_mtime_stale(SessionStatus::Waiting, 0),
             SessionStatus::Waiting
         );
+    }
+
+    // ---- D5：后代活跃度仲裁（共享层通用能力，ZCode 接入轮） ----
+
+    /// D5 回归基线：空后代语义（Absent）= overlay_mtime_stale 现状行为，
+    /// 逐边界对照证明既有工具（Codex/WorkBuddy）零变化
+    #[test]
+    fn absent_descendants_matches_legacy_overlay_exactly() {
+        for status in [
+            SessionStatus::Processing,
+            SessionStatus::Thinking,
+            SessionStatus::Idle,
+            SessionStatus::Waiting,
+            SessionStatus::Compacting,
+            SessionStatus::Finished,
+        ] {
+            for age in [
+                0u64,
+                1,
+                APP_STATUS_STALE_MS - 1,
+                APP_STATUS_STALE_MS,
+                APP_STATUS_STALE_MS + 1,
+                APP_STATUS_STALE_MS * 10,
+            ] {
+                assert_eq!(
+                    overlay_stale_with_descendants(status.clone(), age, DescendantActivity::Absent),
+                    overlay_mtime_stale(status.clone(), age),
+                    "status={:?} age={} 与既有 overlay 语义必须一致",
+                    status,
+                    age
+                );
+            }
+        }
+    }
+
+    /// 后代活跃：主会话停更超时也不降级（子代理长任务全程保持运行中）
+    #[test]
+    fn active_descendants_keep_processing_when_stale() {
+        assert_eq!(
+            overlay_stale_with_descendants(
+                SessionStatus::Processing,
+                APP_STATUS_STALE_MS * 4, // 实测子代理窗口 17 分钟 >> 300s
+                DescendantActivity::Active
+            ),
+            SessionStatus::Processing
+        );
+    }
+
+    /// 后代也停更：降级 Waiting（疑似卡住）
+    #[test]
+    fn stale_descendants_downgrade_to_waiting() {
+        assert_eq!(
+            overlay_stale_with_descendants(
+                SessionStatus::Processing,
+                APP_STATUS_STALE_MS,
+                DescendantActivity::Stale
+            ),
+            SessionStatus::Waiting
+        );
+    }
+
+    /// 无后代 + 停更超时：降级 Waiting（= 现状行为）
+    #[test]
+    fn absent_descendants_downgrade_to_waiting() {
+        assert_eq!(
+            overlay_stale_with_descendants(
+                SessionStatus::Processing,
+                APP_STATUS_STALE_MS + 1,
+                DescendantActivity::Absent
+            ),
+            SessionStatus::Waiting
+        );
+    }
+
+    /// 非运行态不受后代活跃度影响（Idle/Waiting/Thinking/Finished 透传）
+    #[test]
+    fn non_processing_statuses_ignore_descendants() {
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::Waiting,
+            SessionStatus::Thinking,
+            SessionStatus::Finished,
+        ] {
+            for desc in [
+                DescendantActivity::Active,
+                DescendantActivity::Stale,
+                DescendantActivity::Absent,
+            ] {
+                assert_eq!(
+                    overlay_stale_with_descendants(status.clone(), APP_STATUS_STALE_MS * 10, desc),
+                    status
+                );
+            }
+        }
+    }
+
+    /// 停更阈值内：后代状态无关紧要（Processing 保持）
+    #[test]
+    fn fresh_processing_ignores_descendants() {
+        for desc in [
+            DescendantActivity::Active,
+            DescendantActivity::Stale,
+            DescendantActivity::Absent,
+        ] {
+            assert_eq!(
+                overlay_stale_with_descendants(
+                    SessionStatus::Processing,
+                    APP_STATUS_STALE_MS - 1,
+                    desc
+                ),
+                SessionStatus::Processing
+            );
+        }
     }
 }

@@ -95,8 +95,17 @@ fn check_conflict(ext_id: &str, kind: &str, tool_id: &str) -> Option<String> {
                                 if let Ok(root) =
                                     serde_json::from_str::<serde_json::Value>(&content)
                                 {
-                                    let servers =
-                                        root.get("mcpServers").or_else(|| root.get("mcp"));
+                                    // 段定位走 adapter 声明的键路径（ZCode=mcp.servers
+                                    // 嵌套子树），兼容既有工具的顶层键历史形态
+                                    let servers = crate::services::mcp::json_section(
+                                        &root,
+                                        adapter.mcp_json_section(),
+                                    )
+                                    .or_else(|| {
+                                        root.get("mcpServers")
+                                            .or_else(|| root.get("mcp"))
+                                            .and_then(|v| v.as_object())
+                                    });
                                     servers.map(|s| s.get(name).is_some()).unwrap_or(false)
                                 } else {
                                     false
