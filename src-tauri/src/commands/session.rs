@@ -75,13 +75,19 @@ pub fn focus_session(
         // P1-1（Windows）：App 形态且带 sessionId 且工具为 workbuddy/codex 时，
         // 深度链接为第一顺位（session 级直达）：handler 校验通过 → 派发 → 前台验证成功
         // → 标已读返回；任一步失败无缝落回现有 resolve_and_focus → reactivate_tool_app 链路。
-        // codex 由 handler 校验天然门控（无 handler 机器自动跳过，实测语义见 P1-2）
+        // codex 由 handler 校验天然门控（无 handler 机器自动跳过，实测语义见 P1-2）。
+        // zcode 不在此列（2026-09-09 实机验收后移出）：zcode://workspace/open 每次
+        // 无条件弹信任确认、落点为新会话 composer（非定位已有会话）、每次拉起一个
+        // 转发进程——跳转改为下方 resolve_and_focus 的 pid 单窗口路径直接聚焦唯一
+        // 窗口（ZCode 单窗口多标签，卡片携带宿主 pid，窗口零歧义），失败由
+        // reactivate_tool_app 兜底（zcode 已在其谓词与认领关键字内）
         if form.as_deref() == Some("app") {
             if let (Some(sid), Some(agent)) = (session_id.as_deref(), agent_type.as_deref()) {
                 if matches!(agent, "workbuddy" | "codex")
                     && crate::window::deep_link::scheme_handler_exists(agent)
                 {
-                    if let Some(url) = crate::window::deep_link::session_url(agent, sid) {
+                    let url = crate::window::deep_link::session_url(agent, sid);
+                    if let Some(url) = url {
                         if crate::window::deep_link::open_url(&url).is_ok() {
                             if crate::window::win32::verify_foreground_tool(
                                 &mut system,

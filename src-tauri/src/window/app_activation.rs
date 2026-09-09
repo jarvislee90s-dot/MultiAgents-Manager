@@ -18,6 +18,8 @@ fn bundle_matches_agent(bundle_lower: &str, agent_type: &str) -> bool {
     match agent_type {
         "codex" => bundle_lower.ends_with("chatgpt.app") || bundle_lower.ends_with("codex.app"),
         "workbuddy" => bundle_lower.ends_with("workbuddy.app"),
+        // ZCode（Electron APP，bundle dev.zcode.app）：pid 失效兜底的枚举匹配
+        "zcode" => bundle_lower.ends_with("zcode.app"),
         // 其他工具暂无 APP 形态；新增 APP 类工具时在此补一行
         _ => false,
     }
@@ -98,6 +100,18 @@ mod tests {
             "workbuddy"
         ));
         assert!(!bundle_matches_agent("/applications/chatgpt.app", "claude"));
+    }
+
+    /// ZCode（bundle dev.zcode.app → /Applications/ZCode.app）：pid 失效兜底的
+    /// 枚举匹配规则（独立用例，不触碰既有 bundle_matches_agent_rules 断言）
+    #[test]
+    fn bundle_matches_agent_zcode_rules() {
+        assert!(bundle_matches_agent("/applications/zcode.app", "zcode"));
+        assert!(!bundle_matches_agent("/applications/zcode.app", "codex"));
+        assert!(!bundle_matches_agent(
+            "/applications/workbuddy.app",
+            "zcode"
+        ));
     }
 
     #[test]
