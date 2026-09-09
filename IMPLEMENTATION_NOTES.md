@@ -305,3 +305,429 @@ cat ~/.kimi-code/mcp.json   # 应出现 mcpServers.<name>
 3. **子 agent 计数**：Kimi swarm 子 agent 未计数（`active_subagent_count=0`）。
 4. **Linux 实机**：仅 macOS 实机验证；Linux 论证依据为 feature 空操作 +
    CI 同命令集，未实机跑过。
+
+---
+
+# 实现说明 — ZCode 全链路接入（第七工具）
+
+日期：2026-09-08 ｜ 分支：feat/zcode-integration ｜ 探测基线：ZCode v3.11.x（任务书双平台实测事实直接采信）
+
+## Z0. 交付物与验证结果总览
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Rust 格式 | `cd src-tauri && cargo fmt --check` | ✅ 0 diff |
+| Rust lint | `cargo clippy --all-targets -- -D warnings` | ✅ 0 warning（含基线红的一处顺带修复，见 Z1.8 表末行） |
+| Rust 测试 | `cargo test` | ✅ lib 379（基线 312 + 新增 67，含后代 fork 过滤与 MCP 删除对称性两个加固用例）+ dao 4 + linker 7，全绿；既有断言零改动 |
+| Windows 交叉 | `cargo check --target x86_64-pc-windows-gnu` | ✅ Finished（本机工具链） |
+| 前端检查 | `pnpm check`（format:check + lint + check:i18n + build） | ✅ i18n 497 键对齐 |
+| 前端测试 | `pnpm test` | ✅ 46 文件 228 测试（基线 44 文件 224 测试 + 新增 2 文件 4 用例，既有测试文件零改动） |
+| 数据安全 | — | 本轮**新增**的 67 lib + 4 前端用例全部 tempdir fixture，零真实路径访问（Z4.2-9 附 grep 证据）；既有基线活机扫描测试 `test_get_all_sessions`（先于本轮存在、本文件历史内容保持原样不改）在 ZCode 运行时按产品路径**只读**打开真实 `~/.zcode` 并写 MAM 自身 `~/.mam/mam.db`——该 DB 写入为基线既有行为（六工具同机制），缓解手段（宿主门控 + `MAM_HOME` 重定向，已实测）见 Z4.2-9 |
+
+提交序列（整合分支按功能模块重组为语义化提交，实际序列以 git log 为准）：
+
+```
+feat(monitor): D5 后代活跃度仲裁共享核
+feat(zcode): 监控链路——宿主判定 / 双库发现 / 状态推导
+feat(zcode): 跳转与未读——工作区深链两级链
+feat(resources): MCP 段导航读写 + 声明式子树 + 在案债清理
+feat(ui): 前端注册面（徽标/图标/清单/mock/词条）
+docs(zcode): 实现说明与 GUI 验收清单
+```
+
+## Z1. 架构决策与理由
+
+### Z1.1 会话真相源 = 数据库，进程侧只回答「应用开没开」（任务事实 2）
+
+ZCode 进程数量与任务数无关（app-server 池化、子代理与主会话共享进程），任何
+「进程 ↔ 会话」绑定都不成立。因此：
+
+- `find_processes` 只做**宿主判定**：枚举进程表，exe basename 严格等于
+  `zcode`/`zcode.exe` 且命令行非「`--type=`（Electron 辅助）/ 含 `zcode.cjs`
+  （会话运行时）」→ 单个 App 形态 AgentProcess。macOS 上 `ZCode Helper` /
+  `zcode-cli` / `zcode-host-local-1` / `zcode-node-repl-mcp` basename 均不
+  严格等于 zcode，天然排除；Windows 全部可执行体同名 `ZCode.exe`，**命令行是
+  唯一判据**（主进程 = 裸命令行）。cmd 读不到（提权进程）按 exe 放行——漏判
+  宿主会清空全部卡片，代价高于误判（与 workbuddy sidecar 排除的防御方向一致）。
+- `find_sessions` 完全由数据库聚合（`get_zcode_sessions` → `build_sessions`），
+  卡片 pid/cpu 挂宿主进程。宿主是全部卡片的总开关与清理触发器：宿主不在场 →
+  活跃卡为空；未读池由既有 `dead_tools_from_pool` → `clear_tool` 管线清理
+  （host.rs 加了 zcode 分支，Windows 命令行门在 `tool_host_alive_in` 生效）。
+- Windows 关窗驻留托盘、进程仍活 → 宿主判定以进程存活为准，与窗口可见性解耦
+  （实测事实直接采信，无需特判）。
+
+### Z1.2 每会话一卡（D1）与 24h 窗口
+
+`session` 表 `task_type='interactive'` + `time_updated >= now-24h` +
+`time_updated` 倒序 LIMIT 100（有界防御）。过滤链：
+
+1. `task_type` 只收 interactive（subagent_child / selection_side_chat / fork 过滤）；
+2. `parent_id` 非空双保险过滤（私有格式升级可能改 task_type 取值，parent_id 语义更稳定）；
+3. 会话 id 严格校验 `sess_` + 8-4-4-4-12 hex UUID（复用 workbuddy 的
+   `is_strict_uuid_form`；子代理 id `sess_subagent_agent_<uuid>` 不满足该形态，
+   天然被拒）——不合规一律跳过该会话，不 panic、不影响其他会话/工具；
+4. tasks 索引 `archived`/`deleted` 真值过滤（INTEGER/TEXT/BOOL 多形态防御读取；
+   索引缺行视为未归档未删除——索引是加速源不是真相源）；
+5. 单行类型不符（time_updated 非整型等）→ 行级跳过。
+
+`unread_at`/`last_unread_at`（ZCode 侧栏自己的未读标记）不使用——与 MAM 未读池
+语义不同步（任务事实 1）。
+
+### Z1.3 状态推导：消息流尾部按 sequence 倒扫（任务事实 4 的翻译）
+
+复用共享判定核 `monitor::app_status`（D5 反向约束：ZCode 特有逻辑不进共享层，
+ZCode 只写一个「格式翻译适配器」`flatten_entries`/`part_entry_kind`）：
+
+| ZCode 形态 | AppEntryKind | 状态 |
+|---|---|---|
+| message role=user + semantics.kind=user_prompt（或 kind 缺失） | UserMessage | Thinking（用户刚发话） |
+| message role=user + kind=todo_reminder / timeline_event | **整条跳过** | —（记账消息，继续倒扫） |
+| part type=tool | ToolCall | Processing（调用已发出、结果未回） |
+| part type=step-start | TurnStart | Processing |
+| part type=step-finish + reason=tool-calls | ToolCall | Processing（本步以工具调用收尾、后续还有动作） |
+| part type=step-finish（无 reason） | TurnEnd | Idle（回合收尾） |
+| part type=text | AssistantMessage | Idle（助手正文收尾） |
+| part type=reasoning / timeline / file / compaction / 未知 | Other | —（跳过） |
+
+**懒落库处理**：回合收尾的 step-finish 在流关闭时才写入，时间戳不可靠、顺序可靠
+（永远排在所属消息尾部）——消息与 parts 一律按 `sequence` 列排序（列缺失降级
+`time_created`/`rowid`，两列皆无 → 该会话跳过），**绝不按时间戳**；测试
+锁定于两个**判别性 fixture**（自检轮强化，反例构造 + 变异证明）：
+① `lazy_step_finish_ordered_by_sequence_not_timestamp`——双消息 time_created 序
+与 sequence 序相反（懒补写的上一轮消息时间戳最新、用户续问消息 sequence 在最后），
+断言 Thinking；把实现临时改为「按 time_created 排序」后该用例实测 FAILED
+（`left: Idle, right: Thinking`），错误实现无法通过；
+② `parts_ordered_by_sequence_not_physical_row_order`——parts 物理行序（rowid）
+与 sequence 序相反插入，断言 Idle；把实现临时改为「按 rowid 排序」后实测 FAILED
+（`left: Processing, right: Idle`）。两处变异均已还原，还原后全绿。
+成批落库（响应完成时一次写入、思考中无中间写入）意味着尾部即最新已完成批次，
+倒扫第一条有语义条目定状态与既有工具口径一致。
+
+**停更与仲裁**：`session.time_updated`（活动期间实时刷新）为停更时钟，走共享层
+`overlay_stale_with_descendants`（见 Z1.4）。无语义条目兜底：time_updated 新鲜
+（<300s）→ Processing，停更 → Waiting（与 Codex/WorkBuddy 兜底同档）。
+
+**task_status 只作提示不作主源**（任务事实 3：仅 Windows 可靠，macOS 旧任务续跑
+不翻回 running）：只有 `error` 参与判定（→ Finished 转绿，双平台采信）；
+`running`/`completed` 一律不覆盖尾部推导（macOS 恒旧值也不出错），测试双向锁定
+（`stale_completed_hint_does_not_override_running_tail` /
+`running_hint_does_not_override_idle_tail`）。
+**error 同样不得压制其后的新活动**（自检轮修复）：macOS 上 error 是恒旧值，
+用户续聊后若仍强制 Finished 就把活的会话钉死成绿卡。规则：`tasks.updated_at`
+为 error 记录写入时刻，`session.time_updated`（实时刷新）严格越过它 = error
+之后又有新活动 → 提示已被取代，以尾部推导为准；相等/更早/字段缺失（无过时
+证据）→ error 照常生效（失败完成宁可提醒）。纯函数 `error_hint_superseded`
+锁定边界，fixture 测试 `error_hint_does_not_suppress_newer_activity`（error
+1 分钟前 + 用户刚续聊 → Thinking 非 Finished）锁定端到端。
+
+### Z1.4 D5 通用化：后代活跃度仲裁修在共享层
+
+共享核新增 `DescendantActivity { Active, Stale, Absent }` 与
+`overlay_stale_with_descendants(status, age, descendants)`：Processing 且停更
+≥300s 时，后代活跃 → 保持 Processing（主会话静默 = 健康等待子代理），后代停更/
+无后代 → Waiting（疑似卡住）。**既有工具零变化的证明**：`overlay_mtime_stale`
+改为委托 `Absent` 分支，回归测试 `absent_descendants_matches_legacy_overlay_exactly`
+对 6 状态 × 6 年龄边界逐点断言新旧函数输出一致（改前改后语义一致的测试证据）。
+ZCode 侧数据源：`session.parent_id` 分组聚合（COUNT + MAX(time_updated)），
+纯函数 `descendant_activity` 判定，四类情形（有后代活跃 / 后代也停更 / 无后代 /
+非运行态）各有用例。子代理会话自身不出卡（task_type + parent_id 双过滤），
+活跃子代理计数进 `active_subagent_count`（30s 活跃口径与 Claude 对齐）。
+后代聚合在 task_type 列存在时**仅统计 `subagent_child`**：fork 等显式他类的
+子会话可能带相同 parent_id 且持续写入，但不是子代理，不得豁免主会话的真卡死
+（`active_fork_child_does_not_exempt_real_stall` 锁定）；列缺失或行值 NULL/空串
+时不过滤（私有格式演进防御，宁可多豁免不可误报卡死）。
+
+### Z1.5 提醒与未读（D2）：复用 W4 管线 + P1-3 门通用化
+
+- 转绿（Idle/Finished，含 error→Finished）→ 既有 `sync_unread_sessions`
+  迁移触发插行，跨 MAM 重启保留（DB 持久）；已读信号三类不变（跳转成功且前台
+  验证通过 / 手动 X / 24h 过期）；宿主退出 → `dead_tools_from_pool` 清池 +
+  `filter_host_dead_cards` 清活跃卡（host.rs zcode 分支供判）。
+- ZCode 卡片是**数据驱动持久绿卡**（time_updated 24h 窗口内完成态持续出卡，
+  与 Codex rollout 聚合卡同族；区别于 WorkBuddy 进程驱动卡）——P1-3 的
+  「池行存在 ⇒ 在板呈未读态；已读/过期删行 ⇒ 剔除绿卡」门从 `matches!(Codex)`
+  特判泛化为 `green_card_is_data_driven`（Codex | ZCode），判定核心
+  `codex_green_card_should_drop` 与既有测试零改动，新增门测试锁定
+  WorkBuddy/CLI 工具不在门内（既有行为零变化）。
+- ZCode 无「心跳消失竞态」：会话行持久存在，完成转绿必然被轮询观测，无需
+  WorkBuddy 式补偿管线。
+
+### Z1.6 跳转：直接聚焦唯一窗口（深链已移出）
+
+初版曾接入工作区深链（`zcode://workspace/open?path=<URL编码路径>`，会话级深链
+不存在的前提下取工作区级精度上限）。**2026-09-09 Windows 实机验收推翻该设计，
+深链整体移出跳转链**，依据（ZCode 应用日志 36 条 `[deep-link]` 事件 + 会话库
++ 窗口枚举取证）：
+
+- **每次派发无条件弹信任确认**（"打开外部 ZCode 链接？…项目设置可能影响 agent
+  runtime"），当前前台已开着的工作区也不例外（13:12:07 两条「用户取消」日志），
+  `~/.zcode` 全量状态无信任白名单可配；
+- **落点语义 = 打开工作区 + 全新会话 composer**（路由后 `conversation store
+  connect generation:1`，十几次跳转零新会话行——非定位已有会话，用户须重新
+  起会话），跳转目标落空；
+- **每次派发拉起一个 ZCode.exe 转发进程**（日志 13:12–13:30 十余个新 pid 各打
+  一条「注册协议成功」后退出），跳转重且慢；
+- **窗口形态实机不符**：单窗口多标签（`windowId:1` 恒定），标题恒为 `"ZCode"`
+  不含工作区名——原「多窗口按工作区名消歧」命题不存在，聚焦唯一窗口零歧义。
+
+现行跳转链（无深链）：
+
+- Windows：`focus_session` → `resolve_and_focus` 的 **pid 单窗口路径**直接聚焦
+  （卡片携带宿主 pid，ZCode 宿主恰只有一个可见窗口 → 零消歧锁定）；失败落
+  `reactivate_tool_app`（谓词与 `TOOL_CLAIM_KEYWORDS` 均含 zcode，按标题
+  "ZCode" 认领唯一窗口）。ZCode 关闭 ⇒ 宿主不存活 ⇒ 无卡片 ⇒ 无跳转需求。
+- macOS：无深链路径，直接走 bundle 激活（`bundle_matches_agent` 含 zcode.app），
+  与其他 App 形态工具同口径。
+- 保留项：`open_url` 的 **ShellExecuteW 首选派发**（cmd `%` 展开破坏编码 URL 的
+  修复，对 WorkBuddy/Codex 深链同样成立）；`zcode_has_no_session_level_url`
+  回归锁改为「zcode 无任何深链」。随深链移除：`jump_url` / `workspace_url` /
+  `percent_encode` / `workspace_path_for_session` 及其测试。
+
+### Z1.7 资源管理（D3：Skill + MCP，插件不做）
+
+- **Skill（Plan A）**：`skill_dir_for_tool("zcode") = ~/.zcode/skills`（官方
+  文档声明的用户级目录；实测尚不存在，`enable_skill_for_tool` 既有
+  `create_dir_all` 首启建目录）。启用 = SSOT→Layer2→工具目录建链，禁用 = 删链，
+  SSOT 真身保留——linker 三层设施工具无关，零改动复用。不确定性与备选方案见 Z4.1。
+- **MCP**：`~/.zcode/cli/config.json`（与 plugins 等顶层键共存）仅 `mcp.servers`
+  子树读-改-写。实现为 trait 通用能力 `mcp_json_section() -> &[&str]`（默认
+  `["mcpServers"]`，ZCode 声明 `["mcp","servers"]`，OpenCode 显式声明 `["mcp"]`
+  与既有 jsonc 写入段同源）——**共享层无 ZCode 特判**。写入导航缺失层逐层补建、
+  中间层被非对象值占用 → 拒绝写入（不静默覆盖用户数据）；解析失败 → Err 且
+  不落盘；键序与未知键保留（serde_json preserve_order）；条目形态
+  `{"command","args","env"}` 与既有一致。`enable:false`（ZCode 自有停用标记，
+  无字段 = 启用）：SSOT 扫描不把停用条目计入该工具启用列，`read_mcp_servers`
+  原样透传条目（含 enable 字段）如实展示为停用；MAM 写入不携带 enable 字段
+  （= 启用），不破坏 ZCode 语义。删除路径与写入**对称**：段路径任一层被非对象
+  值占用 → 报错且不落盘（不静默吞损坏形态）；段或条目不存在 → 幂等成功且
+  **不重写文件**（避免无谓 pretty 化扰动用户主配置的键序与格式，
+  `remove_rejects_corrupt_section_and_skips_noop_rewrite` 锁定三种形态）。
+- 插件：marketplace 结构，范围外（`plugin_dirs`/`plugin_config_paths` 沿用默认空）。
+
+### Z1.8 已知债清理（随接入一并处理）
+
+| 债 | 位置 | 修法 |
+|---|---|---|
+| MCP 读取链路硬编码 claude/codex/opencode（openclaw/kimi/workbuddy 今天就落「未知工具」） | `commands/mcp.rs::read_mcp_servers` | 改走 `adapter_by_id` 注册表 + `mcp_json_section` 段导航（历史顶层键探测链保留为兜底） |
+| 资源导入溯源硬编码四工具（kimi/workbuddy 来源历史行回溯恒 None → 跳过补链） | `services/resource/mod.rs::detect_source_tool` | 改遍历 `TOOL_IDS` |
+| SSOT 扫描 / MCP 导入 / 预设冲突检查的段探测链不识别嵌套子树 | `commands/resource.rs`、`services/preset/mod.rs` | 同走 `mcp_json_section` 导航 |
+| 前端 `SUPPORTED_TOOLS` 缺 workbuddy（徽标遍历测试覆盖面缺口） | `src/config/constants.ts` | 补 workbuddy + zcode，与后端 TOOL_IDS 对齐 |
+| 浏览器 mock `detect_tools` 缺 workbuddy 行 | `src/tauri-mock.ts` | 补齐（+ zcode 行） |
+| `cargo clippy --all-targets` 基线红（windows-only 测试模块的 unused import，CI Linux / 本机 macOS 均触发） | `linker/detector.rs::alias_dir_tests` | import 随用例同门控 `#[cfg(windows)]`，断言零改动 |
+
+自查其余注册链路（前端 mock、测试遍历、i18n）：工具列正规来源是后端
+`list_enabled_tools` 下发（W5 已重构），资源双视图/设置页声音区/工具开关均无
+硬编码；i18n 无按工具名词条（显示名来自后端 label / agentBadge），无需新增键
+（check:i18n 497 键对齐通过）；`running_projects_from_processes`（Windows 面板
+反推）为 CLI 终端工具专用清单，WorkBuddy/ZCode（APP 形态、无终端窗口）本就不
+参与，维持现状（与 workbuddy 轮口径一致）。
+
+## Z2. 新旧行为对照
+
+| 面 | 改前 | 改后 | 零回归证据 |
+|---|---|---|---|
+| 停更降级（共享核） | `overlay_mtime_stale`：Processing+停更≥300s → Waiting | 委托 `overlay_stale_with_descendants(…, Absent)`，语义逐点相等 | `absent_descendants_matches_legacy_overlay_exactly`（6 状态 × 6 边界）+ 既有 4 个 overlay 测试断言零改动全绿 |
+| P1-3 绿卡门 | `matches!(s.agent_type, Codex)` 特判 | `green_card_is_data_driven(&AgentType)`（Codex|ZCode） | `data_driven_persistent_green_card_tools`（WorkBuddy/CLI 全不在门内）+ 既有 `codex_green_read_tests` 零改动 |
+| MCP JSON 写/删 | 硬编码顶层 `mcpServers` | 按 adapter 声明键路径导航（默认仍 `mcpServers`） | `default_section_roundtrip_matches_legacy_shape`（旧形态往返等价）+ kimi 轮 `mcp_write_and_remove_roundtrip` 同型测试全绿 |
+| MCP 读取命令 | 三工具硬编码，其余报「未知工具」 | 注册表分发（六→七工具全可达） | 既有测试零改动；新增 `zcode_adapter_declares_nested_section` + `read_mcp_servers_registry_tests`（2 个） |
+| 宿主判定 | workbuddy/codex 两分支 | + zcode 分支（exe 严格名 + Windows 命令行门） | 既有 host 测试零改动 + 新增 7 个 zcode 宿主判定用例（host.rs 4 个 + zcode_parser 3 个） |
+| 深链 | session_url 两工具 + UUID 门 | zcode 不接入（初版工作区深链 2026-09-09 实机验收后移除，见 Z1.6；ShellExecuteW 首选派发保留） | `zcode_has_no_session_level_url` + 既有 P1-1 注入测试零改动 |
+| 前端 | 六工具 | 七工具（badge/icon/types/mock） | 既有 224 测试零改动全绿（既有测试文件零 diff，zcode 用例独立新文件 tests/toolIconZcode.test.tsx + tests/agentBadgeZcode.test.tsx） |
+
+## Z3. 测试证据对照表（行为 → 用例 → 结果）
+
+运行命令与结果（本机 macOS，2026-09-08）：
+
+```
+$ cd src-tauri && cargo test --lib
+test result: ok. 377 passed; 0 failed; 0 ignored
+$ cargo test            # 集成：dao 4 + linker 7 全绿
+$ cargo clippy -- -D warnings                 # 0 warning
+$ cargo clippy --all-targets -- -D warnings   # 0 warning（基线红一处已修，见 Z1.8）
+$ cargo fmt --check                           # 0 diff
+$ cargo check --target x86_64-pc-windows-gnu  # Finished
+$ pnpm check                                  # format+lint+i18n(497 键)+build ✅
+$ pnpm test                                   # 46 files, 228 tests ✅
+```
+
+| 行为（任务目标） | 用例（模块::名） | 结果 |
+|---|---|---|
+| 每会话一卡（不按项目压缩） | zcode_parser::one_card_per_session | ✅ |
+| 24h 窗口外不出卡 | zcode_parser::outside_24h_window_no_card | ✅ |
+| archived/deleted 不出卡（索引缺行不影响） | zcode_parser::archived_or_deleted_tasks_no_card | ✅ |
+| fork/selection_side_chat/subagent_child 过滤 | zcode_parser::only_interactive_sessions_become_cards | ✅ |
+| parent_id 双保险过滤 | zcode_parser::subagent_row_with_parent_id_is_filtered_even_if_type_mutated | ✅ |
+| 会话 id 不合规跳过、字段缺失/类型不符行级跳过、不 panic 不影响他卡 | zcode_parser::session_id_validation / malformed_session_id_skipped_without_affecting_others | ✅ |
+| 库缺失整体降级为空 | zcode_parser::missing_databases_degrade_to_empty | ✅ |
+| 用户刚发话 → Thinking | zcode_parser::user_just_sent_message_is_thinking | ✅ |
+| 助手正文收尾 → Idle | zcode_parser::assistant_text_tail_is_idle | ✅ |
+| 工具调用挂起 → Processing | zcode_parser::pending_tool_call_tail_is_processing | ✅ |
+| step-finish(reason=tool-calls) → Processing | zcode_parser::step_finish_with_tool_calls_reason_is_processing | ✅ |
+| 记账消息（todo_reminder/timeline_event）跳过继续倒扫 | zcode_parser::bookkeeping_messages_are_skipped_and_scan_continues | ✅ |
+| 懒落库：时间戳序与 sequence 序相反（按 sequence 倒扫，变异证明见 Z1.3） | zcode_parser::lazy_step_finish_ordered_by_sequence_not_timestamp | ✅ |
+| 成批落库：parts 物理行序与 sequence 序相反（按 sequence 排序，变异证明见 Z1.3） | zcode_parser::parts_ordered_by_sequence_not_physical_row_order | ✅ |
+| 子代理长任务全程运行中（主静默 17min + 子活跃） | zcode_parser::subagent_long_task_keeps_main_processing | ✅ |
+| 停更 + 后代也停更 → 疑似卡住 | zcode_parser::stale_with_stale_descendants_is_suspected_stuck | ✅ |
+| 停更 + 无后代 → 疑似卡住 | zcode_parser::stale_without_descendants_is_suspected_stuck | ✅ |
+| 非运行态不受停更/后代影响 | zcode_parser::non_running_tail_ignores_descendant_and_staleness | ✅ |
+| 仲裁四类纯判定（含时钟回拨防御） | zcode_parser::descendant_activity_pure_judgment | ✅ |
+| task_status=error 按完成转绿 | zcode_parser::task_status_error_turns_green_as_finished | ✅ |
+| error 之后用户续聊：提示不得压制尾部推导（macOS 恒旧值） | zcode_parser::error_hint_does_not_suppress_newer_activity / error_hint_superseded_pure_judgment | ✅ |
+| task_status 恒旧值不出错（completed/running 不覆盖尾部） | zcode_parser::stale_completed_hint_does_not_override_running_tail / running_hint_does_not_override_idle_tail | ✅ |
+| 标题降级链（索引→会话→首条用户消息 60 截断） | zcode_parser::title_degradation_chain | ✅ |
+| 卡片字段口径对齐（项目名/路径/摘要/角色/RFC3339/pid 挂宿主/unread 由池管线标） | zcode_parser::card_fields_align_with_other_tools / long_last_message_is_truncated | ✅ |
+| Windows 反斜杠 + 大写盘符路径行 | zcode_parser::windows_backslash_uppercase_drive_paths | ✅ |
+| 宿主判定（macOS 主进程/非宿主枚举、Windows 命令行门、提权 cmd 缺失防御） | zcode_parser::exe_basename_matching / windows_cmdline_host_gate / host_process_combination + host::zcode_*（4 个） | ✅ |
+| D5 空后代语义 = 现状（逐边界） | app_status::absent_descendants_matches_legacy_overlay_exactly | ✅ |
+| D5 后代活跃保持运行中 / 后代停更降级 / 非运行态透传 / 阈值内透传 | app_status::active_descendants_keep_processing_when_stale / stale_descendants_downgrade_to_waiting / non_processing_statuses_ignore_descendants / fresh_processing_ignores_descendants | ✅ |
+| ~~深链携带项目原生路径（Windows 整段编码）~~ | 随深链移除（2026-09-09 实机验收，见 Z1.6） | 🗑 |
+| ~~深链输出无 cmd 元字符（注入面闭合）~~ | 随深链移除（ShellExecuteW 首选派发保留，惠及 WorkBuddy/Codex） | 🗑 |
+| zcode 无任何深链（路由不存在的不构造） | deep_link::zcode_has_no_session_level_url | ✅ |
+| 跳转 = 聚焦唯一窗口（深链移出后 pid 单窗口路径 + reactivate 兜底） | deep_link::zcode_has_no_session_level_url + 既有 P1-2/P2-1/P2-2 链路测试零改动；原生路径随会话行携带：zcode_parser::windows_backslash_uppercase_drive_paths | ✅ |
+| 前台验证通过才标已读（Windows） | 既有 verify_foreground_tool 状态机测试零改动（zcode 走同一链路，白名单加行） | ✅ |
+| 已读只消该会话卡、同项目其他未读保留 | 既有 unread DAO delete_single_and_clear_tool + adapter 层 unread_card_tests 零改动（工具无关管线） | ✅ |
+| 绿卡在板呈未读态 + 已读剔除（Codex 同款、WorkBuddy 不受影响） | adapter::green_card_gate_tests::data_driven_persistent_green_card_tools / zcode_tool_id_serde_roundtrip + 既有 codex_green_read_tests 零改动 | ✅ |
+| macOS bundle 兜底匹配 zcode.app | app_activation::bundle_matches_agent_zcode_rules（独立新用例，既有 bundle_matches_agent_rules 零改动） | ✅ |
+| skill 目录 = 官方声明 ~/.zcode/skills（Plan A） | adapter::skill_dir_tests::zcode_skill_dir_uses_official_user_level_directory | ✅ |
+| skill 启用=建链 / 禁用=删链 / SSOT 保留 | 既有 linker_test + tool_settings restore 矩阵零改动（linker 工具无关，zcode 经注册表自动纳入） | ✅ |
+| MCP 读-改-写只动 mcp.servers 子树、未知键与原键序保留 | mcp::json_section_tests::write_into_nested_section_preserves_unknown_keys_and_order | ✅ |
+| 缺失层补建 | mcp::write_creates_missing_intermediate_layers | ✅ |
+| 解析失败只报错不落盘 | mcp::parse_failure_errors_without_touching_file | ✅ |
+| 中间层被非对象占用拒绝写入 | mcp::non_object_intermediate_layer_is_rejected | ✅ |
+| 删除只删目标条目 | mcp::remove_only_target_entry | ✅ |
+| 默认段（既有 Json 工具）新旧等价 | mcp::default_section_roundtrip_matches_legacy_shape | ✅ |
+| zcode adapter 段声明/格式/路径 | mcp::zcode_adapter_declares_nested_section | ✅ |
+| enable:false 如实展示为停用（仅布尔 false 算停用，类型漂移防御） | mcp::entry_disabled_tests::enable_flag_recognized_defensively（扫描侧消费该纯函数；read 原样透传由 GUI 验收项 8 覆盖） | ✅ |
+| MCP 读取链路注册表分发（债修复：三工具硬编码 → 七工具可达） | commands::mcp::read_mcp_servers_registry_tests（2 用例，零文件系统访问） | ✅ |
+| 资源导入溯源遍历 TOOL_IDS（债修复：kimi/workbuddy/zcode 不再回溯恒 None） | services::resource::detect_source_tool_tests::registry_covers_late_registered_tools | ✅ |
+| 前端图标不回退 Claude | tests/toolIconZcode.test.tsx::"ToolIcon zcode"（2 用例，独立新文件） | ✅ |
+| 前端徽标显示名/配色/图标渲染（显式断言） | tests/agentBadgeZcode.test.tsx::"agentBadge zcode"（2 用例，独立新文件） | ✅ |
+| 前端徽标七工具遍历 | tests/agentBadge.test.tsx（SUPPORTED_TOOLS 补齐后遍历含 workbuddy+zcode，既有断言零改动） | ✅ |
+
+既有测试零改动核对（自检轮规范化后口径）：
+- **专属测试文件**：`git diff a77bb21..HEAD -- tests/ src-tauri/tests/` 中
+  `src-tauri/tests/`（dao_test/linker_test/support）零 diff；`tests/` 下既有
+  文件全部零 diff（自检轮把 zcode 图标用例从 tests/toolIcon.test.tsx 迁出为
+  独立新文件 tests/toolIconZcode.test.tsx + tests/agentBadgeZcode.test.tsx），唯一变化是**新增文件**。
+- **源码内联测试模块**：app_status 原有 12 例、host 原有 8 例、deep_link 原有
+  P1-1/P1-2 例、adapter unread/sort/dedup 系列、app_activation 原有 6 例、
+  commands/session 原有例、win32 原有例、resource/preset/linker 原有例——
+  全部断言逐字节未动，本轮改动仅为**新增测试函数/新增测试模块**（自检轮把
+  曾追加进既有函数 bundle_matches_agent_rules 的 zcode 断言迁出为独立新函数
+  bundle_matches_agent_zcode_rules）。
+- 唯一既有测试模块的非断言改动：`linker/detector.rs::alias_dir_tests` 的
+  `use super::*;` 加 `#[cfg(windows)]` 门控（该模块两个用例本就全部
+  `#[cfg(windows)]`）。佐证：基线文件在同机 `cargo clippy --all-targets
+  -- -D warnings` 实测报 `error: unused import: super::* -->
+  src/linker/detector.rs:732:9`（非 Windows 平台基线即红），修复后 0 warning。
+- `tests/agentBadge.test.tsx` 的遍历断言因 SUPPORTED_TOOLS 补齐而覆盖面扩大
+  （断言文本未动，文件零 diff）。
+
+## Z4. 已知限制与开放问题
+
+### Z4.1 `~/.zcode/skills/` 是否被 ZCode 真实读取未经实测（任务目标 7）
+
+- **采用 Plan A**：按官方文档声明的用户级目录实现（skill_dirs =
+  `~/.zcode/skills`，首启建目录）。理由：唯一有文档依据的每工具独立目录；
+  MAM 的启用/禁用/还原语义（Layer2 建链删链）在该目录下完整成立。
+- **不确定性**：双平台实测该目录尚不存在（首装时创建），ZCode 是否真实读取
+  未经确认；本轮按任务约束**未在本机在线实测**。
+- **备选方案（不采用）及其处理思路**：跨工具共享目录 `~/.agents/skills/` 已
+  实测确认 ZCode 会读取，但该目录 Codex 等工具同读——在其中做「ZCode 专属
+  启用/禁用」会同时开关其他工具，与 MAM「每工具独立激活」模型直接冲突（禁用
+  ZCode 的链接会断掉 Codex 的技能）。若后续实测证伪 Plan A（ZCode 不读
+  `~/.zcode/skills`），处理思路：① 首选向 ZCode 官方确认配置项（是否存在
+  skill 目录设置或 env 重定向）；② 若只能走共享目录，则把 ZCode 的 skill
+  语义降级为「只读展示 + 文档提示」（不做建链删链，避免跨工具副作用），并在
+  工具管理页对 ZCode 的 skill 开关给出明确 tooltip；③ 不引入
+  「共享目录 + 工具专属子目录」 hack（无文档依据，猜测形态易被升级打破）。
+- 若 Plan A 被证伪，监控/跳转/未读/MCP 链路不受影响（互不依赖）。
+
+### Z4.2 其他限制
+
+1. **macOS 深链不标已读**（P1-2 既有口径）：macOS 无前台验证设施，
+   `open` 退出码 0 不能证实路由成功——zcode 工作区深链成功也不回标已读，
+   bundle/枚举兜底激活照旧标已读。与 Codex/WorkBuddy 行为完全一致（D2 口径）。
+2. **跳转精度上限 = 项目工作区**：会话级深链不存在（实测枚举），点击卡片
+   只能把 ZCode 切到目标项目工作区，不能定位到具体会话。
+3. **message/part 表排序列假设**：按 `sequence` 排序，列缺失降级
+   `time_created`/`rowid`；若升级后两者皆无且 rowid 与流顺序脱钩，尾部推导
+   精度下降（防御方向：该会话按无语义条目兜底，不出错卡）。
+4. **task_status 仅 error 参与判定**：Windows 上 running/completed 本可加速，
+   但为保证 macOS（恒旧值）双平台同一套语义，一律以尾部推导为主源——加速
+   收益（至多一轮轮询间隔）不值得平台分叉。
+5. **ZCode 侧栏未读标记不使用**：`unread_at`/`last_unread_at` 与 MAM 未读池
+   语义不同步（用户在 ZCode 内查看不清 MAM 卡，反之亦然）——任务事实直接采信。
+6. **子代理仲裁窗口 = 300s**：后代 `time_updated` 距 now <300s 记活跃。子代理
+   单次模型请求实测最长 204s、无超 300s 样本，窗口覆盖；若 ZCode 未来出现
+   超长单请求，会短暂误判疑似卡住（下轮自愈）。
+7. **进程池化下 cpu_usage 语义弱化**：卡片 CPU 挂宿主进程（全部会话共享），
+   仅作展示，不参与状态判定（与 Codex APP 聚合卡口径一致）。
+8. **歧义假设记录**（禁止等待人工指导，自行合理假设）：① message.data 的
+   `semantics.kind` 缺失时按真实用户消息处理（已知记账 kind 已
+   显式排除，未知 kind 保守按用户消息 → Thinking，宁黄勿绿）；② tasks 索引
+   缺行视为未归档未删除（索引是加速源）；③ part 的 text 字段仅 type=text 消费
+   （reasoning 的 text 不作摘要，与「思考过程不入摘要」的既有口径一致）。
+9. **测试期数据安全边界（如实披露）**：本轮新增的全部测试仅用 tempdir fixture
+   （zcode_parser 测试经 `ZcodeRoots` 注入、MCP 测试经 tempdir 路径、
+   skill_dir/detect_source_tool 测试为纯路径字符串比较，零文件系统访问）。
+   唯一的真实目录触达来自**既有基线活机扫描测试** `adapter::tests::
+   test_get_all_sessions`（Kimi 轮起的仓库惯例，本文件历史内容保持原样不改）：
+   它执行产品路径 `get_all_sessions()`，当本机 ZCode 主进程在跑时，
+   zcode adapter 会以 `SQLITE_OPEN_READ_ONLY` 打开真实 `~/.zcode` 两库（与
+   出货应用每轮轮询完全相同的行为，绝不写入），并把状态缓存/未读池写入 MAM
+   自身 `~/.mam/mam.db`（该 DB 写入是基线对全部工具一致的既有行为，非本轮
+   引入）。两项已实测的缓解：① **宿主门控**——ZCode 未运行时 `get_zcode_sessions`
+   在打开任何数据库之前即返回空（关闭 ZCode 后跑 `cargo test` 则零 `~/.zcode`
+   触达）；② **MAM_HOME 重定向**——debug 构建尊重 `MAM_HOME`
+   （connection.rs::app_data_home），`MAM_HOME=$(mktemp -d) cargo test` 可使
+   `~/.mam` 零写入（本轮取证已按此口径执行）。全量跑测试建议采用
+   `MAM_HOME=$(mktemp -d) cargo test` 或关闭 ZCode 后运行。
+
+## Z5. GUI 手动验收清单（macOS 为主，Windows 项单列）
+
+前置：`pnpm tauri:dev` 启动 MAM；本机安装 ZCode 且有历史任务（日常使用环境）。
+**注意：验收会读取真实 `~/.zcode/`（只读）与写入 `~/.mam/`（MAM 自身数据目录，
+产品行为）——与开发/测试阶段的「严禁读写」约束不同，属正常运行时语义。**
+
+1. **工具管理**：设置 → 工具管理出现 ZCode 行（蓝紫渐变 Z 图标 + 「已安装」
+   badge，`~/.zcode` 有原生内容即判定）；开关切换 → 保存 → 确认弹窗 →
+   取消勾选后看板/资源页彻底隐藏 ZCode，重新勾选恢复。
+2. **会话出卡**：ZCode 开着且有 24h 内活动任务 → 首页每会话一张卡（标题 =
+   ZCode 侧栏同款任务标题；项目名 = 工作区目录名；徽标 ZCode）。归档/删除的
+   任务不出卡；超过 24h 无活动的任务不出卡。
+3. **状态灯**：在 ZCode 里发一条消息 → MAM 卡变黄（Thinking）；agent 调工具
+   期间保持黄（Processing）；回复正文完成 → 转绿（Idle）并弹完成提醒（浮窗/
+   系统通知/声音/桌宠气泡按既有通知面策略）。
+4. **子代理仲裁**：触发一个长时子代理任务（如「用子代理分析整个仓库」）→
+   主会话卡全程保持黄（运行中），即使超过 5 分钟主会话零写入；ZCode 内子代理
+   结束、主会话正文收尾 → 转绿。
+5. **疑似卡住**：任务运行中强杀 ZCode 的网络（或构造停更）→ 停更超 5 分钟且
+   无活跃子代理 → 卡变红（Waiting）。（可选，构造成本高可跳过）
+6. **error 转绿**：构造一个失败任务（如无效 API key 触发 error）→ ZCode 侧栏
+   显示失败后，MAM 卡转绿（Finished）进未读池并弹提醒。
+7. **跳转与已读**：点击绿色未读卡 → ZCode 被激活且**同一主窗口内切换到该项目
+   工作区**（不新开窗口、其他后台任务不受影响）。已读口径按平台区分（与
+   WorkBuddy/Codex 一致的 P1-2 分层防御）：**Windows** 深链派发后前台验证通过
+   即标已读（仅该会话，同项目其他未读卡保留）；**macOS** 无前台验证设施，
+   深链成功也不自动标已读——通过手动点卡上 X 关闭或等 24h 过期消除，兜底
+   激活路径同理（见 Z4.2.1）。
+8. **MCP 面板**：资源页 → MCP → 对 ZCode 启用一个服务器 →
+   `~/.zcode/cli/config.json` 的 `mcp.servers.<name>` 出现
+   `{command,args,env}`，文件其他键（plugins 等）与原键序不变；禁用 → 该条目
+   移除、其余不动。手动在某条目加 `"enable": false` → 重新扫描后该服务器在
+   ZCode 列不显示为启用（如实展示为停用）。把 config.json 改成非法 JSON →
+   MCP 写入报错且文件原样保留（不被写坏）。
+9. **Skill 分发**：资源页 → Skill → 对 ZCode 启用 → `~/.zcode/skills/<name>`
+   出现符号链接（指向 `~/.mam/active/zcode/<name>`），SSOT 真身保留；禁用 →
+   链接删除、SSOT 仍在。（ZCode 是否真实加载该目录见 Z4.1 开放问题）
+10. **宿主清理**：MAM 运行中完全退出 ZCode（Cmd+Q）→ 下一轮扫描（≤30s）
+    ZCode 全部卡片（含未读）消失；重开 ZCode → 24h 内会话卡恢复。
+11. **跨重启保留**：ZCode 开着、MAM 有绿色未读卡 → 重启 MAM → 未读卡仍在
+    （宿主存活前提）；若重启前 ZCode 已关 → 重启后残留未读卡被清。
+12. **Windows 专项**（Windows 实机）：① 任务栏关窗驻留托盘 → 卡片照常（宿主
+    以进程存活判定）；② 点击卡片 → `zcode://workspace/open?path=E%3A%5C…`
+    深链派发 + 前台验证通过 → 切到对应工作区且标已读；scheme 未注册的机器 →
+    自动落 ZCode.exe 窗口聚焦兜底；③ 深链路径为反斜杠 + 大写盘符整段编码
+    （日志可见 URL 形态）；④ Electron 辅助进程/会话运行时不被误判宿主
+    （强杀主进程后卡片清理，即便辅助进程残存）。

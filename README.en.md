@@ -4,7 +4,7 @@
 
 **Unified Management Platform for Multi-Agent Programming Tools**
 
-A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy sessions
+A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode sessions
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,7 +28,7 @@ Real-time traffic-light status board for all active AI coding tool sessions.
 | 🟡 Yellow | Processing / Thinking |
 | 🟢 Green | Idle / Finished |
 
-- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, **Kimi Code**, and **WorkBuddy** sessions
+- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, **Kimi Code**, **WorkBuddy**, and **ZCode** sessions
 - Distinguishes CLI vs. desktop APP form: APP sessions support session-level deep-link jumps (`workbuddy://chat/<id>`, `codex://threads/<id>`, with APP-foreground fallback) and persistent unread cards (kept across restarts, cleared when the host exits)
 - Shows project name, git branch, last message preview, CPU usage, runtime
 - Sorts by priority: waiting → running → idle
@@ -72,14 +72,14 @@ Click a session card to instantly focus the corresponding terminal tab:
 | tmux | ✅ pane selection + terminal focus |
 | Wayland | ❌ Graceful fallback message |
 
-Desktop APP tools (Codex APP, WorkBuddy) support session-level deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>`. The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read.
+Desktop APP tools (Codex APP, WorkBuddy, ZCode) support deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>` (session-level), and `zcode://workspace/open?path=<URL-encoded native project path>` (workspace-level — ZCode has no session-level deep link, so the jump precision ceiling is the project workspace). The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read.
 
 ### Extension Resource Management
 
 Unified repository for Skills, MCP servers, and Plugins across tools:
 
 - **Skills**: Symlink (Unix) / Junction (Windows) mapping to each tool's skill directory
-- **MCP Servers**: Auto-format conversion — JSON (Claude / Kimi) / TOML (Codex) / JSONC (OpenCode)
+- **MCP Servers**: Auto-format conversion — JSON (Claude / Kimi / WorkBuddy) / TOML (Codex) / JSONC (OpenCode) / nested JSON subtree (ZCode: `mcp.servers`; read-modify-write touches only that subtree, preserving unknown keys and original key order)
 - **Plugins**: File/config hybrid management
 - Auto-import existing skills on first launch (from `~/.claude/skills/`, `~/.agents/skills/`, `~/.config/opencode/skills/`)
 - Rescan button for discovering newly installed skills
@@ -133,6 +133,8 @@ src-tauri/src/
 │   ├── opencode.rs    #   OpenCode (SQLite)
 │   ├── openclaw.rs    #   OpenClaw (state.json)
 │   ├── kimi.rs        #   Kimi Code (session_index + wire.jsonl)
+│   ├── workbuddy.rs   #   WorkBuddy (heartbeat-driven + JSONL)
+│   ├── zcode.rs       #   ZCode (host detection + SQLite session aggregation)
 │   └── mod.rs         #   AgentAdapter trait + tool registry + session discovery scheduler
 ├── monitor/
 │   ├── process.rs     #   Process discovery (sysinfo scan)
@@ -141,6 +143,8 @@ src-tauri/src/
 │   ├── opencode_parser.rs # OpenCode SQLite parser
 │   ├── openclaw_parser.rs # OpenClaw state.json parser
 │   ├── kimi_parser.rs     # Kimi Code parser (session_index + wire.jsonl)
+│   ├── workbuddy_parser.rs # WorkBuddy parser (heartbeat + JSONL tail)
+│   ├── zcode_parser.rs    # ZCode parser (tasks-index + session/message/part dual SQLite)
 │   ├── jsonl.rs       #   Shared JSONL reading (tail read, file enumeration)
 │   ├── cwd.rs         #   cwd normalization (process ↔ session matching)
 │   ├── git.rs         #   GitHub URL lookup (in-process cache)
@@ -252,6 +256,7 @@ The app stores its data in `~/.mam/`:
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌ (status parsed from wire) |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌ (status derived from heartbeat + JSONL) |
+| ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON (nested `mcp.servers` subtree) | ❌ (status derived from SQLite message-stream tail) |
 
 ---
 
@@ -267,6 +272,7 @@ The app stores its data in `~/.mam/`:
 - [x] OpenClaw support (4th tool)
 - [x] Kimi Code support (5th tool: session monitoring + MCP management + `KIMI_CODE_HOME` data directory redirection)
 - [x] WorkBuddy support (6th tool: heartbeat-driven monitoring + deep-link jumps + resource management)
+- [x] ZCode support (7th tool: SQLite session-aggregate monitoring + subagent-activity arbitration + workspace deep-link jumps + skill/MCP resource management)
 - [x] Foxbell desktop pet (status cards + voice alerts + drag physics)
 - [x] External pets (local/Petdex import + manage panel hot swap + capability gating)
 - [x] Tool toggle management (batch save + restore/rebuild + full hiding)
