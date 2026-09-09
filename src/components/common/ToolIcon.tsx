@@ -162,6 +162,38 @@ function WorkBuddyIcon({ size }: { size: number }) {
   );
 }
 
+// ZCode — 官方图标几何重绘（P2-10 同款模式）：智谱品牌蓝紫渐变圆角方块 + 白色
+// 字母 Z 折线（ZCode 桌面 APP 图标为蓝紫底 "Z" 字标，本机无 icns 取样条件，
+// 按品牌色 #3B5BFD→#8A4FF5 重绘；配色与 kimi 天蓝/codex 紫均拉开色相距离）
+function ZCodeIcon({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <linearGradient id="zc-g" x1="3" y1="2" x2="17" y2="18" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#3B5BFD" />
+          <stop offset="1" stopColor="#8A4FF5" />
+        </linearGradient>
+      </defs>
+      {/* 圆角方块底 */}
+      <rect width="20" height="20" rx="5" fill="url(#zc-g)" />
+      {/* 字母 Z 折线（横-斜-横一笔成型） */}
+      <path
+        d="M5.5 5.5h9L6.5 14.5h9"
+        stroke="white"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 const TOOL_SVGS: Record<string, React.FC<{ size: number }>> = {
   claude: ClaudeIcon,
   codex: CodexIcon,
@@ -169,4 +201,5 @@ const TOOL_SVGS: Record<string, React.FC<{ size: number }>> = {
   openclaw: OpenClawIcon,
   kimi: KimiIcon,
   workbuddy: WorkBuddyIcon,
+  zcode: ZCodeIcon,
 };
