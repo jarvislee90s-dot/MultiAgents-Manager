@@ -793,8 +793,11 @@ mod host_liveness_filter_tests {
 pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     match tool_id {
         "claude" => Some(home_dir.join(".claude").join("skills")),
-        // Codex CLI 实际读取 ~/.agents/skills（项目约定 + 当前会话技能来源）
-        "codex" => Some(home_dir.join(".agents").join("skills")),
+        // Codex CLI 有双路径：官方用户级 ~/.agents/skills（Agent Skills 开放标准，
+        // 跨工具共享）+ 私有 ~/.codex/skills（spec F1/F2）。MAM 选私有路径作为激活
+        // 目标，使 codex 的启停不影响共享目录的其他消费者（与 zcode「双读目录不作
+        // 为激活目标」决策同源对齐，spec 2026-09-09 §4.1）
+        "codex" => Some(home_dir.join(".codex").join("skills")),
         "opencode" => Some(home_dir.join(".config").join("opencode").join("skills")),
         "openclaw" => Some(home_dir.join(".openclaw").join("skills")),
         // Kimi Code 读取 $KIMI_CODE_HOME/skills（默认 <home_dir>/.kimi-code/skills），
@@ -822,7 +825,7 @@ mod skill_dir_tests {
     fn codex_skill_dir_uses_real_cli_directory() {
         let dir = skill_dir_for_tool("codex", std::path::Path::new("/home/test"))
             .expect("codex skill dir must be registered");
-        assert_eq!(dir, std::path::Path::new("/home/test/.agents/skills"));
+        assert_eq!(dir, std::path::Path::new("/home/test/.codex/skills"));
     }
 
     #[test]

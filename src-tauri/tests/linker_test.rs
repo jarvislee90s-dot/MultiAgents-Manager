@@ -85,12 +85,17 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
     multi_agents_manager_lib::services::enable_skill_for_tool("demo-skill-codex-link", "codex")
         .unwrap();
 
+    // codex 注册表已切至私有目录（spec 2026-09-09 §4.1）：harness 链接落在
+    // ~/.codex/skills；共享目录 ~/.agents/skills 中的手装源保持真实目录原样
+    //（MAM 不再写 .agents），仅作为只读导入源
     let harness_link = home
-        .join(".agents")
+        .join(".codex")
         .join("skills")
         .join("demo-skill-codex-link");
     assert!(harness_link.is_symlink());
     assert!(harness_link.exists());
+    assert!(source.is_dir());
+    assert!(!source.is_symlink());
     assert!(home
         .join(".mam")
         .join("active")
