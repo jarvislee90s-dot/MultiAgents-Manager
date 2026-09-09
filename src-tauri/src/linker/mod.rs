@@ -270,6 +270,242 @@ pub fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 链接 target 归一化（「单跳字面 target」语义，不触盘、不解析任何 symlink）：
+/// 1) Windows `\\?\` / `\\?\UNC\` verbatim 前缀剥离（UNC 还原为 `\\server\share`）；
+/// 2) 相对 target 按链接所在目录绝对化；
+/// 3) 词法消解 `.` / `..`（越出根的 `..` 就地忽略）。
+///
+/// 供需要「字面 target 相等/前缀比较」的两处共用：§4.4 直链守卫（commands/manifest）
+/// 与 §4.3 遗留链接谓词（services/resource/migration）——两侧必须同规则归一化。
+/// 刻意不用 canonicalize：canonicalize 会沿链接链穿透解析到最终真实路径（破坏
+/// 单跳语义），且断链 target 无法 canonicalize。
+pub fn normalize_link_target(target: &Path, link_parent: &Path) -> PathBuf {
+    let s = target.to_string_lossy();
+    // was_extended：剥离过 `\\?\` 前缀的路径必为 Windows 绝对路径（扩展长度路径恒为
+    // 绝对）——绝对性判定不能依赖 Path::is_absolute()，它在 Unix 上只认 `/` 开头，
+    // 会把 `C:\...` 误判为相对
+    let (stripped, was_extended) = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        (format!(r"\\{}", rest), true)
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        (rest.to_string(), true)
+    } else {
+        (s.to_string(), false)
+    };
+    let joined = {
+        let p = PathBuf::from(stripped);
+        if was_extended || p.is_absolute() {
+            p
+        } else {
+            link_parent.join(p)
+        }
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
+}
+
+/// 递归比较两个目录内容是否一致（条目名集合 + 文件字节）。
+/// 用于「工具侧真目录是否为 SSOT 的未修改副本」判定：一致才允许替换为链接，
+/// 不一致（用户就地修改/手装异内容）必须拒绝，防止静默覆盖用户数据（review I-1）。
+/// 任一侧读失败按不一致处理（保守拒绝）。
+pub fn dir_contents_equal(a: &Path, b: &Path) -> bool {
+    let entries_of = |dir: &Path| -> Option<Vec<std::ffi::OsString>> {
+        let mut names: Vec<std::ffi::OsString> = fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        names.sort();
+        Some(names)
+    };
+    let Some(a_names) = entries_of(a) else {
+        return false;
+    };
+    let Some(b_names) = entries_of(b) else {
+        return false;
+    };
+    if a_names != b_names {
+        return false;
+    }
+    for name in a_names {
+        let (pa, pb) = (a.join(&name), b.join(&name));
+        // review N-3：以 symlink_metadata 判「本体类型」，链接不跟随——链接对链接比
+        // 字面 target、链接对非链接直接判不一致。跟随式 is_dir() 递归会被链接环
+        // （sub → .）无界递归打爆栈（与 scan_skills_recursive 的防环模式对齐）
+        let (Ok(ma), Ok(mb)) = (fs::symlink_metadata(&pa), fs::symlink_metadata(&pb)) else {
+            // 读失败（权限/竞态删除）→ 保守按不一致
+            return false;
+        };
+        let (a_link, b_link) = (ma.is_symlink(), mb.is_symlink());
+        if a_link || b_link {
+            // 链接对链接：比单跳字面 target 的原始形式（逐字节，保守语义——
+            // 平行树内同写法的相对链接判等，写法不同即判不一致，宁可拒绝不误放行）
+            if !(a_link && b_link) {
+                return false;
+            }
+            let (Ok(ta), Ok(tb)) = (fs::read_link(&pa), fs::read_link(&pb)) else {
+                return false;
+            };
+            if ta != tb {
+                return false;
+            }
+            continue;
+        }
+        match (ma.is_dir(), mb.is_dir()) {
+            (true, true) => {
+                if !dir_contents_equal(&pa, &pb) {
+                    return false;
+                }
+            }
+            // 目录 vs 文件 → 不一致
+            (true, false) | (false, true) => return false,
+            (false, false) => match (fs::read(&pa), fs::read(&pb)) {
+                (Ok(ca), Ok(cb)) => {
+                    if ca != cb {
+                        return false;
+                    }
+                }
+                _ => return false,
+            },
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod normalize_link_target_tests {
+    use super::*;
+
+    /// Windows `\\?\` / `\\?\UNC\` 前缀剥离（字符串级逻辑，双平台可测）
+    #[test]
+    fn strips_windows_verbatim_prefixes() {
+        let parent = Path::new("/home/u/.agents/skills");
+        assert_eq!(
+            normalize_link_target(Path::new(r"\\?\C:\Users\u\.mam\active\codex\foo"), parent),
+            PathBuf::from(r"C:\Users\u\.mam\active\codex\foo")
+        );
+        assert_eq!(
+            normalize_link_target(
+                Path::new(r"\\?\UNC\server\share\.mam\active\codex\foo"),
+                parent
+            ),
+            PathBuf::from(r"\\server\share\.mam\active\codex\foo")
+        );
+    }
+
+    /// 相对 target join 链接父目录 + 词法消解 `.` / `..`
+    #[test]
+    fn joins_relative_and_folds_lexically() {
+        let parent = Path::new("/home/u/.agents/skills");
+        assert_eq!(
+            normalize_link_target(Path::new("../active/codex/foo"), parent),
+            PathBuf::from("/home/u/.agents/active/codex/foo")
+        );
+        assert_eq!(
+            normalize_link_target(Path::new("./local-skill"), parent),
+            PathBuf::from("/home/u/.agents/skills/local-skill")
+        );
+        // 绝对路径原样保留（无 . / .. 时组件不变）
+        assert_eq!(
+            normalize_link_target(Path::new("/home/u/.mam/active/codex/foo"), parent),
+            PathBuf::from("/home/u/.mam/active/codex/foo")
+        );
+    }
+}
+
+#[cfg(test)]
+mod dir_contents_equal_tests {
+    use super::*;
+
+    #[test]
+    fn identical_trees_are_equal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        for dir in [&a, &b] {
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "hello").unwrap();
+            std::fs::write(dir.join("sub/note.md"), "x".repeat(10)).unwrap();
+        }
+        assert!(dir_contents_equal(&a, &b));
+        assert!(dir_contents_equal(&b, &a));
+    }
+
+    #[test]
+    fn differing_file_bytes_or_names_are_not_equal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        // 字节差异（用户就地修改）
+        std::fs::write(a.join("SKILL.md"), "v1").unwrap();
+        std::fs::write(b.join("SKILL.md"), "v2").unwrap();
+        assert!(!dir_contents_equal(&a, &b));
+        // 条目名差异（多余文件）
+        std::fs::write(b.join("extra.md"), "v1").unwrap();
+        assert!(!dir_contents_equal(&a, &b));
+    }
+
+    #[test]
+    fn missing_or_type_mismatched_sides_are_not_equal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        // 另一侧不存在 → 保守不一致
+        assert!(!dir_contents_equal(&a, &b));
+        // 目录 vs 文件 → 不一致
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::write(b.join("sub"), "not-a-dir").unwrap();
+        assert!(!dir_contents_equal(&a, &b));
+    }
+
+    /// review N-3 回归锁：链接环（sub → .）不得无界递归（旧实现跟随式 is_dir()
+    /// 会栈溢出）；链接对链接比字面 target、链接对非链接判不一致。
+    /// 三个场景各用独立目录对，避免前序用例的环污染后续断言
+    #[test]
+    #[cfg(unix)]
+    fn symlink_loops_do_not_recurse_and_links_compare_by_target() {
+        use std::os::unix::fs::symlink;
+
+        let mk = |tmp: &tempfile::TempDir, tag: &str| {
+            let dir = tmp.path().join(tag);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "same").unwrap();
+            dir
+        };
+
+        // 场景一：链接环 a/sub → .（自指）vs b/sub 真目录。旧实现此处栈溢出；
+        // 新实现链接 vs 真目录 → false（不跟随、不触达环）
+        let tmp1 = tempfile::tempdir().unwrap();
+        let (a1, b1) = (mk(&tmp1, "a"), mk(&tmp1, "b"));
+        symlink(".", a1.join("sub")).unwrap();
+        std::fs::create_dir_all(b1.join("sub")).unwrap();
+        assert!(!dir_contents_equal(&a1, &b1));
+
+        // 场景二：链接对链接、字面 target 相同 → 一致（不跟随、不触达环）
+        let tmp2 = tempfile::tempdir().unwrap();
+        let (a2, b2) = (mk(&tmp2, "a"), mk(&tmp2, "b"));
+        symlink("SKILL.md", a2.join("alias")).unwrap();
+        symlink("SKILL.md", b2.join("alias")).unwrap();
+        assert!(dir_contents_equal(&a2, &b2));
+
+        // 场景三：链接对链接、字面 target 不同 → 不一致
+        let tmp3 = tempfile::tempdir().unwrap();
+        let (a3, b3) = (mk(&tmp3, "a"), mk(&tmp3, "b"));
+        symlink("SKILL.md", a3.join("alias")).unwrap();
+        symlink("other", b3.join("alias")).unwrap();
+        assert!(!dir_contents_equal(&a3, &b3));
+    }
+}
+
 #[cfg(test)]
 mod link_health_tests {
     use super::*;

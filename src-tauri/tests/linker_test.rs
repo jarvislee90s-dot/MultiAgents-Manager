@@ -104,6 +104,43 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
         .exists());
 }
 
+// review I-1 回归锁：工具侧真目录（手装技能 / W5 还原内容）是扫描源与建链目标的
+// 交叠场景——与 SSOT 内容一致的副本才允许替换为链接；不一致必须拒绝并保留真目录，
+// 绝不静默 remove_dir_all 用户数据。仅 Unix 编译运行（HOME 重定向同上）
+#[cfg(unix)]
+#[test]
+fn enable_refuses_to_replace_divergent_real_dir_but_accepts_identical_copy() {
+    support::setup();
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+    let tool_dir = home.join(".codex").join("skills");
+    let tool_target = tool_dir.join("demo-guard-skill");
+
+    // ---- 反例：真目录与 SSOT 内容不一致（手装异内容）→ 拒绝、真目录原样保留 ----
+    std::fs::create_dir_all(&tool_target).unwrap();
+    std::fs::write(tool_target.join("SKILL.md"), "手装内容 v1\n").unwrap();
+    // SSOT 侧预置同名但内容不同的副本（模拟已导入他源/旧版本）
+    let repo_skill = home.join(".mam").join("skills").join("demo-guard-skill");
+    std::fs::create_dir_all(&repo_skill).unwrap();
+    std::fs::write(repo_skill.join("SKILL.md"), "SSOT 内容 v9\n").unwrap();
+
+    let err =
+        multi_agents_manager_lib::services::enable_skill_for_tool("demo-guard-skill", "codex")
+            .unwrap_err();
+    assert!(err.contains("真实目录"), "错误应说明拒绝原因: {err}");
+    // 真目录未被破坏、未被替换为链接
+    assert!(tool_target.is_dir() && !tool_target.is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(tool_target.join("SKILL.md")).unwrap(),
+        "手装内容 v1\n"
+    );
+
+    // ---- 对照组：真目录内容与 SSOT 一致（W5 还原副本/刚导入拷贝）→ 安全替换 ----
+    std::fs::write(tool_target.join("SKILL.md"), "SSOT 内容 v9\n").unwrap();
+    multi_agents_manager_lib::services::enable_skill_for_tool("demo-guard-skill", "codex").unwrap();
+    assert!(tool_target.is_symlink(), "一致副本应被替换为链接");
+    assert!(tool_target.exists());
+}
+
 #[cfg(windows)]
 #[test]
 fn test_create_junction_for_dir() {

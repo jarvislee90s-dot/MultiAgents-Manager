@@ -50,6 +50,19 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
                 && tool_target.canonicalize().ok() == repo_skill.canonicalize().ok();
             if reaches_ssot {
                 should_create_tool_link = false;
+            } else if !tool_target.is_symlink() && tool_target.is_dir() {
+                // review I-1：真目录可能是用户手装技能，或 W5 停用后还原的内容
+                // （用户可能已就地修改）。与 SSOT 内容一致（还原副本/刚导入的拷贝）
+                // → 安全替换为链接（W5 停用/启用周期照常）；不一致 → 拒绝并报告，
+                // 绝不静默删除用户数据后挂链（spec §4.3「跳过并报告」语义延伸到管线）。
+                // 纳管走资源面板的显式清理流程（cleanup_duplicate_skills）
+                if !crate::linker::dir_contents_equal(&tool_target, &repo_skill) {
+                    return Err(format!(
+                        "{} 为真实目录且与共享仓库内容不一致，已拒绝替换为链接（防止覆盖本地修改）；如需纳管请先在资源面板处理同名技能",
+                        tool_target.display()
+                    ));
+                }
+                let _ = crate::linker::remove_link(&tool_target);
             } else {
                 let _ = crate::linker::remove_link(&tool_target);
             }
