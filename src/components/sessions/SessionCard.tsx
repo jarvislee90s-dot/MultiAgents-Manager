@@ -23,6 +23,25 @@ function formatRuntime(lastActivityAt: string, t: (key: string) => string): stri
   return `${hours}h${mins % 60}m`;
 }
 
+// 全角/CJK 字符按 1.5 单位计入显示预算（10 个中文 = 15 单位）
+const CJK_CHAR =
+  /[\u2e80-\u303f\u31c0-\u31ef\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
+
+/**
+ * 项目名显示预算（卡片顶行）：中文封顶 10 字、英文封顶 15 字符（按 15 单位宽度
+ * 预算折算，CJK 每字 1.5 单位），超出截断加省略号；完整名走 title 悬停提示。
+ * CSS truncate 仅作兜底——预算保证不同卡宽下截断点可预期
+ */
+export function truncateProjectName(name: string, budget = 15): string {
+  const chars = [...name];
+  let cost = 0;
+  for (let i = 0; i < chars.length; i++) {
+    cost += CJK_CHAR.test(chars[i]) ? 1.5 : 1;
+    if (cost > budget) return chars.slice(0, i).join("") + "…";
+  }
+  return name;
+}
+
 export function SessionCard({ session }: { session: Session }) {
   const { t } = useTranslation();
   const badge = AGENT_BADGE[session.agentType];
@@ -102,7 +121,7 @@ export function SessionCard({ session }: { session: Session }) {
               {getAgentLabel(session.agentType, session.form)}
             </span>
             <span className="min-w-0 truncate text-sm font-medium" title={session.projectName}>
-              {session.projectName}
+              {truncateProjectName(session.projectName)}
             </span>
             {(session.title || session.id) && (
               <span
