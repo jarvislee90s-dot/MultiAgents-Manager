@@ -353,15 +353,19 @@ pub fn list_ssot_resources() -> SsotResources {
     };
 
     // 构建工具 → MCP 配置路径映射，用于扫描各工具已有的 MCP 服务器（仅已勾选工具参与）
-    let tool_mcp_configs: Vec<(&str, std::path::PathBuf, crate::adapter::McpFormat)> =
-        crate::adapter::all_adapters_with_ids()
-            .into_iter()
-            .filter(|(id, _)| enabled_ids.contains(*id))
-            .filter_map(|(id, a)| {
-                let path = a.mcp_config_path()?;
-                Some((id, path, a.mcp_format()))
-            })
-            .collect();
+    let tool_mcp_configs: Vec<(
+        &str,
+        std::path::PathBuf,
+        crate::adapter::McpFormat,
+        &'static [&'static str],
+    )> = crate::adapter::all_adapters_with_ids()
+        .into_iter()
+        .filter(|(id, _)| enabled_ids.contains(*id))
+        .filter_map(|(id, a)| {
+            let path = a.mcp_config_path()?;
+            Some((id, path, a.mcp_format(), a.mcp_json_section()))
+        })
+        .collect();
 
     // MCP 扫描：以 ~/.mam/mcp/ 为基础数据源，工具配置文件仅作补充
     let scan_mcp = || -> Vec<SsotResource> {
@@ -382,8 +386,10 @@ pub fn list_ssot_resources() -> SsotResources {
             }
         }
 
-        // 2) 从各工具配置文件中读取已有 MCP（补充 SSOT 中尚未记录的）
-        for (tool_id, config_path, format) in &tool_mcp_configs {
+        // 2) 从各工具配置文件中读取已有 MCP（补充 SSOT 中尚未记录的）。
+        //    段定位走 adapter 声明的键路径（ZCode=mcp.servers 嵌套子树），
+        //    兼容既有工具历史形态的顶层键探测
+        for (tool_id, config_path, format, section) in &tool_mcp_configs {
             let content = std::fs::read_to_string(config_path).unwrap_or_default();
             let servers: serde_json::Value = match format {
                 crate::adapter::McpFormat::Json | crate::adapter::McpFormat::Jsonc => {
@@ -399,13 +405,21 @@ pub fn list_ssot_resources() -> SsotResources {
                         .unwrap_or(serde_json::json!({}))
                 }
             };
-            let mcp_obj = servers
-                .get("mcpServers")
-                .or_else(|| servers.get("mcp_servers"))
-                .or_else(|| servers.get("mcp"))
-                .and_then(|v| v.as_object());
+            let mcp_obj = crate::services::mcp::json_section(&servers, section).or_else(|| {
+                servers
+                    .get("mcpServers")
+                    .or_else(|| servers.get("mcp_servers"))
+                    .or_else(|| servers.get("mcp"))
+                    .and_then(|v| v.as_object())
+            });
             if let Some(obj) = mcp_obj {
-                for name in obj.keys() {
+                for (name, value) in obj {
+                    // ZCode 可选 enable:false 停用标记（无字段 = 启用）：停用条目
+                    // 不计入该工具的启用列（如实展示为停用）；read_mcp_servers
+                    // 原样透传条目（含 enable 字段）供面板展示
+                    if crate::services::mcp::entry_disabled_by_tool(value) {
+                        continue;
+                    }
                     let entry = all_mcps.entry(name.clone()).or_default();
                     if !entry.contains(&tool_id.to_string()) {
                         entry.push((*tool_id).to_string());
@@ -642,11 +656,15 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
                     .unwrap_or(serde_json::json!({}))
             }
         };
-        let mcp_obj = servers
-            .get("mcpServers")
-            .or_else(|| servers.get("mcp_servers"))
-            .or_else(|| servers.get("mcp"))
-            .and_then(|v| v.get(&mcp_name));
+        let mcp_obj = crate::services::mcp::json_section(&servers, adapter.mcp_json_section())
+            .and_then(|m| m.get(&mcp_name))
+            .or_else(|| {
+                servers
+                    .get("mcpServers")
+                    .or_else(|| servers.get("mcp_servers"))
+                    .or_else(|| servers.get("mcp"))
+                    .and_then(|v| v.get(&mcp_name))
+            });
 
         if let Some(config) = mcp_obj {
             let repo = dirs::home_dir()
