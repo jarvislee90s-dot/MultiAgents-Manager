@@ -10,6 +10,7 @@ pub enum AgentType {
     OpenClaw,
     Kimi,
     WorkBuddy,
+    ZCode,
 }
 
 /// 会话状态（红绿灯五态 + Finished）

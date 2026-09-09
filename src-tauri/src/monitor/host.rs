@@ -28,6 +28,15 @@ pub fn is_host_process(exe_lower: &str, tool_id: &str) -> bool {
                     // 内嵌 Codex 框架进程（Contents/Frameworks/）= 会话运行时，不算宿主
                     && !normalized.contains("frameworks/"))
         }
+        "zcode" => {
+            // exe 名判据单源委托 zcode_parser::exe_basename_is_zcode（macOS 主进程
+            // 可执行名恰为 ZCode；ZCode Helper / zcode-cli / zcode-host-local-1 /
+            // zcode-node-repl-mcp 等 basename 不严格等于 zcode，天然排除）。
+            // Windows 全部可执行体都是 ZCode.exe（主进程/辅助进程/会话运行时同名），
+            // exe 判据区分不了 → 必须叠加命令行门（见 tool_host_alive_in 的
+            // zcode 分支：主进程 = 裸命令行，辅助进程带 --type=，会话运行时含 zcode.cjs）
+            crate::monitor::zcode_parser::exe_basename_is_zcode(exe_lower)
+        }
         _ => false,
     }
 }
@@ -42,6 +51,18 @@ pub fn tool_host_alive_in(system: &sysinfo::System, tool_id: &str) -> bool {
         // cmdline 里的 cli/bin/codebuddy 脚本路径排除；macOS 该路径在 exe 内，
         // is_host_process 已排除，此判据对结果无影响
         if tool_id == "workbuddy" && is_session_runtime_cmdline(p.cmd()) {
+            return false;
+        }
+        // ZCode 同款孤儿防线（Windows 全部可执行体都是 ZCode.exe，exe 判据区分不了
+        // 主进程/Electron 辅助进程/会话运行时）：命令行带 --type= 或含 zcode.cjs
+        // 的进程不判宿主，仅裸命令行的主进程算「应用开着」。macOS 非宿主进程
+        // basename 不同名，is_host_process 已排除，此判据对结果无影响。
+        // cmd 读不到（提权进程）时按 exe 判定放行——漏判宿主会清空全部卡片，
+        // 代价高于误判（与 zcode_parser::process_is_host 同向）
+        if tool_id == "zcode"
+            && !p.cmd().is_empty()
+            && crate::monitor::zcode_parser::cmdline_is_non_host(p.cmd())
+        {
             return false;
         }
         p.exe()
@@ -170,6 +191,55 @@ mod tests {
         assert!(!is_host_process(
             "c:\\users\\u\\appdata\\local\\programs\\chatgpt\\codex.exe",
             "codex"
+        ));
+    }
+
+    // ---- ZCode（Electron APP，宿主 = 应用主进程） ----
+
+    #[test]
+    fn zcode_macos_main_process_is_host() {
+        // macOS 主进程可执行名 ZCode（bundle dev.zcode.app）
+        assert!(is_host_process(
+            "/applications/zcode.app/contents/macos/zcode",
+            "zcode"
+        ));
+    }
+
+    #[test]
+    fn zcode_macos_non_host_processes_are_not_host() {
+        // 实测非宿主进程：ZCode Helper / zcode-cli / zcode-host-local-1 /
+        // zcode-node-repl-mcp——basename 均不严格等于 zcode
+        assert!(!is_host_process(
+            "/applications/zcode.app/contents/frameworks/zcode helper.app/contents/macos/zcode helper",
+            "zcode"
+        ));
+        assert!(!is_host_process("/usr/local/bin/zcode-cli", "zcode"));
+        assert!(!is_host_process(
+            "/applications/zcode.app/contents/resources/zcode-host-local-1",
+            "zcode"
+        ));
+        assert!(!is_host_process(
+            "/applications/zcode.app/contents/resources/zcode-node-repl-mcp",
+            "zcode"
+        ));
+    }
+
+    #[test]
+    fn zcode_windows_exe_matches_by_name() {
+        // Windows 全部可执行体都是 ZCode.exe——exe 判据命中（主/辅助进程同名，
+        // 区分交给 tool_host_alive_in 的命令行门，见 zcode_parser 测试）
+        assert!(is_host_process("d:\\programs\\zcode\\zcode.exe", "zcode"));
+    }
+
+    #[test]
+    fn zcode_does_not_match_other_tools() {
+        assert!(!is_host_process(
+            "/applications/chatgpt.app/contents/macos/chatgpt",
+            "zcode"
+        ));
+        assert!(!is_host_process(
+            "/applications/zcode.app/contents/macos/zcode",
+            "workbuddy"
         ));
     }
 }
