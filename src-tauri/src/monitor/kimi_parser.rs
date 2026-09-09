@@ -1011,7 +1011,9 @@ mod tests {
     #[test]
     fn parse_kimi_session_reads_title_with_int_updated_at() {
         let tmp = tempfile::tempdir().unwrap();
-        let session_dir = tmp.path().join("session_44554114-366e-4c61-9a57-733a3f3b79d0");
+        let session_dir = tmp
+            .path()
+            .join("session_44554114-366e-4c61-9a57-733a3f3b79d0");
         fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
         // 真实形态：updatedAt 为 int（ms 时间戳）
         fs::write(
@@ -1042,7 +1044,9 @@ mod tests {
     #[test]
     fn parse_kimi_session_tolerates_string_updated_at() {
         let tmp = tempfile::tempdir().unwrap();
-        let session_dir = tmp.path().join("session_22222222-2222-2222-2222-222222222222");
+        let session_dir = tmp
+            .path()
+            .join("session_22222222-2222-2222-2222-222222222222");
         fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
         fs::write(
             session_dir.join("state.json"),
