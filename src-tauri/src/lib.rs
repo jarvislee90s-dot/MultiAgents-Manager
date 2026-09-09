@@ -115,6 +115,8 @@ pub fn run() {
         commands::resource::enable_skill_for_tool_cmd,
         commands::resource::import_mcp_to_ssot,
         commands::resource::save_mcp_config,
+        commands::resource::detect_legacy_agents_links,
+        commands::resource::migrate_legacy_agents_links,
         commands::preset::create_preset,
         commands::preset::delete_preset,
         commands::preset::list_presets,

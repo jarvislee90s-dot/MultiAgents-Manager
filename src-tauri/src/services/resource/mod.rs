@@ -1,5 +1,6 @@
 // 资源管理服务 - 自动扫描导入 skills 和 plugins
 
+pub mod migration;
 
 use crate::linker;
 

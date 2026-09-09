@@ -250,7 +250,23 @@
     "sortByName": "Sort by name",
     "openDir": "Open folder",
     "openToolDir": "Open {{tool}}'s {{kind}} folder",
-    "openMcpConfig": "Open {{tool}}'s MCP config file"
+    "openMcpConfig": "Open {{tool}}'s MCP config file",
+    "migration": {
+      "title": "Legacy skill links detected",
+      "description": "Found {{n}} legacy links in the shared folder ~/.agents/skills that were created by MAM and point to the codex activation directory (~/.mam/active/codex). Choose how to handle them:",
+      "listTitle": "Affected skills",
+      "migrateBtn": "Migrate to .codex/skills",
+      "migrateDesc": "The codex private folder (~/.codex/skills) takes over these links; enable/disable states in MAM stay unchanged and the shared folder becomes clean again.",
+      "keepBtn": "Keep as shared",
+      "keepDesc": "Links are re-pointed to the MAM shared repository (~/.mam/skills), decoupled from codex enable/disable, and keep serving un-adapted tools that read the shared folder.",
+      "cancel": "Not now",
+      "resultTitle": "Results",
+      "statusOk": "OK",
+      "statusSkipped": "Skipped",
+      "statusError": "Failed",
+      "runFailed": "Operation failed: {{detail}}",
+      "close": "Close"
+    }
   },
   "mcp": {
     "nameAndCommandRequired": "Name and command are required",

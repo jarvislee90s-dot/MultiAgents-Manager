@@ -18,12 +18,16 @@ import { PetStartupGuard } from "@/components/pet/PetStartupGuard";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 import { Activity, AlertCircle } from "lucide-react";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
+import { useLegacySkillMigration } from "@/hooks/useLegacySkillMigration";
+import { LegacySkillMigrationDialog } from "@/components/resources/LegacySkillMigrationDialog";
 
 const SHORTCUT_KEY = "global-shortcut-show-main";
 
 export default function HomePage() {
   useSessions();
   useNotification();
+  // 遗留 codex 技能链接检测（spec §4.3）：mount 即检测，命中 ≥1 条时弹一次性迁移对话框
+  const legacyMigration = useLegacySkillMigration();
   const [activeTab, setActiveTab] = useState<"dashboard" | "extensions">("dashboard");
   const { sessions, totalCount, waitingCount, loading } = useSessionStore();
   const { t } = useAppTranslation();
@@ -138,6 +142,8 @@ export default function HomePage() {
       </div>
       {/* 启动校验弹窗（EP2）：外部宠物素材异常时主窗口确认，宠物窗口先行降级 */}
       <PetStartupGuard />
+      {/* 遗留 codex 技能链接迁移对话框（spec §4.3）：仅检测命中时可见 */}
+      <LegacySkillMigrationDialog migration={legacyMigration} />
     </WindowFrame>
   );
 }
