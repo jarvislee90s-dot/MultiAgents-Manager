@@ -102,8 +102,6 @@ fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> 
             .enumerate()
             .find(|(i, (_, dir, _, _))| !matched_rows.contains(i) && cwd_equivalent(dir, &cwd_str))
         {
-            matched_rows.insert(row_idx);
-            matched_pids.insert(process.pid);
             let (session_id, directory, title, time_updated) = row;
             if let Some(session) = build_session_from_row(
                 &conn,
@@ -115,6 +113,10 @@ fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> 
                 process,
             ) {
                 sessions.push(session);
+                // 构造成功才认领行与 pid（与 kimi Phase 1 同时序）：若将来构造可能
+                // 过滤返回 None，失败时不烧掉行/pid，该进程仍可走回退匹配
+                matched_rows.insert(row_idx);
+                matched_pids.insert(process.pid);
             }
         }
     }
@@ -420,7 +422,8 @@ mod matching_tests {
         }
     }
 
-    /// 最小 schema 夹具 DB：仅建解析器 SQL 引用的表/列；message/part 允许为空
+    /// 最小 schema 夹具 DB：仅建解析器 SQL 引用的表/列；message/part 允许为空。
+    /// project 表留空（session 行硬编码 project_id='p1' 但不插 project 行）= project 回退段不触发
     fn fixture_db(path: &std::path::Path, sessions: &[(&str, &str, &str, i64)]) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
