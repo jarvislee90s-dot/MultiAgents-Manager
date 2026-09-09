@@ -107,8 +107,21 @@ struct IndexedSession {
 #[derive(Deserialize)]
 struct KimiState {
     title: Option<String>,
+    /// 实测 kimi CLI 写 int 毫秒时间戳（2026-09 样本全量）；旧版本可能为 ISO 字符串。
+    /// 曾声明 Option<String>：int 形态类型不匹配 → 整个 state.json 反序列化失败 →
+    /// title 兜底 "session_"（kimi id 统一前缀），标题匹配跳转因此失效（2026-09-09 事故）
     #[serde(rename = "updatedAt")]
-    updated_at: Option<String>,
+    updated_at: Option<serde_json::Value>,
+}
+
+/// updatedAt 双形态（int 毫秒 / ISO 字符串）转显示字符串；其他形态 None
+/// （仅影响 last_activity_at 兜底显示，不影响 title 提取）
+fn updated_at_to_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Number(n) => n.as_i64().map(ms_to_iso),
+        serde_json::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 /// wire.jsonl 条目（按 type 判别，各形态字段缺失容忍）
@@ -350,7 +363,12 @@ fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<
         .unwrap_or_else(|| entry.session_id.chars().take(8).collect());
     let last_activity_at = last_ts
         .map(ms_to_iso)
-        .or_else(|| state.and_then(|s| s.updated_at))
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.updated_at.as_ref())
+                .and_then(updated_at_to_string)
+        })
         .unwrap_or_else(|| "Unknown".to_string());
 
     Some(Session {
@@ -529,7 +547,7 @@ mod tests {
         fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
         fs::write(
             session_dir.join("state.json"),
-            r#"{"title":"Demo Session","createdAt":"2026-08-01T00:00:00.000Z","updatedAt":"2026-08-01T00:01:00.000Z"}"#,
+            r#"{"title":"Demo Session","createdAt":1754000000000,"updatedAt":1754000060000}"#,
         )
         .unwrap();
         fs::write(
@@ -952,6 +970,9 @@ mod tests {
             Some("Demo Session"),
             "state.json 标题可用"
         );
+        // 空 wire → last_ts=None → last_activity_at 走 state.json updatedAt 兜底
+        //（夹具为 int 毫秒形态，锁 updated_at_to_string 的 Number 分支）
+        assert_eq!(sessions[0].last_activity_at, ms_to_iso(1754000060000));
     }
 
     #[test]
@@ -983,6 +1004,68 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         // 标题按字符（非字节）取前 8 位：会 话 🔥 i d - 1 2
         assert_eq!(sessions[0].title.as_deref(), Some("会话🔥id-12"));
+    }
+
+    /// 2026-09-09 事故回归锁：真实 kimi CLI 的 state.json updatedAt 是 int 毫秒时间戳，
+    /// 曾因声明 Option<String> 整体反序列化失败 → title 兜底 "session_" → 双开跳转失效
+    #[test]
+    fn parse_kimi_session_reads_title_with_int_updated_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_dir = tmp.path().join("session_44554114-366e-4c61-9a57-733a3f3b79d0");
+        fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
+        // 真实形态：updatedAt 为 int（ms 时间戳）
+        fs::write(
+            session_dir.join("state.json"),
+            r#"{"id":"session_44554114","version":2,"cwd":"C:/x","createdAt":1788851359520,"updatedAt":1788851359520,"archived":false,"title":"（0）使用技能【ratingdog-report】，下载【贵州铁路投资集团有限责任公司】的 YY评级报告"}"#,
+        )
+        .unwrap();
+        fs::write(
+            session_dir.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"time":1788851359000}"#,
+        )
+        .unwrap();
+        let entry = IndexedSession {
+            session_id: "session_44554114-366e-4c61-9a57-733a3f3b79d0".to_string(),
+            work_dir: "C:/Users/bunny/Desktop/贵州铁路投资集团有限责任公司".to_string(),
+            session_dir: session_dir.clone(),
+            wire_mtime: SystemTime::now(),
+        };
+        let session = parse_kimi_session(&entry, &fake_process(1, "C:/x")).unwrap();
+        // 修复前红：title 兜底 "session_"（id 前 8 字符）
+        assert_eq!(
+            session.title.as_deref(),
+            Some("（0）使用技能【ratingdog-report】，下载【贵州铁路投资集团有限责任公司】的 YY评级报告")
+        );
+    }
+
+    /// updatedAt 双形态：ISO 字符串（旧版本/夹具假设形态）必须继续可用
+    #[test]
+    fn parse_kimi_session_tolerates_string_updated_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_dir = tmp.path().join("session_22222222-2222-2222-2222-222222222222");
+        fs::create_dir_all(session_dir.join("agents").join("main")).unwrap();
+        fs::write(
+            session_dir.join("state.json"),
+            r#"{"title":"Legacy String","updatedAt":"2026-08-01T00:01:00.000Z"}"#,
+        )
+        .unwrap();
+        // wire 条目不带 time（KimiWireEntry.time 为 Option）→ last_ts=None，
+        // 迫使 last_activity_at 走 state.json updatedAt 兜底
+        fs::write(
+            session_dir.join("agents").join("main").join("wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}]}"#,
+        )
+        .unwrap();
+        let entry = IndexedSession {
+            session_id: "session_22222222-2222-2222-2222-222222222222".to_string(),
+            work_dir: "/work".to_string(),
+            session_dir,
+            wire_mtime: SystemTime::now(),
+        };
+        let session = parse_kimi_session(&entry, &fake_process(1, "/work")).unwrap();
+        assert_eq!(session.title.as_deref(), Some("Legacy String"));
+        // 字符串形态 updatedAt 原样透传（锁 updated_at_to_string 的 String 分支）
+        assert_eq!(session.last_activity_at, "2026-08-01T00:01:00.000Z");
     }
 
     #[test]
