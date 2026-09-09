@@ -72,7 +72,9 @@ Click a session card to instantly focus the corresponding terminal tab:
 | tmux | ✅ pane selection + terminal focus |
 | Wayland | ❌ Graceful fallback message |
 
-Desktop APP tools (Codex APP, WorkBuddy, ZCode) support deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>` (session-level), and `zcode://workspace/open?path=<URL-encoded native project path>` (workspace-level — ZCode has no session-level deep link, so the jump precision ceiling is the project workspace). The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read.
+Terminal tools (Claude Code / Codex CLI / OpenCode / Kimi Code) resolve through process-tree and window-content disambiguation; **same-project dual-open jumps land directly**: for Kimi / OpenCode, the window title is matched against the session title (kimi `state.json` title / OpenCode DB title) after normalization — a unique hit locks onto the window, so dual terminals no longer raise a picker.
+
+Desktop APP tools (Codex APP, WorkBuddy) support deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>` (session-level). The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read. ZCode is a single-window multi-tab app — its jump simply focuses the unique window (cards carry the host pid, zero ambiguity).
 
 ### Extension Resource Management
 

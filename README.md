@@ -29,7 +29,7 @@
 | 🟢 绿色 | 空闲 / 已完成 |
 
 - 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code**、**WorkBuddy**、**ZCode** 会话
-- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底；ZCode 无会话级深链，工作区级 `zcode://workspace/open?path=<项目路径>` 直达项目工作区）与持久未读卡（转绿跨重启保留、宿主退出自动清理）
+- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底）；ZCode（单窗口多标签）跳转直接聚焦其唯一窗口。APP 类均支持持久未读卡（转绿跨重启保留、宿主退出自动清理）
 - 显示项目名称、Git 分支、最后消息预览、CPU 占用、运行时长
 - 按优先级排序：等待中 → 运行中 → 空闲
 - 系统托盘图标反映聚合状态（🔴/🟡/🟢）
@@ -74,7 +74,9 @@ v0.3.0 起桌宠格式开放，不再只有 Foxbell：
 | tmux | ✅ pane 选择 + 终端聚焦 |
 | Wayland | ❌ 优雅降级提示 |
 
-桌面 APP 类工具（Codex APP、WorkBuddy、ZCode）支持深度链接直达：`codex://threads/<id>`、`workbuddy://chat/<id>`（会话级）、`zcode://workspace/open?path=<URL编码的项目原生路径>`（工作区级——ZCode 会话级深链不存在，跳转精度上限即直达项目工作区），派发前校验协议 handler、派发后验证前台化，失败自动落 APP 级前台保底（macOS AppleScript / Windows 近祖聚焦），且不误标已读。
+终端类工具（Claude Code / Codex CLI / OpenCode / Kimi Code）经进程树 + 窗口内容逐层消歧聚焦；**同项目双开直达**：Kimi / OpenCode 的窗口标题与会话标题（kimi `state.json` 标题 / OpenCode DB 标题）归一化比对，唯一命中即锁定，双开终端不再弹选择器。
+
+桌面 APP 类工具（Codex APP、WorkBuddy）支持深度链接直达：`codex://threads/<id>`、`workbuddy://chat/<id>`（会话级），派发前校验协议 handler、派发后验证前台化，失败自动落 APP 级前台保底（macOS AppleScript / Windows 近祖聚焦），且不误标已读。ZCode 为单窗口多标签应用，跳转直接聚焦唯一窗口（卡片携带宿主 pid，零歧义锁定）。
 
 ### 扩展资源统一管理
 
@@ -283,7 +285,7 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 - [x] OpenClaw 支持（第四工具）
 - [x] Kimi Code 支持（第五工具：会话监控 + MCP 管理 + `KIMI_CODE_HOME` 数据目录重定向）
 - [x] WorkBuddy 支持（第六工具：心跳驱动监控 + 深度链接跳转 + 资源管理）
-- [x] ZCode 支持（第七工具：SQLite 会话聚合监控 + 子代理活跃度仲裁 + 工作区深链跳转 + Skill/MCP 资源管理）
+- [x] ZCode 支持（第七工具：SQLite 会话聚合监控 + 子代理活跃度仲裁 + 唯一窗口聚焦跳转 + Skill/MCP 资源管理）
 - [x] Foxbell 桌宠（状态卡片 + 语音提醒 + 拖拽物理）
 - [x] 外部桌宠开放（本地/Petdex 导入 + 管理面板热切换 + 能力门控）
 - [x] 工具勾选管理（批量保存 + 还原/重建 + 彻底隐藏）

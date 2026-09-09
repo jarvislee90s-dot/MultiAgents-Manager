@@ -1,15 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-09-09
 ### Added
-- **ZCode 第七工具支持**（智谱桌面 AI 编程助手，Electron APP 形态）：宿主判定（进程侧只回答「应用开没开」，Windows 全部可执行体同名 ZCode.exe 时按命令行区分主进程/辅助进程/会话运行时）+ 双 SQLite 会话聚合（tasks-index 任务索引 + session/message/part 消息流，每会话一卡、24h 窗口、archived/deleted 过滤、会话 id 严格 UUID 校验）；状态从消息流尾部按 sequence 倒扫推导（step-finish 懒落库时间戳不可靠、顺序可靠），todo_reminder 等记账消息识别跳过；子代理长任务经共享层「后代活跃度仲裁」保持运行中（主会话静默 + 子会话活跃 = 健康等待，停更且无后代活动 = 疑似卡住）；task_status=error 按完成转绿
-- **ZCode 跳转与资源管理**：工作区深链 `zcode://workspace/open?path=<URL编码的项目原生路径>`（会话级深链不存在，精度上限 = 直达项目工作区；Windows 反斜杠 + 大写盘符整段编码，派发前 handler 校验 + 派发后前台验证，失败落 APP 级激活保底）；skill 分发（SSOT → `~/.zcode/skills/` 建链/删链）+ MCP 配置读-改-写（`~/.zcode/cli/config.json` 仅 `mcp.servers` 子树，未知键与原键序保留，解析失败只报错不落盘，`enable:false` 条目如实展示为停用）
+- **ZCode 第七工具支持**（智谱桌面 AI 编程助手，Electron APP 形态）：宿主判定（进程侧只回答「应用开没开」，Windows 全部可执行体同名 ZCode.exe 时按命令行区分主进程/辅助进程/会话运行时）+ 双 SQLite 会话聚合（tasks-index 任务索引 + session/message/part 消息流，每会话一卡、24h 窗口、archived/deleted 过滤、会话 id 严格 UUID 校验）；状态从消息流尾部按 sequence 倒扫推导（step-finish 懒落库时间戳不可靠、顺序可靠），todo_reminder 等记账消息识别跳过；子代理长任务经共享层「后代活跃度仲裁」保持运行中（主会话静默 + 子会话活跃 = 健康等待，停更且无后代活动 = 疑似卡住）；task_status=error 按完成转绿。资源管理：skill 分发（SSOT → `~/.zcode/skills/` 建链/删链，**目录已实测被 ZCode 识别**）+ MCP 读-改-写（`~/.zcode/cli/config.json` 仅 `mcp.servers` 子树，未知键与原键序保留，解析失败只报错不落盘，`enable:false` 如实展示为停用）
+- **ZCode 跳转 = 直接聚焦唯一窗口**：ZCode 为单窗口多标签应用（实机取证：`windowId:1` 恒定、标题恒为 "ZCode" 不含工作区名），点击卡片经 pid 单窗口路径零歧义锁定，失败落 APP 级激活兜底。工作区深链 `zcode://workspace/open` 经实机验收后**有意不接入**：其语义为打开工作区 + 全新会话 composer（非定位已有会话）、每次派发无条件弹信任确认且拉起一个转发进程
+- **同项目双开跳转直达（窗口标题匹配层）**：Kimi / OpenCode 的终端窗口标题与会话标题（kimi `state.json` 标题 / OpenCode DB 标题）归一化比对（剥 spinner 前缀 / "OC | " 工具前缀 / 尾部省略号），唯一命中即锁定——双开终端不再弹选择器；会话标题经全部跳转入口（看板 / 通知 / 桌宠 / 历史）统一透传
+- 卡片项目名显示预算：中文封顶 10 字、英文封顶 15 字符（15 单位宽度预算，CJK 每字 1.5 单位），截断点确定、不随卡宽漂移，完整名悬停可见
 - 共享层通用化（D5）：停更降级新增后代活跃度仲裁参数（空后代语义 = 现状，既有工具行为零变化并有逐边界回归测试）；数据驱动持久绿卡门（P1-3 剔除 + 未读态标记）从 Codex 特判泛化为工具能力判定，ZCode 聚合卡复用同款语义
 
 ### Fixed
-- MCP 面板读取链路硬编码旧工具清单（仅 claude/codex/opencode，openclaw/kimi/workbuddy 的 MCP 读取一直落「未知工具」）——改走 adapter 注册表统一分发，段定位按 adapter 声明的键路径（兼容历史顶层键探测）
-- 资源导入溯源 `detect_source_tool` 硬编码四工具清单（kimi/workbuddy 来源历史行回溯恒空 → 跳过补链）——改走 TOOL_IDS 注册表
-- 前端 `SUPPORTED_TOOLS` 常量缺 workbuddy（徽标遍历测试覆盖面缺口）；浏览器 mock 的 detect_tools 缺 workbuddy 行
+- **Kimi 双开跳转必弹选择器**：CLI 写入 `state.json` 的 `updatedAt` 为整数毫秒，serde 类型不匹配导致整个状态解析失败 → 会话标题回退 `session_` 前缀 → 标题匹配层永不命中；现兼容数值 / 字符串双形态
+- **OpenCode 同目录双终端只显示一个会话**：两个进程都认领最新一条会话行、旧会话被遮蔽；现按目录配对到各自进程（已配对行防复用）
+- Codex 会话标题前缀 8 → 12 位，消除同一分钟内创建会话的键碰撞
+- 窗口标题匹配层空标题守卫（归一化后的空串是任何键的「前缀」，会假命中）
+- **深链派发改 ShellExecuteW 优先**：`cmd /C start` 会把成对 `%` 当环境变量展开、破坏 percent-encoded URL（对经同一入口派发的 WorkBuddy/Codex 深链同样生效，cmd 降为兜底）
+- ZCode 卡片：子代理计数只数 30 秒活跃窗口内的子行（原为终身总数按最新行门控，先后派生多个子代理时计数虚高）；最后消息摘要跳过 `<todo>` 等记账消息（原会把工具内部提醒当对话内容展示且角色误标 user）
+- MCP 面板读取链路硬编码旧工具清单（仅 claude/codex/opencode，openclaw/kimi/workbuddy 的 MCP 读取一直落「未知工具」）——改走 adapter 注册表统一分发，段定位按 adapter 声明的键路径（兼容历史顶层键探测）；资源导入溯源 `detect_source_tool` 与前端 `SUPPORTED_TOOLS` 硬编码清单同批注册表化
+
+### Changed
+- 会话卡顶行布局：项目名优先完整显示，会话标题压缩为灰色尾巴、空间不足时先让路（此前 kimi 长任务标题曾把项目名挤成单字）
 
 ## [0.3.0] - 2026-09-06
 ### Added
