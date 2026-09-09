@@ -85,7 +85,8 @@ Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 - **Skill**：符号链接（Unix）/ 交接点（Windows）映射到各工具的 skill 目录
 - **MCP 服务器**：自动格式转换 —— JSON（Claude / Kimi / WorkBuddy）/ TOML（Codex）/ JSONC（OpenCode）/ JSON 嵌套子树（ZCode：`mcp.servers`，读-改-写只动该子树、未知键与原键序保留）
 - **插件**：文件/配置混合管理
-- 首次启动自动导入已有 skill（从 `~/.claude/skills/`、`~/.agents/skills/`、`~/.config/opencode/skills/`）
+- 首次启动自动导入已有 skill（从 `~/.claude/skills/`、`~/.codex/skills/`、`~/.config/opencode/skills/` 等各工具目录，以及共享目录 `~/.agents/skills/`）
+- `~/.agents/skills/` 为**只读共享导入源**（来源标签 `agents-shared`）：MAM 仅扫描入库（不归属工具、不建链），codex / zcode 等遵循开放标准的工具直接读取该目录
 - 重新扫描按钮发现新安装的 skill
 <img width="1384" height="1016" alt="image" src="https://github.com/user-attachments/assets/3b2e9996-0989-4d31-98fd-b0675a00c24f" />
 
@@ -257,12 +258,14 @@ pnpm lint:fix     # ESLint 自动修复
 | 工具 | Skill 目录 | MCP 配置 | MCP 格式 | Hook 支持 |
 |------|-----------|----------|----------|----------|
 | Claude Code | `~/.claude/skills/` | `~/.claude.json` | JSON | ✅（PascalCase） |
-| Codex CLI | `~/.agents/skills/` | `~/.codex/config.toml` | TOML | ✅（camelCase） |
+| Codex CLI | `~/.codex/skills/` | `~/.codex/config.toml` | TOML | ✅（camelCase） |
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌（状态经 wire 解析） |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌（状态经心跳 + JSONL 推导） |
 | ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON（`mcp.servers` 嵌套子树） | ❌（状态经 SQLite 消息流尾部推导） |
+
+> 注：`~/.agents/skills/` 是 Agent Skills 开放标准的跨工具共享目录（codex / zcode 等直接读取）。MAM 对 codex 的 skill 激活目录为私有 `~/.codex/skills/`；`.agents` 仅作只读共享导入源（来源标签 `agents-shared`）——MAM 扫描入库、不归属工具、不建链；除一次性迁移 MAM 自建遗留链接外，永不写入该目录。
 
 ### Kimi Code 数据目录重定向
 

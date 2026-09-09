@@ -731,3 +731,59 @@ $ pnpm test                                   # 46 files, 228 tests ✅
     自动落 ZCode.exe 窗口聚焦兜底；③ 深链路径为反斜杠 + 大写盘符整段编码
     （日志可见 URL 形态）；④ Electron 辅助进程/会话运行时不被误判宿主
     （强杀主进程后卡片清理，即便辅助进程残存）。
+
+---
+
+# 实现说明 — codex 私有 Skill 目录化 + `.agents` 只读共享化
+
+日期：2026-09-09 ｜ 分支：feat/codex-private-skill-dir ｜ 证据基线：官方文档 + codex 0.149.1 实机取证（详见 spec §2）
+
+## X0. 决策总览
+
+| 决策 | 内容 |
+|---|---|
+| codex 激活目标切换 | `skill_dir_for_tool("codex")`：`~/.agents/skills` → **`~/.codex/skills`**（私有目录）。`.agents` 是 Agent Skills 开放标准的跨工具共享目录（codex 与 zcode 都读，spec F1/F3），把它当 codex 专属激活目标会让「仅对 codex 启停」泄露给所有遵循该标准的工具 |
+| `.agents` 降级为只读通用导入源 | `auto_import_extensions` 扫描源显式追加 `~/.agents/skills`，来源标签 **`agents-shared`**：手装技能照常入库，但 `source_tool=None`（不归属工具、不补链）；MAM 从此永不写该目录（唯一例外是迁移对话框对「MAM 自建链接」的处置） |
+| 遗留链接一次性迁移对话框 | 识别谓词 = `.agents/skills` 下 target 规范化后位于 `~/.mam/active/codex/` 的 MAM 自建链接（手装真目录/外部链接/断链不命中）；启动后台检测，命中即弹二选一——「迁移到 .codex/skills」（在 `.codex/skills` 重建链接、删旧链，DB assignments 与 Layer 2 完全不动 = 启停无损；同名冲突跳过并报告）或「保留为共享」（`.agents` 侧 target 改指 Layer 1 `~/.mam/skills/`，脱钩 codex 启停、继续服务未适配工具）；两种结局谓词均不再命中，对话框自熄灭，无需持久化开关 |
+| SSOT 删除保护 | 删除 `~/.mam/skills/<name>` 前若 `.agents/skills/<name>` 存在指向它的直链，删除请求返回需确认提示（防止「保留为共享」后误删 SSOT 导致依赖共享目录的未适配工具失效） |
+
+## X1. 证据引用（spec F1–F6 摘引）
+
+依据 spec `docs/superpowers/specs/2026-09-09-codex-private-skill-dir-design.md` §2（2026-09-09 取证）：
+
+- **F1** codex 读 `~/.agents/skills`——官方文档（开放标准用户级路径）；
+- **F2** codex 也读私有 `~/.codex/skills`——codex 0.149.1 实机取证：全局状态留有
+  `~/.codex/skills` 下技能的真实调用记录、官方捆绑系统技能落在 `.codex/skills/.system`、
+  社区文档与 GitHub Discussion #9682 确认该目录用户技能可与系统技能并列、符号链接受支持；
+- **F3** zcode 双读 `~/.zcode/skills`（优先）+ `~/.agents/skills`，同名 first-wins——ZCode 官方配置指南；
+- **F4** 后端对 codex skill 目录的硬编码仅 `skill_dir_for_tool` 一处，写入/生效检测/导入扫描均派生自注册表——单点切换可行，linker 零硬编码；
+- **F5** 启用状态真源 = DB assignments + Layer 2，工具侧目录只是投影——迁移可不动启停状态；
+- **F6** codex adapter 的 `skill_dirs()` fallback 本就是 `base_dir().join("skills")` = `~/.codex/skills`。
+
+残留风险（spec §2 / §8 V1）：`.codex/skills` 中符号链接被 codex 跟随目前只有 F2 的
+文档背书 + codex 已在 `.agents/skills` 跟随 MAM 链接的旁证，发布前需按 spec §8 实机验证。
+
+## X2. 方案选型
+
+**方案 A（采用）**：codex → `~/.codex/skills` + `.agents` 只读导入源 + 遗留链接一次性迁移对话框。
+方案 B（否决）：把 `.agents` 注册为可启用的伪工具目标——伪工具需贯穿 monitor/MCP/预设/徽标处处特判，
+当前无实锤的未适配工具需求，YAGNI（留作后续立项）。方案 C（否决）：目录不动，用 codex
+`[[skills.config]]` / zcode 配置禁用覆盖做精准化——破坏「链接存在 = 已启用」单一真源，复杂度最高。
+
+## X3. 提交序列
+
+```
+b0beffa feat(adapter): switch codex skill registry to private ~/.codex/skills
+d5f4c36 feat(resources): treat ~/.agents/skills as read-only shared import source
+bccdfe9 feat(migration): legacy codex link detection and migrate/keep for .agents
+7589153 feat(ui): one-time legacy codex skill link migration dialog
+8d2c7e9 feat(resources): confirm guard when deleting SSOT skill referenced by .agents
+```
+
+既有测试更新三处断言：两处按全局约束的单元断言（§7.1 `codex_skill_dir_uses_real_cli_directory`、
+§7.2 `registry_covers_late_registered_tools` 的 `.agents` 行），另有一处被迫同步的集成测试断言
+（`src-tauri/tests/linker_test.rs::test_enable_skill_for_tool_creates_codex_harness_link`，
+注册表切换的设计内后果：原断言 codex harness 链接落在 `~/.agents/skills`，注册表切至
+`~/.codex/skills` 后按设计必然失败，已最小更新为 `.codex/skills` 断言并加锁 `.agents`
+手装源保持非链接真目录）；其余既有测试与 fixture 零改动；新增测试全部 tempdir fixture，
+零真实家目录访问。

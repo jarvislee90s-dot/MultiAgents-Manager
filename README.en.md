@@ -83,7 +83,8 @@ Unified repository for Skills, MCP servers, and Plugins across tools:
 - **Skills**: Symlink (Unix) / Junction (Windows) mapping to each tool's skill directory
 - **MCP Servers**: Auto-format conversion — JSON (Claude / Kimi / WorkBuddy) / TOML (Codex) / JSONC (OpenCode) / nested JSON subtree (ZCode: `mcp.servers`; read-modify-write touches only that subtree, preserving unknown keys and original key order)
 - **Plugins**: File/config hybrid management
-- Auto-import existing skills on first launch (from `~/.claude/skills/`, `~/.agents/skills/`, `~/.config/opencode/skills/`)
+- Auto-import existing skills on first launch (from per-tool directories such as `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, plus the shared directory `~/.agents/skills/`)
+- `~/.agents/skills/` is a **read-only shared import source** (source label `agents-shared`): MAM only scans it into the repository (no tool attribution, no linking); tools that follow the open standard, such as codex / zcode, read this directory directly
 - Rescan button for discovering newly installed skills
 
 ### Preset Groups
@@ -253,12 +254,14 @@ The app stores its data in `~/.mam/`:
 | Tool | Skill Directory | MCP Config | MCP Format | Hook Support |
 |------|----------------|------------|------------|-------------|
 | Claude Code | `~/.claude/skills/` | `~/.claude.json` | JSON | ✅ (PascalCase) |
-| Codex CLI | `~/.agents/skills/` | `~/.codex/config.toml` | TOML | ✅ (camelCase) |
+| Codex CLI | `~/.codex/skills/` | `~/.codex/config.toml` | TOML | ✅ (camelCase) |
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
 | OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌ (status parsed from wire) |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌ (status derived from heartbeat + JSONL) |
 | ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON (nested `mcp.servers` subtree) | ❌ (status derived from SQLite message-stream tail) |
+
+> Note: `~/.agents/skills/` is the cross-tool shared directory of the Agent Skills open standard (read directly by codex / zcode and other compliant tools). MAM's skill activation directory for codex is the private `~/.codex/skills/`; `.agents` serves only as a read-only shared import source (source label `agents-shared`) — MAM scans it into the repository, with no tool attribution, no linking, and never writes to it (sole exception: one-time migration of MAM-created legacy links).
 
 ---
 
