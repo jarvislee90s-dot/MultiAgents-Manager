@@ -26,7 +26,9 @@ struct AgentEntry {
     workspace: Option<String>,
 }
 
-/// 获取 OpenClaw 会话
+/// 获取 OpenClaw 会话。
+/// 扫描预算豁免说明（monitor::session_scan）：配置声明 workspace + 零进程空判早退
+/// （L1），IO 极小，不接 L2/L3
 pub fn get_openclaw_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     if processes.is_empty() {
         return Vec::new();

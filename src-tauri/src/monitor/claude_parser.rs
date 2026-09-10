@@ -9,6 +9,7 @@ use super::jsonl::{
 };
 use super::path_codec::{convert_dir_name_to_path, convert_path_to_dir_name};
 use super::project::project_name_from_path;
+use super::session_scan::SessionFileScan;
 use super::status::*;
 use crate::adapter::AgentProcess;
 use crate::session::model::JsonlMessage;
@@ -19,6 +20,11 @@ use std::fs;
 use std::path::Path;
 
 const RECENT_LINES: usize = 500;
+
+/// L2 摘要缓存（monitor::session_scan）：claude 为进程界定有界扫描（目录名预过滤），
+/// L1+L2 已足够——窗口化反而会丢空闲超窗的活跃卡（见 session_scan 模块文档）
+const CLAUDE_CWD_SCAN: SessionFileScan = SessionFileScan::new("claude-cwd");
+const CLAUDE_DIGEST_SCAN: SessionFileScan = SessionFileScan::new("claude-digest");
 
 /// 扫描 ~/.claude/projects，匹配运行中的 Claude 进程
 pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
@@ -65,8 +71,13 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 
             let mut cwd_to_files: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
             for f in &jsonl_files {
-                let file_cwd =
-                    extract_cwd_from_jsonl(f).unwrap_or_else(|| convert_dir_name_to_path(dir_name));
+                // L2：cwd 提取走 (mtime,size) 缓存（纯内容函数）；未解析出 cwd 才用目录名反推
+                let file_cwd = CLAUDE_CWD_SCAN
+                    .parse(f, extract_cwd_from_jsonl)
+                    .as_ref()
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| convert_dir_name_to_path(dir_name));
                 // 与进程 cwd 同一归一化域（Windows 下小写、无尾部分隔符），两侧才可比
                 cwd_to_files
                     .entry(normalize_cwd_for_match(&file_cwd))
@@ -98,22 +109,23 @@ pub fn get_claude_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     sessions
 }
 
-/// 解析单个 Claude JSONL 文件
-fn parse_claude_jsonl(
-    jsonl_path: &Path,
-    project_path: &str,
-    process: &AgentProcess,
-) -> Option<Session> {
-    use std::time::SystemTime;
+/// 纯内容摘要（L2 缓存产物）：只由文件内容决定；100 字符截断随摘要一并缓存
+struct ClaudeFileDigest {
+    session_id: Option<String>,
+    git_branch: Option<String>,
+    last_timestamp: Option<String>,
+    last_msg_type: Option<String>,
+    last_has_tool_use: bool,
+    last_has_tool_result: bool,
+    last_is_local: bool,
+    last_is_interrupted: bool,
+    last_is_user_input: bool,
+    is_compacting: bool,
+    last_message: Option<String>,
+    last_role: Option<String>,
+}
 
-    let file_age_secs = jsonl_path
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .map(|d| d.as_secs_f32());
-    let file_recently_modified = file_age_secs.map(|a| a < 3.0).unwrap_or(false);
-
+fn read_claude_digest(jsonl_path: &Path) -> ClaudeFileDigest {
     let recent = read_recent_lines(jsonl_path, RECENT_LINES);
 
     let mut session_id = None;
@@ -202,24 +214,6 @@ fn parse_claude_jsonl(
         }
     }
 
-    let session_id = session_id?;
-    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（MAM:<id 前 8 位>）保持一致
-    let session_title = session_id.chars().take(8).collect::<String>();
-    let status = if is_compacting {
-        SessionStatus::Compacting
-    } else {
-        determine_status(
-            last_msg_type.as_deref(),
-            last_has_tool_use,
-            last_has_tool_result,
-            last_is_local,
-            last_is_interrupted,
-            last_is_user_input,
-            file_recently_modified,
-        )
-    };
-
-    let project_name = project_name_from_path(project_path);
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 {
             format!("{}...", m.chars().take(100).collect::<String>())
@@ -228,17 +222,73 @@ fn parse_claude_jsonl(
         }
     });
 
+    ClaudeFileDigest {
+        session_id,
+        git_branch,
+        last_timestamp,
+        last_msg_type,
+        last_has_tool_use,
+        last_has_tool_result,
+        last_is_local,
+        last_is_interrupted,
+        last_is_user_input,
+        is_compacting,
+        last_message,
+        last_role,
+    }
+}
+
+/// 解析单个 Claude JSONL 文件（L2 缓存摘要 + 时间叠加/进程盖章现算，保留原签名）
+fn parse_claude_jsonl(
+    jsonl_path: &Path,
+    project_path: &str,
+    process: &AgentProcess,
+) -> Option<Session> {
+    use std::time::SystemTime;
+
+    let d = CLAUDE_DIGEST_SCAN.parse(jsonl_path, read_claude_digest);
+    let digest = d.as_ref();
+    // 时间叠加每次现算（L2 契约）：recently-modified 参与状态判定，不能进缓存
+    let file_recently_modified = jsonl_path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| SystemTime::now().duration_since(m).ok())
+        .map(|age| age.as_secs_f32() < 3.0)
+        .unwrap_or(false);
+
+    let session_id = digest.session_id.clone()?;
+    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（MAM:<id 前 8 位>）保持一致
+    let session_title = session_id.chars().take(8).collect::<String>();
+    let status = if digest.is_compacting {
+        SessionStatus::Compacting
+    } else {
+        determine_status(
+            digest.last_msg_type.as_deref(),
+            digest.last_has_tool_use,
+            digest.last_has_tool_result,
+            digest.last_is_local,
+            digest.last_is_interrupted,
+            digest.last_is_user_input,
+            file_recently_modified,
+        )
+    };
+
+    let project_name = project_name_from_path(project_path);
     Some(Session {
         id: session_id,
         agent_type: AgentType::Claude,
         project_name,
         project_path: project_path.to_string(),
-        git_branch,
+        git_branch: digest.git_branch.clone(),
         github_url: get_github_url(project_path),
         status,
-        last_message,
-        last_message_role: last_role,
-        last_activity_at: last_timestamp.unwrap_or_else(|| "Unknown".to_string()),
+        last_message: digest.last_message.clone(),
+        last_message_role: digest.last_role.clone(),
+        last_activity_at: digest
+            .last_timestamp
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string()),
         pid: process.pid,
         cpu_usage: process.cpu_usage,
         active_subagent_count: 0,

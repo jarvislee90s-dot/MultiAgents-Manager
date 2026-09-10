@@ -6,6 +6,7 @@ use super::app_status::{derive_app_status, AppEntryKind};
 use super::git::get_github_url;
 use super::jsonl::{read_first_lines, read_recent_lines};
 use super::project::project_name_from_path;
+use super::session_scan::SessionFileScan;
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, ProcessForm, Session, SessionStatus};
 use once_cell::sync::Lazy;
@@ -13,6 +14,24 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// L2 摘要缓存（monitor::session_scan）：workbuddy 为进程界定有界扫描
+/// （心跳文件直达会话 jsonl），L1+L2 已足够（见 session_scan 模块文档）
+const WORKBUDDY_SCAN: SessionFileScan = SessionFileScan::new("workbuddy-tail");
+
+/// jsonl 内容摘要（L2 缓存产物）：核心状态 + 最后一条消息文本均由文件内容决定
+struct WorkBuddyTailDigest {
+    status_core: SessionStatus,
+    last_message: Option<String>,
+}
+
+fn read_workbuddy_tail_digest(jsonl: &Path) -> WorkBuddyTailDigest {
+    let lines = read_recent_lines(jsonl, 500);
+    WorkBuddyTailDigest {
+        status_core: derive_status_from_tail(&lines),
+        last_message: lines.iter().rev().find_map(|l| extract_message_text(l)),
+    }
+}
 
 /// 心跳新鲜阈值：取 MAM 轮询周期（约 30s）的 3 倍，防止轮询间隙卡片闪烁
 pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
@@ -358,24 +377,21 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             continue; // 会话文件未落盘/未命中（防御；mangle 兜底扫描也失败）
         };
 
-        // 尾部解析（复用通用 JSONL 尾读设施；行数与 codex 一致 500）
-        let lines = read_recent_lines(&jsonl, 500);
+        // 尾部解析走 L2 摘要缓存（monitor::session_scan；行数与 codex 一致 500）
+        let digest = WORKBUDDY_SCAN.parse(&jsonl, read_workbuddy_tail_digest);
+        let d = digest.as_ref();
         // JSONL mtime（epoch 毫秒）只取一次，供状态叠加与 last_activity_at 复用
         let jsonl_mtime_ms = jsonl
             .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
+            .map(|dur| dur.as_millis() as u64);
         // 叠加 App 形态 mtime 阈值（spec §4：App 形态 300s，与 Codex APP 一致）——
         // 函数调用尾部停更 >= 300s 视为等待而非运行中；mtime 缺失按未过期处理（防御）
         let mtime_age_ms = jsonl_mtime_ms.map_or(0, |m| now.saturating_sub(m));
-        let status = overlay_mtime_stale(derive_status_from_tail(&lines), mtime_age_ms);
-        let last_message = lines
-            .iter()
-            .rev()
-            .find_map(|l| extract_message_text(l))
-            .unwrap_or_default();
+        let status = overlay_mtime_stale(d.status_core.clone(), mtime_age_ms);
+        let last_message = d.last_message.clone().unwrap_or_default();
 
         let title = resolve_title(db_conn.as_ref(), &hb.session_id, &jsonl);
 
