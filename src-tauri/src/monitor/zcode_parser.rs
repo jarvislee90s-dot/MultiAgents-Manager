@@ -97,11 +97,19 @@ pub fn is_valid_session_id(id: &str) -> bool {
 
 /// exe 路径（或进程名）是否为 ZCode 可执行体。
 /// macOS 主进程可执行名 `ZCode`；`ZCode Helper` / `zcode-cli` / `zcode-host-local-1` /
-/// `zcode-node-repl-mcp` 等非宿主进程 basename 均不严格等于 zcode（含 .exe 归一）
+/// `zcode-node-repl-mcp` 等非宿主进程 basename 均不严格等于 zcode（含 .exe 归一）。
+/// spec §3 双重条件（PR #46 review M1）：macOS 侧要求路径含 `ZCode.app/Contents/MacOS`
+/// **且** basename 精确匹配——仅 basename 会把任何恰叫 `zcode` 的第三方二进制误判
+/// 为宿主（宿主误判 = 应用关闭时卡片不消失）。Windows 全部可执行体同名 `ZCode.exe`、
+/// 路径无区分度，维持 basename 判定（细粒度由 cmdline_is_non_host 把守，见 host.rs）
 pub fn exe_basename_is_zcode(exe: &str) -> bool {
     let normalized = exe.replace('\\', "/").to_lowercase();
     let base = normalized.rsplit('/').next().unwrap_or_default();
-    base == "zcode" || base == "zcode.exe"
+    if normalized.contains("zcode.app/contents/macos") {
+        base == "zcode"
+    } else {
+        base == "zcode.exe"
+    }
 }
 
 /// 命令行是否为非宿主进程（Windows 侧唯一判据——全部可执行体都是 ZCode.exe）：
@@ -117,6 +125,16 @@ pub fn cmdline_is_non_host(cmd: &[std::ffi::OsString]) -> bool {
     })
 }
 
+/// 进程名兜底判定（exe 路径读不到的提权场景）：只有名字、没有路径证据，
+/// 无法应用 .app 路径双重条件——保持宽松（漏判宿主会清空全部卡片，代价高于
+/// 误判，见 process_is_host 文档）。名字恰为 zcode 的第三方进程只要 exe 路径
+/// 可读，已在 exe_basename_is_zcode 的路径门拦截，此处宽松只覆盖无路径证据面
+fn name_is_zcode(name: &str) -> bool {
+    let normalized = name.replace('\\', "/").to_lowercase();
+    let base = normalized.rsplit('/').next().unwrap_or_default();
+    base == "zcode" || base == "zcode.exe"
+}
+
 /// 进程是否为 ZCode 宿主（应用主进程）：exe/进程名命中 + 命令行非辅助/会话运行时。
 /// cmd 读不到（空切片，提权进程场景）时按 exe 判定放行——漏判宿主会清空全部卡片，
 /// 代价高于把辅助进程误当宿主（与 monitor::host 的防御方向一致）
@@ -124,7 +142,7 @@ pub fn process_is_host(exe: Option<&Path>, name: &str, cmd: &[std::ffi::OsString
     let exe_hit = exe
         .map(|e| exe_basename_is_zcode(&e.to_string_lossy()))
         .unwrap_or(false)
-        || exe_basename_is_zcode(name);
+        || name_is_zcode(name);
     exe_hit && !cmdline_is_non_host(cmd)
 }
 
@@ -353,16 +371,21 @@ fn text_truthy(s: &str) -> bool {
 /// 健康等待子代理」还是「真的卡住」（D5 共享层能力的 ZCode 数据源）。
 /// 首字段只数 30s 活跃窗口内落库的子行（卡片「N 个子代理」计数口径），
 /// 不是终身总数——先后派生 5 个、仅最新一个活跃时为 1。
-/// task_type 列存在时仅统计 subagent_child：fork 等显式他类的子会话可能带相同
-/// parent_id 但不是子代理，不得豁免主会话的真卡死；列缺失或行值 NULL/空串时
-/// 不过滤（私有格式演进防御，维持现状）
+/// task_type 列存在时按**黑名单**过滤（PR #46 review M2）：只显式排除已知非
+/// 子代理类（fork / selection_side_chat），未知非空值保守放行——白名单语义下
+/// ZCode 未来把 subagent_child 改名（如 sub_agent_child）会把这些行静默滤出，
+/// 后代表缺失 → 真在跑子代理的主会话被误降级 Waiting，误降级代价高于误豁免
+/// （误豁免只是晚一轮报警）。列缺失或行值 NULL/空串照旧不过滤
 fn load_descendant_activity(conn: &Connection, now: i64) -> HashMap<String, (usize, i64)> {
-    // 列存在性探测：prepare 阶段即解析列名，缺列报「no such column」
+    // 列存在性探测：prepare 阶段即解析列名，缺列报「no such column」。
+    // 主防线在上游 list_recent_sessions（同列缺失时该查询先行失败、会话列表
+    // 已降级为空），此探测仅为 schema 漂移双保险，"\"\"" 分支正常不可达
     let type_pred = if conn
         .prepare("SELECT \"task_type\" FROM session LIMIT 1")
         .is_ok()
     {
-        " AND (\"task_type\" = 'subagent_child' OR \"task_type\" IS NULL OR \"task_type\" = '')"
+        // NOT IN 对 NULL 行返回 NULL（三值逻辑），IS NULL 必须显式放行在前
+        " AND (\"task_type\" IS NULL OR \"task_type\" = '' OR \"task_type\" NOT IN ('fork', 'selection_side_chat'))"
     } else {
         ""
     };
@@ -908,6 +931,11 @@ mod tests {
         assert!(!exe_basename_is_zcode("/opt/zcode-node-repl-mcp"));
         assert!(!exe_basename_is_zcode(""));
         assert!(!exe_basename_is_zcode("/usr/local/bin/claude"));
+        // M1：macOS 侧恰叫 zcode 的第三方二进制（非 .app 形态）不得判为宿主
+        assert!(!exe_basename_is_zcode("/usr/local/bin/zcode"));
+        assert!(!exe_basename_is_zcode("/opt/some-tool/zcode"));
+        // Windows 大小写归一照旧
+        assert!(exe_basename_is_zcode("C:\\apps\\zcode.exe"));
     }
 
     #[test]
@@ -1643,6 +1671,33 @@ mod tests {
             sessions2[0].status,
             SessionStatus::Processing,
             "无类型声明的后代仍豁免"
+        );
+
+        // M2 黑名单语义：task_type 改名（如 sub_agent_child）这类未知非空值必须
+        // 保守放行——白名单语义下值改名会静默滤出后代表、误降级真在跑子代理的主会话
+        let tmp3 = tempfile::tempdir().unwrap();
+        let roots3 = fixture_roots(tmp3.path());
+        let cli3 = build_cli_db(&roots3.cli_db);
+        seed_stalled_main(&cli3);
+        insert_session(
+            &cli3,
+            SID_CHILD,
+            Some(SID_A),
+            "/proj/a",
+            "sub_agent_child", // 假想的未来改名形态
+            None,
+            now - 5_000,
+        );
+        drop(cli3);
+        let sessions3 = build_sessions(&roots3, &fake_host(), now);
+        assert_eq!(
+            sessions3[0].status,
+            SessionStatus::Processing,
+            "未知 task_type 值的后代仍豁免（黑名单语义）"
+        );
+        assert_eq!(
+            sessions3[0].active_subagent_count, 1,
+            "未知 task_type 值计入子代理计数"
         );
     }
 

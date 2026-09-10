@@ -189,7 +189,7 @@ static SHARED_SYSTEM: Mutex<Option<System>> = Mutex::new(None);
 /// codex 每轮新 rollout）在这里统一兜住，一处修复覆盖全部工具
 pub fn dedup_sessions(sessions: &mut Vec<Session>) {
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    sessions.retain(|s| seen.insert((format!("{:?}", s.agent_type), s.id.clone())));
+    sessions.retain(|s| seen.insert((s.agent_type.tool_id().to_string(), s.id.clone())));
 }
 
 /// 获取所有注册 adapter 的会话
@@ -290,7 +290,7 @@ pub fn get_all_sessions() -> SessionsResponse {
                 crate::database::find_status(&s.id).as_deref(),
                 Some("Idle") | Some("Finished")
             );
-            let tool = format!("{:?}", s.agent_type).to_lowercase();
+            let tool = s.agent_type.tool_id().to_string();
             !codex_green_card_should_drop(was_green_prev, pool.contains(&(tool, s.id.clone())))
         });
     }
@@ -462,9 +462,7 @@ fn green_card_is_data_driven(agent_type: &AgentType) -> bool {
 /// 本过滤器不碰。host_alive 经参数注入，复用 SHARED_SYSTEM 快照避免重复全量扫描
 fn filter_host_dead_cards(sessions: &mut Vec<Session>, host_alive: &dyn Fn(&str) -> bool) {
     sessions.retain(|s| {
-        !matches!(s.form, ProcessForm::App)
-            || s.unread
-            || host_alive(&format!("{:?}", s.agent_type).to_lowercase())
+        !matches!(s.form, ProcessForm::App) || s.unread || host_alive(s.agent_type.tool_id())
     });
 }
 
@@ -534,7 +532,7 @@ fn sync_unread_sessions(active: &mut Vec<Session>) {
         if !matches!(s.form, ProcessForm::App) {
             continue; // 仅 APP 类参与（spec W4 范围）
         }
-        let tool = format!("{:?}", s.agent_type).to_lowercase();
+        let tool = s.agent_type.tool_id().to_string();
         let idle = matches!(s.status, SessionStatus::Idle | SessionStatus::Finished);
         if idle {
             // review F1：迁移触发——状态缓存此刻存的是上一轮状态（回合末尾才统一更新），
@@ -625,7 +623,7 @@ fn build_unread_cards(
 ) -> Vec<Session> {
     let active_keys: HashSet<(String, String)> = active
         .iter()
-        .map(|s| (format!("{:?}", s.agent_type).to_lowercase(), s.id.clone()))
+        .map(|s| (s.agent_type.tool_id().to_string(), s.id.clone()))
         .collect();
     let mut cards = Vec::new();
     for r in pool {
