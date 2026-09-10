@@ -1,7 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-09-10
 ### Added
+- **ZCode 第七工具支持**（智谱桌面 AI 编程助手，Electron APP 形态）：宿主判定（进程侧只回答「应用开没开」，Windows 全部可执行体同名 ZCode.exe 时按命令行区分主进程/辅助进程/会话运行时）+ 双 SQLite 会话聚合（tasks-index 任务索引 + session/message/part 消息流，每会话一卡、24h 窗口、archived/deleted 过滤、会话 id 严格 UUID 校验）；状态从消息流尾部按 sequence 倒扫推导（step-finish 懒落库时间戳不可靠、顺序可靠），todo_reminder 等记账消息识别跳过；子代理长任务经共享层「后代活跃度仲裁」保持运行中（主会话静默 + 子会话活跃 = 健康等待，停更且无后代活动 = 疑似卡住）；task_status=error 按完成转绿。资源管理：skill 分发（SSOT → `~/.zcode/skills/` 建链/删链，**目录已实测被 ZCode 识别**）+ MCP 读-改-写（`~/.zcode/cli/config.json` 仅 `mcp.servers` 子树，未知键与原键序保留，解析失败只报错不落盘，`enable:false` 如实展示为停用）
+- **ZCode 跳转 = 直接聚焦唯一窗口**：ZCode 为单窗口多标签应用（实机取证：`windowId:1` 恒定、标题恒为 "ZCode" 不含工作区名），点击卡片经 pid 单窗口路径零歧义锁定，失败落 APP 级激活兜底。工作区深链 `zcode://workspace/open` 经实机验收后**有意不接入**：其语义为打开工作区 + 全新会话 composer（非定位已有会话）、每次派发无条件弹信任确认且拉起一个转发进程
+- **同项目双开跳转直达（窗口标题匹配层）**：Kimi / OpenCode 的终端窗口标题与会话标题（kimi `state.json` 标题 / OpenCode DB 标题）归一化比对（剥 spinner 前缀 / "OC | " 工具前缀 / 尾部省略号），唯一命中即锁定——双开终端不再弹选择器；会话标题经全部跳转入口（看板 / 通知 / 桌宠 / 历史）统一透传
+- 卡片项目名显示预算：中文封顶 10 字、英文封顶 15 字符（15 单位宽度预算，CJK 每字 1.5 单位），截断点确定、不随卡宽漂移，完整名悬停可见
+- 共享层通用化（D5）：停更降级新增后代活跃度仲裁参数（空后代语义 = 现状，既有工具行为零变化并有逐边界回归测试）；数据驱动持久绿卡门（P1-3 剔除 + 未读态标记）从 Codex 特判泛化为工具能力判定，ZCode 聚合卡复用同款语义
 - **codex 私有 Skill 目录化**：codex 的 skill 激活目录从跨工具共享的 `~/.agents/skills/` 切换为私有 `~/.codex/skills/`（codex 0.149.1 实测读取该目录，官方捆绑系统技能同落此处）——对 codex 单独启用/禁用技能不再泄露给 zcode 等遵循 Agent Skills 开放标准的工具
 - **`~/.agents/skills/` 转为只读共享导入源（来源标签 `agents-shared`）**：手装技能照常自动扫描入库，但不归属任何工具、不建链；除一次性迁移 MAM 自建遗留链接外，MAM 不再向该目录写入（codex / zcode 等遵循开放标准的工具直接读取）
 - **遗留 codex 链接一次性迁移对话框**：启动时后台检测 `.agents/skills` 下 MAM 自建链接（指向 `~/.mam/active/codex/`），命中即弹二选一——「迁移到 `.codex/skills`」（DB 分配与 Layer 2 不动，启停状态无损）或「保留为共享」（改指 SSOT 仓库 `~/.mam/skills/`，脱钩 codex 启停、继续服务未适配工具）；两种选择后对话框均自熄灭不再触发
@@ -10,15 +15,7 @@
 
 ### Changed
 - **会话扫描三层预算（性能）**：前端 3 秒轮询下各解析器不再每轮全量重扫历史会话（实机 codex 会话库 2GB / 388 文件曾把主线程打满 100%、界面卡死）。三层通用机制落在 `monitor/session_scan`：① 零进程零解析（`get_all_sessions` 编排层统一短路 + 全 adapter 防回归测试）；② `(mtime,size)` 内容摘要缓存——解析拆「纯内容产物（缓存）+ 时间叠加（现算）」，codex / claude / kimi / workbuddy 已接入；③ 无界历史扫描限 24h 新鲜窗口 + 活跃进程窗口内匹配不到才回退全量（codex；进程界定有界扫描不窗口化以免丢空闲超窗的活跃卡）。opencode / zcode（SQLite 查询即过滤）与 openclaw（配置界定）仅享 ①。契约已写入 AGENTS.md「Agent Adapter 模式」与 trait 文档，新工具接入自动受保护
-- **codex / zcode 停更不落兜底红灯**：无内容信号时无法区分「等用户输入」与「对话已结束」，时间兜底一律落绿灯（Idle 完成待看，接入既有未读/绿卡管线）——codex rollout 路线的无信号兜底与 300s 停更降级、zcode 的无信号 fallback 均已改；红灯只保留给有证据的等待（claude 内容判定、zcode 内容+后代仲裁「疑侼卡住」）；进程绑定型工具（claude/kimi/workbuddy）不动
-
-## [0.4.0] - 2026-09-09
-### Added
-- **ZCode 第七工具支持**（智谱桌面 AI 编程助手，Electron APP 形态）：宿主判定（进程侧只回答「应用开没开」，Windows 全部可执行体同名 ZCode.exe 时按命令行区分主进程/辅助进程/会话运行时）+ 双 SQLite 会话聚合（tasks-index 任务索引 + session/message/part 消息流，每会话一卡、24h 窗口、archived/deleted 过滤、会话 id 严格 UUID 校验）；状态从消息流尾部按 sequence 倒扫推导（step-finish 懒落库时间戳不可靠、顺序可靠），todo_reminder 等记账消息识别跳过；子代理长任务经共享层「后代活跃度仲裁」保持运行中（主会话静默 + 子会话活跃 = 健康等待，停更且无后代活动 = 疑似卡住）；task_status=error 按完成转绿。资源管理：skill 分发（SSOT → `~/.zcode/skills/` 建链/删链，**目录已实测被 ZCode 识别**）+ MCP 读-改-写（`~/.zcode/cli/config.json` 仅 `mcp.servers` 子树，未知键与原键序保留，解析失败只报错不落盘，`enable:false` 如实展示为停用）
-- **ZCode 跳转 = 直接聚焦唯一窗口**：ZCode 为单窗口多标签应用（实机取证：`windowId:1` 恒定、标题恒为 "ZCode" 不含工作区名），点击卡片经 pid 单窗口路径零歧义锁定，失败落 APP 级激活兜底。工作区深链 `zcode://workspace/open` 经实机验收后**有意不接入**：其语义为打开工作区 + 全新会话 composer（非定位已有会话）、每次派发无条件弹信任确认且拉起一个转发进程
-- **同项目双开跳转直达（窗口标题匹配层）**：Kimi / OpenCode 的终端窗口标题与会话标题（kimi `state.json` 标题 / OpenCode DB 标题）归一化比对（剥 spinner 前缀 / "OC | " 工具前缀 / 尾部省略号），唯一命中即锁定——双开终端不再弹选择器；会话标题经全部跳转入口（看板 / 通知 / 桌宠 / 历史）统一透传
-- 卡片项目名显示预算：中文封顶 10 字、英文封顶 15 字符（15 单位宽度预算，CJK 每字 1.5 单位），截断点确定、不随卡宽漂移，完整名悬停可见
-- 共享层通用化（D5）：停更降级新增后代活跃度仲裁参数（空后代语义 = 现状，既有工具行为零变化并有逐边界回归测试）；数据驱动持久绿卡门（P1-3 剔除 + 未读态标记）从 Codex 特判泛化为工具能力判定，ZCode 聚合卡复用同款语义
+- **codex / zcode 停更不落兜底红灯**：无内容信号时无法区分「等用户输入」与「对话已结束」，时间兜底一律落绿灯（Idle 完成待看，接入既有未读/绿卡管线）——codex rollout 路线的无信号兜底与 300s 停更降级、zcode 的无信号 fallback 均已改；红灯只保留给有证据的等待（claude 内容判定、zcode 内容+后代仲裁「疑似卡住」）；进程绑定型工具（claude/kimi/workbuddy）不动
 
 ### Fixed
 - **Kimi 双开跳转必弹选择器**：CLI 写入 `state.json` 的 `updatedAt` 为整数毫秒，serde 类型不匹配导致整个状态解析失败 → 会话标题回退 `session_` 前缀 → 标题匹配层永不命中；现兼容数值 / 字符串双形态
