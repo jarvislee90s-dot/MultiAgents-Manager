@@ -444,11 +444,16 @@ fn build_one_session(
 
     let entries = flatten_entries(&messages, &parts);
     let age_ms = now.saturating_sub(row.time_updated).max(0) as u64;
-    // 尾部推导（主源）→ 无语义条目时按会话新鲜度兜底（与 Codex/WorkBuddy 同档）
+    // 尾部推导（主源）→ 无语义条目时按会话新鲜度兜底：新鲜 → Processing；
+    // 停更 → Idle（绿灯完成待看，2026-09-10 用户决策"不落兜底红"——无信号时
+    // 无法区分"等用户输入"与"已结束"，红灯「等待操作」会对每次完成的会话误报；
+    // 与 Codex 双路线、OpenCode 的"停更落绿防误报"原则对齐）。
+    // 注意仅 fallback 如此：内容推导的 Processing 经停更/后代仲裁降到的 Waiting
+    // （D5"疑似卡住"）是有内容与子代理树背书的判定，保持既有语义
     let fallback = if age_ms < FALLBACK_FRESH_MS as u64 {
         SessionStatus::Processing
     } else {
-        SessionStatus::Waiting
+        SessionStatus::Idle
     };
     let derived = derive_app_status(&entries).unwrap_or(fallback);
     // 停更降级 + 后代活跃度仲裁（D5 共享层；无后代 = 既有语义）

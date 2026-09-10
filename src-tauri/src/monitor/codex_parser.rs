@@ -397,7 +397,10 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
 /// assistant 纯文本 → Idle；function_call/function_call_output → Processing；
 /// task_started → Processing；task_complete → Idle；记账条目跳过。
 /// 无任何语义条目（如仅 session_meta 的 rollout）→ 兜底按形态：APP 文件新鲜
-/// （<300s）→ Processing，停更 → Waiting；CLI 保持 60s 阈值；再叠 300s 停更规则
+/// （<300s）→ Processing，停更 → Idle（绿灯）；CLI 保持 60s 阈值。
+/// codex 全线不落兜底红（2026-09-10 用户决策）：停更后无法区分"等用户输入"与
+/// "对话已结束"，红灯「等待操作」会对每次聊完的会话误报；落绿灯接入
+/// 「完成转绿 → 未读徽标 → 已读后绿卡剔除」既有管线（与 codex_thread_parser 同语义）
 fn session_from_digest(
     digest: &CodexFileDigest,
     process_form: ProcessForm,
@@ -413,12 +416,19 @@ fn session_from_digest(
             if fresh {
                 SessionStatus::Processing
             } else {
-                SessionStatus::Waiting
+                SessionStatus::Idle
             }
         }
     };
-    // 叠加 300s 规则：Processing 且 JSONL mtime 停更 >= 300s → Waiting（与 WorkBuddy 一致）
+    // 叠加 300s 规则（共享核）：Processing 且 JSONL mtime 停更 >= 300s → Waiting；
+    // derive_app_status 不产出 Waiting，此处 Waiting 只能来自时间兜底路径 →
+    // 就地转 Idle，内容推导的状态（Thinking/Idle/Processing）不受影响
     let status = overlay_mtime_stale(status, file_age_secs.map_or(0, |a| (a * 1000.0) as u64));
+    let status = if status == SessionStatus::Waiting {
+        SessionStatus::Idle
+    } else {
+        status
+    };
 
     let project_name = project_name_from_path(&digest.project_path);
     // 卡片前缀统一 12 位 hex（按字符截取，多字节 id 不 panic）：UUIDv7 前 8 hex 只编码
@@ -544,13 +554,13 @@ mod phase2_app_form_tests {
         path
     }
 
-    /// 夹具区分度自检：同一文件，Cli 形态（60s）判 Waiting，App 形态（300s）判 Processing
+    /// 夹具区分度自检：同一文件，Cli 形态（60s）停更 → Idle（绿灯），App 形态（300s）→ Processing
     #[test]
     fn fixture_discriminates_cli_vs_app_mtime_thresholds() {
         let tmp = tempfile::tempdir().unwrap();
         let f = write_meta_only_rollout(tmp.path());
         let cli = parse_codex_jsonl(&f, ProcessForm::Cli).unwrap();
-        assert_eq!(cli.status, SessionStatus::Waiting);
+        assert_eq!(cli.status, SessionStatus::Idle);
         let app = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(app.status, SessionStatus::Processing);
     }
@@ -815,9 +825,10 @@ mod app_status_fixture_tests {
         assert_eq!(session.status, SessionStatus::Idle);
     }
 
-    /// 300s 叠加：Processing 且文件停更 >= 300s → Waiting（与 WorkBuddy 语义一致）
+    /// 300s 叠加 + 兜底红消除：Processing 且文件停更 >= 300s → Idle（绿灯完成待看，
+    /// 2026-09-10 用户决策——停更后无法区分"等输入"与"已结束"，不落红灯「等待操作」）
     #[test]
-    fn processing_stale_downgrades_to_waiting() {
+    fn processing_stale_downgrades_to_idle() {
         let tmp = tempfile::tempdir().unwrap();
         let f = write_rollout(tmp.path(), &round_two_running());
         let stale = std::time::SystemTime::now()
@@ -830,7 +841,7 @@ mod app_status_fixture_tests {
             .set_modified(stale)
             .unwrap();
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
-        assert_eq!(session.status, SessionStatus::Waiting);
+        assert_eq!(session.status, SessionStatus::Idle);
     }
 
     /// 兜底分侧保持：无语义条目（仅 session_meta）时，APP 形态文件新鲜 → Processing
