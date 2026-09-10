@@ -92,6 +92,17 @@ jobs:
       - run: cd src-tauri && cargo clippy -- -D warnings
       - run: cd src-tauri && cargo test
 
+      # cfg(windows) 编译门禁（issue #45）：CI host 是 linux，win32.rs 等整模块
+      # #[cfg(windows)] 代码在上述步骤中不可达、破损静默通过（detector.rs:732 一例）。
+      # 交叉编译只编译不运行，无需 windows runner / wine；check/clippy 不链接，
+      # mingw 仅作兜底依赖（--all-targets 含测试代码的编译）
+      - name: Add Windows cross target
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Install mingw-w64 cross toolchain
+        run: sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - run: cd src-tauri && cargo check --target x86_64-pc-windows-gnu --all-targets
+      - run: cd src-tauri && cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
   build:
     name: Build verification
     runs-on: ubuntu-latest
