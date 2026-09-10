@@ -321,12 +321,16 @@ fn build_one(
     let entries: Vec<AppEntryKind> = items.iter().map(|(t, _)| item_entry_kind(t)).collect();
     let age_ms = (now_s.saturating_sub(row.updated_at).max(0) * 1000) as u64;
     let activity = descendant_activity(descendants, &row.id, now_s);
-    // 无投影兜底：updated_at 新鲜或后代活跃（remote_control 场景下唯一的活动证据）
-    // → Processing；双双停更 → Waiting
+    // 无投影兜底（remote_control 活跃对话的常态）：updated_at 新鲜或后代活跃 →
+    // Processing（黄灯运行中，remote_control 场景下唯一的活动证据）；双双停更 →
+    // **Idle（绿灯）而非 Waiting（红灯）**——本地无内容投影时无法区分"agent 在
+    // 等用户输入"与"对话已结束"，落红灯「等待操作」会对每次聊完的会话误报；
+    // 落绿灯则接入既有「完成转绿 → 未读徽标 → 已读后绿卡剔除」管线
+    // （green_card_is_data_driven 已含 Codex），语义与用户预期一致
     let fallback = if age_ms < FALLBACK_FRESH_MS as u64 || activity == DescendantActivity::Active {
         SessionStatus::Processing
     } else {
-        SessionStatus::Waiting
+        SessionStatus::Idle
     };
     let mut status = derive_app_status(&entries).unwrap_or(fallback);
     // 轮次强信号：inProgress → Processing（须在停更仲裁前——挂机 300s 后降 Waiting，
@@ -566,8 +570,10 @@ mod tests {
         );
     }
 
+    /// 无投影停更 → Idle（绿灯完成待看）：本地无法区分"等用户输入"与"已结束"，
+    /// 红灯「等待操作」会对每次聊完的远程对话误报；绿灯接入既有完成转绿管线
     #[test]
-    fn stale_thread_falls_back_to_waiting() {
+    fn stale_thread_without_projection_falls_back_to_idle() {
         let tmp = tempfile::tempdir().unwrap();
         let roots = fixture_roots(tmp.path());
         let state = build_state_db(&roots.state_db);
@@ -585,8 +591,8 @@ mod tests {
         let out = build_sessions(&roots, &fake_host(), NOW, &HashSet::new());
         assert_eq!(
             out[0].status,
-            SessionStatus::Waiting,
-            "停更 1h 无信号 → Waiting"
+            SessionStatus::Idle,
+            "停更 1h 无信号 → Idle（绿灯完成待看）"
         );
     }
 
