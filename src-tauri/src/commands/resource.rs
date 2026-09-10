@@ -312,6 +312,11 @@ pub struct SsotResource {
     /// plugin 子类型（file | config），仅 kind == "plugin" 时有值
     #[serde(rename = "pluginType", skip_serializing_if = "Option::is_none")]
     pub plugin_type: Option<String>,
+    /// MCP 条目在存储 JSON 里带 enable:false（工具侧停用标记原样入库，M7 口径：
+    /// 禁用配置也是有效资产、照常导入，UI 如实标记「源已停用」）。仅 kind == "mcp"
+    /// 且为 true 时序列化
+    #[serde(rename = "sourceDisabled", skip_serializing_if = "std::ops::Not::not")]
+    pub source_disabled: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -380,6 +385,7 @@ pub fn list_ssot_resources() -> SsotResources {
                     enabled_tools,
                     broken_tools,
                     plugin_type: None,
+                    source_disabled: false,
                 }
             })
             .collect()
@@ -405,7 +411,11 @@ pub fn list_ssot_resources() -> SsotResources {
         let mut all_mcps: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
 
-        // 1) 从 ~/.mam/mcp/ 目录扫描 SSOT 管理的 MCP（排除 DB assignment 中已禁用的）
+        // 1) 从 ~/.mam/mcp/ 目录扫描 SSOT 管理的 MCP（排除 DB assignment 中已禁用的）。
+        //    M7：存储体里带 enable:false（导入时原样保留的工具侧停用标记）→ 记入
+        //    source_disabled 供 UI「源已停用」标记
+        let mut mcp_source_disabled: std::collections::BTreeMap<String, bool> =
+            std::collections::BTreeMap::new();
         let mcp_repo = mam.join("mcp");
         if let Ok(entries) = std::fs::read_dir(&mcp_repo) {
             for entry in entries.flatten() {
@@ -413,7 +423,15 @@ pub fn list_ssot_resources() -> SsotResources {
                 if fname.ends_with(".json") {
                     let name = fname.strip_suffix(".json").unwrap_or(&fname).to_string();
                     if !name.starts_with('.') {
-                        all_mcps.entry(name).or_default();
+                        all_mcps.entry(name.clone()).or_default();
+                        let disabled = std::fs::read_to_string(entry.path())
+                            .ok()
+                            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                            .map(|v| crate::services::mcp::entry_disabled_by_tool(&v))
+                            .unwrap_or(false);
+                        if disabled {
+                            mcp_source_disabled.insert(name, true);
+                        }
                     }
                 }
             }
@@ -479,6 +497,7 @@ pub fn list_ssot_resources() -> SsotResources {
         let mut resources: Vec<SsotResource> = all_mcps
             .into_iter()
             .map(|(name, tools)| SsotResource {
+                source_disabled: mcp_source_disabled.get(&name).copied().unwrap_or(false),
                 name,
                 kind: "mcp".to_string(),
                 enabled_tools: tools,
@@ -520,6 +539,7 @@ pub fn list_ssot_resources() -> SsotResources {
                     enabled_tools,
                     broken_tools: vec![],
                     plugin_type,
+                    source_disabled: false,
                 });
             }
         }
@@ -664,7 +684,10 @@ pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<
 }
 
 /// 从任意工具配置文件中提取 MCP 配置并保存到 SSOT 仓库
-/// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.mam/mcp/<name>.json
+/// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.mam/mcp/<name>.json。
+/// enable:false 条目口径（M7，2026-09-11 拍板）：照常导入、原样保留 enable 字段——
+/// 禁用的配置也是有效资产，值得入库备用；与扫描侧「停用条目不计入启用列」口径
+/// 的差异是有意为之（展示如实、资产照收），UI 侧以「源已停用」标记区分
 #[tauri::command]
 pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
     let adapters = crate::adapter::all_adapters_with_ids();

@@ -169,7 +169,7 @@ WorkBuddy 一轮（2026-09-03 spec）已把「APP 形态工具」的全部通用
 5. **不使用 ZCode 自带未读**：`tasks.unread_at` 是 ZCode 侧栏自己的未读标记，语义与 MAM 未读池不同步（用户在 ZCode 内查看不清 MAM 的卡，反之亦然）——按通用规则显式忽略，与 WorkBuddy 轮「不做 APP 内切换检测」的决策一致。
 6. **在板未读态（Codex 分支扩展，未读链路唯一的新代码）**：ZCode 聚合卡与 Codex 同为「完成后仍持久在板」（24h 窗口内、宿主存活即显示）。空闲卡在板期间必须呈现未读态（绿徽标 + 未读卡排后）——现行管线中该行为由 **Codex 专属分支**承担（`sync_unread_sessions` 内 `if tool == "codex" { s.unread = true; }`，代码注释明示「聚合卡即该会话的未读卡形态」），ZCode 接入 = 该分支扩展为 `matches!(tool, "codex" | "zcode")`。WorkBuddy 不需要此分支（其活跃卡随进程退出离板，由未读池接管渲染——spec §5 双形态语义）。
 
-**关键参数**：深链构造函数 `session_url` 现签名只接收会话 id，而 ZCode 的 path 参数来自会话的项目路径——**签名扩展为「会话 id + 项目路径」双参数**（唯一改动的深链公共函数；其余工具传 path 但不使用）。`sess_` 前缀 id 经 UUID 门校验（§3）。
+**关键参数（实现后修正，PR #46 review M6）**：spec 原定扩展 `session_url` 签名为「会话 id + 项目路径」双参数；实现期间（2026-09-09 实机验收）发现 `zcode://workspace/open` 有无条件信任弹窗、落点为新会话 composer、每次派发拉起转发进程三项副作用，**ZCode 深链整体移出跳转链**——跳转改为 pid 单窗口路径直接聚焦唯一窗口（ZCode 单窗口多标签），失败由 `reactivate_tool_app` 兜底（认领关键字 `zcode`）。`session_url` 维持原签名未扩展，也未引入 `jump_url`/`workspace_url`（曾短暂引入后随深链移除一并删除）。本节为设计演进记录，行为以 `deep_link.rs` 与 `session.rs` 注释为准。`sess_` 前缀 id 经 UUID 门校验（§3）。
 
 ---
 
