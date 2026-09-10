@@ -117,6 +117,14 @@ Layer 3 指向 Layer 2（而非 Layer 1），因此工具级禁用会自动断�
 
 添加新工具：实现 `AgentAdapter`，在 `adapter/mod.rs` 的 `get_all_adapters()` 中注册。
 
+**会话扫描预算契约（新工具必读，详见 `src-tauri/src/monitor/session_scan.rs` 模块文档）**——前端每 3 秒轮询 `get_all_sessions`，解析器必须遵守三层预算，否则历史会话堆积后会拖垮 CPU（实机教训：codex 2GB 会话库导致主线程 100%）：
+
+1. **零进程零解析（L1）**：编排层已统一强制（`get_all_sessions` 对空进程列表不调 `find_sessions`）并有防回归测试（`adapter::session_scan_contract_tests`）；实现侧仍应自带 `processes.is_empty()` 早退作纵深防御；
+2. **文件解析必须经 `monitor::session_scan::SessionFileScan`（L2）**：`(mtime, size)` 内容摘要缓存；解析函数必须拆成「纯内容产物（进缓存）+ 时间叠加（每次现算）」——`recently_modified` / mtime 停更叠加等依赖当前时间的部分**不能进缓存**；
+3. **无界历史目录扫描限 24h 新鲜窗口（L3）**：窗口外文件仅缓存命中时参与匹配，活动进程在窗口内匹配不到才回退全量解析（`fill_uncached`，结果进缓存只付一次代价）；进程界定的有界扫描（目录名 / 索引 / 心跳直达）只需 L1+L2，**不要**窗口化（会丢空闲超窗的活跃卡）。
+
+SQLite 类工具（查询即过滤，如 opencode / zcode）豁免第 2、3 条，仅受 L1 约束。
+
 ## 数据目录
 
 应用数据存储在 `~/.mam/`：

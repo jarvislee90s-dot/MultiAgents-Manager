@@ -14,6 +14,7 @@ pub mod opencode_parser;
 pub mod path_codec;
 pub mod process;
 pub mod project;
+pub mod session_scan;
 pub mod sqlite;
 pub mod status;
 pub mod workbuddy_parser;
