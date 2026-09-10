@@ -478,6 +478,12 @@ if (!isTauri) {
           incompatible: [{ type: "mcp", name: "supabase", reason: "Not installed for this tool" }],
         });
 
+      // 遗留 codex 技能链接检测/迁移（spec §4.3）：浏览器模式视为无遗留、零报告
+      case "detect_legacy_agents_links":
+        return Promise.resolve([]);
+      case "migrate_legacy_agents_links":
+        return Promise.resolve([]);
+
       case "capture_window_screenshot":
         return Promise.resolve({ success: true, path: "/tmp/mock-screenshot.png" });
 

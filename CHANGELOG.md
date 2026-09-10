@@ -2,10 +2,15 @@
 
 ## [Unreleased]
 ### Added
+- **codex 私有 Skill 目录化**：codex 的 skill 激活目录从跨工具共享的 `~/.agents/skills/` 切换为私有 `~/.codex/skills/`（codex 0.149.1 实测读取该目录，官方捆绑系统技能同落此处）——对 codex 单独启用/禁用技能不再泄露给 zcode 等遵循 Agent Skills 开放标准的工具
+- **`~/.agents/skills/` 转为只读共享导入源（来源标签 `agents-shared`）**：手装技能照常自动扫描入库，但不归属任何工具、不建链；除一次性迁移 MAM 自建遗留链接外，MAM 不再向该目录写入（codex / zcode 等遵循开放标准的工具直接读取）
+- **遗留 codex 链接一次性迁移对话框**：启动时后台检测 `.agents/skills` 下 MAM 自建链接（指向 `~/.mam/active/codex/`），命中即弹二选一——「迁移到 `.codex/skills`」（DB 分配与 Layer 2 不动，启停状态无损）或「保留为共享」（改指 SSOT 仓库 `~/.mam/skills/`，脱钩 codex 启停、继续服务未适配工具）；两种选择后对话框均自熄灭不再触发
+- **SSOT 删除保护**：删除仍被 `~/.agents/skills/` 直链引用的 SSOT 技能时弹出确认提示，防止依赖共享目录的未适配工具失效
 - **Codex APP 会话 SQLite 适配**（新版 Codex 桌面端已把会话存储从 `~/.codex/sessions/*.jsonl` 迁入 SQLite——实机取证 state_5 库含 rollout_migration_state 迁移表，rollout 目录 9 月 3 日后零新写入，看板因此检测不到 APP 对话）：APP 卡改由 `monitor/codex_thread_parser` 双库产出——`state_*.sqlite` 的 `threads` 表（cwd/标题/git 分支/git 远端/updated_at(秒)/archived/source）为实时元数据源，`thread_history_*.sqlite` 的 `thread_items`/`thread_turns` 内容投影**可用则用**（remote_control 通道的活跃对话不落本地投影，按 threads.updated_at 新鲜度兜底 + 共享核 300s 停更降级）；turn 生命周期（inProgress→Processing 强信号、failed→Finished 转绿）与 `thread_spawn_edges` 子代理树（后代活跃度仲裁 + 「N 个子代理」）直取 DB。文件名带版本号按数值取最新（state_5→state_6 升级不破）。rollout 线路保留给 CLI 前端（双源），CLI 认领的会话不再重复出 APP 卡；旧 rollout 聚合链（aggregate_app_sessions 等）随存储迁移退役
 
 ### Changed
 - **会话扫描三层预算（性能）**：前端 3 秒轮询下各解析器不再每轮全量重扫历史会话（实机 codex 会话库 2GB / 388 文件曾把主线程打满 100%、界面卡死）。三层通用机制落在 `monitor/session_scan`：① 零进程零解析（`get_all_sessions` 编排层统一短路 + 全 adapter 防回归测试）；② `(mtime,size)` 内容摘要缓存——解析拆「纯内容产物（缓存）+ 时间叠加（现算）」，codex / claude / kimi / workbuddy 已接入；③ 无界历史扫描限 24h 新鲜窗口 + 活跃进程窗口内匹配不到才回退全量（codex；进程界定有界扫描不窗口化以免丢空闲超窗的活跃卡）。opencode / zcode（SQLite 查询即过滤）与 openclaw（配置界定）仅享 ①。契约已写入 AGENTS.md「Agent Adapter 模式」与 trait 文档，新工具接入自动受保护
+- **codex / zcode 停更不落兜底红灯**：无内容信号时无法区分「等用户输入」与「对话已结束」，时间兜底一律落绿灯（Idle 完成待看，接入既有未读/绿卡管线）——codex rollout 路线的无信号兜底与 300s 停更降级、zcode 的无信号 fallback 均已改；红灯只保留给有证据的等待（claude 内容判定、zcode 内容+后代仲裁「疑侼卡住」）；进程绑定型工具（claude/kimi/workbuddy）不动
 
 ## [0.4.0] - 2026-09-09
 ### Added

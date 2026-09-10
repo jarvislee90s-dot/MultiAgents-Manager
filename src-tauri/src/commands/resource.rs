@@ -195,6 +195,39 @@ pub fn import_native_resources(
     })
 }
 
+/// 生产迁移边界路径：从真实家目录构建四字段（测试用 tempdir 注入，见 migration 核心）
+fn migration_paths() -> crate::services::resource::migration::MigrationPaths {
+    let home = dirs::home_dir().unwrap_or_default();
+    crate::services::resource::migration::MigrationPaths {
+        agents_dir: home.join(".agents").join("skills"),
+        codex_skills_dir: home.join(".codex").join("skills"),
+        layer1_dir: home.join(".mam").join("skills"),
+        layer2_root: home.join(".mam").join("active").join("codex"),
+    }
+}
+
+/// 检测 .agents/skills 下指向 ~/.mam/active/codex 的 MAM 遗留链接（spec §4.3）。
+/// 纯文件系统检测，零 DB 访问（F5：工具侧链接只是投影）
+#[tauri::command]
+pub fn detect_legacy_agents_links() -> Vec<String> {
+    crate::services::resource::migration::detect_legacy_links(&migration_paths())
+}
+
+/// 执行迁移/保留（mode: "migrate" | "keep"），返回逐条报告。
+/// 纯文件系统操作，DB assignments 与 Layer 2 完全不动（F5，spec §4.3）
+#[tauri::command]
+pub fn migrate_legacy_agents_links(
+    mode: String,
+) -> Result<Vec<crate::services::resource::migration::MigrationItemReport>, String> {
+    if mode != "migrate" && mode != "keep" {
+        return Err(format!("未知模式: {}（仅支持 migrate | keep）", mode));
+    }
+    Ok(crate::services::resource::migration::migrate_legacy_links(
+        &migration_paths(),
+        &mode,
+    ))
+}
+
 #[tauri::command]
 pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     let global = crate::database::list_extensions();

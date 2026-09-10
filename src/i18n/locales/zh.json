@@ -241,6 +241,9 @@
     "uninstallTitle": "卸载资源",
     "uninstallDesc": "将从所有工具移除「{{name}}」并删除 MAM 仓库副本（影响 {{n}} 个工具）。此操作不可撤销。",
     "uninstallSuccess": "已卸载 {{name}}",
+    "sharedLinkConfirmTitle": "该技能仍被共享目录引用",
+    "sharedLinkConfirmDesc": "检测到 ~/.agents/skills/{{name}} 链接到 MAM 管理的目录（仓库副本或激活目录）。继续卸载将删除 MAM 侧副本并使该链接断开，依赖共享目录的未适配工具将失效。",
+    "sharedLinkConfirmContinue": "继续卸载",
     "linkBroken": "链接损坏",
     "linkBrokenTooltip": "以下工具的链接已断开：{{tools}}，重新扫描可自动修复",
     "installFromManifest": "从 Manifest 安装",
@@ -250,7 +253,23 @@
     "sortByName": "按名字排序",
     "openDir": "打开目录",
     "openToolDir": "打开 {{tool}} 的 {{kind}} 目录",
-    "openMcpConfig": "打开 {{tool}} 的 MCP 配置文件"
+    "openMcpConfig": "打开 {{tool}} 的 MCP 配置文件",
+    "migration": {
+      "title": "检测到遗留技能链接",
+      "description": "在共享目录 ~/.agents/skills 中发现 {{n}} 个由 MAM 创建、指向 codex 激活目录（~/.mam/active/codex）的遗留链接。请选择处置方式：",
+      "listTitle": "受影响的技能",
+      "migrateBtn": "迁移到 .codex/skills",
+      "migrateDesc": "由 codex 私有目录（~/.codex/skills）接管这些链接，MAM 中的启停状态保持不变，共享目录回归纯净。",
+      "keepBtn": "保留为共享",
+      "keepDesc": "链接改指 MAM 共享仓库（~/.mam/skills），与 codex 的启停脱钩，继续服务读取共享目录的未适配工具。",
+      "cancel": "暂不处理",
+      "resultTitle": "处理结果",
+      "statusOk": "成功",
+      "statusSkipped": "已跳过",
+      "statusError": "失败",
+      "runFailed": "操作执行失败：{{detail}}",
+      "close": "关闭"
+    }
   },
   "mcp": {
     "nameAndCommandRequired": "请填写名称和命令",

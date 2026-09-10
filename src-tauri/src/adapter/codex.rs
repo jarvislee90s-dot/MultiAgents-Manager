@@ -56,7 +56,8 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
-        // Codex CLI 实际读取 ~/.agents/skills，保持与扫描、启用一致
+        // MAM 激活目标为 codex 私有目录 ~/.codex/skills（spec 2026-09-09 §4.1；
+        // ~/.agents/skills 已降级为只读共享导入源，MAM 不再写入）
         super::primary_skill_dir("codex")
             .map(|dir| vec![dir])
             .unwrap_or_else(|| vec![self.base_dir().join("skills")])

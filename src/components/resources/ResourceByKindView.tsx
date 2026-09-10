@@ -126,6 +126,8 @@ export function ResourceByKindView() {
     kind: string;
     name: string;
     count: number;
+    // initial = 常规卸载确认；sharedLink = .agents 直链引用二级确认（spec §4.4）
+    stage: "initial" | "sharedLink";
   } | null>(null);
   const [manifestDlgOpen, setManifestDlgOpen] = useState(false);
   const [manifestPath, setManifestPath] = useState("");
@@ -314,15 +316,21 @@ export function ResourceByKindView() {
     }
   };
 
-  const confirmUninstall = async () => {
+  /** 卸载确认：首次调用（force=false）后端检测到 ~/.agents/skills 直链引用时返回
+   *  needsConfirmation（零改动），切换二级确认；用户「继续卸载」→ force=true 强制走原流程 */
+  const confirmUninstall = async (force: boolean) => {
     if (!pendingUninstall) return;
     try {
-      await uninstallResource(pendingUninstall.kind, pendingUninstall.name);
+      const outcome = await uninstallResource(pendingUninstall.kind, pendingUninstall.name, force);
+      if (outcome.needsConfirmation) {
+        setPendingUninstall({ ...pendingUninstall, stage: "sharedLink" });
+        return;
+      }
       toast.success(t("resources.uninstallSuccess", { name: pendingUninstall.name }));
       await refresh();
+      setPendingUninstall(null);
     } catch (e) {
       toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
-    } finally {
       setPendingUninstall(null);
     }
   };
@@ -423,6 +431,7 @@ export function ResourceByKindView() {
                           kind: "skill",
                           name: skill.name,
                           count: skill.enabledTools.length,
+                          stage: "initial",
                         })
                       }
                     >
@@ -516,6 +525,7 @@ export function ResourceByKindView() {
                           kind: "mcp",
                           name: mcp.name,
                           count: mcp.enabledTools.length,
+                          stage: "initial",
                         })
                       }
                     >
@@ -598,6 +608,7 @@ export function ResourceByKindView() {
                           kind: "plugin",
                           name: plugin.name,
                           count: plugin.enabledTools.length,
+                          stage: "initial",
                         })
                       }
                     >
@@ -780,26 +791,50 @@ export function ResourceByKindView() {
         </DialogContent>
       </Dialog>
 
-      {/* 卸载确认弹窗 */}
+      {/* 卸载确认弹窗（stage=sharedLink 为 ~/.agents/skills 直链引用二级确认，spec §4.4；
+          取消/关闭不产生任何变更） */}
       <Dialog open={!!pendingUninstall} onOpenChange={(o) => !o && setPendingUninstall(null)}>
         <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="text-red-600">{t("resources.uninstallTitle")}</DialogTitle>
-            <DialogDescription className="pt-2 text-sm">
-              {t("resources.uninstallDesc", {
-                name: pendingUninstall?.name,
-                n: pendingUninstall?.count ?? 0,
-              })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" size="sm" onClick={() => setPendingUninstall(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button variant="destructive" size="sm" onClick={confirmUninstall}>
-              {t("resources.uninstall")}
-            </Button>
-          </DialogFooter>
+          {pendingUninstall?.stage === "sharedLink" ? (
+            <>
+              <DialogHeader>
+                <DialogTitle className="text-red-600">
+                  {t("resources.sharedLinkConfirmTitle")}
+                </DialogTitle>
+                <DialogDescription className="pt-2 text-sm">
+                  {t("resources.sharedLinkConfirmDesc", { name: pendingUninstall?.name })}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="gap-2">
+                <Button variant="outline" size="sm" onClick={() => setPendingUninstall(null)}>
+                  {t("common.cancel")}
+                </Button>
+                <Button variant="destructive" size="sm" onClick={() => confirmUninstall(true)}>
+                  {t("resources.sharedLinkConfirmContinue")}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle className="text-red-600">{t("resources.uninstallTitle")}</DialogTitle>
+                <DialogDescription className="pt-2 text-sm">
+                  {t("resources.uninstallDesc", {
+                    name: pendingUninstall?.name,
+                    n: pendingUninstall?.count ?? 0,
+                  })}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="gap-2">
+                <Button variant="outline" size="sm" onClick={() => setPendingUninstall(null)}>
+                  {t("common.cancel")}
+                </Button>
+                <Button variant="destructive" size="sm" onClick={() => confirmUninstall(false)}>
+                  {t("resources.uninstall")}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 

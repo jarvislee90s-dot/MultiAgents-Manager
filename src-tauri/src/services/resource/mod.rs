@@ -1,5 +1,7 @@
 // 资源管理服务 - 自动扫描导入 skills 和 plugins
 
+pub mod migration;
+
 use crate::linker;
 
 /// SKILL.md 元数据
@@ -79,6 +81,15 @@ fn scan_skills_recursive(
                 continue;
             }
             if path.is_dir() {
+                // `~/.codex/skills/.system` 是 codex 官方捆绑的系统技能（skill-creator /
+                // skill-installer / imagegen 等，随版本更新生成，spec F2），不属于用户
+                // 技能，不入 MAM SSOT；本函数为递归扫描，`.system/<skill>/SKILL.md`
+                // 会被命中，故显式跳过（spec 2026-09-09 §4.1）。收窄到扫描根顶层
+                // （depth == 0）：官方捆绑只出现在根顶，更深处的同名目录是用户内容，
+                // 不应被一刀切排除（review Minor）
+                if depth == 0 && path.file_name().and_then(|n| n.to_str()) == Some(".system") {
+                    continue;
+                }
                 let skill_md = path.join("SKILL.md");
                 if skill_md.exists() {
                     if let Some(meta) = parse_skill_meta(&skill_md) {
@@ -270,53 +281,95 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
     }
 }
 
-/// 扫描各工具的 skill 目录，递归导入到全局仓库（含去重）
-pub fn auto_import_extensions(force: bool) -> ImportStats {
-    let _repo = linker::ensure_repo_dir();
-    // 只按 skill 的 name 播种 seen_names，避免跨类型同名（plugin/mcp/native 与 skill 共用一张表）误判为已导入
-    let existing_before: std::collections::HashSet<String> = crate::database::list_extensions()
-        .iter()
-        .filter(|e| e.kind == "skill")
-        .map(|e| e.name.clone())
-        .collect();
-    // 指标用：全部 kind 的导入前 name 基线（与播种集分离，避免被 kind 过滤影响）
-    let all_names_before: std::collections::HashSet<String> = crate::database::list_extensions()
-        .iter()
-        .map(|e| e.name.clone())
-        .collect();
+/// `.agents` 开放标准共享技能目录的导入源标签（spec 2026-09-09 §4.2）
+pub(crate) const AGENTS_SHARED_SOURCE: &str = "agents-shared";
 
-    let skill_sources: Vec<(&str, std::path::PathBuf)> = crate::adapter::TOOL_IDS
-        .iter()
-        .copied()
-        .filter_map(|tool_id| crate::adapter::primary_skill_dir(tool_id).map(|dir| (tool_id, dir)))
-        .collect();
+/// 单个 skill 扫描源：注册表工具源（导入后为该工具建链）或 `.agents` 共享源
+/// （只读入库、不归属任何工具——review 建议 enum 化，替代「label 字符串 + is_shared
+/// 布尔」双轨与对"伪工具 id 查 DB 天然为空"的隐含依赖）
+pub(crate) enum SkillScanSource {
+    Tool { id: String, dir: std::path::PathBuf },
+    Shared { dir: std::path::PathBuf },
+}
 
+impl SkillScanSource {
+    fn dir(&self) -> &std::path::Path {
+        match self {
+            SkillScanSource::Tool { dir, .. } | SkillScanSource::Shared { dir } => dir,
+        }
+    }
+
+    /// 来源标签：工具 id 或 AGENTS_SHARED_SOURCE（source_counts / 日志用）
+    fn label(&self) -> &str {
+        match self {
+            SkillScanSource::Tool { id, .. } => id,
+            SkillScanSource::Shared { .. } => AGENTS_SHARED_SOURCE,
+        }
+    }
+}
+
+/// skill 导入依赖注入（可测核心，spec §7.7）：真实实现接全局 DB 与 enable 服务，
+/// 测试用内存闭包替代——全局 DB 指向真实 ~/.mam/mam.db，测试禁触。
+/// install_to_repo 同样注入：真实实现会写 ~/.mam/skills（ensure_repo_dir），
+/// 不注入则测试仍会触真实家目录
+pub(crate) struct SkillImportDeps<'a> {
+    pub list_extensions: &'a dyn Fn() -> Vec<crate::database::ExtensionRecord>,
+    pub list_assignments: &'a dyn Fn(&str) -> Vec<crate::database::AssignmentRecord>,
+    pub insert_extension: &'a dyn Fn(&crate::database::ExtensionRecord),
+    pub install_to_repo: &'a dyn Fn(&std::path::Path, &str, bool) -> Result<(), String>,
+    pub enable_skill: &'a dyn Fn(&str, &str) -> Result<(), String>,
+}
+
+/// 可测核心（spec §7.7）：按源清单扫描导入 skill 到全局仓库（含去重）。
+/// 返回 (imported, skipped_dup, source_counts)；
+/// seen_names 播种逻辑留在核心内：只按 skill 的 name 播种，避免跨类型同名
+/// （plugin/mcp/native 与 skill 共用一张表）误判为已导入
+fn import_skills_from_sources(
+    sources: &[SkillScanSource],
+    force: bool,
+    deps: &SkillImportDeps<'_>,
+) -> (usize, usize, Vec<(String, usize)>) {
     // 增量模式（force=false 且 DB 已有数据）：已存在的 name 只补链不重导（Task 6 的 LinkOnly）；
     // force=true 全量重扫保持覆盖导入语义
     let mut seen_names: std::collections::HashSet<String> = if force {
         std::collections::HashSet::new()
     } else {
-        existing_before.iter().cloned().collect()
+        (deps.list_extensions)()
+            .iter()
+            .filter(|e| e.kind == "skill")
+            .map(|e| e.name.clone())
+            .collect()
     };
     let mut imported: usize = 0;
     let mut skipped_dup: usize = 0;
     let mut source_counts: Vec<(String, usize)> = Vec::new();
 
-    for (tool_id, skills_dir) in &skill_sources {
-        if !skills_dir.exists() {
+    for source in sources {
+        if !source.dir().exists() {
             continue;
         }
-        let found = scan_skills_recursive(skills_dir, skills_dir, 0);
+        let found = scan_skills_recursive(source.dir(), source.dir(), 0);
         log::info!(
             "扫描 {} ({}): 找到 {} 个 SKILL.md",
-            tool_id,
-            skills_dir.display(),
+            source.label(),
+            source.dir().display(),
             found.len()
         );
-        source_counts.push((tool_id.to_string(), found.len()));
+        source_counts.push((source.label().to_string(), found.len()));
+
+        // `.agents` 共享源（spec §4.2 / F1/F3）：MAM 对其只读，发现的技能「入库不归属」
+        // ——source_tool 置 None、tags 记 agents-shared、任何分支都不为工具建链
+        // （Task 1 后 detect_source_tool 对该路径返回 None，
+        // sync_imported_skill_links 同样不会为其补链）
+        let (tool_id, is_shared) = match source {
+            SkillScanSource::Tool { id, .. } => (id.as_str(), false),
+            SkillScanSource::Shared { .. } => (AGENTS_SHARED_SOURCE, true),
+        };
 
         for (skill_path, skill_name) in &found {
-            let tool_enabled = crate::database::list_assignments(tool_id)
+            // 共享源非真实工具 id，list_assignments 天然为空 → tool_enabled 为
+            // None → plan 只会落在 ImportAndLink/LinkOnly，不会被误判为显式禁用
+            let tool_enabled = (deps.list_assignments)(tool_id)
                 .iter()
                 .find(|a| a.extension_id == format!("skill-{}", skill_name))
                 .map(|a| a.enabled);
@@ -326,9 +379,9 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
 
                     let meta = parse_skill_meta(&skill_path.join("SKILL.md"));
                     let description = meta.as_ref().and_then(|m| m.description.clone());
-                    let suite = detect_suite(skill_name, skill_path, skills_dir);
+                    let suite = detect_suite(skill_name, skill_path, source.dir());
 
-                    if let Err(e) = linker::install_to_repo(skill_path, skill_name, force) {
+                    if let Err(e) = (deps.install_to_repo)(skill_path, skill_name, force) {
                         log::warn!("导入 skill {} 失败: {}", skill_name, e);
                         continue;
                     }
@@ -343,19 +396,30 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                         version: None,
                         tags: Some(tool_id.to_string()),
                         suite,
-                        source_tool: Some(tool_id.to_string()),
+                        // 共享源「入库不归属」：source_tool 置 None（sync 补链随之跳过）
+                        source_tool: if is_shared {
+                            None
+                        } else {
+                            Some(tool_id.to_string())
+                        },
                         is_native: false,
                     };
-                    let _ = crate::database::insert_extension(&ext);
+                    (deps.insert_extension)(&ext);
                     // 默认按来源工具自动创建工具目录链接，让 harness 立即可用
-                    if let Err(e) = crate::services::enable_skill_for_tool(skill_name, tool_id) {
-                        log::warn!("导入 {} 后为 {} 创建链接失败: {}", skill_name, tool_id, e);
+                    // （共享源「入库不归属」，跳过建链）
+                    if !is_shared {
+                        if let Err(e) = (deps.enable_skill)(skill_name, tool_id) {
+                            log::warn!("导入 {} 后为 {} 创建链接失败: {}", skill_name, tool_id, e);
+                        }
                     }
                     imported += 1;
                 }
                 SkillImportPlan::LinkOnly => {
-                    if let Err(e) = crate::services::enable_skill_for_tool(skill_name, tool_id) {
-                        log::warn!("为 {} 补建 {} 链接失败: {}", skill_name, tool_id, e);
+                    // 共享源不归属任何工具，补链 no-op（静默）
+                    if !is_shared {
+                        if let Err(e) = (deps.enable_skill)(skill_name, tool_id) {
+                            log::warn!("为 {} 补建 {} 链接失败: {}", skill_name, tool_id, e);
+                        }
                     }
                 }
                 SkillImportPlan::Skip => {
@@ -364,6 +428,52 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
             }
         }
     }
+
+    (imported, skipped_dup, source_counts)
+}
+
+/// 扫描各工具的 skill 目录与 `~/.agents/skills` 共享目录，递归导入到全局仓库（含去重）
+pub fn auto_import_extensions(force: bool) -> ImportStats {
+    let _repo = linker::ensure_repo_dir();
+    // 指标用：全部 kind 的导入前 name 基线（与播种集分离，避免被 kind 过滤影响；
+    // 播种逻辑已随导入循环下沉到 import_skills_from_sources）
+    let all_names_before: std::collections::HashSet<String> = crate::database::list_extensions()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+
+    // 注册表源：各工具主 skill 目录（新工具登记 adapter 后自动纳入扫描）
+    let mut skill_sources: Vec<SkillScanSource> = crate::adapter::TOOL_IDS
+        .iter()
+        .copied()
+        .filter_map(|tool_id| {
+            crate::adapter::primary_skill_dir(tool_id).map(|dir| SkillScanSource::Tool {
+                id: tool_id.to_string(),
+                dir,
+            })
+        })
+        .collect();
+    // 追加共享源（spec §4.2）：`~/.agents/skills` 是 Agent Skills 开放标准共享目录
+    // （codex/zcode 等工具同读），MAM 只读导入，「入库不归属」任何工具
+    skill_sources.push(SkillScanSource::Shared {
+        dir: dirs::home_dir()
+            .unwrap_or_default()
+            .join(".agents")
+            .join("skills"),
+    });
+
+    // 真实依赖：接全局 DB 与 enable 服务（测试用内存闭包替换）
+    let deps = SkillImportDeps {
+        list_extensions: &crate::database::list_extensions,
+        list_assignments: &crate::database::list_assignments,
+        insert_extension: &|ext| {
+            let _ = crate::database::insert_extension(ext);
+        },
+        install_to_repo: &linker::install_to_repo,
+        enable_skill: &crate::services::enable_skill_for_tool,
+    };
+    let (mut imported, mut skipped_dup, source_counts) =
+        import_skills_from_sources(&skill_sources, force, &deps);
 
     // Plugin 扫描
     // Plugin 去重使用独立集合，避免与 skill 同名互相吞掉
@@ -594,9 +704,244 @@ mod detect_source_tool_tests {
         case(".zcode/skills", "zcode");
         // 既有工具零回归（原硬编码清单覆盖的四个）
         case(".claude/skills", "claude");
-        case(".agents/skills", "codex");
         case(".openclaw/skills", "openclaw");
+        // codex 注册表已切至私有目录（spec 2026-09-09 §4.1）
+        case(".codex/skills", "codex");
+        // 共享目录 ~/.agents/skills 不再是 codex 激活目标：其来源回溯为 None
+        // （新语义 = 共享目录发现的技能「入库不归属」，不参与补链）
+        let agents_path = home
+            .join(".agents/skills")
+            .join("my-skill")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            detect_source_tool(&agents_path),
+            None,
+            "共享目录 {agents_path} 不归属任何工具"
+        );
         // 无关路径 → None
         assert_eq!(detect_source_tool("/tmp/nowhere/skill"), None);
+    }
+}
+
+#[cfg(test)]
+mod scan_skills_tests {
+    use super::scan_skills_recursive;
+
+    /// `.system` 排除锁（spec §4.1 / F2）：`~/.codex/skills/.system` 是 codex 官方
+    /// 捆绑的系统技能（skill-creator / skill-installer / imagegen 等，随版本更新
+    /// 生成），不入 MAM SSOT。导入扫描是递归的（深度上限 4），`.system/<skill>/
+    /// SKILL.md` 的两层结构会被命中，必须显式跳过 `.system` 条目连同其子树。
+    /// tempdir fixture，零真实家目录访问
+    #[test]
+    fn scan_excludes_codex_system_bundled_skills() {
+        let tmp = tempfile::tempdir().expect("创建临时目录失败");
+        let root = tmp.path();
+
+        // 用户技能：正常被发现
+        std::fs::create_dir_all(root.join("foo")).unwrap();
+        std::fs::write(
+            root.join("foo").join("SKILL.md"),
+            "---\nname: foo\ndescription: 用户技能\n---\n正文",
+        )
+        .unwrap();
+
+        // 官方捆绑系统技能：两层结构，必须连同子树被排除
+        std::fs::create_dir_all(root.join(".system").join("skill-creator")).unwrap();
+        std::fs::write(
+            root.join(".system").join("skill-creator").join("SKILL.md"),
+            "---\nname: skill-creator\ndescription: 官方捆绑系统技能\n---\n正文",
+        )
+        .unwrap();
+
+        let results = scan_skills_recursive(root, root, 0);
+        let names: Vec<&str> = results.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["foo"],
+            "只应发现用户技能 foo，.system 子树整体排除"
+        );
+    }
+}
+
+// ---- 共享导入源测试（spec §4.2 / §7.7）：全 tempdir + 内存闭包，零真实 DB 与家目录访问 ----
+#[cfg(test)]
+mod shared_source_import_tests {
+    use super::{
+        import_skills_from_sources, SkillImportDeps, SkillScanSource, AGENTS_SHARED_SOURCE,
+    };
+    use crate::database::{AssignmentRecord, ExtensionRecord};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// 内存版 DB / enable 依赖：list_extensions / list_assignments 提供播种与禁用查询，
+    /// insert_extension / enable_skill / install_to_repo 只记录调用供断言
+    #[derive(Default)]
+    struct MemDeps {
+        extensions: RefCell<Vec<ExtensionRecord>>,
+        assignments: RefCell<HashMap<String, Vec<AssignmentRecord>>>,
+        inserted: RefCell<Vec<ExtensionRecord>>,
+        enable_calls: RefCell<Vec<(String, String)>>,
+    }
+
+    /// 在测试函数体内展开构造 SkillImportDeps：闭包临时值以 let 绑定存活到测试块
+    /// 结束（不能从 helper 函数返回引用其局部闭包的结构，E0515）
+    macro_rules! mem_deps {
+        ($mem:expr) => {
+            SkillImportDeps {
+                list_extensions: &|| $mem.extensions.borrow().to_vec(),
+                list_assignments: &|tool_id| {
+                    $mem.assignments
+                        .borrow()
+                        .get(tool_id)
+                        .cloned()
+                        .unwrap_or_default()
+                },
+                insert_extension: &|ext| $mem.inserted.borrow_mut().push(ext.clone()),
+                install_to_repo: &|_source, _name, _overwrite| Ok(()),
+                enable_skill: &|skill_name, tool_id| {
+                    $mem.enable_calls
+                        .borrow_mut()
+                        .push((skill_name.to_string(), tool_id.to_string()));
+                    Ok(())
+                },
+            }
+        };
+    }
+
+    /// 写入一个合法手装技能（SKILL.md frontmatter 同 Task 1 fixture 要求）
+    fn write_skill(root: &std::path::Path, name: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {}\ndescription: 手装共享技能\n---\n正文", name),
+        )
+        .unwrap();
+    }
+
+    /// 构造一条已入库的 skill 记录（供增量播种 seen_names）
+    fn ext_record(name: &str) -> ExtensionRecord {
+        ExtensionRecord {
+            id: format!("skill-{}", name),
+            kind: "skill".to_string(),
+            name: name.to_string(),
+            description: None,
+            source_path: format!("/tmp/{}", name),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: None,
+            is_native: false,
+        }
+    }
+
+    /// §7.7a：agents 共享源发现的技能「入库不归属」——insert 的记录
+    /// source_tool=None、tags=agents-shared，且从不为任何工具建链
+    #[test]
+    fn agents_shared_source_imports_without_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("skills");
+        write_skill(&agents_dir, "handmade");
+
+        let sources = vec![SkillScanSource::Shared { dir: agents_dir }];
+        let mem = MemDeps::default();
+        let deps = mem_deps!(mem);
+        let (imported, skipped_dup, source_counts) =
+            import_skills_from_sources(&sources, false, &deps);
+
+        assert_eq!(imported, 1);
+        assert_eq!(skipped_dup, 0);
+        let inserted = mem.inserted.borrow();
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].id, "skill-handmade");
+        assert_eq!(inserted[0].kind, "skill");
+        assert_eq!(inserted[0].source_tool, None, "共享源入库不归属任何工具");
+        assert_eq!(
+            inserted[0].tags.as_deref(),
+            Some(AGENTS_SHARED_SOURCE),
+            "共享源 tags 记 agents-shared"
+        );
+        assert!(
+            mem.enable_calls.borrow().is_empty(),
+            "共享源 ImportAndLink 分支不得建链"
+        );
+        assert!(source_counts.contains(&(AGENTS_SHARED_SOURCE.to_string(), 1)));
+    }
+
+    /// §7.7b（同源判定）：技能已在库（seen）→ LinkOnly 分支，但共享源不归属
+    /// 任何工具 → 补链 no-op：enable 不被调、imported 不增、不重复 insert
+    #[test]
+    fn agents_shared_seen_skill_stays_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("skills");
+        write_skill(&agents_dir, "handmade");
+
+        let sources = vec![SkillScanSource::Shared { dir: agents_dir }];
+        let mem = MemDeps::default();
+        mem.extensions.borrow_mut().push(ext_record("handmade"));
+        let deps = mem_deps!(mem);
+        let (imported, skipped_dup, _) = import_skills_from_sources(&sources, false, &deps);
+
+        assert_eq!(imported, 0, "seen 技能走 LinkOnly，不重导");
+        assert_eq!(skipped_dup, 0, "LinkOnly 不是 Skip，不计数");
+        assert!(mem.inserted.borrow().is_empty(), "不重复 insert");
+        assert!(
+            mem.enable_calls.borrow().is_empty(),
+            "共享源 LinkOnly 分支静默 no-op，不得补链任何工具"
+        );
+    }
+
+    /// 回归锁：tool 源与 agents 共享源并存时，tool 源行为不变——
+    /// ImportAndLink：enable 被调 + source_tool/tags=Some(tool_id)；
+    /// LinkOnly：补链照旧；共享源两分支均不建链
+    #[test]
+    fn tool_source_behavior_unchanged_alongside_agents_shared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join("claude-skills");
+        write_skill(&claude_dir, "tool-new");
+        write_skill(&claude_dir, "tool-seen");
+        let agents_dir = tmp.path().join("agents-skills");
+        write_skill(&agents_dir, "handmade");
+
+        let sources = vec![
+            SkillScanSource::Tool {
+                id: "claude".to_string(),
+                dir: claude_dir,
+            },
+            SkillScanSource::Shared { dir: agents_dir },
+        ];
+        let mem = MemDeps::default();
+        mem.extensions.borrow_mut().push(ext_record("tool-seen"));
+        let deps = mem_deps!(mem);
+        let (imported, skipped_dup, source_counts) =
+            import_skills_from_sources(&sources, false, &deps);
+
+        // tool-new（ImportAndLink）+ handmade（共享源 ImportAndLink）各计一次导入
+        assert_eq!(imported, 2);
+        assert_eq!(skipped_dup, 0);
+
+        let inserted = mem.inserted.borrow();
+        assert_eq!(inserted.len(), 2);
+        let tool_new = inserted.iter().find(|e| e.name == "tool-new").unwrap();
+        assert_eq!(
+            tool_new.source_tool.as_deref(),
+            Some("claude"),
+            "工具源入库归属来源工具"
+        );
+        assert_eq!(tool_new.tags.as_deref(), Some("claude"));
+        let handmade = inserted.iter().find(|e| e.name == "handmade").unwrap();
+        assert_eq!(handmade.source_tool, None);
+        assert_eq!(handmade.tags.as_deref(), Some(AGENTS_SHARED_SOURCE));
+
+        // claude 两分支都建链（tool-new 导入建链 + tool-seen 补链）；共享源不建链
+        let enables = mem.enable_calls.borrow();
+        assert!(enables.contains(&("tool-new".to_string(), "claude".to_string())));
+        assert!(enables.contains(&("tool-seen".to_string(), "claude".to_string())));
+        assert_eq!(enables.len(), 2, "只有工具源建链，共享源静默");
+
+        assert!(source_counts.contains(&("claude".to_string(), 2)));
+        assert!(source_counts.contains(&(AGENTS_SHARED_SOURCE.to_string(), 1)));
     }
 }
