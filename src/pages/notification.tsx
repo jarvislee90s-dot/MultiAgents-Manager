@@ -84,6 +84,8 @@ export default function NotificationPage() {
         agentType: payload.agentType,
         projectName: payload.projectName,
         lastMessage: payload.lastMessage,
+        // 通知浮窗 payload.title 必填 string（Rust 侧），`|| undefined` 是该来源
+        // 的正确空值语义（issue #45：非 Session 来源，不走 sessionTitleOrUndefined）
         title: payload.title || undefined,
       });
       // 多窗口歧义：在通知窗内联渲染候选，避免静默失败（先调高度再显示，避免闪帧）

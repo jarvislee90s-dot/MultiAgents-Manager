@@ -11,6 +11,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { playCompletionSound } from "@/lib/audio";
 import { getAgentLabel } from "@/lib/agentBadge";
 import { addHistory } from "@/lib/notificationHistory";
+import { sessionTitleOrUndefined } from "@/lib/sessionTitle";
 import { petSoundTakeover, petSuppressPopup } from "@/components/pet/petConfig";
 import type { Session } from "@/types/session";
 
@@ -116,6 +117,9 @@ export function useNotification() {
               agentType: (notification.extra?.agentType as string) ?? undefined,
               projectName: (notification.extra?.projectName as string) ?? undefined,
               lastMessage: (notification.extra?.lastMessage as string) ?? undefined,
+              // issue #45 附带发现：系统通知点击跳转此前漏传 title，标题匹配层对该
+              // 入口永远跳过（安全回落既有层，但增强无效）。extra 与 onAction 成对透传
+              title: (notification.extra?.title as string) || undefined,
               form: (notification.extra?.form as string) ?? undefined,
             });
           } catch (e) {
@@ -152,7 +156,7 @@ export function useNotification() {
           projectName: session.projectName,
           status: session.status,
           lastMessage: session.lastMessage ?? "",
-          title: session.title ?? undefined,
+          title: sessionTitleOrUndefined(session),
           pid: session.pid,
           sessionId: session.id,
           at: Date.now(),
@@ -178,6 +182,8 @@ export function useNotification() {
                 statusColor: currColor,
                 status: session.status,
                 lastMessage: session.lastMessage ?? "",
+                // Rust NotificationPayload.title: String 必填——与可选来源不同，
+                // `?? ""` 兜底是正确语义（issue #45：口径有意保留，非待收敛项）
                 title: session.title ?? "",
                 pid: session.pid,
                 sessionId: session.id,
@@ -199,6 +205,9 @@ export function useNotification() {
                   form: session.form,
                   projectName: session.projectName,
                   lastMessage: session.lastMessage ?? "",
+                  // issue #45 附带发现：extra 此前漏传 title → 点击跳转的标题匹配层
+                  // 对该入口永远跳过。空串兜底（后端 title_keys 过滤空键，无假命中面）
+                  title: session.title ?? "",
                 },
               });
             }
