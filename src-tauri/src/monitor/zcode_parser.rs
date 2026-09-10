@@ -205,7 +205,9 @@ fn now_ms() -> i64 {
 }
 
 /// 主入口（真实 home / 真实时钟 / 系统进程表的薄包装）。
-/// 宿主未运行 → 空（宿主是 ZCode 全部卡片的总开关）；宿主在场 → 数据库聚合出卡
+/// 宿主未运行 → 空（宿主是 ZCode 全部卡片的总开关）；宿主在场 → 数据库聚合出卡。
+/// 扫描预算豁免说明（monitor::session_scan）：SQLite 查询即过滤、无宿主即空判
+/// 早退（L1），不接 L2/L3
 pub fn get_zcode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let Some(host) = processes
         .iter()

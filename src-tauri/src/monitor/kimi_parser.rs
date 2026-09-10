@@ -17,6 +17,7 @@ use super::cwd::normalize_cwd_for_match;
 use super::git::get_github_url;
 use super::jsonl::read_recent_lines;
 use super::project::project_name_from_path;
+use super::session_scan::SessionFileScan;
 use crate::adapter::AgentProcess;
 use crate::session::{jump_supported_for, AgentType, Session, SessionStatus};
 use log::{debug, info};
@@ -290,7 +291,19 @@ fn resolve_session_dir(root: &KimiDataRoot, session_dir: &str) -> PathBuf {
     root.home.join(&p)
 }
 
-/// 解析单个 Kimi 会话：state.json 元数据 + wire.jsonl 尾部状态
+/// wire.jsonl 内容摘要（L2 缓存产物）：状态/消息/角色/时间戳全部由文件内容决定
+struct KimiWireDigest {
+    status: Option<SessionStatus>,
+    last_message: Option<String>,
+    last_role: Option<String>,
+    last_ts: Option<i64>,
+}
+
+/// L2 摘要缓存（monitor::session_scan）：kimi 为进程界定有界扫描（索引 + 候选预过滤），
+/// L1+L2 已足够（见 session_scan 模块文档）
+const KIMI_WIRE_SCAN: SessionFileScan = SessionFileScan::new("kimi-wire");
+
+/// 解析单个 Kimi 会话：state.json 元数据 + wire.jsonl 尾部状态（摘要缓存 + 时间叠加现算）
 fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<Session> {
     let wire = entry
         .session_dir
@@ -301,19 +314,68 @@ fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<
         return None;
     }
 
+    let digest = KIMI_WIRE_SCAN.parse(&wire, read_kimi_wire_digest);
+    let d = digest.as_ref();
+
+    // 时间叠加每次现算（L2 契约）：60s 新鲜度参与状态兜底，不能进缓存
     let file_recently_modified = wire
         .metadata()
         .and_then(|m| m.modified())
         .ok()
         .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .map(|d| d.as_secs_f32() < FILE_RECENT_SECS)
+        .map(|dur| dur.as_secs_f32() < FILE_RECENT_SECS)
         .unwrap_or(false);
-
-    let recent = read_recent_lines(&wire, RECENT_LINES);
 
     let state: Option<KimiState> = fs::read_to_string(entry.session_dir.join("state.json"))
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok());
+
+    let status = d.status.clone().unwrap_or(if file_recently_modified {
+        SessionStatus::Processing
+    } else {
+        SessionStatus::Waiting
+    });
+
+    let title = state
+        .as_ref()
+        .and_then(|s| s.title.clone())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| entry.session_id.chars().take(8).collect());
+    let last_activity_at = d
+        .last_ts
+        .map(ms_to_iso)
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.updated_at.as_ref())
+                .and_then(updated_at_to_string)
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Some(Session {
+        id: entry.session_id.clone(),
+        agent_type: AgentType::Kimi,
+        project_name: project_name_from_path(&entry.work_dir),
+        project_path: entry.work_dir.clone(),
+        git_branch: None,
+        github_url: get_github_url(&entry.work_dir),
+        status,
+        last_message: d.last_message.clone(),
+        last_message_role: d.last_role.clone(),
+        last_activity_at,
+        pid: process.pid,
+        cpu_usage: process.cpu_usage,
+        active_subagent_count: 0,
+        form: process.form,
+        jump_supported: jump_supported_for(process.form),
+        unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
+        title: Some(title),
+    })
+}
+
+/// 读 wire.jsonl 内容摘要（尾读 500 行倒扫；截断随摘要缓存）
+fn read_kimi_wire_digest(wire: &Path) -> KimiWireDigest {
+    let recent = read_recent_lines(wire, RECENT_LINES);
 
     let mut status: Option<SessionStatus> = None;
     let mut last_message: Option<String> = None;
@@ -341,12 +403,6 @@ fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<
         }
     }
 
-    let status = status.unwrap_or(if file_recently_modified {
-        SessionStatus::Processing
-    } else {
-        SessionStatus::Waiting
-    });
-
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 {
             format!("{}...", m.chars().take(100).collect::<String>())
@@ -355,41 +411,12 @@ fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<
         }
     });
 
-    // 标题优先取 state.json（用户自定义/会话摘要），回退 8 位 id 前缀（与其他工具卡片一致）
-    let title = state
-        .as_ref()
-        .and_then(|s| s.title.clone())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| entry.session_id.chars().take(8).collect());
-    let last_activity_at = last_ts
-        .map(ms_to_iso)
-        .or_else(|| {
-            state
-                .as_ref()
-                .and_then(|s| s.updated_at.as_ref())
-                .and_then(updated_at_to_string)
-        })
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    Some(Session {
-        id: entry.session_id.clone(),
-        agent_type: AgentType::Kimi,
-        project_name: project_name_from_path(&entry.work_dir),
-        project_path: entry.work_dir.clone(),
-        git_branch: None,
-        github_url: get_github_url(&entry.work_dir),
+    KimiWireDigest {
         status,
         last_message,
-        last_message_role: last_role,
-        last_activity_at,
-        pid: process.pid,
-        cpu_usage: process.cpu_usage,
-        active_subagent_count: 0,
-        form: process.form,
-        jump_supported: jump_supported_for(process.form),
-        unread: false, // 扫描出的活跃卡默认非未读；未读卡由 adapter 层合并
-        title: Some(title),
-    })
+        last_role,
+        last_ts,
+    }
 }
 
 /// 条目的状态信号：None 表示该条目不构成状态信号，继续向前扫

@@ -71,6 +71,15 @@ pub trait AgentAdapter: Send + Sync {
     fn find_processes(&self, system: &System) -> Vec<AgentProcess>;
     fn base_dir(&self) -> std::path::PathBuf;
 
+    /// 解析该工具的会话。**会话扫描预算契约**（详见 `monitor::session_scan` 模块文档
+    /// 与 AGENTS.md「Agent Adapter 模式」）：
+    /// - L1 零进程零解析：编排层（`get_all_sessions`）保证本工具进程为空时**不会调用**
+    ///   本方法，且有遍历全部注册 adapter 的防回归测试；实现侧仍应自带空判早退作
+    ///   纵深防御；
+    /// - L2/L3 文件类解析必须走 `monitor::session_scan::SessionFileScan`
+    ///   （(mtime,size) 摘要缓存 + 「纯内容产物 / 时间叠加」拆分；无界历史扫描
+    ///   限 24h 新鲜窗口），禁止裸 `read_recent_lines` 每轮全量重扫历史；
+    /// - SQLite 类工具（查询即过滤，如 opencode/zcode）豁免 L2/L3，仅受 L1 约束。
     fn find_sessions(&self, processes: &[AgentProcess]) -> Vec<Session> {
         let _ = processes;
         Vec::new()
@@ -221,7 +230,14 @@ pub fn get_all_sessions() -> SessionsResponse {
     // Phase 2: 解析会话（文件 I/O）
     let mut all_sessions: Vec<Session> = Vec::new();
     for (adapter, processes) in adapters.iter().zip(all_processes.iter()) {
-        let sessions = adapter.find_sessions(processes);
+        // L1 零进程零解析（会话扫描预算契约，见 AgentAdapter::find_sessions 文档与
+        // monitor::session_scan）：无进程 = 无会话，跳过该工具全部文件 / DB 扫描。
+        // 中心化守卫——新工具注册进 get_all_adapters() 即自动受保护
+        let sessions = if processes.is_empty() {
+            Vec::new()
+        } else {
+            adapter.find_sessions(processes)
+        };
         log::info!(
             "{}: {} processes, {} sessions",
             adapter.name(),
@@ -690,6 +706,25 @@ mod dead_tools_from_pool_tests {
         assert!(
             dead_tools_from_pool(&["workbuddy".into(), "codex".into()], Some(&empty)).is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod session_scan_contract_tests {
+    use super::*;
+
+    /// L1 零进程零解析契约的防回归测试：遍历**全部注册** adapter（与设置勾选无关），
+    /// 断言空进程列表 → 空会话列表。未来新增工具若在零进程时仍做文件/DB 扫描，
+    /// 此测试直接红（编排层守卫之外的第二道环；第三道环见 AGENTS.md 契约清单）
+    #[test]
+    fn all_adapters_yield_no_sessions_without_processes() {
+        for (id, adapter) in all_adapters_with_ids() {
+            assert!(
+                adapter.find_sessions(&[]).is_empty(),
+                "{} 违反 L1 零进程零解析契约：空进程列表必须返回空会话列表",
+                id
+            );
+        }
     }
 }
 

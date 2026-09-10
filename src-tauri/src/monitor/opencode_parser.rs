@@ -24,7 +24,9 @@ struct PartData {
     text: Option<String>,
 }
 
-/// 获取 OpenCode 会话（生产入口：DB 固定在 ~/.local/share/opencode/opencode.db）
+/// 获取 OpenCode 会话（生产入口：DB 固定在 ~/.local/share/opencode/opencode.db）。
+/// 扫描预算豁免说明（monitor::session_scan）：SQLite 查询即按 cwd 过滤、零进程已
+/// 空判早退（L1），无"全量历史重扫"问题，故不接 L2/L3
 pub fn get_opencode_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let Some(h) = dirs::home_dir() else {
         return Vec::new();
