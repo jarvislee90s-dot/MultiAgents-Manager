@@ -923,10 +923,12 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         let via_home = CodexThreadRoots::from_home(home);
-        let via_sessions_parent =
-            CodexThreadRoots::from_codex_root(sessions_dir.parent().unwrap());
+        let via_sessions_parent = CodexThreadRoots::from_codex_root(sessions_dir.parent().unwrap());
         assert_eq!(via_home.state_db, via_sessions_parent.state_db);
         assert_eq!(via_home.history_db, via_sessions_parent.history_db);
-        assert!(via_home.state_db.starts_with(&codex_dir), "不得拼出 .codex/.codex");
+        assert!(
+            via_home.state_db.starts_with(&codex_dir),
+            "不得拼出 .codex/.codex"
+        );
     }
 }
