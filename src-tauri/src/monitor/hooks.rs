@@ -20,15 +20,17 @@ CWD=$(echo "$INPUT" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.
 TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
-# 注入窗口标题 marker（MAM:<session_id 前 8 位>）。实测 /dev/tty 与 CONOUT$ 两条通道在
-# hook（原生进程 spawn 的 bash）上下文均不可达（2026-08-25 用户交互终端复测仍无 marker，
-# 判决 no-go），默认禁用、代码保留待新通道（如轻量 helper 可执行文件）。
-# MAM_MARKER=1 可重新启用试验；仅低频事件注入；无 powershell 环境零开销跳过
-if [ "${MAM_MARKER:-0}" = "1" ] && command -v powershell >/dev/null 2>&1; then
+# 注入窗口标题 marker（MAM:<session_id 剥连字符前 12 位>）。hook 内联 powershell 直写
+# /dev/tty 与 CONOUT$ 两条通道均不可达（hook 是原生 spawn 的独立进程、不挂接交互终端，
+# 2026-08-25 判决 no-go），改调 mam-marker helper（随应用分发，B=AttachConsole+
+# SetConsoleTitle 官方通道优先、A=SetWindowTextW 窗口直改兜底，见 src/bin/mam-marker.rs）。
+# marker 口径三处互引（改动须同步）：commands/session.rs（匹配侧）/ 本脚本 /
+# mam-marker helper。MAM_MARKER=1 启用（实验期默认关，实机验收后转默认开）；
+# helper 缺失零开销跳过（整链回落既有消歧层，零回归）
+if [ "${MAM_MARKER:-0}" = "1" ] && [ -x "$HOME/.mam/bin/mam-marker.exe" ]; then
   case "$EVENT" in
     [Ss]top|[Pp]ostToolUse|[Ss]essionEnd|[Uu]serPromptSubmit)
-      MID=$(printf '%s' "$SESSION_ID" | cut -c1-8)
-      powershell -NoProfile -Command "[IO.File]::WriteAllText('CONOUT$',[char]27+\"]0;MAM:$MID\"+[char]7)" >/dev/null 2>&1 || true
+      "$HOME/.mam/bin/mam-marker.exe" "$SESSION_ID" >/dev/null 2>&1 || true
       ;;
   esac
 fi
@@ -54,7 +56,40 @@ pub fn ensure_hook_script() -> PathBuf {
             let _ = fs::set_permissions(&script_path, perms);
         }
     }
+    // marker helper 安装（issue #43）：把与主程序同目录的 mam-marker 拷到 ~/.mam/bin/
+    // 供 hook 脚本调用。helper 未构建/未随包分发是合法状态——hook 检测不到即跳过，
+    // 跳转链完整回落既有消歧层（零回归）。无条件覆盖保证升级后新版 helper 生效
+    install_marker_helper();
     script_path
+}
+
+/// 拷贝 mam-marker helper 到 ~/.mam/bin/（存在才拷；返回目标路径）
+fn install_marker_helper() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let bin_dir = dirs::home_dir()?.join(".mam").join("bin");
+    let _ = fs::create_dir_all(&bin_dir);
+    // Windows 发行名带 .exe；macOS/Linux 开发态为裸名（helper 实际仅 Windows 生效，
+    // 非 Windows 拷贝只为保持路径逻辑一致、无害）
+    for name in ["mam-marker.exe", "mam-marker"] {
+        let src = dir.join(name);
+        if src.is_file() {
+            let dst = bin_dir.join(name);
+            if fs::copy(&src, &dst).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = fs::metadata(&dst) {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o755);
+                        let _ = fs::set_permissions(&dst, perms);
+                    }
+                }
+                return Some(dst);
+            }
+        }
+    }
+    None
 }
 
 /// 为指定工具注册 Hook
@@ -219,10 +254,7 @@ pub fn register_all_hooks() {
         let Some(config_path) = adapter.hook_config_path() else {
             continue;
         };
-        let tool_key = format!(
-            "hooks_registered_{}",
-            format!("{:?}", adapter.agent_type()).to_lowercase()
-        );
+        let tool_key = format!("hooks_registered_{}", adapter.agent_type().tool_id());
 
         // 启动核验：配置文件实际包含 status-hook 引用且脚本存在才跳过
         let verified = fs::read_to_string(&config_path)

@@ -116,19 +116,48 @@ pub fn focus_session(
                 }
             }
         }
-        // marker 与 hook 注入的标题标记一致：MAM:<session_id 前 8 位>
-        let marker = session_id
-            .as_deref()
-            .map(|id| format!("MAM:{}", id.chars().take(8).collect::<String>()));
+        // marker 与 hook 注入的标题标记一致：MAM:<session_id 剥连字符后前 12 位>。
+        // 口径三处互引（改动须同步）：本处 / monitor::hooks::HOOK_SCRIPT /
+        // mam-marker helper（src/bin/mam-marker.rs）。8 位对 codex UUIDv7 只编码
+        // 65.5s 粒度、同分钟双开撞车（实测 2026-09-08），12 位不撞；必须先剥
+        // 连字符——UUID 第 9 位即 '-'，直接 take(12) 会切进分隔符
+        let marker = session_id.as_deref().map(|id| {
+            format!(
+                "MAM:{}",
+                id.chars()
+                    .filter(|c| *c != '-')
+                    .take(12)
+                    .collect::<String>()
+            )
+        });
         // 面板反推：当前所有运行会话的 (工具id, 项目名)，用于排除其他工具的终端窗口
         // （codex 终端标题=项目名，无 "codex" 关键词可静态认领）。进程扫描即可，无文件解析开销
         let running_projects = running_projects_from_processes(&system);
+        // 配对不确定门（issue #48）：同工具同项目 ≥2 个进程在跑时，卡片 pid 与会话的
+        // 启发式配对（kimi=wire mtime 最新 / opencode=time_updated DESC）可能互换——
+        // 跳转禁用一切演绎锁定（单窗口即锁/幸存者推理），只认正向证据，否则交选择器。
+        // 项目名比对忽略大小写（Windows 路径不区分大小写），与 running_projects 的
+        // cwd file_name 同源
+        let require_evidence = {
+            let agent = agent_type.as_deref().unwrap_or_default().to_lowercase();
+            match project_name.as_deref().map(str::to_lowercase) {
+                Some(p) if !p.is_empty() => {
+                    running_projects
+                        .iter()
+                        .filter(|(a, pr)| a.to_lowercase() == agent && pr.to_lowercase() == p)
+                        .count()
+                        >= 2
+                }
+                _ => false,
+            }
+        };
         let hints = crate::window::win32::JumpHints {
             session_marker: marker.as_deref(),
             agent_keyword: agent_type.as_deref(),
             project_name: project_name.as_deref(),
             last_message: last_message.as_deref(),
             title: title.as_deref(),
+            require_positive_evidence: require_evidence,
         };
         match crate::window::win32::resolve_and_focus(&system, pid, &hints, &running_projects) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {

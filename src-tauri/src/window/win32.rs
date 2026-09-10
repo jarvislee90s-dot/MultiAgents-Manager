@@ -99,6 +99,10 @@ pub struct JumpHints<'a> {
     /// 会话标题（kimi=state.json.title / opencode=DB session.title / claude、codex=id 前缀），
     /// 标题匹配层（②′）的键
     pub title: Option<&'a str>,
+    /// 配对不确定门（issue #48）：同工具同项目双开时卡片 pid 与会话的启发式绑定
+    /// 可能互换，true 时跳过一切「演绎锁定」（单窗口即锁 / 排除制幸存者推理），
+    /// 只允许正向证据（marker / 标题匹配 / UIA 尾串唯一命中）自动锁定，否则交选择器
+    pub require_positive_evidence: bool,
 }
 
 /// 剥窗口标题的 "OC | " 工具前缀（opencode 终端标题形态 "OC | <会话标题>"）。
@@ -153,6 +157,16 @@ const IDLE_TERMINAL_TITLES: &[&str] = &[
     "cmd.exe",
     "windows terminal",
 ];
+
+/// 空终端标题判定：全串或 basename（最后一个 `\` / `/` 之后）比对名单（均先
+/// trim + 小写）。basename 归一化覆盖 `C:\WINDOWS\system32\cmd.exe `（全路径 +
+/// 尾空格）形态（issue #47，实测空 shell 标签存在该形态，全串比对漏排除、
+/// 混入跳转选择器）；名单本身维持只含裸名，单点维护
+fn is_idle_terminal_title(title: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    let base = t.rsplit(['\\', '/']).next().unwrap_or_default();
+    IDLE_TERMINAL_TITLES.contains(&t.as_str()) || IDLE_TERMINAL_TITLES.contains(&base)
+}
 
 /// 判定窗口标题被哪个工具认领；命中多个工具（罕见）视为中立返回 None
 fn claim_owner(title: &str) -> Option<&'static str> {
@@ -313,21 +327,22 @@ fn single_survivor<'a>(cands: &[&'a (isize, String)], agent: &str) -> Option<&'a
     }
 }
 
-/// 标题匹配层（②′）：窗口标题（归一化）与会话标题键（归一化）相等或
-/// "窗口标题是键的前缀"（终端截断方向），且候选中恰好 1 个命中 → 锁定。
-/// 守卫：他工具认领的窗口绝不参与；空键与空窗口标题（归一化后为空串会成为一切键的
-/// "前缀"）都不参与；命中 0 或 ≥2 都返回 None（落回下层）。
-/// 键列表由调用方组装（opencode 需同时提供 DB title 等；kimi 传 state.title 一项即可）
-fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> Option<isize> {
+/// 标题匹配层（②′）的命中集合：窗口标题（归一化）与会话标题键（归一化）相等或
+/// "窗口标题是键的前缀"（终端截断方向）的全部候选。守卫：他工具认领的窗口绝不
+/// 参与；空键与空窗口标题（归一化后为空串会成为一切键的"前缀"）都不参与。
+/// 命中恰 1 个 → 直接锁定（title_match_lock）；≥2 个 → 调用方可做 UIA 尾串仲裁
+/// （issue #49 双开同模板场景）。键列表由调用方组装（opencode 需同时提供 DB title
+/// 等；kimi 传 state.title 一项即可）
+fn title_match_hits(cands: &[(isize, String)], agent: &str, keys: &[String]) -> Vec<isize> {
     let keys_norm: Vec<String> = keys
         .iter()
         .filter(|k| !k.trim().is_empty())
         .map(|k| normalize_window_title(k))
         .collect();
     if keys_norm.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let hits: Vec<isize> = cands
+    cands
         .iter()
         .filter(|(_, t)| {
             // 他工具认领的窗口绝不参与命中
@@ -344,7 +359,14 @@ fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> 
             keys_norm.iter().any(|k| wt == *k || k.starts_with(&wt))
         })
         .map(|(h, _)| *h)
-        .collect();
+        .collect()
+}
+
+/// 兼容/测试入口：命中集合恰 1 个时锁定，否则 None。生产路径已内联为 hits +
+/// 双命中仲裁（issue #49），不再经此函数
+#[cfg(test)]
+fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> Option<isize> {
+    let hits = title_match_hits(cands, agent, keys);
     if hits.len() == 1 {
         Some(hits[0])
     } else {
@@ -381,7 +403,7 @@ fn hard_survivors<'a>(
         use_l2: bool,
     ) -> Vec<&'a (isize, String)> {
         let l1 = |t: &str| claim_owner(t).is_some_and(|o| o != agent);
-        let l2 = |t: &str| IDLE_TERMINAL_TITLES.contains(&t.trim().to_lowercase().as_str());
+        let l2 = |t: &str| is_idle_terminal_title(t);
         let l3 = |t: &str| {
             let nt = normalize_title_for_project(t);
             running_projects
@@ -504,6 +526,13 @@ pub fn resolve_and_focus(
 ) -> Result<FocusOutcome, String> {
     let agent = hints.agent_keyword.unwrap_or_default().to_lowercase();
     let keys = title_keys(&agent, hints.title);
+    // UIA 尾串（③④ 与 ①′ 双命中仲裁共用）：空 lastMessage 时无素材
+    let msg = hints.last_message.unwrap_or_default();
+    let tail = if msg.is_empty() {
+        String::new()
+    } else {
+        normalized_tail(msg, 40)
+    };
     let windows = all_windows();
 
     for ancestor in collect_ancestor_pids(system, pid) {
@@ -521,7 +550,9 @@ pub fn resolve_and_focus(
         if cands.is_empty() {
             continue;
         }
-        if cands.len() == 1 {
+        // 配对不确定门（issue #48）：见一即锁的捷径在绑定可疑时关闭——
+        // 单窗口也可能是「兄弟会话」的终端，须由正向证据层裁决
+        if cands.len() == 1 && !hints.require_positive_evidence {
             return try_lock(cands[0].0);
         }
         // ===== 多窗口消歧：硬逻辑先行 + 排除制 + 洋葱回退 =====
@@ -536,25 +567,45 @@ pub fn resolve_and_focus(
             }
         }
         // ①′ 标题匹配：窗口标题（归一化，剥 "OC | " 前缀）≡ 会话标题键且唯一 → 锁定。
-        // 命中即返回，不触发 UIA 读取（省最多 800ms）；不命中完全落回下层，零回归
+        // 唯一命中不触发 UIA 读取（省最多 800ms）；不命中完全落回下层，零回归
         if !keys.is_empty() {
-            if let Some(hwnd) = title_match_lock(cands, &agent, &keys) {
-                return try_lock(hwnd);
+            let hits = title_match_hits(cands, &agent, &keys);
+            if hits.len() == 1 {
+                return try_lock(hits[0]);
+            }
+            // 双命中仲裁（issue #49）：kimi 跨项目同任务模板 → 截断后两窗口标题完全
+            // 相同，唯一性守卫不锁定。把 ④ 层的 UIA 尾串包含匹配前移到双命中集合：
+            // lastMessage 尾串唯中者锁定（会话正文只可能出现在真正在跑它的窗口）；
+            // 仍不唯一则落选择器（宁弹不跳错）。空尾串无素材可仲裁，跳过
+            if hits.len() >= 2 && !tail.is_empty() {
+                let hit_refs: Vec<&(isize, String)> =
+                    cands.iter().filter(|(h, _)| hits.contains(h)).collect();
+                let texts = read_window_texts_parallel(&hit_refs);
+                let full: Vec<isize> = hit_refs
+                    .iter()
+                    .filter(|(h, _)| {
+                        texts
+                            .get(h)
+                            .map(|t| collapse_ws(t).contains(&tail))
+                            .unwrap_or(false)
+                    })
+                    .map(|(h, _)| *h)
+                    .collect();
+                if full.len() == 1 {
+                    return try_lock(full[0]);
+                }
             }
         }
-        // ② 硬排除（L1 认领/L2 空终端/L3 面板反推，洋葱回退）→ 幸存 1 且非他工具认领 → 演绎锁定
+        // ② 硬排除（L1 认领/L2 空终端/L3 面板反推，洋葱回退）→ 幸存 1 且非他工具认领 → 演绎锁定。
+        // 演绎锁定属「排除法推断」，配对不确定时禁用（issue #48），交由 ④ 正向证据或选择器
         let cand_refs: Vec<&(isize, String)> = cands.iter().collect();
         let survivors = hard_survivors(&cand_refs, &agent, running_projects);
-        if let Some((hwnd, _)) = single_survivor(&survivors, &agent) {
-            return try_lock(*hwnd);
+        if !hints.require_positive_evidence {
+            if let Some((hwnd, _)) = single_survivor(&survivors, &agent) {
+                return try_lock(*hwnd);
+            }
         }
         // ③ UIA 阶段（仅幸存 ≥2 才读，候选已被硬排除缩小）
-        let msg = hints.last_message.unwrap_or_default();
-        let tail = if msg.is_empty() {
-            String::new()
-        } else {
-            normalized_tail(msg, 40)
-        };
         let texts: HashMap<isize, String> = if tail.is_empty() {
             HashMap::new()
         } else {
@@ -573,8 +624,10 @@ pub fn resolve_and_focus(
                 ns
             }
         };
-        if let Some((hwnd, _)) = single_survivor(&after_shell, &agent) {
-            return try_lock(*hwnd);
+        if !hints.require_positive_evidence {
+            if let Some((hwnd, _)) = single_survivor(&after_shell, &agent) {
+                return try_lock(*hwnd);
+            }
         }
         // ④ 完整尾串包含且唯一 → 锁定（最强正向证据：会话正文完整出现在哪个窗口哪个就是它；
         //    渲染差异导致整串断裂时不自动锁定，交选择器）
@@ -644,6 +697,7 @@ pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
         project_name: None,
         last_message: None,
         title: None,
+        require_positive_evidence: false,
     };
     match resolve_and_focus(&system, pid, &hints, &[]) {
         Ok(FocusOutcome::Focused) => Ok(()),
@@ -801,7 +855,8 @@ pub fn verify_foreground_tool(
 mod tests {
     use super::{
         claim_owner, collapse_ws, collect_ancestor_pids_with, hard_survivors, is_shell_console,
-        longest_prefix_len, normalize_title_for_project, title_keys, title_match_lock,
+        longest_prefix_len, normalize_title_for_project, title_keys, title_match_hits,
+        title_match_lock,
     };
 
     #[test]
@@ -883,15 +938,50 @@ mod tests {
 
     #[test]
     fn collapse_ws_normalizes() {
-        assert_eq!(
-            collapse_ws(
-                "你好  世界
+        assert_eq!(collapse_ws("你好  世界\n\n下一行"), "你好 世界 下一行");
+        assert_eq!(collapse_ws("  spaced \t out "), "spaced out");
+    }
 
-下一行"
+    #[test]
+    fn idle_title_fullpath_form_matches() {
+        // issue #47：空 shell 标签以全路径+尾空格形态出现，全串比对漏排除、混入选择器。
+        // basename 归一化后按名单命中
+        assert!(super::is_idle_terminal_title(
+            "C:\\WINDOWS\\system32\\cmd.exe "
+        ));
+        assert!(super::is_idle_terminal_title(
+            "C:\\WINDOWS\\system32\\cmd.exe"
+        ));
+        assert!(super::is_idle_terminal_title("  Windows PowerShell  "));
+        assert!(super::is_idle_terminal_title("命令提示符"));
+        // 非空终端标题不得误伤（basename 是项目名/会话标题，不在名单）
+        assert!(!super::is_idle_terminal_title("C:\\proj\\kimi-工作目录"));
+        assert!(!super::is_idle_terminal_title("（1）使用技能【convert】"));
+        // basename 取最后一段：路径中间含 cmd 不影响
+        assert!(!super::is_idle_terminal_title("D:\\cmd\\我的项目"));
+    }
+
+    #[test]
+    fn title_match_hits_returns_all_for_same_prefix_windows() {
+        // issue #49 前置：kimi 同任务模板双开 → 两窗口标题截断后完全相同，
+        // 命中集合应返回两个（供 UIA 尾串仲裁），而不是 title_match_lock 的 None
+        let cands = vec![
+            (50isize, "（5）使用技能【信评-终稿】".to_string()),
+            (51, "（5）使用技能【信评-终稿】".to_string()),
+            (52, "完全不相关标题".to_string()),
+        ];
+        let keys = vec!["（5）使用技能【信评-终稿】 更新完之后股东".to_string()];
+        let hits = title_match_hits(&cands, "kimi", &keys);
+        assert_eq!(hits, vec![50, 51]);
+        // 唯一命中语义不变（兼容入口）
+        assert_eq!(
+            title_match_lock(
+                &cands[..1],
+                "kimi",
+                &["（5）使用技能【信评-终稿】 更新完之后股东".to_string()]
             ),
-            "你好 世界 下一行"
+            Some(50)
         );
-        assert_eq!(collapse_ws("  spaced 	 out "), "spaced out");
     }
 
     #[test]
