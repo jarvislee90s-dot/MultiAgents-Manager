@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- **Codex APP 会话 SQLite 适配**（新版 Codex 桌面端已把会话存储从 `~/.codex/sessions/*.jsonl` 迁入 SQLite——实机取证 state_5 库含 rollout_migration_state 迁移表，rollout 目录 9 月 3 日后零新写入，看板因此检测不到 APP 对话）：APP 卡改由 `monitor/codex_thread_parser` 双库产出——`state_*.sqlite` 的 `threads` 表（cwd/标题/git 分支/git 远端/updated_at(秒)/archived/source）为实时元数据源，`thread_history_*.sqlite` 的 `thread_items`/`thread_turns` 内容投影**可用则用**（remote_control 通道的活跃对话不落本地投影，按 threads.updated_at 新鲜度兜底 + 共享核 300s 停更降级）；turn 生命周期（inProgress→Processing 强信号、failed→Finished 转绿）与 `thread_spawn_edges` 子代理树（后代活跃度仲裁 + 「N 个子代理」）直取 DB。文件名带版本号按数值取最新（state_5→state_6 升级不破）。rollout 线路保留给 CLI 前端（双源），CLI 认领的会话不再重复出 APP 卡；旧 rollout 聚合链（aggregate_app_sessions 等）随存储迁移退役
+
 ### Changed
 - **会话扫描三层预算（性能）**：前端 3 秒轮询下各解析器不再每轮全量重扫历史会话（实机 codex 会话库 2GB / 388 文件曾把主线程打满 100%、界面卡死）。三层通用机制落在 `monitor/session_scan`：① 零进程零解析（`get_all_sessions` 编排层统一短路 + 全 adapter 防回归测试）；② `(mtime,size)` 内容摘要缓存——解析拆「纯内容产物（缓存）+ 时间叠加（现算）」，codex / claude / kimi / workbuddy 已接入；③ 无界历史扫描限 24h 新鲜窗口 + 活跃进程窗口内匹配不到才回退全量（codex；进程界定有界扫描不窗口化以免丢空闲超窗的活跃卡）。opencode / zcode（SQLite 查询即过滤）与 openclaw（配置界定）仅享 ①。契约已写入 AGENTS.md「Agent Adapter 模式」与 trait 文档，新工具接入自动受保护
 

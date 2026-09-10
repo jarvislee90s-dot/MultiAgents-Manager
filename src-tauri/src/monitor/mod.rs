@@ -3,6 +3,7 @@
 pub mod app_status;
 pub mod claude_parser;
 pub mod codex_parser;
+pub mod codex_thread_parser;
 pub mod cwd;
 pub mod git;
 pub mod hooks;
