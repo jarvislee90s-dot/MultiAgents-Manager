@@ -186,7 +186,11 @@ fn scan_codex_sessions(
                     .and_then(|d| d.session_id.clone())
             })
             .collect();
-        let roots = super::codex_thread_parser::CodexThreadRoots::from_home(sessions_dir);
+        // sessions 目录（~/.codex/sessions）的父目录就是 .codex 数据根
+        let roots = sessions_dir
+            .parent()
+            .map(super::codex_thread_parser::CodexThreadRoots::from_codex_root)
+            .unwrap_or_default();
         let now_s = now
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

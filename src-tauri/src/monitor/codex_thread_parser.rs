@@ -59,7 +59,7 @@ const MESSAGE_TRUNC: usize = 100;
 const TITLE_TRUNC: usize = 60;
 
 /// Codex SQLite 双库路径集合（测试注入点：一律 tempdir fixture，严禁真实 ~/.codex）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CodexThreadRoots {
     /// state_*.sqlite（threads 元数据 + 父子边；必需，缺失 → 整体降级为空）
     pub state_db: PathBuf,
@@ -69,12 +69,18 @@ pub struct CodexThreadRoots {
 
 impl CodexThreadRoots {
     pub fn from_home(home: &Path) -> Self {
-        let root = home.join(".codex");
+        Self::from_codex_root(&home.join(".codex"))
+    }
+
+    /// 直接以 `.codex` 数据根构造（codex_parser 的会话目录 `~/.codex/sessions` 的
+    /// 父目录即是；避免再拼一层 `.codex` 的路径拼接错误——首版整合曾把 sessions
+    /// 目录误当 home 传入导致 DB 永远找不到、APP 卡静默为空）
+    pub fn from_codex_root(codex_dir: &Path) -> Self {
         Self {
-            state_db: latest_versioned(&root, "state_")
-                .unwrap_or_else(|| root.join("state.sqlite")),
-            history_db: latest_versioned(&root, "thread_history_")
-                .unwrap_or_else(|| root.join("thread_history.sqlite")),
+            state_db: latest_versioned(codex_dir, "state_")
+                .unwrap_or_else(|| codex_dir.join("state.sqlite")),
+            history_db: latest_versioned(codex_dir, "thread_history_")
+                .unwrap_or_else(|| codex_dir.join("thread_history.sqlite")),
         }
     }
 }
@@ -903,5 +909,24 @@ mod tests {
             dir.join("state_10.sqlite")
         );
         assert_eq!(latest_versioned(&dir, "thread_history_"), None);
+    }
+
+    /// 路径装配回归：from_home 与「sessions 目录父目录 → from_codex_root」必须指向
+    /// 同一份 DB（首版整合曾把 sessions 目录误当 home 传入，DB 永远找不到、APP 卡
+    /// 静默为空——本测试锁死两条装配路径的等价性）
+    #[test]
+    fn root_assembly_from_home_and_sessions_parent_agree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let codex_dir = home.join(".codex");
+        let sessions_dir = codex_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let via_home = CodexThreadRoots::from_home(home);
+        let via_sessions_parent =
+            CodexThreadRoots::from_codex_root(sessions_dir.parent().unwrap());
+        assert_eq!(via_home.state_db, via_sessions_parent.state_db);
+        assert_eq!(via_home.history_db, via_sessions_parent.history_db);
+        assert!(via_home.state_db.starts_with(&codex_dir), "不得拼出 .codex/.codex");
     }
 }
