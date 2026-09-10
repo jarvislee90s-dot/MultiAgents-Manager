@@ -379,7 +379,7 @@
     "jumpToTerminal": "点击跳转到终端",
     "jumpUnsupported": "当前平台或形态不支持跳转",
     "jumpFailed": "跳转失败: {{error}}",
-    "pairingAmbiguous": "同项目双开：卡片状态/最后消息可能与另一会话互换，跳转将要求窗口证据",
+    "pairingAmbiguous": "同项目双开：卡片状态/最后消息可能与另一会话互换，跳转时可能需要手动选择目标窗口",
     "pickWindow": "多个窗口匹配，请选择目标窗口",
     "noMessage": "（无消息）",
     "unread": "未读",

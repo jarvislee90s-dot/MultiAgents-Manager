@@ -379,7 +379,7 @@
     "jumpToTerminal": "Click to jump to terminal",
     "jumpUnsupported": "Jump is not supported for this session type on this platform",
     "jumpFailed": "Jump failed: {{error}}",
-    "pairingAmbiguous": "Same project double-open: card status/last message may be swapped; jump requires window evidence",
+    "pairingAmbiguous": "Same project double-open: card status/last message may be swapped; jump may ask you to pick the target window",
     "pickWindow": "Multiple windows matched — pick the target",
     "noMessage": "(no message)",
     "unread": "Unread",

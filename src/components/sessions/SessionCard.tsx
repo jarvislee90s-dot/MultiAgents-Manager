@@ -140,12 +140,14 @@ export function SessionCard({
                 <ArrowLeftRight className="h-3 w-3" />
               </span>
             )}
-            {/* issue #51：容器查询阈值隐藏——卡宽低于 25rem（400px）时整段收起，
-                避免尾巴被项目名挤压到只剩孤立省略号（实测窄卡 ≈366px 时发生）；
-                跳转匹配消费的是 session.title 数据而非可见文本，隐藏无功能影响 */}
+            {/* issue #51：容器查询阈值隐藏——容器查询按 Card 的 content box 度量，
+                比外卡宽小 26px（1px 边框×2 + p-3 内边距 12px×2），故阈值 374px 对应
+                外卡宽 400px：低于此值时整段收起，避免尾巴被项目名挤压到只剩孤立
+                省略号（实测窄卡 ≈366px 时发生）；跳转匹配消费的是 session.title
+                数据而非可见文本，隐藏无功能影响 */}
             {(session.title || session.id) && (
               <span
-                className="text-muted-foreground/60 hidden max-w-[14em] min-w-0 [flex-shrink:5] truncate font-mono text-[10px] @min-[25rem]:block"
+                className="text-muted-foreground/60 hidden max-w-[14em] min-w-0 [flex-shrink:5] truncate font-mono text-[10px] @min-[374px]:block"
                 title={session.title || session.id.slice(0, 8)}
               >
                 {session.title || session.id.slice(0, 8)}
