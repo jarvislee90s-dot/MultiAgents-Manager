@@ -363,7 +363,7 @@ mod migration_tests {
         assert_eq!(dangling.status, "ok", "报告: {:?}", dangling);
         assert!(paths.agents_dir.join("dangling-skill").is_symlink());
         assert_eq!(
-            std::fs::read_link(&paths.agents_dir.join("dangling-skill")).unwrap(),
+            std::fs::read_link(paths.agents_dir.join("dangling-skill")).unwrap(),
             layer1_dangling
         );
     }
