@@ -84,56 +84,12 @@ fn codex_host_process(app_processes: &[AgentProcess]) -> Option<&AgentProcess> {
     })
 }
 
-pub fn aggregate_app_sessions(
-    parsed: &[(PathBuf, Option<Session>)],
-    mtimes: &[std::time::SystemTime],
-    host: &AgentProcess,
-) -> Vec<Session> {
-    use std::collections::HashMap;
-
-    let now = std::time::SystemTime::now();
-    let window = std::time::Duration::from_secs(24 * 3600);
-
-    // sessionId → (mtime, session)，保留同会话 mtime 最新者
-    let mut by_session: HashMap<String, (std::time::SystemTime, Session)> = HashMap::new();
-    for ((_, session_opt), mtime) in parsed.iter().zip(mtimes.iter()) {
-        let Some(session) = session_opt else { continue };
-        // 该文件已被 CLI 进程认领的判定由调用方通过 parsed 子集传入（见 get_codex_sessions）
-        let fresh = now
-            .duration_since(*mtime)
-            .map(|d| d < window)
-            .unwrap_or(false);
-        if !fresh {
-            continue;
-        }
-        by_session
-            .entry(session.id.clone())
-            .and_modify(|e| {
-                if *mtime > e.0 {
-                    *e = (*mtime, session.clone());
-                }
-            })
-            .or_insert_with(|| (*mtime, session.clone()));
-    }
-
-    by_session
-        .into_values()
-        .map(|(_, mut s)| {
-            s.pid = host.pid;
-            s.cpu_usage = host.cpu_usage;
-            s.form = ProcessForm::App;
-            s.jump_supported = jump_supported_for(ProcessForm::App);
-            s.github_url = get_github_url(&s.project_path);
-            s
-        })
-        .collect()
-}
-
-/// 扫描 ~/.codex/sessions，匹配运行中的 Codex 进程
-/// 1. 按 cwd 匹配 CLI 进程 2. 未被认领的近期 rollout 按 sessionId 聚合为 APP 卡
+/// 扫描 Codex 会话：1. rollout 目录按 cwd 匹配 CLI 进程（CLI 前端仍写 rollout）；
+/// 2. 宿主 APP 在场时读 state/thread_history SQLite 出 APP 卡（codex_thread_parser）
 ///
 /// 会话扫描预算三层（monitor::session_scan）：零进程零解析（编排层 + 此处纵深防御）；
 /// (mtime,size) 摘要缓存（纯内容 digest）；24h 新鲜窗口 + 活跃进程匹配失败回退全量。
+/// SQLite 路线查询即过滤，仅受 L1 约束。
 pub fn get_codex_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let sessions_dir = dirs::home_dir()
         .map(|h| h.join(".codex").join("sessions"))
@@ -208,8 +164,10 @@ fn scan_codex_sessions(
         );
     }
 
-    // Phase 2（W4 每会话一卡）：未被 CLI 认领的近期 rollout 按 sessionId 聚合，
-    // 每会话一张卡（宿主 App 进程在场才出活跃卡；完成转绿的持久未读由 DB 管线合并）
+    // Phase 2（W4 每会话一卡，2026-09-10 起改读 app-server SQLite）：新版 Codex APP
+    // 已把会话迁入 ~/.codex/state_*.sqlite（rollout 目录不再有新写入），APP 卡由
+    // codex_thread_parser 双库产出（threads 元数据实时、items/turns 投影可用则用）。
+    // 宿主 App 进程在场才出卡；完成转绿的持久未读由 DB 管线合并
     let app_processes: Vec<AgentProcess> = processes
         .iter()
         .filter(|p| matches!(p.form, ProcessForm::App))
@@ -218,11 +176,31 @@ fn scan_codex_sessions(
     // review F2：宿主判定口径与 monitor::host::is_host_process 一致
     // （ChatGPT 主进程/chatgpt.exe 才算宿主；CLI 同名 exe、内嵌框架进程不算）
     if let Some(host) = codex_host_process(&app_processes) {
-        // CLI 认领 = Phase 1 已占用；剩余文件进入聚合（fresh 过滤已复用上方收集的 mtimes）
-        let fresh = fresh_unclaimed_files(&jsonl_files, &mtimes, &matched_file_indices, now);
-        let unclaimed = unclaimed_app_parsed(&fresh);
-        let unclaimed_mtimes: Vec<SystemTime> = fresh.iter().map(|(_, m)| *m).collect();
-        sessions.extend(aggregate_app_sessions(&unclaimed, &unclaimed_mtimes, host));
+        // CLI 认领（Phase 1 已占用的文件）对应的会话 id——同一会话不得重复出 APP 卡
+        let cli_claimed_ids: HashSet<String> = matched_file_indices
+            .iter()
+            .filter_map(|&i| {
+                digests
+                    .get(i)
+                    .and_then(|a| a.as_ref().as_ref())
+                    .and_then(|d| d.session_id.clone())
+            })
+            .collect();
+        // sessions 目录（~/.codex/sessions）的父目录就是 .codex 数据根
+        let roots = sessions_dir
+            .parent()
+            .map(super::codex_thread_parser::CodexThreadRoots::from_codex_root)
+            .unwrap_or_default();
+        let now_s = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        sessions.extend(super::codex_thread_parser::build_sessions(
+            &roots,
+            host,
+            now_s,
+            &cli_claimed_ids,
+        ));
     }
 
     // L2 缓存收敛：清掉已消失文件的孤儿条目
@@ -297,42 +275,9 @@ fn phase1_match(
         .count()
 }
 
-/// Phase 2 聚合输入构建：未被 CLI 认领且 24h 窗口内（已由 fresh_within_24h 前移过滤）
-/// 的 rollout 文件，按 APP 形态重新解析。旧实现（Task 10 重构前）会按实际进程形态
-/// 重解析，重构时丢失导致 APP 卡沿用 CLI 的 60s mtime 阈值——工具调用尾部停更
-/// 60-300s 被误判 Waiting（应为 Processing）。仅窗口内文件付出有界尾读（500 行）
-fn unclaimed_app_parsed(
-    fresh_files: &[(PathBuf, std::time::SystemTime)],
-) -> Vec<(PathBuf, Option<Session>)> {
-    fresh_files
-        .iter()
-        .map(|(f, _)| (f.clone(), parse_codex_jsonl(f, ProcessForm::App)))
-        .collect()
-}
-
-/// 未认领候选中 24h 窗口内的文件（review F6：纯函数，过滤前移到二次 parse 之前，
-/// 历史 rollout 不再重复尾读；mtimes 经参数注入，测试无需真实文件）
-fn fresh_unclaimed_files(
-    jsonl_files: &[PathBuf],
-    mtimes: &[std::time::SystemTime],
-    matched: &HashSet<usize>,
-    now: std::time::SystemTime,
-) -> Vec<(PathBuf, std::time::SystemTime)> {
-    let window = std::time::Duration::from_secs(24 * 3600);
-    jsonl_files
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !matched.contains(idx))
-        .filter_map(|(idx, f)| mtimes.get(idx).copied().map(|m| (f.clone(), m)))
-        .filter(|(_, mtime)| {
-            now.duration_since(*mtime)
-                .map(|age| age < window)
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
 // 文件收集已收编进 monitor::session_scan::SessionFileScan::collect（L3 模板见该模块文档）
+// Phase 2 旧聚合链（unclaimed_app_parsed / fresh_unclaimed_files / aggregate_app_sessions）
+// 已随 APP 存储迁移 SQLite 退役（2026-09-10），由 codex_thread_parser 双库产出 APP 卡
 
 /// 纯内容摘要（L2 缓存产物）：只由文件内容决定，与当前时间 / 进程无关。
 /// last_message 的 100 字符截断是纯内容操作，随摘要一并缓存
@@ -452,7 +397,10 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
 /// assistant 纯文本 → Idle；function_call/function_call_output → Processing；
 /// task_started → Processing；task_complete → Idle；记账条目跳过。
 /// 无任何语义条目（如仅 session_meta 的 rollout）→ 兜底按形态：APP 文件新鲜
-/// （<300s）→ Processing，停更 → Waiting；CLI 保持 60s 阈值；再叠 300s 停更规则
+/// （<300s）→ Processing，停更 → Idle（绿灯）；CLI 保持 60s 阈值。
+/// codex 全线不落兜底红（2026-09-10 用户决策）：停更后无法区分"等用户输入"与
+/// "对话已结束"，红灯「等待操作」会对每次聊完的会话误报；落绿灯接入
+/// 「完成转绿 → 未读徽标 → 已读后绿卡剔除」既有管线（与 codex_thread_parser 同语义）
 fn session_from_digest(
     digest: &CodexFileDigest,
     process_form: ProcessForm,
@@ -468,12 +416,19 @@ fn session_from_digest(
             if fresh {
                 SessionStatus::Processing
             } else {
-                SessionStatus::Waiting
+                SessionStatus::Idle
             }
         }
     };
-    // 叠加 300s 规则：Processing 且 JSONL mtime 停更 >= 300s → Waiting（与 WorkBuddy 一致）
+    // 叠加 300s 规则（共享核）：Processing 且 JSONL mtime 停更 >= 300s → Waiting；
+    // derive_app_status 不产出 Waiting，此处 Waiting 只能来自时间兜底路径 →
+    // 就地转 Idle，内容推导的状态（Thinking/Idle/Processing）不受影响
     let status = overlay_mtime_stale(status, file_age_secs.map_or(0, |a| (a * 1000.0) as u64));
+    let status = if status == SessionStatus::Waiting {
+        SessionStatus::Idle
+    } else {
+        status
+    };
 
     let project_name = project_name_from_path(&digest.project_path);
     // 卡片前缀统一 12 位 hex（按字符截取，多字节 id 不 panic）：UUIDv7 前 8 hex 只编码
@@ -513,7 +468,10 @@ fn session_from_digest(
     })
 }
 
-/// 解析单个 Codex JSONL 文件（缓存摘要 + 时间叠加现算；保留原签名供聚合与测试入口）
+/// 解析单个 Codex JSONL 文件（缓存摘要 + 时间叠加现算）。
+/// 生产路径已改走 digest + session_from_digest 分离管线（Phase 1）与 SQLite
+/// （Phase 2，codex_thread_parser），本函数保留为测试入口（形态阈值 / 标题等单测）
+#[cfg(test)]
 fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Session> {
     let digest = CODEX_SCAN.parse(jsonl_path, read_codex_digest);
     // 时间叠加每次现算（L2 契约）：mtime 变化必然伴随 (mtime,size) 失效重读
@@ -525,102 +483,6 @@ fn parse_codex_jsonl(jsonl_path: &Path, process_form: ProcessForm) -> Option<Ses
         .map(|d| d.as_secs_f32());
     let d = digest.as_ref().as_ref()?;
     session_from_digest(d, process_form, file_age_secs)
-}
-
-#[cfg(test)]
-mod aggregate_tests {
-    use super::*;
-    use crate::session::SessionStatus;
-
-    fn mk(id: &str, proj: &str, title: Option<String>) -> Session {
-        Session {
-            id: id.into(),
-            agent_type: AgentType::Codex,
-            project_name: proj.into(),
-            project_path: format!("/tmp/{}", proj),
-            title,
-            git_branch: None,
-            github_url: None,
-            status: SessionStatus::Idle,
-            last_message: None,
-            last_message_role: None,
-            last_activity_at: String::new(),
-            pid: 0,
-            cpu_usage: 0.0,
-            active_subagent_count: 0,
-            form: ProcessForm::App,
-            jump_supported: true,
-            unread: false,
-        }
-    }
-
-    #[test]
-    fn aggregate_groups_by_session_id_and_picks_latest() {
-        // mtime 全部取过去 1h / 1min（实现按 now 起 24h 新鲜窗口过滤，UNIX_EPOCH 会被判过期）
-        let now = std::time::SystemTime::now();
-        let hour_ago = now
-            .checked_sub(std::time::Duration::from_secs(3600))
-            .unwrap_or(now);
-        let min_ago = now
-            .checked_sub(std::time::Duration::from_secs(60))
-            .unwrap_or(now);
-        // s1 两个 rollout，用 title 区分：最新文件（1min 前）应胜出
-        let parsed = vec![
-            (
-                PathBuf::from("/a-rollout-s1-old"),
-                Some(mk("s1", "P1", Some("old".into()))),
-            ),
-            (
-                PathBuf::from("/b-rollout-s1-new"),
-                Some(mk("s1", "P1", Some("new".into()))),
-            ),
-            (PathBuf::from("/c-rollout-s2"), Some(mk("s2", "P2", None))),
-        ];
-        // s1 最新文件是第 2 个（mtime 更大）
-        let mtimes = vec![hour_ago, min_ago, hour_ago];
-        let host = AgentProcess {
-            pid: 100,
-            cpu_usage: 0.0,
-            cwd: None,
-            exe: Some("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".into()),
-            form: ProcessForm::App,
-        };
-        let out = aggregate_app_sessions(&parsed, &mtimes, &host);
-        // 按 sessionId 聚合：s1 + s2 各一张，无重复
-        assert_eq!(out.len(), 2);
-        assert!(out.iter().any(|s| s.id == "s1"));
-        assert!(out.iter().any(|s| s.id == "s2"));
-        // 同会话多 rollout 取 mtime 最新者
-        assert_eq!(
-            out.iter().find(|s| s.id == "s1").unwrap().title.as_deref(),
-            Some("new")
-        );
-        // 宿主在场时卡归 App 形态、pid/cpu 取宿主进程
-        assert!(out.iter().all(|s| matches!(s.form, ProcessForm::App)));
-        assert!(out.iter().all(|s| s.pid == 100));
-    }
-
-    #[test]
-    fn aggregate_skips_matched_files_and_requires_host() {
-        let parsed = vec![(PathBuf::from("/x"), Some(mk("s1", "P", None)))];
-        let base = std::time::SystemTime::UNIX_EPOCH;
-        // 24h 窗口外 → 不出卡
-        let old = base + std::time::Duration::from_secs(1);
-        let now = std::time::SystemTime::now();
-        let hour_ago = now
-            .checked_sub(std::time::Duration::from_secs(3600))
-            .unwrap_or(now);
-        let host = AgentProcess {
-            pid: 100,
-            cpu_usage: 0.0,
-            cwd: None,
-            exe: Some("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT".into()),
-            form: ProcessForm::App,
-        };
-        // 24h 窗口外 → 不出卡（宿主缺席不出卡的口径由 codex_host_criterion 测试锁定）
-        assert!(aggregate_app_sessions(&parsed, &[old], &host).is_empty());
-        let _ = hour_ago;
-    }
 }
 
 #[cfg(test)]
@@ -692,51 +554,15 @@ mod phase2_app_form_tests {
         path
     }
 
-    /// 夹具区分度自检：同一文件，Cli 形态（60s）判 Waiting，App 形态（300s）判 Processing
+    /// 夹具区分度自检：同一文件，Cli 形态（60s）停更 → Idle（绿灯），App 形态（300s）→ Processing
     #[test]
     fn fixture_discriminates_cli_vs_app_mtime_thresholds() {
         let tmp = tempfile::tempdir().unwrap();
         let f = write_meta_only_rollout(tmp.path());
         let cli = parse_codex_jsonl(&f, ProcessForm::Cli).unwrap();
-        assert_eq!(cli.status, SessionStatus::Waiting);
+        assert_eq!(cli.status, SessionStatus::Idle);
         let app = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(app.status, SessionStatus::Processing);
-    }
-
-    /// Phase 2 聚合输入必须按 App 形态解析（spec §4/§7）：未认领文件 60-300s 停更
-    /// 的工具调用尾部在 APP 卡上应为 Processing（红）而非 Waiting（黄）
-    #[test]
-    fn unclaimed_aggregate_input_is_parsed_with_app_form() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = write_meta_only_rollout(tmp.path());
-        let parsed = unclaimed_app_parsed(&[(f, std::time::SystemTime::now())]);
-        assert_eq!(parsed.len(), 1);
-        let session = parsed[0].1.as_ref().unwrap();
-        assert_eq!(
-            session.status,
-            SessionStatus::Processing,
-            "聚合输入按 Cli 60s 阈值解析会把 APP 卡误判为 Waiting"
-        );
-    }
-
-    /// review F6：24h 新鲜过滤必须前移到二次 parse 之前——
-    /// 历史 rollout（mtime 超窗）不得进入重解析，消除重复尾读 IO
-    #[test]
-    fn fresh_filter_drops_stale_rollouts_before_reparse() {
-        let now = std::time::SystemTime::now();
-        let fresh = now - std::time::Duration::from_secs(3600);
-        let stale = now - std::time::Duration::from_secs(25 * 3600);
-        let files = vec![
-            PathBuf::from("/a-rollout-fresh"),
-            PathBuf::from("/b-rollout-stale"),
-        ];
-        let mtimes = vec![fresh, stale];
-        let out = fresh_unclaimed_files(&files, &mtimes, &HashSet::new(), now);
-        assert_eq!(
-            out,
-            vec![(PathBuf::from("/a-rollout-fresh"), fresh)],
-            "超窗文件必须在二次 parse 前被过滤"
-        );
     }
 
     /// review F2：聚合宿主判定口径与 monitor::host::is_host_process 一致——
@@ -775,22 +601,6 @@ mod phase2_app_form_tests {
         assert!(
             codex_host_process(&[cli_like, framework]).is_none(),
             "CLI 同名 exe 与内嵌框架进程都不是宿主"
-        );
-    }
-
-    /// 已被 CLI 认领的文件不得进入聚合输入（Phase 1 / Phase 2 不重复出卡）
-    #[test]
-    fn claimed_files_are_excluded_from_aggregate_input() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = write_meta_only_rollout(tmp.path());
-        let claimed: HashSet<usize> = HashSet::from([0]);
-        let files = vec![f, PathBuf::from("/other-fresh")];
-        let now = std::time::SystemTime::now();
-        let mtimes = vec![now, now];
-        assert_eq!(
-            fresh_unclaimed_files(&files, &mtimes, &claimed, now),
-            vec![(PathBuf::from("/other-fresh"), now)],
-            "被认领索引排除、未认领新鲜文件存活"
         );
     }
 }
@@ -1015,9 +825,10 @@ mod app_status_fixture_tests {
         assert_eq!(session.status, SessionStatus::Idle);
     }
 
-    /// 300s 叠加：Processing 且文件停更 >= 300s → Waiting（与 WorkBuddy 语义一致）
+    /// 300s 叠加 + 兜底红消除：Processing 且文件停更 >= 300s → Idle（绿灯完成待看，
+    /// 2026-09-10 用户决策——停更后无法区分"等输入"与"已结束"，不落红灯「等待操作」）
     #[test]
-    fn processing_stale_downgrades_to_waiting() {
+    fn processing_stale_downgrades_to_idle() {
         let tmp = tempfile::tempdir().unwrap();
         let f = write_rollout(tmp.path(), &round_two_running());
         let stale = std::time::SystemTime::now()
@@ -1030,7 +841,7 @@ mod app_status_fixture_tests {
             .set_modified(stale)
             .unwrap();
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
-        assert_eq!(session.status, SessionStatus::Waiting);
+        assert_eq!(session.status, SessionStatus::Idle);
     }
 
     /// 兜底分侧保持：无语义条目（仅 session_meta）时，APP 形态文件新鲜 → Processing
