@@ -84,14 +84,18 @@ fn install_marker_helper() -> Option<PathBuf> {
     None
 }
 
-/// Windows hook 命令：路径含空格才加引号。claude 在 Windows 经
-/// `powershell -Command "<command>"` 包装执行钩子，内层双引号会破坏外层配对
-/// （SessionStart 报错根因）；无空格路径去引号即绕开
+/// Windows hook 命令：**正斜杠**路径，含空格才加引号。两层转义约束（第四轮实机
+/// 验收实证）：① 引号在 claude 的 `powershell -Command "<command>"` 包装下破坏
+/// 外层配对（SessionStart 报错根因）；② 裸反斜杠路径在 bash 端被当转义序列吃掉
+/// （`C:\Users` → `C:Users`，exit=127 通道全断）。正斜杠两层皆安全（bash 原生
+/// 接受、powershell 不转义），第四轮离线探针三层全通。含空格路径必须保引号
+/// （已知残留：该形态下 SessionStart 报错可能复现，spec §3.4 边界）
 fn quote_bash_command(path_str: &str) -> String {
-    if path_str.contains(' ') {
-        format!("bash \"{path_str}\"")
+    let normalized = path_str.replace('\\', "/");
+    if normalized.contains(' ') {
+        format!("bash \"{normalized}\"")
     } else {
-        format!("bash {path_str}")
+        format!("bash {normalized}")
     }
 }
 
@@ -168,7 +172,11 @@ pub fn register_hooks_for_tool(
                     else {
                         continue;
                     };
-                    if !c.contains(&script_path_str) {
+                    // 双形态判据：脚本绝对路径正反斜杠各查一次。只查原路径会漏掉
+                    // 正斜杠形态的历史条目（如第四轮 1f8fcf4 产出的无引号形态），
+                    // 它们会因识别不出而被当作用户条目跳过 → 坏条目残留 + 新条目追加
+                    let fwd_path = script_path_str.replace('\\', "/");
+                    if !c.contains(&script_path_str) && !c.contains(&fwd_path) {
                         continue; // 用户自己的 hook 条目，不动
                     }
                     if c == command_str {
@@ -338,21 +346,22 @@ mod command_quote_tests {
     use super::quote_bash_command;
 
     #[test]
-    fn no_space_path_is_unquoted() {
-        // 无空格路径不加引号：消除 powershell -Command 包装层的引号嵌套
-        // （claude Windows 侧 SessionStart 报错根因，2026-09-12 第三轮探测 C1）
+    fn no_space_path_becomes_forward_slash_unquoted() {
+        // 第四轮实测：裸反斜杠路径被 bash 当转义序列吃掉（C:\Users → C:Users，
+        // exit=127 通道全断）；正斜杠 + 无引号在 powershell 包装 / bash 两层皆安全
         assert_eq!(
             quote_bash_command(r"C:\Users\bunny\.mam\hooks\status-hook.sh"),
-            r"bash C:\Users\bunny\.mam\hooks\status-hook.sh"
+            r"bash C:/Users/bunny/.mam/hooks/status-hook.sh"
         );
     }
 
     #[test]
-    fn spaced_path_keeps_quotes() {
-        // 含空格路径必须保引号（已知残留：该形态下 SessionStart 报错可能复现，spec 3.4）
+    fn spaced_path_keeps_quotes_forward_slash() {
+        // 含空格路径必须保引号（已知残留：该形态 SessionStart 报错可能复现，spec 3.4）；
+        // 分隔符仍归一为正斜杠（bash 端语义一致）
         assert_eq!(
             quote_bash_command(r"C:\Users\John Doe\.mam\hooks\status-hook.sh"),
-            r#"bash "C:\Users\John Doe\.mam\hooks\status-hook.sh""#
+            r#"bash "C:/Users/John Doe/.mam/hooks/status-hook.sh""#
         );
     }
 }
