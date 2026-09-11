@@ -43,17 +43,21 @@ MAM 的卡片跳转在 Windows 上依靠五层消歧判定链（marker 精确匹
 
 ## 3. 改动设计
 
-### 3.1 改动一：helper 增加「按 PID 附加」模式
+### 3.1 改动一：helper 收敛为「按 PID 附加」唯一形态
 
-**现状**：mam-marker 只有「父链自走」一种定位方式——从自身进程沿父链上溯找终端。该方式只适用于「被目标会话的进程链 spawn 出来」的场景（hook 调用），MAM 主程序直接调用时够不着目标会话。
+**现状**：mam-marker 只有「父链自走」一种定位方式——从自身进程沿父链上溯找终端。该方式只为 hook 周期注入服务（helper 被钩子脚本 spawn，顺自家父链找终端）。随改动三退役 hook 周期注入，父链自走**失去全部生产调用方**，予以删除——helper 收敛为唯一调用形态：
 
-**设计**：新增调用形态 `mam-marker --pid <目标进程pid> <session_id>`：
+```
+mam-marker --pid <目标进程pid> <session_id>
+```
 
-- **路线 B（官方控制台通道，tab 级）**：`AttachConsole(目标pid)` 附加到目标会话所在控制台 → 读现标题 → 追加 marker → `SetConsoleTitleW` 写回；
-- **路线 A（外部直改，窗口级）**：通过进程快照解析**目标 pid** 的父链（而非自身父链），找到第一个拥有可见顶层窗口的非黑名单祖先；恰好单窗口时 `SetWindowTextW` 追加 marker，多窗口放弃（同现有语义，该场景由路线 B 的 tab 级标题覆盖）；
-- 无 `--pid` 的父链自走模式**保留**，定位为手动调试入口（hook 周期注入退役后无生产调用方）。
+内部仍为 B→A 双路线融合执行（两轴正交：定位轴只剩 --pid 一种；写入轴的 B/A 失败面不重叠，必须共存）：
 
-**判定依据**：第三轮以 PowerShell `AttachConsole(pid)` 复刻路线 B 语义，外部附加 claude ConPTY 成功且 marker 立即可见。
+- **路线 B（官方控制台通道，tab 级）**：`AttachConsole(目标pid)` 附加到目标会话所在控制台 → 读现标题 → 追加 marker → `SetConsoleTitleW` 写回。覆盖**多窗口**场景（多开时各会话各占一个 WT 窗口）；
+- **路线 A（外部直改，窗口级）**：通过进程快照解析**目标 pid** 的父链，找到第一个拥有可见顶层窗口的非黑名单祖先；恰好单窗口时 `SetWindowTextW` 追加 marker，多窗口放弃（由路线 B 的 tab 级标题覆盖）。即时生效、不依赖终端配合，为 B 的「无回执、可能被终端配置忽略」提供保险；
+- B 的成功与否无法读回（控制台侧无回执），故双路线**总是都执行**，各自记日志，任一成功即退出码 0。
+
+**判定依据**：第三轮以 PowerShell `AttachConsole(pid)` 复刻路线 B 语义，外部附加 claude ConPTY 成功且 marker 立即可见；父链解析逻辑（ToolHelp 快照）仓库内已有同款实现可复用。
 
 ### 3.2 改动二：跳转前按需注入（focus_session Windows 链路）
 
@@ -94,9 +98,10 @@ MAM 的卡片跳转在 Windows 上依靠五层消歧判定链（marker 精确匹
 
 - `HOOK_SCRIPT` 删除 marker 注入块，脚本回归**纯事件记录**（读 stdin → 写事件文件，见 3.5）；
 - `MAM_MARKER` 环境变量门控及 `hooks.rs` 内相关注释一并移除；
+- helper 随之收敛为 `--pid` 唯一形态（见 3.1），父链自走与 `ATTACH_PARENT_PROCESS` 特例删除；
 - marker 口径的「三处互引」缩减为「两处」（session.rs 匹配侧 / helper），注释同步。
 
-**收益**：少一个常驻写入面（不再向用户终端标题做周期性写入）；消除「注入了但没用的」死机制与「MAM_MARKER=1 才生效」的隐藏开关。
+**收益**：少一个常驻写入面（不再向用户终端标题做周期性写入）；消除「注入了但没用的」死机制与「MAM_MARKER=1 才生效」的隐藏开关；helper 从双定位模式收敛为单一形态，无生产死代码。
 
 ### 3.4 改动四：SessionStart 引号绕开
 
