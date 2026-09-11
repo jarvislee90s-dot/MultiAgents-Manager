@@ -116,9 +116,9 @@ pub fn focus_session(
                 }
             }
         }
-        // marker 与 hook 注入的标题标记一致：MAM:<session_id 剥连字符后前 12 位>。
-        // 口径三处互引（改动须同步）：本处 / monitor::hooks::HOOK_SCRIPT /
-        // mam-marker helper（src/bin/mam-marker.rs）。8 位对 codex UUIDv7 只编码
+        // marker 与按需注入 helper 贴的标题标记一致：MAM:<session_id 剥连字符后
+        // 前 12 位>。口径两处互引（改动须同步）：本处（匹配侧）/ mam-marker
+        // helper（src/bin/mam-marker.rs，注入侧）。8 位对 codex UUIDv7 只编码
         // 65.5s 粒度、同分钟双开撞车（实测 2026-09-08），12 位不撞；必须先剥
         // 连字符——UUID 第 9 位即 '-'，直接 take(12) 会切进分隔符
         let marker = session_id.as_deref().map(|id| {
@@ -130,6 +130,15 @@ pub fn focus_session(
                     .collect::<String>()
             )
         });
+        // 按需注入（spec 2026-09-12 §3.2）：claude/codex CLI 会话在判定链前贴
+        // marker，① 层即可精确命中；helper 缺失/失败/超时全部静默回落
+        if on_demand_marker_applies(agent_type.as_deref(), form.as_deref()) {
+            if let Some(sid) = session_id.as_deref() {
+                if let Some(m) = marker.as_deref() {
+                    crate::window::win32::inject_marker_on_demand(sid, pid, m);
+                }
+            }
+        }
         // 面板反推：当前所有运行会话的 (工具id, 项目名)，用于排除其他工具的终端窗口
         // （codex 终端标题=项目名，无 "codex" 关键词可静态认领）。进程扫描即可，无文件解析开销
         let running_projects = running_projects_from_processes(&system);
@@ -218,6 +227,13 @@ pub fn focus_session(
     }
 }
 
+/// 按需注入门控（spec §3.2）：仅无可靠静态标题键的 claude/codex 且 CLI 形态。
+/// kimi/opencode 标题键已实测够用，注入只会污染其标题
+#[cfg(any(windows, test))]
+fn on_demand_marker_applies(agent: Option<&str>, form: Option<&str>) -> bool {
+    matches!(agent, Some("claude" | "codex")) && form != Some("app")
+}
+
 /// macOS 深链成功是否回标已读（P1-2 判定核心，cfg(test) 使其 Windows 侧可测）：
 /// via=deep-link → 不标（无前台验证，路由成败不可证）；其余（bundle/枚举兜底）→ 标
 #[cfg(any(target_os = "macos", test))]
@@ -304,5 +320,22 @@ mod macos_deep_link_read_tests {
         assert!(macos_deep_link_marks_read(None)); // bundle/枚举兜底（无 via 标记）
         assert!(macos_deep_link_marks_read(Some("tty")));
         assert!(macos_deep_link_marks_read(Some("app-fallback")));
+    }
+}
+
+#[cfg(test)]
+mod on_demand_tests {
+    // 门控契约（spec §3.2）：仅 claude/codex 且仅 CLI 形态注入；其余零开销跳过
+    use super::on_demand_marker_applies;
+
+    #[test]
+    fn applies_to_claude_and_codex_cli_only() {
+        assert!(on_demand_marker_applies(Some("claude"), Some("cli")));
+        assert!(on_demand_marker_applies(Some("codex"), Some("cli")));
+        assert!(on_demand_marker_applies(Some("claude"), None)); // form 缺失按 CLI 处理
+        assert!(!on_demand_marker_applies(Some("claude"), Some("app")));
+        assert!(!on_demand_marker_applies(Some("kimi"), Some("cli"))); // 标题键够用
+        assert!(!on_demand_marker_applies(Some("opencode"), Some("cli"))); // 同上
+        assert!(!on_demand_marker_applies(None, Some("cli")));
     }
 }

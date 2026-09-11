@@ -707,6 +707,47 @@ pub fn focus_hwnd(hwnd_val: isize) -> Result<(), String> {
     }
 }
 
+/// 跳转前按需注入（spec 2026-09-12 §3.2）：spawn helper 附加目标会话控制台贴
+/// marker，随后有界等待 marker 出现在任一候选窗口标题（≤500ms——第三轮实测
+/// idle 态存活 ≥15s，等待的是 ConPTY 渲染延迟）。全部失败路径静默返回，
+/// 判定链照旧执行（零回归）
+pub fn inject_marker_on_demand(session_id: &str, pid: u32, marker: &str) {
+    use std::os::windows::process::CommandExt;
+    if marker.is_empty() {
+        return;
+    }
+    let helper = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("bin")
+        .join("mam-marker.exe");
+    if !helper.is_file() {
+        return; // 未随包分发/被清理：合法状态，跳过
+    }
+    // CREATE_NO_WINDOW：GUI 进程 spawn 控制台子程序防闪窗
+    let _ = std::process::Command::new(&helper)
+        .arg("--pid")
+        .arg(pid.to_string())
+        .arg(session_id)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
+        .spawn();
+    let marker_lc = marker.to_lowercase();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let wins = all_windows();
+        if wins
+            .by_pid
+            .values()
+            .any(|v| v.iter().any(|(_, t)| t.to_lowercase().contains(&marker_lc)))
+        {
+            break;
+        }
+    }
+}
+
 /// 兼容旧入口（mod.rs 的 focus_terminal_for_pid 内部使用）
 pub fn focus_window_for_pid(pid: u32) -> Result<(), String> {
     let system = sysinfo::System::new_all();
