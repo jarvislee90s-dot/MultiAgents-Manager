@@ -130,15 +130,6 @@ pub fn focus_session(
                     .collect::<String>()
             )
         });
-        // 按需注入（spec 2026-09-12 §3.2）：claude/codex CLI 会话在判定链前贴
-        // marker，① 层即可精确命中；helper 缺失/失败/超时全部静默回落
-        if on_demand_marker_applies(agent_type.as_deref(), form.as_deref()) {
-            if let Some(sid) = session_id.as_deref() {
-                if let Some(m) = marker.as_deref() {
-                    crate::window::win32::inject_marker_on_demand(sid, pid, m);
-                }
-            }
-        }
         // 面板反推：当前所有运行会话的 (工具id, 项目名)，用于排除其他工具的终端窗口
         // （codex 终端标题=项目名，无 "codex" 关键词可静态认领）。进程扫描即可，无文件解析开销
         let running_projects = running_projects_from_processes(&system);
@@ -160,6 +151,19 @@ pub fn focus_session(
                 _ => false,
             }
         };
+        // 按需注入（spec 2026-09-12 §3.2）：claude/codex CLI 会话在判定链前贴
+        // marker，① 层即可精确命中。**配对不确定时必须一并禁用**（第四轮 3c 实证）：
+        // 注入目标取自卡片 pid，pid 本身可能配对交叉 → marker 贴到兄弟会话的终端，
+        // ① 层随之高置信锁错窗（marker 命中构成自证循环，不是正向证据）。禁用后
+        // 该场景回落双命中仲裁/选择器，"锁对或选择器、绝不锁错"契约恢复。
+        // helper 缺失/失败/超时仍然全部静默回落
+        if on_demand_injection_allowed(agent_type.as_deref(), form.as_deref(), require_evidence) {
+            if let Some(sid) = session_id.as_deref() {
+                if let Some(m) = marker.as_deref() {
+                    crate::window::win32::inject_marker_on_demand(sid, pid, m);
+                }
+            }
+        }
         let hints = crate::window::win32::JumpHints {
             session_marker: marker.as_deref(),
             agent_keyword: agent_type.as_deref(),
@@ -227,11 +231,23 @@ pub fn focus_session(
     }
 }
 
-/// 按需注入门控（spec §3.2）：仅无可靠静态标题键的 claude/codex 且 CLI 形态。
-/// kimi/opencode 标题键已实测够用，注入只会污染其标题
+/// 按需注入工具/形态门（spec §3.2）：仅无可靠静态标题键的 claude/codex 且 CLI
+/// 形态。kimi/opencode 标题键已实测够用，注入只会污染其标题
 #[cfg(any(windows, test))]
 fn on_demand_marker_applies(agent: Option<&str>, form: Option<&str>) -> bool {
     matches!(agent, Some("claude" | "codex")) && form != Some("app")
+}
+
+/// 按需注入总门 = 工具/形态门 ∧ ¬配对不确定。配对不确定（同工具同项目 ≥2 进程）
+/// 时卡片 pid 可能与会话交叉，注入目标随之错配，marker 命中构成自证循环——
+/// 第四轮 3c 实证 codex 同项目双开两次静默锁错，故此场景禁注入、回落既有层
+#[cfg(any(windows, test))]
+fn on_demand_injection_allowed(
+    agent: Option<&str>,
+    form: Option<&str>,
+    pairing_ambiguous: bool,
+) -> bool {
+    on_demand_marker_applies(agent, form) && !pairing_ambiguous
 }
 
 /// macOS 深链成功是否回标已读（P1-2 判定核心，cfg(test) 使其 Windows 侧可测）：
@@ -326,7 +342,7 @@ mod macos_deep_link_read_tests {
 #[cfg(test)]
 mod on_demand_tests {
     // 门控契约（spec §3.2）：仅 claude/codex 且仅 CLI 形态注入；其余零开销跳过
-    use super::on_demand_marker_applies;
+    use super::{on_demand_injection_allowed, on_demand_marker_applies};
 
     #[test]
     fn applies_to_claude_and_codex_cli_only() {
@@ -337,6 +353,32 @@ mod on_demand_tests {
         assert!(!on_demand_marker_applies(Some("kimi"), Some("cli"))); // 标题键够用
         assert!(!on_demand_marker_applies(Some("opencode"), Some("cli"))); // 同上
         assert!(!on_demand_marker_applies(None, Some("cli")));
+    }
+
+    #[test]
+    fn pairing_ambiguous_disables_injection() {
+        // 第四轮 3c 回归锁：同工具同项目双开（配对不确定）时禁用注入——
+        // 错配 pid 注入会把 marker 贴到兄弟会话终端，① 层自证循环锁错窗
+        assert!(on_demand_injection_allowed(
+            Some("codex"),
+            Some("cli"),
+            false
+        ));
+        assert!(!on_demand_injection_allowed(
+            Some("codex"),
+            Some("cli"),
+            true
+        ));
+        assert!(!on_demand_injection_allowed(
+            Some("claude"),
+            Some("cli"),
+            true
+        ));
+        assert!(!on_demand_injection_allowed(
+            Some("kimi"),
+            Some("cli"),
+            false
+        ));
     }
 }
 
