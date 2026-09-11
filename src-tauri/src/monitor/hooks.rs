@@ -95,6 +95,27 @@ fn install_marker_helper() -> Option<PathBuf> {
     None
 }
 
+/// Windows hook 命令：路径含空格才加引号。claude 在 Windows 经
+/// `powershell -Command "<command>"` 包装执行钩子，内层双引号会破坏外层配对
+/// （SessionStart 报错根因）；无空格路径去引号即绕开
+fn quote_bash_command(path_str: &str) -> String {
+    if path_str.contains(' ') {
+        format!("bash \"{path_str}\"")
+    } else {
+        format!("bash {path_str}")
+    }
+}
+
+/// 当前平台注册的 hook 命令（注册 / 核验 / 去重三处同源，单一事实源）
+fn hook_command_for(script_path: &std::path::Path) -> String {
+    let s = script_path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        quote_bash_command(&s)
+    } else {
+        s
+    }
+}
+
 /// 为指定工具注册 Hook
 /// adapter_name: 工具名称, config_path: 配置文件路径, events: 事件列表, event_case: 大小写格式
 pub fn register_hooks_for_tool(
@@ -106,11 +127,7 @@ pub fn register_hooks_for_tool(
     let script_path_str = script_path.to_string_lossy().to_string();
 
     // Windows 无法直接执行 .sh，hook 命令经 bash 调用（Git Bash 随开发/使用环境存在）
-    let command_str = if cfg!(windows) {
-        format!("bash \"{}\"", script_path_str)
-    } else {
-        script_path_str.clone()
-    };
+    let command_str = hook_command_for(&script_path);
 
     // 读取现有配置（不存在则创建空对象）
     let existing = fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
@@ -126,6 +143,7 @@ pub fn register_hooks_for_tool(
     let hooks_obj = hooks.as_object_mut().ok_or("hooks 字段不是对象")?;
 
     let mut added = 0;
+    let mut migrated_any = false;
     for &event in events {
         let event_name = if is_pascal_case {
             event.to_string()
@@ -138,31 +156,45 @@ pub fn register_hooks_for_tool(
             }
         };
 
-        // 检查是否已注册（避免重复）
-        if let Some(existing_arr) = hooks_obj.get(&event_name) {
-            if let Some(arr) = existing_arr.as_array() {
-                let already = arr.iter().any(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|hooks| {
-                            // 按**当前完整命令**判定（含脚本绝对路径）。此前只查
-                            // "status-hook.sh" 子串——脚本迁移/换机后旧路径条目会被
-                            // 误判为已注册而跳过重写（2026-09-11 实机验收发现 2 弱点）
-                            hooks.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .map(|c| c.contains(&command_str))
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false)
-                });
-                if already {
-                    debug!("Hook 已注册: {}", event_name);
+        // 已注册检测 + 旧形态迁移：条目 command 含脚本路径即视为我们注册的。
+        // 与当前命令一致 → 跳过；含路径但形态旧（如带引号旧格式）→ 原地改写
+        // 为当前命令（追加会造成双写事件且旧条目继续触发 SessionStart 报错）
+        let mut already = false;
+        let mut migrated_this_event = false;
+        if let Some(arr) = hooks_obj
+            .get_mut(&event_name)
+            .and_then(|v| v.as_array_mut())
+        {
+            for entry in arr.iter_mut() {
+                let Some(cmds) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
                     continue;
+                };
+                for h in cmds.iter_mut() {
+                    let Some(c) = h
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                    else {
+                        continue;
+                    };
+                    if !c.contains(&script_path_str) {
+                        continue; // 用户自己的 hook 条目，不动
+                    }
+                    if c == command_str {
+                        already = true;
+                    } else {
+                        h["command"] = serde_json::json!(command_str);
+                        migrated_this_event = true;
+                    }
                 }
             }
+        }
+        migrated_any |= migrated_this_event;
+        // 已注册或本轮完成原地迁移：条目已等于当前命令，再追加会产生同命令重复
+        // 条目（同事件双触发、双写事件），直接进入下一事件；持久化由 migrated_any 保证
+        if already || migrated_this_event {
+            debug!("Hook 已注册/已迁移: {}", event_name);
+            continue;
         }
 
         // 合并式追加：用户已有同事件 hooks 时保留其条目，仅追加我们的（不整组替换）
@@ -184,7 +216,7 @@ pub fn register_hooks_for_tool(
         added += 1;
     }
 
-    if added > 0 {
+    if added > 0 || migrated_any {
         // 创建备份（防止写入失败导致配置丢失）
         if config_path.exists() {
             let backup = config_path.with_extension("json.bak");
@@ -266,11 +298,7 @@ pub fn register_all_hooks() {
         // 只查 "status-hook.sh" 文件名子串会把旧位置的历史注册误判为已核验、
         // 永不重写（2026-09-11 实机验收发现 2 弱点；codex 0.149.1 hook 链路
         // 不执行是 codex 侧问题，此处保证 MAM 侧配置口径始终正确）
-        let expected_cmd = if cfg!(windows) {
-            format!("bash \"{}\"", script_path.to_string_lossy())
-        } else {
-            script_path.to_string_lossy().to_string()
-        };
+        let expected_cmd = hook_command_for(&script_path);
         let verified = fs::read_to_string(&config_path)
             .map(|c| c.contains(&expected_cmd))
             .unwrap_or(false)
@@ -295,5 +323,29 @@ pub fn register_all_hooks() {
                 e
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod command_quote_tests {
+    use super::quote_bash_command;
+
+    #[test]
+    fn no_space_path_is_unquoted() {
+        // 无空格路径不加引号：消除 powershell -Command 包装层的引号嵌套
+        // （claude Windows 侧 SessionStart 报错根因，2026-09-12 第三轮探测 C1）
+        assert_eq!(
+            quote_bash_command(r"C:\Users\bunny\.mam\hooks\status-hook.sh"),
+            r"bash C:\Users\bunny\.mam\hooks\status-hook.sh"
+        );
+    }
+
+    #[test]
+    fn spaced_path_keeps_quotes() {
+        // 含空格路径必须保引号（已知残留：该形态下 SessionStart 报错可能复现，spec 3.4）
+        assert_eq!(
+            quote_bash_command(r"C:\Users\John Doe\.mam\hooks\status-hook.sh"),
+            r#"bash "C:\Users\John Doe\.mam\hooks\status-hook.sh""#
+        );
     }
 }
