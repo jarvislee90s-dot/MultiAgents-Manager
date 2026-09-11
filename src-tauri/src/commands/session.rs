@@ -339,3 +339,25 @@ mod on_demand_tests {
         assert!(!on_demand_marker_applies(None, Some("cli")));
     }
 }
+
+#[cfg(test)]
+mod marker_literal_tests {
+    // 匹配侧 marker 构造回归锁（与本文件 focus_session 的内联构造逐字一致；
+    // 口径内联于命令内，按互引纪律不抽取 helper，靠本锁镜像防漂移）。
+    // 与注入侧锁成对：src/bin/mam-marker.rs marker_strips_hyphens_and_takes_12
+    // 对同一 session id 断言同一字面量，两侧改动必须同步（互引：focus_session
+    // marker 注释 / mam-marker.rs 模块注释）
+    #[test]
+    fn matching_side_marker_literal_matches_helper_side() {
+        let session_id = "01a08083-5ca0-4948-8276-9a0b8c7d6e5f";
+        let marker = format!(
+            "MAM:{}",
+            session_id
+                .chars()
+                .filter(|c| *c != '-')
+                .take(12)
+                .collect::<String>()
+        );
+        assert_eq!(marker, "MAM:01a080835ca0");
+    }
+}

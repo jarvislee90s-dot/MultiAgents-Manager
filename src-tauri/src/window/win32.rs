@@ -88,7 +88,7 @@ fn normalize_title_for_project(title: &str) -> String {
 /// 跳转消歧的会话侧身份线索包（由 focus_session IPC 透传组装）。
 /// 收拢为结构体避免 resolve_and_focus 参数超过 clippy too_many_arguments 阈值（7）
 pub struct JumpHints<'a> {
-    /// hook 注入的标题标记（如 "MAM:1ba8e2f7"），通道 no-go 但代码保留
+    /// 跳转前按需注入（inject_marker_on_demand）贴入的标题标记（如 "MAM:1ba8e2f7"）
     pub session_marker: Option<&'a str>,
     /// 工具 id 小写（"kimi"/"opencode"…），认领判定与打分用
     pub agent_keyword: Option<&'a str>,
@@ -575,7 +575,8 @@ pub fn resolve_and_focus(
             return try_lock(cands[0].0);
         }
         // ===== 多窗口消歧：硬逻辑先行 + 排除制 + 洋葱回退 =====
-        // ① marker 精确匹配（hook 注入标题标记；通道当前 no-go，代码保留）
+        // ① marker 精确匹配：按需注入（inject_marker_on_demand）在判定链前对目标
+        // 会话贴 marker，此处对含 marker 的窗口精确命中
         if let Some(marker) = hints.session_marker {
             let hits: Vec<_> = cands
                 .iter()
@@ -724,15 +725,21 @@ pub fn inject_marker_on_demand(session_id: &str, pid: u32, marker: &str) {
     if !helper.is_file() {
         return; // 未随包分发/被清理：合法状态，跳过
     }
-    // CREATE_NO_WINDOW：GUI 进程 spawn 控制台子程序防闪窗
-    let _ = std::process::Command::new(&helper)
+    // CREATE_NO_WINDOW：GUI 进程 spawn 控制台子程序防闪窗。
+    // spawn 失败（如 AV 拦截执行）时 marker 永远不会出现，立即静默返回，
+    // 不空耗整段轮询预算（判定链照旧执行，零回归）
+    if std::process::Command::new(&helper)
         .arg("--pid")
         .arg(pid.to_string())
         .arg(session_id)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .creation_flags(0x0800_0000)
-        .spawn();
+        .spawn()
+        .is_err()
+    {
+        return;
+    }
     let marker_lc = marker.to_lowercase();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while std::time::Instant::now() < deadline {

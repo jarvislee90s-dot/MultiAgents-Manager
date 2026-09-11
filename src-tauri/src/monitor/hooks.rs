@@ -36,7 +36,7 @@ pub fn ensure_hook_script() -> PathBuf {
     let _ = fs::create_dir_all(&events_dir);
 
     let script_path = hooks_dir.join("status-hook.sh");
-    // 无条件重写：脚本由应用托管，幂等重写保证升级后新 marker 生效
+    // 无条件重写：脚本由应用托管，幂等重写保证升级后新脚本内容生效
     let _ = fs::write(&script_path, HOOK_SCRIPT);
     #[cfg(unix)]
     {
@@ -48,7 +48,8 @@ pub fn ensure_hook_script() -> PathBuf {
         }
     }
     // marker helper 安装（issue #43）：把与主程序同目录的 mam-marker 拷到 ~/.mam/bin/
-    // 供 hook 脚本调用。helper 未构建/未随包分发是合法状态——hook 检测不到即跳过，
+    // 供 MAM 主进程跳转按需注入调用（window/win32.rs::inject_marker_on_demand）。
+    // helper 未构建/未随包分发是合法状态——主进程检测不到即跳过注入，
     // 跳转链完整回落既有消歧层（零回归）。无条件覆盖保证升级后新版 helper 生效
     install_marker_helper();
     script_path
@@ -131,7 +132,9 @@ pub fn register_hooks_for_tool(
     let hooks_obj = hooks.as_object_mut().ok_or("hooks 字段不是对象")?;
 
     let mut added = 0;
-    let mut migrated_any = false;
+    // 原地迁移的旧条目计数（处）：仅用于成功日志区分「新注册」与「迁移」，
+    // 不改变控制流语义（0 ⇔ 原来的 migrated_any=false）
+    let mut migrated = 0usize;
     for &event in events {
         let event_name = if is_pascal_case {
             event.to_string()
@@ -148,7 +151,7 @@ pub fn register_hooks_for_tool(
         // 与当前命令一致 → 跳过；含路径但形态旧（如带引号旧格式）→ 原地改写
         // 为当前命令（追加会造成双写事件且旧条目继续触发 SessionStart 报错）
         let mut already = false;
-        let mut migrated_this_event = false;
+        let mut migrated_this_event = 0usize;
         if let Some(arr) = hooks_obj
             .get_mut(&event_name)
             .and_then(|v| v.as_array_mut())
@@ -172,15 +175,15 @@ pub fn register_hooks_for_tool(
                         already = true;
                     } else {
                         h["command"] = serde_json::json!(command_str);
-                        migrated_this_event = true;
+                        migrated_this_event += 1;
                     }
                 }
             }
         }
-        migrated_any |= migrated_this_event;
+        migrated += migrated_this_event;
         // 已注册或本轮完成原地迁移：条目已等于当前命令，再追加会产生同命令重复
-        // 条目（同事件双触发、双写事件），直接进入下一事件；持久化由 migrated_any 保证
-        if already || migrated_this_event {
+        // 条目（同事件双触发、双写事件），直接进入下一事件；持久化由 migrated 计数保证
+        if already || migrated_this_event > 0 {
             debug!("Hook 已注册/已迁移: {}", event_name);
             continue;
         }
@@ -204,7 +207,7 @@ pub fn register_hooks_for_tool(
         added += 1;
     }
 
-    if added > 0 || migrated_any {
+    if added > 0 || migrated > 0 {
         // 创建备份（防止写入失败导致配置丢失）
         if config_path.exists() {
             let backup = config_path.with_extension("json.bak");
@@ -214,7 +217,15 @@ pub fn register_hooks_for_tool(
             serde_json::to_string_pretty(&config).map_err(|e| format!("序列化配置失败: {}", e))?;
         crate::linker::write_config_locked(config_path, &pretty)
             .map_err(|e| format!("写入配置文件失败: {}", e))?;
-        info!("已注册 {} 个 Hook 到 {:?}", added, config_path);
+        // 仅迁移（added=0）时「已注册 0 个」有误导：日志区分迁移条目数
+        if migrated > 0 {
+            info!(
+                "已注册 {} 个 Hook（迁移旧条目 {} 处）到 {:?}",
+                added, migrated, config_path
+            );
+        } else {
+            info!("已注册 {} 个 Hook 到 {:?}", added, config_path);
+        }
     }
 
     Ok(())
