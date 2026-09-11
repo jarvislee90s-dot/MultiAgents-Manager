@@ -1,29 +1,31 @@
 //! mam-marker — 会话身份窗口标题标记注入 helper（issue #43，仅 Windows）
 //!
-//! 使命：把 `MAM:<session_id 剥连字符前 12 位>` 追加到「当前 CLI 会话所在终端」的
+//! 使命：把 `MAM:<session_id 剥连字符前 12 位>` 追加到「目标 CLI 会话所在终端」的
 //! 标题上，使 `window/win32.rs::resolve_and_focus` 的 ① marker 精确匹配层复活。
-//! 调用方是 hook 脚本（`monitor/hooks.rs::HOOK_SCRIPT`，低频事件触发），helper 被
-//! bash 用管道 spawn——**没有挂接任何交互终端**，这正是 2026-08-25「hook 内联
-//! powershell 直写 CONOUT$」判决 no-go 的根因。
+//! 调用方是 MAM 主进程按需注入（`window/win32.rs::inject_marker_on_demand`，
+//! spec 2026-09-12 §3.1）：直接 spawn 本 exe 并以 `--pid <目标进程pid> <session_id>`
+//! 指定附加目标（外部进程 AttachConsole(pid) 已用 PowerShell 实证可行）；早期
+//! 「hook 脚本管道 spawn + 父链自走定位」随 hook 周期注入退役一并删除。
 //!
 //! 注入采用 B→A 融合（先 B 后 A，B 失败无法读回故双保险都跑）：
 //! - **路线 B（官方控制台通道，tab 级）**：`FreeConsole` 脱离（等价于无控制台初始
-//!   态）→ `AttachConsole` 附加到父链上 CLI 所在的控制台 → 读现标题、追加 marker、
-//!   `SetConsoleTitleW` 写回。Windows Terminal 的 ConPTY 会把它渲染为**该 CLI 所在
-//!   标签**的标题——这是终端官方协议，多标签语义最准。profile 开了
+//!   态）→ `AttachConsole(target_pid)` 附加到目标进程所在的控制台 → 读现标题、
+//!   追加 marker、`SetConsoleTitleW` 写回。Windows Terminal 的 ConPTY 会把它渲染
+//!   为**该 CLI 所在标签**的标题——这是终端官方协议，多标签语义最准。profile 开了
 //!   `suppressApplicationTitle` 时 WT 会忽略（此时依赖路线 A）。
-//! - **路线 A（外部直改窗口标题，窗口级）**：沿父进程链（bash ← CLI ← shell ←
-//!   WindowsTerminal）找到第一个拥有可见顶层窗口的祖先，仅当它**恰好一个窗口**时
-//!   `SetWindowTextW` 追加 marker（多窗口时无法判定本标签属于哪个窗口，放弃 A——
-//!   该场景由 B 的 tab 级标题覆盖）。
+//! - **路线 A（外部直改窗口标题，窗口级）**：沿目标进程的祖先链（含目标自身；
+//!   CLI ← shell ← WindowsTerminal）找到第一个拥有可见顶层窗口的进程，仅当它
+//!   **恰好一个窗口**时 `SetWindowTextW` 追加 marker（多窗口时无法判定本标签属于
+//!   哪个窗口，放弃 A——该场景由 B 的 tab 级标题覆盖）。
 //!
-//! marker 口径三处互引（改动须同步）：`commands/session.rs`（匹配侧构造）、
-//! `monitor/hooks.rs::HOOK_SCRIPT`（调用侧注释）、本文件 `marker_from_session_id`。
+//! marker 口径两处互引（改动须同步）：`commands/session.rs`（匹配侧构造）、
+//! 本文件 `marker_from_session_id`（注入侧构造）。
 //! 12 位理由：codex UUIDv7 前 8 hex 只编码 65.5s 粒度，同分钟双开撞车（实测
 //! 2026-09-08）；12 位不撞。必须先剥连字符——UUID 第 9 位即 '-'。
 //!
-//! 分发：应用启动时由 `ensure_hook_script` 把本 exe（与主程序同目录）拷到
-//! `~/.mam/bin/`；hook 检测到才调用，缺失即整链回落既有消歧层（零回归）。
+//! 分发：应用启动时仍由 `ensure_hook_script` 把本 exe（与主程序同目录）拷到
+//! `~/.mam/bin/`（复用既有分发通道）；helper 缺失即按需注入整体跳过，跳转链
+//! 回落既有消歧层（零回归）。
 //!
 //! # 2026-09-11 Windows 实机验收结论（issue #43 评论）
 //!
@@ -39,10 +41,16 @@
 //! 最短长度门（MIN_UIA_TAIL_CHARS）保证。
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
     {
-        std::process::exit(win::run(args.get(1).map(|s| s.as_str())));
+        match parse_marker_args(&args) {
+            Some((pid, sid)) => std::process::exit(win::run(pid, &sid)),
+            None => {
+                eprintln!("usage: mam-marker --pid <target-pid> <session_id>");
+                std::process::exit(2)
+            }
+        }
     }
     #[cfg(not(windows))]
     {
@@ -51,6 +59,23 @@ fn main() {
         let _ = args;
         eprintln!("mam-marker is Windows-only（issue #43 窗口标题标记注入）");
         std::process::exit(2);
+    }
+}
+
+/// 参数解析：`--pid <目标进程> <session_id>` 唯一形态（spec 2026-09-12 §3.1：
+/// hook 周期注入退役后父链自走无生产调用方，删除）
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_marker_args(args: &[String]) -> Option<(u32, String)> {
+    match args {
+        [flag, pid, sid] if flag == "--pid" => {
+            let pid = pid.parse::<u32>().ok()?;
+            if sid.is_empty() {
+                None
+            } else {
+                Some((pid, sid.clone()))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -81,7 +106,7 @@ fn append_marker_to_title(title: &str, marker: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_marker_to_title, marker_from_session_id};
+    use super::{append_marker_to_title, marker_from_session_id, parse_marker_args};
 
     #[test]
     fn marker_strips_hyphens_and_takes_12() {
@@ -107,6 +132,29 @@ mod tests {
         );
         assert_eq!(append_marker_to_title("", m), m.to_string());
         assert_eq!(append_marker_to_title("   ", m), m.to_string());
+    }
+
+    #[test]
+    fn parse_args_accepts_pid_form() {
+        let args = vec![
+            "--pid".to_string(),
+            "1234".to_string(),
+            "01a08083-5ca0-4948".to_string(),
+        ];
+        assert_eq!(
+            parse_marker_args(&args),
+            Some((1234, "01a08083-5ca0-4948".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_flag_or_bad_pid() {
+        assert_eq!(parse_marker_args(&["1234".into(), "sid".into()][..]), None);
+        assert_eq!(
+            parse_marker_args(&["--pid".into(), "abc".into(), "sid".into()][..]),
+            None
+        );
+        assert_eq!(parse_marker_args(&[]), None);
     }
 }
 
@@ -172,10 +220,10 @@ mod win {
         map
     }
 
-    /// 自身 pid 起沿父链的 pid 序列（含自身，近→远；环/缺失即止，64 层防御）
-    fn ancestor_pids(snap: &HashMap<u32, (u32, String)>) -> Vec<u32> {
+    /// 从 start 起沿父链的 pid 序列（含 start 自身，近→远；环/缺失即止，64 层防御）
+    fn ancestor_chain_from(start: u32, snap: &HashMap<u32, (u32, String)>) -> Vec<u32> {
         let mut chain = Vec::new();
-        let mut cur = std::process::id();
+        let mut cur = start;
         for _ in 0..64 {
             if chain.contains(&cur) {
                 break;
@@ -228,27 +276,17 @@ mod win {
         ctx.out
     }
 
-    /// 路线 B：附加父链上的控制台并 SetConsoleTitleW（官方通道，tab 级）。
-    /// 返回 (是否注入, 日志)。失败点各不相同，逐条记录便于实机排查
-    fn route_b(marker: &str, snap: &HashMap<u32, (u32, String)>, logs: &mut Vec<String>) -> bool {
+    /// 路线 B：附加 `--pid` 目标进程的控制台并 SetConsoleTitleW（官方通道，tab 级）。
+    /// 失败点各不相同，逐条记录便于实机排查
+    fn route_b(target_pid: u32, marker: &str, logs: &mut Vec<String>) -> bool {
         unsafe {
-            // 先脱离（自身可能无控制台，忽略结果）；ATTACH_PARENT_PROCESS 直指父进程
-            // （hook 场景父=bash，与 CLI 同控制台）。失败再沿父链逐个尝试（纵深防御：
-            // 适配 bash 之外更深的 spawn 层级）
+            // 先脱离（被 MAM spawn 时本无控制台，忽略结果），再直指目标 pid 附加
+            //（外部进程 AttachConsole(pid) 已用 PowerShell 实证可行，spec §3.1）
             let _ = FreeConsole();
-            let mut attached = AttachConsole(ATTACH_PARENT_PROCESS).is_ok();
-            if !attached {
-                logs.push("B: ATTACH_PARENT 失败，沿父链回退".into());
-                for pid in ancestor_pids(snap).into_iter().skip(1) {
-                    if AttachConsole(pid).is_ok() {
-                        attached = true;
-                        logs.push(format!("B: 已附加到祖先进程 {pid} 的控制台"));
-                        break;
-                    }
-                }
-            }
-            if !attached {
-                logs.push("B: 父链上无可附加的控制台（CLI 可能已退出）".into());
+            if AttachConsole(target_pid).is_err() {
+                logs.push(format!(
+                    "B: 附加目标 {target_pid} 控制台失败（会话活动中/已退出/权限）"
+                ));
                 return false;
             }
             let mut buf = [0u16; 2048];
@@ -268,10 +306,16 @@ mod win {
         }
     }
 
-    /// 路线 A：沿父链找第一个拥有可见顶层窗口的祖先（跳过 shell 黑名单），
-    /// 恰好单窗口时 SetWindowTextW（窗口级；多窗口放弃——无法判定标签归属）
-    fn route_a(marker: &str, snap: &HashMap<u32, (u32, String)>, logs: &mut Vec<String>) -> bool {
-        for pid in ancestor_pids(snap).into_iter().skip(1) {
+    /// 路线 A：沿目标进程祖先链（含目标自身）找第一个拥有可见顶层窗口的进程
+    /// （跳过 shell 黑名单），恰好单窗口时 SetWindowTextW（窗口级；多窗口放弃——
+    /// 无法判定标签归属）
+    fn route_a(
+        target_pid: u32,
+        marker: &str,
+        snap: &HashMap<u32, (u32, String)>,
+        logs: &mut Vec<String>,
+    ) -> bool {
+        for pid in ancestor_chain_from(target_pid, snap) {
             let Some((_, name)) = snap.get(&pid) else {
                 continue;
             };
@@ -284,7 +328,7 @@ mod win {
             }
             if wins.len() != 1 {
                 logs.push(format!(
-                    "A: 祖先 {pid}（{name}）有 {} 个窗口，无法判定标签归属，放弃 A",
+                    "A: 进程 {pid}（{name}）有 {} 个窗口，无法判定标签归属，放弃 A",
                     wins.len()
                 ));
                 return false;
@@ -294,31 +338,28 @@ mod win {
             let hwnd = HWND(*hwnd);
             let ok = unsafe { SetWindowTextW(hwnd, &HSTRING::from(next.as_str())).is_ok() };
             logs.push(format!(
-                "A: 祖先 {pid}（{name}）单窗口 SetWindowTextW {}（{:?} → {:?}）",
+                "A: 进程 {pid}（{name}）单窗口 SetWindowTextW {}（{:?} → {:?}）",
                 if ok { "成功" } else { "失败" },
                 title,
                 next
             ));
             return ok;
         }
-        logs.push("A: 父链上未找到拥有可见窗口的祖先".into());
+        logs.push("A: 目标祖先链上未找到拥有可见窗口的进程".into());
         false
     }
 
-    /// 入口：session_id → 双路线注入。退出码：0 = 至少一路成功；3 = 全失败；2 = 用法错
-    pub fn run(session_id: Option<&str>) -> i32 {
-        let Some(id) = session_id else {
-            eprintln!("usage: mam-marker <session_id>");
-            return 2;
-        };
-        let marker = super::marker_from_session_id(id);
+    /// 入口：`--pid` 指定的目标进程 → 双路线注入。退出码：0 = 至少一路成功；3 = 全失败
+    /// （2 = 用法错，main 层解析失败时返回）
+    pub fn run(target_pid: u32, session_id: &str) -> i32 {
+        let marker = super::marker_from_session_id(session_id);
         let snap = process_snapshot();
         let mut logs = Vec::new();
 
-        let b = route_b(&marker, &snap, &mut logs);
-        let a = route_a(&marker, &snap, &mut logs);
+        let b = route_b(target_pid, &marker, &mut logs);
+        let a = route_a(target_pid, &marker, &snap, &mut logs);
 
-        // 日志恢复：手动运行时把输出接回自己的控制台（hook 调用时 stderr 是管道，
+        // 日志恢复：手动调试运行时把输出接回自己的控制台（被 MAM spawn 时无控制台，
         // 这两行天然静默）；恢复失败（原本无控制台）则丢弃日志
         unsafe {
             let _ = AttachConsole(ATTACH_PARENT_PROCESS);
