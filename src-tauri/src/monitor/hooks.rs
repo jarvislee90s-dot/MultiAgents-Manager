@@ -26,7 +26,10 @@ echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts
 # SetConsoleTitle 官方通道优先、A=SetWindowTextW 窗口直改兜底，见 src/bin/mam-marker.rs）。
 # marker 口径三处互引（改动须同步）：commands/session.rs（匹配侧）/ 本脚本 /
 # mam-marker helper。MAM_MARKER=1 启用（实验期默认关，实机验收后转默认开）；
-# helper 缺失零开销跳过（整链回落既有消歧层，零回归）
+# helper 缺失零开销跳过（整链回落既有消歧层，零回归）。
+# 实测（2026-09-11）：claude TUI 秒级重写标题、注入被冲掉，codex 0.149.1 的
+# hook 运行时未执行本脚本（codex 侧问题）——marker 端到端按工具逐个成立前，
+# 跳转正确性由标题键与 UIA 尾串门保证（见 src/bin/mam-marker.rs 头注释）
 if [ "${MAM_MARKER:-0}" = "1" ] && [ -x "$HOME/.mam/bin/mam-marker.exe" ]; then
   case "$EVENT" in
     [Ss]top|[Pp]ostToolUse|[Ss]essionEnd|[Uu]serPromptSubmit)
@@ -143,10 +146,13 @@ pub fn register_hooks_for_tool(
                         .get("hooks")
                         .and_then(|h| h.as_array())
                         .map(|hooks| {
+                            // 按**当前完整命令**判定（含脚本绝对路径）。此前只查
+                            // "status-hook.sh" 子串——脚本迁移/换机后旧路径条目会被
+                            // 误判为已注册而跳过重写（2026-09-11 实机验收发现 2 弱点）
                             hooks.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
-                                    .map(|c| c.contains("status-hook.sh"))
+                                    .map(|c| c.contains(&command_str))
                                     .unwrap_or(false)
                             })
                         })
@@ -256,9 +262,17 @@ pub fn register_all_hooks() {
         };
         let tool_key = format!("hooks_registered_{}", adapter.agent_type().tool_id());
 
-        // 启动核验：配置文件实际包含 status-hook 引用且脚本存在才跳过
+        // 启动核验：配置文件实际引用**当前脚本绝对路径**且脚本存在才跳过。
+        // 只查 "status-hook.sh" 文件名子串会把旧位置的历史注册误判为已核验、
+        // 永不重写（2026-09-11 实机验收发现 2 弱点；codex 0.149.1 hook 链路
+        // 不执行是 codex 侧问题，此处保证 MAM 侧配置口径始终正确）
+        let expected_cmd = if cfg!(windows) {
+            format!("bash \"{}\"", script_path.to_string_lossy())
+        } else {
+            script_path.to_string_lossy().to_string()
+        };
         let verified = fs::read_to_string(&config_path)
-            .map(|c| c.contains("status-hook.sh"))
+            .map(|c| c.contains(&expected_cmd))
             .unwrap_or(false)
             && script_path.exists();
         if verified {

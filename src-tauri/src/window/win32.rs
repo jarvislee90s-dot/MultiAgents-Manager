@@ -374,11 +374,18 @@ fn title_match_lock(cands: &[(isize, String)], agent: &str, keys: &[String]) -> 
     }
 }
 
-/// 会话标题键组装：仅标题里携带会话区分度信息的工具接入（kimi/opencode 已实测同源）。
-/// claude/codex/openclaw/workbuddy 返回空列表——本层对其自然跳过
-fn title_keys(agent: &str, title: Option<&str>) -> Vec<String> {
+/// 会话标题键组装：仅标题里携带会话区分度信息的工具接入
+/// （kimi/opencode=会话标题；codex=项目目录名——其终端标题形态即项目名、无会话
+/// 信息，项目名就是它全部的正向证据，2026-09-11 实机验收发现 3 后接入）。
+/// claude/openclaw/workbuddy 返回空列表——本层对其自然跳过
+fn title_keys(agent: &str, title: Option<&str>, project_name: Option<&str>) -> Vec<String> {
     match agent {
         "kimi" | "opencode" => title
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| vec![t.to_string()])
+            .unwrap_or_default(),
+        // codex 运行态标题 "⠙ 项目名"（spinner 前缀）由窗口侧归一化剥除后与键相等
+        "codex" => project_name
             .filter(|t| !t.trim().is_empty())
             .map(|t| vec![t.to_string()])
             .unwrap_or_default(),
@@ -430,6 +437,10 @@ fn hard_survivors<'a>(
     }
     cands.to_vec() // 极端异常：全量回退
 }
+
+/// UIA 尾串参与自动锁定（①′ 双命中仲裁 / ④ 唯一包含）的最短字符数。
+/// 短于该值的尾串（"ok"、"好的" 等）在多窗口正文中区分度不足，只配进选择器排序
+const MIN_UIA_TAIL_CHARS: usize = 12;
 
 /// 空白归一化后取尾部 n 个字符（UIA 正文匹配用：终端渲染与 jsonl 原文的差异主要在空白与折行）
 fn normalized_tail(s: &str, n: usize) -> String {
@@ -525,13 +536,21 @@ pub fn resolve_and_focus(
     running_projects: &[(String, String)],
 ) -> Result<FocusOutcome, String> {
     let agent = hints.agent_keyword.unwrap_or_default().to_lowercase();
-    let keys = title_keys(&agent, hints.title);
+    let keys = title_keys(&agent, hints.title, hints.project_name);
     // UIA 尾串（③④ 与 ①′ 双命中仲裁共用）：空 lastMessage 时无素材
     let msg = hints.last_message.unwrap_or_default();
+    // 泛化短串无区分度（实机验收发现 3：codex lastMessage 尾串 "ok" 恰好只被
+    // claude 窗口的可读文本包含 → ④ 层锁错窗）。低于阈值视为无尾串素材：
+    // ①′ 双命中仲裁与 ④ 层自动锁定全部跳过，交选择器（宁弹不跳错）
     let tail = if msg.is_empty() {
         String::new()
     } else {
-        normalized_tail(msg, 40)
+        let t = normalized_tail(msg, 40);
+        if t.chars().count() < MIN_UIA_TAIL_CHARS {
+            String::new()
+        } else {
+            t
+        }
     };
     let windows = all_windows();
 
@@ -1166,30 +1185,46 @@ Microsoft Windows [版本 10.0.26200]"
     fn title_keys_kimi_single_key() {
         // kimi：键 = [state.title]；title 缺失 → 空列表（层自然跳过）
         assert_eq!(
-            title_keys("kimi", Some("（0）使用技能【ratingdog-report】，下载")),
+            title_keys(
+                "kimi",
+                Some("（0）使用技能【ratingdog-report】，下载"),
+                None
+            ),
             vec!["（0）使用技能【ratingdog-report】，下载".to_string()]
         );
-        assert!(title_keys("kimi", None).is_empty());
+        assert!(title_keys("kimi", None, Some("项目名")).is_empty());
     }
 
     #[test]
     fn title_keys_opencode_single_key() {
         // opencode：键 = [session.title]（前缀剥离在窗口侧做，键保持原样）
         assert_eq!(
-            title_keys("opencode", Some("公司资产查询")),
+            title_keys("opencode", Some("公司资产查询"), None),
             vec!["公司资产查询".to_string()]
         );
-        assert!(title_keys("opencode", None).is_empty());
+        assert!(title_keys("opencode", None, Some("项目名")).is_empty());
+    }
+
+    #[test]
+    fn title_keys_codex_uses_project_name() {
+        // codex 终端标题=项目名（无会话信息），项目名即其唯一正向证据键
+        // （2026-09-11 实机验收发现 3：keys=[] 使 codex 卡跳过标题匹配层）
+        assert_eq!(
+            title_keys("codex", Some("01a08083"), Some("MultiAgents-Manager")),
+            vec!["MultiAgents-Manager".to_string()]
+        );
+        // 项目名缺失时退化为无键（与旧行为一致）
+        assert!(title_keys("codex", Some("01a08083"), None).is_empty());
+        assert!(title_keys("codex", Some("01a08083"), Some("  ")).is_empty());
     }
 
     #[test]
     fn title_keys_id_prefix_tools_get_empty_keys() {
-        // claude/codex 的 title 是 id 前 8/12 位，与终端标题无前缀关系；
-        // 传入也是无害 miss，但为省事直接不给键
-        assert!(title_keys("claude", Some("01a08083")).is_empty());
-        assert!(title_keys("codex", Some("01a08083")).is_empty());
-        assert!(title_keys("workbuddy", Some("WorkBuddy")).is_empty());
-        assert!(title_keys("openclaw", Some("my-agent")).is_empty());
+        // claude 恒为认领词、workbuddy/openclaw 标题无会话区分度，不给键
+        assert!(title_keys("claude", Some("01a08083"), None).is_empty());
+        assert!(title_keys("claude", None, Some("任意项目")).is_empty());
+        assert!(title_keys("workbuddy", Some("WorkBuddy"), None).is_empty());
+        assert!(title_keys("openclaw", Some("my-agent"), None).is_empty());
     }
 
     // ---- P1-2 B：前台验证状态机（喂样本序列断言判定） ----

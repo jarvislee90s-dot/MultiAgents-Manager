@@ -4,6 +4,10 @@ version = "0.4.0"
 description = "多 Agent 编程工具统一管理平台"
 authors = ["jarvis"]
 edition = "2021"
+# src/bin/mam-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
+# 不指定 default-run 时 `cargo run` / `pnpm tauri:dev` 报
+# "could not determine which binary to run"（2026-09-11 Windows 实机验收发现 1）
+default-run = "multi-agents-manager"
 
 [lib]
 name = "multi_agents_manager_lib"

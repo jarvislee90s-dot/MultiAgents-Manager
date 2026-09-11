@@ -24,6 +24,19 @@
 //!
 //! 分发：应用启动时由 `ensure_hook_script` 把本 exe（与主程序同目录）拷到
 //! `~/.mam/bin/`；hook 检测到才调用，缺失即整链回落既有消歧层（零回归）。
+//!
+//! # 2026-09-11 Windows 实机验收结论（issue #43 评论）
+//!
+//! 注入通道本身 GO（B/A 双路线、跨进程自标记均实证），但端到端被两件事限制：
+//! - **claude TUI 持续改写控制台标题**（spinner 动画 + 会话摘要），注入的
+//!   marker <3 秒即被冲掉——claude 的多开消歧靠既有 UIA 尾串层（lastMessage
+//!   长且独特时锁准），marker 对 claude 实际无效；
+//! - **codex 0.149.1 的 hook 链路不执行**（status-hook.sh 未被调用，报错来自
+//!   codex 自带插件），marker 对 codex 也尚未生效。
+//!
+//! marker 通道的端到端价值取决于「工具的 hook 能触发 + 工具不频繁重写标题」，
+//! 当前按工具逐个成立前，跳转正确性由 ①′ 标题键（codex=项目名）与 UIA 尾串
+//! 最短长度门（MIN_UIA_TAIL_CHARS）保证。
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
