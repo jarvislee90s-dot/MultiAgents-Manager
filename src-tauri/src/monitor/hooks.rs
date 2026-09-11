@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// Hook 脚本内容（从 stdin 读 JSON，写入事件文件）
 const HOOK_SCRIPT: &str = r#"#!/bin/bash
 # MultiAgents Manager 状态 Hook 脚本
-# 从 stdin 读取 JSON，写入 ~/.mam/events/<ppid>.json
+# 从 stdin 读取 JSON，写入 ~/.mam/events/<session_id>.json
 EVENTS_DIR="$HOME/.mam/events"
 mkdir -p "$EVENTS_DIR"
 INPUT=$(cat)
@@ -19,23 +19,11 @@ SESSION_ID=$(echo "$INPUT" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]
 CWD=$(echo "$INPUT" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
-# 注入窗口标题 marker（MAM:<session_id 剥连字符前 12 位>）。hook 内联 powershell 直写
-# /dev/tty 与 CONOUT$ 两条通道均不可达（hook 是原生 spawn 的独立进程、不挂接交互终端，
-# 2026-08-25 判决 no-go），改调 mam-marker helper（随应用分发，B=AttachConsole+
-# SetConsoleTitle 官方通道优先、A=SetWindowTextW 窗口直改兜底，见 src/bin/mam-marker.rs）。
-# marker 口径三处互引（改动须同步）：commands/session.rs（匹配侧）/ 本脚本 /
-# mam-marker helper。MAM_MARKER=1 启用（实验期默认关，实机验收后转默认开）；
-# helper 缺失零开销跳过（整链回落既有消歧层，零回归）。
-# 实测（2026-09-11）：claude TUI 秒级重写标题、注入被冲掉，codex 0.149.1 的
-# hook 运行时未执行本脚本（codex 侧问题）——marker 端到端按工具逐个成立前，
-# 跳转正确性由标题键与 UIA 尾串门保证（见 src/bin/mam-marker.rs 头注释）
-if [ "${MAM_MARKER:-0}" = "1" ] && [ -x "$HOME/.mam/bin/mam-marker.exe" ]; then
-  case "$EVENT" in
-    [Ss]top|[Pp]ostToolUse|[Ss]essionEnd|[Uu]serPromptSubmit)
-      "$HOME/.mam/bin/mam-marker.exe" "$SESSION_ID" >/dev/null 2>&1 || true
-      ;;
-  esac
+# 事件以 session_id 为键（$PPID 在 claude 脱管 hook 进程里恒为 1，多会话互覆——
+# 2026-09-12 第三轮探测 C2 实证；session_id 来自 stdin）。字符白名单外的值
+# 直接丢弃（防路径注入；合法 UUID 形态永不触发）。同会话覆盖=保留最新状态
+if printf '%s' "$SESSION_ID" | grep -qE '^[A-Za-z0-9-]+$'; then
+  echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$SESSION_ID.json"
 fi
 "#;
 
@@ -232,37 +220,45 @@ pub fn register_hooks_for_tool(
     Ok(())
 }
 
-/// 读取所有 Hook 事件文件，返回 PPID → 事件数据的映射
-pub fn read_hook_events() -> HashMap<u32, HookEvent> {
-    let mut events = HashMap::new();
+/// 读取所有 Hook 事件文件，返回 session_id → 事件数据的映射（键由脚本侧
+/// 文件名承载；旧 PPID 形态文件 30s TTL 内短暂并存、键永不匹配任何会话，无害）
+pub fn read_hook_events() -> HashMap<String, HookEvent> {
     let events_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".mam")
         .join("events");
+    read_hook_events_from(&events_dir)
+}
 
+/// 核心逻辑（tempdir 可测）：文件名即 session_id，白名单校验 + 30s TTL 过滤
+fn read_hook_events_from(events_dir: &std::path::Path) -> HashMap<String, HookEvent> {
+    let mut events = HashMap::new();
     if !events_dir.exists() {
         return events;
     }
-
-    if let Ok(entries) = fs::read_dir(&events_dir) {
+    let valid_sid =
+        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if let Ok(entries) = fs::read_dir(events_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                if let Ok(ppid) = filename.trim_end_matches(".json").parse::<u32>() {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        if let Ok(event) = serde_json::from_str::<HookEvent>(&content) {
-                            // 过滤过期事件（>30s）
-                            let now = chrono::Utc::now().timestamp();
-                            if now - event.ts < 30 {
-                                events.insert(ppid, event);
-                            }
+                let Some(sid) = filename.strip_suffix(".json") else {
+                    continue;
+                };
+                if !valid_sid(sid) {
+                    continue;
+                }
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(event) = serde_json::from_str::<HookEvent>(&content) {
+                        let now = chrono::Utc::now().timestamp();
+                        if now - event.ts < 30 {
+                            events.insert(sid.to_string(), event);
                         }
                     }
                 }
             }
         }
     }
-
     events
 }
 
@@ -347,5 +343,45 @@ mod command_quote_tests {
             quote_bash_command(r"C:\Users\John Doe\.mam\hooks\status-hook.sh"),
             r#"bash "C:\Users\John Doe\.mam\hooks\status-hook.sh""#
         );
+    }
+}
+
+#[cfg(test)]
+mod event_channel_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_event(dir: &std::path::Path, name: &str, event: &str, age_secs: i64) {
+        let ts = chrono::Utc::now().timestamp() - age_secs;
+        let body = format!(
+            r#"{{"event":"{event}","session_id":"sid-x","cwd":"/tmp","ts":{ts},"last_event_at":"2026-09-12T00:00:00Z"}}"#
+        );
+        let mut f = std::fs::File::create(dir.join(format!("{name}.json"))).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    /// 用独立 tempdir 作为 events 目录跑 read_hook_events（经 MAM_HOME 重定向不可行，
+    /// 该函数直接拼 home 路径——测试以子进程隔离或直接抽取核心逻辑。此处选择抽取：
+    /// 见 Step 3 的 read_hook_events_from，read_hook_events 成为其薄包装）
+    #[test]
+    fn events_are_keyed_by_session_id_with_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event(tmp.path(), "01a08083-5ca0", "Stop", 0);
+        write_event(tmp.path(), "0f1e2d3c-4b5a", "Stop", 120); // 过期
+        write_event(tmp.path(), "1", "Stop", 0); // 旧 PPID 形态孤儿（合法字符，30s 后自然消失）
+        let m = read_hook_events_from(tmp.path());
+        assert_eq!(m.len(), 2);
+        assert!(m.contains_key("01a08083-5ca0"));
+        assert!(m.contains_key("1"));
+        assert!(!m.contains_key("0f1e2d3c-4b5a"));
+    }
+
+    #[test]
+    fn script_uses_session_id_key_and_has_no_marker_block() {
+        // spec 改动三：hook 周期注入退役；事件键 session_id 化（脚本内容回归锁）
+        assert!(HOOK_SCRIPT.contains("$SESSION_ID.json"));
+        assert!(!HOOK_SCRIPT.contains("MAM_MARKER"));
+        assert!(!HOOK_SCRIPT.contains("mam-marker"));
+        assert!(HOOK_SCRIPT.contains("^[A-Za-z0-9-]+$")); // 白名单守卫在场
     }
 }

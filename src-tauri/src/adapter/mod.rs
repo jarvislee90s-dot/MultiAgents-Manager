@@ -303,7 +303,7 @@ pub fn get_all_sessions() -> SessionsResponse {
     let now_ts = chrono::Utc::now().timestamp();
     let mut grace = STOP_GRACE.lock().unwrap();
     for session in &mut all_sessions {
-        if let Some(event) = hook_events.get(&session.pid) {
+        if let Some(event) = hook_events.get(&session.id) {
             match event.event.as_str() {
                 "Stop" | "stop" => {
                     // 按形态计算 grace 时长：APP 形态更长（subagent 调度场景，单步间隔长），CLI 较短
