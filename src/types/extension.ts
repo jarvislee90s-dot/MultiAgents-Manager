@@ -75,6 +75,9 @@ export interface SsotResource {
   brokenTools?: string[];
   /** plugin 子类型（file | config），仅 kind === "plugin" 时由后端返回 */
   pluginType?: string;
+  /** MCP 存储 JSON 带 enable:false（工具侧停用标记原样入库，M7 口径），
+   *  仅 kind === "mcp" 且为 true 时返回，UI 标记「源已停用」 */
+  sourceDisabled?: boolean;
 }
 
 export interface SsotResources {

@@ -31,7 +31,9 @@ pub fn write_mcp(tool_id: &str, mcp_name: &str, config: &McpConfig) -> Result<()
             write_mcp_json(&config_path, adapter.mcp_json_section(), mcp_name, config)
         }
         McpFormat::Toml => write_mcp_toml(&config_path, mcp_name, config),
-        McpFormat::Jsonc => write_mcp_jsonc(&config_path, mcp_name, config),
+        McpFormat::Jsonc => {
+            write_mcp_jsonc(&config_path, adapter.mcp_json_section(), mcp_name, config)
+        }
     }
 }
 
@@ -42,7 +44,7 @@ pub fn remove_mcp(tool_id: &str, mcp_name: &str) -> Result<(), String> {
     match adapter.mcp_format() {
         McpFormat::Json => remove_mcp_json(&config_path, adapter.mcp_json_section(), mcp_name),
         McpFormat::Toml => remove_mcp_toml(&config_path, mcp_name),
-        McpFormat::Jsonc => remove_mcp_jsonc(&config_path, mcp_name),
+        McpFormat::Jsonc => remove_mcp_jsonc(&config_path, adapter.mcp_json_section(), mcp_name),
     }
 }
 
@@ -219,7 +221,12 @@ fn remove_mcp_toml(path: &std::path::Path, name: &str) -> Result<(), String> {
 
 // ===== JSONC (OpenCode: opencode.json mcp) =====
 
-fn write_mcp_jsonc(path: &std::path::Path, name: &str, config: &McpConfig) -> Result<(), String> {
+fn write_mcp_jsonc(
+    path: &std::path::Path,
+    section: &[&'static str],
+    name: &str,
+    config: &McpConfig,
+) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
     // OpenCode 格式：command 是数组，env 是 environment
     let mut cmd_array = vec![config.command.clone()];
@@ -229,14 +236,32 @@ fn write_mcp_jsonc(path: &std::path::Path, name: &str, config: &McpConfig) -> Re
         "command": cmd_array,
         "environment": config.env,
     });
-    let next = jsonc::upsert_entry(&content, "mcp", name, &value.to_string())?;
+    let next = jsonc::upsert_entry(&content, single_section(section)?, name, &value.to_string())?;
     crate::linker::write_config_locked(path, &next)
 }
 
-fn remove_mcp_jsonc(path: &std::path::Path, name: &str) -> Result<(), String> {
+fn remove_mcp_jsonc(
+    path: &std::path::Path,
+    section: &[&'static str],
+    name: &str,
+) -> Result<(), String> {
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    let next = jsonc::remove_entry(&content, "mcp", name)?;
+    let next = jsonc::remove_entry(&content, single_section(section)?, name)?;
     crate::linker::write_config_locked(path, &next)
+}
+
+/// JSONC 写链的节段约束（PR #46 review M5）：读链已注册表驱动（mcp_json_section
+/// 可声明多级路径），但 jsonc 保注释编辑引擎仅支持顶层单段 section。写链消费声明
+/// 而非硬编码 "mcp"——未来任一 JSONC 工具声明多段路径时在此**响亮失败**，而不是
+/// 静默写错位置（读得回、写不进）
+fn single_section(section: &[&'static str]) -> Result<&'static str, String> {
+    match section {
+        [single] => Ok(single),
+        _ => Err(format!(
+            "JSONC 写链暂不支持多级 section 路径（声明 {}），需先扩展 jsonc 编辑引擎",
+            section.join(".")
+        )),
+    }
 }
 
 #[cfg(test)]

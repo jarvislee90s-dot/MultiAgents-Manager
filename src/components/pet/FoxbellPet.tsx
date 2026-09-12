@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import type { Session } from "@/types/session";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import { useSessionsQuery } from "@/lib/query/queries/sessions";
+import { sessionTitleOrUndefined } from "@/lib/sessionTitle";
 import { setupSessionReadListener } from "@/lib/query/sessionReadSync";
 import { ANIM, frameStyle, FRAME_H, FRAME_W, type PetAnimKey } from "./petAnimations";
 import { FOXBELL, resolveActivePet, type ActivePet } from "./petRuntime";
@@ -358,7 +359,7 @@ export function FoxbellPet() {
         agentType: s.agentType,
         projectName: s.projectName,
         lastMessage: s.lastMessage ?? undefined,
-        title: s.title ?? undefined,
+        title: sessionTitleOrUndefined(s),
         unread: s.unread, // 歧义点选回标已读（spec W4 已读信号 1）
         form: s.form, // M3：CLI 会话 APP 级保底时的 UX 提示依据
       });

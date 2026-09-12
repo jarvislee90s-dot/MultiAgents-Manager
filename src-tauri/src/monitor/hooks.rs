@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// Hook 脚本内容（从 stdin 读 JSON，写入事件文件）
 const HOOK_SCRIPT: &str = r#"#!/bin/bash
 # MultiAgents Manager 状态 Hook 脚本
-# 从 stdin 读取 JSON，写入 ~/.mam/events/<ppid>.json
+# 从 stdin 读取 JSON，写入 ~/.mam/events/<session_id>.json
 EVENTS_DIR="$HOME/.mam/events"
 mkdir -p "$EVENTS_DIR"
 INPUT=$(cat)
@@ -19,18 +19,11 @@ SESSION_ID=$(echo "$INPUT" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]
 CWD=$(echo "$INPUT" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$PPID.json"
-# 注入窗口标题 marker（MAM:<session_id 前 8 位>）。实测 /dev/tty 与 CONOUT$ 两条通道在
-# hook（原生进程 spawn 的 bash）上下文均不可达（2026-08-25 用户交互终端复测仍无 marker，
-# 判决 no-go），默认禁用、代码保留待新通道（如轻量 helper 可执行文件）。
-# MAM_MARKER=1 可重新启用试验；仅低频事件注入；无 powershell 环境零开销跳过
-if [ "${MAM_MARKER:-0}" = "1" ] && command -v powershell >/dev/null 2>&1; then
-  case "$EVENT" in
-    [Ss]top|[Pp]ostToolUse|[Ss]essionEnd|[Uu]serPromptSubmit)
-      MID=$(printf '%s' "$SESSION_ID" | cut -c1-8)
-      powershell -NoProfile -Command "[IO.File]::WriteAllText('CONOUT$',[char]27+\"]0;MAM:$MID\"+[char]7)" >/dev/null 2>&1 || true
-      ;;
-  esac
+# 事件以 session_id 为键（$PPID 在 claude 脱管 hook 进程里恒为 1，多会话互覆——
+# 2026-09-12 第三轮探测 C2 实证；session_id 来自 stdin）。字符白名单外的值
+# 直接丢弃（防路径注入；合法 UUID 形态永不触发）。同会话覆盖=保留最新状态
+if printf '%s' "$SESSION_ID" | grep -qE '^[A-Za-z0-9-]+$'; then
+  echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$SESSION_ID.json"
 fi
 "#;
 
@@ -43,7 +36,7 @@ pub fn ensure_hook_script() -> PathBuf {
     let _ = fs::create_dir_all(&events_dir);
 
     let script_path = hooks_dir.join("status-hook.sh");
-    // 无条件重写：脚本由应用托管，幂等重写保证升级后新 marker 生效
+    // 无条件重写：脚本由应用托管，幂等重写保证升级后新脚本内容生效
     let _ = fs::write(&script_path, HOOK_SCRIPT);
     #[cfg(unix)]
     {
@@ -54,7 +47,66 @@ pub fn ensure_hook_script() -> PathBuf {
             let _ = fs::set_permissions(&script_path, perms);
         }
     }
+    // marker helper 安装（issue #43）：把与主程序同目录的 mam-marker 拷到 ~/.mam/bin/
+    // 供 MAM 主进程跳转按需注入调用（window/win32.rs::inject_marker_on_demand）。
+    // helper 未构建/未随包分发是合法状态——主进程检测不到即跳过注入，
+    // 跳转链完整回落既有消歧层（零回归）。无条件覆盖保证升级后新版 helper 生效
+    install_marker_helper();
     script_path
+}
+
+/// 拷贝 mam-marker helper 到 ~/.mam/bin/（存在才拷；返回目标路径）
+fn install_marker_helper() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let bin_dir = dirs::home_dir()?.join(".mam").join("bin");
+    let _ = fs::create_dir_all(&bin_dir);
+    // Windows 发行名带 .exe；macOS/Linux 开发态为裸名（helper 实际仅 Windows 生效，
+    // 非 Windows 拷贝只为保持路径逻辑一致、无害）
+    for name in ["mam-marker.exe", "mam-marker"] {
+        let src = dir.join(name);
+        if src.is_file() {
+            let dst = bin_dir.join(name);
+            if fs::copy(&src, &dst).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = fs::metadata(&dst) {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o755);
+                        let _ = fs::set_permissions(&dst, perms);
+                    }
+                }
+                return Some(dst);
+            }
+        }
+    }
+    None
+}
+
+/// Windows hook 命令：**正斜杠**路径，含空格才加引号。两层转义约束（第四轮实机
+/// 验收实证）：① 引号在 claude 的 `powershell -Command "<command>"` 包装下破坏
+/// 外层配对（SessionStart 报错根因）；② 裸反斜杠路径在 bash 端被当转义序列吃掉
+/// （`C:\Users` → `C:Users`，exit=127 通道全断）。正斜杠两层皆安全（bash 原生
+/// 接受、powershell 不转义），第四轮离线探针三层全通。含空格路径必须保引号
+/// （已知残留：该形态下 SessionStart 报错可能复现，spec §3.4 边界）
+fn quote_bash_command(path_str: &str) -> String {
+    let normalized = path_str.replace('\\', "/");
+    if normalized.contains(' ') {
+        format!("bash \"{normalized}\"")
+    } else {
+        format!("bash {normalized}")
+    }
+}
+
+/// 当前平台注册的 hook 命令（注册 / 核验 / 去重三处同源，单一事实源）
+fn hook_command_for(script_path: &std::path::Path) -> String {
+    let s = script_path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        quote_bash_command(&s)
+    } else {
+        s
+    }
 }
 
 /// 为指定工具注册 Hook
@@ -68,11 +120,7 @@ pub fn register_hooks_for_tool(
     let script_path_str = script_path.to_string_lossy().to_string();
 
     // Windows 无法直接执行 .sh，hook 命令经 bash 调用（Git Bash 随开发/使用环境存在）
-    let command_str = if cfg!(windows) {
-        format!("bash \"{}\"", script_path_str)
-    } else {
-        script_path_str.clone()
-    };
+    let command_str = hook_command_for(&script_path);
 
     // 读取现有配置（不存在则创建空对象）
     let existing = fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
@@ -88,6 +136,9 @@ pub fn register_hooks_for_tool(
     let hooks_obj = hooks.as_object_mut().ok_or("hooks 字段不是对象")?;
 
     let mut added = 0;
+    // 原地迁移的旧条目计数（处）：仅用于成功日志区分「新注册」与「迁移」，
+    // 不改变控制流语义（0 ⇔ 原来的 migrated_any=false）
+    let mut migrated = 0usize;
     for &event in events {
         let event_name = if is_pascal_case {
             event.to_string()
@@ -100,28 +151,49 @@ pub fn register_hooks_for_tool(
             }
         };
 
-        // 检查是否已注册（避免重复）
-        if let Some(existing_arr) = hooks_obj.get(&event_name) {
-            if let Some(arr) = existing_arr.as_array() {
-                let already = arr.iter().any(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(|h| h.as_array())
-                        .map(|hooks| {
-                            hooks.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .map(|c| c.contains("status-hook.sh"))
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false)
-                });
-                if already {
-                    debug!("Hook 已注册: {}", event_name);
+        // 已注册检测 + 旧形态迁移：条目 command 含脚本路径即视为我们注册的。
+        // 与当前命令一致 → 跳过；含路径但形态旧（如带引号旧格式）→ 原地改写
+        // 为当前命令（追加会造成双写事件且旧条目继续触发 SessionStart 报错）
+        let mut already = false;
+        let mut migrated_this_event = 0usize;
+        if let Some(arr) = hooks_obj
+            .get_mut(&event_name)
+            .and_then(|v| v.as_array_mut())
+        {
+            for entry in arr.iter_mut() {
+                let Some(cmds) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
                     continue;
+                };
+                for h in cmds.iter_mut() {
+                    let Some(c) = h
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                    else {
+                        continue;
+                    };
+                    // 双形态判据：脚本绝对路径正反斜杠各查一次。只查原路径会漏掉
+                    // 正斜杠形态的历史条目（如第四轮 1f8fcf4 产出的无引号形态），
+                    // 它们会因识别不出而被当作用户条目跳过 → 坏条目残留 + 新条目追加
+                    let fwd_path = script_path_str.replace('\\', "/");
+                    if !c.contains(&script_path_str) && !c.contains(&fwd_path) {
+                        continue; // 用户自己的 hook 条目，不动
+                    }
+                    if c == command_str {
+                        already = true;
+                    } else {
+                        h["command"] = serde_json::json!(command_str);
+                        migrated_this_event += 1;
+                    }
                 }
             }
+        }
+        migrated += migrated_this_event;
+        // 已注册或本轮完成原地迁移：条目已等于当前命令，再追加会产生同命令重复
+        // 条目（同事件双触发、双写事件），直接进入下一事件；持久化由 migrated 计数保证
+        if already || migrated_this_event > 0 {
+            debug!("Hook 已注册/已迁移: {}", event_name);
+            continue;
         }
 
         // 合并式追加：用户已有同事件 hooks 时保留其条目，仅追加我们的（不整组替换）
@@ -143,7 +215,7 @@ pub fn register_hooks_for_tool(
         added += 1;
     }
 
-    if added > 0 {
+    if added > 0 || migrated > 0 {
         // 创建备份（防止写入失败导致配置丢失）
         if config_path.exists() {
             let backup = config_path.with_extension("json.bak");
@@ -153,43 +225,59 @@ pub fn register_hooks_for_tool(
             serde_json::to_string_pretty(&config).map_err(|e| format!("序列化配置失败: {}", e))?;
         crate::linker::write_config_locked(config_path, &pretty)
             .map_err(|e| format!("写入配置文件失败: {}", e))?;
-        info!("已注册 {} 个 Hook 到 {:?}", added, config_path);
+        // 仅迁移（added=0）时「已注册 0 个」有误导：日志区分迁移条目数
+        if migrated > 0 {
+            info!(
+                "已注册 {} 个 Hook（迁移旧条目 {} 处）到 {:?}",
+                added, migrated, config_path
+            );
+        } else {
+            info!("已注册 {} 个 Hook 到 {:?}", added, config_path);
+        }
     }
 
     Ok(())
 }
 
-/// 读取所有 Hook 事件文件，返回 PPID → 事件数据的映射
-pub fn read_hook_events() -> HashMap<u32, HookEvent> {
-    let mut events = HashMap::new();
+/// 读取所有 Hook 事件文件，返回 session_id → 事件数据的映射（键由脚本侧
+/// 文件名承载；旧 PPID 形态文件 30s TTL 内短暂并存、键永不匹配任何会话，无害）
+pub fn read_hook_events() -> HashMap<String, HookEvent> {
     let events_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".mam")
         .join("events");
+    read_hook_events_from(&events_dir)
+}
 
+/// 核心逻辑（tempdir 可测）：文件名即 session_id，白名单校验 + 30s TTL 过滤
+fn read_hook_events_from(events_dir: &std::path::Path) -> HashMap<String, HookEvent> {
+    let mut events = HashMap::new();
     if !events_dir.exists() {
         return events;
     }
-
-    if let Ok(entries) = fs::read_dir(&events_dir) {
+    let valid_sid =
+        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if let Ok(entries) = fs::read_dir(events_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                if let Ok(ppid) = filename.trim_end_matches(".json").parse::<u32>() {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        if let Ok(event) = serde_json::from_str::<HookEvent>(&content) {
-                            // 过滤过期事件（>30s）
-                            let now = chrono::Utc::now().timestamp();
-                            if now - event.ts < 30 {
-                                events.insert(ppid, event);
-                            }
+                let Some(sid) = filename.strip_suffix(".json") else {
+                    continue;
+                };
+                if !valid_sid(sid) {
+                    continue;
+                }
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(event) = serde_json::from_str::<HookEvent>(&content) {
+                        let now = chrono::Utc::now().timestamp();
+                        if now - event.ts < 30 {
+                            events.insert(sid.to_string(), event);
                         }
                     }
                 }
             }
         }
     }
-
     events
 }
 
@@ -219,14 +307,15 @@ pub fn register_all_hooks() {
         let Some(config_path) = adapter.hook_config_path() else {
             continue;
         };
-        let tool_key = format!(
-            "hooks_registered_{}",
-            format!("{:?}", adapter.agent_type()).to_lowercase()
-        );
+        let tool_key = format!("hooks_registered_{}", adapter.agent_type().tool_id());
 
-        // 启动核验：配置文件实际包含 status-hook 引用且脚本存在才跳过
+        // 启动核验：配置文件实际引用**当前脚本绝对路径**且脚本存在才跳过。
+        // 只查 "status-hook.sh" 文件名子串会把旧位置的历史注册误判为已核验、
+        // 永不重写（2026-09-11 实机验收发现 2 弱点；codex 0.149.1 hook 链路
+        // 不执行是 codex 侧问题，此处保证 MAM 侧配置口径始终正确）
+        let expected_cmd = hook_command_for(&script_path);
         let verified = fs::read_to_string(&config_path)
-            .map(|c| c.contains("status-hook.sh"))
+            .map(|c| c.contains(&expected_cmd))
             .unwrap_or(false)
             && script_path.exists();
         if verified {
@@ -249,5 +338,70 @@ pub fn register_all_hooks() {
                 e
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod command_quote_tests {
+    use super::quote_bash_command;
+
+    #[test]
+    fn no_space_path_becomes_forward_slash_unquoted() {
+        // 第四轮实测：裸反斜杠路径被 bash 当转义序列吃掉（C:\Users → C:Users，
+        // exit=127 通道全断）；正斜杠 + 无引号在 powershell 包装 / bash 两层皆安全
+        assert_eq!(
+            quote_bash_command(r"C:\Users\bunny\.mam\hooks\status-hook.sh"),
+            r"bash C:/Users/bunny/.mam/hooks/status-hook.sh"
+        );
+    }
+
+    #[test]
+    fn spaced_path_keeps_quotes_forward_slash() {
+        // 含空格路径必须保引号（已知残留：该形态 SessionStart 报错可能复现，spec 3.4）；
+        // 分隔符仍归一为正斜杠（bash 端语义一致）
+        assert_eq!(
+            quote_bash_command(r"C:\Users\John Doe\.mam\hooks\status-hook.sh"),
+            r#"bash "C:/Users/John Doe/.mam/hooks/status-hook.sh""#
+        );
+    }
+}
+
+#[cfg(test)]
+mod event_channel_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_event(dir: &std::path::Path, name: &str, event: &str, age_secs: i64) {
+        let ts = chrono::Utc::now().timestamp() - age_secs;
+        let body = format!(
+            r#"{{"event":"{event}","session_id":"sid-x","cwd":"/tmp","ts":{ts},"last_event_at":"2026-09-12T00:00:00Z"}}"#
+        );
+        let mut f = std::fs::File::create(dir.join(format!("{name}.json"))).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    /// 用独立 tempdir 作为 events 目录跑 read_hook_events（经 MAM_HOME 重定向不可行，
+    /// 该函数直接拼 home 路径——测试以子进程隔离或直接抽取核心逻辑。此处选择抽取：
+    /// 见 Step 3 的 read_hook_events_from，read_hook_events 成为其薄包装）
+    #[test]
+    fn events_are_keyed_by_session_id_with_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event(tmp.path(), "01a08083-5ca0", "Stop", 0);
+        write_event(tmp.path(), "0f1e2d3c-4b5a", "Stop", 120); // 过期
+        write_event(tmp.path(), "1", "Stop", 0); // 旧 PPID 形态孤儿（合法字符，30s 后自然消失）
+        let m = read_hook_events_from(tmp.path());
+        assert_eq!(m.len(), 2);
+        assert!(m.contains_key("01a08083-5ca0"));
+        assert!(m.contains_key("1"));
+        assert!(!m.contains_key("0f1e2d3c-4b5a"));
+    }
+
+    #[test]
+    fn script_uses_session_id_key_and_has_no_marker_block() {
+        // spec 改动三：hook 周期注入退役；事件键 session_id 化（脚本内容回归锁）
+        assert!(HOOK_SCRIPT.contains("$SESSION_ID.json"));
+        assert!(!HOOK_SCRIPT.contains("MAM_MARKER"));
+        assert!(!HOOK_SCRIPT.contains("mam-marker"));
+        assert!(HOOK_SCRIPT.contains("^[A-Za-z0-9-]+$")); // 白名单守卫在场
     }
 }

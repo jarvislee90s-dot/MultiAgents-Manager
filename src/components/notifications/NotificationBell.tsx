@@ -93,6 +93,8 @@ export function NotificationBell() {
         agentType: e.agentType,
         projectName: e.projectName,
         lastMessage: e.lastMessage,
+        // HistoryEntry.title 是可选字段，原样透传即正确语义（issue #45：
+        // 非 Session 来源，空值由后端 title_keys 过滤，无需归一）
         title: e.title,
         // review（PR #38）：历史条目带 form 却未透传 → 铃铛跳 App 会话进不了
         // 深链第一顺位（与 P2-5 同族、换入口）。form 仅由 session.form 写入

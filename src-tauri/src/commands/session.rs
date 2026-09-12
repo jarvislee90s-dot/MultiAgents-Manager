@@ -116,22 +116,71 @@ pub fn focus_session(
                 }
             }
         }
-        // marker 与 hook 注入的标题标记一致：MAM:<session_id 前 8 位>
-        let marker = session_id
-            .as_deref()
-            .map(|id| format!("MAM:{}", id.chars().take(8).collect::<String>()));
+        // marker 与按需注入 helper 贴的标题标记一致：MAM:<session_id 剥连字符后
+        // 前 12 位>。口径两处互引（改动须同步）：本处（匹配侧）/ mam-marker
+        // helper（src/bin/mam-marker.rs，注入侧）。8 位对 codex UUIDv7 只编码
+        // 65.5s 粒度、同分钟双开撞车（实测 2026-09-08），12 位不撞；必须先剥
+        // 连字符——UUID 第 9 位即 '-'，直接 take(12) 会切进分隔符
+        let marker = session_id.as_deref().map(|id| {
+            format!(
+                "MAM:{}",
+                id.chars()
+                    .filter(|c| *c != '-')
+                    .take(12)
+                    .collect::<String>()
+            )
+        });
         // 面板反推：当前所有运行会话的 (工具id, 项目名)，用于排除其他工具的终端窗口
         // （codex 终端标题=项目名，无 "codex" 关键词可静态认领）。进程扫描即可，无文件解析开销
         let running_projects = running_projects_from_processes(&system);
+        // 配对不确定门（issue #48）：同工具同项目 ≥2 个进程在跑时，卡片 pid 与会话的
+        // 启发式配对（kimi=wire mtime 最新 / opencode=time_updated DESC）可能互换——
+        // 跳转禁用一切演绎锁定（单窗口即锁/幸存者推理），只认正向证据，否则交选择器。
+        // 项目名比对忽略大小写（Windows 路径不区分大小写），与 running_projects 的
+        // cwd file_name 同源
+        let require_evidence = {
+            let agent = agent_type.as_deref().unwrap_or_default().to_lowercase();
+            match project_name.as_deref().map(str::to_lowercase) {
+                Some(p) if !p.is_empty() => {
+                    running_projects
+                        .iter()
+                        .filter(|(a, pr)| a.to_lowercase() == agent && pr.to_lowercase() == p)
+                        .count()
+                        >= 2
+                }
+                _ => false,
+            }
+        };
+        // 按需注入（spec 2026-09-12 §3.2）：claude/codex CLI 会话在判定链前贴
+        // marker，① 层即可精确命中。**配对不确定时必须一并禁用**（第四轮 3c 实证）：
+        // 注入目标取自卡片 pid，pid 本身可能配对交叉 → marker 贴到兄弟会话的终端，
+        // ① 层随之高置信锁错窗（marker 命中构成自证循环，不是正向证据）。禁用后
+        // 该场景回落双命中仲裁/选择器，"锁对或选择器、绝不锁错"契约恢复。
+        // helper 缺失/失败/超时仍然全部静默回落
+        if on_demand_injection_allowed(agent_type.as_deref(), form.as_deref(), require_evidence) {
+            if let Some(sid) = session_id.as_deref() {
+                if let Some(m) = marker.as_deref() {
+                    crate::window::win32::inject_marker_on_demand(sid, pid, m);
+                }
+            }
+        }
         let hints = crate::window::win32::JumpHints {
             session_marker: marker.as_deref(),
             agent_keyword: agent_type.as_deref(),
             project_name: project_name.as_deref(),
             last_message: last_message.as_deref(),
             title: title.as_deref(),
+            require_positive_evidence: require_evidence,
         };
         match crate::window::win32::resolve_and_focus(&system, pid, &hints, &running_projects) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
+                // 聚焦成功清痕（round-5）：剥掉本次注入的 marker，标题回到干净态
+                //（下次跳转重新注入，按需注入本就是一次性模式）。清除范围与注入的
+                // 工具/形态门一致；Ambiguous 选择器分支不清——marker 还在候选标题上，
+                // 供用户辨认，关选择器后自然过期/下次注入时被剥
+                if on_demand_marker_applies(agent_type.as_deref(), form.as_deref()) {
+                    crate::window::win32::clear_marker_after_focus(pid);
+                }
                 mark_read_on_jump(&app, &session_id, &agent_type);
                 Ok(serde_json::json!({ "type": "focused" }))
             }
@@ -187,6 +236,25 @@ pub fn focus_session(
             pid
         ))
     }
+}
+
+/// 按需注入工具/形态门（spec §3.2）：仅无可靠静态标题键的 claude/codex 且 CLI
+/// 形态。kimi/opencode 标题键已实测够用，注入只会污染其标题
+#[cfg(any(windows, test))]
+fn on_demand_marker_applies(agent: Option<&str>, form: Option<&str>) -> bool {
+    matches!(agent, Some("claude" | "codex")) && form != Some("app")
+}
+
+/// 按需注入总门 = 工具/形态门 ∧ ¬配对不确定。配对不确定（同工具同项目 ≥2 进程）
+/// 时卡片 pid 可能与会话交叉，注入目标随之错配，marker 命中构成自证循环——
+/// 第四轮 3c 实证 codex 同项目双开两次静默锁错，故此场景禁注入、回落既有层
+#[cfg(any(windows, test))]
+fn on_demand_injection_allowed(
+    agent: Option<&str>,
+    form: Option<&str>,
+    pairing_ambiguous: bool,
+) -> bool {
+    on_demand_marker_applies(agent, form) && !pairing_ambiguous
 }
 
 /// macOS 深链成功是否回标已读（P1-2 判定核心，cfg(test) 使其 Windows 侧可测）：
@@ -275,5 +343,70 @@ mod macos_deep_link_read_tests {
         assert!(macos_deep_link_marks_read(None)); // bundle/枚举兜底（无 via 标记）
         assert!(macos_deep_link_marks_read(Some("tty")));
         assert!(macos_deep_link_marks_read(Some("app-fallback")));
+    }
+}
+
+#[cfg(test)]
+mod on_demand_tests {
+    // 门控契约（spec §3.2）：仅 claude/codex 且仅 CLI 形态注入；其余零开销跳过
+    use super::{on_demand_injection_allowed, on_demand_marker_applies};
+
+    #[test]
+    fn applies_to_claude_and_codex_cli_only() {
+        assert!(on_demand_marker_applies(Some("claude"), Some("cli")));
+        assert!(on_demand_marker_applies(Some("codex"), Some("cli")));
+        assert!(on_demand_marker_applies(Some("claude"), None)); // form 缺失按 CLI 处理
+        assert!(!on_demand_marker_applies(Some("claude"), Some("app")));
+        assert!(!on_demand_marker_applies(Some("kimi"), Some("cli"))); // 标题键够用
+        assert!(!on_demand_marker_applies(Some("opencode"), Some("cli"))); // 同上
+        assert!(!on_demand_marker_applies(None, Some("cli")));
+    }
+
+    #[test]
+    fn pairing_ambiguous_disables_injection() {
+        // 第四轮 3c 回归锁：同工具同项目双开（配对不确定）时禁用注入——
+        // 错配 pid 注入会把 marker 贴到兄弟会话终端，① 层自证循环锁错窗
+        assert!(on_demand_injection_allowed(
+            Some("codex"),
+            Some("cli"),
+            false
+        ));
+        assert!(!on_demand_injection_allowed(
+            Some("codex"),
+            Some("cli"),
+            true
+        ));
+        assert!(!on_demand_injection_allowed(
+            Some("claude"),
+            Some("cli"),
+            true
+        ));
+        assert!(!on_demand_injection_allowed(
+            Some("kimi"),
+            Some("cli"),
+            false
+        ));
+    }
+}
+
+#[cfg(test)]
+mod marker_literal_tests {
+    // 匹配侧 marker 构造回归锁（与本文件 focus_session 的内联构造逐字一致；
+    // 口径内联于命令内，按互引纪律不抽取 helper，靠本锁镜像防漂移）。
+    // 与注入侧锁成对：src/bin/mam-marker.rs marker_strips_hyphens_and_takes_12
+    // 对同一 session id 断言同一字面量，两侧改动必须同步（互引：focus_session
+    // marker 注释 / mam-marker.rs 模块注释）
+    #[test]
+    fn matching_side_marker_literal_matches_helper_side() {
+        let session_id = "01a08083-5ca0-4948-8276-9a0b8c7d6e5f";
+        let marker = format!(
+            "MAM:{}",
+            session_id
+                .chars()
+                .filter(|c| *c != '-')
+                .take(12)
+                .collect::<String>()
+        );
+        assert_eq!(marker, "MAM:01a080835ca0");
     }
 }
