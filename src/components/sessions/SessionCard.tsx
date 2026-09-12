@@ -224,7 +224,12 @@ export function SessionCard({
               {candidates.map((w) => (
                 <button
                   key={w.hwnd}
-                  className="hover:bg-accent truncate rounded border px-3 py-2 text-left text-xs"
+                  className={cn(
+                    "hover:bg-accent truncate rounded border px-3 py-2 text-left text-xs",
+                    // 零分候选（多为其他工具无人认领的窗口）视觉弱化；排序保持后端降序，
+                    // 不做过滤——评分素材缺失的真目标可能恰好 0 分，弱化无误杀风险
+                    w.score === 0 && w.uiaPrefix === 0 && "opacity-60"
+                  )}
                   onClick={async () => {
                     setCandidates(null);
                     try {
