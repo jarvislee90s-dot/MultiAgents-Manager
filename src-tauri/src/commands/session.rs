@@ -174,6 +174,13 @@ pub fn focus_session(
         };
         match crate::window::win32::resolve_and_focus(&system, pid, &hints, &running_projects) {
             Ok(crate::window::win32::FocusOutcome::Focused) => {
+                // 聚焦成功清痕（round-5）：剥掉本次注入的 marker，标题回到干净态
+                //（下次跳转重新注入，按需注入本就是一次性模式）。清除范围与注入的
+                // 工具/形态门一致；Ambiguous 选择器分支不清——marker 还在候选标题上，
+                // 供用户辨认，关选择器后自然过期/下次注入时被剥
+                if on_demand_marker_applies(agent_type.as_deref(), form.as_deref()) {
+                    crate::window::win32::clear_marker_after_focus(pid);
+                }
                 mark_read_on_jump(&app, &session_id, &agent_type);
                 Ok(serde_json::json!({ "type": "focused" }))
             }

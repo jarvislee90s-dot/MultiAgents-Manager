@@ -708,36 +708,39 @@ pub fn focus_hwnd(hwnd_val: isize) -> Result<(), String> {
     }
 }
 
-/// 跳转前按需注入（spec 2026-09-12 §3.2）：spawn helper 附加目标会话控制台贴
-/// marker，随后有界等待 marker 出现在任一候选窗口标题（≤500ms——第三轮实测
-/// idle 态存活 ≥15s，等待的是 ConPTY 渲染延迟）。全部失败路径静默返回，
-/// 判定链照旧执行（零回归）
-pub fn inject_marker_on_demand(session_id: &str, pid: u32, marker: &str) {
+/// spawn mam-marker helper（helper 在场检查 + CREATE_NO_WINDOW 防闪窗 + null
+/// stdio）。返回是否成功派发：helper 缺失（未随包分发/被清理，合法状态）或
+/// spawn 失败（如 AV 拦截执行）均静默 false，调用方自行决定是否回落
+fn spawn_marker_helper(args: &[&str]) -> bool {
     use std::os::windows::process::CommandExt;
-    if marker.is_empty() {
-        return;
-    }
     let helper = dirs::home_dir()
         .unwrap_or_default()
         .join(".mam")
         .join("bin")
         .join("mam-marker.exe");
     if !helper.is_file() {
-        return; // 未随包分发/被清理：合法状态，跳过
+        return false;
     }
-    // CREATE_NO_WINDOW：GUI 进程 spawn 控制台子程序防闪窗。
-    // spawn 失败（如 AV 拦截执行）时 marker 永远不会出现，立即静默返回，
-    // 不空耗整段轮询预算（判定链照旧执行，零回归）
-    if std::process::Command::new(&helper)
-        .arg("--pid")
-        .arg(pid.to_string())
-        .arg(session_id)
+    std::process::Command::new(&helper)
+        .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .creation_flags(0x0800_0000)
         .spawn()
-        .is_err()
-    {
+        .is_ok()
+}
+
+/// 跳转前按需注入（spec 2026-09-12 §3.2）：spawn helper 附加目标会话控制台贴
+/// marker（helper 侧贴新前先剥旧，防 codex 标题不自愈导致的 marker 叠加），
+/// 随后有界等待 marker 出现在任一候选窗口标题（≤500ms——第三轮实测
+/// idle 态存活 ≥15s，等待的是 ConPTY 渲染延迟）。全部失败路径静默返回，
+/// 判定链照旧执行（零回归）
+pub fn inject_marker_on_demand(session_id: &str, pid: u32, marker: &str) {
+    if marker.is_empty() {
+        return;
+    }
+    // spawn 失败时 marker 永远不会出现，立即静默返回，不空耗整段轮询预算
+    if !spawn_marker_helper(&["--pid", &pid.to_string(), session_id]) {
         return;
     }
     let marker_lc = marker.to_lowercase();
@@ -753,6 +756,14 @@ pub fn inject_marker_on_demand(session_id: &str, pid: u32, marker: &str) {
             break;
         }
     }
+}
+
+/// 聚焦成功后清痕（round-5）：对目标会话终端执行 --clear（helper 剥掉注入的
+/// marker，标题回到干净态；下次跳转重新注入）。全部失败静默（残留 marker 无
+/// 功能影响，仅视觉）；仅在注入门控内调用（Ambiguous 选择器分支不清——marker
+/// 还在候选标题上，供用户辨认）
+pub fn clear_marker_after_focus(pid: u32) {
+    spawn_marker_helper(&["--pid", &pid.to_string(), "--clear"]);
 }
 
 /// 兼容旧入口（mod.rs 的 focus_terminal_for_pid 内部使用）

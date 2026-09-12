@@ -18,6 +18,12 @@
 //!   **恰好一个窗口**时 `SetWindowTextW` 追加 marker（多窗口时无法判定本标签属于
 //!   哪个窗口，放弃 A——该场景由 B 的 tab 级标题覆盖）。
 //!
+//! 标题写入防叠加 + 清痕（round-5，issue #43）：codex 窗口标题静态不自愈，
+//! 不同会话先后跳转同一窗口时 ` — MAM:xxx` 会叠加（实机观测过双 marker）。
+//! 故贴新前先剥旧（`title_with_marker`：仅剥尾部 ` — MAM:<hex>` 形态，防误伤
+//! 正文）；主进程聚焦成功后以 `--clear` 清痕（按需注入本就是一次性模式，
+//! 清痕不损失信息，标题回到干净态）。
+//!
 //! marker 口径两处互引（改动须同步）：`commands/session.rs`（匹配侧构造）、
 //! 本文件 `marker_from_session_id`（注入侧构造）。
 //! 12 位理由：codex UUIDv7 前 8 hex 只编码 65.5s 粒度，同分钟双开撞车（实测
@@ -45,9 +51,9 @@ fn main() {
     #[cfg(windows)]
     {
         match parse_marker_args(&args) {
-            Some((pid, sid)) => std::process::exit(win::run(pid, &sid)),
+            Some((pid, sid)) => std::process::exit(win::run(pid, sid.as_deref())),
             None => {
-                eprintln!("usage: mam-marker --pid <target-pid> <session_id>");
+                eprintln!("usage: mam-marker --pid <target-pid> <session_id | --clear>");
                 std::process::exit(2)
             }
         }
@@ -62,17 +68,21 @@ fn main() {
     }
 }
 
-/// 参数解析：`--pid <目标进程> <session_id>` 唯一形态（spec 2026-09-12 §3.1：
-/// hook 周期注入退役后父链自走无生产调用方，删除）
+/// 参数解析：`--pid <目标进程> <session_id | --clear>` 两种形态（spec 2026-09-12
+/// §3.1：hook 周期注入退役后父链自走无生产调用方，删除）。`--clear` 为清痕模式
+/// （聚焦成功后剥掉 marker，不贴新）；session_id 位空串/缺 `--pid`/pid 非法/
+/// 参数个数不对均拒绝（None = 用法错）
 #[cfg_attr(not(windows), allow(dead_code))]
-fn parse_marker_args(args: &[String]) -> Option<(u32, String)> {
+fn parse_marker_args(args: &[String]) -> Option<(u32, Option<String>)> {
     match args {
-        [flag, pid, sid] if flag == "--pid" => {
+        [flag, pid, arg] if flag == "--pid" => {
             let pid = pid.parse::<u32>().ok()?;
-            if sid.is_empty() {
+            if arg.is_empty() {
                 None
+            } else if arg == "--clear" {
+                Some((pid, None))
             } else {
-                Some((pid, sid.clone()))
+                Some((pid, Some(arg.clone())))
             }
         }
         _ => None,
@@ -92,21 +102,40 @@ fn marker_from_session_id(id: &str) -> String {
     )
 }
 
-/// 标题追加：已含 marker 则幂等返回原值；空标题直接用 marker
+/// 剥掉标题尾部全部 marker 残留（` — MAM:<hex>` 可叠加多层，循环剥净；
+/// 只剥尾部、且仅剥 MAM: 前缀形态，用户标题正文不受影响）
 #[cfg_attr(not(windows), allow(dead_code))]
-fn append_marker_to_title(title: &str, marker: &str) -> String {
-    if title.contains(marker) {
-        title.to_string()
-    } else if title.trim().is_empty() {
-        marker.to_string()
-    } else {
-        format!("{title} — {marker}")
+fn strip_marker_suffix(title: &str) -> String {
+    let mut t = title.to_string();
+    while let Some(pos) = t.rfind(" — MAM:") {
+        let tail = &t[pos + " — MAM:".len()..];
+        // 仅当尾部是完整 marker 形态（MAM: + 1..16 个十六进制字符）才剥，防误伤
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_hexdigit()) {
+            t.truncate(pos);
+            t = t.trim_end().to_string();
+        } else {
+            break;
+        }
+    }
+    t
+}
+
+/// 标题写入：Some(marker) = 剥旧贴新（防叠加）；None = 仅剥旧（--clear 模式）
+#[cfg_attr(not(windows), allow(dead_code))]
+fn title_with_marker(title: &str, marker: Option<&str>) -> String {
+    let base = strip_marker_suffix(title);
+    match marker {
+        None => base,
+        Some(m) if base.trim().is_empty() => m.to_string(),
+        Some(m) => format!("{base} — {m}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{append_marker_to_title, marker_from_session_id, parse_marker_args};
+    use super::{
+        marker_from_session_id, parse_marker_args, strip_marker_suffix, title_with_marker,
+    };
 
     #[test]
     fn marker_strips_hyphens_and_takes_12() {
@@ -120,18 +149,66 @@ mod tests {
     }
 
     #[test]
-    fn append_is_idempotent_and_handles_empty() {
+    fn strip_removes_single_marker() {
+        // 单 marker 剥净：标题回到正文（含分隔符一并移除）
+        assert_eq!(
+            strip_marker_suffix("华为投资 — MAM:01a080835ca0"),
+            "华为投资"
+        );
+    }
+
+    #[test]
+    fn strip_removes_stacked_markers() {
+        // 双 marker 叠加（实机缺陷形态）剥净：循环剥到无残留
         let m = "MAM:01a080835ca0";
         assert_eq!(
-            append_marker_to_title("华为投资", m),
+            strip_marker_suffix(&format!("华为投资 — {m} — {m}")),
+            "华为投资"
+        );
+    }
+
+    #[test]
+    fn strip_keeps_title_without_marker() {
+        // 无 marker 原样返回
+        assert_eq!(strip_marker_suffix("华为投资"), "华为投资");
+        assert_eq!(strip_marker_suffix(""), "");
+    }
+
+    #[test]
+    fn strip_keeps_non_hex_tail() {
+        // ` — MAM:` 后非 hex 尾巴（如 "MAM:build" 字样正文）不剥，防误伤
+        assert_eq!(
+            strip_marker_suffix("华为投资 — MAM:build"),
+            "华为投资 — MAM:build"
+        );
+        assert_eq!(strip_marker_suffix("华为投资 — MAM:"), "华为投资 — MAM:");
+    }
+
+    #[test]
+    fn title_with_marker_empty_title_uses_marker_alone() {
+        let m = "MAM:01a080835ca0";
+        // 空标题/纯空白 + Some → marker 本体
+        assert_eq!(title_with_marker("", Some(m)), m.to_string());
+        assert_eq!(title_with_marker("   ", Some(m)), m.to_string());
+        // Some + 有正文：剥旧（防叠加）后贴新
+        assert_eq!(
+            title_with_marker("华为投资", Some(m)),
             format!("华为投资 — {m}")
         );
         assert_eq!(
-            append_marker_to_title(&format!("华为投资 — {m}"), m),
+            title_with_marker(&format!("华为投资 — {m}"), Some(m)),
             format!("华为投资 — {m}")
         );
-        assert_eq!(append_marker_to_title("", m), m.to_string());
-        assert_eq!(append_marker_to_title("   ", m), m.to_string());
+        assert_eq!(
+            title_with_marker(&format!("华为投资 — {m} — {m}"), Some(m)),
+            format!("华为投资 — {m}")
+        );
+        // None（--clear 模式）：仅剥旧，不贴新
+        assert_eq!(
+            title_with_marker(&format!("华为投资 — {m}"), None),
+            "华为投资"
+        );
+        assert_eq!(title_with_marker("华为投资", None), "华为投资");
     }
 
     #[test]
@@ -143,8 +220,29 @@ mod tests {
         ];
         assert_eq!(
             parse_marker_args(&args),
-            Some((1234, "01a08083-5ca0-4948".to_string()))
+            Some((1234, Some("01a08083-5ca0-4948".to_string())))
         );
+    }
+
+    #[test]
+    fn parse_args_accepts_clear_form() {
+        // --clear 形态：session_id 位为 None
+        let args = vec![
+            "--pid".to_string(),
+            "1234".to_string(),
+            "--clear".to_string(),
+        ];
+        assert_eq!(parse_marker_args(&args), Some((1234, None)));
+        // --clear 形态下 pid 仍须合法，坏 pid 拒绝
+        let bad = vec![
+            "--pid".to_string(),
+            "abc".to_string(),
+            "--clear".to_string(),
+        ];
+        assert_eq!(parse_marker_args(&bad), None);
+        // 空 session_id 位（非 --clear）仍拒绝
+        let empty = vec!["--pid".to_string(), "1234".to_string(), "".to_string()];
+        assert_eq!(parse_marker_args(&empty), None);
     }
 
     #[test]
@@ -155,6 +253,15 @@ mod tests {
             None
         );
         assert_eq!(parse_marker_args(&[]), None);
+        // arity 错误：2 个/4 个参数均拒绝
+        assert_eq!(
+            parse_marker_args(&["--pid".into(), "1234".into()][..]),
+            None
+        );
+        assert_eq!(
+            parse_marker_args(&["--pid".into(), "1234".into(), "sid".into(), "extra".into()][..]),
+            None
+        );
     }
 }
 
@@ -277,8 +384,8 @@ mod win {
     }
 
     /// 路线 B：附加 `--pid` 目标进程的控制台并 SetConsoleTitleW（官方通道，tab 级）。
-    /// 失败点各不相同，逐条记录便于实机排查
-    fn route_b(target_pid: u32, marker: &str, logs: &mut Vec<String>) -> bool {
+    /// 失败点各不相同，逐条记录便于实机排查。marker=None（--clear）时仅剥旧不贴新
+    fn route_b(target_pid: u32, marker: Option<&str>, logs: &mut Vec<String>) -> bool {
         unsafe {
             // 先脱离（被 MAM spawn 时本无控制台，忽略结果），再直指目标 pid 附加
             //（外部进程 AttachConsole(pid) 已用 PowerShell 实证可行，spec §3.1）
@@ -292,7 +399,7 @@ mod win {
             let mut buf = [0u16; 2048];
             let len = GetConsoleTitleW(&mut buf);
             let cur = String::from_utf16_lossy(&buf[..len as usize]);
-            let next = super::append_marker_to_title(&cur, marker);
+            let next = super::title_with_marker(&cur, marker);
             let ok = SetConsoleTitleW(&HSTRING::from(next.as_str())).is_ok();
             // 脱离目标控制台（进程退出会自动释放，显式释放让日志恢复通道可预测）
             let _ = FreeConsole();
@@ -308,10 +415,10 @@ mod win {
 
     /// 路线 A：沿目标进程祖先链（含目标自身）找第一个拥有可见顶层窗口的进程
     /// （跳过 shell 黑名单），恰好单窗口时 SetWindowTextW（窗口级；多窗口放弃——
-    /// 无法判定标签归属）
+    /// 无法判定标签归属）。marker=None（--clear）时仅剥旧不贴新
     fn route_a(
         target_pid: u32,
-        marker: &str,
+        marker: Option<&str>,
         snap: &HashMap<u32, (u32, String)>,
         logs: &mut Vec<String>,
     ) -> bool {
@@ -334,7 +441,7 @@ mod win {
                 return false;
             }
             let (hwnd, title) = &wins[0];
-            let next = super::append_marker_to_title(title, marker);
+            let next = super::title_with_marker(title, marker);
             let hwnd = HWND(*hwnd);
             let ok = unsafe { SetWindowTextW(hwnd, &HSTRING::from(next.as_str())).is_ok() };
             logs.push(format!(
@@ -349,15 +456,16 @@ mod win {
         false
     }
 
-    /// 入口：`--pid` 指定的目标进程 → 双路线注入。退出码：0 = 至少一路成功；3 = 全失败
+    /// 入口：`--pid` 指定的目标进程 → 双路线注入/清痕。session_id=None（--clear）
+    /// 时仅剥旧 marker 不贴新。退出码：0 = 至少一路成功；3 = 全失败
     /// （2 = 用法错，main 层解析失败时返回）
-    pub fn run(target_pid: u32, session_id: &str) -> i32 {
-        let marker = super::marker_from_session_id(session_id);
+    pub fn run(target_pid: u32, session_id: Option<&str>) -> i32 {
+        let marker = session_id.map(super::marker_from_session_id);
         let snap = process_snapshot();
         let mut logs = Vec::new();
 
-        let b = route_b(target_pid, &marker, &mut logs);
-        let a = route_a(target_pid, &marker, &snap, &mut logs);
+        let b = route_b(target_pid, marker.as_deref(), &mut logs);
+        let a = route_a(target_pid, marker.as_deref(), &snap, &mut logs);
 
         // 日志恢复：手动调试运行时把输出接回自己的控制台（被 MAM spawn 时无控制台，
         // 这两行天然静默）；恢复失败（原本无控制台）则丢弃日志
