@@ -21,6 +21,16 @@ fn content_texts(value: &serde_json::Value) -> Vec<(String, String)> {
     }).unwrap_or_default()
 }
 
+/// 预览文本截断（对齐 kimi_parser 口径）：超 100 字符取前 100 字符 + "..."
+/// （卡片单行预览，超长文本不截断会撑爆布局；按字符数切，中文不碎字）
+fn truncate_100(text: String) -> String {
+    if text.chars().count() > 100 {
+        format!("{}...", text.chars().take(100).collect::<String>())
+    } else {
+        text
+    }
+}
+
 /// (role, text)：真人输入与助手回复取 seq 更新的一方
 pub fn extract(events: &[DshEvent]) -> (Option<String>, Option<String>) {
     let mut last_user: Option<(i64, String)> = None;
@@ -58,14 +68,17 @@ pub fn extract(events: &[DshEvent]) -> (Option<String>, Option<String>) {
         }
     }
 
+    // 返回前统一截断（I3 终审：预览无长度上限会撑爆卡片单行预览）
     match (last_user, last_assistant) {
-        (Some(u), Some(a)) => if a.0 >= u.0 {
-            (Some("assistant".into()), Some(a.1))
-        } else {
-            (Some("user".into()), Some(u.1))
-        },
-        (Some(u), None) => (Some("user".into()), Some(u.1)),
-        (None, Some(a)) => (Some("assistant".into()), Some(a.1)),
+        (Some(u), Some(a)) => {
+            if a.0 >= u.0 {
+                (Some("assistant".into()), Some(truncate_100(a.1)))
+            } else {
+                (Some("user".into()), Some(truncate_100(u.1)))
+            }
+        }
+        (Some(u), None) => (Some("user".into()), Some(truncate_100(u.1))),
+        (None, Some(a)) => (Some("assistant".into()), Some(truncate_100(a.1))),
         (None, None) => (None, None),
     }
 }
@@ -151,5 +164,28 @@ mod tests {
             title: Some("from-cache".into()), last_prompt_at: None, open_turn: None };
         assert_eq!(title(&events, Some(&cache)).as_deref(), Some("from-cache"));
         assert_eq!(title(&events, None).as_deref(), Some("from-log"));
+    }
+
+    #[test]
+    fn long_preview_truncated_to_100_chars() {
+        // I3 终审：预览超长文本截断（对齐 kimi_parser 口径：前 100 字符 + "..."）。
+        // 用中文字符验证按字符数切（非字节切，多字节不碎字）
+        let long = "长".repeat(250);
+        let events = vec![ev("user/message", 8, json!({
+            "content": [ { "type": "text", "text": long } ],
+            "source": { "kind": "user" } }))];
+        let (role, text) = extract(&events);
+        assert_eq!(role.as_deref(), Some("user"));
+        let text = text.unwrap();
+        assert_eq!(text.chars().count(), 103, "100 字符 + 省略号 3 字符");
+        assert!(text.ends_with("..."));
+        assert_eq!(text.chars().take(100).collect::<String>(), "长".repeat(100));
+        // 恰 100 字符不截断（kimi 同款边界：>100 才切）
+        let exact = "x".repeat(100);
+        let events = vec![ev("user/message", 8, json!({
+            "content": [ { "type": "text", "text": exact.clone() } ],
+            "source": { "kind": "user" } }))];
+        let (_, text) = extract(&events);
+        assert_eq!(text.as_deref(), Some(exact.as_str()));
     }
 }
