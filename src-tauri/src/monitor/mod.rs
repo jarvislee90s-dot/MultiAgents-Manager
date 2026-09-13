@@ -5,6 +5,7 @@ pub mod claude_parser;
 pub mod codex_parser;
 pub mod codex_thread_parser;
 pub mod cwd;
+pub mod dsh;
 pub mod git;
 pub mod hooks;
 pub mod host;

@@ -19,6 +19,11 @@ function ToolIconZCodeAdapter({ className: _className }: { className?: string })
   return <ToolIcon toolId="zcode" size={14} />;
 }
 
+/** ToolIcon(toolId) → AgentBadge.Icon（className 形参）适配：DSH 专属品牌图标 */
+function ToolIconDshAdapter({ className: _className }: { className?: string }) {
+  return <ToolIcon toolId="dsh" size={14} />;
+}
+
 /** 会话显示名的唯一命名源：主界面徽标、通知浮窗、历史面板统一引用。
  *  codex 区分桌面版（Codex APP）与命令行（Codex CLI），其余工具单一名称。 */
 export function getAgentLabel(agentType: string, form?: string): string {
@@ -29,6 +34,7 @@ export function getAgentLabel(agentType: string, form?: string): string {
   if (agentType === "kimi") return "Kimi Code";
   if (agentType === "workbuddy") return "WorkBuddy";
   if (agentType === "zcode") return "ZCode";
+  if (agentType === "dsh") return "DSH";
   return agentType;
 }
 
@@ -69,5 +75,11 @@ export const AGENT_BADGE: Record<string, AgentBadge> = {
     // 品牌蓝紫（官方图标几何重绘，与 ToolIcon 同源渐变 #3B5BFD→#8A4FF5）
     className: "border-indigo-500/30 bg-indigo-500/15 text-indigo-400",
     Icon: ToolIconZCodeAdapter,
+  },
+  dsh: {
+    label: "DSH",
+    // 品牌深蓝（DeepSeek #4D6BFE，与 ToolIcon DshIcon 同源；与 kimi 天蓝/zcode 蓝紫拉开）
+    className: "border-blue-500/30 bg-blue-500/15 text-blue-400",
+    Icon: ToolIconDshAdapter,
   },
 };

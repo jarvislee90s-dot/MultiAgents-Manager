@@ -11,6 +11,7 @@ pub enum AgentType {
     Kimi,
     WorkBuddy,
     ZCode,
+    Dsh,
 }
 
 impl AgentType {
@@ -28,6 +29,7 @@ impl AgentType {
             AgentType::Kimi => "kimi",
             AgentType::WorkBuddy => "workbuddy",
             AgentType::ZCode => "zcode",
+            AgentType::Dsh => "dsh",
         }
     }
 }

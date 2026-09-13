@@ -3,6 +3,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod dsh;
 pub mod kimi;
 pub mod openclaw;
 pub mod opencode;
@@ -136,6 +137,7 @@ pub const TOOL_IDS: &[&str] = &[
     "kimi",
     "workbuddy",
     "zcode",
+    "dsh",
 ];
 
 /// 工具 id → adapter 的唯一登记处。新增工具只需在此加一行（+ 其 adapter 文件），
@@ -149,6 +151,7 @@ pub fn adapter_by_id(tool_id: &str) -> Option<Box<dyn AgentAdapter>> {
         "kimi" => Some(Box::new(kimi::KimiAdapter)),
         "workbuddy" => Some(Box::new(workbuddy::WorkBuddyAdapter)),
         "zcode" => Some(Box::new(zcode::ZCodeAdapter)),
+        "dsh" => Some(Box::new(dsh::DshAdapter)),
         _ => None,
     }
 }
@@ -1079,5 +1082,19 @@ mod insert_allowed_tests {
         assert!(insert_allowed(None, false));
         // prev 有值 → 真实状态迁移，已读后会话转黄再转绿的通知不丢
         assert!(insert_allowed(Some("Processing"), true));
+    }
+}
+
+#[cfg(test)]
+mod dsh_registration_tests {
+    use super::*;
+
+    #[test]
+    fn dsh_adapter_registered() {
+        assert!(adapter_by_id("dsh").is_some());
+        assert_eq!(adapter_by_id("dsh").unwrap().name(), "dsh");
+        // 注册表完整：8 个工具
+        assert_eq!(all_adapters().len(), 8);
+        assert!(TOOL_IDS.contains(&"dsh"));
     }
 }

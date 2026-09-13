@@ -194,6 +194,19 @@ function ZCodeIcon({ size }: { size: number }) {
   );
 }
 
+// dsh（DeepSeek harness）— 品牌深蓝圆角方块 + 白色字母 D（本机无图标取样条件，几何近似）
+function DshIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <rect width="24" height="24" rx="5" fill="#4D6BFE" />
+      <path
+        d="M8 7h4.2c2.6 0 4.3 1.7 4.3 5s-1.7 5-4.3 5H8V7zm2.3 2v6h1.8c1.4 0 2.2-1 2.2-3s-.8-3-2.2-3h-1.8z"
+        fill="#fff"
+      />
+    </svg>
+  );
+}
+
 const TOOL_SVGS: Record<string, React.FC<{ size: number }>> = {
   claude: ClaudeIcon,
   codex: CodexIcon,
@@ -202,4 +215,5 @@ const TOOL_SVGS: Record<string, React.FC<{ size: number }>> = {
   kimi: KimiIcon,
   workbuddy: WorkBuddyIcon,
   zcode: ZCodeIcon,
+  dsh: DshIcon,
 };
