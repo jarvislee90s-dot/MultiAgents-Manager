@@ -59,6 +59,15 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     // 015：native_extensions 表从未被业务写入，移除（历史库中 DROP）
     conn.execute_batch("DROP TABLE IF EXISTS native_extensions;")
         .map_err(|e| format!("移除 native_extensions 失败: {}", e))?;
+
+    // M1（dsh 第 8 工具）：会话已读水位（未读判定的 MAM 侧持久化）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dsh_session_read (
+             session_id TEXT PRIMARY KEY,
+             last_read_at INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .map_err(|e| format!("建 dsh_session_read 失败: {}", e))?;
     Ok(())
 }
 
@@ -153,5 +162,37 @@ mod tests {
             )
             .unwrap();
         assert!(!exists);
+    }
+
+    /// M1（dsh）：迁移幂等创建已读水位表
+    #[test]
+    fn migrate_creates_dsh_session_read() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE extensions (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                source_path TEXT NOT NULL,
+                source_url TEXT,
+                version TEXT,
+                tags TEXT,
+                installed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        // 幂等：重复迁移不报错
+        migrate(&conn).unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='dsh_session_read'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(exists);
     }
 }
