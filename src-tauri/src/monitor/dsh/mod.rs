@@ -2,6 +2,8 @@
 // 会话存储/事件语义全部依据 M0 探测报告（research/dsh-probe-2026-09-13-report.md）
 // 双数据源：storages/session_projcache（首选）+ sessions/<项目>/<会话>/session.vN.jsonl.zstd（兜底）
 
+pub mod decode;
+
 use crate::adapter::AgentProcess;
 use crate::session::Session;
 
