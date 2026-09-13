@@ -128,7 +128,7 @@ mod tests {
         let text = fixture("sample1-completed.sanitized.jsonl");
         let h = parse_header(&text).expect("header 可解析");
         assert!(h.id.starts_with("session-"));
-        assert!(h.cwd.as_deref().unwrap_or("").len() > 0);
+        assert!(!h.cwd.as_deref().unwrap_or("").is_empty());
         assert!(!is_subagent(&h));
         let events = parse_events(&text);
         assert_eq!(events.len(), 21); // M0 实测 21 事件
