@@ -9,7 +9,9 @@ pub mod projcache;
 pub mod status;
 
 use crate::adapter::AgentProcess;
-use crate::session::Session;
+use crate::session::{AgentType, ProcessForm, Session, SessionStatus};
+
+pub use status::LockState;
 
 /// dsh 数据根：$DSH_HOME 覆盖（M0 F14 优先级：env > ~/.dsh），测试注入用
 pub fn dsh_home() -> std::path::PathBuf {
@@ -20,12 +22,286 @@ pub fn dsh_home() -> std::path::PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".dsh"))
 }
 
-/// 进程发现：node 进程且 cmdline 令牌含 "dsh" 与 "web"（M0：进程名是 node，必须按 cmdline 判定）
-pub fn find_dsh_processes(_system: &sysinfo::System) -> Vec<AgentProcess> {
-    Vec::new() // Task 8 实装
+/// 进程发现：node 进程且 cmdline 含 "dsh" 与 "web" 令牌（M0 §5：进程名是 node，
+/// 必须按 cmdline 判定；取命中的第一个作为宿主——esbuild 等子进程 cmdline 无此二令牌）
+pub fn find_dsh_processes(system: &sysinfo::System) -> Vec<AgentProcess> {
+    let mut out = Vec::new();
+    for (pid, process) in system.processes() {
+        let cmd = process.cmd();
+        if cmd.is_empty() {
+            continue;
+        }
+        let tokens: Vec<String> = cmd
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let has_dsh = tokens
+            .iter()
+            .any(|t| t == "dsh" || t.ends_with("/dsh") || t.ends_with("\\dsh"));
+        let has_web = tokens.iter().any(|t| t == "web");
+        if has_dsh && has_web {
+            out.push(AgentProcess {
+                pid: pid.as_u32(),
+                cpu_usage: process.cpu_usage(),
+                cwd: process.cwd().map(|p| p.to_path_buf()),
+                exe: process.exe().map(|p| p.to_path_buf()),
+                form: ProcessForm::App,
+            });
+            // 只需一个宿主（卡片 pid 用）——命中即取第一个，后续同名进程不再收集
+            break;
+        }
+    }
+    out
 }
 
-/// 会话聚合：宿主进程在位时扫描全部会话目录出卡（Task 8 实装）
-pub fn get_dsh_sessions(_processes: &[AgentProcess]) -> Vec<Session> {
-    Vec::new()
+/// 会话锁持有探测（零干扰）：lock 文件不存在 → Unknown；有文件则问 lsof 是否有进程开着它
+fn probe_lock_state(session_dir: &std::path::Path) -> LockState {
+    let lock = session_dir.join("session.lock");
+    if !lock.exists() {
+        return LockState::Unknown; // v0 旧目录无锁文件（M0 F3）
+    }
+    let out = std::process::Command::new("lsof")
+        .arg("-t")
+        .arg(&lock)
+        .output();
+    match out {
+        Ok(o)
+            if o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty() =>
+        {
+            LockState::Held
+        }
+        Ok(_) => LockState::Free,    // 文件在但无人持有 → 写入者已死
+        Err(_) => LockState::Unknown, // lsof 不可用（如 Windows）→ 静默兜底
+    }
+}
+
+/// 会话聚合：宿主在位时扫描全部会话目录（含历史会话）出卡；未运行 → 无卡
+pub fn get_dsh_sessions(processes: &[AgentProcess]) -> Vec<Session> {
+    let Some(host) = processes.first() else {
+        return Vec::new();
+    };
+    scan_sessions(&dsh_home(), host)
+}
+
+/// 内部扫描（home 注入，测试直调——避免 DSH_HOME 环境变量在并行测试中互踩）
+fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
+    let sessions_root = home.join("sessions");
+    let Ok(entries) = std::fs::read_dir(&sessions_root) else {
+        return Vec::new();
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let mut sessions = Vec::new();
+    for project_dir in entries.flatten() {
+        let ppath = project_dir.path();
+        if !ppath.is_dir() {
+            continue;
+        }
+        let name = project_dir.file_name().to_string_lossy().to_string();
+        if name.starts_with("session_projcache") || name == "workspace.json" {
+            continue;
+        }
+        let Ok(session_dirs) = std::fs::read_dir(&ppath) else {
+            continue;
+        };
+        for sdir in session_dirs.flatten() {
+            let spath = sdir.path();
+            if !spath.is_dir() {
+                continue;
+            }
+            // 版本门 + 读取（代际最大者；读不到/解不开 → 跳过该会话不影响其他）
+            let Some(read) = log::read_best_generation(&spath) else {
+                continue;
+            };
+            let Some(header) = log::parse_header(&read.text) else {
+                continue;
+            };
+            if log::is_subagent(&header) {
+                continue; // 子 Agent 不出卡（M0 F7）
+            }
+            // 版本门（设计 P5 + 备忘 A8）：header.version 超出已知集（0..=3）→
+            // 降级卡"格式待适配"（未知语义不猜——探测红线），不影响其他会话
+            if let Some(v) = header.version {
+                if !(0..=3).contains(&v) {
+                    ::log::warn!("dsh: 会话 {} 为未知代际 v{}，出降级卡", header.id, v);
+                    sessions.push(Session {
+                        id: header.id.clone(),
+                        agent_type: AgentType::Dsh,
+                        project_name: header
+                            .cwd
+                            .as_deref()
+                            .map(crate::monitor::project::project_name_from_path)
+                            .unwrap_or_else(|| name.clone()),
+                        project_path: header.cwd.clone().unwrap_or_default(),
+                        title: Some(format!("dsh 格式待适配（v{}）", v)),
+                        git_branch: None,
+                        github_url: None,
+                        status: SessionStatus::Idle,
+                        last_message: None,
+                        last_message_role: None,
+                        last_activity_at: chrono::DateTime::from_timestamp_millis(read.mtime_ms)
+                            .map(|d| d.to_rfc3339())
+                            .unwrap_or_default(),
+                        pid: host.pid,
+                        cpu_usage: host.cpu_usage,
+                        active_subagent_count: 0,
+                        form: ProcessForm::App,
+                        jump_supported: crate::session::jump_supported_for(ProcessForm::App),
+                        unread: false,
+                    });
+                    continue;
+                }
+            }
+            let events = log::parse_events(&read.text);
+
+            // 双源：projcache（identity 过校验才可用）
+            let cache = projcache::load(home, &header.id)
+                .filter(|_| projcache_identity_ok(home, &header, read.version));
+
+            // 状态：lock 交叉判定 + 静默兜底
+            let lock = probe_lock_state(&spath);
+            let silence_ms = now_ms - read.mtime_ms;
+            // projcache 运行口径与日志口径一致时信任日志（审批只有日志有）
+            let outcome = status::derive(&status::StatusInput {
+                events: &events,
+                lock,
+                silence_ms: Some(silence_ms),
+            });
+
+            let (role, text) = preview::extract(&events);
+            let title = preview::title(&events, cache.as_ref());
+            let last_activity_ms = cache
+                .as_ref()
+                .and_then(|c| c.last_prompt_at)
+                .or(events.iter().filter_map(|e| e.time).max())
+                .unwrap_or(read.mtime_ms);
+
+            // 未读（设计 P2 定死：等批准/出错/刚完成/回合被阻塞 → 未读）。
+            // 锚点用事件流最大 time——勿用 lastPromptAt（完成晚于提问，
+            // 用提问时刻会漏掉"读后完成"的刚完成未读）
+            let unread_anchor_ms = events.iter().filter_map(|e| e.time).max().unwrap_or(read.mtime_ms);
+            // MAM 自有库读已读水位（绝不写 ~/.dsh）；按会话短锁即取即放，
+            // 避免长扫描（zstd 解码 + lsof 子进程）期间独占全局连接
+            let last_read = {
+                let conn = crate::database::connection::DB.lock().unwrap();
+                crate::database::dao::dsh_read::last_read_at(&conn, &header.id).unwrap_or(0)
+            };
+            let unread = (matches!(
+                outcome.status,
+                SessionStatus::Waiting | SessionStatus::Finished
+            ) || outcome.end_kind.as_deref() == Some("blocked"))
+                && unread_anchor_ms > last_read;
+
+            sessions.push(Session {
+                id: header.id.clone(),
+                agent_type: AgentType::Dsh,
+                project_name: header
+                    .cwd
+                    .as_deref()
+                    .map(crate::monitor::project::project_name_from_path)
+                    .unwrap_or_else(|| name.clone()),
+                project_path: header.cwd.clone().unwrap_or_default(),
+                title,
+                git_branch: None,
+                github_url: None,
+                status: outcome.status,
+                last_message: text,
+                last_message_role: role,
+                last_activity_at: chrono::DateTime::from_timestamp_millis(last_activity_ms)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default(),
+                pid: host.pid,
+                cpu_usage: host.cpu_usage,
+                active_subagent_count: 0,
+                form: ProcessForm::App,
+                jump_supported: crate::session::jump_supported_for(ProcessForm::App),
+                unread,
+            });
+        }
+    }
+    sessions
+}
+
+/// projcache identity 校验（5 字段；坏记录路径在此收敛）
+fn projcache_identity_ok(home: &std::path::Path, header: &log::DshHeader, version: i64) -> bool {
+    let path = home
+        .join("storages/session_projcache/sessions")
+        .join(format!("{}.json", header.id));
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    v.get("record")
+        .and_then(|r| r.get("identity"))
+        .map(|ident| projcache::identity_matches(ident, header, version))
+        .unwrap_or(false)
+}
+
+// ===== 集成测试（Task 8）：会话编排流水线（home 注入直调，不触真机 ~/.dsh）=====
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::session::{ProcessForm, SessionStatus};
+
+    /// 造一个隔离 dsh home：一个项目 + 一个会话（zstd 单帧事件）
+    fn make_home(events: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sessions/--tmp-proj--/session-abc");
+        std::fs::create_dir_all(&sess).unwrap();
+        // JSON 花括号不能进 format! 格式串——header 行用普通字面量变量拼接
+        let header_line = "{\"type\":\"session\",\"version\":3,\"id\":\"session-abc\",\"cwd\":\"/tmp/proj\",\"createdAt\":1000,\"isSeeded\":false}";
+        let frame = zstd::stream::encode_all(format!("{header_line}\n{events}").as_bytes(), 3)
+            .unwrap();
+        std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
+        dir
+    }
+
+    fn fake_host() -> AgentProcess {
+        AgentProcess {
+            pid: 42,
+            cpu_usage: 0.5,
+            cwd: None,
+            exe: None,
+            form: ProcessForm::App,
+        }
+    }
+
+    #[test]
+    fn emits_card_with_status_and_preview() {
+        let home = make_home(
+            "{\"type\":\"turn/start\",\"seq\":4,\"data\":{}}\n\
+             {\"type\":\"user/message\",\"seq\":8,\"data\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"source\":{\"kind\":\"user\"}}}\n\
+             {\"type\":\"assistant/message\",\"seq\":9,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}}\n\
+             {\"type\":\"turn/end\",\"seq\":10,\"data\":{\"reason\":{\"kind\":\"completed\"}}}\n",
+        );
+        let sessions = scan_sessions(home.path(), &fake_host());
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert_eq!(s.id, "session-abc");
+        assert_eq!(s.agent_type, crate::session::AgentType::Dsh);
+        assert_eq!(s.status, SessionStatus::Finished);
+        assert_eq!(s.last_message.as_deref(), Some("done"));
+        assert_eq!(s.last_message_role.as_deref(), Some("assistant"));
+        assert_eq!(s.form, ProcessForm::App);
+        assert_eq!(s.pid, 42);
+        assert!(s.unread, "刚完成且从未读过 → 未读");
+    }
+
+    #[test]
+    fn skips_subagent_and_missing_host() {
+        // 子 Agent 会话不出卡
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sessions/--tmp-proj--/3b8a0933-0000-0000-0000-000000000000");
+        std::fs::create_dir_all(&sess).unwrap();
+        let frame = zstd::stream::encode_all(
+            b"{\"type\":\"session\",\"version\":0,\"id\":\"sub-1\",\"cwd\":\"/tmp\",\"origin\":\"subagent\",\"delegationDepth\":1}\n".as_slice(),
+            3).unwrap();
+        std::fs::write(sess.join("session.jsonl.zstd"), &frame).unwrap();
+        let with_host = scan_sessions(dir.path(), &fake_host());
+        assert!(with_host.is_empty(), "子 Agent 过滤");
+        // 宿主不在 → 无卡（与其他工具一致；不入扫描，无需 home）
+        assert!(get_dsh_sessions(&[]).is_empty());
+    }
 }
