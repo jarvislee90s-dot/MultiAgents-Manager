@@ -210,6 +210,19 @@ pub fn focus_session(
             mark_read_on_jump(&app, &session_id, &agent_type);
             return Ok(serde_json::json!({ "type": "focused", "via": "tty" }));
         }
+        // dsh（M1）：宿主是 node + 浏览器标签形态，不走 APP 激活链路——
+        // 聚焦/打开 dsh web 标签页（无 per-session URL，设计 P4 定案）；失败给出提示
+        #[cfg(target_os = "macos")]
+        if agent_type.as_deref() == Some("dsh") {
+            match crate::window::dsh_tab::focus_dsh_tab() {
+                Ok(mut out) => {
+                    mark_read_on_jump(&app, &session_id, &agent_type);
+                    out["via"] = serde_json::Value::String("dsh".into());
+                    return Ok(out);
+                }
+                Err(e) => return Err(format!("无法聚焦 dsh 页面：{e}（请手动打开 dsh web）")),
+            }
+        }
         // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）。
         // via=app-fallback：CLI 会话 TTY 聚焦失败走到这里的 UX 提示依据（review M3）
         #[cfg(target_os = "macos")]
