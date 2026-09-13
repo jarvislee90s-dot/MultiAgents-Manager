@@ -205,7 +205,7 @@ pub fn focus_session(
     #[cfg(not(windows))]
     {
         let _ = (project_name, last_message, title, form, unread);
-        // dsh（M1）：宿主是前台终端启动的 node 进程，必然持有 TTY——若 TTY 链路
+        // dsh（M1）：宿主是终端启动的 node 进程，通常持有 TTY——若 TTY 链路
         // 先行会聚焦终端并误标已读，dsh 路由永远不可达（review Important）。
         // 故 dsh 精确匹配必须在 TTY 链路之前短路；也不走 APP 激活链路——
         // 聚焦/打开 dsh web 标签页（无 per-session URL，设计 P4 定案）；失败给出提示
@@ -214,6 +214,18 @@ pub fn focus_session(
             match crate::window::dsh_tab::focus_dsh_tab() {
                 Ok(mut out) => {
                     mark_read_on_jump(&app, &session_id, &agent_type);
+                    // dsh 水位（终审 C2）：dsh 未读判定消费 dsh_session_read——跳转即写水位，
+                    // 否则下一轮扫描 last_read=0 角标复活（通用池写入对 dsh 无效）
+                    if let Some(sid) = session_id.as_deref() {
+                        let conn = crate::database::connection::DB.lock().unwrap();
+                        if let Err(e) = crate::database::dao::dsh_read::mark_read(
+                            &conn,
+                            sid,
+                            chrono::Utc::now().timestamp_millis(),
+                        ) {
+                            log::warn!("dsh 跳转写水位失败: {e}");
+                        }
+                    }
                     out["via"] = serde_json::Value::String("dsh".into());
                     return Ok(out);
                 }
