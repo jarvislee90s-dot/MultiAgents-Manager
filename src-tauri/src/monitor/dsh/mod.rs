@@ -4,6 +4,7 @@
 
 pub mod decode;
 pub mod log;
+pub mod projcache;
 
 use crate::adapter::AgentProcess;
 use crate::session::Session;
