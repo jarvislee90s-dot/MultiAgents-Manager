@@ -5,6 +5,7 @@
 pub mod decode;
 pub mod log;
 pub mod projcache;
+pub mod status;
 
 use crate::adapter::AgentProcess;
 use crate::session::Session;
