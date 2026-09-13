@@ -22,6 +22,22 @@ pub fn dsh_home() -> std::path::PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".dsh"))
 }
 
+/// dsh 宿主 cmdline 双令牌门（单源，M0 §5）：cmdline 含 "dsh"（精确令牌，
+/// 或 /dsh、\dsh 路径结尾）与 "web"（精确令牌）即视为 dsh 宿主。dsh 宿主是
+/// 前台终端启动的 node 进程，exe 判据不可用——find_dsh_processes（进程发现）
+/// 与 host::tool_host_alive_in（宿主存活判定）共用本口径，防两处判定漂移
+pub fn cmdline_is_dsh_host(cmd: &[std::ffi::OsString]) -> bool {
+    let tokens: Vec<String> = cmd
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    let has_dsh = tokens
+        .iter()
+        .any(|t| t == "dsh" || t.ends_with("/dsh") || t.ends_with("\\dsh"));
+    let has_web = tokens.iter().any(|t| t == "web");
+    has_dsh && has_web
+}
+
 /// 进程发现：node 进程且 cmdline 含 "dsh" 与 "web" 令牌（M0 §5：进程名是 node，
 /// 必须按 cmdline 判定；取命中的第一个作为宿主——esbuild 等子进程 cmdline 无此二令牌）
 pub fn find_dsh_processes(system: &sysinfo::System) -> Vec<AgentProcess> {
@@ -31,15 +47,8 @@ pub fn find_dsh_processes(system: &sysinfo::System) -> Vec<AgentProcess> {
         if cmd.is_empty() {
             continue;
         }
-        let tokens: Vec<String> = cmd
-            .iter()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        let has_dsh = tokens
-            .iter()
-            .any(|t| t == "dsh" || t.ends_with("/dsh") || t.ends_with("\\dsh"));
-        let has_web = tokens.iter().any(|t| t == "web");
-        if has_dsh && has_web {
+        // 判定口径单源委托 cmdline_is_dsh_host（host.rs 存活判定同款）
+        if cmdline_is_dsh_host(cmd) {
             out.push(AgentProcess {
                 pid: pid.as_u32(),
                 cpu_usage: process.cpu_usage(),
@@ -237,6 +246,52 @@ fn projcache_identity_ok(home: &std::path::Path, header: &log::DshHeader, versio
         .and_then(|r| r.get("identity"))
         .map(|ident| projcache::identity_matches(ident, header, version))
         .unwrap_or(false)
+}
+
+// ===== 单元测试：宿主 cmdline 双令牌门（C1 终审：host.rs 存活判定同源口径的防漂移锁）=====
+#[cfg(test)]
+mod cmdline_gate_tests {
+    use super::cmdline_is_dsh_host;
+    use std::ffi::OsString;
+
+    fn cmd(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn dual_tokens_qualify_as_host() {
+        // 精确双令牌（node + dsh + web）
+        assert!(cmdline_is_dsh_host(&cmd(&["node", "/usr/local/bin/dsh", "web"])));
+        assert!(cmdline_is_dsh_host(&cmd(&["node", "dsh", "web"])));
+        // 令牌顺序无关（extra 参数不影响；但脚本路径须以 /dsh、\dsh 结尾或恰为
+        // "dsh"——/opt/dsh/cli.js 这类路径中段形态不算，见 substring 用例）
+        assert!(cmdline_is_dsh_host(&cmd(&["/usr/local/bin/node", "web", "dsh"])));
+        assert!(cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh", "web", "--port=4173"])));
+    }
+
+    #[test]
+    fn path_suffix_dsh_qualifies() {
+        // 路径结尾 /dsh（POSIX）与 \dsh（Windows）均算 dsh 令牌
+        assert!(cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh/bin/dsh", "web"])));
+        assert!(cmdline_is_dsh_host(&cmd(&["node", "C:\\tools\\dsh\\bin\\dsh", "web"])));
+    }
+
+    #[test]
+    fn single_token_is_not_host() {
+        // 只含其一 → 非宿主（esbuild 等子进程形态）
+        assert!(!cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh/bin/dsh"])));
+        assert!(!cmdline_is_dsh_host(&cmd(&["node", "web"])));
+        assert!(!cmdline_is_dsh_host(&cmd(&[])));
+    }
+
+    #[test]
+    fn substring_tokens_do_not_qualify() {
+        // "dshweb" 子串不构成 dsh 令牌、"webview" 子串不构成 web 令牌（防误匹配）
+        assert!(!cmdline_is_dsh_host(&cmd(&["node", "dshweb", "web"])));
+        assert!(!cmdline_is_dsh_host(&cmd(&["node", "dsh", "webview"])));
+        // 子串出现在路径中间同样不算（仅路径结尾 /dsh|\dsh 认可）
+        assert!(!cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh-web/cli.js", "web"])));
+    }
 }
 
 // ===== 集成测试（Task 8）：会话编排流水线（home 注入直调，不触真机 ~/.dsh）=====

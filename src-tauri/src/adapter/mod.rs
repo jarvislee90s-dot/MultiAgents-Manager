@@ -734,9 +734,13 @@ mod host_liveness_filter_tests {
     use super::*;
 
     fn fake(id: &str, form: ProcessForm, unread: bool) -> Session {
+        fake_for(AgentType::WorkBuddy, id, form, unread)
+    }
+
+    fn fake_for(agent: AgentType, id: &str, form: ProcessForm, unread: bool) -> Session {
         Session {
             id: id.into(),
-            agent_type: AgentType::WorkBuddy,
+            agent_type: agent,
             project_name: "P".into(),
             project_path: String::new(),
             title: None,
@@ -787,6 +791,25 @@ mod host_liveness_filter_tests {
         ];
         filter_host_dead_cards(&mut sessions, &|_| true);
         assert_eq!(sessions.len(), 2);
+    }
+
+    /// C1 终审回归锁（管线级）：dsh 卡恒为 App 形态，宿主存活判定若未登记该工具
+    /// （tool_host_alive_in 恒 false——dsh 曾因 host.rs 缺 dsh arm 整批丢卡），
+    /// unread=false 的活跃卡每轮都被本过滤器丢弃、dead_tools_from_pool 亦误清池。
+    /// 锁定：App 形态 dsh 活跃卡的存留必须由 host_alive("dsh") 驱动——
+    /// 未来新工具若再犯同类「注册 adapter 却漏登记存活判定」，此处即红
+    #[test]
+    fn dsh_app_card_survives_iff_host_alive_reports_alive() {
+        // host_alive("dsh")=true（宿主在位口径）→ 未读活跃卡保留
+        let mut alive = vec![fake_for(AgentType::Dsh, "dsh-live", ProcessForm::App, false)];
+        filter_host_dead_cards(&mut alive, &|tool| tool == "dsh");
+        assert_eq!(alive.len(), 1, "宿主存活口径登记正确时 dsh 活跃卡不得被过滤");
+
+        // host_alive("dsh")=false（登记漏项时的错误口径）→ App 活跃卡必须丢弃
+        //（本断言同时证明过滤器对该工具生效、测试具备区分度）
+        let mut dead = vec![fake_for(AgentType::Dsh, "dsh-live", ProcessForm::App, false)];
+        filter_host_dead_cards(&mut dead, &|tool| tool != "dsh");
+        assert!(dead.is_empty(), "宿主判死时 App 形态活跃卡必须被过滤");
     }
 }
 
