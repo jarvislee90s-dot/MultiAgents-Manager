@@ -205,12 +205,9 @@ pub fn focus_session(
     #[cfg(not(windows))]
     {
         let _ = (project_name, last_message, title, form, unread);
-        // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
-        if crate::window::focus_terminal_for_pid(pid).is_ok() {
-            mark_read_on_jump(&app, &session_id, &agent_type);
-            return Ok(serde_json::json!({ "type": "focused", "via": "tty" }));
-        }
-        // dsh（M1）：宿主是 node + 浏览器标签形态，不走 APP 激活链路——
+        // dsh（M1）：宿主是前台终端启动的 node 进程，必然持有 TTY——若 TTY 链路
+        // 先行会聚焦终端并误标已读，dsh 路由永远不可达（review Important）。
+        // 故 dsh 精确匹配必须在 TTY 链路之前短路；也不走 APP 激活链路——
         // 聚焦/打开 dsh web 标签页（无 per-session URL，设计 P4 定案）；失败给出提示
         #[cfg(target_os = "macos")]
         if agent_type.as_deref() == Some("dsh") {
@@ -222,6 +219,11 @@ pub fn focus_session(
                 }
                 Err(e) => return Err(format!("无法聚焦 dsh 页面：{e}（请手动打开 dsh web）")),
             }
+        }
+        // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
+        if crate::window::focus_terminal_for_pid(pid).is_ok() {
+            mark_read_on_jump(&app, &session_id, &agent_type);
+            return Ok(serde_json::json!({ "type": "focused", "via": "tty" }));
         }
         // APP 形态 / pid 失效兜底：深度链接 → bundle 激活 → 按工具枚举（W2）。
         // via=app-fallback：CLI 会话 TTY 聚焦失败走到这里的 UX 提示依据（review M3）
