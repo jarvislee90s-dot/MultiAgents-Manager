@@ -178,6 +178,17 @@ mod tests {
     }
 
     #[test]
+    fn golden_approval_decided_recovers_finished() {
+        // T5-1 黄金夹具（sample3，此前零消费）：asked(seq19)→decided(seq20) 同 id，
+        // 决议必须清除开放审批集；样本随后 turn/end(seq26) 以 completed 收尾——
+        // 最终绿（Finished），不得因"曾有审批"滞留红（Waiting）误判
+        let e = fixture_events("sample3-approval-decided.sanitized.jsonl");
+        let out = derive(&input(&e, LockState::Held));
+        assert_eq!(out.status, SessionStatus::Finished);
+        assert_eq!(out.end_kind.as_deref(), Some("completed"));
+    }
+
+    #[test]
     fn golden_running_is_processing() {
         let e = fixture_events("sample4-running.sanitized.jsonl");
         assert_eq!(
