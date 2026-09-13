@@ -4,6 +4,7 @@
 
 pub mod decode;
 pub mod log;
+pub mod preview;
 pub mod projcache;
 pub mod status;
 
