@@ -1,7 +1,9 @@
 # Changelog
 
-## [0.4.0] - 2026-09-10
+## [0.4.0] - 2026-09-14
 ### Added
+- **跳转 marker 通道（Windows，issue #43）**：点击卡片时经 `mam-marker` helper（随应用自动分发至 `~/.mam/bin/`）对目标会话终端贴一次性身份标记 ` — MAM:<session_id 剥连字符前 12 位>`（官方控制台 `SetConsoleTitle` 通道优先 + 近祖窗口标题直改兜底），窗口消歧①层精确命中；聚焦成功后自动清痕回干净态、注入前剥旧防叠加（不同会话先后跳同一窗不残留双标记）；helper 缺失/失败全链静默回落既有消歧层（零回归）
+- **Hook 事件通道重构（issue #43）**：claude/codex 状态 hook 事件文件改以 session_id 为键（原 PPID 键在多会话下互覆），写入前字符白名单校验（防路径注入，合法 UUID 永不触发）；读取侧 30s TTL；claude 的 Stop 宽限（防误报红灯）恢复生效，周期性 marker 注入块退役
 - **ZCode 第七工具支持**（智谱桌面 AI 编程助手，Electron APP 形态）：宿主判定（进程侧只回答「应用开没开」，Windows 全部可执行体同名 ZCode.exe 时按命令行区分主进程/辅助进程/会话运行时）+ 双 SQLite 会话聚合（tasks-index 任务索引 + session/message/part 消息流，每会话一卡、24h 窗口、archived/deleted 过滤、会话 id 严格 UUID 校验）；状态从消息流尾部按 sequence 倒扫推导（step-finish 懒落库时间戳不可靠、顺序可靠），todo_reminder 等记账消息识别跳过；子代理长任务经共享层「后代活跃度仲裁」保持运行中（主会话静默 + 子会话活跃 = 健康等待，停更且无后代活动 = 疑似卡住）；task_status=error 按完成转绿。资源管理：skill 分发（SSOT → `~/.zcode/skills/` 建链/删链，**目录已实测被 ZCode 识别**）+ MCP 读-改-写（`~/.zcode/cli/config.json` 仅 `mcp.servers` 子树，未知键与原键序保留，解析失败只报错不落盘，`enable:false` 如实展示为停用）
 - **ZCode 跳转 = 直接聚焦唯一窗口**：ZCode 为单窗口多标签应用（实机取证：`windowId:1` 恒定、标题恒为 "ZCode" 不含工作区名），点击卡片经 pid 单窗口路径零歧义锁定，失败落 APP 级激活兜底。工作区深链 `zcode://workspace/open` 经实机验收后**有意不接入**：其语义为打开工作区 + 全新会话 composer（非定位已有会话）、每次派发无条件弹信任确认且拉起一个转发进程
 - **同项目双开跳转直达（窗口标题匹配层）**：Kimi / OpenCode 的终端窗口标题与会话标题（kimi `state.json` 标题 / OpenCode DB 标题）归一化比对（剥 spinner 前缀 / "OC | " 工具前缀 / 尾部省略号），唯一命中即锁定——双开终端不再弹选择器；会话标题经全部跳转入口（看板 / 通知 / 桌宠 / 历史）统一透传
@@ -14,10 +16,21 @@
 - **Codex APP 会话 SQLite 适配**（新版 Codex 桌面端已把会话存储从 `~/.codex/sessions/*.jsonl` 迁入 SQLite——实机取证 state_5 库含 rollout_migration_state 迁移表，rollout 目录 9 月 3 日后零新写入，看板因此检测不到 APP 对话）：APP 卡改由 `monitor/codex_thread_parser` 双库产出——`state_*.sqlite` 的 `threads` 表（cwd/标题/git 分支/git 远端/updated_at(秒)/archived/source）为实时元数据源，`thread_history_*.sqlite` 的 `thread_items`/`thread_turns` 内容投影**可用则用**（remote_control 通道的活跃对话不落本地投影，按 threads.updated_at 新鲜度兜底 + 共享核 300s 停更降级）；turn 生命周期（inProgress→Processing 强信号、failed→Finished 转绿）与 `thread_spawn_edges` 子代理树（后代活跃度仲裁 + 「N 个子代理」）直取 DB。文件名带版本号按数值取最新（state_5→state_6 升级不破）。rollout 线路保留给 CLI 前端（双源），CLI 认领的会话不再重复出 APP 卡；旧 rollout 聚合链（aggregate_app_sessions 等）随存储迁移退役
 
 ### Changed
+- **配对不确定安全门（issue #48）**：同工具同项目 ≥2 进程时，卡片↔终端启发式配对可能互换——禁用一切演绎锁定（单窗口即锁/幸存者推理）与按需 marker 注入（防贴错窗后自证锁错），只认正向证据、素材不足交选择器；卡片加「同项目双开」提示角标（诚实文案，不承诺跳转行为）
+- **同标题双命中 UIA 仲裁（issue #49）**：窗口标题匹配层命中 ≥2 时，把 UIA 尾串包含匹配前移到命中集合仲裁，唯中者锁定、仍不唯一落选择器（宁弹不锁错）
+- **聚焦失败诚实报错**：置前被系统拒绝（锁屏 / 前台锁）时返回错误并 toast 显式提示，不再静默假成功
+- **选择器零分候选视觉弱化**：score=0 且无 UIA 命中的候选降为 60% 不透明度，排序保持后端降序不过滤（防误杀评分素材缺失的真目标）
+- 命令层统一 `AgentType::tool_id()` 显式映射，收口 6 处 `format!("{:?}")` 隐式推导（新增变体编译期强制补齐）
 - **会话扫描三层预算（性能）**：前端 3 秒轮询下各解析器不再每轮全量重扫历史会话（实机 codex 会话库 2GB / 388 文件曾把主线程打满 100%、界面卡死）。三层通用机制落在 `monitor/session_scan`：① 零进程零解析（`get_all_sessions` 编排层统一短路 + 全 adapter 防回归测试）；② `(mtime,size)` 内容摘要缓存——解析拆「纯内容产物（缓存）+ 时间叠加（现算）」，codex / claude / kimi / workbuddy 已接入；③ 无界历史扫描限 24h 新鲜窗口 + 活跃进程窗口内匹配不到才回退全量（codex；进程界定有界扫描不窗口化以免丢空闲超窗的活跃卡）。opencode / zcode（SQLite 查询即过滤）与 openclaw（配置界定）仅享 ①。契约已写入 AGENTS.md「Agent Adapter 模式」与 trait 文档，新工具接入自动受保护
 - **codex / zcode 停更不落兜底红灯**：无内容信号时无法区分「等用户输入」与「对话已结束」，时间兜底一律落绿灯（Idle 完成待看，接入既有未读/绿卡管线）——codex rollout 路线的无信号兜底与 300s 停更降级、zcode 的无信号 fallback 均已改；红灯只保留给有证据的等待（claude 内容判定、zcode 内容+后代仲裁「疑似卡住」）；进程绑定型工具（claude/kimi/workbuddy）不动
 
 ### Fixed
+- **空壳终端窗口混入跳转选择器（issue #47）**：`C:\WINDOWS\system32\cmd.exe `（全路径 + 尾空格）形态的空闲终端按 basename 归一化命中排除名单，不再成为跳转候选；名单比对统一 trim + 小写
+- **系统通知跳转 title 漏传（issue #45）**：系统通知入口此前不传会话标题、标题匹配层对该入口永不生效——浮窗 / 系统 toast / 铃铛历史全部路径补齐（空值安全回落，无假命中面）
+- **CI windows-gnu 交叉编译门禁（issue #45）**：`cfg(windows)` 代码进 CI（`cargo check` + `cargo clippy -D warnings` 双步），Windows 侧编译/告警问题不再漏检
+- **窄卡标题尾巴阈值（issue #51）**：容器查询按 content box 度量校准，外卡约 400px 以下会话标题尾巴整段隐藏（不留孤立省略号），项目名不再被挤压
+- **zcode 集成加固（issue #52）**：宿主判定加命令行路径门控 + 后代进程黑名单（防辅助进程误判宿主）；缺排序列的会话整卡跳过（不出错误卡）；MCP 写路径与读路径对称；`enable:false` 的 MCP 条目导入保留并显示「源已停用」角标
+- **claude hook 命令注册修复**：无空格路径去引号（bash 把引号当字面量）+ 正斜杠形态；存量双形态条目迁移谓词修复，SessionStart 不再报错
 - **Kimi 双开跳转必弹选择器**：CLI 写入 `state.json` 的 `updatedAt` 为整数毫秒，serde 类型不匹配导致整个状态解析失败 → 会话标题回退 `session_` 前缀 → 标题匹配层永不命中；现兼容数值 / 字符串双形态
 - **OpenCode 同目录双终端只显示一个会话**：两个进程都认领最新一条会话行、旧会话被遮蔽；现按目录配对到各自进程（已配对行防复用）
 - Codex 会话标题前缀 8 → 12 位，消除同一分钟内创建会话的键碰撞
