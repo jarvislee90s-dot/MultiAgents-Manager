@@ -514,6 +514,14 @@ export function ResourceByKindView() {
                 >
                   <div className="flex items-center gap-1">
                     <span className="font-medium">{mcp.name}</span>
+                    {mcp.sourceDisabled && (
+                      <span
+                        className="text-muted-foreground rounded border border-dashed px-1 text-[10px]"
+                        title={t("resources.mcpSourceDisabledHint")}
+                      >
+                        {t("resources.mcpSourceDisabled")}
+                      </span>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"

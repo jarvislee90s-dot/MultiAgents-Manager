@@ -1,10 +1,13 @@
 import { useTranslation } from "react-i18next";
 import { SessionCard } from "@/components/sessions/SessionCard";
+import { pairingAmbiguitySet, pairingKey } from "@/lib/pairing";
 import type { Session } from "@/types/session";
 import { Monitor } from "lucide-react";
 
 export function SessionGrid({ sessions }: { sessions: Session[] }) {
   const { t } = useTranslation();
+  // issue #48：同工具同项目双开的会话标记「配对不确定」角标（与跳转侧判定同口径）
+  const ambiguity = pairingAmbiguitySet(sessions);
   if (sessions.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 py-20 text-center">
@@ -20,7 +23,11 @@ export function SessionGrid({ sessions }: { sessions: Session[] }) {
   return (
     <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
       {sessions.map((session) => (
-        <SessionCard key={`${session.agentType}-${session.id}`} session={session} />
+        <SessionCard
+          key={`${session.agentType}-${session.id}`}
+          session={session}
+          pairingAmbiguous={ambiguity.has(pairingKey(session))}
+        />
       ))}
     </div>
   );

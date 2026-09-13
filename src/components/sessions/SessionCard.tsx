@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Cpu, Clock, Bot, ChevronRight, X } from "lucide-react";
+import { Cpu, Clock, Bot, ChevronRight, X, ArrowLeftRight } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { StatusLight } from "@/components/sessions/StatusLight";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import { AGENT_BADGE, getAgentLabel } from "@/lib/agentBadge";
+import { sessionTitleOrUndefined } from "@/lib/sessionTitle";
 import type { Session } from "@/types/session";
 
 function formatRuntime(lastActivityAt: string, t: (key: string) => string): string {
@@ -42,7 +43,14 @@ export function truncateProjectName(name: string, budget = 15): string {
   return name;
 }
 
-export function SessionCard({ session }: { session: Session }) {
+export function SessionCard({
+  session,
+  pairingAmbiguous = false,
+}: {
+  session: Session;
+  /** 同工具同项目双开：卡片信息（状态/最后消息）可能互换的提示角标（issue #48） */
+  pairingAmbiguous?: boolean;
+}) {
   const { t } = useTranslation();
   const badge = AGENT_BADGE[session.agentType];
   const Icon = badge.Icon;
@@ -85,7 +93,7 @@ export function SessionCard({ session }: { session: Session }) {
         agentType: session.agentType,
         projectName: session.projectName,
         lastMessage: session.lastMessage ?? undefined,
-        title: session.title ?? undefined,
+        title: sessionTitleOrUndefined(session),
         unread: session.unread, // 歧义选择器点选成功后回标已读用（spec W4 已读信号 1）
         form: session.form, // review M3：CLI 会话 APP 级保底激活时的 UX 提示依据
       });
@@ -98,7 +106,7 @@ export function SessionCard({ session }: { session: Session }) {
     <>
       <Card
         className={cn(
-          "group hover:bg-accent/50 relative cursor-pointer border p-3 transition-colors",
+          "group hover:bg-accent/50 @container relative cursor-pointer border p-3 transition-colors",
           session.status === "waiting" && "border-red-500/40",
           !session.jumpSupported && "cursor-default opacity-80"
         )}
@@ -123,9 +131,23 @@ export function SessionCard({ session }: { session: Session }) {
             <span className="min-w-0 truncate text-sm font-medium" title={session.projectName}>
               {truncateProjectName(session.projectName)}
             </span>
+            {pairingAmbiguous && (
+              <span
+                className="shrink-0 text-amber-500/80"
+                title={t("sessions.pairingAmbiguous")}
+                aria-label={t("sessions.pairingAmbiguous")}
+              >
+                <ArrowLeftRight className="h-3 w-3" />
+              </span>
+            )}
+            {/* issue #51：容器查询阈值隐藏——容器查询按 Card 的 content box 度量，
+                比外卡宽小 26px（1px 边框×2 + p-3 内边距 12px×2），故阈值 374px 对应
+                外卡宽 400px：低于此值时整段收起，避免尾巴被项目名挤压到只剩孤立
+                省略号（实测窄卡 ≈366px 时发生）；跳转匹配消费的是 session.title
+                数据而非可见文本，隐藏无功能影响 */}
             {(session.title || session.id) && (
               <span
-                className="text-muted-foreground/60 max-w-[14em] min-w-0 [flex-shrink:5] truncate font-mono text-[10px]"
+                className="text-muted-foreground/60 hidden max-w-[14em] min-w-0 [flex-shrink:5] truncate font-mono text-[10px] @min-[374px]:block"
                 title={session.title || session.id.slice(0, 8)}
               >
                 {session.title || session.id.slice(0, 8)}
@@ -202,7 +224,12 @@ export function SessionCard({ session }: { session: Session }) {
               {candidates.map((w) => (
                 <button
                   key={w.hwnd}
-                  className="hover:bg-accent truncate rounded border px-3 py-2 text-left text-xs"
+                  className={cn(
+                    "hover:bg-accent truncate rounded border px-3 py-2 text-left text-xs",
+                    // 零分候选（多为其他工具无人认领的窗口）视觉弱化；排序保持后端降序，
+                    // 不做过滤——评分素材缺失的真目标可能恰好 0 分，弱化无误杀风险
+                    w.score === 0 && w.uiaPrefix === 0 && "opacity-60"
+                  )}
                   onClick={async () => {
                     setCandidates(null);
                     try {

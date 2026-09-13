@@ -400,7 +400,9 @@ mod uninstall_tests {
 
     // —— agents_link_targets_layer2（review N-1：卸载守卫的 Layer 2 遗留投影分支）——
 
-    /// tempdir 内构造 `<tmp>/mam/active`（Layer 2 根）供投影判定用
+    /// tempdir 内构造 `<tmp>/mam/active`（Layer 2 根）供投影判定用。
+    /// 仅 unix 测试使用，同门控避免 windows target 侧 dead_code（issue #45 同族）
+    #[cfg(unix)]
     fn active_root_of(tmp: &tempfile::TempDir) -> std::path::PathBuf {
         tmp.path().join("mam").join("active")
     }

@@ -13,6 +13,25 @@ pub enum AgentType {
     ZCode,
 }
 
+impl AgentType {
+    /// 稳定 tool_id 字符串（与 serde lowercase 形态一致）。此前多处以
+    /// `format!("{:?}", variant).to_lowercase()` 推导（PR #46 review M4：adapter/mod.rs
+    /// 5 处 + hooks.rs 1 处），依赖「变体名小写恰好等于 tool_id」的隐式约定——
+    /// 给枚举加自定义 Debug 或重命名变体会全部同时静默错位，且错的是进程匹配/
+    /// 宿主判定这类核心链路。match 穷尽使新增变体在编译期强制补映射
+    pub fn tool_id(&self) -> &'static str {
+        match self {
+            AgentType::Claude => "claude",
+            AgentType::Codex => "codex",
+            AgentType::OpenCode => "opencode",
+            AgentType::OpenClaw => "openclaw",
+            AgentType::Kimi => "kimi",
+            AgentType::WorkBuddy => "workbuddy",
+            AgentType::ZCode => "zcode",
+        }
+    }
+}
+
 /// 会话状态（红绿灯五态 + Finished）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]

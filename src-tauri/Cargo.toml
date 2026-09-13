@@ -4,6 +4,10 @@ version = "0.4.0"
 description = "多 Agent 编程工具统一管理平台"
 authors = ["jarvis"]
 edition = "2021"
+# src/bin/mam-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
+# 不指定 default-run 时 `cargo run` / `pnpm tauri:dev` 报
+# "could not determine which binary to run"（2026-09-11 Windows 实机验收发现 1）
+default-run = "multi-agents-manager"
 
 [lib]
 name = "multi_agents_manager_lib"
@@ -45,7 +49,9 @@ tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"
-windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading"] }
+# Console（AttachConsole/SetConsoleTitle 路线 B）、Diagnostics_ToolHelp + FileSystem
+# （父进程链遍历）为 mam-marker helper（src/bin）所需
+windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp"] }
 winreg = "0.52"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
