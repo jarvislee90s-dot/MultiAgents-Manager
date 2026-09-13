@@ -3,6 +3,7 @@
 // 双数据源：storages/session_projcache（首选）+ sessions/<项目>/<会话>/session.vN.jsonl.zstd（兜底）
 
 pub mod decode;
+pub mod log;
 
 use crate::adapter::AgentProcess;
 use crate::session::Session;
