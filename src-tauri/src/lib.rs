@@ -4,6 +4,7 @@ pub mod database;
 pub mod linker;
 pub mod monitor;
 pub mod plugins;
+pub mod remote;
 pub mod services;
 pub mod session;
 pub mod window;
