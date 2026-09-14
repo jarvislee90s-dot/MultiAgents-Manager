@@ -139,28 +139,67 @@ fn stop_server() {
     STATE.pairing.lock().unwrap().stop();
 }
 
-/// 开关远程接入（前端设置页 invoke）：写设置 SSOT 后启停服务器
-#[tauri::command]
-pub fn remote_toggle(enabled: bool) -> Result<(), String> {
-    crate::database::dao::settings::set_setting(
-        KEY_ENABLED,
-        if enabled { "true" } else { "false" },
-    );
+/// 开关内核（可测核心，SSOT 写入与启停以闭包注入）：写 enabled SSOT → 启/停服务器。
+/// 开启分支 start 失败时**回滚 SSOT 为 false** 再传 Err：若不回滚，DB 里 enabled 残留
+/// true 而服务器实际没起（典型：TLS 安全门拒绝 / 端口被占），重进设置页开关显示 ON
+/// 而无人监听——Task 8 验收场景「TLS 门」的状态撒谎。remote_status 的句柄校准只是
+/// 展示层兜底，SSOT 本身必须与现实一致
+fn toggle_core(
+    enabled: bool,
+    // FnMut：开启失败时会被调用两次（写 true + 回滚写 false）
+    mut set_enabled: impl FnMut(bool),
+    start: impl FnOnce() -> Result<(), String>,
+    stop: impl FnOnce(),
+) -> Result<(), String> {
     if enabled {
-        start_server()
+        set_enabled(true);
+        if let Err(e) = start() {
+            // 回滚：启动失败不得让 SSOT 残留 true（见函数注释）
+            set_enabled(false);
+            return Err(e);
+        }
+        Ok(())
     } else {
-        stop_server();
+        set_enabled(false);
+        stop();
         Ok(())
     }
+}
+
+/// 开关远程接入（前端设置页 invoke）：写设置 SSOT 后启停服务器（失败回滚见 toggle_core）
+#[tauri::command]
+pub fn remote_toggle(enabled: bool) -> Result<(), String> {
+    toggle_core(
+        enabled,
+        |v| {
+            crate::database::dao::settings::set_setting(
+                KEY_ENABLED,
+                if v { "true" } else { "false" },
+            )
+        },
+        start_server,
+        stop_server,
+    )
+}
+
+/// enabled 展示校准内核（纯函数）：DB 声明开启**且**服务器句柄存活才算启用。
+/// 动机（SSOT 与现实校准）：DB enabled=true 只代表用户意图——若启动失败残留或任务
+/// 自退后未自愈，实际无人监听，展示必须以现实为准。正常态不受影响：start_server
+/// 成功后句柄是长驻 serve 任务（is_finished=false），必然存活
+fn status_enabled(db_enabled: bool, handle_alive: bool) -> bool {
+    db_enabled && handle_alive
 }
 
 /// 设置页状态展示：enabled / bind / port / url / lanUrls（仅 0.0.0.0 给局域网候选）
 #[tauri::command]
 pub fn remote_status() -> serde_json::Value {
     let (bind, port) = bind_and_port();
-    let enabled = crate::database::dao::settings::get_setting(KEY_ENABLED)
+    let db_enabled = crate::database::dao::settings::get_setting(KEY_ENABLED)
         .map(|v| v == "true")
         .unwrap_or(false);
+    // 短锁：只取 SERVER_HANDLE 的存活快照立即释放，锁内不碰 DB / pairing（不新增嵌套锁序）
+    let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
+    let enabled = status_enabled(db_enabled, handle_alive);
     let lan = lan_hosts_for(&bind, local_lan_ips());
     serde_json::json!({ "enabled": enabled, "bind": bind, "port": port,
         "url": format!("http://{bind}:{port}/m"), "lanUrls": lan })
@@ -322,6 +361,66 @@ mod tests {
         );
     }
 
+    /// (c-1) toggle 内核的失败回滚（终审修复轮）：开启分支 start 失败（TLS 门拒绝 /
+    /// 端口被占）必须把 SSOT 回滚为 false 再原样传出 Err——否则 DB 残留 enabled=true
+    /// 而服务器没起，设置页重进显示 ON（状态撒谎）。零污染：SSOT 写入与启停均为
+    /// 记录调用的假闭包，不触真实 ~/.mam/mam.db、不绑端口、不碰 SERVER_HANDLE
+    #[test]
+    fn toggle_core_rolls_back_ssot_when_start_fails() {
+        // (1) 开启失败：先写 true，start 报错后回滚 false，Err 原样传出
+        let mut log: Vec<&str> = vec![];
+        let r = toggle_core(
+            true,
+            |v| log.push(if v { "set=true" } else { "set=false" }),
+            || Err("对外绑定需先确认已配置 TLS 反向代理（remote_confirm_public）".into()),
+            || panic!("开启分支不得触发 stop"),
+        );
+        assert!(r.is_err(), "start 失败必须把 Err 传出去");
+        assert_eq!(
+            log,
+            vec!["set=true", "set=false"],
+            "启动失败必须把 SSOT 回滚为 false"
+        );
+
+        // (2) 开启成功：SSOT 保持 true，不回滚
+        let mut log: Vec<&str> = vec![];
+        let r = toggle_core(
+            true,
+            |v| log.push(if v { "set=true" } else { "set=false" }),
+            || Ok(()),
+            || panic!("开启分支不得触发 stop"),
+        );
+        assert!(r.is_ok());
+        assert_eq!(log, vec!["set=true"], "成功路径不得回滚 SSOT");
+
+        // (3) 关闭：SSOT 写 false + 触发 stop，不触发 start
+        let mut log: Vec<&str> = vec![];
+        let mut stopped = false;
+        let r = toggle_core(
+            false,
+            |v| log.push(if v { "set=true" } else { "set=false" }),
+            || panic!("关闭分支不得触发 start"),
+            || stopped = true,
+        );
+        assert!(r.is_ok());
+        assert!(stopped, "关闭必须触发 stop");
+        assert_eq!(log, vec!["set=false"], "关闭路径 SSOT 直接写 false");
+    }
+
+    /// (c-2) remote_status 的 enabled 校准内核（终审修复轮）：DB 声明与句柄存活
+    /// 两者缺一不可——DB=true 但句柄死（启动失败残留 / 任务自退）按未启用展示，
+    /// SSOT 与现实背离时以现实为准
+    #[test]
+    fn status_enabled_requires_db_and_live_handle() {
+        assert!(status_enabled(true, true), "DB 开 + 句柄活 → 正常 ON");
+        assert!(
+            !status_enabled(true, false),
+            "DB 开但句柄死 → 按未启用展示（SSOT 与现实校准）"
+        );
+        assert!(!status_enabled(false, true), "DB 关 → OFF，句柄活也不算");
+        assert!(!status_enabled(false, false), "DB 关 + 句柄死 → OFF");
+    }
+
     /// (a-佐证) spawn 用法裁决的运行时证据：本测试线程**不进入任何 tokio runtime 上下文**，
     /// 与 sync tauri 命令线程、lib.rs `.setup()` 主线程同境——裸 `tokio::spawn` 在此会
     /// panic（no reactor running），而 `tauri::async_runtime::spawn`（内部先 enter 再
@@ -362,7 +461,7 @@ mod tests {
             || panic!("幂等跳过不得读取 ack"),
             |_, _| panic!("幂等跳过不得 spawn"),
         );
-        assert_eq!(r.unwrap(), false, "运行中句柄必须幂等跳过");
+        assert!(!r.unwrap(), "运行中句柄必须幂等跳过");
         slot.as_ref().unwrap().abort(); // 清理 pending 任务
 
         // ---- case 2: 已完成句柄 → 自愈（本轮修复的核心分支）----
@@ -386,9 +485,8 @@ mod tests {
                 tauri::async_runtime::spawn(async {}) // 假 spawn：不绑任何端口
             },
         );
-        assert_eq!(
+        assert!(
             r.unwrap(),
-            true,
             "已完成句柄必须视为不存在并重新 spawn（自愈），\
              否则服务器自退后重开会静默失效"
         );
@@ -408,7 +506,7 @@ mod tests {
                 tauri::async_runtime::spawn(async {})
             },
         );
-        assert_eq!(r.unwrap(), true, "无句柄应正常 spawn");
+        assert!(r.unwrap(), "无句柄应正常 spawn");
         assert_eq!(spawned, 1);
         assert!(slot.is_some(), "新句柄应写回槽位");
         slot.as_ref().unwrap().abort();

@@ -68,7 +68,8 @@ zstd = "0.13"
 tauri-plugin-dialog = "2"
 # M2（远程接入）：主进程内嵌 axum 服务器 + 看板静态资源内嵌
 axum = "0.8"
-rust-embed = "8"
+# include-exclude：支持 #[exclude = ".gitkeep"]（占位文件不嵌入二进制，终审修复轮）
+rust-embed = { version = "8", features = ["include-exclude"] }
 # 配对码 / deviceId 生成
 rand = "0.8"
 

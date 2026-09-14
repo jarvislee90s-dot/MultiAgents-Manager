@@ -15,9 +15,11 @@ export default defineConfig({
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   build: {
     outDir: "dist-mobile",
-    // 保留 dist-mobile/.gitkeep 占位（rust-embed 编译依赖目录存在，Task 1 已入库）；
-    // 代价是旧 hash 资源残留，已接受
-    emptyOutDir: false,
+    // 清空重建（终审修复轮）：emptyOutDir:false 曾让旧 hash 产物无限积累（实测 5 js/3 css
+    // ~1.1MB），rust-embed 会把陈旧产物全量嵌进二进制。.gitkeep 占位不受清空影响：
+    // publicDir 拷贝阶段会把 public-mobile/.gitkeep 拷回 dist-mobile/.gitkeep
+    // （0 字节内容不变 → git 无删除），rust-embed 编译依赖的入库占位得以保留
+    emptyOutDir: true,
     rollupOptions: { input: path.resolve(__dirname, "mobile.html") },
   },
 });

@@ -7,8 +7,9 @@
 //   后加 `.fallback()` 会替换掉被 gate 包裹的默认 fallback，未知 API 路径随之裸奔）；
 // - 内层 fallback 直接 403：`/m/api/v1/*` 的未知路径不留裸路径，Task 7 追加的顶层
 //   静态 fallback 追不进来；
-// - 外层 Router 只负责静态侧：Task 7 在其上追加 `.route("/m", ...)`、`/m/assets/*`
-//   与顶层 fallback，均**不应**经过 gate（配对页必须无 cookie 可加载）；
+// - 外层 Router 只负责静态侧：Task 7 在其上追加 `.route("/m", ...)` 与顶层
+//   fallback（/m/* 静态资产由该 fallback 的路径分流伺服，没有独立的 /m/assets/*
+//   路由），均**不应**经过 gate（配对页必须无 cookie 可加载）；
 // - 内层 gate 看到的 path 已被 nest 剥掉前缀（`/pair` 而非 `/m/api/v1/pair`），
 //   放行名单必须写相对路径，详见 gate.rs。
 
@@ -32,6 +33,9 @@ use super::api;
 /// 因此任何 `cargo check/test/build` 之前必须先 `pnpm build:mobile`，否则入口 404。
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../dist-mobile/"]
+// dist-mobile/.gitkeep 是入库占位文件（构建时由 publicDir 拷贝自动恢复，非伺服资产）：
+// exclude 防止它被 rust-embed 嵌进二进制 / 被静态伺服（include-exclude feature 即为此开启）
+#[exclude = ".gitkeep"]
 struct MobileAssets;
 
 /// SPA 入口文件。控制者裁决（2026-09-14）：`vite build` 对 `mobile.html` 入口产出的就是
@@ -91,14 +95,25 @@ async fn serve_asset(path: &str) -> Response {
 /// 顶层静态 fallback 的路径分流（控制者裁决 2，勿退化）：
 /// - 非 `/m` 前缀 → 404（根路径与移动看板无关，不给静态兜底）；
 /// - `/m/` 尾斜杠与 `/m`（理论上被 route 收口，防御性兜底）→ 入口 HTML；
+/// - `/m/api` 裸前缀与 `/m/api/*`（含未知版本前缀如 `/m/api/v2/*`）→ 403：这是
+///   「所有 `/m/api/*` 过 gate（403）」安全不变量的**字面收口**（终审 2026-09-14）——
+///   这些路径不匹配 nest 的 catch-all（matchit `{*rest}` 要求至少一个非空段，且裸
+///   前缀 `/m/api` 连尾斜杠都没有），否则会落到下方 `serve_asset` 的 SPA 回落返回
+///   200 入口 HTML，字面违反不变量。`/m/api/v1/` 精确变体另有 router() 上的显式
+///   收口条（结构层保证，见其注释）；
 /// - `/m/<path>` → `serve_asset(path)`，未命中回落入口 HTML。
 ///
-/// 注意：`/m/api/v1/*` 永远到不了这里——nest 内层 fallback 先 403（结构隔离，
-/// 见 router()/api_router 注释与 task7_static_routes_* 测试）
+/// 注意：`/m/api/v1/<已知或未知子路径>` 永远到不了这里——nest 内层 fallback 先 403
+/// （结构隔离，见 router()/api_router 注释与 task7_static_routes_* 测试）
 async fn static_fallback(uri: axum::http::Uri) -> Response {
     let path = uri.path();
     if path == "/m" || path == "/m/" {
         return entry_response();
+    }
+    // 「所有 /m/api/* 过 gate」的字面收口：裸前缀 / 尾斜杠 / 未知版本前缀一律 403
+    // （须在 serve_asset 的 SPA 回落之前判定，否则 200 静态内容顶替 gate）
+    if path == "/m/api" || path.starts_with("/m/api/") {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     match path.strip_prefix("/m/") {
         Some(rest) => serve_asset(rest).await,
@@ -145,7 +160,11 @@ pub fn router(state: Arc<RemoteState>) -> Router {
         .nest("/m/api/v1", api_router(state.clone()))
         // 裸前缀带尾斜杠 `/m/api/v1/` 实测**不**匹配 nest 的 catch-all（matchit 的 `{*rest}`
         // 要求至少一个非空段，也不做尾斜杠归一化），会落到外层静态 fallback → 200。
-        // 与"所有 /m/api/* 过 gate（403）"冲突，故显式 403 收口（any：方法无关一律 403）
+        // 与"所有 /m/api/* 过 gate（403）"冲突，故显式 403 收口（any：方法无关一律 403）。
+        // 终审修复轮保留了此条（未并入 static_fallback）：它挂在 router() 上，对**任意**
+        // 外层 fallback 装配（含测试/未来变体的自定义 fallback）结构性生效，不依赖
+        // static_fallback 分流的实现自觉；其余 /m/api 变体（裸前缀 / 尾斜杠 / 未知版本）
+        // 由 static_fallback 的字面收口兜住
         .route(
             "/m/api/v1/",
             axum::routing::any(|| async { axum::http::StatusCode::FORBIDDEN }),
@@ -744,11 +763,31 @@ mod tests {
 
         // (7) 尾斜杠变体 /m/ → 200 入口（route("/m") 不匹配，由 fallback 分流收口）
         let r = app
+            .clone()
             .oneshot(req("GET", "/m/", None, None))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
         assert!(body_string(r).await.to_lowercase().contains("<!doctype html>"));
+
+        // (8) /m/api 裸前缀三变体 → 403（终审修复轮：「所有 /m/api/* 过 gate」的字面
+        // 收口）。修复前 /m/api 与 /m/api/ 不匹配任何 route，落到 SPA 回返 200 入口
+        // HTML，字面违反安全不变量；/m/api/v2/* 锁定未来版本前缀同样收口
+        for uri in ["/m/api", "/m/api/", "/m/api/v2/anything"] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, None, None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 403, "{uri} 必须被 /m/api 字面收口为 403");
+            assert!(
+                !body_string(r)
+                    .await
+                    .to_lowercase()
+                    .contains("<!doctype html>"),
+                "{uri} 不得回落静态入口 HTML"
+            );
+        }
     }
 
     /// PNG 产物（icon-mobile.png）MIME 与 200：manifest icons 引用的唯一非 js/css 资产
