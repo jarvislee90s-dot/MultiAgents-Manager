@@ -1,0 +1,262 @@
+# 预设组 v2 设计：独占套件 + 通用/工具私有双分区
+
+- 日期：2026-09-14
+- 状态：待用户审阅
+- 前置：`specs/001-multi-agent-platform/spec.md` FR-6（预设组）
+- 宪法对齐：`docs/MASTER-PLAN.md` 无预设组条目（已 grep 核实），本设计为 specs/001 FR-6 的功能内演进，不涉宪法冲突，不需修宪。
+
+## 1. 背景与问题
+
+预设组的初衷是「工作流套件」：做开发/设计时只启用对应组合的 skill+MCP+插件，让 Agent 上下文专注。当前实现与初衷有五个偏差（2026-09-14 代码勘探结论）：
+
+| # | 问题 | 根因 |
+|---|------|------|
+| P1 | 应用是纯增量，预设外资源留在工具目录，上下文不干净 | `services/preset/mod.rs` apply 只遍历预设项逐个 enable，无差集清扫 |
+| P2 | 有些资源「单独卡片能配、预设组里配不了」 | ① 预设创建列表读 `extensions` 表，而手工导入 MCP/部分 skill 从不写表（数据源与目录扫描的卡片视图不一致）；② `check_compatibility` 把 `tags` 当「支持的工具列表」，但 tags 实际混存来源工具/插件子类型/任意标签 → 误报不兼容，兼容数为 0 时确认按钮被禁用 |
+| P3 | 预设组不能编辑、无描述、无详情 | 后端无 update 命令，表无 description 字段，UI 无弹窗 |
+| P4 | 无「技能可迁移性」概念 | codex computer-use 这类「专属技能+特定 MCP+工具 App」三位一体的能力，复制 skill 文件夹到别的工具无效；现有 tags 标记不可靠 |
+| P5 | 托盘预设菜单点击是 no-op | `on_menu_event` 未处理 `preset-*` |
+
+调研结论（GitHub，2026-09-14）：集中管理+符号链接是通用模式（Skills-Manager、mcpm.sh 等）；「组合切换」最接近的是 claude-profile-switch（整档切换、仅 Claude Code、全有或全无）；「不可迁移技能不参与统一分配」无任何现成实现。本设计的双分区+独占语义是 MAM 架构（SSOT+三层链接）的差异化能力。
+
+## 2. 目标与非目标
+
+### 目标
+
+1. 预设组升级为**独占套件**：应用到某工具后，该工具只见「预设内资源 + 常驻资源」。
+2. 预设组分**通用**（纯 MAM 资源组合，可应用任意工具）与**工具私有**（绑定单一工具，可额外收录该工具原生技能）两类，UI 分区展示。
+3. 基底快照：首次应用拍「干净状态」快照；「恢复默认」一键精确回基底。
+4. 原生技能隔离：非常驻原生技能应用时移入 MAM 暂存区（移动，非压缩），恢复时移回，崩溃可恢复。
+5. 常驻名单：任何资源可按工具标记常驻，独占模式永不触碰。
+6. 专属绑定：资源可标记「仅支持某些工具」（手动为主 + SKILL.md frontmatter 自动预填建议），不参与对不适配工具的分配；替换坏掉的 tags 兼容检查。
+7. 预设组可编辑：名称 + 描述备忘录 + 套件列表，弹窗卡片交互。
+8. 随行修复 P2/P5 两个 bug。
+
+### 非目标（用户已裁决）
+
+- 预设**内容**版本历史（编辑不留历史，可回滚的是激活状态）。
+- 子 Agent 级预设的独占语义（维持现状增量语义；工具级独占对 Layer3 的级联清理照旧生效）。
+- 手写 MCP 配置段与工具自装插件的「托管」（默认视为常驻永不触碰，将来另议）。
+- 预设导入/导出分享。
+
+## 3. 概念模型
+
+### 3.1 资源三情形矩阵（独占模式下的处理）
+
+| 资源类别 | 应用预设时（预设外且非常驻） | 恢复默认时 |
+|---------|---------------------------|-----------|
+| MAM 链接技能 | 断链（复用 `disable_skill_for_tool`，级联清 Layer3） | 按基底快照重建 |
+| MAM MCP（`~/.mam/mcp` 导入） | 从工具配置移除段（`remove_mcp`） | 按基底快照重写 |
+| MAM 插件（file 链接 / config 段） | 关闭（`toggle_plugin off`） | 按基底快照恢复 |
+| 原生技能（工具 skill 目录里的真目录） | **移入暂存区** `~/.mam/stash/<tool>/skills/`，记 stash_journal | 从暂存区移回原位 |
+| 手写 MCP 配置段、工具自装插件 | **视为常驻，永不触碰** | 无需恢复 |
+
+### 3.2 独占语义与基底快照
+
+- 首次对工具 T 应用任何预设 → 扫描 T 当前完整状态（MAM 技能/MCP/插件 + 原生技能目录）存为**基底快照**。
+- 之后无论切换多少次预设，基底快照**不重拍**（切换 = 沿用基底，先清扫旧预设再启用新预设）。
+- 「恢复默认」/「取消预设」= 精确回到基底：暂存区技能回移、MAM 资源重建到恰好基底集合。预设激活期间手动额外启用的资源也会被清掉（恢复 = 回到起点，非合并）。
+- 工具 × 预设可多对多并存：每个工具独立基底快照与激活预设，互不影响。
+
+### 3.3 通用预设组 vs 工具私有预设组
+
+| | 通用预设组（universal） | 工具私有预设组（tool-scope） |
+|---|------------------------|---------------------------|
+| 组成 | 仅 MAM 管理资源（技能/MCP/插件） | MAM 资源 + **该工具原生技能** |
+| 可应用对象 | 任意已启用工具 | 仅绑定的那个工具 |
+| 存在理由 | 链接可任意切换，纯技能包天然跨工具 | 专属技能/特定 MCP/原生技能依赖工具 App，只有绑定工具下才有完整体验（例：Codex 设计套件 = computer-use + 通用设计 skill 包） |
+| 编辑期专属过滤 | 显示专属徽标但不禁选；应用时按目标工具过滤 | 绑定工具已知，不适配资源**置灰+原因**，不可选 |
+
+- 原生技能项的「启用」语义 = **确保在场**：目录已在则不动；被之前的预设暂存了就从暂存区移回。无「链接」概念。
+- 纯技能预设（无 MCP/插件）在两种类型下都合法。
+- 创建通用预设时选择列表不含原生技能；选了专属/原生内容时 UI 自动建议转为工具私有类型。
+- 现有存量预设迁移为通用（其项全部来自 extensions 表，天然满足通用约束）。
+
+### 3.4 四个机制小结
+
+- **基底快照**：工具级激活状态真值源；`preset_applications` 降级为应用历史审计表。
+- **暂存区**：`~/.mam/stash/<tool>/skills/`，移动（同盘 rename，瞬时）而非压缩；stash_journal 为唯一账本。
+- **常驻名单**：工具 × 资源，独占模式豁免；手写 MCP 段与工具自装插件**定义上即常驻**，无需标记。
+- **专属绑定**：资源 → 允许工具列表（空=通用可迁移）+ 原因备注；真值源 `resource_bindings`，frontmatter 只做预填建议。
+
+## 4. 数据模型（SQLite 迁移，`database/schema.rs` + `migration.rs`）
+
+```sql
+-- 预设组：描述 + 类型 + 绑定工具
+ALTER TABLE presets ADD COLUMN description TEXT NOT NULL DEFAULT '';
+ALTER TABLE presets ADD COLUMN scope TEXT NOT NULL DEFAULT 'universal';  -- 'universal' | 'tool'
+ALTER TABLE presets ADD COLUMN bound_tool TEXT;                          -- tool-scope 时非空
+
+-- 专属绑定（替代 tags 兼容检查；tags 字段保留但不再参与兼容判定）
+CREATE TABLE resource_bindings (
+  extension_id    TEXT PRIMARY KEY,
+  exclusive_tools TEXT NOT NULL,   -- 逗号分隔 agent_tools.id；空 = 通用可迁移
+  reason          TEXT,            -- 为什么专属（如「依赖 codex App + computer-use MCP」）
+  updated_at      TEXT NOT NULL
+);
+
+-- 常驻名单
+CREATE TABLE tool_residents (
+  tool_id       TEXT NOT NULL,
+  extension_id  TEXT NOT NULL,
+  PRIMARY KEY (tool_id, extension_id)
+);
+
+-- 基底快照（工具级）
+CREATE TABLE tool_base_snapshots (
+  tool_id          TEXT PRIMARY KEY,
+  active_preset_id TEXT,
+  created_at       TEXT NOT NULL
+);
+CREATE TABLE tool_base_snapshot_items (
+  tool_id       TEXT NOT NULL,
+  extension_id  TEXT NOT NULL,
+  kind          TEXT NOT NULL,     -- skill / mcp / plugin
+  origin        TEXT NOT NULL,     -- 'mam' | 'native'
+  PRIMARY KEY (tool_id, extension_id)
+);
+
+-- 暂存账本（崩溃恢复依据）
+CREATE TABLE stash_journal (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  tool_id       TEXT NOT NULL,
+  skill_name    TEXT NOT NULL,
+  stashed_path  TEXT NOT NULL,
+  original_path TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  restored_at   TEXT               -- NULL = 仍在暂存区
+);
+```
+
+- 原生技能项复用 `extensions` 表已有 `is_native` 列（原生扫描已写入，`commands/resource.rs:178-180`），无需新表。
+- `preset_items` 结构不变；tool-scope 预设的原生技能项即引用 `is_native=1` 的 extensions 行。
+- 命令新增：`update_preset`（改名/描述/改项/改类型需在无激活时或先恢复）、`get_preset`、常驻开关、专属绑定读写、基底快照查询/恢复。`apply_preset` / `restore_preset`（原 `deactivate_preset` 更名语义）。
+
+## 5. 核心流程
+
+### 5.1 应用预设 P 到工具 T
+
+```
+1. 守卫：T 已启用；scope 校验（tool-scope 的 P 只能用于 bound_tool）
+2. 专属过滤：逐项查 resource_bindings；不适配项剔除，进确认弹窗的原因列表
+3. 快照：T 无基底 → 扫描现状写入基底快照；已有 → 沿用
+4. 独占清扫（差集 = T 当前生效资源 − P 的项 − 常驻）：
+   - MAM 技能 → disable_skill_for_tool（级联清 Layer3）
+   - MAM MCP → remove_mcp
+   - MAM 插件 → toggle off
+   - 原生技能 → 移入 ~/.mam/stash/<tool>/skills/ + stash_journal 记账
+5. 启用 P 的项：
+   - MAM 资源走现有 enable 路径
+   - 原生技能项 = 确保在场（在 stash 则移回）
+6. active_preset_id = P.id；写 preset_applications 历史
+```
+
+### 5.2 恢复默认（取消预设）
+
+```
+1. 读 T 的基底快照
+2. 暂存区回移：逐条 stash_journal 未恢复项 → 移回 original_path
+   - 原位已被同名占位且内容不同 → 不覆盖，留在暂存区，UI 列出待人工处理
+3. MAM 资源重建到恰好基底集合：启用快照内全部 mam 项；停用快照外的全部激活项
+4. 清 active_preset_id；历史标记 inactive
+```
+
+### 5.3 崩溃安全
+
+- `stash_journal` 是暂存区唯一账本；链接/配置操作保持幂等，中断重跑安全。
+- MAM 启动时检查孤儿（`restored_at IS NULL` 且暂存区文件在而工具目录无对应项）→ 弹提示一键恢复。
+- 基底快照写入先于任何清扫动作（先记账后动手）。
+
+### 5.4 边界语义（已裁决）
+
+- 预设激活期间手动启用的资源：允许，恢复默认时被清除（恢复 = 精确回基底）。
+- 删除激活中的预设：先提示恢复默认，再删。
+- 工具被停用（W5 清理）时若有激活预设：先恢复基底，再走 W5 还原清理。
+- 工具运行中变更其 skill 目录：与现有链接操作同级风险，接受（现状已如此）。
+- 通用预设应用到带原生技能的工具：非常驻原生技能照样被暂存（独占语义一致），确认弹窗明示。
+
+## 6. 专属绑定：自动预填 + 手动优先
+
+- 导入/同步资源时解析 `SKILL.md` frontmatter，识别 `supported_agents`（宽容别名：`agents` / `compatible_tools` / `tools`；坏 YAML 或缺字段视为未声明）。
+- 命中 → 预填建议：弹提示「检测到该技能声明仅支持 codex，已标记专属」，用户可当场改或忽略。**自动识别只建议不强制，真值永远是 `resource_bindings` 的手动值**（frontmatter 是作者写的，可能过时/缺失——computer-use 这类依赖 App 的技能往往没写）。
+- 展示与交互：
+  - 资源卡片：专属徽标（点击弹层编辑允许工具列表 + 原因备注）；对不适配工具的启用按钮置灰。
+  - 通用预设编辑列表：徽标可见不禁选（预设跨工具，适配性在应用时按工具判定）。
+  - 工具私有预设编辑列表：置灰 + 原因。
+  - 应用确认弹窗：被过滤项点名 + 原因。
+
+## 7. UI 设计
+
+### 7.1 预设区双分区（PresetList v2）
+
+```
+┌─ 通用预设组 ──────────────────────────┐
+│ [设计基础包] [写作套件] …              │  ← 仅 MAM 资源组成，任意工具可应用
+├─ 工具私有预设组 ───────────────────────┤
+│ Codex:  [Codex 设计套件] [Codex 开发]  │  ← 按工具分组，含专属徽标项
+│ Claude: [Claude 评审套件]              │
+└──────────────────────────────────────┘
+```
+
+预设卡片：名称、描述摘要、激活状态徽标（当前应用于哪些工具）、点击开编辑弹窗。
+
+### 7.2 预设编辑弹窗（新建/编辑共用）
+
+- 类型选择：通用 / 工具私有（+ 绑定工具下拉，仅已启用工具）。
+- 名称（必填）、描述（选填 textarea，备忘录用途）。
+- 套件列表：skill / MCP / plugin 分组复选；
+  - 通用：仅 MAM 资源；专属项带徽标。
+  - 工具私有：MAM 资源（不适配置灰）+ 该工具原生技能（`is_native=1`）。
+- 选了不适配项时提示转工具私有；保存走 `update_preset`。
+
+### 7.3 应用确认弹窗（CompatibilityDialog v2）
+
+列明：将启用的项；因专属被过滤的项（原因）；将停用的 MAM 资源数；将暂存的原生技能（点名）；常驻豁免数。工具能力门控（`skillToggleSupported/mcpSupported/pluginSupported`）：预设含某类资源而工具不支持时，该工具的应用按钮置灰并说明。
+
+### 7.4 资源卡片增强
+
+- 专属徽标 + 编辑弹层（允许工具 + 原因）。
+- 常驻开关（按工具，锁图标）→ `tool_residents`。
+
+### 7.5 托盘接线
+
+- 菜单已有「预设：xxx」项（当前 no-op）：通用预设 → 子菜单选工具；工具私有预设 → 直接应用/恢复到绑定工具。
+- i18n 中英文案全量同步。
+
+## 8. 随行 bug 修复
+
+1. **数据源统一**（P2①）：手工导入 MCP 写 `extensions` 表；修掉 `insert_extension` 被 `let _ =` 吞错的问题；启动时从 SSOT 目录扫描回填历史无行资源。预设创建列表与资源卡片从此同源。
+2. **tags 兼容检查删除**（P2②）：`check_compatibility` 改查 `resource_bindings`。
+3. 预设 UI 补工具能力门控。
+4. 应用期冲突显式化：独占清扫后重名冲突基本消失，残余冲突在结果中点名（不再静默「已存在，跳过」）。
+5. 托盘预设菜单接线（P5）。
+
+## 9. 错误处理
+
+- 清扫/暂存中途失败：已执行动作不回滚（幂等，可重跑）；失败项进结果列表；stash_journal 保证暂存可追踪。
+- 恢复时同名占位冲突：不覆盖，暂存区保留 + UI 人工处理列表。
+- frontmatter 解析失败：按未声明处理，不阻塞导入。
+- 数据库写快照失败：中止应用（未动手，状态未变）。
+
+## 10. 测试策略
+
+现状 `services/preset` 零单测，本期补齐：
+
+- **Rust 单测**：基底快照拍取/恢复精确性（含「预设期间手动加资源，恢复后被清掉」）；独占差集计算；暂存/回移/同名冲突；孤儿暂存恢复；专属过滤（含 frontmatter 多别名/缺失/坏 YAML）；scope 守卫（tool-scope 不可跨工具）；DAO 新表 CRUD；数据源统一回填。
+- **集成测试**：复用 `tests/support.rs` 临时目录基建，走完整 apply→switch→restore 链。
+- **前端**：PresetList v2 双分区渲染、编辑弹窗表单校验、应用确认弹窗内容（msw mock），i18n key 覆盖。
+
+## 11. 实施切分建议（供计划阶段参考）
+
+- **M1 后端语义**：schema 迁移 + DAO + 快照/清扫/暂存/恢复 + 专属绑定 + 数据源统一 + 全量 Rust 测试。
+- **M2 前端**：双分区 + 编辑弹窗 + 确认弹窗 v2 + 徽标/常驻开关 + 冲突/孤儿提示 UI。
+- **M3 收尾**：托盘接线 + frontmatter 自动预填 + 用户手册（`docs/user-manual/zh/06-presets.md` 当前是占位模板，顺手补真）。
+
+## 12. 用户裁决记录
+
+| 日期 | 裁决 |
+|------|------|
+| 2026-09-14 | 独占套件模式（非增量/非可选）；原生技能暂存用移动不用压缩包 |
+| 2026-09-14 | 基底快照（非链式）；暂存非常驻原生技能；本期仅工具级独占；版本管理=激活状态管理（不做内容历史） |
+| 2026-09-14 | 专属标记 = 手动 + frontmatter 自动预填，手动优先 |
+| 2026-09-14 | 双分区：通用预设组（纯 MAM 资源、跨工具）/ 工具私有预设组（绑定工具、含原生技能项） |
