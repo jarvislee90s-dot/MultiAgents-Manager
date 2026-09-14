@@ -28,6 +28,11 @@ impl AgentAdapter for DshAdapter {
     fn base_dir(&self) -> std::path::PathBuf {
         monitor::dsh::dsh_home()
     }
-    // hook/MCP/plugin 均用 trait 默认值（hook_supported=false、McpFormat::Json 默认、
-    // mcp_config_path=None、skill_dirs 默认空）——M1 只做监控
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        // 只读打开/跳转接入（用户 2026-09-14 裁决）：真机实测 ~/.dsh/skills 存在；
+        // 与 skill_dir_for_tool 注册表同源（dsh_home_with 单源路径）
+        vec![monitor::dsh::dsh_home().join("skills")]
+    }
+    // hook/MCP/plugin 仍用 trait 默认值（MCP 配置文件 M0 探测无记载；插件为
+    // profile bundle 形态，前端显示不支持）——管理写通道不在范围
 }

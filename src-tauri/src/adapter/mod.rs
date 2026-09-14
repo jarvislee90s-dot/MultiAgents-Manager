@@ -838,6 +838,9 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
         // ZCode：官方文档声明的用户级 skill 目录 ~/.zcode/skills（Plan A，
         // 目录真实性不确定与备选方案见 IMPLEMENTATION_NOTES）
         "zcode" => Some(crate::monitor::zcode_parser::zcode_home_with(home_dir).join("skills")),
+        // Dsh：真机实测 ~/.dsh/skills 存在且为 dsh 的 skill 目录（用户 2026-09-14
+        // 裁决：资源页只读打开/跳转接入，管理写通道仍不在范围）
+        "dsh" => Some(crate::monitor::dsh::dsh_home_with(home_dir).join("skills")),
         _ => None,
     }
 }
@@ -850,6 +853,16 @@ pub fn primary_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod skill_dir_tests {
     use super::*;
+
+    #[test]
+    fn dsh_skill_dir_under_home() {
+        let dir = skill_dir_for_tool("dsh", std::path::Path::new("/home/test"))
+            .expect("dsh 应有 skill 目录");
+        assert_eq!(
+            dir,
+            std::path::Path::new("/home/test").join(".dsh").join("skills")
+        );
+    }
 
     #[test]
     fn codex_skill_dir_uses_real_cli_directory() {

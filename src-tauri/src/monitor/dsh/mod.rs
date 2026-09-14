@@ -75,11 +75,17 @@ fn build_digest(gen_path: &std::path::Path) -> Option<DshSessionDigest> {
 
 /// dsh 数据根：$DSH_HOME 覆盖（M0 F14 优先级：env > ~/.dsh），测试注入用
 pub fn dsh_home() -> std::path::PathBuf {
+    dsh_home_with(&dirs::home_dir().unwrap_or_default())
+}
+
+/// dsh 数据根（home 注入版）：skill_dir_for_tool 注册表与 adapter 保持同一
+/// 路径单源（kimi/zcode 的 *_home_with 同款模式）
+pub fn dsh_home_with(home_dir: &std::path::Path) -> std::path::PathBuf {
     std::env::var("DSH_HOME")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".dsh"))
+        .unwrap_or_else(|| home_dir.join(".dsh"))
 }
 
 /// dsh 宿主 cmdline 双令牌门（单源，M0 §5）：cmdline 含 "dsh"（精确令牌，
