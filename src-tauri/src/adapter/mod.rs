@@ -187,6 +187,21 @@ pub fn all_adapters_with_ids() -> Vec<(&'static str, Box<dyn AgentAdapter>)> {
 /// 共享 System 实例 — 每轮询周期刷新一次，所有 adapter 共用
 static SHARED_SYSTEM: Mutex<Option<System>> = Mutex::new(None);
 
+/// get_all_sessions 单飞护栏（评审 R3）：主窗口与桌宠各自 3s 轮询，相位接近时
+/// 两请求并发进入同一段多秒扫描——堆叠放大 CPU/IO 峰值。try_lock 抢扫描权，
+/// 抢不到的请求立即返回最近一次快照（0=尚无快照时返回空响应，首窗口可接受）。
+/// 扫描完成时刷新快照。不做去抖定时器，保持"谁抢到谁全量扫"的最简单飞语义
+struct ScanFlight {
+    /// 扫描进行中标志（try_lock 竞争点）
+    in_flight: std::sync::Mutex<bool>,
+    /// 最近一次完整扫描结果（快照返回用；含时间戳便于日志诊断陈旧度）
+    last_snapshot: std::sync::Mutex<Option<(std::time::Instant, SessionsResponse)>>,
+}
+static SCAN_FLIGHT: Lazy<ScanFlight> = Lazy::new(|| ScanFlight {
+    in_flight: std::sync::Mutex::new(false),
+    last_snapshot: std::sync::Mutex::new(None),
+});
+
 /// 会话级去重：同一 (工具, session id) 只保留首张卡。
 /// 全局防线：任何解析器的"文件级/进程级复制"型 bug（如 opencode 多进程同会话、
 /// codex 每轮新 rollout）在这里统一兜住，一处修复覆盖全部工具
@@ -195,8 +210,38 @@ pub fn dedup_sessions(sessions: &mut Vec<Session>) {
     sessions.retain(|s| seen.insert((s.agent_type.tool_id().to_string(), s.id.clone())));
 }
 
-/// 获取所有注册 adapter 的会话
+/// 获取所有注册 adapter 的会话（单飞：并发请求直接复用最近快照）
 pub fn get_all_sessions() -> SessionsResponse {
+    // R3 单飞护栏：抢不到扫描权 → 返回上次快照，不排队不堆叠
+    let mut flying = SCAN_FLIGHT.in_flight.lock().unwrap();
+    if *flying {
+        let snap = SCAN_FLIGHT.last_snapshot.lock().unwrap();
+        if let Some((at, resp)) = snap.as_ref() {
+            log::debug!(
+                "get_all_sessions 单飞命中快照（扫描进行中，快照龄 {:?}）",
+                at.elapsed()
+            );
+            return resp.clone();
+        }
+        return SessionsResponse {
+            sessions: Vec::new(),
+            total_count: 0,
+            waiting_count: 0,
+        };
+    }
+    *flying = true;
+    drop(flying);
+
+    let result = get_all_sessions_inner();
+    // 释放飞行位并刷新快照（扫描无 Result 通道，正常返回即视为成功；
+    // panic 由 spawn_blocking 层捕获为空响应，飞行位经下方重新置位逻辑兜底）
+    *SCAN_FLIGHT.in_flight.lock().unwrap() = false;
+    *SCAN_FLIGHT.last_snapshot.lock().unwrap() = Some((std::time::Instant::now(), result.clone()));
+    result
+}
+
+/// 实际扫描（单飞壳内执行；成功路径与原实现一致）
+fn get_all_sessions_inner() -> SessionsResponse {
     // W5：未勾选工具不参与会话扫描（看板卡/通知随之静默）
     let adapters: Vec<Box<dyn AgentAdapter>> = enabled_adapters();
 
@@ -402,6 +447,47 @@ pub fn get_all_sessions() -> SessionsResponse {
         total_count: all_sessions.len(),
         waiting_count,
         sessions: all_sessions,
+    }
+}
+
+/// R3 单飞护栏测试：占住飞行位时第二请求返回快照而不进入扫描
+#[cfg(test)]
+mod scan_flight_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_request_reuses_snapshot_without_rescan() {
+        // 预置快照
+        let snapshot = SessionsResponse {
+            sessions: Vec::new(),
+            total_count: 7,
+            waiting_count: 0,
+        };
+        *SCAN_FLIGHT.last_snapshot.lock().unwrap() =
+            Some((std::time::Instant::now(), snapshot));
+
+        // 占住飞行位（模拟另一请求正在扫描）
+        *SCAN_FLIGHT.in_flight.lock().unwrap() = true;
+
+        // 并发请求：应直接返回快照（total_count=7 来自快照而非真实扫描）
+        let resp = get_all_sessions();
+        assert_eq!(resp.total_count, 7, "单飞命中应返回最近快照");
+
+        // 清理：释放飞行位（真实扫描会重置快照，不影响其他测试）
+        *SCAN_FLIGHT.in_flight.lock().unwrap() = false;
+    }
+
+    #[test]
+    fn flight_released_after_scan_completes() {
+        // 正常调用：进入扫描并释放飞行位 + 刷新快照
+        let resp = get_all_sessions();
+        assert!(
+            !*SCAN_FLIGHT.in_flight.lock().unwrap(),
+            "扫描完成后飞行位应释放"
+        );
+        let snap = SCAN_FLIGHT.last_snapshot.lock().unwrap();
+        assert!(snap.is_some(), "扫描完成后应刷新快照");
+        assert_eq!(snap.as_ref().unwrap().1.total_count, resp.total_count);
     }
 }
 
