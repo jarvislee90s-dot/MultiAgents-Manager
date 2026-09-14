@@ -36,6 +36,9 @@ pub fn run() {
         services::pet::sweep_staging();
         // 预设 v2：孤儿暂存回移 + 注册表回填（先于导入/补链，保证表口径就绪）
         services::preset::stash::recover_orphans();
+        for msg in services::preset::check_snapshot_invariants() {
+            log::warn!("预设快照不变量违背: {}", msg);
+        }
         services::resource::backfill_registry();
         services::auto_import_extensions(false);
         services::sync_imported_skill_links();

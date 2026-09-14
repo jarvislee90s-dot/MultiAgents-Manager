@@ -24,7 +24,10 @@ pub fn plan_sweep(tool_id: &str, keep: &[(String, String)]) -> SweepPlan {
             plan.disable_mam.push((item.extension_id, item.kind));
         } else {
             // native 项 extension_id = "skill-<name>"
-            let name = item.extension_id.strip_prefix("skill-").unwrap_or(&item.extension_id);
+            let name = item
+                .extension_id
+                .strip_prefix("skill-")
+                .unwrap_or(&item.extension_id);
             plan.stash_native.push(name.to_string());
         }
     }
@@ -32,18 +35,13 @@ pub fn plan_sweep(tool_id: &str, keep: &[(String, String)]) -> SweepPlan {
 }
 
 /// 执行清扫：逐项 best-effort，失败进 failures 不阻断（spec §9，FR-6.32 部分成功）
-pub fn execute_sweep(
-    tool_id: &str,
-    plan: &SweepPlan,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+pub fn execute_sweep(tool_id: &str, plan: &SweepPlan) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut disabled = Vec::new();
     let mut stashed = Vec::new();
     let mut failures = Vec::new();
 
     for (ext_id, kind) in &plan.disable_mam {
-        let name = ext_id
-            .strip_prefix(&format!("{}-", kind))
-            .unwrap_or(ext_id);
+        let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
         let result = match kind.as_str() {
             "skill" => crate::services::disable_skill_for_tool(name, tool_id),
             "mcp" => crate::services::toggle_mcp(name, tool_id, false),

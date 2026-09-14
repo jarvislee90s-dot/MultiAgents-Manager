@@ -47,8 +47,11 @@ pub fn get_resource_binding(extension_id: &str) -> Option<ResourceBindingRecord>
 
 pub fn delete_resource_binding(extension_id: &str) -> Result<(), String> {
     let conn = DB.lock().unwrap();
-    conn.execute("DELETE FROM resource_bindings WHERE extension_id = ?1", [extension_id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM resource_bindings WHERE extension_id = ?1",
+        [extension_id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

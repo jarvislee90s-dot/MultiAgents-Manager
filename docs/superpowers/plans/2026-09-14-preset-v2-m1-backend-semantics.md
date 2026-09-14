@@ -2598,7 +2598,7 @@ git commit -m "fix(preset-v2): unify data source — MCP import registers rows +
 **Interfaces:**
 - Produces: `services::preset::check_snapshot_invariants() -> Vec<String>`——「存在快照 ⟺ 存在激活预设」违背项列表（启动日志告警；spec §3.2 不变量）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 /// 不变量（spec §3.2）：快照在而 active 为空（或反之）→ 检查器报告
@@ -2626,12 +2626,12 @@ fn snapshot_invariant_detector_reports_broken_state() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test snapshot_invariant`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现守卫并接线**
+- [x] **Step 3: 实现守卫并接线**
 
 `services/preset/mod.rs` 追加：
 
@@ -2658,7 +2658,7 @@ pub fn check_snapshot_invariants() -> Vec<String> {
         }
 ```
 
-- [ ] **Step 4: 文档更新**
+- [x] **Step 4: 文档更新**
 
 `AGENTS.md` 数据目录表（`~/.mam/hooks/status-hook.sh` 行后）加：
 
@@ -2668,7 +2668,7 @@ pub fn check_snapshot_invariants() -> Vec<String> {
 
 spec 头部 `- 状态：待用户审阅` 改为 `- 状态：已批准；M1（后端语义）已实施`。
 
-- [ ] **Step 5: 全量门禁**
+- [x] **Step 5: 全量门禁**
 
 Run: `cd src-tauri && cargo test && cargo clippy -- -D warnings && cargo fmt --check`
 Expected: 全绿（fmt 若有 diff 先 `cargo fmt` 再提交）
@@ -2676,7 +2676,7 @@ Expected: 全绿（fmt 若有 diff 先 `cargo fmt` 再提交）
 Run: `cd /Users/jarvis/Documents/MultiAgents-Manager && pnpm format:check && pnpm lint`
 Expected: PASS（本计划未动前端，确认无意外波及）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add AGENTS.md docs/superpowers/specs/2026-09-14-preset-groups-v2-design.md src-tauri/src/services/preset/mod.rs src-tauri/src/lib.rs src-tauri/tests/preset_v2_test.rs

@@ -63,7 +63,14 @@ pub fn update_preset(
     if scope == "tool" && bound_tool.is_none() {
         return Err("工具私有预设必须指定绑定工具".into());
     }
-    crate::database::update_preset(&id, &name, &description, &scope, bound_tool.as_deref(), &items)
+    crate::database::update_preset(
+        &id,
+        &name,
+        &description,
+        &scope,
+        bound_tool.as_deref(),
+        &items,
+    )
 }
 
 #[tauri::command]

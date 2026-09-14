@@ -24,8 +24,11 @@ pub fn save_base_snapshot(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("保存基底快照失败: {}", e))?;
-    tx.execute("DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1", [tool_id])
-        .map_err(|e| format!("保存基底快照失败: {}", e))?;
+    tx.execute(
+        "DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1",
+        [tool_id],
+    )
+    .map_err(|e| format!("保存基底快照失败: {}", e))?;
     tx.execute(
         "INSERT OR REPLACE INTO tool_base_snapshots (tool_id, active_preset_id, created_at) VALUES (?1, ?2, ?3)",
         params![tool_id, active_preset_id, now],
@@ -53,7 +56,9 @@ pub fn get_base_snapshot(tool_id: &str) -> Option<(Option<String>, Vec<BaseSnaps
         )
         .ok()?;
     let items = conn
-        .prepare("SELECT extension_id, kind, origin FROM tool_base_snapshot_items WHERE tool_id = ?1")
+        .prepare(
+            "SELECT extension_id, kind, origin FROM tool_base_snapshot_items WHERE tool_id = ?1",
+        )
         .ok()
         .and_then(|mut stmt| {
             stmt.query_map([tool_id], |row| {
@@ -82,9 +87,15 @@ pub fn set_active_preset(tool_id: &str, preset_id: &str) -> Result<(), String> {
 
 pub fn destroy_base_snapshot(tool_id: &str) -> Result<(), String> {
     let conn = DB.lock().unwrap();
-    conn.execute("DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1", [tool_id])
-        .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM tool_base_snapshots WHERE tool_id = ?1", [tool_id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1",
+        [tool_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM tool_base_snapshots WHERE tool_id = ?1",
+        [tool_id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -24,7 +24,8 @@ pub struct ApplyResult {
 
 /// 工具私有预设的跨工具应用属硬错误（spec §3.3）
 pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, String> {
-    let preset = database::get_preset(preset_id).ok_or_else(|| format!("预设不存在: {}", preset_id))?;
+    let preset =
+        database::get_preset(preset_id).ok_or_else(|| format!("预设不存在: {}", preset_id))?;
     if preset.scope == "tool" && preset.bound_tool.as_deref() != Some(tool_id) {
         return Err(format!(
             "预设 {} 绑定 {}，不能应用到 {}",
@@ -81,9 +82,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, Strin
 
     // 4) 启用预设项：MAM 走既有服务；原生技能 = 确保在场（spec §3.3）
     for (ext_id, kind) in &apply_items {
-        let name = ext_id
-            .strip_prefix(&format!("{}-", kind))
-            .unwrap_or(ext_id);
+        let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
         let is_native_item = kind == "skill"
             && extensions
                 .iter()
@@ -118,8 +117,13 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, Strin
     let _ = database::record_preset_application(preset_id, tool_id, true);
     info!(
         "预设组 {} → {}（独占）— 成功 {} 停用 {} 暂存 {} 失败 {} 冲突 {}",
-        preset_id, tool_id, result.success, result.disabled.len(),
-        result.stashed.len(), result.failures.len(), result.conflicts.len()
+        preset_id,
+        tool_id,
+        result.success,
+        result.disabled.len(),
+        result.stashed.len(),
+        result.failures.len(),
+        result.conflicts.len()
     );
     Ok(result)
 }
@@ -161,7 +165,8 @@ pub struct ApplyPreview {
 }
 
 pub fn preview_apply(preset_id: &str, tool_id: &str) -> Result<ApplyPreview, String> {
-    let preset = database::get_preset(preset_id).ok_or_else(|| format!("预设不存在: {}", preset_id))?;
+    let preset =
+        database::get_preset(preset_id).ok_or_else(|| format!("预设不存在: {}", preset_id))?;
     if preset.scope == "tool" && preset.bound_tool.as_deref() != Some(tool_id) {
         return Err(format!(
             "预设 {} 绑定 {}，不能应用到 {}",
@@ -176,7 +181,8 @@ pub fn preview_apply(preset_id: &str, tool_id: &str) -> Result<ApplyPreview, Str
         if database::tool_allowed(&ext_id, tool_id) {
             apply_items.push((ext_id, kind));
         } else {
-            out.filtered.push(format!("{}: 专属绑定不兼容 {}", ext_id, tool_id));
+            out.filtered
+                .push(format!("{}: 专属绑定不兼容 {}", ext_id, tool_id));
         }
     }
     let plan = sweep::plan_sweep(tool_id, &apply_items);
@@ -303,7 +309,10 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
         if let Some(name) = a.extension_id.strip_prefix("skill-") {
             let sub = a.sub_agent_id.clone().unwrap_or_default();
             if let Err(e) = services::assign_skill_to_subagent(name, tool_id, &sub) {
-                out.conflicts.push(format!("{}#{}: 子 Agent 链接重建失败 {}", a.extension_id, sub, e));
+                out.conflicts.push(format!(
+                    "{}#{}: 子 Agent 链接重建失败 {}",
+                    a.extension_id, sub, e
+                ));
             }
         }
     }
@@ -471,4 +480,17 @@ pub fn deactivate_preset_from_subagent(
         preset_id, tool_id, sub_agent_id
     );
     Ok(())
+}
+
+/// 快照不变量检查（spec §3.2）：存在基底快照 ⟺ 存在激活预设。
+/// 违背项描述列表；启动时 log::warn，M2 UI 提示恢复或废弃
+pub fn check_snapshot_invariants() -> Vec<String> {
+    let mut broken = Vec::new();
+    for tool in crate::adapter::TOOL_IDS {
+        // clippy::single_match：等价 match 改写为 if let（Some((Some(_),_)) | None 臂为空）
+        if let Some((None, _)) = database::get_base_snapshot(tool) {
+            broken.push(format!("{}：快照存在但无激活预设", tool));
+        }
+    }
+    broken
 }

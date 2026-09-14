@@ -202,20 +202,24 @@ fn test_base_snapshot_and_stash_dao() {
     assert!(multi_agents_manager_lib::database::get_base_snapshot("codex").is_none());
     // 保存（拍基底，active=None）
     multi_agents_manager_lib::database::save_base_snapshot("codex", None, &items).unwrap();
-    let (active, got) =
-        multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap();
+    let (active, got) = multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap();
     assert!(active.is_none());
     assert_eq!(got.len(), 2);
     // 幂等重存（会话内切换不动快照；重存=覆盖）
     multi_agents_manager_lib::database::save_base_snapshot("codex", None, &items).unwrap();
     assert_eq!(
-        multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap().1.len(),
+        multi_agents_manager_lib::database::get_base_snapshot("codex")
+            .unwrap()
+            .1
+            .len(),
         2
     );
     // 设激活 + 读回
     multi_agents_manager_lib::database::set_active_preset("codex", "preset-v2m1").unwrap();
     assert_eq!(
-        multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap().0,
+        multi_agents_manager_lib::database::get_base_snapshot("codex")
+            .unwrap()
+            .0,
         Some("preset-v2m1".into())
     );
     // 销毁（恢复默认后快照不复存在——会话级生命周期）

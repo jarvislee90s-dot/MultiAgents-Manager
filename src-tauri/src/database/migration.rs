@@ -43,9 +43,18 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
 
     // 预设 v2（spec §4）：presets 补描述/类型/绑定工具三列（新表由 schema.rs IF NOT EXISTS 覆盖）
     for (col, ddl) in [
-        ("description", "ALTER TABLE presets ADD COLUMN description TEXT NOT NULL DEFAULT ''"),
-        ("scope", "ALTER TABLE presets ADD COLUMN scope TEXT NOT NULL DEFAULT 'universal'"),
-        ("bound_tool", "ALTER TABLE presets ADD COLUMN bound_tool TEXT"),
+        (
+            "description",
+            "ALTER TABLE presets ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "scope",
+            "ALTER TABLE presets ADD COLUMN scope TEXT NOT NULL DEFAULT 'universal'",
+        ),
+        (
+            "bound_tool",
+            "ALTER TABLE presets ADD COLUMN bound_tool TEXT",
+        ),
     ] {
         if !column_exists(conn, "presets", col) {
             conn.execute(ddl, [])
@@ -196,7 +205,8 @@ mod tests {
 
         for col in ["description", "scope", "bound_tool"] {
             assert!(
-                conn.prepare(&format!("SELECT {} FROM presets LIMIT 0", col)).is_ok(),
+                conn.prepare(&format!("SELECT {} FROM presets LIMIT 0", col))
+                    .is_ok(),
                 "presets 缺列 {}",
                 col
             );
