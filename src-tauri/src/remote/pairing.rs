@@ -172,6 +172,10 @@ impl DeviceStore {
 
     /// 在锁定连接上执行闭包。
     /// 注意：连接锁不能作为引用逃逸出闭包（借用会失效），故返回值由闭包自己决定。
+    ///
+    /// **不可重入**：闭包内再调 `with()` 会在同一把 `Mutex` 上二次加锁——同线程嵌套调用
+    /// 必自锁死（std Mutex 非重入）。需要"先判断、后写入"的两段逻辑必须合并进**同一个**
+    /// 闭包（如 gate 的 device_valid + touch_device），不得嵌套调用。
     pub fn with<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
         match self {
             DeviceStore::Global => {
