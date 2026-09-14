@@ -25,6 +25,7 @@
 - **codex / zcode 停更不落兜底红灯**：无内容信号时无法区分「等用户输入」与「对话已结束」，时间兜底一律落绿灯（Idle 完成待看，接入既有未读/绿卡管线）——codex rollout 路线的无信号兜底与 300s 停更降级、zcode 的无信号 fallback 均已改；红灯只保留给有证据的等待（claude 内容判定、zcode 内容+后代仲裁「疑似卡住」）；进程绑定型工具（claude/kimi/workbuddy）不动
 
 ### Fixed
+- **macOS universal 构建兼容**：`mam-marker` helper bin 加 `marker-helper` feature 门控——macOS universal 打包只对主二进制 lipo，额外 bin 会令打包必然失败；helper 仅随 Windows 安装包分发（Windows-only 功能），macOS 构建不再产出该 bin
 - **空壳终端窗口混入跳转选择器（issue #47）**：`C:\WINDOWS\system32\cmd.exe `（全路径 + 尾空格）形态的空闲终端按 basename 归一化命中排除名单，不再成为跳转候选；名单比对统一 trim + 小写
 - **系统通知跳转 title 漏传（issue #45）**：系统通知入口此前不传会话标题、标题匹配层对该入口永不生效——浮窗 / 系统 toast / 铃铛历史全部路径补齐（空值安全回落，无假命中面）
 - **CI windows-gnu 交叉编译门禁（issue #45）**：`cfg(windows)` 代码进 CI（`cargo check` + `cargo clippy -D warnings` 双步），Windows 侧编译/告警问题不再漏检

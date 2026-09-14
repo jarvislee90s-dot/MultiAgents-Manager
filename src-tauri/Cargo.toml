@@ -9,6 +9,24 @@ edition = "2021"
 # "could not determine which binary to run"（2026-09-11 Windows 实机验收发现 1）
 default-run = "multi-agents-manager"
 
+[features]
+# mam-marker helper 的构建门（默认关）：helper 是 Windows-only 功能，而 macOS
+# universal 打包只对主二进制 lipo（tauri-cli desktop.rs build_target），额外 bin
+# 会被打包器要求存在于 universal 目录而必然失败（2026-09-14 v0.4.0 tag 构建实证，
+# 9 月 10 日草稿能构建成功是当时 src/bin/mam-marker.rs 尚不存在）。Windows 发布
+# 构建（release.yml）与 CI windows-gnu 门禁显式 `--features marker-helper`；
+# 本地需要构建 helper 时同理。声明 [[bin]] 后 bin 自动发现关闭，两个 bin 均显式声明
+marker-helper = []
+
+[[bin]]
+name = "multi-agents-manager"
+path = "src/main.rs"
+
+[[bin]]
+name = "mam-marker"
+path = "src/bin/mam-marker.rs"
+required-features = ["marker-helper"]
+
 [lib]
 name = "multi_agents_manager_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

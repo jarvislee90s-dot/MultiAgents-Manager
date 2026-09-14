@@ -90,7 +90,9 @@ jobs:
       - run: cd src-tauri && cargo fmt --check
       - run: cd src-tauri && cargo check
       - run: cd src-tauri && cargo clippy -- -D warnings
-      - run: cd src-tauri && cargo test
+      # --features marker-helper：mam-marker bin 有 required-features 门控（默认不构建），
+      # 显式启用让其纯函数单测（strip_marker_suffix 等）继续在 ubuntu 跑
+      - run: cd src-tauri && cargo test --features marker-helper
 
       # cfg(windows) 编译门禁（issue #45）：CI host 是 linux，win32.rs 等整模块
       # #[cfg(windows)] 代码在上述步骤中不可达、破损静默通过（detector.rs:732 一例）。
@@ -100,8 +102,9 @@ jobs:
         run: rustup target add x86_64-pc-windows-gnu
       - name: Install mingw-w64 cross toolchain
         run: sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
-      - run: cd src-tauri && cargo check --target x86_64-pc-windows-gnu --all-targets
-      - run: cd src-tauri && cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+      # --features marker-helper：让 mam-marker bin（Windows-only helper）进入门禁
+      - run: cd src-tauri && cargo check --target x86_64-pc-windows-gnu --all-targets --features marker-helper
+      - run: cd src-tauri && cargo clippy --target x86_64-pc-windows-gnu --all-targets --features marker-helper -- -D warnings
 
   build:
     name: Build verification

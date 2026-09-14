@@ -33,6 +33,12 @@
 //! `~/.mam/bin/`（复用既有分发通道）；helper 缺失即按需注入整体跳过，跳转链
 //! 回落既有消歧层（零回归）。
 //!
+//! 构建：本 bin 挂 `required-features = ["marker-helper"]` 门（Cargo.toml）——
+//! helper 是 Windows-only 功能，而 macOS universal 打包只对主二进制 lipo，额外
+//! bin 会令打包必然失败（2026-09-14 v0.4.0 tag 构建实证）。Windows 发布构建
+//! （release.yml）与 CI windows-gnu 门禁 / ubuntu 测试显式 `--features marker-helper`；
+//! 本地需要构建 helper 时同理。
+//!
 //! # 2026-09-11 Windows 实机验收结论（issue #43 评论）
 //!
 //! 注入通道本身 GO（B/A 双路线、跨进程自标记均实证），但端到端被两件事限制：
@@ -60,8 +66,9 @@ fn main() {
     }
     #[cfg(not(windows))]
     {
-        // 非 Windows 平台编译出的是占位二进制（保持 cargo build 全 target 可用；
-        // CI 的 windows 交叉门禁同时覆盖本文件的编译）
+        // 非 Windows 平台编译出的是占位二进制（bin 挂 marker-helper feature 门，
+        // 显式启用时全 target 可用；CI 的 windows 交叉门禁带该 feature 覆盖本文件的
+        // Windows 侧编译，ubuntu 测试步带该 feature 跑本文件的纯函数单测）
         let _ = args;
         eprintln!("mam-marker is Windows-only（issue #43 窗口标题标记注入）");
         std::process::exit(2);
