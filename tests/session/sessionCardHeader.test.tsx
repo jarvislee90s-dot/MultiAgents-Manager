@@ -123,11 +123,11 @@ describe("APP 卡头部重排（Task 6）", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("focus_session", expect.anything());
   });
 
-  it("CLI 卡不回归：无 X、无未读光环，状态灯正常", () => {
+  it("CLI 卡：X 已接入（2026-09-14 全形态）、无未读光环，状态灯正常", () => {
     const { container } = render(
       <SessionCard session={mk({ status: "processing", form: "cli", unread: false })} />
     );
-    expect(screen.queryByRole("button", { name: /Hide for now/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /Hide for now/i })).not.toBeNull();
     expect(screen.queryByRole("button", { name: /Mark read/i })).toBeNull();
     expect(screen.queryByLabelText("Unread")).toBeNull();
     // 状态灯仍在（黄灯 = 运行中）

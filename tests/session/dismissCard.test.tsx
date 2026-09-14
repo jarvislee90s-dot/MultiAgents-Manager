@@ -67,9 +67,15 @@ describe("App 卡 X 关闭（T2）", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("dismiss_session_card", expect.anything());
   });
 
-  it("CLI 活跃卡不显示 X（T2 范围仅 App 形态）", () => {
+  it("CLI 活跃卡显示 X 且点击走 dismiss（2026-09-14：全形态接入 T2）", async () => {
     render(<SessionCard session={mk({ status: "waiting", form: "cli", unread: false })} />);
-    expect(screen.queryByRole("button", { name: /Hide for now/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Mark read/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Hide for now/i }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("dismiss_session_card", {
+        agentType: "workbuddy",
+        sessionId: "s1",
+        status: "waiting",
+      })
+    );
   });
 });
