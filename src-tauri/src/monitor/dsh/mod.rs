@@ -45,9 +45,9 @@ fn load_digest(
     scan.parse(gen_path, build_digest)
 }
 
-/// 纯内容解析（session_scan.rs 要求：时间叠加绝不在此函数内）。
-/// TEST_DIGEST_CALLS：测试可见的调用计数（thread_local——scan_sessions 是
-/// 同步调用链，计数与断言同线程，天然免疫并行测试对全局计数器的污染）
+// 纯内容解析（session_scan.rs 要求：时间叠加绝不在此函数内）。
+// TEST_DIGEST_CALLS：测试可见的调用计数（thread_local——scan_sessions 是
+// 同步调用链，计数与断言同线程，天然免疫并行测试对全局计数器的污染）
 #[cfg(test)]
 thread_local! {
     pub(crate) static TEST_DIGEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -152,12 +152,10 @@ fn probe_lock_state(session_dir: &std::path::Path) -> LockState {
         .arg(&lock)
         .output();
     match out {
-        Ok(o)
-            if o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty() =>
-        {
+        Ok(o) if o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty() => {
             LockState::Held
         }
-        Ok(_) => LockState::Free,    // 文件在但无人持有 → 写入者已死
+        Ok(_) => LockState::Free,     // 文件在但无人持有 → 写入者已死
         Err(_) => LockState::Unknown, // lsof 不可用（如 Windows）→ 静默兜底
     }
 }
@@ -232,10 +230,14 @@ fn scan_sessions(
             if !fresh && scan.peek::<Option<DshSessionDigest>>(&gen_path).is_none() {
                 continue; // 超窗且从未解析过 → 跳过，文件不打开
             }
-            let Some(digest) = load_digest(scan, &gen_path).as_ref().clone() else {
+            // 缓存保活先于 digest 判空：解析失败缓存为 None 的条目（0 字节新建/
+            // 损坏文件）也是有效缓存——若因 None 不保活，retain_existing 当轮逐出，
+            // 窗内坏文件每轮重读重解压（L2 对解析失败失效，评审 R4）
+            let digest_arc = load_digest(scan, &gen_path);
+            live_logs.insert(gen_path);
+            let Some(digest) = digest_arc.as_ref().clone() else {
                 continue;
             };
-            live_logs.insert(gen_path);
             let header = &digest.header;
             if digest.is_subagent {
                 continue; // 子 Agent 不出卡（M0 F7）
@@ -308,34 +310,37 @@ fn scan_sessions(
             // 出现周期已在 stat 预过滤统一执行（mtime 口径，含"缓存命中例外"）；
             // 此处不再按 last_activity 重复拦截——两个口径不一致会把缓存命中的
             // 超窗会话重新拦掉（R2 测试抓取），出卡排序活跃度仍用 last_activity
-            cards.push((last_activity_ms, Session {
-                id: header.id.clone(),
-                agent_type: AgentType::Dsh,
-                project_name: header
-                    .cwd
-                    .as_deref()
-                    .map(crate::monitor::project::project_name_from_path)
-                    .unwrap_or_else(|| name.clone()),
-                project_path: header.cwd.clone().unwrap_or_default(),
-                title,
-                git_branch: None,
-                github_url: None,
-                status: outcome.status,
-                last_message: text,
-                last_message_role: role,
-                last_activity_at: chrono::DateTime::from_timestamp_millis(last_activity_ms)
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_default(),
-                pid: host.pid,
-                cpu_usage: host.cpu_usage,
-                active_subagent_count: 0,
-                form: ProcessForm::App,
-                jump_supported: crate::session::jump_supported_for(ProcessForm::App),
-                // 未读态不由扫描侧自判：dsh 卡是 App 形态，由 adapter 层未读池
-                // 管线（W4）统一标记/清除——绿卡「池行在⇒未读、已读删行⇒P1-3 剔除」，
-                // 与 codex/zcode 数据驱动绿卡同一套出现周期
-                unread: false,
-            }));
+            cards.push((
+                last_activity_ms,
+                Session {
+                    id: header.id.clone(),
+                    agent_type: AgentType::Dsh,
+                    project_name: header
+                        .cwd
+                        .as_deref()
+                        .map(crate::monitor::project::project_name_from_path)
+                        .unwrap_or_else(|| name.clone()),
+                    project_path: header.cwd.clone().unwrap_or_default(),
+                    title,
+                    git_branch: None,
+                    github_url: None,
+                    status: outcome.status,
+                    last_message: text,
+                    last_message_role: role,
+                    last_activity_at: chrono::DateTime::from_timestamp_millis(last_activity_ms)
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_default(),
+                    pid: host.pid,
+                    cpu_usage: host.cpu_usage,
+                    active_subagent_count: 0,
+                    form: ProcessForm::App,
+                    jump_supported: crate::session::jump_supported_for(ProcessForm::App),
+                    // 未读态不由扫描侧自判：dsh 卡是 App 形态，由 adapter 层未读池
+                    // 管线（W4）统一标记/清除——绿卡「池行在⇒未读、已读删行⇒P1-3 剔除」，
+                    // 与 codex/zcode 数据驱动绿卡同一套出现周期
+                    unread: false,
+                },
+            ));
         }
     }
     // 收敛缓存：清掉本轮未命中的代际日志条目（会话目录已被删除等）
@@ -348,11 +353,7 @@ fn scan_sessions(
 fn take_recent(cards: Vec<(i64, Session)>, limit: usize) -> Vec<Session> {
     let mut pairs = cards;
     pairs.sort_by_key(|(ms, _)| std::cmp::Reverse(*ms));
-    pairs
-        .into_iter()
-        .take(limit)
-        .map(|(_, s)| s)
-        .collect()
+    pairs.into_iter().take(limit).map(|(_, s)| s).collect()
 }
 
 /// projcache identity 校验（5 字段；坏记录路径在此收敛）
@@ -385,19 +386,40 @@ mod cmdline_gate_tests {
     #[test]
     fn dual_tokens_qualify_as_host() {
         // 精确双令牌（node + dsh + web）
-        assert!(cmdline_is_dsh_host(&cmd(&["node", "/usr/local/bin/dsh", "web"])));
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            "node",
+            "/usr/local/bin/dsh",
+            "web"
+        ])));
         assert!(cmdline_is_dsh_host(&cmd(&["node", "dsh", "web"])));
         // 令牌顺序无关（extra 参数不影响；但脚本路径须以 /dsh、\dsh 结尾或恰为
         // "dsh"——/opt/dsh/cli.js 这类路径中段形态不算，见 substring 用例）
-        assert!(cmdline_is_dsh_host(&cmd(&["/usr/local/bin/node", "web", "dsh"])));
-        assert!(cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh", "web", "--port=4173"])));
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            "/usr/local/bin/node",
+            "web",
+            "dsh"
+        ])));
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            "node",
+            "/opt/dsh",
+            "web",
+            "--port=4173"
+        ])));
     }
 
     #[test]
     fn path_suffix_dsh_qualifies() {
         // 路径结尾 /dsh（POSIX）与 \dsh（Windows）均算 dsh 令牌
-        assert!(cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh/bin/dsh", "web"])));
-        assert!(cmdline_is_dsh_host(&cmd(&["node", "C:\\tools\\dsh\\bin\\dsh", "web"])));
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            "node",
+            "/opt/dsh/bin/dsh",
+            "web"
+        ])));
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            "node",
+            "C:\\tools\\dsh\\bin\\dsh",
+            "web"
+        ])));
     }
 
     #[test]
@@ -414,7 +436,11 @@ mod cmdline_gate_tests {
         assert!(!cmdline_is_dsh_host(&cmd(&["node", "dshweb", "web"])));
         assert!(!cmdline_is_dsh_host(&cmd(&["node", "dsh", "webview"])));
         // 子串出现在路径中间同样不算（仅路径结尾 /dsh|\dsh 认可）
-        assert!(!cmdline_is_dsh_host(&cmd(&["node", "/opt/dsh-web/cli.js", "web"])));
+        assert!(!cmdline_is_dsh_host(&cmd(&[
+            "node",
+            "/opt/dsh-web/cli.js",
+            "web"
+        ])));
     }
 }
 
@@ -440,8 +466,8 @@ mod integration_tests {
         std::fs::create_dir_all(&sess).unwrap();
         // JSON 花括号不能进 format! 格式串——header 行用普通字面量变量拼接
         let header_line = "{\"type\":\"session\",\"version\":3,\"id\":\"session-abc\",\"cwd\":\"/tmp/proj\",\"createdAt\":1000,\"isSeeded\":false}";
-        let frame = zstd::stream::encode_all(format!("{header_line}\n{events}").as_bytes(), 3)
-            .unwrap();
+        let frame =
+            zstd::stream::encode_all(format!("{header_line}\n{events}").as_bytes(), 3).unwrap();
         std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
         dir
     }
@@ -483,7 +509,9 @@ mod integration_tests {
     fn skips_subagent_and_missing_host() {
         // 子 Agent 会话不出卡
         let dir = tempfile::tempdir().unwrap();
-        let sess = dir.path().join("sessions/--tmp-proj--/3b8a0933-0000-0000-0000-000000000000");
+        let sess = dir
+            .path()
+            .join("sessions/--tmp-proj--/3b8a0933-0000-0000-0000-000000000000");
         std::fs::create_dir_all(&sess).unwrap();
         let frame = zstd::stream::encode_all(
             b"{\"type\":\"session\",\"version\":0,\"id\":\"sub-1\",\"cwd\":\"/tmp\",\"origin\":\"subagent\",\"delegationDepth\":1}\n".as_slice(),
@@ -525,6 +553,34 @@ mod integration_tests {
             std::sync::Arc::ptr_eq(&second, &third),
             "其他实例的逐出不得影响本实例的缓存命中"
         );
+    }
+
+    #[test]
+    fn parse_failure_entry_survives_retain_and_is_not_reparsed() {
+        // 评审 R4 回归锁：解析失败缓存为 None 的条目也是有效缓存（mtime/size
+        // 未变 ⇒ 下轮免重读）。若 None 条目不参与 live_logs 保活，retain_existing
+        // 当轮逐出 → 窗内损坏/0 字节文件每轮重复读取解压，L2 对解析失败失效
+        let now = chrono::Utc::now().timestamp_millis();
+        let home = make_home_timed("session-broken", now);
+        let dir = home.path().join("sessions/--tmp-proj--/session-broken");
+        let (_, gen) = log::generation_logs(&dir).pop().unwrap();
+        std::fs::write(&gen, b"not-a-zstd-file").unwrap(); // 覆写为非法字节，mtime 即刻 fresh
+        let host = fake_host();
+        let scan = test_scan();
+        TEST_DIGEST_CALLS.with(|c| c.set(0));
+        assert!(
+            scan_sessions(home.path(), &host, &scan).is_empty(),
+            "解析失败不出卡"
+        );
+        let second = scan_sessions(home.path(), &host, &scan);
+        assert!(second.is_empty(), "两轮均不出卡");
+        TEST_DIGEST_CALLS.with(|c| {
+            assert_eq!(
+                c.get(),
+                1,
+                "第二轮应命中 None 缓存条目，不得重复读取解析失败文件"
+            );
+        });
     }
 
     /// 造一个带显式事件 time 的隔离 dsh home（单会话，completed 收尾）
@@ -584,9 +640,7 @@ mod integration_tests {
         let now = chrono::Utc::now().timestamp_millis();
         let home = make_home_timed("session-fresh", now - 3600 * 1000);
         // 再造一个超窗会话，其目录置为不可读（打开必失败）
-        let stale_dir = home
-            .path()
-            .join("sessions/--tmp-proj--/session-stale");
+        let stale_dir = home.path().join("sessions/--tmp-proj--/session-stale");
         std::fs::create_dir_all(&stale_dir).unwrap();
         std::fs::write(
             stale_dir.join("session.v3.jsonl.zstd"),
@@ -616,7 +670,11 @@ mod integration_tests {
         // 机器证明（评审 Minor）：冷扫描只解析窗内 fresh 一次——超窗 stale 未被
         // 打开/解压（本线程计数=1 而非 2）
         TEST_DIGEST_CALLS.with(|c| {
-            assert_eq!(c.get(), 1, "冷扫描应只解析 fresh 一次，超窗文件不进 build_digest");
+            assert_eq!(
+                c.get(),
+                1,
+                "冷扫描应只解析 fresh 一次，超窗文件不进 build_digest"
+            );
         });
         // 缓存例外回归锁：超窗但曾解析过（缓存命中）→ 仍参与出卡。
         // 第一次 scan 预过滤跳过了 stale（缓存里没有），手动向同一实例注入
@@ -625,11 +683,20 @@ mod integration_tests {
         TEST_DIGEST_CALLS.with(|c| c.set(0));
         let cards2 = scan_sessions(home.path(), &host, &scan);
         let ids: Vec<String> = cards2.iter().map(|c| c.id.clone()).collect();
-        assert_eq!(cards2.len(), 2, "缓存命中的超窗会话应例外出卡，实得 {:?}", ids);
+        assert_eq!(
+            cards2.len(),
+            2,
+            "缓存命中的超窗会话应例外出卡，实得 {:?}",
+            ids
+        );
         assert!(ids.iter().any(|i| i == "session-stale"));
         // 例外路径同样零新增解析：stale 走 peek 缓存命中，fresh 未变化
         TEST_DIGEST_CALLS.with(|c| {
-            assert_eq!(c.get(), 0, "第二次扫描应全缓存命中（含超窗例外），零 build_digest 调用");
+            assert_eq!(
+                c.get(),
+                0,
+                "第二次扫描应全缓存命中（含超窗例外），零 build_digest 调用"
+            );
         });
     }
 
@@ -687,7 +754,10 @@ mod integration_tests {
         );
         std::fs::write(&gen, &bytes).unwrap();
         let cards = scan_sessions(home.path(), &host, &test_scan());
-        assert_eq!(cards[0].status, SessionStatus::Waiting, "追加 error 帧后应重扫");
+        assert_eq!(
+            cards[0].status,
+            SessionStatus::Waiting,
+            "追加 error 帧后应重扫"
+        );
     }
 }
-

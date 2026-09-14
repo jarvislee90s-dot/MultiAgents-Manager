@@ -98,11 +98,7 @@ pub fn scan_facts(events: &[DshEvent]) -> TurnFacts {
 }
 
 /// 时间叠加：回合事实 + 本轮 lock 探测 / 静默时长 → 三色判定（每轮现算，代价 O(1)）
-pub fn derive_facts(
-    facts: &TurnFacts,
-    lock: LockState,
-    silence_ms: Option<i64>,
-) -> StatusOutcome {
+pub fn derive_facts(facts: &TurnFacts, lock: LockState, silence_ms: Option<i64>) -> StatusOutcome {
     let open_turn = facts.has_open_turn();
 
     let (status, end_kind) = if open_turn {

@@ -9,27 +9,49 @@ pub fn update_session_status(session_id: &str, agent_type: &str, status: &str) -
     update_session_status_conn(&conn, session_id, agent_type, status)
 }
 
+/// 状态未变时跳过写库的 last_seen 年龄上限（评审 #5）。
+/// skip-write 会让 last_seen 停在上次状态变化时刻，而 cleanup 的 24h TTL 以
+/// last_seen 计——不加年龄上限，状态连续 >24h 未变的长青卡离板第一轮就被清行
+/// （#35-1 的 24h 离板保留语义被窄幅回退：回板走 Insert 边沿，未读角标对旧卡
+/// 重打）。1h 刷新一次：每卡每小时至多 1 次提交，fsync 风暴消除目标不受影响
+const LAST_SEEN_REFRESH_MS: i64 = 3600 * 1000;
+
+/// last_seen 是否超龄需刷新（解析失败/畸形值按需刷新处理——刷新写库即自愈）
+fn last_seen_stale(last_seen: &str) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(last_seen) {
+        Ok(t) => {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_milliseconds()
+                > LAST_SEEN_REFRESH_MS
+        }
+        Err(_) => true,
+    }
+}
+
 /// 同上（连接注入版，测试与批量场景用）。状态未变 ⇒ 不产生写事务：
 /// SQLite 回滚日志模式下每次提交伴随多次 fsync，几十张卡每 3 秒轮询各无条件
-/// REPLACE 一次即成持续 fsync 风暴（真机 dev 实测 ~69% 单核）。last_seen 仅服务
-/// cleanup 的 24h TTL 且要求行已离板，停更无消费方受影响；previous_status /
-/// status 两列不变，状态迁移边沿语义不变
+/// REPLACE 一次即成持续 fsync 风暴（真机 dev 实测 ~69% 单核）。例外：last_seen
+/// 距今超过 LAST_SEEN_REFRESH_MS 时仍刷新写库一次（见常量注释，保住 #35-1 的
+/// 24h 离板保留语义）；previous_status / status 两列不变，状态迁移边沿语义不变
 pub fn update_session_status_conn(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_type: &str,
     status: &str,
 ) -> Option<String> {
-    let previous: Option<String> = conn
+    let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT status FROM session_status_cache WHERE session_id = ?",
+            "SELECT status, last_seen FROM session_status_cache WHERE session_id = ?",
             [session_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
-    if previous.as_deref() == Some(status) {
-        return None; // 状态未变：零写事务
+    let status_changed = row.as_ref().is_none_or(|(prev, _)| prev != status);
+    // 状态未变且 last_seen 新鲜：零写事务（fsync 风暴消除的主路径）；
+    // 超龄则仍落库刷新 last_seen，但不得按状态迁移产生边沿
+    if !status_changed && !row.as_ref().is_some_and(|(_, seen)| last_seen_stale(seen)) {
+        return None;
     }
+    let previous = row.map(|(prev, _)| prev);
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR REPLACE INTO session_status_cache
@@ -38,7 +60,12 @@ pub fn update_session_status_conn(
         params![session_id, agent_type, status, now, previous.as_deref()],
     )
     .ok();
-    previous
+    // 返回值语义：仅状态变化产生边沿（Some(前值)）——last_seen 刷新写不是迁移
+    if status_changed {
+        previous
+    } else {
+        None
+    }
 }
 
 /// 清理不再活跃的会话缓存
@@ -163,12 +190,13 @@ mod tests {
         .is_ok()
     }
 
-    /// fsync 风暴修复回归锁：状态未变 ⇒ 零写事务（last_seen 停更）；
-    /// 状态变化 ⇒ 正常写入并返回前值（边沿语义不变）
+    /// fsync 风暴修复回归锁：状态未变且 last_seen 新鲜 ⇒ 零写事务（last_seen
+    /// 停更）；状态变化 ⇒ 正常写入并返回前值（边沿语义不变）
     #[test]
     fn unchanged_status_skips_write() {
         let conn = mem();
-        insert_status(&conn, "s1", "2020-01-01T00:00:00+00:00");
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_status(&conn, "s1", &now);
         let prev = update_session_status_conn(&conn, "s1", "WorkBuddy", "Idle");
         assert_eq!(prev, None, "状态未变无边沿");
         let last_seen: String = conn
@@ -179,11 +207,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            last_seen, "2020-01-01T00:00:00+00:00",
-            "状态未变不得写库（last_seen 停更）"
+            last_seen, now,
+            "状态未变且 last_seen 新鲜 ⇒ 不得写库（停更）"
         );
         let prev2 = update_session_status_conn(&conn, "s1", "WorkBuddy", "Waiting");
         assert_eq!(prev2.as_deref(), Some("Idle"), "变化时返回前值");
+    }
+
+    /// 评审 #5 回归锁：状态未变但 last_seen 超龄 ⇒ 仍刷新写库（返回值仍 None，
+    /// 不产生状态边沿）——否则长青卡离板第一轮即被 24h TTL 清行，#35-1 的
+    /// 离板保留语义回退
+    #[test]
+    fn stale_last_seen_refreshed_despite_unchanged_status() {
+        let conn = mem();
+        insert_status(&conn, "s2", "2020-01-01T00:00:00+00:00");
+        let prev = update_session_status_conn(&conn, "s2", "WorkBuddy", "Idle");
+        assert_eq!(prev, None, "状态未变仍不得产生边沿");
+        let last_seen: String = conn
+            .query_row(
+                "SELECT last_seen FROM session_status_cache WHERE session_id = 's2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            last_seen, "2020-01-01T00:00:00+00:00",
+            "last_seen 超龄 ⇒ 刷新写库（保住 cleanup 24h TTL 的计时基准）"
+        );
     }
 
     /// issue #35-1 回归锁：离板行在 TTL 内保留（心跳间隙后回板仍读得到上一轮状态，

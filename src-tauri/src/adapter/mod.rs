@@ -231,10 +231,10 @@ pub fn get_all_sessions() -> SessionsResponse {
     }
     *flying = true;
     drop(flying); // 先放手上的 in_flight 锁：Drop guard 析构时要重新拿它清位，
-    // 不 drop 即自锁自等（本测试挂起事故的根因）
-    // Drop guard：内层扫描 panic（如 DB 锁中毒 unwrap）时飞行位自动释放——
-    // 若靠扫描返回后手动清位，一次 panic 即永久卡死单飞（看板冻结到重启），
-    // 且把原失败模式（单次报错下轮重试）恶化成永久故障
+                  // 不 drop 即自锁自等（本测试挂起事故的根因）
+                  // Drop guard：内层扫描 panic（如 DB 锁中毒 unwrap）时飞行位自动释放——
+                  // 若靠扫描返回后手动清位，一次 panic 即永久卡死单飞（看板冻结到重启），
+                  // 且把原失败模式（单次报错下轮重试）恶化成永久故障
     let _guard = ScanFlightGuard;
     let result = get_all_sessions_inner();
     *SCAN_FLIGHT.last_snapshot.lock().unwrap() = Some((std::time::Instant::now(), result.clone()));
@@ -459,27 +459,30 @@ fn get_all_sessions_inner() -> SessionsResponse {
     }
 }
 
-/// R3 单飞护栏测试：占住飞行位时第二请求返回快照而不进入扫描。
-/// SCAN_FLIGHT_TEST_LOCK：直接操纵全局 SCAN_FLIGHT 的测试与真实扫描类测试
-/// （会重置飞行位/快照）互斥——与 R1 同类并行互踩病的收口
+/// R3 单飞护栏的测试互斥锁（跨模块共享）：直接操纵全局 SCAN_FLIGHT 的测试与
+/// 真实扫描类测试（会重置飞行位/快照，含 tests::test_get_all_sessions）互斥——
+/// cargo 默认并行测试下两个真实 get_all_sessions 同时起跑会互踩快照/飞行位
+/// （flight_released 断言 !in_flight 时另一测试的扫描仍在飞即红，评审 R6）
+#[cfg(test)]
+static SCAN_FLIGHT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// R3 单飞护栏测试：占住飞行位时第二请求返回快照而不进入扫描
 #[cfg(test)]
 mod scan_flight_tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static SCAN_FLIGHT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn concurrent_request_reuses_snapshot_without_rescan() {
-        let _g = SCAN_FLIGHT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = SCAN_FLIGHT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // 预置快照
         let snapshot = SessionsResponse {
             sessions: Vec::new(),
             total_count: 7,
             waiting_count: 0,
         };
-        *SCAN_FLIGHT.last_snapshot.lock().unwrap() =
-            Some((std::time::Instant::now(), snapshot));
+        *SCAN_FLIGHT.last_snapshot.lock().unwrap() = Some((std::time::Instant::now(), snapshot));
 
         // 占住飞行位（模拟另一请求正在扫描）
         *SCAN_FLIGHT.in_flight.lock().unwrap() = true;
@@ -494,7 +497,9 @@ mod scan_flight_tests {
 
     #[test]
     fn flight_released_after_scan_completes() {
-        let _g = SCAN_FLIGHT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = SCAN_FLIGHT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // 正常调用：进入扫描并释放飞行位 + 刷新快照
         let resp = get_all_sessions();
         assert!(
@@ -513,6 +518,11 @@ mod tests {
 
     #[test]
     fn test_get_all_sessions() {
+        // 与 scan_flight_tests 共用 SCAN_FLIGHT_TEST_LOCK：本测试触发真实
+        // get_all_sessions（刷新快照/飞行位），不互斥则并行起跑互踩（评审 R6）
+        let _g = SCAN_FLIGHT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let response = get_all_sessions();
         eprintln!("=== SESSION SCAN ===");
         eprintln!(
@@ -909,13 +919,27 @@ mod host_liveness_filter_tests {
     #[test]
     fn dsh_app_card_survives_iff_host_alive_reports_alive() {
         // host_alive("dsh")=true（宿主在位口径）→ 未读活跃卡保留
-        let mut alive = vec![fake_for(AgentType::Dsh, "dsh-live", ProcessForm::App, false)];
+        let mut alive = vec![fake_for(
+            AgentType::Dsh,
+            "dsh-live",
+            ProcessForm::App,
+            false,
+        )];
         filter_host_dead_cards(&mut alive, &|tool| tool == "dsh");
-        assert_eq!(alive.len(), 1, "宿主存活口径登记正确时 dsh 活跃卡不得被过滤");
+        assert_eq!(
+            alive.len(),
+            1,
+            "宿主存活口径登记正确时 dsh 活跃卡不得被过滤"
+        );
 
         // host_alive("dsh")=false（登记漏项时的错误口径）→ App 活跃卡必须丢弃
         //（本断言同时证明过滤器对该工具生效、测试具备区分度）
-        let mut dead = vec![fake_for(AgentType::Dsh, "dsh-live", ProcessForm::App, false)];
+        let mut dead = vec![fake_for(
+            AgentType::Dsh,
+            "dsh-live",
+            ProcessForm::App,
+            false,
+        )];
         filter_host_dead_cards(&mut dead, &|tool| tool != "dsh");
         assert!(dead.is_empty(), "宿主判死时 App 形态活跃卡必须被过滤");
     }
@@ -962,7 +986,9 @@ mod skill_dir_tests {
             .expect("dsh 应有 skill 目录");
         assert_eq!(
             dir,
-            std::path::Path::new("/home/test").join(".dsh").join("skills")
+            std::path::Path::new("/home/test")
+                .join(".dsh")
+                .join("skills")
         );
     }
 

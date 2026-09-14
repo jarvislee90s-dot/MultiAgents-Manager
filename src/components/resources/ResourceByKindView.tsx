@@ -86,8 +86,7 @@ function SectionTableHeader(props: {
         {tools.map((tool) => {
           // 能力门：工具不支持该类资源（如 dsh 无 MCP 配置/插件目录）→ 显示「暂不支持」
           const supported =
-            kind === "skill" ||
-            (kind === "mcp" ? tool.mcpSupported : tool.pluginSupported);
+            kind === "skill" || (kind === "mcp" ? tool.mcpSupported : tool.pluginSupported);
           if (!supported) {
             return (
               <span
@@ -505,7 +504,7 @@ export function ResourceByKindView() {
                             disabled
                             variant="ghost"
                             size="sm"
-                            className="h-6 px-2 text-[10px] text-muted-foreground opacity-40"
+                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
                             title={`${tool.label}: ${t("resources.kindNotSupported")}`}
                           >
                             <ToolIcon toolId={tool.id} size={14} className="mr-1" />
@@ -620,7 +619,7 @@ export function ResourceByKindView() {
                             disabled
                             variant="ghost"
                             size="sm"
-                            className="h-6 px-2 text-[10px] text-muted-foreground opacity-40"
+                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
                             title={`${tool.label}: ${t("resources.kindNotSupported")}`}
                           >
                             <ToolIcon toolId={tool.id} size={14} className="mr-1" />
@@ -720,7 +719,7 @@ export function ResourceByKindView() {
                             disabled
                             variant="ghost"
                             size="sm"
-                            className="h-6 px-2 text-[10px] text-muted-foreground opacity-40"
+                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
                             title={`${tool.label}: ${t("resources.kindNotSupported")}`}
                           >
                             <ToolIcon toolId={tool.id} size={14} className="mr-1" />

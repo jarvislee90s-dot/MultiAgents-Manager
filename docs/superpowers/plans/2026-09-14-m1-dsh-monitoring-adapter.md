@@ -1828,3 +1828,20 @@ git commit -m "docs(m1-dsh): M1 验收记录（五场景 + 跳转 + 回归）"
 - **Spec 覆盖**：P1（Task 8 发现/子Agent过滤/卡片）、P2（Task 5 映射+Task 8 未读/通知经 Session.status 自动接入）、P3（Task 7）、P4（Task 9）、P5（Task 3 版本门 + Task 8 读不到跳过降级）——全覆盖。P2 的"通知链路复用"无独立任务：SessionStatus 进入现有 get_all_sessions 管道即自动接入（现有机制），Task 10 场景 1 验证。
 - **占位符扫描**：Task 8 有两处"以现实为准对齐"（connection 与 project_name 函数名）——这是对齐既有代码的明确指令（含抄哪里），非 TBD；无其他占位。
 - **类型一致性**（2026-09-14 审计后修订）：`header.id` 全文统一为 pub 字段直取；`ProjcacheView` 三字段在 Task 4/7/8 一致；`LockState` 在 Task 5/8 一致；未读语义对齐设计 P2（含 blocked 计未读），未读锚点用事件流最大 time（审计修正，勿改回 lastPromptAt）。
+
+---
+
+## 合并前评审追记（2026-09-14，第 4 轮评审）
+
+三路独立评审（dsh 核心 / 集成性能 / 前端对齐）+ CI 门禁复查后，本分支追加一轮修复（详细动机见各代码注释内「评审 R4/R5/R6」标记）：
+
+- **R4**（dsh 核心 Important #1）：解析失败缓存为 `None` 的条目此前不参与 `live_logs` 保活，被 `retain_existing` 当轮逐出 → 窗内损坏/0 字节文件每轮重复读取解压。修复：保活先于 digest 判空，回归测试 `parse_failure_entry_survives_retain_and_is_not_reparsed`。
+- **R5**（集成 Important #1）：skip-write 会让 `last_seen` 停在上次状态变化时刻，cleanup 的 24h TTL 以它计——长青卡离板第一轮即被清行，回退 #35-1 的离板保留语义。修复：`LAST_SEEN_REFRESH_MS`（1h）年龄上限，超龄仍刷新写库（不产生状态边沿）。
+- **R6**（集成 Important #2）：`scan_flight_tests` 与 `tests::test_get_all_sessions` 并行互踩（快照/飞行位）→ CI 间歇红。修复：`SCAN_FLIGHT_TEST_LOCK` 提升至模块级跨模块共享。
+- **CI 机械修复**：`cargo fmt`（adapter/mod.rs、migration.rs、dsh/mod.rs）+ `prettier`（ResourceByKindView/SessionCard/home）+ `dsh/mod.rs` 测试计数器宏上的 `///` 注释改 `//`（clippy `--all-targets -D warnings`，Windows 交叉门禁口径）。
+
+### 已裁决接受的已知限制：冷启动超窗「开回合」会话不上板
+
+**场景**：dsh 存在开回合会话（红·中断 / 红·等待批准）空闲超 24h 后 MAM 重启——冷缓存 + mtime 预过滤直接跳过，且 dsh web 宿主无法映射进程→会话、无从实现 codex 式 `fill_uncached` 回退，该卡永不上板（MAM 持续运行期间有缓存例外保卡，不受影响）。
+
+**裁决（2026-09-14 用户拍板）**：接受为已知限制、落档不改代码；后续与 I1（强杀中断卡可达性——宿主死=卡片消失 vs 红·中断离线卡）一并裁决是否补轻量 rescue（`session.lock` 存在 / projcache `openTurnStartSeq` 非空则豁免预过滤）。AGENTS.md L3-4 已同步加注。

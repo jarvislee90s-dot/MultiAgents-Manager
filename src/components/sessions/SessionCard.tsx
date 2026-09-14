@@ -170,7 +170,7 @@ export function SessionCard({
                 />
               )}
             </div>
-            {(
+            {
               <button
                 onClick={handleClose}
                 className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
@@ -179,7 +179,7 @@ export function SessionCard({
               >
                 <X className="h-3 w-3" />
               </button>
-            )}
+            }
           </div>
         </div>
 

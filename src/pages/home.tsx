@@ -37,9 +37,7 @@ export default function HomePage() {
   // 一键清除已完成卡片（绿/空闲）：对每张绿卡复用单卡 X 的同款语义——
   // 未读卡标已读（mark_session_read），其余 dismiss（dismiss_session_card）；
   // 全部完成后立即失效轮询缓存，不等 3 秒轮询自然生效
-  const finishedCards = sessions.filter(
-    (s) => s.status === "idle" || s.status === "finished"
-  );
+  const finishedCards = sessions.filter((s) => s.status === "idle" || s.status === "finished");
   const clearFinishedCards = async () => {
     await Promise.allSettled(
       finishedCards.map((s) =>
@@ -160,7 +158,7 @@ export default function HomePage() {
           {finishedCards.length > 0 && (
             <button
               onClick={clearFinishedCards}
-              className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-1.5 transition-colors"
               title={t("home.clearFinishedCards")}
               aria-label={t("home.clearFinishedCards")}
             >
