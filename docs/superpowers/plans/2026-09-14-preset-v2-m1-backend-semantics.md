@@ -20,6 +20,8 @@
 - 每个任务收尾必须过：`cd src-tauri && cargo test`；最终门禁 `cargo clippy` + `cargo fmt`
 - 不碰 `monitor/`（会话扫描预算契约与本计划无关）
 - MCP 分配 id 形如 `mcp-<name>`、skill `skill-<name>`、plugin `plugin-<name>`（全库约定，新代码必须沿用）
+- 测试中取家目录一律 `dirs::home_dir().unwrap()`（`tests/support.rs` 对 Windows 设 `MAM_HOME`，直接读 `env HOME` 不可移植）
+- 集成测试共享同一 HOME 与全局 DB，测试执行顺序不定——**断言禁用精确集合相等，一律用 `contains`**（其他测试残留的原生目录/启用项会让 `==` flaky）
 
 ---
 
@@ -1031,7 +1033,7 @@ fn stash_and_restore_roundtrip() {
     use multi_agents_manager_lib::services::preset::stash;
 
     // 工具原生技能目录（fake HOME 下）
-    let tool_dir = PathBuf::from(std::env::var("HOME").unwrap()).join(".codex/skills");
+    let tool_dir = dirs::home_dir().unwrap().join(".codex/skills");
     std::fs::create_dir_all(tool_dir.join("v2m1-native-a")).unwrap();
     std::fs::write(tool_dir.join("v2m1-native-a/SKILL.md"), "hi").unwrap();
 
@@ -1058,7 +1060,7 @@ fn stash_restore_conflict_keeps_stash() {
     use multi_agents_manager_lib::database;
     use multi_agents_manager_lib::services::preset::stash;
 
-    let tool_dir = PathBuf::from(std::env::var("HOME").unwrap()).join(".codex/skills");
+    let tool_dir = dirs::home_dir().unwrap().join(".codex/skills");
     std::fs::create_dir_all(tool_dir.join("v2m1-native-b")).unwrap();
     std::fs::write(tool_dir.join("v2m1-native-b/SKILL.md"), "origin").unwrap();
     stash::stash_native_skill("codex", "v2m1-native-b", &tool_dir.join("v2m1-native-b")).unwrap();
@@ -1091,6 +1093,8 @@ Run: `cd src-tauri && cargo test stash_`
 Expected: 编译失败——`stash` 模块不存在
 
 - [ ] **Step 3: 实现 `services/preset/stash.rs`**
+
+先在 `src-tauri/Cargo.toml` 的 `[dev-dependencies]`（87 行附近）补一行 `dirs = "5.0"`（与主依赖同版本）——本计划集成测试直接取家目录，而 `dirs` 此前只在 `[dependencies]`，集成测试 crate 引用不到。
 
 ```rust
 // 暂存区引擎（spec §3.1/§5.3）：原生技能目录整体移动（同盘 rename，零拷贝），
@@ -1218,7 +1222,7 @@ fn scan_tool_state_captures_mam_and_native() {
     // SSOT 造一个 MAM skill 并为 claude 启用（建链接）
     let repo = database::list_extensions; // 引用防未用告警（可删）
     let _ = repo;
-    let ssot = PathBuf::from(std::env::var("HOME").unwrap()).join(".mam/skills/v2m1-scan-a");
+    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-scan-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1236,9 +1240,12 @@ fn scan_tool_state_captures_mam_and_native() {
     })
     .unwrap();
     enable_skill_for_tool("v2m1-scan-a", "claude").unwrap();
+    // 子 Agent 分配行不得让同一 ext_id 重复入基底（快照 PK 冲突防护）
+    database::upsert_assignment_with_subagent("skill-v2m1-scan-a", "claude", "v2m1-scan-sub", true, "valid")
+        .unwrap();
 
     // claude 目录再放一个原生真目录
-    let claude_dir = PathBuf::from(std::env::var("HOME").unwrap()).join(".claude/skills");
+    let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
     std::fs::create_dir_all(claude_dir.join("v2m1-scan-native")).unwrap();
     std::fs::write(claude_dir.join("v2m1-scan-native/SKILL.md"), "y").unwrap();
 
@@ -1248,6 +1255,11 @@ fn scan_tool_state_captures_mam_and_native() {
     let mam = find("skill-v2m1-scan-a").expect("MAM 启用项应入基底");
     assert_eq!(mam.origin, "mam");
     assert_eq!(mam.kind, "skill");
+    assert_eq!(
+        state.iter().filter(|i| i.extension_id == "skill-v2m1-scan-a").count(),
+        1,
+        "子 Agent 分配行不得让同一 ext_id 重复计入"
+    );
     let native = find("skill-v2m1-scan-native").expect("原生真目录应入基底");
     assert_eq!(native.origin, "native");
 
@@ -1259,6 +1271,7 @@ fn scan_tool_state_captures_mam_and_native() {
     assert!(items.iter().any(|i| i.extension_id == "skill-v2m1-scan-native" && i.origin == "native"));
 
     // 清场，避免影响其他测试
+    let _ = database::disable_subagent_assignment("skill-v2m1-scan-a", "claude", "v2m1-scan-sub");
     disable_skill_for_tool("v2m1-scan-a", "claude").unwrap();
     database::destroy_base_snapshot("claude").unwrap();
 }
@@ -1281,9 +1294,13 @@ use crate::database::{self, BaseSnapshotItemRecord};
 pub fn scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord> {
     let mut items = Vec::new();
 
-    // 1) MAM 管理项：enabled assignment（id 前缀即 kind，全库约定）
+    // 1) MAM 管理项：enabled assignment（id 前缀即 kind，全库约定）。
+    //    只记工具级行——list_assignments 返回含子 Agent 行（同一 ext_id 两行：
+    //    工具级 + sub_agent 级，见 dao/extension.rs:71-91），不过滤会对快照
+    //    PK (tool_id, extension_id) 二次插入报 UNIQUE 冲突；子 Agent 链接由
+    //    工具级启停级联清理，恢复时单独重建（restore_tool 的子 Agent 重建段）
     for a in database::list_assignments(tool_id) {
-        if !a.enabled {
+        if !a.enabled || a.sub_agent_id.is_some() {
             continue;
         }
         let kind = if a.extension_id.starts_with("skill-") {
@@ -1379,7 +1396,7 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
 
     // MAM skill A（预设内）+ MAM skill B（预设外）为 claude 启用
     for name in ["v2m1-sw-a", "v2m1-sw-b"] {
-        let ssot = PathBuf::from(std::env::var("HOME").unwrap()).join(".mam/skills").join(name);
+        let ssot = dirs::home_dir().unwrap().join(".mam/skills").join(name);
         std::fs::create_dir_all(&ssot).unwrap();
         std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
         database::insert_extension(&database::ExtensionRecord {
@@ -1399,23 +1416,24 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
         enable_skill_for_tool(name, "claude").unwrap();
     }
     // 原生真目录 C（预设外）与 D（常驻）
-    let claude_dir = PathBuf::from(std::env::var("HOME").unwrap()).join(".claude/skills");
+    let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
     for name in ["v2m1-sw-c", "v2m1-sw-d"] {
         std::fs::create_dir_all(claude_dir.join(name)).unwrap();
         std::fs::write(claude_dir.join(name).join("SKILL.md"), "n").unwrap();
     }
     database::set_tool_resident("claude", "skill-v2m1-sw-d", true).unwrap();
 
-    // 计划：keep 只有 A
+    // 计划：keep 只有 A（断言用 contains——集成测试共享 HOME，其他测试可能残留原生目录）
     let keep = vec![("skill-v2m1-sw-a".to_string(), "skill".to_string())];
     let plan = sweep::plan_sweep("claude", &keep);
-    assert_eq!(plan.disable_mam, vec![("skill-v2m1-sw-b".to_string(), "skill".to_string())]);
-    assert_eq!(plan.stash_native, vec!["v2m1-sw-c".to_string()]);
+    assert!(plan.disable_mam.contains(&("skill-v2m1-sw-b".to_string(), "skill".to_string())));
+    assert!(plan.stash_native.contains(&"v2m1-sw-c".to_string()));
+    assert!(!plan.stash_native.contains(&"v2m1-sw-d".to_string()), "常驻项不得进暂存计划");
 
     // 执行：B 断链、C 暂存、D 不动
     let (disabled, stashed, failures) = sweep::execute_sweep("claude", &plan);
-    assert_eq!(disabled, vec!["skill-v2m1-sw-b".to_string()]);
-    assert_eq!(stashed, vec!["v2m1-sw-c".to_string()]);
+    assert!(disabled.contains(&"skill-v2m1-sw-b".to_string()));
+    assert!(stashed.contains(&"v2m1-sw-c".to_string()));
     assert!(failures.is_empty(), "{:?}", failures);
     assert!(!claude_dir.join("v2m1-sw-b").exists(), "B 链接应已断");
     assert!(!claude_dir.join("v2m1-sw-c").exists(), "C 应已暂存");
@@ -1555,12 +1573,12 @@ fn apply_switch_restore_full_lifecycle() {
     use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
-    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let home = dirs::home_dir().unwrap();
     let claude_dir = home.join(".claude/skills");
 
-    // 基底现场：MAM skill base-1 已启用 + 原生真目录 native-1
+    // 基底现场：MAM skill base-1 已启用（含一条子 Agent 分配行）+ 原生真目录 native-1
     for name in ["v2m1-lc-base1"] {
-        let ssot = home.join(".mam/skills").join(name);
+        let ssot = dirs::home_dir().unwrap().join(".mam/skills").join(name);
         std::fs::create_dir_all(&ssot).unwrap();
         std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
         database::insert_extension(&database::ExtensionRecord {
@@ -1571,6 +1589,10 @@ fn apply_switch_restore_full_lifecycle() {
         }).unwrap();
         enable_skill_for_tool(name, "claude").unwrap();
     }
+    // 子 Agent 分配行：应用预设时随工具级清扫断链，恢复默认后必须重建回来
+    database::upsert_assignment_with_subagent("skill-v2m1-lc-base1", "claude", "v2m1-lc-sub", true, "valid")
+        .unwrap();
+    let sub_target = claude_dir.join("subagents/v2m1-lc-sub/v2m1-lc-base1");
     std::fs::create_dir_all(claude_dir.join("v2m1-lc-native1")).unwrap();
     std::fs::write(claude_dir.join("v2m1-lc-native1/SKILL.md"), "n").unwrap();
 
@@ -1591,11 +1613,11 @@ fn apply_switch_restore_full_lifecycle() {
     let preset_a = database::create_preset("v2m1-lc-A", &[("skill-v2m1-lc-a".into(), "skill".into())]).unwrap();
     let preset_b = database::create_preset("v2m1-lc-B", &[("skill-v2m1-lc-b".into(), "skill".into())]).unwrap();
 
-    // 开 A：base-1 断链、native-1 暂存、a 启用；快照在、active=A
+    // 开 A：base-1 断链（含子 Agent 链级联清理）、native-1 暂存、a 启用；快照在、active=A
     let r = apply_preset(&preset_a, "claude").unwrap();
     assert!(r.success >= 1);
     assert!(r.disabled.contains(&"skill-v2m1-lc-base1".to_string()), "{:?}", r.disabled);
-    assert_eq!(r.stashed, vec!["v2m1-lc-native1".to_string()]);
+    assert!(r.stashed.contains(&"v2m1-lc-native1".to_string()), "{:?}", r.stashed);
     assert!(claude_dir.join("v2m1-lc-a").exists());
     assert!(!claude_dir.join("v2m1-lc-base1").exists());
     let (active, items) = database::get_base_snapshot("claude").unwrap();
@@ -1616,11 +1638,12 @@ fn apply_switch_restore_full_lifecycle() {
     enable_skill_for_tool("v2m1-lc-base1", "claude").unwrap();
     assert!(claude_dir.join("v2m1-lc-base1").exists());
 
-    // 关：精确回基底——base-1 回来、native-1 回来、b/a 都不在；快照销毁
+    // 关：精确回基底——base-1 回来（含子 Agent 链接重建）、native-1 回来、b/a 都不在；快照销毁
     let rr = restore_tool("claude").unwrap();
     assert!(claude_dir.join("v2m1-lc-base1").exists(), "MAM 基底项应重建");
     assert!(claude_dir.join("v2m1-lc-native1").exists(), "原生暂存应回移");
     assert!(rr.restored_native.contains(&"v2m1-lc-native1".to_string()));
+    assert!(sub_target.exists(), "子 Agent 链接应随基底重建（Layer3）");
     assert!(!claude_dir.join("v2m1-lc-a").exists());
     assert!(!claude_dir.join("v2m1-lc-b").exists());
     assert!(database::get_base_snapshot("claude").is_none(), "恢复后快照销毁（会话级）");
@@ -1659,7 +1682,7 @@ fn apply_filters_incompatible_items() {
     use multi_agents_manager_lib::database;
     use multi_agents_manager_lib::services::preset::apply_preset;
 
-    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let home = dirs::home_dir().unwrap();
     let ssot = home.join(".mam/skills/v2m1-filt-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
@@ -1699,6 +1722,7 @@ Expected: 编译/断言失败——旧 apply_preset 是增量语义且返回非 
 
 ```rust
 /// 应用预设（独占语义，spec §5.1）：开 = 拍基底（若无）→ 差集清扫 → 启用预设项
+#[derive(Default)]
 pub struct ApplyResult {
     pub success: usize,
     pub failures: Vec<String>,
@@ -1862,7 +1886,8 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
         .collect();
     let current: Vec<(String, String)> = database::list_assignments(tool_id)
         .into_iter()
-        .filter(|a| a.enabled)
+        // 只看工具级行：子 Agent 行由下面的重建段处理（与 scan_tool_state 同口径）
+        .filter(|a| a.enabled && a.sub_agent_id.is_none())
         .map(|a| {
             let kind = if a.extension_id.starts_with("skill-") {
                 "skill"
@@ -1925,6 +1950,25 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
         }
     }
 
+    // 2.5) 子 Agent 链接重建：清扫的工具级禁用会级联断 Layer3（cleanup_layer3_on_tool_disable），
+    //      工具级恢复后对「基底内且仍 enabled」的子 Agent 分配行重建链接——与 W5
+    //      rebuild_tool_links 同思路（先工具级后子 Agent）；幂等，链在则替换。
+    //      基底外技能的子 Agent 行不重建（其工具级已被本流程停用）
+    for a in database::list_assignments(tool_id) {
+        if !a.enabled || a.sub_agent_id.is_none() {
+            continue;
+        }
+        if !target.iter().any(|(tid, _)| tid == &a.extension_id) {
+            continue;
+        }
+        if let Some(name) = a.extension_id.strip_prefix("skill-") {
+            let sub = a.sub_agent_id.clone().unwrap_or_default();
+            if let Err(e) = services::assign_skill_to_subagent(name, tool_id, &sub) {
+                out.conflicts.push(format!("{}#{}: 子 Agent 链接重建失败 {}", a.extension_id, sub, e));
+            }
+        }
+    }
+
     // 3) 销毁快照（会话结束）+ 历史置 inactive
     database::destroy_base_snapshot(tool_id)?;
     if let Some(p) = active_preset {
@@ -1947,6 +1991,17 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
 ```
 
 同时：`mod.rs` 顶部补 `pub mod snapshot; pub mod sweep;`（stash 已在 Task 6 加过）、删掉旧 `apply_preset` 里被替换的 `check_conflict`（`deactivate_preset` 旧实现整体删除）。
+
+**注意**：`apply_preset_to_subagent`（mod.rs:172-214，本期不改语义）末尾的 `ApplyResult { success, failures, conflicts }` 构造会因字段扩到 6 个而编译失败——改为：
+
+```rust
+    ApplyResult {
+        success,
+        failures,
+        conflicts,
+        ..Default::default()
+    }
+```
 
 - [ ] **Step 4: 适配调用方 + W5 前置恢复**
 
@@ -2012,6 +2067,9 @@ git commit -m "feat(preset-v2): exclusive apply/restore orchestration + switch s
   - `update_preset(id, name, description, scope, bound_tool: Option<String>, items) -> Result<(), String>`——激活中（任一快照 active == id）拒绝
   - `get_preset(preset_id) -> Option<PresetRecord>`
   - `restore_preset(tool_id) -> Result<RestoreResult, String>`（守卫 `ensure_tool_enabled`；关=安全动作直接执行）
+  - `get_active_preset(tool_id) -> Option<String>`——M2 开关状态渲染的数据源（spec §4「基底快照查询」）
+  - `preview_apply_preset(preset_id, tool_id) -> Result<ApplyPreview, String>`——应用确认弹窗（spec §7.3）的 dry-run 数据源：纯计算不执行
+  - `ApplyPreview { to_enable: Vec<String>, filtered: Vec<String>, to_disable: Vec<String>, to_stash: Vec<String>, resident_exempt: Vec<String> }`（services 层 `preview_apply` 同构）
   - `set_resource_binding(extension_id, exclusive_tools: Vec<String>, reason: Option<String>)`、`list_resource_bindings() -> Vec<ResourceBindingRecord>`、`delete_resource_binding(extension_id)`
   - `set_tool_resident(tool_id, extension_id, resident: bool)`、`list_tool_residents(tool_id) -> Vec<String>`
   - `delete_preset` 增守卫：激活中的预设不可删（提示先恢复）
@@ -2029,7 +2087,7 @@ fn delete_rejects_active_preset() {
     use multi_agents_manager_lib::database;
     use multi_agents_manager_lib::services::preset::apply_preset;
 
-    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let home = dirs::home_dir().unwrap();
     let ssot = home.join(".mam/skills/v2m1-del-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
@@ -2050,6 +2108,46 @@ fn delete_rejects_active_preset() {
 }
 ```
 
+再加预览与开关状态命令的测试：
+
+```rust
+/// 预览（dry-run）不动现场；get_active_preset 反映开关状态
+#[test]
+fn preview_is_dryrun_and_active_preset_queryable() {
+    support::setup();
+    use multi_agents_manager_lib::commands::preset as cmd;
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{apply_preset, preview_apply, restore_tool};
+
+    assert_eq!(cmd::get_active_preset("claude".into()), None);
+
+    let home = dirs::home_dir().unwrap();
+    let claude_dir = home.join(".claude/skills");
+    std::fs::create_dir_all(claude_dir.join("v2m1-pv-native")).unwrap();
+    let ssot = home.join(".mam/skills/v2m1-pv-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-pv-a".into(), kind: "skill".into(), name: "v2m1-pv-a".into(),
+        description: None, source_path: ssot.to_string_lossy().to_string(),
+        source_url: None, version: None, tags: None, suite: None,
+        source_tool: None, is_native: false,
+    }).unwrap();
+    let pid = database::create_preset("v2m1-pv", &[("skill-v2m1-pv-a".into(), "skill".into())]).unwrap();
+
+    let pv = preview_apply(&pid, "claude").unwrap();
+    assert_eq!(pv.to_enable, vec!["skill-v2m1-pv-a".to_string()]);
+    assert!(pv.to_stash.contains(&"v2m1-pv-native".to_string()));
+    assert!(pv.filtered.is_empty());
+    assert!(claude_dir.join("v2m1-pv-native").exists(), "预览不得动现场");
+
+    apply_preset(&pid, "claude").unwrap();
+    assert_eq!(cmd::get_active_preset("claude".into()), Some(pid.clone()));
+    let _ = restore_tool("claude");
+    assert_eq!(cmd::get_active_preset("claude".into()), None);
+}
+```
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test delete_rejects`
@@ -2057,7 +2155,65 @@ Expected: FAIL——旧 delete_preset 无守卫直接删
 
 - [ ] **Step 3: 实现命令**
 
-`commands/preset.rs` 追加/修改（`use` 段补 `RestoreResult, ResourceBindingRecord, PresetRecord` 路径 `crate::services::preset` / `crate::database`）：
+`commands/preset.rs` 追加/修改（`use` 段补 `RestoreResult, ApplyPreview, ResourceBindingRecord, PresetRecord` 路径 `crate::services::preset` / `crate::database`）。
+
+先在 `services/preset/mod.rs` 加预览（纯计算，复用 T5 兼容判定 + T8 清扫计划，不执行任何文件/DB 写操作）：
+
+```rust
+/// 应用预览（spec §7.3 差异确认弹窗数据源）：dry-run，不执行、不动现场
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreview {
+    /// 将启用（专属过滤后）的 extension_id
+    pub to_enable: Vec<String>,
+    /// 被专属绑定过滤的项 "id: 原因"
+    pub filtered: Vec<String>,
+    /// 将停用的 MAM 资源 extension_id
+    pub to_disable: Vec<String>,
+    /// 将暂存的原生技能名
+    pub to_stash: Vec<String>,
+    /// 常驻豁免（当前生效、不在预设、但受常驻保护）的 extension_id
+    pub resident_exempt: Vec<String>,
+}
+
+pub fn preview_apply(preset_id: &str, tool_id: &str) -> Result<ApplyPreview, String> {
+    let preset = database::get_preset(preset_id).ok_or_else(|| format!("预设不存在: {}", preset_id))?;
+    if preset.scope == "tool" && preset.bound_tool.as_deref() != Some(tool_id) {
+        return Err(format!(
+            "预设 {} 绑定 {}，不能应用到 {}",
+            preset.name,
+            preset.bound_tool.as_deref().unwrap_or("?"),
+            tool_id
+        ));
+    }
+    let mut apply_items: Vec<(String, String)> = Vec::new();
+    let mut out = ApplyPreview::default();
+    for (ext_id, kind) in database::get_preset_items(preset_id) {
+        if database::tool_allowed(&ext_id, tool_id) {
+            apply_items.push((ext_id, kind));
+        } else {
+            out.filtered.push(format!("{}: 专属绑定不兼容 {}", ext_id, tool_id));
+        }
+    }
+    let plan = sweep::plan_sweep(tool_id, &apply_items);
+    out.to_enable = apply_items.into_iter().map(|(id, _)| id).collect();
+    out.to_disable = plan.disable_mam.into_iter().map(|(id, _)| id).collect();
+    out.to_stash = plan.stash_native;
+    // 常驻豁免清单：与 plan_sweep 的跳过逻辑对齐（当前生效 − 预设 − 常驻保护）
+    let keep: Vec<String> = out.to_enable.clone();
+    for item in snapshot::scan_tool_state(tool_id) {
+        if keep.contains(&item.extension_id) {
+            continue;
+        }
+        if database::is_tool_resident(tool_id, &item.extension_id) {
+            out.resident_exempt.push(item.extension_id);
+        }
+    }
+    Ok(out)
+}
+```
+
+命令层追加：
 
 ```rust
 #[tauri::command]
@@ -2105,6 +2261,18 @@ pub fn update_preset(
 pub fn restore_preset(tool_id: String) -> Result<RestoreResult, String> {
     crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::preset::restore_tool(&tool_id)
+}
+
+/// 工具当前激活的预设（开关状态数据源；无激活 = None）
+#[tauri::command]
+pub fn get_active_preset(tool_id: String) -> Option<String> {
+    crate::database::get_base_snapshot(&tool_id).and_then(|(active, _)| active)
+}
+
+/// 应用预览（确认弹窗数据源，dry-run）
+#[tauri::command]
+pub fn preview_apply_preset(preset_id: String, tool_id: String) -> Result<ApplyPreview, String> {
+    crate::services::preset::preview_apply(&preset_id, &tool_id)
 }
 
 #[tauri::command]
@@ -2182,6 +2350,8 @@ pub fn deactivate_preset(preset_id: String, tool_id: String) -> Result<(), Strin
         commands::preset::get_preset,
         commands::preset::update_preset,
         commands::preset::restore_preset,
+        commands::preset::get_active_preset,
+        commands::preset::preview_apply_preset,
         commands::preset::set_resource_binding,
         commands::preset::list_resource_bindings,
         commands::preset::delete_resource_binding,
@@ -2231,11 +2401,11 @@ fn mcp_import_and_backfill_register_rows() {
     use multi_agents_manager_lib::services::resource::backfill_registry;
 
     // 手工放一个 MCP 配置文件（历史上 toggle_mcp 只写 assignment 不写表）
-    let repo = PathBuf::from(std::env::var("HOME").unwrap()).join(".mam/mcp");
+    let repo = dirs::home_dir().unwrap().join(".mam/mcp");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(repo.join("v2m1-backfill-mcp.json"), r#"{"command":"x"}"#).unwrap();
     // 手工放一个无行的 skill 目录（历史残留/手工放置）
-    let skill = PathBuf::from(std::env::var("HOME").unwrap()).join(".mam/skills/v2m1-backfill-skill");
+    let skill = dirs::home_dir().unwrap().join(".mam/skills/v2m1-backfill-skill");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "x").unwrap();
 
