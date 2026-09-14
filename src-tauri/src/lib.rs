@@ -66,6 +66,9 @@ pub fn run() {
                     log::warn!("pet window create failed: {}", e);
                 }
             });
+            // M2 远程接入：按设置恢复远程服务器（开机自启语义；内部用
+            // tauri::async_runtime，无 runtime 上下文的主线程可安全调用）
+            crate::remote::restore_on_launch();
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -150,6 +153,10 @@ pub fn run() {
         commands::manifest::install_resource_from_manifest,
         commands::manifest::uninstall_resource,
         commands::manifest::get_store_index,
+        remote::remote_toggle,
+        remote::remote_status,
+        remote::remote_issue_token,
+        remote::remote_confirm_public,
     ]);
 
     #[cfg(not(debug_assertions))]
