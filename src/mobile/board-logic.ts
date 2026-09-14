@@ -2,17 +2,23 @@
 // （相对时长接收 now 参数，组件侧传 Date.now()，保证可测性）
 import type { AgentType, Session, SessionStatus } from "@/types/session";
 
-/** 八工具 chips 顺序（与 src/types/session.ts 的 AgentType 声明顺序一致） */
-export const AGENT_TYPES: readonly AgentType[] = [
-  "claude",
-  "codex",
-  "opencode",
-  "openclaw",
-  "kimi",
-  "workbuddy",
-  "zcode",
-  "dsh",
-] as const;
+// 穷尽守卫（类型级，以 src/types/session.ts 的 AgentType 为源）：
+// Record 键集必须与 AgentType 完全一致——未来 AgentType 增/删第 9 值时，
+// 此处缺失或多余的键会直接编译报错，chips 不会静默缺失。
+// 字面量键序即 chips 展示顺序（Object.values 对字符串键保证按插入序返回）。
+const AGENT_TYPE_RECORD: Record<AgentType, AgentType> = {
+  claude: "claude",
+  codex: "codex",
+  opencode: "opencode",
+  openclaw: "openclaw",
+  kimi: "kimi",
+  workbuddy: "workbuddy",
+  zcode: "zcode",
+  dsh: "dsh",
+};
+
+/** 八工具 chips 顺序（键集穷尽自 AgentType，顺序与其在 session.ts 的声明顺序一致） */
+export const AGENT_TYPES: readonly AgentType[] = Object.values(AGENT_TYPE_RECORD);
 
 export type ToolFilter = AgentType | "all";
 

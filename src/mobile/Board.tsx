@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchSessions } from "./api";
 import {
   STATUS_DOT_COLOR,
@@ -13,6 +13,8 @@ import type { SessionsResponse } from "@/types/session";
 const POLL_MS = 3000;
 
 interface BoardProps {
+  /** 首次成功拉到数据时回调（一次）：探测成功信号，App 由此把 paired null→true（已配对设备免重配） */
+  onPaired: () => void;
   /** 轮询收到 403（设备失效）时回调：App 切回配对页 */
   onUnpaired: () => void;
 }
@@ -20,19 +22,29 @@ interface BoardProps {
 // 移动看板：自持 3s 轮询（含挂载后首拍 = 探测），App 不再持有任何拉取逻辑。
 // 失败口径：403 → 回配对页；网络异常（fetch reject，如服务器关闭）→ 保留上次数据 +
 // 错误横幅继续重试（不白屏、不误踢回配对页，支撑"重启免重配"自愈）。
-export default function Board({ onUnpaired }: BoardProps) {
+export default function Board({ onPaired, onUnpaired }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [filter, setFilter] = useState<ToolFilter>("all");
   // 相对时长的基准时钟：随每拍轮询刷新（react-hooks/purity 禁止渲染期直接调 Date.now）
   const [now, setNow] = useState(() => Date.now());
+  // 首拍成功通知只发一次：防每拍回调导致父级无谓重渲染；重挂载（403 后重配）时随组件自然复位
+  const aliveRef = useRef(false);
+  // in-flight 守卫：慢网下上一拍未返回时跳过新拍，防早发慢到的旧响应覆盖新数据
+  const inFlightRef = useRef(false);
 
   const tick = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const s = await fetchSessions<SessionsResponse>();
       if (s === null) {
         onUnpaired(); // 设备失效 → 回配对页
         return;
+      }
+      if (!aliveRef.current) {
+        aliveRef.current = true;
+        onPaired(); // 首拍成功（首拍 = 探测）：通知 App 配对仍有效，只发一次
       }
       setData(s);
       setNow(Date.now());
@@ -40,8 +52,10 @@ export default function Board({ onUnpaired }: BoardProps) {
     } catch {
       // 网络异常：保持上次数据与上次时钟，仅提示重试中
       setLoadError(true);
+    } finally {
+      inFlightRef.current = false; // 无论成败都放行下一拍
     }
-  }, [onUnpaired]);
+  }, [onPaired, onUnpaired]);
 
   useEffect(() => {
     void tick();
