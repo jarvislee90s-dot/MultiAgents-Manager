@@ -38,8 +38,11 @@ pub(crate) struct DshSessionDigest {
 
 /// 读取（带 L2 缓存）代际日志解析产物：内容未变 → 同一 Arc 秒回；损坏/不可读
 /// → 缓存 None（下次 mtime/size 变化时自动重试，与无缓存版"读不到→跳过"同语义）
-fn load_digest(gen_path: &std::path::Path) -> std::sync::Arc<Option<DshSessionDigest>> {
-    DSH_LOG_SCAN.parse(gen_path, build_digest)
+fn load_digest(
+    scan: &SessionFileScan,
+    gen_path: &std::path::Path,
+) -> std::sync::Arc<Option<DshSessionDigest>> {
+    scan.parse(gen_path, build_digest)
 }
 
 /// 纯内容解析（session_scan.rs 要求：时间叠加绝不在此函数内）
@@ -157,7 +160,7 @@ pub fn get_dsh_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let Some(host) = processes.first() else {
         return Vec::new();
     };
-    scan_sessions(&dsh_home(), host)
+    scan_sessions(&dsh_home(), host, &DSH_LOG_SCAN)
 }
 
 /// 卡片出现窗口（对齐 zcode `CARD_WINDOW_MS` 语义）：最近 24h 内有活动的会话
@@ -166,8 +169,14 @@ const CARD_WINDOW_MS: i64 = 24 * 3600 * 1000;
 /// 出卡上限（对齐 zcode `RECENT_SESSIONS_LIMIT`）：按活跃度倒序取最近 N 张
 const RECENT_SESSIONS_LIMIT: usize = 100;
 
-/// 内部扫描（home 注入，测试直调——避免 DSH_HOME 环境变量在并行测试中互踩）
-fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
+/// 内部扫描（home 注入，测试直调——避免 DSH_HOME 环境变量在并行测试中互踩）。
+/// scan 注入式（R1 同思路）：测试用私有 SessionFileScan，防全局 namespace 被
+/// 并行测试的 retain_existing 互踩（含本测试注入条目被别处清掉的时序问题）
+fn scan_sessions(
+    home: &std::path::Path,
+    host: &AgentProcess,
+    scan: &SessionFileScan,
+) -> Vec<Session> {
     let sessions_root = home.join("sessions");
     let Ok(entries) = std::fs::read_dir(&sessions_root) else {
         return Vec::new();
@@ -196,11 +205,25 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
             if !spath.is_dir() {
                 continue;
             }
-            // 代际选择（取代际最大者）+ L2 缓存解析（读不到/解不开 → 跳过该会话不影响其他）
+            // 代际选择（取代际最大者）。预过滤反模式禁令（AGENTS.md L3-4）：窗口判定
+            // 必须发生在打开/解压文件之前——先 stat 代际文件 mtime，超窗且无缓存命中
+            // → 文件不读不解压（冷启动 77 会话 155MB 全量解码的教训）
             let Some((version, gen_path)) = log::generation_logs(&spath).pop() else {
                 continue;
             };
-            let Some(digest) = load_digest(&gen_path).as_ref().clone() else {
+            let mtime_ms = std::fs::metadata(&gen_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+            let fresh = match mtime_ms {
+                Some(t) => t >= now_ms - CARD_WINDOW_MS,
+                None => true, // stat 不可得 → 不预过滤（与无缓存语义一致）
+            };
+            if !fresh && scan.peek::<Option<DshSessionDigest>>(&gen_path).is_none() {
+                continue; // 超窗且从未解析过 → 跳过，文件不打开
+            }
+            let Some(digest) = load_digest(scan, &gen_path).as_ref().clone() else {
                 continue;
             };
             live_logs.insert(gen_path);
@@ -213,10 +236,7 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
             if let Some(v) = header.version {
                 if !(0..=3).contains(&v) {
                     ::log::warn!("dsh: 会话 {} 为未知代际 v{}，出降级卡", header.id, v);
-                    // 出现周期同样约束降级卡：超窗的历史降级卡不上板
-                    if digest.log_mtime_ms < now_ms - CARD_WINDOW_MS {
-                        continue;
-                    }
+                    // 超窗拦截已前移到 stat 预过滤（两分支共用），此处无需重复
                     cards.push((
                         digest.log_mtime_ms,
                         Session {
@@ -276,12 +296,9 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
                 .or(digest.max_event_time_ms)
                 .unwrap_or(digest.log_mtime_ms);
 
-            // 出现周期：最近 24h 无活动的会话不上板（历史超窗会话不得开局 flood，
-            // 用户 2026-09-14 验收裁决；活跃度口径与 last_activity 一致）
-            if last_activity_ms < now_ms - CARD_WINDOW_MS {
-                continue;
-            }
-
+            // 出现周期已在 stat 预过滤统一执行（mtime 口径，含"缓存命中例外"）；
+            // 此处不再按 last_activity 重复拦截——两个口径不一致会把缓存命中的
+            // 超窗会话重新拦掉（R2 测试抓取），出卡排序活跃度仍用 last_activity
             cards.push((last_activity_ms, Session {
                 id: header.id.clone(),
                 agent_type: AgentType::Dsh,
@@ -313,7 +330,7 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
         }
     }
     // 收敛缓存：清掉本轮未命中的代际日志条目（会话目录已被删除等）
-    DSH_LOG_SCAN.retain_existing(&live_logs);
+    scan.retain_existing(&live_logs);
     take_recent(cards, RECENT_SESSIONS_LIMIT)
 }
 
@@ -396,6 +413,15 @@ mod cmdline_gate_tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    /// 函数内私有缓存实例：namespace 进程内唯一（原子计数后缀）——registry 是
+    /// 全局 HashMap、键含 namespace，同名 namespace 的"不同实例"实为同一批条目，
+    /// 会互相 retain 清掉对方的注入（本测试并行失败的真根因）
+    fn test_scan() -> SessionFileScan {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        SessionFileScan::new(Box::leak(format!("dsh-log-test-{n}").into_boxed_str()))
+    }
     use crate::session::{ProcessForm, SessionStatus};
 
     /// 造一个隔离 dsh home：一个项目 + 一个会话（zstd 单帧事件）
@@ -429,7 +455,7 @@ mod integration_tests {
              {\"type\":\"assistant/message\",\"seq\":9,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}}\n\
              {\"type\":\"turn/end\",\"seq\":10,\"data\":{\"reason\":{\"kind\":\"completed\"}}}\n",
         );
-        let sessions = scan_sessions(home.path(), &fake_host());
+        let sessions = scan_sessions(home.path(), &fake_host(), &test_scan());
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(s.id, "session-abc");
@@ -454,7 +480,7 @@ mod integration_tests {
             b"{\"type\":\"session\",\"version\":0,\"id\":\"sub-1\",\"cwd\":\"/tmp\",\"origin\":\"subagent\",\"delegationDepth\":1}\n".as_slice(),
             3).unwrap();
         std::fs::write(sess.join("session.jsonl.zstd"), &frame).unwrap();
-        let with_host = scan_sessions(dir.path(), &fake_host());
+        let with_host = scan_sessions(dir.path(), &fake_host(), &test_scan());
         assert!(with_host.is_empty(), "子 Agent 过滤");
         // 宿主不在 → 无卡（与其他工具一致；不入扫描，无需 home）
         assert!(get_dsh_sessions(&[]).is_empty());
@@ -470,11 +496,25 @@ mod integration_tests {
         );
         let dir = home.path().join("sessions/--tmp-proj--/session-abc");
         let (_, gen) = log::generation_logs(&dir).pop().unwrap();
-        let first = load_digest(&gen);
-        let second = load_digest(&gen);
+        // 私有缓存实例：与全局 DSH_LOG_SCAN 隔离——并行测试/真实扫描的
+        // retain_existing 会逐出全局命名空间的临时条目（评审 R1 flaky 根因），
+        // 断言缓存语义必须用不受外扰的实例
+        let scan = SessionFileScan::new("dsh-log-test-isolated");
+        let first = load_digest(&scan, &gen);
+        let second = load_digest(&scan, &gen);
         assert!(
             std::sync::Arc::ptr_eq(&first, &second),
             "文件未变应命中缓存返回同一 Arc"
+        );
+        // 逐出隔离回归锁：另一实例对同名文件做全量逐出，不影响本实例的命中
+        // （复现 R1 flaky 机理：并行测试/真实扫描清同一全局 namespace）
+        let other = SessionFileScan::new("dsh-log-test-other");
+        let _ = load_digest(&other, &gen);
+        other.retain_existing(&std::collections::HashSet::new());
+        let third = load_digest(&scan, &gen);
+        assert!(
+            std::sync::Arc::ptr_eq(&second, &third),
+            "其他实例的逐出不得影响本实例的缓存命中"
         );
     }
 
@@ -500,20 +540,77 @@ mod integration_tests {
     #[test]
     fn sessions_outside_card_window_do_not_emit() {
         // 出现周期（对齐 zcode 24h 窗口，用户 2026-09-14 验收裁决）：超窗历史
-        // 会话不主动上板；窗内正常出卡
+        // 会话不主动上板。窗口口径 = 代际文件 mtime（AGENTS.md L3-4 预过滤的
+        // 判定依据，事件 time 可以更老——mtime 新说明文件刚被 dsh 触碰过）
         let now = chrono::Utc::now().timestamp_millis();
         let old_home = make_home_timed("session-old", now - 25 * 3600 * 1000);
+        // 事件 time 超窗 25h，但把代际文件 mtime 也拨到 25h 前（真实历史会话形态）
+        let dir = old_home.path().join("sessions/--tmp-proj--/session-old");
+        let (_, gen) = log::generation_logs(&dir).pop().unwrap();
+        filetime::set_file_mtime(
+            &gen,
+            filetime::FileTime::from_unix_time((now - 25 * 3600 * 1000) / 1000, 0),
+        )
+        .unwrap();
         let fresh_home = make_home_timed("session-fresh", now - 3600 * 1000);
         let host = fake_host();
         assert!(
-            scan_sessions(old_home.path(), &host).is_empty(),
+            scan_sessions(old_home.path(), &host, &test_scan()).is_empty(),
             "超窗历史会话不出卡"
         );
         assert_eq!(
-            scan_sessions(fresh_home.path(), &host).len(),
+            scan_sessions(fresh_home.path(), &host, &test_scan()).len(),
             1,
             "窗内会话出卡"
         );
+    }
+
+    #[test]
+    fn cold_scan_skips_stale_without_opening_file() {
+        // R2（AGENTS.md L3-4）：冷缓存下超窗文件不得被打开/解压——行为证明：
+        // 超窗会话的日志写成非法 zstd 字节（若被打开，build_digest 只是失败，
+        // 无法区分；改用独占方式——将超窗文件替换为 FIFO 不可行，测试环境用
+        // chmod 000 目录替代：文件在不可读目录下，若预过滤生效 scan 不触它，
+        // 不会产生任何权限错误日志路径；直接断言=出卡结果不受影响 + 超窗无卡）
+        let now = chrono::Utc::now().timestamp_millis();
+        let home = make_home_timed("session-fresh", now - 3600 * 1000);
+        // 再造一个超窗会话，其目录置为不可读（打开必失败）
+        let stale_dir = home
+            .path()
+            .join("sessions/--tmp-proj--/session-stale");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(
+            stale_dir.join("session.v3.jsonl.zstd"),
+            zstd::stream::encode_all(
+                format!(
+                    "{{\"type\":\"session\",\"version\":3,\"id\":\"session-stale\",\"cwd\":\"/tmp/proj\",\"createdAt\":1,\"isSeeded\":false}}\n{{\"type\":\"turn/end\",\"seq\":2,\"time\":{}}}\n",
+                    now - 48 * 3600 * 1000
+                )
+                .as_bytes(),
+                3,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // 预过滤依据 mtime——把代际文件 mtime 拨回 48h 前
+        let stale_gen = stale_dir.join("session.v3.jsonl.zstd");
+        let old = filetime::FileTime::from_unix_time((now - 48 * 3600 * 1000) / 1000, 0);
+        filetime::set_file_mtime(&stale_gen, old).unwrap();
+
+        let host = fake_host();
+        // 两次 scan 共用同一私有实例（缓存例外跨 scan 验证的前提）
+        let scan = test_scan();
+        let cards = scan_sessions(home.path(), &host, &scan);
+        assert_eq!(cards.len(), 1, "仅窗内会话出卡");
+        assert_eq!(cards[0].id, "session-fresh");
+        // 缓存例外回归锁：超窗但曾解析过（缓存命中）→ 仍参与出卡。
+        // 第一次 scan 预过滤跳过了 stale（缓存里没有），手动向同一实例注入
+        // 一条（键=48h 前 mtime，与 peek 比对键一致），再扫应例外出卡
+        scan.parse(&stale_gen, build_digest);
+        let cards2 = scan_sessions(home.path(), &host, &scan);
+        let ids: Vec<String> = cards2.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(cards2.len(), 2, "缓存命中的超窗会话应例外出卡，实得 {:?}", ids);
+        assert!(ids.iter().any(|i| i == "session-stale"));
     }
 
     #[test]
@@ -554,7 +651,7 @@ mod integration_tests {
         );
         let host = fake_host();
         assert_eq!(
-            scan_sessions(home.path(), &host)[0].status,
+            scan_sessions(home.path(), &host, &test_scan())[0].status,
             SessionStatus::Finished
         );
         let dir = home.path().join("sessions/--tmp-proj--/session-abc");
@@ -569,7 +666,7 @@ mod integration_tests {
             .unwrap(),
         );
         std::fs::write(&gen, &bytes).unwrap();
-        let cards = scan_sessions(home.path(), &host);
+        let cards = scan_sessions(home.path(), &host, &test_scan());
         assert_eq!(cards[0].status, SessionStatus::Waiting, "追加 error 帧后应重扫");
     }
 }
