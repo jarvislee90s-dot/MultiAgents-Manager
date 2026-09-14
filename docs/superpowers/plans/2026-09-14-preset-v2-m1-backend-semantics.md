@@ -92,7 +92,7 @@
 
 - [x] **Step 2: 运行测试确认失败**
 
-Run: `cd src-tari && cargo test migrate_adds_preset_v2 -- --nocapture`（注意目录是 `src-tauri`）
+Run: `cd src-tauri && cargo test migrate_adds_preset_v2 -- --nocapture`（注意目录是 `src-tauri`）
 Expected: FAIL——`presets 缺列 description`
 
 - [x] **Step 3: schema.rs——presets CREATE 补列 + 追加 5 张表**

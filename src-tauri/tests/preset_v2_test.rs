@@ -3,6 +3,10 @@ mod support; // 若 tests/ 下 support.rs 非共享 mod，按 dao_test.rs 的引
 /// P2②：兼容判定改查 resource_bindings——claude 来源的 skill 不再对 codex 误报不兼容
 #[test]
 fn check_compatibility_uses_bindings_not_tags() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     support::setup();
     use multi_agents_manager_lib::database;
     use multi_agents_manager_lib::services::preset::check_compatibility;
