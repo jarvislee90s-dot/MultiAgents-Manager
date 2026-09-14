@@ -1,5 +1,6 @@
 // 预设组应用逻辑 — 增量应用 + 精确移除 + 部分成功处理
 
+pub mod snapshot;
 pub mod stash;
 
 use crate::database;

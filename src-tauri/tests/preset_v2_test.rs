@@ -44,15 +44,15 @@ fn check_compatibility_uses_bindings_not_tags() {
 
 use std::sync::{Mutex, OnceLock};
 
-/// 两个 stash 测试共享进程级 fake HOME 与 stash_journal 账本（账本按 tool_id 查询，
-/// 无法用目录名区分），并行跑会互相读到对方条目 —— 用互斥锁强制串行
-static STASH_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+/// 共享进程级 fake HOME 与全局状态的测试（stash 账本按 tool_id 查询无法用目录名
+/// 区分；基底快照与工具 skill 目录同为共享态），并行跑会互相踩踏 —— 用互斥锁强制串行
+static PRESET_V2_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// 暂存往返：真目录移入 ~/.mam/stash/<tool>/skills 再移回；账本同步
 #[test]
 fn stash_and_restore_roundtrip() {
     support::setup();
-    let _ledger = STASH_TEST_LOCK
+    let _ledger = PRESET_V2_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -84,7 +84,7 @@ fn stash_and_restore_roundtrip() {
 #[test]
 fn stash_restore_conflict_keeps_stash() {
     support::setup();
-    let _ledger = STASH_TEST_LOCK
+    let _ledger = PRESET_V2_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -115,4 +115,71 @@ fn stash_restore_conflict_keeps_stash() {
     assert!(n >= 1);
     assert!(tool_dir.join("v2m1-native-b/SKILL.md").exists());
     assert!(database::unrestored_stash(None).iter().all(|e| e.skill_name != "v2m1-native-b"));
+}
+
+/// 状态扫描：MAM 启用项 + 原生真目录都要进基底；链接不重复计为原生
+#[test]
+fn scan_tool_state_captures_mam_and_native() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::snapshot;
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    // SSOT 造一个 MAM skill 并为 claude 启用（建链接）
+    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-scan-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-scan-a".into(),
+        kind: "skill".into(),
+        name: "v2m1-scan-a".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m1-scan-a", "claude").unwrap();
+    // 子 Agent 分配行不得让同一 ext_id 重复入基底（快照 PK 冲突防护）
+    database::upsert_assignment_with_subagent("skill-v2m1-scan-a", "claude", "v2m1-scan-sub", true, "valid")
+        .unwrap();
+
+    // claude 目录再放一个原生真目录
+    let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
+    std::fs::create_dir_all(claude_dir.join("v2m1-scan-native")).unwrap();
+    std::fs::write(claude_dir.join("v2m1-scan-native/SKILL.md"), "y").unwrap();
+
+    let state = snapshot::scan_tool_state("claude");
+    let find = |id: &str| state.iter().find(|i| i.extension_id == id);
+
+    let mam = find("skill-v2m1-scan-a").expect("MAM 启用项应入基底");
+    assert_eq!(mam.origin, "mam");
+    assert_eq!(mam.kind, "skill");
+    assert_eq!(
+        state.iter().filter(|i| i.extension_id == "skill-v2m1-scan-a").count(),
+        1,
+        "子 Agent 分配行不得让同一 ext_id 重复计入"
+    );
+    let native = find("skill-v2m1-scan-native").expect("原生真目录应入基底");
+    assert_eq!(native.origin, "native");
+
+    // 拍快照 → 可读回
+    snapshot::capture_base_snapshot("claude").unwrap();
+    let (active, items) = database::get_base_snapshot("claude").unwrap();
+    assert!(active.is_none());
+    assert!(items.iter().any(|i| i.extension_id == "skill-v2m1-scan-a" && i.origin == "mam"));
+    assert!(items.iter().any(|i| i.extension_id == "skill-v2m1-scan-native" && i.origin == "native"));
+
+    // 清场，避免影响其他测试
+    let _ = database::disable_subagent_assignment("skill-v2m1-scan-a", "claude", "v2m1-scan-sub");
+    disable_skill_for_tool("v2m1-scan-a", "claude").unwrap();
+    database::destroy_base_snapshot("claude").unwrap();
 }

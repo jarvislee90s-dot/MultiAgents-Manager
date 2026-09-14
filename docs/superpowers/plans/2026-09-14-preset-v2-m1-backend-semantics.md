@@ -1206,7 +1206,7 @@ git commit -m "feat(preset-v2): native skill stash engine with journal + orphan 
   - `scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord>`——MAM 项来自 `list_assignments(tool_id)` 的 enabled 行（kind 按 id 前缀 `skill-`/`mcp-`/`plugin-`），原生项来自 `primary_skill_dir` 下的真目录（非 symlink 且非链接穿透），`origin = "mam" | "native"`
   - `capture_base_snapshot(tool_id: &str) -> Result<(), String>`——scan + `save_base_snapshot(tool_id, None, items)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/preset_v2_test.rs` 追加：
 
@@ -1279,12 +1279,12 @@ fn scan_tool_state_captures_mam_and_native() {
 
 注意：测试里的 `let repo = database::list_extensions;` 是防告警的丑写法——实现时直接删掉这两行。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test scan_tool_state`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现 `services/preset/snapshot.rs`**
+- [x] **Step 3: 实现 `services/preset/snapshot.rs`**
 
 ```rust
 // 状态扫描与基底拍快照（spec §3.2/§5.1 步骤3）：拍快照先于任何清扫动作
@@ -1355,7 +1355,7 @@ pub fn capture_base_snapshot(tool_id: &str) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 4: 跑测试 + Commit**
+- [x] **Step 4: 跑测试 + Commit**
 
 Run: `cd src-tauri && cargo test scan_tool_state && cargo test`
 Expected: PASS
