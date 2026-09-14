@@ -254,12 +254,9 @@ pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityRepor
             .map(|e| e.name.clone())
             .unwrap_or_else(|| ext_id.clone());
 
-        // 检查兼容性：tags 字段包含目标工具 ID
-        let is_compatible = ext
-            .as_ref()
-            .and_then(|e| e.tags.as_ref())
-            .map(|tags| tags.split(',').any(|t| t.trim() == tool_id))
-            .unwrap_or(true); // 默认兼容（无标记则兼容所有工具）
+        // 兼容判定（spec §6）：真值源是 resource_bindings（手动标记），
+        // extensions.tags 不再参与（其语义是来源工具/插件子类型，历史误用）
+        let is_compatible = crate::database::tool_allowed(&ext_id, tool_id);
 
         if is_compatible {
             compatible.push(CompatibleItem {
@@ -268,11 +265,14 @@ pub fn check_compatibility(preset_id: &str, tool_id: &str) -> CompatibilityRepor
                 kind,
             });
         } else {
+            let bound = crate::database::get_resource_binding(&ext_id)
+                .map(|b| b.exclusive_tools)
+                .unwrap_or_default();
             incompatible.push(IncompatibleItem {
                 id: ext_id,
                 name,
                 kind,
-                reason: format!("不支持 {}", tool_id),
+                reason: format!("专属 {}，不支持 {}", bound, tool_id),
             });
         }
     }

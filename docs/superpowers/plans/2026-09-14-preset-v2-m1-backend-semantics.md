@@ -907,7 +907,7 @@ git commit -m "feat(preset-v2): base snapshot + stash journal DAO"
 - Consumes: Task 3 的 `tool_allowed`
 - Produces: `check_compatibility(preset_id, tool_id) -> CompatibilityReport` 签名不变（`commands/resource.rs:297` 调用方无感）；行为变化：判定源从 `extensions.tags` 换成 `resource_bindings`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 新建 `src-tauri/tests/preset_v2_test.rs`：
 
@@ -957,12 +957,12 @@ fn check_compatibility_uses_bindings_not_tags() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test check_compatibility_uses_bindings`
 Expected: FAIL——旧 tags 逻辑把 `tags="claude"` 判为 claude 专属，codex 走 incompatible
 
-- [ ] **Step 3: 重写 `check_compatibility`**
+- [x] **Step 3: 重写 `check_compatibility`**
 
 `services/preset/mod.rs` 中 `check_compatibility` 的判定段（原 257-262 行的 tags 分支）替换为：
 
@@ -990,7 +990,7 @@ Expected: FAIL——旧 tags 逻辑把 `tags="claude"` 判为 claude 专属，co
         }
 ```
 
-- [ ] **Step 4: 跑测试 + 全量 + Commit**
+- [x] **Step 4: 跑测试 + 全量 + Commit**
 
 Run: `cd src-tauri && cargo test check_compatibility && cargo test`
 Expected: PASS
