@@ -34,6 +34,9 @@ pub fn run() {
         // 清扫 .import-staging 崩溃残留（issue #32-3）：必须先于增量导入/补链执行，
         // 二者可能耗时数秒，期间 IPC 已可用、用户可能已发起导入，晚清扫会误删活跃暂存区
         services::pet::sweep_staging();
+        // 预设 v2：孤儿暂存回移 + 注册表回填（先于导入/补链，保证表口径就绪）
+        services::preset::stash::recover_orphans();
+        services::resource::backfill_registry();
         services::auto_import_extensions(false);
         services::sync_imported_skill_links();
     });

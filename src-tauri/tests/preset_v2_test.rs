@@ -475,3 +475,53 @@ fn preview_is_dryrun_and_active_preset_queryable() {
     let _ = restore_tool("claude");
     assert_eq!(cmd::get_active_preset("claude".into()), None);
 }
+
+/// P2①：MCP 入 SSOT 必须落 extensions 行——预设创建列表与卡片从此同源；
+/// 注册表回填把历史无行的 skill/mcp 补进表
+#[test]
+fn mcp_import_and_backfill_register_rows() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::backfill_registry;
+
+    // 手工放一个 MCP 配置文件（历史上 toggle_mcp 只写 assignment 不写表）
+    let repo = dirs::home_dir().unwrap().join(".mam/mcp");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("v2m1-backfill-mcp.json"), r#"{"command":"x"}"#).unwrap();
+    // 手工放一个无行的 skill 目录（历史残留/手工放置）
+    let skill = dirs::home_dir().unwrap().join(".mam/skills/v2m1-backfill-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "x").unwrap();
+
+    assert!(database::list_extensions().iter().all(|e| e.id != "mcp-v2m1-backfill-mcp"));
+    backfill_registry();
+
+    let ids: Vec<String> = database::list_extensions().iter().map(|e| e.id.clone()).collect();
+    assert!(ids.contains(&"mcp-v2m1-backfill-mcp".to_string()), "MCP 应回填入表");
+    assert!(ids.contains(&"skill-v2m1-backfill-skill".to_string()), "无行 skill 应回填");
+
+    // 幂等：再跑不重复
+    backfill_registry();
+    let n_mcp = database::list_extensions()
+        .iter()
+        .filter(|e| e.id == "mcp-v2m1-backfill-mcp")
+        .count();
+    assert_eq!(n_mcp, 1);
+
+    // save_mcp_config 命令直接落表（新导入路径）
+    multi_agents_manager_lib::commands::resource::save_mcp_config(
+        "v2m1-direct-mcp".into(),
+        "node".into(),
+        vec![],
+        Default::default(),
+    )
+    .unwrap();
+    assert!(
+        database::list_extensions().iter().any(|e| e.id == "mcp-v2m1-direct-mcp"),
+        "save_mcp_config 应写 extensions 行"
+    );
+}

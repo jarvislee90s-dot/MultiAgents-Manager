@@ -41,6 +41,19 @@ pub fn insert_extension(ext: &ExtensionRecord) -> Result<(), String> {
     ).map_err(|e| e.to_string()).map(|_| ())
 }
 
+/// 幂等回填：行不存在才插入（INSERT OR IGNORE），不覆盖既有元数据。
+/// 预设 v2 数据源统一（spec §8.1）：注册表以 extensions 表为唯一真值源
+pub fn ensure_extension(ext: &ExtensionRecord) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO extensions (id, kind, name, description, source_path, source_url, version, tags, suite, source_tool, is_native, installed_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+        params![ext.id, ext.kind, ext.name, ext.description, ext.source_path, ext.source_url, ext.version, ext.tags, ext.suite, ext.source_tool, ext.is_native as i64, &now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn list_extensions() -> Vec<ExtensionRecord> {
     let conn = DB.lock().unwrap();
     conn.prepare("SELECT id, kind, name, description, source_path, source_url, version, tags, suite, source_tool, is_native FROM extensions")

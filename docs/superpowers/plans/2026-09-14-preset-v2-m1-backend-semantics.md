@@ -2387,7 +2387,7 @@ git commit -m "feat(preset-v2): IPC commands — update/get/restore + bindings/r
   - `services::resource::backfill_registry()`——扫描 `~/.mam/skills/<dir>` 与 `~/.mam/mcp/*.json`，无行则 ensure；启动时调用
   - `import_mcp_to_ssot` / `save_mcp_config` 成功写文件后落 `extensions` 行（`kind="mcp"`）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/preset_v2_test.rs` 追加：
 
@@ -2439,12 +2439,12 @@ fn mcp_import_and_backfill_register_rows() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test mcp_import_and_backfill`
 Expected: 编译失败（backfill_registry 不存在）/ 断言失败（save_mcp_config 不落表）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `dao/extension.rs`（`insert_extension` 旁）追加：
 
@@ -2575,7 +2575,7 @@ pub fn backfill_registry() {
 
 `database/mod.rs` re-export 补 `ensure_extension`。
 
-- [ ] **Step 4: 跑测试 + 全量 + Commit**
+- [x] **Step 4: 跑测试 + 全量 + Commit**
 
 Run: `cd src-tauri && cargo test mcp_import_and_backfill && cargo test`
 Expected: PASS

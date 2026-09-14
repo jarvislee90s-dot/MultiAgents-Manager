@@ -179,7 +179,9 @@ pub fn import_native_resources(
             source_tool: Some(source_tool.clone()),
             is_native: true,
         };
-        let _ = crate::database::insert_extension(&ext);
+        if let Err(e) = crate::database::insert_extension(&ext) {
+            log::warn!("原生技能 {} 登记失败: {}", name, e);
+        }
         // 默认按来源工具自动创建工具目录链接，让 harness 立即读取 SSOT 中的 skill
         // 用户主动导入时，按来源工具自动把原生目录替换为 MAM 软链接
         if let Err(e) = crate::services::enable_skill_for_tool(&name, &source_tool) {
@@ -736,6 +738,22 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
                 mcp_name,
                 config_file.display()
             );
+            // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到
+            if let Err(e) = crate::database::insert_extension(&crate::database::ExtensionRecord {
+                id: format!("mcp-{}", mcp_name),
+                kind: "mcp".to_string(),
+                name: mcp_name.clone(),
+                description: None,
+                source_path: config_file.to_string_lossy().to_string(),
+                source_url: None,
+                version: None,
+                tags: None,
+                suite: None,
+                source_tool: None,
+                is_native: false,
+            }) {
+                log::warn!("MCP {} 登记 extensions 失败: {}", mcp_name, e);
+            }
             return Ok(());
         }
     }
@@ -764,6 +782,21 @@ pub fn save_mcp_config(
     });
     let pretty = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
+    // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到。
+    // 新建路径不该静默——登记失败以 `?` 传播，让前端拿到明确错误
+    crate::database::insert_extension(&crate::database::ExtensionRecord {
+        id: format!("mcp-{}", name),
+        kind: "mcp".to_string(),
+        name: name.clone(),
+        description: None,
+        source_path: config_file.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })?;
     log::info!("MCP 配置已保存: {}", config_file.display());
     Ok(())
 }

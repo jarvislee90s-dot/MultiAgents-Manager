@@ -25,8 +25,8 @@ pub use dao::base_snapshot::{
     destroy_base_snapshot, get_base_snapshot, save_base_snapshot, set_active_preset,
 };
 pub use dao::extension::{
-    delete_assignments_for, delete_extension, disable_subagent_assignment, insert_extension,
-    list_all_assignments, list_assignments, list_extensions, upsert_assignment,
+    delete_assignments_for, delete_extension, disable_subagent_assignment, ensure_extension,
+    insert_extension, list_all_assignments, list_assignments, list_extensions, upsert_assignment,
     upsert_assignment_with_subagent,
 };
 pub use dao::preset::{

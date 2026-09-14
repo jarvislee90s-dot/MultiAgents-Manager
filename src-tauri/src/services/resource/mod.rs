@@ -575,6 +575,68 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
     }
 }
 
+/// 注册表回填（spec §8.1 P2①）：SSOT 目录里有、extensions 表里无行的资源补登记。
+/// 启动时调用，幂等——预设创建列表（查表）与资源卡片（扫目录）从此同源
+pub fn backfill_registry() {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // skill：~/.mam/skills/<dir>
+    let skills = home.join(".mam").join("skills");
+    if skills.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&skills) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if let Some(name) = e.file_name().to_str() {
+                    let _ = crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                        id: format!("skill-{}", name),
+                        kind: "skill".to_string(),
+                        name: name.to_string(),
+                        description: None,
+                        source_path: path.to_string_lossy().to_string(),
+                        source_url: None,
+                        version: None,
+                        tags: None,
+                        suite: None,
+                        source_tool: None,
+                        is_native: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // mcp：~/.mam/mcp/<stem>.json
+    let mcp = home.join(".mam").join("mcp");
+    if mcp.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&mcp) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    let _ = crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                        id: format!("mcp-{}", stem),
+                        kind: "mcp".to_string(),
+                        name: stem.to_string(),
+                        description: None,
+                        source_path: path.to_string_lossy().to_string(),
+                        source_url: None,
+                        version: None,
+                        tags: None,
+                        suite: None,
+                        source_tool: None,
+                        is_native: false,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod import_plan_tests {
     use super::*;
