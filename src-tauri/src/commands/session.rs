@@ -5,8 +5,20 @@ use crate::session::SessionsResponse;
 use tauri::Emitter;
 
 #[tauri::command]
-pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
-    let response = adapter::get_all_sessions();
+pub async fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
+    // 重扫描移出主线程（同步命令在主线程执行）：sysinfo 全进程刷新 + 各工具
+    // 会话文件解析（如 dsh 冷启动全量解析数秒）会冻结整个 UI——dev 模式整机
+    // 卡顿的第二根因。托盘/预设更新是轻量 UI 操作，await 后照常执行
+    let response = tauri::async_runtime::spawn_blocking(adapter::get_all_sessions)
+        .await
+        .unwrap_or_else(|e| {
+            ::log::error!("会话扫描任务异常: {e}");
+            SessionsResponse {
+                sessions: Vec::new(),
+                total_count: 0,
+                waiting_count: 0,
+            }
+        });
     let has_processing = response.sessions.iter().any(|s| {
         matches!(
             s.status,
