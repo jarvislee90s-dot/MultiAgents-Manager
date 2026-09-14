@@ -1,0 +1,2 @@
+/* 移动端样式入口：仅 tailwind 原子类，不引入桌面全量样式（src/index.css） */
+@import "tailwindcss";

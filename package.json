@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:mobile": "tsc && vite build --config vite.config.mobile.ts",
     "preview": "vite preview",
     "release:version": "node scripts/release-version.mjs",
     "tauri": "tauri",
@@ -15,8 +16,8 @@
     "release:macos": "tauri build --bundles dmg && bash scripts/release.sh",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\"",
-    "lint": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts",
-    "lint:fix": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts --fix",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts vite.config.mobile.ts",
+    "lint:fix": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts vite.config.mobile.ts --fix",
     "check": "pnpm format:check && pnpm lint && pnpm check:i18n && pnpm build",
     "check:i18n": "node scripts/check-i18n.mjs",
     "test": "vitest run",
