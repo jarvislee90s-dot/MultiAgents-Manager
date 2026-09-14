@@ -416,7 +416,7 @@ git commit -m "feat(preset-v2): preset DAO — description/scope/bound_tool + up
   - `is_tool_resident(tool_id: &str, extension_id: &str) -> bool`
   - `list_tool_residents(tool_id: &str) -> Vec<String>`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/dao_test.rs` 追加：
 
@@ -466,12 +466,12 @@ fn test_resource_binding_and_resident_dao() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test test_resource_binding_and_resident_dao`
 Expected: 编译失败——函数不存在
 
-- [ ] **Step 3: 实现 `dao/resource_binding.rs`**
+- [x] **Step 3: 实现 `dao/resource_binding.rs`**
 
 ```rust
 // 专属绑定（spec §3.4/§4）：资源 → 允许工具列表（空 = 通用可迁移），手动为真值源
@@ -559,7 +559,7 @@ pub fn tool_allowed(extension_id: &str, tool_id: &str) -> bool {
 }
 ```
 
-- [ ] **Step 4: 实现 `dao/tool_resident.rs`**
+- [x] **Step 4: 实现 `dao/tool_resident.rs`**
 
 ```rust
 // 常驻名单（spec §3.4）：工具 × 资源豁免独占清扫；原生 MCP 段/自装插件定义上即常驻，不进本表
@@ -611,7 +611,7 @@ pub fn list_tool_residents(tool_id: &str) -> Vec<String> {
 
 `dao/mod.rs` 加 `pub mod resource_binding; pub mod tool_resident;`；`database/mod.rs` re-export：`pub use dao::resource_binding::{delete_resource_binding, get_resource_binding, list_resource_bindings, tool_allowed, upsert_resource_binding, ResourceBindingRecord};` 与 `pub use dao::tool_resident::{is_tool_resident, list_tool_residents, set_tool_resident};`
 
-- [ ] **Step 5: 跑测试 + Commit**
+- [x] **Step 5: 跑测试 + Commit**
 
 Run: `cd src-tauri && cargo test test_resource_binding && cargo test`
 Expected: PASS

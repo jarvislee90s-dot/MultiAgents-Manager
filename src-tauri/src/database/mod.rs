@@ -28,6 +28,11 @@ pub use dao::preset::{
     create_preset, create_preset_with_meta, delete_preset, get_preset, get_preset_items,
     list_presets, record_preset_application, record_preset_application_subagent, update_preset,
 };
+pub use dao::resource_binding::{
+    delete_resource_binding, get_resource_binding, list_resource_bindings, tool_allowed,
+    upsert_resource_binding, ResourceBindingRecord,
+};
+pub use dao::tool_resident::{is_tool_resident, list_tool_residents, set_tool_resident};
 pub use dao::session::{cleanup_stale_sessions, find_status, update_session_status};
 pub use dao::settings::{get_setting, set_setting};
 pub use dao::unread::UnreadSessionRecord;

@@ -136,3 +136,47 @@ fn test_preset_v2_crud_roundtrip() {
     database::delete_preset(&id).unwrap();
     assert!(database::get_preset(&id).is_none());
 }
+
+#[test]
+fn test_resource_binding_and_resident_dao() {
+    crate::support::setup();
+    use multi_agents_manager_lib::database;
+
+    // 默认无行 = 通用
+    assert!(database::tool_allowed("skill-v2m1-x", "codex"));
+
+    // 标记专属 codex + 原因
+    database::upsert_resource_binding("skill-v2m1-x", "codex", Some("依赖 codex App + MCP"))
+        .unwrap();
+    assert!(database::tool_allowed("skill-v2m1-x", "codex"));
+    assert!(!database::tool_allowed("skill-v2m1-x", "claude"));
+    let b = database::get_resource_binding("skill-v2m1-x").unwrap();
+    assert_eq!(b.exclusive_tools, "codex");
+    assert_eq!(b.reason.as_deref(), Some("依赖 codex App + MCP"));
+
+    // 多工具逗号分隔
+    database::upsert_resource_binding("skill-v2m1-y", "codex,claude", None).unwrap();
+    assert!(database::tool_allowed("skill-v2m1-y", "claude"));
+    assert!(database::tool_allowed("skill-v2m1-y", "codex"));
+    assert!(!database::tool_allowed("skill-v2m1-y", "opencode"));
+
+    // 清空专属 = 回到通用
+    database::upsert_resource_binding("skill-v2m1-x", "", None).unwrap();
+    assert!(database::tool_allowed("skill-v2m1-x", "claude"));
+
+    // 删除绑定
+    database::delete_resource_binding("skill-v2m1-y").unwrap();
+    assert!(database::get_resource_binding("skill-v2m1-y").is_none());
+
+    // 常驻名单
+    assert!(!database::is_tool_resident("codex", "skill-v2m1-x"));
+    database::set_tool_resident("codex", "skill-v2m1-x", true).unwrap();
+    assert!(database::is_tool_resident("codex", "skill-v2m1-x"));
+    assert_eq!(
+        database::list_tool_residents("codex"),
+        vec!["skill-v2m1-x".to_string()]
+    );
+    // 关闭 = 删行
+    database::set_tool_resident("codex", "skill-v2m1-x", false).unwrap();
+    assert!(!database::is_tool_resident("codex", "skill-v2m1-x"));
+}
