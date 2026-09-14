@@ -246,3 +246,160 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
     disable_skill_for_tool("v2m1-sw-a", "claude").unwrap();
     let _ = database::destroy_base_snapshot("claude");
 }
+
+/// 完整生命周期（spec §3.2/§5）：开（拍基底+独占）→ 切换（沿用基底）→ 关（精确回基底+销毁）→ 再开（重拍新基底）
+#[test]
+fn apply_switch_restore_full_lifecycle() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    let home = dirs::home_dir().unwrap();
+    let claude_dir = home.join(".claude/skills");
+
+    // 基底现场：MAM skill base-1 已启用（含一条子 Agent 分配行）+ 原生真目录 native-1
+    //（保留单元素 for：与多资源场景的 setup 写法同构，便于扩展）
+    #[allow(clippy::single_element_loop)]
+    for name in ["v2m1-lc-base1"] {
+        let ssot = dirs::home_dir().unwrap().join(".mam/skills").join(name);
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+        database::insert_extension(&database::ExtensionRecord {
+            id: format!("skill-{}", name), kind: "skill".into(), name: name.into(),
+            description: None, source_path: ssot.to_string_lossy().to_string(),
+            source_url: None, version: None, tags: None, suite: None,
+            source_tool: None, is_native: false,
+        }).unwrap();
+        enable_skill_for_tool(name, "claude").unwrap();
+    }
+    // 子 Agent 分配行：应用预设时随工具级清扫断链，恢复默认后必须重建回来
+    database::upsert_assignment_with_subagent("skill-v2m1-lc-base1", "claude", "v2m1-lc-sub", true, "valid")
+        .unwrap();
+    let sub_target = claude_dir.join("subagents/v2m1-lc-sub/v2m1-lc-base1");
+    std::fs::create_dir_all(claude_dir.join("v2m1-lc-native1")).unwrap();
+    std::fs::write(claude_dir.join("v2m1-lc-native1/SKILL.md"), "n").unwrap();
+
+    // 预设 A：skill-a
+    let mk = |name: &str| {
+        let ssot = home.join(".mam/skills").join(name);
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+        database::insert_extension(&database::ExtensionRecord {
+            id: format!("skill-{}", name), kind: "skill".into(), name: name.into(),
+            description: None, source_path: ssot.to_string_lossy().to_string(),
+            source_url: None, version: None, tags: None, suite: None,
+            source_tool: None, is_native: false,
+        }).unwrap();
+    };
+    mk("v2m1-lc-a");
+    mk("v2m1-lc-b");
+    let preset_a = database::create_preset("v2m1-lc-A", &[("skill-v2m1-lc-a".into(), "skill".into())]).unwrap();
+    let preset_b = database::create_preset("v2m1-lc-B", &[("skill-v2m1-lc-b".into(), "skill".into())]).unwrap();
+
+    // 开 A：base-1 断链（含子 Agent 链级联清理）、native-1 暂存、a 启用；快照在、active=A
+    let r = apply_preset(&preset_a, "claude").unwrap();
+    assert!(r.success >= 1);
+    assert!(r.disabled.contains(&"skill-v2m1-lc-base1".to_string()), "{:?}", r.disabled);
+    assert!(r.stashed.contains(&"v2m1-lc-native1".to_string()), "{:?}", r.stashed);
+    assert!(claude_dir.join("v2m1-lc-a").exists());
+    assert!(!claude_dir.join("v2m1-lc-base1").exists());
+    let (active, items) = database::get_base_snapshot("claude").unwrap();
+    assert_eq!(active.as_deref(), Some(preset_a.as_str()));
+    assert!(items.iter().any(|i| i.extension_id == "skill-v2m1-lc-base1" && i.origin == "mam"));
+    assert!(items.iter().any(|i| i.extension_id == "skill-v2m1-lc-native1" && i.origin == "native"));
+
+    // 切 B：a 断、b 启；基底沿用（native-1 仍暂存，base-1 仍不在）
+    let r2 = apply_preset(&preset_b, "claude").unwrap();
+    assert!(r2.disabled.contains(&"skill-v2m1-lc-a".to_string()));
+    assert!(!claude_dir.join("v2m1-lc-a").exists());
+    assert!(claude_dir.join("v2m1-lc-b").exists());
+    assert!(!claude_dir.join("v2m1-lc-native1").exists(), "切换不清算基底，原生仍暂存");
+    let (active_b, _) = database::get_base_snapshot("claude").unwrap();
+    assert_eq!(active_b.as_deref(), Some(preset_b.as_str()));
+
+    // 会话期间手动漂移：再启用 base-1
+    enable_skill_for_tool("v2m1-lc-base1", "claude").unwrap();
+    assert!(claude_dir.join("v2m1-lc-base1").exists());
+
+    // 关：精确回基底——base-1 回来（含子 Agent 链接重建）、native-1 回来、b/a 都不在；快照销毁
+    let rr = restore_tool("claude").unwrap();
+    assert!(claude_dir.join("v2m1-lc-base1").exists(), "MAM 基底项应重建");
+    assert!(claude_dir.join("v2m1-lc-native1").exists(), "原生暂存应回移");
+    assert!(rr.restored_native.contains(&"v2m1-lc-native1".to_string()));
+    assert!(sub_target.exists(), "子 Agent 链接应随基底重建（Layer3）");
+    assert!(!claude_dir.join("v2m1-lc-a").exists());
+    assert!(!claude_dir.join("v2m1-lc-b").exists());
+    assert!(database::get_base_snapshot("claude").is_none(), "恢复后快照销毁（会话级）");
+
+    // 再开 A：重拍新基底（= 刚恢复的状态）
+    apply_preset(&preset_a, "claude").unwrap();
+    let (active2, items2) = database::get_base_snapshot("claude").unwrap();
+    assert_eq!(active2.as_deref(), Some(preset_a.as_str()));
+    assert!(items2.iter().any(|i| i.extension_id == "skill-v2m1-lc-base1"));
+    // 清场
+    let _ = restore_tool("claude");
+    disable_skill_for_tool("v2m1-lc-base1", "claude").unwrap();
+}
+
+/// scope 守卫：tool 私有预设不可应用到别的工具（硬错误）
+#[test]
+fn apply_rejects_cross_tool_for_tool_scoped_preset() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::apply_preset;
+
+    let id = database::create_preset_with_meta("v2m1-scope", "", "tool", Some("codex"), &[])
+        .unwrap();
+    let err = apply_preset(&id, "claude").unwrap_err();
+    assert!(err.contains("绑定"), "应拒绝跨工具: {}", err);
+}
+
+/// 专属过滤：预设项对目标工具不兼容 → 剔除进 conflicts，不启用
+#[test]
+fn apply_filters_incompatible_items() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::apply_preset;
+
+    let home = dirs::home_dir().unwrap();
+    let ssot = home.join(".mam/skills/v2m1-filt-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-filt-a".into(), kind: "skill".into(), name: "v2m1-filt-a".into(),
+        description: None, source_path: ssot.to_string_lossy().to_string(),
+        source_url: None, version: None, tags: None, suite: None,
+        source_tool: None, is_native: false,
+    }).unwrap();
+    database::upsert_resource_binding("skill-v2m1-filt-a", "codex", Some("专属 codex")).unwrap();
+
+    let pid = database::create_preset("v2m1-filt", &[("skill-v2m1-filt-a".into(), "skill".into())]).unwrap();
+    let r = apply_preset(&pid, "claude").unwrap();
+    assert_eq!(r.success, 0);
+    assert_eq!(r.conflicts.len(), 1);
+    assert!(r.conflicts[0].contains("v2m1-filt-a"));
+    let claude_dir = home.join(".claude/skills");
+    assert!(!claude_dir.join("v2m1-filt-a").exists(), "被过滤项不得启用");
+    // 清场辅助返回 ()，let _ 仅为表达「忽略即丢弃」的意图
+    #[allow(clippy::let_unit_value)]
+    let _ = restore_tool_cleanup_only("claude");
+}
+
+/// 测试辅助：只销毁快照不动文件（清场用）
+fn restore_tool_cleanup_only(tool_id: &str) {
+    let _ = multi_agents_manager_lib::database::destroy_base_snapshot(tool_id);
+    let _ = multi_agents_manager_lib::services::preset::stash::restore_all_for_tool(tool_id);
+}

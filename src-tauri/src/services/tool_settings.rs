@@ -89,6 +89,11 @@ pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
             continue;
         }
         if !c.enabled {
+            // 预设 v2（spec §5.4）：取消勾选前先恢复基底——若有激活预设，
+            // 暂存的原生技能与独占停用项必须先归位，再做 W5 还原清理
+            if let Err(e) = crate::services::preset::restore_tool(&c.tool_id) {
+                log::warn!("取消勾选 {} 前恢复基底失败: {}", c.tool_id, e);
+            }
             // 取消勾选：清理为 best-effort（跳过项逐项报告，spec §9），随后落 DB
             disable_tool_cleanup(&c.tool_id, &mut result);
             agent_tool::set_tool_enabled(&c.tool_id, false);

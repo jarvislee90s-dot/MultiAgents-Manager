@@ -8,6 +8,9 @@ pub struct PresetApplyResult {
     pub success_count: usize,
     pub failures: Vec<String>,
     pub conflicts: Vec<String>,
+    pub stashed: Vec<String>,
+    pub disabled: Vec<String>,
+    pub restored_native: Vec<String>,
 }
 
 #[tauri::command]
@@ -29,11 +32,14 @@ pub fn list_presets() -> Vec<PresetRecord> {
 pub fn apply_preset(preset_id: String, tool_id: String) -> Result<PresetApplyResult, String> {
     // review F4：停用工具的预设写操作一律拒绝（W5 生效范围）
     crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
-    let result = crate::services::preset::apply_preset(&preset_id, &tool_id);
+    let result = crate::services::preset::apply_preset(&preset_id, &tool_id)?;
     Ok(PresetApplyResult {
         success_count: result.success,
         failures: result.failures,
         conflicts: result.conflicts,
+        stashed: result.stashed,
+        disabled: result.disabled,
+        restored_native: result.restored_native,
     })
 }
 
@@ -56,6 +62,10 @@ pub fn apply_preset_to_subagent(
         success_count: result.success,
         failures: result.failures,
         conflicts: result.conflicts,
+        // 子 Agent 级应用不触发独占清扫/暂存（工具级专属语义），恒为空
+        stashed: Vec::new(),
+        disabled: Vec::new(),
+        restored_native: Vec::new(),
     })
 }
 

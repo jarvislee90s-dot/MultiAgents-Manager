@@ -1560,7 +1560,7 @@ git commit -m "feat(preset-v2): exclusive sweep — diff plan + best-effort exec
   - `RestoreResult { restored_mam: Vec<String>, restored_native: Vec<String>, conflicts: Vec<String> }`
   - `deactivate_preset(preset_id, tool_id)` 保留为兼容委托（校验激活中 → restore_tool），M2 移除
 
-- [ ] **Step 1: 写失败测试（完整生命周期）**
+- [x] **Step 1: 写失败测试（完整生命周期）**
 
 `tests/preset_v2_test.rs` 追加：
 
@@ -1711,12 +1711,12 @@ fn restore_tool_cleanup_only(tool_id: &str) {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test apply_ && cargo test apply_switch`
 Expected: 编译/断言失败——旧 apply_preset 是增量语义且返回非 Result
 
-- [ ] **Step 3: 重写 `services/preset/mod.rs` 的 apply/deactivate**
+- [x] **Step 3: 重写 `services/preset/mod.rs` 的 apply/deactivate**
 
 保留 `apply_preset_to_subagent` / `deactivate_preset_from_subagent` / `check_compatibility`（Task 5 已改）不动；`apply_preset` 整体替换为：
 
@@ -2003,7 +2003,7 @@ pub fn deactivate_preset(preset_id: &str, tool_id: &str) -> Result<(), String> {
     }
 ```
 
-- [ ] **Step 4: 适配调用方 + W5 前置恢复**
+- [x] **Step 4: 适配调用方 + W5 前置恢复**
 
 `commands/preset.rs:29-38` 的 `apply_preset` 命令改为：
 
@@ -2041,7 +2041,7 @@ pub fn apply_preset(preset_id: String, tool_id: String) -> Result<PresetApplyRes
         }
 ```
 
-- [ ] **Step 5: 跑测试 + 全量 + Commit**
+- [x] **Step 5: 跑测试 + 全量 + Commit**
 
 Run: `cd src-tauri && cargo test apply_ && cargo test apply_switch && cargo test`
 Expected: 全 PASS（存量 `dao_test::test_preset_crud` 不受影响——它只测 DAO）
