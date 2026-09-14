@@ -1,31 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
-import { fetchSessions } from "./api";
-import type { SessionsResponse } from "@/types/session";
+import { useCallback, useState } from "react";
+import Board from "./Board";
 import PairPage from "./PairPage";
 
-// 配对状态机：sessions=null 即未配对（含 403 / 网络异常）→ 出配对页；
-// 探测完成前由 PairPage 承载（探测与配对共用同一入口，首帧即出配对页不闪白）。
-// 已配对态为极简占位，看板 Board 由 Task 6 接管。
+// 配对状态机（轮询全部由 Board 自持，App 只持状态标记）：
+// - null  探测中：首帧即出配对页（沿用 Task 5 不闪白口径），Board 在底下挂载完成首次探测；
+//         已配对设备（cookie 有效）由 Board 首拍拉到数据后翻转为 true，配对页随即卸载
+// - true  已配对：仅 Board（配对页卸载）
+// - false 设备失效：Board 收 403 回调后置 false 并卸载（停轮询），回配对页；
+//         重新配对成功 → true → Board 重新挂载恢复轮询
+// 注意：网络异常不走 403 通道，Board 内部保数据重试，不会误置 false
 export default function App() {
-  const [sessions, setSessions] = useState<SessionsResponse | null>(null);
-
-  const probe = useCallback(async () => {
-    const s = await fetchSessions<SessionsResponse>().catch(() => null);
-    setSessions(s);
-  }, []);
-
-  useEffect(() => {
-    void probe();
-  }, [probe]);
-
-  if (sessions === null) {
-    return <PairPage onPaired={() => void probe()} />;
-  }
+  const [paired, setPaired] = useState<boolean | null>(null);
+  const onPaired = useCallback(() => setPaired(true), []);
+  const onUnpaired = useCallback(() => setPaired(false), []);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-200">
-      {/* Task 6 占位：Board 将替换此文案 */}
-      <p>已接入 · 看板加载中…（{sessions.totalCount} 个会话）</p>
-    </div>
+    <>
+      {/* Board 常驻持轮询（探测也来自轮询首拍）；未配对态仅隐藏，避免与配对页堆叠 */}
+      {paired !== false && (
+        <div className={paired === true ? "contents" : "hidden"}>
+          <Board onUnpaired={onUnpaired} />
+        </div>
+      )}
+      {paired !== true && <PairPage onPaired={onPaired} />}
+    </>
   );
 }
