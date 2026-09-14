@@ -34,7 +34,7 @@
 **Interfaces:**
 - Produces: 表 `presets(description, scope, bound_tool)`、`resource_bindings`、`tool_residents`、`tool_base_snapshots`、`tool_base_snapshot_items`、`stash_journal`——后续所有 DAO 任务依赖这些表名与列名（Task 2-4 直接照抄本任务的 DDL）
 
-- [ ] **Step 1: 写失败测试（老库迁移出 3 列 + 5 表）**
+- [x] **Step 1: 写失败测试（老库迁移出 3 列 + 5 表）**
 
 在 `src-tauri/src/database/migration.rs` 的 `mod tests` 末尾追加：
 
@@ -90,12 +90,12 @@
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd src-tari && cargo test migrate_adds_preset_v2 -- --nocapture`（注意目录是 `src-tauri`）
 Expected: FAIL——`presets 缺列 description`
 
-- [ ] **Step 3: schema.rs——presets CREATE 补列 + 追加 5 张表**
+- [x] **Step 3: schema.rs——presets CREATE 补列 + 追加 5 张表**
 
 `schema.rs:64-68` 的 presets 建表改为：
 
@@ -147,7 +147,7 @@ Expected: FAIL——`presets 缺列 description`
         );
 ```
 
-- [ ] **Step 4: migration.rs——老库 ALTER（column_exists 模式）**
+- [x] **Step 4: migration.rs——老库 ALTER（column_exists 模式）**
 
 在 `migrate()` 的 is_native 迁移块之后追加：
 
@@ -165,12 +165,12 @@ Expected: FAIL——`presets 缺列 description`
     }
 ```
 
-- [ ] **Step 5: 跑测试 + 全量回归**
+- [x] **Step 5: 跑测试 + 全量回归**
 
 Run: `cd src-tauri && cargo test migrate && cargo test`
 Expected: 新测试 PASS，存量全绿
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/database/schema.rs src-tauri/src/database/migration.rs
