@@ -1018,7 +1018,7 @@ git commit -m "fix(preset-v2): compatibility check reads resource_bindings, reti
   - `restore_all_for_tool(tool_id: &str) -> (Vec<String> /*restored*/, Vec<String> /*conflicts: "name: 原因"*/)`
   - `recover_orphans() -> usize`（启动钩子，Task 12 接线）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/preset_v2_test.rs` 追加：
 
@@ -1087,12 +1087,12 @@ fn stash_restore_conflict_keeps_stash() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test stash_`
 Expected: 编译失败——`stash` 模块不存在
 
-- [ ] **Step 3: 实现 `services/preset/stash.rs`**
+- [x] **Step 3: 实现 `services/preset/stash.rs`**
 
 先在 `src-tauri/Cargo.toml` 的 `[dev-dependencies]`（87 行附近）补一行 `dirs = "5.0"`（与主依赖同版本）——本计划集成测试直接取家目录，而 `dirs` 此前只在 `[dependencies]`，集成测试 crate 引用不到。
 
@@ -1182,7 +1182,7 @@ pub fn recover_orphans() -> usize {
 
 `services/preset/mod.rs` 顶部（`use` 之前）加 `pub mod stash;`。
 
-- [ ] **Step 4: 跑测试 + Commit**
+- [x] **Step 4: 跑测试 + Commit**
 
 Run: `cd src-tauri && cargo test stash_ && cargo test`
 Expected: PASS
