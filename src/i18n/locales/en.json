@@ -146,7 +146,8 @@
     "loading": "Loading…",
     "tabDashboard": "Dashboard",
     "tabResources": "Resources",
-    "petToggle": "Show/hide pet"
+    "petToggle": "Show/hide pet",
+    "clearFinishedCards": "Clear finished cards"
   },
   "status": {
     "waiting": "Waiting",
