@@ -4,7 +4,7 @@
 
 **Unified Management Platform for Multi-Agent Programming Tools**
 
-A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode sessions
+A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode / dsh sessions
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,8 +28,8 @@ Real-time traffic-light status board for all active AI coding tool sessions.
 | 🟡 Yellow | Processing / Thinking |
 | 🟢 Green | Idle / Finished |
 
-- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, **Kimi Code**, **WorkBuddy**, and **ZCode** sessions
-- Distinguishes CLI vs. desktop APP form: APP sessions support session-level deep-link jumps (`workbuddy://chat/<id>`, `codex://threads/<id>`, with APP-foreground fallback) and persistent unread cards (kept across restarts, cleared when the host exits)
+- Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, **Kimi Code**, **WorkBuddy**, **ZCode**, and **dsh** sessions
+- Distinguishes CLI vs. desktop APP form: APP sessions support session-level deep-link jumps (`workbuddy://chat/<id>`, `codex://threads/<id>`, with APP-foreground fallback) and persistent unread cards (kept across restarts, cleared when the host exits); dsh (web-hosted) jumps focus/open the dsh tab in your browser (macOS)
 - Shows project name, git branch, last message preview, CPU usage, runtime
 - Sorts by priority: waiting → running → idle
 - System tray icon reflects aggregate status (🔴/🟡/🟢)
@@ -74,7 +74,7 @@ Click a session card to instantly focus the corresponding terminal tab:
 
 Terminal tools (Claude Code / Codex CLI / OpenCode / Kimi Code) resolve through process-tree and window-content disambiguation; **same-project dual-open jumps land directly**: for Kimi / OpenCode, the window title is matched against the session title (kimi `state.json` title / OpenCode DB title) after normalization — a unique hit locks onto the window, so dual terminals no longer raise a picker. On Windows, resolution also stamps a one-shot identity marker onto the target terminal title (` — MAM:xxxxxxxxxxxx`, cleared automatically after focus) for positive locking; markers never stack, and when the card↔terminal pairing is uncertain (same-project multi-open) the app **raises a picker rather than risking the wrong window**, and focus refusals surface an explicit error instead of failing silently.
 
-Desktop APP tools (Codex APP, WorkBuddy) support deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>` (session-level). The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read. ZCode is a single-window multi-tab app — its jump simply focuses the unique window (cards carry the host pid, zero ambiguity).
+Desktop APP tools (Codex APP, WorkBuddy) support deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>` (session-level). The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read. ZCode is a single-window multi-tab app — its jump simply focuses the unique window (cards carry the host pid, zero ambiguity). dsh's jump focuses (or opens) the dsh web tab in your browser.
 
 ### Extension Resource Management
 
@@ -138,6 +138,7 @@ src-tauri/src/
 │   ├── kimi.rs        #   Kimi Code (session_index + wire.jsonl)
 │   ├── workbuddy.rs   #   WorkBuddy (heartbeat-driven + JSONL)
 │   ├── zcode.rs       #   ZCode (host detection + SQLite session aggregation)
+│   ├── dsh.rs         #   dsh (web host + zstd multi-frame logs)
 │   └── mod.rs         #   AgentAdapter trait + tool registry + session discovery scheduler
 ├── monitor/
 │   ├── process.rs     #   Process discovery (sysinfo scan)
@@ -148,6 +149,7 @@ src-tauri/src/
 │   ├── kimi_parser.rs     # Kimi Code parser (session_index + wire.jsonl)
 │   ├── workbuddy_parser.rs # WorkBuddy parser (heartbeat + JSONL tail)
 │   ├── zcode_parser.rs    # ZCode parser (tasks-index + session/message/part dual SQLite)
+│   ├── dsh/           #   dsh parser (projcache + zstd logs + status/preview, 5 modules)
 │   ├── jsonl.rs       #   Shared JSONL reading (tail read, file enumeration)
 │   ├── cwd.rs         #   cwd normalization (process ↔ session matching)
 │   ├── git.rs         #   GitHub URL lookup (in-process cache)
@@ -260,6 +262,7 @@ The app stores its data in `~/.mam/`:
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌ (status parsed from wire) |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌ (status derived from heartbeat + JSONL) |
 | ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON (nested `mcp.servers` subtree) | ❌ (status derived from SQLite message-stream tail) |
+| dsh | `~/.dsh/skills/` | N/A (probed unsupported) | N/A | ❌ (status derived from lock cross-check + event stream) |
 
 > Note: `~/.agents/skills/` is the cross-tool shared directory of the Agent Skills open standard (read directly by codex / zcode and other compliant tools). MAM's skill activation directory for codex is the private `~/.codex/skills/`; `.agents` serves only as a read-only shared import source (source label `agents-shared`) — MAM scans it into the repository, with no tool attribution, no linking, and never writes to it (sole exception: one-time migration of MAM-created legacy links).
 
@@ -278,6 +281,7 @@ The app stores its data in `~/.mam/`:
 - [x] Kimi Code support (5th tool: session monitoring + MCP management + `KIMI_CODE_HOME` data directory redirection)
 - [x] WorkBuddy support (6th tool: heartbeat-driven monitoring + deep-link jumps + resource management)
 - [x] ZCode support (7th tool: SQLite session-aggregate monitoring + subagent-activity arbitration + workspace deep-link jumps + skill/MCP resource management)
+- [x] dsh support (8th tool: web-host monitoring + zstd multi-frame log parsing + tri-color status + browser-tab jumps + read-only skill access)
 - [x] Foxbell desktop pet (status cards + voice alerts + drag physics)
 - [x] External pets (local/Petdex import + manage panel hot swap + capability gating)
 - [x] Tool toggle management (batch save + restore/rebuild + full hiding)

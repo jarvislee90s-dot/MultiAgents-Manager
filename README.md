@@ -4,7 +4,7 @@
 
 **多 Agent 编程工具统一管理平台**
 
-一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode 的桌面应用
+一站式监控、通知、跳转、管理 Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode / dsh 的桌面应用
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-blue?logo=tauri)](https://v2.tauri.app/)
@@ -28,8 +28,8 @@
 | 🟡 黄色 | 处理中 / 思考中 |
 | 🟢 绿色 | 空闲 / 已完成 |
 
-- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code**、**WorkBuddy**、**ZCode** 会话
-- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底）；ZCode（单窗口多标签）跳转直接聚焦其唯一窗口。APP 类均支持持久未读卡（转绿跨重启保留、宿主退出自动清理）
+- 自动发现运行中的 **Claude Code**、**Codex CLI/APP**、**OpenCode**、**OpenClaw**、**Kimi Code**、**WorkBuddy**、**ZCode**、**dsh** 会话
+- 区分 CLI 与桌面 APP 形态：APP 类支持会话级深度链接直达（`workbuddy://chat/<id>`、`codex://threads/<id>`，失败自动落 APP 前台保底）；ZCode（单窗口多标签）跳转直接聚焦其唯一窗口；dsh（web 宿主）跳转聚焦/打开浏览器中的 dsh 标签页（macOS）。APP 类均支持持久未读卡（转绿跨重启保留、宿主退出自动清理）
 - 显示项目名称、Git 分支、最后消息预览、CPU 占用、运行时长
 - 按优先级排序：等待中 → 运行中 → 空闲
 - 系统托盘图标反映聚合状态（🔴/🟡/🟢）
@@ -142,6 +142,7 @@ src-tauri/src/
 │   ├── kimi.rs        #   Kimi Code（session_index + wire.jsonl）
 │   ├── workbuddy.rs   #   WorkBuddy（心跳驱动 + JSONL）
 │   ├── zcode.rs       #   ZCode（宿主判定 + SQLite 会话聚合）
+│   ├── dsh.rs         #   dsh（web 宿主 + zstd 多帧日志）
 │   └── mod.rs         #   AgentAdapter trait + 工具注册表 + 会话发现调度器
 ├── monitor/
 │   ├── process.rs     #   进程发现（sysinfo 扫描）
@@ -152,6 +153,7 @@ src-tauri/src/
 │   ├── kimi_parser.rs     # Kimi Code 解析器（session_index + wire.jsonl）
 │   ├── workbuddy_parser.rs # WorkBuddy 解析器（心跳 + JSONL 尾部推导）
 │   ├── zcode_parser.rs    # ZCode 解析器（tasks-index + session/message/part 双 SQLite）
+│   ├── dsh/           #   dsh 解析器（projcache + zstd 多帧日志 + 状态/预览五模块）
 │   ├── jsonl.rs       #   JSONL 读取公共件（尾部读取、文件枚举）
 │   ├── cwd.rs         #   cwd 归一化（进程 ↔ 会话匹配公共设施）
 │   ├── git.rs         #   GitHub URL 查询（进程内缓存）
@@ -264,6 +266,7 @@ pnpm lint:fix     # ESLint 自动修复
 | Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌（状态经 wire 解析） |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌（状态经心跳 + JSONL 推导） |
 | ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON（`mcp.servers` 嵌套子树） | ❌（状态经 SQLite 消息流尾部推导） |
+| dsh | `~/.dsh/skills/` | N/A（探测不支持） | N/A | ❌（状态经 lock 交叉判定 + 事件流推导） |
 
 > 注：`~/.agents/skills/` 是 Agent Skills 开放标准的跨工具共享目录（codex / zcode 等直接读取）。MAM 对 codex 的 skill 激活目录为私有 `~/.codex/skills/`；`.agents` 仅作只读共享导入源（来源标签 `agents-shared`）——MAM 扫描入库、不归属工具、不建链；除一次性迁移 MAM 自建遗留链接外，永不写入该目录。
 
@@ -289,6 +292,7 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 - [x] Kimi Code 支持（第五工具：会话监控 + MCP 管理 + `KIMI_CODE_HOME` 数据目录重定向）
 - [x] WorkBuddy 支持（第六工具：心跳驱动监控 + 深度链接跳转 + 资源管理）
 - [x] ZCode 支持（第七工具：SQLite 会话聚合监控 + 子代理活跃度仲裁 + 唯一窗口聚焦跳转 + Skill/MCP 资源管理）
+- [x] dsh 支持（第八工具：web 宿主监控 + zstd 多帧日志解析 + 三色状态 + 浏览器标签跳转 + Skill 只读接入）
 - [x] Foxbell 桌宠（状态卡片 + 语音提醒 + 拖拽物理）
 - [x] 外部桌宠开放（本地/Petdex 导入 + 管理面板热切换 + 能力门控）
 - [x] 工具勾选管理（批量保存 + 还原/重建 + 彻底隐藏）
