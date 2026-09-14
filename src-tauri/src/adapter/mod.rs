@@ -457,7 +457,13 @@ fn codex_green_card_should_drop(was_green_prev: bool, pool_has_row: bool) -> boo
 /// 的聚合卡语义。WorkBuddy 活跃卡由进程/心跳存活驱动（进程退出后由未读池接管渲染），
 /// 不在此列——既有工具行为零变化
 fn green_card_is_data_driven(agent_type: &AgentType) -> bool {
-    matches!(agent_type, AgentType::Codex | AgentType::ZCode)
+    // Dsh：出卡同样由扫描窗口驱动（24h 活动窗 + LIMIT，monitor::dsh），完成后
+    // 窗口内持续出卡——与 Codex/ZCode 同一套「池行在⇒未读、已读⇒剔除」聚合卡
+    // 语义（用户 2026-09-14 验收裁决：绿灯点击后消失，变黄/红才重新进入周期）
+    matches!(
+        agent_type,
+        AgentType::Codex | AgentType::ZCode | AgentType::Dsh
+    )
 }
 
 /// review F2：宿主 APP 已死 → App 形态活跃卡全部清除（孤儿 codebuddy 心跳未过期
@@ -884,6 +890,7 @@ mod green_card_gate_tests {
     fn data_driven_persistent_green_card_tools() {
         assert!(green_card_is_data_driven(&AgentType::Codex));
         assert!(green_card_is_data_driven(&AgentType::ZCode));
+        assert!(green_card_is_data_driven(&AgentType::Dsh));
         // 既有工具零回归：WorkBuddy 与全部 CLI 工具不在门内
         assert!(!green_card_is_data_driven(&AgentType::WorkBuddy));
         assert!(!green_card_is_data_driven(&AgentType::Claude));

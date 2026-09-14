@@ -144,13 +144,21 @@ fn probe_lock_state(session_dir: &std::path::Path) -> LockState {
     }
 }
 
-/// 会话聚合：宿主在位时扫描全部会话目录（含历史会话）出卡；未运行 → 无卡
+/// 会话聚合：宿主在位时扫描会话目录出卡；未运行 → 无卡。
+/// 出现周期对齐 zcode/codex（用户 2026-09-14 验收裁决）：仅最近 24h 有活动的
+/// 会话出卡，历史超窗会话不主动上板
 pub fn get_dsh_sessions(processes: &[AgentProcess]) -> Vec<Session> {
     let Some(host) = processes.first() else {
         return Vec::new();
     };
     scan_sessions(&dsh_home(), host)
 }
+
+/// 卡片出现窗口（对齐 zcode `CARD_WINDOW_MS` 语义）：最近 24h 内有活动的会话
+/// 才出卡——历史超窗会话不主动上板，开局不再 flood 几十张历史已完成卡
+const CARD_WINDOW_MS: i64 = 24 * 3600 * 1000;
+/// 出卡上限（对齐 zcode `RECENT_SESSIONS_LIMIT`）：按活跃度倒序取最近 N 张
+const RECENT_SESSIONS_LIMIT: usize = 100;
 
 /// 内部扫描（home 注入，测试直调——避免 DSH_HOME 环境变量在并行测试中互踩）
 fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
@@ -160,7 +168,8 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    let mut sessions = Vec::new();
+    // (活跃度毫秒, 卡) 成对收集：窗口过滤 + 活跃度倒序截断后统一出卡
+    let mut cards: Vec<(i64, Session)> = Vec::new();
     // 本轮扫描命中的代际日志全集（缓存收敛用，防已删会话的孤儿条目常驻）
     let mut live_logs: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
@@ -198,33 +207,40 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
             if let Some(v) = header.version {
                 if !(0..=3).contains(&v) {
                     ::log::warn!("dsh: 会话 {} 为未知代际 v{}，出降级卡", header.id, v);
-                    sessions.push(Session {
-                        id: header.id.clone(),
-                        agent_type: AgentType::Dsh,
-                        project_name: header
-                            .cwd
-                            .as_deref()
-                            .map(crate::monitor::project::project_name_from_path)
-                            .unwrap_or_else(|| name.clone()),
-                        project_path: header.cwd.clone().unwrap_or_default(),
-                        title: Some(format!("dsh 格式待适配（v{}）", v)),
-                        git_branch: None,
-                        github_url: None,
-                        status: SessionStatus::Idle,
-                        last_message: None,
-                        last_message_role: None,
-                        last_activity_at: chrono::DateTime::from_timestamp_millis(
-                            digest.log_mtime_ms,
-                        )
-                        .map(|d| d.to_rfc3339())
-                        .unwrap_or_default(),
-                        pid: host.pid,
-                        cpu_usage: host.cpu_usage,
-                        active_subagent_count: 0,
-                        form: ProcessForm::App,
-                        jump_supported: crate::session::jump_supported_for(ProcessForm::App),
-                        unread: false,
-                    });
+                    // 出现周期同样约束降级卡：超窗的历史降级卡不上板
+                    if digest.log_mtime_ms < now_ms - CARD_WINDOW_MS {
+                        continue;
+                    }
+                    cards.push((
+                        digest.log_mtime_ms,
+                        Session {
+                            id: header.id.clone(),
+                            agent_type: AgentType::Dsh,
+                            project_name: header
+                                .cwd
+                                .as_deref()
+                                .map(crate::monitor::project::project_name_from_path)
+                                .unwrap_or_else(|| name.clone()),
+                            project_path: header.cwd.clone().unwrap_or_default(),
+                            title: Some(format!("dsh 格式待适配（v{}）", v)),
+                            git_branch: None,
+                            github_url: None,
+                            status: SessionStatus::Idle,
+                            last_message: None,
+                            last_message_role: None,
+                            last_activity_at: chrono::DateTime::from_timestamp_millis(
+                                digest.log_mtime_ms,
+                            )
+                            .map(|d| d.to_rfc3339())
+                            .unwrap_or_default(),
+                            pid: host.pid,
+                            cpu_usage: host.cpu_usage,
+                            active_subagent_count: 0,
+                            form: ProcessForm::App,
+                            jump_supported: crate::session::jump_supported_for(ProcessForm::App),
+                            unread: false,
+                        },
+                    ));
                     continue;
                 }
             }
@@ -254,23 +270,13 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
                 .or(digest.max_event_time_ms)
                 .unwrap_or(digest.log_mtime_ms);
 
-            // 未读（设计 P2 定死：等批准/出错/刚完成/回合被阻塞 → 未读）。
-            // 锚点用事件流最大 time——勿用 lastPromptAt（完成晚于提问，
-            // 用提问时刻会漏掉"读后完成"的刚完成未读）
-            let unread_anchor_ms = digest.max_event_time_ms.unwrap_or(digest.log_mtime_ms);
-            // MAM 自有库读已读水位（绝不写 ~/.dsh）；按会话短锁即取即放，
-            // 避免长扫描（zstd 解码 + lsof 子进程）期间独占全局连接
-            let last_read = {
-                let conn = crate::database::connection::DB.lock().unwrap();
-                crate::database::dao::dsh_read::last_read_at(&conn, &header.id).unwrap_or(0)
-            };
-            let unread = (matches!(
-                outcome.status,
-                SessionStatus::Waiting | SessionStatus::Finished
-            ) || outcome.end_kind.as_deref() == Some("blocked"))
-                && unread_anchor_ms > last_read;
+            // 出现周期：最近 24h 无活动的会话不上板（历史超窗会话不得开局 flood，
+            // 用户 2026-09-14 验收裁决；活跃度口径与 last_activity 一致）
+            if last_activity_ms < now_ms - CARD_WINDOW_MS {
+                continue;
+            }
 
-            sessions.push(Session {
+            cards.push((last_activity_ms, Session {
                 id: header.id.clone(),
                 agent_type: AgentType::Dsh,
                 project_name: header
@@ -293,13 +299,28 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
                 active_subagent_count: 0,
                 form: ProcessForm::App,
                 jump_supported: crate::session::jump_supported_for(ProcessForm::App),
-                unread,
-            });
+                // 未读态不由扫描侧自判：dsh 卡是 App 形态，由 adapter 层未读池
+                // 管线（W4）统一标记/清除——绿卡「池行在⇒未读、已读删行⇒P1-3 剔除」，
+                // 与 codex/zcode 数据驱动绿卡同一套出现周期
+                unread: false,
+            }));
         }
     }
     // 收敛缓存：清掉本轮未命中的代际日志条目（会话目录已被删除等）
     DSH_LOG_SCAN.retain_existing(&live_logs);
-    sessions
+    take_recent(cards, RECENT_SESSIONS_LIMIT)
+}
+
+/// 活跃度倒序取最近 `limit` 张（纯函数，LIMIT 语义对齐 zcode SQL `ORDER BY
+/// time_updated DESC LIMIT n`）。同毫秒并列时按收集序稳定排序
+fn take_recent(cards: Vec<(i64, Session)>, limit: usize) -> Vec<Session> {
+    let mut pairs = cards;
+    pairs.sort_by_key(|(ms, _)| std::cmp::Reverse(*ms));
+    pairs
+        .into_iter()
+        .take(limit)
+        .map(|(_, s)| s)
+        .collect()
 }
 
 /// projcache identity 校验（5 字段；坏记录路径在此收敛）
@@ -412,7 +433,9 @@ mod integration_tests {
         assert_eq!(s.last_message_role.as_deref(), Some("assistant"));
         assert_eq!(s.form, ProcessForm::App);
         assert_eq!(s.pid, 42);
-        assert!(s.unread, "刚完成且从未读过 → 未读");
+        // 未读态由 adapter 层未读池管线标记（W4），扫描侧恒 false——
+        // 对齐 zcode/codex 数据驱动绿卡的「池行在⇒未读、已读⇒剔除」周期
+        assert!(!s.unread, "扫描侧不自判未读（池管线统一标记）");
     }
 
     #[test]
@@ -447,6 +470,73 @@ mod integration_tests {
             std::sync::Arc::ptr_eq(&first, &second),
             "文件未变应命中缓存返回同一 Arc"
         );
+    }
+
+    /// 造一个带显式事件 time 的隔离 dsh home（单会话，completed 收尾）
+    fn make_home_timed(session_id: &str, event_time_ms: i64) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let sess = dir.path().join("sessions/--tmp-proj--").join(session_id);
+        std::fs::create_dir_all(&sess).unwrap();
+        let frame = zstd::stream::encode_all(
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{sid}\",\"cwd\":\"/tmp/proj\",\"createdAt\":1000,\"isSeeded\":false}}\n{{\"type\":\"turn/end\",\"seq\":2,\"time\":{t},\"data\":{{\"reason\":{{\"kind\":\"completed\"}}}}}}\n",
+                sid = session_id,
+                t = event_time_ms
+            )
+            .as_bytes(),
+            3,
+        )
+        .unwrap();
+        std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sessions_outside_card_window_do_not_emit() {
+        // 出现周期（对齐 zcode 24h 窗口，用户 2026-09-14 验收裁决）：超窗历史
+        // 会话不主动上板；窗内正常出卡
+        let now = chrono::Utc::now().timestamp_millis();
+        let old_home = make_home_timed("session-old", now - 25 * 3600 * 1000);
+        let fresh_home = make_home_timed("session-fresh", now - 3600 * 1000);
+        let host = fake_host();
+        assert!(
+            scan_sessions(old_home.path(), &host).is_empty(),
+            "超窗历史会话不出卡"
+        );
+        assert_eq!(
+            scan_sessions(fresh_home.path(), &host).len(),
+            1,
+            "窗内会话出卡"
+        );
+    }
+
+    #[test]
+    fn take_recent_keeps_latest_and_truncates() {
+        // 活跃度倒序 + LIMIT 截断（纯函数，对齐 zcode ORDER BY time_updated DESC LIMIT）
+        let mk = |id: &str| Session {
+            id: id.into(),
+            agent_type: AgentType::Dsh,
+            project_name: "p".into(),
+            project_path: String::new(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: String::new(),
+            pid: 1,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::App,
+            jump_supported: true,
+            unread: false,
+        };
+        let cards = vec![(100, mk("old")), (300, mk("new")), (200, mk("mid"))];
+        let out = take_recent(cards, 2);
+        assert_eq!(out.len(), 2, "LIMIT 截断");
+        assert_eq!(out[0].id, "new", "活跃度最高者在前");
+        assert_eq!(out[1].id, "mid");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use crate::adapter;
 use crate::session::SessionsResponse;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[tauri::command]
 pub async fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
@@ -226,17 +226,11 @@ pub fn focus_session(
             match crate::window::dsh_tab::focus_dsh_tab() {
                 Ok(mut out) => {
                     mark_read_on_jump(&app, &session_id, &agent_type);
-                    // dsh 水位（终审 C2）：dsh 未读判定消费 dsh_session_read——跳转即写水位，
-                    // 否则下一轮扫描 last_read=0 角标复活（通用池写入对 dsh 无效）
-                    if let Some(sid) = session_id.as_deref() {
-                        let conn = crate::database::connection::DB.lock().unwrap();
-                        if let Err(e) = crate::database::dao::dsh_read::mark_read(
-                            &conn,
-                            sid,
-                            chrono::Utc::now().timestamp_millis(),
-                        ) {
-                            log::warn!("dsh 跳转写水位失败: {e}");
-                        }
+                    // 跳转成功即隐藏看板（用户 2026-09-14 验收裁决）：dsh 落点是
+                    // 浏览器标签，看板窗口留在原地遮挡视线；收进托盘（点托盘可
+                    // 再唤出），与「关窗即隐藏」的托盘应用形态一致
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
                     }
                     out["via"] = serde_json::Value::String("dsh".into());
                     return Ok(out);
