@@ -18,4 +18,5 @@ export const SUPPORTED_TOOLS = [
   "kimi",
   "workbuddy",
   "zcode",
+  "dsh",
 ] as const;

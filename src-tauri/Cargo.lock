@@ -2636,6 +2636,7 @@ dependencies = [
  "dashmap",
  "dirs 5.0.1",
  "env_logger",
+ "filetime",
  "fs2",
  "junction",
  "log",
@@ -2663,6 +2664,7 @@ dependencies = [
  "windows 0.57.0",
  "winreg 0.52.0",
  "zip",
+ "zstd",
 ]
 
 [[package]]

@@ -57,9 +57,9 @@ export function SessionCard({
   // 跳转共享逻辑（歧义候选窗口由 hook 状态承载，命中多个窗口时弹出选择器）
   const { candidates, setCandidates, focus, focusHwnd } = useSessionJump();
 
-  // 手动关闭卡（X）：不触发卡片跳转。
+  // 手动关闭卡（X）：不触发卡片跳转。全部形态（App/CLI）均可关闭。
   // 未读卡 = 标记已读（mark_session_read，spec W4 已读信号 2）；
-  // 活跃 App 卡（黄/红）= 暂离不提示（dismiss_session_card，T2）——写入进程内
+  // 非未读卡（黄/红/绿）= 暂离不提示（dismiss_session_card，T2）——写入进程内
   // dismiss 集合从看板与宠物隐藏，同一会话状态变化后自然重现
   const handleClose = async (e: React.MouseEvent) => {
     e.stopPropagation(); // 不触发卡片跳转
@@ -170,7 +170,7 @@ export function SessionCard({
                 />
               )}
             </div>
-            {(session.unread || session.form === "app") && (
+            {
               <button
                 onClick={handleClose}
                 className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
@@ -179,7 +179,7 @@ export function SessionCard({
               >
                 <X className="h-3 w-3" />
               </button>
-            )}
+            }
           </div>
         </div>
 

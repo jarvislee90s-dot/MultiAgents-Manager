@@ -1,0 +1,355 @@
+# MAM 远程接入与操控平台 · 总需求说明书（项目宪法）
+
+> **文档地位**：本文档是本项目最高权威设计依据（"项目宪法"）。任何设计文档、实现、任务列表、spec 与本文档冲突时，一律以本文档为准。**未经用户在场明确同意，任何人（含任何 AI agent）不得修改本文档**；发现冲突时应停下向用户报告，由用户裁决改宪法还是改实现。
+> 版本：v1.0（2026-09-09）· 依据：《手机端远程访问技术路线调研》（research/ 根目录，判定 A–F）与用户对账结论。
+> 调研支撑索引：`research/README.md`（三期参考库 + 持续跟踪清单）。
+
+---
+
+## 0. 总目标与分期
+
+把 MAM 从"桌面监控看板"升级为**多 Agent 统一远程接入与操控平台**：手机/外部浏览器经安全通道接入本机 MAM，实现跨互联网的会话监控、消息提醒、消息注入、会话操控，最终支持**任务在无头端/手机端/桌面端、以及不同 harness 之间流转**。
+
+| 期 | 主题 | 能力等级 | 一句话 |
+|---|---|---|---|
+| 一期 | 远程监控与提醒 | 只读 | 外网看到全部会话状态与内容，及时提醒 |
+| 二期 | 消息注入 | 可写消息 | 手机给特定会话发消息，agent 处理，桌面可见 |
+| 三期 | 全功能操控与流转 | 受控操控 | 切模型/切会话/配置 + 任务跨端跨 harness 流转 |
+
+**分期递进原则**：只读 → 白名单消息 → 受控操控，每次扩权独立设计评审；token 门禁覆盖一切端点；通道只是入口不是信任边界。
+
+**竞品对标（2026-09-12 复核）**：ChatGPT App 已把 Codex 单工具做到"等级 3"（全线程管理/审批/切模型/看 diff/推送，openai.com/index/work-with-codex-from-anywhere）；ZCode 仍为"扫码远控 + Bot Channel"双轨（远控页无切模型、无设备管理、单设备连接）。MAM 的差异化 = 多工具统一（八工具）、跨 harness 任务流转（社区空白带）、已开窗口会话的管理（上述产品均只管自家实例）。
+
+## 0.1 贯穿三期的共用底座
+
+| 底座 | 内容 | 建成期 |
+|---|---|---|
+| 接入层 | 进程内 axum 服务器 + 配对门禁（一次性 token 状态机）+ 移动 API 独立前缀 `/m/api` | 一期 |
+| 通道抽象 | 四模式可插拔：直连域名 / named tunnel / quick tunnel（零配置默认）/ Tailscale | 一期 |
+| 移动端 | PWA（React 第二入口，rust-embed 内嵌伺服）；API 按"原生 APP 可复用"形态设计（token + REST + SSE） | 一期建骨架，三期演进 |
+| 读通道 | 八工具会话状态判定 + 会话内容全量读（`read_session_messages`） | 一期（现有解析器扩展） |
+| 写通道 | 终端注入引擎（tmux/iTerm2/Terminal）+ 无头通道（zcode/claude/codex/kimi CLI）+ 路由表 | 二期 |
+| 协议客户端 | ZCode Protocol / codex app-server / ACP 客户端矩阵（版本门控） | 三期 |
+| 流转设施 | HandoffStore / Export / Import / 工作区在册感知 | 三期（基座在一二期埋） |
+
+---
+
+## 1. 需求与功能
+
+### 1.1 一期 · 远程监控与提醒（只读）
+
+**需求点**：
+- R1.1 外网（非局域网）可见全部受管会话的红黄绿状态
+- R1.2 状态变更及时提醒（页面内 + 可选系统级推送）
+- R1.3 可点开查看会话完整内容（含无头会话）
+- R1.4 接入过程安全且简单（扫码配对；无公网用户零配置可用）
+
+**功能点**：
+
+| # | 功能 | 说明 |
+|---|---|---|
+| F1.1 | 接入层核心 | axum 服务器（默认关闭，设置/托盘开关）、配对面板（审批配对默认 + 直通配对可选，见 D11）、设备管理（花名册/吊销/手动腾位） |
+| F1.2 | 通道四模式 | 直连域名（绑 0.0.0.0，用户反代+TLS）/ named tunnel（Token）/ quick tunnel（自动拉起 cloudflared，地址随重启变化需界面明示）/ Tailscale（文档指引） |
+| F1.3 | 移动看板 | 会话卡片（状态/项目/分支/最后消息预览/运行时长），按状态优先级排序，SSE 实时刷新 |
+| F1.4 | 会话内容只读 | `read_session_messages`：按会话全量读（ZCode db.sqlite、Claude/Codex JSONL、OpenCode SQLite、Kimi wire、WorkBuddy JSONL、dsh sessions） |
+| F1.5 | 页面内提醒 | SSE 边沿触发（状态跃迁才推）+ 横幅/提示音/振动 + PWA manifest |
+| F1.6 | 系统级推送（可选） | **推送网关抽象**（同一事件源多出口）：Bark（iOS）/ ntfy（Android；**华为无 GMS 机型 Web Push 不可达，ntfy 为其默认出口**）；APK 出口（HMS Push）预留 |
+| F1.7 | 设置页 | 远程开关、通道配置、配对面板、设备花名册、电源开关（D13）、安全警示文案 |
+| F1.8 | 后端事件桥 | `SessionWatcher` tokio 任务：定时快照 → diff 状态跃迁 → broadcast（SSE + 推送转发器） |
+| F1.9 | 电源锁 | 远程开启时阻止系统/磁盘休眠（caffeinate / SetThreadExecutionState；Windows 可代设硬盘休眠），默认开（D13） |
+| F1.10 | APK 加强包（D15） | Capacitor 壳复用移动端代码 + 推送（HMS Push，ntfy 兜底）+ 通知点击直达会话；一期收尾交付，链路稳定后套壳 |
+
+**一期明确不做**：一切写操作（发消息/切模型/任何改变 agent 状态的动作）。
+
+### 1.2 二期 · 消息注入
+
+**需求点**：
+- R2.1 手机能给特定会话发消息，agent 真实收到并处理
+- R2.2 用户回到桌面能自然看到这段对话（有头可见性）
+- R2.3 不打断正在运行的会话（黄状态排队）
+- R2.4 未开窗的会话也能被驱动（无头）
+- R2.5 任务可以交接出去（摘要导出）
+
+**功能点**：
+
+| # | 功能 | 说明 |
+|---|---|---|
+| F2.1 | 终端注入引擎 | tmux `send-keys -l` / iTerm2 `write text` / Terminal.app `do script`；复用现有窗口/pane/tty 定位链路 |
+| F2.2 | 状态门控队列 | 黄=排队、转红自动 flush；消息带 `[mobile <设备名>]` 来源标记；单会话串行 |
+| F2.3 | ZCode 无头通道 | `zcode --resume sess_xxx --prompt`（**限定在册工作区** → 桌面 UI/官方远程网页可见，判定 F）；app-server 为升级路径 |
+| F2.4 | Claude/Codex/Kimi 无头通道 | `claude -p --resume --output-format stream-json` / `codex exec`·app-server / `kimi -p -S <id>`；AionCore 进程管理骨架（Spawner trait、进程注册表、空闲挂起、版本门控） |
+| F2.5 | 注入路由表 | 会话宿主 → 通道映射（tmux/iTerm/Terminal/ZCode 无头/通用无头），有头可见性预期标注 |
+| F2.6 | 移动端发消息 | 会话详情页输入框 + 队列状态指示 + 发送回执 |
+| F2.7 | 会话流转 v1 | `session.export`：规则摘要 + 模板渲染 → `~/.mam/handoffs/`（HANDOFF.md 格式见 §4.2） |
+| F2.8 | keystroke 应急预案（文档级） | AppleScript keystroke/accessibility 作为"不承诺、不默认"的应急手段记录在案，非正式功能 |
+| F2.9 | 审批应答（TUI 会话） | 等待用户输入且解析器识别为审批提示时，推送结构化选项卡；选择后注入对应按键（每 CLI 按键映射表一次探测入库 + 版本探针，见 D12） |
+| F2.10 | 写操作审计 | 注入/无头驱动逐条记录（设备、时间、目标会话、内容摘要）入 SQLite 审计表 |
+
+**二期明确不做**：切模型/切模式、会话管理操作、自动流转（导入侧三期做）。
+
+### 1.3 三期 · 全功能操控与流转
+
+**需求点**：
+- R3.1 手机端等价使用各 harness 大部分功能（切模型/切会话/打开设置）
+- R3.2 移动端完整对话体验（流式输出）
+- R3.3 任务跨 harness 流转闭环（导出+导入+回执）
+
+**功能点**：
+
+| # | 功能 | 说明 |
+|---|---|---|
+| F3.1 | 斜杠命令注入 | TUI 工具切模型/模式 = 注入 `/model X` 类命令；移动端模型选择器 UI |
+| F3.2 | 完整对话界面 | 读渲染（一期基座）+ 写注入（二期基座）→ 移动端聊天体验，含流式 |
+| F3.3 | 协议客户端矩阵 | ZCode Protocol（session/send/setModel/setMode/events）、codex app-server（thread/start·resume·turn/start；先 generate-json-schema）、ACP（SDK 2.0.0，收编多数 CLI 工具）；全部带版本门控+探针+降级；**审批事件原生化**（app-server 审批 / ACP request_permission → 移动端审批卡，D12 第一层） |
+| F3.4 | 会话切换/跳转 | 会话列表 + "回电脑后点哪张卡"的远程跳转指引（复用现有聚焦/深链） |
+| F3.5 | 配置代理 | 模型/MCP/skill 配置的移动端读写（MAM 已有全部配置写能力，暴露到移动 API） |
+| F3.6 | 设置直达 | 按工具降级：深度链接 → MAM 代理配置 |
+| F3.7 | 会话流转 v2 | ImportService：同 cwd 目标会话选择 → 投递（注入/无头/attach 路由）→ 首轮确认回执；跨 harness 闭环 |
+| F3.8 | 工作区在册感知 | 各 harness 在册工作区判定（ZCode=recentProjects；其余待查）→ 有头可见性预期管理 |
+| F3.9 | （可选，另行立项）原生 APP | 复用移动 API（token+REST+SSE），PWA 不满足需求时启动 |
+
+**三期明确不做**：远程代码执行类能力（不暴露任意 shell）；绕过各 harness 自身权限体系。
+
+---
+
+## 2. 输入输出
+
+> 格式：功能点 = 输入（来源/触发/参数）→ 输出（产物/去向/副作用）。
+
+### 2.1 一期
+
+| 功能点 | 输入 | 输出 |
+|---|---|---|
+| F1.1 配对 | 用户点击"开启远程"；参数：无 | 一次性 token（128bit、TTL 10min、单活跃）；二维码图片（通道地址+`/m#token=`）；输出到设置面板 |
+| F1.1 设备管理 | 手机浏览器携带 token 首次访问 `/m` | 设备会话（cookie deviceId）、设备表新增行；后续请求凭 cookie 过闸 |
+| F1.2 通道 | 设置项：模式选择、端口、Tunnel Token | 监听 socket（127.0.0.1 或 0.0.0.0）或 cloudflared 子进程；公网地址（quick 模式地址变化时刷新界面二维码） |
+| F1.3 看板 | 手机请求 `/m/api/sessions`（cookie 过闸） | JSON：会话卡数组（agent_type/session_id/状态/项目/预览/时长），数据源=直调 `get_all_sessions`（不经 Tauri IPC） |
+| F1.4 会话内容 | `/m/api/session-messages?agent=&session=` | JSON：消息数组（role/content/ts/工具调用摘要），数据源=各 adapter 全量读 |
+| F1.5 SSE | 手机订阅 `/m/api/events` | 首帧全量快照 + 增量跃迁事件 `{session_id, from, to, preview}`；断线自动重连；隧道不支持 SSE 时降级轮询 |
+| F1.6 系统推送 | 设置：Bark/ntfy URL；触发=状态跃迁 | HTTP POST 到推送服务（标题=工具+项目，正文=跃迁方向+预览）；失败静默重试一次 |
+| F1.8 SessionWatcher | 定时器（2s） | 内存快照 diff → broadcast；无磁盘写入；与桌面通知（前端轮询驱动）互不干扰 |
+
+### 2.2 二期
+
+| 功能点 | 输入 | 输出 |
+|---|---|---|
+| F2.1 注入 | `/m/api/session-send`（session_id、文本）；路由表解析宿主 | tmux send-keys / AppleScript write text / do script 执行；副作用=目标终端收到一行输入+回车 |
+| F2.2 队列 | 注入请求 + 会话当前状态（Watcher 提供） | 状态黄：入队（SQLite 队列表，含设备花名/时间戳）；转红：逐条 flush；移动端可查队列/撤回未发 |
+| F2.3 ZCode 无头 | session_id + 文本；工作区在册校验 | spawn `zcode --resume <id> --prompt <text> --cwd <项目> --json`；stdout 的 sessionId/turn 结果回执；副作用=db.sqlite 追加消息（同会话，判定 A） |
+| F2.4 通用无头 | session_id + 文本 | 对应 CLI 无头进程一次 turn；回执=末条 assistant 消息 + token 用量；进程按 AionCore 骨架管理（挂起/重生） |
+| F2.5 路由表 | 会话的宿主形态（MAM 已区分 CLI/APP/终端类型） | 通道决策 + 有头可见性预期（实时/刷新后/不可见）返回给移动端展示 |
+| F2.7 导出 | 会话卡"交接"按钮（选择：规则摘要 or LLM 摘要） | `~/.mam/handoffs/<ts>-<from>-<to>-<项目>.md`（HANDOFF v0 格式）+ 索引表登记 |
+
+### 2.3 三期
+
+| 功能点 | 输入 | 输出 |
+|---|---|---|
+| F3.1 命令注入 | 移动端模型选择器的结构化选择（tool+model） | 翻译为该工具的斜杠命令文本 → 走二期注入通道 |
+| F3.2 对话界面 | 会话 id + 输入框 | 流式渲染（SSE/协议事件流）；写走 F2 通道 |
+| F3.3 协议客户端 | 长驻 stdio 子进程（app-server/ACP）+ 方法调用 | 会话/模型/模式操作；事件流 → 移动端实时渲染；版本探针结果缓存 |
+| F3.5 配置代理 | `/m/api/config/*` 读写请求 | 各工具配置文件变更（复用现有 services/mcp、skill 写链路）；宿主重启后生效的提示 |
+| F3.7 导入 | handoff 文件 + 目标会话（列表选择或新建） | 投递（注入/无头/attach 路由）+ 首轮确认语句检测 → 回执标记"已交接"；索引表状态更新 |
+| F3.8 在册感知 | 各 harness 的在册工作区来源（ZCode=setting.json recentProjects 等） | 会话元数据新增"有头可见性预期"字段，看板/详情展示 |
+
+---
+
+## 3. 技术选型
+
+### 3.(a) 选型总方案
+
+| 层 | 选型 |
+|---|---|
+| HTTP 服务器 | **axum**（内嵌 Tauri 主进程 tokio runtime） |
+| 静态资源 | **rust-embed**（移动端产物嵌二进制）+ Vite 第二入口 `mobile.html` |
+| 实时推送 | **SSE**（首选）+ 轮询降级 |
+| 配对/门禁 | 自研 Rust 移植 dsh-remote-web-ui 状态机（单活跃一次性 token + 设备表） |
+| 隧道 | **cloudflared 子进程**（quick/named 二合一）+ 直连模式 + Tailscale 文档指引 |
+| 推送 | Bark / ntfy HTTP 转发 |
+| 终端注入 | tmux CLI + AppleScript（iTerm2/Terminal） |
+| 无头通道 | 各官方 CLI（zcode/claude/codex/kimi）子进程 + JSONL/stdout 解析 |
+| 协议客户端（三期） | ZCode Protocol（行协议自实现）、codex app-server（schema 生成）、ACP（官方 Rust SDK） |
+| 移动 UI | React 19 复用（组件/i18n/主题共享）+ PWA manifest |
+
+### 3.(b) 选型依据
+
+- **axum**：tokio 生态第一公民（MAM 已依赖 tokio full）；tower middleware 天然适合门禁层；类型安全。社区/dsh 生态同类实现均为现代 async 框架。
+- **rust-embed**：Tauri 打包单二进制的自然选择，移动页面随应用分发无外部文件依赖。
+- **SSE 而非 WebSocket**：单向推送场景（状态跃迁）SSE 足够；自动重连内建；dsh 生态实测隧道对 SSE 偶有不透传→轮询降级兜底即可，不需要 WS 的双向复杂度（写操作是低频 POST）。
+- **自研配对移植而非现成 auth 库**：需求特殊（一次性配对码语义），dsh 状态机语义已被生态验证且 Apache-2.0 可抄，比套 JWT/OAuth 更小更可控。
+- **cloudflared 子进程**：生态 104 插件验证的主流路径；免账号 quick tunnel 是"其他用户零配置"的唯一成熟解。
+- **终端注入三件套**：各自终端的唯一官方远程写入 API；MAM 已有定位链路，边际成本最小。
+- **无头通道用官方 CLI**：唯一不破版权/逆向风险的路；AionCore 已验证可行性与坑清单。
+- **协议客户端三期才做**：非公开 API 的维护成本高（版本门控+探针），只在注入通道覆盖不了时引入（能力补全：setModel/events 流）。
+
+### 3.(c) 已决策点（对账记录，第一选型）
+
+| # | 决策 | 时间 |
+|---|---|---|
+| D1 | 通道四模式可插拔；用户主用直连域名；quick tunnel 为无公网用户默认 | 2026-09-09 |
+| D2 | 一期看板范围 = 状态 + 会话内容只读 | 2026-09-09 |
+| D3 | 提醒双通道 = 页面内 SSE + 可选 Bark/ntfy 系统推送；"手机 APP"一期以 PWA 落地，API 按 APP 可复用设计 | 2026-09-09 |
+| D4 | 接入层进程内嵌（方案 A），不做独立 sidecar | 2026-09-09 |
+| D5 | 配对状态机照抄 dsh-remote-web-ui（Apache-2.0），Rust 移植 | 2026-09-09 |
+| D6 | ZCode 无头通道限定在册工作区操作（判定 F；未注册工作区会话桌面不可见） | 2026-09-09 |
+| D7 | keystroke/accessibility 不纳入正式功能，仅应急预案（文档级） | 2026-09-09 |
+| D8 | 三期终点的任务流转倒推一二期基座（见 §5） | 2026-09-09 |
+| D9 | 本文档为项目宪法；修改需用户在场同意；AGENTS.md 登记权威条款 | 2026-09-09 |
+| D10 | **固定地址优先**：有公网域名的用户一律固定地址（直连反代 / named tunnel）；quick tunnel 仅作无域名用户的临时入口，UI 明示地址漂移并引导升级 | 2026-09-12 |
+| D11 | **配对模型双模**：审批配对（默认——新设备需桌面端批准或输入桌面显示的 4 位确认码，固定地址不再是秘密、批准才是）+ 直通配对（可选，dsh 式一次性二维码）；设备 cookie 有效期 180 天；设备满员（默认 3）需手动腾位，不静默淘汰 | 2026-09-12 |
+| D12 | **审批通道两层**：协议原生优先（Claude control 通道 / codex app-server 审批事件 / ACP request_permission / OpenCode API，三期随协议矩阵接入）；已开 TUI 会话用注入应答（机制通用，按键映射每 CLI 一次探测入库+版本探针，二期）；一期只做"等待用户"通知 | 2026-09-12 |
+| D13 | **电源策略**：远程开启时 MAM 持有系统电源锁（macOS caffeinate / Windows SetThreadExecutionState；阻止系统+磁盘休眠，显示器可睡；Windows 可代设电源计划的硬盘休眠项），开关默认开；界面明示合盖/电池限制 | 2026-09-12 |
+| D14 | **dsh（DeepSeek harness）纳入第八受管工具**：一期只读监控（读其 storages/sessions；它本身是本地 web 架构，读其 HTTP API 亦可评估），写通道视其 web API/插件生态另评。**2026-09-14 用户裁决补充**：Skill 符号链接管理（写 `~/.dsh/skills`）纳入一期——属 MAM 资源管理能力而非消息写通道；未读语义对齐全工具口径（红/blocked 不挂角标，绿卡走通用未读池） | 2026-09-12（09-14 补裁决） |
+| D15 | **移动端交付形态定案**：网页版 + 推送网关为一期主体；**APK（Capacitor 壳 + HMS Push/ntfy 兜底 + 通知点击直达）为一期收尾加强包**（"1.5 期"定位，可滑入二期初）——原则：链路做稳，套壳收尾 | 2026-09-12 |
+
+### 3.(d) 可比选型对照（重点补充）
+
+**HTTP 服务器框架**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **axum** ✅ | tokio 亲儿子、tower 生态、类型安全、文档最全 | 无 | 采用 |
+| actix-web | 性能标杆、成熟 | actor 模型心智负担、与 tokio 生态有摩擦史 | 备选 |
+| warp | filter 组合优雅 | filter 类型错误难懂、社区转冷 | 不选 |
+| tiny_http/hyper 裸写 | 零依赖 | 一切自己造（路由/提取/SSE） | 不选（工作量不值） |
+
+**实时通道**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **SSE** ✅ | 单向够用、自动重连、实现小 | 单向（写走 POST 即可）；个别隧道不透传（降级轮询兜底） | 采用 |
+| WebSocket | 双向、二进制 | 双向需求不存在；多一套连接状态管理 | 不选 |
+| 纯轮询 | 最稳 | 延迟与电量差 | 仅作降级 |
+
+**隧道/公网接入**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **cloudflared（quick+named）** ✅ | 免账号起步/可升级固定域名；生态主流 | TLS 终止在 CF 边缘；quick 地址易变 | 采用 |
+| 直连+自备反代 ✅ | 全自控（本项目用户主用） | 需公网 IP/域名 | 采用（模式之一） |
+| Tailscale ✅ | 隐私最好、P2P | 手机需装客户端 | 采用（模式之一，文档指引） |
+| 自建 WSS 中继（dshn 式） | 完全自控、ZCode 同构 | 需 VPS+自维护；一期过重 | 三期后可选 |
+| frp/SSH 隧道 | 传统成熟 | 配置负担转嫁给用户 | 不内置，用户可自配（直连模式天然支持） |
+| P2P 打洞（iroh/WebRTC） | 无第三方见明文 | 实现复杂度高（dsh-tether 需要 sidecar+APP） | 远期可选 |
+
+**鉴权/配对**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **一次性配对 token + 设备 cookie（dsh 式）** ✅ | 语义被生态验证、可 1:1 移植、无外部依赖 | 自维护 | 采用 |
+| JWT+账号体系（AionCore/ds-harness-remote 式） | 多用户、可吊销粒度细 | 一期单用户场景过重 | 三期评估（多设备/多用户时） |
+| PIN+登录限速（dsh-pocket 式） | 简单 | 短码可爆破（靠限速补） | 借鉴其限速思想，不采用 PIN |
+| E2EE（Noise/PBKDF2，ds-harness-remote/dshn 式） | 中继零知识 | 复杂；一期无中继场景 | 设计留位，三期可选 |
+
+**移动端形态**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **PWA（同 React 仓库第二入口）** ✅ | 复用组件/i18n、无商店分发、迭代快 | iOS 推送受限（靠 Bark 补） | 采用 |
+| Capacitor/Tauri Mobile 包装 | 可上商店、原生 API | 打包链复杂化 | 三期 F3.9 评估 |
+| 纯原生 APP | 体验最佳 | 三端三代码库 | 远期 |
+
+**消息注入**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **终端原生 API（send-keys/write text/do script）** ✅ | 官方、精准、直达已开 TUI | 需按终端分别实现（就三个） | 采用 |
+| **无头 resume（zcode/claude/codex CLI）** ✅ | 不依赖窗口形态、可驱动未开窗会话 | 已开 TUI 不实时可见（Claude/Kimi）；进程管理负担 | 采用（与上互补，路由表决定） |
+| keystroke/accessibility | 万能 | 抢焦点/输入法敏感/权限 | 应急预案（D7） |
+| app-server/ACP 协议 | 全能力（含 setModel） | 非 public API、版本维护成本 | 三期（F3.3） |
+
+**会话摘要生成（二期 F2.7）**
+
+| 候选 | 优势 | 劣势 | 结论 |
+|---|---|---|---|
+| **规则摘要** ✅（默认） | 零成本、零依赖、可离线 | 质量一般（尾部截取+状态拼接） | 采用 |
+| **LLM 摘要** ✅（可选） | 质量高（.handoff 先例即 agent 自总结） | 消耗 token；依赖无头通道 | 采用（复用二期无头通道执行） |
+| 全量 JSON 导出（opencode export 式） | 无损 | 目标 harness 读不懂别家 JSON | 作为附本随 HANDOFF 落盘，不作主载体 |
+
+---
+
+## 4. 跨端任务流转调研
+
+> 详细证据与矩阵：`research/refs/phase3-全控与流转/跨端任务流转-调研.md`。
+
+### 4.(a) 交流形式流转（手机端 ↔ 无头端 ↔ 桌面端）
+
+**互通两条件模型**（判定 D/E/F 提炼）：① 无头与有头**共享磁盘会话存储**；② 有头 UI 会**重读存储**且有可知的**索引判别条件**（ZCode=工作区在册）。两条件满足即可复制 ZCode 模式（无头驱动→有头可见）；仅满足①的 TUI 型工具（Claude/Kimi）用终端注入等效达成（更实时）；皆不满足的封闭 APP 退化为通知+跳转。
+
+**互通判定**：ZCode ✅ 已实证（判定 A/F，在册工作区）；Codex ◐ 官方证据支持同型（openai/codex#28259：exec resume 可追加桌面会话 rollout，索引不保证刷新——与 ZCode 判定 D/E/F 同构）；OpenCode ✅ 最开放（官方 serve/export/share）；Claude/Kimi ◐ 注入直达已开 TUI + 无头续写（Kimi 官方支持恢复运行时状态）；OpenClaw ✅ 官方 server 化（单一 Gateway 状态源 + 指针式 handoff）；WorkBuddy ❌ 黑盒（腾讯 CodeBuddy 团队产品，无公开 CLI/API/存储文档，唯一通路=文件型交接+深链+keystroke）。
+
+**理论推广**：其他带 GUI 的 APP（Codex APP、WorkBuddy）"理论上"都可能以 ZCode 式流转，判据就是两条件模型——每家做一次 spike（无头/外部写入 → 刷新/重启 → 有头列表是否出现）即可定案，验证协议已模板化（见流转调研文档）。
+
+### 4.(b) 任务上下文流转（同项目目录、跨 harness）
+
+**可行性**：成立。跨 harness 无数据层转换（各家存储互不兼容），唯一通路是**语义层摘要 + 文件系统/git 共同事实源**；同 cwd 打开是前提（Claude `--resume` 同 cwd 键控；ZCode 在册判定也按路径）。
+
+**载体**：HANDOFF.md（v1 九段式：Objective/Work Completed/Current State/Decisions & Rationale/Next Steps/Environment & File Context/Session Log/Smart Defaults/Verification Steps + 原始会话指引），格式基线 = qdhenry/Claude-Command-Suite handoff 命令模板（社区最成熟，与本仓库 `.handoff/日期-handoff.md` 实践命名独立撞车）+ Claude `/export`（原文附录）`/compact`（聚焦摘要）语义。
+
+**双路径**：**内容式交接**（跨 harness 主路径，HANDOFF.md 携带语义）与**指针式交接**（同 harness 快路径，仅携带会话标识+恢复方式，如 `--resume <id>`、OpenClaw versioned handoff——无损）；MAM 路由规则：同 harness 优先指针式，跨 harness 走内容式，两者可叠加。流转状态字段采用 A2A 式状态机（9 态、终态封闭、contextId 聚合）。
+
+**导入**：按目标工具能力路由——注入"读取 handoff 并继续"（qdhenry handoff-continue 同模式）、`--attach`（zcode CLI 已验证）、@文件 引用。
+
+**SSOT 原则**：MAM 自有 DB 只做缓存索引，各 harness 原始会话文件永远是事实源（codex 索引滞后教训，openai/codex#28259）。
+
+### 4.(c) 系统设计需求
+
+六件套：**HandoffStore**（`~/.mam/handoffs/` + 索引表 + 审计）、**ExportService**（全量读→摘要→模板，双档规则/LLM）、**ImportService**（目标选择→投递→首轮确认回执）、**工作区在册感知**（有头可见性预期）、**触发与 UI**（手动交接按钮 + 自动规则）、**可选自动化 watcher**。依赖关系见 §5 基座矩阵——Export 的读取基座=一期 F1.4，LLM 摘要执行器与 Import 的投递通道=二期 F2.1–F2.5。
+
+---
+
+## 5. 阶段规划与基座设计（目标倒推）
+
+### 5.(a) 从三期终态倒推一二期基座
+
+三期终态 = "任务在任意两端、任意 harness 间流转 + 全功能遥控"。拆开它的每个能力，反推前两期应顺手埋下的基座：
+
+| 三期终态能力 | 倒推 | 一期基座 | 二期基座 |
+|---|---|---|---|
+| 移动端完整对话（F3.2） | 读渲染+写注入 | **F1.4 会话全量读**（对话渲染的数据件）+ F1.3 看板（UI 骨架） | F2.1–2.4 写通道 + F2.6 输入框 |
+| 切模型/会话（F3.1/3.4） | 命令注入 + 会话列表 | F1.3 会话列表（移动版） | F2.1 注入通道（命令=特殊消息） |
+| 协议客户端（F3.3） | 进程管理 + 事件流 | F1.8 SessionWatcher（broadcast 通道复用） | F2.4 无头进程管理骨架（Spawner/注册表/挂起）直接长出协议客户端 |
+| 配置代理（F3.5） | 配置读写暴露 | `/m/api` 门禁框架（新端点即插） | — |
+| 流转 Export（F3.7） | 全量读+摘要执行器 | **F1.4 read_session_messages = Export 的读取件** | **F2.4 无头通道 = LLM 摘要的执行器**；F2.7 导出落地 |
+| 流转 Import（F3.7） | 投递通道 | — | **F2.1–F2.5 = Import 的投递通道**（路由表直接复用） |
+| 有头可见性预期（F3.8） | 在册感知 | F1.3 看板可先展示"宿主形态"字段 | F2.5 路由表已含可见性预期 |
+
+**结论**：一期的三个组件（全量读、SessionWatcher、/m/api 框架）和二期的两块（写通道+路由表、无头进程骨架）就是流转的全部基座——三期没有凭空的新地基，只有协议客户端矩阵和 Handoff 设施是纯增量。
+
+### 5.(b) 各期验收标准（简）
+
+- **一期**：外网手机扫码→看到八工具会话状态与内容；杀掉一个 agent 会话状态跃迁→手机 2s 内收到提醒；配对码刷新旧码失效；"停止远程"后所有设备 403；quick tunnel 断网自动恢复。
+- **二期**：手机对 tmux/iTerm2/Terminal 里的会话发消息→终端出现 `[mobile]` 标记输入；黄状态消息排队、转红 flush；对 ZCode 在册会话无头发消息→桌面刷新后可见（判定 F 复现）；导出 HANDOFF.md 人可读、agent 可续。
+- **三期**：移动端切换 Claude Code 模型生效；移动端与 ZCode 会话流式对话；HANDOFF 从 ZCode 会话导出→导入到同 cwd 的 Claude 会话→首轮确认回执；协议探针失败时降级路径可用。
+
+### 5.(c) 横切原则（宪法条款）
+
+1. 安全递进：只读→白名单消息→受控操控；每次扩权独立评审；token 门禁覆盖一切端点
+2. 通道无关：功能不绑定网络通道，四模式等价
+3. 能力差异显式化：按工具支持矩阵降级呈现，不假装统一（矩阵见 research/README 与流转调研）
+4. MAM 渲染为默认可视化：桌面宿主 UI 不可见的会话 MAM 必须能看
+5. 桌面体验不回退：新增能力不得影响现有监控/通知/资源管理
+6. 版本漂移受控：无头/协议通道均非公开稳定 API，实现必须带版本门控+探针+降级
+7. 文档权威：本文档最高；修改需用户在场明确同意；冲突时停下报告
+
+---
+
+## 附 A. 工具支持矩阵（随实现更新）
+
+| 工具 | 状态读 | 内容读(一期) | 注入(二期) | 无头(二期) | 有头可见性 | 全控(三期) |
+|---|---|---|---|---|---|---|
+| Claude Code | ✅ | ✅ JSONL | ✅ 三终端 | ✅ -p --resume（+官方/export、/compact） | 刷新后/注入直达 | ACP 或原生 |
+| Codex CLI/APP | ✅ | ✅ rollout | ✅（CLI） | ✅ exec resume（官方#28259 实证可追加桌面会话） | ◐ 索引不保证刷新 | app-server |
+| OpenCode | ✅ | ✅ SQLite | ✅ | ✅ run/serve/acp/export/share | ✅ 官方 web | ACP |
+| OpenClaw | ✅ | ✅ state.json/SQLite | ◐ gateway | ✅ sessions CLI + 指针式 handoff | ✅ Gateway 单一状态源 | gateway HTTP |
+| Kimi Code | ✅ | ✅ wire.jsonl | ✅ | ✅ -p -S（恢复含运行时状态） | 刷新后/注入直达 | 待评估 |
+| WorkBuddy | ✅ | ✅ JSONL | ❌ 黑盒（无 CLI/API） | ❌ 黑盒 | ❌（仅深链跳转） | ❌（文件型交接兜底） |
+| ZCode | ✅ | ✅ db.sqlite | —（走无头） | ✅ --resume/app-server | ✅ 在册工作区（判定 F） | ZCode Protocol |
+| dsh (DeepSeek harness) | ✅（新增 adapter，D14） | ✅ sessions/storages | ◐（其 web API/插件生态另评） | ◐（CLI headless 待探） | ✅ 自带 web UI（dsh web） | 自带 web + 插件生态 |
+
+## 附 B. 参考库指针
+
+- 总报告（判定 A–F）：`research/手机端远程访问技术路线调研.md`
+- 一期：`research/refs/phase1-接入层/`（dsh 源码落地 + 摘要 + 通道要点）
+- 二期：`research/refs/phase2-消息注入/`（AionCore 报告 + 生态九模式 + 注入参考）
+- 三期：`research/refs/phase3-全控与流转/`（协议笔记 + 流转调研）
+- 持续跟踪清单（外部依赖版本）：`research/README.md`

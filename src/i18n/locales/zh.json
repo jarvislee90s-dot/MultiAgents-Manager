@@ -146,7 +146,8 @@
     "loading": "加载中…",
     "tabDashboard": "看板",
     "tabResources": "资源",
-    "petToggle": "显示/隐藏桌宠"
+    "petToggle": "显示/隐藏桌宠",
+    "clearFinishedCards": "一键清除已完成卡片"
   },
   "status": {
     "waiting": "待处理",
@@ -181,6 +182,7 @@
     "pageCrashed": "出错了"
   },
   "resources": {
+    "kindNotSupported": "暂不支持",
     "byKind": "按资源",
     "byTool": "按工具",
     "scanNative": "扫描原生资源",

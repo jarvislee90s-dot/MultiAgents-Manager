@@ -1,7 +1,7 @@
 // 会话类型定义 — 与 Rust Session 结构（camelCase 序列化）对应
 
 export type AgentType =
-  "claude" | "codex" | "opencode" | "openclaw" | "kimi" | "workbuddy" | "zcode";
+  "claude" | "codex" | "opencode" | "openclaw" | "kimi" | "workbuddy" | "zcode" | "dsh";
 
 export type SessionStatus =
   "waiting" | "processing" | "thinking" | "compacting" | "idle" | "finished";

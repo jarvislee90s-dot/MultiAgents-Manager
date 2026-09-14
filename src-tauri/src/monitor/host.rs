@@ -65,6 +65,13 @@ pub fn tool_host_alive_in(system: &sysinfo::System, tool_id: &str) -> bool {
         {
             return false;
         }
+        // dsh（M1 终审 C1）：宿主是前台终端启动的 node 进程，exe 判据不可用（exe=node），
+        // 照 zcode 先例走 cmdline 门——口径单源委托 dsh::cmdline_is_dsh_host（与
+        // find_dsh_processes 完全一致）。dsh 无「孤儿防线」需求：esbuild 等子进程
+        // cmdline 无 dsh+web 双令牌、天然排除，故任何含双令牌的 node 即视为宿主
+        if tool_id == "dsh" {
+            return crate::monitor::dsh::cmdline_is_dsh_host(p.cmd());
+        }
         p.exe()
             .map(|e| is_host_process(&e.to_string_lossy().to_lowercase(), tool_id))
             .unwrap_or(false)
@@ -149,12 +156,15 @@ mod tests {
         ));
     }
 
-    /// review F2：tool_host_alive_in 复用外部快照；空快照（无进程）→ 不存活
+    /// review F2：tool_host_alive_in 复用外部快照；空快照（无进程）→ 不存活。
+    /// dsh 分支（C1 终审）同样接线：空快照/空 cmdline → 不存活
+    /// （带 cmdline 的正例在 dsh::cmdline_gate_tests——sysinfo 无法伪造进程）
     #[test]
     fn empty_system_snapshot_has_no_host() {
         let system = sysinfo::System::new();
         assert!(!tool_host_alive_in(&system, "workbuddy"));
         assert!(!tool_host_alive_in(&system, "codex"));
+        assert!(!tool_host_alive_in(&system, "dsh"));
     }
 
     /// issue #35-5：cmdline 级 sidecar 排除（Windows 上 sidecar exe 与主进程同名，

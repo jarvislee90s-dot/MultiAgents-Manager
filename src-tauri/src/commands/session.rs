@@ -2,11 +2,25 @@
 
 use crate::adapter;
 use crate::session::SessionsResponse;
+// Manager 的导入在下方 macOS cfg 块内局部引入：get_webview_window 仅 macOS
+// 路径消费，顶层导入在 Linux/Windows CI 上是 unused import（-D warnings 即挂）
 use tauri::Emitter;
 
 #[tauri::command]
-pub fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
-    let response = adapter::get_all_sessions();
+pub async fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
+    // 重扫描移出主线程（同步命令在主线程执行）：sysinfo 全进程刷新 + 各工具
+    // 会话文件解析（如 dsh 冷启动全量解析数秒）会冻结整个 UI——dev 模式整机
+    // 卡顿的第二根因。托盘/预设更新是轻量 UI 操作，await 后照常执行
+    let response = tauri::async_runtime::spawn_blocking(adapter::get_all_sessions)
+        .await
+        .unwrap_or_else(|e| {
+            ::log::error!("会话扫描任务异常: {e}");
+            SessionsResponse {
+                sessions: Vec::new(),
+                total_count: 0,
+                waiting_count: 0,
+            }
+        });
     let has_processing = response.sessions.iter().any(|s| {
         matches!(
             s.status,
@@ -205,6 +219,29 @@ pub fn focus_session(
     #[cfg(not(windows))]
     {
         let _ = (project_name, last_message, title, form, unread);
+        // dsh（M1）：宿主是终端启动的 node 进程，通常持有 TTY——若 TTY 链路
+        // 先行会聚焦终端并误标已读，dsh 路由永远不可达（review Important）。
+        // 故 dsh 精确匹配必须在 TTY 链路之前短路；也不走 APP 激活链路——
+        // 聚焦/打开 dsh web 标签页（无 per-session URL，设计 P4 定案）；失败给出提示
+        #[cfg(target_os = "macos")]
+        if agent_type.as_deref() == Some("dsh") {
+            // get_webview_window 的 Manager trait 导入收在 cfg 块内（见文件头注释）
+            use tauri::Manager;
+            match crate::window::dsh_tab::focus_dsh_tab() {
+                Ok(mut out) => {
+                    mark_read_on_jump(&app, &session_id, &agent_type);
+                    // 跳转成功即隐藏看板（用户 2026-09-14 验收裁决）：dsh 落点是
+                    // 浏览器标签，看板窗口留在原地遮挡视线；收进托盘（点托盘可
+                    // 再唤出），与「关窗即隐藏」的托盘应用形态一致
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                    out["via"] = serde_json::Value::String("dsh".into());
+                    return Ok(out);
+                }
+                Err(e) => return Err(format!("无法聚焦 dsh 页面：{e}（请手动打开 dsh web）")),
+            }
+        }
         // CLI 形态：TTY 链路（tmux/iTerm2/Terminal.app）
         if crate::window::focus_terminal_for_pid(pid).is_ok() {
             mark_read_on_jump(&app, &session_id, &agent_type);

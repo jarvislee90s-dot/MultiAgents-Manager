@@ -8,6 +8,10 @@ import type { AgentType } from "@/types/session";
 export interface EnabledTool {
   id: AgentType;
   label: string;
+  /** 资源能力标志：dsh 的 skill 启停写通道暂未开放；mcp/plugin 按工具实际能力 */
+  skillToggleSupported: boolean;
+  mcpSupported: boolean;
+  pluginSupported: boolean;
 }
 
 export const ENABLED_TOOLS_KEY = ["enabled-tools"] as const;

@@ -3,6 +3,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod dsh;
 pub mod kimi;
 pub mod openclaw;
 pub mod opencode;
@@ -136,6 +137,7 @@ pub const TOOL_IDS: &[&str] = &[
     "kimi",
     "workbuddy",
     "zcode",
+    "dsh",
 ];
 
 /// 工具 id → adapter 的唯一登记处。新增工具只需在此加一行（+ 其 adapter 文件），
@@ -149,6 +151,7 @@ pub fn adapter_by_id(tool_id: &str) -> Option<Box<dyn AgentAdapter>> {
         "kimi" => Some(Box::new(kimi::KimiAdapter)),
         "workbuddy" => Some(Box::new(workbuddy::WorkBuddyAdapter)),
         "zcode" => Some(Box::new(zcode::ZCodeAdapter)),
+        "dsh" => Some(Box::new(dsh::DshAdapter)),
         _ => None,
     }
 }
@@ -184,6 +187,21 @@ pub fn all_adapters_with_ids() -> Vec<(&'static str, Box<dyn AgentAdapter>)> {
 /// 共享 System 实例 — 每轮询周期刷新一次，所有 adapter 共用
 static SHARED_SYSTEM: Mutex<Option<System>> = Mutex::new(None);
 
+/// get_all_sessions 单飞护栏（评审 R3）：主窗口与桌宠各自 3s 轮询，相位接近时
+/// 两请求并发进入同一段多秒扫描——堆叠放大 CPU/IO 峰值。try_lock 抢扫描权，
+/// 抢不到的请求立即返回最近一次快照（0=尚无快照时返回空响应，首窗口可接受）。
+/// 扫描完成时刷新快照。不做去抖定时器，保持"谁抢到谁全量扫"的最简单飞语义
+struct ScanFlight {
+    /// 扫描进行中标志（try_lock 竞争点）
+    in_flight: std::sync::Mutex<bool>,
+    /// 最近一次完整扫描结果（快照返回用；含时间戳便于日志诊断陈旧度）
+    last_snapshot: std::sync::Mutex<Option<(std::time::Instant, SessionsResponse)>>,
+}
+static SCAN_FLIGHT: Lazy<ScanFlight> = Lazy::new(|| ScanFlight {
+    in_flight: std::sync::Mutex::new(false),
+    last_snapshot: std::sync::Mutex::new(None),
+});
+
 /// 会话级去重：同一 (工具, session id) 只保留首张卡。
 /// 全局防线：任何解析器的"文件级/进程级复制"型 bug（如 opencode 多进程同会话、
 /// codex 每轮新 rollout）在这里统一兜住，一处修复覆盖全部工具
@@ -192,8 +210,47 @@ pub fn dedup_sessions(sessions: &mut Vec<Session>) {
     sessions.retain(|s| seen.insert((s.agent_type.tool_id().to_string(), s.id.clone())));
 }
 
-/// 获取所有注册 adapter 的会话
+/// 获取所有注册 adapter 的会话（单飞：并发请求直接复用最近快照）
 pub fn get_all_sessions() -> SessionsResponse {
+    // R3 单飞护栏：抢不到扫描权 → 返回上次快照，不排队不堆叠
+    let mut flying = SCAN_FLIGHT.in_flight.lock().unwrap();
+    if *flying {
+        let snap = SCAN_FLIGHT.last_snapshot.lock().unwrap();
+        if let Some((at, resp)) = snap.as_ref() {
+            log::debug!(
+                "get_all_sessions 单飞命中快照（扫描进行中，快照龄 {:?}）",
+                at.elapsed()
+            );
+            return resp.clone();
+        }
+        return SessionsResponse {
+            sessions: Vec::new(),
+            total_count: 0,
+            waiting_count: 0,
+        };
+    }
+    *flying = true;
+    drop(flying); // 先放手上的 in_flight 锁：Drop guard 析构时要重新拿它清位，
+                  // 不 drop 即自锁自等（本测试挂起事故的根因）
+                  // Drop guard：内层扫描 panic（如 DB 锁中毒 unwrap）时飞行位自动释放——
+                  // 若靠扫描返回后手动清位，一次 panic 即永久卡死单飞（看板冻结到重启），
+                  // 且把原失败模式（单次报错下轮重试）恶化成永久故障
+    let _guard = ScanFlightGuard;
+    let result = get_all_sessions_inner();
+    *SCAN_FLIGHT.last_snapshot.lock().unwrap() = Some((std::time::Instant::now(), result.clone()));
+    result
+}
+
+/// 扫描飞行位的 Drop 释放护栏（作用域结束/panic unwind 均自动清位）
+struct ScanFlightGuard;
+impl Drop for ScanFlightGuard {
+    fn drop(&mut self) {
+        *SCAN_FLIGHT.in_flight.lock().unwrap() = false;
+    }
+}
+
+/// 实际扫描（单飞壳内执行；成功路径与原实现一致）
+fn get_all_sessions_inner() -> SessionsResponse {
     // W5：未勾选工具不参与会话扫描（看板卡/通知随之静默）
     let adapters: Vec<Box<dyn AgentAdapter>> = enabled_adapters();
 
@@ -402,12 +459,70 @@ pub fn get_all_sessions() -> SessionsResponse {
     }
 }
 
+/// R3 单飞护栏的测试互斥锁（跨模块共享）：直接操纵全局 SCAN_FLIGHT 的测试与
+/// 真实扫描类测试（会重置飞行位/快照，含 tests::test_get_all_sessions）互斥——
+/// cargo 默认并行测试下两个真实 get_all_sessions 同时起跑会互踩快照/飞行位
+/// （flight_released 断言 !in_flight 时另一测试的扫描仍在飞即红，评审 R6）
+#[cfg(test)]
+static SCAN_FLIGHT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// R3 单飞护栏测试：占住飞行位时第二请求返回快照而不进入扫描
+#[cfg(test)]
+mod scan_flight_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_request_reuses_snapshot_without_rescan() {
+        let _g = SCAN_FLIGHT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // 预置快照
+        let snapshot = SessionsResponse {
+            sessions: Vec::new(),
+            total_count: 7,
+            waiting_count: 0,
+        };
+        *SCAN_FLIGHT.last_snapshot.lock().unwrap() = Some((std::time::Instant::now(), snapshot));
+
+        // 占住飞行位（模拟另一请求正在扫描）
+        *SCAN_FLIGHT.in_flight.lock().unwrap() = true;
+
+        // 并发请求：应直接返回快照（total_count=7 来自快照而非真实扫描）
+        let resp = get_all_sessions();
+        assert_eq!(resp.total_count, 7, "单飞命中应返回最近快照");
+
+        // 清理：释放飞行位（真实扫描会重置快照，不影响其他测试）
+        *SCAN_FLIGHT.in_flight.lock().unwrap() = false;
+    }
+
+    #[test]
+    fn flight_released_after_scan_completes() {
+        let _g = SCAN_FLIGHT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // 正常调用：进入扫描并释放飞行位 + 刷新快照
+        let resp = get_all_sessions();
+        assert!(
+            !*SCAN_FLIGHT.in_flight.lock().unwrap(),
+            "扫描完成后飞行位应释放"
+        );
+        let snap = SCAN_FLIGHT.last_snapshot.lock().unwrap();
+        assert!(snap.is_some(), "扫描完成后应刷新快照");
+        assert_eq!(snap.as_ref().unwrap().1.total_count, resp.total_count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_get_all_sessions() {
+        // 与 scan_flight_tests 共用 SCAN_FLIGHT_TEST_LOCK：本测试触发真实
+        // get_all_sessions（刷新快照/飞行位），不互斥则并行起跑互踩（评审 R6）
+        let _g = SCAN_FLIGHT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let response = get_all_sessions();
         eprintln!("=== SESSION SCAN ===");
         eprintln!(
@@ -454,7 +569,13 @@ fn codex_green_card_should_drop(was_green_prev: bool, pool_has_row: bool) -> boo
 /// 的聚合卡语义。WorkBuddy 活跃卡由进程/心跳存活驱动（进程退出后由未读池接管渲染），
 /// 不在此列——既有工具行为零变化
 fn green_card_is_data_driven(agent_type: &AgentType) -> bool {
-    matches!(agent_type, AgentType::Codex | AgentType::ZCode)
+    // Dsh：出卡同样由扫描窗口驱动（24h 活动窗 + LIMIT，monitor::dsh），完成后
+    // 窗口内持续出卡——与 Codex/ZCode 同一套「池行在⇒未读、已读⇒剔除」聚合卡
+    // 语义（用户 2026-09-14 验收裁决：绿灯点击后消失，变黄/红才重新进入周期）
+    matches!(
+        agent_type,
+        AgentType::Codex | AgentType::ZCode | AgentType::Dsh
+    )
 }
 
 /// review F2：宿主 APP 已死 → App 形态活跃卡全部清除（孤儿 codebuddy 心跳未过期
@@ -731,9 +852,13 @@ mod host_liveness_filter_tests {
     use super::*;
 
     fn fake(id: &str, form: ProcessForm, unread: bool) -> Session {
+        fake_for(AgentType::WorkBuddy, id, form, unread)
+    }
+
+    fn fake_for(agent: AgentType, id: &str, form: ProcessForm, unread: bool) -> Session {
         Session {
             id: id.into(),
-            agent_type: AgentType::WorkBuddy,
+            agent_type: agent,
             project_name: "P".into(),
             project_path: String::new(),
             title: None,
@@ -785,6 +910,39 @@ mod host_liveness_filter_tests {
         filter_host_dead_cards(&mut sessions, &|_| true);
         assert_eq!(sessions.len(), 2);
     }
+
+    /// C1 终审回归锁（管线级）：dsh 卡恒为 App 形态，宿主存活判定若未登记该工具
+    /// （tool_host_alive_in 恒 false——dsh 曾因 host.rs 缺 dsh arm 整批丢卡），
+    /// unread=false 的活跃卡每轮都被本过滤器丢弃、dead_tools_from_pool 亦误清池。
+    /// 锁定：App 形态 dsh 活跃卡的存留必须由 host_alive("dsh") 驱动——
+    /// 未来新工具若再犯同类「注册 adapter 却漏登记存活判定」，此处即红
+    #[test]
+    fn dsh_app_card_survives_iff_host_alive_reports_alive() {
+        // host_alive("dsh")=true（宿主在位口径）→ 未读活跃卡保留
+        let mut alive = vec![fake_for(
+            AgentType::Dsh,
+            "dsh-live",
+            ProcessForm::App,
+            false,
+        )];
+        filter_host_dead_cards(&mut alive, &|tool| tool == "dsh");
+        assert_eq!(
+            alive.len(),
+            1,
+            "宿主存活口径登记正确时 dsh 活跃卡不得被过滤"
+        );
+
+        // host_alive("dsh")=false（登记漏项时的错误口径）→ App 活跃卡必须丢弃
+        //（本断言同时证明过滤器对该工具生效、测试具备区分度）
+        let mut dead = vec![fake_for(
+            AgentType::Dsh,
+            "dsh-live",
+            ProcessForm::App,
+            false,
+        )];
+        filter_host_dead_cards(&mut dead, &|tool| tool != "dsh");
+        assert!(dead.is_empty(), "宿主判死时 App 形态活跃卡必须被过滤");
+    }
 }
 
 /// 统一维护每个工具的原生 skill 根目录，避免扫描、清理和启用各自硬编码路径
@@ -806,6 +964,9 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
         // ZCode：官方文档声明的用户级 skill 目录 ~/.zcode/skills（Plan A，
         // 目录真实性不确定与备选方案见 IMPLEMENTATION_NOTES）
         "zcode" => Some(crate::monitor::zcode_parser::zcode_home_with(home_dir).join("skills")),
+        // Dsh：真机实测 ~/.dsh/skills 存在且为 dsh 的 skill 目录（用户 2026-09-14
+        // 裁决：资源页只读打开/跳转接入，管理写通道仍不在范围）
+        "dsh" => Some(crate::monitor::dsh::dsh_home_with(home_dir).join("skills")),
         _ => None,
     }
 }
@@ -818,6 +979,18 @@ pub fn primary_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod skill_dir_tests {
     use super::*;
+
+    #[test]
+    fn dsh_skill_dir_under_home() {
+        let dir = skill_dir_for_tool("dsh", std::path::Path::new("/home/test"))
+            .expect("dsh 应有 skill 目录");
+        assert_eq!(
+            dir,
+            std::path::Path::new("/home/test")
+                .join(".dsh")
+                .join("skills")
+        );
+    }
 
     #[test]
     fn codex_skill_dir_uses_real_cli_directory() {
@@ -858,6 +1031,7 @@ mod green_card_gate_tests {
     fn data_driven_persistent_green_card_tools() {
         assert!(green_card_is_data_driven(&AgentType::Codex));
         assert!(green_card_is_data_driven(&AgentType::ZCode));
+        assert!(green_card_is_data_driven(&AgentType::Dsh));
         // 既有工具零回归：WorkBuddy 与全部 CLI 工具不在门内
         assert!(!green_card_is_data_driven(&AgentType::WorkBuddy));
         assert!(!green_card_is_data_driven(&AgentType::Claude));
@@ -1079,5 +1253,19 @@ mod insert_allowed_tests {
         assert!(insert_allowed(None, false));
         // prev 有值 → 真实状态迁移，已读后会话转黄再转绿的通知不丢
         assert!(insert_allowed(Some("Processing"), true));
+    }
+}
+
+#[cfg(test)]
+mod dsh_registration_tests {
+    use super::*;
+
+    #[test]
+    fn dsh_adapter_registered() {
+        assert!(adapter_by_id("dsh").is_some());
+        assert_eq!(adapter_by_id("dsh").unwrap().name(), "dsh");
+        // 注册表完整：8 个工具
+        assert_eq!(all_adapters().len(), 8);
+        assert!(TOOL_IDS.contains(&"dsh"));
     }
 }

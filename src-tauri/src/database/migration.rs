@@ -59,6 +59,7 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     // 015：native_extensions 表从未被业务写入，移除（历史库中 DROP）
     conn.execute_batch("DROP TABLE IF EXISTS native_extensions;")
         .map_err(|e| format!("移除 native_extensions 失败: {}", e))?;
+
     Ok(())
 }
 

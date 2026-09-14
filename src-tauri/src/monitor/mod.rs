@@ -5,6 +5,7 @@ pub mod claude_parser;
 pub mod codex_parser;
 pub mod codex_thread_parser;
 pub mod cwd;
+pub mod dsh;
 pub mod git;
 pub mod hooks;
 pub mod host;
@@ -27,26 +28,26 @@ use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-/// 用户 X 掉的 App 形态卡（T2「暂离不提示」）：key = (tool_id, session_id, status 小写)。
-/// 同一会话状态变化后 key 不匹配 → 卡片自然重现（绿→黄/红或产生新未读）；
-/// 进程内语义，MAM 重启清空（重启后全部重现，可接受）。不碰 unread_sessions 表——
-/// 未读卡的 X 走已读（mark_session_read），本集合只服务活跃卡的「隐藏」语义
+/// 用户 X 掉的卡（T2「暂离不提示」）：key = (tool_id, session_id, status 小写)，
+/// App 与 CLI 形态通用。同一会话状态变化后 key 不匹配 → 卡片自然重现
+/// （绿→黄/红或产生新未读）；进程内语义，MAM 重启清空（重启后全部重现，可接受）。
+/// 不碰 unread_sessions 表——未读卡的 X 走已读（mark_session_read），
+/// 本集合只服务活跃卡的「隐藏」语义
 pub static SESSION_DISMISALS: Lazy<Mutex<HashSet<(String, String, String)>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
-/// dismiss 过滤纯函数（可测）：App 形态卡按 (tool, session, status 小写) 命中则剔除；
-/// CLI 卡不参与 X 关闭，防御性放行。dismissed 以闭包注入，测试不触全局集合
+/// dismiss 过滤纯函数（可测）：任意形态卡（App/CLI）按 (tool, session, status 小写)
+/// 命中则剔除；状态变化后 key 不匹配自然重现。dismissed 以闭包注入，测试不触全局集合
 pub fn filter_dismissed_cards(
     sessions: &mut Vec<crate::session::Session>,
     dismissed: &dyn Fn(&str, &str, &str) -> bool,
 ) {
     sessions.retain(|s| {
-        !matches!(s.form, crate::session::ProcessForm::App)
-            || !dismissed(
-                &format!("{:?}", s.agent_type).to_lowercase(),
-                &s.id,
-                &format!("{:?}", s.status).to_lowercase(),
-            )
+        !dismissed(
+            &format!("{:?}", s.agent_type).to_lowercase(),
+            &s.id,
+            &format!("{:?}", s.status).to_lowercase(),
+        )
     });
 }
 
@@ -165,7 +166,7 @@ mod dismissed_filter_tests {
         assert!(sessions.iter().any(|s| s.id == "s2"), "未 dismiss 的卡保留");
         assert!(
             sessions.iter().any(|s| s.id == "cli"),
-            "CLI 卡不参与 dismiss 过滤"
+            "未被 dismiss 的 CLI 卡保留（与 App 卡同规则：只剔命中的）"
         );
 
         // 状态变化（绿→等待）：key 不匹配 → 卡片重现
@@ -185,5 +186,40 @@ mod dismissed_filter_tests {
         // 全部卡片重现；本纯函数测试经注入闭包模拟「空集合」即可覆盖
         filter_dismissed_cards(&mut changed, &|_, _, _| false);
         assert_eq!(changed.len(), 1);
+    }
+
+    /// CLI 卡与 App 卡同规则：X 掉即过滤，状态变化后重现（2026-09-14 验收裁决：
+    /// 终端类卡此前无 X 无法主动关闭，现全形态接入）
+    #[test]
+    fn dismissed_cli_card_filtered_until_status_changes() {
+        let mut sessions = vec![card(
+            "t1",
+            AgentType::Claude,
+            ProcessForm::Cli,
+            SessionStatus::Waiting,
+        )];
+        let dismissed_keys = std::collections::HashSet::from([(
+            "claude".to_string(),
+            "t1".to_string(),
+            "waiting".to_string(),
+        )]);
+        let dismissed = |t: &str, sid: &str, st: &str| {
+            dismissed_keys.contains(&(t.to_string(), sid.to_string(), st.to_string()))
+        };
+        filter_dismissed_cards(&mut sessions, &dismissed);
+        assert!(sessions.is_empty(), "被 X 的 CLI 卡应被过滤");
+
+        // 状态变化（红→绿）：key 不匹配 → 重现
+        let mut changed = vec![card(
+            "t1",
+            AgentType::Claude,
+            ProcessForm::Cli,
+            SessionStatus::Finished,
+        )];
+        filter_dismissed_cards(&mut changed, &dismissed);
+        assert!(
+            changed.iter().any(|s| s.id == "t1"),
+            "CLI 卡状态变化后应重现"
+        );
     }
 }

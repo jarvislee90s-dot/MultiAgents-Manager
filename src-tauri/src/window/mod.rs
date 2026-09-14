@@ -4,6 +4,7 @@ pub mod app_activation;
 mod applescript;
 #[cfg(any(target_os = "macos", windows))]
 pub mod deep_link;
+pub mod dsh_tab;
 #[cfg(target_os = "macos")]
 mod iterm;
 #[cfg(target_os = "macos")]

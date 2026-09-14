@@ -112,6 +112,14 @@ pub async fn update_tool_settings(
 pub struct EnabledTool {
     pub id: String,
     pub label: String,
+    /// 资源能力标志（前端据其渲染「暂不支持」，不按工具 id 硬编码）。
+    /// skill 启停：dsh 已放开（用户 2026-09-14 验收裁决要求 UI 增减链接管理；
+    /// 依据：①后台补链已事实性写 ~/.dsh/skills 且链接有效 ②dsh skill-filesystem
+    /// 源码有专用符号链接处理分支 + followSymlinks 配置，跟随符号链接是受支持形态；
+    /// 随注册表演化，有 skill_dir 分支的工具即为支持）
+    pub skill_toggle_supported: bool,
+    pub mcp_supported: bool,
+    pub plugin_supported: bool,
 }
 
 /// 前端工具列的唯一下发源（W5：勾选状态驱动，替代三处硬编码 TOOLS）
@@ -124,6 +132,9 @@ pub fn list_enabled_tools() -> Vec<EnabledTool> {
             crate::adapter::adapter_by_id(id).map(|a| EnabledTool {
                 id: id.to_string(),
                 label: a.name().to_string(),
+                skill_toggle_supported: crate::adapter::primary_skill_dir(id).is_some(),
+                mcp_supported: a.mcp_config_path().is_some(),
+                plugin_supported: !a.plugin_dirs().is_empty(),
             })
         })
         .collect()

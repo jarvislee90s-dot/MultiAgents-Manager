@@ -7,7 +7,8 @@ import { UpdaterDialog } from "@/components/common/updater-dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { SessionGrid } from "@/components/sessions/SessionGrid";
 import { ExtensionList } from "@/components/resources/ExtensionList";
-import { Monitor, Package } from "lucide-react";
+import { CheckCheck, Monitor, Package } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSessions } from "@/hooks/useSessions";
 import { useNotification } from "@/hooks/useNotification";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -31,6 +32,26 @@ export default function HomePage() {
   const [activeTab, setActiveTab] = useState<"dashboard" | "extensions">("dashboard");
   const { sessions, totalCount, waitingCount, loading } = useSessionStore();
   const { t } = useAppTranslation();
+  const queryClient = useQueryClient();
+
+  // 一键清除已完成卡片（绿/空闲）：对每张绿卡复用单卡 X 的同款语义——
+  // 未读卡标已读（mark_session_read），其余 dismiss（dismiss_session_card）；
+  // 全部完成后立即失效轮询缓存，不等 3 秒轮询自然生效
+  const finishedCards = sessions.filter((s) => s.status === "idle" || s.status === "finished");
+  const clearFinishedCards = async () => {
+    await Promise.allSettled(
+      finishedCards.map((s) =>
+        s.unread
+          ? invoke("mark_session_read", { agentType: s.agentType, sessionId: s.id })
+          : invoke("dismiss_session_card", {
+              agentType: s.agentType,
+              sessionId: s.id,
+              status: s.status,
+            })
+      )
+    );
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  };
 
   // 桌宠开关状态：与 petConfig 双向同步（标题栏开关/设置页/托盘改动经订阅回流）；
   // 开关本体在 MainTitleBar，此处状态仅供托盘菜单文案
@@ -133,7 +154,19 @@ export default function HomePage() {
           </button>
         </div>
         {/* 桌宠开关已上移至标题栏（MainTitleBar 齿轮右侧）；此处不再保留副本 */}
-        <NotificationBell />
+        <div className="flex items-center gap-2">
+          {finishedCards.length > 0 && (
+            <button
+              onClick={clearFinishedCards}
+              className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-1.5 transition-colors"
+              title={t("home.clearFinishedCards")}
+              aria-label={t("home.clearFinishedCards")}
+            >
+              <CheckCheck className="h-4 w-4" />
+            </button>
+          )}
+          <NotificationBell />
+        </div>
       </div>
 
       {/* 内容区 */}
