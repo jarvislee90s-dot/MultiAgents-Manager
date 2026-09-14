@@ -1,4 +1,4 @@
-// axum 组装：/m 静态（rust-embed，Task 7 填充资产）+ /m/api/v1/* + gate
+// axum 组装：/m 静态（rust-embed，Task 7 已装配）+ /m/api/v1/* + gate
 //
 // 结构契约（评审 Important 1 修复后，勿退化）：
 // - API 一律走 `nest("/m/api/v1", api_router)`；gate 是**内层 layer**，覆盖该 nest 下
@@ -14,12 +14,102 @@
 
 use axum::{
     middleware,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use std::sync::Arc;
 
 use super::api;
+
+// ============================================================
+// /m 静态伺服（Task 7）：rust-embed 嵌入 dist-mobile 构建产物
+// ============================================================
+
+/// rust-embed 嵌入 `../dist-mobile/`（相对 src-tauri/，即仓库根的移动端产物目录）。
+/// 构建顺序铁律：release 下产物在**编译期**打进二进制，debug 下 `get()` 每次**从磁盘直读**
+/// （crate 默认行为，便于 tauri:dev 迭代移动端产物而免重编 Rust）——
+/// 因此任何 `cargo check/test/build` 之前必须先 `pnpm build:mobile`，否则入口 404。
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../dist-mobile/"]
+struct MobileAssets;
+
+/// SPA 入口文件。控制者裁决（2026-09-14）：`vite build` 对 `mobile.html` 入口产出的就是
+/// `dist-mobile/mobile.html`（`rollupOptions.input` 键名改不了 HTML 输出名，Task 5 实测）——
+/// 简报原稿的 `serve_asset("index.html")` 会 404，故 /m 与各处回落统一伺服 mobile.html
+const MOBILE_ENTRY: &str = "mobile.html";
+
+/// 入口 HTML 响应（/m 精确命中与 /m/* 未命中回落共用）。
+/// 抽成非 async 纯函数的原因：若 serve_asset 未命中分支直接 `mobile_index().await`，
+/// 会构成相互递归的 async fn（编译不过；且 dist-mobile 未构建时无限循环）。
+/// 产物缺失（未跑 pnpm build:mobile）→ 404 显式失败，不挂死
+fn entry_response() -> Response {
+    match MobileAssets::get(MOBILE_ENTRY) {
+        Some(f) => (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            f.data,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "mobile assets missing (run `pnpm build:mobile` first)",
+        )
+            .into_response(),
+    }
+}
+
+/// 按扩展名给 MIME：简报清单（js/css/png/json/html）+ 补充（svg=manifest/图标可能引用；
+/// webmanifest=若产物出现 PWA manifest 的 .webmanifest 形态）。
+/// 未知扩展回落 `application/octet-stream`（选型：二进制下载语义，而非简报默认的
+/// text/html——把任意未知内容误标成 HTML 会放大注入面）
+fn mime_for(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("js") => "text/javascript",
+        Some("css") => "text/css",
+        Some("png") => "image/png",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("webmanifest") => "application/manifest+json",
+        Some("html") => "text/html; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_asset(path: &str) -> Response {
+    match MobileAssets::get(path) {
+        Some(f) => (
+            [(axum::http::header::CONTENT_TYPE, mime_for(path))],
+            f.data,
+        )
+            .into_response(),
+        // SPA 兜底（控制者裁决 1）：/m/<path> 未命中回落入口 HTML——移动端单页 hash 路由，
+        // 刷新/直达任意路径都必须能拿到壳页面
+        None => entry_response(),
+    }
+}
+
+/// 顶层静态 fallback 的路径分流（控制者裁决 2，勿退化）：
+/// - 非 `/m` 前缀 → 404（根路径与移动看板无关，不给静态兜底）；
+/// - `/m/` 尾斜杠与 `/m`（理论上被 route 收口，防御性兜底）→ 入口 HTML；
+/// - `/m/<path>` → `serve_asset(path)`，未命中回落入口 HTML。
+///
+/// 注意：`/m/api/v1/*` 永远到不了这里——nest 内层 fallback 先 403（结构隔离，
+/// 见 router()/api_router 注释与 task7_static_routes_* 测试）
+async fn static_fallback(uri: axum::http::Uri) -> Response {
+    let path = uri.path();
+    if path == "/m" || path == "/m/" {
+        return entry_response();
+    }
+    match path.strip_prefix("/m/") {
+        Some(rest) => serve_asset(rest).await,
+        None => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// /m 入口（配对页/看板壳）。产物文件是 mobile.html（见 MOBILE_ENTRY 注释）
+async fn mobile_index() -> Response {
+    entry_response()
+}
 
 pub struct RemoteState {
     pub pairing: std::sync::Mutex<super::pairing::PairingService>,
@@ -63,11 +153,23 @@ pub fn router(state: Arc<RemoteState>) -> Router {
         .with_state(state)
 }
 
+/// 生产装配：`router()`（gate 结构不变量）+ /m 静态入口 + 顶层静态 fallback。
+/// 结构契约（评审裁决 2，勿退化）：静态侧**只**以「在 `router()` 返回的 Router 上追加
+/// `.route("/m", ...)` 与顶层 `.fallback(...)`」的形态存在——**绝对不要**改成 catch-all
+/// 路由（`/m/{*path}`）或在外层注册 `/m/api/v1/...`：catch-all 会先于 nest 内层 403
+/// fallback 命中，让未知 API 路径 200 裸奔
+/// （task7_static_routes_do_not_uncover_unknown_api_paths 复刻的正是本函数的追加动作）
+pub fn router_with_static(state: Arc<RemoteState>) -> Router {
+    router(state)
+        .route("/m", get(mobile_index))
+        .fallback(static_fallback)
+}
+
 pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind((bind, port))
         .await
         .map_err(|e| format!("绑定 {bind}:{port} 失败: {e}"))?;
-    axum::serve(listener, router(state))
+    axum::serve(listener, router_with_static(state))
         .await
         .map_err(|e| format!("serve: {e}"))
 }
@@ -554,6 +656,114 @@ mod tests {
             "nest 内层 gate 的相对放行名单必须保住 pair"
         );
         assert!(r.headers().get("set-cookie").is_some());
+    }
+
+    // ==== Task 7 静态伺服（router_with_static 真装配；rust-embed debug 态从磁盘直读
+    // dist-mobile，零接触真实 ~/.mam；产物 hash 文件名动态取，不硬编码） ====
+
+    /// 嵌入清单里 assets/ 下第一个 .js 产物（vite hash 文件名随构建漂移，禁止硬编码）
+    fn first_js_asset() -> String {
+        MobileAssets::iter()
+            .find(|p| p.starts_with("assets/") && p.ends_with(".js"))
+            .expect("dist-mobile 缺少 js 产物：先跑 pnpm build:mobile 再 cargo test")
+            .to_string()
+    }
+
+    fn header<'a>(r: &'a axum::http::Response<Body>, name: &str) -> &'a str {
+        r.headers()
+            .get(name)
+            .expect("响应缺少头")
+            .to_str()
+            .expect("头值非可见 ASCII")
+    }
+
+    /// 静态伺服全矩阵（含安全不变量回归）：入口 / manifest / 真实产物 MIME /
+    /// SPA 回落 / 非 /m 前缀 404 / 未知 API 路径仍 403 / 尾斜杠变体
+    #[tokio::test]
+    async fn static_serving_matrix() {
+        let app = router_with_static(test_state());
+
+        // (1) /m 精确 → 200 入口 HTML（mobile.html 产物：doctype + 移动端标题，防串台桌面 index）
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(header(&r, "content-type"), "text/html; charset=utf-8");
+        let body = body_string(r).await.to_lowercase();
+        assert!(
+            body.contains("<!doctype html>"),
+            "/m 应返回入口 HTML，实际 {body:?}"
+        );
+        assert!(body.contains("mam 远程"), "入口应是 mobile.html 产物（含移动端标题）");
+
+        // (2) PWA manifest → 200 + application/json
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/manifest-mam.json", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(header(&r, "content-type"), "application/json");
+
+        // (3) 真实 js 产物 → 200 + text/javascript
+        let asset = first_js_asset();
+        let r = app
+            .clone()
+            .oneshot(req("GET", &format!("/m/{asset}"), None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "嵌入产物 {asset} 应可伺服");
+        assert_eq!(header(&r, "content-type"), "text/javascript");
+
+        // (4) 未知 /m/* 路径 → SPA 兜底回落入口 HTML（200，非 404）
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/nope.js", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.to_lowercase().contains("<!doctype html>"));
+
+        // (5) 非 /m 前缀 → 404（根路径不给静态兜底）
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/favicon.ico", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+
+        // (6) 未知 API 路径 → 仍 403：真装配下 nest 内层 fallback 不被外层静态兜底顶掉
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/api/v1/nope", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "静态装配不得让未知 API 路径裸奔");
+
+        // (7) 尾斜杠变体 /m/ → 200 入口（route("/m") 不匹配，由 fallback 分流收口）
+        let r = app
+            .oneshot(req("GET", "/m/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.to_lowercase().contains("<!doctype html>"));
+    }
+
+    /// PNG 产物（icon-mobile.png）MIME 与 200：manifest icons 引用的唯一非 js/css 资产
+    #[tokio::test]
+    async fn png_asset_served_with_image_mime() {
+        let app = router_with_static(test_state());
+        let png = MobileAssets::iter()
+            .find(|p| p.ends_with(".png"))
+            .expect("dist-mobile 缺少 png 产物：先跑 pnpm build:mobile");
+        let r = app
+            .oneshot(req("GET", &format!("/m/{png}"), None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(header(&r, "content-type"), "image/png");
     }
 
     /// 阻塞源不得卡住 async runtime（评审 Important 2）：注入一个**同步 sleep 300ms** 的

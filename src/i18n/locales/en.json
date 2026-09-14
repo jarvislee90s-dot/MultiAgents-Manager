@@ -138,6 +138,29 @@
       "rebuildFailed": "The following items failed to rebuild (re-enable to retry): {{items}}",
       "skippedKeptItems": "The following items were not restored (links kept intact; failed placements had their links re-created): {{items}}",
       "skippedLostItems": "The following items were interrupted mid-restore and the target is missing (re-enable to rebuild): {{items}}"
+    },
+    "remote": {
+      "title": "Remote Access",
+      "desc": "Open the mobile board in a phone browser (direct connection to this machine)",
+      "enable": "Enable remote access",
+      "bind": "Bind scope",
+      "bindLocal": "This machine only",
+      "bindLan": "LAN",
+      "bindRestartHint": "Bind changes take effect only after stopping and starting again",
+      "address": "Address",
+      "lanAddress": "LAN addresses (for the phone)",
+      "copy": "Copy",
+      "copied": "Copied",
+      "qrGenerate": "Generate pairing QR code",
+      "qrRegenerate": "Regenerate",
+      "qrHint": "Scan with your phone camera, or open the link in a mobile browser",
+      "tlsAck": "I confirm a TLS reverse proxy is in place (required for LAN binding)",
+      "stopTitle": "Stop remote access?",
+      "stopDesc": "Stopping disconnects every device: all paired devices are revoked and pairing codes invalidated.",
+      "stopConfirm": "Stop",
+      "cancel": "Cancel",
+      "notice1": "The remote page exposes all session content; the URL is the key — do not share it.",
+      "notice2": "This is a temporary direct mode; approval-based pairing will arrive in a later version."
     }
   },
   "home": {
