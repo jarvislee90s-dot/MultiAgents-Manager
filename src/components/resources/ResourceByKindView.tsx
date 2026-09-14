@@ -83,20 +83,37 @@ function SectionTableHeader(props: {
       <div className="flex gap-1">
         {/* 占位：与行内"全部启用"按钮列对齐 */}
         <div className="h-6 w-[52px]" />
-        {tools.map((tool) => (
-          <Button
-            key={tool.id}
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground h-6 px-2 text-[10px]"
-            title={tooltip(tool.label)}
-            aria-label={tooltip(tool.label)}
-            onClick={() => onOpen(tool.id)}
-          >
-            <Ico className="mr-1 h-3 w-3" />
-            {tool.label}
-          </Button>
-        ))}
+        {tools.map((tool) => {
+          // 能力门：工具不支持该类资源（如 dsh 无 MCP 配置/插件目录）→ 显示「暂不支持」
+          const supported =
+            kind === "skill" ||
+            (kind === "mcp" ? tool.mcpSupported : tool.pluginSupported);
+          if (!supported) {
+            return (
+              <span
+                key={tool.id}
+                className="text-muted-foreground/60 h-6 px-2 text-[10px] leading-6"
+                title={t("resources.kindNotSupported")}
+              >
+                {t("resources.kindNotSupported")}
+              </span>
+            );
+          }
+          return (
+            <Button
+              key={tool.id}
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground h-6 px-2 text-[10px]"
+              title={tooltip(tool.label)}
+              aria-label={tooltip(tool.label)}
+              onClick={() => onOpen(tool.id)}
+            >
+              <Ico className="mr-1 h-3 w-3" />
+              {tool.label}
+            </Button>
+          );
+        })}
       </div>
     </div>
   );
@@ -133,6 +150,13 @@ export function ResourceByKindView() {
   const [manifestPath, setManifestPath] = useState("");
   const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
   const [installDlgOpen, setInstallDlgOpen] = useState(false);
+  // 资源能力门：工具 × 资源类型是否支持启停（后端 EnabledTool 标志下发）
+  const kindSupported = (tool: EnabledTool, kind: string): boolean =>
+    kind === "skill"
+      ? tool.skillToggleSupported
+      : kind === "mcp"
+        ? tool.mcpSupported
+        : tool.pluginSupported;
   // 名字排序：三态循环（默认扫描序 → 升序 → 降序），三种资源各自独立记忆
   const [sortDirs, setSortDirs] = useState<Record<ResourceKind, SortDir>>({
     skill: "none",
@@ -183,6 +207,11 @@ export function ResourceByKindView() {
   const filteredPlugins = applySort(resources.plugins.filter(filterFn), "plugin");
 
   const handleToggleMcp = async (name: string, toolId: string, enabled: boolean) => {
+    const tool = tools.find((x) => x.id === toolId);
+    if (tool && !tool.mcpSupported) {
+      toast.info(t("resources.kindNotSupported"));
+      return;
+    }
     try {
       if (enabled) {
         // 启用前尝试自动导入到 SSOT（如果还未导入）
@@ -205,6 +234,8 @@ export function ResourceByKindView() {
     let skipped = 0;
     let failed = 0;
     for (const tool of tools) {
+      // 能力门：不支持的 (tool, kind) 跳过（如 dsh 的 skill 启停/MCP/插件）
+      if (!kindSupported(tool, res.kind)) continue;
       const isEnabled = res.enabledTools.includes(tool.id);
       if (enable === isEnabled) continue;
       try {
@@ -257,6 +288,11 @@ export function ResourceByKindView() {
     enabled: boolean,
     kind: string
   ) => {
+    const tool = tools.find((x) => x.id === toolId);
+    if (tool && !tool.pluginSupported) {
+      toast.info(t("resources.kindNotSupported"));
+      return;
+    }
     try {
       await invoke("toggle_plugin_for_tool", { pluginName: name, toolId, enabled, kind });
       toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
@@ -267,6 +303,11 @@ export function ResourceByKindView() {
   };
 
   const handleSkillToggle = async (skillName: string, toolId: string, enabled: boolean) => {
+    const tool = tools.find((x) => x.id === toolId);
+    if (tool && !tool.skillToggleSupported) {
+      toast.info(t("resources.kindNotSupported"));
+      return;
+    }
     if (!enabled) {
       // 灰 → 亮：直接启用
       try {
@@ -457,6 +498,21 @@ export function ResourceByKindView() {
                         : t("resources.allToolsOn")}
                     </Button>
                     {tools.map((tool) => {
+                      if (!kindSupported(tool, "skill")) {
+                        return (
+                          <Button
+                            key={tool.id}
+                            disabled
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-[10px] text-muted-foreground opacity-40"
+                            title={`${tool.label}: ${t("resources.kindNotSupported")}`}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                        );
+                      }
                       const enabled = skill.enabledTools.includes(tool.id);
                       return (
                         <Button
@@ -557,6 +613,21 @@ export function ResourceByKindView() {
                         : t("resources.allToolsOn")}
                     </Button>
                     {tools.map((tool) => {
+                      if (!tool.mcpSupported) {
+                        return (
+                          <Button
+                            key={tool.id}
+                            disabled
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-[10px] text-muted-foreground opacity-40"
+                            title={`${tool.label}: ${t("resources.kindNotSupported")}`}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                        );
+                      }
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
                         <Button
@@ -642,6 +713,21 @@ export function ResourceByKindView() {
                         : t("resources.allToolsOn")}
                     </Button>
                     {tools.map((tool) => {
+                      if (!tool.pluginSupported) {
+                        return (
+                          <Button
+                            key={tool.id}
+                            disabled
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-[10px] text-muted-foreground opacity-40"
+                            title={`${tool.label}: ${t("resources.kindNotSupported")}`}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                        );
+                      }
                       const enabled = plugin.enabledTools.includes(tool.id);
                       return (
                         <Button

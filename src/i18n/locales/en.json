@@ -182,6 +182,7 @@
     "pageCrashed": "Something went wrong"
   },
   "resources": {
+    "kindNotSupported": "Not supported",
     "byKind": "By kind",
     "byTool": "By tool",
     "scanNative": "Scan native resources",
