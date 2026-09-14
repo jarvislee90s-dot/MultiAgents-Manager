@@ -1,6 +1,7 @@
 // 预设组命令
 
-use crate::database::PresetRecord;
+use crate::database::{PresetRecord, ResourceBindingRecord};
+use crate::services::preset::{ApplyPreview, RestoreResult};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,13 +15,127 @@ pub struct PresetApplyResult {
 }
 
 #[tauri::command]
-pub fn create_preset(name: String, items: Vec<(String, String)>) -> Result<String, String> {
-    crate::database::create_preset(&name, &items)
+pub fn create_preset(
+    name: String,
+    items: Vec<(String, String)>,
+    description: Option<String>,
+    scope: Option<String>,
+    bound_tool: Option<String>,
+) -> Result<String, String> {
+    let scope = scope.unwrap_or_else(|| "universal".to_string());
+    if scope == "tool" && bound_tool.is_none() {
+        return Err("工具私有预设必须指定绑定工具".into());
+    }
+    crate::database::create_preset_with_meta(
+        &name,
+        &description.unwrap_or_default(),
+        &scope,
+        bound_tool.as_deref(),
+        &items,
+    )
+}
+
+#[tauri::command]
+pub fn get_preset(preset_id: String) -> Option<PresetRecord> {
+    crate::database::get_preset(&preset_id)
+}
+
+#[tauri::command]
+pub fn update_preset(
+    id: String,
+    name: String,
+    description: String,
+    scope: String,
+    bound_tool: Option<String>,
+    items: Vec<(String, String)>,
+) -> Result<(), String> {
+    // Interfaces 契约：激活中的预设不可改（任一快照 active == id）——先恢复默认
+    for tool in crate::adapter::TOOL_IDS {
+        if let Some((Some(active), _)) = crate::database::get_base_snapshot(tool) {
+            if active == id {
+                return Err(format!(
+                    "预设正在 {} 上激活，请先恢复默认再修改（PRESET_ACTIVE:{}）",
+                    tool, id
+                ));
+            }
+        }
+    }
+    if scope == "tool" && bound_tool.is_none() {
+        return Err("工具私有预设必须指定绑定工具".into());
+    }
+    crate::database::update_preset(&id, &name, &description, &scope, bound_tool.as_deref(), &items)
 }
 
 #[tauri::command]
 pub fn delete_preset(preset_id: String) -> Result<(), String> {
+    // spec §5.4：激活中的预设不可删——先恢复默认
+    for tool in crate::adapter::TOOL_IDS {
+        if let Some((Some(active), _)) = crate::database::get_base_snapshot(tool) {
+            if active == preset_id {
+                return Err(format!(
+                    "预设正在 {} 上激活，请先恢复默认再删除（PRESET_ACTIVE:{}）",
+                    tool, preset_id
+                ));
+            }
+        }
+    }
     crate::database::delete_preset(&preset_id)
+}
+
+#[tauri::command]
+pub fn restore_preset(tool_id: String) -> Result<RestoreResult, String> {
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
+    crate::services::preset::restore_tool(&tool_id)
+}
+
+/// 工具当前激活的预设（开关状态数据源；无激活 = None）
+#[tauri::command]
+pub fn get_active_preset(tool_id: String) -> Option<String> {
+    crate::database::get_base_snapshot(&tool_id).and_then(|(active, _)| active)
+}
+
+/// 应用预览（确认弹窗数据源，dry-run）
+#[tauri::command]
+pub fn preview_apply_preset(preset_id: String, tool_id: String) -> Result<ApplyPreview, String> {
+    crate::services::preset::preview_apply(&preset_id, &tool_id)
+}
+
+#[tauri::command]
+pub fn set_resource_binding(
+    extension_id: String,
+    exclusive_tools: Vec<String>,
+    reason: Option<String>,
+) -> Result<(), String> {
+    crate::database::upsert_resource_binding(
+        &extension_id,
+        &exclusive_tools.join(","),
+        reason.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn list_resource_bindings() -> Vec<ResourceBindingRecord> {
+    crate::database::list_resource_bindings()
+}
+
+#[tauri::command]
+pub fn delete_resource_binding(extension_id: String) -> Result<(), String> {
+    crate::database::delete_resource_binding(&extension_id)
+}
+
+#[tauri::command]
+pub fn set_tool_resident(
+    tool_id: String,
+    extension_id: String,
+    resident: bool,
+) -> Result<(), String> {
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
+    crate::database::set_tool_resident(&tool_id, &extension_id, resident)
+}
+
+#[tauri::command]
+pub fn list_tool_residents(tool_id: String) -> Vec<String> {
+    crate::database::list_tool_residents(&tool_id)
 }
 
 #[tauri::command]

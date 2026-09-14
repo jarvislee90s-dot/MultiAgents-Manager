@@ -403,3 +403,75 @@ fn restore_tool_cleanup_only(tool_id: &str) {
     let _ = multi_agents_manager_lib::database::destroy_base_snapshot(tool_id);
     let _ = multi_agents_manager_lib::services::preset::stash::restore_all_for_tool(tool_id);
 }
+
+/// 激活中的预设不可删除（spec §5.4）——先恢复默认再删
+#[test]
+fn delete_rejects_active_preset() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::commands::preset as cmd;
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::apply_preset;
+
+    let home = dirs::home_dir().unwrap();
+    let ssot = home.join(".mam/skills/v2m1-del-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-del-a".into(), kind: "skill".into(), name: "v2m1-del-a".into(),
+        description: None, source_path: ssot.to_string_lossy().to_string(),
+        source_url: None, version: None, tags: None, suite: None,
+        source_tool: None, is_native: false,
+    }).unwrap();
+    let pid = database::create_preset("v2m1-del", &[("skill-v2m1-del-a".into(), "skill".into())]).unwrap();
+    apply_preset(&pid, "claude").unwrap();
+
+    let err = cmd::delete_preset(pid.clone()).unwrap_err();
+    assert!(err.contains("激活"), "{}", err);
+
+    let _ = multi_agents_manager_lib::services::preset::restore_tool("claude");
+    cmd::delete_preset(pid).unwrap(); // 恢复后可删
+}
+
+/// 预览（dry-run）不动现场；get_active_preset 反映开关状态
+#[test]
+fn preview_is_dryrun_and_active_preset_queryable() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::commands::preset as cmd;
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{apply_preset, preview_apply, restore_tool};
+
+    assert_eq!(cmd::get_active_preset("claude".into()), None);
+
+    let home = dirs::home_dir().unwrap();
+    let claude_dir = home.join(".claude/skills");
+    std::fs::create_dir_all(claude_dir.join("v2m1-pv-native")).unwrap();
+    let ssot = home.join(".mam/skills/v2m1-pv-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-pv-a".into(), kind: "skill".into(), name: "v2m1-pv-a".into(),
+        description: None, source_path: ssot.to_string_lossy().to_string(),
+        source_url: None, version: None, tags: None, suite: None,
+        source_tool: None, is_native: false,
+    }).unwrap();
+    let pid = database::create_preset("v2m1-pv", &[("skill-v2m1-pv-a".into(), "skill".into())]).unwrap();
+
+    let pv = preview_apply(&pid, "claude").unwrap();
+    assert_eq!(pv.to_enable, vec!["skill-v2m1-pv-a".to_string()]);
+    assert!(pv.to_stash.contains(&"v2m1-pv-native".to_string()));
+    assert!(pv.filtered.is_empty());
+    assert!(claude_dir.join("v2m1-pv-native").exists(), "预览不得动现场");
+
+    apply_preset(&pid, "claude").unwrap();
+    assert_eq!(cmd::get_active_preset("claude".into()), Some(pid.clone()));
+    let _ = restore_tool("claude");
+    assert_eq!(cmd::get_active_preset("claude".into()), None);
+}

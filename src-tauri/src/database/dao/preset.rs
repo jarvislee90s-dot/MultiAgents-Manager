@@ -1,7 +1,11 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::database::connection::DB;
+
+/// 预设 id 进程序列号：时间戳只有毫秒粒度，同毫秒连续创建会撞 UNIQUE（实测 flake），追加序列保证唯一
+static PRESET_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +34,8 @@ pub fn create_preset_with_meta(
     items: &[(String, String)],
 ) -> Result<String, String> {
     let conn = DB.lock().unwrap();
-    let id = format!("preset-{}", chrono::Utc::now().timestamp_millis());
+    let seq = PRESET_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    let id = format!("preset-{}-{}", chrono::Utc::now().timestamp_millis(), seq);
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO presets (id, name, description, scope, bound_tool, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

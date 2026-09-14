@@ -144,6 +144,58 @@ fn ensure_native_present(
     Ok(())
 }
 
+/// 应用预览（spec §7.3 差异确认弹窗数据源）：dry-run，不执行、不动现场
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreview {
+    /// 将启用（专属过滤后）的 extension_id
+    pub to_enable: Vec<String>,
+    /// 被专属绑定过滤的项 "id: 原因"
+    pub filtered: Vec<String>,
+    /// 将停用的 MAM 资源 extension_id
+    pub to_disable: Vec<String>,
+    /// 将暂存的原生技能名
+    pub to_stash: Vec<String>,
+    /// 常驻豁免（当前生效、不在预设、但受常驻保护）的 extension_id
+    pub resident_exempt: Vec<String>,
+}
+
+pub fn preview_apply(preset_id: &str, tool_id: &str) -> Result<ApplyPreview, String> {
+    let preset = database::get_preset(preset_id).ok_or_else(|| format!("预设不存在: {}", preset_id))?;
+    if preset.scope == "tool" && preset.bound_tool.as_deref() != Some(tool_id) {
+        return Err(format!(
+            "预设 {} 绑定 {}，不能应用到 {}",
+            preset.name,
+            preset.bound_tool.as_deref().unwrap_or("?"),
+            tool_id
+        ));
+    }
+    let mut apply_items: Vec<(String, String)> = Vec::new();
+    let mut out = ApplyPreview::default();
+    for (ext_id, kind) in database::get_preset_items(preset_id) {
+        if database::tool_allowed(&ext_id, tool_id) {
+            apply_items.push((ext_id, kind));
+        } else {
+            out.filtered.push(format!("{}: 专属绑定不兼容 {}", ext_id, tool_id));
+        }
+    }
+    let plan = sweep::plan_sweep(tool_id, &apply_items);
+    out.to_enable = apply_items.into_iter().map(|(id, _)| id).collect();
+    out.to_disable = plan.disable_mam.into_iter().map(|(id, _)| id).collect();
+    out.to_stash = plan.stash_native;
+    // 常驻豁免清单：与 plan_sweep 的跳过逻辑对齐（当前生效 − 预设 − 常驻保护）
+    let keep: Vec<String> = out.to_enable.clone();
+    for item in snapshot::scan_tool_state(tool_id) {
+        if keep.contains(&item.extension_id) {
+            continue;
+        }
+        if database::is_tool_resident(tool_id, &item.extension_id) {
+            out.resident_exempt.push(item.extension_id);
+        }
+    }
+    Ok(out)
+}
+
 /// 恢复默认（关，spec §5.2）：对齐基底 → 销毁快照。幂等：无快照返回空结果
 #[derive(Debug, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

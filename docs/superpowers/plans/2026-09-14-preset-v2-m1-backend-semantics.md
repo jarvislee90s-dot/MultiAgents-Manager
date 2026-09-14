@@ -2074,7 +2074,7 @@ git commit -m "feat(preset-v2): exclusive apply/restore orchestration + switch s
   - `set_tool_resident(tool_id, extension_id, resident: bool)`、`list_tool_residents(tool_id) -> Vec<String>`
   - `delete_preset` 增守卫：激活中的预设不可删（提示先恢复）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/preset_v2_test.rs` 追加（命令层函数是纯函数转发，直接调用验证守卫逻辑）：
 
@@ -2148,12 +2148,12 @@ fn preview_is_dryrun_and_active_preset_queryable() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test delete_rejects`
 Expected: FAIL——旧 delete_preset 无守卫直接删
 
-- [ ] **Step 3: 实现命令**
+- [x] **Step 3: 实现命令**
 
 `commands/preset.rs` 追加/修改（`use` 段补 `RestoreResult, ApplyPreview, ResourceBindingRecord, PresetRecord` 路径 `crate::services::preset` / `crate::database`）。
 
@@ -2359,7 +2359,7 @@ pub fn deactivate_preset(preset_id: String, tool_id: String) -> Result<(), Strin
         commands::preset::list_tool_residents,
 ```
 
-- [ ] **Step 4: 跑测试 + 全量 + Commit**
+- [x] **Step 4: 跑测试 + 全量 + Commit**
 
 Run: `cd src-tauri && cargo test delete_rejects && cargo test`
 Expected: PASS
