@@ -64,33 +64,65 @@ fn parse_bind(bind: Option<&str>, port: Option<&str>) -> (String, u16) {
     (bind, port)
 }
 
-/// 启动 axum 服务器（幂等：已有句柄则不重复启动）。
-/// 由 `SERVER_HANDLE` 锁内完成「查重 → 读设置 → 安全门 → spawn」，防并发双开
-fn start_server() -> Result<(), String> {
-    let mut h = SERVER_HANDLE.lock().unwrap();
-    if h.is_some() {
-        return Ok(());
+/// 句柄存活判定内核（纯函数，不触全局/DB/端口）：只有「句柄存在且其任务仍在运行」
+/// 才算存活。任务自行退出（典型：端口被占，`serve` 返回 Err 后任务结束）会留下
+/// **已完成**的陈旧句柄——自愈判定：已完成 = 不存在，允许重新 spawn。
+fn handle_is_live(h: &Option<tauri::async_runtime::JoinHandle<()>>) -> bool {
+    h.as_ref()
+        .map(|jh| !jh.inner().is_finished())
+        .unwrap_or(false)
+}
+
+/// 启动内核（可测核心，外部依赖全部注入）：「查重自愈 → 读设置 → 安全门 → spawn」。
+/// 返回是否实际 spawn（false = 幂等跳过）。
+/// 自愈动机：服务器任务**自行退出**（典型：9420 端口被占，`serve` 返回 Err，任务内仅
+/// 打日志）后 `SERVER_HANDLE` 残留的是**已完成**句柄——若按 `is_some` 视为已启动，
+/// 之后的 remote_toggle(true) / restore_on_launch 都会静默返回 Ok 而实际无人监听，
+/// remote_status 仍报 enabled=true（SSOT 与现实背离），必须"先关再开"才能恢复。
+/// 故把已完成视为不存在：取走陈旧句柄、继续正常 spawn 路径（重开即自愈）；
+/// **运行中**的句柄仍幂等跳过（不重复 spawn、不重复绑定）。
+fn start_server_core(
+    h: &mut Option<tauri::async_runtime::JoinHandle<()>>,
+    bind_and_port: impl FnOnce() -> (String, u16),
+    public_ack: impl FnOnce() -> Option<String>,
+    spawn: impl FnOnce(String, u16) -> tauri::async_runtime::JoinHandle<()>,
+) -> Result<bool, String> {
+    if handle_is_live(h) {
+        return Ok(false); // 运行中：幂等
     }
+    // 自愈：取走已完成（或本就为空）的旧句柄
+    *h = None;
     let (bind, port) = bind_and_port();
     // P7 安全门：0.0.0.0 必须先确认 TLS 前置，否则拒绝对外
-    if bind == "0.0.0.0" {
-        let ack = crate::database::dao::settings::get_setting(KEY_PUBLIC_ACK)
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        if !ack {
-            return Err("对外绑定需先确认已配置 TLS 反向代理（remote_confirm_public）".into());
-        }
+    // （ack 惰性读取：仅对外绑定时才查 DB）
+    if bind == "0.0.0.0" && !public_ack().map(|v| v == "true").unwrap_or(false) {
+        return Err("对外绑定需先确认已配置 TLS 反向代理（remote_confirm_public）".into());
     }
-    let st = STATE.clone();
-    let b = bind.clone();
-    // 见 SERVER_HANDLE 注释：必须用 tauri::async_runtime::spawn（sync 命令 / setup 线程
-    // 无 tokio runtime 上下文）；其 JoinHandle 同样支持 abort（stop_server 语义不变）
-    *h = Some(tauri::async_runtime::spawn(async move {
-        if let Err(e) = server::serve(&b, port, st).await {
-            log::error!("远程服务器退出: {e}");
-        }
-    }));
-    Ok(())
+    *h = Some(spawn(bind, port));
+    Ok(true)
+}
+
+/// 启动 axum 服务器（幂等：**运行中**的句柄不重复启动）。
+/// 薄壳：SERVER_HANDLE 锁贯穿全程（「查重 → 读设置 → 安全门 → spawn」同锁完成，防并发
+/// 双开），DB 读取与真实 spawn（绑端口）以闭包注入 start_server_core，使其可零污染单测
+fn start_server() -> Result<(), String> {
+    let mut h = SERVER_HANDLE.lock().unwrap();
+    start_server_core(
+        &mut h,
+        bind_and_port,
+        || crate::database::dao::settings::get_setting(KEY_PUBLIC_ACK),
+        |bind, port| {
+            // 见 SERVER_HANDLE 注释：必须用 tauri::async_runtime::spawn（sync 命令 /
+            // setup 线程无 tokio runtime 上下文）；其 JoinHandle 同样支持 abort
+            // （stop_server 语义不变）
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = server::serve(&bind, port, STATE.clone()).await {
+                    log::error!("远程服务器退出: {e}");
+                }
+            })
+        },
+    )
+    .map(|_| ())
 }
 
 /// 停止远程服务：abort 服务器任务 + 全吊销已配对设备 + 清空配对码（不变量 5「全吊销」：
@@ -307,5 +339,89 @@ mod tests {
         let h2 = tauri::async_runtime::spawn(async {});
         h2.abort();
         let _ = tauri::async_runtime::block_on(h2);
+    }
+
+    /// (c) 陈旧句柄自愈（评审 Important 修复的行为锁定）：经 `start_server_core` 的
+    /// **真实分支**驱动（而非只测谓词——那样把查重还原成 is_some 的变异测不出来）。
+    /// 零污染：SERVER_HANDLE / STATE 全局不被触碰——句柄槽是局部变量，设置读取与
+    /// spawn 均为注入的假闭包（不读真实 ~/.mam/mam.db、不绑任何端口）；pending 任务
+    /// 用 abort 清理。锁定的行为矩阵（变异锚点：把核心查重还原为 `is_some` 时
+    /// case 2 必红）：
+    ///   1. 运行中句柄 → 幂等跳过（不 spawn、不读设置）；
+    ///   2. 已完成句柄（服务器自退残留）→ 视为不存在：取走旧句柄并重新 spawn（自愈）；
+    ///   3. None → 正常 spawn；
+    ///   4. 安全门未因抽核移位：0.0.0.0 且未确认 ack → Err 且不 spawn。
+    #[test]
+    fn start_server_core_self_heals_finished_handle_and_skips_live_one() {
+        // ---- case 1: 运行中句柄 → 幂等跳过（假闭包 panic 证明确实未被调用）----
+        let live = tauri::async_runtime::spawn(std::future::pending::<()>());
+        let mut slot = Some(live);
+        let r = start_server_core(
+            &mut slot,
+            || panic!("幂等跳过不得读取设置"),
+            || panic!("幂等跳过不得读取 ack"),
+            |_, _| panic!("幂等跳过不得 spawn"),
+        );
+        assert_eq!(r.unwrap(), false, "运行中句柄必须幂等跳过");
+        slot.as_ref().unwrap().abort(); // 清理 pending 任务
+
+        // ---- case 2: 已完成句柄 → 自愈（本轮修复的核心分支）----
+        // spawn 一个立即返回的空任务，自旋等它真正结束（不能用 block_on——那会消费句柄）
+        let done = tauri::async_runtime::spawn(async {});
+        let mut waited = 0u32;
+        while !done.inner().is_finished() {
+            assert!(waited < 5000, "空任务 5s 内未结束，测试环境异常");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            waited += 1;
+        }
+        let mut slot = Some(done);
+        let mut spawned = 0usize;
+        let r = start_server_core(
+            &mut slot,
+            || ("127.0.0.1".to_string(), 12345),
+            || None,
+            |b, p| {
+                spawned += 1;
+                assert_eq!((b.as_str(), p), ("127.0.0.1", 12345));
+                tauri::async_runtime::spawn(async {}) // 假 spawn：不绑任何端口
+            },
+        );
+        assert_eq!(
+            r.unwrap(),
+            true,
+            "已完成句柄必须视为不存在并重新 spawn（自愈），\
+             否则服务器自退后重开会静默失效"
+        );
+        assert_eq!(spawned, 1, "自愈后必须恰好 spawn 一次");
+        assert!(slot.is_some(), "新句柄应写回槽位");
+        slot.as_ref().unwrap().abort(); // 清理假任务
+
+        // ---- case 3: None → 正常 spawn ----
+        let mut slot: Option<tauri::async_runtime::JoinHandle<()>> = None;
+        let mut spawned = 0usize;
+        let r = start_server_core(
+            &mut slot,
+            || ("127.0.0.1".to_string(), DEFAULT_PORT),
+            || panic!("loopback 绑定不应读取 ack"),
+            |_, _| {
+                spawned += 1;
+                tauri::async_runtime::spawn(async {})
+            },
+        );
+        assert_eq!(r.unwrap(), true, "无句柄应正常 spawn");
+        assert_eq!(spawned, 1);
+        assert!(slot.is_some(), "新句柄应写回槽位");
+        slot.as_ref().unwrap().abort();
+
+        // ---- case 4: 安全门未移位：0.0.0.0 且未确认 ack → Err 且不 spawn ----
+        let mut slot: Option<tauri::async_runtime::JoinHandle<()>> = None;
+        let r = start_server_core(
+            &mut slot,
+            || ("0.0.0.0".to_string(), DEFAULT_PORT),
+            || None,
+            |_, _| panic!("未确认对外时不得 spawn"),
+        );
+        assert!(r.is_err(), "0.0.0.0 未确认 TLS 前置必须拒绝");
+        assert!(slot.is_none(), "被安全门拒绝时不得留下句柄");
     }
 }
