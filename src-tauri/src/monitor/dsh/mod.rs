@@ -9,9 +9,69 @@ pub mod projcache;
 pub mod status;
 
 use crate::adapter::AgentProcess;
+use crate::monitor::session_scan::SessionFileScan;
 use crate::session::{AgentType, ProcessForm, Session, SessionStatus};
 
 pub use status::LockState;
+
+// L2 内容缓存（monitor::session_scan 预算层，AGENTS.md 新工具接入模板同款）：
+// 代际日志的解析产物按 (mtime, size) 缓存——前端 3 秒轮询下未变化的历史会话
+// 零解码零解析。M1 实测真机 77 会话/解压 155MB 每轮全量重扫 12.5s（debug），
+// 远超 3s 轮询间隔且跑在 IPC 线程上，是 dev 模式整机卡顿的根因
+const DSH_LOG_SCAN: SessionFileScan = SessionFileScan::new("dsh-log");
+
+/// 单个会话代际日志的纯内容解析产物（不含 lock / 时间叠加，可安全跨轮询缓存）
+#[derive(Debug, Clone)]
+pub(crate) struct DshSessionDigest {
+    pub(crate) header: log::DshHeader,
+    pub(crate) is_subagent: bool,
+    pub(crate) facts: status::TurnFacts,
+    /// (role, text) 预览（真人输入/助手回复取 seq 更新者，注入已过滤）
+    pub(crate) preview: (Option<String>, Option<String>),
+    /// 日志侧标题（session/title 最新事件；projcache 优先的叠加在外层按轮现算）
+    pub(crate) log_title: Option<String>,
+    /// 事件流最大 time（未读锚点；None = 无 time 字段时外层兜底 mtime）
+    pub(crate) max_event_time_ms: Option<i64>,
+    /// 所选代际文件 mtime（静默兜底 / last_activity 兜底输入）
+    pub(crate) log_mtime_ms: i64,
+}
+
+/// 读取（带 L2 缓存）代际日志解析产物：内容未变 → 同一 Arc 秒回；损坏/不可读
+/// → 缓存 None（下次 mtime/size 变化时自动重试，与无缓存版"读不到→跳过"同语义）
+fn load_digest(gen_path: &std::path::Path) -> std::sync::Arc<Option<DshSessionDigest>> {
+    DSH_LOG_SCAN.parse(gen_path, build_digest)
+}
+
+/// 纯内容解析（session_scan.rs 要求：时间叠加绝不在此函数内）
+fn build_digest(gen_path: &std::path::Path) -> Option<DshSessionDigest> {
+    let bytes = std::fs::read(gen_path).ok()?;
+    let text = if gen_path.extension().map(|e| e == "zstd").unwrap_or(false) {
+        decode::decode_zstd_frames(&bytes).ok()?.text
+    } else {
+        String::from_utf8_lossy(&bytes).to_string()
+    };
+    let header = log::parse_header(&text)?;
+    let events = log::parse_events(&text);
+    let preview = preview::extract(&events);
+    let log_title = preview::title(&events, None);
+    let max_event_time_ms = events.iter().filter_map(|e| e.time).max();
+    let log_mtime_ms = std::fs::metadata(gen_path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    Some(DshSessionDigest {
+        is_subagent: log::is_subagent(&header),
+        header,
+        facts: status::scan_facts(&events),
+        preview,
+        log_title,
+        max_event_time_ms,
+        log_mtime_ms,
+    })
+}
 
 /// dsh 数据根：$DSH_HOME 覆盖（M0 F14 优先级：env > ~/.dsh），测试注入用
 pub fn dsh_home() -> std::path::PathBuf {
@@ -101,6 +161,9 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let mut sessions = Vec::new();
+    // 本轮扫描命中的代际日志全集（缓存收敛用，防已删会话的孤儿条目常驻）
+    let mut live_logs: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     for project_dir in entries.flatten() {
         let ppath = project_dir.path();
         if !ppath.is_dir() {
@@ -118,14 +181,16 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
             if !spath.is_dir() {
                 continue;
             }
-            // 版本门 + 读取（代际最大者；读不到/解不开 → 跳过该会话不影响其他）
-            let Some(read) = log::read_best_generation(&spath) else {
+            // 代际选择（取代际最大者）+ L2 缓存解析（读不到/解不开 → 跳过该会话不影响其他）
+            let Some((version, gen_path)) = log::generation_logs(&spath).pop() else {
                 continue;
             };
-            let Some(header) = log::parse_header(&read.text) else {
+            let Some(digest) = load_digest(&gen_path).as_ref().clone() else {
                 continue;
             };
-            if log::is_subagent(&header) {
+            live_logs.insert(gen_path);
+            let header = &digest.header;
+            if digest.is_subagent {
                 continue; // 子 Agent 不出卡（M0 F7）
             }
             // 版本门（设计 P5 + 备忘 A8）：header.version 超出已知集（0..=3）→
@@ -148,9 +213,11 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
                         status: SessionStatus::Idle,
                         last_message: None,
                         last_message_role: None,
-                        last_activity_at: chrono::DateTime::from_timestamp_millis(read.mtime_ms)
-                            .map(|d| d.to_rfc3339())
-                            .unwrap_or_default(),
+                        last_activity_at: chrono::DateTime::from_timestamp_millis(
+                            digest.log_mtime_ms,
+                        )
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_default(),
                         pid: host.pid,
                         cpu_usage: host.cpu_usage,
                         active_subagent_count: 0,
@@ -161,34 +228,36 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
                     continue;
                 }
             }
-            let events = log::parse_events(&read.text);
 
-            // 双源：projcache（identity 过校验才可用）
+            // 双源：projcache（identity 过校验才可用；小文件每轮直读——量级远低于日志）
             let cache = projcache::load(home, &header.id)
-                .filter(|_| projcache_identity_ok(home, &header, read.version));
+                .filter(|_| projcache_identity_ok(home, header, version));
 
-            // 状态：lock 交叉判定 + 静默兜底
-            let lock = probe_lock_state(&spath);
-            let silence_ms = now_ms - read.mtime_ms;
-            // projcache 运行口径与日志口径一致时信任日志（审批只有日志有）
-            let outcome = status::derive(&status::StatusInput {
-                events: &events,
-                lock,
-                silence_ms: Some(silence_ms),
-            });
+            // 状态：lock 交叉判定 + 静默兜底。lock 仅开裔回合才探测（lsof 子进程，
+            // 终审 I2）——闭合回合的 derive 不消费 lock，探测是纯浪费
+            let lock = if digest.facts.has_open_turn() {
+                probe_lock_state(&spath)
+            } else {
+                LockState::Unknown
+            };
+            let silence_ms = now_ms - digest.log_mtime_ms;
+            let outcome = status::derive_facts(&digest.facts, lock, Some(silence_ms));
 
-            let (role, text) = preview::extract(&events);
-            let title = preview::title(&events, cache.as_ref());
+            let (role, text) = digest.preview.clone();
+            let title = cache
+                .as_ref()
+                .and_then(|c| c.title.clone())
+                .or_else(|| digest.log_title.clone());
             let last_activity_ms = cache
                 .as_ref()
                 .and_then(|c| c.last_prompt_at)
-                .or(events.iter().filter_map(|e| e.time).max())
-                .unwrap_or(read.mtime_ms);
+                .or(digest.max_event_time_ms)
+                .unwrap_or(digest.log_mtime_ms);
 
             // 未读（设计 P2 定死：等批准/出错/刚完成/回合被阻塞 → 未读）。
             // 锚点用事件流最大 time——勿用 lastPromptAt（完成晚于提问，
             // 用提问时刻会漏掉"读后完成"的刚完成未读）
-            let unread_anchor_ms = events.iter().filter_map(|e| e.time).max().unwrap_or(read.mtime_ms);
+            let unread_anchor_ms = digest.max_event_time_ms.unwrap_or(digest.log_mtime_ms);
             // MAM 自有库读已读水位（绝不写 ~/.dsh）；按会话短锁即取即放，
             // 避免长扫描（zstd 解码 + lsof 子进程）期间独占全局连接
             let last_read = {
@@ -228,6 +297,8 @@ fn scan_sessions(home: &std::path::Path, host: &AgentProcess) -> Vec<Session> {
             });
         }
     }
+    // 收敛缓存：清掉本轮未命中的代际日志条目（会话目录已被删除等）
+    DSH_LOG_SCAN.retain_existing(&live_logs);
     sessions
 }
 
@@ -359,4 +430,51 @@ mod integration_tests {
         // 宿主不在 → 无卡（与其他工具一致；不入扫描，无需 home）
         assert!(get_dsh_sessions(&[]).is_empty());
     }
+
+    #[test]
+    fn digest_cache_reuses_unchanged_log() {
+        // L2 内容缓存（session_scan.rs 预算层）：(mtime,size) 未变 ⇒ 复用同一份
+        // 解析产物 Arc——3 秒轮询下 77 个历史会话不再每轮全量解码
+        let home = make_home(
+            "{\"type\":\"turn/start\",\"seq\":4,\"data\":{}}\n\
+             {\"type\":\"turn/end\",\"seq\":6,\"data\":{\"reason\":{\"kind\":\"completed\"}}}\n",
+        );
+        let dir = home.path().join("sessions/--tmp-proj--/session-abc");
+        let (_, gen) = log::generation_logs(&dir).pop().unwrap();
+        let first = load_digest(&gen);
+        let second = load_digest(&gen);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "文件未变应命中缓存返回同一 Arc"
+        );
+    }
+
+    #[test]
+    fn digest_invalidates_when_log_appends() {
+        // 追加一帧（size 变化）→ 缓存必须失效：completed → error，Finished → Waiting
+        let home = make_home(
+            "{\"type\":\"turn/start\",\"seq\":4,\"data\":{}}\n\
+             {\"type\":\"turn/end\",\"seq\":6,\"data\":{\"reason\":{\"kind\":\"completed\"}}}\n",
+        );
+        let host = fake_host();
+        assert_eq!(
+            scan_sessions(home.path(), &host)[0].status,
+            SessionStatus::Finished
+        );
+        let dir = home.path().join("sessions/--tmp-proj--/session-abc");
+        let (_, gen) = log::generation_logs(&dir).pop().unwrap();
+        let mut bytes = std::fs::read(&gen).unwrap();
+        bytes.extend_from_slice(
+            &zstd::stream::encode_all(
+                b"{\"type\":\"turn/end\",\"seq\":9,\"data\":{\"reason\":{\"kind\":\"error\"}}}\n"
+                    .as_slice(),
+                3,
+            )
+            .unwrap(),
+        );
+        std::fs::write(&gen, &bytes).unwrap();
+        let cards = scan_sessions(home.path(), &host);
+        assert_eq!(cards[0].status, SessionStatus::Waiting, "追加 error 帧后应重扫");
+    }
 }
+

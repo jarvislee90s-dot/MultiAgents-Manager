@@ -33,14 +33,35 @@ pub struct StatusOutcome {
     pub last_end_seq: Option<i64>,
 }
 
-pub fn derive(input: &StatusInput) -> StatusOutcome {
-    let mut last_start: Option<i64> = None;
-    let mut last_end: Option<(i64, String)> = None; // (seq, kind)
-    let mut open_approvals: std::collections::HashSet<String> = std::collections::HashSet::new();
+/// 事件流的纯内容扫描产物（session_scan.rs L2 预算层："纯内容产物进缓存 +
+/// 时间叠加现算"）——不含任何 lock / 时间输入，可安全跨轮询缓存
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnFacts {
+    /// 最近 turn/start 的 seq
+    pub(crate) last_start: Option<i64>,
+    /// 最近 turn/end 的 (seq, reason.kind)
+    pub(crate) last_end: Option<(i64, String)>,
+    /// 未决审批 id 集合（asked 未 decided）
+    pub(crate) open_approvals: std::collections::HashSet<String>,
+}
 
-    for e in input.events {
+impl TurnFacts {
+    /// 回合是否打开（mod.rs 据此决定是否做 lsof 锁探测——闭合回合不探测）
+    pub fn has_open_turn(&self) -> bool {
+        match (self.last_start, &self.last_end) {
+            (Some(s), Some((e, _))) => s > *e,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// 纯内容扫描：从事件流提取回合事实（每文件只在内容变化时执行一次）
+pub fn scan_facts(events: &[DshEvent]) -> TurnFacts {
+    let mut facts = TurnFacts::default();
+    for e in events {
         match e.kind.as_str() {
-            "turn/start" => last_start = e.seq.or(last_start),
+            "turn/start" => facts.last_start = e.seq.or(facts.last_start),
             "turn/end" => {
                 if let Some(seq) = e.seq {
                     let kind = e
@@ -50,40 +71,49 @@ pub fn derive(input: &StatusInput) -> StatusOutcome {
                         .unwrap_or("")
                         .to_string();
                     // 只保留最新（seq 单调）
-                    if last_end.as_ref().map(|(s, _)| seq >= *s).unwrap_or(true) {
-                        last_end = Some((seq, kind));
+                    if facts
+                        .last_end
+                        .as_ref()
+                        .map(|(s, _)| seq >= *s)
+                        .unwrap_or(true)
+                    {
+                        facts.last_end = Some((seq, kind));
                     }
                 }
             }
             "approval/asked" => {
                 if let Some(id) = e.data.get("id").and_then(|v| v.as_str()) {
-                    open_approvals.insert(id.to_string());
+                    facts.open_approvals.insert(id.to_string());
                 }
             }
             "approval/decided" => {
                 if let Some(id) = e.data.get("id").and_then(|v| v.as_str()) {
-                    open_approvals.remove(id);
+                    facts.open_approvals.remove(id);
                 }
             }
             _ => {}
         }
     }
+    facts
+}
 
-    let open_turn = match (last_start, &last_end) {
-        (Some(s), Some((e, _))) => s > *e,
-        (Some(_), None) => true,
-        _ => false,
-    };
+/// 时间叠加：回合事实 + 本轮 lock 探测 / 静默时长 → 三色判定（每轮现算，代价 O(1)）
+pub fn derive_facts(
+    facts: &TurnFacts,
+    lock: LockState,
+    silence_ms: Option<i64>,
+) -> StatusOutcome {
+    let open_turn = facts.has_open_turn();
 
     let (status, end_kind) = if open_turn {
-        if !open_approvals.is_empty() {
+        if !facts.open_approvals.is_empty() {
             (SessionStatus::Waiting, None) // 红 · 等待批准
         } else {
-            match input.lock {
+            match lock {
                 LockState::Held => (SessionStatus::Processing, None),
                 LockState::Free => (SessionStatus::Waiting, Some("interrupted".into())), // 写入者已死
                 LockState::Unknown => {
-                    let silence = input.silence_ms.unwrap_or(0);
+                    let silence = silence_ms.unwrap_or(0);
                     if silence > V0_SILENCE_INTERRUPT_MS {
                         (SessionStatus::Waiting, Some("interrupted".into()))
                     } else {
@@ -93,7 +123,7 @@ pub fn derive(input: &StatusInput) -> StatusOutcome {
             }
         }
     } else {
-        let kind = last_end.as_ref().map(|(_, k)| k.clone());
+        let kind = facts.last_end.as_ref().map(|(_, k)| k.clone());
         let st = match kind.as_deref() {
             Some("error") | Some("interrupted") => SessionStatus::Waiting, // 红
             Some("blocked") => SessionStatus::Processing,                  // 黄 · 等待
@@ -107,8 +137,12 @@ pub fn derive(input: &StatusInput) -> StatusOutcome {
     StatusOutcome {
         status,
         end_kind,
-        last_end_seq: last_end.map(|(s, _)| s),
+        last_end_seq: facts.last_end.as_ref().map(|(s, _)| *s),
     }
+}
+
+pub fn derive(input: &StatusInput) -> StatusOutcome {
+    derive_facts(&scan_facts(input.events), input.lock, input.silence_ms)
 }
 
 // 测试：黄金夹具判定 + P2 映射表 + lock 交叉判定分支
@@ -270,5 +304,113 @@ mod tests {
             derive(&input(&e, LockState::Held)).status,
             SessionStatus::Waiting
         );
+    }
+
+    #[test]
+    fn scan_facts_derive_facts_equivalent_to_derive() {
+        // L2 预算层拆分等价性（session_scan.rs："纯内容产物进缓存 + 时间叠加现算"）：
+        // derive ≡ derive_facts(scan_facts(events), lock, silence)，对黄金样本与
+        // 合成分支逐一断言，保证拆分不改变任何判定语义
+        let cases: Vec<(Vec<DshEvent>, LockState, Option<i64>)> = vec![
+            (
+                fixture_events("sample1-completed.sanitized.jsonl"),
+                LockState::Held,
+                None,
+            ),
+            (
+                fixture_events("sample2-tool-error.sanitized.jsonl"),
+                LockState::Held,
+                None,
+            ),
+            (
+                fixture_events("sample3-approval-decided.sanitized.jsonl"),
+                LockState::Held,
+                None,
+            ),
+            (
+                fixture_events("sample4-running.sanitized.jsonl"),
+                LockState::Held,
+                None,
+            ),
+            // Free / Unknown 双档（10min 黄 / 31min 红）
+            (
+                fixture_events("sample4-running.sanitized.jsonl"),
+                LockState::Free,
+                None,
+            ),
+            (
+                fixture_events("sample4-running.sanitized.jsonl"),
+                LockState::Unknown,
+                Some(10 * 60 * 1000),
+            ),
+            (
+                fixture_events("sample4-running.sanitized.jsonl"),
+                LockState::Unknown,
+                Some(31 * 60 * 1000),
+            ),
+            (
+                fixture_events("sample5-approval-pending.sanitized.jsonl"),
+                LockState::Held,
+                None,
+            ),
+            // end-kind 映射代表分支
+            (
+                vec![
+                    ev("turn/start", 4, json!({})),
+                    ev("turn/end", 6, json!({ "reason": { "kind": "aborted" } })),
+                ],
+                LockState::Held,
+                None,
+            ),
+            (
+                vec![
+                    ev("turn/start", 4, json!({})),
+                    ev("turn/end", 6, json!({ "reason": { "kind": "blocked" } })),
+                ],
+                LockState::Held,
+                None,
+            ),
+            // 开回合 + 审批未决（优先于 lock 分支）
+            (
+                vec![
+                    ev("turn/start", 4, json!({})),
+                    ev("approval/asked", 5, json!({ "id": "a" })),
+                ],
+                LockState::Free,
+                Some(40 * 60 * 1000),
+            ),
+        ];
+        for (events, lock, silence) in &cases {
+            let a = derive(&StatusInput {
+                events,
+                lock: *lock,
+                silence_ms: *silence,
+            });
+            let facts = scan_facts(events);
+            let b = derive_facts(&facts, *lock, *silence);
+            assert_eq!(a.status, b.status, "status 必须等价");
+            assert_eq!(a.end_kind, b.end_kind, "end_kind 必须等价");
+            assert_eq!(a.last_end_seq, b.last_end_seq, "last_end_seq 必须等价");
+        }
+    }
+
+    #[test]
+    fn has_open_turn_matches_derive_open_branch() {
+        // 开裔回合判定（mod.rs 据此决定是否做 lsof 探测——闭合回合不探测）
+        let open = scan_facts(&[ev("turn/start", 4, json!({}))]);
+        assert!(open.has_open_turn(), "start 无 end → 开");
+        let closed = scan_facts(&[
+            ev("turn/start", 4, json!({})),
+            ev("turn/end", 6, json!({ "reason": { "kind": "completed" } })),
+        ]);
+        assert!(!closed.has_open_turn(), "end seq 更新 → 闭");
+        let empty = scan_facts(&[]);
+        assert!(!empty.has_open_turn(), "空事件流 → 闭（降级 Idle）");
+        let reopened = scan_facts(&[
+            ev("turn/start", 4, json!({})),
+            ev("turn/end", 6, json!({ "reason": { "kind": "completed" } })),
+            ev("turn/start", 9, json!({})),
+        ]);
+        assert!(reopened.has_open_turn(), "新 start seq 更新 → 开");
     }
 }
