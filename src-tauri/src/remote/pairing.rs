@@ -99,6 +99,9 @@ impl PairingService {
         }
     }
 
+    /// 停止配对服务：**仅清内存 token**（并置 `stopped`）。
+    /// 已配对设备的吊销需调用方另行 `revoke_all()`，两者共同构成不变量 5 的「全吊销」——
+    /// 单独调用 `stop()` 不足以断开已配对设备（Task 4 的 `stop_server()` 两条都会调）。
     pub fn stop(&mut self) {
         self.token = None;
         self.stopped = true;
@@ -177,9 +180,11 @@ mod tests {
         assert!(matches!(s.accept(&t1), AcceptResult::Ok { .. }));
     }
 
-    /// 追加测试（简报五个之外，理由见报告 §④）：简报固定 token 源下每次 issue 都是同一字符串，
-    /// "发行即作废旧 token" 无法被证伪（单槽实现天然满足）。此处换用计数器 token 源，
-    /// 正向验证不变量 1（旧链接失效）与 issue() 对 stop() 的重新武装（dsh：stopped 经 issue 复活）。
+    /// 追加测试（简报五个之外，理由见报告 §④）：只覆盖 `stop()` 之后的**重新武装**
+    /// （dsh：stopped 经 issue 复活，原文 `pairing.ts:219` `this.stopped = false`）。
+    /// 注意：本测试证明不了不变量 1——`stop()` 自己已把 token 置 `None`，
+    /// 旧密文无论 `issue()` 是否清旧 token 都必然 `Invalid`；不变量 1 的证伪测试见
+    /// `issue_twice_without_stop_invalidates_first`。
     #[test]
     fn issue_invalidates_previous_and_rearms_after_stop() {
         let counter = Arc::new(AtomicI64::new(0));
@@ -192,11 +197,33 @@ mod tests {
         };
         let mut s = PairingService::new(600_000, clock);
         let t1 = s.issue(); // tok-0
-        s.stop(); // 全吊销
+        s.stop(); // 全吊销（内存 token 部分）
         let t2 = s.issue(); // tok-1：重新武装
         assert_ne!(t1, t2);
         assert_eq!(s.accept(&t1), AcceptResult::Invalid); // 旧 token 已作废
         assert!(matches!(s.accept(&t2), AcceptResult::Ok { .. })); // 新 token 生效
+    }
+
+    /// 不变量 1 的**证伪测试**（评审 Important 1）：不经过 `stop()`，用计数器 token 源
+    /// 连续 `issue()` 两次。若实现只在 `stop()`/清空后才作废旧 token（即"唯一缺陷 = issue()
+    /// 不清旧 token"的变异体），本测试的 `accept(&a) == Invalid` 断言会失败——
+    /// 单点变异已实测：真实实现通过、变异体失败。
+    #[test]
+    fn issue_twice_without_stop_invalidates_first() {
+        let counter = Arc::new(AtomicI64::new(0));
+        let c = counter.clone();
+        let t = Arc::new(AtomicI64::new(1000));
+        let now = t.clone();
+        let clock = PairingClock {
+            now: Box::new(move || now.load(Ordering::SeqCst)),
+            token: Box::new(move || format!("tok-{}", c.fetch_add(1, Ordering::SeqCst))),
+        };
+        let mut s = PairingService::new(600_000, clock);
+        let a = s.issue(); // tok-0
+        let b = s.issue(); // tok-1（发行即作废旧 token，未经过 stop）
+        assert_ne!(a, b);
+        assert_eq!(s.accept(&a), AcceptResult::Invalid); // 旧 token 已作废
+        assert!(matches!(s.accept(&b), AcceptResult::Ok { .. })); // 新 token 生效
     }
 
     #[test]
