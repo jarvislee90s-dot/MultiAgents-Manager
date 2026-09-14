@@ -643,7 +643,7 @@ git commit -m "feat(preset-v2): resource binding + tool resident DAO"
   - `mark_stash_restored(id: i64) -> Result<(), String>`
   - `unrestored_stash(tool_id: Option<&str>) -> Vec<StashEntryRecord>`（None = 全部工具，孤儿扫描用）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/dao_test.rs` 追加：
 
@@ -710,12 +710,12 @@ fn test_base_snapshot_and_stash_dao() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test test_base_snapshot_and_stash_dao`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现 `dao/base_snapshot.rs`**
+- [x] **Step 3: 实现 `dao/base_snapshot.rs`**
 
 ```rust
 // 基底快照（spec §3.2/§4）：生命周期 = 一次预设会话；恢复默认时销毁
@@ -804,7 +804,7 @@ pub fn destroy_base_snapshot(tool_id: &str) -> Result<(), String> {
 }
 ```
 
-- [ ] **Step 4: 实现 `dao/stash.rs`**
+- [x] **Step 4: 实现 `dao/stash.rs`**
 
 ```rust
 // 暂存日志（spec §3.4/§5.3）：暂存区唯一账本，崩溃恢复依据
@@ -885,7 +885,7 @@ pub fn unrestored_stash(tool_id: Option<&str>) -> Vec<StashEntryRecord> {
 
 `dao/mod.rs` 注册两模块；`database/mod.rs` re-export 上述全部函数与两个 Record 类型。
 
-- [ ] **Step 5: 跑测试 + Commit**
+- [x] **Step 5: 跑测试 + Commit**
 
 Run: `cd src-tauri && cargo test test_base_snapshot && cargo test`
 Expected: PASS

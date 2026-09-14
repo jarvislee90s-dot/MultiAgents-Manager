@@ -180,3 +180,64 @@ fn test_resource_binding_and_resident_dao() {
     database::set_tool_resident("codex", "skill-v2m1-x", false).unwrap();
     assert!(!database::is_tool_resident("codex", "skill-v2m1-x"));
 }
+
+#[test]
+fn test_base_snapshot_and_stash_dao() {
+    crate::support::setup();
+    use multi_agents_manager_lib::database::{BaseSnapshotItemRecord, StashEntryRecord};
+
+    let items = vec![
+        BaseSnapshotItemRecord {
+            extension_id: "skill-v2m1-a".into(),
+            kind: "skill".into(),
+            origin: "mam".into(),
+        },
+        BaseSnapshotItemRecord {
+            extension_id: "skill-v2m1-native".into(),
+            kind: "skill".into(),
+            origin: "native".into(),
+        },
+    ];
+    // 无快照 → None
+    assert!(multi_agents_manager_lib::database::get_base_snapshot("codex").is_none());
+    // 保存（拍基底，active=None）
+    multi_agents_manager_lib::database::save_base_snapshot("codex", None, &items).unwrap();
+    let (active, got) =
+        multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap();
+    assert!(active.is_none());
+    assert_eq!(got.len(), 2);
+    // 幂等重存（会话内切换不动快照；重存=覆盖）
+    multi_agents_manager_lib::database::save_base_snapshot("codex", None, &items).unwrap();
+    assert_eq!(
+        multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap().1.len(),
+        2
+    );
+    // 设激活 + 读回
+    multi_agents_manager_lib::database::set_active_preset("codex", "preset-v2m1").unwrap();
+    assert_eq!(
+        multi_agents_manager_lib::database::get_base_snapshot("codex").unwrap().0,
+        Some("preset-v2m1".into())
+    );
+    // 销毁（恢复默认后快照不复存在——会话级生命周期）
+    multi_agents_manager_lib::database::destroy_base_snapshot("codex").unwrap();
+    assert!(multi_agents_manager_lib::database::get_base_snapshot("codex").is_none());
+
+    // 暂存日志
+    let id = multi_agents_manager_lib::database::record_stash(
+        "codex",
+        "v2m1-native",
+        "/tmp/stash/v2m1-native",
+        "/home/u/.codex/skills/v2m1-native",
+    )
+    .unwrap();
+    let entries = multi_agents_manager_lib::database::unrestored_stash(Some("codex"));
+    assert_eq!(entries.len(), 1);
+    let e: &StashEntryRecord = &entries[0];
+    assert_eq!(e.skill_name, "v2m1-native");
+    assert!(e.restored_at.is_none());
+    // 全工具扫描（孤儿恢复用）
+    assert!(!multi_agents_manager_lib::database::unrestored_stash(None).is_empty());
+    // 标记恢复后不再出现
+    multi_agents_manager_lib::database::mark_stash_restored(id).unwrap();
+    assert!(multi_agents_manager_lib::database::unrestored_stash(Some("codex")).is_empty());
+}

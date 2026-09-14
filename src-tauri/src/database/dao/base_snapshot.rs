@@ -1,0 +1,84 @@
+// 基底快照（spec §3.2/§4）：生命周期 = 一次预设会话；恢复默认时销毁
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+
+use crate::database::connection::DB;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaseSnapshotItemRecord {
+    pub extension_id: String,
+    pub kind: String,
+    pub origin: String, // "mam" | "native"
+}
+
+/// 幂等保存：先删该工具旧快照再插入（拍基底/重存同一路径）
+pub fn save_base_snapshot(
+    tool_id: &str,
+    active_preset_id: Option<&str>,
+    items: &[BaseSnapshotItemRecord],
+) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute("DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1", [tool_id])
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO tool_base_snapshots (tool_id, active_preset_id, created_at) VALUES (?1, ?2, ?3)",
+        params![tool_id, active_preset_id, now],
+    )
+    .map_err(|e| e.to_string())?;
+    for it in items {
+        conn.execute(
+            "INSERT INTO tool_base_snapshot_items (tool_id, extension_id, kind, origin) VALUES (?1, ?2, ?3, ?4)",
+            params![tool_id, it.extension_id, it.kind, it.origin],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn get_base_snapshot(tool_id: &str) -> Option<(Option<String>, Vec<BaseSnapshotItemRecord>)> {
+    let conn = DB.lock().unwrap();
+    let active: Option<String> = conn
+        .query_row(
+            "SELECT active_preset_id FROM tool_base_snapshots WHERE tool_id = ?1",
+            [tool_id],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let items = conn
+        .prepare("SELECT extension_id, kind, origin FROM tool_base_snapshot_items WHERE tool_id = ?1")
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([tool_id], |row| {
+                Ok(BaseSnapshotItemRecord {
+                    extension_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    origin: row.get(2)?,
+                })
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    Some((active, items))
+}
+
+pub fn set_active_preset(tool_id: &str, preset_id: &str) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    conn.execute(
+        "UPDATE tool_base_snapshots SET active_preset_id = ?2 WHERE tool_id = ?1",
+        params![tool_id, preset_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn destroy_base_snapshot(tool_id: &str) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    conn.execute("DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1", [tool_id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM tool_base_snapshots WHERE tool_id = ?1", [tool_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
