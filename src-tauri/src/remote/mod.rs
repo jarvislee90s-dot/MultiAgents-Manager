@@ -1,7 +1,10 @@
 // 远程接入层（M2）：axum 内嵌服务器 + 直通配对 + 移动看板 API
 // 范围与红线见 docs/superpowers/plans/2026-09-14-m2-remote-access-board.md
 
+pub mod api;
+pub mod gate;
 pub mod pairing;
+pub mod server;
 
 pub const KEY_ENABLED: &str = "remote.enabled";
 pub const KEY_BIND: &str = "remote.bind";

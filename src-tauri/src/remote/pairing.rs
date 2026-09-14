@@ -145,6 +145,47 @@ pub fn revoke_all(conn: &rusqlite::Connection) -> Result<usize, String> {
         .map_err(|e| format!("revoke_all: {e}"))
 }
 
+/// 设备存储注入缝：生产走全局 DB，测试注入内存库（绝不写真实 ~/.mam）
+pub enum DeviceStore {
+    /// 生产：全局 `~/.mam/mam.db`（`crate::database::connection::DB`）
+    Global,
+    /// 测试：注入自建库（内存库，绝不落盘真实数据目录）
+    Owned(std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>),
+}
+
+impl DeviceStore {
+    /// 生产构造：锁全局 DB
+    pub fn global() -> Self {
+        Self::Global
+    }
+
+    /// 测试构造：自建内存库并建表。
+    /// 调用序必须为 `schema::init`（建全部表）→ `migration::migrate`（增量迁移）——
+    /// migrate 首条语句是 `ALTER TABLE extensions`，空库直跑报 "no such table: extensions"
+    /// （真机调用序见 `src/database/mod.rs` 的 `init()`）
+    pub fn memory() -> Self {
+        let conn = rusqlite::Connection::open_in_memory().expect("打开内存库失败");
+        crate::database::schema::init(&conn);
+        crate::database::migration::migrate(&conn).expect("内存库建表失败");
+        Self::Owned(std::sync::Arc::new(std::sync::Mutex::new(conn)))
+    }
+
+    /// 在锁定连接上执行闭包。
+    /// 注意：连接锁不能作为引用逃逸出闭包（借用会失效），故返回值由闭包自己决定。
+    pub fn with<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
+        match self {
+            DeviceStore::Global => {
+                let c = crate::database::connection::DB.lock().unwrap();
+                f(&c)
+            }
+            DeviceStore::Owned(arc) => {
+                let c = arc.lock().unwrap();
+                f(&c)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +338,48 @@ mod tests {
         touch_device(&conn, "d1", 1000);
         assert!(device_valid(&conn, "d1", 1000 + DEVICE_TTL_MS - 1));
         assert!(!device_valid(&conn, "d1", 1000 + DEVICE_TTL_MS + 1));
+    }
+
+    /// DeviceStore 注入缝契约：memory() 建表可用（persist/valid/touch 全链路），
+    /// 且 with() 的 `FnOnce(&Connection) -> R` 形态支持取值/布尔/写操作三种用法
+    #[test]
+    fn device_store_memory_is_wired_and_never_touches_real_db() {
+        let store = DeviceStore::memory();
+        let now = 1_700_000_000_000i64;
+        let dev = NewDevice {
+            id: "mem-1".into(),
+            name: "测试设备".into(),
+            ua: "ua".into(),
+            origin_ip: "127.0.0.1".into(),
+            paired_at: now,
+        };
+        // 写（返回 Result，忽略）——若 memory() 未建表此处会 Err 且后续断言失败
+        store.with(|c| persist_device(c, &dev).unwrap());
+        // 布尔取值
+        assert!(store.with(|c| device_valid(c, "mem-1", now)));
+        // 写操作（touch）
+        store.with(|c| touch_device(c, "mem-1", now + 10));
+        let seen: i64 = store.with(|c| {
+            c.query_row(
+                "SELECT last_seen_at FROM remote_devices WHERE id = 'mem-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(seen, now + 10);
+        // 未知设备与已吊销设备都不通过
+        assert!(!store.with(|c| device_valid(c, "no-such", now)));
+        store.with(|c| revoke_all(c).unwrap());
+        assert!(!store.with(|c| device_valid(c, "mem-1", now + 10)));
+    }
+
+    /// 反向自审：`global()` 只返回标记（不触碰 DB），构造本身不产生副作用。
+    /// 若误把 Global 写成急切实例化，本测试仍会通过——故此处仅锁定"构造不写库"，
+    /// 真实 DB 访问路径由 gate 的集成测试覆盖（测试一律走 memory()）
+    #[test]
+    fn device_store_global_construction_has_no_side_effect() {
+        let store = DeviceStore::global();
+        assert!(matches!(store, DeviceStore::Global));
     }
 }

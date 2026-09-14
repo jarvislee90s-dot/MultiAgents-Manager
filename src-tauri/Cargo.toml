@@ -92,3 +92,6 @@ strip = true
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"
+# M2 axum 集成测试：tower ServiceExt::oneshot + http-body-util 读响应体
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
