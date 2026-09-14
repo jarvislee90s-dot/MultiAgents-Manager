@@ -230,14 +230,23 @@ pub fn get_all_sessions() -> SessionsResponse {
         };
     }
     *flying = true;
-    drop(flying);
-
+    drop(flying); // 先放手上的 in_flight 锁：Drop guard 析构时要重新拿它清位，
+    // 不 drop 即自锁自等（本测试挂起事故的根因）
+    // Drop guard：内层扫描 panic（如 DB 锁中毒 unwrap）时飞行位自动释放——
+    // 若靠扫描返回后手动清位，一次 panic 即永久卡死单飞（看板冻结到重启），
+    // 且把原失败模式（单次报错下轮重试）恶化成永久故障
+    let _guard = ScanFlightGuard;
     let result = get_all_sessions_inner();
-    // 释放飞行位并刷新快照（扫描无 Result 通道，正常返回即视为成功；
-    // panic 由 spawn_blocking 层捕获为空响应，飞行位经下方重新置位逻辑兜底）
-    *SCAN_FLIGHT.in_flight.lock().unwrap() = false;
     *SCAN_FLIGHT.last_snapshot.lock().unwrap() = Some((std::time::Instant::now(), result.clone()));
     result
+}
+
+/// 扫描飞行位的 Drop 释放护栏（作用域结束/panic unwind 均自动清位）
+struct ScanFlightGuard;
+impl Drop for ScanFlightGuard {
+    fn drop(&mut self) {
+        *SCAN_FLIGHT.in_flight.lock().unwrap() = false;
+    }
 }
 
 /// 实际扫描（单飞壳内执行；成功路径与原实现一致）
@@ -450,13 +459,19 @@ fn get_all_sessions_inner() -> SessionsResponse {
     }
 }
 
-/// R3 单飞护栏测试：占住飞行位时第二请求返回快照而不进入扫描
+/// R3 单飞护栏测试：占住飞行位时第二请求返回快照而不进入扫描。
+/// SCAN_FLIGHT_TEST_LOCK：直接操纵全局 SCAN_FLIGHT 的测试与真实扫描类测试
+/// （会重置飞行位/快照）互斥——与 R1 同类并行互踩病的收口
 #[cfg(test)]
 mod scan_flight_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static SCAN_FLIGHT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn concurrent_request_reuses_snapshot_without_rescan() {
+        let _g = SCAN_FLIGHT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // 预置快照
         let snapshot = SessionsResponse {
             sessions: Vec::new(),
@@ -479,6 +494,7 @@ mod scan_flight_tests {
 
     #[test]
     fn flight_released_after_scan_completes() {
+        let _g = SCAN_FLIGHT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // 正常调用：进入扫描并释放飞行位 + 刷新快照
         let resp = get_all_sessions();
         assert!(

@@ -45,8 +45,17 @@ fn load_digest(
     scan.parse(gen_path, build_digest)
 }
 
-/// 纯内容解析（session_scan.rs 要求：时间叠加绝不在此函数内）
+/// 纯内容解析（session_scan.rs 要求：时间叠加绝不在此函数内）。
+/// TEST_DIGEST_CALLS：测试可见的调用计数（thread_local——scan_sessions 是
+/// 同步调用链，计数与断言同线程，天然免疫并行测试对全局计数器的污染）
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_DIGEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn build_digest(gen_path: &std::path::Path) -> Option<DshSessionDigest> {
+    #[cfg(test)]
+    TEST_DIGEST_CALLS.with(|c| c.set(c.get() + 1));
     let bytes = std::fs::read(gen_path).ok()?;
     let text = if gen_path.extension().map(|e| e == "zstd").unwrap_or(false) {
         decode::decode_zstd_frames(&bytes).ok()?.text
@@ -566,7 +575,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn cold_scan_skips_stale_without_opening_file() {
+    fn cold_scan_skips_stale_digest_and_cache_hit_exception_works() {
         // R2（AGENTS.md L3-4）：冷缓存下超窗文件不得被打开/解压——行为证明：
         // 超窗会话的日志写成非法 zstd 字节（若被打开，build_digest 只是失败，
         // 无法区分；改用独占方式——将超窗文件替换为 FIFO 不可行，测试环境用
@@ -600,17 +609,28 @@ mod integration_tests {
         let host = fake_host();
         // 两次 scan 共用同一私有实例（缓存例外跨 scan 验证的前提）
         let scan = test_scan();
+        TEST_DIGEST_CALLS.with(|c| c.set(0));
         let cards = scan_sessions(home.path(), &host, &scan);
         assert_eq!(cards.len(), 1, "仅窗内会话出卡");
         assert_eq!(cards[0].id, "session-fresh");
+        // 机器证明（评审 Minor）：冷扫描只解析窗内 fresh 一次——超窗 stale 未被
+        // 打开/解压（本线程计数=1 而非 2）
+        TEST_DIGEST_CALLS.with(|c| {
+            assert_eq!(c.get(), 1, "冷扫描应只解析 fresh 一次，超窗文件不进 build_digest");
+        });
         // 缓存例外回归锁：超窗但曾解析过（缓存命中）→ 仍参与出卡。
         // 第一次 scan 预过滤跳过了 stale（缓存里没有），手动向同一实例注入
         // 一条（键=48h 前 mtime，与 peek 比对键一致），再扫应例外出卡
         scan.parse(&stale_gen, build_digest);
+        TEST_DIGEST_CALLS.with(|c| c.set(0));
         let cards2 = scan_sessions(home.path(), &host, &scan);
         let ids: Vec<String> = cards2.iter().map(|c| c.id.clone()).collect();
         assert_eq!(cards2.len(), 2, "缓存命中的超窗会话应例外出卡，实得 {:?}", ids);
         assert!(ids.iter().any(|i| i == "session-stale"));
+        // 例外路径同样零新增解析：stale 走 peek 缓存命中，fresh 未变化
+        TEST_DIGEST_CALLS.with(|c| {
+            assert_eq!(c.get(), 0, "第二次扫描应全缓存命中（含超窗例外），零 build_digest 调用");
+        });
     }
 
     #[test]
