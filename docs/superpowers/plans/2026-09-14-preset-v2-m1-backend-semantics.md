@@ -1381,7 +1381,7 @@ git commit -m "feat(preset-v2): tool state scan + base snapshot capture"
   - `plan_sweep(tool_id: &str, keep: &[(String, String)]) -> SweepPlan`——keep 为（过滤后的）预设项 `(extension_id, kind)`；差集 = 当前状态 − keep − 常驻
   - `execute_sweep(tool_id: &str, plan: &SweepPlan) -> (Vec<String> /*disabled: ext_id*/, Vec<String> /*stashed: skill 名*/, Vec<String> /*failures*/)`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/preset_v2_test.rs` 追加：
 
@@ -1446,12 +1446,12 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test sweep_`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现 `services/preset/sweep.rs`**
+- [x] **Step 3: 实现 `services/preset/sweep.rs`**
 
 ```rust
 // 独占清扫（spec §5.1 步骤4）：差集 = 当前生效资源 − 预设项 − 常驻；
@@ -1532,7 +1532,7 @@ pub fn execute_sweep(
 }
 ```
 
-- [ ] **Step 4: 跑测试 + Commit**
+- [x] **Step 4: 跑测试 + Commit**
 
 Run: `cd src-tauri && cargo test sweep_ && cargo test`
 Expected: PASS

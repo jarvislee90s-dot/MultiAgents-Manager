@@ -51,11 +51,11 @@ static PRESET_V2_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// 暂存往返：真目录移入 ~/.mam/stash/<tool>/skills 再移回；账本同步
 #[test]
 fn stash_and_restore_roundtrip() {
-    support::setup();
     let _ledger = PRESET_V2_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    support::setup();
     use multi_agents_manager_lib::database;
     use multi_agents_manager_lib::services::preset::stash;
 
@@ -83,11 +83,11 @@ fn stash_and_restore_roundtrip() {
 /// 原位被占：不覆盖，留在暂存区，报告冲突
 #[test]
 fn stash_restore_conflict_keeps_stash() {
-    support::setup();
     let _ledger = PRESET_V2_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    support::setup();
     use multi_agents_manager_lib::database;
     use multi_agents_manager_lib::services::preset::stash;
 
@@ -182,4 +182,67 @@ fn scan_tool_state_captures_mam_and_native() {
     let _ = database::disable_subagent_assignment("skill-v2m1-scan-a", "claude", "v2m1-scan-sub");
     disable_skill_for_tool("v2m1-scan-a", "claude").unwrap();
     database::destroy_base_snapshot("claude").unwrap();
+}
+
+/// 清扫差集：预设外的 MAM skill 停用、原生真目录暂存；常驻豁免两项都不动
+#[test]
+fn sweep_stashes_native_and_disables_mam_except_resident() {
+    let _ledger = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::sweep;
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    // MAM skill A（预设内）+ MAM skill B（预设外）为 claude 启用
+    for name in ["v2m1-sw-a", "v2m1-sw-b"] {
+        let ssot = dirs::home_dir().unwrap().join(".mam/skills").join(name);
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+        database::insert_extension(&database::ExtensionRecord {
+            id: format!("skill-{}", name),
+            kind: "skill".into(),
+            name: name.into(),
+            description: None,
+            source_path: ssot.to_string_lossy().to_string(),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: None,
+            is_native: false,
+        })
+        .unwrap();
+        enable_skill_for_tool(name, "claude").unwrap();
+    }
+    // 原生真目录 C（预设外）与 D（常驻）
+    let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
+    for name in ["v2m1-sw-c", "v2m1-sw-d"] {
+        std::fs::create_dir_all(claude_dir.join(name)).unwrap();
+        std::fs::write(claude_dir.join(name).join("SKILL.md"), "n").unwrap();
+    }
+    database::set_tool_resident("claude", "skill-v2m1-sw-d", true).unwrap();
+
+    // 计划：keep 只有 A（断言用 contains——集成测试共享 HOME，其他测试可能残留原生目录）
+    let keep = vec![("skill-v2m1-sw-a".to_string(), "skill".to_string())];
+    let plan = sweep::plan_sweep("claude", &keep);
+    assert!(plan.disable_mam.contains(&("skill-v2m1-sw-b".to_string(), "skill".to_string())));
+    assert!(plan.stash_native.contains(&"v2m1-sw-c".to_string()));
+    assert!(!plan.stash_native.contains(&"v2m1-sw-d".to_string()), "常驻项不得进暂存计划");
+
+    // 执行：B 断链、C 暂存、D 不动
+    let (disabled, stashed, failures) = sweep::execute_sweep("claude", &plan);
+    assert!(disabled.contains(&"skill-v2m1-sw-b".to_string()));
+    assert!(stashed.contains(&"v2m1-sw-c".to_string()));
+    assert!(failures.is_empty(), "{:?}", failures);
+    assert!(!claude_dir.join("v2m1-sw-b").exists(), "B 链接应已断");
+    assert!(!claude_dir.join("v2m1-sw-c").exists(), "C 应已暂存");
+    assert!(claude_dir.join("v2m1-sw-d").is_dir(), "常驻 D 不得动");
+
+    // 清场
+    database::set_tool_resident("claude", "skill-v2m1-sw-d", false).unwrap();
+    disable_skill_for_tool("v2m1-sw-a", "claude").unwrap();
+    let _ = database::destroy_base_snapshot("claude");
 }

@@ -2,6 +2,7 @@
 
 pub mod snapshot;
 pub mod stash;
+pub mod sweep;
 
 use crate::database;
 use crate::services;
