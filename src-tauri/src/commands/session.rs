@@ -2,7 +2,9 @@
 
 use crate::adapter;
 use crate::session::SessionsResponse;
-use tauri::{Emitter, Manager};
+// Manager 的导入在下方 macOS cfg 块内局部引入：get_webview_window 仅 macOS
+// 路径消费，顶层导入在 Linux/Windows CI 上是 unused import（-D warnings 即挂）
+use tauri::Emitter;
 
 #[tauri::command]
 pub async fn get_all_sessions(app: tauri::AppHandle) -> SessionsResponse {
@@ -223,6 +225,8 @@ pub fn focus_session(
         // 聚焦/打开 dsh web 标签页（无 per-session URL，设计 P4 定案）；失败给出提示
         #[cfg(target_os = "macos")]
         if agent_type.as_deref() == Some("dsh") {
+            // get_webview_window 的 Manager trait 导入收在 cfg 块内（见文件头注释）
+            use tauri::Manager;
             match crate::window::dsh_tab::focus_dsh_tab() {
                 Ok(mut out) => {
                     mark_read_on_jump(&app, &session_id, &agent_type);
