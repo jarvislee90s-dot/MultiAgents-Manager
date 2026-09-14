@@ -83,3 +83,56 @@ fn test_session_status() {
     active.insert("session-1".to_string());
     database::cleanup_stale_sessions(&active);
 }
+
+#[test]
+fn test_preset_v2_crud_roundtrip() {
+    support::setup();
+
+    let items = vec![
+        ("skill-v2m1-a".to_string(), "skill".to_string()),
+        ("mcp-v2m1-b".to_string(), "mcp".to_string()),
+    ];
+    // 带元信息创建：工具私有预设
+    let id = database::create_preset_with_meta(
+        "v2m1-设计套件",
+        "做设计时的备忘",
+        "tool",
+        Some("codex"),
+        &items,
+    )
+    .unwrap();
+    let p = database::get_preset(&id).expect("get_preset 应返回");
+    assert_eq!(p.name, "v2m1-设计套件");
+    assert_eq!(p.description, "做设计时的备忘");
+    assert_eq!(p.scope, "tool");
+    assert_eq!(p.bound_tool.as_deref(), Some("codex"));
+    assert_eq!(p.items.len(), 2);
+
+    // 更新：改类型为 universal + 换 items
+    database::update_preset(
+        &id,
+        "v2m1-改名",
+        "新描述",
+        "universal",
+        None,
+        &[("skill-v2m1-c".to_string(), "skill".to_string())],
+    )
+    .unwrap();
+    let p2 = database::get_preset(&id).unwrap();
+    assert_eq!(p2.name, "v2m1-改名");
+    assert_eq!(p2.scope, "universal");
+    assert!(p2.bound_tool.is_none());
+    assert_eq!(p2.items.len(), 1);
+    assert_eq!(p2.items[0].extension_id, "skill-v2m1-c");
+
+    // 旧入口仍可用，默认 universal
+    let legacy_id = database::create_preset("v2m1-旧入口", &items).unwrap();
+    assert_eq!(database::get_preset(&legacy_id).unwrap().scope, "universal");
+
+    // list_presets 返回扩展字段
+    let listed = database::list_presets();
+    assert!(listed.iter().any(|p| p.id == id && p.scope == "universal"));
+
+    database::delete_preset(&id).unwrap();
+    assert!(database::get_preset(&id).is_none());
+}

@@ -8,6 +8,9 @@ use crate::database::connection::DB;
 pub struct PresetRecord {
     pub id: String,
     pub name: String,
+    pub description: String,
+    pub scope: String, // "universal" | "tool"
+    pub bound_tool: Option<String>,
     pub items: Vec<PresetItemRecord>,
 }
 
@@ -19,15 +22,35 @@ pub struct PresetItemRecord {
     pub extension_name: String,
 }
 
-pub fn create_preset(name: &str, items: &[(String, String)]) -> Result<String, String> {
+pub fn create_preset_with_meta(
+    name: &str,
+    description: &str,
+    scope: &str,
+    bound_tool: Option<&str>,
+    items: &[(String, String)],
+) -> Result<String, String> {
     let conn = DB.lock().unwrap();
     let id = format!("preset-{}", chrono::Utc::now().timestamp_millis());
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO presets (id, name, created_at) VALUES (?1, ?2, ?3)",
-        params![id, name, now],
+        "INSERT INTO presets (id, name, description, scope, bound_tool, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, name, description, scope, bound_tool, now],
     )
     .map_err(|e| e.to_string())?;
+    insert_items(&conn, &id, items)?;
+    Ok(id)
+}
+
+/// 旧入口委托：默认通用预设（前端 M2 前的兼容层）
+pub fn create_preset(name: &str, items: &[(String, String)]) -> Result<String, String> {
+    create_preset_with_meta(name, "", "universal", None, items)
+}
+
+fn insert_items(
+    conn: &rusqlite::Connection,
+    id: &str,
+    items: &[(String, String)],
+) -> Result<(), String> {
     for (ext_id, kind) in items {
         let item_id = format!("{}-{}", id, ext_id);
         conn.execute(
@@ -36,41 +59,105 @@ pub fn create_preset(name: &str, items: &[(String, String)]) -> Result<String, S
         )
         .map_err(|e| e.to_string())?;
     }
-    Ok(id)
+    Ok(())
+}
+
+pub fn update_preset(
+    id: &str,
+    name: &str,
+    description: &str,
+    scope: &str,
+    bound_tool: Option<&str>,
+    items: &[(String, String)],
+) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    let n = conn
+        .execute(
+            "UPDATE presets SET name=?2, description=?3, scope=?4, bound_tool=?5 WHERE id=?1",
+            params![id, name, description, scope, bound_tool],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("预设不存在: {}", id));
+    }
+    conn.execute("DELETE FROM preset_items WHERE preset_id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    insert_items(&conn, id, items)
+}
+
+pub fn get_preset(preset_id: &str) -> Option<PresetRecord> {
+    let conn = DB.lock().unwrap();
+    conn.query_row(
+        "SELECT id, name, description, scope, bound_tool FROM presets WHERE id = ?1",
+        [preset_id],
+        |row| {
+            Ok(PresetRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                scope: row.get(3)?,
+                bound_tool: row.get(4)?,
+                items: Vec::new(),
+            })
+        },
+    )
+    .ok()
+    .map(|mut p| {
+        p.items = load_items(&conn, &p.id);
+        p
+    })
 }
 
 pub fn list_presets() -> Vec<PresetRecord> {
     let conn = DB.lock().unwrap();
-    let preset_ids: Vec<(String, String)> = conn
-        .prepare("SELECT id, name FROM presets ORDER BY created_at DESC")
+    let presets: Vec<PresetRecord> = conn
+        .prepare(
+            "SELECT id, name, description, scope, bound_tool FROM presets ORDER BY created_at DESC",
+        )
         .ok()
         .map(|mut stmt| {
-            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
+            stmt.query_map([], |row| {
+                Ok(PresetRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    scope: row.get(3)?,
+                    bound_tool: row.get(4)?,
+                    items: Vec::new(),
+                })
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
         })
         .unwrap_or_default();
 
-    preset_ids.iter().map(|(id, name)| {
-        let items: Vec<PresetItemRecord> = conn
-            .prepare("SELECT pi.extension_id, pi.kind, e.name FROM preset_items pi LEFT JOIN extensions e ON pi.extension_id = e.id WHERE pi.preset_id = ?1")
-            .ok()
-            .map(|mut stmt| {
-                stmt.query_map([id], |row| {
-                    Ok(PresetItemRecord {
-                        extension_id: row.get(0)?,
-                        kind: row.get(1)?,
-                        extension_name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    })
-                })
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
+    presets
+        .into_iter()
+        .map(|mut p| {
+            p.items = load_items(&conn, &p.id);
+            p
+        })
+        .collect()
+}
+
+fn load_items(conn: &rusqlite::Connection, id: &str) -> Vec<PresetItemRecord> {
+    conn.prepare(
+        "SELECT pi.extension_id, pi.kind, e.name FROM preset_items pi LEFT JOIN extensions e ON pi.extension_id = e.id WHERE pi.preset_id = ?1",
+    )
+    .ok()
+    .and_then(|mut stmt| {
+        stmt.query_map([id], |row| {
+            Ok(PresetItemRecord {
+                extension_id: row.get(0)?,
+                kind: row.get(1)?,
+                extension_name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
             })
-            .unwrap_or_default();
-        PresetRecord { id: id.clone(), name: name.clone(), items }
-    }).collect()
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    })
+    .unwrap_or_default()
 }
 
 pub fn delete_preset(preset_id: &str) -> Result<(), String> {

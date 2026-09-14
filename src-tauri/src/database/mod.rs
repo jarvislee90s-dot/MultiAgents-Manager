@@ -25,8 +25,8 @@ pub use dao::extension::{
     upsert_assignment_with_subagent,
 };
 pub use dao::preset::{
-    create_preset, delete_preset, get_preset_items, list_presets, record_preset_application,
-    record_preset_application_subagent,
+    create_preset, create_preset_with_meta, delete_preset, get_preset, get_preset_items,
+    list_presets, record_preset_application, record_preset_application_subagent, update_preset,
 };
 pub use dao::session::{cleanup_stale_sessions, find_status, update_session_status};
 pub use dao::settings::{get_setting, set_setting};

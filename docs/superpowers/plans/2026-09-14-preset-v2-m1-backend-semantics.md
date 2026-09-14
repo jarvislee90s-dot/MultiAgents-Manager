@@ -194,7 +194,7 @@ git commit -m "feat(preset-v2): schema/migration — presets 3 columns + binding
   - `get_preset(preset_id: &str) -> Option<PresetRecord>`
   - 旧 `create_preset(name, items)` 保留并委托（默认 universal），`list_presets` 返回扩展字段
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `src-tauri/tests/dao_test.rs` 末尾追加（沿用文件既有 `support::setup()` 模式；名字带 `v2m1` 前缀避免与存量 `test_preset_crud` 串扰）：
 
@@ -256,12 +256,12 @@ fn test_preset_v2_crud_roundtrip() {
 
 注意：若 `dao_test.rs` 顶部没有 `mod support` / 已有公用 use，按文件现状对齐；`support::setup()` 的调用方式照抄同文件 `test_preset_crud`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test test_preset_v2_crud_roundtrip`
 Expected: 编译失败——`create_preset_with_meta` 不存在
 
-- [ ] **Step 3: 实现 DAO**
+- [x] **Step 3: 实现 DAO**
 
 `dao/preset.rs`：`PresetRecord` 扩 3 字段；`create_preset_with_meta` / `update_preset` / `get_preset` / `list_presets` 改列。关键新代码：
 
@@ -381,12 +381,12 @@ fn load_items(conn: &rusqlite::Connection, id: &str) -> Vec<PresetItemRecord> {
 
 `list_presets` 改为 `SELECT id, name, description, scope, bound_tool FROM presets ORDER BY created_at DESC`，组装 PresetRecord（items 用 `load_items`）。`database/mod.rs` re-export 增加 `create_preset_with_meta, get_preset, update_preset`。
 
-- [ ] **Step 4: 跑测试 + 全量**
+- [x] **Step 4: 跑测试 + 全量**
 
 Run: `cd src-tauri && cargo test test_preset_v2 && cargo test`
 Expected: PASS；注意 `get_preset_items`（旧函数）被 Task 9 继续使用，勿删
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/database/dao/preset.rs src-tauri/src/database/mod.rs src-tauri/tests/dao_test.rs
