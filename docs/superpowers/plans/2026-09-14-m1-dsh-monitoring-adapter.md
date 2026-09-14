@@ -1802,7 +1802,7 @@ Run: `pnpm tauri:dev`（保持 dsh web 运行）
 | 运行中（黄） | 让会话跑长任务 | 卡黄·运行中，长跑 30 分钟不误判为中断 |
 | 完成（绿+未读） | 任务结束 | 卡绿且未读，点击跳转后未读清除 |
 | 用户取消（不点红） | 在 dsh 里手动取消回合 | 卡变空闲/绿，**不亮红** |
-| 强杀中断（红·中断） | `kill -9` 一个正在跑 turn 的 dsh headless 进程（或重启 dsh web 期间观察） | 卡红·中断（lock 交叉判定生效），不恒黄 |
+| 强杀（2026-09-14 裁决 D6） | ① `kill -9` dsh web 宿主 ② 另起一个正在跑 turn 的 dsh headless 进程后杀之（web 存活） | ① 卡片随宿主消失（与全工具统一语义，用户已确认）；② 卡红·中断（lock 交叉判定的可达场景），不恒黄 |
 
 - [ ] **Step 4: 跳转验证**
 
@@ -1810,7 +1810,7 @@ Run: `pnpm tauri:dev`（保持 dsh web 运行）
 
 - [ ] **Step 5: 回归确认**
 
-其他七工具卡片/通知/未读行为无变化（宪法原则 5）；`~/.dsh` 零写入复核：`find ~/.dsh -newermt "$(date -v-30M '+%Y-%m-%d %H:%M:%S')" -not -path '*/node_modules/*' 2>/dev/null | grep -v -E 'sessions/|storages/|logs?/' | head`（MAM 不产生 sessions/storages 外的写入）。
+其他七工具卡片/通知/未读行为无变化（宪法原则 5）；`~/.dsh` 零写入复核：`find ~/.dsh -newermt "$(date -v-30M '+%Y-%m-%d %H:%M:%S')" -not -path '*/node_modules/*' 2>/dev/null | grep -v -E 'sessions/|storages/|logs?/' | head`（MAM 除 `~/.dsh/skills` 的符号链接管理外不产生其他写入——2026-09-14 用户裁决 skill 管理纳入一期，见宪法 D14 补记）。
 
 - [ ] **Step 6: 记录与收尾**
 
