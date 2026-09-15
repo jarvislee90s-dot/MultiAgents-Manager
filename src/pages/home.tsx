@@ -73,10 +73,12 @@ export default function HomePage() {
 
     const initTrayMenu = async () => {
       try {
-        await invoke("update_tray_menu", {
+        // Task 16 统一重建：基础项 + 预设项一次成型（原 update_tray_menu 会丢预设项）
+        await invoke("refresh_tray", {
+          presetsLabel: t("tray.presetsLabel"),
           showText: t("tray.show"),
-          quitText: t("tray.quit"),
           petText: petOn ? t("tray.petHide") : t("tray.petShow"),
+          quitText: t("tray.quit"),
         });
       } catch (error) {
         console.error("Failed to initialize tray menu:", error);

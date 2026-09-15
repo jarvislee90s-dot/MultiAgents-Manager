@@ -6,6 +6,7 @@
 // 无异常时折叠一行 + 「立即体检」（refetch）；标题处角标 = 未决差异总数
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { HeartPulse, RefreshCw, RotateCcw, Undo2 } from "lucide-react";
@@ -68,6 +69,8 @@ export function HealthCheckCard() {
     await qc.invalidateQueries({ queryKey: PRESETS_KEY });
     await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
     await qc.invalidateQueries({ queryKey: SSOT_RESOURCES_KEY });
+    // 托盘同步（Task 16）：处置可能改动激活预设，重建托盘选中态；失败静默
+    invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
   };
 
   // 工具是否启用（② 不变量修复前置检查：disabled 工具按钮禁用 + title 提示先启用）
@@ -140,6 +143,8 @@ export function HealthCheckCard() {
       setInvPending(null);
       await qc.invalidateQueries({ queryKey: PRESET_HEALTH_KEY });
       await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
+      // 托盘同步（Task 16）：不变量修复 = restorePreset，托盘选中态随之翻关
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
     }
   };
 

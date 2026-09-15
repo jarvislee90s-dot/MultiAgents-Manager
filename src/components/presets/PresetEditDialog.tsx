@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -205,6 +206,8 @@ export function PresetEditDialog({
         toast.success(t("presets.created", { name: name.trim() }));
       }
       await qc.invalidateQueries({ queryKey: PRESETS_KEY });
+      // 托盘同步（Task 16）：预设增删/改名后重建托盘预设项；失败静默
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
       onClose();
     } catch (e) {
       // 后端守卫：预设正在应用中时错误串带 PRESET_ACTIVE 标记（commands/preset.rs）

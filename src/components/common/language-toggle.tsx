@@ -11,14 +11,16 @@ export function LanguageToggle() {
     const newLang = i18n.language === "zh" ? "en" : "zh";
     await i18n.changeLanguage(newLang);
 
-    // Update tray menu with new language
+    // Update tray menu with new language（Task 16 统一重建：基础项 + 预设项一次成型，
+    // 预设项不再因语言切换丢失）
     try {
-      await invoke("update_tray_menu", {
+      await invoke("refresh_tray", {
+        presetsLabel: t("tray.presetsLabel", { lng: newLang }),
         showText: t("tray.show", { lng: newLang }),
-        quitText: t("tray.quit", { lng: newLang }),
         petText: loadVisible()
           ? t("tray.petHide", { lng: newLang })
           : t("tray.petShow", { lng: newLang }),
+        quitText: t("tray.quit", { lng: newLang }),
       });
     } catch (error) {
       console.error("Failed to update tray menu:", error);

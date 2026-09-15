@@ -475,11 +475,11 @@ pub fn preset_health() -> PresetHealth { /* 三源聚合 */ }
 5. 刷新触发：session.rs 计数启发式保留兜底；前端在 PRESETS/ACTIVE invalidate 处追加 `invoke("refresh_tray", {presetsLabel: t("tray.presetsLabel")})`
 
 **验收条件：**
-- [ ] `preset_toggle_action` 单测绿；`cargo test` + `pnpm lint && pnpm build` 绿
+- [x] `preset_toggle_action` 单测绿；`cargo test` + `pnpm lint && pnpm build` 绿
 - [ ] dev 目验：托盘显示预设项与选中态；点击私有预设直接翻转（开→关无需确认）；语言切换后预设项仍在；增删预设/开关变化后托盘刷新
 
-- [ ] **Step 1: Rust 改造+单测** → **Step 2: 前端调用替换** → **Step 3: 门禁 + Commit** `feat(preset-v2): tray wiring — check state, direct toggle, unified rebuild, i18n label`
-- [ ] **Step 4: 竞态复评（Minor#10）**：确认 Patch 5 的 `is_some()` 守卫已关闭启动竞态窗口，结论一行记 progress.md
+- [x] **Step 1: Rust 改造+单测** → **Step 2: 前端调用替换** → **Step 3: 门禁 + Commit** `feat(preset-v2): tray wiring — check state, direct toggle, unified rebuild, i18n label`
+- [x] **Step 4: 竞态复评（Minor#10）**：确认 Patch 5 的 `is_some()` 守卫已关闭启动竞态窗口，结论一行记 progress.md
 
 ### Task 17: frontmatter 解析 + 导入提示 + 存量建议入体检
 

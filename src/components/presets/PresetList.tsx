@@ -117,6 +117,8 @@ export function PresetList({
           description: rr.conflicts.join("\n"),
         });
       await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
+      // 托盘同步（Task 16）：选中态变化后重建托盘菜单；失败静默，不影响主流程
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
     } catch (e) {
       toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
     }
@@ -136,6 +138,8 @@ export function PresetList({
         })
       );
       await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
+      // 托盘同步（Task 16）：同上，开（应用）成功后重建托盘选中态
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
       setConfirmTarget(null);
     } catch (e) {
       toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
@@ -148,6 +152,8 @@ export function PresetList({
       await deletePreset(deleteTarget.id);
       toast.success(t("common.deleted"));
       qc.invalidateQueries({ queryKey: PRESETS_KEY });
+      // 托盘同步（Task 16）：预设删除后移除对应托盘项
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
     } catch (e) {
       // 后端守卫：预设正在应用中时错误串带 PRESET_ACTIVE 标记（commands/preset.rs）
       const msg = formatInvokeError(e, t);

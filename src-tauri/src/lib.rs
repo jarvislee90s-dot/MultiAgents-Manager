@@ -24,6 +24,23 @@ fn update_tray_menu(
     plugins::system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text)
 }
 
+/// 托盘菜单统一重建（Task 16）：基础项 + 预设项（带开/关选中态）一次成型。
+/// 标签合并语义：传入的标签覆盖持久化值，未传的沿用最近一次值——预设增删/
+/// 开关变化处可只追加 presetsLabel 一行调用，无需关心基础项文案。
+/// `update_tray_menu` 保留但前端已不再调用（保留至下个清理窗口移除）
+#[tauri::command]
+fn refresh_tray(
+    app: tauri::AppHandle,
+    presets_label: Option<String>,
+    show_text: Option<String>,
+    pet_text: Option<String>,
+    quit_text: Option<String>,
+) -> Result<(), String> {
+    let labels =
+        plugins::system_tray::TrayLabels::merged(presets_label, show_text, pet_text, quit_text);
+    plugins::system_tray::update_tray_with_presets_labeled(&app, &labels)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -85,6 +102,7 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         greet,
         update_tray_menu,
+        refresh_tray,
         commands::session::get_all_sessions,
         commands::session::focus_session,
         commands::session::focus_hwnd,
