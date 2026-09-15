@@ -1,6 +1,6 @@
 // 移动看板纯函数层：排序 / 过滤 / 状态配色 / 相对时长 —— 零 React、零 Tauri、零时钟依赖
 // （相对时长接收 now 参数，组件侧传 Date.now()，保证可测性）
-import type { AgentType, Session, SessionStatus } from "@/types/session";
+import type { AgentType, Session, SessionStatus, TransitionEvent } from "@/types/session";
 
 // 穷尽守卫（类型级，以 src/types/session.ts 的 AgentType 为源）：
 // Record 键集必须与 AgentType 完全一致——未来 AgentType 增/删第 9 值时，
@@ -144,6 +144,45 @@ export const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
   idle: "bg-green-500",
   finished: "bg-green-500",
 };
+
+/** 状态中文名（M3 Task 6 跃迁横幅「变化方向」用；文案对齐桌面 i18n
+ *  sessionList.statusLabels：waiting=等待操作 / finished=已结束）。
+ *  Record<SessionStatus, string> 穷尽守卫：状态增删时此处编译报错，横幅不会静默缺文案 */
+export const STATUS_LABELS: Record<SessionStatus, string> = {
+  waiting: "等待操作",
+  processing: "运行中",
+  thinking: "思考中",
+  compacting: "压缩中",
+  idle: "空闲",
+  finished: "已结束",
+};
+
+/** 跃迁横幅文案（M3 Task 6）：`工具 · 项目 · 前态 → 后态 [· 消息预览]`。
+ *  wire 值防御：agentType / from / to 理论上受后端类型约束，但 JSON.parse 结果不可信——
+ *  未知值回落原样字符串（横幅仍可读），不得渲染 undefined */
+export function formatTransition(ev: TransitionEvent): string {
+  const tool = TOOL_LABELS[ev.agentType] ?? ev.agentType;
+  const from = STATUS_LABELS[ev.from] ?? ev.from;
+  const to = STATUS_LABELS[ev.to] ?? ev.to;
+  const preview = ev.lastMessage ? ` · ${ev.lastMessage}` : "";
+  return `${tool} · ${ev.projectName} · ${from} → ${to}${preview}`;
+}
+
+/** 把跃迁事件应用到会话列表（M3 Task 6 看板卡随 SSE 实时变化）。
+ *  **不是去重**（去重唯一来源在服务端 watcher，铁律 4）——这是「已去重的边沿事件」的
+ *  展示层应用：命中 (agentType, id) 时更新该卡的 status/lastMessage（键口径同 watcher
+ *  diff 的 (工具, id)：id 只在工具内唯一）。
+ *  返回新数组才触发重渲染；未命中（新会话 / 已消失 / 未知状态串）原样返回同一引用，
+ *  调用方 setData 走引用相等短路，零多余渲染。不改入参 */
+export function applyTransition(sessions: Session[], ev: TransitionEvent): Session[] {
+  // 未知状态串（wire 损坏）不写入：否则卡片状态点取色会渲染出 undefined 类名
+  if ((STATUS_PRIORITY as Record<string, number | undefined>)[ev.to] === undefined) return sessions;
+  const idx = sessions.findIndex((s) => s.agentType === ev.agentType && s.id === ev.sessionId);
+  if (idx === -1) return sessions;
+  const next = sessions.slice();
+  next[idx] = { ...next[idx], status: ev.to, lastMessage: ev.lastMessage };
+  return next;
+}
 
 /** lastActivityAt 距 now 的相对时长（中文文案，移动页 i18n 随 M3 完善） */
 export function formatRelativeTime(lastActivityAt: string, now: number): string {

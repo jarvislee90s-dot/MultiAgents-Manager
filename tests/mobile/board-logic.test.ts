@@ -3,18 +3,21 @@ import {
   AGENT_TYPES,
   CHIP_LIGHT_TEXT_FACTOR,
   STATUS_DOT_COLOR,
+  STATUS_LABELS,
   TOOL_BRAND_COLORS,
   TOOL_FILTERS,
   TOOL_LABELS,
+  applyTransition,
   darkenHex,
   filterByAgent,
   filterEnabledTools,
   formatRelativeTime,
+  formatTransition,
   sortChipsByActivity,
   sortSessions,
   type ToolFilter,
 } from "@/mobile/board-logic";
-import type { Session, SessionStatus } from "@/types/session";
+import type { Session, SessionStatus, TransitionEvent } from "@/types/session";
 
 // 会话夹具：仅 board-logic 消费的字体段有语义，其余给合法默认值
 function makeSession(
@@ -165,6 +168,85 @@ describe("board-logic 状态 → 三色映射（红=等待 / 黄=运行 / 绿=�
   ];
   it.each(cases)("%s → %s", (status, color) => {
     expect(STATUS_DOT_COLOR[status]).toContain(color);
+  });
+});
+
+// M3 Task 6：跃迁事件 → 展示层纯函数（横幅文案 / 看板卡应用）
+describe("board-logic 跃迁展示（M3 Task 6）", () => {
+  function makeTransition(overrides: Partial<TransitionEvent> = {}): TransitionEvent {
+    return {
+      sessionId: "s1",
+      agentType: "claude",
+      from: "processing",
+      to: "waiting",
+      projectName: "mam",
+      lastMessage: null,
+      ts: 42,
+      ...overrides,
+    };
+  }
+
+  it("STATUS_LABELS 键集穷尽 SessionStatus 六值（横幅不会静默缺文案）", () => {
+    expect(Object.keys(STATUS_LABELS).sort()).toEqual([
+      "compacting",
+      "finished",
+      "idle",
+      "processing",
+      "thinking",
+      "waiting",
+    ]);
+  });
+
+  it("formatTransition：工具 · 项目 · 前态 → 后态 [· 消息预览]", () => {
+    expect(formatTransition(makeTransition())).toBe("Claude · mam · 运行中 → 等待操作");
+    expect(formatTransition(makeTransition({ lastMessage: "需要批准" }))).toBe(
+      "Claude · mam · 运行中 → 等待操作 · 需要批准"
+    );
+    // lastMessage 空串与 null 同样省略预览段（不渲染孤立的 ` · `）
+    expect(formatTransition(makeTransition({ lastMessage: "" }))).toBe(
+      "Claude · mam · 运行中 → 等待操作"
+    );
+  });
+
+  it("formatTransition：未知 wire 值回落原样字符串（JSON.parse 结果不可信，不渲染 undefined）", () => {
+    const weird = makeTransition({
+      agentType: "future-tool" as TransitionEvent["agentType"],
+      from: "weird" as TransitionEvent["from"],
+      to: "state" as TransitionEvent["to"],
+    });
+    expect(formatTransition(weird)).toBe("future-tool · mam · weird → state");
+  });
+
+  it("applyTransition：命中 (工具, 会话 id) 时更新 status/lastMessage，返回新数组且不改入参", () => {
+    const before = makeSession({ id: "s1", status: "processing", lastActivityAt: "t" });
+    const input = [before];
+    const out = applyTransition(input, makeTransition({ lastMessage: "done" }));
+    expect(out).not.toBe(input);
+    expect(out[0]).not.toBe(before); // 对象也是新引用（不可变更新）
+    expect(out[0].status).toBe("waiting");
+    expect(out[0].lastMessage).toBe("done");
+    expect(input[0].status).toBe("processing"); // 入参未被改
+    expect(before.lastMessage).toBeNull();
+  });
+
+  it("applyTransition：跨工具撞 id 不误命中（键取 (工具, id) 二元组，同 watcher diff 口径）", () => {
+    const input = [
+      makeSession({ id: "shared", agentType: "claude", status: "idle", lastActivityAt: "t" }),
+      makeSession({ id: "shared", agentType: "codex", status: "idle", lastActivityAt: "t" }),
+    ];
+    const out = applyTransition(input, makeTransition({ sessionId: "shared", agentType: "codex" }));
+    expect(out[0].status).toBe("idle"); // claude 的同名会话不受影响
+    expect(out[1].status).toBe("waiting");
+  });
+
+  it("applyTransition：未命中（新会话 / 已消失 / 坏状态串）原样返回同一引用（零多余渲染）", () => {
+    const input = [makeSession({ id: "s1", status: "idle", lastActivityAt: "t" })];
+    // 目标会话不在当前列表（事件早于快照到达 / 卡已消失）
+    expect(applyTransition(input, makeTransition({ sessionId: "gone" }))).toBe(input);
+    // 未知状态串（wire 损坏）不写入：状态点取色会渲染出 undefined 类名
+    const bad = makeTransition({ to: "bogus" as TransitionEvent["to"] });
+    expect(applyTransition(input, bad)).toBe(input);
+    expect(input[0].status).toBe("idle");
   });
 });
 

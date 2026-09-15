@@ -1,14 +1,17 @@
 // /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
-// + pair + heartbeat
+// + pair + heartbeat + events（M3 Task 6 SSE 实时通道）
 
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{sse, IntoResponse, Response, Sse},
     Json,
 };
+use futures::stream::{Stream, StreamExt as _};
 use serde::Deserialize;
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio_stream::wrappers::BroadcastStream;
 
 use super::gate::COOKIE_NAME;
 use super::server::RemoteState;
@@ -42,6 +45,63 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
         Json(response),
     )
         .into_response()
+}
+
+/// 空快照 JSON（与 SessionsResponse camelCase 序列化同形）：快照序列化理论不可达失败
+/// （C 风格字段无 map 键/浮点 NaN）时的防御性降级——前端拿到合法空载荷而非空串
+/// （空串会让 JSON.parse 抛错、看板卡死）
+const EMPTY_SESSIONS_JSON: &str = r#"{"sessions":[],"totalCount":0,"waitingCount":0}"#;
+
+/// GET /m/api/v1/events（M3 Task 6，C1 后半）：SSE 实时通道。
+/// - 首帧 = 全量会话快照（**直调注入源**，数据同源铁律 3），此后只推跃迁边沿
+///   （watcher 是唯一去重点，铁律 4——本层不独立去重、来一条推一条）；
+/// - gate 由 nest 内层 layer 结构性覆盖（本端点注册在 api_router 内），无需另加 middleware；
+/// - 心跳用 `Sse::keep_alive(KeepAlive::default())`：axum 自带 15s 空注释帧
+///   （简报的 `: ping` 等效物，无需自拼 interval 流——简报 Step 1 注释"心跳省略实现"即指此）；
+/// - 断流：客户端断开 → axum drop 本流 → BroadcastStream 释放 Receiver →
+///   receiver_count 归零 → watcher 零订阅者守卫跳过扫描（Task 5 闭环）。
+pub async fn events(
+    State(st): State<Arc<RemoteState>>,
+) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
+    // 先订阅、后取快照（顺序刻意，勿换）：subscribe 在快照计算之前，期间产生的跃迁
+    // 落进 broadcast 缓冲（容量 64）并在快照帧之后依次送出；若反序，快照与订阅之间
+    // 发生的跃迁会永久丢失（重连后的看板状态与真实脱节）
+    let rx = st.watcher_tx.subscribe();
+    // 快照走 spawn_blocking：session_source 是同步阻塞调用（sysinfo 全进程刷新 + 各工具
+    // 会话解析，冷启动可达数秒），直接 await 会周期性堵死 tokio worker——与 sessions
+    // handler 同一先例（实机教训见 commands/session.rs 的 get_all_sessions 注释）
+    let snapshot = tokio::task::spawn_blocking(move || (st.session_source)())
+        .await
+        .unwrap_or_else(|e| {
+            // JoinError（任务 panic/取消）降级为空快照：移动端拿到 0 会话而非断流
+            log::error!("SSE 快照会话扫描任务异常: {e}");
+            crate::session::SessionsResponse {
+                sessions: Vec::new(),
+                total_count: 0,
+                waiting_count: 0,
+            }
+        });
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|e| {
+        log::warn!("SSE 快照序列化失败，降级为空快照: {e}");
+        EMPTY_SESSIONS_JSON.to_string()
+    });
+    let initial = futures::stream::once(async move {
+        Ok(sse::Event::default().event("snapshot").data(snapshot_json))
+    });
+    let transitions = BroadcastStream::new(rx).filter_map(|msg| async move {
+        // Lagged（消费者落后超通道容量）与 Closed 均非致命：broadcast 丢最旧事件是通道
+        // 语义（宁可缺边沿也不阻塞 watcher 生产端），重连时的全量快照负责校正——丢弃该条继续流
+        let e = msg.ok()?;
+        match serde_json::to_string(&e) {
+            Ok(data) => Some(Ok(sse::Event::default().event("transition").data(data))),
+            Err(err) => {
+                // 不产出空 data 帧：前端 JSON.parse("") 会抛错且该帧无信息量
+                log::warn!("跃迁事件序列化失败，丢弃该帧: {err}");
+                None
+            }
+        }
+    });
+    Sse::new(initial.chain(transitions)).keep_alive(sse::KeepAlive::default())
 }
 
 #[derive(Deserialize)]

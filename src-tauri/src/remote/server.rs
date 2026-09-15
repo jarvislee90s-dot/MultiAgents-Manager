@@ -143,6 +143,9 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
     Router::new()
         .route("/sessions", get(api::sessions))
         .route("/host", get(api::host))
+        // /events（M3 Task 6）：SSE 长连接，gate 由本子路由的 layer 结构性覆盖
+        // （与其余端点同一内层 gate，不需要额外 middleware）
+        .route("/events", get(api::events))
         .route("/pair", post(api::pair))
         .route("/heartbeat", post(api::heartbeat))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
@@ -911,6 +914,126 @@ mod tests {
         assert!(
             light_elapsed < std::time::Duration::from_millis(150),
             "阻塞扫描期间轻量任务被推迟了 {light_elapsed:?}——session_source 未走 spawn_blocking"
+        );
+    }
+
+    // ==== M3 Task 6：GET /m/api/v1/events（SSE 实时通道，C1 后半） ====
+    // 零污染：会话源经注入缝（假 SessionsResponse）、事件源经注入的空 broadcast 通道。
+    // SSE 是长连接流式响应：**不能用 body_string（collect 会等流结束、永久挂起）**，
+    // 只逐帧读（BodyExt::frame），够断言首帧快照与增量帧即可，读完即 drop（连接关闭）。
+
+    /// 读 SSE 流的下一帧文本（不等待流结束；帧缺失/非数据帧即断言失败）
+    async fn next_frame(body: &mut Body) -> String {
+        let frame = body
+            .frame()
+            .await
+            .expect("SSE 流在断言帧之前结束")
+            .expect("SSE 帧读取失败");
+        let bytes = frame
+            .into_data()
+            .unwrap_or_else(|_| panic!("SSE 应产生数据帧（非 trailers）"));
+        String::from_utf8(bytes.to_vec()).expect("SSE 帧应为 UTF-8")
+    }
+
+    /// 预置有效设备（SSE 测试专用：复用 state_with_clock 的注入缝，零接触真实设备表）
+    fn persist_device(state: &Arc<RemoteState>, id: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: id.into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+    }
+
+    /// gate 覆盖（控制者①）：/events 与其余 /m/api/v1/* 同一门禁——无 cookie 必须 403，
+    /// 不得因为「SSE 是长连接」而漏过内层 layer
+    #[tokio::test]
+    async fn sse_events_is_gated() {
+        let (state, _clock) = state_with_clock();
+        let app = router(state);
+        let r = app
+            .oneshot(req("GET", "/m/api/v1/events", None, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            403,
+            "/events 必须过 gate（设备失效与未配对同 403 语义）"
+        );
+    }
+
+    /// SSE 端点主链（控制者③）：认证后 200 + text/event-stream + 首帧 `event: snapshot`
+    /// 携带全量会话（注入源 totalCount=7 ⇒ 数据同源），随后 watcher_tx 上的事件以
+    /// `event: transition` + camelCase JSON 送达（wire 契约端到端锁定）
+    #[tokio::test]
+    async fn sse_events_streams_snapshot_then_transitions() {
+        let (state, _clock) = state_with_clock();
+        persist_device(&state, "ev");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req("GET", "/m/api/v1/events", Some("mam_device=ev"), None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            header(&r, "content-type"),
+            "text/event-stream",
+            "SSE 响应必须声明 text/event-stream（浏览器据此走 EventSource 解析）"
+        );
+        assert_eq!(
+            header(&r, "cache-control"),
+            "no-cache",
+            "SSE 是设备门禁下的私有实时流，禁止中间层缓存"
+        );
+
+        let mut body = r.into_body();
+        // 首帧：全量快照（event: snapshot + SessionsResponse JSON，数据来自注入源）
+        let first = next_frame(&mut body).await;
+        assert!(
+            first.starts_with("event: snapshot\n"),
+            "首帧必须是 snapshot 事件，实际 {first:?}"
+        );
+        assert!(
+            first.contains("\"totalCount\":7"),
+            "首帧快照必须直调 session_source（注入源 totalCount=7），实际 {first:?}"
+        );
+
+        // 增量帧：watcher_tx 发一条跃迁 → transition 帧 + camelCase 键（前端按
+        // ev.sessionId / ev.agentType / ev.projectName 读取；snake_case 会静默 undefined）
+        state
+            .watcher_tx
+            .send(crate::remote::watcher::TransitionEvent {
+                session_id: "s1".into(),
+                agent_type: "claude".into(),
+                from: "idle".into(),
+                to: "processing".into(),
+                project_name: "proj".into(),
+                last_message: Some("hello".into()),
+                ts: 42,
+            })
+            .unwrap();
+        let second = next_frame(&mut body).await;
+        assert!(
+            second.starts_with("event: transition\n"),
+            "增量帧必须是 transition 事件，实际 {second:?}"
+        );
+        for key in ["\"sessionId\":\"s1\"", "\"to\":\"processing\"", "\"ts\":42"] {
+            assert!(
+                second.contains(key),
+                "transition 帧缺少 {key}（camelCase wire 契约），实际 {second:?}"
+            );
+        }
+        assert!(
+            !second.contains("session_id"),
+            "transition 帧不得出现 snake_case 键，实际 {second:?}"
         );
     }
 

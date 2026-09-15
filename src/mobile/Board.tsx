@@ -1,24 +1,33 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Moon, Sun } from "lucide-react";
-import { fetchHost, fetchSessions, type HostPayload } from "./api";
+import { connectEvents, fetchHost, fetchSessions, type HostPayload } from "./api";
 import { getInitialTheme, toggleTheme, type Theme } from "./theme";
 import {
   CHIP_LIGHT_TEXT_FACTOR,
   STATUS_DOT_COLOR,
   TOOL_BRAND_COLORS,
   TOOL_LABELS,
+  applyTransition,
   darkenHex,
   filterByAgent,
   filterEnabledTools,
   formatRelativeTime,
+  formatTransition,
   sortChipsByActivity,
   sortSessions,
   type ToolFilter,
 } from "./board-logic";
 import { ToolIcon } from "@/components/common/ToolIcon";
-import type { AgentType, SessionsResponse } from "@/types/session";
+import type { AgentType, SessionsResponse, TransitionEvent } from "@/types/session";
 
 const POLL_MS = 3000;
+/** 相对时长的基准时钟刷新间隔：SSE 模式下无每拍拉取，时钟仍须走动
+ *  （否则卡片上的「3 分钟前」会冻结在挂载时刻）。纯前端重算，零网络开销 */
+const CLOCK_MS = 30_000;
+/** 跃迁横幅存活时长（毫秒）：几秒后自动消失，不长期占据看板顶部 */
+const BANNER_TTL_MS = 4000;
+/** 同屏横幅上限：突发跃迁（批量会话同时变化）时不淹没会话列表 */
+const MAX_BANNERS = 3;
 
 // P8e 折叠高度上限（溢出判定与裁剪样式的单一来源，fix round 1）：
 // 36px = 单行 chips（24px）+ 行纵距（12px）——恰容纳一行、第二行起点恰在 36px 被完全裁掉
@@ -28,22 +37,68 @@ const POLL_MS = 3000;
 // 下界防宽屏单行被误裁，上界防折叠态露出第二行残影。字号增大时两边界同向放宽，仍成立
 const CHIPS_COLLAPSED_HEIGHT = 36;
 
+/** 跃迁横幅条目：key = `工具-会话id`（展示层防叠键，见 pushBanner 注释） */
+interface TransitionBanner {
+  key: string;
+  text: string;
+}
+
+// 提醒音（M3 Task 6 提醒三件套之二）：Web Audio 极简 beep。
+// **不复用桌面 src/lib/audio.ts**：其 12 个音效资产在 public/ 下（约 9.5MB），
+// 未随移动产物分发（vite.config.mobile.ts 的 publicDir=public-mobile），且那套
+// 配置/试听 UI 属桌面域——移动 bundle 引它必然拿不到音频文件而静默失败。
+// 懒建单例 AudioContext：Safari 对每页 AudioContext 数量有硬上限（约 6 个），
+// 每次提醒新建会在数次提醒后耗尽配额、之后全部静默失败。
+// 整体 try/catch：提示音是锦上添花，任何失败（无该 API / 自动播放策略挂起）
+// 都不得中断提醒链路（横幅与振动仍在）
+let beepCtx: AudioContext | null = null;
+function beep() {
+  try {
+    if (!beepCtx) {
+      const Ctx = window.AudioContext;
+      if (!Ctx) return; // 无 Web Audio 的环境（含 jsdom / 老浏览器）：跳过
+      beepCtx = new Ctx();
+    }
+    const ctx = beepCtx;
+    // 自动播放策略：无用户手势时 context 处于 suspended，resume 可能被拒——
+    // 拒绝即本次无声，用户下次触摸页面后的提醒会正常出声，不额外处理
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880; // A5 短音：清晰可辨
+    gain.gain.value = 0.08; // 低增益：手机默认音量下不刺耳
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.15); // 150ms
+  } catch {
+    /* 静默降级：无提示音，其余提醒通道不受影响 */
+  }
+}
+
 interface BoardProps {
   /** 首次成功拉到数据时回调（一次）：探测成功信号，App 由此把 paired null→true（已配对设备免重配） */
   onPaired: () => void;
-  /** 轮询收到 403（设备失效）时回调：App 切回配对页 */
+  /** 收到 403（设备失效）时回调：App 切回配对页 */
   onUnpaired: () => void;
 }
 
-// 移动看板：自持 3s 轮询（含挂载后首拍 = 探测），App 不再持有任何拉取逻辑。
-// 失败口径：403 → 回配对页；网络异常（fetch reject，如服务器关闭）→ 保留上次数据 +
-// 错误横幅继续重试（不白屏、不误踢回配对页，支撑"重启免重配"自愈）。
+// 移动看板：主通道为 SSE（快照首帧 + 跃迁增量），断流 2 次降级为 3s 轮询。
+// 数据流：connectEvents 的 snapshot → setData（含挂载探测）；transition → 卡片实时刷新
+// + 横幅/提示音/振动提醒；降级 → 交给下方轮询 effect（复用 tick 的 in-flight 守卫）。
+// 失败口径：403 → 回配对页（只由 fetchSessions 的 null 触发，SSE 断流不算）；
+// 网络异常 → 保留上次数据 + 错误横幅继续重试（不白屏、不误踢回配对页）。
 export default function Board({ onPaired, onUnpaired }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
+  // SSE 已降级（连续 2 次失败）：单向闩——置位后由轮询 effect 接管数据拉取；
+  // 不做「轮询期间试回 SSE」（YAGNI，M3 不要求；服务端恢复后刷新页面即重连）
+  const [degraded, setDegraded] = useState(false);
+  // 跃迁横幅（提醒三件套之一）：SSE transition 边沿驱动，见 pushBanner
+  const [banners, setBanners] = useState<TransitionBanner[]>([]);
   // 页头品牌行（P8a/P8b）：host 信息运行期不变，挂载时拉一次即可，不随轮询重复。
   // 失败口径（与轮询不同）：拉取失败 / 403 一律静默降级为不显示——设备有效性只以
-  // 会话轮询的 403 为准，品牌行只是展示层，不参与配对状态机
+  // 会话拉取的 403 为准，品牌行只是展示层，不参与配对状态机
   const [host, setHost] = useState<HostPayload["host"] | null>(null);
   // P8d 受管工具名单：与 host 同源一次拉取（enabledTools 来自后端 dao::agent_tool）。
   // null = host 未到（竞态窗口）：chips 只显示「全部」，不猜全量八工具
@@ -54,16 +109,85 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
   // 不回写——内容本就放得下，保持展开无副作用；下次溢出时沿用用户上次的选择
   const [chipsOverflow, setChipsOverflow] = useState(false);
   const [chipsExpanded, setChipsExpanded] = useState(false);
-  // 相对时长的基准时钟：随每拍轮询刷新（react-hooks/purity 禁止渲染期直接调 Date.now）
+  // 相对时长的基准时钟：数据变化时刷新 + CLOCK_MS 定时走动（react-hooks/purity
+  // 禁止渲染期直接调 Date.now）
   const [now, setNow] = useState(() => Date.now());
   // P8f 日/夜双皮肤：初值取 getInitialTheme（localStorage > 系统偏好 > 默认 dark），
   // 与 mobile.html 防闪白脚本、main.tsx applyInitialTheme 三处同源同优先级。
   // 真实 DOM 类由 toggleTheme 直接切（非渲染派生），本 state 仅驱动按钮图标/可达名
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
-  // 首拍成功通知只发一次：防每拍回调导致父级无谓重渲染；重挂载（403 后重配）时随组件自然复位
+  // 首个成功快照/首拍只发一次 onPaired：防重复回调导致父级无谓重渲染；
+  // 重挂载（403 后重配）时随组件自然复位
   const aliveRef = useRef(false);
   // in-flight 守卫：慢网下上一拍未返回时跳过新拍，防早发慢到的旧响应覆盖新数据
   const inFlightRef = useRef(false);
+  // 横幅自动消失定时器（键 = 横幅 key）：同会话新跃迁覆盖旧横幅时须撤销旧定时器，
+  // 否则旧定时器会提前清掉新横幅
+  const bannerTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  /** 首个成功快照/首拍：探测信号只发一次（SSE 快照与降级轮询两路共用，防语义分叉） */
+  const notifyPairedOnce = useCallback(() => {
+    if (aliveRef.current) return;
+    aliveRef.current = true;
+    onPaired(); // 首拍成功（首拍 = 探测）：通知 App 配对仍有效，只发一次
+  }, [onPaired]);
+
+  /** SSE 首帧快照（也是断线重连后的基线校正）：全量替换看板数据 */
+  const handleSnapshot = useCallback(
+    (s: SessionsResponse) => {
+      notifyPairedOnce();
+      setData(s);
+      setNow(Date.now());
+      setLoadError(false);
+    },
+    [notifyPairedOnce]
+  );
+
+  /** 跃迁横幅入列（提醒三件套之一：横幅）。
+   *  「同 sessionId 覆盖」是**展示层防叠**，不是数据去重——数据去重的唯一来源是服务端
+   *  watcher（铁律 4），事件来一条我们显一条、音也响一次；这里只是保证同一会话的
+   *  连续跃迁不会堆出多条横幅（后到的替换先到的，各自计时独立重置） */
+  const pushBanner = useCallback((ev: TransitionEvent) => {
+    // key 取 (工具, 会话 id)：与 watcher diff 同一唯一性口径——会话 id 只在工具内唯一，
+    // 跨工具撞 id 不得互相顶掉横幅
+    const key = `${ev.agentType}-${ev.sessionId}`;
+    const text = formatTransition(ev);
+    setBanners((prev) =>
+      [{ key, text }, ...prev.filter((b) => b.key !== key)].slice(0, MAX_BANNERS)
+    );
+    const old = bannerTimers.current.get(key);
+    if (old) clearTimeout(old);
+    bannerTimers.current.set(
+      key,
+      setTimeout(() => {
+        bannerTimers.current.delete(key);
+        setBanners((prev) => prev.filter((b) => b.key !== key));
+      }, BANNER_TTL_MS)
+    );
+  }, []);
+
+  /** 状态跃迁（watcher 已去重的边沿，铁律 4：本层不独立去重，来一条处理一条）：
+   *  卡片实时刷新（F1.3「SSE 实时刷新」）+ 提醒三件套（横幅 / 提示音 / 振动） */
+  const handleTransition = useCallback(
+    (ev: TransitionEvent) => {
+      // 命中会话才换数组引用；未命中（新会话 / 已消失 / 坏状态串）返回原引用，
+      // setData 走引用相等短路零重渲染
+      setData((prev) => (prev ? { ...prev, sessions: applyTransition(prev.sessions, ev) } : prev));
+      setNow(Date.now());
+      pushBanner(ev);
+      beep();
+      // 振动（能力检测）：桌面浏览器与 iOS Safari 均无此 API，缺失即跳过
+      navigator.vibrate?.(200);
+    },
+    [pushBanner]
+  );
+
+  // SSE 主通道（M3 Task 6）：挂载即连，卸载即断（→ 服务端 Receiver 归零 → watcher
+  // 停扫，Task 5 守卫闭环）。connectEvents 的回调全部是稳定引用（useCallback 空依赖
+  // 链路 + setXxx），本 effect 只随组件生命周期跑一次
+  useEffect(() => {
+    return connectEvents(handleSnapshot, handleTransition, () => setDegraded(true));
+  }, [handleSnapshot, handleTransition]);
 
   const tick = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -71,13 +195,10 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
     try {
       const s = await fetchSessions<SessionsResponse>();
       if (s === null) {
-        onUnpaired(); // 设备失效 → 回配对页
+        onUnpaired(); // 设备失效 → 回配对页（**唯一判废通道**：SSE 断流不触发）
         return;
       }
-      if (!aliveRef.current) {
-        aliveRef.current = true;
-        onPaired(); // 首拍成功（首拍 = 探测）：通知 App 配对仍有效，只发一次
-      }
+      notifyPairedOnce();
       setData(s);
       setNow(Date.now());
       setLoadError(false);
@@ -87,14 +208,32 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
     } finally {
       inFlightRef.current = false; // 无论成败都放行下一拍
     }
-  }, [onPaired, onUnpaired]);
+  }, [notifyPairedOnce, onUnpaired]);
 
+  // 降级轮询（仅在 SSE 连续 2 次失败后启用）：复用既有 tick（in-flight 守卫、
+  // 403→onUnpaired、错误横幅语义单点保留）。SSE 模式（未降级）下本 effect 不装定时器，
+  // 数据全由事件流驱动
   useEffect(() => {
-    void tick();
+    if (!degraded) return;
+    void tick(); // 降级即刻补一拍：断流期间可能已有状态变化，不等 3s
     const id = setInterval(() => void tick(), POLL_MS);
-    // 卸载清理：停掉轮询，防止离页后继续请求
     return () => clearInterval(id);
-  }, [tick]);
+  }, [degraded, tick]);
+
+  // 基准时钟走动：SSE 模式下没有每拍拉取，相对时长仍须随时间前进
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), CLOCK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // 横幅定时器清理（卸载）：防离页后 setState 警告与定时器泄漏
+  useEffect(() => {
+    const timers = bannerTimers.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
 
   // 品牌行数据：挂载时拉一次（host 信息不变，无需轮询；失败静默，见 state 注释）。
   // enabledTools（P8d 受管名单）随同一载荷更新——host 拉取失败时保持 null，
@@ -199,6 +338,23 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
         <p className="mb-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           网络连接失败，正在自动重试…（当前展示上次数据）
         </p>
+      )}
+
+      {/* 跃迁横幅（M3 Task 6 提醒三件套之一）：SSE transition 边沿驱动，展示
+          「工具 · 项目 · 前态 → 后态 · 消息预览」，BANNER_TTL_MS 后自动消失。
+          与 loadError 横幅并列而非互斥——断流恢复期的跃迁提醒仍有意义；
+          aria-live=polite 供读屏器播报（看板是信息类界面，不用 assertive 打断）*/}
+      {banners.length > 0 && (
+        <ul aria-live="polite" data-testid="transition-banners" className="mb-3 space-y-1">
+          {banners.map((b) => (
+            <li
+              key={b.key}
+              className="truncate rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
+            >
+              {b.text}
+            </li>
+          ))}
+        </ul>
       )}
 
       {/* 工具过滤 chips（P8d/P8e）：受管∩有卡 + 全部，按活跃排序；溢出时折叠为一行。
