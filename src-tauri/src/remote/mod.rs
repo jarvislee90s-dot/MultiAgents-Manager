@@ -48,8 +48,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
     })
 });
 
-/// 读取设置里的绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）
-fn bind_and_port() -> (String, u16) {
+/// 读取设置里的绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
+/// M2-R3：设置里存了非法 bind 时返回 Err（由调用方决定拒绝启动或展示回落）
+fn bind_and_port() -> Result<(String, u16), String> {
     parse_bind(
         crate::database::dao::settings::get_setting(KEY_BIND).as_deref(),
         crate::database::dao::settings::get_setting(KEY_PORT).as_deref(),
@@ -57,11 +58,48 @@ fn bind_and_port() -> (String, u16) {
 }
 
 /// 绑定/端口解析内核（纯函数，不触 DB）：无设置回落 `127.0.0.1:DEFAULT_PORT`；
-/// 端口字符串非法（非数字 / 超 u16 范围）回落默认端口
-fn parse_bind(bind: Option<&str>, port: Option<&str>) -> (String, u16) {
-    let bind = bind.unwrap_or("127.0.0.1").to_string();
-    let port: u16 = port.and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_PORT);
-    (bind, port)
+/// 端口字符串非法（非数字 / 超 u16 范围）回落默认端口。
+/// M2-R3：bind 值域校验——空缺回落 127.0.0.1，`localhost` 与任何合法 IP 地址放行，
+/// 其余字符串（乱串/带端口的复合串/URL 等）一律 Err，绝不静默透传给绑定与安全门
+fn parse_bind(bind: Option<&str>, port: Option<&str>) -> Result<(String, u16), String> {
+    let raw = bind.unwrap_or("127.0.0.1");
+    validate_bind(raw).map(|bind| {
+        let port: u16 = port.and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_PORT);
+        (bind.to_string(), port)
+    })
+}
+
+/// M2-R3 绑定值域校验（纯函数）：空缺 → 127.0.0.1；`localhost` 与合法 IP 地址放行
+/// （返回归一化后的 bind）；其余 Err 并回显原值
+fn validate_bind(raw: &str) -> Result<&str, String> {
+    // None（键缺失）与 Some("")（配置损坏）语义不同：前者回落默认，后者必须报错——
+    // 静默把空串当 127.0.0.1 会掩盖写坏设置的真实故障
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("远程绑定地址为空（设置键存在但值为空串）".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case("localhost") || trimmed.parse::<std::net::IpAddr>().is_ok() {
+        Ok(trimmed)
+    } else {
+        Err(format!(
+            "远程绑定地址非法: {raw:?}（仅支持 127.0.0.1 / localhost / ::1 / 合法 IP 地址）"
+        ))
+    }
+}
+
+/// M2-R3 对外判定内核（纯函数）：**白名单反转**——只有「内环可达」的绑定不算对外
+/// （127.0.0.0/8 整段、::1、localhost 名单）；其余一切合法地址（0.0.0.0 通配、::
+/// 未指定地址、任意具体网卡 IP）一律视为对外、必须过 TLS 确认门。
+/// 旧实现只认字面量 "0.0.0.0"，写具体网卡 IP 即绕过 ack 门——正是本函数要堵的口。
+/// 输入必须是 parse_bind 校验过的值；防御性兜底：解析失败按对外处理（fail-closed）
+fn is_external_bind(bind: &str) -> bool {
+    if bind.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    match bind.parse::<std::net::IpAddr>() {
+        Ok(ip) => !ip.is_loopback(),
+        Err(_) => true,
+    }
 }
 
 /// 句柄存活判定内核（纯函数，不触全局/DB/端口）：只有「句柄存在且其任务仍在运行」
@@ -83,7 +121,7 @@ fn handle_is_live(h: &Option<tauri::async_runtime::JoinHandle<()>>) -> bool {
 /// **运行中**的句柄仍幂等跳过（不重复 spawn、不重复绑定）。
 fn start_server_core(
     h: &mut Option<tauri::async_runtime::JoinHandle<()>>,
-    bind_and_port: impl FnOnce() -> (String, u16),
+    bind_and_port: impl FnOnce() -> Result<(String, u16), String>,
     public_ack: impl FnOnce() -> Option<String>,
     spawn: impl FnOnce(String, u16) -> tauri::async_runtime::JoinHandle<()>,
 ) -> Result<bool, String> {
@@ -92,10 +130,12 @@ fn start_server_core(
     }
     // 自愈：取走已完成（或本就为空）的旧句柄
     *h = None;
-    let (bind, port) = bind_and_port();
-    // P7 安全门：0.0.0.0 必须先确认 TLS 前置，否则拒绝对外
-    // （ack 惰性读取：仅对外绑定时才查 DB）
-    if bind == "0.0.0.0" && !public_ack().map(|v| v == "true").unwrap_or(false) {
+    // M2-R3：bind 非法（设置被写入乱串）在此即拒绝，不走绑定、不碰安全门
+    let (bind, port) = bind_and_port()?;
+    // P7 安全门（M2-R3 判定反转）：**除内环白名单外一律视为对外**（is_external_bind），
+    // 必须先确认 TLS 前置，否则拒绝对外——旧实现只拦字面量 "0.0.0.0"，写具体网卡
+    // IP 即绕过。ack 惰性读取：仅对外绑定时才查 DB
+    if is_external_bind(&bind) && !public_ack().map(|v| v == "true").unwrap_or(false) {
         return Err("对外绑定需先确认已配置 TLS 反向代理（remote_confirm_public）".into());
     }
     *h = Some(spawn(bind, port));
@@ -193,7 +233,11 @@ fn status_enabled(db_enabled: bool, handle_alive: bool) -> bool {
 /// 设置页状态展示：enabled / bind / port / url / lanUrls（仅 0.0.0.0 给局域网候选）
 #[tauri::command]
 pub fn remote_status() -> serde_json::Value {
-    let (bind, port) = bind_and_port();
+    // 展示层：设置里 bind 非法时回落默认值展示（真实启动会在 start_server 被拒）
+    let (bind, port) = bind_and_port().unwrap_or_else(|e| {
+        log::warn!("remote_status: 设置里的绑定地址非法，按默认展示: {e}");
+        ("127.0.0.1".to_string(), DEFAULT_PORT)
+    });
     let db_enabled = crate::database::dao::settings::get_setting(KEY_ENABLED)
         .map(|v| v == "true")
         .unwrap_or(false);
@@ -210,7 +254,7 @@ pub fn remote_status() -> serde_json::Value {
 #[tauri::command]
 pub fn remote_issue_token() -> Result<serde_json::Value, String> {
     let token = STATE.pairing.lock().unwrap().issue();
-    let (_, port) = bind_and_port();
+    let (_, port) = bind_and_port().unwrap_or_else(|_| ("127.0.0.1".to_string(), DEFAULT_PORT));
     let host = match crate::database::dao::settings::get_setting(KEY_BIND) {
         Some(b) if b == "0.0.0.0" => local_lan_ips()
             .first()
@@ -316,34 +360,74 @@ mod tests {
     // 零污染约束：不触真实 ~/.mam/mam.db、不绑端口、不真正 start_server()。
     // (a)(b) 测的是从 bind_and_port / remote_status 抽出的纯函数内核（DB 读取留在薄壳里）。
 
-    /// (a) bind_and_port 的解析内核：无设置 / 坏端口字符串的回落行为
+    /// (a) bind_and_port 的解析内核：无设置 / 坏端口字符串的回落行为。
+    /// M2-R3：bind 值域校验——非法地址字符串一律 Err（端口回落行为保持不变）
     #[test]
     fn parse_bind_falls_back_on_missing_or_bad_port() {
         // 无任何设置 → loopback + 默认端口
         assert_eq!(
-            parse_bind(None, None),
+            parse_bind(None, None).unwrap(),
             ("127.0.0.1".to_string(), DEFAULT_PORT)
         );
         // 端口非数字 → 回落默认端口
         assert_eq!(
-            parse_bind(Some("0.0.0.0"), Some("not-a-port")),
+            parse_bind(Some("0.0.0.0"), Some("not-a-port")).unwrap(),
             ("0.0.0.0".to_string(), DEFAULT_PORT)
         );
         // 端口越界（> u16::MAX）→ 同样回落
         assert_eq!(
-            parse_bind(Some("0.0.0.0"), Some("99999")),
+            parse_bind(Some("0.0.0.0"), Some("99999")).unwrap(),
             ("0.0.0.0".to_string(), DEFAULT_PORT)
         );
         // 合法端口被采用
         assert_eq!(
-            parse_bind(Some("127.0.0.1"), Some("9421")),
+            parse_bind(Some("127.0.0.1"), Some("9421")).unwrap(),
             ("127.0.0.1".to_string(), 9421)
         );
         // bind 缺失但端口合法：bind 回落、端口采用
         assert_eq!(
-            parse_bind(None, Some("8080")),
+            parse_bind(None, Some("8080")).unwrap(),
             ("127.0.0.1".to_string(), 8080)
         );
+    }
+
+    /// (a-2) M2-R3：bind 值域校验——解析失败的地址串必须 Err（不得静默透传给绑定/安全门）
+    #[test]
+    fn parse_bind_rejects_invalid_bind_address() {
+        for bad in ["not-an-address", "999.1.1.1", "http://evil", "192.168.1.5:9420", ""] {
+            let r = parse_bind(Some(bad), Some("9420"));
+            assert!(r.is_err(), "非法 bind {bad:?} 必须被拒绝");
+            assert!(
+                r.unwrap_err().contains(bad),
+                "错误信息必须回显非法值便于用户定位"
+            );
+        }
+        // 合法形态不误拒：IPv4 / IPv6 / localhost
+        for good in ["127.0.0.1", "0.0.0.0", "192.168.1.5", "::", "::1", "fe80::1", "localhost"] {
+            assert!(
+                parse_bind(Some(good), Some("9420")).is_ok(),
+                "合法 bind {good:?} 不得被拒绝"
+            );
+        }
+    }
+
+    /// (a-3) M2-R3：对外判定内核——四分支（:: / 具体网卡 IP / 0.0.0.0 / 白名单）
+    /// 白名单 = 仅内环可达（127.0.0.1 / localhost / ::1 / 127.0.0.0-8）；其余合法地址
+    /// （含未指定地址 :: 与 0.0.0.0、任意网卡 IP）一律视为对外、必须过 ack 门
+    #[test]
+    fn is_external_bind_four_branches() {
+        // 对外三支
+        assert!(is_external_bind("::"), "未指定 IPv6 地址监听全部 v6 接口，属对外");
+        assert!(
+            is_external_bind("192.168.1.5"),
+            "具体网卡 IP 对局域网可达，属对外（旧实现只认 0.0.0.0 字面量，是绕过口）"
+        );
+        assert!(is_external_bind("0.0.0.0"), "通配绑定属对外");
+        // 白名单支：仅内环
+        assert!(!is_external_bind("127.0.0.1"));
+        assert!(!is_external_bind("localhost"));
+        assert!(!is_external_bind("::1"), "::1 是 IPv6 内环，不可从局域网到达");
+        assert!(!is_external_bind("127.0.0.2"), "127.0.0.0/8 整段都是内环");
     }
 
     /// (b) 局域网候选的门控内核：仅 0.0.0.0（对外）模式给出候选，loopback / 具体地址绑定恒空。
@@ -486,7 +570,7 @@ mod tests {
         let mut spawned = 0usize;
         let r = start_server_core(
             &mut slot,
-            || ("127.0.0.1".to_string(), 12345),
+            || Ok(("127.0.0.1".to_string(), 12345)),
             || None,
             |b, p| {
                 spawned += 1;
@@ -508,7 +592,7 @@ mod tests {
         let mut spawned = 0usize;
         let r = start_server_core(
             &mut slot,
-            || ("127.0.0.1".to_string(), DEFAULT_PORT),
+            || Ok(("127.0.0.1".to_string(), DEFAULT_PORT)),
             || panic!("loopback 绑定不应读取 ack"),
             |_, _| {
                 spawned += 1;
@@ -520,15 +604,22 @@ mod tests {
         assert!(slot.is_some(), "新句柄应写回槽位");
         slot.as_ref().unwrap().abort();
 
-        // ---- case 4: 安全门未移位：0.0.0.0 且未确认 ack → Err 且不 spawn ----
-        let mut slot: Option<tauri::async_runtime::JoinHandle<()>> = None;
-        let r = start_server_core(
-            &mut slot,
-            || ("0.0.0.0".to_string(), DEFAULT_PORT),
-            || None,
-            |_, _| panic!("未确认对外时不得 spawn"),
-        );
-        assert!(r.is_err(), "0.0.0.0 未确认 TLS 前置必须拒绝");
-        assert!(slot.is_none(), "被安全门拒绝时不得留下句柄");
+        // ---- case 4: 安全门未移位（M2-R3 判定反转）：一切对外绑定（含具体网卡 IP
+        //      与 ::）未确认 ack → Err 且不 spawn；内环白名单不误拦 ----
+        for external in ["0.0.0.0", "192.168.1.5", "::", "fe80::1"] {
+            let mut slot: Option<tauri::async_runtime::JoinHandle<()>> = None;
+            let bind = external.to_string();
+            let r = start_server_core(
+                &mut slot,
+                || Ok((bind.clone(), DEFAULT_PORT)),
+                || None,
+                |_, _| panic!("未确认对外（{external}）时不得 spawn"),
+            );
+            assert!(
+                r.is_err(),
+                "对外绑定 {external} 未确认 TLS 前置必须拒绝"
+            );
+            assert!(slot.is_none(), "被安全门拒绝时不得留下句柄（{external}）");
+        }
     }
 }
