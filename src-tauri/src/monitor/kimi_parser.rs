@@ -48,17 +48,20 @@ pub(crate) fn kimi_home_with(user_home: &Path) -> PathBuf {
 }
 
 /// 选定的 Kimi 数据根：session_index.jsonl 所在的 home 与 sessions/ 目录必须同源，
-/// 否则会出现"sessions 取自 A、索引取自 B"的混搭（原 legacy 回退断裂的根源）
-struct KimiDataRoot {
-    home: PathBuf,
-    sessions: PathBuf,
+/// 否则会出现"sessions 取自 A、索引取自 B"的混搭（原 legacy 回退断裂的根源）。
+/// M3 Task 7 起供 remote::content 复用（pub(crate)：同一 crate 的内容读取层）
+pub(crate) struct KimiDataRoot {
+    pub(crate) home: PathBuf,
+    pub(crate) sessions: PathBuf,
 }
 
 /// 数据根选择规则（纯函数便于测试）：
 /// 1. KIMI_CODE_HOME 显式设置时以其为准，sessions 缺失即整体不可用（不回落 legacy）；
 /// 2. 否则优先 ~/.kimi-code/sessions；
 /// 3. 主目录不存在时回退早期版本 ~/.kimi（home 与 sessions 一起切到 legacy 根）
-fn resolve_data_root(env_home: Option<&str>, user_home: &Path) -> Option<KimiDataRoot> {
+///
+/// M3 Task 7 起 pub(crate)：remote::content 复用同一根判定，禁止内容层复刻路径推导逻辑
+pub(crate) fn resolve_data_root(env_home: Option<&str>, user_home: &Path) -> Option<KimiDataRoot> {
     if let Some(h) = env_home.filter(|h| !h.is_empty()) {
         let home = PathBuf::from(h);
         let sessions = home.join("sessions");
@@ -85,15 +88,23 @@ fn kimi_data_root() -> Option<KimiDataRoot> {
     resolve_data_root(env_home.as_deref(), &dirs::home_dir().unwrap_or_default())
 }
 
-/// session_index.jsonl 条目（字段名以官方文档为准；alias 容忍 snake_case 变体）
+/// kimi_data_root 的注入版（M3 Task 7：remote::content 内容读取用）——
+/// user_home 可注入 tempdir，生产传真实 home；KIMI_CODE_HOME env 语义保持
+pub(crate) fn kimi_data_root_with(user_home: &Path) -> Option<KimiDataRoot> {
+    let env_home = std::env::var("KIMI_CODE_HOME").ok();
+    resolve_data_root(env_home.as_deref(), user_home)
+}
+
+/// session_index.jsonl 条目（字段名以官方文档为准；alias 容忍 snake_case 变体）。
+/// M3 Task 7 起 pub(crate)（remote::content 复用索引定位）
 #[derive(Deserialize)]
-struct KimiIndexEntry {
+pub(crate) struct KimiIndexEntry {
     #[serde(rename = "sessionId", alias = "session_id")]
-    session_id: String,
+    pub(crate) session_id: String,
     #[serde(rename = "sessionDir", alias = "session_dir")]
-    session_dir: String,
+    pub(crate) session_dir: String,
     #[serde(rename = "workDir", alias = "work_dir")]
-    work_dir: String,
+    pub(crate) work_dir: String,
 }
 
 /// 索引解析后的会话（wire.jsonl 按 mtime 倒序排列，匹配时取最新）
@@ -244,8 +255,9 @@ pub fn get_kimi_sessions(processes: &[AgentProcess]) -> Vec<Session> {
 }
 
 /// 解析 session_index.jsonl 原始条目（纯解析，不触碰 wire 文件；
-/// stat 延迟到候选过滤之后，避免每轮轮询 stat 全部历史会话）
-fn parse_session_index(root: &KimiDataRoot) -> Vec<KimiIndexEntry> {
+/// stat 延迟到候选过滤之后，避免每轮轮询 stat 全部历史会话）。
+/// M3 Task 7 起 pub(crate)（remote::content 复用）
+pub(crate) fn parse_session_index(root: &KimiDataRoot) -> Vec<KimiIndexEntry> {
     let index_path = root.home.join("session_index.jsonl");
     match fs::read_to_string(&index_path) {
         Ok(content) => content
@@ -278,8 +290,9 @@ fn stat_index_entry(root: &KimiDataRoot, entry: &KimiIndexEntry) -> Option<Index
     })
 }
 
-/// sessionDir 可能是绝对路径，也可能相对 sessions/ 或数据根目录
-fn resolve_session_dir(root: &KimiDataRoot, session_dir: &str) -> PathBuf {
+/// sessionDir 可能是绝对路径，也可能相对 sessions/ 或数据根目录。
+/// M3 Task 7 起 pub(crate)（remote::content 复用）
+pub(crate) fn resolve_session_dir(root: &KimiDataRoot, session_dir: &str) -> PathBuf {
     let p = PathBuf::from(session_dir);
     if p.is_absolute() {
         return p;

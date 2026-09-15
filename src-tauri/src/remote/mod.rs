@@ -2,6 +2,7 @@
 // 范围与红线见 docs/superpowers/plans/2026-09-14-m2-remote-access-board.md
 
 pub mod api;
+pub mod content;
 pub mod gate;
 pub mod pairing;
 pub mod server;
@@ -50,6 +51,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         store: pairing::DeviceStore::global(),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
+        // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，
+        // 注入缝供端点测试；生产签名 fn(&str,&str,usize) 与 trait 对象形态一致）
+        message_source: Box::new(content::read_session_messages),
         // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
         // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
         watcher_tx: watcher::event_sender(),

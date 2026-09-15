@@ -2,13 +2,14 @@
 // + pair + heartbeat + events（M3 Task 6 SSE 实时通道）
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{sse, IntoResponse, Response, Sse},
     Json,
 };
 use futures::stream::{Stream, StreamExt as _};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -176,4 +177,62 @@ pub async fn host(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
         Json((st.host_source)()),
     )
         .into_response()
+}
+
+/// GET /m/api/v1/session-messages?agent_type=&session_id=&limit=（M3 Task 7，C2 后端）
+/// 八工具统一内容出口（P9）：`{messages: [{seq, role, content, kind, ts, toolName?,
+/// toolArgs?, collapsed}]}`（SessionMessage camelCase 序列化）。
+/// - 缺参（agent_type / session_id）或空串 → 400 BAD_REQUEST；
+/// - 读取失败（会话不存在 / 存储不可读 / 未知工具）→ 404 NOT_FOUND，错误细节只进
+///   日志不外泄（不向外部暴露内部路径/存储布局）；
+/// - `before` 游标不做（Task 7 裁决）：M3 不做向上翻页，更早内容由前端以更大 limit 重拉；
+/// - 文件/SQLite IO 是重活，`spawn_blocking` 包读取（sessions handler 同一先例），
+///   不堵 tokio worker。
+pub async fn session_messages(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(agent) = params
+        .get("agent_type")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    // message_source 不可 clone（Box<dyn Fn>）：整体 move 进阻塞线程池调用（与
+    // sessions handler 捕获 session_source 的写法一致）；agent/sid 移动副本进闭包，
+    // 原值保留给失败分支的日志
+    let st = st.clone();
+    let agent_ref = agent.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        (st.message_source)(agent_ref.as_str(), sid.as_str(), limit)
+    })
+    .await
+    .map_err(|e| {
+        log::error!("会话内容读取任务异常: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match result {
+        Ok(msgs) => Ok((
+            // 门禁下的私有会话正文，禁止中间层缓存（sessions/host 同规）
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "messages": msgs })),
+        )
+            .into_response()),
+        Err(e) => {
+            log::warn!("session-messages 读取失败（agent={agent}）: {e}");
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
 }

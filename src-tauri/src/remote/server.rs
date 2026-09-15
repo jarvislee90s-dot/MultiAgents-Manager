@@ -130,6 +130,9 @@ pub struct RemoteState {
     pub store: super::pairing::DeviceStore,
     /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
     pub host_source: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
+    /// 会话内容源注入缝（M3 Task 7）：生产 = content::read_session_messages（八工具
+    /// 统一出口）；测试注入假源（零接触真实 ~/.zcode ~/.dsh 等数据目录）
+    pub message_source: Box<super::content::MessageSourceFn>,
     /// 跃迁事件通道（M3 Task 5）：生产 = watcher::event_sender()（全进程同一通道，
     /// 与 SessionWatcher::start 的循环共享）；测试注入新建空通道即可。
     /// **订阅端消费即去重完成**（铁律 4）：事件只含边沿（见 watcher::diff_transitions）
@@ -146,6 +149,8 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // /events（M3 Task 6）：SSE 长连接，gate 由本子路由的 layer 结构性覆盖
         // （与其余端点同一内层 gate，不需要额外 middleware）
         .route("/events", get(api::events))
+        // /session-messages（M3 Task 7）：单会话内容读取（C2 后端，八工具统一出口）
+        .route("/session-messages", get(api::session_messages))
         .route("/pair", post(api::pair))
         .route("/heartbeat", post(api::heartbeat))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
@@ -242,6 +247,8 @@ mod tests {
                     "enabledTools": ["claude"]
                 })
             }),
+            // M3 Task 7：本组测试不触 /session-messages，注入恒 Err 的桩
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
         })
@@ -386,6 +393,7 @@ mod tests {
                 }),
                 store: crate::remote::pairing::DeviceStore::memory(),
                 host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
+                message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())), // 本组测试不触 /session-messages
                 watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
             }),
             t,
@@ -873,6 +881,7 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
@@ -1069,6 +1078,7 @@ mod tests {
                     "enabledTools": ["claude", "zcode"]
                 })
             }),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         let app = router(state.clone());
@@ -1114,6 +1124,161 @@ mod tests {
         assert!(
             body.contains("\"enabledTools\""),
             "enabledTools 数据源随载荷返回"
+        );
+    }
+
+    /// /session-messages（M3 Task 7）端点矩阵：gate 403 → 缺参 400 → 注入源 200
+    /// （载荷 camelCase 且 no-store）→ 读取失败 404（错误细节不外泄）。
+    /// 零污染：message_source 注入假源，不触任何真实工具数据目录
+    #[tokio::test]
+    async fn session_messages_endpoint_is_gated_and_shaped() {
+        let captured: Arc<std::sync::Mutex<Vec<(String, String, usize)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let state = Arc::new(RemoteState {
+            pairing: std::sync::Mutex::new({
+                let mut svc = PairingService::new(
+                    600_000,
+                    PairingClock {
+                        now: Box::new(|| 1000),
+                        token: Box::new(|| "tok-x".to_string()),
+                    },
+                );
+                svc.issue();
+                svc
+            }),
+            session_source: Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![],
+                total_count: 0,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(move |agent: &str, sid: &str, limit: usize| {
+                cap.lock()
+                    .unwrap()
+                    .push((agent.to_string(), sid.to_string(), limit));
+                if sid == "sess_hit" {
+                    Ok(vec![
+                        crate::remote::content::SessionMessage {
+                            seq: 0,
+                            role: "user".into(),
+                            kind: "user".into(),
+                            content: "你好".into(),
+                            ts: Some(1000),
+                            tool_name: None,
+                            tool_args: None,
+                            collapsed: false,
+                        },
+                        crate::remote::content::SessionMessage {
+                            seq: 1,
+                            role: "assistant".into(),
+                            kind: "tool-call".into(),
+                            content: "调用 Bash".into(),
+                            ts: Some(1001),
+                            tool_name: Some("Bash".into()),
+                            tool_args: Some(r#"{"cmd":"ls"}"#.into()),
+                            collapsed: true,
+                        },
+                    ])
+                } else {
+                    Err("内部路径细节不应出现在响应里".to_string())
+                }
+            }),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+        });
+        let app = router(state.clone());
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "cm".into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+
+        // (1) 无 cookie → 403（nest 内层 gate 结构性覆盖新路由）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-messages?agent_type=zcode&session_id=sess_hit",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "新端点必须过 gate");
+
+        // (2) 缺 agent_type / 缺 session_id / 空白 session_id → 400
+        for uri in [
+            "/m/api/v1/session-messages?session_id=sess_hit",
+            "/m/api/v1/session-messages?agent_type=zcode",
+            "/m/api/v1/session-messages?agent_type=zcode&session_id=%20%20",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, Some("mam_device=cm"), None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "缺参必须 400：{uri}");
+        }
+
+        // (3) 命中 → 200 + camelCase 载荷 + no-store；参数正确传入注入源（limit 默认 200）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-messages?agent_type=zcode&session_id=sess_hit",
+                Some("mam_device=cm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "会话正文是门禁下私有数据，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"messages\"") && body.contains("\"toolName\":\"Bash\""),
+            "载荷必须 camelCase（toolName/toolArgs/collapsed），实际 {body}"
+        );
+        assert!(body.contains("\"toolArgs\"") && body.contains("\"collapsed\":true"));
+        assert_eq!(
+            captured.lock().unwrap().first().cloned(),
+            Some(("zcode".to_string(), "sess_hit".to_string(), 200)),
+            "handler 应把 agent_type/session_id/默认 limit 传给内容源"
+        );
+
+        // (4) 读取失败 → 404 空语义；limit 查询参数透传
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-messages?agent_type=dsh&session_id=sess_miss&limit=50",
+                Some("mam_device=cm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "读取失败必须 404");
+        let body = body_string(r).await;
+        assert!(!body.contains("内部路径细节"), "错误细节只进日志不外泄");
+        assert_eq!(
+            captured.lock().unwrap().last().cloned(),
+            Some(("dsh".to_string(), "sess_miss".to_string(), 50)),
+            "limit 查询参数应透传"
         );
     }
 }
