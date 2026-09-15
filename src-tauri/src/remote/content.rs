@@ -88,7 +88,9 @@ impl SessionMessage {
 pub type MessageSourceFn =
     dyn Fn(&str, &str, usize) -> Result<Vec<SessionMessage>, String> + Send + Sync;
 
-/// 统一出口（生产薄壳）：真实 home → 注入核。
+/// 统一出口（生产薄壳）：真实 home + 环境重定向（DSH_HOME / KIMI_CODE_HOME，
+/// 与各工具看板扫描同源——dsh 走 scan_sessions(&dsh_home()) 的 M0 F14 优先级，
+/// kimi 走 resolve_data_root 的 env 优先级）→ 注入核。
 /// agent_type 与 `AgentType::tool_id()` 的小写形态一致（zcode/dsh/claude/codex/kimi/
 /// workbuddy/opencode/openclaw）。
 pub fn read_session_messages(
@@ -97,12 +99,35 @@ pub fn read_session_messages(
     limit: usize,
 ) -> Result<Vec<SessionMessage>, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法确定用户主目录".to_string())?;
-    read_session_messages_with(&home, agent_type, session_id, limit)
+    // env 只在生产薄壳读取（fix round 1 Important 1）：值以参数传入注入核，
+    // 测试路径零真实 env 接触（与并行 env 测试互斥锁无交集）
+    let dsh_env = std::env::var("DSH_HOME").ok();
+    let kimi_env = std::env::var("KIMI_CODE_HOME").ok();
+    read_session_messages_impl(
+        &home,
+        dsh_env.as_deref(),
+        kimi_env.as_deref(),
+        agent_type,
+        session_id,
+        limit,
+    )
 }
 
-/// 注入核（测试直调 tempdir home，零真实数据目录接触）
+/// 注入核（测试直调 tempdir home，零真实数据目录接触；env 重定向恒 None）
 pub fn read_session_messages_with(
     home: &Path,
+    agent_type: &str,
+    session_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionMessage>, String> {
+    read_session_messages_impl(home, None, None, agent_type, session_id, limit)
+}
+
+/// 派发核（env 双参注入，dsh/kimi 消费；kimi 的 resolve_data_root 双参模式同款）
+fn read_session_messages_impl(
+    home: &Path,
+    dsh_env_home: Option<&str>,
+    kimi_env_home: Option<&str>,
     agent_type: &str,
     session_id: &str,
     limit: usize,
@@ -120,10 +145,10 @@ pub fn read_session_messages_with(
     let limit = limit.clamp(1, 1000);
     match agent_type {
         "zcode" => read_zcode_messages_with(home, session_id, limit),
-        "dsh" => read_dsh_messages_with(home, session_id, limit),
+        "dsh" => read_dsh_messages_with(home, dsh_env_home, session_id, limit),
         "claude" => read_claude_messages_with(home, session_id, limit),
         "codex" => read_codex_messages_with(home, session_id, limit),
-        "kimi" => read_kimi_messages_with(home, session_id, limit),
+        "kimi" => read_kimi_messages_with(home, kimi_env_home, session_id, limit),
         "workbuddy" => read_workbuddy_messages_with(home, session_id, limit),
         "opencode" => read_opencode_messages_with(home, session_id, limit),
         "openclaw" => read_openclaw_messages_with(home, session_id, limit),
@@ -405,13 +430,20 @@ fn zcode_text_of(parts: &[serde_json::Value], ptype: &str) -> String {
 
 fn read_dsh_messages_with(
     home: &Path,
+    env_home: Option<&str>,
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<SessionMessage>, String> {
     use crate::monitor::dsh::log;
-    // 注意：home 是注入根（生产薄壳传 dsh_home() 已含 DSH_HOME env 语义；
-    // 测试传 tempdir——不走 dsh_home_with 的 env 分支，防并行测试互踩）
-    let sessions_root = home.join("sessions");
+    // 数据根（fix round 1 Important 1）：$DSH_HOME 覆盖优先（M0 F14：env 非空 >
+    // ~/.dsh），与看板生产扫描 scan_sessions(&dsh_home()) **同源**——否则设了
+    // DSH_HOME 的机器上会话卡在板、详情 404。env 值由生产薄壳作参数传入
+    // （dsh_home_with 的双参注入同款），测试传 None 走回落分支，零真实 env 接触
+    let dsh_root = match env_home {
+        Some(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
+        _ => home.join(".dsh"),
+    };
+    let sessions_root = dsh_root.join("sessions");
     let Ok(entries) = std::fs::read_dir(&sessions_root) else {
         return Err("dsh sessions 目录不存在".to_string());
     };
@@ -455,9 +487,14 @@ fn read_dsh_messages_with(
 /// dsh 事件流 → 统一条目（纯函数）。跳过注入与记账事件（M0 F8：user/message 仅
 /// source.kind=="user" 是真人；system/message 是插件注入）。
 /// 产出映射：assistant/message.content[] 的 text→assistant、reasoning→thinking、
-/// tool-call→tool-call；tool/call→tool-call；tool/result→tool-result
+/// tool-call→tool-call；tool/call→tool-call；tool/result→tool-result。
+/// 同一调用在事件流里两路呈现（assistant 内嵌块 `id` + 独立 tool/call `callId`，
+/// 黄金样本实证同 id）→ 按调用 id 去重保留先出现者；id 缺失保守保留（无键判等，
+/// 去重有误杀真实并行调用的风险）（fix round 1 Important 2）
 fn map_dsh_events(events: &[crate::monitor::dsh::log::DshEvent]) -> Vec<SessionMessage> {
     let mut out = Vec::new();
+    // 已出条的调用 id 集（内嵌块 id 与 tool/call callId 同一 id 空间）
+    let mut seen_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
     for e in events {
         let ts = e.time;
         match e.kind.as_str() {
@@ -501,6 +538,11 @@ fn map_dsh_events(events: &[crate::monitor::dsh::log::DshEvent]) -> Vec<SessionM
                                 Some(v) if !v.is_null() => serde_json::to_string(v).ok(),
                                 _ => None,
                             };
+                            // 同 id 去重（保留先出现者）；id 缺失保守保留
+                            match c.get("id").and_then(|i| i.as_str()) {
+                                Some(id) if !seen_calls.insert(id.to_string()) => continue,
+                                _ => {}
+                            }
                             out.push(SessionMessage::tool_call(
                                 tool_summary(name),
                                 ts,
@@ -520,6 +562,11 @@ fn map_dsh_events(events: &[crate::monitor::dsh::log::DshEvent]) -> Vec<SessionM
                     Some(v) if !v.is_null() => serde_json::to_string(v).ok(),
                     _ => None,
                 };
+                // 同 id 去重（保留先出现者）；id 缺失保守保留
+                match e.data.get("callId").and_then(|i| i.as_str()) {
+                    Some(id) if !seen_calls.insert(id.to_string()) => continue,
+                    _ => {}
+                }
                 out.push(SessionMessage::tool_call(
                     tool_summary(name),
                     ts,
@@ -985,13 +1032,17 @@ fn read_codex_thread_with(
 
 fn read_kimi_messages_with(
     home: &Path,
+    env_home: Option<&str>,
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<SessionMessage>, String> {
     use crate::monitor::kimi_parser::{
-        kimi_data_root_with, parse_session_index, resolve_session_dir,
+        parse_session_index, resolve_data_root, resolve_session_dir,
     };
-    let Some(root) = kimi_data_root_with(home) else {
+    // 数据根（fix round 1 Minor①）：KIMI_CODE_HOME env 值以**参数**传入
+    // resolve_data_root（双参注入，kimi_parser 自用同款），生产薄壳读 env、
+    // 测试传 None——内容层自身不读真实进程 env，与并行 env 测试无互斥交集
+    let Some(root) = resolve_data_root(env_home, home) else {
         return Err("kimi 数据根不存在".to_string());
     };
     let Some(entry) = parse_session_index(&root)
@@ -1640,6 +1691,45 @@ mod tests {
         assert_eq!(msgs[2].seq, 2);
     }
 
+    /// fix round 1 Minor②：limit 夹取边界——0（未传/坏参路径的 0 值）按 1 生效、
+    /// 超大值截回上限 1000（读端在 impl 入口 clamp，此处锁定两端行为）。
+    /// 两套独立 tmp home（ZCodeRoots 固定读 .zcode/cli/db/db.sqlite，不能同目录换库）
+    #[test]
+    fn limit_is_clamped_to_1_1000() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = zcode_db(&tmp.path().join(".zcode/cli/db/db.sqlite"));
+        for i in 0..5 {
+            zcode_msg(&conn, &format!("m{i}"), i, 1000 + i, "user", "user_prompt");
+            zcode_part(
+                &conn,
+                &format!("p{i}"),
+                &format!("m{i}"),
+                1,
+                &format!(r#"{{"type":"text","text":"msg{i}"}}"#),
+            );
+        }
+        // 下界：0 → 按 1 生效（只出文件序最后 1 条）
+        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 0).unwrap();
+        assert_eq!(msgs.len(), 1, "limit=0 必须夹为 1");
+        assert_eq!(msgs[0].content, "msg4", "夹取后仍取尾部");
+        // 上界：999999 → 截回 1000（1001 条消息夹去 1 条）
+        let big = tempfile::tempdir().unwrap();
+        let conn = zcode_db(&big.path().join(".zcode/cli/db/db.sqlite"));
+        for i in 0..1001 {
+            zcode_msg(&conn, &format!("m{i}"), i, 1000 + i, "user", "user_prompt");
+            zcode_part(
+                &conn,
+                &format!("p{i}"),
+                &format!("m{i}"),
+                1,
+                &format!(r#"{{"type":"text","text":"big{i}"}}"#),
+            );
+        }
+        let r = read_session_messages_impl(big.path(), None, None, "zcode", SID, 999_999).unwrap();
+        assert_eq!(r.len(), 1000, "limit 上限截回 1000");
+        assert_eq!(r[0].content, "big1", "截去最旧的 1 条（文件序头部）");
+    }
+
     #[test]
     fn zcode_missing_session_or_db_errs() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1668,7 +1758,8 @@ mod tests {
     }
 
     /// 黄金样本 sample5 映射：真人输入保留、注入（agent-instructions / plugin /
-    /// skill-catalog）过滤、assistant tool-call 与独立 tool/call 均出 tool-call
+    /// skill-catalog）过滤；同一调用（内嵌块 id 与 tool/call callId 同 id）去重后
+    /// 恰好一条 tool-call（fix round 1 Important 2）
     #[test]
     fn dsh_sanitized_fixture_filters_injection_and_maps_tools() {
         let text = dsh_fixture("sample5-approval-pending.sanitized.jsonl");
@@ -1685,31 +1776,59 @@ mod tests {
             m.kind == "user" && (m.content.contains("chars") || m.content.contains("AGENTS"))
         });
         assert!(!injected, "注入 user/message 必须被过滤");
-        // 两个 tool-call 来源（assistant content 内嵌块 + 独立 tool/call 事件）同名 bash：
-        // 黄金样本的审批挂起回合只有 bash 一个调用，两路映射都必须命中
+        // 同一调用两路呈现（assistant content 内嵌块 id == tool/call callId，均 bash）：
+        // 按调用 id 去重后恰好 1 条，不得在板上看成两次调用
         let tool_calls: Vec<&SessionMessage> =
             msgs.iter().filter(|m| m.kind == "tool-call").collect();
-        assert!(
-            tool_calls
-                .iter()
-                .all(|m| m.tool_name.as_deref() == Some("bash")),
-            "tool/call 与 assistant 内嵌 tool-call 均应映射 tool-call，实得 {tool_calls:?}"
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "同 id 调用必须去重为一条，实得 {tool_calls:?}"
         );
+        assert_eq!(tool_calls[0].tool_name.as_deref(), Some("bash"));
         assert!(
-            tool_calls.len() >= 2,
-            "两个来源各出一条 tool-call，实得 {}",
-            tool_calls.len()
-        );
-        assert!(
-            tool_calls
-                .iter()
-                .any(|m| m.tool_args.as_deref().is_some_and(|a| !a.is_empty())),
+            tool_calls[0]
+                .tool_args
+                .as_deref()
+                .is_some_and(|a| !a.is_empty()),
             "arguments（JSON 字符串）应透传为 toolArgs"
         );
         // 记账事件（session / turn / step / approval / session/title / system/message）不出条目
         assert!(!msgs
             .iter()
             .any(|m| m.kind == "user" && m.content.contains("permission")));
+    }
+
+    /// 去重防御：调用 id 缺失（内嵌块无 id / tool/call 无 callId）时保守保留两条——
+    /// 无键可判等，去重有误杀真实并行调用的风险
+    #[test]
+    fn dsh_tool_calls_without_ids_are_kept_separately() {
+        let events = vec![
+            crate::monitor::dsh::log::DshEvent {
+                kind: "assistant/message".into(),
+                seq: Some(1),
+                time: Some(10),
+                data: serde_json::json!({
+                    "message": { "content": [
+                        { "type": "tool-call", "name": "bash" }
+                    ]}
+                }),
+            },
+            crate::monitor::dsh::log::DshEvent {
+                kind: "tool/call".into(),
+                seq: Some(2),
+                time: Some(11),
+                data: serde_json::json!({ "name": "bash", "arguments": "{}" }),
+            },
+        ];
+        let msgs = map_dsh_events(&events);
+        let tool_calls: Vec<&SessionMessage> =
+            msgs.iter().filter(|m| m.kind == "tool-call").collect();
+        assert_eq!(
+            tool_calls.len(),
+            2,
+            "id 缺失时不得去重（无键判等，保守保留）"
+        );
     }
 
     /// tool/result 事件 → tool-result 条目（sample2 含 isError 工具失败样本）
@@ -1750,11 +1869,11 @@ mod tests {
         assert_eq!(msgs[1].kind, "assistant");
     }
 
-    /// tmp home 上的代际文件读取：header.id 匹配路由到会话；未知 id → Err
-    #[test]
-    fn dsh_reads_zstd_generation_by_header_id() {
-        let tmp = tempfile::tempdir().unwrap();
-        let header = r#"{"type":"session","version":3,"id":"session-abc","cwd":"/tmp/proj","createdAt":1000,"isSeeded":false}"#;
+    /// 在指定 dsh 根下写一个 zstd 代际会话（tmp 夹具共享助手）
+    fn write_dsh_generation(dsh_root: &Path, session_id: &str) {
+        let header = format!(
+            r#"{{"type":"session","version":3,"id":"{session_id}","cwd":"/tmp/proj","createdAt":1000,"isSeeded":false}}"#
+        );
         let events = concat!(
             r#"{"type":"turn/start","seq":4,"data":{}}"#,
             "\n",
@@ -1764,9 +1883,20 @@ mod tests {
             "\n",
         );
         let frame = zstd::stream::encode_all(format!("{header}\n{events}").as_bytes(), 3).unwrap();
-        let sess = tmp.path().join("sessions/--proj--/escaped~dir");
+        let sess = dsh_root
+            .join("sessions")
+            .join("--proj--")
+            .join("escaped~dir");
         std::fs::create_dir_all(&sess).unwrap();
         std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
+    }
+
+    /// tmp home 上的代际文件读取：header.id 匹配路由到会话；未知 id → Err。
+    /// 默认根 = home/.dsh（home 为 dsh 数据根，与 dsh_home_with 的回落分支同形）
+    #[test]
+    fn dsh_reads_zstd_generation_by_header_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_dsh_generation(&tmp.path().join(".dsh"), "session-abc");
 
         let msgs = read_session_messages_with(tmp.path(), "dsh", "session-abc", 200).unwrap();
         let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
@@ -1775,6 +1905,25 @@ mod tests {
         assert_eq!(msgs[0].ts, Some(1111));
         // 未知会话 → Err（404 语义）
         assert!(read_session_messages_with(tmp.path(), "dsh", "session-other", 200).is_err());
+    }
+
+    /// fix round 1 Important 1：$DSH_HOME 重定向必须与看板同源（M0 F14：env >
+    /// ~/.dsh，生产扫描是 scan_sessions(&dsh_home())）。env 值以**参数**注入
+    /// （测试绝不读真实进程 env，杜绝与并行 env 测试互踩）：
+    /// Some(env 根) → 命中 env 根下会话；None（env 未设形态）→ 回落 home/.dsh
+    #[test]
+    fn dsh_env_home_redirects_data_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env_dir = tempfile::tempdir().unwrap();
+        // 会话数据在 env 根下；home 下无任何 dsh 数据（旧的「恒 ~/.dsh」实现在此必红）
+        write_dsh_generation(env_dir.path(), "session-abc");
+        let env = env_dir.path().to_str().unwrap().to_string();
+
+        let msgs =
+            read_dsh_messages_with(tmp.path(), Some(env.as_str()), "session-abc", 200).unwrap();
+        assert_eq!(msgs[0].content, "hi dsh", "env 根指向必须生效");
+        // env 未设（None）→ 回落 home/.dsh → 找不到（数据只在 env 根下）
+        assert!(read_dsh_messages_with(tmp.path(), None, "session-abc", 200).is_err());
     }
 
     // ==== Claude（合成 JSONL 行）====
@@ -2050,6 +2199,42 @@ mod tests {
             200
         )
         .is_err());
+    }
+
+    /// fix round 1 Minor①：KIMI_CODE_HOME 重定向以**参数**注入（env 值作参，
+    /// 测试不读真实进程 env——与 kimi_parser 的 run_with_home 互斥锁不再有交集）。
+    /// Some(env 根) → 命中 env 根下的索引与会话；None → 回落 home/.kimi-code
+    #[test]
+    fn kimi_env_home_redirects_data_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env_dir = tempfile::tempdir().unwrap();
+        let session_dir = env_dir
+            .path()
+            .join("sessions/wd_demo_0123456789ab")
+            .join(format!("session_{UUID}"));
+        std::fs::create_dir_all(session_dir.join("agents/main")).unwrap();
+        std::fs::write(
+            session_dir.join("agents/main/wire.jsonl"),
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"kimi in env"}],"time":1}"#,
+        )
+        .unwrap();
+        let index_line = serde_json::json!({
+            "sessionId": UUID,
+            "sessionDir": session_dir.to_string_lossy(),
+            "workDir": "/work/demo",
+        })
+        .to_string();
+        std::fs::write(
+            env_dir.path().join("session_index.jsonl"),
+            format!("{index_line}\n"),
+        )
+        .unwrap();
+        let env = env_dir.path().to_str().unwrap().to_string();
+
+        let msgs = read_kimi_messages_with(tmp.path(), Some(env.as_str()), UUID, 200).unwrap();
+        assert_eq!(msgs[0].content, "kimi in env", "env 根指向必须生效");
+        // env 未设（None）→ 回落 home/.kimi-code → 找不到
+        assert!(read_kimi_messages_with(tmp.path(), None, UUID, 200).is_err());
     }
 
     // ==== WorkBuddy（合成 JSONL 行 + tmp home projects 扫描）====

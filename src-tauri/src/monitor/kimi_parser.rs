@@ -88,13 +88,6 @@ fn kimi_data_root() -> Option<KimiDataRoot> {
     resolve_data_root(env_home.as_deref(), &dirs::home_dir().unwrap_or_default())
 }
 
-/// kimi_data_root 的注入版（M3 Task 7：remote::content 内容读取用）——
-/// user_home 可注入 tempdir，生产传真实 home；KIMI_CODE_HOME env 语义保持
-pub(crate) fn kimi_data_root_with(user_home: &Path) -> Option<KimiDataRoot> {
-    let env_home = std::env::var("KIMI_CODE_HOME").ok();
-    resolve_data_root(env_home.as_deref(), user_home)
-}
-
 /// session_index.jsonl 条目（字段名以官方文档为准；alias 容忍 snake_case 变体）。
 /// M3 Task 7 起 pub(crate)（remote::content 复用索引定位）
 #[derive(Deserialize)]
