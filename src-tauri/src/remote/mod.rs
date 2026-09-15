@@ -5,6 +5,7 @@ pub mod api;
 pub mod gate;
 pub mod pairing;
 pub mod server;
+pub mod watcher;
 
 pub const KEY_ENABLED: &str = "remote.enabled";
 pub const KEY_BIND: &str = "remote.bind";
@@ -49,6 +50,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         store: pairing::DeviceStore::global(),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
+        // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
+        // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
+        watcher_tx: watcher::event_sender(),
     })
 });
 

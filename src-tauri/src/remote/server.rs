@@ -130,6 +130,10 @@ pub struct RemoteState {
     pub store: super::pairing::DeviceStore,
     /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
     pub host_source: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
+    /// 跃迁事件通道（M3 Task 5）：生产 = watcher::event_sender()（全进程同一通道，
+    /// 与 SessionWatcher::start 的循环共享）；测试注入新建空通道即可。
+    /// **订阅端消费即去重完成**（铁律 4）：事件只含边沿（见 watcher::diff_transitions）
+    pub watcher_tx: tokio::sync::broadcast::Sender<super::watcher::TransitionEvent>,
 }
 
 /// API 子路由：三条端点 + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -187,6 +191,11 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     let listener = tokio::net::TcpListener::bind((bind, port))
         .await
         .map_err(|e| format!("绑定 {bind}:{port} 失败: {e}"))?;
+    // M3 Task 5：事件桥在**绑定成功后**启动（幂等——全局 Once 保证扫描循环全进程只
+    // spawn 一次）。放在 bind 之后：端口被占等启动失败不遗留 2s 会话扫描（扫描是重活，
+    // 见 adapter::get_all_sessions 的单飞护栏注释）；watcher 生命周期随进程结束，
+    // stop_server 不显式停止（关闭远程后循环仍扫描，为已有取舍）
+    super::watcher::SessionWatcher::start();
     axum::serve(listener, router_with_static(state))
         .await
         .map_err(|e| format!("serve: {e}"))
@@ -230,6 +239,8 @@ mod tests {
                     "enabledTools": ["claude"]
                 })
             }),
+            // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
         })
     }
 
@@ -372,6 +383,7 @@ mod tests {
                 }),
                 store: crate::remote::pairing::DeviceStore::memory(),
                 host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
+                watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
             }),
             t,
         )
@@ -858,6 +870,7 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
+            watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -933,6 +946,7 @@ mod tests {
                     "enabledTools": ["claude", "zcode"]
                 })
             }),
+            watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
