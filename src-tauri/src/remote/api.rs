@@ -1,5 +1,6 @@
 // /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
-// + pair + heartbeat + events（M3 Task 6 SSE 实时通道）
+// + pair + heartbeat + events（M3 Task 6 SSE 实时通道）+ session-messages（Task 7）
+// + session-files / file（M3 Task 8 文件路径提取与安全读取）
 
 use axum::{
     extract::{Query, State},
@@ -177,6 +178,136 @@ pub async fn host(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
         Json((st.host_source)()),
     )
         .into_response()
+}
+
+/// GET /m/api/v1/session-files?agent_type=&session_id=（M3 Task 8）
+/// 该会话工具调用涉及的文件路径表：`{files: [...]}`（去重保序，泛化提取见
+/// files::extract_file_paths 的控制者裁决）。移动端详情页用它做消息正文的
+/// 文件路径链接化（点开 → /file 预览）。
+/// - 缺参（agent_type / session_id）或空串 → 400 BAD_REQUEST；
+/// - 提取失败 / 会话不存在 → 200 空表 `{files: []}`——文件链接化是增强能力，
+///   失败不阻塞详情页，也无从区分「无文件」与「读不到」（不给探测面）；
+/// - 提取要读一遍会话消息流（文件/SQLite IO），`spawn_blocking` 包裹
+///   （sessions handler 同一先例），不堵 tokio worker。
+pub async fn session_files(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(agent) = params
+        .get("agent_type")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    // path_source 不可 clone（Box<dyn Fn>）：整体 move 进阻塞线程池调用（与
+    // session_messages handler 的写法一致）
+    let st = st.clone();
+    let files = tokio::task::spawn_blocking(move || (st.path_source)(agent.as_str(), sid.as_str()))
+        .await
+        .map_err(|e| {
+            log::error!("文件路径提取任务异常: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok((
+        // 门禁下的私有数据（会话涉及的文件路径），禁止中间层缓存（sessions 同规）
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "files": files })),
+    )
+        .into_response())
+}
+
+/// file 端点的读取结果三分（403/404 语义分流在 handler 尾部，读取全程在阻塞线程池）：
+/// - Found：cwd 内常规文件（字节 + mime）；
+/// - NoSession：session_id 不在会话快照中 → 404；
+/// - Rejected：越界 / 不存在 / 过大 / 目录 / cwd 缺失 → 一律 403（错误细节只进
+///   日志——越界与不存在不可区分，不给外部探测面预言机，进度台账 #12 口径）。
+enum FileReadOutcome {
+    Found(Vec<u8>, String),
+    NoSession,
+    Rejected(String),
+}
+
+/// GET /m/api/v1/file?session_id=&path=（M3 Task 8）
+/// 会话项目目录内的安全文件读取（read_file_safe：限 cwd、只读、双阈值 500KB/5MB）。
+/// - 缺参 / 空白 → 400；session_id 不在会话快照 → 404；
+/// - 图片 mime → 二进制响应 + Content-Type；文本 → JSON `{content, mime, size}`；
+/// - 拒绝（越界/不存在/超限彼此不可区分）→ 403 + log::warn；
+/// - cwd 查找与文件读取同在一个 `spawn_blocking` 里：会话快照源是同步阻塞调用
+///   （sysinfo 全进程刷新，实机教训见 commands/session.rs），文件 IO 同为重活。
+pub async fn read_file(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(path) = params
+        .get("path")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let st = st.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        // 数据同源铁律 3：cwd 直调注入的会话源（生产 = adapter::get_all_sessions，
+        // 与看板同一份快照），不另立查找函数
+        let resp = (st.session_source)();
+        let Some(session) = resp.sessions.into_iter().find(|s| s.id == sid) else {
+            return FileReadOutcome::NoSession;
+        };
+        match crate::remote::files::read_file_safe(&session.project_path, &path) {
+            Ok((bytes, mime)) => FileReadOutcome::Found(bytes, mime),
+            Err(e) => FileReadOutcome::Rejected(e),
+        }
+    })
+    .await
+    .map_err(|e| {
+        log::error!("文件读取任务异常: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match outcome {
+        FileReadOutcome::Found(bytes, mime) if mime.starts_with("image/") => Ok((
+            // 门禁下的私有文件内容，禁止中间层缓存（sessions 同规）
+            [
+                (axum::http::header::CONTENT_TYPE, mime),
+                (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            bytes,
+        )
+            .into_response()),
+        FileReadOutcome::Found(bytes, mime) => {
+            let text = String::from_utf8_lossy(&bytes);
+            Ok((
+                [(axum::http::header::CACHE_CONTROL, "no-store".to_string())],
+                Json(serde_json::json!({
+                    "content": text,
+                    "mime": mime,
+                    "size": bytes.len(),
+                })),
+            )
+                .into_response())
+        }
+        FileReadOutcome::NoSession => Err(StatusCode::NOT_FOUND),
+        FileReadOutcome::Rejected(e) => {
+            // 探测面最小化（进度台账 #12）：越界 / 不存在 / 超限对外一律同 403 空体，
+            // 差异只进服务端日志
+            log::warn!("file 读取被拒: {e}");
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
 }
 
 /// GET /m/api/v1/session-messages?agent_type=&session_id=&limit=（M3 Task 7，C2 后端）

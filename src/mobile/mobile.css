@@ -8,3 +8,128 @@
  * dark 类时生效——桌面端 src/index.css 无需此行，因为桌面走语义 token
  * （.dark 覆盖 CSS 变量）而非 dark: 前缀类。 */
 @custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+ * 代码高亮双态主题（M3 Task 8）：github（浅色）/ github-dark（深色）。
+ * 不直接 import highlight.js/styles/github*.css：两份主题同级层叠、
+ * 后 import 者恒胜，无法随 .dark 类切换；此处按官方配色内联常用 token
+ * （约 1KB，远小于整份主题表），浅色为默认、.dark 下覆盖（与
+ * @custom-variant dark 同一 .dark 类策略，documentElement 挂类即生效）。
+ * 消费方：SessionDetail 代码块（rehype-highlight 输出 .hljs-*）与
+ * FilePreview 纯文本高亮（highlight.js/lib/common 输出同类名）。
+ * ============================================================ */
+.hljs {
+  color: #1f2328;
+  background: #f6f8fa;
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  color: #6a737d;
+}
+.hljs-keyword,
+.hljs-doctag,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.constant_,
+.hljs-section {
+  color: #cf222e;
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_ {
+  color: #8250df;
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-variable {
+  color: #0550ae;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-meta .hljs-string {
+  color: #0a3069;
+}
+.hljs-built_in,
+.hljs-symbol {
+  color: #953800;
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo,
+.hljs-tag {
+  color: #116329;
+}
+.hljs-deletion {
+  color: #82071e;
+}
+.hljs-addition {
+  color: #116329;
+}
+
+.dark .hljs {
+  color: #e6edf3;
+  background: #0d1117;
+}
+.dark .hljs-comment,
+.dark .hljs-code,
+.dark .hljs-formula {
+  color: #8b949e;
+}
+.dark .hljs-keyword,
+.dark .hljs-doctag,
+.dark .hljs-template-tag,
+.dark .hljs-template-variable,
+.dark .hljs-type,
+.dark .hljs-variable.constant_,
+.dark .hljs-section {
+  color: #ff7b72;
+}
+.dark .hljs-title,
+.dark .hljs-title.class_,
+.dark .hljs-title.function_ {
+  color: #d2a8ff;
+}
+.dark .hljs-attr,
+.dark .hljs-attribute,
+.dark .hljs-literal,
+.dark .hljs-meta,
+.dark .hljs-number,
+.dark .hljs-operator,
+.dark .hljs-selector-attr,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id,
+.dark .hljs-variable {
+  color: #79c0ff;
+}
+.dark .hljs-string,
+.dark .hljs-regexp,
+.dark .hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+.dark .hljs-built_in,
+.dark .hljs-symbol {
+  color: #ffa657;
+}
+.dark .hljs-name,
+.dark .hljs-quote,
+.dark .hljs-selector-tag,
+.dark .hljs-selector-pseudo,
+.dark .hljs-tag {
+  color: #7ee787;
+}
+.dark .hljs-deletion {
+  color: #ffa198;
+}
+.dark .hljs-addition {
+  color: #7ee787;
+}

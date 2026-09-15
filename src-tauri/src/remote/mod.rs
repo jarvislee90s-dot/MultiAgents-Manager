@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod content;
+pub mod files;
 pub mod gate;
 pub mod pairing;
 pub mod server;
@@ -54,6 +55,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，
         // 注入缝供端点测试；生产签名 fn(&str,&str,usize) 与 trait 对象形态一致）
         message_source: Box::new(content::read_session_messages),
+        // M3 Task 8：文件路径源同源直调（files::extract_file_paths 内部复用 content
+        // 层读取，注入缝供端点测试）
+        path_source: Box::new(files::extract_file_paths),
         // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
         // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
         watcher_tx: watcher::event_sender(),

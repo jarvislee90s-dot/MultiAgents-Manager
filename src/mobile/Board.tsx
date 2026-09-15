@@ -18,7 +18,7 @@ import {
   type ToolFilter,
 } from "./board-logic";
 import { ToolIcon } from "@/components/common/ToolIcon";
-import type { AgentType, SessionsResponse, TransitionEvent } from "@/types/session";
+import type { AgentType, Session, SessionsResponse, TransitionEvent } from "@/types/session";
 
 const POLL_MS = 3000;
 /** 相对时长的基准时钟刷新间隔：SSE 模式下无每拍拉取，时钟仍须走动
@@ -81,6 +81,8 @@ interface BoardProps {
   onPaired: () => void;
   /** 收到 403（设备失效）时回调：App 切回配对页 */
   onUnpaired: () => void;
+  /** 卡片点击回调（M3 Task 8）：进入会话详情；缺省时卡片不可点（既有测试/用法不受影响） */
+  onOpenSession?: (session: Session) => void;
 }
 
 // 移动看板：主通道为 SSE（快照首帧 + 跃迁增量），断流 2 次降级为 3s 轮询。
@@ -88,7 +90,7 @@ interface BoardProps {
 // + 横幅/提示音/振动提醒；降级 → 交给下方轮询 effect（复用 tick 的 in-flight 守卫）。
 // 失败口径：403 → 回配对页（只由 fetchSessions 的 null 触发，SSE 断流不算）；
 // 网络异常 → 保留上次数据 + 错误横幅继续重试（不白屏、不误踢回配对页）。
-export default function Board({ onPaired, onUnpaired }: BoardProps) {
+export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
   // SSE 已降级（连续 2 次失败）：单向闩——置位后由轮询 effect 接管数据拉取；
@@ -435,7 +437,10 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
           {sessions.map((s) => (
             <li
               key={`${s.agentType}-${s.id}`}
-              className="rounded-xl border border-slate-200 bg-slate-100 p-3 dark:border-transparent dark:bg-slate-900"
+              onClick={onOpenSession ? () => onOpenSession(s) : undefined}
+              className={`rounded-xl border border-slate-200 bg-slate-100 p-3 dark:border-transparent dark:bg-slate-900 ${
+                onOpenSession ? "cursor-pointer" : ""
+              }`}
             >
               {/* 主行（P8c 定稿）：工具图标+工具名+项目名 … 相对时长+状态点（右端）。
                   相对时长保留在主行右端（状态点左边）：时间/状态属卡片级元数据，

@@ -5,6 +5,16 @@ export interface PairResult {
   ok: boolean;
 }
 
+/** 带 HTTP 状态的请求失败（status=null 表示网络层异常，无响应可读）。
+ *  详情页/预览按 status 分流错误文案（404 → 会话不可读，403 → 文件不可预览） */
+export class ApiError extends Error {
+  status: number | null;
+  constructor(status: number | null, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export async function pair(token: string): Promise<PairResult> {
   const r = await fetch("/m/api/v1/pair", {
     method: "POST",
@@ -37,6 +47,86 @@ export async function fetchHost<T = HostPayload>(): Promise<T | null> {
   const r = await fetch("/m/api/v1/host");
   if (r.status === 403) return null; // 设备失效 → 与 sessions 同语义
   return r.json() as Promise<T>;
+}
+
+// ==== M3 Task 8：会话详情（ZCode 式对话视图）+ 文件预览 ====
+
+/** 统一消息条目 — 与 Rust `remote::content::SessionMessage`（camelCase 序列化）逐字段
+ *  对应，勿漂移：seq / role / content / kind / ts / toolName? / toolArgs? / collapsed。
+ *  kind ∈ user / assistant / thinking / tool-call / tool-result；
+ *  thinking 与 tool-call 的 collapsed 恒 true（wire 语义，运行中态的默认折叠依据） */
+export interface SessionMessage {
+  seq: number;
+  role: string;
+  content: string;
+  kind: "user" | "assistant" | "thinking" | "tool-call" | "tool-result" | string;
+  ts: number | null;
+  toolName?: string | null;
+  toolArgs?: string | null;
+  collapsed: boolean;
+}
+
+/** 拉取单会话消息流尾部（八工具统一出口）。读取失败（会话不存在 / 存储不可读）
+ *  以 ApiError 抛出：404 = 会话内容不可读；网络异常 status=null。
+ *  不自动轮询（M3 范围裁决：SSE transition 不驱动详情页，下拉手动刷新） */
+export async function fetchSessionMessages(
+  agentType: string,
+  sessionId: string,
+  limit: number
+): Promise<SessionMessage[]> {
+  const q = new URLSearchParams({
+    agent_type: agentType,
+    session_id: sessionId,
+    limit: String(limit),
+  });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-messages?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-messages 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-messages ${r.status}`);
+  const j = (await r.json()) as { messages: SessionMessage[] };
+  return Array.isArray(j.messages) ? j.messages : [];
+}
+
+/** 拉取该会话涉及的文件路径表（/session-files，泛化提取）。链接化是增强能力：
+ *  任何失败（含 404/403）静默降级为空表——详情页正文照常渲染，只是没有文件链接 */
+export async function fetchSessionFiles(agentType: string, sessionId: string): Promise<string[]> {
+  const q = new URLSearchParams({ agent_type: agentType, session_id: sessionId });
+  try {
+    const r = await fetch(`/m/api/v1/session-files?${q}`);
+    if (!r.ok) return [];
+    const j = (await r.json()) as { files: string[] };
+    return Array.isArray(j.files) ? j.files : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 文件预览载荷：图片 → 同源 fetch blob 后的 object URL（调用方负责 revoke）；
+ *  其余 → 文本内容 + 后端判定的 mime */
+export type FilePayload =
+  { kind: "image"; url: string; mime: string } | { kind: "text"; content: string; mime: string };
+
+/** 安全读取会话项目目录内的文件（/file）。越界 / 超限 / 不存在对外一律 403
+ *  （后端探测面最小化，不可区分）；session_id 不在快照 → 404；网络异常 → status=null */
+export async function fetchFile(sessionId: string, filePath: string): Promise<FilePayload> {
+  const q = new URLSearchParams({ session_id: sessionId, path: filePath });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/file?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `file 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `file ${r.status}`);
+  const mime = r.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+  if (mime.startsWith("image/")) {
+    const blob = await r.blob();
+    return { kind: "image", url: URL.createObjectURL(blob), mime };
+  }
+  const j = (await r.json()) as { content: string; mime: string };
+  return { kind: "text", content: j.content, mime: j.mime };
 }
 
 // ==== M3 Task 6：SSE 实时通道客户端 ====

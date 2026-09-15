@@ -133,6 +133,9 @@ pub struct RemoteState {
     /// 会话内容源注入缝（M3 Task 7）：生产 = content::read_session_messages（八工具
     /// 统一出口）；测试注入假源（零接触真实 ~/.zcode ~/.dsh 等数据目录）
     pub message_source: Box<super::content::MessageSourceFn>,
+    /// 文件路径源注入缝（M3 Task 8）：生产 = files::extract_file_paths（复用
+    /// content 层读取的泛化提取）；测试注入假源（返回固定路径表）
+    pub path_source: Box<super::files::PathSourceFn>,
     /// 跃迁事件通道（M3 Task 5）：生产 = watcher::event_sender()（全进程同一通道，
     /// 与 SessionWatcher::start 的循环共享）；测试注入新建空通道即可。
     /// **订阅端消费即去重完成**（铁律 4）：事件只含边沿（见 watcher::diff_transitions）
@@ -151,6 +154,10 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         .route("/events", get(api::events))
         // /session-messages（M3 Task 7）：单会话内容读取（C2 后端，八工具统一出口）
         .route("/session-messages", get(api::session_messages))
+        // /session-files（M3 Task 8）：会话涉及的文件路径表（链接化数据源）
+        .route("/session-files", get(api::session_files))
+        // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
+        .route("/file", get(api::read_file))
         .route("/pair", post(api::pair))
         .route("/heartbeat", post(api::heartbeat))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
@@ -249,6 +256,8 @@ mod tests {
             }),
             // M3 Task 7：本组测试不触 /session-messages，注入恒 Err 的桩
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            // 本组测试不触 /session-files /file：注入恒空的路径源
+            path_source: Box::new(|_, _| Vec::new()),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
         })
@@ -393,7 +402,9 @@ mod tests {
                 }),
                 store: crate::remote::pairing::DeviceStore::memory(),
                 host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
-                message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())), // 本组测试不触 /session-messages
+                message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+                // 本组测试不触 /session-files /file：注入恒空的路径源
+                path_source: Box::new(|_, _| Vec::new()), // 本组测试不触 /session-messages
                 watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
             }),
             t,
@@ -882,6 +893,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            // 本组测试不触 /session-files /file：注入恒空的路径源
+            path_source: Box::new(|_, _| Vec::new()),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
@@ -1079,6 +1092,8 @@ mod tests {
                 })
             }),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            // 本组测试不触 /session-files /file：注入恒空的路径源
+            path_source: Box::new(|_, _| Vec::new()),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         let app = router(state.clone());
@@ -1185,6 +1200,8 @@ mod tests {
                     Err("内部路径细节不应出现在响应里".to_string())
                 }
             }),
+            // 本测试不触 /session-files：注入恒空的路径源
+            path_source: Box::new(|_, _| Vec::new()),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
         });
         let app = router(state.clone());
@@ -1280,5 +1297,226 @@ mod tests {
             Some(("dsh".to_string(), "sess_miss".to_string(), 50)),
             "limit 查询参数应透传"
         );
+    }
+
+    // ==== M3 Task 8：GET /m/api/v1/file + /session-files（安全文件读取与路径提取） ====
+    // 零污染：session_source 注入 tempdir 项目目录的会话，被读文件均为 tempdir 内
+    // 现造文件；path_source 注入固定路径表——不触任何真实数据目录
+
+    /// file / session-files 端点矩阵：gate 403 → 缺参 400 → 会话不存在 404 →
+    /// cwd 内文本 200（JSON 载荷 + no-store）→ 图片 200（二进制 + Content-Type）→
+    /// 越界 403 → 超限 403（与越界不可区分，探测面最小化，进度台账 #12）
+    #[tokio::test]
+    async fn file_endpoints_are_gated_and_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_str().unwrap().to_string();
+        std::fs::write(tmp.path().join("hello.txt"), "hello mam").unwrap();
+        std::fs::write(tmp.path().join("pic.png"), [0x89u8, b'P', b'N', b'G']).unwrap();
+        std::fs::write(tmp.path().join("big.txt"), vec![b'a'; 500 * 1024 + 1]).unwrap();
+        let session = crate::session::Session {
+            id: "sess_file".into(),
+            agent_type: crate::session::AgentType::Claude,
+            project_name: "proj".into(),
+            project_path: cwd.clone(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: crate::session::SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-09-15T00:00:00Z".into(),
+            pid: 1,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: crate::session::ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        };
+        let state = Arc::new(RemoteState {
+            pairing: std::sync::Mutex::new({
+                let mut svc = PairingService::new(
+                    600_000,
+                    PairingClock {
+                        now: Box::new(|| 1000),
+                        token: Box::new(|| "tok-x".to_string()),
+                    },
+                );
+                svc.issue();
+                svc
+            }),
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _| vec!["/absent/proj/src/main.rs".to_string()]),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+        });
+        let app = router(state.clone());
+        persist_device(&state, "fe");
+
+        // (1) gate：无 cookie 访问 file / session-files → 403（nest 内层 gate 结构性覆盖）
+        for uri in [
+            "/m/api/v1/file?session_id=sess_file&path=hello.txt",
+            "/m/api/v1/session-files?agent_type=claude&session_id=sess_file",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, None, None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 403, "新端点必须过 gate：{uri}");
+        }
+
+        // (2) 缺参 / 空白参数 → 400
+        for uri in [
+            "/m/api/v1/file?path=hello.txt",
+            "/m/api/v1/file?session_id=sess_file",
+            "/m/api/v1/file?session_id=%20&path=hello.txt",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, Some("mam_device=fe"), None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "缺参必须 400：{uri}");
+        }
+
+        // (3) 会话不在快照中 → 404
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_miss&path=hello.txt",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "session_id 不在快照必须 404");
+
+        // (4) cwd 内文本 → 200 JSON {content, mime, size} + no-store（相对路径形态）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=hello.txt",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "门禁下的私有文件内容禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"content\":\"hello mam\"")
+                && body.contains("\"mime\":\"text/plain\"")
+                && body.contains("\"size\":9"),
+            "文本载荷形状 content/mime/size 三键，实际 {body}"
+        );
+
+        // (5) 图片 → 200 二进制 + Content-Type: image/png（绝对路径形态 + 含空格文件名
+        //     的 URL 编码变体一并覆盖查询串解码）
+        std::fs::write(tmp.path().join("with space.png"), [0x89u8, b'P']).unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/m/api/v1/file?session_id=sess_file&path={}",
+                    uri_encode(&tmp.path().join("with space.png").to_string_lossy())
+                ),
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "含空格的绝对路径（URL 编码）应可读取");
+        assert_eq!(header(&r, "content-type"), "image/png");
+        let bytes = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), &[0x89, b'P'], "图片走二进制直传");
+
+        // (6) 越界 → 403（绝对路径指向 cwd 外）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=/etc/passwd",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "越界必须 403");
+        assert!(body_string(r).await.is_empty(), "403 不携带错误细节");
+
+        // (7) 超限 → 403，与越界完全不可区分（同码同空体——探测面最小化）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=big.txt",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "超限必须 403");
+        assert!(
+            body_string(r).await.is_empty(),
+            "超限 403 与越界 403 不可区分"
+        );
+
+        // (8) /session-files：缺参 400 → 命中 200 {files:[...]} + no-store
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-files?session_id=sess_file",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-files?agent_type=claude&session_id=sess_file",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "文件路径表是门禁下私有数据，禁止中间层缓存"
+        );
+        assert!(
+            body_string(r)
+                .await
+                .contains("\"files\":[\"/absent/proj/src/main.rs\"]"),
+            "session-files 应透传注入路径源的结果"
+        );
+    }
+
+    /// 查询参数值的最小 URL 编码（测试助手：空格 → %20；其余字符测试数据不含）
+    fn uri_encode(s: &str) -> String {
+        s.replace(' ', "%20")
     }
 }
