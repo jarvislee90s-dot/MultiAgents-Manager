@@ -258,12 +258,12 @@ const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
 **Interfaces:** 照 `tests/legacySkillMigrationDialog.test.tsx` 惯例（vi.hoisted + mock core + i18n zh）。
 
 **验收条件：**
-- [ ] `npx vitest run` 全绿；每文件 ≥3 用例：
+- [x] `npx vitest run` 全绿；每文件 ≥3 用例：
   1. presetList：双分区渲染 + 私有归属组 + activePresets 驱动 checked（on 工具/off 工具各断言）
   2. presetEditDialog：空名不 invoke / create args 含 meta / 私有不适配 disabled
   3. applyConfirmDialog：五段清单渲染 / 白板警示 + destructive 按钮
 
-- [ ] **Step 1: 写测试** → **Step 2: 全绿 + lint** → **Step 3: Commit** `test(preset-v2): frontend component tests — dual zone, edit gating, whiteboard warning`
+- [x] **Step 1: 写测试** → **Step 2: 全绿 + lint** → **Step 3: Commit** `test(preset-v2): frontend component tests — dual zone, edit gating, whiteboard warning`
 
 ## Phase C · 资源卡片增强
 
