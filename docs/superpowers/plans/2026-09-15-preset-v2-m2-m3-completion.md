@@ -526,15 +526,15 @@ pub fn parse_supported_agents(skill_md: &str) -> Option<Vec<String>>
 - Modify: `docs/superpowers/specs/2026-09-14-preset-groups-v2-design.md`（状态行）
 
 **验收条件（全部满足才算 M2+M3 完结）：**
-- [ ] **全量门禁复跑**：`cd src-tauri && cargo test && cargo clippy -- -D warnings && cargo fmt --check` + `pnpm format:check && pnpm lint && pnpm build && npx vitest run`——全部绿，数字记入 progress.md
-- [ ] **i18n parity**：zh/en 叶子路径比对 0 差异
-- [ ] **mock parity**：`src/tauri-mock.ts` 与 `tests/msw/tauriMocks.ts` 对新命令的覆盖一致（读命令双 mock 有 fixture）
-- [ ] **自动化冒烟**：`preset_v2_test` + `reconcile_test` 全套作为端到端链路证明（apply→switch→restore / 漂移→处置 / MCP+plugin 往返 / 暂存对账）
-- [ ] **手工测试清单 v2** 成文：覆盖 28 项缺口表的 UI 目验点 + 原 PR 9 项手工点，注明「测试方法」（备份 `~/.mam/` 或 `MAM_HOME` 隔离）——收官 push 时用于替换 PR #63 描述
-- [ ] spec 状态行更新「M1-M3 全部已实施（待手工验收）」
-- [ ] **全程本地**：无 push、无 PR 变更，等待用户收官指令
+- [x] **全量门禁复跑**：`cd src-tauri && cargo test && cargo clippy -- -D warnings && cargo fmt --check` + `pnpm format:check && pnpm lint && pnpm build && npx vitest run`——全部绿，数字记入 progress.md
+- [x] **i18n parity**：zh/en 叶子路径比对 0 差异
+- [x] **mock parity**：`src/tauri-mock.ts` 与 `tests/msw/tauriMocks.ts` 对新命令的覆盖一致（读命令双 mock 有 fixture）
+- [x] **自动化冒烟**：`preset_v2_test` + `reconcile_test` 全套作为端到端链路证明（apply→switch→restore / 漂移→处置 / MCP+plugin 往返 / 暂存对账）
+- [x] **手工测试清单 v2** 成文：覆盖 28 项缺口表的 UI 目验点 + 原 PR 9 项手工点，注明「测试方法」（备份 `~/.mam/` 或 `MAM_HOME` 隔离）——收官 push 时用于替换 PR #63 描述
+- [x] spec 状态行更新「M1-M3 全部已实施（待手工验收）」
+- [x] **全程本地**：无 push、无 PR 变更，等待用户收官指令
 
-- [ ] **Step 1: 逐项执行上述清单** → **Step 2: Commit** `chore(preset-v2): M2+M3 closeout — full gates, parity checks, manual checklist v2, spec status`
+- [x] **Step 1: 逐项执行上述清单** → **Step 2: Commit** `chore(preset-v2): M2+M3 closeout — full gates, parity checks, manual checklist v2, spec status`
 
 ---
 

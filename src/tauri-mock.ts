@@ -567,6 +567,10 @@ if (!isTauri) {
         );
       }
 
+      // 托盘统一重建（T16）：fire-and-forget，无返回值消费，显式 no-op 以闭合双 mock parity
+      case "refresh_tray":
+        return Promise.resolve(undefined);
+
       case "detect_tools":
         return Promise.resolve([
           { id: "claude", name: "Claude Code", available: true, path: "/usr/local/bin/claude" },

@@ -305,6 +305,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
           message: "skill-brainstorming @ claude: mock 已按账本重建链接",
         },
       ]);
+    // 托盘统一重建（T16）：fire-and-forget，无返回值消费，显式 no-op 以闭合双 mock parity
+    case "refresh_tray":
+      return Promise.resolve();
     default:
       return Promise.resolve(undefined);
   }
