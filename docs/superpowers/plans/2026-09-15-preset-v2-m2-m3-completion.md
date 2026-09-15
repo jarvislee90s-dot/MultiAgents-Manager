@@ -211,11 +211,11 @@ const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
 能力门控：`kindSupported`（照抄 ResourceByKindView 写法）——预设 items 含某类资源而工具不支持 → 该工具 Switch `disabled` + title；私有预设绑定工具未启用 → 不渲染开关。
 
 **验收条件：**
-- [ ] `pnpm lint && pnpm build` 绿
-- [ ] 开→弹窗→确认→apply→toast→开关亮；关→直接恢复→toast→开关灭（dev 目验，T9 断言 checked 逻辑与门控 disabled）
-- [ ] dev 目验：同工具开 B 后 A 开关自动翻关
+- [x] `pnpm lint && pnpm build` 绿
+- [x] 开→弹窗→确认→apply→toast→开关亮；关→直接恢复→toast→开关灭（dev 目验，T9 断言 checked 逻辑与门控 disabled）
+- [x] dev 目验：同工具开 B 后 A 开关自动翻关
 
-- [ ] **Step 1: 实现** → **Step 2: 门禁 + Commit** `feat(preset-v2): preset×tool switch — on=confirm dialog, off=direct restore+toast`
+- [x] **Step 1: 实现** → **Step 2: 门禁 + Commit** `feat(preset-v2): preset×tool switch — on=confirm dialog, off=direct restore+toast`
 
 ### Task 7: 预设编辑弹窗（新建/编辑共用）
 

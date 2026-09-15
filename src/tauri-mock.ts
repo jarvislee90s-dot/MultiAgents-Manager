@@ -413,13 +413,25 @@ if (!isTauri) {
           residentExempt: [],
         });
 
+      // T6 开关 fixture：写命令须返回与真实命令同形的对象（undefined 会让 r.successCount / rr.restoredMam.length 崩）
+      case "apply_preset":
+        // PresetApplyResult（serde camelCase）：计数与上方 preview_apply_preset 的 toEnable 对齐
+        return Promise.resolve({
+          successCount: 2,
+          failures: [],
+          conflicts: [],
+          stashed: [],
+          disabled: [],
+          restoredNative: [],
+        });
+      case "restore_preset":
+        return Promise.resolve({ restoredMam: [], restoredNative: [], conflicts: [] });
+
       // 预设组写命令（浏览器 mock 一律视为成功；与 tests/msw/tauriMocks.ts 写分组对齐）
       case "create_preset":
       case "update_preset":
       case "delete_preset":
-      case "apply_preset":
       case "deactivate_preset":
-      case "restore_preset":
       case "apply_preset_to_subagent":
       case "deactivate_preset_from_subagent":
       case "set_resource_binding":

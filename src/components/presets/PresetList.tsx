@@ -1,5 +1,6 @@
-// 预设组 v2 列表（M2 Phase B）：双分区（通用 / 工具私有）+ 预设卡片
-// 数据层走 React Query（usePresetsQuery），删除成功后 invalidate PRESETS_KEY；
+// 预设组 v2 列表（M2 Phase B）：双分区（通用 / 工具私有）+ 预设卡片 + 预设×工具开关
+// 数据层走 React Query（usePresetsQuery / useActivePresetsQuery），删除成功后 invalidate PRESETS_KEY；
+// 开关契约（spec §5.5）：开 = 只开 T5 确认弹窗（apply 延迟到 onConfirm）；关 = 直接 restore + toast。
 // 创建 / 编辑弹窗由 Task 7 接线（本文件仅留 TODO(T7) 占位 handler）。
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -8,6 +9,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { ApplyConfirmDialog } from "@/components/presets/ApplyConfirmDialog";
 import {
   Dialog,
   DialogContent,
@@ -17,12 +20,17 @@ import {
 } from "@/components/ui/dialog";
 import { Layers, Plus, Trash2, Play, X } from "lucide-react";
 import type { PresetApplyResult, PresetRecord } from "@/types/preset";
-import type { ExtensionWithAssignments } from "@/types/extension";
+import type { ActivePreset, ExtensionWithAssignments } from "@/types/extension";
 import { ToolIcon } from "@/components/common/ToolIcon";
 // review F4：工具列改后端下发（勾选状态驱动），停用工具不再出现在预设组选择中
 import { useEnabledToolsQuery, type EnabledTool } from "@/lib/query/queries/tools";
-import { PRESETS_KEY, usePresetsQuery } from "@/lib/query/queries/presets";
-import { deletePreset } from "@/lib/api/preset";
+import {
+  ACTIVE_PRESETS_KEY,
+  PRESETS_KEY,
+  useActivePresetsQuery,
+  usePresetsQuery,
+} from "@/lib/query/queries/presets";
+import { applyPreset, deletePreset, restorePreset } from "@/lib/api/preset";
 
 export function PresetList({
   // extensions 本任务暂不消费（旧建组表单已删，T7 编辑弹窗经 props 链使用）；
@@ -35,8 +43,16 @@ export function PresetList({
   const qc = useQueryClient();
   const { data: enabledTools = [] } = useEnabledToolsQuery();
   const { data: presets = [] } = usePresetsQuery();
+  // 工具当前激活的预设（开关 checked 状态源）：apply/restore 后 invalidate 即自动翻转
+  const { data: activePresets = [] } = useActivePresetsQuery();
   // 删除确认弹窗目标（null = 关闭）
   const [deleteTarget, setDeleteTarget] = useState<PresetRecord | null>(null);
+  // 应用确认弹窗目标（T5 ApplyConfirmDialog；null = 关闭）。toolName 预查好供弹窗标题
+  const [confirmTarget, setConfirmTarget] = useState<{
+    presetId: string;
+    toolId: string;
+    toolName: string;
+  } | null>(null);
 
   // 通用区：scope === "universal"
   const universalPresets = presets.filter((p) => p.scope === "universal");
@@ -67,6 +83,52 @@ export function PresetList({
   // TODO(T7): 打开编辑弹窗（空表单新建），本任务仅占位
   const handleCreate = () => {
     console.debug("[PresetList] TODO(T7): open preset edit dialog (create)");
+  };
+
+  // 开关契约（spec §5.5）：开 → 只开确认弹窗（apply 延迟到弹窗 onConfirm）；关 → 直接恢复默认。
+  // 两个分支都自捕获错误（T5 carry-note：不得向外抛未捕获 rejection）
+  const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
+    if (next) {
+      setConfirmTarget({
+        presetId,
+        toolId,
+        toolName: enabledTools.find((tool) => tool.id === toolId)?.label ?? toolId,
+      });
+      return;
+    }
+    try {
+      const rr = await restorePreset(toolId);
+      toast.success(
+        t("presets.restoreDone", { m: rr.restoredMam.length, n: rr.restoredNative.length })
+      );
+      if (rr.conflicts.length)
+        toast.warning(t("presets.restoreConflicts"), {
+          description: rr.conflicts.join("\n"),
+        });
+      await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
+    } catch (e) {
+      toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
+    }
+  };
+
+  // 弹窗确认 → 真正 apply（三计数 toast）→ invalidate 后关弹窗；失败 toast 并留在弹窗可重试。
+  // 必须自捕获（catch 而非 finally 抛出）：ApplyConfirmDialog 内部 await onConfirm，外抛即未处理 rejection
+  const confirmApply = async () => {
+    if (!confirmTarget) return;
+    try {
+      const r = await applyPreset(confirmTarget.presetId, confirmTarget.toolId);
+      toast.success(
+        t("presets.applyResult", {
+          n: r.successCount,
+          d: r.disabled.length,
+          s: r.stashed.length,
+        })
+      );
+      await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
+      setConfirmTarget(null);
+    } catch (e) {
+      toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
+    }
   };
 
   const confirmDelete = async () => {
@@ -113,6 +175,8 @@ export function PresetList({
                   key={preset.id}
                   preset={preset}
                   enabledTools={enabledTools}
+                  activePresets={activePresets}
+                  onSwitch={onSwitch}
                   onRequestDelete={setDeleteTarget}
                 />
               ))}
@@ -135,6 +199,8 @@ export function PresetList({
                       key={preset.id}
                       preset={preset}
                       enabledTools={enabledTools}
+                      activePresets={activePresets}
+                      onSwitch={onSwitch}
                       onRequestDelete={setDeleteTarget}
                     />
                   ))}
@@ -166,24 +232,55 @@ export function PresetList({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 应用确认弹窗（T5）：开开关 → 预览清单 → 确认后经 confirmApply 真正 apply */}
+      <ApplyConfirmDialog
+        open={confirmTarget !== null}
+        presetId={confirmTarget?.presetId ?? ""}
+        toolId={confirmTarget?.toolId ?? ""}
+        toolName={confirmTarget?.toolName ?? ""}
+        onClose={() => setConfirmTarget(null)}
+        onConfirm={confirmApply}
+      />
     </div>
   );
 }
 
-/** 预设卡片：名称 + 描述摘要（1 行截断）+ items 计数徽标 + 删除入口；整卡可点（T7 接 onEdit） */
+/** 预设卡片：名称 + 描述摘要（1 行截断）+ items 计数徽标 + 预设×工具开关 + 删除入口；整卡可点（T7 接 onEdit） */
 function PresetCard({
   preset,
   enabledTools,
+  activePresets,
+  onSwitch,
   onRequestDelete,
 }: {
   preset: PresetRecord;
   enabledTools: EnabledTool[];
+  activePresets: ActivePreset[];
+  onSwitch: (presetId: string, toolId: string, next: boolean) => void;
   onRequestDelete: (preset: PresetRecord) => void;
 }) {
+  const { t } = useTranslation();
   // TODO(T7): onEdit —— 打开编辑弹窗并回填该预设，本任务仅占位
   const handleEdit = () => {
     console.debug("[PresetList] TODO(T7): edit preset", preset.id);
   };
+
+  // 资源能力门（照抄 ResourceByKindView 的 kindSupported 判定，评审裁决不抽公共模块）：
+  // 工具 × 资源类型是否支持启停（后端 EnabledTool 标志下发）
+  const kindSupported = (tool: EnabledTool, kind: string): boolean =>
+    kind === "skill"
+      ? tool.skillToggleSupported
+      : kind === "mcp"
+        ? tool.mcpSupported
+        : tool.pluginSupported;
+
+  // 开关目标工具（spec §7.1）：私有预设 = 绑定工具一枚（绑定工具未启用 → 不渲染开关）；
+  // 通用预设 = 每个已启用工具一枚
+  const switchTools: EnabledTool[] =
+    preset.scope === "tool" && preset.boundTool
+      ? enabledTools.filter((tool) => tool.id === preset.boundTool)
+      : enabledTools;
 
   return (
     <div
@@ -212,6 +309,34 @@ function PresetCard({
       {/* 描述摘要：1 行截断 */}
       {preset.description && (
         <p className="text-muted-foreground mt-0.5 truncate text-[11px]">{preset.description}</p>
+      )}
+      {/* 预设×工具开关：checked 由 list_active_presets 下发；items 含工具不支持的资源类型 → disabled + title。
+          整行阻断冒泡，避免误触整卡点击（T7 的 onEdit） */}
+      {switchTools.length > 0 && (
+        <div
+          className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {switchTools.map((tool) => {
+            const checked = activePresets.find((a) => a.toolId === tool.id)?.presetId === preset.id;
+            const gated = preset.items.some((item) => !kindSupported(tool, item.kind));
+            return (
+              <span
+                key={tool.id}
+                className="flex items-center gap-1 text-xs"
+                title={gated ? `${tool.label}: ${t("resources.kindNotSupported")}` : undefined}
+              >
+                <ToolIcon toolId={tool.id} size={12} />
+                <span className="text-muted-foreground">{tool.label}</span>
+                <Switch
+                  checked={checked}
+                  disabled={gated}
+                  onCheckedChange={(next) => onSwitch(preset.id, tool.id, next)}
+                />
+              </span>
+            );
+          })}
+        </div>
       )}
       {/* 子 Agent 级操作（遗留特性，原样保留迁移）：私有预设挂绑定工具，通用预设沿用旧的逐启用工具形态 */}
       {preset.scope === "tool" && preset.boundTool ? (
