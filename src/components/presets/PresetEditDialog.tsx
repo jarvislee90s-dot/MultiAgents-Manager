@@ -218,10 +218,7 @@ export function PresetEditDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent
-        aria-describedby={undefined}
-        className="max-h-[80vh] max-w-lg overflow-y-auto"
-      >
+      <DialogContent aria-describedby={undefined} className="max-h-[80vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-sm">
             {preset ? t("presets.editTitle") : t("presets.createTitle")}
