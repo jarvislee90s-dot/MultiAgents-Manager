@@ -446,11 +446,11 @@ if (!isTauri) {
       case "restore_preset":
         return Promise.resolve({ restoredMam: [], restoredNative: [], conflicts: [] });
 
-      // 预设组写命令（浏览器 mock 一律视为成功；与 tests/msw/tauriMocks.ts 写分组对齐）
+      // 预设组写命令（浏览器 mock 一律视为成功；与 tests/msw/tauriMocks.ts 写分组对齐）。
+      // deactivate_preset 前端路径已退役（T8），case 移除；子 Agent 变体保留
       case "create_preset":
       case "update_preset":
       case "delete_preset":
-      case "deactivate_preset":
       case "apply_preset_to_subagent":
       case "deactivate_preset_from_subagent":
       case "set_resource_binding":

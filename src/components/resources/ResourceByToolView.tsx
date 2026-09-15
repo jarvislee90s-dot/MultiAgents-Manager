@@ -4,11 +4,22 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
-import { Scan, Import, FolderOpen } from "lucide-react";
+import { Scan, Import, FolderOpen, BookmarkPlus } from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
-import { detectDuplicateSkills, cleanupDuplicateSkills } from "@/lib/api/resource";
+import { PresetEditDialog } from "@/components/presets/PresetEditDialog";
+import {
+  detectDuplicateSkills,
+  cleanupDuplicateSkills,
+  listExtensionsWithAssignments,
+} from "@/lib/api/resource";
+import { getToolActiveResources } from "@/lib/api/preset";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
-import type { NativeExtension, ToolResources, ImportStats } from "@/types/extension";
+import type {
+  ExtensionWithAssignments,
+  NativeExtension,
+  ToolResources,
+  ImportStats,
+} from "@/types/extension";
 
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
@@ -20,6 +31,40 @@ export function ResourceByToolView() {
   const { data: tools = [] } = useEnabledToolsQuery();
   const [toolResources, setToolResources] = useState<Record<string, ToolResources>>({});
   const [scanning, setScanning] = useState<Record<string, boolean>>({});
+
+  // FR-24「存为预设」：弹窗开关 + 预填 + 套件列表数据源。
+  // prefill 必须持有在 state（T7 carry-note：弹窗 open-effect 依赖 prefill 身份，
+  // JSX 内联字面量每次渲染都是新对象，会在编辑中途重置表单）
+  const [presetDlgOpen, setPresetDlgOpen] = useState(false);
+  const [presetPrefill, setPresetPrefill] = useState<{
+    toolId: string;
+    items: [string, string][];
+  } | null>(null);
+  const [presetExtensions, setPresetExtensions] = useState<ExtensionWithAssignments[]>([]);
+  const [prefilling, setPrefilling] = useState<Record<string, boolean>>({});
+
+  const handleSaveAsPreset = async (toolId: string) => {
+    setPrefilling((prev) => ({ ...prev, [toolId]: true }));
+    try {
+      // 双拉取：当前生效资源（三元组，origin 丢弃——预设条目即二元组）+ 全量套件列表。
+      // 本视图已有的 list_tool_resources 数据缺 isNative 字段，不能直接作弹窗数据源
+      //（原生技能分组会失真），故补一次 list_extensions_with_assignments 加载
+      const [triples, extensions] = await Promise.all([
+        getToolActiveResources(toolId),
+        listExtensionsWithAssignments(),
+      ]);
+      setPresetExtensions(extensions as ExtensionWithAssignments[]);
+      setPresetPrefill({
+        toolId,
+        items: triples.map(([id, kind]) => [id, kind] as [string, string]),
+      });
+      setPresetDlgOpen(true);
+    } catch (e) {
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
+    } finally {
+      setPrefilling((prev) => ({ ...prev, [toolId]: false }));
+    }
+  };
 
   const loadToolResources = useCallback(async (toolId: string) => {
     try {
@@ -157,6 +202,20 @@ export function ResourceByToolView() {
                 <Scan className={`mr-1 h-3 w-3 ${scanning[tool.id] ? "animate-spin" : ""}`} />
                 {t("common.scan")}
               </Button>
+              {/* FR-24「存为预设」入口：抓取该工具当前生效资源预填编辑弹窗 */}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-[10px]"
+                title={t("presets.saveAsPreset")}
+                onClick={() => handleSaveAsPreset(tool.id)}
+                disabled={prefilling[tool.id]}
+              >
+                <BookmarkPlus
+                  className={`mr-1 h-3 w-3 ${prefilling[tool.id] ? "animate-spin" : ""}`}
+                />
+                {t("presets.saveAsPreset")}
+              </Button>
             </div>
           </div>
 
@@ -201,6 +260,16 @@ export function ResourceByToolView() {
           )}
         </div>
       ))}
+
+      {/* FR-24「存为预设」弹窗（复用 T7 编辑弹窗，新建模式 + 预填）：
+          保存成功后弹窗自失效 PRESETS_KEY，此处无需额外刷新逻辑 */}
+      <PresetEditDialog
+        open={presetDlgOpen}
+        preset={null}
+        presetExtensions={presetExtensions}
+        prefill={presetPrefill ?? undefined}
+        onClose={() => setPresetDlgOpen(false)}
+      />
     </div>
   );
 }

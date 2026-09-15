@@ -34,9 +34,8 @@ export async function deletePreset(presetId: string): Promise<void> {
 export async function applyPreset(presetId: string, toolId: string): Promise<PresetApplyResult> {
   return await invoke<PresetApplyResult>("apply_preset", { presetId, toolId });
 }
-export async function deactivatePreset(presetId: string, toolId: string): Promise<void> {
-  return await invoke("deactivate_preset", { presetId, toolId });
-}
+// 工具级 deactivate 封装已退役（T8）：v2 预设×工具开关的「关」走 restore_preset
+// 恢复默认，不再直呼 deactivate_preset（Rust 命令保留，子 Agent 级 deactivatePresetFromSubagent 仍用旧命令）
 export async function restorePreset(toolId: string): Promise<RestoreResult> {
   return await invoke<RestoreResult>("restore_preset", { toolId });
 }

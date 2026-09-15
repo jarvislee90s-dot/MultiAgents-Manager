@@ -246,10 +246,10 @@ const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
 **Interfaces:** 工具组头部 `presets.saveAsPreset` 按钮 → `getToolActiveResources(toolId)` → 打开 `PresetEditDialog`（preset=null、prefill={toolId, items}，scope 预选 tool）。
 
 **验收条件：**
-- [ ] `pnpm lint && pnpm build` 绿；`grep -rn "deactivatePreset\|deactivate_preset" src/` 零结果
-- [ ] dev 目验：按钮 → 弹窗预填正确 → 保存后列表出现新预设
+- [x] `pnpm lint && pnpm build` 绿；`grep -rn "deactivatePreset\|deactivate_preset" src/` 零结果
+- [x] dev 目验：按钮 → 弹窗预填正确 → 保存后列表出现新预设
 
-- [ ] **Step 1: 实现 + 清理** → **Step 2: 门禁 + Commit** `feat(preset-v2): save-active-combo-as-preset entry (FR-24) + retire frontend deactivate path`
+- [x] **Step 1: 实现 + 清理** → **Step 2: 门禁 + Commit** `feat(preset-v2): save-active-combo-as-preset entry (FR-24) + retire frontend deactivate path`
 
 ### Task 9: 预设前端组件测试
 
