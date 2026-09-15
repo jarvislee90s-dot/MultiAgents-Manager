@@ -680,3 +680,136 @@ fn snapshot_invariant_detector_reports_broken_state() {
     database::destroy_base_snapshot("dsh").unwrap();
     assert!(check_snapshot_invariants().is_empty());
 }
+
+/// Patch 1a（评审裁决 1）会话守卫：激活会话进行中，孤儿恢复不得回移该工具的
+/// 暂存项；销毁快照（会话结束）后恢复
+#[test]
+fn recover_orphans_skips_active_session_then_restores_after_destroy() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::stash;
+
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    std::fs::create_dir_all(codex_dir.join("v2m1-gd-native")).unwrap();
+    std::fs::write(codex_dir.join("v2m1-gd-native/SKILL.md"), "n").unwrap();
+    stash::stash_native_skill("codex", "v2m1-gd-native", &codex_dir.join("v2m1-gd-native"))
+        .unwrap();
+    // 激活会话进行中：快照在且 active 非空
+    database::save_base_snapshot("codex", Some("preset-v2m1-gd"), &[]).unwrap();
+
+    let n_guarded = stash::recover_orphans();
+    assert!(
+        stash::stash_dir("codex").join("v2m1-gd-native").is_dir(),
+        "激活会话期间孤儿恢复不得回移暂存项"
+    );
+    assert!(!codex_dir.join("v2m1-gd-native").exists(), "原位不得被触碰");
+    assert_eq!(database::unrestored_stash(Some("codex")).len(), 1);
+
+    // 会话结束（快照销毁）→ 孤儿恢复放行
+    database::destroy_base_snapshot("codex").unwrap();
+    let n = stash::recover_orphans();
+    assert!(
+        codex_dir.join("v2m1-gd-native/SKILL.md").exists(),
+        "会话结束后应回移"
+    );
+    assert!(
+        !stash::stash_dir("codex").join("v2m1-gd-native").exists(),
+        "暂存区应清空"
+    );
+    assert!(database::unrestored_stash(Some("codex")).is_empty());
+    assert!(
+        n >= 1 && n_guarded == 0,
+        "守卫期计数 0，放行后计数 >= 1（{n_guarded}/{n}）"
+    );
+}
+
+/// Patch 1b（评审裁决 1）账本自愈：回移已落位但未销账的硬崩溃残留——
+/// 暂存文件不在且原位在 → 销账，unrestored 不再含它（只写账不动文件）
+#[test]
+fn recover_orphans_self_heals_stale_ledger_entries() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::stash;
+
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    std::fs::create_dir_all(codex_dir.join("v2m1-heal-orig")).unwrap();
+    std::fs::write(codex_dir.join("v2m1-heal-orig/SKILL.md"), "n").unwrap();
+    // 账目在而暂存文件不在（伪造「移完没销账即崩溃」）
+    let ghost_stash = stash::stash_dir("codex").join("v2m1-heal-ghost");
+    database::record_stash(
+        "codex",
+        "v2m1-heal-orig",
+        &ghost_stash.to_string_lossy(),
+        &codex_dir.join("v2m1-heal-orig").to_string_lossy(),
+    )
+    .unwrap();
+    assert!(database::unrestored_stash(Some("codex"))
+        .iter()
+        .any(|e| e.skill_name == "v2m1-heal-orig"));
+
+    stash::recover_orphans();
+    assert!(
+        !database::unrestored_stash(Some("codex"))
+            .iter()
+            .any(|e| e.skill_name == "v2m1-heal-orig"),
+        "自愈后该账目应已销账"
+    );
+    assert!(
+        codex_dir.join("v2m1-heal-orig/SKILL.md").exists(),
+        "自愈不动文件"
+    );
+}
+
+/// Patch 1c（评审裁决 1）无账孤儿对账：rename 与记账之间硬崩溃留下的
+/// 无账暂存目录 → 移回原位 + 补记审计；原位被占则保留待人工
+#[test]
+fn recover_orphans_reclaims_unledgered_stash_dirs() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::stash;
+
+    // 无账孤儿 A（原位空闲）与无账孤儿 B（原位被占）
+    let ghost_a = stash::stash_dir("codex").join("v2m1-ghost-a");
+    std::fs::create_dir_all(&ghost_a).unwrap();
+    std::fs::write(ghost_a.join("SKILL.md"), "g").unwrap();
+    let ghost_b = stash::stash_dir("codex").join("v2m1-ghost-b");
+    std::fs::create_dir_all(&ghost_b).unwrap();
+    std::fs::write(ghost_b.join("SKILL.md"), "g").unwrap();
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    std::fs::create_dir_all(codex_dir.join("v2m1-ghost-b")).unwrap();
+    std::fs::write(codex_dir.join("v2m1-ghost-b/SKILL.md"), "intruder").unwrap();
+
+    stash::recover_orphans();
+
+    // A：移回原位 + 补记审计（已销账，不在 unrestored）
+    assert!(
+        codex_dir.join("v2m1-ghost-a/SKILL.md").exists(),
+        "无账孤儿应移回原位"
+    );
+    assert!(!ghost_a.exists(), "暂存区应清空");
+    assert!(
+        !database::unrestored_stash(Some("codex"))
+            .iter()
+            .any(|e| e.skill_name == "v2m1-ghost-a"),
+        "补记审计应已销账（restored 状态）"
+    );
+    // B：原位被占 → 不覆盖、留在暂存区
+    assert!(ghost_b.is_dir(), "原位被占的孤儿应留在暂存区");
+    assert_eq!(
+        std::fs::read_to_string(codex_dir.join("v2m1-ghost-b/SKILL.md")).unwrap(),
+        "intruder",
+        "原位内容不得被覆盖"
+    );
+}
