@@ -81,6 +81,15 @@ pub fn ensure_tool_enabled(tool_id: &str) -> Result<(), String> {
 }
 
 pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
+    apply_tool_changes_with(changes, &crate::services::preset::restore_tool)
+}
+
+/// 可注入缝隙（照 sync_imported_skill_links_with 先例）：restore 结果可注入，
+/// 供测试验证取消勾选分支对前置恢复失败的防御
+pub fn apply_tool_changes_with(
+    changes: Vec<ToolSettingChange>,
+    restore_preset: &dyn Fn(&str) -> Result<crate::services::preset::RestoreResult, String>,
+) -> ApplyResult {
     let mut result = ApplyResult::default();
     for c in &changes {
         let was = agent_tool::get_tool_enabled(&c.tool_id);
@@ -90,9 +99,16 @@ pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
         }
         if !c.enabled {
             // 预设 v2（spec §5.4）：取消勾选前先恢复基底——若有激活预设，
-            // 暂存的原生技能与独占停用项必须先归位，再做 W5 还原清理
-            if let Err(e) = crate::services::preset::restore_tool(&c.tool_id) {
-                log::warn!("取消勾选 {} 前恢复基底失败: {}", c.tool_id, e);
+            // 暂存的原生技能与独占停用项必须先归位，再做 W5 还原清理。
+            // 恢复失败（DB 级）→ 不清理、不落 disabled，工具保持启用可重试；
+            // Ok（conflicts 是软性报告）→ 照常清理（评审裁决 2）
+            if let Err(e) = restore_preset(&c.tool_id) {
+                log::warn!("取消勾选 {} 前恢复基底失败，工具保持启用: {}", c.tool_id, e);
+                result.skipped_kept.push(format!(
+                    "{}: 预设恢复失败，工具保持启用（可重试）",
+                    c.tool_id
+                ));
+                continue;
             }
             // 取消勾选：清理为 best-effort（跳过项逐项报告，spec §9），随后落 DB
             disable_tool_cleanup(&c.tool_id, &mut result);

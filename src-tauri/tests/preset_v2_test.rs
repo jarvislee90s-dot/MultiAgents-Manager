@@ -813,3 +813,144 @@ fn recover_orphans_reclaims_unledgered_stash_dirs() {
         "原位内容不得被覆盖"
     );
 }
+
+/// Patch 2（评审裁决 2）：取消勾选时前置恢复失败（Err）→ 不清理、不落 disabled，
+/// 工具保持启用并计入 skipped_kept（可重试）
+#[test]
+fn apply_tool_changes_keeps_tool_enabled_when_preset_restore_fails() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::tool_settings::{
+        apply_tool_changes_with, ToolSettingChange,
+    };
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    // 现场：MAM skill 已启用（有链接可被清理），工具启用中
+    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-w5-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-w5-a".into(),
+        kind: "skill".into(),
+        name: "v2m1-w5-a".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m1-w5-a", "claude").unwrap();
+    assert!(database::get_tool_enabled("claude"), "前置：工具启用中");
+    let claude_link = dirs::home_dir().unwrap().join(".claude/skills/v2m1-w5-a");
+    assert!(claude_link.exists(), "前置：链接在场");
+
+    // 注入恢复失败
+    let changes = vec![ToolSettingChange {
+        tool_id: "claude".into(),
+        enabled: false,
+    }];
+    let result = apply_tool_changes_with(changes, &|_tool: &str| Err("boom".to_string()));
+
+    assert!(
+        database::get_tool_enabled("claude"),
+        "恢复失败时工具必须保持启用"
+    );
+    assert!(
+        result
+            .skipped_kept
+            .iter()
+            .any(|s| s.contains("claude") && s.contains("预设恢复失败")),
+        "skipped_kept 应含提示: {:?}",
+        result.skipped_kept
+    );
+    // W5 清理未执行：工具目录里仍是 MAM 链接（未被还原/未被动过）
+    let link_meta = std::fs::symlink_metadata(&claude_link).expect("链接应仍在场");
+    assert!(
+        link_meta.file_type().is_symlink(),
+        "恢复失败时链接必须原样保留"
+    );
+    // 清场：注入 Ok 走正常清理；W5 还原会把链接还原成真实内容且 assignment 行
+    // 仍为 enabled——必须禁用 assignment 并移除真实目录，否则后续测试扫描 claude
+    // 会出现同 ext_id 双条目（拍基底 UNIQUE 失败）
+    let _ = apply_tool_changes_with(
+        vec![ToolSettingChange {
+            tool_id: "claude".into(),
+            enabled: false,
+        }],
+        &|_tool: &str| Ok(Default::default()),
+    );
+    let _ = disable_skill_for_tool("v2m1-w5-a", "claude");
+    let _ = std::fs::remove_dir_all(&claude_link);
+    database::set_tool_enabled("claude", true);
+}
+
+/// Patch 2（评审裁决 2）真实路径：无激活预设时 restore 返回 Ok（空 conflicts）
+/// → 取消勾选照常清理并落 disabled
+#[test]
+fn apply_tool_changes_disables_tool_when_preset_restore_succeeds() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::{
+        disable_skill_for_tool, enable_skill_for_tool, tool_settings,
+    };
+
+    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-w5-b");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-w5-b".into(),
+        kind: "skill".into(),
+        name: "v2m1-w5-b".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m1-w5-b", "claude").unwrap();
+
+    let changes = vec![tool_settings::ToolSettingChange {
+        tool_id: "claude".into(),
+        enabled: false,
+    }];
+    let result = tool_settings::apply_tool_changes(changes);
+
+    assert!(
+        !database::get_tool_enabled("claude"),
+        "恢复 Ok 时应照常落 disabled"
+    );
+    // W5 清理语义：链接被还原为真实内容（内容保留、MAM 接管解除），而非删除
+    let w5_path = dirs::home_dir().unwrap().join(".claude/skills/v2m1-w5-b");
+    let w5_meta = std::fs::symlink_metadata(&w5_path).expect("W5 还原后原位应有真实内容");
+    assert!(
+        !w5_meta.file_type().is_symlink(),
+        "MAM 链接应已解除（还原为真实目录）"
+    );
+    assert!(w5_path.join("SKILL.md").exists(), "SSOT 内容应落回原位");
+    assert!(
+        result.restored.contains(&"v2m1-w5-b".to_string()),
+        "清理结果应报告还原项: {:?}",
+        result.restored
+    );
+    // 清场：禁用 assignment 并移除 W5 还原出的真实目录（同上，避免污染
+    // 后续测试的 scan_tool_state），再恢复工具启用态
+    let _ = disable_skill_for_tool("v2m1-w5-b", "claude");
+    let _ = std::fs::remove_dir_all(&w5_path);
+    database::set_tool_enabled("claude", true);
+}
