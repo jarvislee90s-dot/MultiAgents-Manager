@@ -53,8 +53,25 @@ export const mockExtensions = [
   },
 ];
 
+// 预设组 v2 形状（1 通用 + 1 tool 私有）：与 src/tauri-mock.ts 的 list_presets 样例同构，
+// 与 Rust PresetRecord（serde camelCase）一致（mock parity 收口门禁）
 export const mockPresets = [
-  { id: "preset-1", name: "前端开发", items: [["brainstorming", "skill"]] },
+  {
+    id: "preset-1",
+    name: "前端开发",
+    description: "前端开发常用组合",
+    scope: "universal",
+    boundTool: null,
+    items: [{ extensionId: "brainstorming", kind: "skill", extensionName: "Brainstorming" }],
+  },
+  {
+    id: "preset-2",
+    name: "Claude 专属",
+    description: "仅 Claude Code 可见的工具私有预设样例",
+    scope: "tool",
+    boundTool: "claude",
+    items: [],
+  },
 ];
 
 // convertFileSrc：asset 协议路径转换（petRuntime/向导预览用）
@@ -81,6 +98,40 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
       return Promise.resolve(mockExtensions);
     case "list_presets":
       return Promise.resolve(mockPresets);
+    // —— 预设组 v2 读命令 fixture（与 src/tauri-mock.ts 同构）——
+    case "get_preset":
+      return Promise.resolve(
+        mockPresets.find((p) => p.id === (_args as { presetId?: string })?.presetId) ?? null
+      );
+    case "get_active_preset":
+      return Promise.resolve((_args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null);
+    case "list_active_presets":
+      return Promise.resolve([{ toolId: "claude", presetId: "preset-1" }]);
+    // (extensionId, kind, origin) 三元组，origin = "mam" | "native"（scan_tool_state 口径）
+    case "get_tool_active_resources":
+      return Promise.resolve([
+        ["brainstorming", "skill", "mam"],
+        ["skill-native-brainstorming", "skill", "native"],
+      ]);
+    case "list_resource_bindings":
+      return Promise.resolve([
+        {
+          extensionId: "brainstorming",
+          exclusiveTools: "claude,codex",
+          reason: null,
+          updatedAt: new Date().toISOString(),
+        },
+      ]);
+    case "list_tool_residents":
+      return Promise.resolve([]);
+    case "preview_apply_preset":
+      return Promise.resolve({
+        toEnable: ["brainstorming"],
+        filtered: [],
+        toDisable: [],
+        toStash: [],
+        residentExempt: [],
+      });
     case "kill_session":
       return Promise.resolve();
     case "focus_session":
@@ -106,8 +157,14 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
       return Promise.resolve({ imported: 0, newlyAdded: 0, skippedDup: 0, sourceCounts: [] });
     case "list_tool_resources":
       return Promise.resolve({ global: [], native: [] });
+    // CompatibilityReport（serde camelCase）：条目为 {id, name, kind} / {id, name, kind, reason}
     case "check_preset_compatibility":
-      return Promise.resolve({ compatible: [], incompatible: [] });
+      return Promise.resolve({
+        compatible: [{ id: "brainstorming", name: "Brainstorming", kind: "skill" }],
+        incompatible: [
+          { id: "supabase", name: "Supabase", kind: "mcp", reason: "Not installed for this tool" },
+        ],
+      });
     case "toggle_mcp_for_tool":
     case "toggle_plugin_for_tool":
     case "write_mcp_server":
@@ -115,11 +172,16 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
     case "install_skill":
     case "assign_skill_to_subagent":
     case "create_preset":
+    case "update_preset":
     case "delete_preset":
     case "apply_preset":
     case "deactivate_preset":
+    case "restore_preset":
     case "apply_preset_to_subagent":
     case "deactivate_preset_from_subagent":
+    case "set_resource_binding":
+    case "delete_resource_binding":
+    case "set_tool_resident":
       return Promise.resolve();
     default:
       return Promise.resolve(undefined);

@@ -101,6 +101,28 @@ pub fn get_active_preset(tool_id: String) -> Option<String> {
     crate::database::get_base_snapshot(&tool_id).and_then(|(active, _)| active)
 }
 
+/// 全工具激活预设（开关状态批量数据源，避免前端 N 次 invoke）
+#[tauri::command]
+pub fn list_active_presets() -> Vec<serde_json::Value> {
+    crate::adapter::TOOL_IDS
+        .iter()
+        .filter_map(|tool| {
+            crate::database::get_base_snapshot(tool)
+                .and_then(|(active, _)| active)
+                .map(|p| serde_json::json!({ "toolId": tool, "presetId": p }))
+        })
+        .collect()
+}
+
+/// 工具当前生效资源集合（FR-24「存为预设」预填数据源）
+#[tauri::command]
+pub fn get_tool_active_resources(tool_id: String) -> Vec<(String, String, String)> {
+    crate::services::preset::snapshot::scan_tool_state(&tool_id)
+        .into_iter()
+        .map(|i| (i.extension_id, i.kind, i.origin))
+        .collect()
+}
+
 /// 应用预览（确认弹窗数据源，dry-run）
 #[tauri::command]
 pub fn preview_apply_preset(preset_id: String, tool_id: String) -> Result<ApplyPreview, String> {

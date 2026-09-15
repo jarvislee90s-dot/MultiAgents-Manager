@@ -85,3 +85,17 @@ export interface SsotResources {
   mcp: SsotResource[];
   plugins: SsotResource[];
 }
+
+/** 资源独占绑定（exclusiveTools 为逗号 join 的工具 id 串，与后端存储同形） */
+export interface ResourceBinding {
+  extensionId: string;
+  exclusiveTools: string;
+  reason: string | null;
+  updatedAt: string;
+}
+
+/** 工具当前激活的预设（开关状态批量下发项） */
+export interface ActivePreset {
+  toolId: string;
+  presetId: string;
+}

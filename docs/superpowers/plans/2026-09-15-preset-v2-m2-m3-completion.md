@@ -123,15 +123,15 @@ export const useResourceBindingsQuery = () => useQuery({ queryKey: BINDINGS_KEY,
 ```
 
 **验收条件：**
-- [ ] `cargo test` 绿（两命令编译注册）；`pnpm lint && pnpm build` 绿
-- [ ] `grep -rn "schemas/preset" src/ tests/` 零结果（死代码已删）
-- [ ] `src/tauri-mock.ts` 的 `list_presets` 返回 v2 形状（含 description/scope/boundTool，1 通用 + 1 tool 私有样例）；`tests/msw/tauriMocks.ts` 的 `mockPresets` 同步 v2；新读命令有 fixture case、写命令入 `:117-123` 分组
-- [ ] `check_preset_compatibility` mock 修正为 `{id,name,kind}` 形状
+- [x] `cargo test` 绿（两命令编译注册）；`pnpm lint && pnpm build` 绿
+- [x] `grep -rn "schemas/preset" src/ tests/` 零结果（死代码已删）
+- [x] `src/tauri-mock.ts` 的 `list_presets` 返回 v2 形状（含 description/scope/boundTool，1 通用 + 1 tool 私有样例）；`tests/msw/tauriMocks.ts` 的 `mockPresets` 同步 v2；新读命令有 fixture case、写命令入 `:117-123` 分组
+- [x] `check_preset_compatibility` mock 修正为 `{id,name,kind}` 形状
 
-- [ ] **Step 1: Rust 两命令 + 注册 + cargo test**
-- [ ] **Step 2: 类型/api/query/删死代码**
-- [ ] **Step 3: 双 mock 更新**
-- [ ] **Step 4: 门禁 + Commit** `feat(preset-v2): frontend plumbing — types/api/queries/mocks + list_active_presets & get_tool_active_resources commands`
+- [x] **Step 1: Rust 两命令 + 注册 + cargo test**
+- [x] **Step 2: 类型/api/query/删死代码**
+- [x] **Step 3: 双 mock 更新**
+- [x] **Step 4: 门禁 + Commit** `feat(preset-v2): frontend plumbing — types/api/queries/mocks + list_active_presets & get_tool_active_resources commands`
 
 ### Task 3: i18n 全量 key（zh/en 成对）
 

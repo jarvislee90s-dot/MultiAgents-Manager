@@ -24,6 +24,34 @@ interface TauriInternalsMock {
 if (!isTauri) {
   console.log("[tauri-mock] Running outside Tauri WebView — injecting API mocks");
 
+  // 预设组 v2 fixture（1 通用 + 1 tool 私有；extensionId 对应上方资源样例的 id）
+  const mockPresetsV2 = [
+    {
+      id: "preset-1",
+      name: "Full Stack Dev",
+      description: "全栈开发常用组合：需求梳理 + 系统化调试 + 文档检索",
+      scope: "universal",
+      boundTool: null,
+      items: [
+        { extensionId: "1", kind: "skill", extensionName: "brainstorming" },
+        { extensionId: "2", kind: "skill", extensionName: "systematic-debugging" },
+        { extensionId: "13", kind: "mcp", extensionName: "context7" },
+        { extensionId: "14", kind: "mcp", extensionName: "firecrawl-mcp" },
+      ],
+    },
+    {
+      id: "preset-2",
+      name: "Code Review",
+      description: "Claude 专属中文审查流（工具私有预设样例）",
+      scope: "tool",
+      boundTool: "claude",
+      items: [
+        { extensionId: "10", kind: "skill", extensionName: "chinese-code-review" },
+        { extensionId: "11", kind: "skill", extensionName: "chinese-commit-conventions" },
+      ],
+    },
+  ];
+
   // Mock __TAURI_INTERNALS__
   (window as unknown as { __TAURI_INTERNALS__: TauriInternalsMock }).__TAURI_INTERNALS__ = {
     metadata: {
@@ -338,29 +366,66 @@ if (!isTauri) {
           },
         ]);
 
+      // 预设组 v2 样例（1 通用 + 1 tool 私有）：与 Rust PresetRecord（serde camelCase）同构，
+      // 并与 tests/msw/tauriMocks.ts 的 mockPresets 保持形状一致（mock parity 收口门禁）
       case "list_presets":
+        return Promise.resolve(mockPresetsV2);
+
+      case "get_preset":
+        return Promise.resolve(
+          mockPresetsV2.find((p) => p.id === (args?.presetId as string)) ?? null
+        );
+
+      case "get_active_preset":
+        return Promise.resolve(args?.toolId === "claude" ? "preset-1" : null);
+
+      case "list_active_presets":
+        return Promise.resolve([{ toolId: "claude", presetId: "preset-1" }]);
+
+      // (extensionId, kind, origin) 三元组，origin = "mam" | "native"（scan_tool_state 口径）
+      case "get_tool_active_resources":
+        return Promise.resolve([
+          ["1", "skill", "mam"],
+          ["2", "skill", "mam"],
+          ["13", "mcp", "mam"],
+          ["skill-brainstorming", "skill", "native"],
+        ]);
+
+      case "list_resource_bindings":
         return Promise.resolve([
           {
-            id: "preset-1",
-            name: "Full Stack Dev",
-            items: [
-              { type: "skill", name: "brainstorming", tool_id: "claude" },
-              { type: "skill", name: "systematic-debugging", tool_id: "claude" },
-              { type: "mcp", name: "context7", tool_id: "claude" },
-              { type: "mcp", name: "firecrawl-mcp", tool_id: "claude" },
-            ],
-            active_for: ["claude"],
-          },
-          {
-            id: "preset-2",
-            name: "Code Review",
-            items: [
-              { type: "skill", name: "requesting-code-review", tool_id: "claude" },
-              { type: "skill", name: "chinese-code-review", tool_id: "claude" },
-            ],
-            active_for: [],
+            extensionId: "13",
+            exclusiveTools: "claude,codex",
+            reason: "需要 Node 运行时，仅绑定前端工具链",
+            updatedAt: new Date().toISOString(),
           },
         ]);
+
+      case "list_tool_residents":
+        return Promise.resolve(args?.toolId === "claude" ? ["17"] : []);
+
+      case "preview_apply_preset":
+        return Promise.resolve({
+          toEnable: ["1", "2"],
+          filtered: [],
+          toDisable: [],
+          toStash: [],
+          residentExempt: [],
+        });
+
+      // 预设组写命令（浏览器 mock 一律视为成功；与 tests/msw/tauriMocks.ts 写分组对齐）
+      case "create_preset":
+      case "update_preset":
+      case "delete_preset":
+      case "apply_preset":
+      case "deactivate_preset":
+      case "restore_preset":
+      case "apply_preset_to_subagent":
+      case "deactivate_preset_from_subagent":
+      case "set_resource_binding":
+      case "delete_resource_binding":
+      case "set_tool_resident":
+        return Promise.resolve(undefined);
 
       case "detect_tools":
         return Promise.resolve([
@@ -472,10 +537,16 @@ if (!isTauri) {
           { name: "systematic-debugging", path: "/Users/jarvis/.mam/skills/systematic-debugging" },
         ]);
 
+      // CompatibilityReport（serde camelCase）：条目为 {id, name, kind} / {id, name, kind, reason}
       case "check_preset_compatibility":
         return Promise.resolve({
-          compatible: [{ type: "skill", name: "brainstorming", reason: "Available in tool scope" }],
-          incompatible: [{ type: "mcp", name: "supabase", reason: "Not installed for this tool" }],
+          compatible: [
+            { id: "1", name: "brainstorming", kind: "skill" },
+            { id: "13", name: "context7", kind: "mcp" },
+          ],
+          incompatible: [
+            { id: "16", name: "supabase", kind: "mcp", reason: "Not installed for this tool" },
+          ],
         });
 
       // 遗留 codex 技能链接检测/迁移（spec §4.3）：浏览器模式视为无遗留、零报告

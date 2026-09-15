@@ -10,10 +10,18 @@ describe("Tauri mock", () => {
     expect(result.waitingCount).toBe(1);
   });
 
-  it("mocks list_presets", async () => {
-    const result = await invoke("list_presets") as Array<{ id: string; name: string }>;
-    expect(result).toHaveLength(1);
-    expect(result[0].name).toBe("前端开发");
+  // 预设组 v2（M2 前端基建）：fixture 固定为 1 通用 + 1 tool 私有样例（mock parity 收口门禁）
+  it("mocks list_presets with v2 shape", async () => {
+    const result = await invoke("list_presets") as Array<{
+      id: string;
+      name: string;
+      description: string;
+      scope: string;
+      boundTool: string | null;
+    }>;
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ name: "前端开发", scope: "universal", boundTool: null });
+    expect(result[1]).toMatchObject({ scope: "tool", boundTool: "claude" });
   });
 
   it("mocks unknown commands with undefined", async () => {

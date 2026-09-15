@@ -128,6 +128,8 @@ pub fn run() {
         commands::preset::update_preset,
         commands::preset::restore_preset,
         commands::preset::get_active_preset,
+        commands::preset::list_active_presets,
+        commands::preset::get_tool_active_resources,
         commands::preset::preview_apply_preset,
         commands::preset::set_resource_binding,
         commands::preset::list_resource_bindings,
