@@ -1443,8 +1443,39 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 200, "含空格的绝对路径（URL 编码）应可读取");
         assert_eq!(header(&r, "content-type"), "image/png");
+        // 终审 Important 2：所有图片二进制响应必须带嗅探防护双头——SVG 以顶层文档
+        // 加载时可执行内嵌脚本（同源脚本可 fetch 会话数据，SameSite=Lax 不防同源），
+        // CSP 断脚本/取资源 + nosniff 防 MIME 嗅探误判（png 与 svg 同一分支，双头断言一致）
+        assert_eq!(header(&r, "content-security-policy"), "default-src 'none'");
+        assert_eq!(header(&r, "x-content-type-options"), "nosniff");
         let bytes = r.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(bytes.as_ref(), &[0x89, b'P'], "图片走二进制直传");
+
+        // (5b) SVG 直出（终审 Important 2 的直接场景）：image/svg+xml 同样带
+        //      CSP + nosniff 双头——内容可含脚本的图片 mime 是防护重点
+        std::fs::write(
+            tmp.path().join("icon.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+        )
+        .unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=icon.svg",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "cwd 内 svg 应可读取");
+        assert_eq!(header(&r, "content-type"), "image/svg+xml");
+        assert_eq!(
+            header(&r, "content-security-policy"),
+            "default-src 'none'",
+            "SVG 直出必须断一切脚本与子资源"
+        );
+        assert_eq!(header(&r, "x-content-type-options"), "nosniff");
 
         // (6) 越界 → 403（绝对路径指向 cwd 外）
         let r = app

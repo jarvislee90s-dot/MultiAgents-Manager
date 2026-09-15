@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Board from "@/mobile/Board";
+import { applyInitialTheme } from "@/mobile/theme";
 import { MockEventSource } from "./eventSourceMock";
 import type { Session, SessionsResponse, TransitionEvent } from "@/types/session";
 
@@ -724,6 +725,10 @@ describe("Board 主题切换（P8f）", () => {
     localStorage.clear();
     document.documentElement.classList.remove("dark", "light");
     installMatchMedia(false); // 系统非浅色偏好
+    // 终审 Important 3 起镜像真实挂载序：main.tsx 在 React 挂载前调 applyInitialTheme()，
+    // 生产环境 DOM 类与 theme state 恒一致；fixture 补齐这步（此前缺失时 DOM 类从未真正
+    // 打上，toggleTheme 改为按当前生效态推导后必须真实建 DOM 前置）
+    applyInitialTheme();
   });
   afterEach(() => {
     localStorage.clear();

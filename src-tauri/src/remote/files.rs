@@ -184,22 +184,46 @@ fn mime_from_ext(ext: &str) -> String {
 // 路径提取（extract_file_paths）
 // ============================================================
 
-/// 生产薄壳：真实 home → 注入核（zcode_home_with 先例）。
-/// 提取失败（存储不可读 / 会话不存在）一律返回空表——文件面板是增强能力，
-/// 不因提取失败阻塞详情页。
+/// 生产薄壳：真实 home + env 重定向 → 注入核（zcode_home_with 先例）。
+/// env 双参（DSH_HOME / KIMI_CODE_HOME）与 /session-messages 生产薄壳**同一归口**
+/// （content::read_env_homes，终审 Important 1）——设了 env 的机器上文件面板与
+/// 详情页消息同源，不再静默空表。提取失败（存储不可读 / 会话不存在）一律返回
+/// 空表——文件面板是增强能力，不因提取失败阻塞详情页。
 pub fn extract_file_paths(agent_type: &str, session_id: &str) -> Vec<String> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    extract_file_paths_with(&home, agent_type, session_id)
+    let (dsh_env, kimi_env) = super::content::read_env_homes();
+    extract_file_paths_with_env(
+        &home,
+        dsh_env.as_deref(),
+        kimi_env.as_deref(),
+        agent_type,
+        session_id,
+    )
 }
 
-/// 注入核（测试直调 tempdir home，零真实数据目录接触）
+/// 注入核（测试直调 tempdir home，零真实数据目录接触；env 重定向恒 None）
 pub fn extract_file_paths_with(home: &Path, agent_type: &str, session_id: &str) -> Vec<String> {
+    extract_file_paths_with_env(home, None, None, agent_type, session_id)
+}
+
+/// env 注入核（终审 Important 1）：与 content::read_session_messages_impl 同款 env
+/// 双参——dsh/kimi 数据根重定向可注入（env 值作参，测试锁重定向链路，零真实 env
+/// 接触）。生产薄壳不走 None：extract_file_paths 经 content::read_env_homes 读真实值
+pub(crate) fn extract_file_paths_with_env(
+    home: &Path,
+    dsh_env_home: Option<&str>,
+    kimi_env_home: Option<&str>,
+    agent_type: &str,
+    session_id: &str,
+) -> Vec<String> {
     // 复用 Task 7 的八工具统一出口（数据同源：与详情页读的是同一份消息流），
-    // 不另立 per-tool 查询（控制者裁决）
-    match super::content::read_session_messages_with(
+    // 不另立 per-tool 查询（控制者裁决）；派发核 pub(crate) 同源复用
+    match super::content::read_session_messages_impl(
         home,
+        dsh_env_home,
+        kimi_env_home,
         agent_type,
         session_id,
         EXTRACT_MESSAGE_LIMIT,
@@ -791,5 +815,76 @@ mod tests {
         );
         // 会话不存在 → 空表（不 Err，文件面板是增强能力）
         assert!(extract_file_paths_with(tmp.path(), "claude", "missing").is_empty());
+    }
+
+    /// 终审 Important 1：/session-files 与 /session-messages 数据同源——DSH_HOME /
+    /// KIMI_CODE_HOME 数据源重定向必须同样作用到文件面板提取。env 值以**参数**注入
+    /// （dsh_env_home_redirects_data_root 同款模式，测试零真实 env 接触）。旧实现恒走
+    /// None env（read_session_messages_with）——设了 env 的机器上详情页消息正常、
+    /// 文件面板静默空表，本测试在旧实现下必红
+    #[test]
+    fn extract_file_paths_env_redirect_reaches_file_panel() {
+        // ---- dsh：会话数据只在 DSH_HOME 根下（home 下无任何 dsh 数据）----
+        let tmp = tempfile::tempdir().unwrap();
+        let dsh_env_dir = tempfile::tempdir().unwrap();
+        let header = r#"{"type":"session","version":3,"id":"session-env","cwd":"/tmp/proj","createdAt":1000,"isSeeded":false}"#;
+        let events = r#"{"type":"tool/call","seq":10,"time":1112,"data":{"name":"edit","callId":"c1","arguments":"{\"file_path\":\"/tmp/proj/src/env.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}"}}"#;
+        let frame =
+            zstd::stream::encode_all(format!("{header}\n{events}\n").as_bytes(), 3).unwrap();
+        let sess = dsh_env_dir.path().join("sessions/--proj--/escaped~dir");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
+
+        let dsh_env = dsh_env_dir.path().to_str().unwrap().to_string();
+        assert_eq!(
+            extract_file_paths_with_env(
+                tmp.path(),
+                Some(dsh_env.as_str()),
+                None,
+                "dsh",
+                "session-env"
+            ),
+            vec!["/tmp/proj/src/env.rs".to_string()],
+            "DSH_HOME 重定向必须作用到文件面板提取（与详情页消息同源）"
+        );
+        // env 未设形态（None）→ 回落 home/.dsh → 无数据 → 空表
+        assert!(
+            extract_file_paths_with_env(tmp.path(), None, None, "dsh", "session-env").is_empty()
+        );
+
+        // ---- kimi：会话数据只在 KIMI_CODE_HOME 根下 ----
+        let kimi_env_dir = tempfile::tempdir().unwrap();
+        let session_dir = kimi_env_dir
+            .path()
+            .join("sessions/wd_env")
+            .join(format!("session_{T9_UUID}"));
+        std::fs::create_dir_all(session_dir.join("agents/main")).unwrap();
+        let wire = concat!(
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Edit","args":{"path":"/tmp/proj/src/kimi-env.rs","old_string":"a","new_string":"b"}},"time":100}"#,
+            "\n",
+        );
+        std::fs::write(session_dir.join("agents/main/wire.jsonl"), wire).unwrap();
+        let index = serde_json::json!({
+            "sessionId": T9_UUID,
+            "sessionDir": session_dir.to_string_lossy(),
+            "workDir": "/tmp/proj",
+        })
+        .to_string();
+        std::fs::write(
+            kimi_env_dir.path().join("session_index.jsonl"),
+            format!("{index}\n"),
+        )
+        .unwrap();
+
+        let kimi_env = kimi_env_dir.path().to_str().unwrap().to_string();
+        assert_eq!(
+            extract_file_paths_with_env(tmp.path(), None, Some(kimi_env.as_str()), "kimi", T9_UUID),
+            vec!["/tmp/proj/src/kimi-env.rs".to_string()],
+            "KIMI_CODE_HOME 重定向必须作用到文件面板提取（与详情页消息同源）"
+        );
+        assert!(
+            extract_file_paths_with_env(tmp.path(), None, None, "kimi", T9_UUID).is_empty(),
+            "env 未设形态回落 ~/.kimi-code → 无数据 → 空表"
+        );
     }
 }

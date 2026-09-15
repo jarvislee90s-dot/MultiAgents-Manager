@@ -46,11 +46,15 @@ export function applyInitialTheme(theme: Theme = getInitialTheme()): void {
 
 /** 翻转主题：写 localStorage 持久化 + 切换 documentElement 的 dark 类 + 返回新主题 */
 export function toggleTheme(): Theme {
-  const next = getInitialTheme() === "dark" ? "light" : "dark";
+  // next 从**当前生效态**推导（终审 Important 3）：旧实现从 getInitialTheme() 推导，
+  // 写 localStorage 失败被吞后该函数恒回落系统偏好 → 连续点击恒产同一 next，
+  // 单向锁死（用户永远切不回）。以 documentElement 实际类状态翻转，写失败也自愈
+  const next: Theme = document.documentElement.classList.contains("dark") ? "light" : "dark";
   try {
     localStorage.setItem(KEY, next);
   } catch {
-    // 写失败（隐私模式/配额）：本次会话内类切换仍生效，仅刷新后回落系统偏好
+    // 写失败（隐私模式/配额）：持久化放弃，但 next 已按生效态推导、不依赖
+    // localStorage 回读——本次会话内仍可继续往返切换，仅刷新后回落系统偏好
   }
   document.documentElement.classList.toggle("dark", next === "dark");
   return next;

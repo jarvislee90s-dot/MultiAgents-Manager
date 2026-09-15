@@ -125,6 +125,27 @@ describe("mobile theme：toggleTheme 翻转 + 持久化 + 类切换", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     spy.mockRestore();
   });
+
+  it("localStorage 写入持续抛错：连续 toggle 仍能往返，不单向锁死", () => {
+    // 终审 Important 3：写失败被吞后 getInitialTheme() 恒回落系统偏好（无 saved），
+    // 旧实现连续点击恒产同一 next（dark→light 后永远切不回）。修复后 next 从
+    // documentElement 当前生效态推导，写失败也自愈可往返。
+    // spy 在 finally 里恢复：红态断言失败时不得让 mock 泄漏污染后续用例
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    try {
+      document.documentElement.classList.add("dark");
+      expect(toggleTheme()).toBe("light");
+      expect(document.documentElement.classList.contains("dark")).toBe(false);
+      expect(toggleTheme()).toBe("dark");
+      expect(document.documentElement.classList.contains("dark")).toBe(true);
+      expect(toggleTheme()).toBe("light");
+      expect(document.documentElement.classList.contains("dark")).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("mobile theme：applyInitialTheme 初始应用", () => {

@@ -284,6 +284,18 @@ pub async fn read_file(
             [
                 (axum::http::header::CONTENT_TYPE, mime),
                 (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+                // 终审 Important 2：图片二进制直出必须带嗅探防护双头。SVG 以顶层
+                // 文档加载时可执行内嵌脚本（同源脚本可 fetch 会话数据，cookie
+                // SameSite=Lax 不防同源攻击）——CSP 断脚本与一切子资源 +
+                // nosniff 防 MIME 嗅探把图片内容误判为可执行文档
+                (
+                    axum::http::header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'".to_string(),
+                ),
+                (
+                    axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                    "nosniff".to_string(),
+                ),
             ],
             bytes,
         )

@@ -88,6 +88,17 @@ impl SessionMessage {
 pub type MessageSourceFn =
     dyn Fn(&str, &str, usize) -> Result<Vec<SessionMessage>, String> + Send + Sync;
 
+/// env 双参读取（DSH_HOME / KIMI_CODE_HOME）——**生产薄壳专用单一归口**（终审
+/// Important 1）：/session-messages 与 /session-files 两条生产薄壳都从这里取值，
+/// 禁止在别处复制 std::env::var 逻辑。值一律以参数传入注入核（impl），测试路径
+/// 零真实 env 接触（与并行 env 测试互斥锁无交集）
+pub(crate) fn read_env_homes() -> (Option<String>, Option<String>) {
+    (
+        std::env::var("DSH_HOME").ok(),
+        std::env::var("KIMI_CODE_HOME").ok(),
+    )
+}
+
 /// 统一出口（生产薄壳）：真实 home + 环境重定向（DSH_HOME / KIMI_CODE_HOME，
 /// 与各工具看板扫描同源——dsh 走 scan_sessions(&dsh_home()) 的 M0 F14 优先级，
 /// kimi 走 resolve_data_root 的 env 优先级）→ 注入核。
@@ -99,10 +110,9 @@ pub fn read_session_messages(
     limit: usize,
 ) -> Result<Vec<SessionMessage>, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法确定用户主目录".to_string())?;
-    // env 只在生产薄壳读取（fix round 1 Important 1）：值以参数传入注入核，
-    // 测试路径零真实 env 接触（与并行 env 测试互斥锁无交集）
-    let dsh_env = std::env::var("DSH_HOME").ok();
-    let kimi_env = std::env::var("KIMI_CODE_HOME").ok();
+    // env 只在生产薄壳读取（fix round 1 Important 1；读取归口 read_env_homes，
+    // 终审 Important 1 起 files.rs 生产薄壳同源复用）
+    let (dsh_env, kimi_env) = read_env_homes();
     read_session_messages_impl(
         &home,
         dsh_env.as_deref(),
@@ -123,8 +133,10 @@ pub fn read_session_messages_with(
     read_session_messages_impl(home, None, None, agent_type, session_id, limit)
 }
 
-/// 派发核（env 双参注入，dsh/kimi 消费；kimi 的 resolve_data_root 双参模式同款）
-fn read_session_messages_impl(
+/// 派发核（env 双参注入，dsh/kimi 消费；kimi 的 resolve_data_root 双参模式同款）。
+/// `pub(crate)`（终审 Important 1）：files.rs 的 env 注入核（extract_file_paths_with_env）
+/// 同源复用——文件面板提取与 /session-messages 走同一派发路径
+pub(crate) fn read_session_messages_impl(
     home: &Path,
     dsh_env_home: Option<&str>,
     kimi_env_home: Option<&str>,
