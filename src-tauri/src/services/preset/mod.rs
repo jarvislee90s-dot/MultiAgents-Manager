@@ -22,6 +22,35 @@ pub struct ApplyResult {
     pub restored_native: Vec<String>,
 }
 
+/// 统一的 MAM 资源启停分派（DRY，缺口表 #28 / Minor#7）：apply_preset 与
+/// restore_tool 里三处按 kind 路由 enable/disable 的 match 块收敛到此。
+/// name = extension_id 剥掉 "<kind>-" 前缀（无前缀则原样）；plugin 的子类型
+/// 参数取 extensions.tags（历史约定），缺省 "file"。未知 kind 返回 Err——
+/// restore 路径旧闭包的 `_ => Ok(())` 致因 kind 由 extension_id 前缀推导、
+/// 必为 skill/mcp/plugin 三选一而不可达，合并后行为等价。
+fn toggle_ext(ext_id: &str, kind: &str, tool_id: &str, on: bool) -> Result<(), String> {
+    let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
+    match kind {
+        "skill" => {
+            if on {
+                services::enable_skill_for_tool(name, tool_id)
+            } else {
+                services::disable_skill_for_tool(name, tool_id)
+            }
+        }
+        "mcp" => services::toggle_mcp(name, tool_id, on),
+        "plugin" => {
+            let plugin_kind = database::list_extensions()
+                .into_iter()
+                .find(|e| e.id == ext_id)
+                .and_then(|e| e.tags.clone())
+                .unwrap_or_else(|| "file".to_string());
+            crate::services::plugin::toggle_plugin(name, tool_id, on, &plugin_kind)
+        }
+        _ => Err(format!("未知类型: {}", kind)),
+    }
+}
+
 /// 工具私有预设的跨工具应用属硬错误（spec §3.3）
 pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, String> {
     let preset =
@@ -92,19 +121,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, Strin
         let outcome = if is_native_item {
             ensure_native_present(tool_id, name, &mut result.restored_native)
         } else {
-            match kind.as_str() {
-                "skill" => services::enable_skill_for_tool(name, tool_id),
-                "mcp" => services::toggle_mcp(name, tool_id, true),
-                "plugin" => {
-                    let plugin_kind = extensions
-                        .iter()
-                        .find(|e| &e.id == ext_id)
-                        .and_then(|e| e.tags.clone())
-                        .unwrap_or_else(|| "file".to_string());
-                    crate::services::plugin::toggle_plugin(name, tool_id, true, &plugin_kind)
-                }
-                _ => Err(format!("未知类型: {}", kind)),
-            }
+            toggle_ext(ext_id, kind, tool_id, true)
         };
         match outcome {
             Ok(()) => result.success += 1,
@@ -245,39 +262,8 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
         })
         .collect();
 
-    let extensions = database::list_extensions();
-    let enable_one = |ext_id: &str, kind: &str| -> Result<(), String> {
-        let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
-        match kind {
-            "skill" => services::enable_skill_for_tool(name, tool_id),
-            "mcp" => services::toggle_mcp(name, tool_id, true),
-            "plugin" => {
-                let plugin_kind = extensions
-                    .iter()
-                    .find(|e| e.id == ext_id)
-                    .and_then(|e| e.tags.clone())
-                    .unwrap_or_else(|| "file".to_string());
-                crate::services::plugin::toggle_plugin(name, tool_id, true, &plugin_kind)
-            }
-            _ => Ok(()),
-        }
-    };
-    let disable_one = |ext_id: &str, kind: &str| -> Result<(), String> {
-        let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
-        match kind {
-            "skill" => services::disable_skill_for_tool(name, tool_id),
-            "mcp" => services::toggle_mcp(name, tool_id, false),
-            "plugin" => {
-                let plugin_kind = extensions
-                    .iter()
-                    .find(|e| e.id == ext_id)
-                    .and_then(|e| e.tags.clone())
-                    .unwrap_or_else(|| "file".to_string());
-                crate::services::plugin::toggle_plugin(name, tool_id, false, &plugin_kind)
-            }
-            _ => Ok(()),
-        }
-    };
+    let enable_one = |ext_id: &str, kind: &str| toggle_ext(ext_id, kind, tool_id, true);
+    let disable_one = |ext_id: &str, kind: &str| toggle_ext(ext_id, kind, tool_id, false);
 
     for (id, kind) in &target {
         if !current.iter().any(|(cid, _)| cid == id) {

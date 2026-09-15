@@ -513,11 +513,11 @@ pub fn parse_supported_agents(skill_md: &str) -> Option<Vec<String>>
 - Modify: `src-tauri/src/services/preset/mod.rs`（DRY）
 
 **验收条件：**
-- [ ] 手册双语成文（非占位模板），结构与 `docs/user-manual/zh/` 其他章节一致
-- [ ] DRY（缺口表 #28 / Minor#7）：三处 enable/disable 分派闭包抽 `fn toggle_ext(ext_id, kind, tool_id, on) -> Result<(), String>`，行为不变、全量测试绿
-- [ ] `cargo test && cargo clippy -- -D warnings && cargo fmt --check`；`pnpm format:check && pnpm lint && pnpm build`
+- [x] 手册双语成文（非占位模板），结构与 `docs/user-manual/zh/` 其他章节一致
+- [x] DRY（缺口表 #28 / Minor#7）：三处 enable/disable 分派闭包抽 `fn toggle_ext(ext_id, kind, tool_id, on) -> Result<(), String>`，行为不变、全量测试绿
+- [x] `cargo test && cargo clippy -- -D warnings && cargo fmt --check`；`pnpm format:check && pnpm lint && pnpm build`
 
-- [ ] **Step 1: 手册** → **Step 2: DRY** → **Step 3: 门禁 + Commit** `docs(preset-v2): user manual zh/en + toggle_ext DRY + final gate`
+- [x] **Step 1: 手册** → **Step 2: DRY** → **Step 3: 门禁 + Commit** `docs(preset-v2): user manual zh/en + toggle_ext DRY + final gate`
 
 ### Task 19: 整体关门验收（本地，收官前最后一步）
 
