@@ -4,9 +4,10 @@
 // - `extract_file_paths`：从会话消息流（复用 content::read_session_messages，八工具
 //   统一出口）的 tool-call 条目里提取涉及的文件路径——**泛化实现，不做 per-tool
 //   提取器**（控制者裁决 2026-09-15）：递归走 toolArgs JSON 树，收集
-//   file_path / path / filename / abs_path 键下的字符串值（须含路径分隔符或
-//   `.扩展名` 才算路径候选），去重保序。对八工具统一生效，Task 9 只需补各工具
-//   的 fixture 测试。
+//   file_path / path / filename / abs_path（+ Task 9 实测补键 filePath / file，
+//   证据见 task-9-report.md）键下的字符串值（须含路径分隔符或 `.扩展名` 才算
+//   路径候选），去重保序。对八工具统一生效；各工具真实 toolArgs 形态由
+//   extract_chain_* 系列 fixture 测试锁定。
 // - `read_file_safe`：文件预览的安全读取内核——canonicalize 双方后限定在会话 cwd
 //   之内（越界拒绝）、只读、双阈值大小上限（图片扩展名 5MB / 其余 500KB，按
 //   Global Constraints 的 mime 分支）、按扩展名给 MIME。
@@ -35,8 +36,20 @@ const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 /// 路径提取的消息读取尾窗：与移动端详情页默认 limit 同量级（按需单会话读取，
 /// 非 3s 轮询路径；更早的工具调用不回捞，M3 接受为已知范围）
 const EXTRACT_MESSAGE_LIMIT: usize = 200;
-/// 递归收集的参数键集合（控制者裁决的四个键；小写精确匹配）
-const PATH_KEYS: &[&str] = &["file_path", "path", "filename", "abs_path"];
+/// 递归收集的参数键集合（小写精确匹配）。基础四键 `file_path`/`path`/`filename`/
+/// `abs_path` 为控制者裁决；Task 9 按各工具真实 toolArgs 形态探测补两键（证据见
+/// task-9-report.md）：`filePath` 驼峰——OpenCode 官方工具 schema（edit/write/read，
+/// 本机库无 tool part 样本，文档级证据）；`file`——Kimi 旧版 Read 参数（本机
+/// wire.jsonl 实测 3 例绝对路径）。键名单对八工具统一生效，不做 per-tool 分支；
+/// 误收风险由 is_path_candidate 候选判定（URL/纯词/换行排除）兜底
+const PATH_KEYS: &[&str] = &[
+    "file_path",
+    "path",
+    "filename",
+    "abs_path",
+    "filePath",
+    "file",
+];
 /// 单个路径候选的长度上限（超长串不是可预览文件，纯防御）
 const MAX_PATH_LEN: usize = 4096;
 
@@ -152,7 +165,8 @@ fn mime_from_ext(ext: &str) -> String {
         "cpp" | "cc" | "hpp" => "text/cpp",
         "css" => "text/css",
         "sh" => "text/shell",
-        "toml" | "yaml" | "yml" => "text/toml",
+        "toml" => "text/toml",
+        "yaml" | "yml" => "text/yaml",
         "json" => "application/json",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -400,6 +414,10 @@ mod tests {
         assert_eq!(mime_from_ext("gif"), "image/gif");
         assert_eq!(mime_from_ext("svg"), "image/svg+xml");
         assert_eq!(mime_from_ext("json"), "application/json");
+        // Task 8 评审 Minor①：yaml/yml 从 toml 拆出，不再误标 text/toml
+        assert_eq!(mime_from_ext("toml"), "text/toml");
+        assert_eq!(mime_from_ext("yaml"), "text/yaml");
+        assert_eq!(mime_from_ext("yml"), "text/yaml");
         assert_eq!(mime_from_ext(""), "text/plain");
         assert_eq!(mime_from_ext("unknownxyz"), "text/plain");
         // 大写扩展名（IMG.PNG 实测形态）不误判为文本
@@ -512,8 +530,248 @@ mod tests {
         );
     }
 
+    // ==== Task 9：七工具提取链路 fixture（真实 toolArgs 形态口径，逐工具探测证据
+    // 见 task-9-report.md）。全链路 = tempdir home → content 层统一出口 → 泛化提取。
+    // claude 已有 extract_file_paths_with_reads_through_content_layer（Task 8 实机验证）。====
+
+    const T9_UUID: &str = "1f2e3d4c-5b6a-4948-8276-9a0b8c7d6e5f";
+
+    /// ZCode tmp sqlite（message + part 表，content.rs 测试同款 schema）
+    fn t9_zcode_db(home: &Path) -> rusqlite::Connection {
+        let db = home.join(".zcode/cli/db/db.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT, sequence INTEGER,
+                time_created INTEGER, data TEXT
+             );
+             CREATE TABLE part (
+                id TEXT PRIMARY KEY, message_id TEXT, sequence INTEGER, data TEXT
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 实测形态（本机 ~/.zcode 真实库，4646+758+3370 命中）：Edit/Write/Read 的
+    /// state.input 用 file_path 键；Bash 的 command 键不是路径参数——不得误收
+    #[test]
+    fn extract_chain_zcode_tool_part_input_file_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = t9_zcode_db(tmp.path());
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'sess-t9', 1, 100, '{\"role\":\"assistant\",\"semantics\":{\"kind\":\"assistant\"}}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('p1', 'm1', 1, '{\"type\":\"tool\",\"tool\":\"Edit\",\"state\":{\"input\":{\"file_path\":\"/tmp/proj/src/main.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}}}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('p2', 'm1', 2, '{\"type\":\"tool\",\"tool\":\"Bash\",\"state\":{\"input\":{\"command\":\"cat /etc/hostname\"}}}')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "zcode", "sess-t9"),
+            vec!["/tmp/proj/src/main.rs".to_string()],
+            "zcode state.input.file_path 收集；bash command 不收"
+        );
+    }
+
+    /// 实测形态（本机 ~/.codex 真实 rollout 抽样 40 份）：view_image 的 arguments.path
+    /// 是唯一成规模的文件路径键；apply_patch 的 command 是补丁全文（路径只是嵌在
+    /// 补丁字符串里，不是路径参数键）——嵌在串内的路径不得被误收
+    #[test]
+    fn extract_chain_codex_rollout_function_call_arguments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".codex/sessions/2026/09/15");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rollout = dir.join(format!("rollout-2026-09-15T00-00-00-{T9_UUID}.jsonl"));
+        let meta = format!(
+            r#"{{"timestamp":"2026-09-15T00:00:00.000Z","type":"session_meta","payload":{{"id":"{T9_UUID}","cwd":"/tmp/proj"}}}}"#
+        );
+        let view_image = r#"{"timestamp":"2026-09-15T00:00:10.000Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/tmp/shots/page1.png\"}"}}"#;
+        let apply_patch = r#"{"timestamp":"2026-09-15T00:00:20.000Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"command\":\"*** Add File: /tmp/proj/embedded.rs\"}"}}"#;
+        std::fs::write(&rollout, format!("{meta}\n{view_image}\n{apply_patch}\n")).unwrap();
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "codex", T9_UUID),
+            vec!["/tmp/shots/page1.png".to_string()],
+            "codex arguments.path 收集；补丁串内嵌路径不收"
+        );
+    }
+
+    /// dsh tmp home zstd 代际（content.rs 测试同款 header/events 编码）。
+    /// 实测形态（本机 ~/.dsh 21 份代际日志）：read/write/edit/read_image 的
+    /// arguments.file_path；present 的 files[].path（数组嵌套递归）；bash 的
+    /// command 是命令串——不得误收
+    #[test]
+    fn extract_chain_dsh_tool_call_arguments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let header = r#"{"type":"session","version":3,"id":"session-t9","cwd":"/tmp/proj","createdAt":1000,"isSeeded":false}"#;
+        let events = concat!(
+            r#"{"type":"tool/call","seq":10,"time":1112,"data":{"name":"edit","callId":"c1","arguments":"{\"file_path\":\"/tmp/proj/src/a.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}"}}"#,
+            "\n",
+            r#"{"type":"tool/call","seq":11,"time":1113,"data":{"name":"bash","callId":"c2","arguments":"{\"command\":\"ls /etc\"}"}}"#,
+            "\n",
+            r#"{"type":"tool/call","seq":12,"time":1114,"data":{"name":"present","callId":"c3","arguments":"{\"files\":[{\"path\":\"/tmp/proj/docs/report.md\",\"description\":\"d\"}]}"}}"#,
+            "\n",
+        );
+        let frame = zstd::stream::encode_all(format!("{header}\n{events}").as_bytes(), 3).unwrap();
+        let sess = tmp.path().join(".dsh/sessions/--proj--/escaped~dir");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "dsh", "session-t9"),
+            vec![
+                "/tmp/proj/src/a.rs".to_string(),
+                "/tmp/proj/docs/report.md".to_string(),
+            ],
+            "dsh arguments.file_path 收集 + files[].path 嵌套收集；bash command 不收"
+        );
+    }
+
+    /// Kimi tmp home（session_index 定位 + wire.jsonl）。实测形态（本机
+    /// ~/.kimi-code 35 份 wire）：Read/Edit/Write/Grep 的 args.path；另有旧版
+    /// Read 用 args.file（3 实测绝对路径样本）——file 键须在收集名单内
+    #[test]
+    fn extract_chain_kimi_wire_tool_call_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".kimi-code");
+        let session_dir = home
+            .join("sessions/wd_t9")
+            .join(format!("session_{T9_UUID}"));
+        std::fs::create_dir_all(session_dir.join("agents/main")).unwrap();
+        let lines = concat!(
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Edit","args":{"path":"/tmp/proj/src/m.rs","old_string":"a","new_string":"b"}},"time":100}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c2","name":"Read","args":{"file":"/tmp/proj/README.md","offset":10,"limit":80}},"time":200}"#,
+            "\n",
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c3","name":"Bash","args":{"command":"ls /tmp"}},"time":300}"#,
+            "\n",
+        );
+        std::fs::write(session_dir.join("agents/main/wire.jsonl"), lines).unwrap();
+        let index = serde_json::json!({
+            "sessionId": T9_UUID,
+            "sessionDir": session_dir.to_string_lossy(),
+            "workDir": "/tmp/proj",
+        })
+        .to_string();
+        std::fs::write(home.join("session_index.jsonl"), format!("{index}\n")).unwrap();
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "kimi", T9_UUID),
+            vec![
+                "/tmp/proj/src/m.rs".to_string(),
+                "/tmp/proj/README.md".to_string(),
+            ],
+            "kimi args.path 与旧版 args.file 均收集；bash command 不收"
+        );
+    }
+
+    /// WorkBuddy tmp home（projects 扫描定位）。实测形态（本机 ~/.workbuddy）：
+    /// OpenAI 风格 function_call 的 arguments.file_path（Read/Write/Edit）
+    #[test]
+    fn extract_chain_workbuddy_function_call_arguments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".workbuddy/projects/-tmp-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines = concat!(
+            r#"{"type":"message","role":"user","content":[{"type":"text","text":"改一下"}]}"#,
+            "\n",
+            r#"{"type":"function_call","name":"Edit","arguments":"{\"file_path\":\"/tmp/proj/src/wb.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}"}"#,
+            "\n",
+            r#"{"type":"function_call","name":"Bash","arguments":"{\"command\":\"cat /etc/hosts\"}"}"#,
+            "\n",
+        );
+        std::fs::write(dir.join(format!("{T9_UUID}.jsonl")), lines).unwrap();
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "workbuddy", T9_UUID),
+            vec!["/tmp/proj/src/wb.rs".to_string()],
+            "workbuddy arguments.file_path 收集；bash command 不收"
+        );
+    }
+
+    /// OpenCode tmp sqlite。本机库无 tool part 样本（实测只有 text/patch）——
+    /// 形态按官方文档合成：edit/write/read 的 state.input 用 filePath 驼峰键
+    /// （opencode.ai/docs/tools 与 issue #729 交叉确认），须在收集名单内
+    #[test]
+    fn extract_chain_opencode_tool_part_state_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (message_id TEXT, data TEXT, time_created INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', ?1, 100, '{\"role\":\"assistant\"}')",
+            ["sess-t9-oc"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('m1', '{\"type\":\"tool\",\"tool\":\"edit\",\"state\":{\"input\":{\"filePath\":\"/tmp/proj/src/oc.ts\",\"oldString\":\"a\",\"newString\":\"b\"}}}', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('m1', '{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"input\":{\"command\":\"ls\"}}}', 2)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "opencode", "sess-t9-oc"),
+            vec!["/tmp/proj/src/oc.ts".to_string()],
+            "opencode state.input.filePath（驼峰）收集；bash command 不收"
+        );
+    }
+
+    /// OpenClaw tmp sqlite（acp_replay_events）。协议形态（sessionUpdate/rawInput）
+    /// 为 2026-09-15 实机探测确认，但本机库无 tool_call 事件样本、rawInput 内的
+    /// 路径键名无实测依据——合成用 file_path 锁「replay → toolArgs → 提取」链路，
+    /// 真实键名若不同，泛化名单（path/file/filePath 等）大概率兜住（低置信度备案）
+    #[test]
+    fn extract_chain_openclaw_acp_tool_call_raw_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".openclaw/state/openclaw.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE acp_replay_events (
+                session_id TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL,
+                session_key TEXT NOT NULL, run_id TEXT, update_json TEXT NOT NULL,
+                PRIMARY KEY (session_id, seq)
+             );",
+        )
+        .unwrap();
+        let ins = |seq: i64, update: &str| {
+            conn.execute(
+                "INSERT INTO acp_replay_events (session_id, seq, at, session_key, update_json) VALUES ('s-t9', ?1, ?2, 'k', ?3)",
+                rusqlite::params![seq, seq * 100, update],
+            )
+            .unwrap();
+        };
+        ins(
+            1,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"c1","title":"write","rawInput":{"file_path":"/tmp/proj/src/oclaw.rs","content":"x"}}"#,
+        );
+        ins(
+            2,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"c2","title":"bash","rawInput":{"command":"ls /tmp"}}"#,
+        );
+        assert_eq!(
+            extract_file_paths_with(tmp.path(), "openclaw", "s-t9"),
+            vec!["/tmp/proj/src/oclaw.rs".to_string()],
+            "openclaw rawInput 经 ACP 映射后收集；bash command 不收"
+        );
+    }
+
     /// 计划测试名保留：注入核全链路（tempdir home 的 claude fixture → 统一出口 → 提取）。
-    /// Task 9 将按同款为其余七工具补 fixture。
+    /// Task 9 已按同款为其余七工具补 fixture（上方 extract_chain_* 系列）。
     #[test]
     fn extract_file_paths_with_reads_through_content_layer() {
         let tmp = tempfile::tempdir().unwrap();

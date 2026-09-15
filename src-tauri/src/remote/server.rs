@@ -404,7 +404,7 @@ mod tests {
                 host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 // 本组测试不触 /session-files /file：注入恒空的路径源
-                path_source: Box::new(|_, _| Vec::new()), // 本组测试不触 /session-messages
+                path_source: Box::new(|_, _| Vec::new()), // 本组测试不触 /session-files /file
                 watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
             }),
             t,
