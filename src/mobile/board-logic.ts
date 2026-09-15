@@ -111,6 +111,29 @@ export function filterEnabledTools(tools: string[], enabled: Set<string>): strin
   return tools.filter((t) => enabled.has(t));
 }
 
+// ---- P8f chip 浅色态配色（Task 4）----
+// 问题：品牌色原值直接当文字色在浅底上对比度不足。白底 + 12% 品牌底实测
+// 1.96–3.84（openclaw 1.96 / opencode 2.27 / claude 2.76…），低于 WCAG AA 小字 4.5。
+// 深底（slate-950）上同色为 4.10–8.13，故仅浅色态压暗文字色，暗色态保持 Task 3 原口径。
+
+/** 浅色态 chip 文字色压暗系数：品牌色各通道乘 0.6 后，八色在白底+12%品牌底上
+ *  对比度 4.93–8.00（最低 openclaw 4.93），全部达 AA。系数即该口径的单一来源 */
+export const CHIP_LIGHT_TEXT_FACTOR = 0.6;
+
+/** 按系数压暗 6 位 hex（#RRGGBB）：chip 浅色态文字色的唯一变换，
+ *  纯函数、不改入参。入参非法时返回原值（防御：不产出 NaN 色） */
+export function darkenHex(hex: string, factor: number): string {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex);
+  if (!m) return hex;
+  const toHex = (v: number) =>
+    Math.min(255, Math.max(0, Math.round(v)))
+      .toString(16)
+      .padStart(2, "0");
+  const n = parseInt(m[1], 16);
+  const [r, g, b] = [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+  return `#${toHex(r * factor)}${toHex(g * factor)}${toHex(b * factor)}`;
+}
+
 // 状态 → 圆点颜色，三色语义与桌面 StatusLight 一致：
 // 红=待处理（waiting）/ 黄=正在运行（processing/thinking/compacting）/ 绿=已完成（idle/finished）
 export const STATUS_DOT_COLOR: Record<SessionStatus, string> = {

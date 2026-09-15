@@ -1,2 +1,10 @@
 /* 移动端样式入口：仅 tailwind 原子类，不引入桌面全量样式（src/index.css） */
 @import "tailwindcss";
+
+/* P8f 必需：把 dark: 变体声明为类策略（Tailwind v4 默认是 media 查询）。
+ * 默认行为下 dark:* 只跟随系统 prefers-color-scheme，theme.ts 的
+ * classList.toggle("dark") 手动切换对它完全无效（P8f 手动切换即死功能）。
+ * 声明为 :where(.dark, .dark *) 后，dark:* 仅在 documentElement（或其后代）带
+ * dark 类时生效——桌面端 src/index.css 无需此行，因为桌面走语义 token
+ * （.dark 覆盖 CSS 变量）而非 dark: 前缀类。 */
+@custom-variant dark (&:where(.dark, .dark *));

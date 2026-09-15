@@ -313,6 +313,47 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     expect(["#D97757", "rgb(217, 119, 87)", "rgb(217,119,87)"]).toContain(bg);
   });
 
+  it("未选中 chip 文字色随主题：浅色态用压暗色（AA 达标），暗色态回品牌原色", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/m/api/v1/host") return okHost(["claude"]);
+        return okSessionsWith([
+          chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
+        ]);
+      })
+    );
+    // 浅色态起手（系统浅色偏好）；jsdom 无 matchMedia，本用例内安装并在末尾还原，
+    // 防 shim 泄漏到后续用例改变其主题初值
+    const prevMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: true, // 系统浅色偏好
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      const claudeChip = () =>
+        within(screen.getByTestId("tool-chips"))
+          .getByText("Claude")
+          .closest("button") as HTMLElement;
+      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#824734|rgb\(130, 71, 52\))$/);
+      // 切到暗色：文字色回品牌原色 #D97757（toggle 触发重渲染，chip 现算主题）
+      fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
+      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#D97757|rgb\(217, 119, 87\))$/);
+    } finally {
+      window.matchMedia = prevMatchMedia;
+      localStorage.clear();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
   it("多行折叠：无溢出时不出现展开/收起按钮，容器无折叠裁剪样式", async () => {
     vi.stubGlobal(
       "fetch",
@@ -458,5 +499,91 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     expect(allChip()).toHaveAttribute("aria-pressed", "true");
     // 回落生效的证据：codex 卡可见（filter 残留则显示空态提示）
     expect(screen.getByText("proj-x")).toBeInTheDocument();
+  });
+});
+
+// M3 Task 4：P8f 日/夜双皮肤（顶部切换按钮 + 容器双态底色）
+//
+// 测试口径：按钮的可访问名描述「点下去会切到什么」（暗色下叫「切换到浅色模式」），
+// 主题初值来自 getInitialTheme（localStorage > matchMedia > 默认 dark，详见 theme.test.ts）。
+describe("Board 主题切换（P8f）", () => {
+  // jsdom 无 matchMedia：安装可控 shim（同 tests/pet/petSettings.test.tsx:11 模式）
+  function installMatchMedia(matches: boolean) {
+    window.matchMedia = ((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    document.documentElement.classList.remove("dark", "light");
+    installMatchMedia(false); // 系统非浅色偏好
+  });
+  afterEach(() => {
+    localStorage.clear();
+    document.documentElement.classList.remove("dark", "light");
+  });
+
+  it("初始暗色：按钮文案为「切换到浅色模式」；点击后翻转浅色——移除 dark 类 + 持久化 mam-theme=light", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => okSessions(0))
+    );
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+
+    const toggle = screen.getByRole("button", { name: "切换到浅色模式" });
+    fireEvent.click(toggle);
+    // 翻转后：documentElement 去掉 dark 类（dark: 前缀类随之全部失效）
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+    expect(localStorage.getItem("mam-theme")).toBe("light");
+    // 图标/文案同步为「切回深色」
+    expect(screen.getByRole("button", { name: "切换到深色模式" })).toBeInTheDocument();
+
+    // 再点一次回暗色：dark 类加回、持久化翻转
+    fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    expect(localStorage.getItem("mam-theme")).toBe("dark");
+  });
+
+  it("手动选择优先于系统：已存 mam-theme=light + 系统暗色 → 初始按钮为「切换到深色模式」", async () => {
+    localStorage.setItem("mam-theme", "light");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => okSessions(0))
+    );
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    expect(screen.getByRole("button", { name: "切换到深色模式" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "切换到浅色模式" })).not.toBeInTheDocument();
+  });
+
+  it("容器底色双态回归锁：浅色底（bg-white）+ dark: 前缀深色底，body 同款不残留黑底", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/m/api/v1/host") return okHost(["claude"]);
+        return okSessionsWith([
+          chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
+        ]);
+      })
+    );
+    const { container } = render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    // 看板根容器：双态类同时存在，浅色态不再是黑底（P8f 浅色模式整体可读性的最小锁）
+    const root = container.querySelector("div.min-h-screen") as HTMLElement;
+    expect(root.className).toContain("bg-white");
+    expect(root.className).toContain("dark:bg-slate-950");
+    // 卡片同理：浅色底 + dark 前缀深色底
+    const card = container.querySelector("ul > li") as HTMLElement;
+    expect(card.className).toContain("bg-slate-100");
+    expect(card.className).toContain("dark:bg-slate-900");
   });
 });

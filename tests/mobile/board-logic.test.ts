@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_TYPES,
+  CHIP_LIGHT_TEXT_FACTOR,
   STATUS_DOT_COLOR,
   TOOL_BRAND_COLORS,
   TOOL_FILTERS,
   TOOL_LABELS,
+  darkenHex,
   filterByAgent,
   filterEnabledTools,
   formatRelativeTime,
@@ -245,5 +247,70 @@ describe("board-logic 相对时长（now 由调用方注入，可测）", () => 
 
   it("不可解析 → 占位符", () => {
     expect(formatRelativeTime("garbage", now)).toBe("--");
+  });
+});
+
+// P8f chip 浅色态配色（Task 4）：品牌原色当文字在浅底上对比度不足（实测 1.96–3.84），
+// 压暗到 AA 后交付。本组测试把「系数口径」与「八色全达标」锁进 CI——
+// 未来有人替换品牌色/放大系数导致不达标时立刻变红。
+describe("P8f chip 浅色态文字色（darkenHex + 对比度）", () => {
+  // WCAG 相对亮度与对比度（2.0 版公式，与实现文档中的实测口径一致）
+  function luminance(hex: string): number {
+    const [r, g, b] = [1, 3, 5]
+      .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  function contrast(a: string, b: string): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  // 12% 品牌色淡底（chip 未选中态背景；白底 alpha 合成）
+  function blendedBackground(brand: string): string {
+    const rgb = [1, 3, 5].map((i) => parseInt(brand.slice(i, i + 2), 16));
+    return (
+      "#" +
+      rgb
+        .map((v) =>
+          Math.round(v * 0.12 + 255 * 0.88)
+            .toString(16)
+            .padStart(2, "0")
+        )
+        .join("")
+    );
+  }
+
+  it("darkenHex：各通道乘系数并取整（含进位/截断边界）", () => {
+    expect(darkenHex("#ffffff", 0.6)).toBe("#999999");
+    expect(darkenHex("#000000", 0.6)).toBe("#000000");
+    expect(darkenHex("#D97757", 0.6)).toBe("#824734");
+    // 四舍五入边界：0.6 × 255 = 153 → 99(h)
+    expect(darkenHex("#ff0000", 0.5)).toBe("#800000"); // 0.5×255=127.5 → 128
+  });
+
+  it("darkenHex：非法入参原样返回（不产出 NaN 色）", () => {
+    expect(darkenHex("not-a-color", 0.6)).toBe("not-a-color");
+    expect(darkenHex("#fff", 0.6)).toBe("#fff"); // 3 位简写不接受，避免歧义
+    expect(darkenHex("", 0.6)).toBe("");
+  });
+
+  it("八工具品牌色压暗后，在白底 + 12% 品牌底上对比度全部 ≥ 4.5（WCAG AA 小字）", () => {
+    for (const brand of Object.values(TOOL_BRAND_COLORS)) {
+      const text = darkenHex(brand, CHIP_LIGHT_TEXT_FACTOR);
+      const bg = blendedBackground(brand);
+      const c = contrast(text, bg);
+      expect(
+        c,
+        `品牌色 ${brand} 压暗后 ${text} 在 ${bg} 上对比度仅 ${c.toFixed(2)}`
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("回归锁：品牌原色在浅底上确实不达标（证明压暗不是多余变换）", () => {
+    const failures = Object.values(TOOL_BRAND_COLORS).filter(
+      (brand) => contrast(brand, blendedBackground(brand)) < 4.5
+    );
+    // 八色全部不达标——若未来品牌色整体换深色系，此断言会变红，届时可评估移除压暗逻辑
+    expect(failures).toHaveLength(8);
   });
 });
