@@ -304,7 +304,9 @@
       "batchB": "Update all (disk wins)",
       "invariantBroken": "Snapshot invariant violations",
       "stashPending": "Leftover stash entries",
-      "suggestion": "Pending exclusive suggestions"
+      "suggestion": "Pending exclusive suggestions",
+      "fixAll": "Fix All",
+      "restoreStash": "Move Back"
     }
   },
   "mcp": {

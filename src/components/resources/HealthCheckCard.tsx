@@ -1,7 +1,7 @@
 // 一致性体检卡片（spec §13 呈现侧，Task 15）：三源聚合——
 // ① 账本-磁盘漂移：按工具分组，逐行 a/b/c 处置（c=暂不处理，纯前端收起）+ 组头批量；
 //    needs_manual 处置结果行转橙色无按钮（L4 / L2 内容不一致，重新体检也不会消失）
-// ② 快照不变量违背：逐条「重试」= restorePreset（借 common.retry 文案，见任务报告 i18n 记录）
+// ② 快照不变量违背：逐条「一键修复」= restorePreset（fixAll，评审追记的专属 key）
 // ③ 残留暂存：逐条回移 = restore_stash_entry（失败原样 toast，后端 message 已含原因）
 // 无异常时折叠一行 + 「立即体检」（refetch）；标题处角标 = 未决差异总数
 import { useState } from "react";
@@ -311,8 +311,7 @@ export function HealthCheckCard() {
                       onClick={() => void fixInvariant(line)}
                     >
                       <RotateCcw className="mr-1 h-3 w-3" />
-                      {/* i18n 记录：health key 集无「一键修复」文案，借 common.retry（见任务报告） */}
-                      {t("common.retry")}
+                      {t("resources.health.fixAll")}
                     </Button>
                   </div>
                 );
@@ -334,16 +333,15 @@ export function HealthCheckCard() {
                       {entry.originalPath}
                     </div>
                   </div>
-                  {/* i18n 记录：health key 集无「回移」文案，图标钮 + title 借 stashPending（见任务报告） */}
                   <Button
                     size="sm"
                     variant="outline"
-                    className="h-6 shrink-0 px-1.5"
+                    className="h-6 shrink-0 px-1.5 text-[10px]"
                     disabled={stashPendingId !== null}
-                    title={t("resources.health.stashPending")}
                     onClick={() => void restoreStash(entry)}
                   >
-                    <Undo2 className="h-3 w-3" />
+                    <Undo2 className="mr-1 h-3 w-3" />
+                    {t("resources.health.restoreStash")}
                   </Button>
                 </div>
               ))}

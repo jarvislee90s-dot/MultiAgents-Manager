@@ -304,7 +304,9 @@
       "batchB": "全部按磁盘回写账本",
       "invariantBroken": "快照不变量违背条目",
       "stashPending": "残留暂存条目",
-      "suggestion": "待确认专属建议"
+      "suggestion": "待确认专属建议",
+      "fixAll": "一键修复",
+      "restoreStash": "回移"
     }
   },
   "mcp": {
