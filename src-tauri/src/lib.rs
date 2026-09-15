@@ -115,6 +115,8 @@ pub fn run() {
         commands::resource::check_preset_compatibility,
         commands::resource::list_ssot_resources,
         commands::resource::scan_ledger_drift,
+        commands::resource::reconcile_item,
+        commands::resource::reconcile_tool_batch,
         commands::resource::detect_duplicate_skills,
         commands::resource::cleanup_duplicate_skills,
         commands::resource::check_skill_target_type,

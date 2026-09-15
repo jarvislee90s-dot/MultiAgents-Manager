@@ -304,6 +304,24 @@ pub fn scan_ledger_drift() -> Vec<crate::services::resource::reconcile::DriftIte
     crate::services::resource::reconcile::scan_drift()
 }
 
+/// 单条对账处置（spec §13）：mode "a" 账本为准修磁盘 | "b" 磁盘为准回写账本
+#[tauri::command]
+pub fn reconcile_item(
+    item: crate::services::resource::reconcile::DriftItem,
+    mode: String,
+) -> crate::services::resource::reconcile::ReconcileOutcome {
+    crate::services::resource::reconcile::reconcile_one(&item, &mode)
+}
+
+/// 批量对账处置（spec §13）：该工具全部漂移逐条按同一 mode 处置（L4 恒 needs_manual；单条失败不中断）
+#[tauri::command]
+pub fn reconcile_tool_batch(
+    tool_id: String,
+    mode: String,
+) -> Vec<crate::services::resource::reconcile::ReconcileOutcome> {
+    crate::services::resource::reconcile::reconcile_tool_batch(&tool_id, &mode)
+}
+
 #[tauri::command]
 pub fn check_preset_compatibility(
     preset_id: String,

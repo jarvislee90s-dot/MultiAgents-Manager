@@ -139,6 +139,338 @@ fn reconcile_scan_l4_external_link() {
     let _ = std::fs::remove_dir_all(&outside);
 }
 
+/// L1-a：账本 enabled + 磁盘无条目 → 账本为准修磁盘 → 链接重建（指向 ~/.mam）
+#[test]
+fn reconcile_l1_mode_a_rebuilds_link() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::reconcile::{reconcile_one, scan_drift};
+
+    let tool = "codex";
+    let home = dirs::home_dir().unwrap();
+    database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    // enable 管线要求 SSOT 仓库存在该技能
+    let ssot = home.join(".mam/skills/v2m2-rc-l1a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    database::upsert_assignment("skill-v2m2-rc-l1a", tool, true, "valid").unwrap();
+
+    let items = scan_drift();
+    let item = items
+        .iter()
+        .find(|d| d.extension_id == "skill-v2m2-rc-l1a" && d.kind == "L1")
+        .expect("L1 缺链应先被扫描报告（构造自检）")
+        .clone();
+
+    let outcome = reconcile_one(&item, "a");
+    assert!(
+        outcome.fixed,
+        "L1-a 应修复（重建链接）: {:?}",
+        outcome.message
+    );
+    assert!(
+        !outcome.needs_manual,
+        "L1-a 不应升级人工: {:?}",
+        outcome.message
+    );
+
+    let link = tool_dir.join("v2m2-rc-l1a");
+    assert!(
+        link.is_symlink(),
+        "L1-a 后磁盘应出现链接: {}",
+        link.display()
+    );
+    let target = std::fs::read_link(&link).unwrap();
+    assert!(
+        target.starts_with(home.join(".mam")),
+        "链接应指向 ~/.mam 之下: {:?}",
+        target
+    );
+
+    // 清理（尽力而为）
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(
+        multi_agents_manager_lib::linker::layer2::tool_active_dir(tool).join("v2m2-rc-l1a"),
+    );
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = database::delete_assignments_for("skill-v2m2-rc-l1a");
+}
+
+/// L2-b：账本 enabled + 同名真目录（内容与 SSOT 不同）→ 磁盘为准回写账本
+/// → assignment disabled/missing 且真目录原样保留
+#[test]
+fn reconcile_l2_mode_b_disables_assignment_keeps_dir() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::reconcile::{reconcile_one, scan_drift};
+
+    let tool = "codex";
+    let home = dirs::home_dir().unwrap();
+    database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    let ssot = home.join(".mam/skills/v2m2-rc-l2b");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "ssot-content").unwrap();
+    let real_dir = tool_dir.join("v2m2-rc-l2b");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::fs::write(real_dir.join("SKILL.md"), "local-content").unwrap();
+    database::upsert_assignment("skill-v2m2-rc-l2b", tool, true, "valid").unwrap();
+
+    let items = scan_drift();
+    let item = items
+        .iter()
+        .find(|d| d.extension_id == "skill-v2m2-rc-l2b" && d.kind == "L2")
+        .expect("L2 占位应先被扫描报告（构造自检）")
+        .clone();
+
+    let outcome = reconcile_one(&item, "b");
+    assert!(
+        outcome.fixed,
+        "L2-b 应回写账本视为已修复: {:?}",
+        outcome.message
+    );
+    assert!(
+        !outcome.needs_manual,
+        "L2-b 不应升级人工: {:?}",
+        outcome.message
+    );
+
+    let row = database::list_assignments(tool)
+        .into_iter()
+        .find(|a| a.extension_id == "skill-v2m2-rc-l2b")
+        .expect("assignment 行应存在");
+    assert!(
+        !row.enabled,
+        "mode b 应以磁盘为准把 assignment 置为 disabled"
+    );
+    assert_eq!(row.link_status, "missing", "回写状态应为 missing");
+    assert_eq!(
+        std::fs::read_to_string(real_dir.join("SKILL.md")).unwrap(),
+        "local-content",
+        "真目录内容必须原样保留"
+    );
+
+    // 清理
+    let _ = std::fs::remove_dir_all(&real_dir);
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = database::delete_assignments_for("skill-v2m2-rc-l2b");
+}
+
+/// L2-a 防删回归锁：真目录内容与 SSOT 不一致 → mode a → needs_manual、fixed=false、
+/// 真目录仍在且内容原样（绝不删除现场）
+#[test]
+fn reconcile_l2_mode_a_mismatch_needs_manual_keeps_scene() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::reconcile::{reconcile_one, scan_drift};
+
+    let tool = "codex";
+    let home = dirs::home_dir().unwrap();
+    database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    let ssot = home.join(".mam/skills/v2m2-rc-l2a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "ssot-content").unwrap();
+    let real_dir = tool_dir.join("v2m2-rc-l2a");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::fs::write(real_dir.join("SKILL.md"), "local-content").unwrap();
+    database::upsert_assignment("skill-v2m2-rc-l2a", tool, true, "valid").unwrap();
+
+    let items = scan_drift();
+    let item = items
+        .iter()
+        .find(|d| d.extension_id == "skill-v2m2-rc-l2a" && d.kind == "L2")
+        .expect("L2 占位应先被扫描报告（构造自检）")
+        .clone();
+
+    let outcome = reconcile_one(&item, "a");
+    assert!(
+        outcome.needs_manual,
+        "L2-a 内容不一致应升级人工: {:?}",
+        outcome
+    );
+    assert!(
+        !outcome.fixed,
+        "L2-a 内容不一致不算已修复: {:?}",
+        outcome.message
+    );
+    assert!(
+        outcome.message.contains("人工"),
+        "message 应说明需人工处理: {}",
+        outcome.message
+    );
+    assert!(
+        real_dir.is_dir() && !real_dir.is_symlink(),
+        "真目录必须仍在且未被替换为链接（绝不删除现场）"
+    );
+    assert_eq!(
+        std::fs::read_to_string(real_dir.join("SKILL.md")).unwrap(),
+        "local-content",
+        "真目录内容必须原样"
+    );
+
+    // 清理
+    let _ = std::fs::remove_dir_all(&real_dir);
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = database::delete_assignments_for("skill-v2m2-rc-l2a");
+}
+
+/// L3-a：磁盘 MAM 链接 + 账本无行 → 账本为准修磁盘 → 链接被清除（目录项消失）
+#[test]
+fn reconcile_l3_mode_a_removes_link() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::reconcile::{reconcile_one, scan_drift};
+
+    let tool = "codex";
+    let home = dirs::home_dir().unwrap();
+    database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    let ssot = home.join(".mam/skills/v2m2-rc-l3a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    let link = tool_dir.join("v2m2-rc-l3a");
+    std::os::unix::fs::symlink(&ssot, &link).unwrap();
+
+    let items = scan_drift();
+    let item = items
+        .iter()
+        .find(|d| d.extension_id == "skill-v2m2-rc-l3a" && d.kind == "L3")
+        .expect("L3 多链应先被扫描报告（构造自检）")
+        .clone();
+
+    let outcome = reconcile_one(&item, "a");
+    assert!(
+        outcome.fixed,
+        "L3-a 应清链视为已修复: {:?}",
+        outcome.message
+    );
+    assert!(
+        !outcome.needs_manual,
+        "L3-a 不应升级人工: {:?}",
+        outcome.message
+    );
+    assert!(
+        !link.is_symlink(),
+        "L3-a 后链接应被清除（disable 语义含 Layer2 级联）"
+    );
+    assert!(!link.exists(), "disable 后目录项应消失");
+
+    // 清理（disable 会写一行 disabled assignment，一并清掉）
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = database::delete_assignments_for("skill-v2m2-rc-l3a");
+}
+
+/// L4：外链（指向 ~/.mam 之外）→ 任意 mode → needs_manual=true 且现场不动
+#[test]
+fn reconcile_l4_any_mode_needs_manual() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::services::resource::reconcile::{reconcile_one, scan_drift};
+
+    let tool = "codex";
+    multi_agents_manager_lib::database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    let outside = std::env::temp_dir().join("v2m2-rc-l4m-target");
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = tool_dir.join("v2m2-rc-l4m");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let items = scan_drift();
+    let item = items
+        .iter()
+        .find(|d| d.extension_id == "skill-v2m2-rc-l4m" && d.kind == "L4")
+        .expect("L4 外链应先被扫描报告（构造自检）")
+        .clone();
+
+    for mode in ["a", "b"] {
+        let outcome = reconcile_one(&item, mode);
+        assert!(
+            outcome.needs_manual,
+            "L4 任意 mode 都应 needs_manual（mode={}）: {:?}",
+            mode, outcome
+        );
+        assert!(
+            !outcome.fixed,
+            "L4 不算已修复（mode={}）: {:?}",
+            mode, outcome.message
+        );
+        assert!(
+            outcome.message.contains("外链"),
+            "message 应说明外链不接管（mode={}）: {}",
+            mode,
+            outcome.message
+        );
+        assert!(link.is_symlink(), "L4 处置不得动现场（mode={}）", mode);
+    }
+
+    // 清理
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// 批量：reconcile_tool_batch 过滤该工具逐条处置；单条失败不中断；L4 恒 needs_manual
+#[test]
+fn reconcile_batch_filters_tool_and_l4_manual() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::reconcile::reconcile_tool_batch;
+
+    let tool = "codex";
+    let home = dirs::home_dir().unwrap();
+    database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    std::fs::create_dir_all(&tool_dir).unwrap();
+
+    // 植入一条 L1（账本 enabled、磁盘无条目）
+    let ssot = home.join(".mam/skills/v2m2-rc-b-l1");
+    std::fs::create_dir_all(&ssot).unwrap();
+    database::upsert_assignment("skill-v2m2-rc-b-l1", tool, true, "valid").unwrap();
+    // 植入一条 L4（外链）
+    let outside = std::env::temp_dir().join("v2m2-rc-b-l4-target");
+    std::fs::create_dir_all(&outside).unwrap();
+    let l4_link = tool_dir.join("v2m2-rc-b-l4");
+    std::os::unix::fs::symlink(&outside, &l4_link).unwrap();
+
+    let outcomes = reconcile_tool_batch(tool, "a");
+    assert!(
+        outcomes.len() >= 2,
+        "批量应至少处置两条植入漂移，实得 {} 条: {:?}",
+        outcomes.len(),
+        outcomes
+    );
+    let l1_done = outcomes
+        .iter()
+        .any(|o| o.message.contains("skill-v2m2-rc-b-l1") && o.fixed && !o.needs_manual);
+    assert!(l1_done, "批量内 L1-a 应 fixed: {:?}", outcomes);
+    let l4_manual = outcomes
+        .iter()
+        .any(|o| o.message.contains("skill-v2m2-rc-b-l4") && o.needs_manual && !o.fixed);
+    assert!(l4_manual, "批量内 L4 应恒 needs_manual: {:?}", outcomes);
+    assert!(
+        tool_dir.join("v2m2-rc-b-l1").is_symlink(),
+        "批量后 L1 链接应已重建"
+    );
+    assert!(l4_link.is_symlink(), "批量后 L4 外链应原样（不接管）");
+
+    // 清理
+    let _ = std::fs::remove_file(tool_dir.join("v2m2-rc-b-l1"));
+    let _ = std::fs::remove_file(
+        multi_agents_manager_lib::linker::layer2::tool_active_dir(tool).join("v2m2-rc-b-l1"),
+    );
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = std::fs::remove_file(&l4_link);
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = database::delete_assignments_for("skill-v2m2-rc-b-l1");
+}
+
 /// W5 名册语义：disabled 工具的同类漂移（此处 L1）不出现
 #[test]
 fn reconcile_scan_disabled_tool_excluded() {

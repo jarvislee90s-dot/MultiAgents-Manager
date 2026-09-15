@@ -407,10 +407,10 @@ pub fn reconcile_one(item: &DriftItem, mode: &str) -> ReconcileOutcome {
 ```
 
 **验收条件：**
-- [ ] `cargo test reconcile` 绿，五组断言：L1-a 链接重建 / L2-b 账本 disabled 且真目录原样 / **L2-a 内容不一致 → needs_manual 且真目录仍在（防删回归锁）** / L3-a 清链 / L4 任意 mode → needs_manual
-- [ ] 命令注册、全量绿
+- [x] `cargo test reconcile` 绿，五组断言：L1-a 链接重建 / L2-b 账本 disabled 且真目录原样 / **L2-a 内容不一致 → needs_manual 且真目录仍在（防删回归锁）** / L3-a 清链 / L4 任意 mode → needs_manual
+- [x] 命令注册、全量绿
 
-- [ ] **Step 1: 测试先写** → **Step 2: 实现→绿** → **Step 3: Commit** `feat(preset-v2): reconcile actions — per-item & batch a/b with needs-manual escalation`
+- [x] **Step 1: 测试先写** → **Step 2: 实现→绿** → **Step 3: Commit** `feat(preset-v2): reconcile actions — per-item & batch a/b with needs-manual escalation`
 
 ### Task 14: preset health 聚合命令 + 启动接线
 
