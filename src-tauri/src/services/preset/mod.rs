@@ -502,3 +502,25 @@ pub fn check_snapshot_invariants() -> Vec<String> {
     }
     broken
 }
+
+/// 预设健康聚合（spec §13 检测侧收口）：不变量违背 + 未恢复暂存 + 账本-磁盘漂移
+/// 三源合一，供体检卡片（Task 15）与设置页「立即体检」单次 invoke 取数
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetHealth {
+    /// 快照不变量违背项（check_snapshot_invariants）
+    pub invariants: Vec<String>,
+    /// 跨全部工具的未恢复暂存条目（unrestored_stash(None)）
+    pub stash_pending: Vec<crate::database::StashEntryRecord>,
+    /// 账本-磁盘漂移（scan_drift，L1-L4）
+    pub drift: Vec<crate::services::resource::reconcile::DriftItem>,
+}
+
+/// 三源聚合（spec §13）；顺序即结构体字段序，无短路
+pub fn preset_health() -> PresetHealth {
+    PresetHealth {
+        invariants: check_snapshot_invariants(),
+        stash_pending: database::unrestored_stash(None),
+        drift: services::resource::reconcile::scan_drift(),
+    }
+}

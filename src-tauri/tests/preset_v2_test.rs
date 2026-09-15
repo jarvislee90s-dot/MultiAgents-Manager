@@ -1475,3 +1475,72 @@ fn plugin_config_sweep_restore_v2m2_plugcfg() {
     let _ = std::fs::remove_file(&repo_json);
     let _ = database::delete_extension("plugin-v2m2-plug-cfg");
 }
+
+/// Task 14（spec §13 检测侧收口）：preset_health 三源聚合——不变量违背 /
+/// 未恢复暂存 / 账本-磁盘漂移各造一条，断言齐出
+#[test]
+fn preset_health_aggregates_three_sources_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database::{self, BaseSnapshotItemRecord};
+    use multi_agents_manager_lib::services::preset::preset_health;
+
+    // ① 不变量违背：快照在、active 为 None（检查器只扫 TOOL_IDS，用注册表内的 dsh）
+    database::save_base_snapshot(
+        "dsh",
+        None,
+        &[BaseSnapshotItemRecord {
+            extension_id: "skill-v2m2-health".into(),
+            kind: "skill".into(),
+            origin: "mam".into(),
+        }],
+    )
+    .unwrap();
+
+    // ② 未恢复暂存：直接落账本行（unrestored_stash 为纯 SQL 查询，不校验物理文件存在）
+    let stash_id = database::record_stash(
+        "codex",
+        "v2m2-health-native",
+        "/tmp/v2m2-health-stash/v2m2-health-native",
+        "/tmp/v2m2-health-codex-skills/v2m2-health-native",
+    )
+    .unwrap();
+
+    // ③ 漂移 L1 缺链：enabled 工具 + enabled assignment + 磁盘无链接无真目录
+    //（镜像 reconcile_test.rs 的 L1 造数配方）
+    database::set_tool_enabled("codex", true);
+    std::fs::create_dir_all(multi_agents_manager_lib::adapter::primary_skill_dir("codex").unwrap())
+        .unwrap();
+    database::upsert_assignment("skill-v2m2-health-l1", "codex", true, "valid").unwrap();
+
+    let health = preset_health();
+    assert!(
+        health.invariants.iter().any(|s| s.contains("dsh")),
+        "不变量源应含 dsh 违背项: {:?}",
+        health.invariants
+    );
+    assert!(
+        health
+            .stash_pending
+            .iter()
+            .any(|s| s.id == stash_id && s.skill_name == "v2m2-health-native"),
+        "暂存源应含未恢复条目: {:?}",
+        health.stash_pending
+    );
+    assert!(
+        health
+            .drift
+            .iter()
+            .any(|d| d.kind == "L1" && d.extension_id == "skill-v2m2-health-l1"),
+        "漂移源应含 L1 缺链项: {:?}",
+        health.drift
+    );
+
+    // 清场（尽力而为，镜像文件纪律）
+    let _ = database::destroy_base_snapshot("dsh");
+    let _ = database::mark_stash_restored(stash_id);
+    let _ = database::delete_assignments_for("skill-v2m2-health-l1");
+}

@@ -40,6 +40,10 @@ pub fn run() {
             log::warn!("预设快照不变量违背: {}", msg);
         }
         services::resource::backfill_registry();
+        // 预设 v2（spec §13）：账本-磁盘漂移扫描，启动时 warn 收口
+        for d in services::resource::reconcile::scan_drift() {
+            log::warn!("[漂移{}] {} {}", d.kind, d.extension_id, d.path);
+        }
         services::auto_import_extensions(false);
         services::sync_imported_skill_links();
     });
@@ -145,6 +149,7 @@ pub fn run() {
         commands::preset::deactivate_preset,
         commands::preset::apply_preset_to_subagent,
         commands::preset::deactivate_preset_from_subagent,
+        commands::preset::get_preset_health,
         commands::skill::list_repo_skills,
         commands::skill::install_skill,
         commands::skill::rescan_skills,

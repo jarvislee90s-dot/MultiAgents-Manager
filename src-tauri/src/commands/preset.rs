@@ -1,7 +1,7 @@
 // 预设组命令
 
 use crate::database::{PresetRecord, ResourceBindingRecord};
-use crate::services::preset::{ApplyPreview, RestoreResult};
+use crate::services::preset::{ApplyPreview, PresetHealth, RestoreResult};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -223,4 +223,10 @@ pub fn deactivate_preset_from_subagent(
 ) -> Result<(), String> {
     crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::preset::deactivate_preset_from_subagent(&preset_id, &tool_id, &sub_agent_id)
+}
+
+/// 预设健康聚合（spec §13 检测侧收口）：不变量 + 未恢复暂存 + 账本-磁盘漂移三源合一
+#[tauri::command]
+pub fn get_preset_health() -> PresetHealth {
+    crate::services::preset::preset_health()
 }

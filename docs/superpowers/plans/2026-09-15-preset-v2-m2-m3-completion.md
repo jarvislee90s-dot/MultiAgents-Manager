@@ -433,10 +433,10 @@ pub fn preset_health() -> PresetHealth { /* 三源聚合 */ }
 启动线程在 backfill 后加：`for d in reconcile::scan_drift() { log::warn!("[漂移{}] {} {}", d.kind, d.extension_id, d.path); }`
 
 **验收条件：**
-- [ ] `cargo test` 绿（preset_health 聚合单测：三源各造一条断言齐出）
-- [ ] 命令注册；本地 dev 启动日志可见漂移 warn（构造一个 L1 后目验，可选）
+- [x] `cargo test` 绿（preset_health 聚合单测：三源各造一条断言齐出）
+- [x] 命令注册；本地 dev 启动日志可见漂移 warn（构造一个 L1 后目验，可选）
 
-- [ ] **Step 1: 实现+测试** → **Step 2: 启动接线** → **Step 3: Commit** `feat(preset-v2): preset health aggregation command + startup drift logging`
+- [x] **Step 1: 实现+测试** → **Step 2: 启动接线** → **Step 3: Commit** `feat(preset-v2): preset health aggregation command + startup drift logging`
 
 ### Task 15: 一致性体检卡片 + 设置页「立即体检」
 
