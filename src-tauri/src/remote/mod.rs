@@ -200,7 +200,7 @@ pub fn remote_status() -> serde_json::Value {
     // 短锁：只取 SERVER_HANDLE 的存活快照立即释放，锁内不碰 DB / pairing（不新增嵌套锁序）
     let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
     let enabled = status_enabled(db_enabled, handle_alive);
-    let lan = lan_hosts_for(&bind, local_lan_ips());
+    let lan = lan_urls_for(&bind, local_lan_ips(), port);
     serde_json::json!({ "enabled": enabled, "bind": bind, "port": port,
         "url": format!("http://{bind}:{port}/m"), "lanUrls": lan })
 }
@@ -245,10 +245,14 @@ fn local_lan_ips() -> Vec<String> {
 }
 
 /// 局域网候选门控内核（纯函数，不触网络）：仅对外绑定（0.0.0.0）给出候选，
-/// loopback / 具体地址绑定恒空——与 start_server 的安全门同一判据
-fn lan_hosts_for(bind: &str, ips: Vec<String>) -> Vec<String> {
+/// loopback / 具体地址绑定恒空——与 start_server 的安全门同一判据。
+/// M2-R2：条目为**完整可直达 URL**（`http://{ip}:{port}/m`）而非裸主机名——
+/// 设置页展示与复制按钮原样输出该串，裸 IP 手机没法直接用
+fn lan_urls_for(bind: &str, ips: Vec<String>, port: u16) -> Vec<String> {
     if bind == "0.0.0.0" {
-        ips
+        ips.into_iter()
+            .map(|ip| format!("http://{ip}:{port}/m"))
+            .collect()
     } else {
         vec![]
     }
@@ -342,21 +346,26 @@ mod tests {
         );
     }
 
-    /// (b) 局域网候选的门控内核：仅 0.0.0.0（对外）模式给出候选，loopback / 具体地址绑定恒空
+    /// (b) 局域网候选的门控内核：仅 0.0.0.0（对外）模式给出候选，loopback / 具体地址绑定恒空。
+    /// M2-R2：条目是**完整可直达 URL**（http://{ip}:{port}/m），与前端 fixture
+    /// （tests/remote/api.test.ts 的 lanUrls 形态）及设置页「展示 + 复制即用」对齐
     #[test]
-    fn lan_hosts_only_for_wildcard_bind() {
+    fn lan_urls_only_for_wildcard_bind_and_full_url_shape() {
         let ips = vec!["192.168.1.5".to_string(), "10.0.0.2".to_string()];
         assert_eq!(
-            lan_hosts_for("0.0.0.0", ips.clone()),
-            ips,
-            "0.0.0.0 模式应原样给出候选（非空）"
+            lan_urls_for("0.0.0.0", ips.clone(), 9420),
+            vec![
+                "http://192.168.1.5:9420/m".to_string(),
+                "http://10.0.0.2:9420/m".to_string()
+            ],
+            "0.0.0.0 模式应给出完整可直达 URL（手机复制即用）"
         );
         assert!(
-            lan_hosts_for("127.0.0.1", ips.clone()).is_empty(),
+            lan_urls_for("127.0.0.1", ips.clone(), 9420).is_empty(),
             "loopback 模式必须返回空 Vec"
         );
         assert!(
-            lan_hosts_for("192.168.1.5", ips).is_empty(),
+            lan_urls_for("192.168.1.5", ips, 9420).is_empty(),
             "具体地址绑定不属于对外候选场景"
         );
     }

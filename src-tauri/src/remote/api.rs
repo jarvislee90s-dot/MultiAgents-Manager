@@ -21,7 +21,7 @@ use super::server::RemoteState;
 /// 实机教训见 `commands/session.rs` 的 `get_all_sessions`）。
 pub async fn sessions(
     State(st): State<Arc<RemoteState>>,
-) -> Json<crate::session::SessionsResponse> {
+) -> impl IntoResponse {
     // 闭包捕获 state 的 Arc（Send + Sync + 'static）：`session_source` 是 Box<dyn Fn> 不可
     // clone，故整体 move 进阻塞线程池，在池内调用注入源
     let st = st.clone();
@@ -37,7 +37,12 @@ pub async fn sessions(
                 waiting_count: 0,
             }
         });
-    Json(response)
+    // M2-R2 顺手项：会话数据是设备门禁下的私有数据，禁止中间层/浏览器缓存
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(response),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -95,6 +100,7 @@ pub async fn pair(
 }
 
 /// POST /m/api/v1/heartbeat：gate 已刷新 last_seen（touch），此处仅回 pong 供客户端保活判定
+/// M3 保活判定预留，当前 sessions 轮询 gate touch 已覆盖
 pub async fn heartbeat() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true }))
 }

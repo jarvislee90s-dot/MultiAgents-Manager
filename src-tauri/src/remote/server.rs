@@ -318,6 +318,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+        // M2-R2 顺手项：会话数据不得被中间层缓存（设备门禁下的私有数据）
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "sessions 响应必须带 Cache-Control: no-store"
+        );
         assert!(body_string(r).await.contains("\"totalCount\":7"));
         // 5) 同 token 重放 → 403（一次性）
         let r = app
