@@ -164,10 +164,10 @@ export const useResourceBindingsQuery = () => useQuery({ queryKey: BINDINGS_KEY,
 - 数据层迁 `usePresetsQuery`；变更后 `qc.invalidateQueries({queryKey: PRESETS_KEY})`
 
 **验收条件：**
-- [ ] `pnpm lint && pnpm build` 绿
-- [ ] dev 目验（或并入 T9 断言）：mock 数据下两分区标题渲染、私有预设出现在绑定工具组、描述摘要显示、React Query 生效（同数据不重复 invoke）
+- [x] `pnpm lint && pnpm build` 绿
+- [x] dev 目验（或并入 T9 断言）：mock 数据下两分区标题渲染、私有预设出现在绑定工具组、描述摘要显示、React Query 生效（同数据不重复 invoke）
 
-- [ ] **Step 1: 骨架实现** → **Step 2: 门禁** → **Step 3: Commit** `feat(preset-v2): PresetList v2 dual-zone skeleton on React Query`
+- [x] **Step 1: 骨架实现** → **Step 2: 门禁** → **Step 3: Commit** `feat(preset-v2): PresetList v2 dual-zone skeleton on React Query`
 
 ### Task 5: 应用确认弹窗 v2（preview 数据 + 白板强警示）
 

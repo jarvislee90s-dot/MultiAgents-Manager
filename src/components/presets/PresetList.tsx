@@ -1,139 +1,88 @@
-import { useState, useEffect } from "react";
+// 预设组 v2 列表（M2 Phase B）：双分区（通用 / 工具私有）+ 预设卡片
+// 数据层走 React Query（usePresetsQuery），删除成功后 invalidate PRESETS_KEY；
+// 创建 / 编辑弹窗由 Task 7 接线（本文件仅留 TODO(T7) 占位 handler）。
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Layers, Plus, Trash2, Play, X } from "lucide-react";
-import type { PresetRecord, PresetApplyResult } from "@/types/preset";
+import type { PresetApplyResult, PresetRecord } from "@/types/preset";
 import type { ExtensionWithAssignments } from "@/types/extension";
-import { CompatibilityDialog } from "../resources/CompatibilityDialog";
 import { ToolIcon } from "@/components/common/ToolIcon";
 // review F4：工具列改后端下发（勾选状态驱动），停用工具不再出现在预设组选择中
-import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
+import { useEnabledToolsQuery, type EnabledTool } from "@/lib/query/queries/tools";
+import { PRESETS_KEY, usePresetsQuery } from "@/lib/query/queries/presets";
+import { deletePreset } from "@/lib/api/preset";
 
-export function PresetList({ extensions }: { extensions: ExtensionWithAssignments[] }) {
+export function PresetList({
+  // extensions 本任务暂不消费（旧建组表单已删，T7 编辑弹窗经 props 链使用）；
+  // 下划线前缀 = 有意保留的未用参数（tsc noUnusedParameters / eslint 豁免），props 契约不变
+  extensions: _extensions,
+}: {
+  extensions: ExtensionWithAssignments[];
+}) {
   const { t } = useTranslation();
+  const qc = useQueryClient();
   const { data: enabledTools = [] } = useEnabledToolsQuery();
-  const [presets, setPresets] = useState<PresetRecord[]>([]);
-  const [showCreate, setShowCreate] = useState(false);
-  const [name, setName] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [compatibilityDialog, setCompatibilityDialog] = useState<{
-    open: boolean;
-    presetId: string;
-    presetName: string;
-    toolId: string;
-  } | null>(null);
+  const { data: presets = [] } = usePresetsQuery();
+  // 删除确认弹窗目标（null = 关闭）
+  const [deleteTarget, setDeleteTarget] = useState<PresetRecord | null>(null);
 
-  const load = async () => {
-    try {
-      const data = await invoke<PresetRecord[]>("list_presets");
-      setPresets(data);
-    } catch (e) {
-      console.error("Failed to load presets:", e);
+  // 通用区：scope === "universal"
+  const universalPresets = presets.filter((p) => p.scope === "universal");
+
+  // 私有区：按 boundTool 分组，组顺序跟随启用工具列（停用/未知工具按首次出现排后）
+  const byTool = new Map<string, PresetRecord[]>();
+  for (const p of presets) {
+    if (p.scope !== "tool") continue;
+    const key = p.boundTool ?? "";
+    const list = byTool.get(key);
+    if (list) list.push(p);
+    else byTool.set(key, [p]);
+  }
+  const toolGroups: { toolId: string; label: string; presets: PresetRecord[] }[] = [];
+  const rest = new Map(byTool);
+  for (const tool of enabledTools) {
+    const list = rest.get(tool.id);
+    if (list) {
+      toolGroups.push({ toolId: tool.id, label: tool.label, presets: list });
+      rest.delete(tool.id);
     }
+  }
+  for (const [toolId, list] of rest) {
+    // boundTool 缺失的脏数据回退分区名兜底，避免渲染空组头
+    toolGroups.push({ toolId, label: toolId || t("presets.typeTool"), presets: list });
+  }
+
+  // TODO(T7): 打开编辑弹窗（空表单新建），本任务仅占位
+  const handleCreate = () => {
+    console.debug("[PresetList] TODO(T7): open preset edit dialog (create)");
   };
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  const handleCreate = async () => {
-    if (!name) {
-      toast.error(t("presets.nameRequired"));
-      return;
-    }
-    if (selected.size === 0) {
-      toast.error(t("presets.selectAtLeastOne"));
-      return;
-    }
-    const items = Array.from(selected).map((id) => {
-      const ext = extensions.find((e) => e.id === id);
-      return [id, ext?.kind ?? "skill"] as [string, string];
-    });
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
     try {
-      await invoke("create_preset", { name, items });
-      toast.success(t("presets.created", { name }));
-      setName("");
-      setSelected(new Set());
-      setShowCreate(false);
-      load();
-    } catch (e) {
-      toast.error(t("common.createFailed", { error: formatInvokeError(e, t) }));
-    }
-  };
-
-  const handleApply = async (presetId: string, presetName: string, toolId: string) => {
-    setCompatibilityDialog({
-      open: true,
-      presetId,
-      presetName,
-      toolId,
-    });
-  };
-
-  const confirmApply = async () => {
-    if (!compatibilityDialog) return;
-
-    try {
-      const result = await invoke<PresetApplyResult>("apply_preset", {
-        presetId: compatibilityDialog.presetId,
-        toolId: compatibilityDialog.toolId,
-      });
-      if (result.failures.length > 0) {
-        toast.warning(
-          t("presets.partialSuccess", { n: result.successCount, failed: result.failures.length })
-        );
-      } else if (result.conflicts.length > 0) {
-        toast.info(
-          t("presets.appliedWithConflicts", {
-            n: result.successCount,
-            skipped: result.conflicts.length,
-          })
-        );
-      } else {
-        toast.success(
-          t("presets.appliedTo", {
-            name: compatibilityDialog.presetName,
-            tool: compatibilityDialog.toolId,
-          })
-        );
-      }
-      load();
-    } catch (e) {
-      toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
-    }
-
-    setCompatibilityDialog(null);
-  };
-
-  const handleDeactivate = async (presetId: string, presetName: string, toolId: string) => {
-    try {
-      await invoke("deactivate_preset", { presetId, toolId });
-      toast.success(t("presets.deactivatedFrom", { name: presetName, tool: toolId }));
-    } catch (e) {
-      toast.error(t("presets.deactivateFailed", { error: formatInvokeError(e, t) }));
-    }
-  };
-
-  const handleDelete = async (presetId: string) => {
-    try {
-      await invoke("delete_preset", { presetId });
+      await deletePreset(deleteTarget.id);
       toast.success(t("common.deleted"));
-      load();
+      qc.invalidateQueries({ queryKey: PRESETS_KEY });
     } catch (e) {
-      toast.error(t("common.deleteFailed", { error: formatInvokeError(e, t) }));
+      // 后端守卫：预设正在应用中时错误串带 PRESET_ACTIVE 标记（commands/preset.rs）
+      const msg = formatInvokeError(e, t);
+      if (msg.includes("PRESET_ACTIVE")) toast.error(t("presets.cannotDeleteActive"));
+      else toast.error(t("common.deleteFailed", { error: msg }));
+    } finally {
+      setDeleteTarget(null);
     }
-  };
-
-  const toggleSelect = (id: string) => {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelected(next);
   };
 
   return (
@@ -143,107 +92,143 @@ export function PresetList({ extensions }: { extensions: ExtensionWithAssignment
           <Layers className="h-4 w-4" />
           {t("presets.titleCount", { n: presets.length })}
         </h3>
-        <Button size="sm" variant="outline" onClick={() => setShowCreate(!showCreate)}>
+        <Button size="sm" variant="outline" onClick={handleCreate}>
           <Plus className="mr-1.5 h-3.5 w-3.5" />
           {t("common.create")}
         </Button>
       </div>
 
-      {showCreate && (
-        <Card className="space-y-2 p-3">
-          <Input
-            placeholder={t("presets.namePlaceholder")}
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-          />
-          <div className="max-h-40 space-y-1 overflow-y-auto">
-            {extensions.map((ext) => (
-              <label key={ext.id} className="flex cursor-pointer items-center gap-2 text-xs">
-                <input
-                  type="checkbox"
-                  checked={selected.has(ext.id)}
-                  onChange={() => toggleSelect(ext.id)}
-                />
-                <span className="bg-muted rounded px-1.5 py-0.5 text-[10px]">{ext.kind}</span>
-                <span>{ext.name}</span>
-              </label>
-            ))}
-          </div>
-          <Button size="sm" onClick={handleCreate}>
-            {t("presets.confirmCreate")}
-          </Button>
-        </Card>
-      )}
-
       {presets.length === 0 ? (
         <p className="text-muted-foreground py-2 text-xs">{t("presets.empty")}</p>
       ) : (
-        <div className="space-y-1">
-          {presets.map((preset) => (
-            <div key={preset.id} className="rounded border p-2">
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-sm font-medium">{preset.name}</span>
-                <button
-                  onClick={() => handleDelete(preset.id)}
-                  className="text-muted-foreground hover:text-red-500"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="text-muted-foreground mb-1.5 text-[10px]">
-                {preset.items
-                  .map((i) => `${i.extensionName || i.extensionId} (${i.kind})`)
-                  .join(" · ")}
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {enabledTools.map((tool) => (
-                  <div key={tool.id} className="space-y-1">
-                    <div className="flex gap-0.5">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[10px]"
-                        onClick={() => handleApply(preset.id, preset.name, tool.id)}
-                      >
-                        <Play className="mr-1 h-2.5 w-2.5" />
-                        <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                        {tool.label}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 w-6 p-0 text-[10px]"
-                        onClick={() => handleDeactivate(preset.id, preset.name, tool.id)}
-                      >
-                        <X className="h-2.5 w-2.5" />
-                      </Button>
-                    </div>
-                    {/* 子 Agent 级操作 */}
-                    <SubAgentPresetActions
-                      presetId={preset.id}
-                      presetName={preset.name}
-                      toolId={tool.id}
-                    />
+        <div className="space-y-3">
+          {/* 通用区：无通用预设时整区隐藏 */}
+          {universalPresets.length > 0 && (
+            <section className="space-y-1">
+              <h4 className="text-muted-foreground text-xs font-medium">
+                {t("presets.universalSection")}
+              </h4>
+              {universalPresets.map((preset) => (
+                <PresetCard
+                  key={preset.id}
+                  preset={preset}
+                  enabledTools={enabledTools}
+                  onRequestDelete={setDeleteTarget}
+                />
+              ))}
+            </section>
+          )}
+          {/* 私有区：按绑定工具分组（组头 = 工具名），无私有预设时整区隐藏 */}
+          {toolGroups.length > 0 && (
+            <section className="space-y-1">
+              <h4 className="text-muted-foreground text-xs font-medium">
+                {t("presets.toolScopedSection")}
+              </h4>
+              {toolGroups.map((group) => (
+                <div key={group.toolId} className="space-y-1">
+                  <div className="flex items-center gap-1.5 pl-1 text-xs font-medium">
+                    <ToolIcon toolId={group.toolId} size={14} />
+                    {group.label}
                   </div>
-                ))}
-              </div>
-            </div>
-          ))}
+                  {group.presets.map((preset) => (
+                    <PresetCard
+                      key={preset.id}
+                      preset={preset}
+                      enabledTools={enabledTools}
+                      onRequestDelete={setDeleteTarget}
+                    />
+                  ))}
+                </div>
+              ))}
+            </section>
+          )}
         </div>
       )}
 
-      {compatibilityDialog && (
-        <CompatibilityDialog
-          open={compatibilityDialog.open}
-          presetId={compatibilityDialog.presetId}
-          toolId={compatibilityDialog.toolId}
-          toolName={
-            enabledTools.find((t) => t.id === compatibilityDialog.toolId)?.label ||
-            compatibilityDialog.toolId
-          }
-          onClose={() => setCompatibilityDialog(null)}
-          onConfirm={confirmApply}
+      {/* 删除确认弹窗：标题即预设名，取消 / 破坏性确定 */}
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent aria-describedby={undefined} className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="truncate pr-4">{deleteTarget?.name}</DialogTitle>
+          </DialogHeader>
+          <DialogFooter>
+            <Button size="sm" variant="outline" onClick={() => setDeleteTarget(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button size="sm" variant="destructive" onClick={confirmDelete}>
+              {t("common.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/** 预设卡片：名称 + 描述摘要（1 行截断）+ items 计数徽标 + 删除入口；整卡可点（T7 接 onEdit） */
+function PresetCard({
+  preset,
+  enabledTools,
+  onRequestDelete,
+}: {
+  preset: PresetRecord;
+  enabledTools: EnabledTool[];
+  onRequestDelete: (preset: PresetRecord) => void;
+}) {
+  // TODO(T7): onEdit —— 打开编辑弹窗并回填该预设，本任务仅占位
+  const handleEdit = () => {
+    console.debug("[PresetList] TODO(T7): edit preset", preset.id);
+  };
+
+  return (
+    <div
+      className="hover:bg-accent/30 cursor-pointer rounded border p-2 transition-colors"
+      onClick={handleEdit}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-sm font-medium">{preset.name}</span>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* items 计数徽标 */}
+          <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 text-[10px]">
+            {preset.items.length}
+          </span>
+          <button
+            onClick={(e) => {
+              // 不触发整卡点击（T7 的 onEdit）
+              e.stopPropagation();
+              onRequestDelete(preset);
+            }}
+            className="text-muted-foreground hover:text-red-500"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      {/* 描述摘要：1 行截断 */}
+      {preset.description && (
+        <p className="text-muted-foreground mt-0.5 truncate text-[11px]">{preset.description}</p>
+      )}
+      {/* 子 Agent 级操作（遗留特性，原样保留迁移）：私有预设挂绑定工具，通用预设沿用旧的逐启用工具形态 */}
+      {preset.scope === "tool" && preset.boundTool ? (
+        <SubAgentPresetActions
+          presetId={preset.id}
+          presetName={preset.name}
+          toolId={preset.boundTool}
         />
+      ) : (
+        enabledTools.map((tool) => (
+          <SubAgentPresetActions
+            key={tool.id}
+            presetId={preset.id}
+            presetName={preset.name}
+            toolId={tool.id}
+          />
+        ))
       )}
     </div>
   );
