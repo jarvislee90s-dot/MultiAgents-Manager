@@ -1290,8 +1290,7 @@ fn mcp_sweep_restore_roundtrip() {
     let root: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
     assert_eq!(
-        root["mcpServers"]["v2m2-mcp-a"]["command"],
-        "npx",
+        root["mcpServers"]["v2m2-mcp-a"]["command"], "npx",
         "重写的配置段内容应与仓库一致"
     );
 
@@ -1426,10 +1425,7 @@ fn plugin_config_sweep_restore_v2m2_plugcfg() {
         let root: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
         root["plugins"].get(name).is_some()
     };
-    assert!(
-        plugins_has("v2m2-plug-cfg"),
-        "前置：plugins 段条目应已写入"
-    );
+    assert!(plugins_has("v2m2-plug-cfg"), "前置：plugins 段条目应已写入");
     assert!(database::get_tool_enabled("claude"), "前置：工具启用中");
 
     // 空预设 apply → 独占清扫：条目摘除 + assignment disabled
@@ -1455,7 +1451,8 @@ fn plugin_config_sweep_restore_v2m2_plugcfg() {
     // restore → 条目重写 + assignment enabled
     let rr = restore_tool("claude").unwrap();
     assert!(
-        rr.restored_mam.contains(&"plugin-v2m2-plug-cfg".to_string()),
+        rr.restored_mam
+            .contains(&"plugin-v2m2-plug-cfg".to_string()),
         "restored_mam 应含插件项: {:?}",
         rr.restored_mam
     );
@@ -1463,8 +1460,7 @@ fn plugin_config_sweep_restore_v2m2_plugcfg() {
     let root: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(
-        root["plugins"]["v2m2-plug-cfg"]["source"],
-        "v2m2",
+        root["plugins"]["v2m2-plug-cfg"]["source"], "v2m2",
         "重写的条目内容应与仓库一致"
     );
     let asg = database::list_assignments("claude")

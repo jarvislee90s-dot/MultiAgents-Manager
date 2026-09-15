@@ -298,6 +298,12 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     serde_json::json!({ "global": global_with_status, "native": native })
 }
 
+/// 账本-磁盘对账扫描（spec §13）：返回 enabled 工具的 L1-L4 漂移清单
+#[tauri::command]
+pub fn scan_ledger_drift() -> Vec<crate::services::resource::reconcile::DriftItem> {
+    crate::services::resource::reconcile::scan_drift()
+}
+
 #[tauri::command]
 pub fn check_preset_compatibility(
     preset_id: String,

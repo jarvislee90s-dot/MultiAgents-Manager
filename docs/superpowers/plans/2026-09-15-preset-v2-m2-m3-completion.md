@@ -372,10 +372,10 @@ pub fn scan_drift() -> Vec<DriftItem> {
 命令：`#[tauri::command] pub fn scan_ledger_drift() -> Vec<DriftItem>`（commands/resource.rs + 注册）。
 
 **验收条件：**
-- [ ] `cargo test reconcile` 绿：L1/L2/L3/L4 四类各命中对应 extension_id；disabled 工具的同类漂移**不出现**
-- [ ] 命令注册、全量 `cargo test` 绿
+- [x] `cargo test reconcile` 绿：L1/L2/L3/L4 四类各命中对应 extension_id；disabled 工具的同类漂移**不出现**
+- [x] 命令注册、全量 `cargo test` 绿
 
-- [ ] **Step 1: 测试先写（`v2m2-rc-*`）** → **Step 2: 失败→实现→绿** → **Step 3: 注册 + Commit** `feat(preset-v2): ledger-disk drift scan (L1-L4) + scan_ledger_drift command`
+- [x] **Step 1: 测试先写（`v2m2-rc-*`）** → **Step 2: 失败→实现→绿** → **Step 3: 注册 + Commit** `feat(preset-v2): ledger-disk drift scan (L1-L4) + scan_ledger_drift command`
 
 ### Task 13: 对账处置命令（逐条 a/b + 批量）
 
