@@ -49,6 +49,9 @@ export const mockExtensions = [
     kind: "skill",
     name: "Brainstorming",
     description: "头脑风暴 skill",
+    sourceTool: "claude",
+    // isNative:true + sourceTool 已设：与 src/tauri-mock.ts 同构，可目验「原生技能」分组（T7）
+    isNative: true,
     assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
   },
 ];

@@ -1,7 +1,8 @@
 // 预设组 v2 列表（M2 Phase B）：双分区（通用 / 工具私有）+ 预设卡片 + 预设×工具开关
 // 数据层走 React Query（usePresetsQuery / useActivePresetsQuery），删除成功后 invalidate PRESETS_KEY；
 // 开关契约（spec §5.5）：开 = 只开 T5 确认弹窗（apply 延迟到 onConfirm）；关 = 直接 restore + toast。
-// 创建 / 编辑弹窗由 Task 7 接线（本文件仅留 TODO(T7) 占位 handler）。
+// 创建 / 编辑弹窗（T7 PresetEditDialog）：创建按钮开空表单，卡片点击回填该预设；
+// 弹窗保存成功后自 invalidate PRESETS_KEY（本组件无需关心）。
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
@@ -11,6 +12,7 @@ import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ApplyConfirmDialog } from "@/components/presets/ApplyConfirmDialog";
+import { PresetEditDialog } from "@/components/presets/PresetEditDialog";
 import {
   Dialog,
   DialogContent,
@@ -33,9 +35,8 @@ import {
 import { applyPreset, deletePreset, restorePreset } from "@/lib/api/preset";
 
 export function PresetList({
-  // extensions 本任务暂不消费（旧建组表单已删，T7 编辑弹窗经 props 链使用）；
-  // 下划线前缀 = 有意保留的未用参数（tsc noUnusedParameters / eslint 豁免），props 契约不变
-  extensions: _extensions,
+  // extensions 透传给 T7 编辑弹窗作套件列表数据源（props 契约不变）
+  extensions,
 }: {
   extensions: ExtensionWithAssignments[];
 }) {
@@ -47,6 +48,9 @@ export function PresetList({
   const { data: activePresets = [] } = useActivePresetsQuery();
   // 删除确认弹窗目标（null = 关闭）
   const [deleteTarget, setDeleteTarget] = useState<PresetRecord | null>(null);
+  // 编辑弹窗（T7）：open + 编辑目标（null = 新建空表单）
+  const [editOpen, setEditOpen] = useState(false);
+  const [editPreset, setEditPreset] = useState<PresetRecord | null>(null);
   // 应用确认弹窗目标（T5 ApplyConfirmDialog；null = 关闭）。toolName 预查好供弹窗标题
   const [confirmTarget, setConfirmTarget] = useState<{
     presetId: string;
@@ -80,9 +84,16 @@ export function PresetList({
     toolGroups.push({ toolId, label: toolId || t("presets.typeTool"), presets: list });
   }
 
-  // TODO(T7): 打开编辑弹窗（空表单新建），本任务仅占位
+  // 创建：打开编辑弹窗空表单（preset = null）
   const handleCreate = () => {
-    console.debug("[PresetList] TODO(T7): open preset edit dialog (create)");
+    setEditPreset(null);
+    setEditOpen(true);
+  };
+
+  // 编辑：卡片点击入口（T7）——回填该预设打开弹窗
+  const openEdit = (preset: PresetRecord) => {
+    setEditPreset(preset);
+    setEditOpen(true);
   };
 
   // 开关契约（spec §5.5）：开 → 只开确认弹窗（apply 延迟到弹窗 onConfirm）；关 → 直接恢复默认。
@@ -178,6 +189,7 @@ export function PresetList({
                   activePresets={activePresets}
                   onSwitch={onSwitch}
                   onRequestDelete={setDeleteTarget}
+                  onEdit={openEdit}
                 />
               ))}
             </section>
@@ -202,6 +214,7 @@ export function PresetList({
                       activePresets={activePresets}
                       onSwitch={onSwitch}
                       onRequestDelete={setDeleteTarget}
+                      onEdit={openEdit}
                     />
                   ))}
                 </div>
@@ -242,29 +255,35 @@ export function PresetList({
         onClose={() => setConfirmTarget(null)}
         onConfirm={confirmApply}
       />
+
+      {/* 编辑弹窗（T7，新建/编辑共用）：保存成功后弹窗自 invalidate PRESETS_KEY */}
+      <PresetEditDialog
+        open={editOpen}
+        preset={editPreset}
+        presetExtensions={extensions}
+        onClose={() => setEditOpen(false)}
+      />
     </div>
   );
 }
 
-/** 预设卡片：名称 + 描述摘要（1 行截断）+ items 计数徽标 + 预设×工具开关 + 删除入口；整卡可点（T7 接 onEdit） */
+/** 预设卡片：名称 + 描述摘要（1 行截断）+ items 计数徽标 + 预设×工具开关 + 删除入口；整卡可点（onEdit → T7 编辑弹窗） */
 function PresetCard({
   preset,
   enabledTools,
   activePresets,
   onSwitch,
   onRequestDelete,
+  onEdit,
 }: {
   preset: PresetRecord;
   enabledTools: EnabledTool[];
   activePresets: ActivePreset[];
   onSwitch: (presetId: string, toolId: string, next: boolean) => void;
   onRequestDelete: (preset: PresetRecord) => void;
+  onEdit: (preset: PresetRecord) => void;
 }) {
   const { t } = useTranslation();
-  // TODO(T7): onEdit —— 打开编辑弹窗并回填该预设，本任务仅占位
-  const handleEdit = () => {
-    console.debug("[PresetList] TODO(T7): edit preset", preset.id);
-  };
 
   // 资源能力门（照抄 ResourceByKindView 的 kindSupported 判定，评审裁决不抽公共模块）：
   // 工具 × 资源类型是否支持启停（后端 EnabledTool 标志下发）
@@ -285,7 +304,7 @@ function PresetCard({
   return (
     <div
       className="hover:bg-accent/30 cursor-pointer rounded border p-2 transition-colors"
-      onClick={handleEdit}
+      onClick={() => onEdit(preset)}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="truncate text-sm font-medium">{preset.name}</span>
@@ -296,7 +315,7 @@ function PresetCard({
           </span>
           <button
             onClick={(e) => {
-              // 不触发整卡点击（T7 的 onEdit）
+              // 不触发整卡点击（onEdit 编辑弹窗）
               e.stopPropagation();
               onRequestDelete(preset);
             }}
@@ -312,7 +331,7 @@ function PresetCard({
       )}
       {/* 预设×工具开关：checked 由 list_active_presets 下发；items 含工具不支持的资源类型 → disabled + title
           （控制器裁决：门控只挡「开」不挡「关」——已激活开关保持可操作以走 restore 恢复路径，spec §5.5/§7.3）。
-          整行阻断冒泡，避免误触整卡点击（T7 的 onEdit） */}
+          整行阻断冒泡，避免误触整卡点击（onEdit 编辑弹窗） */}
       {switchTools.length > 0 && (
         <div
           className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1"

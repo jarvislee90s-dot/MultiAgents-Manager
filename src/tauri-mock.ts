@@ -152,6 +152,8 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            // 唯一 isNative:true 样例（sourceTool 已设）：浏览器 mock 下可目验编辑弹窗「原生技能」分组（T7）
+            isNative: true,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -167,6 +169,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -181,6 +184,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -192,6 +196,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: false, linkStatus: "unlinked" }],
           },
           {
@@ -203,6 +208,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -214,6 +220,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -228,6 +235,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -239,6 +247,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -254,6 +263,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -268,6 +278,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -279,6 +290,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -290,6 +302,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: false, linkStatus: "unlinked" },
               { agentToolId: "codex", enabled: false, linkStatus: "unlinked" },
@@ -304,6 +317,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -318,6 +332,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -329,6 +344,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -340,6 +356,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: false, linkStatus: "unlinked" }],
           },
           {
@@ -351,6 +368,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -362,6 +380,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: false, linkStatus: "unlinked" }],
           },
         ]);

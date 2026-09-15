@@ -231,11 +231,11 @@ const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
 - 保存：新建 `createPreset` / 编辑 `updatePreset`；catch 激活守卫 → toast `presets.saveFailedActive`；≥1 项校验
 
 **验收条件：**
-- [ ] `cargo test` 绿（is_native 透出）+ `pnpm lint && pnpm build` 绿
-- [ ] dev 目验：编辑已有预设改名改描述保存 → 列表反映；私有模式不适配项 disabled、原生组仅显绑定工具的；通用勾专属出现转类型提示；激活中编辑被拒并 toast
-- [ ] T9 用例锁：空名不触发 create、create args 含 meta、私有不适配 disabled
+- [x] `cargo test` 绿（is_native 透出）+ `pnpm lint && pnpm build` 绿
+- [x] dev 目验：编辑已有预设改名改描述保存 → 列表反映；私有模式不适配项 disabled、原生组仅显绑定工具的；通用勾专属出现转类型提示；激活中编辑被拒并 toast
+- [x] T9 用例锁：空名不触发 create、create args 含 meta、私有不适配 disabled
 
-- [ ] **Step 1: Rust 透出 is_native** → **Step 2: 弹窗实现** → **Step 3: 接线 + 门禁** → **Step 4: Commit** `feat(preset-v2): preset edit dialog — type/description/suite list with native skills & binding-aware gating`
+- [x] **Step 1: Rust 透出 is_native** → **Step 2: 弹窗实现** → **Step 3: 接线 + 门禁** → **Step 4: Commit** `feat(preset-v2): preset edit dialog — type/description/suite list with native skills & binding-aware gating`
 
 ### Task 8: FR-24 存为预设 + 收尾清理
 

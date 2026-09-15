@@ -68,6 +68,8 @@ pub struct ExtensionWithAssignments {
     pub suite: Option<String>,
     pub source_tool: Option<String>,
     pub tags: Option<String>,
+    /// 原生（未纳管）资源标记：预设编辑弹窗「原生技能」分组的数据源（T7）
+    pub is_native: bool,
     pub assignments: Vec<AssignmentSummary>,
 }
 
@@ -104,6 +106,7 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
                 suite: ext.suite.clone(),
                 source_tool: ext.source_tool.clone(),
                 tags: ext.tags.clone(),
+                is_native: ext.is_native,
                 assignments: ext_assignments,
             }
         })

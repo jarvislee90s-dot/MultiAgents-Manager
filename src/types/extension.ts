@@ -13,6 +13,8 @@ export interface ExtensionWithAssignments {
   sourceTool: string | null;
   suite: string | null;
   tags: string | null;
+  /** 原生（未纳管）资源：工具私有预设编辑弹窗「原生技能」分组的数据源（T7） */
+  isNative: boolean;
   assignments: AssignmentSummary[];
 }
 
