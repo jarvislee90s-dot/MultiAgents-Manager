@@ -20,6 +20,7 @@
 | C2 消息 API | 八工具（claude/codex/dsh/kimi/opencode/openclaw/workbuddy/zcode）会话内容读取；dsh 数据根 DSH_HOME 同源 + 同 id 去重 | `21327ba` + 评审修复 `692a86f` |
 | C2 前端 + 文件预览 | ZCode 式会话详情（完整对话）+ 文件预览（安全读取：越界/symlink/双阈值防护；markdown 渲染 / 图片 / 代码高亮） | `b8b3294` |
 | 文件路径提取 | 七工具会话内容中文件路径提取（泛化提取器 + fixture 兜底；kimi `file` / opencode `filePath` 实证） | `4ba40f0` |
+| 终审修复三连 | 终审（全分支评审）三项必修：/session-files 数据源与 /session-messages 同源（DSH_HOME/KIMI_CODE_HOME 单源归口）；file 端点图片响应加 CSP + nosniff 安全头；移动端主题切换在 localStorage 写失败时自愈 | `67c8565` |
 
 评审记录：每个 commit 均通过独立评审（`.superpowers/sdd/2026-09-15-m3-board-realtime-content/review-*.diff`），评审发现的问题全部在对应 fix commit 内 ADDRESSED（台账见同目录 `progress.md`）。
 
@@ -28,11 +29,11 @@
 | # | 命令 | 结果 | 数字 |
 |---|---|---|---|
 | 1 | `pnpm build:mobile` | ✅ exit 0 | 2323 modules；产物 JS 728.55 kB（gzip 220.71 kB）+ CSS 48.91 kB（gzip 9.50 kB）；vite 对 >500 kB chunk 有体积告警（见第四节 #7） |
-| 2 | `cargo test`（src-tauri/） | ✅ exit 0 | 574 单元 + 4 dao + 8 linker = **586 passed / 0 failed**（Doc-tests 0） |
+| 2 | `cargo test`（src-tauri/） | ✅ exit 0 | 575 单元 + 4 dao + 8 linker = **587 passed / 0 failed**（Doc-tests 0；终审修复后终数） |
 | 3 | `cargo clippy --all-targets -- -D warnings` | ✅ exit 0 | 0 warning |
 | 4 | `cargo fmt --check` | ✅ exit 0 | 无差异 |
 | 5 | `pnpm check`（format:check + lint + check:i18n + tsc + vite build） | ✅ exit 0 | prettier / eslint / i18n / tsc 全过；桌面 bundle 构建成功 |
-| 6 | `pnpm test`（vitest） | ✅ exit 0 | **59 个测试文件 / 356 个用例全过** |
+| 6 | `pnpm test`（vitest） | ✅ exit 0 | **59 个测试文件 / 357 个用例全过**（终审修复后终数） |
 
 ## 三、手动验收清单（⬜ = 待用户真机）
 
@@ -49,7 +50,7 @@
 | C1 降级 | 看板打开后，手机断 Wi-Fi 数秒（让 SSE 连续 2 次重连失败，1s 线性退避）再恢复网络 | 恢复后看板自动切 3s 轮询、数据仍刷新（变化提示延迟最多 ~3s，弱实时但不断流） | ⬜ 待用户 |
 | C2 消息 | 点开任一卡片进入会话详情 | ZCode 式完整对话视图（用户/助手消息、工具调用步骤） | ⬜ 待用户 |
 | C2 文件 | 在会话详情中点开文件路径链接（如 Claude Read/Write 的目标文件、ZCode 会话中被改文件） | 文件可预览：markdown 渲染、图片直接显示、代码语法高亮；拒绝越界/超大文件 | ⬜ 待用户 |
-| 桌面回归 | 以第二节全量门禁为代理指标（586 Rust + 356 前端用例 + 双端构建全绿，M3 未触碰桌面 UI 组件），另请用户日常使用复核 | 现有桌面功能零变化 | ✅ 代理指标绿 + ⬜ 用户复核 |
+| 桌面回归 | 以第二节全量门禁为代理指标（587 Rust + 357 前端用例 + 双端构建全绿，M3 未触碰桌面 UI 组件），另请用户日常使用复核 | 现有桌面功能零变化 | ⬜ 用户复核（代理指标绿：587+357 全绿） |
 
 ## 四、已知限制 / 边界登记（如实转写，均已在评审台账备案）
 
@@ -64,6 +65,6 @@
 
 ## 五、结论
 
-- **自动化验收 ✅**：六项门禁全绿（Rust 586 用例、前端 356 用例、双端构建、clippy -D warnings、rustfmt、prettier/eslint/i18n）。
+- **自动化验收 ✅**：六项门禁全绿（Rust 587 用例、前端 357 用例、双端构建、clippy -D warnings、rustfmt、prettier/eslint/i18n）。
 - **真机验收 ⬜ 待用户**：第三节清单共 10 项，需用户 + 手机真机按步骤操作确认；桌面准备步骤已写明，照做即可。
 - 已知限制 8 条已如实登记，其中 M4 候选：SSE 连接注册表 + revoke 广播断连、TLS 撤回文案、manualChunks 分包。
