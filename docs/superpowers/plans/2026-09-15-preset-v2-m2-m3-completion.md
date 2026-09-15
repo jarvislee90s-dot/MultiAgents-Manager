@@ -182,10 +182,10 @@ export const useResourceBindingsQuery = () => useQuery({ queryKey: BINDINGS_KEY,
 - 确认按钮 loading 态；取消恒可用
 
 **验收条件：**
-- [ ] `pnpm lint && pnpm build` 绿；`grep -rn "CompatibilityDialog" src/` 零结果
-- [ ] T9 用例锁：正常 preview 五段渲染；白板 preview 警示出现且按钮 destructive
+- [x] `pnpm lint && pnpm build` 绿；`grep -rn "CompatibilityDialog" src/` 零结果
+- [x] T9 用例锁：正常 preview 五段渲染；白板 preview 警示出现且按钮 destructive
 
-- [ ] **Step 1: 实现** → **Step 2: 删旧** → **Step 3: 门禁 + Commit** `feat(preset-v2): apply confirm dialog v2 — preview-driven with whiteboard warning`
+- [x] **Step 1: 实现** → **Step 2: 删旧** → **Step 3: 门禁 + Commit** `feat(preset-v2): apply confirm dialog v2 — preview-driven with whiteboard warning`
 
 ### Task 6: 滑块开关——开=确认弹窗、关=直接恢复 + toast
 

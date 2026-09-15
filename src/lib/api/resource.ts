@@ -12,9 +12,6 @@ export async function importNativeResources(items: [string, string, string][]) {
 export async function listToolResources(toolId: string) {
   return await invoke("list_tool_resources", { toolId });
 }
-export async function checkPresetCompatibility(presetId: string, toolId: string) {
-  return await invoke("check_preset_compatibility", { presetId, toolId });
-}
 export async function listSsotResources() {
   return await invoke<SsotResources>("list_ssot_resources");
 }
