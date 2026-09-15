@@ -1,9 +1,12 @@
-// 一致性体检卡片（spec §13 呈现侧，Task 15）：三源聚合——
+// 一致性体检卡片（spec §13 呈现侧，Task 15/17）：三源聚合——
 // ① 账本-磁盘漂移：按工具分组，逐行 a/b/c 处置（c=暂不处理，纯前端收起）+ 组头批量；
 //    needs_manual 处置结果行转橙色无按钮（L4 / L2 内容不一致，重新体检也不会消失）
 // ② 快照不变量违背：逐条「一键修复」= restorePreset（fixAll，评审追记的专属 key）
 // ③ 残留暂存：逐条回移 = restore_stash_entry（失败原样 toast，后端 message 已含原因）
-// 无异常时折叠一行 + 「立即体检」（refetch）；标题处角标 = 未决差异总数
+// ④ frontmatter 存量「待确认专属建议」（Task 17，spec §6）：逐条「设为专属/忽略本轮」，
+//    只列建议不自动写绑定表（2026-09-15 裁决）；忽略=前端收起，下次体检重新出现
+// 无异常时折叠一行 + 「立即体检」（refetch）；标题处角标 = 未决差异数（④ 建议不计入：
+// 角标沿 Task 15 语义只反映漂移/不变量/暂存三类差异）
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -13,13 +16,19 @@ import { HeartPulse, RefreshCw, RotateCcw, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatInvokeError } from "@/lib/invokeError";
-import { restorePreset, restoreStashEntry } from "@/lib/api/preset";
+import { restorePreset, restoreStashEntry, setResourceBinding } from "@/lib/api/preset";
 import { reconcileItem, reconcileToolBatch } from "@/lib/api/resource";
+import {
+  BINDINGS_KEY,
+  FM_SUGGESTIONS_KEY,
+  useFrontmatterSuggestionsQuery,
+} from "@/lib/query/queries/bindings";
 import { PRESET_HEALTH_KEY, usePresetHealthQuery } from "@/lib/query/queries/health";
 import { ACTIVE_PRESETS_KEY, PRESETS_KEY } from "@/lib/query/queries/presets";
 import { SSOT_RESOURCES_KEY } from "@/lib/query/queries/resources";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import type { DriftItem, StashEntryRecord } from "@/types/preset";
+import type { FrontmatterSuggestion } from "@/types/extension";
 
 // 行键：同一 (tool, extension) 的漂移互斥（缺链/占位/多链/外链只居其一），二元组即唯一
 const driftKey = (d: Pick<DriftItem, "toolId" | "extensionId">) => `${d.toolId}|${d.extensionId}`;
@@ -48,20 +57,28 @@ export function HealthCheckCard() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const healthQuery = usePresetHealthQuery();
+  // ④ frontmatter 存量建议（Task 17）：独立轻量 query（["fm-suggestions"]，30s 防抖）
+  const suggestionsQuery = useFrontmatterSuggestionsQuery();
   const enabledToolsQuery = useEnabledToolsQuery();
   const drift = healthQuery.data?.drift ?? [];
   const invariants = healthQuery.data?.invariants ?? [];
   const stashPending = healthQuery.data?.stashPending ?? [];
   const hasIssues = drift.length + invariants.length + stashPending.length > 0;
+  // ④ 忽略本轮：纯前端收起集合（不写库）；「立即体检」清零 + 重拉 → 下次体检重新出现
+  const [ignoredSuggestions, setIgnoredSuggestions] = useState<Set<string>>(new Set());
+  const suggestions = (suggestionsQuery.data ?? []).filter(
+    (s) => !ignoredSuggestions.has(s.extensionId)
+  );
 
   // c=暂不处理：纯前端收起集合（不调后端）；needs_manual：处置返回升级人工的行集合（转橙无按钮）
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [manual, setManual] = useState<Set<string>>(new Set());
-  // 在途态：行级 / 组头批量 / 不变量修复 / 暂存回移 各自独立，防并发点击
+  // 在途态：行级 / 组头批量 / 不变量修复 / 暂存回移 / 建议确认 各自独立，防并发点击
   const [rowPending, setRowPending] = useState<string | null>(null);
   const [batchPending, setBatchPending] = useState<string | null>(null);
   const [invPending, setInvPending] = useState<string | null>(null);
   const [stashPendingId, setStashPendingId] = useState<number | null>(null);
+  const [suggPendingId, setSuggPendingId] = useState<string | null>(null);
 
   // 处置后统一失效：体检三源 + 预设 / 激活预设 / SSOT 资源（账本回写与链接重建都影响这些视图）
   const invalidateAfterFix = async () => {
@@ -162,6 +179,24 @@ export function HealthCheckCard() {
     }
   };
 
+  // ④ 设为专属：按声明工具写绑定表 → 失效建议 + 绑定查询（ResourceByKindView
+  //    专属徽标数据源）。成功 toast 复用既有键组合（presets.exclusiveBadge），不新增文案键
+  const confirmSuggestion = async (s: FrontmatterSuggestion) => {
+    setSuggPendingId(s.extensionId);
+    try {
+      await setResourceBinding(s.extensionId, s.tools);
+      toast.success(
+        `${s.extensionId.replace(/^skill-/, "")} · ${t("presets.exclusiveBadge")}: ${s.tools.join(", ")}`
+      );
+      await qc.invalidateQueries({ queryKey: FM_SUGGESTIONS_KEY });
+      await qc.invalidateQueries({ queryKey: BINDINGS_KEY });
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    } finally {
+      setSuggPendingId(null);
+    }
+  };
+
   // 漂移按 toolId 分组（保持扫描顺序）；组内滤掉已收起行
   const groups: { toolId: string; items: DriftItem[] }[] = [];
   for (const d of drift) {
@@ -190,7 +225,12 @@ export function HealthCheckCard() {
           size="sm"
           variant="outline"
           className="h-7 px-2 text-[10px]"
-          onClick={() => void healthQuery.refetch()}
+          onClick={() => {
+            // 下一轮体检：已忽略的建议重新出现（收起集合清零）+ 建议查询一并重拉
+            setIgnoredSuggestions(new Set());
+            void healthQuery.refetch();
+            void suggestionsQuery.refetch();
+          }}
           disabled={healthQuery.isFetching}
         >
           <RefreshCw className={cn("mr-1 h-3 w-3", healthQuery.isFetching && "animate-spin")} />
@@ -353,6 +393,46 @@ export function HealthCheckCard() {
             </div>
           )}
         </>
+      )}
+
+      {/* ④ frontmatter 存量「待确认专属建议」（Task 17）：独立于漂移三类异常呈现
+          （仅建议存在时也显示）；「设为专属」按钮借 common.confirm、「忽略本轮」
+          借 resources.health.fixC（暂不处理语义同源），不新增文案键 */}
+      {suggestions.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-amber-500">
+            {t("resources.health.suggestion")}
+          </div>
+          {suggestions.map((s) => (
+            <div key={s.extensionId} className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium">
+                  {s.extensionId.replace(/^skill-/, "")}
+                </div>
+                <div className="text-muted-foreground truncate text-[10px]">
+                  {t("presets.exclusiveBadge")}: {s.tools.join(", ")}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 shrink-0 px-1.5 text-[10px]"
+                disabled={suggPendingId !== null}
+                onClick={() => void confirmSuggestion(s)}
+              >
+                {t("common.confirm")}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 shrink-0 px-1.5 text-[10px]"
+                onClick={() => setIgnoredSuggestions((prev) => new Set(prev).add(s.extensionId))}
+              >
+                {t("resources.health.fixC")}
+              </Button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

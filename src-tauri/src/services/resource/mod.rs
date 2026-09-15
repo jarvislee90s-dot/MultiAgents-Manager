@@ -1,5 +1,6 @@
 // 资源管理服务 - 自动扫描导入 skills 和 plugins
 
+pub mod frontmatter;
 pub mod migration;
 pub mod reconcile;
 
@@ -113,6 +114,11 @@ pub struct ImportStats {
     pub newly_added: usize,
     pub skipped_dup: usize,
     pub source_counts: Vec<(String, usize)>,
+    /// frontmatter 专属预填建议（spec §6，Task 17）：仅手动导入路径
+    /// （import_native_resources）取首个命中项填充——brief 语义「弹一个提示」，
+    /// 其余命中项交由 list_frontmatter_suggestions 进体检卡片兜底；
+    /// 启动自动导入（rescan_skills）恒 None（自动识别只建议不强制）
+    pub suggestion: Option<crate::services::resource::frontmatter::FrontmatterSuggestion>,
 }
 
 /// 单次导入决策：SSOT 有无 + 工具显式禁用状态决定复制/补链/跳过
@@ -573,6 +579,8 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         newly_added,
         skipped_dup,
         source_counts,
+        // 自动导入只建议不强制（spec §6 / 2026-09-15 裁决）：存量建议走体检卡片
+        suggestion: None,
     }
 }
 

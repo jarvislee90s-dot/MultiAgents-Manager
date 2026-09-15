@@ -97,6 +97,16 @@ if (!isTauri) {
   };
   const mockPresetHealthEmpty = { invariants: [], stashPending: [], drift: [] };
 
+  // frontmatter 存量建议 fixture（Task 17，spec §6）：extensionId 不在
+  // list_resource_bindings 样例（仅 "13" 有绑定）→ 可出建议。参数化：
+  // localStorage["mam-mock-fm"] = "empty" 切空建议（目验体检卡片无建议段）
+  const mockFmSuggestion = {
+    extensionId: "skill-systematic-debugging",
+    tools: ["claude", "codex"],
+  };
+  const fmSuggestionOrDefault = () =>
+    localStorage.getItem("mam-mock-fm") === "empty" ? null : mockFmSuggestion;
+
   // Mock __TAURI_INTERNALS__
   (window as unknown as { __TAURI_INTERNALS__: TauriInternalsMock }).__TAURI_INTERNALS__ = {
     metadata: {
@@ -467,6 +477,24 @@ if (!isTauri) {
 
       case "list_tool_residents":
         return Promise.resolve(args?.toolId === "claude" ? ["17"] : []);
+
+      // —— frontmatter 专属预填建议（Task 17，与 Rust 命令/ImportOutcome 同形）——
+      // install_skill 返回 ImportOutcome{success, suggestion}；import_native_resources
+      // 返回 ImportStats + suggestion；存量扫描读 fixture（空/有建议可参数化）
+      case "list_frontmatter_suggestions":
+        return Promise.resolve(
+          localStorage.getItem("mam-mock-fm") === "empty" ? [] : [mockFmSuggestion]
+        );
+      case "install_skill":
+        return Promise.resolve({ success: true, suggestion: fmSuggestionOrDefault() });
+      case "import_native_resources":
+        return Promise.resolve({
+          imported: 1,
+          newlyAdded: 1,
+          skippedDup: 0,
+          sourceCounts: [],
+          suggestion: fmSuggestionOrDefault(),
+        });
 
       // —— 一致性体检读命令（T15，与 tests/msw/tauriMocks.ts 形状一致）——
       case "get_preset_health":

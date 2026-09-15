@@ -6,8 +6,9 @@ import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
-import type { NativeExtension } from "@/types/extension";
+import type { FrontmatterSuggestion, ImportStats, NativeExtension } from "@/types/extension";
 import { ToolIcon } from "@/components/common/ToolIcon";
+import { ImportSuggestionDialog } from "@/components/resources/ImportSuggestionDialog";
 // review M2：工具列改后端下发（勾选状态驱动），与 PresetList/资源视图同源
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 
@@ -23,9 +24,14 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
   const [resources, setResources] = useState<Record<string, NativeExtension[]>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  // frontmatter 专属预填建议（spec §6，Task 17）：导入成功后若有命中，
+  // 关闭本弹窗的同时弹出确认 Dialog（2026-09-15 裁决：当场确认，非 toast）
+  const [suggestion, setSuggestion] = useState<FrontmatterSuggestion | null>(null);
 
   useEffect(() => {
     if (open) {
+      // 重开导入弹窗即新一轮导入：上一轮遗留的建议弹窗状态清零
+      setSuggestion(null);
       loadAllResources();
     }
   }, [open]);
@@ -80,16 +86,16 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     }
 
     try {
-      const stats = await invoke<{ imported: number; skippedDup: number }>(
-        "import_native_resources",
-        { items }
-      );
+      const stats = await invoke<ImportStats>("import_native_resources", { items });
       toast.success(
         stats.skippedDup > 0
           ? t("resources.importedWithSkipped", { n: stats.imported, skipped: stats.skippedDup })
           : t("resources.importedCount", { n: stats.imported })
       );
       onImported();
+      // 建议弹窗须在本弹窗关闭后仍可见：ImportDialog 常驻挂载（父级 open 控制），
+      // state 置值后自身 onClose 不影响子 Dialog
+      if (stats.suggestion) setSuggestion(stats.suggestion);
       onClose();
     } catch (e) {
       toast.error(t("resources.importFailed", { error: formatInvokeError(e, t) }));
@@ -166,6 +172,9 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
           </Button>
         </div>
       </DialogContent>
+
+      {/* frontmatter 专属预填建议确认（Task 17）：确认=写绑定，忽略=关闭不写 */}
+      <ImportSuggestionDialog suggestion={suggestion} onClose={() => setSuggestion(null)} />
     </Dialog>
   );
 }

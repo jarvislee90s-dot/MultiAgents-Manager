@@ -16,10 +16,12 @@ import { getToolActiveResources } from "@/lib/api/preset";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import type {
   ExtensionWithAssignments,
+  FrontmatterSuggestion,
   NativeExtension,
   ToolResources,
   ImportStats,
 } from "@/types/extension";
+import { ImportSuggestionDialog } from "@/components/resources/ImportSuggestionDialog";
 
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
@@ -42,6 +44,9 @@ export function ResourceByToolView() {
   } | null>(null);
   const [presetExtensions, setPresetExtensions] = useState<ExtensionWithAssignments[]>([]);
   const [prefilling, setPrefilling] = useState<Record<string, boolean>>({});
+  // frontmatter 专属预填建议（spec §6，Task 17）：单项目导入命中后弹确认 Dialog
+  //（2026-09-15 裁决：当场确认，非 toast）
+  const [suggestion, setSuggestion] = useState<FrontmatterSuggestion | null>(null);
 
   const handleSaveAsPreset = async (toolId: string) => {
     setPrefilling((prev) => ({ ...prev, [toolId]: true }));
@@ -111,6 +116,7 @@ export function ResourceByToolView() {
       });
       if (result.imported > 0) {
         toast.success(t("resources.importSuccess", { name: item.name }));
+        if (result.suggestion) setSuggestion(result.suggestion);
         await loadToolResources(toolId);
         await loadDuplicates(toolId);
       } else {
@@ -270,6 +276,9 @@ export function ResourceByToolView() {
         prefill={presetPrefill ?? undefined}
         onClose={() => setPresetDlgOpen(false)}
       />
+
+      {/* frontmatter 专属预填建议确认（Task 17）：确认=写绑定，忽略=关闭不写 */}
+      <ImportSuggestionDialog suggestion={suggestion} onClose={() => setSuggestion(null)} />
     </div>
   );
 }

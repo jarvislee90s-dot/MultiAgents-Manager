@@ -132,6 +132,18 @@ export function setMockHealthMode(mode: "issues" | "empty") {
   healthMode = mode;
 }
 
+// frontmatter 存量建议 fixture（Task 17，spec §6）：与 src/tauri-mock.ts 同构
+// （extensionId 不在 list_resource_bindings 样例 → 可出建议）。
+// setMockFmMode("empty") 切空建议，默认有建议 ——
+const mockFmSuggestion = {
+  extensionId: "skill-systematic-debugging",
+  tools: ["claude", "codex"],
+};
+let fmMode: "suggestion" | "empty" = "suggestion";
+export function setMockFmMode(mode: "suggestion" | "empty") {
+  fmMode = mode;
+}
+
 export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
   switch (cmd) {
     case "pet_list_pets":
@@ -223,11 +235,33 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
     case "list_repo_skills":
       return Promise.resolve([]);
     case "rescan_skills":
-      return Promise.resolve({ imported: 0, newlyAdded: 0, skippedDup: 0, sourceCounts: [] });
+      // 自动导入恒无建议（spec §6：只建议不强制；存量建议走体检卡片）
+      return Promise.resolve({
+        imported: 0,
+        newlyAdded: 0,
+        skippedDup: 0,
+        sourceCounts: [],
+        suggestion: null,
+      });
     case "scan_native_resources":
       return Promise.resolve([]);
+    // ImportStats + suggestion（Task 17）：手动导入路径带首个命中建议 fixture
     case "import_native_resources":
-      return Promise.resolve({ imported: 0, newlyAdded: 0, skippedDup: 0, sourceCounts: [] });
+      return Promise.resolve({
+        imported: 0,
+        newlyAdded: 0,
+        skippedDup: 0,
+        sourceCounts: [],
+        suggestion: fmMode === "empty" ? null : mockFmSuggestion,
+      });
+    // ImportOutcome（commands/skill.rs，serde camelCase）：undefined 会让调用方读 .success 抛错
+    case "install_skill":
+      return Promise.resolve({
+        success: true,
+        suggestion: fmMode === "empty" ? null : mockFmSuggestion,
+      });
+    case "list_frontmatter_suggestions":
+      return Promise.resolve(fmMode === "empty" ? [] : [mockFmSuggestion]);
     case "list_tool_resources":
       return Promise.resolve({ global: [], native: [] });
     // CompatibilityReport（serde camelCase）：条目为 {id, name, kind} / {id, name, kind, reason}
@@ -242,7 +276,6 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
     case "toggle_plugin_for_tool":
     case "write_mcp_server":
     case "remove_mcp_server":
-    case "install_skill":
     case "assign_skill_to_subagent":
     case "create_preset":
     case "update_preset":

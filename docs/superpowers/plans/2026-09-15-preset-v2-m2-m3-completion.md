@@ -500,11 +500,11 @@ pub fn parse_supported_agents(skill_md: &str) -> Option<Vec<String>>
 ```
 
 **验收条件：**
-- [ ] 解析器单测绿：标准数组 / 逗号串 / 四别名各一 / 坏 YAML / 缺键 / 无 frontmatter → 各断言
-- [ ] `cargo test` + `pnpm lint && pnpm build` 绿
+- [x] 解析器单测绿：标准数组 / 逗号串 / 四别名各一 / 坏 YAML / 缺键 / 无 frontmatter → 各断言
+- [x] `cargo test` + `pnpm lint && pnpm build` 绿
 - [ ] dev 目验：导入带声明的技能 → 确认弹窗 → 设为专属后徽标出现；体检卡片建议段出现存量建议，「设为专属」生效、「忽略本轮」不写绑定
 
-- [ ] **Step 1: 解析器 TDD** → **Step 2: 两导入路径 + 存量命令** → **Step 3: 前端两处** → **Step 4: 门禁 + Commit** `feat(preset-v2): frontmatter exclusive prefill — import-time prompt + stock suggestions in health card`
+- [x] **Step 1: 解析器 TDD** → **Step 2: 两导入路径 + 存量命令** → **Step 3: 前端两处** → **Step 4: 门禁 + Commit** `feat(preset-v2): frontmatter exclusive prefill — import-time prompt + stock suggestions in health card`
 
 ### Task 18: 用户手册 + DRY + 终门禁
 

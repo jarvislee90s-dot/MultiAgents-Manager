@@ -158,6 +158,10 @@ pub fn import_native_resources(
     }
     let mut imported = 0;
     let mut skipped = 0;
+    // frontmatter 专属预填建议（spec §6，2026-09-15 裁决：手动导入当场确认）：
+    // 多项目导入只取首个命中项（brief 语义「弹一个提示」），其余命中项由
+    // list_frontmatter_suggestions 进体检卡片兜底
+    let mut suggestion = None;
     for (source_path, name, source_tool) in items {
         let path = std::path::Path::new(&source_path);
         if !path.exists() {
@@ -191,13 +195,52 @@ pub fn import_native_resources(
             log::warn!("导入 {} 后为 {} 创建链接失败: {}", name, source_tool, e);
         }
         imported += 1;
+        // SSOT 内容已落位（install_to_repo 成功），读 SKILL.md 判定；
+        // 判定失败（非技能/IO 错误）→ None，不阻断导入
+        if suggestion.is_none() {
+            suggestion = crate::services::resource::frontmatter::suggest_for_skill(&name);
+        }
     }
     Ok(crate::services::ImportStats {
         imported,
         newly_added: imported,
         skipped_dup: skipped,
         source_counts: vec![],
+        suggestion,
     })
+}
+
+/// frontmatter 存量「待确认专属建议」（spec §6/§13；2026-09-15 裁决：启动扫描
+/// 只列建议、不自动写绑定表）。扫 SSOT 仓库顶层各技能目录的 SKILL.md，
+/// frontmatter 命中且 resource_bindings 无该行 → 列出；单目录读取失败容错跳过
+#[tauri::command]
+pub fn list_frontmatter_suggestions(
+) -> Vec<crate::services::resource::frontmatter::FrontmatterSuggestion> {
+    let repo = crate::linker::ensure_repo_dir();
+    let Ok(entries) = std::fs::read_dir(&repo) else {
+        return Vec::new();
+    };
+    // 绑定表一次拉取（判定核心 frontmatter::suggestion_for_content 逐技能复用）
+    let bound_ids: std::collections::HashSet<String> = crate::database::list_resource_bindings()
+        .into_iter()
+        .map(|b| b.extension_id)
+        .collect();
+    let mut suggestions: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                return None;
+            }
+            let content = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
+            crate::services::resource::frontmatter::suggestion_for_content(
+                &name, &content, &bound_ids,
+            )
+        })
+        .collect();
+    suggestions.sort_by(|a, b| a.extension_id.cmp(&b.extension_id));
+    suggestions
 }
 
 /// 生产迁移边界路径：从真实家目录构建四字段（测试用 tempdir 注入，见 migration 核心）

@@ -133,6 +133,7 @@ pub fn run() {
         commands::resource::open_tool_resource,
         commands::resource::scan_native_resources,
         commands::resource::import_native_resources,
+        commands::resource::list_frontmatter_suggestions,
         commands::resource::list_tool_resources,
         commands::resource::check_preset_compatibility,
         commands::resource::list_ssot_resources,

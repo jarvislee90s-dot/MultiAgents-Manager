@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ImportStats, SsotResources } from "@/types/extension";
+import type { FrontmatterSuggestion, ImportStats, SsotResources } from "@/types/extension";
 import type { DriftItem, ReconcileOutcome } from "@/types/preset";
 export async function listExtensionsWithAssignments() {
   return await invoke("list_extensions_with_assignments");
@@ -9,6 +9,11 @@ export async function scanNativeResources(toolId: string) {
 }
 export async function importNativeResources(items: [string, string, string][]) {
   return await invoke<ImportStats>("import_native_resources", { items });
+}
+// frontmatter 存量「待确认专属建议」（spec §6/§13，Task 17）：只列建议不写绑定，
+// 确认动作由前端显式调 set_resource_binding
+export async function listFrontmatterSuggestions(): Promise<FrontmatterSuggestion[]> {
+  return await invoke<FrontmatterSuggestion[]>("list_frontmatter_suggestions");
 }
 export async function listToolResources(toolId: string) {
   return await invoke("list_tool_resources", { toolId });
