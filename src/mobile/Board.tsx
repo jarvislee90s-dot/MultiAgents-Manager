@@ -1,16 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { fetchHost, fetchSessions, type HostPayload } from "./api";
 import {
   STATUS_DOT_COLOR,
-  TOOL_FILTERS,
+  TOOL_BRAND_COLORS,
   TOOL_LABELS,
   filterByAgent,
+  filterEnabledTools,
   formatRelativeTime,
+  sortChipsByActivity,
   sortSessions,
   type ToolFilter,
 } from "./board-logic";
 import { ToolIcon } from "@/components/common/ToolIcon";
-import type { SessionsResponse } from "@/types/session";
+import type { AgentType, SessionsResponse } from "@/types/session";
 
 const POLL_MS = 3000;
 
@@ -31,7 +33,13 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
   // 失败口径（与轮询不同）：拉取失败 / 403 一律静默降级为不显示——设备有效性只以
   // 会话轮询的 403 为准，品牌行只是展示层，不参与配对状态机
   const [host, setHost] = useState<HostPayload["host"] | null>(null);
+  // P8d 受管工具名单：与 host 同源一次拉取（enabledTools 来自后端 dao::agent_tool）。
+  // null = host 未到（竞态窗口）：chips 只显示「全部」，不猜全量八工具
+  const [enabledTools, setEnabledTools] = useState<Set<string> | null>(null);
   const [filter, setFilter] = useState<ToolFilter>("all");
+  // P8e 多行折叠：chips 内容超一行时折叠为一行 + 展开/收起按钮（无溢出无按钮）
+  const [chipsOverflow, setChipsOverflow] = useState(false);
+  const [chipsExpanded, setChipsExpanded] = useState(false);
   // 相对时长的基准时钟：随每拍轮询刷新（react-hooks/purity 禁止渲染期直接调 Date.now）
   const [now, setNow] = useState(() => Date.now());
   // 首拍成功通知只发一次：防每拍回调导致父级无谓重渲染；重挂载（403 后重配）时随组件自然复位
@@ -70,15 +78,20 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
     return () => clearInterval(id);
   }, [tick]);
 
-  // 品牌行数据：挂载时拉一次（host 信息不变，无需轮询；失败静默，见 state 注释）
+  // 品牌行数据：挂载时拉一次（host 信息不变，无需轮询；失败静默，见 state 注释）。
+  // enabledTools（P8d 受管名单）随同一载荷更新——host 拉取失败时保持 null，
+  // chips 收敛为「全部」，与品牌行同口径静默降级
   useEffect(() => {
     let alive = true;
     void fetchHost<HostPayload>()
       .then((h) => {
-        if (alive && h !== null) setHost(h.host);
+        if (alive && h !== null) {
+          setHost(h.host);
+          setEnabledTools(new Set(h.enabledTools));
+        }
       })
       .catch(() => {
-        /* 网络异常：品牌行静默不显示 */
+        /* 网络异常：品牌行静默不显示，chips 保持「全部」 */
       });
     return () => {
       alive = false;
@@ -88,6 +101,38 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
   const sessions = data ? sortSessions(filterByAgent(data.sessions, filter)) : [];
   // 过滤后无卡但总量不为 0 时，提示归因于过滤条件而非"真的没会话"
   const filteredOut = data !== null && data.totalCount > 0 && sessions.length === 0;
+
+  // P8d/P8e chips 集合（竞态收敛）：
+  // - host 未到（enabledTools=null）→ 只有「全部」（不猜全量八工具）
+  // - host 已到 → 「全部」 + filterEnabledTools(有卡工具 ∩ 受管)，
+  //   再按各工具最新会话活跃时间降序（「全部」恒首位不参与排序）
+  // 有卡工具集合从当前 sessions 推导（Set 去重；交集元素本就来自 AgentType 会话字段，
+  // filterEnabledTools 的 string[] 签名在此收窄回 AgentType）；再走活跃排序
+  const cardTools: AgentType[] = enabledTools
+    ? (filterEnabledTools(
+        [...new Set(data?.sessions.map((s) => s.agentType) ?? [])],
+        enabledTools
+      ) as AgentType[])
+    : [];
+  const sortedCardTools = sortChipsByActivity(cardTools, data?.sessions ?? []);
+
+  // P8e 溢出测量：chips 行实际渲染高度 > 单行高度 ⇒ 折叠为可展开态。
+  // useLayoutEffect 在首帧布局后同步测量，避免「先折叠后闪烁」；依赖 chips 数量：
+  // host 晚到使 chips 从 1 个收敛为 N 个时重测（resize 之外的第二个测量时机，
+  // 否则竞态窗口内测得的「未溢出」会一直滞后到下次 resize——移动 PWA 上 resize 罕见）。
+  // jsdom 恒 0 → 不折叠（测试需 mock scrollHeight/clientHeight 后派发 resize 验证折叠分支）
+  const chipsRowRef = useRef<HTMLDivElement>(null);
+  const chipCount = sortedCardTools.length + 1; // +1 = 「全部」
+  useLayoutEffect(() => {
+    const measure = () => {
+      const el = chipsRowRef.current;
+      if (!el) return;
+      setChipsOverflow(el.scrollHeight > el.clientHeight);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [chipCount]);
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-4 text-slate-200">
@@ -114,22 +159,59 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
         </p>
       )}
 
-      {/* 工具过滤 chips：全部 + 八工具，横向可滚动 */}
-      <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
-        {TOOL_FILTERS.map((f) => (
+      {/* 工具过滤 chips（P8d/P8e）：受管∩有卡 + 全部，按活跃排序；溢出时折叠为一行。
+          data-testid 供测试精确定位（卡片主行也渲染工具名，全局文本匹配有歧义） */}
+      <div
+        ref={chipsRowRef}
+        data-testid="tool-chips"
+        className={`mb-3 flex items-center gap-2 pb-1 ${
+          chipsOverflow && !chipsExpanded
+            ? "flex-nowrap overflow-hidden" // 折叠态：压回一行，溢出部分隐藏
+            : "flex-wrap" // 展开态 / 无溢出：自然换行
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => setFilter("all")}
+          className={
+            filter === "all"
+              ? "shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-900"
+              : "shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400"
+          }
+        >
+          全部
+        </button>
+        {sortedCardTools.map((tool) => {
+          // 品牌色 chip：选中态 = 品牌色实底 + 白字（八色均够深，白字对比度足够）；
+          // 未选中态 = 品牌色 12% 透明度淡化底（8 位 hex 追加 1F alpha，免 color-mix 的
+          // Tailwind v4 注册环节，选 style 内联为最简实现）+ 品牌色字
+          const brand = TOOL_BRAND_COLORS[tool];
+          const selected = filter === tool;
+          return (
+            <button
+              key={tool}
+              type="button"
+              onClick={() => setFilter(tool)}
+              className="shrink-0 rounded-full px-3 py-1 text-xs"
+              style={
+                selected
+                  ? { backgroundColor: brand, color: "#ffffff" }
+                  : { backgroundColor: `${brand}1F`, color: brand }
+              }
+            >
+              {TOOL_LABELS[tool]}
+            </button>
+          );
+        })}
+        {chipsOverflow && (
           <button
-            key={f}
             type="button"
-            onClick={() => setFilter(f)}
-            className={
-              filter === f
-                ? "shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-900"
-                : "shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400"
-            }
+            onClick={() => setChipsExpanded((v) => !v)}
+            className="shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400"
           >
-            {f === "all" ? "全部" : f}
+            {chipsExpanded ? "收起" : "展开"}
           </button>
-        ))}
+        )}
       </div>
 
       {sessions.length === 0 ? (

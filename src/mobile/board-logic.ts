@@ -40,6 +40,20 @@ export const TOOL_LABELS: Record<AgentType, string> = {
 /** 过滤 chips：全部在最前，其后按 AgentType 八值顺序 */
 export const TOOL_FILTERS: readonly ToolFilter[] = ["all", ...AGENT_TYPES] as const;
 
+/** 工具品牌色（P8e chips 底色，逐字对齐 Task 3 brief；色值仅作品牌识别，与桌面 ToolIcon 的
+ *  图标底色系不同源——brief 拍板的口径优先）。Record<AgentType, string> 穷尽守卫
+ *  （对齐 AGENT_TYPE_RECORD 模式）：AgentType 增删值时此处编译报错，chips 不会静默缺色 */
+export const TOOL_BRAND_COLORS: Record<AgentType, string> = {
+  claude: "#D97757", // 橙
+  codex: "#8B5CF6", // 紫
+  opencode: "#10B981", // 绿
+  openclaw: "#F59E0B", // 琥珀
+  kimi: "#3B82F6", // 蓝
+  workbuddy: "#EF4444", // 红
+  zcode: "#6366F1", // 靛蓝
+  dsh: "#4D6BFE", // 深蓝
+};
+
 // 排序优先级：等待(0) → 运行(1) → 空闲(2)，数字越小越靠前
 // 移动看板口径：等待人工介入的卡置顶（桌面 Rust status_sort_priority 为运行优先，
 // 两端口径刻意不同——移动端强调"哪些卡需要我处理"）
@@ -68,6 +82,33 @@ export function sortSessions(sessions: Session[]): Session[] {
 export function filterByAgent(sessions: Session[], filter: ToolFilter): Session[] {
   if (filter === "all") return sessions;
   return sessions.filter((s) => s.agentType === filter);
+}
+
+/** chips 活跃排序（P8e）：按各工具最新会话的 lastActivityAt 降序，最近活跃的工具在前。
+ *  泛型透传入参元素类型（调用侧传 AgentType[] 时返回保持 AgentType[]，chips 渲染处
+ *  无需类型断言；brief 的 string[] 签名调用方式完全兼容）。
+ *  入参 sessions 只消费 agentType / lastActivityAt 两个字段（Board 侧直接传全量会话）。
+ *  边界口径：无会话工具与不可解析时间戳一律按 0 处理，排有活跃时间的工具之后
+ *  （NaN → 0 与 sortSessions 的 -Infinity 语义对齐：坏数据不冒泡到前排）。
+ *  不改入参。零时钟依赖：时间全部来自会话自身的时间戳，无 now 注入需求 */
+export function sortChipsByActivity<T extends string>(
+  tools: T[],
+  sessions: { agentType: string; lastActivityAt: string }[]
+): T[] {
+  // 每工具只保留最新活跃时间：Math.max 逐条折叠
+  const latest = new Map<string, number>();
+  for (const s of sessions) {
+    const t = Date.parse(s.lastActivityAt);
+    latest.set(s.agentType, Math.max(latest.get(s.agentType) ?? 0, Number.isNaN(t) ? 0 : t));
+  }
+  return [...tools].sort((a, b) => (latest.get(b) ?? 0) - (latest.get(a) ?? 0));
+}
+
+/** 受管过滤（P8d）：有卡工具 ∩ 受管（enabled）工具。enabled 集合来自
+ *  remote_status() 的 enabledTools 字段（后端从 dao::agent_tool 读已启用工具 id 列表），
+ *  调用侧把数组转 Set 一次后传入 */
+export function filterEnabledTools(tools: string[], enabled: Set<string>): string[] {
+  return tools.filter((t) => enabled.has(t));
 }
 
 // 状态 → 圆点颜色，三色语义与桌面 StatusLight 一致：

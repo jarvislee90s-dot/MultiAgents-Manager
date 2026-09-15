@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_TYPES,
   STATUS_DOT_COLOR,
+  TOOL_BRAND_COLORS,
   TOOL_FILTERS,
   TOOL_LABELS,
   filterByAgent,
+  filterEnabledTools,
   formatRelativeTime,
+  sortChipsByActivity,
   sortSessions,
   type ToolFilter,
 } from "@/mobile/board-logic";
@@ -160,6 +163,60 @@ describe("board-logic 状态 → 三色映射（红=等待 / 黄=运行 / 绿=�
   ];
   it.each(cases)("%s → %s", (status, color) => {
     expect(STATUS_DOT_COLOR[status]).toContain(color);
+  });
+});
+
+// P8d/P8e（M3 Task 3）：受管过滤 + 品牌色 chips + 活跃排序
+describe("P8d/P8e board-logic", () => {
+  it("品牌色映射覆盖八工具", () => {
+    for (const t of [
+      "claude",
+      "codex",
+      "opencode",
+      "openclaw",
+      "kimi",
+      "workbuddy",
+      "zcode",
+      "dsh",
+    ]) {
+      expect(TOOL_BRAND_COLORS[t]).toBeTruthy();
+    }
+  });
+
+  it("品牌色键集穷尽 AgentType 八值（Record 守卫，增删 AgentType 时此断言同步修正）", () => {
+    expect(Object.keys(TOOL_BRAND_COLORS).sort()).toEqual([...AGENT_TYPES].sort());
+  });
+
+  it("按最新活跃排序（zcode 12:00 最新在前）", () => {
+    const sessions = [
+      { agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" },
+      { agentType: "zcode", lastActivityAt: "2026-09-15T12:00:00Z" },
+      { agentType: "claude", lastActivityAt: "2026-09-15T11:00:00Z" },
+    ];
+    const sorted = sortChipsByActivity(["claude", "zcode"], sessions);
+    expect(sorted[0]).toBe("zcode"); // 12:00 最新
+    expect(sorted[1]).toBe("claude");
+  });
+
+  it("无会话工具排末尾（有活跃时间的工具在前，相对顺序稳定）", () => {
+    const sessions = [{ agentType: "codex", lastActivityAt: "2026-09-15T08:00:00Z" }];
+    const sorted = sortChipsByActivity(["zcode", "codex", "claude"], sessions);
+    expect(sorted).toEqual(["codex", "zcode", "claude"]);
+  });
+
+  it("不可解析时间戳按 0 处理（NaN 防御：坏时间不压过无会话工具）", () => {
+    const sessions = [
+      { agentType: "codex", lastActivityAt: "not-a-date" },
+      { agentType: "claude", lastActivityAt: "2026-09-15T08:00:00Z" },
+    ];
+    const sorted = sortChipsByActivity(["codex", "claude", "zcode"], sessions);
+    expect(sorted).toEqual(["claude", "codex", "zcode"]);
+  });
+
+  it("仅显示受管工具 ∩ 有卡工具", () => {
+    const result = filterEnabledTools(["claude", "codex", "zcode"], new Set(["claude", "zcode"]));
+    expect(result).toEqual(["claude", "zcode"]);
+    expect(result).not.toContain("codex");
   });
 });
 
