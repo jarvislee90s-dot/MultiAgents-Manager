@@ -274,10 +274,10 @@ const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
 **Interfaces:** Consumes `useResourceBindingsQuery`/`setResourceBinding`/`deleteResourceBinding`。Produces：资源名旁徽标（binding 且 exclusiveTools 非空）→ 点击小 Dialog（允许工具复选 + 原因 textarea + 保存/清除）；行内对不适配工具启停按钮 `disabled`（`kindSupported` 同款 title 模式）。
 
 **验收条件：**
-- [ ] `pnpm lint && pnpm build` 绿
+- [x] `pnpm lint && pnpm build` 绿
 - [ ] dev 目验：设绑定→徽标出现→对不适配工具按钮置灰；弹层保存→`list_resource_bindings` 反映；清除→徽标消失
 
-- [ ] **Step 1: 实现** → **Step 2: 门禁 + Commit** `feat(preset-v2): exclusive badge + binding editor + per-tool gating on resource cards`
+- [x] **Step 1: 实现** → **Step 2: 门禁 + Commit** `feat(preset-v2): exclusive badge + binding editor + per-tool gating on resource cards`
 
 ### Task 11: 常驻锁开关
 

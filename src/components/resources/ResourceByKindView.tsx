@@ -35,16 +35,31 @@ import {
 } from "@/lib/api/resource";
 import { useSsotResourcesQuery, SSOT_RESOURCES_KEY } from "@/lib/query/queries/resources";
 import { useEnabledToolsQuery, type EnabledTool } from "@/lib/query/queries/tools";
+import { useResourceBindingsQuery, BINDINGS_KEY } from "@/lib/query/queries/bindings";
 import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
 import { uninstallResource } from "@/lib/api/manifest";
+import { deleteResourceBinding, setResourceBinding } from "@/lib/api/preset";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
-import type { SsotResource } from "@/types/extension";
+import type { ResourceBinding, SsotResource } from "@/types/extension";
 
 type ResourceKind = "skill" | "mcp" | "plugin";
 type SortDir = "none" | "asc" | "desc";
 
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
+}
+
+/** 资源卡上下文的绑定键：与 extensions 表 id 同形（skill-<name> / mcp-<name> / plugin-<name>） */
+function bindingKey(kind: ResourceKind, name: string): string {
+  return `${kind}-${name}`;
+}
+
+/** 绑定的允许工具列表：逗号串拆分 + trim + 去空（与后端 tool_allowed 口径一致） */
+function parseExclusiveTools(binding: ResourceBinding): string[] {
+  return binding.exclusiveTools
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** 表头行：左侧"名字 + 三态排序按钮"，右侧与行内工具列对齐的目录定位按钮。
@@ -149,6 +164,17 @@ export function ResourceByKindView() {
   const [manifestPath, setManifestPath] = useState("");
   const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
   const [installDlgOpen, setInstallDlgOpen] = useState(false);
+  // —— 专属绑定编辑弹层（spec §6/§7.4）：徽标点击打开，保存/清除走 set/delete_resource_binding ——
+  const [bindingDlgOpen, setBindingDlgOpen] = useState(false);
+  const [bindingTarget, setBindingTarget] = useState<{
+    extensionId: string;
+    displayName: string;
+  } | null>(null);
+  const [bindingTools, setBindingTools] = useState<string[]>([]);
+  const [bindingReason, setBindingReason] = useState("");
+  const [bindingSaving, setBindingSaving] = useState(false);
+  const [bindingClearing, setBindingClearing] = useState(false);
+  const { data: bindings = [] } = useResourceBindingsQuery();
   // 资源能力门：工具 × 资源类型是否支持启停（后端 EnabledTool 标志下发）
   const kindSupported = (tool: EnabledTool, kind: string): boolean =>
     kind === "skill"
@@ -156,6 +182,26 @@ export function ResourceByKindView() {
       : kind === "mcp"
         ? tool.mcpSupported
         : tool.pluginSupported;
+  const bindingOf = (extensionId: string): ResourceBinding | undefined =>
+    bindings.find((b) => b.extensionId === extensionId);
+  // 专属判定：绑定存在且允许工具列表非空；null = 非专属（通用可迁移）
+  const exclusiveToolsOf = (extensionId: string): string[] | null => {
+    const b = bindingOf(extensionId);
+    if (!b) return null;
+    const list = parseExclusiveTools(b);
+    return list.length > 0 ? list : null;
+  };
+  // 不适配判定：专属 && 该工具不在允许列表（行内启停按钮据此置灰）
+  const toolExcludedByBinding = (extensionId: string, toolId: string): boolean => {
+    const ex = exclusiveToolsOf(extensionId);
+    return ex !== null && !ex.includes(toolId);
+  };
+  // 不适配按钮 title：kindSupported 同款「工具名: …」前缀 + 专属原因 / 允许工具列表（复用既有键，不新增文案）
+  const excludedTitle = (extensionId: string, toolLabel: string): string => {
+    const reason = bindingOf(extensionId)?.reason?.trim() ?? "";
+    const allow = `${t("resources.binding.tools")}: ${exclusiveToolsOf(extensionId)?.join(", ") ?? ""}`;
+    return `${toolLabel}: ${reason ? `${reason} · ${allow}` : allow}`;
+  };
   // 名字排序：三态循环（默认扫描序 → 升序 → 降序），三种资源各自独立记忆
   const [sortDirs, setSortDirs] = useState<Record<ResourceKind, SortDir>>({
     skill: "none",
@@ -235,6 +281,14 @@ export function ResourceByKindView() {
     for (const tool of tools) {
       // 能力门：不支持的 (tool, kind) 跳过（如 dsh 的 skill 启停/MCP/插件）
       if (!kindSupported(tool, res.kind)) continue;
+      // 专属门（spec §6）：批量「启用」跳过不适配工具（行内按钮已置灰，此处防绕过）；停用不限
+      if (
+        enable &&
+        toolExcludedByBinding(bindingKey(res.kind as ResourceKind, res.name), tool.id)
+      ) {
+        skipped++;
+        continue;
+      }
       const isEnabled = res.enabledTools.includes(tool.id);
       if (enable === isEnabled) continue;
       try {
@@ -399,6 +453,76 @@ export function ResourceByKindView() {
     }
   };
 
+  /** 打开编辑弹层：以当前 binding 回填（无绑定 = 空表单） */
+  const openBindingEditor = (extensionId: string, displayName: string) => {
+    const b = bindingOf(extensionId);
+    setBindingTarget({ extensionId, displayName });
+    setBindingTools(b ? parseExclusiveTools(b) : []);
+    setBindingReason(b?.reason ?? "");
+    setBindingDlgOpen(true);
+  };
+
+  /** 资源名旁专属徽标（spec §6/§7.4）：仅当存在非空 exclusiveTools 绑定时显示；点击打开编辑弹层 */
+  const renderExclusiveBadge = (kind: ResourceKind, name: string) => {
+    const extensionId = bindingKey(kind, name);
+    const ex = exclusiveToolsOf(extensionId);
+    if (!ex) return null;
+    return (
+      <button
+        type="button"
+        className="shrink-0 cursor-pointer rounded bg-orange-500/15 px-1.5 py-0.5 text-[10px] text-orange-600 hover:bg-orange-500/25"
+        title={`${t("presets.exclusiveBadge")}: ${ex.join(", ")}`}
+        onClick={() =>
+          openBindingEditor(extensionId, kind === "skill" ? formatSkillName(name) : name)
+        }
+      >
+        {t("presets.exclusiveBadge")}
+      </button>
+    );
+  };
+
+  // 保存绑定：空勾选列表 = 清除语义（后端 exclusiveTools 空 = 通用可迁移），直接允许
+  const handleBindingSave = async () => {
+    if (!bindingTarget || bindingSaving || bindingClearing) return;
+    setBindingSaving(true);
+    try {
+      await setResourceBinding(
+        bindingTarget.extensionId,
+        bindingTools,
+        bindingReason.trim() || undefined
+      );
+      await qc.invalidateQueries({ queryKey: BINDINGS_KEY });
+      // 无「绑定已保存」文案键，按不新增文案约束复用既有键组合提示
+      const labels = bindingTools.map((id) => tools.find((x) => x.id === id)?.label ?? id);
+      toast.success(
+        labels.length > 0
+          ? `${t("presets.exclusiveBadge")}: ${labels.join(", ")}`
+          : t("common.deleted")
+      );
+      setBindingDlgOpen(false);
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    } finally {
+      setBindingSaving(false);
+    }
+  };
+
+  // 清除绑定：删除整条绑定记录，恢复通用可迁移
+  const handleBindingClear = async () => {
+    if (!bindingTarget || bindingSaving || bindingClearing) return;
+    setBindingClearing(true);
+    try {
+      await deleteResourceBinding(bindingTarget.extensionId);
+      await qc.invalidateQueries({ queryKey: BINDINGS_KEY });
+      toast.success(t("common.deleted"));
+      setBindingDlgOpen(false);
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    } finally {
+      setBindingClearing(false);
+    }
+  };
+
   return (
     <>
       <div className="bg-card rounded-lg border p-4">
@@ -450,6 +574,7 @@ export function ResourceByKindView() {
                 >
                   <div className="flex items-center gap-1">
                     <span className="font-medium">{formatSkillName(skill.name)}</span>
+                    {renderExclusiveBadge("skill", skill.name)}
                     {skill.brokenTools && skill.brokenTools.length > 0 && (
                       <span
                         className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-500"
@@ -506,6 +631,22 @@ export function ResourceByKindView() {
                             size="sm"
                             className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
                             title={`${tool.label}: ${t("resources.kindNotSupported")}`}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                        );
+                      }
+                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
+                      if (toolExcludedByBinding(bindingKey("skill", skill.name), tool.id)) {
+                        return (
+                          <Button
+                            key={tool.id}
+                            disabled
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
+                            title={excludedTitle(bindingKey("skill", skill.name), tool.label)}
                           >
                             <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                             {tool.label}
@@ -569,6 +710,7 @@ export function ResourceByKindView() {
                 >
                   <div className="flex items-center gap-1">
                     <span className="font-medium">{mcp.name}</span>
+                    {renderExclusiveBadge("mcp", mcp.name)}
                     {mcp.sourceDisabled && (
                       <span
                         className="text-muted-foreground rounded border border-dashed px-1 text-[10px]"
@@ -627,6 +769,22 @@ export function ResourceByKindView() {
                           </Button>
                         );
                       }
+                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
+                      if (toolExcludedByBinding(bindingKey("mcp", mcp.name), tool.id)) {
+                        return (
+                          <Button
+                            key={tool.id}
+                            disabled
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
+                            title={excludedTitle(bindingKey("mcp", mcp.name), tool.label)}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                        );
+                      }
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
                         <Button
@@ -675,6 +833,7 @@ export function ResourceByKindView() {
                 >
                   <div className="flex items-center gap-1">
                     <span className="font-medium">{plugin.name}</span>
+                    {renderExclusiveBadge("plugin", plugin.name)}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -721,6 +880,22 @@ export function ResourceByKindView() {
                             size="sm"
                             className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
                             title={`${tool.label}: ${t("resources.kindNotSupported")}`}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                        );
+                      }
+                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
+                      if (toolExcludedByBinding(bindingKey("plugin", plugin.name), tool.id)) {
+                        return (
+                          <Button
+                            key={tool.id}
+                            disabled
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
+                            title={excludedTitle(bindingKey("plugin", plugin.name), tool.label)}
                           >
                             <ToolIcon toolId={tool.id} size={14} className="mr-1" />
                             {tool.label}
@@ -977,6 +1152,71 @@ export function ResourceByKindView() {
           }
         }}
       />
+
+      {/* 专属绑定编辑弹层（spec §6/§7.4）：工具复选（仅已启用工具，勾选 = exclusiveTools 成员）
+          + 原因备注；保存空列表 = 清除语义；清除/保存进行中互相禁用，取消恒可用 */}
+      <Dialog open={bindingDlgOpen} onOpenChange={(o) => !o && setBindingDlgOpen(false)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("resources.binding.editTitle")}</DialogTitle>
+            <DialogDescription className="pt-1 text-xs">
+              {bindingTarget?.displayName}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <label className="text-xs font-medium">{t("resources.binding.tools")}</label>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                {tools.map((tool) => (
+                  <label key={tool.id} className="flex cursor-pointer items-center gap-1 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={bindingTools.includes(tool.id)}
+                      onChange={(e) => {
+                        // 同步读取后再进 updater，避免 React 置空 currentTarget
+                        const checked = e.currentTarget.checked;
+                        setBindingTools((prev) =>
+                          checked ? [...prev, tool.id] : prev.filter((id) => id !== tool.id)
+                        );
+                      }}
+                    />
+                    {tool.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium">{t("resources.binding.reason")}</label>
+              <textarea
+                value={bindingReason}
+                onChange={(e) => setBindingReason(e.currentTarget.value)}
+                placeholder={t("resources.binding.reasonPlaceholder")}
+                className="h-16 w-full rounded border px-2 py-1 text-xs"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setBindingDlgOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={bindingSaving || bindingClearing}
+              onClick={handleBindingClear}
+            >
+              {t("resources.binding.clear")}
+            </Button>
+            <Button
+              size="sm"
+              disabled={bindingSaving || bindingClearing}
+              onClick={handleBindingSave}
+            >
+              {t("resources.binding.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
