@@ -150,6 +150,7 @@ pub fn run() {
         commands::preset::apply_preset_to_subagent,
         commands::preset::deactivate_preset_from_subagent,
         commands::preset::get_preset_health,
+        commands::preset::restore_stash_entry,
         commands::skill::list_repo_skills,
         commands::skill::install_skill,
         commands::skill::rescan_skills,

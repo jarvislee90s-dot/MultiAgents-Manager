@@ -230,3 +230,16 @@ pub fn deactivate_preset_from_subagent(
 pub fn get_preset_health() -> PresetHealth {
     crate::services::preset::preset_health()
 }
+
+/// 暂存条目回移（spec §13 体检卡片 ③；Task 15 裁决采方案 i）：
+/// 按 id 在跨工具未恢复账目中查 entry（复用 unrestored_stash(None)，不新增 DAO），
+/// 转发 stash::restore_stashed_skill；原位占用 / 暂存缺失等冲突原样报错
+///（不覆盖现场），由前端 toast 透出
+#[tauri::command]
+pub fn restore_stash_entry(id: i64) -> Result<(), String> {
+    let entry = crate::database::unrestored_stash(None)
+        .into_iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| format!("暂存账本无此未恢复条目: id={}", id))?;
+    crate::services::preset::stash::restore_stashed_skill(&entry)
+}

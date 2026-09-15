@@ -7,6 +7,7 @@ import type { ExtensionWithAssignments } from "@/types/extension";
 import { ResourceByKindView } from "./ResourceByKindView";
 import { ResourceByToolView } from "./ResourceByToolView";
 import { ImportDialog } from "./ImportDialog";
+import { HealthCheckCard } from "./HealthCheckCard";
 import { PresetList } from "../presets/PresetList";
 
 export function ExtensionList() {
@@ -30,6 +31,9 @@ export function ExtensionList() {
 
   return (
     <div className="space-y-4">
+      {/* 一致性体检卡片（spec §13）：资源 tab 顶部挂载；存在未决差异时卡片标题处自带角标 */}
+      <HealthCheckCard />
+
       {/* Toolbar */}
       <div className="flex items-center justify-between">
         <div className="flex gap-1">

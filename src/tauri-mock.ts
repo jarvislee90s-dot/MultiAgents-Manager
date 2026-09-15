@@ -52,6 +52,51 @@ if (!isTauri) {
     },
   ];
 
+  // 一致性体检 fixture（spec §13，T15）：含三类异常样例（漂移 L1-L4 / 不变量 / 残留暂存）+ 空健康。
+  // 参数化：localStorage["mam-mock-health"] = "empty" 切空健康，便于目验折叠态（T19 手册）
+  const mockLedgerDrift = [
+    {
+      toolId: "claude",
+      kind: "L1",
+      extensionId: "skill-brainstorming",
+      path: "/Users/jarvis/.claude/skills/brainstorming",
+    },
+    {
+      toolId: "claude",
+      kind: "L3",
+      extensionId: "skill-systematic-debugging",
+      path: "/Users/jarvis/.claude/skills/systematic-debugging",
+    },
+    {
+      toolId: "codex",
+      kind: "L2",
+      extensionId: "skill-chinese-code-review",
+      path: "/Users/jarvis/.codex/skills/chinese-code-review",
+    },
+    {
+      toolId: "codex",
+      kind: "L4",
+      extensionId: "skill-using-superpowers",
+      path: "/Users/jarvis/.codex/skills/using-superpowers",
+    },
+  ];
+  const mockPresetHealthIssues = {
+    invariants: ["codex：快照存在但无激活预设"],
+    stashPending: [
+      {
+        id: 1,
+        toolId: "claude",
+        skillName: "legacy-native-skill",
+        stashedPath: "/Users/jarvis/.mam/stash/claude/skills/legacy-native-skill",
+        originalPath: "/Users/jarvis/.claude/skills/legacy-native-skill",
+        createdAt: new Date().toISOString(),
+        restoredAt: null,
+      },
+    ],
+    drift: mockLedgerDrift,
+  };
+  const mockPresetHealthEmpty = { invariants: [], stashPending: [], drift: [] };
+
   // Mock __TAURI_INTERNALS__
   (window as unknown as { __TAURI_INTERNALS__: TauriInternalsMock }).__TAURI_INTERNALS__ = {
     metadata: {
@@ -423,6 +468,16 @@ if (!isTauri) {
       case "list_tool_residents":
         return Promise.resolve(args?.toolId === "claude" ? ["17"] : []);
 
+      // —— 一致性体检读命令（T15，与 tests/msw/tauriMocks.ts 形状一致）——
+      case "get_preset_health":
+        return Promise.resolve(
+          localStorage.getItem("mam-mock-health") === "empty"
+            ? mockPresetHealthEmpty
+            : mockPresetHealthIssues
+        );
+      case "scan_ledger_drift":
+        return Promise.resolve(mockLedgerDrift);
+
       case "preview_apply_preset":
         return Promise.resolve({
           toEnable: ["1", "2"],
@@ -457,6 +512,32 @@ if (!isTauri) {
       case "delete_resource_binding":
       case "set_tool_resident":
         return Promise.resolve(undefined);
+
+      // 暂存回移（T15 体检卡片 ③）：真实命令返回 Result<(), String>，mock 视为成功
+      case "restore_stash_entry":
+        return Promise.resolve(undefined);
+
+      // 体检对账写命令（T15）：须返回与 Rust ReconcileOutcome 同形对象
+      //（undefined 会让 o.fixed / o.needsManual 读崩）；batch 按 toolId 返回逐条 outcome
+      case "reconcile_item":
+        return Promise.resolve({
+          fixed: true,
+          needsManual: false,
+          message: "mock: 已按账本重建链接",
+        });
+      case "reconcile_tool_batch": {
+        const batchToolId = args?.toolId as string;
+        return Promise.resolve(
+          mockLedgerDrift
+            .filter((d) => d.toolId === batchToolId)
+            .map((d) => ({
+              fixed: true,
+              needsManual: false,
+              // message 前缀 "ext_id @ tool_id" 与 Rust 契约一致（前端靠它回映行键）
+              message: `${d.extensionId} @ ${batchToolId}: mock 已按账本重建链接`,
+            }))
+        );
+      }
 
       case "detect_tools":
         return Promise.resolve([

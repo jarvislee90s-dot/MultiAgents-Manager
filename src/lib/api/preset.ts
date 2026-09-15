@@ -1,7 +1,13 @@
 // 预设组 v2 API 封装：与 src-tauri/src/commands/preset.rs 一一对应（参数 camelCase 由 Tauri 自动映射 snake_case）
 import { invoke } from "@tauri-apps/api/core";
 import type { ActivePreset, ResourceBinding } from "@/types/extension";
-import type { ApplyPreview, PresetApplyResult, PresetRecord, RestoreResult } from "@/types/preset";
+import type {
+  ApplyPreview,
+  PresetApplyResult,
+  PresetHealth,
+  PresetRecord,
+  RestoreResult,
+} from "@/types/preset";
 
 export async function listPresets(): Promise<PresetRecord[]> {
   return await invoke<PresetRecord[]>("list_presets");
@@ -94,4 +100,15 @@ export async function setToolResident(
 }
 export async function listToolResidents(toolId: string): Promise<string[]> {
   return await invoke<string[]>("list_tool_residents", { toolId });
+}
+
+// —— 一致性体检（spec §13 检测侧）——
+
+// 预设健康聚合：三源（不变量 / 未恢复暂存 / 账本-磁盘漂移）单次 invoke 取数
+export async function getPresetHealth(): Promise<PresetHealth> {
+  return await invoke<PresetHealth>("get_preset_health");
+}
+// 暂存条目回移（体检卡片 ③）：原位占用等冲突以 Err 透出（message 已含原因），调用方 toast
+export async function restoreStashEntry(id: number): Promise<void> {
+  return await invoke("restore_stash_entry", { id });
 }

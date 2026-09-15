@@ -453,10 +453,10 @@ pub fn preset_health() -> PresetHealth { /* 三源聚合 */ }
 - 设置页 health 区块：同数据只读摘要 + `resources.health.runNow`
 
 **验收条件：**
-- [ ] `cargo test`（若选 i）+ `pnpm lint && pnpm build` 绿
+- [x] `cargo test`（若选 i）+ `pnpm lint && pnpm build` 绿
 - [ ] dev 目验：构造 L1+L3 → 卡片分组展示；逐条 a 修复后刷新消失；L2 不一致 → 需人工态无按钮；设置页区块可用；无异常时折叠一行
 
-- [ ] **Step 1: Rust（若选 i）** → **Step 2: 前端 + mock** → **Step 3: 门禁 + Commit** `feat(preset-v2): health check card — drift triage a/b/c with batch, invariant & stash panels`
+- [x] **Step 1: Rust（若选 i）** → **Step 2: 前端 + mock** → **Step 3: 门禁 + Commit** `feat(preset-v2): health check card — drift triage a/b/c with batch, invariant & stash panels`
 
 ## Phase E · M3
 

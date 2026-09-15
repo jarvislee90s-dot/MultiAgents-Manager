@@ -80,6 +80,58 @@ export const mockPresets = [
 // convertFileSrc：asset 协议路径转换（petRuntime/向导预览用）
 export const convertFileSrcMock = (path: string) => `asset://mock/${path}`;
 
+// —— 一致性体检 fixture（T15，与 src/tauri-mock.ts 同构）：三类异常样例 + 空健康两态。
+// setMockHealthMode("empty") 切空健康（组件折叠态用例），默认异常样例 ——
+export const mockLedgerDrift = [
+  {
+    toolId: "claude",
+    kind: "L1",
+    extensionId: "skill-brainstorming",
+    path: "/Users/jarvis/.claude/skills/brainstorming",
+  },
+  {
+    toolId: "claude",
+    kind: "L3",
+    extensionId: "skill-systematic-debugging",
+    path: "/Users/jarvis/.claude/skills/systematic-debugging",
+  },
+  {
+    toolId: "codex",
+    kind: "L2",
+    extensionId: "skill-chinese-code-review",
+    path: "/Users/jarvis/.codex/skills/chinese-code-review",
+  },
+  {
+    toolId: "codex",
+    kind: "L4",
+    extensionId: "skill-using-superpowers",
+    path: "/Users/jarvis/.codex/skills/using-superpowers",
+  },
+];
+
+export const mockPresetHealthIssues = {
+  invariants: ["codex：快照存在但无激活预设"],
+  stashPending: [
+    {
+      id: 1,
+      toolId: "claude",
+      skillName: "legacy-native-skill",
+      stashedPath: "/Users/jarvis/.mam/stash/claude/skills/legacy-native-skill",
+      originalPath: "/Users/jarvis/.claude/skills/legacy-native-skill",
+      createdAt: new Date().toISOString(),
+      restoredAt: null,
+    },
+  ],
+  drift: mockLedgerDrift,
+};
+
+export const mockPresetHealthEmpty = { invariants: [], stashPending: [], drift: [] };
+
+let healthMode: "issues" | "empty" = "issues";
+export function setMockHealthMode(mode: "issues" | "empty") {
+  healthMode = mode;
+}
+
 export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
   switch (cmd) {
     case "pet_list_pets":
@@ -127,6 +179,11 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
       ]);
     case "list_tool_residents":
       return Promise.resolve([]);
+    // —— 一致性体检读命令（T15，与 src/tauri-mock.ts 形状一致）——
+    case "get_preset_health":
+      return Promise.resolve(healthMode === "empty" ? mockPresetHealthEmpty : mockPresetHealthIssues);
+    case "scan_ledger_drift":
+      return Promise.resolve(mockLedgerDrift);
     case "preview_apply_preset":
       return Promise.resolve({
         toEnable: ["brainstorming"],
@@ -196,7 +253,25 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
     case "set_resource_binding":
     case "delete_resource_binding":
     case "set_tool_resident":
+    // 暂存回移（T15 体检卡片 ③）：真实命令返回 Result<(), String>，mock 视为成功
+    case "restore_stash_entry":
       return Promise.resolve();
+    // 体检对账写命令（T15）：须返回与 Rust ReconcileOutcome 同形对象
+    //（undefined 会让 o.fixed / o.needsManual 读崩）；message 前缀与 Rust 契约一致
+    case "reconcile_item":
+      return Promise.resolve({
+        fixed: true,
+        needsManual: false,
+        message: "mock: 已按账本重建链接",
+      });
+    case "reconcile_tool_batch":
+      return Promise.resolve([
+        {
+          fixed: true,
+          needsManual: false,
+          message: "skill-brainstorming @ claude: mock 已按账本重建链接",
+        },
+      ]);
     default:
       return Promise.resolve(undefined);
   }
