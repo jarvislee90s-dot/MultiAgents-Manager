@@ -19,9 +19,7 @@ use super::server::RemoteState;
 /// （sysinfo 全进程刷新 + 各工具会话解析，冷启动可达数秒），直接放在 async handler 里会
 /// 周期性堵死 tokio worker——移动端 3s 轮询下即为持续拖垮（桌面侧同一函数已按此包，
 /// 实机教训见 `commands/session.rs` 的 `get_all_sessions`）。
-pub async fn sessions(
-    State(st): State<Arc<RemoteState>>,
-) -> impl IntoResponse {
+pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
     // 闭包捕获 state 的 Arc（Send + Sync + 'static）：`session_source` 是 Box<dyn Fn> 不可
     // clone，故整体 move 进阻塞线程池，在池内调用注入源
     let st = st.clone();

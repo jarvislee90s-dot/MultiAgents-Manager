@@ -81,11 +81,7 @@ fn mime_for(path: &str) -> &'static str {
 
 async fn serve_asset(path: &str) -> Response {
     match MobileAssets::get(path) {
-        Some(f) => (
-            [(axum::http::header::CONTENT_TYPE, mime_for(path))],
-            f.data,
-        )
-            .into_response(),
+        Some(f) => ([(axum::http::header::CONTENT_TYPE, mime_for(path))], f.data).into_response(),
         // SPA 兜底（控制者裁决 1）：/m/<path> 未命中回落入口 HTML——移动端单页 hash 路由，
         // 刷新/直达任意路径都必须能拿到壳页面
         None => entry_response(),
@@ -723,7 +719,10 @@ mod tests {
             body.contains("<!doctype html>"),
             "/m 应返回入口 HTML，实际 {body:?}"
         );
-        assert!(body.contains("mam 远程"), "入口应是 mobile.html 产物（含移动端标题）");
+        assert!(
+            body.contains("mam 远程"),
+            "入口应是 mobile.html 产物（含移动端标题）"
+        );
 
         // (2) PWA manifest → 200 + application/json
         let r = app
@@ -751,7 +750,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        assert!(body_string(r).await.to_lowercase().contains("<!doctype html>"));
+        assert!(body_string(r)
+            .await
+            .to_lowercase()
+            .contains("<!doctype html>"));
 
         // (5) 非 /m 前缀 → 404（根路径不给静态兜底）
         let r = app
@@ -776,7 +778,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        assert!(body_string(r).await.to_lowercase().contains("<!doctype html>"));
+        assert!(body_string(r)
+            .await
+            .to_lowercase()
+            .contains("<!doctype html>"));
 
         // (8) /m/api 裸前缀三变体 → 403（终审修复轮：「所有 /m/api/* 过 gate」的字面
         // 收口）。修复前 /m/api 与 /m/api/ 不匹配任何 route，落到 SPA 回返 200 入口

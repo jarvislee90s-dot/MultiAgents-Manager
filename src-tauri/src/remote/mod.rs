@@ -394,7 +394,13 @@ mod tests {
     /// (a-2) M2-R3：bind 值域校验——解析失败的地址串必须 Err（不得静默透传给绑定/安全门）
     #[test]
     fn parse_bind_rejects_invalid_bind_address() {
-        for bad in ["not-an-address", "999.1.1.1", "http://evil", "192.168.1.5:9420", ""] {
+        for bad in [
+            "not-an-address",
+            "999.1.1.1",
+            "http://evil",
+            "192.168.1.5:9420",
+            "",
+        ] {
             let r = parse_bind(Some(bad), Some("9420"));
             assert!(r.is_err(), "非法 bind {bad:?} 必须被拒绝");
             assert!(
@@ -403,7 +409,15 @@ mod tests {
             );
         }
         // 合法形态不误拒：IPv4 / IPv6 / localhost
-        for good in ["127.0.0.1", "0.0.0.0", "192.168.1.5", "::", "::1", "fe80::1", "localhost"] {
+        for good in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "192.168.1.5",
+            "::",
+            "::1",
+            "fe80::1",
+            "localhost",
+        ] {
             assert!(
                 parse_bind(Some(good), Some("9420")).is_ok(),
                 "合法 bind {good:?} 不得被拒绝"
@@ -417,7 +431,10 @@ mod tests {
     #[test]
     fn is_external_bind_four_branches() {
         // 对外三支
-        assert!(is_external_bind("::"), "未指定 IPv6 地址监听全部 v6 接口，属对外");
+        assert!(
+            is_external_bind("::"),
+            "未指定 IPv6 地址监听全部 v6 接口，属对外"
+        );
         assert!(
             is_external_bind("192.168.1.5"),
             "具体网卡 IP 对局域网可达，属对外（旧实现只认 0.0.0.0 字面量，是绕过口）"
@@ -426,7 +443,10 @@ mod tests {
         // 白名单支：仅内环
         assert!(!is_external_bind("127.0.0.1"));
         assert!(!is_external_bind("localhost"));
-        assert!(!is_external_bind("::1"), "::1 是 IPv6 内环，不可从局域网到达");
+        assert!(
+            !is_external_bind("::1"),
+            "::1 是 IPv6 内环，不可从局域网到达"
+        );
         assert!(!is_external_bind("127.0.0.2"), "127.0.0.0/8 整段都是内环");
     }
 
@@ -615,10 +635,7 @@ mod tests {
                 || None,
                 |_, _| panic!("未确认对外（{external}）时不得 spawn"),
             );
-            assert!(
-                r.is_err(),
-                "对外绑定 {external} 未确认 TLS 前置必须拒绝"
-            );
+            assert!(r.is_err(), "对外绑定 {external} 未确认 TLS 前置必须拒绝");
             assert!(slot.is_none(), "被安全门拒绝时不得留下句柄（{external}）");
         }
     }
