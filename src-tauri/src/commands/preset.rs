@@ -104,6 +104,8 @@ pub fn get_active_preset(tool_id: String) -> Option<String> {
 /// 应用预览（确认弹窗数据源，dry-run）
 #[tauri::command]
 pub fn preview_apply_preset(preset_id: String, tool_id: String) -> Result<ApplyPreview, String> {
+    // 与 apply_preset 对齐（评审裁决 4）：停用工具不该拿到执行不了的预览
+    crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     crate::services::preset::preview_apply(&preset_id, &tool_id)
 }
 

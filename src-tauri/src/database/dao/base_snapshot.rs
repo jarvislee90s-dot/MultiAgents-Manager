@@ -87,15 +87,22 @@ pub fn set_active_preset(tool_id: &str, preset_id: &str) -> Result<(), String> {
 
 pub fn destroy_base_snapshot(tool_id: &str) -> Result<(), String> {
     let conn = DB.lock().unwrap();
-    conn.execute(
+    // 事务（评审裁决 4）：两删半截崩溃会留下「空 items 快照」，restore 会把
+    // target 当空集把工具全停用——与 save 对称包事务
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("销毁基底快照失败: {}", e))?;
+    tx.execute(
         "DELETE FROM tool_base_snapshot_items WHERE tool_id = ?1",
         [tool_id],
     )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
+    .map_err(|e| format!("销毁基底快照失败: {}", e))?;
+    tx.execute(
         "DELETE FROM tool_base_snapshots WHERE tool_id = ?1",
         [tool_id],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("销毁基底快照失败: {}", e))?;
+    tx.commit()
+        .map_err(|e| format!("销毁基底快照失败: {}", e))?;
     Ok(())
 }
