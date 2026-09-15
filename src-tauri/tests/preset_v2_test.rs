@@ -954,3 +954,51 @@ fn apply_tool_changes_disables_tool_when_preset_restore_succeeds() {
     let _ = std::fs::remove_dir_all(&w5_path);
     database::set_tool_enabled("claude", true);
 }
+
+/// Patch 3（评审裁决 3）：幂等重保存 MCP 不得抹掉用户编辑过的元数据——
+/// INSERT OR REPLACE 会清空 description/suite，必须走 INSERT OR IGNORE
+#[test]
+fn save_mcp_config_preserves_user_metadata() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::commands::resource::save_mcp_config;
+    use multi_agents_manager_lib::database;
+
+    // 预置带用户备注的 MCP 行（历史编辑过的元数据）
+    database::insert_extension(&database::ExtensionRecord {
+        id: "mcp-v2m1-meta".into(),
+        kind: "mcp".into(),
+        name: "v2m1-meta".into(),
+        description: Some("用户备注".into()),
+        source_path: "/tmp/old".into(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+
+    // 同名重保存配置
+    save_mcp_config(
+        "v2m1-meta".into(),
+        "node".into(),
+        vec![],
+        Default::default(),
+    )
+    .unwrap();
+
+    let row = database::list_extensions()
+        .into_iter()
+        .find(|e| e.id == "mcp-v2m1-meta")
+        .expect("重保存后行应存在");
+    assert_eq!(
+        row.description.as_deref(),
+        Some("用户备注"),
+        "重保存不得抹掉用户元数据"
+    );
+}

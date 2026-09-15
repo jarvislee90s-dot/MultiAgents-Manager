@@ -738,8 +738,9 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
                 mcp_name,
                 config_file.display()
             );
-            // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到
-            if let Err(e) = crate::database::insert_extension(&crate::database::ExtensionRecord {
+            // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到。
+            // ensure_extension（INSERT OR IGNORE）：幂等重导入不抹掉用户编辑过的元数据（评审裁决 3）
+            if let Err(e) = crate::database::ensure_extension(&crate::database::ExtensionRecord {
                 id: format!("mcp-{}", mcp_name),
                 kind: "mcp".to_string(),
                 name: mcp_name.clone(),
@@ -783,8 +784,9 @@ pub fn save_mcp_config(
     let pretty = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
     // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到。
-    // 新建路径不该静默——登记失败以 `?` 传播，让前端拿到明确错误
-    crate::database::insert_extension(&crate::database::ExtensionRecord {
+    // 新建路径不该静默——登记失败以 `?` 传播，让前端拿到明确错误。
+    // ensure_extension（INSERT OR IGNORE）：同名重保存不抹掉用户编辑过的元数据（评审裁决 3）
+    crate::database::ensure_extension(&crate::database::ExtensionRecord {
         id: format!("mcp-{}", name),
         kind: "mcp".to_string(),
         name: name.clone(),

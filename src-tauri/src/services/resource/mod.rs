@@ -590,19 +590,24 @@ pub fn backfill_registry() {
                     continue;
                 }
                 if let Some(name) = e.file_name().to_str() {
-                    let _ = crate::database::ensure_extension(&crate::database::ExtensionRecord {
-                        id: format!("skill-{}", name),
-                        kind: "skill".to_string(),
-                        name: name.to_string(),
-                        description: None,
-                        source_path: path.to_string_lossy().to_string(),
-                        source_url: None,
-                        version: None,
-                        tags: None,
-                        suite: None,
-                        source_tool: None,
-                        is_native: false,
-                    });
+                    // no-swallowed-errors（评审裁决 3）：回填失败逐条报告，不再吞错
+                    if let Err(err) =
+                        crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                            id: format!("skill-{}", name),
+                            kind: "skill".to_string(),
+                            name: name.to_string(),
+                            description: None,
+                            source_path: path.to_string_lossy().to_string(),
+                            source_url: None,
+                            version: None,
+                            tags: None,
+                            suite: None,
+                            source_tool: None,
+                            is_native: false,
+                        })
+                    {
+                        log::warn!("回填 skill {} 登记 extensions 失败: {}", name, err);
+                    }
                 }
             }
         }
@@ -618,19 +623,24 @@ pub fn backfill_registry() {
                     continue;
                 }
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let _ = crate::database::ensure_extension(&crate::database::ExtensionRecord {
-                        id: format!("mcp-{}", stem),
-                        kind: "mcp".to_string(),
-                        name: stem.to_string(),
-                        description: None,
-                        source_path: path.to_string_lossy().to_string(),
-                        source_url: None,
-                        version: None,
-                        tags: None,
-                        suite: None,
-                        source_tool: None,
-                        is_native: false,
-                    });
+                    // no-swallowed-errors（评审裁决 3）：回填失败逐条报告，不再吞错
+                    if let Err(err) =
+                        crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                            id: format!("mcp-{}", stem),
+                            kind: "mcp".to_string(),
+                            name: stem.to_string(),
+                            description: None,
+                            source_path: path.to_string_lossy().to_string(),
+                            source_url: None,
+                            version: None,
+                            tags: None,
+                            suite: None,
+                            source_tool: None,
+                            is_native: false,
+                        })
+                    {
+                        log::warn!("回填 mcp {} 登记 extensions 失败: {}", stem, err);
+                    }
                 }
             }
         }
