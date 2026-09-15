@@ -22,6 +22,21 @@ export const AGENT_TYPES: readonly AgentType[] = Object.values(AGENT_TYPE_RECORD
 
 export type ToolFilter = AgentType | "all";
 
+/** 工具显示名（P8c 卡片主行）：八值与桌面 agentBadge.tsx 的 label 口径一致，但**独立定义**
+ *  （桌面组件与移动 bundle 隔离，不从桌面 import）。Record<AgentType, string> 穷尽守卫
+ *  （对齐 AGENT_TYPE_RECORD 模式）：AgentType 增删值时此处编译报错，主行不会静默缺名。
+ *  注意与桌面 getAgentLabel 的差异：桌面 codex 按 form 区分 APP/CLI，移动主行统一 "Codex" */
+export const TOOL_LABELS: Record<AgentType, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  opencode: "OpenCode",
+  openclaw: "OpenClaw",
+  kimi: "Kimi Code",
+  workbuddy: "WorkBuddy",
+  zcode: "ZCode",
+  dsh: "DSH",
+};
+
 /** 过滤 chips：全部在最前，其后按 AgentType 八值顺序 */
 export const TOOL_FILTERS: readonly ToolFilter[] = ["all", ...AGENT_TYPES] as const;
 

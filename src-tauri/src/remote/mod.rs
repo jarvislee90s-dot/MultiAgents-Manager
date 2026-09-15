@@ -249,7 +249,9 @@ pub fn remote_status() -> serde_json::Value {
     // 短锁：只取 SERVER_HANDLE 的存活快照立即释放，锁内不碰 DB / pairing（不新增嵌套锁序）
     let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
     let enabled = status_enabled(db_enabled, handle_alive);
-    let lan = lan_urls_for(&bind, local_lan_ips(), port);
+    // LAN 枚举只做一次：候选同时喂 lanUrls 与 0.0.0.0 时的主显示 url（P7 v6 修正）
+    let ips = local_lan_ips();
+    let lan = lan_urls_for(&bind, ips.clone(), port);
     // host 载荷薄装配：可测内核 host_payload（见下），此处只注入真实依赖
     // （空串/空白设置由 display_host_name 内部过滤，见其注释）
     let mut st = host_payload(
@@ -260,7 +262,7 @@ pub fn remote_status() -> serde_json::Value {
     st["enabled"] = serde_json::json!(enabled);
     st["bind"] = serde_json::json!(bind);
     st["port"] = serde_json::json!(port);
-    st["url"] = serde_json::json!(format!("http://{bind}:{port}/m"));
+    st["url"] = serde_json::json!(display_url_for(&bind, port, ips));
     st["lanUrls"] = serde_json::json!(lan);
     st
 }
@@ -316,19 +318,17 @@ fn host_info() -> serde_json::Value {
 }
 
 /// 刷新配对二维码：发行新 token（单活跃——发行即作废旧 token，不变量 1）并拼出可扫 URL。
-/// 0.0.0.0 绑定时 host 取局域网地址候选的第一个（枚举失败回落 loopback）
+/// host 选取与 remote_status 的 url 字段同源（display_host_for：0.0.0.0 → 局域网首个
+/// 或回落 loopback），仅比主显示 url 多拼 `#token=` 配对载荷
 #[tauri::command]
 pub fn remote_issue_token() -> Result<serde_json::Value, String> {
     let token = STATE.pairing.lock().unwrap().issue();
     let (_, port) = bind_and_port().unwrap_or_else(|_| ("127.0.0.1".to_string(), DEFAULT_PORT));
-    let host = match crate::database::dao::settings::get_setting(KEY_BIND) {
-        Some(b) if b == "0.0.0.0" => local_lan_ips()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".into()),
-        Some(b) => b,
-        None => "127.0.0.1".into(),
-    };
+    // bind 非法（设置被写坏）时按默认 loopback 展示，与 remote_status 口径一致；
+    // token 扫码串必须可拨号，故同样走 display_host_for 的 0.0.0.0 → LAN 修正
+    let bind =
+        crate::database::dao::settings::get_setting(KEY_BIND).unwrap_or_else(|| "127.0.0.1".into());
+    let host = display_host_for(&bind, local_lan_ips());
     Ok(
         serde_json::json!({ "token": token, "url": format!("http://{host}:{port}/m#token={token}") }),
     )
@@ -352,6 +352,24 @@ fn local_lan_ips() -> Vec<String> {
         .map(|a| a.ip().to_string())
         .into_iter()
         .collect()
+}
+
+/// 主显示 host 选取内核（纯函数，不触网络）：0.0.0.0 通配绑定时取局域网候选首个
+/// （枚举失败回落 127.0.0.1——M2 用户实测 0.0.0.0 地址本身不可拨号），其余绑定原样。
+/// remote_status 的 `url` 字段与 remote_issue_token 的扫码 URL 同源共用（P7 v6 修正）；
+/// 与 lan_urls_for 同为「绑定形态 → 可达地址」口径，风格对齐
+fn display_host_for(bind: &str, ips: Vec<String>) -> String {
+    if bind == "0.0.0.0" {
+        ips.into_iter().next().unwrap_or_else(|| "127.0.0.1".into())
+    } else {
+        bind.to_string()
+    }
+}
+
+/// 主显示地址内核（纯函数）：完整可直达 URL（`http://{host}:{port}/m`），
+/// host 由 display_host_for 选取（0.0.0.0 → 局域网首个 或 127.0.0.1 兜底）
+fn display_url_for(bind: &str, port: u16, ips: Vec<String>) -> String {
+    format!("http://{}:{port}/m", display_host_for(bind, ips))
 }
 
 /// 局域网候选门控内核（纯函数，不触网络）：仅对外绑定（0.0.0.0）给出候选，
@@ -618,6 +636,48 @@ mod tests {
         let h2 = tauri::async_runtime::spawn(async {});
         h2.abort();
         let _ = tauri::async_runtime::block_on(h2);
+    }
+
+    // ==== M3 Task 2：P7 修正（0.0.0.0 主显示地址改局域网 IP）====
+    // 计划里的测试名 url_uses_lan_ip_when_bound_to_all_interfaces 保留，断言落在纯函数
+    // display_url_for 上——零污染裁决（延续 Task 1）：brief 原稿直调 remote_status 前
+    // set_setting(KEY_BIND, ...) 会写真实 ~/.mam/mam.db，禁止；display_url_for 是
+    // remote_status 装配 url 字段的可测内核（DB/网络读取留在薄壳里）
+
+    /// 计划测试名保留：0.0.0.0 通配绑定时主显示 url 必须落到可拨号的局域网 IP
+    /// （M2 用户实测 0.0.0.0 地址本身不可连），四分支全覆盖：
+    ///   1. 0.0.0.0 + 有局域网 IP → 取第一个；
+    ///   2. 0.0.0.0 + 无局域网 IP（离线/无路由）→ 回落 127.0.0.1；
+    ///   3. 具体网卡 IP 绑定 → 原样（本身可达）；
+    ///   4. loopback 绑定 → 原样
+    #[test]
+    fn url_uses_lan_ip_when_bound_to_all_interfaces() {
+        // 1) 通配绑定 + 局域网候选命中 → 首个 IP
+        assert_eq!(
+            display_url_for(
+                "0.0.0.0",
+                9420,
+                vec!["192.168.1.5".into(), "10.0.0.2".into()]
+            ),
+            "http://192.168.1.5:9420/m",
+            "0.0.0.0 主显示地址必须为可拨号的局域网 IP（取首个）"
+        );
+        // 2) 通配绑定 + 枚举失败 → 回落 loopback（不把 0.0.0.0 拼进 url）
+        assert_eq!(
+            display_url_for("0.0.0.0", 9420, vec![]),
+            "http://127.0.0.1:9420/m",
+            "无局域网候选时回落 127.0.0.1"
+        );
+        // 3) 具体网卡 IP 绑定 → 原样透传
+        assert_eq!(
+            display_url_for("192.168.1.5", 9420, vec![]),
+            "http://192.168.1.5:9420/m"
+        );
+        // 4) loopback 绑定 → 原样透传
+        assert_eq!(
+            display_url_for("127.0.0.1", 9420, vec![]),
+            "http://127.0.0.1:9420/m"
+        );
     }
 
     /// (c) 陈旧句柄自愈（评审 Important 修复的行为锁定）：经 `start_server_core` 的

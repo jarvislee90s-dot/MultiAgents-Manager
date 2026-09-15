@@ -3,6 +3,7 @@ import {
   AGENT_TYPES,
   STATUS_DOT_COLOR,
   TOOL_FILTERS,
+  TOOL_LABELS,
   filterByAgent,
   formatRelativeTime,
   sortSessions,
@@ -128,6 +129,23 @@ describe("board-logic 工具过滤", () => {
       "zcode",
       "dsh",
     ]);
+  });
+});
+
+describe("board-logic 工具显示名（P8c 卡片主行）", () => {
+  it("键集穷尽 AgentType 八值（Record 守卫，增删 AgentType 时此断言同步修正）", () => {
+    expect(Object.keys(TOOL_LABELS).sort()).toEqual([...AGENT_TYPES].sort());
+  });
+
+  it("八值显示名与桌面 agentBadge 口径一致（codex 不分 APP/CLI，统一 Codex）", () => {
+    expect(TOOL_LABELS.claude).toBe("Claude");
+    expect(TOOL_LABELS.codex).toBe("Codex");
+    expect(TOOL_LABELS.opencode).toBe("OpenCode");
+    expect(TOOL_LABELS.openclaw).toBe("OpenClaw");
+    expect(TOOL_LABELS.kimi).toBe("Kimi Code");
+    expect(TOOL_LABELS.workbuddy).toBe("WorkBuddy");
+    expect(TOOL_LABELS.zcode).toBe("ZCode");
+    expect(TOOL_LABELS.dsh).toBe("DSH");
   });
 });
 

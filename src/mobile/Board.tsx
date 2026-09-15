@@ -3,11 +3,13 @@ import { fetchHost, fetchSessions, type HostPayload } from "./api";
 import {
   STATUS_DOT_COLOR,
   TOOL_FILTERS,
+  TOOL_LABELS,
   filterByAgent,
   formatRelativeTime,
   sortSessions,
   type ToolFilter,
 } from "./board-logic";
+import { ToolIcon } from "@/components/common/ToolIcon";
 import type { SessionsResponse } from "@/types/session";
 
 const POLL_MS = 3000;
@@ -90,9 +92,10 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-4 text-slate-200">
       {/* 品牌行（P8a+P8b）：MAM + 版本号 + 本机名（右侧，双机双子域辨识）；
-          host 未拉到时整行隐藏（静默降级，见上方 state 注释） */}
+          host 未拉到时整行隐藏（静默降级，见上方 state 注释）。
+          内层不再加 px-4（M3 Task 2 顺手修）：容器已有 px-4，双层内边距导致品牌行偏右 */}
       {host && (
-        <header className="flex items-center gap-2 px-4 pt-4 pb-2">
+        <header className="flex items-center gap-2 pt-4 pb-2">
           <span className="text-lg font-bold">MAM</span>
           <span className="text-xs text-slate-400">v{host.version}</span>
           <span className="ml-auto text-sm">{host.name}</span>
@@ -137,18 +140,27 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
         <ul className="space-y-2">
           {sessions.map((s) => (
             <li key={`${s.agentType}-${s.id}`} className="rounded-xl bg-slate-900 p-3">
+              {/* 主行（P8c 定稿）：工具图标+工具名+项目名 … 相对时长+状态点（右端）。
+                  相对时长保留在主行右端（状态点左边）：时间/状态属卡片级元数据，
+                  一眼可读，且沿用旧版"时长在右"的视觉惯性 */}
               <div className="flex items-center gap-2">
+                {/* 桌面组件但零 Tauri 依赖，移动 bundle 可直接 import（控制者裁决） */}
+                <ToolIcon toolId={s.agentType} size={16} className="shrink-0" />
+                <span className="shrink-0 text-sm font-medium text-slate-100">
+                  {TOOL_LABELS[s.agentType]}
+                </span>
+                <span className="truncate text-sm text-slate-400">{s.projectName}</span>
+                <span className="ml-auto shrink-0 text-xs text-slate-500">
+                  {formatRelativeTime(s.lastActivityAt, now)}
+                </span>
                 {/* 三色圆点：与桌面 StatusLight 同语义（waiting 附加呼吸动画） */}
                 <span
                   className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT_COLOR[s.status]} ${
                     s.status === "waiting" ? "animate-pulse" : ""
                   }`}
                 />
-                <span className="truncate text-sm font-medium text-slate-100">{s.projectName}</span>
-                <span className="ml-auto shrink-0 text-xs text-slate-500">
-                  {formatRelativeTime(s.lastActivityAt, now)}
-                </span>
               </div>
+              {/* 副行（P8c 定稿）：标题+最新消息预览（现有数据重新排布，无新 API） */}
               <p className="mt-1 truncate text-sm text-slate-300">{s.title ?? "（无标题）"}</p>
               {s.lastMessage && (
                 <p className="mt-0.5 truncate text-xs text-slate-500">{s.lastMessage}</p>
