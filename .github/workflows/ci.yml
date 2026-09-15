@@ -35,6 +35,9 @@ jobs:
               - "src/**"
               - "tests/**"
               - "index.html"
+              - "mobile.html"
+              - "public-mobile/**"
+              - "vite.config.mobile.ts"
               - "package.json"
               - "pnpm-lock.yaml"
               - "pnpm-workspace.yaml"
@@ -77,6 +80,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # M2-R1：后端内嵌移动看板静态资源（rust-embed 读 ../dist-mobile/），
+      # cargo 步骤前必须有 node/pnpm 环境 + build:mobile 产物，否则 fresh checkout
+      # 的静态伺服测试必红（入口 404）
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
 
       - name: Install Linux system dependencies
         run: |
@@ -85,6 +98,12 @@ jobs:
             build-essential pkg-config file libssl-dev patchelf xdg-utils \
             libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev \
             libwebkit2gtk-4.1-dev libsoup-3.0-dev
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build mobile entry (rust-embed prerequisite)
+        run: pnpm build:mobile
 
       # 格式门禁放最前：不依赖编译、秒级失败（PR #38 曾因无此门禁合入未格式化代码）
       - run: cd src-tauri && cargo fmt --check

@@ -66,6 +66,12 @@ zip = "4"
 # dsh 会话日志为多帧拼接的 zstd 容器（M0 F1），解码用
 zstd = "0.13"
 tauri-plugin-dialog = "2"
+# M2（远程接入）：主进程内嵌 axum 服务器 + 看板静态资源内嵌
+axum = "0.8"
+# include-exclude：支持 #[exclude = ".gitkeep"]（占位文件不嵌入二进制，终审修复轮）
+rust-embed = { version = "8", features = ["include-exclude"] }
+# 配对码 / deviceId 生成
+rand = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"
@@ -87,3 +93,6 @@ strip = true
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"
+# M2 axum 集成测试：tower ServiceExt::oneshot + http-body-util 读响应体
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
