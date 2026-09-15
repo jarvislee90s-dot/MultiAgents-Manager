@@ -1,4 +1,5 @@
-// /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ pair + heartbeat
+// /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
+// + pair + heartbeat
 
 use axum::{
     extract::State,
@@ -101,4 +102,18 @@ pub async fn pair(
 /// M3 保活判定预留，当前 sessions 轮询 gate touch 已覆盖
 pub async fn heartbeat() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// GET /m/api/v1/host（M3 Task 1）：移动看板页头品牌行（P8a 版本 + P8b 本机名 +
+/// P8d enabledTools 数据源）。gate 内自动覆盖（nest 内层 layer，无需另加 middleware）；
+/// host 信息运行期不变，移动端挂载时拉一次即可，无需轮询。
+/// 直调 host_source 注入缝（生产 = remote::host_info()，与 remote_status 的 host 部分同源，
+/// 禁止复制聚合逻辑）——读 settings DAO 是轻量 SQLite 查询，无需 spawn_blocking
+pub async fn host(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
+    // 门禁下的私有数据（本机名/启用工具），与会话数据同样禁止中间层缓存
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json((st.host_source)()),
+    )
+        .into_response()
 }

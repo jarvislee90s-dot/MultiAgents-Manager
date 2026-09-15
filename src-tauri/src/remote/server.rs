@@ -128,6 +128,8 @@ pub struct RemoteState {
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
     /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.mam）
     pub store: super::pairing::DeviceStore,
+    /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
+    pub host_source: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
 }
 
 /// API 子路由：三条端点 + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -136,6 +138,7 @@ pub struct RemoteState {
 fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
     Router::new()
         .route("/sessions", get(api::sessions))
+        .route("/host", get(api::host))
         .route("/pair", post(api::pair))
         .route("/heartbeat", post(api::heartbeat))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
@@ -221,6 +224,12 @@ mod tests {
                 waiting_count: 0,
             }),
             store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.mam
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
+                    "enabledTools": ["claude"]
+                })
+            }),
         })
     }
 
@@ -362,6 +371,7 @@ mod tests {
                     waiting_count: 0,
                 }),
                 store: crate::remote::pairing::DeviceStore::memory(),
+                host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
             }),
             t,
         )
@@ -847,6 +857,7 @@ mod tests {
                 }
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -887,6 +898,85 @@ mod tests {
         assert!(
             light_elapsed < std::time::Duration::from_millis(150),
             "阻塞扫描期间轻量任务被推迟了 {light_elapsed:?}——session_source 未走 spawn_blocking"
+        );
+    }
+
+    // ==== M3 Task 1：GET /m/api/v1/host（P8a/P8b 页头数据源） ====
+    // 零污染：host 载荷经 host_source 注入缝供给（假 json），不触 settings DAO / 全局 DB。
+
+    /// /host 端点矩阵：无 cookie 403（与 sessions 同一 gate，设备失效语义一致）；
+    /// 有效设备 200 返回注入载荷 + Cache-Control: no-store（host 同属门禁下私有数据）
+    #[tokio::test]
+    async fn host_endpoint_is_gated_and_returns_injected_payload() {
+        // 重建 state：host_source 注入假载荷（与 sessions_scan_* 重建 state 的先例一致）
+        let state = Arc::new(RemoteState {
+            pairing: std::sync::Mutex::new({
+                let mut svc = PairingService::new(
+                    600_000,
+                    PairingClock {
+                        now: Box::new(|| 1000),
+                        token: Box::new(|| "tok-x".to_string()),
+                    },
+                );
+                svc.issue();
+                svc
+            }),
+            session_source: Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![],
+                total_count: 0,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "jarvis-win", "platform": "windows", "version": "9.9.9-test" },
+                    "enabledTools": ["claude", "zcode"]
+                })
+            }),
+        });
+        let app = router(state.clone());
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "hd".into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+
+        // (1) 无 cookie → 403（gate 全量覆盖新端点，与 sessions 语义一致）
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/api/v1/host", None, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            403,
+            "/host 必须过 gate（设备失效同 sessions 的 403 语义）"
+        );
+
+        // (2) 有效设备 → 200 + 注入载荷原样透传
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/api/v1/host", Some("mam_device=hd"), None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"name\":\"jarvis-win\"") && body.contains("\"version\":\"9.9.9-test\""),
+            "host 载荷应原样透传，实际 {body}"
+        );
+        assert!(
+            body.contains("\"enabledTools\""),
+            "enabledTools 数据源随载荷返回"
         );
     }
 }

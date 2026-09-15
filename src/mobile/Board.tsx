@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchSessions } from "./api";
+import { fetchHost, fetchSessions, type HostPayload } from "./api";
 import {
   STATUS_DOT_COLOR,
   TOOL_FILTERS,
@@ -25,6 +25,10 @@ interface BoardProps {
 export default function Board({ onPaired, onUnpaired }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
+  // 页头品牌行（P8a/P8b）：host 信息运行期不变，挂载时拉一次即可，不随轮询重复。
+  // 失败口径（与轮询不同）：拉取失败 / 403 一律静默降级为不显示——设备有效性只以
+  // 会话轮询的 403 为准，品牌行只是展示层，不参与配对状态机
+  const [host, setHost] = useState<HostPayload["host"] | null>(null);
   const [filter, setFilter] = useState<ToolFilter>("all");
   // 相对时长的基准时钟：随每拍轮询刷新（react-hooks/purity 禁止渲染期直接调 Date.now）
   const [now, setNow] = useState(() => Date.now());
@@ -64,12 +68,36 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
     return () => clearInterval(id);
   }, [tick]);
 
+  // 品牌行数据：挂载时拉一次（host 信息不变，无需轮询；失败静默，见 state 注释）
+  useEffect(() => {
+    let alive = true;
+    void fetchHost<HostPayload>()
+      .then((h) => {
+        if (alive && h !== null) setHost(h.host);
+      })
+      .catch(() => {
+        /* 网络异常：品牌行静默不显示 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const sessions = data ? sortSessions(filterByAgent(data.sessions, filter)) : [];
   // 过滤后无卡但总量不为 0 时，提示归因于过滤条件而非"真的没会话"
   const filteredOut = data !== null && data.totalCount > 0 && sessions.length === 0;
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-4 text-slate-200">
+      {/* 品牌行（P8a+P8b）：MAM + 版本号 + 本机名（右侧，双机双子域辨识）；
+          host 未拉到时整行隐藏（静默降级，见上方 state 注释） */}
+      {host && (
+        <header className="flex items-center gap-2 px-4 pt-4 pb-2">
+          <span className="text-lg font-bold">MAM</span>
+          <span className="text-xs text-slate-400">v{host.version}</span>
+          <span className="ml-auto text-sm">{host.name}</span>
+        </header>
+      )}
       <header className="mb-3 flex items-baseline justify-between">
         <h1 className="text-lg font-semibold text-slate-100">会话看板</h1>
         <span className="text-xs text-slate-500">

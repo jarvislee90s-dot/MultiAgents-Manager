@@ -10,6 +10,8 @@ pub const KEY_ENABLED: &str = "remote.enabled";
 pub const KEY_BIND: &str = "remote.bind";
 pub const KEY_PORT: &str = "remote.port";
 pub const KEY_PUBLIC_ACK: &str = "remote.public_ack";
+/// 本机展示名（P8b）：设置里可覆盖 sysinfo 探测值；空串视为未设置
+pub const KEY_HOST_NAME: &str = "remote.host_name";
 /// 默认端口（避开 3080=dsh / 1420=vite / 18789=zcode）
 pub const DEFAULT_PORT: u16 = 9420;
 
@@ -45,6 +47,8 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
         store: pairing::DeviceStore::global(),
+        // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
+        host_source: Box::new(host_info),
     })
 });
 
@@ -231,6 +235,7 @@ fn status_enabled(db_enabled: bool, handle_alive: bool) -> bool {
 }
 
 /// 设置页状态展示：enabled / bind / port / url / lanUrls（仅 0.0.0.0 给局域网候选）
+/// M3 Task 1 追加 host（P8a 版本 + P8b 本机名 + P8d enabledTools 数据源）
 #[tauri::command]
 pub fn remote_status() -> serde_json::Value {
     // 展示层：设置里 bind 非法时回落默认值展示（真实启动会在 start_server 被拒）
@@ -245,8 +250,69 @@ pub fn remote_status() -> serde_json::Value {
     let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
     let enabled = status_enabled(db_enabled, handle_alive);
     let lan = lan_urls_for(&bind, local_lan_ips(), port);
-    serde_json::json!({ "enabled": enabled, "bind": bind, "port": port,
-        "url": format!("http://{bind}:{port}/m"), "lanUrls": lan })
+    // host 载荷薄装配：可测内核 host_payload（见下），此处只注入真实依赖
+    // （空串/空白设置由 display_host_name 内部过滤，见其注释）
+    let mut st = host_payload(
+        || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
+        crate::database::dao::agent_tool::enabled_tool_ids,
+    );
+    // 原 status 键并入同一返回值（消费方：设置页 RemoteSection + 移动端 /host 直调）
+    st["enabled"] = serde_json::json!(enabled);
+    st["bind"] = serde_json::json!(bind);
+    st["port"] = serde_json::json!(port);
+    st["url"] = serde_json::json!(format!("http://{bind}:{port}/m"));
+    st["lanUrls"] = serde_json::json!(lan);
+    st
+}
+
+/// 本机展示名（纯函数，注入缝：sysinfo 以闭包注入便于测试）：
+/// DB 设置（Some 且**非空白**，配置损坏的空串不得顶替真实主机名）
+/// > sysinfo 探测 > "MAM" 品牌兜底——双机双子域辨识（P8b）
+fn display_host_name(saved: Option<String>, sysinfo: impl FnOnce() -> Option<String>) -> String {
+    saved
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(sysinfo)
+        .unwrap_or_else(|| "MAM".into())
+}
+
+/// 编译目标平台标识（P8）：固定三值，供移动端按平台给提示/图标
+fn platform_id() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// host 载荷内核（纯装配，外部依赖全部注入，零 DB 接触可单测）：
+///   host: { name, platform, version } + enabledTools（P8d chips 过滤数据源，Task 3 消费）。
+/// 返回 serde_json Value 便于 remote_status 原地并入其余 status 键
+fn host_payload(
+    saved_name: impl FnOnce() -> Option<String>,
+    enabled_tools: impl FnOnce() -> Vec<String>,
+) -> serde_json::Value {
+    let name = display_host_name(saved_name(), sysinfo::System::host_name);
+    serde_json::json!({
+        // P8a+P8b：品牌版本号 + 本机名称（双机双子域辨识）
+        "host": {
+            "name": name,
+            "platform": platform_id(),
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "enabledTools": enabled_tools(),
+    })
+}
+
+/// /m/api/v1/host 移动端装配（api.rs handler 直调）：host 部分与 remote_status 同源
+/// （P8 数据同源红线：禁止复制聚合逻辑），状态键（enabled/bind/…）移动端不需要，不返回
+fn host_info() -> serde_json::Value {
+    host_payload(
+        || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
+        crate::database::dao::agent_tool::enabled_tool_ids,
+    )
 }
 
 /// 刷新配对二维码：发行新 token（单活跃——发行即作废旧 token，不变量 1）并拼出可扫 URL。
@@ -353,6 +419,7 @@ mod tests {
         assert_eq!(KEY_BIND, "remote.bind");
         assert_eq!(KEY_PORT, "remote.port");
         assert_eq!(KEY_PUBLIC_ACK, "remote.public_ack");
+        assert_eq!(KEY_HOST_NAME, "remote.host_name");
         assert_eq!(DEFAULT_PORT, 9420);
     }
 
@@ -637,6 +704,96 @@ mod tests {
             );
             assert!(r.is_err(), "对外绑定 {external} 未确认 TLS 前置必须拒绝");
             assert!(slot.is_none(), "被安全门拒绝时不得留下句柄（{external}）");
+        }
+    }
+}
+
+// ============================================================
+// M3 Task 1：Host 信息（P8a 品牌版本号 + P8b 本机名 + P8d enabledTools 数据源）
+// 测试策略（控制者裁决，零污染最高优先）：可测逻辑抽成纯函数 host_payload /
+// display_host_name / platform_id，DB 读取（remote.host_name / enabled_tool_ids）
+// 以闭包注入——测试不触全局 DB Lazy，remote_status / host_info 只做薄装配不测。
+// 计划里的测试名 remote_status_includes_host_info 保留，断言落在纯函数上。
+// ============================================================
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    /// 计划测试名保留：remote_status 的 host 载荷断言落在纯函数 host_payload 上
+    /// （零 DB 接触——remote_status 本体是读 settings DAO 的薄装配，集成路径不测）
+    #[test]
+    fn remote_status_includes_host_info() {
+        let st = host_payload(
+            || Some("JARVIS-Win".to_string()),
+            || vec!["claude".to_string(), "codex".to_string()],
+        );
+        let host = st.get("host").expect("remote_status 应含 host 字段");
+        assert!(host.get("name").is_some());
+        assert!(host.get("version").is_some());
+        assert!(
+            host.get("platform").is_some(),
+            "platform 字段为移动端约定的固定三值之一"
+        );
+        assert_eq!(host.get("name").unwrap(), "JARVIS-Win");
+        assert_eq!(
+            host.get("version").unwrap(),
+            env!("CARGO_PKG_VERSION"),
+            "版本号必须与 crate 版本一致（P8a）"
+        );
+        // enabledTools（P8d 数据源）随 host 载荷一并返回，Task 3 chips 过滤直接消费
+        assert_eq!(
+            st.get("enabledTools").unwrap(),
+            &serde_json::json!(["claude", "codex"]),
+            "enabledTools 应透传 enabled_tool_ids 的结果（按种子顺序）"
+        );
+    }
+
+    /// 本机名取值顺序：DB 设置（Some 且非空）> sysinfo > "MAM"（P8b 优先级）
+    #[test]
+    fn display_host_name_prefers_saved_then_sysinfo_then_fallback() {
+        // 1) DB 设置非空 → 直接采用
+        assert_eq!(
+            display_host_name(Some("JARVIS-Win".into()), || panic!(
+                "设置命中时不得回落 sysinfo"
+            )),
+            "JARVIS-Win"
+        );
+        // 2) DB 未设置 → sysinfo 命中
+        assert_eq!(
+            display_host_name(None, || Some("mac-studio".into())),
+            "mac-studio"
+        );
+        // 3) 双双未命中 → "MAM" 品牌兜底
+        assert_eq!(display_host_name(None, || None), "MAM");
+    }
+
+    /// 空串设置视为未设置（配置损坏不得顶替 sysinfo 真实主机名）
+    #[test]
+    fn display_host_name_treats_blank_setting_as_unset() {
+        assert_eq!(
+            display_host_name(Some("".into()), || Some("real-host".into())),
+            "real-host",
+            "空串设置必须回落 sysinfo（filter 非 empty）"
+        );
+        assert_eq!(display_host_name(Some("   ".into()), || None), "MAM");
+    }
+
+    /// platform 判定（P8）：固定三值之一；本机编译目标 darwin → macos
+    #[test]
+    fn platform_id_is_one_of_three_values() {
+        let p = platform_id();
+        assert!(
+            ["macos", "windows", "linux"].contains(&p),
+            "platform 必须是三值之一，实际 {p}"
+        );
+        // 编译期判定与运行期取值一致性（darwin/arm64 CI 与本机环境）
+        if cfg!(target_os = "macos") {
+            assert_eq!(p, "macos");
+        } else if cfg!(windows) {
+            assert_eq!(p, "windows");
+        } else {
+            assert_eq!(p, "linux");
         }
     }
 }

@@ -1,4 +1,4 @@
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Board from "@/mobile/Board";
 import type { SessionsResponse } from "@/types/session";
@@ -40,7 +40,8 @@ describe("Board 轮询契约", () => {
     expect(onUnpaired).not.toHaveBeenCalled();
 
     await advance(POLL_MS * 2 + 100); // 再走两拍
-    expect(fetchMock).toHaveBeenCalledTimes(3); // 轮询在继续
+    // 挂载时另有一次 /host 拉取（M3 Task 1 品牌行），轮询本身仍只走了两拍
+    expect(fetchMock.mock.calls.filter(([u]) => u !== "/m/api/v1/host").length).toBe(3);
     expect(onPaired).toHaveBeenCalledTimes(1); // 但成功通知只发一次
   });
 
@@ -71,16 +72,78 @@ describe("Board 轮询契约", () => {
     render(<Board onPaired={onPaired} onUnpaired={vi.fn()} />);
 
     await advance(0); // 首拍发出但挂起（慢网）
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // 首拍 + 挂载时的 /host 品牌行拉取（M3 Task 1），会话轮询本身只发了 1 次
+    expect(fetchMock.mock.calls.filter(([u]) => u !== "/m/api/v1/host").length).toBe(1);
     await advance(POLL_MS * 2 + 100); // 挂起期间到点的两拍全部跳过
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([u]) => u !== "/m/api/v1/host").length).toBe(1);
 
     resolveFirst(okSessions(0));
     await advance(0); // 首拍落地 → 成功通知（且仅一次）
     expect(onPaired).toHaveBeenCalledTimes(1);
 
     await advance(POLL_MS + 100); // 恢复后正常走下一拍
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([u]) => u !== "/m/api/v1/host").length).toBe(2);
     expect(onPaired).toHaveBeenCalledTimes(1);
+  });
+});
+
+// M3 Task 1：页头品牌行（P8a 版本号 + P8b 本机名）
+describe("Board 页头品牌行", () => {
+  it("挂载时拉一次 /host，品牌行显示 MAM + v{version} + 本机名；host 403 不踢回配对页", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/m/api/v1/host") {
+        return new Response(
+          JSON.stringify({
+            host: { name: "JARVIS-Win", platform: "windows", version: "0.4.1" },
+            enabledTools: ["claude"],
+          }),
+          { status: 200 }
+        );
+      }
+      return okSessions(3);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onUnpaired = vi.fn();
+    const { container } = render(<Board onPaired={vi.fn()} onUnpaired={onUnpaired} />);
+
+    await advance(0);
+    // host 只在挂载时拉一次（不随 3s 轮询重复）
+    expect(fetchMock).toHaveBeenCalledWith("/m/api/v1/host");
+    const hostCalls = fetchMock.mock.calls.filter(([u]) => u === "/m/api/v1/host").length;
+    await advance(POLL_MS + 100);
+    expect(fetchMock.mock.calls.filter(([u]) => u === "/m/api/v1/host").length).toBe(hostCalls);
+
+    expect(screen.getByText("MAM")).toBeInTheDocument();
+    expect(screen.getByText("v0.4.1")).toBeInTheDocument();
+    expect(screen.getByText("JARVIS-Win")).toBeInTheDocument();
+    // 看板标题行保留（品牌行在其上一行）
+    expect(container.textContent).toContain("会话看板");
+    expect(onUnpaired).not.toHaveBeenCalled();
+  });
+
+  it("host 拉取失败（网络异常）：静默降级为隐藏品牌行，不影响会话轮询", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/m/api/v1/host") throw new TypeError("network down");
+      return okSessions(0);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    expect(screen.queryByText("MAM")).not.toBeInTheDocument();
+    // 会话数据照常拉到
+    expect(screen.getByText("0 个会话")).toBeInTheDocument();
+  });
+
+  it("host 403（设备失效）：不回调 onUnpaired——设备有效性只以会话轮询为准", async () => {
+    const fetchMock = vi.fn(async (url: string) =>
+      url === "/m/api/v1/host"
+        ? new Response("", { status: 403 })
+        : okSessions(0)
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onUnpaired = vi.fn();
+    render(<Board onPaired={vi.fn()} onUnpaired={onUnpaired} />);
+    await advance(0);
+    expect(onUnpaired).not.toHaveBeenCalled();
   });
 });
