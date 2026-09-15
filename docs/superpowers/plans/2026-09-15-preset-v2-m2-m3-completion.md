@@ -33,13 +33,13 @@
 **Interfaces:** Consumes M1 服务；Produces 无新接口——纯回归锁。若测试暴露 M1 真缺陷 → **停下报告**，不自行改 services。
 
 **验收条件：**
-- [ ] `cargo test mcp_sweep_restore && cargo test v2m2_plug` 绿：MCP 配置段往返（清扫后 assignment disabled 且配置段移除 → 恢复后重写且 enabled）+ file 型插件链接往返（清扫断链 → 恢复链接回）
-- [ ] config 型 plugin 覆盖与否及原因写入 commit message（工具配置格式无法构造时允许跳过，file 型为必测）
-- [ ] 全量 `cargo test` 绿
+- [x] `cargo test mcp_sweep_restore && cargo test v2m2_plug` 绿：MCP 配置段往返（清扫后 assignment disabled 且配置段移除 → 恢复后重写且 enabled）+ file 型插件链接往返（清扫断链 → 恢复链接回）
+- [x] config 型 plugin 覆盖与否及原因写入 commit message（工具配置格式无法构造时允许跳过，file 型为必测）
+- [x] 全量 `cargo test` 绿
 
-- [ ] **Step 1: MCP 测试**（`v2m2-mcp-a` 经 `toggle_mcp` 启用为基底 → 空预设 apply → 断言 `r.disabled` 含 `mcp-v2m2-mcp-a` 且 assignment disabled → `restore_tool` → 断言 `rr.restored_mam` 含之且 assignment enabled）
-- [ ] **Step 2: plugin 测试**（`~/.mam/plugins/v2m2-plug-a/` + tags=Some("file") 注册 → `toggle_plugin` 启用 → apply → 断言 disabled + 工具插件目录项消失 → restore → 链接回来 + enabled）
-- [ ] **Step 3: Commit** `test(preset-v2): MCP/plugin sweep-restore roundtrips (M2 precondition, ruling #2)`
+- [x] **Step 1: MCP 测试**（`v2m2-mcp-a` 经 `toggle_mcp` 启用为基底 → 空预设 apply → 断言 `r.disabled` 含 `mcp-v2m2-mcp-a` 且 assignment disabled → `restore_tool` → 断言 `rr.restored_mam` 含之且 assignment enabled）
+- [x] **Step 2: plugin 测试**（`~/.mam/plugins/v2m2-plug-a/` + tags=Some("file") 注册 → `toggle_plugin` 启用 → apply → 断言 disabled + 工具插件目录项消失 → restore → 链接回来 + enabled）
+- [x] **Step 3: Commit** `test(preset-v2): MCP/plugin sweep-restore roundtrips (M2 precondition, ruling #2)`
 
 ## Phase A · 前端基建
 

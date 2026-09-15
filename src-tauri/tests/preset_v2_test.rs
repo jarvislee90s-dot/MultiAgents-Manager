@@ -1204,3 +1204,278 @@ fn restore_roundtrip_preserves_drifted_real_dir() {
     let _ = std::fs::remove_dir_all(&drift_dir);
     let _ = std::fs::remove_dir_all(&ssot_a);
 }
+
+/// M2 开工前置回归锁（裁决 2 / plan Task 1）：MCP 配置段独占往返——
+/// 空预设 apply 清扫：assignment disabled + ~/.claude.json mcpServers 段移除；
+/// restore_tool 精确重建：restored_mam 含之 + assignment enabled + 配置段重写
+#[test]
+fn mcp_sweep_restore_roundtrip() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::mcp::tool_mcp_config_path;
+    use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
+    use multi_agents_manager_lib::services::toggle_mcp;
+
+    let claude_json = tool_mcp_config_path("claude").unwrap();
+    let section_has = |name: &str| {
+        let content = std::fs::read_to_string(&claude_json).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+        root["mcpServers"].get(name).is_some()
+    };
+
+    // 基底：MCP 经真实导入路径入仓（save_mcp_config 落仓库文件 + 注册表行），再为 claude 启用
+    multi_agents_manager_lib::commands::resource::save_mcp_config(
+        "v2m2-mcp-a".into(),
+        "npx".into(),
+        vec![],
+        Default::default(),
+    )
+    .unwrap();
+    assert!(
+        database::list_extensions()
+            .iter()
+            .any(|e| e.id == "mcp-v2m2-mcp-a"),
+        "前置：注册表行应在（save_mcp_config 落表）"
+    );
+    toggle_mcp("v2m2-mcp-a", "claude", true).unwrap();
+    assert!(
+        database::list_assignments("claude")
+            .iter()
+            .any(|a| a.extension_id == "mcp-v2m2-mcp-a" && a.enabled),
+        "前置：assignment 应 enabled"
+    );
+    assert!(section_has("v2m2-mcp-a"), "前置：mcpServers 段应已写入");
+    assert!(database::get_tool_enabled("claude"), "前置：工具启用中");
+
+    // 空预设 apply → 独占清扫：assignment disabled + 配置段移除
+    //（断言用 contains——共享 HOME 下其他测试可能残留启用项同被清扫）
+    let pid = database::create_preset("v2m2-mcp-sweep", &[]).unwrap();
+    let r = apply_preset(&pid, "claude").unwrap();
+    assert!(
+        r.disabled.contains(&"mcp-v2m2-mcp-a".to_string()),
+        "disabled 应含 MCP 项: {:?}",
+        r.disabled
+    );
+    assert!(
+        !r.failures.iter().any(|f| f.contains("v2m2-mcp-a")),
+        "MCP 清扫不得失败: {:?}",
+        r.failures
+    );
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "mcp-v2m2-mcp-a")
+        .expect("assignment 行应存在");
+    assert!(!asg.enabled, "清扫后 assignment 应 disabled");
+    assert_eq!(asg.link_status, "missing");
+    assert!(!section_has("v2m2-mcp-a"), "清扫后配置段应移除");
+
+    // restore → 精确重建：配置段重写 + assignment enabled
+    let rr = restore_tool("claude").unwrap();
+    assert!(
+        rr.restored_mam.contains(&"mcp-v2m2-mcp-a".to_string()),
+        "restored_mam 应含 MCP 项: {:?}",
+        rr.restored_mam
+    );
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "mcp-v2m2-mcp-a")
+        .expect("assignment 行应存在");
+    assert!(asg.enabled, "恢复后 assignment 应 enabled");
+    assert_eq!(asg.link_status, "valid");
+    assert!(section_has("v2m2-mcp-a"), "恢复后配置段应重写");
+    let root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    assert_eq!(
+        root["mcpServers"]["v2m2-mcp-a"]["command"],
+        "npx",
+        "重写的配置段内容应与仓库一致"
+    );
+
+    // 清场
+    let _ = toggle_mcp("v2m2-mcp-a", "claude", false);
+    let _ = database::delete_extension("mcp-v2m2-mcp-a");
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".mam/mcp/v2m2-mcp-a.json"));
+}
+
+/// M2 开工前置回归锁（裁决 2 / plan Task 1）：file 型插件独占往返——
+/// 空预设 apply 清扫断链（工具插件目录项消失）→ restore 链接回来（enabled）
+#[test]
+fn plugin_file_sweep_restore_v2m2_plug() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
+    use multi_agents_manager_lib::services::toggle_plugin;
+
+    let home = dirs::home_dir().unwrap();
+    // SSOT 仓库放真目录 + 注册表行（与生产扫描登记 file 型插件同形态：tags=Some("file")）
+    let ssot = home.join(".mam/plugins/v2m2-plug-a");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("plugin.json"), "{}").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "plugin-v2m2-plug-a".into(),
+        kind: "plugin".into(),
+        name: "v2m2-plug-a".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: Some("file".into()),
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: false,
+    })
+    .unwrap();
+    toggle_plugin("v2m2-plug-a", "claude", true, "file").unwrap();
+    let target = home.join(".claude/plugins/v2m2-plug-a");
+    assert!(
+        target.join("plugin.json").exists(),
+        "前置：链接在场且可穿透"
+    );
+    assert!(database::get_tool_enabled("claude"), "前置：工具启用中");
+
+    // 空预设 apply → 独占清扫：断链 + assignment disabled
+    let pid = database::create_preset("v2m2-plug-sweep", &[]).unwrap();
+    let r = apply_preset(&pid, "claude").unwrap();
+    assert!(
+        r.disabled.contains(&"plugin-v2m2-plug-a".to_string()),
+        "disabled 应含插件项: {:?}",
+        r.disabled
+    );
+    assert!(
+        !r.failures.iter().any(|f| f.contains("v2m2-plug-a")),
+        "插件清扫不得失败: {:?}",
+        r.failures
+    );
+    assert!(
+        std::fs::symlink_metadata(&target).is_err(),
+        "清扫后工具插件目录项应消失"
+    );
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "plugin-v2m2-plug-a")
+        .expect("assignment 行应存在");
+    assert!(!asg.enabled, "清扫后 assignment 应 disabled");
+
+    // restore → 链接回来 + assignment enabled
+    let rr = restore_tool("claude").unwrap();
+    assert!(
+        rr.restored_mam.contains(&"plugin-v2m2-plug-a".to_string()),
+        "restored_mam 应含插件项: {:?}",
+        rr.restored_mam
+    );
+    let meta = std::fs::symlink_metadata(&target).expect("恢复后工具插件目录项应在场");
+    assert!(meta.file_type().is_symlink(), "恢复的应是符号链接");
+    assert!(target.join("plugin.json").exists(), "链接应可穿透到 SSOT");
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "plugin-v2m2-plug-a")
+        .expect("assignment 行应存在");
+    assert!(asg.enabled, "恢复后 assignment 应 enabled");
+    assert_eq!(asg.link_status, "valid");
+
+    // 清场
+    let _ = toggle_plugin("v2m2-plug-a", "claude", false, "file");
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = database::delete_extension("plugin-v2m2-plug-a");
+}
+
+/// M2 开工前置回归锁（裁决 2 / plan Task 1）：config 型插件独占往返——
+/// SSOT 为仓库内 .json 条目文件（生产扫描对文件形态登记 tags=Some("config")），
+/// 空预设 apply 清扫摘 ~/.claude/settings.json plugins 段条目 → restore 重写 + enabled
+#[test]
+fn plugin_config_sweep_restore_v2m2_plugcfg() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
+    use multi_agents_manager_lib::services::toggle_plugin;
+
+    let home = dirs::home_dir().unwrap();
+    // config 型插件的 SSOT 是仓库内的 .json 条目文件（toggle 从中读 entries）
+    let repo_json = home.join(".mam/plugins/v2m2-plug-cfg.json");
+    std::fs::write(&repo_json, r#"{"source":"v2m2"}"#).unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "plugin-v2m2-plug-cfg".into(),
+        kind: "plugin".into(),
+        name: "v2m2-plug-cfg".into(),
+        description: None,
+        source_path: repo_json.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: Some("config".into()),
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: false,
+    })
+    .unwrap();
+    toggle_plugin("v2m2-plug-cfg", "claude", true, "config").unwrap();
+    let settings = home.join(".claude/settings.json");
+    let plugins_has = |name: &str| {
+        let content = std::fs::read_to_string(&settings).unwrap_or_default();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+        root["plugins"].get(name).is_some()
+    };
+    assert!(
+        plugins_has("v2m2-plug-cfg"),
+        "前置：plugins 段条目应已写入"
+    );
+    assert!(database::get_tool_enabled("claude"), "前置：工具启用中");
+
+    // 空预设 apply → 独占清扫：条目摘除 + assignment disabled
+    let pid = database::create_preset("v2m2-plugcfg-sweep", &[]).unwrap();
+    let r = apply_preset(&pid, "claude").unwrap();
+    assert!(
+        r.disabled.contains(&"plugin-v2m2-plug-cfg".to_string()),
+        "disabled 应含插件项: {:?}",
+        r.disabled
+    );
+    assert!(
+        !r.failures.iter().any(|f| f.contains("v2m2-plug-cfg")),
+        "插件清扫不得失败: {:?}",
+        r.failures
+    );
+    assert!(!plugins_has("v2m2-plug-cfg"), "清扫后 plugins 段条目应移除");
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "plugin-v2m2-plug-cfg")
+        .expect("assignment 行应存在");
+    assert!(!asg.enabled, "清扫后 assignment 应 disabled");
+
+    // restore → 条目重写 + assignment enabled
+    let rr = restore_tool("claude").unwrap();
+    assert!(
+        rr.restored_mam.contains(&"plugin-v2m2-plug-cfg".to_string()),
+        "restored_mam 应含插件项: {:?}",
+        rr.restored_mam
+    );
+    assert!(plugins_has("v2m2-plug-cfg"), "恢复后 plugins 段条目应重写");
+    let root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        root["plugins"]["v2m2-plug-cfg"]["source"],
+        "v2m2",
+        "重写的条目内容应与仓库一致"
+    );
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "plugin-v2m2-plug-cfg")
+        .expect("assignment 行应存在");
+    assert!(asg.enabled, "恢复后 assignment 应 enabled");
+    assert_eq!(asg.link_status, "valid");
+
+    // 清场
+    let _ = toggle_plugin("v2m2-plug-cfg", "claude", false, "config");
+    let _ = std::fs::remove_file(&repo_json);
+    let _ = database::delete_extension("plugin-v2m2-plug-cfg");
+}
