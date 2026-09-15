@@ -313,7 +313,7 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     expect(["#D97757", "rgb(217, 119, 87)", "rgb(217,119,87)"]).toContain(bg);
   });
 
-  it("多行折叠：无溢出时不出现展开/收起按钮（jsdom 高度恒 0 需 mock）", async () => {
+  it("多行折叠：无溢出时不出现展开/收起按钮，容器无折叠裁剪样式", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -324,17 +324,20 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
     const chipsRow = screen.getByTestId("tool-chips");
-    // jsdom 无布局引擎：度量恒 0。mock 出「未溢出」度量再触发 resize 重测
-    vi.spyOn(chipsRow, "scrollHeight", "get").mockReturnValue(100);
-    vi.spyOn(chipsRow, "clientHeight", "get").mockReturnValue(100);
+    // jsdom 无布局引擎（度量恒 0），只 mock「浏览器度量层」：单行内容高 28 ≤ 折叠上限 36。
+    // 阈值比较 / 状态切换 / 按钮渲染全走真实逻辑；真实浏览器下的度量语义
+    // 见 task-3-report.md fix 追记（实测：折叠态 scrollHeight 96 / clientHeight 36，
+    // 宽屏单行 28 / 28——mock 值取真实量级）
+    vi.spyOn(chipsRow, "scrollHeight", "get").mockReturnValue(28);
     act(() => {
       window.dispatchEvent(new Event("resize"));
     });
     expect(screen.queryByText("展开")).not.toBeInTheDocument();
     expect(screen.queryByText("收起")).not.toBeInTheDocument();
+    expect(chipsRow.style.maxHeight).toBe(""); // 未折叠：无固定高度裁剪
   });
 
-  it("多行折叠：溢出时折叠为一行 + 展开按钮；点击切换收起", async () => {
+  it("多行折叠：溢出时容器固定高度裁剪（Critical 回归锁）且展开按钮在裁剪行外（Important 回归锁）", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -345,23 +348,115 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
     const chipsRow = screen.getByTestId("tool-chips");
-    // mock 出「溢出」度量：内容两行高（200） > 可视一行高（36）
-    vi.spyOn(chipsRow, "scrollHeight", "get").mockReturnValue(200);
-    vi.spyOn(chipsRow, "clientHeight", "get").mockReturnValue(36);
+    // mock 度量层：三行内容高 96 > 折叠上限 36 ⇒ 溢出（真实浏览器实测 375 宽下为 96/36）。
+    // Critical 修复点：折叠态容器必须有固定 max-height——旧实现 auto-height 下
+    // scrollHeight === clientHeight 恒等，检测恒 false（评审实测 101/101）
+    vi.spyOn(chipsRow, "scrollHeight", "get").mockReturnValue(96);
     act(() => {
       window.dispatchEvent(new Event("resize"));
     });
-    // 折叠态：chips 行不换行（flex-nowrap）+ 展开按钮出现
-    expect(chipsRow.className).toContain("flex-nowrap");
-    expect(screen.getByText("展开")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("展开"));
-    // 展开态：恢复换行 + 收起按钮
+    expect(chipsRow.style.maxHeight).toBe("36px");
+    expect(chipsRow.style.overflow).toBe("hidden");
+    // 保留 flex-wrap：折叠裁掉的是「第二行起」（纵向），不是行尾横向裁切——
+    // 旧实现 nowrap+overflow-hidden 曾把行尾按钮整体裁到屏外
+    expect(chipsRow.className).toContain("flex-wrap");
     expect(chipsRow.className).not.toContain("flex-nowrap");
-    expect(screen.getByText("收起")).toBeInTheDocument();
 
+    // Important 修复点：展开按钮是裁剪行的兄弟节点（结构上不可能被行内裁剪）且可见可点
+    const toggle = screen.getByText("展开").closest("button") as HTMLElement;
+    expect(chipsRow.contains(toggle)).toBe(false);
+    expect(toggle.parentElement?.contains(chipsRow)).toBe(true);
+    expect(toggle).toBeEnabled();
+
+    fireEvent.click(toggle);
+    // 展开态：解除裁剪、按钮变「收起」
+    expect(chipsRow.style.maxHeight).toBe("");
     fireEvent.click(screen.getByText("收起"));
-    expect(chipsRow.className).toContain("flex-nowrap");
+    expect(chipsRow.style.maxHeight).toBe("36px");
     expect(screen.getByText("展开")).toBeInTheDocument();
+  });
+
+  it("重测依赖 chip 集合签名：数量相同、内容变化时也重测（Minor ④ 回归锁）", async () => {
+    let poll = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/m/api/v1/host") return okHost(["claude", "codex", "dsh"]);
+        poll += 1;
+        // 首拍：claude + codex 有卡；二拍：claude 消失、dsh 出现 ⇒ 集合内容变、数量不变
+        return poll === 1
+          ? okSessionsWith([
+              chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
+              chipSession({ id: "x", agentType: "codex", lastActivityAt: "2026-09-15T09:00:00Z" }),
+            ])
+          : okSessionsWith([
+              chipSession({ id: "x", agentType: "codex", lastActivityAt: "2026-09-15T09:00:00Z" }),
+              chipSession({ id: "d", agentType: "dsh", lastActivityAt: "2026-09-15T08:00:00Z" }),
+            ]);
+      })
+    );
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    // 首拍集合 全部/Claude/Codex（3 个）；spy 安装在首拍渲染之后，计数基线另行确定
+    const chipsRow = screen.getByTestId("tool-chips");
+    let reads = 0;
+    vi.spyOn(chipsRow, "scrollHeight", "get").mockImplementation(() => {
+      reads += 1;
+      return 28;
+    });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    const baseline = reads; // 手工 resize 触发的确定读数
+    // 二拍：集合 全部/Codex/DSH（数量同为 3、内容不同）——旧实现依赖裸数量不重测
+    await advance(POLL_MS + 100);
+    expect(reads).toBeGreaterThan(baseline);
+  });
+
+  it("filter 残留回落：过滤工具在集合收敛中消失时回到「全部」（Minor ⑤ 回归锁）", async () => {
+    let poll = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/m/api/v1/host") return okHost(["claude", "codex"]);
+        poll += 1;
+        // 首拍：claude + codex 有卡；二拍：claude 会话全部结束
+        return poll === 1
+          ? okSessionsWith([
+              chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
+              chipSession({
+                id: "x",
+                agentType: "codex",
+                projectName: "proj-x",
+                lastActivityAt: "2026-09-15T09:00:00Z",
+              }),
+            ])
+          : okSessionsWith([
+              chipSession({
+                id: "x",
+                agentType: "codex",
+                projectName: "proj-x",
+                lastActivityAt: "2026-09-15T09:00:00Z",
+              }),
+            ]);
+      })
+    );
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    const chipsRow = screen.getByTestId("tool-chips");
+    const allChip = () => within(chipsRow).getByText("全部").closest("button") as HTMLElement;
+    fireEvent.click(within(chipsRow).getByText("Claude").closest("button") as HTMLElement);
+    expect(within(chipsRow).getByText("Claude").closest("button")).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    // 二拍：claude 卡消失 ⇒ chip 集合只剩余 codex。filter 残留会使看板停在空列表
+    // 且无对应 chip 可取消高亮 ⇒ 应回落「全部」
+    await advance(POLL_MS + 100);
+    expect(screen.queryByText("Claude")).not.toBeInTheDocument();
+    expect(allChip()).toHaveAttribute("aria-pressed", "true");
+    // 回落生效的证据：codex 卡可见（filter 残留则显示空态提示）
+    expect(screen.getByText("proj-x")).toBeInTheDocument();
   });
 });

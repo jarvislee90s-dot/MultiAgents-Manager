@@ -16,6 +16,14 @@ import type { AgentType, SessionsResponse } from "@/types/session";
 
 const POLL_MS = 3000;
 
+// P8e 折叠高度上限（溢出判定与裁剪样式的单一来源，fix round 1）：
+// 36px = 单行 chips（24px）+ 行纵距（12px）——恰容纳一行、第二行起点恰在 36px 被完全裁掉
+// （不留残影）。折叠态以此为固定 max-height（brief 明确要求）：auto-height 容器下
+// scrollHeight === clientHeight 恒等，溢出判定会恒 false（折叠死功能）。
+// 不变式（chips 行须用 gap-y-3）：chipHeight + rowGap ≥ 上限 ≥ chipHeight + paddingBottom，
+// 下界防宽屏单行被误裁，上界防折叠态露出第二行残影。字号增大时两边界同向放宽，仍成立
+const CHIPS_COLLAPSED_HEIGHT = 36;
+
 interface BoardProps {
   /** 首次成功拉到数据时回调（一次）：探测成功信号，App 由此把 paired null→true（已配对设备免重配） */
   onPaired: () => void;
@@ -37,7 +45,9 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
   // null = host 未到（竞态窗口）：chips 只显示「全部」，不猜全量八工具
   const [enabledTools, setEnabledTools] = useState<Set<string> | null>(null);
   const [filter, setFilter] = useState<ToolFilter>("all");
-  // P8e 多行折叠：chips 内容超一行时折叠为一行 + 展开/收起按钮（无溢出无按钮）
+  // P8e 多行折叠：chips 内容超一行时折叠为一行 + 展开/收起按钮（无溢出无按钮）。
+  // chipsExpanded 跨溢出周期保留（Minor ③ 行为与注释对齐）：溢出消失时按钮隐藏但展开态
+  // 不回写——内容本就放得下，保持展开无副作用；下次溢出时沿用用户上次的选择
   const [chipsOverflow, setChipsOverflow] = useState(false);
   const [chipsExpanded, setChipsExpanded] = useState(false);
   // 相对时长的基准时钟：随每拍轮询刷新（react-hooks/purity 禁止渲染期直接调 Date.now）
@@ -116,23 +126,35 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
     : [];
   const sortedCardTools = sortChipsByActivity(cardTools, data?.sessions ?? []);
 
-  // P8e 溢出测量：chips 行实际渲染高度 > 单行高度 ⇒ 折叠为可展开态。
-  // useLayoutEffect 在首帧布局后同步测量，避免「先折叠后闪烁」；依赖 chips 数量：
-  // host 晚到使 chips 从 1 个收敛为 N 个时重测（resize 之外的第二个测量时机，
-  // 否则竞态窗口内测得的「未溢出」会一直滞后到下次 resize——移动 PWA 上 resize 罕见）。
-  // jsdom 恒 0 → 不折叠（测试需 mock scrollHeight/clientHeight 后派发 resize 验证折叠分支）
+  // P8d filter 残留回落（Minor ⑤）：chips 集合随会话收敛，先前选中的工具可能整体消失
+  // （卡全结束）。残留 filter 会让看板停在空列表且无对应 chip 可取消高亮 ⇒ 回落「全部」。
+  // 依赖签名串做成员判断（工具 id 无逗号，split 为其精确逆运算），避免依赖数组身份
+  // 导致每拍空转；用 effect 而非渲染期 setState（react-hooks/purity）
+  const chipsSignature = sortedCardTools.join(",");
+  useEffect(() => {
+    if (filter === "all") return;
+    if (!chipsSignature.split(",").includes(filter)) setFilter("all");
+  }, [chipsSignature, filter]);
+
+  // P8e 溢出测量（fix round 1 重写，Critical）：判据 = 内容自然高度 > 折叠高度上限。
+  // 关键机理：容器在「未裁剪」时 scrollHeight 即内容自然高度；折叠后虽有 max-height 裁剪，
+  // scrollHeight 仍报告内容自然高度（真实浏览器实测：自然 96 / 裁剪后仍 96，clientHeight 才降为
+  // 36）——因此该判据在两种状态下给出同一答案，无循环依赖，折叠→展开→再折叠稳定。
+  // 旧实现用 nowrap+overflow-hidden 无固定高度：scrollHeight === clientHeight 恒等，
+  // 判定恒 false（评审实测 101/101），折叠加按钮形同虚设。
+  // 测量时机：useLayoutEffect（首帧布局后同步，免闪烁）+ resize + chips 集合签名变化
+  // （host 晚到使集合从 1 收敛为 N；签名而非裸数量——同数量不同集合也要重测，Minor ④）
   const chipsRowRef = useRef<HTMLDivElement>(null);
-  const chipCount = sortedCardTools.length + 1; // +1 = 「全部」
   useLayoutEffect(() => {
     const measure = () => {
       const el = chipsRowRef.current;
       if (!el) return;
-      setChipsOverflow(el.scrollHeight > el.clientHeight);
+      setChipsOverflow(el.scrollHeight > CHIPS_COLLAPSED_HEIGHT);
     };
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [chipCount]);
+  }, [chipsSignature]);
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-4 text-slate-200">
@@ -160,49 +182,57 @@ export default function Board({ onPaired, onUnpaired }: BoardProps) {
       )}
 
       {/* 工具过滤 chips（P8d/P8e）：受管∩有卡 + 全部，按活跃排序；溢出时折叠为一行。
-          data-testid 供测试精确定位（卡片主行也渲染工具名，全局文本匹配有歧义） */}
-      <div
-        ref={chipsRowRef}
-        data-testid="tool-chips"
-        className={`mb-3 flex items-center gap-2 pb-1 ${
-          chipsOverflow && !chipsExpanded
-            ? "flex-nowrap overflow-hidden" // 折叠态：压回一行，溢出部分隐藏
-            : "flex-wrap" // 展开态 / 无溢出：自然换行
-        }`}
-      >
-        <button
-          type="button"
-          onClick={() => setFilter("all")}
-          className={
-            filter === "all"
-              ? "shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-900"
-              : "shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400"
+          结构（fix round 1，Important）：展开/收起按钮是裁剪行的**兄弟节点**——
+          旧实现把按钮放在裁剪行内，折叠态横向溢出时按钮整体被裁到屏外不可达。
+          折叠只作用于 chips 行自身（max-height 纵向裁「第二行起」，保留 flex-wrap，
+          不再用 nowrap 横向裁行尾）。data-testid 供测试精确定位 */}
+      <div className="mb-3 flex items-start gap-2">
+        <div
+          ref={chipsRowRef}
+          data-testid="tool-chips"
+          className="flex min-w-0 flex-1 flex-wrap content-start items-center gap-x-2 gap-y-3"
+          style={
+            chipsOverflow && !chipsExpanded
+              ? { maxHeight: CHIPS_COLLAPSED_HEIGHT, overflow: "hidden" }
+              : undefined
           }
         >
-          全部
-        </button>
-        {sortedCardTools.map((tool) => {
-          // 品牌色 chip：选中态 = 品牌色实底 + 白字（八色均够深，白字对比度足够）；
-          // 未选中态 = 品牌色 12% 透明度淡化底（8 位 hex 追加 1F alpha，免 color-mix 的
-          // Tailwind v4 注册环节，选 style 内联为最简实现）+ 品牌色字
-          const brand = TOOL_BRAND_COLORS[tool];
-          const selected = filter === tool;
-          return (
-            <button
-              key={tool}
-              type="button"
-              onClick={() => setFilter(tool)}
-              className="shrink-0 rounded-full px-3 py-1 text-xs"
-              style={
-                selected
-                  ? { backgroundColor: brand, color: "#ffffff" }
-                  : { backgroundColor: `${brand}1F`, color: brand }
-              }
-            >
-              {TOOL_LABELS[tool]}
-            </button>
-          );
-        })}
+          <button
+            type="button"
+            aria-pressed={filter === "all"}
+            onClick={() => setFilter("all")}
+            className={
+              filter === "all"
+                ? "shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-900"
+                : "shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400"
+            }
+          >
+            全部
+          </button>
+          {sortedCardTools.map((tool) => {
+            // 品牌色 chip：选中态 = 品牌色实底 + 白字（八色均够深，白字对比度足够）；
+            // 未选中态 = 品牌色 12% 透明度淡化底（8 位 hex 追加 1F alpha，免 color-mix 的
+            // Tailwind v4 注册环节，选 style 内联为最简实现）+ 品牌色字
+            const brand = TOOL_BRAND_COLORS[tool];
+            const selected = filter === tool;
+            return (
+              <button
+                key={tool}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setFilter(tool)}
+                className="shrink-0 rounded-full px-3 py-1 text-xs"
+                style={
+                  selected
+                    ? { backgroundColor: brand, color: "#ffffff" }
+                    : { backgroundColor: `${brand}1F`, color: brand }
+                }
+              >
+                {TOOL_LABELS[tool]}
+              </button>
+            );
+          })}
+        </div>
         {chipsOverflow && (
           <button
             type="button"
