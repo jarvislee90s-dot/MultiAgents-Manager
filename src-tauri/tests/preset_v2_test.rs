@@ -1069,10 +1069,12 @@ fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
         plan.disable_mam
     );
 
-    // 清场：禁用 assignment、移除真目录与快照
+    // 清场：禁用 assignment、移除真目录与快照，补删 SSOT 目录与 extensions 行
     database::destroy_base_snapshot("claude").unwrap();
     let _ = disable_skill_for_tool("v2m1-drift-x", "claude");
     let _ = std::fs::remove_dir_all(&drift);
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = database::delete_extension("skill-v2m1-drift-x");
 }
 
 /// Patch 5 修改 2（评审 Minor 1）：首次应用的瞬态（快照已存、active 未设）
@@ -1107,4 +1109,98 @@ fn recover_orphans_treats_unactivated_snapshot_as_in_session() {
     database::destroy_base_snapshot("codex").unwrap();
     stash::restore_all_for_tool("codex");
     assert!(codex_dir.join("v2m1-tr-native/SKILL.md").exists());
+}
+
+/// Patch 6（终审 Critical 数据丢失修复）：恢复对账循环的漂移防护——
+/// 快照内任意 origin 的项都不属于「会话新增」，按 native 记录的漂移项
+/// （账本 enabled + 真目录）恢复后真目录已回移，走 disable 会把真目录删掉
+#[test]
+fn restore_roundtrip_preserves_drifted_real_dir() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::enable_skill_for_tool;
+    use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
+
+    // 漂移现场：skill-v2m1-dl-x 账本 enabled + 同名真目录（有内容）
+    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-dl-x");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-dl-x".into(),
+        kind: "skill".into(),
+        name: "v2m1-dl-x".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m1-dl-x", "claude").unwrap();
+    let drift_dir = dirs::home_dir().unwrap().join(".claude/skills/v2m1-dl-x");
+    std::fs::remove_file(&drift_dir).unwrap();
+    std::fs::create_dir_all(&drift_dir).unwrap();
+    std::fs::write(drift_dir.join("SKILL.md"), "用户的真实内容").unwrap();
+
+    // 预设只含另一项（不含漂移项）→ 漂移项按 native 暂存
+    let ssot_a = dirs::home_dir().unwrap().join(".mam/skills/v2m1-dl-a");
+    std::fs::create_dir_all(&ssot_a).unwrap();
+    std::fs::write(ssot_a.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-dl-a".into(),
+        kind: "skill".into(),
+        name: "v2m1-dl-a".into(),
+        description: None,
+        source_path: ssot_a.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    let pid =
+        database::create_preset("v2m1-dl", &[("skill-v2m1-dl-a".into(), "skill".into())]).unwrap();
+    apply_preset(&pid, "claude").unwrap();
+    assert!(
+        !drift_dir.exists()
+            && database::unrestored_stash(Some("claude"))
+                .iter()
+                .any(|e| e.skill_name == "v2m1-dl-x"),
+        "前置：漂移真目录应已被独占清扫暂存"
+    );
+
+    // 恢复默认：真目录回移 = 基底态两项并存（账本 enabled + 真目录）
+    restore_tool("claude").unwrap();
+
+    assert!(
+        drift_dir.join("SKILL.md").exists()
+            && std::fs::read_to_string(drift_dir.join("SKILL.md")).unwrap() == "用户的真实内容",
+        "漂移真目录必须原样保留（当前实现会被 disable 循环删除）"
+    );
+    let assignments = database::list_assignments("claude");
+    assert!(
+        assignments
+            .iter()
+            .any(|a| a.extension_id == "skill-v2m1-dl-x" && a.enabled),
+        "账本 enabled 是基底态的一部分，不得被停用"
+    );
+    assert!(
+        database::get_base_snapshot("claude").is_none(),
+        "恢复后快照销毁（会话级生命周期不变）"
+    );
+
+    // 清场
+    let _ = database::upsert_assignment("skill-v2m1-dl-x", "claude", false, "missing");
+    let _ = database::upsert_assignment("skill-v2m1-dl-a", "claude", false, "missing");
+    let _ = std::fs::remove_dir_all(&drift_dir);
+    let _ = std::fs::remove_dir_all(&ssot_a);
 }

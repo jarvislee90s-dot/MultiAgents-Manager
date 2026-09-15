@@ -288,10 +288,18 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
         }
     }
     for (id, kind) in &current {
-        if !target.iter().any(|(tid, _)| tid == id) {
-            if let Err(e) = disable_one(id, kind) {
-                out.conflicts.push(format!("{}: 停用失败 {}", id, e));
-            }
+        if target.iter().any(|(tid, _)| tid == id) {
+            continue;
+        }
+        // 漂移防护（终审 Critical）：快照内任意 origin 的项都不属于「会话新增」——
+        // 按 native 记录的漂移项（账本 enabled + 真目录）恢复后真目录已回移，
+        // 走 disable 会让 remove_link 删掉真目录（数据丢失）。基底态=两项并存。
+        // 漂移本身的治理属 M2 对账体系
+        if base_items.iter().any(|i| &i.extension_id == id) {
+            continue;
+        }
+        if let Err(e) = disable_one(id, kind) {
+            out.conflicts.push(format!("{}: 停用失败 {}", id, e));
         }
     }
 
