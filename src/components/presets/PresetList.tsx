@@ -310,7 +310,8 @@ function PresetCard({
       {preset.description && (
         <p className="text-muted-foreground mt-0.5 truncate text-[11px]">{preset.description}</p>
       )}
-      {/* 预设×工具开关：checked 由 list_active_presets 下发；items 含工具不支持的资源类型 → disabled + title。
+      {/* 预设×工具开关：checked 由 list_active_presets 下发；items 含工具不支持的资源类型 → disabled + title
+          （控制器裁决：门控只挡「开」不挡「关」——已激活开关保持可操作以走 restore 恢复路径，spec §5.5/§7.3）。
           整行阻断冒泡，避免误触整卡点击（T7 的 onEdit） */}
       {switchTools.length > 0 && (
         <div
@@ -320,17 +321,19 @@ function PresetCard({
           {switchTools.map((tool) => {
             const checked = activePresets.find((a) => a.toolId === tool.id)?.presetId === preset.id;
             const gated = preset.items.some((item) => !kindSupported(tool, item.kind));
+            // disabled 仅作用于「未激活 + 门控」组合；已激活开关恒可关（关 = 恢复默认，安全动作）
+            const disabled = gated && !checked;
             return (
               <span
                 key={tool.id}
                 className="flex items-center gap-1 text-xs"
-                title={gated ? `${tool.label}: ${t("resources.kindNotSupported")}` : undefined}
+                title={disabled ? `${tool.label}: ${t("resources.kindNotSupported")}` : undefined}
               >
                 <ToolIcon toolId={tool.id} size={12} />
                 <span className="text-muted-foreground">{tool.label}</span>
                 <Switch
                   checked={checked}
-                  disabled={gated}
+                  disabled={disabled}
                   onCheckedChange={(next) => onSwitch(preset.id, tool.id, next)}
                 />
               </span>
