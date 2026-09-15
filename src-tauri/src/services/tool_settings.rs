@@ -100,12 +100,13 @@ pub fn apply_tool_changes_with(
         if !c.enabled {
             // 预设 v2（spec §5.4）：取消勾选前先恢复基底——若有激活预设，
             // 暂存的原生技能与独占停用项必须先归位，再做 W5 还原清理。
-            // 恢复失败（DB 级）→ 不清理、不落 disabled，工具保持启用可重试；
-            // Ok（conflicts 是软性报告）→ 照常清理（评审裁决 2）
+            // 恢复失败（Err 仅发生在文件已归位后的快照销账步，DB 级）→ 不清理、
+            // 不落 disabled，工具保持启用，重试可愈；Ok（conflicts 是软性报告）
+            // → 照常清理（评审裁决 2 + Minor 2 文案精度）
             if let Err(e) = restore_preset(&c.tool_id) {
                 log::warn!("取消勾选 {} 前恢复基底失败，工具保持启用: {}", c.tool_id, e);
                 result.skipped_kept.push(format!(
-                    "{}: 预设恢复失败，工具保持启用（可重试）",
+                    "{}: 预设基底已还原但快照销账失败（陈旧基底），工具保持启用，重试可愈",
                     c.tool_id
                 ));
                 continue;

@@ -31,7 +31,8 @@ pub fn scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord> {
     }
 
     // 2) 原生技能：主 skill 目录下的真目录（非符号链接）。MAM 启用项在目录里是链接，
-    //    与真目录天然不重叠；链接穿透套件（父目录是链接）不在此层出现
+    //    与真目录正常不重叠；链接穿透套件（父目录是链接）不在此层出现
+    let mut native_names: Vec<String> = Vec::new();
     if let Some(dir) = crate::adapter::primary_skill_dir(tool_id) {
         if dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -44,6 +45,7 @@ pub fn scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord> {
                             if name == "subagents" {
                                 continue;
                             }
+                            native_names.push(name.to_string());
                             items.push(BaseSnapshotItemRecord {
                                 extension_id: format!("skill-{}", name),
                                 kind: "skill".to_string(),
@@ -55,6 +57,26 @@ pub fn scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord> {
             }
         }
     }
+
+    // 3) 账本-磁盘漂移去重（Patch 5，设计裁决：磁盘实况优先）：W5 还原内容后
+    //    名册未销、或用户手动删链放真目录时，同一 skill 会同时命中 MAM 条目与
+    //    原生条目，快照 PK 冲突。剔除 MAM 条目、保留 native 条目（仅限 skill 类
+    //    且与原生真目录同名的项），快照与后续清扫均按磁盘实况处置
+    items.retain(|it| {
+        let drifted = it.origin == "mam"
+            && it.kind == "skill"
+            && it
+                .extension_id
+                .strip_prefix("skill-")
+                .is_some_and(|name| native_names.iter().any(|n| n == name));
+        if drifted {
+            log::warn!(
+                "[漂移L2] {}：账本启用但磁盘为真目录，快照按磁盘实况记录",
+                it.extension_id
+            );
+        }
+        !drifted
+    });
 
     items
 }

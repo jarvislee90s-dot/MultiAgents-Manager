@@ -867,8 +867,8 @@ fn apply_tool_changes_keeps_tool_enabled_when_preset_restore_fails() {
         result
             .skipped_kept
             .iter()
-            .any(|s| s.contains("claude") && s.contains("预设恢复失败")),
-        "skipped_kept 应含提示: {:?}",
+            .any(|s| s.contains("claude") && s.contains("快照销账失败") && s.contains("重试可愈")),
+        "skipped_kept 应含精确文案: {:?}",
         result.skipped_kept
     );
     // W5 清理未执行：工具目录里仍是 MAM 链接（未被还原/未被动过）
@@ -1001,4 +1001,110 @@ fn save_mcp_config_preserves_user_metadata() {
         Some("用户备注"),
         "重保存不得抹掉用户元数据"
     );
+}
+
+/// Patch 5 修改 1（设计裁决：磁盘实况优先）：账本 enabled 但磁盘为真目录的
+/// 漂移态，拍基底不再 UNIQUE 崩——剔除 MAM 条目、按 native 记录恰一条，
+/// sweep 对它的处置走「暂存」而非「停用」
+#[test]
+fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{snapshot, sweep};
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    // 漂移现场：账本 enabled + 同名真目录（W5 还原内容后名册未销的形态）
+    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-drift-x");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-drift-x".into(),
+        kind: "skill".into(),
+        name: "v2m1-drift-x".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m1-drift-x", "claude").unwrap();
+    let drift = dirs::home_dir()
+        .unwrap()
+        .join(".claude/skills/v2m1-drift-x");
+    std::fs::remove_file(&drift).unwrap();
+    std::fs::create_dir_all(&drift).unwrap();
+    std::fs::write(drift.join("SKILL.md"), "real").unwrap();
+
+    // 当前实现：MAM 条目 + 原生条目同 ext_id → 拍基底 UNIQUE 崩（红）
+    snapshot::capture_base_snapshot("claude").unwrap();
+    let (_, items) = database::get_base_snapshot("claude").unwrap();
+    let hits: Vec<_> = items
+        .iter()
+        .filter(|i| i.extension_id == "skill-v2m1-drift-x")
+        .collect();
+    assert_eq!(hits.len(), 1, "漂移项快照恰一条: {:?}", items);
+    assert_eq!(hits[0].origin, "native", "按磁盘实况记为 native");
+
+    // sweep 计划：走暂存（native 路径）而非停用
+    let plan = sweep::plan_sweep("claude", &[]);
+    assert!(
+        plan.stash_native.contains(&"v2m1-drift-x".to_string()),
+        "漂移项应进暂存计划: {:?}",
+        plan.stash_native
+    );
+    assert!(
+        !plan
+            .disable_mam
+            .iter()
+            .any(|(id, _)| id == "skill-v2m1-drift-x"),
+        "漂移项不得进停用计划: {:?}",
+        plan.disable_mam
+    );
+
+    // 清场：禁用 assignment、移除真目录与快照
+    database::destroy_base_snapshot("claude").unwrap();
+    let _ = disable_skill_for_tool("v2m1-drift-x", "claude");
+    let _ = std::fs::remove_dir_all(&drift);
+}
+
+/// Patch 5 修改 2（评审 Minor 1）：首次应用的瞬态（快照已存、active 未设）
+/// 也视为会话中，孤儿恢复不得回移——否则启动线程会拆掉进行中的应用
+#[test]
+fn recover_orphans_treats_unactivated_snapshot_as_in_session() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::stash;
+
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    std::fs::create_dir_all(codex_dir.join("v2m1-tr-native")).unwrap();
+    std::fs::write(codex_dir.join("v2m1-tr-native/SKILL.md"), "n").unwrap();
+    stash::stash_native_skill("codex", "v2m1-tr-native", &codex_dir.join("v2m1-tr-native"))
+        .unwrap();
+    // 瞬态：快照在、active 未设（apply 的拍基底与设激活之间）
+    database::save_base_snapshot("codex", None, &[]).unwrap();
+
+    let n = stash::recover_orphans();
+    assert_eq!(n, 0, "瞬态期不得回移");
+    assert!(
+        stash::stash_dir("codex").join("v2m1-tr-native").is_dir(),
+        "瞬态期暂存项应保留"
+    );
+    assert_eq!(database::unrestored_stash(Some("codex")).len(), 1);
+
+    // 清场：销快照（守卫解除）后回移，恢复现场
+    database::destroy_base_snapshot("codex").unwrap();
+    stash::restore_all_for_tool("codex");
+    assert!(codex_dir.join("v2m1-tr-native/SKILL.md").exists());
 }

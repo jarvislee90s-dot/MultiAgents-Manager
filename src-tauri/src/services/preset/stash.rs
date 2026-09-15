@@ -80,11 +80,11 @@ pub fn restore_all_for_tool(tool_id: &str) -> (Vec<String>, Vec<String>) {
     (restored, conflicts)
 }
 
-/// 工具是否有激活中的预设会话（快照在且 active 非空）。
-/// 孤儿恢复不得触碰会话进行中的工具——会话中途重启时，暂存是合法状态，
-/// 静默回移会拆掉独占模式（评审裁决 1；spec §3.2 快照生命周期）
+/// 工具是否处于预设会话中（快照行存在即算——含首次应用「快照已存、active 未设」
+/// 的瞬态，防止启动线程在该窗口回移暂存、拆掉进行中的应用；评审 Minor 1。
+/// 「快照在而 active 为空」的崩溃残留由不变量检查器标记，见 check_snapshot_invariants）
 fn tool_in_active_session(tool_id: &str) -> bool {
-    matches!(database::get_base_snapshot(tool_id), Some((Some(_), _)))
+    database::get_base_snapshot(tool_id).is_some()
 }
 
 /// 启动孤儿恢复（spec §5.3 + 评审裁决 1）三段对账：
