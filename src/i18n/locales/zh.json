@@ -46,7 +46,10 @@
     "show": "显示窗口",
     "quit": "退出",
     "petShow": "显示桌宠",
-    "petHide": "隐藏桌宠"
+    "petHide": "隐藏桌宠",
+    "presetsLabel": "预设",
+    "on": "开",
+    "off": "关"
   },
   "updater": {
     "checkForUpdates": "检查更新",
@@ -273,6 +276,35 @@
       "statusError": "失败",
       "runFailed": "操作执行失败：{{detail}}",
       "close": "关闭"
+    },
+    "binding": {
+      "editTitle": "编辑专属绑定",
+      "tools": "允许工具",
+      "reason": "专属原因",
+      "reasonPlaceholder": "为什么专属？（如：依赖 codex App + computer-use MCP）",
+      "save": "保存",
+      "clear": "清除绑定"
+    },
+    "resident": {
+      "toggle": "常驻锁（预设应用时豁免停用/暂存）"
+    },
+    "health": {
+      "title": "一致性体检",
+      "runNow": "立即体检",
+      "ok": "一切正常，未发现漂移或异常",
+      "L1": "缺链",
+      "L2": "占位",
+      "L3": "多链",
+      "L4": "外链",
+      "fixA": "以账本为准修磁盘",
+      "fixB": "以磁盘为准回写账本",
+      "fixC": "暂不处理",
+      "needsManual": "需人工处理",
+      "batchA": "全部按账本修磁盘",
+      "batchB": "全部按磁盘回写账本",
+      "invariantBroken": "快照不变量违背条目",
+      "stashPending": "残留暂存条目",
+      "suggestion": "待确认专属建议"
     }
   },
   "mcp": {
@@ -306,7 +338,35 @@
     "applyTo": "应用预设组到 {{tool}}",
     "compatibleCount": "兼容的资源 ({{n}})",
     "incompatibleCount": "不兼容的资源 ({{n}})",
-    "confirmApply": "确认应用 ({{n}} 项)"
+    "confirmApply": "确认应用 ({{n}} 项)",
+    "universalSection": "通用预设",
+    "toolScopedSection": "工具私有预设",
+    "description": "描述",
+    "descriptionPlaceholder": "描述这个预设组的用途（可选）",
+    "edit": "编辑",
+    "editTitle": "编辑预设组",
+    "type": "类型",
+    "typeUniversal": "通用",
+    "typeTool": "工具私有",
+    "boundTool": "绑定工具",
+    "addItem": "添加项",
+    "removeItem": "移除项",
+    "nativeSkills": "原生技能",
+    "exclusiveBadge": "专属",
+    "residentBadge": "常驻",
+    "switchToToolScopedHint": "所选包含专属资源，建议转为工具私有预设",
+    "activeOn": "应用中",
+    "saveFailedActive": "该预设组正在应用中，无法保存修改；请先关闭后再试",
+    "cannotDeleteActive": "该预设组正在应用中，无法删除；请先关闭后再试",
+    "whiteboardWarning": "白板模式：本次应用不会启用任何资源，仅停用/暂存现有资源（常驻项豁免）",
+    "applyResult": "已应用 {{n}} 项，停用 {{d}} 项，暂存 {{s}} 项",
+    "restoreDone": "已恢复 MAM 资源 {{m}} 项、原生资源 {{n}} 项",
+    "restoreConflicts": "部分资源未能恢复",
+    "filteredCount": "被过滤 ({{n}})",
+    "toStashCount": "将暂存 ({{n}})",
+    "toDisableCount": "将停用 ({{n}})",
+    "residentExemptCount": "常驻豁免 ({{n}})",
+    "saveAsPreset": "存为预设"
   },
   "screenshot": {
     "saved": "截图已保存: {{path}}",

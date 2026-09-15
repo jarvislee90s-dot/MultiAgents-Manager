@@ -143,10 +143,10 @@ export const useResourceBindingsQuery = () => useQuery({ queryKey: BINDINGS_KEY,
 - `tray` 扩展：`presetsLabel`、`on`、`off`
 
 **验收条件：**
-- [ ] 一次性 node 脚本比对 zh/en 叶子路径集合：0 差异（命令贴进报告，不留测试文件）
-- [ ] `pnpm lint` 绿
+- [x] 一次性 node 脚本比对 zh/en 叶子路径集合：0 差异（命令贴进报告，不留测试文件）
+- [x] `pnpm lint` 绿
 
-- [ ] **Step 1: zh 写入** → **Step 2: en 成对** → **Step 3: parity 自检** → **Step 4: Commit** `chore(preset-v2): i18n keys zh/en for M2+M3`
+- [x] **Step 1: zh 写入** → **Step 2: en 成对** → **Step 3: parity 自检** → **Step 4: Commit** `chore(preset-v2): i18n keys zh/en for M2+M3`
 
 ## Phase B · 预设区 v2
 

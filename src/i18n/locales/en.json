@@ -46,7 +46,10 @@
     "show": "Show Window",
     "quit": "Quit",
     "petShow": "Show Pet",
-    "petHide": "Hide Pet"
+    "petHide": "Hide Pet",
+    "presetsLabel": "Presets",
+    "on": "On",
+    "off": "Off"
   },
   "updater": {
     "checkForUpdates": "Check for Updates",
@@ -273,6 +276,35 @@
       "statusError": "Failed",
       "runFailed": "Operation failed: {{detail}}",
       "close": "Close"
+    },
+    "binding": {
+      "editTitle": "Edit Exclusive Binding",
+      "tools": "Allowed tools",
+      "reason": "Exclusive reason",
+      "reasonPlaceholder": "Why is this exclusive? (e.g. depends on codex app + computer-use MCP)",
+      "save": "Save",
+      "clear": "Clear binding"
+    },
+    "resident": {
+      "toggle": "Resident lock (exempt from preset disable/stash)"
+    },
+    "health": {
+      "title": "Health Check",
+      "runNow": "Run health check now",
+      "ok": "All good — no drift or issues found",
+      "L1": "Missing link",
+      "L2": "Real-dir placeholder",
+      "L3": "Untracked link",
+      "L4": "External link",
+      "fixA": "Fix disk (ledger wins)",
+      "fixB": "Update ledger (disk wins)",
+      "fixC": "Skip for now",
+      "needsManual": "Needs manual handling",
+      "batchA": "Fix all (ledger wins)",
+      "batchB": "Update all (disk wins)",
+      "invariantBroken": "Snapshot invariant violations",
+      "stashPending": "Leftover stash entries",
+      "suggestion": "Pending exclusive suggestions"
     }
   },
   "mcp": {
@@ -306,7 +338,35 @@
     "applyTo": "Apply preset to {{tool}}",
     "compatibleCount": "Compatible ({{n}})",
     "incompatibleCount": "Incompatible ({{n}})",
-    "confirmApply": "Apply ({{n}})"
+    "confirmApply": "Apply ({{n}})",
+    "universalSection": "Universal presets",
+    "toolScopedSection": "Tool-scoped presets",
+    "description": "Description",
+    "descriptionPlaceholder": "Describe what this preset is for (optional)",
+    "edit": "Edit",
+    "editTitle": "Edit Preset",
+    "type": "Type",
+    "typeUniversal": "Universal",
+    "typeTool": "Tool-scoped",
+    "boundTool": "Bound tool",
+    "addItem": "Add item",
+    "removeItem": "Remove item",
+    "nativeSkills": "Native skills",
+    "exclusiveBadge": "Exclusive",
+    "residentBadge": "Resident",
+    "switchToToolScopedHint": "Selection includes exclusive resources — consider switching to a tool-scoped preset",
+    "activeOn": "Active",
+    "saveFailedActive": "This preset is active — turn it off before saving changes",
+    "cannotDeleteActive": "This preset is active — turn it off before deleting",
+    "whiteboardWarning": "Whiteboard mode: this apply enables nothing — it only disables/stashes existing resources (resident items are exempt)",
+    "applyResult": "Applied {{n}}, disabled {{d}}, stashed {{s}}",
+    "restoreDone": "Restored {{m}} MAM resource(s) and {{n}} native resource(s)",
+    "restoreConflicts": "Some resources could not be restored",
+    "filteredCount": "Filtered out ({{n}})",
+    "toStashCount": "To stash ({{n}})",
+    "toDisableCount": "To disable ({{n}})",
+    "residentExemptCount": "Resident-exempt ({{n}})",
+    "saveAsPreset": "Save as Preset"
   },
   "screenshot": {
     "saved": "Screenshot saved: {{path}}",
