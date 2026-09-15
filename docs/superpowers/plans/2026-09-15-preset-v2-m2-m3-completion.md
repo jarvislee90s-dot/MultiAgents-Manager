@@ -286,11 +286,11 @@ const onSwitch = async (presetId: string, toolId: string, next: boolean) => {
 **Interfaces:** Consumes `setToolResident/listToolResidents`（新 query `["tool-residents", toolId]` 写入 bindings.ts）。Produces：每资源行 × 每工具一枚锁开关（title=`resources.resident.toggle`），on 时加 `presets.residentBadge` 徽标。
 
 **验收条件：**
-- [ ] `pnpm lint && pnpm build` 绿
+- [x] `pnpm lint && pnpm build` 绿
 - [ ] dev 目验：开关持久化（刷新仍 on）；invoke args 正确（toolId/extensionId/resident）
-- [ ] Rust 侧已有常驻豁免测试护航，前端仅传参
+- [x] Rust 侧已有常驻豁免测试护航，前端仅传参
 
-- [ ] **Step 1: 实现** → **Step 2: 门禁 + Commit** `feat(preset-v2): per-tool resident lock switch on resource cards`
+- [x] **Step 1: 实现** → **Step 2: 门禁 + Commit** `feat(preset-v2): per-tool resident lock switch on resource cards`
 
 ## Phase D · 账本-磁盘对账（spec §13）
 

@@ -35,10 +35,16 @@ import {
 } from "@/lib/api/resource";
 import { useSsotResourcesQuery, SSOT_RESOURCES_KEY } from "@/lib/query/queries/resources";
 import { useEnabledToolsQuery, type EnabledTool } from "@/lib/query/queries/tools";
-import { useResourceBindingsQuery, BINDINGS_KEY } from "@/lib/query/queries/bindings";
+import {
+  useResourceBindingsQuery,
+  useToolResidentsQuery,
+  BINDINGS_KEY,
+  TOOL_RESIDENTS_KEY,
+} from "@/lib/query/queries/bindings";
 import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
 import { uninstallResource } from "@/lib/api/manifest";
-import { deleteResourceBinding, setResourceBinding } from "@/lib/api/preset";
+import { deleteResourceBinding, setResourceBinding, setToolResident } from "@/lib/api/preset";
+import { Switch } from "@/components/ui/switch";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
 import type { ResourceBinding, SsotResource } from "@/types/extension";
 
@@ -140,6 +146,47 @@ type PendingDisable = {
   displayName: string;
   targetType: "symlink" | "native";
 };
+
+/** 常驻锁开关（spec §7.4）：每资源行 × 每工具一枚，紧邻启停按钮。
+ *  on = 该 (tool, extension) 进入常驻豁免名单——预设应用时免停用/免暂存；
+ *  豁免语义在 Rust 侧实现并有测试护航，前端仅传参。
+ *  判定走 useToolResidentsQuery（["tool-residents", toolId]）；写入后失效该键回读，
+ *  checked 始终以 query 数据为准，失败 toast 后状态自然回弹，无需本地 optimistic。 */
+function ResidentLockSwitch(props: { toolId: string; extensionId: string }) {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const { data: residents = [] } = useToolResidentsQuery(props.toolId);
+  const resident = residents.includes(props.extensionId);
+  // 写入中禁用开关防连点
+  const [saving, setSaving] = useState(false);
+  const onToggle = async (next: boolean) => {
+    setSaving(true);
+    try {
+      await setToolResident(props.toolId, props.extensionId, next);
+      await qc.invalidateQueries({ queryKey: [...TOOL_RESIDENTS_KEY, props.toolId] });
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <span className="flex items-center gap-1">
+      <Switch
+        checked={resident}
+        disabled={saving}
+        title={t("resources.resident.toggle")}
+        aria-label={t("resources.resident.toggle")}
+        onCheckedChange={onToggle}
+      />
+      {resident && (
+        <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-0.5 text-[9px] leading-none text-emerald-600 dark:text-emerald-400">
+          {t("presets.residentBadge")}
+        </span>
+      )}
+    </span>
+  );
+}
 
 export function ResourceByKindView() {
   const { t } = useTranslation();
@@ -655,17 +702,23 @@ export function ResourceByKindView() {
                       }
                       const enabled = skill.enabledTools.includes(tool.id);
                       return (
-                        <Button
-                          key={tool.id}
-                          variant={enabled ? "default" : "ghost"}
-                          size="sm"
-                          className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
-                          title={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
-                          onClick={() => handleSkillToggle(skill.name, tool.id, enabled)}
-                        >
-                          <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                          {tool.label}
-                        </Button>
+                        <span key={tool.id} className="flex items-center gap-1">
+                          <Button
+                            variant={enabled ? "default" : "ghost"}
+                            size="sm"
+                            className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            title={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
+                            onClick={() => handleSkillToggle(skill.name, tool.id, enabled)}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                          {/* 常驻锁：紧邻启停按钮（spec §7.4） */}
+                          <ResidentLockSwitch
+                            toolId={tool.id}
+                            extensionId={bindingKey("skill", skill.name)}
+                          />
+                        </span>
                       );
                     })}
                   </div>
@@ -787,16 +840,22 @@ export function ResourceByKindView() {
                       }
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
-                        <Button
-                          key={tool.id}
-                          variant={enabled ? "default" : "ghost"}
-                          size="sm"
-                          className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
-                          onClick={() => handleToggleMcp(mcp.name, tool.id, !enabled)}
-                        >
-                          <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                          {tool.label}
-                        </Button>
+                        <span key={tool.id} className="flex items-center gap-1">
+                          <Button
+                            variant={enabled ? "default" : "ghost"}
+                            size="sm"
+                            className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            onClick={() => handleToggleMcp(mcp.name, tool.id, !enabled)}
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                          {/* 常驻锁：紧邻启停按钮（spec §7.4） */}
+                          <ResidentLockSwitch
+                            toolId={tool.id}
+                            extensionId={bindingKey("mcp", mcp.name)}
+                          />
+                        </span>
                       );
                     })}
                   </div>
@@ -904,23 +963,29 @@ export function ResourceByKindView() {
                       }
                       const enabled = plugin.enabledTools.includes(tool.id);
                       return (
-                        <Button
-                          key={tool.id}
-                          variant={enabled ? "default" : "ghost"}
-                          size="sm"
-                          className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
-                          onClick={() =>
-                            handleTogglePlugin(
-                              plugin.name,
-                              tool.id,
-                              !enabled,
-                              plugin.pluginType ?? "file"
-                            )
-                          }
-                        >
-                          <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                          {tool.label}
-                        </Button>
+                        <span key={tool.id} className="flex items-center gap-1">
+                          <Button
+                            variant={enabled ? "default" : "ghost"}
+                            size="sm"
+                            className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            onClick={() =>
+                              handleTogglePlugin(
+                                plugin.name,
+                                tool.id,
+                                !enabled,
+                                plugin.pluginType ?? "file"
+                              )
+                            }
+                          >
+                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+                            {tool.label}
+                          </Button>
+                          {/* 常驻锁：紧邻启停按钮（spec §7.4） */}
+                          <ResidentLockSwitch
+                            toolId={tool.id}
+                            extensionId={bindingKey("plugin", plugin.name)}
+                          />
+                        </span>
                       );
                     })}
                   </div>
