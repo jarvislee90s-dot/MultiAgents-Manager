@@ -119,6 +119,12 @@ export function PresetEditDialog({
     return m;
   }, [bindings]);
 
+  // 原生项 id 集合：切通用剪除选中键 + 保存兜底过滤共用（spec §3.3 通用 = 仅 MAM 资源）
+  const nativeIds = useMemo(
+    () => new Set(presetExtensions.filter((e) => e.isNative).map((e) => e.id)),
+    [presetExtensions]
+  );
+
   /** 专属资源判定：存在 binding 且 exclusiveTools 非空（通用模式徽标 + 转类型提示的数据源） */
   const isExclusive = (extensionId: string): boolean =>
     (bindingById.get(extensionId)?.exclusive.length ?? 0) > 0;
@@ -182,7 +188,11 @@ export function PresetEditDialog({
       return;
     }
     if (scope === "tool" && !boundTool) return;
-    const items = [...selected].map(parseItemKey);
+    // 兜底（双保险）：通用预设仅 MAM 资源——即使 selected 残留原生键（如未来新入口漏剪），
+    // 保存前也按 scope 再次滤除（final review Finding 2）
+    const items = [...selected]
+      .map(parseItemKey)
+      .filter(([id]) => scope !== "universal" || !nativeIds.has(id));
     try {
       setSaving(true);
       if (preset) {
@@ -237,7 +247,16 @@ export function PresetEditDialog({
                 type="radio"
                 name="preset-scope"
                 checked={scope === "universal"}
-                onChange={() => setScope("universal")}
+                onChange={() => {
+                  setScope("universal");
+                  // 切通用即剪除原生选中键（spec §3.3 通用 = 仅 MAM 资源）：原生组随之隐藏，
+                  // 但 selected 里的残留键不可见仍会随保存泄漏进「通用」预设（final review Finding 2）
+                  setSelected((prev) => {
+                    const s = new Set<string>();
+                    for (const k of prev) if (!nativeIds.has(parseItemKey(k)[0])) s.add(k);
+                    return s;
+                  });
+                }}
               />
               {t("presets.typeUniversal")}
             </label>

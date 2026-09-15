@@ -124,7 +124,9 @@ export function HealthCheckCard() {
       const fixed = outcomes.filter((o) => o.fixed).length;
       const nextManual = new Set(manual);
       for (const o of outcomes) {
-        const m = /^(\S+) @ (\S+)/.exec(o.message);
+        // message 格式 "{ext_id} @ {tool_id}: {detail}"（reconcile.rs where_at + detail 后缀）；
+        // 正则必须锚定 detail 冒号：不锚定时 \S+ 贪婪吞掉冒号产出 "codex:"，永不等于行键的 "codex"
+        const m = /^(\S+) @ (\S+):/.exec(o.message);
         if (o.needsManual && m) nextManual.add(`${m[2]}|${m[1]}`);
       }
       setManual(nextManual);
