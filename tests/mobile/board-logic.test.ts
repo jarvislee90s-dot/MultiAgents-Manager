@@ -229,6 +229,31 @@ describe("board-logic 跃迁展示（M3 Task 6）", () => {
     expect(before.lastMessage).toBeNull();
   });
 
+  it("applyTransition：ev.lastMessage 为 null 时不覆盖既有消息预览（空事件不清空摘要）", () => {
+    // 评审 Important：watcher 的跃迁事件可能不带消息（lastMessage=null）——
+    // 此时只更新 status，既有预览原样保留；status 仍照常更新
+    const before = makeSession({
+      id: "s1",
+      status: "processing",
+      lastMessage: "既有预览",
+      lastActivityAt: "t",
+    });
+    const out = applyTransition([before], makeTransition({ lastMessage: null }));
+    expect(out[0].status).toBe("waiting"); // 状态照常更新
+    expect(out[0].lastMessage).toBe("既有预览"); // 预览不被 null 抹掉
+  });
+
+  it("applyTransition：ev.lastMessage 为非 null 时正常覆盖既有预览（既有口径保持）", () => {
+    const before = makeSession({
+      id: "s1",
+      status: "processing",
+      lastMessage: "旧消息",
+      lastActivityAt: "t",
+    });
+    const out = applyTransition([before], makeTransition({ lastMessage: "新消息" }));
+    expect(out[0].lastMessage).toBe("新消息");
+  });
+
   it("applyTransition：跨工具撞 id 不误命中（键取 (工具, id) 二元组，同 watcher diff 口径）", () => {
     const input = [
       makeSession({ id: "shared", agentType: "claude", status: "idle", lastActivityAt: "t" }),

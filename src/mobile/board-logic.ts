@@ -180,7 +180,10 @@ export function applyTransition(sessions: Session[], ev: TransitionEvent): Sessi
   const idx = sessions.findIndex((s) => s.agentType === ev.agentType && s.id === ev.sessionId);
   if (idx === -1) return sessions;
   const next = sessions.slice();
-  next[idx] = { ...next[idx], status: ev.to, lastMessage: ev.lastMessage };
+  // lastMessage 空值保护（评审 Important 修复）：watcher 的跃迁事件可能不带消息
+  // （lastMessage=null）——此时只更新 status，既有预览原样保留（null 抹掉摘要会让
+  // 卡片副行凭空消失）；非 null 时正常覆盖
+  next[idx] = { ...next[idx], status: ev.to, lastMessage: ev.lastMessage ?? next[idx].lastMessage };
   return next;
 }
 
