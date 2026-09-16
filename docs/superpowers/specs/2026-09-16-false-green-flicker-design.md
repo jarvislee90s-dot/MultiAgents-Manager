@@ -53,10 +53,10 @@ rollout 尾部短暂停在中间 assistant 消息
 | **Codex CLI**（rollout JSONL） | 共享尾扫核 | **实锤**（§1.2 实证） | **加回合守卫**（§4.1） |
 | **Codex APP**（app-server SQLite） | 尾扫核 + `inProgress` 强信号 | 已守卫（`codex_thread_parser.rs:338`） | 不动，作为语义参照 |
 | **WorkBuddy**（JSONL） | 共享尾扫核，**格式无任何轮次信号** | **本机数据证实同款中间消息模式**（最新会话尾部 `msg/assistant → function_call → …` 多轮交错） | **完成防抖 10s**（§4.2） |
-| **ZCode**（SQLite） | 尾扫核 + `step-finish(reason=tool-calls)`→ToolCall 守卫 | 半免疫：步骤间已守卫（`zcode_parser.rs:668-676`），残余仅部件流式落盘窗口（未证实） | 不动，残余暴露记录于 §7 |
+| **ZCode**（SQLite） | 尾扫核 + `step-finish(reason=tool-calls)`→ToolCall 守卫 | 半免疫：步骤间已守卫（`zcode_parser.rs:661` `part_entry_kind`），残余仅部件流式落盘窗口（未证实） | 不动，残余暴露记录于 §7 |
 | **Claude**（JSONL） | 消息模型：assistant 带 `tool_use` → Processing（`status.rs:127`） | 免疫（文字+tool_use 同条消息，纯文本即回合结束） | 不动 |
 | **Kimi**（wire.jsonl 事件流） | 事件模型：`tool_calls` 判据 + `turn.ended` 边界（`kimi_parser.rs:429`） | 免疫 | 不动 |
-| **OpenCode**（SQLite） | `last_role` + 60s 新鲜窗 + CPU（`opencode_parser.rs:363`） | 三症状：输入瞬间绿→红 + 假 approval 语音；运行全程红灯（应为黄）；单步 >60s 运行中假绿 | **加会话尾部部件 step 边界守卫**（§4.3，ZCode 同构，活体取证完成，一并修三症状） |
+| **OpenCode**（SQLite） | `last_role` + 60s 新鲜窗 + CPU（`opencode_parser.rs:355`） | 三症状：输入瞬间绿→红 + 假 approval 语音；运行全程红灯（应为黄）；单步 >60s 运行中假绿 | **加会话尾部部件 step 边界守卫**（§4.3，ZCode 同构，活体取证完成，一并修三症状） |
 | **OpenClaw** | 纯 CPU 启发式 | 另一类误报源（API 等待期 CPU 低） | 不动（超出本轮范围，§7 记 follow-up） |
 | **dsh**（事件流 + 锁） | 轮次事实 `has_open_turn`（`dsh/status.rs`） | 免疫，正面教材 | 不动，作为 Codex 守卫的参考实现 |
 
@@ -68,7 +68,7 @@ rollout 尾部短暂停在中间 assistant 消息
 
 **目标**：回合（task）仍在进行中时，中间 assistant 消息不得触发 Idle；只有回合真正结束（`task_complete` 落盘）才转绿。
 
-**实现位置**：`app_status.rs` 新增共享纯函数 + `codex_parser.rs` 消费，`derive_app_status` 契约不变（核仍是「最后一条说了什么」，回合感知是叠加在核之上的仲裁层，WorkBuddy/ZCode 等无信号消费者不受影响）。
+**实现位置**：`app_status.rs` 新增共享纯函数 `turn_window_open(&[AppEntryKind]) -> Option<bool>`（最后一个 `TurnStart` 晚于最后一个 `TurnEnd` → `Some(true)`；窗口内无任何边界事件 → `None`）+ `codex_parser.rs` 消费，`derive_app_status` 契约不变（核仍是「最后一条说了什么」，回合感知是叠加在核之上的仲裁层，WorkBuddy/ZCode 等无信号消费者不受影响）。复用与参考：dsh 的 `TurnFacts::has_open_turn`（`dsh/status.rs`）语义相同但其类型绑定 `DshEvent` 不可直接复用，新函数按 `AppEntryKind` 镜像其语义；守卫条件中「尾部语义条目是 AssistantMessage」复用 §4.2 的 `tail_semantic_kind`（同文件共享，两节共同消费）。
 
 **已定方案 A（2026-09-16 用户拍板；方案 B 为已否决备选，见本节末尾）**：
 
@@ -98,6 +98,8 @@ rollout 尾部短暂停在中间 assistant 消息
 
 **权衡**（用户已接纳）：所有真完成绿灯/语音延迟 10 秒到达；10s 窗口内模型若停顿超 10s 再继续（重推理长停顿），仍可能漏放一次假绿——防抖是启发式，不追求全防。
 
+**命名防混**：`GREEN_DEBOUNCE_MS` 与既有 `FALLBACK_FRESH_MS`（`zcode_parser.rs:48` / `codex_thread_parser.rs:53`，值均为 `APP_STATUS_STALE_MS` = 300s）语义不同——后者是「无信号时按会话新鲜度兜底」的窗口，前者是「完成信号延迟确认」的防抖窗；独立常量，实现期不得互相借用或改名对齐。
+
 **与 300s 停更叠加的顺序**：防抖在前（assistant 尾 + 新鲜 → 拉回 Processing），`overlay_mtime_stale` 在后。真完成场景 10s 后即为 Idle，不会落入 300s 降级路径。
 
 **测试**：assistant 尾 + mtime 9.9s → Processing / 10.1s → Idle；`function_call` 尾不受防抖影响（照常 Processing）；user 尾照常 Thinking；防抖只作用于 assistant 尾导出的 Idle，不影响其他 Idle 来源。
@@ -106,7 +108,7 @@ rollout 尾部短暂停在中间 assistant 消息
 
 **目标**：消除三类症状——① 输入瞬间绿灯直落红灯并触发假 approval 语音（2026-09-16 用户报告）；② 任务运行全程红灯（应为黄灯）；③ 单步超 60s 运行中假绿（假完成语音）。
 
-**现状与根因**：`determine_opencode_status`（`opencode_parser.rs:363`）只看 last_role + 60s 窗（`is_recent` 基于**消息行创建时间**，`opencode_parser.rs:272`）+ CPU，完全不读 parts。根因（活体取证，2026-09-16）：
+**现状与根因**：`determine_opencode_status`（`opencode_parser.rs:355`）只看 last_role + 60s 窗（`is_recent` 基于**消息行创建时间**，`opencode_parser.rs:272`）+ CPU，完全不读 parts。根因（活体取证，2026-09-16）：
 
 - opencode 在用户按回车后 **~105-171ms** 即创建**空的 assistant 占位消息行**（部件之后才写入；首轮 step-start 部件约 +4s 才到）。「user 消息在尾 → 黄灯」的正确状态仅存在 ~130ms，3s 轮询必然错过，落点恒为 `last_role=assistant + is_recent` → **Waiting 红灯** → 绿→红边沿触发 `newWaiting` → 假 approval 语音（`petStatus.ts:129` → `FoxbellPet.tsx:333`，10s 冷却）。
 - 运行期间最后一条消息永远是 assistant（占位行或 step 消息）→ **全程红灯**；CPU 分支条件 `last_role != "assistant"` 永不满足。
@@ -115,16 +117,21 @@ rollout 尾部短暂停在中间 assistant 消息
 **活体取证（2026-09-16，opencode v1.18.22，用户配合实测一轮工具任务）**——原「实现期前置取证」任务已消解，证据如下：
 
 - **消息/部件结构**：每个模型 step = 一条独立 assistant 消息，部件序 `step-start → [reasoning | tool | text] → step-finish`；一轮 = 一至多个 step。
-- **step-finish.reason 词汇表（本机两值全观测）**：`tool-calls`（本步因要调工具而结束，后续还有动作）/ `stop`（回合结束）。与 ZCode 解析器的映射（`zcode_parser.rs:668-676`）及 opencode issue 生态（[opencode #14972](https://github.com/anomalyco/opencode/issues/14972) 中 `finish_reason: tool_calls` 标准值）三源交叉一致。
+- **step-finish.reason 词汇表（本机两值全观测）**：`tool-calls`（本步因要调工具而结束，后续还有动作）/ `stop`（回合结束）。与 ZCode 解析器的映射（`zcode_parser.rs:661` `part_entry_kind`）及 opencode issue 生态（[opencode #14972](https://github.com/anomalyco/opencode/issues/14972) 中 `finish_reason: tool_calls` 标准值）三源交叉一致。
 - **tool 部件真实形状**：`{"type":"tool","tool":"bash","callID":"call_…","state":{"status":"completed","input":{"command":"…"}}}`——tool 部件会落盘，本守卫设计不依赖它（增强项）。
 - **时序金证**：step1 `step-finish(tool-calls)` 落盘到 step2 `step-start` 落盘间隔 **4.3 秒**——此窗口内尾部即 `step-finish(tool-calls)`，恰是守卫要覆盖的「步骤间空窗」；step2 回答 text 落盘到 `step-finish(stop)` 间隔 5.1 秒（部件流式窗口，守卫同样覆盖）。
 
-**设计**（ZCode 同构，升级为**会话尾部部件序列**判定——占位行场景最后一条消息没有部件，只看末条消息会在回合头 ~4s 漏判）：新增「会话最后一条 part（跨消息，按 time_created）+ 该 part 所属消息的 role + 该消息是否含 step 部件」查询，规则按尾部部件类型映射：
+**设计**（ZCode 同构，升级为**会话尾部部件序列**判定——占位行场景最后一条消息没有部件，只看末条消息会在回合头 ~4s 漏判）：新增「会话最后一条 part（跨消息，按 time_created）+ 该 part 所属消息的 role + 该消息是否含 step 部件」查询。复用与实现要点：
+
+- 查询沿既有模式新增（`get_last_message_info`（`opencode_parser.rs:280`）/ `get_message_text`（`:310`，内部 `:312` 已有按消息查 parts 的 SQL）为参照）；`part` 表自带 `session_id` 列（`PRAGMA table_info(part)` 实证），末条 part 可直接按会话查询，仅需 join `message` 取 role。
+- part JSON（`type`/`reason` 顶层字段）与 ZCode `part_entry_kind`（`zcode_parser.rs:661`）的输入同构——其「JSON → AppEntryKind」映射核心（`step-start`→TurnStart、`step-finish(reason)`→ToolCall/TurnEnd、`tool`→ToolCall、`text`→AssistantMessage）抽为共享纯函数（吃 `&str` JSON），ZCode/OpenCode 两处消费，避免复制映射表；user part 的角色区分（→UserMessage）由 OpenCode 侧以消息 role 补充（ZCode 在 `flatten_entries` 消息层做同款事）。
+
+规则按尾部部件映射：
 
 - 尾部 part = `step-finish(reason="stop")` → 回合结束 → **维持现行为**（60s 窗内 Waiting 红 / 超窗 Idle 绿；用户验证该收尾红→绿转换为正常语义，保留）
 - 尾部 part = `step-finish(reason≠stop)`（`tool-calls`/`length`）→ 后续还有动作 → **Processing 黄**
 - 尾部 part = `step-start` / `reasoning` / `tool` → 步骤进行中 → **Processing 黄**
-- 尾部 part = **user 消息的 text part**（含占位行空窗：最后一条消息是空 assistant 行、末条 part 仍属于 user 消息）→ 输入刚提交 → **Processing 黄**（修症状①：不再误触 Waiting 红/假语音）
+- 尾部 part **属于 user 消息**（任意 part 类型；含占位行空窗：最后一条消息是空 assistant 行、末条 part 仍属于 user 消息）→ 输入刚提交 → **Processing 黄**（修症状①：不再误触 Waiting 红/假语音）
 - 尾部 part = assistant 的 `text`/`patch` 且其消息**无任何 step 部件**（team-mode 老格式，无信号）→ 回退现行为（last_role + 60s + CPU 启发式），老会话零回归
 - 会话无 part 数据（空库/极旧库）→ 回退现行为
 
