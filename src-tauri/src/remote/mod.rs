@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod content;
+pub mod events;
 pub mod files;
 pub mod gate;
 pub mod pairing;

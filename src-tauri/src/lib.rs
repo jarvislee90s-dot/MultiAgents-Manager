@@ -66,6 +66,8 @@ pub fn run() {
                     log::warn!("pet window create failed: {}", e);
                 }
             });
+            // M4：全局句柄落位（先于 restore_on_launch——隧道自启即可发通知）
+            let _ = crate::remote::events::APP_HANDLE.set(app.handle().clone());
             // M2 远程接入：按设置恢复远程服务器（开机自启语义；内部用
             // tauri::async_runtime，无 runtime 上下文的主线程可安全调用）
             crate::remote::restore_on_launch();
