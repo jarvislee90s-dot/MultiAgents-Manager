@@ -266,6 +266,17 @@ pub async fn pair_poll(
     let outcome = st.approval.lock().unwrap().poll(&req.request_id, now);
     match outcome {
         PollOutcome::Approved { device, name } => {
+            // E2E S7 实测缺陷修复：approved 落库前复核设备上限——批准后满员、
+            // 旧 requestId 幂等重 poll 会经本路径绕过「三入口同门」把第 4 台
+            // 设备落库（Task 7 评审 Minor TOCTOU 被端到端坐实）。满员时维持
+            // pending 观感（腾位后下次 poll 自动补上凭证）。
+            let cap = st
+                .store
+                .with(|c| crate::remote::pairing::device_count(c) >= (st.max_devices_source)());
+            if cap {
+                super::events::audit("pair_poll_deferred_cap", &format!("device={device}"));
+                return Json(serde_json::json!({ "status": "pending" })).into_response();
+            }
             super::events::audit("pair_polled", &format!("device={device}"));
             persist_and_cookie(&st, &device, &name, now)
         }

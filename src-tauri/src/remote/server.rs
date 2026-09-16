@@ -1933,6 +1933,63 @@ mod tests {
         assert_eq!(resp2.status(), 200);
     }
 
+    /// E2E S7 实测缺陷回归：批准后满员、旧 requestId 幂等重 poll 不得落库第 4 台
+    /// 设备（pair_poll Approved 路径须复核上限；满员时维持 pending 且不下发 Set-Cookie）
+    #[tokio::test]
+    async fn pair_poll_defers_when_cap_full() {
+        let state = state_with_approval();
+        // 预置 3 台有效设备（max_devices_source 注入 || 3 → 已满员）
+        state.store.with(|c| {
+            for i in 0..3 {
+                let _ = crate::remote::pairing::persist_device(
+                    c,
+                    &crate::remote::pairing::NewDevice {
+                        id: format!("cap-{i}"),
+                        name: String::new(),
+                        ua: String::new(),
+                        origin_ip: String::new(),
+                        paired_at: 0,
+                    },
+                );
+            }
+        });
+        // 直接把队列项推进到已批准（模拟「批准通过后、poll 前满员」的 TOCTOU 窗口）；
+        // now 取真实时钟——handler 的 prune 用真实时间，测试假时钟会被立即判过期
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        {
+            let mut svc = state.approval.lock().unwrap();
+            svc.create("JARVIS-E2E-S7", "UA", "1.2.3.4", now_ms)
+                .unwrap();
+            svc.approve("req-x", now_ms, || false);
+        }
+        let app = super::router_with_static(state.clone());
+        let resp = app
+            .oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-x"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(
+            resp.headers().get("set-cookie").is_none(),
+            "满员时 poll 不得下发凭证"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "pending");
+        // 腾位一台后同 requestId 重 poll → 放行（设备落库 + Set-Cookie）
+        state.store.with(|c| {
+            let _ = crate::remote::pairing::revoke_device(c, "cap-0");
+        });
+        let app2 = super::router_with_static(state.clone());
+        let resp2 = app2
+            .oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-x"}"#))
+            .await
+            .unwrap();
+        assert!(
+            resp2.headers().get("set-cookie").is_some(),
+            "腾位后 poll 应下发凭证"
+        );
+    }
+
     fn post_json(uri: &str, body: &str) -> axum::http::Request<axum::body::Body> {
         axum::http::Request::builder()
             .method("POST")
