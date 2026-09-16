@@ -56,7 +56,7 @@ rollout 尾部短暂停在中间 assistant 消息
 | **ZCode**（SQLite） | 尾扫核 + `step-finish(reason=tool-calls)`→ToolCall 守卫 | 半免疫：步骤间已守卫（`zcode_parser.rs:668-676`），残余仅部件流式落盘窗口（未证实） | 不动，残余暴露记录于 §7 |
 | **Claude**（JSONL） | 消息模型：assistant 带 `tool_use` → Processing（`status.rs:127`） | 免疫（文字+tool_use 同条消息，纯文本即回合结束） | 不动 |
 | **Kimi**（wire.jsonl 事件流） | 事件模型：`tool_calls` 判据 + `turn.ended` 边界（`kimi_parser.rs:429`） | 免疫 | 不动 |
-| **OpenCode**（SQLite） | `last_role` + 60s 新鲜窗 + CPU（`opencode_parser.rs:363`） | 延迟衰减变体：中间消息先红 60s，模型停顿 >60s 才假绿 | **加 step 边界守卫**（§4.3，ZCode 同构，活体取证完成） |
+| **OpenCode**（SQLite） | `last_role` + 60s 新鲜窗 + CPU（`opencode_parser.rs:363`） | 三症状：输入瞬间绿→红 + 假 approval 语音；运行全程红灯（应为黄）；单步 >60s 运行中假绿 | **加会话尾部部件 step 边界守卫**（§4.3，ZCode 同构，活体取证完成，一并修三症状） |
 | **OpenClaw** | 纯 CPU 启发式 | 另一类误报源（API 等待期 CPU 低） | 不动（超出本轮范围，§7 记 follow-up） |
 | **dsh**（事件流 + 锁） | 轮次事实 `has_open_turn`（`dsh/status.rs`） | 免疫，正面教材 | 不动，作为 Codex 守卫的参考实现 |
 
@@ -104,9 +104,13 @@ rollout 尾部短暂停在中间 assistant 消息
 
 ### 4.3 OpenCode：step 边界守卫（ZCode 同构）
 
-**目标**：消除「中间停顿 >60s 后假绿」的延迟衰减变体。
+**目标**：消除三类症状——① 输入瞬间绿灯直落红灯并触发假 approval 语音（2026-09-16 用户报告）；② 任务运行全程红灯（应为黄灯）；③ 单步超 60s 运行中假绿（假完成语音）。
 
-**现状**：`determine_opencode_status`（`opencode_parser.rs:363`）只看 last_role + 60s 窗 + CPU，完全不读 parts。中间消息场景：assistant 尾 + 60s 内红（Waiting）、超 60s 绿（Idle）——若模型/编排器 60s 后续跑则假绿。
+**现状与根因**：`determine_opencode_status`（`opencode_parser.rs:363`）只看 last_role + 60s 窗（`is_recent` 基于**消息行创建时间**，`opencode_parser.rs:272`）+ CPU，完全不读 parts。根因（活体取证，2026-09-16）：
+
+- opencode 在用户按回车后 **~105-171ms** 即创建**空的 assistant 占位消息行**（部件之后才写入；首轮 step-start 部件约 +4s 才到）。「user 消息在尾 → 黄灯」的正确状态仅存在 ~130ms，3s 轮询必然错过，落点恒为 `last_role=assistant + is_recent` → **Waiting 红灯** → 绿→红边沿触发 `newWaiting` → 假 approval 语音（`petStatus.ts:129` → `FoxbellPet.tsx:333`，10s 冷却）。
+- 运行期间最后一条消息永远是 assistant（占位行或 step 消息）→ **全程红灯**；CPU 分支条件 `last_role != "assistant"` 永不满足。
+- 单步（一条 step 消息）运行超 60s：`is_recent` 过期 → **运行中假绿** + 假完成语音（step 间隔实测可达 24s+，长工具调用轻松超 60s）。
 
 **活体取证（2026-09-16，opencode v1.18.22，用户配合实测一轮工具任务）**——原「实现期前置取证」任务已消解，证据如下：
 
@@ -115,16 +119,29 @@ rollout 尾部短暂停在中间 assistant 消息
 - **tool 部件真实形状**：`{"type":"tool","tool":"bash","callID":"call_…","state":{"status":"completed","input":{"command":"…"}}}`——tool 部件会落盘，本守卫设计不依赖它（增强项）。
 - **时序金证**：step1 `step-finish(tool-calls)` 落盘到 step2 `step-start` 落盘间隔 **4.3 秒**——此窗口内尾部即 `step-finish(tool-calls)`，恰是守卫要覆盖的「步骤间空窗」；step2 回答 text 落盘到 `step-finish(stop)` 间隔 5.1 秒（部件流式窗口，守卫同样覆盖）。
 
-**设计**（与 ZCode `part_entry_kind` 完全同构）：读取会话尾部部件（查询路径已有，`opencode_parser.rs:312`），映射 `step-finish(reason)` 后判定：
+**设计**（ZCode 同构，升级为**会话尾部部件序列**判定——占位行场景最后一条消息没有部件，只看末条消息会在回合头 ~4s 漏判）：新增「会话最后一条 part（跨消息，按 time_created）+ 该 part 所属消息的 role + 该消息是否含 step 部件」查询，规则按尾部部件类型映射：
 
-- 尾部语义部件 = `step-finish(reason="tool-calls")` → 后续还有动作 → **Processing**（覆盖现 Waiting/Idle 分支）
-- 尾部语义部件 = `step-finish(reason="stop")` → 回合结束 → 维持现行为（60s 窗内 Waiting / 超窗 Idle）
-- 尾部无 `step-finish`（步骤进行中：`step-start`/`reasoning`/`text`/`tool` 在尾）→ **Processing**
-- 增强（非必需）：尾部 `tool` 部件 `state.status` 为未完成值 → Processing；本机仅观测到 `completed`，未完成值词汇表（`running`/`pending`）实现期以防御性不等式（≠ `completed`/`error`）处理
+- 尾部 part = `step-finish(reason="stop")` → 回合结束 → **维持现行为**（60s 窗内 Waiting 红 / 超窗 Idle 绿；用户验证该收尾红→绿转换为正常语义，保留）
+- 尾部 part = `step-finish(reason≠stop)`（`tool-calls`/`length`）→ 后续还有动作 → **Processing 黄**
+- 尾部 part = `step-start` / `reasoning` / `tool` → 步骤进行中 → **Processing 黄**
+- 尾部 part = **user 消息的 text part**（含占位行空窗：最后一条消息是空 assistant 行、末条 part 仍属于 user 消息）→ 输入刚提交 → **Processing 黄**（修症状①：不再误触 Waiting 红/假语音）
+- 尾部 part = assistant 的 `text`/`patch` 且其消息**无任何 step 部件**（team-mode 老格式，无信号）→ 回退现行为（last_role + 60s + CPU 启发式），老会话零回归
+- 会话无 part 数据（空库/极旧库）→ 回退现行为
 
-**残余已知限制**：外部编排器 team-mode 形态（AionUi/omo "Sisyphus"，本机 `ses_fae18a2f` 等老会话实证）只落 `text`/`patch` 部件、无 step 部件 → 无 step 信号时回退现行为，编排器续跑的假绿窗口保留（记入 §7）。
+增强（非必需）：尾部 `tool` 部件 `state.status` ≠ `completed`/`error` → Processing；本机仅观测到 `completed`，未完成值以防御性不等式处理。
 
-**测试**（以本节取证样本为夹具）：`step-finish(tool-calls)` 在尾 → Processing；`step-finish(stop)` 在尾 → 现行为；`text` 尾无 step-finish（流式窗口）→ Processing；无 step 部件的老库会话 → 现行为降级；user 消息在尾 → 现行为（Processing/Thinking 语义不变）。
+该设计同时修复：症状①（占位空窗判黄，绿→红与假 approval 语音消失）、症状②（运行全程黄）、症状③（步骤未完结不判 Idle，单步 >60s 不再闪绿）。完成后的红→绿（≤60s 延迟）为既有设计语义，保留。
+
+**残余已知限制**：外部编排器 team-mode 形态（AionUi/omo "Sisyphus"，本机 `ses_fae18a2f` 等老会话实证）只落 `text`/`patch` 部件、无 step 部件 → 回退启发式，编排器续跑的假绿窗口保留（记入 §7）。
+
+**测试**（以本节取证样本为夹具）：
+- 占位空窗夹具（末条 part=user text、最后消息=空 assistant 行）→ Processing 黄（症状①回归锁）
+- `step-finish(tool-calls)` 在尾（4.3s 步间空窗样本）→ Processing 黄
+- `step-finish(stop)` 在尾 → 现行为（红 ≤60s → 绿），完成语音时序不变
+- step 进行中尾部（`step-start`/`reasoning`/`tool`/assistant `text` 无 step-finish，5.1s 流式窗口样本）→ Processing 黄
+- 单步 60s+ 无新消息（模拟长工具）→ 不落 Idle（症状③回归锁）
+- 无 step 部件的老格式会话（text/patch 尾）→ 现行为逐分支不变（降级零回归）
+- user 消息在尾（无占位行的 130ms 窗）→ Processing（现行为保留）
 
 ## 5. 明确不动清单
 
@@ -142,7 +159,7 @@ rollout 尾部短暂停在中间 assistant 消息
 
 1. 单测：§4.1/§4.2/§4.3 各自的测试清单全部落地（夹具优先取自本机真实数据脱敏）。
 2. 回归：`cd src-tauri && cargo test` 全绿；`clippy -D warnings` 干净。重点回归组：`app_status` 既有判定核测试、codex `app_status_fixture_tests`（issue #6 样本）、WorkBuddy `derive_status_from_tail` 系列、OpenCode `status_tests`。
-3. 手工验收：Codex CLI 跑一个 3+ 轮工具任务，全程黄灯、只在 `task_complete` 后一次绿灯一次语音；WorkBuddy 完成任务观察绿灯延迟约 10s 出现。
+3. 手工验收：Codex CLI 跑一个 3+ 轮工具任务，全程黄灯、只在 `task_complete` 后一次绿灯一次语音；WorkBuddy 完成任务观察绿灯延迟约 10s 出现；OpenCode 提交指令瞬间转黄（无红闪、无假语音）、运行全程黄、结束后红→绿一次完成语音。
 
 ## 7. 已知限制与 follow-up
 
@@ -161,3 +178,4 @@ rollout 尾部短暂停在中间 assistant 消息
 | 3 | WorkBuddy 防抖窗口 N | 10 秒（常量可调） | 2026-09-16 |
 | 4 | OpenCode 延迟衰减变体是否本轮处理 | 本轮一并修（§4.3） | 2026-09-16 |
 | 5 | Codex CLI 守卫方案 A vs B | **方案 A（开闭对，dsh 同款）**；B 记录为已否决备选 | 2026-09-16 |
+| 6 | OpenCode 输入瞬间绿→红 + 假 approval 语音（用户追加报告） | 根因坐实（assistant 占位行 ~130ms + last_role 启发式误判），并入 §4.3 会话尾部部件守卫本轮一并修 | 2026-09-16 |
