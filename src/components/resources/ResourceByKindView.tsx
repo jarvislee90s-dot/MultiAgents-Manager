@@ -79,7 +79,7 @@ const SECTION_GRID_STYLE: CSSProperties = {
   gridTemplateColumns: "220px minmax(0, auto)",
 };
 const ALL_COL_CLS = "w-[64px] shrink-0"; // 「全部启用」列（表头占位 + 行内按钮同宽）
-const TOOL_COL_CLS = "w-[168px] shrink-0"; // 每工具一列：启停钮 + 常驻锁同占一列
+const TOOL_COL_CLS = "w-[72px] shrink-0"; // 每工具一列：格内仅「启停图标钮 + 常驻锁」两个控件，工具名只活在表头
 
 /** 表头行：左侧"名字 + 三态排序按钮"，右侧与行内工具列对齐的目录定位按钮。
  *  MCP 打开的是配置文件（FileJson 图标），Skill/插件打开目录（FolderOpen 图标）。 */
@@ -100,10 +100,11 @@ function SectionTableHeader(props: {
     : (tool: string) => t("resources.openToolDir", { tool, kind });
   return (
     <div
-      className="bg-muted/30 mb-1 w-max min-w-full items-center rounded border px-2 py-1"
+      className="bg-muted sticky top-0 z-20 mb-1 w-max min-w-full items-center rounded border px-2 py-1"
       style={SECTION_GRID_STYLE}
     >
-      <div className="bg-muted sticky left-2 z-10 flex items-center gap-1 border-r pr-2">
+      {/* 左上角格：行、列双向冻结（top-0 锁纵向页滚动，left-2 锁横向工具滚动） */}
+      <div className="bg-muted sticky top-0 left-2 z-30 flex items-center gap-1 border-r pr-2">
         <span className="text-xs font-medium">{t("resources.nameHeader")}</span>
         <Button
           variant="ghost"
@@ -128,7 +129,7 @@ function SectionTableHeader(props: {
             return (
               <span
                 key={tool.id}
-                className={`text-muted-foreground/60 flex h-6 items-center text-[10px] ${TOOL_COL_CLS}`}
+                className={`text-muted-foreground/60 flex items-center justify-center text-[9px] leading-3 ${TOOL_COL_CLS}`}
                 title={t("resources.kindNotSupported")}
               >
                 {t("resources.kindNotSupported")}
@@ -136,18 +137,22 @@ function SectionTableHeader(props: {
             );
           }
           return (
-            <Button
-              key={tool.id}
-              variant="ghost"
-              size="sm"
-              className={`text-muted-foreground h-6 justify-start text-[10px] ${TOOL_COL_CLS}`}
-              title={tooltip(tool.label)}
-              aria-label={tooltip(tool.label)}
-              onClick={() => onOpen(tool.id)}
-            >
-              <Ico className="mr-1 h-3 w-3" />
-              {tool.label}
-            </Button>
+            <div key={tool.id} className={`flex flex-col items-center gap-0.5 ${TOOL_COL_CLS}`}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground h-5 w-full justify-center px-0"
+                title={tooltip(tool.label)}
+                aria-label={tooltip(tool.label)}
+                onClick={() => onOpen(tool.id)}
+              >
+                <Ico className="h-3 w-3" />
+              </Button>
+              {/* 工具名只活在表头：行内格仅剩图标，纵向滚动时靠本锁定表头识列 */}
+              <span className="text-muted-foreground w-full truncate text-center text-[9px] leading-3">
+                {tool.label}
+              </span>
+            </div>
           );
         })}
       </div>
@@ -273,11 +278,10 @@ export function ResourceByKindView() {
       disabled
       variant="ghost"
       size="sm"
-      className={`text-muted-foreground h-6 justify-start px-2 text-[10px] opacity-40 ${TOOL_COL_CLS}`}
+      className={`text-muted-foreground h-6 justify-center px-0 opacity-40 ${TOOL_COL_CLS}`}
       title={title}
     >
-      <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-      {tool.label}
+      <ToolIcon toolId={tool.id} size={14} />
     </Button>
   );
   // 名字排序：三态循环（默认扫描序 → 升序 → 降序），三种资源各自独立记忆
@@ -672,7 +676,7 @@ export function ResourceByKindView() {
               {t("resources.noSkillsHint")}
             </div>
           ) : (
-            <div className="space-y-1 overflow-x-auto pb-1">
+            <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
               <SectionTableHeader
                 kind="skill"
                 tools={tools}
@@ -751,16 +755,18 @@ export function ResourceByKindView() {
                       }
                       const enabled = skill.enabledTools.includes(tool.id);
                       return (
-                        <span key={tool.id} className={`flex items-center gap-1 ${TOOL_COL_CLS}`}>
+                        <span
+                          key={tool.id}
+                          className={`flex items-center justify-center gap-1 ${TOOL_COL_CLS}`}
+                        >
                           <Button
                             variant={enabled ? "default" : "ghost"}
                             size="sm"
-                            className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            className={`h-6 w-7 justify-center px-0 ${enabled ? "" : "text-muted-foreground opacity-50"}`}
                             title={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
                             onClick={() => handleSkillToggle(skill.name, tool.id, enabled)}
                           >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
+                            <ToolIcon toolId={tool.id} size={14} />
                           </Button>
                           {/* 常驻锁：紧邻启停按钮（spec §7.4） */}
                           <ResidentLockSwitch
@@ -814,7 +820,7 @@ export function ResourceByKindView() {
               {t("mcp.empty")}
             </div>
           ) : (
-            <div className="space-y-1 overflow-x-auto pb-1">
+            <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
               <SectionTableHeader
                 kind="mcp"
                 tools={tools}
@@ -889,15 +895,18 @@ export function ResourceByKindView() {
                       }
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
-                        <span key={tool.id} className={`flex items-center gap-1 ${TOOL_COL_CLS}`}>
+                        <span
+                          key={tool.id}
+                          className={`flex items-center justify-center gap-1 ${TOOL_COL_CLS}`}
+                        >
                           <Button
                             variant={enabled ? "default" : "ghost"}
                             size="sm"
-                            className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            className={`h-6 w-7 justify-center px-0 ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            title={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
                             onClick={() => handleToggleMcp(mcp.name, tool.id, !enabled)}
                           >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
+                            <ToolIcon toolId={tool.id} size={14} />
                           </Button>
                           {/* 常驻锁：紧邻启停按钮（spec §7.4） */}
                           <ResidentLockSwitch
@@ -939,7 +948,7 @@ export function ResourceByKindView() {
               {t("resources.noPlugins")}
             </div>
           ) : (
-            <div className="space-y-1 overflow-x-auto pb-1">
+            <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
               <SectionTableHeader
                 kind="plugin"
                 tools={tools}
@@ -1008,11 +1017,15 @@ export function ResourceByKindView() {
                       }
                       const enabled = plugin.enabledTools.includes(tool.id);
                       return (
-                        <span key={tool.id} className={`flex items-center gap-1 ${TOOL_COL_CLS}`}>
+                        <span
+                          key={tool.id}
+                          className={`flex items-center justify-center gap-1 ${TOOL_COL_CLS}`}
+                        >
                           <Button
                             variant={enabled ? "default" : "ghost"}
                             size="sm"
-                            className={`h-6 px-2 text-[10px] ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            className={`h-6 w-7 justify-center px-0 ${enabled ? "" : "text-muted-foreground opacity-50"}`}
+                            title={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
                             onClick={() =>
                               handleTogglePlugin(
                                 plugin.name,
@@ -1022,8 +1035,7 @@ export function ResourceByKindView() {
                               )
                             }
                           >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
+                            <ToolIcon toolId={tool.id} size={14} />
                           </Button>
                           {/* 常驻锁：紧邻启停按钮（spec §7.4） */}
                           <ResidentLockSwitch
