@@ -180,8 +180,13 @@ fn start_server() -> Result<(), String> {
             // setup 线程无 tokio runtime 上下文）；其 JoinHandle 同样支持 abort
             // （stop_server 语义不变）
             tauri::async_runtime::spawn(async move {
+                // M4 T1c：隧道随服务器启动（off/未配置内部直返；失败写快照不阻断——
+                // 隧道失败不阻断远程主体）
+                tunnel::start_if_configured(port);
                 if let Err(e) = server::serve(&bind, port, STATE.clone()).await {
                     log::error!("远程服务器退出: {e}");
+                    // serve 失败退出任务时隧道留着无意义，一并停掉
+                    tunnel::stop();
                 }
             })
         },
@@ -204,6 +209,8 @@ fn stop_server() {
         let _ = pairing::revoke_all(c); // 停止 = 全吊销（七不变量）
     });
     STATE.pairing.lock().unwrap().stop();
+    // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
+    tunnel::stop();
 }
 
 /// 开关内核（可测核心，SSOT 写入与启停以闭包注入）：写 enabled SSOT → 启/停服务器。
@@ -246,7 +253,10 @@ pub fn remote_toggle(enabled: bool) -> Result<(), String> {
         },
         start_server,
         stop_server,
-    )
+    )?;
+    // M4 T1c：成功后广播状态变更（Task 8 的 useRemoteEvents 监听 → 状态页即时刷新）
+    events::emit_ui("remote-changed", serde_json::json!({ "enabled": enabled }));
+    Ok(())
 }
 
 /// enabled 展示校准内核（纯函数）：DB 声明开启**且**服务器句柄存活才算启用。
@@ -289,8 +299,18 @@ pub fn remote_status() -> serde_json::Value {
     st["port"] = serde_json::json!(port);
     st["url"] = serde_json::json!(display_url_for(&bind, port, ips));
     st["lanUrls"] = serde_json::json!(lan);
-    // 地址表（2026-09-16 用户裁决）：设置页「访问地址」单区块逐条渲染的数据源
-    st["addresses"] = serde_json::json!(address_entries(&bind, port, &candidates));
+    // 地址表（2026-09-16 用户裁决）：设置页「访问地址」单区块逐条渲染的数据源。
+    // M4 T1a：隧道地址恒首位 primary（隧道出错时回退纯局域网表）
+    let tun = tunnel::snapshot();
+    st["channel"] = serde_json::json!(crate::database::dao::settings::get_setting(KEY_CHANNEL)
+        .as_deref()
+        .unwrap_or("off"));
+    st["tunnelUrl"] = serde_json::json!(tun.url);
+    st["tunnelError"] = serde_json::json!(tun.error);
+    st["addresses"] = serde_json::json!(address_entries_with_tunnel(
+        tun.url.filter(|_| tun.error.is_none()),
+        address_entries(&bind, port, &candidates),
+    ));
     st
 }
 
@@ -375,15 +395,45 @@ pub fn remote_issue_token() -> Result<serde_json::Value, String> {
     let bind =
         crate::database::dao::settings::get_setting(KEY_BIND).unwrap_or_else(|| "127.0.0.1".into());
     let host = display_host_for(&bind, local_lan_ips());
-    Ok(
-        serde_json::json!({ "token": token, "url": format!("http://{host}:{port}/m#token={token}") }),
-    )
+    // M4 T1c：隧道健康（有地址且无 error）时扫码 URL 跟随隧道基址，否则回落 http 直连
+    Ok(serde_json::json!({
+        "token": token,
+        "url": pair_url_with_tunnel(
+            tunnel::snapshot().url.filter(|_| tunnel::snapshot().error.is_none()),
+            format!("http://{host}:{port}/m"),
+            &token,
+        )
+    }))
 }
 
 /// TLS 前置确认（P7 安全门）：用户确认已配置 TLS 反向代理后置位，解锁 0.0.0.0 绑定
 #[tauri::command]
 pub fn remote_confirm_public() -> Result<(), String> {
     crate::database::dao::settings::set_setting(KEY_PUBLIC_ACK, "true");
+    Ok(())
+}
+
+/// 通道设置（M4 T1a）：写 KV；运行中热切换（restart_if_running）；成功后广播状态变更。
+/// 校验先行（named 必须已有 Token——先写后验会把非法通道落库）
+#[tauri::command]
+pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), String> {
+    let mode = tunnel::parse_channel(Some(&channel))
+        .ok_or_else(|| format!("通道值非法: {channel}（仅 off/quick/named）"))?;
+    if let Some(t) = token {
+        crate::database::dao::settings::set_setting(KEY_TUNNEL_TOKEN, t.trim());
+    }
+    if mode == tunnel::KEY_CHANNEL_VALUE_NAMED
+        && crate::database::dao::settings::get_setting(KEY_TUNNEL_TOKEN)
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err("命名隧道需要填写 Tunnel Token".into());
+    }
+    crate::database::dao::settings::set_setting(KEY_CHANNEL, mode);
+    let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
+    tunnel::restart_if_running(port);
+    events::emit_ui("remote-changed", serde_json::json!({ "channel": mode }));
+    events::audit("channel_set", &format!("channel={mode}"));
     Ok(())
 }
 
@@ -526,6 +576,42 @@ fn address_entries(
         "iface": "",
         "primary": true,
     })]
+}
+
+/// 地址表隧道前插（纯函数，M4 T1a）：隧道地址恒首位 primary；既有条目补 kind="lan"
+pub fn address_entries_with_tunnel(
+    tunnel_url: Option<String>,
+    mut base: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    for e in &mut base {
+        if e.get("kind").is_none() {
+            e["kind"] = serde_json::json!("lan");
+        }
+        e["primary"] = serde_json::json!(false); // 隧道在时局域网不再推荐位
+    }
+    match tunnel_url {
+        Some(u) => {
+            let mut out = vec![serde_json::json!({
+                "url": u, "iface": "", "primary": true, "kind": "tunnel",
+            })];
+            out.append(&mut base);
+            out
+        }
+        None => {
+            if let Some(first) = base.first_mut() {
+                first["primary"] = serde_json::json!(true);
+            }
+            base
+        }
+    }
+}
+
+/// 配对 URL 隧道跟随（纯函数）：隧道开 → 隧道基址/m#token=
+pub fn pair_url_with_tunnel(tunnel: Option<String>, base_url: String, token: &str) -> String {
+    match tunnel {
+        Some(t) => format!("{}/m#token={token}", t.trim_end_matches('/')),
+        None => format!("{base_url}#token={token}"),
+    }
 }
 
 /// 应用启动恢复（lib.rs setup 调用）：开机自启（若启用）。失败仅告警不阻断启动
@@ -1000,6 +1086,25 @@ mod tests {
             assert!(r.is_err(), "对外绑定 {external} 未确认 TLS 前置必须拒绝");
             assert!(slot.is_none(), "被安全门拒绝时不得留下句柄（{external}）");
         }
+    }
+
+    /// (d) 配对 URL 隧道跟随（Task 5 纯核）：隧道开（无 error）→ 隧道基址/m#token=；
+    /// 隧道关/异常 → 既有 http 直连逻辑原样。issue_token 的隧道门控在此锁定
+    #[test]
+    fn pair_url_prefers_tunnel_base() {
+        // 隧道开 → https://host/m#token=…；隧道关 → 既有 http 逻辑
+        assert_eq!(
+            pair_url_with_tunnel(
+                Some("https://mam.example.asia".into()),
+                "http://192.168.1.5:9420/m".into(),
+                "tok" // clippy useless_conversion 适配（蓝本 "tok".into() 对 &str 参数多余）
+            ),
+            "https://mam.example.asia/m#token=tok"
+        );
+        assert_eq!(
+            pair_url_with_tunnel(None, "http://192.168.1.5:9420/m".into(), "tok"),
+            "http://192.168.1.5:9420/m#token=tok"
+        );
     }
 }
 
