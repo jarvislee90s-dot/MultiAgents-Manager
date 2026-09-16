@@ -14,7 +14,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { ArrowLeft, ChevronDown, ChevronRight, RotateCw } from "lucide-react";
 import FilePreview from "./FilePreview";
-import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
+import { type PreviewMode } from "./PreviewModeSwitcher";
 import SplitHandle from "./SplitHandle";
 import { ApiError, fetchSessionFiles, fetchSessionMessages, type SessionMessage } from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
@@ -513,15 +513,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             session.status === "waiting" ? "animate-pulse" : ""
           }`}
         />
-        {/* 预览布局切换（仅预览打开时出现；Task 8 裁决：切换控件在 SessionDetail；
-            需求 1 扩展为三态：纵向分屏 / 横向分屏 / 全屏） */}
-        {preview && (
-          <PreviewModeSwitcher
-            mode={preview.mode}
-            onChange={changePreviewMode}
-            testIdPrefix="preview-mode"
-          />
-        )}
+        {/* 布局切换器唯一实例在预览页头（FilePreview 内，2026-09-16 用户裁决：
+            两处重复出现占用页面空间，只保留贴近文件的那份）——三态均可从那里切 */}
         <button
           type="button"
           data-testid="detail-refresh"

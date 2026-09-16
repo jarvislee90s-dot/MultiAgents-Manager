@@ -232,7 +232,8 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(preview.getAttribute("data-mode")).toBe("fullscreen");
     expect((await screen.findByTestId("preview-code")).textContent).toContain("fn main() {}");
     // 切分屏：data-mode 翻转（split = 上对话下文件由布局类承担，此处锁语义切换）
-    fireEvent.click(screen.getByTestId("preview-mode-split"));
+    // —— 切换器唯一实例在预览页头（2026-09-16 裁决：详情页头那份已删）
+    fireEvent.click(screen.getByTestId("preview-toggle-split"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
     // 关闭预览：对话仍在（同一组件树内状态保持）
     fireEvent.click(screen.getByTestId("preview-close"));
@@ -441,6 +442,43 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.pointerMove(window, { clientY: -100000 });
     fireEvent.pointerUp(window);
     expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
+  });
+
+  it("切换器只保留预览页头一份（2026-09-16 裁决），不占详情页头空间", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+
+    // 预览未打开：整个页面没有任何布局切换器
+    expect(screen.queryAllByTestId("preview-toggle-split")).toHaveLength(0);
+    expect(screen.queryAllByTestId("preview-mode-split")).toHaveLength(0);
+
+    fireEvent.click(await screen.findByTestId("file-link"));
+    // 打开后：切换器恰好一份（旧版两份——详情页头 + 预览页头），且属于预览页头
+    expect(screen.getAllByTestId("preview-toggle-split")).toHaveLength(1);
+    // 详情页头那份（旧 testid 前缀 preview-mode-*）不得再存在
+    expect(screen.queryAllByTestId("preview-mode-split")).toHaveLength(0);
+    expect(screen.queryAllByTestId("preview-mode-split-h")).toHaveLength(0);
+    expect(screen.queryAllByTestId("preview-mode-fullscreen")).toHaveLength(0);
+    // 唯一那份在 file-preview 容器内（预览页头）
+    const previewEl = screen.getByTestId("file-preview");
+    expect(previewEl.contains(screen.getByTestId("preview-toggle-split"))).toBe(true);
+    expect(previewEl.contains(screen.getByTestId("preview-toggle-split-h"))).toBe(true);
+    expect(previewEl.contains(screen.getByTestId("preview-toggle-fullscreen"))).toBe(true);
+
+    // 三态在唯一入口下仍全通：全屏 → 左右 → 上下 → 回全屏
+    fireEvent.click(screen.getByTestId("preview-toggle-split-h"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split-h");
+    // 分屏态（文件区顶部页头）同样只有一份
+    expect(screen.getAllByTestId("preview-toggle-split")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("preview-toggle-split"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
+    fireEvent.click(screen.getByTestId("preview-toggle-fullscreen"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
   });
 
   it("未知路径不出链接：files 为空时正文原样", async () => {
