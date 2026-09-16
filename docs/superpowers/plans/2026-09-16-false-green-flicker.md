@@ -39,7 +39,7 @@
 - Consumes: `AppEntryKind`（同文件既有枚举）。
 - Produces: `pub fn tail_semantic_kind(entries: &[AppEntryKind]) -> Option<AppEntryKind>`；`pub fn turn_window_open(entries: &[AppEntryKind]) -> Option<bool>`。Task 2、Task 3 依赖这两个签名。
 
-- [ ] **Step 1: 写失败测试**（追加到 `app_status.rs` 既有 `mod tests` 内）
+- [x] **Step 1: 写失败测试**（追加到 `app_status.rs` 既有 `mod tests` 内）
 
 ```rust
     // ---- 假绿治理共享件（spec 2026-09-16 §4.1/§4.2）----
@@ -78,12 +78,12 @@
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test --lib app_status::tests::tail_semantic_kind_returns_last_non_other app_status::tests::turn_window_open_detects_pair_order`
 Expected: 编译失败（`cannot find function`）。
 
-- [ ] **Step 3: 最小实现**（放在 `derive_app_status` 函数之后）
+- [x] **Step 3: 最小实现**（放在 `derive_app_status` 函数之后）
 
 ```rust
 /// 尾部第一条有语义条目（= derive_app_status 的判定依据条目；全记账 → None）。
@@ -119,12 +119,12 @@ pub fn turn_window_open(entries: &[AppEntryKind]) -> Option<bool> {
 }
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib app_status::tests`
 Expected: 全部 PASS（含既有测试零回归）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/monitor/app_status.rs

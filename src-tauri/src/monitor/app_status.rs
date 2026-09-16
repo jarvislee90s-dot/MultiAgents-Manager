@@ -87,6 +87,38 @@ pub fn derive_app_status(entries: &[AppEntryKind]) -> Option<SessionStatus> {
     })
 }
 
+/// 尾部第一条有语义条目（= derive_app_status 的判定依据条目；全记账 → None）。
+/// 假绿治理共享件（spec 2026-09-16）：WorkBuddy 完成防抖（§4.2）与 Codex 回合守卫（§4.1）
+/// 共用——识别「Idle 是否由 assistant 尾导出」
+pub fn tail_semantic_kind(entries: &[AppEntryKind]) -> Option<AppEntryKind> {
+    entries
+        .iter()
+        .rev()
+        .find(|k| !matches!(k, AppEntryKind::Other))
+        .copied()
+}
+
+/// 回合开闭判定（spec 2026-09-16 §4.1 方案 A）：最后一个 TurnStart 晚于最后一个
+/// TurnEnd → Some(true)；窗口内无任何边界事件 → None（调用方回退尾扫语义，不仲裁）。
+/// dsh `TurnFacts::has_open_turn` 的 AppEntryKind 语义镜像（其类型绑定 DshEvent，不可直接复用）
+pub fn turn_window_open(entries: &[AppEntryKind]) -> Option<bool> {
+    let mut last_start: Option<usize> = None;
+    let mut last_end: Option<usize> = None;
+    for (i, k) in entries.iter().enumerate() {
+        match k {
+            AppEntryKind::TurnStart => last_start = Some(i),
+            AppEntryKind::TurnEnd => last_end = Some(i),
+            _ => {}
+        }
+    }
+    match (last_start, last_end) {
+        (Some(s), Some(e)) => Some(s > e),
+        (Some(_), None) => Some(true),
+        (None, Some(_)) => Some(false),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +370,40 @@ mod tests {
                 SessionStatus::Processing
             );
         }
+    }
+
+    // ---- 假绿治理共享件（spec 2026-09-16 §4.1/§4.2）----
+
+    #[test]
+    fn tail_semantic_kind_returns_last_non_other() {
+        let entries = [
+            AppEntryKind::UserMessage,
+            AppEntryKind::Other,
+            AppEntryKind::ToolCall,
+            AppEntryKind::Other,
+        ];
+        assert_eq!(tail_semantic_kind(&entries), Some(AppEntryKind::ToolCall));
+        // 全记账条目 → None（derive 核同样返回 None，兜底留给各工具）
+        assert_eq!(tail_semantic_kind(&[AppEntryKind::Other]), None);
+        assert_eq!(tail_semantic_kind(&[]), None);
+    }
+
+    #[test]
+    fn turn_window_open_detects_pair_order() {
+        use AppEntryKind::*;
+        // 开：最后一个 TurnStart 晚于最后一个 TurnEnd
+        assert_eq!(
+            turn_window_open(&[TurnEnd, AssistantMessage, TurnStart, UserMessage, AssistantMessage]),
+            Some(true)
+        );
+        // 闭：最后一个 TurnEnd 更晚
+        assert_eq!(turn_window_open(&[TurnStart, ToolCall, TurnEnd, AssistantMessage]), Some(false));
+        // 只有 TurnStart（回合刚开始，未见 TurnEnd）→ 开
+        assert_eq!(turn_window_open(&[UserMessage, TurnStart]), Some(true));
+        // 只有 TurnEnd（上回合闭合痕迹，起点不可见）→ 不可证开
+        assert_eq!(turn_window_open(&[TurnEnd, AssistantMessage]), Some(false));
+        // 窗口内无任何边界事件 → None（调用方回退现状，不仲裁）
+        assert_eq!(turn_window_open(&[UserMessage, AssistantMessage]), None);
+        assert_eq!(turn_window_open(&[]), None);
     }
 }
