@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -68,6 +68,17 @@ function parseExclusiveTools(binding: ResourceBinding): string[] {
     .filter(Boolean);
 }
 
+// ===== 行网格对齐（用户反馈：管理的工具一多，行内 flex 挤压换行导致纵列歪斜） =====
+// 表头行与每个资源行共用同一网格模板：名字列固定宽 → 每行工具区起点一致；
+// 工具区内所有单元格定宽 shrink-0 → 第 i 个工具永远落在同一条纵列上；
+// 工具再多也不挤压换行，超出部分由区块容器（overflow-x-auto）横向滚动。
+const SECTION_GRID_STYLE: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "220px minmax(0, auto)",
+};
+const ALL_COL_CLS = "w-[64px] shrink-0"; // 「全部启用」列（表头占位 + 行内按钮同宽）
+const TOOL_COL_CLS = "w-[168px] shrink-0"; // 每工具一列：启停钮 + 常驻锁同占一列
+
 /** 表头行：左侧"名字 + 三态排序按钮"，右侧与行内工具列对齐的目录定位按钮。
  *  MCP 打开的是配置文件（FileJson 图标），Skill/插件打开目录（FolderOpen 图标）。 */
 function SectionTableHeader(props: {
@@ -86,7 +97,10 @@ function SectionTableHeader(props: {
     ? (tool: string) => t("resources.openMcpConfig", { tool })
     : (tool: string) => t("resources.openToolDir", { tool, kind });
   return (
-    <div className="bg-muted/30 mb-1 flex items-center justify-between rounded border px-2 py-1">
+    <div
+      className="bg-muted/30 mb-1 w-max min-w-full items-center rounded border px-2 py-1"
+      style={SECTION_GRID_STYLE}
+    >
       <div className="flex items-center gap-1">
         <span className="text-xs font-medium">{t("resources.nameHeader")}</span>
         <Button
@@ -101,9 +115,9 @@ function SectionTableHeader(props: {
           {sortDir !== "none" && <span>{sortDir === "asc" ? "↑" : "↓"}</span>}
         </Button>
       </div>
-      <div className="flex gap-1">
+      <div className="flex flex-nowrap gap-1">
         {/* 占位：与行内"全部启用"按钮列对齐 */}
-        <div className="h-6 w-[52px]" />
+        <div className={`h-6 ${ALL_COL_CLS}`} />
         {tools.map((tool) => {
           // 能力门：工具不支持该类资源（如 dsh 无 MCP 配置/插件目录）→ 显示「暂不支持」
           const supported =
@@ -112,7 +126,7 @@ function SectionTableHeader(props: {
             return (
               <span
                 key={tool.id}
-                className="text-muted-foreground/60 h-6 px-2 text-[10px] leading-6"
+                className={`text-muted-foreground/60 flex h-6 items-center text-[10px] ${TOOL_COL_CLS}`}
                 title={t("resources.kindNotSupported")}
               >
                 {t("resources.kindNotSupported")}
@@ -124,7 +138,7 @@ function SectionTableHeader(props: {
               key={tool.id}
               variant="ghost"
               size="sm"
-              className="text-muted-foreground h-6 px-2 text-[10px]"
+              className={`text-muted-foreground h-6 justify-start text-[10px] ${TOOL_COL_CLS}`}
               title={tooltip(tool.label)}
               aria-label={tooltip(tool.label)}
               onClick={() => onOpen(tool.id)}
@@ -257,7 +271,7 @@ export function ResourceByKindView() {
       disabled
       variant="ghost"
       size="sm"
-      className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
+      className={`text-muted-foreground h-6 justify-start px-2 text-[10px] opacity-40 ${TOOL_COL_CLS}`}
       title={title}
     >
       <ToolIcon toolId={tool.id} size={14} className="mr-1" />
@@ -621,7 +635,7 @@ export function ResourceByKindView() {
               {t("resources.noSkillsHint")}
             </div>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-1 overflow-x-auto pb-1">
               <SectionTableHeader
                 kind="skill"
                 tools={tools}
@@ -632,9 +646,10 @@ export function ResourceByKindView() {
               {filteredSkills.map((skill) => (
                 <div
                   key={skill.name}
-                  className="flex items-center justify-between rounded border p-2 text-sm"
+                  className="w-max min-w-full items-center rounded border p-2 text-sm"
+                  style={SECTION_GRID_STYLE}
                 >
-                  <div className="flex items-center gap-1">
+                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden">
                     <span className="font-medium">{formatSkillName(skill.name)}</span>
                     {renderExclusiveBadge("skill", skill.name)}
                     {skill.brokenTools && skill.brokenTools.length > 0 && (
@@ -665,11 +680,11 @@ export function ResourceByKindView() {
                       <Trash2 className="h-3 w-3" />
                     </Button>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex flex-nowrap gap-1">
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-6 px-1.5 text-[10px]"
+                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
                       title={
                         skill.enabledTools.length === tools.length
                           ? t("resources.allToolsOff")
@@ -699,7 +714,7 @@ export function ResourceByKindView() {
                       }
                       const enabled = skill.enabledTools.includes(tool.id);
                       return (
-                        <span key={tool.id} className="flex items-center gap-1">
+                        <span key={tool.id} className={`flex items-center gap-1 ${TOOL_COL_CLS}`}>
                           <Button
                             variant={enabled ? "default" : "ghost"}
                             size="sm"
@@ -745,7 +760,7 @@ export function ResourceByKindView() {
               {t("mcp.empty")}
             </div>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-1 overflow-x-auto pb-1">
               <SectionTableHeader
                 kind="mcp"
                 tools={tools}
@@ -756,9 +771,10 @@ export function ResourceByKindView() {
               {filteredMcp.map((mcp) => (
                 <div
                   key={mcp.name}
-                  className="flex items-center justify-between rounded border p-2 text-sm"
+                  className="w-max min-w-full items-center rounded border p-2 text-sm"
+                  style={SECTION_GRID_STYLE}
                 >
-                  <div className="flex items-center gap-1">
+                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden">
                     <span className="font-medium">{mcp.name}</span>
                     {renderExclusiveBadge("mcp", mcp.name)}
                     {mcp.sourceDisabled && (
@@ -787,11 +803,11 @@ export function ResourceByKindView() {
                       <Trash2 className="h-3 w-3" />
                     </Button>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex flex-nowrap gap-1">
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-6 px-1.5 text-[10px]"
+                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
                       title={
                         mcp.enabledTools.length === tools.length
                           ? t("resources.allToolsOff")
@@ -819,7 +835,7 @@ export function ResourceByKindView() {
                       }
                       const enabled = mcp.enabledTools.includes(tool.id);
                       return (
-                        <span key={tool.id} className="flex items-center gap-1">
+                        <span key={tool.id} className={`flex items-center gap-1 ${TOOL_COL_CLS}`}>
                           <Button
                             variant={enabled ? "default" : "ghost"}
                             size="sm"
@@ -856,7 +872,7 @@ export function ResourceByKindView() {
               {t("resources.noPlugins")}
             </div>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-1 overflow-x-auto pb-1">
               <SectionTableHeader
                 kind="plugin"
                 tools={tools}
@@ -867,9 +883,10 @@ export function ResourceByKindView() {
               {filteredPlugins.map((plugin) => (
                 <div
                   key={plugin.name}
-                  className="flex items-center justify-between rounded border p-2 text-sm"
+                  className="w-max min-w-full items-center rounded border p-2 text-sm"
+                  style={SECTION_GRID_STYLE}
                 >
-                  <div className="flex items-center gap-1">
+                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden">
                     <span className="font-medium">{plugin.name}</span>
                     {renderExclusiveBadge("plugin", plugin.name)}
                     <Button
@@ -890,11 +907,11 @@ export function ResourceByKindView() {
                       <Trash2 className="h-3 w-3" />
                     </Button>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex flex-nowrap gap-1">
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-6 px-1.5 text-[10px]"
+                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
                       title={
                         plugin.enabledTools.length === tools.length
                           ? t("resources.allToolsOff")
@@ -924,7 +941,7 @@ export function ResourceByKindView() {
                       }
                       const enabled = plugin.enabledTools.includes(tool.id);
                       return (
-                        <span key={tool.id} className="flex items-center gap-1">
+                        <span key={tool.id} className={`flex items-center gap-1 ${TOOL_COL_CLS}`}>
                           <Button
                             variant={enabled ? "default" : "ghost"}
                             size="sm"
