@@ -72,8 +72,8 @@ rollout 尾部短暂停在中间 assistant 消息
 
 **已定方案 A（2026-09-16 用户拍板；方案 B 为已否决备选，见本节末尾）**：
 
-- **方案 A（开闭对，dsh 同款，选定）**：扫描 kinds 序列，最后一个 `TurnStart` 晚于最后一个 `TurnEnd` → 回合开。仅当「derive 结果为 Idle 且尾部语义条目是 `AssistantMessage` 且回合开」时改判 Processing。
-  - 超长回合（>500 行尾读窗口）时 `TurnStart` 滚出窗口 → 回合状态不可证 → 回退现状（用户已拍板：保持现状 + 文档化，见 §8 决策 2）。已知限制：长回合中途仍可能假绿（记入 §7）。
+- **方案 A（开闭对，dsh 同款，选定）**：扫描 kinds 序列，最后一个 `TurnStart` 晚于最后一个 `TurnEnd` → 回合开（`Some(true)`）；仅 `TurnEnd` 可见无 `TurnStart`（起点滚出窗口）→ 不可证开（`Some(false)`）；窗口内无任何边界事件 → `None` 不仲裁。仅当「derive 结果为 Idle 且尾部语义条目是 `AssistantMessage` 且回合开」时改判 Processing。
+  - 超长回合（>500 行尾读窗口）时 `TurnStart` 滚出窗口 → 回合状态不可证开 → 回退现状（用户已拍板：保持现状 + 文档化，见 §8 决策 2）。已知限制：长回合中途仍可能假绿（记入 §7）。
   - 既有测试 `assistant_message_tail_is_idle`（夹具无 task_started/task_complete 开闭对）在方案 A 下语义不变（窗口内无边界事件 → 不仲裁 → Idle 照旧），无适配负担——这是 A 相对 B 的实现简洁性优势。
 
 **不参与仲裁的路径**：`UserMessage` 在尾 → Thinking 原样；`ToolCall`/`TurnStart` 在尾 → Processing 原样；`TurnEnd` 在尾 → Idle 原样。
@@ -135,7 +135,7 @@ rollout 尾部短暂停在中间 assistant 消息
 - 尾部 part = assistant 的 `text`/`patch` 且其消息**无任何 step 部件**（team-mode 老格式，无信号）→ 回退现行为（last_role + 60s + CPU 启发式），老会话零回归
 - 会话无 part 数据（空库/极旧库）→ 回退现行为
 
-增强（非必需）：尾部 `tool` 部件 `state.status` ≠ `completed`/`error` → Processing；本机仅观测到 `completed`，未完成值以防御性不等式处理。
+增强说明：尾部出现 `tool` 部件即判 Running（部件在步骤内落盘、`step-finish` 随后 ~0.5s 才写，工具部件在尾恒为步骤进行中）——已覆盖「`state.status` 未完成 → Processing」的原始增强设想且更简，不再单独读取 `state.status`。
 
 该设计同时修复：症状①（占位空窗判黄，绿→红与假 approval 语音消失）、症状②（运行全程黄）、症状③（步骤未完结不判 Idle，单步 >60s 不再闪绿）。完成后的红→绿（≤60s 延迟）为既有设计语义，保留。
 

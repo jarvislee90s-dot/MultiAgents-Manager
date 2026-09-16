@@ -265,12 +265,14 @@ mod debounce_tests {
         );
         // 非 assistant 尾导出的 Idle（tail 为 None，如仅记账条目兜底前的形态）→ 不防抖
         assert_eq!(apply_green_debounce(Idle, None, 0), Idle);
-        // 其他状态透传：Waiting 兜底、Processing、Thinking 不受影响
+        // 其他状态透传：Waiting 兜底、Processing（含 function_call 尾）、Thinking（user 尾）不受影响
         assert_eq!(apply_green_debounce(Waiting, Some(AppEntryKind::AssistantMessage), 0), Waiting);
         assert_eq!(
             apply_green_debounce(Processing, Some(AppEntryKind::AssistantMessage), 0),
             Processing
         );
+        assert_eq!(apply_green_debounce(Processing, Some(AppEntryKind::ToolCall), 0), Processing);
+        assert_eq!(apply_green_debounce(Thinking, Some(AppEntryKind::UserMessage), 0), Thinking);
     }
 
     /// 尾部语义条目随摘要产出：assistant 文本尾 → (Idle, AssistantMessage)；
@@ -385,12 +387,11 @@ fn read_workbuddy_tail_digest(jsonl: &Path) -> WorkBuddyTailDigest {
 }
 ```
 
-3e. 构卡层叠加点（:393 `let status = overlay_mtime_stale(...)` 改为）：
+3e. 构卡层叠加点（:393 `let status = overlay_mtime_stale(...)` 改为；顺序按 spec §4.2——防抖在内层、`overlay_mtime_stale` 在外层。两叠加作用域互斥（防抖只动 Idle、overlay 只动 Processing），顺序无行为差异，取 spec 字面顺序）：
 
 ```rust
-        let status = apply_green_debounce(
-            overlay_mtime_stale(d.status_core.clone(), mtime_age_ms),
-            d.tail_kind,
+        let status = overlay_mtime_stale(
+            apply_green_debounce(d.status_core.clone(), d.tail_kind, mtime_age_ms),
             mtime_age_ms,
         );
 ```
@@ -724,13 +725,15 @@ git commit -m "fix(opencode): session-tail part signal fixes false red at input,
 
 ---
 
-### Task 5: 全量回归与验收
+### Task 5: 全量回归 + 端到端验收（E2E）
 
 **Files:**
-- 无新增改动（验证任务；若 clippy/fmt 产生修复，按工具各自提交）
+- 无新增代码（验证任务；若 clippy/fmt 产生修复，单独提交）
 
 **Interfaces:**
-- Consumes: Task 1-4 的全部产出。
+- Consumes: Task 1-4 的全部产出；用户配合操作三个工具（Codex CLI / WorkBuddy / OpenCode）。
+
+#### 5A. 自动化回归
 
 - [ ] **Step 1: Rust 全量测试**
 
@@ -742,26 +745,81 @@ Expected: 全部 PASS（重点确认 issue #6 的 codex `app_status_fixture_test
 Run: `cd src-tauri && cargo clippy -- -D warnings && cargo fmt --check`
 Expected: 干净；若有 fmt 差异运行 `cargo fmt` 后单独提交 `style: rustfmt`。
 
-- [ ] **Step 3: 前端零改动确认**
+- [ ] **Step 3: 改动面确认**
 
-Run: `git diff --stat origin/main -- src/ package.json`
-Expected: 空输出（本治理不动前端，spec §5）。
+Run: `git diff --stat origin/main -- src/ package.json` → 空输出（不动前端，spec §5）；
+`git diff --stat origin/main -- src-tauri/src/monitor/` → 仅 4 个文件（app_status / codex_parser / workbuddy_parser / opencode_parser），不动清单成员零触碰。
 
-- [ ] **Step 4: 手工验收（用户参与，spec §6）**
+#### 5B. 端到端验收（用户配合，三工具实操）
 
-- Codex CLI：跑一个 3+ 轮工具任务——全程黄灯，只在 `task_complete` 后一次绿灯/一次完成语音。
-- WorkBuddy：完成任务——绿灯/语音延迟约 10s 出现，无中间假绿。
-- OpenCode：提交指令瞬间转黄（无红闪、无假 approval 语音）、运行全程黄、结束后红→绿一次完成语音。
+**环境准备（Step 4）：**
 
-- [ ] **Step 5: 收尾提交（如有）并汇报**
+1. 退出日常运行的 MAM 实例（它不含本修复；双实例会抢托盘/宠物窗造成观察混淆）。
+2. 从 worktree 启动带修复的 MAM：`cd /Users/jarvis/Documents/mam-worktree3 && pnpm install && pnpm tauri:dev`。
+3. 宠物挂载且 done/approval 语音开启；MAM 看板可见三个工具的会话卡。
+4. 用户开三个窗口待命：Codex CLI（任意项目目录）、WorkBuddy、OpenCode。
+5. 执行者（agent）全程每 ~5s 采样工具侧数据文件，与用户观察的灯色/语音对齐时间线：
+   - Codex：`tail` 对应 rollout 文件的 type/payload.type/role 序列；
+   - OpenCode：`sqlite3 -readonly ~/.local/share/opencode/opencode.db` 查末条 part 与 message；
+   - WorkBuddy：`tail` 对应 `~/.workbuddy/projects/*/<sessionId>.jsonl`。
 
-无代码改动则无提交；汇报测试输出与手工验收结果。
+- [ ] **Step 5: Codex CLI 场景——多轮任务零假绿**
+
+用户在 Codex CLI 发指令（必然 3+ 轮工具调用）：
+
+> 查看当前 git log 最近 5 条提交，逐条总结每次改了什么
+
+PASS 判据（全部满足）：
+- a. 任务全程（含每轮工具调用间隙）卡片黄灯，宠物零语音；
+- b. 任务真正结束后恰好一次绿灯 + 一次 done 语音；
+- c. 执行者证据：rollout 尾部序列中存在「`msg/assistant` 后紧跟下一轮 `function_call`」的中间消息形态（即假绿触发条件在本轮真实成立过），且期间卡片未转绿。
+
+- [ ] **Step 6: WorkBuddy 场景——防抖延迟转绿**
+
+用户在 WorkBuddy 发指令（1~2 轮工具调用）：
+
+> 列出当前目录的文件，并统计一共有多少个
+
+PASS 判据：
+- a. 运行全程黄灯，轮次间隙无假绿、无语音；
+- b. 任务完成后绿灯与 done 语音延迟约 10s 到达（允许 10~13s，含 3s 轮询与音频起播抖动）——用户体感确认「完成语音晚了一拍但只响一次」。
+
+- [ ] **Step 7: OpenCode 场景——三症状逐一验证**
+
+用户在 OpenCode 依次发两条指令：
+
+指令 1（验症状①输入瞬间 + 症状②全程黄）：
+
+> 用 ls 列出当前目录的文件，并告诉我一共有几个
+
+PASS 判据：
+- a. 按下回车的瞬间卡片转**黄**（不红、无 approval 语音）；
+- b. 任务运行期间全程黄，无红「等待操作」。
+
+指令 2（验症状③单步 >60s 不假绿 + 正常收尾）：
+
+> 运行 sleep 70，然后告诉我退出码
+>（若 bash 工具超时限制不足 70s，改发：通读目录里最大的一个源文件并总结其结构）
+
+PASS 判据：
+- c. 单步执行的 70s 期间卡片保持黄，不闪绿、无 done 语音；
+- d. 结束后红（≤60s，既有语义）→ 绿 + 恰好一次 done 语音。
+
+- [ ] **Step 8: E2E 证据归档与失败协议**
+
+- 每场景记录：指令文本、发送时刻、灯色迁移时间线（用户口述 + 执行者数据采样对齐）、语音次数。
+- 任一判据 FAIL：执行者立即采样当时的 rollout/DB 尾部序列留证，按 systematic-debugging 流程定位（预期常见点：轮询时序、宠物语音冷却干扰观察、Codex 会话卡与 APP 卡混淆——注意观察的是 CLI 形态卡）；修复后该场景重跑。
+
+- [ ] **Step 9: 汇报**
+
+输出五列判定表：场景 × 判据 × 预期 × 实际 × PASS/FAIL；全部 PASS 后本计划收口，剩余按 finishing-a-development-branch 流程处理分支合流。
 
 ---
 
 ## Self-Review 记录
 
-- **Spec 覆盖**：§4.1 方案 A → Task 1+2；§4.2 → Task 1+3；§4.3 → Task 4（三症状 + 老格式回退 + length 语义）；§5 不动清单 → 各任务 Modify 清单 + Task 5 Step 3 验证；§6 测试与验收 → 各任务测试步 + Task 5；§8 决策 7（不共享 ZCode 映射）→ Task 4 注释与代码。无遗漏。
+- **Spec 覆盖**：§4.1 方案 A → Task 1+2；§4.2 → Task 1+3；§4.3 → Task 4（三症状 + 老格式回退 + length 语义 + tool 部件在尾即 Running）；§5 不动清单 → 各任务 Modify 清单 + Task 5 Step 3 验证；§6 测试与验收 → 各任务测试步 + Task 5；§8 决策 7（不共享 ZCode 映射）→ Task 4 注释与代码。无遗漏。
 - **占位符扫描**：无 TBD/TODO/「类似 Task N」；所有代码步含完整代码。
 - **类型一致性**：`tail_semantic_kind(&[AppEntryKind]) -> Option<AppEntryKind>`、`turn_window_open(&[AppEntryKind]) -> Option<bool>`（Task 1 定义，Task 2/3 消费）；`TailSignal` 三变体与 `tail_part_signal` 签名在 Task 4 内自洽；`determine_opencode_status` 五参签名在 Step 3c/3d/Step 4 间一致。
 - **行号锚点**：Task 3 的 `:211`、Task 4 的 `:209-226`/`:355` 均为 main 分支实测行号；执行时如有漂移以函数名定位。
+- **二次复查（2026-09-16，用户三轮审阅）**：① Task 3 叠加顺序改为与 spec §4.2 字面一致（防抖内层、overlay 外层；行为等价，两者作用域互斥）；② Task 3 测试补 spec 测试清单的两条透传断言（function_call 尾 Processing / user 尾 Thinking）；③ Task 5 扩为完整 E2E（5A 自动化回归 + 5B 三工具实操协议、PASS 判据、证据采样、失败协议）；④ spec 回写两处计划期精确化（`turn_window_open` 的仅 TurnEnd 可见 → Some(false)；tool 部件在尾即 Running 覆盖增强设想）。宪法与关联文档核对：MASTER-PLAN 一期 R1.1/R1.2（状态准确性与边沿提醒）正向受益；二期 R2.3（黄状态排队不打断运行会话）正是假绿治理保护的语义；ZCode spec（2026-09-08）对尾扫核的叙述属其自身格式（有 step-finish 守卫），本轮不动 ZCode，无冲突。
