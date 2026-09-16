@@ -60,58 +60,42 @@ export default function BookmarkBar({
           书签
         </button>
 
-        {/* 色点区（常态：跳转；管理态：删除） */}
+        {/* 色点区：常态点即跳转；管理态变大一号的 × 删除钮（同一按钮两种态） */}
         <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-          {bookmarks.map((b) =>
-            managing ? (
-              <button
-                key={b.color}
-                type="button"
-                data-testid={`bookmark-remove-${b.color}`}
-                aria-label={`删除书签 ${b.preview}`}
-                title={`删除：${b.preview}`}
-                onClick={() => onRemove(b.color)}
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white"
-                style={{ backgroundColor: b.color }}
-              >
-                <X size={12} />
-              </button>
-            ) : (
-              <button
-                key={b.color}
-                type="button"
-                data-testid={`bookmark-dot-${b.color}`}
-                aria-label={`跳转到书签 ${b.preview}`}
-                title={b.preview}
-                onClick={() => onJump(b.anchor)}
-                className="h-3.5 w-3.5 shrink-0 rounded-full transition-transform hover:scale-125"
-                style={{ backgroundColor: b.color }}
-              />
-            )
-          )}
+          {bookmarks.map((b) => (
+            <button
+              key={b.color}
+              type="button"
+              data-testid={`bookmark-${managing ? "remove" : "dot"}-${b.color}`}
+              aria-label={`${managing ? "删除" : "跳转到"}书签 ${b.preview}`}
+              title={managing ? `删除：${b.preview}` : b.preview}
+              onClick={() => (managing ? onRemove(b.color) : onJump(b.anchor))}
+              style={{ backgroundColor: b.color }}
+              className={
+                managing
+                  ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white"
+                  : "h-3.5 w-3.5 shrink-0 rounded-full transition-transform hover:scale-125"
+              }
+            >
+              {managing && <X size={12} />}
+            </button>
+          ))}
         </span>
 
         {/* 管理 / 完成 */}
         <button
           type="button"
-          data-testid="bookmark-manage"
+          data-testid={managing ? "bookmark-manage-done" : "bookmark-manage"}
           aria-label={managing ? "完成管理" : "管理书签"}
           aria-pressed={managing}
           onClick={() => setManaging((v) => !v)}
-          className={`shrink-0 rounded-full p-0.5 text-xs ${
+          className={`shrink-0 rounded-full p-1 text-xs ${
             managing
               ? "bg-slate-200 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
               : "text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
           }`}
         >
-          {/* 管理态用「完成」文案，测试锚点也随态切换（bookmark-manage-done） */}
-          {managing ? (
-            <span data-testid="bookmark-manage-done" className="px-1.5 py-0.5">
-              完成
-            </span>
-          ) : (
-            <Settings2 size={14} className="m-0.5" />
-          )}
+          {managing ? "完成" : <Settings2 size={14} />}
         </button>
 
         {/* 清空全部（仅管理态 + 有书签） */}

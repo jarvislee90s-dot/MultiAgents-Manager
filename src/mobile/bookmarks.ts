@@ -64,19 +64,19 @@ export function listBookmarks(sessionId: string): Bookmark[] {
   return [...(store.get(sessionId) ?? [])];
 }
 
-/** 加书签：颜色已占用 或 已达上限 → 拒绝（no-op）。
- *  两种情况都不可静默替换语义（用户裁决：颜色即唯一键、硬上限 10） */
+/** 加书签：颜色已占用 或 已达上限 → 拒绝（no-op，不静默替换——
+ *  用户裁决：颜色即唯一键、硬上限 10） */
 export function addBookmark(sessionId: string, b: Bookmark): void {
   const list = store.get(sessionId) ?? [];
-  if (list.length >= BOOKMARK_LIMIT) return;
-  if (list.some((x) => x.color === b.color)) return;
+  const full = list.length >= BOOKMARK_LIMIT;
+  const taken = list.some((x) => x.color === b.color);
+  if (full || taken) return;
   store.set(sessionId, [...list, b]);
 }
 
 /** 删单条（按颜色）：不存在则 no-op */
 export function removeBookmark(sessionId: string, color: string): void {
-  const list = store.get(sessionId);
-  if (!list) return;
+  const list = store.get(sessionId) ?? [];
   store.set(
     sessionId,
     list.filter((x) => x.color !== color)

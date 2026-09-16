@@ -547,6 +547,21 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const hasLoadMore =
     messages !== null && !error && (messages.length >= limit || truncated) && limit < MAX_LIMIT;
 
+  // 锚 → 书签查找表（消息角标用；渲染期 O(1) 直读，避免每条消息 find）
+  const bookmarkByAnchor = useMemo(() => new Map(bookmarks.map((b) => [b.anchor, b])), [bookmarks]);
+
+  // 书签条（两个布局分支共用同一份 JSX）
+  const bookmarkBar = (
+    <BookmarkBar
+      bookmarks={bookmarks}
+      atLimit={bookmarks.length >= BOOKMARK_LIMIT}
+      onAdd={handleAddBookmark}
+      onJump={handleJumpBookmark}
+      onRemove={handleRemoveBookmark}
+      onClear={handleClearBookmarks}
+    />
+  );
+
   // 消息区（split 布局复用同一份 JSX）
   const messageArea = (
     <>
@@ -638,6 +653,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             const collapsed = isCollapsed(m);
             const toggleable = isToggleable(m);
             const isUser = m.kind === "user";
+            const msgBookmark = bookmarkByAnchor.get(messageAnchor(m));
             return (
               <li
                 key={m.seq}
@@ -649,17 +665,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 }
               >
                 {/* 书签角标（M3+）：该消息命中书签时在气泡左上显示色点 */}
-                {(() => {
-                  const bm = bookmarks.find((b) => b.anchor === messageAnchor(m));
-                  return bm ? (
-                    <span
-                      data-testid={`msg-bookmark-${m.seq}`}
-                      title={`书签：${bm.preview}`}
-                      className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full ring-2 ring-white dark:ring-slate-950"
-                      style={{ backgroundColor: bm.color }}
-                    />
-                  ) : null;
-                })()}
+                {msgBookmark && (
+                  <span
+                    data-testid={`msg-bookmark-${m.seq}`}
+                    title={`书签：${msgBookmark.preview}`}
+                    className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full ring-2 ring-white dark:ring-slate-950"
+                    style={{ backgroundColor: msgBookmark.color }}
+                  />
+                )}
                 <div
                   className={
                     isUser
@@ -775,14 +788,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
         >
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <BookmarkBar
-              bookmarks={bookmarks}
-              atLimit={bookmarks.length >= BOOKMARK_LIMIT}
-              onAdd={handleAddBookmark}
-              onJump={handleJumpBookmark}
-              onRemove={handleRemoveBookmark}
-              onClear={handleClearBookmarks}
-            />
+            {bookmarkBar}
             <div
               ref={messageAreaRef}
               data-testid="message-area"
@@ -849,14 +855,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
-          <BookmarkBar
-            bookmarks={bookmarks}
-            atLimit={bookmarks.length >= BOOKMARK_LIMIT}
-            onAdd={handleAddBookmark}
-            onJump={handleJumpBookmark}
-            onRemove={handleRemoveBookmark}
-            onClear={handleClearBookmarks}
-          />
+          {bookmarkBar}
           <div
             ref={messageAreaRef}
             data-testid="message-area"
