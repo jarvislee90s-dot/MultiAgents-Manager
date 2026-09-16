@@ -142,7 +142,7 @@
     },
     "remote": {
       "title": "远程接入",
-      "desc": "在手机浏览器打开移动看板（与本机直连）",
+      "desc": "在手机浏览器打开移动看板",
       "hostName": "本机名称",
       "hostNamePlaceholder": "如 JARVIS 的 Win 电脑",
       "enable": "开启远程接入",
@@ -182,7 +182,7 @@
       "stopConfirm": "停止",
       "cancel": "取消",
       "notice1": "远程页面等价于查看全部会话内容；地址即钥匙，勿外传。",
-      "notice2": "当前为临时直通模式，审批制配对将在后续版本提供。",
+      "notice2": "审批配对已可用：新设备在登录页请求接入，待桌面端批准；直通接入码仍可用于一次性分享。",
       "pendingTitle": "待审批设备",
       "pendingEmpty": "暂无请求",
       "pendingApprove": "批准",

@@ -142,7 +142,7 @@
     },
     "remote": {
       "title": "Remote Access",
-      "desc": "Open the mobile board in a phone browser (direct connection to this machine)",
+      "desc": "Open the mobile board in your phone browser",
       "hostName": "Machine name",
       "hostNamePlaceholder": "e.g. JARVIS's Win PC",
       "enable": "Enable remote access",
@@ -182,7 +182,7 @@
       "stopConfirm": "Stop",
       "cancel": "Cancel",
       "notice1": "The remote page exposes all session content; the URL is the key — do not share it.",
-      "notice2": "This is a temporary direct mode; approval-based pairing will arrive in a later version.",
+      "notice2": "Approval pairing is available: new devices request access on the login page and await desktop approval; direct pairing codes remain available for one-time sharing.",
       "pendingTitle": "Pending devices",
       "pendingEmpty": "No pending requests",
       "pendingApprove": "Approve",

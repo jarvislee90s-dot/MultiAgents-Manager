@@ -269,7 +269,8 @@ fn stop_server() {
     // 重启清空，停止 = 全吊销后若不清已消费项，重开远程后旧 requestId 重 poll 仍可复活
     // 已吊销设备（同 purge_approved 防复活语义，spec T0a 即时生效）
     let purged = STATE.approval.lock().unwrap().purge_approved();
-    log::info!("停止远程：审批队列清理已消费项 purged={purged}");
+    // 终审建议并入：purge 计数走审计留痕（与同文件其它审计事件同风格），不再仅打日志
+    events::audit("server_stop_purged_queue", &format!("purged={purged}"));
     STATE.pairing.lock().unwrap().stop();
     // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
     tunnel::stop();
@@ -598,7 +599,10 @@ pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), 
     crate::database::dao::settings::set_setting(KEY_CHANNEL, mode);
     let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
     tunnel::stop();
-    if mode != tunnel::KEY_CHANNEL_VALUE_OFF {
+    // 终审 Important：加服务器句柄存活门——远程关闭（enabled=false）时隧道无意义且浪费
+    // 资源（会触发 cloudflared 下载并 spawn 指向死端口的公网 URL）；而开启远程的路径
+    // 本就会再调 start_if_configured，此门无功能损失。锁短临界区：存活快照取完即放
+    if mode != tunnel::KEY_CHANNEL_VALUE_OFF && handle_is_live(&SERVER_HANDLE.lock().unwrap()) {
         tunnel::start_if_configured(port);
     }
     events::emit_ui("remote-changed", serde_json::json!({ "channel": mode }));

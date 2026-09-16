@@ -324,6 +324,11 @@ pub async fn pair_confirm(
             persist_and_cookie(&st, &device, &name, now)
         }
         ConfirmOutcome::Wrong(left) => {
+            // 敌意试码留痕（spec T2e）：前两次失败也要有审计，否则 exhausted 才是首条记录
+            super::events::audit(
+                "pair_confirm_wrong",
+                &format!("id={} tries_left={left}", req.request_id),
+            );
             Json(serde_json::json!({ "ok": false, "error": "wrong", "triesLeft": left }))
                 .into_response()
         }
