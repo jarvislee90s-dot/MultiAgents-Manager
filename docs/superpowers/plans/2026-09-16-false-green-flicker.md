@@ -419,7 +419,7 @@ git commit -m "fix(workbuddy): 10s green debounce on assistant tail kills transi
 - Consumes: 既有 `MessageData`（:14）；`SessionStatus`。
 - Produces（全部模块内私有）: `enum TailSignal { TurnDone, Running, Fallback }`；`fn tail_part_signal(part: &serde_json::Value, message_role: Option<&str>, message_has_step: bool) -> TailSignal`；`struct SessionTailPart { message_id: String, message_role: Option<String>, part: serde_json::Value }`；`fn get_session_tail_part(conn: &Connection, session_id: &str) -> Option<SessionTailPart>`；`fn message_has_step_part(conn: &Connection, message_id: &str) -> bool`；`determine_opencode_status` 新末参 `tail: TailSignal`。
 
-- [ ] **Step 1: 写失败测试**（新增测试模块；既有 `status_tests` 两测在 Step 4 一并加参适配）
+- [x] **Step 1: 写失败测试**（新增测试模块；既有 `status_tests` 两测在 Step 4 一并加参适配）
 
 ```rust
 #[cfg(test)]
@@ -530,12 +530,12 @@ mod tail_signal_tests {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test --lib opencode_parser::tail_signal_tests`
 Expected: 编译失败（`TailSignal` / 新函数 / `determine_opencode_status` 参数个数不匹配）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a. `TailSignal` 与 `tail_part_signal`（放在 `determine_opencode_status` 之前）：
 
@@ -696,7 +696,7 @@ fn determine_opencode_status(
     );
 ```
 
-- [ ] **Step 4: 适配既有测试并跑全模块**
+- [x] **Step 4: 适配既有测试并跑全模块**
 
 既有 `mod status_tests` 两个测试的 `determine_opencode_status(...)` 调用补第 5 参 `TailSignal::Fallback`（行为不变语义）：
 
@@ -716,7 +716,7 @@ fn determine_opencode_status(
 Run: `cd src-tauri && cargo test --lib opencode_parser`
 Expected: 全部 PASS（新增 4 个 + 既有 2 个适配后零回归）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/monitor/opencode_parser.rs

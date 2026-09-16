@@ -217,12 +217,22 @@ fn build_session_from_row(
 ) -> Option<Session> {
     let (last_role, last_message) = get_last_message_info(conn, session_id);
     let last_msg_time = get_last_message_time(conn, session_id);
+    // 会话尾部部件信号（§4.3）：末条 part + 所属 role；仅 text/patch 尾按需查 step 部件
+    let tail = get_session_tail_part(conn, session_id)
+        .map(|t| {
+            let ptype = t.part.get("type").and_then(|x| x.as_str()).unwrap_or_default();
+            let has_step =
+                (ptype == "text" || ptype == "patch") && message_has_step_part(conn, &t.message_id);
+            tail_part_signal(&t.part, t.message_role.as_deref(), has_step)
+        })
+        .unwrap_or(TailSignal::Fallback);
 
     let status = determine_opencode_status(
         process.cpu_usage,
         last_role.as_deref(),
         last_msg_time,
         time_updated,
+        tail,
     );
     let last_activity_at = ms_to_iso(time_updated);
 
@@ -351,13 +361,128 @@ fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
     }
 }
 
+/// 会话末条部件（跨消息，按落盘时间倒序取 1）+ 所属消息 role（spec §4.3）。
+/// part 表自带 session_id 列，无需绕消息表过滤；role 经 LEFT JOIN message 取
+struct SessionTailPart {
+    message_id: String,
+    message_role: Option<String>,
+    part: serde_json::Value,
+}
+
+fn get_session_tail_part(conn: &Connection, session_id: &str) -> Option<SessionTailPart> {
+    let row = conn
+        .query_row(
+            "SELECT p.message_id, p.data, m.data FROM part p \
+             LEFT JOIN message m ON m.id = p.message_id \
+             WHERE p.session_id = ?1 ORDER BY p.time_created DESC LIMIT 1",
+            [session_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .ok()?;
+    let (message_id, part_data, message_data) = row;
+    let part = serde_json::from_str(&part_data).ok()?;
+    let message_role = message_data.and_then(|d| {
+        serde_json::from_str::<MessageData>(&d)
+            .ok()
+            .and_then(|m| m.role)
+    });
+    Some(SessionTailPart {
+        message_id,
+        message_role,
+        part,
+    })
+}
+
+/// 消息是否含 step 部件（新格式标识；仅尾部为 text/patch 时按需调用）。
+/// 沿模块既有模式取原始 data 在 Rust 侧解析（不依赖 SQLite JSON1 扩展）
+fn message_has_step_part(conn: &Connection, message_id: &str) -> bool {
+    let Ok(mut stmt) = conn.prepare("SELECT data FROM part WHERE message_id = ?1") else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([message_id], |r| r.get::<_, String>(0)) else {
+        return false;
+    };
+    for row in rows.flatten() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&row) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("step-start") | Some("step-finish") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 会话尾部部件信号（spec 假绿治理 §4.3，2026-09-16）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailSignal {
+    /// step-finish(reason=stop)：回合结束 → 走既有 last_role+60s 启发式
+    ///（60s 窗内 Waiting 红 → Idle 绿；用户验证该收尾转换为正常语义，保留）
+    TurnDone,
+    /// 步骤进行中 / 用户输入刚提交 / step-finish(reason≠stop) → Processing 黄
+    Running,
+    /// 无部件或老格式无 step 信号（team-mode text/patch）→ 回退既有启发式
+    Fallback,
+}
+
+/// 尾部部件 → 信号（纯函数）。词汇表活体取证 2026-09-16（opencode v1.18.22）：
+/// step-start / reasoning / tool / step-finish(reason=tool-calls|stop)。
+/// 注意 reason=length 归 Running（宁黄不假绿），与 ZCode part_entry_kind 的
+/// length→TurnEnd 语义相反，故不共享其映射（spec §8 决策 7）
+fn tail_part_signal(
+    part: &serde_json::Value,
+    message_role: Option<&str>,
+    message_has_step: bool,
+) -> TailSignal {
+    // 用户消息的部件（任意类型）= 输入刚提交——含 assistant 占位行空窗
+    //（opencode 按回车后 ~130ms 即写空 assistant 行，末条 part 仍属 user 消息）
+    if message_role == Some("user") {
+        return TailSignal::Running;
+    }
+    let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+    match ptype {
+        "step-finish" => {
+            if part.get("reason").and_then(|r| r.as_str()) == Some("stop") {
+                TailSignal::TurnDone
+            } else {
+                TailSignal::Running // tool-calls / length 等：后续还有动作
+            }
+        }
+        "step-start" | "reasoning" | "tool" => TailSignal::Running,
+        // assistant 的 text/patch：消息含 step 部件 → 新格式流式窗口进行中；
+        // 无 step 部件 → team-mode 老格式无信号，回退启发式（老会话零回归）
+        "text" | "patch" => {
+            if message_has_step {
+                TailSignal::Running
+            } else {
+                TailSignal::Fallback
+            }
+        }
+        _ => TailSignal::Fallback,
+    }
+}
+
 /// OpenCode 状态判断：非 assistant 回复完且 CPU > 15% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
 fn determine_opencode_status(
     cpu: f32,
     last_role: Option<&str>,
     last_msg_time: i64,
     session_updated: i64,
+    tail: TailSignal,
 ) -> SessionStatus {
+    // 尾部部件强信号（spec 假绿治理 §4.3）：步骤进行中/用户输入 → 黄灯，短路既有
+    // 启发式（修「输入瞬间绿→红假语音」「运行全程红」「单步>60s 假绿」三症状）；
+    // TurnDone 与 Fallback 走既有语义
+    if tail == TailSignal::Running {
+        return SessionStatus::Processing;
+    }
     // CPU 为瞬时采样噪声大：仅当会话不是"assistant 已回复完"且 CPU 明显高（阈值提高至 15%）
     // 才升级为 Processing，避免任务结束后后台活动（GC/索引）导致绿黄横跳
     if cpu > 15.0 && last_role != Some("assistant") {
@@ -393,7 +518,7 @@ mod status_tests {
         // 消息时间取 60 秒活跃窗口之外，避开既有 Waiting 分支（其余分支语义不动）
         let old = now - 61_000;
         assert_eq!(
-            determine_opencode_status(50.0, Some("assistant"), old, old),
+            determine_opencode_status(50.0, Some("assistant"), old, old, TailSignal::Fallback),
             SessionStatus::Idle
         );
     }
@@ -403,9 +528,116 @@ mod status_tests {
         // 尚未回复完（最后消息是 user）：高 CPU 正常判 Processing
         let now = chrono::Utc::now().timestamp_millis();
         assert_eq!(
-            determine_opencode_status(50.0, Some("user"), now, now),
+            determine_opencode_status(50.0, Some("user"), now, now, TailSignal::Fallback),
             SessionStatus::Processing
         );
+    }
+}
+
+#[cfg(test)]
+mod tail_signal_tests {
+    use super::*;
+
+    fn part(ptype: &str, reason: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({ "type": ptype });
+        if let Some(r) = reason {
+            v["reason"] = serde_json::json!(r);
+        }
+        v
+    }
+
+    /// §4.3 判定表（词汇表活体取证 2026-09-16，opencode v1.18.22）
+    #[test]
+    fn tail_part_signal_rules() {
+        // step-finish(stop) → 回合结束，走既有启发式（收尾红→绿语义保留）
+        assert_eq!(tail_part_signal(&part("step-finish", Some("stop")), Some("assistant"), false), TailSignal::TurnDone);
+        // step-finish(tool-calls / length) → 后续还有动作（length 宁黄不假绿，spec §8 决策 7）
+        assert_eq!(tail_part_signal(&part("step-finish", Some("tool-calls")), Some("assistant"), false), TailSignal::Running);
+        assert_eq!(tail_part_signal(&part("step-finish", Some("length")), Some("assistant"), false), TailSignal::Running);
+        // 步骤进行中部件
+        assert_eq!(tail_part_signal(&part("step-start", None), Some("assistant"), false), TailSignal::Running);
+        assert_eq!(tail_part_signal(&part("reasoning", None), Some("assistant"), false), TailSignal::Running);
+        assert_eq!(tail_part_signal(&part("tool", None), Some("assistant"), false), TailSignal::Running);
+        // 用户消息的部件（任意类型）= 输入刚提交（含 assistant 占位行空窗）→ Running（修输入瞬间假红）
+        assert_eq!(tail_part_signal(&part("text", None), Some("user"), false), TailSignal::Running);
+        // assistant text/patch：新格式（消息含 step 部件）流式窗口 → Running；
+        // 老格式 team-mode（无 step 部件）→ Fallback 回退启发式（老会话零回归）
+        assert_eq!(tail_part_signal(&part("text", None), Some("assistant"), true), TailSignal::Running);
+        assert_eq!(tail_part_signal(&part("text", None), Some("assistant"), false), TailSignal::Fallback);
+        assert_eq!(tail_part_signal(&part("patch", None), Some("assistant"), false), TailSignal::Fallback);
+        // 未知类型 / 无 role 信息 → Fallback
+        assert_eq!(tail_part_signal(&part("file", None), Some("assistant"), false), TailSignal::Fallback);
+        assert_eq!(tail_part_signal(&part("text", None), None, false), TailSignal::Fallback);
+    }
+
+    /// Running 强信号短路既有启发式：即便 last_role=assistant 且新鲜（旧逻辑判 Waiting 红），
+    /// 也返回 Processing（修「输入瞬间绿→红假语音」与「运行全程红」）
+    #[test]
+    fn running_signal_short_circuits_to_processing() {
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_eq!(
+            determine_opencode_status(0.0, Some("assistant"), now, now, TailSignal::Running),
+            crate::session::SessionStatus::Processing
+        );
+    }
+
+    /// TurnDone / Fallback 走既有语义（assistant+新鲜 → Waiting；超窗 → Idle）
+    #[test]
+    fn turn_done_and_fallback_keep_legacy_behavior() {
+        let now = chrono::Utc::now().timestamp_millis();
+        for tail in [TailSignal::TurnDone, TailSignal::Fallback] {
+            assert_eq!(
+                determine_opencode_status(0.0, Some("assistant"), now, now, tail),
+                crate::session::SessionStatus::Waiting
+            );
+            let old = now - 61_000;
+            assert_eq!(
+                determine_opencode_status(0.0, Some("assistant"), old, old, tail),
+                crate::session::SessionStatus::Idle
+            );
+        }
+    }
+
+    /// 尾部件查询：跨消息取会话末条 part + 所属 role（占位行空窗场景——末条 part 属 user 消息）
+    #[test]
+    fn session_tail_part_crosses_messages() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id INTEGER PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1','s1',100,'{\"role\":\"user\"}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m2','s1',200,'{\"role\":\"assistant\"}')",
+            [],
+        )
+        .unwrap();
+        // 占位行 m2 无部件；末条 part 属 m1（user）
+        conn.execute(
+            "INSERT INTO part VALUES (1,'m1','s1',101,'{\"type\":\"text\",\"text\":\"列一下目录\"}')",
+            [],
+        )
+        .unwrap();
+        let tail = get_session_tail_part(&conn, "s1").unwrap();
+        assert_eq!(tail.message_role.as_deref(), Some("user"));
+        assert_eq!(tail.part.get("type").and_then(|t| t.as_str()), Some("text"));
+        // m2 无 step 部件
+        assert!(!message_has_step_part(&conn, "m2"));
+        // step 部件探测
+        conn.execute(
+            "INSERT INTO part VALUES (2,'m2','s1',300,'{\"type\":\"step-finish\",\"reason\":\"stop\"}')",
+            [],
+        )
+        .unwrap();
+        assert!(message_has_step_part(&conn, "m2"));
+        // 末条 part 现属 m2 → role assistant
+        let tail2 = get_session_tail_part(&conn, "s1").unwrap();
+        assert_eq!(tail2.message_role.as_deref(), Some("assistant"));
     }
 }
 
