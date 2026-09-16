@@ -198,12 +198,25 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     [isCollapsed]
   );
 
-  // 点文件链接 → 预览（默认全屏，Task 8 裁决；页头控件可切分屏）
+  // 点文件链接 → 预览。Bug 2 顺手项（spec P9「按屏幕宽度自适应」）：≥768px 分屏
+  // （上对话下文件）、<768px 全屏；手动切换（页头 / 预览头控件）随时覆盖该默认值。
+  // matchMedia 防御式访问（jsdom / 隐私模式可能缺失，theme.ts 同款口径）
   const openFile = useCallback((path: string) => {
-    setPreview({ path, mode: "fullscreen" });
+    let wide = false;
+    try {
+      wide = window.matchMedia?.("(min-width: 768px)")?.matches ?? false;
+    } catch {
+      wide = false; // matchMedia 缺失/异常 → 窄屏默认全屏（Task 8 原裁决）
+    }
+    setPreview({ path, mode: wide ? "split" : "fullscreen" });
   }, []);
 
   const closePreview = useCallback(() => setPreview(null), []);
+
+  // 布局切换（页头切换器与 FilePreview 页头控件共用同一状态出口）
+  const changePreviewMode = useCallback((mode: "split" | "fullscreen") => {
+    setPreview((p) => (p ? { ...p, mode } : p));
+  }, []);
 
   const sortedFiles = useMemo(() => sortedPaths(files), [files]);
 
@@ -482,13 +495,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
 
       {/* split = 上对话下文件（纵向分屏，Task 8 裁决的手机现实） */}
       {preview?.mode === "split" ? (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div data-testid="split-container" className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-3">{messageArea}</div>
           <div className="h-1/2 shrink-0 border-t border-slate-200 dark:border-slate-800">
             <FilePreview
               session={session}
               filePath={preview.path}
               mode="split"
+              onModeChange={changePreviewMode}
               onClose={closePreview}
             />
           </div>
@@ -504,6 +518,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             session={session}
             filePath={preview.path}
             mode="fullscreen"
+            onModeChange={changePreviewMode}
             onClose={closePreview}
           />
         </div>

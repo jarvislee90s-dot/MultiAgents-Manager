@@ -187,7 +187,8 @@ describe("SessionDetail：消息渲染与折叠交互（P9）", () => {
       },
       { timeout: 3000 }
     );
-  });
+  }, 15000); // 用例级 timeout 加固（flaky 修复②）：60 文件并行时 waitFor 内的
+  // mock→state 链可能吃满默认 5s 用例预算（b7a407d 只加固了 waitFor 自身）
 
   it("Bug 1：truncated=true 且条数 < limit 时仍显示加载更早（胖会话字节截断）", async () => {
     installFetch();
@@ -211,7 +212,7 @@ describe("SessionDetail：消息渲染与折叠交互（P9）", () => {
       },
       { timeout: 3000 }
     );
-  });
+  }, 15000); // 用例级 timeout 加固：同上
 });
 
 describe("SessionDetail：文件链接化与预览联动", () => {
@@ -237,6 +238,47 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.click(screen.getByTestId("preview-close"));
     expect(screen.queryByTestId("file-preview")).toBeNull();
     expect(screen.getByText("改了", { exact: false })).toBeTruthy();
+  });
+
+  it("Bug 2：全屏预览态下切换按钮可达（FilePreview 页头），一键切分屏出分屏容器", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    // 默认全屏浮层（jsdom 无 matchMedia → 窄屏默认；宽屏自适应由 openFile 判定）
+    const preview = await screen.findByTestId("file-preview");
+    expect(preview.getAttribute("data-mode")).toBe("fullscreen");
+    // 全屏浮层 fixed inset-0 盖住 SessionDetail 页头 → 页头切换器不可达；
+    // FilePreview 页头自带的切换控件是全屏态唯一入口
+    fireEvent.click(screen.getByTestId("preview-toggle-split"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
+    // 分屏容器出现（上对话下文件布局，Task 8 裁决）
+    expect(screen.getByTestId("split-container")).toBeTruthy();
+    // 分屏态可一键切回全屏
+    fireEvent.click(screen.getByTestId("preview-toggle-fullscreen"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
+  });
+
+  it("Bug 2 顺手项：宽屏（matchMedia ≥768px）打开文件自动进分屏，窄屏默认全屏", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.fileContent = "fn main() {}";
+    // jsdom 未实现 matchMedia：装 shim（theme.test.ts 同款模式）
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (q: string) => ({ matches: q.includes("min-width"), media: q }),
+    });
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    expect((await screen.findByTestId("file-preview")).getAttribute("data-mode")).toBe("split");
+    expect(screen.getByTestId("split-container")).toBeTruthy();
   });
 
   it("未知路径不出链接：files 为空时正文原样", async () => {

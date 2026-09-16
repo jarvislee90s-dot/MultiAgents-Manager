@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import hljs from "highlight.js/lib/common";
-import { X } from "lucide-react";
+import { Columns2, Maximize2, X } from "lucide-react";
 import { ApiError, fetchFile, type FilePayload } from "./api";
 import type { Session } from "@/types/session";
 
@@ -21,6 +21,10 @@ interface FilePreviewProps {
   filePath: string;
   /** 呈现形态：split=嵌入分屏下半区 / fullscreen=全屏浮层（只影响容器高度语义） */
   mode: "split" | "fullscreen";
+  /** 布局切换回调（Bug 2，M3 验收）：提供后页头出现 split/fullscreen 切换控件——
+   *  全屏浮层 fixed inset-0 盖住 SessionDetail 页头，此控件是全屏态唯一可达入口；
+   *  缺省不渲染（既有直接用法/测试不受影响），切换仍由 SessionDetail 持有 mode */
+  onModeChange?: (mode: "split" | "fullscreen") => void;
   onClose: () => void;
 }
 
@@ -73,7 +77,13 @@ function highlightText(content: string, filePath: string): string {
   }
 }
 
-export default function FilePreview({ session, filePath, mode, onClose }: FilePreviewProps) {
+export default function FilePreview({
+  session,
+  filePath,
+  mode,
+  onModeChange,
+  onClose,
+}: FilePreviewProps) {
   const [state, setState] = useState<LoadState>({ phase: "loading" });
   // 手动重试信号（403 时文件可能已被 agent 补写回限内 / 网络恢复后再试）
   const [retryTick, setRetryTick] = useState(0);
@@ -124,7 +134,7 @@ export default function FilePreview({ session, filePath, mode, onClose }: FilePr
       className="flex h-full min-h-0 flex-col bg-white dark:bg-slate-950"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
-        <span className="truncate text-sm font-medium text-slate-800 dark:text-slate-200">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-200">
           {baseName}
         </span>
         {state.phase === "error" && (
@@ -132,21 +142,55 @@ export default function FilePreview({ session, filePath, mode, onClose }: FilePr
             type="button"
             data-testid="preview-retry"
             onClick={() => setRetryTick((t) => t + 1)}
-            className="ml-auto shrink-0 rounded-md bg-slate-200 px-2 py-1 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+            className="shrink-0 rounded-md bg-slate-200 px-2 py-1 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
           >
             重试
           </button>
+        )}
+        {/* 布局切换控件（Bug 2，M3 验收）：全屏浮层盖住 SessionDetail 页头时，
+            此处是 split/fullscreen 切换的唯一可达入口 */}
+        {onModeChange && (
+          <span
+            role="group"
+            aria-label="预览布局"
+            className="flex shrink-0 items-center rounded-full bg-slate-200 p-0.5 dark:bg-slate-800"
+          >
+            <button
+              type="button"
+              data-testid="preview-toggle-split"
+              aria-pressed={mode === "split"}
+              aria-label="分屏预览"
+              onClick={() => onModeChange("split")}
+              className={`rounded-full p-1 ${
+                mode === "split"
+                  ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
+                  : "text-slate-500 dark:text-slate-400"
+              }`}
+            >
+              <Columns2 size={14} />
+            </button>
+            <button
+              type="button"
+              data-testid="preview-toggle-fullscreen"
+              aria-pressed={mode === "fullscreen"}
+              aria-label="全屏预览"
+              onClick={() => onModeChange("fullscreen")}
+              className={`rounded-full p-1 ${
+                mode === "fullscreen"
+                  ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
+                  : "text-slate-500 dark:text-slate-400"
+              }`}
+            >
+              <Maximize2 size={14} />
+            </button>
+          </span>
         )}
         <button
           type="button"
           data-testid="preview-close"
           aria-label="关闭预览"
           onClick={onClose}
-          className={
-            state.phase === "error"
-              ? "shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
-              : "ml-auto shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
-          }
+          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
         >
           <X size={16} />
         </button>
