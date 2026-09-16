@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionDetail from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
+import { BOOKMARK_COLORS, clearBookmarks } from "@/mobile/bookmarks";
 import type { Session } from "@/types/session";
 
 // M3 Task 8：ZCode 式会话详情页渲染矩阵。fetch 全量 stub（盖过 setup.ts 的 msw），
@@ -65,6 +66,9 @@ let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   routes = {};
+  // 书签 store 用例间隔离（模块级单例，不清理会串场——如上一个用例占用了
+  // 某颜色，下一个用例的调色板里该色就变置灰不可点）
+  clearBookmarks("sess-1");
   // matchMedia 用例间隔离：默认「无 matchMedia」= 窄屏语义（jsdom 原生行为），
   // 需要宽屏的用例自行安装后由 afterEach 还原（旧版仅少数用例安装，
   // 泄漏会让后续用例误判宽屏——如面板默认布局用例）
@@ -689,6 +693,97 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       // 补偿：1000 + (8000 - 5000) = 4000（视线停在原内容处）
       expect(area.scrollTop).toBe(4000);
     });
+  }, 15000);
+
+  it("书签集成：打标签 → 消息旁角标 → 点色点跳转（scrollIntoView 落在目标）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "第一条指令" }),
+      msg({ seq: 1, kind: "assistant", content: "第一段回复" }),
+      msg({ seq: 2, kind: "user", content: "待会回来看这条" }),
+      msg({ seq: 3, kind: "assistant", content: "最后一段" }),
+    ];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("最后一段");
+
+    const area = screen.getByTestId("message-area");
+    // jsdom 无布局：注入几何量——容器顶边 100，seq 2 的底边 200（= 视口首条）
+    area.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    const liOf = (seq: number) => screen.getByTestId(`msg-${seq}`);
+    // 视口顶边 = 100：seq 0/1 已完全滚出上方（bottom ≤ 100），seq 2 是首条可见
+    liOf(0).getBoundingClientRect = () => ({ top: -60, bottom: -10, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    liOf(1).getBoundingClientRect = () => ({ top: 20, bottom: 90, left: 0, right: 400, width: 400, height: 70 }) as DOMRect;
+    liOf(2).getBoundingClientRect = () => ({ top: 110, bottom: 260, left: 0, right: 400, width: 400, height: 150 }) as DOMRect;
+    liOf(3).getBoundingClientRect = () => ({ top: 270, bottom: 400, left: 0, right: 400, width: 400, height: 130 }) as DOMRect;
+
+    // 打标签：点 + → 选第一个颜色 → 落在视口首条（seq 2「待会回来看这条」）
+    fireEvent.click(screen.getByTestId("bookmark-add"));
+    fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[0]}`));
+    // 色点出现 + 目标消息旁有角标
+    expect(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[0]}`)).toBeTruthy();
+    expect(screen.getByTestId("msg-bookmark-2")).toBeTruthy();
+    // 角标只落在命中那条
+    expect(screen.queryByTestId("msg-bookmark-0")).toBeNull();
+
+    // 点色点跳转：scrollIntoView 落在 seq 2 的 li 上
+    const target = liOf(2);
+    const scrollSpy = vi.fn();
+    target.scrollIntoView = scrollSpy;
+    fireEvent.click(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[0]}`));
+    expect(scrollSpy).toHaveBeenCalled();
+    expect(scrollSpy.mock.calls[0][0]).toMatchObject({ block: "start" });
+  }, 15000);
+
+  it("书签集成：删除单条与清空全部", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "甲" }),
+      msg({ seq: 1, kind: "user", content: "乙" }),
+    ];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("乙");
+    const area = screen.getByTestId("message-area");
+    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    screen.getByTestId("msg-1").getBoundingClientRect = () => ({ top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 100 }) as DOMRect;
+
+    // 打两个不同颜色的标签
+    fireEvent.click(screen.getByTestId("bookmark-add"));
+    fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[0]}`));
+    fireEvent.click(screen.getByTestId("bookmark-add"));
+    fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[1]}`));
+    expect(screen.getAllByTestId(/^bookmark-dot-/)).toHaveLength(2);
+
+    // 管理态删单条
+    fireEvent.click(screen.getByTestId("bookmark-manage"));
+    fireEvent.click(screen.getByTestId(`bookmark-remove-${BOOKMARK_COLORS[0]}`));
+    expect(screen.getAllByTestId(/^bookmark-(dot|remove)-/)).toHaveLength(1);
+    // 清空全部
+    fireEvent.click(screen.getByTestId("bookmark-clear-all"));
+    expect(screen.queryAllByTestId(/^bookmark-(dot|remove)-/)).toHaveLength(0);
+    // 角标也一并消失
+    expect(screen.queryByTestId("msg-bookmark-0")).toBeNull();
+  }, 15000);
+
+  it("书签集成：返回看板再进同一会话，书签仍在（store 跨卸载恢复）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "记住我" })];
+    const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("记住我");
+    const area = screen.getByTestId("message-area");
+    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    fireEvent.click(screen.getByTestId("bookmark-add"));
+    fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[3]}`));
+    expect(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[3]}`)).toBeTruthy();
+
+    // 「返回看板」= 卸载本组件（App.tsx 条件挂载）
+    unmount();
+    // 再进同一会话（同 session.id）→ 书签从模块级 store 恢复
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("记住我");
+    expect(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[3]}`)).toBeTruthy();
+    expect(screen.getByTestId("msg-bookmark-0")).toBeTruthy();
   }, 15000);
 
   it("未知路径不出链接：files 为空时正文原样", async () => {

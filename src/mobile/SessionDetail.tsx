@@ -13,6 +13,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { ArrowLeft, ChevronDown, ChevronRight, PanelLeft, RotateCw } from "lucide-react";
+import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
 import { type PreviewMode } from "./PreviewModeSwitcher";
@@ -25,6 +26,16 @@ import {
   type SessionMessage,
 } from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
+import {
+  addBookmark,
+  bookmarkPreview,
+  clearBookmarks,
+  listBookmarks,
+  messageAnchor,
+  removeBookmark,
+  BOOKMARK_LIMIT,
+  type Bookmark,
+} from "./bookmarks";
 import type { Session } from "@/types/session";
 
 /** 单次拉取条数（与后端 session-messages 默认 limit 一致） */
@@ -148,6 +159,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const [fileLoading, setFileLoading] = useState(false);
   // 字号档位（默认 100%）
   const [fontScale, setFontScale] = useState<number>(1);
+  // 书签表（M3+）：初值从模块级 store 读——SessionDetail 卸载重挂后仍恢复
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => listBookmarks(session.id));
+  // 跳转失败提示（书签指向更早范围，当前窗口内找不到）
+  const [bookmarkJumpMiss, setBookmarkJumpMiss] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   // 文件栏占比（可拖分隔条，需求 2026-09-16）：两形态各自保留用户拖出的比例，
   // 初值 0.5（对半分，与旧版 h-1/2 / w-1/2 观感一致）
@@ -413,6 +428,69 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     setRefreshTick((t) => t + 1);
   }, []);
 
+  // ---- 书签（M3+，2026-09-16 用户裁决）----
+  // 取锚：当前视口顶部可见的那条消息。消息 li 挂 data-seq，取第一个
+  // 「底边越过容器顶边」的条目即视口首条
+  const topVisibleMessage = useCallback((): SessionMessage | null => {
+    const el = messageAreaRef.current;
+    if (!el || messages === null) return null;
+    const areaTop = el.getBoundingClientRect().top;
+    const items = el.querySelectorAll<HTMLElement>("[data-seq]");
+    for (const it of items) {
+      if (it.getBoundingClientRect().bottom > areaTop) {
+        const seq = Number(it.dataset.seq);
+        return messages.find((m) => m.seq === seq) ?? null;
+      }
+    }
+    return null;
+  }, [messages]);
+
+  const handleAddBookmark = useCallback(
+    (color: string) => {
+      const m = topVisibleMessage();
+      if (m === null) return;
+      addBookmark(session.id, {
+        color,
+        seq: m.seq,
+        anchor: messageAnchor(m),
+        preview: bookmarkPreview(m.content),
+      });
+      setBookmarks(listBookmarks(session.id));
+      setBookmarkJumpMiss(false);
+    },
+    [session.id, topVisibleMessage]
+  );
+
+  const handleRemoveBookmark = useCallback(
+    (color: string) => {
+      removeBookmark(session.id, color);
+      setBookmarks(listBookmarks(session.id));
+    },
+    [session.id]
+  );
+
+  const handleClearBookmarks = useCallback(() => {
+    clearBookmarks(session.id);
+    setBookmarks([]);
+  }, [session.id]);
+
+  // 跳转：按指纹在当前窗口查回消息 → seq → scrollIntoView（block:start 落在视口顶部）。
+  // 查不到（书签指向已滑出窗口的更早消息）→ 提示先加载更早消息
+  const handleJumpBookmark = useCallback(
+    (anchor: string) => {
+      if (messages === null) return;
+      const target = messages.find((m) => messageAnchor(m) === anchor);
+      if (!target) {
+        setBookmarkJumpMiss(true);
+        return;
+      }
+      setBookmarkJumpMiss(false);
+      const el = messageAreaRef.current?.querySelector<HTMLElement>(`[data-seq="${target.seq}"]`);
+      el?.scrollIntoView({ block: "start" });
+    },
+    [messages]
+  );
+
   // 进入详情默认滚到最底部（最新消息在下方，用户裁决 2026-09-16）；且
   // 「加载更早消息」重拉后**保持原阅读位置**——记录重拉前的滚动高度差，
   // 新内容（更早消息）插在顶部后把差值补回去，视线不跳。
@@ -524,6 +602,15 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       {messages !== null && !error && messages.length === 0 && (
         <p className="py-16 text-center text-sm text-slate-500">暂无消息</p>
       )}
+      {/* 书签跳转失败提示（M3+）：书签指向的消息不在当前窗口 */}
+      {bookmarkJumpMiss && (
+        <p
+          data-testid="bookmark-jump-miss"
+          className="mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          该书签在更早的范围内，请先点上方「加载更早消息」
+        </p>
+      )}
       {/* 「加载更早消息」置于列表**最上方**（2026-09-16 用户裁决）：语义是
           「往前翻到头再加一段更早的」，与阅读方向一致；此前放在列表末尾，
           与「更早」的空间直觉相反 */}
@@ -556,8 +643,23 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 key={m.seq}
                 data-testid={`msg-${m.seq}`}
                 data-kind={m.kind}
-                className={isUser ? "flex flex-col items-end" : "flex flex-col items-start"}
+                data-seq={m.seq}
+                className={
+                  isUser ? "relative flex flex-col items-end" : "relative flex flex-col items-start"
+                }
               >
+                {/* 书签角标（M3+）：该消息命中书签时在气泡左上显示色点 */}
+                {(() => {
+                  const bm = bookmarks.find((b) => b.anchor === messageAnchor(m));
+                  return bm ? (
+                    <span
+                      data-testid={`msg-bookmark-${m.seq}`}
+                      title={`书签：${bm.preview}`}
+                      className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full ring-2 ring-white dark:ring-slate-950"
+                      style={{ backgroundColor: bm.color }}
+                    />
+                  ) : null;
+                })()}
                 <div
                   className={
                     isUser
@@ -672,13 +774,23 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           data-split={preview.mode}
           className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
         >
-          <div
-            ref={messageAreaRef}
-            data-testid="message-area"
-            data-font-scale={fontScale}
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pt-3"
-          >
-            {messageArea}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <BookmarkBar
+              bookmarks={bookmarks}
+              atLimit={bookmarks.length >= BOOKMARK_LIMIT}
+              onAdd={handleAddBookmark}
+              onJump={handleJumpBookmark}
+              onRemove={handleRemoveBookmark}
+              onClear={handleClearBookmarks}
+            />
+            <div
+              ref={messageAreaRef}
+              data-testid="message-area"
+              data-font-scale={fontScale}
+              className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"
+            >
+              {messageArea}
+            </div>
           </div>
           <SplitHandle
             orientation={preview.mode === "split-h" ? "horizontal" : "vertical"}
@@ -736,13 +848,23 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           </div>
         </div>
       ) : (
-        <div
-          ref={messageAreaRef}
-          data-testid="message-area"
-          data-font-scale={fontScale}
-          className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"
-        >
-          {messageArea}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <BookmarkBar
+            bookmarks={bookmarks}
+            atLimit={bookmarks.length >= BOOKMARK_LIMIT}
+            onAdd={handleAddBookmark}
+            onJump={handleJumpBookmark}
+            onRemove={handleRemoveBookmark}
+            onClear={handleClearBookmarks}
+          />
+          <div
+            ref={messageAreaRef}
+            data-testid="message-area"
+            data-font-scale={fontScale}
+            className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"
+          >
+            {messageArea}
+          </div>
         </div>
       )}
 
