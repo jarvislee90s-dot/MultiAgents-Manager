@@ -246,8 +246,10 @@ export function RemoteSection() {
                 onCheckedChange={(v) => {
                   if (v === true) void confirmPublic();
                   else
+                    // 分隔符不硬编码：句号收进各 locale 文案（评审 Important：英文 locale 下
+                    // 全角「。」混排是用户可见 i18n 缺陷），组件仅以空格连接两句
                     toast.info(
-                      `${t("settings.remote.tlsAckNoRevoke")}。${t("settings.remote.tlsAckRevokeByRebind")}`
+                      `${t("settings.remote.tlsAckNoRevoke")} ${t("settings.remote.tlsAckRevokeByRebind")}`
                     );
                 }}
               />
