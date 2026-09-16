@@ -8,6 +8,7 @@ pub mod files;
 pub mod gate;
 pub mod pairing;
 pub mod server;
+pub mod tunnel;
 pub mod watcher;
 
 pub const KEY_ENABLED: &str = "remote.enabled";
@@ -18,6 +19,10 @@ pub const KEY_PUBLIC_ACK: &str = "remote.public_ack";
 pub const KEY_HOST_NAME: &str = "remote.host_name";
 /// 默认端口（避开 3080=dsh / 1420=vite / 18789=zcode）
 pub const DEFAULT_PORT: u16 = 9420;
+/// 外部通道（M4 T1）：off / quick / named 三值（tunnel::parse_channel 唯一解析口）
+pub const KEY_CHANNEL: &str = "remote.channel";
+/// 命名隧道 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
+pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
 
 // ============================================================
 // 生命周期接线（Task 4）：服务器随设置启停 + 四个 tauri 命令 + 启动恢复
