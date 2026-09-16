@@ -25,6 +25,7 @@ import {
   remoteStatus,
   remoteToggle,
   type PairingToken,
+  type RemoteAddressEntry,
   type RemoteStatus,
 } from "@/lib/api/remote";
 import { getSetting, setSetting } from "@/lib/api/settings";
@@ -155,10 +156,14 @@ export function RemoteSection() {
     }
   };
 
-  // Bug 6（M3 验收）：bind=0.0.0.0 时 url 与 lanUrls[0] 是同一 IP 生成的同一串
-  // （后端两字段各有消费方、语义不动）——展示层过滤与主 url 全等的候选，避免
-  // 同一地址渲染两行
-  const lanUrls = (status?.lanUrls ?? []).filter((u) => u !== status?.url);
+  // 地址表（2026-09-16 用户裁决）：单区块逐条渲染。addresses 缺失时（后端旧版
+  // 或载荷异常）回落单条 status.url，保证展示不空
+  const addresses: RemoteAddressEntry[] =
+    status?.addresses && status.addresses.length > 0
+      ? status.addresses
+      : status
+        ? [{ url: status.url, iface: "", primary: true }]
+        : [];
 
   return (
     <div className="space-y-4">
@@ -248,36 +253,34 @@ export function RemoteSection() {
         {/* 运行中才展示地址与二维码（停止状态无服务可连） */}
         {enabled && status && (
           <>
-            <div className="flex items-center justify-between py-2.5">
-              <label className="text-sm font-medium">{t("settings.remote.address")}</label>
-              <div className="flex items-center gap-2">
-                <code className="text-xs">{status.url}</code>
-                <Button variant="outline" size="sm" onClick={() => void copy(status.url)}>
-                  <Copy className="mr-1 h-3 w-3" />
-                  {t("settings.remote.copy")}
-                </Button>
+            {/* 地址区块（2026-09-16 用户裁决）：单区块逐条展示全部可用地址——
+                多网卡机器有多个网段（如实测 WLAN 与以太网），旧版「访问地址 +
+                局域网地址」两块并列会被读成重复。每条标注网卡名，主/推荐那条
+                带标记；复制按钮逐条给（手机对准所在网络挑一条即可） */}
+            <div className="flex items-start justify-between gap-4 py-2.5">
+              <label className="mt-0.5 shrink-0 text-sm font-medium">
+                {t("settings.remote.address")}
+              </label>
+              <div className="flex flex-col items-end gap-1.5">
+                {addresses.map((a) => (
+                  <div key={a.url} className="flex items-center gap-2">
+                    <span className="text-muted-foreground text-xs">
+                      {a.iface || t("settings.remote.addressLocal")}
+                    </span>
+                    {a.primary && (
+                      <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        {t("settings.remote.addressRecommended")}
+                      </span>
+                    )}
+                    <code className="text-xs">{a.url}</code>
+                    <Button variant="outline" size="sm" onClick={() => void copy(a.url)}>
+                      <Copy className="mr-1 h-3 w-3" />
+                      {t("settings.remote.copy")}
+                    </Button>
+                  </div>
+                ))}
               </div>
             </div>
-            {/* lanUrls 仅 0.0.0.0 绑定时非空（后端 lan_hosts_for 门控） */}
-            {lanUrls.length > 0 && (
-              <>
-                <div className="border-t" />
-                <div className="flex items-center justify-between py-2.5">
-                  <label className="text-sm font-medium">{t("settings.remote.lanAddress")}</label>
-                  <div className="flex flex-col items-end gap-1">
-                    {lanUrls.map((u) => (
-                      <div key={u} className="flex items-center gap-2">
-                        <code className="text-xs">{u}</code>
-                        <Button variant="outline" size="sm" onClick={() => void copy(u)}>
-                          <Copy className="mr-1 h-3 w-3" />
-                          {t("settings.remote.copy")}
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
             <div className="border-t" />
             <div className="flex items-center justify-between py-2.5">
               <label className="text-sm font-medium">{t("settings.remote.qrGenerate")}</label>

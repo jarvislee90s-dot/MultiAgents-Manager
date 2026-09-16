@@ -25,16 +25,21 @@ const status = {
   port: 8787,
   url: "http://127.0.0.1:8787/m",
   lanUrls: [],
+  addresses: [{ url: "http://127.0.0.1:8787/m", iface: "", primary: true }],
 };
 
-// Bug 6（M3 验收）：bind=0.0.0.0 时 remote_status 的 url 与 lanUrls[0] 是同一 IP
-// 生成的同一串——设置页去重前渲染两行一模一样的地址
+// 2026-09-16 用户裁决：地址合并为**一个区块**逐条展示（多网卡有两个不同网段的
+// 地址，旧版「访问地址 + 局域网地址」两块并列被读成重复）
 const lanStatus = {
   enabled: true,
   bind: "0.0.0.0",
   port: 9420,
-  url: "http://192.168.1.5:9420/m",
-  lanUrls: ["http://192.168.1.5:9420/m", "http://10.0.0.2:9420/m"],
+  url: "http://192.168.66.202:9420/m",
+  lanUrls: ["http://192.168.66.202:9420/m", "http://192.168.42.216:9420/m"],
+  addresses: [
+    { url: "http://192.168.66.202:9420/m", iface: "WLAN", primary: true },
+    { url: "http://192.168.42.216:9420/m", iface: "以太网", primary: false },
+  ],
 };
 
 beforeEach(() => {
@@ -48,8 +53,8 @@ beforeEach(() => {
   });
 });
 
-describe("RemoteSection 访问地址展示（Bug 6 去重）", () => {
-  it("lanUrls 含与 url 全等的条目时不重复渲染（url 单独一行展示）", async () => {
+describe("RemoteSection 访问地址展示（2026-09-16 单区块 + 网卡名）", () => {
+  it("多网卡地址在同一个「访问地址」区块逐条展示，各带网卡名与推荐标记", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
       if (cmd === "remote_status") return { ...lanStatus };
       if (cmd === "get_setting") {
@@ -58,13 +63,40 @@ describe("RemoteSection 访问地址展示（Bug 6 去重）", () => {
       return null;
     });
     render(<RemoteSection />);
-    // 局域网分区出现（0.0.0.0 绑定 + enabled）
-    expect(await screen.findByText("LAN addresses (for the phone)")).toBeTruthy();
-    // 与主 url 全等的候选被过滤：整个页面该串只出现一次（访问地址行）
-    const dup = screen.getAllByText("http://192.168.1.5:9420/m");
-    expect(dup).toHaveLength(1);
-    // 其余候选照常展示
-    expect(screen.getByText("http://10.0.0.2:9420/m")).toBeTruthy();
+    // 单区块：地址标签只出现一次（旧版是「访问地址」+「局域网地址」两块并列），
+    // 且不再有独立的局域网地址分区
+    expect(await screen.findAllByText("Address")).toHaveLength(1);
+    expect(screen.queryByText("LAN addresses (for the phone)")).toBeNull();
+    // 两个地址都在，且逐条标注所属网卡
+    expect(screen.getByText("http://192.168.66.202:9420/m")).toBeTruthy();
+    expect(screen.getByText("http://192.168.42.216:9420/m")).toBeTruthy();
+    expect(screen.getByText("WLAN")).toBeTruthy();
+    expect(screen.getByText("以太网")).toBeTruthy();
+    // 主（推荐）地址有标记，另一条没有
+    expect(screen.getAllByText("Recommended")).toHaveLength(1);
+  });
+
+  it("loopback 绑定：单条目（本机），无网卡名与推荐噪声", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
+      if (cmd === "remote_status") {
+        return {
+          enabled: true,
+          bind: "127.0.0.1",
+          port: 9420,
+          url: "http://127.0.0.1:9420/m",
+          lanUrls: [],
+          addresses: [{ url: "http://127.0.0.1:9420/m", iface: "本机", primary: true }],
+        };
+      }
+      if (cmd === "get_setting") {
+        return args?.key === "remote.host_name" ? "JARVIS-Win" : null;
+      }
+      return null;
+    });
+    render(<RemoteSection />);
+    expect(await screen.findAllByText("Address")).toHaveLength(1);
+    expect(screen.getByText("http://127.0.0.1:9420/m")).toBeTruthy();
+    expect(screen.getByText("本机")).toBeTruthy();
   });
 });
 

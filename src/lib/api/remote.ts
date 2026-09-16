@@ -8,6 +8,16 @@ export type RemoteStatus = {
   url: string;
   // 仅 bind=0.0.0.0 时非空：本机局域网地址候选（手机可直达）
   lanUrls: string[];
+  // 地址表（2026-09-16 用户裁决）：设置页「访问地址」单区块逐条渲染的数据源。
+  // iface = 网卡名（探测不到为空串，前端本地化兜底）；
+  // primary = 推荐地址（0.0.0.0 时即默认路由那条）
+  addresses: RemoteAddressEntry[];
+};
+
+export type RemoteAddressEntry = {
+  url: string;
+  iface: string;
+  primary: boolean;
 };
 
 // remote_issue_token 的返回：一次性配对码 + 拼好 #token= 片段的可扫 URL

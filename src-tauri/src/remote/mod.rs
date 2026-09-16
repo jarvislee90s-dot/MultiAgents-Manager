@@ -262,7 +262,8 @@ pub fn remote_status() -> serde_json::Value {
     let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
     let enabled = status_enabled(db_enabled, handle_alive);
     // LAN 枚举只做一次：候选同时喂 lanUrls 与 0.0.0.0 时的主显示 url（P7 v6 修正）
-    let ips = local_lan_ips();
+    let candidates = local_lan_candidates();
+    let ips: Vec<String> = candidates.iter().map(|(ip, _)| ip.clone()).collect();
     let lan = lan_urls_for(&bind, ips.clone(), port);
     // host 载荷薄装配：可测内核 host_payload（见下），此处只注入真实依赖
     // （空串/空白设置由 display_host_name 内部过滤，见其注释）
@@ -276,6 +277,8 @@ pub fn remote_status() -> serde_json::Value {
     st["port"] = serde_json::json!(port);
     st["url"] = serde_json::json!(display_url_for(&bind, port, ips));
     st["lanUrls"] = serde_json::json!(lan);
+    // 地址表（2026-09-16 用户裁决）：设置页「访问地址」单区块逐条渲染的数据源
+    st["addresses"] = serde_json::json!(address_entries(&bind, port, &candidates));
     st
 }
 
@@ -359,26 +362,34 @@ pub fn remote_confirm_public() -> Result<(), String> {
 /// 空表 → display_host_for 回落 127.0.0.1（= 验收第 2 条偶发不过的根因），多网卡
 /// 机器候选缺失。新实现：UDP 默认路由 IP 优先 + sysinfo 全量 UP 网卡枚举追加，
 /// 去重保序（UDP 恒首位——display_host_for 取 first 的语义不变）
-fn local_lan_ips() -> Vec<String> {
+fn local_lan_candidates() -> Vec<(String, String)> {
     let udp = std::net::UdpSocket::bind("0.0.0.0:0")
         .ok()
         .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s))
         .and_then(|s| s.local_addr().ok())
         .map(|a| a.ip().to_string());
-    merge_lan_candidates(udp, enumerated_lan_ips())
+    merge_lan_candidates(udp, enumerated_lan_candidates())
 }
 
-/// sysinfo 全量网卡 IPv4 枚举（Bug 7）：仅收非回环 / 非链路本地 / 非未指定地址。
-/// 虚拟网卡（WSL / Hyper-V vEthernet）**不排除**——多候选无害（设置页逐条展示），
-/// 主显示 url 仍由 UDP 默认路由首位决定，虚拟网卡不会挤掉首位
-fn enumerated_lan_ips() -> Vec<String> {
+/// 候选 IP 表（仅地址，display_host_for / lan_urls_for 的输入形态）
+fn local_lan_ips() -> Vec<String> {
+    local_lan_candidates()
+        .into_iter()
+        .map(|(ip, _)| ip)
+        .collect()
+}
+
+/// sysinfo 全量网卡枚举（Bug 7；2026-09-16 起带网卡名）：仅收非回环 / 非链路
+/// 本地 / 非未指定 IPv4。虚拟网卡（WSL / Hyper-V vEthernet）**不排除**——多候选
+/// 无害（设置页逐条展示并标注网卡名），主显示 url 仍由 UDP 默认路由首位决定
+fn enumerated_lan_candidates() -> Vec<(String, String)> {
     let networks = sysinfo::Networks::new_with_refreshed_list();
     let mut out = Vec::new();
-    for data in networks.list().values() {
+    for (name, data) in networks.list() {
         for net in data.ip_networks() {
             if let std::net::IpAddr::V4(v4) = net.addr {
                 if !(v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()) {
-                    out.push(v4.to_string());
+                    out.push((v4.to_string(), name.clone()));
                 }
             }
         }
@@ -386,24 +397,36 @@ fn enumerated_lan_ips() -> Vec<String> {
     out
 }
 
-/// LAN 候选合并内核（纯函数，Bug 7 可测核心）：UDP 默认路由恒首位 → 枚举候选
-/// 去重保序追加 → 回环 / 非法 / 非 IPv4 剔除。UDP 探测失败或只探到回环时由
-/// 枚举结果兜底——消灭「无外网路由瞬间回落 127.0.0.1」的主场景
-fn merge_lan_candidates(udp: Option<String>, enumerated: Vec<String>) -> Vec<String> {
-    fn try_push(ip: Option<String>, out: &mut Vec<String>) {
-        let Some(ip) = ip else { return };
-        let valid = ip
-            .parse::<std::net::Ipv4Addr>()
+/// LAN 候选合并内核（纯函数，Bug 7 可测核心）：UDP 默认路由恒首位（网卡名从
+/// 枚举表反查，查不到给**空串**——前端按语言本地化为「本机」，后端不硬编码文案）
+/// → 枚举候选去重保序追加 → 回环 / 非法 / 非 IPv4 剔除。UDP 探测失败或只探到
+/// 回环时由枚举结果兜底——消灭「无外网路由瞬间回落 127.0.0.1」的主场景
+fn merge_lan_candidates(
+    udp: Option<String>,
+    enumerated: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    fn valid(ip: &str) -> bool {
+        ip.parse::<std::net::Ipv4Addr>()
             .map(|v| !(v.is_loopback() || v.is_link_local() || v.is_unspecified()))
-            .unwrap_or(false);
-        if valid && !out.contains(&ip) {
-            out.push(ip);
+            .unwrap_or(false)
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    if let Some(ip) = udp {
+        if valid(&ip) {
+            // 网卡名反查失败 → 空串（前端本地化兜底），不因缺名丢候选
+            let iface = enumerated
+                .iter()
+                .find(|(e, _)| *e == ip)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default();
+            out.push((ip, iface));
         }
     }
-    let mut out = Vec::new();
-    try_push(udp, &mut out);
-    for ip in enumerated {
-        try_push(Some(ip), &mut out);
+    for (ip, iface) in enumerated {
+        if !valid(&ip) || out.iter().any(|(e, _)| *e == ip) {
+            continue;
+        }
+        out.push((ip, iface));
     }
     out
 }
@@ -438,6 +461,40 @@ fn lan_urls_for(bind: &str, ips: Vec<String>, port: u16) -> Vec<String> {
     } else {
         vec![]
     }
+}
+
+/// 地址表内核（纯函数，2026-09-16 用户裁决）：设置页「访问地址」合并为**一个区块**
+/// 逐条展示——多网卡机器有两个不同网段的地址（如实测 WLAN 192.168.66.x 与
+/// 以太网 192.168.42.x），旧版「访问地址 + 局域网地址」两块并列会被读成重复。
+/// 条目：`{url, iface, primary}`，0.0.0.0 时逐候选出（首位 primary=推荐），
+/// 空候选回落 loopback；具体地址/loopback 绑定为单条目
+fn address_entries(
+    bind: &str,
+    port: u16,
+    candidates: &[(String, String)],
+) -> Vec<serde_json::Value> {
+    if bind == "0.0.0.0" && !candidates.is_empty() {
+        return candidates
+            .iter()
+            .enumerate()
+            .map(|(i, (ip, iface))| {
+                serde_json::json!({
+                    "url": format!("http://{ip}:{port}/m"),
+                    // 网卡名（探测不到为空串——前端本地化兜底，后端不硬编码文案）
+                    "iface": iface,
+                    "primary": i == 0,
+                })
+            })
+            .collect();
+    }
+    // 非通配绑定，或通配但无候选（离线）→ 单条目：host 取 display_host_for 同值；
+    // iface 空串 = 前端本地化「本机」（非通配）语义
+    let host = display_host_for(bind, candidates.iter().map(|(ip, _)| ip.clone()).collect());
+    vec![serde_json::json!({
+        "url": format!("http://{host}:{port}/m"),
+        "iface": "",
+        "primary": true,
+    })]
 }
 
 /// 应用启动恢复（lib.rs setup 调用）：开机自启（若启用）。失败仅告警不阻断启动
@@ -735,46 +792,96 @@ mod tests {
     }
 
     /// Bug 7（M3 验收）：LAN 候选合并内核——UDP 默认路由恒首位、去重保序、
-    /// 回环剔除、UDP 空时枚举兜底（消灭回落 127.0.0.1 的主场景）
+    /// 回环剔除、UDP 空时枚举兜底（消灭回落 127.0.0.1 的主场景）。
+    /// 2026-09-16 起候选带网卡名（设置页逐条标注）
     #[test]
     fn merge_lan_candidates_orders_dedups_and_falls_back() {
+        fn cands(list: &[(&str, &str)]) -> Vec<(String, String)> {
+            list.iter()
+                .map(|(ip, iface)| (ip.to_string(), iface.to_string()))
+                .collect()
+        }
         // UDP 优先 + 去重保序（枚举中的同 IP 不重复入列）
         assert_eq!(
             merge_lan_candidates(
                 Some("192.168.1.5".into()),
-                vec!["192.168.1.5".into(), "10.0.0.2".into(), "172.16.0.3".into()]
+                cands(&[
+                    ("192.168.1.5", "WLAN"),
+                    ("10.0.0.2", "以太网"),
+                    ("172.16.0.3", "虚拟网卡"),
+                ])
             ),
-            vec![
-                "192.168.1.5".to_string(),
-                "10.0.0.2".to_string(),
-                "172.16.0.3".to_string()
-            ]
+            cands(&[
+                ("192.168.1.5", "WLAN"),
+                ("10.0.0.2", "以太网"),
+                ("172.16.0.3", "虚拟网卡"),
+            ])
         );
         // 回环 / 非法串 / 非 IPv4 剔除
         assert_eq!(
             merge_lan_candidates(
                 Some("127.0.0.1".into()),
-                vec![
-                    "127.0.0.1".into(),
-                    "10.0.0.2".into(),
-                    "not-an-ip".into(),
-                    "::1".into()
-                ]
+                cands(&[
+                    ("127.0.0.1", "Loopback"),
+                    ("10.0.0.2", "以太网"),
+                    ("not-an-ip", "x"),
+                    ("::1", "v6"),
+                ])
             ),
-            vec!["10.0.0.2".to_string()]
+            cands(&[("10.0.0.2", "以太网")])
         );
         // UDP 探测失败（None）→ 枚举兜底（旧实现此场景恒空表 → 回落 127.0.0.1）
         assert_eq!(
-            merge_lan_candidates(None, vec!["192.168.1.5".into()]),
-            vec!["192.168.1.5".to_string()]
+            merge_lan_candidates(None, cands(&[("192.168.1.5", "WLAN")])),
+            cands(&[("192.168.1.5", "WLAN")])
         );
         // 双双为空 → 空表（display_host_for 仍回落 127.0.0.1 作最后兜底）
         assert!(merge_lan_candidates(None, vec![]).is_empty());
         // UDP 只探到回环（无外网路由的隔离网段）→ 剔除后由枚举兜底
         assert_eq!(
-            merge_lan_candidates(Some("127.0.0.1".into()), vec!["10.0.0.9".into()]),
-            vec!["10.0.0.9".to_string()]
+            merge_lan_candidates(Some("127.0.0.1".into()), cands(&[("10.0.0.9", "以太网")])),
+            cands(&[("10.0.0.9", "以太网")])
         );
+        // UDP 命中的 IP 不在枚举里（罕见：枚举与探测时序不一致）→ 网卡名留空
+        // （前端本地化兜底），不得因缺名丢候选
+        assert_eq!(
+            merge_lan_candidates(Some("192.168.9.9".into()), cands(&[("10.0.0.2", "以太网")])),
+            cands(&[("192.168.9.9", ""), ("10.0.0.2", "以太网")])
+        );
+    }
+
+    /// 2026-09-16 用户裁决：设置页「访问地址」合并为一个区块，逐条标注网卡名——
+    /// 地址表内核：0.0.0.0 时逐候选出条目（首位 primary），空候选回落 loopback；
+    /// 具体绑定/loopback 单条目；网卡名缺失留空串（文案本地化在前端）
+    #[test]
+    fn address_entries_labels_iface_and_marks_primary() {
+        let cands = vec![
+            ("192.168.66.202".to_string(), "WLAN".to_string()),
+            ("192.168.42.216".to_string(), "以太网".to_string()),
+        ];
+        // 0.0.0.0：全部候选逐条出，首位标推荐并带网卡名
+        let e = address_entries("0.0.0.0", 9420, &cands);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["url"], "http://192.168.66.202:9420/m");
+        assert_eq!(e[0]["iface"], "WLAN");
+        assert_eq!(e[0]["primary"], true);
+        assert_eq!(e[1]["url"], "http://192.168.42.216:9420/m");
+        assert_eq!(e[1]["iface"], "以太网");
+        assert_eq!(e[1]["primary"], false);
+        // 0.0.0.0 且候选为空（离线）→ 单条 loopback 兜底（与 display_url_for 同值）
+        let e = address_entries("0.0.0.0", 9420, &[]);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["url"], "http://127.0.0.1:9420/m");
+        assert_eq!(e[0]["primary"], true);
+        // loopback / 具体地址绑定 → 单条目（iface 空串 = 前端「本机」本地化）
+        let e = address_entries("127.0.0.1", 9420, &cands);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["url"], "http://127.0.0.1:9420/m");
+        assert_eq!(e[0]["iface"], "");
+        assert_eq!(e[0]["primary"], true);
+        // 网卡名缺失（探测不到）→ 空串透传，不硬编码中文文案
+        let e = address_entries("0.0.0.0", 9420, &[("10.0.0.5".into(), String::new())]);
+        assert_eq!(e[0]["iface"], "");
     }
 
     /// (c) 陈旧句柄自愈（评审 Important 修复的行为锁定）：经 `start_server_core` 的
