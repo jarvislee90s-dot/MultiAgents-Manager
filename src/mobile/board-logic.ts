@@ -19,7 +19,7 @@ const AGENT_TYPE_RECORD: Record<AgentType, AgentType> = {
 
 /** 八工具 chips 顺序（键集穷尽自 AgentType，顺序与其在 session.ts 的声明顺序一致） */
 export const AGENT_TYPES: readonly AgentType[] = Object.values(AGENT_TYPE_RECORD);
-
+// 注：仅测试消费（board-logic.test 穷尽断言），生产代码用 host.enabledTools 驱动
 export type ToolFilter = AgentType | "all";
 
 /** 工具显示名（P8c 卡片主行）：八值与桌面 agentBadge.tsx 的 label 口径一致，但**独立定义**
@@ -38,8 +38,6 @@ export const TOOL_LABELS: Record<AgentType, string> = {
 };
 
 /** 过滤 chips：全部在最前，其后按 AgentType 八值顺序 */
-export const TOOL_FILTERS: readonly ToolFilter[] = ["all", ...AGENT_TYPES] as const;
-
 /** 工具品牌色（P8e chips 底色，逐字对齐 Task 3 brief；色值仅作品牌识别，与桌面 ToolIcon 的
  *  图标底色系不同源——brief 拍板的口径优先）。Record<AgentType, string> 穷尽守卫
  *  （对齐 AGENT_TYPE_RECORD 模式）：AgentType 增删值时此处编译报错，chips 不会静默缺色 */
@@ -150,18 +148,19 @@ export const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
 /** 状态中文名（M3 Task 6 跃迁横幅「变化方向」用；文案对齐桌面 i18n
  *  sessionList.statusLabels：waiting=等待操作 / finished=已结束）。
  *  Record<SessionStatus, string> 穷尽守卫：状态增删时此处编译报错，横幅不会静默缺文案 */
+/** 跃迁横幅文案（M3 Task 6）：`工具 · 项目 · 前态 → 后态 [· 消息预览]`。
+ *  wire 值防御：agentType / from / to 理论上受后端类型约束，但 JSON.parse 结果不可信——
+ *  未知值回落原样字符串（横幅仍可读），不得渲染 undefined */
 export const STATUS_LABELS: Record<SessionStatus, string> = {
   waiting: "等待操作",
   processing: "运行中",
   thinking: "思考中",
   compacting: "压缩中",
   idle: "空闲",
-  finished: "已结束",
+  finished: "已完成",
 };
+// 注：横幅文案回归锁（测试断言六值穷尽），防格式化时漏加状态
 
-/** 跃迁横幅文案（M3 Task 6）：`工具 · 项目 · 前态 → 后态 [· 消息预览]`。
- *  wire 值防御：agentType / from / to 理论上受后端类型约束，但 JSON.parse 结果不可信——
- *  未知值回落原样字符串（横幅仍可读），不得渲染 undefined */
 export function formatTransition(ev: TransitionEvent): string {
   const tool = TOOL_LABELS[ev.agentType] ?? ev.agentType;
   const from = STATUS_LABELS[ev.from] ?? ev.from;

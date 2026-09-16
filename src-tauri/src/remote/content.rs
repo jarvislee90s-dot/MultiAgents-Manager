@@ -253,6 +253,25 @@ fn tool_summary(name: Option<&str>) -> String {
 // ZCode：~/.zcode/cli/db/db.sqlite（message + part 表）
 // ============================================================
 
+/// 在 <tool_dir>/projects/*/ 下按 session_id 定位 .jsonl 文件（claude / workbuddy 共用）
+fn find_jsonl_in_projects(
+    home: &std::path::Path,
+    tool_dir: &str,
+    session_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let projects = home.join(tool_dir).join("projects");
+    let Ok(entries) = std::fs::read_dir(&projects) else {
+        return Err(format!("{tool_dir} projects 目录不存在"));
+    };
+    for dir in entries.flatten() {
+        let candidate = dir.path().join(format!("{session_id}.jsonl"));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("会话文件不存在: {session_id}"))
+}
+
 fn read_zcode_messages_with(
     home: &Path,
     session_id: &str,
@@ -629,20 +648,9 @@ fn read_claude_messages_with(
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<SessionMessage>, String> {
-    let projects = home.join(".claude").join("projects");
-    let Ok(entries) = std::fs::read_dir(&projects) else {
-        return Err("claude projects 目录不存在".to_string());
-    };
-    // 按 session_id 找文件：projects/*/ 下名为 <session_id>.jsonl（目录名是 mangled
-    // cwd，不可反推——扫一层即中）
-    for dir in entries.flatten() {
-        let candidate = dir.path().join(format!("{session_id}.jsonl"));
-        if candidate.is_file() {
-            let lines = crate::monitor::jsonl::read_recent_lines(&candidate, line_budget(limit));
-            return Ok(finalize(map_claude_lines(&lines), limit));
-        }
-    }
-    Err(format!("claude 会话文件不存在: {session_id}"))
+    let path = find_jsonl_in_projects(home, ".claude", session_id)?;
+    let lines = crate::monitor::jsonl::read_recent_lines(&path, line_budget(limit));
+    Ok(finalize(map_claude_lines(&lines), limit))
 }
 
 /// Claude JSONL 行 → 统一条目（纯函数）。行协议：type user/assistant +
@@ -1232,20 +1240,9 @@ fn read_workbuddy_messages_with(
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<SessionMessage>, String> {
-    // 内容 API 只有 session_id 无 cwd（心跳才带 cwd）——扫 projects/*/ 找 <sid>.jsonl
-    // （workbuddy_parser::find_session_jsonl 兜底段的同款扫描）
-    let projects = home.join(".workbuddy").join("projects");
-    let Ok(entries) = std::fs::read_dir(&projects) else {
-        return Err("workbuddy projects 目录不存在".to_string());
-    };
-    for dir in entries.flatten() {
-        let candidate = dir.path().join(format!("{session_id}.jsonl"));
-        if candidate.is_file() {
-            let lines = crate::monitor::jsonl::read_recent_lines(&candidate, line_budget(limit));
-            return Ok(finalize(map_workbuddy_lines(&lines), limit));
-        }
-    }
-    Err(format!("workbuddy 会话文件不存在: {session_id}"))
+    let path = find_jsonl_in_projects(home, ".workbuddy", session_id)?;
+    let lines = crate::monitor::jsonl::read_recent_lines(&path, line_budget(limit));
+    Ok(finalize(map_workbuddy_lines(&lines), limit))
 }
 
 /// WorkBuddy JSONL 行 → 统一条目（纯函数；workbuddy_entry_kind 的内容版映射）。

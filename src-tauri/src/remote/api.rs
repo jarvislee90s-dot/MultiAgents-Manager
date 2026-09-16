@@ -1,5 +1,5 @@
 // /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
-// + pair + heartbeat + events（M3 Task 6 SSE 实时通道）+ session-messages（Task 7）
+// + pair + events（M3 Task 6 SSE 实时通道）+ session-messages（Task 7）
 // + session-files / file（M3 Task 8 文件路径提取与安全读取）
 
 use axum::{
@@ -158,12 +158,6 @@ pub async fn pair(
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response())
-}
-
-/// POST /m/api/v1/heartbeat：gate 已刷新 last_seen（touch），此处仅回 pong 供客户端保活判定
-/// M3 保活判定预留，当前 sessions 轮询 gate touch 已覆盖
-pub async fn heartbeat() -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": true }))
 }
 
 /// GET /m/api/v1/host（M3 Task 1）：移动看板页头品牌行（P8a 版本 + P8b 本机名 +

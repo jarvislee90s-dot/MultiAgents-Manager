@@ -5,7 +5,6 @@ import {
   STATUS_DOT_COLOR,
   STATUS_LABELS,
   TOOL_BRAND_COLORS,
-  TOOL_FILTERS,
   TOOL_LABELS,
   applyTransition,
   darkenHex,
@@ -117,17 +116,6 @@ describe("board-logic 工具过滤", () => {
 
   it("chips 顺序 = AgentType 八值顺序 + 全部在前", () => {
     expect(AGENT_TYPES).toEqual([
-      "claude",
-      "codex",
-      "opencode",
-      "openclaw",
-      "kimi",
-      "workbuddy",
-      "zcode",
-      "dsh",
-    ]);
-    expect(TOOL_FILTERS).toEqual<ToolFilter[]>([
-      "all",
       "claude",
       "codex",
       "opencode",

@@ -159,7 +159,6 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
         .route("/file", get(api::read_file))
         .route("/pair", post(api::pair))
-        .route("/heartbeat", post(api::heartbeat))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
         // `/m/api/v1/nope` 会落到外层 fallback（Task 7 的静态兜底 → 200 静态内容），
         // 绕开"所有 /m/api/* 过 gate（403）"这条安全不变量（评审实测确认）
@@ -553,44 +552,6 @@ mod tests {
             .unwrap()
         });
         assert!(seen > now - 5_000, "gate 应刷新 last_seen_at，实际 {seen}");
-    }
-
-    /// heartbeat 同样受 gate 保护；带有效 cookie 回 pong
-    #[tokio::test]
-    async fn heartbeat_is_gated_and_returns_pong() {
-        let (state, _clock) = state_with_clock();
-        let now = chrono::Utc::now().timestamp_millis();
-        state.store.with(|c| {
-            crate::remote::pairing::persist_device(
-                c,
-                &crate::remote::pairing::NewDevice {
-                    id: "hb".into(),
-                    name: String::new(),
-                    ua: String::new(),
-                    origin_ip: String::new(),
-                    paired_at: now,
-                },
-            )
-            .unwrap();
-        });
-        let app = router(state);
-        let r = app
-            .clone()
-            .oneshot(req("POST", "/m/api/v1/heartbeat", None, None))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 403);
-        let r = app
-            .oneshot(req(
-                "POST",
-                "/m/api/v1/heartbeat",
-                Some("mam_device=hb"),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 200);
-        assert!(body_string(r).await.contains("\"ok\":true"));
     }
 
     /// gate 拒绝不可区分性（评审 Important 4）："无 cookie"与"cookie 无效（未配对 id）"
