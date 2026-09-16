@@ -1,7 +1,7 @@
 # 设计文档：会话假「完成」信号（假绿）治理 — Codex CLI / WorkBuddy / OpenCode
 
 - 日期：2026-09-16
-- 状态：待评审
+- 状态：设计定稿（全部决策已拍板，含 OpenCode 活体取证；待出实现计划）
 - 工作分支：`fix/status-false-green`（基于 main `2b86907`）
 - 关联问题：用户实测报告——Codex CLI 多轮工具调用场景，每轮结束输出中间消息时被误判「任务完成」转绿灯，触发宠物语音
 
@@ -56,7 +56,7 @@ rollout 尾部短暂停在中间 assistant 消息
 | **ZCode**（SQLite） | 尾扫核 + `step-finish(reason=tool-calls)`→ToolCall 守卫 | 半免疫：步骤间已守卫（`zcode_parser.rs:668-676`），残余仅部件流式落盘窗口（未证实） | 不动，残余暴露记录于 §7 |
 | **Claude**（JSONL） | 消息模型：assistant 带 `tool_use` → Processing（`status.rs:127`） | 免疫（文字+tool_use 同条消息，纯文本即回合结束） | 不动 |
 | **Kimi**（wire.jsonl 事件流） | 事件模型：`tool_calls` 判据 + `turn.ended` 边界（`kimi_parser.rs:429`） | 免疫 | 不动 |
-| **OpenCode**（SQLite） | `last_role` + 60s 新鲜窗 + CPU（`opencode_parser.rs:363`） | 延迟衰减变体：中间消息先红 60s，模型停顿 >60s 才假绿 | **加末消息工具部件守卫**（§4.3） |
+| **OpenCode**（SQLite） | `last_role` + 60s 新鲜窗 + CPU（`opencode_parser.rs:363`） | 延迟衰减变体：中间消息先红 60s，模型停顿 >60s 才假绿 | **加 step 边界守卫**（§4.3，ZCode 同构，活体取证完成） |
 | **OpenClaw** | 纯 CPU 启发式 | 另一类误报源（API 等待期 CPU 低） | 不动（超出本轮范围，§7 记 follow-up） |
 | **dsh**（事件流 + 锁） | 轮次事实 `has_open_turn`（`dsh/status.rs`） | 免疫，正面教材 | 不动，作为 Codex 守卫的参考实现 |
 
@@ -70,26 +70,21 @@ rollout 尾部短暂停在中间 assistant 消息
 
 **实现位置**：`app_status.rs` 新增共享纯函数 + `codex_parser.rs` 消费，`derive_app_status` 契约不变（核仍是「最后一条说了什么」，回合感知是叠加在核之上的仲裁层，WorkBuddy/ZCode 等无信号消费者不受影响）。
 
-**两个候选方案**（需评审定夺，推荐 B）：
+**已定方案 A（2026-09-16 用户拍板；方案 B 为已否决备选，见本节末尾）**：
 
-- **方案 A（开闭对，dsh 同款）**：扫描 kinds 序列，最后一个 `TurnStart` 晚于最后一个 `TurnEnd` → 回合开。仅当「derive 结果为 Idle 且尾部语义条目是 `AssistantMessage` 且回合开」时改判 Processing。
-  - 超长回合（>500 行尾读窗口）时 `TurnStart` 滚出窗口 → 回合状态不可证 → 回退现状（用户已拍板：保持现状 + 文档化）。已知限制：长回合中途仍可能假绿。
-- **方案 B（不可证完成即不绿，推荐）**：**仅当回合可证关闭时 assistant 尾才判 Idle**——`AssistantMessage` 在尾且其位置晚于窗口内最后一个 `TurnEnd`（或窗口内无任何 `TurnEnd`）→ 改判 Processing。
-  - 语义：绿灯的充分条件收紧为「看见了回合结束」，而不是「没看见回合在跑」。
-  - 正常回合结束时尾部为 `[..., assistant收尾, task_complete]` 或 `[..., task_complete]`，`TurnEnd` 在尾 → 照常 Idle，**绿灯零延迟**。
-  - 中间消息在尾 → 它必然位于上一回合 `TurnEnd` 之后（本轮未关）→ 保持 Processing，假绿消失。
-  - 超长回合中途（窗口内可能无 `TurnEnd`）→ 同样不可证完成 → Processing（**行为正确**，方案 A 在此场景失效而 B 不失效）。
-  - 兜底：若未来某版本 rollout 不再写 `task_complete`，会话将保持黄灯直到 300s 停更降级路径转绿（`session_from_digest` 现有 Waiting→Idle 就地转换）——罕见场景可接受。
-  - 实测依据：本机三轮真实数据与 issue #6 实测样本中，每个回合末尾均写 `task_complete`，视为稳定协议行为。
-  - 既有测试影响：`assistant_message_tail_is_idle`（人为构造「无 task_complete 的 assistant 尾」）语义将反转为 Processing，属预期变更，需随实现更新并注明依据。
+- **方案 A（开闭对，dsh 同款，选定）**：扫描 kinds 序列，最后一个 `TurnStart` 晚于最后一个 `TurnEnd` → 回合开。仅当「derive 结果为 Idle 且尾部语义条目是 `AssistantMessage` 且回合开」时改判 Processing。
+  - 超长回合（>500 行尾读窗口）时 `TurnStart` 滚出窗口 → 回合状态不可证 → 回退现状（用户已拍板：保持现状 + 文档化，见 §8 决策 2）。已知限制：长回合中途仍可能假绿（记入 §7）。
+  - 既有测试 `assistant_message_tail_is_idle`（夹具无 task_started/task_complete 开闭对）在方案 A 下语义不变（窗口内无边界事件 → 不仲裁 → Idle 照旧），无适配负担——这是 A 相对 B 的实现简洁性优势。
 
 **不参与仲裁的路径**：`UserMessage` 在尾 → Thinking 原样；`ToolCall`/`TurnStart` 在尾 → Processing 原样；`TurnEnd` 在尾 → Idle 原样。
 
-**测试**（两方案通用）：
+**测试**（方案 A）：
 - 真实样本夹具化（§1.2 序列）：中间消息在尾 → Processing；追加 function_call → Processing；追加收尾消息 + task_complete → Idle。
 - 两轮同文件：第一轮完成后第二轮运行中 → Processing（回归 issue #6 主场景）。
 - 回合正常完成 → Idle 立即（无防抖延迟）。
-- 方案 B 专属：窗口内无 TurnEnd + assistant 尾 → Processing（超长回合中途不假绿）。
+- 窗口内无开闭对（既有夹具形态）→ 语义不变（Idle 照旧），锁定 A 的回退行为。
+
+**已否决备选——方案 B（不可证完成即不绿）**：`AssistantMessage` 在尾且位于窗口内最后一个 `TurnEnd` 之后（或窗口内无 `TurnEnd`）→ 保持 Processing。优点：超长回合中途也不假绿、绿灯零延迟；缺点：依赖「每回合必写 `task_complete`」这一协议假设，且反转 `assistant_message_tail_is_idle` 既有语义。用户裁决取 A（行为可预期性优先，超窗场景接受已知限制）。
 
 ### 4.2 WorkBuddy：完成防抖（10 秒）
 
@@ -107,21 +102,29 @@ rollout 尾部短暂停在中间 assistant 消息
 
 **测试**：assistant 尾 + mtime 9.9s → Processing / 10.1s → Idle；`function_call` 尾不受防抖影响（照常 Processing）；user 尾照常 Thinking；防抖只作用于 assistant 尾导出的 Idle，不影响其他 Idle 来源。
 
-### 4.3 OpenCode：末消息工具部件守卫
+### 4.3 OpenCode：step 边界守卫（ZCode 同构）
 
 **目标**：消除「中间停顿 >60s 后假绿」的延迟衰减变体。
 
 **现状**：`determine_opencode_status`（`opencode_parser.rs:363`）只看 last_role + 60s 窗 + CPU，完全不读 parts。中间消息场景：assistant 尾 + 60s 内红（Waiting）、超 60s 绿（Idle）——若模型/编排器 60s 后续跑则假绿。
 
-**本机取证**（opencode v1.18.22，`~/.local/share/opencode/opencode.db`）：库内 `part` 表本机仅有 `text`/`patch` 两类部件（本机几乎没有 opencode 工具任务样本）；`event` 表为实体投影事件（`session.created` / `message.updated` / `message.part.updated` / `session.updated`），未见回合级 idle 事件。**tool 部件的真实 data 形状（`state.status` 字段名与状态枚举）本机无法取证，列为实现期前置任务。**
+**活体取证（2026-09-16，opencode v1.18.22，用户配合实测一轮工具任务）**——原「实现期前置取证」任务已消解，证据如下：
 
-**设计**：取最后一条 assistant 消息的 parts（查询路径已有，`opencode_parser.rs:312`），若存在 `type="tool"` 的部件且其状态为未完成（`pending`/`running`，词汇表以实现期取证为准）→ Processing，覆盖 Waiting/Idle 分支；tool 部件全部完结 → 维持现行为。
+- **消息/部件结构**：每个模型 step = 一条独立 assistant 消息，部件序 `step-start → [reasoning | tool | text] → step-finish`；一轮 = 一至多个 step。
+- **step-finish.reason 词汇表（本机两值全观测）**：`tool-calls`（本步因要调工具而结束，后续还有动作）/ `stop`（回合结束）。与 ZCode 解析器的映射（`zcode_parser.rs:668-676`）及 opencode issue 生态（[opencode #14972](https://github.com/anomalyco/opencode/issues/14972) 中 `finish_reason: tool_calls` 标准值）三源交叉一致。
+- **tool 部件真实形状**：`{"type":"tool","tool":"bash","callID":"call_…","state":{"status":"completed","input":{"command":"…"}}}`——tool 部件会落盘，本守卫设计不依赖它（增强项）。
+- **时序金证**：step1 `step-finish(tool-calls)` 落盘到 step2 `step-start` 落盘间隔 **4.3 秒**——此窗口内尾部即 `step-finish(tool-calls)`，恰是守卫要覆盖的「步骤间空窗」；step2 回答 text 落盘到 `step-finish(stop)` 间隔 5.1 秒（部件流式窗口，守卫同样覆盖）。
 
-**残余已知限制**：本机数据实证存在外部编排器驱动形态（AionUi/omo "Sisyphus" 向 opencode 注入消息，见 `session.updated` 事件中的 agent 字段与注入文本样本）——text-only assistant 消息 >60s 后由编排器续跑的场景，库内无回合信号可判，假绿窗口保留，记入 §7。
+**设计**（与 ZCode `part_entry_kind` 完全同构）：读取会话尾部部件（查询路径已有，`opencode_parser.rs:312`），映射 `step-finish(reason)` 后判定：
 
-**实现期前置任务**：跑一次真实 opencode 工具任务（或对照 opencode 源码 `packages/opencode/src/session/`）取证：① `part.data` 中 tool 部件的状态字段路径与枚举；② event 表是否保留回合级事件（若保留 `session.idle` 类事件，则改用事件尾扫，语义对齐 Kimi `turn.ended`，优先级高于部件判据）。
+- 尾部语义部件 = `step-finish(reason="tool-calls")` → 后续还有动作 → **Processing**（覆盖现 Waiting/Idle 分支）
+- 尾部语义部件 = `step-finish(reason="stop")` → 回合结束 → 维持现行为（60s 窗内 Waiting / 超窗 Idle）
+- 尾部无 `step-finish`（步骤进行中：`step-start`/`reasoning`/`text`/`tool` 在尾）→ **Processing**
+- 增强（非必需）：尾部 `tool` 部件 `state.status` 为未完成值 → Processing；本机仅观测到 `completed`，未完成值词汇表（`running`/`pending`）实现期以防御性不等式（≠ `completed`/`error`）处理
 
-**测试**：末 assistant 消息带 pending/running tool 部件 → Processing；全部 completed → 现行为（60s 窗内 Waiting / 超窗 Idle）；无 parts 数据（旧库/空库）→ 现行为降级。
+**残余已知限制**：外部编排器 team-mode 形态（AionUi/omo "Sisyphus"，本机 `ses_fae18a2f` 等老会话实证）只落 `text`/`patch` 部件、无 step 部件 → 无 step 信号时回退现行为，编排器续跑的假绿窗口保留（记入 §7）。
+
+**测试**（以本节取证样本为夹具）：`step-finish(tool-calls)` 在尾 → Processing；`step-finish(stop)` 在尾 → 现行为；`text` 尾无 step-finish（流式窗口）→ Processing；无 step 部件的老库会话 → 现行为降级；user 消息在尾 → 现行为（Processing/Thinking 语义不变）。
 
 ## 5. 明确不动清单
 
@@ -145,16 +148,16 @@ rollout 尾部短暂停在中间 assistant 消息
 
 - **WorkBuddy 防抖漏防**：模型中间停顿 >10s 仍会漏放一次假绿（启发式上限）。
 - **ZCode 流式落盘窗口**：text part 已写、step-finish 未写的瞬态窗口未证实是否存在假绿；待有实感症状再立项。
-- **OpenCode 编排器续跑**：外部编排形态无库内回合信号，假绿窗口保留；若实现期取证发现 event 表有回合级事件可升级方案。
+- **OpenCode 编排器续跑**：team-mode 外部编排形态（无 step 部件）无库内回合信号，假绿窗口保留。
 - **OpenClaw CPU 误报族**：API 等待期 CPU 低可能假绿/假红，与本轮不同根因，单独立项。
-- **方案 A 专属限制**（若评审选 A）：>500 行长回合窗口内无开闭对 → 回退现状可能假绿。（方案 B 无此限制。）
+- **方案 A 专属限制**：>500 行长回合窗口内无开闭对 → 回退现状可能假绿（用户裁决接受，§8 决策 2/5）。
 
 ## 8. 决策记录
 
 | # | 决策点 | 结论 | 日期 |
 |---|---|---|---|
 | 1 | WorkBuddy 防抖思路是否接纳 | 接纳 | 2026-09-16 |
-| 2 | Codex CLI 超窗（>500 行）回退策略 | 保持现状 + 文档化（方案 A 语境；方案 B 下该限制自然消解） | 2026-09-16 |
+| 2 | Codex CLI 超窗（>500 行）回退策略 | 保持现状 + 文档化（方案 A 语境） | 2026-09-16 |
 | 3 | WorkBuddy 防抖窗口 N | 10 秒（常量可调） | 2026-09-16 |
 | 4 | OpenCode 延迟衰减变体是否本轮处理 | 本轮一并修（§4.3） | 2026-09-16 |
-| 5 | Codex CLI 守卫方案 A vs B | **待评审**（推荐 B：不可证完成即不绿） | — |
+| 5 | Codex CLI 守卫方案 A vs B | **方案 A（开闭对，dsh 同款）**；B 记录为已否决备选 | 2026-09-16 |
