@@ -3,6 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > **v2（2026-09-16）**：三文档对照核查（M4 spec v1.1 / 一期 v6 / 宪法 D1-D17）+ 代码实证修订 14 处——详见文末「对照核查记录」。
+> **v3（2026-09-16）**：一期 v6 全量覆盖复查（补 3 处：P10 D17 标注进 Task 12、首屏 ≤1s / 180 天 cookie 两条 v6 非功能断言进 E2E）+ Task 12 重构为统一端到端验收（S1-S14 场景表；computer-use 可行性已本机实证：WKWebView 不透传 AX → 桌面走截图+坐标点击，移动走 Playwright 直连真实服务器）。
 
 **Goal:** 交付 M4 五组能力——T0 前置清账（SSE 即时断连 / TLS 撤回文案）、T1 外部通道（命名隧道主路径 + 临时隧道 + cloudflared 获取）、T2 审批配对 + 设备花名册、T3 电源保活、T4 托盘远程入口；外网真机验收全绿即宪法一期验收达成。
 
@@ -2874,12 +2875,19 @@ git commit -m "feat(m4-t4): 托盘远程入口——开关勾选项+地址展示
 
 ---
 
-### Task 12: 收尾 · 全量门禁 + M4 验收记录
+### Task 12: 收尾 · 全量门禁 + 统一端到端验收（M4 全场景）
 
 **Files:**
 - Create: `docs/release-notes/m4-acceptance.md`
+- Modify: `docs/superpowers/specs/2026-09-12-remote-access-level1-design.md`（附录进度表 + P10 的 D17 移期标注——v6 原文仍列 ntfy/Bark 为 M4 交付，须随验收落档修订）
 
-**Interfaces:** 无代码——验收文档 + 门禁终跑。
+**Interfaces:** 无代码——验收执行 + 文档落档。**本任务是 M4 验收唯一出口**：spec §9 八项 + v6 §5 非功能 + 宪法 §5.b 一期行全部在此收口。
+
+**验收工具链（2026-09-16 本机探针已验证）**：
+- **桌面端驱动**：computer-use。**已实证 Tauri/WKWebView 网页内容不透传辅助功能树**（AX 只见原生菜单栏）→ 桌面 UI 操作走「截图定位 + 坐标点击」路线（`raw_mouse_keyboard`/截图/坐标命中能力探针全绿）。读数（面板文本/4 位码/toast）同用截图目读。
+- **移动端驱动**：Playwright 浏览器直连真实服务器（`http://127.0.0.1:9420/m`）——真 HTTP/SSE/cookie 链路，不碰 tauri-mock。多浏览器 context = 多设备模拟（配对上限场景需要 4 个）。
+- **OS 真值探针**：bash——`lsof -i :9420`（服务在听）、`pgrep caffeinate` / `pmset -g assertions`（电源锁）、`pgrep cloudflared`（隧道进程）、Playwright 网络日志（Set-Cookie Max-Age）。
+- **环境**：`pnpm tauri:dev` 后台起（验收前 `cargo build` 已绿）；**数据契约**：验收用设备全部以「JARVIS-E2E-<场景>」命名，结束统一吊销清账，不污染真实花名册。
 
 - [ ] **Step 1: 全量门禁（顺序执行，任何一步失败停下修复）**
 
@@ -2890,24 +2898,48 @@ cd .. && pnpm build:mobile && pnpm check && pnpm test
 
 Expected: 全绿；记录各套数字（Rust 用例数 / 前端用例数 / 双端构建产物）写入验收记录。
 
-- [ ] **Step 2: 写验收记录**
+- [ ] **Step 2: 端到端场景执行（S1–S14，逐项记录通过/失败与证据）**
 
-`docs/release-notes/m4-acceptance.md`（对照 `m3-acceptance.md` 结构）：分支/基线（`feat/m4-external-fullchain`，基于 M3 合并后 main）、逐任务交付表（T0-T4 → commit hash）、自动化门禁数字、**手动验收清单**（spec §9 八项外网真机 + 局域网补充项逐条列出待用户勾选）、已知限制登记（named 隧道 url 解析失败时设置页显示「以 Cloudflare 面板为准」、审批队列重启即清、托盘通知点击直达设置页为观察项）。
+外网真机才能验的项标注【人工】，其余全部由执行 agent 驱动（computer-use + Playwright + bash）。
 
-- [ ] **Step 3: 更新 spec 附录进度表**
+| # | 场景 | 驱动步骤 | 通过标准 |
+|---|---|---|---|
+| S1 | 远程开关 + TLS 门 | computer-use：设置→远程接入，绑 0.0.0.0 未确认时开开关 | 开启失败 toast 出现（P7 安全门）；改绑本机后可开；`lsof -i :9420` 在听 |
+| S2 | T0b 撤回文案 | computer-use：勾选 TLS 确认后取消勾选 | 复选框回弹 + toast「不可在线撤回」+ 常驻说明文案（截图留证） |
+| S3 | 直通扫码配对 + 首屏 | computer-use 点「生成二维码」→ 截图读 URL → Playwright 导航（`#token=` 自动提交） | 板上卡；**Playwright 断言 Set-Cookie `Max-Age=15552000`（v6 P6：180 天）**；**首屏 ≤1s**（v6 §5：`performance.timing` domContentLoaded≤1000ms 或人工秒表复核） |
+| S4 | 审批配对（路径一） | Playwright 新 context 访问 `/m` → 填设备名「JARVIS-E2E-S4」→ 请求接入；computer-use 截图确认桌面通知出现 + 待审批项出现 → 点「批准」 | 新 context 数秒内上板（≤5s）；轮询 poll 幂等（刷新页面仍已配对） |
+| S5 | 4 位码（路径二） | Playwright 另一 context 请求接入 → computer-use 截图读待审批项上的 4 位码 → context 输码 | 输码后上板；花名册出现两台 E2E 设备且在线点为绿 |
+| S6 | 限试 3 次 | Playwright context 对某请求连输 3 次错码 | 第 1/2 次「剩余 N 次」；第 3 次「错误次数过多，请重新发起」；桌面待审批项消失 |
+| S7 | 满员腾位 | 3 台设备在册（S3/S4/S5 累计）→ 第 4 台：审批路径批准按钮禁用/报「设备已满」；4 位码输对也回 cap_full；直通扫码回 cap_full | 三入口同拒；花名册吊销一台后任一入口放行（spec T2c 端到端） |
+| S8 | 吊销即时断连 | Playwright：S4 设备页面开着（SSE 在线）；computer-use 花名册点该设备「吊销」 | 该页面 **≤5s** 内断连回配对页（T0a；断连后重连被拒 403）；其余设备页面不受影响 |
+| S9 | 停止远程一键断开 | computer-use 关闭远程开关（确认弹窗） | 全部 Playwright context 回配对页；`lsof -i :9420` 不在听；`pgrep caffeinate` 无进程（电源锁释放） |
+| S10 | 电源保活往返 | 重新开启远程 → `pmset -g assertions` 采样 → 关闭 → 再采样 | 开启期间出现 `PreventUserIdleSystemSleep` 类断言（caffeinate -i/-s）；关闭后断言消失（macOS 本机可全自动；Windows 磁盘代设还原【人工：Win 实机 `powercfg /q` 前后对照】） |
+| S11 | 临时隧道全链路 | computer-use 通道切「临时隧道」→ bash 轮询 `pgrep cloudflared`（首启含下载，≤3min 超时）→ 截图读 trycloudflare 地址 → Playwright **经隧道 URL** 重走 S4 审批配对 | 隧道地址可访问且完成配对上板；地址变化有桌面通知（截图）；**SSE 空闲 2.5 分钟不断连**（CF 100s 超时 × 内建 15s 心跳）；通道切回关闭后 `pgrep cloudflared` 无进程 |
+| S12 | 实时提醒（2s 口径） | 桌面有真实 agent 会话运行时：板上开着 → 终端触发状态跃迁（如 kill 会话） | 手机页横幅 ≤2s（宪法一期行；无真实会话则降级为 M3 单测引用 +【人工】真机复核） |
+| S13 | 重启免重连 | 重启 tauri:dev 进程 → 已配对 Playwright context 刷新 | 免重配直接上板（v6 §5：MAM 重启后已配对设备免重连；走新审批配对路径复验 M2 结论） |
+| S14 | 托盘入口 | computer-use 截图定位菜单栏托盘图标 → 点开菜单 → 切「远程接入」 | 托盘勾选态与设置页一致；地址项点击后剪贴板含地址（`pbpaste` 验证）；0.0.0.0 未确认时托盘开启失败有系统通知（AX 对 NSStatusItem 不可达则【人工】点一次） |
+| 人工 | 外网蜂窝全链路 | 手机蜂窝网络访问固定子域（named tunnel） | 看板+内容可用；页面开杀会话 2s 提醒；quick tunnel 断网自愈；彻夜保活（宪法 §5.b 一期验收行——三项均需真机/真 token，用户提供 Tunnel Token 后 S11 流程可半自动复用） |
 
-`docs/superpowers/specs/2026-09-12-remote-access-level1-design.md` 附录 B（B2/B4/B5 ✅ 待实测/🔄）与进度基线行——按「代码完成待用户验收」口径更新（M3 收官后本表同样需补 M3 ✅，一并处理）。
+**记录契约**：每个场景在验收记录里落一行——场景号 / 结果 / 证据（截图文件名 / Playwright 断言输出 / bash 探针输出）。失败的场景修完重跑该场景及其下游。
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 3: 写验收记录**
+
+`docs/release-notes/m4-acceptance.md`（对照 `m3-acceptance.md` 结构）：分支/基线（`feat/m4-external-fullchain`，基于 M3 合并后 main）、逐任务交付表（T0-T4 → commit hash）、自动化门禁数字、**S1-S14 逐项结果与证据**、人工项清单（外网蜂窝/彻夜保活/Windows 实机/named tunnel）、已知限制登记（named 隧道 url 解析失败时设置页显示「以 Cloudflare 面板为准」、审批队列重启即清、托盘 AX 不可达时坐标驱动）。
+
+- [ ] **Step 4: 更新一期 v6 spec（双处）**
+
+`docs/superpowers/specs/2026-09-12-remote-access-level1-design.md`：
+1. **P10 段加 D17 移期标注**——v6 原文仍把 ntfy/Bark 列为 M4 交付（「页面关：系统级推送…同期交付」），随 M4 收官按宪法 D17 落修订注记（「2026-09-16：页面关系统推送随 D17 移至二期与 APK 同期交付，一期『2s 提醒』以页面开时 SSE 为口径」），正文其余不动（稳定版原则）；
+2. **附录进度表**——B2/B4/B5/C3 行状态更新（C3 标注移二期）、进度基线行补 M3 ✅ + M4 状态、「APK（P12/C4）已移二期」口径复核。
+
+- [ ] **Step 5: 提交 + 提 PR**
 
 ```bash
 git add docs/release-notes/m4-acceptance.md docs/superpowers/specs/2026-09-12-remote-access-level1-design.md
-git commit -m "docs(m4): M4 验收记录（自动化门禁数字+真机手动清单）+ spec 附录进度表更新"
+git commit -m "docs(m4): M4 验收记录（门禁数字+S1-S14 端到端证据+人工清单）+ v6 spec P10 D17 标注与附录进度"
 ```
 
-- [ ] **Step 5: 收尾**
-
-分支保持 `feat/m4-external-fullchain`；提 PR（标题 `M4 外网全链路：T0 清账 + T1 隧道 + T2 审批配对 + T3 保活 + T4 托盘`），PR 正文粘贴手动验收清单，**合并决定留给用户**。
+分支保持 `feat/m4-external-fullchain`；提 PR（标题 `M4 外网全链路：T0 清账 + T1 隧道 + T2 审批配对 + T3 保活 + T4 托盘`），PR 正文粘贴 S1-S14 结果表 + 人工项清单，**合并决定留给用户**。
 
 ---
 
@@ -2926,3 +2958,27 @@ git commit -m "docs(m4): M4 验收记录（自动化门禁数字+真机手动清
 **前后矛盾核查（修复 7 处）**：①spec T1b「守护放弃桌面通知」—Task 5 发 `remote-tunnel-error` 但 Task 8 未监听→补监听（toast+系统通知双通道）；②spec §8「应用退出清理子进程与电源锁」无落点→lib.rs 改 build+run 退出钩子（tunnel::stop + power::release）；③spec T1a「网卡名一栏标注外部通道」与隧道条目 iface 空串渲染「本机」兜底自相矛盾→kind=tunnel 隐藏 iface 兜底只出徽标；④审批落库 `name:""` 与花名册显示设备名（spec T2a 花名册列名字段）矛盾→`ApproveOutcome/PollOutcome/ConfirmOutcome` 的 Ok 携 `{device, name}`；⑤位置式 id/设备 id 生成器在请求消费后复用——手机 A 旧轮询可搭手机 B 新请求、设备 id 撞行（违反 v6 P6「配对全程留痕可审计」的唯一性前提）→三生成器改零参随机 hex；⑥Task 5 `supervise` 内 `block_on` 死锁（async 上下文禁 block_on）→获取二进制挪 `spawn_blocking` 线程；⑦守护失败计数永不重置（数周内三次偶发闪断即永久放弃，违背 spec T1b「连续失败」语义）→稳定运行 ≥60s 后退出重置计数。另修：Task 2 `vi.mock` 写在 it() 内的 hoisting 错、Task 5 `remote_set_channel` 先写库后校验顺序、Task 7 api::pair 带 body 403 需包 `Ok(...)`、Task 12 前全部 git add 清单对齐、隧道守护 `kill_on_drop(true)` 补齐（孤儿进程防线）。
 
 **文档间一致性（无冲突确认）**：宪法 F1.1（配对面板/花名册/手动腾位）、F1.2（四通道模式）、F1.9/D13（保活默认开+边界明示）、D17（推送移期）、§5.b 一期验收各行 ↔ 计划逐条覆盖；v6 P6（180 天/TTL 5 分钟/上限可配/审计）、P7（零配置临时隧道/地址变化通知/手动放置旁路/Tailscale 文档）、P11（代设还原/默认开）↔ 计划逐条覆盖；M4 spec v1.1 的 15 项需求（T0a-T4）↔ Task 1-12 全覆盖（T1e 按 spec 声明为已内建无交付）。
+
+## 覆盖复查记录（v3，2026-09-16——一期 v6 逐节 → plan 全量映射）
+
+| v6 章节 | 状态 | 落点 |
+|---|---|---|
+| §2 P1–P5（dsh 监控） | ✅ 不属 M4 | M1 已合并（v0.4.1） |
+| §3 P6 配对（审批默认/直通可选、180 天、花名册、上限 3 可配、TTL 5 分钟、4 位码限试 3、留痕、停止断开一切） | ✅ 全覆盖 | Task 7/8/9；180 天经 `device_cookie` 复用（E2E S3 断言 Max-Age） |
+| §3 P6 v6 修正项（0.0.0.0 主显示） | ✅ 已修 | M3（`display_url_for`），通道态地址优先为 M4 增量（Task 5） |
+| §3 P7 通道四模式（直连/临时/命名/Tailscale + TLS 确认门 + 手动放置旁路 + 地址变化通知） | ✅ 全覆盖 | Task 4/5/6；直连+TLS 门为 M2 已测基线（E2E S1 复验） |
+| §3 P8/P8+ 看板 + P8a-f | ✅ 不属 M4 | M3 已合并（PR #67） |
+| §3 P9 内容 | ✅ 不属 M4 | M3 已合并 |
+| §3 P10 页面开提醒 | ✅ 不属 M4 | M3（SSE+降级）；E2E S11/S12 外网复验 |
+| §3 P10 页面关推送（ntfy/Bark） | ⚠️ D17 移二期 | 计划不含（宪法 D17）；**v6 原文未标注 → Task 12 Step 4 补 D17 修订注记**（本次复查新增） |
+| §3 P11 保活（阻止休眠/Win 代设还原/合盖电池边界/默认开） | ✅ 全覆盖 | Task 10（四要素齐） |
+| §3 P12 APK | ✅ 移二期 | D15/D17，计划不含 |
+| §5 非功能·安全（批准制/通道侧加密/最小暴露/审计） | ✅ | Task 7 audit + 隧道回环（Task 5）+ E2E S4/S7 |
+| §5 非功能·性能（跃迁 ≤2s；**看板首屏 ≤1s**） | ✅ 补齐 | 首屏断言**本次新增**进 E2E S3（Playwright timing）；2s 为 S12 |
+| §5 非功能·可靠性（隧道自愈/降级轮询/**重启免重连**） | ✅ 补齐 | 重启免重连复验**本次新增**进 E2E S13（走新审批配对路径） |
+| §5 非功能·体验（中文/主屏安装） | ✅/备注 | 中文界面既有；PWA 主屏安装为真机项，列 E2E 人工备注 |
+| §6 里程碑 M4 出口 + §3 第二部分验收（宪法 §5.b 一期行） | ✅ 全覆盖 | E2E S1-S14 + 人工项逐条映射（外网扫码/2s 提醒/吊销即时/停止 403/隧道自愈/彻夜保活） |
+| §7 证据台账（命名隧道 Token 流程 M4 实测 / 保活实测） | ✅ | 人工项（用户提供 Token 可半自动复用 S11 流程） |
+| 附录 A/B/C 进度表 | ✅ | Task 12 Step 4 更新（含 M3 ✅ 补记与 C3 移期标注） |
+
+**computer-use 可行性实证（2026-09-16 本机探针）**：①权限全绿（辅助功能+屏幕录制+raw 输入+坐标命中）；②对运行中的 MAM 窗口实测——**AX 树仅暴露原生菜单栏，WKWebView 网页内容不透传**（Tauri/macOS 已知限制）→ 桌面 UI 驱动定为「截图定位 + 坐标点击」路线（能力已验证），元素级点击不可用不阻塞验收；③托盘 NSStatusItem 同理，S14 定为半自动（坐标点开菜单，AX 不可达时人工兜底）；④移动端不经 mock——Playwright 直连真实 axum（真 cookie/SSE），多 context 即多设备。结论：**S1-S13+S14 可由执行 agent 在本机完成驱动，仅外网蜂窝/彻夜/Win 实机/named-token 四类留人工**。
