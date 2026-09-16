@@ -44,14 +44,16 @@ export const TOOL_FILTERS: readonly ToolFilter[] = ["all", ...AGENT_TYPES] as co
  *  图标底色系不同源——brief 拍板的口径优先）。Record<AgentType, string> 穷尽守卫
  *  （对齐 AGENT_TYPE_RECORD 模式）：AgentType 增删值时此处编译报错，chips 不会静默缺色 */
 export const TOOL_BRAND_COLORS: Record<AgentType, string> = {
-  claude: "#D97757", // 橙
-  codex: "#8B5CF6", // 紫
-  opencode: "#10B981", // 绿
-  openclaw: "#F59E0B", // 琥珀
-  kimi: "#3B82F6", // 蓝
-  workbuddy: "#EF4444", // 红
-  zcode: "#6366F1", // 靛蓝
-  dsh: "#4D6BFE", // 深蓝
+  // 以桌面端 ToolIcon.tsx SVG 图标底色为准（2026-09-15 用户裁决）；
+  // 渐变取首 stop 色
+  claude: "#6445A2", // 桌面 ClaudeIcon L29
+  codex: "#16A34A", // 桌面 CodexIcon L55
+  opencode: "#EA580C", // 桌面 OpenCodeIcon L78
+  openclaw: "#6366F1", // 桌面 OpenClawIcon L107
+  kimi: "#0B0E1A", // 桌面 KimiIcon L127（深夜蓝底+白色月牙）
+  workbuddy: "#4AD06A", // 桌面 WorkBuddyIcon 渐变首色 L147
+  zcode: "#3B5BFD", // 桌面 ZCodeIcon 渐变首色 L179
+  dsh: "#4D6BFE", // 桌面 DshIcon L201（不变）
 };
 
 // 排序优先级：等待(0) → 运行(1) → 空闲(2)，数字越小越靠前

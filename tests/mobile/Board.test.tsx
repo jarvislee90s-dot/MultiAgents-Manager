@@ -526,14 +526,14 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     );
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
-    // 默认选中「全部」：Claude chip 未选中，无品牌橙实底
+    // 默认选中「全部」：Claude chip 未选中，无品牌紫实底
     const claudeChip = () =>
       within(screen.getByTestId("tool-chips")).getByText("Claude").closest("button") as HTMLElement;
-    expect(getComputedStyle(claudeChip()).backgroundColor).not.toBe("rgb(217, 119, 87)");
-    // 点 Claude 后底色为品牌橙 #D97757（jsdom 可能归一化为 rgb 形式，两种都接受）
+    expect(getComputedStyle(claudeChip()).backgroundColor).not.toBe("rgb(100, 69, 162)");
+    // 点 Claude 后底色为品牌紫 #6445A2（jsdom 可能归一化为 rgb 形式，两种都接受）
     fireEvent.click(claudeChip());
     const bg = getComputedStyle(claudeChip()).backgroundColor;
-    expect(["#D97757", "rgb(217, 119, 87)", "rgb(217,119,87)"]).toContain(bg);
+    expect(["#6445A2", "rgb(100, 69, 162)", "rgb(100,69,162)"]).toContain(bg);
   });
 
   it("未选中 chip 文字色随主题：浅色态用压暗色（AA 达标），暗色态回品牌原色", async () => {
@@ -566,10 +566,10 @@ describe("Board 工具 chips（P8d/P8e）", () => {
         within(screen.getByTestId("tool-chips"))
           .getByText("Claude")
           .closest("button") as HTMLElement;
-      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#824734|rgb\(130, 71, 52\))$/);
-      // 切到暗色：文字色回品牌原色 #D97757（toggle 触发重渲染，chip 现算主题）
+      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#3c2961|rgb\(60, 41, 97\))$/);
+      // 切到暗色：文字色回品牌原色 #6445A2（toggle 触发重渲染，chip 现算主题）
       fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
-      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#D97757|rgb\(217, 119, 87\))$/);
+      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#6445A2|rgb\(100, 69, 162\))$/);
     } finally {
       window.matchMedia = prevMatchMedia;
       localStorage.clear();

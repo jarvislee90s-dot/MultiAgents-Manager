@@ -417,7 +417,9 @@ describe("P8f chip 浅色态文字色（darkenHex + 对比度）", () => {
     const failures = Object.values(TOOL_BRAND_COLORS).filter(
       (brand) => contrast(brand, blendedBackground(brand)) < 4.5
     );
-    // 八色全部不达标——若未来品牌色整体换深色系，此断言会变红，届时可评估移除压暗逻辑
-    expect(failures).toHaveLength(8);
+    // 2026-09-15 品牌色改为桌面 SVG 底色后：claude #6445A2(6.01) 与 kimi #0B0E1A(14.87)
+    // 已达标，其余六色不达标——压暗逻辑仍必要但不再全量覆盖。
+    // 若未来整体换深色系致 failures=0，可移除压暗逻辑
+    expect(failures).toHaveLength(6);
   });
 });
