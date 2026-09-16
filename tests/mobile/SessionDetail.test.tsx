@@ -171,12 +171,17 @@ describe("SessionDetail：消息渲染与折叠交互（P9）", () => {
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     expect(await screen.findByText("m199")).toBeTruthy();
     fireEvent.click(screen.getByTestId("load-more"));
-    await waitFor(() => {
-      const called400 = fetchMock.mock.calls.some((c: unknown[]) =>
-        String(c[0]).includes("limit=400")
-      );
-      expect(called400).toBe(true);
-    });
+    // timeout 加固（flaky 修复）：mock 本身同步 resolve（无真实 timer 需求），
+    // 但 59 文件并行时 fetch mock→state 更新链可能被资源竞争拉长，默认 1s 不够
+    await waitFor(
+      () => {
+        const called400 = fetchMock.mock.calls.some((c: unknown[]) =>
+          String(c[0]).includes("limit=400")
+        );
+        expect(called400).toBe(true);
+      },
+      { timeout: 3000 }
+    );
   });
 });
 
@@ -238,10 +243,13 @@ describe("SessionDetail：错误态与手动刷新", () => {
     routes.messages = [msg({ seq: 0, kind: "user", content: "刷新结果" })];
     fireEvent.click(screen.getByTestId("detail-retry"));
     expect(await screen.findByText("刷新结果")).toBeTruthy();
-    // 手动刷新（refresh 按钮）同样走重拉
+    // 手动刷新（refresh 按钮）同样走重拉；timeout 加固同上（并行资源竞争双保险）
     fireEvent.click(screen.getByTestId("detail-refresh"));
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4);
-    });
+    await waitFor(
+      () => {
+        expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4);
+      },
+      { timeout: 3000 }
+    );
   });
 });
