@@ -237,7 +237,7 @@ git commit -m "fix(codex): open-turn guard stops interim-message false green on 
 - Consumes: Task 1 的 `tail_semantic_kind`；既有 `workbuddy_entry_kind` / `derive_app_status` / `overlay_mtime_stale`。
 - Produces: `pub const GREEN_DEBOUNCE_MS: u64`（=10_000）；`fn derive_status_with_tail(lines: &[String]) -> (SessionStatus, Option<AppEntryKind>)`（模块内）；`fn apply_green_debounce(status, tail_kind, mtime_age_ms) -> SessionStatus`（模块内，纯函数可测）。`pub fn derive_status_from_tail` 对外签名不变。
 
-- [ ] **Step 1: 写失败测试**（新增测试模块，放在 `derive_status_from_tail` 附近或文件既有测试区）
+- [x] **Step 1: 写失败测试**（新增测试模块，放在 `derive_status_from_tail` 附近或文件既有测试区）
 
 ```rust
 #[cfg(test)]
@@ -299,12 +299,12 @@ mod debounce_tests {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test --lib workbuddy_parser::debounce_tests`
 Expected: 编译失败（`cannot find function apply_green_debounce / derive_status_with_tail / GREEN_DEBOUNCE_MS`）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a. 扩 import（`workbuddy_parser.rs:5`，现为 `use super::app_status::{derive_app_status, AppEntryKind};`）：
 
@@ -396,12 +396,12 @@ fn read_workbuddy_tail_digest(jsonl: &Path) -> WorkBuddyTailDigest {
         );
 ```
 
-- [ ] **Step 4: 跑模块全部测试确认通过**
+- [x] **Step 4: 跑模块全部测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib workbuddy_parser`
 Expected: 全部 PASS（既有 `derive_status_from_tail` 系列测试经薄壳零回归；`unread` 池测试（:530 附近用 `derive_status_from_tail`）不受影响）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/monitor/workbuddy_parser.rs

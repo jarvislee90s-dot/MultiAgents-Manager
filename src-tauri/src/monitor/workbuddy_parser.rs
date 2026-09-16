@@ -2,7 +2,7 @@
 // 会话历史在 ~/.workbuddy/projects/<路径编码>/<sessionId>.jsonl（OpenAI 风格 type/role/content）
 // 所有文件均为未文档化私有格式：解析失败一律跳过/降级，禁止 panic（spec W3 防御性要求）
 
-use super::app_status::{derive_app_status, AppEntryKind};
+use super::app_status::{derive_app_status, tail_semantic_kind, AppEntryKind};
 use super::git::get_github_url;
 use super::jsonl::{read_first_lines, read_recent_lines};
 use super::project::project_name_from_path;
@@ -22,19 +22,28 @@ const WORKBUDDY_SCAN: SessionFileScan = SessionFileScan::new("workbuddy-tail");
 /// jsonl 内容摘要（L2 缓存产物）：核心状态 + 最后一条消息文本均由文件内容决定
 struct WorkBuddyTailDigest {
     status_core: SessionStatus,
+    /// 尾部语义条目（纯内容产物，随摘要缓存；完成防抖判定依据）
+    tail_kind: Option<AppEntryKind>,
     last_message: Option<String>,
 }
 
 fn read_workbuddy_tail_digest(jsonl: &Path) -> WorkBuddyTailDigest {
     let lines = read_recent_lines(jsonl, 500);
+    let (status_core, tail_kind) = derive_status_with_tail(&lines);
     WorkBuddyTailDigest {
-        status_core: derive_status_from_tail(&lines),
+        status_core,
+        tail_kind,
         last_message: lines.iter().rev().find_map(|l| extract_message_text(l)),
     }
 }
 
 /// 心跳新鲜阈值：取 MAM 轮询周期（约 30s）的 3 倍，防止轮询间隙卡片闪烁
 pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
+
+/// 完成防抖窗（spec 假绿治理 §4.2）：assistant 语义尾 + JSONL mtime 年龄 < 该窗 → 拉回
+/// Processing（WorkBuddy 格式无轮次信号，中间消息假绿只能时间防抖），≥ 该窗才转绿。
+/// 注意与 FALLBACK_FRESH_MS（无信号兜底新鲜窗，300s）语义不同，独立常量不得混用
+pub const GREEN_DEBOUNCE_MS: u64 = 10_000;
 
 /// App 形态状态叠加阈值与叠加函数自共享核 re-export（issue #6 收敛后保持兼容）：
 /// 语义见 monitor::app_status——JSONL mtime 停更 >= 300s 时函数调用类尾部（Processing）
@@ -204,11 +213,9 @@ fn workbuddy_entry_kind(v: &serde_json::Value) -> AppEntryKind {
     }
 }
 
-/// JSONL 尾部状态推导（对外签名不变，issue #6 起为共享核的翻译适配器）：
-/// 收集全部条目的归一化 kind（保持既有逐行解析防御逻辑：`type` 字段存在才计入），
-/// 把完整切片交给共享核尾部倒扫——跳过 Other 记账条目，取第一条有语义条目定状态
-/// （spec W3 映射的推广）；无任何语义条目 → Waiting（兜底不变）
-pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
+/// 尾部状态 + 尾部语义条目（摘要缓存消费；tail_kind 供完成防抖判定「Idle 是否由
+/// assistant 尾导出」，纯内容产物可随 L2 缓存）
+fn derive_status_with_tail(lines: &[String]) -> (SessionStatus, Option<AppEntryKind>) {
     let mut kinds: Vec<AppEntryKind> = Vec::new();
     for line in lines {
         match serde_json::from_str::<serde_json::Value>(line) {
@@ -216,7 +223,35 @@ pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
             _ => continue,
         }
     }
-    derive_app_status(&kinds).unwrap_or(SessionStatus::Waiting)
+    (
+        derive_app_status(&kinds).unwrap_or(SessionStatus::Waiting),
+        tail_semantic_kind(&kinds),
+    )
+}
+
+/// 完成防抖纯判定（§4.2，可测）：仅作用于「assistant 尾导出的 Idle + 新鲜」，
+/// 其余状态透传；真完成的转绿由调用方在 mtime 年龄 ≥ 窗口后自然到达
+fn apply_green_debounce(
+    status: SessionStatus,
+    tail_kind: Option<AppEntryKind>,
+    mtime_age_ms: u64,
+) -> SessionStatus {
+    if status == SessionStatus::Idle
+        && tail_kind == Some(AppEntryKind::AssistantMessage)
+        && mtime_age_ms < GREEN_DEBOUNCE_MS
+    {
+        SessionStatus::Processing
+    } else {
+        status
+    }
+}
+
+/// JSONL 尾部状态推导（对外签名不变，issue #6 起为共享核的翻译适配器）：
+/// 收集全部条目的归一化 kind（保持既有逐行解析防御逻辑：`type` 字段存在才计入），
+/// 把完整切片交给共享核尾部倒扫——跳过 Other 记账条目，取第一条有语义条目定状态
+/// （spec W3 映射的推广）；无任何语义条目 → Waiting（兜底不变）
+pub fn derive_status_from_tail(lines: &[String]) -> SessionStatus {
+    derive_status_with_tail(lines).0
 }
 
 /// 会话标题：只读打开 workbuddy.db 读 sessions 标题（P2-1：custom_title 非空优先，否则 title）；
@@ -390,7 +425,10 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
         // 叠加 App 形态 mtime 阈值（spec §4：App 形态 300s，与 Codex APP 一致）——
         // 函数调用尾部停更 >= 300s 视为等待而非运行中；mtime 缺失按未过期处理（防御）
         let mtime_age_ms = jsonl_mtime_ms.map_or(0, |m| now.saturating_sub(m));
-        let status = overlay_mtime_stale(d.status_core.clone(), mtime_age_ms);
+        let status = overlay_mtime_stale(
+            apply_green_debounce(d.status_core.clone(), d.tail_kind, mtime_age_ms),
+            mtime_age_ms,
+        );
         let last_message = d.last_message.clone().unwrap_or_default();
 
         let title = resolve_title(db_conn.as_ref(), &hb.session_id, &jsonl);
@@ -1611,5 +1649,63 @@ mod observation_restore_tests {
         );
         assert_eq!(last_seen.get(&7).unwrap().1, "live-session");
         assert_eq!(last_seen.get(&8).unwrap().1, "restored");
+    }
+}
+
+#[cfg(test)]
+mod debounce_tests {
+    use super::*;
+
+    /// §4.2 判定表：仅「Idle 且尾部语义条目为 AssistantMessage 且 mtime 年龄 < 10s」拉回
+    /// Processing；窗口边界值 10_000ms 恰好放行（< 判定）；其余状态一概透传
+    #[test]
+    fn debounce_holds_processing_only_for_fresh_assistant_idle() {
+        use crate::session::SessionStatus::*;
+        // 防抖窗内：Idle ← assistant 尾 → Processing（拦截中间消息瞬态假绿）
+        assert_eq!(
+            apply_green_debounce(Idle, Some(AppEntryKind::AssistantMessage), 9_999),
+            Processing
+        );
+        assert_eq!(
+            apply_green_debounce(Idle, Some(AppEntryKind::AssistantMessage), 0),
+            Processing
+        );
+        // 恰好到窗：放行转绿（真完成绿灯/语音延迟 10s 到达，用户已接纳）
+        assert_eq!(
+            apply_green_debounce(Idle, Some(AppEntryKind::AssistantMessage), GREEN_DEBOUNCE_MS),
+            Idle
+        );
+        // 非 assistant 尾导出的 Idle（tail 为 None，如仅记账条目兜底前的形态）→ 不防抖
+        assert_eq!(apply_green_debounce(Idle, None, 0), Idle);
+        // 其他状态透传：Waiting 兜底、Processing（含 function_call 尾）、Thinking（user 尾）不受影响
+        assert_eq!(apply_green_debounce(Waiting, Some(AppEntryKind::AssistantMessage), 0), Waiting);
+        assert_eq!(
+            apply_green_debounce(Processing, Some(AppEntryKind::AssistantMessage), 0),
+            Processing
+        );
+        assert_eq!(apply_green_debounce(Processing, Some(AppEntryKind::ToolCall), 0), Processing);
+        assert_eq!(apply_green_debounce(Thinking, Some(AppEntryKind::UserMessage), 0), Thinking);
+    }
+
+    /// 尾部语义条目随摘要产出：assistant 文本尾 → (Idle, AssistantMessage)；
+    /// function_call 尾 → (Processing, ToolCall)
+    #[test]
+    fn derive_status_with_tail_exposes_tail_kind() {
+        let assistant_tail = vec![
+            r#"{"type":"message","role":"user","content":"跑一下"}"#.to_string(),
+            r#"{"type":"message","role":"assistant","content":"我先看一下"}"#.to_string(),
+        ];
+        assert_eq!(
+            derive_status_with_tail(&assistant_tail),
+            (crate::session::SessionStatus::Idle, Some(AppEntryKind::AssistantMessage))
+        );
+        let tool_tail = vec![
+            r#"{"type":"message","role":"user","content":"跑一下"}"#.to_string(),
+            r#"{"type":"function_call","name":"shell"}"#.to_string(),
+        ];
+        assert_eq!(
+            derive_status_with_tail(&tool_tail),
+            (crate::session::SessionStatus::Processing, Some(AppEntryKind::ToolCall))
+        );
     }
 }
