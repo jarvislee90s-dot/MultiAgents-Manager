@@ -220,7 +220,11 @@ fn build_session_from_row(
     // 会话尾部部件信号（§4.3）：末条 part + 所属 role；仅 text/patch 尾按需查 step 部件
     let tail = get_session_tail_part(conn, session_id)
         .map(|t| {
-            let ptype = t.part.get("type").and_then(|x| x.as_str()).unwrap_or_default();
+            let ptype = t
+                .part
+                .get("type")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default();
             let has_step =
                 (ptype == "text" || ptype == "patch") && message_has_step_part(conn, &t.message_id);
             tail_part_signal(&t.part, t.message_role.as_deref(), has_step)
@@ -446,7 +450,10 @@ fn tail_part_signal(
     if message_role == Some("user") {
         return TailSignal::Running;
     }
-    let ptype = part.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+    let ptype = part
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
     match ptype {
         "step-finish" => {
             if part.get("reason").and_then(|r| r.as_str()) == Some("stop") {
@@ -550,24 +557,68 @@ mod tail_signal_tests {
     #[test]
     fn tail_part_signal_rules() {
         // step-finish(stop) → 回合结束，走既有启发式（收尾红→绿语义保留）
-        assert_eq!(tail_part_signal(&part("step-finish", Some("stop")), Some("assistant"), false), TailSignal::TurnDone);
+        assert_eq!(
+            tail_part_signal(&part("step-finish", Some("stop")), Some("assistant"), false),
+            TailSignal::TurnDone
+        );
         // step-finish(tool-calls / length) → 后续还有动作（length 宁黄不假绿，spec §8 决策 7）
-        assert_eq!(tail_part_signal(&part("step-finish", Some("tool-calls")), Some("assistant"), false), TailSignal::Running);
-        assert_eq!(tail_part_signal(&part("step-finish", Some("length")), Some("assistant"), false), TailSignal::Running);
+        assert_eq!(
+            tail_part_signal(
+                &part("step-finish", Some("tool-calls")),
+                Some("assistant"),
+                false
+            ),
+            TailSignal::Running
+        );
+        assert_eq!(
+            tail_part_signal(
+                &part("step-finish", Some("length")),
+                Some("assistant"),
+                false
+            ),
+            TailSignal::Running
+        );
         // 步骤进行中部件
-        assert_eq!(tail_part_signal(&part("step-start", None), Some("assistant"), false), TailSignal::Running);
-        assert_eq!(tail_part_signal(&part("reasoning", None), Some("assistant"), false), TailSignal::Running);
-        assert_eq!(tail_part_signal(&part("tool", None), Some("assistant"), false), TailSignal::Running);
+        assert_eq!(
+            tail_part_signal(&part("step-start", None), Some("assistant"), false),
+            TailSignal::Running
+        );
+        assert_eq!(
+            tail_part_signal(&part("reasoning", None), Some("assistant"), false),
+            TailSignal::Running
+        );
+        assert_eq!(
+            tail_part_signal(&part("tool", None), Some("assistant"), false),
+            TailSignal::Running
+        );
         // 用户消息的部件（任意类型）= 输入刚提交（含 assistant 占位行空窗）→ Running（修输入瞬间假红）
-        assert_eq!(tail_part_signal(&part("text", None), Some("user"), false), TailSignal::Running);
+        assert_eq!(
+            tail_part_signal(&part("text", None), Some("user"), false),
+            TailSignal::Running
+        );
         // assistant text/patch：新格式（消息含 step 部件）流式窗口 → Running；
         // 老格式 team-mode（无 step 部件）→ Fallback 回退启发式（老会话零回归）
-        assert_eq!(tail_part_signal(&part("text", None), Some("assistant"), true), TailSignal::Running);
-        assert_eq!(tail_part_signal(&part("text", None), Some("assistant"), false), TailSignal::Fallback);
-        assert_eq!(tail_part_signal(&part("patch", None), Some("assistant"), false), TailSignal::Fallback);
+        assert_eq!(
+            tail_part_signal(&part("text", None), Some("assistant"), true),
+            TailSignal::Running
+        );
+        assert_eq!(
+            tail_part_signal(&part("text", None), Some("assistant"), false),
+            TailSignal::Fallback
+        );
+        assert_eq!(
+            tail_part_signal(&part("patch", None), Some("assistant"), false),
+            TailSignal::Fallback
+        );
         // 未知类型 / 无 role 信息 → Fallback
-        assert_eq!(tail_part_signal(&part("file", None), Some("assistant"), false), TailSignal::Fallback);
-        assert_eq!(tail_part_signal(&part("text", None), None, false), TailSignal::Fallback);
+        assert_eq!(
+            tail_part_signal(&part("file", None), Some("assistant"), false),
+            TailSignal::Fallback
+        );
+        assert_eq!(
+            tail_part_signal(&part("text", None), None, false),
+            TailSignal::Fallback
+        );
     }
 
     /// Running 强信号短路既有启发式：即便 last_role=assistant 且新鲜（旧逻辑判 Waiting 红），

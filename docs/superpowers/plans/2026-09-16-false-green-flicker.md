@@ -735,17 +735,17 @@ git commit -m "fix(opencode): session-tail part signal fixes false red at input,
 
 #### 5A. 自动化回归
 
-- [ ] **Step 1: Rust 全量测试**
+- [x] **Step 1: Rust 全量测试**
 
 Run: `cd src-tauri && cargo test`
 Expected: 全部 PASS（重点确认 issue #6 的 codex `app_status_fixture_tests` 组、WorkBuddy 未读池测试、OpenCode `status_tests` 无回归）。
 
-- [ ] **Step 2: clippy 与格式**
+- [x] **Step 2: clippy 与格式**
 
 Run: `cd src-tauri && cargo clippy -- -D warnings && cargo fmt --check`
 Expected: 干净；若有 fmt 差异运行 `cargo fmt` 后单独提交 `style: rustfmt`。
 
-- [ ] **Step 3: 改动面确认**
+- [x] **Step 3: 改动面确认**
 
 Run: `git diff --stat origin/main -- src/ package.json` → 空输出（不动前端，spec §5）；
 `git diff --stat origin/main -- src-tauri/src/monitor/` → 仅 4 个文件（app_status / codex_parser / workbuddy_parser / opencode_parser），不动清单成员零触碰。

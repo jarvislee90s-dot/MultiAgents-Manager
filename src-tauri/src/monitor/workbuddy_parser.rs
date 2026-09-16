@@ -1672,19 +1672,32 @@ mod debounce_tests {
         );
         // 恰好到窗：放行转绿（真完成绿灯/语音延迟 10s 到达，用户已接纳）
         assert_eq!(
-            apply_green_debounce(Idle, Some(AppEntryKind::AssistantMessage), GREEN_DEBOUNCE_MS),
+            apply_green_debounce(
+                Idle,
+                Some(AppEntryKind::AssistantMessage),
+                GREEN_DEBOUNCE_MS
+            ),
             Idle
         );
         // 非 assistant 尾导出的 Idle（tail 为 None，如仅记账条目兜底前的形态）→ 不防抖
         assert_eq!(apply_green_debounce(Idle, None, 0), Idle);
         // 其他状态透传：Waiting 兜底、Processing（含 function_call 尾）、Thinking（user 尾）不受影响
-        assert_eq!(apply_green_debounce(Waiting, Some(AppEntryKind::AssistantMessage), 0), Waiting);
+        assert_eq!(
+            apply_green_debounce(Waiting, Some(AppEntryKind::AssistantMessage), 0),
+            Waiting
+        );
         assert_eq!(
             apply_green_debounce(Processing, Some(AppEntryKind::AssistantMessage), 0),
             Processing
         );
-        assert_eq!(apply_green_debounce(Processing, Some(AppEntryKind::ToolCall), 0), Processing);
-        assert_eq!(apply_green_debounce(Thinking, Some(AppEntryKind::UserMessage), 0), Thinking);
+        assert_eq!(
+            apply_green_debounce(Processing, Some(AppEntryKind::ToolCall), 0),
+            Processing
+        );
+        assert_eq!(
+            apply_green_debounce(Thinking, Some(AppEntryKind::UserMessage), 0),
+            Thinking
+        );
     }
 
     /// 尾部语义条目随摘要产出：assistant 文本尾 → (Idle, AssistantMessage)；
@@ -1697,7 +1710,10 @@ mod debounce_tests {
         ];
         assert_eq!(
             derive_status_with_tail(&assistant_tail),
-            (crate::session::SessionStatus::Idle, Some(AppEntryKind::AssistantMessage))
+            (
+                crate::session::SessionStatus::Idle,
+                Some(AppEntryKind::AssistantMessage)
+            )
         );
         let tool_tail = vec![
             r#"{"type":"message","role":"user","content":"跑一下"}"#.to_string(),
@@ -1705,7 +1721,10 @@ mod debounce_tests {
         ];
         assert_eq!(
             derive_status_with_tail(&tool_tail),
-            (crate::session::SessionStatus::Processing, Some(AppEntryKind::ToolCall))
+            (
+                crate::session::SessionStatus::Processing,
+                Some(AppEntryKind::ToolCall)
+            )
         );
     }
 }

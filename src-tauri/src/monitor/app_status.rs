@@ -393,11 +393,20 @@ mod tests {
         use AppEntryKind::*;
         // 开：最后一个 TurnStart 晚于最后一个 TurnEnd
         assert_eq!(
-            turn_window_open(&[TurnEnd, AssistantMessage, TurnStart, UserMessage, AssistantMessage]),
+            turn_window_open(&[
+                TurnEnd,
+                AssistantMessage,
+                TurnStart,
+                UserMessage,
+                AssistantMessage
+            ]),
             Some(true)
         );
         // 闭：最后一个 TurnEnd 更晚
-        assert_eq!(turn_window_open(&[TurnStart, ToolCall, TurnEnd, AssistantMessage]), Some(false));
+        assert_eq!(
+            turn_window_open(&[TurnStart, ToolCall, TurnEnd, AssistantMessage]),
+            Some(false)
+        );
         // 只有 TurnStart（回合刚开始，未见 TurnEnd）→ 开
         assert_eq!(turn_window_open(&[UserMessage, TurnStart]), Some(true));
         // 只有 TurnEnd（上回合闭合痕迹，起点不可见）→ 不可证开
