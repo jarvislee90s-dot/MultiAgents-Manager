@@ -95,3 +95,12 @@
 2. macOS 崩溃孤儿 caffeinate 无自动恢复（spec §8 崩溃恢复仅承诺 Windows 磁盘代设）。
 3. 推送网关（ntfy/Bark）随 D17 移二期；APK 壳同步移二期。
 4. M3/M2 既有行为零回归：全量门禁绿 + E2E 复验（S1 绑定/TLS 门、S3 直通配对、S13 免重连、降级横幅）未见回归。
+
+## 八、终审（全分支评审）与修复波
+
+- 终审判定：Needs fixes → 3 项 Important 全部修复 → 范围复审 3/3 ADDRESSED → **Ready to merge**。
+- 终审修复波（`20e3035`，4 文件 +15/−6）：
+  1. 远程关闭时通道切换不再拉起隧道——`remote_set_channel` 的 `start_if_configured` 前加 `handle_is_live` 存活门（此前远程关着点「临时隧道」会下载并 spawn 指向死端口的公网 URL）；
+  2. `notice2` 安全警示文案更新——「临时直通模式/审批制后续提供」与已交付的审批配对自相矛盾，改为如实描述（审批配对已可用 + 直通码保留一次性分享）；`remote.desc` 同步去掉「与本机直连」排斥措辞；
+  3. spec T2e 审计补全——`pair_confirm` 的 Wrong 分支补 `pair_confirm_wrong` 留痕（敌意试码前两次失败此前无痕）；`stop_server` purge 计数并入 `events::audit`。
+- 终审其余结论：无 Critical；全部 32 条 deferred minors 裁定可遗留（triage 表见台账）；跨任务一致性（事件名/wire camelCase/KV 键/cookie 语义/i18n）与 spec 覆盖逐项核查通过；两处形态偏差如实记录（T2c 批准按钮以 toast 报满替代禁用态——服务端门更强；T2e 剩余 NotFound/Expired 试码无痕）。
