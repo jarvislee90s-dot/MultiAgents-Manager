@@ -142,6 +142,8 @@
     "remote": {
       "title": "Remote Access",
       "desc": "Open the mobile board in a phone browser (direct connection to this machine)",
+      "hostName": "Machine name",
+      "hostNamePlaceholder": "e.g. JARVIS's Win PC",
       "enable": "Enable remote access",
       "bind": "Bind scope",
       "bindLocal": "This machine only",

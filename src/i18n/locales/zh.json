@@ -142,6 +142,8 @@
     "remote": {
       "title": "远程接入",
       "desc": "在手机浏览器打开移动看板（与本机直连）",
+      "hostName": "本机名称",
+      "hostNamePlaceholder": "如 JARVIS 的 Win 电脑",
       "enable": "开启远程接入",
       "bind": "绑定范围",
       "bindLocal": "仅本机",
