@@ -172,10 +172,28 @@ fn scan_tool_state_captures_mam_and_native() {
     )
     .unwrap();
 
-    // claude 目录再放一个原生真目录
+    // claude 目录再放一个原生真目录（登记线，用户裁决 2026-09-16：原生目录须
+    // 经 MAM 导入登记 is_native=1 AND source_tool 才参与快照/暂存）
     let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
     std::fs::create_dir_all(claude_dir.join("v2m1-scan-native")).unwrap();
     std::fs::write(claude_dir.join("v2m1-scan-native/SKILL.md"), "y").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-scan-native".into(),
+        kind: "skill".into(),
+        name: "v2m1-scan-native".into(),
+        description: None,
+        source_path: claude_dir
+            .join("v2m1-scan-native")
+            .to_string_lossy()
+            .to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: true,
+    })
+    .unwrap();
 
     let state = snapshot::scan_tool_state("claude");
     let find = |id: &str| state.iter().find(|i| i.extension_id == id);
@@ -208,6 +226,7 @@ fn scan_tool_state_captures_mam_and_native() {
     // 清场，避免影响其他测试
     let _ = database::disable_subagent_assignment("skill-v2m1-scan-a", "claude", "v2m1-scan-sub");
     disable_skill_for_tool("v2m1-scan-a", "claude").unwrap();
+    let _ = database::delete_extension("skill-v2m1-scan-native");
     database::destroy_base_snapshot("claude").unwrap();
 }
 
@@ -244,11 +263,26 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
         .unwrap();
         enable_skill_for_tool(name, "claude").unwrap();
     }
-    // 原生真目录 C（预设外）与 D（常驻）
+    // 原生真目录 C（预设外）与 D（常驻）——登记线（2026-09-16 裁决）：原生目录
+    // 须经 MAM 登记才参与快照/暂存，未登记即视为常驻
     let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
     for name in ["v2m1-sw-c", "v2m1-sw-d"] {
         std::fs::create_dir_all(claude_dir.join(name)).unwrap();
         std::fs::write(claude_dir.join(name).join("SKILL.md"), "n").unwrap();
+        database::insert_extension(&database::ExtensionRecord {
+            id: format!("skill-{}", name),
+            kind: "skill".into(),
+            name: name.into(),
+            description: None,
+            source_path: claude_dir.join(name).to_string_lossy().to_string(),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: Some("claude".into()),
+            is_native: true,
+        })
+        .unwrap();
     }
     database::set_tool_resident("claude", "skill-v2m1-sw-d", true).unwrap();
 
@@ -276,6 +310,8 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
     // 清场
     database::set_tool_resident("claude", "skill-v2m1-sw-d", false).unwrap();
     disable_skill_for_tool("v2m1-sw-a", "claude").unwrap();
+    let _ = database::delete_extension("skill-v2m1-sw-c");
+    let _ = database::delete_extension("skill-v2m1-sw-d");
     let _ = database::destroy_base_snapshot("claude");
 }
 
@@ -329,6 +365,24 @@ fn apply_switch_restore_full_lifecycle() {
     let sub_target = claude_dir.join("subagents/v2m1-lc-sub/v2m1-lc-base1");
     std::fs::create_dir_all(claude_dir.join("v2m1-lc-native1")).unwrap();
     std::fs::write(claude_dir.join("v2m1-lc-native1/SKILL.md"), "n").unwrap();
+    // 登记线（2026-09-16 裁决）：原生目录须登记才参与快照/暂存
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-lc-native1".into(),
+        kind: "skill".into(),
+        name: "v2m1-lc-native1".into(),
+        description: None,
+        source_path: claude_dir
+            .join("v2m1-lc-native1")
+            .to_string_lossy()
+            .to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: true,
+    })
+    .unwrap();
 
     // 预设 A：skill-a
     let mk = |name: &str| {
@@ -428,6 +482,7 @@ fn apply_switch_restore_full_lifecycle() {
     // 清场
     let _ = restore_tool("claude");
     disable_skill_for_tool("v2m1-lc-base1", "claude").unwrap();
+    let _ = database::delete_extension("skill-v2m1-lc-native1");
 }
 
 /// scope 守卫：tool 私有预设不可应用到别的工具（硬错误）
@@ -555,6 +610,24 @@ fn preview_is_dryrun_and_active_preset_queryable() {
     let home = dirs::home_dir().unwrap();
     let claude_dir = home.join(".claude/skills");
     std::fs::create_dir_all(claude_dir.join("v2m1-pv-native")).unwrap();
+    // 登记线（2026-09-16 裁决）：原生目录须登记才参与快照/暂存
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m1-pv-native".into(),
+        kind: "skill".into(),
+        name: "v2m1-pv-native".into(),
+        description: None,
+        source_path: claude_dir
+            .join("v2m1-pv-native")
+            .to_string_lossy()
+            .to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: true,
+    })
+    .unwrap();
     let ssot = home.join(".mam/skills/v2m1-pv-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
@@ -585,6 +658,7 @@ fn preview_is_dryrun_and_active_preset_queryable() {
     assert_eq!(cmd::get_active_preset("claude".into()), Some(pid.clone()));
     let _ = restore_tool("claude");
     assert_eq!(cmd::get_active_preset("claude".into()), None);
+    let _ = database::delete_extension("skill-v2m1-pv-native");
 }
 
 /// P2①：MCP 入 SSOT 必须落 extensions 行——预设创建列表与卡片从此同源；
@@ -1017,7 +1091,9 @@ fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
     use multi_agents_manager_lib::services::preset::{snapshot, sweep};
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
-    // 漂移现场：账本 enabled + 同名真目录（W5 还原内容后名册未销的形态）
+    // 漂移现场：账本 enabled + 同名真目录（W5 还原内容后名册未销的形态）。
+    // 登记线（2026-09-16 裁决）：行须为登记原生（is_native=1 AND source_tool），
+    // 真目录才参与快照/暂存判定
     let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-drift-x");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
@@ -1031,8 +1107,8 @@ fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
         version: None,
         tags: None,
         suite: None,
-        source_tool: None,
-        is_native: false,
+        source_tool: Some("claude".into()),
+        is_native: true,
     })
     .unwrap();
     enable_skill_for_tool("v2m1-drift-x", "claude").unwrap();
@@ -1125,7 +1201,8 @@ fn restore_roundtrip_preserves_drifted_real_dir() {
     use multi_agents_manager_lib::services::enable_skill_for_tool;
     use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
 
-    // 漂移现场：skill-v2m1-dl-x 账本 enabled + 同名真目录（有内容）
+    // 漂移现场：skill-v2m1-dl-x 账本 enabled + 同名真目录（有内容）。
+    // 登记线（2026-09-16 裁决）：行须为登记原生，真目录才参与快照/暂存判定
     let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-dl-x");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
@@ -1139,8 +1216,8 @@ fn restore_roundtrip_preserves_drifted_real_dir() {
         version: None,
         tags: None,
         suite: None,
-        source_tool: None,
-        is_native: false,
+        source_tool: Some("claude".into()),
+        is_native: true,
     })
     .unwrap();
     enable_skill_for_tool("v2m1-dl-x", "claude").unwrap();
@@ -1543,4 +1620,99 @@ fn preset_health_aggregates_three_sources_v2m2() {
     let _ = database::destroy_base_snapshot("dsh");
     let _ = database::mark_stash_restored(stash_id);
     let _ = database::delete_assignments_for("skill-v2m2-health-l1");
+}
+
+/// 工具内建原生技能保护（用户裁决 2026-09-16）：识别即常驻——
+/// ① codex 内建目录 `.system`（静态清单命中，带 `.codex-system-skills.marker`
+/// 实证标记）不进快照；② 未登记的磁盘原生目录（无 is_native=1 AND
+/// source_tool 行）登记线兜底同样视为常驻、不进快照；③ 登记的原生目录
+/// 照常进快照（工具私有预设的消费前提不受影响）
+#[test]
+fn builtin_and_unregistered_native_dirs_never_enter_snapshot_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::snapshot;
+
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    // ① 内建 .system：静态清单 + marker 双证据
+    std::fs::create_dir_all(codex_dir.join(".system")).unwrap();
+    std::fs::write(codex_dir.join(".system/.codex-system-skills.marker"), "").unwrap();
+    // ② 未登记普通目录（用户手装、MAM 无账）
+    std::fs::create_dir_all(codex_dir.join("v2m2-plain-x")).unwrap();
+    std::fs::write(codex_dir.join("v2m2-plain-x/SKILL.md"), "plain").unwrap();
+    // ③ 登记目录（导入登记的标准形态：is_native=1 AND source_tool=codex）
+    std::fs::create_dir_all(codex_dir.join("v2m2-reg-x")).unwrap();
+    std::fs::write(codex_dir.join("v2m2-reg-x/SKILL.md"), "reg").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-reg-x".into(),
+        kind: "skill".into(),
+        name: "v2m2-reg-x".into(),
+        description: None,
+        source_path: "/tmp/v2m2-reg-x".into(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: Some("codex".into()),
+        is_native: true,
+    })
+    .unwrap();
+
+    let state = snapshot::scan_tool_state("codex");
+    let ids: Vec<String> = state.iter().map(|i| i.extension_id.clone()).collect();
+    assert!(
+        !ids.iter().any(|id| id == "skill-.system"),
+        "内建 .system 不得进快照: {:?}",
+        ids
+    );
+    assert!(
+        !ids.iter().any(|id| id == "skill-v2m2-plain-x"),
+        "未登记原生目录视为常驻，不得进快照: {:?}",
+        ids
+    );
+    let reg = state
+        .iter()
+        .find(|i| i.extension_id == "skill-v2m2-reg-x")
+        .expect("登记原生目录应照常进快照");
+    assert_eq!(reg.origin, "native");
+
+    // 清场（目录与登记行都收走，避免污染后续测试的扫描现场）
+    let _ = database::delete_extension("skill-v2m2-reg-x");
+    let _ = std::fs::remove_dir_all(codex_dir.join(".system"));
+    let _ = std::fs::remove_dir_all(codex_dir.join("v2m2-plain-x"));
+    let _ = std::fs::remove_dir_all(codex_dir.join("v2m2-reg-x"));
+}
+
+/// 启停守卫（用户裁决 2026-09-16）：enable 目标命中工具内建原生技能 →
+/// 拒绝且目录原样保留（识别即保护，MAM 不得接管/替换/删除）
+#[test]
+fn enable_skill_rejects_builtin_native_dir_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::services::enable_skill_for_tool;
+
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    std::fs::create_dir_all(codex_dir.join(".system")).unwrap();
+    std::fs::write(codex_dir.join(".system/SKILL.md"), "builtin").unwrap();
+
+    let err = enable_skill_for_tool(".system", "codex").unwrap_err();
+    assert!(err.contains("内建"), "错误应点名内建保护: {}", err);
+    assert!(
+        codex_dir.join(".system").is_dir() && codex_dir.join(".system/SKILL.md").exists(),
+        "内建目录必须原样保留，不得被替换为链接或删除"
+    );
+    assert!(
+        !codex_dir.join(".system").is_symlink(),
+        "内建目录不得被替换为链接"
+    );
+
+    // 清场
+    let _ = std::fs::remove_dir_all(codex_dir.join(".system"));
 }

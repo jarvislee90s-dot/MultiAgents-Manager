@@ -156,6 +156,19 @@ fn agents_link_targets_layer2(
     crate::linker::normalize_link_target(&raw, agents_dir).starts_with(active_root)
 }
 
+/// 工具内建原生技能卸载拒绝判定（用户裁决 2026-09-16，入口守卫的纯判定部分，
+/// tempdir 可测）：目标真目录对任一注册工具命中内建判定（静态清单 / marker）→
+/// Some(拒绝原因)；非真目录 / 链接 / 普通技能 → None
+fn builtin_uninstall_rejection(name: &str, target: &std::path::Path) -> Option<String> {
+    if !target.is_dir() || target.is_symlink() {
+        return None;
+    }
+    crate::adapter::TOOL_IDS
+        .iter()
+        .any(|&tool_id| crate::adapter::is_builtin_native_skill(tool_id, name, target))
+        .then(|| format!("工具内建技能，不可卸载: {}", target.display()))
+}
+
 /// 卸载资源：.agents 直链守卫（spec §4.4）→ 清理所有工具的分配与配置 → 删 SSOT → 删 DB 行 → 删 store 索引
 ///
 /// kind == "skill" 时，若 `~/.agents/skills/<name>` 是指向 SSOT 的直链且 force != true，
@@ -168,6 +181,10 @@ fn agents_link_targets_layer2(
 /// 同样触发确认——无提示卸载会连带删掉 Layer 1/Layer 2，经 `.agents` 消费该技能的
 /// 外部工具（zcode 等）静默失效，且事后对话框的「保留为共享」因 Layer 1 缺失只能
 /// skip，用户失去知情选择权。
+///
+/// 工具内建原生技能守卫（用户裁决 2026-09-16）：识别即保护、全路径不可卸载。
+/// kind=skill 时目标目录按 SSOT 候选规则解析（与下方删除循环同规则，取第一个
+/// 存在的真目录），命中内建判定 → 硬错误，先于一切清理/破坏性步骤
 #[tauri::command]
 pub fn uninstall_resource(
     kind: String,
@@ -181,6 +198,19 @@ pub fn uninstall_resource(
     let record = crate::database::list_extensions()
         .into_iter()
         .find(|e| e.kind == kind && e.name == name);
+
+    // -1) 内建原生技能拒绝：目标真目录判定内建（静态清单 / marker）→ 不卸载
+    if kind == "skill" {
+        let target = resolve_ssot_paths("skill", &name, record.as_ref().map(|r| r.id.as_str()))
+            .into_iter()
+            .find(|p| p.is_dir() && !p.is_symlink());
+        if let Some(target) = target {
+            if let Some(reason) = builtin_uninstall_rejection(&name, &target) {
+                log::info!("{}", reason);
+                return Err(reason);
+            }
+        }
+    }
 
     // 0) SSOT 删除保护（spec §4.4 + review N-1）：在任何破坏性步骤（逐工具清理）之前，
     //    检查 ~/.agents/skills/<name> 是否为指向 SSOT 的直链（情景 B「保留为共享」形态）
@@ -453,5 +483,40 @@ mod uninstall_tests {
         std::fs::create_dir_all(agents_dir.join("native")).unwrap();
         assert!(!agents_link_targets_layer2(&agents_dir, "native", &active));
         assert!(!agents_link_targets_layer2(&agents_dir, "missing", &active));
+    }
+
+    // —— 工具内建原生技能卸载守卫（用户裁决 2026-09-16）——
+
+    /// 内建目标必须拒绝：静态清单命中（codex .system）与 marker 命中（任意工具）
+    /// 都产出「不可卸载」拒绝原因；普通技能目录不拒绝
+    #[test]
+    fn uninstall_rejects_builtin_native_skill_target() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 静态清单命中：目录名 .system（codex 内建表）
+        let builtin = tmp.path().join(".system");
+        std::fs::create_dir_all(&builtin).unwrap();
+        let reason = builtin_uninstall_rejection(".system", &builtin)
+            .expect("codex 内建 .system 必须拒绝卸载");
+        assert!(reason.contains("不可卸载"), "{}", reason);
+        assert!(reason.contains(".system"), "{}", reason);
+
+        // 标记文件命中：任意目录带 .codex-system-skills.marker 即内建
+        let marked = tmp.path().join("v2m2-marked");
+        std::fs::create_dir_all(&marked).unwrap();
+        std::fs::write(marked.join(".codex-system-skills.marker"), "").unwrap();
+        assert!(builtin_uninstall_rejection("v2m2-marked", &marked)
+            .expect("marker 目录必须拒绝卸载")
+            .contains("不可卸载"));
+
+        // 链接本体不算真目录 → 不在本守卫拒绝（链接由 assignment 清理流程处置）
+        let linked = tmp.path().join("v2m2-linked");
+        make_dir_link(&builtin, &linked);
+        assert!(builtin_uninstall_rejection("v2m2-linked", &linked).is_none());
+
+        // 普通技能目录（无表名无标记）→ 不拒绝
+        let plain = tmp.path().join("v2m2-plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(builtin_uninstall_rejection("v2m2-plain", &plain).is_none());
     }
 }

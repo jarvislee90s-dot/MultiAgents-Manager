@@ -976,6 +976,79 @@ pub fn primary_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
     skill_dir_for_tool(tool_id, &dirs::home_dir().unwrap_or_default())
 }
 
+/// 工具内建原生技能静态清单（per-tool 内建目录名表，用户裁决 2026-09-16）：
+/// codex 的 `.system`（系统技能）与 `_shared`（共享资源）由 CLI 自管，
+/// MAM 不接管；其余工具暂无实证内建目录，先空表（发现后在此登记）
+pub const BUILTIN_NATIVE_DIRS: &[(&str, &[&str])] = &[("codex", &[".system", "_shared"])];
+
+/// 工具内建原生技能的自管重建标记文件名（codex 实证：内建目录带此标记，
+/// 删除后 CLI 会自行重建）。任意工具的目录内命中该标记即判内建
+pub const BUILTIN_NATIVE_MARKER: &str = ".codex-system-skills.marker";
+
+/// 工具内建原生技能判定（三层识别的前两层，adapter 层数据驱动；登记线兜底
+/// 在扫描层调用点做——需查 DB，见 `services::preset::snapshot`）：
+/// a) 静态清单：目录名命中该工具的内建目录名表；
+/// b) 标记文件：目录内存在 `.codex-system-skills.marker`（不限工具，命中即内建）。
+/// 命中 = **定义上即常驻**（与「原生 MCP 段/自装插件不碰」同类）：识别即保护，
+/// 无需用户标记——不进快照、不被暂存、不可启停、不可卸载
+pub fn is_builtin_native_skill(tool_id: &str, dir_name: &str, dir_path: &std::path::Path) -> bool {
+    BUILTIN_NATIVE_DIRS
+        .iter()
+        .any(|(tool, names)| *tool == tool_id && names.contains(&dir_name))
+        || dir_path.join(BUILTIN_NATIVE_MARKER).exists()
+}
+
+#[cfg(test)]
+mod builtin_native_tests {
+    use super::*;
+
+    /// 静态清单命中：codex 的 .system / _shared 判内建（marker 缺席也命中）
+    #[test]
+    fn codex_builtin_dirs_hit_static_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_builtin_native_skill("codex", ".system", tmp.path()));
+        assert!(is_builtin_native_skill("codex", "_shared", tmp.path()));
+    }
+
+    /// 其余工具空表不误伤：同名目录在无表工具下不因名字判内建
+    #[test]
+    fn tools_without_table_do_not_match_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        for tool in [
+            "claude",
+            "zcode",
+            "dsh",
+            "kimi",
+            "openclaw",
+            "workbuddy",
+            "opencode",
+        ] {
+            assert!(
+                !is_builtin_native_skill(tool, ".system", tmp.path()),
+                "{} 空表不得误判 .system",
+                tool
+            );
+        }
+    }
+
+    /// 标记文件命中：任意工具的目录内存在 `.codex-system-skills.marker` 即内建
+    #[test]
+    fn marker_file_hits_for_any_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(BUILTIN_NATIVE_MARKER), "").unwrap();
+        assert!(is_builtin_native_skill("claude", "v2m2-marked", tmp.path()));
+        assert!(is_builtin_native_skill("codex", "v2m2-marked", tmp.path()));
+    }
+
+    /// 无表名 + 无标记 → 非内建（普通用户技能照常参与暂存/启停）
+    #[test]
+    fn plain_dir_without_table_name_or_marker_is_not_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_builtin_native_skill("codex", "v2m2-plain", tmp.path()));
+        assert!(!is_builtin_native_skill("claude", "v2m2-plain", tmp.path()));
+    }
+}
+
 #[cfg(test)]
 mod skill_dir_tests {
     use super::*;

@@ -36,6 +36,20 @@ pub fn install_skill(source_path: &str, name: &str, overwrite: bool) -> Result<(
 
 /// 为工具启用 skill（创建 Layer 2 symlink）
 pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), String> {
+    // 工具内建原生技能守卫（用户裁决 2026-09-16）：识别即常驻、不可启停。
+    // 置于函数最前——命中即拒绝，Layer 2 链接与工具目录零副作用（内建目录
+    // 永不被替换为链接/删除）；仅对真实目录判定（链接/不存在路径与非内建同路）。
+    // disable 侧不需要对称守卫：内建目录永不产生 MAM 链接，无可断之链
+    if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
+        let tool_target = tool_skill_dir.join(skill_name);
+        if tool_target.is_dir()
+            && !tool_target.is_symlink()
+            && crate::adapter::is_builtin_native_skill(tool_id, skill_name, &tool_target)
+        {
+            return Err(format!("工具内建技能，不可操作: {}", tool_target.display()));
+        }
+    }
+
     let layer2_path = crate::linker::layer2::link_skill_to_layer2(skill_name, tool_id)?;
 
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {

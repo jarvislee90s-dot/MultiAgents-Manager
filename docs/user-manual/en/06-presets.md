@@ -52,6 +52,8 @@ Some resources should survive every preset — your core MCP servers, must-have 
 - The exclusive sweep **never touches** resident resources: they are neither disabled nor stashed.
 - The "resident exempt" count in the apply confirmation dialog is exactly what this lock saved from the sweep.
 
+**Built-in native skills (resident by definition)**: a tool's own built-in skill directories (such as codex's `.system` and `_shared`, and any directory carrying a `.codex-system-skills.marker` file) are **resident by definition** — no lock needed. MAM identifies them automatically and protects them on every path: they never enter the base snapshot, are never stashed, and can be neither toggled nor uninstalled through MAM. The same applies to native skills in a tool's directory that were never imported (registered) through MAM — exclusive presets leave them alone; import them via the Resources panel first if you want them to participate in preset switching.
+
 ## Exclusive Bindings
 
 Some resources depend on a specific tool's environment (an app, a companion MCP); putting them into other tools only causes trouble. An exclusive binding restricts a resource to the tools you allow:

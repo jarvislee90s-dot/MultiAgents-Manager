@@ -81,6 +81,24 @@ pub fn list_extensions() -> Vec<ExtensionRecord> {
         .unwrap_or_default()
 }
 
+/// 登记的原生技能名集合（`is_native=1 AND source_tool=tool_id` 行的 name 列）——
+/// 预设扫描的「登记线」兜底数据源（用户裁决 2026-09-16）：磁盘原生目录只有
+/// 登记在案（经理 MAM 导入）才参与快照/暂存，未登记者视为常驻不参与
+pub fn list_registered_native_names(tool_id: &str) -> Vec<String> {
+    let conn = DB.lock().unwrap();
+    conn.prepare(
+        "SELECT name FROM extensions WHERE is_native = 1 AND source_tool = ?1 AND kind = 'skill'",
+    )
+    .ok()
+    .map(|mut stmt| {
+        stmt.query_map([tool_id], |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
 pub fn list_assignments(tool_id: &str) -> Vec<AssignmentRecord> {
     let conn = DB.lock().unwrap();
     conn.prepare("SELECT id, extension_id, agent_tool_id, sub_agent_id, enabled, link_status FROM extension_assignments WHERE agent_tool_id = ?1")

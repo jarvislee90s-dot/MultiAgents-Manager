@@ -31,10 +31,20 @@ pub fn scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord> {
     }
 
     // 2) 原生技能：主 skill 目录下的真目录（非符号链接）。MAM 启用项在目录里是链接，
-    //    与真目录正常不重叠；链接穿透套件（父目录是链接）不在此层出现
+    //    与真目录正常不重叠；链接穿透套件（父目录是链接）不在此层出现。
+    //    工具内建原生技能保护（用户裁决 2026-09-16）：每个真目录入快照前过两道——
+    //    ① adapter 内建判定（静态清单 + marker）命中 → 定义上即常驻，skip；
+    //    ② 登记线兜底：未在 extensions 表登记（无 is_native=1 AND source_tool 行）
+    //    的磁盘原生目录 → 视为常驻，skip。两道都不出的目录不进快照，
+    //    独占管线的暂存/清扫随之全程不可达；登记的原生项照常进快照，
+    //    restore/ensure-present 等快照消费者不受影响
     let mut native_names: Vec<String> = Vec::new();
     if let Some(dir) = crate::adapter::primary_skill_dir(tool_id) {
         if dir.exists() {
+            let registered: std::collections::HashSet<String> =
+                database::list_registered_native_names(tool_id)
+                    .into_iter()
+                    .collect();
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for e in entries.flatten() {
                     let path = e.path();
@@ -43,6 +53,26 @@ pub fn scan_tool_state(tool_id: &str) -> Vec<BaseSnapshotItemRecord> {
                         if let Some(name) = e.file_name().to_str() {
                             // 子 Agent 布局目录（subagents/）不是技能，跳过
                             if name == "subagents" {
+                                continue;
+                            }
+                            // ① 内建判定：工具内建原生技能（codex .system/_shared、
+                            //    带 marker 目录）定义上即常驻，不进快照
+                            if crate::adapter::is_builtin_native_skill(tool_id, name, &path) {
+                                log::debug!(
+                                    "[内建常驻] {}/{}：工具内建原生技能，不进快照不暂存",
+                                    tool_id,
+                                    name
+                                );
+                                continue;
+                            }
+                            // ② 登记线兜底：未经理 MAM 导入登记的磁盘原生目录
+                            //    视为常驻，不参与暂存
+                            if !registered.contains(name) {
+                                log::debug!(
+                                    "[未登记常驻] {}/{}：磁盘原生目录未登记，视为常驻不暂存",
+                                    tool_id,
+                                    name
+                                );
                                 continue;
                             }
                             native_names.push(name.to_string());
