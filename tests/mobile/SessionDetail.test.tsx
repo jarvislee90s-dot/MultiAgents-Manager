@@ -338,6 +338,36 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.queryByTestId("summary-banner")).toBeNull();
   });
 
+  it("需求 1：横向分屏（左对话右文件）可用，与上下分屏/全屏三态互通", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    // 打开默认全屏 → 切横向分屏（左对话右文件）
+    fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+    const preview = screen.getByTestId("file-preview");
+    expect(preview.getAttribute("data-mode")).toBe("split-h");
+    const split = screen.getByTestId("split-container");
+    // 横向分屏容器：flex-row（左对话右文件）——与纵向 split 的 flex-col 区分
+    expect(split.className).toContain("flex-row");
+    // 对话与文件都在同一屏（同一容器内两个子区）
+    expect(split.textContent).toContain("改了");
+    expect(split.textContent).toContain("fn main() {}");
+    // 三态互通：纵分屏 ↔ 横分屏 ↔ 全屏
+    fireEvent.click(screen.getByTestId("preview-toggle-split"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
+    expect(screen.getByTestId("split-container").className).toContain("flex-col");
+    fireEvent.click(screen.getByTestId("preview-toggle-split-h"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split-h");
+    fireEvent.click(screen.getByTestId("preview-toggle-fullscreen"));
+    expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
+    expect(screen.queryByTestId("split-container")).toBeNull();
+  });
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];

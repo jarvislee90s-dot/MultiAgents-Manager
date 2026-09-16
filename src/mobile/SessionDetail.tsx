@@ -12,8 +12,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ArrowLeft, ChevronDown, ChevronRight, Columns2, Maximize2, RotateCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, RotateCw } from "lucide-react";
 import FilePreview from "./FilePreview";
+import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import { ApiError, fetchSessionFiles, fetchSessionMessages, type SessionMessage } from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
 import type { Session } from "@/types/session";
@@ -33,7 +34,7 @@ interface SessionDetailProps {
 
 interface PreviewState {
   path: string;
-  mode: "split" | "fullscreen";
+  mode: PreviewMode;
 }
 
 /** 拉取失败态：status=null 表示网络层异常（无 HTTP 状态可读） */
@@ -214,7 +215,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const closePreview = useCallback(() => setPreview(null), []);
 
   // 布局切换（页头切换器与 FilePreview 页头控件共用同一状态出口）
-  const changePreviewMode = useCallback((mode: "split" | "fullscreen") => {
+  const changePreviewMode = useCallback((mode: PreviewMode) => {
     setPreview((p) => (p ? { ...p, mode } : p));
   }, []);
 
@@ -334,8 +335,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
 
   // Bug 8（M3 验收）：总结模式折叠提示。折叠数 = 当前被折叠的可折叠条数——
   // 70 条过程消息被静默折叠会被误读为「内容被截」，顶部提示行 + 展开/收起全部
-  // 消除歧义（折叠本身是正确行为，不改动折叠语义）
-  const toggleableMessages = messages !== null ? messages.filter(isToggleable) : [];
+  // 消除歧义（折叠本身是正确行为，不改动折叠语义）。
+  // useMemo 保持引用稳定（expandAll 依赖它，逐渲染新建会让 useCallback 每拍失效）
+  const toggleableMessages = useMemo(
+    () => (messages !== null ? messages.filter(isToggleable) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- isToggleable 是渲染期纯函数（依赖 isSummary/lastAssistantSeq，已在下行列出）
+    [messages, isSummary, lastAssistantSeq]
+  );
   const collapsedCount = toggleableMessages.filter((m) => isCollapsed(m)).length;
 
   const expandAll = useCallback(() => {
@@ -497,42 +503,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             session.status === "waiting" ? "animate-pulse" : ""
           }`}
         />
-        {/* 预览布局切换（仅预览打开时出现；Task 8 裁决：切换控件在 SessionDetail） */}
+        {/* 预览布局切换（仅预览打开时出现；Task 8 裁决：切换控件在 SessionDetail；
+            需求 1 扩展为三态：纵向分屏 / 横向分屏 / 全屏） */}
         {preview && (
-          <span
-            role="group"
-            aria-label="预览布局"
-            className="flex shrink-0 items-center rounded-full bg-slate-200 p-0.5 dark:bg-slate-800"
-          >
-            <button
-              type="button"
-              data-testid="preview-mode-split"
-              aria-pressed={preview.mode === "split"}
-              aria-label="分屏预览"
-              onClick={() => setPreview((p) => (p ? { ...p, mode: "split" } : p))}
-              className={`rounded-full p-1 ${
-                preview.mode === "split"
-                  ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
-                  : "text-slate-500 dark:text-slate-400"
-              }`}
-            >
-              <Columns2 size={14} />
-            </button>
-            <button
-              type="button"
-              data-testid="preview-mode-fullscreen"
-              aria-pressed={preview.mode === "fullscreen"}
-              aria-label="全屏预览"
-              onClick={() => setPreview((p) => (p ? { ...p, mode: "fullscreen" } : p))}
-              className={`rounded-full p-1 ${
-                preview.mode === "fullscreen"
-                  ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
-                  : "text-slate-500 dark:text-slate-400"
-              }`}
-            >
-              <Maximize2 size={14} />
-            </button>
-          </span>
+          <PreviewModeSwitcher
+            mode={preview.mode}
+            onChange={changePreviewMode}
+            testIdPrefix="preview-mode"
+          />
         )}
         <button
           type="button"
@@ -545,15 +523,26 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </button>
       </header>
 
-      {/* split = 上对话下文件（纵向分屏，Task 8 裁决的手机现实） */}
-      {preview?.mode === "split" ? (
-        <div data-testid="split-container" className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-3">{messageArea}</div>
-          <div className="h-1/2 shrink-0 border-t border-slate-200 dark:border-slate-800">
+      {/* split = 上对话下文件（纵向）；split-h = 左对话右文件（横向，需求 1）；
+          fullscreen = 全屏浮层。三态互切，关闭回原位 */}
+      {preview?.mode === "split" || preview?.mode === "split-h" ? (
+        <div
+          data-testid="split-container"
+          data-split={preview.mode}
+          className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
+        >
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pt-3">{messageArea}</div>
+          <div
+            className={
+              preview.mode === "split-h"
+                ? "w-1/2 shrink-0 overflow-hidden border-l border-slate-200 dark:border-slate-800"
+                : "h-1/2 shrink-0 overflow-hidden border-t border-slate-200 dark:border-slate-800"
+            }
+          >
             <FilePreview
               session={session}
               filePath={preview.path}
-              mode="split"
+              mode={preview.mode}
               onModeChange={changePreviewMode}
               onClose={closePreview}
             />

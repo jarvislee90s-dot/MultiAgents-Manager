@@ -10,7 +10,8 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import hljs from "highlight.js/lib/common";
-import { Columns2, Maximize2, X } from "lucide-react";
+import { X } from "lucide-react";
+import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import { ApiError, fetchFile, type FilePayload } from "./api";
 import type { Session } from "@/types/session";
 
@@ -19,12 +20,13 @@ interface FilePreviewProps {
   session: Session;
   /** 待预览的文件路径（绝对或相对项目目录，端点侧 read_file_safe 解析） */
   filePath: string;
-  /** 呈现形态：split=嵌入分屏下半区 / fullscreen=全屏浮层（只影响容器高度语义） */
-  mode: "split" | "fullscreen";
-  /** 布局切换回调（Bug 2，M3 验收）：提供后页头出现 split/fullscreen 切换控件——
+  /** 呈现形态：split=上对话下文件 / split-h=左对话右文件 / fullscreen=全屏浮层
+   *  （只影响容器布局语义，布局本身由 SessionDetail 承担） */
+  mode: PreviewMode;
+  /** 布局切换回调（Bug 2，M3 验收）：提供后页头出现三态切换控件——
    *  全屏浮层 fixed inset-0 盖住 SessionDetail 页头，此控件是全屏态唯一可达入口；
    *  缺省不渲染（既有直接用法/测试不受影响），切换仍由 SessionDetail 持有 mode */
-  onModeChange?: (mode: "split" | "fullscreen") => void;
+  onModeChange?: (mode: PreviewMode) => void;
   onClose: () => void;
 }
 
@@ -148,42 +150,9 @@ export default function FilePreview({
           </button>
         )}
         {/* 布局切换控件（Bug 2，M3 验收）：全屏浮层盖住 SessionDetail 页头时，
-            此处是 split/fullscreen 切换的唯一可达入口 */}
+            此处是三态切换的唯一可达入口 */}
         {onModeChange && (
-          <span
-            role="group"
-            aria-label="预览布局"
-            className="flex shrink-0 items-center rounded-full bg-slate-200 p-0.5 dark:bg-slate-800"
-          >
-            <button
-              type="button"
-              data-testid="preview-toggle-split"
-              aria-pressed={mode === "split"}
-              aria-label="分屏预览"
-              onClick={() => onModeChange("split")}
-              className={`rounded-full p-1 ${
-                mode === "split"
-                  ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
-                  : "text-slate-500 dark:text-slate-400"
-              }`}
-            >
-              <Columns2 size={14} />
-            </button>
-            <button
-              type="button"
-              data-testid="preview-toggle-fullscreen"
-              aria-pressed={mode === "fullscreen"}
-              aria-label="全屏预览"
-              onClick={() => onModeChange("fullscreen")}
-              className={`rounded-full p-1 ${
-                mode === "fullscreen"
-                  ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
-                  : "text-slate-500 dark:text-slate-400"
-              }`}
-            >
-              <Maximize2 size={14} />
-            </button>
-          </span>
+          <PreviewModeSwitcher mode={mode} onChange={onModeChange} testIdPrefix="preview-toggle" />
         )}
         <button
           type="button"
