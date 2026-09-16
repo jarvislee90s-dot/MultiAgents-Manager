@@ -21,7 +21,7 @@
 | C2 前端 + 文件预览 | ZCode 式会话详情（完整对话）+ 文件预览（安全读取：越界/symlink/双阈值防护；markdown 渲染 / 图片 / 代码高亮） | `b8b3294` |
 | 文件路径提取 | 七工具会话内容中文件路径提取（泛化提取器 + fixture 兜底；kimi `file` / opencode `filePath` 实证） | `4ba40f0` |
 | 终审修复三连 | 终审（全分支评审）三项必修：/session-files 数据源与 /session-messages 同源（DSH_HOME/KIMI_CODE_HOME 单源归口）；file 端点图片响应加 CSP + nosniff 安全头；移动端主题切换在 localStorage 写失败时自愈 | `67c8565` |
-| 终验评审修复 R1 | SSE 模式 30s 低频对账（`Board.tsx` SSE effect 内 `RECONCILE_MS=30s` tick）：transition 只更新已存在卡（watcher 对新增会话不发事件）、SSE 又无周期快照，新会话成员资格原本冻结——30s 一次全量拉取兜底后，新会话上卡/下卡最大延迟 30s，不再需要刷新页面 | `d8a237f` |
+| 终验评审修复 R1 | SSE 模式 30s 低频对账（`Board.tsx` SSE effect 内 `RECONCILE_MS=30s` tick）：transition 只更新已存在卡（watcher 对新增会话不发事件）、SSE 又无周期快照，新会话成员资格原本冻结——30s 一次全量拉取兜底后，新会话上卡/下卡最大延迟 30s，不再需要刷新页面 | `56a9040` |
 
 评审记录：每个 commit 均通过独立评审（`.superpowers/sdd/2026-09-15-m3-board-realtime-content/review-*.diff`），评审发现的问题全部在对应 fix commit 内 ADDRESSED（台账见同目录 `progress.md`）。
 
