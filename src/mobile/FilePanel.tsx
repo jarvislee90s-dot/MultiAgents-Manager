@@ -55,6 +55,8 @@ interface FilePanelProps {
   onOpenFile: (path: string) => void;
   /** 布局切换（与单文件预览共用三态） */
   onModeChange: (mode: PreviewMode) => void;
+  /** 字号档位（2026-09-16 用户裁决）：作用于列表内容区（头部/档位卡不受影响） */
+  fontScale?: number;
   onClose: () => void;
 }
 
@@ -67,9 +69,13 @@ export default function FilePanel({
   onScopeChange,
   onOpenFile,
   onModeChange,
+  fontScale = 1,
   onClose,
 }: FilePanelProps) {
   const [kind, setKind] = useState<FileKindFilter>("all");
+  // 目录路径浮窗（2026-09-16 用户裁决）：次行目录被截断时点击查看全路径
+  // （手机与电脑逻辑一致——同一组件两板共用）
+  const [pathPopover, setPathPopover] = useState<string | null>(null);
   // 相对时间的基准时钟（Board 同款模式：渲染期不得调 Date.now——react-hooks/purity）
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -154,7 +160,11 @@ export default function FilePanel({
         {loading && <span className="ml-auto text-xs text-slate-400">加载中…</span>}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+      <div
+        data-testid="panel-content"
+        data-font-scale={fontScale}
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
+      >
         {visible.length === 0 && !loading && (
           <p data-testid="panel-empty" className="py-12 text-center text-sm text-slate-500">
             该范围内未发现文件
@@ -182,7 +192,24 @@ export default function FilePanel({
                 {fileBaseName(e.path)}
               </button>
               <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <span className="min-w-0 flex-1 truncate">{fileDirPrefix(e.path)}</span>
+                {fileDirPrefix(e.path) ? (
+                  <button
+                    type="button"
+                    data-testid={`file-row-${i}-dir`}
+                    aria-label="查看完整路径"
+                    title="点击查看完整路径"
+                    onClick={() =>
+                      setPathPopover((p) =>
+                        p === fileDirPrefix(e.path) ? null : fileDirPrefix(e.path)
+                      )
+                    }
+                    className="min-w-0 flex-1 truncate text-left hover:text-slate-700 hover:underline dark:hover:text-slate-200"
+                  >
+                    {fileDirPrefix(e.path)}
+                  </button>
+                ) : (
+                  <span className="min-w-0 flex-1" />
+                )}
                 {/* 相对时间（lastTs null → 占位符） */}
                 <span className="shrink-0">
                   {e.lastTs === null
@@ -195,6 +222,28 @@ export default function FilePanel({
             </li>
           ))}
         </ul>
+        {/* 路径浮窗（2026-09-16 用户裁决）：完整目录路径可读可复制（长按/选中） */}
+        {pathPopover !== null && (
+          <div
+            data-testid="path-popover"
+            role="dialog"
+            aria-label="完整路径"
+            className="sticky bottom-0 mt-2 flex items-start gap-2 rounded-lg border border-slate-300 bg-white p-2 shadow-lg dark:border-slate-700 dark:bg-slate-900"
+          >
+            <code className="min-w-0 flex-1 text-xs break-all text-slate-700 dark:text-slate-200">
+              {pathPopover}
+            </code>
+            <button
+              type="button"
+              data-testid="path-popover-close"
+              aria-label="关闭路径浮窗"
+              onClick={() => setPathPopover(null)}
+              className="shrink-0 rounded-full p-0.5 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
         {/* 档位提示：还有更早文件且未到顶（用户裁决 3） */}
         {truncated && !atTop && (
           <p

@@ -178,6 +178,32 @@ describe("FilePanel 档位卡片（用户裁决 3）", () => {
   });
 });
 
+describe("FilePanel 目录路径点击弹全路径（2026-09-16 用户裁决）", () => {
+  const longPath = "/very/long/directory/prefix/that/gets/truncated/in/the/list/view/sub";
+
+  it("点次行目录 → 弹层显示完整路径（手机与电脑逻辑一致）", () => {
+    renderPanel([entry(`${longPath}/app.rs`)]);
+    // 弹层初始不存在
+    expect(screen.queryByTestId("path-popover")).toBeNull();
+    fireEvent.click(screen.getByTestId("file-row-0-dir"));
+    const pop = screen.getByTestId("path-popover");
+    expect(pop.textContent).toContain(longPath);
+  });
+
+  it("弹层可关闭（再点目录 / 点关闭按钮）", () => {
+    renderPanel([entry(`${longPath}/app.rs`)]);
+    fireEvent.click(screen.getByTestId("file-row-0-dir"));
+    expect(screen.getByTestId("path-popover")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("path-popover-close"));
+    expect(screen.queryByTestId("path-popover")).toBeNull();
+  });
+
+  it("无目录前缀的行不该有可点目录按钮（避免空弹层）", () => {
+    renderPanel([entry("app.rs")]);
+    expect(screen.queryByTestId("file-row-0-dir")).toBeNull();
+  });
+});
+
 describe("FilePanel 头部操作", () => {
   it("关闭按钮回调 onClose；切换器回调 onModeChange", () => {
     const { onClose, onModeChange } = renderPanel([entry("/p/a.rs")]);

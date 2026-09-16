@@ -427,14 +427,15 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.pointerDown(handleH, { clientX: 300 });
     fireEvent.pointerMove(window, { clientX: 320 });
     fireEvent.pointerUp(window);
-    const wider = parseFloat(filePane.style.width);
-    // 向右拖 20px / 容器宽 400 → 文件栏宽度增加 5 个百分点
-    expect(wider).toBeCloseTo(initial + 5, 1);
-    // 收起方向：向左拖回（文件栏变窄）
+    const narrower = parseFloat(filePane.style.width);
+    // 向右拖 20px / 容器宽 400 → 分隔条右移 → 右侧文件栏变窄 5 个百分点
+    // （2026-09-16 用户裁决：分隔条跟随指针）
+    expect(narrower).toBeCloseTo(initial - 5, 1);
+    // 反向：向左拖回（文件栏变宽）
     fireEvent.pointerDown(handleH, { clientX: 320 });
     fireEvent.pointerMove(window, { clientX: 260 });
     fireEvent.pointerUp(window);
-    expect(parseFloat(filePane.style.width)).toBeCloseTo(wider - 15, 1);
+    expect(parseFloat(filePane.style.width)).toBeCloseTo(narrower + 15, 1);
 
     // ---- 纵向分屏：拖分隔条 → 文件栏高度变化 ----
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
@@ -447,16 +448,17 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.pointerDown(handleV, { clientY: 400 });
     fireEvent.pointerMove(window, { clientY: 300 });
     fireEvent.pointerUp(window);
-    // 向上拖 100px / 容器高 800 → 文件栏高度增加 12.5 个百分点
+    // 向上拖 100px / 容器高 800 → 分隔条上移 → 下方文件栏变高 12.5 个百分点
+    // （2026-09-16 用户裁决：分隔条跟随指针——向上拖条子上移，下方文件区变大）
     expect(parseFloat(filePaneV.style.height)).toBeCloseTo(h0 + 12.5, 1);
 
     // ---- 拖动不得越界（钳制 15%–85%） ----
-    fireEvent.pointerDown(handleV, { clientY: 0 });
-    fireEvent.pointerMove(window, { clientY: 100000 });
-    fireEvent.pointerUp(window);
-    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
     fireEvent.pointerDown(handleV, { clientY: 800 });
     fireEvent.pointerMove(window, { clientY: -100000 });
+    fireEvent.pointerUp(window);
+    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
+    fireEvent.pointerDown(handleV, { clientY: 0 });
+    fireEvent.pointerMove(window, { clientY: 100000 });
     fireEvent.pointerUp(window);
     expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
   });
@@ -618,6 +620,24 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.click(btn);
     expect(screen.queryByTestId("preview-shell")).toBeNull();
     expect(btn.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("字号档位（2026-09-16 用户裁决）：面板按钮旁选择，50/75/100/125 四档，主对话窗口生效", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "正文" })];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("正文");
+    const sel = (await screen.findByTestId("font-scale-select")) as HTMLSelectElement;
+    // 四档可选，默认 100
+    expect([...sel.options].map((o) => o.value)).toEqual(["0.5", "0.75", "1", "1.25"]);
+    expect(sel.value).toBe("1");
+    // 切到 125% → 消息区容器带档位类（字号经 CSS 变量缩放）
+    fireEvent.change(sel, { target: { value: "1.25" } });
+    expect(screen.getByTestId("message-area").getAttribute("data-font-scale")).toBe("1.25");
+    // 切到 50%
+    fireEvent.change(sel, { target: { value: "0.5" } });
+    expect(screen.getByTestId("message-area").getAttribute("data-font-scale")).toBe("0.5");
   });
 
   it("未知路径不出链接：files 为空时正文原样", async () => {

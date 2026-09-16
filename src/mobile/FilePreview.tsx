@@ -30,6 +30,9 @@ interface FilePreviewProps {
   /** 返回文件列表（M3+）：从面板进入时提供 → 页头显示返回按钮；
    *  从消息正文链接进入（backToList=false）时缺省不渲染，既有行为不变 */
   onBack?: () => void;
+  /** 字号档位（2026-09-16 用户裁决）：只作用于预览内容区（页头不受影响）。
+   *  缺省 1（100%，不覆写 CSS 变量） */
+  fontScale?: number;
   onClose: () => void;
 }
 
@@ -88,6 +91,7 @@ export default function FilePreview({
   mode,
   onModeChange,
   onBack,
+  fontScale = 1,
   onClose,
 }: FilePreviewProps) {
   const [state, setState] = useState<LoadState>({ phase: "loading" });
@@ -180,7 +184,11 @@ export default function FilePreview({
           <X size={16} />
         </button>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-3">
+      <div
+        data-testid="preview-content"
+        data-font-scale={fontScale}
+        className="min-h-0 flex-1 overflow-auto p-3"
+      >
         {state.phase === "loading" && (
           <p className="text-sm text-slate-500 dark:text-slate-400">加载中…</p>
         )}

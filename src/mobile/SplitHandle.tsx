@@ -63,8 +63,12 @@ export default function SplitHandle({
       const span = orientation === "horizontal" ? rect.width : rect.height;
       if (span <= 0) return; // 无布局引擎 / 未挂载：不换算
       const now = orientation === "horizontal" ? e.clientX : e.clientY;
-      // 纵向：文件栏在下半区，向下拖 = 文件栏变矮 → 占比减，故增量取负
-      const delta = orientation === "horizontal" ? now - drag.pos : drag.pos - now;
+      // 语义：分隔条跟随指针（两方向同式，均取负差值）。布局恒为
+      // [对话 flex-1][分隔条][文件栏 占比 ratio]——文件栏在分隔条**之后**，
+      // 指针朝文件栏方向拖 = 分隔条跟随过去 = 文件栏被压小 = 占比减。
+      // 横向：右拖（now 增）→ 右侧文件栏变窄；纵向：下拖 → 下方文件栏变矮。
+      // 原横向用正差值（拖右反而变大＝逆着指针走），2026-09-16 用户裁决修正
+      const delta = drag.pos - now;
       onRatioChange(clamp(drag.ratio + delta / span));
     };
     const onUp = () => {

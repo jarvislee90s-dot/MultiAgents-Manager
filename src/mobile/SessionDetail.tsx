@@ -51,6 +51,10 @@ type PreviewState =
 /** 面板默认追溯档位（首屏数据源，与详情页默认 limit 同标尺） */
 const FILE_DEFAULT_SCOPE = 200;
 
+/** 字号档位（2026-09-16 用户裁决）：只作用于消息正文与文件预览内容，
+ *  UI 与页头不受影响（mobile.css 的 [data-font-scale] 变量覆写） */
+const FONT_SCALES = [0.5, 0.75, 1, 1.25] as const;
+
 /** 拉取失败态：status=null 表示网络层异常（无 HTTP 状态可读） */
 interface LoadError {
   status: number | null;
@@ -142,6 +146,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 追溯档位（M3+ 用户裁决 3）：面板三档 200/500/1000，切档重拉
   const [fileScope, setFileScope] = useState<number>(FILE_DEFAULT_SCOPE);
   const [fileLoading, setFileLoading] = useState(false);
+  // 字号档位（默认 100%）
+  const [fontScale, setFontScale] = useState<number>(1);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   // 文件栏占比（可拖分隔条，需求 2026-09-16）：两形态各自保留用户拖出的比例，
   // 初值 0.5（对半分，与旧版 h-1/2 / w-1/2 观感一致）
@@ -598,6 +604,21 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         >
           <PanelLeft size={16} />
         </button>
+        {/* 字号档位（2026-09-16 用户裁决）：面板按钮旁，作用于正文与预览内容 */}
+        <select
+          data-testid="font-scale-select"
+          aria-label="正文字号"
+          title="正文字号"
+          value={String(fontScale)}
+          onChange={(e) => setFontScale(Number(e.target.value))}
+          className="shrink-0 rounded-md border border-slate-200 bg-transparent px-1 py-0.5 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+        >
+          {FONT_SCALES.map((v) => (
+            <option key={v} value={String(v)}>
+              {Math.round(v * 100)}%
+            </option>
+          ))}
+        </select>
         {/* 布局切换器唯一实例在预览侧栏页头（FilePreview / FilePanel 内，
             2026-09-16 用户裁决：两处重复出现占用页面空间，只保留贴近文件的那份） */}
         <button
@@ -620,7 +641,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           data-split={preview.mode}
           className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
         >
-          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pt-3">{messageArea}</div>
+          <div
+            data-testid="message-area"
+            data-font-scale={fontScale}
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pt-3"
+          >
+            {messageArea}
+          </div>
           <SplitHandle
             orientation={preview.mode === "split-h" ? "horizontal" : "vertical"}
             ratio={fileRatio}
@@ -637,7 +664,12 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             }
           >
             {preview.view === "list" ? (
-              <div data-testid="preview-shell" data-view="list" data-mode={preview.mode}>
+              <div
+                data-testid="preview-shell"
+                data-view="list"
+                data-mode={preview.mode}
+                className="h-full"
+              >
                 <FilePanel
                   entries={fileEntries}
                   truncated={fileTruncated}
@@ -647,16 +679,23 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   onScopeChange={setFileScope}
                   onOpenFile={openFileFromList}
                   onModeChange={changePreviewMode}
+                  fontScale={fontScale}
                   onClose={closePreview}
                 />
               </div>
             ) : (
-              <div data-testid="preview-shell" data-view="file" data-mode={preview.mode}>
+              <div
+                data-testid="preview-shell"
+                data-view="file"
+                data-mode={preview.mode}
+                className="h-full"
+              >
                 <FilePreview
                   session={session}
                   filePath={preview.path}
                   mode={preview.mode}
                   onModeChange={changePreviewMode}
+                  fontScale={fontScale}
                   onBack={preview.backToList ? backToList : undefined}
                   onClose={closePreview}
                 />
@@ -665,7 +704,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           </div>
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-3">{messageArea}</div>
+        <div
+          data-testid="message-area"
+          data-font-scale={fontScale}
+          className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"
+        >
+          {messageArea}
+        </div>
       )}
 
       {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——列表状态由本组件持有） */}
@@ -687,6 +732,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 onScopeChange={setFileScope}
                 onOpenFile={openFileFromList}
                 onModeChange={changePreviewMode}
+                fontScale={fontScale}
                 onClose={closePreview}
               />
             ) : (
@@ -695,6 +741,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 filePath={preview.path}
                 mode="fullscreen"
                 onModeChange={changePreviewMode}
+                fontScale={fontScale}
                 onBack={preview.backToList ? backToList : undefined}
                 onClose={closePreview}
               />
