@@ -61,6 +61,8 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
         // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
         watcher_tx: watcher::event_sender(),
+        // M4 T0a：SSE 连接注册表（吊销/停止即时断连 + Task 7 在线口径数据源）
+        sse_registry: std::sync::Arc::new(server::SseRegistry::default()),
     })
 });
 
@@ -189,6 +191,9 @@ fn stop_server() {
     if let Some(h) = SERVER_HANDLE.lock().unwrap().take() {
         h.abort();
     }
+    // M4 T0a：停止 = 已建立 SSE 连接即时断开（旧限制「仅拒新连」的修复前半；
+    // 单设备吊销断连在 Task 8 的 remote_revoke_device 接线）
+    STATE.sse_registry.disconnect_all();
     STATE.store.with(|c| {
         let _ = pairing::revoke_all(c); // 停止 = 全吊销（七不变量）
     });

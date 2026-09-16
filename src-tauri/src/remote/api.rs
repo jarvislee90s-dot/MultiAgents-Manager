@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 
 use super::gate::COOKIE_NAME;
-use super::server::RemoteState;
+use super::server::{CleanupStream, RemoteState};
 
 /// GET /m/api/v1/sessions：数据源注入（生产 = adapter::get_all_sessions），
 /// `SessionsResponse` 已 camelCase 序列化（前端约定 totalCount）。
@@ -61,14 +61,21 @@ const EMPTY_SESSIONS_JSON: &str = r#"{"sessions":[],"totalCount":0,"waitingCount
 /// - 心跳用 `Sse::keep_alive(KeepAlive::default())`：axum 自带 15s 空注释帧
 ///   （简报的 `: ping` 等效物，无需自拼 interval 流——简报 Step 1 注释"心跳省略实现"即指此）；
 /// - 断流：客户端断开 → axum drop 本流 → BroadcastStream 释放 Receiver →
-///   receiver_count 归零 → watcher 零订阅者守卫跳过扫描（Task 5 闭环）。
+///   receiver_count 归零 → watcher 零订阅者守卫跳过扫描（Task 5 闭环）；
+/// - 吊销/停止即时断连（M4 T0a）：连接注册进 sse_registry，信号经 take_until 终止流
 pub async fn events(
     State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
     // 先订阅、后取快照（顺序刻意，勿换）：subscribe 在快照计算之前，期间产生的跃迁
     // 落进 broadcast 缓冲（容量 64）并在快照帧之后依次送出；若反序，快照与订阅之间
     // 发生的跃迁会永久丢失（重连后的看板状态与真实脱节）
     let rx = st.watcher_tx.subscribe();
+    // M4 T0a：注册连接（gate 已过闸，此处必能取到设备 id；防御性 None 时跳过注册只服务）
+    let device = super::gate::extract_device(&headers).unwrap_or_default();
+    let (conn_id, close_rx) = st.sse_registry.register(&device);
+    // 注册表句柄先行克隆：st 整体 move 进下方 spawn_blocking 闭包（既有代码不动）
+    let registry = st.sse_registry.clone();
     // 快照走 spawn_blocking：session_source 是同步阻塞调用（sysinfo 全进程刷新 + 各工具
     // 会话解析，冷启动可达数秒），直接 await 会周期性堵死 tokio worker——与 sessions
     // handler 同一先例（实机教训见 commands/session.rs 的 get_all_sessions 注释）
@@ -103,7 +110,16 @@ pub async fn events(
             }
         }
     });
-    Sse::new(initial.chain(transitions)).keep_alive(sse::KeepAlive::default())
+    let base = initial.chain(transitions);
+    // 吊销/停止信号到达即终止流（take_until：close_rx 被 send 或 Sender drop 均触发）
+    let guarded = base.take_until(close_rx);
+    let cleaned = CleanupStream {
+        inner: guarded,
+        reg: registry,
+        device,
+        conn_id,
+    };
+    Sse::new(cleaned).keep_alive(sse::KeepAlive::default())
 }
 
 #[derive(Deserialize)]

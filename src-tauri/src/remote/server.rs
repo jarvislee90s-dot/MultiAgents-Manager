@@ -122,6 +122,114 @@ async fn mobile_index() -> Response {
     entry_response()
 }
 
+/// 活跃连接句柄表（clippy::type_complexity 门禁适配：复杂类型抽别名，语义同原稿内联形）
+type DeviceConns = std::collections::HashMap<String, Vec<(u64, tokio::sync::oneshot::Sender<()>)>>;
+
+/// SSE 连接注册表（M4 T0a）：device_id → 活跃连接句柄表。
+/// 断连语义：吊销/停止时对目标设备的全部连接发 oneshot 关闭信号，
+/// SSE 流的 `take_until` 收到信号即终止 → axum 关闭该 HTTP 连接；
+/// 自然断开（客户端关页）由 CleanupStream 的 Drop 反注册。
+/// 锁粒度：单 Mutex 短临界区（register/unregister/disconnect 均无 IO），
+/// 不与 store/pairing 锁嵌套（锁序红线：registry 永远最后进最先出）。
+#[derive(Default)]
+pub struct SseRegistry {
+    inner: std::sync::Mutex<DeviceConns>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl SseRegistry {
+    /// 注册一条连接：返回 (连接 id, 关闭信号接收端)。
+    /// 返回的 Receiver 在 disconnect_device/disconnect_all 或 Sender 被 drop 时给出信号
+    pub fn register(&self, device: &str) -> (u64, tokio::sync::oneshot::Receiver<()>) {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .lock()
+            .unwrap()
+            .entry(device.to_string())
+            .or_default()
+            .push((id, tx));
+        (id, rx)
+    }
+
+    /// 自然断开反注册（幂等：未知 id 静默忽略）。
+    /// 写法适配（clippy::option_map_unit_fn 门禁）：原稿 `.map(|v| …)` 改 `if let`，语义不变
+    pub fn unregister(&self, device: &str, id: u64) {
+        if let Some(v) = self.inner.lock().unwrap().get_mut(device) {
+            v.retain(|(i, _)| *i != id);
+        }
+    }
+
+    /// 断开指定设备的全部连接，返回断开数
+    pub fn disconnect_device(&self, device: &str) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .remove(device)
+            .map(|v| {
+                // 编译适配（oneshot::Sender::send 消费 self，不能按引用迭代 send）：
+                // 先取长度，再按值迭代逐个 send
+                let n = v.len();
+                for (_, tx) in v {
+                    let _ = tx.send(());
+                }
+                n
+            })
+            .unwrap_or(0)
+    }
+
+    /// 断开全部设备连接（停止远程 / 全部吊销），返回断开数
+    pub fn disconnect_all(&self) -> usize {
+        let mut map = self.inner.lock().unwrap();
+        let n: usize = map.values().map(Vec::len).sum();
+        // 编译适配（send 消费 Sender，需持所有权迭代）：drain 等价于原稿的
+        // 「逐个 send 后 map.clear()」
+        for (_, v) in map.drain() {
+            for (_, tx) in v {
+                let _ = tx.send(());
+            }
+        }
+        n
+    }
+
+    /// 该设备是否存在活跃连接（Task 7 花名册在线口径数据源）
+    pub fn has(&self, device: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(device)
+            .is_some_and(|v| !v.is_empty())
+    }
+}
+
+/// 自然断开清理包装：axum drop SSE 流时反注册注册表项（不留陈旧句柄泄漏）。
+/// pub(crate) + 字段同可见性（编译适配）：api.rs（兄弟模块）按简报原稿以字段字面量构造
+pub(crate) struct CleanupStream<S> {
+    pub(crate) inner: S,
+    pub(crate) reg: std::sync::Arc<SseRegistry>,
+    pub(crate) device: String,
+    pub(crate) conn_id: u64,
+}
+impl<S: futures::Stream> futures::Stream for CleanupStream<S> {
+    type Item = S::Item;
+    fn poll_next(
+        // 编译适配（unused_mut，-D warnings 门禁）：map_unchecked_mut 按值消费 self，
+        // 绑定无需 mut
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Safety: 无 Unpin 约束需求经字段投影转发（inner 已被 take_until 包装为 Unpin 流链）
+        unsafe { self.map_unchecked_mut(|s| &mut s.inner).poll_next(cx) }
+    }
+}
+impl<S> Drop for CleanupStream<S> {
+    fn drop(&mut self) {
+        self.reg.unregister(&self.device, self.conn_id);
+    }
+}
+
 pub struct RemoteState {
     pub pairing: std::sync::Mutex<super::pairing::PairingService>,
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
@@ -140,6 +248,8 @@ pub struct RemoteState {
     /// 与 SessionWatcher::start 的循环共享）；测试注入新建空通道即可。
     /// **订阅端消费即去重完成**（铁律 4）：事件只含边沿（见 watcher::diff_transitions）
     pub watcher_tx: tokio::sync::broadcast::Sender<super::watcher::TransitionEvent>,
+    /// SSE 连接注册表（M4 T0a）：吊销/停止即时断连 + 在线口径数据源
+    pub sse_registry: std::sync::Arc<SseRegistry>,
 }
 
 /// API 子路由：三条端点 + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -225,6 +335,8 @@ mod tests {
     // 简报测试原稿直接使用 `PairingService` / `PairingClock` 短名，但 `use super::*`
     // 只引入 server.rs 自身条目；此处补 import（编译硬阻断，非行为偏离）
     use crate::remote::pairing::{PairingClock, PairingService};
+    // M4 T0a（编译硬阻断补 import，先例同上）：SSE 流逐帧消费需要 StreamExt::next
+    use futures::StreamExt as _;
 
     fn test_state() -> Arc<RemoteState> {
         let mut pairing = PairingService::new(
@@ -259,6 +371,8 @@ mod tests {
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
         })
     }
 
@@ -405,6 +519,8 @@ mod tests {
                 // 本组测试不触 /session-files /file：注入恒空的路径源
                 path_source: Box::new(|_, _, _| (Vec::new(), false)), // 本组测试不触 /session-files /file
                 watcher_tx: tokio::sync::broadcast::channel(64).0,    // M3 Task 5：空事件通道
+                // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+                sse_registry: Arc::new(SseRegistry::default()),
             }),
             t,
         )
@@ -857,6 +973,8 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -1020,6 +1138,86 @@ mod tests {
         );
     }
 
+    // ---- SseRegistry 单元（M4 T0a）----
+
+    #[test]
+    fn sse_registry_register_then_disconnect_device() {
+        let reg = SseRegistry::default();
+        let (id1, mut rx1) = reg.register("dev-a");
+        let (_id2, rx2) = reg.register("dev-a");
+        let (_id3, _rx3) = reg.register("dev-b");
+        assert!(reg.has("dev-a") && reg.has("dev-b"));
+        // 断 dev-a：两条连接全断，dev-b 不受影响
+        assert_eq!(reg.disconnect_device("dev-a"), 2);
+        assert!(rx1.try_recv().is_ok());
+        drop(rx2); // 第二条 receiver 被 send 唤醒后丢弃即可（Sender 已 send）
+        assert!(!reg.has("dev-a") && reg.has("dev-b"));
+        // 自然断开清理：unregister 幂等
+        reg.unregister("dev-a", id1);
+        reg.unregister("dev-a", id1); // 不 panic
+        assert_eq!(reg.disconnect_all(), 1); // 只剩 dev-b
+    }
+
+    #[test]
+    fn sse_registry_sender_dropped_when_entry_replaced_by_disconnect() {
+        let reg = SseRegistry::default();
+        // 编译适配（E0596）：try_recv 需 &mut self，原稿 rx 未加 mut
+        let (_id, mut rx) = reg.register("dev");
+        reg.disconnect_device("dev");
+        // 断连后 Sender 已移除；receiver 侧已收到信号
+        // 断言写法适配（clippy::redundant_pattern_matching 门禁）：matches! → is_ok()，语义不变
+        assert!(rx.try_recv().is_ok());
+    }
+
+    // ---- 吊销即时断流集成（SSE 流随 disconnect 终止）----
+
+    #[tokio::test]
+    async fn sse_stream_ends_when_device_disconnected() {
+        let state = test_state();
+        // 直通配对拿有效 cookie（复用既有 pair 流程的简化版：直接 persist 一个设备）
+        state.store.with(|c| {
+            let _ = crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "dev-sse".into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    // 偏离简报原稿一处（测试语义硬阻断）：原稿 paired_at: 0——persist 以
+                    // paired_at 充当 last_seen_at，gate 按真实时钟做滑动 TTL 判定，
+                    // 0 必被 403 拒绝。改为当前时刻，语义等价于「刚配对的活跃设备」
+                    // （既有 persist_device 测试助手同一取值先例）
+                    paired_at: chrono::Utc::now().timestamp_millis(),
+                },
+            );
+        });
+        let app = super::router_with_static(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/m/api/v1/events")
+                    .header("cookie", "mam_device=dev-sse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let mut stream = resp.into_body().into_data_stream();
+        // 读到首帧（snapshot）证明流已建立
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("首帧超时")
+            .unwrap();
+        assert!(first.is_ok());
+        // 吊销 → 流必须结束（next 返回 None）
+        assert_eq!(state.sse_registry.disconnect_device("dev-sse"), 1);
+        let end = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("断连后流未在 2s 内结束");
+        assert!(end.is_none());
+    }
+
     // ==== M3 Task 1：GET /m/api/v1/host（P8a/P8b 页头数据源） ====
     // 零污染：host 载荷经 host_source 注入缝供给（假 json），不触 settings DAO / 全局 DB。
 
@@ -1056,6 +1254,8 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1167,6 +1367,8 @@ mod tests {
             // 本测试不触 /session-files：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1335,6 +1537,8 @@ mod tests {
                 )
             }),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
