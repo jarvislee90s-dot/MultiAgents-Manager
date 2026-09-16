@@ -4,9 +4,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
-import { Scan, Import, FolderOpen, BookmarkPlus } from "lucide-react";
+import {
+  Scan,
+  Import,
+  FolderOpen,
+  BookmarkPlus,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { PresetEditDialog } from "@/components/presets/PresetEditDialog";
+import { applyNameSort, cycleSortDir, type SortDir } from "@/lib/nameSort";
 import {
   detectDuplicateSkills,
   cleanupDuplicateSkills,
@@ -47,6 +56,10 @@ export function ResourceByToolView() {
   // frontmatter 专属预填建议（spec §6，Task 17）：单项目导入命中后弹确认 Dialog
   //（2026-09-15 裁决：当场确认，非 toast）
   const [suggestion, setSuggestion] = useState<FrontmatterSuggestion | null>(null);
+  // 名称筛选 + 三态排序（用户反馈：工具组下清单可能很长）——与「按资源」视图同款口径，
+  // 排序/筛选逻辑复用 src/lib/nameSort.ts；作用于每个工具组内的全部清单
+  const [search, setSearch] = useState("");
+  const [sortDir, setSortDir] = useState<SortDir>("none");
 
   const handleSaveAsPreset = async (toolId: string) => {
     setPrefilling((prev) => ({ ...prev, [toolId]: true }));
@@ -180,6 +193,34 @@ export function ResourceByToolView() {
 
   return (
     <div className="space-y-4">
+      {/* 名称筛选 + 三态排序控制条：作用于下方每个工具组内的全部清单 */}
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          placeholder={t("resources.filterByName")}
+          value={search}
+          onChange={(e) => setSearch(e.currentTarget.value)}
+          className="h-7 w-40 rounded border px-2 text-xs"
+        />
+        <Button
+          size="sm"
+          variant="ghost"
+          className={`h-6 px-1.5 text-[10px] ${sortDir !== "none" ? "text-foreground" : "text-muted-foreground"}`}
+          title={t("resources.sortByName")}
+          aria-label={t("resources.sortByName")}
+          onClick={() => setSortDir((prev) => cycleSortDir(prev))}
+        >
+          {sortDir === "asc" ? (
+            <ArrowUp className="mr-1 h-3 w-3" />
+          ) : sortDir === "desc" ? (
+            <ArrowDown className="mr-1 h-3 w-3" />
+          ) : (
+            <ArrowUpDown className="mr-1 h-3 w-3" />
+          )}
+          {t("resources.sortByName")}
+          {sortDir !== "none" && <span>{sortDir === "asc" ? "↑" : "↓"}</span>}
+        </Button>
+      </div>
       {tools.map((tool) => (
         <div key={tool.id} className="rounded border p-3">
           <div className="mb-2 flex items-center justify-between">
@@ -229,6 +270,8 @@ export function ResourceByToolView() {
             toolId={tool.id}
             resources={toolResources[tool.id]}
             onImport={handleImport}
+            search={search}
+            sortDir={sortDir}
           />
 
           {/* 重复 skill 清理区 */}
@@ -287,20 +330,39 @@ function ToolResourceList({
   toolId,
   resources,
   onImport,
+  search,
+  sortDir,
 }: {
   toolId: string;
   resources?: ToolResources;
   onImport: (toolId: string, item: NativeExtension) => void;
+  search: string;
+  sortDir: SortDir;
 }) {
   const { t } = useTranslation();
   if (!resources) {
     return <div className="text-muted-foreground py-2 text-xs">{t("common.loading")}</div>;
   }
 
-  const globalSkills = resources.global.filter((e) => e.kind === "skill");
-  const nativeSkills = resources.native.filter((n) => n.kind === "skill");
-  const globalMcps = resources.global.filter((e) => e.kind === "mcp");
-  const globalPlugins = resources.global.filter((e) => e.kind === "plugin");
+  // 名称筛选（大小写不敏感包含）+ 三态排序：全局与原生两块分别过滤后各自排序
+  const q = search.trim().toLowerCase();
+  const match = (name: string) => !q || name.toLowerCase().includes(q);
+  const globalSkills = applyNameSort(
+    resources.global.filter((e) => e.kind === "skill" && match(e.name)),
+    sortDir
+  );
+  const nativeSkills = applyNameSort(
+    resources.native.filter((n) => n.kind === "skill" && match(n.name)),
+    sortDir
+  );
+  const globalMcps = applyNameSort(
+    resources.global.filter((e) => e.kind === "mcp" && match(e.name)),
+    sortDir
+  );
+  const globalPlugins = applyNameSort(
+    resources.global.filter((e) => e.kind === "plugin" && match(e.name)),
+    sortDir
+  );
 
   return (
     <div className="space-y-2">

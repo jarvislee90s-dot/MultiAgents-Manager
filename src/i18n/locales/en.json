@@ -287,6 +287,7 @@
     },
     "collapseSection": "Collapse section",
     "expandSection": "Expand section",
+    "filterByName": "Filter by name…",
     "resident": {
       "toggle": "Resident lock (exempt from preset disable/stash)"
     },

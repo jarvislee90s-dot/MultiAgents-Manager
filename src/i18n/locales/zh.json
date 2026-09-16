@@ -287,6 +287,7 @@
     },
     "collapseSection": "收起该分组",
     "expandSection": "展开该分组",
+    "filterByName": "按名称筛选…",
     "resident": {
       "toggle": "常驻锁（预设应用时豁免停用/暂存）"
     },

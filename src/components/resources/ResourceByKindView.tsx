@@ -44,6 +44,7 @@ import {
   TOOL_RESIDENTS_KEY,
 } from "@/lib/query/queries/bindings";
 import { useToggleMcpMutation } from "@/lib/query/mutations/resources";
+import { applyNameSort, cycleSortDir, type SortDir } from "@/lib/nameSort";
 import { uninstallResource } from "@/lib/api/manifest";
 import { deleteResourceBinding, setResourceBinding, setToolResident } from "@/lib/api/preset";
 import { Switch } from "@/components/ui/switch";
@@ -51,7 +52,6 @@ import { ManifestInstallDialog } from "./ManifestInstallDialog";
 import type { ResourceBinding, SsotResource } from "@/types/extension";
 
 type ResourceKind = "skill" | "mcp" | "plugin";
-type SortDir = "none" | "asc" | "desc";
 
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
@@ -288,11 +288,7 @@ export function ResourceByKindView() {
   });
 
   const toggleSort = (kind: ResourceKind) => {
-    setSortDirs((prev) => {
-      const order: SortDir[] = ["none", "asc", "desc"];
-      const next = order[(order.indexOf(prev[kind]) + 1) % order.length];
-      return { ...prev, [kind]: next };
-    });
+    setSortDirs((prev) => ({ ...prev, [kind]: cycleSortDir(prev[kind]) }));
   };
 
   // 分组折叠（用户反馈：名单可能特别长，翻阅成本高）：段头整行可点收起/展开，
@@ -327,14 +323,8 @@ export function ResourceByKindView() {
     }
   };
 
-  const applySort = <T extends { name: string }>(items: T[], kind: ResourceKind): T[] => {
-    const dir = sortDirs[kind];
-    if (dir === "none") return items;
-    return [...items].sort((a, b) => {
-      const cmp = a.name.localeCompare(b.name, "zh");
-      return dir === "asc" ? cmp : -cmp;
-    });
-  };
+  const applySort = <T extends { name: string }>(items: T[], kind: ResourceKind): T[] =>
+    applyNameSort(items, sortDirs[kind]);
 
   /** 打开工具对应资源位置（skill/plugin = 目录，mcp = 配置文件） */
   const handleOpenResource = async (kind: ResourceKind, toolId: string) => {
