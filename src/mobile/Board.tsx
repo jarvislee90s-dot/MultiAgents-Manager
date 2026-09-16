@@ -21,6 +21,10 @@ import { ToolIcon } from "@/components/common/ToolIcon";
 import type { AgentType, Session, SessionsResponse, TransitionEvent } from "@/types/session";
 
 const POLL_MS = 3000;
+/** SSE 模式低频对账周期（评审修复 R1）：transition 只更新已存在卡，新会话成员资格
+ *  靠本周期一次全量拉取兜底。30s = 成员资格变化的最大可见延迟，远低于实时性要求，
+ *  又不会对服务端构成轮询压力 */
+const RECONCILE_MS = 30_000;
 /** 相对时长的基准时钟刷新间隔：SSE 模式下无每拍拉取，时钟仍须走动
  *  （否则卡片上的「3 分钟前」会冻结在挂载时刻）。纯前端重算，零网络开销 */
 const CLOCK_MS = 30_000;
@@ -184,13 +188,6 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
     [pushBanner]
   );
 
-  // SSE 主通道（M3 Task 6）：挂载即连，卸载即断（→ 服务端 Receiver 归零 → watcher
-  // 停扫，Task 5 守卫闭环）。connectEvents 的回调全部是稳定引用（useCallback 空依赖
-  // 链路 + setXxx），本 effect 只随组件生命周期跑一次
-  useEffect(() => {
-    return connectEvents(handleSnapshot, handleTransition, () => setDegraded(true));
-  }, [handleSnapshot, handleTransition]);
-
   const tick = useCallback(async () => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
@@ -211,6 +208,24 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
       inFlightRef.current = false; // 无论成败都放行下一拍
     }
   }, [notifyPairedOnce, onUnpaired]);
+
+  // SSE 主通道（M3 Task 6）+ 30s 低频对账（评审修复 R1）：挂载即连，卸载即断（→ 服务端
+  // Receiver 归零 → watcher 停扫，Task 5 守卫闭环）。connectEvents 的回调全部是稳定引用
+  // （useCallback 空依赖链路 + setXxx），tick 亦稳定（App 侧 onPaired/onUnpaired 为
+  // useCallback 常量），本 effect 只随组件生命周期跑一次
+  useEffect(() => {
+    const stopEvents = connectEvents(handleSnapshot, handleTransition, () => setDegraded(true));
+    // 30s 低频对账（Critical 评审修复）：transition 只更新已存在卡（watcher 对**新增**
+    // 会话不发事件），SSE 模式又无周期快照——新会话的成员资格（上卡/下卡）在事件流里
+    // 是冻结的。低频 tick 全量拉取兜底；in-flight 守卫 / 403→onUnpaired / 错误横幅语义
+    // 由 tick 单点保留。降级后本 interval 与 3s 轮询并存无害（tick 幂等 + in-flight 守卫
+    // 防重叠），不为此引入 degraded 分支——那会让本 effect 重跑、SSE 重连，得不偿失
+    const reconcile = setInterval(() => void tick(), RECONCILE_MS);
+    return () => {
+      clearInterval(reconcile);
+      stopEvents(); // 既有 close 逻辑原样保留（stopped 闩 + 关连接 + 清重连定时器）
+    };
+  }, [handleSnapshot, handleTransition, tick]);
 
   // 降级轮询（仅在 SSE 连续 2 次失败后启用）：复用既有 tick（in-flight 守卫、
   // 403→onUnpaired、错误横幅语义单点保留）。SSE 模式（未降级）下本 effect 不装定时器，

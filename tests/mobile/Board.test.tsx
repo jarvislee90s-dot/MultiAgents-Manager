@@ -11,6 +11,8 @@ import type { Session, SessionsResponse, TransitionEvent } from "@/types/session
 // 后续快照 / 跃迁由用例显式 emit 推送——与真实服务端行为同形。
 const POLL_MS = 3000;
 const BANNER_TTL_MS = 4000;
+/** SSE 模式低频对账周期（评审修复 R1）：新会话成员资格兜底上卡的周期上限 */
+const RECONCILE_MS = 30_000;
 
 function okSessions(totalCount = 0): SessionsResponse {
   return { sessions: [], totalCount, waitingCount: 0 };
@@ -144,6 +146,29 @@ describe("Board 数据通道契约", () => {
     await advance(0);
     expect(screen.getByText("2 个会话")).toBeInTheDocument();
     expect(onPaired).toHaveBeenCalledTimes(1);
+  });
+
+  it("SSE 模式下新会话 30s 对账内上卡（成员资格不再冻结）", async () => {
+    // 背景（评审 Critical）：transition 只更新已存在卡（watcher 对新增会话不发事件），
+    // SSE 模式又无周期快照——新会话的「上卡/下卡」成员资格在 SSE 主通道里是冻结的。
+    // 兜底 = SSE effect 内 30s 低频对账 tick（全量拉取）。本用例锁该机制：
+    // 无任何 transition / snapshot 推送，仅桌面侧新增会话，advance 30s 后必须上卡
+    installSse(okSessions(0));
+    let remoteCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/m/api/v1/host") return okHost([]);
+        return new Response(JSON.stringify(okSessions(remoteCount)), { status: 200 });
+      })
+    );
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    expect(screen.getByText("0 个会话")).toBeInTheDocument();
+
+    remoteCount = 1; // 桌面侧出现新会话（SSE 不推送任何帧）
+    await advance(RECONCILE_MS); // 30s 对账 tick → fetchSessions 全量拉取
+    expect(screen.getByText("1 个会话")).toBeInTheDocument();
   });
 
   it("SSE 断线不触发 onUnpaired（断线≠403，不误踢回配对页）", async () => {
