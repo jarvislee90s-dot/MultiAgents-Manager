@@ -1,7 +1,9 @@
 // Codex CLI 会话解析 — type + payload 协议（rollout-*.jsonl）
 // 公共设施（cwd 归一化、git URL 缓存、JSONL 尾部读取）见 monitor::{cwd,git,jsonl,project}
 
-use super::app_status::{derive_app_status, overlay_mtime_stale, AppEntryKind};
+use super::app_status::{
+    derive_app_status, overlay_mtime_stale, tail_semantic_kind, turn_window_open, AppEntryKind,
+};
 use super::cwd::normalize_cwd_for_match;
 use super::git::get_github_url;
 use super::jsonl::read_recent_lines;
@@ -406,7 +408,7 @@ fn session_from_digest(
     process_form: ProcessForm,
     file_age_secs: Option<f32>,
 ) -> Option<Session> {
-    let status = match derive_app_status(&digest.kinds) {
+    let mut status = match derive_app_status(&digest.kinds) {
         Some(status) => status,
         None => {
             let fresh = match process_form {
@@ -420,6 +422,15 @@ fn session_from_digest(
             }
         }
     };
+    // 回合守卫（spec 假绿治理 §4.1 方案 A）：回合仍开（最后一个 TurnStart 晚于最后一个
+    // TurnEnd）时，尾部的 assistant 消息是回合内中间消息而非完成信号——改判 Processing，
+    // 拦截「中间消息短暂占据尾部」的瞬态假绿；窗口内无边界事件 → 不仲裁，回退尾扫语义
+    if status == SessionStatus::Idle
+        && tail_semantic_kind(&digest.kinds) == Some(AppEntryKind::AssistantMessage)
+        && turn_window_open(&digest.kinds) == Some(true)
+    {
+        status = SessionStatus::Processing;
+    }
     // 叠加 300s 规则（共享核）：Processing 且 JSONL mtime 停更 >= 300s → Waiting；
     // derive_app_status 不产出 Waiting，此处 Waiting 只能来自时间兜底路径 →
     // 就地转 Idle，内容推导的状态（Thinking/Idle/Processing）不受影响
@@ -852,6 +863,44 @@ mod app_status_fixture_tests {
         let f = write_rollout(tmp.path(), &[meta()]);
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(session.status, SessionStatus::Processing);
+    }
+
+    /// 假绿治理 §4.1 方案 A 主回归：回合仍开（本轮 task_started 已写、task_complete 未写）时，
+    /// 尾部中间 assistant 消息不得判 Idle——实测中间消息与下一轮 function_call 落盘间隔
+    /// 0~3s，3s 轮询落窗即假绿触发完成语音（spec §1.2 实证序列）
+    #[test]
+    fn open_turn_interim_assistant_tail_is_processing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // round_one（含 task_started + task_complete）结束后，第二轮 task_started 已落盘、
+        // 中间 assistant 消息在尾、下一轮 function_call 尚未写
+        let mut lines = round_one();
+        lines.push(task_started("2026-09-06T05:41:19.000Z", 9));
+        lines.push(user_msg("2026-09-06T05:41:25.003Z", 10, "同步到本地"));
+        lines.push(assistant_msg("2026-09-06T05:41:28.121Z", 11, "开始同步"));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "回合开的中间消息不是完成信号（假绿源）"
+        );
+    }
+
+    /// 方案 A 边界锁 1：窗口内无任何开闭对（既有夹具形态，超长回合/老文件）→ 不仲裁，
+    /// assistant 尾保持 Idle（用户裁决：回退现状，spec §8 决策 2/5）。
+    /// 既有测试 assistant_message_tail_is_idle 已锁定该行为，此处补「有旧闭对但无新开对」变体：
+    /// 最后一个 TurnEnd 晚于（可见范围内）任何 TurnStart → 不可证开 → 不仲裁
+    #[test]
+    fn closed_turn_assistant_tail_stays_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        // round_two_running 无 task_started，其 assistant 追加尾位于 round_one 的
+        // task_complete 之后：窗口内 TurnEnd 晚于 TurnStart → Some(false) → 不改判
+        let mut lines = round_one();
+        lines.extend(round_two_running());
+        lines.push(assistant_msg("2026-09-06T05:41:43.138Z", 16, "同步完成"));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
     }
 }
 

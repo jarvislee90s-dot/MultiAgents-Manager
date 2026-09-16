@@ -142,7 +142,7 @@ git commit -m "feat(monitor): shared tail_semantic_kind + turn_window_open arbit
 - Consumes: Task 1 的 `tail_semantic_kind` / `turn_window_open`；既有夹具构造器 `task_started` / `task_complete` / `assistant_msg` / `user_msg` / `round_one` / `round_two_running` / `round_two_complete` / `write_rollout`（同模块测试内已有）。
 - Produces: 无新接口；行为变更——`session_from_digest` 在「Idle + assistant 尾 + 回合开」时改判 Processing。
 
-- [ ] **Step 1: 写失败测试**（追加到 `codex_parser.rs` 的 `mod app_status_fixture_tests`；该模块已有 `use super::*` 与 `SessionStatus`）
+- [x] **Step 1: 写失败测试**（追加到 `codex_parser.rs` 的 `mod app_status_fixture_tests`；该模块已有 `use super::*` 与 `SessionStatus`）
 
 ```rust
     /// 假绿治理 §4.1 方案 A 主回归：回合仍开（本轮 task_started 已写、task_complete 未写）时，
@@ -184,13 +184,13 @@ git commit -m "feat(monitor): shared tail_semantic_kind + turn_window_open arbit
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test --lib codex_parser::app_status_fixture_tests::open_turn_interim_assistant_tail_is_processing`
 Expected: FAIL——实际得到 `Processing != Idle` 断言失败（守卫未实现，中间消息被判 Idle）。
 （`closed_turn_assistant_tail_stays_idle` 此时应已 PASS，作为行为不变锁。）
 
-- [ ] **Step 3: 实现守卫**
+- [x] **Step 3: 实现守卫**
 
 3a. 扩 import（`codex_parser.rs:4`）：
 
@@ -214,12 +214,12 @@ use super::app_status::{
     }
 ```
 
-- [ ] **Step 4: 跑模块全部测试确认通过（重点回归 issue #6 既有判定组）**
+- [x] **Step 4: 跑模块全部测试确认通过（重点回归 issue #6 既有判定组）**
 
 Run: `cd src-tauri && cargo test --lib codex_parser`
 Expected: 全部 PASS——新增 2 个 + 既有 `function_call_tail_is_processing` / `task_complete_tail_is_idle` / `assistant_message_tail_is_idle` / `two_rounds_same_file_second_round_running_then_idle` / `processing_stale_downgrades_to_idle` 等零回归（方案 A 下 `assistant_message_tail_is_idle` 夹具窗口内无新开对，语义不变）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/monitor/codex_parser.rs
