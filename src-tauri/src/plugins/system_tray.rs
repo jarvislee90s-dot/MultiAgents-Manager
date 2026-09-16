@@ -35,10 +35,18 @@ impl Default for TrayLabels {
 
 const TRAY_LABELS_KEY: &str = "tray_labels";
 
+/// 启动期托盘标签决策（终审 Minor #2，纯函数）：解析 settings KV 里的持久化
+/// 标签——存在且可解析 → Some（init 走统一重建路径，首屏即正确语言且含预设
+/// 项）；缺失或损坏（首次启动 / 脏数据）→ None → init 维持英文基础菜单兜底
+///（历史行为：首启时尚无前端语境，语言未知，不硬造首屏）。注意与
+/// `saved_tray_labels` 的差别：本函数保留「有无持久化值」的信息，后者会把
+/// 缺失折叠成中文 Default，无法区分首启与已本地化
+fn startup_tray_labels(raw: Option<String>) -> Option<TrayLabels> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+}
+
 fn saved_tray_labels() -> TrayLabels {
-    crate::database::get_setting(TRAY_LABELS_KEY)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    startup_tray_labels(crate::database::get_setting(TRAY_LABELS_KEY)).unwrap_or_default()
 }
 
 impl TrayLabels {
@@ -250,6 +258,20 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     _ => {}
                 })
                 .build(app)?;
+
+            // 启动即本地化（终审 Minor #2）：有持久化标签 → 复用统一重建路径
+            //（update_tray_with_presets_labeled，不另写第二套菜单组装），首屏
+            // 即正确语言且含预设项；无持久化（首次启动）→ 维持上方英文基础菜单
+            // 兜底。必须放在 build 之后（set_menu 需已注册的 "main-tray"，
+            // TrayIconBuilder::build 会同步注册）；失败仅告警不 panic，基础菜单
+            // 仍在。DB 在 run() 里先于 Builder 构建（database::init），此处
+            // get_setting 已可用；plugin setup 收到的 app 即 &AppHandle，直接复用
+            if let Some(labels) = startup_tray_labels(crate::database::get_setting(TRAY_LABELS_KEY))
+            {
+                if let Err(e) = update_tray_with_presets_labeled(app, &labels) {
+                    log::warn!("托盘启动重建失败，维持默认基础菜单: {e}");
+                }
+            }
             Ok(())
         })
         .on_window_ready(move |window| {
@@ -470,5 +492,50 @@ mod preset_toggle_tests {
             Some("preset-1726000000-0")
         );
         assert_eq!(parse_private_item_id("show"), None);
+    }
+}
+
+#[cfg(test)]
+mod startup_tray_labels_tests {
+    use super::{startup_tray_labels, TrayLabels};
+
+    /// 终审 Minor #2：有持久化标签 → Some → init 走统一重建（首屏本地化 + 预设项）
+    #[test]
+    fn persisted_labels_parse_to_some() {
+        let raw = serde_json::json!({
+            "presets": "Presets",
+            "show": "Show Window",
+            "pet": "Toggle Pet",
+            "quit": "Quit"
+        })
+        .to_string();
+        let labels = startup_tray_labels(Some(raw)).expect("完整持久化值应解析为 Some");
+        assert_eq!(labels.presets, "Presets");
+        assert_eq!(labels.show, "Show Window");
+        assert_eq!(labels.pet, "Toggle Pet");
+        assert_eq!(labels.quit, "Quit");
+    }
+
+    /// 首次启动（KV 无值）→ None → init 维持英文基础菜单兜底（历史行为）
+    #[test]
+    fn missing_value_is_none() {
+        assert!(startup_tray_labels(None).is_none());
+    }
+
+    /// 持久化值损坏 → None（同样兜底，不 panic）
+    #[test]
+    fn corrupt_value_is_none() {
+        assert!(startup_tray_labels(Some("not-json".into())).is_none());
+    }
+
+    /// serde(default) 容错口径：半截 JSON（缺字段）按 Default 补齐仍可用，
+    /// 不判为损坏——语言切换只回写部分字段的旧版本数据也能正常恢复
+    #[test]
+    fn partial_json_fills_defaults() {
+        let labels =
+            startup_tray_labels(Some(r#"{"presets":"预设"}"#.into())).expect("缺字段应按默认补齐");
+        assert_eq!(labels.presets, "预设");
+        assert_eq!(labels.show, TrayLabels::default().show);
+        assert_eq!(labels.quit, TrayLabels::default().quit);
     }
 }
