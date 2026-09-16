@@ -124,7 +124,7 @@ rollout 尾部短暂停在中间 assistant 消息
 **设计**（ZCode 同构，升级为**会话尾部部件序列**判定——占位行场景最后一条消息没有部件，只看末条消息会在回合头 ~4s 漏判）：新增「会话最后一条 part（跨消息，按 time_created）+ 该 part 所属消息的 role + 该消息是否含 step 部件」查询。复用与实现要点：
 
 - 查询沿既有模式新增（`get_last_message_info`（`opencode_parser.rs:280`）/ `get_message_text`（`:310`，内部 `:312` 已有按消息查 parts 的 SQL）为参照）；`part` 表自带 `session_id` 列（`PRAGMA table_info(part)` 实证），末条 part 可直接按会话查询，仅需 join `message` 取 role。
-- part JSON（`type`/`reason` 顶层字段）与 ZCode `part_entry_kind`（`zcode_parser.rs:661`）的输入同构——其「JSON → AppEntryKind」映射核心（`step-start`→TurnStart、`step-finish(reason)`→ToolCall/TurnEnd、`tool`→ToolCall、`text`→AssistantMessage）抽为共享纯函数（吃 `&str` JSON），ZCode/OpenCode 两处消费，避免复制映射表；user part 的角色区分（→UserMessage）由 OpenCode 侧以消息 role 补充（ZCode 在 `flatten_entries` 消息层做同款事）。
+- part JSON（`type`/`reason` 顶层字段）与 ZCode `part_entry_kind`（`zcode_parser.rs:661`）的输入同构，但**不抽共享映射**（2026-09-16 计划期裁决，§8 决策 7）：① ZCode 在不动清单（§5），为其重构共享件违反本轮范围约束；② 两者对 `step-finish(reason="length")` 的判定语义相反——ZCode 映射 TurnEnd（回合结束）、OpenCode 按「宁黄不假绿」归 Running（输出截断后会自动续步），共享映射会互相绑架。OpenCode 侧自实现 ~25 行可测纯函数（raw `type` + `reason` 判定），语义独立性优先于去重。
 
 规则按尾部部件映射：
 
@@ -186,3 +186,4 @@ rollout 尾部短暂停在中间 assistant 消息
 | 4 | OpenCode 延迟衰减变体是否本轮处理 | 本轮一并修（§4.3） | 2026-09-16 |
 | 5 | Codex CLI 守卫方案 A vs B | **方案 A（开闭对，dsh 同款）**；B 记录为已否决备选 | 2026-09-16 |
 | 6 | OpenCode 输入瞬间绿→红 + 假 approval 语音（用户追加报告） | 根因坐实（assistant 占位行 ~130ms + last_role 启发式误判），并入 §4.3 会话尾部部件守卫本轮一并修 | 2026-09-16 |
+| 7 | OpenCode 部件映射是否抽共享（复查轮追加项的再裁决） | 不共享：ZCode 在不动清单且 `reason=length` 语义分歧（ZCode→TurnEnd / OpenCode→Running 宁黄不假绿），OpenCode 自实现可测纯函数 | 2026-09-16 |
