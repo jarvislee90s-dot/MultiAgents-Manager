@@ -536,7 +536,7 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     expect(["#6445A2", "rgb(100, 69, 162)", "rgb(100,69,162)"]).toContain(bg);
   });
 
-  it("未选中 chip 文字色随主题：浅色态用压暗色（AA 达标），暗色态回品牌原色", async () => {
+  it("未选中 chip 文字色随主题：浅色态用压暗色（AA 达标），暗色态查暗色表（Bug 4）", async () => {
     installSse(
       sessionsWith([
         chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
@@ -567,9 +567,10 @@ describe("Board 工具 chips（P8d/P8e）", () => {
           .getByText("Claude")
           .closest("button") as HTMLElement;
       expect(getComputedStyle(claudeChip()).color).toMatch(/^(#3c2961|rgb\(60, 41, 97\))$/);
-      // 切到暗色：文字色回品牌原色 #6445A2（toggle 触发重渲染，chip 现算主题）
+      // 切到暗色：文字色查暗色表 TOOL_BRAND_COLORS_DARK（Bug 4 修复——旧实现回
+      // 品牌原色 #6445A2，在深色卡底 #0f172a 上对比度 2.48 融底）
       fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
-      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#6445A2|rgb\(100, 69, 162\))$/);
+      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#8B74B9|rgb\(139, 116, 185\))$/);
     } finally {
       window.matchMedia = prevMatchMedia;
       localStorage.clear();

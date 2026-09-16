@@ -5,6 +5,7 @@ import {
   STATUS_DOT_COLOR,
   STATUS_LABELS,
   TOOL_BRAND_COLORS,
+  TOOL_BRAND_COLORS_DARK,
   TOOL_LABELS,
   applyTransition,
   darkenHex,
@@ -409,5 +410,48 @@ describe("P8f chip 浅色态文字色（darkenHex + 对比度）", () => {
     // 已达标，其余六色不达标——压暗逻辑仍必要但不再全量覆盖。
     // 若未来整体换深色系致 failures=0，可移除压暗逻辑
     expect(failures).toHaveLength(6);
+  });
+});
+
+// Bug 4（M3 验收）：暗色态品牌色融底修复。P8f 的对比度结论做在 P8e 改色之前，
+// 改色后无人复算——实测（深色卡底 #0f172a）：kimi 1.08 / claude 2.48 / zcode 3.49 /
+// openclaw 4.00 / dsh 4.12，均低于文字线 4.5。修复=逐工具暗色文字色表（Board dark
+// 分支查表），本组测试把「表穷尽 + 关键五值 + 全表达标」锁进 CI
+describe("Bug 4：暗色 chip 文字色（TOOL_BRAND_COLORS_DARK，vs 深色卡底 #0f172a）", () => {
+  function luminance(hex: string): number {
+    const [r, g, b] = [1, 3, 5]
+      .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  function contrast(a: string, b: string): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  it("键集穷尽 AgentType 八值（Record 守卫，增删 AgentType 时此断言同步修正）", () => {
+    expect(Object.keys(TOOL_BRAND_COLORS_DARK).sort()).toEqual([...AGENT_TYPES].sort());
+  });
+
+  it("关键五值精确匹配（实测对比度选色，不得漂移；codex/opencode/workbuddy 用原色）", () => {
+    expect(TOOL_BRAND_COLORS_DARK.kimi).toBe("#A5B4CE"); // 8.52
+    expect(TOOL_BRAND_COLORS_DARK.claude).toBe("#8B74B9"); // 4.50
+    expect(TOOL_BRAND_COLORS_DARK.zcode).toBe("#5874FD"); // 4.53
+    expect(TOOL_BRAND_COLORS_DARK.openclaw).toBe("#7375F2"); // 4.72
+    expect(TOOL_BRAND_COLORS_DARK.dsh).toBe("#5F7AFE"); // 4.85
+    expect(TOOL_BRAND_COLORS_DARK.codex).toBe(TOOL_BRAND_COLORS.codex);
+    expect(TOOL_BRAND_COLORS_DARK.opencode).toBe(TOOL_BRAND_COLORS.opencode);
+    expect(TOOL_BRAND_COLORS_DARK.workbuddy).toBe(TOOL_BRAND_COLORS.workbuddy);
+  });
+
+  it("八色 vs #0f172a 对比度全部 ≥ 4.5（WCAG AA 小字，锁暗色回归）", () => {
+    const darkCard = "#0f172a";
+    for (const [tool, color] of Object.entries(TOOL_BRAND_COLORS_DARK)) {
+      const c = contrast(color, darkCard);
+      expect(
+        c,
+        `暗色文字色 ${tool} ${color} 在深色卡底上对比度仅 ${c.toFixed(2)}`
+      ).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

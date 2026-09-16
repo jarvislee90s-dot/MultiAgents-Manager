@@ -6,6 +6,7 @@ import {
   CHIP_LIGHT_TEXT_FACTOR,
   STATUS_DOT_COLOR,
   TOOL_BRAND_COLORS,
+  TOOL_BRAND_COLORS_DARK,
   TOOL_LABELS,
   applyTransition,
   darkenHex,
@@ -403,17 +404,20 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
             全部
           </button>
           {sortedCardTools.map((tool) => {
-            // 品牌色 chip：选中态 = 品牌色实底 + 白字（八色均够深/够饱和，白字对比度 2.15–4.47，
-            // 与 Task 3 口径一致）；未选中态 = 品牌色 12% 透明度淡化底（8 位 hex 追加 1F alpha，
-            // 免 color-mix 的 Tailwind v4 注册环节，选 style 内联为最简实现）+ 品牌色字。
+            // 品牌色 chip：选中态 = 品牌色实底 + 白字；未选中态 = 品牌色 12% 透明度
+            // 淡化底（8 位 hex 追加 1F alpha）+ 品牌色字。
             // P8f 浅色态修正：品牌原色当字在浅底上仅 1.96–3.84（不足 WCAG AA 4.5），
-            // 故浅色态文字色压暗（darkenHex 系数 0.6 → 4.93–8.00 全达标）；
-            // 暗色态沿用 Task 3 原色（深底上 4.10–8.13）。主题切换会重渲染本组件
-            // （theme state 驱动），故文字色按当前主题现算即可，无需 CSS 变量分流
+            // 故浅色态文字色压暗（darkenHex 系数 0.6 → 4.93–8.00 全达标）。
+            // Bug 4（M3 验收）：暗色态原样用原色实测 1.08–5.41（kimi/claude/zcode/
+            // openclaw/dsh 融底），文字色改查暗色表 TOOL_BRAND_COLORS_DARK；选中态
+            // chip 在暗色下加白色轮廓——kimi 原色 #0B0E1A 作选中实底与深色卡底
+            // #0f172a 几乎同色（1.08），八色统一轮廓解决深底融边
             const brand = TOOL_BRAND_COLORS[tool];
             const selected = filter === tool;
             const chipTextColor =
-              theme === "dark" ? brand : darkenHex(brand, CHIP_LIGHT_TEXT_FACTOR);
+              theme === "dark"
+                ? TOOL_BRAND_COLORS_DARK[tool]
+                : darkenHex(brand, CHIP_LIGHT_TEXT_FACTOR);
             return (
               <button
                 key={tool}
@@ -423,7 +427,13 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
                 className="shrink-0 rounded-full px-3 py-1 text-xs"
                 style={
                   selected
-                    ? { backgroundColor: brand, color: "#ffffff" }
+                    ? {
+                        backgroundColor: brand,
+                        color: "#ffffff",
+                        ...(theme === "dark"
+                          ? { boxShadow: "0 0 0 1px rgba(255,255,255,0.35)" }
+                          : {}),
+                      }
                     : { backgroundColor: `${brand}1F`, color: chipTextColor }
                 }
               >

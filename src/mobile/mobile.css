@@ -10,6 +10,37 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ============================================================
+ * 工具品牌图标底色双态变量（Bug 4，M3 验收）：桌面共用组件 ToolIcon 的 SVG
+ * 经 style var() 引用这些变量。浅色=原色（回退值同源）；.dark 下 kimi 反色
+ * （深夜蓝方底在深色卡底 #0f172a 上对比度 1.08 即隐形）、claude 提亮，
+ * 其余六工具原色达标不动。.dark 类策略与上方 @custom-variant 同一挂载点
+ * （documentElement），桌面表见 src/index.css 同名变量
+ * ============================================================ */
+:root {
+  --tool-claude-bg: #6445a2;
+  --tool-codex-bg: #16a34a;
+  --tool-opencode-bg: #ea580c;
+  --tool-openclaw-bg: #6366f1;
+  --tool-kimi-bg: #0b0e1a;
+  --tool-kimi-fg: #ffffff;
+  --tool-workbuddy-bg: #4ad06a;
+  --tool-zcode-bg: #3b5bfd;
+  --tool-dsh-bg: #4d6bfe;
+}
+
+.dark {
+  --tool-claude-bg: #8b74b9;
+  --tool-codex-bg: #16a34a;
+  --tool-opencode-bg: #ea580c;
+  --tool-openclaw-bg: #6366f1;
+  --tool-kimi-bg: #e8edf8;
+  --tool-kimi-fg: #0b0e1a;
+  --tool-workbuddy-bg: #4ad06a;
+  --tool-zcode-bg: #3b5bfd;
+  --tool-dsh-bg: #4d6bfe;
+}
+
+/* ============================================================
  * 代码高亮双态主题（M3 Task 8）：github（浅色）/ github-dark（深色）。
  * 不直接 import highlight.js/styles/github*.css：两份主题同级层叠、
  * 后 import 者恒胜，无法随 .dark 类切换；此处按官方配色内联常用 token

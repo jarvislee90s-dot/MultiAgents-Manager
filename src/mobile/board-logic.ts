@@ -54,6 +54,22 @@ export const TOOL_BRAND_COLORS: Record<AgentType, string> = {
   dsh: "#4D6BFE", // 桌面 DshIcon L201（不变）
 };
 
+// Bug 4（M3 验收）：暗色态 chip 文字色。P8f 的对比度结论做在 P8e 改色之前无人
+// 复算——原色在深色卡底 #0f172a 上：kimi 1.08 / claude 2.48 / zcode 3.49 /
+// openclaw 4.00 / dsh 4.12 均低于文字线 4.5（claude/kimi 同时低于图形线 3.0）。
+// 下表为逐工具暗色文字色（vs #0f172a 实测对比度入注释），保留蓝紫色调、
+// 不机械提白成灰；codex(5.41)/opencode(5.01)/workbuddy(8.94) 原色达标沿用
+export const TOOL_BRAND_COLORS_DARK: Record<AgentType, string> = {
+  claude: "#8B74B9", // 4.50
+  codex: "#16A34A", // 5.41（原色达标）
+  opencode: "#EA580C", // 5.01（原色达标）
+  openclaw: "#7375F2", // 4.72
+  kimi: "#A5B4CE", // 8.52
+  workbuddy: "#4AD06A", // 8.94（原色达标）
+  zcode: "#5874FD", // 4.53
+  dsh: "#5F7AFE", // 4.85
+};
+
 // 排序优先级：等待(0) → 运行(1) → 空闲(2)，数字越小越靠前
 // 移动看板口径：等待人工介入的卡置顶（桌面 Rust status_sort_priority 为运行优先，
 // 两端口径刻意不同——移动端强调"哪些卡需要我处理"）
