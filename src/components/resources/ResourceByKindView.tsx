@@ -101,7 +101,7 @@ function SectionTableHeader(props: {
       className="bg-muted/30 mb-1 w-max min-w-full items-center rounded border px-2 py-1"
       style={SECTION_GRID_STYLE}
     >
-      <div className="flex items-center gap-1">
+      <div className="bg-muted sticky left-2 z-10 flex items-center gap-1 border-r pr-2">
         <span className="text-xs font-medium">{t("resources.nameHeader")}</span>
         <Button
           variant="ghost"
@@ -649,7 +649,7 @@ export function ResourceByKindView() {
                   className="w-max min-w-full items-center rounded border p-2 text-sm"
                   style={SECTION_GRID_STYLE}
                 >
-                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden">
+                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
                     <span className="font-medium">{formatSkillName(skill.name)}</span>
                     {renderExclusiveBadge("skill", skill.name)}
                     {skill.brokenTools && skill.brokenTools.length > 0 && (
@@ -774,7 +774,7 @@ export function ResourceByKindView() {
                   className="w-max min-w-full items-center rounded border p-2 text-sm"
                   style={SECTION_GRID_STYLE}
                 >
-                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden">
+                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
                     <span className="font-medium">{mcp.name}</span>
                     {renderExclusiveBadge("mcp", mcp.name)}
                     {mcp.sourceDisabled && (
@@ -886,7 +886,7 @@ export function ResourceByKindView() {
                   className="w-max min-w-full items-center rounded border p-2 text-sm"
                   style={SECTION_GRID_STYLE}
                 >
-                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden">
+                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
                     <span className="font-medium">{plugin.name}</span>
                     {renderExclusiveBadge("plugin", plugin.name)}
                     <Button
