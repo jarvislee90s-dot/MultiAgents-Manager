@@ -195,11 +195,34 @@ impl ApprovalService {
             .cloned()
             .collect()
     }
+
+    /// 单设备吊销时的队列清理：移除「已消费且设备 id == device_id」的请求项，返回清除数
+    /// （audit 记 purged=N）。依据 spec T0a「吊销生效时效收紧为即时」/ T2d「吊销后即时断连」：
+    /// 若不清，残留项存活至 TTL（5 分钟），期间旧 requestId 重 poll/重 confirm
+    /// （/pair/* 不过闸）会再次走 persist 的 INSERT OR REPLACE 把 revoked 硬编码回 0——
+    /// 已吊销设备复活（敌意设备正是吊销功能的威胁模型）
+    pub fn purge_by_device(&mut self, device_id: &str) -> usize {
+        let before = self.requests.len();
+        self.requests
+            .retain(|r| r.approved_device.as_deref() != Some(device_id));
+        before - self.requests.len()
+    }
+
+    /// 全部吊销时的队列清理：移除一切已产生设备的消费项，返回清除数（audit 记 purged=N）。
+    /// 未批准的 pending 请求不动——它们尚未产生设备，不构成复活面
+    /// （防复活依据同 purge_by_device：spec T0a 即时生效）
+    pub fn purge_approved(&mut self) -> usize {
+        let before = self.requests.len();
+        self.requests.retain(|r| r.approved_device.is_none());
+        before - self.requests.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
 
     fn svc() -> ApprovalService {
         // 三个生成器均为零参随机形态（生产 = 随机 hex；id/设备 id 绝不可位置式——
@@ -326,5 +349,64 @@ mod tests {
             ConfirmOutcome::Ok { .. }
         ));
         assert_eq!(s.pending(2).len(), 0); // 请求已消费
+    }
+
+    /// 吊销防复活（评审 Important，spec T0a「吊销生效时效收紧为即时」）：
+    /// 已批准项被 purge_by_device 后，旧 requestId 重 poll 不得再取回设备 id——
+    /// 否则 handler 侧 persist 的 INSERT OR REPLACE 会把 revoked 回写 0，
+    /// 已吊销设备在 TTL（5 分钟）内复活（敌意设备正是吊销功能的威胁模型）
+    #[test]
+    fn revoke_purges_consumed_request_and_blocks_poll_revival() {
+        let mut s = svc();
+        s.create("d", "UA", "1.1.1.1", 0).unwrap();
+        assert_eq!(
+            s.approve("req-x", 1, || false),
+            ApproveOutcome::Ok {
+                device: "adev-x".into(),
+                name: "d".into()
+            }
+        );
+        assert_eq!(s.purge_by_device("adev-x"), 1);
+        // 旧 requestId 重 poll → Expired（拿不到设备 id，复活路径封死）
+        assert_eq!(s.poll("req-x", 2), PollOutcome::Expired);
+        // 幂等：再 purge 无残留可清，计数 0
+        assert_eq!(s.purge_by_device("adev-x"), 0);
+    }
+
+    /// 全部吊销路径：purge_approved 清掉一切已消费项（返回清除数进 audit），
+    /// 未批准的 pending 请求不动（尚未产生设备，不构成复活面）
+    #[test]
+    fn revoke_all_purges_approved_but_keeps_pending() {
+        // 生成器恒定值形态照 svc() 先例；id 需要区分两条请求，用计数源（测试内确定且互异，
+        // 生产随机性由 mod.rs 的零参随机生成器保证，与本测试无关）
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let mut s = ApprovalService::new(
+            5 * 60 * 1000,
+            Box::new(move || {
+                format!(
+                    "req-{}",
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                )
+            }),
+            Box::new(|| "1234".to_string()),
+            Box::new(|| "adev-x".to_string()),
+        );
+        s.create("d", "UA", "1.1.1.1", 0).unwrap(); // req-0
+        s.approve("req-0", 1, || false);
+        // 另一条未批准的 pending 请求（不同 IP——同 IP 会被 IpBusy 拒）
+        s.create("d2", "UA", "2.2.2.2", 2).unwrap(); // req-1
+        assert_eq!(s.purge_approved(), 1);
+        // 面板只剩未批准项；已消费 requestId 重 poll → Expired
+        assert_eq!(s.pending(3).len(), 1);
+        assert_eq!(s.poll("req-0", 4), PollOutcome::Expired);
+        // 未批准请求不受 purge 影响：仍可正常批准
+        assert_eq!(
+            s.approve("req-1", 5, || false),
+            ApproveOutcome::Ok {
+                device: "adev-x".into(),
+                name: "d2".into()
+            }
+        );
     }
 }

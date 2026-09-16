@@ -259,6 +259,11 @@ fn stop_server() {
     STATE.store.with(|c| {
         let _ = pairing::revoke_all(c); // 停止 = 全吊销（七不变量）
     });
+    // M4（评审 Important 同源，裁决外扩展——可回退）：审批队列随 STATE 存活、不随服务器
+    // 重启清空，停止 = 全吊销后若不清已消费项，重开远程后旧 requestId 重 poll 仍可复活
+    // 已吊销设备（同 purge_approved 防复活语义，spec T0a 即时生效）
+    let purged = STATE.approval.lock().unwrap().purge_approved();
+    log::info!("停止远程：审批队列清理已消费项 purged={purged}");
     STATE.pairing.lock().unwrap().stop();
     // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
     tunnel::stop();
@@ -524,12 +529,18 @@ pub fn remote_devices() -> serde_json::Value {
         .collect::<Vec<_>>())
 }
 
-/// 单设备吊销：DB 置位 + SSE 即时断连（Task 1 注册表接线）+ 审计
+/// 单设备吊销：DB 置位 + 审批队列已消费项清理 + SSE 即时断连（Task 1 注册表接线）+ 审计
 #[tauri::command]
 pub fn remote_revoke_device(id: String) -> Result<(), String> {
     STATE.store.with(|c| pairing::revoke_device(c, &id))?;
+    // M4（评审 Important，spec T0a 即时生效）：清掉审批队列中该设备的已消费项——
+    // 否则残留项 TTL 内被旧 requestId 重 poll/confirm 经 INSERT OR REPLACE 复活
+    let purged = STATE.approval.lock().unwrap().purge_by_device(&id);
     let n = STATE.sse_registry.disconnect_device(&id);
-    events::audit("device_revoked", &format!("id={id} closed_sse={n}"));
+    events::audit(
+        "device_revoked",
+        &format!("id={id} closed_sse={n} purged={purged}"),
+    );
     events::emit_ui("remote-roster-changed", serde_json::json!({"id": id}));
     Ok(())
 }
@@ -541,10 +552,12 @@ pub fn remote_revoke_all_devices() -> Result<usize, String> {
         .store
         .with(pairing::revoke_all)
         .map_err(|e| e.to_string())?;
+    // M4（评审 Important）：清掉一切已产生设备的消费项（未批准 pending 不动，防复活同上）
+    let purged = STATE.approval.lock().unwrap().purge_approved();
     let closed = STATE.sse_registry.disconnect_all();
     events::audit(
         "devices_revoked_all",
-        &format!("count={n} closed_sse={closed}"),
+        &format!("count={n} closed_sse={closed} purged={purged}"),
     );
     events::emit_ui("remote-roster-changed", serde_json::json!({}));
     Ok(n)
