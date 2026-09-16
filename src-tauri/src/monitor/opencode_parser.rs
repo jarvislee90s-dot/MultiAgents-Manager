@@ -476,7 +476,9 @@ fn tail_part_signal(
     }
 }
 
-/// OpenCode 状态判断：非 assistant 回复完且 CPU > 15% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
+/// OpenCode 状态判断：tail=Running（会话尾部部件强信号——步骤进行中/用户输入/
+/// step-finish(reason≠stop)）→ 直接 Processing；否则走既有启发式——
+/// 非 assistant 回复完且 CPU > 15% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
 fn determine_opencode_status(
     cpu: f32,
     last_role: Option<&str>,

@@ -431,9 +431,8 @@ fn session_from_digest(
     {
         status = SessionStatus::Processing;
     }
-    // 叠加 300s 规则（共享核）：Processing 且 JSONL mtime 停更 >= 300s → Waiting；
-    // derive_app_status 不产出 Waiting，此处 Waiting 只能来自时间兜底路径 →
-    // 就地转 Idle，内容推导的状态（Thinking/Idle/Processing）不受影响
+    // 叠加 300s 规则（共享核）：Processing（工具尾部 / 兜底新鲜 / 上方回合守卫改判）
+    // 且 JSONL mtime 停更 >= 300s → Waiting；codex 不落红灯，Waiting 一律就地转 Idle
     let status = overlay_mtime_stale(status, file_age_secs.map_or(0, |a| (a * 1000.0) as u64));
     let status = if status == SessionStatus::Waiting {
         SessionStatus::Idle
