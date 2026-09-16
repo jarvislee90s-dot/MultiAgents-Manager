@@ -624,12 +624,18 @@ mod tail_signal_tests {
     }
 
     /// Running 强信号短路既有启发式：即便 last_role=assistant 且新鲜（旧逻辑判 Waiting 红），
-    /// 也返回 Processing（修「输入瞬间绿→红假语音」与「运行全程红」）
+    /// 也返回 Processing（修「输入瞬间绿→红假语音」与「运行全程红」）；
+    /// 时间戳超窗（单步 >60s 无新消息，旧逻辑落 Idle 假绿）同样短路（症状③回归锁，spec §4.3）
     #[test]
     fn running_signal_short_circuits_to_processing() {
         let now = chrono::Utc::now().timestamp_millis();
         assert_eq!(
             determine_opencode_status(0.0, Some("assistant"), now, now, TailSignal::Running),
+            crate::session::SessionStatus::Processing
+        );
+        let old = now - 61_000;
+        assert_eq!(
+            determine_opencode_status(0.0, Some("assistant"), old, old, TailSignal::Running),
             crate::session::SessionStatus::Processing
         );
     }
