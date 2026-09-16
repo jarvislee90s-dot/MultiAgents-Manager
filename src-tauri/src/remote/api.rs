@@ -361,10 +361,15 @@ pub async fn session_messages(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     match result {
-        Ok(msgs) => Ok((
+        Ok(pg) => Ok((
             // 门禁下的私有会话正文，禁止中间层缓存（sessions/host 同规）
             [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "messages": msgs })),
+            // Bug 1（M3 验收）：truncated = 头部截断标记，移动端据此提供
+            // 「加载更早消息」（放大 limit 重拉时后端字节窗同放大）
+            Json(serde_json::json!({
+                "messages": pg.messages,
+                "truncated": pg.truncated,
+            })),
         )
             .into_response()),
         Err(e) => {

@@ -228,7 +228,7 @@ pub(crate) fn extract_file_paths_with_env(
         session_id,
         EXTRACT_MESSAGE_LIMIT,
     ) {
-        Ok(msgs) => extract_paths_from_messages(&msgs),
+        Ok(pg) => extract_paths_from_messages(&pg.messages),
         Err(_) => Vec::new(),
     }
 }

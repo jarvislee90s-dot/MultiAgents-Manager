@@ -109,6 +109,9 @@ function linkifySegments(
 
 export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const [messages, setMessages] = useState<SessionMessage[] | null>(null);
+  // 头部截断标记（Bug 1，M3 验收）：后端字节窗切掉文件头时为 true——
+  // 即使本页条数 < limit 也存在更早内容，按钮必须可见
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<LoadError | null>(null);
   const [loading, setLoading] = useState(true);
   // 「加载更早消息」：limit 递增整页重拉（后端取文件序尾部 limit 条）
@@ -131,8 +134,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     setLoading(true);
     setError(null);
     fetchSessionMessages(session.agentType, session.id, limit)
-      .then((m) => {
-        if (alive) setMessages(m);
+      .then((pg) => {
+        if (!alive) return;
+        setMessages(pg.messages);
+        setTruncated(pg.truncated);
       })
       .catch((e: unknown) => {
         if (alive) setError({ status: e instanceof ApiError ? e.status : null });
@@ -313,7 +318,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     m.kind === "tool-result" ||
     (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
 
-  const hasLoadMore = messages !== null && !error && messages.length >= limit && limit < MAX_LIMIT;
+  // Bug 1（M3 验收）：条数到顶（length >= limit）**或**后端报告头部截断（truncated，
+  // 胖单行吃满字节窗的会话条数恒小于 limit）任一成立即提供「加载更早消息」
+  const hasLoadMore =
+    messages !== null && !error && (messages.length >= limit || truncated) && limit < MAX_LIMIT;
 
   // 消息区（split 布局复用同一份 JSX）
   const messageArea = (

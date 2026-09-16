@@ -1135,28 +1135,31 @@ mod tests {
                     .unwrap()
                     .push((agent.to_string(), sid.to_string(), limit));
                 if sid == "sess_hit" {
-                    Ok(vec![
-                        crate::remote::content::SessionMessage {
-                            seq: 0,
-                            role: "user".into(),
-                            kind: "user".into(),
-                            content: "你好".into(),
-                            ts: Some(1000),
-                            tool_name: None,
-                            tool_args: None,
-                            collapsed: false,
-                        },
-                        crate::remote::content::SessionMessage {
-                            seq: 1,
-                            role: "assistant".into(),
-                            kind: "tool-call".into(),
-                            content: "调用 Bash".into(),
-                            ts: Some(1001),
-                            tool_name: Some("Bash".into()),
-                            tool_args: Some(r#"{"cmd":"ls"}"#.into()),
-                            collapsed: true,
-                        },
-                    ])
+                    Ok(crate::remote::content::MessagesPage {
+                        messages: vec![
+                            crate::remote::content::SessionMessage {
+                                seq: 0,
+                                role: "user".into(),
+                                kind: "user".into(),
+                                content: "你好".into(),
+                                ts: Some(1000),
+                                tool_name: None,
+                                tool_args: None,
+                                collapsed: false,
+                            },
+                            crate::remote::content::SessionMessage {
+                                seq: 1,
+                                role: "assistant".into(),
+                                kind: "tool-call".into(),
+                                content: "调用 Bash".into(),
+                                ts: Some(1001),
+                                tool_name: Some("Bash".into()),
+                                tool_args: Some(r#"{"cmd":"ls"}"#.into()),
+                                collapsed: true,
+                            },
+                        ],
+                        truncated: false,
+                    })
                 } else {
                     Err("内部路径细节不应出现在响应里".to_string())
                 }
@@ -1231,6 +1234,12 @@ mod tests {
         assert!(
             body.contains("\"messages\"") && body.contains("\"toolName\":\"Bash\""),
             "载荷必须 camelCase（toolName/toolArgs/collapsed），实际 {body}"
+        );
+        // Bug 1 修复（M3 验收）：载荷携带 truncated（头部截断标记），移动端据此决定
+        // 是否提供「加载更早消息」
+        assert!(
+            body.contains("\"truncated\":false"),
+            "载荷必须含 truncated 字段，实际 {body}"
         );
         assert!(body.contains("\"toolArgs\"") && body.contains("\"collapsed\":true"));
         assert_eq!(

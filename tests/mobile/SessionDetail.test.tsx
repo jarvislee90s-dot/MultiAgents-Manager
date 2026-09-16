@@ -46,6 +46,8 @@ interface Routes {
   messages?: SessionMessage[];
   messagesStatus?: number;
   messagesNetworkFail?: boolean;
+  /** Bug 1（M3 验收）：后端头部截断标记，随 /session-messages 载荷返回 */
+  truncated?: boolean;
   files?: string[];
   fileContent?: string;
   fileMime?: string;
@@ -72,7 +74,10 @@ function installFetch() {
       if (routes.messagesStatus) {
         return new Response("gone", { status: routes.messagesStatus });
       }
-      return new Response(JSON.stringify({ messages: routes.messages ?? [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({ messages: routes.messages ?? [], truncated: routes.truncated === true }),
+        { status: 200 }
+      );
     }
     if (url.includes("/session-files")) {
       return new Response(JSON.stringify({ files: routes.files ?? [] }), { status: 200 });
@@ -173,6 +178,30 @@ describe("SessionDetail：消息渲染与折叠交互（P9）", () => {
     fireEvent.click(screen.getByTestId("load-more"));
     // timeout 加固（flaky 修复）：mock 本身同步 resolve（无真实 timer 需求），
     // 但 59 文件并行时 fetch mock→state 更新链可能被资源竞争拉长，默认 1s 不够
+    await waitFor(
+      () => {
+        const called400 = fetchMock.mock.calls.some((c: unknown[]) =>
+          String(c[0]).includes("limit=400")
+        );
+        expect(called400).toBe(true);
+      },
+      { timeout: 3000 }
+    );
+  });
+
+  it("Bug 1：truncated=true 且条数 < limit 时仍显示加载更早（胖会话字节截断）", async () => {
+    installFetch();
+    // 胖 JSONL 单行吃掉整个 512KB 字节窗：返回条数远小于 limit，但头部被切
+    routes.messages = Array.from({ length: 5 }, (_, i) =>
+      msg({ seq: i, kind: "user", content: `m${i}` })
+    );
+    routes.truncated = true;
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    expect(await screen.findByText("m4")).toBeTruthy();
+    // 旧实现条件 length >= limit 恒 false → 按钮死功能；新实现 truncated 也能触发
+    expect(screen.getByTestId("load-more")).toBeTruthy();
+    // 点击 → 以更大 limit 重拉（后端字节窗随 limit 放大，更早内容可达）
+    fireEvent.click(screen.getByTestId("load-more"));
     await waitFor(
       () => {
         const called400 = fetchMock.mock.calls.some((c: unknown[]) =>

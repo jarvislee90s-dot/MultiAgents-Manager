@@ -84,9 +84,19 @@ impl SessionMessage {
     }
 }
 
+/// 会话内容读取结果：消息页 + 头部截断标记（Bug 1，M3 验收）。
+/// truncated = 文件头部被字节窗截断（存在更早但未在本页的内容）——移动端据此
+/// 显示「加载更早消息」；SQLite 系（zcode/opencode/openclaw/codex thread）与 dsh
+/// （自有 zstd 代际读取）恒 false
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagesPage {
+    pub messages: Vec<SessionMessage>,
+    pub truncated: bool,
+}
+
 /// 会话内容源函数形态（RemoteState 注入缝的类型别名，生产 = read_session_messages）
-pub type MessageSourceFn =
-    dyn Fn(&str, &str, usize) -> Result<Vec<SessionMessage>, String> + Send + Sync;
+pub type MessageSourceFn = dyn Fn(&str, &str, usize) -> Result<MessagesPage, String> + Send + Sync;
 
 /// env 双参读取（DSH_HOME / KIMI_CODE_HOME）——**生产薄壳专用单一归口**（终审
 /// Important 1）：/session-messages 与 /session-files 两条生产薄壳都从这里取值，
@@ -108,7 +118,7 @@ pub fn read_session_messages(
     agent_type: &str,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法确定用户主目录".to_string())?;
     // env 只在生产薄壳读取（fix round 1 Important 1；读取归口 read_env_homes，
     // 终审 Important 1 起 files.rs 生产薄壳同源复用）
@@ -129,7 +139,7 @@ pub fn read_session_messages_with(
     agent_type: &str,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     read_session_messages_impl(home, None, None, agent_type, session_id, limit)
 }
 
@@ -143,7 +153,7 @@ pub(crate) fn read_session_messages_impl(
     agent_type: &str,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     // 防御：空 session_id 直接拒绝（各工具文件名/SQL 均以 id 拼 key，空串会形成
     // ".jsonl" 这类危险形态）；路径分隔符与 ".." 拒绝——claude/workbuddy 的文件
     // 定位是 `目录.join(format!("{sid}.jsonl"))`，穿越字符会逃出项目根（端点在
@@ -184,10 +194,28 @@ fn finalize(mut msgs: Vec<SessionMessage>, limit: usize) -> Vec<SessionMessage> 
     msgs
 }
 
+/// 组页小件：finalize + 截断标记打包（各工具读取器统一出口）
+fn page(msgs: Vec<SessionMessage>, limit: usize, truncated: bool) -> MessagesPage {
+    MessagesPage {
+        messages: finalize(msgs, limit),
+        truncated,
+    }
+}
+
 /// JSONL 行读取预算：映射后条数上限 limit 对应的行窗口（assistant 消息会展开为
 /// 多条目，按 4 倍预留；下限 500 对齐各 parser 的 RECENT_LINES 口径）
 fn line_budget(limit: usize) -> usize {
     (limit.saturating_mul(4)).clamp(500, 4096)
+}
+
+/// JSONL 字节窗预算（Bug 1，M3 验收）：512KB 基准按 limit 放大（每 200 条一档），
+/// 封顶 4MB——「加载更早消息」以更大 limit 重拉时字节窗必须同放大，否则按钮
+/// 拉不到更早内容（死功能根因之一）。limit 在派发核入口已夹 [1,1000]，此处
+/// saturating 防御即可；封顶属纵深防御（limit=1000 时 2.5MB 未触顶）
+fn byte_budget(limit: usize) -> u64 {
+    const BASE: u64 = 512 * 1024;
+    const CAP: u64 = 4 * 1024 * 1024;
+    BASE.saturating_mul(limit.div_ceil(200) as u64).min(CAP)
 }
 
 /// ISO 8601 时间戳 → epoch 毫秒（claude/codex 行内 timestamp 形态）；解析失败 None
@@ -276,7 +304,7 @@ fn read_zcode_messages_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     use crate::monitor::zcode_parser::ZcodeRoots;
     let roots = ZcodeRoots::from_home(home);
     let conn = crate::monitor::sqlite::open_readonly_with_timeout(&roots.cli_db)
@@ -401,7 +429,8 @@ fn read_zcode_messages_with(
             _ => {} // 未知角色 → 跳过
         }
     }
-    Ok(finalize(out, limit))
+    // SQLite 查询自带 LIMIT：无「头部截断」语义（truncated 恒 false，Bug 1 契约）
+    Ok(page(out, limit, false))
 }
 
 /// ZCode：一组消息的全部 parts（IN 子句，sequence 列存在则保流顺序，否则 rowid）
@@ -464,7 +493,7 @@ fn read_dsh_messages_with(
     env_home: Option<&str>,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     use crate::monitor::dsh::log;
     // 数据根（fix round 1 Important 1）：$DSH_HOME 覆盖优先（M0 F14：env 非空 >
     // ~/.dsh），与看板生产扫描 scan_sessions(&dsh_home()) **同源**——否则设了
@@ -509,7 +538,8 @@ fn read_dsh_messages_with(
             }
             // 命中：事件流映射（纯函数，独立可测）
             let events = log::parse_events(&read.text);
-            return Ok(finalize(map_dsh_events(&events), limit));
+            // dsh 走自有 zstd 代际整读，无字节尾窗（truncated 恒 false，Bug 1 契约）
+            return Ok(page(map_dsh_events(&events), limit, false));
         }
     }
     Err(format!("dsh 会话不存在或日志不可读: {session_id}"))
@@ -647,10 +677,15 @@ fn read_claude_messages_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     let path = find_jsonl_in_projects(home, ".claude", session_id)?;
-    let lines = crate::monitor::jsonl::read_recent_lines(&path, line_budget(limit));
-    Ok(finalize(map_claude_lines(&lines), limit))
+    // Bug 1：字节窗随 limit 放大（byte_budget），头部截断经 truncated 上报
+    let (lines, truncated) = crate::monitor::jsonl::read_recent_lines_with_budget(
+        &path,
+        line_budget(limit),
+        byte_budget(limit),
+    );
+    Ok(page(map_claude_lines(&lines), limit, truncated))
 }
 
 /// Claude JSONL 行 → 统一条目（纯函数）。行协议：type user/assistant +
@@ -755,7 +790,7 @@ fn read_codex_messages_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     // 路线 1：rollout JSONL（CLI 前端线路；两条线路共享同一会话 id 空间——
     // codex_thread_parser 以 rollout session id 排除 DB 侧重复出卡，即此结论）
     if let Ok(msgs) = read_codex_rollout_with(home, session_id, limit) {
@@ -807,7 +842,7 @@ fn read_codex_rollout_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     let sessions_dir = home.join(".codex").join("sessions");
     let mut files = Vec::new();
     collect_rollout_files(&sessions_dir, &mut files);
@@ -839,8 +874,13 @@ fn read_codex_rollout_with(
     let Some(f) = hit else {
         return Err(format!("codex rollout 未命中: {session_id}"));
     };
-    let lines = crate::monitor::jsonl::read_recent_lines(&f, line_budget(limit));
-    Ok(finalize(map_codex_lines(&lines), limit))
+    // Bug 1：字节窗随 limit 放大，头部截断经 truncated 上报
+    let (lines, truncated) = crate::monitor::jsonl::read_recent_lines_with_budget(
+        &f,
+        line_budget(limit),
+        byte_budget(limit),
+    );
+    Ok(page(map_codex_lines(&lines), limit, truncated))
 }
 
 /// Codex rollout 行 → 统一条目（纯函数；codex_entry_kind 的内容版映射）。
@@ -935,7 +975,7 @@ fn read_codex_thread_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     use crate::monitor::codex_thread_parser::CodexThreadRoots;
     let roots = CodexThreadRoots::from_home(home);
     let conn = crate::monitor::sqlite::open_readonly_with_timeout(&roots.history_db)
@@ -1043,7 +1083,8 @@ fn read_codex_thread_with(
             _ => {}
         }
     }
-    Ok(finalize(out, limit))
+    // SQLite 查询自带 LIMIT：无「头部截断」语义（truncated 恒 false，Bug 1 契约）
+    Ok(page(out, limit, false))
 }
 
 // ============================================================
@@ -1055,7 +1096,7 @@ fn read_kimi_messages_with(
     env_home: Option<&str>,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     use crate::monitor::kimi_parser::{
         parse_session_index, resolve_data_root, resolve_session_dir,
     };
@@ -1077,12 +1118,18 @@ fn read_kimi_messages_with(
         return Err(format!("kimi sessionDir 越界: {session_id}"));
     }
     let wire = session_dir.join("agents").join("main").join("wire.jsonl");
-    let lines = crate::monitor::jsonl::read_recent_lines(&wire, line_budget(limit));
+    // Bug 1：字节窗随 limit 放大，头部截断经 truncated 上报（kimi 实测 854KB 胖
+    // 会话头部 39.5% 被旧 512KB 恒定窗切掉）
+    let (lines, truncated) = crate::monitor::jsonl::read_recent_lines_with_budget(
+        &wire,
+        line_budget(limit),
+        byte_budget(limit),
+    );
     if lines.is_empty() {
         return Err(format!("kimi wire.jsonl 不可读: {session_id}"));
     }
     let msgs = map_kimi_lines(&lines);
-    Ok(finalize(msgs, limit))
+    Ok(page(msgs, limit, truncated))
 }
 
 /// Kimi wire.jsonl 行 → 统一条目（纯函数；entry_text/entry_status 的内容版映射）。
@@ -1239,10 +1286,15 @@ fn read_workbuddy_messages_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     let path = find_jsonl_in_projects(home, ".workbuddy", session_id)?;
-    let lines = crate::monitor::jsonl::read_recent_lines(&path, line_budget(limit));
-    Ok(finalize(map_workbuddy_lines(&lines), limit))
+    // Bug 1：字节窗随 limit 放大，头部截断经 truncated 上报
+    let (lines, truncated) = crate::monitor::jsonl::read_recent_lines_with_budget(
+        &path,
+        line_budget(limit),
+        byte_budget(limit),
+    );
+    Ok(page(map_workbuddy_lines(&lines), limit, truncated))
 }
 
 /// WorkBuddy JSONL 行 → 统一条目（纯函数；workbuddy_entry_kind 的内容版映射）。
@@ -1310,7 +1362,7 @@ fn read_opencode_messages_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     let db = home
         .join(".local")
         .join("share")
@@ -1400,7 +1452,8 @@ fn read_opencode_messages_with(
             }
         }
     }
-    Ok(finalize(out, limit))
+    // SQLite 查询自带 LIMIT：无「头部截断」语义（truncated 恒 false，Bug 1 契约）
+    Ok(page(out, limit, false))
 }
 
 // ============================================================
@@ -1415,7 +1468,7 @@ fn read_openclaw_messages_with(
     home: &Path,
     session_id: &str,
     limit: usize,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<MessagesPage, String> {
     let db = home.join(".openclaw").join("state").join("openclaw.sqlite");
     if !db.exists() {
         return Err(OPENCLAW_NO_HISTORY.to_string());
@@ -1505,7 +1558,8 @@ fn read_openclaw_messages_with(
             _ => {}
         }
     }
-    Ok(finalize(out, limit))
+    // SQLite 查询自带 LIMIT：无「头部截断」语义（truncated 恒 false，Bug 1 契约）
+    Ok(page(out, limit, false))
 }
 
 // ============================================================
@@ -1651,7 +1705,9 @@ mod tests {
             r#"{"type":"step-finish","reason":"end_turn"}"#,
         );
 
-        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 200)
+            .unwrap()
+            .messages;
         let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
         assert_eq!(
             kinds,
@@ -1693,7 +1749,9 @@ mod tests {
                 &format!(r#"{{"type":"text","text":"msg{i}"}}"#),
             );
         }
-        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 3).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 3)
+            .unwrap()
+            .messages;
         let contents: Vec<&str> = msgs.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(contents, vec!["msg2", "msg3", "msg4"], "取尾部且保持文件序");
         assert_eq!(msgs[0].seq, 0, "seq 重排为 0..n");
@@ -1718,7 +1776,9 @@ mod tests {
             );
         }
         // 下界：0 → 按 1 生效（只出文件序最后 1 条）
-        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 0).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "zcode", SID, 0)
+            .unwrap()
+            .messages;
         assert_eq!(msgs.len(), 1, "limit=0 必须夹为 1");
         assert_eq!(msgs[0].content, "msg4", "夹取后仍取尾部");
         // 上界：999999 → 截回 1000（1001 条消息夹去 1 条）
@@ -1734,7 +1794,9 @@ mod tests {
                 &format!(r#"{{"type":"text","text":"big{i}"}}"#),
             );
         }
-        let r = read_session_messages_impl(big.path(), None, None, "zcode", SID, 999_999).unwrap();
+        let r = read_session_messages_impl(big.path(), None, None, "zcode", SID, 999_999)
+            .unwrap()
+            .messages;
         assert_eq!(r.len(), 1000, "limit 上限截回 1000");
         assert_eq!(r[0].content, "big1", "截去最旧的 1 条（文件序头部）");
     }
@@ -1907,7 +1969,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_dsh_generation(&tmp.path().join(".dsh"), "session-abc");
 
-        let msgs = read_session_messages_with(tmp.path(), "dsh", "session-abc", 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "dsh", "session-abc", 200)
+            .unwrap()
+            .messages;
         let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
         assert_eq!(kinds, vec!["user", "assistant"], "turn/start 不出条目");
         assert_eq!(msgs[0].content, "hi dsh");
@@ -1928,8 +1992,9 @@ mod tests {
         write_dsh_generation(env_dir.path(), "session-abc");
         let env = env_dir.path().to_str().unwrap().to_string();
 
-        let msgs =
-            read_dsh_messages_with(tmp.path(), Some(env.as_str()), "session-abc", 200).unwrap();
+        let msgs = read_dsh_messages_with(tmp.path(), Some(env.as_str()), "session-abc", 200)
+            .unwrap()
+            .messages;
         assert_eq!(msgs[0].content, "hi dsh", "env 根指向必须生效");
         // env 未设（None）→ 回落 home/.dsh → 找不到（数据只在 env 根下）
         assert!(read_dsh_messages_with(tmp.path(), None, "session-abc", 200).is_err());
@@ -1975,6 +2040,40 @@ mod tests {
         assert_eq!(msgs[4].content, "total 0");
     }
 
+    /// Bug 1 修复（M3 验收）：胖 JSONL（>512KB）头部被字节尾窗切掉——内容层必须
+    /// 报告 truncated，且放大 limit 时字节窗同放大（512KB×⌈limit/200⌉）、头部行回归。
+    /// 这是「加载更早消息」死功能的根因之一：按钮出现后重拉拿不到更早内容
+    #[test]
+    fn claude_fat_file_reports_truncation_and_grows_window_with_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".claude/projects/-Users-x-demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 头部小行（首条用户指令）+ 600KB 大行 + 尾行：512KB 窗必切进大行
+        let big_text = "x".repeat(600 * 1024);
+        let head = r#"{"type":"user","timestamp":"2026-09-15T00:00:01.000Z","message":{"role":"user","content":"首条指令"}}"#;
+        let fat = format!(
+            r#"{{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{{"role":"assistant","content":[{{"type":"text","text":"{big_text}"}}]}}}}"#
+        );
+        let tail = r#"{"type":"assistant","timestamp":"2026-09-15T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"尾行"}]}}"#;
+        std::fs::write(
+            dir.join(format!("{UUID}.jsonl")),
+            format!("{head}\n{fat}\n{tail}\n"),
+        )
+        .unwrap();
+
+        // limit=200：字节窗 512KB → truncated=true，头部行缺席（旧实现的静默截断）
+        let page = read_session_messages_impl(tmp.path(), None, None, "claude", UUID, 200).unwrap();
+        assert!(page.truncated, "超窗文件必须报告头部截断");
+        assert!(
+            !page.messages.iter().any(|m| m.content == "首条指令"),
+            "窗外的头部行本页不可见"
+        );
+        // limit=400：字节窗放大到 1MB → 全文件进窗，头部行回归
+        let page = read_session_messages_impl(tmp.path(), None, None, "claude", UUID, 400).unwrap();
+        assert!(!page.truncated, "放大窗后不得再报告截断");
+        assert_eq!(page.messages[0].content, "首条指令", "头部行必须可见");
+    }
+
     #[test]
     fn claude_reads_file_by_session_id() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1985,7 +2084,9 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-09-15T00:00:01.000Z","message":{"role":"user","content":"hi claude"}}"#,
         )
         .unwrap();
-        let msgs = read_session_messages_with(tmp.path(), "claude", UUID, 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "claude", UUID, 200)
+            .unwrap()
+            .messages;
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "hi claude");
         assert!(read_session_messages_with(
@@ -2043,7 +2144,9 @@ mod tests {
         )
         .unwrap();
         // rollout 只有 meta（无内容条目）→ 应继续落空但不炸
-        let r = read_session_messages_with(tmp.path(), "codex", UUID, 200).unwrap();
+        let r = read_session_messages_with(tmp.path(), "codex", UUID, 200)
+            .unwrap()
+            .messages;
         assert!(r.is_empty(), "仅 meta 的 rollout 映射为空");
 
         // (b) APP 线路回退：thread_history sqlite（无 rollout 文件时）
@@ -2096,7 +2199,9 @@ mod tests {
             "fileChange",
             r#"{"type":"fileChange","changes":[{"path":"/w/a.rs","kind":{"type":"update"}}]}"#,
         );
-        let msgs = read_session_messages_with(tmp.path(), "codex", UUID, 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "codex", UUID, 200)
+            .unwrap()
+            .messages;
         let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
         assert_eq!(
             kinds,
@@ -2197,7 +2302,9 @@ mod tests {
         .to_string();
         std::fs::write(home.join("session_index.jsonl"), format!("{index_line}\n")).unwrap();
 
-        let msgs = read_session_messages_with(tmp.path(), "kimi", UUID, 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "kimi", UUID, 200)
+            .unwrap()
+            .messages;
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "hi kimi");
         // 索引外会话 → Err
@@ -2240,7 +2347,9 @@ mod tests {
         .unwrap();
         let env = env_dir.path().to_str().unwrap().to_string();
 
-        let msgs = read_kimi_messages_with(tmp.path(), Some(env.as_str()), UUID, 200).unwrap();
+        let msgs = read_kimi_messages_with(tmp.path(), Some(env.as_str()), UUID, 200)
+            .unwrap()
+            .messages;
         assert_eq!(msgs[0].content, "kimi in env", "env 根指向必须生效");
         // env 未设（None）→ 回落 home/.kimi-code → 找不到
         assert!(read_kimi_messages_with(tmp.path(), None, UUID, 200).is_err());
@@ -2277,7 +2386,9 @@ mod tests {
             r#"{"type":"message","role":"user","content":[{"type":"text","text":"hi wb"}]}"#,
         )
         .unwrap();
-        let msgs = read_session_messages_with(tmp.path(), "workbuddy", UUID, 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "workbuddy", UUID, 200)
+            .unwrap()
+            .messages;
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "hi wb");
         assert!(read_session_messages_with(
@@ -2333,7 +2444,9 @@ mod tests {
         )
         .unwrap();
 
-        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
         let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
         assert_eq!(kinds, vec!["user", "thinking", "tool-call", "assistant"]);
         assert_eq!(msgs[0].content, "看下这个");
@@ -2444,7 +2557,9 @@ mod tests {
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"完成"}}"#,
         );
 
-        let msgs = read_session_messages_with(tmp.path(), "openclaw", "s1", 200).unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "openclaw", "s1", 200)
+            .unwrap()
+            .messages;
         let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
         assert_eq!(
             kinds,

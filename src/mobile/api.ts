@@ -66,6 +66,14 @@ export interface SessionMessage {
   collapsed: boolean;
 }
 
+/** 会话消息页（Bug 1，M3 验收）：messages + truncated（文件头部被字节窗截断的
+ *  标记——SQLite 系与 dsh 恒 false）。truncated=true 表示存在更早未在本页的内容，
+ *  即使条数 < limit 也应显示「加载更早消息」 */
+export interface SessionMessagesPage {
+  messages: SessionMessage[];
+  truncated: boolean;
+}
+
 /** 拉取单会话消息流尾部（八工具统一出口）。读取失败（会话不存在 / 存储不可读）
  *  以 ApiError 抛出：404 = 会话内容不可读；网络异常 status=null。
  *  不自动轮询（M3 范围裁决：SSE transition 不驱动详情页，下拉手动刷新） */
@@ -73,7 +81,7 @@ export async function fetchSessionMessages(
   agentType: string,
   sessionId: string,
   limit: number
-): Promise<SessionMessage[]> {
+): Promise<SessionMessagesPage> {
   const q = new URLSearchParams({
     agent_type: agentType,
     session_id: sessionId,
@@ -86,8 +94,11 @@ export async function fetchSessionMessages(
     throw new ApiError(null, `session-messages 网络异常: ${String(e)}`);
   }
   if (!r.ok) throw new ApiError(r.status, `session-messages ${r.status}`);
-  const j = (await r.json()) as { messages: SessionMessage[] };
-  return Array.isArray(j.messages) ? j.messages : [];
+  const j = (await r.json()) as { messages?: SessionMessage[]; truncated?: boolean };
+  return {
+    messages: Array.isArray(j.messages) ? j.messages : [],
+    truncated: j.truncated === true,
+  };
 }
 
 /** 拉取该会话涉及的文件路径表（/session-files，泛化提取）。链接化是增强能力：
