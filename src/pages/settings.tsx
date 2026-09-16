@@ -346,6 +346,9 @@ export default function SettingsPage() {
       // 全量失效本窗口（设置窗口）的 react-query 缓存；主窗口/看板的缓存由后端广播的
       // tools-changed 事件失效（toolsChangedSync，N2 根因修复）——两者是独立 WebView
       await queryClient.invalidateQueries();
+      // 托盘同步（终审 Minor #5）：工具启停可能改动预设激活态，重建托盘菜单；失败静默
+      // （只读传参，refresh_tray 内部已有持久化合并，与 PresetList 既有调用同款）
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
       const jump = pendingJumpRef.current;
       pendingJumpRef.current = null;
       jump?.();

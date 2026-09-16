@@ -1,14 +1,19 @@
 // tests/presetList.test.tsx — 预设组 v2 列表（Task 4 骨架 + Task 6 预设×工具开关）
 // 覆盖：双分区渲染（通用 / 工具私有按绑定工具分组）、activePresets 驱动 Switch checked、
 // 能力门控（工具不支持的资源类型 → 未激活开关 disabled；已激活保持可操作以走 restore）
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PresetList } from "@/components/presets/PresetList";
 import type { EnabledTool } from "@/lib/query/queries/tools";
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, toastMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  // 终审 Minor #1：捕获 toast 文案，锁定 restore 失败分支的专用文案（不与 applyFailed 混用）
+  toastMock: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("sonner", () => ({ toast: toastMock }));
 
 // tests/setup.ts 未初始化 i18n，显式引入并固定中文（文案按 zh 断言）
 import i18n from "@/i18n";
@@ -202,5 +207,30 @@ describe("PresetList（v2 双分区 + 预设×工具开关）", () => {
     expect(screen.getByText("Dsh").parentElement).toHaveAttribute("title", "Dsh: 暂不支持");
     // 支持该类型的 claude 开关不受影响
     expect(switchFor("MCP 组合", "Claude Code")).not.toBeDisabled();
+  });
+
+  it("restore 失败文案（终审 Minor #1）：开关关 → restore_preset 拒绝 → toast 报「恢复默认失败」而非「应用失败」", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_enabled_tools") return [TOOL_CLAUDE];
+      if (cmd === "list_presets") return [UNIVERSAL_PRESET];
+      if (cmd === "list_active_presets") return [{ toolId: "claude", presetId: "p-univ" }];
+      if (cmd === "restore_preset") throw new Error("backend boom");
+      return [];
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PresetList extensions={[]} />
+      </QueryClientProvider>
+    );
+    await screen.findByText("通用组合");
+    // 已激活开关恒可操作（关 = 恢复默认路径）
+    fireEvent.click(switchFor("通用组合", "Claude Code"));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledTimes(1));
+    const msg = toastMock.error.mock.calls[0][0] as string;
+    // 新文案 presets.restoreFailed（zh「恢复默认失败」），且不得回退到 applyFailed 的「应用失败」
+    expect(msg).toContain("恢复默认失败");
+    expect(msg).toContain("backend boom");
+    expect(msg).not.toContain("应用失败");
   });
 });

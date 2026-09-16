@@ -80,8 +80,9 @@ export function HealthCheckCard() {
   const [stashPendingId, setStashPendingId] = useState<number | null>(null);
   const [suggPendingId, setSuggPendingId] = useState<string | null>(null);
 
-  // 处置后统一失效：体检三源 + 预设 / 激活预设 / SSOT 资源（账本回写与链接重建都影响这些视图）
-  const invalidateAfterFix = async () => {
+  // 处置后统一失效（终审 Minor #7 起 ① 单行/批量与 ③ 暂存回移共用）：体检三源 +
+  // 预设 / 激活预设 / SSOT 资源（账本回写与链接重建都影响这些视图）
+  const invalidateAfterDisposition = async () => {
     await qc.invalidateQueries({ queryKey: PRESET_HEALTH_KEY });
     await qc.invalidateQueries({ queryKey: PRESETS_KEY });
     await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
@@ -112,7 +113,7 @@ export function HealthCheckCard() {
       toast.error(formatInvokeError(e, t));
     } finally {
       setRowPending(null);
-      await invalidateAfterFix();
+      await invalidateAfterDisposition();
     }
   };
 
@@ -121,7 +122,11 @@ export function HealthCheckCard() {
     setBatchPending(`${toolId}|${mode}`);
     try {
       const outcomes = await reconcileToolBatch(toolId, mode);
+      // 三分计数（终审 Minor #3）：fixed / needs_manual / failed 各按 outcome 字段统计，
+      // needs_manual 不再并入 failed（升级人工 ≠ 处置失败）
       const fixed = outcomes.filter((o) => o.fixed).length;
+      const manualCount = outcomes.filter((o) => o.needsManual).length;
+      const failed = outcomes.length - fixed - manualCount;
       const nextManual = new Set(manual);
       for (const o of outcomes) {
         // message 格式 "{ext_id} @ {tool_id}: {detail}"（reconcile.rs where_at + detail 后缀）；
@@ -133,13 +138,17 @@ export function HealthCheckCard() {
       if (fixed === outcomes.length) {
         toast.success(t("resources.health.ok"));
       } else {
-        toast.warning(t("presets.partialSuccess", { n: fixed, failed: outcomes.length - fixed }));
+        // 汇总沿用 presets.partialSuccess 两计数，needs_manual>0 时追加需人工计数
+        let summary = t("presets.partialSuccess", { n: fixed, failed });
+        if (manualCount > 0)
+          summary += ` · ${t("resources.health.batchNeedsManual", { n: manualCount })}`;
+        toast.warning(summary);
       }
     } catch (e) {
       toast.error(formatInvokeError(e, t));
     } finally {
       setBatchPending(null);
-      await invalidateAfterFix();
+      await invalidateAfterDisposition();
     }
   };
 
@@ -167,13 +176,15 @@ export function HealthCheckCard() {
     }
   };
 
-  // ③ 暂存回移：成功报落位去向（沿用资源视图 toast.success(路径) 风格）；失败后端已含原因
+  // ③ 暂存回移：成功报落位去向（沿用资源视图 toast.success(路径) 风格）；失败后端已含原因。
+  // 成功后复用统一失效路径（终审 Minor #7 补全：原只失效 preset-health，
+  // 漏掉 PRESETS / ACTIVE_PRESETS / SSOT 与托盘同步）
   const restoreStash = async (entry: StashEntryRecord) => {
     setStashPendingId(entry.id);
     try {
       await restoreStashEntry(entry.id);
       toast.success(`${entry.skillName} → ${entry.originalPath}`);
-      await qc.invalidateQueries({ queryKey: PRESET_HEALTH_KEY });
+      await invalidateAfterDisposition();
     } catch (e) {
       toast.error(formatInvokeError(e, t));
     } finally {

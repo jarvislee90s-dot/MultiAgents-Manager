@@ -120,7 +120,8 @@ export function PresetList({
       // 托盘同步（Task 16）：选中态变化后重建托盘菜单；失败静默，不影响主流程
       invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
     } catch (e) {
-      toast.error(t("presets.applyFailed", { error: formatInvokeError(e, t) }));
+      // 终审 Minor #1：restore（开关关）失败用专用文案，不与 apply 分支的「应用失败」混用
+      toast.error(t("presets.restoreFailed", { error: formatInvokeError(e, t) }));
     }
   };
 
