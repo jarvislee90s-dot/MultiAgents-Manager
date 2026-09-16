@@ -1,4 +1,4 @@
-// gate 中间件：/m/api/* 全量过闸（403）——放行名单仅 pair（换 cookie 的入口）
+// gate 中间件：/m/api/* 全量过闸（403）——放行名单仅 /pair 与 /pair/*（换 cookie 的入口）
 // cookie 解析手写（不加 cookie 依赖）：mam_device=<hex>
 //
 // 路径语义（重要，勿按直觉改）：本中间件由 `server.rs` 作为 **nest("/m/api/v1") 的内层 layer**
@@ -38,8 +38,9 @@ pub fn extract_device(headers: &axum::http::HeaderMap) -> Option<String> {
 /// 路径为 nest 剥前缀后的相对路径（见文件头注释），放行名单是 `"/pair"`
 pub async fn gate(State(state): State<Arc<RemoteState>>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if path == "/pair" {
-        return next.run(req).await; // 换 cookie 入口放行（token 即凭据）
+    // M4 T2：审批配对三端点（/pair/request|poll|confirm）与 /pair 同为换 cookie 入口，放行
+    if path == "/pair" || path.starts_with("/pair/") {
+        return next.run(req).await; // 换 cookie 入口放行（token/审批码即凭据）
     }
     let Some(device) = extract_device(req.headers()) else {
         return unauthorized();

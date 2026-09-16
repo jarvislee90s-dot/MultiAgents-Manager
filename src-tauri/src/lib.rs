@@ -159,6 +159,12 @@ pub fn run() {
         remote::remote_status,
         remote::remote_issue_token,
         remote::remote_confirm_public,
+        remote::remote_pending_requests,
+        remote::remote_approve_request,
+        remote::remote_devices,
+        remote::remote_revoke_device,
+        remote::remote_revoke_all_devices,
+        remote::remote_set_channel,
     ]);
 
     #[cfg(not(debug_assertions))]

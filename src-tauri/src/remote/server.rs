@@ -250,6 +250,11 @@ pub struct RemoteState {
     pub watcher_tx: tokio::sync::broadcast::Sender<super::watcher::TransitionEvent>,
     /// SSE 连接注册表（M4 T0a）：吊销/停止即时断连 + 在线口径数据源
     pub sse_registry: std::sync::Arc<SseRegistry>,
+    /// 审批配对队列（M4 T2a：内存态，重启即清——spec 边界）
+    pub approval: std::sync::Mutex<super::approval::ApprovalService>,
+    /// 设备上限注入缝（M4 T2c）：生产 = 读 remote.max_devices KV；测试注入常量
+    /// （零 DAO 接触——端点测试不触碰真实 ~/.mam）
+    pub max_devices_source: Box<dyn Fn() -> usize + Send + Sync>,
 }
 
 /// API 子路由：三条端点 + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -269,6 +274,10 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
         .route("/file", get(api::read_file))
         .route("/pair", post(api::pair))
+        // M4 T2：审批配对三端点（不过闸——gate 放行名单已扩 /pair/*）
+        .route("/pair/request", post(api::pair_request))
+        .route("/pair/poll", post(api::pair_poll))
+        .route("/pair/confirm", post(api::pair_confirm))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
         // `/m/api/v1/nope` 会落到外层 fallback（Task 7 的静态兜底 → 200 静态内容），
         // 绕开"所有 /m/api/* 过 gate（403）"这条安全不变量（评审实测确认）
@@ -320,9 +329,14 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     // 见 adapter::get_all_sessions 的单飞护栏注释）；watcher 生命周期随进程结束，
     // stop_server 不显式停止（关闭远程后循环仍扫描，为已有取舍）
     super::watcher::SessionWatcher::start();
-    axum::serve(listener, router_with_static(state))
-        .await
-        .map_err(|e| format!("serve: {e}"))
+    // M4 T2：审批请求记来源 IP——into_make_service_with_connect_info 注入
+    // ConnectInfo extension（pair_request 提取器依赖；oneshot 测试在请求侧自补）
+    axum::serve(
+        listener,
+        router_with_static(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| format!("serve: {e}"))
 }
 
 #[cfg(test)]
@@ -373,6 +387,15 @@ mod tests {
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            approval: std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(|| "req-t".to_string()),
+                Box::new(|| "0000".to_string()),
+                Box::new(|| "adev-t".to_string()),
+            )),
+            max_devices_source: Box::new(|| 3),
         })
     }
 
@@ -521,6 +544,14 @@ mod tests {
                 watcher_tx: tokio::sync::broadcast::channel(64).0,    // M3 Task 5：空事件通道
                 // M4 T0a：本组测试不触 SSE 断连，空注册表即可
                 sse_registry: Arc::new(SseRegistry::default()),
+                // M4 T2：审批队列固定生成器 + 上限注入常量（本组测试不触 /pair/*）
+                approval: std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                    300_000,
+                    Box::new(|| "req-t".to_string()),
+                    Box::new(|| "0000".to_string()),
+                    Box::new(|| "adev-t".to_string()),
+                )),
+                max_devices_source: Box::new(|| 3),
             }),
             t,
         )
@@ -975,6 +1006,15 @@ mod tests {
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            approval: std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(|| "req-t".to_string()),
+                Box::new(|| "0000".to_string()),
+                Box::new(|| "adev-t".to_string()),
+            )),
+            max_devices_source: Box::new(|| 3),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -1256,6 +1296,15 @@ mod tests {
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            approval: std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(|| "req-t".to_string()),
+                Box::new(|| "0000".to_string()),
+                Box::new(|| "adev-t".to_string()),
+            )),
+            max_devices_source: Box::new(|| 3),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1369,6 +1418,15 @@ mod tests {
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            approval: std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(|| "req-t".to_string()),
+                Box::new(|| "0000".to_string()),
+                Box::new(|| "adev-t".to_string()),
+            )),
+            max_devices_source: Box::new(|| 3),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1539,6 +1597,15 @@ mod tests {
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            approval: std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(|| "req-t".to_string()),
+                Box::new(|| "0000".to_string()),
+                Box::new(|| "adev-t".to_string()),
+            )),
+            max_devices_source: Box::new(|| 3),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -1737,5 +1804,146 @@ mod tests {
     /// 查询参数值的最小 URL 编码（测试助手：空格 → %20；其余字符测试数据不含）
     fn uri_encode(s: &str) -> String {
         s.replace(' ', "%20")
+    }
+
+    // ---- 审批配对端到端（M4 T2）----
+
+    fn state_with_approval() -> Arc<RemoteState> {
+        let mut arc = test_state();
+        // Arc 唯一引用期原地换 approval：4 位码恒 2468、id/设备 id 恒 "req-x"/"adev-x"
+        // （Arc::get_mut：test_state 刚构造、无其他引用，必然 Some）
+        std::sync::Arc::get_mut(&mut arc).unwrap().approval =
+            std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(|| "req-x".to_string()),
+                Box::new(|| "2468".to_string()),
+                Box::new(|| "adev-x".to_string()),
+            ));
+        arc
+    }
+
+    #[tokio::test]
+    async fn approval_request_poll_confirm_endpoints() {
+        let state = state_with_approval();
+        let app = super::router_with_static(state.clone());
+        // 1. 请求接入（不携带 cookie——gate 放行 /pair/*）
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/m/api/v1/pair/request",
+                r#"{"name":"我的手机"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["requestId"], "req-x");
+        // 2. poll：pending
+        let resp = app
+            .clone()
+            .oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-x"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        // 3. confirm 错码 → wrong + triesLeft；正码 → Set-Cookie
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/m/api/v1/pair/confirm",
+                r#"{"requestId":"req-x","code":"0000"}"#,
+            ))
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], serde_json::json!(false));
+        assert_eq!(v["error"], serde_json::json!("wrong"));
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/m/api/v1/pair/confirm",
+                r#"{"requestId":"req-x","code":"2468"}"#,
+            ))
+            .await
+            .unwrap();
+        let cookie = resp
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cookie.contains("mam_device=adev-x"));
+        // 4. poll 再拉：approved 幂等重发同 cookie
+        let resp = app
+            .clone()
+            .oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-x"}"#))
+            .await
+            .unwrap();
+        assert!(resp
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("mam_device=adev-x"));
+    }
+
+    /// T2c 直通上限门端到端：满员 403+cap_full；腾位后**同一 token** 可用（门不消费 token）
+    #[tokio::test]
+    async fn direct_pair_rejected_when_device_cap_reached() {
+        let state = test_state();
+        // 预置 3 台有效设备（test_state 的 max_devices_source 注入 || 3 = 默认上限）
+        state.store.with(|c| {
+            for i in 0..3 {
+                let _ = crate::remote::pairing::persist_device(
+                    c,
+                    &crate::remote::pairing::NewDevice {
+                        id: format!("cap-{i}"),
+                        name: String::new(),
+                        ua: String::new(),
+                        origin_ip: String::new(),
+                        paired_at: 0,
+                    },
+                );
+            }
+        });
+        state.pairing.lock().unwrap().issue(); // test_state 假时钟 token = "tok-x"
+        let app = super::router_with_static(state.clone());
+        let resp = app
+            .oneshot(post_json("/m/api/v1/pair", r#"{"token":"tok-x"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+            "cap_full"
+        );
+        // 腾位一台后同 token 放行（token 未被上限门消费）
+        state.store.with(|c| {
+            let _ = crate::remote::pairing::revoke_device(c, "cap-0");
+        });
+        let app2 = super::router_with_static(state.clone());
+        let resp2 = app2
+            .oneshot(post_json("/m/api/v1/pair", r#"{"token":"tok-x"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), 200);
+    }
+
+    fn post_json(uri: &str, body: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            // 控制者预裁定 1：axum oneshot 不注入 ConnectInfo extension，
+            // pair_request 直取提取器会 500——测试环境适配，补注入固定回环地址
+            .extension(axum::extract::ConnectInfo(
+                "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
     }
 }

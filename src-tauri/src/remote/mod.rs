@@ -2,6 +2,7 @@
 // 范围与红线见 docs/superpowers/plans/2026-09-14-m2-remote-access-board.md
 
 pub mod api;
+pub mod approval;
 pub mod content;
 pub mod events;
 pub mod files;
@@ -23,6 +24,41 @@ pub const DEFAULT_PORT: u16 = 9420;
 pub const KEY_CHANNEL: &str = "remote.channel";
 /// 命名隧道 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
+/// 设备上限键（spec T2c：默认 3 台可配）
+pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
+
+/// 上限解析（纯函数）：None/乱串 → 3；clamp 1..=10
+pub fn max_devices_from(v: Option<String>) -> usize {
+    v.and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(1, 10))
+        .unwrap_or(3)
+}
+
+/// 生产上限源（STATE 构造注入；唯一 KV 读取点）
+fn max_devices_from_kv() -> usize {
+    max_devices_from(crate::database::dao::settings::get_setting(KEY_MAX_DEVICES))
+}
+
+/// 在线口径（spec T2d 自审修正）：活跃 SSE 连接 ∨ 30s 内过闸
+pub fn is_online(registry_hit: bool, last_seen_at: i64, now: i64) -> bool {
+    registry_hit || now - last_seen_at < 30_000
+}
+
+/// 8 字节随机 hex（审批请求 id 生成器）：fill_bytes 后逐字节两位 hex——
+/// 与 STATE 里 pairing token 生成器同写法，抽成复用函数（控制者预裁定 2：
+/// 生成器零参随机形态，**不可位置式**——消费后复用会让旧轮询搭上新请求）
+fn random_hex_8() -> String {
+    let mut b = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// 16 字节随机 hex（审批配对设备 id 生成器）：与直通配对 device_id 同风格
+fn random_hex_16() -> String {
+    let mut b = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
 
 // ============================================================
 // 生命周期接线（Task 4）：服务器随设置启停 + 四个 tauri 命令 + 启动恢复
@@ -69,6 +105,21 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         watcher_tx: watcher::event_sender(),
         // M4 T0a：SSE 连接注册表（吊销/停止即时断连 + Task 7 在线口径数据源）
         sse_registry: std::sync::Arc::new(server::SseRegistry::default()),
+        // M4 T2：审批队列（零参随机 hex 生成器——id/设备 id 不可位置式，防消费后复用）
+        approval: Mutex::new(approval::ApprovalService::new(
+            5 * 60 * 1000,
+            Box::new(random_hex_8), // 请求 id：8 字节随机 hex
+            // 4 位码：0000-9999 等概率，前导零补齐
+            Box::new(|| {
+                format!(
+                    "{:04}",
+                    rand::Rng::gen_range(&mut rand::thread_rng(), 0..10000)
+                )
+            }),
+            Box::new(random_hex_16), // 设备 id：16 字节随机 hex（与直通配对 device_id 同风格）
+        )),
+        // M4 T2：设备上限源（生产读 KV——max_devices_from_kv 是唯一读取点）
+        max_devices_source: Box::new(max_devices_from_kv),
     })
 });
 
@@ -404,6 +455,99 @@ pub fn remote_issue_token() -> Result<serde_json::Value, String> {
             &token,
         )
     }))
+}
+
+// ============================================================
+// M4 T2：审批配对 / 设备花名册命令（桌面面板数据源与操作入口）
+// ============================================================
+
+/// 待审批队列（设置页面板数据源；name/ip/ua/expiresAt/4位码）
+#[tauri::command]
+pub fn remote_pending_requests() -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    let list = STATE.approval.lock().unwrap().pending(now);
+    serde_json::json!(list
+        .iter()
+        .map(|r| serde_json::json!({
+            "id": r.id, "name": r.name, "ip": r.ip, "ua": r.ua,
+            "code": r.code, "expiresAt": r.expires_at,
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// 桌面批准（spec T2b 路径一）。cap 先于 approve 锁计算（不持审批锁碰 DB）；
+/// 上限门经 max_devices_source 注入缝——与 api::pair / pair_confirm 三入口同门（spec T2c）
+#[tauri::command]
+pub fn remote_approve_request(id: String) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let max = (STATE.max_devices_source)();
+    let cap = STATE.store.with(|c| pairing::device_count(c) >= max);
+    match STATE.approval.lock().unwrap().approve(&id, now, || cap) {
+        approval::ApproveOutcome::Ok { .. } => {
+            events::audit("pair_approved", &id);
+            Ok(())
+        }
+        approval::ApproveOutcome::CapFull => Err("设备已满，请先在花名册吊销腾位".into()),
+        approval::ApproveOutcome::NotFound | approval::ApproveOutcome::Expired => {
+            Err("请求已过期或不存在".into())
+        }
+    }
+}
+
+/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——直通/审批落库均带设备名）
+#[tauri::command]
+pub fn remote_devices() -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    let rows: Vec<(String, String, i64, i64, i64)> = STATE.store.with(|c| {
+        c.prepare("SELECT id, name, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
+            // Rows 借用局部 Statement——必须在闭包内收集为 owned 值（E0515）
+            .and_then(|mut s| {
+                let rows: Vec<(String, String, i64, i64, i64)> = s
+                    .query_map([], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    })?
+                    .filter_map(Result::ok)
+                    .collect();
+                Ok(rows)
+            })
+            .unwrap_or_default()
+    });
+    serde_json::json!(rows
+        .iter()
+        .filter(|(_, _, _, _, revoked)| *revoked == 0)
+        .map(|(id, name, paired, seen, _)| {
+            serde_json::json!({
+                "id": id, "name": name, "firstPairedAt": paired,
+                "lastSeenAt": seen, "online": is_online(STATE.sse_registry.has(id), *seen, now),
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+/// 单设备吊销：DB 置位 + SSE 即时断连（Task 1 注册表接线）+ 审计
+#[tauri::command]
+pub fn remote_revoke_device(id: String) -> Result<(), String> {
+    STATE.store.with(|c| pairing::revoke_device(c, &id))?;
+    let n = STATE.sse_registry.disconnect_device(&id);
+    events::audit("device_revoked", &format!("id={id} closed_sse={n}"));
+    events::emit_ui("remote-roster-changed", serde_json::json!({"id": id}));
+    Ok(())
+}
+
+/// 全部吊销（不停止服务器——与「停止远程」的差别只在服务存续）
+#[tauri::command]
+pub fn remote_revoke_all_devices() -> Result<usize, String> {
+    let n = STATE
+        .store
+        .with(pairing::revoke_all)
+        .map_err(|e| e.to_string())?;
+    let closed = STATE.sse_registry.disconnect_all();
+    events::audit(
+        "devices_revoked_all",
+        &format!("count={n} closed_sse={closed}"),
+    );
+    events::emit_ui("remote-roster-changed", serde_json::json!({}));
+    Ok(n)
 }
 
 /// TLS 前置确认（P7 安全门）：用户确认已配置 TLS 反向代理后置位，解锁 0.0.0.0 绑定
@@ -1105,6 +1249,23 @@ mod tests {
             pair_url_with_tunnel(None, "http://192.168.1.5:9420/m".into(), "tok"),
             "http://192.168.1.5:9420/m#token=tok"
         );
+    }
+
+    // ==== M4 T2 纯函数：在线口径 + 设备上限解析 ====
+
+    #[test]
+    fn online_threshold_30s() {
+        assert!(is_online(true, 0, 60_000)); // 活跃 SSE 连接：不看 last_seen
+        assert!(is_online(false, 40_000, 60_000)); // 20s 前过闸 → 在线
+        assert!(!is_online(false, 20_000, 60_000)); // 40s 前过闸 → 离线
+    }
+
+    #[test]
+    fn max_devices_default_and_clamp() {
+        assert_eq!(max_devices_from(None), 3);
+        assert_eq!(max_devices_from(Some("1".into())), 1);
+        assert_eq!(max_devices_from(Some("99".into())), 10); // clamp 上限
+        assert_eq!(max_devices_from(Some("x".into())), 3); // 乱串回落默认
     }
 }
 

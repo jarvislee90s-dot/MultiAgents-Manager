@@ -3,7 +3,7 @@
 // + session-files / file（M3 Task 8 文件路径提取与安全读取）
 
 use axum::{
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::{sse, IntoResponse, Response, Sse},
     Json,
@@ -15,7 +15,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 
-use super::gate::COOKIE_NAME;
+// 审批状态机产出枚举（M4 T2 三 handler 的 match 对象）
+use super::approval::{ConfirmOutcome, CreateRejection, PollOutcome};
 use super::server::{CleanupStream, RemoteState};
 
 /// GET /m/api/v1/sessions：数据源注入（生产 = adapter::get_all_sessions），
@@ -135,6 +136,22 @@ pub async fn pair(
     Json(req): Json<PairReq>,
 ) -> Result<Response, StatusCode> {
     use crate::remote::pairing::AcceptResult;
+    // M4 T2c：上限三入口统一门——直通扫码也拒（spec：否则扫码绕过上限）。
+    // max 经注入缝取（生产读 KV；测试注入常量——不直读全局 DAO）。
+    // 门在 accept **之前**：token 不被消费，腾位后原码仍可用。
+    // 注意本 handler 返回 `Result<Response, StatusCode>`——带 body 的 403 须包 `Ok(...)`
+    let max = (st.max_devices_source)();
+    if st
+        .store
+        .with(|c| crate::remote::pairing::device_count(c) >= max)
+    {
+        super::events::audit("pair_rejected_cap", &format!("max={max}"));
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "cap_full" })),
+        )
+            .into_response());
+    }
     let now = chrono::Utc::now().timestamp_millis();
     let ua = headers
         .get(axum::http::header::USER_AGENT)
@@ -155,7 +172,8 @@ pub async fn pair(
     };
     let dev = crate::remote::pairing::NewDevice {
         id: device_id.clone(),
-        name: String::new(),
+        // M4 T2：直通路径落设备名（花名册展示——否则 roster 只剩 id 前 8 位可读）
+        name: "直通扫码".to_string(),
         ua,
         origin_ip: String::new(),
         paired_at: now,
@@ -164,16 +182,168 @@ pub async fn pair(
     st.store.with(|c| {
         let _ = crate::remote::pairing::persist_device(c, &dev);
     });
-    // HttpOnly + SameSite=Lax + Path=/m + 180d（dsh 七不变量之 cookie 语义）
-    let cookie = format!(
-        "{COOKIE_NAME}={device_id}; Path=/m; HttpOnly; SameSite=Lax; Max-Age={}",
-        crate::remote::pairing::DEVICE_TTL_MS / 1000
-    );
+    // HttpOnly + SameSite=Lax + Path=/m + 180d（dsh 七不变量之 cookie 语义）——
+    // 拼装收口到 pairing::device_cookie（与 pair-poll / pair-confirm 三处共用，防漂移）
     Ok((
-        [(axum::http::header::SET_COOKIE, cookie)],
+        [(
+            axum::http::header::SET_COOKIE,
+            crate::remote::pairing::device_cookie(&device_id),
+        )],
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response())
+}
+
+// ============================================================
+// 审批配对三端点（M4 T2）：/pair/request | /pair/poll | /pair/confirm
+// 均不过闸（gate 放行 /pair/*）——凭据 = 桌面批准或 4 位码，成功后换设备 cookie
+// ============================================================
+
+#[derive(Deserialize)]
+pub struct PairRequestBody {
+    pub name: Option<String>,
+}
+
+/// POST /m/api/v1/pair/request（M4 T2a）：新设备请求接入（未过闸端点）。
+/// 成功即桌面通知（emit remote-pair-request）+ 审计留痕
+pub async fn pair_request(
+    State(st): State<Arc<RemoteState>>,
+    ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PairRequestBody>,
+) -> Response {
+    let now = chrono::Utc::now().timestamp_millis();
+    let ua = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let ip = addr.ip().to_string();
+    let name = req.name.unwrap_or_default();
+    let mut svc = st.approval.lock().unwrap();
+    match svc.create(&name, &ua, &ip, now) {
+        Ok(r) => {
+            super::events::emit_ui(
+                "remote-pair-request",
+                serde_json::json!({
+                    "name": r.name, "ip": r.ip, "expiresAt": r.expires_at,
+                }),
+            );
+            super::events::audit(
+                "pair_request",
+                &format!("id={} name={} ip={}", r.id, r.name, r.ip),
+            );
+            Json(serde_json::json!({ "requestId": r.id, "expiresAt": r.expires_at }))
+                .into_response()
+        }
+        Err(e) => {
+            let err = match e {
+                CreateRejection::QueueFull => "queue_full",
+                CreateRejection::IpBusy => "ip_busy",
+            };
+            super::events::audit("pair_request_rejected", &format!("ip={ip} reason={err}"));
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairPollBody {
+    pub request_id: String,
+}
+
+/// POST /m/api/v1/pair/poll：手机轮询审批结果（approved 幂等重发 Set-Cookie——丢包重 poll 不掉凭证）
+pub async fn pair_poll(
+    State(st): State<Arc<RemoteState>>,
+    Json(req): Json<PairPollBody>,
+) -> Response {
+    let now = chrono::Utc::now().timestamp_millis();
+    let outcome = st.approval.lock().unwrap().poll(&req.request_id, now);
+    match outcome {
+        PollOutcome::Approved { device, name } => {
+            super::events::audit("pair_polled", &format!("device={device}"));
+            persist_and_cookie(&st, &device, &name, now)
+        }
+        PollOutcome::Pending { expires_at } => {
+            Json(serde_json::json!({ "status": "pending", "expiresAt": expires_at }))
+                .into_response()
+        }
+        PollOutcome::Expired => Json(serde_json::json!({ "status": "expired" })).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairConfirmBody {
+    pub request_id: String,
+    pub code: String,
+}
+
+/// POST /m/api/v1/pair/confirm：4 位确认码等效授权（限试 3 次，spec T2b）
+pub async fn pair_confirm(
+    State(st): State<Arc<RemoteState>>,
+    Json(req): Json<PairConfirmBody>,
+) -> Response {
+    let now = chrono::Utc::now().timestamp_millis();
+    let max = (st.max_devices_source)();
+    let outcome = st
+        .approval
+        .lock()
+        .unwrap()
+        .confirm(&req.request_id, &req.code, now);
+    // Ok 路径补上限门（confirm 内部不触 DB——状态机纯内存；满员时码对了也拒）
+    match outcome {
+        ConfirmOutcome::Ok { device, name } => {
+            let cap = st
+                .store
+                .with(|c| crate::remote::pairing::device_count(c) >= max);
+            if cap {
+                return Json(serde_json::json!({ "ok": false, "error": "cap_full" }))
+                    .into_response();
+            }
+            super::events::audit("pair_confirmed", &format!("device={device}"));
+            persist_and_cookie(&st, &device, &name, now)
+        }
+        ConfirmOutcome::Wrong(left) => {
+            Json(serde_json::json!({ "ok": false, "error": "wrong", "triesLeft": left }))
+                .into_response()
+        }
+        ConfirmOutcome::Exhausted => {
+            super::events::audit("pair_confirm_exhausted", &req.request_id);
+            Json(serde_json::json!({ "ok": false, "error": "exhausted" })).into_response()
+        }
+        ConfirmOutcome::Expired | ConfirmOutcome::NotFound => {
+            Json(serde_json::json!({ "ok": false, "error": "expired" })).into_response()
+        }
+    }
+}
+
+/// 批准/确认通过的公共落库 + 下发 cookie（设备名来自请求——花名册展示用；
+/// api::pair 直通路径传「直通扫码」）
+fn persist_and_cookie(st: &Arc<RemoteState>, device_id: &str, name: &str, now: i64) -> Response {
+    let dev = crate::remote::pairing::NewDevice {
+        id: device_id.to_string(),
+        name: name.to_string(),
+        ua: String::new(),
+        origin_ip: String::new(),
+        paired_at: now,
+    };
+    st.store.with(|c| {
+        let _ = crate::remote::pairing::persist_device(c, &dev);
+    });
+    (
+        [(
+            axum::http::header::SET_COOKIE,
+            crate::remote::pairing::device_cookie(device_id),
+        )],
+        Json(serde_json::json!({ "ok": true, "status": "approved" })),
+    )
+        .into_response()
 }
 
 /// GET /m/api/v1/host（M3 Task 1）：移动看板页头品牌行（P8a 版本 + P8b 本机名 +

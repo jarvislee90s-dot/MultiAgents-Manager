@@ -1,6 +1,7 @@
 // 直通配对状态机（M2 最简版）——dsh-remote-web-ui pairing.ts 七不变量的 Rust 移植
 // （研究库源码摘要 §不变量；审批制/花名册 UI 为 M4，不在本文件）
 
+use crate::remote::gate::COOKIE_NAME as COOKIE;
 use rand::RngCore;
 
 /// 设备 cookie 有效期：180 天（dsh 设备会话 TTL，cookie Max-Age 同源）
@@ -143,6 +144,34 @@ pub fn touch_device(conn: &rusqlite::Connection, device_id: &str, now: i64) {
 pub fn revoke_all(conn: &rusqlite::Connection) -> Result<usize, String> {
     conn.execute("UPDATE remote_devices SET revoked = 1", [])
         .map_err(|e| format!("revoke_all: {e}"))
+}
+
+/// 有效设备数（上限门计数口径：revoked=0）
+pub fn device_count(conn: &rusqlite::Connection) -> usize {
+    conn.query_row(
+        "SELECT COUNT(*) FROM remote_devices WHERE revoked = 0",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as usize)
+    .unwrap_or(0)
+}
+
+/// 单设备吊销（返回影响行数：0 = 本就无效/不存在）
+pub fn revoke_device(conn: &rusqlite::Connection, device_id: &str) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE remote_devices SET revoked = 1 WHERE id = ?1 AND revoked = 0",
+        [device_id],
+    )
+    .map_err(|e| format!("吊销设备失败: {e}"))
+}
+
+/// 设备 cookie 统一拼装（api::pair / pair-poll / pair-confirm 三处共用，防漂移）
+pub fn device_cookie(device_id: &str) -> String {
+    format!(
+        "{COOKIE}={device_id}; Path=/m; HttpOnly; SameSite=Lax; Max-Age={}",
+        DEVICE_TTL_MS / 1000
+    )
 }
 
 /// 设备存储注入缝：生产走全局 DB，测试注入内存库（绝不写真实 ~/.mam）
