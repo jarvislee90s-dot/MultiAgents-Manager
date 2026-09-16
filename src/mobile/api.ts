@@ -31,11 +31,13 @@ export async function fetchSessions<T>(): Promise<T | null> {
 }
 
 // host 载荷（GET /m/api/v1/host）：host 部分对应 Rust host_payload 的 "host" 键；
-// enabledTools 为 P8d 受管工具 id 列表（Task 3 chips 过滤的数据源）
+// enabledTools 为 P8d 受管工具 id 列表（Task 3 chips 过滤的数据源）；
+// bootId 为 MAM 进程生命周期标识（书签等「随进程消失」的客户端态的恢复守卫）
 export interface HostInfo {
   name: string;
   platform: "macos" | "windows" | "linux";
   version: string;
+  bootId: string;
 }
 
 export interface HostPayload {

@@ -128,8 +128,8 @@ function persist(): void {
   writeStorage({ bootId: activeBootId, sessions });
 }
 
-/** 取当前 bootId：优先用 api 层缓存的 host 载荷（Board 挂载时已拉过），
- *  没有再主动拉一次。null = 尚不可得（离线/未配对） */
+/** 取当前 bootId：ensureBootId 首次成功后缓存在本模块（activeBootId）；
+ *  未缓存则主动拉一次 /host。null = 尚不可得（离线/未配对） */
 export async function ensureBootId(): Promise<string | null> {
   if (activeBootId !== null) return activeBootId;
   try {

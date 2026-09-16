@@ -52,7 +52,8 @@ export default function SplitHandle({
     [orientation, ratio]
   );
 
-  // 拖动期间的 window 级监听：仅在拖动中挂载（dragRef 非空）
+  // window 级监听随组件常挂：靠 dragRef 判空——非拖动期移动指针为 no-op，
+  // 拖动期即使指针滑出 handle 也持续跟踪（不依赖 setPointerCapture）
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const drag = dragRef.current;

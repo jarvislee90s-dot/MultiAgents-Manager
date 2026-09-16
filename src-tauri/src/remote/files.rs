@@ -119,10 +119,24 @@ pub fn read_file_safe(
     if !allowed && !in_home {
         return Err("路径越界：文件不在项目目录或用户主目录内".into());
     }
-    // 敏感清单只作用于**放宽路径**（cwd 之外、主目录之内）：项目目录自身是会话
-    // 上下文（用户在此启动了 agent），其内文件不因目录名命中清单而拒——否则
-    // Windows 的 AppData 下临时项目、macOS ~/Library 下的开发目录会被整体误拒
-    if !allowed && in_home {
+    // 敏感清单检查（评审 I1 修复）：豁免仅豁免 **cwd 之内**的文件；唯一的
+    // 例外是 **cwd == 用户主目录**——把整个 ~ 当项目目录时，cwd 豁免会把
+    // ~/.ssh 等全部架空，此时所有路径（含 cwd 内）一律过清单。
+    // 已知边界（有意取舍）：cwd 自身位于某敏感子目录内（如 ~/Library/proj、
+    // ~/.config/app）时，该子树内的文件豁免——范围有界（仅该会话项目目录），
+    // 且避免 Windows AppData 下临时项目 / macOS ~/Library 开发目录被整体误拒
+    let cwd_is_home = home_canon
+        .as_deref()
+        .map(|h| {
+            let (c, hm) = (
+                cwd.to_string_lossy().to_string(),
+                h.to_string_lossy().to_string(),
+            );
+            path_within_semantics(&c, &hm, cfg!(windows))
+                && path_within_semantics(&hm, &c, cfg!(windows))
+        })
+        .unwrap_or(false);
+    if in_home && (cwd_is_home || !allowed) {
         let (child, anc) = (
             canon.to_string_lossy(),
             home_canon
@@ -1039,6 +1053,39 @@ mod tests {
                 "{read_tool} 属读类工具，不得标为已改写"
             );
         }
+    }
+
+    /// 评审 I1 回归锁：会话 cwd == 用户主目录时，cwd 豁免不得架空敏感清单——
+    /// ~/.ssh/id_rsa 必须仍被拒绝，而 ~/Downloads 下的普通文件仍可读
+    #[test]
+    fn read_file_safe_cwd_equals_home_still_enforces_sensitive_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::fs::write(home.join(".ssh").join("id_rsa"), "PRIVATE").unwrap();
+        std::fs::write(home.join("Downloads").join("trip.png"), b"\x89PNG").unwrap();
+        let home_s = home.to_str().unwrap();
+        // 会话 cwd = 主目录本身（在 ~ 下启动 agent 的常见场景）
+        assert!(
+            read_file_safe(
+                home_s,
+                home.join(".ssh").join("id_rsa").to_str().unwrap(),
+                Some(home_s)
+            )
+            .unwrap_err()
+            .contains("敏感目录"),
+            "cwd==home 时 ~/.ssh 必须仍被敏感清单拒绝"
+        );
+        assert!(
+            read_file_safe(
+                home_s,
+                home.join("Downloads").join("trip.png").to_str().unwrap(),
+                Some(home_s)
+            )
+            .is_ok(),
+            "cwd==home 时 Downloads 普通文件仍可读"
+        );
     }
 
     /// FileEntry 新增 modified 的 camelCase 序列化契约
