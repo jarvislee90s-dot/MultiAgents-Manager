@@ -168,10 +168,7 @@ export function HealthCheckCard() {
       toast.error(formatInvokeError(e, t));
     } finally {
       setInvPending(null);
-      await qc.invalidateQueries({ queryKey: PRESET_HEALTH_KEY });
-      await qc.invalidateQueries({ queryKey: ACTIVE_PRESETS_KEY });
-      // 托盘同步（Task 16）：不变量修复 = restorePreset，托盘选中态随之翻关
-      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
+      await invalidateAfterDisposition();
     }
   };
 

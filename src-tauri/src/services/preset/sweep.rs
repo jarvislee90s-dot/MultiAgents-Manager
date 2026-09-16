@@ -41,21 +41,9 @@ pub fn execute_sweep(tool_id: &str, plan: &SweepPlan) -> (Vec<String>, Vec<Strin
     let mut failures = Vec::new();
 
     for (ext_id, kind) in &plan.disable_mam {
-        let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
-        let result = match kind.as_str() {
-            "skill" => crate::services::disable_skill_for_tool(name, tool_id),
-            "mcp" => crate::services::toggle_mcp(name, tool_id, false),
-            "plugin" => {
-                let plugin_kind = database::list_extensions()
-                    .iter()
-                    .find(|e| &e.id == ext_id)
-                    .and_then(|e| e.tags.clone())
-                    .unwrap_or_else(|| "file".to_string());
-                crate::services::toggle_plugin(name, tool_id, false, &plugin_kind)
-            }
-            _ => Ok(()),
-        };
-        match result {
+        // 停用分派统一走 toggle_ext（与 apply/restore 同源；kind 全部来自
+        // scan_tool_state 的三前缀推导，未知 kind 臂不可达，论证见 toggle_ext 注释）
+        match super::toggle_ext(ext_id, kind, tool_id, false) {
             Ok(()) => disabled.push(ext_id.clone()),
             Err(e) => failures.push(format!("{}: {}", ext_id, e)),
         }

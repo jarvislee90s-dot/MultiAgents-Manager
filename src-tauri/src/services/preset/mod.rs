@@ -63,14 +63,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, Strin
             tool_id
         ));
     }
-    let mut result = ApplyResult {
-        success: 0,
-        failures: Vec::new(),
-        conflicts: Vec::new(),
-        stashed: Vec::new(),
-        disabled: Vec::new(),
-        restored_native: Vec::new(),
-    };
+    let mut result = ApplyResult::default();
 
     // 1) 专属过滤（spec §6）：不兼容项剔除进 conflicts
     let all_items = database::get_preset_items(preset_id);

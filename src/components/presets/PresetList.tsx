@@ -21,7 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Layers, Plus, Trash2, Play, X } from "lucide-react";
-import type { PresetApplyResult, PresetRecord } from "@/types/preset";
+import type { PresetRecord } from "@/types/preset";
 import type { ActivePreset, ExtensionWithAssignments } from "@/types/extension";
 import { ToolIcon } from "@/components/common/ToolIcon";
 // review F4：工具列改后端下发（勾选状态驱动），停用工具不再出现在预设组选择中
@@ -32,7 +32,13 @@ import {
   useActivePresetsQuery,
   usePresetsQuery,
 } from "@/lib/query/queries/presets";
-import { applyPreset, deletePreset, restorePreset } from "@/lib/api/preset";
+import {
+  applyPreset,
+  applyPresetToSubagent,
+  deactivatePresetFromSubagent,
+  deletePreset,
+  restorePreset,
+} from "@/lib/api/preset";
 
 export function PresetList({
   // extensions 透传给 T7 编辑弹窗作套件列表数据源（props 契约不变）
@@ -412,11 +418,7 @@ function SubAgentPresetActions({
 
   const handleApplyToSubagent = async (subAgentId: string) => {
     try {
-      const result = await invoke<PresetApplyResult>("apply_preset_to_subagent", {
-        presetId,
-        toolId,
-        subAgentId,
-      });
+      const result = await applyPresetToSubagent(presetId, toolId, subAgentId);
       if (result.failures.length > 0) {
         toast.warning(
           t("presets.partialSuccess", { n: result.successCount, failed: result.failures.length })
@@ -433,7 +435,7 @@ function SubAgentPresetActions({
 
   const handleDeactivateFromSubagent = async (subAgentId: string) => {
     try {
-      await invoke("deactivate_preset_from_subagent", { presetId, toolId, subAgentId });
+      await deactivatePresetFromSubagent(presetId, toolId, subAgentId);
       toast.success(
         t("presets.deactivatedFromSubagent", {
           name: presetName,

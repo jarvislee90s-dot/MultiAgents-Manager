@@ -102,14 +102,24 @@ pub fn get_active_preset(tool_id: String) -> Option<String> {
 }
 
 /// 全工具激活预设（开关状态批量数据源，避免前端 N 次 invoke）
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivePreset {
+    pub tool_id: String,
+    pub preset_id: String,
+}
+
 #[tauri::command]
-pub fn list_active_presets() -> Vec<serde_json::Value> {
+pub fn list_active_presets() -> Vec<ActivePreset> {
     crate::adapter::TOOL_IDS
         .iter()
         .filter_map(|tool| {
             crate::database::get_base_snapshot(tool)
                 .and_then(|(active, _)| active)
-                .map(|p| serde_json::json!({ "toolId": tool, "presetId": p }))
+                .map(|preset_id| ActivePreset {
+                    tool_id: tool.to_string(),
+                    preset_id,
+                })
         })
         .collect()
 }

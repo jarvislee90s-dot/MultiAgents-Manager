@@ -249,6 +249,21 @@ export function ResourceByKindView() {
     const allow = `${t("resources.binding.tools")}: ${exclusiveToolsOf(extensionId)?.join(", ") ?? ""}`;
     return `${toolLabel}: ${reason ? `${reason} · ${allow}` : allow}`;
   };
+  // 门控置灰按钮（spec §6/§7.4）：能力门（kindSupported）与专属门（toolExcludedByBinding）
+  // 共用同一形态，仅 title 随原因变化——三区六处收敛到此
+  const gatedToolButton = (tool: EnabledTool, title: string) => (
+    <Button
+      key={tool.id}
+      disabled
+      variant="ghost"
+      size="sm"
+      className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
+      title={title}
+    >
+      <ToolIcon toolId={tool.id} size={14} className="mr-1" />
+      {tool.label}
+    </Button>
+  );
   // 名字排序：三态循环（默认扫描序 → 升序 → 降序），三种资源各自独立记忆
   const [sortDirs, setSortDirs] = useState<Record<ResourceKind, SortDir>>({
     skill: "none",
@@ -670,34 +685,16 @@ export function ResourceByKindView() {
                     </Button>
                     {tools.map((tool) => {
                       if (!kindSupported(tool, "skill")) {
-                        return (
-                          <Button
-                            key={tool.id}
-                            disabled
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
-                            title={`${tool.label}: ${t("resources.kindNotSupported")}`}
-                          >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
-                          </Button>
+                        return gatedToolButton(
+                          tool,
+                          `${tool.label}: ${t("resources.kindNotSupported")}`
                         );
                       }
                       // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
                       if (toolExcludedByBinding(bindingKey("skill", skill.name), tool.id)) {
-                        return (
-                          <Button
-                            key={tool.id}
-                            disabled
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
-                            title={excludedTitle(bindingKey("skill", skill.name), tool.label)}
-                          >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
-                          </Button>
+                        return gatedToolButton(
+                          tool,
+                          excludedTitle(bindingKey("skill", skill.name), tool.label)
                         );
                       }
                       const enabled = skill.enabledTools.includes(tool.id);
@@ -807,35 +804,17 @@ export function ResourceByKindView() {
                         : t("resources.allToolsOn")}
                     </Button>
                     {tools.map((tool) => {
-                      if (!tool.mcpSupported) {
-                        return (
-                          <Button
-                            key={tool.id}
-                            disabled
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
-                            title={`${tool.label}: ${t("resources.kindNotSupported")}`}
-                          >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
-                          </Button>
+                      if (!kindSupported(tool, "mcp")) {
+                        return gatedToolButton(
+                          tool,
+                          `${tool.label}: ${t("resources.kindNotSupported")}`
                         );
                       }
                       // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
                       if (toolExcludedByBinding(bindingKey("mcp", mcp.name), tool.id)) {
-                        return (
-                          <Button
-                            key={tool.id}
-                            disabled
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
-                            title={excludedTitle(bindingKey("mcp", mcp.name), tool.label)}
-                          >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
-                          </Button>
+                        return gatedToolButton(
+                          tool,
+                          excludedTitle(bindingKey("mcp", mcp.name), tool.label)
                         );
                       }
                       const enabled = mcp.enabledTools.includes(tool.id);
@@ -930,35 +909,17 @@ export function ResourceByKindView() {
                         : t("resources.allToolsOn")}
                     </Button>
                     {tools.map((tool) => {
-                      if (!tool.pluginSupported) {
-                        return (
-                          <Button
-                            key={tool.id}
-                            disabled
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
-                            title={`${tool.label}: ${t("resources.kindNotSupported")}`}
-                          >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
-                          </Button>
+                      if (!kindSupported(tool, "plugin")) {
+                        return gatedToolButton(
+                          tool,
+                          `${tool.label}: ${t("resources.kindNotSupported")}`
                         );
                       }
                       // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
                       if (toolExcludedByBinding(bindingKey("plugin", plugin.name), tool.id)) {
-                        return (
-                          <Button
-                            key={tool.id}
-                            disabled
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground h-6 px-2 text-[10px] opacity-40"
-                            title={excludedTitle(bindingKey("plugin", plugin.name), tool.label)}
-                          >
-                            <ToolIcon toolId={tool.id} size={14} className="mr-1" />
-                            {tool.label}
-                          </Button>
+                        return gatedToolButton(
+                          tool,
+                          excludedTitle(bindingKey("plugin", plugin.name), tool.label)
                         );
                       }
                       const enabled = plugin.enabledTools.includes(tool.id);

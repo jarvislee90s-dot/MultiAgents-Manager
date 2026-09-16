@@ -168,10 +168,10 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // —— 预设组 v2 读命令 fixture（与 src/tauri-mock.ts 同构）——
     case "get_preset":
       return Promise.resolve(
-        mockPresets.find((p) => p.id === (_args as { presetId?: string })?.presetId) ?? null
+        mockPresets.find((p) => p.id === (args as { presetId?: string })?.presetId) ?? null
       );
     case "get_active_preset":
-      return Promise.resolve((_args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null);
+      return Promise.resolve((args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null);
     case "list_active_presets":
       return Promise.resolve([{ toolId: "claude", presetId: "preset-1" }]);
     // (extensionId, kind, origin) 三元组，origin = "mam" | "native"（scan_tool_state 口径）

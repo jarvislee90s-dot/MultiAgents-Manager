@@ -49,18 +49,16 @@ export async function saveMcpConfig(
 }
 
 // —— 账本-磁盘对账（spec §13；命令在 src-tauri/src/commands/resource.rs）——
+// 漂移清单数据走 get_preset_health 聚合（见 lib/api/preset.ts），scan_ledger_drift
+// 的独立 TS 封装无调用方，照 checkPresetCompatibility 先例不保留（Rust 命令保留）。
 
-// 扫描 enabled 工具的 L1-L4 漂移清单（disabled 工具按名册语义排除）
-export async function scanLedgerDrift(): Promise<DriftItem[]> {
-  return await invoke<DriftItem[]>("scan_ledger_drift");
-}
 // 单条处置。mode: "a" 账本为准修磁盘 | "b" 磁盘为准回写账本；
 // 「暂不处理」= 前端收起该行（纯 state），绝不调后端
 export async function reconcileItem(item: DriftItem, mode: "a" | "b"): Promise<ReconcileOutcome> {
   return await invoke<ReconcileOutcome>("reconcile_item", { item, mode });
 }
 // 批量处置：该工具全部漂移逐条按同一 mode 处置（L4 恒 needs_manual；单条失败不中断），
-// 返回按扫描顺序的 outcome 数组（message 前缀 "ext_id @ tool_id" 可回映行）
+// 返回按扫描顺序的 outcome 数组（message 仅供人读；行键映射用结构化 extensionId/toolId 字段）
 export async function reconcileToolBatch(
   toolId: string,
   mode: "a" | "b"
