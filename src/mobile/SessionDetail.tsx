@@ -155,6 +155,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const [fileRatioH, setFileRatioH] = useState(0.5);
   // 分屏容器 ref：拖动换算的尺寸来源（SplitHandle 内取 getBoundingClientRect）
   const splitRef = useRef<HTMLDivElement>(null);
+  // 消息区 ref（滚动到底 / 加载更早的位置锚定）
+  const messageAreaRef = useRef<HTMLDivElement>(null);
+  // 待回补的滚动锚（加载更早前记录；非 null 表示下次数据落地要做位置补偿）
+  const pendingScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
   // 当前形态对应的占比与写回口（横向/纵向各记一份，来回切换不丢用户拖出的比例）
   const fileRatio = preview?.mode === "split-h" ? fileRatioH : fileRatioV;
   const setFileRatio = preview?.mode === "split-h" ? setFileRatioH : setFileRatioV;
@@ -409,6 +413,24 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     setRefreshTick((t) => t + 1);
   }, []);
 
+  // 进入详情默认滚到最底部（最新消息在下方，用户裁决 2026-09-16）；且
+  // 「加载更早消息」重拉后**保持原阅读位置**——记录重拉前的滚动高度差，
+  // 新内容（更早消息）插在顶部后把差值补回去，视线不跳。
+  // 依赖 messages（而非 limit）：只在数据真正落地后执行一次对齐
+  useEffect(() => {
+    const el = messageAreaRef.current;
+    if (!el || messages === null) return;
+    const pending = pendingScrollRef.current;
+    if (pending !== null) {
+      // 回补：新高度 - 旧高度 = 顶部插入量，往下偏移同等距离保持视线
+      const inserted = el.scrollHeight - pending.prevHeight;
+      el.scrollTop = pending.prevTop + Math.max(0, inserted);
+      pendingScrollRef.current = null;
+      return;
+    }
+    el.scrollTop = el.scrollHeight; // 首次（或手动刷新后）落到底部
+  }, [messages]);
+
   // 是否渲染折叠切换头：过程消息 + 总结模式下的「更早 assistant」；
   // 最终 assistant 总结直显正文（不给「更早的回复」头）
   const isToggleable = (m: SessionMessage) =>
@@ -502,6 +524,27 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       {messages !== null && !error && messages.length === 0 && (
         <p className="py-16 text-center text-sm text-slate-500">暂无消息</p>
       )}
+      {/* 「加载更早消息」置于列表**最上方**（2026-09-16 用户裁决）：语义是
+          「往前翻到头再加一段更早的」，与阅读方向一致；此前放在列表末尾，
+          与「更早」的空间直觉相反 */}
+      {hasLoadMore && (
+        <div className="pt-1 pb-3 text-center">
+          <button
+            type="button"
+            data-testid="load-more"
+            onClick={() => {
+              const el = messageAreaRef.current;
+              if (el) {
+                pendingScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+              }
+              setLimit((l) => Math.min(l + PAGE_LIMIT, MAX_LIMIT));
+            }}
+            className="rounded-full bg-slate-200 px-4 py-1.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+          >
+            {loading ? "加载中…" : "加载更早消息"}
+          </button>
+        </div>
+      )}
       {messages !== null && messages.length > 0 && (
         <ul className="space-y-2 pb-4">
           {messages.map((m) => {
@@ -544,18 +587,6 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             );
           })}
         </ul>
-      )}
-      {hasLoadMore && (
-        <div className="pb-4 text-center">
-          <button
-            type="button"
-            data-testid="load-more"
-            onClick={() => setLimit((l) => Math.min(l + PAGE_LIMIT, MAX_LIMIT))}
-            className="rounded-full bg-slate-200 px-4 py-1.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-          >
-            {loading ? "加载中…" : "加载更早消息"}
-          </button>
-        </div>
       )}
     </>
   );
@@ -642,6 +673,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
         >
           <div
+            ref={messageAreaRef}
             data-testid="message-area"
             data-font-scale={fontScale}
             className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pt-3"
@@ -705,6 +737,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </div>
       ) : (
         <div
+          ref={messageAreaRef}
           data-testid="message-area"
           data-font-scale={fontScale}
           className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"

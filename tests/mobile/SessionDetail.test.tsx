@@ -640,6 +640,57 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.getByTestId("message-area").getAttribute("data-font-scale")).toBe("0.5");
   });
 
+  it("进入详情默认滚到底部（最新消息）；加载更早按钮在消息列表最上方", async () => {
+    installFetch();
+    routes.messages = Array.from({ length: 200 }, (_, i) =>
+      msg({ seq: i, kind: "user", content: `m${i}` })
+    );
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("m199");
+
+    // 进入即滚到底：jsdom 无布局引擎（scrollHeight 恒 0），注入有限值后
+    // 触发一次手动刷新（等价于「数据到达」）让滚动 effect 有可观测量
+    const area = screen.getByTestId("message-area");
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    fireEvent.click(screen.getByTestId("detail-refresh"));
+    await waitFor(() => expect(area.scrollTop).toBe(5000));
+
+    // 「加载更早消息」应排在消息列表**之前**（用户往上翻到头才点它）
+    const list = area.querySelector("ul");
+    const loadMore = screen.getByTestId("load-more");
+    expect(list).toBeTruthy();
+    expect(
+      list!.compareDocumentPosition(loadMore) & Node.DOCUMENT_POSITION_PRECEDING
+    ).toBeTruthy();
+  }, 15000);
+
+  it("点加载更早后保持阅读位置（顶部插入量补偿，视线不跳）", async () => {
+    installFetch();
+    routes.messages = Array.from({ length: 200 }, (_, i) =>
+      msg({ seq: i, kind: "user", content: `m${i}` })
+    );
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("m199");
+    const area = screen.getByTestId("message-area");
+    // 模拟：当前滚动位置 1000，内容总高 5000
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    area.scrollTop = 1000;
+    // 点「加载更早」→ 记录锚点；随后重拉返回更多内容（总高变 8000）
+    fireEvent.click(screen.getByTestId("load-more"));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=400"))
+      ).toBe(true);
+    });
+    Object.defineProperty(area, "scrollHeight", { value: 8000, configurable: true });
+    // 再触发一次数据落地（等价于 limit=400 的响应到达）
+    fireEvent.click(screen.getByTestId("detail-refresh"));
+    await waitFor(() => {
+      // 补偿：1000 + (8000 - 5000) = 4000（视线停在原内容处）
+      expect(area.scrollTop).toBe(4000);
+    });
+  }, 15000);
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];
