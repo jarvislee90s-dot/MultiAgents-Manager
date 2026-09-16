@@ -40,7 +40,8 @@ export default function PreviewModeSwitcher({
         onClick={() => onChange("split")}
         className={cls(mode === "split")}
       >
-        <Columns2 size={14} />
+        {/* 上下分屏 = 中间一条横切线 = 上下两格 → Rows2 */}
+        <Rows2 size={14} />
       </button>
       <button
         type="button"
@@ -50,7 +51,8 @@ export default function PreviewModeSwitcher({
         onClick={() => onChange("split-h")}
         className={cls(mode === "split-h")}
       >
-        <Rows2 size={14} />
+        {/* 左右分屏 = 中间一条竖切线 = 左右两格 → Columns2 */}
+        <Columns2 size={14} />
       </button>
       <button
         type="button"

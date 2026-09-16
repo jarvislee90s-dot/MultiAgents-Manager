@@ -8,13 +8,14 @@
 // - 「加载更早消息」按钮以更大 limit 整页重拉（Task 8 裁决：M3 用按钮替代无限
 //   滚动，YAGNI——避免滚动位置管理复杂度）；
 // - 不自动轮询（M3 范围裁决：SSE transition 不驱动详情页），页头刷新按钮手动重拉。
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { ArrowLeft, ChevronDown, ChevronRight, RotateCw } from "lucide-react";
 import FilePreview from "./FilePreview";
 import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
+import SplitHandle from "./SplitHandle";
 import { ApiError, fetchSessionFiles, fetchSessionMessages, type SessionMessage } from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
 import type { Session } from "@/types/session";
@@ -124,6 +125,15 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 该会话涉及的文件路径（/session-files 提取结果，链接化数据源）
   const [files, setFiles] = useState<Set<string>>(new Set());
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  // 文件栏占比（可拖分隔条，需求 2026-09-16）：两形态各自保留用户拖出的比例，
+  // 初值 0.5（对半分，与旧版 h-1/2 / w-1/2 观感一致）
+  const [fileRatioV, setFileRatioV] = useState(0.5);
+  const [fileRatioH, setFileRatioH] = useState(0.5);
+  // 分屏容器 ref：拖动换算的尺寸来源（SplitHandle 内取 getBoundingClientRect）
+  const splitRef = useRef<HTMLDivElement>(null);
+  // 当前形态对应的占比与写回口（横向/纵向各记一份，来回切换不丢用户拖出的比例）
+  const fileRatio = preview?.mode === "split-h" ? fileRatioH : fileRatioV;
+  const setFileRatio = preview?.mode === "split-h" ? setFileRatioH : setFileRatioV;
 
   // 总结模式（P9）：会话已结束/空闲 → 只显最后 assistant 总结，过程消息自动折叠
   const isSummary = session.status === "idle" || session.status === "finished";
@@ -524,19 +534,28 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       </header>
 
       {/* split = 上对话下文件（纵向）；split-h = 左对话右文件（横向，需求 1）；
-          fullscreen = 全屏浮层。三态互切，关闭回原位 */}
+          fullscreen = 全屏浮层。三态互切，关闭回原位；分屏两区之间有可拖分隔条 */}
       {preview?.mode === "split" || preview?.mode === "split-h" ? (
         <div
+          ref={splitRef}
           data-testid="split-container"
           data-split={preview.mode}
           className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
         >
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pt-3">{messageArea}</div>
+          <SplitHandle
+            orientation={preview.mode === "split-h" ? "horizontal" : "vertical"}
+            ratio={fileRatio}
+            onRatioChange={setFileRatio}
+            containerRef={splitRef}
+          />
           <div
-            className={
+            data-testid="split-file-pane"
+            className="shrink-0 overflow-hidden"
+            style={
               preview.mode === "split-h"
-                ? "w-1/2 shrink-0 overflow-hidden border-l border-slate-200 dark:border-slate-800"
-                : "h-1/2 shrink-0 overflow-hidden border-t border-slate-200 dark:border-slate-800"
+                ? { width: `${fileRatio * 100}%` }
+                : { height: `${fileRatio * 100}%` }
             }
           >
             <FilePreview

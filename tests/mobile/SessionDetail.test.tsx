@@ -368,6 +368,81 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.queryByTestId("split-container")).toBeNull();
   });
 
+  it("图标语义不得颠倒：split 按钮画上下两格（rows-2）、split-h 画左右两格（columns-2）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    const btn = (id: string) => screen.getByTestId(id);
+    // SVG 的 className 是 SVGAnimatedString，取 class 属性字符串
+    const iconClass = (id: string) =>
+      btn(id).querySelector("svg")!.getAttribute("class") ?? "";
+    // 上下分屏（split）= 上下两格 → rows-2
+    expect(iconClass("preview-toggle-split")).toContain("lucide-rows-2");
+    // 左右分屏（split-h）= 左右两格 → columns-2
+    expect(iconClass("preview-toggle-split-h")).toContain("lucide-columns-2");
+  });
+
+  it("需求：分屏分隔条可拖动——横向拖动改变文件栏宽度，纵向拖动改变高度", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+
+    // ---- 横向分屏：拖分隔条 → 文件栏宽度变化（百分比） ----
+    fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+    const container = screen.getByTestId("split-container");
+    // jsdom 无布局引擎：注入容器矩形（宽 400）使拖动换算可算
+    container.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 400, height: 600, right: 400, bottom: 600 }) as DOMRect;
+    const handleH = screen.getByTestId("split-handle");
+    const filePane = screen.getByTestId("split-file-pane");
+    const initial = parseFloat(filePane.style.width);
+    fireEvent.pointerDown(handleH, { clientX: 300 });
+    fireEvent.pointerMove(window, { clientX: 320 });
+    fireEvent.pointerUp(window);
+    const wider = parseFloat(filePane.style.width);
+    // 向右拖 20px / 容器宽 400 → 文件栏宽度增加 5 个百分点
+    expect(wider).toBeCloseTo(initial + 5, 1);
+    // 收起方向：向左拖回（文件栏变窄）
+    fireEvent.pointerDown(handleH, { clientX: 320 });
+    fireEvent.pointerMove(window, { clientX: 260 });
+    fireEvent.pointerUp(window);
+    expect(parseFloat(filePane.style.width)).toBeCloseTo(wider - 15, 1);
+
+    // ---- 纵向分屏：拖分隔条 → 文件栏高度变化 ----
+    fireEvent.click(screen.getByTestId("preview-toggle-split"));
+    const containerV = screen.getByTestId("split-container");
+    containerV.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 400, height: 800, right: 400, bottom: 800 }) as DOMRect;
+    const handleV = screen.getByTestId("split-handle");
+    const filePaneV = screen.getByTestId("split-file-pane");
+    const h0 = parseFloat(filePaneV.style.height);
+    fireEvent.pointerDown(handleV, { clientY: 400 });
+    fireEvent.pointerMove(window, { clientY: 300 });
+    fireEvent.pointerUp(window);
+    // 向上拖 100px / 容器高 800 → 文件栏高度增加 12.5 个百分点
+    expect(parseFloat(filePaneV.style.height)).toBeCloseTo(h0 + 12.5, 1);
+
+    // ---- 拖动不得越界（钳制 15%–85%） ----
+    fireEvent.pointerDown(handleV, { clientY: 0 });
+    fireEvent.pointerMove(window, { clientY: 100000 });
+    fireEvent.pointerUp(window);
+    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
+    fireEvent.pointerDown(handleV, { clientY: 800 });
+    fireEvent.pointerMove(window, { clientY: -100000 });
+    fireEvent.pointerUp(window);
+    expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
+  });
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];
