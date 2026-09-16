@@ -132,9 +132,9 @@ describe("PresetList（v2 双分区 + 预设×工具开关）", () => {
     expect(within(universalSection).getByText("通用组合")).toBeInTheDocument();
     // 私有区：组头 = 绑定工具名，预设卡片落在该组容器内
     const privateSection = screen.getByText("工具私有预设").closest("section")!;
-    // "Codex CLI" 出现 3 处（组头 div + 开关行包装 span + 开关行标签 span），取组头 div
+    // "Codex" 出现 2 处（组头 div + 开关行标签 span；显示名经 TOOL_LABEL_OVERRIDES 覆盖）（组头 div + 开关行包装 span + 开关行标签 span），取组头 div
     const groupHeader = within(privateSection)
-      .getAllByText("Codex CLI")
+      .getAllByText("Codex")
       .find((el) => el.tagName === "DIV")!;
     const group = groupHeader.parentElement!;
     expect(within(group).getByText("Codex 专属")).toBeInTheDocument();
@@ -161,9 +161,9 @@ describe("PresetList（v2 双分区 + 预设×工具开关）", () => {
     });
     // 通用预设 × claude = 激活 → checked；× codex = 未激活 → unchecked
     expect(switchFor("通用组合", "Claude Code")).toHaveAttribute("data-state", "checked");
-    expect(switchFor("通用组合", "Codex CLI")).toHaveAttribute("data-state", "unchecked");
+    expect(switchFor("通用组合", "Codex")).toHaveAttribute("data-state", "unchecked");
     // 私有预设 × 绑定工具 = 激活 → checked；非绑定工具不渲染开关（仅 claude/codex 两枚）
-    expect(switchFor("Codex 专属", "Codex CLI")).toHaveAttribute("data-state", "checked");
+    expect(switchFor("Codex 专属", "Codex")).toHaveAttribute("data-state", "checked");
   });
 
   it("能力门控：dsh 全能力 false → 未激活 mcp 开关 disabled 且 unchecked；已激活开关保持可操作（restore 路径）", async () => {
@@ -180,7 +180,7 @@ describe("PresetList（v2 双分区 + 预设×工具开关）", () => {
       activePresets: [{ toolId: "dsh", presetId: "p-mcp" }],
     });
     // 未激活组合不存在（p-mcp 仅在 dsh 上激活），故门控开关 = checked + 可操作
-    const activeGated = switchFor("MCP 组合", "Dsh");
+    const activeGated = switchFor("MCP 组合", "DSH");
     expect(activeGated).toHaveAttribute("data-state", "checked");
     expect(activeGated).not.toBeDisabled();
     // 支持该类型的 claude 开关不受门控影响（未激活 → unchecked + 可操作）
@@ -201,10 +201,10 @@ describe("PresetList（v2 双分区 + 预设×工具开关）", () => {
       activePresets: [],
     });
     // 未激活 + 门控 → disabled 且 unchecked，包装 span title = 「工具名: 暂不支持」（zh）
-    const gated = switchFor("MCP 组合", "Dsh");
+    const gated = switchFor("MCP 组合", "DSH");
     expect(gated).toBeDisabled();
     expect(gated).toHaveAttribute("data-state", "unchecked");
-    expect(screen.getByText("Dsh").parentElement).toHaveAttribute("title", "Dsh: 暂不支持");
+    expect(screen.getByText("DSH").parentElement).toHaveAttribute("title", "DSH: 暂不支持");
     // 支持该类型的 claude 开关不受影响
     expect(switchFor("MCP 组合", "Claude Code")).not.toBeDisabled();
   });
