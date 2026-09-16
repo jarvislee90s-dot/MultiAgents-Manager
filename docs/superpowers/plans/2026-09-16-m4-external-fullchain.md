@@ -35,7 +35,7 @@
 **Interfaces:**
 - Produces: `server::SseRegistry::register(device:&str)->(u64, oneshot::Receiver<()>)`、`unregister(device,id)`、`disconnect_device(device)->usize`、`disconnect_all()->usize`、`has(device)->bool`；`RemoteState.sse_registry: Arc<SseRegistry>`（Task 7 在线口径、Task 8 吊销接线消费）。
 
-- [ ] **Step 1: 写失败测试（注册表单元 + 吊销断流集成）**
+- [x] **Step 1: 写失败测试（注册表单元 + 吊销断流集成）**
 
 在 `server.rs` 的 `mod tests` 追加（沿用既有 `test_state()` 构造，先给它加字段——本步先写测试，编译失败即红灯）：
 
@@ -117,12 +117,12 @@ async fn sse_stream_ends_when_device_disconnected() {
 
 注意：`test_state()` 需补 `sse_registry: Arc::new(SseRegistry::default())`（本任务 Step 3 一并加）。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test sse_`
 Expected: 编译失败（`SseRegistry` 未定义）——即红灯。
 
-- [ ] **Step 3: 实现 SseRegistry + events 接线**
+- [x] **Step 3: 实现 SseRegistry + events 接线**
 
 `server.rs` 新增（放在 `RemoteState` 定义之前）：
 
@@ -270,12 +270,12 @@ pub async fn events(
     STATE.sse_registry.disconnect_all();
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test sse_ && cargo test remote`
 Expected: 新增 3 测试全过，既有 remote 测试零回归。
 
-- [ ] **Step 5: 门禁 + 提交**
+- [x] **Step 5: 门禁 + 提交**
 
 Run: `cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo fmt`
 ```bash
@@ -296,7 +296,7 @@ git commit -m "feat(m4-t0a): SSE 连接注册表——吊销/停止即时断连�
 - Consumes: 既有 `acked` state / `toast`（sonner）/ i18n。
 - Produces: i18n 键 `settings.remote.tlsAckHint`（常驻说明）、`tlsAckNoRevoke`（取消时 toast）、`tlsAckRevokeByRebind`（toast 第二句）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/settings/remoteSection.test.tsx` 追加（沿用文件头既有 `invokeMock` / status 夹具模式；sonner mock 必须放**文件顶部**——`vi.mock` 会被提升，写在 `it()` 内引用局部变量会因 hoisting 报错）：
 
@@ -333,12 +333,12 @@ it("tls ack: uncheck snaps back with toast, stays checked", async () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run tests/settings/remoteSection.test.tsx`
 Expected: FAIL——`cannot be undone` 文案不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `zh.json` / `en.json` 的 `settings.remote` 追加（两文件键序一致）：
 
@@ -377,12 +377,12 @@ Expected: FAIL——`cannot be undone` 文案不存在。
 )}
 ```
 
-- [ ] **Step 4: 跑测试 + 门禁**
+- [x] **Step 4: 跑测试 + 门禁**
 
 Run: `pnpm vitest run tests/settings/remoteSection.test.tsx && pnpm check`
 Expected: 全过（既有用例零回归，i18n 键成对）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/components/settings/RemoteSection.tsx src/i18n/locales/zh.json src/i18n/locales/en.json tests/settings/remoteSection.test.tsx
@@ -402,7 +402,7 @@ git commit -m "feat(m4-t0b): TLS 确认撤回文案——取消勾选回弹+toas
 - Produces: `events::emit_ui(event: &str, payload: impl serde::Serialize + Clone)`（无句柄时静默——单测/无窗环境安全）；`events::audit(action: &str, detail: &str)`（`log::info!(target: "remote_audit", ...)`，T2e 审计留痕唯一出口）；`lib.rs::APP_HANDLE: OnceLock<tauri::AppHandle>`。
 - Consumes（后续）：Task 5 隧道地址通知、Task 7 配对请求通知、Task 11 托盘。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `events.rs` 直接实现+测试一体（薄壳函数，红绿同文件）：
 
@@ -448,7 +448,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 接线（等效"跑通"）**
+- [x] **Step 2: 接线（等效"跑通"）**
 
 `lib.rs`：`setup` 闭包内、`crate::remote::restore_on_launch();` **之前**加：
 
@@ -487,12 +487,12 @@ pub fn emit_ui(event: &str, payload: impl serde::Serialize + Clone) {
 
 `mod.rs` 加 `pub mod events;`。
 
-- [ ] **Step 3: 跑测试 + 门禁**
+- [x] **Step 3: 跑测试 + 门禁**
 
 Run: `cd src-tauri && cargo test events && cargo clippy --all-targets -- -D warnings && cargo fmt`
 Expected: 2 测试过，clippy 零告警。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src-tauri/src/remote/events.rs src-tauri/src/remote/mod.rs src-tauri/src/lib.rs
@@ -511,7 +511,7 @@ git commit -m "feat(m4): 全局 AppHandle + emit_ui/audit 事件出口基建（�
 - Produces: `tunnel::KEY_CHANNEL_VALUE_OFF/QUICK/NAMED`（"off"/"quick"/"named"）；`tunnel::parse_channel(Option<&str>) -> Option<&'static str>`（纯函数）；`tunnel::download_url_for() -> Result<String, String>`（按平台/架构纯函数）；`tunnel::cloudflared_path() -> std::path::PathBuf`（`~/.mam/bin/cloudflared[.exe]`）；`tunnel::ensure_cloudflared(dl: impl Fn(&str, &Path) -> Result<(), String>) -> Result<PathBuf, String>`（注入下载器，本体只管存在性判定+解压落位）。
 - Consumes: `mod.rs` 新增 `pub const KEY_CHANNEL: &str = "remote.channel";`、`pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tunnel.rs` 尾部 `mod tests`：
 
@@ -574,12 +574,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test tunnel`
 Expected: 编译失败（模块为空）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `tunnel.rs` 主体（进程管理在 Task 5 追加，本文件先立获取层）：
 
@@ -699,12 +699,12 @@ pub const KEY_CHANNEL: &str = "remote.channel";
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
 ```
 
-- [ ] **Step 4: 跑测试确认通过 + 门禁**
+- [x] **Step 4: 跑测试确认通过 + 门禁**
 
 Run: `cd src-tauri && cargo test tunnel && cargo clippy --all-targets -- -D warnings && cargo fmt`
 Expected: 3 测试过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/remote/tunnel.rs src-tauri/src/remote/mod.rs
@@ -723,7 +723,7 @@ git commit -m "feat(m4-t1d): cloudflared 获取层——三值通道解析/按�
 - Consumes: Task 3 `events::emit_ui`、Task 4 获取层。
 - Produces: `tunnel::TunnelStatus { mode, url: Option<String>, error: Option<String> }`（`tunnel::snapshot() -> TunnelStatus` 读全局快照）；`tunnel::start_if_configured(port: u16)` / `tunnel::stop()`；`tunnel::restart_if_running(port)`；纯函数 `parse_quick_url(&str) -> Option<String>`、`backoff_ms(u32) -> Option<u64>`、`tunnel_address_entry(url:&str) -> serde_json::Value`。IPC：`remote_set_channel(channel: String, token: Option<String>) -> Result<(), String>`。status 新键：`channel`/`tunnelUrl`/`tunnelError`；`addresses` 条目新增 `kind` 字段（"tunnel"|"lan"，隧道条目恒首位 primary）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tunnel.rs` tests 追加：
 
@@ -792,12 +792,12 @@ git commit -m "feat(m4-t1d): cloudflared 获取层——三值通道解析/按�
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test tunnel && cargo test pair_url`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `tunnel.rs` 追加进程管理层：
 
@@ -1099,12 +1099,12 @@ pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), 
 
 7. `remote_toggle` 成功后 emit：`toggle_core` 两分支成功路径后（`remote_toggle` 函数体内 `toggle_core(...)` 返回 Ok 时）`events::emit_ui("remote-changed", serde_json::json!({"enabled": enabled}));`
 
-- [ ] **Step 4: 跑测试确认通过 + 门禁**
+- [x] **Step 4: 跑测试确认通过 + 门禁**
 
 Run: `cd src-tauri && cargo test tunnel && cargo test pair_url && cargo test address_entries_with_tunnel && cargo clippy --all-targets -- -D warnings && cargo fmt`
 Expected: 全过；`dummy_child` 占位已随修正删除。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/remote/tunnel.rs src-tauri/src/remote/mod.rs
@@ -1126,7 +1126,7 @@ git commit -m "feat(m4-t1bc): 隧道进程管理——quick/named 双模式 spaw
 - Consumes: Task 5 的 `remote_set_channel` / status 新键（channel/tunnelUrl/tunnelError/addresses[].kind）。
 - Produces: `remote.ts` 的 `RemoteStatus.channel: string`、`tunnelUrl: string | null`、`tunnelError: string | null`、`RemoteAddressEntry.kind?: "tunnel" | "lan"`；`remoteSetChannel(channel, token?)`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```tsx
 // M4 T1a：通道区块三选一 + named 需 Token + 隧道地址条目徽标
@@ -1163,12 +1163,12 @@ it("channel block: renders selector, saves via remote_set_channel, tunnel badge"
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run tests/settings/remoteSection.test.tsx`
 Expected: FAIL（无 external channel 文案）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `remote.ts` 类型扩展 + 新函数：
 
@@ -1293,12 +1293,12 @@ i18n 新键（zh / en 成对，共 10 键）：`channel`外部通道/External Ch
 
 `tauri-mock.ts`：switch 内 `case "remote_set_channel": return Promise.resolve(null);`（default 已兜 null，显式 case 便于 Playwright 场景扩展）。
 
-- [ ] **Step 4: 跑测试 + 门禁**
+- [x] **Step 4: 跑测试 + 门禁**
 
 Run: `pnpm vitest run tests/settings/remoteSection.test.tsx && pnpm check && pnpm build:mobile`
 Expected: 全过（既有用例零回归）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/lib/api/remote.ts src/components/settings/RemoteSection.tsx src/i18n/locales/zh.json src/i18n/locales/en.json src/tauri-mock.ts tests/settings/remoteSection.test.tsx
@@ -1323,7 +1323,7 @@ git commit -m "feat(m4-t1a): 设置页外部通道区块（三选一+Token 输�
 - Produces（HTTP，均不过闸）：`POST /m/api/v1/pair/request {name}` → `200 {requestId,expiresAt}` | `429 {error:"queue_full"|"ip_busy"}`；`POST /m/api/v1/pair/poll {requestId}` → `200 {status:"pending"|"approved"|"expired", expiresAt}`（approved 附 Set-Cookie）；`POST /m/api/v1/pair/confirm {requestId,code}` → `200 {ok,error?,triesLeft?}`（ok 附 Set-Cookie；error ∈ wrong/exhausted/expired/not_found/cap_full）。
 - Consumes: Task 1 `sse_registry`（吊销断连）、Task 3 `events::emit_ui/audit`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `approval.rs` 尾部：
 
@@ -1541,12 +1541,12 @@ mod tests {
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test approval && cargo test online_ && cargo test max_devices`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `approval.rs`：
 
@@ -2003,12 +2003,12 @@ pub fn remote_revoke_all_devices() -> Result<usize, String> {
 
 `lib.rs` generate_handler 追加：`remote::remote_pending_requests, remote::remote_approve_request, remote::remote_devices, remote::remote_revoke_device, remote::remote_revoke_all_devices, remote::remote_set_channel,`（set_channel 属 Task 5，此处一并注册）。
 
-- [ ] **Step 4: 跑测试确认通过 + 门禁**
+- [x] **Step 4: 跑测试确认通过 + 门禁**
 
 Run: `cd src-tauri && cargo test approval && cargo test online_ && cargo test max_devices && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt`
 Expected: 全部（含既有 gate/pair/server 回归）绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/remote/approval.rs src-tauri/src/remote/pairing.rs src-tauri/src/remote/gate.rs src-tauri/src/remote/server.rs src-tauri/src/remote/api.rs src-tauri/src/remote/mod.rs src-tauri/src/lib.rs
@@ -2032,7 +2032,7 @@ git commit -m "feat(m4-t2): 审批配对后端——队列状态机(TTL/上限/�
 - Consumes: Task 7 全部命令 + 事件（`remote-pair-request` / `remote-roster-changed`）。
 - Produces: `remote.ts` 的 `remotePendingRequests()/remoteApproveRequest(id)/remoteDevices()/remoteRevokeDevice(id)/remoteRevokeAllDevices()` + `PendingRequest`/`RemoteDevice` 类型；`useRemoteEvents()` hook（系统通知/剪贴板/报错 toast 路由）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```tsx
 // M4 T2：待审批面板（4 位码可见 + 批准）与花名册（在线点 + 吊销）
@@ -2064,11 +2064,11 @@ it("pairing panel: pending request shows code, approve works; roster revokes", a
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run tests/settings/remoteSection.test.tsx` → FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `remote.ts` 追加：
 
@@ -2193,12 +2193,12 @@ export function useRemoteEvents() {
 
 i18n 键（zh/en 成对，命名 `settings.remote.pending*` / `roster*`：pendingTitle 待审批设备/Pending devices、pendingEmpty 暂无请求/No pending requests、pendingApprove 批准/Approve、rosterTitle 设备花名册/Device roster、rosterEmpty 尚无已配对设备/No paired devices、rosterRevoke 吊销/Revoke、rosterRevokeAll 全部吊销/Revoke all、rosterOnline 在线/Online、rosterOffline 离线/Offline、rosterMax 设备上限/Device limit、pairNotifyTitle/body 等——以实现时实际文案为准成对补齐）。
 
-- [ ] **Step 4: 跑测试 + 门禁**
+- [x] **Step 4: 跑测试 + 门禁**
 
 Run: `pnpm vitest run tests/settings/remoteSection.test.tsx && pnpm check`
 Expected: 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/lib/api/remote.ts src/components/settings/RemoteSection.tsx src/hooks/useRemoteEvents.ts src/main.tsx src/i18n/locales/zh.json src/i18n/locales/en.json tests/settings/remoteSection.test.tsx
@@ -2218,7 +2218,7 @@ git commit -m "feat(m4-t2): 桌面配对面板（待审批+4位码+批准）与�
 - Consumes: Task 7 三端点。
 - Produces: `api.ts` 的 `requestPairing(name): Promise<{requestId; expiresAt}>`（429 抛 `ApiError(429, "queue_full"|"ip_busy")`）、`pollPairing(id): Promise<"pending"|"approved"|"expired">`（approved 时服务端已 Set-Cookie）、`confirmPairing(id, code): Promise<{ok: boolean; error?: string; triesLeft?: number}>`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/mobile/api.test.ts` 追加（沿用文件内 fetch mock 先例）：
 
@@ -2253,11 +2253,11 @@ it("confirmPairing surfaces wrong + triesLeft", async () => {
 
 `tests/mobile/` 新建 `PairRequest.test.tsx`（渲染 PairPage，mock `./api`，走请求→pending→approved 状态机断言 onPaired 调用）。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run tests/mobile/api.test.ts tests/mobile/PairRequest.test.tsx` → FAIL（函数不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `api.ts` 追加：
 
@@ -2353,12 +2353,12 @@ useEffect(() => {
 
 渲染：`idle` 态在 token 表单下加分隔线 + 设备名输入 + 「请求接入」按钮 + `msg` 提示；`waiting` 态显示「等待桌面批准…（5 分钟内有效）」+ 4 位码输入 + 提交按钮 + `msg`。（全部沿用 PairPage 既有的浅色/dark 双态类名风格。）
 
-- [ ] **Step 4: 跑测试 + 门禁**
+- [x] **Step 4: 跑测试 + 门禁**
 
 Run: `pnpm vitest run tests/mobile/ && pnpm check && pnpm build:mobile`
 Expected: 全过（既有 App/PairPage 用例零回归）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mobile/api.ts src/mobile/PairPage.tsx tests/mobile/api.test.ts tests/mobile/PairRequest.test.tsx
@@ -2380,7 +2380,7 @@ git commit -m "feat(m4-t2): 移动端请求接入流——设备名+请求/轮�
 - Produces: `power::acquire()/release()/restore_on_launch()`；纯核 `power::should_acquire(setting: Option<String>) -> bool`（默认开）、`power::PowerCore<O: PowerOps>`（注入式状态机，可测）；KEY_KEEPALIVE="remote.keepalive"。
 - Consumes: `start_server`/`stop_server` 生命周期。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `power.rs` 一体（先写测试后补实现同文件）：
 
@@ -2428,11 +2428,11 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test power` → 编译失败。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 // 电源保活（M4 T3，宪法 D13）：远程开启期间阻止系统空闲睡眠与磁盘休眠（屏幕可熄）。
@@ -2673,12 +2673,12 @@ fn start_server() -> Result<(), String> {
 
 （`keepalive` 态 = `getSetting("remote.keepalive") !== "false"`；`changeKeepalive` = `setSetting("remote.keepalive", v ? "true" : "false")` + refresh。）i18n：`keepalive` 电源保活/Keep awake、`keepaliveHint`「远程开启期间阻止系统与磁盘休眠（屏幕可熄）。macOS 合盖仍会休眠；电池模式下 macOS 需接电源才完整生效、Windows 临界电量会强制睡眠」/英文对照。
 
-- [ ] **Step 4: 跑测试 + 门禁**
+- [x] **Step 4: 跑测试 + 门禁**
 
 Run: `cd src-tauri && cargo test power && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt && cd .. && pnpm check`
 Expected: 全绿（Windows 分支代码在 mac 编译门下至少语法过——CI windows job 兜底真编译）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/remote/power.rs src-tauri/src/remote/mod.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src/components/settings/RemoteSection.tsx src/i18n/locales/zh.json src/i18n/locales/en.json
@@ -2702,7 +2702,7 @@ git commit -m "feat(m4-t3): 电源保活——caffeinate/执行状态+磁盘休�
 - Produces: `mod::tray_display() -> (bool, String)`（enabled + 对外地址 = 隧道优先）；托盘菜单项 id `"remote"`（CheckMenuItem，勾选态=远程开关）/`"remote-addr"`（地址展示项，点击经事件复制）；命令 `update_tray_menu(show_text, quit_text, pet_text, remote_on_text)`。
 - Consumes: Task 3 emit、Task 5 tunnel snapshot、Task 8 useRemoteEvents。
 
-- [ ] **Step 1: 写失败测试（托盘展示纯核）**
+- [x] **Step 1: 写失败测试（托盘展示纯核）**
 
 `mod.rs` tests：
 
@@ -2716,11 +2716,11 @@ git commit -m "feat(m4-t3): 电源保活——caffeinate/执行状态+磁盘休�
     }
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test tray_display` → 编译失败。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `mod.rs`：
 
@@ -2861,12 +2861,12 @@ fn update_tray_menu(
 
 `tauri-mock.ts`：`case "update_tray_menu":` 兼容新旧参（多余参数忽略即可，无返回）。
 
-- [ ] **Step 4: 跑测试 + 门禁**
+- [x] **Step 4: 跑测试 + 门禁**
 
 Run: `cd src-tauri && cargo test tray_display && cargo clippy --all-targets -- -D warnings && cargo fmt && cd .. && pnpm check && pnpm test`
 Expected: 全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src-tauri/src/remote/mod.rs src-tauri/src/plugins/system_tray.rs src-tauri/src/lib.rs src/pages/home.tsx src/components/common/language-toggle.tsx src/tauri-mock.ts src/i18n/locales/zh.json src/i18n/locales/en.json
@@ -2889,7 +2889,7 @@ git commit -m "feat(m4-t4): 托盘远程入口——开关勾选项+地址展示
 - **OS 真值探针**：bash——`lsof -i :9420`（服务在听）、`pgrep caffeinate` / `pmset -g assertions`（电源锁）、`pgrep cloudflared`（隧道进程）、Playwright 网络日志（Set-Cookie Max-Age）。
 - **环境**：`pnpm tauri:dev` 后台起（验收前 `cargo build` 已绿）；**数据契约**：验收用设备全部以「JARVIS-E2E-<场景>」命名，结束统一吊销清账，不污染真实花名册。
 
-- [ ] **Step 1: 全量门禁（顺序执行，任何一步失败停下修复）**
+- [x] **Step 1: 全量门禁（顺序执行，任何一步失败停下修复）**
 
 ```bash
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
@@ -2898,7 +2898,7 @@ cd .. && pnpm build:mobile && pnpm check && pnpm test
 
 Expected: 全绿；记录各套数字（Rust 用例数 / 前端用例数 / 双端构建产物）写入验收记录。
 
-- [ ] **Step 2: 端到端场景执行（S1–S14，逐项记录通过/失败与证据）**
+- [x] **Step 2: 端到端场景执行（S1–S14，逐项记录通过/失败与证据）**
 
 外网真机才能验的项标注【人工】，其余全部由执行 agent 驱动（computer-use + Playwright + bash）。
 
@@ -2922,17 +2922,17 @@ Expected: 全绿；记录各套数字（Rust 用例数 / 前端用例数 / 双�
 
 **记录契约**：每个场景在验收记录里落一行——场景号 / 结果 / 证据（截图文件名 / Playwright 断言输出 / bash 探针输出）。失败的场景修完重跑该场景及其下游。
 
-- [ ] **Step 3: 写验收记录**
+- [x] **Step 3: 写验收记录**
 
 `docs/release-notes/m4-acceptance.md`（对照 `m3-acceptance.md` 结构）：分支/基线（`feat/m4-external-fullchain`，基于 M3 合并后 main）、逐任务交付表（T0-T4 → commit hash）、自动化门禁数字、**S1-S14 逐项结果与证据**、人工项清单（外网蜂窝/彻夜保活/Windows 实机/named tunnel）、已知限制登记（named 隧道 url 解析失败时设置页显示「以 Cloudflare 面板为准」、审批队列重启即清、托盘 AX 不可达时坐标驱动）。
 
-- [ ] **Step 4: 更新一期 v6 spec（双处）**
+- [x] **Step 4: 更新一期 v6 spec（双处）**
 
 `docs/superpowers/specs/2026-09-12-remote-access-level1-design.md`：
 1. **P10 段加 D17 移期标注**——v6 原文仍把 ntfy/Bark 列为 M4 交付（「页面关：系统级推送…同期交付」），随 M4 收官按宪法 D17 落修订注记（「2026-09-16：页面关系统推送随 D17 移至二期与 APK 同期交付，一期『2s 提醒』以页面开时 SSE 为口径」），正文其余不动（稳定版原则）；
 2. **附录进度表**——B2/B4/B5/C3 行状态更新（C3 标注移二期）、进度基线行补 M3 ✅ + M4 状态、「APK（P12/C4）已移二期」口径复核。
 
-- [ ] **Step 5: 提交 + 提 PR**
+- [x] **Step 5: 提交 + 提 PR**
 
 ```bash
 git add docs/release-notes/m4-acceptance.md docs/superpowers/specs/2026-09-12-remote-access-level1-design.md
