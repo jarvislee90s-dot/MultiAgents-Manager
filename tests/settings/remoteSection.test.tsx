@@ -167,6 +167,43 @@ describe("RemoteSection TLS 确认不可在线撤回（M4 T0b）", () => {
   });
 });
 
+// M4 T2：待审批面板（4 位码可见 + 批准）与花名册（在线点 + 吊销）
+describe("RemoteSection 配对面板与设备花名册（M4 T2）", () => {
+  it("pairing panel: pending request shows code, approve works; roster revokes", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "remote_status") return Promise.resolve({ ...lanStatus, enabled: true });
+      if (cmd === "get_setting") return Promise.resolve(null);
+      if (cmd === "remote_pending_requests")
+        return Promise.resolve([
+          {
+            id: "r0",
+            name: "我的手机",
+            ip: "192.168.1.9",
+            ua: "Mobile Safari",
+            code: "2468",
+            expiresAt: Date.now() + 300_000,
+          },
+        ]);
+      if (cmd === "remote_devices")
+        return Promise.resolve([
+          { id: "d1", name: "我的手机", firstPairedAt: 1, lastSeenAt: Date.now(), online: true },
+          { id: "d2", name: "", firstPairedAt: 2, lastSeenAt: 1, online: false },
+        ]);
+      return Promise.resolve(null);
+    });
+    render(<RemoteSection />);
+    // 待审批：设备名 + 来源 IP + 4 位码 + 批准按钮
+    expect(await screen.findByText("我的手机")).toBeInTheDocument();
+    expect(screen.getByText("2468")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("remote_approve_request", { id: "r0" }));
+    // 花名册：在线点 + 单独吊销 + 全部吊销
+    expect(await screen.findByRole("button", { name: /revoke all/i })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /^revoke$/i })[0]);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("remote_revoke_device", { id: "d1" }));
+  });
+});
+
 // M4 T1a：通道区块三选一 + named 需 Token + 隧道地址条目徽标
 describe("RemoteSection 外部通道区块（M4 T1a）", () => {
   it("channel block: renders selector, saves via remote_set_channel, tunnel badge", async () => {

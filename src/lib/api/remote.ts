@@ -54,3 +54,44 @@ export async function remoteConfirmPublic(): Promise<void> {
 export async function remoteSetChannel(channel: string, token?: string): Promise<void> {
   return await invoke("remote_set_channel", { channel, token: token ?? null });
 }
+
+// ============================================================
+// 审批配对 / 设备花名册（M4 T2）：命令定义于 src-tauri/src/remote/mod.rs
+// （Rust 端返回 serde_json::Value 数组形态，键名原样无 camelCase 重命名）
+// ============================================================
+
+// 待审批配对请求：name/ip/ua + 4 位码 + 过期时刻（桌面配对面板数据源）
+export type PendingRequest = {
+  id: string;
+  name: string;
+  ip: string;
+  ua: string;
+  code: string;
+  expiresAt: number;
+};
+// 已配对设备（花名册行）：online 口径在后端（SSE 注册 ∨ 30s 过闸），前端只渲染
+export type RemoteDevice = {
+  id: string;
+  name: string;
+  firstPairedAt: number;
+  lastSeenAt: number;
+  online: boolean;
+};
+// 待审批队列（含未消费项；设置页 3s 轮询）
+export async function remotePendingRequests(): Promise<PendingRequest[]> {
+  return await invoke<PendingRequest[]>("remote_pending_requests");
+}
+// 桌面批准（spec T2b 路径一）；设备满时 Err 中文文案（「设备已满…」）由后端给出
+export async function remoteApproveRequest(id: string): Promise<void> {
+  return await invoke("remote_approve_request", { id });
+}
+// 设备花名册（已吊销项后端已过滤）
+export async function remoteDevices(): Promise<RemoteDevice[]> {
+  return await invoke<RemoteDevice[]>("remote_devices");
+}
+export async function remoteRevokeDevice(id: string): Promise<void> {
+  return await invoke("remote_revoke_device", { id });
+}
+export async function remoteRevokeAllDevices(): Promise<void> {
+  return await invoke("remote_revoke_all_devices");
+}

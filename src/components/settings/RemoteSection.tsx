@@ -21,13 +21,20 @@ import { useAppTranslation } from "@/hooks/use-app-translation";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import {
+  remoteApproveRequest,
   remoteConfirmPublic,
+  remoteDevices,
   remoteIssueToken,
+  remotePendingRequests,
+  remoteRevokeAllDevices,
+  remoteRevokeDevice,
   remoteSetChannel,
   remoteStatus,
   remoteToggle,
   type PairingToken,
+  type PendingRequest,
   type RemoteAddressEntry,
+  type RemoteDevice,
   type RemoteStatus,
 } from "@/lib/api/remote";
 import { getSetting, setSetting } from "@/lib/api/settings";
@@ -40,6 +47,9 @@ const PUBLIC_ACK_KEY = "remote.public_ack";
 const HOST_NAME_KEY = "remote.host_name";
 // 隧道 Token（M4 T1a）：与 Rust 端 remote::KEY_TUNNEL_TOKEN 对齐；named 通道前置条件
 const TUNNEL_TOKEN_KEY = "remote.tunnel_token";
+// 设备上限（M4 T2）：与 Rust 端 remote::KEY_MAX_DEVICES 对齐；后端 max_devices_from
+//（None/乱串 → 3，clamp 1..=10）是唯一口径，前端不 clamp、占位符即默认值
+const MAX_DEVICES_KEY = "remote.max_devices";
 // 绑定只允许这两个字面量（Task 4 评审：后端 TLS 门只匹配 "0.0.0.0"；若允许自由输入
 // 具体局域网 IP，会绕过「对外必须先确认 TLS 反代」的 ack 门）
 const BIND_LOCAL = "127.0.0.1";
@@ -48,6 +58,23 @@ const BIND_LAN = "0.0.0.0";
 const CHANNEL_OFF = "off";
 const CHANNEL_QUICK = "quick";
 const CHANNEL_NAMED = "named";
+
+type TFunc = ReturnType<typeof useAppTranslation>["t"];
+
+// 花名册最近活跃相对时间（M4 T2）：分钟/小时/天三档，<1 分钟按「刚刚」
+function lastSeenLabel(lastSeenAt: number, t: TFunc): string {
+  const minutes = Math.max(0, Math.floor((Date.now() - lastSeenAt) / 60_000));
+  if (minutes < 1) return t("settings.remote.rosterSeenNow");
+  if (minutes < 60) return t("settings.remote.rosterSeenMin", { n: minutes });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return t("settings.remote.rosterSeenHour", { n: hours });
+  return t("settings.remote.rosterSeenDay", { n: Math.floor(hours / 24) });
+}
+
+// 审批剩余秒（M4 T2）：渲染时现算（时间量不进任何缓存），随 3s 轮询顺带刷新
+function remainingSeconds(expiresAt: number): number {
+  return Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+}
 
 export function RemoteSection() {
   const { t } = useAppTranslation();
@@ -89,6 +116,81 @@ export function RemoteSection() {
   const bind = status?.bind ?? BIND_LOCAL;
   // 通道（M4 T1a）：status 未加载或旧后端无 channel 键 → 按 off 展示（undefined 兜底）
   const channel = status?.channel ?? CHANNEL_OFF;
+
+  // 配对面板与花名册（M4 T2）：enabled 时 3s 轮询两列表（与移动端看板同节奏）；
+  // disabled 清空——不展示陈旧审批/花名册，避免过期凭据假象
+  const [pendingReqs, setPendingReqs] = useState<PendingRequest[]>([]);
+  const [devices, setDevices] = useState<RemoteDevice[]>([]);
+  // 设备上限（M4 T2）：受控输入 blur 落盘；前端不 clamp，后端 max_devices_from 唯一口径
+  const [maxDevices, setMaxDevices] = useState("");
+
+  // 两列表刷新（M4 T2）：尽力而为，失败静默（下一拍轮询自愈，不打断设置页）；
+  // null 兜底空表——旧后端/异常载荷不致渲染崩溃
+  const refreshLists = useCallback(async () => {
+    try {
+      setPendingReqs((await remotePendingRequests()) ?? []);
+      setDevices((await remoteDevices()) ?? []);
+    } catch {
+      /* 面板刷新尽力而为 */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) {
+      setPendingReqs([]);
+      setDevices([]);
+      return;
+    }
+    void refreshLists();
+    const timer = setInterval(() => void refreshLists(), 3000);
+    return () => clearInterval(timer);
+  }, [enabled, refreshLists]);
+
+  // 上限回填（M4 T2）：进面板读一次已存值（null → 空输入框，占位符即后端默认 3）；
+  // 后续轮询不回读，保留用户正在编辑的值
+  useEffect(() => {
+    void (async () => setMaxDevices((await getSetting(MAX_DEVICES_KEY)) ?? ""))();
+  }, []);
+
+  // 上限落盘（M4 T2）：blur 原样写（空串 = 回落后端默认 3），前端不 clamp
+  const changeMaxDevices = async () => {
+    try {
+      await setSetting(MAX_DEVICES_KEY, maxDevices);
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
+  // 批准（M4 T2，spec T2b 路径一）：成功即刷新两列表 + toast；失败 Err 原文 toast——
+  // CapFull 文案「设备已满，请先在花名册吊销腾位」直接来自后端，前端不复制判定
+  const approveRequest = async (id: string) => {
+    try {
+      await remoteApproveRequest(id);
+      toast.success(t("settings.remote.pairApproved"));
+      await refreshLists();
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
+  // 吊销（M4 T2）：单独 / 全部；成功即刷新（轮询下一拍也会对齐），失败 Err 原文 toast
+  const revokeDevice = async (id: string) => {
+    try {
+      await remoteRevokeDevice(id);
+      await refreshLists();
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
+  const revokeAllDevices = async () => {
+    try {
+      await remoteRevokeAllDevices();
+      await refreshLists();
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
 
   // 开启：后端有 P7 安全门（0.0.0.0 未确认 TLS 反代 → Err），失败 toast 原样透出，
   // 前端不复制门槛判定（避免与后端双源漂移）
@@ -436,6 +538,102 @@ export function RemoteSection() {
                 <p className="text-muted-foreground text-xs">{t("settings.remote.qrHint")}</p>
               </div>
             )}
+
+            {/* 配对面板（M4 T2）：待审批设备——名称/来源 IP/UA（超长截断）/剩余秒 +
+                4 位码大字 + 批准。数据随 3s 轮询刷新；批准成功请求即被消费（下一拍消失） */}
+            <div className="border-t" />
+            <div className="py-2.5">
+              <label className="text-sm font-medium">{t("settings.remote.pendingTitle")}</label>
+              {pendingReqs.length === 0 ? (
+                <p className="text-muted-foreground mt-1 text-xs">
+                  {t("settings.remote.pendingEmpty")}
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-2">
+                  {pendingReqs.map((r) => (
+                    <li key={r.id} className="flex items-center gap-3 rounded-md border p-2.5">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{r.name || r.ip}</p>
+                        <p className="text-muted-foreground truncate text-xs">
+                          {r.ip}
+                          {r.ua ? ` · ${r.ua}` : ""}
+                        </p>
+                        <p className="text-xs text-amber-500">
+                          {t("settings.remote.pendingExpires", {
+                            seconds: remainingSeconds(r.expiresAt),
+                          })}
+                        </p>
+                      </div>
+                      <code className="text-2xl font-semibold tracking-widest">{r.code}</code>
+                      <Button size="sm" onClick={() => void approveRequest(r.id)}>
+                        {t("settings.remote.pendingApprove")}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* 设备花名册（M4 T2）：在线点（绿=在线/灰=离线，口径在后端 SSE ∨ 30s 过闸）+
+                最近活跃相对时间；每行单独吊销，底部全部吊销与设备上限输入（blur 落盘） */}
+            <div className="border-t" />
+            <div className="py-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-sm font-medium">{t("settings.remote.rosterTitle")}</label>
+                <div className="flex items-center gap-2">
+                  <label htmlFor="remote-max-devices" className="text-muted-foreground text-xs">
+                    {t("settings.remote.rosterMax")}
+                  </label>
+                  <Input
+                    id="remote-max-devices"
+                    type="number"
+                    value={maxDevices}
+                    placeholder="3"
+                    className="h-8 w-20"
+                    onChange={(e) => setMaxDevices(e.target.value)}
+                    onBlur={() => void changeMaxDevices()}
+                  />
+                </div>
+              </div>
+              {devices.length === 0 ? (
+                <p className="text-muted-foreground mt-1 text-xs">
+                  {t("settings.remote.rosterEmpty")}
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-1.5">
+                  {devices.map((d) => (
+                    <li key={d.id} className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${
+                            d.online ? "bg-green-500" : "bg-gray-400"
+                          }`}
+                        />
+                        {/* 名称与活跃时间拼进同一元素：花名册行不产生与待审批面板
+                            设备名相同的精确文本节点（测试按唯一文本定位待审批行） */}
+                        <span className="truncate text-sm">
+                          {d.name || d.id.slice(0, 8)} ·{" "}
+                          <span className="text-muted-foreground text-xs">
+                            {d.online
+                              ? t("settings.remote.rosterOnline")
+                              : t("settings.remote.rosterOffline")}{" "}
+                            · {lastSeenLabel(d.lastSeenAt, t)}
+                          </span>
+                        </span>
+                      </div>
+                      <Button variant="outline" size="sm" onClick={() => void revokeDevice(d.id)}>
+                        {t("settings.remote.rosterRevoke")}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-2 flex justify-end">
+                <Button variant="destructive" size="sm" onClick={() => void revokeAllDevices()}>
+                  {t("settings.remote.rosterRevokeAll")}
+                </Button>
+              </div>
+            </div>
           </>
         )}
 
