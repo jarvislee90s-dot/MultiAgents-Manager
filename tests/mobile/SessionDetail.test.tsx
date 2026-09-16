@@ -281,6 +281,31 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.getByTestId("split-container")).toBeTruthy();
   });
 
+  it("Bug 5：markdown 标题/列表渲染结构化元素且容器挂 md-body 排版类", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 0,
+        kind: "assistant",
+        content: "## 小节标题\n\n- 第一项\n- 第二项\n\n1. 有序\n\n> 引用\n\n| 列A | 列B |\n|---|---|\n| a | b |",
+      }),
+    ];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    expect(await screen.findByText("小节标题")).toBeTruthy();
+    // 结构化元素存在（ReactMarkdown 本就产出；视觉拍平是 CSS 层问题）
+    const h2 = screen.getByText("小节标题").closest("h2");
+    expect(h2).toBeTruthy();
+    const firstLi = screen.getByText("第一项").closest("li");
+    expect(firstLi).toBeTruthy();
+    expect(firstLi!.closest("ul")).toBeTruthy();
+    expect(screen.getByText("有序").closest("ol")).toBeTruthy();
+    expect(screen.getByText("引用").closest("blockquote")).toBeTruthy();
+    expect(document.querySelector(".md-body table")).toBeTruthy();
+    // Bug 5 修复锚点：渲染容器必须挂 .md-body 排版类（mobile.css 提供
+    // 标题分级/列表符号/引用边框/表格边框，对抗 preflight 重置）
+    expect(h2!.closest(".md-body")).toBeTruthy();
+  });
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];

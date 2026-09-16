@@ -73,7 +73,11 @@ describe("FilePreview：文本 / markdown / 图片三态", () => {
         })
     );
     renderPreview("/tmp/proj/README.md");
-    expect((await screen.findByTestId("preview-markdown")).textContent).toContain("标题");
+    const md = await screen.findByTestId("preview-markdown");
+    expect(md.textContent).toContain("标题");
+    // Bug 5：markdown 渲染容器挂 .md-body 排版类（标题/列表语义样式）
+    expect(md.classList.contains("md-body")).toBe(true);
+    expect(md.querySelector("h1")).toBeTruthy();
     expect(screen.getByText("加粗").tagName).toBe("STRONG");
   });
 

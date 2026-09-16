@@ -216,7 +216,7 @@ export default function FilePreview({
         {state.phase === "ok" &&
           state.payload.kind === "text" &&
           state.payload.mime === "text/markdown" && (
-            <div data-testid="preview-markdown" className="text-sm dark:text-slate-200">
+            <div data-testid="preview-markdown" className="md-body text-sm dark:text-slate-200">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{state.payload.content}</ReactMarkdown>
             </div>
           )}

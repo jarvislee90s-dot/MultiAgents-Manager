@@ -282,7 +282,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       switch (m.kind) {
         case "assistant":
         case "user":
-          return <div className="text-sm">{renderMarkdown(m.content)}</div>;
+          // md-body：markdown 排版层（Bug 5——preflight 拍平标题/列表的修复锚点）
+          return <div className="md-body text-sm">{renderMarkdown(m.content)}</div>;
         case "thinking":
           return (
             <div className="text-xs break-words whitespace-pre-wrap text-slate-500 dark:text-slate-400">
