@@ -1,5 +1,9 @@
 // 资源管理命令
 
+// 递归技能扫描（深度 4 / SKILL.md 判定 / 跳软链点目录 / 结果排序）已上收至
+// services::resource 与回填共用（预设编辑弹窗与资源视图同源口径）
+use crate::services::resource::scan_skill_dirs;
+
 /// 原生（未纳管）资源的扫描结果 DTO
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,49 +16,6 @@ pub struct NativeExtensionRecord {
     pub source_tool: String,
     pub detected_at: String,
     pub imported: bool,
-}
-
-/// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
-/// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
-/// 深度上限 4 层，symlink 目录不跟随（防循环）
-fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
-    const SCAN_MAX_DEPTH: usize = 4;
-    let mut results = Vec::new();
-    fn recurse(
-        dir: &std::path::Path,
-        base: &std::path::Path,
-        depth: usize,
-        results: &mut Vec<String>,
-    ) {
-        if depth > SCAN_MAX_DEPTH {
-            log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
-            return;
-        }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_symlink() {
-                    continue;
-                }
-                if path.is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                    if path.join("SKILL.md").exists() {
-                        if let Ok(rel) = path.strip_prefix(base) {
-                            results.push(rel.to_string_lossy().to_string());
-                        }
-                    } else {
-                        recurse(&path, base, depth + 1, results);
-                    }
-                }
-            }
-        }
-    }
-    recurse(base, base, 0, &mut results);
-    results.sort();
-    results
 }
 
 #[derive(serde::Serialize)]

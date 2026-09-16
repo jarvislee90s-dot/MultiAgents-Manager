@@ -6,6 +6,51 @@ pub mod reconcile;
 
 use crate::linker;
 
+/// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
+/// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
+/// 深度上限 4 层，symlink 目录不跟随（防循环）
+/// 资源视图（list_ssot_resources）与注册表回填（backfill_registry）共用同一扫描，
+/// 保证「卡片看到的」与「登记进表的」口径一致
+pub fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
+    const SCAN_MAX_DEPTH: usize = 4;
+    let mut results = Vec::new();
+    fn recurse(
+        dir: &std::path::Path,
+        base: &std::path::Path,
+        depth: usize,
+        results: &mut Vec<String>,
+    ) {
+        if depth > SCAN_MAX_DEPTH {
+            log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() {
+                    continue;
+                }
+                if path.is_dir() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    if path.join("SKILL.md").exists() {
+                        if let Ok(rel) = path.strip_prefix(base) {
+                            results.push(rel.to_string_lossy().to_string());
+                        }
+                    } else {
+                        recurse(&path, base, depth + 1, results);
+                    }
+                }
+            }
+        }
+    }
+    recurse(base, base, 0, &mut results);
+    results.sort();
+    results
+}
+
 /// SKILL.md 元数据
 struct SkillMeta {
     name: String,
@@ -589,35 +634,29 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
 pub fn backfill_registry() {
     let home = dirs::home_dir().unwrap_or_default();
 
-    // skill：~/.mam/skills/<dir>
+    // skill：~/.mam/skills 递归扫描（与资源视图 list_ssot_resources 同一
+    // scan_skill_dirs 口径），嵌套套件技能（如 superpowers/brainstorming）按
+    // 相对路径登记（id/name 均带斜杠路径）；套件目录本身（无 SKILL.md）不入表。
+    // 旧实现只扫顶层，嵌套套件永远进不了 extensions 表，还会把套件目录误登记为技能
     let skills = home.join(".mam").join("skills");
     if skills.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&skills) {
-            for e in entries.flatten() {
-                let path = e.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                if let Some(name) = e.file_name().to_str() {
-                    // no-swallowed-errors（评审裁决 3）：回填失败逐条报告，不再吞错
-                    if let Err(err) =
-                        crate::database::ensure_extension(&crate::database::ExtensionRecord {
-                            id: format!("skill-{}", name),
-                            kind: "skill".to_string(),
-                            name: name.to_string(),
-                            description: None,
-                            source_path: path.to_string_lossy().to_string(),
-                            source_url: None,
-                            version: None,
-                            tags: None,
-                            suite: None,
-                            source_tool: None,
-                            is_native: false,
-                        })
-                    {
-                        log::warn!("回填 skill {} 登记 extensions 失败: {}", name, err);
-                    }
-                }
+        for rel in scan_skill_dirs(&skills) {
+            let path = skills.join(&rel);
+            // no-swallowed-errors（评审裁决 3）：回填失败逐条报告，不再吞错
+            if let Err(err) = crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                id: format!("skill-{}", rel),
+                kind: "skill".to_string(),
+                name: rel.clone(),
+                description: None,
+                source_path: path.to_string_lossy().to_string(),
+                source_url: None,
+                version: None,
+                tags: None,
+                suite: None,
+                source_tool: None,
+                is_native: false,
+            }) {
+                log::warn!("回填 skill {} 登记 extensions 失败: {}", rel, err);
             }
         }
     }

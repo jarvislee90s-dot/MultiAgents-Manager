@@ -726,6 +726,67 @@ fn mcp_import_and_backfill_register_rows() {
     );
 }
 
+/// P2① 嵌套套件口径（M2）：回填与资源视图同用递归扫描——嵌套套件技能
+/// （v2m2-suite-x/inner）也要登记入表，且套件目录本身不得被误登记为技能
+#[test]
+fn backfill_registry_covers_nested_suite_skills() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::backfill_registry;
+
+    // 平铺技能（顶层直接含 SKILL.md）与嵌套套件技能（suite/inner/SKILL.md）
+    let flat = dirs::home_dir().unwrap().join(".mam/skills/v2m2-flat-x");
+    std::fs::create_dir_all(&flat).unwrap();
+    std::fs::write(flat.join("SKILL.md"), "x").unwrap();
+    let inner = dirs::home_dir()
+        .unwrap()
+        .join(".mam/skills/v2m2-suite-x/inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(inner.join("SKILL.md"), "y").unwrap();
+
+    backfill_registry();
+
+    let exts = database::list_extensions();
+    let ids: Vec<String> = exts.iter().map(|e| e.id.clone()).collect();
+    assert!(
+        ids.contains(&"skill-v2m2-flat-x".to_string()),
+        "平铺技能应回填入表"
+    );
+    let nested = exts.iter().find(|e| e.id == "skill-v2m2-suite-x/inner");
+    assert!(
+        nested.is_some(),
+        "嵌套套件技能应按相对路径回填入表: {:?}",
+        ids
+    );
+    let nested = nested.unwrap();
+    assert_eq!(nested.name, "v2m2-suite-x/inner", "name = 相对路径");
+    assert_eq!(nested.kind, "skill");
+    assert!(!nested.is_native);
+    assert!(nested
+        .source_path
+        .ends_with(".mam/skills/v2m2-suite-x/inner"));
+
+    // 套件目录本身（无 SKILL.md）不得被误登记为名为 v2m2-suite-x 的技能
+    assert!(
+        exts.iter().all(|e| e.id != "skill-v2m2-suite-x"),
+        "套件目录不得误登记"
+    );
+    assert!(
+        exts.iter().all(|e| e.name != "v2m2-suite-x"),
+        "不得存在名为 v2m2-suite-x 的误登记行"
+    );
+
+    // 清理测试数据
+    let _ = database::delete_extension("skill-v2m2-flat-x");
+    let _ = database::delete_extension("skill-v2m2-suite-x/inner");
+    let _ = std::fs::remove_dir_all(flat);
+    let _ = std::fs::remove_dir_all(inner.parent().unwrap());
+}
+
 /// 不变量（spec §3.2）：快照在而 active 为空（或反之）→ 检查器报告
 #[test]
 fn snapshot_invariant_detector_reports_broken_state() {
