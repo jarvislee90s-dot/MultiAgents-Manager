@@ -256,7 +256,7 @@ mod tests {
             // M3 Task 7：本组测试不触 /session-messages，注入恒 Err 的桩
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
-            path_source: Box::new(|_, _| Vec::new()),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
         })
@@ -403,8 +403,8 @@ mod tests {
                 host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 // 本组测试不触 /session-files /file：注入恒空的路径源
-                path_source: Box::new(|_, _| Vec::new()), // 本组测试不触 /session-files /file
-                watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+                path_source: Box::new(|_, _, _| (Vec::new(), false)), // 本组测试不触 /session-files /file
+                watcher_tx: tokio::sync::broadcast::channel(64).0,    // M3 Task 5：空事件通道
             }),
             t,
         )
@@ -855,7 +855,7 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
-            path_source: Box::new(|_, _| Vec::new()),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
@@ -1054,7 +1054,7 @@ mod tests {
             }),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
-            path_source: Box::new(|_, _| Vec::new()),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         let app = router(state.clone());
@@ -1165,7 +1165,7 @@ mod tests {
                 }
             }),
             // 本测试不触 /session-files：注入恒空的路径源
-            path_source: Box::new(|_, _| Vec::new()),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
         });
         let app = router(state.clone());
@@ -1322,7 +1322,17 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
-            path_source: Box::new(|_, _| vec!["/absent/proj/src/main.rs".to_string()]),
+            path_source: Box::new(|_, _, _| {
+                (
+                    vec![crate::remote::files::FileEntry {
+                        path: "/absent/proj/src/main.rs".to_string(),
+                        last_seq: 1,
+                        last_ts: None,
+                        hits: 1,
+                    }],
+                    false,
+                )
+            }),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
         });
         let app = router(state.clone());
@@ -1508,11 +1518,14 @@ mod tests {
             Some("no-store"),
             "文件路径表是门禁下私有数据，禁止中间层缓存"
         );
+        // M3+ 富化形状：结构化条目（camelCase）+ truncated
+        let files_body = body_string(r).await;
         assert!(
-            body_string(r)
-                .await
-                .contains("\"files\":[\"/absent/proj/src/main.rs\"]"),
-            "session-files 应透传注入路径源的结果"
+            files_body.contains("\"path\":\"/absent/proj/src/main.rs\"")
+                && files_body.contains("\"lastSeq\":1")
+                && files_body.contains("\"hits\":1")
+                && files_body.contains("\"truncated\":false"),
+            "session-files 应透传注入路径源的结构化条目，实际 {files_body}"
         );
     }
 

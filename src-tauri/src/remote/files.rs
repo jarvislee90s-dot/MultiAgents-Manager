@@ -21,21 +21,18 @@
 // 测试约束（宪法级）：一律 tempdir，绝不触真实 ~/.zcode ~/.claude 等数据目录；
 // Windows 语义分支以 `windows: bool` 参数注入，darwin 上也可全分支测试。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::content::SessionMessage;
 
 /// 文件路径源函数形态（RemoteState 注入缝的类型别名，生产 = extract_file_paths）
-pub type PathSourceFn = dyn Fn(&str, &str) -> Vec<String> + Send + Sync;
+pub type PathSourceFn = dyn Fn(&str, &str, usize) -> (Vec<FileEntry>, bool) + Send + Sync;
 
 /// 文本类文件大小上限：500KB（Global Constraints）
 const MAX_TEXT_BYTES: u64 = 500 * 1024;
 /// 图片类文件大小上限：5MB（Global Constraints，mime 分支）
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
-/// 路径提取的消息读取尾窗：与移动端详情页默认 limit 同量级（按需单会话读取，
-/// 非 3s 轮询路径；更早的工具调用不回捞，M3 接受为已知范围）
-const EXTRACT_MESSAGE_LIMIT: usize = 200;
 /// 递归收集的参数键集合（小写精确匹配）。基础四键 `file_path`/`path`/`filename`/
 /// `abs_path` 为控制者裁决；Task 9 按各工具真实 toolArgs 形态探测补两键（证据见
 /// task-9-report.md）：`filePath` 驼峰——OpenCode 官方工具 schema（edit/write/read，
@@ -291,11 +288,16 @@ fn mime_from_ext(ext: &str) -> String {
 /// 生产薄壳：真实 home + env 重定向 → 注入核（zcode_home_with 先例）。
 /// env 双参（DSH_HOME / KIMI_CODE_HOME）与 /session-messages 生产薄壳**同一归口**
 /// （content::read_env_homes，终审 Important 1）——设了 env 的机器上文件面板与
-/// 详情页消息同源，不再静默空表。提取失败（存储不可读 / 会话不存在）一律返回
-/// 空表——文件面板是增强能力，不因提取失败阻塞详情页。
-pub fn extract_file_paths(agent_type: &str, session_id: &str) -> Vec<String> {
+/// 详情页消息同源，不再静默空表。limit 为追溯档位（默认值由 API 层给）。
+/// 提取失败（存储不可读 / 会话不存在）一律返回空表——文件面板是增强能力，
+/// 不因提取失败阻塞详情页
+pub fn extract_file_paths(
+    agent_type: &str,
+    session_id: &str,
+    limit: usize,
+) -> (Vec<FileEntry>, bool) {
     let Some(home) = dirs::home_dir() else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let (dsh_env, kimi_env) = super::content::read_env_homes();
     extract_file_paths_with_env(
@@ -304,24 +306,35 @@ pub fn extract_file_paths(agent_type: &str, session_id: &str) -> Vec<String> {
         kimi_env.as_deref(),
         agent_type,
         session_id,
+        limit,
     )
 }
 
 /// 注入核（测试直调 tempdir home，零真实数据目录接触；env 重定向恒 None）
-pub fn extract_file_paths_with(home: &Path, agent_type: &str, session_id: &str) -> Vec<String> {
-    extract_file_paths_with_env(home, None, None, agent_type, session_id)
+pub fn extract_file_paths_with(
+    home: &Path,
+    agent_type: &str,
+    session_id: &str,
+    limit: usize,
+) -> (Vec<FileEntry>, bool) {
+    extract_file_paths_with_env(home, None, None, agent_type, session_id, limit)
 }
 
 /// env 注入核（终审 Important 1）：与 content::read_session_messages_impl 同款 env
 /// 双参——dsh/kimi 数据根重定向可注入（env 值作参，测试锁重定向链路，零真实 env
-/// 接触）。生产薄壳不走 None：extract_file_paths 经 content::read_env_homes 读真实值
+/// 接触）。生产薄壳不走 None：extract_file_paths 经 content::read_env_homes 读真实值。
+///
+/// M3+（用户裁决 2）：limit 直接**透传** read_session_messages_impl——条数窗、
+/// 字节窗（512KB×⌈limit/200⌉ 封顶 4MB）与 truncated 全部复用主会话同一套机制，
+/// 本层零新增预算代码；返回值第二项即该 truncated（前端据此提示「还有更早文件」）
 pub(crate) fn extract_file_paths_with_env(
     home: &Path,
     dsh_env_home: Option<&str>,
     kimi_env_home: Option<&str>,
     agent_type: &str,
     session_id: &str,
-) -> Vec<String> {
+    limit: usize,
+) -> (Vec<FileEntry>, bool) {
     // 复用 Task 7 的八工具统一出口（数据同源：与详情页读的是同一份消息流），
     // 不另立 per-tool 查询（控制者裁决）；派发核 pub(crate) 同源复用
     match super::content::read_session_messages_impl(
@@ -330,18 +343,51 @@ pub(crate) fn extract_file_paths_with_env(
         kimi_env_home,
         agent_type,
         session_id,
-        EXTRACT_MESSAGE_LIMIT,
+        limit,
     ) {
-        Ok(pg) => extract_paths_from_messages(&pg.messages),
-        Err(_) => Vec::new(),
+        Ok(pg) => (extract_paths_from_messages(&pg.messages), pg.truncated),
+        Err(_) => (Vec::new(), false),
     }
 }
 
-/// 从统一消息流提取文件路径（纯函数）：只看 tool-call 条目的 toolArgs JSON，
-/// 递归收集 PATH_KEYS 键下的字符串值，去重保序。
-pub fn extract_paths_from_messages(msgs: &[SessionMessage]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+/// 文件条目（M3+ 文件面板后端富化契约，camelCase 序列化 = 移动端字段名，勿改）
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    /// 文件路径：**最后一次出现**的原始形态（归一化只用于去重比较，用户裁决 7）
+    pub path: String,
+    /// 最后出现条目的 seq（finalize 重排后的数组内序，稳定可排序）
+    pub last_seq: i64,
+    /// 最后出现条目的时间戳（原生存储无时间戳则为 None，前端显示 `—`）
+    pub last_ts: Option<i64>,
+    /// 该文件在窗口内出现的次数（hits=1 前端不显示徽标）
+    pub hits: usize,
+}
+
+/// 归一化比较键（去重用，用户裁决 7）：`\`→`/`；Windows 语义再 to_lowercase。
+/// 平台语义以参数注入便于跨平台测试（path_within_semantics 先例），生产 cfg!(windows)
+fn normalize_key(path: &str, windows: bool) -> String {
+    let unified = path.replace('\\', "/");
+    if windows {
+        unified.to_lowercase()
+    } else {
+        unified
+    }
+}
+
+/// 从统一消息流提取文件条目（纯函数，M3+ 富化）：只看 kind=="tool-call" 的
+/// toolArgs JSON（PATH_KEYS 递归收集，既有逻辑不变），按归一化键去重，
+/// 记录最后出现 seq/ts 与 hits，输出按 last_seq 降序（最近出现的在上）。
+/// 生产入口（平台语义取编译目标）
+pub fn extract_paths_from_messages(msgs: &[SessionMessage]) -> Vec<FileEntry> {
+    extract_paths_from_messages_with(msgs, cfg!(windows))
+}
+
+/// 平台语义注入核（darwin 上可测全分支）
+pub fn extract_paths_from_messages_with(msgs: &[SessionMessage], windows: bool) -> Vec<FileEntry> {
+    // 插入序保稳定（同 last_seq 时按首次进入顺序，纯理论场景）；键 → 索引
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<FileEntry> = Vec::new();
     for m in msgs {
         if m.kind != "tool-call" {
             continue;
@@ -350,12 +396,39 @@ pub fn extract_paths_from_messages(msgs: &[SessionMessage]) -> Vec<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
             continue; // 参数损坏 → 跳过该条（防御）
         };
-        collect_path_values(&v, &mut out, &mut seen);
+        let mut paths: Vec<String> = Vec::new();
+        let mut seen_in_msg: HashSet<String> = HashSet::new();
+        collect_path_values(&v, &mut paths, &mut seen_in_msg);
+        // 同一消息内同一文件多次命中只计一次（一条 tool-call 里重复键不算多次使用）
+        for path in paths {
+            let key = normalize_key(&path, windows);
+            match index.get(&key) {
+                Some(&i) => {
+                    out[i].hits += 1;
+                    out[i].last_seq = m.seq;
+                    out[i].last_ts = m.ts;
+                    out[i].path = path; // 展示保留最后一次出现的原始形态
+                }
+                None => {
+                    index.insert(key, out.len());
+                    out.push(FileEntry {
+                        path,
+                        last_seq: m.seq,
+                        last_ts: m.ts,
+                        hits: 1,
+                    });
+                }
+            }
+        }
     }
+    // 排序键 = 会话出现序（lastSeq 降序），用户裁决 1；同 seq 保持插入序（稳定）
+    out.sort_by_key(|b| std::cmp::Reverse(b.last_seq));
     out
 }
 
-/// 递归走 JSON 树：对象键命中 PATH_KEYS 时收字符串值，其余结构下钻
+/// 递归走 JSON 树：对象键命中 PATH_KEYS 时收字符串值，其余结构下钻。
+/// `seen` 为**单条消息内**的判重集（跨消息去重由 extract_paths_from_messages_with
+/// 按归一化键完成——同一条 tool-call 里同路径重复键不该计成多次使用）
 fn collect_path_values(v: &serde_json::Value, out: &mut Vec<String>, seen: &mut HashSet<String>) {
     match v {
         serde_json::Value::Object(map) => {
@@ -775,15 +848,16 @@ mod tests {
             tool_call(r#"{"abs_path":"/tmp/proj/README.md"}"#),
             text_msg("assistant", "done"), // 非 tool-call 忽略
         ];
+        // 全部同 seq（tool_call 夹具默认 seq=1）→ 稳定排序下保持插入序
         assert_eq!(
-            extract_paths_from_messages(&msgs),
+            paths_of(&extract_paths_from_messages(&msgs)),
             vec![
                 "/tmp/proj/src/a.rs".to_string(),
                 "/tmp/proj/src/b.rs".to_string(),
                 "/tmp/proj/lib/c.py".to_string(),
                 "/tmp/proj/README.md".to_string(),
             ],
-            "命中键递归收集 + 去重保序"
+            "命中键递归收集 + 去重（按最后出现序稳定）"
         );
     }
 
@@ -811,9 +885,156 @@ mod tests {
             tool_call(r#"{"path":"Cargo.toml"}"#),
         ];
         assert_eq!(
-            extract_paths_from_messages(&msgs),
+            paths_of(&extract_paths_from_messages(&msgs)),
             vec!["src/lib/util.ts".to_string(), "Cargo.toml".to_string()],
             "相对路径与裸扩展名文件名都是候选（端点侧按 cwd 解析相对路径）"
+        );
+    }
+
+    /// FileEntry 列表 → 路径列表（既有用例断言适配助手）
+    fn paths_of(entries: &[FileEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.path.clone()).collect()
+    }
+
+    // ==== extract_paths_from_messages（M3+ 文件面板：FileEntry 富化）====
+
+    /// M3+ 文件面板：出现序/hits/最后原始形态
+    /// - 同一文件 3 次（seq 2/7/9）→ hits=3、last_seq=9、path=最后一次的原始形态；
+    /// - 多文件按 last_seq 降序（最近出现的文件在上）
+    #[test]
+    fn extract_entries_track_hits_last_seq_and_last_shape() {
+        let mut msgs: Vec<SessionMessage> = Vec::new();
+        let mut push = |seq: i64, args: &str| {
+            let mut m = tool_call(args);
+            m.seq = seq;
+            m.ts = Some(seq * 100);
+            msgs.push(m);
+        };
+        push(2, r#"{"path":"/p/a.rs"}"#);
+        push(4, r#"{"path":"/p/b.md"}"#);
+        push(7, r#"{"file_path":"/p/a.rs"}"#);
+        push(9, r#"{"abs_path":"/p/a.rs","other":"x"}"#);
+
+        let entries = extract_paths_from_messages(&msgs);
+        assert_eq!(
+            entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            vec!["/p/a.rs", "/p/b.md"],
+            "按 last_seq 降序（a 最后出现于 9，b 于 4）"
+        );
+        let a = &entries[0];
+        assert_eq!(a.hits, 3, "同一文件三次出现");
+        assert_eq!(a.last_seq, 9, "取最后出现的 seq");
+        assert_eq!(a.last_ts, Some(900), "取最后出现的 ts");
+        let b = &entries[1];
+        assert_eq!(b.hits, 1);
+        assert_eq!(b.last_seq, 4);
+        assert_eq!(b.last_ts, Some(400));
+    }
+
+    /// M3+ 归一化比较键去重：`\`→`/`；Windows 语义（参数注入）再小写。
+    /// 展示保留**最后一次出现**的原始形态（用户裁决 7）
+    #[test]
+    fn extract_dedups_via_normalized_key_and_keeps_last_shape() {
+        let mut m1 = tool_call(r#"{"path":"C:\\A\\b.md"}"#);
+        m1.seq = 1;
+        let mut m2 = tool_call(r#"{"path":"C:/a/b.md"}"#);
+        m2.seq = 2;
+        let msgs = vec![m1, m2];
+
+        // windows=true：反斜杠/大小写归一 → 一行，hits=2，形态取最后一次
+        let win = extract_paths_from_messages_with(&msgs, true);
+        assert_eq!(win.len(), 1, "Windows 语义下两种形态归一为一个文件");
+        assert_eq!(win[0].hits, 2);
+        assert_eq!(win[0].path, "C:/a/b.md", "保留最后一次出现的原始形态");
+
+        // windows=false（macOS/Linux）：大小写敏感 → 两行
+        let unix = extract_paths_from_messages_with(&msgs, false);
+        assert_eq!(unix.len(), 2, "大小写敏感平台不得归一小写差异");
+    }
+
+    /// M3+ 归一化键纯函数：分隔符统一 + 平台大小写语义
+    #[test]
+    fn normalize_key_unifies_separators_and_platform_case() {
+        assert_eq!(normalize_key(r"C:\A\b.md", true), "c:/a/b.md");
+        assert_eq!(normalize_key("C:/a/b.md", true), "c:/a/b.md");
+        assert_eq!(
+            normalize_key(r"C:\A\b.md", true),
+            normalize_key("C:/a/b.md", true),
+            "同一文件两种形态必须同键"
+        );
+        assert_eq!(normalize_key(r"C:\A\b.md", false), "C:/A/b.md");
+        assert_ne!(
+            normalize_key("C:/a/b.md", false),
+            normalize_key("C:/A/b.md", false),
+            "非 Windows 语义大小写敏感"
+        );
+        // 尾部分隔符与空串（防御）
+        assert_eq!(normalize_key("", true), "");
+    }
+
+    /// M3+ lastTs 可为 None（原生存储无时间戳条目）——不得 panic
+    #[test]
+    fn extract_entries_tolerate_missing_timestamp() {
+        let mut m = tool_call(r#"{"path":"/p/n.ts"}"#);
+        m.ts = None;
+        let entries = extract_paths_from_messages(&[m]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].last_ts, None);
+    }
+
+    /// camelCase 序列化契约（移动端字段名，勿漂移）：lastSeq/lastTs
+    #[test]
+    fn file_entry_serializes_camel_case() {
+        let e = FileEntry {
+            path: "/p/a.rs".into(),
+            last_seq: 7,
+            last_ts: Some(700),
+            hits: 2,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v.get("path").is_some());
+        assert!(v.get("lastSeq").is_some(), "lastSeq 字段（camelCase）");
+        assert!(v.get("lastTs").is_some(), "lastTs 字段（camelCase）");
+        assert!(v.get("hits").is_some());
+    }
+
+    /// limit 透传：更大 limit 取到更早的工具调用（窗口机制零新增，透传既有管线）
+    #[test]
+    fn extract_with_env_passes_limit_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".claude/projects/-tmp-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 早期行（首条）+ 大量后续行：小 limit 取不到首条，大 limit 取得到
+        let mut lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t0","name":"Write","input":{"file_path":"/tmp/proj/early.rs"}}]}}"#.to_string(),
+        ];
+        for i in 0..60 {
+            lines.push(format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"t{i}","name":"Write","input":{{"file_path":"/tmp/proj/late{i}.rs"}}}}]}}}}"#
+            ));
+        }
+        std::fs::write(
+            dir.join("1f2e3d4c-5b6a-4948-8276-9a0b8c7d6e5f.jsonl"),
+            format!("{}\n", lines.join("\n")),
+        )
+        .unwrap();
+        let sid = "1f2e3d4c-5b6a-4948-8276-9a0b8c7d6e5f";
+
+        // limit=1：窗口只覆盖尾条消息（其工具调用出条目，早期文件不在窗内）
+        let (small, _) = extract_file_paths_with_env(tmp.path(), None, None, "claude", sid, 1);
+        assert!(
+            small.iter().all(|e| !e.path.ends_with("early.rs")),
+            "limit=1 只覆盖尾条（早期工具调用不在窗内），实得 {small:?}"
+        );
+        assert!(
+            small.iter().any(|e| e.path.ends_with("late59.rs")),
+            "尾条消息的文件必须在窗内，实得 {small:?}"
+        );
+        // limit=200：窗口覆盖全量 → 首条也可见
+        let (big, _) = extract_file_paths_with_env(tmp.path(), None, None, "claude", sid, 200);
+        assert!(
+            big.iter().any(|e| e.path.ends_with("early.rs")),
+            "放大 limit 后早期文件必须可见（窗口透传生效）"
         );
     }
 
@@ -863,7 +1084,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "zcode", "sess-t9"),
+            paths_of(&extract_file_paths_with(tmp.path(), "zcode", "sess-t9", 200).0),
             vec!["/tmp/proj/src/main.rs".to_string()],
             "zcode state.input.file_path 收集；bash command 不收"
         );
@@ -885,7 +1106,7 @@ mod tests {
         let apply_patch = r#"{"timestamp":"2026-09-15T00:00:20.000Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"command\":\"*** Add File: /tmp/proj/embedded.rs\"}"}}"#;
         std::fs::write(&rollout, format!("{meta}\n{view_image}\n{apply_patch}\n")).unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "codex", T9_UUID),
+            paths_of(&extract_file_paths_with(tmp.path(), "codex", T9_UUID, 200).0),
             vec!["/tmp/shots/page1.png".to_string()],
             "codex arguments.path 收集；补丁串内嵌路径不收"
         );
@@ -912,10 +1133,11 @@ mod tests {
         std::fs::create_dir_all(&sess).unwrap();
         std::fs::write(sess.join("session.v3.jsonl.zstd"), &frame).unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "dsh", "session-t9"),
+            paths_of(&extract_file_paths_with(tmp.path(), "dsh", "session-t9", 200).0),
             vec![
-                "/tmp/proj/src/a.rs".to_string(),
+                // lastSeq 降序：report.md 出现于 seq 12、a.rs 于 seq 10（用户裁决 1）
                 "/tmp/proj/docs/report.md".to_string(),
+                "/tmp/proj/src/a.rs".to_string(),
             ],
             "dsh arguments.file_path 收集 + files[].path 嵌套收集；bash command 不收"
         );
@@ -949,10 +1171,11 @@ mod tests {
         .to_string();
         std::fs::write(home.join("session_index.jsonl"), format!("{index}\n")).unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "kimi", T9_UUID),
+            paths_of(&extract_file_paths_with(tmp.path(), "kimi", T9_UUID, 200).0),
             vec![
-                "/tmp/proj/src/m.rs".to_string(),
+                // lastSeq 降序：README.md 行后于 m.rs 行（用户裁决 1）
                 "/tmp/proj/README.md".to_string(),
+                "/tmp/proj/src/m.rs".to_string(),
             ],
             "kimi args.path 与旧版 args.file 均收集；bash command 不收"
         );
@@ -975,7 +1198,7 @@ mod tests {
         );
         std::fs::write(dir.join(format!("{T9_UUID}.jsonl")), lines).unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "workbuddy", T9_UUID),
+            paths_of(&extract_file_paths_with(tmp.path(), "workbuddy", T9_UUID, 200).0),
             vec!["/tmp/proj/src/wb.rs".to_string()],
             "workbuddy arguments.file_path 收集；bash command 不收"
         );
@@ -1011,7 +1234,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "opencode", "sess-t9-oc"),
+            paths_of(&extract_file_paths_with(tmp.path(), "opencode", "sess-t9-oc", 200).0),
             vec!["/tmp/proj/src/oc.ts".to_string()],
             "opencode state.input.filePath（驼峰）收集；bash command 不收"
         );
@@ -1051,7 +1274,7 @@ mod tests {
             r#"{"sessionUpdate":"tool_call","toolCallId":"c2","title":"bash","rawInput":{"command":"ls /tmp"}}"#,
         );
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "openclaw", "s-t9"),
+            paths_of(&extract_file_paths_with(tmp.path(), "openclaw", "s-t9", 200).0),
             vec!["/tmp/proj/src/oclaw.rs".to_string()],
             "openclaw rawInput 经 ACP 映射后收集；bash command 不收"
         );
@@ -1072,12 +1295,16 @@ mod tests {
         let line = r#"{"type":"assistant","timestamp":"2026-09-15T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"/tmp/proj/src/main.rs","content":"fn main(){}"}}]}}"#;
         std::fs::write(proj.join(format!("{sid}.jsonl")), format!("{line}\n")).unwrap();
         assert_eq!(
-            extract_file_paths_with(tmp.path(), "claude", sid),
+            paths_of(&extract_file_paths_with(tmp.path(), "claude", sid, 200).0),
             vec!["/tmp/proj/src/main.rs".to_string()],
             "全链路：content 层读取 → tool-call 参数提取"
         );
         // 会话不存在 → 空表（不 Err，文件面板是增强能力）
-        assert!(extract_file_paths_with(tmp.path(), "claude", "missing").is_empty());
+        assert!(
+            extract_file_paths_with(tmp.path(), "claude", "missing", 200)
+                .0
+                .is_empty()
+        );
     }
 
     /// 终审 Important 1：/session-files 与 /session-messages 数据同源——DSH_HOME /
@@ -1100,19 +1327,25 @@ mod tests {
 
         let dsh_env = dsh_env_dir.path().to_str().unwrap().to_string();
         assert_eq!(
-            extract_file_paths_with_env(
-                tmp.path(),
-                Some(dsh_env.as_str()),
-                None,
-                "dsh",
-                "session-env"
+            paths_of(
+                &extract_file_paths_with_env(
+                    tmp.path(),
+                    Some(dsh_env.as_str()),
+                    None,
+                    "dsh",
+                    "session-env",
+                    200,
+                )
+                .0
             ),
             vec!["/tmp/proj/src/env.rs".to_string()],
             "DSH_HOME 重定向必须作用到文件面板提取（与详情页消息同源）"
         );
         // env 未设形态（None）→ 回落 home/.dsh → 无数据 → 空表
         assert!(
-            extract_file_paths_with_env(tmp.path(), None, None, "dsh", "session-env").is_empty()
+            extract_file_paths_with_env(tmp.path(), None, None, "dsh", "session-env", 200)
+                .0
+                .is_empty()
         );
 
         // ---- kimi：会话数据只在 KIMI_CODE_HOME 根下 ----
@@ -1141,12 +1374,24 @@ mod tests {
 
         let kimi_env = kimi_env_dir.path().to_str().unwrap().to_string();
         assert_eq!(
-            extract_file_paths_with_env(tmp.path(), None, Some(kimi_env.as_str()), "kimi", T9_UUID),
+            paths_of(
+                &extract_file_paths_with_env(
+                    tmp.path(),
+                    None,
+                    Some(kimi_env.as_str()),
+                    "kimi",
+                    T9_UUID,
+                    200
+                )
+                .0
+            ),
             vec!["/tmp/proj/src/kimi-env.rs".to_string()],
             "KIMI_CODE_HOME 重定向必须作用到文件面板提取（与详情页消息同源）"
         );
         assert!(
-            extract_file_paths_with_env(tmp.path(), None, None, "kimi", T9_UUID).is_empty(),
+            extract_file_paths_with_env(tmp.path(), None, None, "kimi", T9_UUID, 200)
+                .0
+                .is_empty(),
             "env 未设形态回落 ~/.kimi-code → 无数据 → 空表"
         );
     }

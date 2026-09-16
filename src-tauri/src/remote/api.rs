@@ -175,12 +175,15 @@ pub async fn host(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
 }
 
 /// GET /m/api/v1/session-files?agent_type=&session_id=（M3 Task 8）
-/// 该会话工具调用涉及的文件路径表：`{files: [...]}`（去重保序，泛化提取见
-/// files::extract_file_paths 的控制者裁决）。移动端详情页用它做消息正文的
-/// 文件路径链接化（点开 → /file 预览）。
+/// GET /m/api/v1/session-files?agent_type=&session_id=&limit=（M3 Task 8 / M3+ 富化）
+/// 该会话工具调用涉及的文件表：`{files: [{path, lastSeq, lastTs, hits}], truncated}`
+/// （结构化条目 + 出现序排序，泛化提取见 files::extract_file_paths）。移动端
+/// 详情页一份数据两用：正文路径链接化（取 path 集）+ 文件面板列表（全字段）。
 /// - 缺参（agent_type / session_id）或空串 → 400 BAD_REQUEST；
-/// - 提取失败 / 会话不存在 → 200 空表 `{files: []}`——文件链接化是增强能力，
-///   失败不阻塞详情页，也无从区分「无文件」与「读不到」（不给探测面）；
+/// - limit 缺省 200（clamp [1,1000] 由 read_session_messages_impl 内部完成，直接透传）；
+/// - truncated = 该档位窗口下头部被截断（还有更早文件），面板据此提示；
+/// - 提取失败 / 会话不存在 → 200 空表 `{files: [], truncated: false}`——文件面板
+///   是增强能力，失败不阻塞详情页，也无从区分「无文件」与「读不到」（不给探测面）；
 /// - 提取要读一遍会话消息流（文件/SQLite IO），`spawn_blocking` 包裹
 ///   （sessions handler 同一先例），不堵 tokio worker。
 pub async fn session_files(
@@ -201,19 +204,25 @@ pub async fn session_files(
     else {
         return Err(StatusCode::BAD_REQUEST);
     };
+    // 追溯档位（M3+ 用户裁决 3）：缺省 200，与详情页默认 limit 同标尺
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
     // path_source 不可 clone（Box<dyn Fn>）：整体 move 进阻塞线程池调用（与
     // session_messages handler 的写法一致）
     let st = st.clone();
-    let files = tokio::task::spawn_blocking(move || (st.path_source)(agent.as_str(), sid.as_str()))
-        .await
-        .map_err(|e| {
-            log::error!("文件路径提取任务异常: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let (files, truncated) =
+        tokio::task::spawn_blocking(move || (st.path_source)(agent.as_str(), sid.as_str(), limit))
+            .await
+            .map_err(|e| {
+                log::error!("文件路径提取任务异常: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     Ok((
         // 门禁下的私有数据（会话涉及的文件路径），禁止中间层缓存（sessions 同规）
         [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({ "files": files })),
+        Json(serde_json::json!({ "files": files, "truncated": truncated })),
     )
         .into_response())
 }
