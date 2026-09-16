@@ -24,6 +24,57 @@ export async function pair(token: string): Promise<PairResult> {
   return { ok: r.ok };
 }
 
+// ==== M4 T2：请求接入三端点封装（/pair/request | /pair/poll | /pair/confirm）====
+
+export interface PairRequestResult {
+  requestId: string;
+  expiresAt: number;
+}
+
+/** 请求接入（M4 T2）：429（队列满/同 IP 占位）抛 ApiError，message 即 error 串 */
+export async function requestPairing(name: string): Promise<PairRequestResult> {
+  const r = await fetch("/m/api/v1/pair/request", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (r.status === 429) {
+    const v = (await r.json()) as { error: string };
+    throw new ApiError(429, v.error ?? "busy");
+  }
+  if (!r.ok) throw new ApiError(r.status, "request failed");
+  return (await r.json()) as PairRequestResult;
+}
+
+export type PairPollStatus = "pending" | "approved" | "expired";
+
+/** 轮询审批结果：approved 时服务端已 Set-Cookie，客户端只需回调切换视图 */
+export async function pollPairing(requestId: string): Promise<PairPollStatus> {
+  const r = await fetch("/m/api/v1/pair/poll", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId }),
+  });
+  const v = (await r.json()) as { status: PairPollStatus };
+  return v.status;
+}
+
+export interface ConfirmResult {
+  ok: boolean;
+  error?: string;
+  triesLeft?: number;
+}
+
+/** 4 位确认码等效授权：error ∈ wrong/exhausted/expired/cap_full（文案映射在 PairPage） */
+export async function confirmPairing(requestId: string, code: string): Promise<ConfirmResult> {
+  const r = await fetch("/m/api/v1/pair/confirm", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, code }),
+  });
+  return (await r.json()) as ConfirmResult;
+}
+
 export async function fetchSessions<T>(): Promise<T | null> {
   const r = await fetch("/m/api/v1/sessions");
   if (r.status === 403) return null; // 设备失效 → 回配对页
