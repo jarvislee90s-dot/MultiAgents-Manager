@@ -270,9 +270,12 @@ pub async fn pair_poll(
             // 旧 requestId 幂等重 poll 会经本路径绕过「三入口同门」把第 4 台
             // 设备落库（Task 7 评审 Minor TOCTOU 被端到端坐实）。满员时维持
             // pending 观感（腾位后下次 poll 自动补上凭证）。
+            // 注意取值顺序：max 必须在 store.with 之外求值——with 持 DB 锁不可重入，
+            // 闭包内再走 get_setting 会自死锁（E2E 实测进程冻结的根因）
+            let max = (st.max_devices_source)();
             let cap = st
                 .store
-                .with(|c| crate::remote::pairing::device_count(c) >= (st.max_devices_source)());
+                .with(|c| crate::remote::pairing::device_count(c) >= max);
             if cap {
                 super::events::audit("pair_poll_deferred_cap", &format!("device={device}"));
                 return Json(serde_json::json!({ "status": "pending" })).into_response();
