@@ -354,16 +354,58 @@ pub fn remote_confirm_public() -> Result<(), String> {
 }
 
 /// 局域网地址枚举（0.0.0.0 模式给手机可输入的候选）。
-/// 实现用 std::net UDP connect 技巧零依赖：`connect` 只决定默认对端、**不发包**，
-/// 失败（无路由 / 离线）返回空表
+/// Bug 7（M3 验收）：旧实现只做 UDP connect 技巧（`connect` 只决定默认对端、
+/// **不发包**）——运行时快照最多 1 个 IP（仅默认路由网卡）、无外网路由瞬间返回
+/// 空表 → display_host_for 回落 127.0.0.1（= 验收第 2 条偶发不过的根因），多网卡
+/// 机器候选缺失。新实现：UDP 默认路由 IP 优先 + sysinfo 全量 UP 网卡枚举追加，
+/// 去重保序（UDP 恒首位——display_host_for 取 first 的语义不变）
 fn local_lan_ips() -> Vec<String> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0")
+    let udp = std::net::UdpSocket::bind("0.0.0.0:0")
         .ok()
-        .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s));
-    s.and_then(|s| s.local_addr().ok())
-        .map(|a| a.ip().to_string())
-        .into_iter()
-        .collect()
+        .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s))
+        .and_then(|s| s.local_addr().ok())
+        .map(|a| a.ip().to_string());
+    merge_lan_candidates(udp, enumerated_lan_ips())
+}
+
+/// sysinfo 全量网卡 IPv4 枚举（Bug 7）：仅收非回环 / 非链路本地 / 非未指定地址。
+/// 虚拟网卡（WSL / Hyper-V vEthernet）**不排除**——多候选无害（设置页逐条展示），
+/// 主显示 url 仍由 UDP 默认路由首位决定，虚拟网卡不会挤掉首位
+fn enumerated_lan_ips() -> Vec<String> {
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let mut out = Vec::new();
+    for data in networks.list().values() {
+        for net in data.ip_networks() {
+            if let std::net::IpAddr::V4(v4) = net.addr {
+                if !(v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()) {
+                    out.push(v4.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// LAN 候选合并内核（纯函数，Bug 7 可测核心）：UDP 默认路由恒首位 → 枚举候选
+/// 去重保序追加 → 回环 / 非法 / 非 IPv4 剔除。UDP 探测失败或只探到回环时由
+/// 枚举结果兜底——消灭「无外网路由瞬间回落 127.0.0.1」的主场景
+fn merge_lan_candidates(udp: Option<String>, enumerated: Vec<String>) -> Vec<String> {
+    fn try_push(ip: Option<String>, out: &mut Vec<String>) {
+        let Some(ip) = ip else { return };
+        let valid = ip
+            .parse::<std::net::Ipv4Addr>()
+            .map(|v| !(v.is_loopback() || v.is_link_local() || v.is_unspecified()))
+            .unwrap_or(false);
+        if valid && !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    let mut out = Vec::new();
+    try_push(udp, &mut out);
+    for ip in enumerated {
+        try_push(Some(ip), &mut out);
+    }
+    out
 }
 
 /// 主显示 host 选取内核（纯函数，不触网络）：0.0.0.0 通配绑定时取局域网候选首个
@@ -689,6 +731,49 @@ mod tests {
         assert_eq!(
             display_url_for("127.0.0.1", 9420, vec![]),
             "http://127.0.0.1:9420/m"
+        );
+    }
+
+    /// Bug 7（M3 验收）：LAN 候选合并内核——UDP 默认路由恒首位、去重保序、
+    /// 回环剔除、UDP 空时枚举兜底（消灭回落 127.0.0.1 的主场景）
+    #[test]
+    fn merge_lan_candidates_orders_dedups_and_falls_back() {
+        // UDP 优先 + 去重保序（枚举中的同 IP 不重复入列）
+        assert_eq!(
+            merge_lan_candidates(
+                Some("192.168.1.5".into()),
+                vec!["192.168.1.5".into(), "10.0.0.2".into(), "172.16.0.3".into()]
+            ),
+            vec![
+                "192.168.1.5".to_string(),
+                "10.0.0.2".to_string(),
+                "172.16.0.3".to_string()
+            ]
+        );
+        // 回环 / 非法串 / 非 IPv4 剔除
+        assert_eq!(
+            merge_lan_candidates(
+                Some("127.0.0.1".into()),
+                vec![
+                    "127.0.0.1".into(),
+                    "10.0.0.2".into(),
+                    "not-an-ip".into(),
+                    "::1".into()
+                ]
+            ),
+            vec!["10.0.0.2".to_string()]
+        );
+        // UDP 探测失败（None）→ 枚举兜底（旧实现此场景恒空表 → 回落 127.0.0.1）
+        assert_eq!(
+            merge_lan_candidates(None, vec!["192.168.1.5".into()]),
+            vec!["192.168.1.5".to_string()]
+        );
+        // 双双为空 → 空表（display_host_for 仍回落 127.0.0.1 作最后兜底）
+        assert!(merge_lan_candidates(None, vec![]).is_empty());
+        // UDP 只探到回环（无外网路由的隔离网段）→ 剔除后由枚举兜底
+        assert_eq!(
+            merge_lan_candidates(Some("127.0.0.1".into()), vec!["10.0.0.9".into()]),
+            vec!["10.0.0.9".to_string()]
         );
     }
 
