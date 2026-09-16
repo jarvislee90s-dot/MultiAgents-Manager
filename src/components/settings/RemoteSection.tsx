@@ -155,7 +155,10 @@ export function RemoteSection() {
     }
   };
 
-  const lanUrls = status?.lanUrls ?? [];
+  // Bug 6（M3 验收）：bind=0.0.0.0 时 url 与 lanUrls[0] 是同一 IP 生成的同一串
+  // （后端两字段各有消费方、语义不动）——展示层过滤与主 url 全等的候选，避免
+  // 同一地址渲染两行
+  const lanUrls = (status?.lanUrls ?? []).filter((u) => u !== status?.url);
 
   return (
     <div className="space-y-4">
