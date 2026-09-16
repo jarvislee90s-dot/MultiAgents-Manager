@@ -46,7 +46,8 @@
     "show": "Show Window",
     "quit": "Quit",
     "petShow": "Show Pet",
-    "petHide": "Hide Pet"
+    "petHide": "Hide Pet",
+    "remote": "Remote Access"
   },
   "updater": {
     "checkForUpdates": "Check for Updates",

@@ -602,6 +602,40 @@ pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), 
     Ok(())
 }
 
+// ============================================================
+// M4 T4：托盘远程入口（system_tray 消费的展示快照）
+// ============================================================
+
+/// 托盘展示纯核（M4 T4）：enabled=false 不给地址（无服务可连）；
+/// 隧道开地址优先（T1a 同口径）
+pub fn tray_display_from(
+    enabled: bool,
+    tunnel_url: Option<String>,
+    bind_url: String,
+) -> (bool, String) {
+    if !enabled {
+        return (false, String::new());
+    }
+    (true, tunnel_url.unwrap_or(bind_url))
+}
+
+/// 托盘快照（system_tray 消费；与 remote_status 同源不复制聚合——直调各单点）
+pub fn tray_display() -> (bool, String) {
+    let (bind, port) = bind_and_port().unwrap_or(("127.0.0.1".to_string(), DEFAULT_PORT));
+    let enabled = status_enabled(
+        crate::database::dao::settings::get_setting(KEY_ENABLED)
+            .map(|v| v == "true")
+            .unwrap_or(false),
+        handle_is_live(&SERVER_HANDLE.lock().unwrap()),
+    );
+    let tun = tunnel::snapshot();
+    tray_display_from(
+        enabled,
+        tun.url.filter(|_| tun.error.is_none()),
+        display_url_for(&bind, port, local_lan_ips()),
+    )
+}
+
 /// 局域网地址枚举（0.0.0.0 模式给手机可输入的候选）。
 /// Bug 7（M3 验收）：旧实现只做 UDP connect 技巧（`connect` 只决定默认对端、
 /// **不发包**）——运行时快照最多 1 个 IP（仅默认路由网卡）、无外网路由瞬间返回
@@ -1289,6 +1323,34 @@ mod tests {
         assert_eq!(max_devices_from(Some("1".into())), 1);
         assert_eq!(max_devices_from(Some("99".into())), 10); // clamp 上限
         assert_eq!(max_devices_from(Some("x".into())), 3); // 乱串回落默认
+    }
+
+    // ==== M4 T4 托盘展示纯核 ====
+
+    /// 托盘展示纯核：隧道开（地址有效）→ (true, 隧道地址)；无隧道 → (true,
+    /// 绑定口径地址)；enabled=false → (false, 空串)——无服务可连时不给地址
+    /// （托盘地址项据此禁用并展示占位「—」）
+    #[test]
+    fn tray_display_prefers_tunnel_url() {
+        // 隧道开 → 隧道地址优先（T1a 同口径）
+        assert_eq!(
+            tray_display_from(
+                true,
+                Some("https://mam.example.asia".into()),
+                "http://192.168.1.5:9420/m".into()
+            ),
+            (true, "https://mam.example.asia".into())
+        );
+        // 开且无隧道 → 绑定口径地址
+        assert_eq!(
+            tray_display_from(true, None, "http://192.168.1.5:9420/m".into()),
+            (true, "http://192.168.1.5:9420/m".into())
+        );
+        // 关 → 不给地址（enabled=false 时隧道/绑定地址一并丢弃）
+        assert_eq!(
+            tray_display_from(false, None, "http://127.0.0.1:9420/m".into()),
+            (false, String::new())
+        );
     }
 }
 

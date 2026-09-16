@@ -19,6 +19,8 @@ export function LanguageToggle() {
         petText: loadVisible()
           ? t("tray.petHide", { lng: newLang })
           : t("tray.petShow", { lng: newLang }),
+        // M4 T4：远程开关项标签随语言重建（勾选态 Rust 侧自查）
+        remoteOnText: t("tray.remote", { lng: newLang }),
       });
     } catch (error) {
       console.error("Failed to update tray menu:", error);

@@ -21,8 +21,9 @@ fn update_tray_menu(
     show_text: String,
     quit_text: String,
     pet_text: String,
+    remote_on_text: String,
 ) -> Result<(), String> {
-    plugins::system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text)
+    plugins::system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text, &remote_on_text)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
