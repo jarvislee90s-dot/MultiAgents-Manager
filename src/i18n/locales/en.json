@@ -285,6 +285,8 @@
       "save": "Save",
       "clear": "Clear binding"
     },
+    "collapseSection": "Collapse section",
+    "expandSection": "Expand section",
     "resident": {
       "toggle": "Resident lock (exempt from preset disable/stash)"
     },

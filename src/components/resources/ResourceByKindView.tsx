@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useState, type CSSProperties, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -25,6 +25,8 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import {
   checkSkillTargetType,
@@ -291,6 +293,38 @@ export function ResourceByKindView() {
       const next = order[(order.indexOf(prev[kind]) + 1) % order.length];
       return { ...prev, [kind]: next };
     });
+  };
+
+  // 分组折叠（用户反馈：名单可能特别长，翻阅成本高）：段头整行可点收起/展开，
+  // 状态存 localStorage——切到「按工具」视图再切回来也不丢
+  const COLLAPSED_KEY = "mam.resourceView.collapsed";
+  const [collapsed, setCollapsed] = useState<Record<ResourceKind, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_KEY);
+      return raw
+        ? (JSON.parse(raw) as Record<ResourceKind, boolean>)
+        : { skill: false, mcp: false, plugin: false };
+    } catch {
+      return { skill: false, mcp: false, plugin: false };
+    }
+  });
+  const toggleCollapsed = (kind: ResourceKind) => {
+    setCollapsed((prev) => {
+      const next = { ...prev, [kind]: !prev[kind] };
+      try {
+        localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+      } catch {
+        // 存储不可用（隐私模式等）→ 仅本会话内生效
+      }
+      return next;
+    });
+  };
+  // 段头键盘可达：Enter/Space 等价点击
+  const onSectionKeyDown = (kind: ResourceKind) => (e: KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggleCollapsed(kind);
+    }
   };
 
   const applySort = <T extends { name: string }>(items: T[], kind: ResourceKind): T[] => {
@@ -625,11 +659,24 @@ export function ResourceByKindView() {
 
         {/* Skills */}
         <div className="mb-4">
-          <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+          <h4
+            className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
+            aria-expanded={!collapsed.skill}
+            title={collapsed.skill ? t("resources.expandSection") : t("resources.collapseSection")}
+            onClick={() => toggleCollapsed("skill")}
+            onKeyDown={onSectionKeyDown("skill")}
+            tabIndex={0}
+            role="button"
+          >
+            {collapsed.skill ? (
+              <ChevronRight className="h-4 w-4" />
+            ) : (
+              <ChevronDown className="h-4 w-4" />
+            )}
             <Package className="h-4 w-4" />
             {t("resources.skillsCount", { n: filteredSkills.length })}
           </h4>
-          {filteredSkills.length === 0 ? (
+          {collapsed.skill ? null : filteredSkills.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
               {t("resources.noSkillsHint")}
@@ -742,19 +789,36 @@ export function ResourceByKindView() {
 
         {/* MCP */}
         <div className="mb-4">
-          <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+          <h4
+            className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
+            aria-expanded={!collapsed.mcp}
+            title={collapsed.mcp ? t("resources.expandSection") : t("resources.collapseSection")}
+            onClick={() => toggleCollapsed("mcp")}
+            onKeyDown={onSectionKeyDown("mcp")}
+            tabIndex={0}
+            role="button"
+          >
+            {collapsed.mcp ? (
+              <ChevronRight className="h-4 w-4" />
+            ) : (
+              <ChevronDown className="h-4 w-4" />
+            )}
             <Link2 className="h-4 w-4" />
             {t("resources.mcpsCount", { n: filteredMcp.length })}
             <Button
               size="sm"
               variant="ghost"
               className="ml-auto h-6 px-2 text-[10px]"
-              onClick={() => setMcpDialogOpen(true)}
+              onClick={(e) => {
+                // 阻断冒泡：添加按钮不应触发分组折叠
+                e.stopPropagation();
+                setMcpDialogOpen(true);
+              }}
             >
               {t("resources.addWithPlus")}
             </Button>
           </h4>
-          {filteredMcp.length === 0 ? (
+          {collapsed.mcp ? null : filteredMcp.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
               {t("mcp.empty")}
@@ -862,11 +926,24 @@ export function ResourceByKindView() {
 
         {/* Plugins */}
         <div>
-          <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+          <h4
+            className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
+            aria-expanded={!collapsed.plugin}
+            title={collapsed.plugin ? t("resources.expandSection") : t("resources.collapseSection")}
+            onClick={() => toggleCollapsed("plugin")}
+            onKeyDown={onSectionKeyDown("plugin")}
+            tabIndex={0}
+            role="button"
+          >
+            {collapsed.plugin ? (
+              <ChevronRight className="h-4 w-4" />
+            ) : (
+              <ChevronDown className="h-4 w-4" />
+            )}
             <Plug className="h-4 w-4" />
             {t("resources.pluginsCount", { n: filteredPlugins.length })}
           </h4>
-          {filteredPlugins.length === 0 ? (
+          {collapsed.plugin ? null : filteredPlugins.length === 0 ? (
             <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
               <Info className="h-3.5 w-3.5" />
               {t("resources.noPlugins")}
