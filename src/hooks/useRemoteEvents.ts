@@ -31,7 +31,7 @@ export function useRemoteEvents() {
           await notify(
             t("settings.remote.pairNotifyTitle"),
             t("settings.remote.pairNotifyBody", {
-              name: e.payload.name || t("settings.remote.pairNotifyUnknown"),
+              name: e.payload.name || t("settings.remote.pendingUnknown"),
               ip: e.payload.ip,
             })
           );
