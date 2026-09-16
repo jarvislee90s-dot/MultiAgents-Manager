@@ -555,6 +555,51 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     ).toBe(before);
   }, 15000);
 
+  it("Task 3 集成：面板 → 点文件 → 预览带返回按钮 → 返回列表（布局保持）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "hi" })];
+    // 后端契约：已按 lastSeq 降序（app.rs seq 9 在前，doc.md seq 5 在后）
+    routes.files = [
+      fileEntry("/tmp/proj/src/app.rs", { lastSeq: 9 }),
+      fileEntry("/p/doc.md", { lastSeq: 5 }),
+    ];
+    routes.fileContent = "fn main() {}";
+    routes.fileMime = "text/rust";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // 打开面板 → 列表视图（窄屏全屏）
+    fireEvent.click(await screen.findByTestId("file-panel-button"));
+    const shell = await screen.findByTestId("preview-shell");
+    expect(shell.getAttribute("data-view")).toBe("list");
+    // 面板列表渲染（后端顺序）
+    expect(screen.getByTestId("file-row-0-open").textContent).toContain("app.rs");
+    expect(screen.getByTestId("file-row-1-open").textContent).toContain("doc.md");
+    // 点文件名 → 单文件预览 + 返回按钮
+    fireEvent.click(screen.getByTestId("file-row-0-open"));
+    expect((await screen.findByTestId("preview-shell")).getAttribute("data-view")).toBe("file");
+    expect((await screen.findByTestId("preview-code")).textContent).toContain("fn main() {}");
+    // 从面板进入 → 有返回按钮
+    const backBtn = screen.getByTestId("preview-back-list");
+    expect(backBtn.getAttribute("aria-label")).toBe("返回文件列表");
+    // 返回列表：视图切回 list，布局 mode 保持
+    fireEvent.click(backBtn);
+    const back = screen.getByTestId("preview-shell");
+    expect(back.getAttribute("data-view")).toBe("list");
+    expect(back.getAttribute("data-mode")).toBe("fullscreen");
+  }, 15000);
+
+  it("Task 3：从消息正文链接进入预览无返回按钮（来源区分）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    await screen.findByTestId("file-preview");
+    expect(screen.queryByTestId("preview-back-list")).toBeNull();
+  });
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];
