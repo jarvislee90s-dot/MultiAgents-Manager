@@ -1,6 +1,8 @@
 # M4 外网全链路（配对管控 + 隧道 + 保活 + 托盘）实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **v2（2026-09-16）**：三文档对照核查（M4 spec v1.1 / 一期 v6 / 宪法 D1-D17）+ 代码实证修订 14 处——详见文末「对照核查记录」。
 
 **Goal:** 交付 M4 五组能力——T0 前置清账（SSE 即时断连 / TLS 撤回文案）、T1 外部通道（命名隧道主路径 + 临时隧道 + cloudflared 获取）、T2 审批配对 + 设备花名册、T3 电源保活、T4 托盘远程入口；外网真机验收全绿即宪法一期验收达成。
 
@@ -295,19 +297,22 @@ git commit -m "feat(m4-t0a): SSE 连接注册表——吊销/停止即时断连�
 
 - [ ] **Step 1: 写失败测试**
 
-`tests/settings/remoteSection.test.tsx` 追加（沿用文件头既有 `invokeMock` / status 夹具模式；`sonner` 的 toast 需 mock——文件若未 mock 则在顶部补）：
+`tests/settings/remoteSection.test.tsx` 追加（沿用文件头既有 `invokeMock` / status 夹具模式；sonner mock 必须放**文件顶部**——`vi.mock` 会被提升，写在 `it()` 内引用局部变量会因 hoisting 报错）：
 
 ```tsx
+// ---- 文件顶部（与既有 vi.mock("@tauri-apps/api/core") 并列）----
+const { toastInfoMock } = vi.hoisted(() => ({ toastInfoMock: vi.fn() }));
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), {
+    info: toastInfoMock,
+    success: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
+// ---- 用例----
 // M4 T0b：TLS 确认不可在线撤回——取消勾选回弹 + toast 说明，复选框旁常驻文案
 it("tls ack: uncheck snaps back with toast, stays checked", async () => {
-  const toastInfo = vi.fn();
-  vi.mock("sonner", () => ({
-    toast: Object.assign(vi.fn(), {
-      info: toastInfo,
-      success: vi.fn(),
-      error: vi.fn(),
-    }),
-  }));
   // bind=0.0.0.0 + acked=true 才渲染复选框
   invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     if (cmd === "remote_status") return Promise.resolve({ ...lanStatus, enabled: true });
@@ -323,7 +328,7 @@ it("tls ack: uncheck snaps back with toast, stays checked", async () => {
   // 取消勾选：仍选中 + toast 提示
   fireEvent.click(cb);
   expect(cb).toBeChecked(); // 回弹（受控于 acked，本就 snaps back；本任务补 toast 与文案）
-  await waitFor(() => expect(toastInfo).toHaveBeenCalled());
+  await waitFor(() => expect(toastInfoMock).toHaveBeenCalled());
 });
 ```
 
@@ -604,16 +609,17 @@ pub fn bin_name() -> &'static str {
     if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" }
 }
 
-/// cloudflared 固定放置路径（spec T1d：~/.mam/bin/，手动放置旁路即放这里）
+/// cloudflared 固定放置路径（spec T1d：~/.mam/bin/，手动放置旁路即放这里）。
+/// 数据目录构造沿代码库先例（manifest.rs：dirs::home_dir().unwrap_or_default().join(".mam")，
+/// 无统一 helper——不新造，保持散用先例）
 pub fn cloudflared_path() -> PathBuf {
-    crate::database::mam_data_dir() // 若无此函数则用 dirs::home_dir().join(".mam")
-        .unwrap_or_else(|| PathBuf::from(".mam"))
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
         .join("bin")
         .join(bin_name())
 }
 ```
-
-**注**：先 `grep -n "fn mam_data_dir\|\.mam" src-tauri/src/database/mod.rs` 确认数据目录函数名；若为 `dirs::home_dir()` 散用则按现状写 `dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".mam")`。
 
 ```rust
 /// 下载源（纯函数）：官方 GitHub Releases latest 固定资产名（2026-09-16 spec T1d 自决默认）
@@ -817,10 +823,10 @@ static SNAPSHOT: Lazy<Mutex<TunnelStatus>> = Lazy::new(|| {
 pub fn snapshot() -> TunnelStatus { SNAPSHOT.lock().unwrap().clone() }
 fn set_snapshot(f: impl FnOnce(&mut TunnelStatus)) { f(&mut SNAPSHOT.lock().unwrap()); }
 
-/// 运行句柄：stop 信号 + 子进程共享引用 + supervisor 任务句柄
+/// 运行句柄：stop 信号 + supervisor 任务句柄（子进程由 supervisor 全权持有，
+/// stop 经标志位传导——supervisor 内 kill_on_drop 保证 abort 时子进程必死）
 struct TunnelHandle {
     stop: Arc<AtomicBool>,
-    child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
     supervisor: tauri::async_runtime::JoinHandle<()>,
 }
 static TUNNEL: Lazy<Mutex<Option<TunnelHandle>>> = Lazy::new(|| Mutex::new(None));
@@ -872,32 +878,25 @@ pub fn start_if_configured(port: u16) {
     let supervisor = tauri::async_runtime::spawn(async move {
         supervise(mode.to_string(), port, stop2).await;
     });
-    *h = Some(TunnelHandle { stop, child: Arc::new(tokio::sync::Mutex::new(dummy_child())), supervisor });
-    // 注：child 占位由 supervise 内部重建——见 supervise 注释
-}
-
-fn dummy_child() -> tokio::process::Child {
-    unreachable!("占位不可达：TunnelHandle.child 在 supervise 首圈被真实子进程替换")
+    *h = Some(TunnelHandle { stop, supervisor });
 }
 ```
-
-**实现修正**（占位不可取——改为 supervisor 全权持有子进程，`TunnelHandle` 只留 stop + supervisor；kill 经由 stop 标志 + supervisor 内 kill）：
-
-```rust
-struct TunnelHandle {
-    stop: Arc<AtomicBool>,
-    supervisor: tauri::async_runtime::JoinHandle<()>,
-}
 
 /// 守护主循环：确保二进制 → spawn → 监听 stderr(quick 解析地址) → wait → 退避重启
 async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
     set_snapshot(|s| { s.mode = mode.clone(); s.url = None; s.error = None; });
-    // 获取二进制（可能触发下载——秒到分钟级，全程不阻塞调用方）
-    let dl = |url: &str, dest: &Path| {
-        let (u, d) = (url.to_string(), dest.to_path_buf());
-        tauri::async_runtime::block_on(download_to(&u, &d))
-    };
-    let bin = match ensure_with(&cloudflared_path(), Box::new(dl)) {
+    // 获取二进制（可能触发下载——秒到分钟级）。ensure_with 的下载器是**同步闭包**，
+    // 内部需要 async 的 download_to——必须在 spawn_blocking 线程里 block_on：
+    // supervise 本身是 async 任务，直接 tauri::async_runtime::block_on 会死锁/panic
+    // （async 上下文内禁止 block_on；blocking 线程池无此限制）
+    let bin_path = cloudflared_path();
+    let bin = match tokio::task::spawn_blocking(move || {
+        let dl = |url: &str, dest: &Path| tauri::async_runtime::block_on(download_to(url, dest));
+        ensure_with(&bin_path, Box::new(dl))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("获取任务异常: {e}")))
+    {
         Ok(p) => p,
         Err(e) => {
             set_snapshot(|s| s.error = Some(format!("cloudflared 获取失败: {e}；可手动放置到 ~/.mam/bin/{}", bin_name())));
@@ -905,11 +904,12 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         }
     };
     let mut failures: u32 = 0;
-    let mut last_url: Option<String> = None;
     loop {
         if stop.load(Ordering::Relaxed) { break; }
+        let started_at = std::time::Instant::now();
         let mut cmd = tokio::process::Command::new(&bin);
-        cmd.arg("tunnel").arg("--no-autoupdate");
+        cmd.arg("tunnel").arg("--no-autoupdate")
+            .kill_on_drop(true); // supervisor 被 abort 时子进程必死（无孤儿）
         if mode == KEY_CHANNEL_VALUE_QUICK {
             cmd.arg("--url").arg(format!("http://127.0.0.1:{port}"));
         } else {
@@ -922,20 +922,32 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
             set_snapshot(|s| s.error = Some(format!("cloudflared 启动失败: {e}")));
             return;
         }};
-        // stderr 读取任务（quick 地址解析；named 也无害——named stderr 无 trycloudflare 域名）
+        // stderr 读取任务（地址解析：quick=trycloudflare 行；named=自有子域行）
         let stderr = child.stderr.take();
-        let stop_r = stop.clone();
+        let mode_for_stderr = mode.clone();
         let url_sink = Arc::new(Mutex::new(Option::<String>::None));
         let url_sink2 = url_sink.clone();
         if let Some(err) = stderr {
             tauri::async_runtime::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
+                let quick = mode_for_stderr == KEY_CHANNEL_VALUE_QUICK;
                 let mut lines = BufReader::new(err).lines();
                 loop {
                     match lines.next_line().await {
                         Ok(Some(line)) => {
-                            if let Some(u) = parse_quick_url(&line) {
-                                *url_sink2.lock().unwrap() = Some(u);
+                            let u = if quick { parse_quick_url(&line) } else { parse_named_url(&line) };
+                            if let Some(u) = u {
+                                let fresh = {
+                                    let mut g = url_sink2.lock().unwrap();
+                                    let fresh = g.as_ref() != Some(&u);
+                                    *g = Some(u.clone());
+                                    fresh
+                                };
+                                if fresh {
+                                    set_snapshot(|s| s.url = Some(u.clone()));
+                                    // spec T1c：地址变化桌面通知（含首次拿到地址）
+                                    crate::remote::events::emit_ui("remote-tunnel-address", serde_json::json!({"url": u}));
+                                }
                             }
                         }
                         _ => break,
@@ -943,12 +955,14 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                 }
             });
         }
-        // 等子进程退出（或被 stop 方 kill）
+        // 等子进程退出（或被 stop 方经 kill_on_drop/标志位终止）
         let status = child.wait().await;
         if stop.load(Ordering::Relaxed) { break; } // 主动停止不算失败
-        // quick：地址可能已解析——先取走
-        let new_url = url_sink.lock().unwrap().take();
-        let _ = &mut last_url;
+        // 稳定运行 ≥60s 后的退出视为「新失败」重置计数——否则数周内三次偶发闪断
+        // 就会累计到永久放弃（backoff 给 vidas 3 次是**连续**失败语义，spec T1b）
+        if started_at.elapsed() >= std::time::Duration::from_secs(60) {
+            failures = 0;
+        }
         failures += 1;
         match backoff_ms(failures) {
             Some(ms) => {
@@ -957,31 +971,26 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
             }
             None => {
                 set_snapshot(|s| { s.error = Some("cloudflared 连续失败 3 次，已停止守护".into()); });
-                crate::remote::events::emit_ui("remote-tunnel-error", snapshot());
+                // spec T1b：放弃时桌面通知报错（Task 8 的 useRemoteEvents 监听）
+                crate::remote::events::emit_ui("remote-tunnel-error", serde_json::json!({"error": "cloudflared 连续失败 3 次，已停止守护"}));
                 return;
             }
         }
     }
-    let _ = last_url;
 }
-```
 
-**quick 地址/变更通知**：quick 模式下解析到新地址即写快照 + emit（把 stderr 任务里 url 落位处扩为）：
-
-```rust
-                            if let Some(u) = parse_quick_url(&line) {
-                                let fresh = { let mut g = url_sink2.lock().unwrap();
-                                    let fresh = g.as_ref() != Some(&u);
-                                    *g = Some(u.clone()); fresh };
-                                if fresh {
-                                    set_snapshot(|s| s.url = Some(u.clone()));
-                                    // spec T1c：地址变化桌面通知（含首次拿到地址）
-                                    crate::remote::events::emit_ui("remote-tunnel-address", serde_json::json!({"url": u}));
-                                }
-                            }
-```
-
-named 模式的 url：Token 对应子域 MAM 侧不可知（Cloudflare 面板配置），快照 url 置 None、设置页提示「地址以 Cloudflare 面板为准」——**修正**：named 也可从 stderr 解析连接日志里的子域（`INF +--------------------------------------------------------------------------------------------+` 上方会打印 hostname）。保守做法：named url 尝试从 stderr 中 `https://<sub>.<domain>` 行解析；解析不到留 None。复用：写 `parse_named_url(line) -> Option<String>`（含 `https://` 且非 trycloudflare 且非 docs.cloudflare.com 的 host 行）——测试一行即可。
+/// named 地址解析（纯函数）：stderr 中自有子域的 https:// 行——cloudflared run 启动
+/// 横幅打印其 hostname；cloudflare.com 域（docs/trycloudflare）一律排除。
+/// 解析不到留 None——设置页提示「地址以 Cloudflare 面板为准」
+pub fn parse_named_url(line: &str) -> Option<String> {
+    let s = line.find("https://")?;
+    let url = line[s..].split_whitespace().next()?.to_string();
+    let host = url.trim_start_matches("https://");
+    if host.contains("cloudflare.com") || !host.contains('.') {
+        return None;
+    }
+    Some(url)
+}
 
 `stop()` / `restart_if_running(port)`：
 
@@ -1064,19 +1073,21 @@ pub fn pair_url_with_tunnel(tunnel: Option<String>, base_url: String, token: &st
 6. 新 IPC 命令（写设置 + 通道热切换 + 通知）：
 
 ```rust
-/// 通道设置（M4 T1a）：写 KV；运行中热切换（restart_if_running）；成功后广播状态变更
+/// 通道设置（M4 T1a）：写 KV；运行中热切换（restart_if_running）；成功后广播状态变更。
+/// 校验先行（named 必须已有 Token——先写后验会把非法通道落库）
 #[tauri::command]
 pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), String> {
     let mode = tunnel::parse_channel(Some(&channel))
         .ok_or_else(|| format!("通道值非法: {channel}（仅 off/quick/named）"))?;
-    crate::database::dao::settings::set_setting(KEY_CHANNEL, mode);
     if let Some(t) = token {
         crate::database::dao::settings::set_setting(KEY_TUNNEL_TOKEN, t.trim());
     }
-    if mode != "off" && crate::database::dao::settings::get_setting(KEY_TUNNEL_TOKEN)
-        .map(|v| v.trim().is_empty()).unwrap_or(true) && mode == "named" {
+    if mode == tunnel::KEY_CHANNEL_VALUE_NAMED
+        && crate::database::dao::settings::get_setting(KEY_TUNNEL_TOKEN)
+            .map(|v| v.trim().is_empty()).unwrap_or(true) {
         return Err("命名隧道需要填写 Tunnel Token".into());
     }
+    crate::database::dao::settings::set_setting(KEY_CHANNEL, mode);
     let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
     tunnel::restart_if_running(port);
     events::emit_ui("remote-changed", serde_json::json!({"channel": mode}));
@@ -1138,7 +1149,8 @@ it("channel block: renders selector, saves via remote_set_channel, tunnel badge"
   render(<RemoteSection />);
   // 隧道地址条目带「外部通道」徽标且居首
   expect(await screen.findByText(/external channel/i)).toBeInTheDocument();
-  expect(screen.getByText("https://mam-mac.example.asia")).toBeInTheDocument();
+  // URL 同时出现在地址条目与「当前隧道地址」行——用 getAllByText 防多匹配报错
+  expect(screen.getAllByText("https://mam-mac.example.asia").length).toBeGreaterThan(0);
   // 通道三按钮：named 高亮
   const namedBtn = screen.getByRole("button", { name: /named tunnel/i });
   expect(namedBtn).toBeInTheDocument();
@@ -1253,9 +1265,16 @@ const saveToken = async () => {
 )}
 ```
 
-2. 地址条目徽标（`addresses.map` 内，iface 渲染前插）：
+2. 地址条目徽标（`addresses.map` 内）。spec T1a 口径「网卡名一栏标注外部通道」——
+   隧道条目 `iface` 为空串，若走既有 `{a.iface || t("addressLocal")}` 兜底会渲染出
+   「本机」字样与「外部通道」徽标并排自相矛盾：**kind=tunnel 时隐藏 iface 兜底，只出徽标**：
 
 ```tsx
+{a.kind !== "tunnel" && (
+  <span className="text-muted-foreground text-xs">
+    {a.iface || t("settings.remote.addressLocal")}
+  </span>
+)}
 {a.kind === "tunnel" && (
   <span className="rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-600 dark:text-blue-400">
     {t("settings.remote.channelBadge")}
@@ -1299,7 +1318,7 @@ git commit -m "feat(m4-t1a): 设置页外部通道区块（三选一+Token 输�
 - Modify: `src-tauri/src/lib.rs`（generate_handler 注册 5 命令）
 
 **Interfaces:**
-- Produces（Rust）：`approval::ApprovalService{create,approve,poll,confirm,prune,pending}`；`pairing::device_cookie(id)->String`、`device_count(conn)->usize`、`revoke_device(conn,id)->Result<usize,String>`；命令 `remote_pending_requests`、`remote_approve_request(id)`、`remote_devices`、`remote_revoke_device(id)`、`remote_revoke_all_devices`；`mod::is_online(registry_hit,last_seen,now)->bool`；`mod::max_devices()->usize`（KEY_MAX_DEVICES="remote.max_devices"，默认 3，clamp 1..=10）。
+- Produces（Rust）：`approval::ApprovalService{create,approve,poll,confirm,prune,pending}`；`pairing::device_cookie(id)->String`、`device_count(conn)->usize`、`revoke_device(conn,id)->Result<usize,String>`；命令 `remote_pending_requests`、`remote_approve_request(id)`、`remote_devices`、`remote_revoke_device(id)`、`remote_revoke_all_devices`；`mod::is_online(registry_hit,last_seen,now)->bool`；`mod::max_devices_from(Option<String>)->usize`（纯函数，KEY_MAX_DEVICES="remote.max_devices"，默认 3，clamp 1..=10）+ `RemoteState.max_devices_source: Box<dyn Fn() -> usize + Send + Sync>`（注入缝——生产读 KV、测试注入常量；**不直读全局 DAO**，否则端点测试触碰真实 `~/.mam` 违反红线）。
 - Produces（HTTP，均不过闸）：`POST /m/api/v1/pair/request {name}` → `200 {requestId,expiresAt}` | `429 {error:"queue_full"|"ip_busy"}`；`POST /m/api/v1/pair/poll {requestId}` → `200 {status:"pending"|"approved"|"expired", expiresAt}`（approved 附 Set-Cookie）；`POST /m/api/v1/pair/confirm {requestId,code}` → `200 {ok,error?,triesLeft?}`（ok 附 Set-Cookie；error ∈ wrong/exhausted/expired/not_found/cap_full）。
 - Consumes: Task 1 `sse_registry`（吊销断连）、Task 3 `events::emit_ui/audit`。
 
@@ -1313,11 +1332,13 @@ mod tests {
     use super::*;
 
     fn svc() -> ApprovalService {
+        // 三个生成器均为零参随机形态（生产 = 随机 hex；id/设备 id 绝不可位置式——
+        // 请求消费后位置复用会让旧轮询搭上新请求、旧设备 id 撞新设备行）
         ApprovalService::new(
             5 * 60 * 1000, // TTL 5 分钟（spec T2a）
-            Box::new(|i| format!("r{i}")),
+            Box::new(|| "req-x".to_string()),
             Box::new(|| "1234".to_string()),
-            Box::new(|i| format!("dev-{i}")),
+            Box::new(|| "adev-x".to_string()),
         )
     }
 
@@ -1325,34 +1346,47 @@ mod tests {
     fn create_approve_poll_flow() {
         let mut s = svc();
         let r = s.create("我的手机", "UA", "1.1.1.1", 0).unwrap();
-        assert_eq!(r.id, "r0");
+        assert_eq!(r.id, "req-x");
         // 轮询：待批准
-        assert!(matches!(s.poll("r0", 10), PollOutcome::Pending { .. }));
-        // 桌面批准 → poll 拿设备 id（幂等：可重复 poll）
-        assert_eq!(s.approve("r0", 20, || false), ApproveOutcome::Ok("dev-0".into()));
-        assert_eq!(s.poll("r0", 21), PollOutcome::Approved("dev-0".into()));
-        assert_eq!(s.poll("r0", 22), PollOutcome::Approved("dev-0".into()));
+        assert!(matches!(s.poll("req-x", 10), PollOutcome::Pending { .. }));
+        // 桌面批准 → poll 拿设备 id + 设备名（幂等：可重复 poll——落库在 handler 侧，
+        // 花名册要显示手机填的设备名，名字必须随审批结果带出）
+        assert_eq!(
+            s.approve("req-x", 20, || false),
+            ApproveOutcome::Ok { device: "adev-x".into(), name: "我的手机".into() }
+        );
+        assert_eq!(
+            s.poll("req-x", 21),
+            PollOutcome::Approved { device: "adev-x".into(), name: "我的手机".into() }
+        );
+        assert_eq!(
+            s.poll("req-x", 22),
+            PollOutcome::Approved { device: "adev-x".into(), name: "我的手机".into() }
+        );
     }
 
     #[test]
     fn confirm_code_three_strikes() {
         let mut s = svc();
         s.create("d", "UA", "1.1.1.1", 0).unwrap();
-        assert_eq!(s.confirm("r0", "0000", 10), ConfirmOutcome::Wrong(2));
-        assert_eq!(s.confirm("r0", "0000", 11), ConfirmOutcome::Wrong(1));
+        assert_eq!(s.confirm("req-x", "0000", 10), ConfirmOutcome::Wrong(2));
+        assert_eq!(s.confirm("req-x", "0000", 11), ConfirmOutcome::Wrong(1));
         // 第 3 次错 → 作废（exhausted），正确码也不再用
-        assert_eq!(s.confirm("r0", "0000", 12), ConfirmOutcome::Exhausted);
-        assert_eq!(s.confirm("r0", "1234", 13), ConfirmOutcome::NotFound);
-        // 正确路径
+        assert_eq!(s.confirm("req-x", "0000", 12), ConfirmOutcome::Exhausted);
+        assert_eq!(s.confirm("req-x", "1234", 13), ConfirmOutcome::NotFound);
+        // 正确路径（带名字带出）
         s.create("d2", "UA", "2.2.2.2", 20).unwrap();
-        assert_eq!(s.confirm("r1", "1234", 21), ConfirmOutcome::Ok("dev-1".into()));
+        assert_eq!(
+            s.confirm("req-x", "1234", 21),
+            ConfirmOutcome::Ok { device: "adev-x".into(), name: "d2".into() }
+        );
     }
 
     #[test]
     fn ttl_expiry_and_prune() {
         let mut s = svc();
         s.create("d", "UA", "1.1.1.1", 0).unwrap();
-        assert!(matches!(s.poll("r0", 5 * 60 * 1000 + 1), PollOutcome::Expired));
+        assert!(matches!(s.poll("req-x", 5 * 60 * 1000 + 1), PollOutcome::Expired));
         // 过期项被 prune 后队列腾位
         assert_eq!(s.pending(5 * 60 * 1000 + 2).len(), 0);
     }
@@ -1374,8 +1408,26 @@ mod tests {
     fn approve_respects_cap_full() {
         let mut s = svc();
         s.create("d", "UA", "1.1.1.1", 0).unwrap();
-        assert_eq!(s.approve("r0", 0, || true), ApproveOutcome::CapFull);
-        assert_eq!(s.approve("r0", 1, || false), ApproveOutcome::Ok("dev-0".into()));
+        assert_eq!(s.approve("req-x", 0, || true), ApproveOutcome::CapFull);
+        assert_eq!(
+            s.approve("req-x", 1, || false),
+            ApproveOutcome::Ok { device: "adev-x".into(), name: "d".into() }
+        );
+    }
+
+    /// 随机 id 语义锁定：create→confirm 消费后同一 svc 再 create，新请求拿到新 id
+    /// （零参生成器由调用方保证唯一性；本测试锁定「结果携带的 id 与请求 id 同源」）
+    #[test]
+    fn consumed_request_id_not_reused_by_service_contract() {
+        let mut s = ApprovalService::new(
+            300_000,
+            Box::new(|| "req-a".to_string()),
+            Box::new(|| "1111".to_string()),
+            Box::new(|| "adev-a".to_string()),
+        );
+        s.create("d", "UA", "1.1.1.1", 0).unwrap();
+        assert!(matches!(s.confirm("req-a", "1111", 1), ConfirmOutcome::Ok { .. }));
+        assert_eq!(s.pending(2).len(), 0); // 请求已消费
     }
 }
 ```
@@ -1387,14 +1439,14 @@ mod tests {
 
     fn state_with_approval() -> Arc<RemoteState> {
         let mut arc = test_state();
-        // Arc 唯一引用期原地换 approval：假时钟 now=1000、4 位码恒 2468
+        // Arc 唯一引用期原地换 approval：4 位码恒 2468、id/设备 id 恒 "req-x"/"adev-x"
         // （Arc::get_mut：test_state 刚构造、无其他引用，必然 Some）
         std::sync::Arc::get_mut(&mut arc).unwrap().approval =
             std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
                 300_000,
-                Box::new(|i| format!("req-{i}")),
+                Box::new(|| "req-x".to_string()),
                 Box::new(|| "2468".to_string()),
-                Box::new(|i| format!("adev-{i}")),
+                Box::new(|| "adev-x".to_string()),
             ));
         arc
     }
@@ -1406,33 +1458,57 @@ mod tests {
         // 1. 请求接入（不携带 cookie——gate 放行 /pair/*）
         let resp = app
             .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/m/api/v1/pair/request")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"name":"我的手机"}"#))
-                    .unwrap(),
-            )
+            .oneshot(post_json("/m/api/v1/pair/request", r#"{"name":"我的手机"}"#))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["requestId"], "req-0");
+        assert_eq!(v["requestId"], "req-x");
         // 2. poll：pending
-        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-0"}"#)).await.unwrap();
+        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-x"}"#)).await.unwrap();
         assert_eq!(resp.status(), 200);
         // 3. confirm 错码 → wrong + triesLeft；正码 → Set-Cookie
-        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/confirm", r#"{"requestId":"req-0","code":"0000"}"#)).await.unwrap();
+        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/confirm", r#"{"requestId":"req-x","code":"0000"}"#)).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["error"], serde_json::json!("wrong"));
-        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/confirm", r#"{"requestId":"req-0","code":"2468"}"#)).await.unwrap();
+        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/confirm", r#"{"requestId":"req-x","code":"2468"}"#)).await.unwrap();
         let cookie = resp.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
-        assert!(cookie.contains("mam_device=adev-0"));
-        // 4. 直通配对上限门：预置 3 台有效设备 → api::pair 拒绝（复用既有 token 流程断言 403 + body error）
+        assert!(cookie.contains("mam_device=adev-x"));
+        // 4. poll 再拉：approved 幂等重发同 cookie
+        let resp = app.clone().oneshot(post_json("/m/api/v1/pair/poll", r#"{"requestId":"req-x"}"#)).await.unwrap();
+        assert!(resp.headers().get("set-cookie").unwrap().to_str().unwrap().contains("mam_device=adev-x"));
+    }
+
+    /// T2c 直通上限门端到端：满员 403+cap_full；腾位后**同一 token** 可用（门不消费 token）
+    #[tokio::test]
+    async fn direct_pair_rejected_when_device_cap_reached() {
+        let state = test_state();
+        // 预置 3 台有效设备（test_state 的 max_devices_source 注入 || 3 = 默认上限）
+        state.store.with(|c| {
+            for i in 0..3 {
+                let _ = crate::remote::pairing::persist_device(
+                    c,
+                    &crate::remote::pairing::NewDevice {
+                        id: format!("cap-{i}"), name: String::new(), ua: String::new(),
+                        origin_ip: String::new(), paired_at: 0,
+                    },
+                );
+            }
+        });
+        state.pairing.lock().unwrap().issue(); // test_state 假时钟 token = "tok-x"
+        let app = super::router_with_static(state.clone());
+        let resp = app.oneshot(post_json("/m/api/v1/pair", r#"{"token":"tok-x"}"#)).await.unwrap();
+        assert_eq!(resp.status(), 403);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"], "cap_full");
+        // 腾位一台后同 token 放行（token 未被上限门消费）
+        state.store.with(|c| { let _ = crate::remote::pairing::revoke_device(c, "cap-0"); });
+        let app2 = super::router_with_static(state.clone());
+        let resp2 = app2.oneshot(post_json("/m/api/v1/pair", r#"{"token":"tok-x"}"#)).await.unwrap();
+        assert_eq!(resp2.status(), 200);
     }
 
     fn post_json(uri: &str, body: &str) -> axum::http::Request<axum::body::Body> {
@@ -1501,7 +1577,9 @@ pub enum CreateRejection { QueueFull, IpBusy }
 
 #[derive(Debug, PartialEq)]
 pub enum ApproveOutcome {
-    Ok(String),
+    /// 批准成功：设备 id + 设备名（花名册展示手机填的名字——名字必须随结果带出，
+    /// 请求消费后无法回查）
+    Ok { device: String, name: String },
     NotFound,
     Expired,
     CapFull,
@@ -1510,13 +1588,13 @@ pub enum ApproveOutcome {
 #[derive(Debug, PartialEq)]
 pub enum PollOutcome {
     Pending { expires_at: i64 },
-    Approved(String),
+    Approved { device: String, name: String },
     Expired,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum ConfirmOutcome {
-    Ok(String),
+    Ok { device: String, name: String },
     Wrong(u8), // 剩余次数
     Exhausted,
     Expired,
@@ -1525,18 +1603,20 @@ pub enum ConfirmOutcome {
 
 pub struct ApprovalService {
     ttl_ms: i64,
-    id_gen: Box<dyn Fn(usize) -> String + Send + Sync>,
+    /// 三个生成器均为零参随机形态（生产 = 随机 hex；**不可位置式**——
+    /// 请求消费后位置复用会让旧轮询搭上新请求、设备 id 撞行）
+    id_gen: Box<dyn Fn() -> String + Send + Sync>,
     code_gen: Box<dyn Fn() -> String + Send + Sync>,
-    device_gen: Box<dyn Fn(usize) -> String + Send + Sync>,
+    device_gen: Box<dyn Fn() -> String + Send + Sync>,
     requests: Vec<ApprovalRequest>,
 }
 
 impl ApprovalService {
     pub fn new(
         ttl_ms: i64,
-        id_gen: Box<dyn Fn(usize) -> String + Send + Sync>,
+        id_gen: Box<dyn Fn() -> String + Send + Sync>,
         code_gen: Box<dyn Fn() -> String + Send + Sync>,
-        device_gen: Box<dyn Fn(usize) -> String + Send + Sync>,
+        device_gen: Box<dyn Fn() -> String + Send + Sync>,
     ) -> Self {
         Self { ttl_ms, id_gen, code_gen, device_gen, requests: Vec::new() }
     }
@@ -1554,7 +1634,7 @@ impl ApprovalService {
         if self.requests.len() >= MAX_QUEUE {
             return Err(CreateRejection::QueueFull);
         }
-        let id = (self.id_gen)(self.requests.len());
+        let id = (self.id_gen)();
         self.requests.push(ApprovalRequest {
             id: id.clone(),
             name: name.trim().chars().take(40).collect(),
@@ -1575,12 +1655,12 @@ impl ApprovalService {
         let Some(r) = self.requests.iter_mut().find(|r| r.id == id) else {
             return ApproveOutcome::NotFound;
         };
-        let device = (self.device_gen)(self.requests.iter().position(|x| x.id == id).unwrap_or(0));
         if cap_exceeded() {
             return ApproveOutcome::CapFull;
         }
+        let device = (self.device_gen)();
         r.approved_device = Some(device.clone());
-        ApproveOutcome::Ok(device)
+        ApproveOutcome::Ok { device, name: r.name.clone() }
     }
 
     pub fn poll(&mut self, id: &str, now: i64) -> PollOutcome {
@@ -1588,30 +1668,29 @@ impl ApprovalService {
         match self.requests.iter().find(|r| r.id == id) {
             None => PollOutcome::Expired, // 作废/不存在对手机同观感（不给预言机）
             Some(r) => match &r.approved_device {
-                Some(d) => PollOutcome::Approved(d.clone()),
+                Some(d) => PollOutcome::Approved { device: d.clone(), name: r.name.clone() },
                 None => PollOutcome::Pending { expires_at: r.expires_at },
             },
         }
     }
 
-    /// 4 位码确认（cap 由调用方在 Ok 前置检查——满员时码对了也拒）
+    /// 4 位码确认（Ok 路径的上限门由调用方在落库前检查——满员时码对了也拒）
     pub fn confirm(&mut self, id: &str, code: &str, now: i64) -> ConfirmOutcome {
         self.prune(now);
-        let Some(pos) = self.requests.iter().position(|r| r.id == id) else {
+        let Some(r) = self.requests.iter_mut().find(|r| r.id == id) else {
             return ConfirmOutcome::NotFound;
         };
-        let r = &mut self.requests[pos];
-        if r.approved_device.is_some() {
-            return ConfirmOutcome::Ok(r.approved_device.clone().unwrap());
+        if let Some(d) = &r.approved_device {
+            return ConfirmOutcome::Ok { device: d.clone(), name: r.name.clone() };
         }
         if r.code == code.trim() {
-            let device = (self.device_gen)(pos);
+            let device = (self.device_gen)();
             r.approved_device = Some(device.clone());
-            return ConfirmOutcome::Ok(device);
+            return ConfirmOutcome::Ok { device, name: r.name.clone() };
         }
         r.tries += 1;
         if r.tries >= MAX_CODE_TRIES {
-            self.requests.remove(pos); // 错满 3 次：作废需重新发起（spec T2b）
+            self.requests.retain(|x| x.id != id); // 错满 3 次：作废需重新发起（spec T2b）
             ConfirmOutcome::Exhausted
         } else {
             ConfirmOutcome::Wrong(MAX_CODE_TRIES - r.tries)
@@ -1666,7 +1745,17 @@ pub fn device_cookie(device_id: &str) -> String {
 ```
 
 `server.rs`：
-1. `RemoteState` 加 `pub approval: std::sync::Mutex<super::approval::ApprovalService>,`
+1. `RemoteState` 加两字段：
+
+```rust
+    /// 审批配对队列（M4 T2a：内存态，重启即清——spec 边界）
+    pub approval: std::sync::Mutex<super::approval::ApprovalService>,
+    /// 设备上限注入缝（M4 T2c）：生产 = 读 remote.max_devices KV；测试注入常量
+    /// （零 DAO 接触——端点测试不触碰真实 ~/.mam）
+    pub max_devices_source: Box<dyn Fn() -> usize + Send + Sync>,
+```
+
+（`server.rs` tests 的 `test_state()` 同步补：`approval: Mutex::new(ApprovalService::new(300_000, Box::new(|| "req-t".into()), Box::new(|| "0000".into()), Box::new(|| "adev-t".into())))`、`max_devices_source: Box::new(|| 3)`。）
 2. `api_router` 追加路由：
 
 ```rust
@@ -1727,12 +1816,9 @@ pub async fn pair_poll(State(st): State<Arc<RemoteState>>, Json(req): Json<PairP
     let now = chrono::Utc::now().timestamp_millis();
     let outcome = st.approval.lock().unwrap().poll(&req.request_id, now);
     match outcome {
-        PollOutcome::Approved(device) => {
+        PollOutcome::Approved { device, name } => {
             super::events::audit("pair_polled", &format!("device={device}"));
-            let cookie = crate::remote::pairing::device_cookie(&device);
-            st.store.with(|c| { let _ = crate::remote::pairing::touch_device(c, &device, now); });
-            ([(axum::http::header::SET_COOKIE, cookie)],
-             Json(serde_json::json!({ "status": "approved" }))).into_response()
+            persist_and_cookie(&st, &device, &name, now)
         }
         PollOutcome::Pending { expires_at } =>
             Json(serde_json::json!({ "status": "pending", "expiresAt": expires_at })).into_response(),
@@ -1747,18 +1833,18 @@ pub struct PairConfirmBody { pub request_id: String, pub code: String }
 /// POST /m/api/v1/pair/confirm：4 位确认码等效授权（限试 3 次，spec T2b）
 pub async fn pair_confirm(State(st): State<Arc<RemoteState>>, Json(req): Json<PairConfirmBody>) -> Response {
     let now = chrono::Utc::now().timestamp_millis();
-    let max = super::max_devices();
+    let max = (st.max_devices_source)();
     let store = st.store.clone();
     let outcome = st.approval.lock().unwrap().confirm(&req.request_id, &req.code, now);
-    // Ok 路径补上限门 + 落库（confirm 内部不触 DB——状态机纯内存）
+    // Ok 路径补上限门（confirm 内部不触 DB——状态机纯内存；满员时码对了也拒）
     match outcome {
-        ConfirmOutcome::Ok(device) => {
+        ConfirmOutcome::Ok { device, name } => {
             let cap = store.with(|c| crate::remote::pairing::device_count(c) >= max);
             if cap {
                 return Json(serde_json::json!({ "ok": false, "error": "cap_full" })).into_response();
             }
             super::events::audit("pair_confirmed", &format!("device={device}"));
-            persist_and_cookie(&st, &device, now)
+            persist_and_cookie(&st, &device, &name, now)
         }
         ConfirmOutcome::Wrong(left) =>
             Json(serde_json::json!({ "ok": false, "error": "wrong", "triesLeft": left })).into_response(),
@@ -1771,11 +1857,12 @@ pub async fn pair_confirm(State(st): State<Arc<RemoteState>>, Json(req): Json<Pa
     }
 }
 
-/// 批准/确认通过的公共落库 + 下发 cookie（与 api::pair 同形设备记录）
-fn persist_and_cookie(st: &Arc<RemoteState>, device_id: &str, now: i64) -> Response {
+/// 批准/确认通过的公共落库 + 下发 cookie（设备名来自请求——花名册展示用；
+/// api::pair 直通路径传空名，前端 roster 回落 id 前 8 位展示）
+fn persist_and_cookie(st: &Arc<RemoteState>, device_id: &str, name: &str, now: i64) -> Response {
     let dev = crate::remote::pairing::NewDevice {
         id: device_id.to_string(),
-        name: String::new(),
+        name: name.to_string(),
         ua: String::new(),
         origin_ip: String::new(),
         paired_at: now,
@@ -1783,28 +1870,26 @@ fn persist_and_cookie(st: &Arc<RemoteState>, device_id: &str, now: i64) -> Respo
     st.store.with(|c| { let _ = crate::remote::pairing::persist_device(c, &dev); });
     (
         [(axum::http::header::SET_COOKIE, crate::remote::pairing::device_cookie(device_id))],
-        Json(serde_json::json!({ "ok": true })),
+        Json(serde_json::json!({ "ok": true, "status": "approved" })),
     ).into_response()
 }
-```
 
-（poll 的 Approved 路径同样要 persist——`poll` 里 Approved 分支改调 `persist_and_cookie(&st, &device, now)`，cookie/落库同源；测试里 poll 后设备即入库。）
-
-`api::pair` 上限门（`svc.accept` 之前插入）：
+`api::pair` 上限门（`svc.accept` 之前插入；注意 api::pair 返回 `Result<Response, StatusCode>`——带 body 的 403 须包 `Ok(...)`）：
 
 ```rust
-    // M4 T2c：上限三入口统一门——直通扫码也拒（spec：否则扫码绕过上限）
-    let max = super::max_devices();
+    // M4 T2c：上限三入口统一门——直通扫码也拒（spec：否则扫码绕过上限）。
+    // max 经注入缝取（生产读 KV；测试注入常量——不直读全局 DAO）
+    let max = (st.max_devices_source)();
     if st.store.with(|c| crate::remote::pairing::device_count(c) >= max) {
         super::events::audit("pair_rejected_cap", &format!("max={max}"));
-        return (
+        return Ok((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "cap_full" })),
-        ).into_response();
+        ).into_response());
     }
 ```
 
-（注意：上限门在 accept **之前**——token 不被消费，腾位后原码仍可用。）
+（上限门在 accept **之前**——token 不被消费，腾位后原码仍可用；既有 `AcceptResult` 非Ok 的裸 403 分支不动——上限拒绝带 body、token 无效不带，不构成预言机差异。）
 
 `mod.rs`：
 
@@ -1818,7 +1903,9 @@ pub fn max_devices_from(v: Option<String>) -> usize {
         .map(|n| n.clamp(1, 10))
         .unwrap_or(3)
 }
-pub fn max_devices() -> usize {
+
+/// 生产上限源（STATE 构造注入；唯一 KV 读取点）
+fn max_devices_from_kv() -> usize {
     max_devices_from(crate::database::dao::settings::get_setting(KEY_MAX_DEVICES))
 }
 
@@ -1828,7 +1915,20 @@ pub fn is_online(registry_hit: bool, last_seen_at: i64, now: i64) -> bool {
 }
 ```
 
-STATE 构造追加 `approval: Mutex::new(approval::ApprovalService::new(5*60*1000, 实时钟/码/设备生成))`（id/设备生成复用 pairing 的 16 字节 hex 风格；code 生成 `format!("{:04}", rand::thread_rng().gen_range(0..10000))`）。
+STATE 构造追加两字段：
+
+```rust
+        // M4 T2：审批队列（零参随机 hex 生成器——id/设备 id 不可位置式，防消费后复用）
+        approval: Mutex::new(approval::ApprovalService::new(
+            5 * 60 * 1000,
+            Box::new(random_hex_8),   // 请求 id：8 字节随机 hex
+            Box::new(|| format!("{:04}", rand::thread_rng().gen_range(0..10000))), // 4 位码
+            Box::new(random_hex_16),  // 设备 id：16 字节随机 hex（与直通配对 device_id 同风格）
+        )),
+        max_devices_source: Box::new(max_devices_from_kv),
+```
+
+（`random_hex_8`/`random_hex_16` 为 mod.rs 内小助手：`rand::RngCore::fill_bytes` 后逐字节 `format!("{x:02x}")`——与 STATE 里 pairing token 生成器同写法，抽成复用函数。）
 
 5 个 IPC 命令（`remote_issue_token` 之后）：
 
@@ -1848,10 +1948,10 @@ pub fn remote_pending_requests() -> serde_json::Value {
 #[tauri::command]
 pub fn remote_approve_request(id: String) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
-    let max = max_devices();
+    let max = (STATE.max_devices_source)();
     let cap = STATE.store.with(|c| pairing::device_count(c) >= max);
     match STATE.approval.lock().unwrap().approve(&id, now, || cap) {
-        approval::ApproveOutcome::Ok(_) => { events::audit("pair_approved", &id); Ok(()) }
+        approval::ApproveOutcome::Ok { .. } => { events::audit("pair_approved", &id); Ok(()) }
         approval::ApproveOutcome::CapFull => Err("设备已满，请先在花名册吊销腾位".into()),
         approval::ApproveOutcome::NotFound | approval::ApproveOutcome::Expired => Err("请求已过期或不存在".into()),
     }
@@ -1922,13 +2022,14 @@ git commit -m "feat(m4-t2): 审批配对后端——队列状态机(TTL/上限/�
 - Modify: `src/lib/api/remote.ts`（5 个 IPC 封装 + 类型）
 - Modify: `src/components/settings/RemoteSection.tsx`（两个新区块）
 - Modify: `src/main.tsx`（AppWrapper 挂事件监听 hook）
+- Modify: `src/hooks/useNotification.ts`（注册 `open-pairing` 通知动作——点击直达设置页；**通知动作注册是全局单点**，useRemoteEvents 里二次注册会互相覆盖，必须扩这份既有注册）
 - Create: `src/hooks/useRemoteEvents.ts`
 - Modify: `src/i18n/locales/zh.json`、`en.json`（~20 键）
 - Test: `tests/settings/remoteSection.test.tsx`
 
 **Interfaces:**
 - Consumes: Task 7 全部命令 + 事件（`remote-pair-request` / `remote-roster-changed`）。
-- Produces: `remote.ts` 的 `remotePendingRequests()/remoteApproveRequest(id)/remoteDevices()/remoteRevokeDevice(id)/remoteRevokeAllDevices()` + `PendingRequest`/`RemoteDevice` 类型；`useRemoteEvents()` hook（系统通知 + 托盘事件路由，Task 11 复用）。
+- Produces: `remote.ts` 的 `remotePendingRequests()/remoteApproveRequest(id)/remoteDevices()/remoteRevokeDevice(id)/remoteRevokeAllDevices()` + `PendingRequest`/`RemoteDevice` 类型；`useRemoteEvents()` hook（系统通知/剪贴板/报错 toast 路由）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2025,8 +2126,9 @@ useEffect(() => {
 `useRemoteEvents.ts`（桌面全局事件 → 系统通知/剪贴板；`main.tsx` AppWrapper 的 useEffect 里调用一次）：
 
 ```ts
-// 桌面全局远程事件（M4）：配对请求系统通知（点击直达设置页）/ 隧道地址变化通知 /
-// 托盘触发的地址复制与开关失败 toast。main.tsx AppWrapper 挂载一次。
+// 桌面全局远程事件（M4）：配对请求系统通知（点击直达设置页——动作经
+// useNotification.ts 的既有全局注册）/ 隧道地址与守护失败通知 / 托盘触发的
+// 地址复制与开关失败提示。main.tsx AppWrapper 挂载一次。
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { sendNotification, isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
@@ -2036,25 +2138,31 @@ export function useRemoteEvents() {
   useEffect(() => {
     const unlisten: Array<() => void> = [];
     void (async () => {
-      unlisten.push(await listen<{ name: string; ip: string }>("remote-pair-request", async (e) => {
+      const notify = async (title: string, body: string, actionTypeId = "open-pairing") => {
         let ok = await isPermissionGranted();
         if (!ok) ok = (await requestPermission()) === "granted";
-        if (ok) {
-          sendNotification({
-            title: "MAM 配对请求",
-            body: `${e.payload.name || "新设备"}（${e.payload.ip}）请求接入，点击前往审批`,
-          });
-        }
+        if (ok) sendNotification({ title, body, actionTypeId });
+      };
+      unlisten.push(await listen<{ name: string; ip: string }>("remote-pair-request", async (e) => {
+        // spec T2a：桌面弹通知 + 点击直达配对面板（设置页）
+        await notify("MAM 配对请求", `${e.payload.name || "新设备"}（${e.payload.ip}）请求接入`);
         toast.info("收到配对请求，请到 设置 → 远程接入 审批");
       }));
       unlisten.push(await listen<{ url: string }>("remote-tunnel-address", (e) => {
         toast.success(`外部地址已就绪: ${e.payload.url}`);
       }));
+      unlisten.push(await listen<{ error: string }>("remote-tunnel-error", async (e) => {
+        // spec T1b：守护放弃时桌面通知报错（toast 在窗口隐藏时不可见——双通道）
+        await notify("MAM 外部通道异常", e.payload.error, "open-pairing");
+        toast.error(`外部通道: ${e.payload.error}`);
+      }));
       unlisten.push(await listen<{ url: string }>("remote-copy-addr", async (e) => {
         await navigator.clipboard.writeText(e.payload.url);
         toast.success("已复制远程地址");
       }));
-      unlisten.push(await listen<{ error: string }>("remote-toggle-failed", (e) => {
+      unlisten.push(await listen<{ error: string }>("remote-toggle-failed", async (e) => {
+        // spec T4：托盘开关失败「桌面通知报错」——toast + 系统通知双通道
+        await notify("MAM 远程开关失败", e.payload.error);
         toast.error(`远程开关失败: ${e.payload.error}`);
       }));
     })();
@@ -2063,7 +2171,24 @@ export function useRemoteEvents() {
 }
 ```
 
-（通知点击直达设置页：plugin-notification 的点击事件在无 actionTypeId 时只聚焦应用——本期以「通知 + toast 指路」交付，deep-link 登记为验收观察项，不阻塞。）
+`useNotification.ts` 的既有注册扩展（唯一动作注册点——`registerActionTypes` 数组追加 + `onAction` 分支追加，勿在别处二次注册）：
+
+```ts
+        // registerActionTypes 数组追加（既有 focus-session 旁）：
+        {
+          id: "open-pairing",
+          actions: [{ id: "open", title: "前往审批" }],
+        },
+        // onAction 回调开头追加分支（在 focus-session 判定之前）：
+        onAction(async (notification) => {
+          // M4 T2a：配对请求通知点击直达设置页（spec「点击直达配对面板」）
+          if (notification.actionTypeId === "open-pairing") {
+            window.location.assign("/settings"); // pathname 路由（main.tsx pageMap），整页跳转
+            return;
+          }
+          if (notification.actionTypeId !== "focus-session") return;
+          // ...既有 focus-session 逻辑不动...
+```
 
 i18n 键（zh/en 成对，命名 `settings.remote.pending*` / `roster*`：pendingTitle 待审批设备/Pending devices、pendingEmpty 暂无请求/No pending requests、pendingApprove 批准/Approve、rosterTitle 设备花名册/Device roster、rosterEmpty 尚无已配对设备/No paired devices、rosterRevoke 吊销/Revoke、rosterRevokeAll 全部吊销/Revoke all、rosterOnline 在线/Online、rosterOffline 离线/Offline、rosterMax 设备上限/Device limit、pairNotifyTitle/body 等——以实现时实际文案为准成对补齐）。
 
@@ -2175,7 +2300,7 @@ export async function confirmPairing(requestId: string, code: string): Promise<C
 }
 ```
 
-`PairPage.tsx` 改造（保留原 token 输入为主视图，下方加请求接入区）：
+`PairPage.tsx` 改造（保留原 token 输入为主视图，下方加请求接入区；import 行扩为 `import { pair, requestPairing, pollPairing, confirmPairing, ApiError } from "./api";`——既有 `ApiError` 类复用，勿新建）：
 
 ```tsx
 type RequestState = "idle" | "waiting" | "denied";
@@ -2245,7 +2370,8 @@ git commit -m "feat(m4-t2): 移动端请求接入流——设备名+请求/轮�
 
 **Files:**
 - Create: `src-tauri/src/remote/power.rs`
-- Modify: `src-tauri/src/remote/mod.rs`（`pub mod power;` + KEY + 启停接线 + 恢复）
+- Modify: `src-tauri/src/remote/mod.rs`（`pub mod power;` + 启停接线 + 恢复）
+- Modify: `src-tauri/src/lib.rs`（退出钩子：build + run 回调——退出时 tunnel::stop + power::release）
 - Modify: `src-tauri/Cargo.toml`（windows features 追加 `Win32_System_Power`）
 - Modify: `src/components/settings/RemoteSection.tsx` + i18n（保活开关 + 边界文案）
 
@@ -2389,10 +2515,9 @@ static POWER: Lazy<std::sync::Mutex<PowerCore<RealOps>>> = Lazy::new(|| {
     std::sync::Mutex::new(PowerCore::new(RealOps))
 });
 
-/// 远程开启时获取（开关默认开；toggle 侧调用）
+/// 远程开启时获取（开关默认开；start_server 成功路径调用）
 pub fn acquire() {
     if !should_acquire(crate::database::dao::settings::get_setting(KEY_KEEPALIVE)) { return; }
-    let _ = &*POWER; // Windows 依赖 Lazy 初始化副作用（无——保守保活）
     POWER.lock().unwrap().acquire();
 }
 pub fn release() { POWER.lock().unwrap().release(); }
@@ -2494,10 +2619,42 @@ mod win {
 （`PowerGetActiveScheme` 第一个参数 windows 0.57 中为 `rootpowerkey: Option<HKEY>` 形态、`PowerReadACValueIndex` 参数为 `Option<HKEY>, GUID, GUID, GUID?...`——以编译器报错为准调整 None/指针形态；流程与 GUID 不变。**Cargo.toml**：windows 依赖 features 追加 `"Win32_System_Power"`。）
 
 `mod.rs` 接线：
-1. `start_server()` 内 spawn 成功后（`start_server_core` 返回 Ok(true) 分支）加 `power::acquire();`
+1. `start_server()` 显式接 spawn 布尔（仅真正 spawn 才持锁——幂等跳过时保活已在持）：
+
+```rust
+fn start_server() -> Result<(), String> {
+    let mut h = SERVER_HANDLE.lock().unwrap();
+    let spawned = start_server_core(
+        /* 既有三参不动 */
+    )?;
+    if spawned {
+        // M4 T3：远程真正开启 → 持电源锁（spec T3：保活跟随远程开关，默认开）
+        power::acquire();
+    }
+    Ok(())
+}
+```
+
 2. `stop_server()` 末尾加 `power::release();`
 3. `restore_on_launch()` 函数体首行加 `power::restore_on_launch();`
-4. 常量区已在 power.rs 定义 KEY——无需重复。
+4. `pub mod power;` 加模块声明。
+
+`lib.rs` 应用退出钩子（spec §8「应用退出清理子进程与电源锁（不留孤儿进程、不失电源锁）」——既有 `.run(ctx)` 无事件回调，改为 build + run 回调；**唯一动 lib.rs 结尾的改动**）：
+
+```rust
+    // 旧：builder.run(tauri::generate_context!()).expect("error while running tauri application");
+    // 新：
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_app, event| {
+        if let tauri::RunEvent::Exit = event {
+            // M4：退出清理——cloudflared 子进程（kill_on_drop 兜不住进程级退出）+ 电源锁/磁盘代设还原
+            crate::remote::tunnel::stop();
+            crate::remote::power::release();
+        }
+    });
+```
 
 设置页（`RemoteSection.tsx`）开关区块（远程开关行下）：
 
@@ -2523,7 +2680,7 @@ Expected: 全绿（Windows 分支代码在 mac 编译门下至少语法过——
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src-tauri/src/remote/power.rs src-tauri/src/remote/mod.rs src-tauri/Cargo.toml src/components/settings/RemoteSection.tsx src/i18n/locales/zh.json src/i18n/locales/en.json
+git add src-tauri/src/remote/power.rs src-tauri/src/remote/mod.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src/components/settings/RemoteSection.tsx src/i18n/locales/zh.json src/i18n/locales/en.json
 git commit -m "feat(m4-t3): 电源保活——caffeinate/执行状态+磁盘休眠代设还原（注入式状态机+崩溃恢复），默认开+边界文案"
 ```
 
@@ -2532,16 +2689,16 @@ git commit -m "feat(m4-t3): 电源保活——caffeinate/执行状态+磁盘休�
 ### Task 11: T4 · 托盘远程入口
 
 **Files:**
-- Modify: `src-tauri/src/remote/mod.rs`（`tray_snapshot()` 纯装配）
-- Modify: `src-tauri/src/plugins/system_tray.rs`（两处菜单重建路径加远程项 + 事件处理）
+- Modify: `src-tauri/src/remote/mod.rs`（`tray_snapshot` 纯装配——见下，实际命名 `tray_display`/`tray_display_from`）
+- Modify: `src-tauri/src/plugins/system_tray.rs`（三处菜单重建路径加远程项 + 事件处理）
 - Modify: `src-tauri/src/lib.rs`（update_tray_menu 命令签名）
-- Modify: `src/pages/home.tsx`、`src/components/common/language-toggle.tsx`（调用点传新参）
-- Modify: `src/hooks/useRemoteEvents.ts`（remote-changed → 重建托盘）
+- Modify: `src/pages/home.tsx`（initTrayMenu 补 remoteOnText 参 + remote-changed 监听重建）
+- Modify: `src/components/common/language-toggle.tsx`（调用点传新参）
 - Modify: `src/tauri-mock.ts`
-- Test: `src-tauri` mod tests（tray_snapshot 纯核）
+- Test: `src-tauri` mod tests（tray_display_from 纯核）
 
 **Interfaces:**
-- Produces: `mod::tray_display() -> (bool, String)`（enabled + 对外地址 = 隧道优先）；托盘菜单项 id `"remote"`（CheckMenuItem）/`"remote-addr"`（展示项）；命令 `update_tray_menu(show_text, quit_text, pet_text, remote_text, remote_off_text)`。
+- Produces: `mod::tray_display() -> (bool, String)`（enabled + 对外地址 = 隧道优先）；托盘菜单项 id `"remote"`（CheckMenuItem，勾选态=远程开关）/`"remote-addr"`（地址展示项，点击经事件复制）；命令 `update_tray_menu(show_text, quit_text, pet_text, remote_on_text)`。
 - Consumes: Task 3 emit、Task 5 tunnel snapshot、Task 8 useRemoteEvents。
 
 - [ ] **Step 1: 写失败测试（托盘展示纯核）**
@@ -2595,57 +2752,71 @@ pub fn tray_display() -> (bool, String) {
 ```
 
 `system_tray.rs`：
-1. `update_tray_menu` 与 `init` 的菜单构建统一走新内部函数（两处 + presets 共三处消费）：
+1. 远程区菜单项（构造法沿 `update_tray_with_presets` 的既有模式——owned 项 + `Vec<&dyn IsMenuItem>` 收集，不用 `Box<dyn>`；`update_tray_menu`、`init` 默认菜单、`update_tray_with_presets` **三处重建路径都追加**，否则任一路径重建会抹掉远程项）：
 
 ```rust
-/// 远程区菜单项（M4 T4）：开关（Check）+ 地址展示（disabled，点击经事件走前端剪贴板）
-fn remote_items(app: &AppHandle, remote_on_text: &str) -> Result<Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>>, String> {
+/// 远程区菜单项（M4 T4）：开关（Check，勾选态=当前远程状态）+ 地址展示（点击经
+/// 事件走前端剪贴板）。文本由调用方传入（前端本地化），状态/地址 Rust 侧自查
+fn push_remote_items(
+    app: &AppHandle,
+    items: &mut Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>>,
+    owned: &mut Vec<tauri::menu::CheckMenuItem<tauri::Wry>>, // owned 存活容器
+    addr_owned: &mut Vec<tauri::menu::MenuItem<tauri::Wry>>,
+    sep_owned: &mut Vec<tauri::menu::PredefinedMenuItem>,
+    remote_on_text: &str,
+) -> Result<(), String> {
     let (enabled, addr) = crate::remote::tray_display();
+    let sep = tauri::menu::PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let toggle = tauri::menu::CheckMenuItem::with_id(
         app, "remote", remote_on_text, true, enabled, None::<&str>,
     ).map_err(|e| e.to_string())?;
+    // 地址为空（远程关）时展示占位「—」并禁用点击复制
     let addr_item = tauri::menu::MenuItem::with_id(
         app, "remote-addr",
         &if addr.is_empty() { "—".to_string() } else { addr },
-        true, None::<&str>,
+        !addr.is_empty(), None::<&str>,
     ).map_err(|e| e.to_string())?;
-    let sep = tauri::menu::PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    Ok(vec![Box::new(sep), Box::new(toggle), Box::new(addr_item)])
+    sep_owned.push(sep); owned.push(toggle); addr_owned.push(addr_item);
+    items.push(sep_owned.last().unwrap() as _);
+    items.push(owned.last().unwrap() as _);
+    items.push(addr_owned.last().unwrap() as _);
+    Ok(())
 }
 ```
 
-（`update_tray_menu` 把 `remote_items` 追加到既有 show/pet/quit 之间——quit 之前；`update_tray_with_presets` 同样追加；`init` 默认菜单亦然。签名 `update_tray_menu(app, show_text, quit_text, pet_text, remote_on_text: String)`。）
+（三个重建函数各自声明 owned 容器后调用 `push_remote_items`，把远程项插在 quit 之前；`update_tray_menu` 签名扩为 `(app, show_text, quit_text, pet_text, remote_on_text: String)`。）
 2. `on_menu_event` match 追加：
 
 ```rust
                     "remote" => {
-                        // 托盘开关：与设置页同一命令链路（remote_toggle 内含 TLS 门回滚）
-                        let (_, addr) = crate::remote::tray_display();
-                        let enabled = !addr.is_empty() || {
-                            // 地址空可能=关 or 无服务：以 DB+句柄口径判当前态
-                            let (e, _) = crate::remote::tray_display();
-                            e
-                        };
-                        let next = !enabled;
+                        // 托盘开关：与设置页同一命令链路（remote_toggle 内含 TLS 门与回滚）。
+                        // 菜单勾选态经前端回环刷新（remote-changed 监听重建，见 home.tsx 接线）
+                        let next = !crate::remote::tray_display().0;
                         match crate::remote::remote_toggle(next) {
                             Ok(()) => {
-                                // 菜单勾选态经前端回环刷新（remote-changed 监听重建）
-                                crate::remote::events::emit_ui("remote-changed", serde_json::json!({"enabled": next}));
+                                crate::remote::events::emit_ui(
+                                    "remote-changed",
+                                    serde_json::json!({ "enabled": next }),
+                                );
                             }
                             Err(e) => {
-                                crate::remote::events::emit_ui("remote-toggle-failed", serde_json::json!({"error": e}));
+                                crate::remote::events::emit_ui(
+                                    "remote-toggle-failed",
+                                    serde_json::json!({ "error": e }),
+                                );
                             }
                         }
                     }
                     "remote-addr" => {
                         let (_, addr) = crate::remote::tray_display();
                         if !addr.is_empty() {
-                            crate::remote::events::emit_ui("remote-copy-addr", serde_json::json!({"url": addr}));
+                            crate::remote::events::emit_ui(
+                                "remote-copy-addr",
+                                serde_json::json!({ "url": addr }),
+                            );
                         }
                     }
 ```
-
-（**简化**：`remote_toggle(next)` 的 next 判定直接用 `tray_display().0`：`let next = !crate::remote::tray_display().0;`——删除上面多余的 addr 推导。）
 
 `lib.rs` 命令签名：
 
@@ -2662,23 +2833,30 @@ fn update_tray_menu(
 }
 ```
 
-前端两调用点补参 `remoteOnText: t("tray.remote", "远程接入")`（home.tsx / language-toggle.tsx——具体 i18n 键沿用两文件现有取键风格，加 `tray.remote` zh=远程接入 en=Remote Access）。
+前端接线（托盘重建监听放 **home.tsx**——`initTrayMenu` 在那里且持有 `petOn` 与 `t`；放 useRemoteEvents 会丢失 pet 态与真实键名 `tray.petHide/petShow`，重建出错误标签）：
 
-`useRemoteEvents.ts` 追加监听：
+1. `home.tsx` 的 `initTrayMenu` 补第四参并挂监听（同一 effect 内，卸载时解绑）：
 
 ```ts
-      unlisten.push(await listen("remote-changed", async () => {
-        // 状态变了 → 重建托盘菜单（勾选态/地址刷新；标签走前端本地化）
-        try {
-          await invoke("update_tray_menu", {
-            showText: i18n.t("tray.show"), quitText: i18n.t("tray.quit"),
-            petText: i18n.t("tray.pet"), remoteOnText: i18n.t("tray.remote"),
-          });
-        } catch { /* 托盘刷新尽力而为 */ }
-      }));
+    const initTrayMenu = async () => {
+      try {
+        await invoke("update_tray_menu", {
+          showText: t("tray.show"),
+          quitText: t("tray.quit"),
+          petText: petOn ? t("tray.petHide") : t("tray.petShow"),
+          remoteOnText: t("tray.remote"), // M4 T4：远程开关项标签（勾选态 Rust 侧自查）
+        });
+      } catch (error) {
+        console.error("Failed to initialize tray menu:", error);
+      }
+    };
+    // M4 T4：远程状态变化（设置页/托盘/通道切换）→ 重建托盘刷新勾选态与地址
+    const unRemote = await listen("remote-changed", () => void initTrayMenu());
+    // ...既有解绑链追加 unRemote()...
 ```
 
-（`tray.show/quit/pet` 键若不存在则按两调用点现有键名复用——执行时以 home.tsx 现传值为准对齐，不新造重复键。）
+（`listen` 从 `@tauri-apps/api/event` 导入——home.tsx 若未导入则补；键名对齐既有 `tray.show/tray.quit/tray.petHide/tray.petShow` 风格新增 `tray.remote`：zh=远程接入 / en=Remote Access。）
+2. `language-toggle.tsx` 的 invoke 同步补 `remoteOnText: t("tray.remote")`。
 
 `tauri-mock.ts`：`case "update_tray_menu":` 兼容新旧参（多余参数忽略即可，无返回）。
 
@@ -2690,7 +2868,7 @@ Expected: 全绿。
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src-tauri/src/remote/mod.rs src-tauri/src/plugins/system_tray.rs src-tauri/src/lib.rs src/pages/home.tsx src/components/common/language-toggle.tsx src/hooks/useRemoteEvents.ts src/tauri-mock.ts src/i18n/locales/zh.json src/i18n/locales/en.json
+git add src-tauri/src/remote/mod.rs src-tauri/src/plugins/system_tray.rs src-tauri/src/lib.rs src/pages/home.tsx src/components/common/language-toggle.tsx src/tauri-mock.ts src/i18n/locales/zh.json src/i18n/locales/en.json
 git commit -m "feat(m4-t4): 托盘远程入口——开关勾选项+地址展示复制（三菜单重建路径统一+remote-changed 回环刷新）"
 ```
 
@@ -2737,4 +2915,14 @@ git commit -m "docs(m4): M4 验收记录（自动化门禁数字+真机手动清
 
 1. **Spec 覆盖**：T0a→Task 1；T0b→Task 2；T1a→Task 6；T1b/T1c→Task 5；T1d→Task 4；T1e→已内建（spec 声明无交付，验收 2 附带）；T1f→Task 6 Tailscale 文案；T2a→Task 7/9；T2b→Task 7/8/9；T2c→Task 7（pair 上限门+approve+confirm）；T2d→Task 7/8（在线口径 is_online）；T2e→Task 3 audit 贯穿；T3→Task 10；T4→Task 11；验收 8 项→Task 12 手动清单。**无缺口**。
 2. **占位符扫描**：Task 3 Step 2 初稿的 `call_once/unreachable!` 占位已在同步内修正为 OnceLock 方案；Windows Power API 标注「以 cargo check 报错为准微调签名」（流程/GUID 已定，属编译适配非占位）；i18n Task 8 标注「以实现时实际文案成对补齐」但已列全键名清单。其余无 TBD/TODO。
-3. **类型一致性**：`device_cookie`（Task 7 定义，api::pair 同步改用）；`max_devices()`（Task 7 mod.rs，api.rs confirm 消费同签名）；`tray_display_from`（Task 11 定义/测试同签名）；`address_entries_with_tunnel`/`pair_url_with_tunnel`（Task 5 定义，测试同名）；前端 `RemoteAddressEntry.kind`（Task 6 定义，Task 8 复用）；事件名 `remote-pair-request/remote-changed/remote-tunnel-address/remote-tunnel-error/remote-copy-addr/remote-toggle-failed/remote-roster-changed` 后端 emit 与前端 listen 逐对核对一致。
+3. **类型一致性**：`device_cookie`（Task 7 定义，api::pair 同步改用）；`max_devices_source`（Task 7 RemoteState 注入缝——api::pair/pair_confirm/remote_approve_request 三处消费同签名）；`tray_display_from`（Task 11 定义/测试同签名）；`address_entries_with_tunnel`/`pair_url_with_tunnel`（Task 5 定义，测试同名）；前端 `RemoteAddressEntry.kind`（Task 6 定义，Task 8 复用）；事件名 `remote-pair-request/remote-changed/remote-tunnel-address/remote-tunnel-error/remote-copy-addr/remote-toggle-failed/remote-roster-changed` 后端 emit 与前端 listen 逐对核对一致。
+
+## 对照核查记录（v2，2026-09-16——三文档 × 代码实证）
+
+**核查范围**：M4 spec v1.1 / 一期 v6 / 宪法 D1-D17 逐条对照计划 + 计划引用的既有接口逐个到源码验证。
+
+**接口名核查（现成接口复用）**：已验证与源码一致的引用——`get_setting/set_setting`、`persist_device/touch_device/revoke_all/device_valid/DEVICE_TTL_MS/NewDevice`（pairing.rs）、`extract_device/COOKIE_NAME`（gate.rs）、`bind_and_port/display_url_for/address_entries`（mod.rs）、`router_with_static/test_state`（server.rs）、`update_tray_with_presets/CheckMenuItem::with_id`（system_tray.rs）、`listen/invoke/sendNotification/isPermissionGranted`（前端 API 形态）、home.tsx 既有 `tray.show/tray.quit/tray.petHide/tray.petShow` 键。修正的误用：①`crate::database::mam_data_dir()` 不存在→改 `dirs::home_dir().unwrap_or_default().join(".mam")`（manifest.rs 先例）；②托盘重建监听从 useRemoteEvents（会丢 petOn 态与真实键名）→ 挪 home.tsx；③通知动作注册全局单点在 `useNotification.ts`，`open-pairing` 扩既有注册而非新建；④`max_devices()` 直读全局 DAO 会让端点测试触碰真实 `~/.mam`（违反计划红线）→ `RemoteState.max_devices_source` 注入缝。
+
+**前后矛盾核查（修复 7 处）**：①spec T1b「守护放弃桌面通知」—Task 5 发 `remote-tunnel-error` 但 Task 8 未监听→补监听（toast+系统通知双通道）；②spec §8「应用退出清理子进程与电源锁」无落点→lib.rs 改 build+run 退出钩子（tunnel::stop + power::release）；③spec T1a「网卡名一栏标注外部通道」与隧道条目 iface 空串渲染「本机」兜底自相矛盾→kind=tunnel 隐藏 iface 兜底只出徽标；④审批落库 `name:""` 与花名册显示设备名（spec T2a 花名册列名字段）矛盾→`ApproveOutcome/PollOutcome/ConfirmOutcome` 的 Ok 携 `{device, name}`；⑤位置式 id/设备 id 生成器在请求消费后复用——手机 A 旧轮询可搭手机 B 新请求、设备 id 撞行（违反 v6 P6「配对全程留痕可审计」的唯一性前提）→三生成器改零参随机 hex；⑥Task 5 `supervise` 内 `block_on` 死锁（async 上下文禁 block_on）→获取二进制挪 `spawn_blocking` 线程；⑦守护失败计数永不重置（数周内三次偶发闪断即永久放弃，违背 spec T1b「连续失败」语义）→稳定运行 ≥60s 后退出重置计数。另修：Task 2 `vi.mock` 写在 it() 内的 hoisting 错、Task 5 `remote_set_channel` 先写库后校验顺序、Task 7 api::pair 带 body 403 需包 `Ok(...)`、Task 12 前全部 git add 清单对齐、隧道守护 `kill_on_drop(true)` 补齐（孤儿进程防线）。
+
+**文档间一致性（无冲突确认）**：宪法 F1.1（配对面板/花名册/手动腾位）、F1.2（四通道模式）、F1.9/D13（保活默认开+边界明示）、D17（推送移期）、§5.b 一期验收各行 ↔ 计划逐条覆盖；v6 P6（180 天/TTL 5 分钟/上限可配/审计）、P7（零配置临时隧道/地址变化通知/手动放置旁路/Tailscale 文档）、P11（代设还原/默认开）↔ 计划逐条覆盖；M4 spec v1.1 的 15 项需求（T0a-T4）↔ Task 1-12 全覆盖（T1e 按 spec 声明为已内建无交付）。
