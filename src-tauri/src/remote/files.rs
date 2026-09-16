@@ -57,11 +57,42 @@ const MAX_PATH_LEN: usize = 4096;
 // 安全读取（read_file_safe）
 // ============================================================
 
-/// 安全读取文件（限会话 cwd、只读、双阈值大小上限）。
+/// 敏感目录拒绝清单（2026-09-16 用户裁决）：主目录放宽后，这些目录下的文件
+/// 对**已配对设备**一律不可读——密钥/凭据/浏览器与会话数据。按路径段精确匹配
+/// （`.ssh2` 这类前缀相似目录不误伤），平台语义可注入便于测试
+const SENSITIVE_DIRS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".mam",
+    ".claude",
+    ".codex",
+    ".kimi-code",
+    ".zcode",
+    ".dsh",
+    ".config",
+    ".docker",
+    ".kube",
+    ".npmrc",
+    ".netrc",
+    ".git-credentials",
+    "AppData", // Windows 应用数据（含浏览器 profile / 凭据库）
+    "Library", // macOS 应用支持与凭据（~/Library/Keychains）
+];
+
+/// 安全读取文件（限会话 cwd 或用户主目录、只读、双阈值大小上限）。
 /// 返回 (字节, mime)。任何拒绝一律 Err（调用方 file 端点统一 403，不外泄区别）。
 /// `path` 支持绝对路径与相对路径（相对者按会话 cwd 解析——部分工具 toolArgs
 /// 记录项目内相对路径）。
-pub fn read_file_safe(session_cwd: &str, path: &str) -> Result<(Vec<u8>, String), String> {
+///
+/// 边界（2026-09-16 用户裁决放宽）：会话 cwd ∪ 用户主目录（`home` 为 None 时
+/// 只允许 cwd，fail-closed）——kimi 等工具会在对话里引用 `~/Downloads` 的图片，
+/// 仅限 cwd 会让这类预览永久打不开。主目录内的敏感目录（SENSITIVE_DIRS）仍拒绝。
+pub fn read_file_safe(
+    session_cwd: &str,
+    path: &str,
+    home: Option<&str>,
+) -> Result<(Vec<u8>, String), String> {
     if session_cwd.trim().is_empty() {
         return Err("会话 cwd 为空".into());
     }
@@ -78,8 +109,33 @@ pub fn read_file_safe(session_cwd: &str, path: &str) -> Result<(Vec<u8>, String)
     let canon = full
         .canonicalize()
         .map_err(|e| format!("文件不可解析: {e}"))?;
-    if !path_within(&canon, &cwd) {
-        return Err("路径越界：文件不在项目目录内".into());
+    // 边界判定：cwd 内 或 主目录内（home 未知则只认 cwd）
+    let allowed = path_within(&canon, &cwd);
+    let home_canon = home
+        .map(|h| Path::new(h).canonicalize())
+        .transpose()
+        .map_err(|e| format!("主目录不可解析: {e}"))?;
+    let in_home = home_canon
+        .as_deref()
+        .map(|h| path_within(&canon, h))
+        .unwrap_or(false);
+    if !allowed && !in_home {
+        return Err("路径越界：文件不在项目目录或用户主目录内".into());
+    }
+    // 敏感清单只作用于**放宽路径**（cwd 之外、主目录之内）：项目目录自身是会话
+    // 上下文（用户在此启动了 agent），其内文件不因目录名命中清单而拒——否则
+    // Windows 的 AppData 下临时项目、macOS ~/Library 下的开发目录会被整体误拒
+    if !allowed && in_home {
+        let (child, anc) = (
+            canon.to_string_lossy(),
+            home_canon
+                .as_deref()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+        if is_sensitive_path(&child, &anc, cfg!(windows)) {
+            return Err("路径越界：敏感目录不可预览".into());
+        }
     }
     let meta = canon.metadata().map_err(|e| format!("元数据不可读: {e}"))?;
     if !meta.is_file() {
@@ -98,6 +154,54 @@ pub fn read_file_safe(session_cwd: &str, path: &str) -> Result<(Vec<u8>, String)
     }
     let bytes = std::fs::read(&canon).map_err(|e| format!("读取失败: {e}"))?;
     Ok((bytes, mime))
+}
+
+/// 敏感路径判定内核（纯函数，平台语义可注入）：路径**相对主目录**的每一段
+/// 命中 SENSITIVE_DIRS 即拒（含嵌套 `.config/gh/hosts.yml`）。分隔符双态
+/// （`/` 与 `\`）、Windows 语义大小写不敏感、剥 verbatim 前缀——macOS 形态
+/// `/Users/x/.ssh/id_rsa` 与 Windows 形态 `C:\Users\x\.ssh\id_rsa` 一并覆盖
+fn is_sensitive_path(child: &str, home: &str, windows: bool) -> bool {
+    let norm = |s: &str| -> String {
+        let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s.to_string()
+        };
+        let mut s = s.replace('\\', "/");
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        if windows {
+            s.to_lowercase()
+        } else {
+            s
+        }
+    };
+    let c = norm(child);
+    let h = norm(home);
+    // 相对主目录的部分（不在 home 之下时——cwd 内路径——用全段匹配，
+    // 项目目录里叫 .config 的子目录同样按敏感处理，宁可少读一个文件）
+    let rel = c
+        .strip_prefix(&h)
+        .map(|r| r.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| c.trim_start_matches('/').to_string());
+    rel.split('/').any(|seg| {
+        let seg = if windows {
+            seg.to_lowercase()
+        } else {
+            seg.to_string()
+        };
+        SENSITIVE_DIRS.iter().any(|d| {
+            let d = if windows {
+                d.to_lowercase()
+            } else {
+                (*d).to_string()
+            };
+            seg == d
+        })
+    })
 }
 
 /// 路径包含判定（canonicalize 之后的双方）：Windows 语义自动分派
@@ -352,8 +456,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("hello.txt");
         std::fs::write(&f, "hello mam").unwrap();
-        let (bytes, mime) =
-            read_file_safe(tmp.path().to_str().unwrap(), f.to_str().unwrap()).unwrap();
+        let (bytes, mime) = read_file_safe(
+            tmp.path().to_str().unwrap(),
+            f.to_str().unwrap(),
+            Some(tmp.path().to_str().unwrap()),
+        )
+        .unwrap();
         assert_eq!(bytes, b"hello mam");
         assert_eq!(mime, "text/plain");
     }
@@ -363,35 +471,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
         std::fs::write(tmp.path().join("src").join("m.rs"), "fn main() {}").unwrap();
-        let (bytes, mime) = read_file_safe(tmp.path().to_str().unwrap(), "src/m.rs").unwrap();
+        let (bytes, mime) = read_file_safe(
+            tmp.path().to_str().unwrap(),
+            "src/m.rs",
+            Some(tmp.path().to_str().unwrap()),
+        )
+        .unwrap();
         assert_eq!(bytes, b"fn main() {}");
         assert_eq!(mime, "text/rust");
     }
 
     #[test]
     fn read_file_safe_rejects_escape_and_missing_and_dir() {
-        // 布局：outer/{proj(cwd), secret.txt}——越界目标须真实存在于 cwd 外
+        // 布局：outer/{proj(cwd), secret.txt}——越界目标须真实存在于 cwd 外；
+        // home 注入为 proj 自身 → 放宽后的主目录边界不覆盖 outer（越界语义按
+        // 「cwd 与 home 双边界」测）
         let outer = tempfile::tempdir().unwrap();
         let proj = outer.path().join("proj");
         std::fs::create_dir_all(&proj).unwrap();
         let secret = outer.path().join("secret.txt");
         std::fs::write(&secret, "x").unwrap();
         let cwd = proj.to_str().unwrap();
-        // (1) 越界：../ 逃出 cwd（按会话 cwd 解析相对路径后仍指向 cwd 外真实文件）
-        let r = read_file_safe(cwd, "../secret.txt");
+        let home = proj.to_str().unwrap();
+        // (1) 越界：../ 逃出 cwd 且出 home（按会话 cwd 解析相对路径后仍指向界外真实文件）
+        let r = read_file_safe(cwd, "../secret.txt", Some(home));
         assert!(r.unwrap_err().contains("越界"));
-        // (2) 绝对路径越界（cwd 外真实文件）
-        let r = read_file_safe(cwd, secret.to_str().unwrap());
+        // (2) 绝对路径越界（cwd 外、home 外真实文件）
+        let r = read_file_safe(cwd, secret.to_str().unwrap(), Some(home));
         assert!(r.unwrap_err().contains("越界"));
         // (3) 不存在
-        let r = read_file_safe(cwd, "nope.txt");
+        let r = read_file_safe(cwd, "nope.txt", Some(home));
         assert!(r.is_err(), "不存在的文件必须拒绝");
         // (4) 目录（canonicalize 成功但非常规文件）
-        let r = read_file_safe(cwd, ".");
+        let r = read_file_safe(cwd, ".", Some(home));
         assert!(r.is_err(), "目录必须拒绝");
         // (5) 空参
-        assert!(read_file_safe("", "x").is_err());
-        assert!(read_file_safe(cwd, "  ").is_err());
+        assert!(read_file_safe("", "x", Some(home)).is_err());
+        assert!(read_file_safe(cwd, "  ", Some(home)).is_err());
     }
 
     /// 双阈值（进度台账 #11）：文本 500KB 上限、图片 5MB 上限——
@@ -404,25 +520,172 @@ mod tests {
         let txt = tmp.path().join("big.txt");
         std::fs::write(&txt, vec![b'a'; 500 * 1024]).unwrap();
         assert!(
-            read_file_safe(cwd, txt.to_str().unwrap()).is_ok(),
+            read_file_safe(cwd, txt.to_str().unwrap(), Some(cwd)).is_ok(),
             "恰 500KB 放行"
         );
         std::fs::write(&txt, vec![b'a'; 500 * 1024 + 1]).unwrap();
         assert!(
-            read_file_safe(cwd, txt.to_str().unwrap()).is_err(),
+            read_file_safe(cwd, txt.to_str().unwrap(), Some(cwd)).is_err(),
             "超 500KB 拒"
         );
         // 图片：600KB（超文本上限、低于图片上限）必须放行；>5MB 拒
         let png = tmp.path().join("pic.png");
         std::fs::write(&png, vec![0u8; 600 * 1024]).unwrap();
-        let (bytes, mime) = read_file_safe(cwd, png.to_str().unwrap()).unwrap();
+        let (bytes, mime) = read_file_safe(cwd, png.to_str().unwrap(), Some(cwd)).unwrap();
         assert_eq!(mime, "image/png");
         assert_eq!(bytes.len(), 600 * 1024);
         std::fs::write(&png, vec![0u8; 5 * 1024 * 1024 + 1]).unwrap();
         assert!(
-            read_file_safe(cwd, png.to_str().unwrap()).is_err(),
+            read_file_safe(cwd, png.to_str().unwrap(), Some(cwd)).is_err(),
             "超 5MB 拒"
         );
+    }
+
+    /// 放宽边界（2026-09-16 用户裁决）：会话 cwd 之外、但在**用户主目录之内**的
+    /// 文件必须可读（kimi 会话引用 Downloads 图片的实测场景——图片在
+    /// ~/Downloads 而 cwd 是桌面上的项目目录）；主目录之外的越界仍拒绝
+    #[test]
+    fn read_file_safe_allows_home_but_rejects_outside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let proj = home.join("Desktop").join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let dl = home.join("Downloads");
+        std::fs::create_dir_all(&dl).unwrap();
+        let pic = dl.join("trip-share.png");
+        std::fs::write(&pic, b"\x89PNG").unwrap();
+        let cwd = proj.to_str().unwrap();
+
+        // 主目录内、项目目录外（Downloads）→ 放行
+        let (bytes, mime) =
+            read_file_safe(cwd, pic.to_str().unwrap(), Some(home.to_str().unwrap()))
+                .unwrap_or_else(|e| panic!("主目录内文件必须放行: {e}"));
+        assert_eq!(bytes, b"\x89PNG");
+        assert_eq!(mime, "image/png");
+
+        // 反斜杠形态路径（Windows 会话里 toolArgs 记录的形态）同样放行
+        let win_style = pic.to_string_lossy().replace('/', "\\");
+        assert!(
+            read_file_safe(cwd, &win_style, Some(home.to_str().unwrap())).is_ok(),
+            "反斜杠路径必须与正斜杠同判"
+        );
+
+        // 主目录之外（同级另一棵树的文件）→ 仍拒绝
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "x").unwrap();
+        let r = read_file_safe(cwd, outside.to_str().unwrap(), Some(home.to_str().unwrap()));
+        assert!(r.unwrap_err().contains("越界"), "主目录外必须仍判越界");
+
+        // home 缺失（无法确定主目录）→ 回落项目目录限制（fail-closed）
+        let r = read_file_safe(cwd, pic.to_str().unwrap(), None);
+        assert!(r.unwrap_err().contains("越界"), "home 未知时不得放宽");
+    }
+
+    /// 敏感目录拒绝清单（2026-09-16 用户裁决）：主目录内但这些目录下的文件
+    /// 一律拒绝——配对手机不得读取密钥与凭据
+    #[test]
+    fn read_file_safe_rejects_sensitive_dirs_inside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let proj = home.join("Desktop").join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let cwd = proj.to_str().unwrap();
+        let home_s = home.to_str().unwrap();
+
+        for dir in [
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".mam",
+            ".claude",
+            ".codex",
+            ".kimi-code",
+            ".zcode",
+            ".dsh",
+            ".config",
+            ".docker",
+            ".kube",
+            ".npmrc",
+        ] {
+            let d = home.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            let f = d.join("id_rsa");
+            std::fs::write(&f, "PRIVATE").unwrap();
+            let r = read_file_safe(cwd, f.to_str().unwrap(), Some(home_s));
+            assert!(
+                r.is_err(),
+                "敏感目录 {dir} 下的文件必须拒绝（配对设备不得读凭据）"
+            );
+        }
+        // 敏感目录的**同级前缀**目录不得被误伤（.ssh2 不是 .ssh）
+        let lookalike = home.join(".ssh2");
+        std::fs::create_dir_all(&lookalike).unwrap();
+        let f = lookalike.join("notes.txt");
+        std::fs::write(&f, "ok").unwrap();
+        assert!(
+            read_file_safe(cwd, f.to_str().unwrap(), Some(home_s)).is_ok(),
+            "前缀相似目录（.ssh2）不得被误拒"
+        );
+    }
+
+    /// 敏感清单匹配内核（纯函数，平台语义可注入）：
+    /// - 命中清单任一段即拒（含嵌套 .config/xxx）；
+    /// - macOS 形态（/Users/x/.ssh/id_rsa）与 Windows 形态（C:\Users\x\.ssh\id_rsa）
+    ///   必须一并覆盖；大小写不敏感（Windows 语义）
+    #[test]
+    fn sensitive_path_check_covers_mac_and_windows_forms() {
+        // macOS 形态（正斜杠）
+        assert!(is_sensitive_path(
+            "/Users/alice/.ssh/id_rsa",
+            "/Users/alice",
+            true
+        ));
+        assert!(is_sensitive_path(
+            "/Users/alice/.aws/credentials",
+            "/Users/alice",
+            true
+        ));
+        // Windows 形态（反斜杠，大小写混合）
+        assert!(is_sensitive_path(
+            r"C:\Users\bunny\.SSH\id_rsa",
+            r"C:\Users\bunny",
+            true
+        ));
+        assert!(is_sensitive_path(
+            r"C:\Users\bunny\.gnupg\secring.gpg",
+            r"C:\Users\bunny",
+            true
+        ));
+        // 嵌套命中：清单项出现在路径中段也算（~/.config/gh/hosts.yml）
+        assert!(is_sensitive_path(
+            "/Users/alice/.config/gh/hosts.yml",
+            "/Users/alice",
+            true
+        ));
+        // 普通文件不误拒
+        assert!(!is_sensitive_path(
+            "/Users/alice/Downloads/trip.png",
+            "/Users/alice",
+            true
+        ));
+        assert!(!is_sensitive_path(
+            r"C:\Users\bunny\Desktop\proj\src\main.rs",
+            r"C:\Users\bunny",
+            true
+        ));
+        // 前缀相似不误拒（.ssh2 / .awsome）
+        assert!(!is_sensitive_path(
+            "/Users/alice/.ssh2/notes.txt",
+            "/Users/alice",
+            true
+        ));
+        assert!(!is_sensitive_path(
+            "/Users/alice/.awsome/x.txt",
+            "/Users/alice",
+            true
+        ));
+        // 目录名恰好等于清单项本身（非其内文件）仍拒（目录不可预览，语义一致）
+        assert!(is_sensitive_path("/Users/alice/.ssh", "/Users/alice", true));
     }
 
     #[test]
