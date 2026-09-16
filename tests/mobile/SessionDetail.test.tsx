@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionDetail from "@/mobile/SessionDetail";
-import type { SessionMessage } from "@/mobile/api";
+import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
 import type { Session } from "@/types/session";
 
 // M3 Task 8：ZCode 式会话详情页渲染矩阵。fetch 全量 stub（盖过 setup.ts 的 msw），
@@ -31,6 +31,11 @@ function makeSession(overrides: Partial<Session> = {}): Session {
   };
 }
 
+/** M3+ 文件面板条目夹具（后端 FileEntry camelCase 契约） */
+function fileEntry(path: string, over: Partial<SessionFileEntry> = {}): SessionFileEntry {
+  return { path, lastSeq: 1, lastTs: 1000, hits: 1, ...over };
+}
+
 function msg(
   overrides: Partial<SessionMessage> & Pick<SessionMessage, "seq" | "kind" | "content">
 ): SessionMessage {
@@ -48,7 +53,8 @@ interface Routes {
   messagesNetworkFail?: boolean;
   /** Bug 1（M3 验收）：后端头部截断标记，随 /session-messages 载荷返回 */
   truncated?: boolean;
-  files?: string[];
+  files?: SessionFileEntry[];
+  filesTruncated?: boolean;
   fileContent?: string;
   fileMime?: string;
   fileStatus?: number;
@@ -59,6 +65,14 @@ let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   routes = {};
+  // matchMedia 用例间隔离：默认「无 matchMedia」= 窄屏语义（jsdom 原生行为），
+  // 需要宽屏的用例自行安装后由 afterEach 还原（旧版仅少数用例安装，
+  // 泄漏会让后续用例误判宽屏——如面板默认布局用例）
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: undefined,
+  });
 });
 afterEach(() => {
   cleanup();
@@ -80,7 +94,10 @@ function installFetch() {
       );
     }
     if (url.includes("/session-files")) {
-      return new Response(JSON.stringify({ files: routes.files ?? [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({ files: routes.files ?? [], truncated: routes.filesTruncated === true }),
+        { status: 200 }
+      );
     }
     if (url.includes("/file?")) {
       if (routes.fileStatus) return new Response("no", { status: routes.fileStatus });
@@ -221,7 +238,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     routes.fileMime = "text/rust";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
@@ -246,7 +263,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     fireEvent.click(await screen.findByTestId("file-link"));
@@ -269,7 +286,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     // jsdom 未实现 matchMedia：装 shim（theme.test.ts 同款模式）
     Object.defineProperty(window, "matchMedia", {
@@ -344,7 +361,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     fireEvent.click(await screen.findByTestId("file-link"));
@@ -355,9 +372,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const split = screen.getByTestId("split-container");
     // 横向分屏容器：flex-row（左对话右文件）——与纵向 split 的 flex-col 区分
     expect(split.className).toContain("flex-row");
-    // 对话与文件都在同一屏（同一容器内两个子区）
+    // 对话与文件都在同一屏（同一容器内两个子区）；文件内容为异步拉取，等就绪
     expect(split.textContent).toContain("改了");
-    expect(split.textContent).toContain("fn main() {}");
+    expect((await screen.findByTestId("preview-code")).textContent).toContain("fn main() {}");
     // 三态互通：纵分屏 ↔ 横分屏 ↔ 全屏
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
@@ -374,7 +391,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     fireEvent.click(await screen.findByTestId("file-link"));
@@ -393,7 +410,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     fireEvent.click(await screen.findByTestId("file-link"));
@@ -449,7 +466,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
     ];
-    routes.files = ["/tmp/proj/src/app.rs"];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
     routes.fileContent = "fn main() {}";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
 
@@ -480,6 +497,63 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.click(screen.getByTestId("preview-toggle-fullscreen"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
   });
+
+  it("Task 2：页头恒有文件面板入口，点击进入列表视图（窄屏默认全屏布局）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // 页头按钮恒可见（预览未打开时也有）
+    const btn = await screen.findByTestId("file-panel-button");
+    expect(btn.getAttribute("aria-label")).toBe("文件面板");
+    // 预览未打开：无侧栏容器
+    expect(screen.queryByTestId("preview-shell")).toBeNull();
+    fireEvent.click(btn);
+    // 进入列表视图：侧栏容器出现（jsdom 无 matchMedia → 窄屏默认 fullscreen）
+    const shell = await screen.findByTestId("preview-shell");
+    expect(shell.getAttribute("data-view")).toBe("list");
+    expect(shell.getAttribute("data-mode")).toBe("fullscreen");
+  });
+
+  it("Task 2：宽屏打开面板默认 split-h（左对话右列表）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "hi" })];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (q: string) => ({ matches: q.includes("min-width"), media: q }),
+    });
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-panel-button"));
+    const shell = await screen.findByTestId("preview-shell");
+    expect(shell.getAttribute("data-mode")).toBe("split-h");
+    expect(screen.getByTestId("split-container").className).toContain("flex-row");
+  });
+
+  it("Task 2：面板挂载复用详情页已拉的提取结果，切档才重拉（scope→limit）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs" })];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // 挂载时已拉一次（scope 默认 200，用于正文链接化）
+    await screen.findByTestId("file-panel-button");
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=200"))
+      ).toBe(true);
+    });
+    const before = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-files")
+    ).length;
+    // 打开面板不重拉（复用挂载结果）
+    fireEvent.click(screen.getByTestId("file-panel-button"));
+    await screen.findByTestId("preview-shell");
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-files")).length
+    ).toBe(before);
+  }, 15000);
 
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();

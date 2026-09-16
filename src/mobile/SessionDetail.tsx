@@ -12,11 +12,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ArrowLeft, ChevronDown, ChevronRight, RotateCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, FolderOpen, RotateCw } from "lucide-react";
+import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
 import { type PreviewMode } from "./PreviewModeSwitcher";
 import SplitHandle from "./SplitHandle";
-import { ApiError, fetchSessionFiles, fetchSessionMessages, type SessionMessage } from "./api";
+import {
+  ApiError,
+  fetchSessionFiles,
+  fetchSessionMessages,
+  type SessionFileEntry,
+  type SessionMessage,
+} from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
 import type { Session } from "@/types/session";
 
@@ -33,10 +40,16 @@ interface SessionDetailProps {
   onBack: () => void;
 }
 
-interface PreviewState {
-  path: string;
-  mode: PreviewMode;
-}
+/** 预览侧栏状态（M3+ 辨识联合）：
+ *  - list：文件面板（聚合列表，用户裁决 4/6）；
+ *  - file：单文件预览；backToList 标记来源（从面板进入 → 显示返回按钮，
+ *    从消息正文链接进入 → 无返回按钮，行为不变） */
+type PreviewState =
+  | { view: "list"; mode: PreviewMode }
+  | { view: "file"; path: string; mode: PreviewMode; backToList: boolean };
+
+/** 面板默认追溯档位（首屏数据源，与详情页默认 limit 同标尺） */
+const FILE_DEFAULT_SCOPE = 200;
 
 /** 拉取失败态：status=null 表示网络层异常（无 HTTP 状态可读） */
 interface LoadError {
@@ -122,8 +135,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const [refreshTick, setRefreshTick] = useState(0);
   // 折叠覆盖表：seq → 强制折叠/展开；缺省走默认折叠语义（见 isCollapsed）
   const [expandedOverride, setExpandedOverride] = useState<Map<number, boolean>>(new Map());
-  // 该会话涉及的文件路径（/session-files 提取结果，链接化数据源）
-  const [files, setFiles] = useState<Set<string>>(new Set());
+  // 该会话涉及的文件（/session-files 提取结果，M3+）：一份数据两用——
+  // fileEntries 驱动文件面板列表，派生 Set 驱动正文路径链接化
+  const [fileEntries, setFileEntries] = useState<SessionFileEntry[]>([]);
+  const [fileTruncated, setFileTruncated] = useState(false);
+  // 追溯档位（M3+ 用户裁决 3）：面板三档 200/500/1000，切档重拉
+  const [fileScope, setFileScope] = useState<number>(FILE_DEFAULT_SCOPE);
+  const [fileLoading, setFileLoading] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   // 文件栏占比（可拖分隔条，需求 2026-09-16）：两形态各自保留用户拖出的比例，
   // 初值 0.5（对半分，与旧版 h-1/2 / w-1/2 观感一致）
@@ -161,17 +179,27 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     };
   }, [session.agentType, session.id, limit, refreshTick]);
 
-  // 文件路径表：挂载拉一次（提取要读一遍会话消息流，属重活；失败已在 api 层
-  // 静默降级为空表——正文照常渲染，只是没有文件链接）
+  // 文件表拉取（M3+）：挂载 / 切档时重拉。挂载那次（scope=200）即面板首次打开
+  // 复用的数据（一次拉取两用，用户裁决 3 的附带口径）；失败已由 api 层静默降级
   useEffect(() => {
     let alive = true;
-    fetchSessionFiles(session.agentType, session.id).then((list) => {
-      if (alive) setFiles(new Set(list));
-    });
+    setFileLoading(true);
+    fetchSessionFiles(session.agentType, session.id, fileScope)
+      .then((pg) => {
+        if (!alive) return;
+        setFileEntries(pg.files);
+        setFileTruncated(pg.truncated);
+      })
+      .finally(() => {
+        if (alive) setFileLoading(false);
+      });
     return () => {
       alive = false;
     };
-  }, [session.agentType, session.id]);
+  }, [session.agentType, session.id, fileScope]);
+
+  // 链接化 Set（派生自面板条目，单一数据源）：正文路径匹配用
+  const files = useMemo(() => new Set(fileEntries.map((e) => e.path)), [fileEntries]);
 
   // 总结模式下的「最后 assistant 总结」：倒数第一条 assistant
   const lastAssistantSeq = useMemo(() => {
@@ -209,22 +237,55 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     [isCollapsed]
   );
 
-  // 点文件链接 → 预览。Bug 2 顺手项（spec P9「按屏幕宽度自适应」）：≥768px 分屏
-  // （上对话下文件）、<768px 全屏；手动切换（页头 / 预览头控件）随时覆盖该默认值。
-  // matchMedia 防御式访问（jsdom / 隐私模式可能缺失，theme.ts 同款口径）
-  const openFile = useCallback((path: string) => {
-    let wide = false;
+  /** 宽屏判定（matchMedia 防御式访问；jsdom / 隐私模式可能缺失，theme.ts 同款口径） */
+  const isWideViewport = useCallback((): boolean => {
     try {
-      wide = window.matchMedia?.("(min-width: 768px)")?.matches ?? false;
+      return window.matchMedia?.("(min-width: 768px)")?.matches ?? false;
     } catch {
-      wide = false; // matchMedia 缺失/异常 → 窄屏默认全屏（Task 8 原裁决）
+      return false; // matchMedia 缺失/异常 → 窄屏语义（Task 8 原裁决）
     }
-    setPreview({ path, mode: wide ? "split" : "fullscreen" });
   }, []);
+
+  // 点文件链接（消息正文）→ 预览。Bug 2 顺手项（spec P9「按屏幕宽度自适应」）：
+  // ≥768px 分屏（上对话下文件）、<768px 全屏；手动切换随时覆盖该默认值。
+  // backToList=false（从正文进入，无返回列表按钮，既有行为不变）
+  const openFile = useCallback(
+    (path: string) => {
+      setPreview({
+        view: "file",
+        path,
+        mode: isWideViewport() ? "split" : "fullscreen",
+        backToList: false,
+      });
+    },
+    [isWideViewport]
+  );
+
+  // 从文件面板进入单文件预览（M3+）：backToList=true → 预览页头显示返回按钮；
+  // 布局沿用当前 mode（往返保持，用户裁决「布局保持」）
+  const openFileFromList = useCallback((path: string) => {
+    setPreview((p) => ({
+      view: "file",
+      path,
+      mode: p?.mode ?? "fullscreen",
+      backToList: true,
+    }));
+  }, []);
+
+  // 页头面板入口（M3+）：宽屏默认 split-h（列表是行集，右侧整列纵向空间大）、
+  // 窄屏 fullscreen（用户裁决：面板默认布局口径）
+  const openPanel = useCallback(() => {
+    setPreview({ view: "list", mode: isWideViewport() ? "split-h" : "fullscreen" });
+  }, [isWideViewport]);
 
   const closePreview = useCallback(() => setPreview(null), []);
 
-  // 布局切换（页头切换器与 FilePreview 页头控件共用同一状态出口）
+  // 从单文件预览返回列表（保持当前布局 mode）
+  const backToList = useCallback(() => {
+    setPreview((p) => ({ view: "list", mode: p?.mode ?? "fullscreen" }));
+  }, []);
+
+  // 布局切换（预览页头控件与面板共用同一状态出口）
   const changePreviewMode = useCallback((mode: PreviewMode) => {
     setPreview((p) => (p ? { ...p, mode } : p));
   }, []);
@@ -513,8 +574,18 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             session.status === "waiting" ? "animate-pulse" : ""
           }`}
         />
-        {/* 布局切换器唯一实例在预览页头（FilePreview 内，2026-09-16 用户裁决：
-            两处重复出现占用页面空间，只保留贴近文件的那份）——三态均可从那里切 */}
+        {/* 文件面板入口（M3+）：页头恒可见（不依赖预览是否打开） */}
+        <button
+          type="button"
+          data-testid="file-panel-button"
+          aria-label="文件面板"
+          onClick={openPanel}
+          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+        >
+          <FolderOpen size={16} />
+        </button>
+        {/* 布局切换器唯一实例在预览侧栏页头（FilePreview / FilePanel 内，
+            2026-09-16 用户裁决：两处重复出现占用页面空间，只保留贴近文件的那份） */}
         <button
           type="button"
           data-testid="detail-refresh"
@@ -526,8 +597,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </button>
       </header>
 
-      {/* split = 上对话下文件（纵向）；split-h = 左对话右文件（横向，需求 1）；
-          fullscreen = 全屏浮层。三态互切，关闭回原位；分屏两区之间有可拖分隔条 */}
+      {/* 预览侧栏（M3+ 两视图共用）：split/split-h 内联分屏（可拖分隔条），
+          fullscreen 全屏浮层；list 视图渲染 FilePanel，file 视图渲染 FilePreview */}
       {preview?.mode === "split" || preview?.mode === "split-h" ? (
         <div
           ref={splitRef}
@@ -551,13 +622,32 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 : { height: `${fileRatio * 100}%` }
             }
           >
-            <FilePreview
-              session={session}
-              filePath={preview.path}
-              mode={preview.mode}
-              onModeChange={changePreviewMode}
-              onClose={closePreview}
-            />
+            {preview.view === "list" ? (
+              <div data-testid="preview-shell" data-view="list" data-mode={preview.mode}>
+                <FilePanel
+                  entries={fileEntries}
+                  truncated={fileTruncated}
+                  scope={fileScope}
+                  loading={fileLoading}
+                  mode={preview.mode}
+                  onScopeChange={setFileScope}
+                  onOpenFile={openFileFromList}
+                  onModeChange={changePreviewMode}
+                  onClose={closePreview}
+                />
+              </div>
+            ) : (
+              <div data-testid="preview-shell" data-view="file" data-mode={preview.mode}>
+                <FilePreview
+                  session={session}
+                  filePath={preview.path}
+                  mode={preview.mode}
+                  onModeChange={changePreviewMode}
+                  onBack={preview.backToList ? backToList : undefined}
+                  onClose={closePreview}
+                />
+              </div>
+            )}
           </div>
         </div>
       ) : (
@@ -567,13 +657,35 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——列表状态由本组件持有） */}
       {preview?.mode === "fullscreen" && (
         <div className="fixed inset-0 z-50 bg-white dark:bg-slate-950">
-          <FilePreview
-            session={session}
-            filePath={preview.path}
-            mode="fullscreen"
-            onModeChange={changePreviewMode}
-            onClose={closePreview}
-          />
+          <div
+            data-testid="preview-shell"
+            data-view={preview.view}
+            data-mode="fullscreen"
+            className="h-full"
+          >
+            {preview.view === "list" ? (
+              <FilePanel
+                entries={fileEntries}
+                truncated={fileTruncated}
+                scope={fileScope}
+                loading={fileLoading}
+                mode="fullscreen"
+                onScopeChange={setFileScope}
+                onOpenFile={openFileFromList}
+                onModeChange={changePreviewMode}
+                onClose={closePreview}
+              />
+            ) : (
+              <FilePreview
+                session={session}
+                filePath={preview.path}
+                mode="fullscreen"
+                onModeChange={changePreviewMode}
+                onBack={preview.backToList ? backToList : undefined}
+                onClose={closePreview}
+              />
+            )}
+          </div>
         </div>
       )}
     </div>

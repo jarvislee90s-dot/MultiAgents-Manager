@@ -72,7 +72,7 @@ function installFetch() {
         );
       }
       if (url.includes("/session-files")) {
-        return new Response(JSON.stringify({ files: [] }), { status: 200 });
+        return new Response(JSON.stringify({ files: [], truncated: false }), { status: 200 });
       }
       if (url.includes("/file?")) {
         return new Response(JSON.stringify({ content: "x", mime: "text/plain" }), { status: 200 });

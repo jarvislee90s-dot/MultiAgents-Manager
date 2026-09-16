@@ -101,17 +101,41 @@ export async function fetchSessionMessages(
   };
 }
 
-/** 拉取该会话涉及的文件路径表（/session-files，泛化提取）。链接化是增强能力：
- *  任何失败（含 404/403）静默降级为空表——详情页正文照常渲染，只是没有文件链接 */
-export async function fetchSessionFiles(agentType: string, sessionId: string): Promise<string[]> {
-  const q = new URLSearchParams({ agent_type: agentType, session_id: sessionId });
+/** 文件条目（M3+ 文件面板，与 Rust `remote::files::FileEntry` camelCase 序列化
+ *  逐字段对应，勿漂移）：path = 最后一次出现的原始形态，lastSeq = 最后出现条目的
+ *  会话内序，lastTs = 最后出现时间（可 null → 前端显示 `—`），hits = 出现次数 */
+export interface SessionFileEntry {
+  path: string;
+  lastSeq: number;
+  lastTs: number | null;
+  hits: number;
+}
+
+/** 拉取该会话涉及的文件表（/session-files，泛化提取）。一份数据两用：正文
+ *  路径链接化（取 path 集）+ 文件面板列表（全字段）。增强能力：任何失败
+ *  （含 404/403）静默降级为空表——详情页正文照常渲染。
+ *  limit = 追溯档位（面板 200/500/1000 三档），透传后端窗口机制；
+ *  truncated = 该档位下还有更早文件未纳入（面板据此提示） */
+export async function fetchSessionFiles(
+  agentType: string,
+  sessionId: string,
+  limit: number
+): Promise<{ files: SessionFileEntry[]; truncated: boolean }> {
+  const q = new URLSearchParams({
+    agent_type: agentType,
+    session_id: sessionId,
+    limit: String(limit),
+  });
   try {
     const r = await fetch(`/m/api/v1/session-files?${q}`);
-    if (!r.ok) return [];
-    const j = (await r.json()) as { files: string[] };
-    return Array.isArray(j.files) ? j.files : [];
+    if (!r.ok) return { files: [], truncated: false };
+    const j = (await r.json()) as { files?: SessionFileEntry[]; truncated?: boolean };
+    return {
+      files: Array.isArray(j.files) ? j.files : [],
+      truncated: j.truncated === true,
+    };
   } catch {
-    return [];
+    return { files: [], truncated: false };
   }
 }
 

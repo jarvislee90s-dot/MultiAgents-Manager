@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import hljs from "highlight.js/lib/common";
-import { X } from "lucide-react";
+import { ArrowLeft, X } from "lucide-react";
 import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import { ApiError, fetchFile, type FilePayload } from "./api";
 import type { Session } from "@/types/session";
@@ -27,6 +27,9 @@ interface FilePreviewProps {
    *  全屏浮层 fixed inset-0 盖住 SessionDetail 页头，此控件是全屏态唯一可达入口；
    *  缺省不渲染（既有直接用法/测试不受影响），切换仍由 SessionDetail 持有 mode */
   onModeChange?: (mode: PreviewMode) => void;
+  /** 返回文件列表（M3+）：从面板进入时提供 → 页头显示返回按钮；
+   *  从消息正文链接进入（backToList=false）时缺省不渲染，既有行为不变 */
+  onBack?: () => void;
   onClose: () => void;
 }
 
@@ -84,6 +87,7 @@ export default function FilePreview({
   filePath,
   mode,
   onModeChange,
+  onBack,
   onClose,
 }: FilePreviewProps) {
   const [state, setState] = useState<LoadState>({ phase: "loading" });
@@ -136,6 +140,18 @@ export default function FilePreview({
       className="flex h-full min-h-0 flex-col bg-white dark:bg-slate-950"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+        {/* 返回文件列表（M3+）：仅从面板进入时出现 */}
+        {onBack && (
+          <button
+            type="button"
+            data-testid="preview-back-list"
+            aria-label="返回文件列表"
+            onClick={onBack}
+            className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          >
+            <ArrowLeft size={16} />
+          </button>
+        )}
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-200">
           {baseName}
         </span>
