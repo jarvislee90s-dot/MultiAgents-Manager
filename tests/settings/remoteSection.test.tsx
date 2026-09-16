@@ -5,12 +5,23 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, toastInfoMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  toastInfoMock: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 // useAppTranslation 内部 listen("@tauri-apps/api/event") 在 jsdom 无 Tauri 内核，须 mock
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
   emit: vi.fn(async () => {}),
+}));
+// M4 T0b：sonner mock 须放文件顶部——vi.mock 会被提升，写在 it() 内引用局部变量会因 hoisting 报错
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), {
+    info: toastInfoMock,
+    success: vi.fn(),
+    error: vi.fn(),
+  }),
 }));
 
 // tests/setup.ts 未初始化 i18n，显式引入并按默认英文断言（jsdom navigator.language=en）
@@ -132,5 +143,26 @@ describe("RemoteSection 本机名称输入（P8b 收尾）", () => {
         value: "JARVIS-Win",
       })
     );
+  });
+});
+
+describe("RemoteSection TLS 确认不可在线撤回（M4 T0b）", () => {
+  it("tls ack: uncheck snaps back with toast, stays checked", async () => {
+    // bind=0.0.0.0 + acked=true 才渲染复选框
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "remote_status") return Promise.resolve({ ...lanStatus, enabled: true });
+      if (cmd === "get_setting")
+        return Promise.resolve(args?.key === "remote.public_ack" ? "true" : null);
+      return Promise.resolve(null);
+    });
+    render(<RemoteSection />);
+    const cb = await screen.findByRole("checkbox");
+    expect(cb).toBeChecked();
+    // 常驻说明文案存在
+    expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument();
+    // 取消勾选：仍选中 + toast 提示
+    fireEvent.click(cb);
+    expect(cb).toBeChecked(); // 回弹（受控于 acked，本就 snaps back；本任务补 toast 与文案）
+    await waitFor(() => expect(toastInfoMock).toHaveBeenCalled());
   });
 });

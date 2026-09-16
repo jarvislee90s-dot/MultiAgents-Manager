@@ -234,7 +234,9 @@ export function RemoteSection() {
         </div>
         <div className="border-t" />
 
-        {/* TLS 反代确认：仅对外绑定（0.0.0.0）时出现；勾选即调 remote_confirm_public 置位 */}
+        {/* TLS 反代确认：仅对外绑定（0.0.0.0）时出现；勾选即调 remote_confirm_public 置位。
+            M4 T0b：确认只进不退——取消方向回弹（受控于 acked 态天然回弹）并 toast 明示
+            不可在线撤回；复选框下方常驻说明撤销路径（改绑本机模式） */}
         {bind === BIND_LAN && (
           <>
             <div className="flex items-center justify-between py-2.5">
@@ -243,9 +245,14 @@ export function RemoteSection() {
                 checked={acked}
                 onCheckedChange={(v) => {
                   if (v === true) void confirmPublic();
+                  else
+                    toast.info(
+                      `${t("settings.remote.tlsAckNoRevoke")}。${t("settings.remote.tlsAckRevokeByRebind")}`
+                    );
                 }}
               />
             </div>
+            <p className="text-muted-foreground pb-2 text-xs">{t("settings.remote.tlsAckHint")}</p>
             <div className="border-t" />
           </>
         )}
