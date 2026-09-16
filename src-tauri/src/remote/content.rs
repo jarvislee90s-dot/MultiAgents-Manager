@@ -1132,6 +1132,16 @@ fn read_kimi_messages_with(
     Ok(page(msgs, limit, truncated))
 }
 
+/// skill 装载注入标记（Bug 3，M3 验收）：kimi CLI 把 skill 装载全文写成
+/// turn.steer 与 append_message(role=user) 两条 user 载荷（真实 wire 取证，内容
+/// 全等）——映射前按标记跳过，对齐 claude 跳 isMeta / dsh 过滤 source.kind 注入
+/// 的先例。真实用户输入不含此标记不受影响；短 tool.result（loaded inline）留在
+/// 折叠块，无信息损失
+fn is_kimi_skill_injection(text: &str) -> bool {
+    text.contains("Skill tool loaded instructions for this request.")
+        || text.contains("<skill-loaded ")
+}
+
 /// Kimi wire.jsonl 行 → 统一条目（纯函数；entry_text/entry_status 的内容版映射）。
 /// 流式 content.part 事件会碎片化 → 连续同 kind 文本行合并为一条（tool 行为边界）；
 /// turn.prompt 与 append_message(user) 是同一输入的两次落笔（实机取证）→ 连续全等去重
@@ -1156,7 +1166,7 @@ fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
                             .join(" ")
                     })
                     .unwrap_or_default();
-                if !text.trim().is_empty() {
+                if !text.trim().is_empty() && !is_kimi_skill_injection(&text) {
                     push_kimi(&mut out, SessionMessage::text("user", text, ts));
                 }
             }
@@ -1169,7 +1179,9 @@ fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
                 let text = msg
                     .map(|m| join_text_parts(m.get("content").unwrap_or(&serde_json::Value::Null)))
                     .unwrap_or_default();
-                if !text.trim().is_empty() {
+                // 注入过滤只作用于 user 侧（assistant 正文是模型输出，不做标记过滤）
+                let injected = role == "user" && is_kimi_skill_injection(&text);
+                if !text.trim().is_empty() && !injected {
                     let kind = if role == "user" { "user" } else { "assistant" };
                     push_kimi(&mut out, SessionMessage::text(kind, text, ts));
                 }
@@ -2279,6 +2291,43 @@ mod tests {
         assert_eq!(msgs[4].content, "a.rs");
         assert_eq!(msgs[4].ts, Some(1400));
         assert_eq!(msgs[5].content, "再改一下", "不同内容的两次用户输入不合并");
+    }
+
+    /// Bug 3 修复（M3 验收）：kimi skill 装载注入泄漏为 user 正文。
+    /// 真实 wire 取证：CLI 把 skill 装载全文写成 turn.steer + append_message(role=user)
+    /// 两条同文 user 载荷（与 turn.prompt 双写不同，中间隔 tool-result 时相邻全等
+    /// 去重失效 → 同文泄漏两次）。映射前按注入标记过滤：真实用户输入不受影响；
+    /// 短 tool.result（loaded inline）留在折叠块，无信息损失
+    #[test]
+    fn kimi_skill_loaded_injection_never_leaks_as_user_content() {
+        // mark 内嵌双引号会破坏合成 JSON（parse 失败被跳过即假绿），故用无引号形态
+        let mark =
+            "<skill-loaded name=demo>Skill tool loaded instructions for this request.</skill-loaded>";
+        let lines = vec![
+            // 注入载荷 1：turn.steer（skill 装载全文）
+            format!(
+                r#"{{"type":"turn.steer","input":[{{"type":"text","text":"{mark}"}}],"time":100}}"#
+            ),
+            // 工具链路夹在两条注入载荷之间（相邻去重对此失效的真实形态）
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Skill","args":{"skill":"demo"}},"time":110}"#.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c1","result":{"output":"Skill \"demo\" loaded inline."}},"time":120}"#.to_string(),
+            // 注入载荷 2：append_message(role=user) 同文
+            format!(
+                r#"{{"type":"context.append_message","message":{{"role":"user","content":[{{"type":"text","text":"{mark}"}}]}},"time":130}}"#
+            ),
+        ];
+        let msgs = map_kimi_lines(&lines);
+        let leaked: Vec<&SessionMessage> = msgs.iter().filter(|m| m.kind == "user").collect();
+        assert!(
+            leaked.is_empty(),
+            "skill 装载注入不得泄漏为 user 正文，实得 {leaked:?}"
+        );
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call", "tool-result"],
+            "工具链路照常出条目"
+        );
     }
 
     #[test]
