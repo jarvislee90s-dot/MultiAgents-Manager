@@ -145,6 +145,8 @@
       "hostName": "本机名称",
       "hostNamePlaceholder": "如 JARVIS 的 Win 电脑",
       "enable": "开启远程接入",
+      "keepalive": "电源保活",
+      "keepaliveHint": "远程开启期间阻止系统与磁盘休眠（屏幕可熄）。macOS 合盖仍会休眠；电池模式下 macOS 需接电源才完整生效、Windows 临界电量会强制睡眠",
       "bind": "绑定范围",
       "bindLocal": "仅本机",
       "bindLan": "局域网",

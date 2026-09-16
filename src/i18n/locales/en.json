@@ -145,6 +145,8 @@
       "hostName": "Machine name",
       "hostNamePlaceholder": "e.g. JARVIS's Win PC",
       "enable": "Enable remote access",
+      "keepalive": "Keep awake",
+      "keepaliveHint": "Prevents system and disk sleep while remote access is on (the screen may still turn off). macOS still sleeps when the lid is closed; on battery, macOS needs AC power for the full effect, and Windows forces sleep at critical battery level",
       "bind": "Bind scope",
       "bindLocal": "This machine only",
       "bindLan": "LAN",

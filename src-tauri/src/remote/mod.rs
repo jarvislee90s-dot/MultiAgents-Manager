@@ -8,6 +8,7 @@ pub mod events;
 pub mod files;
 pub mod gate;
 pub mod pairing;
+pub mod power;
 pub mod server;
 pub mod tunnel;
 pub mod watcher;
@@ -222,7 +223,7 @@ fn start_server_core(
 /// 双开），DB 读取与真实 spawn（绑端口）以闭包注入 start_server_core，使其可零污染单测
 fn start_server() -> Result<(), String> {
     let mut h = SERVER_HANDLE.lock().unwrap();
-    start_server_core(
+    let spawned = start_server_core(
         &mut h,
         bind_and_port,
         || crate::database::dao::settings::get_setting(KEY_PUBLIC_ACK),
@@ -241,8 +242,13 @@ fn start_server() -> Result<(), String> {
                 }
             })
         },
-    )
-    .map(|_| ())
+    )?;
+    if spawned {
+        // M4 T3：远程真正开启 → 持电源锁（spec T3：保活跟随远程开关，默认开）；
+        // 仅真正 spawn 才持锁（幂等跳过时保活已在持，PowerCore 自身幂等，双保险）
+        power::acquire();
+    }
+    Ok(())
 }
 
 /// 停止远程服务：abort 服务器任务 + 全吊销已配对设备 + 清空配对码（不变量 5「全吊销」：
@@ -267,6 +273,8 @@ fn stop_server() {
     STATE.pairing.lock().unwrap().stop();
     // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
     tunnel::stop();
+    // M4 T3：电源锁随远程关闭释放（caffeinate kill / 执行状态清除 + 磁盘代设还原）
+    power::release();
 }
 
 /// 开关内核（可测核心，SSOT 写入与启停以闭包注入）：写 enabled SSOT → 启/停服务器。
@@ -773,6 +781,8 @@ pub fn pair_url_with_tunnel(tunnel: Option<String>, base_url: String, token: &st
 
 /// 应用启动恢复（lib.rs setup 调用）：开机自启（若启用）。失败仅告警不阻断启动
 pub fn restore_on_launch() {
+    // M4 T3：电源保活崩溃恢复（Windows 磁盘代设原值未还原时写回并清键；其余平台无值即空操作）
+    power::restore_on_launch();
     if crate::database::dao::settings::get_setting(KEY_ENABLED)
         .map(|v| v == "true")
         .unwrap_or(false)

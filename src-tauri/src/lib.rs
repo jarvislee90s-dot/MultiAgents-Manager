@@ -177,7 +177,16 @@ pub fn run() {
         }
     };
 
-    builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    // M4：退出钩子（spec §8 应用退出清理子进程与电源锁）——旧 `.run(ctx)` 无事件回调，
+    // 改为 build + run 回调：RunEvent::Exit 时停隧道（kill_on_drop 兜不住进程级退出）
+    // 与电源锁（caffeinate kill / 执行状态清除 + 磁盘代设还原），不留孤儿进程、不失电源锁
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_app, event| {
+        if let tauri::RunEvent::Exit = event {
+            crate::remote::tunnel::stop();
+            crate::remote::power::release();
+        }
+    });
 }

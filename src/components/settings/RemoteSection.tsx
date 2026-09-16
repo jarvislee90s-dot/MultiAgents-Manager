@@ -50,6 +50,9 @@ const TUNNEL_TOKEN_KEY = "remote.tunnel_token";
 // 设备上限（M4 T2）：与 Rust 端 remote::KEY_MAX_DEVICES 对齐；后端 max_devices_from
 //（None/乱串 → 3，clamp 1..=10）是唯一口径，前端不 clamp、占位符即默认值
 const MAX_DEVICES_KEY = "remote.max_devices";
+// 电源保活（M4 T3）：与 Rust 端 remote::power::KEY_KEEPALIVE 对齐；默认开，
+// 后端 should_acquire（None/乱串 → true）是唯一口径，前端仅同步展示
+const KEEPALIVE_KEY = "remote.keepalive";
 // 绑定只允许这两个字面量（Task 4 评审：后端 TLS 门只匹配 "0.0.0.0"；若允许自由输入
 // 具体局域网 IP，会绕过「对外必须先确认 TLS 反代」的 ack 门）
 const BIND_LOCAL = "127.0.0.1";
@@ -90,6 +93,8 @@ export function RemoteSection() {
   const [stopOpen, setStopOpen] = useState(false);
   // 开关在途互斥：连点会并发 remote_toggle（start/stop 竞态），与设置页 toolSaving 同型
   const [busy, setBusy] = useState(false);
+  // 电源保活开关（M4 T3，默认开）：受控 Switch，加载回填、切换落盘
+  const [keepalive, setKeepalive] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
@@ -110,6 +115,12 @@ export function RemoteSection() {
   // 不回读，保留用户正在编辑的值
   useEffect(() => {
     void (async () => setToken((await getSetting(TUNNEL_TOKEN_KEY)) ?? ""))();
+  }, []);
+
+  // 保活回填（M4 T3）：进面板读一次已存值；null/非 "false" → 默认开
+  //（与后端 should_acquire 的 fail-safe 口径一致），后续 refresh 不回读
+  useEffect(() => {
+    void (async () => setKeepalive((await getSetting(KEEPALIVE_KEY)) !== "false"))();
   }, []);
 
   const enabled = status?.enabled ?? false;
@@ -259,6 +270,17 @@ export function RemoteSection() {
     }
   };
 
+  // 保活落盘（M4 T3）：写 "true"/"false" 后刷新；失败 toast 且开关回弹（受控态未变）
+  const changeKeepalive = async (v: boolean) => {
+    try {
+      await setSetting(KEEPALIVE_KEY, v ? "true" : "false");
+      setKeepalive(v);
+      await refresh();
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
   // 本机名落盘（P8b 收尾）：blur 触发（不逐键写库）；原样写不做非空校验——
   // 空串/空白由后端 display_host_name 过滤后回落系统名，口径单点保留在后端
   const changeHostName = async (value: string) => {
@@ -326,6 +348,23 @@ export function RemoteSection() {
             checked={enabled}
             disabled={busy || !status}
             onCheckedChange={(v) => (v ? void enable() : setStopOpen(true))}
+          />
+        </div>
+        <div className="border-t" />
+
+        {/* 电源保活（M4 T3，默认开）：远程开启期间阻止休眠（屏幕可熄）。
+            开关仅落盘 KV，热生效在后端（远程开启路径每次现读 should_acquire） */}
+        <div className="flex items-center justify-between py-2.5">
+          <div className="flex-1">
+            <label className="text-sm font-medium">{t("settings.remote.keepalive")}</label>
+            <p className="text-muted-foreground mt-0.5 text-xs">
+              {t("settings.remote.keepaliveHint")}
+            </p>
+          </div>
+          <Switch
+            checked={keepalive}
+            disabled={busy || !status}
+            onCheckedChange={(v) => void changeKeepalive(v)}
           />
         </div>
         <div className="border-t" />
