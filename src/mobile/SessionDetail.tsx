@@ -332,6 +332,26 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     m.kind === "tool-result" ||
     (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
 
+  // Bug 8（M3 验收）：总结模式折叠提示。折叠数 = 当前被折叠的可折叠条数——
+  // 70 条过程消息被静默折叠会被误读为「内容被截」，顶部提示行 + 展开/收起全部
+  // 消除歧义（折叠本身是正确行为，不改动折叠语义）
+  const toggleableMessages = messages !== null ? messages.filter(isToggleable) : [];
+  const collapsedCount = toggleableMessages.filter((m) => isCollapsed(m)).length;
+
+  const expandAll = useCallback(() => {
+    setExpandedOverride((prev) => {
+      const next = new Map(prev);
+      // 覆盖表值语义 = 强制折叠与否（false = 强制展开，见 isCollapsed）
+      for (const m of toggleableMessages) next.set(m.seq, false);
+      return next;
+    });
+  }, [toggleableMessages]);
+
+  const collapseAll = useCallback(() => {
+    // 清空覆盖表 = 回到默认折叠语义（总结模式折叠规则的单点来源仍是 isCollapsed）
+    setExpandedOverride(new Map());
+  }, []);
+
   // Bug 1（M3 验收）：条数到顶（length >= limit）**或**后端报告头部截断（truncated，
   // 胖单行吃满字节窗的会话条数恒小于 limit）任一成立即提供「加载更早消息」
   const hasLoadMore =
@@ -340,6 +360,37 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 消息区（split 布局复用同一份 JSX）
   const messageArea = (
     <>
+      {/* 总结模式提示行（Bug 8）：仅总结模式且有可折叠过程消息时出现 */}
+      {isSummary && toggleableMessages.length > 0 && (
+        <div
+          data-testid="summary-banner"
+          className="mb-2 flex items-center gap-2 rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
+        >
+          <span>总结模式 · 已折叠 {collapsedCount} 条过程消息</span>
+          <span className="ml-auto flex shrink-0 gap-1">
+            {collapsedCount > 0 && (
+              <button
+                type="button"
+                data-testid="expand-all"
+                onClick={expandAll}
+                className="rounded-full bg-sky-500/20 px-2 py-0.5 text-xs text-sky-700 dark:bg-sky-400/20 dark:text-sky-300"
+              >
+                展开全部
+              </button>
+            )}
+            {collapsedCount < toggleableMessages.length && (
+              <button
+                type="button"
+                data-testid="collapse-all"
+                onClick={collapseAll}
+                className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+              >
+                收起全部
+              </button>
+            )}
+          </span>
+        </div>
+      )}
       {loading && messages === null && (
         <p className="py-16 text-center text-sm text-slate-500">加载中…</p>
       )}

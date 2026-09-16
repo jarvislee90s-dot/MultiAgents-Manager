@@ -306,6 +306,38 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(h2!.closest(".md-body")).toBeTruthy();
   });
 
+  it("Bug 8：总结模式提示行计数正确，展开全部/收起全部生效；运行中不出现", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "查一下" }),
+      msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+      msg({ seq: 2, kind: "assistant", content: "中间回复" }),
+      msg({ seq: 3, kind: "tool-call", content: "调用 Grep", toolName: "Grep" }),
+      msg({ seq: 4, kind: "assistant", content: "最终总结" }),
+    ];
+    const { unmount } = render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    await screen.findByText("最终总结");
+    // 计数 = 当前被折叠的可折叠条数（thinking / 中间 assistant / tool-call = 3；
+    // user 直显、最终 assistant 总结直显，不计入）
+    const banner = screen.getByTestId("summary-banner");
+    expect(banner.textContent).toContain("总结模式");
+    expect(banner.textContent).toContain("已折叠 3 条过程消息");
+    // 展开全部：过程消息全部可见，计数归零，收起全部出现
+    fireEvent.click(screen.getByTestId("expand-all"));
+    expect(screen.getByText("内部思考内容")).toBeTruthy();
+    expect(screen.getByText("中间回复")).toBeTruthy();
+    expect(screen.getByTestId("summary-banner").textContent).toContain("已折叠 0 条过程消息");
+    // 收起全部：恢复默认折叠语义
+    fireEvent.click(screen.getByTestId("collapse-all"));
+    expect(screen.queryByText("内部思考内容")).toBeNull();
+    expect(screen.getByTestId("summary-banner").textContent).toContain("已折叠 3 条过程消息");
+    unmount();
+    // 运行中模式：折叠是 wire 语义，不出现总结提示行
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    expect(await screen.findByText("查一下")).toBeTruthy();
+    expect(screen.queryByTestId("summary-banner")).toBeNull();
+  });
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];
