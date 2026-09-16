@@ -694,12 +694,16 @@ mod tests {
         assert_eq!(bytes, b"\x89PNG");
         assert_eq!(mime, "image/png");
 
-        // 反斜杠形态路径（Windows 会话里 toolArgs 记录的形态）同样放行
-        let win_style = pic.to_string_lossy().replace('/', "\\");
-        assert!(
-            read_file_safe(cwd, &win_style, Some(home.to_str().unwrap())).is_ok(),
-            "反斜杠路径必须与正斜杠同判"
-        );
+        // 反斜杠形态路径（Windows 会话里 toolArgs 记录的形态）同样放行。
+        // 仅 Windows 跑：Linux 下反斜杠是合法文件名字符，`	mp\...` 是相对
+        // 路径而非绝对路径，此检查不适用
+        if cfg!(windows) {
+            let win_style = pic.to_string_lossy().replace('/', "\\");
+            assert!(
+                read_file_safe(cwd, &win_style, Some(home.to_str().unwrap())).is_ok(),
+                "反斜杠路径必须与正斜杠同判"
+            );
+        }
 
         // 主目录之外（同级另一棵树的文件）→ 仍拒绝
         let outside = tmp.path().join("outside.txt");

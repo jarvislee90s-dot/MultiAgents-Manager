@@ -96,7 +96,9 @@ describe("FilePreview：文本 / markdown / 图片三态", () => {
     });
     installFileFetch(
       () =>
-        new Response(new Blob(["fake-png-bytes"]), {
+        // 字符串体（不用 Blob）：CI 的 Node 22 undici 对 Blob 体 Response 的
+        // blob() 存在兼容性问题会抛错；分支判定只依赖 content-type 头
+        new Response("fake-png-bytes", {
           status: 200,
           headers: { "content-type": "image/png" },
         })
