@@ -47,6 +47,18 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --radius: 0.625rem;
+
+  /* 工具品牌图标底色（Bug 4，M3 验收）：ToolIcon SVG 经 style var() 引用，
+   * 浅色=原色；暗色表见 .dark（kimi 反色、claude 提亮，其余=原色） */
+  --tool-claude-bg: #6445a2;
+  --tool-codex-bg: #16a34a;
+  --tool-opencode-bg: #ea580c;
+  --tool-openclaw-bg: #6366f1;
+  --tool-kimi-bg: #0b0e1a;
+  --tool-kimi-fg: #ffffff;
+  --tool-workbuddy-bg: #4ad06a;
+  --tool-zcode-bg: #3b5bfd;
+  --tool-dsh-bg: #4d6bfe;
 }
 
 .dark {
@@ -69,6 +81,19 @@
   --border: oklch(0.269 0 0);
   --input: oklch(0.269 0 0);
   --ring: oklch(0.439 0 0);
+
+  /* 工具品牌图标底色暗色表（Bug 4，M3 验收）：深夜蓝/原紫在深色卡底上融底
+   * （kimi #0B0E1A 对比度 1.08）——kimi 反色（浅底+深夜蓝月牙）、claude 提亮；
+   * 其余六工具原色在深底达标，变量值=原色不动 */
+  --tool-claude-bg: #8b74b9;
+  --tool-codex-bg: #16a34a;
+  --tool-opencode-bg: #ea580c;
+  --tool-openclaw-bg: #6366f1;
+  --tool-kimi-bg: #e8edf8;
+  --tool-kimi-fg: #0b0e1a;
+  --tool-workbuddy-bg: #4ad06a;
+  --tool-zcode-bg: #3b5bfd;
+  --tool-dsh-bg: #4d6bfe;
 }
 
 @layer base {

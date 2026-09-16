@@ -16,6 +16,11 @@ export function ToolIcon({ toolId, className = "", size = 16 }: ToolIconProps) {
   );
 }
 
+// 品牌底色 CSS 变量（Bug 4，M3 验收）：SVG 底色经 style 内联 var() 引用
+// （presentation attribute 不支持 var()），浅色回退值=原色；暗色态由
+// src/index.css / src/mobile/mobile.css 的 .dark 变量表覆盖（kimi 反色、
+// claude 提亮，其余=原色）。桌面+移动共用本组件，一处改两板生效
+
 // Claude — purple "C" mark
 function ClaudeIcon({ size }: { size: number }) {
   return (
@@ -26,7 +31,7 @@ function ClaudeIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" fill="#6445A2" />
+      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-claude-bg, #6445A2)" }} />
       <text
         x="10"
         y="14.5"
@@ -52,7 +57,7 @@ function CodexIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" fill="#16A34A" />
+      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-codex-bg, #16A34A)" }} />
       <path
         d="M5.5 12.5L9 9L5.5 5.5"
         stroke="white"
@@ -75,7 +80,7 @@ function OpenCodeIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" fill="#EA580C" />
+      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-opencode-bg, #EA580C)" }} />
       <path
         d="M7 6L4 10L7 14"
         stroke="white"
@@ -104,7 +109,7 @@ function OpenClawIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" fill="#6366F1" />
+      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-openclaw-bg, #6366F1)" }} />
       <circle cx="10" cy="11" r="4.5" stroke="white" strokeWidth="1.5" />
       <circle cx="8" cy="10" r="0.8" fill="white" />
       <circle cx="12" cy="10" r="0.8" fill="white" />
@@ -114,7 +119,8 @@ function OpenClawIcon({ size }: { size: number }) {
   );
 }
 
-// Kimi Code — Moonshot 弦月
+// Kimi Code — Moonshot 弦月。双变量（底+月牙）：浅色=深夜蓝底白月牙；暗色反色
+// （底 #E8EDF8、月牙 #0B0E1A）——深夜蓝方底在深色卡底上 1.08 对比度即隐形
 function KimiIcon({ size }: { size: number }) {
   return (
     <svg
@@ -124,9 +130,12 @@ function KimiIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" fill="#0B0E1A" />
+      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-kimi-bg, #0B0E1A)" }} />
       {/* 弦月：外弧 + 内弧咬出月形（Feather moon 路径 24→20 等比缩放） */}
-      <path d="M17.5 10.66A7.5 7.5 0 1 1 9.34 2.5 5.83 5.83 0 0 0 17.5 10.66Z" fill="white" />
+      <path
+        d="M17.5 10.66A7.5 7.5 0 1 1 9.34 2.5 5.83 5.83 0 0 0 17.5 10.66Z"
+        style={{ fill: "var(--tool-kimi-fg, #ffffff)" }}
+      />
     </svg>
   );
 }
@@ -144,7 +153,7 @@ function WorkBuddyIcon({ size }: { size: number }) {
     >
       <defs>
         <linearGradient id="wb-g" x1="3" y1="2" x2="17" y2="18" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#4AD06A" />
+          <stop style={{ stopColor: "var(--tool-workbuddy-bg, #4AD06A)" }} />
           <stop offset="1" stopColor="#0FBF8F" />
         </linearGradient>
       </defs>
@@ -176,7 +185,7 @@ function ZCodeIcon({ size }: { size: number }) {
     >
       <defs>
         <linearGradient id="zc-g" x1="3" y1="2" x2="17" y2="18" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#3B5BFD" />
+          <stop style={{ stopColor: "var(--tool-zcode-bg, #3B5BFD)" }} />
           <stop offset="1" stopColor="#8A4FF5" />
         </linearGradient>
       </defs>
@@ -198,7 +207,7 @@ function ZCodeIcon({ size }: { size: number }) {
 function DshIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <rect width="24" height="24" rx="5" fill="#4D6BFE" />
+      <rect width="24" height="24" rx="5" style={{ fill: "var(--tool-dsh-bg, #4D6BFE)" }} />
       <path
         d="M8 7h4.2c2.6 0 4.3 1.7 4.3 5s-1.7 5-4.3 5H8V7zm2.3 2v6h1.8c1.4 0 2.2-1 2.2-3s-.8-3-2.2-3h-1.8z"
         fill="#fff"

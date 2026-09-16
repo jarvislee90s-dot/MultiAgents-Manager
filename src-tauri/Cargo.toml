@@ -1,6 +1,6 @@
 [package]
 name = "multi-agents-manager"
-version = "0.4.1"
+version = "0.4.2"
 description = "多 Agent 编程工具统一管理平台"
 authors = ["jarvis"]
 edition = "2021"
@@ -72,6 +72,11 @@ axum = "0.8"
 rust-embed = { version = "8", features = ["include-exclude"] }
 # 配对码 / deviceId 生成
 rand = "0.8"
+# M3 Task 6（SSE 端点）：BroadcastStream 把 watcher 的 broadcast::Receiver 适配成
+# Stream（sync feature 即含此包装器）；futures 提供 stream::once / StreamExt::chain
+# 组合首帧快照与增量流
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"

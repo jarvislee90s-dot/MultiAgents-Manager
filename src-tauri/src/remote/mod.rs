@@ -2,14 +2,19 @@
 // 范围与红线见 docs/superpowers/plans/2026-09-14-m2-remote-access-board.md
 
 pub mod api;
+pub mod content;
+pub mod files;
 pub mod gate;
 pub mod pairing;
 pub mod server;
+pub mod watcher;
 
 pub const KEY_ENABLED: &str = "remote.enabled";
 pub const KEY_BIND: &str = "remote.bind";
 pub const KEY_PORT: &str = "remote.port";
 pub const KEY_PUBLIC_ACK: &str = "remote.public_ack";
+/// 本机展示名（P8b）：设置里可覆盖 sysinfo 探测值；空串视为未设置
+pub const KEY_HOST_NAME: &str = "remote.host_name";
 /// 默认端口（避开 3080=dsh / 1420=vite / 18789=zcode）
 pub const DEFAULT_PORT: u16 = 9420;
 
@@ -45,6 +50,17 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
         store: pairing::DeviceStore::global(),
+        // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
+        host_source: Box::new(host_info),
+        // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，
+        // 注入缝供端点测试；生产签名 fn(&str,&str,usize) 与 trait 对象形态一致）
+        message_source: Box::new(content::read_session_messages),
+        // M3 Task 8：文件路径源同源直调（files::extract_file_paths 内部复用 content
+        // 层读取，注入缝供端点测试）
+        path_source: Box::new(files::extract_file_paths),
+        // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
+        // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
+        watcher_tx: watcher::event_sender(),
     })
 });
 
@@ -231,6 +247,7 @@ fn status_enabled(db_enabled: bool, handle_alive: bool) -> bool {
 }
 
 /// 设置页状态展示：enabled / bind / port / url / lanUrls（仅 0.0.0.0 给局域网候选）
+/// M3 Task 1 追加 host（P8a 版本 + P8b 本机名 + P8d enabledTools 数据源）
 #[tauri::command]
 pub fn remote_status() -> serde_json::Value {
     // 展示层：设置里 bind 非法时回落默认值展示（真实启动会在 start_server 被拒）
@@ -244,25 +261,109 @@ pub fn remote_status() -> serde_json::Value {
     // 短锁：只取 SERVER_HANDLE 的存活快照立即释放，锁内不碰 DB / pairing（不新增嵌套锁序）
     let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
     let enabled = status_enabled(db_enabled, handle_alive);
-    let lan = lan_urls_for(&bind, local_lan_ips(), port);
-    serde_json::json!({ "enabled": enabled, "bind": bind, "port": port,
-        "url": format!("http://{bind}:{port}/m"), "lanUrls": lan })
+    // LAN 枚举只做一次：候选同时喂 lanUrls 与 0.0.0.0 时的主显示 url（P7 v6 修正）
+    let candidates = local_lan_candidates();
+    let ips: Vec<String> = candidates.iter().map(|(ip, _)| ip.clone()).collect();
+    let lan = lan_urls_for(&bind, ips.clone(), port);
+    // host 载荷薄装配：可测内核 host_payload（见下），此处只注入真实依赖
+    // （空串/空白设置由 display_host_name 内部过滤，见其注释）
+    let mut st = host_payload(
+        || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
+        crate::database::dao::agent_tool::enabled_tool_ids,
+        boot_id(),
+    );
+    // 原 status 键并入同一返回值（消费方：设置页 RemoteSection + 移动端 /host 直调）
+    st["enabled"] = serde_json::json!(enabled);
+    st["bind"] = serde_json::json!(bind);
+    st["port"] = serde_json::json!(port);
+    st["url"] = serde_json::json!(display_url_for(&bind, port, ips));
+    st["lanUrls"] = serde_json::json!(lan);
+    // 地址表（2026-09-16 用户裁决）：设置页「访问地址」单区块逐条渲染的数据源
+    st["addresses"] = serde_json::json!(address_entries(&bind, port, &candidates));
+    st
+}
+
+/// 本机展示名（纯函数，注入缝：sysinfo 以闭包注入便于测试）：
+/// DB 设置（Some 且**非空白**，配置损坏的空串不得顶替真实主机名）
+/// > sysinfo 探测 > "MAM" 品牌兜底——双机双子域辨识（P8b）
+fn display_host_name(saved: Option<String>, sysinfo: impl FnOnce() -> Option<String>) -> String {
+    saved
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(sysinfo)
+        .unwrap_or_else(|| "MAM".into())
+}
+
+/// 编译目标平台标识（P8）：固定三值，供移动端按平台给提示/图标
+fn platform_id() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// host 载荷内核（纯装配，外部依赖全部注入，零 DB 接触可单测）：
+///   host: { name, platform, version } + enabledTools（P8d chips 过滤数据源，Task 3 消费）。
+/// 返回 serde_json Value 便于 remote_status 原地并入其余 status 键
+/// MAM 进程生命周期标识（每次启动重新生成，进程内恒定）：移动端「随进程
+/// 消失」的客户端态（消息书签）持久化时打上此标识——MAM 重启后客户端读到
+/// 不同的 bootId 即自行清空，页面刷新（同一进程）则原样恢复
+static BOOT_ID: Lazy<String> = Lazy::new(|| {
+    let mut b = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+});
+
+/// 进程生命周期标识（host 载荷下发；只读借用避免克隆）
+fn boot_id() -> &'static str {
+    &BOOT_ID
+}
+
+fn host_payload(
+    saved_name: impl FnOnce() -> Option<String>,
+    enabled_tools: impl FnOnce() -> Vec<String>,
+    boot_id: &str,
+) -> serde_json::Value {
+    let name = display_host_name(saved_name(), sysinfo::System::host_name);
+    serde_json::json!({
+        // P8a+P8b：品牌版本号 + 本机名称（双机双子域辨识）
+        "host": {
+            "name": name,
+            "platform": platform_id(),
+            "version": env!("CARGO_PKG_VERSION"),
+            // 进程生命周期标识（书签修复）：移动端「随进程消失」的客户端态
+            // （消息书签）据此区分同一进程与「MAM 已重启」——重启即清空
+            "bootId": boot_id,
+        },
+        "enabledTools": enabled_tools(),
+    })
+}
+
+/// /m/api/v1/host 移动端装配（api.rs handler 直调）：host 部分与 remote_status 同源
+/// （P8 数据同源红线：禁止复制聚合逻辑），状态键（enabled/bind/…）移动端不需要，不返回
+fn host_info() -> serde_json::Value {
+    host_payload(
+        || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
+        crate::database::dao::agent_tool::enabled_tool_ids,
+        boot_id(),
+    )
 }
 
 /// 刷新配对二维码：发行新 token（单活跃——发行即作废旧 token，不变量 1）并拼出可扫 URL。
-/// 0.0.0.0 绑定时 host 取局域网地址候选的第一个（枚举失败回落 loopback）
+/// host 选取与 remote_status 的 url 字段同源（display_host_for：0.0.0.0 → 局域网首个
+/// 或回落 loopback），仅比主显示 url 多拼 `#token=` 配对载荷
 #[tauri::command]
 pub fn remote_issue_token() -> Result<serde_json::Value, String> {
     let token = STATE.pairing.lock().unwrap().issue();
     let (_, port) = bind_and_port().unwrap_or_else(|_| ("127.0.0.1".to_string(), DEFAULT_PORT));
-    let host = match crate::database::dao::settings::get_setting(KEY_BIND) {
-        Some(b) if b == "0.0.0.0" => local_lan_ips()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".into()),
-        Some(b) => b,
-        None => "127.0.0.1".into(),
-    };
+    // bind 非法（设置被写坏）时按默认 loopback 展示，与 remote_status 口径一致；
+    // token 扫码串必须可拨号，故同样走 display_host_for 的 0.0.0.0 → LAN 修正
+    let bind =
+        crate::database::dao::settings::get_setting(KEY_BIND).unwrap_or_else(|| "127.0.0.1".into());
+    let host = display_host_for(&bind, local_lan_ips());
     Ok(
         serde_json::json!({ "token": token, "url": format!("http://{host}:{port}/m#token={token}") }),
     )
@@ -276,16 +377,96 @@ pub fn remote_confirm_public() -> Result<(), String> {
 }
 
 /// 局域网地址枚举（0.0.0.0 模式给手机可输入的候选）。
-/// 实现用 std::net UDP connect 技巧零依赖：`connect` 只决定默认对端、**不发包**，
-/// 失败（无路由 / 离线）返回空表
-fn local_lan_ips() -> Vec<String> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0")
+/// Bug 7（M3 验收）：旧实现只做 UDP connect 技巧（`connect` 只决定默认对端、
+/// **不发包**）——运行时快照最多 1 个 IP（仅默认路由网卡）、无外网路由瞬间返回
+/// 空表 → display_host_for 回落 127.0.0.1（= 验收第 2 条偶发不过的根因），多网卡
+/// 机器候选缺失。新实现：UDP 默认路由 IP 优先 + sysinfo 全量 UP 网卡枚举追加，
+/// 去重保序（UDP 恒首位——display_host_for 取 first 的语义不变）
+fn local_lan_candidates() -> Vec<(String, String)> {
+    let udp = std::net::UdpSocket::bind("0.0.0.0:0")
         .ok()
-        .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s));
-    s.and_then(|s| s.local_addr().ok())
-        .map(|a| a.ip().to_string())
+        .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s))
+        .and_then(|s| s.local_addr().ok())
+        .map(|a| a.ip().to_string());
+    merge_lan_candidates(udp, enumerated_lan_candidates())
+}
+
+/// 候选 IP 表（仅地址，display_host_for / lan_urls_for 的输入形态）
+fn local_lan_ips() -> Vec<String> {
+    local_lan_candidates()
         .into_iter()
+        .map(|(ip, _)| ip)
         .collect()
+}
+
+/// sysinfo 全量网卡枚举（Bug 7；2026-09-16 起带网卡名）：仅收非回环 / 非链路
+/// 本地 / 非未指定 IPv4。虚拟网卡（WSL / Hyper-V vEthernet）**不排除**——多候选
+/// 无害（设置页逐条展示并标注网卡名），主显示 url 仍由 UDP 默认路由首位决定
+fn enumerated_lan_candidates() -> Vec<(String, String)> {
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let mut out = Vec::new();
+    for (name, data) in networks.list() {
+        for net in data.ip_networks() {
+            if let std::net::IpAddr::V4(v4) = net.addr {
+                if !(v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()) {
+                    out.push((v4.to_string(), name.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// LAN 候选合并内核（纯函数，Bug 7 可测核心）：UDP 默认路由恒首位（网卡名从
+/// 枚举表反查，查不到给**空串**——前端按语言本地化为「本机」，后端不硬编码文案）
+/// → 枚举候选去重保序追加 → 回环 / 非法 / 非 IPv4 剔除。UDP 探测失败或只探到
+/// 回环时由枚举结果兜底——消灭「无外网路由瞬间回落 127.0.0.1」的主场景
+fn merge_lan_candidates(
+    udp: Option<String>,
+    enumerated: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    fn valid(ip: &str) -> bool {
+        ip.parse::<std::net::Ipv4Addr>()
+            .map(|v| !(v.is_loopback() || v.is_link_local() || v.is_unspecified()))
+            .unwrap_or(false)
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    if let Some(ip) = udp {
+        if valid(&ip) {
+            // 网卡名反查失败 → 空串（前端本地化兜底），不因缺名丢候选
+            let iface = enumerated
+                .iter()
+                .find(|(e, _)| *e == ip)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default();
+            out.push((ip, iface));
+        }
+    }
+    for (ip, iface) in enumerated {
+        if !valid(&ip) || out.iter().any(|(e, _)| *e == ip) {
+            continue;
+        }
+        out.push((ip, iface));
+    }
+    out
+}
+
+/// 主显示 host 选取内核（纯函数，不触网络）：0.0.0.0 通配绑定时取局域网候选首个
+/// （枚举失败回落 127.0.0.1——M2 用户实测 0.0.0.0 地址本身不可拨号），其余绑定原样。
+/// remote_status 的 `url` 字段与 remote_issue_token 的扫码 URL 同源共用（P7 v6 修正）；
+/// 与 lan_urls_for 同为「绑定形态 → 可达地址」口径，风格对齐
+fn display_host_for(bind: &str, ips: Vec<String>) -> String {
+    if bind == "0.0.0.0" {
+        ips.into_iter().next().unwrap_or_else(|| "127.0.0.1".into())
+    } else {
+        bind.to_string()
+    }
+}
+
+/// 主显示地址内核（纯函数）：完整可直达 URL（`http://{host}:{port}/m`），
+/// host 由 display_host_for 选取（0.0.0.0 → 局域网首个 或 127.0.0.1 兜底）
+fn display_url_for(bind: &str, port: u16, ips: Vec<String>) -> String {
+    format!("http://{}:{port}/m", display_host_for(bind, ips))
 }
 
 /// 局域网候选门控内核（纯函数，不触网络）：仅对外绑定（0.0.0.0）给出候选，
@@ -300,6 +481,40 @@ fn lan_urls_for(bind: &str, ips: Vec<String>, port: u16) -> Vec<String> {
     } else {
         vec![]
     }
+}
+
+/// 地址表内核（纯函数，2026-09-16 用户裁决）：设置页「访问地址」合并为**一个区块**
+/// 逐条展示——多网卡机器有两个不同网段的地址（如实测 WLAN 192.168.66.x 与
+/// 以太网 192.168.42.x），旧版「访问地址 + 局域网地址」两块并列会被读成重复。
+/// 条目：`{url, iface, primary}`，0.0.0.0 时逐候选出（首位 primary=推荐），
+/// 空候选回落 loopback；具体地址/loopback 绑定为单条目
+fn address_entries(
+    bind: &str,
+    port: u16,
+    candidates: &[(String, String)],
+) -> Vec<serde_json::Value> {
+    if bind == "0.0.0.0" && !candidates.is_empty() {
+        return candidates
+            .iter()
+            .enumerate()
+            .map(|(i, (ip, iface))| {
+                serde_json::json!({
+                    "url": format!("http://{ip}:{port}/m"),
+                    // 网卡名（探测不到为空串——前端本地化兜底，后端不硬编码文案）
+                    "iface": iface,
+                    "primary": i == 0,
+                })
+            })
+            .collect();
+    }
+    // 非通配绑定，或通配但无候选（离线）→ 单条目：host 取 display_host_for 同值；
+    // iface 空串 = 前端本地化「本机」（非通配）语义
+    let host = display_host_for(bind, candidates.iter().map(|(ip, _)| ip.clone()).collect());
+    vec![serde_json::json!({
+        "url": format!("http://{host}:{port}/m"),
+        "iface": "",
+        "primary": true,
+    })]
 }
 
 /// 应用启动恢复（lib.rs setup 调用）：开机自启（若启用）。失败仅告警不阻断启动
@@ -353,6 +568,7 @@ mod tests {
         assert_eq!(KEY_BIND, "remote.bind");
         assert_eq!(KEY_PORT, "remote.port");
         assert_eq!(KEY_PUBLIC_ACK, "remote.public_ack");
+        assert_eq!(KEY_HOST_NAME, "remote.host_name");
         assert_eq!(DEFAULT_PORT, 9420);
     }
 
@@ -553,6 +769,141 @@ mod tests {
         let _ = tauri::async_runtime::block_on(h2);
     }
 
+    // ==== M3 Task 2：P7 修正（0.0.0.0 主显示地址改局域网 IP）====
+    // 计划里的测试名 url_uses_lan_ip_when_bound_to_all_interfaces 保留，断言落在纯函数
+    // display_url_for 上——零污染裁决（延续 Task 1）：brief 原稿直调 remote_status 前
+    // set_setting(KEY_BIND, ...) 会写真实 ~/.mam/mam.db，禁止；display_url_for 是
+    // remote_status 装配 url 字段的可测内核（DB/网络读取留在薄壳里）
+
+    /// 计划测试名保留：0.0.0.0 通配绑定时主显示 url 必须落到可拨号的局域网 IP
+    /// （M2 用户实测 0.0.0.0 地址本身不可连），四分支全覆盖：
+    ///   1. 0.0.0.0 + 有局域网 IP → 取第一个；
+    ///   2. 0.0.0.0 + 无局域网 IP（离线/无路由）→ 回落 127.0.0.1；
+    ///   3. 具体网卡 IP 绑定 → 原样（本身可达）；
+    ///   4. loopback 绑定 → 原样
+    #[test]
+    fn url_uses_lan_ip_when_bound_to_all_interfaces() {
+        // 1) 通配绑定 + 局域网候选命中 → 首个 IP
+        assert_eq!(
+            display_url_for(
+                "0.0.0.0",
+                9420,
+                vec!["192.168.1.5".into(), "10.0.0.2".into()]
+            ),
+            "http://192.168.1.5:9420/m",
+            "0.0.0.0 主显示地址必须为可拨号的局域网 IP（取首个）"
+        );
+        // 2) 通配绑定 + 枚举失败 → 回落 loopback（不把 0.0.0.0 拼进 url）
+        assert_eq!(
+            display_url_for("0.0.0.0", 9420, vec![]),
+            "http://127.0.0.1:9420/m",
+            "无局域网候选时回落 127.0.0.1"
+        );
+        // 3) 具体网卡 IP 绑定 → 原样透传
+        assert_eq!(
+            display_url_for("192.168.1.5", 9420, vec![]),
+            "http://192.168.1.5:9420/m"
+        );
+        // 4) loopback 绑定 → 原样透传
+        assert_eq!(
+            display_url_for("127.0.0.1", 9420, vec![]),
+            "http://127.0.0.1:9420/m"
+        );
+    }
+
+    /// Bug 7（M3 验收）：LAN 候选合并内核——UDP 默认路由恒首位、去重保序、
+    /// 回环剔除、UDP 空时枚举兜底（消灭回落 127.0.0.1 的主场景）。
+    /// 2026-09-16 起候选带网卡名（设置页逐条标注）
+    #[test]
+    fn merge_lan_candidates_orders_dedups_and_falls_back() {
+        fn cands(list: &[(&str, &str)]) -> Vec<(String, String)> {
+            list.iter()
+                .map(|(ip, iface)| (ip.to_string(), iface.to_string()))
+                .collect()
+        }
+        // UDP 优先 + 去重保序（枚举中的同 IP 不重复入列）
+        assert_eq!(
+            merge_lan_candidates(
+                Some("192.168.1.5".into()),
+                cands(&[
+                    ("192.168.1.5", "WLAN"),
+                    ("10.0.0.2", "以太网"),
+                    ("172.16.0.3", "虚拟网卡"),
+                ])
+            ),
+            cands(&[
+                ("192.168.1.5", "WLAN"),
+                ("10.0.0.2", "以太网"),
+                ("172.16.0.3", "虚拟网卡"),
+            ])
+        );
+        // 回环 / 非法串 / 非 IPv4 剔除
+        assert_eq!(
+            merge_lan_candidates(
+                Some("127.0.0.1".into()),
+                cands(&[
+                    ("127.0.0.1", "Loopback"),
+                    ("10.0.0.2", "以太网"),
+                    ("not-an-ip", "x"),
+                    ("::1", "v6"),
+                ])
+            ),
+            cands(&[("10.0.0.2", "以太网")])
+        );
+        // UDP 探测失败（None）→ 枚举兜底（旧实现此场景恒空表 → 回落 127.0.0.1）
+        assert_eq!(
+            merge_lan_candidates(None, cands(&[("192.168.1.5", "WLAN")])),
+            cands(&[("192.168.1.5", "WLAN")])
+        );
+        // 双双为空 → 空表（display_host_for 仍回落 127.0.0.1 作最后兜底）
+        assert!(merge_lan_candidates(None, vec![]).is_empty());
+        // UDP 只探到回环（无外网路由的隔离网段）→ 剔除后由枚举兜底
+        assert_eq!(
+            merge_lan_candidates(Some("127.0.0.1".into()), cands(&[("10.0.0.9", "以太网")])),
+            cands(&[("10.0.0.9", "以太网")])
+        );
+        // UDP 命中的 IP 不在枚举里（罕见：枚举与探测时序不一致）→ 网卡名留空
+        // （前端本地化兜底），不得因缺名丢候选
+        assert_eq!(
+            merge_lan_candidates(Some("192.168.9.9".into()), cands(&[("10.0.0.2", "以太网")])),
+            cands(&[("192.168.9.9", ""), ("10.0.0.2", "以太网")])
+        );
+    }
+
+    /// 2026-09-16 用户裁决：设置页「访问地址」合并为一个区块，逐条标注网卡名——
+    /// 地址表内核：0.0.0.0 时逐候选出条目（首位 primary），空候选回落 loopback；
+    /// 具体绑定/loopback 单条目；网卡名缺失留空串（文案本地化在前端）
+    #[test]
+    fn address_entries_labels_iface_and_marks_primary() {
+        let cands = vec![
+            ("192.168.66.202".to_string(), "WLAN".to_string()),
+            ("192.168.42.216".to_string(), "以太网".to_string()),
+        ];
+        // 0.0.0.0：全部候选逐条出，首位标推荐并带网卡名
+        let e = address_entries("0.0.0.0", 9420, &cands);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["url"], "http://192.168.66.202:9420/m");
+        assert_eq!(e[0]["iface"], "WLAN");
+        assert_eq!(e[0]["primary"], true);
+        assert_eq!(e[1]["url"], "http://192.168.42.216:9420/m");
+        assert_eq!(e[1]["iface"], "以太网");
+        assert_eq!(e[1]["primary"], false);
+        // 0.0.0.0 且候选为空（离线）→ 单条 loopback 兜底（与 display_url_for 同值）
+        let e = address_entries("0.0.0.0", 9420, &[]);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["url"], "http://127.0.0.1:9420/m");
+        assert_eq!(e[0]["primary"], true);
+        // loopback / 具体地址绑定 → 单条目（iface 空串 = 前端「本机」本地化）
+        let e = address_entries("127.0.0.1", 9420, &cands);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["url"], "http://127.0.0.1:9420/m");
+        assert_eq!(e[0]["iface"], "");
+        assert_eq!(e[0]["primary"], true);
+        // 网卡名缺失（探测不到）→ 空串透传，不硬编码中文文案
+        let e = address_entries("0.0.0.0", 9420, &[("10.0.0.5".into(), String::new())]);
+        assert_eq!(e[0]["iface"], "");
+    }
+
     /// (c) 陈旧句柄自愈（评审 Important 修复的行为锁定）：经 `start_server_core` 的
     /// **真实分支**驱动（而非只测谓词——那样把查重还原成 is_some 的变异测不出来）。
     /// 零污染：SERVER_HANDLE / STATE 全局不被触碰——句柄槽是局部变量，设置读取与
@@ -637,6 +988,108 @@ mod tests {
             );
             assert!(r.is_err(), "对外绑定 {external} 未确认 TLS 前置必须拒绝");
             assert!(slot.is_none(), "被安全门拒绝时不得留下句柄（{external}）");
+        }
+    }
+}
+
+// ============================================================
+// M3 Task 1：Host 信息（P8a 品牌版本号 + P8b 本机名 + P8d enabledTools 数据源）
+// 测试策略（控制者裁决，零污染最高优先）：可测逻辑抽成纯函数 host_payload /
+// display_host_name / platform_id，DB 读取（remote.host_name / enabled_tool_ids）
+// 以闭包注入——测试不触全局 DB Lazy，remote_status / host_info 只做薄装配不测。
+// 计划里的测试名 remote_status_includes_host_info 保留，断言落在纯函数上。
+// ============================================================
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    /// 计划测试名保留：remote_status 的 host 载荷断言落在纯函数 host_payload 上
+    /// （零 DB 接触——remote_status 本体是读 settings DAO 的薄装配，集成路径不测）
+    #[test]
+    fn remote_status_includes_host_info() {
+        let st = host_payload(
+            || Some("JARVIS-Win".to_string()),
+            || vec!["claude".to_string(), "codex".to_string()],
+            "boot-test-1",
+        );
+        let host = st.get("host").expect("remote_status 应含 host 字段");
+        assert!(host.get("name").is_some());
+        assert!(host.get("version").is_some());
+        assert!(
+            host.get("platform").is_some(),
+            "platform 字段为移动端约定的固定三值之一"
+        );
+        assert_eq!(host.get("name").unwrap(), "JARVIS-Win");
+        assert_eq!(
+            host.get("version").unwrap(),
+            env!("CARGO_PKG_VERSION"),
+            "版本号必须与 crate 版本一致（P8a）"
+        );
+        // enabledTools（P8d 数据源）随 host 载荷一并返回，Task 3 chips 过滤直接消费
+        assert_eq!(
+            st.get("enabledTools").unwrap(),
+            &serde_json::json!(["claude", "codex"]),
+            "enabledTools 应透传 enabled_tool_ids 的结果（按种子顺序）"
+        );
+        // bootId（书签修复）：随 host 载荷下发，移动端据此守卫「随进程消失」的
+        // 客户端态——非空即可（值随机，不锁内容）
+        let boot = host.get("bootId").and_then(|b| b.as_str()).unwrap_or("");
+        assert!(!boot.is_empty(), "host 载荷必须携带 bootId，实际 {st}");
+    }
+
+    /// boot_id 进程内恒定（书签守卫的语义前提：同进程两次读取必须一致）
+    #[test]
+    fn boot_id_is_stable_within_process() {
+        assert_eq!(boot_id(), boot_id());
+        assert!(!boot_id().is_empty());
+    }
+
+    /// 本机名取值顺序：DB 设置（Some 且非空）> sysinfo > "MAM"（P8b 优先级）
+    #[test]
+    fn display_host_name_prefers_saved_then_sysinfo_then_fallback() {
+        // 1) DB 设置非空 → 直接采用
+        assert_eq!(
+            display_host_name(Some("JARVIS-Win".into()), || panic!(
+                "设置命中时不得回落 sysinfo"
+            )),
+            "JARVIS-Win"
+        );
+        // 2) DB 未设置 → sysinfo 命中
+        assert_eq!(
+            display_host_name(None, || Some("mac-studio".into())),
+            "mac-studio"
+        );
+        // 3) 双双未命中 → "MAM" 品牌兜底
+        assert_eq!(display_host_name(None, || None), "MAM");
+    }
+
+    /// 空串设置视为未设置（配置损坏不得顶替 sysinfo 真实主机名）
+    #[test]
+    fn display_host_name_treats_blank_setting_as_unset() {
+        assert_eq!(
+            display_host_name(Some("".into()), || Some("real-host".into())),
+            "real-host",
+            "空串设置必须回落 sysinfo（filter 非 empty）"
+        );
+        assert_eq!(display_host_name(Some("   ".into()), || None), "MAM");
+    }
+
+    /// platform 判定（P8）：固定三值之一；本机编译目标 darwin → macos
+    #[test]
+    fn platform_id_is_one_of_three_values() {
+        let p = platform_id();
+        assert!(
+            ["macos", "windows", "linux"].contains(&p),
+            "platform 必须是三值之一，实际 {p}"
+        );
+        // 编译期判定与运行期取值一致性（darwin/arm64 CI 与本机环境）
+        if cfg!(target_os = "macos") {
+            assert_eq!(p, "macos");
+        } else if cfg!(windows) {
+            assert_eq!(p, "windows");
+        } else {
+            assert_eq!(p, "linux");
         }
     }
 }

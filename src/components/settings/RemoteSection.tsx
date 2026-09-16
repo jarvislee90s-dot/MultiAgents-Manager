@@ -6,6 +6,7 @@ import QRCode from "qrcode";
 import { Copy, QrCode, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
@@ -24,6 +25,7 @@ import {
   remoteStatus,
   remoteToggle,
   type PairingToken,
+  type RemoteAddressEntry,
   type RemoteStatus,
 } from "@/lib/api/remote";
 import { getSetting, setSetting } from "@/lib/api/settings";
@@ -31,6 +33,9 @@ import { getSetting, setSetting } from "@/lib/api/settings";
 // 与 Rust 端 remote::KEY_BIND / KEY_PUBLIC_ACK 对齐的设置键（漂移即读写错位）
 const BIND_KEY = "remote.bind";
 const PUBLIC_ACK_KEY = "remote.public_ack";
+// 本机名（P8b 收尾）：与 Rust 端 remote::KEY_HOST_NAME 对齐；空串/空白原样写——
+// 后端 display_host_name 过滤空白后回落系统名，前端不做非空校验（口径单点在后端）
+const HOST_NAME_KEY = "remote.host_name";
 // 绑定只允许这两个字面量（Task 4 评审：后端 TLS 门只匹配 "0.0.0.0"；若允许自由输入
 // 具体局域网 IP，会绕过「对外必须先确认 TLS 反代」的 ack 门）
 const BIND_LOCAL = "127.0.0.1";
@@ -41,6 +46,8 @@ export function RemoteSection() {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
   // TLS 反代确认位（remote.public_ack）；remote_status 不含 ack，单独读 KV
   const [acked, setAcked] = useState(false);
+  // 本机名（P8b 收尾）：受控输入，加载回填、blur 落盘（不逐键写库）
+  const [hostName, setHostName] = useState("");
   const [pairing, setPairing] = useState<PairingToken | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
@@ -51,6 +58,8 @@ export function RemoteSection() {
     try {
       setStatus(await remoteStatus());
       setAcked((await getSetting(PUBLIC_ACK_KEY)) === "true");
+      // 本机名回填（P8b 收尾）：null（从未设置）→ 空输入框，占位符提示格式
+      setHostName((await getSetting(HOST_NAME_KEY)) ?? "");
     } catch (e) {
       console.error("remote_status failed:", e);
     }
@@ -106,6 +115,16 @@ export function RemoteSection() {
     }
   };
 
+  // 本机名落盘（P8b 收尾）：blur 触发（不逐键写库）；原样写不做非空校验——
+  // 空串/空白由后端 display_host_name 过滤后回落系统名，口径单点保留在后端
+  const changeHostName = async (value: string) => {
+    try {
+      await setSetting(HOST_NAME_KEY, value);
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
   const confirmPublic = async () => {
     try {
       await remoteConfirmPublic();
@@ -137,7 +156,14 @@ export function RemoteSection() {
     }
   };
 
-  const lanUrls = status?.lanUrls ?? [];
+  // 地址表（2026-09-16 用户裁决）：单区块逐条渲染。addresses 缺失时（后端旧版
+  // 或载荷异常）回落单条 status.url，保证展示不空
+  const addresses: RemoteAddressEntry[] =
+    status?.addresses && status.addresses.length > 0
+      ? status.addresses
+      : status
+        ? [{ url: status.url, iface: "", primary: true }]
+        : [];
 
   return (
     <div className="space-y-4">
@@ -189,6 +215,25 @@ export function RemoteSection() {
         </div>
         <div className="border-t" />
 
+        {/* 本机名（P8b 收尾）：移动看板品牌行右侧展示的双机辨识名。受控输入 blur 落盘；
+            空串原样写（后端过滤空白回落系统名），占位符给出示例格式 */}
+        <div className="flex items-center justify-between gap-4 py-2.5">
+          <div className="flex-1">
+            <label htmlFor="remote-host-name" className="text-sm font-medium">
+              {t("settings.remote.hostName")}
+            </label>
+          </div>
+          <Input
+            id="remote-host-name"
+            value={hostName}
+            placeholder={t("settings.remote.hostNamePlaceholder")}
+            className="w-56"
+            onChange={(e) => setHostName(e.target.value)}
+            onBlur={(e) => void changeHostName(e.target.value)}
+          />
+        </div>
+        <div className="border-t" />
+
         {/* TLS 反代确认：仅对外绑定（0.0.0.0）时出现；勾选即调 remote_confirm_public 置位 */}
         {bind === BIND_LAN && (
           <>
@@ -208,36 +253,34 @@ export function RemoteSection() {
         {/* 运行中才展示地址与二维码（停止状态无服务可连） */}
         {enabled && status && (
           <>
-            <div className="flex items-center justify-between py-2.5">
-              <label className="text-sm font-medium">{t("settings.remote.address")}</label>
-              <div className="flex items-center gap-2">
-                <code className="text-xs">{status.url}</code>
-                <Button variant="outline" size="sm" onClick={() => void copy(status.url)}>
-                  <Copy className="mr-1 h-3 w-3" />
-                  {t("settings.remote.copy")}
-                </Button>
+            {/* 地址区块（2026-09-16 用户裁决）：单区块逐条展示全部可用地址——
+                多网卡机器有多个网段（如实测 WLAN 与以太网），旧版「访问地址 +
+                局域网地址」两块并列会被读成重复。每条标注网卡名，主/推荐那条
+                带标记；复制按钮逐条给（手机对准所在网络挑一条即可） */}
+            <div className="flex items-start justify-between gap-4 py-2.5">
+              <label className="mt-0.5 shrink-0 text-sm font-medium">
+                {t("settings.remote.address")}
+              </label>
+              <div className="flex flex-col items-end gap-1.5">
+                {addresses.map((a) => (
+                  <div key={a.url} className="flex items-center gap-2">
+                    <span className="text-muted-foreground text-xs">
+                      {a.iface || t("settings.remote.addressLocal")}
+                    </span>
+                    {a.primary && (
+                      <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        {t("settings.remote.addressRecommended")}
+                      </span>
+                    )}
+                    <code className="text-xs">{a.url}</code>
+                    <Button variant="outline" size="sm" onClick={() => void copy(a.url)}>
+                      <Copy className="mr-1 h-3 w-3" />
+                      {t("settings.remote.copy")}
+                    </Button>
+                  </div>
+                ))}
               </div>
             </div>
-            {/* lanUrls 仅 0.0.0.0 绑定时非空（后端 lan_hosts_for 门控） */}
-            {lanUrls.length > 0 && (
-              <>
-                <div className="border-t" />
-                <div className="flex items-center justify-between py-2.5">
-                  <label className="text-sm font-medium">{t("settings.remote.lanAddress")}</label>
-                  <div className="flex flex-col items-end gap-1">
-                    {lanUrls.map((u) => (
-                      <div key={u} className="flex items-center gap-2">
-                        <code className="text-xs">{u}</code>
-                        <Button variant="outline" size="sm" onClick={() => void copy(u)}>
-                          <Copy className="mr-1 h-3 w-3" />
-                          {t("settings.remote.copy")}
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
             <div className="border-t" />
             <div className="flex items-center justify-between py-2.5">
               <label className="text-sm font-medium">{t("settings.remote.qrGenerate")}</label>

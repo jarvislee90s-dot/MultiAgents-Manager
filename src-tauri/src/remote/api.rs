@@ -1,13 +1,19 @@
-// /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ pair + heartbeat
+// /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
+// + pair + events（M3 Task 6 SSE 实时通道）+ session-messages（Task 7）
+// + session-files / file（M3 Task 8 文件路径提取与安全读取）
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{sse, IntoResponse, Response, Sse},
     Json,
 };
+use futures::stream::{Stream, StreamExt as _};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio_stream::wrappers::BroadcastStream;
 
 use super::gate::COOKIE_NAME;
 use super::server::RemoteState;
@@ -41,6 +47,63 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
         Json(response),
     )
         .into_response()
+}
+
+/// 空快照 JSON（与 SessionsResponse camelCase 序列化同形）：快照序列化理论不可达失败
+/// （C 风格字段无 map 键/浮点 NaN）时的防御性降级——前端拿到合法空载荷而非空串
+/// （空串会让 JSON.parse 抛错、看板卡死）
+const EMPTY_SESSIONS_JSON: &str = r#"{"sessions":[],"totalCount":0,"waitingCount":0}"#;
+
+/// GET /m/api/v1/events（M3 Task 6，C1 后半）：SSE 实时通道。
+/// - 首帧 = 全量会话快照（**直调注入源**，数据同源铁律 3），此后只推跃迁边沿
+///   （watcher 是唯一去重点，铁律 4——本层不独立去重、来一条推一条）；
+/// - gate 由 nest 内层 layer 结构性覆盖（本端点注册在 api_router 内），无需另加 middleware；
+/// - 心跳用 `Sse::keep_alive(KeepAlive::default())`：axum 自带 15s 空注释帧
+///   （简报的 `: ping` 等效物，无需自拼 interval 流——简报 Step 1 注释"心跳省略实现"即指此）；
+/// - 断流：客户端断开 → axum drop 本流 → BroadcastStream 释放 Receiver →
+///   receiver_count 归零 → watcher 零订阅者守卫跳过扫描（Task 5 闭环）。
+pub async fn events(
+    State(st): State<Arc<RemoteState>>,
+) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
+    // 先订阅、后取快照（顺序刻意，勿换）：subscribe 在快照计算之前，期间产生的跃迁
+    // 落进 broadcast 缓冲（容量 64）并在快照帧之后依次送出；若反序，快照与订阅之间
+    // 发生的跃迁会永久丢失（重连后的看板状态与真实脱节）
+    let rx = st.watcher_tx.subscribe();
+    // 快照走 spawn_blocking：session_source 是同步阻塞调用（sysinfo 全进程刷新 + 各工具
+    // 会话解析，冷启动可达数秒），直接 await 会周期性堵死 tokio worker——与 sessions
+    // handler 同一先例（实机教训见 commands/session.rs 的 get_all_sessions 注释）
+    let snapshot = tokio::task::spawn_blocking(move || (st.session_source)())
+        .await
+        .unwrap_or_else(|e| {
+            // JoinError（任务 panic/取消）降级为空快照：移动端拿到 0 会话而非断流
+            log::error!("SSE 快照会话扫描任务异常: {e}");
+            crate::session::SessionsResponse {
+                sessions: Vec::new(),
+                total_count: 0,
+                waiting_count: 0,
+            }
+        });
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|e| {
+        log::warn!("SSE 快照序列化失败，降级为空快照: {e}");
+        EMPTY_SESSIONS_JSON.to_string()
+    });
+    let initial = futures::stream::once(async move {
+        Ok(sse::Event::default().event("snapshot").data(snapshot_json))
+    });
+    let transitions = BroadcastStream::new(rx).filter_map(|msg| async move {
+        // Lagged（消费者落后超通道容量）与 Closed 均非致命：broadcast 丢最旧事件是通道
+        // 语义（宁可缺边沿也不阻塞 watcher 生产端），重连时的全量快照负责校正——丢弃该条继续流
+        let e = msg.ok()?;
+        match serde_json::to_string(&e) {
+            Ok(data) => Some(Ok(sse::Event::default().event("transition").data(data))),
+            Err(err) => {
+                // 不产出空 data 帧：前端 JSON.parse("") 会抛错且该帧无信息量
+                log::warn!("跃迁事件序列化失败，丢弃该帧: {err}");
+                None
+            }
+        }
+    });
+    Sse::new(initial.chain(transitions)).keep_alive(sse::KeepAlive::default())
 }
 
 #[derive(Deserialize)]
@@ -97,8 +160,239 @@ pub async fn pair(
         .into_response())
 }
 
-/// POST /m/api/v1/heartbeat：gate 已刷新 last_seen（touch），此处仅回 pong 供客户端保活判定
-/// M3 保活判定预留，当前 sessions 轮询 gate touch 已覆盖
-pub async fn heartbeat() -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": true }))
+/// GET /m/api/v1/host（M3 Task 1）：移动看板页头品牌行（P8a 版本 + P8b 本机名 +
+/// P8d enabledTools 数据源）。gate 内自动覆盖（nest 内层 layer，无需另加 middleware）；
+/// host 信息运行期不变，移动端挂载时拉一次即可，无需轮询。
+/// 直调 host_source 注入缝（生产 = remote::host_info()，与 remote_status 的 host 部分同源，
+/// 禁止复制聚合逻辑）——读 settings DAO 是轻量 SQLite 查询，无需 spawn_blocking
+pub async fn host(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
+    // 门禁下的私有数据（本机名/启用工具），与会话数据同样禁止中间层缓存
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json((st.host_source)()),
+    )
+        .into_response()
+}
+
+/// GET /m/api/v1/session-files?agent_type=&session_id=（M3 Task 8）
+/// GET /m/api/v1/session-files?agent_type=&session_id=&limit=（M3 Task 8 / M3+ 富化）
+/// 该会话工具调用涉及的文件表：`{files: [{path, lastSeq, lastTs, hits}], truncated}`
+/// （结构化条目 + 出现序排序，泛化提取见 files::extract_file_paths）。移动端
+/// 详情页一份数据两用：正文路径链接化（取 path 集）+ 文件面板列表（全字段）。
+/// - 缺参（agent_type / session_id）或空串 → 400 BAD_REQUEST；
+/// - limit 缺省 200（clamp [1,1000] 由 read_session_messages_impl 内部完成，直接透传）；
+/// - truncated = 该档位窗口下头部被截断（还有更早文件），面板据此提示；
+/// - 提取失败 / 会话不存在 → 200 空表 `{files: [], truncated: false}`——文件面板
+///   是增强能力，失败不阻塞详情页，也无从区分「无文件」与「读不到」（不给探测面）；
+/// - 提取要读一遍会话消息流（文件/SQLite IO），`spawn_blocking` 包裹
+///   （sessions handler 同一先例），不堵 tokio worker。
+pub async fn session_files(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(agent) = params
+        .get("agent_type")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    // 追溯档位（M3+ 用户裁决 3）：缺省 200，与详情页默认 limit 同标尺
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    // path_source 不可 clone（Box<dyn Fn>）：整体 move 进阻塞线程池调用（与
+    // session_messages handler 的写法一致）
+    let st = st.clone();
+    let (files, truncated) =
+        tokio::task::spawn_blocking(move || (st.path_source)(agent.as_str(), sid.as_str(), limit))
+            .await
+            .map_err(|e| {
+                log::error!("文件路径提取任务异常: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    Ok((
+        // 门禁下的私有数据（会话涉及的文件路径），禁止中间层缓存（sessions 同规）
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "files": files, "truncated": truncated })),
+    )
+        .into_response())
+}
+
+/// file 端点的读取结果三分（403/404 语义分流在 handler 尾部，读取全程在阻塞线程池）：
+/// - Found：cwd 内常规文件（字节 + mime）；
+/// - NoSession：session_id 不在会话快照中 → 404；
+/// - Rejected：越界 / 不存在 / 过大 / 目录 / cwd 缺失 → 一律 403（错误细节只进
+///   日志——越界与不存在不可区分，不给外部探测面预言机，进度台账 #12 口径）。
+enum FileReadOutcome {
+    Found(Vec<u8>, String),
+    NoSession,
+    Rejected(String),
+}
+
+/// GET /m/api/v1/file?session_id=&path=（M3 Task 8）
+/// 会话项目目录或用户主目录内的安全文件读取（read_file_safe：限 cwd∪home、
+/// 只读、双阈值 500KB/5MB；主目录内敏感目录拒绝——2026-09-16 用户裁决放宽
+/// 到主目录，kimi 等工具常引用 ~/Downloads 的图片）。
+/// - 缺参 / 空白 → 400；session_id 不在会话快照 → 404；
+/// - 图片 mime → 二进制响应 + Content-Type；文本 → JSON `{content, mime, size}`；
+/// - 拒绝（越界/不存在/超限/敏感目录彼此不可区分）→ 403 + log::warn；
+/// - cwd 查找与文件读取同在一个 `spawn_blocking` 里：会话快照源是同步阻塞调用
+///   （sysinfo 全进程刷新，实机教训见 commands/session.rs），文件 IO 同为重活。
+pub async fn read_file(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(path) = params
+        .get("path")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let st = st.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        // 数据同源铁律 3：cwd 直调注入的会话源（生产 = adapter::get_all_sessions，
+        // 与看板同一份快照），不另立查找函数
+        let resp = (st.session_source)();
+        let Some(session) = resp.sessions.into_iter().find(|s| s.id == sid) else {
+            return FileReadOutcome::NoSession;
+        };
+        // home 读真实主目录（放宽边界：cwd ∪ home，敏感目录仍拒）；
+        // 取不到 home（极端环境）则按 None 走 fail-closed 的 cwd-only 边界
+        let home = dirs::home_dir();
+        match crate::remote::files::read_file_safe(
+            &session.project_path,
+            &path,
+            home.as_deref().and_then(|h| h.to_str()),
+        ) {
+            Ok((bytes, mime)) => FileReadOutcome::Found(bytes, mime),
+            Err(e) => FileReadOutcome::Rejected(e),
+        }
+    })
+    .await
+    .map_err(|e| {
+        log::error!("文件读取任务异常: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match outcome {
+        FileReadOutcome::Found(bytes, mime) if mime.starts_with("image/") => Ok((
+            // 门禁下的私有文件内容，禁止中间层缓存（sessions 同规）
+            [
+                (axum::http::header::CONTENT_TYPE, mime),
+                (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+                // 终审 Important 2：图片二进制直出必须带嗅探防护双头。SVG 以顶层
+                // 文档加载时可执行内嵌脚本（同源脚本可 fetch 会话数据，cookie
+                // SameSite=Lax 不防同源攻击）——CSP 断脚本与一切子资源 +
+                // nosniff 防 MIME 嗅探把图片内容误判为可执行文档
+                (
+                    axum::http::header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'".to_string(),
+                ),
+                (
+                    axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                    "nosniff".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response()),
+        FileReadOutcome::Found(bytes, mime) => {
+            let text = String::from_utf8_lossy(&bytes);
+            Ok((
+                [(axum::http::header::CACHE_CONTROL, "no-store".to_string())],
+                Json(serde_json::json!({
+                    "content": text,
+                    "mime": mime,
+                    "size": bytes.len(),
+                })),
+            )
+                .into_response())
+        }
+        FileReadOutcome::NoSession => Err(StatusCode::NOT_FOUND),
+        FileReadOutcome::Rejected(e) => {
+            // 探测面最小化（进度台账 #12）：越界 / 不存在 / 超限对外一律同 403 空体，
+            // 差异只进服务端日志
+            log::warn!("file 读取被拒: {e}");
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
+}
+
+/// GET /m/api/v1/session-messages?agent_type=&session_id=&limit=（M3 Task 7，C2 后端）
+/// 八工具统一内容出口（P9）：`{messages: [{seq, role, content, kind, ts, toolName?,
+/// toolArgs?, collapsed}]}`（SessionMessage camelCase 序列化）。
+/// - 缺参（agent_type / session_id）或空串 → 400 BAD_REQUEST；
+/// - 读取失败（会话不存在 / 存储不可读 / 未知工具）→ 404 NOT_FOUND，错误细节只进
+///   日志不外泄（不向外部暴露内部路径/存储布局）；
+/// - `before` 游标不做（Task 7 裁决）：M3 不做向上翻页，更早内容由前端以更大 limit 重拉；
+/// - 文件/SQLite IO 是重活，`spawn_blocking` 包读取（sessions handler 同一先例），
+///   不堵 tokio worker。
+pub async fn session_messages(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(agent) = params
+        .get("agent_type")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    // message_source 不可 clone（Box<dyn Fn>）：整体 move 进阻塞线程池调用（与
+    // sessions handler 捕获 session_source 的写法一致）；agent/sid 移动副本进闭包，
+    // 原值保留给失败分支的日志
+    let st = st.clone();
+    let agent_ref = agent.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        (st.message_source)(agent_ref.as_str(), sid.as_str(), limit)
+    })
+    .await
+    .map_err(|e| {
+        log::error!("会话内容读取任务异常: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match result {
+        Ok(pg) => Ok((
+            // 门禁下的私有会话正文，禁止中间层缓存（sessions/host 同规）
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            // Bug 1（M3 验收）：truncated = 头部截断标记，移动端据此提供
+            // 「加载更早消息」（放大 limit 重拉时后端字节窗同放大）
+            Json(serde_json::json!({
+                "messages": pg.messages,
+                "truncated": pg.truncated,
+            })),
+        )
+            .into_response()),
+        Err(e) => {
+            log::warn!("session-messages 读取失败（agent={agent}）: {e}");
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
 }

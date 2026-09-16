@@ -128,6 +128,18 @@ pub struct RemoteState {
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
     /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.mam）
     pub store: super::pairing::DeviceStore,
+    /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
+    pub host_source: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
+    /// 会话内容源注入缝（M3 Task 7）：生产 = content::read_session_messages（八工具
+    /// 统一出口）；测试注入假源（零接触真实 ~/.zcode ~/.dsh 等数据目录）
+    pub message_source: Box<super::content::MessageSourceFn>,
+    /// 文件路径源注入缝（M3 Task 8）：生产 = files::extract_file_paths（复用
+    /// content 层读取的泛化提取）；测试注入假源（返回固定路径表）
+    pub path_source: Box<super::files::PathSourceFn>,
+    /// 跃迁事件通道（M3 Task 5）：生产 = watcher::event_sender()（全进程同一通道，
+    /// 与 SessionWatcher::start 的循环共享）；测试注入新建空通道即可。
+    /// **订阅端消费即去重完成**（铁律 4）：事件只含边沿（见 watcher::diff_transitions）
+    pub watcher_tx: tokio::sync::broadcast::Sender<super::watcher::TransitionEvent>,
 }
 
 /// API 子路由：三条端点 + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -136,8 +148,17 @@ pub struct RemoteState {
 fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
     Router::new()
         .route("/sessions", get(api::sessions))
+        .route("/host", get(api::host))
+        // /events（M3 Task 6）：SSE 长连接，gate 由本子路由的 layer 结构性覆盖
+        // （与其余端点同一内层 gate，不需要额外 middleware）
+        .route("/events", get(api::events))
+        // /session-messages（M3 Task 7）：单会话内容读取（C2 后端，八工具统一出口）
+        .route("/session-messages", get(api::session_messages))
+        // /session-files（M3 Task 8）：会话涉及的文件路径表（链接化数据源）
+        .route("/session-files", get(api::session_files))
+        // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
+        .route("/file", get(api::read_file))
         .route("/pair", post(api::pair))
-        .route("/heartbeat", post(api::heartbeat))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
         // `/m/api/v1/nope` 会落到外层 fallback（Task 7 的静态兜底 → 200 静态内容），
         // 绕开"所有 /m/api/* 过 gate（403）"这条安全不变量（评审实测确认）
@@ -184,6 +205,11 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     let listener = tokio::net::TcpListener::bind((bind, port))
         .await
         .map_err(|e| format!("绑定 {bind}:{port} 失败: {e}"))?;
+    // M3 Task 5：事件桥在**绑定成功后**启动（幂等——全局 Once 保证扫描循环全进程只
+    // spawn 一次）。放在 bind 之后：端口被占等启动失败不遗留 2s 会话扫描（扫描是重活，
+    // 见 adapter::get_all_sessions 的单飞护栏注释）；watcher 生命周期随进程结束，
+    // stop_server 不显式停止（关闭远程后循环仍扫描，为已有取舍）
+    super::watcher::SessionWatcher::start();
     axum::serve(listener, router_with_static(state))
         .await
         .map_err(|e| format!("serve: {e}"))
@@ -221,6 +247,18 @@ mod tests {
                 waiting_count: 0,
             }),
             store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.mam
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
+                    "enabledTools": ["claude"]
+                })
+            }),
+            // M3 Task 7：本组测试不触 /session-messages，注入恒 Err 的桩
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            // 本组测试不触 /session-files /file：注入恒空的路径源
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
         })
     }
 
@@ -362,6 +400,11 @@ mod tests {
                     waiting_count: 0,
                 }),
                 store: crate::remote::pairing::DeviceStore::memory(),
+                host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
+                message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+                // 本组测试不触 /session-files /file：注入恒空的路径源
+                path_source: Box::new(|_, _, _| (Vec::new(), false)), // 本组测试不触 /session-files /file
+                watcher_tx: tokio::sync::broadcast::channel(64).0,    // M3 Task 5：空事件通道
             }),
             t,
         )
@@ -509,44 +552,6 @@ mod tests {
             .unwrap()
         });
         assert!(seen > now - 5_000, "gate 应刷新 last_seen_at，实际 {seen}");
-    }
-
-    /// heartbeat 同样受 gate 保护；带有效 cookie 回 pong
-    #[tokio::test]
-    async fn heartbeat_is_gated_and_returns_pong() {
-        let (state, _clock) = state_with_clock();
-        let now = chrono::Utc::now().timestamp_millis();
-        state.store.with(|c| {
-            crate::remote::pairing::persist_device(
-                c,
-                &crate::remote::pairing::NewDevice {
-                    id: "hb".into(),
-                    name: String::new(),
-                    ua: String::new(),
-                    origin_ip: String::new(),
-                    paired_at: now,
-                },
-            )
-            .unwrap();
-        });
-        let app = router(state);
-        let r = app
-            .clone()
-            .oneshot(req("POST", "/m/api/v1/heartbeat", None, None))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 403);
-        let r = app
-            .oneshot(req(
-                "POST",
-                "/m/api/v1/heartbeat",
-                Some("mam_device=hb"),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 200);
-        assert!(body_string(r).await.contains("\"ok\":true"));
     }
 
     /// gate 拒绝不可区分性（评审 Important 4）："无 cookie"与"cookie 无效（未配对 id）"
@@ -847,6 +852,11 @@ mod tests {
                 }
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            // 本组测试不触 /session-files /file：注入恒空的路径源
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -888,5 +898,640 @@ mod tests {
             light_elapsed < std::time::Duration::from_millis(150),
             "阻塞扫描期间轻量任务被推迟了 {light_elapsed:?}——session_source 未走 spawn_blocking"
         );
+    }
+
+    // ==== M3 Task 6：GET /m/api/v1/events（SSE 实时通道，C1 后半） ====
+    // 零污染：会话源经注入缝（假 SessionsResponse）、事件源经注入的空 broadcast 通道。
+    // SSE 是长连接流式响应：**不能用 body_string（collect 会等流结束、永久挂起）**，
+    // 只逐帧读（BodyExt::frame），够断言首帧快照与增量帧即可，读完即 drop（连接关闭）。
+
+    /// 读 SSE 流的下一帧文本（不等待流结束；帧缺失/非数据帧即断言失败）
+    async fn next_frame(body: &mut Body) -> String {
+        let frame = body
+            .frame()
+            .await
+            .expect("SSE 流在断言帧之前结束")
+            .expect("SSE 帧读取失败");
+        let bytes = frame
+            .into_data()
+            .unwrap_or_else(|_| panic!("SSE 应产生数据帧（非 trailers）"));
+        String::from_utf8(bytes.to_vec()).expect("SSE 帧应为 UTF-8")
+    }
+
+    /// 预置有效设备（SSE 测试专用：复用 state_with_clock 的注入缝，零接触真实设备表）
+    fn persist_device(state: &Arc<RemoteState>, id: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: id.into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+    }
+
+    /// gate 覆盖（控制者①）：/events 与其余 /m/api/v1/* 同一门禁——无 cookie 必须 403，
+    /// 不得因为「SSE 是长连接」而漏过内层 layer
+    #[tokio::test]
+    async fn sse_events_is_gated() {
+        let (state, _clock) = state_with_clock();
+        let app = router(state);
+        let r = app
+            .oneshot(req("GET", "/m/api/v1/events", None, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            403,
+            "/events 必须过 gate（设备失效与未配对同 403 语义）"
+        );
+    }
+
+    /// SSE 端点主链（控制者③）：认证后 200 + text/event-stream + 首帧 `event: snapshot`
+    /// 携带全量会话（注入源 totalCount=7 ⇒ 数据同源），随后 watcher_tx 上的事件以
+    /// `event: transition` + camelCase JSON 送达（wire 契约端到端锁定）
+    #[tokio::test]
+    async fn sse_events_streams_snapshot_then_transitions() {
+        let (state, _clock) = state_with_clock();
+        persist_device(&state, "ev");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req("GET", "/m/api/v1/events", Some("mam_device=ev"), None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            header(&r, "content-type"),
+            "text/event-stream",
+            "SSE 响应必须声明 text/event-stream（浏览器据此走 EventSource 解析）"
+        );
+        assert_eq!(
+            header(&r, "cache-control"),
+            "no-cache",
+            "SSE 是设备门禁下的私有实时流，禁止中间层缓存"
+        );
+
+        let mut body = r.into_body();
+        // 首帧：全量快照（event: snapshot + SessionsResponse JSON，数据来自注入源）
+        let first = next_frame(&mut body).await;
+        assert!(
+            first.starts_with("event: snapshot\n"),
+            "首帧必须是 snapshot 事件，实际 {first:?}"
+        );
+        assert!(
+            first.contains("\"totalCount\":7"),
+            "首帧快照必须直调 session_source（注入源 totalCount=7），实际 {first:?}"
+        );
+
+        // 增量帧：watcher_tx 发一条跃迁 → transition 帧 + camelCase 键（前端按
+        // ev.sessionId / ev.agentType / ev.projectName 读取；snake_case 会静默 undefined）
+        state
+            .watcher_tx
+            .send(crate::remote::watcher::TransitionEvent {
+                session_id: "s1".into(),
+                agent_type: "claude".into(),
+                from: "idle".into(),
+                to: "processing".into(),
+                project_name: "proj".into(),
+                last_message: Some("hello".into()),
+                ts: 42,
+            })
+            .unwrap();
+        let second = next_frame(&mut body).await;
+        assert!(
+            second.starts_with("event: transition\n"),
+            "增量帧必须是 transition 事件，实际 {second:?}"
+        );
+        for key in ["\"sessionId\":\"s1\"", "\"to\":\"processing\"", "\"ts\":42"] {
+            assert!(
+                second.contains(key),
+                "transition 帧缺少 {key}（camelCase wire 契约），实际 {second:?}"
+            );
+        }
+        assert!(
+            !second.contains("session_id"),
+            "transition 帧不得出现 snake_case 键，实际 {second:?}"
+        );
+    }
+
+    // ==== M3 Task 1：GET /m/api/v1/host（P8a/P8b 页头数据源） ====
+    // 零污染：host 载荷经 host_source 注入缝供给（假 json），不触 settings DAO / 全局 DB。
+
+    /// /host 端点矩阵：无 cookie 403（与 sessions 同一 gate，设备失效语义一致）；
+    /// 有效设备 200 返回注入载荷 + Cache-Control: no-store（host 同属门禁下私有数据）
+    #[tokio::test]
+    async fn host_endpoint_is_gated_and_returns_injected_payload() {
+        // 重建 state：host_source 注入假载荷（与 sessions_scan_* 重建 state 的先例一致）
+        let state = Arc::new(RemoteState {
+            pairing: std::sync::Mutex::new({
+                let mut svc = PairingService::new(
+                    600_000,
+                    PairingClock {
+                        now: Box::new(|| 1000),
+                        token: Box::new(|| "tok-x".to_string()),
+                    },
+                );
+                svc.issue();
+                svc
+            }),
+            session_source: Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![],
+                total_count: 0,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "jarvis-win", "platform": "windows", "version": "9.9.9-test" },
+                    "enabledTools": ["claude", "zcode"]
+                })
+            }),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            // 本组测试不触 /session-files /file：注入恒空的路径源
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+        });
+        let app = router(state.clone());
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "hd".into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+
+        // (1) 无 cookie → 403（gate 全量覆盖新端点，与 sessions 语义一致）
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/api/v1/host", None, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            403,
+            "/host 必须过 gate（设备失效同 sessions 的 403 语义）"
+        );
+
+        // (2) 有效设备 → 200 + 注入载荷原样透传
+        let r = app
+            .clone()
+            .oneshot(req("GET", "/m/api/v1/host", Some("mam_device=hd"), None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"name\":\"jarvis-win\"") && body.contains("\"version\":\"9.9.9-test\""),
+            "host 载荷应原样透传，实际 {body}"
+        );
+        assert!(
+            body.contains("\"enabledTools\""),
+            "enabledTools 数据源随载荷返回"
+        );
+    }
+
+    /// /session-messages（M3 Task 7）端点矩阵：gate 403 → 缺参 400 → 注入源 200
+    /// （载荷 camelCase 且 no-store）→ 读取失败 404（错误细节不外泄）。
+    /// 零污染：message_source 注入假源，不触任何真实工具数据目录
+    #[tokio::test]
+    async fn session_messages_endpoint_is_gated_and_shaped() {
+        let captured: Arc<std::sync::Mutex<Vec<(String, String, usize)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let state = Arc::new(RemoteState {
+            pairing: std::sync::Mutex::new({
+                let mut svc = PairingService::new(
+                    600_000,
+                    PairingClock {
+                        now: Box::new(|| 1000),
+                        token: Box::new(|| "tok-x".to_string()),
+                    },
+                );
+                svc.issue();
+                svc
+            }),
+            session_source: Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![],
+                total_count: 0,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(move |agent: &str, sid: &str, limit: usize| {
+                cap.lock()
+                    .unwrap()
+                    .push((agent.to_string(), sid.to_string(), limit));
+                if sid == "sess_hit" {
+                    Ok(crate::remote::content::MessagesPage {
+                        messages: vec![
+                            crate::remote::content::SessionMessage {
+                                seq: 0,
+                                role: "user".into(),
+                                kind: "user".into(),
+                                content: "你好".into(),
+                                ts: Some(1000),
+                                tool_name: None,
+                                tool_args: None,
+                                collapsed: false,
+                            },
+                            crate::remote::content::SessionMessage {
+                                seq: 1,
+                                role: "assistant".into(),
+                                kind: "tool-call".into(),
+                                content: "调用 Bash".into(),
+                                ts: Some(1001),
+                                tool_name: Some("Bash".into()),
+                                tool_args: Some(r#"{"cmd":"ls"}"#.into()),
+                                collapsed: true,
+                            },
+                        ],
+                        truncated: false,
+                    })
+                } else {
+                    Err("内部路径细节不应出现在响应里".to_string())
+                }
+            }),
+            // 本测试不触 /session-files：注入恒空的路径源
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+        });
+        let app = router(state.clone());
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "cm".into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+
+        // (1) 无 cookie → 403（nest 内层 gate 结构性覆盖新路由）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-messages?agent_type=zcode&session_id=sess_hit",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "新端点必须过 gate");
+
+        // (2) 缺 agent_type / 缺 session_id / 空白 session_id → 400
+        for uri in [
+            "/m/api/v1/session-messages?session_id=sess_hit",
+            "/m/api/v1/session-messages?agent_type=zcode",
+            "/m/api/v1/session-messages?agent_type=zcode&session_id=%20%20",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, Some("mam_device=cm"), None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "缺参必须 400：{uri}");
+        }
+
+        // (3) 命中 → 200 + camelCase 载荷 + no-store；参数正确传入注入源（limit 默认 200）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-messages?agent_type=zcode&session_id=sess_hit",
+                Some("mam_device=cm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "会话正文是门禁下私有数据，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"messages\"") && body.contains("\"toolName\":\"Bash\""),
+            "载荷必须 camelCase（toolName/toolArgs/collapsed），实际 {body}"
+        );
+        // Bug 1 修复（M3 验收）：载荷携带 truncated（头部截断标记），移动端据此决定
+        // 是否提供「加载更早消息」
+        assert!(
+            body.contains("\"truncated\":false"),
+            "载荷必须含 truncated 字段，实际 {body}"
+        );
+        assert!(body.contains("\"toolArgs\"") && body.contains("\"collapsed\":true"));
+        assert_eq!(
+            captured.lock().unwrap().first().cloned(),
+            Some(("zcode".to_string(), "sess_hit".to_string(), 200)),
+            "handler 应把 agent_type/session_id/默认 limit 传给内容源"
+        );
+
+        // (4) 读取失败 → 404 空语义；limit 查询参数透传
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-messages?agent_type=dsh&session_id=sess_miss&limit=50",
+                Some("mam_device=cm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "读取失败必须 404");
+        let body = body_string(r).await;
+        assert!(!body.contains("内部路径细节"), "错误细节只进日志不外泄");
+        assert_eq!(
+            captured.lock().unwrap().last().cloned(),
+            Some(("dsh".to_string(), "sess_miss".to_string(), 50)),
+            "limit 查询参数应透传"
+        );
+    }
+
+    // ==== M3 Task 8：GET /m/api/v1/file + /session-files（安全文件读取与路径提取） ====
+    // 零污染：session_source 注入 tempdir 项目目录的会话，被读文件均为 tempdir 内
+    // 现造文件；path_source 注入固定路径表——不触任何真实数据目录
+
+    /// file / session-files 端点矩阵：gate 403 → 缺参 400 → 会话不存在 404 →
+    /// cwd 内文本 200（JSON 载荷 + no-store）→ 图片 200（二进制 + Content-Type）→
+    /// 越界 403 → 超限 403（与越界不可区分，探测面最小化，进度台账 #12）
+    #[tokio::test]
+    async fn file_endpoints_are_gated_and_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_str().unwrap().to_string();
+        std::fs::write(tmp.path().join("hello.txt"), "hello mam").unwrap();
+        std::fs::write(tmp.path().join("pic.png"), [0x89u8, b'P', b'N', b'G']).unwrap();
+        std::fs::write(tmp.path().join("big.txt"), vec![b'a'; 500 * 1024 + 1]).unwrap();
+        let session = crate::session::Session {
+            id: "sess_file".into(),
+            agent_type: crate::session::AgentType::Claude,
+            project_name: "proj".into(),
+            project_path: cwd.clone(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: crate::session::SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-09-15T00:00:00Z".into(),
+            pid: 1,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: crate::session::ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        };
+        let state = Arc::new(RemoteState {
+            pairing: std::sync::Mutex::new({
+                let mut svc = PairingService::new(
+                    600_000,
+                    PairingClock {
+                        now: Box::new(|| 1000),
+                        token: Box::new(|| "tok-x".to_string()),
+                    },
+                );
+                svc.issue();
+                svc
+            }),
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| {
+                (
+                    vec![crate::remote::files::FileEntry {
+                        path: "/absent/proj/src/main.rs".to_string(),
+                        last_seq: 1,
+                        last_ts: None,
+                        hits: 1,
+                        modified: false,
+                    }],
+                    false,
+                )
+            }),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+        });
+        let app = router(state.clone());
+        persist_device(&state, "fe");
+
+        // (1) gate：无 cookie 访问 file / session-files → 403（nest 内层 gate 结构性覆盖）
+        for uri in [
+            "/m/api/v1/file?session_id=sess_file&path=hello.txt",
+            "/m/api/v1/session-files?agent_type=claude&session_id=sess_file",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, None, None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 403, "新端点必须过 gate：{uri}");
+        }
+
+        // (2) 缺参 / 空白参数 → 400
+        for uri in [
+            "/m/api/v1/file?path=hello.txt",
+            "/m/api/v1/file?session_id=sess_file",
+            "/m/api/v1/file?session_id=%20&path=hello.txt",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req("GET", uri, Some("mam_device=fe"), None))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "缺参必须 400：{uri}");
+        }
+
+        // (3) 会话不在快照中 → 404
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_miss&path=hello.txt",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "session_id 不在快照必须 404");
+
+        // (4) cwd 内文本 → 200 JSON {content, mime, size} + no-store（相对路径形态）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=hello.txt",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "门禁下的私有文件内容禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"content\":\"hello mam\"")
+                && body.contains("\"mime\":\"text/plain\"")
+                && body.contains("\"size\":9"),
+            "文本载荷形状 content/mime/size 三键，实际 {body}"
+        );
+
+        // (5) 图片 → 200 二进制 + Content-Type: image/png（绝对路径形态 + 含空格文件名
+        //     的 URL 编码变体一并覆盖查询串解码）
+        std::fs::write(tmp.path().join("with space.png"), [0x89u8, b'P']).unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/m/api/v1/file?session_id=sess_file&path={}",
+                    uri_encode(&tmp.path().join("with space.png").to_string_lossy())
+                ),
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "含空格的绝对路径（URL 编码）应可读取");
+        assert_eq!(header(&r, "content-type"), "image/png");
+        // 终审 Important 2：所有图片二进制响应必须带嗅探防护双头——SVG 以顶层文档
+        // 加载时可执行内嵌脚本（同源脚本可 fetch 会话数据，SameSite=Lax 不防同源），
+        // CSP 断脚本/取资源 + nosniff 防 MIME 嗅探误判（png 与 svg 同一分支，双头断言一致）
+        assert_eq!(header(&r, "content-security-policy"), "default-src 'none'");
+        assert_eq!(header(&r, "x-content-type-options"), "nosniff");
+        let bytes = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), &[0x89, b'P'], "图片走二进制直传");
+
+        // (5b) SVG 直出（终审 Important 2 的直接场景）：image/svg+xml 同样带
+        //      CSP + nosniff 双头——内容可含脚本的图片 mime 是防护重点
+        std::fs::write(
+            tmp.path().join("icon.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+        )
+        .unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=icon.svg",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "cwd 内 svg 应可读取");
+        assert_eq!(header(&r, "content-type"), "image/svg+xml");
+        assert_eq!(
+            header(&r, "content-security-policy"),
+            "default-src 'none'",
+            "SVG 直出必须断一切脚本与子资源"
+        );
+        assert_eq!(header(&r, "x-content-type-options"), "nosniff");
+
+        // (6) 越界 → 403（绝对路径指向 cwd 外）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=/etc/passwd",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "越界必须 403");
+        assert!(body_string(r).await.is_empty(), "403 不携带错误细节");
+
+        // (7) 超限 → 403，与越界完全不可区分（同码同空体——探测面最小化）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/file?session_id=sess_file&path=big.txt",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "超限必须 403");
+        assert!(
+            body_string(r).await.is_empty(),
+            "超限 403 与越界 403 不可区分"
+        );
+
+        // (8) /session-files：缺参 400 → 命中 200 {files:[...]} + no-store
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-files?session_id=sess_file",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-files?agent_type=claude&session_id=sess_file",
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "文件路径表是门禁下私有数据，禁止中间层缓存"
+        );
+        // M3+ 富化形状：结构化条目（camelCase）+ truncated
+        let files_body = body_string(r).await;
+        assert!(
+            files_body.contains("\"path\":\"/absent/proj/src/main.rs\"")
+                && files_body.contains("\"lastSeq\":1")
+                && files_body.contains("\"hits\":1")
+                && files_body.contains("\"truncated\":false"),
+            "session-files 应透传注入路径源的结构化条目，实际 {files_body}"
+        );
+    }
+
+    /// 查询参数值的最小 URL 编码（测试助手：空格 → %20；其余字符测试数据不含）
+    fn uri_encode(s: &str) -> String {
+        s.replace(' ', "%20")
     }
 }
