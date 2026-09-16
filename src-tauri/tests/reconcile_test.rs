@@ -165,6 +165,12 @@ fn reconcile_l1_mode_a_rebuilds_link() {
         .clone();
 
     let outcome = reconcile_one(&item, "a");
+    // 终审 Minor #4：结构化字段随结果回带（前端行键映射不再解析 message 文本）
+    assert_eq!(
+        outcome.extension_id, "skill-v2m2-rc-l1a",
+        "L1-a outcome 应携带漂移条目 extension_id"
+    );
+    assert_eq!(outcome.tool_id, tool, "L1-a outcome 应携带漂移条目 tool_id");
     assert!(
         outcome.fixed,
         "L1-a 应修复（重建链接）: {:?}",
@@ -288,6 +294,9 @@ fn reconcile_l2_mode_a_mismatch_needs_manual_keeps_scene() {
         .clone();
 
     let outcome = reconcile_one(&item, "a");
+    // 终审 Minor #4：needs_manual 路径同样回带结构化字段（L2-a 守卫臂）
+    assert_eq!(outcome.extension_id, "skill-v2m2-rc-l2a");
+    assert_eq!(outcome.tool_id, tool);
     assert!(
         outcome.needs_manual,
         "L2-a 内容不一致应升级人工: {:?}",
@@ -391,6 +400,17 @@ fn reconcile_l4_any_mode_needs_manual() {
 
     for mode in ["a", "b"] {
         let outcome = reconcile_one(&item, mode);
+        // 终审 Minor #4：L4 升级人工臂也必须回带结构化字段
+        assert_eq!(
+            outcome.extension_id, "skill-v2m2-rc-l4m",
+            "L4 outcome 应携带 extension_id（mode={}）",
+            mode
+        );
+        assert_eq!(
+            outcome.tool_id, tool,
+            "L4 outcome 应携带 tool_id（mode={}）",
+            mode
+        );
         assert!(
             outcome.needs_manual,
             "L4 任意 mode 都应 needs_manual（mode={}）: {:?}",
@@ -454,6 +474,29 @@ fn reconcile_batch_filters_tool_and_l4_manual() {
         .iter()
         .any(|o| o.message.contains("skill-v2m2-rc-b-l4") && o.needs_manual && !o.fixed);
     assert!(l4_manual, "批量内 L4 应恒 needs_manual: {:?}", outcomes);
+    // 终审 Minor #4：批量经 reconcile_one 自然携带结构化字段——逐条非空且与漂移条目一致，
+    // 前端行键映射（toolId|extensionId）不再依赖 message 文本格式
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| !o.extension_id.is_empty() && !o.tool_id.is_empty()),
+        "批量每条 outcome 都应携带非空结构化字段: {:?}",
+        outcomes
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| o.extension_id == "skill-v2m2-rc-b-l1" && o.tool_id == tool && o.fixed),
+        "批量 L1 条目结构化字段应正确: {:?}",
+        outcomes
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| o.extension_id == "skill-v2m2-rc-b-l4" && o.tool_id == tool && o.needs_manual),
+        "批量 L4 条目结构化字段应正确: {:?}",
+        outcomes
+    );
     assert!(
         tool_dir.join("v2m2-rc-b-l1").is_symlink(),
         "批量后 L1 链接应已重建"

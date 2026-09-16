@@ -144,7 +144,7 @@ export function setMockFmMode(mode: "suggestion" | "empty") {
   fmMode = mode;
 }
 
-export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
+export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
   switch (cmd) {
     case "pet_list_pets":
       return Promise.resolve([]);
@@ -290,21 +290,33 @@ export const tauriInvokeMock = vi.fn((cmd: string, _args?: unknown) => {
     case "restore_stash_entry":
       return Promise.resolve();
     // 体检对账写命令（T15）：须返回与 Rust ReconcileOutcome 同形对象
-    //（undefined 会让 o.fixed / o.needsManual 读崩）；message 前缀与 Rust 契约一致
-    case "reconcile_item":
+    //（undefined 会让 o.fixed / o.needsManual 读崩）；extensionId/toolId 结构化回带
+    //（终审 Minor #4 起前端批量行映射靠结构化字段，message 只供人读不承载可解析格式）——
+    // 与 src/tauri-mock.ts 双 mock 形状一致
+    case "reconcile_item": {
+      const item = (args as { item?: { extensionId?: string; toolId?: string } } | undefined)?.item;
       return Promise.resolve({
         fixed: true,
         needsManual: false,
+        extensionId: item?.extensionId ?? "",
+        toolId: item?.toolId ?? "",
         message: "mock: 已按账本重建链接",
       });
-    case "reconcile_tool_batch":
-      return Promise.resolve([
-        {
-          fixed: true,
-          needsManual: false,
-          message: "skill-brainstorming @ claude: mock 已按账本重建链接",
-        },
-      ]);
+    }
+    case "reconcile_tool_batch": {
+      const batchToolId = (args as { toolId?: string } | undefined)?.toolId ?? "claude";
+      return Promise.resolve(
+        mockLedgerDrift
+          .filter((d) => d.toolId === batchToolId)
+          .map((d) => ({
+            fixed: true,
+            needsManual: false,
+            extensionId: d.extensionId,
+            toolId: d.toolId,
+            message: "mock 已按账本重建链接",
+          }))
+      );
+    }
     // 托盘统一重建（T16）：fire-and-forget，无返回值消费，显式 no-op 以闭合双 mock parity
     case "refresh_tray":
       return Promise.resolve();

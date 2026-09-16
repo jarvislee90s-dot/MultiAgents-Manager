@@ -53,10 +53,13 @@ export interface DriftItem {
   path: string;
 }
 
-/** 单条对账处置结果（Rust reconcile::ReconcileOutcome）：needs_manual 升级人工 */
+/** 单条对账处置结果（Rust reconcile::ReconcileOutcome）：needs_manual 升级人工；
+ *  extensionId/toolId 为结构化行键定位（终审 Minor #4），message 只供人读不解析 */
 export interface ReconcileOutcome {
   fixed: boolean;
   needsManual: boolean;
+  extensionId: string;
+  toolId: string;
   message: string;
 }
 

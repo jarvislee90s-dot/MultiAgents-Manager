@@ -546,13 +546,18 @@ if (!isTauri) {
         return Promise.resolve(undefined);
 
       // 体检对账写命令（T15）：须返回与 Rust ReconcileOutcome 同形对象
-      //（undefined 会让 o.fixed / o.needsManual 读崩）；batch 按 toolId 返回逐条 outcome
-      case "reconcile_item":
+      //（undefined 会让 o.fixed / o.needsManual 读崩）；extensionId/toolId 结构化回带
+      //（终审 Minor #4 起前端批量行映射靠结构化字段，message 只供人读不承载可解析格式）
+      case "reconcile_item": {
+        const item = args?.item as { extensionId?: string; toolId?: string } | undefined;
         return Promise.resolve({
           fixed: true,
           needsManual: false,
+          extensionId: item?.extensionId ?? "",
+          toolId: item?.toolId ?? "",
           message: "mock: 已按账本重建链接",
         });
+      }
       case "reconcile_tool_batch": {
         const batchToolId = args?.toolId as string;
         return Promise.resolve(
@@ -561,8 +566,9 @@ if (!isTauri) {
             .map((d) => ({
               fixed: true,
               needsManual: false,
-              // message 前缀 "ext_id @ tool_id" 与 Rust 契约一致（前端靠它回映行键）
-              message: `${d.extensionId} @ ${batchToolId}: mock 已按账本重建链接`,
+              extensionId: d.extensionId,
+              toolId: batchToolId,
+              message: "mock 已按账本重建链接",
             }))
         );
       }

@@ -1,8 +1,8 @@
 // tests/healthCheckCard.test.tsx — 一致性体检卡片（spec §13 呈现侧）
-// 覆盖（final review Finding 1 回归锁）：组头批量 a/b 后，needs_manual 结果行按
-// ReconcileOutcome.message 前缀 "{ext_id} @ {tool_id}: {detail}" 回映行键转橙无按钮——
-// 历史缺陷：解析正则 /^(\S+) @ (\S+)/ 未锚定冒号，\S+ 贪婪吞掉 "codex:" 的冒号，
-// 产出 "codex:|skill-x" 永不等于 driftKey 的 "codex|skill-x"，批量标橙静默失效
+// 覆盖（终审 Minor #4 换轨回归锁）：组头批量 a/b 后，needs_manual 结果行按
+// ReconcileOutcome 结构化字段 extensionId/toolId 回映行键转橙无按钮——
+// mock 的 message 一律纯文案（不承载 "{ext_id} @ {tool_id}:" 可解析格式），
+// 旧实现（解析 message 正则）在此 mock 下静默失效：只有结构化字段能命中行键
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -33,12 +33,31 @@ const HEALTH: PresetHealth = {
 };
 
 // 批量处置结果（终审 Minor #3 三分计数）：1 修复 + 1 needs_manual + 1 失败（两者皆非）——
-// needs_manual 必须单列汇总，不得并入失败计数；message 前缀 "{ext_id} @ {tool_id}: {detail}"
-// 同 Rust reconcile.rs where_at 格式，needs_manual 行仍须回映到漂移行键 codex|skill-x
+// needs_manual 必须单列汇总，不得并入失败计数；回映行键 codex|skill-x 的唯一凭证是
+// 结构化字段 extensionId/toolId（终审 Minor #4），message 全部纯文案不可解析：
+// 旧 message-正则实现面对此 mock 静默失效（行不转橙）→ 本测试即换轨回归锁
 const BATCH_MIXED = [
-  { fixed: true, needsManual: false, message: "skill-ok @ codex: 已按账本修复磁盘" },
-  { fixed: false, needsManual: true, message: "skill-x @ codex: 内容不一致，需人工处理" },
-  { fixed: false, needsManual: false, message: "skill-bad @ codex: 处置失败" },
+  {
+    fixed: true,
+    needsManual: false,
+    extensionId: "skill-ok",
+    toolId: "codex",
+    message: "已按账本修复磁盘",
+  },
+  {
+    fixed: false,
+    needsManual: true,
+    extensionId: "skill-x",
+    toolId: "codex",
+    message: "内容不一致，需人工处理",
+  },
+  {
+    fixed: false,
+    needsManual: false,
+    extensionId: "skill-bad",
+    toolId: "codex",
+    message: "处置失败",
+  },
 ];
 
 beforeEach(() => {
@@ -73,7 +92,7 @@ function renderCard() {
 }
 
 describe("HealthCheckCard（批量 needs-manual 行回映，Finding 1 回归锁）", () => {
-  it("批量 a 后 needs_manual 行转橙无按钮：message 前缀回映行键不被尾缀冒号破坏", async () => {
+  it("批量 a 后 needs_manual 行转橙无按钮：结构化 extensionId/toolId 回映行键（message 不承载可解析格式）", async () => {
     renderCard();
     // 漂移行就绪：extensionId 去 skill- 前缀展示（"skill-x" → "x"）
     expect(await screen.findByText("x")).toBeInTheDocument();

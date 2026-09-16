@@ -103,40 +103,50 @@ pub struct ReconcileOutcome {
     pub fixed: bool,
     /// 是否升级人工（L4 外链、L2-a 内容不一致守卫）
     pub needs_manual: bool,
+    /// 漂移条目定位（终审 Minor #4 结构化契约）：前端批量行键映射用，
+    /// 与 message 文本解耦——message 保留 "ext @ tool: detail" 仅供人读
+    pub extension_id: String,
+    pub tool_id: String,
     pub message: String,
 }
 
 /// 处置成功
-fn fixed_do(message: String) -> ReconcileOutcome {
+fn fixed_do(item: &DriftItem, message: String) -> ReconcileOutcome {
     ReconcileOutcome {
         fixed: true,
         needs_manual: false,
+        extension_id: item.extension_id.clone(),
+        tool_id: item.tool_id.clone(),
         message,
     }
 }
 
 /// 处置失败（普通失败，不升级人工）
-fn failed(message: String) -> ReconcileOutcome {
+fn failed(item: &DriftItem, message: String) -> ReconcileOutcome {
     ReconcileOutcome {
         fixed: false,
         needs_manual: false,
+        extension_id: item.extension_id.clone(),
+        tool_id: item.tool_id.clone(),
         message,
     }
 }
 
 /// 升级人工（MAM 不动手 / 绝不删除现场）
-fn needs_manual(message: String) -> ReconcileOutcome {
+fn needs_manual(item: &DriftItem, message: String) -> ReconcileOutcome {
     ReconcileOutcome {
         fixed: false,
         needs_manual: true,
+        extension_id: item.extension_id.clone(),
+        tool_id: item.tool_id.clone(),
         message,
     }
 }
 
-fn from_result(res: Result<(), String>, ok_message: String) -> ReconcileOutcome {
+fn from_result(res: Result<(), String>, item: &DriftItem, ok_message: String) -> ReconcileOutcome {
     match res {
-        Ok(()) => fixed_do(ok_message),
-        Err(e) => failed(format!("处置失败: {}", e)),
+        Ok(()) => fixed_do(item, ok_message),
+        Err(e) => failed(item, format!("处置失败: {}", e)),
     }
 }
 
@@ -156,23 +166,29 @@ pub fn reconcile_one(item: &DriftItem, mode: &str) -> ReconcileOutcome {
     match (item.kind.as_str(), mode) {
         ("L1", "a") => from_result(
             crate::services::skill::enable_skill_for_tool(name, &item.tool_id),
+            item,
             format!("{}: 已按账本重建链接", where_at),
         ),
         ("L1", "b") => from_result(
             crate::database::upsert_assignment(&item.extension_id, &item.tool_id, false, "missing"),
+            item,
             format!("{}: 已按磁盘回写账本 disabled/missing", where_at),
         ),
         ("L2", "a") => match crate::services::skill::enable_skill_for_tool(name, &item.tool_id) {
-            Ok(()) => fixed_do(format!("{}: 真目录与共享仓库一致，已替换为链接", where_at)),
+            Ok(()) => fixed_do(item, format!("{}: 真目录与共享仓库一致，已替换为链接", where_at)),
             // M1 真目录守卫（「不一致」稳定标记）：内容不一致 → 需人工处理，绝不删除现场
-            Err(e) if e.contains("不一致") => needs_manual(format!(
-                "{}: 磁盘真目录与共享仓库内容不一致，需人工处理；MAM 未做任何改动，现场已保留（{}）",
-                where_at, e
-            )),
-            Err(e) => failed(format!("处置失败: {}", e)),
+            Err(e) if e.contains("不一致") => needs_manual(
+                item,
+                format!(
+                    "{}: 磁盘真目录与共享仓库内容不一致，需人工处理；MAM 未做任何改动，现场已保留（{}）",
+                    where_at, e
+                ),
+            ),
+            Err(e) => failed(item, format!("处置失败: {}", e)),
         },
         ("L2", "b") => from_result(
             crate::database::upsert_assignment(&item.extension_id, &item.tool_id, false, "missing"),
+            item,
             format!(
                 "{}: 已按磁盘回写账本 disabled/missing（真目录保留原生态）",
                 where_at
@@ -180,17 +196,25 @@ pub fn reconcile_one(item: &DriftItem, mode: &str) -> ReconcileOutcome {
         ),
         ("L3", "a") => from_result(
             crate::services::skill::disable_skill_for_tool(name, &item.tool_id),
+            item,
             format!("{}: 已按账本清除链接（含 Layer 2 级联）", where_at),
         ),
         ("L3", "b") => from_result(
             crate::database::upsert_assignment(&item.extension_id, &item.tool_id, true, "valid"),
+            item,
             format!("{}: 已按磁盘回写账本 enabled/valid", where_at),
         ),
-        ("L4", _) => needs_manual(format!(
-            "{}: 外链不归 MAM 接管，需人工确认归属或手动处理",
-            where_at
-        )),
-        _ => failed(format!("未知组合: kind={}, mode={}", item.kind, mode)),
+        ("L4", _) => needs_manual(
+            item,
+            format!(
+                "{}: 外链不归 MAM 接管，需人工确认归属或手动处理",
+                where_at
+            ),
+        ),
+        _ => failed(
+            item,
+            format!("未知组合: kind={}, mode={}", item.kind, mode),
+        ),
     }
 }
 

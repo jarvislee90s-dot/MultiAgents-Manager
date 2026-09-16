@@ -117,7 +117,8 @@ export function HealthCheckCard() {
     }
   };
 
-  // ① 组头批量：结果按 message 前缀 "ext_id @ tool_id" 回映行键标橙，汇总 toast（复用既有计数文案）
+  // ① 组头批量：needs_manual 结果按结构化字段 extensionId/toolId 回映行键标橙
+  //（终审 Minor #4：与 driftKey 同构，不再解析 message 文本），汇总 toast（复用既有计数文案）
   const runBatch = async (toolId: string, mode: "a" | "b") => {
     setBatchPending(`${toolId}|${mode}`);
     try {
@@ -129,10 +130,8 @@ export function HealthCheckCard() {
       const failed = outcomes.length - fixed - manualCount;
       const nextManual = new Set(manual);
       for (const o of outcomes) {
-        // message 格式 "{ext_id} @ {tool_id}: {detail}"（reconcile.rs where_at + detail 后缀）；
-        // 正则必须锚定 detail 冒号：不锚定时 \S+ 贪婪吞掉冒号产出 "codex:"，永不等于行键的 "codex"
-        const m = /^(\S+) @ (\S+):/.exec(o.message);
-        if (o.needsManual && m) nextManual.add(`${m[2]}|${m[1]}`);
+        // 结构化行键（后端 ReconcileOutcome 自带，与 driftKey 同构）；message 只供 toast 人读
+        if (o.needsManual) nextManual.add(`${o.toolId}|${o.extensionId}`);
       }
       setManual(nextManual);
       if (fixed === outcomes.length) {
