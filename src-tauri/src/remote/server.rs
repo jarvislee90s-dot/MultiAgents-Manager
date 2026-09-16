@@ -1329,6 +1329,7 @@ mod tests {
                         last_seq: 1,
                         last_ts: None,
                         hits: 1,
+                        modified: false,
                     }],
                     false,
                 )

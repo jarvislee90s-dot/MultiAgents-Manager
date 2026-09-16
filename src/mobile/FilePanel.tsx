@@ -140,7 +140,15 @@ export default function FilePanel({
 
       {/* 档位卡片（用户裁决 3）：三档常显、当前高亮 */}
       <div className="flex shrink-0 items-center gap-1 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+        {/* 单位注释（2026-09-16 用户裁决）：200/500/1000 指**消息条数** */}
         <span className="text-xs text-slate-500 dark:text-slate-400">追溯范围</span>
+        <span
+          data-testid="file-scope-hint"
+          className="text-[10px] text-slate-400 dark:text-slate-500"
+          title="按最近的消息条数统计：user / assistant / 思考 / 工具调用 / 工具结果 各算 1 条"
+        >
+          （消息条数）
+        </span>
         {FILE_SCOPES.map((s) => (
           <button
             key={s}
@@ -182,7 +190,11 @@ export default function FilePanel({
                 type="button"
                 data-testid={`file-row-${i}-open`}
                 onClick={() => onOpenFile(e.path)}
-                className="block w-full truncate text-left text-sm font-medium text-sky-700 hover:underline dark:text-sky-400"
+                className={`block w-full truncate text-left text-sm font-medium hover:underline ${
+                  e.modified
+                    ? "text-sky-700 dark:text-sky-400"
+                    : "text-slate-700 dark:text-slate-300"
+                }`}
               >
                 {fileKindOf(e.path) === "image" ? (
                   <ImageIcon size={12} className="mr-1 inline shrink-0" />

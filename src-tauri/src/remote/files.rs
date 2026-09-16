@@ -362,6 +362,46 @@ pub struct FileEntry {
     pub last_ts: Option<i64>,
     /// 该文件在窗口内出现的次数（hits=1 前端不显示徽标）
     pub hits: usize,
+    /// 是否**被改写**过（2026-09-16 用户裁决）：窗口内只要有一次写类工具
+    /// （Edit/Write/apply_patch 等）触达即为 true；仅被读类工具（Read/Grep/
+    /// Glob/view_image…）触达为 false。前端据此把「仅读过」的文件名渲成
+    /// 常规色（仍是超链接，只是视觉上区分「只是看过」与「动过手」）
+    pub modified: bool,
+}
+
+/// 读类工具白名单（**小写**比较）：只读取文件、不修改内容。
+/// 判定读写的唯一依据是工具名——不在白名单内的（含工具名缺失）一律按
+/// 已改写处理（fail-safe：宁可把只读文件标成改写，也不要让真正被改过的
+/// 文件看起来「只是读过」）。名单按各工具实测形态收集：
+/// claude/codex/workbuddy 的 Read/Grep/Glob/view_image、kimi 的 Read/
+/// ReadMediaFile、zcode/opencode/openclaw 的 read 类工具名
+const READ_ONLY_TOOLS: &[&str] = &[
+    "read",
+    "readfile",
+    "readmediafile",
+    "read_image",
+    "view_image",
+    "view",
+    "cat",
+    "grep",
+    "glob",
+    "search",
+    "find",
+    "list",
+    "ls",
+    "webfetch",
+    "fetch",
+];
+
+/// 工具名是否为读类（大小写不敏感；None → false = 按已改写处理）
+fn is_read_only_tool(name: Option<&str>) -> bool {
+    match name {
+        Some(n) => {
+            let lower = n.to_lowercase();
+            READ_ONLY_TOOLS.contains(&lower.as_str())
+        }
+        None => false,
+    }
 }
 
 /// 归一化比较键（去重用，用户裁决 7）：`\`→`/`；Windows 语义再 to_lowercase。
@@ -402,12 +442,15 @@ pub fn extract_paths_from_messages_with(msgs: &[SessionMessage], windows: bool) 
         // 同一消息内同一文件多次命中只计一次（一条 tool-call 里重复键不算多次使用）
         for path in paths {
             let key = normalize_key(&path, windows);
+            let written = !is_read_only_tool(m.tool_name.as_deref());
             match index.get(&key) {
                 Some(&i) => {
                     out[i].hits += 1;
                     out[i].last_seq = m.seq;
                     out[i].last_ts = m.ts;
                     out[i].path = path; // 展示保留最后一次出现的原始形态
+                                        // 写优先：写过之后再读也不撤销「已改写」
+                    out[i].modified = out[i].modified || written;
                 }
                 None => {
                     index.insert(key, out.len());
@@ -416,6 +459,7 @@ pub fn extract_paths_from_messages_with(msgs: &[SessionMessage], windows: bool) 
                         last_seq: m.seq,
                         last_ts: m.ts,
                         hits: 1,
+                        modified: written,
                     });
                 }
             }
@@ -931,6 +975,86 @@ mod tests {
         assert_eq!(b.last_ts, Some(400));
     }
 
+    /// M3+ 文件面板（2026-09-16 用户裁决）：区分「已改写」与「仅读过」。
+    /// 判定依据 = 触达该文件的工具名是否属于读类白名单；只要有一次
+    /// 写类工具（Edit/Write/apply_patch…）触达即 modified=true。
+    /// 前端据此把仅读过的文件名渲成常规色（仍是超链接）
+    #[test]
+    fn extract_entries_track_modified_vs_readonly() {
+        // (1) 仅 Read → modified=false（tool_call 夹具默认名是 Write，须显式改）
+        let mut read_msg = tool_call(r#"{"file_path":"/p/read.rs"}"#);
+        read_msg.tool_name = Some("Read".into());
+        let read_only = vec![read_msg];
+        let entries = extract_paths_from_messages(&read_only);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].modified, "只有 Read 触达的文件应标为未改写");
+
+        // (2) Edit → modified=true
+        let mut edit = tool_call(r#"{"file_path":"/p/edited.rs"}"#);
+        edit.tool_name = Some("Edit".into());
+        let entries = extract_paths_from_messages(&[edit]);
+        assert!(entries[0].modified, "Edit 触达的文件应标为已改写");
+
+        // (3) 先读后写 → modified=true（写优先，只要写过就算改写）
+        let mut r = tool_call(r#"{"file_path":"/p/both.rs"}"#);
+        r.seq = 1;
+        r.tool_name = Some("Read".into());
+        let mut w = tool_call(r#"{"file_path":"/p/both.rs"}"#);
+        w.seq = 2;
+        w.tool_name = Some("Write".into());
+        let entries = extract_paths_from_messages(&[r, w]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].modified, "先读后写应判为已改写");
+        // 反过来（先写后读）仍是已改写——读过不撤销写过的结论
+        let mut r2 = tool_call(r#"{"file_path":"/p/both2.rs"}"#);
+        r2.seq = 1;
+        r2.tool_name = Some("Read".into());
+        let mut w2 = tool_call(r#"{"file_path":"/p/both2.rs"}"#);
+        w2.seq = 2;
+        w2.tool_name = Some("Write".into());
+        let mut r3 = tool_call(r#"{"file_path":"/p/both2.rs"}"#);
+        r3.seq = 3;
+        r3.tool_name = Some("Read".into());
+        assert!(
+            extract_paths_from_messages(&[r2, w2, r3])[0].modified,
+            "写过之后的读不撤销已改写标记"
+        );
+
+        // (4) 工具名缺失（未知形态）→ 保守判为已改写？不——按读类白名单判定，
+        //     不在白名单内即视为可能改写（fail-safe：宁可标成改写也不误导用户
+        //     以为「只是读过」的安全文件其实是改过的）
+        let mut unknown = tool_call(r#"{"file_path":"/p/unknown.rs"}"#);
+        unknown.tool_name = None;
+        assert!(
+            extract_paths_from_messages(&[unknown])[0].modified,
+            "工具名缺失时按已改写处理（保守）"
+        );
+
+        // (5) 读类白名单：Read / Grep / Glob / view_image / ReadMediaFile 等
+        for read_tool in ["Read", "Grep", "Glob", "view_image", "ReadMediaFile"] {
+            let mut m = tool_call(r#"{"file_path":"/p/x.rs"}"#);
+            m.tool_name = Some(read_tool.to_string());
+            assert!(
+                !extract_paths_from_messages(&[m])[0].modified,
+                "{read_tool} 属读类工具，不得标为已改写"
+            );
+        }
+    }
+
+    /// FileEntry 新增 modified 的 camelCase 序列化契约
+    #[test]
+    fn file_entry_serializes_modified_flag() {
+        let e = FileEntry {
+            path: "/p/a.rs".into(),
+            last_seq: 1,
+            last_ts: None,
+            hits: 1,
+            modified: true,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v.get("modified").and_then(|b| b.as_bool()), Some(true));
+    }
+
     /// M3+ 归一化比较键去重：`\`→`/`；Windows 语义（参数注入）再小写。
     /// 展示保留**最后一次出现**的原始形态（用户裁决 7）
     #[test]
@@ -990,6 +1114,7 @@ mod tests {
             last_seq: 7,
             last_ts: Some(700),
             hits: 2,
+            modified: false,
         };
         let v = serde_json::to_value(&e).unwrap();
         assert!(v.get("path").is_some());

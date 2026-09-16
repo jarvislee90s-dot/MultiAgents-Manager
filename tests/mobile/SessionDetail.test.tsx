@@ -34,7 +34,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 
 /** M3+ 文件面板条目夹具（后端 FileEntry camelCase 契约） */
 function fileEntry(path: string, over: Partial<SessionFileEntry> = {}): SessionFileEntry {
-  return { path, lastSeq: 1, lastTs: 1000, hits: 1, ...over };
+  return { path, lastSeq: 1, lastTs: 1000, hits: 1, modified: true, ...over };
 }
 
 function msg(

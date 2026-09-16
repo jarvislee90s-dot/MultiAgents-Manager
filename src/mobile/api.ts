@@ -105,12 +105,15 @@ export async function fetchSessionMessages(
  *  逐字段对应，勿漂移）：path = 最后一次出现的原始形态，lastSeq = 最后出现条目的
  *  会话内序，lastTs = 最后出现时间（可 null → 前端显示 `—`），hits = 出现次数
  *  （后端契约字段；2026-09-16 用户裁决：次数信息用户不在意，前端**不再展示**，
- *  保留字段供后续可能的排序/统计消费） */
+ *  保留字段供后续可能的排序/统计消费），
+ *  modified = 是否被写类工具（Edit/Write…）改写触达（2026-09-16 用户裁决：
+ *  前端据此把「仅读过」的文件名渲成常规色，与「动过手」的区分） */
 export interface SessionFileEntry {
   path: string;
   lastSeq: number;
   lastTs: number | null;
   hits: number;
+  modified: boolean;
 }
 
 /** 拉取该会话涉及的文件表（/session-files，泛化提取）。一份数据两用：正文

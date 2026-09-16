@@ -9,7 +9,7 @@ afterEach(cleanup);
 
 /** 条目夹具（后端 FileEntry camelCase 契约） */
 function entry(path: string, over: Partial<SessionFileEntry> = {}): SessionFileEntry {
-  return { path, lastSeq: 1, lastTs: 1_700_000_000_000, hits: 1, ...over };
+  return { path, lastSeq: 1, lastTs: 1_700_000_000_000, hits: 1, modified: true, ...over };
 }
 
 /** 渲染面板（默认回调全部注入 mock） */
@@ -179,6 +179,30 @@ describe("FilePanel 档位卡片（用户裁决 3）", () => {
   it("未 truncated → 不显示提示", () => {
     renderPanel([entry("/p/a.rs")], { truncated: false, scope: 200 });
     expect(screen.queryByTestId("panel-truncated-hint")).toBeNull();
+  });
+});
+
+describe("FilePanel 已改写 / 仅读过 的视觉区分（2026-09-16 用户裁决）", () => {
+  it("已改写的文件名保持强调色；仅读过的用常规文字色（两者都是超链接）", () => {
+    renderPanel([
+      entry("/p/edited.rs", { lastSeq: 9, modified: true }),
+      entry("/p/readonly.rs", { lastSeq: 5, modified: false }),
+    ]);
+    const edited = screen.getByTestId("file-row-0-open");
+    const readonly = screen.getByTestId("file-row-1-open");
+    // 两者都是可点按钮（超链接语义一致）
+    expect(edited.tagName).toBe("BUTTON");
+    expect(readonly.tagName).toBe("BUTTON");
+    // 已改写：强调色（sky）；仅读过：常规文字色（slate），不带 sky
+    expect(edited.className).toContain("text-sky-700");
+    expect(readonly.className).not.toContain("text-sky-700");
+    expect(readonly.className).toMatch(/text-slate-/);
+  });
+
+  it("档位卡片带单位注释：说明 200/500/1000 是消息条数", () => {
+    renderPanel([entry("/p/a.rs")]);
+    const hint = screen.getByTestId("file-scope-hint");
+    expect(hint.textContent).toContain("消息");
   });
 });
 
