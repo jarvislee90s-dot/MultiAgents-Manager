@@ -166,3 +166,46 @@ describe("RemoteSection TLS 确认不可在线撤回（M4 T0b）", () => {
     await waitFor(() => expect(toastInfoMock).toHaveBeenCalled());
   });
 });
+
+// M4 T1a：通道区块三选一 + named 需 Token + 隧道地址条目徽标
+describe("RemoteSection 外部通道区块（M4 T1a）", () => {
+  it("channel block: renders selector, saves via remote_set_channel, tunnel badge", async () => {
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "remote_status")
+        return Promise.resolve({
+          ...lanStatus,
+          enabled: true,
+          channel: "named",
+          tunnelUrl: "https://mam-mac.example.asia",
+          tunnelError: null,
+          addresses: [
+            { url: "https://mam-mac.example.asia", iface: "", primary: true, kind: "tunnel" },
+            { url: "http://192.168.66.202:9420/m", iface: "WLAN", primary: false, kind: "lan" },
+          ],
+        });
+      if (cmd === "get_setting") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    render(<RemoteSection />);
+    // 先等 status 驱动的内容上屏（通道 label 不依赖 status，首帧即渲染；
+    // 直接断言徽标会拿到「只有 label」的首帧 → 假阴），隧道地址条目即 status 已载
+    expect(await screen.findByText("https://mam-mac.example.asia")).toBeInTheDocument();
+    // 隧道地址条目带「外部通道」徽标且居首；通道区块 label 与徽标是同文案（都是
+    // External Channel）→ findAllByText 防多匹配报错（label + 徽标 ≥ 2 处）
+    const externalTexts = screen.getAllByText(/external channel/i);
+    expect(externalTexts.length).toBeGreaterThanOrEqual(2);
+    // URL 同时出现在地址条目与「当前隧道地址」行——用 getAllByText 防多匹配报错
+    expect(screen.getAllByText("https://mam-mac.example.asia").length).toBeGreaterThan(0);
+    // 通道三按钮：named 高亮
+    const namedBtn = screen.getByRole("button", { name: /named tunnel/i });
+    expect(namedBtn).toBeInTheDocument();
+    // 切到临时隧道 → invoke remote_set_channel
+    fireEvent.click(screen.getByRole("button", { name: /quick tunnel/i }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "remote_set_channel",
+        expect.objectContaining({ channel: "quick" })
+      )
+    );
+  });
+});

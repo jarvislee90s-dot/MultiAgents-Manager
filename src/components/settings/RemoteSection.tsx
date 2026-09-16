@@ -1,6 +1,7 @@
-// 设置页「远程接入」分区（M2 Task 7）：开关 / 绑定二选 / 地址与局域网候选 /
-// 配对二维码 / TLS 反代确认 / 停止确认弹窗 / 底部安全警示。
-// 四命令统一走 src/lib/api/remote.ts；绑定写值走通用 set_setting（commands/settings.rs）。
+// 设置页「远程接入」分区（M2 Task 7）：开关 / 绑定二选 / 本机名 / 外部通道三选（M4 T1a）/
+// 地址与局域网候选 / 配对二维码 / TLS 反代确认 / 停止确认弹窗 / 底部安全警示。
+// 四命令统一走 src/lib/api/remote.ts；绑定写值走通用 set_setting（commands/settings.rs）；
+// 通道写值走 remote_set_channel（remote/mod.rs，M4 T1a 热切换）。
 import { useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { Copy, QrCode, RefreshCw } from "lucide-react";
@@ -22,6 +23,7 @@ import { formatInvokeError } from "@/lib/invokeError";
 import {
   remoteConfirmPublic,
   remoteIssueToken,
+  remoteSetChannel,
   remoteStatus,
   remoteToggle,
   type PairingToken,
@@ -36,10 +38,16 @@ const PUBLIC_ACK_KEY = "remote.public_ack";
 // 本机名（P8b 收尾）：与 Rust 端 remote::KEY_HOST_NAME 对齐；空串/空白原样写——
 // 后端 display_host_name 过滤空白后回落系统名，前端不做非空校验（口径单点在后端）
 const HOST_NAME_KEY = "remote.host_name";
+// 隧道 Token（M4 T1a）：与 Rust 端 remote::KEY_TUNNEL_TOKEN 对齐；named 通道前置条件
+const TUNNEL_TOKEN_KEY = "remote.tunnel_token";
 // 绑定只允许这两个字面量（Task 4 评审：后端 TLS 门只匹配 "0.0.0.0"；若允许自由输入
 // 具体局域网 IP，会绕过「对外必须先确认 TLS 反代」的 ack 门）
 const BIND_LOCAL = "127.0.0.1";
 const BIND_LAN = "0.0.0.0";
+// 外部通道三值（M4 T1a）：与 Rust 端 tunnel::parse_channel 值域对齐
+const CHANNEL_OFF = "off";
+const CHANNEL_QUICK = "quick";
+const CHANNEL_NAMED = "named";
 
 export function RemoteSection() {
   const { t } = useAppTranslation();
@@ -48,6 +56,8 @@ export function RemoteSection() {
   const [acked, setAcked] = useState(false);
   // 本机名（P8b 收尾）：受控输入，加载回填、blur 落盘（不逐键写库）
   const [hostName, setHostName] = useState("");
+  // 隧道 Token（M4 T1a）：named 通道的受控输入；进面板回填已存值
+  const [token, setToken] = useState("");
   const [pairing, setPairing] = useState<PairingToken | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
@@ -69,8 +79,16 @@ export function RemoteSection() {
     void refresh();
   }, [refresh]);
 
+  // 回填（M4 T1a）：进面板时读已存 Tunnel Token（named 输入框免空）；后续 refresh
+  // 不回读，保留用户正在编辑的值
+  useEffect(() => {
+    void (async () => setToken((await getSetting(TUNNEL_TOKEN_KEY)) ?? ""))();
+  }, []);
+
   const enabled = status?.enabled ?? false;
   const bind = status?.bind ?? BIND_LOCAL;
+  // 通道（M4 T1a）：status 未加载或旧后端无 channel 键 → 按 off 展示（undefined 兜底）
+  const channel = status?.channel ?? CHANNEL_OFF;
 
   // 开启：后端有 P7 安全门（0.0.0.0 未确认 TLS 反代 → Err），失败 toast 原样透出，
   // 前端不复制门槛判定（避免与后端双源漂移）
@@ -110,6 +128,30 @@ export function RemoteSection() {
       await setSetting(BIND_KEY, value);
       // 不自动重启（控制者裁决 3）：绑定变更不热生效，运行中由 bindRestartHint 提示
       await refresh();
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
+  // 通道热切换（M4 T1a）：named 时随调携 Token；named 无 Token 由后端拒绝——
+  // Err 中文文案原样 toast，前端不复制门槛判定（避免与后端双源漂移）
+  const changeChannel = async (mode: string) => {
+    if (mode === channel) return;
+    try {
+      await remoteSetChannel(mode, mode === CHANNEL_NAMED ? token : undefined);
+      await refresh();
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
+  // Token 保存（M4 T1a）：走同一 remote_set_channel（后端先写 Token 后校验落库），
+  // 成功即以 named 通道生效并 toast 确认
+  const saveToken = async () => {
+    try {
+      await remoteSetChannel(CHANNEL_NAMED, token);
+      await refresh();
+      toast.success(t("settings.remote.channelSaved"));
     } catch (e) {
       toast.error(formatInvokeError(e, t));
     }
@@ -234,6 +276,75 @@ export function RemoteSection() {
         </div>
         <div className="border-t" />
 
+        {/* 外部通道（M4 T1a，2026-09-16 裁决：独立区块与绑定并存）：off/quick/named 三选。
+            quick/named 切换即后端热生效（restart_if_running）；named 需先填 Tunnel Token
+            （门槛在后端，Err 文案原样 toast）。下方随 status 展示隧道状态：错误黄字、
+            成功给当前隧道地址 */}
+        <div className="flex items-center justify-between gap-4 py-2.5">
+          <div className="flex-1">
+            <label className="text-sm font-medium">{t("settings.remote.channel")}</label>
+            <p className="text-muted-foreground mt-0.5 text-xs">
+              {t("settings.remote.channelHint")}
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              variant={channel === CHANNEL_OFF ? "default" : "outline"}
+              size="sm"
+              onClick={() => void changeChannel(CHANNEL_OFF)}
+            >
+              {t("settings.remote.channelOff")}
+            </Button>
+            <Button
+              variant={channel === CHANNEL_QUICK ? "default" : "outline"}
+              size="sm"
+              onClick={() => void changeChannel(CHANNEL_QUICK)}
+            >
+              {t("settings.remote.channelQuick")}
+            </Button>
+            <Button
+              variant={channel === CHANNEL_NAMED ? "default" : "outline"}
+              size="sm"
+              onClick={() => void changeChannel(CHANNEL_NAMED)}
+            >
+              {t("settings.remote.channelNamed")}
+            </Button>
+          </div>
+        </div>
+        {channel !== CHANNEL_OFF && <div className="border-t" />}
+        {channel === CHANNEL_NAMED && (
+          <div className="flex items-center justify-between gap-4 py-2.5">
+            <div className="flex-1">
+              <label htmlFor="remote-tunnel-token" className="text-sm font-medium">
+                {t("settings.remote.tunnelToken")}
+              </label>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                {t("settings.remote.tunnelTokenHint")}
+              </p>
+            </div>
+            <div className="flex w-72 gap-2">
+              <Input
+                id="remote-tunnel-token"
+                value={token}
+                type="password"
+                placeholder="eyJh...（Cloudflare Tunnel Token）"
+                className="flex-1"
+                onChange={(e) => setToken(e.target.value)}
+              />
+              <Button size="sm" variant="outline" onClick={() => void saveToken()}>
+                {t("settings.remote.channelSave")}
+              </Button>
+            </div>
+          </div>
+        )}
+        {status?.tunnelError && <p className="pb-2 text-xs text-amber-500">{status.tunnelError}</p>}
+        {status?.tunnelUrl && (
+          <p className="text-muted-foreground pb-2 text-xs break-all">
+            {t("settings.remote.tunnelCurrent")}: {status.tunnelUrl}
+          </p>
+        )}
+        <div className="border-t" />
+
         {/* TLS 反代确认：仅对外绑定（0.0.0.0）时出现；勾选即调 remote_confirm_public 置位。
             M4 T0b：确认只进不退——取消方向回弹（受控于 acked 态天然回弹）并 toast 明示
             不可在线撤回；复选框下方常驻说明撤销路径（改绑本机模式） */}
@@ -273,9 +384,19 @@ export function RemoteSection() {
               <div className="flex flex-col items-end gap-1.5">
                 {addresses.map((a) => (
                   <div key={a.url} className="flex items-center gap-2">
-                    <span className="text-muted-foreground text-xs">
-                      {a.iface || t("settings.remote.addressLocal")}
-                    </span>
+                    {/* M4 T1a：隧道条目 iface 恒空串——若走「本机」兜底会与「外部通道」
+                        徽标并排自相矛盾，故 kind=tunnel 隐藏网卡名兜底只出徽标；
+                        旧后端无 kind（undefined ≠ tunnel）→ 照旧渲染 */}
+                    {a.kind !== "tunnel" && (
+                      <span className="text-muted-foreground text-xs">
+                        {a.iface || t("settings.remote.addressLocal")}
+                      </span>
+                    )}
+                    {a.kind === "tunnel" && (
+                      <span className="rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-600 dark:text-blue-400">
+                        {t("settings.remote.channelBadge")}
+                      </span>
+                    )}
                     {a.primary && (
                       <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
                         {t("settings.remote.addressRecommended")}
@@ -318,11 +439,12 @@ export function RemoteSection() {
           </>
         )}
 
-        {/* 底部安全警示（简报固定文案两条） */}
+        {/* 底部安全警示（简报固定文案两条）+ Tailscale 指引（M4 T1a） */}
         <div className="border-t" />
         <div className="space-y-1 py-2.5">
           <p className="text-xs text-amber-500">{t("settings.remote.notice1")}</p>
           <p className="text-muted-foreground text-xs">{t("settings.remote.notice2")}</p>
+          <p className="text-muted-foreground text-xs">{t("settings.remote.tailscaleHint")}</p>
         </div>
       </div>
 
