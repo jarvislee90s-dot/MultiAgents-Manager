@@ -819,3 +819,29 @@ describe("Board 主题切换（P8f）", () => {
     expect(card.className).toContain("dark:bg-slate-900");
   });
 });
+
+// 2026-09-16 用户裁决：暗色卡与背景几乎同色（dark:border-transparent + 深底），
+// 加带灰度的白色边框区分层次
+describe("Board 卡片暗色边框（2026-09-16 用户裁决）", () => {
+  it("暗色态卡片有可见白灰边框，且不再用 transparent 消边", async () => {
+    installSse(
+      sessionsWith([
+        chipSession({ id: "s1", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
+      ])
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => (url === "/m/api/v1/host" ? okHost(["claude"]) : okSessions(0)))
+    );
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    // 「Claude」在 chip 与卡片两处出现 → 从卡片列表（ul）内取
+    const cardList = document.querySelector("ul.space-y-2") as HTMLElement;
+    const card = cardList.querySelector("li") as HTMLElement;
+    expect(card).toBeTruthy();
+    const cls = card.className;
+    // 暗色边框类存在（白系或灰系 + 透明度分级），transparent 消边已移除
+    expect(cls).toMatch(/dark:border-(white|slate)(-\d+)?\/\d+/);
+    expect(cls).not.toContain("dark:border-transparent");
+  });
+});

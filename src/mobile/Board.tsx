@@ -463,7 +463,7 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
             <li
               key={`${s.agentType}-${s.id}`}
               onClick={onOpenSession ? () => onOpenSession(s) : undefined}
-              className={`rounded-xl border border-slate-200 bg-slate-100 p-3 dark:border-transparent dark:bg-slate-900 ${
+              className={`rounded-xl border border-slate-200 bg-slate-100 p-3 dark:border-white/15 dark:bg-slate-900 ${
                 onOpenSession ? "cursor-pointer" : ""
               }`}
             >

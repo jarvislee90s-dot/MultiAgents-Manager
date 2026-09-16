@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ArrowLeft, ChevronDown, ChevronRight, FolderOpen, RotateCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, PanelLeft, RotateCw } from "lucide-react";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
 import { type PreviewMode } from "./PreviewModeSwitcher";
@@ -273,9 +273,16 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // 页头面板入口（M3+）：宽屏默认 split-h（列表是行集，右侧整列纵向空间大）、
-  // 窄屏 fullscreen（用户裁决：面板默认布局口径）
-  const openPanel = useCallback(() => {
-    setPreview({ view: "list", mode: isWideViewport() ? "split-h" : "fullscreen" });
+  // 窄屏 fullscreen（用户裁决：面板默认布局口径）。
+  // 面板开启态 = 当前是 list 视图（页头按钮高亮依据；文件预览态不算——那是
+  // 从列表或正文进入的下一层）；再点收回（ZCode 式排版，2026-09-16 用户裁决）
+  const panelOpen = preview?.view === "list";
+  const togglePanel = useCallback(() => {
+    setPreview((p) =>
+      p?.view === "list"
+        ? null
+        : { view: "list", mode: isWideViewport() ? "split-h" : "fullscreen" }
+    );
   }, [isWideViewport]);
 
   const closePreview = useCallback(() => setPreview(null), []);
@@ -574,15 +581,22 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             session.status === "waiting" ? "animate-pulse" : ""
           }`}
         />
-        {/* 文件面板入口（M3+）：页头恒可见（不依赖预览是否打开） */}
+        {/* 文件面板入口（M3+；ZCode 式排版，2026-09-16 用户裁决）：页头恒可见
+            （不依赖预览是否打开）；开启态高亮 + tooltip 随状态切换 + 再点收回 */}
         <button
           type="button"
           data-testid="file-panel-button"
           aria-label="文件面板"
-          onClick={openPanel}
-          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          aria-pressed={panelOpen}
+          title={panelOpen ? "收起文件面板" : "打开文件面板"}
+          onClick={togglePanel}
+          className={`shrink-0 rounded-full p-1 ${
+            panelOpen
+              ? "bg-slate-200 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
+              : "text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          }`}
         >
-          <FolderOpen size={16} />
+          <PanelLeft size={16} />
         </button>
         {/* 布局切换器唯一实例在预览侧栏页头（FilePreview / FilePanel 内，
             2026-09-16 用户裁决：两处重复出现占用页面空间，只保留贴近文件的那份） */}

@@ -600,6 +600,26 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.queryByTestId("preview-back-list")).toBeNull();
   });
 
+  it("ZCode 式面板按钮：开启态高亮 + tooltip，再点收回面板", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "hi" })];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    const btn = await screen.findByTestId("file-panel-button");
+    // 未开启：无高亮（aria-pressed=false），tooltip 提示打开
+    expect(btn.getAttribute("aria-pressed")).toBe("false");
+    expect(btn.getAttribute("title")).toBe("打开文件面板");
+    fireEvent.click(btn);
+    // 开启：高亮（aria-pressed=true）+ tooltip 变「收起面板」
+    expect(await screen.findByTestId("preview-shell"));
+    expect(btn.getAttribute("aria-pressed")).toBe("true");
+    expect(btn.getAttribute("title")).toBe("收起文件面板");
+    // 再点：收回面板（回正文视图）
+    fireEvent.click(btn);
+    expect(screen.queryByTestId("preview-shell")).toBeNull();
+    expect(btn.getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("未知路径不出链接：files 为空时正文原样", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "见 /tmp/other/x.rs" })];
