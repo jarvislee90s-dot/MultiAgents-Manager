@@ -177,7 +177,7 @@ export default function FilePanel({
               data-testid={`file-row-${i}`}
               className="rounded-lg px-2 py-1.5 hover:bg-slate-100 dark:hover:bg-slate-900"
             >
-              {/* 主行 = 末段文件名（加粗，即超链接）；次行 = 目录 + 时间 + hits */}
+              {/* 主行 = 末段文件名（加粗，即超链接）；次行 = 目录 + 时间 */}
               <button
                 type="button"
                 data-testid={`file-row-${i}-open`}
@@ -216,8 +216,6 @@ export default function FilePanel({
                     ? "—"
                     : formatRelativeTime(new Date(e.lastTs).toISOString(), now)}
                 </span>
-                {/* hits 徽标（1 次不显示） */}
-                {e.hits > 1 && <span className="shrink-0">{e.hits}×</span>}
               </div>
             </li>
           ))}

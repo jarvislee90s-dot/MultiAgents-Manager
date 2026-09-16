@@ -103,7 +103,9 @@ export async function fetchSessionMessages(
 
 /** 文件条目（M3+ 文件面板，与 Rust `remote::files::FileEntry` camelCase 序列化
  *  逐字段对应，勿漂移）：path = 最后一次出现的原始形态，lastSeq = 最后出现条目的
- *  会话内序，lastTs = 最后出现时间（可 null → 前端显示 `—`），hits = 出现次数 */
+ *  会话内序，lastTs = 最后出现时间（可 null → 前端显示 `—`），hits = 出现次数
+ *  （后端契约字段；2026-09-16 用户裁决：次数信息用户不在意，前端**不再展示**，
+ *  保留字段供后续可能的排序/统计消费） */
 export interface SessionFileEntry {
   path: string;
   lastSeq: number;

@@ -80,17 +80,21 @@ describe("FilePanel 列表渲染", () => {
     expect(names[2]).toContain("early.rs");
   });
 
-  it("行信息齐全：文件名（主行）+ 目录前缀 + 相对时间 + hits 徽标", () => {
+  it("行信息齐全：文件名（主行）+ 目录前缀 + 相对时间", () => {
     renderPanel([entry("/tmp/proj/src/app.rs", { hits: 3 })]);
     const row = screen.getByTestId("file-row-0");
     expect(within(row).getByTestId("file-row-0-open").textContent).toContain("app.rs");
     expect(row.textContent).toContain("/tmp/proj/src");
-    expect(row.textContent).toContain("3×");
   });
 
-  it("hits=1 不显示徽标；lastTs=null 显示占位符 —", () => {
-    renderPanel([entry("/p/a.rs", { hits: 1 }), entry("/p/b.rs", { lastTs: null, lastSeq: 3 })]);
+  it("hits 徽标已移除（2026-09-16 用户裁决：次数信息用户不在意）", () => {
+    // 无论 hits 多少都不出现 × 徽标；lastTs=null 仍显示占位符 —
+    renderPanel([
+      entry("/p/a.rs", { hits: 7 }),
+      entry("/p/b.rs", { lastTs: null, lastSeq: 3, hits: 4 }),
+    ]);
     expect(screen.getByTestId("file-row-0").textContent).not.toContain("×");
+    expect(screen.getByTestId("file-row-1").textContent).not.toContain("×");
     expect(screen.getByTestId("file-row-1").textContent).toContain("—");
   });
 
