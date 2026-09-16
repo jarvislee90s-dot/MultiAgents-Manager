@@ -30,9 +30,11 @@ import {
   addBookmark,
   bookmarkPreview,
   clearBookmarks,
+  ensureBootId,
   listBookmarks,
   messageAnchor,
   removeBookmark,
+  restoreBookmarks,
   BOOKMARK_LIMIT,
   type Bookmark,
 } from "./bookmarks";
@@ -429,6 +431,20 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // ---- 书签（M3+，2026-09-16 用户裁决）----
+  // 恢复：拿到 MAM 进程 bootId 后从 localStorage 种回内存单例（刷新页面/
+  // 卸载重挂均走此路径）；bootId 不一致（MAM 已重启）由 restore 内部清空
+  useEffect(() => {
+    let alive = true;
+    void ensureBootId().then((boot) => {
+      if (!alive || boot === null) return;
+      restoreBookmarks(boot);
+      setBookmarks(listBookmarks(session.id));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [session.id]);
+
   // 取锚：当前视口顶部可见的那条消息。消息 li 挂 data-seq，取第一个
   // 「底边越过容器顶边」的条目即视口首条
   const topVisibleMessage = useCallback((): SessionMessage | null => {

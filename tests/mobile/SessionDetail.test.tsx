@@ -66,9 +66,10 @@ let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   routes = {};
-  // 书签 store 用例间隔离（模块级单例，不清理会串场——如上一个用例占用了
-  // 某颜色，下一个用例的调色板里该色就变置灰不可点）
+  // 书签 store 用例间隔离（模块级单例 + localStorage 镜像，不清理会串场——
+  // 如上一个用例占用了某颜色，下一个用例的调色板里该色就变置灰不可点）
   clearBookmarks("sess-1");
+  window.localStorage.removeItem("mam-bookmarks");
   // matchMedia 用例间隔离：默认「无 matchMedia」= 窄屏语义（jsdom 原生行为），
   // 需要宽屏的用例自行安装后由 afterEach 还原（旧版仅少数用例安装，
   // 泄漏会让后续用例误判宽屏——如面板默认布局用例）
@@ -100,6 +101,16 @@ function installFetch() {
     if (url.includes("/session-files")) {
       return new Response(
         JSON.stringify({ files: routes.files ?? [], truncated: routes.filesTruncated === true }),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/host")) {
+      // 书签恢复（M3+）依赖 bootId：默认给固定值（用例间由 beforeEach 清 store）
+      return new Response(
+        JSON.stringify({
+          host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
+          enabledTools: [],
+        }),
         { status: 200 }
       );
     }
@@ -783,6 +794,27 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("记住我");
     expect(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[3]}`)).toBeTruthy();
+    expect(screen.getByTestId("msg-bookmark-0")).toBeTruthy();
+  }, 15000);
+
+  it("书签集成：刷新页面（同 bootId 重挂）书签从 localStorage 恢复", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "记住我" })];
+    // 第一次「打开页面」：打书签（写入 localStorage 镜像）
+    const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("记住我");
+    const area = screen.getByTestId("message-area");
+    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    fireEvent.click(screen.getByTestId("bookmark-add"));
+    fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[3]}`));
+    expect(window.localStorage.getItem("mam-bookmarks")).toContain(BOOKMARK_COLORS[3]);
+    unmount();
+
+    // 「刷新页面」：重挂（bootId 不变，内存单例从 localStorage 种回）
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("记住我");
+    expect(await screen.findByTestId(`bookmark-dot-${BOOKMARK_COLORS[3]}`)).toBeTruthy();
     expect(screen.getByTestId("msg-bookmark-0")).toBeTruthy();
   }, 15000);
 

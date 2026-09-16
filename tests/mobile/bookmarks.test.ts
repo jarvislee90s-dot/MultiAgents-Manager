@@ -6,15 +6,17 @@
 //
 // 生命周期（用户裁决）：内存态——关 MAM 消失；出会话窗口再切回来保留
 // （SessionDetail 是条件挂载，state 会被丢弃，故存模块级单例）。
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import {
   BOOKMARK_COLORS,
   BOOKMARK_LIMIT,
   addBookmark,
   clearBookmarks,
+  ensureBootId,
   listBookmarks,
   messageAnchor,
   removeBookmark,
+  restoreBookmarks,
   type Bookmark,
 } from "@/mobile/bookmarks";
 
@@ -77,9 +79,11 @@ describe("messageAnchor 内容指纹", () => {
 
 describe("书签 store（内存单例）", () => {
   beforeEach(() => {
-    // 用例间隔离：清掉两个用到的会话
+    // 用例间隔离：清掉两个用到的会话 + localStorage 镜像 + bootId 缓存
     clearBookmarks("s1");
     clearBookmarks("s2");
+    window.localStorage.removeItem("mam-bookmarks");
+    window.localStorage.removeItem("mam-theme");
   });
 
   it("调色板 10 色、上限 10 个（颜色即唯一键）", () => {
@@ -149,5 +153,96 @@ describe("书签 store（内存单例）", () => {
     addBookmark("s1", bm({ color: BOOKMARK_COLORS[2] }));
     expect(listBookmarks("s1")).toHaveLength(1);
     expect(listBookmarks("s1")).toHaveLength(1);
+  });
+});
+
+// 刷新恢复（2026-09-16 用户裁决补充）：刷新网页销毁 JS 上下文（内存单例清空），
+// localStorage 镜像 + bootId 守卫负责恢复——同一 MAM 进程恢复、MAM 重启清空。
+// 每个用例用 vi.resetModules + 动态 import 模拟「全新页面」（内存单例是模块级，
+// 静态导入会跨用例残留 activeBootId / store，无法模拟刷新）
+describe("书签刷新恢复（localStorage 镜像 + bootId 守卫）", () => {
+  beforeEach(() => {
+    window.localStorage.removeItem("mam-bookmarks");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/host")) {
+          return new Response(
+            JSON.stringify({
+              host: { name: "n", platform: "windows", version: "0", bootId: hostBootId },
+              enabledTools: [],
+            }),
+            { status: 200 }
+          );
+        }
+        throw new Error("unexpected fetch: " + url);
+      })
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  let hostBootId = "boot-a";
+  /** 模拟一次「新开页面」：模块注册表重置后动态导入 → 全新内存单例 */
+  async function freshModule() {
+    vi.resetModules();
+    return await import("@/mobile/bookmarks");
+  }
+
+  it("打书签后镜像进 localStorage（同 bootId 可恢复）", async () => {
+    const mod = await freshModule();
+    await mod.ensureBootId(); // bootId = boot-a
+    mod.restoreBookmarks("boot-a");
+    mod.addBookmark("s1", bm({ color: BOOKMARK_COLORS[0] }));
+    const raw = window.localStorage.getItem("mam-bookmarks");
+    expect(raw).toBeTruthy();
+    expect(raw).toContain('"bootId":"boot-a"');
+    expect(raw).toContain('"s1"');
+  });
+
+  it("同 bootId 再恢复（模拟刷新页面）→ 书签回来", async () => {
+    const mod1 = await freshModule();
+    await mod1.ensureBootId();
+    mod1.restoreBookmarks("boot-a");
+    mod1.addBookmark("s1", bm({ color: BOOKMARK_COLORS[0] }));
+
+    // 「刷新」：全新模块实例（内存单例为空）+ 同一 localStorage + 同一 bootId
+    const mod2 = await freshModule();
+    await mod2.ensureBootId();
+    mod2.restoreBookmarks("boot-a");
+    expect(mod2.listBookmarks("s1")).toHaveLength(1);
+    expect(mod2.listBookmarks("s1")[0].anchor).toBe("user|1000|3|abc");
+  });
+
+  it("bootId 变化（模拟 MAM 重启）→ 书签清空", async () => {
+    const mod1 = await freshModule();
+    await mod1.ensureBootId();
+    mod1.restoreBookmarks("boot-a");
+    mod1.addBookmark("s1", bm({ color: BOOKMARK_COLORS[0] }));
+
+    hostBootId = "boot-b"; // MAM 重启：新进程新 bootId
+    const mod2 = await freshModule();
+    await mod2.ensureBootId();
+    mod2.restoreBookmarks("boot-b");
+    expect(mod2.listBookmarks("s1")).toEqual([]);
+    // 存储也被重写为新 bootId 的空表
+    expect(window.localStorage.getItem("mam-bookmarks")).toContain('"bootId":"boot-b"');
+  });
+
+  it("host 拉不到（离线）→ ensureBootId 返回 null，书签保持纯内存态", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("network down");
+      })
+    );
+    const mod = await freshModule();
+    expect(await mod.ensureBootId()).toBeNull();
+    // 内存态仍可用（不持久化，但不崩溃）
+    mod.addBookmark("s1", bm({ color: BOOKMARK_COLORS[0] }));
+    expect(mod.listBookmarks("s1")).toHaveLength(1);
+    expect(window.localStorage.getItem("mam-bookmarks")).toBeNull();
   });
 });

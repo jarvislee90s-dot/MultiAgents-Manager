@@ -270,6 +270,7 @@ pub fn remote_status() -> serde_json::Value {
     let mut st = host_payload(
         || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
         crate::database::dao::agent_tool::enabled_tool_ids,
+        boot_id(),
     );
     // 原 status 键并入同一返回值（消费方：设置页 RemoteSection + 移动端 /host 直调）
     st["enabled"] = serde_json::json!(enabled);
@@ -307,9 +308,24 @@ fn platform_id() -> &'static str {
 /// host 载荷内核（纯装配，外部依赖全部注入，零 DB 接触可单测）：
 ///   host: { name, platform, version } + enabledTools（P8d chips 过滤数据源，Task 3 消费）。
 /// 返回 serde_json Value 便于 remote_status 原地并入其余 status 键
+/// MAM 进程生命周期标识（每次启动重新生成，进程内恒定）：移动端「随进程
+/// 消失」的客户端态（消息书签）持久化时打上此标识——MAM 重启后客户端读到
+/// 不同的 bootId 即自行清空，页面刷新（同一进程）则原样恢复
+static BOOT_ID: Lazy<String> = Lazy::new(|| {
+    let mut b = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+});
+
+/// 进程生命周期标识（host 载荷下发；只读借用避免克隆）
+fn boot_id() -> &'static str {
+    &BOOT_ID
+}
+
 fn host_payload(
     saved_name: impl FnOnce() -> Option<String>,
     enabled_tools: impl FnOnce() -> Vec<String>,
+    boot_id: &str,
 ) -> serde_json::Value {
     let name = display_host_name(saved_name(), sysinfo::System::host_name);
     serde_json::json!({
@@ -318,6 +334,9 @@ fn host_payload(
             "name": name,
             "platform": platform_id(),
             "version": env!("CARGO_PKG_VERSION"),
+            // 进程生命周期标识（书签修复）：移动端「随进程消失」的客户端态
+            // （消息书签）据此区分同一进程与「MAM 已重启」——重启即清空
+            "bootId": boot_id,
         },
         "enabledTools": enabled_tools(),
     })
@@ -329,6 +348,7 @@ fn host_info() -> serde_json::Value {
     host_payload(
         || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
         crate::database::dao::agent_tool::enabled_tool_ids,
+        boot_id(),
     )
 }
 
@@ -991,6 +1011,7 @@ mod host_tests {
         let st = host_payload(
             || Some("JARVIS-Win".to_string()),
             || vec!["claude".to_string(), "codex".to_string()],
+            "boot-test-1",
         );
         let host = st.get("host").expect("remote_status 应含 host 字段");
         assert!(host.get("name").is_some());
@@ -1011,6 +1032,17 @@ mod host_tests {
             &serde_json::json!(["claude", "codex"]),
             "enabledTools 应透传 enabled_tool_ids 的结果（按种子顺序）"
         );
+        // bootId（书签修复）：随 host 载荷下发，移动端据此守卫「随进程消失」的
+        // 客户端态——非空即可（值随机，不锁内容）
+        let boot = host.get("bootId").and_then(|b| b.as_str()).unwrap_or("");
+        assert!(!boot.is_empty(), "host 载荷必须携带 bootId，实际 {st}");
+    }
+
+    /// boot_id 进程内恒定（书签守卫的语义前提：同进程两次读取必须一致）
+    #[test]
+    fn boot_id_is_stable_within_process() {
+        assert_eq!(boot_id(), boot_id());
+        assert!(!boot_id().is_empty());
     }
 
     /// 本机名取值顺序：DB 设置（Some 且非空）> sysinfo > "MAM"（P8b 优先级）
