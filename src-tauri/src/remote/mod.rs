@@ -578,8 +578,9 @@ pub fn remote_confirm_public() -> Result<(), String> {
     Ok(())
 }
 
-/// 通道设置（M4 T1a）：写 KV；运行中热切换（restart_if_running）；成功后广播状态变更。
-/// 校验先行（named 必须已有 Token——先写后验会把非法通道落库）
+/// 通道设置（M4 T1a）：写 KV；显式停旧启新（E2E S11 修正：off→quick/named 时
+/// 隧道从未运行，restart_if_running 的「运行中才重启」会直接空转，隧道永不拉起）；
+/// 成功后广播状态变更。校验先行（named 必须已有 Token——先写后验会把非法通道落库）
 #[tauri::command]
 pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), String> {
     let mode = tunnel::parse_channel(Some(&channel))
@@ -596,7 +597,10 @@ pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), 
     }
     crate::database::dao::settings::set_setting(KEY_CHANNEL, mode);
     let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
-    tunnel::restart_if_running(port);
+    tunnel::stop();
+    if mode != tunnel::KEY_CHANNEL_VALUE_OFF {
+        tunnel::start_if_configured(port);
+    }
     events::emit_ui("remote-changed", serde_json::json!({ "channel": mode }));
     events::audit("channel_set", &format!("channel={mode}"));
     Ok(())
