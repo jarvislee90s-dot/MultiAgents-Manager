@@ -112,6 +112,18 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
 /// 为工具禁用 skill（移除 Layer 2 symlink + 工具目录 symlink）。
 /// 工具目录目标按拍平名定位（与 enable 同口径）
 pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), String> {
+    // 常驻=停用防护（用户裁决 2026-09-18）：常驻 on 时手动停用被拒，需先关闭
+    // 常驻；启用方向不受影响。守卫置于一切断链动作之前——命中即零副作用。
+    // W5 整工具停用的还原清理（disable_tool_cleanup）不走本函数（直接
+    // restore_mam_link / remove_mcp），不受此守卫约束；独占清扫（sweep）在
+    // 计划层已剔除常驻项，同样不会触达
+    let ext_id = format!("skill-{}", skill_name);
+    if crate::database::is_tool_resident(tool_id, &ext_id) {
+        return Err(format!(
+            "skill {} 是 {} 的常驻资源，先关闭常驻再停用",
+            skill_name, tool_id
+        ));
+    }
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
         let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
         let _ = crate::linker::remove_link(&tool_target);
@@ -119,7 +131,6 @@ pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Str
     let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(skill_name, tool_id);
     crate::linker::layer2::unlink_skill_from_layer2(skill_name, tool_id)?;
 
-    let ext_id = format!("skill-{}", skill_name);
     database::upsert_assignment(&ext_id, tool_id, false, "missing")?;
     info!("Skill {} 已为 {} 禁用", skill_name, tool_id);
     Ok(())

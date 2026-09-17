@@ -326,6 +326,20 @@ pub fn reconcile_tool_batch(
     crate::services::resource::reconcile::reconcile_tool_batch(&tool_id, &mode)
 }
 
+/// 空目录扫描（wave33 Item 2）：MAM skill 仓库与启用工具 skill 目录中的
+/// 可清理空目录清单
+#[tauri::command]
+pub fn scan_empty_dirs() -> Vec<crate::services::resource::reconcile::EmptyDirItem> {
+    crate::services::resource::reconcile::scan_empty_dirs()
+}
+
+/// 空目录清理（wave33 Item 2）：白名单根校验（越界 Err）+ 自底向上反复
+/// remove_dir；非空/不存在跳过；返回实际删除数
+#[tauri::command]
+pub fn clean_empty_dirs(paths: Vec<String>) -> Result<usize, String> {
+    crate::services::resource::reconcile::clean_empty_dirs(paths)
+}
+
 #[tauri::command]
 pub fn check_preset_compatibility(
     preset_id: String,
@@ -940,6 +954,52 @@ pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String,
         open_dir_in_system(&path)?;
     }
     Ok(path.to_string_lossy().to_string())
+}
+
+/// reveal_dir 白名单校验核（wave33 Item 4，可测）：canonicalize 后必须以
+/// ~/.mam 或 ~/.agents 为前缀（安全白名单——前端快捷跳转只允许 MAM 管辖目录）。
+/// 词法预检 + canonicalize 复核双道（对不存在的路径 canonicalize 失败 → 报
+/// 不存在；越界路径无论存在与否一律拒绝）
+pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let raw_roots = [home.join(".mam"), home.join(".agents")];
+    let p = std::path::Path::new(path);
+    let lexically_allowed = raw_roots.iter().any(|r| p.starts_with(r));
+    // canonicalize 对不存在路径失败 → 明确报不存在（而非静默放行/误报越界）
+    let canonical = std::fs::canonicalize(p).map_err(|_| format!("路径不存在: {}", path))?;
+    let root_canons: Vec<std::path::PathBuf> = raw_roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    if !lexically_allowed && !root_canons.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!(
+            "路径不在允许打开的范围（~/.mam 或 ~/.agents）: {}",
+            path
+        ));
+    }
+    // symlink 穿透复核：词法命中但 canonicalize 落到白名单外 → 拒绝
+    if !root_canons.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!(
+            "路径不在允许打开的范围（~/.mam 或 ~/.agents）: {}",
+            path
+        ));
+    }
+    Ok(canonical)
+}
+
+/// 快捷跳转（wave33 Item 4，前端波消费）：用系统文件管理器/默认程序打开
+/// 白名单内的目录或文件——打开机制照抄 open_tool_resource（目录走
+/// open_dir_in_system，文件走 open_file_in_system），但加了 ~/.mam / ~/.agents
+/// 前缀白名单（open_tool_resource 的目标由 adapter 推导、天然受限；本命令
+/// 接受任意路径，必须显式校验）
+#[tauri::command]
+pub fn reveal_dir(path: String) -> Result<(), String> {
+    let target = ensure_reveal_allowed(&path)?;
+    if target.is_dir() {
+        open_dir_in_system(&target)
+    } else {
+        open_file_in_system(&target)
+    }
 }
 
 #[cfg(test)]

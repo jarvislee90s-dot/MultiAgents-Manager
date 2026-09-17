@@ -1922,6 +1922,155 @@ fn nested_dispatch_collision_guard_rejects_flat_namesake() {
     let _ = std::fs::remove_dir_all(&namesake);
 }
 
+/// 常驻=停用防护（用户裁决 2026-09-18）：常驻 on 时手动停用被拒（Err 含
+/// 「常驻」），需先关闭常驻；skill / MCP / plugin 三类资源同构
+#[test]
+fn resident_guard_rejects_manual_disable_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::{
+        disable_skill_for_tool, enable_skill_for_tool, toggle_mcp, toggle_plugin,
+    };
+
+    let home = dirs::home_dir().unwrap();
+
+    // ---- skill：SSOT 真目录 + 登记行，启用后开常驻 ----
+    let ssot = home.join(".mam/skills/v2m2-res-skill");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-res-skill".into(),
+        kind: "skill".into(),
+        name: "v2m2-res-skill".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m2-res-skill", "claude").unwrap();
+    let claude_link = home.join(".claude/skills/v2m2-res-skill");
+    assert!(claude_link.exists(), "前置：链接在场");
+
+    database::set_tool_resident("claude", "skill-v2m2-res-skill", true).unwrap();
+    let err = disable_skill_for_tool("v2m2-res-skill", "claude").unwrap_err();
+    assert!(err.contains("常驻"), "skill 停用应被常驻守卫拒绝: {}", err);
+    assert!(claude_link.exists(), "被拒后链接不得被动");
+    // 关常驻 → 停用成功
+    database::set_tool_resident("claude", "skill-v2m2-res-skill", false).unwrap();
+    disable_skill_for_tool("v2m2-res-skill", "claude").unwrap();
+    assert!(!claude_link.exists(), "关常驻后停用应生效");
+
+    // ---- MCP：真实导入路径入仓 + 启用 + 常驻 ----
+    multi_agents_manager_lib::commands::resource::save_mcp_config(
+        "v2m2-res-mcp".into(),
+        "npx".into(),
+        vec![],
+        Default::default(),
+    )
+    .unwrap();
+    toggle_mcp("v2m2-res-mcp", "claude", true).unwrap();
+    database::set_tool_resident("claude", "mcp-v2m2-res-mcp", true).unwrap();
+    let err = toggle_mcp("v2m2-res-mcp", "claude", false).unwrap_err();
+    assert!(err.contains("常驻"), "MCP 停用应被常驻守卫拒绝: {}", err);
+    assert!(
+        database::list_assignments("claude")
+            .iter()
+            .any(|a| a.extension_id == "mcp-v2m2-res-mcp" && a.enabled),
+        "被拒后 assignment 应保持 enabled"
+    );
+    database::set_tool_resident("claude", "mcp-v2m2-res-mcp", false).unwrap();
+    toggle_mcp("v2m2-res-mcp", "claude", false).unwrap();
+
+    // ---- plugin（file 型，照既有 plugin 测试惯例）----
+    let plug_ssot = home.join(".mam/plugins/v2m2-res-plug");
+    std::fs::create_dir_all(&plug_ssot).unwrap();
+    std::fs::write(plug_ssot.join("plugin.json"), "{}").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "plugin-v2m2-res-plug".into(),
+        kind: "plugin".into(),
+        name: "v2m2-res-plug".into(),
+        description: None,
+        source_path: plug_ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: Some("file".into()),
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: false,
+    })
+    .unwrap();
+    toggle_plugin("v2m2-res-plug", "claude", true, "file").unwrap();
+    let plug_target = home.join(".claude/plugins/v2m2-res-plug");
+    assert!(plug_target.exists(), "前置：插件链接在场");
+    database::set_tool_resident("claude", "plugin-v2m2-res-plug", true).unwrap();
+    let err = toggle_plugin("v2m2-res-plug", "claude", false, "file").unwrap_err();
+    assert!(err.contains("常驻"), "plugin 停用应被常驻守卫拒绝: {}", err);
+    assert!(plug_target.exists(), "被拒后插件链接不得被动");
+    database::set_tool_resident("claude", "plugin-v2m2-res-plug", false).unwrap();
+    toggle_plugin("v2m2-res-plug", "claude", false, "file").unwrap();
+
+    // 清场
+    let _ = database::delete_extension("skill-v2m2-res-skill");
+    let _ = database::delete_extension("mcp-v2m2-res-mcp");
+    let _ = database::delete_extension("plugin-v2m2-res-plug");
+    let _ = std::fs::remove_dir_all(&ssot);
+    let _ = std::fs::remove_file(home.join(".mam/mcp/v2m2-res-mcp.json"));
+    let _ = std::fs::remove_dir_all(&plug_ssot);
+}
+
+/// 常驻守卫的启用方向不受影响：常驻 on 时 enable 照常放行
+#[test]
+fn resident_guard_allows_enable_direction_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    let home = dirs::home_dir().unwrap();
+    let ssot = home.join(".mam/skills/v2m2-res-en");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-res-en".into(),
+        kind: "skill".into(),
+        name: "v2m2-res-en".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+
+    database::set_tool_resident("claude", "skill-v2m2-res-en", true).unwrap();
+    enable_skill_for_tool("v2m2-res-en", "claude").unwrap();
+    assert!(
+        home.join(".claude/skills/v2m2-res-en").exists(),
+        "常驻不拦启用方向"
+    );
+
+    // 清场（先关常驻再停用）
+    database::set_tool_resident("claude", "skill-v2m2-res-en", false).unwrap();
+    disable_skill_for_tool("v2m2-res-en", "claude").unwrap();
+    let _ = database::delete_extension("skill-v2m2-res-en");
+    let _ = std::fs::remove_dir_all(&ssot);
+}
+
 /// 启停守卫（用户裁决 2026-09-16）：enable 目标命中工具内建原生技能 →
 /// 拒绝且目录原样保留（识别即保护，MAM 不得接管/替换/删除）
 #[test]
@@ -1950,4 +2099,140 @@ fn enable_skill_rejects_builtin_native_dir_v2m2() {
 
     // 清场
     let _ = std::fs::remove_dir_all(codex_dir.join(".system"));
+}
+
+/// reveal_dir 白名单校验（wave33 Item 4）：canonicalize 后必须以 ~/.mam 或
+/// ~/.agents 为前缀；越界拒绝、不存在拒绝、白名单内放行（纯校验核，
+/// 不触发系统打开动作）
+#[test]
+fn reveal_dir_whitelist_validation_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::commands::resource::ensure_reveal_allowed;
+
+    let home = dirs::home_dir().unwrap();
+    // 白名单内：fake HOME 的 ~/.mam（support::setup 已建目录树）→ 放行
+    let allowed = home.join(".mam/skills").to_string_lossy().to_string();
+    let ok = ensure_reveal_allowed(&allowed);
+    assert!(ok.is_ok(), "白名单内路径应放行: {:?}", ok.err());
+
+    // 越界（/tmp 下，存在）→ 拒绝并点名范围
+    let err = ensure_reveal_allowed("/tmp").unwrap_err();
+    assert!(err.contains("范围"), "越界应报范围错误: {}", err);
+
+    // 越界且不存在 → 同样拒绝（不静默放行）
+    let err = ensure_reveal_allowed("/tmp/v2m2-reveal-out").unwrap_err();
+    assert!(!err.is_empty(), "不存在的越界路径必须拒绝");
+
+    // 白名单内但不存在 → 拒绝（路径不存在）
+    let missing = home
+        .join(".mam/v2m2-reveal-nonexistent")
+        .to_string_lossy()
+        .to_string();
+    let err = ensure_reveal_allowed(&missing).unwrap_err();
+    assert!(err.contains("不存在"), "白名单内不存在应报不存在: {}", err);
+}
+
+/// backfill 陈旧行修剪（wave33 Item 3，修「预设编辑名单重复」根因）：
+/// extensions 行 source_path 非空且路径不存在（含 symlink 死链——exists()
+/// 跟随链接，死链判不存在）→ 回填时删除该行并连带清 assignments /
+/// tool_residents / resource_bindings（防孤儿）；在场技能行不受影响
+#[test]
+fn backfill_prunes_stale_rows_with_dead_source_paths() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::backfill_registry;
+
+    let home = dirs::home_dir().unwrap();
+
+    // 死行 A：source_path 指向不存在的路径
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-prune-dead".into(),
+        kind: "skill".into(),
+        name: "v2m2-prune-dead".into(),
+        description: None,
+        source_path: home
+            .join(".claude/skills/v2m2-prune-dead")
+            .to_string_lossy()
+            .to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: Some("claude".into()),
+        is_native: true,
+    })
+    .unwrap();
+    // 连带行：assignment + 常驻 + 专属绑定（防孤儿断言用）
+    database::upsert_assignment("skill-v2m2-prune-dead", "claude", true, "valid").unwrap();
+    database::set_tool_resident("claude", "skill-v2m2-prune-dead", true).unwrap();
+    database::upsert_resource_binding("skill-v2m2-prune-dead", "claude", Some("陈旧")).unwrap();
+
+    // 死行 B：symlink 死链（路径项存在但链接目标已消失）
+    let dangling = home.join(".mam/skills/v2m2-prune-dangling");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(home.join(".mam/skills/v2m2-prune-nowhere"), &dangling).unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-prune-dangling".into(),
+        kind: "skill".into(),
+        name: "v2m2-prune-dangling".into(),
+        description: None,
+        source_path: dangling.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+
+    // 在场技能行：SSOT 真目录 + SKILL.md → 不得被修剪
+    let live = home.join(".mam/skills/v2m2-prune-live");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("SKILL.md"), "x").unwrap();
+
+    backfill_registry();
+
+    let exts = database::list_extensions();
+    assert!(
+        exts.iter().all(|e| e.id != "skill-v2m2-prune-dead"),
+        "source_path 失效的行应被修剪: {:?}",
+        exts.iter().map(|e| e.id.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        exts.iter().all(|e| e.id != "skill-v2m2-prune-dangling"),
+        "symlink 死链的行应被修剪（exists() 跟随链接判不存在）"
+    );
+    assert!(
+        exts.iter().any(|e| e.id == "skill-v2m2-prune-live"),
+        "在场技能行应保留（backfill 已登记）"
+    );
+    // 连带行清除：assignment / 常驻 / 绑定不留孤儿
+    assert!(
+        !database::list_assignments("claude")
+            .iter()
+            .any(|a| a.extension_id == "skill-v2m2-prune-dead"),
+        "死行的 assignment 应连带删除"
+    );
+    assert!(
+        !database::list_tool_residents("claude").contains(&"skill-v2m2-prune-dead".to_string()),
+        "死行的常驻行应连带删除"
+    );
+    assert!(
+        database::get_resource_binding("skill-v2m2-prune-dead").is_none(),
+        "死行的专属绑定应连带删除"
+    );
+
+    // 清场
+    let _ = database::delete_extension("skill-v2m2-prune-live");
+    let _ = std::fs::remove_dir_all(&live);
+    let _ = std::fs::remove_file(&dangling);
 }

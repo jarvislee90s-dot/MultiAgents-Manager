@@ -1,5 +1,173 @@
 // 账本-磁盘对账扫描引擎（spec §13 第一块）
 
+/// 空目录体检条目（wave33 Item 2）：MAM skill 仓库与启用工具 skill 目录中
+/// 无任何条目的目录（安装/卸载残留），可安全清理
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmptyDirItem {
+    /// 归属："mam"（~/.mam/skills）| "tool:<id>"（该工具的 primary skill 目录）
+    pub owner: String,
+    /// 空目录绝对路径
+    pub path: String,
+}
+
+/// 空目录扫描根集合：(~/.mam/skills, "mam") + 各启用工具的 primary_skill_dir
+///（disabled 工具不扫——W5 名册语义，与 scan_drift 同口径），owner 直接带
+/// 完整标签（"mam" | "tool:<id>"）
+fn empty_dir_roots() -> Vec<(std::path::PathBuf, String)> {
+    let mut roots = Vec::new();
+    let mam = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".mam")
+        .join("skills");
+    roots.push((mam, "mam".to_string()));
+    for tool in crate::adapter::TOOL_IDS {
+        if !crate::database::get_tool_enabled(tool) {
+            continue;
+        }
+        if let Some(dir) = crate::adapter::primary_skill_dir(tool) {
+            roots.push((dir, format!("tool:{}", tool)));
+        }
+    }
+    roots
+}
+
+/// 目录是否无任何条目（零 entry，含隐藏文件也算非空）
+fn is_empty_dir(dir: &std::path::Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => false,
+    }
+}
+
+/// 递归收集子树内全部目录（含根；不跟随 symlink、跳过点目录），
+/// 供 clean 自底向上删除用
+fn collect_subtree_dirs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    out.push(dir.to_path_buf());
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_symlink() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                collect_subtree_dirs(&path, out);
+            }
+        }
+    }
+}
+
+/// 扫描空目录（wave33 Item 2）：~/.mam/skills 递归 + 各启用工具
+/// primary_skill_dir 递归；空目录 = 无任何条目（嵌套链只报叶子，父目录
+/// 含该叶子即非空；清理后父目录变空的属下一轮扫描迭代）；symlink 跳过、
+/// 点目录跳过；扫描根本身不报告
+pub fn scan_empty_dirs() -> Vec<EmptyDirItem> {
+    let mut out = Vec::new();
+    for (root, owner) in empty_dir_roots() {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_symlink() {
+                    continue;
+                }
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if !path.is_dir() {
+                    continue;
+                }
+                if is_empty_dir(&path) {
+                    out.push(EmptyDirItem {
+                        owner: owner.clone(),
+                        path: path.to_string_lossy().to_string(),
+                    });
+                } else {
+                    stack.push(path);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 清理空目录（wave33 Item 2）：仅允许 ~/.mam/skills 与启用工具 primary_skill_dir
+/// 根前缀内（词法预检 + canonicalize 复核双道白名单）；对每个传入路径收集其
+/// 子树目录按深度降序（自底向上）反复 remove_dir 直到无进展；非空/不存在跳过；
+/// 返回实际删除的目录数
+pub fn clean_empty_dirs(paths: Vec<String>) -> Result<usize, String> {
+    // 白名单根：词法形态（对不存在路径 canonicalize 会失败，需先做词法预检）
+    // 与 canonicalize 形态双集合
+    let roots_raw: Vec<std::path::PathBuf> =
+        empty_dir_roots().into_iter().map(|(r, _)| r).collect();
+    let roots_canon: Vec<std::path::PathBuf> = roots_raw
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+
+    let mut targets = Vec::new();
+    for p in &paths {
+        let path = std::path::Path::new(p);
+        // 第一道（词法）：越界直接拒绝——先于存在性跳过，防止「不存在的越界路径」
+        // 被静默吞掉
+        let lexically_allowed = roots_raw.iter().any(|r| path.starts_with(r))
+            || roots_canon.iter().any(|r| path.starts_with(r));
+        if !lexically_allowed {
+            return Err(format!(
+                "路径不在允许清理的范围（MAM skill 仓库或工具 skill 目录）: {}",
+                p
+            ));
+        }
+        if !path.exists() {
+            continue; // 不存在跳过（非错误）
+        }
+        // 第二道（canonicalize）：防 symlink 越界（链接穿透到根外真实路径）
+        let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+        if !roots_canon.iter().any(|r| canonical.starts_with(r)) {
+            return Err(format!(
+                "路径不在允许清理的范围（MAM skill 仓库或工具 skill 目录）: {}",
+                p
+            ));
+        }
+        targets.push(canonical);
+    }
+
+    let mut removed = 0usize;
+    loop {
+        let mut progress = 0usize;
+        for t in &targets {
+            if !t.is_dir() {
+                continue;
+            }
+            let mut dirs = Vec::new();
+            collect_subtree_dirs(t, &mut dirs);
+            // 自底向上：深度降序，子目录先于父目录
+            dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+            for d in dirs {
+                if is_empty_dir(&d) && std::fs::remove_dir(&d).is_ok() {
+                    removed += 1;
+                    progress += 1;
+                }
+            }
+        }
+        if progress == 0 {
+            break;
+        }
+    }
+    Ok(removed)
+}
+
 /// 单条账本-磁盘漂移
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

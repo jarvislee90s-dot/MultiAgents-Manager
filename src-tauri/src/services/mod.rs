@@ -32,6 +32,19 @@ pub fn toggle_plugin(
 
 /// 为工具启用/禁用 MCP（委托到 mcp 子模块）
 pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), String> {
+    let ext_id = format!("mcp-{}", mcp_name);
+    if !enabled
+        // 常驻=停用防护（用户裁决 2026-09-18）：常驻 on 时手动停用被拒，需先关闭
+        // 常驻；启用方向不受影响。守卫置于 remove_mcp 之前——命中即零副作用。
+        // W5 整工具停用的还原清理（disable_tool_cleanup）直接调 mcp::remove_mcp，
+        // 不走本函数，不受此守卫约束；独占清扫（sweep）在计划层已剔除常驻项
+        && crate::database::is_tool_resident(tool_id, &ext_id)
+    {
+        return Err(format!(
+            "MCP {} 是 {} 的常驻资源，先关闭常驻再停用",
+            mcp_name, tool_id
+        ));
+    }
     if enabled {
         let repo = dirs::home_dir()
             .unwrap_or_default()
@@ -47,7 +60,6 @@ pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), St
     } else {
         mcp::remove_mcp(tool_id, mcp_name)?;
     }
-    let ext_id = format!("mcp-{}", mcp_name);
     crate::database::upsert_assignment(
         &ext_id,
         tool_id,

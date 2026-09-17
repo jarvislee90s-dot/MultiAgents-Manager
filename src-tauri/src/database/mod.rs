@@ -40,7 +40,9 @@ pub use dao::resource_binding::{
 pub use dao::session::{cleanup_stale_sessions, find_status, update_session_status};
 pub use dao::settings::{get_setting, set_setting};
 pub use dao::stash::{mark_stash_restored, record_stash, unrestored_stash};
-pub use dao::tool_resident::{is_tool_resident, list_tool_residents, set_tool_resident};
+pub use dao::tool_resident::{
+    delete_tool_residents_for, is_tool_resident, list_tool_residents, set_tool_resident,
+};
 pub use dao::unread::UnreadSessionRecord;
 pub use dao::unread::{
     clear_tool as clear_unread_tool, delete as delete_unread, list as list_unread_sessions,

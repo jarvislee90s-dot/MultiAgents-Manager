@@ -310,7 +310,10 @@
       "stashPending": "Leftover stash entries",
       "suggestion": "Pending exclusive suggestions",
       "fixAll": "Fix All",
-      "restoreStash": "Move Back"
+      "restoreStash": "Move Back",
+      "emptyDirsTitle": "Empty directories",
+      "emptyDirsHint": "Empty directories in the MAM repo and tool skill dirs, safe to clean",
+      "cleanEmptyDirs": "Clean empty dirs"
     }
   },
   "mcp": {

@@ -310,7 +310,10 @@
       "stashPending": "残留暂存条目",
       "suggestion": "待确认专属建议",
       "fixAll": "一键修复",
-      "restoreStash": "回移"
+      "restoreStash": "回移",
+      "emptyDirsTitle": "空目录",
+      "emptyDirsHint": "MAM 仓库与工具 skill 目录中的空目录，可安全清理",
+      "cleanEmptyDirs": "清理空目录"
     }
   },
   "mcp": {

@@ -493,13 +493,16 @@ pub struct PresetHealth {
     pub stash_pending: Vec<crate::database::StashEntryRecord>,
     /// 账本-磁盘漂移（scan_drift，L1-L4）
     pub drift: Vec<crate::services::resource::reconcile::DriftItem>,
+    /// 空目录（wave33 Item 2）：MAM 仓库与启用工具 skill 目录中的可清理空目录
+    pub empty_dirs: Vec<crate::services::resource::reconcile::EmptyDirItem>,
 }
 
-/// 三源聚合（spec §13）；顺序即结构体字段序，无短路
+/// 四源聚合（spec §13 + wave33 空目录）；顺序即结构体字段序，无短路
 pub fn preset_health() -> PresetHealth {
     PresetHealth {
         invariants: check_snapshot_invariants(),
         stash_pending: database::unrestored_stash(None),
         drift: services::resource::reconcile::scan_drift(),
+        empty_dirs: services::resource::reconcile::scan_empty_dirs(),
     }
 }

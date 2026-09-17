@@ -697,6 +697,45 @@ pub fn backfill_registry() {
             }
         }
     }
+
+    // 陈旧行修剪（wave33 Item 3，修「预设编辑名单重复」根因）：source_path 非空
+    // 且路径不存在 → 死行——与新登记行并存会让预设编辑弹窗双列。判定口径：
+    // Path::exists()（跟随 symlink，死链同样判不存在）。删除该行并连带清
+    // extension_assignments / tool_residents / resource_bindings（防孤儿）；
+    // is_native 的 source_path 指向工具目录、MCP 行指向 ~/.mam/mcp/*.json、
+    // 插件行指向插件目录——统一按存在性判定，不做 kind 特判
+    let mut pruned = 0usize;
+    for ext in crate::database::list_extensions() {
+        if ext.source_path.is_empty() {
+            continue;
+        }
+        if std::path::Path::new(&ext.source_path).exists() {
+            continue;
+        }
+        if let Err(e) = crate::database::delete_extension(&ext.id) {
+            log::warn!("修剪 {} 删除 extensions 行失败: {}", ext.id, e);
+            continue;
+        }
+        // 连带清理全部 best-effort：单条失败只降日志，不阻断其余修剪
+        if let Err(e) = crate::database::delete_assignments_for(&ext.id) {
+            log::warn!("修剪 {} 连带清 assignments 失败: {}", ext.id, e);
+        }
+        if let Err(e) = crate::database::delete_tool_residents_for(&ext.id) {
+            log::warn!("修剪 {} 连带清 tool_residents 失败: {}", ext.id, e);
+        }
+        if let Err(e) = crate::database::delete_resource_binding(&ext.id) {
+            log::warn!("修剪 {} 连带清 resource_bindings 失败: {}", ext.id, e);
+        }
+        log::info!(
+            "注册表回填：修剪陈旧行 {}（source_path 失效: {}）",
+            ext.id,
+            ext.source_path
+        );
+        pruned += 1;
+    }
+    if pruned > 0 {
+        log::info!("注册表回填：共修剪 {} 条 source_path 失效的陈旧行", pruned);
+    }
 }
 
 #[cfg(test)]

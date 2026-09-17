@@ -43,3 +43,14 @@ pub fn list_tool_residents(tool_id: &str) -> Vec<String> {
         })
         .unwrap_or_default()
 }
+
+/// 删除某资源的全部常驻行（extension 修剪时防孤儿连带清理）
+pub fn delete_tool_residents_for(extension_id: &str) -> Result<(), String> {
+    let conn = DB.lock().unwrap();
+    conn.execute(
+        "DELETE FROM tool_residents WHERE extension_id = ?1",
+        [extension_id],
+    )
+    .map_err(|e| e.to_string())
+    .map(|_| ())
+}

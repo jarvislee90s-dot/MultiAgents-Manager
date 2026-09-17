@@ -616,3 +616,88 @@ fn reconcile_scan_disabled_tool_excluded() {
     // 清理
     let _ = database::delete_assignments_for("skill-v2m2-rc-dis");
 }
+
+/// 空目录健康检查（wave33 Item 2）：scan 报告 mam 根与启用工具 skill 目录下的
+/// 空目录（嵌套链只报无任何条目的叶子；symlink / 点目录跳过）；clean 白名单
+/// 根校验（越界 Err）+ 自底向上反复 remove_dir；PresetHealth 聚合 emptyDirs；
+/// 含文件的目录不被删
+#[test]
+fn empty_dir_scan_clean_and_aggregate() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::preset_health;
+    use multi_agents_manager_lib::services::resource::reconcile::{
+        clean_empty_dirs, scan_empty_dirs,
+    };
+
+    let home = dirs::home_dir().unwrap();
+    let tool = "codex";
+    database::set_tool_enabled(tool, true);
+
+    // 嵌套空目录：tool 根一条（v2m2-ed-t/leaf）+ mam 根一条（v2m2-ed-m/leaf）
+    let tool_leaf = multi_agents_manager_lib::adapter::primary_skill_dir(tool)
+        .unwrap()
+        .join("v2m2-ed-t/leaf");
+    std::fs::create_dir_all(&tool_leaf).unwrap();
+    let mam_leaf = home.join(".mam/skills/v2m2-ed-m/leaf");
+    std::fs::create_dir_all(&mam_leaf).unwrap();
+    // 含 SKILL.md 的兄弟目录：非空，不得命中、不得被删
+    let sibling = home.join(".mam/skills/v2m2-ed-sib");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("SKILL.md"), "x").unwrap();
+
+    // scan：两条各归其主（contains 断言——共享 HOME 下其他残留不干扰）
+    let items = scan_empty_dirs();
+    let tool_hit = items
+        .iter()
+        .find(|i| i.path.contains("v2m2-ed-t"))
+        .expect("工具根空目录应命中");
+    assert_eq!(tool_hit.owner, "tool:codex");
+    assert!(tool_hit.path.contains("v2m2-ed-t/leaf"));
+    let mam_hit = items
+        .iter()
+        .find(|i| i.path.contains("v2m2-ed-m"))
+        .expect("MAM 根空目录应命中");
+    assert_eq!(mam_hit.owner, "mam");
+    assert!(
+        !items.iter().any(|i| i.path.contains("v2m2-ed-sib")),
+        "含 SKILL.md 的目录不得命中: {:?}",
+        items
+    );
+
+    // 聚合：preset_health 的 emptyDirs 与 scan 同源
+    assert!(
+        preset_health()
+            .empty_dirs
+            .iter()
+            .any(|i| i.path.contains("v2m2-ed-t")),
+        "PresetHealth 应聚合空目录源"
+    );
+
+    // clean：传入 scan 的两条 → 恰好删 2、叶子消失；父目录变空属下一轮迭代语义
+    let n = clean_empty_dirs(vec![
+        tool_leaf.to_string_lossy().to_string(),
+        mam_leaf.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+    assert_eq!(n, 2, "应恰好删除两条空目录");
+    assert!(!tool_leaf.exists() && !mam_leaf.exists(), "空目录应已消失");
+
+    // 含文件的目录即使显式传入也不被删（返回 0）
+    let n_sib = clean_empty_dirs(vec![sibling.to_string_lossy().to_string()]).unwrap();
+    assert_eq!(n_sib, 0, "非空目录应被跳过");
+    assert!(
+        sibling.join("SKILL.md").exists(),
+        "含 SKILL.md 的目录不得被删"
+    );
+
+    // 越界路径（/tmp 下）→ Err（白名单根校验先于存在性跳过）
+    let err = clean_empty_dirs(vec!["/tmp/v2m2-ed-out".into()]).unwrap_err();
+    assert!(err.contains("范围"), "越界应报范围错误: {}", err);
+
+    // 清理
+    let _ = std::fs::remove_dir_all(tool_leaf.parent().unwrap());
+    let _ = std::fs::remove_dir_all(mam_leaf.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&sibling);
+}
