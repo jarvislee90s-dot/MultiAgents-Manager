@@ -66,14 +66,7 @@ const channelsOf = (over: {
 
 const statusOf = (over: Record<string, unknown> = {}) => ({
   enabled: true,
-  bind: "0.0.0.0",
-  port: 9420,
-  url: "http://192.168.66.202:9420/m",
-  lanUrls: [],
-  addresses: [],
-  channel: "quick",
-  tunnelUrl: null,
-  tunnelError: null,
+  maxDevices: 10,
   channels: channelsOf(over.channels as never),
   pin: "4827",
   host: { name: "matebook16s", platform: "windows", version: "0.4.2", bootId: "boot-x" },
@@ -382,8 +375,11 @@ describe("RemoteSection 命名隧道：Token 保存与教程 popover（M5 A6）"
     // 收起态：教程正文不在文档
     expect(screen.queryByText(/Prerequisite: a domain hosted on Cloudflare/i)).toBeNull();
     fireEvent.click(screen.getByText(/How-to \(click to expand\/collapse\)/i));
-    // 展开：前置 + 六步 + 收尾说明
+    // 展开：前置 + 六步 + 收尾说明；data-help 钩子随开合翻转（A8 评审：勿留死钩子）
     expect(screen.getByText(/Prerequisite: a domain hosted on Cloudflare/i)).toBeTruthy();
+    expect(
+      (screen.getByText(/How-to \(click to expand\/collapse\)/i) as HTMLElement).dataset["help"]
+    ).toBe("open");
     expect(screen.getByText(/Sign in at dash\.cloudflare\.com/i)).toBeTruthy();
     expect(screen.getByText(/Create a tunnel, connection type Cloudflared/i)).toBeTruthy();
     expect(screen.getByText(/Save tunnel;/i)).toBeTruthy();
@@ -459,6 +455,20 @@ describe("RemoteSection 访问密码（M5 A6）", () => {
     );
   });
 
+  it("保存未满 4 位时禁用（A8 评审：不发起注定失败的后端往返）", async () => {
+    render(<RemoteSection />);
+    await waitFor(() => expect(pinInput().value).toBe("4827"));
+    fireEvent.change(pinInput(), { target: { value: "13" } });
+    expect((screen.getByRole("button", { name: /^save$/i }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_set_pin", expect.anything());
+    fireEvent.change(pinInput(), { target: { value: "1357" } });
+    expect((screen.getByRole("button", { name: /^save$/i }) as HTMLButtonElement).disabled).toBe(
+      false
+    );
+  });
+
   it("重置设备：二次确认 Dialog——确认调 remote_reset_devices，取消零调用", async () => {
     render(<RemoteSection />);
     await waitFor(() => expect(pinInput().value).toBe("4827"));
@@ -494,9 +504,15 @@ describe("RemoteSection 已接入设备列表（M5 A6）", () => {
     });
   });
 
-  it("上限徽标 N / 10（决策 #17：上限默认 10）", async () => {
+  it("上限徽标 N / maxDevices——默认 10（决策 #17），后端改上限随之变化（A8：不再硬编码）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_status") return statusOf({ maxDevices: 7 });
+      if (cmd === "get_setting") return null;
+      if (cmd === "remote_devices") return devicesOf();
+      return null;
+    });
     render(<RemoteSection />);
-    expect(await screen.findByText("5 / 10")).toBeTruthy();
+    expect(await screen.findByText("5 / 7")).toBeTruthy();
   });
 
   it("via 四值徽标映射：quick→临时隧道、lan→局域网、local→本机、named→命名隧道；无 via 不渲染徽标", async () => {

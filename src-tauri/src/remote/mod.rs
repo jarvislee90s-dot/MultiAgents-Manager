@@ -629,9 +629,12 @@ fn status_enabled(db_enabled: bool, handle_alive: bool) -> bool {
     db_enabled && handle_alive
 }
 
-/// 设置页状态展示：enabled / bind / port / url / lanUrls（仅 0.0.0.0 给局域网候选）
+/// 设置页状态展示：enabled / maxDevices / channels（四通道状态）/ pin / host 载荷。
 /// M3 Task 1 追加 host（P8a 版本 + P8b 本机名 + P8d enabledTools 数据源）
-/// M5 A5 追加 channels（四通道状态）+ pin（当前访问密码）
+/// M5 A5 追加 channels（四通道状态）+ pin（当前访问密码）；
+/// M5 A8 回归裁决：M3 起的 legacy 键（bind/port/url/lanUrls/channel/tunnelUrl/
+/// tunnelError/addresses）经逐键 grep 确认前端零消费（设置页 A6 起唯一数据源是
+/// channels），随本任务删除——地址载荷只保留 channels 一条通路，不再双轨漂移
 #[tauri::command]
 pub fn remote_status() -> serde_json::Value {
     // 展示层：派生 bind + 设置端口（派生值恒合法，unwrap_or 仅端口解析的兜底口径）
@@ -645,10 +648,10 @@ pub fn remote_status() -> serde_json::Value {
     // 短锁：只取 SERVER_HANDLE 的存活快照立即释放，锁内不碰 DB / pairing（不新增嵌套锁序）
     let handle_alive = handle_is_live(&SERVER_HANDLE.lock().unwrap());
     let enabled = status_enabled(db_enabled, handle_alive);
-    // LAN 枚举只做一次：候选同时喂 lanUrls 与 0.0.0.0 时的主显示 url（P7 v6 修正）
+    // LAN 枚举：喂 channels.lan.addresses（完整可直达 URL 列表）
     let candidates = local_lan_candidates();
     let ips: Vec<String> = candidates.iter().map(|(ip, _)| ip.clone()).collect();
-    let lan = lan_urls_for(&bind, ips.clone(), port);
+    let lan = lan_urls_for(&bind, ips, port);
     // host 载荷薄装配：可测内核 host_payload（见下），此处只注入真实依赖
     // （空串/空白设置由 display_host_name 内部过滤，见其注释）
     let mut st = host_payload(
@@ -658,30 +661,11 @@ pub fn remote_status() -> serde_json::Value {
     );
     // 原 status 键并入同一返回值（消费方：设置页 RemoteSection + 移动端 /host 直调）
     st["enabled"] = serde_json::json!(enabled);
-    st["bind"] = serde_json::json!(bind);
-    st["port"] = serde_json::json!(port);
-    st["url"] = serde_json::json!(display_url_for(&bind, port, ips));
-    st["lanUrls"] = serde_json::json!(lan);
+    // 设备上限（线稿「已接入设备 N / 上限」徽标；KV 可改，未设置默认 10——决策 #17）
+    st["maxDevices"] = serde_json::json!(max_devices_from_kv());
     // M5 A5：三通道开关（read_channels 含惰性迁移）+ 双通道隧道快照
     let chans = read_channels();
     let tun = tunnel::snapshot();
-    // 旧单通道键保留（现前端兼容；A6 切换到 channels 后随 A8 回归裁决去留）：
-    // channel = 开关派生三值（quick 优先——双开时旧键只能表达一个）；
-    // tunnelUrl / tunnelError / addresses 的隧道位 = 首个可用通道（first_available_tunnel_url）
-    st["channel"] = serde_json::json!(if chans.quick {
-        tunnel::KEY_CHANNEL_VALUE_QUICK
-    } else if chans.named {
-        tunnel::KEY_CHANNEL_VALUE_NAMED
-    } else {
-        tunnel::KEY_CHANNEL_VALUE_OFF
-    });
-    st["tunnelUrl"] = serde_json::json!(first_available_tunnel_url(&tun));
-    st["tunnelError"] =
-        serde_json::json!(tun.quick.error.clone().or_else(|| tun.named.error.clone()));
-    st["addresses"] = serde_json::json!(address_entries_with_tunnel(
-        first_available_tunnel_url(&tun),
-        address_entries(&bind, port, &candidates),
-    ));
     // M5 A5：四通道状态（形状契约见 channels_payload 注释）+ 当前访问密码
     // （gate 已保证本载荷只被本机/已过闸前端读到——pin 展示给设置页与看板持有者）
     st["channels"] = channels_payload(enabled, chans, port, lan, &tun);
@@ -821,17 +805,18 @@ fn host_info() -> serde_json::Value {
 // 审批/直通命令已随密码制下线）
 // ============================================================
 
-/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名）
+/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名）。
+/// M5 A8：载荷带出 via（配对时刻接入通道，A1 落库列）——桌面花名册 via 徽标数据源
 #[tauri::command]
 pub fn remote_devices() -> serde_json::Value {
     let now = chrono::Utc::now().timestamp_millis();
-    let rows: Vec<(String, String, i64, i64, i64)> = STATE.store.with(|c| {
-        c.prepare("SELECT id, name, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
+    let rows: Vec<(String, String, String, i64, i64, i64)> = STATE.store.with(|c| {
+        c.prepare("SELECT id, name, via, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
             // Rows 借用局部 Statement——必须在闭包内收集为 owned 值（E0515）
             .and_then(|mut s| {
-                let rows: Vec<(String, String, i64, i64, i64)> = s
+                let rows: Vec<(String, String, String, i64, i64, i64)> = s
                     .query_map([], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
                     })?
                     .filter_map(Result::ok)
                     .collect();
@@ -841,10 +826,10 @@ pub fn remote_devices() -> serde_json::Value {
     });
     serde_json::json!(rows
         .iter()
-        .filter(|(_, _, _, _, revoked)| *revoked == 0)
-        .map(|(id, name, paired, seen, _)| {
+        .filter(|(_, _, _, _, _, revoked)| *revoked == 0)
+        .map(|(id, name, via, paired, seen, _)| {
             serde_json::json!({
-                "id": id, "name": name, "firstPairedAt": paired,
+                "id": id, "name": name, "via": via, "firstPairedAt": paired,
                 "lastSeenAt": seen, "online": is_online(STATE.sse_registry.has(id), *seen, now),
             })
         })
@@ -1285,68 +1270,6 @@ fn lan_urls_for(bind: &str, ips: Vec<String>, port: u16) -> Vec<String> {
     }
 }
 
-/// 地址表内核（纯函数，2026-09-16 用户裁决）：设置页「访问地址」合并为**一个区块**
-/// 逐条展示——多网卡机器有两个不同网段的地址（如实测 WLAN 192.168.66.x 与
-/// 以太网 192.168.42.x），旧版「访问地址 + 局域网地址」两块并列会被读成重复。
-/// 条目：`{url, iface, primary}`，0.0.0.0 时逐候选出（首位 primary=推荐），
-/// 空候选回落 loopback；具体地址/loopback 绑定为单条目
-fn address_entries(
-    bind: &str,
-    port: u16,
-    candidates: &[(String, String)],
-) -> Vec<serde_json::Value> {
-    if bind == "0.0.0.0" && !candidates.is_empty() {
-        return candidates
-            .iter()
-            .enumerate()
-            .map(|(i, (ip, iface))| {
-                serde_json::json!({
-                    "url": format!("http://{ip}:{port}/m"),
-                    // 网卡名（探测不到为空串——前端本地化兜底，后端不硬编码文案）
-                    "iface": iface,
-                    "primary": i == 0,
-                })
-            })
-            .collect();
-    }
-    // 非通配绑定，或通配但无候选（离线）→ 单条目：host 取 display_host_for 同值；
-    // iface 空串 = 前端本地化「本机」（非通配）语义
-    let host = display_host_for(bind, candidates.iter().map(|(ip, _)| ip.clone()).collect());
-    vec![serde_json::json!({
-        "url": format!("http://{host}:{port}/m"),
-        "iface": "",
-        "primary": true,
-    })]
-}
-
-/// 地址表隧道前插（纯函数，M4 T1a）：隧道地址恒首位 primary；既有条目补 kind="lan"
-pub fn address_entries_with_tunnel(
-    tunnel_url: Option<String>,
-    mut base: Vec<serde_json::Value>,
-) -> Vec<serde_json::Value> {
-    for e in &mut base {
-        if e.get("kind").is_none() {
-            e["kind"] = serde_json::json!("lan");
-        }
-        e["primary"] = serde_json::json!(false); // 隧道在时局域网不再推荐位
-    }
-    match tunnel_url {
-        Some(u) => {
-            let mut out = vec![serde_json::json!({
-                "url": u, "iface": "", "primary": true, "kind": "tunnel",
-            })];
-            out.append(&mut base);
-            out
-        }
-        None => {
-            if let Some(first) = base.first_mut() {
-                first["primary"] = serde_json::json!(true);
-            }
-            base
-        }
-    }
-}
-
 /// 应用启动恢复（lib.rs setup 调用）：开机自启（若启用）。失败仅告警不阻断启动
 pub fn restore_on_launch() {
     // M4 T3：电源保活崩溃恢复（Windows 磁盘代设原值未还原时写回并清键；其余平台无值即空操作）
@@ -1703,40 +1626,6 @@ mod tests {
             merge_lan_candidates(Some("192.168.9.9".into()), cands(&[("10.0.0.2", "以太网")])),
             cands(&[("192.168.9.9", ""), ("10.0.0.2", "以太网")])
         );
-    }
-
-    /// 2026-09-16 用户裁决：设置页「访问地址」合并为一个区块，逐条标注网卡名——
-    /// 地址表内核：0.0.0.0 时逐候选出条目（首位 primary），空候选回落 loopback；
-    /// 具体绑定/loopback 单条目；网卡名缺失留空串（文案本地化在前端）
-    #[test]
-    fn address_entries_labels_iface_and_marks_primary() {
-        let cands = vec![
-            ("192.168.66.202".to_string(), "WLAN".to_string()),
-            ("192.168.42.216".to_string(), "以太网".to_string()),
-        ];
-        // 0.0.0.0：全部候选逐条出，首位标推荐并带网卡名
-        let e = address_entries("0.0.0.0", 9420, &cands);
-        assert_eq!(e.len(), 2);
-        assert_eq!(e[0]["url"], "http://192.168.66.202:9420/m");
-        assert_eq!(e[0]["iface"], "WLAN");
-        assert_eq!(e[0]["primary"], true);
-        assert_eq!(e[1]["url"], "http://192.168.42.216:9420/m");
-        assert_eq!(e[1]["iface"], "以太网");
-        assert_eq!(e[1]["primary"], false);
-        // 0.0.0.0 且候选为空（离线）→ 单条 loopback 兜底（与 display_url_for 同值）
-        let e = address_entries("0.0.0.0", 9420, &[]);
-        assert_eq!(e.len(), 1);
-        assert_eq!(e[0]["url"], "http://127.0.0.1:9420/m");
-        assert_eq!(e[0]["primary"], true);
-        // loopback / 具体地址绑定 → 单条目（iface 空串 = 前端「本机」本地化）
-        let e = address_entries("127.0.0.1", 9420, &cands);
-        assert_eq!(e.len(), 1);
-        assert_eq!(e[0]["url"], "http://127.0.0.1:9420/m");
-        assert_eq!(e[0]["iface"], "");
-        assert_eq!(e[0]["primary"], true);
-        // 网卡名缺失（探测不到）→ 空串透传，不硬编码中文文案
-        let e = address_entries("0.0.0.0", 9420, &[("10.0.0.5".into(), String::new())]);
-        assert_eq!(e[0]["iface"], "");
     }
 
     /// (c) 陈旧句柄自愈（评审 Important 修复的行为锁定）：经 `start_server_core` 的

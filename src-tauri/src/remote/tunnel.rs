@@ -392,17 +392,6 @@ pub fn backoff_ms(consecutive_failures: u32) -> Option<u64> {
     }
 }
 
-/// 隧道地址条目（纯函数）：恒 primary，iface 空串（前端按 kind 渲染「外部通道」徽标）。
-/// 地址表首位由 mod.rs 的 address_entries_with_tunnel 前插保证
-pub fn tunnel_address_entry(url: &str) -> serde_json::Value {
-    serde_json::json!({
-        "url": url,
-        "iface": "",
-        "primary": true,
-        "kind": "tunnel",
-    })
-}
-
 /// 按通道启动隧道（M5 A5，幂等：该通道句柄存活直接返回；**已完成**陈旧句柄视为
 /// 不存在重 spawn——自愈判据与 mod.rs start_server_core 同口径）。named 缺 Token
 /// 不 spawn，错误写该通道快照供设置页展示。失败不返回 Err（隧道失败不阻断远程
@@ -1092,39 +1081,5 @@ mod tests {
         assert_eq!(backoff_ms(2), Some(2000));
         assert_eq!(backoff_ms(3), Some(4000));
         assert_eq!(backoff_ms(4), None); // 连续失败 3 次后停止（spec T1b）
-    }
-
-    #[test]
-    fn tunnel_address_entry_is_primary_tunnel_kind() {
-        let e = tunnel_address_entry("https://mam.example.asia");
-        assert_eq!(e["url"], serde_json::json!("https://mam.example.asia"));
-        assert_eq!(e["kind"], serde_json::json!("tunnel"));
-        assert_eq!(e["primary"], serde_json::json!(true));
-        assert_eq!(e["iface"], serde_json::json!("")); // 前端按 kind 渲染「外部通道」徽标
-    }
-
-    #[test]
-    fn address_entries_prepend_tunnel() {
-        // mod.rs 的 address_entries_with_tunnel：隧道地址恒插到表首位
-        let base = vec![
-            serde_json::json!({"url": "http://192.168.1.5:9420/m", "iface": "en0", "primary": true, "kind": "lan"}),
-        ];
-        let out = super::super::address_entries_with_tunnel(
-            // 生产输入恒为 board_url 归一后的 /m 形态（快照 url 契约），夹具镜像之
-            Some("https://mam.example.asia/m".into()), // 签名 Option<String>（brief 同款 .into() 形态）
-            base.clone(),
-        );
-        assert_eq!(out.len(), 2);
-        assert_eq!(
-            out[0]["url"],
-            serde_json::json!("https://mam.example.asia/m"),
-            "隧道条目 url 原样透传（归一已在摄取点完成，此处不再补 /m）"
-        );
-        assert_eq!(out[0]["kind"], serde_json::json!("tunnel"));
-        assert_eq!(out[1]["kind"], serde_json::json!("lan"));
-        // 无隧道 → 原样（既有条目补 kind="lan"）
-        let out2 = super::super::address_entries_with_tunnel(None, base);
-        assert_eq!(out2.len(), 1);
-        assert_eq!(out2[0]["kind"], serde_json::json!("lan"));
     }
 }

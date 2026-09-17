@@ -168,6 +168,7 @@
       "copyLink": "Copy link",
       "copy": "Copy",
       "copied": "Copied",
+      "copyFailed": "Copy failed — please copy manually",
       "localDetailHint": "Loopback access on this machine, no access PIN; also the forwarding target for tunnel traffic.",
       "lanDetailHint": "The address changes when the network changes; scanning or opening the link auto-fills the PIN.",
       "quickWarn": "⚠ Every toggle of this channel regenerates the tunnel address (old links stop working). Toggling other channels or changing other settings does not affect this one.",

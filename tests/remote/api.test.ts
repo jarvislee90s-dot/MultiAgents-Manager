@@ -33,10 +33,14 @@ describe("remote api wrappers", () => {
   it("remoteStatus 无参调用 remote_status，透传返回值", async () => {
     const status = {
       enabled: true,
-      bind: "0.0.0.0",
-      port: 9420,
-      url: "http://0.0.0.0:9420/m",
-      lanUrls: ["http://192.168.1.5:9420/m"],
+      maxDevices: 10,
+      channels: {
+        local: { running: true, address: "http://127.0.0.1:9420/m" },
+        lan: { enabled: true, running: true, addresses: ["http://192.168.1.5:9420/m"] },
+        quick: { enabled: false, running: false, address: null, error: null },
+        named: { enabled: false, running: false, address: null, error: null },
+      },
+      pin: "4827",
     };
     invokeMock.mockResolvedValue(status);
     expect(await remoteStatus()).toEqual(status);

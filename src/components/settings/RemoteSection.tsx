@@ -207,13 +207,14 @@ export function RemoteSection() {
   }, []);
 
   // 系统名兜底（A6：默认填系统用户名/主机名，去掉灰字提示）：只在「无已存值且
-  // 用户尚未编辑」时填一次；ref 双闸防止轮询期间反复覆盖空输入框
+  // 用户尚未编辑」时填一次；ref 双闸防止轮询期间反复覆盖空输入框；
+  // 函数式写入防挂载竞态——首个 status 到达前用户已敲的字符不被兜底值冲掉（A8 评审）
   useEffect(() => {
     if (hostNameSavedRef.current || hostNameDefaultedRef.current) return;
     const sys = status?.host?.name;
     if (sys) {
       hostNameDefaultedRef.current = true;
-      setHostName(sys);
+      setHostName((prev) => (prev.trim() === "" ? sys : prev));
     }
   }, [status]);
 
@@ -250,6 +251,8 @@ export function RemoteSection() {
   }, [enabled, refreshDevices, refreshStatus]);
 
   const channels = status?.channels;
+  // 设备上限（后端 KV 可改；未载荷时回落 10 = 决策 #17 默认值）
+  const maxDevices = status?.maxDevices ?? 10;
   // 卡片 live 点/开关态口径：enabled||running（本机卡 = 总开关）
   const chanOn = (key: ToggleableChannel): boolean => {
     const c = channels?.[key];
@@ -267,7 +270,9 @@ export function RemoteSection() {
       await navigator.clipboard.writeText(text);
       toast.success(t("settings.remote.copied"));
     } catch (e) {
+      // 复制失败给用户可见反馈（与其它错误路径同一 toast 口径；A8 评审）
       console.error("clipboard write failed:", e);
+      toast.error(t("settings.remote.copyFailed"));
     }
   };
 
@@ -638,6 +643,7 @@ export function RemoteSection() {
                     <span
                       role="button"
                       tabIndex={0}
+                      aria-expanded={helpOpen}
                       data-help={helpOpen ? "open" : "closed"}
                       className="cursor-pointer border-b border-dotted border-blue-500 text-xs text-blue-500"
                       onClick={() => setHelpOpen((v) => !v)}
@@ -730,7 +736,7 @@ export function RemoteSection() {
           <Button variant="outline" size="sm" onClick={randomPin}>
             {t("settings.remote.pinRandom")}
           </Button>
-          <Button size="sm" onClick={() => void savePin()}>
+          <Button size="sm" onClick={() => void savePin()} disabled={!/^\d{4}$/.test(pinInput)}>
             {t("settings.remote.save")}
           </Button>
           <Button
@@ -746,8 +752,8 @@ export function RemoteSection() {
       <div className="py-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">{t("settings.remote.devicesTitle")}</span>
-          {/* 上限徽标（决策 #17：上限默认 10） */}
-          <Badge tone="gray">{`${devices.length} / 10`}</Badge>
+          {/* 上限徽标：上限来自 remote_status.maxDevices（KV 可改，默认 10），不再硬编码 */}
+          <Badge tone="gray">{`${devices.length} / ${maxDevices}`}</Badge>
         </div>
         <p className="text-muted-foreground mt-0.5 text-xs">{t("settings.remote.devicesHint")}</p>
         {devices.length === 0 ? (

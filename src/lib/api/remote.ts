@@ -1,24 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
 // Rust 端 remote_status 的返回（serde_json::json! 裸值，键名原样，无 camelCase 重命名）。
-// M5 A6：设置页切到 channels + pin 新载荷；带 legacy 标注的键后端仍返回但本前端不再
-// 消费，键的去留由 A8 回归裁决（类型先行如实描述载荷，避免误删引发隐式 any）。
+// M5 A6：设置页切到 channels + pin 新载荷；M5 A8 回归裁决：M3 起的 legacy 键
+// （bind/port/url/lanUrls/channel/tunnelUrl/tunnelError/addresses）后端已删——
+// 前端唯一数据源是 enabled + maxDevices + channels + pin + host 载荷
 export type RemoteStatus = {
   enabled: boolean;
-  /** legacy：派生绑定地址（A6 起设置页改由 lan 通道开关派生，不再消费） */
-  bind: string;
-  port: number;
-  url: string;
-  /** legacy：局域网地址候选（A6 起不再消费，改读 channels.lan.addresses） */
-  lanUrls: string[];
-  /** legacy：地址表（A6 起不再消费，改读 channels 载荷） */
-  addresses: RemoteAddressEntry[];
-  /** legacy：旧单通道三值 off/quick/named（双开时 quick 优先；A6 起不再消费） */
-  channel: string;
-  /** legacy：隧道当前地址（A6 起不再消费，改读 channels.quick/named.address） */
-  tunnelUrl: string | null;
-  /** legacy：隧道错误信息（A6 起不再消费，改读 channels.quick/named.error） */
-  tunnelError: string | null;
+  /** 设备上限（线稿「已接入设备 N / 上限」徽标；KV 可改，未设置默认 10） */
+  maxDevices: number;
   // M5 A5：四通道状态 + 当前访问密码（设置页卡片与详情区的唯一数据源；
   // 形状契约见 Rust 端 channels_payload 注释——A6 卡片与 A7 移动端消费同一形状）
   channels: RemoteChannels;
@@ -27,15 +16,6 @@ export type RemoteStatus = {
   // ——A6 本机名称输入框的默认值来源
   host?: { name: string; platform?: string; version?: string; bootId?: string };
   enabledTools?: string[];
-};
-
-export type RemoteAddressEntry = {
-  url: string;
-  iface: string;
-  primary: boolean;
-  // M4 T1a：tunnel=外部通道徽标（隧道地址恒首位 primary、iface 空串）；
-  // 旧后端无此键 → undefined 按 lan 渲染（照旧网卡名兜底）
-  kind?: "tunnel" | "lan";
 };
 
 // M5 A5 四通道状态载荷（Rust 端 channels_payload 注释即唯一契约）：
