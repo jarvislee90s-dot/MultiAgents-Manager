@@ -359,8 +359,79 @@ pub(crate) fn extract_file_paths_with_env(
         session_id,
         limit,
     ) {
-        Ok(pg) => (extract_paths_from_messages(&pg.messages), pg.truncated),
+        Ok(pg) => {
+            let mut merger = EntryMerger::new(cfg!(windows));
+            merger.absorb_messages(&pg.messages);
+            // M5 B2：zcode 用户附件第二抽取源——part 表 type=file（B1 调研）。
+            // 该形态不在统一消息流的文本里（content.rs 只拼 text parts），故走
+            // content 层专用查询拿「(窗口序号, 路径或 artifact URI, ts)」，序号与
+            // SessionMessage.seq 同刻度（同一窗口查询），合并排序语义一致。
+            // 其它工具用户附件已随 user 正文内联标记覆盖（absorb_messages）。
+            if agent_type == "zcode" {
+                for (seq, r#ref, ts) in
+                    super::content::read_zcode_attachment_refs_with(home, session_id, limit)
+                {
+                    // artifact URI（粘贴截图，无原始路径）→ 解析 artifacts 目录磁盘实体；
+                    // 解析不到（实体已清理）→ 降级跳过（不可预览的条目无展示价值）
+                    let path = match r#ref.strip_prefix("zcode-artifact://") {
+                        Some(tail) => match resolve_zcode_artifact(home, tail) {
+                            Some(p) => p,
+                            None => continue,
+                        },
+                        None => r#ref,
+                    };
+                    merger.merge(&path, seq, ts, FileOrigin::User);
+                }
+            }
+            (merger.finish(), pg.truncated)
+        }
         Err(_) => (Vec::new(), false),
+    }
+}
+
+/// zcode artifact URI（`<session_id>/<tool-result-<uuid>>` 尾段）→ artifacts 目录
+/// 磁盘实体路径。实测落盘形态 `~/.zcode/cli/artifacts/<session>/…-<tool-result-uuid>.<ext>`
+/// （文件名尾段内嵌 uuid，B1 调研），故按「文件名包含尾段」匹配；多命中取字典序
+/// 最小（保证确定性；uuid 全局唯一，碰撞纯理论）。目录不可读 / 无命中 → None
+/// （调用方降级跳过）
+fn resolve_zcode_artifact(home: &Path, tail: &str) -> Option<String> {
+    let (sess, name) = tail.split_once('/')?;
+    if sess.is_empty() || name.is_empty() {
+        return None;
+    }
+    let dir = home.join(".zcode").join("cli").join("artifacts").join(sess);
+    let mut hit: Option<String> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let fname = entry.file_name();
+        if fname.to_string_lossy().contains(name) {
+            let p = entry.path().to_string_lossy().into_owned();
+            if hit.as_ref().is_none_or(|h| p < *h) {
+                hit = Some(p);
+            }
+        }
+    }
+    hit
+}
+
+/// 文件来源三池（M5 决策 10 / 线稿来源筛选）：user=用户上传/引用（附件抽取，
+/// B1 调研口径）；tool_read=工具只读；tool_write=工具改写。
+/// 同一文件多来源命中取信息量最大者（tool_write > tool_read > user）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOrigin {
+    User,
+    ToolRead,
+    ToolWrite,
+}
+
+impl FileOrigin {
+    /// 合并优先级（数值大者胜）：上传后被工具改写 → 显示「工具读写」
+    fn rank(self) -> u8 {
+        match self {
+            FileOrigin::User => 0,
+            FileOrigin::ToolRead => 1,
+            FileOrigin::ToolWrite => 2,
+        }
     }
 }
 
@@ -379,8 +450,11 @@ pub struct FileEntry {
     /// 是否**被改写**过（2026-09-16 用户裁决）：窗口内只要有一次写类工具
     /// （Edit/Write/apply_patch 等）触达即为 true；仅被读类工具（Read/Grep/
     /// Glob/view_image…）触达为 false。前端据此把「仅读过」的文件名渲成
-    /// 常规色（仍是超链接，只是视觉上区分「只是看过」与「动过手」）
+    /// 常规色（仍是超链接，只是视觉上区分「只是看过」与「动过手」）。
+    /// M5 B2 起与 origin 同步：modified == (origin == ToolWrite)
     pub modified: bool,
+    /// 来源三池（M5 B2）：user / tool_read / tool_write（snake_case 序列化）
+    pub origin: FileOrigin,
 }
 
 /// 读类工具白名单（**小写**比较）：只读取文件、不修改内容。
@@ -429,9 +503,13 @@ fn normalize_key(path: &str, windows: bool) -> String {
     }
 }
 
-/// 从统一消息流提取文件条目（纯函数，M3+ 富化）：只看 kind=="tool-call" 的
-/// toolArgs JSON（PATH_KEYS 递归收集，既有逻辑不变），按归一化键去重，
-/// 记录最后出现 seq/ts 与 hits，输出按 last_seq 降序（最近出现的在上）。
+/// 从统一消息流提取文件条目（纯函数，M3+ 富化 + M5 B2 来源三池）：
+/// - kind=="tool-call"：toolArgs JSON（PATH_KEYS 递归收集，既有逻辑不变）→
+///   按读写白名单定 origin（tool_write / tool_read）；
+/// - kind=="user"：正文里的内联附件标记（B1 调研 kimi 实测形态
+///   `<image path="X">` / `<file path="X">`，通用扫描对其它工具无害）→ origin=user。
+///
+/// 按归一化键去重，记录最后出现 seq/ts 与 hits，输出按 last_seq 降序（最近出现的在上）。
 /// 生产入口（平台语义取编译目标）
 pub fn extract_paths_from_messages(msgs: &[SessionMessage]) -> Vec<FileEntry> {
     extract_paths_from_messages_with(msgs, cfg!(windows))
@@ -439,48 +517,140 @@ pub fn extract_paths_from_messages(msgs: &[SessionMessage]) -> Vec<FileEntry> {
 
 /// 平台语义注入核（darwin 上可测全分支）
 pub fn extract_paths_from_messages_with(msgs: &[SessionMessage], windows: bool) -> Vec<FileEntry> {
-    // 插入序保稳定（同 last_seq 时按首次进入顺序，纯理论场景）；键 → 索引
-    let mut index: HashMap<String, usize> = HashMap::new();
-    let mut out: Vec<FileEntry> = Vec::new();
-    for m in msgs {
-        if m.kind != "tool-call" {
-            continue;
+    let mut merger = EntryMerger::new(windows);
+    merger.absorb_messages(msgs);
+    merger.finish()
+}
+
+/// 合并管线状态（M5 B2 重构为结构体）：去重索引 + 条目集 + 平台语义。
+/// 消息流抽取与 zcode 附件第二抽取源共用同一实例——跨来源去重/优先级合并
+/// 才能全局生效（同一文件被上传又被工具改写 → 单条目 origin=tool_write）
+pub(crate) struct EntryMerger {
+    index: HashMap<String, usize>,
+    out: Vec<FileEntry>,
+    windows: bool,
+}
+
+impl EntryMerger {
+    pub(crate) fn new(windows: bool) -> Self {
+        Self {
+            index: HashMap::new(),
+            out: Vec::new(),
+            windows,
         }
-        let Some(args) = &m.tool_args else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
-            continue; // 参数损坏 → 跳过该条（防御）
-        };
-        let mut paths: Vec<String> = Vec::new();
-        let mut seen_in_msg: HashSet<String> = HashSet::new();
-        collect_path_values(&v, &mut paths, &mut seen_in_msg);
-        // 同一消息内同一文件多次命中只计一次（一条 tool-call 里重复键不算多次使用）
-        for path in paths {
-            let key = normalize_key(&path, windows);
-            let written = !is_read_only_tool(m.tool_name.as_deref());
-            match index.get(&key) {
-                Some(&i) => {
-                    out[i].hits += 1;
-                    out[i].last_seq = m.seq;
-                    out[i].last_ts = m.ts;
-                    out[i].path = path; // 展示保留最后一次出现的原始形态
-                                        // 写优先：写过之后再读也不撤销「已改写」
-                    out[i].modified = out[i].modified || written;
+    }
+
+    /// 消息流吸收（tool-call 参数路径 + user 正文内联附件标记）
+    pub(crate) fn absorb_messages(&mut self, msgs: &[SessionMessage]) {
+        for m in msgs {
+            match m.kind.as_str() {
+                "tool-call" => {
+                    let Some(args) = &m.tool_args else { continue };
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+                        continue; // 参数损坏 → 跳过该条（防御）
+                    };
+                    let mut paths: Vec<String> = Vec::new();
+                    let mut seen_in_msg: HashSet<String> = HashSet::new();
+                    collect_path_values(&v, &mut paths, &mut seen_in_msg);
+                    // 同一消息内同一文件多次命中只计一次（一条 tool-call 里重复键不算多次使用）
+                    let origin = if is_read_only_tool(m.tool_name.as_deref()) {
+                        FileOrigin::ToolRead
+                    } else {
+                        FileOrigin::ToolWrite
+                    };
+                    for path in paths {
+                        self.merge(&path, m.seq, m.ts, origin);
+                    }
                 }
-                None => {
-                    index.insert(key, out.len());
-                    out.push(FileEntry {
-                        path,
-                        last_seq: m.seq,
-                        last_ts: m.ts,
-                        hits: 1,
-                        modified: written,
-                    });
+                "user" => {
+                    // M5 B2：用户消息内联附件标记（kimi 贴图/引用文件形态）
+                    for path in extract_inline_markup_paths(&m.content) {
+                        self.merge(&path, m.seq, m.ts, FileOrigin::User);
+                    }
                 }
+                _ => {}
             }
         }
     }
-    // 排序键 = 会话出现序（lastSeq 降序），用户裁决 1；同 seq 保持插入序（稳定）
-    out.sort_by_key(|b| std::cmp::Reverse(b.last_seq));
+
+    /// 单路径并入：命中更新 last_seq/ts/hits 与来源优先级（优先级 tool_write
+    /// 最高，其次 tool_read，user 最低——B2）；未命中建行。modified 与
+    /// origin==ToolWrite 同步（字段保留为前端既有消费面）。
+    pub(crate) fn merge(&mut self, path: &str, seq: i64, ts: Option<i64>, origin: FileOrigin) {
+        let key = normalize_key(path, self.windows);
+        match self.index.get(&key) {
+            Some(&i) => {
+                let e = &mut self.out[i];
+                e.hits += 1;
+                e.last_seq = seq;
+                e.last_ts = ts;
+                e.path = path.to_string(); // 展示保留最后一次出现的原始形态
+                if origin.rank() > e.origin.rank() {
+                    e.origin = origin;
+                }
+                // 写优先：写过之后再读也不撤销「已改写」
+                e.modified = e.origin == FileOrigin::ToolWrite;
+            }
+            None => {
+                self.index.insert(key, self.out.len());
+                self.out.push(FileEntry {
+                    path: path.to_string(),
+                    last_seq: seq,
+                    last_ts: ts,
+                    hits: 1,
+                    modified: origin == FileOrigin::ToolWrite,
+                    origin,
+                });
+            }
+        }
+    }
+
+    /// 收官：排序键 = 会话出现序（lastSeq 降序），用户裁决 1；同 seq 保持插入序（稳定）
+    pub(crate) fn finish(self) -> Vec<FileEntry> {
+        let mut out = self.out;
+        out.sort_by_key(|b| std::cmp::Reverse(b.last_seq));
+        out
+    }
+}
+
+/// kimi 实测内联附件标记（B1 调研）：`<image path="X">` / `<file path="X">` /
+/// `src="X"` 变体。双引号属性（实测唯一定界形态）；逐标记扫描、无正则依赖。
+/// 通用应用到全部工具的 user 正文——普通文本不含 `<image `/`<file ` 前缀，零误伤面
+fn extract_inline_markup_paths(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for tag in ["<image ", "<file "] {
+        let mut from = 0;
+        while let Some(rel) = content[from..].find(tag) {
+            let inner_start = from + rel + tag.len();
+            let rest = &content[inner_start..];
+            let inner_end = rest.find('>').unwrap_or(rest.len());
+            let inner = &rest[..inner_end];
+            for attr in ["path=\"", "src=\""] {
+                if let Some(a) = inner.find(attr) {
+                    let v = &inner[a + attr.len()..];
+                    if let Some(q) = v.find('"') {
+                        let p = v[..q].trim();
+                        // URI 判别跳过（blobref:/zcode-artifact: 等）：冒号前缀 >1 字符
+                        // 即协议名（Windows 盘符恒单字符，不受影响）——内容寻址引用
+                        // 不可按路径预览，不入池（B1 调研口径）
+                        let is_uri = match p.find(':') {
+                            Some(i) => i > 1,
+                            None => false,
+                        };
+                        if !p.is_empty()
+                            && !is_uri
+                            && is_path_candidate(p)
+                            && seen.insert(p.to_string())
+                        {
+                            out.push(p.to_string());
+                        }
+                    }
+                }
+            }
+            from = inner_start + inner_end;
+        }
+    }
     out
 }
 
@@ -1092,7 +1262,7 @@ mod tests {
         );
     }
 
-    /// FileEntry 新增 modified 的 camelCase 序列化契约
+    /// FileEntry 新增 modified 的 camelCase 序列化契约 + M5 B2 origin snake_case
     #[test]
     fn file_entry_serializes_modified_flag() {
         let e = FileEntry {
@@ -1101,9 +1271,15 @@ mod tests {
             last_ts: None,
             hits: 1,
             modified: true,
+            origin: FileOrigin::ToolWrite,
         };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v.get("modified").and_then(|b| b.as_bool()), Some(true));
+        assert_eq!(
+            v.get("origin").and_then(|s| s.as_str()),
+            Some("tool_write"),
+            "origin 序列化为 snake_case（移动端来源筛选值域）"
+        );
     }
 
     /// M3+ 归一化比较键去重：`\`→`/`；Windows 语义（参数注入）再小写。
@@ -1157,7 +1333,7 @@ mod tests {
         assert_eq!(entries[0].last_ts, None);
     }
 
-    /// camelCase 序列化契约（移动端字段名，勿漂移）：lastSeq/lastTs
+    /// camelCase 序列化契约（移动端字段名，勿漂移）：lastSeq/lastTs + origin
     #[test]
     fn file_entry_serializes_camel_case() {
         let e = FileEntry {
@@ -1166,12 +1342,153 @@ mod tests {
             last_ts: Some(700),
             hits: 2,
             modified: false,
+            origin: FileOrigin::ToolRead,
         };
         let v = serde_json::to_value(&e).unwrap();
         assert!(v.get("path").is_some());
         assert!(v.get("lastSeq").is_some(), "lastSeq 字段（camelCase）");
         assert!(v.get("lastTs").is_some(), "lastTs 字段（camelCase）");
         assert!(v.get("hits").is_some());
+        assert_eq!(v.get("origin").and_then(|s| s.as_str()), Some("tool_read"));
+    }
+
+    // ==== M5 B2：来源三池（user / tool_read / tool_write）====
+
+    /// 工具读写 → origin 推导：写类工具 ToolWrite+modified、读类工具 ToolRead
+    #[test]
+    fn tool_call_origin_derivation_read_vs_write() {
+        let mut write = tool_call(r#"{"path":"/p/w.txt"}"#);
+        write.tool_name = Some("Write".into());
+        let mut read = tool_call(r#"{"path":"/p/r.txt"}"#);
+        read.tool_name = Some("Read".into());
+        let entries = extract_paths_from_messages(&[write, read]);
+        let w = entries.iter().find(|e| e.path == "/p/w.txt").unwrap();
+        let r = entries.iter().find(|e| e.path == "/p/r.txt").unwrap();
+        assert_eq!(w.origin, FileOrigin::ToolWrite);
+        assert!(w.modified);
+        assert_eq!(r.origin, FileOrigin::ToolRead);
+        assert!(!r.modified);
+    }
+
+    /// kimi 内联标记（B1 黄金夹具形态）→ user 来源；blobref 不入池
+    #[test]
+    fn user_inline_markup_extracts_user_origin() {
+        let m = text_msg(
+            "user",
+            "先看 <image path=\"C:/fixt/demo/brand-a.png\"> 与 <file path=\"C:/fixt/demo/report-draft.md\">",
+        );
+        let entries = extract_paths_from_messages(&[m]);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.origin == FileOrigin::User));
+        assert!(entries.iter().any(|e| e.path == "C:/fixt/demo/brand-a.png"));
+        // blobref / 无路径标记不出条目
+        let blob = text_msg("user", "<image src=\"blobref:image/png;abc\"></image>");
+        assert!(
+            extract_paths_from_messages(&[blob]).is_empty(),
+            "blobref 内容寻址不可预览，不入池"
+        );
+    }
+
+    /// 同一文件多来源：上传（user）后被工具改写（tool_write）→ 取信息量最大者
+    #[test]
+    fn merged_origin_takes_highest_priority() {
+        let user = text_msg("user", "<image path=\"/p/both.png\"></image>");
+        let mut write = tool_call(r#"{"path":"/p/both.png"}"#);
+        write.seq = 3;
+        // 反序喂入（先工具后用户）也一样：user 不得降级 tool_write
+        let entries = extract_paths_from_messages(&[user, write]);
+        assert_eq!(entries.len(), 1, "归一键去重 → 单条目");
+        assert_eq!(entries[0].origin, FileOrigin::ToolWrite);
+        assert!(entries[0].modified);
+        assert_eq!(entries[0].hits, 2);
+    }
+
+    /// kimi 黄金夹具全链：wire 行 → map_kimi_lines → 抽取 → user 来源条目
+    #[test]
+    fn kimi_golden_fixture_full_chain_user_attachments() {
+        let lines = crate::remote::attachment_fixtures::kimi_fixture_lines();
+        let msgs = super::super::content::map_kimi_lines(&lines);
+        let entries = extract_paths_from_messages(&msgs);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            paths.contains(&"C:/fixt/demo/brand-a.png"),
+            "用户消息内联 <image path> 必须出条目：{paths:?}"
+        );
+        assert!(
+            paths.contains(&"C:/fixt/demo/report-draft.md"),
+            "用户输入内联 <file path> 必须出条目"
+        );
+        assert!(
+            entries.iter().all(|e| e.origin == FileOrigin::User),
+            "内联标记全部来自用户消息 → user 来源"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|p| p.contains("blobref") || p.contains("chart-b.png")),
+            "工具读取（tool.result blobref）不属用户附件来源"
+        );
+    }
+
+    /// zcode 黄金夹具全链：tmp sqlite 种入 → 注入核抽取 → source.path 与
+    /// artifact 磁盘实体双条目，origin=user
+    #[test]
+    fn zcode_golden_fixture_full_chain_user_attachments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (source_path, artifact) =
+            crate::remote::attachment_fixtures::seed_zcode_attachment_db(tmp.path()).unwrap();
+        let (entries, truncated) = extract_file_paths_with(
+            tmp.path(),
+            "zcode",
+            crate::remote::attachment_fixtures::ZCODE_SESSION_ID,
+            200,
+        );
+        assert!(!truncated);
+        let by_path = |p: &str| entries.iter().find(|e| e.path == p);
+        let src = by_path(&source_path).expect("source.path 型附件必须入池");
+        assert_eq!(src.origin, FileOrigin::User);
+        let art =
+            by_path(&artifact.to_string_lossy()).expect("artifact URI 必须解析到磁盘实体并入池");
+        assert_eq!(art.origin, FileOrigin::User);
+        assert_eq!(entries.len(), 2, "恰两附件：本地路径型 + artifact 型");
+    }
+
+    /// artifact 实体缺失（artifacts 目录被清理）→ 降级跳过，不出死链接条目
+    #[test]
+    fn zcode_artifact_missing_entity_degrades_to_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (source_path, artifact) =
+            crate::remote::attachment_fixtures::seed_zcode_attachment_db(tmp.path()).unwrap();
+        std::fs::remove_file(&artifact).unwrap();
+        let (entries, _) = extract_file_paths_with(
+            tmp.path(),
+            "zcode",
+            crate::remote::attachment_fixtures::ZCODE_SESSION_ID,
+            200,
+        );
+        assert_eq!(entries.len(), 1, "仅剩 source.path 型附件");
+        assert_eq!(entries[0].path, source_path);
+    }
+
+    /// artifact URI 解析纯函数：尾段匹配 + 多命中取字典序最小 + 越界会话空尾段拒绝
+    #[test]
+    fn resolve_zcode_artifact_matches_tail_and_prefers_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 真实目录布局：<home>/.zcode/cli/artifacts/<session>/…
+        let sess = tmp.path().join(".zcode/cli/artifacts/sess_x");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("prompt-a-tool-result-u1.png"), b"x").unwrap();
+        std::fs::write(sess.join("prompt-b-tool-result-u1.png"), b"x").unwrap();
+        let hit = resolve_zcode_artifact(tmp.path(), "sess_x/tool-result-u1").unwrap();
+        assert!(
+            hit.ends_with("prompt-a-tool-result-u1.png"),
+            "字典序最小：{hit}"
+        );
+        assert!(resolve_zcode_artifact(tmp.path(), "sess_x/tool-result-missing").is_none());
+        assert!(
+            resolve_zcode_artifact(tmp.path(), "sess_x").is_none(),
+            "无尾段拒绝"
+        );
     }
 
     /// limit 透传：更大 limit 取到更早的工具调用（窗口机制零新增，透传既有管线）

@@ -92,6 +92,19 @@ pub fn seed_zcode_attachment_db(
         rusqlite::params!["msg_fixt_u1", ZCODE_SESSION_ID, 1783562500000i64, msg_data],
     )
     .map_err(|e| e.to_string())?;
+    // 真实会话形态：附件必有伴随文本（content.rs user 分支只拼 text parts——
+    // 无 text part 的消息不出条目，会话会被判「不存在」）。故种一条 text part。
+    conn.execute(
+        "INSERT INTO part (id, message_id, session_id, sequence, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            "part_fixt_t0",
+            "msg_fixt_u1",
+            ZCODE_SESSION_ID,
+            0i64,
+            serde_json::json!({ "type": "text", "text": "看这两张图" }).to_string()
+        ],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO part (id, message_id, session_id, sequence, data) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
@@ -116,8 +129,14 @@ pub fn seed_zcode_attachment_db(
     .map_err(|e| e.to_string())?;
     drop(conn);
 
-    // artifact 落盘：文件名内嵌 tool-result 尾段（真实库同构——glob 尾段匹配的依据）
-    let art_dir = home.join(format!(".zcode/cli/artifacts/{ZCODE_SESSION_ID}"));
+    // artifact 落盘：文件名内嵌 tool-result 尾段（真实库同构——glob 尾段匹配的依据）。
+    // 逐段 join（勿用含 `/` 的整串 join）：返回的路径必须与 files.rs resolver 的
+    // entry.path()（全平台原生分隔符）逐字符一致，消费方按原始串比较
+    let art_dir = home
+        .join(".zcode")
+        .join("cli")
+        .join("artifacts")
+        .join(ZCODE_SESSION_ID);
     std::fs::create_dir_all(&art_dir).map_err(|e| format!("建 artifacts 目录失败: {e}"))?;
     let artifact = art_dir.join(format!(
         "prompt-attachment-upload-xx9z-{ZCODE_TOOL_RESULT_ID}.png"
@@ -171,7 +190,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 2, "file part 两行：本地路径型 + artifact 型");
+        assert_eq!(
+            n, 3,
+            "text part 一行 + file part 两行（本地路径型 + artifact 型）"
+        );
         let data: String = conn
             .query_row("SELECT data FROM part WHERE id = 'part_fixt_f1'", [], |r| {
                 r.get(0)

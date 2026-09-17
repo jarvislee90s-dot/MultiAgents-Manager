@@ -1554,6 +1554,7 @@ mod tests {
                         last_ts: None,
                         hits: 1,
                         modified: false,
+                        origin: crate::remote::files::FileOrigin::ToolRead,
                     }],
                     false,
                 )
