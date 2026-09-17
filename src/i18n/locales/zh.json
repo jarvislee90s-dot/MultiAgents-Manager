@@ -169,7 +169,6 @@
       "channelSaved": "已保存",
       "tunnelCurrent": "当前隧道地址",
       "channelBadge": "外部通道",
-      "tailscaleHint": "Tailscale 用户：在 Tailscale 网络内直接访问局域网地址即可，无需隧道（详见 Tailscale 文档）",
       "address": "访问地址",
       "addressHint": "访问地址（手机使用）",
       "addressRecommended": "推荐",

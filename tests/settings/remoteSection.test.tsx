@@ -579,3 +579,20 @@ describe("RemoteSection 隧道状态随 3s 轮询常驻（M4 Task 2）", () => {
     expect(input.value).toBe("My PC");
   });
 });
+
+// Task 5（2026-09-17 用户裁决）：Tailscale 指引受众过窄，底部警示区该行整行退场，
+// i18n 键 settings.remote.tailscaleHint 同步删除。防回潮断言：渲染输出中不得再出现
+// 任何 Tailscale 字样；另两条安全警示（notice1 / notice2）必须原样保留
+describe("RemoteSection Tailscale 指引文案退场（M4 Task 5）", () => {
+  it("底部安全警示区不再渲染 Tailscale 指引，notice1 / notice2 未受误伤", async () => {
+    render(<RemoteSection />);
+    await screen.findByLabelText("Machine name");
+    // 防回潮核心：任何 Tailscale 字样都不应出现在渲染输出中
+    expect(screen.queryByText(/Tailscale/i)).toBeNull();
+    // 另两条安全警示照常渲染（中英文案断言取 en 默认语言的关键片段）
+    expect(
+      screen.getByText(/the remote page exposes all session content/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/approval pairing is available/i)).toBeTruthy();
+  });
+});

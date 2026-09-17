@@ -742,12 +742,11 @@ export function RemoteSection() {
           </>
         )}
 
-        {/* 底部安全警示（简报固定文案两条）+ Tailscale 指引（M4 T1a） */}
+        {/* 底部安全警示（简报固定文案两条）；Tailscale 指引已随 M4 Task 5 退场（用户裁决：受众过窄） */}
         <div className="border-t" />
         <div className="space-y-1 py-2.5">
           <p className="text-xs text-amber-500">{t("settings.remote.notice1")}</p>
           <p className="text-muted-foreground text-xs">{t("settings.remote.notice2")}</p>
-          <p className="text-muted-foreground text-xs">{t("settings.remote.tailscaleHint")}</p>
         </div>
       </div>
 

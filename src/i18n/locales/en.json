@@ -169,7 +169,6 @@
       "channelSaved": "Saved",
       "tunnelCurrent": "Current tunnel URL",
       "channelBadge": "External Channel",
-      "tailscaleHint": "Tailscale users: access the LAN address directly within your Tailscale network — no tunnel needed (see the Tailscale docs)",
       "address": "Address",
       "addressHint": "Addresses (open on the phone)",
       "addressRecommended": "Recommended",
