@@ -230,6 +230,9 @@ impl<S> Drop for CleanupStream<S> {
     }
 }
 
+/// via 判定域名源接缝类型（clippy type_complexity 收敛别名）
+pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -269,7 +272,7 @@ pub struct RemoteState {
     /// via 分通道域名注入缝（M5 A3，/pair/pin 配对时刻消费）：生产 = snapshot 按
     /// mode 分拣 quick/named 域名；测试注入固定域名。与 tunnel_hosts_source 同源分形——
     /// gate 豁免只要"是否隧道域名"并集，via 需要通道区分
-    pub via_hosts_source: Box<dyn Fn() -> (Vec<String>, Vec<String>) + Send + Sync>,
+    pub via_hosts_source: Box<ViaHostsSource>,
 }
 
 /// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -392,7 +395,7 @@ mod tests {
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
-            via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
+            via_hosts_source: Box::new(|| None),
         })
     }
 
@@ -921,7 +924,7 @@ mod tests {
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
-            via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -1288,7 +1291,7 @@ mod tests {
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
-            via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1400,7 +1403,7 @@ mod tests {
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
-            via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1570,7 +1573,7 @@ mod tests {
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
-            via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -1830,7 +1833,7 @@ mod tests {
                     }
                     Some(q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect())
                 }),
-                via_hosts_source: Box::new(move || (quick.clone(), named.clone())),
+                via_hosts_source: Box::new(move || Some((quick.clone(), named.clone()))),
             }),
             t,
         )
@@ -2369,7 +2372,7 @@ mod tests {
                     pin_source: Box::new(move || slot.lock().unwrap().clone()),
                     now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
                     tunnel_hosts_source: Box::new(|| Some(Vec::new())),
-                    via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
+                    via_hosts_source: Box::new(|| None),
                 }),
                 t,
             )

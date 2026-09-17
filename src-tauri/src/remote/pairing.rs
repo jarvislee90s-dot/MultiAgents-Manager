@@ -36,9 +36,10 @@ pub fn fingerprint_for(ua: &str, origin_ip: &str) -> String {
 }
 
 /// 持久化设备（M5 A1：upsert-by-fingerprint——同浏览器同一网络重绑**覆盖不新增**）。
-/// - 按指纹查**未吊销**行 → 命中：覆盖 ua / origin_ip / last_seen_at，
-///   **保留原 id 与原 name**（含用户重命名——命中路径完全不更新 name）、
-///   保留 first_paired_at，revoked 保持 0，via 沿用建行值（运行时刷新属 Task A3）；
+/// - 按指纹查**未吊销**行 → 命中：覆盖 ua / origin_ip / last_seen_at / via
+///   （via 随重连刷新——M5 实锤定通道 2026-09-18 裁决：via = 最近一次接入的通道，
+///   设备换通道接入时徽标自动跟上；**保留原 id 与原 name**（含用户重命名——命中
+///   路径完全不更新 name）、保留 first_paired_at，revoked 保持 0）；
 ///   返回原行 id（调用方下发 cookie 必须用它，否则命中路径的 cookie 指向不存在的行）。
 /// - 未命中，或命中行已吊销 → 新建行（**吊销行不复活**），name 取设备自报，返回新 id。
 pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<String, String> {
@@ -56,12 +57,12 @@ pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<Stri
         .map_err(|e| format!("persist_device 查指纹失败: {e}"))?;
     if let Some(id) = existing {
         // 命中路径：ua/origin_ip 实际与指纹输入同源（防御式重写），last_seen 必刷新；
-        // name / first_paired_at / via / revoked 一律不动
+        // via 刷新为本次接入通道；name / first_paired_at / revoked 不动
         conn.execute(
             "UPDATE remote_devices
-             SET ua = ?2, origin_ip = ?3, last_seen_at = ?4
+             SET ua = ?2, origin_ip = ?3, last_seen_at = ?4, via = ?5
              WHERE id = ?1",
-            rusqlite::params![id, d.ua, d.origin_ip, d.paired_at],
+            rusqlite::params![id, d.ua, d.origin_ip, d.paired_at, d.via],
         )
         .map_err(|e| format!("persist_device 更新失败: {e}"))?;
         return Ok(id);
@@ -345,7 +346,8 @@ mod tests {
 
     /// upsert 命中：同指纹二次配对 → 覆盖不新增、返回原 id、
     /// name 保留（含"先重命名后重连"场景）、first_paired 不变、last_seen 刷新、
-    /// via 保留建行值（契约覆盖清单仅 ua/origin_ip/last_seen_at）
+    /// **via 刷新为本次接入通道**（2026-09-18 实锤定通道裁决：via = 最近一次接入
+    /// 的通道，设备换通道接入时徽标自动跟上；id/name/first_paired/revoked 不动）
     #[test]
     fn upsert_hit_keeps_id_and_name_and_first_paired() {
         let conn = memory_conn();
@@ -356,7 +358,7 @@ mod tests {
         // 插入路径：via 落库为设备自报值
         assert_eq!(row(&conn, "d1").3, "lan");
         // 桌面端重命名（Task A4 命令语义），随后同一浏览器重连（新 id、同 UA/IP、
-        // 时间前进、通道字段不同——验证命中路径不覆盖 via）
+        // 时间前进、通道字段不同——验证命中路径 via 刷新为新通道）
         assert!(rename_device(&conn, "d1", "我的手机").unwrap());
         let mut reconnect = dev("d2", "UA", "1.1.1.1", 2000);
         reconnect.via = "quick".into();
@@ -369,7 +371,7 @@ mod tests {
         assert_eq!(name, "我的手机", "命中路径完全不更新 name——重命名不丢");
         assert_eq!(ua, "UA");
         assert_eq!(ip, "1.1.1.1");
-        assert_eq!(via, "lan", "命中路径 via 保留建行原值");
+        assert_eq!(via, "quick", "命中路径 via 刷新为本次接入通道");
         assert_eq!(first_paired, 1000, "first_paired 保留");
         assert_eq!(last_seen, 2000, "last_seen 刷新");
         assert_eq!(revoked, 0);

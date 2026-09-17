@@ -267,7 +267,7 @@ pub fn download_to(dest: &Path) -> Result<(), String> {
 // ============================================================
 
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 单通道运行态（M5 A5 双通道化）：running 由 snapshot() 现算（句柄存活，不落全局——
@@ -320,6 +320,9 @@ fn slot_live(h: &Option<TunnelHandle>) -> bool {
 struct TunnelHandle {
     stop: Arc<AtomicBool>,
     supervisor: tauri::async_runtime::JoinHandle<()>,
+    /// 当前 cloudflared 子进程 PID（supervise 每次 spawn 后写入；0 = 未 spawn/已退出）。
+    /// M5 实锤定通道（2026-09-18）：conn_owner 反查连接归属 PID 后与此对账
+    child_pid: Arc<AtomicU32>,
 }
 
 /// 每通道双槽位（M5 A5 安全关键）：quick / named 可同开，句柄互不共享——
@@ -423,16 +426,41 @@ pub fn start_channel(mode: &str, port: u16) {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let m = mode.to_string();
+    let child_pid = Arc::new(AtomicU32::new(0));
+    let pid_slot = child_pid.clone();
     let supervisor = tauri::async_runtime::spawn(async move {
-        supervise(m, port, stop2).await;
+        supervise(m, port, stop2, pid_slot).await;
     });
-    *slot = Some(TunnelHandle { stop, supervisor });
+    *slot = Some(TunnelHandle {
+        stop,
+        supervisor,
+        child_pid,
+    });
+}
+
+/// PID 账本（M5 实锤定通道）：各通道当前 cloudflared 子进程 PID → 通道。
+/// conn_owner 反查连接归属后与此对账；0 值槽位（未 spawn/已退出）不记账
+pub(crate) fn owned_channel_pids() -> Vec<(u32, &'static str)> {
+    let owned_from_slots = |quick: &Option<TunnelHandle>, named: &Option<TunnelHandle>| {
+        let mut out: Vec<(u32, &'static str)> = Vec::new();
+        for (h, kind) in [(quick, "quick"), (named, "named")] {
+            if let Some(h) = h {
+                let pid = h.child_pid.load(Ordering::Relaxed);
+                if pid != 0 {
+                    out.push((pid, kind));
+                }
+            }
+        }
+        out
+    };
+    let slots = TUNNELS.lock().unwrap();
+    owned_from_slots(&slots.quick, &slots.named)
 }
 
 /// 守护主循环（每通道独立运行一份）：确保二进制 → spawn → 监听 stderr(quick 解析地址)
 /// → wait → 退避重启。quick / named 各自 spawn 互不干扰，全部快照写入经
 /// set_channel_snapshot 落到**本通道**槽位，绝不触碰另一通道
-async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
+async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Arc<AtomicU32>) {
     set_channel_snapshot(&mode, |c| {
         c.url = None;
         c.error = None;
@@ -480,7 +508,11 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         cmd.stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null());
         let mut child = match cmd.spawn() {
-            Ok(c) => c,
+            Ok(c) => {
+                // PID 记账（M5 实锤定通道）：conn_owner 反查连接归属与此对账
+                child_pid.store(c.id().unwrap_or(0), Ordering::Relaxed);
+                c
+            }
             Err(e) => {
                 set_channel_snapshot(&mode, |c| {
                     c.error = Some(format!("cloudflared 启动失败: {e}"))
@@ -535,6 +567,8 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         if stop.load(Ordering::Relaxed) {
             break; // 主动停止不算失败
         }
+        // 进程已退出 → 清 PID 记账（账本只记存活子进程）
+        child_pid.store(0, Ordering::Relaxed);
         // 稳定运行 ≥60s 后的退出视为「新失败」重置计数——否则数周内三次偶发闪断
         // 就会累计到永久放弃（backoff 给的 3 次是**连续**失败语义，spec T1b）
         if started_at.elapsed() >= std::time::Duration::from_secs(60) {
@@ -675,6 +709,7 @@ mod tests {
             TunnelHandle {
                 stop: Arc::new(AtomicBool::new(false)),
                 supervisor,
+                child_pid: Arc::new(AtomicU32::new(0)),
             },
             rx,
         )

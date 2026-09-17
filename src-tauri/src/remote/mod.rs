@@ -4,6 +4,7 @@
 pub mod api;
 #[cfg(test)]
 pub mod attachment_fixtures;
+pub mod conn_owner;
 pub mod content;
 pub mod events;
 pub mod files;
@@ -293,10 +294,15 @@ fn tunnel_hosts_from_status(s: &tunnel::TunnelStatus) -> Option<Vec<String>> {
 }
 
 /// via 判定的分通道域名（生产源）：双通道各自归集（错误通道不宣称——错误通道的
-/// 旧域名不得再给新配对设备打通道标签）
-fn via_hosts_from_snapshot() -> (Vec<String>, Vec<String>) {
+/// 旧域名不得再给新配对设备打通道标签）。**None 哨兵与豁免同源**：名单不可信
+/// （错误终态 / 运行中而域名缺失）时返回 None——via 判定侧收到 None 保守标
+/// 「局域网」，绝不判「本机」（2026-09-18 实测：名单为空曾把隧道设备标成本机）
+fn via_hosts_from_snapshot() -> Option<(Vec<String>, Vec<String>)> {
     let s = tunnel::snapshot();
-    (channel_hosts(&s.quick), channel_hosts(&s.named))
+    match tunnel_hosts_from_status(&s) {
+        None => None,
+        Some(_) => Some((channel_hosts(&s.quick), channel_hosts(&s.named))),
+    }
 }
 
 /// 读取绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
@@ -1785,9 +1791,9 @@ mod tests {
         let _g = tunnel::test_sync::TUNNEL_GLOBALS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // 默认态（双通道皆空）
+        // 默认态（双通道皆空）：名单为空集但**可信**（无隧道运行，Some 非哨兵）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
-        assert_eq!(via_hosts_from_snapshot(), (Vec::new(), Vec::new()));
+        assert_eq!(via_hosts_from_snapshot(), Some((Vec::new(), Vec::new())));
         // 双通道同开：各自归集（quick url 故意大写——归一后入表）
         tunnel::set_snapshot(|s| {
             s.quick = tunnel::ChannelStatus {
@@ -1803,10 +1809,10 @@ mod tests {
         });
         assert_eq!(
             via_hosts_from_snapshot(),
-            (
+            Some((
                 vec!["q-test.trycloudflare.com".to_string()],
                 vec!["mam.example.com".to_string()]
-            )
+            ))
         );
         assert_eq!(
             tunnel_hosts_from_snapshot(),
@@ -1816,14 +1822,15 @@ mod tests {
             ]),
             "豁免并集 = 双通道域名链式聚合"
         );
-        // 错误通道不宣称：quick 错误 → quick 名单空、named 名单保留
+        // 错误通道不宣称 + **哨兵同源**：任一通道错误 → via 判定与豁免一起收 None
+        // （错误/未知态绝不给 via 提供「本机」判定依据，2026-09-18 实测误标根因）
         tunnel::set_snapshot(|s| {
             s.quick.error = Some("cloudflared 启动失败".into());
         });
         assert_eq!(
             via_hosts_from_snapshot(),
-            (Vec::new(), vec!["mam.example.com".to_string()]),
-            "错误通道的旧域名不得宣称（不误导新配对设备的通道标签）"
+            None,
+            "名单不可信 → None 哨兵（via 判定侧保守标 lan，绝不判本机）"
         );
         // 豁免侧同源判定：任一通道错误 → None 哨兵（整体收紧，fail-closed）
         assert_eq!(

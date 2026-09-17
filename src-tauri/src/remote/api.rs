@@ -204,14 +204,24 @@ pub async fn pair_pin(
         )
             .into_response();
     }
-    // via 判定（配对时刻）：Host 头 + 来源 IP 对照隧道快照域名（与 gate 豁免同判据，
-    // is_local_access / classify_via 一处定义两处消费）
+    // via 判定（配对时刻），两级：
+    // ① PID 实锤优先（2026-09-18）：来连套接字归属 MAM 账本的 cloudflared 通道
+    //    → 直接定 quick/named（不依赖域名名单，编外/未知归属走②）；
+    // ② Host 判定：Host + 来源 IP 对照隧道快照域名；**None 哨兵**（名单不可信：
+    //    错误终态 / 运行中而域名缺失）→ 保守标 lan，绝不判本机。
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let (quick_hosts, named_hosts) = (st.via_hosts_source)();
-    let via = super::gate::classify_via(addr.ip(), host, &quick_hosts, &named_hosts);
+    let via = match super::conn_owner::tunnel_channel_for_conn(addr.port()) {
+        Some(kind) => kind,
+        None => match (st.via_hosts_source)() {
+            None => "lan",
+            Some((quick_hosts, named_hosts)) => {
+                super::gate::classify_via(addr.ip(), host, &quick_hosts, &named_hosts)
+            }
+        },
+    };
     // 设备名：自报 trim 收敛 40 字符（与 rename_device / 审批自报名同口径），空回落默认名
     let mut name: String = req
         .name

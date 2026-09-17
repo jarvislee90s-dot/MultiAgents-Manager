@@ -117,14 +117,21 @@ pub async fn gate(State(state): State<Arc<RemoteState>>, req: Request, next: Nex
     {
         let source_ip = ci.0.ip();
         if source_ip.is_loopback() {
-            if let Some(tunnel_hosts) = (state.tunnel_hosts_source)() {
-                let host = req
-                    .headers()
-                    .get(header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                if is_local_access(source_ip, host, &tunnel_hosts) {
-                    return next.run(req).await; // 本机免密直达全看板
+            // PID 实锤优先（2026-09-18）：来连套接字归属 MAM 账本的 cloudflared
+            // 通道 → 必为隧道转发，**跳过豁免**落到下方设备 cookie 校验（域名名单
+            // 未知/漂移都不影响）；查不到（本机浏览器直连 / 表不可得 / macOS）→
+            // 回落域名名单判定
+            let pid_is_tunnel = super::conn_owner::tunnel_channel_for_conn(ci.0.port()).is_some();
+            if !pid_is_tunnel {
+                if let Some(tunnel_hosts) = (state.tunnel_hosts_source)() {
+                    let host = req
+                        .headers()
+                        .get(header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    if is_local_access(source_ip, host, &tunnel_hosts) {
+                        return next.run(req).await; // 本机免密直达全看板
+                    }
                 }
             }
         }
