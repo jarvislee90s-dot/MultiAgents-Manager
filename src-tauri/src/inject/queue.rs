@@ -70,10 +70,12 @@ pub(crate) fn try_flush(
     item: &QueueRow,
     jump: bool,
 ) -> FlushOutcome {
+    // 会话 id 只在工具内唯一（watcher/dedup 同口径）：必须按 (tool, id) 复合匹配，
+    // 跨工具撞 id 时裸 id 匹配会向错误会话的 pid 注入
     let Some(session) = (st.session_source)()
         .sessions
         .into_iter()
-        .find(|s| s.id == item.session_id)
+        .find(|s| s.id == item.session_id && s.agent_type.tool_id() == item.agent_type)
     else {
         return FlushOutcome::Suspended;
     };
