@@ -123,9 +123,14 @@ export const mockPresetHealthIssues = {
     },
   ],
   drift: mockLedgerDrift,
+  // 空目录（wave33 Item D，与 src/tauri-mock.ts 同构）：mam 仓库 + 工具目录各一
+  emptyDirs: [
+    { owner: "mam", path: "/Users/jarvis/.mam/skills/empty-suite-dir" },
+    { owner: "tool:claude", path: "/Users/jarvis/.claude/skills/empty-dir" },
+  ],
 };
 
-export const mockPresetHealthEmpty = { invariants: [], stashPending: [], drift: [] };
+export const mockPresetHealthEmpty = { invariants: [], stashPending: [], drift: [], emptyDirs: [] };
 
 let healthMode: "issues" | "empty" = "issues";
 export function setMockHealthMode(mode: "issues" | "empty") {
@@ -196,6 +201,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
       return Promise.resolve(healthMode === "empty" ? mockPresetHealthEmpty : mockPresetHealthIssues);
     case "scan_ledger_drift":
       return Promise.resolve(mockLedgerDrift);
+    // 空目录扫描（wave33 Item D）：读 fixture（与 get_preset_health 的 emptyDirs 同源）
+    case "scan_empty_dirs":
+      return Promise.resolve(mockPresetHealthIssues.emptyDirs);
     case "preview_apply_preset":
       return Promise.resolve({
         toEnable: ["brainstorming"],
@@ -289,6 +297,15 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // 暂存回移（T15 体检卡片 ③）：真实命令返回 Result<(), String>，mock 视为成功
     case "restore_stash_entry":
       return Promise.resolve();
+    // 空目录清理（wave33 Item D）：真实命令返回 Result<usize>，mock 删无可删返回 0
+    case "clean_empty_dirs":
+      return Promise.resolve(0);
+    // 快捷跳转（wave33 Item B）：homeDir()（@tauri-apps/api/path）mock 下提供
+    // 固定 home；reveal_dir 浏览器 mock 语义，静默成功（与 src/tauri-mock.ts 对齐）
+    case "plugin:path|resolve_directory":
+      return Promise.resolve("/Users/jarvis");
+    case "reveal_dir":
+      return Promise.resolve(undefined);
     // 体检对账写命令（T15）：须返回与 Rust ReconcileOutcome 同形对象
     //（undefined 会让 o.fixed / o.needsManual 读崩）；extensionId/toolId 结构化回带
     //（终审 Minor #4 起前端批量行映射靠结构化字段，message 只供人读不承载可解析格式）——

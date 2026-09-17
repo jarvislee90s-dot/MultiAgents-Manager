@@ -5,6 +5,8 @@
 // ③ 残留暂存：逐条回移 = restore_stash_entry（失败原样 toast，后端 message 已含原因）
 // ④ frontmatter 存量「待确认专属建议」（Task 17，spec §6）：逐条「设为专属/忽略本轮」，
 //    只列建议不自动写绑定表（2026-09-15 裁决）；忽略=前端收起，下次体检重新出现
+// ⑤ 空目录（wave33 Item D）：MAM 仓库 / 工具 skill 目录中的可清理空目录，
+//    「清理空目录」批量 clean_empty_dirs（后端白名单自校验，返回实际删除数）
 // 无异常时折叠一行 + 「立即体检」（refetch）；标题处角标 = 未决差异数（④ 建议不计入：
 // 角标沿 Task 15 语义只反映漂移/不变量/暂存三类差异）
 import { useState } from "react";
@@ -12,7 +14,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { HeartPulse, RefreshCw, RotateCcw, Undo2 } from "lucide-react";
+import { Eraser, HeartPulse, RefreshCw, RotateCcw, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatInvokeError } from "@/lib/invokeError";
@@ -63,6 +65,8 @@ export function HealthCheckCard() {
   const drift = healthQuery.data?.drift ?? [];
   const invariants = healthQuery.data?.invariants ?? [];
   const stashPending = healthQuery.data?.stashPending ?? [];
+  // ⑤ 空目录（wave33 Item D）：防御性回退——旧 mock / 异常数据缺字段时不崩
+  const emptyDirs = healthQuery.data?.emptyDirs ?? [];
   const hasIssues = drift.length + invariants.length + stashPending.length > 0;
   // ④ 忽略本轮：纯前端收起集合（不写库）；「立即体检」清零 + 重拉 → 下次体检重新出现
   const [ignoredSuggestions, setIgnoredSuggestions] = useState<Set<string>>(new Set());
@@ -79,6 +83,8 @@ export function HealthCheckCard() {
   const [invPending, setInvPending] = useState<string | null>(null);
   const [stashPendingId, setStashPendingId] = useState<number | null>(null);
   const [suggPendingId, setSuggPendingId] = useState<string | null>(null);
+  // ⑤ 空目录清理在途态（防连点）
+  const [emptyCleanPending, setEmptyCleanPending] = useState(false);
 
   // 处置后统一失效（终审 Minor #7 起 ① 单行/批量与 ③ 暂存回移共用）：体检三源 +
   // 预设 / 激活预设 / SSOT 资源（账本回写与链接重建都影响这些视图）
@@ -203,6 +209,26 @@ export function HealthCheckCard() {
       toast.error(formatInvokeError(e, t));
     } finally {
       setSuggPendingId(null);
+    }
+  };
+
+  // ⑤ 空目录清理（wave33 Item D）：传当前列出全部 path → clean_empty_dirs 返回
+  //    实际删除数；后端白名单自校验（MAM skill 仓库 / 启用工具 skill 目录），
+  //    越界/失败以 Err 透出。成功后失效体检 + SSOT 资源（目录变化影响资源扫描视图）
+  const cleanEmptyDirs = async () => {
+    if (emptyDirs.length === 0 || emptyCleanPending) return;
+    setEmptyCleanPending(true);
+    try {
+      const removed = await invoke<number>("clean_empty_dirs", {
+        paths: emptyDirs.map((d) => d.path),
+      });
+      toast.success(t("resources.health.emptyDirsCleaned", { n: removed }));
+      await qc.invalidateQueries({ queryKey: PRESET_HEALTH_KEY });
+      await qc.invalidateQueries({ queryKey: SSOT_RESOURCES_KEY });
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    } finally {
+      setEmptyCleanPending(false);
     }
   };
 
@@ -439,6 +465,41 @@ export function HealthCheckCard() {
               >
                 {t("resources.health.fixC")}
               </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ⑤ 空目录（wave33 Item D）：非空才渲染；owner 徽标 mam / 工具名 +
+          path 等宽截断；「清理空目录」传当前列出全部 path（清理后父目录变空
+          属下一轮扫描迭代，后端口径） */}
+      {emptyDirs.length > 0 && (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-amber-500">
+              {t("resources.health.emptyDirsTitle")}
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 shrink-0 px-1.5 text-[10px]"
+              disabled={emptyCleanPending}
+              onClick={() => void cleanEmptyDirs()}
+            >
+              <Eraser className="mr-1 h-3 w-3" />
+              {t("resources.health.cleanEmptyDirs")}
+            </Button>
+          </div>
+          <p className="text-muted-foreground text-[10px]">{t("resources.health.emptyDirsHint")}</p>
+          {emptyDirs.map((d) => (
+            <div key={d.path} className="flex items-center gap-2">
+              {/* owner："mam" | "tool:<id>" → 徽标展示 mam / 工具名 */}
+              <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium">
+                {d.owner === "mam" ? "mam" : d.owner.replace(/^tool:/, "")}
+              </span>
+              <span className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-[10px]">
+                {d.path}
+              </span>
             </div>
           ))}
         </div>

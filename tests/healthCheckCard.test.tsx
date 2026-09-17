@@ -25,11 +25,13 @@ beforeAll(async () => {
 });
 
 // 体检 fixture：一条 codex 的 L2 漂移（extensionId 与批量 message 前缀严格同源，
-// 回映成功的唯一凭证就是行键 codex|skill-x 命中）
+// 回映成功的唯一凭证就是行键 codex|skill-x 命中）；wave33 Item D 起 PresetHealth
+// 增必填 emptyDirs 字段——fixture 补空数组（新段不渲染，断言语义不变）
 const HEALTH: PresetHealth = {
   invariants: [],
   stashPending: [],
   drift: [{ toolId: "codex", kind: "L2", extensionId: "skill-x", path: "/tmp/ssot/skill-x" }],
+  emptyDirs: [],
 };
 
 // 批量处置结果（终审 Minor #3 三分计数）：1 修复 + 1 needs_manual + 1 失败（两者皆非）——

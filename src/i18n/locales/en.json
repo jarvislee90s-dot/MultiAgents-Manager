@@ -291,6 +291,10 @@
     "resident": {
       "toggle": "Resident lock (exempt from preset disable/stash)"
     },
+    "matrixHint": "A lit tool icon = dispatched to that tool; the \"Resident\" tag beside it = exclusive-sweep exemption + disable protection; click a tool name in the header row to open its skill directory / MCP·plugin config file",
+    "openMamRepo": "MAM Repo",
+    "openAgentsDir": "~/.agents Dir",
+    "residentProtected": "Resident-protected — turn off resident first",
     "health": {
       "title": "Health Check",
       "runNow": "Run health check now",
@@ -313,7 +317,8 @@
       "restoreStash": "Move Back",
       "emptyDirsTitle": "Empty directories",
       "emptyDirsHint": "Empty directories in the MAM repo and tool skill dirs, safe to clean",
-      "cleanEmptyDirs": "Clean empty dirs"
+      "cleanEmptyDirs": "Clean empty dirs",
+      "emptyDirsCleaned": "Cleaned {{n}} empty directories"
     }
   },
   "mcp": {

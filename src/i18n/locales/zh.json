@@ -291,6 +291,10 @@
     "resident": {
       "toggle": "常驻锁（预设应用时豁免停用/暂存）"
     },
+    "matrixHint": "点亮的工具图标 = 已派发到该工具；旁侧「常驻」= 独占清扫豁免 + 停用保护；点击表头工具名可打开对应 skill 目录 / MCP·插件配置文件",
+    "openMamRepo": "MAM 仓库",
+    "openAgentsDir": "~/.agents 目录",
+    "residentProtected": "常驻保护中，先关闭常驻",
     "health": {
       "title": "一致性体检",
       "runNow": "立即体检",
@@ -313,7 +317,8 @@
       "restoreStash": "回移",
       "emptyDirsTitle": "空目录",
       "emptyDirsHint": "MAM 仓库与工具 skill 目录中的空目录，可安全清理",
-      "cleanEmptyDirs": "清理空目录"
+      "cleanEmptyDirs": "清理空目录",
+      "emptyDirsCleaned": "已清理 {{n}} 个空目录"
     }
   },
   "mcp": {

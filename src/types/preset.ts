@@ -74,9 +74,17 @@ export interface StashEntryRecord {
   restoredAt: string | null;
 }
 
-/** 预设健康聚合（Rust preset::PresetHealth）：三源合一，无持久化每次现算 */
+/** 空目录条目（Rust reconcile::EmptyDirItem）：owner = "mam"（~/.mam/skills）
+ *  | "tool:<id>"（该工具 primary skill 目录）；path 为绝对路径 */
+export interface EmptyDirItem {
+  owner: string;
+  path: string;
+}
+
+/** 预设健康聚合（Rust preset::PresetHealth）：三源合一 + 空目录（wave33），无持久化每次现算 */
 export interface PresetHealth {
   invariants: string[];
   stashPending: StashEntryRecord[];
   drift: DriftItem[];
+  emptyDirs: EmptyDirItem[];
 }
