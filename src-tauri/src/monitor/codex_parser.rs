@@ -292,6 +292,21 @@ struct CodexFileDigest {
     last_timestamp: Option<String>,
 }
 
+/// session_meta payload 的会话身份（id 与 cwd；缺字段 → None / 空串）。
+/// 尾扫与头补读（§4.4 头尾拼接）两处共用
+fn session_meta_identity(payload: Option<&serde_json::Value>) -> (Option<String>, String) {
+    let id = payload
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let cwd = payload
+        .and_then(|p| p.get("cwd"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (id, cwd)
+}
+
 /// 读单个 rollout 的内容摘要：尾部 RECENT_LINES 行倒扫定状态（kinds/last_message），
 /// 文件头首行 session_meta 定身份（id/cwd）。头尾皆缺身份 → None
 fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
@@ -314,22 +329,12 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
             }
             match entry.entry_type.as_deref() {
                 Some("session_meta") => {
+                    let (id, cwd) = session_meta_identity(entry.payload.as_ref());
                     if session_id.is_none() {
-                        session_id = entry
-                            .payload
-                            .as_ref()
-                            .and_then(|p| p.get("id"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
+                        session_id = id;
                     }
                     if project_path.is_empty() {
-                        project_path = entry
-                            .payload
-                            .as_ref()
-                            .and_then(|p| p.get("cwd"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        project_path = cwd;
                     }
                 }
                 Some("response_item") => {
@@ -377,24 +382,17 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
     // 匹配不出卡、进程被同目录其他会话抢占。身份恒在文件头首行；小文件头尾同窗，
     // 尾扫已取到时零变化
     if session_id.is_none() || project_path.is_empty() {
-        if let Some(head) = read_first_lines(jsonl_path, 1).first() {
-            if let Ok(entry) = serde_json::from_str::<CodexEntry>(head) {
-                if entry.entry_type.as_deref() == Some("session_meta") {
-                    let payload = entry.payload.as_ref();
-                    if session_id.is_none() {
-                        session_id = payload
-                            .and_then(|p| p.get("id"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                    }
-                    if project_path.is_empty() {
-                        project_path = payload
-                            .and_then(|p| p.get("cwd"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                    }
-                }
+        let head_meta = read_first_lines(jsonl_path, 1)
+            .first()
+            .and_then(|l| serde_json::from_str::<CodexEntry>(l).ok())
+            .filter(|e| e.entry_type.as_deref() == Some("session_meta"));
+        if let Some(entry) = head_meta {
+            let (id, cwd) = session_meta_identity(entry.payload.as_ref());
+            if session_id.is_none() {
+                session_id = id;
+            }
+            if project_path.is_empty() {
+                project_path = cwd;
             }
         }
     }

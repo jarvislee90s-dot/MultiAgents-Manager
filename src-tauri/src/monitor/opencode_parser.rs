@@ -559,11 +559,12 @@ fn determine_opencode_status(
         let now = chrono::Utc::now().timestamp_millis();
         let last_active = last_msg_time.max(session_updated);
         let is_recent = now - last_active < 60_000; // 60 秒内
-        match last_role {
-            Some("user") if is_recent => SessionStatus::Processing,
-            // 完成即绿（2026-09-17 用户裁决）：assistant 回复完直接 Idle，
-            // 不再有 60s Waiting 红窗
-            _ => SessionStatus::Idle,
+                                                    // user 尾 + 近期活跃 = 输入刚提交 → 黄；其余（含 assistant 回复完）→ Idle
+                                                    // 完成即绿（2026-09-17 用户裁决）：不再有 60s Waiting 红窗
+        if last_role == Some("user") && is_recent {
+            SessionStatus::Processing
+        } else {
+            SessionStatus::Idle
         }
     }
 }
