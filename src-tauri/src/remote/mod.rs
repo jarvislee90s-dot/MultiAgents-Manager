@@ -14,6 +14,8 @@ pub mod tunnel;
 pub mod watcher;
 
 pub const KEY_ENABLED: &str = "remote.enabled";
+/// **M5 A5 起废弃**：bind 由 chan_lan 派生（bind_from_channels），生产路径不再读取；
+/// 仅一次性迁移（read_channels）读它一次，之后废弃不删（用户回滚旧版本仍可读得其语义）
 pub const KEY_BIND: &str = "remote.bind";
 pub const KEY_PORT: &str = "remote.port";
 pub const KEY_PUBLIC_ACK: &str = "remote.public_ack";
@@ -21,25 +23,153 @@ pub const KEY_PUBLIC_ACK: &str = "remote.public_ack";
 pub const KEY_HOST_NAME: &str = "remote.host_name";
 /// 默认端口（避开 3080=dsh / 1420=vite / 18789=zcode）
 pub const DEFAULT_PORT: u16 = 9420;
-/// 外部通道（M4 T1）：off / quick / named 三值（tunnel::parse_channel 唯一解析口）
+/// **M5 A5 起废弃**：通道选择被三通道独立开关取代（KEY_CHAN_LAN/QUICK/NAMED）；
+/// 仅一次性迁移（read_channels）读它一次，之后废弃不删（回滚旧版本仍可读）
 pub const KEY_CHANNEL: &str = "remote.channel";
+/// 三通道独立开关（M5 A5）：值口径 = **"1" 开 / "0" 关**——写入侧（toggle 命令与
+/// 迁移）恒写显式两值；读取侧 channel_flag_from 只认 "1"，其余（"0"/缺键/乱串）一律关
+pub const KEY_CHAN_LAN: &str = "remote.chan_lan";
+pub const KEY_CHAN_QUICK: &str = "remote.chan_quick";
+pub const KEY_CHAN_NAMED: &str = "remote.chan_named";
 /// 命名隧道 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
-/// 设备上限键（spec T2c：默认 3 台可配）
+/// 设备上限键（spec T2c：默认 10 台可配——M5 A5 用户裁决 3 → 10）
 pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
 /// 访问密码键（M5 A2）：4 位数字（validate_pin 唯一口径；A3 端点 / A4 命令消费）
 pub const KEY_ACCESS_PIN: &str = "remote.access_pin";
 
-/// 上限解析（纯函数）：None/乱串 → 3；clamp 1..=10
+/// 上限解析（纯函数）：None/乱串 → 10（M5 A5 用户裁决：默认 3 → 10；已存值不迁移）；
+/// clamp 1..=10 不变
 pub fn max_devices_from(v: Option<String>) -> usize {
     v.and_then(|s| s.trim().parse::<usize>().ok())
         .map(|n| n.clamp(1, 10))
-        .unwrap_or(3)
+        .unwrap_or(10)
 }
 
 /// 生产上限源（STATE 构造注入；唯一 KV 读取点）
 fn max_devices_from_kv() -> usize {
     max_devices_from(crate::database::dao::settings::get_setting(KEY_MAX_DEVICES))
+}
+
+// ============================================================
+// 三通道独立开关（M5 A5）：KV + 惰性迁移 + bind 派生
+// ============================================================
+
+/// 三通道开关集合：lan = 局域网监听（0.0.0.0，天然包含回环）；quick/named =
+/// cloudflared 隧道。本机通道常驻锁死无开关（前端 A6 只渲染）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChannelFlags {
+    pub lan: bool,
+    pub quick: bool,
+    pub named: bool,
+}
+
+/// 通道种类（remote_toggle_channel 的参数值域）；本机常驻无命令
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelKind {
+    Lan,
+    Quick,
+    Named,
+}
+
+impl ChannelKind {
+    /// 解析（纯函数）：仅认三字面量，其余 Err（错误文案回显原值）
+    fn parse(v: &str) -> Result<Self, String> {
+        match v {
+            "lan" => Ok(Self::Lan),
+            "quick" => Ok(Self::Quick),
+            "named" => Ok(Self::Named),
+            other => Err(format!("通道值非法: {other}（仅 lan/quick/named）")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::Quick => "quick",
+            Self::Named => "named",
+        }
+    }
+
+    fn flag(self, f: ChannelFlags) -> bool {
+        match self {
+            Self::Lan => f.lan,
+            Self::Quick => f.quick,
+            Self::Named => f.named,
+        }
+    }
+}
+
+/// 开关解析（纯函数）：仅 "1" 为开——写入侧恒写显式两值，读侧把 "0"/缺键/乱串
+/// 一律判关（防御性：不认第二真值）
+fn channel_flag_from(v: Option<String>) -> bool {
+    v.as_deref() == Some("1")
+}
+
+/// 迁移映射纯函数（M5 A5 一次性、幂等）：旧键值组合 → 三开关。
+/// 映射口径（用户裁决）：`remote.bind` 仅 "0.0.0.0" → lan 开（127.0.0.1/缺失/乱串
+/// → 关）；`remote.channel` quick/named → 对应开关开，off/缺失/乱串（parse_channel
+/// 返回 None）→ 双关。旧 channel 是单值三选一，双开组合不可能由迁移产生
+fn migrate_channels_from_legacy(bind: Option<&str>, channel: Option<&str>) -> ChannelFlags {
+    ChannelFlags {
+        lan: bind == Some("0.0.0.0"),
+        quick: tunnel::parse_channel(channel) == Some(tunnel::KEY_CHANNEL_VALUE_QUICK),
+        named: tunnel::parse_channel(channel) == Some(tunnel::KEY_CHANNEL_VALUE_NAMED),
+    }
+}
+
+/// 三通道开关读取唯一入口（含一次性惰性迁移，幂等）。
+/// **迁移落库点选型：惰性迁移（本函数）而非 database/migration.rs**——schema 迁移层
+/// 不应反向依赖 remote 的 KV 语义；惰性迁移把「判定 + 映射 + 落库」收口在唯一读取点，
+/// 首次 status / toggle / 启动恢复触达即完成，且天然幂等。
+/// 已迁移判定 = 三新键至少其一存在（迁移恒三键全写含 "0"，不留半迁移态）；
+/// 旧键（KEY_BIND / KEY_CHANNEL）在全代码库仅剩本函数这一处读取，读后**废弃不删**
+/// （用户回滚旧版本仍可读得其语义）
+fn read_channels() -> ChannelFlags {
+    use crate::database::dao::settings;
+    let lan = settings::get_setting(KEY_CHAN_LAN);
+    let quick = settings::get_setting(KEY_CHAN_QUICK);
+    let named = settings::get_setting(KEY_CHAN_NAMED);
+    if lan.is_some() || quick.is_some() || named.is_some() {
+        return ChannelFlags {
+            lan: channel_flag_from(lan),
+            quick: channel_flag_from(quick),
+            named: channel_flag_from(named),
+        };
+    }
+    let flags = migrate_channels_from_legacy(
+        settings::get_setting(KEY_BIND).as_deref(),
+        settings::get_setting(KEY_CHANNEL).as_deref(),
+    );
+    for (key, on) in [
+        (KEY_CHAN_LAN, flags.lan),
+        (KEY_CHAN_QUICK, flags.quick),
+        (KEY_CHAN_NAMED, flags.named),
+    ] {
+        settings::set_setting(key, if on { "1" } else { "0" });
+    }
+    flags
+}
+
+/// 三通道 KV 写入（生产注入；值口径恒 "1"/"0" 显式两值）
+fn write_chan_flag(kind: ChannelKind, on: bool) {
+    let key = match kind {
+        ChannelKind::Lan => KEY_CHAN_LAN,
+        ChannelKind::Quick => KEY_CHAN_QUICK,
+        ChannelKind::Named => KEY_CHAN_NAMED,
+    };
+    crate::database::dao::settings::set_setting(key, if on { "1" } else { "0" });
+}
+
+/// bind 派生（纯函数，M5 A5）：chan_lan 开 → "0.0.0.0"（对外监听，P7 门随
+/// remote_toggle_channel("lan", true) 生效）；关 → "127.0.0.1"。
+/// KEY_BIND 旧键废弃后 bind 的唯一来源——0.0.0.0 由局域网开关驱动，不再独立成键
+fn bind_from_channels(lan_on: bool) -> &'static str {
+    if lan_on {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    }
 }
 
 /// 在线口径（spec T2d 自审修正）：活跃 SSE 连接 ∨ 30s 内过闸
@@ -95,7 +225,7 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         pin_limiter: Mutex::new(pin::PinRateLimiter::new()),
         pin_source: Box::new(pin::get_pin),
         now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-        // gate 回环豁免 / via 判定的隧道域名源（生产 = 快照抽取；A5 双通道聚合时改聚合实现）
+        // gate 回环豁免 / via 判定的隧道域名源（生产 = 双通道快照聚合抽取；M5 A5）
         tunnel_hosts_source: Box::new(tunnel_hosts_from_snapshot),
         via_hosts_source: Box::new(via_hosts_from_snapshot),
     })
@@ -111,48 +241,53 @@ fn host_of_board_url(url: &str) -> Option<String> {
         .filter(|h| !h.is_empty())
 }
 
+/// 单通道域名归集（纯函数）：错误通道不宣称（error ⇒ 无存活 cloudflared，快照里的
+/// 旧地址不可信）；url → host_of_board_url 归一。via 分通道与豁免并集共用
+fn channel_hosts(c: &tunnel::ChannelStatus) -> Vec<String> {
+    if c.error.is_some() {
+        return Vec::new();
+    }
+    c.url
+        .as_deref()
+        .and_then(host_of_board_url)
+        .into_iter()
+        .collect()
+}
+
 /// gate 回环豁免的隧道域名并集（生产源；测试注入缝在 RemoteState）。
-/// **Some(名单) = 正常判定；None = 快照错误终态的 fail-closed 哨兵（评审 Important 1）**：
-/// 豁免的 Host 条件依赖域名名单，快照错误时无从判定 Host 是否隧道域名——返回 None 让
-/// gate **完全跳过本机豁免**（回环 + 任意 Host 都不免费），绝不可当空名单处理（那会让
-/// Host 条件恒满足 → 回环流量全豁免，fail-open）。代价仅隧道错误态下本机也需配对一次。
+/// **Some(名单) = 正常判定；None = 任一通道快照错误终态的 fail-closed 哨兵（评审
+/// Important 1，M5 A5 双通道推广）**：豁免的 Host 条件依赖域名名单，任一通道处于
+/// 错误终态时该通道域名不可信——整体返回 None 让 gate **完全跳过本机豁免**（回环 +
+/// 任意 Host 都不免费），绝不可当空名单处理（那会让 Host 条件恒满足 → 回环流量全
+/// 豁免，fail-open）。代价仅隧道错误态下本机也需配对一次。
 /// 依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared（穿透面本应消失），
 /// 但豁免判定不押注该不变量——快照错误一律收紧
 fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
     let s = tunnel::snapshot();
-    if s.error.is_some() {
+    if s.quick.error.is_some() || s.named.error.is_some() {
         return None;
     }
     Some(
-        s.url
-            .and_then(|u| host_of_board_url(&u))
+        channel_hosts(&s.quick)
             .into_iter()
+            .chain(channel_hosts(&s.named))
             .collect(),
     )
 }
 
-/// via 判定的分通道域名（生产源）：快照单通道模型按 mode 分拣 quick/named；
-/// A5 双通道聚合时改为两通道地址各自归集（签名已兼容）
+/// via 判定的分通道域名（生产源）：双通道各自归集（错误通道不宣称——错误通道的
+/// 旧域名不得再给新配对设备打通道标签）
 fn via_hosts_from_snapshot() -> (Vec<String>, Vec<String>) {
     let s = tunnel::snapshot();
-    if s.error.is_some() {
-        return (Vec::new(), Vec::new());
-    }
-    match (
-        s.mode.as_str(),
-        s.url.as_deref().and_then(host_of_board_url),
-    ) {
-        (m, Some(h)) if m == tunnel::KEY_CHANNEL_VALUE_QUICK => (vec![h], Vec::new()),
-        (m, Some(h)) if m == tunnel::KEY_CHANNEL_VALUE_NAMED => (Vec::new(), vec![h]),
-        _ => (Vec::new(), Vec::new()),
-    }
+    (channel_hosts(&s.quick), channel_hosts(&s.named))
 }
 
-/// 读取设置里的绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
-/// M2-R3：设置里存了非法 bind 时返回 Err（由调用方决定拒绝启动或展示回落）
+/// 读取绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
+/// M5 A5：bind 不再读 KEY_BIND（废弃）——由三通道开关派生（read_channels 含惰性迁移
+/// → bind_from_channels）。M2-R3：parse_bind 校验保留作纵深防御（派生值恒合法）
 fn bind_and_port() -> Result<(String, u16), String> {
     parse_bind(
-        crate::database::dao::settings::get_setting(KEY_BIND).as_deref(),
+        Some(bind_from_channels(read_channels().lan)),
         crate::database::dao::settings::get_setting(KEY_PORT).as_deref(),
     )
 }
@@ -202,6 +337,22 @@ fn is_external_bind(bind: &str) -> bool {
     }
 }
 
+/// P7 门特征错误文案（M2-R3 起的既有口径，单点常量化）：前端 TLS Dialog（A6 局域网
+/// 开关 Dialog 同判据）据此识别「需先确认 TLS 反代」——文案含 remote_confirm_public
+/// 指引。start_server_core 内联门与 ensure_public_ack_if_external 共用，防两处漂移
+const PUBLIC_ACK_REQUIRED_MSG: &str =
+    "对外绑定需先确认已配置 TLS 反向代理（remote_confirm_public）";
+
+/// P7 门检查内核（纯函数）：对外绑定 + 未确认 TLS 前置 → Err 特征文案（沿用
+/// start_server_core 口径）；内环绑定或已确认 → Ok。remote_toggle_channel("lan", true)
+/// 在热重启前先行检查，让错误在改绑动作发生前暴露
+fn ensure_public_ack_if_external(bind: &str, ack: Option<String>) -> Result<(), String> {
+    if is_external_bind(bind) && !ack.map(|v| v == "true").unwrap_or(false) {
+        return Err(PUBLIC_ACK_REQUIRED_MSG.to_string());
+    }
+    Ok(())
+}
+
 /// 句柄存活判定内核（纯函数，不触全局/DB/端口）：只有「句柄存在且其任务仍在运行」
 /// 才算存活。任务自行退出（典型：端口被占，`serve` 返回 Err 后任务结束）会留下
 /// **已完成**的陈旧句柄——自愈判定：已完成 = 不存在，允许重新 spawn。
@@ -236,7 +387,7 @@ fn start_server_core(
     // 必须先确认 TLS 前置，否则拒绝对外——旧实现只拦字面量 "0.0.0.0"，写具体网卡
     // IP 即绕过。ack 惰性读取：仅对外绑定时才查 DB
     if is_external_bind(&bind) && !public_ack().map(|v| v == "true").unwrap_or(false) {
-        return Err("对外绑定需先确认已配置 TLS 反向代理（remote_confirm_public）".into());
+        return Err(PUBLIC_ACK_REQUIRED_MSG.to_string());
     }
     *h = Some(spawn(bind, port));
     Ok(true)
@@ -256,13 +407,14 @@ fn start_server() -> Result<(), String> {
             // setup 线程无 tokio runtime 上下文）；其 JoinHandle 同样支持 abort
             // （stop_server 语义不变）
             tauri::async_runtime::spawn(async move {
-                // M4 T1c：隧道随服务器启动（off/未配置内部直返；失败写快照不阻断——
-                // 隧道失败不阻断远程主体）
-                tunnel::start_if_configured(port);
+                // M5 A5：隧道随监听 spawn 逐通道恢复（原 start_if_configured 单通道位；
+                // 幂等——restart_listener 路径隧道未被停，已存活句柄在此自然短路）
+                restore_enabled_tunnels(port);
                 if let Err(e) = server::serve(&bind, port, STATE.clone()).await {
                     log::error!("远程服务器退出: {e}");
-                    // serve 失败退出任务时隧道留着无意义，一并停掉
-                    tunnel::stop();
+                    // serve 失败退出任务时隧道留着无意义（代理目标已无人监听），
+                    // 双通道一并停掉
+                    tunnel::stop_all();
                 }
             })
         },
@@ -276,14 +428,17 @@ fn start_server() -> Result<(), String> {
 }
 
 /// 停止内核（可测核心，外部依赖全部注入）：abort 服务器任务 → SSE 全断连 →
-/// [仅 revoke] 全吊销设备 → 停隧道 → 释放电源锁。
-/// **M5 A4 吊销收窄矩阵（调用点 → revoke 取值，全量清单，专测锁定语义）**：
-///   - `remote_toggle(false)`（显性关闭远程）→ `true`（`stop_server_explicit_close`）；
+/// [仅 revoke] 全吊销设备 → [注入的]隧道停法 → 释放电源锁。
+/// **M5 A4 吊销收窄矩阵（调用点 → revoke / 隧道停法取值，全量清单，专测锁定语义）**：
+///   - `remote_toggle(false)`（显性关闭远程）→ revoke=`true`（`stop_server_explicit_close`）
+///     + 隧道 `stop_all`（全停，重开按各卡状态恢复）；
+///   - 热重启（`restart_listener` → `stop_server_hot_restart`，M5 A4 遗留命名化）→
+///     revoke=`false` + **隧道不动**（隧道句柄独立于监听进程，随通道开关与总开关启停；
+///     监听热重启弹掉隧道会让 lan 开关把 quick 临时隧道换址）；
 ///   - 重置密码（`remote_set_pin` 改值）/ 重置设备（`remote_reset_devices`）→ 不经停机，
 ///     走 `revoke_all_and_disconnect`（服务器不停）；
-///   - 改绑定/改端口热重启（`restart_listener`）→ `false`（设备与 cookie 全保留）；
 ///   - MAM 应用退出/重启（lib.rs `RunEvent::Exit`）→ 本就不调 stop_server（只停隧道
-///     + 放电源锁），维持「重启不吊销」现状。
+///     `stop_all` + 放电源锁），维持「重启不吊销」现状。
 ///
 /// `revoke=false` = 只停监听，设备记录与 cookie 全部保留——热重启后 cookie 仍过闸。
 fn stop_server_core(
@@ -307,12 +462,13 @@ fn stop_server_core(
     release_power();
 }
 
-/// 停止远程服务（M5 A4 吊销收窄：revoke 参数化）——语义矩阵见 stop_server_core 注释。
+/// 停止远程服务（吊销与隧道停法参数化）：revoke 语义矩阵见 stop_server_core 注释。
 /// M5 A3：旧直通码/审批制的内存态（PairingService token / ApprovalService 队列）已随
 /// 模块删除——吊销 = `revoke_all` 一条即足够，已配对设备下次过闸即 403。
-/// 锁序不变：SERVER_HANDLE 短锁取走句柄即释放，两条锁不并发持有（registry 永远
-/// 最后进最先出）——store/registry 经 Arc 克隆在锁外的闭包里触达
-fn stop_server(revoke: bool) {
+/// 锁纪律：**两把锁从不嵌套持有，各自独立短临界区**——SERVER_HANDLE 短锁取走句柄
+/// 即释放；store/registry 经 Arc 克隆在锁外的闭包里触达（M5 A5 修正表述：
+/// 原注释「registry 永远最后进最先出」与实际顺序不符）
+fn stop_server_with(revoke: bool, stop_tunnels: impl FnOnce()) {
     let handle = SERVER_HANDLE.lock().unwrap().take();
     let st_reg = STATE.clone();
     let st_store = STATE.clone();
@@ -325,18 +481,33 @@ fn stop_server(revoke: bool) {
         move || {
             let _ = st_store.store.with(pairing::revoke_all); // 吊销失败仅忽略，不阻断停机
         },
-        // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
-        tunnel::stop,
+        stop_tunnels,
         // M4 T3：电源锁随远程关闭释放（caffeinate kill / 执行状态清除 + 磁盘代设还原）
         power::release,
     );
 }
 
-/// 显性关闭远程的停止路径（remote_toggle(false) 专用）：停止 + 全吊销。
-/// 命名函数而非内联闭包：吊销收窄矩阵的每个调用点在代码里可点名审阅（矩阵清单见
-/// stop_server_core 注释），杜绝未来改动误接成 revoke=false 造成「关闭不掉线」
+/// 停止远程服务（通用停机）：revoke 按调用方语义 + 隧道全停（M5 A5 双通道 stop_all）
+fn stop_server(revoke: bool) {
+    stop_server_with(revoke, tunnel::stop_all);
+}
+
+/// 显性关闭远程的停止路径（remote_toggle(false) 专用）：停止 + 全吊销 + 隧道全停
+/// （重开按各通道卡状态恢复）。命名函数而非内联闭包：吊销收窄矩阵的每个调用点在
+/// 代码里可点名审阅（矩阵清单见 stop_server_core 注释），杜绝未来改动误接成
+/// revoke=false 造成「关闭不掉线」
 fn stop_server_explicit_close() {
     stop_server(true);
+}
+
+/// 热重启的停止路径（restart_listener 专用；M5 A4 遗留命名化——原为 restart_listener
+/// 内联闭包 `|| stop_server(false)`）：只停监听——不吊销（设备与 cookie 全保留）
+/// 且**不停隧道**（见 stop_server_core 矩阵「热重启」行）。
+/// **变异锚点**：误接成 `stop_server(true)` → server.rs
+/// hot_restart_without_revoke_keeps_device_cookie_valid 必红；误塞隧道停止（如
+/// `tunnel::stop_all`）→ lan 开关弹掉 quick 隧道换址（通道开关独立语义破坏）
+fn stop_server_hot_restart() {
+    stop_server_with(false, || {});
 }
 
 /// 热重启内核（可测核心）：仅运行中才有「重启」语义——未运行空转（下次
@@ -356,19 +527,38 @@ fn restart_listener_core(
 }
 
 /// 改绑定/改端口自动热重启（M5 A4，不吊销）：远程开启状态下，停监听（设备记录与
-/// cookie 全保留）→ 按当前设置重新监听，用户无感、不掉线。复用既有 stop/start
-/// 监听代码路径（stop_server(false) + start_server），无并行实现。
-/// **通用原语**：A5 的 remote_toggle_channel（chan_lan 派生 bind）在其上接线；本任务
-/// 不动 remote_set_channel、不拦通用 set_setting——改绑定现状（写 KV + 手动停开，
-/// 前端 bindRestartHint 提示）由 A5/A6 收口。
+/// cookie 全保留、**隧道不受扰**）→ 按当前设置重新监听，用户无感、不掉线。
+/// 复用既有 stop/start 监听代码路径（stop_server_hot_restart + start_server），
+/// 无并行实现。**通用原语**：A5 的 remote_toggle_channel（chan_lan 派生 bind）在其上
+/// 接线；不拦通用 set_setting——旧 remote.bind 键已废弃（生产不读），改绑定 = 局域网
+/// 开关（前端 A6 收口）。
 /// **失败口径（二选一已裁决：保持停机 + 错误上抛，不回落旧 bind/port）**：
 /// 回落会让「实际监听地址」与「设置页展示」背离——显示已收窄（如 127.0.0.1）实际
 /// 仍对外（或反之）属状态撒谎；且 enabled SSOT 与现实的背离正是 status_enabled
 /// 句柄校准 + start 自愈既有机制覆盖的场景，用户解除端口占用后重开一次即恢复。
 pub fn restart_listener() -> Result<(), String> {
-    // 短锁：只取存活快照立即释放（与 remote_status / remote_set_channel 同型）
+    // 短锁：只取存活快照立即释放（与 remote_status / remote_toggle_channel 同型）
     let live = handle_is_live(&SERVER_HANDLE.lock().unwrap());
-    restart_listener_core(live, || stop_server(false), start_server)
+    restart_listener_core(live, stop_server_hot_restart, start_server)
+}
+
+/// 逐通道恢复内核（可测核心，M5 A5）：只对开着的隧道通道 ensure（lan 的监听恢复由
+/// start_server 承担不在此列；本机通道常驻无动作）
+fn restore_tunnels_core(flags: ChannelFlags, mut ensure: impl FnMut(ChannelKind)) {
+    if flags.quick {
+        ensure(ChannelKind::Quick);
+    }
+    if flags.named {
+        ensure(ChannelKind::Named);
+    }
+}
+
+/// 恢复开着的隧道通道（总开关 spawn 路径 / remote_toggle(true) 的单点；通道开关
+/// remote_toggle_channel 不经此——它直连 tunnel::start_channel 单通道）。
+/// 读三通道 KV（含惰性迁移），逐通道 ensure（幂等：已存活句柄短路）
+fn restore_enabled_tunnels(port: u16) {
+    let flags = read_channels();
+    restore_tunnels_core(flags, |k| tunnel::start_channel(k.as_str(), port));
 }
 
 /// 开关内核（可测核心，SSOT 写入与启停以闭包注入）：写 enabled SSOT → 启/停服务器。
@@ -399,7 +589,9 @@ fn toggle_core(
 }
 
 /// 开关远程接入（前端设置页 invoke）：写设置 SSOT 后启停服务器（失败回滚见 toggle_core）。
-/// M5 A4 吊销收窄：关闭走 stop_server_explicit_close（吊销）；开启分支不 stop
+/// M5 A4 吊销收窄：关闭走 stop_server_explicit_close（吊销 + 隧道全停）；开启分支
+/// 不 stop。M5 A5 总开关恢复逻辑：开启成功 → 按各通道 KV 恢复隧道 + PIN 自动生成
+/// （关闭 = 全停，重开按各卡状态恢复——用户裁决）
 #[tauri::command]
 pub fn remote_toggle(enabled: bool) -> Result<(), String> {
     toggle_core(
@@ -413,6 +605,17 @@ pub fn remote_toggle(enabled: bool) -> Result<(), String> {
         start_server,
         stop_server_explicit_close,
     )?;
+    if enabled {
+        // 恢复开着的隧道（幂等：start_server spawn 闭包已恢复过一轮，重入切换时
+        // 此处兜底——已存活句柄短路）。lan 的监听已由 start_server 按派生 bind 起，
+        // 无需额外动作
+        let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
+        restore_enabled_tunnels(port);
+        // PIN 自动生成：未设置才生成写入；已有 PIN 不覆盖（随 remote_status.pin 返回）
+        if ensure_pin_auto() {
+            events::audit("pin_autogenerated", "master=true");
+        }
+    }
     // M4 T1c：成功后广播状态变更（Task 8 的 useRemoteEvents 监听 → 状态页即时刷新）
     events::emit_ui("remote-changed", serde_json::json!({ "enabled": enabled }));
     Ok(())
@@ -428,9 +631,10 @@ fn status_enabled(db_enabled: bool, handle_alive: bool) -> bool {
 
 /// 设置页状态展示：enabled / bind / port / url / lanUrls（仅 0.0.0.0 给局域网候选）
 /// M3 Task 1 追加 host（P8a 版本 + P8b 本机名 + P8d enabledTools 数据源）
+/// M5 A5 追加 channels（四通道状态）+ pin（当前访问密码）
 #[tauri::command]
 pub fn remote_status() -> serde_json::Value {
-    // 展示层：设置里 bind 非法时回落默认值展示（真实启动会在 start_server 被拒）
+    // 展示层：派生 bind + 设置端口（派生值恒合法，unwrap_or 仅端口解析的兜底口径）
     let (bind, port) = bind_and_port().unwrap_or_else(|e| {
         log::warn!("remote_status: 设置里的绑定地址非法，按默认展示: {e}");
         ("127.0.0.1".to_string(), DEFAULT_PORT)
@@ -458,19 +662,85 @@ pub fn remote_status() -> serde_json::Value {
     st["port"] = serde_json::json!(port);
     st["url"] = serde_json::json!(display_url_for(&bind, port, ips));
     st["lanUrls"] = serde_json::json!(lan);
-    // 地址表（2026-09-16 用户裁决）：设置页「访问地址」单区块逐条渲染的数据源。
-    // M4 T1a：隧道地址恒首位 primary（隧道出错时回退纯局域网表）
+    // M5 A5：三通道开关（read_channels 含惰性迁移）+ 双通道隧道快照
+    let chans = read_channels();
     let tun = tunnel::snapshot();
-    st["channel"] = serde_json::json!(crate::database::dao::settings::get_setting(KEY_CHANNEL)
-        .as_deref()
-        .unwrap_or("off"));
-    st["tunnelUrl"] = serde_json::json!(tun.url);
-    st["tunnelError"] = serde_json::json!(tun.error);
+    // 旧单通道键保留（现前端兼容；A6 切换到 channels 后随 A8 回归裁决去留）：
+    // channel = 开关派生三值（quick 优先——双开时旧键只能表达一个）；
+    // tunnelUrl / tunnelError / addresses 的隧道位 = 首个可用通道（first_available_tunnel_url）
+    st["channel"] = serde_json::json!(if chans.quick {
+        tunnel::KEY_CHANNEL_VALUE_QUICK
+    } else if chans.named {
+        tunnel::KEY_CHANNEL_VALUE_NAMED
+    } else {
+        tunnel::KEY_CHANNEL_VALUE_OFF
+    });
+    st["tunnelUrl"] = serde_json::json!(first_available_tunnel_url(&tun));
+    st["tunnelError"] =
+        serde_json::json!(tun.quick.error.clone().or_else(|| tun.named.error.clone()));
     st["addresses"] = serde_json::json!(address_entries_with_tunnel(
-        tun.url.filter(|_| tun.error.is_none()),
+        first_available_tunnel_url(&tun),
         address_entries(&bind, port, &candidates),
     ));
+    // M5 A5：四通道状态（形状契约见 channels_payload 注释）+ 当前访问密码
+    // （gate 已保证本载荷只被本机/已过闸前端读到——pin 展示给设置页与看板持有者）
+    st["channels"] = channels_payload(enabled, chans, port, lan, &tun);
+    st["pin"] = serde_json::json!(pin::get_pin());
     st
+}
+
+/// 快照聚合的「首个可用隧道看板地址」（纯函数，quick 优先）：错误通道不宣称——
+/// 旧单通道口径 `url.filter(error.is_none())` 的双通道推广。legacy 单地址消费方
+/// （托盘 / addresses 表 / tunnelUrl 键）共用；新消费方请直接读 channels 载荷
+fn first_available_tunnel_url(tun: &tunnel::TunnelStatus) -> Option<String> {
+    tun.quick
+        .url
+        .clone()
+        .filter(|_| tun.quick.error.is_none())
+        .or_else(|| tun.named.url.clone().filter(|_| tun.named.error.is_none()))
+}
+
+/// 四通道状态载荷内核（纯函数，M5 A5；A6 设置页卡片与 A7 移动端消费**同一形状**——
+/// 本注释即契约）：
+/// ```json
+/// {
+///   "local": { "running": bool, "address": "http://127.0.0.1:{port}/m" },
+///   "lan":   { "enabled": bool, "running": bool, "addresses": ["http://{ip}:{port}/m", ...] },
+///   "quick": { "enabled": bool, "running": bool, "address": str|null, "error": str|null },
+///   "named": { "enabled": bool, "running": bool, "address": str|null, "error": str|null }
+/// }
+/// ```
+/// enabled = 三通道 KV 开关；running = 运行态（local/lan 随监听存活，隧道随句柄存活）；
+/// 隧道 address = 看板完整地址（错误态不宣称 → null）；error = 该通道终态错误。
+/// lan.addresses 沿 lan_urls_for 口径（仅 0.0.0.0 非空，完整可直达 URL）
+fn channels_payload(
+    listener_alive: bool,
+    flags: ChannelFlags,
+    port: u16,
+    lan_addresses: Vec<String>,
+    tun: &tunnel::TunnelStatus,
+) -> serde_json::Value {
+    let chan = |c: &tunnel::ChannelStatus, enabled: bool| {
+        serde_json::json!({
+            "enabled": enabled,
+            "running": c.running,
+            "address": c.url.clone().filter(|_| c.error.is_none()),
+            "error": c.error.clone(),
+        })
+    };
+    serde_json::json!({
+        "local": {
+            "running": listener_alive,
+            "address": format!("http://127.0.0.1:{port}/m"),
+        },
+        "lan": {
+            "enabled": flags.lan,
+            "running": listener_alive && flags.lan,
+            "addresses": lan_addresses,
+        },
+        "quick": chan(&tun.quick, flags.quick),
+        "named": chan(&tun.named, flags.named),
+    })
 }
 
 /// 本机展示名（纯函数，注入缝：sysinfo 以闭包注入便于测试）：
@@ -730,34 +1000,143 @@ pub fn remote_confirm_public() -> Result<(), String> {
     Ok(())
 }
 
-/// 通道设置（M4 T1a）：写 KV；显式停旧启新（E2E S11 修正：off→quick/named 时
-/// 隧道从未运行，restart_if_running 的「运行中才重启」会直接空转，隧道永不拉起）；
-/// 成功后广播状态变更。校验先行（named 必须已有 Token——先写后验会把非法通道落库）
+// ============================================================
+// 三通道独立开关命令（M5 A5）：remote_toggle_channel
+// ============================================================
+
+/// PIN 自动生成内核（纯函数）：未设置（None）→ 生成写入返回 true；已有 → 不覆盖
+/// 返回 false（用户自设/既有 PIN 恒优先——用户裁决「已有 PIN 不覆盖」）
+fn ensure_pin_core(
+    existing: Option<String>,
+    gen: impl FnOnce() -> String,
+    write: impl FnOnce(&str),
+) -> bool {
+    match existing {
+        None => {
+            write(&gen());
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+/// PIN 自动生成（总开关开启 / 任一对外通道开启时调用）：返回是否新生成
+fn ensure_pin_auto() -> bool {
+    ensure_pin_core(pin::get_pin(), pin::generate_pin, pin::set_pin)
+}
+
+/// 通道开关内核的注入依赖束（clippy too_many_arguments 规避 + 语义分组）
+struct ChannelToggleDeps<P, W, R, T> {
+    /// P7 ack 读取（生产 = KEY_PUBLIC_ACK KV；测试注入 None / Some("true")）
+    public_ack: P,
+    /// 三通道 KV 写入（生产 = write_chan_flag；测试记录调用序供回滚断言）
+    write_flag: W,
+    /// 监听热重启（生产 = restart_listener——不吊销不扰隧道；测试记录调用）
+    restart: R,
+    /// 隧道启停 (kind, on)：on = start_channel ensure / off = stop_channel
+    /// （生产直连 tunnel 单点；测试记录调用）
+    tunnel: T,
+}
+
+/// 通道开关内核（可测核心，M5 A5）：幂等短路 → 写 KV → 总开关开着才联动运行态
+/// （lan = P7 门 + 热重启改绑；quick/named = 隧道启停——**隧道启停仅由本命令与
+/// 总开关驱动**）。
+/// **失败回滚纪律（toggle_core 同款「失败不撒谎」）**：lan on 在门失败 / 重启失败时
+/// 回滚 KV 为关再传 Err——不回滚有二患：开关显示开而监听仍 127.0.0.1（状态撒谎）；
+/// 用户确认 TLS 后重开会撞上「同向幂等短路」而永不生效。lan off / 隧道路径无失败
+/// 形态，不回滚（off 即目标态）。总开关关着时只写 KV（运行态由下次 remote_toggle(true)
+/// 按 restore_tunnels_core / 派生 bind 恢复）
+fn toggle_channel_core(
+    kind: ChannelKind,
+    on: bool,
+    current: ChannelFlags,
+    master_live: bool,
+    deps: ChannelToggleDeps<
+        impl FnOnce() -> Option<String>,
+        impl FnMut(ChannelKind, bool),
+        impl FnOnce() -> Result<(), String>,
+        impl FnMut(ChannelKind, bool),
+    >,
+) -> Result<(), String> {
+    let ChannelToggleDeps {
+        public_ack,
+        mut write_flag,
+        restart,
+        mut tunnel,
+    } = deps;
+    if kind.flag(current) == on {
+        return Ok(()); // 幂等：重复同向调用 no-op（不写 KV、不触运行态）
+    }
+    write_flag(kind, on);
+    if !master_live {
+        return Ok(()); // 总开关关着：只落开关位，恢复交给 remote_toggle(true)
+    }
+    match (kind, on) {
+        (ChannelKind::Lan, true) => {
+            // P7 门先行（特征文案与 start_server_core 内联门同源单点）——过门才热重启
+            if let Err(e) = ensure_public_ack_if_external(bind_from_channels(true), public_ack()) {
+                write_flag(ChannelKind::Lan, false);
+                return Err(e);
+            }
+            restart().inspect_err(|_| {
+                write_flag(ChannelKind::Lan, false);
+            })?;
+            Ok(())
+        }
+        // lan off：bind 回 127.0.0.1 需热重启；重启失败不回滚（off 即目标态，
+        // 「监听已停」由 restart_listener 保持停机口径承担）
+        (ChannelKind::Lan, false) => restart(),
+        // 隧道启停无失败形态（隧道失败写快照不阻断——spec T1d）
+        (k, o) => {
+            tunnel(k, o);
+            Ok(())
+        }
+    }
+}
+
+/// 三通道独立开关（M5 A5）：channel ∈ "lan" | "quick" | "named"（本机常驻锁死无命令，
+/// 前端 A6 只渲染）。幂等（重复同向调用 no-op）。
+/// **隧道启停唯一入口 = 本命令 + 总开关 remote_toggle**（旧 remote_set_channel 已删）。
+/// lan on：P7 门（未确认 TLS → Err 特征文案，前端弹 Dialog）→ restart_listener 改绑
+/// 不吊销。通道开启且 PIN 未设置 → 自动生成（随 remote_status.pin 返回，UI 展示可改）。
+/// 失败回滚口径见 toggle_channel_core
 #[tauri::command]
-pub fn remote_set_channel(channel: String, token: Option<String>) -> Result<(), String> {
-    let mode = tunnel::parse_channel(Some(&channel))
-        .ok_or_else(|| format!("通道值非法: {channel}（仅 off/quick/named）"))?;
-    if let Some(t) = token {
-        crate::database::dao::settings::set_setting(KEY_TUNNEL_TOKEN, t.trim());
+pub fn remote_toggle_channel(channel: String, on: bool) -> Result<(), String> {
+    let kind = ChannelKind::parse(&channel)?;
+    let current = read_channels();
+    // 短锁：只取监听存活快照立即释放（「总开关开着」的运行态判据——DB enabled=true
+    // 但句柄已死时按未运行处理，自愈交给下次 remote_toggle / restore_on_launch）
+    let master_live = handle_is_live(&SERVER_HANDLE.lock().unwrap());
+    toggle_channel_core(
+        kind,
+        on,
+        current,
+        master_live,
+        ChannelToggleDeps {
+            public_ack: || crate::database::dao::settings::get_setting(KEY_PUBLIC_ACK),
+            write_flag: write_chan_flag,
+            restart: restart_listener,
+            tunnel: |k: ChannelKind, o: bool| {
+                let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
+                if o {
+                    tunnel::start_channel(k.as_str(), port);
+                } else {
+                    tunnel::stop_channel(k.as_str());
+                }
+            },
+        },
+    )?;
+    if on && ensure_pin_auto() {
+        events::audit("pin_autogenerated", &format!("channel={}", kind.as_str()));
     }
-    if mode == tunnel::KEY_CHANNEL_VALUE_NAMED
-        && crate::database::dao::settings::get_setting(KEY_TUNNEL_TOKEN)
-            .map(|v| v.trim().is_empty())
-            .unwrap_or(true)
-    {
-        return Err("命名隧道需要填写 Tunnel Token".into());
-    }
-    crate::database::dao::settings::set_setting(KEY_CHANNEL, mode);
-    let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
-    tunnel::stop();
-    // 终审 Important：加服务器句柄存活门——远程关闭（enabled=false）时隧道无意义且浪费
-    // 资源（会触发 cloudflared 下载并 spawn 指向死端口的公网 URL）；而开启远程的路径
-    // 本就会再调 start_if_configured，此门无功能损失。锁短临界区：存活快照取完即放
-    if mode != tunnel::KEY_CHANNEL_VALUE_OFF && handle_is_live(&SERVER_HANDLE.lock().unwrap()) {
-        tunnel::start_if_configured(port);
-    }
-    events::emit_ui("remote-changed", serde_json::json!({ "channel": mode }));
-    events::audit("channel_set", &format!("channel={mode}"));
+    events::emit_ui(
+        "remote-changed",
+        serde_json::json!({ "channel": kind.as_str(), "on": on }),
+    );
+    events::audit(
+        "channel_toggled",
+        &format!("channel={} on={on}", kind.as_str()),
+    );
     Ok(())
 }
 
@@ -790,7 +1169,7 @@ pub fn tray_display() -> (bool, String) {
     let tun = tunnel::snapshot();
     tray_display_from(
         enabled,
-        tun.url.filter(|_| tun.error.is_none()),
+        first_available_tunnel_url(&tun),
         display_url_for(&bind, port, local_lan_ips()),
     )
 }
@@ -1454,16 +1833,17 @@ mod tests {
 
     #[test]
     fn max_devices_default_and_clamp() {
-        assert_eq!(max_devices_from(None), 3);
+        assert_eq!(max_devices_from(None), 10); // M5 A5 用户裁决：默认 3 → 10
         assert_eq!(max_devices_from(Some("1".into())), 1);
+        assert_eq!(max_devices_from(Some("10".into())), 10); // 已存值原样（clamp 内）
         assert_eq!(max_devices_from(Some("99".into())), 10); // clamp 上限
-        assert_eq!(max_devices_from(Some("x".into())), 3); // 乱串回落默认
+        assert_eq!(max_devices_from(Some("x".into())), 10); // 乱串回落默认（A5 起 = 10）
     }
 
-    // ==== M5 A3 评审修复（Minor 6）：隧道快照 → 域名适配器单测 ====
-    // 全局态纪律：via_hosts/tunnel_hosts 适配器读 tunnel::SNAPSHOT 全局——本组测试
-    // 是全测试进程唯一触碰该全局的用例（tunnel.rs 自身测试全为纯函数），且用后还原
-    // 默认值，不存在跨测试污染
+    // ==== M5 A3 评审修复（Minor 6）+ M5 A5 双通道化：隧道快照 → 域名适配器单测 ====
+    // 全局态纪律：via_hosts/tunnel_hosts 适配器读 tunnel::SNAPSHOT 全局——触碰该全局
+    // 的用例一律持 tunnel::test_sync::TUNNEL_GLOBALS 互斥锁（与 tunnel.rs 快照测试
+    // 共享，默认多线程运行下两文件并发触碰会互踩），且用后还原默认值
 
     /// host_of_board_url 纯函数边界：scheme + 路径、无 scheme、大写+端口归一、空 host
     #[test]
@@ -1487,60 +1867,99 @@ mod tests {
         assert_eq!(host_of_board_url(""), None, "空串 → None");
     }
 
-    /// via 分通道分发：off → 两表皆空；quick/named 按 mode 分拣（域名归一）；
-    /// 错误终态 → via 两表皆空（标签不宣称通道）而豁免侧返回 None 哨兵（fail-closed）
+    /// M5 A5 双通道聚合：quick/named 各自归集（域名归一）；错误通道不宣称（该通道
+    /// 名单为空）而豁免侧**任一通道错误 → None 哨兵**（fail-closed 整体收紧）
     #[test]
-    fn via_hosts_from_snapshot_dispatches_by_mode_and_fails_closed_on_error() {
+    fn via_hosts_from_snapshot_aggregates_both_channels_and_fails_closed_on_error() {
         use tunnel::TunnelStatus;
-        // 默认态（off / 无 url）
+        let _g = tunnel::test_sync::TUNNEL_GLOBALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 默认态（双通道皆空）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
         assert_eq!(via_hosts_from_snapshot(), (Vec::new(), Vec::new()));
-        // quick 分发（url 故意大写——归一后入表）
+        // 双通道同开：各自归集（quick url 故意大写——归一后入表）
         tunnel::set_snapshot(|s| {
-            *s = TunnelStatus {
-                mode: "quick".into(),
+            s.quick = tunnel::ChannelStatus {
+                running: true,
                 url: Some("https://Q-Test.trycloudflare.com/m".into()),
                 error: None,
-            }
-        });
-        assert_eq!(
-            via_hosts_from_snapshot(),
-            (vec!["q-test.trycloudflare.com".to_string()], Vec::new())
-        );
-        // named 分发
-        tunnel::set_snapshot(|s| {
-            *s = TunnelStatus {
-                mode: "named".into(),
+            };
+            s.named = tunnel::ChannelStatus {
+                running: true,
                 url: Some("https://mam.example.com/m".into()),
                 error: None,
-            }
+            };
         });
         assert_eq!(
             via_hosts_from_snapshot(),
-            (Vec::new(), vec!["mam.example.com".to_string()])
+            (
+                vec!["q-test.trycloudflare.com".to_string()],
+                vec!["mam.example.com".to_string()]
+            )
         );
-        // 错误终态：via 两表皆空（此时域名不可信）
+        assert_eq!(
+            tunnel_hosts_from_snapshot(),
+            Some(vec![
+                "q-test.trycloudflare.com".to_string(),
+                "mam.example.com".to_string()
+            ]),
+            "豁免并集 = 双通道域名链式聚合"
+        );
+        // 错误通道不宣称：quick 错误 → quick 名单空、named 名单保留
         tunnel::set_snapshot(|s| {
-            *s = TunnelStatus {
-                mode: "quick".into(),
-                url: Some("https://q-test.trycloudflare.com/m".into()),
-                error: Some("cloudflared 启动失败".into()),
-            }
+            s.quick.error = Some("cloudflared 启动失败".into());
         });
-        assert_eq!(via_hosts_from_snapshot(), (Vec::new(), Vec::new()));
-        // 豁免侧同源判定：错误 → None 哨兵；恢复正常 → Some(域名)
+        assert_eq!(
+            via_hosts_from_snapshot(),
+            (Vec::new(), vec!["mam.example.com".to_string()]),
+            "错误通道的旧域名不得宣称（不误导新配对设备的通道标签）"
+        );
+        // 豁免侧同源判定：任一通道错误 → None 哨兵（整体收紧，fail-closed）
         assert_eq!(
             tunnel_hosts_from_snapshot(),
             None,
-            "快照错误必须返回 None 哨兵（gate 据此跳过豁免，fail-closed）"
-        );
-        tunnel::set_snapshot(|s| s.error = None);
-        assert_eq!(
-            tunnel_hosts_from_snapshot(),
-            Some(vec!["q-test.trycloudflare.com".to_string()])
+            "任一通道快照错误必须返回 None 哨兵（gate 据此跳过豁免，fail-closed）"
         );
         // 还原默认快照（用后即还，不污染其它测试）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
+    }
+
+    /// first_available_tunnel_url（legacy 单地址聚合口径）：quick 优先；错误通道不宣称；
+    /// 双皆空 → None
+    #[test]
+    fn first_available_tunnel_url_prefers_quick_and_skips_errored() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let mk = |u: Option<&str>, e: Option<&str>| ChannelStatus {
+            running: false,
+            url: u.map(str::to_string),
+            error: e.map(str::to_string),
+        };
+        // 双开 → quick 优先
+        let t = TunnelStatus {
+            quick: mk(Some("https://q.trycloudflare.com/m"), None),
+            named: mk(Some("https://mam.example.com/m"), None),
+        };
+        assert_eq!(
+            first_available_tunnel_url(&t).as_deref(),
+            Some("https://q.trycloudflare.com/m")
+        );
+        // quick 错误 → 回落 named（错误通道不宣称）
+        let t = TunnelStatus {
+            quick: mk(Some("https://q.trycloudflare.com/m"), Some("挂了")),
+            named: mk(Some("https://mam.example.com/m"), None),
+        };
+        assert_eq!(
+            first_available_tunnel_url(&t).as_deref(),
+            Some("https://mam.example.com/m")
+        );
+        // 双皆空 / 双皆错 → None
+        assert_eq!(first_available_tunnel_url(&TunnelStatus::default()), None);
+        let t = TunnelStatus {
+            quick: mk(None, Some("挂了")),
+            named: mk(None, Some("也挂了")),
+        };
+        assert_eq!(first_available_tunnel_url(&t), None);
     }
 
     // ==== M4 T4 托盘展示纯核 ====
@@ -1862,6 +2281,458 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, "甲".repeat(40), "DAO 40 字截断贯穿命令内核");
+    }
+
+    // ==== M5 A5：三通道独立开关（迁移映射 / bind 派生 / toggle 内核 / 恢复 / PIN / 载荷） ====
+    // 零污染约束：read_channels / write_chan_flag / 真实命令触全局 DB——测试只驱动
+    // 纯函数与注入式内核；tunnel 启停/快照全局的用例持 tunnel::test_sync 锁
+
+    /// 迁移映射纯函数全矩阵：旧 bind/channel 值组合 → 三开关（含缺失/乱值回落）。
+    /// 口径：仅 "0.0.0.0" → lan 开；仅 quick/named 字面量 → 对应隧道开；
+    /// off/缺失/乱串（parse_channel None）→ 双关
+    #[test]
+    fn migrate_channels_from_legacy_full_matrix() {
+        let all_off = ChannelFlags::default();
+        // bind 维度：0.0.0.0 → lan on；127.0.0.1 / localhost / 乱串 / 缺失 → lan off
+        assert_eq!(
+            migrate_channels_from_legacy(Some("0.0.0.0"), None),
+            ChannelFlags {
+                lan: true,
+                quick: false,
+                named: false
+            }
+        );
+        for b in [
+            Some("127.0.0.1"),
+            Some("localhost"),
+            Some("192.168.1.5"),
+            Some(""),
+            Some("999.1.1.1"),
+            None,
+        ] {
+            assert_eq!(
+                migrate_channels_from_legacy(b, None),
+                all_off,
+                "bind {b:?} 不得映射出任何开关"
+            );
+        }
+        // channel 维度：quick / named / off / 缺失 / 乱串（大小写敏感拒绝 → None → off）
+        assert_eq!(
+            migrate_channels_from_legacy(None, Some("quick")),
+            ChannelFlags {
+                lan: false,
+                quick: true,
+                named: false
+            }
+        );
+        assert_eq!(
+            migrate_channels_from_legacy(None, Some("named")),
+            ChannelFlags {
+                lan: false,
+                quick: false,
+                named: true
+            }
+        );
+        for c in [Some("off"), Some(""), Some("QUICK"), Some("tls"), None] {
+            assert_eq!(
+                migrate_channels_from_legacy(None, c),
+                all_off,
+                "channel {c:?} 不得映射出任何开关"
+            );
+        }
+        // 组合：双通道同开不可能由单值旧键迁移产生（0.0.0.0 + named 各归各位）
+        assert_eq!(
+            migrate_channels_from_legacy(Some("0.0.0.0"), Some("named")),
+            ChannelFlags {
+                lan: true,
+                quick: false,
+                named: true
+            }
+        );
+    }
+
+    /// 开关解析口径：仅 "1" 为开；"0" / 空串 / 乱串 / 缺键一律关
+    #[test]
+    fn channel_flag_from_only_one_means_on() {
+        assert!(channel_flag_from(Some("1".into())));
+        for v in [
+            Some("0".to_string()),
+            Some("".to_string()),
+            Some("true".to_string()),
+            None,
+        ] {
+            assert!(!channel_flag_from(v.clone()), "{v:?} 必须判关");
+        }
+    }
+
+    /// bind 派生：lan 开 → 0.0.0.0（对外，P7 门在 toggle_channel 生效）；关 → 127.0.0.1
+    #[test]
+    fn bind_from_channels_derives_wildcard_or_loopback() {
+        assert_eq!(bind_from_channels(true), "0.0.0.0");
+        assert_eq!(bind_from_channels(false), "127.0.0.1");
+    }
+
+    /// 通道命令参数值域：仅认三字面量，其余 Err 且回显原值
+    #[test]
+    fn channel_kind_parse_rejects_unknown_values() {
+        assert_eq!(ChannelKind::parse("lan"), Ok(ChannelKind::Lan));
+        assert_eq!(ChannelKind::parse("quick"), Ok(ChannelKind::Quick));
+        assert_eq!(ChannelKind::parse("named"), Ok(ChannelKind::Named));
+        for bad in ["off", "local", "QUICK", ""] {
+            let e = ChannelKind::parse(bad).unwrap_err();
+            assert!(e.contains(bad), "错误信息必须回显非法值便于定位: {e}");
+        }
+    }
+
+    /// 通道开关内核：重复同向调用幂等 no-op——写 KV / 重启 / 隧道启停全不触
+    /// （panic 闭包证明），总开关开着也一样
+    #[test]
+    fn toggle_channel_core_same_direction_is_noop() {
+        // lan 已开再开（总开关开着）：全不触
+        let r = toggle_channel_core(
+            ChannelKind::Lan,
+            true,
+            ChannelFlags {
+                lan: true,
+                ..Default::default()
+            },
+            true,
+            ChannelToggleDeps {
+                public_ack: || panic!("幂等 no-op 不得读 ack"),
+                write_flag: |_, _| panic!("幂等 no-op 不得写 KV"),
+                restart: || panic!("幂等 no-op 不得重启监听"),
+                tunnel: |_, _| panic!("幂等 no-op 不得触隧道"),
+            },
+        );
+        assert!(r.is_ok());
+        // quick 已关再关（总开关关着）：同样全不触
+        let r = toggle_channel_core(
+            ChannelKind::Quick,
+            false,
+            ChannelFlags::default(),
+            false,
+            ChannelToggleDeps {
+                public_ack: || panic!("幂等 no-op 不得读 ack"),
+                write_flag: |_, _| panic!("幂等 no-op 不得写 KV"),
+                restart: || panic!("幂等 no-op 不得重启监听"),
+                tunnel: |_, _| panic!("幂等 no-op 不得触隧道"),
+            },
+        );
+        assert!(r.is_ok());
+    }
+
+    /// 通道开关内核：lan on 且总开关开着时 P7 门拦停——未确认 TLS → Err 特征文案
+    /// （与 start_server_core 同源常量），KV 回滚为关（先写 true 后回滚 false），
+    /// 重启不触。ack=Some("false") 同拦（与 start 门同判据）
+    #[test]
+    fn toggle_channel_core_lan_on_requires_public_ack_and_rolls_back() {
+        for ack in [None, Some("false".to_string())] {
+            let writes: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> =
+                Default::default();
+            let lw = writes.clone();
+            let r = toggle_channel_core(
+                ChannelKind::Lan,
+                true,
+                ChannelFlags::default(),
+                true,
+                ChannelToggleDeps {
+                    public_ack: move || ack.clone(),
+                    write_flag: move |k: ChannelKind, v: bool| {
+                        lw.borrow_mut().push((k.as_str(), v))
+                    },
+                    restart: || panic!("未过 P7 门不得重启监听"),
+                    tunnel: |_, _| panic!("lan 开关不得触隧道"),
+                },
+            );
+            let err = r.unwrap_err();
+            assert_eq!(
+                err, PUBLIC_ACK_REQUIRED_MSG,
+                "特征错误码（前端 TLS Dialog 判据）必须逐字一致"
+            );
+            assert_eq!(
+                &*writes.borrow(),
+                &[("lan", true), ("lan", false)],
+                "门失败必须回滚 KV（否则确认后重开被同向幂等短路吞掉）"
+            );
+        }
+    }
+
+    /// 通道开关内核：lan on 过 P7 门 → 热重启恰好一次（不吊销语义由
+    /// restart_listener → stop_server_hot_restart 承担，gate 级回归见 server.rs
+    /// hot_restart_without_revoke_keeps_device_cookie_valid）；重启失败 → KV 回滚 +
+    /// Err 原样上抛（保持停机不撒谎）
+    #[test]
+    fn toggle_channel_core_lan_on_restarts_then_rolls_back_on_failure() {
+        // 过门成功：写 KV 一次 + 重启一次，Ok
+        let writes: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lw = writes.clone();
+        let restarts = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let lr = restarts.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Lan,
+            true,
+            ChannelFlags::default(),
+            true,
+            ChannelToggleDeps {
+                public_ack: || Some("true".into()),
+                write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
+                restart: move || {
+                    lr.set(lr.get() + 1);
+                    Ok(())
+                },
+                tunnel: |_, _| panic!("lan 开关不得触隧道"),
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*writes.borrow(), &[("lan", true)]);
+        assert_eq!(restarts.get(), 1, "过门后必须恰好热重启一次");
+
+        // 重启失败（如端口被占）：KV 回滚，Err 原样传出
+        let writes: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lw = writes.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Lan,
+            true,
+            ChannelFlags::default(),
+            true,
+            ChannelToggleDeps {
+                public_ack: || Some("true".into()),
+                write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
+                restart: || Err("绑定 0.0.0.0:9420 失败: 端口被占".into()),
+                tunnel: |_, _| panic!("lan 开关不得触隧道"),
+            },
+        );
+        assert_eq!(r.unwrap_err(), "绑定 0.0.0.0:9420 失败: 端口被占");
+        assert_eq!(
+            &*writes.borrow(),
+            &[("lan", true), ("lan", false)],
+            "重启失败必须回滚 KV（失败不撒谎）"
+        );
+    }
+
+    /// 通道开关内核：lan off 走重启改绑回 127.0.0.1；重启失败**不回滚**（off 即目标态，
+    /// 监听已停由 restart_listener 保持停机口径承担），Err 上抛
+    #[test]
+    fn toggle_channel_core_lan_off_restarts_without_rollback_on_failure() {
+        let writes: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lw = writes.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Lan,
+            false,
+            ChannelFlags {
+                lan: true,
+                ..Default::default()
+            },
+            true,
+            ChannelToggleDeps {
+                public_ack: || panic!("lan off 不读 ack 门"),
+                write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
+                restart: || Err("绑定 127.0.0.1:9420 失败: 端口被占".into()),
+                tunnel: |_, _| panic!("lan 开关不得触隧道"),
+            },
+        );
+        assert!(r.is_err(), "重启失败原样上抛");
+        assert_eq!(
+            &*writes.borrow(),
+            &[("lan", false)],
+            "off 是目标态：失败也不回滚成 true"
+        );
+    }
+
+    /// 通道开关内核：quick/named 启停只触隧道（kind, on 透传），不触重启与 ack 门；
+    /// 总开关关着时只写 KV，运行态不触（恢复交给 remote_toggle(true)）
+    #[test]
+    fn toggle_channel_core_tunnel_lifecycle_gated_on_master() {
+        // quick on（总开关开着）→ tunnel(Quick, true)
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lc = calls.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Quick,
+            true,
+            ChannelFlags::default(),
+            true,
+            ChannelToggleDeps {
+                public_ack: || panic!("隧道开关不读 ack 门"),
+                write_flag: |_, _| {},
+                restart: || panic!("隧道开关不得重启监听"),
+                tunnel: move |k: ChannelKind, o: bool| {
+                    lc.borrow_mut().push((k.as_str(), o));
+                },
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*calls.borrow(), &[("quick", true)]);
+
+        // named off（总开关开着）→ tunnel(Named, false)
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lc = calls.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Named,
+            false,
+            ChannelFlags {
+                named: true,
+                ..Default::default()
+            },
+            true,
+            ChannelToggleDeps {
+                public_ack: || panic!("隧道开关不读 ack 门"),
+                write_flag: |_, _| {},
+                restart: || panic!("隧道开关不得重启监听"),
+                tunnel: move |k: ChannelKind, o: bool| {
+                    lc.borrow_mut().push((k.as_str(), o));
+                },
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*calls.borrow(), &[("named", false)]);
+
+        // 总开关关着：只写 KV，隧道/重启/ack 全不触
+        let writes: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lw = writes.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Quick,
+            true,
+            ChannelFlags::default(),
+            false,
+            ChannelToggleDeps {
+                public_ack: || panic!("总开关关着不读 ack"),
+                write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
+                restart: || panic!("总开关关着不得重启监听"),
+                tunnel: |_, _| panic!("总开关关着不得触隧道"),
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*writes.borrow(), &[("quick", true)]);
+    }
+
+    /// 逐通道恢复内核：只对开着的隧道通道 ensure（lan 不进隧道恢复——监听由
+    /// start_server 按派生 bind 承担）；全关 → 不触任何 ensure
+    #[test]
+    fn restore_tunnels_core_only_ensures_enabled_channels() {
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let lc = calls.clone();
+        restore_tunnels_core(
+            ChannelFlags {
+                lan: true,
+                quick: true,
+                named: false,
+            },
+            move |k| lc.borrow_mut().push(k.as_str()),
+        );
+        assert_eq!(
+            &*calls.borrow(),
+            &["quick"],
+            "lan 开不得触发隧道 ensure；named 关不得 ensure"
+        );
+        // 双开：依序 quick → named
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let lc = calls.clone();
+        restore_tunnels_core(
+            ChannelFlags {
+                lan: false,
+                quick: true,
+                named: true,
+            },
+            move |k| lc.borrow_mut().push(k.as_str()),
+        );
+        assert_eq!(&*calls.borrow(), &["quick", "named"]);
+        // 全关：panic 闭包证明确实不触
+        restore_tunnels_core(ChannelFlags::default(), |_| {
+            panic!("全关时不得触发任何隧道 ensure")
+        });
+    }
+
+    /// PIN 自动生成内核：未设置 → 生成写入返回 true；已有 → 不覆盖（写闭包 panic
+    /// 证明未被调）返回 false
+    #[test]
+    fn ensure_pin_core_writes_only_when_missing() {
+        // None → 写入生成值
+        let mut written: Vec<String> = vec![];
+        let generated =
+            ensure_pin_core(None, || "4321".to_string(), |p| written.push(p.to_string()));
+        assert!(generated, "None 必须生成写入");
+        assert_eq!(written, vec!["4321"]);
+        // 已有 → 不覆盖
+        let generated = ensure_pin_core(
+            Some("1234".into()),
+            || panic!("已有 PIN 不得覆盖"),
+            |_| panic!("已有 PIN 不得写 KV"),
+        );
+        assert!(!generated);
+    }
+
+    /// 四通道状态载荷形状（A6/A7 消费契约，见 channels_payload 注释）：
+    /// 四键齐全、local 常驻地址、lan 门控地址表、隧道错误态不宣称地址只给 error
+    #[test]
+    fn channels_payload_shape_contract() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let tun = TunnelStatus {
+            quick: ChannelStatus {
+                running: true,
+                url: Some("https://q.trycloudflare.com/m".into()),
+                error: None,
+            },
+            named: ChannelStatus {
+                running: false,
+                url: Some("https://stale.example.com/m".into()),
+                error: Some("cloudflared 启动失败".into()),
+            },
+        };
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                lan: true,
+                quick: true,
+                named: true,
+            },
+            9420,
+            vec![
+                "http://192.168.1.5:9420/m".to_string(),
+                "http://10.0.0.2:9420/m".to_string(),
+            ],
+            &tun,
+        );
+        // 四键形状
+        for k in ["local", "lan", "quick", "named"] {
+            assert!(p.get(k).is_some(), "channels 载荷缺 {k} 键");
+        }
+        // 本机常驻：running = 监听存活，address = 回环直达
+        assert_eq!(p["local"]["running"], true);
+        assert_eq!(p["local"]["address"], "http://127.0.0.1:9420/m");
+        // 局域网：enabled = 开关，running = 开关 ∧ 监听，addresses = 完整可直达 URL 表
+        assert_eq!(p["lan"]["enabled"], true);
+        assert_eq!(p["lan"]["running"], true);
+        assert_eq!(
+            p["lan"]["addresses"],
+            serde_json::json!(["http://192.168.1.5:9420/m", "http://10.0.0.2:9420/m"])
+        );
+        // quick：运行中 + 地址宣称；无 error
+        assert_eq!(p["quick"]["enabled"], true);
+        assert_eq!(p["quick"]["running"], true);
+        assert_eq!(p["quick"]["address"], "https://q.trycloudflare.com/m");
+        assert_eq!(p["quick"]["error"], serde_json::Value::Null);
+        // named：错误态不宣称地址（stale url 不得出表），只给 error
+        assert_eq!(p["named"]["address"], serde_json::Value::Null);
+        assert_eq!(p["named"]["error"], "cloudflared 启动失败");
+        assert_eq!(p["named"]["running"], false);
+
+        // 监听关着：local/lan running 全 false（本机/局域网随总开关停）
+        let p = channels_payload(
+            false,
+            ChannelFlags {
+                lan: true,
+                ..Default::default()
+            },
+            9420,
+            vec!["http://192.168.1.5:9420/m".to_string()],
+            &TunnelStatus::default(),
+        );
+        assert_eq!(p["local"]["running"], false);
+        assert_eq!(
+            p["lan"]["running"], false,
+            "lan.running = 监听存活 ∧ 开关，缺一不可"
+        );
+        assert_eq!(p["lan"]["enabled"], true, "enabled 只看开关位");
     }
 }
 

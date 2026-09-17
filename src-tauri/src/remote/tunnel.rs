@@ -270,28 +270,49 @@ use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// 对外快照（remote_status 消费；ui 线程与 supervisor 任务共写——Mutex 单字段写短临界区）
+/// 单通道运行态（M5 A5 双通道化）：running 由 snapshot() 现算（句柄存活，不落全局——
+/// 陈旧标志不可能撒谎）；url / error 由 supervise 摄取点写入，url 恒为 board_url
+/// 归一后的看板完整地址
+#[derive(Clone, Default, serde::Serialize)]
+pub struct ChannelStatus {
+    pub running: bool,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 双通道聚合快照（remote_status / gate 域名源 / 托盘消费）。
+/// **错误语义选型：每通道独立 error（而非聚合列表）**——gate fail-closed 只需
+/// 「任一通道有错」的并集判定，但设置页按通道渲染错误卡片（A6）、via 域名需按通道
+/// 归集，聚合列表反而迫使每个消费方再按通道拆分。error ⇒ 该通道无存活 cloudflared，
+/// 消费方按「错误通道不宣称」口径过滤地址与域名
 #[derive(Clone, Default, serde::Serialize)]
 pub struct TunnelStatus {
-    pub mode: String,          // off/quick/named（当前实际运行模式）
-    pub url: Option<String>,   // 看板完整地址（含 /m——摄取点经 board_url 归一）/ 未知时 None
-    pub error: Option<String>, // 起不来/连续失败的终态错误（界面明示）
+    pub quick: ChannelStatus,
+    pub named: ChannelStatus,
 }
-static SNAPSHOT: Lazy<Mutex<TunnelStatus>> = Lazy::new(|| {
-    Mutex::new(TunnelStatus {
-        mode: KEY_CHANNEL_VALUE_OFF.into(),
-        url: None,
-        error: None,
-    })
-});
+static SNAPSHOT: Lazy<Mutex<TunnelStatus>> = Lazy::new(Mutex::default);
 
 pub fn snapshot() -> TunnelStatus {
-    SNAPSHOT.lock().unwrap().clone()
+    // SNAPSHOT 短锁克隆后即放，再取 TUNNELS 短锁现算 running——两把锁从不嵌套持有，
+    // 各自独立短临界区（与 mod.rs SERVER_HANDLE/registry 同纪律）
+    let mut st = SNAPSHOT.lock().unwrap().clone();
+    let slots = TUNNELS.lock().unwrap();
+    st.quick.running = slot_live(&slots.quick);
+    st.named.running = slot_live(&slots.named);
+    st
 }
 /// pub(crate) 供 remote/mod.rs 的「快照 → 域名适配器」单测注入通道/错误态
-/// （评审 Minor 6；全局态仅该测试触碰，用后还原默认值）
+/// （评审 Minor 6；全局态仅测试触碰，用后还原默认值）
 pub(crate) fn set_snapshot(f: impl FnOnce(&mut TunnelStatus)) {
     f(&mut SNAPSHOT.lock().unwrap());
+}
+
+/// 句柄存活判定（与 mod.rs handle_is_live 同判据）：句柄存在且 supervisor 任务未结束。
+/// 任务自行退出（spawn 失败 / 3 次退避放弃）留下**已完成**的陈旧句柄 = 不存活
+fn slot_live(h: &Option<TunnelHandle>) -> bool {
+    h.as_ref()
+        .map(|t| !t.supervisor.inner().is_finished())
+        .unwrap_or(false)
 }
 
 /// 运行句柄：stop 信号 + supervisor 任务句柄（子进程由 supervisor 全权持有，
@@ -300,7 +321,29 @@ struct TunnelHandle {
     stop: Arc<AtomicBool>,
     supervisor: tauri::async_runtime::JoinHandle<()>,
 }
-static TUNNEL: Lazy<Mutex<Option<TunnelHandle>>> = Lazy::new(|| Mutex::new(None));
+
+/// 每通道双槽位（M5 A5 安全关键）：quick / named 可同开，句柄互不共享——
+/// stop_channel 只 take 对应槽位，另一通道句柄不受扰（专测锁定）。
+/// 槽位按通道分立后，旧「单槽 TUNNEL + mode 三值」模型随 remote.channel 一起退役
+#[derive(Default)]
+struct TunnelSlots {
+    quick: Option<TunnelHandle>,
+    named: Option<TunnelHandle>,
+}
+static TUNNELS: Lazy<Mutex<TunnelSlots>> = Lazy::new(Mutex::default);
+
+/// 按通道写快照（supervise 摄取点 / stop 复位的单点入口）：mode 只认 quick/named
+/// 两字面量（调用方来自 ChannelKind / parse_channel 值域，此处再过滤乱串防御）
+fn set_channel_snapshot(mode: &str, f: impl FnOnce(&mut ChannelStatus)) {
+    let quick = mode == KEY_CHANNEL_VALUE_QUICK;
+    set_snapshot(move |s| {
+        if quick {
+            f(&mut s.quick)
+        } else {
+            f(&mut s.named)
+        }
+    });
+}
 
 /// 隧道地址归一为看板地址（纯函数，平台无关的纯字符串处理）：去尾部 `/`（可多个）
 /// → 追加 `/m`；已以 `/m` 结尾则幂等（不重复追加，不产生 `/m/m`）。
@@ -360,48 +403,50 @@ pub fn tunnel_address_entry(url: &str) -> serde_json::Value {
     })
 }
 
-/// 按当前设置启动隧道（幂等：运行中直接返回；off 直接返回）。
-/// 失败不返回 Err（隧道失败不阻断远程主体——spec T1d「不阻塞其他功能」），
-/// 错误写快照 error 供设置页展示
-pub fn start_if_configured(port: u16) {
-    let Some(mode) = parse_channel(
-        crate::database::dao::settings::get_setting(crate::remote::KEY_CHANNEL).as_deref(),
-    ) else {
-        set_snapshot(|s| s.error = Some("通道设置非法".into()));
-        return;
-    };
-    if mode == KEY_CHANNEL_VALUE_OFF {
-        return; // 关闭态：快照保持 off
+/// 按通道启动隧道（M5 A5，幂等：该通道句柄存活直接返回；**已完成**陈旧句柄视为
+/// 不存在重 spawn——自愈判据与 mod.rs start_server_core 同口径）。named 缺 Token
+/// 不 spawn，错误写该通道快照供设置页展示。失败不返回 Err（隧道失败不阻断远程
+/// 主体——spec T1d），运行态可见性全在快照。调用方值域：mod.rs 的 ChannelKind /
+/// restore_enabled_tunnels（通道开关与总开关是隧道启停唯一入口）
+pub fn start_channel(mode: &str, port: u16) {
+    let is_quick = mode == KEY_CHANNEL_VALUE_QUICK;
+    let is_named = mode == KEY_CHANNEL_VALUE_NAMED;
+    if !is_quick && !is_named {
+        return; // 防御：未知通道名无槽位可起（值来自 ChannelKind，此处兜底乱串）
     }
-    if mode == KEY_CHANNEL_VALUE_NAMED
+    if is_named
         && crate::database::dao::settings::get_setting(crate::remote::KEY_TUNNEL_TOKEN)
             .map(|t| t.trim().is_empty())
             .unwrap_or(true)
     {
-        set_snapshot(|s| {
-            s.mode = mode.into();
-            s.error = Some("命名隧道缺少 Tunnel Token".into());
-        });
+        set_channel_snapshot(mode, |c| c.error = Some("命名隧道缺少 Tunnel Token".into()));
         return;
     }
-    let mut h = TUNNEL.lock().unwrap();
-    if h.is_some() {
-        return; // 运行中幂等（通道切换走 restart 路径）
+    let mut slots = TUNNELS.lock().unwrap();
+    let slot = if is_quick {
+        &mut slots.quick
+    } else {
+        &mut slots.named
+    };
+    if slot_live(slot) {
+        return; // 运行中幂等（重复开关 / 总开关与通道开关重入均短路）
     }
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
+    let m = mode.to_string();
     let supervisor = tauri::async_runtime::spawn(async move {
-        supervise(mode.to_string(), port, stop2).await;
+        supervise(m, port, stop2).await;
     });
-    *h = Some(TunnelHandle { stop, supervisor });
+    *slot = Some(TunnelHandle { stop, supervisor });
 }
 
-/// 守护主循环：确保二进制 → spawn → 监听 stderr(quick 解析地址) → wait → 退避重启
+/// 守护主循环（每通道独立运行一份）：确保二进制 → spawn → 监听 stderr(quick 解析地址)
+/// → wait → 退避重启。quick / named 各自 spawn 互不干扰，全部快照写入经
+/// set_channel_snapshot 落到**本通道**槽位，绝不触碰另一通道
 async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
-    set_snapshot(|s| {
-        s.mode = mode.clone();
-        s.url = None;
-        s.error = None;
+    set_channel_snapshot(&mode, |c| {
+        c.url = None;
+        c.error = None;
     });
     // 获取二进制（可能触发下载——秒到分钟级）。ensure_with 的下载器是**同步闭包**，
     // 生产实现 download_to 内部对单次 HTTP 做 block_on：必须在 spawn_blocking 线程里
@@ -417,8 +462,8 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         {
             Ok(p) => p,
             Err(e) => {
-                set_snapshot(|s| {
-                    s.error = Some(download_failure_message(
+                set_channel_snapshot(&mode, |c| {
+                    c.error = Some(download_failure_message(
                         &e,
                         asset_name(),
                         Path::new(&bin_display),
@@ -448,7 +493,9 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                set_snapshot(|s| s.error = Some(format!("cloudflared 启动失败: {e}")));
+                set_channel_snapshot(&mode, |c| {
+                    c.error = Some(format!("cloudflared 启动失败: {e}"))
+                });
                 return;
             }
         };
@@ -475,11 +522,12 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                             fresh
                         };
                         if fresh {
-                            set_snapshot(|s| s.url = Some(u.clone()));
-                            // spec T1c：地址变化桌面通知（含首次拿到地址）
+                            set_channel_snapshot(&mode_for_stderr, |c| c.url = Some(u.clone()));
+                            // spec T1c：地址变化桌面通知（含首次拿到地址；channel 字段
+                            // 供前端区分双通道，A6 消费）
                             crate::remote::events::emit_ui(
                                 "remote-tunnel-address",
-                                serde_json::json!({ "url": u }),
+                                serde_json::json!({ "url": u, "channel": mode_for_stderr }),
                             );
                         }
                     }
@@ -503,11 +551,13 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
             }
             None => {
-                set_snapshot(|s| s.error = Some("cloudflared 连续失败 3 次，已停止守护".into()));
+                set_channel_snapshot(&mode, |c| {
+                    c.error = Some("cloudflared 连续失败 3 次，已停止守护".into())
+                });
                 // spec T1b：放弃时桌面通知报错（Task 8 的 useRemoteEvents 监听）
                 crate::remote::events::emit_ui(
                     "remote-tunnel-error",
-                    serde_json::json!({"error": "cloudflared 连续失败 3 次，已停止守护"}),
+                    serde_json::json!({"error": "cloudflared 连续失败 3 次，已停止守护", "channel": mode}),
                 );
                 return;
             }
@@ -528,32 +578,215 @@ pub fn parse_named_url(line: &str) -> Option<String> {
     Some(url)
 }
 
-/// 停止隧道（幂等）：置 stop → kill 子进程由 supervisor abort 经 kill_on_drop 传播
-/// （spawn 时已设 .kill_on_drop(true)，兜底标志位 + abort 双保险）→ 快照复位
-pub fn stop() {
-    if let Some(h) = TUNNEL.lock().unwrap().take() {
+/// 停止单通道（M5 A5，幂等；**安全关键**）：只 take 对应槽位——另一通道句柄不受扰
+/// （专测锁定「quick 存活时 stop_channel("named") 不动 quick」）。停止 = 置 stop 标志，
+/// abort supervisor（kill_on_drop 传播杀子进程，无孤儿），随后该通道快照复位——
+/// running 由 snapshot() 现算：句柄取走即 false，无陈旧标志可写
+pub fn stop_channel(mode: &str) {
+    let is_quick = mode == KEY_CHANNEL_VALUE_QUICK;
+    if !is_quick && mode != KEY_CHANNEL_VALUE_NAMED {
+        return; // 防御：未知通道名无槽位可停
+    }
+    let h = {
+        let mut slots = TUNNELS.lock().unwrap();
+        if is_quick {
+            slots.quick.take()
+        } else {
+            slots.named.take()
+        }
+    };
+    if let Some(h) = h {
         h.stop.store(true, Ordering::Relaxed);
         h.supervisor.abort(); // kill 由 abort 传播（子进程 kill_on_drop 已设——无孤儿）
     }
-    set_snapshot(|s| {
-        s.mode = KEY_CHANNEL_VALUE_OFF.into();
-        s.url = None;
-        s.error = None;
+    set_channel_snapshot(mode, |c| {
+        c.url = None;
+        c.error = None;
     });
 }
 
-/// 通道切换：运行中则重启（spec T1b「切换通道进程一并退出」）
-pub fn restart_if_running(port: u16) {
-    let running = TUNNEL.lock().unwrap().is_some();
-    if running {
-        stop();
-        start_if_configured(port);
-    }
+/// 双通道全停（总开关关闭 / 应用退出 / serve 退出联动）：逐一停止单通道，
+/// 槽位独立，语义与 stop_channel 完全一致
+pub fn stop_all() {
+    stop_channel(KEY_CHANNEL_VALUE_QUICK);
+    stop_channel(KEY_CHANNEL_VALUE_NAMED);
+}
+
+/// 隧道全局态（SNAPSHOT / TUNNELS）测试互斥锁（M5 A5）：tunnel.rs 与 remote/mod.rs
+/// 的快照/槽位相关测试共享——默认多线程 test 运行下两文件用例并发触碰同一全局会互踩，
+/// 持锁串行化 + 各用例用后还原默认值。锁中毒直接取内（某用例 panic 后其余用例照跑，
+/// 不连锁红）
+#[cfg(test)]
+pub(crate) mod test_sync {
+    use once_cell::sync::Lazy;
+    pub static TUNNEL_GLOBALS: Lazy<std::sync::Mutex<()>> = Lazy::new(|| std::sync::Mutex::new(()));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 还原全局默认（每个触碰 TUNNELS/SNAPSHOT 的用例结束前必须调用——与 mod.rs
+    /// 快照测试「用后即还」同一纪律）。注入的假句柄随还原 abort 终结，不留悬挂任务
+    fn reset_globals() {
+        let mut slots = TUNNELS.lock().unwrap();
+        if let Some(h) = slots.quick.take() {
+            h.supervisor.abort();
+        }
+        if let Some(h) = slots.named.take() {
+            h.supervisor.abort();
+        }
+        drop(slots);
+        set_snapshot(|s| *s = TunnelStatus::default());
+    }
+
+    /// 假句柄（可观测终结，A4 同款技巧）：supervisor = pending 任务持 tx——任务被
+    /// abort 后 tx 随 future drop，rx 端 Disconnected；stop 标志位真实可断言
+    fn fake_handle() -> (TunnelHandle, std::sync::mpsc::Receiver<()>) {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let supervisor = tauri::async_runtime::spawn(async move {
+            let _tx = tx; // 随被取消的任务 drop → rx 端可观测
+            std::future::pending::<()>().await;
+        });
+        (
+            TunnelHandle {
+                stop: Arc::new(AtomicBool::new(false)),
+                supervisor,
+            },
+            rx,
+        )
+    }
+
+    /// 自旋等 rx 断连（上限 5s）——证明持有 tx 的 supervisor 任务已被 abort 终结
+    fn assert_disconnected(rx: &std::sync::mpsc::Receiver<()>, what: &str) {
+        let mut waited = 0u32;
+        loop {
+            match rx.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    assert!(waited < 5000, "{what} 5s 内未终结");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    waited += 1;
+                }
+                Ok(v) => panic!("{what} 不应产出值，实际 {v:?}"),
+            }
+        }
+    }
+
+    /// M5 A5 安全关键专测：quick 存活时 stop_channel("named") 不动 quick——
+    /// named supervisor 被终结（rx 断连）、quick 的 stop 标志未置位且 rx 在有界窗口内
+    /// 不断连（变异锚点：还原为单槽 stop() 全停时，quick 的断连断言必红）
+    #[test]
+    fn stop_channel_targets_only_its_own_slot() {
+        let _g = test_sync::TUNNEL_GLOBALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (qh, qrx) = fake_handle();
+        let (nh, nrx) = fake_handle();
+        {
+            let mut slots = TUNNELS.lock().unwrap();
+            slots.quick = Some(qh);
+            slots.named = Some(nh);
+        }
+        stop_channel(KEY_CHANNEL_VALUE_NAMED);
+        assert_disconnected(&nrx, "named supervisor");
+        {
+            let slots = TUNNELS.lock().unwrap();
+            assert!(
+                !slots.quick.as_ref().unwrap().stop.load(Ordering::Relaxed),
+                "quick 的 stop 标志不得被 named 的停止置位"
+            );
+            assert!(slots.named.is_none(), "named 槽位必须已清空");
+        }
+        // 有界窗口内 quick 未被终结（100ms 静默窗口；abort 送达是毫秒级，
+        // 窗口内 Empty 即任务存活——启发式断言，配合标志位双证）。必须发生在
+        // 清理 abort 之前，否则测的是自己刚杀掉的句柄
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            matches!(qrx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "quick supervisor 必须仍存活（named 的停止不得波及）"
+        );
+        reset_globals();
+    }
+
+    /// stop_channel 幂等：空槽位重复停止 no-op 不 panic；停止后槽位清空、
+    /// 该通道快照复位（url/error 清掉，running 由句柄现算）
+    #[test]
+    fn stop_channel_is_idempotent_and_resets_snapshot() {
+        let _g = test_sync::TUNNEL_GLOBALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 空槽位连停两次：不 panic（幂等）
+        stop_channel(KEY_CHANNEL_VALUE_QUICK);
+        stop_channel(KEY_CHANNEL_VALUE_QUICK);
+        // 注入后再停：句柄终结 + 槽位清空 + 快照复位
+        let (qh, qrx) = fake_handle();
+        TUNNELS.lock().unwrap().quick = Some(qh);
+        set_snapshot(|s| {
+            s.quick.url = Some("https://q.trycloudflare.com/m".into());
+            s.quick.error = Some("旧错误".into());
+        });
+        stop_channel(KEY_CHANNEL_VALUE_QUICK);
+        assert_disconnected(&qrx, "quick supervisor");
+        assert!(TUNNELS.lock().unwrap().quick.is_none(), "槽位必须清空");
+        let st = snapshot();
+        assert_eq!(st.quick.url, None, "停止后 url 复位");
+        assert_eq!(st.quick.error, None, "停止后 error 复位");
+        assert!(!st.quick.running, "句柄取走后 running 现算为 false");
+        // 未知通道名：防御性 no-op（不 panic、不触碰任何槽位）
+        stop_channel("bogus");
+        reset_globals();
+    }
+
+    /// stop_all 全停：两通道句柄全部终结、槽位清空（总开关关闭 / 应用退出路径的语义）
+    #[test]
+    fn stop_all_stops_both_channels() {
+        let _g = test_sync::TUNNEL_GLOBALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (qh, qrx) = fake_handle();
+        let (nh, nrx) = fake_handle();
+        {
+            let mut slots = TUNNELS.lock().unwrap();
+            slots.quick = Some(qh);
+            slots.named = Some(nh);
+        }
+        stop_all();
+        assert_disconnected(&qrx, "quick supervisor");
+        assert_disconnected(&nrx, "named supervisor");
+        {
+            let slots = TUNNELS.lock().unwrap();
+            assert!(slots.quick.is_none() && slots.named.is_none());
+        }
+        reset_globals();
+    }
+
+    /// 双通道同开快照聚合：两通道 url/error 各自独立呈现；running 随句柄存活现算
+    /// （句柄取走立即 false）。两通道同开 = A5 用户裁决的核心场景
+    #[test]
+    fn snapshot_aggregates_both_channels_and_running_follows_slots() {
+        let _g = test_sync::TUNNEL_GLOBALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (qh, _qrx) = fake_handle();
+        TUNNELS.lock().unwrap().quick = Some(qh);
+        set_snapshot(|s| {
+            s.quick.url = Some("https://q-test.trycloudflare.com/m".into());
+            s.named.url = Some("https://mam.example.com/m".into());
+            s.named.error = Some("cloudflared 启动失败".into());
+        });
+        let st = snapshot();
+        assert!(st.quick.running, "quick 句柄存活 → running 真");
+        assert_eq!(
+            st.quick.url.as_deref(),
+            Some("https://q-test.trycloudflare.com/m")
+        );
+        assert_eq!(st.quick.error, None);
+        assert!(!st.named.running, "named 无句柄 → running 假（现算不撒谎）");
+        assert_eq!(st.named.url.as_deref(), Some("https://mam.example.com/m"));
+        assert_eq!(st.named.error.as_deref(), Some("cloudflared 启动失败"));
+        reset_globals();
+    }
 
     #[test]
     fn channel_parse_only_three_literals() {

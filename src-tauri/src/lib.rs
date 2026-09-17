@@ -166,7 +166,8 @@ pub fn run() {
         remote::remote_set_pin,
         remote::remote_reset_devices,
         remote::remote_rename_device,
-        remote::remote_set_channel,
+        // M5 A5：三通道独立开关（旧 remote_set_channel 单值三选一已随之下线）
+        remote::remote_toggle_channel,
     ]);
 
     #[cfg(not(debug_assertions))]
@@ -180,14 +181,15 @@ pub fn run() {
     };
 
     // M4：退出钩子（spec §8 应用退出清理子进程与电源锁）——旧 `.run(ctx)` 无事件回调，
-    // 改为 build + run 回调：RunEvent::Exit 时停隧道（kill_on_drop 兜不住进程级退出）
-    // 与电源锁（caffeinate kill / 执行状态清除 + 磁盘代设还原），不留孤儿进程、不失电源锁
+    // 改为 build + run 回调：RunEvent::Exit 时停隧道（M5 A5 双通道 stop_all；
+    // kill_on_drop 兜不住进程级退出）与电源锁（caffeinate kill / 执行状态清除 +
+    // 磁盘代设还原），不留孤儿进程、不失电源锁
     let app = builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
     app.run(|_app, event| {
         if let tauri::RunEvent::Exit = event {
-            crate::remote::tunnel::stop();
+            crate::remote::tunnel::stop_all();
             crate::remote::power::release();
         }
     });
