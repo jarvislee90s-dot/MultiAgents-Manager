@@ -112,17 +112,23 @@ fn host_of_board_url(url: &str) -> Option<String> {
 }
 
 /// gate 回环豁免的隧道域名并集（生产源；测试注入缝在 RemoteState）。
-/// 隧道出错 = 地址不可信（remote_status 同口径 url.filter(error.is_none())）→ 空表，
-/// 即隧道异常时本机豁免的 Host 条件恒不成立之外仍以 cookie 为准（豁免面最小化）
-fn tunnel_hosts_from_snapshot() -> Vec<String> {
+/// **Some(名单) = 正常判定；None = 快照错误终态的 fail-closed 哨兵（评审 Important 1）**：
+/// 豁免的 Host 条件依赖域名名单，快照错误时无从判定 Host 是否隧道域名——返回 None 让
+/// gate **完全跳过本机豁免**（回环 + 任意 Host 都不免费），绝不可当空名单处理（那会让
+/// Host 条件恒满足 → 回环流量全豁免，fail-open）。代价仅隧道错误态下本机也需配对一次。
+/// 依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared（穿透面本应消失），
+/// 但豁免判定不押注该不变量——快照错误一律收紧
+fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
     let s = tunnel::snapshot();
     if s.error.is_some() {
-        return Vec::new();
+        return None;
     }
-    s.url
-        .and_then(|u| host_of_board_url(&u))
-        .into_iter()
-        .collect()
+    Some(
+        s.url
+            .and_then(|u| host_of_board_url(&u))
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// via 判定的分通道域名（生产源）：快照单通道模型按 mode 分拣 quick/named；
@@ -762,17 +768,6 @@ pub fn address_entries_with_tunnel(
     }
 }
 
-/// 配对 URL 隧道跟随（纯函数）：隧道开 → 隧道看板地址#token=。
-/// 契约（裸域名 404 修复）：tunnel 入参恒为看板地址（快照 url 经 tunnel::board_url
-/// 归一，已含 /m）——此处只去尾 `/` 再拼 token，**不再补 /m**（防 /m/m）；
-/// LAN 分支 base_url 本就含 /m，原样拼 token
-pub fn pair_url_with_tunnel(tunnel: Option<String>, base_url: String, token: &str) -> String {
-    match tunnel {
-        Some(t) => format!("{}#token={token}", t.trim_end_matches('/')),
-        None => format!("{base_url}#token={token}"),
-    }
-}
-
 /// 应用启动恢复（lib.rs setup 调用）：开机自启（若启用）。失败仅告警不阻断启动
 pub fn restore_on_launch() {
     // M4 T3：电源保活崩溃恢复（Windows 磁盘代设原值未还原时写回并清键；其余平台无值即空操作）
@@ -1252,35 +1247,6 @@ mod tests {
         }
     }
 
-    /// (d) 配对 URL 隧道跟随（Task 5 纯核）：隧道开（无 error）→ 隧道看板地址#token=
-    /// （入参恒为看板地址——快照 url 已被 board_url 归一含 /m，此处不再补 /m，防 /m/m）；
-    /// 隧道关/异常 → 既有 http 直连逻辑原样。issue_token 的隧道门控在此锁定
-    #[test]
-    fn pair_url_prefers_tunnel_base() {
-        // 隧道开 → 看板地址#token=…（已含 /m，不重复追加）
-        assert_eq!(
-            pair_url_with_tunnel(
-                Some("https://mam.example.asia/m".into()),
-                "http://192.168.1.5:9420/m".into(),
-                "tok" // clippy useless_conversion 适配（蓝本 "tok".into() 对 &str 参数多余）
-            ),
-            "https://mam.example.asia/m#token=tok"
-        );
-        // 入参带尾 / → 先去掉再拼 token（同样不得出现 /m/m）
-        assert_eq!(
-            pair_url_with_tunnel(
-                Some("https://mam.example.asia/m/".into()),
-                "http://192.168.1.5:9420/m".into(),
-                "tok"
-            ),
-            "https://mam.example.asia/m#token=tok"
-        );
-        assert_eq!(
-            pair_url_with_tunnel(None, "http://192.168.1.5:9420/m".into(), "tok"),
-            "http://192.168.1.5:9420/m#token=tok"
-        );
-    }
-
     // ==== M4 T2 纯函数：在线口径 + 设备上限解析 ====
 
     #[test]
@@ -1296,6 +1262,89 @@ mod tests {
         assert_eq!(max_devices_from(Some("1".into())), 1);
         assert_eq!(max_devices_from(Some("99".into())), 10); // clamp 上限
         assert_eq!(max_devices_from(Some("x".into())), 3); // 乱串回落默认
+    }
+
+    // ==== M5 A3 评审修复（Minor 6）：隧道快照 → 域名适配器单测 ====
+    // 全局态纪律：via_hosts/tunnel_hosts 适配器读 tunnel::SNAPSHOT 全局——本组测试
+    // 是全测试进程唯一触碰该全局的用例（tunnel.rs 自身测试全为纯函数），且用后还原
+    // 默认值，不存在跨测试污染
+
+    /// host_of_board_url 纯函数边界：scheme + 路径、无 scheme、大写+端口归一、空 host
+    #[test]
+    fn host_of_board_url_extracts_and_normalizes() {
+        assert_eq!(
+            host_of_board_url("https://q-test.trycloudflare.com/m"),
+            Some("q-test.trycloudflare.com".to_string()),
+            "常规形态：scheme + 看板路径 → 域名"
+        );
+        assert_eq!(
+            host_of_board_url("mam.example.com/m"),
+            Some("mam.example.com".to_string()),
+            "无 scheme（防御：快照契约恒含 scheme，解析不炸即可）"
+        );
+        assert_eq!(
+            host_of_board_url("https://Mam.Example.COM:8443/m"),
+            Some("mam.example.com".to_string()),
+            "大写 + 带端口 → normalize_host 归一（小写 + 剥端口）"
+        );
+        assert_eq!(host_of_board_url("https:///m"), None, "空 host → None");
+        assert_eq!(host_of_board_url(""), None, "空串 → None");
+    }
+
+    /// via 分通道分发：off → 两表皆空；quick/named 按 mode 分拣（域名归一）；
+    /// 错误终态 → via 两表皆空（标签不宣称通道）而豁免侧返回 None 哨兵（fail-closed）
+    #[test]
+    fn via_hosts_from_snapshot_dispatches_by_mode_and_fails_closed_on_error() {
+        use tunnel::TunnelStatus;
+        // 默认态（off / 无 url）
+        tunnel::set_snapshot(|s| *s = TunnelStatus::default());
+        assert_eq!(via_hosts_from_snapshot(), (Vec::new(), Vec::new()));
+        // quick 分发（url 故意大写——归一后入表）
+        tunnel::set_snapshot(|s| {
+            *s = TunnelStatus {
+                mode: "quick".into(),
+                url: Some("https://Q-Test.trycloudflare.com/m".into()),
+                error: None,
+            }
+        });
+        assert_eq!(
+            via_hosts_from_snapshot(),
+            (vec!["q-test.trycloudflare.com".to_string()], Vec::new())
+        );
+        // named 分发
+        tunnel::set_snapshot(|s| {
+            *s = TunnelStatus {
+                mode: "named".into(),
+                url: Some("https://mam.example.com/m".into()),
+                error: None,
+            }
+        });
+        assert_eq!(
+            via_hosts_from_snapshot(),
+            (Vec::new(), vec!["mam.example.com".to_string()])
+        );
+        // 错误终态：via 两表皆空（此时域名不可信）
+        tunnel::set_snapshot(|s| {
+            *s = TunnelStatus {
+                mode: "quick".into(),
+                url: Some("https://q-test.trycloudflare.com/m".into()),
+                error: Some("cloudflared 启动失败".into()),
+            }
+        });
+        assert_eq!(via_hosts_from_snapshot(), (Vec::new(), Vec::new()));
+        // 豁免侧同源判定：错误 → None 哨兵；恢复正常 → Some(域名)
+        assert_eq!(
+            tunnel_hosts_from_snapshot(),
+            None,
+            "快照错误必须返回 None 哨兵（gate 据此跳过豁免，fail-closed）"
+        );
+        tunnel::set_snapshot(|s| s.error = None);
+        assert_eq!(
+            tunnel_hosts_from_snapshot(),
+            Some(vec!["q-test.trycloudflare.com".to_string()])
+        );
+        // 还原默认快照（用后即还，不污染其它测试）
+        tunnel::set_snapshot(|s| *s = TunnelStatus::default());
     }
 
     // ==== M4 T4 托盘展示纯核 ====

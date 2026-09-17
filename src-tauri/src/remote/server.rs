@@ -260,8 +260,12 @@ pub struct RemoteState {
     /// 到期测试用它推进时间（与 pairing 时代 state_with_clock 同目的，零 sleep）
     pub now_source: Box<dyn Fn() -> i64 + Send + Sync>,
     /// 隧道域名并集注入缝（M5 A3，gate 回环豁免消费）：生产 = 从 tunnel::snapshot()
-    /// 抽当前隧道地址的域名部分（A5 双通道聚合时改聚合实现，签名不变）；测试注入固定域名
-    pub tunnel_hosts_source: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// 抽当前隧道地址的域名部分（A5 双通道聚合时改聚合实现，签名不变）；测试注入固定域名。
+    /// **None = 隧道快照错误终态（fail-closed 哨兵，评审 Important 1）**：豁免的 Host 条件
+    /// 依赖域名名单，快照错误时无从判定 Host 是否隧道域名——gate 收到 None 必须**完全
+    /// 跳过本机豁免**（回环 + 任意 Host 都不免费），而非把 None 当空名单（那是 fail-open：
+    /// Host 条件恒满足 → 回环流量全豁免）
+    pub tunnel_hosts_source: Box<dyn Fn() -> Option<Vec<String>> + Send + Sync>,
     /// via 分通道域名注入缝（M5 A3，/pair/pin 配对时刻消费）：生产 = snapshot 按
     /// mode 分拣 quick/named 域名；测试注入固定域名。与 tunnel_hosts_source 同源分形——
     /// gate 豁免只要"是否隧道域名"并集，via 需要通道区分
@@ -339,8 +343,8 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     // 见 adapter::get_all_sessions 的单飞护栏注释）；watcher 生命周期随进程结束，
     // stop_server 不显式停止（关闭远程后循环仍扫描，为已有取舍）
     super::watcher::SessionWatcher::start();
-    // M4 T2：审批请求记来源 IP——into_make_service_with_connect_info 注入
-    // ConnectInfo extension（pair_request 提取器依赖；oneshot 测试在请求侧自补）
+    // M5 A3：来源 IP 记录——into_make_service_with_connect_info 注入 ConnectInfo
+    // extension（pair_pin 的限速键/指纹与 gate 本机豁免判定依赖；oneshot 测试在请求侧自补）
     axum::serve(
         listener,
         router_with_static(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -387,7 +391,7 @@ mod tests {
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(Vec::new),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
         })
     }
@@ -916,7 +920,7 @@ mod tests {
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(Vec::new),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
@@ -1199,7 +1203,7 @@ mod tests {
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(Vec::new),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
         });
         let app = router(state.clone());
@@ -1311,7 +1315,7 @@ mod tests {
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(Vec::new),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
         });
         let app = router(state.clone());
@@ -1480,7 +1484,7 @@ mod tests {
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(Vec::new),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
         });
         let app = router(state.clone());
@@ -1709,6 +1713,7 @@ mod tests {
         max_devices: usize,
         quick_hosts: &[&str],
         named_hosts: &[&str],
+        tunnel_error: bool,
     ) -> (Arc<RemoteState>, Arc<std::sync::atomic::AtomicI64>) {
         let t = Arc::new(std::sync::atomic::AtomicI64::new(1_000_000));
         let now = t.clone();
@@ -1735,7 +1740,10 @@ mod tests {
                 pin_source: Box::new(move || pin_owned.clone()),
                 now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
                 tunnel_hosts_source: Box::new(move || {
-                    q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect()
+                    if tunnel_error {
+                        return None; // 评审 Important 1：错误态哨兵——gate 必须跳过豁免
+                    }
+                    Some(q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect())
                 }),
                 via_hosts_source: Box::new(move || (quick.clone(), named.clone())),
             }),
@@ -1805,7 +1813,7 @@ mod tests {
     /// 4. 回环 + 缺 Host 头 → 403（空 Host fail closed）。
     #[tokio::test]
     async fn gate_local_exempt_requires_loopback_and_local_host() {
-        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[]);
+        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[], false);
         let app = router(state);
 
         // 1) 穿透：回环 + 隧道 Host → 403 不得免密（带端口的 Host 形态归一后同样拦下）
@@ -1884,6 +1892,68 @@ mod tests {
         assert_eq!(r.status(), 403, "缺 Host 头必须按非本地处理（fail closed）");
     }
 
+    /// 快照错误态 fail-closed（评审 Important 1）：隧道快照处于错误终态时，豁免依赖的
+    /// 域名名单无从判定——gate 收到 None 哨兵必须**完全跳过本机豁免**：
+    /// 回环 + 本地 Host（正常态本应免密 200）→ 仍要求 cookie（403）；
+    /// 有效 cookie 的请求不受影响（fail-closed 只收紧豁免路径，不断 cookie 路径）。
+    /// 变异锚点：若把 None 当空名单处理（fail-open），断言 1 必红
+    #[tokio::test]
+    async fn gate_local_exempt_disabled_when_tunnel_snapshot_degraded() {
+        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[], true);
+        // 预置有效设备（cookie 路径的对照组；last_seen 取当前时刻——滑动 TTL 窗口内）
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "degraded".into(),
+                    name: String::new(),
+                    ua: "ua-degraded".into(),
+                    origin_ip: "ip-degraded".into(),
+                    via: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+        let app = router(state);
+
+        // 1) 回环 + 本地 Host + 无 cookie → 403（豁免被快照错误完全关闭）
+        let r = app
+            .clone()
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/sessions",
+                "127.0.0.1:41000",
+                Some("localhost:9420"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            403,
+            "快照错误 ∧ 回环 → 不豁免（fail-closed，不得当空名单 fail-open）"
+        );
+
+        // 2) 同请求带有效 cookie → 200（fail-closed 只影响豁免，不影响 cookie 认证路径）
+        let r = app
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/sessions",
+                "127.0.0.1:41000",
+                Some("localhost:9420"),
+                None,
+                Some("mam_device=degraded"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "有效 cookie 在快照错误态照常过闸");
+    }
+
     /// 配对流（矩阵 4）：PIN 对 → 200 + Set-Cookie（携带 upsert 返回 id）+ 落行；
     /// via 按 Host 四分支（quick 域名 → quick / 本地 Host 非回环 → lan / named 域名 →
     /// named / 回环+本地 → local）；两台不同 UA/IP 设备 → 各自一行；同 UA+IP 重绑 →
@@ -1895,6 +1965,7 @@ mod tests {
             10,
             &["mam-test.trycloudflare.com"],
             &["mam.example.com"],
+            false,
         );
         let app = router_with_static(state.clone());
 
@@ -2055,7 +2126,7 @@ mod tests {
     /// （now_source 注入缝）→ 正确 PIN 配对成功
     #[tokio::test]
     async fn pin_rate_limit_locks_after_five_failures_then_expires() {
-        let (state, t) = a3_state(Some("1234"), 3, &[], &[]);
+        let (state, t) = a3_state(Some("1234"), 3, &[], &[], false);
         let app = router(state.clone());
         for want in [4, 3, 2, 1] {
             let r = app
@@ -2139,7 +2210,7 @@ mod tests {
     /// 名额）；腾位后同 PIN 可配
     #[tokio::test]
     async fn pin_pair_rejected_when_device_cap_full() {
-        let (state, _t) = a3_state(Some("1234"), 1, &[], &[]);
+        let (state, _t) = a3_state(Some("1234"), 1, &[], &[], false);
         let app = router(state.clone());
         // 第一台占满名额
         let r = app
@@ -2212,7 +2283,7 @@ mod tests {
                     pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
                     pin_source: Box::new(move || slot.lock().unwrap().clone()),
                     now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
-                    tunnel_hosts_source: Box::new(Vec::new),
+                    tunnel_hosts_source: Box::new(|| Some(Vec::new())),
                     via_hosts_source: Box::new(|| (Vec::new(), Vec::new())),
                 }),
                 t,
@@ -2254,7 +2325,7 @@ mod tests {
     /// 多余段同样 403（名单精确相等，不是 /pair 前缀）
     #[tokio::test]
     async fn legacy_pair_endpoints_are_closed() {
-        let (state, _t) = a3_state(Some("1234"), 3, &[], &[]);
+        let (state, _t) = a3_state(Some("1234"), 3, &[], &[], false);
         let app = router(state);
         for (uri, body) in [
             ("/m/api/v1/pair", r#"{"pin":"1234"}"#),

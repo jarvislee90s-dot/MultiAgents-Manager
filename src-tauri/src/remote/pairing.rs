@@ -79,8 +79,8 @@ pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<Stri
 /// 按设备 id 重命名（M5 A1 DAO；供 Task A4 的 `remote_rename_device` 命令调用）。
 /// 返回是否命中行——false = 上层 404 语义（不区分"不存在"与"已吊销"，按 id 直改）。
 ///
-/// 名字长度在 DAO 内收敛：trim 后截前 40 个字符——与审批自报名
-/// （`ApprovalService::create` 的 `name.trim().chars().take(40)`）同一口径。
+/// 名字长度在 DAO 内收敛：trim 后截前 40 个字符——与 /pair/pin 设备自报名
+/// （api::pair_pin 的 `name.trim().chars().take(40)`）同一口径。
 /// 选"DAO 自守"而非"注释交上层收敛"：花名册 name 是纯展示字段，DAO 截断
 /// 即可保证任何调用方（含 Task A4 命令）都不会把无界名写进库
 pub fn rename_device(

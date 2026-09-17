@@ -288,7 +288,9 @@ static SNAPSHOT: Lazy<Mutex<TunnelStatus>> = Lazy::new(|| {
 pub fn snapshot() -> TunnelStatus {
     SNAPSHOT.lock().unwrap().clone()
 }
-fn set_snapshot(f: impl FnOnce(&mut TunnelStatus)) {
+/// pub(crate) 供 remote/mod.rs 的「快照 → 域名适配器」单测注入通道/错误态
+/// （评审 Minor 6；全局态仅该测试触碰，用后还原默认值）
+pub(crate) fn set_snapshot(f: impl FnOnce(&mut TunnelStatus)) {
     f(&mut SNAPSHOT.lock().unwrap());
 }
 

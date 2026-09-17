@@ -104,18 +104,29 @@ pub async fn gate(State(state): State<Arc<RemoteState>>, req: Request, next: Nex
     // 回环转发进来（源 IP=回环），仅查回环会把全部隧道流量免密放进；Host 命中快照
     // 隧道域名即按外部流量对待。命中 → 直接放行（本机免密访问全看板）。
     // 源 IP 取 ConnectInfo（serve 以 into_make_service_with_connect_info 注入）；
-    // 提取不到（异常装配）按非本地处理；空 Host 头同样 fail closed（纯函数内判定）
+    // 提取不到（异常装配）按非本地处理；空 Host 头同样 fail closed（纯函数内判定）。
+    // **快照错误 = 不豁免（评审 Important 1，fail-closed）**：豁免的 Host 条件依赖
+    // 隧道域名名单，快照处于错误终态时无从判定 Host 是否隧道域名——tunnel_hosts_source
+    // 返回 None 哨兵，此处必须**完全跳过豁免**（回环 + 任意 Host 都不免费），代价仅
+    // 隧道错误态下本机也需配对一次。依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared
+    // （穿透面本应消失），但豁免判定**不押注**该不变量——快照错误一律收紧。
+    // 廉价前置（评审 Minor 5）：先判 `is_loopback()`，非回环流量不付快照锁 + 名单分配开销
     if let Some(ci) = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
     {
-        let host = req
-            .headers()
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if is_local_access(ci.0.ip(), host, &(state.tunnel_hosts_source)()) {
-            return next.run(req).await; // 本机免密直达全看板
+        let source_ip = ci.0.ip();
+        if source_ip.is_loopback() {
+            if let Some(tunnel_hosts) = (state.tunnel_hosts_source)() {
+                let host = req
+                    .headers()
+                    .get(header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if is_local_access(source_ip, host, &tunnel_hosts) {
+                    return next.run(req).await; // 本机免密直达全看板
+                }
+            }
         }
     }
     let Some(device) = extract_device(req.headers()) else {

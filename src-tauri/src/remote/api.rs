@@ -150,10 +150,11 @@ pub async fn pair_pin(
     let ip = addr.ip().to_string();
     // 限速时钟走注入缝（测试可推进）；设备时间戳走真实时钟（gate 滑动 TTL 域，见 persist）
     let now = (st.now_source)();
-    // ① 限速过闸：锁定期内即使 PIN 正确也拒（429），不泄露任何 PIN 有效性信息
-    if let RateDecision::Locked { retry_after_secs } =
-        st.pin_limiter.lock().unwrap().check(&ip, now)
-    {
+    // ① 限速过闸：锁定期内即使 PIN 正确也拒（429），不泄露任何 PIN 有效性信息。
+    // decision 先绑定出锁（评审 Minor 2）：MutexGuard 临时值随 let 语句结束即释放，
+    // audit 与响应构建不持限速器锁（对齐"audit 不持锁"风格）
+    let decision = st.pin_limiter.lock().unwrap().check(&ip, now);
+    if let RateDecision::Locked { retry_after_secs } = decision {
         super::events::audit(
             "pair_pin_locked",
             &format!("ip={ip} retry_after={retry_after_secs}s"),
@@ -172,8 +173,10 @@ pub async fn pair_pin(
         )
             .into_response();
     };
-    // ③ 校验：格式非法与比对失败同语义（同记失败——不给"格式预言机"）
-    if !crate::remote::pin::validate_pin(&req.pin) || req.pin.trim() != expected {
+    // ③ 校验：格式非法与比对失败同语义（同记失败——不给"格式预言机"）。
+    // 比对两侧都 trim（评审 Minor 7）：与 validate_pin 的 trim 对称，防将来 KV 存入
+    // 带空白值（set_pin 不再经本端点校验路径时）造成恒不等
+    if !crate::remote::pin::validate_pin(&req.pin) || req.pin.trim() != expected.trim() {
         // 记失败与读剩余次数在同一锁临界区（限速器锁内查改，契约如此）
         let remaining = {
             let mut limiter = st.pin_limiter.lock().unwrap();

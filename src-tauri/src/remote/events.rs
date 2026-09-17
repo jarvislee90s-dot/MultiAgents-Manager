@@ -30,12 +30,12 @@ mod tests {
     #[test]
     fn emit_ui_without_handle_is_silent() {
         // 无句柄不 panic（单测环境 OnceLock 未 set，get() 返回 None——静默分支）
-        emit_ui("remote-pair-request", serde_json::json!({"name": "x"}));
+        emit_ui("remote-changed", serde_json::json!({"enabled": true}));
     }
 
     #[test]
     fn audit_writes_log_line() {
         // 审计出口不 panic（真实留痕由 remote_audit target 的日志侧验证）
-        audit("pair_request", "id=r1 ip=127.0.0.1");
+        audit("pair_pin_ok", "via=lan ip=127.0.0.1");
     }
 }
