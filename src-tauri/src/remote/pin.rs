@@ -1,6 +1,6 @@
 // 访问密码（PIN）内核（M5 A2）：KV 存取 + 校验/生成纯函数 + per-IP 限速状态机
-// 范围红线：本模块是纯内核——不接线 HTTP 端点（POST /pair/pin 属 Task A3）、
-// 不动 gate/server/api；限速状态机为内存态（重启即清），绝不放 DB。
+// 接线现状（A3 起）：POST /pair/pin 端点消费本模块（api::pair_pin）；
+// 限速状态机为内存态（重启即清），绝不放 DB。
 
 use crate::remote::KEY_ACCESS_PIN;
 use std::collections::HashMap;
@@ -56,8 +56,8 @@ struct Entry {
 /// per-IP 限速状态机（内存态，重启即清——不放 DB）。
 ///
 /// 时钟注入：内核**零真实时钟读取**，`now` 由调用方显式传入（生产 A3 侧传
-/// chrono 毫秒；测试传合成时间）——与 pairing.rs 的 PairingClock + fake clock
-/// 同一目的，形态更简：时间显式传参，连闭包都不需要，测试完全确定、零 sleep。
+/// chrono 毫秒；测试传合成时间）——时间显式传参形态：测试完全确定、零 sleep
+/// （与旧 PairingClock 注入时钟同一目的，形态更简，连闭包都不需要）。
 ///
 /// 无界增长说明：键为来源 IP（`SocketAddr::ip().to_string()` 形态），数量级 =
 /// 访问过的客户端数，桌面远程场景极小；不做后台清理线程/惰性扫描（勿过度设计）。
@@ -119,6 +119,18 @@ impl PinRateLimiter {
     /// 锁定期内不会走到此处（check 先拒、PIN 比对根本不发生），故无「成功解锁」语义
     pub fn record_success(&mut self, ip: &str) {
         self.entries.remove(ip);
+    }
+
+    /// 剩余可尝试次数（只读，401 `invalid_pin.remaining` 文案数据源——移动端要展示
+    /// 「还可尝试 N 次」）：锁定期恒 0；未见过 IP 满额；否则 MAX_FAILURES - 连续失败数。
+    /// 第 5 次失败 record_failure 已置锁并清计数——本方法先看锁，恰返 0（不泄露
+    /// "计数已清零"的内部态），与「5 次错后第 6 次请求必 429」的外部语义一致
+    pub fn remaining_attempts(&self, ip: &str) -> u32 {
+        match self.entries.get(ip) {
+            Some(e) if e.locked_until.is_some() => 0,
+            Some(e) => MAX_FAILURES.saturating_sub(e.failures),
+            None => MAX_FAILURES,
+        }
     }
 }
 
@@ -445,5 +457,24 @@ mod tests {
             },
             "A 的锁定状态独立存续"
         );
+    }
+
+    // ==== remaining_attempts（A3 端点 401 remaining 文案数据源）====
+
+    /// 递减语义：未见过 → 5；错 1..4 次 → 4..1；第 5 次（置锁）→ 0；
+    /// record_success 清零 → 满 5 重来
+    #[test]
+    fn remaining_attempts_decrements_and_locks_at_zero() {
+        let mut rl = PinRateLimiter::new();
+        let t = FakeClock(0);
+        assert_eq!(rl.remaining_attempts("1.1.1.1"), 5, "未见过 IP 满额");
+        for want in [4, 3, 2, 1] {
+            rl.record_failure("1.1.1.1", t.now());
+            assert_eq!(rl.remaining_attempts("1.1.1.1"), want);
+        }
+        rl.record_failure("1.1.1.1", t.now()); // 第 5 次：置锁
+        assert_eq!(rl.remaining_attempts("1.1.1.1"), 0, "锁定期恒 0");
+        rl.record_success("1.1.1.1");
+        assert_eq!(rl.remaining_attempts("1.1.1.1"), 5, "成功清零后满额重来");
     }
 }

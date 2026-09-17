@@ -1,8 +1,7 @@
-// 远程接入层（M2）：axum 内嵌服务器 + 直通配对 + 移动看板 API
-// 范围与红线见 docs/superpowers/plans/2026-09-14-m2-remote-access-board.md
+// 远程接入层（M2）：axum 内嵌服务器 + 访问密码配对（M5）+ 移动看板 API
+// 范围与红线见 docs/superpowers/plans/2026-09-17-m5-access-pin-and-file-pool.md
 
 pub mod api;
-pub mod approval;
 pub mod content;
 pub mod events;
 pub mod files;
@@ -48,16 +47,8 @@ pub fn is_online(registry_hit: bool, last_seen_at: i64, now: i64) -> bool {
     registry_hit || now - last_seen_at < 30_000
 }
 
-/// 8 字节随机 hex（审批请求 id 生成器）：fill_bytes 后逐字节两位 hex——
-/// 与 STATE 里 pairing token 生成器同写法，抽成复用函数（控制者预裁定 2：
-/// 生成器零参随机形态，**不可位置式**——消费后复用会让旧轮询搭上新请求）
-fn random_hex_8() -> String {
-    let mut b = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-/// 16 字节随机 hex（审批配对设备 id 生成器）：与直通配对 device_id 同风格
+/// 16 字节随机 hex（设备 id 生成器，M5 A3 起 /pair/pin 落行消费）：零参随机形态，
+/// 不可位置式（生成器消费后复用会让不同设备撞行）
 fn random_hex_16() -> String {
     let mut b = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
@@ -65,7 +56,7 @@ fn random_hex_16() -> String {
 }
 
 // ============================================================
-// 生命周期接线（Task 4）：服务器随设置启停 + 四个 tauri 命令 + 启动恢复
+// 生命周期接线（Task 4）：服务器随设置启停 + tauri 命令 + 启动恢复
 // ============================================================
 
 use once_cell::sync::Lazy;
@@ -82,17 +73,6 @@ static SERVER_HANDLE: Lazy<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> 
 /// 共享状态单例：服务器任务与 tauri 命令共用同一份 pairing / 会话源 / 设备存储
 static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
     std::sync::Arc::new(server::RemoteState {
-        pairing: Mutex::new(pairing::PairingService::new(
-            10 * 60 * 1000, // 配对码有效期 10 分钟
-            pairing::PairingClock {
-                now: Box::new(|| chrono::Utc::now().timestamp_millis()),
-                token: Box::new(|| {
-                    let mut b = [0u8; 16];
-                    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
-                    b.iter().map(|x| format!("{x:02x}")).collect()
-                }),
-            },
-        )),
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
         store: pairing::DeviceStore::global(),
@@ -109,23 +89,58 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         watcher_tx: watcher::event_sender(),
         // M4 T0a：SSE 连接注册表（吊销/停止即时断连 + Task 7 在线口径数据源）
         sse_registry: std::sync::Arc::new(server::SseRegistry::default()),
-        // M4 T2：审批队列（零参随机 hex 生成器——id/设备 id 不可位置式，防消费后复用）
-        approval: Mutex::new(approval::ApprovalService::new(
-            5 * 60 * 1000,
-            Box::new(random_hex_8), // 请求 id：8 字节随机 hex
-            // 4 位码：0000-9999 等概率，前导零补齐
-            Box::new(|| {
-                format!(
-                    "{:04}",
-                    rand::Rng::gen_range(&mut rand::thread_rng(), 0..10000)
-                )
-            }),
-            Box::new(random_hex_16), // 设备 id：16 字节随机 hex（与直通配对 device_id 同风格）
-        )),
         // M4 T2：设备上限源（生产读 KV——max_devices_from_kv 是唯一读取点）
         max_devices_source: Box::new(max_devices_from_kv),
+        // M5 A3：/pair/pin 认证端点接线
+        pin_limiter: Mutex::new(pin::PinRateLimiter::new()),
+        pin_source: Box::new(pin::get_pin),
+        now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+        // gate 回环豁免 / via 判定的隧道域名源（生产 = 快照抽取；A5 双通道聚合时改聚合实现）
+        tunnel_hosts_source: Box::new(tunnel_hosts_from_snapshot),
+        via_hosts_source: Box::new(via_hosts_from_snapshot),
     })
 });
+
+/// 从看板地址抽域名（纯函数）：快照 url 契约恒为含 /m 的完整地址（board_url 归一），
+/// 取 scheme 后、首个 / 前的 host 段，过 gate::normalize_host 归一（小写+剥端口）
+fn host_of_board_url(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    rest.split('/')
+        .next()
+        .map(gate::normalize_host)
+        .filter(|h| !h.is_empty())
+}
+
+/// gate 回环豁免的隧道域名并集（生产源；测试注入缝在 RemoteState）。
+/// 隧道出错 = 地址不可信（remote_status 同口径 url.filter(error.is_none())）→ 空表，
+/// 即隧道异常时本机豁免的 Host 条件恒不成立之外仍以 cookie 为准（豁免面最小化）
+fn tunnel_hosts_from_snapshot() -> Vec<String> {
+    let s = tunnel::snapshot();
+    if s.error.is_some() {
+        return Vec::new();
+    }
+    s.url
+        .and_then(|u| host_of_board_url(&u))
+        .into_iter()
+        .collect()
+}
+
+/// via 判定的分通道域名（生产源）：快照单通道模型按 mode 分拣 quick/named；
+/// A5 双通道聚合时改为两通道地址各自归集（签名已兼容）
+fn via_hosts_from_snapshot() -> (Vec<String>, Vec<String>) {
+    let s = tunnel::snapshot();
+    if s.error.is_some() {
+        return (Vec::new(), Vec::new());
+    }
+    match (
+        s.mode.as_str(),
+        s.url.as_deref().and_then(host_of_board_url),
+    ) {
+        (m, Some(h)) if m == tunnel::KEY_CHANNEL_VALUE_QUICK => (vec![h], Vec::new()),
+        (m, Some(h)) if m == tunnel::KEY_CHANNEL_VALUE_NAMED => (Vec::new(), vec![h]),
+        _ => (Vec::new(), Vec::new()),
+    }
+}
 
 /// 读取设置里的绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
 /// M2-R3：设置里存了非法 bind 时返回 Err（由调用方决定拒绝启动或展示回落）
@@ -254,10 +269,10 @@ fn start_server() -> Result<(), String> {
     Ok(())
 }
 
-/// 停止远程服务：abort 服务器任务 + 全吊销已配对设备 + 清空配对码（不变量 5「全吊销」：
-/// `stop()` 只清内存 token，DB 侧吊销由 `revoke_all` 完成，二者缺一不可）。
-/// 锁序：SERVER_HANDLE（取走即释放）→ store DB 锁 → pairing 锁——两条锁不并发持有，
-/// 与 api::pair 的「pairing 释放后再进 store」（Task 3 已收窄）不构成锁序反转
+/// 停止远程服务：abort 服务器任务 + 全吊销已配对设备（不变量 5「全吊销」）。
+/// M5 A3：旧直通码/审批制的内存态（PairingService token / ApprovalService 队列）已随
+/// 模块删除——停止 = `revoke_all` 一条即足够，已配对设备下次过闸即 403。
+/// 锁序：SERVER_HANDLE（取走即释放）→ store DB 锁——两条锁不并发持有
 fn stop_server() {
     if let Some(h) = SERVER_HANDLE.lock().unwrap().take() {
         h.abort();
@@ -268,13 +283,6 @@ fn stop_server() {
     STATE.store.with(|c| {
         let _ = pairing::revoke_all(c); // 停止 = 全吊销（七不变量）
     });
-    // M4（评审 Important 同源，裁决外扩展——可回退）：审批队列随 STATE 存活、不随服务器
-    // 重启清空，停止 = 全吊销后若不清已消费项，重开远程后旧 requestId 重 poll 仍可复活
-    // 已吊销设备（同 purge_approved 防复活语义，spec T0a 即时生效）
-    let purged = STATE.approval.lock().unwrap().purge_approved();
-    // 终审建议并入：purge 计数走审计留痕（与同文件其它审计事件同风格），不再仅打日志
-    events::audit("server_stop_purged_queue", &format!("purged={purged}"));
-    STATE.pairing.lock().unwrap().stop();
     // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
     tunnel::stop();
     // M4 T3：电源锁随远程关闭释放（caffeinate kill / 执行状态清除 + 磁盘代设还原）
@@ -451,67 +459,12 @@ fn host_info() -> serde_json::Value {
     )
 }
 
-/// 刷新配对二维码：发行新 token（单活跃——发行即作废旧 token，不变量 1）并拼出可扫 URL。
-/// host 选取与 remote_status 的 url 字段同源（display_host_for：0.0.0.0 → 局域网首个
-/// 或回落 loopback），仅比主显示 url 多拼 `#token=` 配对载荷
-#[tauri::command]
-pub fn remote_issue_token() -> Result<serde_json::Value, String> {
-    let token = STATE.pairing.lock().unwrap().issue();
-    let (_, port) = bind_and_port().unwrap_or_else(|_| ("127.0.0.1".to_string(), DEFAULT_PORT));
-    // bind 非法（设置被写坏）时按默认 loopback 展示，与 remote_status 口径一致；
-    // token 扫码串必须可拨号，故同样走 display_host_for 的 0.0.0.0 → LAN 修正
-    let bind =
-        crate::database::dao::settings::get_setting(KEY_BIND).unwrap_or_else(|| "127.0.0.1".into());
-    let host = display_host_for(&bind, local_lan_ips());
-    // M4 T1c：隧道健康（有地址且无 error）时扫码 URL 跟随隧道基址，否则回落 http 直连
-    Ok(serde_json::json!({
-        "token": token,
-        "url": pair_url_with_tunnel(
-            tunnel::snapshot().url.filter(|_| tunnel::snapshot().error.is_none()),
-            format!("http://{host}:{port}/m"),
-            &token,
-        )
-    }))
-}
-
 // ============================================================
-// M4 T2：审批配对 / 设备花名册命令（桌面面板数据源与操作入口）
+// 设备花名册命令（桌面面板数据源与操作入口；M5 A3 起配对仅 /pair/pin，
+// 审批/直通命令已随密码制下线）
 // ============================================================
 
-/// 待审批队列（设置页面板数据源；name/ip/ua/expiresAt/4位码）
-#[tauri::command]
-pub fn remote_pending_requests() -> serde_json::Value {
-    let now = chrono::Utc::now().timestamp_millis();
-    let list = STATE.approval.lock().unwrap().pending(now);
-    serde_json::json!(list
-        .iter()
-        .map(|r| serde_json::json!({
-            "id": r.id, "name": r.name, "ip": r.ip, "ua": r.ua,
-            "code": r.code, "expiresAt": r.expires_at,
-        }))
-        .collect::<Vec<_>>())
-}
-
-/// 桌面批准（spec T2b 路径一）。cap 先于 approve 锁计算（不持审批锁碰 DB）；
-/// 上限门经 max_devices_source 注入缝——与 api::pair / pair_confirm 三入口同门（spec T2c）
-#[tauri::command]
-pub fn remote_approve_request(id: String) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    let max = (STATE.max_devices_source)();
-    let cap = STATE.store.with(|c| pairing::device_count(c) >= max);
-    match STATE.approval.lock().unwrap().approve(&id, now, || cap) {
-        approval::ApproveOutcome::Ok { .. } => {
-            events::audit("pair_approved", &id);
-            Ok(())
-        }
-        approval::ApproveOutcome::CapFull => Err("设备已满，请先在花名册吊销腾位".into()),
-        approval::ApproveOutcome::NotFound | approval::ApproveOutcome::Expired => {
-            Err("请求已过期或不存在".into())
-        }
-    }
-}
-
-/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——直通/审批落库均带设备名）
+/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名）
 #[tauri::command]
 pub fn remote_devices() -> serde_json::Value {
     let now = chrono::Utc::now().timestamp_millis();
@@ -541,18 +494,13 @@ pub fn remote_devices() -> serde_json::Value {
         .collect::<Vec<_>>())
 }
 
-/// 单设备吊销：DB 置位 + 审批队列已消费项清理 + SSE 即时断连（Task 1 注册表接线）+ 审计
+/// 单设备吊销：DB 置位 + SSE 即时断连（Task 1 注册表接线）+ 审计。
+/// M5 A3：审批队列清理随审批制下线——旧审批路径已不存在，无「重 poll 复活」面
 #[tauri::command]
 pub fn remote_revoke_device(id: String) -> Result<(), String> {
     STATE.store.with(|c| pairing::revoke_device(c, &id))?;
-    // M4（评审 Important，spec T0a 即时生效）：清掉审批队列中该设备的已消费项——
-    // 否则残留项 TTL 内被旧 requestId 重 poll/confirm 经 INSERT OR REPLACE 复活
-    let purged = STATE.approval.lock().unwrap().purge_by_device(&id);
     let n = STATE.sse_registry.disconnect_device(&id);
-    events::audit(
-        "device_revoked",
-        &format!("id={id} closed_sse={n} purged={purged}"),
-    );
+    events::audit("device_revoked", &format!("id={id} closed_sse={n}"));
     events::emit_ui("remote-roster-changed", serde_json::json!({"id": id}));
     Ok(())
 }
@@ -564,12 +512,10 @@ pub fn remote_revoke_all_devices() -> Result<usize, String> {
         .store
         .with(pairing::revoke_all)
         .map_err(|e| e.to_string())?;
-    // M4（评审 Important）：清掉一切已产生设备的消费项（未批准 pending 不动，防复活同上）
-    let purged = STATE.approval.lock().unwrap().purge_approved();
     let closed = STATE.sse_registry.disconnect_all();
     events::audit(
         "devices_revoked_all",
-        &format!("count={n} closed_sse={closed} purged={purged}"),
+        &format!("count={n} closed_sse={closed}"),
     );
     events::emit_ui("remote-roster-changed", serde_json::json!({}));
     Ok(n)
@@ -724,7 +670,7 @@ fn merge_lan_candidates(
 
 /// 主显示 host 选取内核（纯函数，不触网络）：0.0.0.0 通配绑定时取局域网候选首个
 /// （枚举失败回落 127.0.0.1——M2 用户实测 0.0.0.0 地址本身不可拨号），其余绑定原样。
-/// remote_status 的 `url` 字段与 remote_issue_token 的扫码 URL 同源共用（P7 v6 修正）；
+/// remote_status 的 `url` 字段与托盘地址同源共用（P7 v6 修正；旧 remote_issue_token 已删）；
 /// 与 lan_urls_for 同为「绑定形态 → 可达地址」口径，风格对齐
 fn display_host_for(bind: &str, ips: Vec<String>) -> String {
     if bind == "0.0.0.0" {

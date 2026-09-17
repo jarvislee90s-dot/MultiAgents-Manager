@@ -1,6 +1,6 @@
 // /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
-// + pair + events（M3 Task 6 SSE 实时通道）+ session-messages（Task 7）
-// + session-files / file（M3 Task 8 文件路径提取与安全读取）
+// + pair/pin（M5 A3 访问密码配对，唯一换 cookie 入口）+ events（M3 Task 6 SSE 实时通道）
+// + session-messages（Task 7）+ session-files / file（M3 Task 8 文件路径提取与安全读取）
 
 use axum::{
     extract::{ConnectInfo, Query, State},
@@ -15,8 +15,6 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 
-// 审批状态机产出枚举（M4 T2 三 handler 的 match 对象）
-use super::approval::{ConfirmOutcome, CreateRejection, PollOutcome};
 use super::server::{CleanupStream, RemoteState};
 
 /// GET /m/api/v1/sessions：数据源注入（生产 = adapter::get_all_sessions），
@@ -123,252 +121,128 @@ pub async fn events(
     Sse::new(cleaned).keep_alive(sse::KeepAlive::default())
 }
 
+/// POST /pair/pin 请求体（M5 A3）：PIN 必填，设备名可选（缺省/空回落默认名）
 #[derive(Deserialize)]
-pub struct PairReq {
-    pub token: String,
-}
-
-/// POST /m/api/v1/pair：一次性 token 换设备 cookie。
-/// 不变量③：Invalid / Expired / Used 一律 403、响应体无差异（不给有效性预言机）
-pub async fn pair(
-    State(st): State<Arc<RemoteState>>,
-    headers: axum::http::HeaderMap,
-    ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    Json(req): Json<PairReq>,
-) -> Result<Response, StatusCode> {
-    use crate::remote::pairing::AcceptResult;
-    // M4 T2c：上限三入口统一门——直通扫码也拒（spec：否则扫码绕过上限）。
-    // max 经注入缝取（生产读 KV；测试注入常量——不直读全局 DAO）。
-    // 门在 accept **之前**：token 不被消费，腾位后原码仍可用。
-    // 注意本 handler 返回 `Result<Response, StatusCode>`——带 body 的 403 须包 `Ok(...)`
-    let max = (st.max_devices_source)();
-    if st
-        .store
-        .with(|c| crate::remote::pairing::device_count(c) >= max)
-    {
-        super::events::audit("pair_rejected_cap", &format!("max={max}"));
-        return Ok((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "cap_full" })),
-        )
-            .into_response());
-    }
-    let now = chrono::Utc::now().timestamp_millis();
-    let ua = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    // 先把 pairing 锁收窄到 accept() 一步：accept 返回后立即释放 MutexGuard，再做阻塞 DB 写。
-    // 原写法持着 pairing 锁调 persist_device（锁序 pairing→DB 阻塞段），Task 4 的 stop_server
-    // 是 store→pairing 顺序，虽非嵌套暂不反转，但两条顺序并存即是未来死锁的种子（评审 Minor）
-    let device_id = {
-        let mut svc = st.pairing.lock().unwrap();
-        match svc.accept(&req.token) {
-            AcceptResult::Ok { device_id } => device_id,
-            // 不变量③：Invalid / Expired / Used 一律 403、响应体无差异（不给有效性预言机）
-            _ => return Err(StatusCode::FORBIDDEN),
-        }
-        // svc（MutexGuard）在此作用域结束处 drop：后续 persist 不再持 pairing 锁
-    };
-    let dev = crate::remote::pairing::NewDevice {
-        id: device_id.clone(),
-        // M4 T2：直通路径落设备名（花名册展示——否则 roster 只剩 id 前 8 位可读）
-        name: "直通扫码".to_string(),
-        ua,
-        // 来源 IP 取 TCP 对端（ConnectInfo）入指纹——经隧道时为隧道地址，
-        // 真实客户端 IP 还原属 Task A3 运行时判定范畴
-        origin_ip: addr.ip().to_string(),
-        // via 运行时判定（回环+Host 快照）属 Task A3——接入前空串占位（列 DEFAULT 同值）
-        via: String::new(),
-        paired_at: now,
-    };
-    // 持久化失败不阻断本次配对（下次 gate 校验会失败）——保持简报行为；
-    // 成功则 cookie 必须下发**生效 id**（M5 A1 upsert：同指纹命中会沿用旧行 id，
-    // 若仍下发 accept() 新生成 id，该 cookie 指向不存在的行，重连浏览器永久 403）
-    let effective_id = st.store.with(|c| {
-        crate::remote::pairing::persist_device(c, &dev).unwrap_or_else(|_| device_id.clone())
-    });
-    // HttpOnly + SameSite=Lax + Path=/m + 180d（dsh 七不变量之 cookie 语义）——
-    // 拼装收口到 pairing::device_cookie（与 pair-poll / pair-confirm 三处共用，防漂移）
-    Ok((
-        [(
-            axum::http::header::SET_COOKIE,
-            crate::remote::pairing::device_cookie(&effective_id),
-        )],
-        Json(serde_json::json!({ "ok": true })),
-    )
-        .into_response())
-}
-
-// ============================================================
-// 审批配对三端点（M4 T2）：/pair/request | /pair/poll | /pair/confirm
-// 均不过闸（gate 放行 /pair/*）——凭据 = 桌面批准或 4 位码，成功后换设备 cookie
-// ============================================================
-
-#[derive(Deserialize)]
-pub struct PairRequestBody {
+pub struct PairPinBody {
+    pub pin: String,
+    #[serde(default)]
     pub name: Option<String>,
 }
 
-/// POST /m/api/v1/pair/request（M4 T2a）：新设备请求接入（未过闸端点）。
-/// 成功即桌面通知（emit remote-pair-request）+ 审计留痕
-pub async fn pair_request(
+/// POST /m/api/v1/pair/pin（M5 A3）：访问密码换设备 cookie——密码制唯一配对入口。
+/// 处理序（计划 §3.1）：① 限速 check（锁内查改）→ ② PIN 源读取 → ③ 校验 →
+/// ④ record_success + 设备上限门（PIN 正确**之后**判定——先验 PIN 再谈名额，不向前者
+/// 泄露名额信息）→ ⑤ upsert + cookie 下发 → ⑥ 200。
+/// 状态码契约（响应体 camelCase）：
+/// - 锁定期内（即使 PIN 正确）→ 429 `{"retryAfter": 秒}`；
+/// - PIN 未设置（KV 空）→ 401 `{"error":"pin_not_set"}`（不计失败——无密可对；
+///   A5 会在开通道时自动生成，本任务只留语义）；
+/// - PIN 错 / 格式非法 → 记失败 + 401 `{"error":"invalid_pin","remaining": n}`
+///   （n = 5 - 已错次数；移动端展示「还可尝试 N 次」是计划内预言机披露）；
+/// - 正确 → 200 `{"ok":true}` + Set-Cookie（upsert 生效 id，属性同既有 cookie 契约）。
+pub async fn pair_pin(
     State(st): State<Arc<RemoteState>>,
-    ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<PairRequestBody>,
+    Json(req): Json<PairPinBody>,
 ) -> Response {
-    let now = chrono::Utc::now().timestamp_millis();
+    use crate::remote::pin::RateDecision;
+    let ip = addr.ip().to_string();
+    // 限速时钟走注入缝（测试可推进）；设备时间戳走真实时钟（gate 滑动 TTL 域，见 persist）
+    let now = (st.now_source)();
+    // ① 限速过闸：锁定期内即使 PIN 正确也拒（429），不泄露任何 PIN 有效性信息
+    if let RateDecision::Locked { retry_after_secs } =
+        st.pin_limiter.lock().unwrap().check(&ip, now)
+    {
+        super::events::audit(
+            "pair_pin_locked",
+            &format!("ip={ip} retry_after={retry_after_secs}s"),
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "retryAfter": retry_after_secs })),
+        )
+            .into_response();
+    }
+    // ② PIN 源读取：未设置 → 401 pin_not_set，不计失败
+    let Some(expected) = (st.pin_source)() else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "pin_not_set" })),
+        )
+            .into_response();
+    };
+    // ③ 校验：格式非法与比对失败同语义（同记失败——不给"格式预言机"）
+    if !crate::remote::pin::validate_pin(&req.pin) || req.pin.trim() != expected {
+        // 记失败与读剩余次数在同一锁临界区（限速器锁内查改，契约如此）
+        let remaining = {
+            let mut limiter = st.pin_limiter.lock().unwrap();
+            limiter.record_failure(&ip, now);
+            limiter.remaining_attempts(&ip)
+        };
+        super::events::audit("pair_pin_wrong", &format!("ip={ip} remaining={remaining}"));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid_pin", "remaining": remaining })),
+        )
+            .into_response();
+    }
+    // ④ PIN 正确：清零该 IP 计数 → 设备上限门（沿用既有直通上限语义：403 + cap_full）
+    st.pin_limiter.lock().unwrap().record_success(&ip);
+    let max = (st.max_devices_source)();
+    let cap_full = st
+        .store
+        .with(|c| crate::remote::pairing::device_count(c) >= max);
+    if cap_full {
+        super::events::audit("pair_pin_rejected_cap", &format!("max={max}"));
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "cap_full" })),
+        )
+            .into_response();
+    }
+    // via 判定（配对时刻）：Host 头 + 来源 IP 对照隧道快照域名（与 gate 豁免同判据，
+    // is_local_access / classify_via 一处定义两处消费）
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (quick_hosts, named_hosts) = (st.via_hosts_source)();
+    let via = super::gate::classify_via(addr.ip(), host, &quick_hosts, &named_hosts);
+    // 设备名：自报 trim 收敛 40 字符（与 rename_device / 审批自报名同口径），空回落默认名
+    let mut name: String = req
+        .name
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(40)
+        .collect();
+    if name.is_empty() {
+        name = "新设备".to_string();
+    }
     let ua = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let ip = addr.ip().to_string();
-    let name = req.name.unwrap_or_default();
-    let mut svc = st.approval.lock().unwrap();
-    match svc.create(&name, &ua, &ip, now) {
-        Ok(r) => {
-            super::events::emit_ui(
-                "remote-pair-request",
-                serde_json::json!({
-                    "name": r.name, "ip": r.ip, "expiresAt": r.expires_at,
-                }),
-            );
-            super::events::audit(
-                "pair_request",
-                &format!("id={} name={} ip={}", r.id, r.name, r.ip),
-            );
-            Json(serde_json::json!({ "requestId": r.id, "expiresAt": r.expires_at }))
-                .into_response()
-        }
-        Err(e) => {
-            let err = match e {
-                CreateRejection::QueueFull => "queue_full",
-                CreateRejection::IpBusy => "ip_busy",
-            };
-            super::events::audit("pair_request_rejected", &format!("ip={ip} reason={err}"));
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({ "error": err })),
-            )
-                .into_response()
-        }
-    }
+    let device_id = super::random_hex_16();
+    let paired_at = chrono::Utc::now().timestamp_millis();
+    super::events::audit("pair_pin_ok", &format!("via={via} ip={ip}"));
+    persist_and_cookie(&st, &device_id, &name, &ua, &ip, via, paired_at)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairPollBody {
-    pub request_id: String,
-}
-
-/// POST /m/api/v1/pair/poll：手机轮询审批结果（approved 幂等重发 Set-Cookie——丢包重 poll 不掉凭证）
-pub async fn pair_poll(
-    State(st): State<Arc<RemoteState>>,
-    Json(req): Json<PairPollBody>,
-) -> Response {
-    let now = chrono::Utc::now().timestamp_millis();
-    let outcome = st.approval.lock().unwrap().poll(&req.request_id, now);
-    match outcome {
-        PollOutcome::Approved {
-            device,
-            name,
-            ua,
-            ip,
-        } => {
-            // E2E S7 实测缺陷修复：approved 落库前复核设备上限——批准后满员、
-            // 旧 requestId 幂等重 poll 会经本路径绕过「三入口同门」把第 4 台
-            // 设备落库（Task 7 评审 Minor TOCTOU 被端到端坐实）。满员时维持
-            // pending 观感（腾位后下次 poll 自动补上凭证）。
-            // 注意取值顺序：max 必须在 store.with 之外求值——with 持 DB 锁不可重入，
-            // 闭包内再走 get_setting 会自死锁（E2E 实测进程冻结的根因）
-            let max = (st.max_devices_source)();
-            let cap = st
-                .store
-                .with(|c| crate::remote::pairing::device_count(c) >= max);
-            if cap {
-                super::events::audit("pair_poll_deferred_cap", &format!("device={device}"));
-                return Json(serde_json::json!({ "status": "pending" })).into_response();
-            }
-            super::events::audit("pair_polled", &format!("device={device}"));
-            persist_and_cookie(&st, &device, &name, &ua, &ip, now)
-        }
-        PollOutcome::Pending { expires_at } => {
-            Json(serde_json::json!({ "status": "pending", "expiresAt": expires_at }))
-                .into_response()
-        }
-        PollOutcome::Expired => Json(serde_json::json!({ "status": "expired" })).into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairConfirmBody {
-    pub request_id: String,
-    pub code: String,
-}
-
-/// POST /m/api/v1/pair/confirm：4 位确认码等效授权（限试 3 次，spec T2b）
-pub async fn pair_confirm(
-    State(st): State<Arc<RemoteState>>,
-    Json(req): Json<PairConfirmBody>,
-) -> Response {
-    let now = chrono::Utc::now().timestamp_millis();
-    let max = (st.max_devices_source)();
-    let outcome = st
-        .approval
-        .lock()
-        .unwrap()
-        .confirm(&req.request_id, &req.code, now);
-    // Ok 路径补上限门（confirm 内部不触 DB——状态机纯内存；满员时码对了也拒）
-    match outcome {
-        ConfirmOutcome::Ok {
-            device,
-            name,
-            ua,
-            ip,
-        } => {
-            let cap = st
-                .store
-                .with(|c| crate::remote::pairing::device_count(c) >= max);
-            if cap {
-                return Json(serde_json::json!({ "ok": false, "error": "cap_full" }))
-                    .into_response();
-            }
-            super::events::audit("pair_confirmed", &format!("device={device}"));
-            persist_and_cookie(&st, &device, &name, &ua, &ip, now)
-        }
-        ConfirmOutcome::Wrong(left) => {
-            // 敌意试码留痕（spec T2e）：前两次失败也要有审计，否则 exhausted 才是首条记录
-            super::events::audit(
-                "pair_confirm_wrong",
-                &format!("id={} tries_left={left}", req.request_id),
-            );
-            Json(serde_json::json!({ "ok": false, "error": "wrong", "triesLeft": left }))
-                .into_response()
-        }
-        ConfirmOutcome::Exhausted => {
-            super::events::audit("pair_confirm_exhausted", &req.request_id);
-            Json(serde_json::json!({ "ok": false, "error": "exhausted" })).into_response()
-        }
-        ConfirmOutcome::Expired | ConfirmOutcome::NotFound => {
-            Json(serde_json::json!({ "ok": false, "error": "expired" })).into_response()
-        }
-    }
-}
-
-/// 批准/确认通过的公共落库 + 下发 cookie（设备名来自请求——花名册展示用；
-/// api::pair 直通路径传「直通扫码」）。
-/// ua/ip 来自审批请求（pair/request 存档、随 Ok 变体透传）——入设备指纹，
-/// 不同设备不同行（M5 A1 评审修复：空指纹会让所有审批设备合并成一行）
+/// 配对通过的公共落库 + 下发 cookie（M5 A3 起为 /pair/pin 专用；真实 ua/ip 入指纹，
+/// via 为配对时刻的分类结果）。
+/// cookie 下发生效 id（M5 A1 upsert 语义：命中旧行时必须下发旧行 id——若下发新生成 id，
+/// 该 cookie 指向不存在的行，重连浏览器永久 403）；
+/// 持久化失败不阻断配对（下次 gate 校验会失败）——回退请求侧生成 id
 fn persist_and_cookie(
     st: &Arc<RemoteState>,
     device_id: &str,
     name: &str,
     ua: &str,
     origin_ip: &str,
+    via: &str,
     now: i64,
 ) -> Response {
     let dev = crate::remote::pairing::NewDevice {
@@ -376,12 +250,9 @@ fn persist_and_cookie(
         name: name.to_string(),
         ua: ua.to_string(),
         origin_ip: origin_ip.to_string(),
-        // via 运行时判定（回环+Host 快照）属 Task A3——接入前空串占位（列 DEFAULT 同值）
-        via: String::new(),
+        via: via.to_string(),
         paired_at: now,
     };
-    // cookie 下发生效 id（M5 A1 upsert 语义，理由同 api::pair）；
-    // 持久化失败不阻断配对（下次 gate 校验会失败）——回退请求侧生成 id
     let effective_id = st.store.with(|c| {
         crate::remote::pairing::persist_device(c, &dev).unwrap_or_else(|_| device_id.to_string())
     });
@@ -390,7 +261,7 @@ fn persist_and_cookie(
             axum::http::header::SET_COOKIE,
             crate::remote::pairing::device_cookie(&effective_id),
         )],
-        Json(serde_json::json!({ "ok": true, "status": "approved" })),
+        Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
 }
