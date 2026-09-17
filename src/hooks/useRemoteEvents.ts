@@ -1,6 +1,6 @@
-// 桌面全局远程事件（M4 T2）：配对请求系统通知（点击直达设置页——动作类型经
-// useNotification.ts 的既有全局注册，本 hook 不得二次注册）/ 隧道地址与守护
-// 失败通知 / 托盘触发的地址复制与开关失败提示。main.tsx AppWrapper 挂载一次。
+// 桌面全局远程事件（M5 A6 更新）：/pair/pin 认证制落地后审批/配对请求事件已下线
+//（remote-pair-request 监听与配套 i18n 文案随 A6 删除）；保留隧道地址与守护失败
+// 通知 / 托盘触发的地址复制与开关失败提示。main.tsx AppWrapper 挂载一次。
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -25,19 +25,6 @@ export function useRemoteEvents() {
         if (!ok) ok = (await requestPermission()) === "granted";
         if (ok) sendNotification({ title, body, actionTypeId });
       };
-      unlisten.push(
-        await listen<{ name: string; ip: string }>("remote-pair-request", async (e) => {
-          // spec T2a：桌面弹通知 + 点击直达配对面板（设置页）
-          await notify(
-            t("settings.remote.pairNotifyTitle"),
-            t("settings.remote.pairNotifyBody", {
-              name: e.payload.name || t("settings.remote.pendingUnknown"),
-              ip: e.payload.ip,
-            })
-          );
-          toast.info(t("settings.remote.pairNotifyToast"));
-        })
-      );
       unlisten.push(
         await listen<{ url: string }>("remote-tunnel-address", (e) => {
           toast.success(t("settings.remote.tunnelReadyToast", { url: e.payload.url }));

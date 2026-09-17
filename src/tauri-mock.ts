@@ -513,11 +513,6 @@ if (!isTauri) {
       case "update_tray_menu":
         return Promise.resolve(undefined);
 
-      // M4 T1a：外部通道热切换（设置页「外部通道」区块 off/quick/named）。
-      // default 已兜 null，显式 case 便于 Playwright 场景按需扩展
-      case "remote_set_channel":
-        return Promise.resolve(null);
-
       // Default: return empty success
       default:
         console.log(`[tauri-mock] Unhandled command: ${cmd}`);
