@@ -2,7 +2,7 @@
 
 > 上位文档：`docs/MASTER-PLAN.md`（宪法，D1–D18）→ `docs/superpowers/specs/2026-09-18-phase2-message-injection-design.md`（二期总 spec **v1.4**）。冲突时以宪法为准，其次二期 spec。
 > 版本：2026-09-18 v1 → v2（用户二审裁决 11–14：无头后移、插队、审批边界、由简到繁）→ **v2.1**（v1.4 同步：推送网关/APK 移三期收尾〔裁决 16〕、无头=M11、交接执行器=注入自总结〔裁决 17〕）。
-> 基线（2026-09-18 定案）：分支 **`feat/m5-injection`** = 最新 main（5effc59，含 preset-v2 PR #63）+ PR #68 全量**预演合并**（模拟合并后形态，09-18 用户裁决建立）；远程基座 = 访问密码制；合并验证六门禁全绿（cargo test 738+ / vitest 526 全过）。托盘已融合 main 的 `refresh_tray` 统一重建（远程区进全部三重建路径）。PR #68 正式合并后 main 与本分支自然归一。
+> 基线（2026-09-18 定案）：分支 **`feat/phase2-injection`**（原 feat/m5-injection 更名——该分支承载二期全部工作）= 最新 main（5effc59，含 preset-v2 PR #63）+ PR #68 全量**预演合并**（模拟合并后形态，09-18 用户裁决建立）；远程基座 = 访问密码制；合并验证六门禁全绿（cargo test 738+ / vitest 526 全过）。托盘已融合 main 的 `refresh_tray` 统一重建（远程区进全部三重建路径）。PR #68 正式合并后 main 与本分支自然归一。
 > 状态：待用户确认后进入实施计划（writing-plans）。
 
 ---
