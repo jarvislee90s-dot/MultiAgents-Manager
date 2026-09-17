@@ -88,6 +88,9 @@ export function RemoteSection() {
   const [hostName, setHostName] = useState("");
   // 隧道 Token（M4 T1a）：named 通道的受控输入；进面板回填已存值
   const [token, setToken] = useState("");
+  // Token 面板「待切换」态（M4 Task 3 死锁解除）：channel 尚非 named 时主动展开
+  // 面板——后端对空 Token 必拒，若等切成功才渲染输入框，用户将无处填 Token
+  const [tokenPanelOpen, setTokenPanelOpen] = useState(false);
   const [pairing, setPairing] = useState<PairingToken | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
@@ -262,10 +265,17 @@ export function RemoteSection() {
     }
   };
 
-  // 通道热切换（M4 T1a）：named 时随调携 Token；named 无 Token 由后端拒绝——
-  // Err 中文文案原样 toast，前端不复制门槛判定（避免与后端双源漂移）
+  // 通道热切换（M4 T1a；M4 Task 3 死锁解除）：named 且 Token 为空时**不调后端**——
+  // 后端先校验 Token 后写 channel，空 Token 必 Err，「先切换后面板」会陷入
+  // 「通道变不成 named → 输入框永不出现 → 无处填 Token」死锁；此处直接展开
+  // Token 面板（当前通道不变、运行中隧道不受影响），取消/保存语义见下方 JSX。
+  // 其余路径行为不变：quick/off 即调即热生效，named 有 Token 随调携行
   const changeChannel = async (mode: string) => {
     if (mode === channel) return;
+    if (mode === CHANNEL_NAMED && token.trim() === "") {
+      setTokenPanelOpen(true);
+      return;
+    }
     try {
       await remoteSetChannel(mode, mode === CHANNEL_NAMED ? token : undefined);
       await refresh();
@@ -434,9 +444,9 @@ export function RemoteSection() {
         <div className="border-t" />
 
         {/* 外部通道（M4 T1a，2026-09-16 裁决：独立区块与绑定并存）：off/quick/named 三选。
-            quick/named 切换即后端热生效（restart_if_running）；named 需先填 Tunnel Token
-            （门槛在后端，Err 文案原样 toast）。下方随 status 展示隧道状态：错误黄字、
-            成功给当前隧道地址 */}
+            quick/named 切换即后端热生效（restart_if_running）；named 需先填 Tunnel Token，
+            空 Token 点 named 由前端拦截展开下方 Token 面板（M4 Task 3 死锁解除），后端
+            空 Token 拒绝路径保留为兜底。下方随 status 展示隧道状态：错误黄字、成功给地址 */}
         <div className="flex items-center justify-between gap-4 py-2.5">
           <div className="flex-1">
             <label className="text-sm font-medium">{t("settings.remote.channel")}</label>
@@ -468,30 +478,59 @@ export function RemoteSection() {
             </Button>
           </div>
         </div>
-        {channel !== CHANNEL_OFF && <div className="border-t" />}
-        {channel === CHANNEL_NAMED && (
-          <div className="flex items-center justify-between gap-4 py-2.5">
-            <div className="flex-1">
-              <label htmlFor="remote-tunnel-token" className="text-sm font-medium">
-                {t("settings.remote.tunnelToken")}
-              </label>
-              <p className="text-muted-foreground mt-0.5 text-xs">
-                {t("settings.remote.tunnelTokenHint")}
-              </p>
+        {/* 分隔线跟随面板出现：待切换态（channel 仍 off）展开面板时同样补上 */}
+        {(channel !== CHANNEL_OFF || tokenPanelOpen) && <div className="border-t" />}
+        {/* Token 面板（M4 T1a + Task 3 死锁解除）：channel 已为 named（老用户照常
+            回填显示）或「待切换」态（tokenPanelOpen）时渲染。待切换态额外给三步
+            引导 + 文档外链 + 警示 + 取消；取消仅待切换态有语义（已切 named 的
+            面板是常驻配置，无取消），点击只收面板、不调后端 */}
+        {(channel === CHANNEL_NAMED || tokenPanelOpen) && (
+          <div className="py-2.5">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <label htmlFor="remote-tunnel-token" className="text-sm font-medium">
+                  {t("settings.remote.tunnelToken")}
+                </label>
+                <p className="text-muted-foreground mt-0.5 text-xs">
+                  {t("settings.remote.tunnelTokenHint")}
+                </p>
+              </div>
+              <div className="flex w-72 gap-2">
+                <Input
+                  id="remote-tunnel-token"
+                  value={token}
+                  type="password"
+                  placeholder="eyJh...（Cloudflare Tunnel Token）"
+                  className="flex-1"
+                  onChange={(e) => setToken(e.target.value)}
+                />
+                <Button size="sm" variant="outline" onClick={() => void saveToken()}>
+                  {t("settings.remote.channelSave")}
+                </Button>
+                {channel !== CHANNEL_NAMED && (
+                  <Button size="sm" variant="ghost" onClick={() => setTokenPanelOpen(false)}>
+                    {t("settings.remote.tunnelTokenCancel")}
+                  </Button>
+                )}
+              </div>
             </div>
-            <div className="flex w-72 gap-2">
-              <Input
-                id="remote-tunnel-token"
-                value={token}
-                type="password"
-                placeholder="eyJh...（Cloudflare Tunnel Token）"
-                className="flex-1"
-                onChange={(e) => setToken(e.target.value)}
-              />
-              <Button size="sm" variant="outline" onClick={() => void saveToken()}>
-                {t("settings.remote.channelSave")}
-              </Button>
-            </div>
+            {/* 轻量三步引导：用户此刻多半还没建隧道，就地给出最短路径 */}
+            <ol className="text-muted-foreground mt-2 list-decimal space-y-0.5 pl-4 text-xs">
+              <li>{t("settings.remote.tunnelTokenStep1")}</li>
+              <li>{t("settings.remote.tunnelTokenStep2")}</li>
+              <li>{t("settings.remote.tunnelTokenStep3")}</li>
+            </ol>
+            <p className="mt-1.5 text-xs">
+              <a
+                href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-500 underline underline-offset-2 hover:text-blue-400"
+              >
+                {t("settings.remote.tunnelTokenDoc")}
+              </a>
+            </p>
+            <p className="mt-1 text-xs text-amber-500">{t("settings.remote.tunnelTokenWarning")}</p>
           </div>
         )}
         {status?.tunnelError && <p className="pb-2 text-xs text-amber-500">{status.tunnelError}</p>}

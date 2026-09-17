@@ -247,6 +247,73 @@ describe("RemoteSection 外部通道区块（M4 T1a）", () => {
   });
 });
 
+// M4 Task 3：解除命名隧道 Token 死锁。根因：旧代码「选 named 必调后端 → 后端空 Token
+// 必拒 → 面板只在 channel===named 才渲染」三者互锁——无 Token 永远切不成 named，
+// 输入框永不出现，无处填 Token。新编排：空 Token 点 named 不调后端，直接展开
+// Token 面板 + 三步引导 + 文档外链 + 警示；取消按钮仅「待切换」态（channel 非 named）有语义。
+describe("RemoteSection 命名隧道 Token 面板（M4 Task 3 死锁解除）", () => {
+  const TUNNEL_DOC_URL =
+    "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/";
+
+  it("用例 A（死锁解除核心）：channel=off 且 Token 为空 → 点「命名隧道」不调后端，面板与三步引导展开", async () => {
+    render(<RemoteSection />);
+    // 通道区块不依赖 status 加载，named 按钮（channel 缺省按 off）首帧即可点
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    // 核心断言：后端零调用——remote_set_channel 从未被发起（旧代码此处必被调用）
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_set_channel", expect.anything());
+    // 面板展开：Token 输入框 + 三步引导 + Cloudflare 文档外链 + 警示行
+    //（步骤断言用片段避开 tunnelTokenHint——其文案同样含「Zero Trust / Tunnels」）
+    expect(await screen.findByLabelText("Tunnel Token")).toBeInTheDocument();
+    expect(screen.getByText(/cloudflare dashboard/i)).toBeInTheDocument();
+    expect(screen.getByText(/create a tunnel/i)).toBeInTheDocument();
+    expect(screen.getByText(/paste it here/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /cloudflare docs/i })).toHaveAttribute(
+      "href",
+      TUNNEL_DOC_URL
+    );
+    expect(screen.getByText(/never share/i)).toBeInTheDocument();
+  });
+
+  it("用例 B：面板展开后填 Token 点保存 → remote_set_channel 以 (named, token) 调用", async () => {
+    render(<RemoteSection />);
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    const input = (await screen.findByLabelText("Tunnel Token")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "eyJh-test-token" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_set_channel", {
+        channel: "named",
+        token: "eyJh-test-token",
+      })
+    );
+  });
+
+  it("用例 C：待切换态（channel 非 named）点取消 → 面板消失且不调后端", async () => {
+    render(<RemoteSection />);
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    expect(await screen.findByLabelText("Tunnel Token")).toBeInTheDocument();
+    // 取消按钮只在「待切换」态出现（channel 尚非 named）
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(screen.queryByLabelText("Tunnel Token")).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_set_channel", expect.anything());
+  });
+
+  it("用例 D（不回归）：channel 已为 named → 输入框照常渲染并回填已存 Token，且无取消按钮", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
+      if (cmd === "remote_status") return { ...status, channel: "named" };
+      if (cmd === "get_setting") {
+        return args?.key === "remote.tunnel_token" ? "eyJh-saved-token" : null;
+      }
+      return null;
+    });
+    render(<RemoteSection />);
+    const input = (await screen.findByLabelText("Tunnel Token")) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("eyJh-saved-token"));
+    // 已切 named = 常驻配置面板：无取消按钮（取消仅待切换态）
+    expect(screen.queryByRole("button", { name: /^cancel$/i })).toBeNull();
+  });
+});
+
 // M4 Task 2：设置页随 3s 轮询刷新隧道状态——地址常驻不再只靠 toast。
 // 根因：remote_status 只在进面板/开关/改配置动作时读一次；隧道拉起是异步的，
 // 地址到手时只有 remote-tunnel-address 事件弹 toast，页面状态区永远空。
