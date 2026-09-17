@@ -6,7 +6,7 @@ use super::app_status::{
 };
 use super::cwd::normalize_cwd_for_match;
 use super::git::get_github_url;
-use super::jsonl::read_recent_lines;
+use super::jsonl::{read_first_lines, read_recent_lines};
 use super::project::project_name_from_path;
 use super::session_scan::{fresh_within, SessionFileScan};
 use crate::adapter::AgentProcess;
@@ -292,7 +292,8 @@ struct CodexFileDigest {
     last_timestamp: Option<String>,
 }
 
-/// 读单个 rollout 的内容摘要（尾读 500 行倒扫；session_meta 缺失或 cwd 为空 → None）
+/// 读单个 rollout 的内容摘要：尾部 RECENT_LINES 行倒扫定状态（kinds/last_message），
+/// 文件头首行 session_meta 定身份（id/cwd）。头尾皆缺身份 → None
 fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
     let recent = read_recent_lines(jsonl_path, RECENT_LINES);
 
@@ -370,6 +371,33 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
     }
     // 倒扫时按文件顺序 push，此处反转回文件顺序（旧 → 新）供共享核尾部倒扫
     kinds.reverse();
+
+    // 头尾拼接（2026-09-18 修复，活体取证 11.4MB/2801 行）：长会话（> RECENT_LINES
+    // 行）尾窗不含文件头的 session_meta，身份缺失会让整个 digest 作废 → Phase 1
+    // 匹配不出卡、进程被同目录其他会话抢占。身份恒在文件头首行；小文件头尾同窗，
+    // 尾扫已取到时零变化
+    if session_id.is_none() || project_path.is_empty() {
+        if let Some(head) = read_first_lines(jsonl_path, 1).first() {
+            if let Ok(entry) = serde_json::from_str::<CodexEntry>(head) {
+                if entry.entry_type.as_deref() == Some("session_meta") {
+                    let payload = entry.payload.as_ref();
+                    if session_id.is_none() {
+                        session_id = payload
+                            .and_then(|p| p.get("id"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                    }
+                    if project_path.is_empty() {
+                        project_path = payload
+                            .and_then(|p| p.get("cwd"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                    }
+                }
+            }
+        }
+    }
 
     let session_id = session_id?;
     if project_path.is_empty() {
@@ -938,6 +966,46 @@ mod scan_budget_tests {
         assert!(
             CODEX_SCAN.peek::<Option<CodexFileDigest>>(&f).is_none(),
             "零进程不得触发任何文件解析"
+        );
+    }
+
+    /// 头尾拼接修复（2026-09-18 活体取证）：长会话（> RECENT_LINES 行）尾窗不含
+    /// 文件头的 session_meta → digest 作废 → Phase 1 匹配失败整卡消失（实测
+    /// 11.4MB/2801 行 rollout 正在运行却无卡，进程被同目录空闲兄弟会话抢占）。
+    /// 身份取文件头首行 session_meta，状态取尾窗工具活动，照常匹配出卡
+    #[test]
+    fn long_rollout_keeps_identity_via_head_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = vec![
+            r#"{"timestamp":"2026-09-10T00:00:00Z","type":"session_meta","payload":{"id":"id-long","cwd":"/tmp/proj-long"}}"#.to_string(),
+        ];
+        // 填充超过尾窗（RECENT_LINES=500）的记账行，把 session_meta 挤出尾窗
+        for i in 0..600 {
+            lines.push(
+                r#"{"timestamp":"2026-09-10T00:01:00Z","type":"event_msg","payload":{"type":"token_count""#
+                    .to_string()
+                    + &format!(r#","i":{i}}}}}"#),
+            );
+        }
+        // 尾部工具活动进行中 → 应判 Processing 黄
+        lines.push(
+            r#"{"timestamp":"2026-09-10T00:02:00Z","type":"response_item","payload":{"type":"function_call","name":"bash"}}"#
+                .to_string(),
+        );
+        let f = tmp.path().join("rollout-long.jsonl");
+        std::fs::write(&f, lines.join("\n")).unwrap();
+
+        let out = scan_codex_sessions(
+            tmp.path(),
+            &[cli_process("/tmp/proj-long")],
+            SystemTime::now(),
+        );
+        assert_eq!(out.len(), 1, "长会话经头尾拼接后必须照常出卡");
+        assert_eq!(out[0].id, "id-long");
+        assert_eq!(
+            out[0].status,
+            SessionStatus::Processing,
+            "尾部工具活动 → 运行中黄卡"
         );
     }
 

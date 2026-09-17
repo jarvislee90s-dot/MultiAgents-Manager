@@ -158,6 +158,16 @@ rollout 尾部短暂停在中间 assistant 消息
 - 末条消息 `APIError`（空占位行 + user 文本尾，`ses_f5574c39` 形态）→ Waiting 红（失败请求回归锁；error 判定优先于尾部 Running 短路——user 尾本身判黄）
 - 末条消息 `MessageAbortedError`（同形态）→ Idle 绿（主动中止不提示，优先级同样高于尾部 Running）
 
+## 4.4 Codex 长会话 digest 头尾拼接（2026-09-18 验收期抓获，随本 PR 修复）
+
+**症状**：`codex resume` 长命会话（rollout > 500 行）正在运行却整卡消失（桌面与远程列表皆无），进程被同目录空闲兄弟会话抢占匹配（后者绿卡剔除后项目完全无卡）。活体取证：11.4MB / 2801 行 rollout，`session_id` 在状态缓存中从未出现。
+
+**根因**：`read_codex_digest` 只读尾部 `RECENT_LINES=500` 行，而会话身份（`session_meta` 的 id/cwd）**只在文件第一行**——长会话头部被挤出尾窗 → digest 身份缺失整体作废（None）→ Phase 1 cwd 匹配跳过该文件；`fill_uncached` 回退同样产出 None，无法自救。
+
+**修复**：头尾拼接——身份取文件头首行 `session_meta`，状态取尾窗 500 行，互不依赖；小文件头尾同窗零变化。纯内容函数，(mtime,size) 缓存契约不变（仅缓存未命中时多读一行）。Claude（头 20 行取 cwd）与 WorkBuddy（目录身份）本就免疫，仅 Codex 需修。
+
+**测试**：600+ 行夹具（头部 meta + 超窗记账行 + 尾部工具活动）→ 进程匹配出卡且判 Processing（修复前红：0 卡）。
+
 ## 5. 明确不动清单
 
 | 对象 | 理由 |
