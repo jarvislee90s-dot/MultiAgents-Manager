@@ -254,3 +254,56 @@ describe("FilePreview 403 原因分診（M5 P2-a）", () => {
     );
   });
 });
+
+describe("FilePreview HTML 缩放与源码换行（M5 P2-b）", () => {
+  it("HTML 渲染态：缩放控件 −/＋ 步进 25%（50%–200%），srcDoc 注入 zoom 样式", async () => {
+    installFileFetch(
+      () =>
+        new Response(JSON.stringify({ content: "<p>hello</p>", mime: "text/html" }), {
+          status: 200,
+        })
+    );
+    renderPreview("/tmp/proj/page.html");
+    await screen.findByTestId("preview-code"); // 等文本加载完成（seg 仅加载后出现）
+    fireEvent.click(screen.getByTestId("preview-seg-render"));
+    const frame = await screen.findByTestId("preview-html-frame");
+    expect(frame.getAttribute("srcdoc")).toContain("zoom:1");
+    // ＋ → 125% → srcDoc 注入更新
+    fireEvent.click(screen.getByTestId("preview-zoom-in"));
+    expect(frame.getAttribute("srcdoc")).toContain("zoom:1.25");
+    // 越界钳制：连点 ＋ 到 200% 封顶
+    fireEvent.click(screen.getByTestId("preview-zoom-in"));
+    fireEvent.click(screen.getByTestId("preview-zoom-in"));
+    fireEvent.click(screen.getByTestId("preview-zoom-in"));
+    expect(frame.getAttribute("srcdoc")).toContain("zoom:2");
+    // − 回落；百分比标签点击重置 100%
+    fireEvent.click(screen.getByTestId("preview-zoom-out"));
+    fireEvent.click(screen.getByTestId("preview-zoom-reset"));
+    expect(frame.getAttribute("srcdoc")).toContain("zoom:1");
+  });
+
+  it("md 源码态软换行（pre-wrap），代码类源码不换行", async () => {
+    installFileFetch(
+      () =>
+        new Response(JSON.stringify({ content: "# t", mime: "text/markdown" }), {
+          status: 200,
+        })
+    );
+    renderPreview("/tmp/proj/NOTES.md");
+    await screen.findByTestId("preview-markdown");
+    fireEvent.click(screen.getByTestId("preview-seg-source"));
+    const pre = await screen.findByTestId("preview-code");
+    expect(pre.className).toContain("whitespace-pre-wrap");
+    expect(pre.className).toContain("break-words");
+  });
+
+  it("代码类（.rs）源码保持横向滚动不换行", async () => {
+    installFileFetch(
+      () => new Response(JSON.stringify({ content: "fn a() {}", mime: "text/rust" }), { status: 200 })
+    );
+    renderPreview("/tmp/proj/a.rs");
+    const pre = await screen.findByTestId("preview-code");
+    expect(pre.className).not.toContain("whitespace-pre-wrap");
+    expect(pre.className).toContain("overflow-auto");
+  });
+});

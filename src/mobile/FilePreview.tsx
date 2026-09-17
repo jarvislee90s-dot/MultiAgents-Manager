@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import hljs from "highlight.js/lib/common";
 import { ArrowLeft, X } from "lucide-react";
 import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
+import { fileKindOf } from "./FilePanel";
 import { ApiError, fetchFile, type FilePayload } from "./api";
 import type { Session } from "@/types/session";
 
@@ -127,6 +128,21 @@ export default function FilePreview({
         : "source"
     );
   }, [filePath]);
+
+  // HTML 渲染态缩放（M5 P2-b，虚拟浏览器放缩）：步进 25%、范围 50%–200%。
+  // 缩放经注入 srcDoc 的样式生效（html{zoom}），跨文件保留——观感偏好不随文件重置
+  const [zoom, setZoom] = useState(1);
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 2;
+  const ZOOM_STEP = 0.25;
+  const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  const bumpZoom = (dir: 1 | -1) =>
+    setZoom((z) => clampZoom(Math.round((z + dir * ZOOM_STEP) * 100) / 100));
+
+  // 源码档软换行（M5 P2-b）：文档类（md/markdown/txt）源码自动换行——不影响
+  // 阅读与实质；代码类保持不换行（横向滚动，保逻辑关系）。业界惯例
+  // （GitHub / VSCode 默认口径）
+  const docSource = segKind === "markdown" || fileKindOf(filePath) === "doc";
 
   // 拉取文件：挂载与 filePath 变化时各一次；图片 object URL 在清理函数里 revoke，
   // 防浮窗反复开关泄漏 blob。alive 标记防卸载后 setState 与迟到响应的 revoke 竞态
@@ -279,6 +295,43 @@ export default function FilePreview({
             </button>
           </span>
         )}
+        {/* 缩放控件（M5 P2-b）：仅 HTML 渲染态出现——虚拟浏览器放缩 */}
+        {showHtmlFrame && (
+          <span
+            role="group"
+            aria-label="渲染缩放"
+            data-testid="preview-zoom"
+            className="flex shrink-0 items-center overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700"
+          >
+            <button
+              type="button"
+              data-testid="preview-zoom-out"
+              aria-label="缩小"
+              onClick={() => bumpZoom(-1)}
+              className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              data-testid="preview-zoom-reset"
+              aria-label="重置缩放"
+              onClick={() => setZoom(1)}
+              className="border-x border-slate-300 px-1.5 py-1 text-[10px] text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              type="button"
+              data-testid="preview-zoom-in"
+              aria-label="放大"
+              onClick={() => bumpZoom(1)}
+              className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+            >
+              ＋
+            </button>
+          </span>
+        )}
         <button
           type="button"
           data-testid="preview-close"
@@ -316,11 +369,13 @@ export default function FilePreview({
             data-testid="preview-html-frame"
             title={`渲染 ${baseName}`}
             /* 沙箱仅 allow-scripts（无 allow-same-origin）：渲染态可跑脚本，
-             * 但与看板数据、cookie、storage 完全隔离（M5 线稿既定安全口径） */
+             * 但与看板数据、cookie、storage 完全隔离（M5 线稿既定安全口径）。
+             * 缩放（M5 P2-b）：注入 html{zoom} 样式实现放缩——内容自带样式表的
+             * body 级规则不会覆盖 html 层 zoom */
             sandbox="allow-scripts"
-            srcDoc={
+            srcDoc={`<style>html{zoom:${zoom}}</style>${
               state.phase === "ok" && state.payload.kind === "text" ? state.payload.content : ""
-            }
+            }`}
             className="h-full min-h-[320px] w-full rounded-lg border border-slate-200 bg-white dark:border-slate-700"
           />
         )}
@@ -337,7 +392,13 @@ export default function FilePreview({
           state.payload.kind === "text" && (
             <pre
               data-testid="preview-code"
-              className="overflow-auto rounded-lg bg-slate-100 p-3 text-xs dark:bg-slate-900"
+              className={
+                // 源码档软换行（M5 P2-b）：文档类（md/txt）自动换行不影响阅读；
+                // 代码类保持不换行（横向滚动，保逻辑关系与缩进层级）
+                docSource
+                  ? "rounded-lg bg-slate-100 p-3 text-xs break-words whitespace-pre-wrap dark:bg-slate-900"
+                  : "overflow-auto rounded-lg bg-slate-100 p-3 text-xs dark:bg-slate-900"
+              }
             >
               {highlighted ? (
                 // highlight.js 输出已转义；.hljs 供 mobile.css 双态主题着色
