@@ -42,6 +42,15 @@ fn tool_gate(tool: &str) -> Option<(&'static str, String)> {
     }
 }
 
+/// 路由决策（W3 纯核）。
+///
+/// # 输入契约（前置条件，调用方必须满足）
+/// - `agent_tool_id`：**小写精确匹配**（对齐 `AgentType` serde lowercase 形态，如
+///   `"claude"`/`"workbuddy"`）；大小写不符会静默绕过工具门，调用方必须原样传
+///   会话的 agent_type 小写标识
+/// - `form`：会话宿主形态（adapter 判定产物）
+/// - `pid`：会话 CLI 进程 pid；0 = 进程不在/未读卡
+/// - `platform`：`std::env::consts::OS` 原值（`"macos"`/`"windows"`，其他一律不支持）
 pub fn route(agent_tool_id: &str, form: ProcessForm, pid: u32, platform: &str) -> RouteOutcome {
     if pid == 0 {
         return RouteOutcome::NotInjectable {
