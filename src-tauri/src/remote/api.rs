@@ -133,6 +133,7 @@ pub struct PairReq {
 pub async fn pair(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
+    ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<PairReq>,
 ) -> Result<Response, StatusCode> {
     use crate::remote::pairing::AcceptResult;
@@ -175,7 +176,9 @@ pub async fn pair(
         // M4 T2：直通路径落设备名（花名册展示——否则 roster 只剩 id 前 8 位可读）
         name: "直通扫码".to_string(),
         ua,
-        origin_ip: String::new(),
+        // 来源 IP 取 TCP 对端（ConnectInfo）入指纹——经隧道时为隧道地址，
+        // 真实客户端 IP 还原属 Task A3 运行时判定范畴
+        origin_ip: addr.ip().to_string(),
         // via 运行时判定（回环+Host 快照）属 Task A3——接入前空串占位（列 DEFAULT 同值）
         via: String::new(),
         paired_at: now,
@@ -269,7 +272,12 @@ pub async fn pair_poll(
     let now = chrono::Utc::now().timestamp_millis();
     let outcome = st.approval.lock().unwrap().poll(&req.request_id, now);
     match outcome {
-        PollOutcome::Approved { device, name } => {
+        PollOutcome::Approved {
+            device,
+            name,
+            ua,
+            ip,
+        } => {
             // E2E S7 实测缺陷修复：approved 落库前复核设备上限——批准后满员、
             // 旧 requestId 幂等重 poll 会经本路径绕过「三入口同门」把第 4 台
             // 设备落库（Task 7 评审 Minor TOCTOU 被端到端坐实）。满员时维持
@@ -285,7 +293,7 @@ pub async fn pair_poll(
                 return Json(serde_json::json!({ "status": "pending" })).into_response();
             }
             super::events::audit("pair_polled", &format!("device={device}"));
-            persist_and_cookie(&st, &device, &name, now)
+            persist_and_cookie(&st, &device, &name, &ua, &ip, now)
         }
         PollOutcome::Pending { expires_at } => {
             Json(serde_json::json!({ "status": "pending", "expiresAt": expires_at }))
@@ -316,7 +324,12 @@ pub async fn pair_confirm(
         .confirm(&req.request_id, &req.code, now);
     // Ok 路径补上限门（confirm 内部不触 DB——状态机纯内存；满员时码对了也拒）
     match outcome {
-        ConfirmOutcome::Ok { device, name } => {
+        ConfirmOutcome::Ok {
+            device,
+            name,
+            ua,
+            ip,
+        } => {
             let cap = st
                 .store
                 .with(|c| crate::remote::pairing::device_count(c) >= max);
@@ -325,7 +338,7 @@ pub async fn pair_confirm(
                     .into_response();
             }
             super::events::audit("pair_confirmed", &format!("device={device}"));
-            persist_and_cookie(&st, &device, &name, now)
+            persist_and_cookie(&st, &device, &name, &ua, &ip, now)
         }
         ConfirmOutcome::Wrong(left) => {
             // 敌意试码留痕（spec T2e）：前两次失败也要有审计，否则 exhausted 才是首条记录
@@ -347,13 +360,22 @@ pub async fn pair_confirm(
 }
 
 /// 批准/确认通过的公共落库 + 下发 cookie（设备名来自请求——花名册展示用；
-/// api::pair 直通路径传「直通扫码」）
-fn persist_and_cookie(st: &Arc<RemoteState>, device_id: &str, name: &str, now: i64) -> Response {
+/// api::pair 直通路径传「直通扫码」）。
+/// ua/ip 来自审批请求（pair/request 存档、随 Ok 变体透传）——入设备指纹，
+/// 不同设备不同行（M5 A1 评审修复：空指纹会让所有审批设备合并成一行）
+fn persist_and_cookie(
+    st: &Arc<RemoteState>,
+    device_id: &str,
+    name: &str,
+    ua: &str,
+    origin_ip: &str,
+    now: i64,
+) -> Response {
     let dev = crate::remote::pairing::NewDevice {
         id: device_id.to_string(),
         name: name.to_string(),
-        ua: String::new(),
-        origin_ip: String::new(),
+        ua: ua.to_string(),
+        origin_ip: origin_ip.to_string(),
         // via 运行时判定（回环+Host 快照）属 Task A3——接入前空串占位（列 DEFAULT 同值）
         via: String::new(),
         paired_at: now,

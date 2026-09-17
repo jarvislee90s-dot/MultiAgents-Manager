@@ -426,6 +426,10 @@ mod tests {
                     .method("POST")
                     .uri("/m/api/v1/pair")
                     .header("content-type", "application/json")
+                    // api::pair 现提取 ConnectInfo（来源 IP 入指纹）——oneshot 请求侧自补
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
                     .body(Body::from(r#"{"token":"wrong"}"#))
                     .unwrap(),
             )
@@ -440,6 +444,9 @@ mod tests {
                     .method("POST")
                     .uri("/m/api/v1/pair")
                     .header("content-type", "application/json")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
                     .body(Body::from(r#"{"token":"tok-x"}"#))
                     .unwrap(),
             )
@@ -506,6 +513,9 @@ mod tests {
                     .method("POST")
                     .uri("/m/api/v1/pair")
                     .header("content-type", "application/json")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
                     .body(Body::from(r#"{"token":"tok-x"}"#))
                     .unwrap(),
             )
@@ -571,6 +581,11 @@ mod tests {
         if let Some(c) = cookie {
             b = b.header("cookie", c);
         }
+        // M5 A1 评审修复随记：api::pair 现以 ConnectInfo 取来源 IP 入指纹——
+        // oneshot 不注入该 extension，测试请求侧自补（与 post_json 同一适配）
+        b = b.extension(axum::extract::ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
         b.body(match body {
             Some(s) => Body::from(s.to_string()),
             None => Body::empty(),
@@ -1897,6 +1912,179 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("mam_device=adev-x"));
+    }
+
+    /// 审批服务计数器形态：两台设备测试需互异的 requestId / deviceId
+    /// （固定值形态会让第二条请求撞 "req-x"）。id 与 device 各自独立计数——
+    /// approve 会调 device_gen，共用一个计数器会让序号错位
+    fn state_with_approval_counters() -> Arc<RemoteState> {
+        let mut arc = test_state();
+        let id_n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dev_n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let i = id_n.clone();
+        let d = dev_n.clone();
+        std::sync::Arc::get_mut(&mut arc).unwrap().approval =
+            std::sync::Mutex::new(crate::remote::approval::ApprovalService::new(
+                300_000,
+                Box::new(move || {
+                    format!(
+                        "req-{}",
+                        i.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    )
+                }),
+                Box::new(|| "2468".to_string()),
+                Box::new(move || {
+                    format!(
+                        "adev-{}",
+                        d.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    )
+                }),
+            ));
+        arc
+    }
+
+    /// 携带 UA + 来源 IP 的 /pair/request 请求（oneshot 不注入 ConnectInfo——请求侧自补，
+    /// 与 post_json 同一适配）
+    fn pair_request_with(addr: &str, ua: &str, body: &str) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/m/api/v1/pair/request")
+            .header("content-type", "application/json")
+            .header("user-agent", ua)
+            .extension(axum::extract::ConnectInfo(
+                addr.parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// 携带 UA + 来源 IP 的直通 /pair 请求（同上自补 ConnectInfo）
+    fn direct_pair_with(addr: &str, ua: &str, token: &str) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/m/api/v1/pair")
+            .header("content-type", "application/json")
+            .header("user-agent", ua)
+            .extension(axum::extract::ConnectInfo(
+                addr.parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap()
+    }
+
+    /// 从 Set-Cookie 取设备 id（`mam_device=<id>; Path=/m; ...`）
+    fn cookie_device_id(resp: &axum::http::Response<Body>) -> String {
+        let v = resp
+            .headers()
+            .get("set-cookie")
+            .expect("应携带 Set-Cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        v.split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("mam_device=")
+            .unwrap()
+            .to_string()
+    }
+
+    /// M5 A1 评审修复（Critical）：审批路径以 pair/request 存下的真实 ua/ip 入指纹——
+    /// 两台不同设备 → 两行（修复前共享空指纹合并成一行、上限门失效、误踢）；
+    /// 同设备（同 UA + 同来源 IP）重走 → upsert 命中同一行 id，不新增
+    #[tokio::test]
+    async fn approval_pair_two_devices_two_rows_and_rejoin_hits_same_row() {
+        let state = state_with_approval_counters();
+        let app = super::router_with_static(state.clone());
+        // 设备 A / B 各走一轮：pair/request（各自 UA + 来源 IP）→ 桌面批准 → confirm 换 cookie
+        for (ua, addr, want_id) in [
+            ("ua-A", "10.0.0.1:1000", "adev-0"),
+            ("ua-B", "10.0.0.2:2000", "adev-1"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(pair_request_with(addr, ua, r#"{"name":"手机"}"#))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            let rid = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["requestId"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let now = chrono::Utc::now().timestamp_millis();
+            assert!(matches!(
+                state.approval.lock().unwrap().approve(&rid, now, || false),
+                crate::remote::approval::ApproveOutcome::Ok { .. }
+            ));
+            let resp = app
+                .clone()
+                .oneshot(post_json(
+                    "/m/api/v1/pair/confirm",
+                    &format!(r#"{{"requestId":"{rid}","code":"2468"}}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            assert_eq!(cookie_device_id(&resp), want_id);
+        }
+        let (rows, ua_a_id): (i64, String) = state.store.with(|c| {
+            let n: i64 = c
+                .query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+                .unwrap();
+            let id: String = c
+                .query_row("SELECT id FROM remote_devices WHERE ua = 'ua-A'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            (n, id)
+        });
+        assert_eq!(rows, 2, "两台不同设备必须两行（真实 ua/ip 入指纹）");
+        assert_eq!(ua_a_id, "adev-0");
+
+        // 设备 A 原样重走（直通码路径：同 UA + 同来源 IP）→ upsert 命中同一行，cookie 同 id
+        state.pairing.lock().unwrap().issue();
+        let resp = app
+            .oneshot(direct_pair_with("10.0.0.1:1000", "ua-A", "tok-x"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            cookie_device_id(&resp),
+            "adev-0",
+            "命中路径 Set-Cookie 必须带旧行 id"
+        );
+        let rows: i64 = state.store.with(|c| {
+            c.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+                .unwrap()
+        });
+        assert_eq!(rows, 2, "重走不新增行");
+    }
+
+    /// M5 A1 评审修复（Minor）：直通二次配对命中路径后 Set-Cookie 必须携带 persist
+    /// 返回的旧行 id——若带 accept() 新生成 id，cookie 指向不存在的行，重连浏览器永久 403
+    #[tokio::test]
+    async fn direct_repair_setcookie_carries_persisted_row_id() {
+        let state = test_state();
+        let app = super::router_with_static(state.clone());
+        let pair = || direct_pair_with("10.0.0.9:9000", "UA-shared", "tok-x");
+        state.pairing.lock().unwrap().issue(); // 假时钟 token = "tok-x"
+        let r1 = app.clone().oneshot(pair()).await.unwrap();
+        assert_eq!(r1.status(), 200);
+        let id1 = cookie_device_id(&r1);
+        state.pairing.lock().unwrap().issue(); // accept 一次性——重新发行同密文
+        let r2 = app.clone().oneshot(pair()).await.unwrap();
+        assert_eq!(r2.status(), 200);
+        let id2 = cookie_device_id(&r2);
+        assert_eq!(
+            id2, id1,
+            "二次配对 Set-Cookie 必须携带 persist 返回的旧行 id（而非新生成 id）"
+        );
+        let rows: i64 = state.store.with(|c| {
+            c.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+                .unwrap()
+        });
+        assert_eq!(rows, 1, "同指纹重绑不新增行");
     }
 
     /// T2c 直通上限门端到端：满员 403+cap_full；腾位后**同一 token** 可用（门不消费 token）

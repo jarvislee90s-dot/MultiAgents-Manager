@@ -32,10 +32,13 @@ pub enum CreateRejection {
 #[derive(Debug, PartialEq)]
 pub enum ApproveOutcome {
     /// 批准成功：设备 id + 设备名（花名册展示手机填的名字——名字必须随结果带出，
-    /// 请求消费后无法回查）
+    /// 请求消费后无法回查）+ 建行凭据 ua/ip（M5 A1 评审修复：随 Ok 透传进
+    /// persist 入设备指纹——否则所有审批设备共享空指纹，花名册合并成一行、上限门失效）
     Ok {
         device: String,
         name: String,
+        ua: String,
+        ip: String,
     },
     NotFound,
     Expired,
@@ -44,14 +47,28 @@ pub enum ApproveOutcome {
 
 #[derive(Debug, PartialEq)]
 pub enum PollOutcome {
-    Pending { expires_at: i64 },
-    Approved { device: String, name: String },
+    Pending {
+        expires_at: i64,
+    },
+    /// ua/ip 随结果带出（同 ApproveOutcome::Ok：落库入指纹，消费后无法回查）
+    Approved {
+        device: String,
+        name: String,
+        ua: String,
+        ip: String,
+    },
     Expired,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum ConfirmOutcome {
-    Ok { device: String, name: String },
+    /// ua/ip 随结果带出（同 ApproveOutcome::Ok：落库入指纹，消费后无法回查）
+    Ok {
+        device: String,
+        name: String,
+        ua: String,
+        ip: String,
+    },
     Wrong(u8), // 剩余次数
     Exhausted,
     Expired,
@@ -137,6 +154,8 @@ impl ApprovalService {
         ApproveOutcome::Ok {
             device,
             name: r.name.clone(),
+            ua: r.ua.clone(),
+            ip: r.ip.clone(),
         }
     }
 
@@ -148,6 +167,8 @@ impl ApprovalService {
                 Some(d) => PollOutcome::Approved {
                     device: d.clone(),
                     name: r.name.clone(),
+                    ua: r.ua.clone(),
+                    ip: r.ip.clone(),
                 },
                 None => PollOutcome::Pending {
                     expires_at: r.expires_at,
@@ -166,6 +187,8 @@ impl ApprovalService {
             return ConfirmOutcome::Ok {
                 device: d.clone(),
                 name: r.name.clone(),
+                ua: r.ua.clone(),
+                ip: r.ip.clone(),
             };
         }
         if r.code == code.trim() {
@@ -174,6 +197,8 @@ impl ApprovalService {
             return ConfirmOutcome::Ok {
                 device,
                 name: r.name.clone(),
+                ua: r.ua.clone(),
+                ip: r.ip.clone(),
             };
         }
         r.tries += 1;
@@ -248,21 +273,27 @@ mod tests {
             s.approve("req-x", 20, || false),
             ApproveOutcome::Ok {
                 device: "adev-x".into(),
-                name: "我的手机".into()
+                name: "我的手机".into(),
+                ua: "UA".into(),
+                ip: "1.1.1.1".into()
             }
         );
         assert_eq!(
             s.poll("req-x", 21),
             PollOutcome::Approved {
                 device: "adev-x".into(),
-                name: "我的手机".into()
+                name: "我的手机".into(),
+                ua: "UA".into(),
+                ip: "1.1.1.1".into()
             }
         );
         assert_eq!(
             s.poll("req-x", 22),
             PollOutcome::Approved {
                 device: "adev-x".into(),
-                name: "我的手机".into()
+                name: "我的手机".into(),
+                ua: "UA".into(),
+                ip: "1.1.1.1".into()
             }
         );
     }
@@ -282,7 +313,9 @@ mod tests {
             s.confirm("req-x", "1234", 21),
             ConfirmOutcome::Ok {
                 device: "adev-x".into(),
-                name: "d2".into()
+                name: "d2".into(),
+                ua: "UA".into(),
+                ip: "2.2.2.2".into()
             }
         );
     }
@@ -328,7 +361,9 @@ mod tests {
             s.approve("req-x", 1, || false),
             ApproveOutcome::Ok {
                 device: "adev-x".into(),
-                name: "d".into()
+                name: "d".into(),
+                ua: "UA".into(),
+                ip: "1.1.1.1".into()
             }
         );
     }
@@ -363,7 +398,9 @@ mod tests {
             s.approve("req-x", 1, || false),
             ApproveOutcome::Ok {
                 device: "adev-x".into(),
-                name: "d".into()
+                name: "d".into(),
+                ua: "UA".into(),
+                ip: "1.1.1.1".into()
             }
         );
         assert_eq!(s.purge_by_device("adev-x"), 1);
@@ -405,7 +442,9 @@ mod tests {
             s.approve("req-1", 5, || false),
             ApproveOutcome::Ok {
                 device: "adev-x".into(),
-                name: "d2".into()
+                name: "d2".into(),
+                ua: "UA".into(),
+                ip: "2.2.2.2".into()
             }
         );
     }

@@ -3,6 +3,7 @@
 
 use crate::remote::gate::COOKIE_NAME as COOKIE;
 use rand::RngCore;
+use rusqlite::OptionalExtension;
 
 /// 设备 cookie 有效期：180 天（dsh 设备会话 TTL，cookie Max-Age 同源）
 pub const DEVICE_TTL_MS: i64 = 180 * 24 * 3600 * 1000;
@@ -149,11 +150,7 @@ pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<Stri
             [&fp],
             |r| r.get(0),
         )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
+        .optional()
         .map_err(|e| format!("persist_device 查指纹失败: {e}"))?;
     if let Some(id) = existing {
         // 命中路径：ua/origin_ip 实际与指纹输入同源（防御式重写），last_seen 必刷新；
@@ -178,12 +175,18 @@ pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<Stri
 }
 
 /// 按设备 id 重命名（M5 A1 DAO；供 Task A4 的 `remote_rename_device` 命令调用）。
-/// 返回是否命中行——false = 上层 404 语义（不区分"不存在"与"已吊销"，按 id 直改）
+/// 返回是否命中行——false = 上层 404 语义（不区分"不存在"与"已吊销"，按 id 直改）。
+///
+/// 名字长度在 DAO 内收敛：trim 后截前 40 个字符——与审批自报名
+/// （`ApprovalService::create` 的 `name.trim().chars().take(40)`）同一口径。
+/// 选"DAO 自守"而非"注释交上层收敛"：花名册 name 是纯展示字段，DAO 截断
+/// 即可保证任何调用方（含 Task A4 命令）都不会把无界名写进库
 pub fn rename_device(
     conn: &rusqlite::Connection,
     device_id: &str,
     name: &str,
 ) -> Result<bool, String> {
+    let name: String = name.trim().chars().take(40).collect();
     let n = conn
         .execute(
             "UPDATE remote_devices SET name = ?2 WHERE id = ?1",
@@ -510,10 +513,13 @@ mod tests {
         }
     }
 
-    /// 读整行（name, ua, origin_ip, first_paired_at, last_seen_at, revoked）
-    fn row(conn: &rusqlite::Connection, id: &str) -> (String, String, String, i64, i64, i64) {
+    /// 读整行（name, ua, origin_ip, via, first_paired_at, last_seen_at, revoked）
+    fn row(
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> (String, String, String, String, i64, i64, i64) {
         conn.query_row(
-            "SELECT name, ua, origin_ip, first_paired_at, last_seen_at, revoked
+            "SELECT name, ua, origin_ip, via, first_paired_at, last_seen_at, revoked
              FROM remote_devices WHERE id = ?1",
             [id],
             |r| {
@@ -524,6 +530,7 @@ mod tests {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             },
         )
@@ -564,7 +571,8 @@ mod tests {
     }
 
     /// upsert 命中：同指纹二次配对 → 覆盖不新增、返回原 id、
-    /// name 保留（含"先重命名后重连"场景）、first_paired 不变、last_seen 刷新
+    /// name 保留（含"先重命名后重连"场景）、first_paired 不变、last_seen 刷新、
+    /// via 保留建行值（契约覆盖清单仅 ua/origin_ip/last_seen_at）
     #[test]
     fn upsert_hit_keeps_id_and_name_and_first_paired() {
         let conn = memory_conn();
@@ -572,17 +580,23 @@ mod tests {
             persist_device(&conn, &dev("d1", "UA", "1.1.1.1", 1000)).unwrap(),
             "d1"
         );
-        // 桌面端重命名（Task A4 命令语义），随后同一浏览器重连（新 id、同 UA/IP、时间前进）
+        // 插入路径：via 落库为设备自报值
+        assert_eq!(row(&conn, "d1").3, "lan");
+        // 桌面端重命名（Task A4 命令语义），随后同一浏览器重连（新 id、同 UA/IP、
+        // 时间前进、通道字段不同——验证命中路径不覆盖 via）
         assert!(rename_device(&conn, "d1", "我的手机").unwrap());
+        let mut reconnect = dev("d2", "UA", "1.1.1.1", 2000);
+        reconnect.via = "quick".into();
         assert_eq!(
-            persist_device(&conn, &dev("d2", "UA", "1.1.1.1", 2000)).unwrap(),
+            persist_device(&conn, &reconnect).unwrap(),
             "d1",
             "同指纹命中必须返回原行 id（cookie 下发依赖它）"
         );
-        let (name, ua, ip, first_paired, last_seen, revoked) = row(&conn, "d1");
+        let (name, ua, ip, via, first_paired, last_seen, revoked) = row(&conn, "d1");
         assert_eq!(name, "我的手机", "命中路径完全不更新 name——重命名不丢");
         assert_eq!(ua, "UA");
         assert_eq!(ip, "1.1.1.1");
+        assert_eq!(via, "lan", "命中路径 via 保留建行原值");
         assert_eq!(first_paired, 1000, "first_paired 保留");
         assert_eq!(last_seen, 2000, "last_seen 刷新");
         assert_eq!(revoked, 0);
@@ -634,5 +648,19 @@ mod tests {
         );
         // 未命中不写任何行
         assert_eq!(total_rows(&conn), 1);
+    }
+
+    /// rename 长度收敛（Minor 5）：trim 后截前 40 字符——与审批自报名同一口径，
+    /// DAO 自守防止无界名入库
+    #[test]
+    fn rename_device_trims_and_caps_name_at_40_chars() {
+        let conn = memory_conn();
+        persist_device(&conn, &dev("d1", "UA", "1.1.1.1", 1000)).unwrap();
+        // 50 个汉字 → 前 40 个
+        assert!(rename_device(&conn, "d1", &"甲".repeat(50)).unwrap());
+        assert_eq!(row(&conn, "d1").0, "甲".repeat(40));
+        // 前后空白 trim
+        assert!(rename_device(&conn, "d1", "  平板  ").unwrap());
+        assert_eq!(row(&conn, "d1").0, "平板");
     }
 }
