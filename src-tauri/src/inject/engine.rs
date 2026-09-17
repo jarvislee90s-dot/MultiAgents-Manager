@@ -44,18 +44,35 @@ pub fn tmux_key_args(target: &str, key: &str) -> Vec<String> {
 }
 
 /// AppleScript 字符串字面量转义：反斜杠→`\\`、引号→`\"`（先反斜杠后引号，
-/// 顺序颠倒会把已转义内容的反斜杠再次转义，产生错误字面量）。
+/// 顺序颠倒会把已转义内容的反斜杠再次转义，产生错误字面量）。裸换行/回车转义为
+/// 字面 `\n`/`\r` 两字符——AppleScript 字符串字面量不允许裸换行，且归一后的载荷
+/// 本就以字面 `\n` 语义上行（裁决 6），两处语义对齐。
 pub fn applescript_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// 运行态守卫（仓内 window/iterm.rs 既有约定）：App 未运行直接返回哨兵，
+/// 杜绝 fallback 探测冷启动终端 App 抢焦点。
+fn app_running_guard(process: &str) -> String {
+    format!(
+        r#"
+        tell application "System Events"
+            if not (exists process "{process}") then
+                return "not found"
+            end if
+        end tell"#
+    )
 }
 
 /// 构造 iTerm2 写入脚本：遍历窗口/tab/session 定位 TTY 后缀，两步写入
 /// （文本 `newline NO` + 空文本补回车）。`text` 为原文，内部完成转义。
 pub fn iterm_write_script(tty_suffix: &str, text: &str) -> String {
     format!(
-        r#"
+        r#"{guard}
         tell application "iTerm2"
-            activate
             repeat with w in windows
                 repeat with t in tabs of w
                     repeat with s in sessions of t
@@ -70,6 +87,7 @@ pub fn iterm_write_script(tty_suffix: &str, text: &str) -> String {
         end tell
         return "not found"
     "#,
+        guard = app_running_guard("iTerm2"),
         suffix = tty_suffix,
         text = applescript_escape(text)
     )
@@ -79,7 +97,7 @@ pub fn iterm_write_script(tty_suffix: &str, text: &str) -> String {
 /// 其余（单字符/未知多字符）→`keystroke "<key>"` 字面（内部完成转义）。
 pub fn iterm_send_key_script(tty_suffix: &str, key: &str) -> String {
     format!(
-        r#"
+        r#"{guard}
         tell application "iTerm2"
             activate
             repeat with w in windows
@@ -100,6 +118,7 @@ pub fn iterm_send_key_script(tty_suffix: &str, key: &str) -> String {
         end tell
         return "not found"
     "#,
+        guard = app_running_guard("iTerm2"),
         suffix = tty_suffix,
         action = key_action_line(key)
     )
@@ -109,9 +128,8 @@ pub fn iterm_send_key_script(tty_suffix: &str, key: &str) -> String {
 /// （do script 自带回车）。`text` 为原文，内部完成转义。
 pub fn terminal_do_script(tty_suffix: &str, text: &str) -> String {
     format!(
-        r#"
+        r#"{guard}
         tell application "Terminal"
-            activate
             repeat with w in windows
                 if tty of w is "/dev/{suffix}" then
                     do script "{text}" in w
@@ -122,6 +140,7 @@ pub fn terminal_do_script(tty_suffix: &str, text: &str) -> String {
         end tell
         return "not found"
     "#,
+        guard = app_running_guard("Terminal"),
         suffix = tty_suffix,
         text = applescript_escape(text)
     )
@@ -131,7 +150,7 @@ pub fn terminal_do_script(tty_suffix: &str, text: &str) -> String {
 /// 单键等价形态；按键形态归回传清单实测复核）。
 pub fn terminal_send_key_script(tty_suffix: &str, key: &str) -> String {
     format!(
-        r#"
+        r#"{guard}
         tell application "Terminal"
             activate
             set found to false
@@ -151,6 +170,7 @@ pub fn terminal_send_key_script(tty_suffix: &str, key: &str) -> String {
             return "not found"
         end if
     "#,
+        guard = app_running_guard("Terminal"),
         suffix = tty_suffix,
         action = key_action_line(key)
     )
@@ -189,13 +209,17 @@ impl Injector for RealInjector {
         let suffix = tty.rsplit('/').next().unwrap_or(&tty);
         let mut errs: Vec<String> = Vec::new();
 
-        // ① tmux：命中 pane 则文本字面量 + 回车键名两连发
+        // ① tmux：命中 pane 则文本字面量 + 回车键名两连发。
+        // 文本已发出而回车失败 = 半成功态：pane 输入行挂着无回车文本，不可再让
+        // fallback 通道对同一会话重复注入（也不该诱导用户重试叠加）——立即返回 Err。
         if let Some(target) = find_tmux_pane(&tty) {
             match run_tmux(&tmux_send_args(&target, text)) {
-                Ok(()) => match run_tmux(&tmux_enter_args(&target)) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => errs.push(format!("tmux 回车失败：{}", e)),
-                },
+                Ok(()) => {
+                    return match run_tmux(&tmux_enter_args(&target)) {
+                        Ok(()) => Ok(()),
+                        Err(e) => Err(format!("tmux 回车失败（文本已入 pane，勿重试）：{}", e)),
+                    };
+                }
                 Err(e) => errs.push(format!("tmux 文本注入失败：{}", e)),
             }
         }
