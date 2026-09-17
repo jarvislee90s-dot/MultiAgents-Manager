@@ -1861,12 +1861,20 @@ mod tests {
                 vec!["mam.example.com".to_string()]
             ))
         );
+        // 豁免并集 = 双通道域名链式聚合 + 本机命名附加主机（named_extra_hosts 读真实
+        // settings，测试进程无法零接触隔离——按机器相关项做相对断言，通道聚合语义不变）
+        let mut expected_union = vec![
+            "q-test.trycloudflare.com".to_string(),
+            "mam.example.com".to_string(),
+        ];
+        let extras: Vec<String> = named_extra_hosts()
+            .into_iter()
+            .filter(|h| !expected_union.contains(&h.to_string()))
+            .collect();
+        expected_union.extend(extras);
         assert_eq!(
             tunnel_hosts_from_snapshot(),
-            Some(vec![
-                "q-test.trycloudflare.com".to_string(),
-                "mam.example.com".to_string()
-            ]),
+            Some(expected_union),
             "豁免并集 = 双通道域名链式聚合"
         );
         // 错误通道不宣称 + **哨兵同源**：任一通道错误 → via 判定与豁免一起收 None
