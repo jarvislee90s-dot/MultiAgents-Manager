@@ -40,7 +40,10 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$HOME/.mam/pets/**"]
+        "scope": {
+          "allow": ["$HOME/.mam/pets/**"],
+          "requireLiteralLeadingDot": false
+        }
       }
     }
   },
