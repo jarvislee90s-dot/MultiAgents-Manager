@@ -134,23 +134,23 @@ rollout 尾部短暂停在中间 assistant 消息
 
 规则按尾部部件映射：
 
-- 尾部 part = `step-finish(reason="stop")` → 回合结束 → **维持现行为**（60s 窗内 Waiting 红 / 超窗 Idle 绿；用户验证该收尾红→绿转换为正常语义，保留）
+- 尾部 part = `step-finish(reason="stop")` → 回合结束 → **Idle 绿（完成即绿）**（2026-09-17 用户裁决：推翻本节原「收尾红→绿保留」决策——正常完成不需要提示，**红只留给失败与批准**；完成语音随黄→绿边沿即刻触发，不再延迟 60s）
 - 尾部 part = `step-finish(reason≠stop)`（`tool-calls`/`length`）→ 后续还有动作 → **Processing 黄**
 - 尾部 part = `step-start` / `reasoning` / `tool` → 步骤进行中 → **Processing 黄**
 - 尾部 part **属于 user 消息**（任意 part 类型；含占位行空窗：最后一条消息是空 assistant 行、末条 part 仍属于 user 消息）→ 输入刚提交 → **Processing 黄**（修症状①：不再误触 Waiting 红/假语音）
-- 尾部 part = assistant 的 `text`/`patch` 且其消息**无任何 step 部件**（team-mode 老格式，无信号）→ 回退现行为（last_role + 60s + CPU 启发式），老会话零回归
+- 尾部 part = assistant 的 `text`/`patch` 且其消息**无任何 step 部件**（team-mode 老格式，无信号）→ 回退现行为（last_role + 60s + CPU 启发式；assistant 尾完成即绿，同上裁决），老会话零回归
 - 会话无 part 数据（空库/极旧库）→ 回退现行为
 
 增强说明：尾部出现 `tool` 部件即判 Running（部件在步骤内落盘、`step-finish` 随后 ~0.5s 才写，工具部件在尾恒为步骤进行中）——已覆盖「`state.status` 未完成 → Processing」的原始增强设想且更简，不再单独读取 `state.status`。
 
-该设计同时修复：症状①（占位空窗判黄，绿→红与假 approval 语音消失）、症状②（运行全程黄）、症状③（步骤未完结不判 Idle，单步 >60s 不再闪绿）。完成后的红→绿（≤60s 延迟）为既有设计语义，保留。
+该设计同时修复：症状①（占位空窗判黄，绿→红与假 approval 语音消失）、症状②（运行全程黄）、症状③（步骤未完结不判 Idle，单步 >60s 不再闪绿）。完成即绿（2026-09-17 裁决；原「完成后红→绿 60s 延迟」语义废除）。失败卡片的错误摘要（`error.name` + `data.message`）写入卡片消息行前缀（如 `❌ APIError: Invalid API key.`），与完成绿一眼可辨。
 
 **残余已知限制**：外部编排器 team-mode 形态（AionUi/omo "Sisyphus"，本机 `ses_fae18a2f` 等老会话实证）只落 `text`/`patch` 部件、无 step 部件 → 回退启发式，编排器续跑的假绿窗口保留（记入 §7）。进程被强杀/崩溃且未落 `error` 字段的请求无内容信号可判 → 停留黄灯（「宁黄不假绿」方向，接受）。
 
 **测试**（以本节取证样本为夹具）：
 - 占位空窗夹具（末条 part=user text、最后消息=空 assistant 行）→ Processing 黄（症状①回归锁）
 - `step-finish(tool-calls)` 在尾（4.3s 步间空窗样本）→ Processing 黄
-- `step-finish(stop)` 在尾 → 现行为（红 ≤60s → 绿），完成语音时序不变
+- `step-finish(stop)` 在尾 → Idle 绿（完成即绿；新鲜时间戳也不红——回归锁），完成语音即刻触发
 - step 进行中尾部（`step-start`/`reasoning`/`tool`/assistant `text` 无 step-finish，5.1s 流式窗口样本）→ Processing 黄
 - 单步 60s+ 无新消息（模拟长工具）→ 不落 Idle（症状③回归锁）
 - 无 step 部件的老格式会话（text/patch 尾）→ 现行为逐分支不变（降级零回归）

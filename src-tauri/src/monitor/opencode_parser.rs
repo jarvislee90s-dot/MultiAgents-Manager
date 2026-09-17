@@ -22,6 +22,19 @@ struct MessageData {
 #[derive(Deserialize)]
 struct ErrorData {
     name: Option<String>,
+    data: Option<ErrorDataInner>,
+}
+
+/// error.data JSON 结构（API 错误详情等）
+#[derive(Deserialize)]
+struct ErrorDataInner {
+    message: Option<String>,
+}
+
+/// 末条消息失败错误的摘要（§4.3 前置规则：状态判定 + 卡片消息行展示）
+struct LastError {
+    name: String,
+    message: Option<String>,
 }
 
 /// part.data JSON 结构
@@ -243,15 +256,16 @@ fn build_session_from_row(
         .unwrap_or(TailSignal::Fallback);
 
     // §4.3 前置规则优先：末条消息失败/中止判定高于尾部部件信号
-    let status = failed_request_status(last_error.as_deref()).unwrap_or_else(|| {
-        determine_opencode_status(
-            process.cpu_usage,
-            last_role.as_deref(),
-            last_msg_time,
-            time_updated,
-            tail,
-        )
-    });
+    let status = failed_request_status(last_error.as_ref().map(|e| e.name.as_str()))
+        .unwrap_or_else(|| {
+            determine_opencode_status(
+                process.cpu_usage,
+                last_role.as_deref(),
+                last_msg_time,
+                time_updated,
+                tail,
+            )
+        });
     let last_activity_at = ms_to_iso(time_updated);
 
     let title = title.unwrap_or("").to_string();
@@ -265,13 +279,22 @@ fn build_session_from_row(
                 .unwrap_or("Unknown")
                 .to_string()
         });
-    let display_message = last_message.or_else(|| {
-        if !title.is_empty() {
-            Some(title.clone())
-        } else {
-            None
-        }
-    });
+    let display_message = match &last_error {
+        // 失败请求：错误摘要进消息行（与完成绿/中止一眼可辨，spec §4.3）；
+        // 主动中止不标注（不提示裁决，维持原展示）
+        Some(e) if e.name != "MessageAbortedError" => Some(format!(
+            "❌ {}: {}",
+            if e.name.is_empty() { "Error" } else { &e.name },
+            e.message.as_deref().unwrap_or("")
+        )),
+        _ => last_message.or_else(|| {
+            if !title.is_empty() {
+                Some(title.clone())
+            } else {
+                None
+            }
+        }),
+    };
 
     Some(Session {
         id: session_id.to_string(),
@@ -304,11 +327,11 @@ fn get_last_message_time(conn: &Connection, session_id: &str) -> i64 {
     .unwrap_or(0)
 }
 
-/// 获取会话最后一条消息的角色、文本与失败错误名（错误名供 §4.3 前置规则）
+/// 获取会话最后一条消息的角色、文本与失败错误摘要（错误供 §4.3 前置规则）
 fn get_last_message_info(
     conn: &Connection,
     session_id: &str,
-) -> (Option<String>, Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<LastError>) {
     // 查最后一条消息（id 为 ULID，作同毫秒平局破缺键）
     let mut stmt = match conn.prepare(
         "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
@@ -326,15 +349,18 @@ fn get_last_message_info(
         Err(_) => return (None, None, None),
     };
 
-    // 解析 message.data JSON 获取 role 与 error.name
+    // 解析 message.data JSON 获取 role 与 error 摘要
     let data = serde_json::from_str::<MessageData>(&data_json).ok();
     let role = data.as_ref().and_then(|d| d.role.clone());
-    let error_name = data.and_then(|d| d.error).and_then(|e| e.name);
+    let error = data.and_then(|d| d.error).map(|e| LastError {
+        name: e.name.unwrap_or_default(),
+        message: e.data.and_then(|inner| inner.message),
+    });
 
     // 查该消息的 text 类型 parts
     let text = get_message_text(conn, &message_id);
 
-    (role, text, error_name)
+    (role, text, error)
 }
 
 /// 获取消息的文本内容（优先 text 类型，其次 reasoning）
@@ -508,8 +534,10 @@ fn failed_request_status(error_name: Option<&str>) -> Option<SessionStatus> {
 }
 
 /// OpenCode 状态判断：tail=Running（会话尾部部件强信号——步骤进行中/用户输入/
-/// step-finish(reason≠stop)）→ 直接 Processing；否则走既有启发式——
-/// 非 assistant 回复完且 CPU > 15% → Processing，assistant 且近期活跃 → Waiting，否则 Idle
+/// step-finish(reason≠stop)）→ 直接 Processing；否则——非 assistant 回复完且
+/// CPU > 15% → Processing，user 尾近期活跃 → Processing，其余（含 assistant
+/// 回复完）→ Idle 完成即绿（2026-09-17 用户裁决：红=失败/批准专用，
+/// 失败红由 failed_request_status 前置规则给出，本函数不再产出 Waiting）
 fn determine_opencode_status(
     cpu: f32,
     last_role: Option<&str>,
@@ -518,8 +546,7 @@ fn determine_opencode_status(
     tail: TailSignal,
 ) -> SessionStatus {
     // 尾部部件强信号（spec 假绿治理 §4.3）：步骤进行中/用户输入 → 黄灯，短路既有
-    // 启发式（修「输入瞬间绿→红假语音」「运行全程红」「单步>60s 假绿」三症状）；
-    // TurnDone 与 Fallback 走既有语义
+    // 启发式（修「输入瞬间绿→红假语音」「运行全程红」「单步>60s 假绿」三症状）
     if tail == TailSignal::Running {
         return SessionStatus::Processing;
     }
@@ -533,9 +560,10 @@ fn determine_opencode_status(
         let last_active = last_msg_time.max(session_updated);
         let is_recent = now - last_active < 60_000; // 60 秒内
         match last_role {
-            Some("assistant") if is_recent => SessionStatus::Waiting,
             Some("user") if is_recent => SessionStatus::Processing,
-            _ => SessionStatus::Idle, // 超过 60s 无活动 → Idle（防止空闲误报 Waiting）
+            // 完成即绿（2026-09-17 用户裁决）：assistant 回复完直接 Idle，
+            // 不再有 60s Waiting 红窗
+            _ => SessionStatus::Idle,
         }
     }
 }
@@ -553,9 +581,13 @@ mod status_tests {
 
     #[test]
     fn cpu_spike_after_assistant_reply_is_not_processing() {
-        // assistant 已回复完：CPU 抖动（后台 GC/索引）不得把状态拉回 Processing
+        // assistant 已回复完：CPU 抖动（后台 GC/索引）不得把状态拉回 Processing；
+        // 完成即绿（2026-09-17 裁决）：新鲜窗口内高 CPU 也不回黄/红
         let now = chrono::Utc::now().timestamp_millis();
-        // 消息时间取 60 秒活跃窗口之外，避开既有 Waiting 分支（其余分支语义不动）
+        assert_eq!(
+            determine_opencode_status(50.0, Some("assistant"), now, now, TailSignal::Fallback),
+            SessionStatus::Idle
+        );
         let old = now - 61_000;
         assert_eq!(
             determine_opencode_status(50.0, Some("assistant"), old, old, TailSignal::Fallback),
@@ -589,7 +621,7 @@ mod tail_signal_tests {
     /// §4.3 判定表（词汇表活体取证 2026-09-16，opencode v1.18.22）
     #[test]
     fn tail_part_signal_rules() {
-        // step-finish(stop) → 回合结束，走既有启发式（收尾红→绿语义保留）
+        // step-finish(stop) → 回合结束信号（TurnDone → 完成即绿，2026-09-17 裁决）
         assert_eq!(
             tail_part_signal(&part("step-finish", Some("stop")), Some("assistant"), false),
             TailSignal::TurnDone
@@ -725,14 +757,16 @@ mod tail_signal_tests {
         );
     }
 
-    /// TurnDone / Fallback 走既有语义（assistant+新鲜 → Waiting；超窗 → Idle）
+    /// TurnDone / Fallback：完成即绿（2026-09-17 用户裁决——正常完成不走红，
+    /// 红=失败/批准专用；新鲜窗口内也不再 Waiting），超窗 Idle 不变
     #[test]
-    fn turn_done_and_fallback_keep_legacy_behavior() {
+    fn turn_done_and_fallback_complete_green_immediately() {
         let now = chrono::Utc::now().timestamp_millis();
         for tail in [TailSignal::TurnDone, TailSignal::Fallback] {
             assert_eq!(
                 determine_opencode_status(0.0, Some("assistant"), now, now, tail),
-                crate::session::SessionStatus::Waiting
+                crate::session::SessionStatus::Idle,
+                "完成即绿：新鲜窗口内也不走红"
             );
             let old = now - 61_000;
             assert_eq!(
@@ -867,11 +901,18 @@ mod matching_tests {
         assert_eq!(sessions.len(), 2, "两会话各一张卡");
         for s in &sessions {
             match s.id.as_str() {
-                "ses_fail" => assert_eq!(
-                    s.status,
-                    crate::session::SessionStatus::Waiting,
-                    "失败请求挂红（需要用户介入）"
-                ),
+                "ses_fail" => {
+                    assert_eq!(
+                        s.status,
+                        crate::session::SessionStatus::Waiting,
+                        "失败请求挂红（需要用户介入）"
+                    );
+                    let msg = s.last_message.as_deref().unwrap_or("");
+                    assert!(
+                        msg.contains("APIError") && msg.contains("Invalid API key"),
+                        "失败卡消息行显示错误摘要，实际：{msg}"
+                    );
+                }
                 "ses_abort" => assert_eq!(
                     s.status,
                     crate::session::SessionStatus::Idle,
