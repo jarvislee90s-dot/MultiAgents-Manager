@@ -37,8 +37,11 @@ describe("App 配对状态机：探测成功 → 配对页卸载（已配对设�
     );
     render(<App />);
 
-    // 首帧：探测中（paired=null），配对页先出（沿用不闪白口径）
+    // 首帧：探测中（paired=null），配对页先出（沿用不闪白口径）；
+    // P3-b：探测期渲染连接指示器而非密码表单（区分「探测中」与「未配对」）
     expect(screen.getByText("MAM 远程接入")).toBeTruthy();
+    expect(screen.getByTestId("probe-indicator")).toBeTruthy();
+    expect(screen.queryByTestId("pin-input")).toBeNull();
 
     // 首帧快照到达（"2 个会话" 仅在成功数据到达后渲染；首帧 = 探测）
     expect(await screen.findByText("2 个会话")).toBeTruthy();

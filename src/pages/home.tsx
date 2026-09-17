@@ -79,12 +79,18 @@ export default function HomePage() {
           showText: t("tray.show"),
           petText: petOn ? t("tray.petHide") : t("tray.petShow"),
           quitText: t("tray.quit"),
+          remoteOnText: t("tray.remote"), // M4 T4：远程开关项标签（勾选态 Rust 侧自查）
         });
       } catch (error) {
         console.error("Failed to initialize tray menu:", error);
       }
     };
     initTrayMenu();
+
+    // M4 T4：远程状态变化（设置页/托盘开关/通道切换）→ 重建托盘刷新勾选态与地址。
+    // 监听放本组件：持有 petOn 与真实键名 tray.petHide/petShow（放 useRemoteEvents
+    // 会丢桌宠态、重建出错误标签）；勾选态不经 setState，托盘重建即回环刷新
+    const unlistenRemoteChanged = listen("remote-changed", () => void initTrayMenu());
 
     const initShortcut = async () => {
       const savedShortcut = localStorage.getItem(SHORTCUT_KEY);
@@ -98,6 +104,7 @@ export default function HomePage() {
 
     return () => {
       unlistenShortcutChanged.then((fn) => fn());
+      unlistenRemoteChanged.then((fn) => fn());
     };
     // petOn 变化时重跑本 effect，托盘桌宠文案随开关/语言刷新
   }, [t, petOn]);

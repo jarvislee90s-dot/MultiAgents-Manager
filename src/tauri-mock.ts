@@ -751,6 +751,7 @@ if (!isTauri) {
       case "plugin:notification|is_permission_granted":
         return Promise.resolve(false);
 
+      // M4 T4：新增 remoteOnText 第四参——mock 无状态托盘，多余参数忽略（无返回）
       case "update_tray_menu":
         return Promise.resolve(undefined);
 

@@ -241,3 +241,133 @@ describe("FilePanel 头部操作", () => {
     expect(onModeChange).toHaveBeenCalledWith("split-h");
   });
 });
+
+// ==== M5 B3：来源筛选 + 文件名搜索（决策 10 / 线稿三池）====
+
+describe("FilePanel 来源筛选（M5 B3）", () => {
+  const entries = [
+    entry("/p/upload.png", { lastSeq: 5, origin: "user" }),
+    entry("/p/read-only.rs", { lastSeq: 4, origin: "tool_read" }),
+    entry("/p/edited.rs", { lastSeq: 3, origin: "tool_write" }),
+    entry("/p/legacy.rs", { lastSeq: 2 }), // 旧载荷无 origin
+  ];
+
+  it("默认「全部来源」：四条（含无 origin 的旧载荷条目）都可见", () => {
+    renderPanel(entries);
+    expect(screen.getByText("upload.png")).toBeTruthy();
+    expect(screen.getByText("legacy.rs")).toBeTruthy();
+  });
+
+  it("切「我上传的」：仅 origin=user 可见，旧载荷条目隐藏", () => {
+    renderPanel(entries);
+    fireEvent.click(screen.getByTestId("file-origin-user"));
+    expect(screen.getByText("upload.png")).toBeTruthy();
+    expect(screen.queryByText("read-only.rs")).toBeNull();
+    expect(screen.queryByText("legacy.rs")).toBeNull();
+  });
+
+  it("切「工具读取」与「工具读写」各自精确过滤", () => {
+    renderPanel(entries);
+    fireEvent.click(screen.getByTestId("file-origin-tool_read"));
+    expect(screen.getByText("read-only.rs")).toBeTruthy();
+    expect(screen.queryByText("edited.rs")).toBeNull();
+    fireEvent.click(screen.getByTestId("file-origin-tool_write"));
+    expect(screen.getByText("edited.rs")).toBeTruthy();
+    expect(screen.queryByText("read-only.rs")).toBeNull();
+  });
+
+  it("行内来源徽标：三值中文文案，旧载荷不渲染徽标", () => {
+    renderPanel(entries);
+    // 徽标按行内 testid 定位（chips 里也有同文案，不能全局查文本）
+    expect(screen.getByTestId("file-row-0-origin").textContent).toBe("我上传的");
+    expect(screen.getByTestId("file-row-1-origin").textContent).toBe("工具读取");
+    expect(screen.getByTestId("file-row-2-origin").textContent).toBe("工具读写");
+    expect(screen.queryByTestId("file-row-3-origin")).toBeNull();
+  });
+
+  it("来源筛选无匹配 → 「无匹配文件」空态", () => {
+    renderPanel([entry("/p/a.rs", { origin: "user" })]);
+    fireEvent.click(screen.getByTestId("file-origin-tool_write"));
+    expect(screen.getByText("无匹配文件")).toBeTruthy();
+  });
+});
+
+describe("FilePanel 文件名搜索（M5 决策 10：点「搜索」或回车才执行）", () => {
+  const entries = [
+    entry("/p/行程示意图.png", { lastSeq: 3 }),
+    entry("/p/retrace_labels.py", { lastSeq: 2 }),
+    entry("/p/report-draft.md", { lastSeq: 1 }),
+  ];
+
+  it("仅输入不执行：草稿不改变列表，点「搜索」才过滤（大小写不敏感、按文件名模糊匹配）", () => {
+    renderPanel(entries);
+    fireEvent.change(screen.getByTestId("file-search-input"), { target: { value: "REPORT" } });
+    // 草稿态：三行都还在
+    expect(screen.getByText("行程示意图.png")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("file-search-run"));
+    expect(screen.getByText("report-draft.md")).toBeTruthy();
+    expect(screen.queryByText("行程示意图.png")).toBeNull();
+    expect(screen.queryByText("retrace_labels.py")).toBeNull();
+  });
+
+  it("回车提交表单等价于点「搜索」", () => {
+    renderPanel(entries);
+    const input = screen.getByTestId("file-search-input");
+    fireEvent.change(input, { target: { value: "行程" } });
+    fireEvent.submit(input.closest("form")!);
+    expect(screen.getByText("行程示意图.png")).toBeTruthy();
+    expect(screen.queryByText("retrace_labels.py")).toBeNull();
+  });
+
+  it("清空草稿再搜索 → 清除过滤，恢复全列表", () => {
+    renderPanel(entries);
+    fireEvent.change(screen.getByTestId("file-search-input"), { target: { value: "行程" } });
+    fireEvent.click(screen.getByTestId("file-search-run"));
+    expect(screen.queryByText("retrace_labels.py")).toBeNull();
+    fireEvent.change(screen.getByTestId("file-search-input"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("file-search-run"));
+    expect(screen.getByText("retrace_labels.py")).toBeTruthy();
+  });
+
+  it("搜索与来源筛选、类型档叠加生效", () => {
+    const mixed = [
+      entry("/p/upload.png", { lastSeq: 4, origin: "user" }),
+      entry("/p/tool.png", { lastSeq: 3, origin: "tool_read" }),
+      entry("/p/upload.md", { lastSeq: 2, origin: "user" }),
+    ];
+    renderPanel(mixed);
+    // 类型=图片
+    fireEvent.click(screen.getByTestId("file-chip-image"));
+    // 来源=我上传的
+    fireEvent.click(screen.getByTestId("file-origin-user"));
+    expect(screen.getByText("upload.png")).toBeTruthy();
+    expect(screen.queryByText("tool.png")).toBeNull();
+    expect(screen.queryByText("upload.md")).toBeNull();
+    // 再叠搜索 "upload"：upload.png 同时满足三重过滤仍在列；其余两条被滤掉
+    fireEvent.change(screen.getByTestId("file-search-input"), { target: { value: "upload" } });
+    fireEvent.click(screen.getByTestId("file-search-run"));
+    expect(screen.getByText("upload.png")).toBeTruthy();
+    expect(screen.queryByTestId("panel-empty")).toBeNull();
+    expect(screen.queryByText("tool.png")).toBeNull();
+    expect(screen.queryByText("upload.md")).toBeNull();
+  });
+
+  it("搜索无匹配 → 「无匹配文件」空态", () => {
+    renderPanel(entries);
+    fireEvent.change(screen.getByTestId("file-search-input"), { target: { value: "不存在" } });
+    fireEvent.click(screen.getByTestId("file-search-run"));
+    expect(screen.getByText("无匹配文件")).toBeTruthy();
+  });
+});
+
+describe("FilePanel 可预览说明（M5 P2-a）", () => {
+  it("面板底部展示类型与上限说明（文本 500KB / 图片 5MB）", () => {
+    renderPanel([]);
+    expect(screen.getByTestId("panel-preview-help").textContent).toContain(
+      "500KB"
+    );
+    expect(screen.getByTestId("panel-preview-help").textContent).toContain(
+      "5MB"
+    );
+  });
+});

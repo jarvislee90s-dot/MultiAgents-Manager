@@ -1,9 +1,9 @@
 // /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
-// + pair + events（M3 Task 6 SSE 实时通道）+ session-messages（Task 7）
-// + session-files / file（M3 Task 8 文件路径提取与安全读取）
+// + pair/pin（M5 A3 访问密码配对，唯一换 cookie 入口）+ events（M3 Task 6 SSE 实时通道）
+// + session-messages（Task 7）+ session-files / file（M3 Task 8 文件路径提取与安全读取）
 
 use axum::{
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::{sse, IntoResponse, Response, Sse},
     Json,
@@ -15,8 +15,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 
-use super::gate::COOKIE_NAME;
-use super::server::RemoteState;
+use super::server::{CleanupStream, RemoteState};
 
 /// GET /m/api/v1/sessions：数据源注入（生产 = adapter::get_all_sessions），
 /// `SessionsResponse` 已 camelCase 序列化（前端约定 totalCount）。
@@ -61,14 +60,21 @@ const EMPTY_SESSIONS_JSON: &str = r#"{"sessions":[],"totalCount":0,"waitingCount
 /// - 心跳用 `Sse::keep_alive(KeepAlive::default())`：axum 自带 15s 空注释帧
 ///   （简报的 `: ping` 等效物，无需自拼 interval 流——简报 Step 1 注释"心跳省略实现"即指此）；
 /// - 断流：客户端断开 → axum drop 本流 → BroadcastStream 释放 Receiver →
-///   receiver_count 归零 → watcher 零订阅者守卫跳过扫描（Task 5 闭环）。
+///   receiver_count 归零 → watcher 零订阅者守卫跳过扫描（Task 5 闭环）；
+/// - 吊销/停止即时断连（M4 T0a）：连接注册进 sse_registry，信号经 take_until 终止流
 pub async fn events(
     State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
     // 先订阅、后取快照（顺序刻意，勿换）：subscribe 在快照计算之前，期间产生的跃迁
     // 落进 broadcast 缓冲（容量 64）并在快照帧之后依次送出；若反序，快照与订阅之间
     // 发生的跃迁会永久丢失（重连后的看板状态与真实脱节）
     let rx = st.watcher_tx.subscribe();
+    // M4 T0a：注册连接（gate 已过闸，此处必能取到设备 id；防御性 None 时跳过注册只服务）
+    let device = super::gate::extract_device(&headers).unwrap_or_default();
+    let (conn_id, close_rx) = st.sse_registry.register(&device);
+    // 注册表句柄先行克隆：st 整体 move 进下方 spawn_blocking 闭包（既有代码不动）
+    let registry = st.sse_registry.clone();
     // 快照走 spawn_blocking：session_source 是同步阻塞调用（sysinfo 全进程刷新 + 各工具
     // 会话解析，冷启动可达数秒），直接 await 会周期性堵死 tokio worker——与 sessions
     // handler 同一先例（实机教训见 commands/session.rs 的 get_all_sessions 注释）
@@ -103,61 +109,174 @@ pub async fn events(
             }
         }
     });
-    Sse::new(initial.chain(transitions)).keep_alive(sse::KeepAlive::default())
+    let base = initial.chain(transitions);
+    // 吊销/停止信号到达即终止流（take_until：close_rx 被 send 或 Sender drop 均触发）
+    let guarded = base.take_until(close_rx);
+    let cleaned = CleanupStream {
+        inner: guarded,
+        reg: registry,
+        device,
+        conn_id,
+    };
+    Sse::new(cleaned).keep_alive(sse::KeepAlive::default())
 }
 
+/// POST /pair/pin 请求体（M5 A3）：PIN 必填，设备名可选（缺省/空回落默认名）
 #[derive(Deserialize)]
-pub struct PairReq {
-    pub token: String,
+pub struct PairPinBody {
+    pub pin: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
-/// POST /m/api/v1/pair：一次性 token 换设备 cookie。
-/// 不变量③：Invalid / Expired / Used 一律 403、响应体无差异（不给有效性预言机）
-pub async fn pair(
+/// POST /m/api/v1/pair/pin（M5 A3）：访问密码换设备 cookie——密码制唯一配对入口。
+/// 处理序（计划 §3.1）：① 限速 check（锁内查改）→ ② PIN 源读取 → ③ 校验 →
+/// ④ record_success + 设备上限门（PIN 正确**之后**判定——先验 PIN 再谈名额，不向前者
+/// 泄露名额信息）→ ⑤ upsert + cookie 下发 → ⑥ 200。
+/// 状态码契约（响应体 camelCase）：
+/// - 锁定期内（即使 PIN 正确）→ 429 `{"retryAfter": 秒}`；
+/// - PIN 未设置（KV 空）→ 401 `{"error":"pin_not_set"}`（不计失败——无密可对；
+///   A5 会在开通道时自动生成，本任务只留语义）；
+/// - PIN 错 / 格式非法 → 记失败 + 401 `{"error":"invalid_pin","remaining": n}`
+///   （n = 5 - 已错次数；移动端展示「还可尝试 N 次」是计划内预言机披露）；
+/// - 正确 → 200 `{"ok":true}` + Set-Cookie（upsert 生效 id，属性同既有 cookie 契约）。
+pub async fn pair_pin(
     State(st): State<Arc<RemoteState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<PairReq>,
-) -> Result<Response, StatusCode> {
-    use crate::remote::pairing::AcceptResult;
-    let now = chrono::Utc::now().timestamp_millis();
+    Json(req): Json<PairPinBody>,
+) -> Response {
+    use crate::remote::pin::RateDecision;
+    let ip = addr.ip().to_string();
+    // 限速时钟走注入缝（测试可推进）；设备时间戳走真实时钟（gate 滑动 TTL 域，见 persist）
+    let now = (st.now_source)();
+    // ① 限速过闸：锁定期内即使 PIN 正确也拒（429），不泄露任何 PIN 有效性信息。
+    // decision 先绑定出锁（评审 Minor 2）：MutexGuard 临时值随 let 语句结束即释放，
+    // audit 与响应构建不持限速器锁（对齐"audit 不持锁"风格）
+    let decision = st.pin_limiter.lock().unwrap().check(&ip, now);
+    if let RateDecision::Locked { retry_after_secs } = decision {
+        super::events::audit(
+            "pair_pin_locked",
+            &format!("ip={ip} retry_after={retry_after_secs}s"),
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "retryAfter": retry_after_secs })),
+        )
+            .into_response();
+    }
+    // ② PIN 源读取：未设置 → 401 pin_not_set，不计失败
+    let Some(expected) = (st.pin_source)() else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "pin_not_set" })),
+        )
+            .into_response();
+    };
+    // ③ 校验：格式非法与比对失败同语义（同记失败——不给"格式预言机"）。
+    // 比对两侧都 trim（评审 Minor 7）：与 validate_pin 的 trim 对称，防将来 KV 存入
+    // 带空白值（set_pin 不再经本端点校验路径时）造成恒不等
+    if !crate::remote::pin::validate_pin(&req.pin) || req.pin.trim() != expected.trim() {
+        // 记失败与读剩余次数在同一锁临界区（限速器锁内查改，契约如此）
+        let remaining = {
+            let mut limiter = st.pin_limiter.lock().unwrap();
+            limiter.record_failure(&ip, now);
+            limiter.remaining_attempts(&ip)
+        };
+        super::events::audit("pair_pin_wrong", &format!("ip={ip} remaining={remaining}"));
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid_pin", "remaining": remaining })),
+        )
+            .into_response();
+    }
+    // ④ PIN 正确：清零该 IP 计数 → 设备上限门（沿用既有直通上限语义：403 + cap_full）
+    st.pin_limiter.lock().unwrap().record_success(&ip);
+    let max = (st.max_devices_source)();
+    let cap_full = st
+        .store
+        .with(|c| crate::remote::pairing::device_count(c) >= max);
+    if cap_full {
+        super::events::audit("pair_pin_rejected_cap", &format!("max={max}"));
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "cap_full" })),
+        )
+            .into_response();
+    }
+    // via 判定（配对时刻），两级：
+    // ① PID 实锤优先（2026-09-18）：来连套接字归属 MAM 账本的 cloudflared 通道
+    //    → 直接定 quick/named（不依赖域名名单，编外/未知归属走②）；
+    // ② Host 判定：Host + 来源 IP 对照隧道快照域名；**None 哨兵**（名单不可信：
+    //    错误终态 / 运行中而域名缺失）→ 保守标 lan，绝不判本机。
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let via = match super::conn_owner::tunnel_channel_for_conn(addr.port()) {
+        Some(kind) => kind,
+        None => match (st.via_hosts_source)() {
+            None => "lan",
+            Some((quick_hosts, named_hosts)) => {
+                super::gate::classify_via(addr.ip(), host, &quick_hosts, &named_hosts)
+            }
+        },
+    };
+    // 设备名：自报 trim 收敛 40 字符（与 rename_device / 审批自报名同口径），空回落默认名
+    let mut name: String = req
+        .name
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(40)
+        .collect();
+    if name.is_empty() {
+        name = "新设备".to_string();
+    }
     let ua = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    // 先把 pairing 锁收窄到 accept() 一步：accept 返回后立即释放 MutexGuard，再做阻塞 DB 写。
-    // 原写法持着 pairing 锁调 persist_device（锁序 pairing→DB 阻塞段），Task 4 的 stop_server
-    // 是 store→pairing 顺序，虽非嵌套暂不反转，但两条顺序并存即是未来死锁的种子（评审 Minor）
-    let device_id = {
-        let mut svc = st.pairing.lock().unwrap();
-        match svc.accept(&req.token) {
-            AcceptResult::Ok { device_id } => device_id,
-            // 不变量③：Invalid / Expired / Used 一律 403、响应体无差异（不给有效性预言机）
-            _ => return Err(StatusCode::FORBIDDEN),
-        }
-        // svc（MutexGuard）在此作用域结束处 drop：后续 persist 不再持 pairing 锁
-    };
+    let device_id = super::random_hex_16();
+    let paired_at = chrono::Utc::now().timestamp_millis();
+    super::events::audit("pair_pin_ok", &format!("via={via} ip={ip}"));
+    persist_and_cookie(&st, &device_id, &name, &ua, &ip, via, paired_at)
+}
+
+/// 配对通过的公共落库 + 下发 cookie（M5 A3 起为 /pair/pin 专用；真实 ua/ip 入指纹，
+/// via 为配对时刻的分类结果）。
+/// cookie 下发生效 id（M5 A1 upsert 语义：命中旧行时必须下发旧行 id——若下发新生成 id，
+/// 该 cookie 指向不存在的行，重连浏览器永久 403）；
+/// 持久化失败不阻断配对（下次 gate 校验会失败）——回退请求侧生成 id
+fn persist_and_cookie(
+    st: &Arc<RemoteState>,
+    device_id: &str,
+    name: &str,
+    ua: &str,
+    origin_ip: &str,
+    via: &str,
+    now: i64,
+) -> Response {
     let dev = crate::remote::pairing::NewDevice {
-        id: device_id.clone(),
-        name: String::new(),
-        ua,
-        origin_ip: String::new(),
+        id: device_id.to_string(),
+        name: name.to_string(),
+        ua: ua.to_string(),
+        origin_ip: origin_ip.to_string(),
+        via: via.to_string(),
         paired_at: now,
     };
-    // 持久化失败不阻断本次配对（下次 gate 校验会失败）——保持简报行为
-    st.store.with(|c| {
-        let _ = crate::remote::pairing::persist_device(c, &dev);
+    let effective_id = st.store.with(|c| {
+        crate::remote::pairing::persist_device(c, &dev).unwrap_or_else(|_| device_id.to_string())
     });
-    // HttpOnly + SameSite=Lax + Path=/m + 180d（dsh 七不变量之 cookie 语义）
-    let cookie = format!(
-        "{COOKIE_NAME}={device_id}; Path=/m; HttpOnly; SameSite=Lax; Max-Age={}",
-        crate::remote::pairing::DEVICE_TTL_MS / 1000
-    );
-    Ok((
-        [(axum::http::header::SET_COOKIE, cookie)],
+    (
+        [(
+            axum::http::header::SET_COOKIE,
+            crate::remote::pairing::device_cookie(&effective_id),
+        )],
         Json(serde_json::json!({ "ok": true })),
     )
-        .into_response())
+        .into_response()
 }
 
 /// GET /m/api/v1/host（M3 Task 1）：移动看板页头品牌行（P8a 版本 + P8b 本机名 +
@@ -230,21 +349,22 @@ pub async fn session_files(
 /// file 端点的读取结果三分（403/404 语义分流在 handler 尾部，读取全程在阻塞线程池）：
 /// - Found：cwd 内常规文件（字节 + mime）；
 /// - NoSession：session_id 不在会话快照中 → 404；
-/// - Rejected：越界 / 不存在 / 过大 / 目录 / cwd 缺失 → 一律 403（错误细节只进
-///   日志——越界与不存在不可区分，不给外部探测面预言机，进度台账 #12 口径）。
+/// - Rejected：敏感目录 / 不存在 / 过大 / 目录 / 读取失败 → 一律 403，**响应体
+///   带结构化原因**（M5 P2-a 用户裁决：原因写在报错处便于排障。原「空体防探测」
+///   随边界全盘放开退役——原因仅暴露给已过闸设备，PIN + cookie 已是门槛）。
 enum FileReadOutcome {
     Found(Vec<u8>, String),
     NoSession,
-    Rejected(String),
+    Rejected(crate::remote::files::FileRejectReason),
 }
 
-/// GET /m/api/v1/file?session_id=&path=（M3 Task 8）
-/// 会话项目目录或用户主目录内的安全文件读取（read_file_safe：限 cwd∪home、
-/// 只读、双阈值 500KB/5MB；主目录内敏感目录拒绝——2026-09-16 用户裁决放宽
-/// 到主目录，kimi 等工具常引用 ~/Downloads 的图片）。
+/// GET /m/api/v1/file?session_id=&path=（M3 Task 8；M5 P2-a 全盘语义）
+/// 安全文件只读读取（read_file_safe：任意路径、敏感目录黑名单、只读、
+/// 双阈值 500KB/5MB——2026-09-18 用户裁决放开项目外文件预览）。
 /// - 缺参 / 空白 → 400；session_id 不在会话快照 → 404；
 /// - 图片 mime → 二进制响应 + Content-Type；文本 → JSON `{content, mime, size}`；
-/// - 拒绝（越界/不存在/超限/敏感目录彼此不可区分）→ 403 + log::warn；
+/// - 拒绝（敏感目录/不存在/超限/目录/IO）→ 403 + `{"error":"<reason>"}`（snake_case
+///   原因码：sensitive/too_large/not_found/not_file/io，前端据此分診文案）+ log::warn；
 /// - cwd 查找与文件读取同在一个 `spawn_blocking` 里：会话快照源是同步阻塞调用
 ///   （sysinfo 全进程刷新，实机教训见 commands/session.rs），文件 IO 同为重活。
 pub async fn read_file(
@@ -273,14 +393,7 @@ pub async fn read_file(
         let Some(session) = resp.sessions.into_iter().find(|s| s.id == sid) else {
             return FileReadOutcome::NoSession;
         };
-        // home 读真实主目录（放宽边界：cwd ∪ home，敏感目录仍拒）；
-        // 取不到 home（极端环境）则按 None 走 fail-closed 的 cwd-only 边界
-        let home = dirs::home_dir();
-        match crate::remote::files::read_file_safe(
-            &session.project_path,
-            &path,
-            home.as_deref().and_then(|h| h.to_str()),
-        ) {
+        match crate::remote::files::read_file_safe(&session.project_path, &path, None) {
             Ok((bytes, mime)) => FileReadOutcome::Found(bytes, mime),
             Err(e) => FileReadOutcome::Rejected(e),
         }
@@ -325,11 +438,15 @@ pub async fn read_file(
                 .into_response())
         }
         FileReadOutcome::NoSession => Err(StatusCode::NOT_FOUND),
-        FileReadOutcome::Rejected(e) => {
-            // 探测面最小化（进度台账 #12）：越界 / 不存在 / 超限对外一律同 403 空体，
-            // 差异只进服务端日志
-            log::warn!("file 读取被拒: {e}");
-            Err(StatusCode::FORBIDDEN)
+        FileReadOutcome::Rejected(reason) => {
+            // 原因细分（M5 P2-a 用户裁决「把看不了的原因写在报错的地方」）：
+            // 403 + snake_case 原因码，仅已过闸设备可见；日志保留中文明细
+            log::warn!("file 读取被拒: {}（{reason:?}）", reason.message());
+            Ok((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response())
         }
     }
 }

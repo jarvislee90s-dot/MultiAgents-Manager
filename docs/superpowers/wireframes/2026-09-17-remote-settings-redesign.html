@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAM 远程接入 · 设置重排线稿 v3（2026-09-17 对齐稿）</title>
+<style>
+  :root {
+    --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --muted: #64748b;
+    --ink: #0f172a; --accent: #0f172a; --green: #059669; --green-bg: #ecfdf5;
+    --blue: #2563eb; --blue-bg: #eff6ff; --amber: #b45309; --amber-bg: #fffbeb;
+    --rose: #be123c; --violet: #7c3aed; --violet-bg: #f5f3ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 15px; margin: 36px 0 12px; }
+  h2 .tag { font-size: 11px; color: var(--muted); font-weight: normal; margin-left: 8px; }
+  .note { background: var(--violet-bg); border: 1px dashed #a78bfa88; border-radius: 8px;
+          padding: 8px 12px; font-size: 12.5px; color: var(--violet); margin: 10px 0; }
+
+  .window { background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+            box-shadow: 0 8px 30px #0f172a12; overflow: hidden; }
+  .titlebar { display: flex; justify-content: space-between; align-items: center;
+              padding: 8px 16px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--muted); }
+  .winbody { display: grid; grid-template-columns: 172px 1fr; min-height: 700px; }
+  .nav { border-right: 1px solid var(--border); padding: 14px 10px; font-size: 13.5px; }
+  .nav div { padding: 8px 12px; border-radius: 8px; color: var(--muted); margin-bottom: 2px; }
+  .nav div.on { background: #f1f5f9; color: var(--ink); font-weight: 600; }
+  .content { padding: 22px 26px 30px; }
+
+  .sect-title { font-size: 16px; font-weight: 700; }
+  .sect-desc { color: var(--muted); font-size: 12.5px; margin: 2px 0 6px; }
+  .group-label { font-size: 12.5px; color: var(--muted); font-weight: 600; margin: 16px 0 2px; }
+
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+         padding: 12px 0; border-bottom: 1px solid #f1f5f9; }
+  .row:last-child { border-bottom: none; }
+  .row .lbl { font-weight: 600; font-size: 13.5px; }
+  .row .hint { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  .switch { width: 36px; height: 20px; border-radius: 999px; background: #cbd5e1; position: relative; flex: none; cursor: pointer; transition: .15s; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+                   border-radius: 50%; background: #fff; transition: .15s; box-shadow: 0 1px 3px #0003; }
+  .switch.on { background: var(--green); }
+  .switch.on::after { left: 18px; }
+  .switch.locked { opacity: .55; cursor: not-allowed; }
+
+  input[type=text], input[type=password] {
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px;
+    background: #fff; color: var(--ink); outline: none; width: 100%;
+  }
+  input:focus { border-color: #94a3b8; }
+  .btn { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 6px 12px;
+         font-size: 12.5px; cursor: pointer; color: var(--ink); white-space: nowrap; }
+  .btn.dark { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.ghost-danger { color: var(--rose); }
+
+  /* v3：四个小卡片摆一排；卡片只承载 名称+一句话+开关；点击卡片选中展开 */
+  .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0 0; }
+  .mode { border: 1.5px solid var(--border); border-radius: 10px; padding: 9px 11px;
+          background: #fff; cursor: pointer; transition: .12s; }
+  .mode:hover { border-color: #94a3b8; }
+  .mode.sel { border-color: var(--ink); box-shadow: 0 0 0 2px #0f172a12; }
+  .mode .head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .mode .name { font-weight: 700; font-size: 13px; }
+  .mode .desc { color: var(--muted); font-size: 11px; margin-top: 4px; line-height: 1.5; min-height: 33px; }
+  .mode .live { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; margin-right: 4px; }
+  .mode.on .live { background: var(--green); }
+
+  /* 唯一展开区（同时只显示一个） */
+  .expand { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-top: 10px; background: #fcfcfd; }
+  .addr { display: flex; align-items: center; gap: 8px; padding: 7px 0; flex-wrap: wrap; }
+  .badge { font-size: 10.5px; border-radius: 999px; padding: 2px 8px; flex: none; }
+  .b-green { background: var(--green-bg); color: var(--green); }
+  .b-blue { background: var(--blue-bg); color: var(--blue); }
+  .b-gray { background: #f1f5f9; color: var(--muted); }
+  .b-violet { background: var(--violet-bg); color: var(--violet); }
+  code.url { font-family: Consolas, monospace; font-size: 12.5px; background: #f1f5f9;
+             border-radius: 6px; padding: 3px 8px; word-break: break-all; }
+  .warn { color: var(--amber); font-size: 12px; background: var(--amber-bg);
+          border-radius: 8px; padding: 7px 10px; margin-top: 8px; }
+  .qr { width: 132px; height: 132px; border: 1px solid var(--border); border-radius: 10px; margin: 8px auto;
+        display: grid; place-items: center; color: var(--muted); font-size: 10.5px; text-align: center;
+        background: repeating-conic-gradient(#e2e8f0 0 25%, #fff 0 50%) 0 0/16px 16px; }
+
+  /* 命名隧道：点击展开的教程信息框（可保持展开，边看边操作） */
+  .help { color: var(--blue); cursor: pointer;
+          font-size: 12px; border-bottom: 1px dotted var(--blue); user-select: none; }
+  .help .pop { display: none; position: absolute; z-index: 30; top: 22px; left: -40px; width: 420px;
+               background: #fff; border: 1px solid var(--border); border-radius: 10px;
+               box-shadow: 0 10px 30px #0f172a22; padding: 12px 14px; font-size: 12px; color: var(--ink); }
+  .help .pop ol { margin: 6px 0 0; padding-left: 18px; }
+  .help .pop li { margin-bottom: 6px; }
+  .help.open { position: relative; }
+  .help.open .pop { display: block; }
+
+  .pin-box { display: flex; align-items: center; gap: 10px; }
+  .pin-input { width: 110px; text-align: center; font-family: Consolas, monospace; font-size: 18px;
+               letter-spacing: 8px; font-weight: 700; }
+
+  .dev { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #eef2f7; font-size: 13px; flex-wrap: wrap; }
+  .dev:last-child { border-bottom: none; }
+  .dev .st { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .st.on { background: #22c55e; } .st.off { background: #cbd5e1; }
+  .dev .meta { color: var(--muted); font-size: 12px; }
+  .dev .kick { margin-left: auto; }
+
+  .phone-row { display: flex; gap: 40px; align-items: flex-start; flex-wrap: wrap; }
+  .phone { width: 300px; border: 10px solid #0f172a; border-radius: 32px; background: #fff; overflow: hidden; flex: none; }
+  .phone .screen { padding: 40px 20px 30px; min-height: 460px; display: flex; flex-direction: column; }
+  .design-notes { font-size: 12.5px; color: var(--muted); max-width: 560px; }
+  .design-notes li { margin-bottom: 8px; }
+  .design-notes b { color: var(--ink); }
+  .n { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+       background: var(--ink); color: #fff; font-size: 11px; margin-right: 6px; flex: none; }
+  .flex { display: flex; align-items: center; gap: 10px; }
+
+  /* 文件预览线稿 */
+  .preview-mock { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; max-width: 680px; }
+  .pv-head { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: #fcfcfd; font-size: 12.5px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-left: auto; }
+  .seg span { padding: 4px 12px; font-size: 12px; cursor: pointer; color: var(--muted); }
+  .seg span.on { background: var(--accent); color: #fff; }
+  .pv-body { padding: 12px; font-family: Consolas, monospace; font-size: 12px; background: #0f172a; color: #e2e8f0; min-height: 140px; white-space: pre-wrap; }
+  .pv-body.render { font-family: inherit; background: #fff; color: var(--ink); }
+  .pv-body.render h3 { margin: 4px 0 8px; font-size: 16px; }
+  .pv-filter { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: #fcfcfd; font-size: 12px; flex-wrap: wrap; }
+  .chip { border: none; background: transparent; border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
+  .chip.on { background: var(--accent); color: #fff; }
+  .search { display: flex; margin-left: auto; }
+  .search input { width: 130px; border: 1px solid var(--border); border-right: none;
+                  border-radius: 8px 0 0 8px; padding: 4px 8px; font-size: 12px; outline: none; }
+  .search button { border: 1px solid var(--border); background: #fff; border-radius: 0 8px 8px 0;
+                   padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  .pool { display: flex; flex-direction: column; gap: 2px; margin-top: 0; padding: 6px 10px; }
+  .frow { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 8px; font-size: 12.5px; }
+  .frow:hover { background: #f8fafc; }
+  .frow .fname { font-weight: 600; }
+  .frow .from { color: var(--muted); font-size: 10.5px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; flex: none; }
+  .from.user { color: var(--violet); border-color: #ddd6fe; background: var(--violet-bg); }
+  .from.read { color: var(--muted); }
+  .from.write { color: var(--blue); border-color: #bfdbfe; background: var(--blue-bg); }
+  .frow .time { margin-left: auto; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>MAM 远程接入 · 设置重排线稿 v5（定稿候选）</h1>
+  <div class="sub">2026-09-17。本稿为实施基准：文件来源三池（我上传的 / 工具读取 / 工具读写）+ 此前全部裁决。UI 将严格按本稿实现。</div>
+
+  <h2>一、桌面端「远程接入」设置 <span class="tag">窗口默认 880×640</span></h2>
+  <div class="window">
+    <div class="titlebar"><span>设置</span><span style="letter-spacing:2px">— ✕</span></div>
+    <div class="winbody">
+      <div class="nav">
+        <div>外观</div><div>快捷键</div><div>通知</div><div>桌宠</div><div>工具管理</div>
+        <div class="on">远程接入</div>
+      </div>
+      <div class="content">
+        <div class="sect-title">远程接入</div>
+        <div class="sect-desc">在手机浏览器打开移动看板</div>
+
+        <div class="group-label">① 通用</div>
+        <div class="row">
+          <div><div class="lbl">开启远程接入</div><div class="hint">显性关闭会断开所有设备并要求重新输入访问密码；切换下方开关、重启电脑不会</div></div>
+          <div class="switch on" onclick="this.classList.toggle('on')"></div>
+        </div>
+        <div class="row">
+          <div><div class="lbl">电源保活</div><div class="hint">远程开启期间阻止系统与磁盘休眠（屏幕可熄）</div></div>
+          <div class="switch on" onclick="this.classList.toggle('on')"></div>
+        </div>
+        <div class="row">
+          <div class="lbl" style="flex:none">本机名称</div>
+          <input type="text" style="max-width:260px" value="matebook16s">
+        </div>
+
+        <div class="group-label">② 通道（开关各自独立，可同时开启；点卡片在下方展开详情）</div>
+        <div class="modes">
+          <div class="mode on sel" data-p="p-local" onclick="pick(this)">
+            <div class="head"><span class="name"><span class="live"></span>本机</span>
+              <span class="switch on locked" onclick="event.stopPropagation()" title="随「开启远程接入」常驻"></span></div>
+            <div class="desc">随远程接入常驻，无需密码</div>
+          </div>
+          <div class="mode on" data-p="p-lan" onclick="pick(this)">
+            <div class="head"><span class="name"><span class="live"></span>局域网</span>
+              <span class="switch on" onclick="event.stopPropagation(); tg(this)"></span></div>
+            <div class="desc">同一 WiFi / 网线的设备直接访问，需访问密码</div>
+          </div>
+          <div class="mode on" data-p="p-quick" onclick="pick(this)">
+            <div class="head"><span class="name"><span class="live"></span>临时隧道</span>
+              <span class="switch on" onclick="event.stopPropagation(); tg(this)"></span></div>
+            <div class="desc">公网免注册，地址每次开启会变</div>
+          </div>
+          <div class="mode" data-p="p-named" onclick="pick(this)">
+            <div class="head"><span class="name"><span class="live"></span>命名隧道</span>
+              <span class="switch" onclick="event.stopPropagation(); tg(this)"></span></div>
+            <div class="desc">公网固定地址，需 Cloudflare 账号</div>
+          </div>
+        </div>
+
+        <!-- 唯一展开区 -->
+        <div class="expand" id="p-local">
+          <div class="addr"><span class="badge b-gray">仅本机</span><code class="url">http://127.0.0.1:9420/m</code><button class="btn">复制链接</button></div>
+          <div class="hint" style="color:var(--muted);font-size:12px">本机回环访问，无需访问密码；也是隧道流量的转发终点。</div>
+        </div>
+        <div class="expand" id="p-lan" style="display:none">
+          <div class="addr"><span class="badge b-gray">WLAN</span><span class="badge b-green">推荐</span><code class="url">http://192.168.66.202:9420/m</code><button class="btn">复制</button></div>
+          <div class="flex" style="align-items:flex-start; margin-top:6px">
+            <div class="qr">二维码<br>链接已含密码<br>扫码直接进入</div>
+            <div style="flex:1; font-size:12px; color:var(--muted)">换网络后地址会变；扫码或打开地址后密码自动填入。</div>
+          </div>
+        </div>
+        <div class="expand" id="p-quick" style="display:none">
+          <div class="addr"><span class="badge b-blue">公网</span><code class="url">https://subaru-levels-nurses-obtained.trycloudflare.com/m</code><button class="btn">复制</button></div>
+          <div class="flex"><span class="badge b-green">运行中</span><span style="font-size:12px;color:var(--muted)">断线自动重连</span></div>
+          <div class="warn">⚠ 每次开关此通道，隧道地址都会重新生成（旧链接失效）。切换其它通道、修改其它设置不影响本通道。</div>
+          <div class="flex" style="align-items:flex-start; margin-top:8px">
+            <div class="qr">二维码<br>链接已含密码</div>
+            <div style="flex:1; font-size:12px; color:var(--muted)">手机蜂窝网络也能访问（走 Cloudflare 网络）。</div>
+          </div>
+        </div>
+        <div class="expand" id="p-named" style="display:none">
+          <div class="row" style="border:none; padding-top:0">
+            <div style="flex:1">
+              <div class="lbl" style="font-size:12.5px">Tunnel Token
+                <span class="help" id="helpBox" onclick="toggleHelp()">使用教程（点击展开/收起）<span class="pop">
+                  <b>前置：需要一个托管在 Cloudflare 的域名（免费计划即可）</b>
+                  <ol>
+                    <li>登录 <b>dash.cloudflare.com</b>，左侧菜单进入 <b>Zero Trust</b>（首次使用需起个团队名，选 Free 计划）；</li>
+                    <li>左侧 <b>Networks → Tunnels</b>，点 <b>Create a tunnel</b>，连接类型选 <b>Cloudflared</b>；</li>
+                    <li>给隧道起个名字（如 <code>mam-jarvis</code>）→ Save tunnel；</li>
+                    <li>安装方式页<b>不用装任何东西</b>——复制页面里那串 <code>eyJh...</code> 开头的 Token；</li>
+                    <li>切到 <b>Public Hostname</b> 标签：子域填 <code>mam</code>、域名选你的域名、Service 填 <code>HTTP://localhost:9420</code> → Save；</li>
+                    <li>回到 MAM 本页，把 Token 粘贴进输入框点「保存」，状态变「运行中」即完成。</li>
+                  </ol>
+                  之后地址永久不变；MAM 会自动下载 cloudflared 并守护进程，无需手动安装。
+                </span></span>
+              </div>
+              <div class="hint">Cloudflare Zero Trust → Networks → Tunnels 创建后复制</div>
+            </div>
+            <div class="flex" style="max-width:300px"><input type="password" value="eyJh****"><button class="btn dark">保存</button></div>
+          </div>
+          <div class="addr"><span class="badge b-blue">公网</span><code class="url">https://mam.jarvis.example.com/m</code><button class="btn">复制</button></div>
+          <div class="qr" style="margin-left:0">二维码<br>链接已含密码</div>
+        </div>
+
+        <div class="group-label">③ 访问与安全</div>
+        <div class="row">
+          <div><div class="lbl">访问密码</div><div class="hint">仅对 局域网 / 临时隧道 / 命名隧道 生效（本机无需）。输入后点「保存」生效；新设备输入一次，180 天免输入；修改后所有设备需重新输入</div></div>
+          <div class="pin-box">
+            <input class="pin-input" inputmode="numeric" maxlength="4" placeholder="0000" value="4827">
+            <button class="btn" onclick="randPin()">随机</button>
+            <button class="btn dark">保存</button>
+            <button class="btn ghost-danger">重置设备</button>
+          </div>
+        </div>
+        <div class="row">
+          <div style="flex:1">
+            <div class="lbl">已接入设备 <span class="badge b-gray" style="margin-left:4px">2 / 10</span>
+              <span class="hint" style="display:inline">同一浏览器同一网络重新绑定只算一台；名称默认取自设备自报，可重命名</span></div>
+            <div style="margin-top:6px">
+              <div class="dev"><span class="st on"></span>JARVIS 的 iPhone<span class="badge b-violet">临时隧道</span><span class="meta">在线 · 刚刚</span>
+                <button class="btn" onclick="renameDev(this)">重命名</button><button class="btn kick">踢下线</button></div>
+              <div class="dev"><span class="st off"></span>
+                <input type="text" value="matebook16s · Edge" style="max-width:180px; padding:3px 8px; font-size:12px">
+                <span class="badge b-gray">局域网</span><span class="meta">2 小时前</span>
+                <button class="btn dark" onclick="alert('线稿示意：保存名称')">保存</button><button class="btn kick">踢下线</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="hint">⚠ 远程页面等价于查看全部会话内容；地址 + 访问密码即钥匙，勿外传。密码连续输错 5 次将锁定 10 分钟。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>二、手机端配对页 <span class="tag">单入口：访问密码；扫码已自动填入</span></h2>
+  <div class="phone-row">
+    <div class="phone"><div class="screen">
+      <div style="font-size:18px;font-weight:700">MAM 远程接入</div>
+      <div style="color:var(--muted);font-size:12.5px;margin:4px 0 18px">输入访问密码，绑定此设备（180 天免输入）</div>
+      <input type="password" value="4827" style="text-align:center;font-size:20px;letter-spacing:10px;padding:10px">
+      <div style="color:var(--green);font-size:12px;margin-top:6px;text-align:center">✓ 已从链接自动填入，正在进入…</div>
+      <button class="btn dark" style="width:100%;padding:10px;margin-top:14px;font-size:14px">进入看板</button>
+      <div style="color:var(--rose);font-size:12.5px;margin-top:12px">密码不正确，还可尝试 3 次（连续输错将锁定 10 分钟）</div>
+      <div style="color:var(--muted);font-size:11.5px;margin-top:auto;padding-top:24px;text-align:center">扫码进入时无需手动输入</div>
+    </div></div>
+    <ul class="design-notes" style="list-style:none;padding:0;margin:0">
+      <li><span class="n">1</span><b>登录状态常驻</b>：绑定后 180 天滑动有效；切换通道开关 / 改设置 / 重启 MAM 都不掉线。只有显性关闭「开启远程接入」或重置密码才需重新绑定。同一浏览器同一网络重复绑定只覆盖原设备记录，不再 1 刷新 = 1 新设备。</li>
+      <li><span class="n">2</span><b>密码规则</b>：仅允许 4 位数字，可自填或随机生成；连续输错 5 次锁 10 分钟。本机访问不设密码。</li>
+      <li><span class="n">3</span><b>三通道二维码</b>：二维码 = 通道地址 + 密码参数，扫码自动填入直接进入。</li>
+    </ul>
+  </div>
+
+  <h2>三、隧道生命周期 <span class="tag">开关即卡关</span></h2>
+  <div class="note" style="max-width:880px">
+    每个通道独立开关 = 唯一启停入口。开 = 常驻运行（断线自动重连；切设置页 / 开关其它通道 / 改本机名一律不影响）；关 = 显性停止。<b>临时隧道每次开关都会换新地址</b>（Cloudflare quick tunnel 机制，卡片已明示）；命名隧道地址固定。「开启远程接入」总开关关闭时全部通道联动停止，重新打开时按各卡开关状态自动恢复。
+  </div>
+
+  <h2>四、文件预览增强 <span class="tag">来源筛选 + 文件名搜索 + 点进文件后的源码/渲染切换</span></h2>
+  <div class="preview-mock">
+    <div class="pv-head"><span>📁 文件</span><span class="chip on">全部</span><span class="chip">文档</span><span class="chip">图片</span></div>
+    <div class="pv-filter">
+      <span style="color:var(--muted)">追溯范围（消息条数）</span>
+      <span class="chip on">200</span><span class="chip">500</span><span class="chip">1000</span>
+      <span style="color:var(--border)">|</span>
+      <span class="chip on">全部来源</span><span class="chip">我上传的</span><span class="chip">工具读取</span><span class="chip">工具读写</span>
+      <div class="search">
+        <input type="text" placeholder="按文件名搜索"><button>搜索</button>
+      </div>
+    </div>
+    <div class="pool" id="filelist">
+      <div class="frow"><span>🖼</span><span class="fname">行程示意图.png</span><span class="from user">我上传的</span><span class="time">刚刚</span></div>
+      <div class="frow"><span>📄</span><span class="fname">middle-east-2026.html</span><span class="from user">我上传的</span><span class="time">1 小时前</span></div>
+      <div class="frow"><span>📊</span><span class="fname">报价单.xlsx</span><span class="from user">我上传的</span><span class="time">2 小时前</span></div>
+      <div class="frow"><span>💻</span><span class="fname">retrace_labels.py</span><span class="from write">工具读写</span><span class="time">1 小时前</span></div>
+      <div class="frow"><span>🖼</span><span class="fname">shot12_map.png</span><span class="from read">工具读取</span><span class="time">1 小时前</span></div>
+    </div>
+  </div>
+  <div style="font-size:12px;color:var(--muted);margin:8px 0 4px">↓ 点进具体文件后的预览页（「源码 / 渲染」切换在这里，仅 .md 与 .html 出现；其余文件原样展示，图片直接显示图片）</div>
+  <div class="preview-mock">
+    <div class="pv-head">
+      <span>←</span><span>📄 middle-east-2026.html</span>
+      <div class="seg" id="seg">
+        <span class="on" onclick="pv(this,'src')">源码</span>
+        <span onclick="pv(this,'render')">渲染</span>
+      </div>
+    </div>
+    <div class="pv-body" id="pvbody">&lt;!DOCTYPE html&gt;
+&lt;html&gt;&lt;head&gt;&lt;title&gt;中东 2026 行程&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;&lt;h1&gt;中东 2026 行程&lt;/h1&gt;&lt;p&gt;Day 1 迪拜…&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</div>
+  </div>
+  <ul class="design-notes" style="list-style:none;padding:14px 0 0;margin:0;max-width:880px">
+    <li><span class="n">1</span><b>来源三池</b>：文件池分三个来源——「我上传的」（用户附件，新增）/「工具读取」（Agent 只读，现有 modified=false）/「工具读写」（Agent 改写，现有 modified=true）；筛选片三种 + 全部来源，默认全部。</li>
+    <li><span class="n">2</span><b>文件名搜索</b>：搜索框按文件名模糊匹配，<b>点「搜索」按钮（或回车）才执行</b>，与追溯范围、来源筛选叠加生效。</li>
+    <li><span class="n">3</span><b>源码/渲染切换在文件预览页内</b>：仅 .md 与 .html 出现——.md 渲染态即现有 markdown 排版（本次把切换器显式化），.html 渲染态为沙箱 iframe（可跑脚本，与看板数据隔离）；其余类型原样展示。</li>
+    <li><span class="n">4</span><b>上传入池按工具逐步支持</b>：需逐工具调研附件在会话文件中的存放位置，先做你常用的 kimi / zcode。</li>
+    <li><span class="n">5</span><b>已确认项 ✓</b>：本机卡常驻锁死 / 密码 4 位数字 + 连错 5 次锁 10 分钟 / 设备指纹去重 / 密码点「保存」生效 / 设备默认名 + 可重命名 / 教程点击展开。</li>
+  </ul>
+</div>
+
+<script>
+  function pick(card) {
+    document.querySelectorAll(".mode").forEach(m => m.classList.remove("sel"));
+    card.classList.add("sel");
+    ["p-local", "p-lan", "p-quick", "p-named"].forEach(id => {
+      document.getElementById(id).style.display = id === card.dataset.p ? "block" : "none";
+    });
+  }
+  function tg(el) {
+    el.classList.toggle("on");
+    const live = el.closest(".mode").querySelector(".live");
+    if (live) live.style.background = el.classList.contains("on") ? "var(--green)" : "#cbd5e1";
+  }
+  function randPin() {
+    document.querySelector(".pin-input").value = String(Math.floor(1000 + Math.random() * 9000));
+  }
+  function toggleHelp() {
+    document.getElementById("helpBox").classList.toggle("open");
+  }
+  function renameDev() { /* 线稿示意 */ }
+  function pv(el, mode) {
+    document.querySelectorAll("#seg span").forEach(s => s.classList.remove("on"));
+    el.classList.add("on");
+    const b = document.getElementById("pvbody");
+    if (mode === "render") {
+      b.classList.add("render");
+      b.innerHTML = "<h3>中东 2026 行程</h3><p>Day 1 迪拜 —— 接机入住哈利法塔景观酒店…</p><p>Day 2 阿布扎比卢浮宫…</p>";
+    } else {
+      b.classList.remove("render");
+      b.textContent = "<!DOCTYPE html>\n<html><head><title>中东 2026 行程</title></head>\n<body><h1>中东 2026 行程</h1><p>Day 1 迪拜…</p></body></html>";
+    }
+  }
+</script>
+</body>
+</html>

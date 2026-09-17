@@ -491,21 +491,70 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, [session.id]);
 
   // 跳转：按指纹在当前窗口查回消息 → seq → scrollIntoView（block:start 落在视口顶部）。
-  // 查不到（书签指向已滑出窗口的更早消息）→ 提示先加载更早消息
-  const handleJumpBookmark = useCallback(
-    (anchor: string) => {
-      if (messages === null) return;
+  // 查不到（书签指向更早的未加载消息）→ **自动逐级「加载更早」**直到命中或到顶
+  // （M5 P3-c：刷新后窗口只剩尾部 200 条，书签目标在更早分页——旧实现只提示手动
+  // 加载，跳转等于失效）；到顶仍未命中 → miss 横幅
+  const pendingJumpRef = useRef<{ anchor: string; nextLimit: number } | null>(null);
+  const [jumpLoading, setJumpLoading] = useState(false);
+
+  const scrollAnchorIntoView = useCallback(
+    (anchor: string): boolean => {
+      if (messages === null) return false;
       const target = messages.find((m) => messageAnchor(m) === anchor);
-      if (!target) {
-        setBookmarkJumpMiss(true);
-        return;
-      }
-      setBookmarkJumpMiss(false);
-      const el = messageAreaRef.current?.querySelector<HTMLElement>(`[data-seq="${target.seq}"]`);
-      el?.scrollIntoView({ block: "start" });
+      if (!target) return false;
+      messageAreaRef.current
+        ?.querySelector<HTMLElement>(`[data-seq="${target.seq}"]`)
+        ?.scrollIntoView({ block: "start" });
+      return true;
     },
     [messages]
   );
+
+  const handleJumpBookmark = useCallback(
+    (anchor: string) => {
+      setBookmarkJumpMiss(false);
+      if (scrollAnchorIntoView(anchor)) {
+        return;
+      }
+      // 目标不在当前窗口：能扩则登记自动扩窗（逐级 200，至多 1000），否则 miss。
+      // 扩窗经由 pendingJumpRef + setLimit——不直接依赖 limit，避免 setLimit 渲染
+      // （messages 未变）触发的中间态误判成「仍找不到」而连锁扩到顶
+      if (limit < MAX_LIMIT) {
+        pendingJumpRef.current = {
+          anchor,
+          nextLimit: Math.min(limit + PAGE_LIMIT, MAX_LIMIT),
+        };
+        setJumpLoading(true);
+        setLimit(Math.min(limit + PAGE_LIMIT, MAX_LIMIT));
+      } else {
+        setBookmarkJumpMiss(true);
+      }
+    },
+    [limit, scrollAnchorIntoView]
+  );
+
+  // 自动加载跳转的续查：**仅随 messages 变化重查**（deps 不含 limit）——
+  // setLimit 引起的中间渲染不会误触发；命中滚动收尾；未命中且还能扩继续扩；
+  // 到顶仍未命中 → miss。声明在滚动对齐 effect 之后：跳转滚动覆盖「落底」对齐
+  useEffect(() => {
+    if (messages === null) return;
+    const pj = pendingJumpRef.current;
+    if (pj === null) return;
+    if (scrollAnchorIntoView(pj.anchor)) {
+      pendingJumpRef.current = null;
+      setJumpLoading(false);
+      return;
+    }
+    if (pj.nextLimit < MAX_LIMIT) {
+      const next = Math.min(pj.nextLimit + PAGE_LIMIT, MAX_LIMIT);
+      pendingJumpRef.current = { anchor: pj.anchor, nextLimit: next };
+      setLimit(next);
+      return;
+    }
+    pendingJumpRef.current = null;
+    setJumpLoading(false);
+    setBookmarkJumpMiss(true);
+  }, [messages, scrollAnchorIntoView]);
 
   // 进入详情默认滚到最底部（最新消息在下方，用户裁决 2026-09-16）；且
   // 「加载更早消息」重拉后**保持原阅读位置**——记录重拉前的滚动高度差，
@@ -633,13 +682,21 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       {messages !== null && !error && messages.length === 0 && (
         <p className="py-16 text-center text-sm text-slate-500">暂无消息</p>
       )}
-      {/* 书签跳转失败提示（M3+）：书签指向的消息不在当前窗口 */}
-      {bookmarkJumpMiss && (
+      {/* 书签跳转：自动加载中提示（M5 P3-c）与到顶未命中 miss 提示（M3+） */}
+      {jumpLoading && (
+        <p
+          data-testid="bookmark-jump-loading"
+          className="mb-2 rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-300"
+        >
+          正在加载更早消息以定位书签…
+        </p>
+      )}
+      {bookmarkJumpMiss && !jumpLoading && (
         <p
           data-testid="bookmark-jump-miss"
           className="mb-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
         >
-          该书签在更早的范围内，请先点上方「加载更早消息」
+          已到最早消息，未找到该书签目标
         </p>
       )}
       {/* 「加载更早消息」置于列表**最上方**（2026-09-16 用户裁决）：语义是

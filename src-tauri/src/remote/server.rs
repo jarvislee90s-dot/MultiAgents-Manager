@@ -122,8 +122,118 @@ async fn mobile_index() -> Response {
     entry_response()
 }
 
+/// 活跃连接句柄表（clippy::type_complexity 门禁适配：复杂类型抽别名，语义同原稿内联形）
+type DeviceConns = std::collections::HashMap<String, Vec<(u64, tokio::sync::oneshot::Sender<()>)>>;
+
+/// SSE 连接注册表（M4 T0a）：device_id → 活跃连接句柄表。
+/// 断连语义：吊销/停止时对目标设备的全部连接发 oneshot 关闭信号，
+/// SSE 流的 `take_until` 收到信号即终止 → axum 关闭该 HTTP 连接；
+/// 自然断开（客户端关页）由 CleanupStream 的 Drop 反注册。
+/// 锁粒度：单 Mutex 短临界区（register/unregister/disconnect 均无 IO），
+/// 不与 store/pairing 锁嵌套（锁序红线：registry 永远最后进最先出）。
+#[derive(Default)]
+pub struct SseRegistry {
+    inner: std::sync::Mutex<DeviceConns>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl SseRegistry {
+    /// 注册一条连接：返回 (连接 id, 关闭信号接收端)。
+    /// 返回的 Receiver 在 disconnect_device/disconnect_all 或 Sender 被 drop 时给出信号
+    pub fn register(&self, device: &str) -> (u64, tokio::sync::oneshot::Receiver<()>) {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .lock()
+            .unwrap()
+            .entry(device.to_string())
+            .or_default()
+            .push((id, tx));
+        (id, rx)
+    }
+
+    /// 自然断开反注册（幂等：未知 id 静默忽略）。
+    /// 写法适配（clippy::option_map_unit_fn 门禁）：原稿 `.map(|v| …)` 改 `if let`，语义不变
+    pub fn unregister(&self, device: &str, id: u64) {
+        if let Some(v) = self.inner.lock().unwrap().get_mut(device) {
+            v.retain(|(i, _)| *i != id);
+        }
+    }
+
+    /// 断开指定设备的全部连接，返回断开数
+    pub fn disconnect_device(&self, device: &str) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .remove(device)
+            .map(|v| {
+                // 编译适配（oneshot::Sender::send 消费 self，不能按引用迭代 send）：
+                // 先取长度，再按值迭代逐个 send
+                let n = v.len();
+                for (_, tx) in v {
+                    let _ = tx.send(());
+                }
+                n
+            })
+            .unwrap_or(0)
+    }
+
+    /// 断开全部设备连接（停止远程 / 全部吊销），返回断开数
+    pub fn disconnect_all(&self) -> usize {
+        let mut map = self.inner.lock().unwrap();
+        let n: usize = map.values().map(Vec::len).sum();
+        // 编译适配（send 消费 Sender，需持所有权迭代）：drain 等价于原稿的
+        // 「逐个 send 后 map.clear()」
+        for (_, v) in map.drain() {
+            for (_, tx) in v {
+                let _ = tx.send(());
+            }
+        }
+        n
+    }
+
+    /// 该设备是否存在活跃连接（Task 7 花名册在线口径数据源）
+    pub fn has(&self, device: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(device)
+            .is_some_and(|v| !v.is_empty())
+    }
+}
+
+/// 自然断开清理包装：axum drop SSE 流时反注册注册表项（不留陈旧句柄泄漏）。
+/// pub(crate) + 字段同可见性（编译适配）：api.rs（兄弟模块）按简报原稿以字段字面量构造
+pub(crate) struct CleanupStream<S> {
+    pub(crate) inner: S,
+    pub(crate) reg: std::sync::Arc<SseRegistry>,
+    pub(crate) device: String,
+    pub(crate) conn_id: u64,
+}
+impl<S: futures::Stream> futures::Stream for CleanupStream<S> {
+    type Item = S::Item;
+    fn poll_next(
+        // 编译适配（unused_mut，-D warnings 门禁）：map_unchecked_mut 按值消费 self，
+        // 绑定无需 mut
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Safety: 无 Unpin 约束需求经字段投影转发（inner 已被 take_until 包装为 Unpin 流链）
+        unsafe { self.map_unchecked_mut(|s| &mut s.inner).poll_next(cx) }
+    }
+}
+impl<S> Drop for CleanupStream<S> {
+    fn drop(&mut self) {
+        self.reg.unregister(&self.device, self.conn_id);
+    }
+}
+
+/// via 判定域名源接缝类型（clippy type_complexity 收敛别名）
+pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send + Sync;
+
 pub struct RemoteState {
-    pub pairing: std::sync::Mutex<super::pairing::PairingService>,
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
     /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.mam）
@@ -140,9 +250,32 @@ pub struct RemoteState {
     /// 与 SessionWatcher::start 的循环共享）；测试注入新建空通道即可。
     /// **订阅端消费即去重完成**（铁律 4）：事件只含边沿（见 watcher::diff_transitions）
     pub watcher_tx: tokio::sync::broadcast::Sender<super::watcher::TransitionEvent>,
+    /// SSE 连接注册表（M4 T0a）：吊销/停止即时断连 + 在线口径数据源
+    pub sse_registry: std::sync::Arc<SseRegistry>,
+    /// 设备上限注入缝（M4 T2c）：生产 = 读 remote.max_devices KV；测试注入常量
+    /// （零 DAO 接触——端点测试不触碰真实 ~/.mam）
+    pub max_devices_source: Box<dyn Fn() -> usize + Send + Sync>,
+    /// per-IP 限速状态机（M5 A3）：POST /pair/pin 锁内查改；内存态重启即清
+    pub pin_limiter: std::sync::Mutex<crate::remote::pin::PinRateLimiter>,
+    /// PIN 源注入缝（M5 A3）：生产 = pin::get_pin（全局 KV）；测试注入固定值（零 DB）
+    pub pin_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    /// 时钟注入缝（M5 A3）：生产 = chrono 毫秒；测试注入可推进原子量——限速锁定
+    /// 到期测试用它推进时间（与 pairing 时代 state_with_clock 同目的，零 sleep）
+    pub now_source: Box<dyn Fn() -> i64 + Send + Sync>,
+    /// 隧道域名并集注入缝（M5 A3，gate 回环豁免消费）：生产 = 从 tunnel::snapshot()
+    /// 抽当前隧道地址的域名部分（A5 双通道聚合时改聚合实现，签名不变）；测试注入固定域名。
+    /// **None = 隧道快照错误终态（fail-closed 哨兵，评审 Important 1）**：豁免的 Host 条件
+    /// 依赖域名名单，快照错误时无从判定 Host 是否隧道域名——gate 收到 None 必须**完全
+    /// 跳过本机豁免**（回环 + 任意 Host 都不免费），而非把 None 当空名单（那是 fail-open：
+    /// Host 条件恒满足 → 回环流量全豁免）
+    pub tunnel_hosts_source: Box<dyn Fn() -> Option<Vec<String>> + Send + Sync>,
+    /// via 分通道域名注入缝（M5 A3，/pair/pin 配对时刻消费）：生产 = snapshot 按
+    /// mode 分拣 quick/named 域名；测试注入固定域名。与 tunnel_hosts_source 同源分形——
+    /// gate 豁免只要"是否隧道域名"并集，via 需要通道区分
+    pub via_hosts_source: Box<ViaHostsSource>,
 }
 
-/// API 子路由：三条端点 + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
+/// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
 /// 注意：gate 在 `with_state` 之前 `layer`，故它包裹的是**本子路由已注册的全部端点与 fallback**；
 /// 之后 Task 7 从外部追加的静态路由不在本子路由内，天然不过闸（结构隔离，非顺序巧合）。
 fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
@@ -158,7 +291,10 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         .route("/session-files", get(api::session_files))
         // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
         .route("/file", get(api::read_file))
-        .route("/pair", post(api::pair))
+        // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
+        // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
+        // 内层 fallback 403）
+        .route("/pair/pin", post(api::pair_pin))
         // 内层 fallback：nest 前缀下的未知/多余路径不得裸奔——没有它，
         // `/m/api/v1/nope` 会落到外层 fallback（Task 7 的静态兜底 → 200 静态内容），
         // 绕开"所有 /m/api/* 过 gate（403）"这条安全不变量（评审实测确认）
@@ -210,9 +346,14 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     // 见 adapter::get_all_sessions 的单飞护栏注释）；watcher 生命周期随进程结束，
     // stop_server 不显式停止（关闭远程后循环仍扫描，为已有取舍）
     super::watcher::SessionWatcher::start();
-    axum::serve(listener, router_with_static(state))
-        .await
-        .map_err(|e| format!("serve: {e}"))
+    // M5 A3：来源 IP 记录——into_make_service_with_connect_info 注入 ConnectInfo
+    // extension（pair_pin 的限速键/指纹与 gate 本机豁免判定依赖；oneshot 测试在请求侧自补）
+    axum::serve(
+        listener,
+        router_with_static(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| format!("serve: {e}"))
 }
 
 #[cfg(test)]
@@ -222,25 +363,11 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    // 简报测试原稿直接使用 `PairingService` / `PairingClock` 短名，但 `use super::*`
-    // 只引入 server.rs 自身条目；此处补 import（编译硬阻断，非行为偏离）
-    use crate::remote::pairing::{PairingClock, PairingService};
+    // M4 T0a（编译硬阻断补 import，先例同上）：SSE 流逐帧消费需要 StreamExt::next
+    use futures::StreamExt as _;
 
     fn test_state() -> Arc<RemoteState> {
-        let mut pairing = PairingService::new(
-            600_000,
-            PairingClock {
-                now: Box::new(|| 1000),
-                token: Box::new(|| "tok-x".to_string()),
-            },
-        );
-        // 偏离简报原稿一处（测试语义硬阻断）：原稿未调用 issue()，服务内无活跃 token，
-        // 则 pair("tok-x") 必返 Invalid（Task 2 状态机：未知密文与无 token 同拒），
-        // 步骤 3 的 200 断言不可能成立。此处先 issue() 使 "tok-x" 活跃——语义等价于
-        // "用户已点击生成配对码"，正是被测流程的前置状态。
-        pairing.issue();
         Arc::new(RemoteState {
-            pairing: std::sync::Mutex::new(pairing),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
                 total_count: 7,
@@ -259,6 +386,16 @@ mod tests {
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            // M5 A3 新字段：限速器全新；PIN 恒 "1234"；时钟真实毫秒；无隧道域名
+            // （豁免面关闭——既有"无 cookie → 403"断言不受本机豁免影响：空 Host fail closed）
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
         })
     }
 
@@ -267,9 +404,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_403_matrix_and_pair_flow() {
+    async fn gate_403_matrix_and_pin_pair_flow() {
         let app = crate::remote::server::router(test_state());
-        // 1) 无 cookie 访问 sessions → 403
+        // 1) 无 cookie 访问 sessions → 403（请求无 Host 头——空 Host fail closed，
+        //    不会误入本机豁免；测试环境也不注入 ConnectInfo，按非本地处理）
         let r = app
             .clone()
             .oneshot(
@@ -281,29 +419,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 403);
-        // 2) pair 错 token → 403
+        // 2) PIN 错 → 401 invalid_pin（非 403：配对入口的错误语义是可鉴别的 401+计数）
         let r = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/m/api/v1/pair")
+                    .uri("/m/api/v1/pair/pin")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"token":"wrong"}"#))
+                    // pair_pin 提取 ConnectInfo（来源 IP 入限速与指纹）——oneshot 请求侧自补
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::from(r#"{"pin":"9999"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(r.status(), 403);
-        // 3) pair 正确 token → 200 + Set-Cookie mam_device
+        assert_eq!(r.status(), 401);
+        // 3) PIN 正确 → 200 + Set-Cookie mam_device
         let r = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/m/api/v1/pair")
+                    .uri("/m/api/v1/pair/pin")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"token":"tok-x"}"#))
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::from(r#"{"pin":"1234"}"#))
                     .unwrap(),
             )
             .await
@@ -361,54 +506,27 @@ mod tests {
             "sessions 响应必须带 Cache-Control: no-store"
         );
         assert!(body_string(r).await.contains("\"totalCount\":7"));
-        // 5) 同 token 重放 → 403（一次性）
+        // 5) PIN 重放再配对 → 仍 200（与旧一次性 token 语义相反：访问密码常驻，
+        //    同指纹重绑命中旧行——不新增设备）
         let r = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/m/api/v1/pair")
+                    .uri("/m/api/v1/pair/pin")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"token":"tok-x"}"#))
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::from(r#"{"pin":"1234"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(r.status(), 403);
+        assert_eq!(r.status(), 200, "PIN 非一次性——重放可再次配对");
     }
 
     // ==== 追加测试（简报单个之外；理由：锁定简报未覆盖但已裁决的契约） ====
-
-    /// 可推进时钟的状态（复用注入缝，测试仍零接触真实数据目录）
-    fn state_with_clock() -> (Arc<RemoteState>, Arc<std::sync::atomic::AtomicI64>) {
-        let t = Arc::new(std::sync::atomic::AtomicI64::new(1000));
-        let now = t.clone();
-        let mut svc = PairingService::new(
-            600_000,
-            PairingClock {
-                now: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
-                token: Box::new(|| "tok-x".to_string()),
-            },
-        );
-        svc.issue(); // 前置状态：已有活跃配对码
-        (
-            Arc::new(RemoteState {
-                pairing: std::sync::Mutex::new(svc),
-                session_source: Box::new(|| crate::session::SessionsResponse {
-                    sessions: vec![],
-                    total_count: 7,
-                    waiting_count: 0,
-                }),
-                store: crate::remote::pairing::DeviceStore::memory(),
-                host_source: Box::new(|| serde_json::Value::Null), // 本组测试不触 /host
-                message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
-                // 本组测试不触 /session-files /file：注入恒空的路径源
-                path_source: Box::new(|_, _, _| (Vec::new(), false)), // 本组测试不触 /session-files /file
-                watcher_tx: tokio::sync::broadcast::channel(64).0,    // M3 Task 5：空事件通道
-            }),
-            t,
-        )
-    }
 
     /// 构造请求的收敛助手（cookie / body 可选）
     fn req(
@@ -424,6 +542,11 @@ mod tests {
         if let Some(c) = cookie {
             b = b.header("cookie", c);
         }
+        // M5 A1 评审修复随记：api::pair 现以 ConnectInfo 取来源 IP 入指纹——
+        // oneshot 不注入该 extension，测试请求侧自补（与 post_json 同一适配）
+        b = b.extension(axum::extract::ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
         b.body(match body {
             Some(s) => Body::from(s.to_string()),
             None => Body::empty(),
@@ -438,74 +561,19 @@ mod tests {
         (status, body_string(r).await, has_cookie)
     }
 
-    /// 不变量③（简报未覆盖）：Invalid / Expired / Used 三态对客户端完全一致——
-    /// 403 + 空响应体 + 无 Set-Cookie，不给 token 有效性预言机
-    #[tokio::test]
-    async fn pair_rejections_are_indistinguishable() {
-        let (state, clock) = state_with_clock();
-        let app = router(state.clone());
-        let pair_req = |tok: &str| req("POST", "/m/api/v1/pair", None, Some(tok));
-        let mut observed = vec![];
-
-        // (a) Invalid：未知密文
-        observed.push(
-            snapshot(
-                app.clone()
-                    .oneshot(pair_req(r#"{"token":"nope"}"#))
-                    .await
-                    .unwrap(),
-            )
-            .await,
-        );
-        // (b) Expired：时钟推进越过 TTL（accept 在 used 判定前返回）
-        clock.store(1000 + 600_001, std::sync::atomic::Ordering::SeqCst);
-        observed.push(
-            snapshot(
-                app.clone()
-                    .oneshot(pair_req(r#"{"token":"tok-x"}"#))
-                    .await
-                    .unwrap(),
-            )
-            .await,
-        );
-        // (c) Used：回到有效窗口重新发行，配对成功后重放
-        clock.store(1000, std::sync::atomic::Ordering::SeqCst);
-        state.pairing.lock().unwrap().issue();
-        let r = app
-            .clone()
-            .oneshot(pair_req(r#"{"token":"tok-x"}"#))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 200, "前置：重新发行后应配对成功");
-        observed.push(
-            snapshot(
-                app.clone()
-                    .oneshot(pair_req(r#"{"token":"tok-x"}"#))
-                    .await
-                    .unwrap(),
-            )
-            .await,
-        );
-
-        assert_eq!(observed[0], observed[1], "Invalid 与 Expired 响应不可区分");
-        assert_eq!(observed[1], observed[2], "Expired 与 Used 响应不可区分");
-        assert_eq!(
-            observed[0],
-            (403, String::new(), false),
-            "拒绝一律 403 空体无 cookie"
-        );
-    }
-
     /// gate 的滑动 TTL：超窗设备拒绝、活跃设备过闸即刷新 last_seen
     #[tokio::test]
     async fn gate_refreshes_last_seen_and_rejects_stale_device() {
-        let (state, _clock) = state_with_clock();
+        let state = test_state();
         let now = chrono::Utc::now().timestamp_millis();
+        // M5 A1 upsert 按指纹（sha256(ua|ip)）去重：ua/ip 全空的设备会互相撞键合并成一行，
+        // 故按 id 派生合成值保证 stale/fresh 两行并存（与真机"不同设备"语义一致）
         let dev = |id: &str, paired_at: i64| crate::remote::pairing::NewDevice {
             id: id.into(),
             name: String::new(),
-            ua: String::new(),
-            origin_ip: String::new(),
+            ua: format!("ua-{id}"),
+            origin_ip: format!("ip-{id}"),
+            via: String::new(),
             paired_at,
         };
         state.store.with(|c| {
@@ -559,7 +627,7 @@ mod tests {
     /// 若变异为"两种失败写入不同响应体/附带头"，即构成设备有效性预言机——本测试锁死该不变量
     #[tokio::test]
     async fn gate_rejections_are_indistinguishable() {
-        let (state, _clock) = state_with_clock();
+        let state = test_state();
         let app = router(state);
         // (a) 无 cookie
         let no_cookie = snapshot(
@@ -662,8 +730,8 @@ mod tests {
         assert_eq!(r.status(), 403);
     }
 
-    /// 追加静态路由后 pair 仍可换 cookie（放行名单随 nest 剥前缀改为相对 `/pair`
-    /// 的回归锁定——若名单仍写绝对路径，此测试 403 失败）
+    /// 追加静态路由后 pair/pin 仍可换 cookie（放行名单随 nest 剥前缀改为相对
+    /// `/pair/pin` 的回归锁定——若名单仍写绝对路径，此测试 403 失败）
     #[tokio::test]
     async fn pair_still_reachable_after_task7_static_appended() {
         let app = router(test_state())
@@ -672,16 +740,16 @@ mod tests {
         let r = app
             .oneshot(req(
                 "POST",
-                "/m/api/v1/pair",
+                "/m/api/v1/pair/pin",
                 None,
-                Some(r#"{"token":"tok-x"}"#),
+                Some(r#"{"pin":"1234"}"#),
             ))
             .await
             .unwrap();
         assert_eq!(
             r.status(),
             200,
-            "nest 内层 gate 的相对放行名单必须保住 pair"
+            "nest 内层 gate 的相对放行名单必须保住 pair/pin"
         );
         assert!(r.headers().get("set-cookie").is_some());
     }
@@ -832,17 +900,6 @@ mod tests {
     async fn sessions_scan_does_not_stall_async_runtime() {
         // 重建 state 以注入阻塞源（其余注入缝与 test_state 一致：内存库、预发行 token）
         let state = Arc::new(RemoteState {
-            pairing: std::sync::Mutex::new({
-                let mut svc = PairingService::new(
-                    600_000,
-                    PairingClock {
-                        now: Box::new(|| 1000),
-                        token: Box::new(|| "tok-x".to_string()),
-                    },
-                );
-                svc.issue();
-                svc
-            }),
             session_source: Box::new(|| {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 crate::session::SessionsResponse {
@@ -857,6 +914,17 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            max_devices_source: Box::new(|| 3),
+            // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -868,6 +936,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -918,7 +987,8 @@ mod tests {
         String::from_utf8(bytes.to_vec()).expect("SSE 帧应为 UTF-8")
     }
 
-    /// 预置有效设备（SSE 测试专用：复用 state_with_clock 的注入缝，零接触真实设备表）
+    /// 预置有效设备（SSE 测试专用：复用 state_with_clock 的注入缝，零接触真实设备表）。
+    /// M5 A1：ua/ip 按 id 派生——upsert 按指纹去重，全空值会在同库多次预置时撞键合并
     fn persist_device(state: &Arc<RemoteState>, id: &str) {
         let now = chrono::Utc::now().timestamp_millis();
         state.store.with(|c| {
@@ -927,8 +997,9 @@ mod tests {
                 &crate::remote::pairing::NewDevice {
                     id: id.into(),
                     name: String::new(),
-                    ua: String::new(),
-                    origin_ip: String::new(),
+                    ua: format!("ua-{id}"),
+                    origin_ip: format!("ip-{id}"),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -940,7 +1011,7 @@ mod tests {
     /// 不得因为「SSE 是长连接」而漏过内层 layer
     #[tokio::test]
     async fn sse_events_is_gated() {
-        let (state, _clock) = state_with_clock();
+        let state = test_state();
         let app = router(state);
         let r = app
             .oneshot(req("GET", "/m/api/v1/events", None, None))
@@ -958,7 +1029,7 @@ mod tests {
     /// `event: transition` + camelCase JSON 送达（wire 契约端到端锁定）
     #[tokio::test]
     async fn sse_events_streams_snapshot_then_transitions() {
-        let (state, _clock) = state_with_clock();
+        let state = test_state();
         persist_device(&state, "ev");
         let app = router(state.clone());
         let r = app
@@ -1020,6 +1091,171 @@ mod tests {
         );
     }
 
+    // ---- SseRegistry 单元（M4 T0a）----
+
+    #[test]
+    fn sse_registry_register_then_disconnect_device() {
+        let reg = SseRegistry::default();
+        let (id1, mut rx1) = reg.register("dev-a");
+        let (_id2, rx2) = reg.register("dev-a");
+        let (_id3, _rx3) = reg.register("dev-b");
+        assert!(reg.has("dev-a") && reg.has("dev-b"));
+        // 断 dev-a：两条连接全断，dev-b 不受影响
+        assert_eq!(reg.disconnect_device("dev-a"), 2);
+        assert!(rx1.try_recv().is_ok());
+        drop(rx2); // 第二条 receiver 被 send 唤醒后丢弃即可（Sender 已 send）
+        assert!(!reg.has("dev-a") && reg.has("dev-b"));
+        // 自然断开清理：unregister 幂等
+        reg.unregister("dev-a", id1);
+        reg.unregister("dev-a", id1); // 不 panic
+        assert_eq!(reg.disconnect_all(), 1); // 只剩 dev-b
+    }
+
+    #[test]
+    fn sse_registry_sender_dropped_when_entry_replaced_by_disconnect() {
+        let reg = SseRegistry::default();
+        // 编译适配（E0596）：try_recv 需 &mut self，原稿 rx 未加 mut
+        let (_id, mut rx) = reg.register("dev");
+        reg.disconnect_device("dev");
+        // 断连后 Sender 已移除；receiver 侧已收到信号
+        // 断言写法适配（clippy::redundant_pattern_matching 门禁）：matches! → is_ok()，语义不变
+        assert!(rx.try_recv().is_ok());
+    }
+
+    // ---- 吊销即时断流集成（SSE 流随 disconnect 终止）----
+
+    #[tokio::test]
+    async fn sse_stream_ends_when_device_disconnected() {
+        let state = test_state();
+        // 直通配对拿有效 cookie（复用既有 pair 流程的简化版：直接 persist 一个设备）
+        state.store.with(|c| {
+            let _ = crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "dev-sse".into(),
+                    name: String::new(),
+                    ua: String::new(),
+                    origin_ip: String::new(),
+                    via: String::new(),
+                    // 偏离简报原稿一处（测试语义硬阻断）：原稿 paired_at: 0——persist 以
+                    // paired_at 充当 last_seen_at，gate 按真实时钟做滑动 TTL 判定，
+                    // 0 必被 403 拒绝。改为当前时刻，语义等价于「刚配对的活跃设备」
+                    // （既有 persist_device 测试助手同一取值先例）
+                    paired_at: chrono::Utc::now().timestamp_millis(),
+                },
+            );
+        });
+        let app = super::router_with_static(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/m/api/v1/events")
+                    .header("cookie", "mam_device=dev-sse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let mut stream = resp.into_body().into_data_stream();
+        // 读到首帧（snapshot）证明流已建立
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("首帧超时")
+            .unwrap();
+        assert!(first.is_ok());
+        // 吊销 → 流必须结束（next 返回 None）
+        assert_eq!(state.sse_registry.disconnect_device("dev-sse"), 1);
+        let end = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("断连后流未在 2s 内结束");
+        assert!(end.is_none());
+    }
+
+    // ==== M5 A4：吊销收窄（gate 级回归） ====
+
+    /// M5 A4 吊销收窄回归：热重启半程（stop revoke=false）后设备 cookie 仍过闸
+    /// （「改绑定/改端口热重启不掉线」），显性关闭（revoke=true）后同 cookie 403。
+    /// 真实 stop_server 触碰全局 DB / 电源锁 / 隧道进程（零污染红线禁测）——此处以
+    /// stop_server_core 注入与生产 stop_server 完全同形的 store/registry 闭包，
+    /// 等价锁定「revoke 取值 → 设备有效性」这一收窄语义核心（重启后的监听生效半边
+    /// 由 serve/start 既有路径承担，gate 与设备表不受重启影响的判据即本测试）
+    #[tokio::test]
+    async fn hot_restart_without_revoke_keeps_device_cookie_valid() {
+        let state = test_state();
+        persist_device(&state, "hn");
+        let app = router(state.clone());
+        // 初始：cookie 过闸
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=hn"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+
+        // 热重启半程：停监听不吊销（闭包与生产 stop_server(false) 同形）
+        let st_reg = state.clone();
+        let st_store = state.clone();
+        crate::remote::stop_server_core(
+            None,
+            false,
+            move || {
+                st_reg.sse_registry.disconnect_all();
+            },
+            move || {
+                let _ = st_store.store.with(crate::remote::pairing::revoke_all);
+            },
+            || {},
+            || {},
+        );
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=hn"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "revoke=false（热重启）后 cookie 必须仍过闸（设备不掉线）"
+        );
+
+        // 显性关闭：吊销 → 同一 cookie 403（收窄前后对照）
+        let st_reg = state.clone();
+        let st_store = state.clone();
+        crate::remote::stop_server_core(
+            None,
+            true,
+            move || {
+                st_reg.sse_registry.disconnect_all();
+            },
+            move || {
+                let _ = st_store.store.with(crate::remote::pairing::revoke_all);
+            },
+            || {},
+            || {},
+        );
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=hn"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "revoke=true（显性关闭）后设备全吊销");
+    }
+
     // ==== M3 Task 1：GET /m/api/v1/host（P8a/P8b 页头数据源） ====
     // 零污染：host 载荷经 host_source 注入缝供给（假 json），不触 settings DAO / 全局 DB。
 
@@ -1029,17 +1265,6 @@ mod tests {
     async fn host_endpoint_is_gated_and_returns_injected_payload() {
         // 重建 state：host_source 注入假载荷（与 sessions_scan_* 重建 state 的先例一致）
         let state = Arc::new(RemoteState {
-            pairing: std::sync::Mutex::new({
-                let mut svc = PairingService::new(
-                    600_000,
-                    PairingClock {
-                        now: Box::new(|| 1000),
-                        token: Box::new(|| "tok-x".to_string()),
-                    },
-                );
-                svc.issue();
-                svc
-            }),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
                 total_count: 0,
@@ -1056,6 +1281,17 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            max_devices_source: Box::new(|| 3),
+            // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1067,6 +1303,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -1112,17 +1349,6 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let cap = captured.clone();
         let state = Arc::new(RemoteState {
-            pairing: std::sync::Mutex::new({
-                let mut svc = PairingService::new(
-                    600_000,
-                    PairingClock {
-                        now: Box::new(|| 1000),
-                        token: Box::new(|| "tok-x".to_string()),
-                    },
-                );
-                svc.issue();
-                svc
-            }),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
                 total_count: 0,
@@ -1167,6 +1393,17 @@ mod tests {
             // 本测试不触 /session-files：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            max_devices_source: Box::new(|| 3),
+            // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1178,6 +1415,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -1303,17 +1541,6 @@ mod tests {
             unread: false,
         };
         let state = Arc::new(RemoteState {
-            pairing: std::sync::Mutex::new({
-                let mut svc = PairingService::new(
-                    600_000,
-                    PairingClock {
-                        now: Box::new(|| 1000),
-                        token: Box::new(|| "tok-x".to_string()),
-                    },
-                );
-                svc.issue();
-                svc
-            }),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -1330,11 +1557,23 @@ mod tests {
                         last_ts: None,
                         hits: 1,
                         modified: false,
+                        origin: crate::remote::files::FileOrigin::ToolRead,
                     }],
                     false,
                 )
             }),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            // M4 T0a：本组测试不触 SSE 断连，空注册表即可
+            sse_registry: Arc::new(SseRegistry::default()),
+            // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
+            // /pair/* 则不被消费）；上限注入常量 3 = 默认上限（零 DAO 接触）
+            max_devices_source: Box::new(|| 3),
+            // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -1458,7 +1697,8 @@ mod tests {
         );
         assert_eq!(header(&r, "x-content-type-options"), "nosniff");
 
-        // (6) 越界 → 403（绝对路径指向 cwd 外）
+        // (6) 不存在（cwd 外任意路径）→ 403 + 原因码 not_found（M5 P2-a：原因
+        // 写在报错处，仅已过闸设备可见）
         let r = app
             .clone()
             .oneshot(req(
@@ -1469,10 +1709,12 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 403, "越界必须 403");
-        assert!(body_string(r).await.is_empty(), "403 不携带错误细节");
+        assert_eq!(r.status(), 403, "不存在必须 403");
+        let b = body_string(r).await;
+        assert!(b.contains("not_found"), "403 体必须带原因码 not_found: {b}");
 
-        // (7) 超限 → 403，与越界完全不可区分（同码同空体——探测面最小化）
+        // (7) 超限 → 403 + 原因码 too_large（与 (6) 可区分——M5 P2-a 裁决：
+        // 原因写在报错处，替代旧「空体不可区分」口径）
         let r = app
             .clone()
             .oneshot(req(
@@ -1484,10 +1726,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 403, "超限必须 403");
-        assert!(
-            body_string(r).await.is_empty(),
-            "超限 403 与越界 403 不可区分"
-        );
+        let b = body_string(r).await;
+        assert!(b.contains("too_large"), "403 体必须带原因码 too_large: {b}");
 
         // (8) /session-files：缺参 400 → 命中 200 {files:[...]} + no-store
         let r = app
@@ -1533,5 +1773,673 @@ mod tests {
     /// 查询参数值的最小 URL 编码（测试助手：空格 → %20；其余字符测试数据不含）
     fn uri_encode(s: &str) -> String {
         s.replace(' ', "%20")
+    }
+
+    /// 从 Set-Cookie 取设备 id（`mam_device=<id>; Path=/m; ...`）
+    fn cookie_device_id(resp: &axum::http::Response<Body>) -> String {
+        let v = resp
+            .headers()
+            .get("set-cookie")
+            .expect("应携带 Set-Cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        v.split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("mam_device=")
+            .unwrap()
+            .to_string()
+    }
+
+    // ==== M5 A3：/pair/pin 端点 + gate 本机豁免（回环 + 本地 Host 双条件）====
+    // 安全是本任务的存在意义：穿透测试锁定「隧道流量无法借回环穿透」。
+
+    /// A3 专用 state：PIN 源 / 设备上限 / 隧道域名 / 可推进时钟全注入（零 DB 零真实隧道）。
+    /// 返回时钟句柄供限速到期测试推进（state_with_clock 同目的，零 sleep）
+    fn a3_state(
+        pin: Option<&str>,
+        max_devices: usize,
+        quick_hosts: &[&str],
+        named_hosts: &[&str],
+        tunnel_error: bool,
+    ) -> (Arc<RemoteState>, Arc<std::sync::atomic::AtomicI64>) {
+        let t = Arc::new(std::sync::atomic::AtomicI64::new(1_000_000));
+        let now = t.clone();
+        let quick: Vec<String> = quick_hosts.iter().map(|s| s.to_string()).collect();
+        let named: Vec<String> = named_hosts.iter().map(|s| s.to_string()).collect();
+        let q_tunnel = quick.clone();
+        let n_tunnel = named.clone();
+        let pin_owned: Option<String> = pin.map(|s| s.to_string());
+        (
+            Arc::new(RemoteState {
+                session_source: Box::new(|| crate::session::SessionsResponse {
+                    sessions: vec![],
+                    total_count: 7,
+                    waiting_count: 0,
+                }),
+                store: crate::remote::pairing::DeviceStore::memory(),
+                host_source: Box::new(|| serde_json::Value::Null),
+                message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+                path_source: Box::new(|_, _, _| (Vec::new(), false)),
+                watcher_tx: tokio::sync::broadcast::channel(64).0,
+                sse_registry: Arc::new(SseRegistry::default()),
+                max_devices_source: Box::new(move || max_devices),
+                pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+                pin_source: Box::new(move || pin_owned.clone()),
+                now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
+                tunnel_hosts_source: Box::new(move || {
+                    if tunnel_error {
+                        return None; // 评审 Important 1：错误态哨兵——gate 必须跳过豁免
+                    }
+                    Some(q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect())
+                }),
+                via_hosts_source: Box::new(move || Some((quick.clone(), named.clone()))),
+            }),
+            t,
+        )
+    }
+
+    /// A3 自由请求构造：来源地址 / Host 头 / UA / cookie / JSON body 全可指定。
+    /// host 不给 = 请求**不带 Host 头**（axum oneshot 不会自动补——正好锁定"空 Host fail closed"）
+    #[allow(clippy::too_many_arguments)]
+    fn http_req(
+        method: &str,
+        uri: &str,
+        addr: &str,
+        host: Option<&str>,
+        ua: Option<&str>,
+        cookie: Option<&str>,
+        body: Option<&str>,
+    ) -> axum::http::Request<Body> {
+        let mut b = axum::http::Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            b = b.header("content-type", "application/json");
+        }
+        if let Some(h) = host {
+            b = b.header("host", h);
+        }
+        if let Some(u) = ua {
+            b = b.header("user-agent", u);
+        }
+        if let Some(c) = cookie {
+            b = b.header("cookie", c);
+        }
+        // axum oneshot 不注入 ConnectInfo extension——请求侧自补（post_json 同一适配）
+        b = b.extension(axum::extract::ConnectInfo(
+            addr.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        b.body(match body {
+            Some(s) => Body::from(s.to_string()),
+            None => Body::empty(),
+        })
+        .unwrap()
+    }
+
+    /// POST /pair/pin 收敛助手（无 cookie——配对入口本就无凭据）
+    fn pin_post(
+        addr: &str,
+        host: Option<&str>,
+        ua: Option<&str>,
+        body: &str,
+    ) -> axum::http::Request<Body> {
+        http_req(
+            "POST",
+            "/m/api/v1/pair/pin",
+            addr,
+            host,
+            ua,
+            None,
+            Some(body),
+        )
+    }
+
+    /// 穿透矩阵（安全关键，变异自证：去掉 is_local_access 的 Host 条件——只查回环——
+    /// 断言 1 必红：127.0.0.1 + 隧道 Host 的公网隧道流量会被免密放进看板）：
+    /// 1. 127.0.0.1 + Host=隧道域名（模拟 cloudflared 本机回环转发公网流量）+ 无 cookie → 403；
+    /// 2. 回环（127.0.0.1 / ::1）+ 本地 Host → 免密直达 /sessions 200；
+    /// 3. 非回环 + 本地 Host + 无 cookie → 403（豁免只信来源回环）；
+    /// 4. 回环 + 缺 Host 头 → 403（空 Host fail closed）。
+    #[tokio::test]
+    async fn gate_local_exempt_requires_loopback_and_local_host() {
+        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[], false);
+        let app = router(state);
+
+        // 1) 穿透：回环 + 隧道 Host → 403 不得免密（带端口的 Host 形态归一后同样拦下）
+        for host in [
+            "mam-test.trycloudflare.com",
+            "mam-test.trycloudflare.com:443",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(http_req(
+                    "GET",
+                    "/m/api/v1/sessions",
+                    "127.0.0.1:40000",
+                    Some(host),
+                    None,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                r.status(),
+                403,
+                "隧道域名 Host 的回环流量不得免密（穿透防线）：{host}"
+            );
+        }
+
+        // 2) 本机免密：回环 + 本地 Host → 直达看板 200（数据来自注入源 totalCount=7）
+        for addr in ["127.0.0.1:40001", "[::1]:40002"] {
+            let r = app
+                .clone()
+                .oneshot(http_req(
+                    "GET",
+                    "/m/api/v1/sessions",
+                    addr,
+                    Some("localhost:9420"),
+                    None,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200, "{addr} 本机免密应直达看板");
+            assert!(body_string(r).await.contains("\"totalCount\":7"));
+        }
+
+        // 3) 非回环 + 本地 Host → 403
+        let r = app
+            .clone()
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/sessions",
+                "10.0.0.5:40003",
+                Some("localhost:9420"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "非回环来源不得借本地 Host 免密");
+
+        // 4) 回环 + 缺 Host 头 → 403（fail closed）
+        let r = app
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/sessions",
+                "127.0.0.1:40004",
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "缺 Host 头必须按非本地处理（fail closed）");
+    }
+
+    /// 快照错误态 fail-closed（评审 Important 1）：隧道快照处于错误终态时，豁免依赖的
+    /// 域名名单无从判定——gate 收到 None 哨兵必须**完全跳过本机豁免**：
+    /// 回环 + 本地 Host（正常态本应免密 200）→ 仍要求 cookie（403）；
+    /// 有效 cookie 的请求不受影响（fail-closed 只收紧豁免路径，不断 cookie 路径）。
+    /// 变异锚点：若把 None 当空名单处理（fail-open），断言 1 必红
+    #[tokio::test]
+    async fn gate_local_exempt_disabled_when_tunnel_snapshot_degraded() {
+        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[], true);
+        // 预置有效设备（cookie 路径的对照组；last_seen 取当前时刻——滑动 TTL 窗口内）
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: "degraded".into(),
+                    name: String::new(),
+                    ua: "ua-degraded".into(),
+                    origin_ip: "ip-degraded".into(),
+                    via: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+        let app = router(state);
+
+        // 1) 回环 + 本地 Host + 无 cookie → 403（豁免被快照错误完全关闭）
+        let r = app
+            .clone()
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/sessions",
+                "127.0.0.1:41000",
+                Some("localhost:9420"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            403,
+            "快照错误 ∧ 回环 → 不豁免（fail-closed，不得当空名单 fail-open）"
+        );
+
+        // 2) 同请求带有效 cookie → 200（fail-closed 只影响豁免，不影响 cookie 认证路径）
+        let r = app
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/sessions",
+                "127.0.0.1:41000",
+                Some("localhost:9420"),
+                None,
+                Some("mam_device=degraded"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "有效 cookie 在快照错误态照常过闸");
+    }
+
+    /// 配对流（矩阵 4）：PIN 对 → 200 + Set-Cookie（携带 upsert 返回 id）+ 落行；
+    /// via 按 Host 四分支（quick 域名 → quick / 本地 Host 非回环 → lan / named 域名 →
+    /// named / 回环+本地 → local）；两台不同 UA/IP 设备 → 各自一行；同 UA+IP 重绑 →
+    /// 同行 id（cookie 刷新）——A1 upsert 语义在新端点上存活
+    #[tokio::test]
+    async fn pin_pair_flow_via_four_branches_two_devices_and_rejoin() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            10,
+            &["mam-test.trycloudflare.com"],
+            &["mam.example.com"],
+            false,
+        );
+        let app = router_with_static(state.clone());
+
+        // 设备 A：经 quick 隧道域名 → via=quick；cookie 五属性全断言（评审 Important 3 既有口径）
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "203.0.113.7:51000",
+                Some("mam-test.trycloudflare.com"),
+                Some("ua-A"),
+                r#"{"pin":"1234","name":"我的手机"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "PIN 正确必须 200");
+        let cookie = r
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let id_a = cookie
+            .split("mam_device=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            id_a.len() == 32 && id_a.chars().all(|c| c.is_ascii_hexdigit()),
+            "device id 应为 32 位 hex，实际 {id_a:?}"
+        );
+        assert_eq!(
+            cookie,
+            format!(
+                "mam_device={id_a}; Path=/m; HttpOnly; SameSite=Lax; Max-Age={}",
+                crate::remote::pairing::DEVICE_TTL_MS / 1000
+            ),
+            "cookie 必须同时具备 mam_device=hex / Path=/m / HttpOnly / SameSite=Lax / Max-Age=180d"
+        );
+        let row_a: (String, String, String, String) = state.store.with(|c| {
+            c.query_row(
+                "SELECT via, name, ua, origin_ip FROM remote_devices WHERE id = ?1",
+                [&id_a],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        });
+        assert_eq!(row_a.0, "quick", "Host==quick 域名 → via=quick");
+        assert_eq!(row_a.1, "我的手机", "自报名落库");
+        assert_eq!(row_a.2, "ua-A", "真实 UA 落库");
+        assert_eq!(row_a.3, "203.0.113.7", "ConnectInfo 来源 IP 落库");
+
+        // 设备 B：局域网直连（非回环 + 本地 Host）→ via=lan；缺 name → 默认名
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "10.0.0.8:51001",
+                Some("192.168.1.9:9420"),
+                Some("ua-B"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let id_b = cookie_device_id(&r);
+        let row_b: (String, String) = state.store.with(|c| {
+            c.query_row(
+                "SELECT via, name FROM remote_devices WHERE id = ?1",
+                [&id_b],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        });
+        assert_eq!(row_b.0, "lan", "非隧道 Host 的非回环来源 → via=lan");
+        assert_eq!(row_b.1, "新设备", "缺省名回落默认名");
+
+        // 设备 C：经 named 域名 → via=named
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "198.51.100.3:51002",
+                Some("mam.example.com:443"),
+                Some("ua-C"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let id_c = cookie_device_id(&r);
+        let via_c: String = state.store.with(|c| {
+            c.query_row(
+                "SELECT via FROM remote_devices WHERE id = ?1",
+                [&id_c],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(via_c, "named", "Host==named 域名（带端口归一）→ via=named");
+
+        // 设备 D：本机回环 + 本地 Host → via=local
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "127.0.0.1:51003",
+                Some("localhost:9420"),
+                Some("ua-D"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let id_d = cookie_device_id(&r);
+        let via_d: String = state.store.with(|c| {
+            c.query_row(
+                "SELECT via FROM remote_devices WHERE id = ?1",
+                [&id_d],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(via_d, "local", "回环 + 非隧道 Host → via=local");
+
+        // 四台设备 = 四行（UA/IP 互异，指纹各不同）
+        let rows: i64 = state.store.with(|c| {
+            c.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+                .unwrap()
+        });
+        assert_eq!(rows, 4, "四台不同 UA/IP 设备必须四行");
+
+        // 设备 A 同 UA + 同来源 IP 重绑 → upsert 命中同行 id（cookie 刷新指向旧行），不新增
+        let r = app
+            .oneshot(pin_post(
+                "203.0.113.7:51000",
+                Some("mam-test.trycloudflare.com"),
+                Some("ua-A"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            cookie_device_id(&r),
+            id_a,
+            "同指纹重绑 Set-Cookie 必须携带旧行 id"
+        );
+        let rows: i64 = state.store.with(|c| {
+            c.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+                .unwrap()
+        });
+        assert_eq!(rows, 4, "重绑不新增行");
+    }
+
+    /// 限速矩阵（矩阵 5）：连错 4 次 → 401 且 remaining 递减（4,3,2,1）；第 5 次错 → 401
+    /// （remaining 0）；第 6 次请求（即使 PIN 对）→ 429 + retryAfter=600；时钟推进过锁期
+    /// （now_source 注入缝）→ 正确 PIN 配对成功
+    #[tokio::test]
+    async fn pin_rate_limit_locks_after_five_failures_then_expires() {
+        let (state, t) = a3_state(Some("1234"), 3, &[], &[], false);
+        let app = router(state.clone());
+        for want in [4, 3, 2, 1] {
+            let r = app
+                .clone()
+                .oneshot(pin_post(
+                    "10.9.9.9:6000",
+                    Some("192.168.1.9:9420"),
+                    Some("ua-x"),
+                    r#"{"pin":"0000"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 401, "第 {} 次错应 401", 5 - want);
+            let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["error"], "invalid_pin");
+            assert_eq!(v["remaining"], want, "remaining 应递减为 {want}");
+        }
+        // 第 5 次错 → 401（remaining 0——次数披露到此为止，此后一律 429）
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "10.9.9.9:6000",
+                Some("192.168.1.9:9420"),
+                Some("ua-x"),
+                r#"{"pin":"0000"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "第 5 次错仍是 401 invalid_pin");
+        let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["remaining"], 0, "第 5 次失败后剩余 0");
+
+        // 第 6 次：即使 PIN 正确 → 429 + retryAfter（锁内正确 PIN 也拒）
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "10.9.9.9:6000",
+                Some("192.168.1.9:9420"),
+                Some("ua-x"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 429, "锁定期内正确 PIN 也必须 429");
+        assert!(
+            r.headers().get("set-cookie").is_none(),
+            "429 不得下发任何凭证"
+        );
+        let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["retryAfter"], 600, "整锁 10 分钟 → retryAfter 600 秒");
+
+        // 时钟推进过锁期（600_001ms）→ 正确 PIN 配对成功（配对产物落行可验证）
+        t.fetch_add(600_001, std::sync::atomic::Ordering::SeqCst);
+        let r = app
+            .oneshot(pin_post(
+                "10.9.9.9:6000",
+                Some("192.168.1.9:9420"),
+                Some("ua-x"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "锁定到期后正确 PIN 可配对");
+        let id = cookie_device_id(&r);
+        let n: i64 = state.store.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM remote_devices WHERE id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(n, 1, "成功配对应落一行设备记录");
+    }
+
+    /// 上限门（矩阵 6）：满员（max=1，已配一台）→ 第二台 PIN 对也拒——沿用既有直通
+    /// 上限语义（403 + {"error":"cap_full"}）；门在 PIN 正确**之后**判定（先验 PIN 再谈
+    /// 名额）；腾位后同 PIN 可配
+    #[tokio::test]
+    async fn pin_pair_rejected_when_device_cap_full() {
+        let (state, _t) = a3_state(Some("1234"), 1, &[], &[], false);
+        let app = router(state.clone());
+        // 第一台占满名额
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "10.0.0.1:7000",
+                Some("192.168.1.9:9420"),
+                Some("ua-1"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "前置：第一台配对成功");
+        let id1 = cookie_device_id(&r);
+        // 第二台：PIN 正确但满员 → 403 cap_full
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "10.0.0.2:7001",
+                Some("192.168.1.9:9420"),
+                Some("ua-2"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "cap_full", "上限语义沿用仓库既有 cap_full 契约");
+        // 腾位后同 PIN 可配
+        state
+            .store
+            .with(|c| crate::remote::pairing::revoke_device(c, &id1).unwrap());
+        let r = app
+            .oneshot(pin_post(
+                "10.0.0.2:7001",
+                Some("192.168.1.9:9420"),
+                Some("ua-2"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "腾位后同 PIN 应可配对");
+    }
+
+    /// pin_not_set（矩阵 7）：KV 空 → 401 {"error":"pin_not_set"}，**不计失败**——
+    /// 连发 5 次错误 PIN 也不进入锁定（无密可对；A5 开通道时自动生成，本任务只留语义）。
+    /// pin 源用可变槽位：切到 Some 后正确 PIN 立即可配，证明 5 次未计失败
+    #[tokio::test]
+    async fn pin_not_set_is_unauthorized_and_records_no_failure() {
+        let pin_slot: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let slot = pin_slot.clone();
+        let (state, _t) = {
+            let t = Arc::new(std::sync::atomic::AtomicI64::new(1_000_000));
+            let now = t.clone();
+            (
+                Arc::new(RemoteState {
+                    session_source: Box::new(|| crate::session::SessionsResponse {
+                        sessions: vec![],
+                        total_count: 0,
+                        waiting_count: 0,
+                    }),
+                    store: crate::remote::pairing::DeviceStore::memory(),
+                    host_source: Box::new(|| serde_json::Value::Null),
+                    message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+                    path_source: Box::new(|_, _, _| (Vec::new(), false)),
+                    watcher_tx: tokio::sync::broadcast::channel(64).0,
+                    sse_registry: Arc::new(SseRegistry::default()),
+                    max_devices_source: Box::new(|| 3),
+                    pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+                    pin_source: Box::new(move || slot.lock().unwrap().clone()),
+                    now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
+                    tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+                    via_hosts_source: Box::new(|| None),
+                }),
+                t,
+            )
+        };
+        let app = router(state);
+        for _ in 0..5 {
+            let r = app
+                .clone()
+                .oneshot(pin_post(
+                    "10.8.8.8:6100",
+                    Some("192.168.1.9:9420"),
+                    Some("ua-y"),
+                    r#"{"pin":"0000"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 401);
+            let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["error"], "pin_not_set", "未设置 PIN 必须 pin_not_set");
+        }
+        // 切 PIN 源后正确 PIN 立即可配——若 pin_not_set 被计失败，5 次早已锁定 429
+        *pin_slot.lock().unwrap() = Some("1234".to_string());
+        let r = app
+            .oneshot(pin_post(
+                "10.8.8.8:6100",
+                Some("192.168.1.9:9420"),
+                Some("ua-y"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "pin_not_set 不计失败——5 次后不得锁定");
+    }
+
+    /// 名单收口（矩阵 8）：旧 /pair 直通端点与审批三端点全部死亡——POST 一律 403
+    /// （旧路由删除后落内层 fallback；gate 放行名单不再含 /pair*）；/pair/pin/extra
+    /// 多余段同样 403（名单精确相等，不是 /pair 前缀）
+    #[tokio::test]
+    async fn legacy_pair_endpoints_are_closed() {
+        let (state, _t) = a3_state(Some("1234"), 3, &[], &[], false);
+        let app = router(state);
+        for (uri, body) in [
+            ("/m/api/v1/pair", r#"{"pin":"1234"}"#),
+            ("/m/api/v1/pair/request", r#"{"name":"x"}"#),
+            ("/m/api/v1/pair/poll", r#"{"requestId":"r"}"#),
+            (
+                "/m/api/v1/pair/confirm",
+                r#"{"requestId":"r","code":"1234"}"#,
+            ),
+            ("/m/api/v1/pair/pin/extra", r#"{"pin":"1234"}"#),
+        ] {
+            let r = app
+                .clone()
+                .oneshot(http_req(
+                    "POST",
+                    uri,
+                    "10.0.0.9:8000",
+                    Some("192.168.1.9:9420"),
+                    Some("ua"),
+                    None,
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 403, "{uri} 必须死亡（旧端点下线 + 名单收口）");
+        }
     }
 }

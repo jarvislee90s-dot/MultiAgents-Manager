@@ -61,7 +61,12 @@ toml = "0.8"
 toml_edit = "0.22"
 trash = "5"
 semver = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# system-proxy：reqwest 的**默认特性**，被 default-features=false 一并关掉——M4 T1d
+# 下载器不读 Windows/macOS 系统代理、直连 github.com 失败的根因，必须显式加回
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+# M4 T1d：cloudflared 下载完整性校验（固定版本 + release 页 SHA256 表比对；
+# 0.10 本就存在于依赖树，升直依不新增传递项）
+sha2 = "0.10"
 zip = "4"
 # dsh 会话日志为多帧拼接的 zstd 容器（M0 F1），解码用
 zstd = "0.13"
@@ -82,7 +87,7 @@ futures = "0.3"
 junction = "1.2"
 # Console（AttachConsole/SetConsoleTitle 路线 B）、Diagnostics_ToolHelp + FileSystem
 # （父进程链遍历）为 mam-marker helper（src/bin）所需
-windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp"] }
+windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 winreg = "0.52"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

@@ -104,8 +104,20 @@ export function useNotification() {
             id: "focus-session",
             actions: [{ id: "focus", title: "查看会话" }],
           },
+          {
+            // M4 T2a：配对请求通知动作（点击直达设置页审批）。通知动作类型注册的
+            // 全局单点在此——useRemoteEvents 只发送 actionTypeId，不得二次注册
+            id: "open-pairing",
+            actions: [{ id: "open", title: "前往审批" }],
+          },
         ]);
         await onAction(async (notification) => {
+          // M4 T2a：配对请求通知点击直达设置页（spec「点击直达配对面板」）——
+          // pathname 路由（main.tsx pageMap），整页跳转
+          if (notification.actionTypeId === "open-pairing") {
+            window.location.assign("/settings");
+            return;
+          }
           if (notification.actionTypeId !== "focus-session") return;
           // P2-5（issue #34）：放开 pid>0 门并透传 form——App 形态未读卡 pid=0，
           // 原门直接吞掉点击致"查看会话"死路；缺 form 则 Windows 深链分支永不可达。

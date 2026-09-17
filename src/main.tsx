@@ -13,6 +13,7 @@ void initTheme();
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query/queryClient";
 import { setupToolsChangedListener } from "@/lib/query/toolsChangedSync";
+import { useRemoteEvents } from "@/hooks/useRemoteEvents";
 
 const HomePage = lazy(() => import("./pages/home"));
 const AboutPage = lazy(() => import("./pages/about"));
@@ -38,6 +39,10 @@ const PageComponent = isNotificationWindow
     : (pageMap[pathname as keyof typeof pageMap] ?? HomePage);
 
 function AppWrapper() {
+  // M4 T2：桌面全局远程事件（配对请求系统通知 / 隧道地址与守护失败通知 /
+  // 托盘触发的地址复制与开关失败提示）——本窗口挂载一次（浮窗/宠物窗口由
+  // hook 内部 hash 守卫跳过，避免多 WebView 重复弹通知）
+  useRemoteEvents();
   useEffect(() => {
     // 通知浮窗的显隐由 notification:new 事件驱动，宠物窗口由显隐状态驱动，创建时保持隐藏（避免空白窗抢显示）
     if (isNotificationWindow || isPetWindow) return;
