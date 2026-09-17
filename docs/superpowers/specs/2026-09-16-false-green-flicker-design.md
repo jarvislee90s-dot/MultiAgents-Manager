@@ -126,6 +126,12 @@ rollout 尾部短暂停在中间 assistant 消息
 - 查询沿既有模式新增（`get_last_message_info`（`opencode_parser.rs:280`）/ `get_message_text`（`:310`，内部 `:312` 已有按消息查 parts 的 SQL）为参照）；`part` 表自带 `session_id` 列（`PRAGMA table_info(part)` 实证），末条 part 可直接按会话查询，仅需 join `message` 取 role。
 - part JSON（`type`/`reason` 顶层字段）与 ZCode `part_entry_kind`（`zcode_parser.rs:661`）的输入同构，但**不抽共享映射**（2026-09-16 计划期裁决，§8 决策 7）：① ZCode 在不动清单（§5），为其重构共享件违反本轮范围约束；② 两者对 `step-finish(reason="length")` 的判定语义相反——ZCode 映射 TurnEnd（回合结束）、OpenCode 按「宁黄不假绿」归 Running（输出截断后会自动续步），共享映射会互相绑架。OpenCode 侧自实现 ~25 行可测纯函数（raw `type` + `reason` 判定），语义独立性优先于去重。
 
+**前置规则：末条消息失败判定（2026-09-17 用户裁决，优先于尾部部件规则）**——末条消息 `role=assistant` 且 `data.error` 非空 → 该请求已彻底失败/被中止，部件层无痕迹（error 落在 **0 part 的空 assistant 占位行**上，尾部 part 停留在 user 文本 → 若无此规则将永久黄灯）。取证：本机库 10 条真实样本（9× `APIError` 401 Invalid API key + 1× `MessageAbortedError`，形态样本 `ses_f5574c39`）：
+
+- `error.name == "MessageAbortedError"`（用户主动 Esc 中止）→ **Idle 绿**——用户自己终止的已知事实，与提示板无关，不提示（2026-09-17 用户裁决：「我主动终止，这跟提不提示我没有关系」）
+- 其余 error（`APIError` 等，含 name 缺失的任意非空 error）→ **Waiting 红**——需要用户介入（修 key / 重试）；绿→红边沿触发语音为**正确报警**（区别于症状①的假报警）
+- 明确**不加时间兜底**（user 尾部超时判异常）——error 字段取证可靠，时间兜底会把模型冷启动慢与失败混淆（2026-09-17 用户裁决）
+
 规则按尾部部件映射：
 
 - 尾部 part = `step-finish(reason="stop")` → 回合结束 → **维持现行为**（60s 窗内 Waiting 红 / 超窗 Idle 绿；用户验证该收尾红→绿转换为正常语义，保留）
@@ -139,7 +145,7 @@ rollout 尾部短暂停在中间 assistant 消息
 
 该设计同时修复：症状①（占位空窗判黄，绿→红与假 approval 语音消失）、症状②（运行全程黄）、症状③（步骤未完结不判 Idle，单步 >60s 不再闪绿）。完成后的红→绿（≤60s 延迟）为既有设计语义，保留。
 
-**残余已知限制**：外部编排器 team-mode 形态（AionUi/omo "Sisyphus"，本机 `ses_fae18a2f` 等老会话实证）只落 `text`/`patch` 部件、无 step 部件 → 回退启发式，编排器续跑的假绿窗口保留（记入 §7）。
+**残余已知限制**：外部编排器 team-mode 形态（AionUi/omo "Sisyphus"，本机 `ses_fae18a2f` 等老会话实证）只落 `text`/`patch` 部件、无 step 部件 → 回退启发式，编排器续跑的假绿窗口保留（记入 §7）。进程被强杀/崩溃且未落 `error` 字段的请求无内容信号可判 → 停留黄灯（「宁黄不假绿」方向，接受）。
 
 **测试**（以本节取证样本为夹具）：
 - 占位空窗夹具（末条 part=user text、最后消息=空 assistant 行）→ Processing 黄（症状①回归锁）
@@ -149,6 +155,8 @@ rollout 尾部短暂停在中间 assistant 消息
 - 单步 60s+ 无新消息（模拟长工具）→ 不落 Idle（症状③回归锁）
 - 无 step 部件的老格式会话（text/patch 尾）→ 现行为逐分支不变（降级零回归）
 - user 消息在尾（无占位行的 130ms 窗）→ Processing（现行为保留）
+- 末条消息 `APIError`（空占位行 + user 文本尾，`ses_f5574c39` 形态）→ Waiting 红（失败请求回归锁；error 判定优先于尾部 Running 短路——user 尾本身判黄）
+- 末条消息 `MessageAbortedError`（同形态）→ Idle 绿（主动中止不提示，优先级同样高于尾部 Running）
 
 ## 5. 明确不动清单
 
