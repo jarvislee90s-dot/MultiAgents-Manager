@@ -561,17 +561,44 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
     }
 }
 
-/// named 地址解析（纯函数）：stderr 中自有子域的 https:// 行——cloudflared run 启动
-/// 横幅打印其 hostname；cloudflare.com 域（docs/trycloudflare）一律排除。
-/// 解析不到留 None——设置页提示「地址以 Cloudflare 面板为准」
+/// named 地址解析（纯函数），两形态（2026-09-17 穿透事故的治根项）：
+/// ① banner 形态：stderr 中自有子域的 https:// 行（cloudflared 直连凭证模式的
+///    启动横幅打印其 hostname）；
+/// ② token 模式（远程托管）形态：`"hostname":"<host>"` 配置行——token 启动
+///    **不打印** https:// 横幅，M4 只认①导致快照 url 恒 None（设置页无地址显示，
+///    且在 M5 豁免语义下演化为穿透，见 mod.rs 豁免名单内核注释）。
+/// cloudflare.com / cfargotunnel.com（Registered tunnel connection 行内嵌的
+/// 隧道域）一律排除。解析不到留 None——闸门侧对「运行中而 url 缺失」fail-closed
+/// （mod.rs `tunnel_hosts_from_status`），设置页提示「地址以 Cloudflare 面板为准」
 pub fn parse_named_url(line: &str) -> Option<String> {
-    let s = line.find("https://")?;
-    let url = line[s..].split_whitespace().next()?.to_string();
-    let host = url.trim_start_matches("https://");
-    if host.contains("cloudflare.com") || !host.contains('.') {
-        return None;
+    if let Some(pos) = line.find("https://") {
+        let url = line[pos..].split_whitespace().next()?;
+        if let Some(h) = named_host_ok(url.trim_start_matches("https://")) {
+            return Some(format!("https://{h}"));
+        }
     }
-    Some(url)
+    // token 模式：配置 JSON 的 ingress hostname（无 scheme；一行可能含多条 ingress，
+    // 取第一条合法者）
+    const KEY: &str = "\"hostname\":\"";
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(KEY) {
+        let start = from + rel + KEY.len();
+        let rest = &line[start..];
+        let host = &rest[..rest.find('"').unwrap_or(rest.len())];
+        if let Some(h) = named_host_ok(host) {
+            return Some(format!("https://{h}"));
+        }
+        from = start;
+    }
+    None
+}
+
+/// named 域名合法性（两形态共用）：带点（排除裸词），排除 cloudflare 自有域
+/// （面板域 docs.cloudflare.com / 隧道域 *.cfargotunnel.com）
+fn named_host_ok(host: &str) -> Option<&str> {
+    let h = host.trim();
+    let bad = h.contains("cloudflare.com") || h.contains("cfargotunnel.com") || !h.contains('.');
+    (!bad).then_some(h)
 }
 
 /// 停止单通道（M5 A5，幂等；**安全关键**）：只 take 对应槽位——另一通道句柄不受扰
@@ -1022,6 +1049,41 @@ mod tests {
         assert_eq!(
             parsed_board_url("see https://docs.cloudflare.com/", true),
             None
+        );
+    }
+
+    /// token（远程托管）模式解析（2026-09-17 穿透事故治根项）：无 https:// 横幅，
+    /// 配置 JSON 内嵌 ingress hostname——旧实现只认横幅 → 快照 url 恒 None
+    #[test]
+    fn parse_named_url_token_mode_hostname_line() {
+        let line = r#"2026-09-17T00:00:00Z INF Updated to new configuration {"config":{"ingress":[{"hostname":"mam-win.bondtoolbox.asia","service":"http://localhost:9420"},{"service":"http_status:404"}]}}"#;
+        assert_eq!(
+            parse_named_url(line),
+            Some("https://mam-win.bondtoolbox.asia".to_string())
+        );
+        assert_eq!(
+            parsed_board_url(line, false),
+            Some("https://mam-win.bondtoolbox.asia/m".to_string())
+        );
+        // Registered tunnel connection 行内嵌的隧道域（cfargotunnel.com）不得误报
+        assert_eq!(
+            parse_named_url(
+                r#"INF Registered tunnel connection connIndex=0 hostname=abc123.cfargotunnel.com"#
+            ),
+            None
+        );
+        // 面板文档域不误报
+        assert_eq!(
+            parse_named_url(
+                r#"INF config {"ingress":[{"hostname":"docs.cloudflare.com","service":"http_status:404"}]}"#
+            ),
+            None
+        );
+        // 多条 ingress：跳过不合法者，取第一条合法域名
+        let multi = r#"INF Updated to new configuration {"config":{"ingress":[{"hostname":"a.cfargotunnel.com"},{"hostname":"mam-two.example.org","service":"http://localhost:9420"}]}}"#;
+        assert_eq!(
+            parse_named_url(multi),
+            Some("https://mam-two.example.org".to_string())
         );
     }
 

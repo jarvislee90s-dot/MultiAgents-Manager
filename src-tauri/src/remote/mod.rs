@@ -257,16 +257,31 @@ fn channel_hosts(c: &tunnel::ChannelStatus) -> Vec<String> {
 }
 
 /// gate 回环豁免的隧道域名并集（生产源；测试注入缝在 RemoteState）。
-/// **Some(名单) = 正常判定；None = 任一通道快照错误终态的 fail-closed 哨兵（评审
-/// Important 1，M5 A5 双通道推广）**：豁免的 Host 条件依赖域名名单，任一通道处于
-/// 错误终态时该通道域名不可信——整体返回 None 让 gate **完全跳过本机豁免**（回环 +
-/// 任意 Host 都不免费），绝不可当空名单处理（那会让 Host 条件恒满足 → 回环流量全
-/// 豁免，fail-open）。代价仅隧道错误态下本机也需配对一次。
-/// 依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared（穿透面本应消失），
-/// 但豁免判定不押注该不变量——快照错误一律收紧
+/// 薄壳：取快照转纯函数内核（tunnel_hosts_from_status）——fail-closed 语义在
+/// 内核上测试（snapshot 的 running 现算自真实句柄槽，set_snapshot 无法直接
+/// 伪造 running=true）
 fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
-    let s = tunnel::snapshot();
+    tunnel_hosts_from_status(&tunnel::snapshot())
+}
+
+/// 豁免名单内核（纯函数，2026-09-17 穿透修复）：
+/// - 任一通道快照**错误终态** → None（既有哨兵，A3 评审 Important 1：错误通道域名
+///   不可信，整体 None 让 gate 完全跳过本机豁免，绝不可当空名单处理——那会让 Host
+///   条件恒满足 → 回环流量全豁免 fail-open。代价仅错误态下本机也需配对一次。
+///   依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared，但豁免判定不押注该不变量）；
+/// - 任一通道**在运行而域名缺失** → None（本次新增的 fail-closed，同样关键）：
+///   token 模式命名隧道的域名可能解析不到（cloudflared 不打印 https:// 横幅时），
+///   空名单会让「Host 不在名单」恒真——cloudflared 从回环转发的**全部**公网流量
+///   免密直进（实测穿透：第二台电脑无 cookie 直登）。原则：**豁免永不依赖
+///   「名单恰好非空」**，域名未知时收口豁免（本机访问也需配对一次）。
+///   变异锚点：删掉 running-without-url 分支 → mod 测试
+///   `tunnel_hosts_fail_closed_when_running_without_url` 必红
+fn tunnel_hosts_from_status(s: &tunnel::TunnelStatus) -> Option<Vec<String>> {
     if s.quick.error.is_some() || s.named.error.is_some() {
+        return None;
+    }
+    let missing_url_while_running = |c: &tunnel::ChannelStatus| c.running && c.url.is_none();
+    if missing_url_while_running(&s.quick) || missing_url_while_running(&s.named) {
         return None;
     }
     Some(
@@ -1818,6 +1833,71 @@ mod tests {
         );
         // 还原默认快照（用后即还，不污染其它测试）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
+    }
+
+    /// 穿透修复专测（2026-09-17 实测事故）：任一通道「运行中而域名缺失」→ 豁免名单
+    /// 整体 None（fail-closed）。空名单会让「Host 不在名单」恒真——cloudflared 从
+    /// 回环转发的全部公网流量免密直进（第二台电脑无 cookie 直登的根因）。
+    /// 变异锚点：删掉 tunnel_hosts_from_status 的 running-without-url 分支本测试必红
+    #[test]
+    fn tunnel_hosts_fail_closed_when_running_without_url() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        // named 在跑（token 模式域名解析不到）→ 名单不可信 → None
+        let s = TunnelStatus {
+            quick: ChannelStatus {
+                running: false,
+                url: None,
+                error: None,
+            },
+            named: ChannelStatus {
+                running: true,
+                url: None,
+                error: None,
+            },
+        };
+        assert_eq!(
+            tunnel_hosts_from_status(&s),
+            None,
+            "运行中而域名缺失 → 豁免整体收口（不可当空名单放行）"
+        );
+        // 反例边界：通道关着且无 url（正常关闭态）→ 名单为空集而非 None——
+        // 此时不存在隧道流量，豁免语义照旧（回环 + 非隧道 Host = 本机免密）
+        let off = TunnelStatus {
+            quick: ChannelStatus {
+                running: false,
+                url: None,
+                error: None,
+            },
+            named: ChannelStatus {
+                running: false,
+                url: None,
+                error: None,
+            },
+        };
+        assert_eq!(tunnel_hosts_from_status(&off), Some(Vec::new()));
+    }
+
+    /// 豁免名单正常态：运行且有 url → 名单含其域名（纯函数内核直测——
+    /// snapshot 的 running 现算自真实句柄槽，set_snapshot 无法伪造 running=true）
+    #[test]
+    fn tunnel_hosts_normal_state_lists_running_channel_domain() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let s = TunnelStatus {
+            quick: ChannelStatus {
+                running: true,
+                url: Some("https://demo.trycloudflare.com/m".into()),
+                error: None,
+            },
+            named: ChannelStatus {
+                running: false,
+                url: None,
+                error: None,
+            },
+        };
+        assert_eq!(
+            tunnel_hosts_from_status(&s),
+            Some(vec!["demo.trycloudflare.com".to_string()])
+        );
     }
 
     /// first_available_tunnel_url（legacy 单地址聚合口径）：quick 优先；错误通道不宣称；
