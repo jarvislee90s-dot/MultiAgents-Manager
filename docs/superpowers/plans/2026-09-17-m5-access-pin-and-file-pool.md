@@ -175,3 +175,27 @@ pnpm test && pnpm build:mobile && pnpm build && pnpm format:check && pnpm lint
 3. 密码输错 5 次 → 锁 10 分钟；重置密码 → 所有设备下线。
 4. 临时隧道开关 → 地址变化且卡片有警告；命名隧道按教程操作可跑通（需 CF 域名）。
 5. 文件池三个来源筛选正确；搜索点按钮才执行；HTML 点「渲染」出页面且脚本被沙箱隔离。
+
+---
+
+## 九、B1 附件调研结论（2026-09-17 实测，实施期追记）
+
+> 调研方法：只读实测本机真实会话数据（kimi wire.jsonl 多会话 + zcode cli/db/db.sqlite），抽取**结构形态**；黄金夹具一律合成数据（`tests/fixtures/attachments/` + `remote/attachment_fixtures.rs`），零真实路径入库。
+
+### 9.1 kimi（wire.jsonl 事件流）
+
+- **用户输入为纯文本**：`turn.steer.input[*].text` 与 `context.append_message.message.content[*].text`（role=user）——未发现独立的"附件对象"结构。
+- **原始路径以内联标记出现在文本里**：`<image path="E:/demo/fig.png">…</image>`、`<file path="…">`（HTML 风格属性，路径含正斜杠/反斜杠双形态）。
+- **贴图走内容寻址 blob**：消息内容块 `{"type":"image_url","imageUrl":{"url":"blobref:image/png;<sha256>"}}`，实体在会话目录 `agents/main/blobs/<sha256>`（无扩展名、无原始名）——**不可按原始路径预览**，降级口径 = 不入池（文件名无从谈起）或仅展示 blob 引用（实施取不入池，避免噪音）。
+- **抽取口径（B2）**：从 user 消息文本中提取 `<image path="X">` / `<file path="X">` / `<image src="X">` 属性值 → origin=user。
+
+### 9.2 zcode（cli/db/db.sqlite，message/part 表——content.rs 同源）
+
+- **用户附件在 part 表**：`{"type":"file","mime":"image/png","filename":"cover.png","url":"zcode-artifact://<session_id>/tool-result-<uuid>","source":{"type":"file","path":"<原始绝对路径>"}}`。
+- **本地路径型**：有 `source.path`（如微信临时目录里的 jpg）→ 原始文件落盘可直接预览 → origin=user。
+- **artifact 型**（粘贴截图）：无 `source`，`url` 为 `zcode-artifact://` URI → 磁盘实体在 `~/.zcode/cli/artifacts/<session_id>/*<tool-result-<uuid>>*`（文件名尾段内嵌 uuid，glob 尾段匹配可解析）→ 解析命中则按该路径入池预览，未命中降级仅文件名。
+- **`input_history.attachments` 辅助表**（`[{"type":"image","path":"…"}]` / `{"path":"image.png","content":"zcode-artifact://…"}`）与 part 表形态互证；B2 取 part 表为主（会话消息流同源，input_history 跨会话共享、以 session_id 关联亦可作补充源——实施只取 part 表，保持数据同源铁律）。
+
+### 9.3 其余六工具
+
+claude/codex/opencode/openclaw/workbuddy/dsh 未在本批调研范围——追踪 issue 按 B5 落档（kimi/zcode 勾选完成，其余待调研）。

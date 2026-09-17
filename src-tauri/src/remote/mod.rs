@@ -2,6 +2,8 @@
 // 范围与红线见 docs/superpowers/plans/2026-09-17-m5-access-pin-and-file-pool.md
 
 pub mod api;
+#[cfg(test)]
+pub mod attachment_fixtures;
 pub mod content;
 pub mod events;
 pub mod files;
