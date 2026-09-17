@@ -28,7 +28,7 @@
 | 通道抽象 | 四模式可插拔：直连域名 / named tunnel / quick tunnel（零配置默认）/ Tailscale | 一期 |
 | 移动端 | PWA（React 第二入口，rust-embed 内嵌伺服）；API 按"原生 APP 可复用"形态设计（token + REST + SSE） | 一期建骨架，三期演进 |
 | 读通道 | 八工具会话状态判定 + 会话内容全量读（`read_session_messages`） | 一期（现有解析器扩展） |
-| 写通道 | 终端注入引擎（tmux/iTerm2/Terminal）+ 无头通道（zcode/claude/codex/kimi CLI）+ 路由表 | 二期 |
+| 写通道 | 终端注入引擎（tmux/iTerm2/Terminal + Windows 终端通道【D18】）+ 无头通道（zcode/claude/codex/kimi CLI）+ 路由表 | 二期 |
 | 协议客户端 | ZCode Protocol / codex app-server / ACP 客户端矩阵（版本门控） | 三期 |
 | 流转设施 | HandoffStore / Export / Import / 工作区在册感知 | 三期（基座在一二期埋） |
 
@@ -74,7 +74,7 @@
 
 | # | 功能 | 说明 |
 |---|---|---|
-| F2.1 | 终端注入引擎 | tmux `send-keys -l` / iTerm2 `write text` / Terminal.app `do script`；复用现有窗口/pane/tty 定位链路 |
+| F2.1 | 终端注入引擎 | tmux `send-keys -l` / iTerm2 `write text` / Terminal.app `do script`；Windows 终端通道同期纳入（D18，写入路径由 M6 探测定案）；复用现有窗口/pane/tty 定位链路 |
 | F2.2 | 状态门控队列 | 黄=排队、转红自动 flush；消息带 `[mobile <设备名>]` 来源标记；单会话串行 |
 | F2.3 | ZCode 无头通道 | `zcode --resume sess_xxx --prompt`（**限定在册工作区** → 桌面 UI/官方远程网页可见，判定 F）；app-server 为升级路径 |
 | F2.4 | Claude/Codex/Kimi 无头通道 | `claude -p --resume --output-format stream-json` / `codex exec`·app-server / `kimi -p -S <id>`；AionCore 进程管理骨架（Spawner trait、进程注册表、空闲挂起、版本门控） |
@@ -165,7 +165,7 @@
 | 配对/门禁 | 自研 Rust 移植 dsh-remote-web-ui 状态机（单活跃一次性 token + 设备表） |
 | 隧道 | **cloudflared 子进程**（quick/named 二合一）+ 直连模式 + Tailscale 文档指引 |
 | 推送 | Bark / ntfy HTTP 转发（一期移出，随 D17 二期交付） |
-| 终端注入 | tmux CLI + AppleScript（iTerm2/Terminal） |
+| 终端注入 | tmux CLI + AppleScript（iTerm2/Terminal）+ Windows 终端通道（D18） |
 | 无头通道 | 各官方 CLI（zcode/claude/codex/kimi）子进程 + JSONL/stdout 解析 |
 | 协议客户端（三期） | ZCode Protocol（行协议自实现）、codex app-server（schema 生成）、ACP（官方 Rust SDK） |
 | 移动 UI | React 19 复用（组件/i18n/主题共享）+ PWA manifest |
@@ -202,6 +202,7 @@
 | D15 | **移动端交付形态**：网页版 + 推送网关为一期主体。**2026-09-15 用户修订：APK 壳（Capacitor 壳 + 内置长连接推送 + 通知点击直达）移至二期收尾**——触发条件：二期「手机端网页发送消息」能力落地验收后再做套壳；原则不变：链路做稳，套壳收尾（顺带修正：推送通道为内置长连接，2026-09-14 v4 已定案，原「HMS Push/ntfy 兜底」表述作废） | 2026-09-12（09-15 修订） |
 | D16 | **远期路线 · 桌面大操作台套壳回 Tauri**（三期后评估）：当三期「会话在智能体之间流转」（F3.7）落地且功能逐步完善后，把电脑端的整体控制交互面板套壳回 Tauri 体系——默认轻量化入口仍是消息看板（现有主窗），特殊通道（快捷键/托盘/设置入口）打开**大看板操作台**（完整操控面板，复用远程 Web 面板套壳集成）。在此之前桌面主窗维持现状 | 2026-09-15 |
 | D17 | **系统级推送移期**：F1.6 推送网关（Bark/ntfy，页面关时的系统通知出口）移至二期，与 APK 壳（D15）同期交付——APK 移期后系统级推送的最大价值（页面关、系统通知）随 APK 走，页面开着的实时提醒已由 F1.5 SSE（M3 交付）覆盖；一期验收「2s 内收到提醒」以页面开时的 SSE 提醒为口径。移动端构建分包（manualChunks）同批计入二期套壳期 | 2026-09-16 |
+| D18 | **Windows 终端注入纳入二期**：终端注入引擎在 macOS 三通道之外新增 Windows 终端通道——写入路径（WriteConsoleInput / ConPTY 附加写入 / Windows Terminal 通道）由二期首个里程碑 M6 探测定案（前置实证：PowerShell AttachConsole(pid) 附加 claude ConPTY 成功，见跳转 marker 三轮实机验收 issue #43）；二期验收含 Windows 实机同口径复验 | 2026-09-18 |
 
 ### 3.(d) 可比选型对照（重点补充）
 
@@ -320,7 +321,7 @@
 ### 5.(b) 各期验收标准（简）
 
 - **一期**：外网手机扫码→看到八工具会话状态与内容；杀掉一个 agent 会话状态跃迁→手机 2s 内收到提醒；配对码刷新旧码失效；"停止远程"后所有设备 403；quick tunnel 断网自动恢复。（2026-09-15：APK 验收项随 D15 修订移至二期；2026-09-16：页面关系统推送随 D17 移至二期，"2s 提醒"以页面开时 SSE 为验收口径）
-- **二期**：手机对 tmux/iTerm2/Terminal 里的会话发消息→终端出现 `[mobile]` 标记输入；黄状态消息排队、转红 flush；对 ZCode 在册会话无头发消息→桌面刷新后可见（判定 F 复现）；导出 HANDOFF.md 人可读、agent 可续。**二期收尾（D15 修订）**：APK 在华为机收到 MAM 自有通知并点击直达会话。
+- **二期**：手机对 tmux/iTerm2/Terminal 里的会话发消息→终端出现 `[mobile]` 标记输入；黄状态消息排队、转红 flush；对 ZCode 在册会话无头发消息→桌面刷新后可见（判定 F 复现）；导出 HANDOFF.md 人可读、agent 可续；Windows 终端注入同口径实机复验（D18）。**二期收尾（D15 修订）**：APK 在华为机收到 MAM 自有通知并点击直达会话。
 - **三期**：移动端切换 Claude Code 模型生效；移动端与 ZCode 会话流式对话；HANDOFF 从 ZCode 会话导出→导入到同 cwd 的 Claude 会话→首轮确认回执；协议探针失败时降级路径可用。
 
 ### 5.(c) 横切原则（宪法条款）
