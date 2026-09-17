@@ -615,8 +615,12 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Ar
 /// （mod.rs `tunnel_hosts_from_status`），设置页提示「地址以 Cloudflare 面板为准」
 pub fn parse_named_url(line: &str) -> Option<String> {
     if let Some(pos) = line.find("https://") {
+        // 只取 origin（scheme 后到第一个 `/` 为止）——**剥掉一切路径**：cloudflared
+        // 的错误日志行会携带带路径的完整 URL（实测：…/m/api/v1/events 被当成地址，
+        // 经 board_url 归一后变成 …/events/m 的脏值）。看板地址 = origin + /m
         let url = line[pos..].split_whitespace().next()?;
-        if let Some(h) = named_host_ok(url.trim_start_matches("https://")) {
+        let host = url.trim_start_matches("https://").split('/').next()?;
+        if let Some(h) = named_host_ok(host) {
             return Some(format!("https://{h}"));
         }
     }

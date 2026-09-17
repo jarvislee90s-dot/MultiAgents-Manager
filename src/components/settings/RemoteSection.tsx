@@ -43,8 +43,6 @@ const HOST_NAME_KEY = "remote.host_name";
 // 隧道 Token：与 Rust 端 remote::KEY_TUNNEL_TOKEN 对齐；A6 起保存走通用 set_setting
 //（remote_set_channel 已下线），开关由命名隧道卡片开关（remote_toggle_channel）驱动
 const TUNNEL_TOKEN_KEY = "remote.tunnel_token";
-// M5 P2-c：手填命名固定地址（后端 KV remote.named_addr_manual——进豁免名单与显示）
-const NAMED_MANUAL_KEY = "remote.named_addr_manual";
 // 电源保活：与 Rust 端 remote::power::KEY_KEEPALIVE 对齐；默认开，
 // 后端 should_acquire（None/乱串 → true）是唯一口径，前端仅同步展示
 const KEEPALIVE_KEY = "remote.keepalive";
@@ -157,8 +155,6 @@ export function RemoteSection() {
   const pinInitRef = useRef(false);
   // 隧道 Token：进面板回填已存值
   const [token, setToken] = useState("");
-  // M5 P2-c：手填命名固定地址草稿
-  const [namedManualInput, setNamedManualInput] = useState("");
   // 教程 popover（线稿 .help：点击展开/收起，可保持展开边看边操作）
   const [helpOpen, setHelpOpen] = useState(false);
   // 唯一展开的通道详情卡（线稿 pick()：同时只显示一个，点其它卡切换）
@@ -225,11 +221,6 @@ export function RemoteSection() {
   // Token 回填：进面板读已存值，后续刷新不回读
   useEffect(() => {
     void (async () => setToken((await getSetting(TUNNEL_TOKEN_KEY)) ?? ""))();
-  }, []);
-
-  // 手填固定地址回填（M5 P2-c）：进面板读已存值
-  useEffect(() => {
-    void (async () => setNamedManualInput((await getSetting(NAMED_MANUAL_KEY)) ?? ""))();
   }, []);
 
   // PIN 回填：首个非空 status.pin 填一次（ref 闸），轮询不覆盖编辑中值
@@ -364,18 +355,6 @@ export function RemoteSection() {
     }
   };
 
-  // 手填固定地址保存（M5 P2-c）：走通用 set_setting；保存后刷新状态回显。
-  // 后端把手填地址 host 并入豁免/via 名单——解析失败时通道判定不再降级
-  const saveNamedAddr = async () => {
-    try {
-      await setSetting(NAMED_MANUAL_KEY, namedManualInput.trim());
-      toast.success(t("settings.remote.namedAddrSaved"));
-      await refreshStatus();
-    } catch (e) {
-      toast.error(formatInvokeError(e, t));
-    }
-  };
-
   // 随机密码（线稿 randPin：1000-9999 四位数字）
   const randomPin = () => {
     setPinInput(String(Math.floor(1000 + Math.random() * 9000)));
@@ -436,10 +415,9 @@ export function RemoteSection() {
   const namedAddr = channels?.named?.address ?? null;
   const namedErr = channels?.named?.error ?? null;
   // M5 P2-c：手填地址（已保存值）与自动记忆的上次地址（解析失败时的显示兜底）
-  const namedManualAddr = channels?.named?.manualAddr ?? null;
   const namedLastAddr = channels?.named?.lastAddr ?? null;
   // 命名卡片展示优先级：解析地址 > 手填 > 上次地址（三者皆无 = 从未配置）
-  const namedDisplayAddr = namedAddr ?? namedManualAddr ?? namedLastAddr;
+  const namedDisplayAddr = namedAddr ?? namedLastAddr;
 
   // 四卡配置（线稿顺序：本机 / 局域网 / 临时隧道 / 命名隧道；desc 逐字取线稿）
   const cardDefs: Array<{ key: ChannelKind; name: string; desc: string }> = [
@@ -714,25 +692,6 @@ export function RemoteSection() {
                   {t("settings.remote.save")}
                 </Button>
               </div>
-            </div>
-            {/* 手填固定地址（M5 P2-c）：解析失败时的兜底——地址进豁免名单与显示 */}
-            <div className="mt-3 flex items-center gap-2">
-              <Input
-                id="remote-named-addr"
-                value={namedManualInput}
-                placeholder={t("settings.remote.namedAddrPlaceholder")}
-                aria-label={t("settings.remote.namedAddrTitle")}
-                className="flex-1 text-xs"
-                onChange={(e) => setNamedManualInput(e.target.value)}
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void saveNamedAddr()}
-                disabled={namedManualInput.trim() === ""}
-              >
-                {t("settings.remote.save")}
-              </Button>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Badge tone="blue">{t("settings.remote.badgePublic")}</Badge>

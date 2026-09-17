@@ -30,8 +30,6 @@ export type RemoteChannels = {
     running: boolean;
     address: string | null;
     error: string | null;
-    /** M5 P2-c：用户手填的固定地址（KV remote.named_addr_manual） */
-    manualAddr?: string | null;
     /** M5 P2-c：最近一次解析成功的地址（KV remote.named_addr_last） */
     lastAddr?: string | null;
   };
