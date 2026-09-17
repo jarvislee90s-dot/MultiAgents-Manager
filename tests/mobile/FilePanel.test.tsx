@@ -359,3 +359,15 @@ describe("FilePanel 文件名搜索（M5 决策 10：点「搜索」或回车才
     expect(screen.getByText("无匹配文件")).toBeTruthy();
   });
 });
+
+describe("FilePanel 可预览说明（M5 P2-a）", () => {
+  it("面板底部展示类型与上限说明（文本 500KB / 图片 5MB）", () => {
+    renderPanel([]);
+    expect(screen.getByTestId("panel-preview-help").textContent).toContain(
+      "500KB"
+    );
+    expect(screen.getByTestId("panel-preview-help").textContent).toContain(
+      "5MB"
+    );
+  });
+});

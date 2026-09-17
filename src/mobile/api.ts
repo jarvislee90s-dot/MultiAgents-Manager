@@ -182,7 +182,17 @@ export async function fetchFile(sessionId: string, filePath: string): Promise<Fi
   } catch (e) {
     throw new ApiError(null, `file 网络异常: ${String(e)}`);
   }
-  if (!r.ok) throw new ApiError(r.status, `file ${r.status}`);
+  if (!r.ok) {
+    // M5 P2-a：403 响应体带结构化原因码（sensitive/too_large/not_found/not_file/io），
+    // FilePreview 据此分診排障文案
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理页等）：data 保持 null，按状态码兜底文案 */
+    }
+    throw new ApiError(r.status, `file ${r.status}`, data);
+  }
   const mime = r.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
   if (mime.startsWith("image/")) {
     const blob = await r.blob();

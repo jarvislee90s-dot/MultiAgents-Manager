@@ -1697,7 +1697,8 @@ mod tests {
         );
         assert_eq!(header(&r, "x-content-type-options"), "nosniff");
 
-        // (6) 越界 → 403（绝对路径指向 cwd 外）
+        // (6) 不存在（cwd 外任意路径）→ 403 + 原因码 not_found（M5 P2-a：原因
+        // 写在报错处，仅已过闸设备可见）
         let r = app
             .clone()
             .oneshot(req(
@@ -1708,10 +1709,12 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 403, "越界必须 403");
-        assert!(body_string(r).await.is_empty(), "403 不携带错误细节");
+        assert_eq!(r.status(), 403, "不存在必须 403");
+        let b = body_string(r).await;
+        assert!(b.contains("not_found"), "403 体必须带原因码 not_found: {b}");
 
-        // (7) 超限 → 403，与越界完全不可区分（同码同空体——探测面最小化）
+        // (7) 超限 → 403 + 原因码 too_large（与 (6) 可区分——M5 P2-a 裁决：
+        // 原因写在报错处，替代旧「空体不可区分」口径）
         let r = app
             .clone()
             .oneshot(req(
@@ -1723,10 +1726,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 403, "超限必须 403");
-        assert!(
-            body_string(r).await.is_empty(),
-            "超限 403 与越界 403 不可区分"
-        );
+        let b = body_string(r).await;
+        assert!(b.contains("too_large"), "403 体必须带原因码 too_large: {b}");
 
         // (8) /session-files：缺参 400 → 命中 200 {files:[...]} + no-store
         let r = app

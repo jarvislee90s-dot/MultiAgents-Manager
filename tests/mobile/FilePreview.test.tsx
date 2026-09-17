@@ -209,3 +209,48 @@ describe("FilePreview 源码/渲染 seg（M5 B4）", () => {
     expect(screen.queryByTestId("preview-seg")).toBeNull();
   });
 });
+
+describe("FilePreview 403 原因分診（M5 P2-a）", () => {
+  function case403(reason: string) {
+    installFileFetch(
+      () =>
+        new Response(JSON.stringify({ error: reason }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        })
+    );
+    renderPreview("/tmp/proj/x.txt");
+  }
+
+  it("sensitive → 安全策略文案", async () => {
+    case403("sensitive");
+    expect((await screen.findByTestId("preview-error")).textContent).toContain(
+      "安全策略保护"
+    );
+  });
+
+  it("too_large → 上限文案（文本 500KB / 图片 5MB）", async () => {
+    case403("too_large");
+    expect((await screen.findByTestId("preview-error")).textContent).toContain(
+      "500KB"
+    );
+    expect((await screen.findByTestId("preview-error")).textContent).toContain(
+      "5MB"
+    );
+  });
+
+  it("not_found → 不存在文案", async () => {
+    case403("not_found");
+    expect((await screen.findByTestId("preview-error")).textContent).toContain(
+      "不存在或已被移动"
+    );
+  });
+
+  it("空错误体（旧后端/代理）→ 兜底文案「无法预览该文件」", async () => {
+    installFileFetch(() => new Response("", { status: 403 }));
+    renderPreview();
+    expect((await screen.findByTestId("preview-error")).textContent).toContain(
+      "无法预览该文件"
+    );
+  });
+});

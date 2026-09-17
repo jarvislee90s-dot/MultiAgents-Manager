@@ -352,6 +352,14 @@ export default function FilePanel({
             范围内还有更早文件，可扩大追溯范围
           </p>
         )}
+        {/* 可预览说明（M5 P2-a：类型与上限前置告知，配合 403 原因细分排障） */}
+        <p
+          data-testid="panel-preview-help"
+          className="mt-3 border-t border-slate-100 pt-2 text-[10px] leading-relaxed text-slate-400 dark:border-slate-800 dark:text-slate-500"
+        >
+          可预览：文本 / 代码 ≤500KB（md/html 支持渲染切换），图片 ≤5MB
+          （png/jpg/jpeg/gif/webp/svg/bmp）；敏感目录不可预览，其余原因见报错提示。
+        </p>
       </div>
     </section>
   );

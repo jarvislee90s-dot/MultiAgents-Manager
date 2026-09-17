@@ -75,82 +75,98 @@ const SENSITIVE_DIRS: &[&str] = &[
     ".git-credentials",
     "AppData", // Windows 应用数据（含浏览器 profile / 凭据库）
     "Library", // macOS 应用支持与凭据（~/Library/Keychains）
+               // 黑名单仅作用于**用户主目录范围内**（凭据高价值区）；主目录之外不设
+               // 路径级防线（M5 P2-a 全盘放开——系统目录本就低敏，且全路径黑名单会
+               // 误伤 AppData 下的临时文件）
 ];
 
-/// 安全读取文件（限会话 cwd 或用户主目录、只读、双阈值大小上限）。
-/// 返回 (字节, mime)。任何拒绝一律 Err（调用方 file 端点统一 403，不外泄区别）。
+/// 预览拒绝原因（M5 P2-a：403 细分——原因仅暴露给已过闸设备，便于用户自助排障；
+/// 原设计「一律空体 403 防探测」随边界放开退役：PIN + cookie 已是门槛，原因文案
+/// 对已认证用户是排障信息而非预言机）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRejectReason {
+    /// 命中敏感目录黑名单（全盘语义下任意路径段命中即拒）
+    Sensitive,
+    /// 超过预览大小上限
+    TooLarge,
+    /// 路径不存在 / 不可解析
+    NotFound,
+    /// 非常规文件（目录等）
+    NotFile,
+    /// 其它读取失败
+    Io,
+}
+
+impl FileRejectReason {
+    /// 日志用中文明细（reason 字段本身走 snake_case 序列化）
+    pub fn message(&self) -> String {
+        match self {
+            FileRejectReason::Sensitive => "路径命中敏感目录黑名单，不可预览".into(),
+            FileRejectReason::TooLarge => format!(
+                "文件超过预览上限（文本 {}KB / 图片 {}MB）",
+                MAX_TEXT_BYTES / 1024,
+                MAX_IMAGE_BYTES / 1024 / 1024
+            ),
+            FileRejectReason::NotFound => "文件不存在或路径不可解析".into(),
+            FileRejectReason::NotFile => "目标不是常规文件".into(),
+            FileRejectReason::Io => "文件读取失败".into(),
+        }
+    }
+}
+
+/// 安全读取文件（M5 P2-a 全盘语义：任意路径可读，仅两道约束——① 主目录内的
+/// 敏感目录黑名单（凭据防护，威胁主体是隧道/局域网上的配对设备读密钥）；②
+/// 只读 + 双阈值大小上限。主目录之外不再设路径级防线：系统目录等本就任何
+/// 用户可读，访问门槛 = PIN + 设备 cookie）。返回 (字节, mime)；拒绝一律
+/// Err(FileRejectReason)（file 端点统一 403 并把 reason 序列化进响应体）。
 /// `path` 支持绝对路径与相对路径（相对者按会话 cwd 解析——部分工具 toolArgs
 /// 记录项目内相对路径）。
 ///
-/// 边界（2026-09-16 用户裁决放宽）：会话 cwd ∪ 用户主目录（`home` 为 None 时
-/// 只允许 cwd，fail-closed）——kimi 等工具会在对话里引用 `~/Downloads` 的图片，
-/// 仅限 cwd 会让这类预览永久打不开。主目录内的敏感目录（SENSITIVE_DIRS）仍拒绝。
+/// 边界沿革：2026-09-16 放宽为「cwd ∪ 主目录」；2026-09-18 用户裁决**全盘放开**
+/// ——经常需要查看/参考项目外文件（微信目录附件等）。取舍记录：黑名单仅作用
+/// 于主目录内（凭据高价值区）；主目录外连 Windows 系统目录都不设防（低价值 +
+/// 避免误伤 AppData 下的临时文件/测试目录——全路径黑名单会让 Windows 临时目录
+/// 全部不可读，实测教训）。
 pub fn read_file_safe(
     session_cwd: &str,
     path: &str,
     home: Option<&str>,
-) -> Result<(Vec<u8>, String), String> {
-    if session_cwd.trim().is_empty() {
-        return Err("会话 cwd 为空".into());
-    }
+) -> Result<(Vec<u8>, String), FileRejectReason> {
     if path.trim().is_empty() {
-        return Err("文件路径为空".into());
+        return Err(FileRejectReason::NotFound);
     }
-    let cwd = Path::new(session_cwd)
-        .canonicalize()
-        .map_err(|e| format!("cwd 不可解析: {e}"))?;
+    // 相对路径仍按会话 cwd 解析（cwd 本身不构成边界——全盘语义下仅作解析基准）
     let mut full = PathBuf::from(path.trim());
     if full.is_relative() {
+        let cwd = Path::new(session_cwd)
+            .canonicalize()
+            .map_err(|_| FileRejectReason::NotFound)?;
         full = cwd.join(full);
     }
     let canon = full
         .canonicalize()
-        .map_err(|e| format!("文件不可解析: {e}"))?;
-    // 边界判定：cwd 内 或 主目录内（home 未知则只认 cwd）
-    let allowed = path_within(&canon, &cwd);
-    let home_canon = home
-        .map(|h| Path::new(h).canonicalize())
-        .transpose()
-        .map_err(|e| format!("主目录不可解析: {e}"))?;
-    let in_home = home_canon
-        .as_deref()
-        .map(|h| path_within(&canon, h))
-        .unwrap_or(false);
-    if !allowed && !in_home {
-        return Err("路径越界：文件不在项目目录或用户主目录内".into());
-    }
-    // 敏感清单检查（评审 I1 修复）：豁免仅豁免 **cwd 之内**的文件；唯一的
-    // 例外是 **cwd == 用户主目录**——把整个 ~ 当项目目录时，cwd 豁免会把
-    // ~/.ssh 等全部架空，此时所有路径（含 cwd 内）一律过清单。
-    // 已知边界（有意取舍）：cwd 自身位于某敏感子目录内（如 ~/Library/proj、
-    // ~/.config/app）时，该子树内的文件豁免——范围有界（仅该会话项目目录），
-    // 且避免 Windows AppData 下临时项目 / macOS ~/Library 开发目录被整体误拒
-    let cwd_is_home = home_canon
-        .as_deref()
-        .map(|h| {
-            let (c, hm) = (
-                cwd.to_string_lossy().to_string(),
-                h.to_string_lossy().to_string(),
-            );
-            path_within_semantics(&c, &hm, cfg!(windows))
-                && path_within_semantics(&hm, &c, cfg!(windows))
-        })
-        .unwrap_or(false);
-    if in_home && (cwd_is_home || !allowed) {
-        let (child, anc) = (
-            canon.to_string_lossy(),
-            home_canon
-                .as_deref()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        );
-        if is_sensitive_path(&child, &anc, cfg!(windows)) {
-            return Err("路径越界：敏感目录不可预览".into());
+        .map_err(|_| FileRejectReason::NotFound)?;
+    // 敏感黑名单（仅主目录范围内）：任意相对段命中 SENSITIVE_DIRS 即拒——
+    // 凭据防护的主体是 ~/.ssh、AppData 浏览器 profile、~/Library/Keychains 等。
+    // 主目录之外不再设路径级防线（低价值 + 误伤面大），访问门槛收敛到认证层
+    if let Some(home_s) = home {
+        let home_canon = Path::new(home_s)
+            .canonicalize()
+            .map_err(|_| FileRejectReason::NotFound)?;
+        if path_within(&canon, &home_canon)
+            && is_sensitive_path(
+                &canon.to_string_lossy(),
+                &home_canon.to_string_lossy(),
+                cfg!(windows),
+            )
+        {
+            return Err(FileRejectReason::Sensitive);
         }
     }
-    let meta = canon.metadata().map_err(|e| format!("元数据不可读: {e}"))?;
+    let meta = canon.metadata().map_err(|_| FileRejectReason::NotFound)?;
     if !meta.is_file() {
-        return Err("不是常规文件".into());
+        return Err(FileRejectReason::NotFile);
     }
     let ext = canon.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mime = mime_from_ext(ext);
@@ -161,9 +177,9 @@ pub fn read_file_safe(
         MAX_TEXT_BYTES
     };
     if meta.len() > max {
-        return Err(format!("文件过大: {} bytes（上限 {max}）", meta.len()));
+        return Err(FileRejectReason::TooLarge);
     }
-    let bytes = std::fs::read(&canon).map_err(|e| format!("读取失败: {e}"))?;
+    let bytes = std::fs::read(&canon).map_err(|_| FileRejectReason::Io)?;
     Ok((bytes, mime))
 }
 
@@ -783,32 +799,24 @@ mod tests {
     }
 
     #[test]
-    fn read_file_safe_rejects_escape_and_missing_and_dir() {
-        // 布局：outer/{proj(cwd), secret.txt}——越界目标须真实存在于 cwd 外；
-        // home 注入为 proj 自身 → 放宽后的主目录边界不覆盖 outer（越界语义按
-        // 「cwd 与 home 双边界」测）
+    fn read_file_safe_rejects_missing_and_dir() {
+        // M5 P2-a 全盘语义：cwd 外真实文件**放行**（见 allows_outside_project 测试）；
+        // 本测试聚焦「不存在 / 目录 / 空参」三类结构性拒绝
         let outer = tempfile::tempdir().unwrap();
         let proj = outer.path().join("proj");
         std::fs::create_dir_all(&proj).unwrap();
-        let secret = outer.path().join("secret.txt");
-        std::fs::write(&secret, "x").unwrap();
         let cwd = proj.to_str().unwrap();
-        let home = proj.to_str().unwrap();
-        // (1) 越界：../ 逃出 cwd 且出 home（按会话 cwd 解析相对路径后仍指向界外真实文件）
-        let r = read_file_safe(cwd, "../secret.txt", Some(home));
-        assert!(r.unwrap_err().contains("越界"));
-        // (2) 绝对路径越界（cwd 外、home 外真实文件）
-        let r = read_file_safe(cwd, secret.to_str().unwrap(), Some(home));
-        assert!(r.unwrap_err().contains("越界"));
-        // (3) 不存在
-        let r = read_file_safe(cwd, "nope.txt", Some(home));
-        assert!(r.is_err(), "不存在的文件必须拒绝");
-        // (4) 目录（canonicalize 成功但非常规文件）
-        let r = read_file_safe(cwd, ".", Some(home));
-        assert!(r.is_err(), "目录必须拒绝");
-        // (5) 空参
-        assert!(read_file_safe("", "x", Some(home)).is_err());
-        assert!(read_file_safe(cwd, "  ", Some(home)).is_err());
+        // (1) 不存在（../ 相对形态与绝对形态一致：NotFound）
+        let r = read_file_safe(cwd, "../nope.txt", None);
+        assert_eq!(r.unwrap_err(), FileRejectReason::NotFound);
+        // (2) 目录（canonicalize 成功但非常规文件）
+        let r = read_file_safe(cwd, ".", Some(cwd));
+        assert_eq!(r.unwrap_err(), FileRejectReason::NotFile);
+        // (3) 空参
+        assert_eq!(
+            read_file_safe(cwd, "  ", Some(cwd)).unwrap_err(),
+            FileRejectReason::NotFound
+        );
     }
 
     /// 双阈值（进度台账 #11）：文本 500KB 上限、图片 5MB 上限——
@@ -842,11 +850,11 @@ mod tests {
         );
     }
 
-    /// 放宽边界（2026-09-16 用户裁决）：会话 cwd 之外、但在**用户主目录之内**的
-    /// 文件必须可读（kimi 会话引用 Downloads 图片的实测场景——图片在
-    /// ~/Downloads 而 cwd 是桌面上的项目目录）；主目录之外的越界仍拒绝
+    /// 全盘放开（2026-09-18 用户裁决）：项目外 / 主目录外的文件**放行**——
+    /// 经常需要查看/参考项目目录外文件（微信目录附件等实测场景）；
+    /// 访问门槛 = PIN + 设备 cookie，路径级防线收敛为敏感目录黑名单
     #[test]
-    fn read_file_safe_allows_home_but_rejects_outside_home() {
+    fn read_file_safe_allows_outside_project_and_home() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let proj = home.join("Desktop").join("proj");
@@ -860,13 +868,12 @@ mod tests {
         // 主目录内、项目目录外（Downloads）→ 放行
         let (bytes, mime) =
             read_file_safe(cwd, pic.to_str().unwrap(), Some(home.to_str().unwrap()))
-                .unwrap_or_else(|e| panic!("主目录内文件必须放行: {e}"));
+                .unwrap_or_else(|e| panic!("主目录内文件必须放行: {e:?}"));
         assert_eq!(bytes, b"\x89PNG");
         assert_eq!(mime, "image/png");
 
         // 反斜杠形态路径（Windows 会话里 toolArgs 记录的形态）同样放行。
-        // 仅 Windows 跑：Linux 下反斜杠是合法文件名字符，`	mp\...` 是相对
-        // 路径而非绝对路径，此检查不适用
+        // 仅 Windows 跑：Linux 下反斜杠是合法文件名字符，此检查不适用
         if cfg!(windows) {
             let win_style = pic.to_string_lossy().replace('/', "\\");
             assert!(
@@ -875,15 +882,16 @@ mod tests {
             );
         }
 
-        // 主目录之外（同级另一棵树的文件）→ 仍拒绝
+        // 主目录之外（同级另一棵树的文件）→ **同样放行**（全盘语义）
         let outside = tmp.path().join("outside.txt");
         std::fs::write(&outside, "x").unwrap();
-        let r = read_file_safe(cwd, outside.to_str().unwrap(), Some(home.to_str().unwrap()));
-        assert!(r.unwrap_err().contains("越界"), "主目录外必须仍判越界");
-
-        // home 缺失（无法确定主目录）→ 回落项目目录限制（fail-closed）
-        let r = read_file_safe(cwd, pic.to_str().unwrap(), None);
-        assert!(r.unwrap_err().contains("越界"), "home 未知时不得放宽");
+        let (bytes, _) =
+            read_file_safe(cwd, outside.to_str().unwrap(), Some(home.to_str().unwrap()))
+                .unwrap_or_else(|e| panic!("全盘语义下主目录外文件必须放行: {e:?}"));
+        assert_eq!(bytes, b"x");
+        // home 缺失不再收紧（home 参数已退役为策略扩展点）——路径照常可读
+        let r = read_file_safe(cwd, outside.to_str().unwrap(), None);
+        assert!(r.is_ok(), "home=None 不再构成边界（全盘语义）");
     }
 
     /// 敏感目录拒绝清单（2026-09-16 用户裁决）：主目录内但这些目录下的文件
@@ -1229,8 +1237,9 @@ mod tests {
         }
     }
 
-    /// 评审 I1 回归锁：会话 cwd == 用户主目录时，cwd 豁免不得架空敏感清单——
-    /// ~/.ssh/id_rsa 必须仍被拒绝，而 ~/Downloads 下的普通文件仍可读
+    /// 评审 I1 回归锁（M5 P2-a 全盘语义下语义不变）：会话 cwd == 用户主目录时，
+    /// ~/.ssh/id_rsa 必须仍被拒绝（黑名单全路径一致生效，无 cwd 豁免），而
+    /// ~/Downloads 下的普通文件仍可读
     #[test]
     fn read_file_safe_cwd_equals_home_still_enforces_sensitive_list() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1241,14 +1250,14 @@ mod tests {
         std::fs::write(home.join("Downloads").join("trip.png"), b"\x89PNG").unwrap();
         let home_s = home.to_str().unwrap();
         // 会话 cwd = 主目录本身（在 ~ 下启动 agent 的常见场景）
-        assert!(
+        assert_eq!(
             read_file_safe(
                 home_s,
                 home.join(".ssh").join("id_rsa").to_str().unwrap(),
                 Some(home_s)
             )
-            .unwrap_err()
-            .contains("敏感目录"),
+            .unwrap_err(),
+            FileRejectReason::Sensitive,
             "cwd==home 时 ~/.ssh 必须仍被敏感清单拒绝"
         );
         assert!(

@@ -41,7 +41,12 @@ interface FilePreviewProps {
 
 type LoadState =
   | { phase: "loading" }
-  | { phase: "error"; status: number | null }
+  | {
+      phase: "error";
+      status: number | null;
+      /** 403 响应体的结构化原因码（M5 P2-a：sensitive/too_large/not_found/not_file/io） */
+      errorData: Record<string, unknown> | null;
+    }
   | { phase: "ok"; payload: FilePayload };
 
 /** 扩展名 → highlight.js 语言（lib/common 子集内的常用项；未命中走自动检测） */
@@ -97,8 +102,7 @@ export default function FilePreview({
   fontScale = 1,
   onClose,
 }: FilePreviewProps) {
-  const [state, setState] = useState<LoadState>({ phase: "loading" });
-  // 手动重试信号（403 时文件可能已被 agent 补写回限内 / 网络恢复后再试）
+  const [state, setState] = useState<LoadState>({ phase: "loading" }); // 手动重试信号（403 时文件可能已被 agent 补写回限内 / 网络恢复后再试）
   const [retryTick, setRetryTick] = useState(0);
 
   // 源码/渲染双态（M5 B4，线稿 .pv-head seg）：仅 .md 与 .html 出现切换器。
@@ -141,7 +145,11 @@ export default function FilePreview({
       })
       .catch((e: unknown) => {
         if (alive) {
-          setState({ phase: "error", status: e instanceof ApiError ? e.status : null });
+          setState({
+            phase: "error",
+            status: e instanceof ApiError ? e.status : null,
+            errorData: e instanceof ApiError ? e.data : null,
+          });
         }
       });
     return () => {
@@ -152,8 +160,26 @@ export default function FilePreview({
 
   // 路径末段作标题（分隔符双态：win 反斜杠 / unix 斜杠）
   const baseName = filePath.split(/[\\/]/).pop() || filePath;
-  const previewableError =
-    state.phase === "error" && (state.status === 403 || state.status === 404);
+
+  // M5 P2-a：403 原因分診——后端响应体 error ∈ sensitive/too_large/not_found/
+  // not_file/io（snake_case），已过闸设备可见原因便于排障；404 会话级与网络异常
+  // 保留原兜底文案
+  const errorReason =
+    state.phase === "error"
+      ? typeof (state.errorData ?? {})?.error === "string"
+        ? ((state.errorData as { error: string }).error as string)
+        : null
+      : null;
+  const errorText = (() => {
+    if (state.phase !== "error") return "";
+    if (errorReason === "sensitive") return "该路径受安全策略保护，无法预览";
+    if (errorReason === "too_large")
+      return "文件超过预览上限（文本 500KB / 图片 5MB），请用工具导出小结后查看";
+    if (errorReason === "not_found") return "文件不存在或已被移动";
+    if (errorReason === "not_file") return "该路径不是文件";
+    if (state.status === 403 || state.status === 404) return "无法预览该文件";
+    return "预览加载失败";
+  })();
 
   // 正文三分支（M5 B4）：markdown 渲染 / html 沙箱 iframe / 源码高亮。
   // md 在 seg 源码态回落 code 分支；html 渲染态 = 取文本 → 沙箱 iframe
@@ -273,8 +299,8 @@ export default function FilePreview({
         )}
         {state.phase === "error" && (
           <p data-testid="preview-error" className="text-sm text-rose-600 dark:text-rose-400">
-            {/* 探测面最小化：403（越界/超限/不存在不可区分）与 404 同文案，不给预言机 */}
-            {previewableError ? "无法预览该文件" : "预览加载失败"}
+            {/* M5 P2-a：403 带后端结构化原因码，按原因分診排障文案（已过闸设备可见） */}
+            {errorText}
           </p>
         )}
         {state.phase === "ok" && state.payload.kind === "image" && (

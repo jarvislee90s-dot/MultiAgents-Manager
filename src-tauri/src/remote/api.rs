@@ -349,21 +349,22 @@ pub async fn session_files(
 /// file 端点的读取结果三分（403/404 语义分流在 handler 尾部，读取全程在阻塞线程池）：
 /// - Found：cwd 内常规文件（字节 + mime）；
 /// - NoSession：session_id 不在会话快照中 → 404；
-/// - Rejected：越界 / 不存在 / 过大 / 目录 / cwd 缺失 → 一律 403（错误细节只进
-///   日志——越界与不存在不可区分，不给外部探测面预言机，进度台账 #12 口径）。
+/// - Rejected：敏感目录 / 不存在 / 过大 / 目录 / 读取失败 → 一律 403，**响应体
+///   带结构化原因**（M5 P2-a 用户裁决：原因写在报错处便于排障。原「空体防探测」
+///   随边界全盘放开退役——原因仅暴露给已过闸设备，PIN + cookie 已是门槛）。
 enum FileReadOutcome {
     Found(Vec<u8>, String),
     NoSession,
-    Rejected(String),
+    Rejected(crate::remote::files::FileRejectReason),
 }
 
-/// GET /m/api/v1/file?session_id=&path=（M3 Task 8）
-/// 会话项目目录或用户主目录内的安全文件读取（read_file_safe：限 cwd∪home、
-/// 只读、双阈值 500KB/5MB；主目录内敏感目录拒绝——2026-09-16 用户裁决放宽
-/// 到主目录，kimi 等工具常引用 ~/Downloads 的图片）。
+/// GET /m/api/v1/file?session_id=&path=（M3 Task 8；M5 P2-a 全盘语义）
+/// 安全文件只读读取（read_file_safe：任意路径、敏感目录黑名单、只读、
+/// 双阈值 500KB/5MB——2026-09-18 用户裁决放开项目外文件预览）。
 /// - 缺参 / 空白 → 400；session_id 不在会话快照 → 404；
 /// - 图片 mime → 二进制响应 + Content-Type；文本 → JSON `{content, mime, size}`；
-/// - 拒绝（越界/不存在/超限/敏感目录彼此不可区分）→ 403 + log::warn；
+/// - 拒绝（敏感目录/不存在/超限/目录/IO）→ 403 + `{"error":"<reason>"}`（snake_case
+///   原因码：sensitive/too_large/not_found/not_file/io，前端据此分診文案）+ log::warn；
 /// - cwd 查找与文件读取同在一个 `spawn_blocking` 里：会话快照源是同步阻塞调用
 ///   （sysinfo 全进程刷新，实机教训见 commands/session.rs），文件 IO 同为重活。
 pub async fn read_file(
@@ -392,14 +393,7 @@ pub async fn read_file(
         let Some(session) = resp.sessions.into_iter().find(|s| s.id == sid) else {
             return FileReadOutcome::NoSession;
         };
-        // home 读真实主目录（放宽边界：cwd ∪ home，敏感目录仍拒）；
-        // 取不到 home（极端环境）则按 None 走 fail-closed 的 cwd-only 边界
-        let home = dirs::home_dir();
-        match crate::remote::files::read_file_safe(
-            &session.project_path,
-            &path,
-            home.as_deref().and_then(|h| h.to_str()),
-        ) {
+        match crate::remote::files::read_file_safe(&session.project_path, &path, None) {
             Ok((bytes, mime)) => FileReadOutcome::Found(bytes, mime),
             Err(e) => FileReadOutcome::Rejected(e),
         }
@@ -444,11 +438,15 @@ pub async fn read_file(
                 .into_response())
         }
         FileReadOutcome::NoSession => Err(StatusCode::NOT_FOUND),
-        FileReadOutcome::Rejected(e) => {
-            // 探测面最小化（进度台账 #12）：越界 / 不存在 / 超限对外一律同 403 空体，
-            // 差异只进服务端日志
-            log::warn!("file 读取被拒: {e}");
-            Err(StatusCode::FORBIDDEN)
+        FileReadOutcome::Rejected(reason) => {
+            // 原因细分（M5 P2-a 用户裁决「把看不了的原因写在报错的地方」）：
+            // 403 + snake_case 原因码，仅已过闸设备可见；日志保留中文明细
+            log::warn!("file 读取被拒: {}（{reason:?}）", reason.message());
+            Ok((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response())
         }
     }
 }
