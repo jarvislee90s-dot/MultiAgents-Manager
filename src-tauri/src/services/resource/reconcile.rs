@@ -11,7 +11,14 @@ pub struct DriftItem {
 }
 
 /// 扫描 enabled 工具的账本-磁盘漂移（§13）：disabled 工具排除（W5 名册语义）；
-/// 只看 skill（mcp/plugin 后续版本）；L4 外链只报告不接管
+/// 只看 skill（mcp/plugin 后续版本）；L4 外链只报告不接管。
+///
+/// 派发拍平对账口径（用户裁决 2026-09-17）：磁盘派发链接名一律是拍平名
+/// （套件-技能名），账本侧比较时**正向映射**到拍平名再比（磁盘侧不做歧义
+/// 反解）；报告的 extension_id 尽量保持账本嵌套规范名——L1/L2 由账本侧驱动
+/// 天然保持原名；L3（磁盘有账本无）的拍平名无法无歧义反解回嵌套规范名
+/// （多个嵌套名可拍平到同名，且账本无行即无映射源），extension_id 按磁盘
+/// 拍平名报告，path 保留磁盘实况——此为该裁决的已知不可反解边界
 pub fn scan_drift() -> Vec<DriftItem> {
     let home = dirs::home_dir().unwrap_or_default();
     let mam_root = home.join(".mam");
@@ -27,6 +34,16 @@ pub fn scan_drift() -> Vec<DriftItem> {
             })
             .map(|a| a.extension_id)
             .collect();
+        // 账本正向映射：嵌套规范名 → 拍平派发名（平铺名恒等）；
+        // flat_to_ledger 供 L2 命中时回填账本嵌套规范名（报告身份保持嵌套名）
+        let flat_of = |ext_id: &str| -> String {
+            let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
+            format!("skill-{}", crate::linker::dispatch_name(name))
+        };
+        let ledger_flat: std::collections::HashSet<String> =
+            ledger.iter().map(|id| flat_of(id)).collect();
+        let flat_to_ledger: std::collections::HashMap<String, String> =
+            ledger.iter().map(|id| (flat_of(id), id.clone())).collect();
         let Some(dir) = crate::adapter::primary_skill_dir(tool) else {
             continue;
         };
@@ -56,11 +73,12 @@ pub fn scan_drift() -> Vec<DriftItem> {
                                 path: path.to_string_lossy().to_string(),
                             });
                         }
-                    } else if path.is_dir() && ledger.iter().any(|l| l == &ext_id) {
+                    } else if path.is_dir() && ledger_flat.contains(&ext_id) {
+                        // 磁盘真目录名与账本拍平名吻合 → L2；报告身份回填账本嵌套规范名
                         out.push(DriftItem {
                             tool_id: tool.to_string(),
                             kind: "L2".into(),
-                            extension_id: ext_id,
+                            extension_id: flat_to_ledger.get(&ext_id).cloned().unwrap_or(ext_id),
                             path: path.to_string_lossy().to_string(),
                         });
                     }
@@ -68,20 +86,24 @@ pub fn scan_drift() -> Vec<DriftItem> {
             }
         }
         for ext_id in &ledger {
-            if !disk_mam_links.contains(ext_id) {
+            // 磁盘 MAM 链接集合按拍平名比较（正向映射，不反解磁盘名）
+            if !disk_mam_links.contains(&flat_of(ext_id)) {
                 let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
-                if !dir.join(name).exists() {
+                // 判定与 path 均按拍平名（磁盘派发落点实况）；extension_id 保持账本嵌套规范名
+                if !crate::linker::dispatch_target(&dir, name).exists() {
                     out.push(DriftItem {
                         tool_id: tool.to_string(),
                         kind: "L1".into(),
                         extension_id: ext_id.clone(),
-                        path: dir.join(name).to_string_lossy().to_string(),
+                        path: crate::linker::dispatch_target(&dir, name)
+                            .to_string_lossy()
+                            .to_string(),
                     });
                 }
             }
         }
         for ext_id in &disk_mam_links {
-            if !ledger.contains(ext_id) {
+            if !ledger_flat.contains(ext_id) {
                 let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
                 out.push(DriftItem {
                     tool_id: tool.to_string(),

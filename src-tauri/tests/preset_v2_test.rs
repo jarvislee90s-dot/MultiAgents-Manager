@@ -1748,6 +1748,180 @@ fn builtin_and_unregistered_native_dirs_never_enter_snapshot_v2m2() {
     let _ = std::fs::remove_dir_all(codex_dir.join("v2m2-reg-x"));
 }
 
+/// 派发拍平（用户裁决 2026-09-17）：SSOT 仓库保持套件层级原样，但派发到
+/// 工具的一切磁盘链接名（工具 skill 目录 / Layer2）一律拍平为 套件-技能名
+/// （`/` → `-`）；账本身份（assignment 的 extension_id）保持嵌套规范名
+#[test]
+fn nested_skill_dispatches_flat_links() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::enable_skill_for_tool;
+
+    let home = dirs::home_dir().unwrap();
+    // SSOT 嵌套套件技能（仓库层级不动）+ extensions 登记（嵌套规范名）
+    let inner = home.join(".mam/skills/v2m2-suite9/inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(inner.join("SKILL.md"), "x").unwrap();
+    database::ensure_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-suite9/inner".into(),
+        kind: "skill".into(),
+        name: "v2m2-suite9/inner".into(),
+        description: None,
+        source_path: inner.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+
+    enable_skill_for_tool("v2m2-suite9/inner", "claude").unwrap();
+
+    // 工具 skill 目录：拍平名链接在场，且未建嵌套目录
+    let claude_dir = home.join(".claude/skills");
+    let tool_link = claude_dir.join("v2m2-suite9-inner");
+    assert!(
+        tool_link.is_symlink() && tool_link.exists(),
+        "工具目录应为拍平名符号链接: {}",
+        tool_link.display()
+    );
+    assert!(
+        tool_link.join("SKILL.md").exists(),
+        "链接应可穿透到 SSOT 内容"
+    );
+    assert!(
+        !claude_dir.join("v2m2-suite9").exists(),
+        "不得在工具目录建嵌套套件目录"
+    );
+    // Layer2：同为拍平名链接
+    let layer2_link = home.join(".mam/active/claude/v2m2-suite9-inner");
+    assert!(
+        layer2_link.is_symlink(),
+        "Layer2 应为拍平名链接: {}",
+        layer2_link.display()
+    );
+    assert!(!home.join(".mam/active/claude/v2m2-suite9").exists());
+    // 账本身份：assignment 行 extension_id 仍是嵌套规范名
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "skill-v2m2-suite9/inner")
+        .expect("assignment 行应按嵌套规范名记账");
+    assert!(asg.enabled);
+
+    // 清理（删目录 + delete_extension + assignments）
+    let _ =
+        multi_agents_manager_lib::services::disable_skill_for_tool("v2m2-suite9/inner", "claude");
+    let _ = database::delete_assignments_for("skill-v2m2-suite9/inner");
+    let _ = database::delete_extension("skill-v2m2-suite9/inner");
+    let _ = std::fs::remove_dir_all(inner.parent().unwrap());
+}
+
+/// 派发拍平的禁用侧：disable 按拍平名清链——工具目录与 Layer2 的拍平链接
+/// 都消失（账本行落 disabled，extension_id 仍为嵌套规范名）
+#[test]
+fn nested_skill_disable_removes_flat_links() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    let home = dirs::home_dir().unwrap();
+    let inner = home.join(".mam/skills/v2m2-suite9/inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(inner.join("SKILL.md"), "x").unwrap();
+    database::ensure_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-suite9/inner".into(),
+        kind: "skill".into(),
+        name: "v2m2-suite9/inner".into(),
+        description: None,
+        source_path: inner.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m2-suite9/inner", "claude").unwrap();
+    let claude_dir = home.join(".claude/skills");
+    let layer2_dir = home.join(".mam/active/claude");
+    assert!(
+        claude_dir.join("v2m2-suite9-inner").is_symlink(),
+        "前置：工具目录拍平链接在场"
+    );
+    assert!(
+        layer2_dir.join("v2m2-suite9-inner").is_symlink(),
+        "前置：Layer2 拍平链接在场"
+    );
+
+    disable_skill_for_tool("v2m2-suite9/inner", "claude").unwrap();
+
+    assert!(
+        !claude_dir.join("v2m2-suite9-inner").exists(),
+        "禁用后工具目录拍平链接应消失"
+    );
+    assert!(
+        !layer2_dir.join("v2m2-suite9-inner").exists(),
+        "禁用后 Layer2 拍平链接应消失"
+    );
+    let asg = database::list_assignments("claude")
+        .into_iter()
+        .find(|a| a.extension_id == "skill-v2m2-suite9/inner")
+        .expect("assignment 行应仍在（disabled）");
+    assert!(!asg.enabled);
+
+    // 清理
+    let _ = database::delete_assignments_for("skill-v2m2-suite9/inner");
+    let _ = database::delete_extension("skill-v2m2-suite9/inner");
+    let _ = std::fs::remove_dir_all(inner.parent().unwrap());
+}
+
+/// 拍平碰撞守卫（用户裁决 2026-09-17）：仓库内存在与拍平名同名的另一平铺
+/// 技能（v2m2-flat-c-skill/）时，派发嵌套技能（v2m2-flat-c/skill）会被拒绝
+/// ——两条账目将争同一个磁盘链接名；拒绝时零副作用（不建任何链接）
+#[test]
+fn nested_dispatch_collision_guard_rejects_flat_namesake() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::services::enable_skill_for_tool;
+
+    let home = dirs::home_dir().unwrap();
+    // 嵌套技能 v2m2-flat-c/skill 与字面同名平铺技能 v2m2-flat-c-skill 并存
+    let nested = home.join(".mam/skills/v2m2-flat-c/skill");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("SKILL.md"), "nested").unwrap();
+    let namesake = home.join(".mam/skills/v2m2-flat-c-skill");
+    std::fs::create_dir_all(&namesake).unwrap();
+    std::fs::write(namesake.join("SKILL.md"), "flat").unwrap();
+
+    let err = enable_skill_for_tool("v2m2-flat-c/skill", "claude").unwrap_err();
+    assert!(err.contains("拍平名"), "错误应点名拍平名冲突: {}", err);
+    // 零副作用：工具目录与 Layer2 均未建链接（两种名形都不在）
+    let claude_dir = home.join(".claude/skills");
+    assert!(!claude_dir.join("v2m2-flat-c-skill").exists());
+    assert!(!claude_dir.join("v2m2-flat-c").exists());
+    assert!(!home.join(".mam/active/claude/v2m2-flat-c-skill").exists());
+    // SSOT 双方原样保留
+    assert!(nested.join("SKILL.md").exists() && namesake.join("SKILL.md").exists());
+
+    // 清理
+    let _ = std::fs::remove_dir_all(nested.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&namesake);
+}
+
 /// 启停守卫（用户裁决 2026-09-16）：enable 目标命中工具内建原生技能 →
 /// 拒绝且目录原样保留（识别即保护，MAM 不得接管/替换/删除）
 #[test]

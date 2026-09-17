@@ -179,7 +179,13 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
                             );
                         }
                         None => report_restore(
-                            restore_mam_link(&ssot, &dir.join(&ext.name), &ext.name),
+                            // 派发拍平（2026-09-17）：工具目录目标按拍平名定位磁盘链接；
+                            // 上方 ssot 侧保持嵌套原路径（SSOT 仓库层级不动）
+                            restore_mam_link(
+                                &ssot,
+                                &crate::linker::dispatch_target(&dir, &ext.name),
+                                &ext.name,
+                            ),
                             &ext.name,
                             result,
                         ),
@@ -248,16 +254,17 @@ fn report_restore(outcome: RestoreOutcome, name: &str, result: &mut ApplyResult)
 /// 仍计 SkippedKept，恢复失败才是 SkippedLost（工具目录空缺），由调用方分级报告。
 /// 先把 SSOT 内容暂存到目标旁的临时路径（目录走 copy_dir_recursive，
 /// 子 Agent 分配的 Layer 3 用户可见目标（与 services::skill::assign_skill_to_subagent
-/// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<name>，P1-4 停用还原用）
+/// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<拍平名>，P1-4 停用还原用。
+/// 派发拍平口径见 linker::dispatch_name，2026-09-17 裁决）
 fn subagent_skill_target(
     tool_skill_dir: &std::path::Path,
     sub_agent_id: &str,
     skill_name: &str,
 ) -> std::path::PathBuf {
-    tool_skill_dir
-        .join("subagents")
-        .join(sub_agent_id)
-        .join(skill_name)
+    crate::linker::dispatch_target(
+        &tool_skill_dir.join("subagents").join(sub_agent_id),
+        skill_name,
+    )
 }
 
 /// 单文件如配置型插件的 .json 走 fs::copy），暂存成功才移除链接并原子落位；

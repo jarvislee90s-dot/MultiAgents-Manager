@@ -262,8 +262,10 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
             continue;
         }
 
-        // 断链检测与自动修复：SSOT 仍在则重建，SSOT 缺失则清链接并标记
-        let tool_target = crate::adapter::primary_skill_dir(&tool_id).map(|d| d.join(&ext.name));
+        // 断链检测与自动修复：SSOT 仍在则重建，SSOT 缺失则清链接并标记。
+        // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）；下方 repo 侧保持嵌套原路径
+        let tool_target = crate::adapter::primary_skill_dir(&tool_id)
+            .map(|d| crate::linker::dispatch_target(&d, &ext.name));
         if let Some(t) = &tool_target {
             if crate::linker::check_link_health(t) == crate::linker::LinkHealth::Dangling {
                 let repo_exists = crate::linker::ensure_repo_dir().join(&ext.name).exists();
@@ -285,7 +287,7 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
         }
 
         let already_linked = crate::adapter::primary_skill_dir(&tool_id)
-            .map(|dir| dir.join(&ext.name).is_symlink())
+            .map(|dir| crate::linker::dispatch_target(&dir, &ext.name).is_symlink())
             .unwrap_or(false);
         // P0-1：补链统一走勾选门（停用工具不得重建，见 ensure_skill_relink）
         let _ = ensure_skill_relink(&tool_id, &tool_enabled, &|| already_linked, &|| {
@@ -296,7 +298,8 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
 
     // 兼容历史数据：assignment 表里可能已有 skill 记录，但 extensions 表没有对应行
     let mut assignments: Vec<_> = crate::database::list_all_assignments();
-    // 先建顶层套件链接，再补嵌套子 skill，避免父目录先被创建成真实目录
+    // 排序为历史遗留（嵌套派发期需先顶层后嵌套、避免父目录被建成真实目录）；
+    // 拍平派发（2026-09-17）后嵌套名不再产生父目录，排序保留无害
     assignments.sort_by_key(|a| a.extension_id.matches('/').count());
     for assignment in assignments {
         if !assignment.enabled {
@@ -314,8 +317,9 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
             continue;
         }
 
+        // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）
         let already_linked = crate::adapter::primary_skill_dir(&assignment.agent_tool_id)
-            .map(|dir| dir.join(skill_name).is_symlink())
+            .map(|dir| crate::linker::dispatch_target(&dir, skill_name).is_symlink())
             .unwrap_or(false);
         if let Err(e) = ensure_skill_relink(
             &assignment.agent_tool_id,

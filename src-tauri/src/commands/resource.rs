@@ -394,12 +394,13 @@ pub fn list_ssot_resources() -> SsotResources {
                     .filter(|a| enabled_ids.contains(&a.agent_tool_id))
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
-                // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）
+                // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）。
+                //    按拍平名探测（派发拍平，2026-09-17 裁决）——嵌套名的派发落点是拍平链接
                 for (tool_id, tool_dir) in &tool_skill_dirs {
                     if enabled_tools.iter().any(|t| t == tool_id) {
                         continue;
                     }
-                    if tool_dir.join(&name).exists() {
+                    if crate::linker::dispatch_target(tool_dir, &name).exists() {
                         enabled_tools.push(tool_id.to_string());
                     }
                 }
@@ -605,7 +606,8 @@ pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
     let mut duplicates = Vec::new();
     let ssot_skills = scan_skill_dirs(&repo);
     for name in ssot_skills {
-        let tool_path = tool_skill_dir.join(&name);
+        // 工具目录侧按拍平名探测（派发拍平，2026-09-17 裁决：嵌套名的派发落点）
+        let tool_path = crate::linker::dispatch_target(&tool_skill_dir, &name);
         if tool_path.exists() && !tool_path.is_symlink() {
             duplicates.push(name);
         }
@@ -628,8 +630,9 @@ pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(
     let mut errors = Vec::new();
 
     for name in &names {
+        // ssot 侧保持嵌套原路径；工具目录目标按拍平名（派发拍平，2026-09-17 裁决）
         let ssot_path = repo.join(name);
-        let tool_path = tool_skill_dir.join(name);
+        let tool_path = crate::linker::dispatch_target(&tool_skill_dir, name);
 
         match crate::linker::replace_with_symlink(&ssot_path, &tool_path) {
             Ok(()) => {
@@ -662,7 +665,8 @@ pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
     let Some(tool_skill_dir) = crate::adapter::primary_skill_dir(&tool_id) else {
         return "missing".to_string();
     };
-    let target = tool_skill_dir.join(&skill_name);
+    // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）
+    let target = crate::linker::dispatch_target(&tool_skill_dir, &skill_name);
     if !target.exists() {
         "missing".to_string()
     } else if target.is_symlink() {
@@ -695,7 +699,8 @@ pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<Str
     crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
         .ok_or_else(|| format!("未知工具: {}", tool_id))?;
-    let target = tool_skill_dir.join(&skill_name);
+    // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）
+    let target = crate::linker::dispatch_target(&tool_skill_dir, &skill_name);
     if !target.exists() && !target.is_symlink() {
         return Err("目标路径不存在".to_string());
     }

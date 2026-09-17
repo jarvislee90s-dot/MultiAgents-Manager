@@ -514,6 +514,72 @@ fn reconcile_batch_filters_tool_and_l4_manual() {
     let _ = database::delete_assignments_for("skill-v2m2-rc-b-l1");
 }
 
+/// 派发拍平对账口径（用户裁决 2026-09-17）：账本 enabled 的嵌套技能先正向
+/// 映射到拍平名（skill-套件-技能名）再与磁盘比较——磁盘拍平链接在场时不得
+/// 误报 L1（嵌套名）/ L3（拍平名）；拍平链接被删后报 L1，extension_id 保持
+/// 嵌套规范名
+#[test]
+fn drift_scan_uses_flat_names_no_false_l1l3() {
+    let _guard = acquire_lock();
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::resource::reconcile::scan_drift;
+
+    let tool = "codex";
+    let home = dirs::home_dir().unwrap();
+    database::set_tool_enabled(tool, true);
+    let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
+    std::fs::create_dir_all(&tool_dir).unwrap();
+
+    // SSOT 嵌套技能 + 磁盘按拍平名挂好链接（工具目录与 Layer2，均指向 ~/.mam 之下）
+    let ssot = home.join(".mam/skills/v2m2-flat9/inner");
+    std::fs::create_dir_all(&ssot).unwrap();
+    let flat_name = "v2m2-flat9-inner";
+    let tool_link = tool_dir.join(flat_name);
+    std::os::unix::fs::symlink(&ssot, &tool_link).unwrap();
+    let layer2_link =
+        multi_agents_manager_lib::linker::layer2::tool_active_dir(tool).join(flat_name);
+    std::fs::create_dir_all(layer2_link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&ssot, &layer2_link).unwrap();
+    // 账本：嵌套规范名 enabled
+    database::upsert_assignment("skill-v2m2-flat9/inner", tool, true, "valid").unwrap();
+
+    // 拍平链接在场：对账两侧按拍平名吻合——不报 L1 也不报 L3（负断言）
+    let items = scan_drift();
+    assert!(
+        !items
+            .iter()
+            .any(|d| d.extension_id == "skill-v2m2-flat9/inner"),
+        "不得误报 L1（账本嵌套名）: {:?}",
+        items
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|d| d.extension_id == "skill-v2m2-flat9-inner"),
+        "不得误报 L3（磁盘拍平名）: {:?}",
+        items
+    );
+
+    // 拍平链接被删 → 报 L1；extension_id 为嵌套规范名，path 保留磁盘拍平名实况
+    std::fs::remove_file(&tool_link).unwrap();
+    let items = scan_drift();
+    let hit = items
+        .iter()
+        .find(|d| d.extension_id == "skill-v2m2-flat9/inner" && d.kind == "L1")
+        .expect("缺链应报 L1 且 extension_id 为嵌套规范名");
+    assert!(
+        hit.path.contains(flat_name),
+        "path 应指向拍平名落点: {}",
+        hit.path
+    );
+
+    // 清理
+    let _ = std::fs::remove_file(&layer2_link);
+    let _ = std::fs::remove_dir_all(ssot.parent().unwrap());
+    let _ = database::delete_assignments_for("skill-v2m2-flat9/inner");
+}
+
 /// W5 名册语义：disabled 工具的同类漂移（此处 L1）不出现
 #[test]
 fn reconcile_scan_disabled_tool_excluded() {

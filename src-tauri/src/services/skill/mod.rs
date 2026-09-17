@@ -34,14 +34,29 @@ pub fn install_skill(source_path: &str, name: &str, overwrite: bool) -> Result<(
     Ok(())
 }
 
-/// 为工具启用 skill（创建 Layer 2 symlink）
+/// 为工具启用 skill（创建 Layer 2 symlink）。
+/// 派发拍平（用户裁决 2026-09-17）：工具目录侧目标一律按拍平名
+/// （linker::dispatch_target），source/账本侧保持嵌套规范名
 pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), String> {
+    // 拍平碰撞守卫（用户裁决 2026-09-17）：仓库里存在与拍平名同名的另一技能
+    // （如 v2m2-flat-c/skill 与字面平铺的 v2m2-flat-c-skill/ 并存）时，两条
+    // 账目会争同一个磁盘链接名（派发后互相覆盖链接）→ 拒绝且零副作用。
+    // 仅嵌套名需要判定（dispatch_name != skill_name）；平铺技能拍平名即自身，
+    // 恒不触发
+    let flat = crate::linker::dispatch_name(skill_name);
+    if flat != skill_name && crate::linker::ensure_repo_dir().join(&flat).exists() {
+        return Err(format!(
+            "拍平名与现有技能冲突：{} 的派发名 {} 已被仓库内另一平铺技能占用",
+            skill_name, flat
+        ));
+    }
+
     // 工具内建原生技能守卫（用户裁决 2026-09-16）：识别即常驻、不可启停。
-    // 置于函数最前——命中即拒绝，Layer 2 链接与工具目录零副作用（内建目录
+    // 置于链接动作之前——命中即拒绝，Layer 2 链接与工具目录零副作用（内建目录
     // 永不被替换为链接/删除）；仅对真实目录判定（链接/不存在路径与非内建同路）。
     // disable 侧不需要对称守卫：内建目录永不产生 MAM 链接，无可断之链
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
-        let tool_target = tool_skill_dir.join(skill_name);
+        let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
         if tool_target.is_dir()
             && !tool_target.is_symlink()
             && crate::adapter::is_builtin_native_skill(tool_id, skill_name, &tool_target)
@@ -54,11 +69,13 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
 
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
         let _ = std::fs::create_dir_all(&tool_skill_dir);
-        let tool_target = tool_skill_dir.join(skill_name);
+        let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
         let mut should_create_tool_link = true;
         if tool_target.exists() || tool_target.is_symlink() {
-            // 若父级已是链接（如 superpowers 套件），目标路径可能穿透到 SSOT；
-            // 此时子技能已经可用，不应再次删除 SSOT 中的真实目录。
+            // 若父级已是链接（历史形态：套件整体派发为父目录链接），目标路径可能
+            // 穿透到 SSOT；此时子技能已经可用，不应再次删除 SSOT 中的真实目录。
+            // 【拍平派发（2026-09-17）后预计不可达——嵌套名不再产生父目录链接，
+            // 保留作纵深防御（历史防删保护）】
             let repo_skill = crate::linker::ensure_repo_dir().join(skill_name);
             let reaches_ssot = !tool_target.is_symlink()
                 && tool_target.canonicalize().ok() == repo_skill.canonicalize().ok();
@@ -92,10 +109,11 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// 为工具禁用 skill（移除 Layer 2 symlink + 工具目录 symlink）
+/// 为工具禁用 skill（移除 Layer 2 symlink + 工具目录 symlink）。
+/// 工具目录目标按拍平名定位（与 enable 同口径）
 pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), String> {
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
-        let tool_target = tool_skill_dir.join(skill_name);
+        let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
         let _ = crate::linker::remove_link(&tool_target);
     }
     let _ = crate::linker::layer3::cleanup_layer3_on_tool_disable(skill_name, tool_id);
@@ -139,9 +157,13 @@ pub fn assign_skill_to_subagent(
         if let Some(skill_dir) = adapter.skill_dirs().into_iter().next() {
             let subagent_dir = skill_dir.join("subagents").join(sub_agent_id);
             let _ = std::fs::create_dir_all(&subagent_dir);
-            let tool_target = subagent_dir.join(skill_name);
-            let layer3_path =
-                crate::linker::layer3::subagent_active_dir(tool_id, sub_agent_id).join(skill_name);
+            // 派发拍平（2026-09-17）：子 Agent 工具目录目标与 Layer3 链接源
+            // 都按拍平名定位（Layer3 落盘即拍平链接）
+            let tool_target = crate::linker::dispatch_target(&subagent_dir, skill_name);
+            let layer3_path = crate::linker::dispatch_target(
+                &crate::linker::layer3::subagent_active_dir(tool_id, sub_agent_id),
+                skill_name,
+            );
             if tool_target.exists() || tool_target.is_symlink() {
                 let _ = crate::linker::remove_link(&tool_target);
             }

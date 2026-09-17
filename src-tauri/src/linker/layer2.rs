@@ -23,7 +23,9 @@ pub fn ensure_tool_active_dir(tool_id: &str) -> PathBuf {
     dir
 }
 
-/// 创建 Layer 2 symlink：从 Layer 1 源文件 → Layer 2 工具目录
+/// 创建 Layer 2 symlink：从 Layer 1 源文件 → Layer 2 工具目录。
+/// 派发拍平（用户裁决 2026-09-17）：source 侧保持 SSOT 嵌套原路径（仓库层级
+/// 不动），target 侧一律用拍平名（套件-技能名，`/` → `-`）
 pub fn link_skill_to_layer2(skill_name: &str, tool_id: &str) -> Result<PathBuf, String> {
     let repo = super::ensure_repo_dir();
     let source = repo.join(skill_name);
@@ -31,14 +33,14 @@ pub fn link_skill_to_layer2(skill_name: &str, tool_id: &str) -> Result<PathBuf, 
         return Err(format!("Skill 不在全局仓库: {}", skill_name));
     }
     let layer2_dir = ensure_tool_active_dir(tool_id);
-    let target = layer2_dir.join(skill_name);
+    let target = super::dispatch_target(&layer2_dir, skill_name);
     super::create_link(&source, &target)?;
     Ok(target)
 }
 
-/// 从 Layer 2 移除 skill 链接
+/// 从 Layer 2 移除 skill 链接（目标按拍平名定位，与建链同口径）
 pub fn unlink_skill_from_layer2(skill_name: &str, tool_id: &str) -> Result<(), String> {
-    let target = tool_active_dir(tool_id).join(skill_name);
+    let target = super::dispatch_target(&tool_active_dir(tool_id), skill_name);
     super::remove_link(&target)
 }
 
