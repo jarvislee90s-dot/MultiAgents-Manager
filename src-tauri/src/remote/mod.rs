@@ -813,10 +813,13 @@ pub fn address_entries_with_tunnel(
     }
 }
 
-/// 配对 URL 隧道跟随（纯函数）：隧道开 → 隧道基址/m#token=
+/// 配对 URL 隧道跟随（纯函数）：隧道开 → 隧道看板地址#token=。
+/// 契约（裸域名 404 修复）：tunnel 入参恒为看板地址（快照 url 经 tunnel::board_url
+/// 归一，已含 /m）——此处只去尾 `/` 再拼 token，**不再补 /m**（防 /m/m）；
+/// LAN 分支 base_url 本就含 /m，原样拼 token
 pub fn pair_url_with_tunnel(tunnel: Option<String>, base_url: String, token: &str) -> String {
     match tunnel {
-        Some(t) => format!("{}/m#token={token}", t.trim_end_matches('/')),
+        Some(t) => format!("{}#token={token}", t.trim_end_matches('/')),
         None => format!("{base_url}#token={token}"),
     }
 }
@@ -1297,16 +1300,26 @@ mod tests {
         }
     }
 
-    /// (d) 配对 URL 隧道跟随（Task 5 纯核）：隧道开（无 error）→ 隧道基址/m#token=；
+    /// (d) 配对 URL 隧道跟随（Task 5 纯核）：隧道开（无 error）→ 隧道看板地址#token=
+    /// （入参恒为看板地址——快照 url 已被 board_url 归一含 /m，此处不再补 /m，防 /m/m）；
     /// 隧道关/异常 → 既有 http 直连逻辑原样。issue_token 的隧道门控在此锁定
     #[test]
     fn pair_url_prefers_tunnel_base() {
-        // 隧道开 → https://host/m#token=…；隧道关 → 既有 http 逻辑
+        // 隧道开 → 看板地址#token=…（已含 /m，不重复追加）
         assert_eq!(
             pair_url_with_tunnel(
-                Some("https://mam.example.asia".into()),
+                Some("https://mam.example.asia/m".into()),
                 "http://192.168.1.5:9420/m".into(),
                 "tok" // clippy useless_conversion 适配（蓝本 "tok".into() 对 &str 参数多余）
+            ),
+            "https://mam.example.asia/m#token=tok"
+        );
+        // 入参带尾 / → 先去掉再拼 token（同样不得出现 /m/m）
+        assert_eq!(
+            pair_url_with_tunnel(
+                Some("https://mam.example.asia/m/".into()),
+                "http://192.168.1.5:9420/m".into(),
+                "tok"
             ),
             "https://mam.example.asia/m#token=tok"
         );

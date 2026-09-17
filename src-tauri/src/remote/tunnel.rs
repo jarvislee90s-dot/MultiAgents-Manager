@@ -152,7 +152,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Default, serde::Serialize)]
 pub struct TunnelStatus {
     pub mode: String,          // off/quick/named（当前实际运行模式）
-    pub url: Option<String>,   // quick=trycloudflare 地址 / named=子域（未知时 None）
+    pub url: Option<String>,   // 看板完整地址（含 /m——摄取点经 board_url 归一）/ 未知时 None
     pub error: Option<String>, // 起不来/连续失败的终态错误（界面明示）
 }
 static SNAPSHOT: Lazy<Mutex<TunnelStatus>> = Lazy::new(|| {
@@ -177,6 +177,20 @@ struct TunnelHandle {
     supervisor: tauri::async_runtime::JoinHandle<()>,
 }
 static TUNNEL: Lazy<Mutex<Option<TunnelHandle>>> = Lazy::new(|| Mutex::new(None));
+
+/// 隧道地址归一为看板地址（纯函数，平台无关的纯字符串处理）：去尾部 `/`（可多个）
+/// → 追加 `/m`；已以 `/m` 结尾则幂等（不重复追加，不产生 `/m/m`）。
+/// 快照 url 契约：摄取点（supervise 的 stderr 解析）统一过本函数，url 恒为
+/// 看板完整地址——消费方（地址表 / issue_token / 托盘复制 / toast）直接使用，
+/// 不再各自拼接（根路径 / 会 404，服务端只伺服 /m 前缀）
+pub fn board_url(base: &str) -> String {
+    let t = base.trim_end_matches('/');
+    if t.ends_with("/m") {
+        t.to_string()
+    } else {
+        format!("{t}/m")
+    }
+}
 
 /// quick stderr 地址解析（纯函数）：行内 https://*.trycloudflare.com 才算
 pub fn parse_quick_url(line: &str) -> Option<String> {
@@ -311,11 +325,15 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                 let mut lines = BufReader::new(err).lines();
                 // clippy whilelet_loop 适配（蓝本 loop/match 同语义：Ok(None)/Err 均终止）
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let u = if quick {
+                    let parsed = if quick {
                         parse_quick_url(&line)
                     } else {
                         parse_named_url(&line)
                     };
+                    // 归一在摄取点：解析出的裸域名统一过 board_url（quick/named 同一路径），
+                    // 快照 url 恒为看板完整地址——url_sink / set_snapshot / emit_ui 消费的
+                    // 全是归一后的值，下游（地址表 / issue_token / 托盘 / toast）不再各自拼 /m
+                    let u = parsed.map(|u| board_url(&u));
                     if let Some(u) = u {
                         let fresh = {
                             let mut g = url_sink2.lock().unwrap();
@@ -469,6 +487,41 @@ mod tests {
         // 普通日志行/其他域名不误报
         assert_eq!(parse_quick_url("INF Registered tunnel connection"), None);
         assert_eq!(parse_quick_url("see https://docs.cloudflare.com/"), None);
+    }
+
+    // ==== 裸域名 404 修复：board_url 归一（纯字符串，平台无关） ====
+
+    #[test]
+    fn board_url_appends_m_idempotent_and_trims_slashes() {
+        // 裸域名（quick/named stderr 解析形态）→ 补 /m
+        assert_eq!(
+            board_url("https://example-words-here.trycloudflare.com"),
+            "https://example-words-here.trycloudflare.com/m"
+        );
+        assert_eq!(
+            board_url("https://mam.example.asia"),
+            "https://mam.example.asia/m"
+        );
+        // 已以 /m 结尾 → 幂等（不得产生 /m/m）
+        assert_eq!(
+            board_url("https://mam.example.asia/m"),
+            "https://mam.example.asia/m"
+        );
+        // 尾部 / 去重（可多个），含 /m/ 形态
+        assert_eq!(
+            board_url("https://mam.example.asia/"),
+            "https://mam.example.asia/m"
+        );
+        assert_eq!(
+            board_url("https://mam.example.asia///"),
+            "https://mam.example.asia/m"
+        );
+        assert_eq!(
+            board_url("https://mam.example.asia/m/"),
+            "https://mam.example.asia/m"
+        );
+        // 退化输入不 panic：空串 → 仍返回含 /m 的形态
+        assert_eq!(board_url(""), "/m");
     }
 
     #[test]
