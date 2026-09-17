@@ -51,10 +51,43 @@ pub fn enable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Stri
         ));
     }
 
+    // 反向拍平碰撞守卫（终审 Important#1，控制器裁决 2026-09-17）：正向守卫挡
+    // 「启用嵌套 x/y 时仓库已有平铺 x-y」；反向——先启用的嵌套技能已在工具
+    // 目录留下拍平链接 x-y，后安装并启用字面平铺技能 x-y——放行会让
+    // create_link 静默删掉嵌套技能的拍平链接换挂平铺内容（错误内容派发 +
+    // 账本双 enabled + drift 不可见）。O(1) 判定，不加扫描：仅当 skill_name
+    // 为平铺名（不含 /）且工具目录派发目标已是 symlink 时，解析其最终指向；
+    // 指向 ≠ 本次要挂的 SSOT 技能（典型：嵌套技能的拍平链）→ 拒绝。指向相同
+    // （重复启用幂等）与非 symlink（真目录走既有内容比对守卫）不受影响；
+    // 悬空链接 canonicalize 失败不视为冲突（走既有清理路径）
+    if !skill_name.contains('/') {
+        if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
+            let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
+            if tool_target.is_symlink() {
+                let occupied_by_other = match (
+                    tool_target.canonicalize(),
+                    crate::linker::ensure_repo_dir()
+                        .join(skill_name)
+                        .canonicalize(),
+                ) {
+                    (Ok(existing), Ok(want)) => existing != want,
+                    _ => false,
+                };
+                if occupied_by_other {
+                    return Err(format!(
+                        "拍平名冲突：{} 已被另一技能的链接占用（如嵌套技能的拍平链接），请先停用占用该名字的技能",
+                        tool_target.display()
+                    ));
+                }
+            }
+        }
+    }
+
     // 工具内建原生技能守卫（用户裁决 2026-09-16）：识别即常驻、不可启停。
     // 置于链接动作之前——命中即拒绝，Layer 2 链接与工具目录零副作用（内建目录
     // 永不被替换为链接/删除）；仅对真实目录判定（链接/不存在路径与非内建同路）。
-    // disable 侧不需要对称守卫：内建目录永不产生 MAM 链接，无可断之链
+    // disable 侧有同款对称守卫：remove_link 对真目录走 remove_dir_all，无守卫
+    // 会递归删掉内建目录（见 disable_skill_for_tool）
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
         let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
         if tool_target.is_dir()
@@ -123,6 +156,19 @@ pub fn disable_skill_for_tool(skill_name: &str, tool_id: &str) -> Result<(), Str
             "skill {} 是 {} 的常驻资源，先关闭常驻再停用",
             skill_name, tool_id
         ));
+    }
+    // 工具内建原生技能守卫（终审 Important#2，与 enable 侧对称；用户裁决
+    // 2026-09-16「不可启停」）：remove_link 对真目录走 remove_dir_all——以
+    // .system/_shared/marker 名调用会递归删掉工具内建目录。当前调用方均
+    // 不可达（内建项不进账本/快照/清扫计划），属纵深防御；仅对真实目录判定
+    if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
+        let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);
+        if tool_target.is_dir()
+            && !tool_target.is_symlink()
+            && crate::adapter::is_builtin_native_skill(tool_id, skill_name, &tool_target)
+        {
+            return Err(format!("工具内建技能，不可操作: {}", tool_target.display()));
+        }
     }
     if let Some(tool_skill_dir) = get_tool_skill_dir(tool_id) {
         let tool_target = crate::linker::dispatch_target(&tool_skill_dir, skill_name);

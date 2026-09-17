@@ -1922,6 +1922,104 @@ fn nested_dispatch_collision_guard_rejects_flat_namesake() {
     let _ = std::fs::remove_dir_all(&namesake);
 }
 
+/// 反向拍平碰撞守卫（终审 Important#1，控制器裁决）：正向守卫挡「仓库已有
+/// 平铺同名」；反向——先启用的嵌套技能已在工具目录留下拍平链接，后启用
+/// 字面平铺同名技能——必须拒绝（否则 create_link 静默删掉嵌套技能的拍平
+/// 链接换挂平铺内容：错误内容派发 + 账本双 enabled + drift 不可见）。
+/// 先停用占用名字的嵌套技能后放行
+#[test]
+fn flat_namesake_enable_rejected_while_nested_flat_link_present_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    let home = dirs::home_dir().unwrap();
+    let claude_dir = home.join(".claude/skills");
+    let mk_ext = |id: &str, ssot: &std::path::Path| {
+        database::ensure_extension(&database::ExtensionRecord {
+            id: id.into(),
+            kind: "skill".into(),
+            name: id.trim_start_matches("skill-").into(),
+            description: None,
+            source_path: ssot.to_string_lossy().to_string(),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: None,
+            is_native: false,
+        })
+        .unwrap();
+    };
+
+    // ① 先启用嵌套技能 v2m2-flat2/a → 工具目录与 Layer2 产生拍平链接 v2m2-flat2-a
+    let nested = home.join(".mam/skills/v2m2-flat2/a");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("SKILL.md"), "nested").unwrap();
+    mk_ext("skill-v2m2-flat2/a", &nested);
+    enable_skill_for_tool("v2m2-flat2/a", "claude").unwrap();
+    let flat_link = claude_dir.join("v2m2-flat2-a");
+    let layer2_link = home.join(".mam/active/claude/v2m2-flat2-a");
+    assert!(flat_link.is_symlink(), "前置：嵌套技能的拍平链接在场");
+
+    // ② 再造平铺技能 v2m2-flat2-a（SSOT）并启用 → 拒绝（拍平名冲突）
+    let flat = home.join(".mam/skills/v2m2-flat2-a");
+    std::fs::create_dir_all(&flat).unwrap();
+    std::fs::write(flat.join("SKILL.md"), "flat").unwrap();
+    mk_ext("skill-v2m2-flat2-a", &flat);
+    let err = enable_skill_for_tool("v2m2-flat2-a", "claude").unwrap_err();
+    assert!(err.contains("拍平名冲突"), "错误应点名拍平名冲突: {}", err);
+    // 零副作用：拍平链接仍换挂着嵌套技能内容，Layer2 未被换挂
+    assert_eq!(
+        std::fs::read_to_string(flat_link.join("SKILL.md")).unwrap(),
+        "nested",
+        "被拒后工具目录链接不得换挂平铺技能内容"
+    );
+    assert_eq!(
+        std::fs::read_to_string(layer2_link.join("SKILL.md")).unwrap(),
+        "nested",
+        "被拒后 Layer2 链接不得换挂"
+    );
+    // 账本不得双 enabled：嵌套行 enabled、平铺行无 enabled
+    let asgs = database::list_assignments("claude");
+    assert!(
+        asgs.iter()
+            .any(|a| a.extension_id == "skill-v2m2-flat2/a" && a.enabled),
+        "嵌套技能行应保持 enabled"
+    );
+    assert!(
+        !asgs
+            .iter()
+            .any(|a| a.extension_id == "skill-v2m2-flat2-a" && a.enabled),
+        "平铺技能不得落 enabled 行: {:?}",
+        asgs
+    );
+
+    // ③ 反向解除占用：停用嵌套技能后启用平铺 → 成功且内容正确
+    disable_skill_for_tool("v2m2-flat2/a", "claude").unwrap();
+    assert!(!flat_link.exists(), "停用嵌套技能应清掉拍平链接");
+    enable_skill_for_tool("v2m2-flat2-a", "claude").unwrap();
+    assert!(flat_link.is_symlink(), "停用占用者后启用应放行");
+    assert_eq!(
+        std::fs::read_to_string(flat_link.join("SKILL.md")).unwrap(),
+        "flat",
+        "放行后应派发平铺技能内容"
+    );
+
+    // 清理
+    disable_skill_for_tool("v2m2-flat2-a", "claude").unwrap();
+    let _ = database::delete_assignments_for("skill-v2m2-flat2/a");
+    let _ = database::delete_assignments_for("skill-v2m2-flat2-a");
+    let _ = database::delete_extension("skill-v2m2-flat2/a");
+    let _ = database::delete_extension("skill-v2m2-flat2-a");
+    let _ = std::fs::remove_dir_all(nested.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&flat);
+}
+
 /// 常驻=停用防护（用户裁决 2026-09-18）：常驻 on 时手动停用被拒（Err 含
 /// 「常驻」），需先关闭常驻；skill / MCP / plugin 三类资源同构
 #[test]
@@ -2099,6 +2197,41 @@ fn enable_skill_rejects_builtin_native_dir_v2m2() {
 
     // 清场
     let _ = std::fs::remove_dir_all(codex_dir.join(".system"));
+}
+
+/// 启停守卫对称（终审 Important#2）：disable 以内建目录名调用 → 拒绝且目录
+/// 逐字节原样——remove_link 对真目录走 remove_dir_all，无守卫会递归删掉
+/// 工具内建目录（当前调用方不可达，纵深防御补口；spec 不变量：不可启停）
+#[test]
+fn disable_skill_rejects_builtin_native_dir_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::services::disable_skill_for_tool;
+
+    let codex_dir = dirs::home_dir().unwrap().join(".codex/skills");
+    let sys = codex_dir.join(".system");
+    std::fs::create_dir_all(&sys).unwrap();
+    std::fs::write(sys.join("SKILL.md"), "builtin").unwrap();
+    std::fs::write(sys.join(".codex-system-skills.marker"), "v2 marker bytes").unwrap();
+
+    let err = disable_skill_for_tool(".system", "codex").unwrap_err();
+    assert!(err.contains("内建"), "错误应点名内建保护: {}", err);
+    // 目录逐字节原样：真目录未被递归删除、内容未变
+    assert!(sys.is_dir() && !sys.is_symlink(), "内建目录必须原样保留");
+    assert_eq!(
+        std::fs::read_to_string(sys.join("SKILL.md")).unwrap(),
+        "builtin"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sys.join(".codex-system-skills.marker")).unwrap(),
+        "v2 marker bytes"
+    );
+
+    // 清场
+    let _ = std::fs::remove_dir_all(&sys);
 }
 
 /// reveal_dir 白名单校验（wave33 Item 4）：canonicalize 后必须以 ~/.mam 或
