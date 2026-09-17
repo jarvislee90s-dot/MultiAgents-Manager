@@ -93,11 +93,20 @@ impl PinRateLimiter {
 
     /// 记一次失败：累计到第 5 次（MAX_FAILURES）即锁定 10 分钟（第 5 次起 check 即 Locked）。
     /// 锁定期内的失败**不计数也不延期**（简单口径——锁定本身就是足额惩罚，延期会把
-    /// 锁定窗口推着攻击者走）；正常流程到不了此处（check 先拒），此分支是防御。
+    /// 锁定窗口推着攻击者走；正常流程到不了此处——check 先拒，此分支是防御）。
+    /// 已过期的锁在本方法内**先镜像 check 的到期分支**（清锁 + 清计数）再累计：
+    /// 否则「到期后未经 check 直接 record_failure」攒下的失败（最长 4 次）会被之后
+    /// check 的到期分支一笔清零——静默蒸发，攻击者白得一轮全新 5 次预算
+    /// （评审 Minor 1，测试 `failures_after_expiry_survive_late_check` 锁定）
     pub fn record_failure(&mut self, ip: &str, now: i64) {
         let e = self.entries.entry(ip.to_string()).or_default();
-        if e.locked_until.map(|until| now < until).unwrap_or(false) {
-            return; // 锁定期内：不计数、不延期
+        if let Some(until) = e.locked_until {
+            if now < until {
+                return; // 锁定期内：不计数、不延期
+            }
+            // 已过期：与 check 到期分支同口径——清锁 + 清计数，过期后的失败从零起算
+            e.locked_until = None;
+            e.failures = 0;
         }
         e.failures += 1;
         if e.failures >= MAX_FAILURES {
@@ -310,6 +319,34 @@ mod tests {
         );
     }
 
+    /// 评审 Minor 1（A2 fixup）：到期后未经 check 直接 record_failure 的失败必须存活——
+    /// 若 record_failure 不先清过期锁，之后 check 的到期分支会把过期后攒下的失败
+    /// （本测试恰 4 次）一笔清零（静默蒸发，攻击者白得全新 5 次预算）。
+    /// 变异锚点：还原为"仅锁内 return、不清过期锁"时，末断言必由 Locked 退化 Allowed
+    #[test]
+    fn failures_after_expiry_survive_late_check() {
+        let mut rl = PinRateLimiter::new();
+        let mut t = FakeClock(0);
+        for _ in 0..5 {
+            rl.record_failure("1.1.1.1", t.now());
+        }
+        t.advance_ms(600_000); // 恰到期（now == 截止），**不经过 check**
+        for _ in 0..4 {
+            rl.record_failure("1.1.1.1", t.now()); // 过期后累计，须存活
+        }
+        // 此刻才首次观察到过期——4 次失败不得被清
+        assert_eq!(rl.check("1.1.1.1", t.now()), RateDecision::Allowed);
+        // 过期后第 5 次失败即再锁（若被蒸发则此处仍 Allowed）
+        rl.record_failure("1.1.1.1", t.now());
+        assert_eq!(
+            rl.check("1.1.1.1", t.now()),
+            RateDecision::Locked {
+                retry_after_secs: 600
+            },
+            "过期后未经 check 攒下的失败必须存活，第 5 次即再锁"
+        );
+    }
+
     /// record_success 清零该 IP 计数：错 4 次 → 成功 → 再错 4 次仍放行（从零起算）
     #[test]
     fn record_success_resets_counter() {
@@ -334,6 +371,43 @@ mod tests {
                 retry_after_secs: 600
             },
             "清零后重新数满 5 次"
+        );
+    }
+
+    /// 评审补缺 a：retry_after 向上取整的**非整秒半边**——剩 1500ms 报 2 秒
+    /// （与"剩 1ms 报 1 秒"同一 ceil 口径，避免 0/小额秒数误导客户端立即重试）
+    #[test]
+    fn retry_after_rounds_up_partial_seconds() {
+        let mut rl = PinRateLimiter::new();
+        let mut t = FakeClock(0);
+        for _ in 0..5 {
+            rl.record_failure("1.1.1.1", t.now());
+        }
+        t.advance_ms(598_500); // 剩 1500ms
+        assert_eq!(
+            rl.check("1.1.1.1", t.now()),
+            RateDecision::Locked {
+                retry_after_secs: 2
+            },
+            "1500ms 向上取整为 2 秒"
+        );
+    }
+
+    /// 评审补缺 c：record_success 对未见过的 IP 是无害空操作（remove absent key）——
+    /// 不 panic、不留状态、不产生隐性计数（后续 4 次失败仍不足锁定）
+    #[test]
+    fn record_success_on_unseen_ip_is_harmless_noop() {
+        let mut rl = PinRateLimiter::new();
+        let t = FakeClock(7);
+        rl.record_success("9.9.9.9");
+        assert_eq!(rl.check("9.9.9.9", t.now()), RateDecision::Allowed);
+        for _ in 0..4 {
+            rl.record_failure("9.9.9.9", t.now());
+        }
+        assert_eq!(
+            rl.check("9.9.9.9", t.now()),
+            RateDecision::Allowed,
+            "未见 IP 的成功不留任何隐性计数"
         );
     }
 
