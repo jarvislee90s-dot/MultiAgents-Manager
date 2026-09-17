@@ -14,6 +14,14 @@ use std::path::Path;
 #[derive(Deserialize)]
 struct MessageData {
     role: Option<String>,
+    error: Option<ErrorData>,
+}
+
+/// message.data.error JSON 结构（取证样本：`{"name":"APIError","data":{…}}`，
+/// 本机 10 条：9×APIError 401 + 1×MessageAbortedError）
+#[derive(Deserialize)]
+struct ErrorData {
+    name: Option<String>,
 }
 
 /// part.data JSON 结构
@@ -215,9 +223,11 @@ fn build_session_from_row(
     time_updated: i64,
     process: &AgentProcess,
 ) -> Option<Session> {
-    let (last_role, last_message) = get_last_message_info(conn, session_id);
+    let (last_role, last_message, last_error) = get_last_message_info(conn, session_id);
     let last_msg_time = get_last_message_time(conn, session_id);
-    // 会话尾部部件信号（§4.3）：末条 part + 所属 role；仅 text/patch 尾按需查 step 部件
+    // 会话尾部部件信号（§4.3）：末条 part + 所属 role；仅 text/patch 尾按需查 step 部件。
+    // user 消息的 part 也是 text 类型，但 tail_part_signal 对 role=user 首行即短路，
+    // 先排除 user 尾再查 has_step，省掉最高频状态（输入刚提交）的每轮查询
     let tail = get_session_tail_part(conn, session_id)
         .map(|t| {
             let ptype = t
@@ -225,19 +235,23 @@ fn build_session_from_row(
                 .get("type")
                 .and_then(|x| x.as_str())
                 .unwrap_or_default();
-            let has_step =
-                (ptype == "text" || ptype == "patch") && message_has_step_part(conn, &t.message_id);
+            let has_step = t.message_role.as_deref() != Some("user")
+                && (ptype == "text" || ptype == "patch")
+                && message_has_step_part(conn, &t.message_id);
             tail_part_signal(&t.part, t.message_role.as_deref(), has_step)
         })
         .unwrap_or(TailSignal::Fallback);
 
-    let status = determine_opencode_status(
-        process.cpu_usage,
-        last_role.as_deref(),
-        last_msg_time,
-        time_updated,
-        tail,
-    );
+    // §4.3 前置规则优先：末条消息失败/中止判定高于尾部部件信号
+    let status = failed_request_status(last_error.as_deref()).unwrap_or_else(|| {
+        determine_opencode_status(
+            process.cpu_usage,
+            last_role.as_deref(),
+            last_msg_time,
+            time_updated,
+            tail,
+        )
+    });
     let last_activity_at = ms_to_iso(time_updated);
 
     let title = title.unwrap_or("").to_string();
@@ -283,21 +297,24 @@ fn build_session_from_row(
 /// 获取最后一条消息的时间戳（毫秒）
 fn get_last_message_time(conn: &Connection, session_id: &str) -> i64 {
     conn.query_row(
-        "SELECT time_created FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
+        "SELECT time_created FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
         [session_id],
         |row| row.get::<_, i64>(0),
     )
     .unwrap_or(0)
 }
 
-/// 获取会话最后一条消息的角色和文本
-fn get_last_message_info(conn: &Connection, session_id: &str) -> (Option<String>, Option<String>) {
-    // 查最后一条消息
+/// 获取会话最后一条消息的角色、文本与失败错误名（错误名供 §4.3 前置规则）
+fn get_last_message_info(
+    conn: &Connection,
+    session_id: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    // 查最后一条消息（id 为 ULID，作同毫秒平局破缺键）
     let mut stmt = match conn.prepare(
-        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
     ) {
         Ok(s) => s,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None),
     };
 
     let result = stmt.query_row([session_id], |row| {
@@ -306,24 +323,24 @@ fn get_last_message_info(conn: &Connection, session_id: &str) -> (Option<String>
 
     let (message_id, data_json) = match result {
         Ok(r) => r,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None),
     };
 
-    // 解析 message.data JSON 获取 role
-    let role = serde_json::from_str::<MessageData>(&data_json)
-        .ok()
-        .and_then(|d| d.role);
+    // 解析 message.data JSON 获取 role 与 error.name
+    let data = serde_json::from_str::<MessageData>(&data_json).ok();
+    let role = data.as_ref().and_then(|d| d.role.clone());
+    let error_name = data.and_then(|d| d.error).and_then(|e| e.name);
 
     // 查该消息的 text 类型 parts
     let text = get_message_text(conn, &message_id);
 
-    (role, text)
+    (role, text, error_name)
 }
 
 /// 获取消息的文本内容（优先 text 类型，其次 reasoning）
 fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
     let mut stmt = conn
-        .prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC")
+        .prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC")
         .ok()?;
 
     let mut text_content: Option<String> = None;
@@ -378,7 +395,7 @@ fn get_session_tail_part(conn: &Connection, session_id: &str) -> Option<SessionT
         .query_row(
             "SELECT p.message_id, p.data, m.data FROM part p \
              LEFT JOIN message m ON m.id = p.message_id \
-             WHERE p.session_id = ?1 ORDER BY p.time_created DESC LIMIT 1",
+             WHERE p.session_id = ?1 ORDER BY p.time_created DESC, p.id DESC LIMIT 1",
             [session_id],
             |r| {
                 Ok((
@@ -473,6 +490,20 @@ fn tail_part_signal(
             }
         }
         _ => TailSignal::Fallback,
+    }
+}
+
+/// 末条消息失败判定（spec §4.3 前置规则，2026-09-17 用户裁决）：末条消息
+/// `data.error` 非空 → Some(终态)，优先于尾部部件信号——失败请求的 error 落在
+/// 0 part 的空 assistant 占位行上、尾部 part 停留在 user 文本，走部件规则会
+/// 误判「输入刚提交」永久黄。`MessageAbortedError`（用户主动 Esc）→ Idle 绿
+/// （主动终止是用户已知事实，不提示）；其余 error（含 name 缺失）→ Waiting 红
+/// （需要介入，绿→红边沿为正确报警）
+fn failed_request_status(error_name: Option<&str>) -> Option<SessionStatus> {
+    match error_name {
+        None => None,
+        Some("MessageAbortedError") => Some(SessionStatus::Idle),
+        Some(_) => Some(SessionStatus::Waiting),
     }
 }
 
@@ -640,6 +671,60 @@ mod tail_signal_tests {
         );
     }
 
+    /// 末条消息失败判定（§4.3 前置规则，2026-09-17 用户裁决）：
+    /// APIError → 红（需介入）；主动中止（Esc）→ 绿（用户已知，不提示）；
+    /// 无 error → None 走尾部部件规则；未知 error 一律红（宁红不漏报）
+    #[test]
+    fn failed_request_status_rules() {
+        assert_eq!(
+            failed_request_status(Some("APIError")),
+            Some(crate::session::SessionStatus::Waiting)
+        );
+        assert_eq!(
+            failed_request_status(Some("MessageAbortedError")),
+            Some(crate::session::SessionStatus::Idle)
+        );
+        assert_eq!(
+            failed_request_status(Some("WhateverError")),
+            Some(crate::session::SessionStatus::Waiting)
+        );
+        assert_eq!(failed_request_status(None), None);
+    }
+
+    /// 尾部件查询平局破缺：同毫秒两条 part 按 id 倒序取——id 为 ULID（字典序=时间序，
+    /// opencode 自身索引同以 id 为顺序键）；无破缺时平局胜者依查询计划而定，
+    /// text 与 step-finish(stop) 信号互异（Running vs TurnDone）会翻转状态
+    #[test]
+    fn tail_part_tie_breaks_by_id_desc() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1','s1',100,'{\"role\":\"assistant\"}')",
+            [],
+        )
+        .unwrap();
+        // 同毫秒两条，插入序与 id 序相悖（先插 id 大者）：应稳定取 id 大的 step-finish(stop)
+        conn.execute(
+            "INSERT INTO part VALUES ('prt_0AA2','m1','s1',300,'{\"type\":\"step-finish\",\"reason\":\"stop\"}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('prt_0AA1','m1','s1',300,'{\"type\":\"text\",\"text\":\"hi\"}')",
+            [],
+        )
+        .unwrap();
+        let tail = get_session_tail_part(&conn, "s1").unwrap();
+        assert_eq!(
+            tail.part.get("type").and_then(|t| t.as_str()),
+            Some("step-finish")
+        );
+    }
+
     /// TurnDone / Fallback 走既有语义（assistant+新鲜 → Waiting；超窗 → Idle）
     #[test]
     fn turn_done_and_fallback_keep_legacy_behavior() {
@@ -663,7 +748,7 @@ mod tail_signal_tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-             CREATE TABLE part (id INTEGER PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
         )
         .unwrap();
         conn.execute(
@@ -678,7 +763,7 @@ mod tail_signal_tests {
         .unwrap();
         // 占位行 m2 无部件；末条 part 属 m1（user）
         conn.execute(
-            "INSERT INTO part VALUES (1,'m1','s1',101,'{\"type\":\"text\",\"text\":\"列一下目录\"}')",
+            "INSERT INTO part VALUES ('prt_001','m1','s1',101,'{\"type\":\"text\",\"text\":\"列一下目录\"}')",
             [],
         )
         .unwrap();
@@ -689,7 +774,7 @@ mod tail_signal_tests {
         assert!(!message_has_step_part(&conn, "m2"));
         // step 部件探测
         conn.execute(
-            "INSERT INTO part VALUES (2,'m2','s1',300,'{\"type\":\"step-finish\",\"reason\":\"stop\"}')",
+            "INSERT INTO part VALUES ('prt_002','m2','s1',300,'{\"type\":\"step-finish\",\"reason\":\"stop\"}')",
             [],
         )
         .unwrap();
@@ -723,7 +808,7 @@ mod matching_tests {
             "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT, time_updated INTEGER);
              CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, name TEXT);
              CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-             CREATE TABLE part (message_id TEXT, data TEXT, time_created INTEGER);",
+             CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT, time_created INTEGER);",
         )
         .unwrap();
         for (id, dir, title, ts) in sessions {
@@ -732,6 +817,68 @@ mod matching_tests {
                 rusqlite::params![id, dir, title, ts],
             )
             .unwrap();
+        }
+    }
+
+    /// §4.3 前置规则端到端（取证形态 ses_f5574c39：末条消息 = 0 part 空 assistant
+    /// 占位行且带 data.error，尾部 part 停留在 user 文本 → 部件规则判 Running 黄；
+    /// error 判定须优先）：APIError → Waiting 红；MessageAbortedError（主动 Esc）→ Idle 绿
+    #[test]
+    fn failed_request_red_and_abort_green_end_to_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture_db(
+            &db,
+            &[
+                ("ses_fail", "C:/Users/x/F", "失败会话", 2000),
+                ("ses_abort", "C:/Users/x/G", "中止会话", 2000),
+            ],
+        );
+        let conn = Connection::open(&db).unwrap();
+        let err_api = r#"{"name":"APIError","data":{"message":"Invalid API key."}}"#;
+        let err_abort = r#"{"name":"MessageAbortedError","data":{"message":"Aborted"}}"#;
+        for (ses, err) in [("ses_fail", err_api), ("ses_abort", err_abort)] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, 100, '{\"role\":\"user\"}')",
+                rusqlite::params![format!("mu_{ses}"), ses],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, data, time_created) VALUES (?1, ?2, ?3, '{\"type\":\"text\",\"text\":\"跑一下\"}', 101)",
+                rusqlite::params![format!("pu_{ses}"), format!("mu_{ses}"), ses],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, 200, ?3)",
+                rusqlite::params![
+                    format!("ma_{ses}"),
+                    ses,
+                    format!(r#"{{"role":"assistant","error":{err}}}"#)
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let procs = vec![
+            fake_process(11, "C:\\Users\\x\\F"),
+            fake_process(22, "C:\\Users\\x\\G"),
+        ];
+        let sessions = get_opencode_sessions_with_db(&db, &procs);
+        assert_eq!(sessions.len(), 2, "两会话各一张卡");
+        for s in &sessions {
+            match s.id.as_str() {
+                "ses_fail" => assert_eq!(
+                    s.status,
+                    crate::session::SessionStatus::Waiting,
+                    "失败请求挂红（需要用户介入）"
+                ),
+                "ses_abort" => assert_eq!(
+                    s.status,
+                    crate::session::SessionStatus::Idle,
+                    "主动中止不提示（绿）"
+                ),
+                other => panic!("意外会话 {other}"),
+            }
         }
     }
 
