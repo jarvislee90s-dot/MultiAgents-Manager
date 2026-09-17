@@ -61,7 +61,12 @@ toml = "0.8"
 toml_edit = "0.22"
 trash = "5"
 semver = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# system-proxy：reqwest 的**默认特性**，被 default-features=false 一并关掉——M4 T1d
+# 下载器不读 Windows/macOS 系统代理、直连 github.com 失败的根因，必须显式加回
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+# M4 T1d：cloudflared 下载完整性校验（固定版本 + release 页 SHA256 表比对；
+# 0.10 本就存在于依赖树，升直依不新增传递项）
+sha2 = "0.10"
 zip = "4"
 # dsh 会话日志为多帧拼接的 zstd 容器（M0 F1），解码用
 zstd = "0.13"

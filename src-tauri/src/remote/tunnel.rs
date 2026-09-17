@@ -39,9 +39,15 @@ pub fn cloudflared_path() -> PathBuf {
         .join(bin_name())
 }
 
-/// 下载源（纯函数）：官方 GitHub Releases latest 固定资产名（2026-09-16 spec T1d 自决默认）
-pub fn download_url_for() -> Result<String, String> {
-    let asset = if cfg!(target_os = "macos") {
+/// cloudflared 固定版本（用户实测版本）。**固定版本是 sha256 校验与镜像回退不引入
+/// 供应链风险的前提**——latest 会随上游漂移，校验表与镜像缓存都跟不上；升级 =
+/// 改本常量 + 逐项更新 expected_sha256 表（research/README.md 登记，Task 7 做）
+pub const CLOUDFLARED_VERSION: &str = "2026.9.1";
+
+/// 平台资产名（纯函数）：download_url_for 的 URL 末段、expected_sha256 查表键与
+/// 失败文案共用同一标识——三处必须恒一致，抽出单一来源
+pub fn asset_name() -> &'static str {
+    if cfg!(target_os = "macos") {
         if cfg!(target_arch = "aarch64") {
             "cloudflared-darwin-arm64.tgz"
         } else {
@@ -53,9 +59,104 @@ pub fn download_url_for() -> Result<String, String> {
         "cloudflared-linux-arm64"
     } else {
         "cloudflared-linux-amd64"
-    };
+    }
+}
+
+/// 官方 SHA256 表（纯函数）：逐字取自 cloudflared {CLOUDFLARED_VERSION} release 页
+/// 的 SHA256 Checksums 清单；macOS 的 .tgz 校验对象是**下载的压缩包本身**（解压前）。
+/// 未知资产直接 Err（防御性：资产名写错立刻暴露，绝不静默免检）。
+/// 升级流程：改 CLOUDFLARED_VERSION → 从新 release 页重取五值 → 逐项替换
+fn expected_sha256(asset: &str) -> Result<&'static str, String> {
+    match asset {
+        "cloudflared-darwin-amd64.tgz" => {
+            Ok("1ea07ae775b03236bd6be18ca1848d6bdc4af2f4f3bce398823b5a36e5761b75")
+        }
+        "cloudflared-darwin-arm64.tgz" => {
+            Ok("9a0b19f67dc7a3011bc6b972c7ce06a5fcea8784ac6bd599ffa382ea4aeb5a6e")
+        }
+        "cloudflared-windows-amd64.exe" => {
+            Ok("2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712")
+        }
+        "cloudflared-linux-amd64" => {
+            Ok("03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd68cc")
+        }
+        "cloudflared-linux-arm64" => {
+            Ok("3d97437c71848bd8df68041e12436b484a661d95073ea1937f01a845ce88faa3")
+        }
+        other => Err(format!(
+            "未知 cloudflared 资产名: {other:?}（sha256 表未登记，拒绝下载）"
+        )),
+    }
+}
+
+/// 候选下载源（纯函数）：官方在首位，其后镜像（前缀 + 完整官方 URL 拼接）。
+/// 镜像入表前置条件：开发期 `curl -sI` 实测存活（302/200），死镜像剔除——
+/// 2026-09-17 实测 ghfast.top=200、gh-proxy.com=200，均在表
+fn download_candidates(official: &str) -> Vec<String> {
+    const MIRROR_PREFIXES: [&str; 2] = ["https://ghfast.top/", "https://gh-proxy.com/"];
+    let mut out = vec![official.to_string()];
+    out.extend(MIRROR_PREFIXES.map(|p| format!("{p}{official}")));
+    out
+}
+
+/// sha256 完整性校验（纯函数）：hex 小写比对——匹配 Ok(())，不符 Err（该候选弃用）
+fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let hex: String = Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if hex == expected.to_ascii_lowercase() {
+        Ok(())
+    } else {
+        Err(format!("sha256 校验不符（期望 {expected}，实际 {hex}）"))
+    }
+}
+
+/// 下载编排内核（纯编排，fetch_one 注入——生产实现才碰网络）：按候选序尝试
+/// 下载 → sha256 校验 → 匹配才落盘；失败/不符的候选弃用换下一；全部失败聚合原因。
+/// 本地写盘失败不换候选（磁盘问题换镜像无解）直接 Err
+fn try_download(
+    candidates: &[String],
+    expected: &str,
+    mut fetch_one: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    dest: &Path,
+) -> Result<(), String> {
+    let mut errs: Vec<String> = Vec::new();
+    for url in candidates {
+        match fetch_one(url) {
+            Ok(bytes) => match verify_sha256(&bytes, expected) {
+                Ok(()) => {
+                    if let Some(dir) = dest.parent() {
+                        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败: {e}"))?;
+                    }
+                    return std::fs::write(dest, &bytes).map_err(|e| format!("写文件失败: {e}"));
+                }
+                Err(e) => errs.push(format!("{url} → {e}")),
+            },
+            Err(e) => errs.push(format!("{url} → {e}")),
+        }
+    }
+    Err(format!("全部候选源失败: {}", errs.join("；")))
+}
+
+/// 终态获取失败文案（纯函数）：原因 + 官方下载页 + **完整绝对路径**指引——
+/// 旧文案只给 `~/.mam/bin/` 相对写法，用户无法直接定位放置点
+fn download_failure_message(reason: &str, asset: &str, dest: &Path) -> String {
+    format!(
+        "cloudflared 自动获取失败: {reason}；可从 \
+         https://github.com/cloudflare/cloudflared/releases 手动下载 {asset}，\
+         放到 {} 后重试",
+        dest.display()
+    )
+}
+
+/// 下载源（纯函数）：官方 GitHub Releases **固定版本** + 固定资产名（latest 已弃用——
+/// 固定版本是 sha256 校验与镜像回退不引入供应链风险的前提，见 CLOUDFLARED_VERSION）
+pub fn download_url_for() -> Result<String, String> {
     Ok(format!(
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}"
+        "https://github.com/cloudflare/cloudflared/releases/download/{CLOUDFLARED_VERSION}/{}",
+        asset_name()
     ))
 }
 
@@ -75,21 +176,22 @@ fn binary_ready(p: &Path) -> bool {
     true
 }
 
-/// 下载器注入缝形态（生产 download_to / 测试闭包共用；clippy type_complexity
-/// 对函数参数的阈值更严，按其建议抽 type 定义——具体类型不变）
-pub type Downloader = Box<dyn FnOnce(&str, &Path) -> Result<(), String>>;
+/// 下载器注入缝形态（生产 download_to / 测试闭包共用；只收落盘 dest——候选循环 +
+/// sha 校验的编排已收口进生产实现，测试闭包直接写假文件）。clippy type_complexity
+/// 对函数参数的阈值更严，按其建议抽 type 定义——具体类型不变
+pub type Downloader = Box<dyn FnOnce(&Path) -> Result<(), String>>;
 
-/// 获取内核（可测）：已就绪 → 直接返回；否则调注入下载器（生产实现见 download_to），
-/// 下载完成后 macOS 从 .tgz 解压（系统 tar）、赋可执行位；Windows 直接落位。
+/// 获取内核（可测）：已就绪 → 直接返回；否则调注入下载器（生产实现见 download_to，
+/// 内部完成候选回退 + sha256 校验 + 落盘到 dest），下载完成后 macOS 从 .tgz 解压
+/// （系统 tar）、赋可执行位；Windows 直接落位。
 /// 平台分支用编译期 cfg 属性而非运行期 cfg!：分支体内 use 了 std::os::unix 专属
 /// 条目，运行期分支在 Windows 目标上无法编译（对蓝本的最小编译适配，各平台行为不变）
 pub fn ensure_with(bin: &Path, dl: Downloader) -> Result<PathBuf, String> {
     if binary_ready(bin) {
         return Ok(bin.to_path_buf());
     }
-    let url = download_url_for()?;
     let tmp = bin.with_extension("download");
-    dl(&url, &tmp)?;
+    dl(&tmp)?;
     #[cfg(target_os = "macos")]
     {
         // .tgz 内含裸二进制 cloudflared：解到同目录再改名（tar 存在于 macOS/全部 CI）
@@ -123,21 +225,41 @@ pub fn ensure_with(bin: &Path, dl: Downloader) -> Result<PathBuf, String> {
     }
 }
 
-/// 生产下载器（reqwest rustls，进度不回调——设置页显示「下载中」文案即可）。
-/// 仅生产路径调用（Task 5 接线），测试零网络红线不触碰本函数
-pub async fn download_to(url: &str, dest: &Path) -> Result<(), String> {
-    let bytes = reqwest::get(url)
-        .await
-        .map_err(|e| format!("下载失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("下载失败: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| format!("下载中断: {e}"))?;
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败: {e}"))?;
-    }
-    std::fs::write(dest, &bytes).map_err(|e| format!("写文件失败: {e}"))
+/// 生产下载器（supervise 在 spawn_blocking 线程调用——同步外壳，单次 HTTP 才
+/// block_on，阻塞线程无 runtime 限制）。reqwest rustls + system-proxy（读 Windows/
+/// macOS 系统代理——此前 default-features=false 把该默认特性关掉导致直连
+/// github.com 失败的根因修复）+ connect 15s / 总 600s 超时；候选序尝试
+/// （官方 + 实测存活镜像）逐个 sha256 校验，通过才落盘 dest。
+/// 仅生产路径调用，测试零网络红线不触碰本函数
+pub fn download_to(dest: &Path) -> Result<(), String> {
+    let official = download_url_for()?;
+    let expected = expected_sha256(asset_name())?;
+    let candidates = download_candidates(&official);
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(600)) // 60MB 级二进制容忍慢网、杜绝永久挂起
+        .build()
+        .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
+    try_download(
+        &candidates,
+        expected,
+        |url| {
+            tauri::async_runtime::block_on(async {
+                let bytes = client
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("下载失败: {e}"))?
+                    .error_for_status()
+                    .map_err(|e| format!("下载失败: {e}"))?
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("下载中断: {e}"))?;
+                Ok(bytes.to_vec())
+            })
+        },
+        dest,
+    )
 }
 
 // ============================================================
@@ -182,7 +304,8 @@ static TUNNEL: Lazy<Mutex<Option<TunnelHandle>>> = Lazy::new(|| Mutex::new(None)
 /// → 追加 `/m`；已以 `/m` 结尾则幂等（不重复追加，不产生 `/m/m`）。
 /// 快照 url 契约：摄取点（supervise 的 stderr 解析）统一过本函数，url 恒为
 /// 看板完整地址——消费方（地址表 / issue_token / 托盘复制 / toast）直接使用，
-/// 不再各自拼接（根路径 / 会 404，服务端只伺服 /m 前缀）
+/// 不再各自拼接（根路径 / 会 404，服务端只伺服 /m 前缀）。
+/// 输入假定为裸域名（无路径）；若未来解析器返回带路径 URL 需重新评估
 pub fn board_url(base: &str) -> String {
     let t = base.trim_end_matches('/');
     if t.ends_with("/m") {
@@ -190,6 +313,19 @@ pub fn board_url(base: &str) -> String {
     } else {
         format!("{t}/m")
     }
+}
+
+/// stderr 摄取点解析+归一（纯函数）：quick=trycloudflare 行 / named=自有子域行
+/// → 裸域名 → board_url 归一为看板完整地址。原「parse_quick_url/parse_named_url
+/// → board_url」两步收口为单点，锁定「快照 url 恒为看板地址」契约的执行点——
+/// stderr 任务只调本函数，不得绕开归一直取裸域名
+pub fn parsed_board_url(line: &str, quick: bool) -> Option<String> {
+    let parsed = if quick {
+        parse_quick_url(line)
+    } else {
+        parse_named_url(line)
+    };
+    parsed.map(|u| board_url(&u))
 }
 
 /// quick stderr 地址解析（纯函数）：行内 https://*.trycloudflare.com 才算
@@ -266,28 +402,29 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         s.error = None;
     });
     // 获取二进制（可能触发下载——秒到分钟级）。ensure_with 的下载器是**同步闭包**，
-    // 内部需要 async 的 download_to——必须在 spawn_blocking 线程里 block_on：
-    // supervise 本身是 async 任务，直接 tauri::async_runtime::block_on 会死锁/panic
-    // （async 上下文内禁止 block_on；blocking 线程池无此限制）
+    // 生产实现 download_to 内部对单次 HTTP 做 block_on：必须在 spawn_blocking 线程里
+    // 调用——supervise 本身是 async 任务，async 上下文内禁止 block_on（会死锁/panic；
+    // blocking 线程池无此限制）
     let bin_path = cloudflared_path();
-    let bin = match tokio::task::spawn_blocking(move || {
-        let dl = |url: &str, dest: &Path| tauri::async_runtime::block_on(download_to(url, dest));
-        ensure_with(&bin_path, Box::new(dl))
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("获取任务异常: {e}")))
-    {
-        Ok(p) => p,
-        Err(e) => {
-            set_snapshot(|s| {
-                s.error = Some(format!(
-                    "cloudflared 获取失败: {e}；可手动放置到 ~/.mam/bin/{}",
-                    bin_name()
-                ))
-            });
-            return;
-        }
-    };
+    // bin_path 被 move 进 spawn_blocking 闭包——显示串先另存（错误文案需完整绝对路径）
+    let bin_display = bin_path.display().to_string();
+    let bin =
+        match tokio::task::spawn_blocking(move || ensure_with(&bin_path, Box::new(download_to)))
+            .await
+            .unwrap_or_else(|e| Err(format!("获取任务异常: {e}")))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                set_snapshot(|s| {
+                    s.error = Some(download_failure_message(
+                        &e,
+                        asset_name(),
+                        Path::new(&bin_display),
+                    ))
+                });
+                return;
+            }
+        };
     let mut failures: u32 = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -325,16 +462,10 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                 let mut lines = BufReader::new(err).lines();
                 // clippy whilelet_loop 适配（蓝本 loop/match 同语义：Ok(None)/Err 均终止）
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let parsed = if quick {
-                        parse_quick_url(&line)
-                    } else {
-                        parse_named_url(&line)
-                    };
-                    // 归一在摄取点：解析出的裸域名统一过 board_url（quick/named 同一路径），
+                    // 归一在摄取点（parsed_board_url 内部完成解析 + board_url 两步）：
                     // 快照 url 恒为看板完整地址——url_sink / set_snapshot / emit_ui 消费的
                     // 全是归一后的值，下游（地址表 / issue_token / 托盘 / toast）不再各自拼 /m
-                    let u = parsed.map(|u| board_url(&u));
-                    if let Some(u) = u {
+                    if let Some(u) = parsed_board_url(&line, quick) {
                         let fresh = {
                             let mut g = url_sink2.lock().unwrap();
                             let fresh = g.as_ref() != Some(&u);
@@ -436,6 +567,9 @@ mod tests {
     fn download_url_matches_platform() {
         // 纯函数按 cfg 分支断言本机平台（跨平台 CI 各自命中各自分支）
         let url = download_url_for().unwrap();
+        // 固定版本段（pinned）：latest 是 sha 校验与镜像回退的供应链风险源，禁用
+        assert!(url.contains(&format!("/releases/download/{CLOUDFLARED_VERSION}/")));
+        assert!(!url.contains("latest"));
         if cfg!(target_os = "macos") {
             assert!(url.contains("cloudflared-darwin-"));
             assert!(url.ends_with(".tgz"));
@@ -443,6 +577,8 @@ mod tests {
             assert!(url.ends_with("cloudflared-windows-amd64.exe"));
         }
         assert!(url.starts_with("https://github.com/cloudflare/cloudflared/releases/"));
+        // URL 末段恒为资产名——expected_sha256 查表与失败文案共用同一标识
+        assert_eq!(url.rsplit('/').next(), Some(asset_name()));
     }
 
     #[test]
@@ -465,13 +601,197 @@ mod tests {
         let c2 = called.clone();
         let r = ensure_with(
             &bin,
-            Box::new(move |_url, _dest| {
+            Box::new(move |_dest| {
                 c2.store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }),
         );
         assert!(r.is_ok());
         assert!(!called.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // ==== Task 6：下载器加固（固定版本 + sha256 + 镜像回退 + 失败指引）====
+    // 零网络红线：fetch 闭包全部为内存假实现，不触真实 HTTP
+
+    /// 公认 SHA256 测试向量：sha256("hello")
+    const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn download_candidates_official_first_then_alive_mirrors() {
+        let official =
+            "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-windows-amd64.exe";
+        let c = download_candidates(official);
+        assert_eq!(c[0], official, "官方源恒首位");
+        // 镜像 = 前缀 + 完整官方 URL；两者 2026-09-17 开发期 curl -sI 实测均 200 存活
+        assert_eq!(c[1], format!("https://ghfast.top/{official}"));
+        assert_eq!(c[2], format!("https://gh-proxy.com/{official}"));
+        assert_eq!(c.len(), 3);
+    }
+
+    #[test]
+    fn expected_sha256_table_matches_official_manifest() {
+        // 值逐字对齐 2026.9.1 release 页 SHA256 Checksums 清单（升级 = 改常量 + 更新本表）
+        assert_eq!(
+            expected_sha256("cloudflared-darwin-amd64.tgz").unwrap(),
+            "1ea07ae775b03236bd6be18ca1848d6bdc4af2f4f3bce398823b5a36e5761b75"
+        );
+        assert_eq!(
+            expected_sha256("cloudflared-darwin-arm64.tgz").unwrap(),
+            "9a0b19f67dc7a3011bc6b972c7ce06a5fcea8784ac6bd599ffa382ea4aeb5a6e"
+        );
+        assert_eq!(
+            expected_sha256("cloudflared-windows-amd64.exe").unwrap(),
+            "2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712"
+        );
+        assert_eq!(
+            expected_sha256("cloudflared-linux-amd64").unwrap(),
+            "03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd68cc"
+        );
+        assert_eq!(
+            expected_sha256("cloudflared-linux-arm64").unwrap(),
+            "3d97437c71848bd8df68041e12436b484a661d95073ea1937f01a845ce88faa3"
+        );
+    }
+
+    #[test]
+    fn expected_sha256_rejects_unknown_asset() {
+        // 防御性：资产名写错立刻暴露，绝不静默免检
+        assert!(expected_sha256("cloudflared-freebsd-amd64").is_err());
+        assert!(expected_sha256("").is_err());
+    }
+
+    #[test]
+    fn verify_sha256_accepts_correct_and_rejects_wrong_hex() {
+        // 正确 hex 通过
+        assert_eq!(verify_sha256(b"hello", HELLO_SHA), Ok(()));
+        // 错误 hex（另一公认向量的值）拒绝
+        assert!(verify_sha256(
+            b"hello",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )
+        .is_err());
+        // 乱串期望值拒绝
+        assert!(verify_sha256(b"hello", "not-a-hash").is_err());
+    }
+
+    #[test]
+    fn try_download_stops_at_first_valid_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bin").join("cloudflared");
+        let mut called: Vec<String> = vec![];
+        let r = try_download(
+            &["https://a/1".to_string(), "https://b/2".to_string()],
+            HELLO_SHA,
+            |url| {
+                called.push(url.to_string());
+                Ok(b"hello".to_vec())
+            },
+            &dest,
+        );
+        assert!(r.is_ok());
+        // 首候选成功即停：后续 fetch 不被调
+        assert_eq!(called, vec!["https://a/1".to_string()]);
+        // 校验通过才落盘（含父目录自动创建）
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn try_download_falls_back_on_fetch_error_and_sha_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("cloudflared");
+        let mut called: Vec<String> = vec![];
+        let r = try_download(
+            &[
+                "https://a/1".to_string(),
+                "https://b/2".to_string(),
+                "https://c/3".to_string(),
+            ],
+            HELLO_SHA,
+            |url| {
+                called.push(url.to_string());
+                match url {
+                    "https://a/1" => Err("连接超时".into()), // 网络失败 → 换下一
+                    "https://b/2" => Ok(b"corrupted".to_vec()), // sha 不符 → 弃用换下一
+                    _ => Ok(b"hello".to_vec()),              // 首个有效候选
+                }
+            },
+            &dest,
+        );
+        assert!(r.is_ok());
+        assert_eq!(
+            called,
+            vec![
+                "https://a/1".to_string(),
+                "https://b/2".to_string(),
+                "https://c/3".to_string()
+            ],
+            "失败候选依序弃用回落，不得提前终止"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn try_download_errs_and_writes_nothing_when_all_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("cloudflared");
+        let r = try_download(
+            &["https://a/1".to_string(), "https://b/2".to_string()],
+            HELLO_SHA,
+            |url| Err(format!("源不可达: {url}")),
+            &dest,
+        );
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("https://a/1") && msg.contains("https://b/2"),
+            "全部失败须聚合各候选原因: {msg}"
+        );
+        assert!(!dest.exists(), "全失败不得落盘");
+    }
+
+    #[test]
+    fn download_failure_message_has_absolute_path_and_official_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join("bin").join(bin_name()); // 真实绝对路径
+        let msg = download_failure_message("全部候选源失败", asset_name(), &abs);
+        assert!(msg.contains("https://github.com/cloudflare/cloudflared/releases"));
+        assert!(
+            msg.contains(&abs.display().to_string()),
+            "必须含完整绝对路径（不得只有 ~/.mam/bin/ 相对写法）: {msg}"
+        );
+        assert!(msg.contains(asset_name()));
+    }
+
+    #[test]
+    fn parsed_board_url_normalizes_quick_and_named_lines() {
+        // quick 形态 → 看板完整地址（「快照 url 恒为看板地址」契约的执行点）
+        assert_eq!(
+            parsed_board_url(
+                r#"2026-09-16T00:00:00Z INF |  https://example-words-here.trycloudflare.com"#,
+                true
+            ),
+            Some("https://example-words-here.trycloudflare.com/m".to_string())
+        );
+        // named 形态（自有子域行）→ 同样归一
+        assert_eq!(
+            parsed_board_url("INF hostname=https://mam.example.asia", false),
+            Some("https://mam.example.asia/m".to_string())
+        );
+        // 已含 /m 的输入幂等（不产生 /m/m）
+        assert_eq!(
+            parsed_board_url("INF hostname=https://mam.example.asia/m", false),
+            Some("https://mam.example.asia/m".to_string())
+        );
+        // 解析不到的行 → None
+        assert_eq!(
+            parsed_board_url("INF Registered tunnel connection", true),
+            None
+        );
+        // quick 模式下 cloudflare.com 域行不误报
+        assert_eq!(
+            parsed_board_url("see https://docs.cloudflare.com/", true),
+            None
+        );
     }
 
     // ==== Task 5：隧道进程管理（T1b/T1c）纯函数测试 ====
@@ -548,10 +868,16 @@ mod tests {
             serde_json::json!({"url": "http://192.168.1.5:9420/m", "iface": "en0", "primary": true, "kind": "lan"}),
         ];
         let out = super::super::address_entries_with_tunnel(
-            Some("https://mam.example.asia".into()), // 签名 Option<String>（brief 同款 .into() 形态）
+            // 生产输入恒为 board_url 归一后的 /m 形态（快照 url 契约），夹具镜像之
+            Some("https://mam.example.asia/m".into()), // 签名 Option<String>（brief 同款 .into() 形态）
             base.clone(),
         );
         assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0]["url"],
+            serde_json::json!("https://mam.example.asia/m"),
+            "隧道条目 url 原样透传（归一已在摄取点完成，此处不再补 /m）"
+        );
         assert_eq!(out[0]["kind"], serde_json::json!("tunnel"));
         assert_eq!(out[1]["kind"], serde_json::json!("lan"));
         // 无隧道 → 原样（既有条目补 kind="lan"）
