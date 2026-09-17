@@ -137,6 +137,31 @@ pub fn init(conn: &Connection) {
             session_id    TEXT NOT NULL,
             last_seen_at  INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS inject_queue (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id    TEXT NOT NULL,
+            agent_type    TEXT NOT NULL,
+            device_id     TEXT NOT NULL,
+            device_name   TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            jumped        INTEGER NOT NULL DEFAULT 0,
+            enqueued_at   INTEGER NOT NULL,
+            sent_at       INTEGER,
+            failed_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_inject_queue_session ON inject_queue(session_id, id);
+        CREATE TABLE IF NOT EXISTS write_audit (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          INTEGER NOT NULL,
+            device_id   TEXT NOT NULL,
+            device_name TEXT NOT NULL,
+            agent_type  TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            channel     TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            summary     TEXT NOT NULL,
+            result      TEXT NOT NULL
+        );
         "#,
     )
     .expect("Failed to initialize database schema");
