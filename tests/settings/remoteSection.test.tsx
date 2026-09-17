@@ -146,24 +146,127 @@ describe("RemoteSection 本机名称输入（P8b 收尾）", () => {
   });
 });
 
-describe("RemoteSection TLS 确认不可在线撤回（M4 T0b）", () => {
-  it("tls ack: uncheck snaps back with toast, stays checked", async () => {
-    // bind=0.0.0.0 + acked=true 才渲染复选框
+// M4 T0b 语义保留（M4 Task 4 改写）：TLS 确认「只进不退、不可在线撤回」。常驻勾选框
+// 退场后，该语义表现为：已确认（acked）状态下开启不再走任何确认、remote_confirm_public
+// 不再被调（KV 只置位一次），且 UI 无撤销/再确认入口（勾选框已删，由下方用例 F 锁定）。
+// 原用例的「取消勾选回弹 + toast」分支随勾选框整块退场，toast.info 断言反向保留。
+describe("RemoteSection TLS 确认不可在线撤回（M4 T0b，Task 4 改写为开启动作分流）", () => {
+  it("tls ack: 已确认状态下点开 → 直调 remote_toggle，不再确认（只进不退）", async () => {
+    // bind=0.0.0.0 + 已确认（remote.public_ack = "true"）
     invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "remote_status") return Promise.resolve({ ...lanStatus, enabled: true });
+      if (cmd === "remote_status") return Promise.resolve({ ...lanStatus, enabled: false });
       if (cmd === "get_setting")
         return Promise.resolve(args?.key === "remote.public_ack" ? "true" : null);
       return Promise.resolve(null);
     });
     render(<RemoteSection />);
-    const cb = await screen.findByRole("checkbox");
-    expect(cb).toBeChecked();
-    // 常驻说明文案存在
-    expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument();
-    // 取消勾选：仍选中 + toast 提示
-    fireEvent.click(cb);
-    expect(cb).toBeChecked(); // 回弹（受控于 acked，本就 snaps back；本任务补 toast 与文案）
-    await waitFor(() => expect(toastInfoMock).toHaveBeenCalled());
+    // 「开启远程接入」Switch 在 DOM 中先于「电源保活」Switch（渲染顺序稳定）取第一个；
+    // Switch disabled={busy || !status}，先等 status 载入
+    const sw = screen.getAllByRole("switch")[0];
+    await waitFor(() => expect(sw).toBeEnabled());
+    fireEvent.click(sw);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: true })
+    );
+    // 无 Dialog、无再确认：确认只进不退，撤销唯一路径是改绑本机模式（后端 P7 门不变）
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_confirm_public");
+    // 原取消方向 toast 分支已随勾选框删除，不得再触发
+    expect(toastInfoMock).not.toHaveBeenCalled();
+  });
+});
+
+// M4 Task 4（方案 A）：TLS 对外绑定确认改一次性 Dialog——常驻勾选框退场。
+// 编排：0.0.0.0 且未确认 → 点开 Switch 先弹 Dialog（不调后端）；确认 =
+// remote_confirm_public 置位 remote.public_ack → 再 enable()；取消仅关弹窗；
+// 127.0.0.1 与已确认路径直开无感。后端 P7 门 / remote_confirm_public / KV 语义零改动。
+describe("RemoteSection TLS 对外绑定确认改一次性 Dialog（M4 Task 4）", () => {
+  // 开关定位：enable Switch 无 aria 关联标签，DOM 中先于「电源保活」Switch（渲染顺序
+  // 稳定）取第一个；disabled={busy || !status}，点击前先等 status 载入
+  const enableSwitch = () => screen.getAllByRole("switch")[0];
+
+  // bind=0.0.0.0（对外）+ enabled=false（待开启）+ public_ack 可选的最小 mock
+  const mockLanOff = (ack: string | null) => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
+      if (cmd === "remote_status") return { ...lanStatus, enabled: false };
+      if (cmd === "get_setting") return args?.key === "remote.public_ack" ? ack : null;
+      return null;
+    });
+  };
+
+  it("用例 A：bind=0.0.0.0 且未确认 → 点开 Switch 弹 TLS 确认 Dialog，remote_toggle 未被调", async () => {
+    mockLanOff(null);
+    render(<RemoteSection />);
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    fireEvent.click(enableSwitch());
+    expect(await screen.findByText(/Confirm external binding/i)).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_toggle", expect.anything());
+  });
+
+  it("用例 B：Dialog 确认 → remote_confirm_public 先于 remote_toggle(true) 被调，确认后 Dialog 关", async () => {
+    const calls: string[] = [];
+    invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
+      calls.push(cmd);
+      if (cmd === "remote_status") return { ...lanStatus, enabled: false };
+      if (cmd === "get_setting") return null;
+      return null;
+    });
+    render(<RemoteSection />);
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    fireEvent.click(enableSwitch());
+    fireEvent.click(await screen.findByRole("button", { name: /I understand/i }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: true })
+    );
+    // 调用顺序：先置位 ack（后端 P7 门据此放行），再开启——两命令都必须真实发生
+    expect(calls).toContain("remote_confirm_public");
+    expect(calls.indexOf("remote_confirm_public")).toBeLessThan(
+      calls.indexOf("remote_toggle")
+    );
+    // 确认成功 → Dialog 关
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("用例 C：Dialog 取消 → remote_confirm_public / remote_toggle 均未调，仅关 Dialog", async () => {
+    mockLanOff(null);
+    render(<RemoteSection />);
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    fireEvent.click(enableSwitch());
+    fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_confirm_public");
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_toggle", expect.anything());
+  });
+
+  it("用例 D：bind=127.0.0.1 → 点开直调 remote_toggle(true)，无 Dialog 无确认", async () => {
+    render(<RemoteSection />); // 默认 mock：bind=127.0.0.1、enabled=false、public_ack=null
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    fireEvent.click(enableSwitch());
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: true })
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_confirm_public");
+  });
+
+  it("用例 E：bind=0.0.0.0 且已确认 → 点开直调 remote_toggle(true)，无 Dialog 不再确认", async () => {
+    mockLanOff("true");
+    render(<RemoteSection />);
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    fireEvent.click(enableSwitch());
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: true })
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_confirm_public");
+  });
+
+  it("用例 F：旧常驻勾选框文案（tlsAck label / 不可撤回说明）不再渲染", async () => {
+    mockLanOff(null);
+    render(<RemoteSection />);
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    expect(screen.queryByText(/I confirm a TLS reverse proxy/i)).toBeNull();
+    expect(screen.queryByText(/cannot be undone/i)).toBeNull();
   });
 });
 

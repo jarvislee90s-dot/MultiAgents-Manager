@@ -1,12 +1,11 @@
 // 设置页「远程接入」分区（M2 Task 7）：开关 / 绑定二选 / 本机名 / 外部通道三选（M4 T1a）/
-// 地址与局域网候选 / 配对二维码 / TLS 反代确认 / 停止确认弹窗 / 底部安全警示。
+// 地址与局域网候选 / 配对二维码 / TLS 反代确认弹窗（M4 Task 4，开启动作前置）/ 停止确认弹窗。
 // 四命令统一走 src/lib/api/remote.ts；绑定写值走通用 set_setting（commands/settings.rs）；
 // 通道写值走 remote_set_channel（remote/mod.rs，M4 T1a 热切换）。
 import { useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { Copy, QrCode, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -94,6 +93,8 @@ export function RemoteSection() {
   const [pairing, setPairing] = useState<PairingToken | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
+  // TLS 对外绑定确认弹窗（M4 Task 4）：开启动作在 0.0.0.0 且未确认时的前置一次性确认
+  const [tlsOpen, setTlsOpen] = useState(false);
   // 开关在途互斥：连点会并发 remote_toggle（start/stop 竞态），与设置页 toolSaving 同型
   const [busy, setBusy] = useState(false);
   // 电源保活开关（M4 T3，默认开）：受控 Switch，加载回填、切换落盘
@@ -222,8 +223,8 @@ export function RemoteSection() {
     }
   };
 
-  // 开启：后端有 P7 安全门（0.0.0.0 未确认 TLS 反代 → Err），失败 toast 原样透出，
-  // 前端不复制门槛判定（避免与后端双源漂移）
+  // 开启：P7 安全门唯一口径仍在后端（0.0.0.0 未确认 TLS 反代 → Err），失败 toast 原样
+  // 透出；前端 TLS Dialog（M4 Task 4）只是开启动作的 UX 前置分流，不复制门槛判定
   const enable = async () => {
     if (busy) return;
     setBusy(true);
@@ -332,13 +333,20 @@ export function RemoteSection() {
     }
   };
 
-  const confirmPublic = async () => {
+  // TLS 对外绑定确认 + 开启（M4 Task 4，方案 A）：确认挪进「开启远程接入」动作。
+  // 顺序不可换：先 remote_confirm_public 置位 remote.public_ack（后端 P7 门据此放行），
+  // 再走 enable()。任一步失败 toast 原样透出并中止后续步骤——确认失败不置 acked、
+  // 不关弹窗（可就地重试），开启失败由 enable() 既有 busy 互斥与失败 toast 兜底
+  const confirmTlsAndEnable = async () => {
     try {
       await remoteConfirmPublic();
-      setAcked(true);
     } catch (e) {
       toast.error(formatInvokeError(e, t));
+      return;
     }
+    setAcked(true);
+    setTlsOpen(false);
+    await enable();
   };
 
   // qrcode 只在事件处理器中生成 dataURL（不在渲染期调用）；单活跃 token：
@@ -388,7 +396,17 @@ export function RemoteSection() {
           <Switch
             checked={enabled}
             disabled={busy || !status}
-            onCheckedChange={(v) => (v ? void enable() : setStopOpen(true))}
+            onCheckedChange={(v) => {
+              // 关 = 先弹停止确认（断开全部设备，简报 Step 2）
+              if (!v) {
+                setStopOpen(true);
+                return;
+              }
+              // 开（M4 Task 4）= 对外绑定且未确认时先弹 TLS 确认 Dialog（不调后端）；
+              // 其余路径（127.0.0.1 / 已确认）直开无感
+              if (bind === BIND_LAN && !acked) setTlsOpen(true);
+              else void enable();
+            }}
           />
         </div>
         <div className="border-t" />
@@ -555,31 +573,6 @@ export function RemoteSection() {
           </p>
         )}
         <div className="border-t" />
-
-        {/* TLS 反代确认：仅对外绑定（0.0.0.0）时出现；勾选即调 remote_confirm_public 置位。
-            M4 T0b：确认只进不退——取消方向回弹（受控于 acked 态天然回弹）并 toast 明示
-            不可在线撤回；复选框下方常驻说明撤销路径（改绑本机模式） */}
-        {bind === BIND_LAN && (
-          <>
-            <div className="flex items-center justify-between py-2.5">
-              <label className="text-sm font-medium">{t("settings.remote.tlsAck")}</label>
-              <Checkbox
-                checked={acked}
-                onCheckedChange={(v) => {
-                  if (v === true) void confirmPublic();
-                  else
-                    // 分隔符不硬编码：句号收进各 locale 文案（评审 Important：英文 locale 下
-                    // 全角「。」混排是用户可见 i18n 缺陷），组件仅以空格连接两句
-                    toast.info(
-                      `${t("settings.remote.tlsAckNoRevoke")} ${t("settings.remote.tlsAckRevokeByRebind")}`
-                    );
-                }}
-              />
-            </div>
-            <p className="text-muted-foreground pb-2 text-xs">{t("settings.remote.tlsAckHint")}</p>
-            <div className="border-t" />
-          </>
-        )}
 
         {/* 运行中才展示地址与二维码（停止状态无服务可连） */}
         {enabled && status && (
@@ -768,6 +761,25 @@ export function RemoteSection() {
             </Button>
             <Button variant="destructive" onClick={() => void disable()} disabled={busy}>
               {t("settings.remote.stopConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* TLS 对外绑定确认弹窗（M4 Task 4）：0.0.0.0 未确认时开启动作的前置一次性确认。
+          确认 = 置位 remote.public_ack（长期生效）并继续开启；取消仅关弹窗、不调后端 */}
+      <Dialog open={tlsOpen} onOpenChange={setTlsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("settings.remote.tlsDialogTitle")}</DialogTitle>
+            <DialogDescription>{t("settings.remote.tlsDialogDesc")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTlsOpen(false)}>
+              {t("settings.remote.cancel")}
+            </Button>
+            <Button onClick={() => void confirmTlsAndEnable()} disabled={busy}>
+              {t("settings.remote.tlsDialogConfirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
