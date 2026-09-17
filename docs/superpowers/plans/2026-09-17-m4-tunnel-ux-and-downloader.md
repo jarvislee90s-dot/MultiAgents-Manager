@@ -150,6 +150,8 @@ research/README.md                          改：登记 cloudflared 固定版�
 - `research/README.md` 登记 cloudflared 2026.9.1 与升级流程。
 - 门禁（fmt/check 若涉及）→ `docs(m4): 三项用户裁决追记与 cloudflared 版本登记`
 
+（2026-09-17 实施追记：research/README 登记经用户裁决改道 M4 spec §12.5——research/ 不入库；sha256 实取五平台值。）
+
 ---
 
 ## 六、门禁（每个 commit 前全绿）
