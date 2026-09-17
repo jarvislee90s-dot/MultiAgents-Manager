@@ -146,6 +146,19 @@ export function RemoteSection() {
     }
   }, []);
 
+  // 轻量 status 刷新（M4 Task 2）：只刷 status——隧道地址异步到手后随 3s 轮询
+  // 常驻地址区与「当前隧道地址」行，不再只靠 remote-tunnel-address toast。
+  // 刻意不回读 remote.public_ack / remote.host_name：那两 KV 属于 refresh()，
+  // 轮询若复用它会 setAcked/setHostName，clobber 用户编辑中的输入框；
+  // 失败静默（与 refreshLists 同型），下一拍自愈
+  const refreshStatus = useCallback(async () => {
+    try {
+      setStatus(await remoteStatus());
+    } catch {
+      /* 轮询刷新尽力而为 */
+    }
+  }, []);
+
   useEffect(() => {
     if (!enabled) {
       setPendingReqs([]);
@@ -153,9 +166,12 @@ export function RemoteSection() {
       return;
     }
     void refreshLists();
-    const timer = setInterval(() => void refreshLists(), 3000);
+    const timer = setInterval(() => {
+      void refreshStatus();
+      void refreshLists();
+    }, 3000);
     return () => clearInterval(timer);
-  }, [enabled, refreshLists]);
+  }, [enabled, refreshLists, refreshStatus]);
 
   // 上限回填（M4 T2）：进面板读一次已存值（null → 空输入框，占位符即后端默认 3）；
   // 后续轮询不回读，保留用户正在编辑的值

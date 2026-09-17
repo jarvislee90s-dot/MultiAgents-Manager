@@ -2,8 +2,8 @@
 // 设置页「本机名称」输入：加载时 get_setting("remote.host_name") 回填当前值，
 // blur 时 set_setting 原样落盘（空串语义由后端 display_host_name 过滤，前端不校验）。
 // RemoteSection 有既有组件但无既有测试文件，按 toolManagement.test.tsx 的 mock 模式新建。
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { invokeMock, toastInfoMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -244,5 +244,78 @@ describe("RemoteSection 外部通道区块（M4 T1a）", () => {
         expect.objectContaining({ channel: "quick" })
       )
     );
+  });
+});
+
+// M4 Task 2：设置页随 3s 轮询刷新隧道状态——地址常驻不再只靠 toast。
+// 根因：remote_status 只在进面板/开关/改配置动作时读一次；隧道拉起是异步的，
+// 地址到手时只有 remote-tunnel-address 事件弹 toast，页面状态区永远空。
+// fake timer 用法：本 describe 独占 vi.useFakeTimers()，afterEach 还原（防用例间泄漏）；
+// fake timer 只拦宏任务不拦 promise 微任务，故用 await act(async () => {}) 冲异步链，
+// 不用 waitFor/findBy（其内部 setInterval 会被 fake timer 卡死）。
+describe("RemoteSection 隧道状态随 3s 轮询常驻（M4 Task 2）", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // 冲干净整条 promise 微任务链（refresh/backfill/interval 回调均为微任务续体）
+  const flushAsync = async () => {
+    await act(async () => {});
+  };
+
+  it("用例 A：隧道地址到手后 ≤3s，地址区与「Current tunnel URL」行自动出现", async () => {
+    vi.useFakeTimers();
+    // 隧道拉起是异步的：首拍 remote_status 无 tunnelUrl（cloudflared 未返回），3s 后到手
+    let tunnelUp = false;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_status") {
+        return tunnelUp
+          ? {
+              ...lanStatus,
+              tunnelUrl: "https://mam-win.example.asia",
+              addresses: [
+                { url: "https://mam-win.example.asia", iface: "", primary: true, kind: "tunnel" },
+                { url: "http://192.168.66.202:9420/m", iface: "WLAN", primary: false, kind: "lan" },
+              ],
+            }
+          : { ...lanStatus };
+      }
+      return null;
+    });
+    render(<RemoteSection />);
+    await flushAsync(); // 冲初始 refresh()：status（enabled=true）上屏，3s interval 挂上
+    // 初始：无隧道地址，也无「Current tunnel URL」行
+    expect(screen.queryByText("https://mam-win.example.asia")).toBeNull();
+    expect(screen.queryByText(/current tunnel url/i)).toBeNull();
+    // 地址到手：下一拍 remote_status 返回 tunnelUrl + 隧道地址条目
+    tunnelUp = true;
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    // ≤3s 自动出现：地址表隧道条目 + 「Current tunnel URL」行（Task 1 归一的看板地址原样展示）
+    expect(screen.getByText("https://mam-win.example.asia")).toBeTruthy();
+    expect(screen.getByText(/current tunnel url/i)).toBeTruthy();
+  });
+
+  it("用例 B（防 clobber）：轮询运行中，用户正在输入的本机名不被轮询重置", async () => {
+    vi.useFakeTimers();
+    invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
+      if (cmd === "remote_status") return { ...lanStatus };
+      if (cmd === "get_setting") {
+        return args?.key === "remote.host_name" ? "JARVIS-Win" : null;
+      }
+      return null;
+    });
+    render(<RemoteSection />);
+    await flushAsync(); // host_name 回填完成
+    const input = screen.getByLabelText("Machine name") as HTMLInputElement;
+    expect(input.value).toBe("JARVIS-Win");
+    // 用户输入到一半，轮询拍点到达
+    fireEvent.change(input, { target: { value: "My PC" } });
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    // 轮询只刷 status、不回读 host_name——输入保持（若误复用 refresh() 此处会被 JARVIS-Win 覆盖）
+    expect(input.value).toBe("My PC");
   });
 });
