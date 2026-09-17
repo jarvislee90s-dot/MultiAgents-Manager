@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f172a" />
+    <!-- 相对路径：页面伺服在 /m 下，构建后解析为 /m/manifest-mam.json（public-mobile 拷入 dist-mobile 根） -->
+    <link rel="manifest" href="manifest-mam.json" />
+    <title>MAM 远程</title>
+    <!-- P8f 防闪白：首帧前（早于 React 挂载）按已存主题/系统偏好设置 dark 类。
+         默认分支与 src/mobile/theme.ts 逐字对齐：无已存值且系统非浅色偏好 → 加 dark 类；
+         key "mam-theme" 与 theme.ts 的 KEY 严格一致。此处必须内联：
+         外链模块加载前页面已绘制，任何延后设置都会闪白 -->
+    <script>
+      try {
+        const t = localStorage.getItem("mam-theme");
+        if (t === "light" || (!t && matchMedia("(prefers-color-scheme: light)").matches)) {
+          document.documentElement.classList.remove("dark");
+        } else {
+          document.documentElement.classList.add("dark");
+        }
+      } catch {
+        // 隐私模式 localStorage/matchMedia 抛错：保守回退 dark（与 theme.ts 默认一致）
+        document.documentElement.classList.add("dark");
+      }
+    </script>
+  </head>
+  <body class="bg-white dark:bg-slate-950">
+    <div id="root"></div>
+    <script type="module" src="/src/mobile/main.tsx"></script>
+  </body>
+</html>

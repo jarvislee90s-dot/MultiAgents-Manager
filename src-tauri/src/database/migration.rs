@@ -85,6 +85,20 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("DROP TABLE IF EXISTS native_extensions;")
         .map_err(|e| format!("移除 native_extensions 失败: {}", e))?;
 
+    // M2（远程接入）：已配对设备表（cookie deviceId 跨重启持久）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_devices (
+             id TEXT PRIMARY KEY,
+             name TEXT NOT NULL DEFAULT '',
+             ua TEXT NOT NULL DEFAULT '',
+             origin_ip TEXT NOT NULL DEFAULT '',
+             first_paired_at INTEGER NOT NULL DEFAULT 0,
+             last_seen_at INTEGER NOT NULL DEFAULT 0,
+             revoked INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .map_err(|e| format!("建 remote_devices 失败: {}", e))?;
+
     Ok(())
 }
 

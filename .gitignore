@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+# M2 移动看板构建产物（dist-mobile/.gitkeep 为 rust-embed 占位，已强制入库）
+dist-mobile/
 src-tauri/target/
 src-tauri/gen/
 

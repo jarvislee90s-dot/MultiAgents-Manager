@@ -28,6 +28,7 @@ import {
   Wrench,
   HeartPulse,
   RefreshCw,
+  Smartphone,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -56,6 +57,7 @@ import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
 import { loadActiveName } from "@/components/pet/petRuntime";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import { usePresetHealthQuery } from "@/lib/query/queries/health";
+import { RemoteSection } from "@/components/settings/RemoteSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -135,7 +137,8 @@ function HealthSummary() {
   );
 }
 
-type SettingSection = "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "health";
+type SettingSection =
+  "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "health" | "remote";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
 type ToolRow = {
@@ -442,6 +445,11 @@ export default function SettingsPage() {
       id: "health" as SettingSection,
       label: t("resources.health.title"),
       icon: HeartPulse,
+    },
+    {
+      id: "remote" as SettingSection,
+      label: t("settings.remote.title"),
+      icon: Smartphone,
     },
   ];
 
@@ -824,6 +832,7 @@ export default function SettingsPage() {
               <HealthSummary />
             </div>
           )}
+          {activeSection === "remote" && <RemoteSection />}
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />

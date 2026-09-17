@@ -1,0 +1,16 @@
+{
+  "name": "MAM 远程",
+  "short_name": "MAM",
+  "description": "MAM 移动会话看板",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon-mobile.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    }
+  ]
+}

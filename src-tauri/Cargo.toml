@@ -1,6 +1,6 @@
 [package]
 name = "multi-agents-manager"
-version = "0.4.1"
+version = "0.4.2"
 description = "多 Agent 编程工具统一管理平台"
 authors = ["jarvis"]
 edition = "2021"
@@ -66,6 +66,17 @@ zip = "4"
 # dsh 会话日志为多帧拼接的 zstd 容器（M0 F1），解码用
 zstd = "0.13"
 tauri-plugin-dialog = "2"
+# M2（远程接入）：主进程内嵌 axum 服务器 + 看板静态资源内嵌
+axum = "0.8"
+# include-exclude：支持 #[exclude = ".gitkeep"]（占位文件不嵌入二进制，终审修复轮）
+rust-embed = { version = "8", features = ["include-exclude"] }
+# 配对码 / deviceId 生成
+rand = "0.8"
+# M3 Task 6（SSE 端点）：BroadcastStream 把 watcher 的 broadcast::Receiver 适配成
+# Stream（sync feature 即含此包装器）；futures 提供 stream::once / StreamExt::chain
+# 组合首帧快照与增量流
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"
@@ -89,3 +100,6 @@ tempfile = "3"
 filetime = "0.2"
 # preset_v2 集成测试直接取家目录（stash 测试用）；与主依赖同版本
 dirs = "5.0"
+# M2 axum 集成测试：tower ServiceExt::oneshot + http-body-util 读响应体
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

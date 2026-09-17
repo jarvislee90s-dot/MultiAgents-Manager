@@ -6,28 +6,42 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+/// 既有尾部窗基准（512KB）：轮询路径解析器的恒定字节预算，语义不变
+const TAIL_BYTES: u64 = 512 * 1024;
+
 /// 读取 JSONL 文件尾部最多 max_lines 行（按文件顺序返回）。
 /// 超过 512KB 的文件从尾部定位并跳过首条截断行，与既有解析器行为逐字节一致；
 /// 调用方按 .iter().rev() 即得"最新在前"的遍历序
 pub(crate) fn read_recent_lines(path: &Path, max_lines: usize) -> Vec<String> {
+    read_recent_lines_with_budget(path, max_lines, TAIL_BYTES).0
+}
+
+/// 带字节预算的尾部读取（Bug 1，M3 验收）：返回 (行集, 头部是否被截断)。
+/// 内容层按需单会话读取以 `512KB×⌈limit/200⌉` 放大窗，据此向移动端发 truncated
+/// 信号（「加载更早消息」可达性）；轮询路径解析器仍走 read_recent_lines（512KB
+/// 恒定窗），预算契约不受影响。文件缺失/不可读 → (空集, false)
+pub(crate) fn read_recent_lines_with_budget(
+    path: &Path,
+    max_lines: usize,
+    max_bytes: u64,
+) -> (Vec<String>, bool) {
     let Ok(file) = File::open(path) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let Ok(file_size) = file.metadata().map(|m| m.len()) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
+    let truncated = file_size > max_bytes;
     let mut reader = BufReader::new(file);
-
-    const TAIL_BYTES: u64 = 512 * 1024;
-    if file_size > TAIL_BYTES {
-        let _ = reader.seek(SeekFrom::End(-(TAIL_BYTES as i64)));
+    if truncated {
+        let _ = reader.seek(SeekFrom::End(-(max_bytes as i64)));
         let mut partial = String::new();
         let _ = reader.read_line(&mut partial);
     }
 
     let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     let start = lines.len().saturating_sub(max_lines);
-    lines[start..].to_vec()
+    (lines[start..].to_vec(), truncated)
 }
 
 /// 读取 JSONL 文件头部最多 max_lines 行（按文件顺序返回）。
@@ -125,6 +139,33 @@ pub(crate) fn get_recent_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bug 1 修复（M3 验收）：带字节预算的尾部读取必须报告「头部被截断」。
+    /// 512KB 窗切进 600KB 大行 → truncated=true、头部小行缺席；放大窗后全文件
+    /// 可读（truncated=false）；read_recent_lines 委托语义不变（512KB 恒定窗）
+    #[test]
+    fn read_recent_lines_with_budget_reports_head_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fat.jsonl");
+        let big = "x".repeat(600 * 1024);
+        std::fs::write(&path, format!("head\n{big}\ntail\n")).unwrap();
+        // 512KB 窗：seek 落在大行内 → 大行与头部小行均不可见，仅尾行存活
+        let (lines, truncated) = read_recent_lines_with_budget(&path, 100, 512 * 1024);
+        assert!(truncated, "超窗文件必须报告头部截断");
+        assert_eq!(lines, vec!["tail".to_string()]);
+        // 1MB 窗：全文件进窗，头部行可见
+        let (lines, truncated) = read_recent_lines_with_budget(&path, 100, 1024 * 1024);
+        assert!(!truncated, "未超窗不得报告截断");
+        assert_eq!(lines, vec!["head".to_string(), big, "tail".to_string()]);
+        // 未超窗的小文件：truncated 恒 false
+        let small = dir.path().join("small.jsonl");
+        std::fs::write(&small, "a\nb\n").unwrap();
+        let (lines, truncated) = read_recent_lines_with_budget(&small, 10, 512 * 1024);
+        assert!(!truncated);
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+        // 既有委托：read_recent_lines 仍是 512KB 恒定窗（轮询路径解析器零语义变化）
+        assert_eq!(read_recent_lines(&path, 100), vec!["tail".to_string()]);
+    }
 
     /// issue #35-6：头部读取按文件顺序返回，行数上限生效，缺失文件 → 空集
     #[test]

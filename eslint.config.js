@@ -8,7 +8,7 @@ export default tseslint.config(
     ignores: ["dist", "src-tauri", "node_modules"],
   },
   {
-    files: ["src/**/*.{ts,tsx}", "vite.config.ts"],
+    files: ["src/**/*.{ts,tsx}", "vite.config.ts", "vite.config.mobile.ts"],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: {
       ecmaVersion: 2020,

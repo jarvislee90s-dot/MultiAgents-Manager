@@ -1,0 +1,40 @@
+import { useCallback, useState } from "react";
+import Board from "./Board";
+import PairPage from "./PairPage";
+import SessionDetail from "./SessionDetail";
+import type { Session } from "@/types/session";
+
+// 配对状态机（轮询全部由 Board 自持，App 只持状态标记）：
+// - null  探测中：首帧即出配对页（沿用 Task 5 不闪白口径），Board 在底下挂载完成首次探测；
+//         Board 首拍拉到数据后回调 onPaired（Board 内 ref 保证只发一次）翻转为 true，配对页随即卸载
+//         —— 已配对设备（cookie 有效）刷新页面 / 重开 PWA 即由此免重配
+// - true  已配对：Board 与详情页二选一显示（M3 Task 8 三态：board / detail；
+//         文件预览是 SessionDetail 内部状态，不进 App 路由）
+// - false 设备失效：Board 收 403 回调后置 false 并卸载（停轮询），回配对页；
+//         重新配对成功 → true → Board 重新挂载恢复轮询
+// 注意：网络异常不走 403 通道，Board 内部保数据重试，不会误置 false
+export default function App() {
+  const [paired, setPaired] = useState<boolean | null>(null);
+  // 当前查看的会话（board → detail 的唯一路由状态）：null = 看板
+  const [selected, setSelected] = useState<Session | null>(null);
+  // onPaired 双通道复用（PairPage 手动配对成功 / Board 首拍探测成功）：
+  // Board 侧一次挂载只发一次，重复置 true 时 React 对相同值自动 bail out，无谓重渲染可忽略
+  const onPaired = useCallback(() => setPaired(true), []);
+  const onUnpaired = useCallback(() => setPaired(false), []);
+  // 返回看板：清空选中即可——Board 全程常驻挂载（仅 hidden 类切换），会话数据与
+  // 滚动位置原生保留（对齐 paired!=='false' 的既有 hidden 模式）
+  const onBackToBoard = useCallback(() => setSelected(null), []);
+
+  return (
+    <>
+      {/* Board 常驻持轮询（探测也来自轮询首拍）；未配对态 / 查看详情时隐藏 */}
+      {paired !== false && (
+        <div className={paired === true && !selected ? "contents" : "hidden"}>
+          <Board onPaired={onPaired} onUnpaired={onUnpaired} onOpenSession={setSelected} />
+        </div>
+      )}
+      {paired === true && selected && <SessionDetail session={selected} onBack={onBackToBoard} />}
+      {paired !== true && <PairPage onPaired={onPaired} />}
+    </>
+  );
+}
