@@ -294,6 +294,7 @@ describe("RemoteSection 命名隧道 Token 面板（M4 Task 3 死锁解除）", 
     expect(await screen.findByLabelText("Tunnel Token")).toBeInTheDocument();
     // 取消按钮只在「待切换」态出现（channel 尚非 named）
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    await act(async () => {}); // 冲取消回读 get_setting 的微任务链（评审 Minor 1，防 act 警告）
     expect(screen.queryByLabelText("Tunnel Token")).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("remote_set_channel", expect.anything());
   });
@@ -311,6 +312,68 @@ describe("RemoteSection 命名隧道 Token 面板（M4 Task 3 死锁解除）", 
     await waitFor(() => expect(input.value).toBe("eyJh-saved-token"));
     // 已切 named = 常驻配置面板：无取消按钮（取消仅待切换态）
     expect(screen.queryByRole("button", { name: /^cancel$/i })).toBeNull();
+  });
+
+  // 2026-09-17 评审 Important：tokenPanelOpen 残留——待切换面板开着时点 quick/off，
+  // 后端切换成功但面板继续挂在非 named 通道下（孤儿 UI）。修后：调后端前先收面板。
+  it("用例 E：待切换面板开着 → 点「临时隧道」→ remote_set_channel(quick) 且面板收起", async () => {
+    render(<RemoteSection />);
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    expect(await screen.findByLabelText("Tunnel Token")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /quick tunnel/i }));
+    // 后端切换照常发起（quick 即调即热生效）
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "remote_set_channel",
+        expect.objectContaining({ channel: "quick" })
+      )
+    );
+    // 面板随切离 named 收起：Token 输入框从文档消失
+    expect(screen.queryByLabelText("Tunnel Token")).toBeNull();
+  });
+
+  // 2026-09-17 评审 Minor 2 缺口：挂载回填场景——已存 Token 时点 named 应直调后端
+  // 携行落库值（非空直调是既有语义），且不得误入「待切换」面板
+  it("用例 F：channel=off 且已存 Token → 点「命名隧道」以 (named, 已存Token) 直调，无待切换面板", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { key?: string }) => {
+      if (cmd === "remote_status") return { ...status };
+      if (cmd === "get_setting") {
+        return args?.key === "remote.tunnel_token" ? "eyJh-saved-token" : null;
+      }
+      return null;
+    });
+    render(<RemoteSection />);
+    // 等挂载回填完成（token state 非空后方可点 named，否则会误入待切换面板路径）
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("get_setting", { key: "remote.tunnel_token" })
+    );
+    await act(async () => {}); // 冲 setToken 微任务续体
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_set_channel", {
+        channel: "named",
+        token: "eyJh-saved-token",
+      })
+    );
+    // 直调路径：待切换面板（含取消按钮）全程不出现
+    expect(screen.queryByLabelText("Tunnel Token")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^cancel$/i })).toBeNull();
+  });
+
+  // 2026-09-17 评审 Minor 1：取消应弃用半截 Token——否则 token state 残留半截值，
+  // 再点「命名隧道」会因非空把半截 Token 直调写库（后端只查非空照收，隧道必失败）
+  it("用例 G：待切换态输入半截 Token 点取消 → 弃用半截值，再点「命名隧道」不直调写库", async () => {
+    render(<RemoteSection />);
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    const input = (await screen.findByLabelText("Tunnel Token")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "eyJh-half-typed" } });
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(screen.queryByLabelText("Tunnel Token")).toBeNull();
+    await act(async () => {}); // 冲取消回读 get_setting 的微任务链（token 恢复已落库值）
+    // 再点 named：token 已恢复已落库值（此场景为空）→ 仍走待切换面板，绝不直调后端
+    fireEvent.click(screen.getByRole("button", { name: /named tunnel/i }));
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_set_channel", expect.anything());
+    expect(await screen.findByLabelText("Tunnel Token")).toBeInTheDocument();
   });
 });
 

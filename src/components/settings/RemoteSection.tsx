@@ -269,13 +269,16 @@ export function RemoteSection() {
   // 后端先校验 Token 后写 channel，空 Token 必 Err，「先切换后面板」会陷入
   // 「通道变不成 named → 输入框永不出现 → 无处填 Token」死锁；此处直接展开
   // Token 面板（当前通道不变、运行中隧道不受影响），取消/保存语义见下方 JSX。
-  // 其余路径行为不变：quick/off 即调即热生效，named 有 Token 随调携行
+  // 其余路径行为不变：quick/off 即调即热生效，named 有 Token 随调携行。
+  // 评审 Important（2026-09-17）：切离 named（quick/off）先收「待切换」面板再调后端
+  //（失败也已收，无害）——面板是 named 专属 UI，残挂在非 named 通道下成孤儿
   const changeChannel = async (mode: string) => {
     if (mode === channel) return;
     if (mode === CHANNEL_NAMED && token.trim() === "") {
       setTokenPanelOpen(true);
       return;
     }
+    if (mode !== CHANNEL_NAMED) setTokenPanelOpen(false);
     try {
       await remoteSetChannel(mode, mode === CHANNEL_NAMED ? token : undefined);
       await refresh();
@@ -285,15 +288,27 @@ export function RemoteSection() {
   };
 
   // Token 保存（M4 T1a）：走同一 remote_set_channel（后端先写 Token 后校验落库），
-  // 成功即以 named 通道生效并 toast 确认
+  // 成功即以 named 通道生效并 toast 确认。评审 Important（2026-09-17）：成功即清
+  // 「待切换」标志（卫生位）——此后面板由 channel===named 渲染，标志残留会在
+  // 日后切离 named 时误展开
   const saveToken = async () => {
     try {
       await remoteSetChannel(CHANNEL_NAMED, token);
       await refresh();
+      setTokenPanelOpen(false);
       toast.success(t("settings.remote.channelSaved"));
     } catch (e) {
       toast.error(formatInvokeError(e, t));
     }
+  };
+
+  // 取消（仅待切换态；评审 Minor 1，2026-09-17）：收面板并把 token 恢复为**已落库值**
+  // ——异步回读 KV（getSetting），KV 是唯一口径，不另存挂载基准 ref（免多一处同步点
+  // 漂移）。否则半截输入残留在 token state，再点「命名隧道」会因非空直调写库
+  //（后端只查非空照收，隧道必失败）
+  const cancelTokenPanel = () => {
+    setTokenPanelOpen(false);
+    void (async () => setToken((await getSetting(TUNNEL_TOKEN_KEY)) ?? ""))();
   };
 
   // 保活落盘（M4 T3）：写 "true"/"false" 后刷新；失败 toast 且开关回弹（受控态未变）
@@ -508,7 +523,7 @@ export function RemoteSection() {
                   {t("settings.remote.channelSave")}
                 </Button>
                 {channel !== CHANNEL_NAMED && (
-                  <Button size="sm" variant="ghost" onClick={() => setTokenPanelOpen(false)}>
+                  <Button size="sm" variant="ghost" onClick={cancelTokenPanel}>
                     {t("settings.remote.tunnelTokenCancel")}
                   </Button>
                 )}
