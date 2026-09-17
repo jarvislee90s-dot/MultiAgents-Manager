@@ -14,13 +14,14 @@
 
 ## 1. 目标与范围
 
-二期交付一条主线：**手机给特定会话发消息，agent 真实收到并处理，桌面自然可见，不打断运行中的会话**。按交付顺序展开为五块：
+二期交付一条主线：**手机给特定会话发消息，agent 真实收到并处理，桌面自然可见，不打断运行中的会话**。按交付顺序展开为四块：
 
 1. **已开始的对话框（终端里的 TUI）**——终端注入引擎直达：macOS 三通道（tmux/iTerm2/Terminal.app）+ Windows 终端通道（D18），打字+回车语义，实时可见；
 2. **等待批准的红卡**——手机一键应答（注入对应按键，D12 第二层）；
-3. **未开窗的会话**——无头通道五家一次做齐（zcode/claude/codex/kimi/opencode），一次 turn + 回执；
-4. **任务交接**——会话摘要导出 HANDOFF.md（F2.7）；
-5. **触达补全（D15/D17 移入项）**——推送网关（Bark/ntfy）+ APK 壳收尾 + manualChunks 分包。
+3. **任务交接**——会话摘要导出 HANDOFF.md（F2.7，双档：注入自总结 + 规则摘要兜底）；
+4. **未开窗的会话**——无头通道五家一次做齐（zcode/claude/codex/kimi/opencode，M11 二期收尾后移）。
+
+**已移出二期**：推送网关（Bark/ntfy）与 APK 壳/manualChunks——三期收尾（裁决 16，宪法 D15/D17 再修订）。
 
 **二期不做（边界，非选项）**：切模型/切模式（F3.1 结构化选择器 UI 属三期；斜杠命令**文本**原样放行，见 W4）；会话管理操作；自动流转导入侧（ImportService 属三期 F3.7）；绕过各 harness 自身权限体系；keystroke/accessibility 正式功能（仅 W10 文档级应急预案，D7）。
 
@@ -56,7 +57,7 @@
 
 ```
 手机输入框（会话详情页，多行）
-   │ POST /m/api/session-send（PIN 配对设备 cookie 过闸）
+   │ POST /m/api/v1/session-send（PIN 配对设备 cookie 过闸，沿 v1 前缀惯例）
    ▼
 注入路由表（会话宿主形态 → 通道决策 + 有头可见性预期）
    ├─ 终端注入引擎（tmux / iTerm2 / Terminal.app / Windows）→ 打字+回车，实时可见
@@ -232,7 +233,7 @@
 
 | 需求 | 输入 | 输出 / 效果 |
 |---|---|---|
-| W1 终端注入 | `/m/api/session-send`（session_id、文本、设备花名）；路由表解析宿主 | tmux send-keys / write text / do script / Windows 通道执行；副作用=目标终端一行 `[mobile 设备名]` 输入+回车 |
+| W1 终端注入 | `/m/api/v1/session-send`（session_id、文本、设备花名）；路由表解析宿主 | tmux send-keys / write text / do script / Windows 通道执行；副作用=目标终端一行 `[mobile 设备名]` 输入+回车 |
 | W2 队列 | 注入请求 + 会话状态（Watcher） | 黄：入 SQLite 队列；静息态（红·等待/绿·完成）逐条 flush；单会话串行；可查可撤回；重启不丢 |
 | W3 路由表 | 会话宿主形态 | 通道决策 + 有头可见性预期（实时/刷新后/不可见）返回移动端；不可注入禁用+说明 |
 | W4 移动端发消息 | 详情页多行输入框 + 发送按钮 | 多行 `\n` 归一单行注入；回执（已送达终端/排队中/失败）；斜杠放行 |

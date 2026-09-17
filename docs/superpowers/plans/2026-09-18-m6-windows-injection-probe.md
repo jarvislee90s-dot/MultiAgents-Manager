@@ -69,7 +69,11 @@ Set-Content -Path "$env:USERPROFILE\mam-probe\probe-log.md" -Value "# M6 Windows
 
 预期：三家 CLI 均有版本输出。任何一家未安装 → 台账登记「未装，跳过该家」，继续其余。
 
-- [ ] **Step 3: 台账记一行 Task 0 完成与缺失项**
+- [ ] **Step 3: 三家 CLI 可用性预检（防「未登录」误判为「注入不可达」）**
+
+对每家 CLI 各开一个普通会话，手动发一句「你好」，确认能正常回复后退出。任何一家无法对话（未登录/无额度/网络）→ 台账登记「该家本次不可测」并继续其余——**绝不把登录问题记成注入失败**。
+
+- [ ] **Step 4: 台账记一行 Task 0 完成与缺失项**
 
 ### Task 1: 注入助手脚本 ConIn.ps1
 
@@ -244,7 +248,9 @@ Select-String -Path $hit[0].FullName -Pattern "PROBE-" -SimpleMatch |
 
 判定：`T2-delivery.txt` 出现 `PROBE-<stamp>`（user 消息）= **送达成功**；随后 agent 回复 `PROBE-OK` 再截 `evidence\T2-reply.png`（控制台窗口截图，Win+Shift+S 存文件）作辅助证据。
 
-- [ ] **Step 5: 台账记录四行（PID 命中情况 / API 返回 / 会话文件命中 / 回复观察）**
+- [ ] **Step 5: 未送达时的扫描码兜底重试**——若 `conin.log` 全部 ok=True 但会话文件未命中（API 层成功、TUI 没收到）：把 `ConIn.ps1` 里 `MakeRecord` 的 `wVirtualScanCode` 由 0 改为真实扫描码（Enter=0x1C，字符键=0x2B，或用 `MapVirtualKey` 求值），重发一条**新 stamp** 消息再验证；结果无论成败都台账注明「扫描码兜底：生效/无效」。
+
+- [ ] **Step 6: 台账记录（PID 命中情况 / API 返回 / 会话文件命中 / 回复观察 / 兜底结果）**
 
 ### Task 3: Windows Terminal 宿主 × claude · 基础送达（本探测最大不确定点）
 
@@ -263,15 +269,18 @@ Select-String -Path $hit[0].FullName -Pattern "PROBE-" -SimpleMatch |
 - [ ] **Step 2: 中文与 emoji**——`$msg = "[mobile PROBE-$stamp] 中文测试 你好世界 🌏🚀 收到请只回复：PROBE-OK"`，验证会话文件原文一致（UnicodeChar 通道）。
 - [ ] **Step 3: 非聚焦写入**——先把目标窗口**最小化**，再发送一条新 PROBE 消息，验证仍送达（WriteConsoleInput 理论不依赖焦点——这是它优于 keystroke 的核心卖点，必须实证）。
 - [ ] **Step 4: 连续两条**——背靠背两次 `Send-ToConsole`（不同 stamp），验证两条都到且顺序不乱。
-- [ ] **Step 5: busy 态观察（仅登记，不影响 GO/NO-GO）**——给会话发一句「请从 1 数到 20，每个数一行」，趁运行中（黄态）再注入一条 PROBE 消息，观察 TUI 是缓冲（turn 结束后处理）、忽略还是打断——这是 M7「插队」语义的 Windows 侧证据。
-- [ ] **Step 6: 每步台账 + 证据；全部探测完成后在测试会话里输入 `/exit` 退出 claude，关闭窗口**
+- [ ] **Step 5: 双会话定向（不串台，GO 必要条件）**——在**两个独立窗口/标签**各开一个 claude 会话（不同临时项目目录），用各自 PID 分别发送**不同 stamp** 的消息，验证两个会话文件各自只收到自己的那条。MAM 是多会话看板，注入串台=致命缺陷，此步失败必须在报告置顶标注。
+- [ ] **Step 6: 审批单键注入（M8 Windows 前置，登记不阻塞 GO）**——对 claude 发一条会触发权限请求的指令（如让它运行一条需批准的 shell 命令），等批准提示出现后，**只注入按键**（按提示形态选 `y` 或数字或 Enter，`Send-ToConsole -Text "y" -Enter`），验证会话继续执行。成败都登记——失败时 M8 在 Windows 侧走「映射缺失降级普通发消息」兜底。
+- [ ] **Step 7: 锁屏注入（可选加分项）**——Win+L 锁屏后从另一 PowerShell 发送新 stamp，解锁后验证会话文件送达（WriteConsoleInput 理论不依赖用户会话解锁——与 keystroke 的本质区别，macOS 侧同口径实测在 M7）。
+- [ ] **Step 8: busy 态观察（仅登记，不影响 GO/NO-GO）**——给会话发一句「请从 1 数到 20，每个数一行」，趁运行中（黄态）再注入一条 PROBE 消息，观察 TUI 是缓冲（turn 结束后处理）、忽略还是打断——这是 M7「插队」语义的 Windows 侧证据。
+- [ ] **Step 9: 每步台账 + 证据；全部探测完成后在测试会话里输入 `/exit` 退出 claude，关闭窗口**
 
 ### Task 5: codex 与 kimi 复测（第二梯队；宿主 = Task 2/3 中成功的宿主，由简到繁）
 
 **Files:** `proj-codex-*\`、`proj-kimi-*\`、`evidence\T5-*`
 
-- [ ] **Step 1: codex**——在一次性目录开 `codex`（TUI），重复基础探测（单行+回车、字面 `\n` 长串两项即可）。会话文件位置：`%USERPROFILE%\.codex\sessions\` 下最新 `rollout-*.jsonl`，`Select-String "PROBE-"` 验证。
-- [ ] **Step 2: kimi**——同法开 `kimi`，重复两项。会话文件位置以本机实际为准（先 `Get-ChildItem $env:USERPROFILE -Directory -Filter "*kimi*"` 找线索并记录路径到台账——路径本身是 M9 的路由输入）。
+- [ ] **Step 1: codex**——在一次性目录开 `codex`（TUI），重复**四项基础行为**（单行+回车、字面 `\n` 长串、中文/emoji、非聚焦——与 GO 判定口径一致）。会话文件位置：`%USERPROFILE%\.codex\sessions\` 下最新 `rollout-*.jsonl`，`Select-String "PROBE-"` 验证。
+- [ ] **Step 2: kimi**——同法开 `kimi`，重复四项基础行为。会话文件位置以本机实际为准（先 `Get-ChildItem $env:USERPROFILE -Directory -Filter "*kimi*"` 找线索并记录路径到台账——路径本身是 M9 的路由输入）。
 - [ ] **Step 3: 任一家 AttachConsole/WriteConsoleInput 行为与 claude 不同（错误码/计数差异）如实台账**
 - [ ] **Step 4: 退出测试会话，清理进程（`Get-Process` 确认无残留 claude/codex/kimi）**
 
@@ -310,14 +319,22 @@ Select-String -Path $hit[0].FullName -Pattern "PROBE-" -SimpleMatch |
 | （成功宿主） | codex | | | | | | | T5-* |
 | （成功宿主） | kimi | | | | | | | T5-* |
 
-（矩阵只认「会话文件出现探测消息」为 ✅；API 成功但未送达记 ⚠️ 并注明错误码）
+（矩阵只认「会话文件出现探测消息」为 ✅；API 成功但未送达记 ⚠️ 并注明错误码与扫描码兜底结果）
+
+## 2.1 专项记录
+| 专项 | 结果 | 证据 | 影响 |
+|---|---|---|---|
+| 双会话定向（不串台） | ✅/❌ | T4-* | ❌ 时报告置顶标注，GO 不可给出 |
+| 审批单键注入（y/Enter） | ✅/❌ | T4-* | M8 Windows 前置；❌ 时 M8 走降级兜底 |
+| 锁屏注入（若测） | ✅/❌/未测 | T4-* | 边界文案依据 |
+| 连续两条顺序 | ✅/❌ | T4-* | 队列串行依据 |
 
 ## 3. 技术要点与坑
 （AttachConsole 目标 PID 选择〔CLI 主进程 or 同窗口 cmd〕、FreeConsole 顺序、错误码表、WT 与 conhost 差异、锁屏/聚焦表现）
 
 ## 4. 判定与依据
-- **GO** = WT 与 conhost 双宿主下，≥2 家 CLI（必须含 claude）基础行为（单行+回车、字面\n长串、中文、非聚焦）全 ✅ → M9 全量实现
-- **PARTIAL** = 仅单宿主通过，或仅 claude 通过 → M9 缩小宿主/工具范围（写明保留范围）
+- **GO** = WT 与 conhost 双宿主下，≥2 家 CLI（必须含 claude）基础行为（单行+回车、字面\n长串、中文、非聚焦）全 ✅，**且双会话定向不串台通过** → M9 全量实现
+- **PARTIAL** = 仅单宿主通过，或仅 claude 通过，或定向偶发串台 → M9 缩小宿主/工具范围（写明保留范围）
 - **NO-GO** = claude 在两类宿主均不可送达 → 降级登记已知限制，SendInput 仅应急（D7）
 
 ## 5. M9 实施建议

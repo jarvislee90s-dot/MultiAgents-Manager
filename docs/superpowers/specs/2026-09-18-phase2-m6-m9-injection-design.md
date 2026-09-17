@@ -26,7 +26,7 @@
 
 ```
 手机会话详情页输入框（多行；回车换行、按钮发送）
-   │ POST /m/api/session-send / session-approve（PIN 设备 cookie 过闸）
+   │ POST /m/api/v1/session-send · /m/api/v1/session-approve（PIN 设备 cookie 过闸，沿 v1 前缀惯例）
    ▼
 注入路由表（宿主形态 → 通道 + 可见性预期）
    ├─ injector/（终端注入引擎）
