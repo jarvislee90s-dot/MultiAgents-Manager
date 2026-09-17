@@ -6,6 +6,10 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 }
 
 pub fn migrate(conn: &Connection) -> Result<(), String> {
+    // 先幂等重放 schema.rs 全量 DDL（全部 IF NOT EXISTS）：老库/裸连接补建新表，
+    // 已存在的表保持原样（缺列由下方 ALTER 迁移补齐），与生产启动顺序（schema::init → migrate）一致
+    crate::database::schema::init(conn);
+
     // 检查 extension 表是否有 manifest_path 列
     if !column_exists(conn, "extensions", "manifest_path") {
         conn.execute("ALTER TABLE extensions ADD COLUMN manifest_path TEXT", [])
@@ -35,6 +39,27 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("迁移扩展资源字段失败: {}", e))?;
+    }
+
+    // 预设 v2（spec §4）：presets 补描述/类型/绑定工具三列（新表由 schema.rs IF NOT EXISTS 覆盖）
+    for (col, ddl) in [
+        (
+            "description",
+            "ALTER TABLE presets ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "scope",
+            "ALTER TABLE presets ADD COLUMN scope TEXT NOT NULL DEFAULT 'universal'",
+        ),
+        (
+            "bound_tool",
+            "ALTER TABLE presets ADD COLUMN bound_tool TEXT",
+        ),
+    ] {
+        if !column_exists(conn, "presets", col) {
+            conn.execute(ddl, [])
+                .map_err(|e| format!("迁移 presets.{} 失败: {}", col, e))?;
+        }
     }
 
     // 根据旧表记录回填来源工具
@@ -168,5 +193,56 @@ mod tests {
             )
             .unwrap();
         assert!(!exists);
+    }
+
+    /// 预设 v2（spec §4）：老库迁移补 presets 3 列 + 5 张新表
+    #[test]
+    fn migrate_adds_preset_v2_columns_and_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE extensions (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+                description TEXT, source_path TEXT NOT NULL, source_url TEXT,
+                version TEXT, tags TEXT, installed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE presets (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE preset_items (
+                id TEXT PRIMARY KEY, preset_id TEXT NOT NULL,
+                extension_id TEXT NOT NULL, kind TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        for col in ["description", "scope", "bound_tool"] {
+            assert!(
+                conn.prepare(&format!("SELECT {} FROM presets LIMIT 0", col))
+                    .is_ok(),
+                "presets 缺列 {}",
+                col
+            );
+        }
+        for table in [
+            "resource_bindings",
+            "tool_residents",
+            "tool_base_snapshots",
+            "tool_base_snapshot_items",
+            "stash_journal",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='{}'",
+                        table
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(exists, "缺表 {}", table);
+        }
     }
 }

@@ -1,9 +1,138 @@
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{
+    CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
+};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     plugin::{Builder, TauriPlugin},
     AppHandle, Emitter, Manager, Runtime,
 };
+
+/// 托盘菜单标签集（Task 16 i18n 参数化）：真值源在前端（i18next），经 refresh_tray
+/// 下发并持久化到 settings；托盘事件线程 / session.rs 启发式等无前端语境的重建
+/// 路径沿用最近一次持久化值（此前预设重建会把基础项打回中文占位、语言切换会
+/// 丢预设项——统一重建后两个问题一并消除）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TrayLabels {
+    /// 预设分区标签（"预设" / "Presets"）
+    pub presets: String,
+    pub show: String,
+    pub pet: String,
+    pub quit: String,
+}
+
+impl Default for TrayLabels {
+    fn default() -> Self {
+        // 中文兜底：与历史硬编码占位一致（任何前端调用之前的首次重建使用）
+        Self {
+            presets: "预设".into(),
+            show: "显示窗口".into(),
+            pet: "显示/隐藏桌宠".into(),
+            quit: "退出".into(),
+        }
+    }
+}
+
+const TRAY_LABELS_KEY: &str = "tray_labels";
+
+/// 启动期托盘标签决策（终审 Minor #2，纯函数）：解析 settings KV 里的持久化
+/// 标签——存在且可解析 → Some（init 走统一重建路径，首屏即正确语言且含预设
+/// 项）；缺失或损坏（首次启动 / 脏数据）→ None → init 维持英文基础菜单兜底
+///（历史行为：首启时尚无前端语境，语言未知，不硬造首屏）。注意与
+/// `saved_tray_labels` 的差别：本函数保留「有无持久化值」的信息，后者会把
+/// 缺失折叠成中文 Default，无法区分首启与已本地化
+fn startup_tray_labels(raw: Option<String>) -> Option<TrayLabels> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+}
+
+fn saved_tray_labels() -> TrayLabels {
+    startup_tray_labels(crate::database::get_setting(TRAY_LABELS_KEY)).unwrap_or_default()
+}
+
+impl TrayLabels {
+    /// 合并语义：传入的标签覆盖持久化值，None 沿用最近一次值，并回写持久化。
+    /// 供 refresh_tray 使用——预设变更处可只追加 presetsLabel 一行，
+    /// 无需关心基础项文案
+    pub fn merged(
+        presets: Option<String>,
+        show: Option<String>,
+        pet: Option<String>,
+        quit: Option<String>,
+    ) -> Self {
+        let mut labels = saved_tray_labels();
+        if let Some(v) = presets {
+            labels.presets = v;
+        }
+        if let Some(v) = show {
+            labels.show = v;
+        }
+        if let Some(v) = pet {
+            labels.pet = v;
+        }
+        if let Some(v) = quit {
+            labels.quit = v;
+        }
+        // set_setting 返回 ()（内部自兜错），持久化失败不影响本次重建
+        crate::database::set_setting(
+            TRAY_LABELS_KEY,
+            &serde_json::to_string(&labels).unwrap_or_default(),
+        );
+        labels
+    }
+}
+
+/// 托盘点击翻转判定（spec §5.5 开关模型 + 裁决 2026-09-15「点击=直接执行」）：
+/// 该工具当前激活的正是此预设 → "restore"（关 = 恢复默认）；否则 → "apply"
+///（开 = 独占应用；激活的是其他预设时同样走 apply，独占语义下旧开关自动翻关）
+pub fn preset_toggle_action(active: Option<&str>, preset_id: &str) -> &'static str {
+    if active == Some(preset_id) {
+        "restore"
+    } else {
+        "apply"
+    }
+}
+
+/// 通用预设子项 id（`preset-tool-{preset_id}|{tool_id}`）解析 → (preset_id, tool_id)。
+/// 工具 id 与预设 id（`preset-{ts}-{seq}`）均不含 `|`，split_once 划分无歧义
+fn parse_universal_child_id(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("preset-tool-")
+        .and_then(|rest| rest.split_once('|'))
+}
+
+/// 工具私有预设顶层项 id（`preset-{preset_id}`）解析 → preset_id。
+/// 双前缀陷阱：preset.id 本身以 "preset-" 开头（DAO 生成 `preset-{ts}-{seq}`），
+/// 菜单 id 因此形如 `preset-preset-…`——strip_prefix 恰好一次即得 preset.id
+fn parse_private_item_id(id: &str) -> Option<&str> {
+    id.strip_prefix("preset-")
+}
+
+/// 工具当前激活预设（托盘选中态数据源；无基底快照 / 无激活 = None）
+fn active_preset_of(tool_id: &str) -> Option<String> {
+    crate::database::get_base_snapshot(tool_id).and_then(|(active, _)| active)
+}
+
+/// 托盘预设点击 = 直接执行（spec §7.5 + 裁决 2026-09-15，无窗口语境不弹确认）。
+/// 执行链路与 commands::preset::apply_preset / restore_preset 完全一致（工具启用
+/// 守卫 → service 层；restore 走 restore_tool 而非 command）；成败只记日志不
+/// panic；最后统一重建菜单刷新选中态——失败时项也回到当前真实状态，可重试
+fn toggle_preset_for_tool<R: Runtime>(app: &AppHandle<R>, preset_id: &str, tool_id: &str) {
+    let active = active_preset_of(tool_id);
+    let action = preset_toggle_action(active.as_deref(), preset_id);
+    let outcome = match action {
+        "restore" => crate::services::tool_settings::ensure_tool_enabled(tool_id)
+            .and_then(|()| crate::services::preset::restore_tool(tool_id).map(|_| ())),
+        _ => crate::services::tool_settings::ensure_tool_enabled(tool_id)
+            .and_then(|()| crate::services::preset::apply_preset(preset_id, tool_id).map(|_| ())),
+    };
+    match outcome {
+        Ok(()) => log::info!("托盘预设翻转完成（{action}）: {preset_id} @ {tool_id}"),
+        Err(e) => log::warn!("托盘预设翻转失败（{action}）: {preset_id} @ {tool_id}: {e}"),
+    }
+    let labels = saved_tray_labels();
+    if let Err(e) = update_tray_with_presets_labeled(app, &labels) {
+        log::warn!("托盘菜单重建失败: {e}");
+    }
+}
 
 // Update tray menu with localized text
 pub fn update_tray_menu(
@@ -98,9 +227,51 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     "quit" => {
                         app.exit(0);
                     }
+                    // 预设接线（spec §7.5，P5）：点击 = 直接执行翻转（裁决 2026-09-15）。
+                    // 通用预设子项 id `preset-tool-{preset_id}|{tool_id}` → 对该工具翻转
+                    id if id.starts_with("preset-tool-") => {
+                        if let Some((preset_id, tool_id)) = parse_universal_child_id(id) {
+                            toggle_preset_for_tool(app, preset_id, tool_id);
+                        } else {
+                            log::warn!("托盘预设子项 id 无法解析: {id}");
+                        }
+                    }
+                    // 通用预设子菜单标题：点击仅展开，无动作（防御性吞掉，防止误入下方私有分支）
+                    id if id.starts_with("preset-group-") => {}
+                    // 工具私有预设顶层项：strip 一次得 preset.id（双前缀陷阱见
+                    // parse_private_item_id 注释），作用于其绑定工具
+                    id if id.starts_with("preset-") => {
+                        if let Some(preset_id) = parse_private_item_id(id) {
+                            match crate::database::get_preset(preset_id) {
+                                Some(preset) => match preset.bound_tool.as_deref() {
+                                    Some(tool_id) => {
+                                        toggle_preset_for_tool(app, preset_id, tool_id);
+                                    }
+                                    None => {
+                                        log::warn!("预设 {} 无绑定工具，忽略托盘点击", preset.id)
+                                    }
+                                },
+                                None => log::warn!("托盘预设项无对应预设: {preset_id}"),
+                            }
+                        }
+                    }
                     _ => {}
                 })
                 .build(app)?;
+
+            // 启动即本地化（终审 Minor #2）：有持久化标签 → 复用统一重建路径
+            //（update_tray_with_presets_labeled，不另写第二套菜单组装），首屏
+            // 即正确语言且含预设项；无持久化（首次启动）→ 维持上方英文基础菜单
+            // 兜底。必须放在 build 之后（set_menu 需已注册的 "main-tray"，
+            // TrayIconBuilder::build 会同步注册）；失败仅告警不 panic，基础菜单
+            // 仍在。DB 在 run() 里先于 Builder 构建（database::init），此处
+            // get_setting 已可用；plugin setup 收到的 app 即 &AppHandle，直接复用
+            if let Some(labels) = startup_tray_labels(crate::database::get_setting(TRAY_LABELS_KEY))
+            {
+                if let Err(e) = update_tray_with_presets_labeled(app, &labels) {
+                    log::warn!("托盘启动重建失败，维持默认基础菜单: {e}");
+                }
+            }
             Ok(())
         })
         .on_window_ready(move |window| {
@@ -151,40 +322,103 @@ pub fn update_tray_status(
     }
 }
 
-/// 更新托盘菜单，加入预设组列表
+/// 兜底重建（无前端语境的调用方：session.rs 计数启发式 / 托盘翻转后自刷新）：
+/// 沿用最近一次前端下发的标签集（TrayLabels），首次（无持久化值）用中文默认
 pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
-    use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+    let labels = saved_tray_labels();
+    update_tray_with_presets_labeled(app, &labels)
+}
 
+/// 统一重建托盘菜单（Task 16）：基础项 + 预设项合并成型，预设项带开/关选中态
+///（CheckMenuItem，checked = 该预设在此工具上激活）。通用预设 = 每个已启用工具
+/// 一个子项（子菜单展开，子项 id `preset-tool-{preset_id}|{tool_id}`）；
+/// 工具私有预设 = 顶层 CheckMenuItem（id `preset-{preset_id}`，作用于绑定工具）。
+/// 点击语义在 on_menu_event 的 preset 臂（直接执行，不弹确认）
+pub fn update_tray_with_presets_labeled<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: &TrayLabels,
+) -> Result<(), String> {
     let presets = crate::database::list_presets();
 
-    // 创建菜单项（owned，存活于本函数作用域内）
-    let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)
+    // 基础项（owned，存活于本函数作用域内）
+    let show = MenuItem::with_id(app, "show", &labels.show, true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    // 桌宠显隐项（与 update_tray_menu 同序：show → pet → separator...）；
-    // 前端轮询/语言切换会用本地化文本重建菜单，此处占位中文标签保持一致
-    let pet = MenuItem::with_id(app, "pet", "显示/隐藏桌宠", true, None::<&str>)
+    let pet = MenuItem::with_id(app, "pet", &labels.pet, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let sep1 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    let quit =
-        MenuItem::with_id(app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
+    let quit = MenuItem::with_id(app, "quit", &labels.quit, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
 
-    let mut preset_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
-    let mut sep2: Option<PredefinedMenuItem<tauri::Wry>> = None;
+    // 已启用工具（通用预设子菜单的子项集；与 commands::settings::list_enabled_tools 同口径）
+    let enabled_tools: Vec<(String, String)> = crate::adapter::TOOL_IDS
+        .iter()
+        .filter(|id| crate::database::dao::agent_tool::get_tool_enabled(id))
+        .filter_map(|id| {
+            crate::adapter::adapter_by_id(id).map(|a| (id.to_string(), a.name().to_string()))
+        })
+        .collect();
 
-    if !presets.is_empty() {
-        for preset in &presets {
-            let id = format!("preset-{}", preset.id);
-            let label = format!("预设: {}", preset.name);
-            preset_items.push(
-                MenuItem::with_id(app, &id, &label, true, None::<&str>)
-                    .map_err(|e| e.to_string())?,
-            );
+    // 预设项统一收集为 MenuItemKind 保序（通用 = 子菜单 / 私有 = CheckMenuItem，
+    // 与 list_presets 的 created_at DESC 序一致）
+    let mut preset_items: Vec<MenuItemKind<R>> = Vec::new();
+
+    for preset in &presets {
+        let label = format!("{}: {}", labels.presets, preset.name);
+        match preset.scope.as_str() {
+            "universal" => {
+                let submenu =
+                    Submenu::with_id(app, format!("preset-group-{}", preset.id), &label, true)
+                        .map_err(|e| e.to_string())?;
+                let mut children = 0usize;
+                for (tool_id, tool_name) in &enabled_tools {
+                    let checked = active_preset_of(tool_id).as_deref() == Some(preset.id.as_str());
+                    let child = CheckMenuItem::with_id(
+                        app,
+                        format!("preset-tool-{}|{}", preset.id, tool_id),
+                        tool_name,
+                        true,
+                        checked,
+                        None::<&str>,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    submenu.append(&child).map_err(|e| e.to_string())?;
+                    children += 1;
+                }
+                // 无已启用工具时不渲染空子菜单
+                if children > 0 {
+                    preset_items.push(submenu.kind());
+                }
+            }
+            "tool" => {
+                let Some(tool_id) = preset.bound_tool.as_deref() else {
+                    // bound_tool 缺失的脏数据：无处作用的开关不渲染
+                    continue;
+                };
+                let checked = active_preset_of(tool_id).as_deref() == Some(preset.id.as_str());
+                let item = CheckMenuItem::with_id(
+                    app,
+                    format!("preset-{}", preset.id),
+                    &label,
+                    true,
+                    checked,
+                    None::<&str>,
+                )
+                .map_err(|e| e.to_string())?;
+                preset_items.push(item.kind());
+            }
+            other => log::warn!("未知预设 scope `{other}`（id={}），托盘跳过", preset.id),
         }
-        sep2 = Some(PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?);
     }
 
+    // 预设区与基础区之间的分隔线（仅确有预设项时插入，避免相邻双分隔线）
+    let sep2 = if preset_items.is_empty() {
+        None
+    } else {
+        Some(PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?)
+    };
+
     // 收集引用
-    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
+    let mut items: Vec<&dyn IsMenuItem<R>> = Vec::new();
     items.push(&show);
     items.push(&pet);
     items.push(&sep1);
@@ -203,4 +437,105 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod preset_toggle_tests {
+    use super::{parse_private_item_id, parse_universal_child_id, preset_toggle_action};
+
+    /// spec §5.5：无激活 → 开（应用）
+    #[test]
+    fn no_active_means_apply() {
+        assert_eq!(preset_toggle_action(None, "preset-1726000000-0"), "apply");
+    }
+
+    /// spec §5.5：激活的是其他预设 → 仍开（独占切换，旧开关自动翻关）
+    #[test]
+    fn other_active_means_apply() {
+        assert_eq!(
+            preset_toggle_action(Some("preset-1726000000-1"), "preset-1726000000-0"),
+            "apply"
+        );
+    }
+
+    /// spec §5.5：激活的正是本预设 → 关（恢复默认）
+    #[test]
+    fn same_active_means_restore() {
+        assert_eq!(
+            preset_toggle_action(Some("preset-1726000000-0"), "preset-1726000000-0"),
+            "restore"
+        );
+    }
+
+    /// 通用子项 id 解析：`preset-tool-{preset_id}|{tool_id}` 按首个 `|` 二分
+    #[test]
+    fn universal_child_id_splits_on_first_pipe() {
+        let (preset_id, tool_id) =
+            parse_universal_child_id("preset-tool-preset-1726000000-0|codex").unwrap();
+        assert_eq!(preset_id, "preset-1726000000-0");
+        assert_eq!(tool_id, "codex");
+    }
+
+    /// 无 `|`（或缺前缀）的子项 id 必须解析失败，走 warn 而非 panic
+    #[test]
+    fn universal_child_id_without_pipe_is_none() {
+        assert!(parse_universal_child_id("preset-tool-preset-1726000000-0").is_none());
+        assert!(parse_universal_child_id("show").is_none());
+    }
+
+    /// 双前缀陷阱回归锁：preset.id 以 "preset-" 开头，菜单 id 形如
+    /// `preset-preset-…`——strip 恰好一次必须还原完整 preset.id
+    #[test]
+    fn private_item_id_strips_exactly_once() {
+        assert_eq!(
+            parse_private_item_id("preset-preset-1726000000-0"),
+            Some("preset-1726000000-0")
+        );
+        assert_eq!(parse_private_item_id("show"), None);
+    }
+}
+
+#[cfg(test)]
+mod startup_tray_labels_tests {
+    use super::{startup_tray_labels, TrayLabels};
+
+    /// 终审 Minor #2：有持久化标签 → Some → init 走统一重建（首屏本地化 + 预设项）
+    #[test]
+    fn persisted_labels_parse_to_some() {
+        let raw = serde_json::json!({
+            "presets": "Presets",
+            "show": "Show Window",
+            "pet": "Toggle Pet",
+            "quit": "Quit"
+        })
+        .to_string();
+        let labels = startup_tray_labels(Some(raw)).expect("完整持久化值应解析为 Some");
+        assert_eq!(labels.presets, "Presets");
+        assert_eq!(labels.show, "Show Window");
+        assert_eq!(labels.pet, "Toggle Pet");
+        assert_eq!(labels.quit, "Quit");
+    }
+
+    /// 首次启动（KV 无值）→ None → init 维持英文基础菜单兜底（历史行为）
+    #[test]
+    fn missing_value_is_none() {
+        assert!(startup_tray_labels(None).is_none());
+    }
+
+    /// 持久化值损坏 → None（同样兜底，不 panic）
+    #[test]
+    fn corrupt_value_is_none() {
+        assert!(startup_tray_labels(Some("not-json".into())).is_none());
+    }
+
+    /// serde(default) 容错口径：半截 JSON（缺字段）按 Default 补齐仍可用，
+    /// 不判为损坏——语言切换只回写部分字段的旧版本数据也能正常恢复
+    #[test]
+    fn partial_json_fills_defaults() {
+        let labels =
+            startup_tray_labels(Some(r#"{"presets":"预设"}"#.into())).expect("缺字段应按默认补齐");
+        assert_eq!(labels.presets, "预设");
+        assert_eq!(labels.show, TrayLabels::default().show);
+        assert_eq!(labels.quit, TrayLabels::default().quit);
+    }
 }

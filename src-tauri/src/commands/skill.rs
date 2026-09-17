@@ -1,5 +1,15 @@
 // Skill 管理命令
 
+/// 手动安装返回（Task 17）：success + frontmatter 专属预填建议。
+/// `Result<(), String>` 改为结构体是破坏性 TS 变更，调用方（src/lib/api/skill.ts）
+/// 已同步类型；目前前端消费方均忽略返回值，形状仅保证类型检查通过
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOutcome {
+    pub success: bool,
+    pub suggestion: Option<crate::services::resource::frontmatter::FrontmatterSuggestion>,
+}
+
 #[tauri::command]
 pub fn list_repo_skills() -> Vec<String> {
     crate::linker::list_repo_skills()
@@ -10,8 +20,15 @@ pub fn install_skill(
     source_path: String,
     name: String,
     overwrite: Option<bool>,
-) -> Result<(), String> {
-    crate::services::install_skill(&source_path, &name, overwrite.unwrap_or(false))
+) -> Result<ImportOutcome, String> {
+    crate::services::install_skill(&source_path, &name, overwrite.unwrap_or(false))?;
+    // 建议计算失败（SKILL.md 读不到等）不阻断安装结果 → None（spec §6：只建议不强制；
+    // 2026-09-15 裁决：手动导入弹提示当场确认，由前端呈现 Dialog）
+    let suggestion = crate::services::resource::frontmatter::suggest_for_skill(&name);
+    Ok(ImportOutcome {
+        success: true,
+        suggestion,
+    })
 }
 
 #[tauri::command]

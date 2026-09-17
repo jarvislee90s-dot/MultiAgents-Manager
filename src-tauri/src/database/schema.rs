@@ -62,9 +62,12 @@ pub fn init(conn: &Connection) {
             format        TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS presets (
-            id         TEXT PRIMARY KEY,
-            name       TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            scope       TEXT NOT NULL DEFAULT 'universal',
+            bound_tool  TEXT,
+            created_at  TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS preset_items (
             id           TEXT PRIMARY KEY,
@@ -79,6 +82,38 @@ pub fn init(conn: &Connection) {
             sub_agent_id  TEXT,
             applied_at    TEXT NOT NULL,
             active        INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS resource_bindings (
+            extension_id    TEXT PRIMARY KEY,
+            exclusive_tools TEXT NOT NULL,
+            reason          TEXT,
+            updated_at      TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tool_residents (
+            tool_id       TEXT NOT NULL,
+            extension_id  TEXT NOT NULL,
+            PRIMARY KEY (tool_id, extension_id)
+        );
+        CREATE TABLE IF NOT EXISTS tool_base_snapshots (
+            tool_id          TEXT PRIMARY KEY,
+            active_preset_id TEXT,
+            created_at       TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tool_base_snapshot_items (
+            tool_id       TEXT NOT NULL,
+            extension_id  TEXT NOT NULL,
+            kind          TEXT NOT NULL,
+            origin        TEXT NOT NULL,
+            PRIMARY KEY (tool_id, extension_id)
+        );
+        CREATE TABLE IF NOT EXISTS stash_journal (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_id       TEXT NOT NULL,
+            skill_name    TEXT NOT NULL,
+            stashed_path  TEXT NOT NULL,
+            original_path TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            restored_at   TEXT
         );
         CREATE TABLE IF NOT EXISTS unread_sessions (
             tool_id          TEXT NOT NULL,

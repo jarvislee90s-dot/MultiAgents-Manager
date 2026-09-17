@@ -24,6 +24,94 @@ interface TauriInternalsMock {
 if (!isTauri) {
   console.log("[tauri-mock] Running outside Tauri WebView — injecting API mocks");
 
+  // 预设组 v2 fixture（1 通用 + 1 tool 私有；extensionId 对应上方资源样例的 id）
+  const mockPresetsV2 = [
+    {
+      id: "preset-1",
+      name: "Full Stack Dev",
+      description: "全栈开发常用组合：需求梳理 + 系统化调试 + 文档检索",
+      scope: "universal",
+      boundTool: null,
+      items: [
+        { extensionId: "1", kind: "skill", extensionName: "brainstorming" },
+        { extensionId: "2", kind: "skill", extensionName: "systematic-debugging" },
+        { extensionId: "13", kind: "mcp", extensionName: "context7" },
+        { extensionId: "14", kind: "mcp", extensionName: "firecrawl-mcp" },
+      ],
+    },
+    {
+      id: "preset-2",
+      name: "Code Review",
+      description: "Claude 专属中文审查流（工具私有预设样例）",
+      scope: "tool",
+      boundTool: "claude",
+      items: [
+        { extensionId: "10", kind: "skill", extensionName: "chinese-code-review" },
+        { extensionId: "11", kind: "skill", extensionName: "chinese-commit-conventions" },
+      ],
+    },
+  ];
+
+  // 一致性体检 fixture（spec §13，T15）：含三类异常样例（漂移 L1-L4 / 不变量 / 残留暂存）+ 空健康。
+  // 参数化：localStorage["mam-mock-health"] = "empty" 切空健康，便于目验折叠态（T19 手册）
+  const mockLedgerDrift = [
+    {
+      toolId: "claude",
+      kind: "L1",
+      extensionId: "skill-brainstorming",
+      path: "/Users/jarvis/.claude/skills/brainstorming",
+    },
+    {
+      toolId: "claude",
+      kind: "L3",
+      extensionId: "skill-systematic-debugging",
+      path: "/Users/jarvis/.claude/skills/systematic-debugging",
+    },
+    {
+      toolId: "codex",
+      kind: "L2",
+      extensionId: "skill-chinese-code-review",
+      path: "/Users/jarvis/.codex/skills/chinese-code-review",
+    },
+    {
+      toolId: "codex",
+      kind: "L4",
+      extensionId: "skill-using-superpowers",
+      path: "/Users/jarvis/.codex/skills/using-superpowers",
+    },
+  ];
+  const mockPresetHealthIssues = {
+    invariants: ["codex：快照存在但无激活预设"],
+    stashPending: [
+      {
+        id: 1,
+        toolId: "claude",
+        skillName: "legacy-native-skill",
+        stashedPath: "/Users/jarvis/.mam/stash/claude/skills/legacy-native-skill",
+        originalPath: "/Users/jarvis/.claude/skills/legacy-native-skill",
+        createdAt: new Date().toISOString(),
+        restoredAt: null,
+      },
+    ],
+    drift: mockLedgerDrift,
+    // 空目录（wave33 Item D，与 tests/msw/tauriMocks.ts 同构）：mam 仓库 + 工具目录各一
+    emptyDirs: [
+      { owner: "mam", path: "/Users/jarvis/.mam/skills/empty-suite-dir" },
+      { owner: "tool:claude", path: "/Users/jarvis/.claude/skills/empty-dir" },
+    ],
+  };
+  const mockPresetHealthEmpty = { invariants: [], stashPending: [], drift: [], emptyDirs: [] };
+
+  // frontmatter 存量建议 fixture（Task 17，spec §6）：extensionId 不在
+  // list_resource_bindings 样例（仅 "13" 有绑定）→ 可出建议。参数化：
+  // localStorage["mam-mock-fm"] = "empty" 切空建议（目验体检卡片无建议段）
+  const mockFmSuggestion = {
+    extensionId: "skill-systematic-debugging",
+    tools: ["claude", "codex"],
+  };
+  const fmSuggestionOrDefault = () =>
+    localStorage.getItem("mam-mock-fm") === "empty" ? null : mockFmSuggestion;
+
   // Mock __TAURI_INTERNALS__
   (window as unknown as { __TAURI_INTERNALS__: TauriInternalsMock }).__TAURI_INTERNALS__ = {
     metadata: {
@@ -124,6 +212,8 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            // 唯一 isNative:true 样例（sourceTool 已设）：浏览器 mock 下可目验编辑弹窗「原生技能」分组（T7）
+            isNative: true,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -139,6 +229,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -153,6 +244,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -164,6 +256,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: false, linkStatus: "unlinked" }],
           },
           {
@@ -175,6 +268,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -186,6 +280,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -200,6 +295,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -211,6 +307,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -226,6 +323,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -240,6 +338,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -251,6 +350,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -262,6 +362,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: false, linkStatus: "unlinked" },
               { agentToolId: "codex", enabled: false, linkStatus: "unlinked" },
@@ -276,6 +377,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [
               { agentToolId: "claude", enabled: true, linkStatus: "linked" },
               { agentToolId: "codex", enabled: true, linkStatus: "linked" },
@@ -290,6 +392,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -301,6 +404,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -312,6 +416,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: false, linkStatus: "unlinked" }],
           },
           {
@@ -323,6 +428,7 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: "superpowers",
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: true, linkStatus: "linked" }],
           },
           {
@@ -334,33 +440,163 @@ if (!isTauri) {
             sourceTool: "claude",
             suite: null,
             tags: null,
+            isNative: false,
             assignments: [{ agentToolId: "claude", enabled: false, linkStatus: "unlinked" }],
           },
         ]);
 
+      // 预设组 v2 样例（1 通用 + 1 tool 私有）：与 Rust PresetRecord（serde camelCase）同构，
+      // 并与 tests/msw/tauriMocks.ts 的 mockPresets 保持形状一致（mock parity 收口门禁）
       case "list_presets":
+        return Promise.resolve(mockPresetsV2);
+
+      case "get_preset":
+        return Promise.resolve(
+          mockPresetsV2.find((p) => p.id === (args?.presetId as string)) ?? null
+        );
+
+      case "get_active_preset":
+        return Promise.resolve(args?.toolId === "claude" ? "preset-1" : null);
+
+      case "list_active_presets":
+        return Promise.resolve([{ toolId: "claude", presetId: "preset-1" }]);
+
+      // (extensionId, kind, origin) 三元组，origin = "mam" | "native"（scan_tool_state 口径）
+      case "get_tool_active_resources":
+        return Promise.resolve([
+          ["1", "skill", "mam"],
+          ["2", "skill", "mam"],
+          ["13", "mcp", "mam"],
+          ["skill-brainstorming", "skill", "native"],
+        ]);
+
+      case "list_resource_bindings":
         return Promise.resolve([
           {
-            id: "preset-1",
-            name: "Full Stack Dev",
-            items: [
-              { type: "skill", name: "brainstorming", tool_id: "claude" },
-              { type: "skill", name: "systematic-debugging", tool_id: "claude" },
-              { type: "mcp", name: "context7", tool_id: "claude" },
-              { type: "mcp", name: "firecrawl-mcp", tool_id: "claude" },
-            ],
-            active_for: ["claude"],
-          },
-          {
-            id: "preset-2",
-            name: "Code Review",
-            items: [
-              { type: "skill", name: "requesting-code-review", tool_id: "claude" },
-              { type: "skill", name: "chinese-code-review", tool_id: "claude" },
-            ],
-            active_for: [],
+            extensionId: "13",
+            exclusiveTools: "claude,codex",
+            reason: "需要 Node 运行时，仅绑定前端工具链",
+            updatedAt: new Date().toISOString(),
           },
         ]);
+
+      case "list_tool_residents":
+        return Promise.resolve(args?.toolId === "claude" ? ["17"] : []);
+
+      // —— frontmatter 专属预填建议（Task 17，与 Rust 命令/ImportOutcome 同形）——
+      // install_skill 返回 ImportOutcome{success, suggestion}；import_native_resources
+      // 返回 ImportStats + suggestion；存量扫描读 fixture（空/有建议可参数化）
+      case "list_frontmatter_suggestions":
+        return Promise.resolve(
+          localStorage.getItem("mam-mock-fm") === "empty" ? [] : [mockFmSuggestion]
+        );
+      case "install_skill":
+        return Promise.resolve({ success: true, suggestion: fmSuggestionOrDefault() });
+      case "import_native_resources":
+        return Promise.resolve({
+          imported: 1,
+          newlyAdded: 1,
+          skippedDup: 0,
+          sourceCounts: [],
+          suggestion: fmSuggestionOrDefault(),
+        });
+
+      // —— 一致性体检读命令（T15，与 tests/msw/tauriMocks.ts 形状一致）——
+      case "get_preset_health":
+        return Promise.resolve(
+          localStorage.getItem("mam-mock-health") === "empty"
+            ? mockPresetHealthEmpty
+            : mockPresetHealthIssues
+        );
+      case "scan_ledger_drift":
+        return Promise.resolve(mockLedgerDrift);
+      // 空目录扫描（wave33 Item D）：读 fixture（与 get_preset_health 的 emptyDirs 同源）
+      case "scan_empty_dirs":
+        return Promise.resolve(mockPresetHealthIssues.emptyDirs);
+
+      case "preview_apply_preset":
+        return Promise.resolve({
+          toEnable: ["1", "2"],
+          filtered: [],
+          toDisable: [],
+          toStash: [],
+          residentExempt: [],
+        });
+
+      // T6 开关 fixture：写命令须返回与真实命令同形的对象（undefined 会让 r.successCount / rr.restoredMam.length 崩）
+      case "apply_preset":
+        // PresetApplyResult（serde camelCase）：计数与上方 preview_apply_preset 的 toEnable 对齐
+        return Promise.resolve({
+          successCount: 2,
+          failures: [],
+          conflicts: [],
+          stashed: [],
+          disabled: [],
+          restoredNative: [],
+        });
+      case "restore_preset":
+        return Promise.resolve({ restoredMam: [], restoredNative: [], conflicts: [] });
+
+      // 预设组写命令（浏览器 mock 一律视为成功；与 tests/msw/tauriMocks.ts 写分组对齐）。
+      // deactivate_preset 前端路径已退役（T8），case 移除；子 Agent 变体保留
+      case "create_preset":
+      case "update_preset":
+      case "delete_preset":
+      case "apply_preset_to_subagent":
+      case "deactivate_preset_from_subagent":
+      case "set_resource_binding":
+      case "delete_resource_binding":
+      case "set_tool_resident":
+        return Promise.resolve(undefined);
+
+      // 暂存回移（T15 体检卡片 ③）：真实命令返回 Result<(), String>，mock 视为成功
+      case "restore_stash_entry":
+        return Promise.resolve(undefined);
+
+      // 空目录清理（wave33 Item D）：真实命令返回 Result<usize>，mock 删无可删返回 0
+      case "clean_empty_dirs":
+        return Promise.resolve(0);
+
+      // 快捷跳转（wave33 Item B）：homeDir()（@tauri-apps/api/path）在浏览器 mock
+      // 下也走 __TAURI_INTERNALS__.invoke——提供固定 home，reveal_dir 本 mock 缺省 no-op
+      case "plugin:path|resolve_directory":
+        return Promise.resolve("/Users/jarvis");
+
+      // reveal_dir（wave33 Item B）：浏览器 mock 下无法真开文件管理器，静默成功供目验
+      case "reveal_dir":
+        return Promise.resolve(undefined);
+
+      // 体检对账写命令（T15）：须返回与 Rust ReconcileOutcome 同形对象
+      //（undefined 会让 o.fixed / o.needsManual 读崩）；extensionId/toolId 结构化回带
+      //（终审 Minor #4 起前端批量行映射靠结构化字段，message 只供人读不承载可解析格式）
+      case "reconcile_item": {
+        const item = args?.item as { extensionId?: string; toolId?: string } | undefined;
+        return Promise.resolve({
+          fixed: true,
+          needsManual: false,
+          extensionId: item?.extensionId ?? "",
+          toolId: item?.toolId ?? "",
+          message: "mock: 已按账本重建链接",
+        });
+      }
+      case "reconcile_tool_batch": {
+        const batchToolId = args?.toolId as string;
+        return Promise.resolve(
+          mockLedgerDrift
+            .filter((d) => d.toolId === batchToolId)
+            .map((d) => ({
+              fixed: true,
+              needsManual: false,
+              extensionId: d.extensionId,
+              toolId: batchToolId,
+              message: "mock 已按账本重建链接",
+            }))
+        );
+      }
+
+      // 托盘统一重建（T16）：fire-and-forget，无返回值消费，显式 no-op 以闭合双 mock parity
+      case "refresh_tray":
+        return Promise.resolve(undefined);
 
       case "detect_tools":
         return Promise.resolve([
@@ -472,10 +708,16 @@ if (!isTauri) {
           { name: "systematic-debugging", path: "/Users/jarvis/.mam/skills/systematic-debugging" },
         ]);
 
+      // CompatibilityReport（serde camelCase）：条目为 {id, name, kind} / {id, name, kind, reason}
       case "check_preset_compatibility":
         return Promise.resolve({
-          compatible: [{ type: "skill", name: "brainstorming", reason: "Available in tool scope" }],
-          incompatible: [{ type: "mcp", name: "supabase", reason: "Not installed for this tool" }],
+          compatible: [
+            { id: "1", name: "brainstorming", kind: "skill" },
+            { id: "13", name: "context7", kind: "mcp" },
+          ],
+          incompatible: [
+            { id: "16", name: "supabase", kind: "mcp", reason: "Not installed for this tool" },
+          ],
         });
 
       // 遗留 codex 技能链接检测/迁移（spec §4.3）：浏览器模式视为无遗留、零报告

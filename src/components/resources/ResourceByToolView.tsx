@@ -4,11 +4,33 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { Button } from "@/components/ui/button";
-import { Scan, Import, FolderOpen } from "lucide-react";
+import {
+  Scan,
+  Import,
+  FolderOpen,
+  BookmarkPlus,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
 import { ToolIcon } from "@/components/common/ToolIcon";
-import { detectDuplicateSkills, cleanupDuplicateSkills } from "@/lib/api/resource";
+import { PresetEditDialog } from "@/components/presets/PresetEditDialog";
+import { applyNameSort, cycleSortDir, type SortDir } from "@/lib/nameSort";
+import {
+  detectDuplicateSkills,
+  cleanupDuplicateSkills,
+  listExtensionsWithAssignments,
+} from "@/lib/api/resource";
+import { getToolActiveResources } from "@/lib/api/preset";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
-import type { NativeExtension, ToolResources, ImportStats } from "@/types/extension";
+import type {
+  ExtensionWithAssignments,
+  FrontmatterSuggestion,
+  NativeExtension,
+  ToolResources,
+  ImportStats,
+} from "@/types/extension";
+import { ImportSuggestionDialog } from "@/components/resources/ImportSuggestionDialog";
 
 function formatSkillName(name: string): string {
   return name.includes("/") ? name.replace("/", ": ") : name;
@@ -20,6 +42,47 @@ export function ResourceByToolView() {
   const { data: tools = [] } = useEnabledToolsQuery();
   const [toolResources, setToolResources] = useState<Record<string, ToolResources>>({});
   const [scanning, setScanning] = useState<Record<string, boolean>>({});
+
+  // FR-24「存为预设」：弹窗开关 + 预填 + 套件列表数据源。
+  // prefill 必须持有在 state（T7 carry-note：弹窗 open-effect 依赖 prefill 身份，
+  // JSX 内联字面量每次渲染都是新对象，会在编辑中途重置表单）
+  const [presetDlgOpen, setPresetDlgOpen] = useState(false);
+  const [presetPrefill, setPresetPrefill] = useState<{
+    toolId: string;
+    items: [string, string][];
+  } | null>(null);
+  const [presetExtensions, setPresetExtensions] = useState<ExtensionWithAssignments[]>([]);
+  const [prefilling, setPrefilling] = useState<Record<string, boolean>>({});
+  // frontmatter 专属预填建议（spec §6，Task 17）：单项目导入命中后弹确认 Dialog
+  //（2026-09-15 裁决：当场确认，非 toast）
+  const [suggestion, setSuggestion] = useState<FrontmatterSuggestion | null>(null);
+  // 名称筛选 + 三态排序（用户反馈：工具组下清单可能很长）——与「按资源」视图同款口径，
+  // 排序/筛选逻辑复用 src/lib/nameSort.ts；作用于每个工具组内的全部清单
+  const [search, setSearch] = useState("");
+  const [sortDir, setSortDir] = useState<SortDir>("none");
+
+  const handleSaveAsPreset = async (toolId: string) => {
+    setPrefilling((prev) => ({ ...prev, [toolId]: true }));
+    try {
+      // 双拉取：当前生效资源（三元组，origin 丢弃——预设条目即二元组）+ 全量套件列表。
+      // 本视图已有的 list_tool_resources 数据缺 isNative 字段，不能直接作弹窗数据源
+      //（原生技能分组会失真），故补一次 list_extensions_with_assignments 加载
+      const [triples, extensions] = await Promise.all([
+        getToolActiveResources(toolId),
+        listExtensionsWithAssignments(),
+      ]);
+      setPresetExtensions(extensions as ExtensionWithAssignments[]);
+      setPresetPrefill({
+        toolId,
+        items: triples.map(([id, kind]) => [id, kind] as [string, string]),
+      });
+      setPresetDlgOpen(true);
+    } catch (e) {
+      toast.error(t("common.operationFailed", { error: formatInvokeError(e, t) }));
+    } finally {
+      setPrefilling((prev) => ({ ...prev, [toolId]: false }));
+    }
+  };
 
   const loadToolResources = useCallback(async (toolId: string) => {
     try {
@@ -66,6 +129,7 @@ export function ResourceByToolView() {
       });
       if (result.imported > 0) {
         toast.success(t("resources.importSuccess", { name: item.name }));
+        if (result.suggestion) setSuggestion(result.suggestion);
         await loadToolResources(toolId);
         await loadDuplicates(toolId);
       } else {
@@ -129,6 +193,34 @@ export function ResourceByToolView() {
 
   return (
     <div className="space-y-4">
+      {/* 名称筛选 + 三态排序控制条：作用于下方每个工具组内的全部清单 */}
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          placeholder={t("resources.filterByName")}
+          value={search}
+          onChange={(e) => setSearch(e.currentTarget.value)}
+          className="h-7 w-40 rounded border px-2 text-xs"
+        />
+        <Button
+          size="sm"
+          variant="ghost"
+          className={`h-6 px-1.5 text-[10px] ${sortDir !== "none" ? "text-foreground" : "text-muted-foreground"}`}
+          title={t("resources.sortByName")}
+          aria-label={t("resources.sortByName")}
+          onClick={() => setSortDir((prev) => cycleSortDir(prev))}
+        >
+          {sortDir === "asc" ? (
+            <ArrowUp className="mr-1 h-3 w-3" />
+          ) : sortDir === "desc" ? (
+            <ArrowDown className="mr-1 h-3 w-3" />
+          ) : (
+            <ArrowUpDown className="mr-1 h-3 w-3" />
+          )}
+          {t("resources.sortByName")}
+          {sortDir !== "none" && <span>{sortDir === "asc" ? "↑" : "↓"}</span>}
+        </Button>
+      </div>
       {tools.map((tool) => (
         <div key={tool.id} className="rounded border p-3">
           <div className="mb-2 flex items-center justify-between">
@@ -157,6 +249,20 @@ export function ResourceByToolView() {
                 <Scan className={`mr-1 h-3 w-3 ${scanning[tool.id] ? "animate-spin" : ""}`} />
                 {t("common.scan")}
               </Button>
+              {/* FR-24「存为预设」入口：抓取该工具当前生效资源预填编辑弹窗 */}
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-[10px]"
+                title={t("presets.saveAsPreset")}
+                onClick={() => handleSaveAsPreset(tool.id)}
+                disabled={prefilling[tool.id]}
+              >
+                <BookmarkPlus
+                  className={`mr-1 h-3 w-3 ${prefilling[tool.id] ? "animate-spin" : ""}`}
+                />
+                {t("presets.saveAsPreset")}
+              </Button>
             </div>
           </div>
 
@@ -164,6 +270,8 @@ export function ResourceByToolView() {
             toolId={tool.id}
             resources={toolResources[tool.id]}
             onImport={handleImport}
+            search={search}
+            sortDir={sortDir}
           />
 
           {/* 重复 skill 清理区 */}
@@ -201,6 +309,19 @@ export function ResourceByToolView() {
           )}
         </div>
       ))}
+
+      {/* FR-24「存为预设」弹窗（复用 T7 编辑弹窗，新建模式 + 预填）：
+          保存成功后弹窗自失效 PRESETS_KEY，此处无需额外刷新逻辑 */}
+      <PresetEditDialog
+        open={presetDlgOpen}
+        preset={null}
+        presetExtensions={presetExtensions}
+        prefill={presetPrefill ?? undefined}
+        onClose={() => setPresetDlgOpen(false)}
+      />
+
+      {/* frontmatter 专属预填建议确认（Task 17）：确认=写绑定，忽略=关闭不写 */}
+      <ImportSuggestionDialog suggestion={suggestion} onClose={() => setSuggestion(null)} />
     </div>
   );
 }
@@ -209,20 +330,39 @@ function ToolResourceList({
   toolId,
   resources,
   onImport,
+  search,
+  sortDir,
 }: {
   toolId: string;
   resources?: ToolResources;
   onImport: (toolId: string, item: NativeExtension) => void;
+  search: string;
+  sortDir: SortDir;
 }) {
   const { t } = useTranslation();
   if (!resources) {
     return <div className="text-muted-foreground py-2 text-xs">{t("common.loading")}</div>;
   }
 
-  const globalSkills = resources.global.filter((e) => e.kind === "skill");
-  const nativeSkills = resources.native.filter((n) => n.kind === "skill");
-  const globalMcps = resources.global.filter((e) => e.kind === "mcp");
-  const globalPlugins = resources.global.filter((e) => e.kind === "plugin");
+  // 名称筛选（大小写不敏感包含）+ 三态排序：全局与原生两块分别过滤后各自排序
+  const q = search.trim().toLowerCase();
+  const match = (name: string) => !q || name.toLowerCase().includes(q);
+  const globalSkills = applyNameSort(
+    resources.global.filter((e) => e.kind === "skill" && match(e.name)),
+    sortDir
+  );
+  const nativeSkills = applyNameSort(
+    resources.native.filter((n) => n.kind === "skill" && match(n.name)),
+    sortDir
+  );
+  const globalMcps = applyNameSort(
+    resources.global.filter((e) => e.kind === "mcp" && match(e.name)),
+    sortDir
+  );
+  const globalPlugins = applyNameSort(
+    resources.global.filter((e) => e.kind === "plugin" && match(e.name)),
+    sortDir
+  );
 
   return (
     <div className="space-y-2">

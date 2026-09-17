@@ -25,6 +25,23 @@ fn update_tray_menu(
     plugins::system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text)
 }
 
+/// 托盘菜单统一重建（Task 16）：基础项 + 预设项（带开/关选中态）一次成型。
+/// 标签合并语义：传入的标签覆盖持久化值，未传的沿用最近一次值——预设增删/
+/// 开关变化处可只追加 presetsLabel 一行调用，无需关心基础项文案。
+/// `update_tray_menu` 保留但前端已不再调用（保留至下个清理窗口移除）
+#[tauri::command]
+fn refresh_tray(
+    app: tauri::AppHandle,
+    presets_label: Option<String>,
+    show_text: Option<String>,
+    pet_text: Option<String>,
+    quit_text: Option<String>,
+) -> Result<(), String> {
+    let labels =
+        plugins::system_tray::TrayLabels::merged(presets_label, show_text, pet_text, quit_text);
+    plugins::system_tray::update_tray_with_presets_labeled(&app, &labels)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -35,6 +52,16 @@ pub fn run() {
         // 清扫 .import-staging 崩溃残留（issue #32-3）：必须先于增量导入/补链执行，
         // 二者可能耗时数秒，期间 IPC 已可用、用户可能已发起导入，晚清扫会误删活跃暂存区
         services::pet::sweep_staging();
+        // 预设 v2：孤儿暂存回移 + 注册表回填（先于导入/补链，保证表口径就绪）
+        services::preset::stash::recover_orphans();
+        for msg in services::preset::check_snapshot_invariants() {
+            log::warn!("预设快照不变量违背: {}", msg);
+        }
+        services::resource::backfill_registry();
+        // 预设 v2（spec §13）：账本-磁盘漂移扫描，启动时 warn 收口
+        for d in services::resource::reconcile::scan_drift() {
+            log::warn!("[漂移{}] {} {}", d.kind, d.extension_id, d.path);
+        }
         services::auto_import_extensions(false);
         services::sync_imported_skill_links();
     });
@@ -79,6 +106,7 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         greet,
         update_tray_menu,
+        refresh_tray,
         commands::session::get_all_sessions,
         commands::session::focus_session,
         commands::session::focus_hwnd,
@@ -109,9 +137,16 @@ pub fn run() {
         commands::resource::open_tool_resource,
         commands::resource::scan_native_resources,
         commands::resource::import_native_resources,
+        commands::resource::list_frontmatter_suggestions,
         commands::resource::list_tool_resources,
         commands::resource::check_preset_compatibility,
         commands::resource::list_ssot_resources,
+        commands::resource::scan_ledger_drift,
+        commands::resource::reconcile_item,
+        commands::resource::reconcile_tool_batch,
+        commands::resource::scan_empty_dirs,
+        commands::resource::clean_empty_dirs,
+        commands::resource::reveal_dir,
         commands::resource::detect_duplicate_skills,
         commands::resource::cleanup_duplicate_skills,
         commands::resource::check_skill_target_type,
@@ -122,12 +157,26 @@ pub fn run() {
         commands::resource::detect_legacy_agents_links,
         commands::resource::migrate_legacy_agents_links,
         commands::preset::create_preset,
+        commands::preset::get_preset,
+        commands::preset::update_preset,
+        commands::preset::restore_preset,
+        commands::preset::get_active_preset,
+        commands::preset::list_active_presets,
+        commands::preset::get_tool_active_resources,
+        commands::preset::preview_apply_preset,
+        commands::preset::set_resource_binding,
+        commands::preset::list_resource_bindings,
+        commands::preset::delete_resource_binding,
+        commands::preset::set_tool_resident,
+        commands::preset::list_tool_residents,
         commands::preset::delete_preset,
         commands::preset::list_presets,
         commands::preset::apply_preset,
         commands::preset::deactivate_preset,
         commands::preset::apply_preset_to_subagent,
         commands::preset::deactivate_preset_from_subagent,
+        commands::preset::get_preset_health,
+        commands::preset::restore_stash_entry,
         commands::skill::list_repo_skills,
         commands::skill::install_skill,
         commands::skill::rescan_skills,

@@ -1,9 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ImportOutcome } from "@/types/extension";
 export async function listRepoSkills() {
   return await invoke("list_repo_skills");
 }
-export async function installSkill(sourcePath: string, name: string, overwrite = false) {
-  return await invoke("install_skill", { sourcePath, name, overwrite });
+// 返回类型与 Rust commands::skill::ImportOutcome（serde camelCase）同步（Task 17）
+export async function installSkill(
+  sourcePath: string,
+  name: string,
+  overwrite = false
+): Promise<ImportOutcome> {
+  return await invoke<ImportOutcome>("install_skill", { sourcePath, name, overwrite });
 }
 export async function rescanSkills() {
   return await invoke("rescan_skills");

@@ -52,7 +52,9 @@ beforeEach(() => {
   invokeMock.mockImplementation(async (cmd: string) => {
     if (cmd === "get_tool_settings") return structuredClone(rows);
     if (cmd === "update_tool_settings") {
-      return { restored: [], restoredMcps: [], rebuildFailed: [], skipped: [] };
+      // 按 issue #36-4 的 ToolSettingsResult 真实形状返回（旧 mock 的 skipped 字段
+      // 缺 skippedKept/skippedLost，会让 applyChanges 读 .length 抛错中断后续流程）
+      return { restored: [], restoredMcps: [], rebuildFailed: [], skippedKept: [], skippedLost: [] };
     }
     if (cmd === "list_enabled_tools") return rows.map((r) => ({ id: r.toolId, label: r.name }));
     return [];
@@ -103,6 +105,10 @@ describe("工具管理（review F7①②）", () => {
       expect(invokeMock).toHaveBeenCalledWith("update_tool_settings", {
         changes: [{ toolId: "opencode", enabled: false }],
       });
+    });
+    // 终审 Minor #5：保存成功后同步托盘（工具启停可能改动预设激活态，需重建托盘菜单）
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("refresh_tray", { presetsLabel: "Presets" });
     });
   });
 

@@ -26,6 +26,8 @@ import {
   Volume2,
   Dog,
   Wrench,
+  HeartPulse,
+  RefreshCw,
   Smartphone,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -54,6 +56,7 @@ import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
 import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
 import { loadActiveName } from "@/components/pet/petRuntime";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
+import { usePresetHealthQuery } from "@/lib/query/queries/health";
 import { RemoteSection } from "@/components/settings/RemoteSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
@@ -63,7 +66,79 @@ import { useAppTranslation } from "@/hooks/use-app-translation";
 
 const SHORTCUT_KEY = "global-shortcut-show-main";
 
-type SettingSection = "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "remote";
+// 一致性体检只读摘要（spec §13 设置页「立即体检」）：各源计数 + 前几条文本 + refetch。
+// 与资源页 HealthCheckCard 共用 ["preset-health"] query key（设置窗口独立 WebView，各自取数）
+function HealthSummary() {
+  const { t } = useAppTranslation();
+  const healthQuery = usePresetHealthQuery();
+  const drift = healthQuery.data?.drift ?? [];
+  const invariants = healthQuery.data?.invariants ?? [];
+  const stashPending = healthQuery.data?.stashPending ?? [];
+  const hasIssues = drift.length + invariants.length + stashPending.length > 0;
+  // 漂移按 L1-L4 分组计数（复用 resources.health.L1-L4 文案，无新 key）
+  const kindCounts = (["L1", "L2", "L3", "L4"] as const).map((kind) => ({
+    kind,
+    n: drift.filter((d) => d.kind === kind).length,
+  }));
+  // 前几条文本摘要（封顶 6 行防长列表；只读，不提供处置入口——处置在资源页卡片）
+  const lines = [
+    ...drift.slice(0, 3).map((d) => `${d.toolId} · ${d.extensionId} (${d.kind})`),
+    ...invariants.slice(0, 2),
+    ...stashPending.slice(0, 1).map((s) => `${s.skillName} → ${s.originalPath}`),
+  ];
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
+          {hasIssues ? (
+            <>
+              {kindCounts
+                .filter((k) => k.n > 0)
+                .map((k) => (
+                  <span key={k.kind} className="bg-muted rounded px-1.5 py-0.5">
+                    {t(`resources.health.${k.kind}`)}: {k.n}
+                  </span>
+                ))}
+              {invariants.length > 0 && (
+                <span className="bg-muted rounded px-1.5 py-0.5">
+                  {t("resources.health.invariantBroken")}: {invariants.length}
+                </span>
+              )}
+              {stashPending.length > 0 && (
+                <span className="bg-muted rounded px-1.5 py-0.5">
+                  {t("resources.health.stashPending")}: {stashPending.length}
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="text-muted-foreground">{t("resources.health.ok")}</span>
+          )}
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void healthQuery.refetch()}
+          disabled={healthQuery.isFetching}
+        >
+          <RefreshCw className={cn("mr-1 h-3 w-3", healthQuery.isFetching && "animate-spin")} />
+          {t("resources.health.runNow")}
+        </Button>
+      </div>
+      {hasIssues && lines.length > 0 && (
+        <div className="divide-border divide-y rounded-md border">
+          {lines.map((line, i) => (
+            <div key={i} className="text-muted-foreground truncate px-3 py-1.5 text-xs">
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type SettingSection =
+  "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "health" | "remote";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
 type ToolRow = {
@@ -274,6 +349,9 @@ export default function SettingsPage() {
       // 全量失效本窗口（设置窗口）的 react-query 缓存；主窗口/看板的缓存由后端广播的
       // tools-changed 事件失效（toolsChangedSync，N2 根因修复）——两者是独立 WebView
       await queryClient.invalidateQueries();
+      // 托盘同步（终审 Minor #5）：工具启停可能改动预设激活态，重建托盘菜单；失败静默
+      // （只读传参，refresh_tray 内部已有持久化合并，与 PresetList 既有调用同款）
+      invoke("refresh_tray", { presetsLabel: t("tray.presetsLabel") }).catch(() => {});
       const jump = pendingJumpRef.current;
       pendingJumpRef.current = null;
       jump?.();
@@ -362,6 +440,11 @@ export default function SettingsPage() {
       id: "tools" as SettingSection,
       label: t("settings.tools.title"),
       icon: Wrench,
+    },
+    {
+      id: "health" as SettingSection,
+      label: t("resources.health.title"),
+      icon: HeartPulse,
     },
     {
       id: "remote" as SettingSection,
@@ -740,6 +823,15 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {/* 一致性体检（spec §13）：同 query 数据只读摘要 + 立即体检（处置入口在资源页卡片） */}
+          {activeSection === "health" && (
+            <div className="space-y-4">
+              <div>
+                <h2 className="mb-1 text-lg font-semibold">{t("resources.health.title")}</h2>
+              </div>
+              <HealthSummary />
+            </div>
+          )}
           {activeSection === "remote" && <RemoteSection />}
         </div>
       </div>

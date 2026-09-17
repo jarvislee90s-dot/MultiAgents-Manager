@@ -1,8 +1,55 @@
 // 资源管理服务 - 自动扫描导入 skills 和 plugins
 
+pub mod frontmatter;
 pub mod migration;
+pub mod reconcile;
 
 use crate::linker;
+
+/// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
+/// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
+/// 深度上限 4 层，symlink 目录不跟随（防循环）
+/// 资源视图（list_ssot_resources）与注册表回填（backfill_registry）共用同一扫描，
+/// 保证「卡片看到的」与「登记进表的」口径一致
+pub fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
+    const SCAN_MAX_DEPTH: usize = 4;
+    let mut results = Vec::new();
+    fn recurse(
+        dir: &std::path::Path,
+        base: &std::path::Path,
+        depth: usize,
+        results: &mut Vec<String>,
+    ) {
+        if depth > SCAN_MAX_DEPTH {
+            log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() {
+                    continue;
+                }
+                if path.is_dir() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    if path.join("SKILL.md").exists() {
+                        if let Ok(rel) = path.strip_prefix(base) {
+                            results.push(rel.to_string_lossy().to_string());
+                        }
+                    } else {
+                        recurse(&path, base, depth + 1, results);
+                    }
+                }
+            }
+        }
+    }
+    recurse(base, base, 0, &mut results);
+    results.sort();
+    results
+}
 
 /// SKILL.md 元数据
 struct SkillMeta {
@@ -112,6 +159,11 @@ pub struct ImportStats {
     pub newly_added: usize,
     pub skipped_dup: usize,
     pub source_counts: Vec<(String, usize)>,
+    /// frontmatter 专属预填建议（spec §6，Task 17）：仅手动导入路径
+    /// （import_native_resources）取首个命中项填充——brief 语义「弹一个提示」，
+    /// 其余命中项交由 list_frontmatter_suggestions 进体检卡片兜底；
+    /// 启动自动导入（rescan_skills）恒 None（自动识别只建议不强制）
+    pub suggestion: Option<crate::services::resource::frontmatter::FrontmatterSuggestion>,
 }
 
 /// 单次导入决策：SSOT 有无 + 工具显式禁用状态决定复制/补链/跳过
@@ -210,8 +262,10 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
             continue;
         }
 
-        // 断链检测与自动修复：SSOT 仍在则重建，SSOT 缺失则清链接并标记
-        let tool_target = crate::adapter::primary_skill_dir(&tool_id).map(|d| d.join(&ext.name));
+        // 断链检测与自动修复：SSOT 仍在则重建，SSOT 缺失则清链接并标记。
+        // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）；下方 repo 侧保持嵌套原路径
+        let tool_target = crate::adapter::primary_skill_dir(&tool_id)
+            .map(|d| crate::linker::dispatch_target(&d, &ext.name));
         if let Some(t) = &tool_target {
             if crate::linker::check_link_health(t) == crate::linker::LinkHealth::Dangling {
                 let repo_exists = crate::linker::ensure_repo_dir().join(&ext.name).exists();
@@ -233,7 +287,7 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
         }
 
         let already_linked = crate::adapter::primary_skill_dir(&tool_id)
-            .map(|dir| dir.join(&ext.name).is_symlink())
+            .map(|dir| crate::linker::dispatch_target(&dir, &ext.name).is_symlink())
             .unwrap_or(false);
         // P0-1：补链统一走勾选门（停用工具不得重建，见 ensure_skill_relink）
         let _ = ensure_skill_relink(&tool_id, &tool_enabled, &|| already_linked, &|| {
@@ -244,7 +298,8 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
 
     // 兼容历史数据：assignment 表里可能已有 skill 记录，但 extensions 表没有对应行
     let mut assignments: Vec<_> = crate::database::list_all_assignments();
-    // 先建顶层套件链接，再补嵌套子 skill，避免父目录先被创建成真实目录
+    // 排序为历史遗留（嵌套派发期需先顶层后嵌套、避免父目录被建成真实目录）；
+    // 拍平派发（2026-09-17）后嵌套名不再产生父目录，排序保留无害
     assignments.sort_by_key(|a| a.extension_id.matches('/').count());
     for assignment in assignments {
         if !assignment.enabled {
@@ -262,8 +317,9 @@ pub fn sync_imported_skill_links_with(tool_enabled: &dyn Fn(&str) -> bool) {
             continue;
         }
 
+        // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）
         let already_linked = crate::adapter::primary_skill_dir(&assignment.agent_tool_id)
-            .map(|dir| dir.join(skill_name).is_symlink())
+            .map(|dir| crate::linker::dispatch_target(&dir, skill_name).is_symlink())
             .unwrap_or(false);
         if let Err(e) = ensure_skill_relink(
             &assignment.agent_tool_id,
@@ -572,6 +628,113 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         newly_added,
         skipped_dup,
         source_counts,
+        // 自动导入只建议不强制（spec §6 / 2026-09-15 裁决）：存量建议走体检卡片
+        suggestion: None,
+    }
+}
+
+/// 注册表回填（spec §8.1 P2①）：SSOT 目录里有、extensions 表里无行的资源补登记。
+/// 启动时调用，幂等——预设创建列表（查表）与资源卡片（扫目录）从此同源
+pub fn backfill_registry() {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // skill：~/.mam/skills 递归扫描（与资源视图 list_ssot_resources 同一
+    // scan_skill_dirs 口径），嵌套套件技能（如 superpowers/brainstorming）按
+    // 相对路径登记（id/name 均带斜杠路径）；套件目录本身（无 SKILL.md）不入表。
+    // 旧实现只扫顶层，嵌套套件永远进不了 extensions 表，还会把套件目录误登记为技能
+    let skills = home.join(".mam").join("skills");
+    if skills.is_dir() {
+        for rel in scan_skill_dirs(&skills) {
+            let path = skills.join(&rel);
+            // no-swallowed-errors（评审裁决 3）：回填失败逐条报告，不再吞错
+            if let Err(err) = crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                id: format!("skill-{}", rel),
+                kind: "skill".to_string(),
+                name: rel.clone(),
+                description: None,
+                source_path: path.to_string_lossy().to_string(),
+                source_url: None,
+                version: None,
+                tags: None,
+                suite: None,
+                source_tool: None,
+                is_native: false,
+            }) {
+                log::warn!("回填 skill {} 登记 extensions 失败: {}", rel, err);
+            }
+        }
+    }
+
+    // mcp：~/.mam/mcp/<stem>.json
+    let mcp = home.join(".mam").join("mcp");
+    if mcp.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&mcp) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    // no-swallowed-errors（评审裁决 3）：回填失败逐条报告，不再吞错
+                    if let Err(err) =
+                        crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                            id: format!("mcp-{}", stem),
+                            kind: "mcp".to_string(),
+                            name: stem.to_string(),
+                            description: None,
+                            source_path: path.to_string_lossy().to_string(),
+                            source_url: None,
+                            version: None,
+                            tags: None,
+                            suite: None,
+                            source_tool: None,
+                            is_native: false,
+                        })
+                    {
+                        log::warn!("回填 mcp {} 登记 extensions 失败: {}", stem, err);
+                    }
+                }
+            }
+        }
+    }
+
+    // 陈旧行修剪（wave33 Item 3，修「预设编辑名单重复」根因）：source_path 非空
+    // 且路径不存在 → 死行——与新登记行并存会让预设编辑弹窗双列。判定口径：
+    // Path::exists()（跟随 symlink，死链同样判不存在）。删除该行并连带清
+    // extension_assignments / tool_residents / resource_bindings（防孤儿）；
+    // is_native 的 source_path 指向工具目录、MCP 行指向 ~/.mam/mcp/*.json、
+    // 插件行指向插件目录——统一按存在性判定，不做 kind 特判
+    let mut pruned = 0usize;
+    for ext in crate::database::list_extensions() {
+        if ext.source_path.is_empty() {
+            continue;
+        }
+        if std::path::Path::new(&ext.source_path).exists() {
+            continue;
+        }
+        if let Err(e) = crate::database::delete_extension(&ext.id) {
+            log::warn!("修剪 {} 删除 extensions 行失败: {}", ext.id, e);
+            continue;
+        }
+        // 连带清理全部 best-effort：单条失败只降日志，不阻断其余修剪
+        if let Err(e) = crate::database::delete_assignments_for(&ext.id) {
+            log::warn!("修剪 {} 连带清 assignments 失败: {}", ext.id, e);
+        }
+        if let Err(e) = crate::database::delete_tool_residents_for(&ext.id) {
+            log::warn!("修剪 {} 连带清 tool_residents 失败: {}", ext.id, e);
+        }
+        if let Err(e) = crate::database::delete_resource_binding(&ext.id) {
+            log::warn!("修剪 {} 连带清 resource_bindings 失败: {}", ext.id, e);
+        }
+        log::info!(
+            "注册表回填：修剪陈旧行 {}（source_path 失效: {}）",
+            ext.id,
+            ext.source_path
+        );
+        pruned += 1;
+    }
+    if pruned > 0 {
+        log::info!("注册表回填：共修剪 {} 条 source_path 失效的陈旧行", pruned);
     }
 }
 

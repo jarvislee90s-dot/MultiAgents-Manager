@@ -81,6 +81,15 @@ pub fn ensure_tool_enabled(tool_id: &str) -> Result<(), String> {
 }
 
 pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
+    apply_tool_changes_with(changes, &crate::services::preset::restore_tool)
+}
+
+/// 可注入缝隙（照 sync_imported_skill_links_with 先例）：restore 结果可注入，
+/// 供测试验证取消勾选分支对前置恢复失败的防御
+pub fn apply_tool_changes_with(
+    changes: Vec<ToolSettingChange>,
+    restore_preset: &dyn Fn(&str) -> Result<crate::services::preset::RestoreResult, String>,
+) -> ApplyResult {
     let mut result = ApplyResult::default();
     for c in &changes {
         let was = agent_tool::get_tool_enabled(&c.tool_id);
@@ -89,6 +98,19 @@ pub fn apply_tool_changes(changes: Vec<ToolSettingChange>) -> ApplyResult {
             continue;
         }
         if !c.enabled {
+            // 预设 v2（spec §5.4）：取消勾选前先恢复基底——若有激活预设，
+            // 暂存的原生技能与独占停用项必须先归位，再做 W5 还原清理。
+            // 恢复失败（Err 仅发生在文件已归位后的快照销账步，DB 级）→ 不清理、
+            // 不落 disabled，工具保持启用，重试可愈；Ok（conflicts 是软性报告）
+            // → 照常清理（评审裁决 2 + Minor 2 文案精度）
+            if let Err(e) = restore_preset(&c.tool_id) {
+                log::warn!("取消勾选 {} 前恢复基底失败，工具保持启用: {}", c.tool_id, e);
+                result.skipped_kept.push(format!(
+                    "{}: 预设基底已还原但快照销账失败（陈旧基底），工具保持启用，重试可愈",
+                    c.tool_id
+                ));
+                continue;
+            }
             // 取消勾选：清理为 best-effort（跳过项逐项报告，spec §9），随后落 DB
             disable_tool_cleanup(&c.tool_id, &mut result);
             agent_tool::set_tool_enabled(&c.tool_id, false);
@@ -157,7 +179,13 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
                             );
                         }
                         None => report_restore(
-                            restore_mam_link(&ssot, &dir.join(&ext.name), &ext.name),
+                            // 派发拍平（2026-09-17）：工具目录目标按拍平名定位磁盘链接；
+                            // 上方 ssot 侧保持嵌套原路径（SSOT 仓库层级不动）
+                            restore_mam_link(
+                                &ssot,
+                                &crate::linker::dispatch_target(&dir, &ext.name),
+                                &ext.name,
+                            ),
                             &ext.name,
                             result,
                         ),
@@ -226,16 +254,17 @@ fn report_restore(outcome: RestoreOutcome, name: &str, result: &mut ApplyResult)
 /// 仍计 SkippedKept，恢复失败才是 SkippedLost（工具目录空缺），由调用方分级报告。
 /// 先把 SSOT 内容暂存到目标旁的临时路径（目录走 copy_dir_recursive，
 /// 子 Agent 分配的 Layer 3 用户可见目标（与 services::skill::assign_skill_to_subagent
-/// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<name>，P1-4 停用还原用）
+/// 的落位布局一致：工具 skill 目录下 subagents/<sub>/<拍平名>，P1-4 停用还原用。
+/// 派发拍平口径见 linker::dispatch_name，2026-09-17 裁决）
 fn subagent_skill_target(
     tool_skill_dir: &std::path::Path,
     sub_agent_id: &str,
     skill_name: &str,
 ) -> std::path::PathBuf {
-    tool_skill_dir
-        .join("subagents")
-        .join(sub_agent_id)
-        .join(skill_name)
+    crate::linker::dispatch_target(
+        &tool_skill_dir.join("subagents").join(sub_agent_id),
+        skill_name,
+    )
 }
 
 /// 单文件如配置型插件的 .json 走 fs::copy），暂存成功才移除链接并原子落位；

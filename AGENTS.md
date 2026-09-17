@@ -147,6 +147,7 @@ SQLite 类工具（查询即过滤，如 opencode / zcode）豁免第 2、3 条�
 | `~/.mam/mcp/` | 全局 MCP 服务器配置 |
 | `~/.mam/plugins/` | 全局 Plugin 仓库 |
 | `~/.mam/hooks/status-hook.sh` | 共享 Hook 脚本 |
+| `~/.mam/stash/` | 预设独占模式的原生技能暂存区（应用时移入、恢复时回移，stash_journal 记账） |
 | `~/.mam/events/` | Hook 事件文件（自动清理，30 秒 TTL） |
 
 ## 贡献者行为准则
