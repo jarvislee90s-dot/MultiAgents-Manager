@@ -16,6 +16,10 @@ export const FILE_SCOPES = [200, 500, 1000] as const;
 /** 类型过滤档（用户裁决 5）：全部 / 文档 / 图片；代码文件仅在「全部」可见 */
 export type FileKindFilter = "all" | "doc" | "image";
 
+/** 来源过滤档（M5 决策 10 / 线稿三池）：全部来源 / 我上传的 / 工具读取 / 工具读写。
+ *  值与后端 FileEntry.origin（snake_case 序列化）一致 */
+export type FileOriginFilter = "all" | "user" | "tool_read" | "tool_write";
+
 /** 文档扩展名（用户裁决 5：md/markdown/txt） */
 const DOC_EXTS = ["md", "markdown", "txt"];
 /** 图片扩展名（用户裁决 5：png/jpg/jpeg/gif/webp/svg/bmp） */
@@ -73,6 +77,12 @@ export default function FilePanel({
   onClose,
 }: FilePanelProps) {
   const [kind, setKind] = useState<FileKindFilter>("all");
+  // 来源筛选（M5 B3）：默认全部来源；undefined origin 的旧载荷条目只在「全部」可见
+  const [origin, setOrigin] = useState<FileOriginFilter>("all");
+  // 文件名搜索（M5 决策 10）：**点「搜索」（或回车）才执行**——输入框只是草稿态，
+  // activeSearch 才参与过滤。两态分离是裁决的执行点，勿合并成受控即时过滤
+  const [searchDraft, setSearchDraft] = useState("");
+  const [activeSearch, setActiveSearch] = useState("");
   // 目录路径浮窗（2026-09-16 用户裁决）：次行目录被截断时点击查看全路径
   // （手机与电脑逻辑一致——同一组件两板共用）
   const [pathPopover, setPathPopover] = useState<string | null>(null);
@@ -83,11 +93,22 @@ export default function FilePanel({
     return () => clearInterval(id);
   }, []);
 
-  // 视图层筛选（不再排序：顺序即后端 lastSeq 降序，用户裁决 1）
-  const visible = useMemo(
-    () => (kind === "all" ? entries : entries.filter((e) => fileKindOf(e.path) === kind)),
-    [entries, kind]
-  );
+  /** 执行搜索：草稿 trim 后生效（空串 = 清除搜索） */
+  const runSearch = () => setActiveSearch(searchDraft.trim());
+
+  // 视图层三层叠加过滤（决策 10：与追溯范围、类型、来源叠加；不再排序：
+  // 顺序即后端 lastSeq 降序，用户裁决 1）
+  const visible = useMemo(() => {
+    let list = kind === "all" ? entries : entries.filter((e) => fileKindOf(e.path) === kind);
+    if (origin !== "all") {
+      list = list.filter((e) => e.origin === origin);
+    }
+    if (activeSearch) {
+      const q = activeSearch.toLowerCase();
+      list = list.filter((e) => fileBaseName(e.path).toLowerCase().includes(q));
+    }
+    return list;
+  }, [entries, kind, origin, activeSearch]);
 
   // 到顶判定（用户裁决 3）：1000 = MAX_LIMIT，到顶后不再提示"还有更早文件"
   const atTop = scope >= FILE_SCOPES[FILE_SCOPES.length - 1];
@@ -96,6 +117,19 @@ export default function FilePanel({
     { key: "doc", label: "文档" },
     { key: "image", label: "图片" },
   ];
+  // 来源 chips（M5 线稿三池 + 全部；键 = 后端 origin 值域）
+  const originChips: Array<{ key: FileOriginFilter; label: string }> = [
+    { key: "all", label: "全部来源" },
+    { key: "user", label: "我上传的" },
+    { key: "tool_read", label: "工具读取" },
+    { key: "tool_write", label: "工具读写" },
+  ];
+  // 行内来源徽标文案（undefined = 旧载荷，不渲染）
+  const originLabel: Record<string, string> = {
+    user: "我上传的",
+    tool_read: "工具读取",
+    tool_write: "工具读写",
+  };
 
   return (
     <section
@@ -165,7 +199,53 @@ export default function FilePanel({
             {s}
           </button>
         ))}
-        {loading && <span className="ml-auto text-xs text-slate-400">加载中…</span>}
+        {/* 来源筛选（M5 决策 10 / 线稿三池）：全部来源 / 我上传的 / 工具读取 / 工具读写 */}
+        <span className="text-slate-300 dark:text-slate-600">|</span>
+        <span role="group" aria-label="文件来源过滤" className="flex items-center gap-1">
+          {originChips.map((c) => (
+            <button
+              key={c.key}
+              type="button"
+              data-testid={`file-origin-${c.key}`}
+              aria-pressed={origin === c.key}
+              onClick={() => setOrigin(c.key)}
+              className={`rounded-full px-2 py-0.5 text-xs ${
+                origin === c.key
+                  ? "bg-violet-600 text-white dark:bg-violet-400 dark:text-slate-900"
+                  : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+              }`}
+            >
+              {c.label}
+            </button>
+          ))}
+        </span>
+        {/* 文件名搜索（M5 决策 10）：点「搜索」（或回车）才执行 */}
+        <form
+          role="search"
+          aria-label="文件名搜索"
+          className="ml-auto flex items-center"
+          onSubmit={(e) => {
+            e.preventDefault();
+            runSearch();
+          }}
+        >
+          <input
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
+            placeholder="按文件名搜索"
+            data-testid="file-search-input"
+            aria-label="按文件名搜索"
+            className="w-28 rounded-l-lg border border-r-0 border-slate-300 bg-white px-2 py-1 text-xs outline-none focus:border-slate-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+          />
+          <button
+            type="submit"
+            data-testid="file-search-run"
+            className="rounded-r-lg border border-slate-300 bg-slate-100 px-2 py-1 text-xs text-slate-600 hover:bg-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+          >
+            搜索
+          </button>
+        </form>
+        {loading && <span className="text-xs text-slate-400">加载中…</span>}
       </div>
 
       <div
@@ -175,7 +255,7 @@ export default function FilePanel({
       >
         {visible.length === 0 && !loading && (
           <p data-testid="panel-empty" className="py-12 text-center text-sm text-slate-500">
-            该范围内未发现文件
+            {activeSearch || origin !== "all" ? "无匹配文件" : "该范围内未发现文件"}
           </p>
         )}
         <ul className={`space-y-1 ${loading && entries.length > 0 ? "opacity-60" : ""}`}>
@@ -204,6 +284,15 @@ export default function FilePanel({
                 {fileBaseName(e.path)}
               </button>
               <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                {/* 来源徽标（M5 线稿 .from pill）：undefined（旧载荷）不渲染 */}
+                {e.origin && (
+                  <span
+                    data-testid={`file-row-${i}-origin`}
+                    className="flex-none rounded-full border border-slate-200 px-1.5 py-px text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400"
+                  >
+                    {originLabel[e.origin] ?? e.origin}
+                  </span>
+                )}
                 {fileDirPrefix(e.path) ? (
                   <button
                     type="button"
