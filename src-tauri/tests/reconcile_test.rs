@@ -1,3 +1,8 @@
+// 账本-磁盘对账测试：L1-L4 漂移语义建立在 Unix symlink（read_link 目标判定）之上，
+// fixture 全程用 std::os::unix::fs::symlink 构造——文件级 cfg 门（照 linker_test 惯例），
+// Windows 交叉编译门禁（ci.yml x86_64-pc-windows-gnu --all-targets）跳过本文件。
+#![cfg(unix)]
+
 mod support;
 
 use std::sync::{Mutex, OnceLock};
