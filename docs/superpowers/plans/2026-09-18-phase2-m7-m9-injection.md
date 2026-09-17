@@ -41,6 +41,7 @@
 pub fn normalize_newlines(text: &str) -> String;                  // '\n' → "\\n"（字面两字符）
 pub fn compose_injection(device_name: &str, text: &str) -> String; // "[mobile {name}] {归一正文}"
 pub fn summarize(text: &str, max_chars: usize) -> String;
+pub const AUDIT_SUMMARY_CHARS: usize = 80;   // 审计摘要截断长度（W5 只存摘要）
 
 // inject/routing.rs（Task 2）
 pub enum Channel { Tmux, Iterm2, TerminalApp, WindowsConsole }
@@ -78,13 +79,19 @@ pub struct AuditRow { pub ts: i64, pub device_name: String, pub agent_type: Stri
     pub summary: String, pub result: String }
 pub fn record_conn(conn, ts, device_id, device_name, agent_type, session_id, channel, action, summary, result);
 pub fn recent_conn(conn, limit) -> Vec<AuditRow>;   // action ∈ send|queue|flush|jump|retract|approve|reject|fail
+// 审计写入口统一走 inject::audit_write 辅助（Task 6 提供）：DB 落库 + events::audit
+// 日志留痕并行（M4 T2e 惯例：target remote_audit 单行结构化可 grep）
 
 // inject/queue.rs（Task 5）
 pub fn is_running(status: &SessionStatus) -> bool;       // Processing|Thinking|Compacting
 pub fn is_input_ready(status: &SessionStatus) -> bool;   // Waiting|Idle|Finished
-pub fn spawn_flush_loop(state: Arc<server::RemoteState>); // serve() 内挂载（server.rs:348 旁）
+/// 单次投递内核（循环与端点共用）：jump=true 越过「仍在运行」复核（裁决 12 插队语义），
+/// 但仍要求快照中会话存在（红·中断挂起，W2）。成功/失败都写审计（DB + events::audit 日志并行）
+pub fn flush_one(st: &server::RemoteState, session_id: &str, jump: bool) -> bool;
+pub fn spawn_flush_loop(state: Arc<server::RemoteState>); // serve() 内挂载（Task 6 接线）
 
 // inject/approve.rs（Task 10）
+/// 首批只做批准/拒绝（spec W6 定死）；「不要再问」等扩展键位待 Task 13 实测取证后回填追加
 pub struct ApproveOption { pub id: String, pub label: String, pub key: String }
 pub struct ToolMapping { pub tool: String, pub verified_with: String,
     pub prompt_markers: Vec<String>, pub options: Vec<ApproveOption> }
@@ -394,6 +401,12 @@ CREATE TABLE IF NOT EXISTS write_audit (
     assert!(s.contains(r#"write s text "say \"hi\"" newline NO"#)); // 先文本后回车两步（可校验）
     assert!(s.contains(r#"write s text """#)); // 补回车
 }
+#[test] fn iterm_send_key_script_dispatch() {
+    let s = iterm_send_key_script("ttys005", "1");
+    assert!(s.contains(r#"tty of s contains "ttys005""#));
+    assert!(s.contains(r#"keystroke "1""#));
+    assert!(iterm_send_key_script("ttys005", "esc").contains("key code 53")); // esc 键码
+}
 #[test] fn terminal_script_uses_do_script() {
     let s = terminal_do_script("ttys005", "hi");
     assert!(s.contains(r#"tty of w is "/dev/ttys005""#));
@@ -489,11 +502,11 @@ impl Injector for RealInjector {
 
 - [ ] **Step 4: 全测（纯函数测试跨平台跑）+ fmt + clippy** → **Step 5: Commit** `feat(m7-inject): 注入引擎构造纯核 + macOS 三通道执行层（Injector 缝）`
 
-### Task 5: 队列状态判定纯核 + flush 循环（watcher 驱动）
+### Task 5: 队列状态判定纯核 + flush 内核（watcher 驱动）
 
-**Files:** Create `src-tauri/src/inject/queue.rs`；Modify `inject/mod.rs`、`src-tauri/src/remote/server.rs`（`serve()` 内 `SessionWatcher::start()` 之后追加 `inject::queue::spawn_flush_loop(state.clone());`）
+**Files:** Create `src-tauri/src/inject/queue.rs`；Modify `inject/mod.rs`（serve() 的循环接线放 Task 6 一并合入编译）
 
-**Interfaces:** Produces `is_running`/`is_input_ready`/`spawn_flush_loop`。消费 Task 3 dao + Task 4 Injector + `st.watcher_tx` + `st.session_source` + `st.injector`（Task 6 加缝——本任务先消费字段名，与 Task 6 同步合入编译；**执行顺序上 Task 5 与 6 可互换，建议 5 先写纯核与测试、循环接线放 6 之后一起过门禁**）。
+**Interfaces:** Produces `is_running`/`is_input_ready`/`flush_one(st, sid, jump)`/`spawn_flush_loop`。消费 Task 3 dao + Task 4 Injector + `st.watcher_tx` + `st.session_source` + `st.injector`（缝在 Task 6 加，届时一起过门禁）。
 
 - [ ] **Step 1: 纯核失败测试**
 
@@ -533,20 +546,24 @@ pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState
     });
 }
 
-/// 单次 flush（同步内核，供循环与「立即发送」共用；jump=true 时越过状态门并审计
-/// action=jump）。返回是否实际发出。
-pub fn flush_one(st: &crate::remote::server::RemoteState, session_id: &str) -> bool {
+/// 单次 flush 内核（同步，循环与「立即发送」共用）。返回是否实际发出。
+/// jump=false（常规跃迁驱动）：快照复核——会话找不到（红·中断/消失）→ 不消费挂起；
+/// 找到但 is_running（竞态：又一轮开跑）→ 不消费，等下个事件。
+/// jump=true（插队，裁决 12）：**跳过 is_running 复核**（用户显式要求即刻送达——运行中
+/// TUI 把消息放进自身输入缓冲），仅保留「会话存在」复核。
+pub fn flush_one(st: &crate::remote::server::RemoteState, session_id: &str, jump: bool) -> bool {
     // 1) next_pending_conn（DB.lock()，锁内只做 SQL——不放 get_setting）
     // 2) 快照复核：(st.session_source)() 找 session；找不到 → return false（挂起，W2 红·中断）
-    //    找到但 is_running → return false（竞态：又一轮开跑，等下个事件）
-    // 3) compose 后的 content 已在入队时完成（Task 6 入队即存 compose 产物——flush 直发）
+    //    !jump 且 is_running → return false；jump 则放行
+    // 3) content 已在入队时 compose 完毕（Task 6），flush 直发
     // 4) st.injector.locate_and_inject(session.pid, &item.content)
-    //    Ok → mark_sent + audit(channel=injector.name(), action=flush/jump, ok)
+    //    Ok → mark_sent + audit(channel=injector.name(), action=flush|jump, ok)
     //    Err(e) → mark_failed + audit(action=fail, result=failed:e)
+    // 5) 两分支都并行 events::audit(action, "sid=… result=…") 日志留痕
 }
 ```
 
-- [ ] **Step 3: 循环接线的单测**：`flush_one` 用 Fake session_source + FakeInjector + 内存 DB 直接驱动（不走 broadcast）——断言：黄态会话不消费、Waiting 消费队首、快照无会话不消费、注入失败 mark_failed。`spawn_flush_loop` 本身不单测（异步循环，E2E 归 Mac 清单）。
+- [ ] **Step 3: 循环接线的单测**：`flush_one` 用 Fake session_source + FakeInjector + 内存 DB 直接驱动（不走 broadcast）——断言：黄态会话**常规路径**不消费、**jump=true 照发**（插队语义回归锁）、Waiting 消费队首、快照无会话不消费（jump 也不发）、注入失败 mark_failed。`spawn_flush_loop` 本身不单测（异步循环，E2E 归 Mac 清单）。
 - [ ] **Step 4: 全测 + 门禁** → **Step 5: Commit** `feat(m7-inject): 状态门控队列内核 + watcher 驱动 flush 循环（W2）`
 
 ### Task 6: RemoteState 注入缝 + session-send / send-info / queue 三端点
@@ -556,10 +573,10 @@ pub fn flush_one(st: &crate::remote::server::RemoteState, session_id: &str) -> b
 **Interfaces:** Produces 端点契约（Task 7 移动端消费）：
 
 ```
-POST /m/api/v1/session-send        body {sessionId, text}          → 200 {"status":"delivered"} | 200 {"status":"queued","itemId":N,"position":M} | 400 {"error":"bad_request"} | 404 {"error":"no_session"} | 403 {"error":"not_injectable","reason":"…","reasonCode":"…"}
+POST /m/api/v1/session-send        body {sessionId, text}          → 200 {"status":"delivered"} | 200 {"status":"queued","itemId":N,"position":M} | 200 {"status":"failed","error":"定位终端失败：…"}（直发注入失败——回执可重试，W4） | 400 {"error":"bad_request"} | 404 {"error":"no_session"} | 403 {"error":"not_injectable","reason":"…","reasonCode":"…"}
 GET  /m/api/v1/session-send-info?session_id=                      → 200 {"injectable":bool,"reasonCode?","reason?","channels":["tmux",…],"visibility":"realtime"}
 GET  /m/api/v1/session-queue?session_id=                          → 200 {"items":[{"id":N,"content":"…","enqueuedAt":ms,"position":M}]}
-POST /m/api/v1/session-queue/jump  body {sessionId, itemId}       → 200 {"status":"delivered"} | 404 {"error":"not_found"}
+POST /m/api/v1/session-queue/jump  body {sessionId, itemId}       → 200 {"status":"delivered"} | 200 {"status":"failed","error"} | 404 {"error":"not_found"}
 POST /m/api/v1/session-queue/retract body {sessionId, itemId}     → 200 {"ok":true} | 404 {"error":"not_found"}
 ```
 
@@ -592,8 +609,13 @@ impl inject::engine::Injector for FakeInjector {
     // 不存在的 id → 404 no_session；空 text / >10000 字符 → 400
 }
 #[tokio::test] async fn queue_jump_and_retract() {
-    // 入队两条 → jump 第二条 → delivered（FakeInjector 收到该条 content）且 action=jump
+    // 入队两条（sess_b Processing）→ jump 第二条 → delivered（**插队语义：黄态照发**，
+    // FakeInjector 收到该条 content）且审计 action=jump
     // → retract 第一条 → ok:true；session-queue 空
+}
+#[tokio::test] async fn send_reports_inject_failure() {
+    // FakeInjector 返回 Err("定位终端失败：…") → sess_a 直发 → 200 {"status":"failed","error":…}
+    // → 审计 action=send result=failed:…；队列无残留（W1：定位失败不入队重试）
 }
 #[tokio::test] async fn send_info_matrix() {
     // sess_a → injectable=true channels=["tmux","iterm2","terminal_app"] visibility="realtime"
@@ -602,9 +624,10 @@ impl inject::engine::Injector for FakeInjector {
 ```
 
 - [ ] **Step 2: 确认失败 → Step 3: 实现**（要点）：
-  - `session_send(State, headers: HeaderMap, Json<SessionSendReq>)`：缺参/空/超长 → 400；`extract_device(headers)` 无设备理论不可达（gate 已拦）防御 403；设备名 `store.with` 内 `SELECT name FROM remote_devices WHERE id=?`（**锁内只 SQL**）；session 查找走 `spawn_blocking((st.session_source)())`；route → NotInjectable 403；compose_injection → is_input_ready ? 立即 `flush_deliver(...)`（与 flush_one 共用投递内核，action=send）: 入队（content 存 compose 产物）+ 审计 queue。
+  - `session_send(State, headers: HeaderMap, Json<SessionSendReq>)`（签名照 pair_pin 先例：State + HeaderMap + Json）：缺参/空/超长 → 400；`extract_device(headers)` 无设备理论不可达（gate 已拦）防御 403；设备名经 **`pairing::device_name(conn, id)`（本任务在 pairing.rs 新增小助手：`SELECT name FROM remote_devices WHERE id=?`，形态对齐 device_valid/touch_device，锁内只 SQL）**；session 查找走 `spawn_blocking((st.session_source)())`；route → NotInjectable 403；compose_injection → is_input_ready ? 直发（flush_one(…, jump=false) 投递内核，action=send；Err → 200 failed 回执）: 入队（content 存 compose 产物）+ 审计 queue。
   - `MAX_SEND_CHARS: usize = 10_000` 常量；所有 Json 响应带 `[(CACHE_CONTROL, "no-store")]`。
-  - 路由注册在 `/file` 之后：`.route("/session-send", post(api::session_send))` 等 4 条。
+  - 审计统一经 `inject::audit_write(...)`：write_audit::record（DB）+ `remote::events::audit(action, detail)`（日志留痕并行，M4 T2e 惯例）。
+  - 路由注册在 `/file` 之后：`.route("/session-send", post(api::session_send))` 等 4 条；`serve()` 内 `SessionWatcher::start()` 之后追加 `inject::queue::spawn_flush_loop(state.clone());`（Task 5 的循环在此接线合入）。
 - [ ] **Step 4: 全门禁** → **Step 5: Commit** `feat(m7-inject): session-send/send-info/queue 三端点（PIN 门禁内 + 审计全覆盖 + 假注入器端点测试）`
 
 ### Task 7: 移动端发送 UI（W4）
@@ -617,7 +640,7 @@ impl inject::engine::Injector for FakeInjector {
 export interface SendInfo { injectable: boolean; reasonCode?: string; reason?: string;
   channels: string[]; visibility: "realtime" | "after_refresh" }
 export async function fetchSendInfo(sessionId: string): Promise<SendInfo | null>;   // 403 → null
-export type SendResult = { status: "delivered" } | { status: "queued"; itemId: number; position: number };
+export type SendResult = { status: "delivered" } | { status: "queued"; itemId: number; position: number } | { status: "failed"; error: string };
 export async function sessionSend(sessionId: string, text: string): Promise<SendResult>;
 export interface QueueItemView { id: number; content: string; enqueuedAt: number; position: number }
 export async function fetchQueue(sessionId: string): Promise<QueueItemView[]>;
@@ -635,7 +658,8 @@ export async function queueRetract(sessionId: string, itemId: number): Promise<{
 // 3. 排队态：send 返回 queued → chip「排队中 第1位」+ [立即发送][撤回] 按钮 →
 //    点撤回 → fetchQueue 刷新为空
 // 4. 回车不触发发送（textarea 天然换行）；发送按钮 disabled 当 text.trim() 为空
-// 5. 发送失败（ApiError 403）→ 错误文案 + 可重试
+// 5. 发送失败：status="failed"（注入失败回执，如「定位终端失败：…」）→ 失败 chip + 文案
+//    + 可重试（重按发送）；网络层 ApiError（403 等）→ 错误文案 + 可重试
 ```
 
 - [ ] **Step 2: 确认失败 → Step 3: 实现**：MessageComposer（props: session）内部自带 sendInfo 拉取（mount + 3s 轮询仅当有排队项）、发送/插队/撤回、回执 chip 三态（delivered/queued N/failed）；中文文案内联（「已送达终端」「排队中 第 N 位」「立即发送」「撤回」「发送」）；样式对齐 SessionDetail 既有 Tailwind 风格（border-t、px-3、py-2、rounded 按钮）。
@@ -644,7 +668,7 @@ export async function queueRetract(sessionId: string, itemId: number): Promise<{
 
 ### Task 8: 写审计桌面查看入口（W5）
 
-**Files:** Create `src-tauri/src/inject/audit_cmd.rs`（或并入 mod.rs——**放 mod.rs**，`#[tauri::command] pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value`，`DB.lock()` + `write_audit::recent`，默认 100）；Modify `src-tauri/src/lib.rs` invoke_handler 注册；Create `src/components/settings/AuditLogSection.tsx`；Modify 设置页装配处（RemoteSection 同级）；i18n zh/en 各 +6 键（`audit.title/refresh/empty/time/device/session/action/summary`）；`src/tauri-mock.ts` +1 case（返回固定三条）；测试 `tests/settings/AuditLogSection.test.tsx`
+**Files:** Modify `src-tauri/src/inject/mod.rs`（`#[tauri::command] pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value`，`DB.lock()` + `write_audit::recent`，默认 100）；Modify `src-tauri/src/lib.rs` invoke_handler 注册；Create `src/components/settings/AuditLogSection.tsx`；Modify 设置页装配处（RemoteSection 同级）；i18n zh/en 各 +6 键（`audit.title/refresh/empty/time/device/session/action/summary`）；`src/tauri-mock.ts` +1 case（返回固定三条）；测试 `tests/settings/AuditLogSection.test.tsx`
 
 - [ ] **Step 1: 失败测试**：渲染（invoke mock 返回三条）→ 列表出现设备名/动作/摘要；空 → 「暂无记录」；刷新按钮触发再 invoke。
 - [ ] **Step 2/3/4: 实现 + 过测 + check:i18n（zh/en 成对）**
@@ -668,8 +692,10 @@ export async function queueRetract(sessionId: string, itemId: number): Promise<{
 ```rust
 #[test] fn default_mappings_cover_claude_codex() {
     let ms = load_mappings();   // 无 KV 时用默认表
-    assert!(ms.iter().any(|m| m.tool == "claude" && m.options.len() >= 3));
-    assert!(ms.iter().any(|m| m.tool == "codex"));
+    // spec W6 定死：首批只做批准/拒绝（「不要再问」等扩展键位 Task 13 取证后回填追加）
+    let claude = ms.iter().find(|m| m.tool == "claude").unwrap();
+    assert_eq!(claude.options.len(), 2);
+    assert!(ms.iter().any(|m| m.tool == "codex" && m.options.len() == 2));
 }
 #[test] fn detect_case_insensitive_marker() {
     let m = ToolMapping { tool: "claude".into(), verified_with: "probe-pending".into(),
@@ -694,13 +720,13 @@ const DEFAULT_MAPPINGS_JSON: &str = r#"[
  {"tool":"claude","verified_with":"probe-pending",
   "prompt_markers":["do you want","would you like","allow this","permission"],
   "options":[{"id":"approve","label":"允许","key":"1"},
-             {"id":"always","label":"允许且不再询问","key":"2"},
              {"id":"reject","label":"拒绝","key":"esc"}]},
  {"tool":"codex","verified_with":"probe-pending",
   "prompt_markers":["approve","allow","run this command"],
   "options":[{"id":"approve","label":"允许","key":"y"},
              {"id":"reject","label":"拒绝","key":"n"}]}
 ]"#;
+// 「不要再问」（claude 选项 2 等）不入首批表——Task 13 实测取证确认键位后追加
 ```
 
 `load_mappings()`：读 KV，损坏/缺失回退默认表（不写回——保持默认表可升级）。`cached_cli_version`：`static CACHE: OnceLock<Mutex<HashMap<String,Option<String>>>>`，首次 spawn `<cli> --version` 取首个版本号 token，失败缓存 None（不重试刷屏）。
@@ -721,14 +747,14 @@ POST /m/api/v1/session-approve  body {sessionId, optionId} → 200 {"status":"ke
 - [ ] **Step 1: 端点失败测试**（FakeInjector + 夹具 sess_a=Waiting 且 last_message 命中 "Do you want"；sess_e=Processing 命中；sess_d=zcode）：
   - options：sess_a → available=true options 3 项 drift=true（probe-pending）；sess_e → available=false；sess_d → available=false（工具无映射）
   - approve：sess_a optionId="approve" → 200 key_sent，FakeInjector 收到 (pid, "1")，审计 action=approve；optionId="reject" → 审计 action=reject；非法 optionId → 404 no_mapping；非 Waiting → 409
-- [ ] **Step 2/3: 实现**（审批注入**不带 [mobile] 前缀**——按键非文本；投递走 `st.injector.locate_and_send_key(pid, key)`，映射经 routing 前置复核可注入）
+- [ ] **Step 2/3: 实现**（审批注入**不带 [mobile] 前缀**——按键非文本；投递走 `st.injector.locate_and_send_key(pid, key)`，映射经 routing 前置复核可注入；**预留无头分派缝**：投递处留注释位 `// M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键`——选项卡 UI 与端点契约通道无关，届时只扩这一处分派）
 - [ ] **Step 4: 门禁** → **Step 5: Commit** `feat(m8-approve): 审批选项/应答端点（Waiting+marker 判定、按键注入、审计、降级路径）`
 
 ### Task 12: 移动端审批卡（红卡选项卡 UI）
 
 **Files:** Create `src/mobile/ApproveCard.tsx`（props: session）；Modify `SessionDetail.tsx`（`session.status === "waiting"` 且非 preview 时在 messageArea 上方挂卡）；api.ts +2 函数（`fetchApproveOptions`/`sessionApprove`，契约同端点）；测试 `tests/mobile/ApproveCard.test.tsx`
 
-- [ ] **Step 1: 失败测试**：available=true → 选项按钮（允许/允许且不再询问/拒绝）渲染；点「允许」→ POST body 正确 → 卡片进入「已发送按键」态；available=false → 不渲染；drift=true → 显示「映射待实测确认，若提示不符请用普通发送」提示条；409/404 错误文案。
+- [ ] **Step 1: 失败测试**：available=true → 选项按钮（首批映射 = 允许/拒绝两项，W6 定死）渲染；点「允许」→ POST body 正确 → 卡片进入「已发送按键」态；available=false → 不渲染；drift=true → 显示「映射待实测确认，若提示不符请用普通发送」提示条；409/404 错误文案。
 - [ ] **Step 2/3: 实现**（红卡视觉：红色边框卡 + 选项按钮横排；中文内联）。
 - [ ] **Step 4: vitest + check** → **Step 5: Commit** `feat(m8-approve): 移动端红卡审批选项卡（含漂移提示与降级文案）`
 
@@ -791,12 +817,14 @@ use windows::Win32::System::Console::{AttachConsole, FreeConsole, GetStdHandle,
 
 ### Task 16: M9 收口——Windows 实机自测（本机可完成）+ 门禁 + 台账
 
-- [ ] **Step 1: 实机自测（台账逐条记录证据）**：本机开 `pnpm tauri:dev`（远程开启，回环免 PIN——gate 回环豁免既有）；WT 与 conhost（按 M6 结论）各开一个真实 claude 会话；浏览器或 `Invoke-RestMethod` POST `http://127.0.0.1:9420/m/api/v1/session-send`（带已配对 cookie 或本机豁免路径按实测定）→ 终端出现 `[mobile 设备名]` 行、会话文件命中；审批键（Task 13 取证键位）注入生效；审计页可见。
+- [ ] **Step 1: 实机自测（台账逐条记录证据）**：本机开 `pnpm tauri:dev`（远程开启，回环免 PIN——gate 回环豁免既有）；WT 与 conhost（按 M6 结论）各开一个真实 claude 会话；浏览器或 `Invoke-RestMethod` POST `http://127.0.0.1:9420/m/api/v1/session-send`（带已配对 cookie 或本机豁免路径按实测定）→ 终端出现 `[mobile 设备名]` 行、会话文件命中；审批键（Task 13 取证键位）注入生效；审计页可见。**真机蜂窝复验（外网手机发消息）超出执行机能力**——handover 登记为用户项（Windows 实机 + 用户手机），不伪造。
 - [ ] **Step 2: 全六门禁 + 台账 M9 完成** → **Step 3: Commit** `docs(m9): Windows 实机自测记录 + M9 收口`
 
 ### Task 16-alt: M9 降级登记（仅 M6 = NO-GO 时执行）
 
-**Files:** Modify 二期 spec 附录 A 相关格 —— **停：spec 不得改** → 改为：台账 + 回传 handover 里上报「NO-GO 降级申请」，由 Mac 侧评审后按用户裁决落 spec；代码侧：routing 的 windows 分支返回 `NotInjectable{reason_code:"platform", reason:"Windows 注入探测 NO-GO（见 M6 报告）"}` + Commit `chore(m9): NO-GO 降级——Windows 注入登记不可用`。
+**Files:** Modify `inject/routing.rs`（windows 分支返回 `NotInjectable{reason_code:"platform", reason:"Windows 注入探测 NO-GO（见 M6 报告）"}`）。**二期 spec 附录 A 的矩阵更新不属执行机权限**（红线：不改设计文档）——降级申请写进台账与 handover，由 Mac 侧评审后按用户裁决落 spec。
+
+- [ ] **Step 1: routing 降级分支 + 台账记录 → Commit** `chore(m9): NO-GO 降级——Windows 注入登记不可用`
 
 ### Task 17: 批次收尾——回归 + handover
 
@@ -808,6 +836,7 @@ use windows::Win32::System::Console::{AttachConsole, FreeConsole, GetStdHandle,
 
 ## 自审记录（计划侧）
 
-- **Spec 覆盖**：W1（T1/T4）、W2 含插队撤回（T3/T5/T6）、W3（T2）、W4 多行+回执+斜杠放行（T6 天然放行无过滤、T7）、W5（T3/T8）、W6 TUI 路径+降级+漂移提示（T10–13）、W8（T14–16）；红·中断挂起（T5 快照复核）；锁屏/双开等实机项归回传清单（T9/T13/T16）。F2.3/F2.4 无头不在本计划（M11）。
+- **Spec 覆盖**：W1（T1/T4）、W2 含插队撤回（T3/T5/T6）、W3（T2）、W4 多行+回执+斜杠放行（T6 天然放行无过滤、T7）、W5（T3/T8）、W6 TUI 路径+降级+漂移提示（T10–13）、W8（T14–16）；红·中断挂起（T5 快照复核）；锁屏/双开等实机项归回传清单（T9/T13/T16）；真机蜂窝复验登记用户项（T16）。F2.3/F2.4 无头不在本计划（M11）。
 - **占位符**：无 TBD；「测试即规格」处均给了断言全文或要点集；`find_tmux_pane/run_tmux/flush_one` 内部给了步骤级伪码与语义注释（执行者按既有 window/tmux.rs 形态落码）。
-- **类型一致性**：`Injector` 双方法、`RouteOutcome.reason_code` 枚举值、`*_conn` 命名、端点 JSON 键（camelCase wire：send-info 的 `reasonCode`）与 api.ts 接口逐一对齐；`blackbox` 等枚举值在 T2/T6 测试两处一致。
+- **类型一致性**：`Injector` 双方法、`RouteOutcome.reason_code` 枚举值、`*_conn` 命名、端点 JSON 键（camelCase wire）与 api.ts 接口逐一对齐；`flush_one(st, sid, jump)` 三参与 T5/T6 消费一致。
+- **复审修订（2026-09-18 二轮，对照宪法/总 spec v1.4/批次设计 v2.1 与代码实证）**：①直发注入失败补 `{"status":"failed"}` 回执契约 + 测试 + UI 用例（W4 失败可重试；W1 定位失败不入队）；②`flush_one` 加 `jump` 参——原「is_running 不消费」复核会堵死插队（裁决 12 语义冲突，重要）；③首批映射只 批准/拒绝（spec W6 定死，原默认表多列了「不再问」）；④审计摘要定长 80；⑤serve 接线归并 Task 6（T5/T6 编译纠缠解耦）；⑥设备名新增 `pairing::device_name` 小助手（实证 pairing 无现成函数，避免 api.rs 裸 SQL）；⑦审计写口统一 `inject::audit_write`：DB + `events::audit` 日志并行（M4 T2e 惯例）；⑧无头分派缝留注释位（批次设计 T3）；⑨真机蜂窝复验登记用户项（批次设计 T4 验收含此项，执行机不可达）；⑩16-alt 明确不动 spec（红线）。复用面：get_tty_for_pid/execute_applescript/tmux 输出格式/pair_pin handler 先例/DB.lock+*_conn/broadcast 订阅/spawn_blocking+session_source/windows crate 0.57/win32 祖先链/gate::extract_device/ApiError+fetchMock——全部既有件，零新轮子、零新依赖。
