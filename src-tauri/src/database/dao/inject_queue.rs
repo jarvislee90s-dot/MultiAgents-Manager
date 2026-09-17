@@ -105,11 +105,15 @@ pub fn enqueue_conn(
     content: &str,
     enqueued_at: i64,
 ) -> i64 {
-    conn.execute(
+    if let Err(e) = conn.execute(
         "INSERT INTO inject_queue (session_id, agent_type, device_id, device_name, content, enqueued_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![session_id, agent_type, device_id, device_name, content, enqueued_at],
-    )
-    .expect("inject_queue 入队失败");
+    ) {
+        // 对齐 sibling 约定（settings.rs）：log 降级不 panic——持 DB 锁 panic 会毒化
+        // 全局互斥锁，进程内后续所有 DB 访问瘫痪，代价远大于单条写入丢失
+        log::error!("inject_queue 入队失败: {e}");
+        return 0;
+    }
     conn.last_insert_rowid()
 }
 
@@ -118,10 +122,14 @@ pub fn pending_for_session_conn(conn: &Connection, session_id: &str) -> Vec<Queu
     let sql = format!(
         "SELECT {COLS} FROM inject_queue WHERE session_id = ?1 AND sent_at IS NULL AND failed_reason IS NULL ORDER BY id ASC"
     );
-    let mut stmt = conn.prepare(&sql).expect("inject_queue 查询 pending 失败");
-    let rows = stmt
-        .query_map([session_id], row_to_queue)
-        .expect("inject_queue 遍历 pending 失败");
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        log::error!("inject_queue 查询 pending 失败（prepare）");
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([session_id], row_to_queue) else {
+        log::error!("inject_queue 查询 pending 失败（query）");
+        return Vec::new();
+    };
     rows.filter_map(|r| r.ok()).collect()
 }
 
@@ -138,20 +146,22 @@ pub fn next_pending_conn(conn: &Connection, session_id: &str) -> Option<QueueRow
 
 /// 标记已发送（落 sent_at，行保留作审计痕迹）
 pub fn mark_sent_conn(conn: &Connection, id: i64, now: i64) {
-    conn.execute(
+    if let Err(e) = conn.execute(
         "UPDATE inject_queue SET sent_at = ?2 WHERE id = ?1",
         params![id, now],
-    )
-    .expect("inject_queue 标记已发失败");
+    ) {
+        log::error!("inject_queue 标记已发失败: {e}");
+    }
 }
 
 /// 标记失败（落 failed_reason，行保留作审计痕迹）
 pub fn mark_failed_conn(conn: &Connection, id: i64, reason: &str) {
-    conn.execute(
+    if let Err(e) = conn.execute(
         "UPDATE inject_queue SET failed_reason = ?2 WHERE id = ?1",
         params![id, reason],
-    )
-    .expect("inject_queue 标记失败失败");
+    ) {
+        log::error!("inject_queue 标记失败失败: {e}");
+    }
 }
 
 /// 撤回：仅当 id 属于 session_id 才删，返回是否删到

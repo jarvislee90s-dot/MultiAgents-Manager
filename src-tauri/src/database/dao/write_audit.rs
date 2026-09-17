@@ -67,32 +67,37 @@ pub fn record_conn(
     summary: &str,
     result: &str,
 ) {
-    conn.execute(
+    if let Err(e) = conn.execute(
         "INSERT INTO write_audit (ts, device_id, device_name, agent_type, session_id, channel, action, summary, result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![ts, device_id, device_name, agent_type, session_id, channel, action, summary, result],
-    )
-    .expect("write_audit 记录失败");
+    ) {
+        log::error!("write_audit 记录失败: {e}");
+    }
 }
 
 /// 最近 limit 条审计，最新在前（id 单调递增，按 id 倒序）
 pub fn recent_conn(conn: &Connection, limit: i64) -> Vec<AuditRow> {
-    let mut stmt = conn
-        .prepare("SELECT ts, device_name, agent_type, session_id, channel, action, summary, result FROM write_audit ORDER BY id DESC LIMIT ?1")
-        .expect("write_audit 查询失败");
-    let rows = stmt
-        .query_map([limit], |row| {
-            Ok(AuditRow {
-                ts: row.get(0)?,
-                device_name: row.get(1)?,
-                agent_type: row.get(2)?,
-                session_id: row.get(3)?,
-                channel: row.get(4)?,
-                action: row.get(5)?,
-                summary: row.get(6)?,
-                result: row.get(7)?,
-            })
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT ts, device_name, agent_type, session_id, channel, action, summary, result FROM write_audit ORDER BY id DESC LIMIT ?1",
+    ) else {
+        log::error!("write_audit 查询失败（prepare）");
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([limit], |row| {
+        Ok(AuditRow {
+            ts: row.get(0)?,
+            device_name: row.get(1)?,
+            agent_type: row.get(2)?,
+            session_id: row.get(3)?,
+            channel: row.get(4)?,
+            action: row.get(5)?,
+            summary: row.get(6)?,
+            result: row.get(7)?,
         })
-        .expect("write_audit 遍历失败");
+    }) else {
+        log::error!("write_audit 查询失败（query）");
+        return Vec::new();
+    };
     rows.filter_map(|r| r.ok()).collect()
 }
 
