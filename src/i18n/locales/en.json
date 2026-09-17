@@ -144,7 +144,7 @@
       "title": "Remote Access",
       "desc": "Open the mobile board in your phone browser",
       "enable": "Enable remote access",
-      "enableCloseHint": "Explicitly turning it off disconnects all devices and requires re-entering the access PIN; toggling the switches below or rebooting the computer does not",
+      "enableCloseHint": "Turning it off only stops external access: paired devices reconnect automatically when it's back on; only 'Reset devices' or changing the access PIN clears devices",
       "keepalive": "Keep awake",
       "keepaliveHint": "Prevents system and disk sleep while remote access is on (the screen may still turn off). macOS still sleeps when the lid is closed; on battery, macOS needs AC power for the full effect, and Windows forces sleep at critical battery level",
       "hostName": "Machine name",

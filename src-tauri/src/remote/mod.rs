@@ -492,8 +492,10 @@ fn start_server() -> Result<(), String> {
 /// 停止内核（可测核心，外部依赖全部注入）：abort 服务器任务 → SSE 全断连 →
 /// [仅 revoke] 全吊销设备 → [注入的]隧道停法 → 释放电源锁。
 /// **M5 A4 吊销收窄矩阵（调用点 → revoke / 隧道停法取值，全量清单，专测锁定语义）**：
-///   - `remote_toggle(false)`（显性关闭远程）→ revoke=`true`（`stop_server_explicit_close`）
-///     + 隧道 `stop_all`（全停，重开按各卡状态恢复）；
+///   - `remote_toggle(false)`（显性关闭远程）→ revoke=`false`（`stop_server_explicit_close`）
+///     + 隧道 `stop_all`（全停，重开按各卡状态恢复）。**2026-09-18 用户裁决修订**：
+///     显性关闭 = 停止对外服务，不再吊销设备——吊销仅剩「重置设备」与「修改访问
+///     密码」两个入口（凭当前 PIN 重配对即恢复，设备名保留）；
 ///   - 热重启（`restart_listener` → `stop_server_hot_restart`，M5 A4 遗留命名化）→
 ///     revoke=`false` + **隧道不动**（隧道句柄独立于监听进程，随通道开关与总开关启停；
 ///     监听热重启弹掉隧道会让 lan 开关把 quick 临时隧道换址）；
@@ -554,12 +556,14 @@ fn stop_server(revoke: bool) {
     stop_server_with(revoke, tunnel::stop_all);
 }
 
-/// 显性关闭远程的停止路径（remote_toggle(false) 专用）：停止 + 全吊销 + 隧道全停
-/// （重开按各通道卡状态恢复）。命名函数而非内联闭包：吊销收窄矩阵的每个调用点在
-/// 代码里可点名审阅（矩阵清单见 stop_server_core 注释），杜绝未来改动误接成
-/// revoke=false 造成「关闭不掉线」
+/// 显性关闭远程的停止路径（remote_toggle(false) 专用）：停止监听 + 隧道全停 +
+/// 放电源——**不吊销设备**（2026-09-18 用户裁决修订：吊销触发器收敛为「重置设备」
+/// 与「修改访问密码」两个显式动作；开关切换只是停/起服务，重开后已配对设备凭
+/// cookie 自动恢复，无需重输密码）。命名函数而非内联闭包：吊销矩阵的每个调用点
+/// 在代码里可点名审阅（历史锚点：旧实现误接 revoke=true 曾是裁决内行为，裁决
+/// 修订后误接回 true 会让「开关切换掉线」复活——评审时对照本矩阵逐行核对）
 fn stop_server_explicit_close() {
-    stop_server(true);
+    stop_server(false);
 }
 
 /// 热重启的停止路径（restart_listener 专用；M5 A4 遗留命名化——原为 restart_listener
@@ -651,7 +655,7 @@ fn toggle_core(
 }
 
 /// 开关远程接入（前端设置页 invoke）：写设置 SSOT 后启停服务器（失败回滚见 toggle_core）。
-/// M5 A4 吊销收窄：关闭走 stop_server_explicit_close（吊销 + 隧道全停）；开启分支
+/// M5 A4 吊销收窄：关闭走 stop_server_explicit_close（停服务 + 隧道全停，不吊销——2026-09-18 裁决）；开启分支
 /// 不 stop。M5 A5 总开关恢复逻辑：开启成功 → 按各通道 KV 恢复隧道 + PIN 自动生成
 /// （关闭 = 全停，重开按各卡状态恢复——用户裁决）
 #[tauri::command]

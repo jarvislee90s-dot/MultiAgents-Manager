@@ -143,7 +143,7 @@ describe("RemoteSection 四卡渲染与 live 态映射（M5 A6）", () => {
     expect(cardSwitch("named")).not.toBeChecked();
   });
 
-  it("点总开关关 → remote_toggle(false)；线稿关闭语义文案随行展示", async () => {
+  it("点总开关关 → remote_toggle(false)；P3-a 修订后关闭语义文案随行展示", async () => {
     render(<RemoteSection />);
     const sw = screen.getByRole("switch", { name: /enable remote access/i });
     await waitFor(() => expect(sw).toBeEnabled());
@@ -151,7 +151,7 @@ describe("RemoteSection 四卡渲染与 live 态映射（M5 A6）", () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: false })
     );
-    expect(screen.getByText(/Explicitly turning it off/i)).toBeTruthy();
+    expect(screen.getByText(/Turning it off only stops external access/i)).toBeTruthy();
   });
 });
 
