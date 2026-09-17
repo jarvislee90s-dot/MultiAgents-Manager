@@ -1169,6 +1169,90 @@ mod tests {
         assert!(end.is_none());
     }
 
+    // ==== M5 A4：吊销收窄（gate 级回归） ====
+
+    /// M5 A4 吊销收窄回归：热重启半程（stop revoke=false）后设备 cookie 仍过闸
+    /// （「改绑定/改端口热重启不掉线」），显性关闭（revoke=true）后同 cookie 403。
+    /// 真实 stop_server 触碰全局 DB / 电源锁 / 隧道进程（零污染红线禁测）——此处以
+    /// stop_server_core 注入与生产 stop_server 完全同形的 store/registry 闭包，
+    /// 等价锁定「revoke 取值 → 设备有效性」这一收窄语义核心（重启后的监听生效半边
+    /// 由 serve/start 既有路径承担，gate 与设备表不受重启影响的判据即本测试）
+    #[tokio::test]
+    async fn hot_restart_without_revoke_keeps_device_cookie_valid() {
+        let state = test_state();
+        persist_device(&state, "hn");
+        let app = router(state.clone());
+        // 初始：cookie 过闸
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=hn"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+
+        // 热重启半程：停监听不吊销（闭包与生产 stop_server(false) 同形）
+        let st_reg = state.clone();
+        let st_store = state.clone();
+        crate::remote::stop_server_core(
+            None,
+            false,
+            move || {
+                st_reg.sse_registry.disconnect_all();
+            },
+            move || {
+                let _ = st_store.store.with(crate::remote::pairing::revoke_all);
+            },
+            || {},
+            || {},
+        );
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=hn"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "revoke=false（热重启）后 cookie 必须仍过闸（设备不掉线）"
+        );
+
+        // 显性关闭：吊销 → 同一 cookie 403（收窄前后对照）
+        let st_reg = state.clone();
+        let st_store = state.clone();
+        crate::remote::stop_server_core(
+            None,
+            true,
+            move || {
+                st_reg.sse_registry.disconnect_all();
+            },
+            move || {
+                let _ = st_store.store.with(crate::remote::pairing::revoke_all);
+            },
+            || {},
+            || {},
+        );
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=hn"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "revoke=true（显性关闭）后设备全吊销");
+    }
+
     // ==== M3 Task 1：GET /m/api/v1/host（P8a/P8b 页头数据源） ====
     // 零污染：host 载荷经 host_source 注入缝供给（假 json），不触 settings DAO / 全局 DB。
 

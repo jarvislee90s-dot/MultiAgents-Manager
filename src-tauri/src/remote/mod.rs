@@ -275,24 +275,100 @@ fn start_server() -> Result<(), String> {
     Ok(())
 }
 
-/// 停止远程服务：abort 服务器任务 + 全吊销已配对设备（不变量 5「全吊销」）。
-/// M5 A3：旧直通码/审批制的内存态（PairingService token / ApprovalService 队列）已随
-/// 模块删除——停止 = `revoke_all` 一条即足够，已配对设备下次过闸即 403。
-/// 锁序：SERVER_HANDLE（取走即释放）→ store DB 锁——两条锁不并发持有
-fn stop_server() {
-    if let Some(h) = SERVER_HANDLE.lock().unwrap().take() {
+/// 停止内核（可测核心，外部依赖全部注入）：abort 服务器任务 → SSE 全断连 →
+/// [仅 revoke] 全吊销设备 → 停隧道 → 释放电源锁。
+/// **M5 A4 吊销收窄矩阵（调用点 → revoke 取值，全量清单，专测锁定语义）**：
+///   - `remote_toggle(false)`（显性关闭远程）→ `true`（`stop_server_explicit_close`）；
+///   - 重置密码（`remote_set_pin` 改值）/ 重置设备（`remote_reset_devices`）→ 不经停机，
+///     走 `revoke_all_and_disconnect`（服务器不停）；
+///   - 改绑定/改端口热重启（`restart_listener`）→ `false`（设备与 cookie 全保留）；
+///   - MAM 应用退出/重启（lib.rs `RunEvent::Exit`）→ 本就不调 stop_server（只停隧道
+///     + 放电源锁），维持「重启不吊销」现状。
+///
+/// `revoke=false` = 只停监听，设备记录与 cookie 全部保留——热重启后 cookie 仍过闸。
+fn stop_server_core(
+    handle: Option<tauri::async_runtime::JoinHandle<()>>,
+    revoke: bool,
+    disconnect_all: impl FnOnce(),
+    revoke_all: impl FnOnce(),
+    stop_tunnel: impl FnOnce(),
+    release_power: impl FnOnce(),
+) {
+    if let Some(h) = handle {
         h.abort();
     }
-    // M4 T0a：停止 = 已建立 SSE 连接即时断开（旧限制「仅拒新连」的修复前半；
-    // 单设备吊销断连在 Task 8 的 remote_revoke_device 接线）
-    STATE.sse_registry.disconnect_all();
-    STATE.store.with(|c| {
-        let _ = pairing::revoke_all(c); // 停止 = 全吊销（七不变量）
-    });
-    // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
-    tunnel::stop();
-    // M4 T3：电源锁随远程关闭释放（caffeinate kill / 执行状态清除 + 磁盘代设还原）
-    power::release();
+    // M4 T0a：停止 = 已建立 SSE 连接即时断开。热重启路径同样断——监听没了连接必死，
+    // 显式断开让注册表即刻一致，不依赖任务 abort 的 Drop 时序
+    disconnect_all();
+    if revoke {
+        revoke_all(); // 显性关闭 = 全吊销（收窄后仅此停机分支吊销）
+    }
+    stop_tunnel();
+    release_power();
+}
+
+/// 停止远程服务（M5 A4 吊销收窄：revoke 参数化）——语义矩阵见 stop_server_core 注释。
+/// M5 A3：旧直通码/审批制的内存态（PairingService token / ApprovalService 队列）已随
+/// 模块删除——吊销 = `revoke_all` 一条即足够，已配对设备下次过闸即 403。
+/// 锁序不变：SERVER_HANDLE 短锁取走句柄即释放，两条锁不并发持有（registry 永远
+/// 最后进最先出）——store/registry 经 Arc 克隆在锁外的闭包里触达
+fn stop_server(revoke: bool) {
+    let handle = SERVER_HANDLE.lock().unwrap().take();
+    let st_reg = STATE.clone();
+    let st_store = STATE.clone();
+    stop_server_core(
+        handle,
+        revoke,
+        move || {
+            st_reg.sse_registry.disconnect_all();
+        },
+        move || {
+            let _ = st_store.store.with(pairing::revoke_all); // 吊销失败仅忽略，不阻断停机
+        },
+        // M4 T1c：停服务器时隧道进程一并退出（spec T1b「切换/关闭远程时隧道联动」）
+        tunnel::stop,
+        // M4 T3：电源锁随远程关闭释放（caffeinate kill / 执行状态清除 + 磁盘代设还原）
+        power::release,
+    );
+}
+
+/// 显性关闭远程的停止路径（remote_toggle(false) 专用）：停止 + 全吊销。
+/// 命名函数而非内联闭包：吊销收窄矩阵的每个调用点在代码里可点名审阅（矩阵清单见
+/// stop_server_core 注释），杜绝未来改动误接成 revoke=false 造成「关闭不掉线」
+fn stop_server_explicit_close() {
+    stop_server(true);
+}
+
+/// 热重启内核（可测核心）：仅运行中才有「重启」语义——未运行空转（下次
+/// remote_toggle(true) / restore_on_launch 自然按新设置启动）；运行中先停
+/// （不吊销）再按当前设置重启。start 失败时旧监听已停：保持停机 + Err 原样上抛
+/// （口径裁决见 restart_listener 注释）
+fn restart_listener_core(
+    live: bool,
+    stop: impl FnOnce(),
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if !live {
+        return Ok(());
+    }
+    stop();
+    start()
+}
+
+/// 改绑定/改端口自动热重启（M5 A4，不吊销）：远程开启状态下，停监听（设备记录与
+/// cookie 全保留）→ 按当前设置重新监听，用户无感、不掉线。复用既有 stop/start
+/// 监听代码路径（stop_server(false) + start_server），无并行实现。
+/// **通用原语**：A5 的 remote_toggle_channel（chan_lan 派生 bind）在其上接线；本任务
+/// 不动 remote_set_channel、不拦通用 set_setting——改绑定现状（写 KV + 手动停开，
+/// 前端 bindRestartHint 提示）由 A5/A6 收口。
+/// **失败口径（二选一已裁决：保持停机 + 错误上抛，不回落旧 bind/port）**：
+/// 回落会让「实际监听地址」与「设置页展示」背离——显示已收窄（如 127.0.0.1）实际
+/// 仍对外（或反之）属状态撒谎；且 enabled SSOT 与现实的背离正是 status_enabled
+/// 句柄校准 + start 自愈既有机制覆盖的场景，用户解除端口占用后重开一次即恢复。
+pub fn restart_listener() -> Result<(), String> {
+    // 短锁：只取存活快照立即释放（与 remote_status / remote_set_channel 同型）
+    let live = handle_is_live(&SERVER_HANDLE.lock().unwrap());
+    restart_listener_core(live, || stop_server(false), start_server)
 }
 
 /// 开关内核（可测核心，SSOT 写入与启停以闭包注入）：写 enabled SSOT → 启/停服务器。
@@ -322,7 +398,8 @@ fn toggle_core(
     }
 }
 
-/// 开关远程接入（前端设置页 invoke）：写设置 SSOT 后启停服务器（失败回滚见 toggle_core）
+/// 开关远程接入（前端设置页 invoke）：写设置 SSOT 后启停服务器（失败回滚见 toggle_core）。
+/// M5 A4 吊销收窄：关闭走 stop_server_explicit_close（吊销）；开启分支不 stop
 #[tauri::command]
 pub fn remote_toggle(enabled: bool) -> Result<(), String> {
     toggle_core(
@@ -334,7 +411,7 @@ pub fn remote_toggle(enabled: bool) -> Result<(), String> {
             )
         },
         start_server,
-        stop_server,
+        stop_server_explicit_close,
     )?;
     // M4 T1c：成功后广播状态变更（Task 8 的 useRemoteEvents 监听 → 状态页即时刷新）
     events::emit_ui("remote-changed", serde_json::json!({ "enabled": enabled }));
@@ -511,20 +588,139 @@ pub fn remote_revoke_device(id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 全部吊销（不停止服务器——与「停止远程」的差别只在服务存续）
-#[tauri::command]
-pub fn remote_revoke_all_devices() -> Result<usize, String> {
+/// 吊销全部设备 + SSE 即时断连（M5 A4 单一实现）：`remote_revoke_all_devices` /
+/// `remote_reset_devices` / `remote_set_pin`（改值）三入口共用，杜绝「吊销+断连」
+/// 逻辑两份漂移。返回 (吊销数, 断连数) 供各入口按自身语义审计
+fn revoke_all_and_disconnect() -> Result<(usize, usize), String> {
     let n = STATE
         .store
         .with(pairing::revoke_all)
         .map_err(|e| e.to_string())?;
     let closed = STATE.sse_registry.disconnect_all();
+    Ok((n, closed))
+}
+
+/// 全部吊销（不停止服务器——与「停止远程」的差别只在服务存续）。
+/// M5 A4：吊销+断连机制与 remote_reset_devices / remote_set_pin（改值）共用
+/// revoke_all_and_disconnect 单一实现，本命令只保留既有审计语义
+#[tauri::command]
+pub fn remote_revoke_all_devices() -> Result<usize, String> {
+    let (n, closed) = revoke_all_and_disconnect()?;
     events::audit(
         "devices_revoked_all",
         &format!("count={n} closed_sse={closed}"),
     );
     events::emit_ui("remote-roster-changed", serde_json::json!({}));
     Ok(n)
+}
+
+/// 重置设备（M5 A4，线稿「重置设备」按钮的新口径命令）：吊销全部设备 + SSE 断连，
+/// **不改 PIN**。与 remote_revoke_all_devices 行为同一实现（见 revoke_all_and_disconnect），
+/// 差异只在审计语义走 m5 口径（devices_reset）；A6 落 UI 后旧命令的去留由 A8 回归裁决
+#[tauri::command]
+pub fn remote_reset_devices() -> Result<(), String> {
+    let (n, closed) = revoke_all_and_disconnect()?;
+    events::audit("devices_reset", &format!("count={n} closed_sse={closed}"));
+    events::emit_ui("remote-roster-changed", serde_json::json!({}));
+    Ok(())
+}
+
+/// remote_set_pin 的结果（审计与事件由命令薄壳按此分派；内核只管判定与落库/吊销）
+#[derive(Debug, PartialEq, Eq)]
+enum PinSetOutcome {
+    /// 首次设置（此前 pin_not_set）。该状态下 /pair/pin 恒 401（pair_pin ②），
+    /// 不可能有已配对设备——首次设置无需也无可吊销
+    FirstSet,
+    /// 改值：全部设备已吊销 + SSE 已断连（裁决「修改后所有设备需重新输入」）
+    Changed { reset: usize, closed: usize },
+    /// 与旧值一致（trim 后比较）：幂等，不落库、不吊销
+    Unchanged,
+}
+
+/// 设置访问密码内核（可测核心，KV 写入与吊销重置全部注入）：
+/// validate_pin 校验（A2 口径）→ 与旧值（trim 后）比对分派三态。
+/// Changed 分支**先重置后写值**：KV 写入（set_setting）无失败形态而吊销可 Err，
+/// 先重置保证任一失败路径状态自洽——失败 = 什么都没发生；成功 = 新值生效且
+/// 全设备下线，不存在「新值已生效而旧设备 cookie 仍活」的中间态。
+/// 非法 PIN：Err 且 write/reset 均不触（不落 KV）。
+/// 存储值统一 trim：与 pair_pin 比对口径（两侧 trim）对齐，杜绝空白噪声值入库
+fn set_pin_core(
+    new_pin: &str,
+    old: Option<String>,
+    mut write: impl FnMut(&str),
+    reset_devices: impl FnOnce() -> Result<(usize, usize), String>,
+) -> Result<PinSetOutcome, String> {
+    let new = new_pin.trim();
+    if !pin::validate_pin(new) {
+        return Err("访问密码必须为 4 位数字".to_string());
+    }
+    match old.as_deref().map(str::trim) {
+        None => {
+            write(new);
+            Ok(PinSetOutcome::FirstSet)
+        }
+        Some(old_trimmed) if old_trimmed == new => Ok(PinSetOutcome::Unchanged),
+        Some(_) => {
+            let (reset, closed) = reset_devices()?;
+            write(new);
+            Ok(PinSetOutcome::Changed { reset, closed })
+        }
+    }
+}
+
+/// 设置访问密码（M5 A4）：首次设置只落库；改值 = 全部设备吊销 + SSE 断连
+/// （重置密码 = 全部设备下线）；同值幂等不吊销；非法 PIN Err 且不落 KV
+#[tauri::command]
+pub fn remote_set_pin(pin: String) -> Result<(), String> {
+    let old = pin::get_pin();
+    let outcome = set_pin_core(&pin, old, pin::set_pin, revoke_all_and_disconnect)?;
+    match outcome {
+        PinSetOutcome::FirstSet => events::audit("pin_set", "first=true"),
+        PinSetOutcome::Changed { reset, closed } => {
+            events::audit(
+                "pin_changed",
+                &format!("reset_devices={reset} closed_sse={closed}"),
+            );
+            // 花名册即时刷新（与吊销同一既有事件，不新增事件类型；3s 轮询兜底）
+            events::emit_ui("remote-roster-changed", serde_json::json!({}));
+        }
+        PinSetOutcome::Unchanged => {}
+    }
+    Ok(())
+}
+
+/// 设备重命名内核（可测核心，DAO 注入）：trim 后空 → Err（不触 DAO）；DAO 未命中
+/// （返回 false）→ Err 404 语义；命中 → Ok。40 字截断收敛在 DAO（A1 自守，与
+/// /pair/pin 设备自报名同一口径），本层不重复截断
+fn rename_device_core(
+    device_id: &str,
+    name_raw: &str,
+    rename: impl FnOnce(&str) -> Result<bool, String>,
+) -> Result<(), String> {
+    let name = name_raw.trim();
+    if name.is_empty() {
+        return Err("设备名称不能为空".to_string());
+    }
+    if rename(name)? {
+        Ok(())
+    } else {
+        Err(format!("设备不存在: {device_id}"))
+    }
+}
+
+/// 设备重命名（M5 A4，桌面端保存）：空名拒绝；未命中 404 语义；超 40 字由 DAO 截断
+#[tauri::command]
+pub fn remote_rename_device(id: String, name: String) -> Result<(), String> {
+    let st = STATE.clone();
+    let id_in_store = id.clone();
+    rename_device_core(&id, &name, move |n| {
+        st.store
+            .with(|c| pairing::rename_device(c, &id_in_store, n))
+    })?;
+    events::audit("device_renamed", &format!("id={id}"));
+    // 花名册即时刷新（与单设备吊销同一既有事件，不新增事件类型）
+    events::emit_ui("remote-roster-changed", serde_json::json!({ "id": id }));
+    Ok(())
 }
 
 /// TLS 前置确认（P7 安全门）：用户确认已配置 TLS 反向代理后置位，解锁 0.0.0.0 绑定
@@ -1373,6 +1569,299 @@ mod tests {
             tray_display_from(false, None, "http://127.0.0.1:9420/m".into()),
             (false, String::new())
         );
+    }
+
+    // ==== M5 A4：吊销收窄（stop_server(revoke) / 热重启 / 设置密码 / 重命名） ====
+    // 零污染约束：真实 stop_server / restart_listener 触碰全局 DB、电源锁（Windows
+    // 注册表代设）与隧道进程——测试只驱动注入式内核（stop_server_core /
+    // restart_listener_core / set_pin_core / rename_device_core）+ 内存库；
+    // gate 级 cookie 回归见 server.rs 的 hot_restart_without_revoke_keeps_device_cookie_valid
+
+    /// 内存库连接（真机调用序：schema::init → migration::migrate，见 DeviceStore::memory 注释）
+    fn memory_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        crate::database::migration::migrate(&conn).unwrap();
+        conn
+    }
+
+    /// 合成测试设备（ua/ip 按 id 派生——upsert 按指纹去重，空值会撞键合并）
+    fn synth_device(id: &str, paired_at: i64) -> pairing::NewDevice {
+        pairing::NewDevice {
+            id: id.into(),
+            name: format!("设备-{id}"),
+            ua: format!("ua-{id}"),
+            origin_ip: format!("ip-{id}"),
+            via: "lan".into(),
+            paired_at,
+        }
+    }
+
+    /// 显性关闭语义专测（吊销矩阵 revoke=true 行）：吊销设备 + 断连 + 停隧道 +
+    /// 放电源锁，调用序 abort 后依序；abort 分支真实生效（pending 任务随 future
+    /// drop 可观测终结——tx 随被取消的任务 drop，rx 端 Disconnected）
+    #[test]
+    fn stop_server_core_explicit_close_revokes_and_teardowns_in_order() {
+        let arc = std::sync::Arc::new(std::sync::Mutex::new(memory_conn()));
+        let store = pairing::DeviceStore::Owned(arc.clone());
+        let now = chrono::Utc::now().timestamp_millis();
+        store.with(|c| pairing::persist_device(c, &synth_device("rv", now)).unwrap());
+        assert!(store.with(|c| pairing::device_valid(c, "rv", now)));
+
+        let log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let ld = log.clone();
+        let lt = log.clone();
+        let lp = log.clone();
+        let store_revoke = store;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let live = tauri::async_runtime::spawn(async move {
+            let _tx = tx; // 任务被 abort 时随 future 一起 drop → rx 端可观测
+            std::future::pending::<()>().await;
+        });
+        stop_server_core(
+            Some(live),
+            true,
+            move || ld.borrow_mut().push("disconnect"),
+            move || {
+                let _ = store_revoke.with(pairing::revoke_all);
+            },
+            move || lt.borrow_mut().push("tunnel"),
+            move || lp.borrow_mut().push("power"),
+        );
+        assert_eq!(
+            &*log.borrow(),
+            &["disconnect", "tunnel", "power"],
+            "停止序：abort → 断连 → 吊销 → 停隧道 → 放电源锁（吊销走真实内存库不留日志）"
+        );
+        // abort 后任务被取消：tx drop → Disconnected（自旋等待调度，上限 5s）
+        let mut waited = 0u32;
+        loop {
+            match rx.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    assert!(waited < 5000, "abort 后 pending 任务 5s 内未终结");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    waited += 1;
+                }
+                Ok(v) => panic!("pending 任务不应产出值，实际 {v:?}"),
+            }
+        }
+        // 吊销已在闭包内真实执行：同一内存库上设备已失效（显性关闭 = 全设备下线）
+        assert!(
+            !pairing::DeviceStore::Owned(arc).with(|c| pairing::device_valid(c, "rv", now)),
+            "revoke=true（显性关闭）必须吊销设备"
+        );
+    }
+
+    /// 吊销矩阵 revoke=false 行：只停机不吊销——设备仍有效（热重启后 cookie 仍过闸
+    /// 的核心等价物）；吊销闭包以 panic 证明确实未被调用。真实 store/registry 闭包
+    /// 形态见 server.rs 的 gate 级回归
+    #[test]
+    fn stop_server_core_hot_restart_keeps_devices_valid() {
+        let arc = std::sync::Arc::new(std::sync::Mutex::new(memory_conn()));
+        let store = pairing::DeviceStore::Owned(arc.clone());
+        let now = chrono::Utc::now().timestamp_millis();
+        store.with(|c| pairing::persist_device(c, &synth_device("keep", now)).unwrap());
+        stop_server_core(
+            None,
+            false,
+            || {},
+            || panic!("revoke=false（热重启）不得吊销设备"),
+            || {},
+            || {},
+        );
+        assert!(
+            store.with(|c| pairing::device_valid(c, "keep", now)),
+            "revoke=false 后设备必须仍有效（cookie 不掉线）"
+        );
+    }
+
+    /// 热重启内核：未运行空转（stop/start 均不触，panic 闭包证明）；运行中先停后启
+    /// （共享日志锁顺序）
+    #[test]
+    fn restart_listener_core_gates_on_live_and_stops_before_start() {
+        // 未运行：无「重启」语义——下次开启自然按新设置启动
+        let r = restart_listener_core(
+            false,
+            || panic!("未运行不得 stop"),
+            || panic!("未运行不得 start"),
+        );
+        assert!(r.is_ok(), "未运行时热重启空转返回 Ok");
+
+        // 运行中：先 stop（revoke=false 路径）后 start，顺序锁定
+        let log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let ls = log.clone();
+        let lg = log.clone();
+        let r = restart_listener_core(
+            true,
+            move || ls.borrow_mut().push("stop"),
+            move || {
+                lg.borrow_mut().push("start");
+                Ok(())
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*log.borrow(), &["stop", "start"], "先停（不吊销）后启");
+    }
+
+    /// 热重启失败口径（二选一裁决：保持停机 + 错误上抛，不回落旧 bind/port）：
+    /// start Err 原样传出，stop 恰好执行一次——不静默重试、不回落重启
+    #[test]
+    fn restart_listener_core_propagates_start_failure_after_single_stop() {
+        let stops = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let s = stops.clone();
+        let r = restart_listener_core(
+            true,
+            move || s.set(s.get() + 1),
+            || Err("绑定 127.0.0.1:9420 失败: 端口被占".into()),
+        );
+        assert_eq!(
+            r.unwrap_err(),
+            "绑定 127.0.0.1:9420 失败: 端口被占",
+            "启动失败原样上抛（端口占用等错误透传给调用方展示）"
+        );
+        assert_eq!(stops.get(), 1, "失败路径 stop 恰好一次（保持停机语义）");
+    }
+
+    /// set_pin 内核：非法 PIN → Err 且写值/吊销均不触（不落 KV；panic 闭包证明）
+    #[test]
+    fn set_pin_core_invalid_pin_touches_nothing() {
+        for bad in ["12", "12345", "12a4", "", "   ", "１２３４", " 12 "] {
+            let r = set_pin_core(
+                bad,
+                None,
+                |_| panic!("非法 PIN {bad:?} 不得写 KV"),
+                || panic!("非法 PIN {bad:?} 不得吊销"),
+            );
+            assert!(r.is_err(), "非法 PIN {bad:?} 必须拒绝");
+        }
+    }
+
+    /// set_pin 内核：首次设置（旧值 None）只写值、不吊销——pin_not_set 时 /pair/pin
+    /// 恒 401，不可能有已配对设备，无可吊销；写入 trim 后的规范值
+    #[test]
+    fn set_pin_core_first_set_writes_without_reset() {
+        let mut written: Vec<String> = vec![];
+        let r = set_pin_core(
+            " 5678 ",
+            None,
+            |p| written.push(p.to_string()),
+            || panic!("首次设置不得吊销（无可吊销设备）"),
+        );
+        assert_eq!(r.unwrap(), PinSetOutcome::FirstSet);
+        assert_eq!(
+            written,
+            vec!["5678"],
+            "写入 trim 后的规范值（比对口径无空白噪声）"
+        );
+    }
+
+    /// set_pin 内核：同值幂等（trim 后比较）——不重写 KV、不吊销设备
+    #[test]
+    fn set_pin_core_same_value_is_idempotent_noop() {
+        let r = set_pin_core(
+            "1234",
+            Some("1234".into()),
+            |_| panic!("同值不得重写 KV"),
+            || panic!("同值不得吊销设备"),
+        );
+        assert_eq!(r.unwrap(), PinSetOutcome::Unchanged);
+        // 带空白的同值同样幂等（比对与存储统一 trim）
+        let r = set_pin_core(
+            " 1234 ",
+            Some("1234".into()),
+            |_| panic!("同值不得重写 KV"),
+            || panic!("同值不得吊销设备"),
+        );
+        assert_eq!(r.unwrap(), PinSetOutcome::Unchanged);
+    }
+
+    /// set_pin 内核：改值 = 先吊销断连（重置密码 = 全部设备下线）后写新值，
+    /// 顺序锁定（先重置后写：KV 写无失败形态，不存在「新值已生效而旧 cookie 仍活」
+    /// 的中间态）
+    #[test]
+    fn set_pin_core_changed_resets_all_then_writes() {
+        let order: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let ow = order.clone();
+        let or = order.clone();
+        let r = set_pin_core(
+            "9999",
+            Some("1234".into()),
+            move |p| {
+                ow.borrow_mut()
+                    .push(if p == "9999" { "write" } else { "write-bad" })
+            },
+            move || {
+                or.borrow_mut().push("reset");
+                Ok((2, 3))
+            },
+        );
+        assert_eq!(
+            r.unwrap(),
+            PinSetOutcome::Changed {
+                reset: 2,
+                closed: 3
+            },
+            "改值回传吊销/断连计数供审计"
+        );
+        assert_eq!(
+            &*order.borrow(),
+            &["reset", "write"],
+            "先重置后写值（失败路径状态自洽）"
+        );
+    }
+
+    /// set_pin 内核：改值时重置失败 → Err 上传且不写值（先重置后写的自洽性：
+    /// 失败 = 什么都没发生，旧 PIN 与旧设备俱在）
+    #[test]
+    fn set_pin_core_reset_failure_propagates_without_write() {
+        let r = set_pin_core(
+            "9999",
+            Some("1234".into()),
+            |_| panic!("重置失败不得写值"),
+            || Err("吊销失败".into()),
+        );
+        assert_eq!(r.unwrap_err(), "吊销失败");
+    }
+
+    /// 重命名内核：空名/纯空白 → Err 且不触 DAO（panic 闭包证明）
+    #[test]
+    fn rename_device_core_blank_name_rejected_without_dao_call() {
+        for bad in ["", "   ", "\t\n"] {
+            let r = rename_device_core("d1", bad, |_| panic!("空名 {bad:?} 不得触 DAO"));
+            assert!(r.is_err(), "空名 {bad:?} 必须拒绝");
+        }
+    }
+
+    /// 重命名内核：未命中（DAO false）→ Err 404 语义，文案含设备 id 便于定位
+    #[test]
+    fn rename_device_core_miss_maps_to_not_found() {
+        let r = rename_device_core("no-such", "新名字", |_| Ok(false));
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("设备不存在") && e.contains("no-such"),
+            "404 语义文案应含设备 id: {e}"
+        );
+    }
+
+    /// 重命名内核：命中 → Ok；经真实 DAO（内存库）端到端——50 字截断为 40
+    /// （A1 DAO 自守贯穿命令内核，命令层不重复截断）；trim 生效
+    #[test]
+    fn rename_device_core_success_and_dao_truncation_end_to_end() {
+        let conn = memory_conn();
+        let now = chrono::Utc::now().timestamp_millis();
+        let dev = synth_device("rn", now);
+        pairing::persist_device(&conn, &dev).unwrap();
+        rename_device_core("rn", &format!("  {}  ", "甲".repeat(50)), |n| {
+            pairing::rename_device(&conn, "rn", n)
+        })
+        .unwrap();
+        let stored: String = conn
+            .query_row("SELECT name FROM remote_devices WHERE id = 'rn'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, "甲".repeat(40), "DAO 40 字截断贯穿命令内核");
     }
 }
 

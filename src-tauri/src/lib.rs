@@ -162,6 +162,10 @@ pub fn run() {
         remote::remote_devices,
         remote::remote_revoke_device,
         remote::remote_revoke_all_devices,
+        // M5 A4：访问密码设置 / 重置设备 / 设备重命名（吊销收窄后的新口径命令）
+        remote::remote_set_pin,
+        remote::remote_reset_devices,
+        remote::remote_rename_device,
         remote::remote_set_channel,
     ]);
 
