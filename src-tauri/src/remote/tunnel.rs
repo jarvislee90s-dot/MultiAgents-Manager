@@ -551,6 +551,15 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Ar
                             // 此处不另做停止标志检查（多一份需同步的标志拷贝，两处口径
                             // 易漂移）
                             set_channel_snapshot(&mode_for_stderr, |c| c.url = Some(u.clone()));
+                            // M5 P2-c：自动记忆最近一次解析成功的命名隧道地址（KV 持久，
+                            // 隧道关着/未解析时设置页与豁免名单仍可用）。仅 named 记忆
+                            // （quick 地址每次必变，记忆无意义）
+                            if mode_for_stderr == KEY_CHANNEL_VALUE_NAMED {
+                                crate::database::dao::settings::set_setting(
+                                    crate::remote::KEY_NAMED_ADDR_LAST,
+                                    &u,
+                                );
+                            }
                             // spec T1c：地址变化桌面通知（含首次拿到地址；channel 字段
                             // 供前端区分双通道，A6 消费）
                             crate::remote::events::emit_ui(

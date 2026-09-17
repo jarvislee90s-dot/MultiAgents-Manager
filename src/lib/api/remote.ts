@@ -25,7 +25,16 @@ export type RemoteChannels = {
   local: { running: boolean; address: string };
   lan: { enabled: boolean; running: boolean; addresses: string[] };
   quick: { enabled: boolean; running: boolean; address: string | null; error: string | null };
-  named: { enabled: boolean; running: boolean; address: string | null; error: string | null };
+  named: {
+    enabled: boolean;
+    running: boolean;
+    address: string | null;
+    error: string | null;
+    /** M5 P2-c：用户手填的固定地址（KV remote.named_addr_manual） */
+    manualAddr?: string | null;
+    /** M5 P2-c：最近一次解析成功的地址（KV remote.named_addr_last） */
+    lastAddr?: string | null;
+  };
 };
 
 // 命令定义于 src-tauri/src/remote/mod.rs（M5 A1-A5 已落地）

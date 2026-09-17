@@ -38,6 +38,11 @@ pub const KEY_CHAN_NAMED: &str = "remote.chan_named";
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
 /// 设备上限键（spec T2c：默认 10 台可配——M5 A5 用户裁决 3 → 10）
 pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
+/// M5 P2-c：命名隧道地址记忆——last = 最近一次 stderr 解析成功的完整地址
+/// （tunnel.rs 摄取点自动写入）；manual = 用户手填的固定地址（设置页，兜底
+/// 「域名解析不到」场景）。两者都进豁免/with 的域名名单与状态展示
+pub const KEY_NAMED_ADDR_LAST: &str = "remote.named_addr_last";
+pub const KEY_NAMED_ADDR_MANUAL: &str = "remote.named_addr_manual";
 /// 访问密码键（M5 A2）：4 位数字（validate_pin 唯一口径；A3 端点 / A4 命令消费）
 pub const KEY_ACCESS_PIN: &str = "remote.access_pin";
 
@@ -257,14 +262,6 @@ fn channel_hosts(c: &tunnel::ChannelStatus) -> Vec<String> {
         .collect()
 }
 
-/// gate 回环豁免的隧道域名并集（生产源；测试注入缝在 RemoteState）。
-/// 薄壳：取快照转纯函数内核（tunnel_hosts_from_status）——fail-closed 语义在
-/// 内核上测试（snapshot 的 running 现算自真实句柄槽，set_snapshot 无法直接
-/// 伪造 running=true）
-fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
-    tunnel_hosts_from_status(&tunnel::snapshot())
-}
-
 /// 豁免名单内核（纯函数，2026-09-17 穿透修复）：
 /// - 任一通道快照**错误终态** → None（既有哨兵，A3 评审 Important 1：错误通道域名
 ///   不可信，整体 None 让 gate 完全跳过本机豁免，绝不可当空名单处理——那会让 Host
@@ -277,20 +274,62 @@ fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
 ///   「名单恰好非空」**，域名未知时收口豁免（本机访问也需配对一次）。
 ///   变异锚点：删掉 running-without-url 分支 → mod 测试
 ///   `tunnel_hosts_fail_closed_when_running_without_url` 必红
-fn tunnel_hosts_from_status(s: &tunnel::TunnelStatus) -> Option<Vec<String>> {
+fn tunnel_hosts_from_status(
+    s: &tunnel::TunnelStatus,
+    extra_named: &[String],
+) -> Option<Vec<String>> {
     if s.quick.error.is_some() || s.named.error.is_some() {
         return None;
     }
     let missing_url_while_running = |c: &tunnel::ChannelStatus| c.running && c.url.is_none();
-    if missing_url_while_running(&s.quick) || missing_url_while_running(&s.named) {
+    if missing_url_while_running(&s.quick) {
+        return None;
+    }
+    // named 域名未知时：无手填/记忆兜底 → 收口（安全侧）；有 → 视为域名已知
+    if missing_url_while_running(&s.named) && extra_named.is_empty() {
         return None;
     }
     Some(
         channel_hosts(&s.quick)
             .into_iter()
             .chain(channel_hosts(&s.named))
+            .chain(extra_named.iter().cloned())
             .collect(),
     )
+}
+
+fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
+    tunnel_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts())
+}
+
+/// 手填命名地址（P2-c）：用户在设置页声明的固定地址，可信来源
+fn named_manual_addr() -> Option<String> {
+    crate::database::dao::settings::get_setting(KEY_NAMED_ADDR_MANUAL)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 最近一次解析成功的命名地址（P2-c 自动记忆，tunnel.rs 摄取点写入）
+fn named_last_addr() -> Option<String> {
+    crate::database::dao::settings::get_setting(KEY_NAMED_ADDR_LAST)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 手填/记忆地址的 host 归集（host_of_board_url 归一 + 去重；供豁免与 via 名单）
+fn named_extra_hosts() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for u in [named_manual_addr(), named_last_addr()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(h) = host_of_board_url(&u) {
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+    }
+    out
 }
 
 /// via 判定的分通道域名（生产源）：双通道各自归集（错误通道不宣称——错误通道的
@@ -299,7 +338,7 @@ fn tunnel_hosts_from_status(s: &tunnel::TunnelStatus) -> Option<Vec<String>> {
 /// 「局域网」，绝不判「本机」（2026-09-18 实测：名单为空曾把隧道设备标成本机）
 fn via_hosts_from_snapshot() -> Option<(Vec<String>, Vec<String>)> {
     let s = tunnel::snapshot();
-    match tunnel_hosts_from_status(&s) {
+    match tunnel_hosts_from_status(&s, &named_extra_hosts()) {
         None => None,
         Some(_) => Some((channel_hosts(&s.quick), channel_hosts(&s.named))),
     }
@@ -691,7 +730,11 @@ pub fn remote_status() -> serde_json::Value {
     let tun = tunnel::snapshot();
     // M5 A5：四通道状态（形状契约见 channels_payload 注释）+ 当前访问密码
     // （gate 已保证本载荷只被本机/已过闸前端读到——pin 展示给设置页与看板持有者）
-    st["channels"] = channels_payload(enabled, chans, port, lan, &tun);
+    let mut ch = channels_payload(enabled, chans, port, lan, &tun);
+    // M5 P2-c：命名地址记忆/手填透出（named 卡片显示优先级：解析地址 > 手填 > 上次）
+    ch["named"]["manualAddr"] = serde_json::json!(named_manual_addr());
+    ch["named"]["lastAddr"] = serde_json::json!(named_last_addr());
+    st["channels"] = ch;
     st["pin"] = serde_json::json!(pin::get_pin());
     st
 }
@@ -1863,7 +1906,7 @@ mod tests {
             },
         };
         assert_eq!(
-            tunnel_hosts_from_status(&s),
+            tunnel_hosts_from_status(&s, &[]),
             None,
             "运行中而域名缺失 → 豁免整体收口（不可当空名单放行）"
         );
@@ -1881,7 +1924,32 @@ mod tests {
                 error: None,
             },
         };
-        assert_eq!(tunnel_hosts_from_status(&off), Some(Vec::new()));
+        assert_eq!(tunnel_hosts_from_status(&off, &[]), Some(Vec::new()));
+    }
+
+    /// P2-c 手填兜底：named 运行而解析不到 url，但用户手填了固定地址 →
+    /// 名单不收口（手填地址入名单），豁免 Host 判定恢复精确
+    #[test]
+    fn tunnel_hosts_manual_addr_rescues_missing_named_url() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let s = TunnelStatus {
+            quick: ChannelStatus {
+                running: false,
+                url: None,
+                error: None,
+            },
+            named: ChannelStatus {
+                running: true,
+                url: None,
+                error: None,
+            },
+        };
+        assert_eq!(tunnel_hosts_from_status(&s, &[]), None, "无手填 → 收口");
+        assert_eq!(
+            tunnel_hosts_from_status(&s, &["mam-win.bondtoolbox.asia".to_string()]),
+            Some(vec!["mam-win.bondtoolbox.asia".to_string()]),
+            "有手填 → 名单含手填 host（豁免恢复精确，不再 fail-closed）"
+        );
     }
 
     /// 豁免名单正常态：运行且有 url → 名单含其域名（纯函数内核直测——
@@ -1902,7 +1970,7 @@ mod tests {
             },
         };
         assert_eq!(
-            tunnel_hosts_from_status(&s),
+            tunnel_hosts_from_status(&s, &[]),
             Some(vec!["demo.trycloudflare.com".to_string()])
         );
     }
