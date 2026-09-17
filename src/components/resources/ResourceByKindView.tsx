@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient, useQueries } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,6 +28,7 @@ import {
   ArrowDown,
   ChevronDown,
   ChevronRight,
+  type LucideIcon,
 } from "lucide-react";
 import {
   checkSkillTargetType,
@@ -54,6 +55,14 @@ import {
   setToolResident,
 } from "@/lib/api/preset";
 import { ManifestInstallDialog } from "./ManifestInstallDialog";
+import {
+  EMPTY_NEW_MCP,
+  McpAddDialog,
+  SkillDisableConfirmDialog,
+  UninstallConfirmDialog,
+  type PendingDisable,
+  type PendingUninstall,
+} from "./ResourceDialogs";
 import type { ResourceBinding, SsotResource } from "@/types/extension";
 
 type ResourceKind = "skill" | "mcp" | "plugin";
@@ -165,14 +174,6 @@ function SectionTableHeader(props: {
   );
 }
 
-type PendingDisable = {
-  skillName: string;
-  toolId: string;
-  toolLabel: string;
-  displayName: string;
-  targetType: "symlink" | "native";
-};
-
 /** 常驻小字按钮（用户反馈 wave33 Item A，原 Switch 改造）：点亮态（常驻 on）即
  *  「常驻」徽标本体——default 变体小尺寸（h-5 px-1 text-[9px]）；未点亮 ghost + opacity-60。
  *  写入逻辑不变（spec §7.4）：setToolResident → 失效 tool-residents 回读，checked 始终以
@@ -250,6 +251,30 @@ function ToolCell(props: {
   );
 }
 
+/** 三区段（skill / mcp / plugin）数据驱动渲染的 per-kind 配置：
+ *  三段行渲染 ~90% 平行，仅有的机械差异（图标 / 计数与空态文案 / 名字展示 /
+ *  名字旁附加徽标 / 行内单格启停语义 / 段头附加控件）全部显式化在这份配置里 */
+type KindSectionConfig = {
+  /** 段头图标 */
+  icon: LucideIcon;
+  /** 过滤 + 排序后的行列表 */
+  items: SsotResource[];
+  /** 段头计数文案（如「Skills (3)」） */
+  countLabel: string;
+  /** 空态提示文案 */
+  emptyHint: string;
+  /** 左列名字展示（skill 的目录名斜杠 → 「: 」展示） */
+  displayName: (res: SsotResource) => string;
+  /** 专属徽标与卸载钮之间的附加徽标（skill: 断链；mcp: 源已停用；plugin: 无） */
+  extraBadge?: (res: SsotResource) => ReactNode;
+  /** 行内单格启停（skill 亮→灰需弹窗确认故传 enabled 原值；mcp/plugin 直发取反） */
+  onToggleTool: (res: SsotResource, toolId: string, enabled: boolean) => void;
+  /** 段头右侧附加控件（仅 MCP 有「添加」按钮） */
+  headerExtra?: ReactNode;
+  /** 段落外层间距：plugin 段在最后无下边距（undefined → 不渲染 class 属性） */
+  wrapperClass: string | undefined;
+};
+
 export function ResourceByKindView() {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -261,14 +286,8 @@ export function ResourceByKindView() {
   const [pending, setPending] = useState<PendingDisable | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
-  const [newMcp, setNewMcp] = useState({ name: "", command: "", args: "", env: "" });
-  const [pendingUninstall, setPendingUninstall] = useState<{
-    kind: string;
-    name: string;
-    count: number;
-    // initial = 常规卸载确认；sharedLink = .agents 直链引用二级确认（spec §4.4）
-    stage: "initial" | "sharedLink";
-  } | null>(null);
+  const [newMcp, setNewMcp] = useState(EMPTY_NEW_MCP);
+  const [pendingUninstall, setPendingUninstall] = useState<PendingUninstall | null>(null);
   const [manifestDlgOpen, setManifestDlgOpen] = useState(false);
   const [manifestPath, setManifestPath] = useState("");
   const [installDlgPath, setInstallDlgPath] = useState<string | null>(null);
@@ -304,6 +323,16 @@ export function ResourceByKindView() {
       : kind === "mcp"
         ? tool.mcpSupported
         : tool.pluginSupported;
+  // 单格启停前的能力门（三段 handler 共用）：工具在列表中且不支持该类资源 →
+  // toast 提示并返回 true（调用方早退）；工具不在列表不拦，交由后端处置
+  const capabilityBlocked = (toolId: string, kind: ResourceKind): boolean => {
+    const tool = tools.find((x) => x.id === toolId);
+    if (tool && !kindSupported(tool, kind)) {
+      toast.info(t("resources.kindNotSupported"));
+      return true;
+    }
+    return false;
+  };
   const bindingOf = (extensionId: string): ResourceBinding | undefined =>
     bindings.find((b) => b.extensionId === extensionId);
   // 专属判定：绑定存在且允许工具列表非空；null = 非专属（通用可迁移）
@@ -425,11 +454,7 @@ export function ResourceByKindView() {
   const filteredPlugins = applySort(resources.plugins.filter(filterFn), "plugin");
 
   const handleToggleMcp = async (name: string, toolId: string, enabled: boolean) => {
-    const tool = tools.find((x) => x.id === toolId);
-    if (tool && !tool.mcpSupported) {
-      toast.info(t("resources.kindNotSupported"));
-      return;
-    }
+    if (capabilityBlocked(toolId, "mcp")) return;
     try {
       if (enabled) {
         // 启用前尝试自动导入到 SSOT（如果还未导入）
@@ -524,11 +549,7 @@ export function ResourceByKindView() {
     enabled: boolean,
     kind: string
   ) => {
-    const tool = tools.find((x) => x.id === toolId);
-    if (tool && !tool.pluginSupported) {
-      toast.info(t("resources.kindNotSupported"));
-      return;
-    }
+    if (capabilityBlocked(toolId, "plugin")) return;
     try {
       await invoke("toggle_plugin_for_tool", { pluginName: name, toolId, enabled, kind });
       toast.success(t(enabled ? "resources.enabled" : "resources.disabled", { name }));
@@ -539,11 +560,7 @@ export function ResourceByKindView() {
   };
 
   const handleSkillToggle = async (skillName: string, toolId: string, enabled: boolean) => {
-    const tool = tools.find((x) => x.id === toolId);
-    if (tool && !tool.skillToggleSupported) {
-      toast.info(t("resources.kindNotSupported"));
-      return;
-    }
+    if (capabilityBlocked(toolId, "skill")) return;
     if (!enabled) {
       // 灰 → 亮：直接启用
       try {
@@ -629,7 +646,7 @@ export function ResourceByKindView() {
       await saveMcpConfig(newMcp.name.trim(), newMcp.command.trim(), args, env);
       toast.success(t("resources.mcpAddedToRepo", { name: newMcp.name }));
       setMcpDialogOpen(false);
-      setNewMcp({ name: "", command: "", args: "", env: "" });
+      setNewMcp(EMPTY_NEW_MCP);
       await refresh();
     } catch (e) {
       toast.error(t("resources.addMcpFailed", { error: formatInvokeError(e, t) }));
@@ -706,6 +723,194 @@ export function ResourceByKindView() {
     }
   };
 
+  // per-kind 段落配置：三段的全部行为差异集中于此（共用渲染逻辑见 renderSection）
+  const sectionConfig: Record<ResourceKind, KindSectionConfig> = {
+    skill: {
+      icon: Package,
+      items: filteredSkills,
+      countLabel: t("resources.skillsCount", { n: filteredSkills.length }),
+      emptyHint: t("resources.noSkillsHint"),
+      displayName: (res) => formatSkillName(res.name),
+      extraBadge: (res) =>
+        // 断链徽标：SSOT 存在但部分工具侧符号链接失效（琥珀色警示）
+        res.brokenTools && res.brokenTools.length > 0 ? (
+          <span
+            className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-500"
+            title={t("resources.linkBrokenTooltip", {
+              tools: res.brokenTools.join(", "),
+            })}
+          >
+            {t("resources.linkBroken")}
+          </span>
+        ) : null,
+      // skill 亮→灰需先 checkSkillTargetType 区分 symlink/native 弹窗，传 enabled 原值由 handler 分支
+      onToggleTool: (res, toolId, enabled) => handleSkillToggle(res.name, toolId, enabled),
+      wrapperClass: "mb-4",
+    },
+    mcp: {
+      icon: Link2,
+      items: filteredMcp,
+      countLabel: t("resources.mcpsCount", { n: filteredMcp.length }),
+      emptyHint: t("mcp.empty"),
+      displayName: (res) => res.name,
+      extraBadge: (res) =>
+        // 源已停用徽标：MCP 存储 JSON 带 enable:false 原样入库（M7 口径）
+        res.sourceDisabled ? (
+          <span
+            className="text-muted-foreground rounded border border-dashed px-1 text-[10px]"
+            title={t("resources.mcpSourceDisabledHint")}
+          >
+            {t("resources.mcpSourceDisabled")}
+          </span>
+        ) : null,
+      onToggleTool: (res, toolId, enabled) => handleToggleMcp(res.name, toolId, !enabled),
+      headerExtra: (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="ml-auto h-6 px-2 text-[10px]"
+          onClick={(e) => {
+            // 阻断冒泡：添加按钮不应触发分组折叠
+            e.stopPropagation();
+            setMcpDialogOpen(true);
+          }}
+        >
+          {t("resources.addWithPlus")}
+        </Button>
+      ),
+      wrapperClass: "mb-4",
+    },
+    plugin: {
+      icon: Plug,
+      items: filteredPlugins,
+      countLabel: t("resources.pluginsCount", { n: filteredPlugins.length }),
+      emptyHint: t("resources.noPlugins"),
+      displayName: (res) => res.name,
+      onToggleTool: (res, toolId, enabled) =>
+        handleTogglePlugin(res.name, toolId, !enabled, res.pluginType ?? "file"),
+      wrapperClass: undefined, // plugin 段在最后，无下边距
+    },
+  };
+
+  // 单段渲染：段头（折叠 + 计数 + 附加控件）→ 表头 → 行网格；
+  // 行内「全部启停」与每工具格（能力门 → 专属门 → ToolCell）三段共用同一逻辑
+  const renderSection = (kind: ResourceKind) => {
+    const cfg = sectionConfig[kind];
+    const Icon = cfg.icon;
+    return (
+      <div className={cfg.wrapperClass}>
+        <h4
+          className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
+          aria-expanded={!collapsed[kind]}
+          title={collapsed[kind] ? t("resources.expandSection") : t("resources.collapseSection")}
+          onClick={() => toggleCollapsed(kind)}
+          onKeyDown={onSectionKeyDown(kind)}
+          tabIndex={0}
+          role="button"
+        >
+          {collapsed[kind] ? (
+            <ChevronRight className="h-4 w-4" />
+          ) : (
+            <ChevronDown className="h-4 w-4" />
+          )}
+          <Icon className="h-4 w-4" />
+          {cfg.countLabel}
+          {cfg.headerExtra}
+        </h4>
+        {collapsed[kind] ? null : cfg.items.length === 0 ? (
+          <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
+            <Info className="h-3.5 w-3.5" />
+            {cfg.emptyHint}
+          </div>
+        ) : (
+          <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
+            <SectionTableHeader
+              kind={kind}
+              tools={tools}
+              sortDir={sortDirs[kind]}
+              onToggleSort={() => toggleSort(kind)}
+              onOpen={(toolId) => handleOpenResource(kind, toolId)}
+            />
+            {cfg.items.map((res) => {
+              const extensionId = bindingKey(kind, res.name);
+              return (
+                <div
+                  key={res.name}
+                  className="w-max min-w-full items-center rounded border p-2 text-sm"
+                  style={SECTION_GRID_STYLE}
+                >
+                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
+                    <span className="font-medium">{cfg.displayName(res)}</span>
+                    {renderExclusiveBadge(kind, res.name)}
+                    {cfg.extraBadge?.(res)}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive h-6 px-1.5 text-[10px]"
+                      title={t("resources.uninstall")}
+                      aria-label={t("resources.uninstall")}
+                      onClick={() =>
+                        setPendingUninstall({
+                          kind,
+                          name: res.name,
+                          count: res.enabledTools.length,
+                          stage: "initial",
+                        })
+                      }
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                  <div className="flex flex-nowrap gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
+                      title={
+                        res.enabledTools.length === tools.length
+                          ? t("resources.allToolsOff")
+                          : t("resources.allToolsOn")
+                      }
+                      onClick={() => handleToggleAll(res, res.enabledTools.length !== tools.length)}
+                    >
+                      {res.enabledTools.length === tools.length
+                        ? t("resources.allToolsOff")
+                        : t("resources.allToolsOn")}
+                    </Button>
+                    {tools.map((tool) => {
+                      // 能力门：工具不支持该类资源（如 dsh 无 MCP 配置/插件目录）→ 置灰占位
+                      if (!kindSupported(tool, kind)) {
+                        return gatedToolButton(
+                          tool,
+                          `${tool.label}: ${t("resources.kindNotSupported")}`
+                        );
+                      }
+                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
+                      if (toolExcludedByBinding(extensionId, tool.id)) {
+                        return gatedToolButton(tool, excludedTitle(extensionId, tool.label));
+                      }
+                      const enabled = res.enabledTools.includes(tool.id);
+                      return (
+                        <ToolCell
+                          key={tool.id}
+                          tool={tool}
+                          extensionId={extensionId}
+                          enabled={enabled}
+                          toggleTitle={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
+                          onToggle={() => cfg.onToggleTool(res, tool.id, enabled)}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <div className="bg-card rounded-lg border p-4">
@@ -760,549 +965,45 @@ export function ResourceByKindView() {
           {t("resources.matrixHint")}
         </p>
 
-        {/* Skills */}
-        <div className="mb-4">
-          <h4
-            className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
-            aria-expanded={!collapsed.skill}
-            title={collapsed.skill ? t("resources.expandSection") : t("resources.collapseSection")}
-            onClick={() => toggleCollapsed("skill")}
-            onKeyDown={onSectionKeyDown("skill")}
-            tabIndex={0}
-            role="button"
-          >
-            {collapsed.skill ? (
-              <ChevronRight className="h-4 w-4" />
-            ) : (
-              <ChevronDown className="h-4 w-4" />
-            )}
-            <Package className="h-4 w-4" />
-            {t("resources.skillsCount", { n: filteredSkills.length })}
-          </h4>
-          {collapsed.skill ? null : filteredSkills.length === 0 ? (
-            <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
-              <Info className="h-3.5 w-3.5" />
-              {t("resources.noSkillsHint")}
-            </div>
-          ) : (
-            <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
-              <SectionTableHeader
-                kind="skill"
-                tools={tools}
-                sortDir={sortDirs.skill}
-                onToggleSort={() => toggleSort("skill")}
-                onOpen={(toolId) => handleOpenResource("skill", toolId)}
-              />
-              {filteredSkills.map((skill) => (
-                <div
-                  key={skill.name}
-                  className="w-max min-w-full items-center rounded border p-2 text-sm"
-                  style={SECTION_GRID_STYLE}
-                >
-                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
-                    <span className="font-medium">{formatSkillName(skill.name)}</span>
-                    {renderExclusiveBadge("skill", skill.name)}
-                    {skill.brokenTools && skill.brokenTools.length > 0 && (
-                      <span
-                        className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-500"
-                        title={t("resources.linkBrokenTooltip", {
-                          tools: skill.brokenTools.join(", "),
-                        })}
-                      >
-                        {t("resources.linkBroken")}
-                      </span>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive h-6 px-1.5 text-[10px]"
-                      title={t("resources.uninstall")}
-                      aria-label={t("resources.uninstall")}
-                      onClick={() =>
-                        setPendingUninstall({
-                          kind: "skill",
-                          name: skill.name,
-                          count: skill.enabledTools.length,
-                          stage: "initial",
-                        })
-                      }
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                  <div className="flex flex-nowrap gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
-                      title={
-                        skill.enabledTools.length === tools.length
-                          ? t("resources.allToolsOff")
-                          : t("resources.allToolsOn")
-                      }
-                      onClick={() =>
-                        handleToggleAll(skill, skill.enabledTools.length !== tools.length)
-                      }
-                    >
-                      {skill.enabledTools.length === tools.length
-                        ? t("resources.allToolsOff")
-                        : t("resources.allToolsOn")}
-                    </Button>
-                    {tools.map((tool) => {
-                      if (!kindSupported(tool, "skill")) {
-                        return gatedToolButton(
-                          tool,
-                          `${tool.label}: ${t("resources.kindNotSupported")}`
-                        );
-                      }
-                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
-                      if (toolExcludedByBinding(bindingKey("skill", skill.name), tool.id)) {
-                        return gatedToolButton(
-                          tool,
-                          excludedTitle(bindingKey("skill", skill.name), tool.label)
-                        );
-                      }
-                      const enabled = skill.enabledTools.includes(tool.id);
-                      return (
-                        <ToolCell
-                          key={tool.id}
-                          tool={tool}
-                          extensionId={bindingKey("skill", skill.name)}
-                          enabled={enabled}
-                          toggleTitle={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
-                          onToggle={() => handleSkillToggle(skill.name, tool.id, enabled)}
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        {/* 三区段（skill / mcp / plugin）：行为差异集中于 sectionConfig，共用 renderSection */}
+        {renderSection("skill")}
 
-        {/* MCP */}
-        <div className="mb-4">
-          <h4
-            className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
-            aria-expanded={!collapsed.mcp}
-            title={collapsed.mcp ? t("resources.expandSection") : t("resources.collapseSection")}
-            onClick={() => toggleCollapsed("mcp")}
-            onKeyDown={onSectionKeyDown("mcp")}
-            tabIndex={0}
-            role="button"
-          >
-            {collapsed.mcp ? (
-              <ChevronRight className="h-4 w-4" />
-            ) : (
-              <ChevronDown className="h-4 w-4" />
-            )}
-            <Link2 className="h-4 w-4" />
-            {t("resources.mcpsCount", { n: filteredMcp.length })}
-            <Button
-              size="sm"
-              variant="ghost"
-              className="ml-auto h-6 px-2 text-[10px]"
-              onClick={(e) => {
-                // 阻断冒泡：添加按钮不应触发分组折叠
-                e.stopPropagation();
-                setMcpDialogOpen(true);
-              }}
-            >
-              {t("resources.addWithPlus")}
-            </Button>
-          </h4>
-          {collapsed.mcp ? null : filteredMcp.length === 0 ? (
-            <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
-              <Info className="h-3.5 w-3.5" />
-              {t("mcp.empty")}
-            </div>
-          ) : (
-            <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
-              <SectionTableHeader
-                kind="mcp"
-                tools={tools}
-                sortDir={sortDirs.mcp}
-                onToggleSort={() => toggleSort("mcp")}
-                onOpen={(toolId) => handleOpenResource("mcp", toolId)}
-              />
-              {filteredMcp.map((mcp) => (
-                <div
-                  key={mcp.name}
-                  className="w-max min-w-full items-center rounded border p-2 text-sm"
-                  style={SECTION_GRID_STYLE}
-                >
-                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
-                    <span className="font-medium">{mcp.name}</span>
-                    {renderExclusiveBadge("mcp", mcp.name)}
-                    {mcp.sourceDisabled && (
-                      <span
-                        className="text-muted-foreground rounded border border-dashed px-1 text-[10px]"
-                        title={t("resources.mcpSourceDisabledHint")}
-                      >
-                        {t("resources.mcpSourceDisabled")}
-                      </span>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive h-6 px-1.5 text-[10px]"
-                      title={t("resources.uninstall")}
-                      aria-label={t("resources.uninstall")}
-                      onClick={() =>
-                        setPendingUninstall({
-                          kind: "mcp",
-                          name: mcp.name,
-                          count: mcp.enabledTools.length,
-                          stage: "initial",
-                        })
-                      }
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                  <div className="flex flex-nowrap gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
-                      title={
-                        mcp.enabledTools.length === tools.length
-                          ? t("resources.allToolsOff")
-                          : t("resources.allToolsOn")
-                      }
-                      onClick={() => handleToggleAll(mcp, mcp.enabledTools.length !== tools.length)}
-                    >
-                      {mcp.enabledTools.length === tools.length
-                        ? t("resources.allToolsOff")
-                        : t("resources.allToolsOn")}
-                    </Button>
-                    {tools.map((tool) => {
-                      if (!kindSupported(tool, "mcp")) {
-                        return gatedToolButton(
-                          tool,
-                          `${tool.label}: ${t("resources.kindNotSupported")}`
-                        );
-                      }
-                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
-                      if (toolExcludedByBinding(bindingKey("mcp", mcp.name), tool.id)) {
-                        return gatedToolButton(
-                          tool,
-                          excludedTitle(bindingKey("mcp", mcp.name), tool.label)
-                        );
-                      }
-                      const enabled = mcp.enabledTools.includes(tool.id);
-                      return (
-                        <ToolCell
-                          key={tool.id}
-                          tool={tool}
-                          extensionId={bindingKey("mcp", mcp.name)}
-                          enabled={enabled}
-                          toggleTitle={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
-                          onToggle={() => handleToggleMcp(mcp.name, tool.id, !enabled)}
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        {renderSection("mcp")}
 
-        {/* Plugins */}
-        <div>
-          <h4
-            className="mb-2 flex cursor-pointer items-center gap-2 text-sm font-semibold select-none"
-            aria-expanded={!collapsed.plugin}
-            title={collapsed.plugin ? t("resources.expandSection") : t("resources.collapseSection")}
-            onClick={() => toggleCollapsed("plugin")}
-            onKeyDown={onSectionKeyDown("plugin")}
-            tabIndex={0}
-            role="button"
-          >
-            {collapsed.plugin ? (
-              <ChevronRight className="h-4 w-4" />
-            ) : (
-              <ChevronDown className="h-4 w-4" />
-            )}
-            <Plug className="h-4 w-4" />
-            {t("resources.pluginsCount", { n: filteredPlugins.length })}
-          </h4>
-          {collapsed.plugin ? null : filteredPlugins.length === 0 ? (
-            <div className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
-              <Info className="h-3.5 w-3.5" />
-              {t("resources.noPlugins")}
-            </div>
-          ) : (
-            <div className="max-h-[60vh] space-y-1 overflow-auto pb-1">
-              <SectionTableHeader
-                kind="plugin"
-                tools={tools}
-                sortDir={sortDirs.plugin}
-                onToggleSort={() => toggleSort("plugin")}
-                onOpen={(toolId) => handleOpenResource("plugin", toolId)}
-              />
-              {filteredPlugins.map((plugin) => (
-                <div
-                  key={plugin.name}
-                  className="w-max min-w-full items-center rounded border p-2 text-sm"
-                  style={SECTION_GRID_STYLE}
-                >
-                  <div className="bg-background sticky left-2 z-10 flex flex-wrap items-center gap-x-1 gap-y-0.5 overflow-hidden border-r">
-                    <span className="font-medium">{plugin.name}</span>
-                    {renderExclusiveBadge("plugin", plugin.name)}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive h-6 px-1.5 text-[10px]"
-                      title={t("resources.uninstall")}
-                      aria-label={t("resources.uninstall")}
-                      onClick={() =>
-                        setPendingUninstall({
-                          kind: "plugin",
-                          name: plugin.name,
-                          count: plugin.enabledTools.length,
-                          stage: "initial",
-                        })
-                      }
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                  <div className="flex flex-nowrap gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className={`h-6 px-1 text-[10px] ${ALL_COL_CLS}`}
-                      title={
-                        plugin.enabledTools.length === tools.length
-                          ? t("resources.allToolsOff")
-                          : t("resources.allToolsOn")
-                      }
-                      onClick={() =>
-                        handleToggleAll(plugin, plugin.enabledTools.length !== tools.length)
-                      }
-                    >
-                      {plugin.enabledTools.length === tools.length
-                        ? t("resources.allToolsOff")
-                        : t("resources.allToolsOn")}
-                    </Button>
-                    {tools.map((tool) => {
-                      if (!kindSupported(tool, "plugin")) {
-                        return gatedToolButton(
-                          tool,
-                          `${tool.label}: ${t("resources.kindNotSupported")}`
-                        );
-                      }
-                      // 专属门（spec §6/§7.4）：不适配工具置灰不可启停，title 说明原因
-                      if (toolExcludedByBinding(bindingKey("plugin", plugin.name), tool.id)) {
-                        return gatedToolButton(
-                          tool,
-                          excludedTitle(bindingKey("plugin", plugin.name), tool.label)
-                        );
-                      }
-                      const enabled = plugin.enabledTools.includes(tool.id);
-                      return (
-                        <ToolCell
-                          key={tool.id}
-                          tool={tool}
-                          extensionId={bindingKey("plugin", plugin.name)}
-                          enabled={enabled}
-                          toggleTitle={`${tool.label}: ${enabled ? t("resources.enabledShort") : t("resources.disabledShort")}`}
-                          onToggle={() =>
-                            handleTogglePlugin(
-                              plugin.name,
-                              tool.id,
-                              !enabled,
-                              plugin.pluginType ?? "file"
-                            )
-                          }
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        {renderSection("plugin")}
       </div>
 
-      {/* 确认弹窗 */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-sm">
-          {pending?.targetType === "native" ? (
-            <>
-              <DialogHeader>
-                <DialogTitle className="text-red-600">
-                  {t("resources.deleteNativeTitle")}
-                </DialogTitle>
-                <DialogDescription className="space-y-2 pt-2 text-sm">
-                  <p className="text-red-500">
-                    {t("resources.deleteNativeDesc1", { name: pending?.displayName })}
-                  </p>
-                  <p>{t("resources.deleteNativeDesc2", { tool: pending?.toolLabel })}</p>
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter className="gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setDialogOpen(false);
-                    setPending(null);
-                  }}
-                >
-                  {t("common.cancel")}
-                </Button>
-                <Button variant="destructive" size="sm" onClick={confirmDisable}>
-                  {t("resources.trashAndRemove")}
-                </Button>
-              </DialogFooter>
-            </>
-          ) : (
-            <>
-              <DialogHeader>
-                <DialogTitle>{t("resources.removeLinkTitle")}</DialogTitle>
-                <DialogDescription className="pt-2 text-sm">
-                  {t("resources.removeLinkDesc", {
-                    name: pending?.displayName,
-                    tool: pending?.toolLabel,
-                  })}
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter className="gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setDialogOpen(false);
-                    setPending(null);
-                  }}
-                >
-                  {t("common.cancel")}
-                </Button>
-                <Button variant="default" size="sm" onClick={confirmDisable}>
-                  {t("resources.removeLink")}
-                </Button>
-              </DialogFooter>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* 确认弹窗：取消 = 关弹窗 + 清 pending；Dialog 自身关闭（X/esc）仅关弹窗（与原内联行为一致） */}
+      <SkillDisableConfirmDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        pending={pending}
+        onCancel={() => {
+          setDialogOpen(false);
+          setPending(null);
+        }}
+        onConfirm={confirmDisable}
+      />
 
-      {/* 添加 MCP 弹窗 */}
-      <Dialog open={mcpDialogOpen} onOpenChange={setMcpDialogOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("mcp.addTitle")}</DialogTitle>
-            <DialogDescription className="pt-2 text-xs">
-              {t("resources.addMcpDesc")}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <div>
-              <label className="text-xs font-medium">{t("mcp.nameLabel")}</label>
-              <input
-                value={newMcp.name}
-                onChange={(e) => setNewMcp({ ...newMcp, name: e.currentTarget.value })}
-                placeholder="firecrawl"
-                className="h-8 w-full rounded border px-2 text-xs"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium">{t("mcp.commandLabel")}</label>
-              <input
-                value={newMcp.command}
-                onChange={(e) => setNewMcp({ ...newMcp, command: e.currentTarget.value })}
-                placeholder="npx"
-                className="h-8 w-full rounded border px-2 text-xs"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium">{t("mcp.argsLabelSpace")}</label>
-              <input
-                value={newMcp.args}
-                onChange={(e) => setNewMcp({ ...newMcp, args: e.currentTarget.value })}
-                placeholder="-y firecrawl-mcp"
-                className="h-8 w-full rounded border px-2 text-xs"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium">{t("mcp.envLabel")}</label>
-              <textarea
-                value={newMcp.env}
-                onChange={(e) => setNewMcp({ ...newMcp, env: e.currentTarget.value })}
-                placeholder="API_KEY=xxx"
-                className="h-16 w-full rounded border px-2 text-xs"
-              />
-            </div>
-          </div>
-          <DialogFooter className="gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setMcpDialogOpen(false);
-                setNewMcp({ name: "", command: "", args: "", env: "" });
-              }}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button size="sm" onClick={handleAddMcp}>
-              {t("resources.addToRepo")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* 添加 MCP 弹窗：受控表单，取消 = 关弹窗 + 重置草稿 */}
+      <McpAddDialog
+        open={mcpDialogOpen}
+        onOpenChange={setMcpDialogOpen}
+        value={newMcp}
+        onChange={setNewMcp}
+        onCancel={() => {
+          setMcpDialogOpen(false);
+          setNewMcp(EMPTY_NEW_MCP);
+        }}
+        onSubmit={handleAddMcp}
+      />
 
-      {/* 卸载确认弹窗（stage=sharedLink 为 ~/.agents/skills 直链引用二级确认，spec §4.4；
-          取消/关闭不产生任何变更） */}
-      <Dialog open={!!pendingUninstall} onOpenChange={(o) => !o && setPendingUninstall(null)}>
-        <DialogContent className="max-w-sm">
-          {pendingUninstall?.stage === "sharedLink" ? (
-            <>
-              <DialogHeader>
-                <DialogTitle className="text-red-600">
-                  {t("resources.sharedLinkConfirmTitle")}
-                </DialogTitle>
-                <DialogDescription className="pt-2 text-sm">
-                  {t("resources.sharedLinkConfirmDesc", { name: pendingUninstall?.name })}
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter className="gap-2">
-                <Button variant="outline" size="sm" onClick={() => setPendingUninstall(null)}>
-                  {t("common.cancel")}
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => confirmUninstall(true)}>
-                  {t("resources.sharedLinkConfirmContinue")}
-                </Button>
-              </DialogFooter>
-            </>
-          ) : (
-            <>
-              <DialogHeader>
-                <DialogTitle className="text-red-600">{t("resources.uninstallTitle")}</DialogTitle>
-                <DialogDescription className="pt-2 text-sm">
-                  {t("resources.uninstallDesc", {
-                    name: pendingUninstall?.name,
-                    n: pendingUninstall?.count ?? 0,
-                  })}
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter className="gap-2">
-                <Button variant="outline" size="sm" onClick={() => setPendingUninstall(null)}>
-                  {t("common.cancel")}
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => confirmUninstall(false)}>
-                  {t("resources.uninstall")}
-                </Button>
-              </DialogFooter>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      {/* 卸载确认弹窗：取消/关闭不产生任何变更，「继续卸载」带 force 二次确认 */}
+      <UninstallConfirmDialog
+        pending={pendingUninstall}
+        onCancel={() => setPendingUninstall(null)}
+        onConfirm={confirmUninstall}
+      />
 
       {/* 从 Manifest 安装路径弹窗 */}
       <Dialog open={manifestDlgOpen} onOpenChange={setManifestDlgOpen}>
