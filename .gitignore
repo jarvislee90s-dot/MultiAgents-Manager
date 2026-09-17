@@ -74,3 +74,4 @@ scripts/preseed-crate.py
 scripts/check-trash-index.py
 scripts/get-cargo-src.py
 scripts/extract-registry-src.py
+.superpowers/
