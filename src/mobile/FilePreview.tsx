@@ -3,6 +3,9 @@
 // - markdown → ReactMarkdown 渲染；其他文本 → <pre><code> 语法高亮
 //   （highlight.js/lib/common，与 rehype-highlight 共享同一份 lowlight/highlight.js
 //   模块，不产生重复打包）；
+// - 源码/渲染双态（M5 B4，线稿 seg）：仅 .md 与 .html 出现切换器——.md 源码态
+//   回落源码高亮；.html 渲染态 = 沙箱 iframe（sandbox="allow-scripts"，无
+//   same-origin，与看板数据隔离）；其余类型与图片不显示 seg；
 // - 越界 / 超限 / 不存在对外一律 403（后端探测面最小化）→「无法预览该文件」错误态；
 // - 手机现实（Task 8 裁决）：split = 上对话下文件（纵向分屏，由 SessionDetail 排版），
 //   fullscreen = 全屏浮层；默认 fullscreen，切换控件在 SessionDetail（mode 是受控 prop）。
@@ -98,6 +101,29 @@ export default function FilePreview({
   // 手动重试信号（403 时文件可能已被 agent 补写回限内 / 网络恢复后再试）
   const [retryTick, setRetryTick] = useState(0);
 
+  // 源码/渲染双态（M5 B4，线稿 .pv-head seg）：仅 .md 与 .html 出现切换器。
+  // 默认口径 = 各自现状延续：.md 默认渲染（现有 markdown 排版显式化）、
+  // .html 默认源码（渲染为本次新增能力——沙箱 iframe，见正文分支）
+  const lowerPath = filePath.toLowerCase();
+  const segKind: "markdown" | "html" | null = lowerPath.endsWith(".md")
+    ? "markdown"
+    : lowerPath.endsWith(".markdown")
+      ? "markdown"
+      : lowerPath.endsWith(".html") || lowerPath.endsWith(".htm")
+        ? "html"
+        : null;
+  const [view, setView] = useState<"source" | "render">(
+    segKind === "markdown" ? "render" : "source"
+  );
+  // 换文件回到该扩展名的默认态，避免上一份文件的切换态串场
+  useEffect(() => {
+    setView(
+      filePath.toLowerCase().endsWith(".md") || filePath.toLowerCase().endsWith(".markdown")
+        ? "render"
+        : "source"
+    );
+  }, [filePath]);
+
   // 拉取文件：挂载与 filePath 变化时各一次；图片 object URL 在清理函数里 revoke，
   // 防浮窗反复开关泄漏 blob。alive 标记防卸载后 setState 与迟到响应的 revoke 竞态
   useEffect(() => {
@@ -124,17 +150,33 @@ export default function FilePreview({
     };
   }, [session.id, filePath, retryTick]);
 
-  // 高亮 HTML 只在内容变化时重算（500KB 文本的高亮不是零成本，勿放渲染期）
-  const highlighted = useMemo(() => {
-    if (state.phase !== "ok" || state.payload.kind !== "text") return null;
-    if (state.payload.mime === "text/markdown") return null;
-    return highlightText(state.payload.content, filePath);
-  }, [state, filePath]);
-
   // 路径末段作标题（分隔符双态：win 反斜杠 / unix 斜杠）
   const baseName = filePath.split(/[\\/]/).pop() || filePath;
   const previewableError =
     state.phase === "error" && (state.status === 403 || state.status === 404);
+
+  // 正文三分支（M5 B4）：markdown 渲染 / html 沙箱 iframe / 源码高亮。
+  // md 在 seg 源码态回落 code 分支；html 渲染态 = 取文本 → 沙箱 iframe
+  // （sandbox 仅 allow-scripts、**无** allow-same-origin——脚本可跑但与看板
+  // 数据/cookie 完全隔离，线稿既定安全口径）
+  const showMarkdown =
+    state.phase === "ok" &&
+    state.payload.kind === "text" &&
+    state.payload.mime === "text/markdown" &&
+    !(segKind === "markdown" && view === "source");
+  const showHtmlFrame =
+    state.phase === "ok" &&
+    state.payload.kind === "text" &&
+    segKind === "html" &&
+    view === "render";
+
+  // 高亮 HTML 只在内容变化时重算（500KB 文本的高亮不是零成本，勿放渲染期）；
+  // markdown 渲染态不需要高亮产物，跳过（既有优化，随分支条件同步）
+  const highlighted = useMemo(() => {
+    if (state.phase !== "ok" || state.payload.kind !== "text") return null;
+    if (showMarkdown) return null;
+    return highlightText(state.payload.content, filePath);
+  }, [state, filePath, showMarkdown]);
 
   return (
     <section
@@ -174,6 +216,43 @@ export default function FilePreview({
         {onModeChange && (
           <PreviewModeSwitcher mode={mode} onChange={onModeChange} testIdPrefix="preview-toggle" />
         )}
+        {/* 源码/渲染 seg（M5 B4，线稿 .pv-head）：仅 .md 与 .html 出现（文本加载后）。
+            渲染态（iframe）下保持在场——它是切回源码的唯一入口 */}
+        {segKind !== null && state.phase === "ok" && state.payload.kind === "text" && (
+          <span
+            role="group"
+            aria-label="源码/渲染切换"
+            data-testid="preview-seg"
+            className="flex shrink-0 overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700"
+          >
+            <button
+              type="button"
+              data-testid="preview-seg-source"
+              aria-pressed={view === "source"}
+              onClick={() => setView("source")}
+              className={`px-2.5 py-1 text-xs ${
+                view === "source"
+                  ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900"
+                  : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              }`}
+            >
+              源码
+            </button>
+            <button
+              type="button"
+              data-testid="preview-seg-render"
+              aria-pressed={view === "render"}
+              onClick={() => setView("render")}
+              className={`px-2.5 py-1 text-xs ${
+                view === "render"
+                  ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900"
+                  : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              }`}
+            >
+              渲染
+            </button>
+          </span>
+        )}
         <button
           type="button"
           data-testid="preview-close"
@@ -206,16 +285,30 @@ export default function FilePreview({
             className="max-w-full"
           />
         )}
-        {state.phase === "ok" &&
-          state.payload.kind === "text" &&
-          state.payload.mime === "text/markdown" && (
-            <div data-testid="preview-markdown" className="md-body text-sm dark:text-slate-200">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{state.payload.content}</ReactMarkdown>
-            </div>
-          )}
-        {state.phase === "ok" &&
-          state.payload.kind === "text" &&
-          state.payload.mime !== "text/markdown" && (
+        {showHtmlFrame && (
+          <iframe
+            data-testid="preview-html-frame"
+            title={`渲染 ${baseName}`}
+            /* 沙箱仅 allow-scripts（无 allow-same-origin）：渲染态可跑脚本，
+             * 但与看板数据、cookie、storage 完全隔离（M5 线稿既定安全口径） */
+            sandbox="allow-scripts"
+            srcDoc={
+              state.phase === "ok" && state.payload.kind === "text" ? state.payload.content : ""
+            }
+            className="h-full min-h-[320px] w-full rounded-lg border border-slate-200 bg-white dark:border-slate-700"
+          />
+        )}
+        {showMarkdown && (
+          <div data-testid="preview-markdown" className="md-body text-sm dark:text-slate-200">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {state.phase === "ok" && state.payload.kind === "text" ? state.payload.content : ""}
+            </ReactMarkdown>
+          </div>
+        )}
+        {!showMarkdown &&
+          !showHtmlFrame &&
+          state.phase === "ok" &&
+          state.payload.kind === "text" && (
             <pre
               data-testid="preview-code"
               className="overflow-auto rounded-lg bg-slate-100 p-3 text-xs dark:bg-slate-900"

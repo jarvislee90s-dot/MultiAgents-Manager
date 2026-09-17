@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FilePreview from "@/mobile/FilePreview";
 import type { Session } from "@/types/session";
@@ -143,5 +143,69 @@ describe("FilePreview：错误态与模式标记", () => {
     expect((await screen.findByTestId("file-preview")).getAttribute("data-mode")).toBe(
       "fullscreen"
     );
+  });
+});
+
+// ==== M5 B4：源码/渲染双态（仅 .md 与 .html 出现 seg）====
+
+describe("FilePreview 源码/渲染 seg（M5 B4）", () => {
+  it(".html：默认源码态；点「渲染」→ 沙箱 iframe（allow-scripts 无 same-origin）", async () => {
+    installFileFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            content: "<h1>中东 2026 行程</h1><script>window.x=1</script>",
+            mime: "text/html",
+          }),
+          { status: 200 }
+        )
+    );
+    renderPreview("/tmp/proj/report.html");
+    // 默认源码：code 分支
+    expect(await screen.findByTestId("preview-code")).toBeTruthy();
+    // seg 在场且「源码」为当前态
+    expect(screen.getByTestId("preview-seg")).toBeTruthy();
+    expect(
+      (screen.getByTestId("preview-seg-source") as HTMLButtonElement).getAttribute("aria-pressed")
+    ).toBe("true");
+    // 点「渲染」→ iframe：沙箱仅脚本（无 allow-same-origin），srcDoc 携带原文
+    fireEvent.click(screen.getByTestId("preview-seg-render"));
+    const frame = await screen.findByTestId("preview-html-frame");
+    expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(frame.getAttribute("srcdoc")).toContain("中东 2026 行程");
+    expect(screen.queryByTestId("preview-code")).toBeNull();
+    // 回「源码」：iframe 撤下，源码回来
+    fireEvent.click(screen.getByTestId("preview-seg-source"));
+    expect(await screen.findByTestId("preview-code")).toBeTruthy();
+    expect(screen.queryByTestId("preview-html-frame")).toBeNull();
+  });
+
+  it(".md：默认渲染态（现状延续）；点「源码」→ 高亮源码；切回渲染恢复 markdown", async () => {
+    installFileFetch(
+      () =>
+        new Response(JSON.stringify({ content: "# 标题\n\n正文", mime: "text/markdown" }), {
+          status: 200,
+        })
+    );
+    renderPreview("/tmp/proj/NOTES.md");
+    expect(await screen.findByTestId("preview-markdown")).toBeTruthy();
+    expect(
+      (screen.getByTestId("preview-seg-render") as HTMLButtonElement).getAttribute("aria-pressed")
+    ).toBe("true");
+    fireEvent.click(screen.getByTestId("preview-seg-source"));
+    expect(await screen.findByTestId("preview-code")).toBeTruthy();
+    expect(screen.getByTestId("preview-code").textContent).toContain("# 标题");
+    expect(screen.queryByTestId("preview-markdown")).toBeNull();
+    fireEvent.click(screen.getByTestId("preview-seg-render"));
+    expect(await screen.findByTestId("preview-markdown")).toBeTruthy();
+  });
+
+  it(".txt 等其余类型：seg 不出现（行为与 M3 一致）", async () => {
+    installFileFetch(
+      () => new Response(JSON.stringify({ content: "plain", mime: "text/plain" }), { status: 200 })
+    );
+    renderPreview("/tmp/proj/a.txt");
+    await screen.findByTestId("preview-code");
+    expect(screen.queryByTestId("preview-seg")).toBeNull();
   });
 });
