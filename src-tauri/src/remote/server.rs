@@ -273,6 +273,11 @@ pub struct RemoteState {
     /// mode 分拣 quick/named 域名；测试注入固定域名。与 tunnel_hosts_source 同源分形——
     /// gate 豁免只要"是否隧道域名"并集，via 需要通道区分
     pub via_hosts_source: Box<ViaHostsSource>,
+    /// 注入器缝（M7 Task 5 方案 A 提前缝合）：生产 = RealInjector（macOS 三通道执行层；
+    /// Windows 占位，Task 15 补真实现）；测试可替换 FakeInjector。
+    /// 消费方：inject::queue::flush_one（flush 投递）+ Task 6 的 session-send 直发与
+    /// flush 循环接线（路由/handler/serve 挂载届时合入）
+    pub injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
 }
 
 /// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -374,6 +379,8 @@ mod tests {
                 waiting_count: 0,
             }),
             store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.mam
+            // M7 Task 5：注入器缝——本组测试不触 flush 路径，用生产占位
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
@@ -909,6 +916,8 @@ mod tests {
                 }
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
+            // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
@@ -1271,6 +1280,8 @@ mod tests {
                 waiting_count: 0,
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
+            // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "jarvis-win", "platform": "windows", "version": "9.9.9-test" },
@@ -1355,6 +1366,8 @@ mod tests {
                 waiting_count: 0,
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
+            // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(move |agent: &str, sid: &str, limit: usize| {
                 cap.lock()
@@ -1547,6 +1560,8 @@ mod tests {
                 waiting_count: 0,
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
+            // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| {
@@ -1821,6 +1836,8 @@ mod tests {
                     waiting_count: 0,
                 }),
                 store: crate::remote::pairing::DeviceStore::memory(),
+                // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
+                injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
                 host_source: Box::new(|| serde_json::Value::Null),
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2365,6 +2382,8 @@ mod tests {
                         waiting_count: 0,
                     }),
                     store: crate::remote::pairing::DeviceStore::memory(),
+                    // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
+                    injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
                     host_source: Box::new(|| serde_json::Value::Null),
                     message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                     path_source: Box::new(|_, _, _| (Vec::new(), false)),
