@@ -964,11 +964,13 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
     Element.prototype.scrollIntoView = scrollSpy;
     fireEvent.click(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[1]}`));
 
-    // 逐级扩到 MAX_LIMIT（1000）仍未命中 → miss 横幅，且未发生任何滚动
+    // 逐级扩到 MAX_LIMIT（1000）仍未命中 → miss 横幅，且未发生任何滚动。
+    // waitFor 超时加固（flaky 修复）：扩窗逐级 mock 往返在 60+ 文件并行负载下
+    // 可超 3s（全量套件偶发、单跑稳定——与同文件既有加固同模式）
     await waitFor(
       () => expect(screen.getByTestId("bookmark-jump-miss")).toBeTruthy(),
-      { timeout: 3000 }
+      { timeout: 10000 }
     );
     expect(scrollSpy).not.toHaveBeenCalled();
-  }, 15000);
+  }, 20000);
 });

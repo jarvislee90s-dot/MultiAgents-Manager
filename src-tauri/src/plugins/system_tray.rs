@@ -222,7 +222,7 @@ pub fn update_tray_menu(
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("system-tray")
-        .setup(|app| {
+        .setup(|app, _| {
             // Create tray menu with default English text
             // 三重建路径统一（M4 T4）：默认菜单同样追加远程区项，否则前端首次重建前
             // 托盘缺远程入口（文本为英文占位，主窗口挂载后由前端本地化重建）

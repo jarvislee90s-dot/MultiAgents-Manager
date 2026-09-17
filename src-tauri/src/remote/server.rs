@@ -1698,12 +1698,14 @@ mod tests {
         assert_eq!(header(&r, "x-content-type-options"), "nosniff");
 
         // (6) 不存在（cwd 外任意路径）→ 403 + 原因码 not_found（M5 P2-a：原因
-        // 写在报错处，仅已过闸设备可见）
+        // 写在报错处，仅已过闸设备可见）。探针用确定不存在的合成路径——全盘
+        // 放开语义下 /etc/passwd 在 macOS 真实存在会 200（原探针环境依赖：
+        // Windows 过 macOS 挂，合并验证期抓获修正）
         let r = app
             .clone()
             .oneshot(req(
                 "GET",
-                "/m/api/v1/file?session_id=sess_file&path=/etc/passwd",
+                "/m/api/v1/file?session_id=sess_file&path=/__mam_nonexistent__/passwd",
                 Some("mam_device=fe"),
                 None,
             ))
