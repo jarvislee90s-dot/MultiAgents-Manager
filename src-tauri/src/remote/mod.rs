@@ -8,6 +8,7 @@ pub mod events;
 pub mod files;
 pub mod gate;
 pub mod pairing;
+pub mod pin;
 pub mod power;
 pub mod server;
 pub mod tunnel;
@@ -27,6 +28,8 @@ pub const KEY_CHANNEL: &str = "remote.channel";
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
 /// 设备上限键（spec T2c：默认 3 台可配）
 pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
+/// 访问密码键（M5 A2）：4 位数字（validate_pin 唯一口径；A3 端点 / A4 命令消费）
+pub const KEY_ACCESS_PIN: &str = "remote.access_pin";
 
 /// 上限解析（纯函数）：None/乱串 → 3；clamp 1..=10
 pub fn max_devices_from(v: Option<String>) -> usize {
