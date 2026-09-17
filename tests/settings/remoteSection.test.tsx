@@ -5,9 +5,10 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invokeMock, toastInfoMock } = vi.hoisted(() => ({
+const { invokeMock, toastInfoMock, toastErrorMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   toastInfoMock: vi.fn(),
+  toastErrorMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 // useAppTranslation 内部 listen("@tauri-apps/api/event") 在 jsdom 无 Tauri 内核，须 mock
@@ -20,7 +21,7 @@ vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), {
     info: toastInfoMock,
     success: vi.fn(),
-    error: vi.fn(),
+    error: toastErrorMock,
   }),
 }));
 
@@ -220,9 +221,7 @@ describe("RemoteSection TLS 对外绑定确认改一次性 Dialog（M4 Task 4）
     );
     // 调用顺序：先置位 ack（后端 P7 门据此放行），再开启——两命令都必须真实发生
     expect(calls).toContain("remote_confirm_public");
-    expect(calls.indexOf("remote_confirm_public")).toBeLessThan(
-      calls.indexOf("remote_toggle")
-    );
+    expect(calls.indexOf("remote_confirm_public")).toBeLessThan(calls.indexOf("remote_toggle"));
     // 确认成功 → Dialog 关
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
@@ -268,6 +267,30 @@ describe("RemoteSection TLS 对外绑定确认改一次性 Dialog（M4 Task 4）
     expect(screen.queryByText(/I confirm a TLS reverse proxy/i)).toBeNull();
     expect(screen.queryByText(/cannot be undone/i)).toBeNull();
   });
+
+  // 评审 Important（2026-09-17 追加）：确认失败分支契约——confirmTlsAndEnable 中
+  // remoteConfirmPublic reject → toast 原样透出、不置 acked、不关弹窗（可就地重试）、
+  // 不开启。末段「取消后再点开仍走确认弹窗」是 acked 未被误置的可见化断言：
+  // 若实现把 setAcked(true) 挪到 try 之前，此处会走直开路径（remote_toggle 被调、
+  // 弹窗不出现）而红。mockRejectedValueOnce 在 mount 之后才挂，避免误伤 remote_status
+  it("用例 G：确认失败（remote_confirm_public reject）→ toast.error、弹窗仍在、不开启，acked 语义不变", async () => {
+    mockLanOff(null);
+    render(<RemoteSection />);
+    await waitFor(() => expect(enableSwitch()).toBeEnabled());
+    invokeMock.mockRejectedValueOnce(new Error("ack write failed"));
+    fireEvent.click(enableSwitch());
+    fireEvent.click(await screen.findByRole("button", { name: /I understand/i }));
+    // 失败即止：toast 原样透出 + 弹窗保持（可就地重试）+ 不开启
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_toggle", expect.anything());
+    // acked 语义不变（失败不置位）：取消弹窗后再点开，仍走确认弹窗而非直开
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(enableSwitch());
+    expect(await screen.findByText(/Confirm external binding/i)).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_toggle", expect.anything());
+  });
 });
 
 // M4 T2：待审批面板（4 位码可见 + 批准）与花名册（在线点 + 吊销）
@@ -299,11 +322,15 @@ describe("RemoteSection 配对面板与设备花名册（M4 T2）", () => {
     expect(await screen.findByText("我的手机")).toBeInTheDocument();
     expect(screen.getByText("2468")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /approve/i }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("remote_approve_request", { id: "r0" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_approve_request", { id: "r0" })
+    );
     // 花名册：在线点 + 单独吊销 + 全部吊销
     expect(await screen.findByRole("button", { name: /revoke all/i })).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: /^revoke$/i })[0]);
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("remote_revoke_device", { id: "d1" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_revoke_device", { id: "d1" })
+    );
   });
 });
 

@@ -336,8 +336,11 @@ export function RemoteSection() {
   // TLS 对外绑定确认 + 开启（M4 Task 4，方案 A）：确认挪进「开启远程接入」动作。
   // 顺序不可换：先 remote_confirm_public 置位 remote.public_ack（后端 P7 门据此放行），
   // 再走 enable()。任一步失败 toast 原样透出并中止后续步骤——确认失败不置 acked、
-  // 不关弹窗（可就地重试），开启失败由 enable() 既有 busy 互斥与失败 toast 兜底
+  // 不关弹窗（可就地重试），开启失败由 enable() 既有 busy 互斥与失败 toast 兜底。
+  // 入口 busy 守卫（评审 Minor）：busy（开启/停止）在途时确认链不重入；不在此
+  // setBusy——避免波及 Switch 与停止弹窗的既有互斥语义
   const confirmTlsAndEnable = async () => {
+    if (busy) return;
     try {
       await remoteConfirmPublic();
     } catch (e) {
