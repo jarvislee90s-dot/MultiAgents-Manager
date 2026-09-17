@@ -1,7 +1,7 @@
 use std::process::Command;
 
 /// 执行 AppleScript，成功返回 Ok
-pub fn execute_applescript(script: &str) -> Result<(), String> {
+pub(crate) fn execute_applescript(script: &str) -> Result<(), String> {
     let output = Command::new("osascript")
         .arg("-e")
         .arg(script)

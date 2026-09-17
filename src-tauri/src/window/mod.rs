@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 pub mod app_activation;
 #[cfg(target_os = "macos")]
-mod applescript;
+pub(crate) mod applescript;
 #[cfg(any(target_os = "macos", windows))]
 pub mod deep_link;
 pub mod dsh_tab;
@@ -41,7 +41,7 @@ pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
 
 /// 通过 ps 命令获取进程的 TTY
 #[cfg(target_os = "macos")]
-fn get_tty_for_pid(pid: u32) -> Result<String, String> {
+pub(crate) fn get_tty_for_pid(pid: u32) -> Result<String, String> {
     use std::process::Command;
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "tty="])
