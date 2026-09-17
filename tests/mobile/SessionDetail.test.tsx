@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionDetail from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
-import { BOOKMARK_COLORS, clearBookmarks } from "@/mobile/bookmarks";
+import { BOOKMARK_COLORS, clearBookmarks, messageAnchor } from "@/mobile/bookmarks";
 import type { Session } from "@/types/session";
 
 // M3 Task 8：ZCode 式会话详情页渲染矩阵。fetch 全量 stub（盖过 setup.ts 的 msw），
@@ -860,4 +860,115 @@ describe("SessionDetail：错误态与手动刷新", () => {
       { timeout: 3000 }
     );
   });
+});
+
+describe("书签跨加载窗口跳转（M5 P3-c）", () => {
+  /** 250 条合成消息（seq = 下标）；书签目标 seq=10 在首批 200 条窗口之外 */
+  function bigMessages(): SessionMessage[] {
+    return Array.from({ length: 250 }, (_, i) =>
+      msg({
+        seq: i,
+        kind: i === 10 ? "user" : i % 2 ? "assistant" : "user",
+        content: i === 10 ? "书签目标：这条在很早的分页里" : `填充消息 ${i}`,
+        ts: 1000 + i,
+      })
+    );
+  }
+
+  function installLimitAwareFetch(all: SessionMessage[]) {
+    fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/session-messages")) {
+        const limit = Number(new URL(url, "http://x").searchParams.get("limit") ?? 200);
+        return new Response(
+          JSON.stringify({ messages: all.slice(-limit), truncated: true }),
+          { status: 200 }
+        );
+      }
+      if (url.includes("/host")) {
+        return new Response(
+          JSON.stringify({
+            host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
+            enabledTools: [],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.includes("/session-files")) {
+        return new Response(JSON.stringify({ files: [], truncated: false }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  }
+
+  function seedBookmarkFor(m: SessionMessage) {
+    window.localStorage.setItem(
+      "mam-bookmarks",
+      JSON.stringify({
+        bootId: "boot-test",
+        sessions: {
+          "sess-1": [
+            {
+              color: BOOKMARK_COLORS[1],
+              seq: m.seq,
+              anchor: messageAnchor(m),
+              preview: m.content.slice(0, 40),
+            },
+          ],
+        },
+      })
+    );
+  }
+
+  it("书签目标在首批窗口之外 → 点击自动逐级加载更早直至命中滚动", async () => {
+    const all = bigMessages();
+    const target = all[10];
+    seedBookmarkFor(target);
+    installLimitAwareFetch(all);
+
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // 首批窗口（200 条）：目标 seq 10 不在窗口
+    await screen.findByText("填充消息 249");
+
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    fireEvent.click(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[1]}`));
+
+    // 自动扩窗：limit 200→400 重拉，目标（seq 10）出现并被滚动定位
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("limit=400"));
+    });
+    await screen.findByTestId("msg-10");
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
+    expect(scrollSpy.mock.calls[0][0]).toMatchObject({ block: "start" });
+    // 定位成功：加载/miss 横幅均不在场
+    expect(screen.queryByTestId("bookmark-jump-miss")).toBeNull();
+    expect(screen.queryByTestId("bookmark-jump-loading")).toBeNull();
+  }, 15000);
+
+  it("扩窗到顶（MAX_LIMIT）仍未命中 → miss 横幅", async () => {
+    const all = bigMessages();
+    seedBookmarkFor({
+      seq: 999,
+      kind: "user",
+      content: "这条书签指向不存在的消息",
+      ts: 1234,
+    });
+    installLimitAwareFetch(all);
+
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("填充消息 249");
+
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    fireEvent.click(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[1]}`));
+
+    // 逐级扩到 MAX_LIMIT（1000）仍未命中 → miss 横幅，且未发生任何滚动
+    await waitFor(
+      () => expect(screen.getByTestId("bookmark-jump-miss")).toBeTruthy(),
+      { timeout: 3000 }
+    );
+    expect(scrollSpy).not.toHaveBeenCalled();
+  }, 15000);
 });
