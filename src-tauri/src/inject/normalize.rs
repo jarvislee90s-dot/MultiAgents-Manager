@@ -12,8 +12,14 @@ pub fn normalize_newlines(text: &str) -> String {
 }
 
 /// 组装最终注入文本：`[mobile <设备花名>] <归一正文>`（W1 来源标记，桌面一眼可辨）
+///
+/// 设备花名同样归一：昵称来自手机端用户输入，可能含换行，不得破坏单行不变量。
 pub fn compose_injection(device_name: &str, text: &str) -> String {
-    format!("[mobile {}] {}", device_name, normalize_newlines(text))
+    format!(
+        "[mobile {}] {}",
+        normalize_newlines(device_name),
+        normalize_newlines(text)
+    )
 }
 
 /// 审计摘要（W5：只存摘要不入全文，防审计库膨胀）
@@ -56,5 +62,21 @@ mod tests {
     fn summarize_truncates() {
         assert_eq!(summarize("abcdef", 4), "abcd…");
         assert_eq!(summarize("abc", 4), "abc");
+        assert_eq!(summarize("一二三四五", 4), "一二三四…"); // 多字节按 chars 计
+    }
+
+    /// 裸 CR（奇异客户端）也归一
+    #[test]
+    fn bare_cr_normalizes() {
+        assert_eq!(normalize_newlines("a\rb"), "a\\nb");
+    }
+
+    /// 设备花名同样归一（用户可设昵称，堵单行不变量缺口）
+    #[test]
+    fn compose_normalizes_device_name_too() {
+        assert_eq!(
+            compose_injection("iPhone\n15", "hi"),
+            "[mobile iPhone\\n15] hi"
+        );
     }
 }
