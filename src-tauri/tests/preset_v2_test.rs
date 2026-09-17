@@ -2236,3 +2236,148 @@ fn backfill_prunes_stale_rows_with_dead_source_paths() {
     let _ = std::fs::remove_dir_all(&live);
     let _ = std::fs::remove_file(&dangling);
 }
+
+/// 卸载级联常驻行（review Finding 1，裁决修法 a）：常驻 on 的 skill 被卸载 →
+/// 常驻行先于停用清理级联删除（守卫自然放行）→ 清链成功 + SSOT 删除 + 无孤儿。
+/// 不修则：step1 停用被守卫拒（仅 warn）、step2 仍删 SSOT → 工具侧悬空链接 +
+/// 孤儿常驻行使 is_tool_resident 恒 true → reconcile L3-a 永久 Err「先关闭常驻」
+/// 而 UI 中资源已消失无从关闭（死局，需手改 DB）
+#[test]
+fn uninstall_cascades_resident_rows_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::commands::manifest::uninstall_resource;
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::enable_skill_for_tool;
+
+    let home = dirs::home_dir().unwrap();
+    // 造 skill：SSOT 真目录 + 登记行 + 为 claude 启用 + 开常驻
+    let ssot = home.join(".mam/skills/v2m2-uni-res");
+    std::fs::create_dir_all(&ssot).unwrap();
+    std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+    database::insert_extension(&database::ExtensionRecord {
+        id: "skill-v2m2-uni-res".into(),
+        kind: "skill".into(),
+        name: "v2m2-uni-res".into(),
+        description: None,
+        source_path: ssot.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })
+    .unwrap();
+    enable_skill_for_tool("v2m2-uni-res", "claude").unwrap();
+    let tool_link = home.join(".claude/skills/v2m2-uni-res");
+    assert!(tool_link.exists(), "前置：工具目录链接在场");
+    database::set_tool_resident("claude", "skill-v2m2-uni-res", true).unwrap();
+
+    // 卸载（无 .agents 直链 → 无需确认）
+    let outcome = uninstall_resource("skill".into(), "v2m2-uni-res".into(), None).unwrap();
+    assert!(!outcome.needs_confirmation, "卸载应一步完成");
+
+    // SSOT 目录已删
+    assert!(!ssot.exists(), "SSOT 目录应已删除");
+    // 工具目录链接已消失（停用清链成功，不修则守卫拒绝停用留下悬空链接——
+    // exists() 跟随链接会漏判悬空，须用 symlink_metadata 判链接本体）
+    assert!(
+        std::fs::symlink_metadata(&tool_link).is_err(),
+        "工具目录链接应随卸载清链消失（常驻行级联后守卫放行），不得留悬空链接"
+    );
+    // tool_residents 表无该行（无孤儿，is_tool_resident 不再恒 true）
+    assert!(
+        !database::list_tool_residents("claude").contains(&"skill-v2m2-uni-res".to_string()),
+        "常驻行应随卸载级联删除"
+    );
+    assert!(!database::is_tool_resident("claude", "skill-v2m2-uni-res"));
+    // extensions 行也已删（卸载既有语义）
+    assert!(
+        database::list_extensions()
+            .iter()
+            .all(|e| e.id != "skill-v2m2-uni-res"),
+        "extensions 行应已删除"
+    );
+}
+
+/// 恢复默认的常驻豁免（review Finding 2）：快照之后新启用且标常驻的资源 X
+/// 落在 current−target−base_items 的停用循环——须镜像清扫计划层（sweep.rs）
+/// 的 is_tool_resident 豁免检查：跳过停用（保持启用=保护胜出）、不进
+/// conflicts（终态本正确，不修则误报「停用失败…常驻…」，与 sweep 静默豁免
+/// + residentExempt 报告口径不一致）；快照照常销毁
+#[test]
+fn restore_exempts_post_snapshot_resident_v2m2() {
+    let _guard = PRESET_V2_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    support::setup();
+    use multi_agents_manager_lib::database;
+    use multi_agents_manager_lib::services::preset::{apply_preset, restore_tool};
+    use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
+
+    let home = dirs::home_dir().unwrap();
+    // 预设项 A + 会话中途才启用的资源 X（此刻都未启用 → 都不在基底）
+    for name in ["v2m2-rx-a", "v2m2-rx-x"] {
+        let ssot = home.join(".mam/skills").join(name);
+        std::fs::create_dir_all(&ssot).unwrap();
+        std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
+        database::insert_extension(&database::ExtensionRecord {
+            id: format!("skill-{}", name),
+            kind: "skill".into(),
+            name: name.into(),
+            description: None,
+            source_path: ssot.to_string_lossy().to_string(),
+            source_url: None,
+            version: None,
+            tags: None,
+            suite: None,
+            source_tool: None,
+            is_native: false,
+        })
+        .unwrap();
+    }
+    let pid =
+        database::create_preset("v2m2-rx", &[("skill-v2m2-rx-a".into(), "skill".into())]).unwrap();
+
+    // 1) 应用预设（拍基底：X 未启用、不在 base_items）
+    apply_preset(&pid, "claude").unwrap();
+
+    // 2) 会话中途：手动启用 X + 标常驻
+    enable_skill_for_tool("v2m2-rx-x", "claude").unwrap();
+    let x_link = home.join(".claude/skills/v2m2-rx-x");
+    assert!(x_link.exists(), "前置：X 已启用（链接在场）");
+    database::set_tool_resident("claude", "skill-v2m2-rx-x", true).unwrap();
+
+    // 3) 恢复默认：X 豁免停用（保持启用）、不误报冲突、快照销毁
+    let rr = restore_tool("claude").unwrap();
+    assert!(x_link.exists(), "常驻 X 应保持启用（链接在场）");
+    assert!(
+        !rr.conflicts.iter().any(|c| c.contains("v2m2-rx-x")),
+        "常驻 X 不得误报停用冲突: {:?}",
+        rr.conflicts
+    );
+    assert!(
+        database::list_assignments("claude")
+            .iter()
+            .any(|a| a.extension_id == "skill-v2m2-rx-x" && a.enabled),
+        "常驻 X 的 assignment 应保持 enabled"
+    );
+    assert!(
+        database::get_base_snapshot("claude").is_none(),
+        "恢复后快照应销毁"
+    );
+
+    // 清场
+    database::set_tool_resident("claude", "skill-v2m2-rx-x", false).unwrap();
+    let _ = disable_skill_for_tool("v2m2-rx-x", "claude");
+    let _ = disable_skill_for_tool("v2m2-rx-a", "claude");
+    let _ = database::delete_extension("skill-v2m2-rx-a");
+    let _ = database::delete_extension("skill-v2m2-rx-x");
+    let _ = std::fs::remove_dir_all(home.join(".mam/skills/v2m2-rx-a"));
+    let _ = std::fs::remove_dir_all(home.join(".mam/skills/v2m2-rx-x"));
+}

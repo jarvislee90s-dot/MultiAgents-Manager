@@ -241,6 +241,25 @@ pub fn uninstall_resource(
         }
     }
 
+    // 0.9) 常驻行级联删除（review Finding 1，裁决修法 a）：卸载 = 资源生命周期
+    //      终结，常驻标记随资源消亡（与 assignments 级联同理）。必须先于下方
+    //      停用清理——否则常驻守卫拒绝 step1 停用（仅 log::warn）而 step2 仍删
+    //      SSOT，留下工具侧悬空链接 + 孤儿常驻行使 is_tool_resident 恒 true →
+    //      reconcile L3-a 对该链永久 Err「先关闭常驻」且 UI 中资源已消失无从
+    //      关闭（死局，需手改 DB）。manifest 安装 id 与约定 id 两种都清
+    //     （与 step3 的 assignments 级联同规则）
+    let mut cascade_ids = vec![ext_id.clone()];
+    if let Some(ref r) = record {
+        if r.id != ext_id {
+            cascade_ids.push(r.id.clone());
+        }
+    }
+    for id in &cascade_ids {
+        if let Err(e) = crate::database::delete_tool_residents_for(id) {
+            log::warn!("清理 {} 常驻行失败: {}", id, e);
+        }
+    }
+
     // 1) 按工具清理（一律用 name，assignment 键约定为 kind-name）
     // 同一工具可能有多条 assignment（含子 Agent 维度），用 BTreeSet 去重避免重复清理
     let tools: std::collections::BTreeSet<String> = crate::database::list_all_assignments()

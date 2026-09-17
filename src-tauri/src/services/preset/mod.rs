@@ -277,6 +277,20 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
         if base_items.iter().any(|i| &i.extension_id == id) {
             continue;
         }
+        // 常驻豁免（review Finding 2）：镜像 plan_sweep 的计划层豁免检查——
+        // 泄漏面 = 快照之后新启用且后标常驻的资源落在此处，直呼 disable_one 会
+        // 被常驻守卫拒并误报 conflicts「停用失败…常驻…」；终态本就保持启用
+        //（保护胜出），须与清扫计划层静默豁免 + residentExempt 报告口径一致。
+        // 软报告选型：RestoreResult 无「豁免」集合字段，最小侵入 = 仅 log
+        //（不动序列化结构，前端零改动），口径「常驻=恢复默认同样豁免，
+        // 与清扫计划层一致」
+        if database::is_tool_resident(tool_id, id) {
+            info!(
+                "[常驻豁免] 恢复默认跳过停用 {}/{}（常驻=恢复默认同样豁免，与清扫计划层一致）",
+                tool_id, id
+            );
+            continue;
+        }
         if let Err(e) = disable_one(id, kind) {
             out.conflicts.push(format!("{}: 停用失败 {}", id, e));
         }
