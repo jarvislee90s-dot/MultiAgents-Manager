@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod commands;
 pub mod database;
+pub mod inject;
 pub mod linker;
 pub mod monitor;
 pub mod plugins;
