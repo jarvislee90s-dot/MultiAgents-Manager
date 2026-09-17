@@ -1,78 +1,45 @@
 // 移动端 API：纯 fetch，零 Tauri 依赖（PWA/浏览器同构）
 import type { SessionsResponse, TransitionEvent } from "@/types/session";
 
-export interface PairResult {
-  ok: boolean;
-}
-
 /** 带 HTTP 状态的请求失败（status=null 表示网络层异常，无响应可读）。
- *  详情页/预览按 status 分流错误文案（404 → 会话不可读，403 → 文件不可预览） */
+ *  详情页/预览按 status 分流错误文案（404 → 会话不可读，403 → 文件不可预览）；
+ *  data 携带错误响应体 JSON（/pair/pin 的 error/remaining/retryAfter），供 PairPage 分診文案 */
 export class ApiError extends Error {
   status: number | null;
-  constructor(status: number | null, message: string) {
+  data: Record<string, unknown> | null;
+  constructor(status: number | null, message: string, data: Record<string, unknown> | null = null) {
     super(message);
     this.status = status;
+    this.data = data;
   }
 }
 
-export async function pair(token: string): Promise<PairResult> {
-  const r = await fetch("/m/api/v1/pair", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token }),
-  });
-  return { ok: r.ok };
-}
-
-// ==== M4 T2：请求接入三端点封装（/pair/request | /pair/poll | /pair/confirm）====
-
-export interface PairRequestResult {
-  requestId: string;
-  expiresAt: number;
-}
-
-/** 请求接入（M4 T2）：429（队列满/同 IP 占位）抛 ApiError，message 即 error 串 */
-export async function requestPairing(name: string): Promise<PairRequestResult> {
-  const r = await fetch("/m/api/v1/pair/request", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  if (r.status === 429) {
-    const v = (await r.json()) as { error: string };
-    throw new ApiError(429, v.error ?? "busy");
+/** 访问密码配对（M5 A7，唯一配对入口）：POST /pair/pin。
+ *  成功 → { ok: true }（180 天 cookie 已由响应 Set-Cookie 落地）；
+ *  失败 → 抛 ApiError：HTTP 状态在 status、响应体 JSON（error/remaining/retryAfter）
+ *  在 data——PairPage 据此分診「剩余次数 / 锁定 / 未设密码 / 设备满 / 网络」文案。
+ *  429（限速锁定）与 403（设备上限）也走 ApiError（不再像旧 /pair 静默吞掉） */
+export async function pairWithPin(pin: string): Promise<{ ok: boolean }> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/pair/pin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `pair/pin 网络异常: ${String(e)}`);
   }
-  if (!r.ok) throw new ApiError(r.status, "request failed");
-  return (await r.json()) as PairRequestResult;
-}
-
-export type PairPollStatus = "pending" | "approved" | "expired";
-
-/** 轮询审批结果：approved 时服务端已 Set-Cookie，客户端只需回调切换视图 */
-export async function pollPairing(requestId: string): Promise<PairPollStatus> {
-  const r = await fetch("/m/api/v1/pair/poll", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ requestId }),
-  });
-  const v = (await r.json()) as { status: PairPollStatus };
-  return v.status;
-}
-
-export interface ConfirmResult {
-  ok: boolean;
-  error?: string;
-  triesLeft?: number;
-}
-
-/** 4 位确认码等效授权：error ∈ wrong/exhausted/expired/cap_full（文案映射在 PairPage） */
-export async function confirmPairing(requestId: string, code: string): Promise<ConfirmResult> {
-  const r = await fetch("/m/api/v1/pair/confirm", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ requestId, code }),
-  });
-  return (await r.json()) as ConfirmResult;
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 错误体非 JSON（代理注入页等）：data 保持 null，上层按状态码兜底文案 */
+    }
+    throw new ApiError(r.status, `pair/pin ${r.status}`, data);
+  }
+  return { ok: true };
 }
 
 export async function fetchSessions<T>(): Promise<T | null> {

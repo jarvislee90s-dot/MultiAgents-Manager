@@ -1,55 +1,51 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, confirmPairing, pair, pollPairing, requestPairing } from "./api";
+import { ApiError, pairWithPin } from "./api";
 
 interface PairPageProps {
   /** 配对成功后回调：App 重新探测并切换到已配对态 */
   onPaired: () => void;
 }
 
-type PairStatus = "idle" | "pairing" | "ok" | "error";
+type PairStatus = "idle" | "pairing" | "ok";
 
-// M4 T2：请求接入子视图状态（idle=填设备名发起；waiting=轮询审批+4 位码确认；denied=预留）
-type RequestState = "idle" | "waiting" | "denied";
-
-// 请求接入区输入框：与 token 输入同款浅色/dark 双态类名（不含 font-mono）
-const REQ_INPUT_CLS =
-  "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
-
-// 请求接入区按钮：与主接入按钮同款
-const REQ_BTN_CLS =
-  "mt-3 w-full rounded-lg bg-slate-800 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900";
-
-// 极简配对卡：文案硬编码中文（移动页 i18n 随 M3 完善）。
-// P8f 双态配色：全部颜色类为「浅色基准 + dark: 前缀」，与 Board.tsx 同口径
+// M5 A7（线稿 v5 移动端配对页）：密码单入口——旧「请求接入 / 4 位确认码」UI 与
+// 扫码 token 流（#token=）随 M4 审批制一并下线，扫码参数改为 #pin=<密码>。
+// 错误文案按 /pair/pin 响应分診（401 invalid_pin+remaining / 429 retryAfter /
+// pin_not_set / cap_full / 网络异常），逐字口径见 describePairError。
+// 文案硬编码中文（移动页 i18n 随 M3 完善）；P8f 双态配色与 Board.tsx 同口径。
 export default function PairPage({ onPaired }: PairPageProps) {
-  const [token, setToken] = useState("");
+  const [pin, setPin] = useState("");
   const [status, setStatus] = useState<PairStatus>("idle");
-  // StrictMode 下 effect 会双触发，防扫码 token 重复提交
+  const [msg, setMsg] = useState(""); // 错误/提示行
+  const [autoFill, setAutoFill] = useState(false); // 扫码路径：已自动填入提示
+  // StrictMode 下 effect 会双触发，防扫码 pin 重复提交（重复提交会烧限速次数）
   const autoSubmitted = useRef(false);
-
-  // M4 T2：请求接入流状态
-  const [reqState, setReqState] = useState<RequestState>("idle");
-  const [reqId, setReqId] = useState<string | null>(null);
-  const [deviceName, setDeviceName] = useState("");
-  const [code, setCode] = useState("");
-  const [msg, setMsg] = useState(""); // 错误/提示行（设备已满/次数用尽/过期）
 
   const submit = useCallback(
     async (raw: string) => {
-      const t = raw.trim();
-      if (!t) return;
+      const p = raw.trim();
+      // 扫码坏链防御（手输路径按钮已禁用，到不了这里）：不发注定失败的请求
+      if (!/^\d{4}$/.test(p)) {
+        setStatus("idle");
+        setMsg("链接里的访问密码格式不对，请手动输入 4 位数字");
+        return;
+      }
       setStatus("pairing");
+      setMsg("");
       try {
-        const r = await pair(t);
+        const r = await pairWithPin(p);
         if (r.ok) {
           setStatus("ok");
           onPaired();
           return;
         }
-      } catch {
-        // 网络异常与 403 同样落入错误文案
+      } catch (e) {
+        setStatus("idle");
+        setMsg(describePairError(e));
+        return;
       }
-      setStatus("error");
+      setStatus("idle");
+      setMsg("配对失败，请重试");
     },
     [onPaired]
   );
@@ -58,113 +54,63 @@ export default function PairPage({ onPaired }: PairPageProps) {
     if (autoSubmitted.current) return;
     autoSubmitted.current = true;
     const hash = window.location.hash;
-    if (!hash.startsWith("#token=")) return;
-    const t = hash.slice("#token=".length);
-    // 提交前清掉 hash，避免刷新/回退重复提交过期 token
+    if (!hash.startsWith("#pin=")) return;
+    const p = decodeURIComponent(hash.slice("#pin=".length));
+    // 提交前清掉 hash，避免刷新/回退重复提交（重复提交会烧限速次数）
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
-    setToken(t);
-    void submit(t);
+    setPin(p);
+    setAutoFill(true);
+    void submit(p);
   }, [submit]);
 
-  // M4 T2：发起请求接入（设备名缺省兜底为「手机浏览器」）
-  const startRequest = async () => {
-    try {
-      const r = await requestPairing(deviceName || "手机浏览器");
-      setReqId(r.requestId);
-      setReqState("waiting");
-      setMsg("");
-    } catch (e) {
-      // 429 queue_full/ip_busy → 同一友好文案（不给队列状态预言机）
-      setMsg(
-        e instanceof ApiError && e.status === 429 ? "请求过多，请稍后再试" : "请求失败，请重试"
-      );
-    }
-  };
-
-  // M4 T2：4 位码确认（trim 后长度 4 才提交）
-  const submitCode = async () => {
-    if (!reqId || code.trim().length !== 4) return;
-    const r = await confirmPairing(reqId, code.trim());
-    if (r.ok) {
-      onPaired();
-      return;
-    }
-    if (r.error === "cap_full") setMsg("设备已满，请在桌面端花名册腾位后重试");
-    else if (r.error === "exhausted") {
-      setReqState("idle");
-      setMsg("错误次数过多，请重新发起请求");
-    } else if (r.error === "expired") {
-      setReqState("idle");
-      setMsg("请求已过期，请重新发起");
-    } else setMsg(`确认码错误，剩余 ${r.triesLeft ?? 0} 次机会`);
-  };
-
-  // waiting 态轮询（3s；卸载即停）
-  useEffect(() => {
-    if (reqState !== "waiting" || !reqId) return;
-    let stop = false;
-    const tick = async () => {
-      try {
-        const s = await pollPairing(reqId!);
-        if (stop) return;
-        if (s === "approved") {
-          onPaired();
-          return;
-        }
-        if (s === "expired") {
-          if (!stop) {
-            setReqState("idle");
-            setMsg("请求已过期（5 分钟），请重新发起");
-          }
-        }
-      } catch {
-        /* 网络抖动继续轮询 */
-      }
-    };
-    void tick();
-    const timer = setInterval(() => void tick(), 3000);
-    return () => {
-      stop = true;
-      clearInterval(timer);
-    };
-  }, [reqState, reqId, onPaired]);
-
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-4 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
-      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-slate-100 p-6 shadow-lg dark:border-transparent dark:bg-slate-900">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-white px-6 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+      <div className="w-full max-w-xs">
         <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">MAM 远程接入</h1>
-        <p className="mt-1 mb-6 text-sm text-slate-600 dark:text-slate-400">
-          输入桌面端生成的接入码，绑定此设备
+        <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+          输入访问密码，绑定此设备（180 天免输入）
         </p>
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            void submit(token);
+            void submit(pin);
           }}
         >
           <input
-            value={token}
+            value={pin}
             onChange={(e) => {
-              setToken(e.target.value);
-              if (status === "error") setStatus("idle");
+              setPin(e.target.value);
+              if (msg) setMsg("");
             }}
-            placeholder="接入码"
+            placeholder="0000"
+            type="password"
+            inputMode="numeric"
+            maxLength={4}
             autoComplete="off"
             autoCapitalize="off"
             spellCheck={false}
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 focus:border-slate-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            data-testid="pin-input"
+            className="mt-5 w-full rounded-lg border border-slate-300 bg-white py-2.5 text-center font-mono text-xl tracking-[10px] text-slate-900 focus:border-slate-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
           />
+          {autoFill && status === "pairing" && (
+            <p
+              data-testid="autofill-hint"
+              className="mt-2 text-center text-xs text-emerald-600 dark:text-emerald-400"
+            >
+              ✓ 已从链接自动填入，正在进入…
+            </p>
+          )}
           <button
             type="submit"
-            disabled={!token.trim() || status === "pairing"}
-            className="mt-3 w-full rounded-lg bg-slate-800 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
+            disabled={pin.trim().length !== 4 || status === "pairing"}
+            className="mt-4 w-full rounded-lg bg-slate-800 py-2.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
           >
-            {status === "pairing" ? "接入中…" : "接入"}
+            {status === "pairing" ? "进入中…" : "进入看板"}
           </button>
         </form>
-        {status === "error" && (
-          <p className="mt-4 text-sm text-rose-700 dark:text-rose-400">
-            接入码无效或已过期，请重新扫码或在桌面端重新生成
+        {status === "idle" && msg && (
+          <p data-testid="pair-error" className="mt-4 text-sm text-rose-700 dark:text-rose-400">
+            {msg}
           </p>
         )}
         {status === "ok" && (
@@ -172,64 +118,33 @@ export default function PairPage({ onPaired }: PairPageProps) {
             接入成功，正在进入看板…
           </p>
         )}
-
-        {/* M4 T2：请求接入区（主视图下方；idle=设备名发起 / waiting=轮询+4 位码确认） */}
-        <div className="mt-6 border-t border-slate-200 pt-5 dark:border-slate-700">
-          {reqState === "waiting" && reqId ? (
-            <>
-              <p className="text-sm text-slate-600 dark:text-slate-400">
-                等待桌面批准…（5 分钟内有效）
-              </p>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void submitCode();
-                }}
-              >
-                <input
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  placeholder="4 位确认码"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  className={REQ_INPUT_CLS + " mt-3"}
-                />
-                <button type="submit" disabled={code.trim().length !== 4} className={REQ_BTN_CLS}>
-                  确认
-                </button>
-              </form>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-slate-600 dark:text-slate-400">
-                没有接入码？填写设备名请求接入
-              </p>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void startRequest();
-                }}
-              >
-                <input
-                  value={deviceName}
-                  onChange={(e) => setDeviceName(e.target.value)}
-                  placeholder="设备名称（选填）"
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  className={REQ_INPUT_CLS + " mt-3"}
-                />
-                <button type="submit" className={REQ_BTN_CLS}>
-                  请求接入
-                </button>
-              </form>
-            </>
-          )}
-          {msg && <p className="mt-4 text-sm text-rose-700 dark:text-rose-400">{msg}</p>}
-        </div>
+        <p className="mt-10 text-center text-xs text-slate-500 dark:text-slate-400">
+          扫码进入时无需手动输入
+        </p>
       </div>
     </div>
   );
+}
+
+/** /pair/pin 错误分診（线稿口径）：剩余次数 / 锁定分钟 / 未设密码 / 设备满 / 网络。
+ *  非 JSON 错误体（data=null）按状态码兜底；未知组合统一「配对失败」。 */
+function describePairError(e: unknown): string {
+  if (!(e instanceof ApiError) || e.status === null) {
+    return "网络异常，请检查连接后重试";
+  }
+  const data = (e.data ?? {}) as { error?: string; remaining?: number; retryAfter?: number };
+  if (data.error === "invalid_pin") {
+    if (typeof data.remaining === "number" && data.remaining > 0) {
+      return `密码不正确，还可尝试 ${data.remaining} 次（连续输错将锁定 10 分钟）`;
+    }
+    return "密码错误次数过多，已锁定，请约 10 分钟后再试";
+  }
+  if (e.status === 429 && typeof data.retryAfter === "number") {
+    // 服务端给秒，人读分钟（向上取整，最少 1——「还有 40 秒」显示成 0 分钟是反直觉的）
+    const mins = Math.max(1, Math.ceil(data.retryAfter / 60));
+    return `尝试次数过多，已锁定，请约 ${mins} 分钟后再试`;
+  }
+  if (data.error === "pin_not_set") return "桌面端尚未设置访问密码";
+  if (data.error === "cap_full") return "设备数量已达上限，请在桌面端花名册腾位后重试";
+  return "配对失败，请重试";
 }

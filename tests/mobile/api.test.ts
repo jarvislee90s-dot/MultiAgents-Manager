@@ -1,12 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  confirmPairing,
-  fetchHost,
-  fetchSessions,
-  pair,
-  pollPairing,
-  requestPairing,
-} from "@/mobile/api";
+import { ApiError, fetchHost, fetchSessions, pairWithPin } from "@/mobile/api";
 
 // setup.ts 的 msw server 会包一层全局 fetch；stub 覆盖其上，结束后还原防止泄漏到其他用例
 afterEach(() => {
@@ -14,11 +7,40 @@ afterEach(() => {
 });
 
 describe("mobile api", () => {
-  it("pair 提交 token 并透传成败", async () => {
-    const f = vi.fn(async () => new Response("{}", { status: 200 }));
+  it("pairWithPin POST /pair/pin 携带 pin，成功透传 ok", async () => {
+    const f = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal("fetch", f);
-    expect((await pair("tok")).ok).toBe(true);
-    expect(f).toHaveBeenCalledWith("/m/api/v1/pair", expect.objectContaining({ method: "POST" }));
+    expect((await pairWithPin("4827")).ok).toBe(true);
+    expect(f).toHaveBeenCalledWith(
+      "/m/api/v1/pair/pin",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin: "4827" }),
+      })
+    );
+  });
+
+  it("pairWithPin 错误体 JSON 挂到 ApiError.data（error/remaining/retryAfter 分診依据）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"error":"invalid_pin","remaining":2}', { status: 401 }))
+    );
+    const err = await pairWithPin("0000").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401);
+    expect((err as ApiError).data).toEqual({ error: "invalid_pin", remaining: 2 });
+  });
+
+  it("pairWithPin 网络异常 → ApiError status=null（PairPage 网络文案分診依据）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("network down");
+      })
+    );
+    const err = await pairWithPin("4827").catch((e: unknown) => e);
+    expect((err as ApiError).status).toBeNull();
   });
 
   it("403 返回 null 触发回配对页", async () => {
@@ -44,38 +66,5 @@ describe("mobile api", () => {
       vi.fn(async () => new Response("", { status: 403 }))
     );
     expect(await fetchHost()).toBeNull();
-  });
-
-  // M4 T2：请求接入三端点封装
-  it("requestPairing parses 200 and maps 429", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    fetchMock.mockResolvedValueOnce(
-      new Response('{"requestId":"r0","expiresAt":1}', { status: 200 })
-    );
-    const r = await requestPairing("我的手机");
-    expect(r.requestId).toBe("r0");
-    fetchMock.mockResolvedValueOnce(new Response('{"error":"queue_full"}', { status: 429 }));
-    await expect(requestPairing("x")).rejects.toMatchObject({ status: 429, message: "queue_full" });
-  });
-
-  it("pollPairing returns status strings", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    fetchMock.mockResolvedValueOnce(
-      new Response('{"status":"pending","expiresAt":1}', { status: 200 })
-    );
-    expect(await pollPairing("r0")).toBe("pending");
-    fetchMock.mockResolvedValueOnce(new Response('{"status":"approved"}', { status: 200 }));
-    expect(await pollPairing("r0")).toBe("approved");
-  });
-
-  it("confirmPairing surfaces wrong + triesLeft", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    fetchMock.mockResolvedValueOnce(
-      new Response('{"ok":false,"error":"wrong","triesLeft":2}', { status: 200 })
-    );
-    expect(await confirmPairing("r0", "0000")).toEqual({ ok: false, error: "wrong", triesLeft: 2 });
   });
 });
