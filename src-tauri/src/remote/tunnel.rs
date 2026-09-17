@@ -522,6 +522,13 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                             fresh
                         };
                         if fresh {
+                            // 竞态窗口取舍（评审 Minor 3，payload 侧收口）：本写入任务
+                            // 不持有句柄，stop_channel 的快照复位与在途行写入存在毫秒级
+                            // 竞态——产物 url=Some/running=false/error=None 的陈旧快照会
+                            // 留到下次 start_channel。读取侧（channels_payload）以
+                            // running 为门把已停通道的 address 收口为 null，窗口无害化；
+                            // 此处不另做停止标志检查（多一份需同步的标志拷贝，两处口径
+                            // 易漂移）
                             set_channel_snapshot(&mode_for_stderr, |c| c.url = Some(u.clone()));
                             // spec T1c：地址变化桌面通知（含首次拿到地址；channel 字段
                             // 供前端区分双通道，A6 消费）

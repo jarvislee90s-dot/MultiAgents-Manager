@@ -711,7 +711,10 @@ fn first_available_tunnel_url(tun: &tunnel::TunnelStatus) -> Option<String> {
 /// }
 /// ```
 /// enabled = 三通道 KV 开关；running = 运行态（local/lan 随监听存活，隧道随句柄存活）；
-/// 隧道 address = 看板完整地址（错误态不宣称 → null）；error = 该通道终态错误。
+/// 隧道 address = 看板完整地址（**错误态或已停不宣称 → null**；已停门 = 评审 Minor 3
+/// 收口：stderr 在途行可落在 stop_channel 快照复位之后，留下 url=Some/running=false
+/// 的毫秒级陈旧快照，payload 侧以 running 为门保证已停通道绝不宣称地址——窗口取舍
+/// 见 tunnel.rs stderr 摄取点注释）；error = 该通道终态错误。
 /// lan.addresses 沿 lan_urls_for 口径（仅 0.0.0.0 非空，完整可直达 URL）
 fn channels_payload(
     listener_alive: bool,
@@ -724,7 +727,8 @@ fn channels_payload(
         serde_json::json!({
             "enabled": enabled,
             "running": c.running,
-            "address": c.url.clone().filter(|_| c.error.is_none()),
+            // 地址双门（error ∧ running）：A6 消费契约——已停通道绝不宣称地址
+            "address": c.url.clone().filter(|_| c.error.is_none() && c.running),
             "error": c.error.clone(),
         })
     };
@@ -2733,6 +2737,64 @@ mod tests {
             "lan.running = 监听存活 ∧ 开关，缺一不可"
         );
         assert_eq!(p["lan"]["enabled"], true, "enabled 只看开关位");
+    }
+
+    /// 评审 Minor 3 专测（A6 消费契约防线）：stop_channel 的快照复位与 stderr
+    /// 在途行存在毫秒级竞态窗口——产物是 url=Some/running=false/error=None 的陈旧
+    /// 快照，channels_payload 必须以 running 为门收口（已停通道绝不宣称地址）。
+    /// 变异锚点：去掉 chan 闭包 address 过滤里的 `&& c.running`，本测试
+    /// 「无错误已停通道」分支退化出 address=Some 而红
+    #[test]
+    fn channels_payload_gates_address_on_running_for_stale_snapshot_window() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let tun = TunnelStatus {
+            quick: ChannelStatus {
+                running: false,
+                url: Some("https://stale.trycloudflare.com/m".into()),
+                error: None, // 无错误、无句柄——典型「在途行落在复位之后」的窗口产物
+            },
+            named: ChannelStatus::default(),
+        };
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                quick: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &tun,
+        );
+        assert_eq!(p["quick"]["running"], false);
+        assert_eq!(
+            p["quick"]["address"],
+            serde_json::Value::Null,
+            "running=false 的通道不得宣称地址（陈旧快照窗口收口）"
+        );
+        assert_eq!(p["quick"]["error"], serde_json::Value::Null);
+        // 对照：同一 url 在 running=true 时正常宣称（门不误伤活通道）
+        let tun = TunnelStatus {
+            quick: ChannelStatus {
+                running: true,
+                url: Some("https://fresh.trycloudflare.com/m".into()),
+                error: None,
+            },
+            named: ChannelStatus::default(),
+        };
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                quick: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &tun,
+        );
+        assert_eq!(
+            p["quick"]["address"], "https://fresh.trycloudflare.com/m",
+            "running=true 的活通道地址宣称不受门影响"
+        );
     }
 }
 
