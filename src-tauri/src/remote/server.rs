@@ -648,11 +648,14 @@ mod tests {
     async fn gate_refreshes_last_seen_and_rejects_stale_device() {
         let (state, _clock) = state_with_clock();
         let now = chrono::Utc::now().timestamp_millis();
+        // M5 A1 upsert 按指纹（sha256(ua|ip)）去重：ua/ip 全空的设备会互相撞键合并成一行，
+        // 故按 id 派生合成值保证 stale/fresh 两行并存（与真机"不同设备"语义一致）
         let dev = |id: &str, paired_at: i64| crate::remote::pairing::NewDevice {
             id: id.into(),
             name: String::new(),
-            ua: String::new(),
-            origin_ip: String::new(),
+            ua: format!("ua-{id}"),
+            origin_ip: format!("ip-{id}"),
+            via: String::new(),
             paired_at,
         };
         state.store.with(|c| {
@@ -1026,6 +1029,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -1076,7 +1080,8 @@ mod tests {
         String::from_utf8(bytes.to_vec()).expect("SSE 帧应为 UTF-8")
     }
 
-    /// 预置有效设备（SSE 测试专用：复用 state_with_clock 的注入缝，零接触真实设备表）
+    /// 预置有效设备（SSE 测试专用：复用 state_with_clock 的注入缝，零接触真实设备表）。
+    /// M5 A1：ua/ip 按 id 派生——upsert 按指纹去重，全空值会在同库多次预置时撞键合并
     fn persist_device(state: &Arc<RemoteState>, id: &str) {
         let now = chrono::Utc::now().timestamp_millis();
         state.store.with(|c| {
@@ -1085,8 +1090,9 @@ mod tests {
                 &crate::remote::pairing::NewDevice {
                     id: id.into(),
                     name: String::new(),
-                    ua: String::new(),
-                    origin_ip: String::new(),
+                    ua: format!("ua-{id}"),
+                    origin_ip: format!("ip-{id}"),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -1223,6 +1229,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     // 偏离简报原稿一处（测试语义硬阻断）：原稿 paired_at: 0——persist 以
                     // paired_at 充当 last_seen_at，gate 按真实时钟做滑动 TTL 判定，
                     // 0 必被 403 拒绝。改为当前时刻，语义等价于「刚配对的活跃设备」
@@ -1316,6 +1323,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -1438,6 +1446,7 @@ mod tests {
                     name: String::new(),
                     ua: String::new(),
                     origin_ip: String::new(),
+                    via: String::new(),
                     paired_at: now,
                 },
             )
@@ -1902,8 +1911,11 @@ mod tests {
                     &crate::remote::pairing::NewDevice {
                         id: format!("cap-{i}"),
                         name: String::new(),
-                        ua: String::new(),
-                        origin_ip: String::new(),
+                        // M5 A1 upsert 按指纹去重：全空 ua/ip 三台会撞键合并成一行（上限门失效），
+                        // 按序号派生合成值保证三行并存
+                        ua: format!("ua-cap-{i}"),
+                        origin_ip: format!("ip-cap-{i}"),
+                        via: String::new(),
                         paired_at: 0,
                     },
                 );
@@ -1946,8 +1958,10 @@ mod tests {
                     &crate::remote::pairing::NewDevice {
                         id: format!("cap-{i}"),
                         name: String::new(),
-                        ua: String::new(),
-                        origin_ip: String::new(),
+                        // 同上：upsert 按指纹去重，全空值会合并——按序号派生保证三行并存
+                        ua: format!("ua-cap-{i}"),
+                        origin_ip: format!("ip-cap-{i}"),
+                        via: String::new(),
                         paired_at: 0,
                     },
                 );

@@ -45,7 +45,26 @@ pub struct NewDevice {
     pub name: String,
     pub ua: String,
     pub origin_ip: String,
+    /// 接入通道：ASCII 枚举 `"local" | "lan" | "quick" | "named"`（花名册徽标数据源，
+    /// 前端 Task A6 再映射中文）。运行时判定（回环 + Host 快照）属 Task A3——
+    /// 在其接入前调用方暂传空串占位（与列 DEFAULT 一致，表示"尚未判定"）
+    pub via: String,
     pub paired_at: i64,
+}
+
+/// 设备指纹（纯函数）：sha256(`ua` + "|" + `origin_ip`) 的 hex 小写。
+/// 收口在 DAO 内部调用——调用方只传 ua/origin_ip，拼接格式由本函数唯一锁定
+/// （固定向量测试 `fingerprint_for_is_deterministic_and_concatenation_locked` 防漂移）
+pub fn fingerprint_for(ua: &str, origin_ip: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut buf = String::with_capacity(ua.len() + 1 + origin_ip.len());
+    buf.push_str(ua);
+    buf.push('|');
+    buf.push_str(origin_ip);
+    Sha256::digest(buf.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 impl PairingService {
@@ -113,15 +132,65 @@ impl PairingService {
     }
 }
 
-pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<(), String> {
+/// 持久化设备（M5 A1：upsert-by-fingerprint——同浏览器同一网络重绑**覆盖不新增**）。
+/// - 按指纹查**未吊销**行 → 命中：覆盖 ua / origin_ip / last_seen_at，
+///   **保留原 id 与原 name**（含用户重命名——命中路径完全不更新 name）、
+///   保留 first_paired_at，revoked 保持 0，via 沿用建行值（运行时刷新属 Task A3）；
+///   返回原行 id（调用方下发 cookie 必须用它，否则命中路径的 cookie 指向不存在的行）。
+/// - 未命中，或命中行已吊销 → 新建行（**吊销行不复活**），name 取设备自报，返回新 id。
+pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<String, String> {
+    let fp = fingerprint_for(&d.ua, &d.origin_ip);
+    // 只匹配未吊销行；LIMIT 1 + 按最近活跃排序保 determinism（不变量上每指纹至多一行未吊销）
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM remote_devices
+             WHERE fingerprint = ?1 AND revoked = 0
+             ORDER BY last_seen_at DESC LIMIT 1",
+            [&fp],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| format!("persist_device 查指纹失败: {e}"))?;
+    if let Some(id) = existing {
+        // 命中路径：ua/origin_ip 实际与指纹输入同源（防御式重写），last_seen 必刷新；
+        // name / first_paired_at / via / revoked 一律不动
+        conn.execute(
+            "UPDATE remote_devices
+             SET ua = ?2, origin_ip = ?3, last_seen_at = ?4
+             WHERE id = ?1",
+            rusqlite::params![id, d.ua, d.origin_ip, d.paired_at],
+        )
+        .map_err(|e| format!("persist_device 更新失败: {e}"))?;
+        return Ok(id);
+    }
     conn.execute(
-        "INSERT OR REPLACE INTO remote_devices
-             (id, name, ua, origin_ip, first_paired_at, last_seen_at, revoked)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0)",
-        rusqlite::params![d.id, d.name, d.ua, d.origin_ip, d.paired_at],
+        "INSERT INTO remote_devices
+             (id, name, ua, origin_ip, fingerprint, via, first_paired_at, last_seen_at, revoked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 0)",
+        rusqlite::params![d.id, d.name, d.ua, d.origin_ip, fp, d.via, d.paired_at],
     )
-    .map_err(|e| format!("persist_device: {e}"))?;
-    Ok(())
+    .map_err(|e| format!("persist_device 插入失败: {e}"))?;
+    Ok(d.id.clone())
+}
+
+/// 按设备 id 重命名（M5 A1 DAO；供 Task A4 的 `remote_rename_device` 命令调用）。
+/// 返回是否命中行——false = 上层 404 语义（不区分"不存在"与"已吊销"，按 id 直改）
+pub fn rename_device(
+    conn: &rusqlite::Connection,
+    device_id: &str,
+    name: &str,
+) -> Result<bool, String> {
+    let n = conn
+        .execute(
+            "UPDATE remote_devices SET name = ?2 WHERE id = ?1",
+            rusqlite::params![device_id, name],
+        )
+        .map_err(|e| format!("rename_device: {e}"))?;
+    Ok(n > 0)
 }
 
 pub fn device_valid(conn: &rusqlite::Connection, device_id: &str, now: i64) -> bool {
@@ -340,6 +409,7 @@ mod tests {
                 name: "p".into(),
                 ua: "ua".into(),
                 origin_ip: "127.0.0.1".into(),
+                via: String::new(),
                 paired_at: 1000,
             },
         )
@@ -364,6 +434,7 @@ mod tests {
                 name: String::new(),
                 ua: String::new(),
                 origin_ip: String::new(),
+                via: String::new(),
                 paired_at: 0,
             },
         )
@@ -384,6 +455,7 @@ mod tests {
             name: "测试设备".into(),
             ua: "ua".into(),
             origin_ip: "127.0.0.1".into(),
+            via: String::new(),
             paired_at: now,
         };
         // 写（返回 Result，忽略）——若 memory() 未建表此处会 Err 且后续断言失败
@@ -414,5 +486,153 @@ mod tests {
     fn device_store_global_construction_has_no_side_effect() {
         let store = DeviceStore::global();
         assert!(matches!(store, DeviceStore::Global));
+    }
+
+    // ==== M5 A1：设备指纹 upsert 与 via 字段 ====
+
+    /// 内存库构造（真机调用序：schema::init → migration::migrate，见 DeviceStore::memory 注释）
+    fn memory_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        crate::database::migration::migrate(&conn).unwrap();
+        conn
+    }
+
+    /// 合成测试设备：ua/ip 显式给值（upsert 按指纹去重——空 ua/ip 会互相撞键）
+    fn dev(id: &str, ua: &str, ip: &str, paired_at: i64) -> NewDevice {
+        NewDevice {
+            id: id.into(),
+            name: format!("自报名-{id}"),
+            ua: ua.into(),
+            origin_ip: ip.into(),
+            via: "lan".into(),
+            paired_at,
+        }
+    }
+
+    /// 读整行（name, ua, origin_ip, first_paired_at, last_seen_at, revoked）
+    fn row(conn: &rusqlite::Connection, id: &str) -> (String, String, String, i64, i64, i64) {
+        conn.query_row(
+            "SELECT name, ua, origin_ip, first_paired_at, last_seen_at, revoked
+             FROM remote_devices WHERE id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    /// 总行数（含吊销行——验证"覆盖不新增"/"吊销行不复活"用）
+    fn total_rows(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// 指纹纯函数：确定性 + 拼接格式锁定（sha256("UA|1.2.3.4") 预计算向量）+
+    /// UA/IP 任一变化即变（防拼接歧义），64 位小写 hex
+    #[test]
+    fn fingerprint_for_is_deterministic_and_concatenation_locked() {
+        let a = fingerprint_for("UA", "1.2.3.4");
+        assert_eq!(a, fingerprint_for("UA", "1.2.3.4"));
+        // 固定向量锁定拼接格式为 `{ua}|{origin_ip}`（hex 小写）
+        assert_eq!(
+            a,
+            "b1ed8bf818a01d1d8794475f526dcb5d72323a98f5a2e251661a7bf97d1a980a"
+        );
+        // 任一分量变化即变
+        assert_ne!(
+            fingerprint_for("UA", "1.2.3.4"),
+            fingerprint_for("UA", "5.6.7.8")
+        );
+        assert_ne!(
+            fingerprint_for("UA", "1.2.3.4"),
+            fingerprint_for("UA-B", "1.2.3.4")
+        );
+        let h = fingerprint_for("x", "y");
+        assert_eq!(h.len(), 64);
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    /// upsert 命中：同指纹二次配对 → 覆盖不新增、返回原 id、
+    /// name 保留（含"先重命名后重连"场景）、first_paired 不变、last_seen 刷新
+    #[test]
+    fn upsert_hit_keeps_id_and_name_and_first_paired() {
+        let conn = memory_conn();
+        assert_eq!(
+            persist_device(&conn, &dev("d1", "UA", "1.1.1.1", 1000)).unwrap(),
+            "d1"
+        );
+        // 桌面端重命名（Task A4 命令语义），随后同一浏览器重连（新 id、同 UA/IP、时间前进）
+        assert!(rename_device(&conn, "d1", "我的手机").unwrap());
+        assert_eq!(
+            persist_device(&conn, &dev("d2", "UA", "1.1.1.1", 2000)).unwrap(),
+            "d1",
+            "同指纹命中必须返回原行 id（cookie 下发依赖它）"
+        );
+        let (name, ua, ip, first_paired, last_seen, revoked) = row(&conn, "d1");
+        assert_eq!(name, "我的手机", "命中路径完全不更新 name——重命名不丢");
+        assert_eq!(ua, "UA");
+        assert_eq!(ip, "1.1.1.1");
+        assert_eq!(first_paired, 1000, "first_paired 保留");
+        assert_eq!(last_seen, 2000, "last_seen 刷新");
+        assert_eq!(revoked, 0);
+        assert_eq!(total_rows(&conn), 1, "覆盖而非新增");
+    }
+
+    /// upsert 命中已吊销行：不复活——新建行（新 id），旧行保持 revoked=1
+    #[test]
+    fn upsert_hit_on_revoked_row_creates_new_row() {
+        let conn = memory_conn();
+        persist_device(&conn, &dev("old", "UA", "1.1.1.1", 1000)).unwrap();
+        revoke_all(&conn).unwrap();
+        let id = persist_device(&conn, &dev("new", "UA", "1.1.1.1", 2000)).unwrap();
+        assert_eq!(id, "new", "吊销行不复活，返回新 id");
+        assert!(!device_valid(&conn, "old", 2000), "旧行保持吊销");
+        assert!(device_valid(&conn, "new", 2000));
+        assert_eq!(total_rows(&conn), 2);
+        // 吊销行 name 也不受影响（未被覆盖）
+        assert_eq!(row(&conn, "old").0, "自报名-old");
+    }
+
+    /// 不同指纹（UA 或 IP 不同）→ 新行、返回新 id
+    #[test]
+    fn different_fingerprint_creates_new_row() {
+        let conn = memory_conn();
+        persist_device(&conn, &dev("a", "UA", "1.1.1.1", 1000)).unwrap();
+        assert_eq!(
+            persist_device(&conn, &dev("b", "UA", "2.2.2.2", 2000)).unwrap(),
+            "b"
+        );
+        assert_eq!(
+            persist_device(&conn, &dev("c", "UA-B", "1.1.1.1", 3000)).unwrap(),
+            "c"
+        );
+        assert_eq!(total_rows(&conn), 3);
+        assert_eq!(device_count(&conn), 3);
+    }
+
+    /// rename DAO：命中改名成功返回 true；未命中返回 false（上层 404 语义）
+    #[test]
+    fn rename_device_hits_and_misses() {
+        let conn = memory_conn();
+        persist_device(&conn, &dev("d1", "UA", "1.1.1.1", 1000)).unwrap();
+        assert!(rename_device(&conn, "d1", "客厅平板").unwrap());
+        assert_eq!(row(&conn, "d1").0, "客厅平板");
+        assert!(
+            !rename_device(&conn, "no-such", "x").unwrap(),
+            "未命中 = false"
+        );
+        // 未命中不写任何行
+        assert_eq!(total_rows(&conn), 1);
     }
 }

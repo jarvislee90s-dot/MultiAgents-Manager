@@ -862,6 +862,9 @@ mod tests {
             "name",
             "ua",
             "origin_ip",
+            // M5 A1：设备指纹（upsert 去重键）与接入通道（ASCII 枚举）
+            "fingerprint",
+            "via",
             "first_paired_at",
             "last_seen_at",
             "revoked",

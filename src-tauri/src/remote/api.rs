@@ -176,18 +176,22 @@ pub async fn pair(
         name: "直通扫码".to_string(),
         ua,
         origin_ip: String::new(),
+        // via 运行时判定（回环+Host 快照）属 Task A3——接入前空串占位（列 DEFAULT 同值）
+        via: String::new(),
         paired_at: now,
     };
-    // 持久化失败不阻断本次配对（下次 gate 校验会失败）——保持简报行为
-    st.store.with(|c| {
-        let _ = crate::remote::pairing::persist_device(c, &dev);
+    // 持久化失败不阻断本次配对（下次 gate 校验会失败）——保持简报行为；
+    // 成功则 cookie 必须下发**生效 id**（M5 A1 upsert：同指纹命中会沿用旧行 id，
+    // 若仍下发 accept() 新生成 id，该 cookie 指向不存在的行，重连浏览器永久 403）
+    let effective_id = st.store.with(|c| {
+        crate::remote::pairing::persist_device(c, &dev).unwrap_or_else(|_| device_id.clone())
     });
     // HttpOnly + SameSite=Lax + Path=/m + 180d（dsh 七不变量之 cookie 语义）——
     // 拼装收口到 pairing::device_cookie（与 pair-poll / pair-confirm 三处共用，防漂移）
     Ok((
         [(
             axum::http::header::SET_COOKIE,
-            crate::remote::pairing::device_cookie(&device_id),
+            crate::remote::pairing::device_cookie(&effective_id),
         )],
         Json(serde_json::json!({ "ok": true })),
     )
@@ -350,15 +354,19 @@ fn persist_and_cookie(st: &Arc<RemoteState>, device_id: &str, name: &str, now: i
         name: name.to_string(),
         ua: String::new(),
         origin_ip: String::new(),
+        // via 运行时判定（回环+Host 快照）属 Task A3——接入前空串占位（列 DEFAULT 同值）
+        via: String::new(),
         paired_at: now,
     };
-    st.store.with(|c| {
-        let _ = crate::remote::pairing::persist_device(c, &dev);
+    // cookie 下发生效 id（M5 A1 upsert 语义，理由同 api::pair）；
+    // 持久化失败不阻断配对（下次 gate 校验会失败）——回退请求侧生成 id
+    let effective_id = st.store.with(|c| {
+        crate::remote::pairing::persist_device(c, &dev).unwrap_or_else(|_| device_id.to_string())
     });
     (
         [(
             axum::http::header::SET_COOKIE,
-            crate::remote::pairing::device_cookie(device_id),
+            crate::remote::pairing::device_cookie(&effective_id),
         )],
         Json(serde_json::json!({ "ok": true, "status": "approved" })),
     )
