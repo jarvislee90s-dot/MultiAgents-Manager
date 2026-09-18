@@ -71,7 +71,11 @@ pub fn stamp_hit_in_page(pg: &crate::remote::content::MessagesPage, stamp: &str)
     stamp_in_messages(&user_texts, stamp)
 }
 
-/// 戳探测取数上限（条）：注入命中必然落在最近几条，20 条兼顾读开销与覆盖。
+/// 戳探测取数上限（条）：注入命中必然落在最近几条，20 条兼顾覆盖与读开销。
+/// **读量口径（质量评审 Minor 4 纠正）**：SQLite 家（zcode/opencode 等）是 SQL
+/// `LIMIT 20`，便宜；JSONL 家并非逐条读取——`read_session_messages` 经
+/// `read_recent_lines_with_budget` 有界尾窗（`line_budget(20)`=500 行 /
+/// `byte_budget(20)`=512KB）一次截尾读入后整页解析，20 条只是页内再截取。
 /// `pub(crate)`：remote/mod.rs 生产装配的 confirm_probe 闭包同源引用（单一来源）。
 pub(crate) const PROBE_MESSAGE_LIMIT: usize = 20;
 
@@ -109,6 +113,9 @@ const DIRECT_CONFIRM_FAIL: &str = "已注入未确认（未见会话记录），
 const SCREEN_PROBE_CHARS: usize = 16;
 /// 插队等待占用排空上限（毫秒，§8.1）：busy TUI 消费写入缓冲的宽限
 const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
+/// 排空超时回执（对齐 PARTIAL_WARN 防重纪律，质量评审 Minor 3）：目标可能仍在
+/// 消费，盲目重试会叠加正文——先引导人工检查终端
+const DELIVERY_TIMEOUT_MSG: &str = "投递超时（目标可能仍在消费，重试前请检查终端）";
 
 /// 戳命中查询（经 `confirm_probe` 缝——queue 测试装恒真/恒假假体，零接触真实文件）
 fn probe_hits(st: &crate::remote::server::RemoteState, tool: &str, sid: &str, stamp: &str) -> bool {
@@ -125,7 +132,8 @@ fn screen_probe(content: &str) -> String {
 /// 直发确认（裁决 A1 直发语义）：轮询会话文件戳 → 超时未中走屏读回查（恢复动作：
 /// 滞留输入行判定 → 补按回车 → 复查 3s）→ 仍未中 = 确认失败（失败回执）。
 /// `timeout_ms` 由调用方按族规格下发（`families::FamilySpec::confirm_timeout_ms`，
-/// 无族回退快消费者默认 5000——见 `families::FALLBACK_SPEC`）。
+/// 无族回退快消费者默认 5000——见 `families::FALLBACK_SPEC`；测试经
+/// `queue::flush_one_with` 小超时覆盖，保持套件无 5s 级慢测）。
 pub(crate) fn await_direct_receipt(
     st: &crate::remote::server::RemoteState,
     session: &crate::session::Session,
@@ -160,6 +168,11 @@ pub(crate) fn await_direct_receipt(
 /// `st.injector.locate_and_send_key`——测试假体可观测）→ 复查 3s。
 /// 返回 `Ok(true)` = 复查命中（已送达）；`Ok(false)` = 门槛不成立或复查仍未中；
 /// `Err` = 补按回车失败（原因上抛，由调用方拼接进失败回执）。
+///
+/// **双投后果披露（质量评审 Minor 2）**：补按回车的窗口内（屏读判定+补键数十 ms
+/// 级）若用户焦点恰落在该会话的审批对话框/选择菜单上，这颗空回车会激活其默认
+/// 项——概率低（要求屏读滞留判定成立且焦点恰好重叠），属既有注入面的边际扩大；
+/// 焦点行为实机验证归 Task 12 清单。
 #[cfg(windows)]
 fn direct_recovery(
     st: &crate::remote::server::RemoteState,
@@ -217,10 +230,10 @@ fn stuck_on_input_line(pid: u32, content: &str) -> bool {
 
 /// 插队确认（裁决 A1 插队语义）：写后等占用排空 ≤2s（Windows
 /// `wait_input_drained`）——排空成功 → `Ok`（已送达；屏读草稿尾为 best-effort
-/// 诊断只进日志，不 Gate 结果）；排空超时 → `Err("投递超时")`；排空查询基础
-/// 设施失败（假 pid / 控制台失效）→ best-effort 以「写入成功」为准返回 Ok
-/// （诊断通道不可用不得误报投递超时，错误进日志）。macOS 无占用/屏读 API →
-/// 直接 Ok（保持既有行为，插队无 drain 可等）。
+/// 诊断只进日志，不 Gate 结果）；排空超时 → `Err`（[`DELIVERY_TIMEOUT_MSG`]，
+/// 防重口径）；排空查询基础设施失败（假 pid / 控制台失效）→ best-effort 以
+/// 「写入成功」为准返回 Ok（诊断通道不可用不得误报投递超时，错误进日志）。
+/// macOS 无占用/屏读 API → 直接 Ok（保持既有行为，插队无 drain 可等）。
 pub(crate) fn await_jump_receipt(
     st: &crate::remote::server::RemoteState,
     session: &crate::session::Session,
@@ -249,7 +262,7 @@ fn jump_receipt(session: &crate::session::Session, content: &str) -> Result<(), 
             }
             Ok(())
         }
-        Ok(false) => Err("投递超时".to_string()),
+        Ok(false) => Err(DELIVERY_TIMEOUT_MSG.to_string()),
         Err(e) => {
             log::debug!("插队排空查询失败（best-effort 以写入成功为准）：{e}");
             Ok(())

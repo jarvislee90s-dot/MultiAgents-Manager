@@ -86,6 +86,18 @@ pub(crate) fn try_flush(
     item: &QueueRow,
     jump: bool,
 ) -> FlushOutcome {
+    try_flush_with(st, item, jump, None)
+}
+
+/// 变体：直发确认轮询窗可覆盖（质量评审 Important 1——测试小超时入口，保持套件
+/// 无 5s 级慢测；`None` = 按族规格，生产路径）。仅影响直发确认的轮询窗，
+/// 注入行为与插队路径不受影响。
+pub(crate) fn try_flush_with(
+    st: &crate::remote::server::RemoteState,
+    item: &QueueRow,
+    jump: bool,
+    confirm_timeout_override: Option<u64>,
+) -> FlushOutcome {
     // 会话 id 只在工具内唯一（watcher/dedup 同口径）：必须按 (tool, id) 复合匹配，
     // 跨工具撞 id 时裸 id 匹配会向错误会话的 pid 注入
     let Some(session) = (st.session_source)()
@@ -100,6 +112,7 @@ pub(crate) fn try_flush(
     }
     let spec = crate::inject::families::family_for(&item.agent_type)
         .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let confirm_timeout = confirm_timeout_override.unwrap_or(spec.confirm_timeout_ms);
     let receipt = match st
         .injector
         .locate_and_inject_spec(session.pid, &item.content, &spec)
@@ -109,12 +122,7 @@ pub(crate) fn try_flush(
             if jump {
                 super::confirm::await_jump_receipt(st, &session, &item.content)
             } else {
-                super::confirm::await_direct_receipt(
-                    st,
-                    &session,
-                    &item.content,
-                    spec.confirm_timeout_ms,
-                )
+                super::confirm::await_direct_receipt(st, &session, &item.content, confirm_timeout)
             }
         }
     };
@@ -188,6 +196,16 @@ pub fn flush_one(
     session_id: &str,
     jump: bool,
 ) -> Result<(), String> {
+    flush_one_with(st, session_id, jump, None)
+}
+
+/// 变体：直发确认轮询窗可覆盖（透传 [`try_flush_with`]，测试小超时入口）。
+pub(crate) fn flush_one_with(
+    st: &crate::remote::server::RemoteState,
+    session_id: &str,
+    jump: bool,
+    confirm_timeout_override: Option<u64>,
+) -> Result<(), String> {
     // 1) 取队首：短临界区，临界区内只做 SQL（M4 死锁教训；DeviceStore::with 即锁语义）
     let pending = st
         .store
@@ -196,9 +214,9 @@ pub fn flush_one(
     let Some(item) = pending else {
         return Ok(());
     };
-    // 3+4) 快照复核 + 注入：零 DB 锁（session_source 生产实现内部会锁同一把全局 DB，
-    //      锁内调用即自锁死锁——见模块头锁纪律）
-    let outcome = try_flush(st, &item, jump);
+    // 3+4) 快照复核 + 注入 + 确认：零 DB 锁（session_source 生产实现内部会锁同一把
+    //      全局 DB，锁内调用即自锁死锁——见模块头锁纪律）
+    let outcome = try_flush_with(st, &item, jump, confirm_timeout_override);
     // 5) 落账：再次短临界区（mark + 审计双通道，锁内只 SQL）
     st.store.with(|conn| settle(conn, st, &item, jump, outcome))
 }
@@ -708,5 +726,116 @@ mod tests {
             !super::super::confirm::session_stamp_hit(&st, "claude", "s-sh", "任意戳"),
             "读失败必须判未命中"
         );
+    }
+
+    /// flush_one 端到端确认失败（A1 主回执闭环，质量评审 Important 1）：注入 Ok +
+    /// probe 恒 false（小超时覆盖，无 5s 慢测）→ Err 含裁决文案全句、行 mark_failed
+    /// （failed_reason 与回执逐字命中）、审计 action=fail result=failed:e、行退出 pending。
+    /// 入队/断言全走 st.store 同一内存库（flush_one 的 DB 依赖经 store 缝）
+    #[test]
+    fn flush_one_end_to_end_confirm_failure() {
+        let fake = FakeInjector::ok();
+        let st = state_with_probe(
+            vec![sess("s-e2f", SessionStatus::Waiting, 24)],
+            fake.clone(),
+            std::sync::Arc::new(|_, _, _| false),
+        );
+        let item_id = st.store.with(|c| enq(c, "s-e2f", "端到端确认消息"));
+
+        let err = flush_one_with(&st, "s-e2f", false, Some(60))
+            .expect_err("注入成功但确认未中必须失败回执");
+        assert!(
+            err.contains("已注入未确认（未见会话记录），请检查终端后重试"),
+            "回执须含裁决 A1 文案全句：{err}"
+        );
+        assert_eq!(
+            fake.recorded(),
+            vec![(24, "端到端确认消息".to_string())],
+            "前提自证：注入确实发生（确认失败而非注入失败）"
+        );
+        let (failed_reason, sent_at) = st.store.with(|c| {
+            let row = inject_queue::get_conn(c, item_id).unwrap();
+            (row.failed_reason, row.sent_at)
+        });
+        assert_eq!(
+            failed_reason.as_deref(),
+            Some(err.as_str()),
+            "mark_failed 落 failed_reason 且与回执同源"
+        );
+        assert_eq!(sent_at, None, "确认失败不得落 sent_at");
+        let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "fail");
+        assert_eq!(audits[0].result, format!("failed:{err}"));
+        assert!(
+            st.store
+                .with(|c| inject_queue::next_pending_conn(c, "s-e2f"))
+                .is_none(),
+            "确认失败行退出 pending（重试由用户判断，不自动重发）"
+        );
+    }
+
+    /// 时序锁：注入 Err 短路确认——记录型 probe 在注入失败路径上零调用
+    /// （确认只在注入成功后起跑，FakeInjector 调用记录自证注入确已尝试）
+    #[test]
+    fn inject_failure_short_circuits_confirm_probe() {
+        let probe_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = probe_calls.clone();
+        let st = state_with_probe(
+            vec![sess("s-sc", SessionStatus::Waiting, 25)],
+            FakeInjector::failing("定位终端失败：pid 不存在"),
+            std::sync::Arc::new(move |t: &str, s: &str, stamp: &str| {
+                cap.lock()
+                    .unwrap()
+                    .push((t.to_string(), s.to_string(), stamp.to_string()));
+                true
+            }),
+        );
+        let item_id = st.store.with(|c| enq(c, "s-sc", "时序锁消息"));
+
+        assert!(
+            flush_one(&st, "s-sc", false).is_err(),
+            "注入失败必须返回 Err"
+        );
+        assert!(
+            probe_calls.lock().unwrap().is_empty(),
+            "注入失败必须短路确认（probe 零调用——时序锁）"
+        );
+        let sent_at = st
+            .store
+            .with(|c| inject_queue::get_conn(c, item_id).unwrap().sent_at);
+        assert_eq!(sent_at, None, "注入失败不得落 sent_at");
+        let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "fail");
+        assert_eq!(audits[0].result, "failed:定位终端失败：pid 不存在");
+    }
+
+    /// 插队端到端不消费 confirm_probe（best-effort 恒 Sent）：probe 恒 false 也不得
+    /// 把插队投递打成失败（busy 态无文件戳可查——裁决 A1 插队语义，flush_one 全链路）
+    #[test]
+    fn jump_delivery_ignores_confirm_probe() {
+        let fake = FakeInjector::ok();
+        let st = state_with_probe(
+            vec![sess("s-jp", SessionStatus::Processing, 26)],
+            fake.clone(),
+            std::sync::Arc::new(|_, _, _| false),
+        );
+        let item_id = st.store.with(|c| enq(c, "s-jp", "插队端到端消息"));
+
+        assert_eq!(
+            flush_one(&st, "s-jp", true),
+            Ok(()),
+            "插队确认 best-effort：probe 恒 false 不得改写投递结论"
+        );
+        let sent_at = st
+            .store
+            .with(|c| inject_queue::get_conn(c, item_id).unwrap().sent_at);
+        assert!(sent_at.is_some(), "插队照常 mark_sent");
+        let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "jump");
+        assert_eq!(audits[0].result, "ok");
     }
 }
