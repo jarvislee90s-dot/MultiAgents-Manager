@@ -115,22 +115,37 @@ pub fn chunk_plan(text: &str, spec: &FamilySpec) -> ChunkPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inject::families;
+
+    /// 全部 8 常量钉值（廉价防漂移保险：脆弱常量集中落点，改任一数值必须过此关）
+    #[test]
+    fn constants_match_probe() {
+        assert_eq!(CHUNK_CHARS, 80);
+        assert_eq!(CHUNK_GAP_MS, 50);
+        assert_eq!(SUBMIT_DELAY_MS, 150);
+        assert_eq!(LONG_MSG_CHARS, 2000);
+        assert_eq!(DRAIN_TO, 40);
+        assert_eq!(OCC_ABNORMAL_MS, 5_000);
+        assert_eq!(BASE_BUDGET_MS, 10_000);
+        assert_eq!(BACKPRESSURE_MS_PER_CHAR, 45);
+    }
 
     #[test]
     fn family_table_matches_probe() {
-        let c = families::family_for("claude").unwrap();
+        let c = family_for("claude").unwrap();
         assert_eq!(c.family, TuiFamily::RawVt);
         assert!(!c.slow_consumer);
         assert_eq!(c.verified_with, "2.1.251");
-        let o = families::family_for("opencode").unwrap();
+        let o = family_for("opencode").unwrap();
         assert!(o.slow_consumer);
         assert_eq!(o.verified_with, "1.18.31");
-        let x = families::family_for("codex").unwrap();
+        let x = family_for("codex").unwrap();
         assert_eq!(x.family, TuiFamily::Crossterm);
         assert_eq!(x.verified_with, "0.154.0");
-        assert!(families::family_for("kimi").is_some());
-        assert!(families::family_for("workbuddy").is_none()); // 路由层已拦，此处纵深防御
+        let k = family_for("kimi").unwrap(); // 全行断言：族/版本指纹/消费速率
+        assert_eq!(k.family, TuiFamily::RawVt);
+        assert_eq!(k.verified_with, "2.0.0");
+        assert!(!k.slow_consumer);
+        assert!(family_for("workbuddy").is_none()); // 路由层已拦，此处纵深防御
     }
 
     #[test]
@@ -138,32 +153,33 @@ mod tests {
         // R2-1：慢消费者或长文切背压
         let fast = family_for("claude").unwrap();
         let slow = family_for("opencode").unwrap();
-        assert!(!families::use_backpressure(&fast, 80));
-        assert!(families::use_backpressure(&fast, 2001));
-        assert!(families::use_backpressure(&slow, 39));
-        assert!(!families::use_backpressure(&fast, 2000));
+        assert!(!use_backpressure(&fast, 80));
+        assert!(use_backpressure(&fast, 2001));
+        assert!(use_backpressure(&slow, 39));
+        assert!(!use_backpressure(&fast, 2000));
     }
 
     #[test]
     fn budget_scales_for_backpressure() {
         // 真总预算：背压按斜率放宽（opencode 实测 10k≈110-183s）
         let slow = family_for("opencode").unwrap();
-        assert_eq!(families::inject_budget_ms(&slow, 80), 10_000 + 80 * 45);
-        assert!(families::inject_budget_ms(&slow, 10_000) >= 183_000);
+        assert_eq!(inject_budget_ms(&slow, 80), 10_000 + 80 * 45);
+        assert!(inject_budget_ms(&slow, 10_000) >= 183_000);
         assert_eq!(
-            families::inject_budget_ms(&family_for("claude").unwrap(), 500),
+            inject_budget_ms(&family_for("claude").unwrap(), 500),
             10_000
         );
     }
 
     #[test]
-    fn chunk_plan_splits_text_and_enter() {
-        // 正文块 160 事件 + 回车独立块（150ms 后单批）
-        let spec = families::family_for("claude").unwrap();
-        let plan = chunk_plan("[mobile test] hello", &spec); // 纯函数：分块/背压计划
+    fn chunk_plan_counts_and_flags() {
+        // ChunkPlan 刻意不含回车块——回车块归执行层（SUBMIT_DELAY_MS=150ms 后单批）；
+        // 本测试只核正文分块计数与背压旗标
+        let spec = family_for("claude").unwrap();
+        let plan = chunk_plan("[mobile test] hello", &spec);
         assert_eq!(plan.text_chunks, 1);
         assert!(!plan.backpressure);
-        let spec_op = families::family_for("opencode").unwrap();
+        let spec_op = family_for("opencode").unwrap();
         assert!(chunk_plan(&"x".repeat(3000), &spec_op).backpressure);
     }
 }
