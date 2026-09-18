@@ -1,6 +1,8 @@
 // /m/api/v1/*：sessions（P8 数据同源直调 get_all_sessions）+ host（P8a/P8b 页头数据）
 // + pair/pin（M5 A3 访问密码配对，唯一换 cookie 入口）+ events（M3 Task 6 SSE 实时通道）
 // + session-messages（Task 7）+ session-files / file（M3 Task 8 文件路径提取与安全读取）
+// + session-send / send-info / queue 系（M7 Task 6 注入三端点）
+// + session-approve-options / session-approve（M8 Task 11 审批选项与一键应答）
 
 use axum::{
     extract::{ConnectInfo, Query, State},
@@ -1064,4 +1066,324 @@ pub async fn session_queue_retract(
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
+}
+
+// ==== M8 Task 11：审批端点（session-approve-options / session-approve）====
+// 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写/读路径）：
+//   GET  /session-approve-options?session_id= → 200 {available, options:[{id,label}],
+//        verifiedWith, currentVersion(…|null), drift}
+//        available = status==Waiting && load_mappings 有该工具映射 && detect 命中
+//        （数据同源快照判定）；工具无映射 / 未命中 / 非 Waiting → available=false
+//        （options 空）。options 只含 id+label——**键位不外泄给 UI**。
+//   POST /session-approve body {sessionId, optionId} → 200 {"status":"key_sent"}
+//        | 404 no_session | 409 not_waiting | 404 no_mapping（降级提示走普通发送）
+//        | 200 failed{error}（注入失败 / in-flight 忙，可重试回执）。
+// 锁纪律（M4）：load_mappings 内部自取全局 DB 锁——两个 handler 的调用点都在
+// spawn_blocking 闭包内、**不持任何 DB 锁**（store.with 临界区内调用即自锁死锁）。
+
+/// 审批选项扫描产物（映射存在时的载荷；available=false 时 options 恒空）
+struct ApproveScanHit {
+    available: bool,
+    /// 选项表（只含 id+label——键位不外泄给 UI）
+    options: Vec<(String, String)>,
+    verified_with: String,
+    /// 工具标识（currentVersion 探测的数据源）
+    tool: String,
+}
+
+/// 审批选项扫描（同步，spawn_blocking 内调用）：会话快照（数据同源，与看板同一份）→
+/// Waiting 判定 → load_mappings 按工具找映射（tool_id 匹配）→ detect 命中判定。
+/// 返回 `None` = 不可批（会话不存在 / 非 Waiting / 无映射——统一 false，不给存在性
+/// 预言机）；`Some` = 映射存在，携带 detect 结果 / 选项表 / verifiedWith / tool。
+/// 复合键说明（Task 5 教训）：本端点无 agent_type 入参，快照里按 id 找**第一个**匹配；
+/// id 跨工具撞名时取第一个匹配——契约如此。
+fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<ApproveScanHit> {
+    let session = (st.session_source)()
+        .sessions
+        .into_iter()
+        .find(|s| s.id == session_id)?;
+    if session.status != crate::session::SessionStatus::Waiting {
+        return None;
+    }
+    let tool = session.agent_type.tool_id().to_string();
+    let mapping = crate::inject::approve::load_mappings()
+        .into_iter()
+        .find(|m| m.tool == tool)?;
+    let hit = session
+        .last_message
+        .as_deref()
+        .map(|msg| crate::inject::approve::detect(&mapping, msg))
+        .unwrap_or(false);
+    // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
+    // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
+    let options = if hit {
+        mapping
+            .options
+            .iter()
+            .map(|o| (o.id.clone(), o.label.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(ApproveScanHit {
+        available: hit,
+        options,
+        verified_with: mapping.verified_with,
+        tool,
+    })
+}
+
+/// GET /m/api/v1/session-approve-options?session_id=（M8 审批选项卡数据源）：
+/// 会话快照与映射解析在 spawn_blocking（扫描与 load_mappings 均为同步阻塞调用）；
+/// currentVersion 的 CLI 探测（首调 spawn `<cli> --version`）带 **5s 超时保护**
+/// （Task 10 评审提示：探测卡死不拖垮端点）——超时/任务异常按 None 处理并 log::warn。
+pub async fn session_approve_options(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    let probe_st = st.clone();
+    let scan =
+        match tokio::task::spawn_blocking(move || approve_options_scan(&probe_st, &sid)).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("session-approve-options 会话扫描任务异常: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "error": "internal" })),
+                )
+                    .into_response();
+            }
+        };
+    let (available, options, verified_with, tool) = match scan {
+        Some(hit) => (
+            hit.available,
+            hit.options,
+            hit.verified_with,
+            Some(hit.tool),
+        ),
+        // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空
+        None => (false, Vec::new(), String::new(), None),
+    };
+    // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
+    let current_version = match tool.as_deref() {
+        Some(t) => {
+            let probe_tool = t.to_string();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || {
+                    crate::inject::approve::cached_cli_version(&probe_tool)
+                }),
+            )
+            .await
+            {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    log::warn!("CLI 版本探测任务异常（tool={t}）: {e}");
+                    None
+                }
+                Err(_) => {
+                    log::warn!("CLI 版本探测超时（tool={t}），currentVersion 按未知处理");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    // drift：映射存在时按 verifiedWith vs current（探测失败按 "unknown"）判定
+    let drift = tool.is_some()
+        && crate::inject::approve::is_version_drift(
+            &verified_with,
+            current_version.as_deref().unwrap_or("unknown"),
+        );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "available": available,
+            "options": options
+                .iter()
+                .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
+                .collect::<Vec<_>>(),
+            "verifiedWith": verified_with,
+            "currentVersion": current_version,
+            "drift": drift,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /m/api/v1/session-approve 请求体（camelCase；字段全 default——缺参不触发
+/// axum 提取器 422，由 handler 统一按契约给 400 bad_request）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionApproveReq {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub option_id: String,
+}
+
+/// POST /m/api/v1/session-approve（M8 红卡一键应答）：
+/// - 缺参 → 400；设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
+/// - 会话不在快照 → 404 no_session；非 Waiting → 409 not_waiting（映射解析在其后，
+///   运行中会话不付出 KV 读取代价）；
+/// - load_mappings 无该工具映射 / optionId 无对应项 → 404 no_mapping（降级提示走
+///   普通发送）；
+/// - in-flight 守卫忙（flush 循环/直发/插队正在投递该会话）→ 200 failed 提示重试；
+/// - 投递 `injector.locate_and_send_key(pid, key)`：**不带 [mobile] 前缀**——按键非文本；
+///   成功 → 200 key_sent；失败 → 200 failed{error}（可重试回执）。
+///   // M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键
+///   （选项卡 UI 与端点契约通道无关，届时只扩这一处分派）
+/// - 审计：action=approve/reject（其余键位按 optionId 原样），result=ok/failed:{e}，
+///   channel=injector.name()，content=optionId（协议标识，stable 于展示文案定制）。
+pub async fn session_approve(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionApproveReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    let option_id = req.option_id.trim().to_string();
+    if sid.is_empty() || option_id.is_empty() {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 会话查找 + Waiting 复核 + 映射/选项解析（一个 spawn_blocking：扫描与 load_mappings
+    // 均为同步阻塞；闭包不持任何 DB 锁——load_mappings 内部自取全局 DB 锁，M4 纪律）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let probe_opt = option_id.clone();
+    let lookup = match tokio::task::spawn_blocking(move || {
+        // 复合键说明（Task 5 教训）：本端点无 agent_type 入参，快照里按 id 找第一个匹配；
+        // id 跨工具撞名时取第一个匹配——契约如此
+        let Some(session) = (probe_st.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == probe_sid)
+        else {
+            return Err("no_session");
+        };
+        if session.status != crate::session::SessionStatus::Waiting {
+            return Err("not_waiting");
+        }
+        let tool = session.agent_type.tool_id().to_string();
+        let mapping = crate::inject::approve::load_mappings()
+            .into_iter()
+            .find(|m| m.tool == tool);
+        let Some(option) =
+            mapping.and_then(|m| crate::inject::approve::option_by_id(&m, &probe_opt).cloned())
+        else {
+            return Err("no_mapping");
+        };
+        Ok((session, tool, option))
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-approve 会话扫描任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let (session, tool, option) = match lookup {
+        Ok(v) => v,
+        Err(code) => {
+            let status = if code == "not_waiting" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            return (
+                status,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": code })),
+            )
+                .into_response();
+        }
+    };
+    // in-flight 守卫（与 flush 循环/直发/插队共用）：该会话已有投递进行中 → 让位，
+    // 200 failed 提示重试（不双投；无投递发生故不写审计——jump 忙让位同口径）
+    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "status": "failed",
+                "error": "该会话投递进行中，请稍后重试"
+            })),
+        )
+            .into_response();
+    };
+    // M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键
+    let injector = st.injector.clone();
+    let pid = session.pid;
+    let key = option.key.clone();
+    let sent =
+        match tokio::task::spawn_blocking(move || injector.locate_and_send_key(pid, &key)).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("session-approve 投递任务异常: {e}");
+                Err("内部任务异常".to_string())
+            }
+        };
+    // 审计 action 词表：approve/reject 语义化，其余键位按 optionId 原样留痕
+    let action = if option_id == "approve" {
+        "approve"
+    } else if option_id == "reject" {
+        "reject"
+    } else {
+        option_id.as_str()
+    };
+    match sent {
+        Ok(()) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &option_id,
+                action,
+                "ok",
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "status": "key_sent" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &option_id,
+                action,
+                &format!("failed:{e}"),
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "status": "failed", "error": e })),
+            )
+                .into_response()
+        }
+    }
 }

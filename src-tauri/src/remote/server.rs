@@ -303,6 +303,13 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         .route("/session-queue", get(api::session_queue))
         .route("/session-queue/jump", post(api::session_queue_jump))
         .route("/session-queue/retract", post(api::session_queue_retract))
+        // M8 Task 11：审批端点（红卡一键批准/拒绝——选项可用性 + 按键应答；PIN 门禁
+        // 内层 gate 结构性覆盖，新端点不需要各自鉴权代码）
+        .route(
+            "/session-approve-options",
+            get(api::session_approve_options),
+        )
+        .route("/session-approve", post(api::session_approve))
         // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
         // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
         // 内层 fallback 403）
@@ -2481,9 +2488,11 @@ mod tests {
     // flush_one / 队列 DAO / 审计全走 st.store——生产 Global 语义不变，测试内存库）；
     // 会话快照走注入源；注入器用 FakeInjector。不触真实 ~/.mam。
 
-    /// 注入器假体（记录 locate_and_inject 调用）；fail=Some 时恒 Err（直发失败回执用）
+    /// 注入器假体（记录 locate_and_inject 调用）；fail=Some 时恒 Err（直发失败回执用）。
+    /// Task 11：补 key_calls 记录 locate_and_send_key 调用（审批按键注入路径）
     struct FakeInjector {
         calls: std::sync::Mutex<Vec<(u32, String)>>,
+        key_calls: std::sync::Mutex<Vec<(u32, String)>>,
         fail: Option<&'static str>,
     }
 
@@ -2491,17 +2500,22 @@ mod tests {
         fn ok() -> std::sync::Arc<Self> {
             std::sync::Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                key_calls: std::sync::Mutex::new(Vec::new()),
                 fail: None,
             })
         }
         fn failing(reason: &'static str) -> std::sync::Arc<Self> {
             std::sync::Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                key_calls: std::sync::Mutex::new(Vec::new()),
                 fail: Some(reason),
             })
         }
         fn recorded(&self) -> Vec<(u32, String)> {
             self.calls.lock().unwrap().clone()
+        }
+        fn recorded_keys(&self) -> Vec<(u32, String)> {
+            self.key_calls.lock().unwrap().clone()
         }
     }
 
@@ -2516,8 +2530,12 @@ mod tests {
                 None => Ok(()),
             }
         }
-        fn locate_and_send_key(&self, _pid: u32, _key: &str) -> Result<(), String> {
-            Ok(())
+        fn locate_and_send_key(&self, pid: u32, key: &str) -> Result<(), String> {
+            self.key_calls.lock().unwrap().push((pid, key.to_string()));
+            match self.fail {
+                Some(e) => Err(e.to_string()),
+                None => Ok(()),
+            }
         }
     }
 
@@ -2633,6 +2651,91 @@ mod tests {
             )
             .unwrap();
         });
+    }
+
+    // ==== M8 Task 11：session-approve-options / session-approve 端点 ====
+    // 零污染：设备表/队列/审计全走 RemoteState.store = DeviceStore::memory()；
+    // 会话快照与注入器走注入缝；approve::load_mappings 只读全局 KV（缺省键回默认表，
+    // 与生产端点路径同语义）。不触真实 ~/.mam 的写路径。
+
+    /// Task 11 专用 state：会话夹具与 inject_state 同一套（sess_a Waiting / sess_b
+    /// Processing / sess_d zcode Waiting 无映射 / sess_e-f 备用），但 sess_a 可携带
+    /// last_message 供 detect 命中（inj_sess 夹具的 last_message 恒 None——approve_state
+    /// 局部变体按需补设）；另加 sess_g（Waiting，独占 id）：in-flight 守卫按 session_id
+    /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。其余缝与
+    /// inject_state 同口径（内存库，零接触真实 ~/.mam）
+    fn approve_state(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        sess_a_last: Option<&str>,
+    ) -> Arc<RemoteState> {
+        let sessions = vec![
+            {
+                let mut s = inj_sess(
+                    "sess_a",
+                    crate::session::AgentType::Claude,
+                    11,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = sess_a_last.map(str::to_string);
+                s
+            },
+            inj_sess(
+                "sess_b",
+                crate::session::AgentType::Claude,
+                12,
+                crate::session::SessionStatus::Processing,
+            ),
+            inj_sess(
+                "sess_c",
+                crate::session::AgentType::WorkBuddy,
+                13,
+                crate::session::SessionStatus::Idle,
+            ),
+            inj_sess(
+                "sess_d",
+                crate::session::AgentType::ZCode,
+                14,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_e",
+                crate::session::AgentType::Claude,
+                15,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_f",
+                crate::session::AgentType::Claude,
+                16,
+                crate::session::SessionStatus::Processing,
+            ),
+            inj_sess(
+                "sess_g",
+                crate::session::AgentType::Claude,
+                17,
+                crate::session::SessionStatus::Waiting,
+            ),
+        ];
+        Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: sessions.clone(),
+                total_count: sessions.len(),
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector,
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+        })
     }
 
     /// 直发可输入态（Waiting）：200 delivered + 注入器收到 compose 产物（裁决 6 归一）
@@ -3144,5 +3247,299 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 404);
         assert!(body_string(r).await.contains("no_session"));
+    }
+
+    /// 审批默认表 marker 命中句（DEFAULT_MAPPINGS_JSON claude.prompt_markers 含 "do you want"）
+    const APPROVE_HIT_MSG: &str = "Do you want to proceed?";
+
+    /// 审批选项（可批）：sess_a Waiting + last_message 命中 → 200 available=true +
+    /// options 恰为 允许/拒绝 两项（**无 key 字段**——键位不外泄给 UI）+
+    /// verifiedWith=probe-pending + drift=true（probe-pending 恒判漂移）
+    #[tokio::test]
+    async fn approve_options_available() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 无 cookie → 403（nest 内层 gate 结构性覆盖新端点）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "审批选项端点必须过 gate");
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "审批可用性是门禁下私有数据，禁止中间层缓存"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        let options = v["options"].as_array().expect("options 应为数组");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["id"], "approve");
+        assert_eq!(options[0]["label"], "允许");
+        assert_eq!(options[1]["id"], "reject");
+        assert_eq!(options[1]["label"], "拒绝");
+        for o in options {
+            assert!(
+                o.get("key").is_none(),
+                "选项载荷不得携带 key（键位不外泄给 UI）：{o}"
+            );
+        }
+        assert_eq!(v["verifiedWith"], "probe-pending");
+        assert_eq!(v["drift"], true, "probe-pending 恒判漂移（映射待实测确认）");
+        assert!(
+            fake.recorded_keys().is_empty(),
+            "查询选项端点不得触发任何按键注入"
+        );
+    }
+
+    /// 审批选项（不可批）：非 Waiting（sess_b Processing）→ available=false；
+    /// Waiting 但 last_message 与 marker 无关 → available=false；last_message=None
+    /// （sess_e 夹具原样）→ available=false（None 不命中）
+    #[tokio::test]
+    async fn approve_options_not_waiting_or_no_hit() {
+        let state_a_hit = approve_state(FakeInjector::ok(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state_a_hit, "mm", "测试设备");
+        let app = router(state_a_hit);
+        // sess_b Processing → available=false（Waiting 判定先于映射解析）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_b",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false, "非 Waiting 不得可批");
+        assert!(v["options"].as_array().unwrap().is_empty());
+        // sess_a Waiting 但 last_message 与任何 marker 无关 → available=false
+        let state_a_miss = approve_state(FakeInjector::ok(), Some("无关"));
+        persist_named_device(&state_a_miss, "mm", "测试设备");
+        let app_miss = router(state_a_miss);
+        let r = app_miss
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false, "marker 未命中不得可批");
+        assert!(v["options"].as_array().unwrap().is_empty());
+        // last_message=None（sess_e）→ available=false（detect 对 None 不命中）
+        let r = app_miss
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_e",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false, "无 last_message 不得可批");
+    }
+
+    /// 审批选项（无映射）：sess_d zcode（Waiting）工具无映射 → available=false
+    #[tokio::test]
+    async fn approve_options_no_mapping() {
+        let state = approve_state(FakeInjector::ok(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_d",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false, "工具无映射不得可批");
+        assert!(v["options"].as_array().unwrap().is_empty());
+    }
+
+    /// 审批应答（批准）：sess_a optionId=approve → 200 key_sent + FakeInjector 收到
+    /// (pid=11, "1")（**无 [mobile] 前缀**——按键非文本）+ 审计 action=approve result=ok
+    #[tokio::test]
+    async fn approve_sends_key() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_a","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "审批回执是门禁下私有数据，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\""),
+            "批准应回执 key_sent：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(11u32, "1".to_string())],
+            "按键注入必须带映射键位且无 [mobile] 前缀"
+        );
+        assert!(fake.recorded().is_empty(), "审批走按键通道，不走文本注入");
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "approve");
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(audits[0].channel, "fake");
+        assert_eq!(audits[0].session_id, "sess_a");
+    }
+
+    /// 审批应答（拒绝）：optionId=reject → 200 key_sent + FakeInjector 收到 (pid=17, "esc")
+    /// + 审计 action=reject。用独占会话 sess_g：in-flight 守卫按 session_id 全局占用，
+    /// 与 approve_sends_key（sess_a，契约指定）错开，防并行测试互抢守卫（Task 6 夹具同规）
+    #[tokio::test]
+    async fn approve_reject_audits_reject() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_g","optionId":"reject"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\""),
+            "拒绝应回执 key_sent：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(17u32, "esc".to_string())],
+            "拒绝键位 esc 必须来自映射表"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "reject", "拒绝审计 action=reject");
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(audits[0].session_id, "sess_g");
+    }
+
+    /// 审防 guard 矩阵：非法 optionId → 404 no_mapping；非 Waiting（sess_b）→ 409
+    /// not_waiting；不存在会话 → 404 no_session；缺参 → 400 bad_request
+    #[tokio::test]
+    async fn approve_guards() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 非法 optionId（映射表中无此项）→ 404 no_mapping（降级提示走普通发送）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_a","optionId":"bogus"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_mapping"));
+        // 非 Waiting（sess_b Processing）→ 409 not_waiting
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("not_waiting"));
+        // 不存在会话 → 404 no_session
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"nope","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_session"));
+        // 缺参（空 sessionId / 空 optionId）→ 400 bad_request
+        for payload in [
+            r#"{"sessionId":"","optionId":"approve"}"#,
+            r#"{"sessionId":"sess_a","optionId":"  "}"#,
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-approve",
+                    Some("mam_device=mm"),
+                    Some(payload),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "{payload}");
+            assert!(body_string(r).await.contains("bad_request"));
+        }
+        // 全程无任何投递
+        assert!(fake.recorded_keys().is_empty());
     }
 }
