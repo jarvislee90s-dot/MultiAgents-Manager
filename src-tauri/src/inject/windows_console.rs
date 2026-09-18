@@ -28,8 +28,9 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Console::{
     AttachConsole, FreeConsole, WriteConsoleInputW, INPUT_RECORD, KEY_EVENT,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC};
 
-use super::engine::{key_to_windows_vk, text_to_key_records, KeyRecordSpec};
+use super::engine::{control_records, enter_records, text_records, KeyLayout, KeyRecordSpec};
 
 /// 消费墙分片粒度：每片 1 字符 = keydown + keyup 两事件（M6 实证首读预算 13~43 字符）
 const CHUNK_EVENTS: usize = 2;
@@ -71,10 +72,45 @@ impl From<&KeyRecordSpec> for FlatKeyRecord {
             key_down: i32::from(spec.down),
             repeat_count: 1,
             virtual_key_code: spec.vk,
-            virtual_scan_code: 0,
+            // M9R：扫描码随规格下发（VK 形态事件必带，B 族 crossterm 以 VK+scan 为准）
+            virtual_scan_code: spec.scan,
             unicode_char: spec.ch,
             control_key_state: 0,
         }
+    }
+}
+
+/// 真实键位布局（M9R，Windows FFI，供调用点迁移；执行层大重写归 Task 3）。
+/// 依据 M6R §8.1 定案：vk = VkKeyScanW(ch) & 0xFF，scan = MapVirtualKeyW(vk)。
+pub(crate) struct WinKeyLayout;
+
+#[cfg(windows)]
+impl KeyLayout for WinKeyLayout {
+    /// 字符 → 虚拟键码：`'\r'` 直返 VK_RETURN（控制字符的 VkKeyScanW 语义不可靠，
+    /// 回车 VK 形态三家统一）；非 ASCII → 0（纯字符流，与现役 ConIn.ps1 口径
+    /// 一致）；ASCII → `VkKeyScanW`：返回 i16，-1（不可键入，如部分控制字符）
+    /// → 0 走字符流，否则低字节为 VK（高字节为 shift/Ctrl/Alt 修饰位，M9R 事件
+    /// 不带修饰态，丢弃）。
+    fn vk_of(&self, c: char) -> u16 {
+        if c == '\r' {
+            return 0x0D; // VK_RETURN
+        }
+        if !c.is_ascii() {
+            return 0;
+        }
+        // SAFETY: FFI 调用，无特殊前置条件
+        let ret = unsafe { VkKeyScanW(c as u16) };
+        if ret == -1 {
+            0
+        } else {
+            (ret & 0xFF) as u16
+        }
+    }
+
+    /// 虚拟键码 → 扫描码（`MAPVK_VK_TO_VSC`；无映射返回 0）。
+    fn scan_of(&self, vk: u16) -> u16 {
+        // SAFETY: FFI 调用，无特殊前置条件
+        unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 }
     }
 }
 
@@ -179,46 +215,24 @@ fn inject_via(pid: u32, records: &[KeyRecordSpec]) -> Result<(), String> {
     result
 }
 
-/// 文本注入（「打字 + 回车」铁则）：文本按 UTF-16 code unit 键事件 + 尾部回车事件对。
+/// 文本注入（「打字 + 回车」铁则）：正文按 [`text_records`] 分流构造
+/// （ASCII 走 VK 形态、非 ASCII 走 vk=0 字符流）+ 尾部 VK 形态回车事件对。
 /// `text` 已是 compose 后单行（含字面 \n 两字符场景也按字符事件直发）。
 pub(crate) fn inject_text(target_pid: u32, text: &str) -> Result<(), String> {
-    let mut records = text_to_key_records(text);
-    // 尾部回车事件对（与 macOS 通道「文本 + Enter 两连发」语义对齐）
-    records.extend(text_to_key_records("\n"));
+    let mut records = text_records(text, &WinKeyLayout);
+    // 尾部回车事件对：VK 形态（M9R 修正，取代旧 \n 特判 vk=0 形态——B 族丢
+    // vk=0 控制字符）；与 macOS 通道「文本 + Enter 两连发」语义对齐
+    records.extend(enter_records(&WinKeyLayout));
     inject_via(target_pid, &records)
 }
 
-/// 单键注入：已知 VK → 单键 down/up 事件对；未知（多字符/非单键）→ 文本通道。
+/// 单键注入：键域内（enter/esc/tab/单字符字母数字）→ VK+scan 键事件对；
+/// 域外（多字符/非 ASCII）→ 保持旧回退行为走文本通道（域外直接报错归 Task 3）。
 pub(crate) fn inject_key(target_pid: u32, key: &str) -> Result<(), String> {
-    match key_to_windows_vk(key) {
-        Some(vk) => inject_via(target_pid, &single_key_records(key, vk)),
+    match control_records(key, &WinKeyLayout) {
+        Some(records) => inject_via(target_pid, &records),
         None => inject_text(target_pid, key),
     }
-}
-
-/// 单键事件对的字符码：enter 特例 CR；esc/tab 取对应控制字符码；
-/// 单字符键取键面字符小写（VK 以大写位为基准，char 侧用小写与实际键面一致）。
-fn single_key_records(key: &str, vk: u16) -> Vec<KeyRecordSpec> {
-    let ch = match key {
-        "enter" => 0x0Du16,
-        "esc" => 0x1Bu16,
-        "tab" => 0x09u16,
-        _ => {
-            let mut chars = key.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) if c.is_ascii() => c.to_ascii_lowercase() as u16,
-                _ => 0,
-            }
-        }
-    };
-    vec![
-        KeyRecordSpec { vk, ch, down: true },
-        KeyRecordSpec {
-            vk,
-            ch,
-            down: false,
-        },
-    ]
 }
 
 /// PID 策略（M6 裁定）：先试 pid 本体（会话 CLI 原生进程 claude.exe/codex.exe/kimi.exe）；

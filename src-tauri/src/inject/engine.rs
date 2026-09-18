@@ -14,59 +14,204 @@
 //! 避免执行层二次转义）；执行层按平台 cfg 装配——macOS 真实现（归回传清单
 //! 实测复核）、Windows ConPTY 真实现（M9 Task 14，一跳验证归 Task 15/16）、
 //! 其他平台兜底 Err。
+//!
+//! ## M9R 事件构造纯核（按族分支，M6R §8.1）
+//!
+//! 键事件统一由 [`KeyRecordSpec`]（vk + scan + UTF-16 字符 + down/up）描述，
+//! 按 TUI 族分支构造（族表见 `super::families`）：
+//! - **A 族（claude/kimi/opencode，原生 VT 流）**：方向键走 [`vt_seq_records`]
+//!   整条 VT 序列字符流（vk=0/scan=0，执行层须单批原子写）；正文非 ASCII 字符
+//!   一律 vk=0 纯字符流（M6R 实证 vk=0 被消费，与现役 ConIn.ps1 口径一致）；
+//! - **B 族（codex，crossterm）**：控制键/回车/方向键必须 VK+scan 键形态
+//!   （B 族丢弃 vk=0 控制字符）——[`enter_records`] / [`control_records`] /
+//!   [`vk_arrow_records`]。
+//!
+//! 键位映射走 [`KeyLayout`] 缝：Windows 真 FFI 实现是 `windows_console::WinKeyLayout`
+//! （VkKeyScanW/MapVirtualKeyW，M6R §8.1），测试用假实现；纯核零平台 cfg，
+//! Windows 上全绿可测。字符事件一律 keydown+keyup 成对构造，keyup 由各家执行层
+//! 过滤/忽略（M6R F4 无双写）；回车独立提交（[`enter_records`]），正文不再特判
+//! `\n`（上游 normalize 保证正文无裸换行）。
 
-/// Windows 单键名 → 虚拟键码（VK_）：单字符 ASCII 字母/数字 → 大写 VK
-/// （'1'→0x31 … 'a'→0x41 大写位）；"enter"→VK_RETURN；"esc"→VK_ESCAPE；
-/// "tab"→VK_TAB；多字符/其他 → None（调用方走文本通道）。
-/// 跨平台纯函数（Windows 执行层消费，测试跨平台跑）。
-pub fn key_to_windows_vk(key: &str) -> Option<u16> {
-    match key {
-        "enter" => Some(0x0D), // VK_RETURN
-        "esc" => Some(0x1B),   // VK_ESCAPE
-        "tab" => Some(0x09),   // VK_TAB
-        _ => {
-            let mut chars = key.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => match c {
-                    'a'..='z' => Some(0x41 + (c as u16 - 'a' as u16)),
-                    'A'..='Z' => Some(0x41 + (c as u16 - 'A' as u16)),
-                    '0'..='9' => Some(0x30 + (c as u16 - '0' as u16)),
-                    _ => None,
-                },
-                _ => None,
-            }
-        }
-    }
-}
-
-/// 键事件记录规格（纯层自有类型，不引 windows 类型）：`vk` 虚拟键码；
-/// `ch` UTF-16 code unit；`down` 按下（false 为抬起）。
+/// 键事件记录规格（纯层自有类型，不引 windows 类型）：`vk` 虚拟键码
+/// （0 = 纯字符流形态）；`scan` 扫描码（[`KeyLayout::scan_of`] 派生，VK 形态
+/// 事件必带——B 族 crossterm 以 VK+scan 为准）；`ch` UTF-16 code unit
+/// （Windows UnicodeChar 口径）；`down` 按下（false 为抬起）。
 pub struct KeyRecordSpec {
     pub vk: u16,
+    pub scan: u16,
     pub ch: u16,
     pub down: bool,
 }
 
-/// 文本 → 键事件序列：每字符按 UTF-16 code unit 生成 keydown+keyup 事件对
-/// （统一 vk=0 + UnicodeChar，与 ConIn.ps1 一致——vk=0 也被消费；`\n` 字符
-/// 生成 VK_RETURN 事件对 vk=0x0D ch='\r'）。
-pub fn text_to_key_records(text: &str) -> Vec<KeyRecordSpec> {
-    let mut records = Vec::with_capacity(text.len() * 2);
-    for unit in text.encode_utf16() {
-        // \n（0x0A）→ VK_RETURN 事件对；其余统一 vk=0 + UnicodeChar
-        let (vk, ch) = if unit == u16::from(b'\n') {
-            (0x0Du16, 0x0Du16)
+/// 键位布局缝（M9R）：字符 → 虚拟键码、虚拟键码 → 扫描码。
+/// Windows 真 FFI 实现 `windows_console::WinKeyLayout`（VkKeyScanW /
+/// MapVirtualKeyW）；测试装配假实现。零平台 cfg——纯核跨平台可测。
+pub trait KeyLayout {
+    /// 字符 → 虚拟键码；真实布局对不可键入字符返回 0（调用方按纯字符流处理）。
+    fn vk_of(&self, c: char) -> u16;
+    /// 虚拟键码 → 扫描码（Windows：`MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)`）。
+    fn scan_of(&self, vk: u16) -> u16;
+}
+
+/// 文本 → 键事件序列（一律 keydown+keyup 成对，M9R 按字符分流构造）：
+/// - **ASCII 字符** → VK 形态：`vk = layout.vk_of(c)`（真实布局不可键入时为 0）、
+///   `scan = layout.scan_of(vk)`、`ch = c`；
+/// - **非 ASCII 字符**（CJK/emoji）→ 纯字符流：`vk = 0, scan = 0`，按
+///   `encode_utf16()` 逐 code unit 成对（`ch = unit`，代理对天然展开——
+///   `ch: u16` 与 UTF-16 口径对齐）。真实布局下非 ASCII 一律走 vk=0 字符流，
+///   与现役 ConIn.ps1 口径一致（M6R 实证 vk=0 被消费）。
+///
+/// 旧实现对 `\n` 特判 VK_RETURN 的逻辑**不再保留**：M9R 新架构回车独立提交
+/// （[`enter_records`]），上游 normalize 保证正文无裸换行。
+pub fn text_records(text: &str, layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
+    let mut records = Vec::new();
+    for c in text.chars() {
+        if c.is_ascii() {
+            let vk = layout.vk_of(c);
+            let scan = layout.scan_of(vk);
+            let ch = c as u16;
+            records.push(KeyRecordSpec {
+                vk,
+                scan,
+                ch,
+                down: true,
+            });
+            records.push(KeyRecordSpec {
+                vk,
+                scan,
+                ch,
+                down: false,
+            });
         } else {
-            (0u16, unit)
-        };
-        records.push(KeyRecordSpec { vk, ch, down: true });
-        records.push(KeyRecordSpec {
-            vk,
-            ch,
-            down: false,
-        });
+            // char::encode_utf16 写入栈上缓冲（单字符最长代理对 2 个 code unit）
+            let mut buf = [0u16; 2];
+            for unit in c.encode_utf16(&mut buf) {
+                records.push(KeyRecordSpec {
+                    vk: 0,
+                    scan: 0,
+                    ch: *unit,
+                    down: true,
+                });
+                records.push(KeyRecordSpec {
+                    vk: 0,
+                    scan: 0,
+                    ch: *unit,
+                    down: false,
+                });
+            }
+        }
     }
     records
+}
+
+/// 回车 → VK 形态事件对（三家统一，M6R F3：B 族丢弃 vk=0 控制字符）：
+/// `vk = layout.vk_of('\r')`、`scan = layout.scan_of(vk)`、`ch = 0x0D`，
+/// 成对 down/up（len = 2）。
+pub fn enter_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
+    let vk = layout.vk_of('\r');
+    let scan = layout.scan_of(vk);
+    vec![
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch: 0x0D,
+            down: true,
+        },
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch: 0x0D,
+            down: false,
+        },
+    ]
+}
+
+/// 控制键 → VK 形态事件对；**键域校验（P2-2）**：键域 = `"enter"`/`"esc"`/
+/// `"tab"` + 单字符 ASCII 字母数字（审批键位 "y"/"1" 走这里）；域外（空串/
+/// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab → VK_RETURN/VK_ESCAPE/
+/// VK_TAB 且 ch 同码；单字符 → `vk = layout.vk_of(c)`、`ch = c`；scan 一律
+/// `layout.scan_of(vk)` 派生；成对 down/up。
+pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecordSpec>> {
+    let (vk, ch) = match key {
+        "enter" => (0x0Du16, 0x0Du16), // VK_RETURN
+        "esc" => (0x1Bu16, 0x1Bu16),   // VK_ESCAPE
+        "tab" => (0x09u16, 0x09u16),   // VK_TAB
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii_alphanumeric() => (layout.vk_of(c), c as u16),
+                _ => return None, // 域外
+            }
+        }
+    };
+    let scan = layout.scan_of(vk);
+    Some(vec![
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch,
+            down: true,
+        },
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch,
+            down: false,
+        },
+    ])
+}
+
+/// VT 序列 → 整条字符流事件（A 族方向键等，M6R 定案）：按 `encode_utf16()`
+/// 逐 code unit 成对 down/up，全部 `vk = 0, scan = 0, ch = unit`。
+/// **执行层须整条单批原子写**（M6R：ESC 拆批会被 B 族当按键吃）。
+pub fn vt_seq_records(seq: &str) -> Vec<KeyRecordSpec> {
+    seq.encode_utf16()
+        .flat_map(|unit| {
+            [
+                KeyRecordSpec {
+                    vk: 0,
+                    scan: 0,
+                    ch: unit,
+                    down: true,
+                },
+                KeyRecordSpec {
+                    vk: 0,
+                    scan: 0,
+                    ch: unit,
+                    down: false,
+                },
+            ]
+        })
+        .collect()
+}
+
+/// 方向键名 → VK+scan 键形态事件对（B 族方向键，M6R 定案）：`"up"`/`"down"`/
+/// `"left"`/`"right"` → VK_UP(0x26)/VK_DOWN(0x28)/VK_LEFT(0x25)/VK_RIGHT(0x27)，
+/// `ch = 0`、`scan = layout.scan_of(vk)`，成对 down/up（len = 2）；域外键名
+/// → `None`。
+pub fn vk_arrow_records(seq: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecordSpec>> {
+    let vk = match seq {
+        "up" => 0x26u16,    // VK_UP
+        "down" => 0x28u16,  // VK_DOWN
+        "left" => 0x25u16,  // VK_LEFT
+        "right" => 0x27u16, // VK_RIGHT
+        _ => return None,
+    };
+    let scan = layout.scan_of(vk);
+    Some(vec![
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch: 0,
+            down: true,
+        },
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch: 0,
+            down: false,
+        },
+    ])
 }
 
 /// 构造 tmux 发送文本参数：`-l` 字面量 + `--` 终止选项解析。
@@ -482,57 +627,60 @@ mod tests {
         assert!(terminal_send_key_script("ttys005", "esc").contains("key code 53"));
     }
 
-    #[test]
-    fn vk_mapping() {
-        assert_eq!(key_to_windows_vk("enter"), Some(0x0D));
-        assert_eq!(key_to_windows_vk("esc"), Some(0x1B));
-        assert_eq!(key_to_windows_vk("tab"), Some(0x09));
-        assert_eq!(key_to_windows_vk("y"), Some(0x59));
-        assert_eq!(key_to_windows_vk("1"), Some(0x31));
-        // 字母统一大写 VK 位（大小写字面等价）
-        assert_eq!(key_to_windows_vk("Y"), Some(0x59));
-        assert_eq!(key_to_windows_vk("a"), Some(0x41));
-        assert_eq!(key_to_windows_vk("0"), Some(0x30));
-        // 非单键 → 走文本通道
-        assert_eq!(key_to_windows_vk("我们"), None);
-        assert_eq!(key_to_windows_vk("ok"), None);
-        assert_eq!(key_to_windows_vk("!"), None);
-        assert_eq!(key_to_windows_vk(""), None);
+    /// 假布局（测试缝）：vk_of 恒等映射、scan_of = vk+1——不触任何平台 FFI，
+    /// 跨平台确定可测（真实键位映射归 WinKeyLayout，实机验证归 Task 12）。
+    struct FakeLayout;
+
+    impl KeyLayout for FakeLayout {
+        fn vk_of(&self, c: char) -> u16 {
+            c as u16
+        }
+        fn scan_of(&self, vk: u16) -> u16 {
+            vk + 1
+        }
     }
 
     #[test]
-    fn text_records_pair_down_up() {
-        let recs = text_to_key_records("ab\n");
-        assert_eq!(recs.len(), 6);
-        assert_eq!(recs[0].ch, 'a' as u16);
-        assert!(recs[0].down);
-        assert!(!recs[1].down);
-        // \n → VK_RETURN 事件对（vk=0x0D ch='\r'）
-        assert_eq!((recs[4].vk, recs[4].ch), (0x0D, 0x0D));
-        assert!(recs[4].down);
-        assert!(!recs[5].down);
+    fn text_records_pair_with_vk_scan() {
+        let r = text_records("ab", &FakeLayout);
+        assert_eq!(r.len(), 4);
+        assert_eq!(
+            (r[0].vk, r[0].scan, r[0].ch, r[0].down),
+            (b'a' as u16, b'a' as u16 + 1, b'a' as u16, true)
+        );
+        assert!(!r[1].down); // 成对；keyup 由各家过滤/忽略（M6R F4 无双写）
     }
 
     #[test]
-    fn text_records_non_ascii_vk_zero() {
-        // 非 ASCII 按 UTF-16 code unit 拆对，统一 vk=0（与 ConIn.ps1 一致）
-        let recs = text_to_key_records("我");
-        assert_eq!(recs.len(), 2);
-        assert_eq!(recs[0].vk, 0);
-        assert_eq!(recs[0].ch, 0x6211); // '我' 的 UTF-16 code unit
-        assert!(recs[0].down);
-        assert!(!recs[1].down);
-        // emoji 代理对：2 个 code unit → 4 事件
-        assert_eq!(text_to_key_records("😀").len(), 4);
+    fn enter_is_vk_form() {
+        // 三家统一 VK 回车（B 族丢 vk=0 控制字符，M6R F3）
+        let r = enter_records(&FakeLayout);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].vk, FakeLayout.vk_of('\r'));
+        assert_eq!(r[0].ch, 0x0D);
+        assert!(r[0].scan > 0);
     }
 
     #[test]
-    fn tail_enter_pair_matches_vk_return_spec() {
-        // 尾部回车事件对与 text_to_key_records("\n") 同规格（执行层直接复用）
-        let tail = text_to_key_records("\n");
-        assert_eq!(tail.len(), 2);
-        assert_eq!(tail[0].vk, 0x0D);
-        assert_eq!(tail[0].ch, 0x0D);
-        assert!(tail[0].down && !tail[1].down);
+    fn control_keys_and_domain() {
+        assert!(control_records("esc", &FakeLayout).is_some());
+        assert!(control_records("tab", &FakeLayout).is_some());
+        assert!(control_records("我们", &FakeLayout).is_none()); // 域外 None——域校验（P2-2）
+    }
+
+    #[test]
+    fn vt_seq_is_char_stream() {
+        // A 族方向键：整条单批原子写的字符流
+        let r = vt_seq_records("\x1b[A");
+        assert!(r.iter().all(|k| k.vk == 0 && k.scan == 0));
+        assert_eq!(r[0].ch, 0x1B_u16);
+    }
+
+    #[test]
+    fn vk_arrow_for_crossterm() {
+        // B 族方向键：VK+scan、char=0
+        let r = vk_arrow_records("up", &FakeLayout).unwrap();
+        assert_eq!(r[0].ch, 0);
+        assert!(r[0].vk > 0 && r[0].scan > 0);
     }
 }
