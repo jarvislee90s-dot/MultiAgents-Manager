@@ -395,6 +395,7 @@ git commit -m "test(m5-files): 黑名单端到端回归锁——home_source 接�
 
 ## 七、已知边界（残余风险）
 
-- **firmlink 折叠是前缀级方案**：本次覆盖 `/System/Volumes/Data` 前缀（唯一实测未堵的等价别名形态）。若未来 macOS 引入新的等价挂载别名，需按同法枚举（权威清单 `/usr/share/firmlinks`）。
+- **firmlink 折叠按构造覆盖全部 19 条**（`/usr/share/firmlinks` 右列全部落在 Data 卷下，单一前缀折叠即全覆盖，无需逐条枚举）。真正的残余类别是**非 firmlink 别名**：如 `/.vol/<dev>/<ino>`——canonicalize 解析失败 → `NotFound`，目前被「偶然」挡住（不是机制性防线）；若将来有工具生成这类路径，需另行评估。
+- **macOS 大小写**（2026-09-18 复核新发现，修复前 base 即存在）：`is_sensitive_path` 仅在 Windows 语义下做小写归一；若磁盘上目录**真名**即为大写（如手工/同步工具创建的 `.SSH`），段匹配会漏——复核实测可读 7 字节。对照：磁盘为小写 `.gnupg` 而以 `.GNUPG` 访问则正常拒（canonicalize 返回磁盘真名）。CLI 生成的凭据目录出现大写真名不现实；如需收口可让 darwin 分支也做小写归一（语义变更，另立裁决）。
 - **未采用身份判定方案**（`(dev, ino)` 祖先遍历）：更稳但涉及 `path_within` 语义与 Windows 分支，超出本次范围；如需推进另立计划。
 - 主目录**之外**仍不设路径级防线（2026-09-18 裁决）；黑名单只在主目录内生效（基准不可用时除外——fail-closed 全段匹配）。

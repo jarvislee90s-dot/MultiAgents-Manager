@@ -929,7 +929,9 @@ mod tests {
             read_file_safe(cwd, outside.to_str().unwrap(), Some(home.to_str().unwrap()))
                 .unwrap_or_else(|e| panic!("全盘语义下主目录外文件必须放行: {e:?}"));
         assert_eq!(bytes, b"x");
-        // home 缺失不再收紧（home 参数已退役为策略扩展点）——路径照常可读
+        // home=None ⇒ 基准不可用 → 全段保守匹配分支：outside.txt 不含敏感段，
+        // 故仍可读（全盘语义不变；黑名单对含敏感段路径照拒——见
+        // sensitive_check_still_applies_when_home_base_unusable）
         let r = read_file_safe(cwd, outside.to_str().unwrap(), None);
         assert!(r.is_ok(), "home=None 不再构成边界（全盘语义）");
     }
@@ -1078,9 +1080,7 @@ mod tests {
     fn fold_data_volume_alias_folds_prefix_and_keeps_others() {
         // 别名形态 → 折叠为主目录字面
         assert_eq!(
-            fold_data_volume_alias(Path::new(
-                "/System/Volumes/Data/Users/u/.ssh/id_rsa"
-            )),
+            fold_data_volume_alias(Path::new("/System/Volumes/Data/Users/u/.ssh/id_rsa")),
             Path::new("/Users/u/.ssh/id_rsa")
         );
         // 恒等：非前缀路径原样返回
