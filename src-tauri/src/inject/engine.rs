@@ -396,6 +396,29 @@ pub trait Injector: Send + Sync {
     }
     fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String>;
     fn locate_and_send_key(&self, pid: u32, key: &str) -> Result<(), String>;
+
+    /// spec 感知注入（M9R，跨任务接口契约）：queue 驱动的 flush 必须能把
+    /// opencode 等慢消费者族规格送达引擎。默认实现忽略 spec、委托旧方法
+    /// （macOS 三通道按自身节奏、假注入器不受影响）；Windows [`RealInjector`]
+    /// 覆写两者把 spec 直送 `windows_console::inject_*_spec`。
+    fn locate_and_inject_spec(
+        &self,
+        pid: u32,
+        text: &str,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        let _ = spec;
+        self.locate_and_inject(pid, text)
+    }
+    fn locate_and_send_key_spec(
+        &self,
+        pid: u32,
+        key: &str,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        let _ = spec;
+        self.locate_and_send_key(pid, key)
+    }
 }
 
 pub struct RealInjector;
@@ -527,9 +550,9 @@ fn run_tmux(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Windows 执行层（M9，Task 14）：ConPTY 通道——AttachConsole + CONIN$ +
-/// WriteConsoleInput 逐片键事件（M6 探测结论落地），实现见
-/// [`crate::inject::windows_console`]；真实一跳验证归 Task 15/16。
+/// Windows 执行层（M9R，Task 3 重写）：ConPTY 通道——进程级互斥 + RAII 复位 +
+/// 自适应节流 + 真总预算（P1-1/P1-2/P2-1/P2-2），实现见
+/// [`crate::inject::windows_console`]；真实一跳验证归 Task 12。
 #[cfg(windows)]
 impl Injector for RealInjector {
     fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
@@ -537,6 +560,23 @@ impl Injector for RealInjector {
     }
     fn locate_and_send_key(&self, pid: u32, key: &str) -> Result<(), String> {
         crate::inject::windows_console::locate_and_send_key(pid, key)
+    }
+    fn locate_and_inject_spec(
+        &self,
+        pid: u32,
+        text: &str,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        // stats 本层不消费（Task 5 确认子集才读）；族规格送达执行层即达成本方法使命
+        crate::inject::windows_console::inject_text_spec(pid, text, spec).map(|_| ())
+    }
+    fn locate_and_send_key_spec(
+        &self,
+        pid: u32,
+        key: &str,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        crate::inject::windows_console::inject_key_spec(pid, key, spec)
     }
 }
 

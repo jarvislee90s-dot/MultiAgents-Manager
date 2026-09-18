@@ -1,21 +1,37 @@
 #![cfg(windows)]
-//! Windows ConPTY 注入通道（M9）：`AttachConsole` → 打开 `CONIN$` →
-//! `WriteConsoleInput` 逐片写键事件。M6 探测两处实证修正（落地必须照做）：
+//! Windows ConPTY 注入通道（M9R 执行层重写，M6R–M9R 批次 Task 3）：`AttachConsole`
+//! → 打开 `CONIN$` → `WriteConsoleInput` 写键事件。两处 M6 探测实证仍有效（落地照做）：
 //! 1. AttachConsole 后 `GetStdHandle` 返回旧控制台陈旧句柄（stdin 为管道时必败）
 //!    ——必须以 `CONIN$` 显式打开；
 //! 2. `INPUT_RECORD` 必须拍平为 blittable 布局（嵌套结构体在 FFI 封送报
 //!    0x8007007A）——本文件自定 20 字节平铺结构指针直传，与 ConIn.ps1 的
 //!    C# 平铺完全同构。
 //!
-//! 消费墙（M6 核心发现，引擎内建应对）：目标 TUI 读武装期首读预算 13~43 字符，
-//! 超出 `WriteConsoleInput` 返回 ERROR_INSUFFICIENT_BUFFER(122)；退格事件永不被拦。
-//! 引擎策略：小分片（每片 1 字符 = keydown+keyup 两事件）与片间短 sleep（15ms），
-//! 失败重试（100ms 间隔，总预算 10 秒）；预算耗尽仍失败 → 中文错误。
-//! 短消息（≤35 字符）在该策略下即时成功。
+//! ## M9R 执行纪律（本文件落实项，证据 `research/refs/phase2-消息注入/`）
+//! - **P1-2 进程级互斥**：控制台附加态进程全局唯一，[`CONSOLE_OP`] 串行化
+//!   「定位 → 附加 → 写入 → 复位」全程单临界区——公共入口 [`inject_text_spec`] /
+//!   [`inject_key_spec`] 各取一次锁；[`resolve_target`] 与 [`inject_via`] 为
+//!   **无锁内部版**（调用方已持锁），禁止嵌套取锁（std Mutex 不可重入，嵌套即死锁）；
+//! - **P1-1 RAII 复位**：[`AttachGuard`] Drop → `FreeConsole` 无条件复位，任何
+//!   错误/panic 早退路径都兜底——滞留附加列表的进程在宿主终端窗口关闭时会收到
+//!   CTRL_CLOSE_EVENT，本应用不装 SetConsoleCtrlHandler，默认行为是**被系统终止**
+//!   （用户关一个收过消息的终端 = MAM 整个应用跟着退出，故复位不可省，计划明文）；
+//! - **自适应节流（§8.1）**：按族规格（`super::families`，M6R 探测定案表）分流——
+//!   快消费者 80 字符/块（160 事件单次写入）、块间 50ms；慢消费者/长文切背压，
+//!   每块后排空目标输入缓冲占用至 ≤ DRAIN_TO(40) 再续写（15ms 轮询）；
+//! - **P2-1 真总预算**：正文 / 提交回车 / 122 重试 / 背压轮询共享一个 deadline
+//!   （`families::inject_budget_ms`，背压按斜率放宽），每轮循环顶部检查，耗尽即
+//!   中文报错（可重试语义）；
+//! - **部分写续写（M6R 纪律）**：`WriteConsoleInput` 实写 < 分片长 → 从偏移续写
+//!   （续写不睡眠）；122（ERROR_INSUFFICIENT_BUFFER）现语义 = 目标读武装期缓冲
+//!   暂满、可重试（M6「消费墙首读预算 13~43 字符」叙事已被 M6R 推翻）→ 100ms
+//!   重试同块；错误码仅在 Err 时读取（F7：ok=true 时错误码为噪声）；
+//! - **P2-2 键域校验**：域外键在取锁/附加之前快速失败并报错，**不回退文本+回车**。
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
 use windows::core::Error as WinError;
 use windows::core::HRESULT;
 use windows::Win32::Foundation::{
@@ -26,20 +42,51 @@ use windows::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows::Win32::System::Console::{
-    AttachConsole, FreeConsole, WriteConsoleInputW, INPUT_RECORD, KEY_EVENT,
+    AttachConsole, FreeConsole, GetNumberOfConsoleInputEvents, WriteConsoleInputW, INPUT_RECORD,
+    KEY_EVENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC};
 
-use super::engine::{control_records, enter_records, text_records, KeyLayout, KeyRecordSpec};
+use super::engine::{
+    control_records, enter_records, text_records, vk_arrow_records, vt_seq_records, KeyLayout,
+    KeyRecordSpec,
+};
+use super::families::{self, FamilySpec, TuiFamily};
 
-/// 消费墙分片粒度：每片 1 字符 = keydown + keyup 两事件（M6 实证首读预算 13~43 字符）
-const CHUNK_EVENTS: usize = 2;
-/// 片间短 sleep：给目标 TUI 留出消费输入缓冲的窗口
-const CHUNK_GAP: Duration = Duration::from_millis(15);
-/// 122（消费墙）重试间隔
+/// 122 重试间隔（§8.1：122 走 100ms 重试同块，受 deadline 约束）
 const RETRY_GAP: Duration = Duration::from_millis(100);
-/// 注入总预算：耗尽即判「目标终端输入未就绪」
-const INJECT_BUDGET: Duration = Duration::from_secs(10);
+/// 背压轮询间隔（§8.1：排空目标输入缓冲的 15ms 轮询步距，受 deadline 约束）
+const DRAIN_POLL_GAP: Duration = Duration::from_millis(15);
+
+/// P1-2：进程级注入互斥。控制台「附加态」是进程全局唯一的资源，任何并发注入
+/// （多会话同时 flush）都会互踩 attach/detach；此处串行化全部
+/// 「定位 → 附加 → 写入 → 复位」临界区。锁纪律：公共入口各取一次锁；
+/// `resolve_target` / `inject_via` 为无锁内部版，严禁嵌套取锁。
+static CONSOLE_OP: Lazy<std::sync::Mutex<()>> = Lazy::new(|| std::sync::Mutex::new(()));
+
+/// P1-1：附加态 RAII 守卫——构造前调用方已 `AttachConsole` 成功；Drop 时无条件
+/// `FreeConsole` 复位。任何错误/panic 早退路径都经过 Drop（旧实现手工收尾，
+/// `?` 早退/panic 路径会漏出滞留附加态 → CTRL_CLOSE_EVENT 连带终止风险）。
+struct AttachGuard;
+impl Drop for AttachGuard {
+    fn drop(&mut self) {
+        // SAFETY: FFI 调用；FreeConsole 幂等（未附加时也安全，M6 探测实证）
+        unsafe {
+            let _ = FreeConsole();
+        }
+    }
+}
+
+/// 注入结果统计（跨任务接口契约，Task 4/5 消费）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InjectStats {
+    /// 成功送达的正文字符数（`text.chars().count()`；Ok 即全量送达，不含提交回车）
+    pub written: usize,
+    /// 本次注入是否走背压节流（§8.1 自适应：慢消费者或长文）
+    pub backpressure: bool,
+    /// 冻结自愈是否发生（本任务恒 false；Task 4 冻结自愈置位）
+    pub unfroze: bool,
+}
 
 /// 平铺 KEY_EVENT `INPUT_RECORD`（blittable 20 字节）：EventType u16 + Reserved u16 +
 /// bKeyDown i32(BOOL) + wRepeatCount u16 + wVirtualKeyCode u16 + wVirtualScanCode u16 +
@@ -146,42 +193,95 @@ unsafe fn open_conin() -> Result<HANDLE, String> {
 
 /// 单片写入：平铺结构切片按 `INPUT_RECORD` 同构布局指针直传（上方编译期断言锁定
 /// 尺寸/对齐一致；windows-rs `WriteConsoleInputW` 内部对切片指针仅 transmute 直通，
-/// 无嵌套封马 → 不踩 0x8007007A）。返回 windows Error 以便按错误码分流（122 = 消费墙）。
+/// 无嵌套封马 → 不踩 0x8007007A）。返回 windows Error 以便按错误码分流
+/// （122 = 目标读武装期缓冲暂满，可重试）。**返回实写事件数**（M6R 纪律：
+/// 实写 < 分片长时调用方从偏移续写）。
 ///
 /// # SAFETY
 /// FFI 调用：`handle` 须为有效 CONIN$ 句柄；切片生命周期覆盖调用全程。
-unsafe fn write_chunk(handle: HANDLE, chunk: &[FlatKeyRecord]) -> Result<(), WinError> {
+unsafe fn write_chunk(handle: HANDLE, chunk: &[FlatKeyRecord]) -> Result<u32, WinError> {
     let records = std::slice::from_raw_parts(chunk.as_ptr() as *const INPUT_RECORD, chunk.len());
     let mut written = 0u32;
-    WriteConsoleInputW(handle, records, &mut written)
+    WriteConsoleInputW(handle, records, &mut written).map(|_| written)
 }
 
-/// 消费墙判定：ERROR_INSUFFICIENT_BUFFER(122)（HRESULT 形态 0x8007007A）
+/// 122 判定：ERROR_INSUFFICIENT_BUFFER(122)（HRESULT 形态 0x8007007A）。
+/// 仅在 `write_chunk` 返回 Err 时读错误码（M6R F7：ok=true 时错误码为噪声）。
 fn is_insufficient_buffer(e: &WinError) -> bool {
     e.code() == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0)
 }
 
-/// 分片写入主循环：每片 1 字符两事件；片间 15ms；Err(122) 100ms 重试整片；
-/// 总预算 10s，耗尽 → 中文错误（M6 消费墙语义，可重试）。
-fn write_all(handle: HANDLE, records: &[KeyRecordSpec]) -> Result<(), String> {
-    let deadline = Instant::now() + INJECT_BUDGET;
-    let mut sent = 0usize;
+/// 背压排空（§8.1）：轮询目标输入缓冲占用直至 ≤ `families::DRAIN_TO`(40) 再继续；
+/// 15ms 步距（[`DRAIN_POLL_GAP`]），同样受 `deadline` 约束（P2-1 真总预算）。
+fn drain_to(handle: HANDLE, deadline: Instant) -> Result<(), String> {
+    loop {
+        let mut pending = 0u32;
+        // SAFETY: FFI 调用；handle 为本调用链刚打开的有效 CONIN$ 句柄
+        unsafe { GetNumberOfConsoleInputEvents(handle, &mut pending) }.map_err(|e| {
+            format!(
+                "GetNumberOfConsoleInputEvents 失败（0x{:08X}）",
+                e.code().0 as u32
+            )
+        })?;
+        if pending <= families::DRAIN_TO {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("注入超时（总预算耗尽），请重试".into());
+        }
+        sleep(DRAIN_POLL_GAP);
+    }
+}
+
+/// 分片写入主循环（M9R §8.1 配方，取代旧 M6 消费墙保守实现）：
+/// - 每块 `families::CHUNK_CHARS * 2` 事件（80 字符 = 160 事件单次写入单元）；
+/// - **每轮循环顶部查 deadline**（P2-1 真总预算：写入/回车/122 重试/背压轮询共享）
+///   耗尽 → `Err("注入超时（总预算耗尽），请重试")`；
+/// - M6R 纪律：实写 < 分片长 → **从偏移续写**（续写不睡眠）；`Ok(0)` 不应发生
+///   （防御），按 122 同款可重试处理；
+/// - Err(122) → 100ms 重试同块（受 deadline）；其他错误 → 带错误码中文错误；
+/// - 非背压：块间 `families::CHUNK_GAP_MS`(50ms)；背压：每块后 [`drain_to`]。
+///
+/// 返回实写事件总数（供统计；调用方只看 Ok/Err 亦可）。
+fn paced_write(
+    handle: HANDLE,
+    records: &[KeyRecordSpec],
+    backpressure: bool,
+    deadline: Instant,
+) -> Result<usize, String> {
+    let chunk_events = families::CHUNK_CHARS * 2; // 80 字符 = 160 事件（§8.1）
+    let mut sent = 0usize; // 已实写事件数（部分写续写的游标）
     while sent < records.len() {
-        let end = (sent + CHUNK_EVENTS).min(records.len());
+        // P2-1：真总预算检查（写入/重试/轮询全走这里，一处收口）
+        if Instant::now() >= deadline {
+            return Err("注入超时（总预算耗尽），请重试".into());
+        }
+        let end = (sent + chunk_events).min(records.len());
         let chunk: Vec<FlatKeyRecord> =
             records[sent..end].iter().map(FlatKeyRecord::from).collect();
         match unsafe { write_chunk(handle, &chunk) } {
-            Ok(()) => {
+            Ok(written) if written as usize >= chunk.len() => {
                 sent = end;
-                if sent < records.len() {
-                    sleep(CHUNK_GAP);
+                if backpressure {
+                    // 背压：每块后排空目标输入缓冲至阈值再继续（含末块，§8.1）
+                    drain_to(handle, deadline)?;
+                } else if sent < records.len() {
+                    // 非背压：块间短睡眠，给目标 TUI 留输入缓冲消费窗口
+                    sleep(Duration::from_millis(families::CHUNK_GAP_MS));
+                }
+            }
+            Ok(written) => {
+                if written == 0 {
+                    // Ok(0) 不应发生（防御）：按 122 同款 100ms 重试同块
+                    sleep(RETRY_GAP);
+                } else {
+                    // M6R 纪律：实写 < 分片长，从偏移续写（续写不睡眠）
+                    sent += written as usize;
                 }
             }
             Err(e) if is_insufficient_buffer(&e) => {
-                // 消费墙：目标 TUI 读预算已满，等它消费后重试同一片
-                if Instant::now() >= deadline {
-                    return Err("目标终端输入未就绪（M6 消费墙），请稍后重试".into());
-                }
+                // 122 现语义（M6R 推翻消费墙）：目标读武装期缓冲暂满，可重试——
+                // 100ms 后重试同块（§8.1）；deadline 由循环顶部统一把守
                 sleep(RETRY_GAP);
             }
             Err(e) => {
@@ -192,51 +292,139 @@ fn write_all(handle: HANDLE, records: &[KeyRecordSpec]) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(sent)
 }
 
-/// 对已定位 pid 完整注入：attach → `CONIN$` → 分片写入 → `CloseHandle` →
-/// `FreeConsole` 复位（收尾，无论成败都执行）。
-///
-/// FreeConsole 复位不可省（计划明文）：注入后滞留附加列表的进程，在宿主终端窗口
-/// 关闭时会收到 CTRL_CLOSE_EVENT——本应用不装 SetConsoleCtrlHandler，默认行为是
-/// **被系统终止**（用户关一个收过消息的终端 = MAM 整个应用跟着退出）。
-fn inject_via(pid: u32, records: &[KeyRecordSpec]) -> Result<(), String> {
-    attach(pid).map_err(|code| format!("AttachConsole(pid={pid}) 失败（0x{code:08X}）"))?;
+/// 对 pid 完整注入一条写入闭包（M9R 重写，取代旧 records 直传版）。
+/// **锁纪律：调用方须已持 [`CONSOLE_OP`] 锁**（本函数为无锁内部版，doc 即契约：
+/// 公共入口各取一次锁、全程单临界区；本函数与 [`resolve_target`] 都不再取锁，
+/// 杜绝 std Mutex 不可重入导致的嵌套死锁）。
+/// 流程：resolve_target（锁内探测附加+祖先回退，每步失败即 FreeConsole 复位）
+/// → attach(target) → [`AttachGuard`] → open_conin → 写入闭包 → CloseHandle
+/// → guard Drop 复位。闭包在 guard 作用域内执行、不早退出；任何错误/panic
+/// 路径由 guard Drop 兜底复位（P1-1，CTRL_CLOSE_EVENT 防连带终止）。
+fn inject_via(pid: u32, write: impl FnOnce(HANDLE) -> Result<(), String>) -> Result<(), String> {
+    let target = resolve_target(pid)?;
+    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
+    let _guard = AttachGuard;
     // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
     let handle = unsafe { open_conin() }?;
-    let result = write_all(handle, records);
+    let result = write(handle);
     // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
     unsafe {
         let _ = CloseHandle(handle);
-        // 复位附加态（幂等，M6 探测实证）：见函数 doc 的 CTRL_CLOSE_EVENT 风险
-        let _ = FreeConsole();
     }
     result
+    // _guard 在此 Drop → FreeConsole 复位（无论成败；幂等，M6 探测实证）
 }
 
-/// 文本注入（「打字 + 回车」铁则）：正文按 [`text_records`] 分流构造
-/// （ASCII 走 VK 形态、非 ASCII 走 vk=0 字符流）+ 尾部 VK 形态回车事件对。
+/// 文本注入（「打字 + 回车」铁则，M9R spec 感知版）：正文按 [`text_records`]
+/// 分流构造（ASCII 走 VK 形态、非 ASCII 走 vk=0 字符流）+ 尾部 VK 形态回车
+/// 事件对（固定 [`families::SUBMIT_DELAY_MS`] 后单批提交）。自适应节流与真总
+/// 预算由族规格驱动（§8.1 / P2-1）。
 /// `text` 已是 compose 后单行（含字面 \n 两字符场景也按字符事件直发）。
-pub(crate) fn inject_text(target_pid: u32, text: &str) -> Result<(), String> {
-    let mut records = text_records(text, &WinKeyLayout);
-    // 尾部回车事件对：VK 形态（M9R 修正，取代旧 \n 特判 vk=0 形态——B 族丢
-    // vk=0 控制字符）；与 macOS 通道「文本 + Enter 两连发」语义对齐
-    records.extend(enter_records(&WinKeyLayout));
-    inject_via(target_pid, &records)
+pub(crate) fn inject_text_spec(
+    pid: u32,
+    text: &str,
+    spec: &FamilySpec,
+) -> Result<InjectStats, String> {
+    // P1-2：进程级串行（附加态全局唯一）；毒锁就地恢复（前次 panic 不放大为死锁）
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    // 域内路径：锁内 resolve_target（探测附加+祖先回退全在锁内，杜绝并发附加竞态）
+    let chars = text.chars().count();
+    let bp = families::use_backpressure(spec, chars);
+    // P2-1：真总预算（背压按斜率放宽）；取锁后起算（预算度量注入而非等锁）
+    let deadline = Instant::now() + Duration::from_millis(families::inject_budget_ms(spec, chars));
+    let layout = WinKeyLayout;
+    let body = text_records(text, &layout);
+    let enter = enter_records(&layout);
+    inject_via(pid, move |handle| {
+        paced_write(handle, &body, bp, deadline)?;
+        // 提交回车：正文写完固定延迟后单批发（回车不进 chunk 计划，§8.1）
+        sleep(Duration::from_millis(families::SUBMIT_DELAY_MS));
+        paced_write(handle, &enter, false, deadline)?;
+        Ok(())
+    })?;
+    Ok(InjectStats {
+        written: chars, // Ok = 全量送达；written 记正文字符数（不含提交回车）
+        backpressure: bp,
+        unfroze: false, // 本任务恒 false；Task 4 冻结自愈置位
+    })
 }
 
-/// 单键注入：键域内（enter/esc/tab/单字符字母数字）→ VK+scan 键事件对；
-/// 域外（多字符/非 ASCII）→ 保持旧回退行为走文本通道（域外直接报错归 Task 3）。
-pub(crate) fn inject_key(target_pid: u32, key: &str) -> Result<(), String> {
-    match control_records(key, &WinKeyLayout) {
-        Some(records) => inject_via(target_pid, &records),
-        None => inject_text(target_pid, key),
+/// A 族方向键 → VT 序列映射表（本地常量，M6R §8.1 定案：ESC [ + A/B/C/D 字母流，
+/// vk=0 字符形态整条单批原子写）。
+const ARROW_VT_SEQS: [(&str, &str); 4] = [
+    ("up", "\x1b[A"),
+    ("down", "\x1b[B"),
+    ("right", "\x1b[C"),
+    ("left", "\x1b[D"),
+];
+
+/// 键名 → 键事件序列（域判定纯构造，P2-2）：控制键/单字符字母数字走
+/// [`control_records`]；方向键按族分支——A 族 [`vt_seq_records`]（VT 字符流）/
+/// B 族 [`vk_arrow_records`]（VK+scan）。域外 → `None`。
+fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
+    if let Some(records) = control_records(key, &WinKeyLayout) {
+        return Some(records);
     }
+    let vt = ARROW_VT_SEQS
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, seq)| *seq);
+    match (vt, spec.family) {
+        (Some(seq), TuiFamily::RawVt) => Some(vt_seq_records(seq)),
+        (Some(_), TuiFamily::Crossterm) => vk_arrow_records(key, &WinKeyLayout),
+        (None, _) => None, // 域外
+    }
+}
+
+/// 单键注入（M9R spec 感知版）：键域内（enter/esc/tab/单字符字母数字/方向键）
+/// → 按族形态单批写入；域外 → **快速失败报错，不回退文本+回车**（P2-2 闭环）。
+/// 域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。
+pub(crate) fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), String> {
+    // P2-2：域校验先行——必须在取锁/附加之前快速失败（不触任何控制台 API）
+    let Some(records) = key_records_for(key, spec) else {
+        return Err(format!(
+            "不支持的按键：{key}（域：enter/esc/tab/单字符字母数字/方向键）"
+        ));
+    };
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    // 键事件 ≤ 8 条（方向键 VT 序列），无需放宽——固定基础预算（§8.1）
+    let deadline = Instant::now() + Duration::from_millis(families::BASE_BUDGET_MS);
+    inject_via(pid, move |handle| {
+        paced_write(handle, &records, false, deadline)?;
+        Ok(())
+    })
+}
+
+/// 无族回退规格（本地常量，对齐计划「无族按快消费者默认」口径）：A 族 RawVt +
+/// 非慢消费者 + 5s 确认超时。仅供旧薄壳 [`locate_and_inject`] /
+/// [`locate_and_send_key`]（trait 默认路径与既有调用）使用；正规路径一律经
+/// queue 驱动把族规格送达 `locate_and_*_spec`。
+const DEFAULT_SPEC: FamilySpec = FamilySpec {
+    family: TuiFamily::RawVt,
+    verified_with: "default-fast",
+    slow_consumer: false,
+    confirm_timeout_ms: 5_000,
+};
+
+/// 旧薄壳（保留供 trait 默认路径与既有调用编译）：无族回退 [`DEFAULT_SPEC`]
+/// + 委托 [`inject_text_spec`]。
+pub(crate) fn locate_and_inject(pid: u32, text: &str) -> Result<(), String> {
+    inject_text_spec(pid, text, &DEFAULT_SPEC).map(|_| ())
+}
+
+/// 旧薄壳（单键）：无族回退 [`DEFAULT_SPEC`] + 委托 [`inject_key_spec`]。
+pub(crate) fn locate_and_send_key(pid: u32, key: &str) -> Result<(), String> {
+    inject_key_spec(pid, key, &DEFAULT_SPEC)
 }
 
 /// PID 策略（M6 裁定）：先试 pid 本体（会话 CLI 原生进程 claude.exe/codex.exe/kimi.exe）；
 /// `AttachConsole` 失败 → 祖先链（近→远）第一个附加成功者；全部失败 → 中文错误。
+/// M9R 锁纪律：**无锁内部版**——假定调用方已持 [`CONSOLE_OP`] 锁（公共入口
+/// 各取一次锁、全程单临界区；resolve 与注入不得各自加锁嵌套）。探测性附加/
+/// 祖先回退每一步失败都 FreeConsole 复位，任何路径不滞留附加态。
 fn resolve_target(pid: u32) -> Result<u32, String> {
     let mut tried: Vec<String> = Vec::new();
     // 探测性附加：命中即复位（inject_via 会重新附加）——任何路径都不滞留附加态
@@ -264,21 +452,19 @@ fn resolve_target(pid: u32) -> Result<u32, String> {
     ))
 }
 
-/// 生产入口：定位可附加控制台并注入文本（打字 + 回车）。
-pub(crate) fn locate_and_inject(pid: u32, text: &str) -> Result<(), String> {
-    let target = resolve_target(pid)?;
-    inject_text(target, text)
-}
-
-/// 生产入口：定位可附加控制台并发送单键。
-pub(crate) fn locate_and_send_key(pid: u32, key: &str) -> Result<(), String> {
-    let target = resolve_target(pid)?;
-    inject_key(target, key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P2-2 键域校验单测：域外键报错（不回退文本+回车），且**域校验必须在
+    /// attach 之前快速失败**——假 pid 424242 不触发任何控制台附加（无真控制台
+    /// 也可稳定跑，常规 cargo test 门禁内执行）。
+    #[test]
+    fn unknown_key_rejected() {
+        let err =
+            inject_key_spec(424242, "bad!", &families::family_for("codex").unwrap()).unwrap_err();
+        assert!(err.contains("不支持的按键"));
+    }
 
     /// WinKeyLayout 真 FFI 契约单测（无需目标控制台，常规 cargo test 可跑）：
     /// 不硬编码键位（规避键盘布局差异误报）——vk_of('a') 与 `VkKeyScanW('a')`
