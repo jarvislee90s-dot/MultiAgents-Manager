@@ -108,6 +108,29 @@ const SENSITIVE_DIRS: &[&str] = &[
                // 误伤 AppData 下的临时文件）
 ];
 
+/// fail-closed 全段匹配面（基准不可用分支专用）：仅凭据类目录。AppData/Library
+/// 是「主目录内」语义段，不进全段面——Windows 的 TEMP 本就在 AppData 之下，
+/// 全局段匹配会误伤一切临时文件（含测试 tempdir，feat/phase2-injection 合并
+/// main 后 Windows 实机回归抓获；与本文件上方"全路径黑名单误伤 AppData 临时
+/// 文件"实测教训同源——那条教训只落在了正常分支，fail-closed 分支漏了）
+const CREDENTIAL_DIRS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".mam",
+    ".claude",
+    ".codex",
+    ".kimi-code",
+    ".zcode",
+    ".dsh",
+    ".config",
+    ".docker",
+    ".kube",
+    ".npmrc",
+    ".netrc",
+    ".git-credentials",
+];
+
 /// 预览拒绝原因（M5 P2-a：403 细分——原因仅暴露给已过闸设备，便于用户自助排障；
 /// 原设计「一律空体 403 防探测」随边界放开退役：PIN + cookie 已是门槛，原因文案
 /// 对已认证用户是排障信息而非预言机）
@@ -195,11 +218,11 @@ pub fn read_file_safe(
                 return Err(FileRejectReason::Sensitive);
             }
         }
-        // fail-closed：基准不可用 → 全段匹配。传 home="/" 实现之——POSIX 下
-        // strip_prefix("/") 剥掉根、Windows 下盘符路径不命中该前缀而走内核的
-        // full-path 兜底；两条路径结论一致：相对段 = 全路径段
+        // fail-closed：基准不可用 → 全段匹配（仅凭据目录——AppData/Library 为
+        // 主目录内语义段，全局匹配在 Windows 会误伤 TEMP（其位于 AppData 下），
+        // 见 CREDENTIAL_DIRS 注释）
         None => {
-            if is_sensitive_path(&canon.to_string_lossy(), "/", cfg!(windows)) {
+            if is_credential_path(&canon.to_string_lossy(), cfg!(windows)) {
                 return Err(FileRejectReason::Sensitive);
             }
         }
@@ -228,6 +251,17 @@ pub fn read_file_safe(
 /// （`/` 与 `\`）、Windows 语义大小写不敏感、剥 verbatim 前缀——macOS 形态
 /// `/Users/x/.ssh/id_rsa` 与 Windows 形态 `C:\Users\x\.ssh\id_rsa` 一并覆盖
 fn is_sensitive_path(child: &str, home: &str, windows: bool) -> bool {
+    any_segment_hit(child, home, SENSITIVE_DIRS, windows)
+}
+
+/// fail-closed 全段面（基准不可用）：仅凭据目录参与（见 CREDENTIAL_DIRS 注释）
+fn is_credential_path(child: &str, windows: bool) -> bool {
+    any_segment_hit(child, "/", CREDENTIAL_DIRS, windows)
+}
+
+/// 段匹配内核：child 相对 home 的路径段（home 之下取相对段，否则全段）与给定
+/// 目录清单精确比对（平台语义大小写注入）
+fn any_segment_hit(child: &str, home: &str, dirs: &[&str], windows: bool) -> bool {
     let norm = |s: &str| -> String {
         let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
             format!(r"\\{rest}")
@@ -260,7 +294,7 @@ fn is_sensitive_path(child: &str, home: &str, windows: bool) -> bool {
         } else {
             seg.to_string()
         };
-        SENSITIVE_DIRS.iter().any(|d| {
+        dirs.iter().any(|d| {
             let d = if windows {
                 d.to_lowercase()
             } else {
