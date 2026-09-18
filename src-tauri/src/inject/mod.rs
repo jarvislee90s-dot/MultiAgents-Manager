@@ -1,5 +1,6 @@
 pub mod approve;
 pub mod engine;
+pub mod families;
 pub mod normalize;
 pub mod queue;
 pub mod routing;
