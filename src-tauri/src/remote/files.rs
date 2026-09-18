@@ -128,6 +128,11 @@ impl FileRejectReason {
 /// 于主目录内（凭据高价值区）；主目录外连 Windows 系统目录都不设防（低价值 +
 /// 避免误伤 AppData 下的临时文件/测试目录——全路径黑名单会让 Windows 临时目录
 /// 全部不可读，实测教训）。
+///
+/// `home` = 敏感黑名单的**主目录基准**（非边界）：基准可用时仅主目录内路径过
+/// 段匹配；基准不可用（None / 无法 canonicalize）时退化为**全段保守匹配**
+/// （fail-closed，见 2026-09-18 追记：生产曾传 None 致黑名单整段失效）。
+/// **调用方必须传真实 home**（端点经 `RemoteState.home_source`）。
 pub fn read_file_safe(
     session_cwd: &str,
     path: &str,
@@ -147,21 +152,29 @@ pub fn read_file_safe(
     let canon = full
         .canonicalize()
         .map_err(|_| FileRejectReason::NotFound)?;
-    // 敏感黑名单（仅主目录范围内）：任意相对段命中 SENSITIVE_DIRS 即拒——
-    // 凭据防护的主体是 ~/.ssh、AppData 浏览器 profile、~/Library/Keychains 等。
-    // 主目录之外不再设路径级防线（低价值 + 误伤面大），访问门槛收敛到认证层
-    if let Some(home_s) = home {
-        let home_canon = Path::new(home_s)
-            .canonicalize()
-            .map_err(|_| FileRejectReason::NotFound)?;
-        if path_within(&canon, &home_canon)
-            && is_sensitive_path(
-                &canon.to_string_lossy(),
-                &home_canon.to_string_lossy(),
-                cfg!(windows),
-            )
-        {
-            return Err(FileRejectReason::Sensitive);
+    // 敏感黑名单（凭据防护，威胁主体 = 隧道/局域网上的配对设备读密钥）：
+    // - 主目录基准可用 → 仅主目录内的路径过段匹配（相对主目录段；主目录之外
+    //   不设路径级防线——M5 P2-a 2026-09-18 裁决原样保留）；
+    // - 基准不可用（未注入 / 无法 canonicalize）→ **全段保守匹配**（fail-closed：
+    //   宁可少读一个文件，凭据防护不因基准缺失而失效；也不让一个坏基准把全部
+    //   预览打成 NotFound——根因回归锁，生产曾在 3d22e2e 传 None 致黑名单整段跳过）
+    match home.and_then(|h| Path::new(h).canonicalize().ok()) {
+        Some(home_canon) => {
+            if path_within(&canon, &home_canon)
+                && is_sensitive_path(
+                    &canon.to_string_lossy(),
+                    &home_canon.to_string_lossy(),
+                    cfg!(windows),
+                )
+            {
+                return Err(FileRejectReason::Sensitive);
+            }
+        }
+        // home="/" ⇒ is_sensitive_path 的 strip_prefix 归零、相对段 = 全路径段
+        None => {
+            if is_sensitive_path(&canon.to_string_lossy(), "/", cfg!(windows)) {
+                return Err(FileRejectReason::Sensitive);
+            }
         }
     }
     let meta = canon.metadata().map_err(|_| FileRejectReason::NotFound)?;
@@ -938,6 +951,46 @@ mod tests {
         assert!(
             read_file_safe(cwd, f.to_str().unwrap(), Some(home_s)).is_ok(),
             "前缀相似目录（.ssh2）不得被误拒"
+        );
+    }
+
+    /// 黑名单基准不可用时的保守语义：敏感段照拒——凭据防护不得因基准缺失而
+    /// 失效（M5 P2-a 追记回归：生产曾传 None 致黑名单整段跳过，配对设备可读
+    /// ~/.ssh）；且坏基准不得把一个普通文件读成 NotFound 错误（不打死预览）
+    #[test]
+    fn sensitive_check_still_applies_when_home_base_unusable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let cwd = proj.to_str().unwrap();
+
+        // tmpdir 下造敏感段路径（不触真实主目录）
+        let secret = tmp.path().join(".ssh").join("id_rsa");
+        std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+        std::fs::write(&secret, "PRIVATE").unwrap();
+        let ok = tmp.path().join("notes.txt");
+        std::fs::write(&ok, "ok").unwrap();
+
+        // (1) home 未注入 → 敏感段必须拒（fail-closed）
+        assert_eq!(
+            read_file_safe(cwd, secret.to_str().unwrap(), None).unwrap_err(),
+            FileRejectReason::Sensitive,
+            "home 未知时敏感段必须照拒（fail-closed）"
+        );
+        // (2) home 给了但不存在（canonicalize 失败）→ 同样拒，且不得误报 NotFound
+        assert_eq!(
+            read_file_safe(cwd, secret.to_str().unwrap(), Some("/no-such-mam-home")).unwrap_err(),
+            FileRejectReason::Sensitive,
+            "坏基准下敏感段仍须拒（不得退化为 NotFound 跳过检查）"
+        );
+        // (3) 两者下普通文件仍可读（不误伤全盘语义、不打死预览）
+        assert!(
+            read_file_safe(cwd, ok.to_str().unwrap(), None).is_ok(),
+            "基准不可用不得妨碍普通文件（全盘语义不变）"
+        );
+        assert!(
+            read_file_safe(cwd, ok.to_str().unwrap(), Some("/no-such-mam-home")).is_ok(),
+            "坏基准不得让普通文件读取整体失败"
         );
     }
 
