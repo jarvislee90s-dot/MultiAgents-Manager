@@ -2740,7 +2740,9 @@ mod tests {
 
     /// Task 6 专用 state：夹具会话（sess_a Waiting / sess_b Processing / sess_c workbuddy
     /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话——
-    /// in-flight 守卫按 session_id 全局占用，避免并行测试互相挤占）+ 指定注入器；
+    /// in-flight 守卫按 session_id 全局占用，避免并行测试互相挤占 / sess_f Processing
+    /// 备用 / sess_h Waiting 独占（Important 3：busy 直发测试专用——守卫持到测尾的测试
+    /// 必须占独占 id，防与同 id 的其他测试互抢））+ 指定注入器；
     /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）
     fn inject_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
@@ -2781,6 +2783,12 @@ mod tests {
                 crate::session::AgentType::Claude,
                 16,
                 crate::session::SessionStatus::Processing,
+            ),
+            inj_sess(
+                "sess_h",
+                crate::session::AgentType::Claude,
+                17,
+                crate::session::SessionStatus::Waiting,
             ),
         ];
         Arc::new(RemoteState {
@@ -2836,8 +2844,10 @@ mod tests {
     /// Processing / sess_d zcode Waiting 无映射 / sess_e-f 备用），但 sess_a 可携带
     /// last_message 供 detect 命中（inj_sess 夹具的 last_message 恒 None——approve_state
     /// 局部变体按需补设）；另加 sess_g（Waiting，独占 id）：in-flight 守卫按 session_id
-    /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。其余缝与
-    /// inject_state 同口径（内存库，零接触真实 ~/.mam）
+    /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。sess_h（Waiting，
+    /// 独占 id，与 sess_a 同携命中 last_message）：Important 3——approve_sends_key 改用
+    /// 独占会话（与 send_delivers_when_input_ready 的 sess_a 直发错开全局 in-flight 表）。
+    /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.mam）
     fn approve_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
@@ -2889,6 +2899,18 @@ mod tests {
                 17,
                 crate::session::SessionStatus::Waiting,
             ),
+            {
+                // Important 3：approve_sends_key 独占会话——last_message 与 sess_a 同源
+                // 命中串（detect 依赖），pid 独立（18）供按键注入断言
+                let mut s = inj_sess(
+                    "sess_h",
+                    crate::session::AgentType::Claude,
+                    18,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = sess_a_last.map(str::to_string);
+                s
+            },
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -3135,21 +3157,23 @@ mod tests {
         assert!(pending.is_empty(), "拒绝路径不得入队");
     }
 
-    /// guard-busy 回归锁：直发遇 in-flight 占用 → 按 queued 回执（让位，不双投）
+    /// guard-busy 回归锁：直发遇 in-flight 占用 → 按 queued 回执（让位，不双投）。
+    /// Important 3：守卫持到测尾——占独占会话 sess_h（与 send_reports_inject_failure
+    /// 的 sess_e 错开，防并行互抢全局 in-flight 表假红）
     #[tokio::test]
     async fn send_input_ready_busy_inflight_falls_back_to_queue() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
-        let _busy = crate::inject::queue::try_acquire_inflight("sess_e").unwrap();
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_h").unwrap();
         let r = app
             .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-send",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_e","text":"你好"}"#),
+                Some(r#"{"sessionId":"sess_h","text":"你好"}"#),
             ))
             .await
             .unwrap();
@@ -3670,8 +3694,10 @@ mod tests {
         assert!(v["options"].as_array().unwrap().is_empty());
     }
 
-    /// 审批应答（批准）：sess_a optionId=approve → 200 key_sent + FakeInjector 收到
-    /// (pid=11, "1")（**无 [mobile] 前缀**——按键非文本）+ 审计 action=approve result=ok
+    /// 审批应答（批准）：sess_h optionId=approve → 200 key_sent + FakeInjector 收到
+    /// (pid=18, "1")（**无 [mobile] 前缀**——按键非文本）+ 审计 action=approve result=ok。
+    /// Important 3：独占会话 sess_h——契约行为不变（按键映射/无前缀/审计），仅与
+    /// send_delivers_when_input_ready 的 sess_a 直发错开全局 in-flight 守卫表
     #[tokio::test]
     async fn approve_sends_key() {
         let fake = FakeInjector::ok();
@@ -3684,7 +3710,7 @@ mod tests {
                 "POST",
                 "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_a","optionId":"approve"}"#),
+                Some(r#"{"sessionId":"sess_h","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
@@ -3703,7 +3729,7 @@ mod tests {
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(11u32, "1".to_string())],
+            vec![(18u32, "1".to_string())],
             "按键注入必须带映射键位且无 [mobile] 前缀"
         );
         assert!(fake.recorded().is_empty(), "审批走按键通道，不走文本注入");
@@ -3713,7 +3739,7 @@ mod tests {
         assert_eq!(audits[0].action, "approve");
         assert_eq!(audits[0].result, "ok");
         assert_eq!(audits[0].channel, "fake");
-        assert_eq!(audits[0].session_id, "sess_a");
+        assert_eq!(audits[0].session_id, "sess_h");
     }
 
     /// 审批应答（拒绝）：optionId=reject → 200 key_sent + FakeInjector 收到 (pid=17, "esc")

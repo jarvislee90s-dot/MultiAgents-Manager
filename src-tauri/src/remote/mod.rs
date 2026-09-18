@@ -539,9 +539,13 @@ fn stop_server_core(
     if let Some(h) = handle {
         h.abort();
     }
-    // 裁决 19 冻结队列：投递循环随服务同停——pending 冻结在账、重开续跑；abort 硬停的
-    // 「已注入未落账」窗口由启动对账兜底（P2-5）。abort_flush_loop 自取 FLUSH_LOOP_HANDLE
-    // 自己的锁，与 SERVER_HANDLE 不嵌套（两把锁不嵌套纪律保持）
+    // 裁决 19 冻结队列：停服 = 不再**发起新**投递（投递循环随服务同停），pending 冻结
+    // 在账、重开续跑。abort 只取消循环 future——在途投递（spawn_blocking 阻塞段）不受
+    // 影响，detached 跑完并正常落账（账面自洽）；投递守卫在阻塞闭包内（queue.rs
+    // Critical 1 修订）随投递全程占位 → 热重启后的新循环/对账经 INFLIGHT 互斥让位，
+    // 停服→热重启无双投。启动对账（P2-5）真正兜底的窗口 = 进程崩溃/强杀的「注入成功
+    // 后、落账前」+ stop→start 间隙丢失的跃迁事件。abort_flush_loop 自取
+    // FLUSH_LOOP_HANDLE 自己的锁，与 SERVER_HANDLE 不嵌套（两把锁不嵌套纪律保持）
     crate::inject::queue::abort_flush_loop();
     // M4 T0a：停止 = 已建立 SSE 连接即时断开。热重启路径同样断——监听没了连接必死，
     // 显式断开让注册表即刻一致，不依赖任务 abort 的 Drop 时序
@@ -2135,6 +2139,9 @@ mod tests {
     /// drop 可观测终结——tx 随被取消的任务 drop，rx 端 Disconnected）
     #[test]
     fn stop_server_core_explicit_close_revokes_and_teardowns_in_order() {
+        // Important 4：本测真实调 abort_flush_loop 清全局 FLUSH_LOOP_HANDLE 槽——与
+        // queue.rs 的 stop_freezes_flush_loop 共用测试串行锁，杜绝并行清槽/验槽假红
+        let _serial = crate::inject::queue::LOOP_HANDLE_TEST_LOCK.lock().unwrap();
         let arc = std::sync::Arc::new(std::sync::Mutex::new(memory_conn()));
         let store = pairing::DeviceStore::Owned(arc.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -2191,6 +2198,8 @@ mod tests {
     /// 形态见 server.rs 的 gate 级回归
     #[test]
     fn stop_server_core_hot_restart_keeps_devices_valid() {
+        // Important 4：同上——真实调 abort_flush_loop 的内核测试持测试串行锁
+        let _serial = crate::inject::queue::LOOP_HANDLE_TEST_LOCK.lock().unwrap();
         let arc = std::sync::Arc::new(std::sync::Mutex::new(memory_conn()));
         let store = pairing::DeviceStore::Owned(arc.clone());
         let now = chrono::Utc::now().timestamp_millis();

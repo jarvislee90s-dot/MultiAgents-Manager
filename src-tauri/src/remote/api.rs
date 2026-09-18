@@ -740,7 +740,9 @@ pub async fn session_send(
         "position": position,
     });
     // ⑥ 可输入态 → 直发（flush_one 投递内核，jump=false；in-flight 守卫与 flush 循环共用，
-    //    防同会话并发双投）
+    //    防同会话并发双投）。守卫不对称说明（queue.rs Critical 1 同审）：本守卫宿主是
+    //    handler 任务——stop 的 abort 只打 serve/accept 任务、不追杀已建立请求，不存在
+    //    「守卫先于 detached 投递释放」窗口，无需移入阻塞闭包（flush 循环事件臂必须移）
     if crate::inject::queue::is_input_ready(&session.status) {
         return match crate::inject::queue::try_acquire_inflight(&sid) {
             None => {
@@ -815,7 +817,7 @@ pub async fn session_send(
                             .into_response()
                     }
                     // Deferred/Suspended：行保持 pending 等会话回来/下个跃迁，语义即
-                    // 排队（Suspended 亦 queued）——回查 pending 取实时 position 回执
+                    // 排队（Suspended 亦 queued）——回查 pending 取该条目实时位次回执
                     crate::inject::queue::FlushOutcome::Deferred
                     | crate::inject::queue::FlushOutcome::Suspended => {
                         endpoint_audit(
@@ -828,9 +830,14 @@ pub async fn session_send(
                             "queue",
                             "ok",
                         );
+                        // position = 该条目在 pending 队列中的位次（第 1 位 = 1，评审 Minor 5
+                        // ——len() 会把队首误报为 1 条以后）；并发消费致条目已不在 pending →
+                        // 0（**前端 Task 8 须容忍 0**：语义为「已不在队列，由投递循环接力」）
                         let pos = st.store.with(|c| {
                             crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
-                                .len() as i64
+                                .iter()
+                                .position(|i| i.id == item_id)
+                                .map_or(0, |p| p as i64 + 1)
                         });
                         (
                             StatusCode::OK,
@@ -1060,11 +1067,16 @@ pub async fn session_queue_jump(
             .into_response(),
         crate::inject::queue::FlushOutcome::Failed(e) => failed_body(e),
         // Deferred/Suspended：行保持 pending 等会话回来/下个跃迁，语义即排队——
-        // 回查 pending 取实时 position 回执
+        // 回查 pending 取该条目实时位次回执
         crate::inject::queue::FlushOutcome::Deferred
         | crate::inject::queue::FlushOutcome::Suspended => {
+            // position = 条目位次（第 1 位 = 1，评审 Minor 5）；并发消费致条目已不在
+            // pending → 0（**前端 Task 8 须容忍 0**：语义为「已不在队列，由投递循环接力」）
             let pos = st.store.with(|c| {
-                crate::database::dao::inject_queue::pending_for_session_conn(c, &sid).len() as i64
+                crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
+                    .iter()
+                    .position(|i| i.id == item_id)
+                    .map_or(0, |p| p as i64 + 1)
             });
             (
                 StatusCode::OK,

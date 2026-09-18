@@ -8,6 +8,10 @@ use crate::database::connection::DB;
 /// SELECT 列清单（顺序与 row_to_queue 对齐）
 const COLS: &str = "id, session_id, agent_type, device_id, device_name, content, enqueued_at, sent_at, failed_reason";
 
+/// pending 谓词单源（sent_at / failed_reason 均空 = 待发）：全部 pending 查询共用本
+/// 常量——口径漂移在源头不可能（改谓词必动此一处，四处查询同步生效；评审 Minor 7）
+const PENDING_PREDICATE: &str = "sent_at IS NULL AND failed_reason IS NULL";
+
 /// 行映射（列序见 COLS）
 fn row_to_queue(row: &rusqlite::Row) -> rusqlite::Result<QueueRow> {
     Ok(QueueRow {
@@ -117,10 +121,10 @@ pub fn enqueue_conn(
     conn.last_insert_rowid()
 }
 
-/// 某会话全部待发消息（sent_at IS NULL AND failed_reason IS NULL），FIFO（按 id 升序）
+/// 某会话全部待发消息（pending 谓词见 [`PENDING_PREDICATE`] 单源），FIFO（按 id 升序）
 pub fn pending_for_session_conn(conn: &Connection, session_id: &str) -> Vec<QueueRow> {
     let sql = format!(
-        "SELECT {COLS} FROM inject_queue WHERE session_id = ?1 AND sent_at IS NULL AND failed_reason IS NULL ORDER BY id ASC"
+        "SELECT {COLS} FROM inject_queue WHERE session_id = ?1 AND {PENDING_PREDICATE} ORDER BY id ASC"
     );
     let Ok(mut stmt) = conn.prepare(&sql) else {
         log::error!("inject_queue 查询 pending 失败（prepare）");
@@ -133,10 +137,10 @@ pub fn pending_for_session_conn(conn: &Connection, session_id: &str) -> Vec<Queu
     rows.filter_map(|r| r.ok()).collect()
 }
 
-/// 队首：该会话最小 id 的待发行
+/// 队首：该会话最小 id 的待发行（pending 谓词见 [`PENDING_PREDICATE`] 单源）
 pub fn next_pending_conn(conn: &Connection, session_id: &str) -> Option<QueueRow> {
     let sql = format!(
-        "SELECT {COLS} FROM inject_queue WHERE session_id = ?1 AND sent_at IS NULL AND failed_reason IS NULL ORDER BY id ASC LIMIT 1"
+        "SELECT {COLS} FROM inject_queue WHERE session_id = ?1 AND {PENDING_PREDICATE} ORDER BY id ASC LIMIT 1"
     );
     conn.query_row(&sql, [session_id], row_to_queue)
         .optional()
@@ -185,15 +189,14 @@ pub fn get_conn(conn: &Connection, id: i64) -> Option<QueueRow> {
 }
 
 /// distinct pending 会话列表（P2-5 启动对账/周期兜底用）。
-/// **口径同源**：pending 谓词与 [`pending_for_session_conn`] 完全一致
-/// （`sent_at IS NULL AND failed_reason IS NULL`）——谓词改动必须同步本查询，防口径漂移；
-/// GROUP BY session_id + ORDER BY MIN(id)：按各会话最早入队行稳定排序（对账逐会话补投
-/// 的确定性顺序）
+/// **口径同源**：pending 谓词经 [`PENDING_PREDICATE`] 常量与 [`pending_for_session_conn`]
+/// 物理同源（单一字符串常量，漂移不可能）；GROUP BY session_id + ORDER BY MIN(id)：
+/// 按各会话最早入队行稳定排序（对账逐会话补投的确定性顺序）
 pub fn pending_session_ids_conn(conn: &Connection) -> Vec<String> {
-    let sql = "SELECT session_id FROM inject_queue \
-               WHERE sent_at IS NULL AND failed_reason IS NULL \
-               GROUP BY session_id ORDER BY MIN(id) ASC";
-    let Ok(mut stmt) = conn.prepare(sql) else {
+    let sql = format!(
+        "SELECT session_id FROM inject_queue WHERE {PENDING_PREDICATE} GROUP BY session_id ORDER BY MIN(id) ASC"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
         log::error!("inject_queue 查询 pending 会话列表失败（prepare）");
         return Vec::new();
     };
@@ -205,15 +208,12 @@ pub fn pending_session_ids_conn(conn: &Connection) -> Vec<String> {
 }
 
 /// pending 会话计数（P2-5 周期兜底的纯 SQL 门控——0 直接跳过，守宪法扫描预算）。
-/// **口径同源**：pending 谓词与 [`pending_for_session_conn`] 完全一致，防口径漂移
+/// **口径同源**：pending 谓词经 [`PENDING_PREDICATE`] 常量与 [`pending_for_session_conn`]
+/// 物理同源
 pub fn count_pending_sessions_conn(conn: &Connection) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(DISTINCT session_id) FROM inject_queue \
-         WHERE sent_at IS NULL AND failed_reason IS NULL",
-        [],
-        |r| r.get(0),
-    )
-    .unwrap_or_else(|e| {
+    let sql =
+        format!("SELECT COUNT(DISTINCT session_id) FROM inject_queue WHERE {PENDING_PREDICATE}");
+    conn.query_row(&sql, [], |r| r.get(0)).unwrap_or_else(|e| {
         log::error!("inject_queue 统计 pending 会话失败: {e}");
         0
     })

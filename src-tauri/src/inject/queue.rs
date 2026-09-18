@@ -257,6 +257,11 @@ pub(crate) fn flush_given(
 /// [`flush_one`] 常规路径补投。调用方保证运行于 spawn_blocking（flush_one 内的
 /// session_source 是同步阻塞调用）。结果处置与 flush 循环事件臂同口径：
 /// Sent 静默 / Failed(e) log::warn / 其余（Deferred/Suspended）静默。
+///
+/// 守卫生命周期核对（Critical 1 同审）：守卫在本函数体内、与 [`flush_one`] 同栈同
+/// 生命周期——本函数整体跑在调用方的 spawn_blocking 阻塞段里（abort 只取消调用方
+/// future 不打阻塞段），不存在循环事件臂「future 先 drop 释放守卫、阻塞段仍在跑」
+/// 的窗口，无需再入更内层闭包。
 pub(crate) fn reconcile_once(state: &std::sync::Arc<crate::remote::server::RemoteState>) {
     let sessions = state
         .store
@@ -328,10 +333,25 @@ fn flush_loop_handle_is_live(h: &Option<tauri::async_runtime::JoinHandle<()>>) -
         .unwrap_or(false)
 }
 
+/// 测试专用串行锁（仅 cfg(test)；评审 Important 4 裁决：独占资源方案，替代重试启发式）：
+/// `stop_freezes_flush_loop` 与 remote::mod 两个真实调 [`abort_flush_loop`] 的
+/// stop_server_core 内核测试**全程持锁**——FLUSH_LOOP_HANDLE 是进程级单例槽，三测并行
+/// 时互相清槽/验槽会假红，持本锁强制串行（确定性）。锁序：TEST_LOCK 先取，锁内才可能
+/// 触 FLUSH_LOOP_HANDLE（无反向获取者，无锁序环）。
+#[cfg(test)]
+pub(crate) static LOOP_HANDLE_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
 /// 冻结队列（裁决 19：停止远程 = 投递循环随服务同停）：取 FLUSH_LOOP_HANDLE 锁 →
 /// take → Some(h) 则 `h.abort()`。槽清空即幂等——重复调用 take 得 None，天然无害；
-/// 自取自己的锁，与 SERVER_HANDLE 不嵌套（两把锁不嵌套纪律保持）。abort 硬停的
-/// 「已注入未落账」窗口由启动对账兜底（[`reconcile_once`]，P2-5）。
+/// 自取自己的锁，与 SERVER_HANDLE 不嵌套（两把锁不嵌套纪律保持）。
+///
+/// 停服真实语义（评审 Important 2 归因纠正）：①abort 只取消循环 future，**不再发起新
+/// 投递**（冻结）——在途投递是 spawn_blocking 阻塞段，不受 abort 影响，detached 跑完
+/// 并正常 settle 落账（账面自洽，不存在停服硬停造成的「已注入未落账」）；②守卫在投递
+/// 闭包内（Critical 1）随投递全程占位，停服→热重启后的新循环/对账经 INFLIGHT 互斥让位，
+/// 无双投；③启动对账（[`reconcile_once`]，P2-5）真正兜底的窗口是「进程崩溃/强杀发生在
+/// 注入成功后、落账前」（重启后 at-least-once 重投）与 stop→start 间隙丢失的跃迁事件。
 pub(crate) fn abort_flush_loop() {
     let mut slot = FLUSH_LOOP_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(h) = slot.take() {
@@ -344,9 +364,10 @@ pub(crate) fn abort_flush_loop() {
 /// - **周期臂**（灰2）：60s 一跳 `sweep_if_pending`（纯 SQL 计数门控，0 直接跳过——
 ///   守宪法扫描预算），兜底跃迁事件丢失 / 事件臂 Lagged 丢最旧后的残留 pending；
 /// - **启动对账**（P2-5）：订阅建立后、进入 loop 前立即 `reconcile_once` 一次——
-///   主场景是进程重启后的遗留 pending 补投（含裁决 19 停服冻结期堆积 + abort 硬停的
-///   「已注入未落账」窗口）；subscribe 在 spawn 前已完成，期间发布的跃迁事件由通道
-///   缓冲，无丢失。
+///   主场景是进程重启后的遗留 pending 补投（兜底窗口 = 进程崩溃/强杀发生在「注入成功
+///   后、落账前」→ 重启后 at-least-once 重投；裁决 19 停服冻结期堆积与 stop→start
+///   间隙丢失的跃迁事件同由本扫 + 周期臂兜底）；subscribe 在 spawn 前已完成，期间
+///   发布的跃迁事件由通道缓冲，无丢失。
 ///
 /// spawn 用 tauri::async_runtime（与 watcher 同裁决：任意线程可用）；DB/注入走
 /// spawn_blocking。错误只记日志不 panic（下一跃迁/下轮兜底自会重试队首）。
@@ -356,7 +377,8 @@ pub(crate) fn abort_flush_loop() {
 ///    Closed（无发布者，进程收尾）才退出；
 /// 2. **burst 抑制**：recv 后 `try_recv` 排空积压，按 session_id 去重，每会话每批至多
 ///    一次 flush_one（避免逐事件排队放大投递；快照在 flush_one 内现取，去重后单次即最新态）；
-/// 3. **并发双投防护**：投递前取 in-flight 守卫，同会话并发触发只投一次；
+/// 3. **并发双投防护**：投递前取 in-flight 守卫（守卫在阻塞闭包内、与投递同生命周期
+///    ——Critical 1 修订，见闭包内注释），同会话并发触发只投一次；
 /// 4. JoinError 至少 log::warn（原 `let _ =` 把任务 panic/取消吞得不可见）。
 /// 5. **幂等**：FLUSH_LOOP_HANDLE 护栏（见上），serve() 重入不重复 spawn；停服经
 ///    [`abort_flush_loop`] 清槽（裁决 19 冻结队列，重开续跑）。
@@ -401,14 +423,21 @@ pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState
                                 }
                             }
                             for sid in batch {
-                                // 追记 3：该会话已有投递进行中 → 跳过（进行中的那次已覆盖本会话；
-                                // 队首若仍有残留，下一跃迁事件自会再触发）
-                                let Some(_guard) = try_acquire_inflight(&sid) else {
-                                    continue;
-                                };
                                 let st = state.clone();
                                 let sid_blocking = sid.clone();
                                 match tokio::task::spawn_blocking(move || {
+                                    // 追记 3（Critical 1 修订：守卫移入阻塞闭包）——守卫必须与
+                                    // 投递同生命周期：abort 循环只 drop future（在 .await 点），
+                                    // 守卫若持在 future 里会先于 detached 阻塞段释放，热重启后的
+                                    // 新循环/对账即可取到名额，对同一仍 pending 的队首再注入 = 双投。
+                                    // 守卫在闭包内时，detached 旧投递全程占位，新循环取不到名额
+                                    // 即让位（Deferred 静默）——停服→热重启无双投
+                                    let Some(_guard) = try_acquire_inflight(&sid_blocking) else {
+                                        // 该会话已有投递进行中（含停服后 detached 的旧投递）→
+                                        // 让位：进行中的那次已覆盖本会话，队首若仍有残留，下一
+                                        // 跃迁事件/周期兜底自会再触发
+                                        return FlushOutcome::Deferred;
+                                    };
                                     flush_one(&st, &sid_blocking, false)
                                 })
                                 .await
@@ -430,7 +459,10 @@ pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState
                         }
                     }
                 }
-                // 灰2：周期兜底臂——计数门在 sweep_if_pending 内（纯 SQL，0 跳过）
+                // 灰2：周期兜底臂——计数门在 sweep_if_pending 内（纯 SQL，0 跳过）。
+                // 披露（评审 Minor）：本串行结构自身是 Lag 生产源——长投递（含对账）期间
+                // rx 不被轮询，通道容量 64 可溢出丢最旧，sweep 即为其兜底；interval 默认
+                // Burst 行为，停机/阻塞期间的错失 tick 补拍亦经计数门，无害
                 _ = ticker.tick() => {
                     let st = state.clone();
                     if let Err(e) =
@@ -949,30 +981,26 @@ mod tests {
 
     /// 裁决 19（停止远程 = 冻结队列）：spawn_flush_loop 后 FLUSH_LOOP_HANDLE 槽 live；
     /// abort_flush_loop 后槽空；重复 abort 幂等无害（槽空 take 得 None）。
-    /// 并行测试共存说明：remote::mod 的 stop_server_core 注入式内核测试也会真实调
-    /// abort_flush_loop（同一全局槽）——若本测 spawn 后、首断言前被并发清空，重新
-    /// spawn 再验（幂等护栏允许槽空时重复 spawn），「live → abort → 空」迁移结论不变
+    /// Important 4：全程持 LOOP_HANDLE_TEST_LOCK——remote::mod 两个真实调
+    /// abort_flush_loop 的 stop_server_core 内核测试同锁串行化（同一全局槽，并行会
+    /// 假红），删除重试启发式、确定性优先
     #[test]
     fn stop_freezes_flush_loop() {
+        let _serial = LOOP_HANDLE_TEST_LOCK.lock().unwrap();
         let st = std::sync::Arc::new(state_with(
             vec![sess("s-frz", SessionStatus::Waiting, 30)],
             FakeInjector::ok(),
         ));
-        let mut aborted = false;
-        for _ in 0..20 {
-            spawn_flush_loop(st.clone());
-            if !flush_loop_handle_is_live(&FLUSH_LOOP_HANDLE.lock().unwrap()) {
-                continue; // 被并发测试清空：槽已空 → 幂等护栏放行重新 spawn
-            }
-            abort_flush_loop();
-            assert!(
-                FLUSH_LOOP_HANDLE.lock().unwrap().is_none(),
-                "abort 后句柄槽必须清空（冻结队列：投递循环随服务同停）"
-            );
-            aborted = true;
-            break;
-        }
-        assert!(aborted, "spawn 后句柄槽必须 live（重试上限内未观测到）");
+        spawn_flush_loop(st.clone());
+        assert!(
+            flush_loop_handle_is_live(&FLUSH_LOOP_HANDLE.lock().unwrap()),
+            "spawn 后句柄槽必须 live"
+        );
+        abort_flush_loop();
+        assert!(
+            FLUSH_LOOP_HANDLE.lock().unwrap().is_none(),
+            "abort 后句柄槽必须清空（冻结队列：投递循环随服务同停）"
+        );
         // 幂等：重复调用无害
         abort_flush_loop();
         assert!(FLUSH_LOOP_HANDLE.lock().unwrap().is_none());
@@ -1030,6 +1058,30 @@ mod tests {
         );
     }
 
+    /// 灰2/P2-5 周期兜底正向（评审 Minor 9）：pending>0 → 计数门放行 → reconcile
+    /// 补投成功——注入器收到消息、行 mark_sent、审计 action=flush（与启动对账同内核）
+    #[test]
+    fn periodic_sweep_flushes_when_pending_present() {
+        let fake = FakeInjector::ok();
+        let st = std::sync::Arc::new(state_with(
+            vec![sess("s-swp2", SessionStatus::Waiting, 34)],
+            fake.clone(),
+        ));
+        st.store.with(|c| enq(c, "s-swp2", "兜底补投消息"));
+
+        sweep_if_pending(&st);
+
+        assert_eq!(
+            fake.recorded(),
+            vec![(34u32, "兜底补投消息".to_string())],
+            "pending>0 计数门必须放行（补投经 flush_one 同源内核）"
+        );
+        let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1, "兜底补投恰一条审计");
+        assert_eq!(audits[0].action, "flush");
+        assert_eq!(audits[0].result, "ok");
+    }
+
     /// P1-4 四态上抛（flush_one 薄壳透传内核结论）：黄态 → Deferred；会话消失 →
     /// Suspended（两态行均保持 pending 不落账；delivered/queued/failed 的端点映射
     /// 在 server.rs 端点测试覆盖）
@@ -1048,6 +1100,12 @@ mod tests {
                 .is_some(),
             "Deferred 行保持 pending（等下个可输入态事件）"
         );
+        assert!(
+            st.store
+                .with(|c| write_audit::recent_conn(c, 10))
+                .is_empty(),
+            "Deferred 不落账不写审计（评审 Minor 9：挂起/等待非终态）"
+        );
 
         // 会话消失（空快照）→ Suspended
         let st2 = state_with(vec![], FakeInjector::ok());
@@ -1058,6 +1116,12 @@ mod tests {
                 .with(|c| inject_queue::next_pending_conn(c, "s-gone2"))
                 .is_some(),
             "Suspended 行保持 pending（红·中断挂起，W2）"
+        );
+        assert!(
+            st2.store
+                .with(|c| write_audit::recent_conn(c, 10))
+                .is_empty(),
+            "Suspended 不落账不写审计（红·中断非终态）"
         );
     }
 }
