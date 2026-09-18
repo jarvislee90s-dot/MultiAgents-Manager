@@ -69,6 +69,8 @@ export default function ApproveCard({ session }: ApproveCardProps) {
             setError("会话不在等待状态");
           } else if (code === "no_mapping") {
             setError("该工具暂不支持审批应答，请用普通发送");
+          } else if (code === "no_session") {
+            setError("会话已结束，请返回看板刷新");
           } else {
             setError(e.message);
           }

@@ -932,8 +932,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         <div className="flex min-h-0 flex-1 flex-col">
           {bookmarkBar}
           {/* 审批红卡（M8 Task 12）：waiting 态且正文视图挂载（预览/分屏分支不挂），
-              紧贴 messageArea 上方；available=false 时卡自身自隐（组件内部判定），
-              红卡出现依赖页面数据刷新（SSE → 重挂）自然带动 */}
+              紧贴 messageArea 上方；available=false 时卡自身自隐（组件内部判定）。
+              刷新机制事实口径：App 的 selected 是冻结快照，停留详情期间不会随 SSE
+              重挂——红卡在「退出详情再进入 / PWA 重载」后出现；停留期间会话转为
+              非 waiting 时点按钮会收到 409 not_waiting 的中文降级文案（不误发键） */}
           {session.status === "waiting" && <ApproveCard session={session} />}
           <div
             ref={messageAreaRef}

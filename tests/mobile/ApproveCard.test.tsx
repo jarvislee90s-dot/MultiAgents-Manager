@@ -159,4 +159,17 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
     );
     expect(approveCalls()).toHaveLength(1);
   });
+
+  it("ApiError 404 no_mapping：降级文案「该工具暂不支持审批应答，请用普通发送」", async () => {
+    installFetch();
+    routes.options = approveOptions();
+    routes.approveStatus = 404;
+    routes.approveBody = { error: "no_mapping" };
+    render(<ApproveCard session={{ id: "sess-1" }} />);
+    fireEvent.click(await screen.findByTestId("approve-option-approve"));
+    expect(await screen.findByTestId("approve-error").then((el) => el.textContent)).toContain(
+      "该工具暂不支持审批应答，请用普通发送"
+    );
+    expect(approveCalls()).toHaveLength(1);
+  });
 });
