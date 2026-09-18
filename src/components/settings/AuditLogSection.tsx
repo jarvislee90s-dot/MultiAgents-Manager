@@ -33,6 +33,8 @@ const GRID_COLS = "grid grid-cols-[92px_120px_minmax(0,1fr)_72px_minmax(0,1.4fr)
 export function AuditLogSection() {
   const { t } = useAppTranslation();
   const [items, setItems] = useState<AuditRow[]>([]);
+  // 加载失败可见（用户主动动作的失败不得伪装成「暂无记录」空态）：非空 = 展示错误行
+  const [loadError, setLoadError] = useState(false);
   // 刷新在途标记：仅用于禁用刷新按钮（连点无新语义，读操作幂等）
   const [loading, setLoading] = useState(false);
 
@@ -42,9 +44,12 @@ export function AuditLogSection() {
       // 兜底空表：mock/旧后端异常载荷不致 items.map 崩溃（同 settings.tsx `?? []` 防御）
       const payload = await invoke<{ items: AuditRow[] }>("inject_list_audit");
       setItems(payload?.items ?? []);
+      setLoadError(false);
     } catch (e) {
-      // 只读展示，失败保留旧数据（下手动刷新自愈），console 留痕即可
+      // 只读展示：失败保留旧数据（有旧数据时仅刷新按钮语义受损，可重试），
+      // 空数据时必须显式报错而非伪装空态
       console.error("inject_list_audit failed:", e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -65,7 +70,13 @@ export function AuditLogSection() {
       </div>
 
       {items.length === 0 ? (
-        <p className="text-muted-foreground mt-4 text-sm">{t("settings.audit.empty")}</p>
+        loadError ? (
+          <p className="mt-4 text-sm text-red-500" data-testid="audit-load-error">
+            {t("settings.audit.loadError")}
+          </p>
+        ) : (
+          <p className="text-muted-foreground mt-4 text-sm">{t("settings.audit.empty")}</p>
+        )
       ) : (
         <div className="mt-2 overflow-hidden rounded-xl border text-[12.5px]">
           {/* 表头（与行共用五列网格） */}

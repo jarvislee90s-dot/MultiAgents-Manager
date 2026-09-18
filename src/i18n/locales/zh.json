@@ -229,6 +229,7 @@
       "title": "注入审计",
       "refresh": "刷新",
       "empty": "暂无记录",
+      "loadError": "审计加载失败，请刷新重试",
       "time": "时间",
       "device": "设备",
       "session": "会话",
