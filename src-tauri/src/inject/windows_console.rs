@@ -224,8 +224,11 @@ fn single_key_records(key: &str, vk: u16) -> Vec<KeyRecordSpec> {
 /// PID 策略（M6 裁定）：先试 pid 本体（会话 CLI 原生进程 claude.exe/codex.exe/kimi.exe）；
 /// `AttachConsole` 失败 → 祖先链（近→远）第一个附加成功者；全部失败 → 中文错误。
 fn resolve_target(pid: u32) -> Result<u32, String> {
+    let mut tried: Vec<String> = Vec::new();
     // 探测性附加：命中即复位（inject_via 会重新附加）——任何路径都不滞留附加态
-    if attach(pid).is_ok() {
+    if let Err(code) = attach(pid) {
+        tried.push(format!("pid={pid} 0x{code:08X}"));
+    } else {
         let _ = unsafe { FreeConsole() };
         return Ok(pid);
     }
@@ -234,12 +237,17 @@ fn resolve_target(pid: u32) -> Result<u32, String> {
         if ancestor == pid {
             continue; // 本体已试过
         }
-        if attach(ancestor).is_ok() {
+        if let Err(code) = attach(ancestor) {
+            tried.push(format!("ancestor={ancestor} 0x{code:08X}"));
+        } else {
             let _ = unsafe { FreeConsole() };
             return Ok(ancestor);
         }
     }
-    Err(format!("附加目标控制台失败（pid={pid}）"))
+    Err(format!(
+        "附加目标控制台失败（pid={pid}，尝试：{}）",
+        tried.join("；")
+    ))
 }
 
 /// 生产入口：定位可附加控制台并注入文本（打字 + 回车）。
@@ -252,4 +260,85 @@ pub(crate) fn locate_and_inject(pid: u32, text: &str) -> Result<(), String> {
 pub(crate) fn locate_and_send_key(pid: u32, key: &str) -> Result<(), String> {
     let target = resolve_target(pid)?;
     inject_key(target, key)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Task 15 真 FFI 一跳集成测试（#[ignore]：需要弹真实 conhost 窗口，不在常规门禁跑）。
+    /// 运行：`cargo test --lib inject::windows_console -- --ignored --nocapture`
+    ///
+    /// 拓扑口径（M6 实证 + 本机对照实验 2026-09-18）：测试进程直生 cmd（CREATE_NEW_CONSOLE）
+    /// 的 AttachConsole 返回 0x80070005，而 conhost.exe cmd /k（PowerShell Start-Process
+    /// 起手）拓扑下 attach cmd.exe 稳定成功——故本测试 shell 出 PowerShell 建立已证拓扑。
+    /// 地面真值：向该 cmd 注入 `echo FFI-HOP-OK > hop.txt`，文件落盘 = 送达。
+    #[test]
+    #[ignore = "需要真实 conhost 窗口与外部进程，实机验证时以 --ignored 运行"]
+    fn ffi_hop_injects_into_fresh_console_cmd() {
+        use super::locate_and_inject;
+        use std::process::Command;
+
+        let work = std::env::temp_dir().join(format!("mam-ffi-hop-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        let hop = work.join("hop.txt");
+        let _ = std::fs::remove_file(&hop);
+
+        // 已证拓扑：conhost.exe cmd /k（挂在 work 目录）
+        let script = format!(
+            "Start-Process conhost.exe -ArgumentList 'cmd.exe','/k' -WorkingDirectory '{}'",
+            work.display()
+        );
+        let st = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .expect("启动 powershell 失败");
+        assert!(st.success(), "Start-Process 失败");
+        std::thread::sleep(std::time::Duration::from_millis(3000));
+
+        // 目标 pid：最新起的裸 cmd.exe（CommandLine 恰为 "cmd.exe"，排除其它业务进程）。
+        // 查询落盘为 .ps1 执行——规避 Rust→PowerShell 的多层引号转义
+        let finder = work.parent().unwrap().join("mam-ffi-hop-find.ps1");
+        std::fs::write(
+            &finder,
+            // CommandLine 实为 "cmd.exe /k"（本测试独有形态，Exclude 其它业务进程）
+            "(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object { $_.CommandLine -match 'cmd\\.exe /k$' } | Sort-Object CreationDate -Descending | Select-Object -First 1).ProcessId",
+        )
+        .unwrap();
+        let find_pid = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &finder.display().to_string(),
+            ])
+            .output()
+            .expect("枚举 cmd pid 失败");
+        let out = String::from_utf8_lossy(&find_pid.stdout).trim().to_string();
+        let _ = std::fs::remove_file(&finder);
+        println!("ffi-hop: target cmd pid={out}");
+        let pid: u32 = out.parse().expect("cmd pid 解析失败");
+
+        // 等 cmd 提示符就绪（读武装）
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        // 真 FFI 一跳：打字 + 回车（echo 重定向落盘）
+        let result = locate_and_inject(pid, "echo FFI-HOP-OK > hop.txt");
+        println!("ffi-hop: inject result={result:?}");
+
+        // 等 cmd 执行落盘
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let content = std::fs::read_to_string(&hop).ok();
+        println!("ffi-hop: hop.txt={content:?}");
+
+        // 收尾：关掉探测窗口（按 pid 杀 cmd 与其 conhost 宿主）
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+
+        assert!(result.is_ok(), "注入应成功：{result:?}");
+        assert!(
+            content.map(|c| c.contains("FFI-HOP-OK")).unwrap_or(false),
+            "hop.txt 应含 FFI-HOP-OK（地面真值）"
+        );
+    }
 }
