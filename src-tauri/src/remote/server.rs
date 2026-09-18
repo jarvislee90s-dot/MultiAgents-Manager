@@ -233,6 +233,10 @@ impl<S> Drop for CleanupStream<S> {
 /// via 判定域名源接缝类型（clippy type_complexity 收敛别名）
 pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send + Sync;
 
+/// A1 写入确认探针缝类型（M9R Task 5，clippy type_complexity 收敛别名，对齐
+/// [`ViaHostsSource`] 先例）：参数 = (tool, session_id, stamp)。
+pub type ConfirmProbeFn = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -278,6 +282,13 @@ pub struct RemoteState {
     /// 消费方：inject::queue::flush_one（flush 投递）+ session-send 直发（Task 6 已接线：
     /// 路由注册 / serve 挂 flush 循环 / 审计写口共用）——channel 名（审计）也取自本缝
     pub injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+    /// A1 写入确认缝（M9R Task 5）：参数 = (tool, session_id, stamp)。生产 =
+    /// 会话消息读路径查 24 字符尾戳（与 /session-messages 数据同源；读失败 =
+    /// 未命中，诚实口径）；测试恒 true（确认失败用例就地覆盖恒 false）。
+    /// 消费方：inject::confirm（flush_one 直发/插队确认轮询全经本缝，queue 测试
+    /// 零接触真实文件）——与 injector 缝同模式（生产装配无法捕获自身 Arc，
+    /// 故闭包内直调读路径）。
+    pub confirm_probe: std::sync::Arc<ConfirmProbeFn>,
     /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
     /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
     /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
@@ -404,6 +415,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.mam
             // M7 Task 5：注入器缝——本组测试不触 flush 路径，用生产占位
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
@@ -942,6 +955,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
@@ -1307,6 +1322,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "jarvis-win", "platform": "windows", "version": "9.9.9-test" },
@@ -1394,6 +1411,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(move |agent: &str, sid: &str, limit: usize| {
                 cap.lock()
@@ -1589,6 +1608,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| {
@@ -1862,6 +1883,8 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -1999,6 +2022,8 @@ mod tests {
                 store: crate::remote::pairing::DeviceStore::memory(),
                 // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
                 injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+                // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+                confirm_probe: std::sync::Arc::new(|_, _, _| true),
                 host_source: Box::new(|| serde_json::Value::Null),
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2546,6 +2571,8 @@ mod tests {
                     store: crate::remote::pairing::DeviceStore::memory(),
                     // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
                     injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+                    // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+                    confirm_probe: std::sync::Arc::new(|_, _, _| true),
                     host_source: Box::new(|| serde_json::Value::Null),
                     message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                     path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2764,6 +2791,8 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2869,6 +2898,8 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
+            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),

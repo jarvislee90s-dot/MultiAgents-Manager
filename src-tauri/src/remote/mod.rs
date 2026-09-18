@@ -216,6 +216,20 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // M7 Task 5（方案 A）：注入器生产装配——消费方 flush_one / session-send 直发；
         // Task 6 已接线：api_router 注册 session-send 等路由 + serve() 挂 spawn_flush_loop
         injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+        // A1 写入确认缝（M9R Task 5）：生产 = 会话消息读路径查 24 字符尾戳（与
+        // /session-messages 数据同源；读失败 = 未命中，诚实口径）。生产装配无法
+        // 捕获自身 Arc（与 injector 缝同构），故闭包内直调读路径——确认器「可插拔」
+        // 不建 per-tool 确认器，opencode 等 SQLite 家经同一派发天然覆盖。测试态恒
+        // true（server.rs / queue.rs 夹具），确认失败用例就地覆盖恒 false。
+        confirm_probe: std::sync::Arc::new(|tool: &str, sid: &str, stamp: &str| -> bool {
+            crate::remote::content::read_session_messages(
+                tool,
+                sid,
+                crate::inject::confirm::PROBE_MESSAGE_LIMIT,
+            )
+            .map(|pg| crate::inject::confirm::stamp_hit_in_page(&pg, stamp))
+            .unwrap_or(false)
+        }),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，

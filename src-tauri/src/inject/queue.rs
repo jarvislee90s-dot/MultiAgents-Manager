@@ -2,6 +2,13 @@
 //! （红·等待 / 绿·完成空闲——agent 把光标交回输入框的任何时刻）逐条 flush；
 //! 一次一条，等下一可输入态 = 单会话串行。红·中断（快照中会话消失）不 flush，挂起明示。
 //!
+//! ## A1 分层写入确认（M9R Task 5）
+//! 注入成功 ≠ 已送达：[`try_flush`] 在注入 Ok 后按直发/插队分派确认
+//! （实现全在 `super::confirm`，本模块只接线）——直发以会话文件戳命中定
+//! 「已送达」（超时走屏读回查补按回车）；插队以占用排空确认。确认轮询/屏读
+//! 全在 DB 锁外（`flush_one` 取件/落账两短临界区结构保证），调用经
+//! `RemoteState.confirm_probe` / `injector` 缝——测试零接触真实文件。
+//!
 //! ## 锁纪律（M4 死锁教训的两侧镜像，勿退化）
 //! - `DB.lock()` 临界区内**只做 SQL**（取队首 / 落账两个短临界区）；
 //! - 快照复核与注入**零 DB 锁**：`(st.session_source)()` 的生产实现（get_all_sessions）
@@ -9,8 +16,8 @@
 //!
 //! 测试策略（零接触真实 ~/.mam）：`flush_one` 的 DB 依赖经 `RemoteState.store`
 //! （生产 = `DeviceStore::Global` 即全局 DB 同锁同连接；测试 = 内存库，端点测试
-//! 不触真实目录），单测另可拆分内核 [`try_flush`]（快照复核 + 注入，零 DB）+
-//! [`settle`]（落账 + 审计，conn 显式注入内存库）直接驱动；两者的组合即
+//! 不触真实目录），单测另可拆分内核 [`try_flush`]（快照复核 + 注入 + A1 确认，
+//! 零 DB）+ [`settle`]（落账 + 审计，conn 显式注入内存库）直接驱动；两者的组合即
 //! `flush_one` 全部行为，组合本身仅 10 行取件/落账薄壳。
 
 use crate::database::dao::inject_queue::{self, QueueRow};
@@ -46,9 +53,11 @@ fn is_input_ready_str(wire: &str) -> bool {
 /// 单次投递结论（[`try_flush`] 的产出，[`settle`] 按此落账）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FlushOutcome {
-    /// 注入成功：mark_sent + 审计（action=flush|jump, result=ok）
+    /// 注入成功且 A1 确认通过（直发=会话文件戳命中；插队=占用排空/best-effort）：
+    /// mark_sent + 审计（action=flush|jump, result=ok）
     Sent,
-    /// 注入失败：mark_failed + 审计（action=fail, result=failed:e）
+    /// 注入失败或 A1 确认失败（直发未确认含屏读回查仍未见戳）：mark_failed +
+    /// 审计（action=fail, result=failed:e）——确认失败才回失败回执，重试由用户判断
     Failed(String),
     /// 快照中无此会话（红·中断挂起，W2）：不消费不落账
     Suspended,
@@ -56,13 +65,21 @@ pub(crate) enum FlushOutcome {
     Deferred,
 }
 
-/// 快照复核 + 注入（flush 的判定与投递半边，**零 DB 接触**；落账交 [`settle`]）。
-/// 调用方保证运行于 spawn_blocking（flush 循环与 Task 6 端点 handler 同先例），
-/// 本体不自行 spawn_blocking——session_source 是同步阻塞调用。
+/// 快照复核 + 注入 + A1 写入确认（flush 的判定与投递半边，**零 DB 接触**；落账
+/// 交 [`settle`]）。调用方保证运行于 spawn_blocking（flush 循环与 Task 6 端点
+/// handler 同先例），本体不自行 spawn_blocking——session_source 是同步阻塞调用，
+/// 确认轮询（[`confirm::await_direct_receipt`] / [`confirm::await_jump_receipt`]）
+/// 亦为阻塞语义且全在本函数内完成（DB 锁外——`flush_one` 的取件/落账两短临界区
+/// 结构保证，勿破坏）。
 /// - 会话查找直调注入源（数据同源铁律，与 files.rs 既有 `find` 形态一致）；
 ///   找不到 → [`FlushOutcome::Suspended`]（jump 也不发——红·中断无从定位 pid）；
 /// - 找到但 is_running 且 !jump → [`FlushOutcome::Deferred`]；jump=true 跳过 is_running
 ///   复核（裁决 12 插队语义：运行中 TUI 把消息放进自身输入缓冲，用户显式要求即刻送达）；
+/// - 注入按族规格走 `locate_and_inject_spec`（spec = `families::family_for`，无族
+///   回退 [`families::FALLBACK_SPEC`]——Task 3 trait 扩展正是为这里）；
+/// - **A1 分层写入确认（M9R Task 5，注入成功 ≠ 已送达）**：注入 Ok 后按 jump 分派
+///   ——直发以会话文件戳命中定「已送达」（超时走屏读回查：滞留判定 → 补按回车 →
+///   复查）；插队以占用排空确认（屏读 best-effort）。确认失败才 [`FlushOutcome::Failed`]；
 /// - content 已在入队时 compose 完毕（Task 6），flush 直发
 pub(crate) fn try_flush(
     st: &crate::remote::server::RemoteState,
@@ -81,7 +98,27 @@ pub(crate) fn try_flush(
     if is_running(&session.status) && !jump {
         return FlushOutcome::Deferred;
     }
-    match st.injector.locate_and_inject(session.pid, &item.content) {
+    let spec = crate::inject::families::family_for(&item.agent_type)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let receipt = match st
+        .injector
+        .locate_and_inject_spec(session.pid, &item.content, &spec)
+    {
+        Err(e) => Err(e),
+        Ok(()) => {
+            if jump {
+                super::confirm::await_jump_receipt(st, &session, &item.content)
+            } else {
+                super::confirm::await_direct_receipt(
+                    st,
+                    &session,
+                    &item.content,
+                    spec.confirm_timeout_ms,
+                )
+            }
+        }
+    };
+    match receipt {
         Ok(()) => FlushOutcome::Sent,
         Err(e) => FlushOutcome::Failed(e),
     }
@@ -389,10 +426,20 @@ mod tests {
     }
 
     /// 测试态：session_source 注入给定快照，injector 注入假体（其余缝全空载，
-    /// 形状对齐 server.rs test_state 先例——零 DB 零真实目录）
+    /// 形状对齐 server.rs test_state 先例——零 DB 零真实目录）；confirm_probe
+    /// 恒命中（首轮即中，零延迟零等待）
     fn state_with(
         sessions: Vec<Session>,
         injector: std::sync::Arc<dyn Injector>,
+    ) -> crate::remote::server::RemoteState {
+        state_with_probe(sessions, injector, std::sync::Arc::new(|_, _, _| true))
+    }
+
+    /// 变体：confirm_probe 可注入（A1 确认失败用例就地覆盖恒 false）
+    fn state_with_probe(
+        sessions: Vec<Session>,
+        injector: std::sync::Arc<dyn Injector>,
+        confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
     ) -> crate::remote::server::RemoteState {
         crate::remote::server::RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -414,6 +461,7 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             home_source: Box::new(|| None),
             injector,
+            confirm_probe,
         }
     }
 
@@ -606,6 +654,59 @@ mod tests {
         assert_eq!(audits[0].summary, want, "summary 必须经 summarize 截断");
         assert!(
             audits[0].summary.chars().count() <= super::super::normalize::AUDIT_SUMMARY_CHARS + 1
+        );
+    }
+
+    // ==== A1 写入确认（M9R Task 5）：直呼确认函数 + 小超时（避免 5s 慢测） ====
+
+    /// 直发确认失败：confirm_probe 恒 false（确认失败用例就地覆盖）→ 小超时轮询 +
+    /// 屏读门槛不成立（假 pid 屏读必败，保守不动作）→ Err 含裁决文案
+    #[test]
+    fn direct_confirm_failure_returns_err() {
+        let st = state_with_probe(
+            vec![sess("s-cf", SessionStatus::Waiting, 21)],
+            FakeInjector::ok(),
+            std::sync::Arc::new(|_, _, _| false),
+        );
+        let s = sess("s-cf", SessionStatus::Waiting, 21);
+        let err = super::super::confirm::await_direct_receipt(&st, &s, "直发确认消息", 60)
+            .expect_err("确认未中必须失败回执");
+        assert!(
+            err.contains("已注入未确认"),
+            "失败回执须含裁决 A1 文案：{err}"
+        );
+    }
+
+    /// 插队 best-effort：假 pid 下排空查询基础设施失败（wait_input_drained Err）→
+    /// 以「写入成功」为准返回 Ok（诊断通道不可用不得误报投递超时）；macOS 无
+    /// drain 可等 → 直接 Ok（同断言跨平台恒真）
+    #[test]
+    fn jump_receipt_best_effort_when_drain_unavailable() {
+        let st = state_with(
+            vec![sess("s-cj", SessionStatus::Processing, 22)],
+            FakeInjector::ok(),
+        );
+        let s = sess("s-cj", SessionStatus::Processing, 22);
+        assert_eq!(
+            super::super::confirm::await_jump_receipt(&st, &s, "插队确认消息"),
+            Ok(()),
+            "排空查询基础设施失败走 best-effort（以写入成功为准）"
+        );
+    }
+
+    /// 契约 API（Task 6 消费）：session_stamp_hit 复用 message_source 读路径；
+    /// 读失败 = 未命中（诚实口径——确认不足不伪装成功）
+    #[test]
+    fn session_stamp_hit_misses_when_read_fails() {
+        // state_with 的 message_source 为恒 Err 桩：read_session_messages_core
+        // 经缝读失败 → false
+        let st = state_with(
+            vec![sess("s-sh", SessionStatus::Waiting, 23)],
+            FakeInjector::ok(),
+        );
+        assert!(
+            !super::super::confirm::session_stamp_hit(&st, "claude", "s-sh", "任意戳"),
+            "读失败必须判未命中"
         );
     }
 }

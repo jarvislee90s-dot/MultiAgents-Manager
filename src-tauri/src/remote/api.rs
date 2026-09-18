@@ -456,6 +456,19 @@ pub async fn read_file(
     }
 }
 
+/// 「按 (agent, session) 读消息」聚合内核（M9R Task 5 抽取）：session-messages
+/// 端点与注入确认层（`inject::confirm::session_stamp_hit`）共用——**数据同源**：
+/// 同走 `RemoteState.message_source` 缝（生产 = content::read_session_messages
+/// 八工具统一出口；测试假源对端点矩阵与确认语义同时生效）。
+pub(crate) fn read_session_messages_core(
+    st: &RemoteState,
+    agent: &str,
+    sid: &str,
+    limit: usize,
+) -> Result<crate::remote::content::MessagesPage, String> {
+    (st.message_source)(agent, sid, limit)
+}
+
 /// GET /m/api/v1/session-messages?agent_type=&session_id=&limit=（M3 Task 7，C2 后端）
 /// 八工具统一内容出口（P9）：`{messages: [{seq, role, content, kind, ts, toolName?,
 /// toolArgs?, collapsed}]}`（SessionMessage camelCase 序列化）。
@@ -493,7 +506,9 @@ pub async fn session_messages(
     let st = st.clone();
     let agent_ref = agent.clone();
     let result = tokio::task::spawn_blocking(move || {
-        (st.message_source)(agent_ref.as_str(), sid.as_str(), limit)
+        // M9R Task 5：改调聚合内核 read_session_messages_core（端点与确认层共用，
+        // 行为不变——内核即原 message_source 直调）
+        read_session_messages_core(&st, agent_ref.as_str(), sid.as_str(), limit)
     })
     .await
     .map_err(|e| {

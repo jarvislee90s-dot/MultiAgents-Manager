@@ -87,8 +87,8 @@ const PARTIAL_WARN: &str = "；正文可能已写入输入行，重试将重复�
 /// 冻结错误前缀（§8.1/§8.3：WT 宿主下冻结恢复未验证由该文案覆盖并引导人工介入）
 const FREEZE_ERR: &str = "目标终端输入冻结（选择模式），自动解冻失败——请点一下该终端窗口后重试";
 /// M1 保守闸：`try_unfreeze` 入口剩余 deadline 不足此值时直接 `Ok(false)`
-/// 不发 ESC（让循环顶部既有「注入超时」路径报错，避免短窗把本可解冻的案例
-/// 误判成冻结错误——解冻等待本体 ≥2s，低于该余量的窗口等不出有意义结果）。
+/// 不发 ESC（短窗不发 ESC，由冻结错误（含防重警示）兜底——解冻等待本体 ≥2s，
+/// 低于该余量的窗口等不出有意义结果）。
 const UNFREEZE_MIN_MARGIN_MS: u64 = 500;
 
 /// P1-2：进程级注入互斥。控制台「附加态」是进程全局唯一的资源，任何并发注入
@@ -247,7 +247,6 @@ unsafe fn open_conin() -> Result<HANDLE, String> {
 ///
 /// # SAFETY
 /// FFI 调用：成功句柄由调用方负责 `CloseHandle` 收尾；须处于目标控制台附加态。
-#[allow(dead_code)] // Task 5 确认层消费（插队草稿确认/直发滞留回查）；本任务先落契约
 unsafe fn open_conout() -> Result<HANDLE, String> {
     CreateFileW(
         windows::core::w!("CONOUT$"),
@@ -353,10 +352,10 @@ impl OccWatch {
                         self.unfroze = true;
                         self.since = None; // 解冻成功：重开窗口继续写
                     } else {
-                        // I1：正文第 k 块触发且解冻失败时，前 k 块已滞留冻结缓冲，
-                        // 人工点窗口解冻后文本会落入输入行未提交——追加与回车块
-                        // 相同的防重警示（PARTIAL_WARN）
-                        return Err(format!("{FREEZE_ERR}{PARTIAL_WARN}"));
+                        // I1/N1（Task 4 复检）：冻结错误在此保持**裸** FREEZE_ERR——
+                        // 防重警示（PARTIAL_WARN）由调用点按路径拼接（正文有正文、
+                        // 键路径无正文），源头拼接会让回车路径双重警示
+                        return Err(FREEZE_ERR.to_string());
                     }
                 }
             }
@@ -382,7 +381,8 @@ impl OccWatch {
 /// 不可重入，嵌套即死锁）。等待上限 2s，实际取 `min(2s, deadline 剩余)`——
 /// deadline 耗尽由调用方既有循环顶部超时检查报错，本函数不另行超时报错；
 /// 入口保守闸（M1）：剩余 deadline < 500ms 时直接 `Ok(false)` 不发 ESC（发帖+
-/// 等待本体 ≥2s，短窗等不出有意义结果），让既有超时路径报错而非误报冻结。
+/// 等待本体 ≥2s，短窗等不出有意义结果）——短窗不发 ESC，由冻结错误（含防重
+/// 警示）兜底。
 ///
 /// 返回 `Ok(true)` = 已解冻（占用逐样本下降或归零）；`Ok(false)` = 等待超时
 /// 无下降（仍冻结，PostMessage 失败亦归此态）；`Err` 仅保留占用查询失败
@@ -588,13 +588,16 @@ pub(crate) fn inject_text_spec(
     // 语义；回车块写入前/写入中触发解冻成功 → 同理照常发送。故**不新增独立
     // 补发逻辑**（避免双回车）；回车块因解冻失败而 Err → 既有半成功文案兜底。
     let unfroze = inject_via(pid, move |handle| {
-        let body_out = paced_write(handle, &body, bp, deadline)?;
+        // N1：正文路径防重警示在调用点拼接（正文已部分写入输入行 → 任何正文错误
+        // 皆带防重提示；冻结错误源头为裸 FREEZE_ERR，杜绝双重拼接）
+        let body_out =
+            paced_write(handle, &body, bp, deadline).map_err(|e| format!("{e}{PARTIAL_WARN}"))?;
         // 提交回车：正文写完固定延迟后单批发（回车不进 chunk 计划，§8.1）
         sleep(Duration::from_millis(families::SUBMIT_DELAY_MS));
         let enter_out = paced_write(handle, &enter, false, deadline).map_err(|e| {
             // 半成功防重（对齐 macOS tmux「文本已入 pane」先例）：正文已进输入行、
             // 回车未提交，盲目重试会重复正文——追加人工确认提示（PARTIAL_WARN
-            // 与正文冻结错误共用，I1）
+            // 与正文调用点共用拼接，I1；冻结错误源头裸 FREEZE_ERR，N1）
             format!("{e}{PARTIAL_WARN}")
         })?;
         Ok(body_out.unfroze || enter_out.unfroze)
@@ -665,7 +668,6 @@ pub(crate) fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<
 /// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——
 /// 锁 → [`resolve_target`]（无锁内部版，调用方持锁）→ attach → [`AttachGuard`]
 /// → CONOUT$ 读 → CloseHandle → guard Drop 复位 → 解锁。
-#[allow(dead_code)] // Task 5 确认层消费；本任务先落契约签名（实机探测见 #[ignore] 测试）
 pub(crate) fn read_input_tail(pid: u32, n: usize) -> Result<String, String> {
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
     let target = resolve_target(pid)?;
@@ -684,7 +686,6 @@ pub(crate) fn read_input_tail(pid: u32, n: usize) -> Result<String, String> {
 
 /// 屏读实现体（[`read_input_tail`] 已开 CONOUT$ 句柄）：`GetConsoleScreenBufferInfo`
 /// 取光标位置 → 同行向前读 `min(n, cursor_x+1)` 个 unit。
-#[allow(dead_code)] // 同 read_input_tail（Task 5 消费）
 fn read_tail_chars(handle: HANDLE, n: usize) -> Result<String, String> {
     // M2：n==0 早退（避免空切片/零宽读取走 FFI 的歧义路径，语义恒空串）
     if n == 0 {
@@ -719,26 +720,51 @@ fn read_tail_chars(handle: HANDLE, n: usize) -> Result<String, String> {
     Ok(String::from_utf16_lossy(&buf)) // 不 trim（契约：截尾/匹配语义归调用方）
 }
 
-/// 无族回退规格（本地常量，对齐计划「无族按快消费者默认」口径）：A 族 RawVt +
-/// 非慢消费者 + 5s 确认超时。仅供旧薄壳 [`locate_and_inject`] /
-/// [`locate_and_send_key`]（trait 默认路径与既有调用）使用；正规路径一律经
-/// queue 驱动把族规格送达 `locate_and_*_spec`。
-const DEFAULT_SPEC: FamilySpec = FamilySpec {
-    family: TuiFamily::RawVt,
-    verified_with: "default-fast",
-    slow_consumer: false,
-    confirm_timeout_ms: 5_000,
-};
-
-/// 旧薄壳（保留供 trait 默认路径与既有调用编译）：无族回退 [`DEFAULT_SPEC`]
-/// + 委托 [`inject_text_spec`]。
-pub(crate) fn locate_and_inject(pid: u32, text: &str) -> Result<(), String> {
-    inject_text_spec(pid, text, &DEFAULT_SPEC).map(|_| ())
+/// 插队确认排空判定专用（Task 5 / A1 插队语义）：轮询目标输入缓冲占用直至
+/// ≤ [`families::DRAIN_TO`]（15ms 步距）或超时——达标 `Ok(true)`、超时
+/// `Ok(false)`（调用方报「投递超时」）、基础设施失败 `Err` 上抛（调用方
+/// best-effort 以「写入成功」为准处理）。与注入共用 [`CONSOLE_OP`] 串行
+/// （附加态互斥；锁纪律与 [`read_input_tail`] 同款：锁 → resolve → attach →
+/// guard → CONIN$ 查询 → CloseHandle → guard Drop 复位 → 解锁）。
+pub(crate) fn wait_input_drained(pid: u32, timeout_ms: u64) -> Result<bool, String> {
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let target = resolve_target(pid)?;
+    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
+    let _guard = AttachGuard;
+    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
+    let handle = unsafe { open_conin() }?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let result = loop {
+        match query_pending(handle) {
+            Ok(pending) => {
+                if pending <= families::DRAIN_TO {
+                    break Ok(true);
+                }
+                if Instant::now() >= deadline {
+                    break Ok(false);
+                }
+                sleep(DRAIN_POLL_GAP);
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result
+    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
 }
 
-/// 旧薄壳（单键）：无族回退 [`DEFAULT_SPEC`] + 委托 [`inject_key_spec`]。
+/// 旧薄壳（保留供 trait 默认路径与既有调用编译）：无族回退 [`families::FALLBACK_SPEC`]
+/// + 委托 [`inject_text_spec`]（回退常量已归口 families.rs——脆弱常量集中落点）。
+pub(crate) fn locate_and_inject(pid: u32, text: &str) -> Result<(), String> {
+    inject_text_spec(pid, text, &families::FALLBACK_SPEC).map(|_| ())
+}
+
+/// 旧薄壳（单键）：无族回退 [`families::FALLBACK_SPEC`] + 委托 [`inject_key_spec`]。
 pub(crate) fn locate_and_send_key(pid: u32, key: &str) -> Result<(), String> {
-    inject_key_spec(pid, key, &DEFAULT_SPEC)
+    inject_key_spec(pid, key, &families::FALLBACK_SPEC)
 }
 
 /// PID 策略（M6 裁定）：先试 pid 本体（会话 CLI 原生进程 claude.exe/codex.exe/kimi.exe）；

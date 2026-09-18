@@ -55,6 +55,16 @@ pub const BASE_BUDGET_MS: u64 = 10_000;
 /// 极端 emoji 负载预算可能偏紧——Task 12 实机校准项。
 pub const BACKPRESSURE_MS_PER_CHAR: u64 = 45;
 
+/// 无族回退规格（queue 驱动的 flush 对黑盒/无头家的兜底——族表未收录的工具）：
+/// 快消费者默认口径（A 族形态 + 5s 确认超时）。脆弱常量集中落点（宪法横切 6）
+/// 故放本模块；windows_console 旧薄壳已改引本常量，单一来源勿复制。
+pub(crate) const FALLBACK_SPEC: FamilySpec = FamilySpec {
+    family: TuiFamily::RawVt,
+    verified_with: "default-fast",
+    slow_consumer: false,
+    confirm_timeout_ms: 5_000,
+};
+
 /// 工具 → 族规格（小写精确匹配，对齐 `AgentType` serde lowercase 形态）。
 /// M6R 探测定案表；其余工具（workbuddy/dsh/zcode/openclaw 等黑盒/无头家）
 /// 返回 None——路由层已拦，此处纵深防御。
@@ -128,6 +138,18 @@ mod tests {
         assert_eq!(OCC_ABNORMAL_MS, 5_000);
         assert_eq!(BASE_BUDGET_MS, 10_000);
         assert_eq!(BACKPRESSURE_MS_PER_CHAR, 45);
+    }
+
+    #[test]
+    fn fallback_spec_matches_default() {
+        // 无族回退钉值（const 常量 → const 块编译期断言，clippy assertions_on_constants）：
+        // 快消费者口径（A 族 + 5s 确认超时）——queue/确认层的黑盒家兜底，与 M6R
+        // 「无族按快消费者默认」定案对齐
+        const _: () = {
+            assert!(matches!(FALLBACK_SPEC.family, TuiFamily::RawVt));
+            assert!(!FALLBACK_SPEC.slow_consumer);
+            assert!(FALLBACK_SPEC.confirm_timeout_ms == 5_000);
+        };
     }
 
     #[test]
