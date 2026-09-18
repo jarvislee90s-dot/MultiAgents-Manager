@@ -16,6 +16,7 @@ import { ArrowLeft, ChevronDown, ChevronRight, PanelLeft, RotateCw } from "lucid
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
+import MessageComposer from "./MessageComposer";
 import { type PreviewMode } from "./PreviewModeSwitcher";
 import SplitHandle from "./SplitHandle";
 import {
@@ -937,6 +938,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           >
             {messageArea}
           </div>
+          {/* 发送输入区（M7 Task 7，W4）：仅正文视图挂载（预览/分屏分支不挂）；
+              send-info 拉取失败时组件自静默，不影响对话渲染 */}
+          <MessageComposer session={session} />
         </div>
       )}
 

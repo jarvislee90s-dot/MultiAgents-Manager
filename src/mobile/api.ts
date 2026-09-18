@@ -307,3 +307,119 @@ export function connectEvents(
     if (reconnectTimer) clearTimeout(reconnectTimer);
   };
 }
+
+// ==== M7 Task 7：注入发送（W4 移动端发送 UI）====
+
+/** 输入区可用性矩阵（GET /session-send-info 载荷，与 Rust `session_send_info`
+ *  的 JSON 逐字段对应，勿漂移）：injectable=false 时 reasonCode/reason 携带不可
+ *  注入原因（如 WorkBuddy 黑盒）；channels 为候选注入通道（tmux/iterm2/…）；
+ *  visibility=after_refresh 表示注入后需刷新才见回显 */
+export interface SendInfo {
+  injectable: boolean;
+  reasonCode?: string;
+  reason?: string;
+  channels: string[];
+  visibility: "realtime" | "after_refresh";
+}
+
+/** 拉取输入区可用性（W4：输入区挂载时一次）。403（设备失效，与 fetchSessions
+ *  同语义）→ null；其余失败（404 会话不在快照 / 网络异常）→ 抛 ApiError，
+ *  由调用方静默降级（不渲染输入区，详情页正文照常） */
+export async function fetchSendInfo(sessionId: string): Promise<SendInfo | null> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-send-info?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-send-info 网络异常: ${String(e)}`);
+  }
+  if (r.status === 403) return null; // 设备失效 → 回配对页
+  if (!r.ok) throw new ApiError(r.status, `session-send-info ${r.status}`);
+  return (await r.json()) as SendInfo;
+}
+
+/** 发送回执（POST /session-send 响应三态，HTTP 200 恒定，语义在 body.status）：
+ *  delivered=已直送终端；queued=运行中留队（itemId+position 供插队/撤回/排队
+ *  指示）；failed=注入失败回执（error 文案可直接展示；失败行已退出 pending，
+ *  队列无残留，重按发送即重试） */
+export type SendResult =
+  | { status: "delivered" }
+  | { status: "queued"; itemId: number; position: number }
+  | { status: "failed"; error: string };
+
+/** 发送消息（W4 直发/入队分派，后端按输入态路由；多行原样上行，归一在服务端
+ *  入队时一次完成）。非 2xx（400 参数非法 / 404 会话消失 / 403 不可注入）→
+ *  抛 ApiError */
+export async function sessionSend(sessionId: string, text: string): Promise<SendResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, text }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-send 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-send ${r.status}`);
+  return (await r.json()) as SendResult;
+}
+
+/** 排队条目视图（GET /session-queue 的 items 元素，camelCase 契约）：position =
+ *  1 起队位；content 为入队时 compose 完成的最终注入文本（含设备名前缀） */
+export interface QueueItemView {
+  id: number;
+  content: string;
+  enqueuedAt: number;
+  position: number;
+}
+
+/** 拉取该会话待发队列（FIFO，W4 排队指示/轮询刷新的数据源）。非 2xx → 抛 ApiError */
+export async function fetchQueue(sessionId: string): Promise<QueueItemView[]> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-queue?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-queue 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-queue ${r.status}`);
+  const j = (await r.json()) as { items?: QueueItemView[] };
+  return Array.isArray(j.items) ? j.items : [];
+}
+
+/** 插队直发（裁决 12）：按 itemId 点名该会话 pending 中的一条即刻注入。
+ *  200 {status:"delivered"|"failed"}（failed 时后端 error 文案不在本返回类型内，
+ *  调用方按「立即发送未成功」兜底）；非 2xx（404 not_found 条目已不在队 / 409
+ *  投递进行中）→ 抛 ApiError */
+export async function queueJump(sessionId: string, itemId: number): Promise<{ status: string }> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-queue/jump", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, itemId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-queue/jump 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-queue/jump ${r.status}`);
+  return (await r.json()) as { status: string };
+}
+
+/** 撤回排队条目（W4）：200 {ok:true}；条目已不在队（已送达 / 他端撤回）→
+ *  404 not_found → 抛 ApiError（调用方按「已不在队列」收敛，不作失败提示） */
+export async function queueRetract(sessionId: string, itemId: number): Promise<{ ok: boolean }> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-queue/retract", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, itemId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-queue/retract 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-queue/retract ${r.status}`);
+  return (await r.json()) as { ok: boolean };
+}
