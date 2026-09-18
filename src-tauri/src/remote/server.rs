@@ -3292,6 +3292,102 @@ mod tests {
         );
     }
 
+    /// P1-4 端点精确映射（jump Suspended 分支）：点名快照中不存在的会话的 pending 项 →
+    /// flush_given 挂起（红·中断不投递，W2）→ 200 queued + itemId/position（行保持
+    /// pending 等会话回来，由 flush 循环/对账接力——Suspended 亦按排队回执）
+    #[tokio::test]
+    async fn queue_jump_suspended_returns_queued() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 直接入队一个快照外会话的 pending 项（session-send 对快照外会话 404 no_session
+        // 拦在入队前，故走 DAO 缝构造——同一内存库，零接触真实 ~/.mam）
+        let ghost_id = state.store.with(|c| {
+            crate::database::dao::inject_queue::enqueue_conn(
+                c,
+                "sess_ghost",
+                "claude",
+                "mm",
+                "测试设备",
+                "幽灵消息",
+                1000,
+            )
+        });
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-queue/jump",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"sess_ghost","itemId":{ghost_id}}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["status"], "queued",
+            "Suspended 必须按 queued 回执（行保持 pending，不谎报 delivered）"
+        );
+        assert_eq!(v["itemId"], ghost_id, "queued 回执携带点名条目 id");
+        assert_eq!(
+            v["position"], 1,
+            "唯一 pending 项 position=1（回查实时队列）"
+        );
+        assert!(
+            fake.recorded().is_empty(),
+            "会话消失不得注入（pid 无从定位）"
+        );
+        // 行保持 pending：GET session-queue 仍可见该项
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-queue?session_id=sess_ghost",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            body_string(r).await.contains("幽灵消息"),
+            "挂起行必须保持 pending（等会话回来由 flush 循环/对账接力）"
+        );
+    }
+
+    /// P2-6 撤回与投递共守卫：该会话 in-flight 占用时 retract → 200 failed +
+    /// 「投递进行中，请稍后重试」短回执。守卫必须取在 pending 前查**之前**
+    /// （照 jump 先例）——本测用无 pending 行的会话：若守卫位置错误（后查），响应会是
+    /// 404 not_found 而非 failed，测试即红
+    #[tokio::test]
+    async fn queue_retract_busy_inflight_returns_failed() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 独占会话 id（sess_r 不在夹具快照、无 pending 行）——in-flight 守卫按
+        // session_id 全局占用，错开防止与并行测试互相挤占
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_r").unwrap();
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-queue/retract",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_r","itemId":1}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("投递进行中，请稍后重试"),
+            "in-flight 占用时撤回应 200 failed 短回执：{body}"
+        );
+        assert_eq!(fake.recorded().len(), 0, "占用期间不得注入");
+    }
+
     /// 直发注入失败：注入器恒 Err → 200 {"status":"failed","error":…}（W4 可重试回执）
     /// + 审计 action=send result=failed:… + 队列无残留（W1：失败行 mark_failed 退出 pending）
     #[tokio::test]

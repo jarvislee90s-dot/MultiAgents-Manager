@@ -539,6 +539,10 @@ fn stop_server_core(
     if let Some(h) = handle {
         h.abort();
     }
+    // 裁决 19 冻结队列：投递循环随服务同停——pending 冻结在账、重开续跑；abort 硬停的
+    // 「已注入未落账」窗口由启动对账兜底（P2-5）。abort_flush_loop 自取 FLUSH_LOOP_HANDLE
+    // 自己的锁，与 SERVER_HANDLE 不嵌套（两把锁不嵌套纪律保持）
+    crate::inject::queue::abort_flush_loop();
     // M4 T0a：停止 = 已建立 SSE 连接即时断开。热重启路径同样断——监听没了连接必死，
     // 显式断开让注册表即刻一致，不依赖任务 abort 的 Drop 时序
     disconnect_all();

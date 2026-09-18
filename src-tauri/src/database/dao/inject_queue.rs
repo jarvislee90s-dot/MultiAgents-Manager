@@ -184,6 +184,41 @@ pub fn get_conn(conn: &Connection, id: i64) -> Option<QueueRow> {
         .flatten()
 }
 
+/// distinct pending 会话列表（P2-5 启动对账/周期兜底用）。
+/// **口径同源**：pending 谓词与 [`pending_for_session_conn`] 完全一致
+/// （`sent_at IS NULL AND failed_reason IS NULL`）——谓词改动必须同步本查询，防口径漂移；
+/// GROUP BY session_id + ORDER BY MIN(id)：按各会话最早入队行稳定排序（对账逐会话补投
+/// 的确定性顺序）
+pub fn pending_session_ids_conn(conn: &Connection) -> Vec<String> {
+    let sql = "SELECT session_id FROM inject_queue \
+               WHERE sent_at IS NULL AND failed_reason IS NULL \
+               GROUP BY session_id ORDER BY MIN(id) ASC";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        log::error!("inject_queue 查询 pending 会话列表失败（prepare）");
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+        log::error!("inject_queue 查询 pending 会话列表失败（query）");
+        return Vec::new();
+    };
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// pending 会话计数（P2-5 周期兜底的纯 SQL 门控——0 直接跳过，守宪法扫描预算）。
+/// **口径同源**：pending 谓词与 [`pending_for_session_conn`] 完全一致，防口径漂移
+pub fn count_pending_sessions_conn(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT session_id) FROM inject_queue \
+         WHERE sent_at IS NULL AND failed_reason IS NULL",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|e| {
+        log::error!("inject_queue 统计 pending 会话失败: {e}");
+        0
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

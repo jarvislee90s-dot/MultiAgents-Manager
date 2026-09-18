@@ -641,10 +641,13 @@ fn find_session_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<crate::s
 /// - 设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
 /// - 会话不在快照 → 404 no_session；路由判不可注入 → 403 not_injectable（带
 ///   reasonCode/reason——W1 定位失败语义的前置闸，不入队）；
-/// - 可输入态（is_input_ready）→ 入队后即刻 flush_one 直发（jump=false）：
-///   Ok → 200 delivered；Err(e) → 200 failed{error}（注入失败回执可重试，W1：
-///   失败行已 mark_failed 退出 pending，队列无残留）。直发审计 action=send
-///   （flush_one 落账时已并行写 flush 审计——本端点按契约另写 send 终态）；
+/// - 可输入态（is_input_ready）→ 入队后即刻 flush_one 直发（jump=false），四态精确
+///   映射（P1-4）：Sent → 200 delivered；Failed(e) → 200 failed{error}（注入失败
+///   回执可重试，W1：失败行已 mark_failed 退出 pending，队列无残留）；
+///   Deferred | Suspended → 200 queued（行保持 pending 等会话回来/下个跃迁，语义即
+///   排队——Suspended 亦 queued，红·中断挂起不谎报 delivered 也不误报失败）。直发
+///   审计按态落 send|queue（flush_one 落账时已并行写 flush 审计——本端点按契约另写
+///   send 终态）；
 /// - 运行中（is_running 等）→ 留队（黄灯），审计 action=queue，回执 queued+position。
 ///
 /// 直发也走队列（先入队再 flush 队首）：与既有 pending 项保持 FIFO 串行
@@ -769,11 +772,12 @@ pub async fn session_send(
                 .await
                 .unwrap_or_else(|e| {
                     log::error!("session-send 直发任务异常: {e}");
-                    Err("内部任务异常".to_string())
+                    crate::inject::queue::FlushOutcome::Failed("内部任务异常".to_string())
                 });
+                // P1-4 四态精确映射（Sent/Failed/Deferred/Suspended →
+                // delivered/failed/queued/queued）
                 match outcome {
-                    // Ok = 已发出（或挂起/等待——行保持 pending 由 flush 循环接力，非失败）
-                    Ok(()) => {
+                    crate::inject::queue::FlushOutcome::Sent => {
                         endpoint_audit(
                             &st,
                             &device_id,
@@ -791,8 +795,8 @@ pub async fn session_send(
                         )
                             .into_response()
                     }
-                    // Err(e) = 注入失败（行已 mark_failed，队列无残留——回执可重试，W1/W4）
-                    Err(e) => {
+                    // 注入/确认失败（行已 mark_failed，队列无残留——回执可重试，W1/W4）
+                    crate::inject::queue::FlushOutcome::Failed(e) => {
                         endpoint_audit(
                             &st,
                             &device_id,
@@ -807,6 +811,35 @@ pub async fn session_send(
                             StatusCode::OK,
                             [(axum::http::header::CACHE_CONTROL, "no-store")],
                             Json(serde_json::json!({ "status": "failed", "error": e })),
+                        )
+                            .into_response()
+                    }
+                    // Deferred/Suspended：行保持 pending 等会话回来/下个跃迁，语义即
+                    // 排队（Suspended 亦 queued）——回查 pending 取实时 position 回执
+                    crate::inject::queue::FlushOutcome::Deferred
+                    | crate::inject::queue::FlushOutcome::Suspended => {
+                        endpoint_audit(
+                            &st,
+                            &device_id,
+                            &device_name,
+                            &tool,
+                            &sid,
+                            &content,
+                            "queue",
+                            "ok",
+                        );
+                        let pos = st.store.with(|c| {
+                            crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
+                                .len() as i64
+                        });
+                        (
+                            StatusCode::OK,
+                            [(axum::http::header::CACHE_CONTROL, "no-store")],
+                            Json(serde_json::json!({
+                                "status": "queued",
+                                "itemId": item_id,
+                                "position": pos,
+                            })),
                         )
                             .into_response()
                     }
@@ -960,7 +993,10 @@ pub async fn session_queue(
 /// POST /m/api/v1/session-queue/jump（裁决 12 插队）：按 itemId 点名该会话 pending 中
 /// 的条目（可非队首）即刻投递（黄态照发）——flush_given 内核，settle 落账审计 action=jump。
 /// - 缺参 → 400；无此 pending 项 → 404 not_found；
-/// - Ok → 200 delivered；Err(e) → 200 failed{error}（注入失败行已退出 pending）；
+/// - 四态精确映射（P1-4）：Sent → 200 delivered；Failed(e) → 200 failed{error}
+///   （注入失败行已退出 pending）；Deferred | Suspended → 200 queued + itemId/position
+///   （行保持 pending 等会话回来/下个跃迁，语义即排队——jump 点名场景 Deferred 实际
+///   不可达〔jump 跳过黄态复核〕，Suspended〔会话消失〕亦按 queued 回执）；
 /// - in-flight 守卫忙 → 200 failed（该会话投递进行中，提示重试）。
 pub async fn session_queue_jump(
     State(st): State<Arc<RemoteState>>,
@@ -1012,23 +1048,44 @@ pub async fn session_queue_jump(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-queue/jump 任务异常: {e}");
-            Err("内部任务异常".to_string())
+            crate::inject::queue::FlushOutcome::Failed("内部任务异常".to_string())
         }
     };
     match outcome {
-        Ok(()) => (
+        crate::inject::queue::FlushOutcome::Sent => (
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
             Json(serde_json::json!({ "status": "delivered" })),
         )
             .into_response(),
-        Err(e) => failed_body(e),
+        crate::inject::queue::FlushOutcome::Failed(e) => failed_body(e),
+        // Deferred/Suspended：行保持 pending 等会话回来/下个跃迁，语义即排队——
+        // 回查 pending 取实时 position 回执
+        crate::inject::queue::FlushOutcome::Deferred
+        | crate::inject::queue::FlushOutcome::Suspended => {
+            let pos = st.store.with(|c| {
+                crate::database::dao::inject_queue::pending_for_session_conn(c, &sid).len() as i64
+            });
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "queued",
+                    "itemId": item_id,
+                    "position": pos,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
 /// POST /m/api/v1/session-queue/retract（W4 撤回）：前查该会话 pending 中的目标条目
 /// （取审计字段）→ DAO retract_conn（内部再按 (session_id, id) 二次校验，防竞态误删）
 /// → 审计 action=retract → 200 {ok:true}；无此 pending 项 → 404 not_found。
+/// P2-6：撤回与投递共守卫（照 jump 先例，device_identity 校验后、pending 前查之前取
+/// in-flight 名额）——撤回正删的行可能正是投递内核已取走待落账的队首，共守卫使两者
+/// 串行化，杜绝「撤回成功回执但消息仍被注入」的竞态；忙时短回执（200 failed 提示重试）。
 pub async fn session_queue_retract(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -1041,6 +1098,18 @@ pub async fn session_queue_retract(
     let item_id = req.item_id.unwrap_or(0);
     let Some((device_id, device_name)) = device_identity(&st, &headers) else {
         return forbidden_defense();
+    };
+    let failed_body = |e: String| {
+        (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": "failed", "error": e })),
+        )
+            .into_response()
+    };
+    // P2-6 共守卫（与 flush 循环/直发/插队互斥）：投递进行中 → 撤回让位，短回执提示重试
+    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
+        return failed_body("投递进行中，请稍后重试".to_string());
     };
     // 前查：拿条目供审计（agent_type / 已 compose 的 content），同时完成归属校验
     let target = st.store.with(|c| {
