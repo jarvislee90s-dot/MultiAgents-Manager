@@ -955,6 +955,20 @@ pub async fn session_queue_jump(
     if device_identity(&st, &headers).is_none() {
         return forbidden_defense();
     }
+    let failed_body = |e: String| {
+        (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": "failed", "error": e })),
+        )
+            .into_response()
+    };
+    // 先取 in-flight 守卫再做归属查找：顺序颠倒会有窗口——flush 循环在间隙内发出同一
+    // 队首项，jump 再点名投递同一条 → 双投。守卫先占住即与循环/直发互斥。
+    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
+        // 该会话已有投递进行中（与直发/flush 循环共用守卫）——插队让位，提示重试
+        return failed_body("该会话投递进行中，请稍后重试".to_string());
+    };
     // 前查归属（借 retract 语义）+ 取整行（点名投递需要 item 字段），无 pending 项 → 404
     let target = st.store.with(|c| {
         crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
@@ -968,18 +982,6 @@ pub async fn session_queue_jump(
             Json(serde_json::json!({ "error": "not_found" })),
         )
             .into_response();
-    };
-    let failed_body = |e: String| {
-        (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": "failed", "error": e })),
-        )
-            .into_response()
-    };
-    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
-        // 该会话已有投递进行中（与直发/flush 循环共用守卫）——插队让位，提示重试
-        return failed_body("该会话投递进行中，请稍后重试".to_string());
     };
     let flush_st = st.clone();
     let outcome = match tokio::task::spawn_blocking(move || {
