@@ -21,13 +21,15 @@ fn update_tray_menu(
     show_text: String,
     quit_text: String,
     pet_text: String,
+    remote_on_text: String,
 ) -> Result<(), String> {
-    plugins::system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text)
+    plugins::system_tray::update_tray_menu(&app, &show_text, &quit_text, &pet_text, &remote_on_text)
 }
 
 /// 托盘菜单统一重建（Task 16）：基础项 + 预设项（带开/关选中态）一次成型。
 /// 标签合并语义：传入的标签覆盖持久化值，未传的沿用最近一次值——预设增删/
 /// 开关变化处可只追加 presetsLabel 一行调用，无需关心基础项文案。
+/// M4 T4 并入：新增 remote_on_text（远程开关项标签，勾选态/地址 Rust 侧自查）。
 /// `update_tray_menu` 保留但前端已不再调用（保留至下个清理窗口移除）
 #[tauri::command]
 fn refresh_tray(
@@ -36,9 +38,15 @@ fn refresh_tray(
     show_text: Option<String>,
     pet_text: Option<String>,
     quit_text: Option<String>,
+    remote_on_text: Option<String>,
 ) -> Result<(), String> {
-    let labels =
-        plugins::system_tray::TrayLabels::merged(presets_label, show_text, pet_text, quit_text);
+    let labels = plugins::system_tray::TrayLabels::merged(
+        presets_label,
+        show_text,
+        pet_text,
+        quit_text,
+        remote_on_text,
+    );
     plugins::system_tray::update_tray_with_presets_labeled(&app, &labels)
 }
 
@@ -93,6 +101,8 @@ pub fn run() {
                     log::warn!("pet window create failed: {}", e);
                 }
             });
+            // M4：全局句柄落位（先于 restore_on_launch——隧道自启即可发通知）
+            let _ = crate::remote::events::APP_HANDLE.set(app.handle().clone());
             // M2 远程接入：按设置恢复远程服务器（开机自启语义；内部用
             // tauri::async_runtime，无 runtime 上下文的主线程可安全调用）
             crate::remote::restore_on_launch();
@@ -204,8 +214,16 @@ pub fn run() {
         commands::manifest::get_store_index,
         remote::remote_toggle,
         remote::remote_status,
-        remote::remote_issue_token,
         remote::remote_confirm_public,
+        remote::remote_devices,
+        remote::remote_revoke_device,
+        remote::remote_revoke_all_devices,
+        // M5 A4：访问密码设置 / 重置设备 / 设备重命名（吊销收窄后的新口径命令）
+        remote::remote_set_pin,
+        remote::remote_reset_devices,
+        remote::remote_rename_device,
+        // M5 A5：三通道独立开关（旧 remote_set_channel 单值三选一已随之下线）
+        remote::remote_toggle_channel,
     ]);
 
     #[cfg(not(debug_assertions))]
@@ -218,7 +236,17 @@ pub fn run() {
         }
     };
 
-    builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    // M4：退出钩子（spec §8 应用退出清理子进程与电源锁）——旧 `.run(ctx)` 无事件回调，
+    // 改为 build + run 回调：RunEvent::Exit 时停隧道（M5 A5 双通道 stop_all；
+    // kill_on_drop 兜不住进程级退出）与电源锁（caffeinate kill / 执行状态清除 +
+    // 磁盘代设还原），不留孤儿进程、不失电源锁
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_app, event| {
+        if let tauri::RunEvent::Exit = event {
+            crate::remote::tunnel::stop_all();
+            crate::remote::power::release();
+        }
+    });
 }

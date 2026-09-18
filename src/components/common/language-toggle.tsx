@@ -20,6 +20,9 @@ export function LanguageToggle() {
         petText: loadVisible()
           ? t("tray.petHide", { lng: newLang })
           : t("tray.petShow", { lng: newLang }),
+        // M4 T4：远程开关项标签随语言重建（勾选态 Rust 侧自查）；
+        // main 侧 preset-v2 补的 quitText 一并传入（合并：两侧参数并集）
+        remoteOnText: t("tray.remote", { lng: newLang }),
         quitText: t("tray.quit", { lng: newLang }),
       });
     } catch (error) {

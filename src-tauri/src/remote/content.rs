@@ -433,6 +433,79 @@ fn read_zcode_messages_with(
     Ok(page(out, limit, false))
 }
 
+/// M5 B2：zcode 用户附件第二抽取源——窗口内消息的 part 表 `type=file` 行
+/// （B1 调研：`source.path` = 原始落盘路径；无 source 时 `url` = artifact URI，
+/// 由 files.rs 解析到 `~/.zcode/cli/artifacts/` 磁盘实体）。
+/// 返回 (窗口序号, 路径或 URI, 消息时间戳)——序号与 `read_zcode_messages_with`
+/// 同一窗口查询（同序同 LIMIT），与 SessionMessage.seq 同刻度，合并排序语义一致。
+/// 库不可读 / 会话不存在 → 空表（附件是增强能力，与提取失败同口径）
+pub(crate) fn read_zcode_attachment_refs_with(
+    home: &Path,
+    session_id: &str,
+    limit: usize,
+) -> Vec<(i64, String, Option<i64>)> {
+    use crate::monitor::zcode_parser::ZcodeRoots;
+    let roots = ZcodeRoots::from_home(home);
+    let Some(conn) = crate::monitor::sqlite::open_readonly_with_timeout(&roots.cli_db) else {
+        return Vec::new();
+    };
+    // 顺序列探测：与 read_zcode_messages_with 同款（sequence 优先，time_created 兜底）
+    let order_col = if conn.prepare("SELECT sequence FROM message LIMIT 0").is_ok() {
+        "sequence"
+    } else if conn
+        .prepare("SELECT time_created FROM message LIMIT 0")
+        .is_ok()
+    {
+        "time_created"
+    } else {
+        return Vec::new();
+    };
+    let sql = format!(
+        "SELECT id, time_created FROM message WHERE session_id = ?1 \
+         ORDER BY {order_col} DESC LIMIT {limit}"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([session_id], |row| {
+        Ok((sqlite_text(row, 0)?, row.get::<_, Option<i64>>(1)?))
+    }) else {
+        return Vec::new();
+    };
+    // 查询取「最新在前」，反转为文件序（旧 → 新）——序号与 finalize 的 seq 同刻度
+    let mut msgs: Vec<(String, Option<i64>)> = rows.filter_map(|r| r.ok()).collect();
+    msgs.reverse();
+    if msgs.is_empty() {
+        return Vec::new();
+    }
+    let part_keys: Vec<(String, String, Option<i64>)> = msgs
+        .iter()
+        .map(|(id, ts)| (id.clone(), String::new(), *ts))
+        .collect();
+    let Ok(parts) = zcode_parts_by_message(&conn, &part_keys) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(i64, String, Option<i64>)> = Vec::new();
+    for (ordinal, (id, ts)) in msgs.iter().enumerate() {
+        let Some(ps) = parts.get(id) else { continue };
+        for p in ps {
+            let ptype = p.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+            if ptype != "file" {
+                continue;
+            }
+            // 优先原始落盘路径（source.path）；无则 artifact URI（调用方解析磁盘实体）
+            let r = p
+                .pointer("/source/path")
+                .and_then(|v| v.as_str())
+                .or_else(|| p.get("url").and_then(|v| v.as_str()));
+            if let Some(r) = r {
+                out.push((ordinal as i64, r.to_string(), *ts));
+            }
+        }
+    }
+    out
+}
+
 /// ZCode：一组消息的全部 parts（IN 子句，sequence 列存在则保流顺序，否则 rowid）
 fn zcode_parts_by_message(
     conn: &rusqlite::Connection,
@@ -1145,7 +1218,7 @@ fn is_kimi_skill_injection(text: &str) -> bool {
 /// Kimi wire.jsonl 行 → 统一条目（纯函数；entry_text/entry_status 的内容版映射）。
 /// 流式 content.part 事件会碎片化 → 连续同 kind 文本行合并为一条（tool 行为边界）；
 /// turn.prompt 与 append_message(user) 是同一输入的两次落笔（实机取证）→ 连续全等去重
-fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
+pub(crate) fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
     let mut out: Vec<SessionMessage> = Vec::new();
     for line in lines {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {

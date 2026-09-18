@@ -92,12 +92,34 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
              name TEXT NOT NULL DEFAULT '',
              ua TEXT NOT NULL DEFAULT '',
              origin_ip TEXT NOT NULL DEFAULT '',
+             fingerprint TEXT NOT NULL DEFAULT '',
+             via TEXT NOT NULL DEFAULT '',
              first_paired_at INTEGER NOT NULL DEFAULT 0,
              last_seen_at INTEGER NOT NULL DEFAULT 0,
              revoked INTEGER NOT NULL DEFAULT 0
          );",
     )
     .map_err(|e| format!("建 remote_devices 失败: {}", e))?;
+
+    // M5 A1：设备指纹（sha256(UA|"|"|origin_ip) hex 小写，同浏览器重绑 upsert 的去重键）
+    // 与接入通道（ASCII 枚举 "local"|"lan"|"quick"|"named"）两列——
+    // 存量库走 ALTER（新库已由上方建表语句直建，column_exists 短路）。
+    // SQLite 加 NOT NULL 列必须带 DEFAULT。存量行取 DEFAULT 空串：指纹算法在 Rust 侧
+    // 无法在 SQL 内回填，空串也永不与真实指纹撞键（只影响首次重连多一行，可接受）
+    if !column_exists(conn, "remote_devices", "fingerprint") {
+        conn.execute(
+            "ALTER TABLE remote_devices ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("迁移设备指纹列失败: {}", e))?;
+    }
+    if !column_exists(conn, "remote_devices", "via") {
+        conn.execute(
+            "ALTER TABLE remote_devices ADD COLUMN via TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("迁移设备 via 列失败: {}", e))?;
+    }
 
     Ok(())
 }
@@ -163,6 +185,83 @@ mod tests {
             )
             .unwrap();
         assert_eq!(source_tool.as_deref(), Some("codex"));
+    }
+
+    /// M5 A1：旧结构 remote_devices（M4，无 fingerprint/via）经迁移后两列存在，
+    /// 存量行取 DEFAULT 空串（无法回填指纹——算法在 Rust 侧，且空串永不与真实指纹撞键）
+    #[test]
+    fn migrate_adds_remote_device_fingerprint_and_via_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        // migrate 首段是 ALTER TABLE extensions——沿用本文件既有测试做法先建 extensions
+        conn.execute_batch(
+            "CREATE TABLE extensions (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                source_path TEXT NOT NULL,
+                source_url TEXT,
+                version TEXT,
+                tags TEXT,
+                installed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        // 旧结构表：M4 原始形状（故意不含两新列），并预置一行存量数据
+        conn.execute_batch(
+            "CREATE TABLE remote_devices (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                ua TEXT NOT NULL DEFAULT '',
+                origin_ip TEXT NOT NULL DEFAULT '',
+                first_paired_at INTEGER NOT NULL DEFAULT 0,
+                last_seen_at INTEGER NOT NULL DEFAULT 0,
+                revoked INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO remote_devices (id, name) VALUES ('legacy', '旧设备');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        assert!(conn
+            .prepare("SELECT fingerprint FROM remote_devices LIMIT 0")
+            .is_ok());
+        assert!(conn
+            .prepare("SELECT via FROM remote_devices LIMIT 0")
+            .is_ok());
+        // 幂等：迁移两遍不报错（column_exists 短路 ALTER）
+        migrate(&conn).unwrap();
+        // 存量行新列为 DEFAULT 空串
+        let (fp, via): (String, String) = conn
+            .query_row(
+                "SELECT fingerprint, via FROM remote_devices WHERE id = 'legacy'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((fp.as_str(), via.as_str()), ("", ""));
+    }
+
+    /// M5 A1：全新库（schema::init → migrate）建出的 remote_devices 直含两列，
+    /// 无需走 ALTER 路径
+    #[test]
+    fn fresh_remote_devices_table_includes_fingerprint_and_via() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 真机调用序：schema::init 建全部表 → migration::migrate 增量迁移
+        crate::database::schema::init(&conn);
+        migrate(&conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(remote_devices)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            cols.contains(&"fingerprint".to_string()),
+            "缺 fingerprint 列: {cols:?}"
+        );
+        assert!(cols.contains(&"via".to_string()), "缺 via 列: {cols:?}");
     }
 
     #[test]

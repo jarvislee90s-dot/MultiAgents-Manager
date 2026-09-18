@@ -34,7 +34,9 @@ export default function App() {
         </div>
       )}
       {paired === true && selected && <SessionDetail session={selected} onBack={onBackToBoard} />}
-      {paired !== true && <PairPage onPaired={onPaired} />}
+      {/* M5 P3-b：null（探测中）与 false（未配对）分診——探测期渲染连接指示器，
+          不再出现密码表单（实测走隧道探测有一二十秒延迟，密码页先出像「时滞掉线」） */}
+      {paired !== true && <PairPage onPaired={onPaired} probing={paired === null} />}
     </>
   );
 }

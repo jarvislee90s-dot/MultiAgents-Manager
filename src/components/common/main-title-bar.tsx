@@ -63,8 +63,9 @@ export function MainTitleBar() {
     await createWindow("settings", {
       title: t("settings.title"),
       url: "/settings",
-      width: 600,
-      height: 500,
+      // M5 A6（线稿 v5 定稿）：远程接入四卡 + 唯一展开详情区需要更宽的设置窗口
+      width: 880,
+      height: 640,
       resizable: true,
       maximizable: true,
       minimizable: false,

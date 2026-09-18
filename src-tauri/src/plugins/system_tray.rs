@@ -10,7 +10,8 @@ use tauri::{
 /// 托盘菜单标签集（Task 16 i18n 参数化）：真值源在前端（i18next），经 refresh_tray
 /// 下发并持久化到 settings；托盘事件线程 / session.rs 启发式等无前端语境的重建
 /// 路径沿用最近一次持久化值（此前预设重建会把基础项打回中文占位、语言切换会
-/// 丢预设项——统一重建后两个问题一并消除）
+/// 丢预设项——统一重建后两个问题一并消除）。M4 T4 并入后新增 remote 字段
+///（远程开关项标签，勾选态/地址 Rust 侧自查 remote::tray_display）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TrayLabels {
@@ -19,6 +20,8 @@ pub struct TrayLabels {
     pub show: String,
     pub pet: String,
     pub quit: String,
+    /// 远程接入开关项标签（"远程接入" / "Remote Access"）
+    pub remote: String,
 }
 
 impl Default for TrayLabels {
@@ -29,6 +32,7 @@ impl Default for TrayLabels {
             show: "显示窗口".into(),
             pet: "显示/隐藏桌宠".into(),
             quit: "退出".into(),
+            remote: "远程接入".into(),
         }
     }
 }
@@ -58,6 +62,7 @@ impl TrayLabels {
         show: Option<String>,
         pet: Option<String>,
         quit: Option<String>,
+        remote: Option<String>,
     ) -> Self {
         let mut labels = saved_tray_labels();
         if let Some(v) = presets {
@@ -71,6 +76,9 @@ impl TrayLabels {
         }
         if let Some(v) = quit {
             labels.quit = v;
+        }
+        if let Some(v) = remote {
+            labels.remote = v;
         }
         // set_setting 返回 ()（内部自兜错），持久化失败不影响本次重建
         crate::database::set_setting(
@@ -134,27 +142,76 @@ fn toggle_preset_for_tool<R: Runtime>(app: &AppHandle<R>, preset_id: &str, tool_
     }
 }
 
-// Update tray menu with localized text
+/// 远程接入托盘区（M4 T4）：分隔线 → 开关 CheckMenuItem（勾选态与地址
+/// Rust 侧自查 remote::tray_display：隧道开地址优先，关=空串）→ 地址复制项。
+/// 泛型 R 为最小适配：init 默认菜单在泛型 Runtime 上构造；显式 'a 为编译适配：
+/// `&mut Vec<&dyn>` 不变性要求三个 owned 容器与收集表同享元素生存期；
+/// 容器由调用方声明——菜单项必须存活到 Menu 构建完成（借用语义）
+fn push_remote_items<'a, R: Runtime>(
+    app: &AppHandle<R>,
+    items: &mut Vec<&'a dyn IsMenuItem<R>>,
+    owned: &'a mut Vec<CheckMenuItem<R>>, // owned 存活容器
+    addr_owned: &'a mut Vec<MenuItem<R>>,
+    sep_owned: &'a mut Vec<PredefinedMenuItem<R>>,
+    remote_on_text: &str,
+) -> Result<(), String> {
+    let (enabled, addr) = crate::remote::tray_display();
+    let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    let toggle = CheckMenuItem::with_id(app, "remote", remote_on_text, true, enabled, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    // 地址为空（远程关）时展示占位「—」并禁用点击复制
+    // （先取 enabled 与标签再构造：addr 在拼标签时被移动，
+    // 行内写法 `&if …else { addr }` 后再读 addr 是 E0382，语义不变仅调序）
+    let addr_enabled = !addr.is_empty();
+    let addr_label = if addr.is_empty() {
+        "—".to_string()
+    } else {
+        addr
+    };
+    let addr_item = MenuItem::with_id(app, "remote-addr", &addr_label, addr_enabled, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    sep_owned.push(sep);
+    owned.push(toggle);
+    addr_owned.push(addr_item);
+    items.push(sep_owned.last().unwrap() as _);
+    items.push(owned.last().unwrap() as _);
+    items.push(addr_owned.last().unwrap() as _);
+    Ok(())
+}
+
+// Update tray menu with localized text（遗留基础路径：lib.rs 命令仍注册，
+// 前端已改走 refresh_tray 统一重建；保留至下个清理窗口与命令一并移除）
 pub fn update_tray_menu(
     app: &AppHandle,
     show_text: &str,
     quit_text: &str,
     pet_text: &str,
+    remote_on_text: &str,
 ) -> Result<(), String> {
-    let menu = Menu::with_id_and_items(
+    // owned 容器 + 引用收集：远程区项（sep → 开关 → 地址）统一插在 quit 之前
+    let show =
+        MenuItem::with_id(app, "show", show_text, true, None::<&str>).map_err(|e| e.to_string())?;
+    let pet =
+        MenuItem::with_id(app, "pet", pet_text, true, None::<&str>).map_err(|e| e.to_string())?;
+    let sep1 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    let quit =
+        MenuItem::with_id(app, "quit", quit_text, true, None::<&str>).map_err(|e| e.to_string())?;
+
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&show, &pet, &sep1];
+    let mut remote_owned: Vec<CheckMenuItem<tauri::Wry>> = Vec::new();
+    let mut remote_addr_owned: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    let mut remote_seps: Vec<PredefinedMenuItem<tauri::Wry>> = Vec::new();
+    push_remote_items(
         app,
-        "system-tray",
-        &[
-            &MenuItem::with_id(app, "show", show_text, true, None::<&str>)
-                .map_err(|e| e.to_string())?,
-            &MenuItem::with_id(app, "pet", pet_text, true, None::<&str>)
-                .map_err(|e| e.to_string())?,
-            &PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?,
-            &MenuItem::with_id(app, "quit", quit_text, true, None::<&str>)
-                .map_err(|e| e.to_string())?,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+        &mut items,
+        &mut remote_owned,
+        &mut remote_addr_owned,
+        &mut remote_seps,
+        remote_on_text,
+    )?;
+    items.push(&quit);
+
+    let menu = Menu::with_id_and_items(app, "system-tray", &items).map_err(|e| e.to_string())?;
 
     if let Some(tray) = app.tray_by_id("main-tray") {
         tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
@@ -167,16 +224,28 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("system-tray")
         .setup(|app, _| {
             // Create tray menu with default English text
-            let menu = Menu::with_id_and_items(
+            // 三重建路径统一（M4 T4）：默认菜单同样追加远程区项，否则前端首次重建前
+            // 托盘缺远程入口（文本为英文占位，主窗口挂载后由前端本地化重建）
+            let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
+            let pet = MenuItem::with_id(app, "pet", "Show Pet", true, None::<&str>)?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+
+            let mut items: Vec<&dyn IsMenuItem<R>> = vec![&show, &pet, &sep1];
+            let mut remote_owned: Vec<CheckMenuItem<R>> = Vec::new();
+            let mut remote_addr_owned: Vec<MenuItem<R>> = Vec::new();
+            let mut remote_seps: Vec<PredefinedMenuItem<R>> = Vec::new();
+            push_remote_items(
                 app,
-                "system-tray",
-                &[
-                    &MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "pet", "Show Pet", true, None::<&str>)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
-                ],
+                &mut items,
+                &mut remote_owned,
+                &mut remote_addr_owned,
+                &mut remote_seps,
+                "Remote Access",
             )?;
+            items.push(&quit);
+
+            let menu = Menu::with_id_and_items(app, "system-tray", &items)?;
 
             // Build tray icon
             TrayIconBuilder::with_id("main-tray")
@@ -226,6 +295,34 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                     }
                     "quit" => {
                         app.exit(0);
+                    }
+                    "remote" => {
+                        // 托盘开关：与设置页同一命令链路（remote_toggle 内含 TLS 门与回滚）。
+                        // 菜单勾选态经前端回环刷新（remote-changed 监听重建，见 home.tsx 接线）
+                        let next = !crate::remote::tray_display().0;
+                        match crate::remote::remote_toggle(next) {
+                            Ok(()) => {
+                                crate::remote::events::emit_ui(
+                                    "remote-changed",
+                                    serde_json::json!({ "enabled": next }),
+                                );
+                            }
+                            Err(e) => {
+                                crate::remote::events::emit_ui(
+                                    "remote-toggle-failed",
+                                    serde_json::json!({ "error": e }),
+                                );
+                            }
+                        }
+                    }
+                    "remote-addr" => {
+                        let (_, addr) = crate::remote::tray_display();
+                        if !addr.is_empty() {
+                            crate::remote::events::emit_ui(
+                                "remote-copy-addr",
+                                serde_json::json!({ "url": addr }),
+                            );
+                        }
                     }
                     // 预设接线（spec §7.5，P5）：点击 = 直接执行翻转（裁决 2026-09-15）。
                     // 通用预设子项 id `preset-tool-{preset_id}|{tool_id}` → 对该工具翻转
@@ -333,7 +430,8 @@ pub fn update_tray_with_presets(app: &AppHandle) -> Result<(), String> {
 ///（CheckMenuItem，checked = 该预设在此工具上激活）。通用预设 = 每个已启用工具
 /// 一个子项（子菜单展开，子项 id `preset-tool-{preset_id}|{tool_id}`）；
 /// 工具私有预设 = 顶层 CheckMenuItem（id `preset-{preset_id}`，作用于绑定工具）。
-/// 点击语义在 on_menu_event 的 preset 臂（直接执行，不弹确认）
+/// 点击语义在 on_menu_event 的 preset 臂（直接执行，不弹确认）。
+/// M4 T4 并入：quit 前追加远程区项（分隔线 → 开关 → 地址），三重建路径统一
 pub fn update_tray_with_presets_labeled<R: Runtime>(
     app: &AppHandle<R>,
     labels: &TrayLabels,
@@ -428,6 +526,18 @@ pub fn update_tray_with_presets_labeled<R: Runtime>(
     if let Some(ref s) = sep2 {
         items.push(s);
     }
+    // 远程区（M4 T4）：统一插在 quit 之前——本路径漏加则任何统一重建抹掉远程项
+    let mut remote_owned: Vec<CheckMenuItem<R>> = Vec::new();
+    let mut remote_addr_owned: Vec<MenuItem<R>> = Vec::new();
+    let mut remote_seps: Vec<PredefinedMenuItem<R>> = Vec::new();
+    push_remote_items(
+        app,
+        &mut items,
+        &mut remote_owned,
+        &mut remote_addr_owned,
+        &mut remote_seps,
+        &labels.remote,
+    )?;
     items.push(&quit);
 
     let menu = Menu::with_items(app, &items).map_err(|e| e.to_string())?;
@@ -529,7 +639,8 @@ mod startup_tray_labels_tests {
     }
 
     /// serde(default) 容错口径：半截 JSON（缺字段）按 Default 补齐仍可用，
-    /// 不判为损坏——语言切换只回写部分字段的旧版本数据也能正常恢复
+    /// 不判为损坏——语言切换只回写部分字段的旧版本数据也能正常恢复。
+    /// M4 T4 并入后 remote 同样享受缺省补齐（旧持久化值无 remote 字段）
     #[test]
     fn partial_json_fills_defaults() {
         let labels =
@@ -537,5 +648,6 @@ mod startup_tray_labels_tests {
         assert_eq!(labels.presets, "预设");
         assert_eq!(labels.show, TrayLabels::default().show);
         assert_eq!(labels.quit, TrayLabels::default().quit);
+        assert_eq!(labels.remote, TrayLabels::default().remote);
     }
 }
