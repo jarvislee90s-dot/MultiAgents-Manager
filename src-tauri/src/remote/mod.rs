@@ -235,6 +235,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // gate 回环豁免 / via 判定的隧道域名源（生产 = 双通道快照聚合抽取；M5 A5）
         tunnel_hosts_source: Box::new(tunnel_hosts_from_snapshot),
         via_hosts_source: Box::new(via_hosts_from_snapshot),
+        // M5 P2-a 追记：敏感黑名单的主目录基准（真实 home；取不到时 read_file_safe
+        // 走全段保守匹配分支）
+        home_source: Box::new(|| dirs::home_dir().and_then(|h| h.to_str().map(str::to_string))),
     })
 });
 

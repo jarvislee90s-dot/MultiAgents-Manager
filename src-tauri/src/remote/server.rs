@@ -273,6 +273,10 @@ pub struct RemoteState {
     /// mode 分拣 quick/named 域名；测试注入固定域名。与 tunnel_hosts_source 同源分形——
     /// gate 豁免只要"是否隧道域名"并集，via 需要通道区分
     pub via_hosts_source: Box<ViaHostsSource>,
+    /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
+    /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
+    /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
+    pub home_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 /// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -396,6 +400,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         })
     }
 
@@ -925,6 +930,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -1292,6 +1298,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1404,6 +1411,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1574,6 +1582,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -1836,6 +1845,7 @@ mod tests {
                     Some(q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect())
                 }),
                 via_hosts_source: Box::new(move || Some((quick.clone(), named.clone()))),
+                home_source: Box::new(|| None),
             }),
             t,
         )
@@ -2375,6 +2385,7 @@ mod tests {
                     now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
                     tunnel_hosts_source: Box::new(|| Some(Vec::new())),
                     via_hosts_source: Box::new(|| None),
+                    home_source: Box::new(|| None),
                 }),
                 t,
             )
