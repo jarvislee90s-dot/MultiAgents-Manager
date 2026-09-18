@@ -361,7 +361,17 @@ export async function sessionSend(sessionId: string, text: string): Promise<Send
   } catch (e) {
     throw new ApiError(null, `session-send 网络异常: ${String(e)}`);
   }
-  if (!r.ok) throw new ApiError(r.status, `session-send ${r.status}`);
+  if (!r.ok) {
+    // 403 not_injectable{reason,reasonCode}（如挂载后会话漂移为 APP/黑盒形态）——
+    // 后端已备好中文 reason，解析进 data 供调用方展示（对齐 fetchFile 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 交验失败保持 null */
+    }
+    throw new ApiError(r.status, `session-send ${r.status}`, data);
+  }
   return (await r.json()) as SendResult;
 }
 
@@ -389,10 +399,13 @@ export async function fetchQueue(sessionId: string): Promise<QueueItemView[]> {
 }
 
 /** 插队直发（裁决 12）：按 itemId 点名该会话 pending 中的一条即刻注入。
- *  200 {status:"delivered"|"failed"}（failed 时后端 error 文案不在本返回类型内，
- *  调用方按「立即发送未成功」兜底）；非 2xx（404 not_found 条目已不在队 / 409
- *  投递进行中）→ 抛 ApiError */
-export async function queueJump(sessionId: string, itemId: number): Promise<{ status: string }> {
+ *  200 {status:"delivered"} | {status:"failed",error}（failed 带后端中文文案，
+ *  如「该会话投递进行中，请稍后重试」）；非 2xx（404 not_found 条目已不在队）
+ *  → 抛 ApiError */
+export async function queueJump(
+  sessionId: string,
+  itemId: number
+): Promise<{ status: "delivered" } | { status: "failed"; error: string }> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-queue/jump", {
@@ -404,7 +417,7 @@ export async function queueJump(sessionId: string, itemId: number): Promise<{ st
     throw new ApiError(null, `session-queue/jump 网络异常: ${String(e)}`);
   }
   if (!r.ok) throw new ApiError(r.status, `session-queue/jump ${r.status}`);
-  return (await r.json()) as { status: string };
+  return (await r.json()) as { status: "delivered" } | { status: "failed"; error: string };
 }
 
 /** 撤回排队条目（W4）：200 {ok:true}；条目已不在队（已送达 / 他端撤回）→

@@ -104,7 +104,12 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         setReceipt({ kind: "failed", error: res.error });
       }
     } catch (e) {
-      setReceipt({ kind: "failed", error: e instanceof ApiError ? e.message : String(e) });
+      if (e instanceof ApiError) {
+        const reason = typeof e.data?.reason === "string" ? e.data.reason : null;
+        setReceipt({ kind: "failed", error: reason ?? e.message });
+      } else {
+        setReceipt({ kind: "failed", error: String(e) });
+      }
     } finally {
       setSending(false);
     }
@@ -118,7 +123,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       if (j.status === "delivered") {
         setReceipt({ kind: "delivered" });
       } else {
-        setReceipt({ kind: "failed", error: "立即发送未成功，可重试" });
+        setReceipt({ kind: "failed", error: j.error });
       }
     } catch (e) {
       setReceipt({ kind: "failed", error: e instanceof ApiError ? e.message : String(e) });
@@ -133,8 +138,14 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     setBusy(true);
     try {
       await queueRetract(session.id, itemId);
-    } catch {
-      /* 404 not_found（已送达 / 他端撤回）：不作失败提示，走下方刷新自然收敛 */
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        /* 404 not_found（已送达 / 他端撤回）：不作失败提示，走下方刷新自然收敛 */
+      } else {
+        setReceipt({ kind: "failed", error: "撤回失败，可重试" });
+        setBusy(false);
+        return;
+      }
     }
     try {
       const items = await fetchQueue(session.id);
