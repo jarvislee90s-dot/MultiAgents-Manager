@@ -26,7 +26,9 @@
 //!   （续写不睡眠）；122（ERROR_INSUFFICIENT_BUFFER）现语义 = 目标读武装期缓冲
 //!   暂满、可重试（M6「消费墙首读预算 13~43 字符」叙事已被 M6R 推翻）→ 100ms
 //!   重试同块；错误码仅在 Err 时读取（F7：ok=true 时错误码为噪声）；
-//! - **P2-2 键域校验**：域外键在取锁/附加之前快速失败并报错，**不回退文本+回车**。
+//! - **P2-2 键域校验**：域外键在取锁/附加之前快速失败并报错，**不回退文本+回车**；
+//! - **实机验证归属**：分块/预算/背压/续写的实机行为验证归 Task 12 `#[ignore]`
+//!   （本任务门禁只锁编译 + 单测 + 既有 FFI 契约测试）。
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -62,6 +64,11 @@ const DRAIN_POLL_GAP: Duration = Duration::from_millis(15);
 /// （多会话同时 flush）都会互踩 attach/detach；此处串行化全部
 /// 「定位 → 附加 → 写入 → 复位」临界区。锁纪律：公共入口各取一次锁；
 /// `resolve_target` / `inject_via` 为无锁内部版，严禁嵌套取锁。
+///
+/// 最坏持锁时长 ≈ `families::inject_budget_ms`（背压按 45ms/字符斜率放宽，
+/// 万字符最高 ≈460s）；等待方的 deadline 在**取锁之后**才起算——排队等待不计入
+/// 自身预算，只会排队而不会误报超时。Task 4 的 `read_input_tail` 将共享此临界区
+/// （附加态的读侧同样互斥）。
 static CONSOLE_OP: Lazy<std::sync::Mutex<()>> = Lazy::new(|| std::sync::Mutex::new(()));
 
 /// P1-1：附加态 RAII 守卫——构造前调用方已 `AttachConsole` 成功；Drop 时无条件
@@ -342,7 +349,11 @@ pub(crate) fn inject_text_spec(
         paced_write(handle, &body, bp, deadline)?;
         // 提交回车：正文写完固定延迟后单批发（回车不进 chunk 计划，§8.1）
         sleep(Duration::from_millis(families::SUBMIT_DELAY_MS));
-        paced_write(handle, &enter, false, deadline)?;
+        paced_write(handle, &enter, false, deadline).map_err(|e| {
+            // 半成功防重（对齐 macOS tmux「文本已入 pane」先例）：正文已进输入行、
+            // 回车未提交，盲目重试会重复正文——追加人工确认提示
+            format!("{e}；正文可能已写入输入行，重试将重复——建议先人工确认终端")
+        })?;
         Ok(())
     })?;
     Ok(InjectStats {
@@ -354,6 +365,8 @@ pub(crate) fn inject_text_spec(
 
 /// A 族方向键 → VT 序列映射表（本地常量，M6R §8.1 定案：ESC [ + A/B/C/D 字母流，
 /// vk=0 字符形态整条单批原子写）。
+/// 探针派生脆弱常量——版本复验清单见 `super::families`（宪法横切 6 集中落点），
+/// 勿就地改值。
 const ARROW_VT_SEQS: [(&str, &str); 4] = [
     ("up", "\x1b[A"),
     ("down", "\x1b[B"),
@@ -466,6 +479,19 @@ mod tests {
         assert!(err.contains("不支持的按键"));
     }
 
+    /// 族分派单测（Minor 4）：同一方向键名按族规格分流——A 族（claude，RawVt）
+    /// 走 VT 字符流（vk=0 整条单批原子写），B 族（codex，Crossterm）走 VK+scan
+    /// 键形态（VK_UP=0x26）。
+    #[test]
+    fn key_records_for_family_dispatch() {
+        let claude = families::family_for("claude").unwrap();
+        let up_vt = key_records_for("up", &claude).unwrap();
+        assert!(up_vt.iter().all(|k| k.vk == 0)); // VT 字符流形态
+        let codex = families::family_for("codex").unwrap();
+        let up_vk = key_records_for("up", &codex).unwrap();
+        assert_eq!(up_vk[0].vk, 0x26); // VK_UP 键形态
+    }
+
     /// WinKeyLayout 真 FFI 契约单测（无需目标控制台，常规 cargo test 可跑）：
     /// 不硬编码键位（规避键盘布局差异误报）——vk_of('a') 与 `VkKeyScanW('a')`
     /// 低字节直接对拍；另钉三条铁律：'\r' → VK_RETURN 契约、非 ASCII → 0
@@ -485,7 +511,7 @@ mod tests {
         assert!(layout.scan_of(0x0D) > 0);
     }
 
-    /// Task 15 真 FFI 一跳集成测试（#[ignore]：需要弹真实 conhost 窗口，不在常规门禁跑）。
+    /// Task 12 真 FFI 一跳集成测试（#[ignore]：需要弹真实 conhost 窗口，不在常规门禁跑）。
     /// 运行：`cargo test --lib inject::windows_console -- --ignored --nocapture`
     ///
     /// 拓扑口径（M6 实证 + 本机对照实验 2026-09-18）：测试进程直生 cmd（CREATE_NEW_CONSOLE）

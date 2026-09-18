@@ -51,7 +51,8 @@ pub const OCC_ABNORMAL_MS: u64 = 5_000;
 /// 基础注入总预算（毫秒）：非背压路径的硬上限。
 pub const BASE_BUDGET_MS: u64 = 10_000;
 /// 背压斜率：每字符放宽毫秒数（opencode 实测 10k 字符 ≈110–183s，45ms/字符
-/// 放宽到 460s 留足余量）。
+/// 放宽到 460s 留足余量）。斜率按 chars 计；emoji 等代理对字符事件数翻倍，
+/// 极端 emoji 负载预算可能偏紧——Task 12 实机校准项。
 pub const BACKPRESSURE_MS_PER_CHAR: u64 = 45;
 
 /// 工具 → 族规格（小写精确匹配，对齐 `AgentType` serde lowercase 形态）。
