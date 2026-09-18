@@ -513,3 +513,553 @@ pub async fn session_messages(
         }
     }
 }
+
+// ==== M7 Task 6：注入三端点（session-send / send-info / queue 系）====
+// 契约（JSON camelCase；所有 Json 响应带 Cache-Control: no-store——门禁下私有写路径）：
+//   POST /session-send          → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
+//   GET  /session-send-info     → {injectable, reasonCode?, reason?, channels, visibility}
+//   GET  /session-queue         → {items:[{id,content,enqueuedAt,position}]}
+//   POST /session-queue/jump    → delivered | failed{error} | 404 not_found
+//   POST /session-queue/retract → {ok:true} | 404 not_found
+// 零污染：DB 依赖全部经 RemoteState.store（测试 = 内存库）；会话快照走注入源
+// （数据同源铁律）；注入器走 st.injector 缝（端点测试用 FakeInjector）。
+
+/// 单条发送正文上限（chars 计）：移动端输入框软上限的服务端兜底
+pub const MAX_SEND_CHARS: usize = 10_000;
+
+/// POST /m/api/v1/session-send 请求体（camelCase；字段全 default——缺参不触发
+/// axum 提取器 422，由 handler 统一按契约给 400 bad_request）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSendReq {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// POST /session-queue/jump 与 /retract 请求体（camelCase；item_id 走 Option——
+/// 缺参/非法由 handler 统一 400，不让 serde 提取器抢答）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItemReq {
+    #[serde(default)]
+    pub session_id: String,
+    pub item_id: Option<i64>,
+}
+
+/// 400 bad_request（缺参 / 空 text / 超长）
+fn bad_request() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "error": "bad_request" })),
+    )
+        .into_response()
+}
+
+/// 403 防御（gate 已拦设备，理论不可达——handler 直取 cookie 失败时兜底）
+fn forbidden_defense() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "error": "forbidden" })),
+    )
+        .into_response()
+}
+
+/// 设备侧公共前置：cookie 提取（防御 403 的判定源）+ 花名查询（查无回落 unknown）。
+/// 返回 `None` = 无有效 cookie（调用方统一给 403 防御响应；不在此构造 Response，
+/// 规避 clippy::result_large_err 的大 Err 变体）
+fn device_identity(st: &RemoteState, headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+    let device_id = super::gate::extract_device(headers)?;
+    let device_name = st
+        .store
+        .with(|c| super::pairing::device_name(c, &device_id));
+    Some((device_id, device_name))
+}
+
+/// 端点侧审计（send / queue / retract 共用）：统一走 inject::audit_write
+/// （DB 落库 + events::audit 日志并行，M4 T2e 惯例）
+#[allow(clippy::too_many_arguments)]
+fn endpoint_audit(
+    st: &Arc<RemoteState>,
+    device_id: &str,
+    device_name: &str,
+    agent_type: &str,
+    session_id: &str,
+    content: &str,
+    action: &str,
+    result: &str,
+) {
+    st.store.with(|c| {
+        crate::inject::audit_write(
+            c,
+            st,
+            device_id,
+            device_name,
+            agent_type,
+            session_id,
+            content,
+            action,
+            result,
+        )
+    });
+}
+
+/// 快照中按 session_id 找会话（spawn_blocking 内调用：session_source 是同步阻塞扫描）。
+/// 数据同源铁律：直调注入源（与看板/内容读取同一份快照），不另立查找函数
+fn find_session_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<crate::session::Session> {
+    (st.session_source)()
+        .sessions
+        .into_iter()
+        .find(|s| s.id == session_id)
+}
+
+/// POST /m/api/v1/session-send（W4 直发/入队分派）：
+/// - 缺参 / 空 text / 超 MAX_SEND_CHARS → 400 bad_request；
+/// - 设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
+/// - 会话不在快照 → 404 no_session；路由判不可注入 → 403 not_injectable（带
+///   reasonCode/reason——W1 定位失败语义的前置闸，不入队）；
+/// - 可输入态（is_input_ready）→ 入队后即刻 flush_one 直发（jump=false）：
+///   Ok → 200 delivered；Err(e) → 200 failed{error}（注入失败回执可重试，W1：
+///   失败行已 mark_failed 退出 pending，队列无残留）。直发审计 action=send
+///   （flush_one 落账时已并行写 flush 审计——本端点按契约另写 send 终态）；
+/// - 运行中（is_running 等）→ 留队（黄灯），审计 action=queue，回执 queued+position。
+///
+/// 直发也走队列（先入队再 flush 队首）：与既有 pending 项保持 FIFO 串行
+/// （W2 单会话不变量），成功/失败行都退出 pending，队列无残留。
+pub async fn session_send(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionSendReq>,
+) -> Response {
+    // ① 参数校验（trim 判空，原文上送——归一在入队时统一做）
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() || req.text.trim().is_empty() || req.text.chars().count() > MAX_SEND_CHARS {
+        return bad_request();
+    }
+    // ② 设备身份（防御 403 + 花名）
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // ③ 会话查找（spawn_blocking：扫描是重活）+ 路由判定
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let session =
+        match tokio::task::spawn_blocking(move || find_session_sync(&probe_st, &probe_sid)).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("session-send 会话扫描任务异常: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "error": "internal" })),
+                )
+                    .into_response();
+            }
+        };
+    let Some(session) = session else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "no_session" })),
+        )
+            .into_response();
+    };
+    // ④ 路由判定（W3 纯核；platform = 本机 OS）。不可注入 → 403（带原因），不入队
+    let tool = session.agent_type.tool_id().to_string();
+    if let crate::inject::routing::RouteOutcome::NotInjectable {
+        reason_code,
+        reason,
+    } = crate::inject::routing::route(&tool, session.form, session.pid, std::env::consts::OS)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "error": "not_injectable",
+                "reason": reason,
+                "reasonCode": reason_code,
+            })),
+        )
+            .into_response();
+    }
+    // ⑤ 组装（W1 来源标记 + 裁决 6 归一在入队时一次完成）并入队（FIFO 保序）
+    let content = crate::inject::normalize::compose_injection(&device_name, &req.text);
+    let now = chrono::Utc::now().timestamp_millis();
+    let (item_id, position) = st.store.with(|c| {
+        let id = crate::database::dao::inject_queue::enqueue_conn(
+            c,
+            &sid,
+            &tool,
+            &device_id,
+            &device_name,
+            &content,
+            now,
+        );
+        let pos =
+            crate::database::dao::inject_queue::pending_for_session_conn(c, &sid).len() as i64;
+        (id, pos)
+    });
+    if item_id == 0 {
+        // DAO 写失败哨兵（enqueue_conn 失败返回 0 并 log）：不下发 delivered 谎报
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "internal" })),
+        )
+            .into_response();
+    }
+    let queued = serde_json::json!({
+        "status": "queued",
+        "itemId": item_id,
+        "position": position,
+    });
+    // ⑥ 可输入态 → 直发（flush_one 投递内核，jump=false；in-flight 守卫与 flush 循环共用，
+    //    防同会话并发双投）
+    if crate::inject::queue::is_input_ready(&session.status) {
+        return match crate::inject::queue::try_acquire_inflight(&sid) {
+            None => {
+                // flush 循环正在投递该会话：本条保持入队（守卫方负责队首送达，
+                // 下一跃迁接力本条），按已入队回执——不谎报 delivered
+                endpoint_audit(
+                    &st,
+                    &device_id,
+                    &device_name,
+                    &tool,
+                    &sid,
+                    &content,
+                    "queue",
+                    "ok",
+                );
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(queued),
+                )
+                    .into_response()
+            }
+            Some(_guard) => {
+                let flush_st = st.clone();
+                let flush_sid = sid.clone();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    crate::inject::queue::flush_one(&flush_st, &flush_sid, false)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    log::error!("session-send 直发任务异常: {e}");
+                    Err("内部任务异常".to_string())
+                });
+                match outcome {
+                    // Ok = 已发出（或挂起/等待——行保持 pending 由 flush 循环接力，非失败）
+                    Ok(()) => {
+                        endpoint_audit(
+                            &st,
+                            &device_id,
+                            &device_name,
+                            &tool,
+                            &sid,
+                            &content,
+                            "send",
+                            "ok",
+                        );
+                        (
+                            StatusCode::OK,
+                            [(axum::http::header::CACHE_CONTROL, "no-store")],
+                            Json(serde_json::json!({ "status": "delivered" })),
+                        )
+                            .into_response()
+                    }
+                    // Err(e) = 注入失败（行已 mark_failed，队列无残留——回执可重试，W1/W4）
+                    Err(e) => {
+                        endpoint_audit(
+                            &st,
+                            &device_id,
+                            &device_name,
+                            &tool,
+                            &sid,
+                            &content,
+                            "send",
+                            &format!("failed:{e}"),
+                        );
+                        (
+                            StatusCode::OK,
+                            [(axum::http::header::CACHE_CONTROL, "no-store")],
+                            Json(serde_json::json!({ "status": "failed", "error": e })),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+        };
+    }
+    // ⑦ 运行中（黄灯）→ 留队等下一可输入态
+    endpoint_audit(
+        &st,
+        &device_id,
+        &device_name,
+        &tool,
+        &sid,
+        &content,
+        "queue",
+        "ok",
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(queued),
+    )
+        .into_response()
+}
+
+/// routing Channel → wire 小写字符串（枚举未派生 serde，端点侧手工映射防漂移）
+fn channel_wire(c: &crate::inject::routing::Channel) -> &'static str {
+    use crate::inject::routing::Channel;
+    match c {
+        Channel::Tmux => "tmux",
+        Channel::Iterm2 => "iterm2",
+        Channel::TerminalApp => "terminal_app",
+        Channel::WindowsConsole => "windows_console",
+    }
+}
+
+/// routing Visibility → wire 字符串（与移动端 SendInfo 联合类型对齐）
+fn visibility_wire(v: &crate::inject::routing::Visibility) -> &'static str {
+    use crate::inject::routing::Visibility;
+    match v {
+        Visibility::Realtime => "realtime",
+        Visibility::AfterRefresh => "after_refresh",
+    }
+}
+
+/// GET /m/api/v1/session-send-info?session_id=（W4 输入区可用性矩阵）：
+/// 会话不在快照 → 404 no_session；路由判定 → 200 {injectable, channels, visibility}
+/// 或 {injectable:false, reasonCode, reason}。快照是同步阻塞扫描，spawn_blocking 包裹。
+pub async fn session_send_info(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    let probe_st = st.clone();
+    let session =
+        match tokio::task::spawn_blocking(move || find_session_sync(&probe_st, &sid)).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("session-send-info 会话扫描任务异常: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "error": "internal" })),
+                )
+                    .into_response();
+            }
+        };
+    let Some(session) = session else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "no_session" })),
+        )
+            .into_response();
+    };
+    let tool = session.agent_type.tool_id().to_string();
+    let body =
+        match crate::inject::routing::route(&tool, session.form, session.pid, std::env::consts::OS)
+        {
+            crate::inject::routing::RouteOutcome::Injectable {
+                candidates,
+                visibility,
+            } => serde_json::json!({
+                "injectable": true,
+                "channels": candidates.iter().map(channel_wire).collect::<Vec<_>>(),
+                "visibility": visibility_wire(&visibility),
+            }),
+            crate::inject::routing::RouteOutcome::NotInjectable {
+                reason_code,
+                reason,
+            } => {
+                serde_json::json!({
+                    "injectable": false,
+                    "reasonCode": reason_code,
+                    "reason": reason,
+                })
+            }
+        };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// GET /m/api/v1/session-queue?session_id=（W4 排队视图）：该会话全部待发消息
+/// FIFO（position = 1 起的队位；content 已是入队时 compose 完成的最终注入文本）。
+/// 轻量 SQLite 查询（pending_for_session），无需 spawn_blocking（host handler 同口径）。
+pub async fn session_queue(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    let items = st
+        .store
+        .with(|c| crate::database::dao::inject_queue::pending_for_session_conn(c, &sid));
+    let views: Vec<serde_json::Value> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            serde_json::json!({
+                "id": it.id,
+                "content": it.content,
+                "enqueuedAt": it.enqueued_at,
+                "position": i + 1,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "items": views })),
+    )
+        .into_response()
+}
+
+/// POST /m/api/v1/session-queue/jump（裁决 12 插队）：按 itemId 点名该会话 pending 中
+/// 的条目（可非队首）即刻投递（黄态照发）——flush_given 内核，settle 落账审计 action=jump。
+/// - 缺参 → 400；无此 pending 项 → 404 not_found；
+/// - Ok → 200 delivered；Err(e) → 200 failed{error}（注入失败行已退出 pending）；
+/// - in-flight 守卫忙 → 200 failed（该会话投递进行中，提示重试）。
+pub async fn session_queue_jump(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<QueueItemReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() || req.item_id.is_none_or(|id| id <= 0) {
+        return bad_request();
+    }
+    let item_id = req.item_id.unwrap_or(0);
+    if device_identity(&st, &headers).is_none() {
+        return forbidden_defense();
+    }
+    // 前查归属（借 retract 语义）+ 取整行（点名投递需要 item 字段），无 pending 项 → 404
+    let target = st.store.with(|c| {
+        crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
+            .into_iter()
+            .find(|i| i.id == item_id)
+    });
+    let Some(item) = target else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "not_found" })),
+        )
+            .into_response();
+    };
+    let failed_body = |e: String| {
+        (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": "failed", "error": e })),
+        )
+            .into_response()
+    };
+    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
+        // 该会话已有投递进行中（与直发/flush 循环共用守卫）——插队让位，提示重试
+        return failed_body("该会话投递进行中，请稍后重试".to_string());
+    };
+    let flush_st = st.clone();
+    let outcome = match tokio::task::spawn_blocking(move || {
+        crate::inject::queue::flush_given(&flush_st, &item, true)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-queue/jump 任务异常: {e}");
+            Err("内部任务异常".to_string())
+        }
+    };
+    match outcome {
+        Ok(()) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": "delivered" })),
+        )
+            .into_response(),
+        Err(e) => failed_body(e),
+    }
+}
+
+/// POST /m/api/v1/session-queue/retract（W4 撤回）：前查该会话 pending 中的目标条目
+/// （取审计字段）→ DAO retract_conn（内部再按 (session_id, id) 二次校验，防竞态误删）
+/// → 审计 action=retract → 200 {ok:true}；无此 pending 项 → 404 not_found。
+pub async fn session_queue_retract(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<QueueItemReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() || req.item_id.is_none_or(|id| id <= 0) {
+        return bad_request();
+    }
+    let item_id = req.item_id.unwrap_or(0);
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 前查：拿条目供审计（agent_type / 已 compose 的 content），同时完成归属校验
+    let target = st.store.with(|c| {
+        crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
+            .into_iter()
+            .find(|i| i.id == item_id)
+    });
+    let Some(item) = target else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "not_found" })),
+        )
+            .into_response();
+    };
+    let removed = st
+        .store
+        .with(|c| crate::database::dao::inject_queue::retract_conn(c, &sid, item_id));
+    if !removed {
+        // 前查后竞态被他人删走：按 404 语义（DAO 二次校验未命中）
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "not_found" })),
+        )
+            .into_response();
+    }
+    endpoint_audit(
+        &st,
+        &device_id,
+        &device_name,
+        &item.agent_type,
+        &sid,
+        &item.content,
+        "retract",
+        "ok",
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}

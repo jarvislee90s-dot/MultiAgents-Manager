@@ -214,8 +214,8 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
         store: pairing::DeviceStore::global(),
-        // M7 Task 5（方案 A）：注入器生产装配——本任务只加字段与装配；路由/handler/
-        // flush 循环接线归 Task 6（届时 serve() 挂 spawn_flush_loop + 注册 session-send 等）
+        // M7 Task 5（方案 A）：注入器生产装配——消费方 flush_one / session-send 直发；
+        // Task 6 已接线：api_router 注册 session-send 等路由 + serve() 挂 spawn_flush_loop
         injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),

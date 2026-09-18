@@ -275,8 +275,8 @@ pub struct RemoteState {
     pub via_hosts_source: Box<ViaHostsSource>,
     /// 注入器缝（M7 Task 5 方案 A 提前缝合）：生产 = RealInjector（macOS 三通道执行层；
     /// Windows 占位，Task 15 补真实现）；测试可替换 FakeInjector。
-    /// 消费方：inject::queue::flush_one（flush 投递）+ Task 6 的 session-send 直发与
-    /// flush 循环接线（路由/handler/serve 挂载届时合入）
+    /// 消费方：inject::queue::flush_one（flush 投递）+ session-send 直发（Task 6 已接线：
+    /// 路由注册 / serve 挂 flush 循环 / 审计写口共用）——channel 名（审计）也取自本缝
     pub injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
 }
 
@@ -296,6 +296,13 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         .route("/session-files", get(api::session_files))
         // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
         .route("/file", get(api::read_file))
+        // M7 Task 6：注入三端点（PIN 门禁内层 gate 结构性覆盖——新端点不需要各自
+        // 鉴权代码；session-send 直发/入队 + send-info 可用性 + queue 视图/插队/撤回）
+        .route("/session-send", post(api::session_send))
+        .route("/session-send-info", get(api::session_send_info))
+        .route("/session-queue", get(api::session_queue))
+        .route("/session-queue/jump", post(api::session_queue_jump))
+        .route("/session-queue/retract", post(api::session_queue_retract))
         // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
         // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
         // 内层 fallback 403）
@@ -351,6 +358,11 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     // 见 adapter::get_all_sessions 的单飞护栏注释）；watcher 生命周期随进程结束，
     // stop_server 不显式停止（关闭远程后循环仍扫描，为已有取舍）
     super::watcher::SessionWatcher::start();
+    // M7 Task 6：注入 flush 循环接线（Task 5 交付的循环体在此合入编译）——订阅同一
+    // watcher 跃迁通道（broadcast 多订阅端各自独立游标，与 SSE 消费互不影响），
+    // 会话回到可输入态时逐条投递该会话的待发队列；与 session-send 直发共用
+    // in-flight 守卫（同会话并发双投防护）
+    crate::inject::queue::spawn_flush_loop(state.clone());
     // M5 A3：来源 IP 记录——into_make_service_with_connect_info 注入 ConnectInfo
     // extension（pair_pin 的限速键/指纹与 gate 本机豁免判定依赖；oneshot 测试在请求侧自补）
     axum::serve(
@@ -2462,5 +2474,604 @@ mod tests {
                 .unwrap();
             assert_eq!(r.status(), 403, "{uri} 必须死亡（旧端点下线 + 名单收口）");
         }
+    }
+
+    // ==== M7 Task 6：session-send / send-info / queue 端点（PIN 门禁内 + 注入器缝）====
+    // 零污染：DB 依赖全部经 RemoteState.store = DeviceStore::memory()（Task 6 缝演进：
+    // flush_one / 队列 DAO / 审计全走 st.store——生产 Global 语义不变，测试内存库）；
+    // 会话快照走注入源；注入器用 FakeInjector。不触真实 ~/.mam。
+
+    /// 注入器假体（记录 locate_and_inject 调用）；fail=Some 时恒 Err（直发失败回执用）
+    struct FakeInjector {
+        calls: std::sync::Mutex<Vec<(u32, String)>>,
+        fail: Option<&'static str>,
+    }
+
+    impl FakeInjector {
+        fn ok() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                fail: None,
+            })
+        }
+        fn failing(reason: &'static str) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                fail: Some(reason),
+            })
+        }
+        fn recorded(&self) -> Vec<(u32, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::inject::engine::Injector for FakeInjector {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
+            self.calls.lock().unwrap().push((pid, text.to_string()));
+            match self.fail {
+                Some(e) => Err(e.to_string()),
+                None => Ok(()),
+            }
+        }
+        fn locate_and_send_key(&self, _pid: u32, _key: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// 会话夹具（字段形状对齐 file_endpoints_* 既有构造）
+    fn inj_sess(
+        id: &str,
+        agent_type: crate::session::AgentType,
+        pid: u32,
+        status: crate::session::SessionStatus,
+    ) -> crate::session::Session {
+        crate::session::Session {
+            id: id.into(),
+            agent_type,
+            project_name: "proj".into(),
+            project_path: "/tmp/proj".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-09-18T00:00:00Z".into(),
+            pid,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: crate::session::ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        }
+    }
+
+    /// Task 6 专用 state：夹具会话（sess_a Waiting / sess_b Processing / sess_c workbuddy
+    /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话——
+    /// in-flight 守卫按 session_id 全局占用，避免并行测试互相挤占）+ 指定注入器；
+    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）
+    fn inject_state(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+    ) -> Arc<RemoteState> {
+        let sessions = vec![
+            inj_sess(
+                "sess_a",
+                crate::session::AgentType::Claude,
+                11,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_b",
+                crate::session::AgentType::Claude,
+                12,
+                crate::session::SessionStatus::Processing,
+            ),
+            inj_sess(
+                "sess_c",
+                crate::session::AgentType::WorkBuddy,
+                13,
+                crate::session::SessionStatus::Idle,
+            ),
+            inj_sess(
+                "sess_d",
+                crate::session::AgentType::ZCode,
+                14,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_e",
+                crate::session::AgentType::Claude,
+                15,
+                crate::session::SessionStatus::Waiting,
+            ),
+        ];
+        Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: sessions.clone(),
+                total_count: sessions.len(),
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector,
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+        })
+    }
+
+    /// 预置带花名的有效设备（[mobile <名>] 前缀与审计设备名列的数据源）
+    fn persist_named_device(state: &Arc<RemoteState>, id: &str, name: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        state.store.with(|c| {
+            crate::remote::pairing::persist_device(
+                c,
+                &crate::remote::pairing::NewDevice {
+                    id: id.into(),
+                    name: name.into(),
+                    ua: format!("ua-{id}"),
+                    origin_ip: format!("ip-{id}"),
+                    via: String::new(),
+                    paired_at: now,
+                },
+            )
+            .unwrap();
+        });
+    }
+
+    /// 直发可输入态（Waiting）：200 delivered + 注入器收到 compose 产物（裁决 6 归一）
+    /// + 审计 action=send result=ok channel=fake + 队列无 pending 残留
+    #[tokio::test]
+    async fn send_delivers_when_input_ready() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_a","text":"你好\n继续"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "发送回执是门禁下私有数据，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"delivered\""),
+            "可输入态直发应 delivered：{body}"
+        );
+        // 注入器收到 (pid=11, "[mobile 测试设备] 你好\n继续")——真实换行归一为字面 \n（裁决 6）
+        assert_eq!(
+            fake.recorded(),
+            vec![(11u32, "[mobile 测试设备] 你好\\n继续".to_string())],
+            "直发必须携带 W1 来源标记与归一正文"
+        );
+        // 审计：最新一条 action=send result=ok channel=fake
+        //（flush_one 落账并行写的 action=flush 审计紧随其后——Task 6 最小演进：直发终态
+        // 由端点另行落 send 审计，flush 落账审计保持 Task 5 原样）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "send");
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(audits[0].channel, "fake");
+        assert_eq!(audits[0].session_id, "sess_a");
+        assert_eq!(audits[0].device_name, "测试设备");
+        // 队列无残留（直发行 mark_sent 退出 pending）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-queue?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(
+            body_string(r).await.contains("\"items\":[]"),
+            "直发后队列不得有 pending 残留"
+        );
+    }
+
+    /// 运行中（Processing 黄态）：200 queued + itemId/position + 审计 action=queue +
+    /// 注入器不被调用 + GET session-queue 可见该项（content 为 compose 产物）
+    #[tokio::test]
+    async fn send_queues_when_running() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","text":"排队消息"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "queued");
+        let item_id = v["itemId"].as_i64().expect("queued 回执必须带 itemId");
+        assert!(item_id > 0, "itemId 应为入队行 id");
+        assert_eq!(v["position"], 1, "首条排队 position=1");
+        assert!(
+            fake.recorded().is_empty(),
+            "运行中会话不得直发（等 agent 交回输入框）"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "queue");
+        assert_eq!(audits[0].result, "ok");
+        // GET session-queue 可见该项（content = 入队时 compose 完成的最终文本）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-queue?session_id=sess_b",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains(&format!("\"id\":{item_id}"))
+                && body.contains("[mobile 测试设备] 排队消息")
+                && body.contains("\"position\":1")
+                && body.contains("\"enqueuedAt\":"),
+            "排队视图应含 id/content/enqueuedAt/position，实际 {body}"
+        );
+    }
+
+    /// 拒绝矩阵：workbuddy → 403 blackbox；zcode → 403 headless_only（均不入队）；
+    /// 未知会话 → 404 no_session；空/全空白 text 与超长（MAX_SEND_CHARS+1）→ 400
+    #[tokio::test]
+    async fn send_rejects_not_injectable_and_missing() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // workbuddy 黑盒 → 403 not_injectable + reasonCode=blackbox（原因写在报错处，
+        // 仅已过闸设备可见——M5 P2-a 同口径）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_c","text":"hi"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("not_injectable") && body.contains("blackbox"),
+            "403 体必须带 not_injectable + reasonCode：{body}"
+        );
+        // zcode 走无头（M11）→ 403 headless_only
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_d","text":"hi"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        assert!(body_string(r).await.contains("headless_only"));
+        // 不存在的会话 → 404 no_session（W1：定位失败不入队）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"nope","text":"hi"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_session"));
+        // 空 / 全空白 text → 400 bad_request
+        for payload in [
+            r#"{"sessionId":"sess_a","text":""}"#,
+            r#"{"sessionId":"sess_a","text":"   "}"#,
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-send",
+                    Some("mam_device=mm"),
+                    Some(payload),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "{payload}");
+            assert!(body_string(r).await.contains("bad_request"));
+        }
+        // 超长（MAX_SEND_CHARS + 1 chars）→ 400
+        let payload = serde_json::json!({
+            "sessionId": "sess_a",
+            "text": "字".repeat(crate::remote::api::MAX_SEND_CHARS + 1),
+        })
+        .to_string();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(&payload),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "超长正文必须 400");
+        // 全程无任何投递、无任何入队
+        assert!(fake.recorded().is_empty());
+        let pending = state
+            .store
+            .with(|c| crate::database::dao::inject_queue::pending_for_session_conn(c, "sess_c"));
+        assert!(pending.is_empty(), "拒绝路径不得入队");
+    }
+
+    /// 插队 + 撤回：黄态入队两条 → jump 第二条 delivered（插队语义：黄态照发，注入器
+    /// 收到第二条 compose 产物）+ 审计 action=jump → retract 第一条 ok:true → queue 空
+    #[tokio::test]
+    async fn queue_jump_and_retract() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 入队两条（sess_b Processing 黄态）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","text":"第一条"}"#),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let id1 = v["itemId"].as_i64().unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","text":"第二条"}"#),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let id2 = v["itemId"].as_i64().unwrap();
+        assert_eq!(v["position"], 2, "第二条排位 2");
+
+        // jump 第二条 → delivered（插队语义：黄态照发）
+        let payload = serde_json::json!({ "sessionId": "sess_b", "itemId": id2 }).to_string();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-queue/jump",
+                Some("mam_device=mm"),
+                Some(&payload),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.contains("\"status\":\"delivered\""));
+        // 注入器收到的是插队目标（第二条）的 compose 产物
+        assert_eq!(
+            fake.recorded(),
+            vec![(12u32, "[mobile 测试设备] 第二条".to_string())],
+            "插队必须照发目标条目（运行中 TUI 把消息放进自身输入缓冲）"
+        );
+        // 审计 action=jump（settle 落账写入；此刻 retract 尚未发生，最新一条即 jump）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "jump");
+        assert_eq!(audits[0].result, "ok");
+
+        // retract 第一条 → ok:true
+        let payload = serde_json::json!({ "sessionId": "sess_b", "itemId": id1 }).to_string();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-queue/retract",
+                Some("mam_device=mm"),
+                Some(&payload),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.contains("\"ok\":true"));
+        // 队列空（第一条被撤、第二条已发）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-queue?session_id=sess_b",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            body_string(r).await.contains("\"items\":[]"),
+            "撤回 + 插队发完后队列应为空"
+        );
+    }
+
+    /// 直发注入失败：注入器恒 Err → 200 {"status":"failed","error":…}（W4 可重试回执）
+    /// + 审计 action=send result=failed:… + 队列无残留（W1：失败行 mark_failed 退出 pending）
+    #[tokio::test]
+    async fn send_reports_inject_failure() {
+        let fake = FakeInjector::failing("定位终端失败：pid 不存在");
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_e","text":"失败回执"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "注入失败以 200 failed 回执表达（非 5xx）");
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("定位终端失败：pid 不存在"),
+            "失败回执必须携带注入器错误原文：{body}"
+        );
+        assert_eq!(
+            fake.recorded().len(),
+            1,
+            "失败发生在投递阶段（注入器已被调用）"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "send");
+        assert!(
+            audits[0].result.starts_with("failed:"),
+            "失败审计 result=failed:<原因>，实际 {}",
+            audits[0].result
+        );
+        let pending = state
+            .store
+            .with(|c| crate::database::dao::inject_queue::pending_for_session_conn(c, "sess_e"));
+        assert!(
+            pending.is_empty(),
+            "失败行必须退出 pending（W1：定位失败不入队重试）"
+        );
+    }
+
+    /// send-info 可用性矩阵：可注入会话 → injectable=true + channels/visibility
+    /// （channels 随本机平台——routing platform = std::env::consts::OS，macOS 三通道 /
+    /// windows 单通道，断言按编译平台取期望）；workbuddy → injectable=false + blackbox；
+    /// 另锁定缺参 400 与未知会话 404 no_session
+    #[tokio::test]
+    async fn send_info_matrix() {
+        let state = inject_state(FakeInjector::ok());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-send-info?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["injectable"], true);
+        let channels: Vec<&str> = v["channels"]
+            .as_array()
+            .expect("channels 应为数组")
+            .iter()
+            .map(|c| c.as_str().expect("channel 应为字符串"))
+            .collect();
+        let want: &[&str] = if cfg!(target_os = "macos") {
+            &["tmux", "iterm2", "terminal_app"]
+        } else if cfg!(windows) {
+            &["windows_console"]
+        } else {
+            &[]
+        };
+        assert_eq!(
+            channels, want,
+            "channels 应为 wire 小写字符串数组（本机平台）"
+        );
+        assert_eq!(v["visibility"], "realtime");
+        // workbuddy 黑盒 → injectable=false + reasonCode=blackbox + reason 文案
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-send-info?session_id=sess_c",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["injectable"], false);
+        assert_eq!(v["reasonCode"], "blackbox");
+        assert!(v["reason"].is_string(), "不可注入必须带 reason 文案");
+        // 缺参 → 400；未知会话 → 404 no_session
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-send-info",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-send-info?session_id=nope",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_session"));
     }
 }
