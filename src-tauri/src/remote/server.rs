@@ -1697,13 +1697,14 @@ mod tests {
         );
         assert_eq!(header(&r, "x-content-type-options"), "nosniff");
 
-        // (6) 不存在（cwd 外任意路径）→ 403 + 原因码 not_found（M5 P2-a：原因
-        // 写在报错处，仅已过闸设备可见）
+        // (6) 不存在（两平台都不存在的人造路径——勿用 /etc/passwd 之类真实系统
+        // 路径：Linux CI 上它真实存在，全盘放开语义下 200 是正确行为而非失败）
+        // → 403 + 原因码 not_found（M5 P2-a：原因写在报错处，仅已过闸设备可见）
         let r = app
             .clone()
             .oneshot(req(
                 "GET",
-                "/m/api/v1/file?session_id=sess_file&path=/etc/passwd",
+                "/m/api/v1/file?session_id=sess_file&path=/no-such-mam-fixture/nope.txt",
                 Some("mam_device=fe"),
                 None,
             ))
