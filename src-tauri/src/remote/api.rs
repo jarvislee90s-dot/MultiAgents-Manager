@@ -395,7 +395,10 @@ pub async fn read_file(
         let Some(session) = resp.sessions.into_iter().find(|s| s.id == sid) else {
             return FileReadOutcome::NoSession;
         };
-        match crate::remote::files::read_file_safe(&session.project_path, &path, None) {
+        // 敏感黑名单基准：经注入缝取真实 home（M5 P2-a 追记——直接传 None 曾使
+        // 主目录内黑名单整段失效，见 read_file_safe 文档）
+        let home = (st.home_source)();
+        match crate::remote::files::read_file_safe(&session.project_path, &path, home.as_deref()) {
             Ok((bytes, mime)) => FileReadOutcome::Found(bytes, mime),
             Err(e) => FileReadOutcome::Rejected(e),
         }

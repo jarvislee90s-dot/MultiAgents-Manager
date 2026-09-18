@@ -399,10 +399,12 @@ describe("PetManageDialog", () => {
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
 
-    // 探测 pending：徽标为 no-duration
+    // 探测 pending：徽标为 no-duration；probe 调用为数据落地后的微任务（CI 慢机上
+    // findBy 返回先于 hook effect 的探测发出——run 35315815616 实挂），
+    // 故断言走 waitFor 轮询而非同步断言
     const row = await screen.findByTestId("voice-row-voice/general/greet.mp3");
     expect(row).toHaveTextContent(/无法读取时长/);
-    expect(probeAudioDurationMs).toHaveBeenCalled();
+    await waitFor(() => expect(probeAudioDurationMs).toHaveBeenCalled());
 
     // 探测 resolve（3s）：徽标消解，行内出现时长
     await act(async () => {

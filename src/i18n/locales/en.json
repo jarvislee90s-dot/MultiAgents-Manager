@@ -189,9 +189,7 @@
       "tutorialPost": "The address never changes afterwards; MAM downloads cloudflared automatically and keeps it running — no manual install needed.",
       "save": "Save",
       "tokenSaved": "Saved",
-      "namedAddrTitle": "Fixed address (optional)",
-      "namedAddrPlaceholder": "https://mam.example.com/m",
-      "namedAddrSaved": "Fixed address saved",
+
       "addrFallback": "last known",
       "pinTitle": "Access PIN",
       "pinHint": "Only applies to LAN / Quick tunnel / Named tunnel (not needed locally). Click Save to apply; a new device enters it once and stays trusted for 180 days; changing it signs out every device",

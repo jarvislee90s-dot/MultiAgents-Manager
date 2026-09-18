@@ -278,6 +278,10 @@ pub struct RemoteState {
     /// 消费方：inject::queue::flush_one（flush 投递）+ session-send 直发（Task 6 已接线：
     /// 路由注册 / serve 挂 flush 循环 / 审计写口共用）——channel 名（审计）也取自本缝
     pub injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+    /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
+    /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
+    /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
+    pub home_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 /// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -422,6 +426,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         })
     }
 
@@ -953,6 +958,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -1322,6 +1328,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1436,6 +1443,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1608,6 +1616,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -1731,15 +1740,14 @@ mod tests {
         );
         assert_eq!(header(&r, "x-content-type-options"), "nosniff");
 
-        // (6) 不存在（cwd 外任意路径）→ 403 + 原因码 not_found（M5 P2-a：原因
-        // 写在报错处，仅已过闸设备可见）。探针用确定不存在的合成路径——全盘
-        // 放开语义下 /etc/passwd 在 macOS 真实存在会 200（原探针环境依赖：
-        // Windows 过 macOS 挂，合并验证期抓获修正）
+        // (6) 不存在（两平台都不存在的人造路径——勿用 /etc/passwd 之类真实系统
+        // 路径：Linux CI 上它真实存在，全盘放开语义下 200 是正确行为而非失败）
+        // → 403 + 原因码 not_found（M5 P2-a：原因写在报错处，仅已过闸设备可见）
         let r = app
             .clone()
             .oneshot(req(
                 "GET",
-                "/m/api/v1/file?session_id=sess_file&path=/__mam_nonexistent__/passwd",
+                "/m/api/v1/file?session_id=sess_file&path=/no-such-mam-fixture/nope.txt",
                 Some("mam_device=fe"),
                 None,
             ))
@@ -1803,6 +1811,140 @@ mod tests {
                 && files_body.contains("\"hits\":1")
                 && files_body.contains("\"truncated\":false"),
             "session-files 应透传注入路径源的结构化条目，实际 {files_body}"
+        );
+    }
+
+    /// 敏感黑名单端到端回归锁（M5 P2-a 追记）：/file 端点必须**消费** home_source。
+    /// 3d22e2e 曾把端点调用改传 None，使主目录内黑名单在生产链路上整段失效——
+    /// 当时单元测试全绿（read_file_safe 每个用例都显式传 Some(home)，无从暴露
+    /// 接线缺失），本锁补上这一层：探针 = 调用标记（照
+    /// session_messages_endpoint_is_gated_and_shaped 的捕获注入先例），端点漏接
+    /// home_source 时 hit 恒 false，断言直接变红。
+    #[tokio::test]
+    async fn file_endpoint_rejects_sensitive_paths_inside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let proj = home.join("Desktop").join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let ok_file = proj.join("ok.txt");
+        std::fs::write(&ok_file, "fine").unwrap();
+        let secret = home.join(".ssh").join("id_rsa");
+        std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+        std::fs::write(&secret, "PRIVATE").unwrap();
+        let home_s = home.to_str().unwrap().to_string();
+
+        let session = crate::session::Session {
+            id: "sess_home".into(),
+            agent_type: crate::session::AgentType::Claude,
+            project_name: "proj".into(),
+            project_path: proj.to_str().unwrap().to_string(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: crate::session::SessionStatus::Idle,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-09-15T00:00:00Z".into(),
+            pid: 1,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: crate::session::ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        };
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let h = hit.clone();
+        let state = Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            // 探针 + 注入 tmpdir home（零接触真实主目录）
+            home_source: Box::new(move || {
+                h.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(home_s.clone())
+            }),
+        });
+        let app = router(state.clone());
+        persist_device(&state, "fe");
+
+        // (1) 主目录内凭据 → 403 + 原因码 sensitive
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/m/api/v1/file?session_id=sess_home&path={}",
+                    uri_encode(&secret.to_string_lossy())
+                ),
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            hit.load(std::sync::atomic::Ordering::SeqCst),
+            "/file 必须消费 home_source（漏接 = 生产黑名单失效，3d22e2e 回归形态）"
+        );
+        assert_eq!(r.status(), 403, "主目录内凭据必须拒绝");
+        let b = body_string(r).await;
+        assert!(b.contains("sensitive"), "403 体必须带原因码 sensitive: {b}");
+
+        // (2) 主目录内普通文件 → 200（黑名单不误伤；同时证明 (1) 不是全盘拒绝）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/m/api/v1/file?session_id=sess_home&path={}",
+                    uri_encode(&ok_file.to_string_lossy())
+                ),
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "主目录内普通文件必须放行");
+
+        // (3) **区分度断言**：主目录**外**含敏感段名的路径必须放行——
+        // 这正是「基准被真正消费」的判据：若端点传 None（3d22e2e 形态），
+        // read_file_safe 会走全段保守分支把 .ssh 段一并拒掉（403）；
+        // 只有消费了 home 基准、且裁决边界（主目录外不设路径级防线）未被扩大，
+        // 才会放行。本条同时是「T1 fail-closed 不得吞掉接线错误」的防回归锁。
+        let outside_secret = tmp.path().join("outside").join(".ssh").join("id_rsa");
+        std::fs::create_dir_all(outside_secret.parent().unwrap()).unwrap();
+        std::fs::write(&outside_secret, "PRIVATE").unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/m/api/v1/file?session_id=sess_home&path={}",
+                    uri_encode(&outside_secret.to_string_lossy())
+                ),
+                Some("mam_device=fe"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "主目录外路径不设路径级防线（2026-09-18 裁决）——基准被消费时必须放行"
         );
     }
 
@@ -1873,6 +2015,7 @@ mod tests {
                     Some(q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect())
                 }),
                 via_hosts_source: Box::new(move || Some((quick.clone(), named.clone()))),
+                home_source: Box::new(|| None),
             }),
             t,
         )
@@ -2414,6 +2557,7 @@ mod tests {
                     now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
                     tunnel_hosts_source: Box::new(|| Some(Vec::new())),
                     via_hosts_source: Box::new(|| None),
+                    home_source: Box::new(|| None),
                 }),
                 t,
             )
@@ -2631,6 +2775,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         })
     }
 
@@ -2735,6 +2880,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
         })
     }
 

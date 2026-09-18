@@ -42,7 +42,6 @@ pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
 /// （tunnel.rs 摄取点自动写入）；manual = 用户手填的固定地址（设置页，兜底
 /// 「域名解析不到」场景）。两者都进豁免/with 的域名名单与状态展示
 pub const KEY_NAMED_ADDR_LAST: &str = "remote.named_addr_last";
-pub const KEY_NAMED_ADDR_MANUAL: &str = "remote.named_addr_manual";
 /// 访问密码键（M5 A2）：4 位数字（validate_pin 唯一口径；A3 端点 / A4 命令消费）
 pub const KEY_ACCESS_PIN: &str = "remote.access_pin";
 
@@ -239,6 +238,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // gate 回环豁免 / via 判定的隧道域名源（生产 = 双通道快照聚合抽取；M5 A5）
         tunnel_hosts_source: Box::new(tunnel_hosts_from_snapshot),
         via_hosts_source: Box::new(via_hosts_from_snapshot),
+        // M5 P2-a 追记：敏感黑名单的主目录基准（真实 home；取不到时 read_file_safe
+        // 走全段保守匹配分支）
+        home_source: Box::new(real_home_dir),
     })
 });
 
@@ -305,11 +307,11 @@ fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
     tunnel_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts())
 }
 
-/// 手填命名地址（P2-c）：用户在设置页声明的固定地址，可信来源
-fn named_manual_addr() -> Option<String> {
-    crate::database::dao::settings::get_setting(KEY_NAMED_ADDR_MANUAL)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+/// 敏感黑名单主目录基准的生产源（提取为具名函数以便接线探针测试）：
+/// 端点经 `RemoteState.home_source` 消费它；取不到 home（极端环境）返回 None，
+/// `read_file_safe` 随之走全段保守匹配分支（fail-closed）。
+fn real_home_dir() -> Option<String> {
+    dirs::home_dir().and_then(|h| h.to_str().map(str::to_string))
 }
 
 /// 最近一次解析成功的命名地址（P2-c 自动记忆，tunnel.rs 摄取点写入）
@@ -322,10 +324,7 @@ fn named_last_addr() -> Option<String> {
 /// 手填/记忆地址的 host 归集（host_of_board_url 归一 + 去重；供豁免与 via 名单）
 fn named_extra_hosts() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for u in [named_manual_addr(), named_last_addr()]
-        .into_iter()
-        .flatten()
-    {
+    for u in [named_last_addr()].into_iter().flatten() {
         if let Some(h) = host_of_board_url(&u) {
             if !out.contains(&h) {
                 out.push(h);
@@ -340,11 +339,16 @@ fn named_extra_hosts() -> Vec<String> {
 /// （错误终态 / 运行中而域名缺失）时返回 None——via 判定侧收到 None 保守标
 /// 「局域网」，绝不判「本机」（2026-09-18 实测：名单为空曾把隧道设备标成本机）
 fn via_hosts_from_snapshot() -> Option<(Vec<String>, Vec<String>)> {
-    let s = tunnel::snapshot();
-    match tunnel_hosts_from_status(&s, &named_extra_hosts()) {
-        None => None,
-        Some(_) => Some((channel_hosts(&s.quick), channel_hosts(&s.named))),
-    }
+    via_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts())
+}
+
+/// via 判定内核（纯函数，extras 注入）：与豁免名单同判据（哨兵 None → via 保守）
+fn via_hosts_from_status(
+    s: &tunnel::TunnelStatus,
+    extra_named: &[String],
+) -> Option<(Vec<String>, Vec<String>)> {
+    tunnel_hosts_from_status(s, extra_named)
+        .map(|_| (channel_hosts(&s.quick), channel_hosts(&s.named)))
 }
 
 /// 读取绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
@@ -496,9 +500,11 @@ fn start_server() -> Result<(), String> {
 /// [仅 revoke] 全吊销设备 → [注入的]隧道停法 → 释放电源锁。
 /// **M5 A4 吊销收窄矩阵（调用点 → revoke / 隧道停法取值，全量清单，专测锁定语义）**：
 ///   - `remote_toggle(false)`（显性关闭远程）→ revoke=`false`（`stop_server_explicit_close`）
-///     + 隧道 `stop_all`（全停，重开按各卡状态恢复）。**2026-09-18 用户裁决修订**：
-///       显性关闭 = 停止对外服务，不再吊销设备——吊销仅剩「重置设备」与「修改访问
-///       密码」两个入口（凭当前 PIN 重配对即恢复，设备名保留）；
+///     + 隧道 `stop_all`（全停，重开按各卡状态恢复）。
+///
+///     **2026-09-18 用户裁决修订**：显性关闭 = 停止对外服务，不再吊销设备——吊销
+///     仅剩「重置设备」与「修改访问密码」两个入口（凭当前 PIN 重配对即恢复，
+///     设备名保留）；
 ///   - 热重启（`restart_listener` → `stop_server_hot_restart`，M5 A4 遗留命名化）→
 ///     revoke=`false` + **隧道不动**（隧道句柄独立于监听进程，随通道开关与总开关启停；
 ///     监听热重启弹掉隧道会让 lan 开关把 quick 临时隧道换址）；
@@ -739,7 +745,6 @@ pub fn remote_status() -> serde_json::Value {
     // （gate 已保证本载荷只被本机/已过闸前端读到——pin 展示给设置页与看板持有者）
     let mut ch = channels_payload(enabled, chans, port, lan, &tun);
     // M5 P2-c：命名地址记忆/手填透出（named 卡片显示优先级：解析地址 > 手填 > 上次）
-    ch["named"]["manualAddr"] = serde_json::json!(named_manual_addr());
     ch["named"]["lastAddr"] = serde_json::json!(named_last_addr());
     st["channels"] = ch;
     st["pin"] = serde_json::json!(pin::get_pin());
@@ -1361,6 +1366,25 @@ pub fn restore_on_launch() {
 mod tests {
     use super::*;
 
+    /// 敏感黑名单基准的生产接线探针（M5 P2-a 追记，独立复核暴露的盲区）：
+    /// 端点侧有注入缝探针，但生产 `STATE` 的接线本身此前无任何测试压住——
+    /// 把本文件的 `home_source` 改回 `|| None` 时全量 807 测试曾零告警全绿
+    /// （端点测试自注入真值，无从暴露生产接线错误）。本探针直接读 `STATE`
+    /// 的注入缝，堵住该形态。
+    ///
+    /// 零污染：`STATE` 构造只存函数指针与内存态（`DeviceStore::Global` 是 ZST，
+    /// 不打开 DB——DB 仅在 `.with()` 时锁取）；此处只调 `home_source` 一次
+    /// （读 `dirs::home_dir()`），不触真实 ~/.mam、不绑端口。
+    #[test]
+    fn production_state_home_source_is_wired_to_real_home() {
+        let home = (STATE.home_source)();
+        let home = home.expect("生产接线必须给出真实 home（黑名单基准，不可为 None）");
+        assert!(
+            std::path::Path::new(&home).is_absolute(),
+            "黑名单基准必须是绝对路径，实际 {home}"
+        );
+    }
+
     #[test]
     fn remote_devices_table_idempotent_and_shaped() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1833,8 +1857,9 @@ mod tests {
         assert_eq!(host_of_board_url(""), None, "空串 → None");
     }
 
-    /// M5 A5 双通道聚合：quick/named 各自归集（域名归一）；错误通道不宣称（该通道
-    /// 名单为空）而豁免侧**任一通道错误 → None 哨兵**（fail-closed 整体收紧）
+    /// M5 A5 双通道聚合 + M5 P2-c extras 参数化：quick/named 各自归集（域名归一）；
+    /// 错误通道不宣称，豁免/via **同源 None 哨兵**（fail-closed）。走内核
+    /// via_hosts_from_status 注入 extras（空表），不读真实 KV
     #[test]
     fn via_hosts_from_snapshot_aggregates_both_channels_and_fails_closed_on_error() {
         use tunnel::TunnelStatus;
@@ -1843,7 +1868,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         // 默认态（双通道皆空）：名单为空集但**可信**（无隧道运行，Some 非哨兵）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
-        assert_eq!(via_hosts_from_snapshot(), Some((Vec::new(), Vec::new())));
+        assert_eq!(
+            via_hosts_from_status(&tunnel::snapshot(), &[]),
+            Some((Vec::new(), Vec::new()))
+        );
         // 双通道同开：各自归集（quick url 故意大写——归一后入表）
         tunnel::set_snapshot(|s| {
             s.quick = tunnel::ChannelStatus {
@@ -1858,7 +1886,7 @@ mod tests {
             };
         });
         assert_eq!(
-            via_hosts_from_snapshot(),
+            via_hosts_from_status(&tunnel::snapshot(), &[]),
             Some((
                 vec!["q-test.trycloudflare.com".to_string()],
                 vec!["mam.example.com".to_string()]
@@ -1890,7 +1918,6 @@ mod tests {
             None,
             "名单不可信 → None 哨兵（via 判定侧保守标 lan，绝不判本机）"
         );
-        // 豁免侧同源判定：任一通道错误 → None 哨兵（整体收紧，fail-closed）
         assert_eq!(
             tunnel_hosts_from_snapshot(),
             None,
@@ -1942,10 +1969,10 @@ mod tests {
         assert_eq!(tunnel_hosts_from_status(&off, &[]), Some(Vec::new()));
     }
 
-    /// P2-c 手填兜底：named 运行而解析不到 url，但用户手填了固定地址 →
-    /// 名单不收口（手填地址入名单），豁免 Host 判定恢复精确
+    /// P2-c 记忆地址兜底：named 运行而解析不到 url，但 KV 有记忆地址 →
+    /// 名单不收口（记忆 host 入名单），豁免 Host 判定恢复精确
     #[test]
-    fn tunnel_hosts_manual_addr_rescues_missing_named_url() {
+    fn tunnel_hosts_remembered_addr_rescues_missing_named_url() {
         use tunnel::{ChannelStatus, TunnelStatus};
         let s = TunnelStatus {
             quick: ChannelStatus {
@@ -1959,11 +1986,15 @@ mod tests {
                 error: None,
             },
         };
-        assert_eq!(tunnel_hosts_from_status(&s, &[]), None, "无手填 → 收口");
+        assert_eq!(
+            tunnel_hosts_from_status(&s, &[]),
+            None,
+            "无记忆地址 → 收口（域名未知，安全侧）"
+        );
         assert_eq!(
             tunnel_hosts_from_status(&s, &["mam-win.bondtoolbox.asia".to_string()]),
             Some(vec!["mam-win.bondtoolbox.asia".to_string()]),
-            "有手填 → 名单含手填 host（豁免恢复精确，不再 fail-closed）"
+            "有记忆地址 → 名单含其 host（豁免恢复精确，不再 fail-closed）"
         );
     }
 

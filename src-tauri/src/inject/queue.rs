@@ -412,6 +412,7 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
             injector,
         }
     }

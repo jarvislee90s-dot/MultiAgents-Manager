@@ -196,7 +196,9 @@ fn linux_rows() -> Vec<ConnRow> {
             };
             let link = link.to_string_lossy();
             if let Some(rest) = link.strip_prefix("socket:[") {
-                if let Some(ino) = rest.trim_end_matches(']').parse::<u64>().ok() {
+                // CI 教训（2026-09-18）：本块 cfg(target_os=linux) 在 Windows 本机不编译，
+                // clippy 错误只有 Linux CI 可见——`Some(x.ok())` 应直接 `if let Ok`
+                if let Ok(ino) = rest.trim_end_matches(']').parse::<u64>() {
                     inode_pid.insert(ino, pid);
                 }
             }

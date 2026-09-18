@@ -648,22 +648,3 @@ describe("RemoteSection i18n zh/en 无缺键（M5 A6）", () => {
     expect(missingEn).toEqual([]);
   });
 });
-
-describe("RemoteSection 命名地址手填兜底（M5 P2-c）", () => {
-  it("固定地址输入 + 保存 → set_setting(remote.named_addr_manual)", async () => {
-    render(<RemoteSection />);
-    await screen.findByText("Local only");
-    fireEvent.click(card("named"));
-    const input = (await screen.findByLabelText(/fixed address/i)) as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "https://mam-win.bondtoolbox.asia/m" } });
-    fireEvent.click(
-      within(input.closest("div")!).getByRole("button", { name: /^save$/i })
-    );
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("set_setting", {
-        key: "remote.named_addr_manual",
-        value: "https://mam-win.bondtoolbox.asia/m",
-      })
-    );
-  });
-});
