@@ -12,7 +12,7 @@
 
 ## Global Constraints（每任务隐含遵守）
 
-1. 六门禁全绿才算任务完：`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（基线 876 过/5 败=preset_v2 环境基线，名单恒定）/ `pnpm check` / `pnpm test` / `pnpm build:mobile`。
+1. 六门禁全绿才算任务完：`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`（**合并 main@e6fda1c 后基线〔2026-09-19〕：lib 835/835 全绿 + 集成 preset_v2 34 过/5 败=360 环境基线名单恒定；lib 并行负载下个别用例偶发干扰、复跑即绿**）/ `pnpm check` / `pnpm test`（544/544）/ `pnpm build:mobile`。
 2. 红线：不 push、不建 PR、不动 main、不改宪法与设计文档（发现冲突停下上台账）；裁决 1–19 + A1/B1 不重议。
 3. 平台分层：cfg 只包执行层；纯核（族表/事件构造/节流判定/确认戳/映射）无 cfg、Windows 全绿可测。macOS 单测 `#[cfg(all(test, target_os = "macos"))]` 照旧。
 4. 测试零接触真实 `~/.mam`（dao 内存库；端点测试假 session_source/假注入器）；**实机测试一律 `#[ignore]`**（`cargo test -- --ignored` 显式跑，Task 12）。
