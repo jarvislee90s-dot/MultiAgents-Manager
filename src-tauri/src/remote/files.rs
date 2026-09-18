@@ -71,6 +71,17 @@ fn fold_data_volume_alias(p: &Path) -> PathBuf {
     }
 }
 
+/// 敏感黑名单命中判定（纯函数，无 IO——跨平台 CI 锁定用）：
+/// 先对 child/base 两侧折叠 macOS Data 卷 firmlink 前缀（同 inode 双字面归一），
+/// 再判「child 在主目录基准内 ∧ 相对段命中 SENSITIVE_DIRS」。
+/// `windows` = 平台语义注入（路径分隔符双态 + Windows 语义大小写不敏感）。
+fn sensitive_under_home(child: &Path, home_base: &Path, windows: bool) -> bool {
+    let child = fold_data_volume_alias(child);
+    let base = fold_data_volume_alias(home_base);
+    path_within(&child, &base)
+        && is_sensitive_path(&child.to_string_lossy(), &base.to_string_lossy(), windows)
+}
+
 /// 敏感目录拒绝清单（2026-09-16 用户裁决）：主目录放宽后，这些目录下的文件
 /// 对**已配对设备**一律不可读——密钥/凭据/浏览器与会话数据。按路径段精确匹配
 /// （`.ssh2` 这类前缀相似目录不误伤），平台语义可注入便于测试
@@ -178,17 +189,9 @@ pub fn read_file_safe(
     //   预览打成 NotFound——根因回归锁，生产曾在 3d22e2e 传 None 致黑名单整段跳过）
     match home.and_then(|h| Path::new(h).canonicalize().ok()) {
         Some(home_canon) => {
-            // firmlink 前缀折叠后再判归属与段匹配（两侧同折，相对关系不变）——
-            // 否则 `/System/Volumes/Data<home>` 形态会被误判为「主目录外」而跳过检查
-            let child = fold_data_volume_alias(&canon);
-            let base = fold_data_volume_alias(&home_canon);
-            if path_within(&child, &base)
-                && is_sensitive_path(
-                    &child.to_string_lossy(),
-                    &base.to_string_lossy(),
-                    cfg!(windows),
-                )
-            {
+            // firmlink 折叠与归属/段匹配收敛在 sensitive_under_home（纯函数、
+            // 跨平台 CI 锁定——CI 无 macOS runner，平台门控的端到端锁永不执行）
+            if sensitive_under_home(&canon, &home_canon, cfg!(windows)) {
                 return Err(FileRejectReason::Sensitive);
             }
         }
@@ -1066,6 +1069,69 @@ mod tests {
             read_file_safe(h, &outside, Some(h)).is_ok(),
             "主目录外路径不设防线（裁决未被收窄）"
         );
+    }
+
+    /// firmlink 前缀折叠纯函数锁（跨平台——CI 只有 ubuntu 跑 `cargo test`，
+    /// `#[cfg(target_os = "macos")]` 的端到端锁在 CI 永不执行，2026-09-18 复核
+    /// Important）：别名形态折叠、恒等形态原样、挂载点本身归根。
+    #[test]
+    fn fold_data_volume_alias_folds_prefix_and_keeps_others() {
+        // 别名形态 → 折叠为主目录字面
+        assert_eq!(
+            fold_data_volume_alias(Path::new(
+                "/System/Volumes/Data/Users/u/.ssh/id_rsa"
+            )),
+            Path::new("/Users/u/.ssh/id_rsa")
+        );
+        // 恒等：非前缀路径原样返回
+        assert_eq!(
+            fold_data_volume_alias(Path::new("/Users/u/.ssh/id_rsa")),
+            Path::new("/Users/u/.ssh/id_rsa")
+        );
+        // 挂载点本身 → 根
+        assert_eq!(
+            fold_data_volume_alias(Path::new("/System/Volumes/Data")),
+            Path::new("/")
+        );
+    }
+
+    /// 折叠 + 归属 + 段匹配的组合判定锁（跨平台，纯字符串无 IO）：
+    /// 覆盖 CI 不可达的 firmlink 别名形态——折叠被还原为恒等时，别名用例必红；
+    /// 同时锁定裁决边界（主目录外含敏感段名不设防线、主目录内非敏感不误伤）。
+    #[test]
+    fn sensitive_home_hit_covers_firmlink_alias_and_keeps_ruling_boundary() {
+        let home = Path::new("/Users/u");
+
+        // firmlink 别名形态（主目录内凭据）→ 命中
+        assert!(sensitive_under_home(
+            Path::new("/System/Volumes/Data/Users/u/.ssh/id_rsa"),
+            home,
+            false
+        ));
+        // 直接形态（主目录内凭据）→ 命中
+        assert!(sensitive_under_home(
+            Path::new("/Users/u/.ssh/id_rsa"),
+            home,
+            false
+        ));
+        // Windows 盘符形态 → 命中（段匹配的 Windows 语义）
+        assert!(sensitive_under_home(
+            Path::new("C:\\Users\\u\\.ssh\\id_rsa"),
+            Path::new("C:/Users/u"),
+            true
+        ));
+        // 主目录外含敏感段名 → 不命中（2026-09-18 裁决：主目录外不设防线）
+        assert!(!sensitive_under_home(
+            Path::new("/System/Volumes/Data/Users/other/.ssh/id_rsa"),
+            home,
+            false
+        ));
+        // 主目录内非敏感 → 不命中（不误伤）
+        assert!(!sensitive_under_home(
+            Path::new("/Users/u/notes.txt"),
+            home,
+            false
+        ));
     }
 
     /// 敏感清单匹配内核（纯函数，平台语义可注入）：
