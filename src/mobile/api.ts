@@ -436,3 +436,65 @@ export async function queueRetract(sessionId: string, itemId: number): Promise<{
   if (!r.ok) throw new ApiError(r.status, `session-queue/retract ${r.status}`);
   return (await r.json()) as { ok: boolean };
 }
+
+// ==== M8 Task 12：审批选项卡（红卡一键应答，W6）====
+
+/** 审批选项视图（GET /session-approve-options 载荷，与 Rust `session_approve_options`
+ *  的 JSON 逐字段对应，勿漂移）：available=false（会话非 Waiting / 工具无映射 /
+ *  提示未命中）时 options 恒空——移动端据此不渲染审批卡；options 只含 id+label，
+ *  **键位不外泄给 UI**（投递层机密）；verifiedWith = 映射实测版本，currentVersion =
+ *  CLI 探测版本（探测失败为 null），drift=true 时红卡提示降级路径（普通发送） */
+export interface ApproveOptionsView {
+  available: boolean;
+  options: { id: string; label: string }[];
+  verifiedWith: string;
+  currentVersion: string | null;
+  drift: boolean;
+}
+
+/** 拉取审批选项卡数据源（红卡挂载时一次）。非 2xx → 抛 ApiError（调用方静默
+ *  降级不渲染，与 fetchSendInfo 失败静默同惯例） */
+export async function fetchApproveOptions(sessionId: string): Promise<ApproveOptionsView> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-approve-options?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-approve-options 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-approve-options ${r.status}`);
+  return (await r.json()) as ApproveOptionsView;
+}
+
+/** 审批应答回执（POST /session-approve 响应，HTTP 200 恒定，语义在 body.status）：
+ *  key_sent=按键已投递终端；failed=投递失败 / in-flight 忙让位（error 为后端中文
+ *  文案，如「该会话投递进行中，请稍后重试」，可重试） */
+export type ApproveResult = { status: "key_sent" } | { status: "failed"; error: string };
+
+/** 审批一键应答（M8 红卡）。200 {status:"key_sent"} | 200 {status:"failed",error}；
+ *  409 {error:"not_waiting"} | 404 {error:"no_mapping"|"no_session"} → 非 2xx 抛
+ *  ApiError（错误码解析进 data.error，调用方分診中文文案——not_waiting 已不在
+ *  等待、no_mapping 降级走普通发送） */
+export async function sessionApprove(sessionId: string, optionId: string): Promise<ApproveResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-approve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, optionId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-approve 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 409/404 错误码在响应体 data.error——解析进 data 供调用方分診（对齐 sessionSend 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理注入页等）：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-approve ${r.status}`, data);
+  }
+  return (await r.json()) as ApproveResult;
+}

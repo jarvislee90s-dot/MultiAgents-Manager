@@ -13,6 +13,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { ArrowLeft, ChevronDown, ChevronRight, PanelLeft, RotateCw } from "lucide-react";
+import ApproveCard from "./ApproveCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
@@ -930,6 +931,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           {bookmarkBar}
+          {/* 审批红卡（M8 Task 12）：waiting 态且正文视图挂载（预览/分屏分支不挂），
+              紧贴 messageArea 上方；available=false 时卡自身自隐（组件内部判定），
+              红卡出现依赖页面数据刷新（SSE → 重挂）自然带动 */}
+          {session.status === "waiting" && <ApproveCard session={session} />}
           <div
             ref={messageAreaRef}
             data-testid="message-area"
