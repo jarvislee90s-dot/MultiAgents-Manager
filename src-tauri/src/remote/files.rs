@@ -8,9 +8,11 @@
 //   证据见 task-9-report.md）键下的字符串值（须含路径分隔符或 `.扩展名` 才算
 //   路径候选），去重保序。对八工具统一生效；各工具真实 toolArgs 形态由
 //   extract_chain_* 系列 fixture 测试锁定。
-// - `read_file_safe`：文件预览的安全读取内核——canonicalize 双方后限定在会话 cwd
-//   之内（越界拒绝）、只读、双阈值大小上限（图片扩展名 5MB / 其余 500KB，按
-//   Global Constraints 的 mime 分支）、按扩展名给 MIME。
+// - `read_file_safe`：文件预览的安全读取内核——canonicalize（含 macOS firmlink
+//   前缀折叠）后按敏感目录黑名单拒凭据，只读、双阈值大小上限（图片扩展名 5MB /
+//   其余 500KB，按 Global Constraints 的 mime 分支）、按扩展名给 MIME。
+//   注意：2026-09-18 起**全盘放开**——不再限定会话 cwd（越界拒绝已退役），
+//   路径级防线只剩主目录内的敏感黑名单。
 //
 // Windows 注意：`canonicalize` 返回带 `\\?\`（及 `\\?\UNC\`）前缀的 verbatim 路径，
 // 与字面 cwd 直接 starts_with 会因前缀不匹配误判越界——比较前统一剥前缀、统一
@@ -54,6 +56,21 @@ const MAX_PATH_LEN: usize = 4096;
 // 安全读取（read_file_safe）
 // ============================================================
 
+/// macOS APFS 数据卷 firmlink 前缀折叠：`/System/Volumes/Data/Users/x` 与
+/// `/Users/x` 是同一 inode 的两个字面形态，而 `canonicalize` **不解析 firmlink**
+/// （firmlink 非 symlink）——不折叠会被误判为「主目录外」而整段跳过黑名单
+/// （2026-09-18 复核实锤：该别名可读 `~/.ssh/known_hosts`，194 字节泄露）。
+/// 纯函数、平台中立（非 macOS 上该前缀不出现，调用为恒等变换）。
+fn fold_data_volume_alias(p: &Path) -> PathBuf {
+    const PREFIX: &str = "/System/Volumes/Data/";
+    let s = p.to_string_lossy();
+    match s.strip_prefix(PREFIX) {
+        Some(rest) => PathBuf::from(format!("/{rest}")),
+        None if s == "/System/Volumes/Data" => PathBuf::from("/"),
+        None => p.to_path_buf(),
+    }
+}
+
 /// 敏感目录拒绝清单（2026-09-16 用户裁决）：主目录放宽后，这些目录下的文件
 /// 对**已配对设备**一律不可读——密钥/凭据/浏览器与会话数据。按路径段精确匹配
 /// （`.ssh2` 这类前缀相似目录不误伤），平台语义可注入便于测试
@@ -86,7 +103,8 @@ const SENSITIVE_DIRS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileRejectReason {
-    /// 命中敏感目录黑名单（全盘语义下任意路径段命中即拒）
+    /// 命中敏感目录黑名单（基准可用时仅主目录内路径参与判定；基准不可用时
+    /// 退化为全段匹配——见 `read_file_safe` 的 fail-closed 分支）
     Sensitive,
     /// 超过预览大小上限
     TooLarge,
@@ -160,17 +178,23 @@ pub fn read_file_safe(
     //   预览打成 NotFound——根因回归锁，生产曾在 3d22e2e 传 None 致黑名单整段跳过）
     match home.and_then(|h| Path::new(h).canonicalize().ok()) {
         Some(home_canon) => {
-            if path_within(&canon, &home_canon)
+            // firmlink 前缀折叠后再判归属与段匹配（两侧同折，相对关系不变）——
+            // 否则 `/System/Volumes/Data<home>` 形态会被误判为「主目录外」而跳过检查
+            let child = fold_data_volume_alias(&canon);
+            let base = fold_data_volume_alias(&home_canon);
+            if path_within(&child, &base)
                 && is_sensitive_path(
-                    &canon.to_string_lossy(),
-                    &home_canon.to_string_lossy(),
+                    &child.to_string_lossy(),
+                    &base.to_string_lossy(),
                     cfg!(windows),
                 )
             {
                 return Err(FileRejectReason::Sensitive);
             }
         }
-        // home="/" ⇒ is_sensitive_path 的 strip_prefix 归零、相对段 = 全路径段
+        // fail-closed：基准不可用 → 全段匹配。传 home="/" 实现之——POSIX 下
+        // strip_prefix("/") 剥掉根、Windows 下盘符路径不命中该前缀而走内核的
+        // full-path 兜底；两条路径结论一致：相对段 = 全路径段
         None => {
             if is_sensitive_path(&canon.to_string_lossy(), "/", cfg!(windows)) {
                 return Err(FileRejectReason::Sensitive);
@@ -991,6 +1015,56 @@ mod tests {
         assert!(
             read_file_safe(cwd, ok.to_str().unwrap(), Some("/no-such-mam-home")).is_ok(),
             "坏基准不得让普通文件读取整体失败"
+        );
+    }
+
+    /// macOS firmlink 别名旁路回归锁（2026-09-18 复核阻塞项）：
+    /// `canonicalize` 不解析 APFS firmlink（firmlink 非 symlink），
+    /// `/System/Volumes/Data/<home>` 与 `<home>` 是**同 inode** 的两个字面形态——
+    /// 只做字符串前缀比较会把主目录内路径误判为「主目录外」，按全盘裁决整段跳过
+    /// 黑名单（2026-09-18 实测：别名可读 ~/.ssh/known_hosts，194 字节泄露）。
+    /// 夹具走 tmpdir + 前缀合成（零真实主目录接触，M5 红线）。
+    ///
+    /// 夹具配方要点：tmpdir 原始形态是 `/var/...`，而 `/var` **不在** firmlink
+    /// 清单（`/usr/share/firmlinks` 只有 `/private`）；必须先 `canonicalize()`
+    /// 拿到 `/private/var/...` 再加前缀，别名才真实存在且同 inode（已实测）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn firmlink_alias_still_hits_sensitive_blacklist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".ssh").join("id_rsa"), "PRIVATE").unwrap();
+        std::fs::write(home.join("ok.txt"), "ok").unwrap();
+        let h = home.to_str().unwrap();
+        let alias = |tail: &str| format!("/System/Volumes/Data{h}/{tail}");
+
+        // 夹具自检：别名必须真实存在（否则本锁是空转——把「存在性」也锁住）
+        assert!(
+            std::path::Path::new(&alias(".ssh/id_rsa")).exists(),
+            "夹具别名必须真实存在（先 canonicalize 再加前缀，见本测试文档）"
+        );
+
+        // (1) 别名形态的凭据必须拒（本锁的靶心；修复前此处 Ok = 泄露）
+        assert_eq!(
+            read_file_safe(h, &alias(".ssh/id_rsa"), Some(h)).unwrap_err(),
+            FileRejectReason::Sensitive,
+            "firmlink 别名不得绕过敏感黑名单（2026-09-18 复核阻塞项）"
+        );
+        // (2) 别名形态的普通文件仍可读（不得靠全盘拒绝蒙混过关）
+        assert!(
+            read_file_safe(h, &alias("ok.txt"), Some(h)).is_ok(),
+            "别名形态普通文件必须放行（黑名单不得误伤）"
+        );
+        // (3) 主目录**外**别名路径不设路径级防线（2026-09-18 裁决未收窄）
+        let out = tempfile::tempdir().unwrap();
+        let op = out.path().canonicalize().unwrap().join(".ssh");
+        std::fs::create_dir_all(&op).unwrap();
+        std::fs::write(op.join("n.txt"), "x").unwrap();
+        let outside = format!("/System/Volumes/Data{}", op.join("n.txt").display());
+        assert!(
+            read_file_safe(h, &outside, Some(h)).is_ok(),
+            "主目录外路径不设防线（裁决未被收窄）"
         );
     }
 
