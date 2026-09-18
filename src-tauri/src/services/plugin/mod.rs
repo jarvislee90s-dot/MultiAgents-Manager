@@ -254,6 +254,19 @@ pub fn toggle_plugin(
     enabled: bool,
     kind: &str,
 ) -> Result<(), String> {
+    // 常驻=停用防护（用户裁决 2026-09-18）：常驻 on 时手动停用被拒（file/config
+    // 两型同护），需先关闭常驻；启用方向不受影响。守卫置于分派之前——命中即
+    // 零副作用。W5 整工具停用的还原清理（disable_tool_cleanup）直接
+    // restore_mam_link，不走本函数；独占清扫（sweep）在计划层已剔除常驻项
+    if !enabled {
+        let ext_id = format!("plugin-{}", plugin_name);
+        if crate::database::is_tool_resident(tool_id, &ext_id) {
+            return Err(format!(
+                "插件 {} 是 {} 的常驻资源，先关闭常驻再停用",
+                plugin_name, tool_id
+            ));
+        }
+    }
     match kind {
         "file" => {
             if enabled {

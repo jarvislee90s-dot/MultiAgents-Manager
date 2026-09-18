@@ -71,6 +71,23 @@ pub fn link_marker_is_present(target: &Path) -> bool {
     target.is_symlink()
 }
 
+/// 派发拍平（用户裁决 2026-09-17）：SSOT 仓库保持套件层级原样，但派发到
+/// 工具的一切磁盘链接名（Layer2 / Layer3 / 工具 skill 目录）一律把嵌套
+/// 规范名里的 `/` 替换为 `-`（如 superpowers/brainstorming →
+/// superpowers-brainstorming）——部分工具不递归扫描技能目录，嵌套派发整组
+/// 不可见。账本身份（extension_id / DB 行 / 快照项）保持嵌套规范名不变，
+/// 仅磁盘链接名拍平；对账扫描比较时账本侧正向映射到此名（磁盘侧不做反解）。
+/// 平铺名（无 `/`）恒等映射
+pub fn dispatch_name(skill_name: &str) -> String {
+    skill_name.replace('/', "-")
+}
+
+/// 派发拍平目标路径：base.join(dispatch_name(skill_name))——Layer2 / Layer3 /
+/// 工具 skill 目录三处派发目标的统一构造器（source 侧仍是 repo.join(嵌套名)）
+pub fn dispatch_target(base: &Path, skill_name: &str) -> PathBuf {
+    base.join(dispatch_name(skill_name))
+}
+
 /// 创建链接：source（全局仓库）→ target（工具 skill 目录）
 pub fn create_link(source: &Path, target: &Path) -> Result<(), String> {
     // 如果目标已存在，先移除
@@ -503,6 +520,36 @@ mod dir_contents_equal_tests {
         symlink("SKILL.md", a3.join("alias")).unwrap();
         symlink("other", b3.join("alias")).unwrap();
         assert!(!dir_contents_equal(&a3, &b3));
+    }
+}
+
+/// 派发拍平（用户裁决 2026-09-17）的纯函数契约
+#[cfg(test)]
+mod dispatch_name_tests {
+    use super::*;
+
+    /// 嵌套规范名 → 拍平派发名；平铺名恒等（幂等）
+    #[test]
+    fn flattens_slashes_and_is_identity_for_flat_names() {
+        assert_eq!(
+            dispatch_name("superpowers/brainstorming"),
+            "superpowers-brainstorming"
+        );
+        assert_eq!(dispatch_name("a/b/c"), "a-b-c");
+        assert_eq!(dispatch_name("plain-skill"), "plain-skill");
+    }
+
+    /// 派发目标 = base.join(拍平名)——嵌套名不得在 base 下建子目录
+    #[test]
+    fn dispatch_target_joins_flat_name() {
+        assert_eq!(
+            dispatch_target(Path::new("/h/.claude/skills"), "suite/inner"),
+            PathBuf::from("/h/.claude/skills/suite-inner")
+        );
+        assert_eq!(
+            dispatch_target(Path::new("/h/.claude/skills"), "plain"),
+            PathBuf::from("/h/.claude/skills/plain")
+        );
     }
 }
 

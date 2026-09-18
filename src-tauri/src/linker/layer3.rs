@@ -17,16 +17,18 @@ pub fn ensure_subagent_active_dir(tool_id: &str, sub_agent_id: &str) -> PathBuf 
     dir
 }
 
-/// 创建 Layer 3 symlink：从 Layer 1 源文件 → Layer 3 子 Agent 目录
-/// 约束：Layer 3 只能链接 Layer 2 中已存在的 skill（工具级范围的子集）
+/// 创建 Layer 3 symlink：从 Layer 1 源文件 → Layer 3 子 Agent 目录。
+/// 约束：Layer 3 只能链接 Layer 2 中已存在的 skill（工具级范围的子集）。
+/// 派发拍平（用户裁决 2026-09-17）：source 侧保持 SSOT 嵌套原路径，target 侧
+/// 一律用拍平名；工具级启用判定也按拍平名比对（Layer2 磁盘目录内是拍平链接名）
 pub fn link_skill_to_layer3(
     skill_name: &str,
     tool_id: &str,
     sub_agent_id: &str,
 ) -> Result<PathBuf, String> {
-    // 检查工具级是否已启用
+    // 检查工具级是否已启用（Layer2 落盘的是拍平名）
     let layer2_skills = super::layer2::list_layer2_skills(tool_id);
-    if !layer2_skills.contains(&skill_name.to_string()) {
+    if !layer2_skills.contains(&super::dispatch_name(skill_name)) {
         return Err(format!(
             "Skill {} 未在 {} 的工具级分配中启用，无法分配给子 Agent {}",
             skill_name, tool_id, sub_agent_id
@@ -36,18 +38,18 @@ pub fn link_skill_to_layer3(
     let repo = super::ensure_repo_dir();
     let source = repo.join(skill_name);
     let layer3_dir = ensure_subagent_active_dir(tool_id, sub_agent_id);
-    let target = layer3_dir.join(skill_name);
+    let target = super::dispatch_target(&layer3_dir, skill_name);
     super::create_link(&source, &target)?;
     Ok(target)
 }
 
-/// 从 Layer 3 移除 skill 链接
+/// 从 Layer 3 移除 skill 链接（目标按拍平名定位，与建链同口径）
 pub fn unlink_skill_from_layer3(
     skill_name: &str,
     tool_id: &str,
     sub_agent_id: &str,
 ) -> Result<(), String> {
-    let target = subagent_active_dir(tool_id, sub_agent_id).join(skill_name);
+    let target = super::dispatch_target(&subagent_active_dir(tool_id, sub_agent_id), skill_name);
     super::remove_link(&target)
 }
 
@@ -69,7 +71,8 @@ pub fn list_layer3_skills(tool_id: &str, sub_agent_id: &str) -> Vec<String> {
     skills
 }
 
-/// 当工具级禁用 skill 时，自动从所有子 Agent 中移除
+/// 当工具级禁用 skill 时，自动从所有子 Agent 中移除（目标按拍平名定位，
+/// 与 link_skill_to_layer3 同口径）
 pub fn cleanup_layer3_on_tool_disable(skill_name: &str, tool_id: &str) -> Result<(), String> {
     let tool_dir = super::layer2::tool_active_dir(tool_id);
     if !tool_dir.exists() {
@@ -90,7 +93,7 @@ pub fn cleanup_layer3_on_tool_disable(skill_name: &str, tool_id: &str) -> Result
         .collect();
 
     for sub in &subagents {
-        let target = subagent_active_dir(tool_id, sub).join(skill_name);
+        let target = super::dispatch_target(&subagent_active_dir(tool_id, sub), skill_name);
         if target.exists() || target.is_symlink() {
             let _ = super::remove_link(&target);
         }

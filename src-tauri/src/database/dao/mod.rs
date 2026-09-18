@@ -1,7 +1,11 @@
 pub mod agent_tool;
+pub mod base_snapshot;
 pub mod extension;
 pub mod heartbeat_seen;
 pub mod preset;
+pub mod resource_binding;
 pub mod session;
 pub mod settings;
+pub mod stash;
+pub mod tool_resident;
 pub mod unread;

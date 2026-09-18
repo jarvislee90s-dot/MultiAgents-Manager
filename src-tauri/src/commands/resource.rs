@@ -1,5 +1,9 @@
 // 资源管理命令
 
+// 递归技能扫描（深度 4 / SKILL.md 判定 / 跳软链点目录 / 结果排序）已上收至
+// services::resource 与回填共用（预设编辑弹窗与资源视图同源口径）
+use crate::services::resource::scan_skill_dirs;
+
 /// 原生（未纳管）资源的扫描结果 DTO
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,49 +18,6 @@ pub struct NativeExtensionRecord {
     pub imported: bool,
 }
 
-/// 递归扫描目录，找到所有直接包含 SKILL.md 的子目录
-/// 返回相对路径列表（如 "brainstorming", "superpowers/brainstorming"）
-/// 深度上限 4 层，symlink 目录不跟随（防循环）
-fn scan_skill_dirs(base: &std::path::Path) -> Vec<String> {
-    const SCAN_MAX_DEPTH: usize = 4;
-    let mut results = Vec::new();
-    fn recurse(
-        dir: &std::path::Path,
-        base: &std::path::Path,
-        depth: usize,
-        results: &mut Vec<String>,
-    ) {
-        if depth > SCAN_MAX_DEPTH {
-            log::warn!("扫描深度超过 {} 层，跳过: {:?}", SCAN_MAX_DEPTH, dir);
-            return;
-        }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_symlink() {
-                    continue;
-                }
-                if path.is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                    if path.join("SKILL.md").exists() {
-                        if let Ok(rel) = path.strip_prefix(base) {
-                            results.push(rel.to_string_lossy().to_string());
-                        }
-                    } else {
-                        recurse(&path, base, depth + 1, results);
-                    }
-                }
-            }
-        }
-    }
-    recurse(base, base, 0, &mut results);
-    results.sort();
-    results
-}
-
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionWithAssignments {
@@ -68,6 +29,8 @@ pub struct ExtensionWithAssignments {
     pub suite: Option<String>,
     pub source_tool: Option<String>,
     pub tags: Option<String>,
+    /// 原生（未纳管）资源标记：预设编辑弹窗「原生技能」分组的数据源（T7）
+    pub is_native: bool,
     pub assignments: Vec<AssignmentSummary>,
 }
 
@@ -104,6 +67,7 @@ pub fn list_extensions_with_assignments() -> Vec<ExtensionWithAssignments> {
                 suite: ext.suite.clone(),
                 source_tool: ext.source_tool.clone(),
                 tags: ext.tags.clone(),
+                is_native: ext.is_native,
                 assignments: ext_assignments,
             }
         })
@@ -155,6 +119,10 @@ pub fn import_native_resources(
     }
     let mut imported = 0;
     let mut skipped = 0;
+    // frontmatter 专属预填建议（spec §6，2026-09-15 裁决：手动导入当场确认）：
+    // 多项目导入只取首个命中项（brief 语义「弹一个提示」），其余命中项由
+    // list_frontmatter_suggestions 进体检卡片兜底
+    let mut suggestion = None;
     for (source_path, name, source_tool) in items {
         let path = std::path::Path::new(&source_path);
         if !path.exists() {
@@ -179,20 +147,61 @@ pub fn import_native_resources(
             source_tool: Some(source_tool.clone()),
             is_native: true,
         };
-        let _ = crate::database::insert_extension(&ext);
+        if let Err(e) = crate::database::insert_extension(&ext) {
+            log::warn!("原生技能 {} 登记失败: {}", name, e);
+        }
         // 默认按来源工具自动创建工具目录链接，让 harness 立即读取 SSOT 中的 skill
         // 用户主动导入时，按来源工具自动把原生目录替换为 MAM 软链接
         if let Err(e) = crate::services::enable_skill_for_tool(&name, &source_tool) {
             log::warn!("导入 {} 后为 {} 创建链接失败: {}", name, source_tool, e);
         }
         imported += 1;
+        // SSOT 内容已落位（install_to_repo 成功），读 SKILL.md 判定；
+        // 判定失败（非技能/IO 错误）→ None，不阻断导入
+        if suggestion.is_none() {
+            suggestion = crate::services::resource::frontmatter::suggest_for_skill(&name);
+        }
     }
     Ok(crate::services::ImportStats {
         imported,
         newly_added: imported,
         skipped_dup: skipped,
         source_counts: vec![],
+        suggestion,
     })
+}
+
+/// frontmatter 存量「待确认专属建议」（spec §6/§13；2026-09-15 裁决：启动扫描
+/// 只列建议、不自动写绑定表）。扫 SSOT 仓库顶层各技能目录的 SKILL.md，
+/// frontmatter 命中且 resource_bindings 无该行 → 列出；单目录读取失败容错跳过
+#[tauri::command]
+pub fn list_frontmatter_suggestions(
+) -> Vec<crate::services::resource::frontmatter::FrontmatterSuggestion> {
+    let repo = crate::linker::ensure_repo_dir();
+    let Ok(entries) = std::fs::read_dir(&repo) else {
+        return Vec::new();
+    };
+    // 绑定表一次拉取（判定核心 frontmatter::suggestion_for_content 逐技能复用）
+    let bound_ids: std::collections::HashSet<String> = crate::database::list_resource_bindings()
+        .into_iter()
+        .map(|b| b.extension_id)
+        .collect();
+    let mut suggestions: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                return None;
+            }
+            let content = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
+            crate::services::resource::frontmatter::suggestion_for_content(
+                &name, &content, &bound_ids,
+            )
+        })
+        .collect();
+    suggestions.sort_by(|a, b| a.extension_id.cmp(&b.extension_id));
+    suggestions
 }
 
 /// 生产迁移边界路径：从真实家目录构建四字段（测试用 tempdir 注入，见 migration 核心）
@@ -293,6 +302,44 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     serde_json::json!({ "global": global_with_status, "native": native })
 }
 
+/// 账本-磁盘对账扫描（spec §13）：返回 enabled 工具的 L1-L4 漂移清单
+#[tauri::command]
+pub fn scan_ledger_drift() -> Vec<crate::services::resource::reconcile::DriftItem> {
+    crate::services::resource::reconcile::scan_drift()
+}
+
+/// 单条对账处置（spec §13）：mode "a" 账本为准修磁盘 | "b" 磁盘为准回写账本
+#[tauri::command]
+pub fn reconcile_item(
+    item: crate::services::resource::reconcile::DriftItem,
+    mode: String,
+) -> crate::services::resource::reconcile::ReconcileOutcome {
+    crate::services::resource::reconcile::reconcile_one(&item, &mode)
+}
+
+/// 批量对账处置（spec §13）：该工具全部漂移逐条按同一 mode 处置（L4 恒 needs_manual；单条失败不中断）
+#[tauri::command]
+pub fn reconcile_tool_batch(
+    tool_id: String,
+    mode: String,
+) -> Vec<crate::services::resource::reconcile::ReconcileOutcome> {
+    crate::services::resource::reconcile::reconcile_tool_batch(&tool_id, &mode)
+}
+
+/// 空目录扫描（wave33 Item 2）：MAM skill 仓库与启用工具 skill 目录中的
+/// 可清理空目录清单
+#[tauri::command]
+pub fn scan_empty_dirs() -> Vec<crate::services::resource::reconcile::EmptyDirItem> {
+    crate::services::resource::reconcile::scan_empty_dirs()
+}
+
+/// 空目录清理（wave33 Item 2）：白名单根校验（越界 Err）+ 自底向上反复
+/// remove_dir；非空/不存在跳过；返回实际删除数
+#[tauri::command]
+pub fn clean_empty_dirs(paths: Vec<String>) -> Result<usize, String> {
+    crate::services::resource::reconcile::clean_empty_dirs(paths)
+}
+
 #[tauri::command]
 pub fn check_preset_compatibility(
     preset_id: String,
@@ -361,12 +408,13 @@ pub fn list_ssot_resources() -> SsotResources {
                     .filter(|a| enabled_ids.contains(&a.agent_tool_id))
                     .map(|a| a.agent_tool_id.clone())
                     .collect();
-                // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）
+                // 2) 补充：检查各工具原生 skill 目录中是否存在（非符号链接的实际目录也算已生效）。
+                //    按拍平名探测（派发拍平，2026-09-17 裁决）——嵌套名的派发落点是拍平链接
                 for (tool_id, tool_dir) in &tool_skill_dirs {
                     if enabled_tools.iter().any(|t| t == tool_id) {
                         continue;
                     }
-                    if tool_dir.join(&name).exists() {
+                    if crate::linker::dispatch_target(tool_dir, &name).exists() {
                         enabled_tools.push(tool_id.to_string());
                     }
                 }
@@ -572,7 +620,8 @@ pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
     let mut duplicates = Vec::new();
     let ssot_skills = scan_skill_dirs(&repo);
     for name in ssot_skills {
-        let tool_path = tool_skill_dir.join(&name);
+        // 工具目录侧按拍平名探测（派发拍平，2026-09-17 裁决：嵌套名的派发落点）
+        let tool_path = crate::linker::dispatch_target(&tool_skill_dir, &name);
         if tool_path.exists() && !tool_path.is_symlink() {
             duplicates.push(name);
         }
@@ -595,8 +644,9 @@ pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(
     let mut errors = Vec::new();
 
     for name in &names {
+        // ssot 侧保持嵌套原路径；工具目录目标按拍平名（派发拍平，2026-09-17 裁决）
         let ssot_path = repo.join(name);
-        let tool_path = tool_skill_dir.join(name);
+        let tool_path = crate::linker::dispatch_target(&tool_skill_dir, name);
 
         match crate::linker::replace_with_symlink(&ssot_path, &tool_path) {
             Ok(()) => {
@@ -629,7 +679,8 @@ pub fn check_skill_target_type(tool_id: String, skill_name: String) -> String {
     let Some(tool_skill_dir) = crate::adapter::primary_skill_dir(&tool_id) else {
         return "missing".to_string();
     };
-    let target = tool_skill_dir.join(&skill_name);
+    // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）
+    let target = crate::linker::dispatch_target(&tool_skill_dir, &skill_name);
     if !target.exists() {
         "missing".to_string()
     } else if target.is_symlink() {
@@ -662,7 +713,8 @@ pub fn disable_skill_for_tool(tool_id: String, skill_name: String) -> Result<Str
     crate::services::tool_settings::ensure_tool_enabled(&tool_id)?;
     let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
         .ok_or_else(|| format!("未知工具: {}", tool_id))?;
-    let target = tool_skill_dir.join(&skill_name);
+    // 工具目录目标按拍平名定位（派发拍平，2026-09-17 裁决）
+    let target = crate::linker::dispatch_target(&tool_skill_dir, &skill_name);
     if !target.exists() && !target.is_symlink() {
         return Err("目标路径不存在".to_string());
     }
@@ -736,6 +788,23 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
                 mcp_name,
                 config_file.display()
             );
+            // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到。
+            // ensure_extension（INSERT OR IGNORE）：幂等重导入不抹掉用户编辑过的元数据（评审裁决 3）
+            if let Err(e) = crate::database::ensure_extension(&crate::database::ExtensionRecord {
+                id: format!("mcp-{}", mcp_name),
+                kind: "mcp".to_string(),
+                name: mcp_name.clone(),
+                description: None,
+                source_path: config_file.to_string_lossy().to_string(),
+                source_url: None,
+                version: None,
+                tags: None,
+                suite: None,
+                source_tool: None,
+                is_native: false,
+            }) {
+                log::warn!("MCP {} 登记 extensions 失败: {}", mcp_name, e);
+            }
             return Ok(());
         }
     }
@@ -764,6 +833,22 @@ pub fn save_mcp_config(
     });
     let pretty = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&config_file, &pretty).map_err(|e| e.to_string())?;
+    // 预设 v2 数据源统一（spec §8.1）：MCP 入 SSOT 必须登记，否则预设列表看不到。
+    // 新建路径不该静默——登记失败以 `?` 传播，让前端拿到明确错误。
+    // ensure_extension（INSERT OR IGNORE）：同名重保存不抹掉用户编辑过的元数据（评审裁决 3）
+    crate::database::ensure_extension(&crate::database::ExtensionRecord {
+        id: format!("mcp-{}", name),
+        kind: "mcp".to_string(),
+        name: name.clone(),
+        description: None,
+        source_path: config_file.to_string_lossy().to_string(),
+        source_url: None,
+        version: None,
+        tags: None,
+        suite: None,
+        source_tool: None,
+        is_native: false,
+    })?;
     log::info!("MCP 配置已保存: {}", config_file.display());
     Ok(())
 }
@@ -869,6 +954,52 @@ pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String,
         open_dir_in_system(&path)?;
     }
     Ok(path.to_string_lossy().to_string())
+}
+
+/// reveal_dir 白名单校验核（wave33 Item 4，可测）：canonicalize 后必须以
+/// ~/.mam 或 ~/.agents 为前缀（安全白名单——前端快捷跳转只允许 MAM 管辖目录）。
+/// 词法预检 + canonicalize 复核双道（对不存在的路径 canonicalize 失败 → 报
+/// 不存在；越界路径无论存在与否一律拒绝）
+pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let raw_roots = [home.join(".mam"), home.join(".agents")];
+    let p = std::path::Path::new(path);
+    let lexically_allowed = raw_roots.iter().any(|r| p.starts_with(r));
+    // canonicalize 对不存在路径失败 → 明确报不存在（而非静默放行/误报越界）
+    let canonical = std::fs::canonicalize(p).map_err(|_| format!("路径不存在: {}", path))?;
+    let root_canons: Vec<std::path::PathBuf> = raw_roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    if !lexically_allowed && !root_canons.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!(
+            "路径不在允许打开的范围（~/.mam 或 ~/.agents）: {}",
+            path
+        ));
+    }
+    // symlink 穿透复核：词法命中但 canonicalize 落到白名单外 → 拒绝
+    if !root_canons.iter().any(|r| canonical.starts_with(r)) {
+        return Err(format!(
+            "路径不在允许打开的范围（~/.mam 或 ~/.agents）: {}",
+            path
+        ));
+    }
+    Ok(canonical)
+}
+
+/// 快捷跳转（wave33 Item 4，前端波消费）：用系统文件管理器/默认程序打开
+/// 白名单内的目录或文件——打开机制照抄 open_tool_resource（目录走
+/// open_dir_in_system，文件走 open_file_in_system），但加了 ~/.mam / ~/.agents
+/// 前缀白名单（open_tool_resource 的目标由 adapter 推导、天然受限；本命令
+/// 接受任意路径，必须显式校验）
+#[tauri::command]
+pub fn reveal_dir(path: String) -> Result<(), String> {
+    let target = ensure_reveal_allowed(&path)?;
+    if target.is_dir() {
+        open_dir_in_system(&target)
+    } else {
+        open_file_in_system(&target)
+    }
 }
 
 #[cfg(test)]
