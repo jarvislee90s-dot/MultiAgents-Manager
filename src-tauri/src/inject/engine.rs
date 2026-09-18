@@ -505,23 +505,12 @@ impl Injector for RealInjector {
 }
 
 /// 在 tmux 全局 pane 列表中按 tty 定位 pane target（`session:win.pane`）。
-/// tmux 不存在/无命中 → None。
+/// tmux 不存在/无命中 → None。清单获取复用 [`crate::window::tmux::list_panes_lines`]
+/// （P3 Task 7：与聚焦侧同一份 Command+格式串，消除双份解析；匹配语义保持 contains
+/// 原样——精确匹配的修复归 Task 9 纯函数拆分）
 #[cfg(target_os = "macos")]
 fn find_tmux_pane(tty: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_tty} #{session_name}:#{window_index}.#{pane_index}",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let panes = String::from_utf8_lossy(&output.stdout);
-    for line in panes.lines() {
+    for line in crate::window::tmux::list_panes_lines()? {
         let mut parts = line.split_whitespace();
         if let (Some(pane_tty), Some(target)) = (parts.next(), parts.next()) {
             if pane_tty.contains(tty) {

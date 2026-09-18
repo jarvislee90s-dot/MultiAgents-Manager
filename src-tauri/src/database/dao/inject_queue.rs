@@ -1,5 +1,6 @@
 // 注入队列表 DAO（M7）：每会话 FIFO 待发消息账本
-// jumped 列为 Task 6 插队标记（UPDATE 专用），入队默认 0，不进 QueueRow 模型
+// （jumped 死列已删，P3 Task 7：该表未随任何发布版出库，直接改定义免迁移；
+// 插队语义走 flush_given 的 jump 入参 + 审计 action=jump，不需要列）
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +100,7 @@ pub fn get(id: i64) -> Option<QueueRow> {
     get_conn(&conn, id)
 }
 
-/// 入队：插入一行 pending（jumped 走列默认 0），返回新 id
+/// 入队：插入一行 pending，返回新 id
 pub fn enqueue_conn(
     conn: &Connection,
     session_id: &str,

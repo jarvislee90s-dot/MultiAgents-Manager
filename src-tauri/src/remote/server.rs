@@ -2839,9 +2839,10 @@ mod tests {
     }
 
     // ==== M8 Task 11：session-approve-options / session-approve 端点 ====
-    // 零污染：设备表/队列/审计全走 RemoteState.store = DeviceStore::memory()；
-    // 会话快照与注入器走注入缝；approve::load_mappings 只读全局 KV（缺省键回默认表，
-    // 与生产端点路径同语义）。不触真实 ~/.mam 的写路径。
+    // 零污染：设备表/队列/审计/KV 全走 RemoteState.store = DeviceStore::memory()；
+    // 会话快照与注入器走注入缝；approve 映射 KV 经 store 缝读取（生产 Global=全局库
+    // 同语义、测试 memory 自建库，缺省键回默认表），定制映射由各测试在内存库 seed。
+    // 不触真实 ~/.mam。
 
     /// Task 11 专用 state：会话夹具与 inject_state 同一套（sess_a Waiting / sess_b
     /// Processing / sess_d zcode Waiting 无映射 / sess_e-f 备用），但 sess_a 可携带
@@ -2849,7 +2850,8 @@ mod tests {
     /// 局部变体按需补设）；另加 sess_g（Waiting，独占 id）：in-flight 守卫按 session_id
     /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。sess_h（Waiting，
     /// 独占 id，与 sess_a 同携命中 last_message）：approve_sends_key 独占——复检终修后
-    /// sess_h 全测试集唯一归本族（inject_state 侧已改名 sess_i）。其余缝与
+    /// sess_h 全测试集唯一归本族（inject_state 侧已改名 sess_i）。sess_j（Waiting，
+    /// 独占 id）：audit_action_vocab 独占（Task 7 P3c 审计动作词表）。其余缝与
     /// inject_state 同口径（内存库，零接触真实 ~/.mam）。
     /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾的测试必须占**全测试集
     /// 唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT 按裸 id 字符串全局占用，
@@ -2917,6 +2919,14 @@ mod tests {
                 s.last_message = sess_a_last.map(str::to_string);
                 s
             },
+            // Task 7 audit_action_vocab 独占会话（Waiting claude；全测试集唯一 id——
+            // 守卫 id 立规；POST 不走 detect，无需 last_message）
+            inj_sess(
+                "sess_j",
+                crate::session::AgentType::Claude,
+                20,
+                crate::session::SessionStatus::Waiting,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -3609,9 +3619,9 @@ mod tests {
             );
         }
         // Task 13 取证回填后：claude verified_with = "2.1.251"（Windows 本机实测）。
-        // currentVersion 来自真实 spawn 探测（机器相关：Windows .cmd 垫片可能失败 →
-        // null → "unknown"）——drift 断言按同源纯函数重算期望，保持 hermetic；
-        // codex 保持 probe-pending 的恒漂移断言见 inject::approve::tests
+        // currentVersion 来自真实 spawn 探测（机器相关：灰1 后裸名直 spawn 失败回退
+        // cmd /c 垫片，再失败才 null → "unknown"）——drift 断言按同源纯函数重算期望，
+        // 保持 hermetic；codex 保持 probe-pending 的恒漂移断言见 inject::approve::tests
         let current = v["currentVersion"].as_str();
         let expect_drift =
             crate::inject::approve::is_version_drift("2.1.251", current.unwrap_or("unknown"));
@@ -3853,5 +3863,60 @@ mod tests {
         }
         // 全程无任何投递
         assert!(fake.recorded_keys().is_empty());
+    }
+
+    /// P3 审计动作词表（Task 7 P3c）：KV 定制映射含域外 id=other 的选项 → POST
+    /// session-approve 照发键位（x）→ 审计 action 收敛为 "key"（W5 词表 send|queue|
+    /// flush|jump|retract|approve|reject|fail|open 之外的域外 id 不得原样进审计
+    /// action 列）且不 panic；域外 warn 在实现侧 log，测试不断言日志。
+    /// KV 经内存库 seed（DeviceStore 缝，零接触真实 ~/.mam）；sess_j 全测试集唯一
+    /// id（守卫 id 立规）。前端 AuditLogSection「action 原样小写展示」契约不受影响
+    /// （"key" 本就是词表内小写动作）。
+    #[tokio::test]
+    async fn audit_action_vocab() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        // 定制映射 seed 进本测试自己的内存库（其他测试的 memory 库互不可见，零互染）
+        state.store.with(|c| {
+            crate::database::dao::settings::set_setting_conn(
+                c,
+                crate::inject::approve::KV_KEY,
+                r#"[{"tool":"claude","verified_with":"2.1.251",
+  "prompt_markers":["do you want"],
+  "options":[{"id":"approve","label":"允许","key":"1"},
+             {"id":"reject","label":"拒绝","key":"esc"},
+             {"id":"other","label":"其他","key":"x"}]}]"#,
+            )
+        });
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_j","optionId":"other"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\""),
+            "域外 id 命中定制映射照发键位：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(20u32, "x".to_string())],
+            "域外 id 选项的键位照映射投递"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "key", "域外 id 审计 action 收敛为 key");
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(audits[0].session_id, "sess_j");
     }
 }

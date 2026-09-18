@@ -144,7 +144,6 @@ pub fn init(conn: &Connection) {
             device_id     TEXT NOT NULL,
             device_name   TEXT NOT NULL,
             content       TEXT NOT NULL,
-            jumped        INTEGER NOT NULL DEFAULT 0,
             enqueued_at   INTEGER NOT NULL,
             sent_at       INTEGER,
             failed_reason TEXT

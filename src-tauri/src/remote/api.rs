@@ -1171,14 +1171,15 @@ pub async fn session_queue_retract(
 // 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写/读路径）：
 //   GET  /session-approve-options?session_id= → 200 {available, options:[{id,label}],
 //        verifiedWith, currentVersion(…|null), drift}
-//        available = status==Waiting && load_mappings 有该工具映射 && detect 命中
+//        available = status==Waiting && 映射表有该工具映射 && detect 命中
 //        （数据同源快照判定）；工具无映射 / 未命中 / 非 Waiting → available=false
 //        （options 空）。options 只含 id+label——**键位不外泄给 UI**。
 //   POST /session-approve body {sessionId, optionId} → 200 {"status":"key_sent"}
 //        | 404 no_session | 409 not_waiting | 404 no_mapping（降级提示走普通发送）
 //        | 200 failed{error}（注入失败 / in-flight 忙，可重试回执）。
-// 锁纪律（M4）：load_mappings 内部自取全局 DB 锁——两个 handler 的调用点都在
-// spawn_blocking 闭包内、**不持任何 DB 锁**（store.with 临界区内调用即自锁死锁）。
+// 锁纪律（M4）：KV 映射读取并入 `st.store.with` 短临界区（load_mappings_conn 直用
+// 传入 conn、不自取锁，锁内只 SQL）；session_source 调用与 store.with **顺序执行不
+// 嵌套**——生产 session_source 内部会锁同一把全局 DB，嵌套即自锁死锁。
 
 /// 审批选项扫描产物（映射存在时的载荷；available=false 时 options 恒空）
 struct ApproveScanHit {
@@ -1191,7 +1192,7 @@ struct ApproveScanHit {
 }
 
 /// 审批选项扫描（同步，spawn_blocking 内调用）：会话快照（数据同源，与看板同一份）→
-/// Waiting 判定 → load_mappings 按工具找映射（tool_id 匹配）→ detect 命中判定。
+/// Waiting 判定 → 映射表（KV 经 store 缝）按工具找映射（tool_id 匹配）→ detect 命中判定。
 /// 返回 `None` = 不可批（会话不存在 / 非 Waiting / 无映射——统一 false，不给存在性
 /// 预言机）；`Some` = 映射存在，携带 detect 结果 / 选项表 / verifiedWith / tool。
 /// 复合键说明（Task 5 教训）：本端点无 agent_type 入参，快照里按 id 找**第一个**匹配；
@@ -1205,7 +1206,9 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         return None;
     }
     let tool = session.agent_type.tool_id().to_string();
-    let mapping = crate::inject::approve::load_mappings()
+    let mapping = st
+        .store
+        .with(crate::inject::approve::load_mappings_conn)
         .into_iter()
         .find(|m| m.tool == tool)?;
     let hit = session
@@ -1233,9 +1236,11 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
 }
 
 /// GET /m/api/v1/session-approve-options?session_id=（M8 审批选项卡数据源）：
-/// 会话快照与映射解析在 spawn_blocking（扫描与 load_mappings 均为同步阻塞调用）；
-/// currentVersion 的 CLI 探测（首调 spawn `<cli> --version`）带 **5s 超时保护**
-/// （Task 10 评审提示：探测卡死不拖垮端点）——超时/任务异常按 None 处理并 log::warn。
+/// 会话快照与映射解析在 spawn_blocking（扫描与 KV 读取均为同步阻塞调用）；
+/// currentVersion 的 CLI 探测（首调 spawn `<cli> --version`）带**双重超时保护**：
+/// 探测内核自身 3s 有界等待（灰1，超时结果入缓存），端点另有 5s tokio 护栏
+/// （spawn_blocking 任务级，Task 10 评审提示：探测卡死不拖垮端点）——超时/任务异常
+/// 按 None 处理并 log::warn。
 pub async fn session_approve_options(
     State(st): State<Arc<RemoteState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -1334,15 +1339,16 @@ pub struct SessionApproveReq {
 /// - 缺参 → 400；设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
 /// - 会话不在快照 → 404 no_session；非 Waiting → 409 not_waiting（映射解析在其后，
 ///   运行中会话不付出 KV 读取代价）；
-/// - load_mappings 无该工具映射 / optionId 无对应项 → 404 no_mapping（降级提示走
+/// - 映射表无该工具映射 / optionId 无对应项 → 404 no_mapping（降级提示走
 ///   普通发送）；
 /// - in-flight 守卫忙（flush 循环/直发/插队正在投递该会话）→ 200 failed 提示重试；
 /// - 投递 `injector.locate_and_send_key(pid, key)`：**不带 [mobile] 前缀**——按键非文本；
 ///   成功 → 200 key_sent；失败 → 200 failed{error}（可重试回执）。
 ///   // M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键
 ///   （选项卡 UI 与端点契约通道无关，届时只扩这一处分派）
-/// - 审计：action=approve/reject（其余键位按 optionId 原样），result=ok/failed:{e}，
-///   channel=injector.name()，content=optionId（协议标识，stable 于展示文案定制）。
+/// - 审计：action=approve/reject 语义化，域外 id 收敛为 "key"（log::warn 留痕），
+///   result=ok/failed:{e}，channel=injector.name()，content=optionId（协议标识，
+///   stable 于展示文案定制）。
 pub async fn session_approve(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -1356,8 +1362,9 @@ pub async fn session_approve(
     let Some((device_id, device_name)) = device_identity(&st, &headers) else {
         return forbidden_defense();
     };
-    // 会话查找 + Waiting 复核 + 映射/选项解析（一个 spawn_blocking：扫描与 load_mappings
-    // 均为同步阻塞；闭包不持任何 DB 锁——load_mappings 内部自取全局 DB 锁，M4 纪律）
+    // 会话查找 + Waiting 复核 + 映射/选项解析（一个 spawn_blocking：扫描与 KV 读取
+    // 均为同步阻塞；session_source 与 store.with 顺序执行不嵌套——生产 session_source
+    // 内部自取全局 DB 锁，嵌套即自锁死锁，M4 纪律）
     let probe_st = st.clone();
     let probe_sid = sid.clone();
     let probe_opt = option_id.clone();
@@ -1375,7 +1382,9 @@ pub async fn session_approve(
             return Err("not_waiting");
         }
         let tool = session.agent_type.tool_id().to_string();
-        let mapping = crate::inject::approve::load_mappings()
+        let mapping = probe_st
+            .store
+            .with(crate::inject::approve::load_mappings_conn)
             .into_iter()
             .find(|m| m.tool == tool);
         let Some(option) =
@@ -1439,13 +1448,17 @@ pub async fn session_approve(
                 Err("内部任务异常".to_string())
             }
         };
-    // 审计 action 词表：approve/reject 语义化，其余键位按 optionId 原样留痕
-    let action = if option_id == "approve" {
-        "approve"
-    } else if option_id == "reject" {
-        "reject"
-    } else {
-        option_id.as_str()
+    // 审计 action 词表（W5 词表 send|queue|flush|jump|retract|approve|reject|fail|open）：
+    // approve/reject 语义化；域外 id（KV 定制表可含任意 id）不进词表——收敛为 "key" 并
+    // log::warn 留痕，防自由文本污染审计 action 列（AuditLogSection 前端「原样小写展示」
+    // 契约不受影响："key" 本就是词表内小写动作）
+    let action = match option.id.as_str() {
+        "approve" => "approve",
+        "reject" => "reject",
+        other => {
+            log::warn!("审批动作域外 id：{other}，审计记 key");
+            "key"
+        }
     };
     match sent {
         Ok(()) => {

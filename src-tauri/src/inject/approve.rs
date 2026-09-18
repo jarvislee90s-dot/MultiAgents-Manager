@@ -3,17 +3,20 @@
 //!
 //! ## 数据形态与来源
 //! - 映射表是 `Vec<ToolMapping>` 的 serde JSON，SSOT 在 settings KV 键
-//!   `inject.approve_map`（允许覆盖定制），缺省/损坏回退内置默认表
+//!   [`KV_KEY`]（允许覆盖定制），缺省/损坏回退内置默认表
 //!   [`DEFAULT_MAPPINGS_JSON`]（**不写回**——保持默认表可随版本升级）；
-//! - 默认表 `verified_with` 一律 `"probe-pending"`：键位未经真实审批提示实测取证，
-//!   Task 13/14 实测后回填真实版本号；[`is_version_drift`] 对 probe-pending 恒判
+//! - 默认表 `verified_with` 按工具分态：claude 已实测回填真实版本（2.1.251，
+//!   2026-09-18 Windows 本机取证）；codex 仍 `"probe-pending"`（未经真实审批提示
+//!   实测取证，实机取证后回填）；[`is_version_drift`] 对 probe-pending 恒判
 //!   漂移 → UI 提示「映射待实测确认，若提示不符请用普通发送」。
 //!
 //! ## 锁纪律（M4，调用点必须遵守）
-//! [`load_mappings`] 内部读全局 DB KV（settings 表，`get_setting` 自取 `DB.lock()`），
-//! **绝不在任何 DB 锁临界区内调用**——持 conn 引用的临界区内调用即自锁死锁。
-//! 测试策略（零接触真实 ~/.mam）：KV 读取抽为纯内核 [`load_mappings_from`]，
-//! 测试只驱动内核三态（None / 损坏 / 合法），不调 `get_setting` 不触真实 KV。
+//! KV 读取经调用方 `DeviceStore.with` 短临界区：[`load_mappings_conn`] 直用传入
+//! conn（不自取 DB 锁）——临界区内只做这一条 SQL + 纯解析；**内部自取全局 DB 锁的
+//! 调用（如 session_source）必须在 with 之外**（同线程嵌套加锁即自锁死锁，std Mutex
+//! 非重入）。测试策略（零接触真实 ~/.mam）：解析抽为纯内核 [`load_mappings_from`]
+//! （单测直驱三态 None/损坏/合法）；端点测试经 `DeviceStore::memory()` 自建库 seed
+//! 定制 KV，不触真实 settings 表。
 
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +41,9 @@ pub struct ToolMapping {
 }
 
 /// settings KV 键（inject 域前缀，与其他 inject.* 键同域）
-const KV_KEY: &str = "inject.approve_map";
+pub(crate) const KV_KEY: &str = "inject.approve_map";
 
-/// probe-pending 哨兵：默认表键位未经实测取证（Task 13/14 回填真实版本号）
+/// probe-pending 哨兵：键位未经真实审批提示实测取证（实机取证后回填真实版本号）
 pub const PROBE_PENDING: &str = "probe-pending";
 
 /// 默认映射（首批 Claude/Codex，裁决 14 由简到繁）。
@@ -65,10 +68,12 @@ const DEFAULT_MAPPINGS_JSON: &str = r#"[
 ]"#;
 // 「不要再问」（claude 选项 2 等）不入首批表——Task 13 实测取证确认键位后追加
 
-/// 生产薄壳：读 settings KV 后交内核解析。
-/// 锁纪律（M4）：内部会取全局 DB 锁（get_setting），**绝不在任何 DB 锁临界区内调用**。
-pub fn load_mappings() -> Vec<ToolMapping> {
-    load_mappings_from(crate::database::dao::settings::get_setting(KV_KEY).as_deref())
+/// KV 读取（store 缝版本，远端端点用）：直用调用方 `DeviceStore.with` 短临界区传入的
+/// conn（不自取任何锁，锁内只做这一条 SQL + 纯解析）。生产 `DeviceStore::Global` 即
+/// 全局 DB 同锁同连接，语义与直读 settings KV 完全一致；测试经 `DeviceStore::memory()`
+/// 自建库 seed 定制 KV——零接触真实 ~/.mam（审计词表/严格档等端点测试的注入缝）。
+pub fn load_mappings_conn(conn: &rusqlite::Connection) -> Vec<ToolMapping> {
+    load_mappings_from(crate::database::dao::settings::get_setting_conn(conn, KV_KEY).as_deref())
 }
 
 /// 解析内核（纯函数，测试零接触 DB）：kv=None（缺省）/ 损坏 JSON → 默认表
@@ -124,20 +129,20 @@ pub fn is_version_drift(verified_with: &str, current: &str) -> bool {
     major_minor(verified_with) != major_minor(current)
 }
 
-/// CLI 版本缓存（进程级单例）：cli → 探测结果（含 None，失败也缓存防每次请求刷进程）。
-/// 锁内持有期间完成探测（首调代价一次性，双检都在锁内 = 不会对同一 cli 重复 spawn）；
-/// 这是本模块自有锁，与全局 DB 锁无关。
+/// CLI 版本缓存（进程级单例）：cli → 探测结果（含 None——失败与超时也缓存，防每次
+/// 请求重刷进程/挂死 CLI）。锁内持有期间完成探测（首调代价一次性，双检都在锁内 =
+/// 不会对同一 cli 重复 spawn）；这是本模块自有锁，与全局 DB 锁无关。
 static VERSION_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
 > = std::sync::OnceLock::new();
 
 /// CLI 版本探测（进程级缓存）：首次 spawn `<cli> --version` 取 stdout 首行首个含
-/// 数字的 token（如 "2.1.251"）；失败缓存 None 不重试（避免每次探测刷进程）；
-/// 后续命中缓存直接返回
+/// 数字的 token（如 "2.1.251"）；任何失败（双路 spawn 失败 / 3s 超时 / 无 stdout /
+/// 首行无数字 token）一律缓存 None 不重试（避免每次探测刷进程）；后续命中缓存直接返回
 pub fn cached_cli_version(cli: &str) -> Option<String> {
     let cache =
         VERSION_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut map = cache.lock().unwrap();
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(hit) = map.get(cli) {
         return hit.clone();
     }
@@ -146,20 +151,59 @@ pub fn cached_cli_version(cli: &str) -> Option<String> {
     probed
 }
 
-/// 单次探测（无缓存直查）：stdout 首行首个含数字的 token（"claude 2.1.251" →
-/// "2.1.251"）；spawn 失败 / 无 stdout / 首行无数字 token 一律 None
-fn probe_cli_version(cli: &str) -> Option<String> {
-    let output = std::process::Command::new(cli)
+/// spawn `<cli> --version`（灰1 双路）：先裸名直 spawn（PATH 上的 .exe 命中即走最快
+/// 路）；spawn 失败（NotFound 等）回退 `cmd /c <cli> --version`——npm 全局包在
+/// Windows 的可执行是 `.cmd` 垫片，裸名直 spawn 必失败，须交由 cmd 按 PATH+PATHEXT
+/// 解析（灰1 定案，批次设计 §3.R3-⑥）。stderr 一律 null（版本探测不读错误输出）。
+fn spawn_version_probe(cli: &str) -> std::io::Result<std::process::Child> {
+    std::process::Command::new(cli)
         .arg("--version")
-        .output()
-        .ok()?;
-    let first_line = String::from_utf8_lossy(&output.stdout);
-    first_line
-        .lines()
-        .next()?
-        .split_whitespace()
-        .find(|t| t.chars().any(|c| c.is_ascii_digit()))
-        .map(str::to_string)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .or_else(|_| {
+            std::process::Command::new("cmd")
+                .args(["/c", cli, "--version"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        })
+}
+
+/// 单次探测（无缓存直查，灰1 双保护）：
+/// 1. **cmd 垫片回退**（见 [`spawn_version_probe`]）；
+/// 2. **有界等待**：`wait_timeout` 3s——CLI 启动挂死不再无限等待；超时 `kill()` +
+///    `wait()` 收尸后返回 None（[`cached_cli_version`] 把 None 一并入缓存：超时结果
+///    不重试，防每次请求再刷一个挂死进程刷屏）。
+///
+/// 解析：stdout 首行首个含数字的 token（"claude 2.1.251" → "2.1.251"）；双路 spawn
+/// 均失败 / 无 stdout / 首行无数字 token 一律 None。stdout 管道在拿到退出态后才读
+/// （`--version` 输出远小于管道缓冲，先等后读无死锁风险）
+fn probe_cli_version(cli: &str) -> Option<String> {
+    use wait_timeout::ChildExt;
+    let mut child = spawn_version_probe(cli).ok()?;
+    use std::io::Read;
+    match child.wait_timeout(std::time::Duration::from_secs(3)).ok()? {
+        // 正常退出：收 stdout 解析（子进程已退出，管道缓冲可安全排空）
+        Some(_) => {
+            let mut stdout = String::new();
+            if let Some(pipe) = child.stdout.as_mut() {
+                pipe.read_to_string(&mut stdout).ok()?;
+            }
+            stdout
+                .lines()
+                .next()?
+                .split_whitespace()
+                .find(|t| t.chars().any(|c| c.is_ascii_digit()))
+                .map(str::to_string)
+        }
+        // 超时：杀进程 + 收尸（防僵尸），返回 None（缓存层负责「超时也入缓存」）
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -258,5 +302,85 @@ mod tests {
     /// 默认表期望夹具（直接反序列化内置常量，与内核回退产物同源比对）
     fn default_fixture() -> Vec<ToolMapping> {
         serde_json::from_str(DEFAULT_MAPPINGS_JSON).unwrap()
+    }
+
+    // ==== CLI 版本探测（灰1：cmd 垫片回退 + 3s 有界等待） ====
+    // Windows-only：假 CLI 走 .cmd 垫片 + cmd.exe 解析（npm 全局包形态），POSIX 无此
+    // 语义，Linux CI（cargo test 门禁）不编译不执行
+
+    /// 探测测试专用串行锁：`std::env::set_var("PATH", …)` 是进程级突变，两条探测测试
+    /// （以及任何并发解析 PATH 的代码）互染——两条测试全程持锁强制串行（对齐
+    /// queue.rs LOOP_HANDLE_TEST_LOCK 先例）；每测收尾恢复原 PATH，断言失败也不泄漏
+    /// 突变。锁自愈取锁（unwrap_or_else(into_inner)）：一测失败毒锁不得以 PoisonError
+    /// 连坐另一测（假红噪声），让其照常跑出真实结论
+    #[cfg(windows)]
+    static PATH_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
+    /// 把 dir 前插进程 PATH，返回原 PATH（供收尾恢复）。调用方持 [`PATH_TEST_LOCK`]。
+    #[cfg(windows)]
+    fn prepend_path(dir: &std::path::Path) -> std::ffi::OsString {
+        let old = std::env::var_os("PATH").expect("Windows 下 PATH 必存在");
+        let mut paths: Vec<_> = std::env::split_paths(&old).collect();
+        paths.insert(0, dir.to_path_buf());
+        std::env::set_var("PATH", std::env::join_paths(&paths).unwrap());
+        old
+    }
+
+    /// 灰1 超时臂：PATH 上的 .cmd 假 CLI（ping 挂 29s）→ 探测必须 ≤5s 返回 None
+    /// （内核 3s 有界等待 + kill 收尸，不再无限等待）；删文件复调仍 None = 不再 spawn
+    /// （超时结果入缓存防重试刷屏；缓存命中的铁证见 probe_version_via_cmd_shim——
+    /// 删文件复调仍返回版本号只有缓存能给）
+    #[test]
+    #[cfg(windows)]
+    fn probe_version_times_out_and_caches_none() {
+        let _serial = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("mam-fake-hang-cli.cmd");
+        std::fs::write(&shim, "@ping -n 30 127.0.0.1 >nul\r\n").unwrap();
+        let old_path = prepend_path(dir.path());
+        let started = std::time::Instant::now();
+        let v = cached_cli_version("mam-fake-hang-cli");
+        let elapsed = started.elapsed();
+        // 收尾先恢复 PATH（断言失败也不把突变泄漏给并行测试）
+        std::env::set_var("PATH", old_path);
+        assert_eq!(v, None, "挂死 CLI 必须超时回 None");
+        assert!(
+            elapsed >= std::time::Duration::from_secs(2),
+            "必须真的等满超时窗而非秒退（实际 {elapsed:?}）"
+        );
+        assert!(
+            elapsed <= std::time::Duration::from_secs(5),
+            "≤5s 返回（3s 超时 + 收尸余量），不得逼近无限等待（实际 {elapsed:?}）"
+        );
+        std::fs::remove_file(&shim).ok(); // 删文件；tempdir 收尾也会清，这里显式表达语义
+        assert_eq!(
+            cached_cli_version("mam-fake-hang-cli"),
+            None,
+            "删文件复调仍 None（缓存命中，不再 spawn）"
+        );
+    }
+
+    /// 灰1 垫片臂：PATH 上的 .cmd 假 CLI → 裸名直 spawn 必失败 → 回退 cmd /c 垫片
+    /// 解析出 9.9.9；删文件 + 还原 PATH 后复调仍 9.9.9（缓存命中铁证：重探只可能
+    /// spawn 失败得 None，9.9.9 只能来自缓存）
+    #[test]
+    #[cfg(windows)]
+    fn probe_version_via_cmd_shim() {
+        let _serial = PATH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("mam-fake-fast-cli.cmd");
+        std::fs::write(&shim, "@echo mam-fake-fast-cli 9.9.9\r\n").unwrap();
+        let old_path = prepend_path(dir.path());
+        let v = cached_cli_version("mam-fake-fast-cli");
+        // 收尾：还原 PATH + 删文件，再做缓存断言（重探必败 → 9.9.9 只能来自缓存）
+        std::env::set_var("PATH", old_path);
+        std::fs::remove_file(&shim).ok();
+        assert_eq!(v.as_deref(), Some("9.9.9"), "cmd 垫片回退必须解析出版本号");
+        assert_eq!(
+            cached_cli_version("mam-fake-fast-cli").as_deref(),
+            Some("9.9.9"),
+            "删文件复调仍 9.9.9 = 缓存命中（不再 spawn）"
+        );
     }
 }

@@ -297,6 +297,7 @@ pub(crate) fn sweep_if_pending(state: &std::sync::Arc<crate::remote::server::Rem
 /// 对同一队列头各注入一次）。进程级单例，flush 循环与端点直发/插队共用；
 /// 不引新依赖，用 `Mutex<HashSet>`。try 语义：已 in-flight → `None`（调用方跳过本次，
 /// 进行中的那次投递已覆盖该会话）。守卫 Drop 自释放：flush_one 中途 panic 也不永久占位。
+/// 锁自愈取锁（P3 统一）：临界区 panic 毒化不扩散，后续取锁者照常工作
 static INFLIGHT: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<String>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
@@ -305,13 +306,16 @@ pub(crate) struct InflightGuard(String);
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        INFLIGHT.lock().unwrap().remove(&self.0);
+        INFLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
     }
 }
 
 /// 尝试占用会话的 in-flight 名额：空闲 → `Some(守卫)`；已有投递进行中 → `None`
 pub(crate) fn try_acquire_inflight(session_id: &str) -> Option<InflightGuard> {
-    let mut set = INFLIGHT.lock().unwrap();
+    let mut set = INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     if set.contains(session_id) {
         return None;
     }

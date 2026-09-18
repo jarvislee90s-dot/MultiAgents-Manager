@@ -10,7 +10,7 @@ mod iterm;
 #[cfg(target_os = "macos")]
 mod terminal_app;
 #[cfg(target_os = "macos")]
-mod tmux;
+pub(crate) mod tmux;
 #[cfg(windows)]
 pub mod win32;
 

@@ -13,7 +13,10 @@ pub mod windows_console;
 /// 展示侧只用 device_name）。st 不需要：审计读不走注入器/远端状态，全局 DB 直查。
 #[tauri::command]
 pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
-    let conn = crate::database::connection::DB.lock().unwrap();
+    // 锁自愈取锁（P3 统一）：毒锁不连坐——前一次持锁 panic 后审计查看仍可用
+    let conn = crate::database::connection::DB
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let rows = crate::database::dao::write_audit::recent_conn(
         &conn, // IPC 入参封顶：LIMIT 超大值等于全表读入内存
         limit.unwrap_or(100).min(1000) as i64,
