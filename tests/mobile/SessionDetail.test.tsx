@@ -935,12 +935,18 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
     Element.prototype.scrollIntoView = scrollSpy;
     fireEvent.click(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[1]}`));
 
-    // 自动扩窗：limit 200→400 重拉，目标（seq 10）出现并被滚动定位
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("limit=400"));
-    });
+    // 自动扩窗：limit 200→400 重拉，目标（seq 10）出现并被滚动定位。
+    // timeout 10s：与下例「扩窗到顶」同因——扩窗重拉在整库并行负载下可超 waitFor
+    // 默认 1s（Task 8 门前实测整库跑两次假失败两次，单文件连跑 5/5 绿）；
+    // 只放宽等待上限，断言语义不变
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("limit=400"));
+      },
+      { timeout: 10_000 }
+    );
     await screen.findByTestId("msg-10");
-    await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalled(), { timeout: 10_000 });
     expect(scrollSpy.mock.calls[0][0]).toMatchObject({ block: "start" });
     // 定位成功：加载/miss 横幅均不在场
     expect(screen.queryByTestId("bookmark-jump-miss")).toBeNull();

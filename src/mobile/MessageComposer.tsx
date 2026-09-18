@@ -4,8 +4,14 @@
 //   静默降级同一惯例），403 设备失效同语境（上层会回配对页）；
 // - 发送：POST /session-send 三态回执 chip——delivered 绿「已送达终端」/ queued 黄
 //   「排队中 第 N 位」+ [立即发送][撤回] / failed 红「发送失败：…」（重按发送即重试）；
+//   await 全程另有「投递中…」chip（灰3：慢消费者长文投递可达分钟级，界面不空白，
+//   完成后被结果 chip 覆盖）；正文上限与后端 MAX_SEND_CHARS 对齐（10000，双保险）；
 // - 排队态 3s 轮询 /session-queue 刷新队位（unmount 清理定时器）；条目从队列消失
-//   （已被 flush 送达 / 他端撤回）→ 回执收敛；
+//   （已被 flush 送达 / 他端撤回）→ 回执收敛；position=0（并发消费窗口，后端明示
+//   须容忍）→ 显示「排队中」不带位次数字；
+// - 插队/撤回失败对账（M9R P2-7）：忙时失败 / 网络异常先 fetchQueue 复核——条目
+//   仍在 pending → 恢复排队视图（刷新队位、按钮保留，可重试）；确认不在队才落
+//   failed 终态（jump）/ 收敛（retract）——忙时失败不得吞掉排队操作面；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -32,6 +38,10 @@ type Receipt =
 
 /** 排队态轮询间隔（毫秒）：有排队项时刷新队位（与看板轮询同量级） */
 const QUEUE_POLL_MS = 3000;
+
+/** 正文长度上限：与后端 MAX_SEND_CHARS 对齐（服务端超限 400 拒收，前端
+ *  maxLength 截断是第一道防线，onChange slice 为 jsdom/旧内核兜底的双保险） */
+const MAX_SEND_CHARS = 10000;
 
 export default function MessageComposer({ session }: MessageComposerProps) {
   // 可用性：sendInfo=null 且未就绪 → 不渲染（加载中 / 拉取失败 / 403）
@@ -115,26 +125,58 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     }
   }, [text, sending, busy, sendInfo, session.id]);
 
+  // P2-7 失败对账（插队/撤回共用）：失败后复核 /session-queue——
+  // - 条目仍在 pending → 恢复排队视图（刷新队位，「立即发送/撤回」按钮保留可重试）；
+  // - 确认不在队（已被消费 / 他端撤回）→ onGone 决定终态（jump=failed 展示原始
+  //   错误；retract=回执收敛，撤回目的已达成）；
+  // - 复核自身网络失败 → 保守恢复排队视图（队位沿用旧值，3s 轮询随后自愈）——
+  //   拿不到「真不在队」的证据就不落终态，避免按钮丢失后排队条目在 UI 上失控
+  const reconcileQueued = useCallback(
+    async (itemId: number, prevPosition: number, onGone: () => void) => {
+      try {
+        const items = await fetchQueue(session.id);
+        const mine = items.find((i) => i.id === itemId);
+        if (mine) {
+          setReceipt({ kind: "queued", itemId, position: mine.position });
+        } else {
+          onGone();
+        }
+      } catch {
+        setReceipt({ kind: "queued", itemId, position: prevPosition });
+      }
+    },
+    [session.id]
+  );
+
   const handleJump = useCallback(async () => {
     if (receipt?.kind !== "queued" || busy) return;
+    const { itemId, position } = receipt;
     setBusy(true);
     try {
-      const j = await queueJump(session.id, receipt.itemId);
+      const j = await queueJump(session.id, itemId);
       if (j.status === "delivered") {
         setReceipt({ kind: "delivered" });
       } else {
-        setReceipt({ kind: "failed", error: j.error });
+        // 200 failed 回执（忙时「投递进行中，请稍后重试」等）：条目大概率仍在队，
+        // 先复核再定终态（P2-7：忙时失败不得把排队视图打成 failed 终态）
+        await reconcileQueued(itemId, position, () =>
+          setReceipt({ kind: "failed", error: j.error })
+        );
       }
     } catch (e) {
-      setReceipt({ kind: "failed", error: e instanceof ApiError ? e.message : String(e) });
+      // 网络层 / 非 2xx（404 条目已不在队等）：同样复核，在队即恢复
+      await reconcileQueued(itemId, position, () =>
+        setReceipt({ kind: "failed", error: e instanceof ApiError ? e.message : String(e) })
+      );
     } finally {
       setBusy(false);
     }
-  }, [receipt, busy, session.id]);
+  }, [receipt, busy, session.id, reconcileQueued]);
 
   const handleRetract = useCallback(async () => {
     if (receipt?.kind !== "queued" || busy) return;
     const itemId = receipt.itemId;
+    const { position } = receipt;
     setBusy(true);
     try {
       await queueRetract(session.id, itemId);
@@ -142,7 +184,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       if (e instanceof ApiError && e.status === 404) {
         /* 404 not_found（已送达 / 他端撤回）：不作失败提示，走下方刷新自然收敛 */
       } else {
-        setReceipt({ kind: "failed", error: "撤回失败，可重试" });
+        // 网络错 / 忙时异常路径（P2-7）：同款复核——条目仍在队 → 恢复排队视图可重试；
+        // 确认不在队 → 与成功路径同语义收敛（撤回目的已达成）
+        await reconcileQueued(itemId, position, () => setReceipt(null));
         setBusy(false);
         return;
       }
@@ -156,7 +200,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     } finally {
       setBusy(false);
     }
-  }, [receipt, busy, session.id]);
+  }, [receipt, busy, session.id, reconcileQueued]);
 
   // 拉取未就绪 / 失败 / 403：不渲染（详情页正文照常）
   if (!infoReady || sendInfo === null) return null;
@@ -178,6 +222,20 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           {sendInfo.reasonCode ? `（${sendInfo.reasonCode}）` : ""}
         </p>
       )}
+      {/* 投递中（灰3）：send await 全程在场——慢消费者长文投递可达分钟级，
+          期间不空白；与既有回执并存（排队态的撤回/插队按钮不因发送而失联），
+          完成后被结果 chip 覆盖（sending 翻转 false 即消失） */}
+      {sending && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span
+            data-testid="send-receipt-delivering"
+            className="rounded-full bg-sky-500/10 px-2 py-0.5 text-xs text-sky-700 dark:bg-sky-400/10 dark:text-sky-300"
+          >
+            <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 align-middle" />
+            投递中…
+          </span>
+        </div>
+      )}
       {receipt !== null && (
         <div className="mb-2 flex flex-wrap items-center gap-2">
           {receipt.kind === "delivered" && (
@@ -194,7 +252,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                 data-testid="send-receipt-queued"
                 className="rounded-full bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-400/10 dark:text-amber-400"
               >
-                {`排队中 第${receipt.position}位`}
+                {/* position=0：并发消费把条目刚投出的窗口值（后端明示前端须容忍），
+                    显示口径 → 「排队中」不带位次数字，等下一轮轮询刷新为真实队位 */}
+                {`排队中${receipt.position >= 1 ? ` 第${receipt.position}位` : ""}`}
               </span>
               <button
                 type="button"
@@ -231,7 +291,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           data-testid="composer-input"
           aria-label="消息输入"
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          maxLength={MAX_SEND_CHARS}
+          onChange={(e) => setText(e.target.value.slice(0, MAX_SEND_CHARS))}
           rows={2}
           disabled={!injectable}
           placeholder={injectable ? "输入消息发送到终端…" : "该会话不支持远程注入"}

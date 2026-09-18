@@ -173,3 +173,36 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
     expect(approveCalls()).toHaveLength(1);
   });
 });
+
+// ==== M9R 注入加固前端对齐（严格档 reason 提示条 / P2-10 no_session 文案补锁）====
+describe("ApproveCard：M9R 严格档与补锁", () => {
+  it("probe_pending_options_show_hint_only：available=false 且后端下发 reason（严格档）→ 卡片只渲染提示条不渲染按键组", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      available: false,
+      reason: "键位待实测确认，请用普通发送",
+    });
+    render(<ApproveCard session={{ id: "sess-1" }} />);
+    // 提示条在场：后端中文 reason 原文内联展示
+    expect(await screen.findByTestId("approve-hint").then((el) => el.textContent)).toBe(
+      "键位待实测确认，请用普通发送"
+    );
+    expect(screen.getByTestId("approve-card")).toBeTruthy();
+    // 严格档要点：不渲染任何按键（键位未实测，防误发）
+    expect(screen.queryByTestId("approve-option-approve")).toBeNull();
+    expect(screen.queryByTestId("approve-option-reject")).toBeNull();
+  });
+
+  it("approve_404_no_session_copy：session-approve 404 no_session → 中文文案「会话已结束，请返回看板刷新」（P2-10 补锁）", async () => {
+    installFetch();
+    routes.options = approveOptions();
+    routes.approveStatus = 404;
+    routes.approveBody = { error: "no_session" };
+    render(<ApproveCard session={{ id: "sess-1" }} />);
+    fireEvent.click(await screen.findByTestId("approve-option-approve"));
+    expect(await screen.findByTestId("approve-error").then((el) => el.textContent)).toContain(
+      "会话已结束"
+    );
+    expect(approveCalls()).toHaveLength(1);
+  });
+});

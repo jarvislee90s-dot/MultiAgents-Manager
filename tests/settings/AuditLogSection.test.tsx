@@ -110,6 +110,67 @@ describe("AuditLogSection 渲染（M7 W5）", () => {
   });
 });
 
+// ==== P3 补锁：inject_list_audit 失败的可见性（错误态不伪装成空态；失败保留旧数据）====
+describe("AuditLogSection 加载失败态（P3 补锁）", () => {
+  function failAudit() {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "inject_list_audit") throw new Error("audit boom");
+      return null;
+    });
+  }
+
+  it("audit_load_error_state：失败且无数据 → 显示加载失败错误态（不伪装成空态）", async () => {
+    failAudit();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(<AuditLogSection />);
+      expect(await screen.findByTestId("audit-load-error").then((el) => el.textContent)).toContain(
+        "Failed to load audit log"
+      );
+      // 不得渲染「暂无记录」空态（失败 ≠ 空数据）
+      expect(screen.queryByText("No records yet")).toBeNull();
+      expect(document.querySelectorAll("[data-audit-row]").length).toBe(0);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("失败但有旧数据 → 保留旧数据（不渲染错误态顶掉列表，可重试）", async () => {
+    render(<AuditLogSection />);
+    expect(await screen.findByText("JARVIS 的 iPhone")).toBeTruthy();
+    failAudit();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+      await waitFor(() => expect(auditCalls()).toBe(2));
+      // 刷新失败：旧数据原样保留，错误行不出现（items 非空分支优先）
+      expect(screen.getByText("JARVIS 的 iPhone")).toBeTruthy();
+      expect(screen.getByText("Desktop-A")).toBeTruthy();
+      expect(screen.queryByTestId("audit-load-error")).toBeNull();
+      expect(document.querySelectorAll("[data-audit-row]").length).toBe(3);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("失败态后刷新成功 → 错误态清除，列表恢复", async () => {
+    failAudit();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(<AuditLogSection />);
+      expect(await screen.findByTestId("audit-load-error")).toBeTruthy();
+      invokeMock.mockImplementation(async (cmd: string) =>
+        cmd === "inject_list_audit" ? { items: rowsOf() } : null
+      );
+      fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+      expect(await screen.findByText("JARVIS 的 iPhone")).toBeTruthy();
+      expect(screen.queryByTestId("audit-load-error")).toBeNull();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
 // i18n 契约：AuditLogSection 源码引用的 settings.audit.* 键必须在 zh 与 en 两个
 // locale 同齐备，且两 locale 的 settings.audit 键集相等（对齐 scripts/check-i18n 的子树版）
 describe("AuditLogSection i18n zh/en 无缺键（M7 W5）", () => {

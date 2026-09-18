@@ -936,7 +936,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               刷新机制事实口径：App 的 selected 是冻结快照，停留详情期间不会随 SSE
               重挂——红卡在「退出详情再进入 / PWA 重载」后出现；停留期间会话转为
               非 waiting 时点按钮会收到 409 not_waiting 的中文降级文案（不误发键） */}
-          {session.status === "waiting" && <ApproveCard session={session} />}
+          {/* 组件钥匙（M9R P3）：key={session.id}——复用实例切换会话时强制重挂，
+              清掉上一会话的陈旧 receipt / 选项态（跨会话串卡的防线） */}
+          {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
           <div
             ref={messageAreaRef}
             data-testid="message-area"
@@ -946,8 +948,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             {messageArea}
           </div>
           {/* 发送输入区（M7 Task 7，W4）：仅正文视图挂载（预览/分屏分支不挂）；
-              send-info 拉取失败时组件自静默，不影响对话渲染 */}
-          <MessageComposer session={session} />
+              send-info 拉取失败时组件自静默，不影响对话渲染；key 同上（组件钥匙） */}
+          <MessageComposer key={session.id} session={session} />
         </div>
       )}
 

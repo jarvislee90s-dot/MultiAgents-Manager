@@ -24,16 +24,25 @@ interface Routes {
   infoStatus?: number;
   send?: Record<string, unknown>;
   sendStatus?: number;
+  /** 非 2xx 时响应体 JSON（403 not_injectable{reason,reasonCode} 等，P2-10） */
+  sendBody?: Record<string, unknown>;
+  /** 发送请求挂起不响应（灰3：投递中 chip 的慢消费者场景） */
+  sendHang?: boolean;
   queue?: QueueItemView[];
   jump?: Record<string, unknown>;
   retractOk?: boolean;
+  /** 撤回网络层异常（fetch 直接 reject，P2-7 对账测试用） */
+  retractReject?: boolean;
 }
 
 let routes: Routes;
 let fetchMock: ReturnType<typeof vi.fn>;
+/** sendHang 挂起请求的放行器（测试中手动 resolve 模拟响应到达） */
+let releaseSend: ((r: Response) => void) | null = null;
 
 beforeEach(() => {
   routes = {};
+  releaseSend = null;
 });
 afterEach(() => {
   cleanup();
@@ -53,10 +62,20 @@ function installFetch() {
       return new Response(JSON.stringify(routes.jump ?? { status: "delivered" }), { status: 200 });
     }
     if (url.includes("/session-queue/retract")) {
+      if (routes.retractReject) throw new TypeError("retract 网络断开（模拟网络层异常）");
       return new Response(JSON.stringify({ ok: routes.retractOk ?? true }), { status: 200 });
     }
     if (url.includes("/session-send")) {
-      if (routes.sendStatus) return new Response("no", { status: routes.sendStatus });
+      if (routes.sendHang) {
+        return new Promise<Response>((resolve) => {
+          releaseSend = resolve;
+        });
+      }
+      if (routes.sendStatus) {
+        return new Response(JSON.stringify(routes.sendBody ?? { error: "internal" }), {
+          status: routes.sendStatus,
+        });
+      }
       return new Response(JSON.stringify(routes.send ?? { status: "delivered" }), { status: 200 });
     }
     if (url.includes("/session-queue")) {
@@ -259,5 +278,121 @@ describe("MessageComposer：排队轮询（3s 定时器，unmount 清理）", ()
       await vi.advanceTimersByTimeAsync(9000);
     });
     expect(queueListCalls()).toBe(before);
+  });
+});
+
+// ==== M9R 注入加固前端对齐（P2-7 对账恢复 / 灰3 投递中 chip / P2-10 补锁）====
+describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
+  it("jump_busy_restores_queued_view：插队遇忙（200 failed）→ fetchQueue 复核条目仍在 → 恢复排队视图与按钮；复核确认不在队 → failed 终态", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    routes.jump = { status: "failed", error: "投递进行中，请稍后重试" };
+    routes.queue = [queueItem({ id: 7, position: 2 })];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "插队一下" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-queued");
+    // 插队遇忙 → 复核 /session-queue → 条目仍在 pending → 恢复排队视图（队位刷新为第2位），
+    // 立即发送/撤回按钮保留（P2-7 要点：忙时失败不得吞掉排队操作面）
+    fireEvent.click(screen.getByTestId("queue-jump"));
+    const chip = await screen.findByTestId("send-receipt-queued");
+    expect(chip.textContent).toContain("排队中 第2位");
+    await waitFor(() =>
+      expect((screen.getByTestId("queue-jump") as HTMLButtonElement).disabled).toBe(false)
+    );
+    expect(screen.getByTestId("queue-retract")).toBeTruthy();
+    expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
+    expect(queueListCalls()).toBeGreaterThanOrEqual(1); // 复核确有发生
+    // 复核真不在队（并发消费已把条目投出）→ failed 终态
+    routes.queue = [];
+    fireEvent.click(screen.getByTestId("queue-jump"));
+    const failed = await screen.findByTestId("send-receipt-failed");
+    expect(failed.textContent).toContain("投递进行中，请稍后重试");
+    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+  });
+
+  it("retract_failure_same_reconcile：撤回网络错 → 同款队列复核 → 条目仍在 → 恢复排队视图（不落 failed 终态，可重试）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    routes.retractReject = true;
+    routes.queue = [queueItem({ id: 7, position: 1 })];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "待撤回" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-queued");
+    fireEvent.click(screen.getByTestId("queue-retract"));
+    // 网络错 → 复核 /session-queue → 条目仍在队 → 排队视图恢复（按钮回到可点，可重试撤回）
+    const chip = await screen.findByTestId("send-receipt-queued");
+    expect(chip.textContent).toContain("排队中 第1位");
+    await waitFor(() =>
+      expect((screen.getByTestId("queue-retract") as HTMLButtonElement).disabled).toBe(false)
+    );
+    expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
+  });
+
+  it("maxlength_guard：textarea maxLength=10000；超限输入被截断（与后端 MAX_SEND_CHARS 对齐）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    expect(input.maxLength).toBe(10000);
+    fireEvent.change(input, { target: { value: "a".repeat(10003) } });
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toHaveLength(10000);
+  });
+
+  it("delivering_chip_during_await：发送 await 全程显示「投递中…」chip，完成后被结果 chip 覆盖（灰3 慢消费者不空白）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.sendHang = true;
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "一万字长文（慢消费者）" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    // await 未返回期间：投递中 chip 在场（长文投递可达分钟级，界面不空白）
+    expect(
+      await screen.findByTestId("send-receipt-delivering").then((el) => el.textContent)
+    ).toBe("投递中…");
+    expect(screen.queryByTestId("send-receipt-delivered")).toBeNull();
+    // 放行响应：结果 chip 覆盖投递中
+    await act(async () => {
+      releaseSend!(new Response(JSON.stringify({ status: "delivered" }), { status: 200 }));
+    });
+    expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
+    expect(screen.queryByTestId("send-receipt-delivering")).toBeNull();
+  });
+
+  it("send_403_reason_chip：session-send 403 not_injectable → 失败 chip 含后端 reason 原文（P2-10）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.sendStatus = 403;
+    routes.sendBody = {
+      error: "not_injectable",
+      reason: "会话形态已漂移为黑盒，无法注入",
+      reasonCode: "blackbox",
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "你好" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-failed");
+    expect(chip.textContent).toContain("会话形态已漂移为黑盒，无法注入");
+  });
+
+  it("queued position=0 容忍：并发消费窗口返回位次 0 → 显示「排队中」不带位次数字，按钮保留", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 0 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "刚入队即撞上消费窗口" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-queued");
+    expect(chip.textContent).toBe("排队中");
+    expect(screen.getByTestId("queue-jump")).toBeTruthy();
+    expect(screen.getByTestId("queue-retract")).toBeTruthy();
   });
 });

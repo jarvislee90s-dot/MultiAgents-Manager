@@ -312,14 +312,16 @@ export function connectEvents(
 
 /** 输入区可用性矩阵（GET /session-send-info 载荷，与 Rust `session_send_info`
  *  的 JSON 逐字段对应，勿漂移）：injectable=false 时 reasonCode/reason 携带不可
- *  注入原因（如 WorkBuddy 黑盒）；channels 为候选注入通道（tmux/iterm2/…）；
- *  visibility=after_refresh 表示注入后需刷新才见回显 */
+ *  注入原因（如 WorkBuddy 黑盒），**channels/visibility 不返回**（后端
+ *  RouteOutcome::NotInjectable 分支只给 {injectable,reasonCode,reason}）→ 前端
+ *  类型须 optional（M9R P2-10 对齐）；injectable=true 时 channels 为候选注入
+ *  通道（tmux/iterm2/…），visibility=after_refresh 表示注入后需刷新才见回显 */
 export interface SendInfo {
   injectable: boolean;
   reasonCode?: string;
   reason?: string;
-  channels: string[];
-  visibility: "realtime" | "after_refresh";
+  channels?: string[];
+  visibility?: "realtime" | "after_refresh";
 }
 
 /** 拉取输入区可用性（W4：输入区挂载时一次）。403（设备失效，与 fetchSessions
@@ -420,9 +422,14 @@ export async function queueJump(
   return (await r.json()) as { status: "delivered" } | { status: "failed"; error: string };
 }
 
-/** 撤回排队条目（W4）：200 {ok:true}；条目已不在队（已送达 / 他端撤回）→
- *  404 not_found → 抛 ApiError（调用方按「已不在队列」收敛，不作失败提示） */
-export async function queueRetract(sessionId: string, itemId: number): Promise<{ ok: boolean }> {
+/** 撤回排队条目（W4）：200 {ok:true} 撤回成功；P2-6 忙时（该会话投递进行中）
+ *  → 200 {status:"failed",error:后端中文文案}（条目**未被撤**、仍在队——前端不
+ *  消费该文案，以 fetchQueue 复核结果为准）；条目已不在队（已送达 / 他端撤回）
+ *  → 404 not_found → 抛 ApiError（调用方按「已不在队列」收敛，不作失败提示） */
+export async function queueRetract(
+  sessionId: string,
+  itemId: number
+): Promise<{ ok: true } | { status: "failed"; error: string }> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-queue/retract", {
@@ -434,7 +441,7 @@ export async function queueRetract(sessionId: string, itemId: number): Promise<{
     throw new ApiError(null, `session-queue/retract 网络异常: ${String(e)}`);
   }
   if (!r.ok) throw new ApiError(r.status, `session-queue/retract ${r.status}`);
-  return (await r.json()) as { ok: boolean };
+  return (await r.json()) as { ok: true } | { status: "failed"; error: string };
 }
 
 // ==== M8 Task 12：审批选项卡（红卡一键应答，W6）====
@@ -443,13 +450,17 @@ export async function queueRetract(sessionId: string, itemId: number): Promise<{
  *  的 JSON 逐字段对应，勿漂移）：available=false（会话非 Waiting / 工具无映射 /
  *  提示未命中）时 options 恒空——移动端据此不渲染审批卡；options 只含 id+label，
  *  **键位不外泄给 UI**（投递层机密）；verifiedWith = 映射实测版本，currentVersion =
- *  CLI 探测版本（探测失败为 null），drift=true 时红卡提示降级路径（普通发送） */
+ *  CLI 探测版本（探测失败为 null），drift=true 时红卡提示降级路径（普通发送）；
+ *  reason = 严格档降级原因（Task 10 下发，如「键位待实测确认，请用普通发送」）：
+ *  available=false 且 reason 存在 → 卡片只渲染提示条不渲染按键（M9R 消费）；
+ *  旧分支（非 Waiting / 无映射 / 未命中）不给该键 → optional */
 export interface ApproveOptionsView {
   available: boolean;
   options: { id: string; label: string }[];
   verifiedWith: string;
   currentVersion: string | null;
   drift: boolean;
+  reason?: string;
 }
 
 /** 拉取审批选项卡数据源（红卡挂载时一次）。非 2xx → 抛 ApiError（调用方静默
