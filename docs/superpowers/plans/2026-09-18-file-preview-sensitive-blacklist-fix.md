@@ -1,5 +1,9 @@
 # 文件预览敏感黑名单生产失效修复 · 实施计划
 
+> **状态：已实施（2026-09-18）**，分支 `fix/file-preview-sensitive-blacklist`，commits `e906468` → `178a3df` → `c3d7236` → `5662a27`（未 push）。
+> 实施偏差记录：① Task 3 增加了第 4 个 commit（生产接线探针）——独立验收复核发现「生产 `STATE` 接线无测试覆盖」盲区（把接线改 `|| None` 时全量测试全绿），已照本模块 `tunnel_hosts_from_snapshot` 惯例提取 `real_home_dir()` 具名函数并补探针闭合；② Task 3 的 Step 2 突变验证由独立复核子代理执行并额外覆盖了两种形态（值错 / 生产接线错）。
+> 操作日志（含复验命令）：`.superpowers/sdd/2026-09-18-file-preview-fix/OPERATION-LOG.md`（未入库）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 修复 `/m/api/v1/file` 端点上「主目录敏感目录黑名单整段失效」的生产回归——配对设备当前可读取 `~/.ssh/id_rsa`、`~/Library/Keychains`、浏览器 profile 等凭据文件；修复后黑名单在真实调用链上生效，并有端到端回归锁。
