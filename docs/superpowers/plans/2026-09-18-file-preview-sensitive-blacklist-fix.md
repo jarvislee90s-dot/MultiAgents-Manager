@@ -8,6 +8,8 @@
 
 **Goal:** 修复 `/m/api/v1/file` 端点上「主目录敏感目录黑名单整段失效」的生产回归——配对设备当前可读取 `~/.ssh/id_rsa`、`~/Library/Keychains`、浏览器 profile 等凭据文件；修复后黑名单在真实调用链上生效，并有端到端回归锁。
 
+> **两类失效（2026-09-18 复核补充）**：① 端点传 `None` 致黑名单整段跳过（本计划 Task 1-3 修复）；② **macOS APFS firmlink 别名旁路**——`/System/Volumes/Data<home>/...` 与 `<home>/...` 同 inode，归属性字符串前缀比较把别名误判「主目录外」而跳过黑名单（实测泄露 194 字节），由 `8ec0545` 以 `fold_data_volume_alias()` 修复并加回归锁。**两类修完后**「主目录内黑名单在 macOS 主平台生效」的宣称才成立；残余风险见 §7。
+
 **Architecture:** 两处改动合围。① `remote/files.rs::read_file_safe` 的 `home` 参数语义明确化：基准可用 → 仅主目录内路径过敏感段匹配（保持 M5 P2-a「主目录外不设路径级防线」裁决原样）；基准不可用（未注入 / 无法 canonicalize）→ **全段保守匹配**（fail-closed，与项目既有「None = fail-closed 哨兵」惯例一致）。② `RemoteState` 新增 `home_source` 注入缝（照 session_source / host_source / pin_source 既有惯例），生产接线 `dirs::home_dir()`，端点消费它——根因正是 3d22e2e 把生产调用改传 `None`，而单元测试全部显式传 `Some(home)`，测试全绿、生产裸奔。
 
 **Tech Stack:** Rust（Tauri 2 侧）、axum、tempfile、dirs。前端无需改动（403 原因码 `sensitive` 的文案分诊已在 `src/mobile/FilePreview.tsx:191` 就位）。
@@ -387,3 +389,12 @@ git commit -m "test(m5-files): 黑名单端到端回归锁——home_source 接�
    → **应 403 且响应体含 `{"error":"sensitive"}`**；预览页显示「该路径受安全策略保护，无法预览」。
 2. 同法改 `~/Desktop/<某图>.png`（主目录内非敏感）→ 应正常预览（确认未误伤）。
 3. 项目目录外的文件（如微信临时目录附件）→ 仍可预览（2026-09-18 全盘裁决未被本修复收窄）。
+4. **别名形态**（macOS，2026-09-18 复核补充）：把第 1 步的路径换成
+   `/System/Volumes/Data/Users/<u>/.ssh/id_rsa` → **同样应 403 sensitive**
+   （修复前此形态返回 200 + 密钥内容）。
+
+## 七、已知边界（残余风险）
+
+- **firmlink 折叠是前缀级方案**：本次覆盖 `/System/Volumes/Data` 前缀（唯一实测未堵的等价别名形态）。若未来 macOS 引入新的等价挂载别名，需按同法枚举（权威清单 `/usr/share/firmlinks`）。
+- **未采用身份判定方案**（`(dev, ino)` 祖先遍历）：更稳但涉及 `path_within` 语义与 Windows 分支，超出本次范围；如需推进另立计划。
+- 主目录**之外**仍不设路径级防线（2026-09-18 裁决）；黑名单只在主目录内生效（基准不可用时除外——fail-closed 全段匹配）。
