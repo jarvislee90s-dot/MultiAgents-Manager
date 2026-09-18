@@ -27,6 +27,7 @@
 | M8-1 | 红卡一键批准/拒绝 | claude 会话触发权限请求（如让它跑一条需批准命令） | 红卡出现 → 点「允许」/「拒绝」 | 终端收到对应按键（1/esc 等——以 Task 13 取证键位为准），agent 继续或中止；审计 action=approve/reject |
 | M8-2 | 计划模式「批准执行」 | claude 计划模式会话出计划 | 红卡点批准执行 | 计划被批准开始执行（裁决 13 会话内应答范畴） |
 | M8-3 | 降级路径 | 把映射 KV 清掉（或用无映射工具） | 红卡不出现 → 普通发消息 | 不发错误键位；降级文案出现 |
+| M8-4 | codex 键位取证补测（Windows 未能取证） | codex `/approvals` 设为需审批模式（如 Ask always） | 触发原生审批框，抄录提示原文与键位 | 据实修订 DEFAULT_MAPPINGS_JSON 的 codex markers/keys/verified_with（当前 probe-pending 恒漂移提示） |
 
 ## 已知执行形态差异（实测时留意）
 
