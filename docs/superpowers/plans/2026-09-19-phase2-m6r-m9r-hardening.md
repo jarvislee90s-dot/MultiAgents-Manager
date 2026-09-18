@@ -26,7 +26,7 @@
 - `inject/windows_console.rs`：`FlatKeyRecord`（20 字节平铺+编译期断言）、`attach/open_conin/write_chunk/is_insufficient_buffer/resolve_target` 保留；`write_all/inject_via/inject_text/inject_key/single_key_records` 本计划重写。
 - `inject/queue.rs`：`FlushOutcome{Sent,Failed,Suspended,Deferred}`/`try_flush/settle/try_acquire_inflight/INFLIGHT/FLUSH_LOOP_HANDLE/spawn_flush_loop`。
 - `remote/api.rs`：`session_send`（直发分支 756-775 一带）、`session_queue_jump`（守卫先取先例 968-979）、`session_queue_retract`（1014-1069，无守卫）、`session_approve*`、`endpoint_audit/device_identity/find_session_sync/MAX_SEND_CHARS`。
-- `remote/mod.rs`：`stop_server_core`（SERVER_HANDLE abort 先例 538 一带）；`window/tmux.rs`（list-panes 输出解析）、`window/applescript.rs::execute_applescript`、`window/win32.rs::collect_ancestor_pids`。
+- `remote/mod.rs`：`stop_server_core`@511（SERVER_HANDLE abort@520 先例；`stop_server_with`@538 薄壳）；`window/tmux.rs`（list-panes 输出解析）、`window/applescript.rs::execute_applescript`、`window/win32.rs::collect_ancestor_pids`。
 - `inject/approve.rs`：`DEFAULT_MAPPINGS_JSON/load_mappings_from/detect/is_version_drift/cached_cli_version/VERSION_CACHE`。
 - 移动端：`MessageComposer.tsx`（队列轮询 effect 66-86）、`ApproveCard.tsx`、`api.ts`、`SessionDetail.tsx:939/950` 挂载点。
 
@@ -44,6 +44,8 @@ pub const BASE_BUDGET_MS: u64 = 10_000;  pub const BACKPRESSURE_MS_PER_CHAR: u64
 pub fn family_for(tool: &str) -> Option<FamilySpec>;
 pub fn use_backpressure(spec: &FamilySpec, chars: usize) -> bool;
 pub fn inject_budget_ms(spec: &FamilySpec, chars: usize) -> u64;
+pub struct ChunkPlan { pub text_chunks: usize, pub backpressure: bool } // 纯构造：分块/背压计划（Task 3 执行层消费）
+pub fn chunk_plan(text: &str, spec: &FamilySpec) -> ChunkPlan;
 
 // inject/engine.rs 纯核（Task 2）——KeyLayout 缝：Windows 真 FFI、测试假实现
 pub struct KeyRecordSpec { pub vk: u16, pub scan: u16, pub ch: u16, pub down: bool }
@@ -105,7 +107,7 @@ pub(crate) fn reconcile_once(state: &Arc<RemoteState>);  // 启动/周期对账�
 
 ### Task 2: 事件构造纯核重写 + 键域校验
 
-**Files:** Modify `src-tauri/src/inject/engine.rs`（纯函数区：新增 `KeyRecordSpec{vk,scan,ch,down}` 三字段版——**替换旧二字段版**并同步 `windows_console.rs` 的 `FlatKeyRecord::from`）；Modify `src-tauri/Cargo.toml`（windows crate features 追加 `"Win32_UI_Input_KeyboardAndMouse"`, `"Win32_UI_WindowsAndMessaging"`——仅 feature 位，非新 crate）。
+**Files:** Modify `src-tauri/src/inject/engine.rs`（纯函数区：`KeyRecordSpec`（engine.rs:44）由旧版三字段 {vk,ch,down} **扩为四字段加 scan**，同步 `windows_console.rs` 的 `FlatKeyRecord::from`；旧 `text_to_key_records`/`key_to_windows_vk`/`single_key_records` 中被新构造完全取代者**同批删除**——防死代码）；Modify `src-tauri/Cargo.toml`（windows crate features 追加 `"Win32_UI_Input_KeyboardAndMouse"`, `"Win32_UI_WindowsAndMessaging"`——仅 feature 位，非新 crate）。
 
 - [ ] **Step 1: 失败测试**（engine.rs tests，跨平台；用假布局 `struct FakeLayout;` 实现 `vk_of(c)=c as u16、scan_of(vk)=vk+1`）
 
@@ -141,7 +143,7 @@ pub(crate) fn reconcile_once(state: &Arc<RemoteState>);  // 启动/周期对账�
 
 **Files:** Modify `src-tauri/src/inject/windows_console.rs`（重写 `write_all/inject_via/inject_text/inject_key`；新增 `CONSOLE_OP` 互斥、`AttachGuard`、`paced_write`、Windows 真 `KeyLayout`——`VkKeyScanW(c)&0xFF` / `MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)`）；Modify `inject/engine.rs` 的 `RealInjector` windows impl 委托新签名。
 
-- [ ] **Step 1: 失败测试**（可离线测的部分：节流计划纯函数 + 域外键）
+- [ ] **Step 1: 失败测试**（节流计划纯函数 `chunk_plan` **归属 families.rs**、测试并入 Task 1 清单跨平台跑；此处仅域外键一项，`#[cfg(windows)]`）
 
 ```rust
 #[test] fn chunk_plan_splits_text_and_enter() { // 正文块 160 事件 + 回车独立块（150ms 后单批）
@@ -198,7 +200,7 @@ fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<InjectSta
 
 ### Task 5: A1 写入确认层 `inject/confirm.rs`
 
-**Files:** Create `src-tauri/src/inject/confirm.rs`；Modify `remote/api.rs`（把 session-messages 端点内部的「按 (agent, session) 读消息」聚合抽为 `pub(crate) fn read_session_messages_core(...)`，端点与确认层共用——数据同源）；Modify `inject/queue.rs`（flush_one 内嵌确认）。
+**Files:** Create `src-tauri/src/inject/confirm.rs`；Modify `remote/api.rs`（把 session-messages 端点内部的「按 (agent, session) 读消息」聚合抽为 `pub(crate) fn read_session_messages_core(...)`，端点与确认层共用——数据同源）；Modify `inject/queue.rs`（flush_one 内嵌确认）；Modify `remote/server.rs` + `remote/mod.rs`（RemoteState 新增 `pub confirm_probe: Arc<dyn Fn(&str,&str,&str)->bool + Send + Sync>` 缝并在 STATE/测试态装配——生产=真实现，测试=恒 true，与 injector 缝同模式；**本任务定义并装配，Task 6 仅复用**）。
 
 - [ ] **Step 1: 失败测试**
 
@@ -206,7 +208,7 @@ fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<InjectSta
 #[test] fn stamp_logic() { // 纯核：截尾 24 字符 + 先 trim_end（F8 尾空格修剪）
     let c = "[mobile iPhone] ".to_string() + &"a".repeat(40) + "  ";
     let s = stamp_of(&c);
-    assert_eq!(s.chars().count(), 24); assert!(!s.ends_with(' ''));
+    assert_eq!(s.chars().count(), 24); assert!(!s.ends_with(' '));
     assert_eq!(stamp_of("短消息"), "短消息");
 }
 #[test] fn stamp_found_in_user_messages() {
@@ -225,7 +227,7 @@ fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<InjectSta
 
 ### Task 6: 队列生命周期（裁决 19 + P1-4 + P2-5/6 + 灰2）
 
-**Files:** Modify `src-tauri/src/inject/queue.rs`、`remote/mod.rs`（stop_server_core + STATE 装配 confirm_probe）、`remote/api.rs`（直发/插队端点映射）、`remote/server.rs`（测试态装配缝）。
+**Files:** Modify `src-tauri/src/inject/queue.rs`、`remote/mod.rs`（`stop_server_core`@511 在 SERVER_HANDLE abort@520 之后追加 `abort_flush_loop()`——裁决 19 冻结队列）、`remote/api.rs`（直发/插队端点回执映射；confirm_probe 缝已由 Task 5 装配，此处仅复用）。
 
 - [ ] **Step 1: 失败测试**（queue 内存库 + 假注入器 + confirm_probe）
   - `stop_freezes_flush_loop`：spawn 循环 → 调 stop 路径的 abort 段（抽 `pub(crate) fn abort_flush_loop()`）→ 断言 `FLUSH_LOOP_HANDLE` 槽空。
@@ -269,11 +271,11 @@ fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<InjectSta
 
 ### Task 9: macOS 匹配修复（P2-3/P2-4，构造层 Windows 可测）
 
-**Files:** Modify `src-tauri/src/inject/engine.rs`（iTerm2 两脚本、Terminal 两脚本、`find_tmux_pane`）、`src-tauri/src/window/terminal_app.rs`（聚焦侧 contains→is）。
+**Files:** Modify `src-tauri/src/inject/engine.rs`（iTerm2 两脚本、Terminal 两脚本、**tmux 匹配拆纯函数 `parse_panes_find(lines:&[String], tty:&str)->Option<String>` 置跨平台区——`find_tmux_pane` 本体是 cfg(macos) 执行层薄壳**）、`src-tauri/src/window/terminal_app.rs`（聚焦侧 contains→is）。
 
 - [ ] **Step 1: 失败测试**（跨平台构造断言）
   - `iterm_scripts_use_exact_tty`：`iterm_write_script/iterm_send_key_script` 产出含 `tty of s is "/dev/ttys005"`（不再 contains）。
-  - `tmux_pane_match_is_full_path`：`find_tmux_pane` 比较改 `pane_tty == tty`（全路径；构造 list 输出含 `/dev/ttys100` 与 `/dev/ttys1000`，喂 `/dev/ttys100` 只命中前者——回归锁前缀撞号）。
+  - `tmux_pane_match_is_full_path`：`parse_panes_find`（纯函数，跨平台）比较改全路径相等——构造 list 输出含 `/dev/ttys100` 与 `/dev/ttys1000`，喂 `/dev/ttys100` 只命中前者（回归锁前缀撞号）。
   - `terminal_scripts_traverse_tabs`：两脚本含 `repeat with t in tabs of w` + `tty of t is "/dev/..."`；单键脚本先 `set selected tab of w to t` 再 keystroke（先选后发）。
 - [ ] **Step 2:** 确认失败 → **Step 3:** 实现（`terminal_do_script` 命中后 `do script ... in t`；`terminal_send_key_script` 命中后选 tab → activate → keystroke；`terminal_app.rs:26` contains 同步改 is）→ **Step 4:** 门禁 → **Step 5:** Commit `fix(m9r): macOS 终端定位精确匹配+Terminal.app 标签遍历（P2-3/P2-4；实机验证入回传清单）`
 
@@ -336,4 +338,5 @@ fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<InjectSta
 - **Spec 覆盖矩阵**：R1 探测=已完成（批外）；R2 → Task 1/2/3/4/5 + 12（引擎规格九条硬性要求逐一落：自适应节流 T1/T3、按家分支 T2、生命周期 T3、确认双层 T4/T5、真总预算 T3、键域 T2、保留件 T3 不动件、监控解冻 T4、常量可配+指纹 T1+T10）；R3 → Task 6/7/8/9（P1-3/A2、P1-4、P2-5/6/7/8/10、P2-3/4、P3 子集）+ 灰1(T7)/灰2(T6)/灰3(T8)；R4 → Task 10；R5 → Task 11；R6 → Task 9；R7 → Task 7/8；B1 四家矩阵 → T1 族表/T12 E2E；A1 分层 → T5/T6。**无缺口。**
 - **占位符**：无 TBD；resume 命令表以「Step 1 实测定案 + 断言按实测写」闭环（探测即任务，不留悬空）；codex 映射键位同理（源码已证 y/esc，实测确认）。
 - **类型一致性**：`KeyRecordSpec` 三字段贯穿 T2→T3；`FlushOutcome` 上抛贯穿 T5→T6→api；`confirm_probe` 缝 T5 定义 T6 装配；`InjectStats` T3 定义 T12 断言。
-- **裁决不重议**：18/19/A1/B1 全部落为实现条款；宪法不动（两处可选微调用户未表态，维持原状）。
+- **裁决不重议**：18/19/A1/B1 全部落为实现条款；宪法 D19 措辞级修订已按用户在席批准落档（本计划约束第 2 条"不改宪法"以 D19 已完成的措辞修订为界，后续执行不再触碰）。
+- **复核修订（2026-09-19，标识符与代码库逐一核对后）**：核对命中——`MAX_SEND_CHARS=10_000`（api.rs:530）、`endpoint_audit/device_identity/find_session_sync`（api.rs:576/587/614）、`stop_server_core@511/abort@520/stop_server_with@538`、`FlatKeyRecord/attach/open_conin/write_chunk/is_insufficient_buffer/single_key_records/resolve_target`（windows_console.rs）、`KeyRecordSpec{vk,ch,down}@engine.rs:44`/`key_to_windows_vk@22`/`text_to_key_records@53`、`DEFAULT_MAPPINGS_JSON/load_mappings_from/cached_cli_version/VERSION_CACHE/probe_cli_version`（approve.rs）、`handleJump/handleRetract`（MessageComposer.tsx:118/135）、`FlushOutcome/try_acquire_inflight/INFLIGHT/FLUSH_LOOP_HANDLE/flush_one/flush_given/try_flush/settle`（queue.rs）——全部存在且签名相符；`FlushOutcome` 现为 `pub(crate)`，同 crate 内 api.rs 可见，无需升 pub。据此修正五处：①`chunk_plan` 归属 families.rs（原落 Windows 层导致非 Windows 测试编不过）；②Task 2 字段措辞（旧版三字段非二字段）+ 被取代旧函数删除注记（防死代码）；③Task 5 空字符字面量笔误；④confirm_probe 缝接线从 Task 6 归位 Task 5（消除跨任务接缝含糊）；⑤Task 9 tmux 匹配拆跨平台纯函数（`find_tmux_pane` 是 cfg(macos) 执行层，纯核测试原打不到）。**多路线未落定扫描**：无——abort vs CancellationToken（设计已定 abort+对账兜底）、确认主次（裁决 A1）、互斥 vs actor（设计已定全局互斥）均已定案；resume 命令与 codex 键位属"探测即定案"闭环（Step 1 实测→断言按实测写），非多路线并存。
