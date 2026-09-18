@@ -2587,6 +2587,12 @@ mod tests {
                 15,
                 crate::session::SessionStatus::Waiting,
             ),
+            inj_sess(
+                "sess_f",
+                crate::session::AgentType::Claude,
+                16,
+                crate::session::SessionStatus::Processing,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -2847,6 +2853,71 @@ mod tests {
             .store
             .with(|c| crate::database::dao::inject_queue::pending_for_session_conn(c, "sess_c"));
         assert!(pending.is_empty(), "拒绝路径不得入队");
+    }
+
+    /// guard-busy 回归锁：直发遇 in-flight 占用 → 按 queued 回执（让位，不双投）
+    #[tokio::test]
+    async fn send_input_ready_busy_inflight_falls_back_to_queue() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_e").unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_e","text":"你好"}"#),
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"queued\""),
+            "in-flight 占用时直发应让位排队：{body}"
+        );
+        assert_eq!(fake.recorded().len(), 0, "占用期间不得注入");
+    }
+
+    /// guard-busy 回归锁：jump 遇 in-flight 占用 → 200 failed 提示重试（不注入）
+    #[tokio::test]
+    async fn queue_jump_busy_inflight_returns_failed() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 先入队一条（sess_b Processing）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_f","text":"第一条"}"#),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let id = v["itemId"].as_i64().unwrap();
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_f").unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-queue/jump",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"sess_f","itemId":{id}}}"#)),
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("投递进行中"),
+            "in-flight 占用时 jump 应 200 failed 提示重试：{body}"
+        );
+        assert_eq!(fake.recorded().len(), 0, "占用期间不得注入");
     }
 
     /// 插队 + 撤回：黄态入队两条 → jump 第二条 delivered（插队语义：黄态照发，注入器

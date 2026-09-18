@@ -207,6 +207,20 @@ pub(crate) fn try_acquire_inflight(session_id: &str) -> Option<InflightGuard> {
     Some(InflightGuard(session_id.to_string()))
 }
 
+/// 幂等护栏（对齐 watcher::LOOP_HANDLE 模式）：serve() 可重入（开关切换/热重启），
+/// 循环存活期间重复调用不重复 spawn（否则每次重启净增一个循环任务，且远程关闭后
+/// 残留循环仍在投递）；旧句柄已结束（异常退出）取走重建，自愈。
+static FLUSH_LOOP_HANDLE: once_cell::sync::Lazy<
+    std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+/// 循环句柄存活判定（纯函数，对齐 remote/watcher 同名先例）
+fn flush_loop_handle_is_live(h: &Option<tauri::async_runtime::JoinHandle<()>>) -> bool {
+    h.as_ref()
+        .map(|jh| !jh.inner().is_finished())
+        .unwrap_or(false)
+}
+
 /// flush 循环：订阅跃迁事件 → to 为可输入态的会话 → 单次投递内核（常规路径，jump=false）。
 /// spawn 用 tauri::async_runtime（与 watcher 同裁决：任意线程可用）；DB/注入走
 /// spawn_blocking。错误只记日志不 panic（下一跃迁自会重试队首）。
@@ -218,10 +232,15 @@ pub(crate) fn try_acquire_inflight(session_id: &str) -> Option<InflightGuard> {
 ///    一次 flush_one（避免逐事件排队放大投递；快照在 flush_one 内现取，去重后单次即最新态）；
 /// 3. **并发双投防护**：投递前取 in-flight 守卫，同会话并发触发只投一次；
 /// 4. JoinError 至少 log::warn（原 `let _ =` 把任务 panic/取消吞得不可见）。
+/// 5. **幂等**：FLUSH_LOOP_HANDLE 护栏（见上），serve() 重入不重复 spawn。
 pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState>) {
     use tokio::sync::broadcast::error::RecvError;
+    let mut handle_slot = FLUSH_LOOP_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+    if flush_loop_handle_is_live(&handle_slot) {
+        return; // 存活期间幂等：不重复 spawn
+    }
     let mut rx = state.watcher_tx.subscribe();
-    tauri::async_runtime::spawn(async move {
+    let spawned = tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Err(RecvError::Closed) => break,
@@ -264,6 +283,8 @@ pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState
             }
         }
     });
+    // 句柄落槽（存活期间后续调用幂等返回）
+    *handle_slot = Some(spawned);
 }
 
 #[cfg(test)]
