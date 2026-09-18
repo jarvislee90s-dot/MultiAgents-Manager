@@ -9,8 +9,10 @@ pub mod routing;
 #[tauri::command]
 pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
     let conn = crate::database::connection::DB.lock().unwrap();
-    let rows = crate::database::dao::write_audit::recent_conn(&conn, // IPC 入参封顶：LIMIT 超大值等于全表读入内存
-        limit.unwrap_or(100).min(1000) as i64);
+    let rows = crate::database::dao::write_audit::recent_conn(
+        &conn, // IPC 入参封顶：LIMIT 超大值等于全表读入内存
+        limit.unwrap_or(100).min(1000) as i64,
+    );
     serde_json::json!({ "items": rows })
 }
 
