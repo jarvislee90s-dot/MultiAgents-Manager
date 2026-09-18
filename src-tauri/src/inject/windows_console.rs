@@ -278,6 +278,27 @@ pub(crate) fn locate_and_send_key(pid: u32, key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// WinKeyLayout 真 FFI 契约单测（无需目标控制台，常规 cargo test 可跑）：
+    /// 不硬编码键位（规避键盘布局差异误报）——vk_of('a') 与 `VkKeyScanW('a')`
+    /// 低字节直接对拍；另钉三条铁律：'\r' → VK_RETURN 契约、非 ASCII → 0
+    /// 字符流口径、扫描码派生非 0。
+    #[test]
+    fn win_key_layout_ffi_contract() {
+        let layout = WinKeyLayout;
+        // 字符键：vk_of 与 VkKeyScanW 低字节对拍（非硬编码 0x41，布局无关）
+        let vk_scan_a = unsafe { VkKeyScanW('a' as u16) };
+        assert_ne!(vk_scan_a, -1); // 'a' 在真实键盘布局必可键入
+        assert_eq!(layout.vk_of('a'), (vk_scan_a & 0xFF) as u16);
+        // KeyLayout trait 契约：'\r' 必返 VK_RETURN(0x0D)
+        assert_eq!(layout.vk_of('\r'), 0x0D);
+        // 非 ASCII 一律 0（纯字符流口径，与 ConIn.ps1 一致）
+        assert_eq!(layout.vk_of('我'), 0);
+        // 扫描码派生：VK_RETURN 对应扫描码非 0
+        assert!(layout.scan_of(0x0D) > 0);
+    }
+
     /// Task 15 真 FFI 一跳集成测试（#[ignore]：需要弹真实 conhost 窗口，不在常规门禁跑）。
     /// 运行：`cargo test --lib inject::windows_console -- --ignored --nocapture`
     ///

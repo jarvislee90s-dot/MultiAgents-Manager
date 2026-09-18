@@ -48,6 +48,8 @@ pub struct KeyRecordSpec {
 /// MapVirtualKeyW）；测试装配假实现。零平台 cfg——纯核跨平台可测。
 pub trait KeyLayout {
     /// 字符 → 虚拟键码；真实布局对不可键入字符返回 0（调用方按纯字符流处理）。
+    /// 实现必须对 `'\r'` 返回 VK_RETURN(0x0D)——`enter_records` 与
+    /// `control_records("enter")` 的 VK 同源性依赖此约定。
     fn vk_of(&self, c: char) -> u16;
     /// 虚拟键码 → 扫描码（Windows：`MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)`）。
     fn scan_of(&self, vk: u16) -> u16;
@@ -656,7 +658,7 @@ mod tests {
         // 三家统一 VK 回车（B 族丢 vk=0 控制字符，M6R F3）
         let r = enter_records(&FakeLayout);
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0].vk, FakeLayout.vk_of('\r'));
+        assert_eq!(r[0].vk, 0x0D); // VK_RETURN 钉值
         assert_eq!(r[0].ch, 0x0D);
         assert!(r[0].scan > 0);
     }
@@ -682,5 +684,74 @@ mod tests {
         let r = vk_arrow_records("up", &FakeLayout).unwrap();
         assert_eq!(r[0].ch, 0);
         assert!(r[0].vk > 0 && r[0].scan > 0);
+    }
+
+    #[test]
+    fn text_records_non_ascii_char_stream() {
+        // 非 ASCII 一律 vk=0/scan=0 纯字符流（M6R 实证 vk=0 被消费，ConIn.ps1 口径）
+        let r = text_records("我😀", &FakeLayout);
+        assert_eq!(r.len(), 6); // 我 2 事件 + 😀（代理对 2 unit 各成对）4 事件
+        assert!(r.iter().all(|k| k.vk == 0 && k.scan == 0));
+        // '我'（U+6211）：单 BMP code unit 成对 down/up
+        assert_eq!(
+            (r[0].vk, r[0].scan, r[0].ch, r[0].down),
+            (0, 0, 0x6211, true)
+        );
+        assert!(!r[1].down);
+        // '😀'（U+1F600）：两个代理 code unit（高 U+D83D / 低 U+DE00）各成对
+        // （0xD83D/0xDE38 是 😸 U+1F638 的代理对——评审原文数值笔误，此处按
+        // U+1F600 数学真值钉死）
+        assert_eq!((r[2].ch, r[2].down), (0xD83D, true));
+        assert_eq!((r[3].ch, r[3].down), (0xD83D, false));
+        assert_eq!((r[4].ch, r[4].down), (0xDE00, true));
+        assert_eq!((r[5].ch, r[5].down), (0xDE00, false));
+    }
+
+    #[test]
+    fn control_records_single_char_domain() {
+        // 生产审批键路径："y"/"1" 单字符域内（FakeLayout 下 vk = c as u16），成对 down/up
+        let y = control_records("y", &FakeLayout).unwrap();
+        assert_eq!(y.len(), 2);
+        assert_eq!(
+            (y[0].vk, y[0].ch, y[0].down),
+            (b'y' as u16, b'y' as u16, true)
+        );
+        assert!(!y[1].down);
+        let one = control_records("1", &FakeLayout).unwrap();
+        assert_eq!((one[0].vk, one[0].ch), (b'1' as u16, b'1' as u16));
+        // 域内边界钉值：esc/tab
+        assert_eq!(control_records("esc", &FakeLayout).unwrap()[0].vk, 0x1B);
+        assert_eq!(control_records("tab", &FakeLayout).unwrap()[0].vk, 0x09);
+        // 域外（空串/多字符/单字符标点）→ None
+        assert!(control_records("", &FakeLayout).is_none());
+        assert!(control_records("ok", &FakeLayout).is_none());
+        assert!(control_records("!", &FakeLayout).is_none());
+        // 大写 "Y" → Some：实现域 = is_ascii_alphanumeric（含 A-Z），较计划文字
+        // 「a-z 0-9」取宽——良性偏离，保持旧 key_to_windows_vk 行为（VK 大写位
+        // 大小写同键），此处钉值申报
+        assert!(control_records("Y", &FakeLayout).is_some());
+    }
+
+    #[test]
+    fn vk_arrow_records_pins_and_domain() {
+        // B 族方向键四键钉值（VK_UP/VK_DOWN/VK_LEFT/VK_RIGHT）；ch=0、scan=vk+1（FakeLayout）
+        let pins = [
+            ("up", 0x26u16),
+            ("down", 0x28),
+            ("left", 0x25),
+            ("right", 0x27),
+        ];
+        for (name, vk) in pins {
+            let r = vk_arrow_records(name, &FakeLayout).unwrap();
+            assert_eq!(r.len(), 2); // 成对 down/up
+            assert_eq!(
+                (r[0].vk, r[0].scan, r[0].ch, r[0].down),
+                (vk, vk + 1, 0, true)
+            );
+            assert!(!r[1].down);
+        }
+        // 域外：未知键名 + 大小写敏感（"Up" ≠ "up"）→ None
+        assert!(vk_arrow_records("bad", &FakeLayout).is_none());
+        assert!(vk_arrow_records("Up", &FakeLayout).is_none());
     }
 }
