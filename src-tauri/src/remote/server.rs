@@ -2739,11 +2739,14 @@ mod tests {
     }
 
     /// Task 6 专用 state：夹具会话（sess_a Waiting / sess_b Processing / sess_c workbuddy
-    /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话——
-    /// in-flight 守卫按 session_id 全局占用，避免并行测试互相挤占 / sess_f Processing
-    /// 备用 / sess_h Waiting 独占（Important 3：busy 直发测试专用——守卫持到测尾的测试
-    /// 必须占独占 id，防与同 id 的其他测试互抢））+ 指定注入器；
-    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）
+    /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话 / sess_f
+    /// Processing 备用 / sess_i Waiting 独占——busy 直发测试专用）+ 指定注入器；
+    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾的测试必须占**全测试集
+    /// 唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT 按裸 id 字符串全局占用，
+    /// 跨夹具撞 id 即跨夹具串键（sess_h 曾被本夹具 busy 测试与 approve_state 的
+    /// approve_sends_key 双方使用，实测 2/30 假红；本夹具侧已改名 sess_i 让 sess_h 归
+    /// approve 族独占）
     fn inject_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
     ) -> Arc<RemoteState> {
@@ -2785,9 +2788,9 @@ mod tests {
                 crate::session::SessionStatus::Processing,
             ),
             inj_sess(
-                "sess_h",
+                "sess_i",
                 crate::session::AgentType::Claude,
-                17,
+                19,
                 crate::session::SessionStatus::Waiting,
             ),
         ];
@@ -2845,9 +2848,12 @@ mod tests {
     /// last_message 供 detect 命中（inj_sess 夹具的 last_message 恒 None——approve_state
     /// 局部变体按需补设）；另加 sess_g（Waiting，独占 id）：in-flight 守卫按 session_id
     /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。sess_h（Waiting，
-    /// 独占 id，与 sess_a 同携命中 last_message）：Important 3——approve_sends_key 改用
-    /// 独占会话（与 send_delivers_when_input_ready 的 sess_a 直发错开全局 in-flight 表）。
-    /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.mam）
+    /// 独占 id，与 sess_a 同携命中 last_message）：approve_sends_key 独占——复检终修后
+    /// sess_h 全测试集唯一归本族（inject_state 侧已改名 sess_i）。其余缝与
+    /// inject_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾的测试必须占**全测试集
+    /// 唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT 按裸 id 字符串全局占用，
+    /// 跨夹具撞 id 即跨夹具串键（详见 inject_state doc）
     fn approve_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
@@ -3158,22 +3164,22 @@ mod tests {
     }
 
     /// guard-busy 回归锁：直发遇 in-flight 占用 → 按 queued 回执（让位，不双投）。
-    /// Important 3：守卫持到测尾——占独占会话 sess_h（与 send_reports_inject_failure
-    /// 的 sess_e 错开，防并行互抢全局 in-flight 表假红）
+    /// 守卫持到测尾——占全测试集唯一 id sess_i（复检终修：曾用 sess_h 与 approve_state
+    /// 夹具的 approve_sends_key 跨夹具撞 id 串键实测 2/30 假红；立规见 inject_state doc）
     #[tokio::test]
     async fn send_input_ready_busy_inflight_falls_back_to_queue() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
-        let _busy = crate::inject::queue::try_acquire_inflight("sess_h").unwrap();
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_i").unwrap();
         let r = app
             .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-send",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_h","text":"你好"}"#),
+                Some(r#"{"sessionId":"sess_i","text":"你好"}"#),
             ))
             .await
             .unwrap();
@@ -3696,8 +3702,8 @@ mod tests {
 
     /// 审批应答（批准）：sess_h optionId=approve → 200 key_sent + FakeInjector 收到
     /// (pid=18, "1")（**无 [mobile] 前缀**——按键非文本）+ 审计 action=approve result=ok。
-    /// Important 3：独占会话 sess_h——契约行为不变（按键映射/无前缀/审计），仅与
-    /// send_delivers_when_input_ready 的 sess_a 直发错开全局 in-flight 守卫表
+    /// 独占会话 sess_h——契约行为不变（按键映射/无前缀/审计）；sess_h 全测试集唯一归
+    /// 本族（inject_state 侧 busy 测试已改用 sess_i，复检终修，立规见两夹具 doc）
     #[tokio::test]
     async fn approve_sends_key() {
         let fake = FakeInjector::ok();
