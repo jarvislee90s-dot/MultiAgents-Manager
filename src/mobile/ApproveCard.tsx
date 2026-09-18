@@ -1,8 +1,9 @@
 // 移动端审批卡（M8 Task 12，红卡选项卡 UI）：挂在 SessionDetail 正文视图
 // messageArea 上方（waiting 态；预览/分屏分支不挂——MessageComposer 同一挂载惯例）。
-// - 选项可用性：挂载拉取一次 /session-approve-options；available=false（含拉取
-//   失败 / 网络异常）→ 卡自身自隐（SessionDetail 无需感知选项可用性，详情页
-//   正文照常——fetchSessionFiles 静默降级同一惯例）；
+// - 选项可用性：挂载拉取一次 /session-approve-options；拉取失败 / 网络异常 →
+//   静默自隐；available=false 且无 reason（非 Waiting / 无映射 / 未命中）→ 自隐
+//   （SessionDetail 无需感知选项可用性，详情页正文照常——fetchSessionFiles 静默
+//   降级同一惯例）；available=false 且带 reason（严格档）→ 渲染提示条见下；
 // - 红卡视觉：红色边框卡 + 标题「等待批准」（红点呼吸对齐看板 waiting 状态点）+
 //   选项按钮横排（label 渲染；响应载荷只含 id/label，键位是投递层机密不外泄 UI）；
 // - drift=true → 提示条「映射待实测确认，若提示不符请用普通发送」；
@@ -27,7 +28,7 @@ interface ApproveCardProps {
 }
 
 export default function ApproveCard({ session }: ApproveCardProps) {
-  // 选项可用性：ready=false（加载中 / available=false / 拉取失败）→ 不渲染
+  // 选项可用性：ready=false（加载中 / 拉取失败）→ 不渲染（available/reason 分诊在渲染侧）
   const [options, setOptions] = useState<ApproveOptionsView | null>(null);
   const [ready, setReady] = useState(false);
   // 应答进行中（防连点）

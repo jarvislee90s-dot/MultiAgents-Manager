@@ -10,8 +10,16 @@
 //   （已被 flush 送达 / 他端撤回）→ 回执收敛；position=0（并发消费窗口，后端明示
 //   须容忍）→ 显示「排队中」不带位次数字；
 // - 插队/撤回失败对账（M9R P2-7）：忙时失败 / 网络异常先 fetchQueue 复核——条目
-//   仍在 pending → 恢复排队视图（刷新队位、按钮保留，可重试）；确认不在队才落
-//   failed 终态（jump）/ 收敛（retract）——忙时失败不得吞掉排队操作面；
+//   仍在 pending → 恢复排队视图（刷新队位、按钮保留，可重试）；确认不在队 →
+//   中性收敛文案（gone chip，评审裁决：忙时失败的守卫方正是正在投递的 flush 循环，
+//   条目不在队大概率=已送达，落 failed「可重试」会诱发重复注入）；复核自身网络
+//   失败 → 保守恢复排队视图（队位沿用旧值，3s 轮询随后自愈）——拿不到「真不在队」
+//   的证据就不落终态，避免按钮丢失后排队条目在 UI 上失控；
+// - 撤回按联合返回值分流（评审必须1）：{ok:true} 服务端确认已撤 → 免复核直接收敛；
+//   200 {status:"failed"}（忙时拒收、条目仍在队）→ 复核——不得丢弃返回值直接复核，
+//   否则「忙时 + 复核也失败」双失败会让条目实际在队而 UI 永久失控；
+// - sending 期间插队/撤回按钮加闸（disabled=busy||sending，评审必须3）：与发送
+//   回执的 last-write-wins 竞态防线（按钮可见不可点，保持「不失联」意图）；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -29,11 +37,14 @@ interface MessageComposerProps {
   session: { id: string };
 }
 
-/** 回执条状态（与 SendResult 对应 + 网络层 ApiError 归入 failed） */
+/** 回执条状态（与 SendResult 对应 + 网络层 ApiError 归入 failed；
+ *  gone = 中性收敛（评审裁决）：条目经复核确认已离开队列——大概率已被送达，
+ *  不标失败红色、不带「（可重试）」，防止用户重发造成重复注入） */
 type Receipt =
   | { kind: "delivered" }
   | { kind: "queued"; itemId: number; position: number }
   | { kind: "failed"; error: string }
+  | { kind: "gone"; message: string }
   | null;
 
 /** 排队态轮询间隔（毫秒）：有排队项时刷新队位（与看板轮询同量级） */
@@ -42,6 +53,11 @@ const QUEUE_POLL_MS = 3000;
 /** 正文长度上限：与后端 MAX_SEND_CHARS 对齐（服务端超限 400 拒收，前端
  *  maxLength 截断是第一道防线，onChange slice 为 jsdom/旧内核兜底的双保险） */
 const MAX_SEND_CHARS = 10000;
+
+/** gone 收敛文案定稿（评审裁决，中性、不带「可重试」）：jump 条目可能已送达
+ *  （守卫方 flush 循环刚把队首投出）；retract 只需告知不在队 */
+const GONE_JUMP_MESSAGE = "条目已离开队列（可能已送达，可在会话内容中确认）";
+const GONE_RETRACT_MESSAGE = "条目已不在队列";
 
 export default function MessageComposer({ session }: MessageComposerProps) {
   // 可用性：sendInfo=null 且未就绪 → 不渲染（加载中 / 拉取失败 / 403）
@@ -127,8 +143,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
 
   // P2-7 失败对账（插队/撤回共用）：失败后复核 /session-queue——
   // - 条目仍在 pending → 恢复排队视图（刷新队位，「立即发送/撤回」按钮保留可重试）；
-  // - 确认不在队（已被消费 / 他端撤回）→ onGone 决定终态（jump=failed 展示原始
-  //   错误；retract=回执收敛，撤回目的已达成）；
+  // - 确认不在队（已被消费 / 他端撤回）→ onGone 终态（jump/retract 均为中性 gone
+  //   收敛文案，评审裁决：不落 failed「可重试」，防重复注入）；
   // - 复核自身网络失败 → 保守恢复排队视图（队位沿用旧值，3s 轮询随后自愈）——
   //   拿不到「真不在队」的证据就不落终态，避免按钮丢失后排队条目在 UI 上失控
   const reconcileQueued = useCallback(
@@ -157,16 +173,17 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       if (j.status === "delivered") {
         setReceipt({ kind: "delivered" });
       } else {
-        // 200 failed 回执（忙时「投递进行中，请稍后重试」等）：条目大概率仍在队，
-        // 先复核再定终态（P2-7：忙时失败不得把排队视图打成 failed 终态）
+        // 200 failed 回执（忙时「投递进行中，请稍后重试」等）：先复核再定终态——
+        // 忙时失败的守卫方正是正在投递队首的 flush 循环，条目不在队大概率=已送达，
+        // 走中性 gone 收敛（评审裁决：不得落 failed「可重试」诱发重复注入）
         await reconcileQueued(itemId, position, () =>
-          setReceipt({ kind: "failed", error: j.error })
+          setReceipt({ kind: "gone", message: GONE_JUMP_MESSAGE })
         );
       }
-    } catch (e) {
-      // 网络层 / 非 2xx（404 条目已不在队等）：同样复核，在队即恢复
+    } catch {
+      // 网络层 / 非 2xx（404 条目已不在队等）：同样复核，在队即恢复、不在队中性收敛
       await reconcileQueued(itemId, position, () =>
-        setReceipt({ kind: "failed", error: e instanceof ApiError ? e.message : String(e) })
+        setReceipt({ kind: "gone", message: GONE_JUMP_MESSAGE })
       );
     } finally {
       setBusy(false);
@@ -179,24 +196,28 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     const { position } = receipt;
     setBusy(true);
     try {
-      await queueRetract(session.id, itemId);
+      const r = await queueRetract(session.id, itemId);
+      if ("ok" in r) {
+        /* 服务端确认已撤（{ok:true}）：免复核，直接收敛（评审必须1——撤回目的已达成） */
+        setReceipt(null);
+      } else {
+        /* 忙时 200 {status:"failed"}：条目未被撤、仍在队 → 复核对账。不得丢弃联合
+           返回值直接复核——否则「忙时 + 复核也失败」双失败时条目实际在队、UI 却
+           永久失控（评审必须1核心场景；reconcileQueued 复核失败保守恢复兜底） */
+        await reconcileQueued(itemId, position, () =>
+          setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE })
+        );
+      }
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
-        /* 404 not_found（已送达 / 他端撤回）：不作失败提示，走下方刷新自然收敛 */
+        /* 404 not_found（已送达 / 他端撤回）：条目已不在队 → 中性收敛（不作失败提示） */
+        setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE });
       } else {
-        // 网络错 / 忙时异常路径（P2-7）：同款复核——条目仍在队 → 恢复排队视图可重试；
-        // 确认不在队 → 与成功路径同语义收敛（撤回目的已达成）
-        await reconcileQueued(itemId, position, () => setReceipt(null));
-        setBusy(false);
-        return;
+        // 网络错：同款复核——条目仍在队 → 恢复排队视图可重试；确认不在队 → 中性收敛
+        await reconcileQueued(itemId, position, () =>
+          setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE })
+        );
       }
-    }
-    try {
-      const items = await fetchQueue(session.id);
-      const mine = items.find((i) => i.id === itemId);
-      setReceipt(mine ? { kind: "queued", itemId, position: mine.position } : null);
-    } catch {
-      setReceipt(null);
     } finally {
       setBusy(false);
     }
@@ -233,6 +254,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           >
             <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 align-middle" />
             投递中…
+            <span className="ml-1 text-slate-500 dark:text-slate-400">长文投递可能需要几分钟</span>
           </span>
         </div>
       )}
@@ -259,7 +281,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
               <button
                 type="button"
                 data-testid="queue-jump"
-                disabled={busy}
+                disabled={busy || sending}
                 onClick={handleJump}
                 className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-700 disabled:opacity-40 dark:bg-amber-400/20 dark:text-amber-300"
               >
@@ -268,7 +290,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
               <button
                 type="button"
                 data-testid="queue-retract"
-                disabled={busy}
+                disabled={busy || sending}
                 onClick={handleRetract}
                 className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-300"
               >
@@ -282,6 +304,16 @@ export default function MessageComposer({ session }: MessageComposerProps) {
               className="rounded-full bg-rose-500/10 px-2 py-0.5 text-xs text-rose-700 dark:bg-rose-400/10 dark:text-rose-400"
             >
               {`发送失败：${receipt.error}（可重试）`}
+            </span>
+          )}
+          {receipt.kind === "gone" && (
+            // 中性收敛（评审裁决）：条目经复核确认已离开队列——大概率已送达，
+            // 不标失败红色、不带「（可重试）」，防重复注入
+            <span
+              data-testid="send-receipt-gone"
+              className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
+            >
+              {receipt.message}
             </span>
           )}
         </div>
