@@ -3,6 +3,8 @@ pub mod engine;
 pub mod normalize;
 pub mod queue;
 pub mod routing;
+#[cfg(windows)]
+pub mod windows_console;
 
 /// 桌面端写审计查看（W5 只读入口）：返回最近 limit 条（缺省 100），最新在前。
 /// AuditRow serde camelCase 序列化即前端载荷；无 device_id 字段（设备标识不外泄，

@@ -12,7 +12,62 @@
 //! 构造与执行分离：本文件 `*Args` / `*Script` 纯函数全部跨平台 `pub` 可测
 //! （Windows 上必须全过；脚本构造内部完成 AppleScript 转义，调用方传原文，
 //! 避免执行层二次转义）；执行层按平台 cfg 装配——macOS 真实现（归回传清单
-//! 实测复核）、Windows 占位（Task 15 补真实现）、其他平台兜底 Err。
+//! 实测复核）、Windows ConPTY 真实现（M9 Task 14，一跳验证归 Task 15/16）、
+//! 其他平台兜底 Err。
+
+/// Windows 单键名 → 虚拟键码（VK_）：单字符 ASCII 字母/数字 → 大写 VK
+/// （'1'→0x31 … 'a'→0x41 大写位）；"enter"→VK_RETURN；"esc"→VK_ESCAPE；
+/// "tab"→VK_TAB；多字符/其他 → None（调用方走文本通道）。
+/// 跨平台纯函数（Windows 执行层消费，测试跨平台跑）。
+pub fn key_to_windows_vk(key: &str) -> Option<u16> {
+    match key {
+        "enter" => Some(0x0D), // VK_RETURN
+        "esc" => Some(0x1B),   // VK_ESCAPE
+        "tab" => Some(0x09),   // VK_TAB
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => match c {
+                    'a'..='z' => Some(0x41 + (c as u16 - 'a' as u16)),
+                    'A'..='Z' => Some(0x41 + (c as u16 - 'A' as u16)),
+                    '0'..='9' => Some(0x30 + (c as u16 - '0' as u16)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+    }
+}
+
+/// 键事件记录规格（纯层自有类型，不引 windows 类型）：`vk` 虚拟键码；
+/// `ch` UTF-16 code unit；`down` 按下（false 为抬起）。
+pub struct KeyRecordSpec {
+    pub vk: u16,
+    pub ch: u16,
+    pub down: bool,
+}
+
+/// 文本 → 键事件序列：每字符按 UTF-16 code unit 生成 keydown+keyup 事件对
+/// （统一 vk=0 + UnicodeChar，与 ConIn.ps1 一致——vk=0 也被消费；`\n` 字符
+/// 生成 VK_RETURN 事件对 vk=0x0D ch='\r'）。
+pub fn text_to_key_records(text: &str) -> Vec<KeyRecordSpec> {
+    let mut records = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        // \n（0x0A）→ VK_RETURN 事件对；其余统一 vk=0 + UnicodeChar
+        let (vk, ch) = if unit == u16::from(b'\n') {
+            (0x0Du16, 0x0Du16)
+        } else {
+            (0u16, unit)
+        };
+        records.push(KeyRecordSpec { vk, ch, down: true });
+        records.push(KeyRecordSpec {
+            vk,
+            ch,
+            down: false,
+        });
+    }
+    records
+}
 
 /// 构造 tmux 发送文本参数：`-l` 字面量 + `--` 终止选项解析。
 pub fn tmux_send_args(target: &str, text: &str) -> Vec<String> {
@@ -325,14 +380,16 @@ fn run_tmux(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Windows 占位：本任务只落地 trait + 纯函数，真实现 Task 15 接入。
+/// Windows 执行层（M9，Task 14）：ConPTY 通道——AttachConsole + CONIN$ +
+/// WriteConsoleInput 逐片键事件（M6 探测结论落地），实现见
+/// [`crate::inject::windows_console`]；真实一跳验证归 Task 15/16。
 #[cfg(windows)]
 impl Injector for RealInjector {
-    fn locate_and_inject(&self, _pid: u32, _text: &str) -> Result<(), String> {
-        Err("Windows 通道未接入（Task 15）".into())
+    fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
+        crate::inject::windows_console::locate_and_inject(pid, text)
     }
-    fn locate_and_send_key(&self, _pid: u32, _key: &str) -> Result<(), String> {
-        Err("Windows 通道未接入（Task 15）".into())
+    fn locate_and_send_key(&self, pid: u32, key: &str) -> Result<(), String> {
+        crate::inject::windows_console::locate_and_send_key(pid, key)
     }
 }
 
@@ -423,5 +480,59 @@ mod tests {
         assert!(s.contains(r#"keystroke "1""#));
         assert!(terminal_send_key_script("ttys005", "enter").contains("keystroke return"));
         assert!(terminal_send_key_script("ttys005", "esc").contains("key code 53"));
+    }
+
+    #[test]
+    fn vk_mapping() {
+        assert_eq!(key_to_windows_vk("enter"), Some(0x0D));
+        assert_eq!(key_to_windows_vk("esc"), Some(0x1B));
+        assert_eq!(key_to_windows_vk("tab"), Some(0x09));
+        assert_eq!(key_to_windows_vk("y"), Some(0x59));
+        assert_eq!(key_to_windows_vk("1"), Some(0x31));
+        // 字母统一大写 VK 位（大小写字面等价）
+        assert_eq!(key_to_windows_vk("Y"), Some(0x59));
+        assert_eq!(key_to_windows_vk("a"), Some(0x41));
+        assert_eq!(key_to_windows_vk("0"), Some(0x30));
+        // 非单键 → 走文本通道
+        assert_eq!(key_to_windows_vk("我们"), None);
+        assert_eq!(key_to_windows_vk("ok"), None);
+        assert_eq!(key_to_windows_vk("!"), None);
+        assert_eq!(key_to_windows_vk(""), None);
+    }
+
+    #[test]
+    fn text_records_pair_down_up() {
+        let recs = text_to_key_records("ab\n");
+        assert_eq!(recs.len(), 6);
+        assert_eq!(recs[0].ch, 'a' as u16);
+        assert!(recs[0].down);
+        assert!(!recs[1].down);
+        // \n → VK_RETURN 事件对（vk=0x0D ch='\r'）
+        assert_eq!((recs[4].vk, recs[4].ch), (0x0D, 0x0D));
+        assert!(recs[4].down);
+        assert!(!recs[5].down);
+    }
+
+    #[test]
+    fn text_records_non_ascii_vk_zero() {
+        // 非 ASCII 按 UTF-16 code unit 拆对，统一 vk=0（与 ConIn.ps1 一致）
+        let recs = text_to_key_records("我");
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].vk, 0);
+        assert_eq!(recs[0].ch, 0x6211); // '我' 的 UTF-16 code unit
+        assert!(recs[0].down);
+        assert!(!recs[1].down);
+        // emoji 代理对：2 个 code unit → 4 事件
+        assert_eq!(text_to_key_records("😀").len(), 4);
+    }
+
+    #[test]
+    fn tail_enter_pair_matches_vk_return_spec() {
+        // 尾部回车事件对与 text_to_key_records("\n") 同规格（执行层直接复用）
+        let tail = text_to_key_records("\n");
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].vk, 0x0D);
+        assert_eq!(tail[0].ch, 0x0D);
+        assert!(tail[0].down && !tail[1].down);
     }
 }

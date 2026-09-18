@@ -27,7 +27,8 @@ fn collect_ancestor_pids_with(pid: u32, mut parent_of: impl FnMut(u32) -> Option
 }
 
 /// 收集指定进程的祖先链 PID 序列（含自身，近→远有序）
-fn collect_ancestor_pids(system: &sysinfo::System, pid: u32) -> Vec<u32> {
+/// pub(crate)：inject::windows_console（M9）附加失败回退祖先链复用
+pub(crate) fn collect_ancestor_pids(system: &sysinfo::System, pid: u32) -> Vec<u32> {
     collect_ancestor_pids_with(pid, |p| {
         system
             .process(sysinfo::Pid::from_u32(p))
