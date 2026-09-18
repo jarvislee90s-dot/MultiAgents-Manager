@@ -3305,8 +3305,15 @@ mod tests {
                 "选项载荷不得携带 key（键位不外泄给 UI）：{o}"
             );
         }
-        assert_eq!(v["verifiedWith"], "probe-pending");
-        assert_eq!(v["drift"], true, "probe-pending 恒判漂移（映射待实测确认）");
+        // Task 13 取证回填后：claude verified_with = "2.1.251"（Windows 本机实测）。
+        // currentVersion 来自真实 spawn 探测（机器相关：Windows .cmd 垫片可能失败 →
+        // null → "unknown"）——drift 断言按同源纯函数重算期望，保持 hermetic；
+        // codex 保持 probe-pending 的恒漂移断言见 inject::approve::tests
+        let current = v["currentVersion"].as_str();
+        let expect_drift =
+            crate::inject::approve::is_version_drift("2.1.251", current.unwrap_or("unknown"));
+        assert_eq!(v["verifiedWith"], "2.1.251");
+        assert_eq!(v["drift"], expect_drift, "drift 与 verified/current 一致");
         assert!(
             fake.recorded_keys().is_empty(),
             "查询选项端点不得触发任何按键注入"

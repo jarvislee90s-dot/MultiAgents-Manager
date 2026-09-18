@@ -43,10 +43,18 @@ const KV_KEY: &str = "inject.approve_map";
 /// probe-pending 哨兵：默认表键位未经实测取证（Task 13/14 回填真实版本号）
 pub const PROBE_PENDING: &str = "probe-pending";
 
-/// 默认映射（首批 Claude/Codex，裁决 14 由简到繁；选项键位待实测取证校正——
-/// markers 取宽匹配词，Task 13/14 在临时会话触发真实审批后回填 verified_with 与键位）
+/// 默认映射（首批 Claude/Codex，裁决 14 由简到繁）。
+/// **取证状态（Task 13，2026-09-18 Windows 本机实测）**：
+/// - claude ✅ 已取证：真实审批提示原文「Do you want to create t13.txt? / 1. Yes /
+///   2. Yes, and switch to accept edits …(shift+tab) / 3. No / Esc to cancel」
+///   （claude-code 2.1.251，Write 工具触发；注入「1」实测批准生效——文件真实落盘，
+///   证据 mam-probe evidence\T13-claude-*）。markers 命中验证通过，键位 approve="1"
+///   （数字直选）、reject="esc"（Esc to cancel）。
+/// - codex ⚠️ 未取证（probe-pending）：0.154.0 默认 auto 审批模式不产生原生审批框
+///   （工作区写自动放行、越界写转对话式确认），原生键位无法触发；保持 pending，
+///   drift 提示常驻，待 Mac 侧或后续版本取证。
 const DEFAULT_MAPPINGS_JSON: &str = r#"[
- {"tool":"claude","verified_with":"probe-pending",
+ {"tool":"claude","verified_with":"2.1.251",
   "prompt_markers":["do you want","would you like","allow this","permission"],
   "options":[{"id":"approve","label":"允许","key":"1"},
              {"id":"reject","label":"拒绝","key":"esc"}]},
@@ -170,6 +178,15 @@ mod tests {
         for o in &claude.options {
             assert!(o.id == "approve" || o.id == "reject");
         }
+        // Task 13 取证状态：claude 已实测回填（2.1.251，Windows 本机真实审批提示 +
+        // 「1」键批准生效）；codex 原生审批框未触发保持 pending（drift 提示常驻）
+        assert_eq!(claude.verified_with, "2.1.251");
+        let codex = ms.iter().find(|m| m.tool == "codex").unwrap();
+        assert_eq!(codex.verified_with, PROBE_PENDING);
+        assert!(is_version_drift(&codex.verified_with, "0.154.0"));
+        assert!(!is_version_drift(&claude.verified_with, "2.1.251"));
+        assert!(!is_version_drift(&claude.verified_with, "2.1.252")); // patch 漂移不告警
+        assert!(is_version_drift(&claude.verified_with, "2.2.0")); // minor 漂移告警
     }
 
     /// 内核三态：None → 默认表；损坏 JSON → 默认表（不 panic 不写回）；合法 → 原样解析
@@ -203,6 +220,8 @@ mod tests {
         };
         assert!(detect(&m, "Do you want to proceed?"));
         assert!(!detect(&m, "无关文本"));
+        // Task 13 取证原文回归：Windows 本机真实审批提示（claude 2.1.251 Write 工具）
+        assert!(detect(&m, "Do you want to create t13.txt?"));
     }
 
     /// 漂移规则：probe-pending 恒漂移（未取证 → UI 提示复核）；
