@@ -224,5 +224,6 @@ claude/codex/opencode/openclaw/workbuddy/dsh 未在本批调研范围——追�
 ### 已知边界（预期行为，非缺陷）
 
 - 微信临时目录等**会话工作区之外**的上传文件：入池展示，但点击预览会被 `/file` 安全边界（会话 cwd ∪ 用户主目录）拒绝（403「无法预览该文件」）——边界收紧属安全设计，跨盘预览能力如需放开另立裁决。
+  - **（2026-09-18 追记）上一条已失效**：`3d22e2e` 按用户裁决把预览**全盘放开**——删除 cwd ∪ home 越界判定，主目录外不再 403；403 语义改为结构化原因码（`sensitive`/`too_large`/`not_found`/`not_file`/`io`）。同 commit 引入一处生产回归（端点传 `None` 致主目录内敏感黑名单整段失效），修复计划见 `docs/superpowers/plans/2026-09-18-file-preview-sensitive-blacklist-fix.md`。
 - kimi 贴图（blobs 内容寻址）无原始路径，不入池。
 - 临时隧道每次开关换新地址；隧道错误态下本机访问也需配对（fail-closed）。
