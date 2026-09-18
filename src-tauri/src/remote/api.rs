@@ -1448,10 +1448,10 @@ pub async fn session_approve(
                 Err("内部任务异常".to_string())
             }
         };
-    // 审计 action 词表（W5 词表 send|queue|flush|jump|retract|approve|reject|fail|open）：
-    // approve/reject 语义化；域外 id（KV 定制表可含任意 id）不进词表——收敛为 "key" 并
-    // log::warn 留痕，防自由文本污染审计 action 列（AuditLogSection 前端「原样小写展示」
-    // 契约不受影响："key" 本就是词表内小写动作）
+    // 审计 action 词表（W5 词表 send|queue|flush|jump|retract|approve|reject|fail|key；
+    // open 预留：Task 11 resume 审计动作）：approve/reject 语义化；域外 id（KV 定制表
+    // 可含任意 id）不进词表——收敛为新增词表动作 "key" 并 log::warn 留痕，防自由文本
+    // 污染审计 action 列（AuditLogSection 前端「原样小写展示」契约不受影响）
     let action = match option.id.as_str() {
         "approve" => "approve",
         "reject" => "reject",

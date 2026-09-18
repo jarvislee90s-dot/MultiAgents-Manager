@@ -3867,11 +3867,11 @@ mod tests {
 
     /// P3 审计动作词表（Task 7 P3c）：KV 定制映射含域外 id=other 的选项 → POST
     /// session-approve 照发键位（x）→ 审计 action 收敛为 "key"（W5 词表 send|queue|
-    /// flush|jump|retract|approve|reject|fail|open 之外的域外 id 不得原样进审计
-    /// action 列）且不 panic；域外 warn 在实现侧 log，测试不断言日志。
+    /// flush|jump|retract|approve|reject|fail|key 之外的域外 id 不得原样进审计
+    /// action 列——key 是本次新增的收敛动作）且不 panic；域外 warn 在实现侧 log，
+    /// 测试不断言日志。
     /// KV 经内存库 seed（DeviceStore 缝，零接触真实 ~/.mam）；sess_j 全测试集唯一
-    /// id（守卫 id 立规）。前端 AuditLogSection「action 原样小写展示」契约不受影响
-    /// （"key" 本就是词表内小写动作）。
+    /// id（守卫 id 立规）。前端 AuditLogSection「action 原样小写展示」契约不受影响。
     #[tokio::test]
     async fn audit_action_vocab() {
         let fake = FakeInjector::ok();

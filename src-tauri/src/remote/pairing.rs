@@ -195,7 +195,10 @@ impl DeviceStore {
     pub fn with<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
         match self {
             DeviceStore::Global => {
-                let c = crate::database::connection::DB.lock().unwrap();
+                // 锁自愈取锁（P3 统一）：Global 是生产全局咽喉，毒锁不连坐全部 DB 访问方
+                let c = crate::database::connection::DB
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 f(&c)
             }
             DeviceStore::Owned(arc) => {

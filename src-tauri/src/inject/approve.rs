@@ -131,7 +131,9 @@ pub fn is_version_drift(verified_with: &str, current: &str) -> bool {
 
 /// CLI 版本缓存（进程级单例）：cli → 探测结果（含 None——失败与超时也缓存，防每次
 /// 请求重刷进程/挂死 CLI）。锁内持有期间完成探测（首调代价一次性，双检都在锁内 =
-/// 不会对同一 cli 重复 spawn）；这是本模块自有锁，与全局 DB 锁无关。
+/// 不会对同一 cli 重复 spawn）；这是本模块自有锁，与全局 DB 锁无关。披露：探测在锁内
+/// 最多等 3s——并发首探**不同** cli 时在锁上串行排队（各至多 3s，仅首调；命中缓存后
+/// 不再持锁探测），并发首探同一 cli 只 spawn 一次
 static VERSION_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
 > = std::sync::OnceLock::new();
@@ -154,16 +156,19 @@ pub fn cached_cli_version(cli: &str) -> Option<String> {
 /// spawn `<cli> --version`（灰1 双路）：先裸名直 spawn（PATH 上的 .exe 命中即走最快
 /// 路）；spawn 失败（NotFound 等）回退 `cmd /c <cli> --version`——npm 全局包在
 /// Windows 的可执行是 `.cmd` 垫片，裸名直 spawn 必失败，须交由 cmd 按 PATH+PATHEXT
-/// 解析（灰1 定案，批次设计 §3.R3-⑥）。stderr 一律 null（版本探测不读错误输出）。
+/// 解析（灰1 定案，批次设计 §3.R3-⑥）。stdin/stderr 一律 null（版本探测是单问一答：
+/// 防 CLI 等 stdin 白耗超时窗，错误输出不读）
 fn spawn_version_probe(cli: &str) -> std::io::Result<std::process::Child> {
     std::process::Command::new(cli)
         .arg("--version")
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .or_else(|_| {
             std::process::Command::new("cmd")
                 .args(["/c", cli, "--version"])
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -178,19 +183,22 @@ fn spawn_version_probe(cli: &str) -> std::io::Result<std::process::Child> {
 ///
 /// 解析：stdout 首行首个含数字的 token（"claude 2.1.251" → "2.1.251"）；双路 spawn
 /// 均失败 / 无 stdout / 首行无数字 token 一律 None。stdout 管道在拿到退出态后才读
-/// （`--version` 输出远小于管道缓冲，先等后读无死锁风险）
+/// （`--version` 输出远小于管道缓冲，先等后读无死锁风险；披露：输出超管道缓冲
+/// ~64KB 的 CLI 会在我们 wait 时被写满阻塞而假性超时——结果有界（3s 杀掉）非死锁）
 fn probe_cli_version(cli: &str) -> Option<String> {
     use wait_timeout::ChildExt;
     let mut child = spawn_version_probe(cli).ok()?;
     use std::io::Read;
     match child.wait_timeout(std::time::Duration::from_secs(3)).ok()? {
-        // 正常退出：收 stdout 解析（子进程已退出，管道缓冲可安全排空）
+        // 正常退出：收 stdout 解析（子进程已退出，管道缓冲可安全排空）。字节级读取 +
+        // from_utf8_lossy：中文 Windows ANSI/GBK 码页 CLI 输出可含非法 UTF-8 字节，
+        // read_to_string 会 Err → 探测 None 且永久入缓存——lossy 与旧行为对齐（能提就提）
         Some(_) => {
-            let mut stdout = String::new();
+            let mut raw = Vec::new();
             if let Some(pipe) = child.stdout.as_mut() {
-                pipe.read_to_string(&mut stdout).ok()?;
+                pipe.read_to_end(&mut raw).ok()?;
             }
-            stdout
+            String::from_utf8_lossy(&raw)
                 .lines()
                 .next()?
                 .split_whitespace()

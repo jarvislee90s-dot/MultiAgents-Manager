@@ -1,6 +1,6 @@
 // 设置页「注入审计」分区（M7 W5：移动端注入写审计的桌面只读查看入口）。
 // 数据源 = inject_list_audit（最近 100 条，AuditRow serde camelCase；行内无 device_id，
-// 设备标识不外泄）；动作词表 send|queue|flush|jump|retract|approve|reject|fail 由后端
+// 设备标识不外泄）；动作词表 send|queue|flush|jump|retract|approve|reject|fail|key 由后端
 // 约束，前端原样小写展示（不翻译不改写）。样式对齐 RemoteSection：分区标题 + 边框卡片。
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
