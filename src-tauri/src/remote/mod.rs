@@ -237,7 +237,7 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         via_hosts_source: Box::new(via_hosts_from_snapshot),
         // M5 P2-a 追记：敏感黑名单的主目录基准（真实 home；取不到时 read_file_safe
         // 走全段保守匹配分支）
-        home_source: Box::new(|| dirs::home_dir().and_then(|h| h.to_str().map(str::to_string))),
+        home_source: Box::new(real_home_dir),
     })
 });
 
@@ -302,6 +302,13 @@ fn tunnel_hosts_from_status(
 
 fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
     tunnel_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts())
+}
+
+/// 敏感黑名单主目录基准的生产源（提取为具名函数以便接线探针测试）：
+/// 端点经 `RemoteState.home_source` 消费它；取不到 home（极端环境）返回 None，
+/// `read_file_safe` 随之走全段保守匹配分支（fail-closed）。
+fn real_home_dir() -> Option<String> {
+    dirs::home_dir().and_then(|h| h.to_str().map(str::to_string))
 }
 
 /// 最近一次解析成功的命名地址（P2-c 自动记忆，tunnel.rs 摄取点写入）
@@ -1355,6 +1362,25 @@ pub fn restore_on_launch() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 敏感黑名单基准的生产接线探针（M5 P2-a 追记，独立复核暴露的盲区）：
+    /// 端点侧有注入缝探针，但生产 `STATE` 的接线本身此前无任何测试压住——
+    /// 把本文件的 `home_source` 改回 `|| None` 时全量 807 测试曾零告警全绿
+    /// （端点测试自注入真值，无从暴露生产接线错误）。本探针直接读 `STATE`
+    /// 的注入缝，堵住该形态。
+    ///
+    /// 零污染：`STATE` 构造只存函数指针与内存态（`DeviceStore::Global` 是 ZST，
+    /// 不打开 DB——DB 仅在 `.with()` 时锁取）；此处只调 `home_source` 一次
+    /// （读 `dirs::home_dir()`），不触真实 ~/.mam、不绑端口。
+    #[test]
+    fn production_state_home_source_is_wired_to_real_home() {
+        let home = (STATE.home_source)();
+        let home = home.expect("生产接线必须给出真实 home（黑名单基准，不可为 None）");
+        assert!(
+            std::path::Path::new(&home).is_absolute(),
+            "黑名单基准必须是绝对路径，实际 {home}"
+        );
+    }
 
     #[test]
     fn remote_devices_table_idempotent_and_shaped() {
