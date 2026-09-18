@@ -224,6 +224,16 @@
       "addrCopiedToast": "已复制远程地址",
       "toggleFailedTitle": "MAM 远程开关失败",
       "toggleFailedToast": "远程开关失败: {{error}}"
+    },
+    "audit": {
+      "title": "注入审计",
+      "refresh": "刷新",
+      "empty": "暂无记录",
+      "time": "时间",
+      "device": "设备",
+      "session": "会话",
+      "action": "动作",
+      "summary": "摘要"
     }
   },
   "home": {

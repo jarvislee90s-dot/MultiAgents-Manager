@@ -29,6 +29,7 @@ import {
   HeartPulse,
   RefreshCw,
   Smartphone,
+  ScrollText,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -58,6 +59,7 @@ import { loadActiveName } from "@/components/pet/petRuntime";
 import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import { usePresetHealthQuery } from "@/lib/query/queries/health";
 import { RemoteSection } from "@/components/settings/RemoteSection";
+import { AuditLogSection } from "@/components/settings/AuditLogSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -138,7 +140,7 @@ function HealthSummary() {
 }
 
 type SettingSection =
-  "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "health" | "remote";
+  "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "health" | "remote" | "audit";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
 type ToolRow = {
@@ -450,6 +452,11 @@ export default function SettingsPage() {
       id: "remote" as SettingSection,
       label: t("settings.remote.title"),
       icon: Smartphone,
+    },
+    {
+      id: "audit" as SettingSection,
+      label: t("settings.audit.title"),
+      icon: ScrollText,
     },
   ];
 
@@ -833,6 +840,8 @@ export default function SettingsPage() {
             </div>
           )}
           {activeSection === "remote" && <RemoteSection />}
+          {/* M7 W5：注入审计桌面查看入口（与 RemoteSection 同级独立分区） */}
+          {activeSection === "audit" && <AuditLogSection />}
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />

@@ -224,6 +224,16 @@
       "addrCopiedToast": "Remote address copied",
       "toggleFailedTitle": "MAM remote toggle failed",
       "toggleFailedToast": "Remote toggle failed: {{error}}"
+    },
+    "audit": {
+      "title": "Injection Audit",
+      "refresh": "Refresh",
+      "empty": "No records yet",
+      "time": "Time",
+      "device": "Device",
+      "session": "Session",
+      "action": "Action",
+      "summary": "Summary"
     }
   },
   "home": {

@@ -3,6 +3,16 @@ pub mod normalize;
 pub mod queue;
 pub mod routing;
 
+/// 桌面端写审计查看（W5 只读入口）：返回最近 limit 条（缺省 100），最新在前。
+/// AuditRow serde camelCase 序列化即前端载荷；无 device_id 字段（设备标识不外泄，
+/// 展示侧只用 device_name）。st 不需要：审计读不走注入器/远端状态，全局 DB 直查。
+#[tauri::command]
+pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
+    let conn = crate::database::connection::DB.lock().unwrap();
+    let rows = crate::database::dao::write_audit::recent_conn(&conn, limit.unwrap_or(100) as i64);
+    serde_json::json!({ "items": rows })
+}
+
 /// 审计写口（DB + events::audit 日志并行，M4 T2e 惯例）：channel = 注入器名，
 /// summary 只存摘要（W5 防审计库膨胀）。conn 由调用方短临界区传入（锁内只 SQL）。
 /// 原 Task 5 的 queue.rs 私有版提升至此（Task 6）：flush/jump/fail 落账（queue::settle）

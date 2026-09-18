@@ -621,6 +621,44 @@ if (!isTauri) {
           { id: "sub-2", name: "backend-dev", tool_id: "claude", skills: ["systematic-debugging"] },
         ]);
 
+      // 写审计样例（M7 W5 桌面查看入口）：与 Rust AuditRow（serde camelCase）同构，
+      // 最新在前；无 device_id 字段（与后端对外载荷一致，设备标识不外泄）
+      case "inject_list_audit":
+        return Promise.resolve({
+          items: [
+            {
+              ts: 1758132000000,
+              deviceName: "JARVIS 的 iPhone",
+              agentType: "claude",
+              sessionId: "sess-abc-1",
+              channel: "tmux",
+              action: "send",
+              summary: "[mobile] 修复登录页空指针",
+              result: "ok",
+            },
+            {
+              ts: 1758128400000,
+              deviceName: "iPad",
+              agentType: "codex",
+              sessionId: "sess-def-2",
+              channel: "tmux",
+              action: "queue",
+              summary: "[mobile] 跑一遍回归测试",
+              result: "ok",
+            },
+            {
+              ts: 1758124800000,
+              deviceName: "Desktop-A",
+              agentType: "claude",
+              sessionId: "sess-ghi-3",
+              channel: "tmux",
+              action: "retract",
+              summary: "[mobile] 撤回上条消息",
+              result: "ok",
+            },
+          ],
+        });
+
       case "get_setting":
         if (args?.key === "notifications_enabled") return Promise.resolve(true);
         if (args?.key === "notification_sound") return Promise.resolve("default");
