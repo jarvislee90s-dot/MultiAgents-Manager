@@ -159,8 +159,12 @@ fn write_all(handle: HANDLE, records: &[KeyRecordSpec]) -> Result<(), String> {
     Ok(())
 }
 
-/// 对已定位 pid 完整注入：attach → `CONIN$` → 分片写入 → `CloseHandle`（收尾，
-/// 无论成败都关句柄）。
+/// 对已定位 pid 完整注入：attach → `CONIN$` → 分片写入 → `CloseHandle` →
+/// `FreeConsole` 复位（收尾，无论成败都执行）。
+///
+/// FreeConsole 复位不可省（计划明文）：注入后滞留附加列表的进程，在宿主终端窗口
+/// 关闭时会收到 CTRL_CLOSE_EVENT——本应用不装 SetConsoleCtrlHandler，默认行为是
+/// **被系统终止**（用户关一个收过消息的终端 = MAM 整个应用跟着退出）。
 fn inject_via(pid: u32, records: &[KeyRecordSpec]) -> Result<(), String> {
     attach(pid).map_err(|code| format!("AttachConsole(pid={pid}) 失败（0x{code:08X}）"))?;
     // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
@@ -169,6 +173,8 @@ fn inject_via(pid: u32, records: &[KeyRecordSpec]) -> Result<(), String> {
     // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
     unsafe {
         let _ = CloseHandle(handle);
+        // 复位附加态（幂等，M6 探测实证）：见函数 doc 的 CTRL_CLOSE_EVENT 风险
+        let _ = FreeConsole();
     }
     result
 }
@@ -218,7 +224,9 @@ fn single_key_records(key: &str, vk: u16) -> Vec<KeyRecordSpec> {
 /// PID 策略（M6 裁定）：先试 pid 本体（会话 CLI 原生进程 claude.exe/codex.exe/kimi.exe）；
 /// `AttachConsole` 失败 → 祖先链（近→远）第一个附加成功者；全部失败 → 中文错误。
 fn resolve_target(pid: u32) -> Result<u32, String> {
+    // 探测性附加：命中即复位（inject_via 会重新附加）——任何路径都不滞留附加态
     if attach(pid).is_ok() {
+        let _ = unsafe { FreeConsole() };
         return Ok(pid);
     }
     let system = sysinfo::System::new_all();
@@ -227,6 +235,7 @@ fn resolve_target(pid: u32) -> Result<u32, String> {
             continue; // 本体已试过
         }
         if attach(ancestor).is_ok() {
+            let _ = unsafe { FreeConsole() };
             return Ok(ancestor);
         }
     }
