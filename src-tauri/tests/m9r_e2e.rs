@@ -7,7 +7,9 @@
 //!   `%USERPROFILE%\mam-probe-m6r\`）；
 //! - 本机已装四家 CLI 且版本与族规格表指纹一致：claude 2.1.251 / codex 0.154.0 /
 //!   kimi 2.0.0 / opencode 1.18.31（`inject::families::family_for` 的 verified_with）；
-//! - temp 探测目录可写（测试自建项目目录，run-id 唯一）。
+//! - temp 探测目录可写（测试自建项目目录，run-id 唯一）；
+//! - **硬杀测试进程（如 Ctrl-C）会残留探测终端需手动关闭**；evidence 目录随
+//!   run 累积（体积小，历史 run 不自动清理）。
 //!
 //! ## 纪律（八条铁律的项目内裁剪）
 //! - 只碰 temp 探测目录里**本测试新建**的会话，绝不触碰用户自己的终端/会话；
@@ -42,6 +44,10 @@
 //!   不可用（实测多为 '/'）；
 //! - codex TUI 自报版本 0.155.1 与 npm `codex --version`（0.154.0）存在漂移，
 //!   注入规格按 B 族口径实测有效。
+//!
+//! 失败史留痕（首跑失败 → 修复 → 复跑通过）：
+//! - T1 首跑 opencode 发现超时 → 发现查询改 `session.directory` 匹配后复跑通过；
+//! - T4 首跑 cmd 定位漏 -Parent → 修复后通过。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,6 +61,17 @@ use multi_agents_manager_lib::remote::content::read_session_messages;
 /// 确认轮询取数上限：与生产 `confirm::PROBE_MESSAGE_LIMIT`(20) 同口径
 /// （该常量为 pub(crate)，集成测试侧以字面量对齐，注释锚定单一来源）。
 const PROBE_LIMIT: usize = 20;
+
+/// 会话 id 发现超时（会话存储懒创建 + 落盘异步，注入后轮询等待）。
+const DISCOVER_TIMEOUT: Duration = Duration::from_secs(30);
+/// stamp 确认轮询窗——快消费者（claude/codex/kimi；提交秒级落盘）。
+const STAMP_TIMEOUT_FAST: Duration = Duration::from_secs(30);
+/// stamp 确认轮询窗——慢消费者（opencode，~70 事件/s + SQLite 落库）。
+/// Test 1（150 字符）与 Test 2（10k 背压）统一取同一窗：注入返回后的 stamp
+/// 落盘延迟由消费尾延迟主导、与注入长度弱相关，统一给足上界，不按用例分叉。
+const STAMP_TIMEOUT_SLOW: Duration = Duration::from_secs(180);
+/// 确认轮询步距（与生产 confirm::PROBE_INTERVAL_MS 同口径的测试侧常量）。
+const POLL_GAP: Duration = Duration::from_millis(500);
 
 // ============================================================
 // 证据与日志（追加式带 run-id；探测基座 mam-probe-m6r）
@@ -181,7 +198,14 @@ fn launch_cli(cli: &str, tag: &str, ev: &Ev) -> ProbeProc {
     let conhost: u32 = String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse()
-        .expect("conhost pid 解析失败");
+        .unwrap_or_else(|_| {
+            // Start-Process 失败（目录不存在/权限等）时 stdout 非 pid——带上
+            // powershell stderr 定位，避免裸「无法解析数字」哑 panic
+            panic!(
+                "conhost pid 解析失败（Start-Process 失败？stderr={}）",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        });
     ev.log(&format!(
         "launch {cli}: conhost={conhost} proj={}",
         proj.display()
@@ -303,7 +327,7 @@ fn poll_stamp(ev: &Ev, tool: &str, sid: &str, stamp: &str, timeout: Duration, ta
             ));
             return false;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(POLL_GAP);
     }
 }
 
@@ -410,7 +434,10 @@ fn discover_codex_sid(marker: &str, ev: &Ev) -> Option<String> {
     files.sort_by_key(|f| std::cmp::Reverse(f.0)); // 最新在前
     for (_, path) in files {
         // 首行 session_meta：payload.id 为会话 id，payload.cwd 含探测标记
-        let data = std::fs::read(&path).ok()?;
+        // 读失败（竞态写半行/锁冲突等）→ 跳过该文件继续下一轮，不中断整轮发现
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
         let head = String::from_utf8_lossy(&data[..data.len().min(256 * 1024)]).to_string();
         let Some(line) = head.lines().next() else {
             continue;
@@ -533,16 +560,19 @@ fn proj_marker(proc: &ProbeProc) -> String {
 }
 
 /// 等待 claude 回合结束（Test 3 专用）：预热消息会触发一次真实模型回合，
-/// 轮询会话 JSONL 体积，连续 `STABLE` 秒无增长即判「输入框已交回」。
-/// 判不齐时（模型流式间隔长）到时放行并告警——后续 POST 的确认层自行兜底。
+/// 轮询会话 JSONL 体积，连续 `IDLE_STABLE_SECS`(20s) 无增长即判「输入框已交回」。
+/// **误判模式披露**：回合中途出现 >20s 的静默间隙会被误判为结束——失败形态是
+/// 后续 POST 的 delivered 断言**响亮失败**（确认层超时回执），非静默污染，
+/// 重跑即愈。判不齐时（模型流式间隔更长）到时放行并告警，兜底同上。
 fn wait_claude_idle(ev: &Ev, marker: &str, max_wait: Duration, tag: &str) {
-    const STABLE: u64 = 12;
+    const IDLE_STABLE_SECS: u64 = 20;
     let projects = dirs::home_dir()
         .expect("home")
         .join(".claude")
         .join("projects");
-    // 找到本项目目录下最新的 jsonl（发现阶段已确认存在）
-    let mut jsonl: Option<PathBuf> = None;
+    // 找到本项目目录下 **mtime 最新** 的 jsonl（与 discover_claude_sid 同一口径，
+    // 防 claude sidechain/子代理等旁路文件被误选为监听对象）
+    let mut jsonl: Option<(std::time::SystemTime, PathBuf)> = None;
     for _ in 0..10 {
         for dir in std::fs::read_dir(&projects).into_iter().flatten().flatten() {
             if !dir.file_name().to_string_lossy().contains(marker) {
@@ -554,8 +584,18 @@ fn wait_claude_idle(ev: &Ev, marker: &str, max_wait: Duration, tag: &str) {
                 .flatten()
             {
                 let p = f.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    jsonl = Some(p);
+                if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Ok(mt) = f.metadata().and_then(|m| m.modified()) else {
+                    continue;
+                };
+                let replace = match &jsonl {
+                    None => true,
+                    Some((t, _)) => mt > *t,
+                };
+                if replace {
+                    jsonl = Some((mt, p));
                 }
             }
         }
@@ -564,7 +604,7 @@ fn wait_claude_idle(ev: &Ev, marker: &str, max_wait: Duration, tag: &str) {
         }
         std::thread::sleep(Duration::from_millis(1500));
     }
-    let Some(path) = jsonl else {
+    let Some((_, path)) = jsonl else {
         ev.log(&format!("{tag}: wait_claude_idle 未找到会话文件（放行）"));
         return;
     };
@@ -577,9 +617,9 @@ fn wait_claude_idle(ev: &Ev, marker: &str, max_wait: Duration, tag: &str) {
         if cur != last {
             last = cur;
             since = Instant::now();
-        } else if since.elapsed().as_secs() >= STABLE {
+        } else if since.elapsed().as_secs() >= IDLE_STABLE_SECS {
             ev.log(&format!(
-                "{tag}: claude 回合判定结束（文件稳定 {STABLE}s，{}ms）",
+                "{tag}: claude 回合判定结束（文件稳定 {IDLE_STABLE_SECS}s，{}ms）",
                 t0.elapsed().as_millis()
             ));
             return;
@@ -614,6 +654,8 @@ fn e2e_engine_matrix_short() {
         let tag = format!("short-{tool}-{run_id}");
         let r: Result<(), String> = (|| {
             let mut proc = boot_probe_session(tool, &tag, &ev);
+            // 150 字符与计划的 200 字符语义等价：快家族背压阈值 >2000（任意
+            // ≤2000 长度不背压）、慢家族恒背压——长度在本档内断言等价
             let text = e2e_text(tool, &run_id, 150);
             assert!(text.chars().count() < 200, "短文用例必须 <200 字符");
             let spec = family_for(tool).unwrap();
@@ -634,14 +676,15 @@ fn e2e_engine_matrix_short() {
                 return Err(format!("{tool} written={} ≠ 全量", stats.written));
             }
             // sid 发现在注入之后（会话存储懒创建），随后确认层轮询 stamp
-            // （opencode 慢消费者给长窗）
+            // （opencode 慢消费者统一走 STAMP_TIMEOUT_SLOW 长窗）
             let marker = proj_marker(&proc);
-            let sid = discover_session_id(&ev, tool, &marker, Duration::from_secs(30), &tag)
-                .ok_or_else(|| format!("{tool} 注入后 30s 未发现会话 id（marker={marker}）"))?;
+            let sid = discover_session_id(&ev, tool, &marker, DISCOVER_TIMEOUT, &tag).ok_or_else(
+                || format!("{tool} 注入后未发现会话 id（marker={marker}，{DISCOVER_TIMEOUT:?}）"),
+            )?;
             let timeout = if tool == "opencode" {
-                Duration::from_secs(150)
+                STAMP_TIMEOUT_SLOW
             } else {
-                Duration::from_secs(30)
+                STAMP_TIMEOUT_FAST
             };
             let hit = poll_stamp(&ev, tool, &sid, &stamp, timeout, &tag);
             proc.kill();
@@ -705,9 +748,9 @@ fn e2e_engine_matrix_long() {
         }
         // sid 发现在注入之后（会话存储懒创建），随后确认层轮询 stamp
         let marker = proj_marker(&proc);
-        let sid = discover_session_id(&ev, "claude", &marker, Duration::from_secs(30), &tag)
+        let sid = discover_session_id(&ev, "claude", &marker, DISCOVER_TIMEOUT, &tag)
             .unwrap_or_else(|| panic!("claude 10k 注入后未发现会话 id（marker={marker}）"));
-        let hit = poll_stamp(&ev, "claude", &sid, &stamp, Duration::from_secs(30), &tag);
+        let hit = poll_stamp(&ev, "claude", &sid, &stamp, STAMP_TIMEOUT_FAST, &tag);
         proc.kill();
         if !hit {
             failures.push(format!("claude 10k stamp 未命中（sid={sid}）"));
@@ -747,16 +790,9 @@ fn e2e_engine_matrix_long() {
         }
         // sid 发现在注入之后（会话存储懒创建），随后确认层轮询 stamp
         let marker = proj_marker(&proc);
-        let sid = discover_session_id(&ev, "opencode", &marker, Duration::from_secs(30), &tag)
+        let sid = discover_session_id(&ev, "opencode", &marker, DISCOVER_TIMEOUT, &tag)
             .unwrap_or_else(|| panic!("opencode 10k 注入后未发现会话 id（marker={marker}）"));
-        let hit = poll_stamp(
-            &ev,
-            "opencode",
-            &sid,
-            &stamp,
-            Duration::from_secs(180),
-            &tag,
-        );
+        let hit = poll_stamp(&ev, "opencode", &sid, &stamp, STAMP_TIMEOUT_SLOW, &tag);
         proc.kill();
         if !hit {
             failures.push(format!("opencode 10k stamp 未命中（sid={sid}）"));
@@ -793,14 +829,8 @@ async fn e2e_http_full_chain() {
     let warm_stats = inject_text_spec(proc.target, &warm, &spec)
         .expect("Test 3 预热消息注入失败（会话创建前置）");
     ev.log(&format!("http-chain: 预热注入 stats={warm_stats:?}"));
-    let sid = discover_session_id(
-        &ev,
-        "claude",
-        &marker,
-        Duration::from_secs(30),
-        "http-chain",
-    )
-    .expect("Test 3 预热后未发现 claude 会话 id");
+    let sid = discover_session_id(&ev, "claude", &marker, DISCOVER_TIMEOUT, "http-chain")
+        .expect("Test 3 预热后未发现 claude 会话 id");
     wait_claude_idle(&ev, &marker, Duration::from_secs(240), "http-chain");
     let proj = proc.proj.display().to_string();
 
@@ -929,7 +959,7 @@ async fn e2e_http_full_chain() {
         "claude",
         &sid,
         &stamp,
-        Duration::from_secs(30),
+        STAMP_TIMEOUT_FAST,
         "http-chain",
     );
     proc.kill();
@@ -975,24 +1005,16 @@ fn e2e_key_domain_and_enter() {
     let spec = family_for("codex").unwrap();
 
     // ① 短文本 + VK 回车（inject_text_spec 自带提交回车）：codex rollout 命中文本
-    let text = "echo M8R-E2E-KEY-OK";
+    let text = "echo M9R-E2E-KEY-OK";
     let stamp = stamp_of(text).to_string();
     let r = inject_text_spec(proc.target, text, &spec);
     ev.log(&format!("key-domain: 注入 r={r:?}"));
     assert!(r.is_ok(), "codex 短文本注入应成功：{r:?}");
     // sid 发现在注入之后（rollout 懒创建）
     let marker = proj_marker(&proc);
-    let sid = discover_session_id(&ev, "codex", &marker, Duration::from_secs(30), "key-domain")
+    let sid = discover_session_id(&ev, "codex", &marker, DISCOVER_TIMEOUT, "key-domain")
         .expect("codex 注入后未发现 rollout 会话 id");
-    let hit = poll_stamp(
-        &ev,
-        "codex",
-        &sid,
-        &stamp,
-        Duration::from_secs(30),
-        "key-domain",
-    );
-    proc.kill();
+    let hit = poll_stamp(&ev, "codex", &sid, &stamp, STAMP_TIMEOUT_FAST, "key-domain");
     assert!(hit, "codex rollout JSONL 应命中文本（sid={sid}）");
 
     // ② 域外拒绝：bad! 不在键域（enter/esc/tab/单字符字母数字/方向键），
@@ -1001,4 +1023,8 @@ fn e2e_key_domain_and_enter() {
     ev.log(&format!("key-domain: 域外 r={bad:?}"));
     let err = bad.expect_err("域外键应被拒绝");
     assert!(err.contains("不支持的按键"), "域外拒绝文案不符：{err}");
+
+    // 单一清场点：置于全部断言之后；域校验先行（P2-2）使②的断言与进程
+    // 存活性无关（域外键不触任何控制台附加，活/死 pid 结果一致）
+    proc.kill();
 }
