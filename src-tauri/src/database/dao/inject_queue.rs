@@ -159,7 +159,15 @@ pub fn mark_sent_conn(conn: &Connection, id: i64, now: i64) {
     }
 }
 
-/// 标记失败（落 failed_reason，行保留作审计痕迹）
+/// 标记失败（落 failed_reason，行保留作审计痕迹）。
+///
+/// **failed_reason 单向写，无「清 NULL」路径（M4 复核定案）**：全代码库对本表仅有的
+/// 四条写语句 = INSERT（只建新行）/ `SET sent_at` / `SET failed_reason`（本函数，非 NULL
+/// 才算 pending 之外）/ DELETE——没有任何路径把既有行的 failed_reason 写回 NULL，失败行
+/// 以 failed_reason 非 NULL 永久留在表内，对一切 pending 消费方不可见（含周期兜底
+/// sweep，同 [`PENDING_PREDICATE`] 口径），不存在重投。远端重试是**另入一行新行**
+/// （新自增 id，failed_reason NULL）——按 content 而非 id 观察库表的快照 diff 会把
+/// 重试新行误读为「失败行 failed_reason 被清空」（Mac 验收 §七-5 即此观察假象）
 pub fn mark_failed_conn(conn: &Connection, id: i64, reason: &str) {
     if let Err(e) = conn.execute(
         "UPDATE inject_queue SET failed_reason = ?2 WHERE id = ?1",
