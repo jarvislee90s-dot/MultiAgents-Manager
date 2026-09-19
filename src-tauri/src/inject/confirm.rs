@@ -12,9 +12,9 @@
 //! ## 结构（纯核 / 执行侧分离）
 //! - **纯核（零 cfg，跨平台可测）**：[`stamp_of`]（尾戳）/ [`stamp_in_messages`]
 //!   （列表含戳）/ [`stamp_hit_in_page`]（user 侧过滤 + 含戳）；
-//! - **契约命名 API**：[`session_stamp_hit`]（复用会话消息读路径，Task 6 直接消费；
-//!   flush_one 不直接用它——确认调用全部经 `RemoteState.confirm_probe` 缝，
-//!   queue 测试零接触真实文件）；
+//! - **契约/测试面 API**：[`session_stamp_hit`]（复用会话消息读路径；flush_one 不直接
+//!   用它——生产确认调用全部经 `RemoteState.confirm_probe` 缝，本函数不参加生产
+//!   调用链，当前唯一消费者是 queue 测试，零接触真实文件）；
 //! - **执行侧**：[`await_direct_receipt`] / [`await_jump_receipt`]（flush_one 内嵌，
 //!   调用方均在 spawn_blocking——轮询用线程睡眠的阻塞语义，DB 锁外）；屏读/占用
 //!   API 走 `windows_console`（cfg windows），macOS 无对应 API → 降级注释于各分支。
@@ -79,9 +79,13 @@ pub fn stamp_hit_in_page(pg: &crate::remote::content::MessagesPage, stamp: &str)
 /// `pub(crate)`：remote/mod.rs 生产装配的 confirm_probe 闭包同源引用（单一来源）。
 pub(crate) const PROBE_MESSAGE_LIMIT: usize = 20;
 
-/// 契约命名 API（跨任务接口契约，Task 6 直接消费）：复用会话消息读路径
+/// 契约/测试面 API（跨任务接口命名保留）：复用会话消息读路径
 /// （`remote/api::read_session_messages_core`，与 /session-messages 端点数据同源）
 /// 取最近 20 条查戳。**读失败 = 未命中**（诚实口径：确认不足不伪装成功）。
+/// **不参加生产调用链（M9R 评审 F7 核实口径，2026-09-19 grep 调用点）**：生产确认
+/// 路径走 `RemoteState.confirm_probe` 缝（remote/mod.rs 生产装配直调
+/// `content::read_session_messages` + `stamp_hit_in_page`，不经本函数）；当前唯一
+/// 消费者是 queue 测试（读路径失败语义回归）。
 pub fn session_stamp_hit(
     st: &crate::remote::server::RemoteState,
     tool: &str,

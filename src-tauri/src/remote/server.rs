@@ -3685,7 +3685,8 @@ mod tests {
         assert!(body_string(r).await.contains("no_session"));
     }
 
-    /// 审批默认表 marker 命中句（DEFAULT_MAPPINGS_JSON claude.prompt_markers 含 "do you want"）
+    /// 审批默认表 marker 命中句（DEFAULT_MAPPINGS_JSON claude.prompt_markers 含
+    /// "do you want to proceed"——M9R 评审 F3/D4 收紧后句式）
     const APPROVE_HIT_MSG: &str = "Do you want to proceed?";
 
     /// 审批选项（可批）：sess_a Waiting + last_message 命中 → 200 available=true +
@@ -4093,7 +4094,7 @@ mod tests {
                 c,
                 crate::inject::approve::KV_KEY,
                 r#"[{"tool":"claude","verified_with":"2.1.251",
-  "prompt_markers":["do you want"],
+  "prompt_markers":["do you want to proceed"],
   "options":[{"id":"approve","label":"允许","key":"1"},
              {"id":"reject","label":"拒绝","key":"esc"},
              {"id":"other","label":"其他","key":"x"}]}]"#,

@@ -63,6 +63,12 @@ pub const PROBE_PENDING_REASON: &str = "键位待实测确认，请用普通发�
 ///   （plan-test.txt 落盘 + 状态栏转 auto mode on，M8R，证据 mam-probe-m6r
 ///   evidence\M8R-approve-claude-*）→ approve="1" 双场景通用，reject="esc"（Write 审批
 ///   "Esc to cancel"）；markers 增补 plan 批准标题短语 "would you like to proceed"。
+///   **markers 收紧为恰好三条实测句式（M9R 评审 F3，用户裁决 D4）**：恰为
+///   "do you want to create"（Write 审批标题句式——实机审批框标题 `Do you want to
+///   create 初稿B第一段.html?`，用户截图 2026-09-19）/ "do you want to proceed" /
+///   "would you like to proceed"（plan 批准标题句式）；删除宽词 "permission"/
+///   "allow this"/裸 "do you want"/裸 "would you like"——含 "Permission denied" 等
+///   字样的普通正文不再误判为审批中（负测见 claude_markers_reject_wide_words）。
 /// - codex ✅ 已取证（0.154.0，2026-09-19，`/permissions` 切 Read Only 档后工作区写必弹
 ///   补丁审批）：弹框原文与源码快照逐字一致（"Would you like to make the following
 ///   edits? / › 1. Yes, proceed (y) / 2. … (a) / 3. No, and tell Codex what to do
@@ -70,13 +76,17 @@ pub const PROBE_PENDING_REASON: &str = "键位待实测确认，请用普通发�
 ///   落盘；注入 VK Esc → world.txt 未落盘 + 对话内拒绝记录（证据 mam-probe-m6r
 ///   evidence\M8R-approve-codex-*）→ approve="y"、reject="esc"；markers 换为源码
 ///   approval_overlay.rs 弹窗标题短语（窄匹配，替换旧 "approve"/"allow" 宽词）。
+///   **范围声明（fail-closed 有意选择，M9R 评审 F7）**：权限征求（/permissions 交互
+///   弹窗）、终端写输入（"Would you like to send input to the existing terminal?"——
+///   向既有终端写输入的审批；命令执行审批由首条 marker 覆盖，不在此列）、MCP
+///   elicitation 三类标题未覆盖 = 未取证不出键；命中失败降级普通发送。
 ///
 /// 实测差异照实记录：`/permissions` 实机档位序为 Read Only / Ask for approval /
 /// Approve for me / Full Access（与手册 A1 快照序不同），当前高亮为
 /// Ask for approval（非首项，选 Read Only 实注 ↑+Enter 而非 ↓+Enter）。
 const DEFAULT_MAPPINGS_JSON: &str = r#"[
  {"tool":"claude","verified_with":"2.1.251",
-  "prompt_markers":["do you want","would you like","would you like to proceed","allow this","permission"],
+  "prompt_markers":["do you want to create","do you want to proceed","would you like to proceed"],
   "options":[{"id":"approve","label":"允许","key":"1"},
              {"id":"reject","label":"拒绝","key":"esc"}]},
  {"tool":"codex","verified_with":"0.154.0",
@@ -160,7 +170,12 @@ static VERSION_CACHE: std::sync::OnceLock<
 
 /// CLI 版本探测（进程级缓存）：首次 spawn `<cli> --version` 取 stdout 首行首个含
 /// 数字的 token（如 "2.1.251"）；任何失败（双路 spawn 失败 / 3s 超时 / 无 stdout /
-/// 首行无数字 token）一律缓存 None 不重试（避免每次探测刷进程）；后续命中缓存直接返回
+/// 首行无数字 token）一律缓存 None 不重试（避免每次探测刷进程）；后续命中缓存直接返回。
+///
+/// **盲区注记（M9R 评审 F7）**：版本探针锚 npm 元数据（`--version`），检测不到 TUI
+/// 二进制自报漂移（实证：codex TUI 自报 v0.155.1 vs npm 0.154.0，E2E 台账
+/// 2026-09-19）——漂移复验走项目技能 win-console-inject-probe（实机探测），勿以本
+/// 探针结果单独定案
 pub fn cached_cli_version(cli: &str) -> Option<String> {
     let cache =
         VERSION_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -324,6 +339,34 @@ mod tests {
         assert_eq!(option_by_id(claude, "reject").unwrap().key, "esc");
     }
 
+    /// M9R 评审 F3 负测（R4② 验收句，2026-09-19）：claude markers 收紧（用户裁决
+    /// D4 = 收紧为实测句式、消除宽词误报面）后，含被删宽词的普通正文不得误判为审批中。
+    /// 实机证据（用户截图 2026-09-19）：claude 审批框标题实测句式 `Do you want to
+    /// create 初稿B第一段.html?`（命中收紧后的 "do you want to create"）；codex 命令
+    /// 审批框实机出现（「Would you like to run the following command?」，用户截图）。
+    #[test]
+    fn claude_markers_reject_wide_words() {
+        let ms = load_mappings_from(None);
+        let claude = ms.iter().find(|m| m.tool == "claude").unwrap();
+        assert_eq!(
+            claude.prompt_markers,
+            vec![
+                "do you want to create",
+                "do you want to proceed",
+                "would you like to proceed",
+            ],
+            "claude markers 必须恰为三条实测句式（D4 收紧，宽词已删）"
+        );
+        // R4② 验收句：被删宽词语境一律不命中
+        assert!(!detect(claude, "Permission denied: cannot access file"));
+        assert!(!detect(claude, "I'll allow this"));
+        // 实测句式仍命中（用户实机审批框标题，截图 2026-09-19）
+        assert!(detect(claude, "Do you want to create 初稿B第一段.html?"));
+        // codex 侧对称负测（R4② 验收句）：裸 "allow" 不命中 codex markers
+        let codex = ms.iter().find(|m| m.tool == "codex").unwrap();
+        assert!(!detect(codex, "allow"));
+    }
+
     /// 内核三态：None → 默认表；损坏 JSON → 默认表（不 panic 不写回）；合法 → 原样解析
     #[test]
     fn load_mappings_from_three_states() {
@@ -345,12 +388,16 @@ mod tests {
     }
 
     /// detect 大小写无关：last_message 小写化后 contains 任一 marker
+    /// （fixture markers 用收紧后实测句式——D4 裁决删除的宽词不作正向样本）
     #[test]
     fn detect_case_insensitive_marker() {
         let m = ToolMapping {
             tool: "claude".into(),
             verified_with: "probe-pending".into(),
-            prompt_markers: vec!["do you want".into()],
+            prompt_markers: vec![
+                "do you want to create".into(),
+                "do you want to proceed".into(),
+            ],
             options: vec![],
         };
         assert!(detect(&m, "Do you want to proceed?"));
