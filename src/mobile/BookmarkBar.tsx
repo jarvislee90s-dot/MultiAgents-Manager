@@ -1,15 +1,18 @@
 // 消息窗口书签条（M3+，2026-09-16 用户裁决）：消息区上方常驻横条。
 //
-// 三个功能区（用户裁决）：
+// 功能区布局（2026-09-20 用户裁决重排）：新增/管理/清空三个功能钮**聚集在左**，
+// 色点区随其后，行最右为过程折叠开关（可选）——原布局管理钮在最右端、
+// 与「＋书签」相距过远，功能区块被拆散。
 // - 左：「+ 书签」→ 弹 10 色调色板，已占用色置灰不可点；选色即打标签
 //   （落点 = 当前视口顶部消息，由 SessionDetail 取锚后回填）；
+//   其右：「管理」↔「完成」切换；管理态额外出现「清空全部」；
 // - 中：一排色点——常态点即跳转；管理态变成 × 删除钮；
-// - 右：「管理」↔「完成」切换；管理态额外出现「清空全部」。
+// - 右：过程折叠开关（可选，2026-09-20）：一键收起/展开思考与工具调用过程。
 //
 // 纯展示组件（数据与 store 操作全在 SessionDetail），故无内部书签状态；
 // 唯一内部状态是「调色板是否展开」「是否管理态」。
 import { useState } from "react";
-import { Plus, Settings2, X } from "lucide-react";
+import { FoldVertical, Plus, Settings2, UnfoldVertical, X } from "lucide-react";
 import { BOOKMARK_COLORS, type Bookmark } from "./bookmarks";
 
 interface BookmarkBarProps {
@@ -24,6 +27,10 @@ interface BookmarkBarProps {
   onRemove: (color: string) => void;
   /** 清空该会话全部书签 */
   onClear: () => void;
+  /** 过程折叠开关（2026-09-20）：缺省不渲染。allCollapsed=true 表示当前全部
+   *  处于折叠态（此时按钮动作=全部展开）；由 SessionDetail 依据
+   *  collapsedCount/toggleableMessages 计算——运行态与总结态都可用 */
+  processToggle?: { allCollapsed: boolean; onToggle: () => void };
 }
 
 export default function BookmarkBar({
@@ -33,6 +40,7 @@ export default function BookmarkBar({
   onJump,
   onRemove,
   onClear,
+  processToggle,
 }: BookmarkBarProps) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [managing, setManaging] = useState(false);
@@ -60,29 +68,8 @@ export default function BookmarkBar({
           书签
         </button>
 
-        {/* 色点区：常态点即跳转；管理态变大一号的 × 删除钮（同一按钮两种态） */}
-        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-          {bookmarks.map((b) => (
-            <button
-              key={b.color}
-              type="button"
-              data-testid={`bookmark-${managing ? "remove" : "dot"}-${b.color}`}
-              aria-label={`${managing ? "删除" : "跳转到"}书签 ${b.preview}`}
-              title={managing ? `删除：${b.preview}` : b.preview}
-              onClick={() => (managing ? onRemove(b.color) : onJump(b.anchor))}
-              style={{ backgroundColor: b.color }}
-              className={
-                managing
-                  ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white"
-                  : "h-3.5 w-3.5 shrink-0 rounded-full transition-transform hover:scale-125"
-              }
-            >
-              {managing && <X size={12} />}
-            </button>
-          ))}
-        </span>
-
-        {/* 管理 / 完成 */}
+        {/* 管理 / 完成（2026-09-20 用户裁决：紧挨「书签」文字右侧，
+            与新增/清空聚成功能区块——原布局被色点区隔到最右端） */}
         <button
           type="button"
           data-testid={managing ? "bookmark-manage-done" : "bookmark-manage"}
@@ -108,6 +95,48 @@ export default function BookmarkBar({
             className="shrink-0 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs text-rose-700 dark:text-rose-400"
           >
             清空全部
+          </button>
+        )}
+
+        {/* 色点区：常态点即跳转；管理态变大一号的 × 删除钮（同一按钮两种态） */}
+        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          {bookmarks.map((b) => (
+            <button
+              key={b.color}
+              type="button"
+              data-testid={`bookmark-${managing ? "remove" : "dot"}-${b.color}`}
+              aria-label={`${managing ? "删除" : "跳转到"}书签 ${b.preview}`}
+              title={managing ? `删除：${b.preview}` : b.preview}
+              onClick={() => (managing ? onRemove(b.color) : onJump(b.anchor))}
+              style={{ backgroundColor: b.color }}
+              className={
+                managing
+                  ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white"
+                  : "h-3.5 w-3.5 shrink-0 rounded-full transition-transform hover:scale-125"
+              }
+            >
+              {managing && <X size={12} />}
+            </button>
+          ))}
+        </span>
+
+        {/* 过程折叠开关（2026-09-20）：行最右；一键收起/展开思考与工具调用。
+            allCollapsed 时按钮动作变为全部展开（图标随之切换） */}
+        {processToggle && (
+          <button
+            type="button"
+            data-testid="process-collapse-toggle"
+            aria-label={processToggle.allCollapsed ? "展开全部过程" : "折叠全部过程"}
+            aria-pressed={!processToggle.allCollapsed}
+            title={
+              processToggle.allCollapsed
+                ? "展开全部过程（思考/工具调用）"
+                : "折叠全部过程（思考/工具调用）"
+            }
+            onClick={processToggle.onToggle}
+            className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          >
+            {processToggle.allCollapsed ? <UnfoldVertical size={14} /> : <FoldVertical size={14} />}
           </button>
         )}
       </div>

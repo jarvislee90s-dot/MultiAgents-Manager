@@ -148,9 +148,9 @@ describe("MessageComposer：发送与回执（W4）", () => {
       reason: "WorkBuddy 黑盒会话无法注入",
     });
     render(<MessageComposer session={{ id: "sess-1" }} />);
-    expect(await screen.findByTestId("send-disabled-reason").then((el) => el.textContent)).toContain(
-      "WorkBuddy 黑盒会话无法注入"
-    );
+    expect(
+      await screen.findByTestId("send-disabled-reason").then((el) => el.textContent)
+    ).toContain("WorkBuddy 黑盒会话无法注入");
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).disabled).toBe(true);
     expect((screen.getByTestId("composer-send") as HTMLButtonElement).disabled).toBe(true);
   });
@@ -473,7 +473,9 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     await screen.findByTestId("send-receipt-queued");
     // 第二条发送挂起（慢消费者）：sending=true 期间排队操作面可见但不可点
     routes.sendHang = true;
-    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "第二条（慢投递）" } });
+    fireEvent.change(screen.getByTestId("composer-input"), {
+      target: { value: "第二条（慢投递）" },
+    });
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-delivering");
     expect(screen.getByTestId("queue-jump")).toBeTruthy(); // 可见（不失联）
@@ -486,5 +488,88 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     });
     expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
     expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+  });
+});
+
+// ==== 「修改」按钮 + 排队条目他端消失提示（2026-09-20 用户裁决）====
+describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
+  /** 发送一条进入排队态的公共前缀：回执 queued{itemId:7,position:1,content} */
+  async function sendIntoQueued(text = "跑个长任务") {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-queued");
+    return input;
+  }
+
+  it("排队态三钮并存：立即发送 / 修改 / 撤回", async () => {
+    await sendIntoQueued();
+    expect(screen.getByTestId("queue-jump").textContent).toContain("立即发送");
+    expect(screen.getByTestId("queue-edit").textContent).toContain("修改");
+    expect(screen.getByTestId("queue-retract").textContent).toContain("撤回");
+  });
+
+  it("修改：确认出队（{ok:true}）→ 正文放回输入框（可继续编辑），回执收敛", async () => {
+    const input = await sendIntoQueued("跑个长任务");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("跑个长任务");
+    expect(
+      fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-queue/retract"))
+    ).toBe(true);
+  });
+
+  it("修改：正文超长时截断到 MAX_SEND_CHARS（与输入框 maxLength 对齐）", async () => {
+    const long = "长".repeat(10001);
+    const input = await sendIntoQueued(long);
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toHaveLength(10000);
+  });
+
+  it("修改：忙时 failed（条目仍在队）→ 排队视图保留、输入框保持为空（防双份）", async () => {
+    routes.retractBusy = true;
+    routes.queue = [queueItem({ id: 7, position: 1, content: "跑个长任务" })];
+    const input = await sendIntoQueued("跑个长任务");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    // 复核发现条目仍在队 → 恢复排队视图；正文不得放回（否则队里 + 输入框双份）
+    await waitFor(() => expect(queueListCalls()).toBeGreaterThan(0));
+    expect(screen.getByTestId("send-receipt-queued")).toBeTruthy();
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("撤回回归锁：仍为完全取消——确认出队后回执收敛且输入框保持为空", async () => {
+    const input = await sendIntoQueued("只想取消");
+    fireEvent.click(screen.getByTestId("queue-retract"));
+    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
+  });
+});
+
+describe("排队条目他端消失（2026-09-20 调查修复）：轮询收敛留痕", () => {
+  it("3s 轮询发现条目不在队 → 中性 gone 提示（含电脑端去向），不再静默消失", async () => {
+    vi.useFakeTimers();
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    routes.queue = []; // 轮询时条目已不在队（被 flush 送达 / 桌面端处理）
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await act(async () => {});
+    fireEvent.change(screen.getByTestId("composer-input"), {
+      target: { value: "长任务" },
+    });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await act(async () => {});
+    expect(screen.getByTestId("send-receipt-queued")).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    const gone = screen.getByTestId("send-receipt-gone");
+    expect(gone.textContent).toContain("电脑端");
+    vi.useRealTimers();
   });
 });

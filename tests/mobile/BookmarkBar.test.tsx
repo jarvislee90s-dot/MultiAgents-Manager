@@ -137,3 +137,66 @@ describe("BookmarkBar 跳转与删除", () => {
     expect(dot.getAttribute("title")).toContain("设计意图那一段");
   });
 });
+
+// 功能区块聚集 + 过程折叠开关（2026-09-20 用户裁决）
+describe("BookmarkBar 功能聚集重排与过程折叠（2026-09-20）", () => {
+  it("管理钮紧挨「书签」新增钮（功能区块聚集，不再被色点区隔到最右端）", () => {
+    const { container } = render(
+      <BookmarkBar
+        bookmarks={[bm()]}
+        atLimit={false}
+        onAdd={vi.fn()}
+        onJump={vi.fn()}
+        onRemove={vi.fn()}
+        onClear={vi.fn()}
+      />
+    );
+    const add = screen.getByTestId("bookmark-add");
+    const manage = screen.getByTestId("bookmark-manage");
+    // 顺序断言：add 的下一个兄弟就是 manage（回归锁：防再被挪远）
+    expect(add.nextElementSibling).toBe(manage);
+    // 色点区在 manage 之后
+    const chips = container.querySelector("span.flex.min-w-0");
+    expect(manage.compareDocumentPosition(chips!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("processToggle：有可折叠过程时渲染开关；allCollapsed 决定图标语义与动作", () => {
+    const onToggle = vi.fn();
+    const { rerender } = render(
+      <BookmarkBar
+        bookmarks={[]}
+        atLimit={false}
+        onAdd={vi.fn()}
+        onJump={vi.fn()}
+        onRemove={vi.fn()}
+        onClear={vi.fn()}
+        processToggle={{ allCollapsed: true, onToggle }}
+      />
+    );
+    const toggle = screen.getByTestId("process-collapse-toggle");
+    expect(toggle.getAttribute("aria-label")).toBe("展开全部过程");
+    fireEvent.click(toggle);
+    expect(onToggle).toHaveBeenCalledTimes(1);
+
+    // 全部已展开 → 动作翻转为全部折叠
+    rerender(
+      <BookmarkBar
+        bookmarks={[]}
+        atLimit={false}
+        onAdd={vi.fn()}
+        onJump={vi.fn()}
+        onRemove={vi.fn()}
+        onClear={vi.fn()}
+        processToggle={{ allCollapsed: false, onToggle }}
+      />
+    );
+    expect(screen.getByTestId("process-collapse-toggle").getAttribute("aria-label")).toBe(
+      "折叠全部过程"
+    );
+  });
+
+  it("缺省（无 processToggle）：开关不渲染，既有布局不受影响", () => {
+    renderBar([]);
+    expect(screen.queryByTestId("process-collapse-toggle")).toBeNull();
+  });
+});

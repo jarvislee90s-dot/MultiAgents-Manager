@@ -12,10 +12,18 @@
 //   轮询刷新仅在「贴底」（距底 <120px）时自动跟随落底，上翻阅读历史不被动拽回
 //   （P2-B 评审修复）；首次加载与手动刷新仍无条件落底。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode, Ref } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ArrowLeft, ChevronDown, ChevronRight, PanelLeft, RotateCw } from "lucide-react";
+import {
+  ArrowDownToLine,
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  PanelLeft,
+  RotateCw,
+} from "lucide-react";
 import ApproveCard from "./ApproveCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
@@ -56,6 +64,11 @@ const DETAIL_REFRESH_MS = 10_000;
  *  （px）视为贴底，轮询刷新才自动跟随落底；上翻阅读（距底 ≥ 阈值）时轮询刷新
  *  不改变滚动位置（首次加载 / 手动刷新不受此阈值约束，仍无条件落底） */
 const POLL_FOLLOW_THRESHOLD_PX = 120;
+
+/** 竖屏分屏（split）对话列最小高度保护（2026-09-20 用户裁决）：换位后对话列
+ *  在底部、composer 占其底端——没有下限的话文件栏拖到 85% 时消息区会被压没。
+ *  文件栏侧同步加 maxHeight = 100% - 该值，两处同源（常量单点） */
+const SPLIT_CONVERSATION_MIN_PX = 120;
 
 // R5 一键 resume（Task 11）：支持「在电脑上打开」的工具镜像表。
 // SSOT = src-tauri/src/inject/resume.rs 的 RESUME_TABLE（Step 1 实测取证），
@@ -138,6 +151,78 @@ function isNearBottom(el: HTMLDivElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < POLL_FOLLOW_THRESHOLD_PX;
 }
 
+/** 「跳到最新」按钮显隐阈值：距底超过该值才出现——贴底阅读时它是纯噪声 */
+export const JUMP_SHOW_THRESHOLD_PX = 240;
+
+/** 消息滚动区（两个布局分支共用，2026-09-20 抽取）：滚动容器 + 右下角
+ *  「跳到最新」浮动按钮。对话一长，手翻到最新要很久（用户实测）；
+ *  点击瞬时落底并立即恢复轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」）。
+ *  wrapper 持 relative 定位、滚动容器在内层：浮动按钮若放进滚动容器内部
+ *  会随内容滚走，放 wrapper 上才能常驻右下角 */
+function MessageScrollArea({
+  ref: areaRef,
+  fontScale,
+  showJump,
+  onScroll,
+  onJump,
+  children,
+}: {
+  /** 滚动容器 ref（React 19 ref-prop 通道；自建 areaRef prop 触发 react-hooks/refs） */
+  ref?: Ref<HTMLDivElement>;
+  fontScale: number;
+  showJump: boolean;
+  onScroll: () => void;
+  onJump: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative min-h-0 min-w-0 flex-1">
+      <div
+        ref={areaRef}
+        data-testid="message-area"
+        data-font-scale={fontScale}
+        className="h-full overflow-y-auto px-3 pt-3"
+        onScroll={onScroll}
+      >
+        {children}
+      </div>
+      {showJump && (
+        <button
+          type="button"
+          data-testid="jump-to-bottom"
+          aria-label="跳到最新消息"
+          title="跳到最新消息"
+          onClick={onJump}
+          className="absolute right-3 bottom-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
+          <ArrowDownToLine size={16} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** 计划正文抽取（2026-09-20 用户实测：ExitPlanMode 的整篇计划在手机上是 \n 字面量汤）。
+ *  后端把工具输入原封透传为 JSON 串（claude content.rs:413 / zcode content.rs:1630
+ *  同为 serde_json::to_string），字符串值里的换行全是 `\n` 转义，塞进 <pre> 不可读。
+ *  按形态识别：toolArgs 解析出**非空字符串 `plan` 字段** → 返回该正文（走 markdown
+ *  渲染）；其余一切情况 → null（维持原样渲染）。不看 toolName——zcode 的
+ *  ExitPlanMode 输入同为 {plan}（zcode.cjs：校验 e.plan.trim()），但 MAM 记录的
+ *  是显示 title，按名字匹配会漏；形态匹配 claude/zcode 同覆盖。
+ *  注意：纯 pretty-print（stringify(_,null,2)）救不了——字符串值里的 \n 依然是
+ *  转义（JSON 规范）。用户裁决：其他工具的参数渲染不做通用美化。 */
+export function extractPlanBody(toolArgs: string): string | null {
+  try {
+    const parsed = JSON.parse(toolArgs) as { plan?: unknown };
+    if (typeof parsed?.plan === "string" && parsed.plan.trim() !== "") {
+      return parsed.plan;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** markdown 正文链接化预处理：把出现的已知路径替换为 `#file:` 内链，
  *  再由 components.a 拦截渲染成可点按钮。路径含 markdown 特殊字符（[]()）时
  *  该处替换可能不成链（保持原样文本，M3 接受） */
@@ -216,6 +301,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const messageAreaRef = useRef<HTMLDivElement>(null);
   // 待回补的滚动锚（加载更早前记录；非 null 表示下次数据落地要做位置补偿）
   const pendingScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  // 「跳到最新」按钮显隐（2026-09-20）：距底超过阈值才出现。由滚动容器的
+  // onScroll 驱动（此前消息区没有 onScroll 监听）；不动 pollFollowRef——
+  // P2-B 的轮询前采样语义保持原样
+  const [showJump, setShowJump] = useState(false);
   // P2-B：下一次数据落地是否「跟随落底」的信号（等价于落底函数的 follow 参数）——
   // 轮询 tick 刷新前采样贴底状态写入；手动刷新（retry）置 true 无条件落底；
   // 初值 true 使首次加载落底。ref 而非 state：纯信号不驱动渲染
@@ -357,7 +446,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // 点文件链接（消息正文）→ 预览。Bug 2 顺手项（spec P9「按屏幕宽度自适应」）：
-  // ≥768px 分屏（上对话下文件）、<768px 全屏；手动切换随时覆盖该默认值。
+  // ≥768px 分屏（2026-09-20 裁决：竖屏 split = 文件在上、对话在下）、<768px 全屏；手动切换随时覆盖该默认值。
   // backToList=false（从正文进入，无返回列表按钮，既有行为不变）
   const openFile = useCallback(
     (path: string) => {
@@ -485,13 +574,16 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               {renderLinkifiedText(m.content)}
             </pre>
           );
-        case "tool-call":
+        case "tool-call": {
+          // 计划类工具（ExitPlanMode / zcode 同形）：plan 字段是整篇 markdown，
+          // 抽出来走 markdown 渲染；其余工具维持参数 JSON 原样（用户裁决不做通用美化）
+          const planBody = m.toolArgs ? extractPlanBody(m.toolArgs) : null;
           return (
             <div className="space-y-1">
               <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
                 {m.toolName ? `调用 ${m.toolName}` : "工具调用"}
               </p>
-              {m.toolArgs && (
+              {m.toolArgs && planBody === null && (
                 <pre
                   data-testid={`tool-args-${m.seq}`}
                   className="overflow-x-auto rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
@@ -499,8 +591,20 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   {m.toolArgs}
                 </pre>
               )}
+              {planBody !== null && (
+                <div
+                  data-testid={`tool-args-${m.seq}`}
+                  className="rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                >
+                  <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
+                    计划
+                  </p>
+                  {renderMarkdown(planBody)}
+                </div>
+              )}
             </div>
           );
+        }
         default:
           return <div className="text-sm">{m.content}</div>;
       }
@@ -747,7 +851,25 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 锚 → 书签查找表（消息角标用；渲染期 O(1) 直读，避免每条消息 find）
   const bookmarkByAnchor = useMemo(() => new Map(bookmarks.map((b) => [b.anchor, b])), [bookmarks]);
 
-  // 书签条（两个布局分支共用同一份 JSX）
+  // 「跳到最新」：距底超阈值时显示（onScroll 驱动）；点击瞬时落底并立即恢复
+  // 轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」的明确意图）
+  const handleAreaScroll = useCallback(() => {
+    const el = messageAreaRef.current;
+    if (!el) return;
+    setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_SHOW_THRESHOLD_PX);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    const el = messageAreaRef.current;
+    if (!el) return;
+    pollFollowRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    setShowJump(false);
+  }, []);
+
+  // 书签条（两个布局分支共用同一份 JSX）。processToggle：过程一键折叠开关
+  // （2026-09-20）——运行态与总结态都可用（与 summary-banner 的差别就在不看 isSummary）；
+  // 无可折叠过程消息时不渲染。allCollapsed = 当前全部折叠 → 按钮动作变为全部展开
   const bookmarkBar = (
     <BookmarkBar
       bookmarks={bookmarks}
@@ -756,6 +878,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       onJump={handleJumpBookmark}
       onRemove={handleRemoveBookmark}
       onClear={handleClearBookmarks}
+      processToggle={
+        toggleableMessages.length > 0
+          ? {
+              allCollapsed: collapsedCount === toggleableMessages.length,
+              onToggle: collapsedCount === toggleableMessages.length ? expandAll : collapseAll,
+            }
+          : undefined
+      }
     />
   );
 
@@ -996,18 +1126,28 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               （2026-09-19 用户裁决）——审批红卡与发送输入框在本分支同样挂载。
               原实现把两者排除在分屏外（仅正文视图挂载），致分屏看文件时无法发消息、
               看不到待审批红卡；该行为无设计依据、系实现越权，已修。
-              红卡刷新机制、组件钥匙口径与下方正文分支一致（见该分支注释） */}
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              红卡刷新机制、组件钥匙口径与下方正文分支一致（见该分支注释）。
+              **竖屏换位（2026-09-20 用户裁决）**：split 视觉顺序 = 文件在上、对话在下
+              （输入框贴底，竖屏顺手）；用 CSS order 视觉换位而非调 DOM 顺序——
+              DOM/a11y 顺序与 split-h 保持一致（对话优先）。minHeight = 对话列
+              最小高度保护（防 composer 压没消息区），与文件栏 maxHeight 同源常量 */}
+          <div
+            className={`flex min-h-0 min-w-0 flex-1 flex-col ${
+              preview.mode === "split" ? "order-3" : ""
+            }`}
+            style={preview.mode === "split" ? { minHeight: SPLIT_CONVERSATION_MIN_PX } : undefined}
+          >
             {bookmarkBar}
             {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
-            <div
+            <MessageScrollArea
+              fontScale={fontScale}
+              showJump={showJump}
+              onScroll={handleAreaScroll}
+              onJump={jumpToLatest}
               ref={messageAreaRef}
-              data-testid="message-area"
-              data-font-scale={fontScale}
-              className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"
             >
               {messageArea}
-            </div>
+            </MessageScrollArea>
             <MessageComposer key={session.id} session={session} />
           </div>
           <SplitHandle
@@ -1015,14 +1155,19 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             ratio={fileRatio}
             onRatioChange={setFileRatio}
             containerRef={splitRef}
+            ratioPane={preview.mode === "split" ? "before" : "after"}
+            className={preview.mode === "split" ? "order-2" : ""}
           />
           <div
             data-testid="split-file-pane"
-            className="shrink-0 overflow-hidden"
+            className={`shrink-0 overflow-hidden ${preview.mode === "split" ? "order-1" : ""}`}
             style={
               preview.mode === "split-h"
                 ? { width: `${fileRatio * 100}%` }
-                : { height: `${fileRatio * 100}%` }
+                : {
+                    height: `${fileRatio * 100}%`,
+                    maxHeight: `calc(100% - ${SPLIT_CONVERSATION_MIN_PX}px)`,
+                  }
             }
           >
             {preview.view === "list" ? (
@@ -1114,14 +1259,15 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           {/* 组件钥匙（M9R P3）：key={session.id}——复用实例切换会话时强制重挂，
               清掉上一会话的陈旧 receipt / 选项态（跨会话串卡的防线） */}
           {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
-          <div
+          <MessageScrollArea
+            fontScale={fontScale}
+            showJump={showJump}
+            onScroll={handleAreaScroll}
+            onJump={jumpToLatest}
             ref={messageAreaRef}
-            data-testid="message-area"
-            data-font-scale={fontScale}
-            className="min-h-0 flex-1 overflow-y-auto px-3 pt-3"
           >
             {messageArea}
-          </div>
+          </MessageScrollArea>
           {/* 发送输入区（M7 Task 7，W4）：**全布局态挂载**（正文 / split / split-h，
               2026-09-19 用户裁决）——分屏时对话列同样可发消息；
               send-info 拉取失败时组件自静默，不影响对话渲染；key 同上（组件钥匙） */}

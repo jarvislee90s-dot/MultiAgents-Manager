@@ -625,6 +625,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(parseFloat(filePane.style.width)).toBeCloseTo(narrower + 15, 1);
 
     // ---- 纵向分屏：拖分隔条 → 文件栏高度变化 ----
+    // 2026-09-20 用户裁决：竖屏 split 换位为文件在上、对话在下（ratioPane="before"）——
+    // 文件栏在分隔条**上方**，拖动方向随之取反：向下拖 = 分隔条下移把上方文件栏撑大。
+    // 「分隔条跟随指针」裁决不变（拖哪边文件栏都变小）
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
     const containerV = screen.getByTestId("split-container");
     containerV.getBoundingClientRect = () =>
@@ -633,21 +636,60 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const filePaneV = screen.getByTestId("split-file-pane");
     const h0 = parseFloat(filePaneV.style.height);
     fireEvent.pointerDown(handleV, { clientY: 400 });
-    fireEvent.pointerMove(window, { clientY: 300 });
+    fireEvent.pointerMove(window, { clientY: 500 });
     fireEvent.pointerUp(window);
-    // 向上拖 100px / 容器高 800 → 分隔条上移 → 下方文件栏变高 12.5 个百分点
-    // （2026-09-16 用户裁决：分隔条跟随指针——向上拖条子上移，下方文件区变大）
+    // 向下拖 100px / 容器高 800 → 分隔条下移 → 上方文件栏变高 12.5 个百分点
     expect(parseFloat(filePaneV.style.height)).toBeCloseTo(h0 + 12.5, 1);
+    // 反向：向上拖回（上方文件栏变矮）
+    fireEvent.pointerDown(handleV, { clientY: 500 });
+    fireEvent.pointerMove(window, { clientY: 400 });
+    fireEvent.pointerUp(window);
+    expect(parseFloat(filePaneV.style.height)).toBeCloseTo(h0, 1);
 
     // ---- 拖动不得越界（钳制 15%–85%） ----
-    fireEvent.pointerDown(handleV, { clientY: 800 });
+    fireEvent.pointerDown(handleV, { clientY: 0 });
     fireEvent.pointerMove(window, { clientY: -100000 });
     fireEvent.pointerUp(window);
-    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
-    fireEvent.pointerDown(handleV, { clientY: 0 });
+    expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
+    fireEvent.pointerDown(handleV, { clientY: 800 });
     fireEvent.pointerMove(window, { clientY: 100000 });
     fireEvent.pointerUp(window);
-    expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
+    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
+  });
+
+  // 竖屏分屏换位（2026-09-20 用户裁决）：split 视觉顺序 = 文件在上、对话在下
+  // （输入框贴底）；split-h 维持对话在左、文件在右。CSS order 视觉换位，
+  // DOM 顺序两态一致（对话优先，a11y 不变）
+  it("竖屏 split 视觉换位：文件 order-1 在上、对话 order-3 在下；split-h 无 order", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+    const container = screen.getByTestId("split-container");
+    const convCol = container.querySelector(".flex.min-h-0.min-w-0.flex-1.flex-col")!;
+    const filePane = screen.getByTestId("split-file-pane");
+    const handle = screen.getByTestId("split-handle");
+    expect(convCol.className).toContain("order-3");
+    expect(filePane.className).toContain("order-1");
+    expect(handle.className).toContain("order-2");
+    // 最小高度保护（仅 split）：对话列有 minHeight，文件栏有 maxHeight 上限
+    expect(convCol.getAttribute("style")).toContain("min-height");
+    expect(filePane.getAttribute("style")).toContain("max-height");
+
+    // 切横向分屏：两态语义各自独立——无 order 类、无高度保护
+    fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+    const containerH = screen.getByTestId("split-container");
+    const convColH = containerH.querySelector(".flex.min-h-0.min-w-0.flex-1.flex-col")!;
+    const filePaneH = screen.getByTestId("split-file-pane");
+    expect(convColH.className).not.toContain("order-");
+    expect(filePaneH.className).not.toContain("order-");
+    expect(convColH.getAttribute("style")).not.toContain("min-height");
+    expect(filePaneH.getAttribute("style")).not.toContain("max-height");
   });
 
   it("切换器只保留预览页头一份（2026-09-16 裁决），不占详情页头空间", async () => {
@@ -1419,5 +1461,190 @@ describe("SessionDetail：轮询滚动跟随条件化（P2-B）", () => {
     } finally {
       scrollHeightSpy.mockRestore();
     }
+  });
+});
+
+// ==== 计划正文渲染（2026-09-20 用户实测：ExitPlanMode 整篇计划在详情页是 \n 字面量汤）====
+// 根因：后端把工具输入原封透传为 JSON 串（字符串值换行全为 \n 转义），前端 <pre> 原样上屏。
+// 修法：toolArgs 解析出非空字符串 plan 字段 → 该正文走 markdown 渲染；不看 toolName——
+// zcode 的 ExitPlanMode 输入同为 {plan} 但 MAM 记录的是显示 title，按名字匹配会漏。
+// 其他工具参数维持原样（用户裁决：不做通用美化）。
+describe("SessionDetail：计划正文渲染（2026-09-20）", () => {
+  function expandToolCall(seq: number) {
+    fireEvent.click(screen.getByTestId(`msg-${seq}-toggle`));
+  }
+
+  it("ExitPlanMode：plan 字段按 markdown 渲染（标题/列表正常排版，配「计划」标签）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 4,
+        kind: "tool-call",
+        content: "调用 ExitPlanMode",
+        toolName: "ExitPlanMode",
+        toolArgs: JSON.stringify({ plan: "# 计划标题\n\n- 第一步\n- 第二步" }),
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 ExitPlanMode");
+    expandToolCall(4);
+    // markdown 已渲染：# 标题 → H1，列表项 → LI（对齐既有 markdown 断言的 tagName 手法）
+    expect(screen.getByText("计划标题").tagName).toBe("H1");
+    expect(screen.getByText("第一步").tagName).toBe("LI");
+    // 「计划」标签存在（标识这是计划正文）
+    expect(screen.getByText("计划")).toBeTruthy();
+  });
+
+  it("zcode 同形覆盖：toolName 是显示 title 也能命中 plan 字段（形态识别回归锁）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 5,
+        kind: "tool-call",
+        content: "调用 制定执行计划",
+        toolName: "制定执行计划",
+        toolArgs: JSON.stringify({ plan: "## 方案\n\n正文段落" }),
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 制定执行计划");
+    expandToolCall(5);
+    expect(screen.getByText("方案").tagName).toBe("H2");
+  });
+
+  it("无 plan 字段：维持原样渲染（既有 command 断言不改）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 6,
+        kind: "tool-call",
+        content: "调用 Bash",
+        toolName: "Bash",
+        toolArgs: '{"command":"ls"}',
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 Bash");
+    expandToolCall(6);
+    expect(screen.getByTestId("tool-args-6").textContent).toBe('{"command":"ls"}');
+    expect(screen.queryByText("计划")).toBeNull();
+  });
+
+  it("坏 JSON / plan 非字符串 / 空串：均原样回落，不抛错", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 7, kind: "tool-call", content: "t7", toolName: "T7", toolArgs: '{"plan":' }),
+      msg({ seq: 8, kind: "tool-call", content: "t8", toolName: "T8", toolArgs: '{"plan":123}' }),
+      msg({ seq: 9, kind: "tool-call", content: "t9", toolName: "T9", toolArgs: '{"plan":""}' }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 T7");
+    expandToolCall(7);
+    expect(screen.getByTestId("tool-args-7").textContent).toBe('{"plan":');
+    expandToolCall(8);
+    expect(screen.getByTestId("tool-args-8").textContent).toBe('{"plan":123}');
+    expandToolCall(9);
+    expect(screen.getByTestId("tool-args-9").textContent).toBe('{"plan":""}');
+  });
+});
+
+// ==== 跳到最新（2026-09-20）：距底超阈值出现浮动按钮，点击瞬时落底 ====
+describe("SessionDetail：跳到最新（2026-09-20）", () => {
+  /** jsdom 无布局引擎：注入滚动几何量（既有 :841 手法），distance = 距底像素 */
+  function stubGeometry(area: HTMLElement, distance: number) {
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: 1000, configurable: true });
+    area.scrollTop = 5000 - 1000 - distance;
+  }
+
+  function renderWithMessage() {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "一段回复" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    return waitFor(() => screen.getByTestId("message-area"));
+  }
+
+  it("距底超阈值（>240px）出现按钮；滚回贴底消失", async () => {
+    const area = await renderWithMessage();
+    stubGeometry(area, 3000);
+    fireEvent.scroll(area);
+    expect(screen.getByTestId("jump-to-bottom")).toBeTruthy();
+    stubGeometry(area, 0);
+    fireEvent.scroll(area);
+    expect(screen.queryByTestId("jump-to-bottom")).toBeNull();
+  });
+
+  it("点击按钮：scrollTop 瞬时落到 scrollHeight，按钮消失（正文分支）", async () => {
+    const area = await renderWithMessage();
+    stubGeometry(area, 3000);
+    fireEvent.scroll(area);
+    fireEvent.click(screen.getByTestId("jump-to-bottom"));
+    expect(area.scrollTop).toBe(5000);
+    expect(screen.queryByTestId("jump-to-bottom")).toBeNull();
+  });
+
+  it("分屏（split）分支同样可用", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+    const area = await screen.findByTestId("message-area");
+    stubGeometry(area, 3000);
+    fireEvent.scroll(area);
+    fireEvent.click(screen.getByTestId("jump-to-bottom"));
+    expect(area.scrollTop).toBe(5000);
+  });
+});
+
+// ==== 过程一键折叠（2026-09-20）：书签栏右侧开关，运行态/总结态都可用 ====
+describe("SessionDetail：过程一键折叠（2026-09-20）", () => {
+  function runningMessages() {
+    return [
+      msg({ seq: 0, kind: "user", content: "查一下" }),
+      msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+      msg({
+        seq: 2,
+        kind: "tool-call",
+        content: "调用 Bash",
+        toolName: "Bash",
+        toolArgs: '{"command":"ls"}',
+      }),
+      msg({ seq: 3, kind: "assistant", content: "结论" }),
+    ];
+  }
+
+  it("运行态（非总结模式）折叠开关出现：默认全折叠 → 一键全展 → 一键全收", async () => {
+    installFetch();
+    routes.messages = runningMessages();
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("结论");
+    const toggle = screen.getByTestId("process-collapse-toggle");
+    // 运行态默认 thinking/tool-call 折叠 → allCollapsed=true → 动作=全部展开
+    expect(toggle.getAttribute("aria-label")).toBe("展开全部过程");
+    expect(screen.queryByText("内部思考内容")).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByText("内部思考内容")).toBeTruthy();
+    expect(screen.getByTestId("process-collapse-toggle").getAttribute("aria-label")).toBe(
+      "折叠全部过程"
+    );
+    // 再点全收
+    fireEvent.click(screen.getByTestId("process-collapse-toggle"));
+    expect(screen.queryByText("内部思考内容")).toBeNull();
+  });
+
+  it("无过程消息（纯 user/assistant）：折叠开关不渲染", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "你好" }),
+      msg({ seq: 1, kind: "assistant", content: "你好呀" }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("你好呀");
+    expect(screen.queryByTestId("process-collapse-toggle")).toBeNull();
   });
 });

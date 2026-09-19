@@ -21,7 +21,7 @@
 // - sending 期间插队/撤回按钮加闸（disabled=busy||sending，评审必须3）：与发送
 //   回执的 last-write-wins 竞态防线（按钮可见不可点，保持「不失联」意图）；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   fetchQueue,
@@ -42,7 +42,14 @@ interface MessageComposerProps {
  *  不标失败红色、不带「（可重试）」，防止用户重发造成重复注入） */
 type Receipt =
   | { kind: "delivered" }
-  | { kind: "queued"; itemId: number; position: number }
+  | {
+      kind: "queued";
+      itemId: number;
+      position: number;
+      /** 排队正文（2026-09-20「修改」按钮）：发送时就在手上，随回执携带——
+       *  「修改」确认出队后据此放回输入框，零额外请求。条目内容在队内不可变 */
+      content: string;
+    }
   | { kind: "failed"; error: string }
   | { kind: "gone"; message: string }
   | null;
@@ -58,12 +65,18 @@ const MAX_SEND_CHARS = 10000;
  *  （守卫方 flush 循环刚把队首投出）；retract 只需告知不在队 */
 const GONE_JUMP_MESSAGE = "条目已离开队列（可能已送达，可在会话内容中确认）";
 const GONE_RETRACT_MESSAGE = "条目已不在队列";
+/** 轮询发现条目消失（2026-09-20）：此前静默清空回执——用户实测「桌面端插队后，
+ *  手机端排队提示无声消失」。队列会话级共享、无归属标记，移动端无法区分被送达
+ *  还是被其他端处理，故给中性提示留痕；真实归属需后端审计回传，边缘场景不做 */
+const GONE_POLL_CONSUMED_MESSAGE = "该消息已不在队列（可能已送达，或由电脑端处理）";
 
 export default function MessageComposer({ session }: MessageComposerProps) {
   // 可用性：sendInfo=null 且未就绪 → 不渲染（加载中 / 拉取失败 / 403）
   const [sendInfo, setSendInfo] = useState<SendInfo | null>(null);
   const [infoReady, setInfoReady] = useState(false);
   const [text, setText] = useState("");
+  /** 输入框 ref：「修改」确认出队后把正文放回输入框时聚焦（移动端直接可改） */
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [sending, setSending] = useState(false);
   // 插队/撤回进行中（与发送互斥，防连点）
   const [busy, setBusy] = useState(false);
@@ -98,10 +111,20 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           setReceipt((prev) => {
             if (prev?.kind !== "queued" || prev.itemId !== queuedItemId) return prev;
             const mine = items.find((i) => i.id === queuedItemId);
-            if (!mine) return null; // 已被 flush 送达 / 他端撤回 → 回执收敛
+            if (!mine) {
+              // 已被 flush 送达 / 他端插队 / 他端撤回 → 回执收敛。2026-09-20 前
+              // 是静默 return null（无声消失，用户实测困惑）；队列会话级共享、
+              // 无归属标记，移动端分不清谁触发，故落中性提示留痕
+              return { kind: "gone", message: GONE_POLL_CONSUMED_MESSAGE };
+            }
             return mine.position === prev.position
               ? prev
-              : { kind: "queued", itemId: prev.itemId, position: mine.position };
+              : {
+                  kind: "queued",
+                  itemId: prev.itemId,
+                  position: mine.position,
+                  content: prev.content,
+                };
           });
         })
         .catch(() => {
@@ -125,7 +148,12 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         setReceipt({ kind: "delivered" });
       } else if (res.status === "queued") {
         setText("");
-        setReceipt({ kind: "queued", itemId: res.itemId, position: res.position });
+        setReceipt({
+          kind: "queued",
+          itemId: res.itemId,
+          position: res.position,
+          content: body,
+        });
       } else {
         setReceipt({ kind: "failed", error: res.error });
       }
@@ -148,17 +176,22 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   // - 复核自身网络失败 → 保守恢复排队视图（队位沿用旧值，3s 轮询随后自愈）——
   //   拿不到「真不在队」的证据就不落终态，避免按钮丢失后排队条目在 UI 上失控
   const reconcileQueued = useCallback(
-    async (itemId: number, prevPosition: number, onGone: () => void) => {
+    async (itemId: number, prevPosition: number, prevContent: string, onGone: () => void) => {
       try {
         const items = await fetchQueue(session.id);
         const mine = items.find((i) => i.id === itemId);
         if (mine) {
-          setReceipt({ kind: "queued", itemId, position: mine.position });
+          setReceipt({
+            kind: "queued",
+            itemId,
+            position: mine.position,
+            content: mine.content ?? prevContent,
+          });
         } else {
           onGone();
         }
       } catch {
-        setReceipt({ kind: "queued", itemId, position: prevPosition });
+        setReceipt({ kind: "queued", itemId, position: prevPosition, content: prevContent });
       }
     },
     [session.id]
@@ -166,7 +199,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
 
   const handleJump = useCallback(async () => {
     if (receipt?.kind !== "queued" || busy) return;
-    const { itemId, position } = receipt;
+    const { itemId, position, content } = receipt;
     setBusy(true);
     try {
       const j = await queueJump(session.id, itemId);
@@ -178,13 +211,13 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         // 兼容——条目仍在队恢复排队视图、确认不在队走中性 gone 收敛）与 failed
         // （注入失败，行已退出 pending）同走复核——不得落 failed「可重试」诱发
         // 重复注入（评审裁决）
-        await reconcileQueued(itemId, position, () =>
+        await reconcileQueued(itemId, position, content, () =>
           setReceipt({ kind: "gone", message: GONE_JUMP_MESSAGE })
         );
       }
     } catch {
       // 网络层 / 非 2xx（404 条目已不在队等）：同样复核，在队即恢复、不在队中性收敛
-      await reconcileQueued(itemId, position, () =>
+      await reconcileQueued(itemId, position, content, () =>
         setReceipt({ kind: "gone", message: GONE_JUMP_MESSAGE })
       );
     } finally {
@@ -192,38 +225,65 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     }
   }, [receipt, busy, session.id, reconcileQueued]);
 
+  /** 撤回/修改共用的出队执行器（评审必须1 的复核收敛逻辑单点保留，两钮不复制）：
+   *  调 queueRetract——{ok:true} = 服务端确认已撤（免复核直接收敛，撤回目的已达成）；
+   *  忙时 failed / 404 / 网络错 → 复核对账（条目仍在队恢复排队视图可重试、确认不在队
+   *  走中性 gone）。onConfirmed 仅在「确认出队」后被调：撤回用它清回执，
+   *  修改用它把正文放回输入框 */
+  const retractWithOutcome = useCallback(
+    async (itemId: number, position: number, content: string, onConfirmed: () => void) => {
+      setBusy(true);
+      try {
+        const r = await queueRetract(session.id, itemId);
+        if ("ok" in r) {
+          /* 服务端确认已撤（{ok:true}）：免复核，直接收敛（评审必须1——撤回目的已达成） */
+          onConfirmed();
+        } else {
+          /* 忙时 200 {status:"failed"}：条目未被撤、仍在队 → 复核对账。不得丢弃联合
+             返回值直接复核——否则「忙时 + 复核也失败」双失败时条目实际在队、UI 却
+             永久失控（评审必须1核心场景；reconcileQueued 复核失败保守恢复兜底） */
+          await reconcileQueued(itemId, position, content, () =>
+            setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE })
+          );
+        }
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          /* 404 not_found（已送达 / 他端撤回）：条目已不在队 → 中性收敛（不作失败提示） */
+          setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE });
+        } else {
+          // 网络错：同款复核——条目仍在队 → 恢复排队视图可重试；确认不在队 → 中性收敛
+          await reconcileQueued(itemId, position, content, () =>
+            setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE })
+          );
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [session.id, reconcileQueued]
+  );
+
+  /** 撤回（W4）：完全取消——确认出队后清回执，正文不保留（2026-09-20 裁决：
+   *  撤回=完全取消；拉回编辑走「修改」钮） */
   const handleRetract = useCallback(async () => {
     if (receipt?.kind !== "queued" || busy) return;
-    const itemId = receipt.itemId;
-    const { position } = receipt;
-    setBusy(true);
-    try {
-      const r = await queueRetract(session.id, itemId);
-      if ("ok" in r) {
-        /* 服务端确认已撤（{ok:true}）：免复核，直接收敛（评审必须1——撤回目的已达成） */
-        setReceipt(null);
-      } else {
-        /* 忙时 200 {status:"failed"}：条目未被撤、仍在队 → 复核对账。不得丢弃联合
-           返回值直接复核——否则「忙时 + 复核也失败」双失败时条目实际在队、UI 却
-           永久失控（评审必须1核心场景；reconcileQueued 复核失败保守恢复兜底） */
-        await reconcileQueued(itemId, position, () =>
-          setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE })
-        );
-      }
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 404) {
-        /* 404 not_found（已送达 / 他端撤回）：条目已不在队 → 中性收敛（不作失败提示） */
-        setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE });
-      } else {
-        // 网络错：同款复核——条目仍在队 → 恢复排队视图可重试；确认不在队 → 中性收敛
-        await reconcileQueued(itemId, position, () =>
-          setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE })
-        );
-      }
-    } finally {
-      setBusy(false);
-    }
-  }, [receipt, busy, session.id, reconcileQueued]);
+    await retractWithOutcome(receipt.itemId, receipt.position, receipt.content, () =>
+      setReceipt(null)
+    );
+  }, [receipt, busy, retractWithOutcome]);
+
+  /** 修改（2026-09-20 裁决）：确认出队后把正文放回输入框继续编辑——与撤回共用
+   *  同一后端出队动作，差别仅在是否恢复文本。截断到 MAX_SEND_CHARS 与输入框
+   *  maxLength 对齐；恢复后聚焦输入框（移动端直接可改） */
+  const handleEdit = useCallback(async () => {
+    if (receipt?.kind !== "queued" || busy) return;
+    const { itemId, position, content } = receipt;
+    await retractWithOutcome(itemId, position, content, () => {
+      setText(content.slice(0, MAX_SEND_CHARS));
+      setReceipt(null);
+      inputRef.current?.focus();
+    });
+  }, [receipt, busy, retractWithOutcome]);
 
   // 拉取未就绪 / 失败 / 403：不渲染（详情页正文照常）
   if (!infoReady || sendInfo === null) return null;
@@ -291,6 +351,15 @@ export default function MessageComposer({ session }: MessageComposerProps) {
               </button>
               <button
                 type="button"
+                data-testid="queue-edit"
+                disabled={busy || sending}
+                onClick={handleEdit}
+                className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-700 disabled:opacity-40 dark:bg-amber-400/20 dark:text-amber-300"
+              >
+                修改
+              </button>
+              <button
+                type="button"
                 data-testid="queue-retract"
                 disabled={busy || sending}
                 onClick={handleRetract}
@@ -322,6 +391,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       )}
       <div className="flex items-end gap-2">
         <textarea
+          ref={inputRef}
           data-testid="composer-input"
           aria-label="消息输入"
           value={text}
