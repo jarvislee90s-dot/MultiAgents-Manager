@@ -7,7 +7,8 @@
 // - 消息正文中的已知文件路径（/session-files 提取结果）渲染为可点链接 → 文件预览；
 // - 「加载更早消息」按钮以更大 limit 整页重拉（Task 8 裁决：M3 用按钮替代无限
 //   滚动，YAGNI——避免滚动位置管理复杂度）；
-// - 不自动轮询（M3 范围裁决：SSE transition 不驱动详情页），页头刷新按钮手动重拉。
+// - SSE transition 仍不驱动详情页（M3 范围裁决不变）；页面可见时每 10s 静默轮询
+//   刷新会话内容（F6 评审裁决：hidden 暂停、恢复可见立即补刷，页头刷新按钮保留）。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -47,6 +48,8 @@ import type { Session } from "@/types/session";
 const PAGE_LIMIT = 200;
 /** 后端 limit clamp 上限：到达后不再提供「加载更早消息」 */
 const MAX_LIMIT = 1000;
+/** F6：详情页轮询周期（页面可见时每 10s 静默刷新会话内容） */
+const DETAIL_REFRESH_MS = 10_000;
 
 // R5 一键 resume（Task 11）：支持「在电脑上打开」的工具镜像表。
 // SSOT = src-tauri/src/inject/resume.rs 的 RESUME_TABLE（Step 1 实测取证），
@@ -172,7 +175,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const [loading, setLoading] = useState(true);
   // 「加载更早消息」：limit 递增整页重拉（后端取文件序尾部 limit 条）
   const [limit, setLimit] = useState(PAGE_LIMIT);
-  // 手动刷新信号（不自动轮询，见文件头注释）
+  // 手动刷新信号（页头刷新按钮/错误重试）；F6 轮询同样 bump 此信号复用重拉链路
   const [refreshTick, setRefreshTick] = useState(0);
   // 折叠覆盖表：seq → 强制折叠/展开；缺省走默认折叠语义（见 isCollapsed）
   const [expandedOverride, setExpandedOverride] = useState<Map<number, boolean>>(new Map());
@@ -229,6 +232,38 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       alive = false;
     };
   }, [session.agentType, session.id, limit, refreshTick]);
+
+  // F6：页面可见期间每 10s 静默轮询刷新会话内容。复用 refreshTick 信号走上方既有
+  // 重拉链路（拉取 / alive 清理 / 错误态单点），手动刷新与看板 SSE 均零改动。
+  // 节奏形态：interval 挂载即装但首拍在 +10s（不立即触发）——与挂载首拉天然错开，
+  // 无双触发；hidden 时暂停（清 interval），visibilitychange 恢复可见先立即补刷一次
+  // （追回隐藏期间错过的更新）再重启 10s 节奏。卸载清理 interval + 监听，无泄漏。
+  useEffect(() => {
+    const tick = () => setRefreshTick((t) => t + 1);
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        stop(); // 隐藏：暂停轮询
+      } else {
+        tick(); // 恢复可见：立即补刷一次再续节奏
+        if (timer === null) timer = setInterval(tick, DETAIL_REFRESH_MS);
+      }
+    };
+    if (document.visibilityState !== "hidden") {
+      timer = setInterval(tick, DETAIL_REFRESH_MS);
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [session.agentType, session.id]);
 
   // 文件表拉取（M3+）：挂载 / 切档时重拉。挂载那次（scope=200）即面板首次打开
   // 复用的数据（一次拉取两用，用户裁决 3 的附带口径）；失败已由 api 层静默降级

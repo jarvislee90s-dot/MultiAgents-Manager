@@ -96,7 +96,8 @@ export interface SessionMessagesPage {
 
 /** 拉取单会话消息流尾部（八工具统一出口）。读取失败（会话不存在 / 存储不可读）
  *  以 ApiError 抛出：404 = 会话内容不可读；网络异常 status=null。
- *  不自动轮询（M3 范围裁决：SSE transition 不驱动详情页，下拉手动刷新） */
+ *  本层无状态：SSE transition 不驱动详情页（M3 范围裁决不变），10s 轮询节奏由
+ *  SessionDetail 页面层驱动（F6），此处只负责单次拉取 */
 export async function fetchSessionMessages(
   agentType: string,
   sessionId: string,
@@ -401,13 +402,18 @@ export async function fetchQueue(sessionId: string): Promise<QueueItemView[]> {
 }
 
 /** 插队直发（裁决 12）：按 itemId 点名该会话 pending 中的一条即刻注入。
- *  200 {status:"delivered"} | {status:"failed",error}（failed 带后端中文文案，
- *  如「该会话投递进行中，请稍后重试」）；非 2xx（404 not_found 条目已不在队）
- *  → 抛 ApiError */
-export async function queueJump(
-  sessionId: string,
-  itemId: number
-): Promise<{ status: "delivered" } | { status: "failed"; error: string }> {
+ *  回执四态精确映射（F7④ 与后端契约对齐）：Sent → delivered；Failed(e) →
+ *  failed{error}（注入失败行已退出 pending，可重发）；Deferred | Suspended →
+ *  queued{itemId,position}（行保持 pending，语义即排队）；守卫忙（该会话
+ *  in-flight 投递占用）→ queued{itemId,position}（F1 新语义：旧忙时回 failed
+ *  逼客户端重试，现改 queued 让位给进行中的投递）。非 2xx（404 not_found
+ *  条目已不在队）→ 抛 ApiError */
+export type QueueJumpResult =
+  | { status: "delivered" }
+  | { status: "queued"; itemId: number; position: number }
+  | { status: "failed"; error: string };
+
+export async function queueJump(sessionId: string, itemId: number): Promise<QueueJumpResult> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-queue/jump", {
@@ -419,7 +425,7 @@ export async function queueJump(
     throw new ApiError(null, `session-queue/jump 网络异常: ${String(e)}`);
   }
   if (!r.ok) throw new ApiError(r.status, `session-queue/jump ${r.status}`);
-  return (await r.json()) as { status: "delivered" } | { status: "failed"; error: string };
+  return (await r.json()) as QueueJumpResult;
 }
 
 /** 撤回排队条目（W4）：200 {ok:true} 撤回成功；P2-6 忙时（该会话投递进行中）

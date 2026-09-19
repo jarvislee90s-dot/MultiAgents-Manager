@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionDetail from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
@@ -1037,5 +1037,70 @@ describe("SessionDetail：一键 resume 回执分诊（评审 C1）", () => {
     const btn = screen.getByTestId("session-open") as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
     expect(screen.getByText("该会话没有项目目录信息，无法在电脑上打开")).toBeTruthy();
+  });
+});
+
+// ==== F6：详情页 10s 轮询（假计时器锁节奏与可见性语义）====
+describe("SessionDetail：详情页 10s 轮询（F6）", () => {
+  /** 只数 /session-messages 调用（/host、/session-files 的拉取不计入节奏断言） */
+  function messagesCalls(): number {
+    return fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-messages")
+    ).length;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("节奏：挂载首拉 1 次，+10s 轮询第 2 次，再 +10s 第 3 次（首拉不双触发）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {}); // 挂载首拉落地（轮询 interval 首拍在 +10s，不立即触发）
+    expect(messagesCalls()).toBe(1);
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(2);
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(3);
+  });
+
+  it("hidden 暂停：推进计时器不触发；恢复 visible 立即补刷一次再续 10s 节奏", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    const visSpy = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {});
+    expect(messagesCalls()).toBe(1);
+    // 切后台（hidden + visibilitychange）：暂停轮询——推进 30s 零新增拉取
+    visSpy.mockReturnValue("hidden");
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(messagesCalls()).toBe(1);
+    // 切回前台：立即补刷一次（追回隐藏期间错过的更新）
+    visSpy.mockReturnValue("visible");
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(messagesCalls()).toBe(2);
+    // 补刷后重启节奏：+10s 下一拍
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(3);
+    visSpy.mockRestore();
   });
 });

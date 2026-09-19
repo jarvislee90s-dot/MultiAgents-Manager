@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, fetchHost, fetchSessions, pairWithPin } from "@/mobile/api";
+import { ApiError, fetchHost, fetchSessions, pairWithPin, queueJump } from "@/mobile/api";
 
 // setup.ts 的 msw server 会包一层全局 fetch；stub 覆盖其上，结束后还原防止泄漏到其他用例
 afterEach(() => {
@@ -66,5 +66,25 @@ describe("mobile api", () => {
       vi.fn(async () => new Response("", { status: 403 }))
     );
     expect(await fetchHost()).toBeNull();
+  });
+
+  it("queueJump 200 queued 回执透传（F7④：守卫忙 / Deferred / Suspended 排队语义，与后端契约对齐）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ status: "queued", itemId: 7, position: 2 }), {
+            status: 200,
+          })
+      )
+    );
+    const r = await queueJump("sess-1", 7);
+    // queued 变体必须携带 itemId/position（类型层契约）；运行期透传校验
+    if (r.status === "queued") {
+      expect(r.itemId).toBe(7);
+      expect(r.position).toBe(2);
+    } else {
+      throw new Error("queued 变体丢失：回执未按排队语义透传");
+    }
   });
 });
