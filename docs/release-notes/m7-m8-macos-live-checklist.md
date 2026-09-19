@@ -39,3 +39,22 @@
 ## Windows 侧已实测（本机，非本清单范围）
 
 详见 `%USERPROFILE%\mam-probe\windows-终端注入-探测报告.md`（M6）+ 台账 progress.md 的 M9 实机记录（Task 16 后补）。
+
+---
+
+## M6R–M9R 批次 · Mac 回传清单追加（2026-09-19）
+
+> 硬化批次（引擎重写/确认层/队列生命周期/严格档/resume/macOS 匹配修复）后新增的 macOS 实机验证项。
+> 项 D-1～D-9 与 `docs/release-notes/m6r-m9r-acceptance-checklist.md` D 段同源，彼处含完整前置与判定说明。
+
+| # | 场景 | 前置 | 步骤 | 预期观察 |
+|---|---|---|---|---|
+| D-1 | 三通道长消息 + 确认机制 | tmux/iTerm2/Terminal 各跑真实 CLI | 直发长消息；再测插队排空+草稿 | 三通道均送达；直发以会话文件命中回执；插队 busy 入草稿、转闲命中；macOS 无屏读时确认层降级语义（Failed 文案）可用性确认 |
+| D-2 | 相等匹配：ttys 前缀相近双会话互不串扰 | iTerm2 开 tty 前缀相近的双会话 | 对其一发消息 | 仅目标会话收到（iTerm2 脚本 contains→is 全路径匹配的实机复核） |
+| D-3 | Terminal.app 后台标签页注入 | 目标会话在非前台标签 | 对后台标签会话发消息 | `do script in t` 后台执行语义成立，不切换前台标签 |
+| D-4 | 审批 codex/claude 复验 | codex Read Only 档审批 / claude 权限请求+计划模式 | 红卡批准/拒绝各一次 | 键位与 Windows 取证口径一致（codex y/esc、claude 1/esc）；codex Mac 版本键位漂移复核 |
+| D-5 | resume：iTerm2/Terminal 双通道 | 有 cwd 的会话（≥2 家工具） | 点「在电脑上打开」 | 开窗 + `cd <cwd> && <resume>` + 置前聚焦均成立 |
+| D-6 | **activate→keystroke 时序竞争** | Terminal.app 审批红卡 | 点批准 | 若偶发丢键/落错窗：activate 后加 `delay 0.2` 复验（降级预案备案） |
+| D-7 | **Terminal raise 语义裁决** | Terminal.app 多窗口 | 观察按键/审批应答的升窗行为 | 「升窗不升标签 vs 纯后台」二选一，实机观察后回报用户定案 |
+| D-8 | **iTerm2/Terminal `tty of s/t` 全路径口径确认** | iTerm2 与 Terminal.app 各一 | 打印 `tty of …` 取值 | 确认返回 /dev/ttysNNN 全路径（相等匹配前提；裸后缀则 normalize_dev_tty 兜底） |
+| D-9 | **normalize_dev_tty 实机验证** | macOS 终端 `ps -o tty` | 观察输出口径 | ps 返裸后缀时归一 `/dev/ttysNNN` 后匹配成功（构造已单测，实机口径待验证） |
