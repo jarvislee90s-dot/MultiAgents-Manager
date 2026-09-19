@@ -35,7 +35,8 @@ reference/
 .worktrees/
 
 # Codex / Claude 本地配置（非项目代码）
-.agents/
+.agents/*
+!.agents/skills/
 .claude/
 
 # 项目配置模板 / 内部工具
