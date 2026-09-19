@@ -4179,6 +4179,17 @@ mod tests {
                 Ok(())
             })
         }
+        /// 评审 I3：恒败 spawner（照常记录后报 Err）——驱动 200-failed 分支测试
+        fn seam_failing(
+            &self,
+            err: &'static str,
+        ) -> std::sync::Arc<crate::inject::resume::SpawnFn> {
+            let log = self.0.clone();
+            std::sync::Arc::new(move |spec: &crate::inject::resume::SpawnSpec| {
+                log.lock().unwrap().push(spec.clone());
+                Err(err.to_string())
+            })
+        }
         fn recorded(&self) -> Vec<crate::inject::resume::SpawnSpec> {
             self.0.lock().unwrap().clone()
         }
@@ -4282,14 +4293,20 @@ mod tests {
         // spawner 恰被调用一次，携带命令表产物（wt/conhost 分支的平台差异不断言）
         let recorded = spawner_rec.recorded();
         assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
-        assert!(
-            recorded[0]
-                .args
-                .iter()
-                .any(|a| a == "claude --resume sess_m"),
-            "spawn 计划必须携带 claude 的 resume 命令：{:?}",
-            recorded[0]
-        );
+        match &recorded[0] {
+            crate::inject::resume::SpawnSpec::Windows { args, cwd, .. } => {
+                assert!(
+                    args.iter().any(|a| a == "claude --resume sess_m"),
+                    "spawn 计划必须携带 claude 的 resume 命令：{:?}",
+                    recorded[0]
+                );
+                // 评审 I1：cwd 进 spec（conhost 分支的 current_dir 消费点）
+                assert_eq!(cwd, "/tmp/proj-m", "spawn 计划必须携带项目目录");
+            }
+            crate::inject::resume::SpawnSpec::MacosApplescript { .. } => {
+                panic!("Windows 运行时不得派发 AppleScript 变体");
+            }
+        }
         // 审计 action=open（Task 7 预留兑现）result=ok
         let audits = state
             .store
@@ -4383,5 +4400,56 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 400);
         assert!(spawner_rec.recorded().is_empty());
+    }
+
+    /// 评审 I3：spawn 出手失败 → 200 {"status":"failed","error"}（HTTP 200 恒定，
+    /// 语义在 body——session-approve 同口径）+ 审计 action=open result=failed: 前缀。
+    /// spawner 恒败（本机 wt/conhost 两分支皆败——降级链收口后的终态）
+    #[tokio::test]
+    async fn session_open_endpoint_spawn_failure_reports_failed() {
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state(spawner_rec.seam_failing("终端启动失败（模拟）"));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "失败回执走 200 语义分诊（session-approve 同口径）"
+        );
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "失败回执同为门禁下私有写路径，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("终端启动失败（模拟）"),
+            "失败回执必须携带 status=failed 与后端错误文案：{body}"
+        );
+        // 出手了才谈失败：spawner 被调用（wt 在场时降级链两次、不在场一次——只断言非空）
+        assert!(!spawner_rec.recorded().is_empty(), "失败回执前提是确有出手");
+        // 审计 action=open result=failed: 前缀（出手失败照实落账）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "open");
+        assert!(
+            audits[0].result.starts_with("failed:"),
+            "出手失败审计必须是 failed: 前缀：{}",
+            audits[0].result
+        );
+        assert_eq!(audits[0].session_id, "sess_m");
     }
 }

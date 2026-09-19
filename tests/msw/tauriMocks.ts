@@ -338,7 +338,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     case "refresh_tray":
       return Promise.resolve();
     // R5 一键 resume（M6R–M9R Task 11）：测试环境不真开终端，视为成功（双 mock parity，
-    // 与 src/tauri-mock.ts 的 session_open case 同步）
+    // 与 src/tauri-mock.ts 的 session_open case 同步；失败开关在桌面侧为
+    // localStorage["mam-mock-session-open"]="fail"——vitest 单测直接驱动 Rust 侧
+    // spawner 缝，无需在此模拟）
     case "session_open":
       return Promise.resolve(undefined);
     default:

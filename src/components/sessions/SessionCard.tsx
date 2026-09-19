@@ -224,7 +224,9 @@ export function SessionCard({
               {t("sessions.subagents", { n: session.activeSubagentCount })}
             </span>
           )}
-          {/* R5 一键 resume（Task 11）：无 cwd / 无映射工具禁用（title 给原因） */}
+          {/* R5 一键 resume（Task 11）：无 cwd / 无映射工具禁用（title 给原因——
+              评审 M2：去掉 disabled:pointer-events-none，悬停可见禁用原因；
+              disabled 按钮本就不派发 click，卡片 onClick 不会被穿透触发） */}
           <button
             type="button"
             data-testid="session-open"
@@ -232,7 +234,7 @@ export function SessionCard({
             title={resumeReason ?? t("resume.open")}
             aria-label={resumeReason ?? t("resume.open")}
             onClick={handleResumeOpen}
-            className="hover:bg-muted hover:text-foreground rounded p-0.5 disabled:pointer-events-none disabled:opacity-40"
+            className="hover:bg-muted hover:text-foreground rounded p-0.5 disabled:opacity-40"
           >
             <ExternalLink className="h-3 w-3" />
           </button>

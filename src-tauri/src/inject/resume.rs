@@ -3,15 +3,25 @@
 //! 用户零额外操作。终端选择：Windows 优先 Windows Terminal、未装回退 conhost；
 //! macOS 优先 iTerm2、次选 Terminal.app（复用 window::applescript::execute_applescript）。
 //!
-//! ## 结构（构造与执行分离，engine.rs 同款纪律）
+//! ## 结构（构造与执行分离，engine.rs 同款纪律；评审 I2：macOS 同样入缝）
 //! - [`resume_command`]：命令表纯函数（Step 1 实测取证，**未查证/不存在的工具绝不入表**
 //!   ——前端按钮禁用 + 原因「该工具 resume 命令待查证」）；
-//! - [`build_spawn_command_windows`]：Windows spawn 计划纯构造（wt / conhost 两形态），
-//!   跨平台 pub 可测，不真 spawn；
+//! - [`SpawnSpec`]：spawn 计划载荷（枚举两变体——Windows CreateProcess / macOS
+//!   AppleScript），构造与执行分离，跨平台 pub 可测不真 spawn；
+//! - [`build_spawn_command_windows`]：Windows 变体纯构造（wt / conhost 两形态）；
 //! - [`iterm_open_window_script`] / [`terminal_open_script`]：macOS AppleScript 纯构造
-//!   （跨平台可测；实机开窗验证归 Mac 回传清单）；
+//!   （构造只是字符串拼接，**Windows 上即可测**，实机开窗验证归 Mac 回传清单）；
+//! - [`open_macos_with`]：macOS 双通道缝出手顺序（iTerm2 优先、Terminal.app 次选），
+//!   跨平台可测；
 //! - [`open_session_terminal_with`]：核心入口（**接受 spawner 缝**，远端端点测试注入
-//!   记录型假 spawner，零真开窗）；[`open_session_terminal`] = 生产装配（真 spawn）。
+//!   记录型假 spawner，零真开窗——两平台皆然）；[`open_session_terminal`] =
+//!   生产装配（真 spawn / 真 AppleScript）。
+//!
+//! ## cwd 落点机制（评审 I1 修正）
+//! conhost 回退无 `-d` 等价参数，cwd 继承靠生产 spawner 的 `Command::current_dir`：
+//! conhost → cmd 逐级继承进程工作目录，落在项目目录（免 `cd /d` 复合串的引号地狱）；
+//! wt 分支另带 `-d <cwd>`（双保险），`current_dir` 同设无害。codex resume 默认按
+//! cwd 过滤候选（`--all` 才解除）——spawn 落在项目目录即满足该工作区上下文。
 //!
 //! ## 审计
 //! 远端端点（POST /m/api/v1/session-open）在 spawn 出手时写审计 action=`open`
@@ -32,16 +42,28 @@ use crate::session::Session;
 /// 测试 = 记录型假体（零真开窗）。
 pub type SpawnFn = dyn Fn(&SpawnSpec) -> Result<(), String> + Send + Sync;
 
-/// 终端 spawn 计划（纯构造产物，字段即测试断言面）。
+/// 终端 spawn 计划载荷（枚举两变体；评审 I2：macOS 同样走缝，「测试零真开窗」
+/// 跨平台为真，且 AppleScript 构造获得 Windows 可测性——对齐 R6 精神）。
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpawnSpec {
-    /// 可执行程序（"wt" / "conhost.exe"）
-    pub program: String,
-    /// 参数向量（resume 命令整体作为一个参数由 CreateProcess 引号传递，不再二次分词）
-    pub args: Vec<String>,
-    /// Windows CREATE_NEW_CONSOLE 标记：conhost 回退必须自带（0x10）才开新控制台窗；
-    /// wt 自开新标签无此需求
-    pub new_console: bool,
+pub enum SpawnSpec {
+    /// Windows：CreateProcess 开新窗/新标签
+    Windows {
+        /// 可执行程序（wt 探测命中的完整路径 / "conhost.exe"）
+        program: String,
+        /// 参数向量（resume 命令整体作为一个参数由 CreateProcess 引号传递，不再二次分词）
+        args: Vec<String>,
+        /// 进程工作目录（生产 spawner 经 `Command::current_dir` 消费——conhost 回退
+        /// 无 `-d` 等价物，cwd 靠继承落在项目目录；wt 分支同设无害）
+        cwd: String,
+        /// CREATE_NEW_CONSOLE 标记：conhost 回退必须自带（0x10）才开新控制台窗；
+        /// wt 自开新标签无此需求
+        new_console: bool,
+    },
+    /// macOS：AppleScript 脚本整体（生产 = osascript 执行）
+    MacosApplescript {
+        /// 完整脚本（[`iterm_open_window_script`] / [`terminal_open_script`] 构造）
+        script: String,
+    },
 }
 
 /// resume 命令表（Step 1 实测取证：Windows 本机 `--help` 实跑，2026-09-19）。
@@ -50,8 +72,8 @@ pub struct SpawnSpec {
 ///   open interactive picker with optional search term`；
 /// - codex-cli 0.154.0：子命令 `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`
 ///   （"Resume a previous interactive session"）。**工作区上下文限定**：resume 默认按
-///   cwd 过滤候选（`--all` 才解除），本实现 spawn 先 cd 项目目录即满足；zcode 的
-///   D6 在册工作区限定同口径——但 zcode CLI 本机未安装，如实记 None 不入表；
+///   cwd 过滤候选（`--all` 才解除），本实现 spawn 以 current_dir 落在项目目录即满足；
+///   zcode 的 D6 在册工作区限定同口径——但 zcode CLI 本机未安装，如实记 None 不入表；
 /// - kimi 2.0.0：`-S, --session [id]  Resume a session. With ID: resume that session.
 ///   Without ID: interactively pick.`；
 /// - opencode 1.18.31：`-s, --session  session id to continue`（SQLite 类工具，
@@ -74,13 +96,16 @@ pub fn resume_command(tool: &str, session_id: &str) -> Option<String> {
         .map(|(_, tpl)| tpl.replace("{id}", session_id))
 }
 
-/// Windows spawn 计划纯构造（**不真 spawn**，跨平台可测）：
-/// - 有 wt：`wt -d <cwd> cmd /k <resume>`（wt 自开新标签并落在 cwd）；
+/// Windows spawn 计划纯构造（**不真 spawn**，跨平台可测；评审 M1：入参为 wt 完整
+/// 路径 Option 而非在场布尔——路径进 spec 由生产 spawner 直 spawn，绕开应用执行
+/// 别名（App Execution Alias）停用/损坏场景）。两分支 `cwd` 字段同设——生产
+/// spawner 经 current_dir 消费（见 [`spawn_terminal`]）：
+/// - 有 wt：`<wt 路径> -d <cwd> cmd /k <resume>`（wt 自开新标签并落在 cwd）；
 /// - 无 wt：`conhost.exe cmd /k <resume>` + CREATE_NEW_CONSOLE（全新控制台窗）。
-pub fn build_spawn_command_windows(has_wt: bool, cwd: &str, resume: &str) -> SpawnSpec {
-    if has_wt {
-        SpawnSpec {
-            program: "wt".to_string(),
+pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) -> SpawnSpec {
+    match wt {
+        Some(path) => SpawnSpec::Windows {
+            program: path.to_string(),
             args: vec![
                 "-d".to_string(),
                 cwd.to_string(),
@@ -88,39 +113,50 @@ pub fn build_spawn_command_windows(has_wt: bool, cwd: &str, resume: &str) -> Spa
                 "/k".to_string(),
                 resume.to_string(),
             ],
+            cwd: cwd.to_string(),
             new_console: false,
-        }
-    } else {
-        SpawnSpec {
+        },
+        None => SpawnSpec::Windows {
             program: "conhost.exe".to_string(),
             args: vec!["cmd".to_string(), "/k".to_string(), resume.to_string()],
+            cwd: cwd.to_string(),
             new_console: true,
-        }
+        },
     }
 }
 
 /// `where wt` 探测 Windows Terminal（进程级缓存 OnceLock，approve.rs VERSION_CACHE
-/// 先例：首调一次探测，结果含 false 一并入缓存，不重复刷进程）。`where.exe` 是
-/// System32 上的真实可执行文件（非 cmd 内建），裸名直 spawn 即可。
+/// 先例：首调一次探测，结果含 None 一并入缓存，不重复刷进程）。缓存**首行完整
+/// 路径**（评审 M1：生产直 spawn 该路径——`wt` 应用执行别名可能被停用/损坏，
+/// where 命中的真实 exe 不受影响）。`where.exe` 是 System32 上的真实可执行文件
+/// （非 cmd 内建），裸名直 spawn 即可。
 #[cfg(windows)]
-fn windows_terminal_available() -> bool {
-    static WT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WT.get_or_init(|| {
+fn windows_terminal_path() -> Option<String> {
+    static WT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    WT.get_or_init(|| {
         std::process::Command::new("where")
             .arg("wt")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()
-            .map(|o| o.status.success() && !o.stdout.is_empty())
-            .unwrap_or(false)
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .map(|l| l.trim().to_string())
+            })
+            .filter(|l| !l.is_empty())
     })
+    .clone()
 }
 
-/// 非 Windows 平台无 wt 语义（构造层恒 false；该平台走 AppleScript 分支）。
+/// 非 Windows 平台无 wt 语义（构造层恒 None；该平台走 AppleScript 分支）。
 #[cfg(not(windows))]
-fn windows_terminal_available() -> bool {
-    false
+fn windows_terminal_path() -> Option<String> {
+    None
 }
 
 /// shell 单引号安全包装（macOS cd 参数用）：`'…'` 形态，内嵌单引号按 POSIX `'\''`
@@ -169,44 +205,103 @@ end tell
     )
 }
 
-/// macOS 执行层：iTerm2 优先、Terminal.app 次选（复用 execute_applescript），
-/// 脚本自带 activate 置前聚焦。实机验证归 Mac 回传清单。
-#[cfg(target_os = "macos")]
-fn open_macos_terminal(cwd: &str, resume: &str) -> Result<(), String> {
-    if crate::window::applescript::execute_applescript(&iterm_open_window_script(cwd, resume))
-        .is_ok()
-    {
-        return Ok(());
+/// Windows 出手链（跨平台纯逻辑，wt 路径由调用方注入便于测试降级链）：wt 在场
+/// 先试；spawn 失败（应用执行别名停用/损坏等场景）**降级重试一次 conhost** 再报
+/// failed（两次错误合并披露，cwd 经 current_dir 继承不丢）。
+fn open_windows_with(
+    wt: Option<&str>,
+    cwd: &str,
+    resume: &str,
+    spawner: &SpawnFn,
+) -> Result<(), String> {
+    let mut wt_err: Option<String> = None;
+    if let Some(wt) = wt {
+        let spec = build_spawn_command_windows(Some(wt), cwd, resume);
+        match spawner(&spec) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("wt spawn 失败，降级重试 conhost：{e}");
+                wt_err = Some(e);
+            }
+        }
     }
-    crate::window::applescript::execute_applescript(&terminal_open_script(cwd, resume))
+    let spec = build_spawn_command_windows(None, cwd, resume);
+    match spawner(&spec) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(match wt_err {
+            Some(w) => format!("{w}；{e}"),
+            None => e,
+        }),
+    }
+}
+
+/// macOS 双通道缝出手（跨平台纯逻辑，Windows 上即可测）：iTerm2 优先、Terminal.app
+/// 次选——依次组装 [`SpawnSpec::MacosApplescript`] 交 spawner，首通道 Ok 即返回；
+/// 全败合并中文错误。实机开窗验证归 Mac 回传清单（执行层 = 生产 spawner 的
+/// AppleScript 臂）。
+fn open_macos_with(cwd: &str, resume: &str, spawner: &SpawnFn) -> Result<(), String> {
+    let mut errs: Vec<String> = Vec::new();
+    for script in [
+        iterm_open_window_script(cwd, resume),
+        terminal_open_script(cwd, resume),
+    ] {
+        match spawner(&SpawnSpec::MacosApplescript { script }) {
+            Ok(()) => return Ok(()),
+            Err(e) => errs.push(e),
+        }
+    }
+    Err(format!("全部注入通道失败：{}", errs.join("；")))
 }
 
 /// 生产 spawner（RemoteState 生产装配 / Tauri 命令共用）：spawn fire-and-forget
-/// （不 wait——终端窗口生命周期独立于 MAM 进程）；conhost 路径加
-/// CREATE_NEW_CONSOLE(0x10)——父进程退出后新控制台照常存活。
+/// （不 wait——终端窗口生命周期独立于 MAM 进程），按变体 cfg 分派：
+/// - Windows 变体：CreateProcess；`current_dir` 消费 cwd（评审 I1——conhost 回退
+///   靠进程工作目录继承落在项目目录）；conhost 路径加 CREATE_NEW_CONSOLE(0x10)。
+/// - macOS 变体：复用 execute_applescript（脚本自带 activate 置前聚焦）。
 pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new(&spec.program);
-        cmd.args(&spec.args);
-        if spec.new_console {
-            // CREATE_NEW_CONSOLE：为 conhost 回退开全新控制台窗
-            cmd.creation_flags(0x0000_0010);
+    match spec {
+        #[cfg(windows)]
+        SpawnSpec::Windows {
+            program,
+            args,
+            cwd,
+            new_console,
+        } => {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = std::process::Command::new(program);
+            cmd.args(args);
+            // conhost 回退的 cwd 继承点（wt 同设无害：-d 已双保险）
+            if !cwd.is_empty() {
+                cmd.current_dir(cwd);
+            }
+            if *new_console {
+                // CREATE_NEW_CONSOLE：为 conhost 回退开全新控制台窗
+                cmd.creation_flags(0x0000_0010);
+            }
+            cmd.spawn()
+                .map(|_| ())
+                .map_err(|e| format!("终端启动失败（{program}）：{e}"))
         }
-        cmd.spawn()
-            .map(|_| ())
-            .map_err(|e| format!("终端启动失败（{}）：{e}", spec.program))
-    }
-    #[cfg(not(windows))]
-    {
-        Err(format!("当前平台不支持终端 spawn（{}）", spec.program))
+        #[cfg(not(windows))]
+        SpawnSpec::Windows { program, .. } => Err(format!("当前平台不支持终端 spawn（{program}）")),
+        #[cfg(target_os = "macos")]
+        SpawnSpec::MacosApplescript { script } => {
+            crate::window::applescript::execute_applescript(script)
+        }
+        #[cfg(not(target_os = "macos"))]
+        SpawnSpec::MacosApplescript { .. } => {
+            Err("AppleScript 执行层仅在 macOS 构建装配".to_string())
+        }
     }
 }
 
-/// 核心入口（spawner 缝版本）：命令表解析 → cwd 预检 → 按平台构造并出手。
+/// 核心入口（spawner 缝版本）：命令表解析 → cwd 预检 → 按平台组装 spec 交缝出手。
 /// 错误契约：哨兵串 `"no_resume_command"` / `"no_cwd"`（远端端点映射 404；
 /// 前端按钮同因禁用），其余为人类可读失败文案。
+///
+/// Windows 出手序（评审 M1）：wt 探测命中 → 先试 wt；spawn 失败（应用执行别名
+/// 停用/损坏等场景）**降级重试一次 conhost** 再报 failed（两次错误合并披露，
+/// cwd 经 current_dir 继承不丢）。
 pub fn open_session_terminal_with(session: &Session, spawner: &SpawnFn) -> Result<(), String> {
     let tool = session.agent_type.tool_id();
     // 未查证/未入表工具：出手前拦截（spawner 不被调用）
@@ -218,15 +313,11 @@ pub fn open_session_terminal_with(session: &Session, spawner: &SpawnFn) -> Resul
         return Err("no_cwd".to_string());
     }
     match std::env::consts::OS {
-        "windows" => {
-            let spec = build_spawn_command_windows(windows_terminal_available(), cwd, &resume);
-            spawner(&spec)
-        }
-        // macOS 构造层：执行层随 cfg 装配（本平台不编译 AppleScript 执行层时恒 Err）
-        #[cfg(target_os = "macos")]
-        "macos" => open_macos_terminal(cwd, &resume),
-        #[cfg(not(target_os = "macos"))]
-        "macos" => Err("macOS 执行层仅在 macOS 构建装配".to_string()),
+        // Windows：wt 在场先试、败降级 conhost 一次（open_windows_with 跨平台可测）
+        "windows" => open_windows_with(windows_terminal_path().as_deref(), cwd, &resume, spawner),
+        // macOS：iTerm2 优先、Terminal.app 次选（双通道缝出手，open_macos_with
+        // 跨平台可测；实机验证归 Mac 回传清单）
+        "macos" => open_macos_with(cwd, &resume, spawner),
         _ => Err("当前平台不支持一键恢复会话".to_string()),
     }
 }
@@ -290,15 +381,33 @@ mod tests {
         }
     }
 
-    /// Step 2 失败测试 ②：Windows spawn 计划纯构造——有 wt → wt -d cwd cmd /k；
-    /// 无 wt → conhost + CREATE_NEW_CONSOLE（纯构造断言，不真 spawn）。
+    /// Step 2 失败测试 ②：Windows spawn 计划纯构造——有 wt（完整路径）→
+    /// `<路径> -d cwd cmd /k`；无 wt → conhost + CREATE_NEW_CONSOLE（纯构造断言，
+    /// 不真 spawn）。cwd 字段两分支同设（评审 I1：conhost 的 cwd 靠 current_dir
+    /// 继承，生产 spawner 消费点见 spawn_terminal 的 cwd 臂注释）。
     /// 函数与测试同名：测试体内用 `super::` 显式路径防 glob 导入被本测试名遮蔽
     #[test]
     fn build_spawn_command_windows() {
-        let wt = super::build_spawn_command_windows(true, r"E:\proj", "claude --resume abc");
-        assert_eq!(wt.program, "wt");
+        let wt = super::build_spawn_command_windows(
+            Some(r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\wt.exe"),
+            r"E:\proj",
+            "claude --resume abc",
+        );
+        let SpawnSpec::Windows {
+            program,
+            args,
+            cwd,
+            new_console,
+        } = wt
+        else {
+            panic!("wt 在场必须构造 Windows 变体");
+        };
         assert_eq!(
-            wt.args,
+            program, r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\wt.exe",
+            "评审 M1：缓存 wt 完整路径并进 spec（绕开应用执行别名停用场景）"
+        );
+        assert_eq!(
+            args,
             vec![
                 "-d".to_string(),
                 r"E:\proj".to_string(),
@@ -306,14 +415,24 @@ mod tests {
                 "/k".to_string(),
                 "claude --resume abc".to_string(),
             ],
-            "有 wt → wt -d <cwd> cmd /k <resume>"
+            "有 wt → <路径> -d <cwd> cmd /k <resume>"
         );
-        assert!(!wt.new_console, "wt 自开新标签，无需 CREATE_NEW_CONSOLE");
+        assert_eq!(cwd, r"E:\proj", "cwd 字段两分支同设（current_dir 消费）");
+        assert!(!new_console, "wt 自开新标签，无需 CREATE_NEW_CONSOLE");
 
-        let conhost = super::build_spawn_command_windows(false, r"E:\proj", "claude --resume abc");
-        assert_eq!(conhost.program, "conhost.exe");
+        let conhost = super::build_spawn_command_windows(None, r"E:\proj", "claude --resume abc");
+        let SpawnSpec::Windows {
+            program,
+            args,
+            cwd,
+            new_console,
+        } = conhost
+        else {
+            panic!("无 wt 必须构造 Windows 变体（conhost）");
+        };
+        assert_eq!(program, "conhost.exe");
         assert_eq!(
-            conhost.args,
+            args,
             vec![
                 "cmd".to_string(),
                 "/k".to_string(),
@@ -321,10 +440,8 @@ mod tests {
             ],
             "无 wt → conhost.exe cmd /k <resume>"
         );
-        assert!(
-            conhost.new_console,
-            "conhost 回退必须 CREATE_NEW_CONSOLE 开新窗"
-        );
+        assert_eq!(cwd, r"E:\proj", "评审 I1：conhost 回退不得丢 cwd");
+        assert!(new_console, "conhost 必须 CREATE_NEW_CONSOLE 开新窗");
     }
 
     /// macOS 构造层（跨平台可测）：cd '<cwd>' && <resume> 进脚本 + activate 置前；
@@ -393,9 +510,124 @@ mod tests {
         let recorded = calls.lock().unwrap().clone();
         assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
         assert!(
-            recorded[0].args.iter().any(|a| a == "claude --resume abc"),
-            "spawn 计划必须携带命令表产物：{:?}",
-            recorded[0]
+            recorded
+                .iter()
+                .any(|spec| matches!(spec, SpawnSpec::Windows { args, .. } if args.iter().any(|a| a == "claude --resume abc"))),
+            "spawn 计划必须携带命令表产物：{recorded:?}"
+        );
+    }
+
+    /// 评审 M1 降级链（驱动 open_windows_with 真链）：wt 出手失败 → 降级重试一次
+    /// conhost，两次皆败错误合并；wt 不在场 → 只有 conhost 一次出手
+    #[test]
+    fn windows_wt_failure_falls_back_to_conhost_once() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spawner = {
+            let calls = calls.clone();
+            move |spec: &SpawnSpec| {
+                let is_wt = matches!(spec, SpawnSpec::Windows { program, .. } if program.ends_with("wt.exe"));
+                let cwd = match spec {
+                    SpawnSpec::Windows { cwd, .. } => cwd.clone(),
+                    _ => String::new(),
+                };
+                calls.lock().unwrap().push(spec.clone());
+                if is_wt {
+                    // cwd 经参数直传（current_dir 在生产 spawner 消费）——降级链
+                    // 两次出手必须携带同一 cwd
+                    assert_eq!(cwd, "/tmp/proj", "降级链不得丢 cwd");
+                    Err("wt 启动失败（模拟别名停用）".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        // wt 败 → conhost 接力成功：恰两次出手，Ok
+        assert_eq!(
+            open_windows_with(
+                Some("C:\\fake\\wt.exe"),
+                "/tmp/proj",
+                "claude --resume abc",
+                &spawner
+            ),
+            Ok(()),
+            "wt 失败必须降级 conhost 重试"
+        );
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2, "降级链恰两次出手（wt → conhost）");
+        assert!(
+            matches!(&recorded[0], SpawnSpec::Windows { program, .. } if program.ends_with("wt.exe")),
+            "首次出手是 wt"
+        );
+        assert!(
+            matches!(&recorded[1], SpawnSpec::Windows { program, new_console, cwd, .. }
+                if program == "conhost.exe" && *new_console && cwd == "/tmp/proj"),
+            "降级出手是 conhost + CREATE_NEW_CONSOLE + 原 cwd"
+        );
+
+        // wt 不在场：只有 conhost 一次出手（链路入口直接 None）
+        let calls2 = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let spawner2 = {
+            let calls2 = calls2.clone();
+            move |spec: &SpawnSpec| {
+                assert!(
+                    matches!(spec, SpawnSpec::Windows { program, .. } if program == "conhost.exe"),
+                    "无 wt 只应出手 conhost"
+                );
+                *calls2.lock().unwrap() += 1;
+                Ok(())
+            }
+        };
+        assert_eq!(
+            open_windows_with(None, "/tmp/proj", "claude --resume abc", &spawner2),
+            Ok(())
+        );
+        assert_eq!(*calls2.lock().unwrap(), 1, "无 wt 恰一次出手");
+    }
+
+    /// 评审 I2：macOS 双通道入缝（跨平台可测——构造与出手顺序在 Windows 上即可测）：
+    /// iTerm2 优先；首通道败 → Terminal.app 次选；全败合并错误。spec 恒
+    /// MacosApplescript 变体且携带 cd '<cwd>' && <resume> 载荷
+    #[test]
+    fn macos_dual_channel_dispatches_via_seam() {
+        // ① 首通道（iTerm2）成功：恰一次出手，script 含 cd + activate
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spawner = {
+            let calls = calls.clone();
+            move |spec: &SpawnSpec| {
+                calls.lock().unwrap().push(spec.clone());
+                Ok(())
+            }
+        };
+        assert_eq!(
+            open_macos_with("/tmp/proj", "claude --resume abc", &spawner),
+            Ok(())
+        );
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1, "首通道成功恰一次出手");
+        let SpawnSpec::MacosApplescript { script } = &recorded[0] else {
+            panic!("macOS 缝必须收 AppleScript 变体");
+        };
+        assert!(script.contains("cd '/tmp/proj' && claude --resume abc"));
+        assert!(script.contains("activate"));
+
+        // ② 首通道失败：降级 Terminal.app 次选（第二次出手 do script 形态）
+        let calls2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spawner2 = {
+            let calls2 = calls2.clone();
+            move |spec: &SpawnSpec| {
+                calls2.lock().unwrap().push(spec.clone());
+                Err("osascript 失败".to_string())
+            }
+        };
+        let _ = open_macos_with("/tmp/proj", "claude --resume abc", &spawner2);
+        let recorded2 = calls2.lock().unwrap().clone();
+        assert_eq!(recorded2.len(), 2, "首通道败必须降级第二通道");
+        let SpawnSpec::MacosApplescript { script: second } = &recorded2[1] else {
+            panic!("第二通道同为 AppleScript 变体");
+        };
+        assert!(
+            second.contains(r#"do script "cd '/tmp/proj'"#),
+            "次选是 Terminal.app 形态"
         );
     }
 }

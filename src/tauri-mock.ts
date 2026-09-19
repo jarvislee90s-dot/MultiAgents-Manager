@@ -599,9 +599,12 @@ if (!isTauri) {
         return Promise.resolve(undefined);
 
       // R5 一键 resume（M6R–M9R Task 11）：浏览器 mock 下无法真开终端，视为成功
-      //（按钮态目验链路：成功 toast「正在电脑上打开终端…」）
+      //（按钮态目验链路：成功 toast「正在电脑上打开终端…」）。评审 M4 失败开关：
+      // localStorage["mam-mock-session-open"] = "fail" → 拒绝（桌面失败 toast 目验）
       case "session_open":
-        return Promise.resolve(undefined);
+        return localStorage.getItem("mam-mock-session-open") === "fail"
+          ? Promise.reject("终端启动失败（mock 注入）")
+          : Promise.resolve(undefined);
 
       case "detect_tools":
         return Promise.resolve([

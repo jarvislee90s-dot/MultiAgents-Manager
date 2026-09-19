@@ -455,16 +455,32 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // ---- R5 一键 resume（在电脑上打开，Task 11）----
-  // 出手成功后按钮转「正在电脑上打开终端…」短暂提示；失败按 404 错误码分診中文
-  // 文案（与后端哨兵串一一对应），按钮恢复可点（可重试）
+  // 回执三分诊（评审 C1：HTTP 200 恒定、语义在 body.status，不得只看成功抛错）：
+  // - 404/网络失败（抛 ApiError）→ 按 404 错误码分診中文文案（与后端哨兵串对应）；
+  // - 200 {status:"failed",error} → 展示后端中文错误（spawn 出手失败，可重试）；
+  // - 200 {status:"opening"} → 短暂成功提示条（对齐桌面 toast 语义，移动端用
+  //   内联提示形态，3s 自清），按钮恢复可点（可重开）
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [openSuccess, setOpenSuccess] = useState<string | null>(null);
   const resumeReason = resumeUnavailableReason(session);
+  // 成功提示条自清定时器：重开/切会话时先清旧提示，卸载/重提示时收掉定时器不泄漏
+  useEffect(() => {
+    if (openSuccess === null) return;
+    const t = setTimeout(() => setOpenSuccess(null), 3000);
+    return () => clearTimeout(t);
+  }, [openSuccess]);
   const handleSessionOpen = useCallback(async () => {
     setOpening(true);
     setOpenError(null);
+    setOpenSuccess(null);
     try {
-      await sessionOpen(session.id);
+      const result = await sessionOpen(session.id);
+      if (result.status === "failed") {
+        setOpenError(`打开失败：${result.error}`);
+      } else {
+        setOpenSuccess("已让电脑打开终端，请查看电脑侧窗口");
+      }
     } catch (e) {
       const code = e instanceof ApiError ? (e.data?.error as string | undefined) : undefined;
       setOpenError(
@@ -1004,6 +1020,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 className="mt-1 text-center text-xs text-rose-600 dark:text-rose-400"
               >
                 {openError}
+              </p>
+            )}
+            {openSuccess && !openError && (
+              <p
+                data-testid="session-open-success"
+                className="mt-1 text-center text-xs text-emerald-600 dark:text-emerald-400"
+              >
+                {openSuccess}
               </p>
             )}
           </div>
