@@ -235,9 +235,12 @@ pub(crate) fn flush_one_with(
 
 /// 指定条目投递（session-queue/jump 端点用）：插队语义允许点名 pending 中的任意条目
 /// （裁决 12：用户显式要求即刻送达，不限于队首），故不走 flush_one 的「取队首」——
-/// 调用方（端点）已按 (session_id, item_id) 前查该行 pending 归属并持有 in-flight
-/// 守卫（防与 flush 循环对同一会话双投）。快照复核 + 注入 + 落账与 [`flush_one`]
-/// 同一内核（审计 action=jump 由 [`settle`] 写入），返回语义同 [`flush_one`]。
+/// 调用方（端点）已按 (session_id, item_id) 前查该行 pending 归属，且在本函数执行的
+/// 全程持有 in-flight 守卫（防与 flush 循环对同一会话双投；F1 后守卫取在端点的
+/// spawn_blocking 闭包内，**守卫下必须复查该行仍 pending**——前查与守卫之间的间隙
+/// 他方可能已消费该条目，不复查即对已 sent 行再注入）。快照复核 + 注入 + 落账与
+/// [`flush_one`] 同一内核（审计 action=jump 由 [`settle`] 写入），返回语义同
+/// [`flush_one`]。
 pub(crate) fn flush_given(
     st: &crate::remote::server::RemoteState,
     item: &QueueRow,

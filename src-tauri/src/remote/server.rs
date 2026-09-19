@@ -2685,10 +2685,14 @@ mod tests {
     // 会话快照走注入源；注入器用 FakeInjector。不触真实 ~/.mam。
 
     /// 注入器假体（记录 locate_and_inject 调用）；fail=Some 时恒 Err（直发失败回执用）。
-    /// Task 11：补 key_calls 记录 locate_and_send_key 调用（审批按键注入路径）
+    /// Task 11：补 key_calls 记录 locate_and_send_key 调用（审批按键注入路径）。
+    /// F2：补 key_spec_calls 记录 locate_and_send_key_spec 收到的族规格（trait 默认实现
+    /// 只透传不记录——覆写以断言「审批路径族传递」；键位经委托旧方法照旧入 key_calls，
+    /// 既有键位断言不受影响，fail 语义同源）
     struct FakeInjector {
         calls: std::sync::Mutex<Vec<(u32, String)>>,
         key_calls: std::sync::Mutex<Vec<(u32, String)>>,
+        key_spec_calls: std::sync::Mutex<Vec<(u32, String, crate::inject::families::TuiFamily)>>,
         fail: Option<&'static str>,
     }
 
@@ -2697,6 +2701,7 @@ mod tests {
             std::sync::Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
                 key_calls: std::sync::Mutex::new(Vec::new()),
+                key_spec_calls: std::sync::Mutex::new(Vec::new()),
                 fail: None,
             })
         }
@@ -2704,6 +2709,7 @@ mod tests {
             std::sync::Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
                 key_calls: std::sync::Mutex::new(Vec::new()),
+                key_spec_calls: std::sync::Mutex::new(Vec::new()),
                 fail: Some(reason),
             })
         }
@@ -2712,6 +2718,9 @@ mod tests {
         }
         fn recorded_keys(&self) -> Vec<(u32, String)> {
             self.key_calls.lock().unwrap().clone()
+        }
+        fn recorded_key_specs(&self) -> Vec<(u32, String, crate::inject::families::TuiFamily)> {
+            self.key_spec_calls.lock().unwrap().clone()
         }
     }
 
@@ -2732,6 +2741,18 @@ mod tests {
                 Some(e) => Err(e.to_string()),
                 None => Ok(()),
             }
+        }
+        fn locate_and_send_key_spec(
+            &self,
+            pid: u32,
+            key: &str,
+            spec: &crate::inject::families::FamilySpec,
+        ) -> Result<(), String> {
+            self.key_spec_calls
+                .lock()
+                .unwrap()
+                .push((pid, key.to_string(), spec.family));
+            self.locate_and_send_key(pid, key)
         }
     }
 
@@ -2878,7 +2899,10 @@ mod tests {
     /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。sess_h（Waiting，
     /// 独占 id，与 sess_a 同携命中 last_message）：approve_sends_key 独占——复检终修后
     /// sess_h 全测试集唯一归本族（inject_state 侧已改名 sess_i）。sess_j（Waiting，
-    /// 独占 id）：audit_action_vocab 独占（Task 7 P3c 审计动作词表）。其余缝与
+    /// 独占 id）：audit_action_vocab 独占（Task 7 P3c 审计动作词表）。sess_p（Waiting
+    /// claude，独占 id）：approve 忙让位回归独占（F1，守卫持到测尾）。sess_q（Waiting
+    /// codex，独占 id）：审批族规格传递断言独占（F2）——p/q 为全测试集未占用字母
+    /// （sess_m-sess_o 已归 open_state 族）。其余缝与
     /// inject_state 同口径（内存库，零接触真实 ~/.mam）。
     /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾的测试必须占**全测试集
     /// 唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT 按裸 id 字符串全局占用，
@@ -2980,6 +3004,30 @@ mod tests {
                 s.last_message = Some("无关文本".to_string());
                 s
             },
+            {
+                // F1 approve 忙让位测试独占会话（Waiting claude，全测试集唯一 id——守卫
+                // id 立规：本测守卫持到测尾；sess_p 为全测试集未占用字母，open_state
+                // 夹具的 sess_m/sess_n 已被 session-open 族占用，避开）；last_message
+                // 与 sess_a 同源（POST 审批不消费 detect，保持夹具一致性而已）
+                let mut s = inj_sess(
+                    "sess_p",
+                    crate::session::AgentType::Claude,
+                    23,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = sess_a_last.map(str::to_string);
+                s
+            },
+            // F2 审批族规格测试独占会话（Waiting codex，全测试集唯一 id，避让 open_state
+            // 既有 sess_m-sess_o）：POST 审批只查 Waiting+映射+选项（不消费 detect），
+            // last_message 留 None 即可——缺省 KV 回默认表，codex 映射（verified 0.154.0）
+            // 非严格档，approve="y" 可出键
+            inj_sess(
+                "sess_q",
+                crate::session::AgentType::Codex,
+                24,
+                crate::session::SessionStatus::Waiting,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -3256,14 +3304,18 @@ mod tests {
         assert_eq!(fake.recorded().len(), 0, "占用期间不得注入");
     }
 
-    /// guard-busy 回归锁：jump 遇 in-flight 占用 → 200 failed 提示重试（不注入）
+    /// guard-busy 回归锁（F1 新语义）：jump 遇 in-flight 占用 → 200 queued{itemId,position}
+    /// （**裁决变化**：旧忙时回 failed「投递进行中」提示重试，现改 queued——条目保持
+    /// pending 语义即排队，让位给进行中的那次投递；移动端 handleJump 对非 delivered 走
+    /// reconcileQueued 对账，queued 直认恢复排队视图，无 failed 交互依赖）。守卫持到
+    /// 测尾——sess_f 为 inject_state 夹具内 jump 忙测试专用 id
     #[tokio::test]
-    async fn queue_jump_busy_inflight_returns_failed() {
+    async fn queue_jump_busy_inflight_falls_back_to_queue() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
-        // 先入队一条（sess_b Processing）
+        // 先入队一条（sess_f Processing）
         let r = app
             .clone()
             .oneshot(req(
@@ -3287,12 +3339,28 @@ mod tests {
             ))
             .await
             .unwrap();
+        assert_eq!(r.status(), 200);
         let body = body_string(r).await;
-        assert!(
-            body.contains("\"status\":\"failed\"") && body.contains("投递进行中"),
-            "in-flight 占用时 jump 应 200 failed 提示重试：{body}"
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["status"], "queued",
+            "in-flight 占用时 jump 应让位排队回执 queued：{body}"
         );
+        assert_eq!(v["itemId"], id, "queued 回执必须携带点名条目 id");
+        assert_eq!(v["position"], 1, "唯一 pending 条目队位 1");
         assert_eq!(fake.recorded().len(), 0, "占用期间不得注入");
+        // 忙让位不落审计：账内恰一条审计 = 入队时 send 端点的 queue|ok（端点契约），
+        // 不得出现 jump/fail——jump 审计只出自 settle（busy 让位未执行 flush_given）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(
+            audits.len(),
+            1,
+            "忙让位不落审计（仅入队时的 queue|ok 一条）"
+        );
+        assert_eq!(audits[0].action, "queue");
+        assert_eq!(audits[0].result, "ok");
     }
 
     /// 插队 + 撤回：黄态入队两条 → jump 第二条 delivered（插队语义：黄态照发，注入器
@@ -3920,6 +3988,91 @@ mod tests {
         }
         // 全程无任何投递
         assert!(fake.recorded_keys().is_empty());
+    }
+
+    /// guard-busy 回归锁（F1）：approve 遇 in-flight 占用 → 200 failed{「投递进行中，
+    /// 请稍后重试」} 且零按键出手。守卫取在 spawn_blocking 闭包内（断连双投洞封闭）——
+    /// 手动占位模拟「detached 旧投递进行中」，新触发必须让位。审计口径：忙让位无投递
+    /// 发生不落审计（与 retract/jump 忙让位同口径）。独占会话 sess_p（守卫持到测尾，
+    /// 全测试集唯一 id 立规）
+    #[tokio::test]
+    async fn approve_busy_inflight_returns_failed_without_key() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_p").unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_p","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("投递进行中，请稍后重试"),
+            "in-flight 占用时 approve 应 200 failed 让位：{body}"
+        );
+        assert!(
+            fake.recorded_keys().is_empty() && fake.recorded_key_specs().is_empty(),
+            "占用期间不得出手任何按键（零注入）"
+        );
+        // 忙让位不落审计（无投递发生——retract/jump 忙让位同口径）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(audits.is_empty(), "忙让位不落审计");
+    }
+
+    /// F2 审批族规格（服务端断言「审批路径族传递」）：codex 会话审批按键必须携带 B 族
+    /// 规格（TuiFamily::Crossterm）送达注入器——构造层 key_records_for_family_dispatch
+    /// （windows_console.rs，Task 3）已断言 codex 方向键按族走 VK 形态（vk=0x26），本测
+    /// 锁端点侧族参数真实下传：缺族时 KV 自定义方向键会按 A 族默认形态（vk=0 字符流）
+    /// 被 crossterm 静默吞。FakeInjector 覆写 locate_and_send_key_spec 记录收到的族；
+    /// 键位经委托照旧入 key_calls（无 [mobile] 前缀契约一并回归）。独占会话 sess_q
+    /// （默认表 codex 映射 verified 0.154.0 非严格档，approve="y"）
+    #[tokio::test]
+    async fn approve_passes_family_spec_to_injector() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_q","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\""),
+            "codex 审批应回执 key_sent：{body}"
+        );
+        assert_eq!(
+            fake.recorded_key_specs(),
+            vec![(
+                24u32,
+                "y".to_string(),
+                crate::inject::families::TuiFamily::Crossterm
+            )],
+            "审批按键必须携带 codex 的 B 族（Crossterm）规格送达注入器"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(24u32, "y".to_string())],
+            "键位经 spec 覆写委托照旧记录（无 [mobile] 前缀）"
+        );
+        assert!(fake.recorded().is_empty(), "审批走按键通道，不走文本注入");
     }
 
     /// P3 审计动作词表（Task 7 P3c）：KV 定制映射含域外 id=other 的选项 → POST

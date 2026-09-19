@@ -741,14 +741,73 @@ pub async fn session_send(
         "position": position,
     });
     // ⑥ 可输入态 → 直发（flush_one 投递内核，jump=false；in-flight 守卫与 flush 循环共用，
-    //    防同会话并发双投）。守卫不对称说明（queue.rs Critical 1 同审）：本守卫宿主是
-    //    handler 任务——stop 的 abort 只打 serve/accept 任务、不追杀已建立请求，不存在
-    //    「守卫先于 detached 投递释放」窗口，无需移入阻塞闭包（flush 循环事件臂必须移）
+    //    防同会话并发双投）。守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush
+    //    循环事件臂同款，F1 断连双投修复）——handler 断连（弱网/隧道掐断慢投递）不再
+    //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位
     if crate::inject::queue::is_input_ready(&session.status) {
-        return match crate::inject::queue::try_acquire_inflight(&sid) {
-            None => {
-                // flush 循环正在投递该会话：本条保持入队（守卫方负责队首送达，
-                // 下一跃迁接力本条），按已入队回执——不谎报 delivered
+        let flush_st = st.clone();
+        let flush_sid = sid.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            // 守卫必须是闭包第一条语句：宿主与投递同栈，handler future 因断连被 drop
+            // 也不会提前释放——detached 旧投递全程占位，新触发取不到名额即让位
+            let Some(_guard) = crate::inject::queue::try_acquire_inflight(&flush_sid) else {
+                // flush 循环 / detached 旧投递正在投递该会话：本条保持入队（进行中的
+                // 那次已覆盖该会话队首，下一跃迁接力本条），Deferred → 下方 queued 映射
+                // ——不谎报 delivered
+                return crate::inject::queue::FlushOutcome::Deferred;
+            };
+            crate::inject::queue::flush_one(&flush_st, &flush_sid, false)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("session-send 直发任务异常: {e}");
+            crate::inject::queue::FlushOutcome::Failed("内部任务异常".to_string())
+        });
+        // P1-4 四态精确映射（Sent/Failed/Deferred/Suspended →
+        // delivered/failed/queued/queued）；守卫忙让位归 Deferred，与黄态/挂起同臂——
+        // 单臂收敛（原 handler 帧守卫的 Some/None 双臂已删，审计 queue|ok 口径不变）
+        return match outcome {
+            crate::inject::queue::FlushOutcome::Sent => {
+                endpoint_audit(
+                    &st,
+                    &device_id,
+                    &device_name,
+                    &tool,
+                    &sid,
+                    &content,
+                    "send",
+                    "ok",
+                );
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "status": "delivered" })),
+                )
+                    .into_response()
+            }
+            // 注入/确认失败（行已 mark_failed，队列无残留——回执可重试，W1/W4）
+            crate::inject::queue::FlushOutcome::Failed(e) => {
+                endpoint_audit(
+                    &st,
+                    &device_id,
+                    &device_name,
+                    &tool,
+                    &sid,
+                    &content,
+                    "send",
+                    &format!("failed:{e}"),
+                );
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "status": "failed", "error": e })),
+                )
+                    .into_response()
+            }
+            // Deferred/Suspended（含守卫忙让位）：行保持 pending 等会话回来/下个跃迁，
+            // 语义即排队（Suspended 亦 queued）——回查 pending 取该条目实时位次回执
+            crate::inject::queue::FlushOutcome::Deferred
+            | crate::inject::queue::FlushOutcome::Suspended => {
                 endpoint_audit(
                     &st,
                     &device_id,
@@ -759,99 +818,25 @@ pub async fn session_send(
                     "queue",
                     "ok",
                 );
+                // position = 该条目在 pending 队列中的位次（第 1 位 = 1，评审 Minor 5
+                // ——len() 会把队首误报为 1 条以后）；并发消费致条目已不在 pending →
+                // 0（**前端 Task 8 须容忍 0**：语义为「已不在队列，由投递循环接力」）
+                let pos = st.store.with(|c| {
+                    crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
+                        .iter()
+                        .position(|i| i.id == item_id)
+                        .map_or(0, |p| p as i64 + 1)
+                });
                 (
                     StatusCode::OK,
                     [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(queued),
+                    Json(serde_json::json!({
+                        "status": "queued",
+                        "itemId": item_id,
+                        "position": pos,
+                    })),
                 )
                     .into_response()
-            }
-            Some(_guard) => {
-                let flush_st = st.clone();
-                let flush_sid = sid.clone();
-                let outcome = tokio::task::spawn_blocking(move || {
-                    crate::inject::queue::flush_one(&flush_st, &flush_sid, false)
-                })
-                .await
-                .unwrap_or_else(|e| {
-                    log::error!("session-send 直发任务异常: {e}");
-                    crate::inject::queue::FlushOutcome::Failed("内部任务异常".to_string())
-                });
-                // P1-4 四态精确映射（Sent/Failed/Deferred/Suspended →
-                // delivered/failed/queued/queued）
-                match outcome {
-                    crate::inject::queue::FlushOutcome::Sent => {
-                        endpoint_audit(
-                            &st,
-                            &device_id,
-                            &device_name,
-                            &tool,
-                            &sid,
-                            &content,
-                            "send",
-                            "ok",
-                        );
-                        (
-                            StatusCode::OK,
-                            [(axum::http::header::CACHE_CONTROL, "no-store")],
-                            Json(serde_json::json!({ "status": "delivered" })),
-                        )
-                            .into_response()
-                    }
-                    // 注入/确认失败（行已 mark_failed，队列无残留——回执可重试，W1/W4）
-                    crate::inject::queue::FlushOutcome::Failed(e) => {
-                        endpoint_audit(
-                            &st,
-                            &device_id,
-                            &device_name,
-                            &tool,
-                            &sid,
-                            &content,
-                            "send",
-                            &format!("failed:{e}"),
-                        );
-                        (
-                            StatusCode::OK,
-                            [(axum::http::header::CACHE_CONTROL, "no-store")],
-                            Json(serde_json::json!({ "status": "failed", "error": e })),
-                        )
-                            .into_response()
-                    }
-                    // Deferred/Suspended：行保持 pending 等会话回来/下个跃迁，语义即
-                    // 排队（Suspended 亦 queued）——回查 pending 取该条目实时位次回执
-                    crate::inject::queue::FlushOutcome::Deferred
-                    | crate::inject::queue::FlushOutcome::Suspended => {
-                        endpoint_audit(
-                            &st,
-                            &device_id,
-                            &device_name,
-                            &tool,
-                            &sid,
-                            &content,
-                            "queue",
-                            "ok",
-                        );
-                        // position = 该条目在 pending 队列中的位次（第 1 位 = 1，评审 Minor 5
-                        // ——len() 会把队首误报为 1 条以后）；并发消费致条目已不在 pending →
-                        // 0（**前端 Task 8 须容忍 0**：语义为「已不在队列，由投递循环接力」）
-                        let pos = st.store.with(|c| {
-                            crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
-                                .iter()
-                                .position(|i| i.id == item_id)
-                                .map_or(0, |p| p as i64 + 1)
-                        });
-                        (
-                            StatusCode::OK,
-                            [(axum::http::header::CACHE_CONTROL, "no-store")],
-                            Json(serde_json::json!({
-                                "status": "queued",
-                                "itemId": item_id,
-                                "position": pos,
-                            })),
-                        )
-                            .into_response()
-                    }
-                }
             }
         };
     }
@@ -1003,9 +988,14 @@ pub async fn session_queue(
 /// - 缺参 → 400；无此 pending 项 → 404 not_found；
 /// - 四态精确映射（P1-4）：Sent → 200 delivered；Failed(e) → 200 failed{error}
 ///   （注入失败行已退出 pending）；Deferred | Suspended → 200 queued + itemId/position
-///   （行保持 pending 等会话回来/下个跃迁，语义即排队——jump 点名场景 Deferred 实际
-///   不可达〔jump 跳过黄态复核〕，Suspended〔会话消失〕亦按 queued 回执）；
-/// - in-flight 守卫忙 → 200 failed（该会话投递进行中，提示重试）。
+///   （行保持 pending 等会话回来/下个跃迁，语义即排队——jump 点名场景 Deferred 的黄态
+///   臂实际不可达〔jump 跳过黄态复核〕，守卫忙让位与会话消失〔Suspended〕亦按 queued）；
+/// - in-flight 守卫忙 → 200 queued{itemId,position}（**回执契约变化，F1 裁决**：旧忙时
+///   回 failed「该会话投递进行中」逼客户端重试，现改 queued——条目保持 pending 语义即
+///   排队，让位给进行中的那次投递。前端兼容性论证：移动端 handleJump 对非 delivered
+///   回执一律走 reconcileQueued 对账，条目仍在队即恢复排队视图（= queued 直认），不存在
+///   对 jump 忙 failed 文案的交互依赖，前端 Task 8 已兼容）。守卫取在 spawn_blocking
+///   闭包内（fff9c29 flush 循环事件臂同款，F1 断连双投修复）。
 pub async fn session_queue_jump(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -1027,12 +1017,6 @@ pub async fn session_queue_jump(
         )
             .into_response()
     };
-    // 先取 in-flight 守卫再做归属查找：顺序颠倒会有窗口——flush 循环在间隙内发出同一
-    // 队首项，jump 再点名投递同一条 → 双投。守卫先占住即与循环/直发互斥。
-    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
-        // 该会话已有投递进行中（与直发/flush 循环共用守卫）——插队让位，提示重试
-        return failed_body("该会话投递进行中，请稍后重试".to_string());
-    };
     // 前查归属（借 retract 语义）+ 取整行（点名投递需要 item 字段），无 pending 项 → 404
     let target = st.store.with(|c| {
         crate::database::dao::inject_queue::pending_for_session_conn(c, &sid)
@@ -1048,7 +1032,30 @@ pub async fn session_queue_jump(
             .into_response();
     };
     let flush_st = st.clone();
+    let flush_sid = sid.clone();
     let outcome = match tokio::task::spawn_blocking(move || {
+        // 守卫必须是闭包第一条语句（fff9c29 flush 循环事件臂同款，F1 断连双投修复）：
+        // 宿主与投递同栈，handler 断连（弱网/隧道掐断慢投递）不再提前释放守卫——
+        // detached 旧投递全程占位，新触发取不到名额即让位
+        let Some(_guard) = crate::inject::queue::try_acquire_inflight(&flush_sid) else {
+            // 该会话已有投递进行中（与直发/flush 循环共用守卫）——让位：条目保持
+            // pending 语义即排队，回执 queued（**裁决变化**：旧忙时回 failed「投递
+            // 进行中」提示重试；移动端 handleJump 对非 delivered 走 reconcileQueued
+            // 对账，queued 直认恢复排队视图，无 failed 交互依赖——前端 Task 8 已兼容）
+            return crate::inject::queue::FlushOutcome::Deferred;
+        };
+        // 守卫下再校验 pending 归属（守卫入闭包的伴随义务）：上方前查已不在守卫下，
+        // 间隙内 flush 循环可能已投递本条并释放守卫——不复查会对已 sent 条目再注入
+        // （双投）。仍 pending 才投；已被消费 → Deferred（queued/position=0，语义
+        // 「已不在队列，由投递循环接力」，前端 Task 8 须容忍 0）
+        let still_pending = flush_st.store.with(|c| {
+            crate::database::dao::inject_queue::pending_for_session_conn(c, &flush_sid)
+                .iter()
+                .any(|i| i.id == item_id)
+        });
+        if !still_pending {
+            return crate::inject::queue::FlushOutcome::Deferred;
+        }
         crate::inject::queue::flush_given(&flush_st, &item, true)
     })
     .await
@@ -1067,8 +1074,8 @@ pub async fn session_queue_jump(
         )
             .into_response(),
         crate::inject::queue::FlushOutcome::Failed(e) => failed_body(e),
-        // Deferred/Suspended：行保持 pending 等会话回来/下个跃迁，语义即排队——
-        // 回查 pending 取该条目实时位次回执
+        // Deferred/Suspended（含守卫忙让位/已被他方消费）：行保持 pending 或已退出，
+        // 语义即排队——回查 pending 取该条目实时位次回执
         crate::inject::queue::FlushOutcome::Deferred
         | crate::inject::queue::FlushOutcome::Suspended => {
             // position = 条目位次（第 1 位 = 1，评审 Minor 5）；并发消费致条目已不在
@@ -1099,6 +1106,9 @@ pub async fn session_queue_jump(
 /// P2-6：撤回与投递共守卫（照 jump 先例，device_identity 校验后、pending 前查之前取
 /// in-flight 名额）——撤回正删的行可能正是投递内核已取走待落账的队首，共守卫使两者
 /// 串行化，杜绝「撤回成功回执但消息仍被注入」的竞态；忙时短回执（200 failed 提示重试）。
+/// F1 披露：本端点守卫**留在 handler 帧**是有意为之——撤回临界区是纯 DB 工作，与守卫
+/// 同栈同生命周期，不存在「handler 断连 drop future 提前释放守卫、detached 投递仍在
+/// 跑」的窗口（jump 已因 detached 投递入闭包，本端点无此形态，勿照搬）。
 pub async fn session_queue_retract(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -1373,8 +1383,14 @@ pub struct SessionApproveReq {
 ///   运行中会话不付出 KV 读取代价）；
 /// - 映射表无该工具映射 / optionId 无对应项 / probe-pending 严格档（M9R Task 10：
 ///   未取证不出键，按键位映射缺失处理）→ 404 no_mapping（降级提示走普通发送）；
-/// - in-flight 守卫忙（flush 循环/直发/插队正在投递该会话）→ 200 failed 提示重试；
-/// - 投递 `injector.locate_and_send_key(pid, key)`：**不带 [mobile] 前缀**——按键非文本；
+/// - in-flight 守卫忙（flush 循环/直发/插队/detached 旧投递正在投递该会话）→ 200
+///   failed 提示重试。守卫取在 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，
+///   F1 断连双投修复——handler 断连不再提前释放守卫）；忙让位无投递发生，不写审计
+///   （既有口径：与 retract/jump 忙让位一致）；
+/// - 投递 `injector.locate_and_send_key_spec(pid, key, spec)`（F2：spec = 该会话工具
+///   的族规格，先 `families::family_for` 再 `FALLBACK_SPEC` 兜底，与 Task 5 try_flush
+///   同款——KV 自定义映射若配方向键，B 族 codex 须 VK+scan 键形态，无族默认的 A 族
+///   形态〔vk=0 字符流〕会被静默吞）：**不带 [mobile] 前缀**——按键非文本；
 ///   成功 → 200 key_sent；失败 → 200 failed{error}（可重试回执）。
 ///   // M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键
 ///   （选项卡 UI 与端点契约通道无关，届时只扩这一处分派）
@@ -1464,31 +1480,45 @@ pub async fn session_approve(
                 .into_response();
         }
     };
-    // in-flight 守卫（与 flush 循环/直发/插队共用）：该会话已有投递进行中 → 让位，
-    // 200 failed 提示重试（不双投；无投递发生故不写审计——jump 忙让位同口径）
-    let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
-        return (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
-                "status": "failed",
-                "error": "该会话投递进行中，请稍后重试"
-            })),
-        )
-            .into_response();
-    };
+    // F2：按键按该会话工具取族规格（先 family_for 再 FALLBACK 兜底，与 Task 5
+    // try_flush 同款）——族表未收录的工具（路由层已拦）走快消费者默认口径
+    let spec = crate::inject::families::family_for(&tool)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
     // M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键
     let injector = st.injector.clone();
     let pid = session.pid;
     let key = option.key.clone();
-    let sent =
-        match tokio::task::spawn_blocking(move || injector.locate_and_send_key(pid, &key)).await {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("session-approve 投递任务异常: {e}");
-                Err("内部任务异常".to_string())
-            }
-        };
+    let approve_sid = sid.clone();
+    // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，F1
+    // 断连双投修复）：handler 断连（弱网/隧道掐断慢投递）不再提前释放守卫——detached
+    // 投递全程占位，新触发取不到名额即让位。忙 → None 哨兵：让位不投递亦不落审计
+    // （无投递发生不写审计——retract/jump 忙让位同口径）
+    let attempt = tokio::task::spawn_blocking(move || {
+        // `?` = 守卫忙（try_acquire_inflight 得 None）→ 闭包哨兵返回 None：让位不投递
+        let _guard = crate::inject::queue::try_acquire_inflight(&approve_sid)?;
+        Some(injector.locate_and_send_key_spec(pid, &key, &spec))
+    })
+    .await;
+    let sent = match attempt {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            // in-flight 守卫忙（与 flush 循环/直发/插队共用）→ 让位，200 failed 提示
+            // 重试（不双投；无投递发生故不写审计——忙让位同口径）
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "error": "投递进行中，请稍后重试"
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("session-approve 投递任务异常: {e}");
+            Err("内部任务异常".to_string())
+        }
+    };
     // 审计 action 词表（W5 词表 send|queue|flush|jump|retract|approve|reject|fail|key|open；
     // open = Task 11 一键 resume（session-open 端点），Task 7 的预留标注已兑现）：
     // approve/reject 语义化；域外 id（KV 定制表
