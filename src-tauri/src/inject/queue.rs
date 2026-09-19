@@ -237,10 +237,11 @@ pub(crate) fn flush_one_with(
 /// （裁决 12：用户显式要求即刻送达，不限于队首），故不走 flush_one 的「取队首」——
 /// 调用方（端点）已按 (session_id, item_id) 前查该行 pending 归属，且在本函数执行的
 /// 全程持有 in-flight 守卫（防与 flush 循环对同一会话双投；F1 后守卫取在端点的
-/// spawn_blocking 闭包内，**守卫下必须复查该行仍 pending**——前查与守卫之间的间隙
-/// 他方可能已消费该条目，不复查即对已 sent 行再注入）。快照复核 + 注入 + 落账与
-/// [`flush_one`] 同一内核（审计 action=jump 由 [`settle`] 写入），返回语义同
-/// [`flush_one`]。
+/// spawn_blocking 闭包内）。**守卫下必须复查该行仍 pending**（前查与守卫之间的间隙
+/// 他方可能已消费该条目，不复查即对已 sent 行再注入）——该复查义务已抽为
+/// [`flush_given_if_pending`]（收尾批 P2 可测内核），端点经它调用本函数。快照复核 +
+/// 注入 + 落账与 [`flush_one`] 同一内核（审计 action=jump 由 [`settle`] 写入），
+/// 返回语义同 [`flush_one`]。
 pub(crate) fn flush_given(
     st: &crate::remote::server::RemoteState,
     item: &QueueRow,
@@ -252,6 +253,31 @@ pub(crate) fn flush_given(
         .store
         .with(|conn| settle(conn, st, item, jump, outcome.clone()));
     outcome
+}
+
+/// jump 守卫下的 pending 再校验 + 投递（收尾批 P2 抽函数：session-queue/jump 端点
+/// spawn_blocking 闭包内的「守卫下再校验 pending 归属」可测内核）。调用方（端点）
+/// 必须**先取到该会话 in-flight 守卫再调本函数**——守卫是闭包第一条语句的义务留在
+/// 端点，与 [`flush_one`]/flush 循环事件臂同形。行为：
+/// - 复查条目仍 pending（端点前查与守卫之间有间隙，flush 循环可能已投递本条并释放
+///   守卫——不复查会对已 sent 条目再注入，双投）：`store.with` 短临界区，锁内只 SQL；
+/// - 仍 pending → [`flush_given`]（注入与确认零 DB 锁，锁纪律不破坏）；
+/// - 已被消费 → [`FlushOutcome::Deferred`]（端点按 queued/position=0 回执，语义
+///   「已不在队列，由投递循环接力」，前端须容忍 0）。
+pub(crate) fn flush_given_if_pending(
+    st: &crate::remote::server::RemoteState,
+    item: &QueueRow,
+    jump: bool,
+) -> FlushOutcome {
+    let still_pending = st.store.with(|c| {
+        inject_queue::pending_for_session_conn(c, &item.session_id)
+            .iter()
+            .any(|i| i.id == item.id)
+    });
+    if !still_pending {
+        return FlushOutcome::Deferred;
+    }
+    flush_given(st, item, jump)
 }
 
 /// 启动对账补投内核（P2-5，[`spawn_flush_loop`] 启动时与周期兜底共用）：取 distinct
@@ -986,6 +1012,68 @@ mod tests {
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].action, "jump");
         assert_eq!(audits[0].result, "ok");
+    }
+
+    /// 收尾批 P2（jump 守卫内 still_pending 复查抽函数）：flush_given_if_pending
+    /// 两分支——①条目仍 pending → Sent 且注入发生；②条目已被消费（先 mark_sent）
+    /// → Deferred 且注入零发生（复查缺失即对已 sent 行再注入=双投，本测是防线钉）。
+    /// 调用形态对齐端点闭包：先取 in-flight 守卫，再进复查+投递内核
+    #[test]
+    fn jump_deliver_under_guard() {
+        // ① 条目仍 pending → Sent + 注入 + mark_sent
+        let fake = FakeInjector::ok();
+        let st = state_with(
+            vec![sess("s-jg", SessionStatus::Processing, 40)],
+            fake.clone(),
+        );
+        let item_id = st.store.with(|c| enq(c, "s-jg", "守卫下投递消息"));
+        let item = st
+            .store
+            .with(|c| inject_queue::get_conn(c, item_id))
+            .expect("入队行必须可取");
+        let _guard = try_acquire_inflight("s-jg").expect("空闲会话必须取到守卫");
+        assert_eq!(
+            flush_given_if_pending(&st, &item, true),
+            FlushOutcome::Sent,
+            "仍 pending 必须照发（jump 插队语义）"
+        );
+        drop(_guard);
+        assert_eq!(
+            fake.recorded(),
+            vec![(40u32, "守卫下投递消息".to_string())],
+            "注入必须真实发生"
+        );
+        let sent_at = st
+            .store
+            .with(|c| inject_queue::get_conn(c, item_id).unwrap().sent_at);
+        assert!(sent_at.is_some(), "Sent 落 mark_sent");
+
+        // ② 条目已被消费（先 mark_sent，模拟间隙内 flush 循环已投递）→ Deferred
+        // 且注入零发生
+        let fake2 = FakeInjector::ok();
+        let st2 = state_with(
+            vec![sess("s-jg2", SessionStatus::Processing, 41)],
+            fake2.clone(),
+        );
+        let item2_id = st2.store.with(|c| enq(c, "s-jg2", "已被消费消息"));
+        st2.store.with(|c| {
+            inject_queue::mark_sent_conn(c, item2_id, chrono::Utc::now().timestamp_millis())
+        });
+        let item2 = st2
+            .store
+            .with(|c| inject_queue::get_conn(c, item2_id))
+            .expect("已消费行仍可取（行保留作审计痕迹）");
+        let _guard2 = try_acquire_inflight("s-jg2").expect("空闲会话必须取到守卫");
+        assert_eq!(
+            flush_given_if_pending(&st2, &item2, true),
+            FlushOutcome::Deferred,
+            "已被消费的条目必须让位（端点按 queued/position=0 回执）"
+        );
+        drop(_guard2);
+        assert!(
+            fake2.recorded().is_empty(),
+            "已消费条目零注入（双投防线的存在意义）"
+        );
     }
 
     // ==== 队列生命周期（裁决 19 停服冻结 + P2-5 对账/兜底 + P1-4 四态上抛） ====

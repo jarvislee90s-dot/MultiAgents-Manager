@@ -158,4 +158,27 @@ mod tests {
         // NBSP（U+00A0）不在 C1 区——合法展示字符不受连坐，原样保留
         assert_eq!(normalize_newlines("a\u{a0}b"), "a\u{a0}b");
     }
+
+    /// 收尾批 P2：多字节安全钉死——混入控制字符的正文经逐字符（Unicode 标量）
+    /// 过滤，emoji（😀 U+1F600，4 字节）与中文必须完整保留、控制字符零残留；
+    /// 防未来误改成按字节滤除（会把多字节标量撕成无效字节）
+    #[test]
+    fn emoji_multibyte_survives_filter() {
+        let out = normalize_newlines("部署😀\u{7f}完成\u{1b}[31m中文\u{85}收尾");
+        assert_eq!(out, "部署😀完成[31m中文收尾");
+        // emoji 原样（整标量存活，未撕裂）
+        assert!(out.contains('\u{1F600}'), "emoji 必须原样保留：{out}");
+        assert!(
+            out.contains("部署") && out.contains("中文"),
+            "中文必须原样保留"
+        );
+        // 控制字符零残留（C0 + DEL + C1 全区间）
+        assert!(
+            out.chars().all(|c| {
+                let cp = c as u32;
+                cp > 0x1F && cp != 0x7F && !(0x80..=0x9F).contains(&cp)
+            }),
+            "零残留：产物不含 C0/DEL/C1 任何字符"
+        );
+    }
 }

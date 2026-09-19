@@ -1126,6 +1126,44 @@ describe("SessionDetail：详情页 10s 轮询（F6）", () => {
     expect(messagesCalls()).toBe(3);
     visSpy.mockRestore();
   });
+
+  // 收尾批 P2：F6 卸载清理回归钉（评审修复批遗留的显式验证）——unmount 必须
+  // 清 interval + 移除 visibilitychange 监听，长驻页面来回进出不泄漏计时器/监听。
+  // 监听移除按 spyOn add/removeEventListener 捕获引用比对（同一函数引用注册且移除）；
+  // interval 清理由 getTimerCount 直证（泄漏则卸载后仍挂 1 个待触发拍），并按
+  // 「clearAllTimers 后再推进不再触发拉取」行为口径兜底断言
+  it("unmount 清理：interval 已清 + visibilitychange 监听已移除", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    const addSpy = vi.spyOn(document, "addEventListener");
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+    try {
+      const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      await act(async () => {}); // 挂载首拉落地
+      expect(messagesCalls()).toBe(1);
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(messagesCalls()).toBe(2); // 轮询确实在跑（前提自证，断言不空转）
+      unmount();
+      // visibilitychange 监听已移除：注册与移除是同一函数引用（组件只挂这一个
+      // document 级监听——比对引用即精确钉住 F6 effect 的清理半边）
+      const visListener = addSpy.mock.calls.find((c) => c[0] === "visibilitychange")?.[1];
+      expect(visListener).toBeDefined();
+      expect(removeSpy).toHaveBeenCalledWith("visibilitychange", visListener);
+      // interval 已清：卸载后零待触发计时器（泄漏则此处为 1）
+      expect(vi.getTimerCount()).toBe(0);
+      // 行为口径兜底：清掉全部计时器再推进，不再触发任何拉取
+      vi.clearAllTimers();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(messagesCalls()).toBe(2);
+    } finally {
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+  });
 });
 
 // ==== P2-B（评审修复批）：轮询滚动跟随条件化 ====

@@ -1047,17 +1047,11 @@ pub async fn session_queue_jump(
         };
         // 守卫下再校验 pending 归属（守卫入闭包的伴随义务）：上方前查已不在守卫下，
         // 间隙内 flush 循环可能已投递本条并释放守卫——不复查会对已 sent 条目再注入
-        // （双投）。仍 pending 才投；已被消费 → Deferred（queued/position=0，语义
-        // 「已不在队列，由投递循环接力」，前端 Task 8 须容忍 0）
-        let still_pending = flush_st.store.with(|c| {
-            crate::database::dao::inject_queue::pending_for_session_conn(c, &flush_sid)
-                .iter()
-                .any(|i| i.id == item_id)
-        });
-        if !still_pending {
-            return crate::inject::queue::FlushOutcome::Deferred;
-        }
-        crate::inject::queue::flush_given(&flush_st, &item, true)
+        // （双投）。复查+投递已抽为 flush_given_if_pending 可测内核（收尾批 P2，
+        // 单测 jump_deliver_under_guard）：复查 SQL 短临界区、注入在锁外；已被消费
+        // → Deferred（queued/position=0，语义「已不在队列，由投递循环接力」，
+        // 前端 Task 8 须容忍 0）
+        crate::inject::queue::flush_given_if_pending(&flush_st, &item, true)
     })
     .await
     {
