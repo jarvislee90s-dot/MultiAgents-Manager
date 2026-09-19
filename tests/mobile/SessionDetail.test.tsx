@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionDetail from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
@@ -63,6 +63,19 @@ interface Routes {
    *  sessionOpenStatus 驱动 404 错误码分支（no_cwd / no_resume_command / no_session） */
   sessionOpen?: { status?: string; error?: string };
   sessionOpenStatus?: number;
+  /** 发送能力探测（MessageComposer 挂载即拉）：可注入态夹具。
+   *  组件在 infoReady 前 / sendInfo 为 null 时自隐——缺省给可注入，使 composer 渲染 */
+  sendInfo?: { injectable: boolean; channels: string[]; visibility: string };
+  /** 审批选项卡数据源（ApproveCard 挂载即拉）：available 为假时卡自隐——
+   *  分屏挂载断言需给 available=true，否则断言的是「卡自隐」而非「没挂载」 */
+  approveOptions?: {
+    available: boolean;
+    options: { id: string; label: string }[];
+    verifiedWith: string;
+    currentVersion: string | null;
+    drift: boolean;
+    reason?: string;
+  };
 }
 
 let routes: Routes;
@@ -122,6 +135,32 @@ function installFetch() {
       return new Response(JSON.stringify(routes.sessionOpen ?? { status: "opening" }), {
         status: routes.sessionOpenStatus ?? 200,
       });
+    }
+    if (url.includes("/session-send-info")) {
+      // MessageComposer 挂载即拉；缺省给可注入，使分屏态 composer 真正渲染出来
+      // （sendInfo 为 null 时组件自隐，会把「分屏有没有挂载」的断言变成假阴性）
+      return new Response(
+        JSON.stringify(
+          routes.sendInfo ?? { injectable: true, channels: ["tmux"], visibility: "realtime" }
+        ),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/session-approve-options")) {
+      // ApproveCard 挂载即拉；缺省给 available=false 无 reason（卡自隐，不改既有用例渲染）。
+      // 「分屏红卡挂载」用例须显式给 available=true——否则断言的是卡自隐而非没挂载
+      return new Response(
+        JSON.stringify(
+          routes.approveOptions ?? {
+            available: false,
+            options: [],
+            verifiedWith: "test",
+            currentVersion: null,
+            drift: false,
+          }
+        ),
+        { status: 200 }
+      );
     }
     if (url.includes("/file?")) {
       if (routes.fileStatus) return new Response("no", { status: routes.fileStatus });
@@ -432,6 +471,125 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(iconClass("preview-toggle-split")).toContain("lucide-rows-2");
     // 左右分屏（split-h）= 左右两格 → columns-2
     expect(iconClass("preview-toggle-split-h")).toContain("lucide-columns-2");
+  });
+
+  // 分屏态对话能力（2026-09-19 用户裁决）：分屏 = 对话列 + 文件列的并列布局，
+  // 对话列必须保有完整对话能力。原实现把 MessageComposer / ApproveCard 排除在
+  // 分屏分支外（仅非分屏正文视图挂载），致分屏看文件时**输入框消失、红卡不可见**——
+  // 用户实测报告，且该行为在 docs/ 全库无任何设计依据（系实现越权）。
+  // 本组为用户可见行为的回归锁：分屏两态（split / split-h）下两者都必须挂载。
+  describe("分屏态对话能力（2026-09-19 用户裁决回归锁）", () => {
+    it("上下分屏（split）下发送输入框仍挂载——分屏看文件也能发消息", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+      const split = screen.getByTestId("split-container");
+      // 关键断言：输入框**在分屏容器内**（修正前分屏分支不挂 composer；
+      // 必须用包含关系锁死，避免被其他分支误命中）
+      expect(await within(split).findByTestId("message-composer")).toBeTruthy();
+    });
+
+    it("左右分屏（split-h）下发送输入框仍挂载", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+      const split = screen.getByTestId("split-container");
+      expect(await within(split).findByTestId("message-composer")).toBeTruthy();
+    });
+
+    it("waiting 态上下分屏下审批红卡仍挂载——分屏也必须能看到待审批", async () => {
+      installFetch();
+      // 消息正文须含项目文件路径才会渲染 file-link（openFile 入口）
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "等批准，相关文件 /tmp/proj/src/app.rs" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      routes.approveOptions = {
+        available: true,
+        options: [
+          { id: "allow", label: "允许" },
+          { id: "deny", label: "拒绝" },
+        ],
+        verifiedWith: "claude 2.1.251",
+        currentVersion: "claude 2.1.251",
+        drift: false,
+      };
+      render(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+      const split = screen.getByTestId("split-container");
+      expect(split).toBeTruthy();
+      // 关键断言：红卡**在分屏容器内**（修正前分屏分支不挂红卡；仅断言
+      // findByTestId 会被非分屏分支或浮层误命中 → 必须用包含关系锁死）
+      expect(within(split).getByTestId("approve-card")).toBeTruthy();
+    });
+
+    it("waiting 态左右分屏下审批红卡仍挂载", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "等批准，相关文件 /tmp/proj/src/app.rs" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      routes.approveOptions = {
+        available: true,
+        options: [
+          { id: "allow", label: "允许" },
+          { id: "deny", label: "拒绝" },
+        ],
+        verifiedWith: "claude 2.1.251",
+        currentVersion: "claude 2.1.251",
+        drift: false,
+      };
+      render(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+      const split = screen.getByTestId("split-container");
+      expect(within(split).getByTestId("approve-card")).toBeTruthy();
+    });
+
+    it("非 waiting 态分屏下不渲染红卡（状态门不变）", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+      expect(screen.getByTestId("split-container")).toBeTruthy();
+      expect(screen.queryByTestId("approve-card")).toBeNull();
+      // 但输入框仍在（两者门控条件不同：红卡看状态，输入框无条件）
+      expect(await screen.findByTestId("message-composer")).toBeTruthy();
+    });
+
+    it("全屏浮层态：红卡与输入框不挂载（浮层覆盖对话属预期，非本裁决范围）", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      // file-link 打开默认即全屏
+      expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
+      expect(screen.queryByTestId("split-container")).toBeNull();
+    });
   });
 
   it("需求：分屏分隔条可拖动——横向拖动改变文件栏宽度，纵向拖动改变高度", async () => {

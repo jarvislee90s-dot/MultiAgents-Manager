@@ -992,8 +992,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           data-split={preview.mode}
           className={`flex min-h-0 flex-1 ${preview.mode === "split-h" ? "flex-row" : "flex-col"}`}
         >
+          {/* 对话列：分屏 = 对话列 + 文件列的并列布局，**对话列须保有完整对话能力**
+              （2026-09-19 用户裁决）——审批红卡与发送输入框在本分支同样挂载。
+              原实现把两者排除在分屏外（仅正文视图挂载），致分屏看文件时无法发消息、
+              看不到待审批红卡；该行为无设计依据、系实现越权，已修。
+              红卡刷新机制、组件钥匙口径与下方正文分支一致（见该分支注释） */}
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {bookmarkBar}
+            {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
             <div
               ref={messageAreaRef}
               data-testid="message-area"
@@ -1002,6 +1008,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             >
               {messageArea}
             </div>
+            <MessageComposer key={session.id} session={session} />
           </div>
           <SplitHandle
             orientation={preview.mode === "split-h" ? "horizontal" : "vertical"}
@@ -1061,8 +1068,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           {bookmarkBar}
-          {/* R5 一键 resume（在电脑上打开，Task 11）：无 cwd / 无映射 → 禁用 + 原因；
-            两分支（split / 正文）中只有正文视图挂载，与 ApproveCard 同口径 */}
+          {/* R5 一键 resume（在电脑上打开，Task 11）：无 cwd / 无映射 → 禁用 + 原因。
+              注：本件仍仅正文视图挂载——它是「离开本页去电脑端」的入口，
+              与分屏无关；ApproveCard / MessageComposer 已改为全布局态挂载
+              （2026-09-19 用户裁决，见分屏分支注释） */}
           <div className="shrink-0 px-3 pt-2">
             <button
               type="button"
@@ -1096,11 +1105,12 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               </p>
             )}
           </div>
-          {/* 审批红卡（M8 Task 12）：waiting 态且正文视图挂载（预览/分屏分支不挂），
-              紧贴 messageArea 上方；available=false 时卡自身自隐（组件内部判定）。
+          {/* 审批红卡（M8 Task 12）：waiting 态挂载；紧贴 messageArea 上方；
+              available=false 时卡自身自隐（组件内部判定）。
               刷新机制事实口径：App 的 selected 是冻结快照，停留详情期间不会随 SSE
               重挂——红卡在「退出详情再进入 / PWA 重载」后出现；停留期间会话转为
-              非 waiting 时点按钮会收到 409 not_waiting 的中文降级文案（不误发键） */}
+              非 waiting 时点按钮会收到 409 not_waiting 的中文降级文案（不误发键）。
+              **分屏分支（split/split-h）挂载同一份**（2026-09-19 用户裁决） */}
           {/* 组件钥匙（M9R P3）：key={session.id}——复用实例切换会话时强制重挂，
               清掉上一会话的陈旧 receipt / 选项态（跨会话串卡的防线） */}
           {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
@@ -1112,7 +1122,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           >
             {messageArea}
           </div>
-          {/* 发送输入区（M7 Task 7，W4）：仅正文视图挂载（预览/分屏分支不挂）；
+          {/* 发送输入区（M7 Task 7，W4）：**全布局态挂载**（正文 / split / split-h，
+              2026-09-19 用户裁决）——分屏时对话列同样可发消息；
               send-info 拉取失败时组件自静默，不影响对话渲染；key 同上（组件钥匙） */}
           <MessageComposer key={session.id} session={session} />
         </div>
