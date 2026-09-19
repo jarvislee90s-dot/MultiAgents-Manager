@@ -127,7 +127,15 @@ pub(crate) fn try_flush_with(
             if jump {
                 super::confirm::await_jump_receipt(st, &session, &item.content)
             } else {
-                super::confirm::await_direct_receipt(st, &session, &item.content, confirm_timeout)
+                // family 与 timeout 同源下发（spec）——确认失败文案按族 × 平台感知
+                // （Mac 报告 §四-C：macOS crossterm 补「按一次回车」指引）
+                super::confirm::await_direct_receipt(
+                    st,
+                    &session,
+                    &item.content,
+                    confirm_timeout,
+                    spec.family,
+                )
             }
         }
     };
@@ -849,7 +857,8 @@ mod tests {
     // ==== A1 写入确认（M9R Task 5）：直呼确认函数 + 小超时（避免 5s 慢测） ====
 
     /// 直发确认失败：confirm_probe 恒 false（确认失败用例就地覆盖）→ 小超时轮询 +
-    /// 屏读门槛不成立（假 pid 屏读必败，保守不动作）→ Err 含裁决文案
+    /// 屏读门槛不成立（假 pid 屏读必败，保守不动作）→ Err 含裁决文案。
+    /// family 传 RawVt（对齐生产推导：claude 会话 → family_for("claude").family）
     #[test]
     fn direct_confirm_failure_returns_err() {
         let st = state_with_probe(
@@ -858,11 +867,47 @@ mod tests {
             std::sync::Arc::new(|_, _, _| false),
         );
         let s = sess("s-cf", SessionStatus::Waiting, 21);
-        let err = super::super::confirm::await_direct_receipt(&st, &s, "直发确认消息", 60)
-            .expect_err("确认未中必须失败回执");
+        let err = super::super::confirm::await_direct_receipt(
+            &st,
+            &s,
+            "直发确认消息",
+            60,
+            crate::inject::families::TuiFamily::RawVt,
+        )
+        .expect_err("确认未中必须失败回执");
         assert!(
             err.contains("已注入未确认"),
             "失败回执须含裁决 A1 文案：{err}"
+        );
+    }
+
+    /// 族感知行为断言（M3B 接线锁，Mac 报告 §四-C）：Crossterm 族直发确认失败的
+    /// 回执与纯函数选择器在「本机 OS」下的产出逐字一致——证明 family 参数真实参与
+    /// 选文案（macOS 上即 (Crossterm, macos) 新文案象限；Windows 上为
+    /// (Crossterm, windows) 原文案象限，与 confirm 四象限单测互证）
+    #[test]
+    fn direct_confirm_failure_receipt_is_family_consistent() {
+        let st = state_with_probe(
+            vec![sess("s-cf2", SessionStatus::Waiting, 27)],
+            FakeInjector::ok(),
+            std::sync::Arc::new(|_, _, _| false),
+        );
+        let s = sess("s-cf2", SessionStatus::Waiting, 27);
+        let err = super::super::confirm::await_direct_receipt(
+            &st,
+            &s,
+            "族感知确认消息",
+            60,
+            crate::inject::families::TuiFamily::Crossterm,
+        )
+        .expect_err("确认未中必须失败回执");
+        assert_eq!(
+            err,
+            super::super::confirm::direct_confirm_fail_copy(
+                crate::inject::families::TuiFamily::Crossterm,
+                std::env::consts::OS,
+            ),
+            "回执必须与纯函数选文案一致（族 × 本机 OS）：{err}"
         );
     }
 

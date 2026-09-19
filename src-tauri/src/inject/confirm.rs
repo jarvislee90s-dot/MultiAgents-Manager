@@ -11,7 +11,8 @@
 //!
 //! ## 结构（纯核 / 执行侧分离）
 //! - **纯核（零 cfg，跨平台可测）**：[`stamp_of`]（尾戳）/ [`stamp_in_messages`]
-//!   （列表含戳）/ [`stamp_hit_in_page`]（user 侧过滤 + 含戳）；
+//!   （列表含戳）/ [`stamp_hit_in_page`]（user 侧过滤 + 含戳）/
+//!   [`direct_confirm_fail_copy`]（族 × 平台感知失败文案，Mac 报告 §四-C）；
 //! - **契约/测试面 API**：[`session_stamp_hit`]（复用会话消息读路径；flush_one 不直接
 //!   用它——生产确认调用全部经 `RemoteState.confirm_probe` 缝，本函数不参加生产
 //!   调用链，当前唯一消费者是 queue 测试，零接触真实文件）；
@@ -26,6 +27,8 @@
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+
+use super::families::TuiFamily;
 
 /// 尾戳长度（字符）：composed 消息的尾部片段最具区分度（正文结尾），24 字符在
 /// 「截断防超长」与「防撞车」间取平（跨任务接口契约，Task 6 直接消费）。
@@ -109,6 +112,13 @@ const RECHECK_MS: u64 = 3_000;
 /// 直发确认失败回执（裁决 A1 文案）：注入成功但会话文件未见戳——提交未发生，
 /// 重试由用户判断（重试语义 = 用户先检查终端再重试，不自动重发防重复正文）
 const DIRECT_CONFIRM_FAIL: &str = "已注入未确认（未见会话记录），请检查终端后重试";
+/// 直发确认失败回执——macOS + crossterm 族特例（Mac 报告 §四-C，M3B 裁决）：
+/// Mac 实测 codex/kimi（crossterm 族）注入后自动回车被 TUI 吞（疑 bracketed-paste
+/// 把尾随 \n 当 paste 内容），文本滞留 composer 未提交、确认层 3s 窗找不到落盘
+/// ——原文案没告诉 macOS 用户「按一次回车即好」；Windows crossterm 有真回车
+/// 事件形态不受此困（M6R 探测定案），故严格限定 macos × crossterm 组合。
+const DIRECT_CONFIRM_FAIL_MACOS_CROSSTERM: &str =
+    "已注入未确认：该类工具在 macOS 注入后可能需在终端按一次回车提交，请检查后重试";
 /// 屏读门槛探针长度（字符）：正文末尾至多 16 字符（屏读窗口 64 unit 的安全子集；
 /// content ≤ 2 字符时取全串——「至多」语义天然覆盖）。**启发式性质（诚实口径）**：
 /// 提示符文本与超短消息理论上可撞车（探针恰为终端提示符片段）；折行长文只能读
@@ -120,6 +130,21 @@ const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
 /// 排空超时回执（对齐 PARTIAL_WARN 防重纪律，质量评审 Minor 3）：目标可能仍在
 /// 消费，盲目重试会叠加正文——先引导人工检查终端
 const DELIVERY_TIMEOUT_MSG: &str = "投递超时（目标可能仍在消费，重试前请检查终端）";
+
+/// 直发确认失败文案选择（纯函数，M3B 裁决：文案按族感知，跨平台可测）：
+/// `os == "macos"` 且 crossterm 族 → [`DIRECT_CONFIRM_FAIL_MACOS_CROSSTERM`]
+/// （Mac 报告 §四-C——crossterm 疑 bracketed-paste 吞尾随回车，文本滞留 composer
+/// 未提交，须补「按一次回车」指引）；其余（claude 等快族全平台、crossterm 的
+/// Windows 形态）→ 既有 [`DIRECT_CONFIRM_FAIL`]。os 作参数而非函数内硬取
+/// `std::env::consts::OS`，使四象限在任一平台可钉（Windows 上跑全绿）——
+/// 生产调用点（[`await_direct_receipt`] 失败臂）传 `std::env::consts::OS`。
+pub(crate) fn direct_confirm_fail_copy(family: TuiFamily, os: &str) -> &'static str {
+    if os == "macos" && family == TuiFamily::Crossterm {
+        DIRECT_CONFIRM_FAIL_MACOS_CROSSTERM
+    } else {
+        DIRECT_CONFIRM_FAIL
+    }
+}
 
 /// 戳命中查询（经 `confirm_probe` 缝——queue 测试装恒真/恒假假体，零接触真实文件）
 fn probe_hits(st: &crate::remote::server::RemoteState, tool: &str, sid: &str, stamp: &str) -> bool {
@@ -137,12 +162,16 @@ fn screen_probe(content: &str) -> String {
 /// 滞留输入行判定 → 补按回车 → 复查 3s）→ 仍未中 = 确认失败（失败回执）。
 /// `timeout_ms` 由调用方按族规格下发（`families::FamilySpec::confirm_timeout_ms`，
 /// 无族回退快消费者默认 5000——见 `families::FALLBACK_SPEC`；测试经
-/// `queue::flush_one_with` 小超时覆盖，保持套件无 5s 级慢测）。
+/// `queue::flush_one_with` 小超时覆盖，保持套件无 5s 级慢测）。`family` 同源下发
+/// （`FamilySpec.family`）：确认失败文案按族 × 平台感知（[`direct_confirm_fail_copy`]，
+/// Mac 报告 §四-C——macOS crossterm 补「按一次回车」指引），os 在本函数取
+/// `std::env::consts::OS`。
 pub(crate) fn await_direct_receipt(
     st: &crate::remote::server::RemoteState,
     session: &crate::session::Session,
     content: &str,
     timeout_ms: u64,
+    family: TuiFamily,
 ) -> Result<(), String> {
     let stamp = stamp_of(content);
     let tool = session.agent_type.tool_id();
@@ -161,10 +190,11 @@ pub(crate) fn await_direct_receipt(
     // ② 屏读回查（恢复动作）：Windows 滞留判定 → 补按回车 → 复查；
     //    macOS 无屏读 API → Ok(false)（直发未中直接 Failed——屏读门槛语义的
     //    字面执行，报告已申报；Mac 回传清单已有确认机制复验项）
+    let fail_copy = direct_confirm_fail_copy(family, std::env::consts::OS);
     match direct_recovery(st, session, content, stamp) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(DIRECT_CONFIRM_FAIL.to_string()),
-        Err(e) => Err(format!("{DIRECT_CONFIRM_FAIL}；{e}")),
+        Ok(false) => Err(fail_copy.to_string()),
+        Err(e) => Err(format!("{fail_copy}；{e}")),
     }
 }
 
@@ -361,5 +391,37 @@ mod tests {
             truncated: false,
         };
         assert!(stamp_hit_in_page(&pg3, stamp));
+    }
+
+    /// 直发确认失败文案四象限（M3B，Mac 报告 §四-C 裁决）：仅 (Crossterm, macos)
+    /// 走新文案（补「按一次回车」指引），其余三象限维持原文案。os 参数化 →
+    /// 在 Windows 上即可跨平台钉全四象限（生产 os 取 std::env::consts::OS）。
+    #[test]
+    fn direct_confirm_fail_copy_is_family_aware() {
+        let new_copy =
+            "已注入未确认：该类工具在 macOS 注入后可能需在终端按一次回车提交，请检查后重试";
+        let old_copy = "已注入未确认（未见会话记录），请检查终端后重试";
+        // macOS：crossterm 新文案 / 快族原文案
+        assert_eq!(
+            direct_confirm_fail_copy(TuiFamily::Crossterm, "macos"),
+            new_copy,
+            "(Crossterm, macos) 必须走新文案（逐字钉）"
+        );
+        assert_eq!(
+            direct_confirm_fail_copy(TuiFamily::RawVt, "macos"),
+            old_copy,
+            "(RawVt, macos) 维持原文案"
+        );
+        // Windows：全族原文案（Windows crossterm 有真回车事件形态，不受此困）
+        assert_eq!(
+            direct_confirm_fail_copy(TuiFamily::Crossterm, "windows"),
+            old_copy,
+            "(Crossterm, windows) 维持原文案"
+        );
+        assert_eq!(
+            direct_confirm_fail_copy(TuiFamily::RawVt, "windows"),
+            old_copy,
+            "(RawVt, windows) 维持原文案"
+        );
     }
 }
