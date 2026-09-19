@@ -6,8 +6,8 @@
 //!   `send-keys -t <target> Enter`（键名形态，与文本构成两连发）。
 //! - **iTerm2**：`write text` 两步走——先 `write s text "<escaped>" newline NO`
 //!   （纯文本、不带换行），再 `write s text ""`（补回车）。
-//! - **Terminal.app**：`do script "<escaped>" in w`（do script 自带回车，
-//!   注意反斜杠/双引号转义，见 [`applescript_escape`]）。
+//! - **Terminal.app**：`do script "<escaped>" in t`（命中标签页本体，
+//!   do script 自带回车；注意反斜杠/双引号转义，见 [`applescript_escape`]）。
 //!
 //! 构造与执行分离：本文件 `*Args` / `*Script` 纯函数全部跨平台 `pub` 可测
 //! （Windows 上必须全过；脚本构造内部完成 AppleScript 转义，调用方传原文，
@@ -245,6 +245,24 @@ pub fn tmux_key_args(target: &str, key: &str) -> Vec<String> {
     }
 }
 
+/// tmux pane 清单解析定位（P2-3 纯函数，跨平台可测）：每行
+/// `#{pane_tty} #{session_name}:#{window_index}.#{pane_index}` 按空白切分，
+/// **全路径相等**匹配（`pane_tty == tty`，杜绝 contains 前缀撞号——
+/// `/dev/ttys100` 撞 `/dev/ttys1000`），命中返回 pane target。
+/// 入参 tty 必须是 `/dev/` 全路径形态；裸后缀由执行层薄壳归一
+/// （macOS 侧统一走 `crate::window::normalize_dev_tty`）。
+pub fn parse_panes_find(lines: &[String], tty: &str) -> Option<String> {
+    for line in lines {
+        let mut parts = line.split_whitespace();
+        if let (Some(pane_tty), Some(target)) = (parts.next(), parts.next()) {
+            if pane_tty == tty {
+                return Some(target.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// AppleScript 字符串字面量转义：反斜杠→`\\`、引号→`\"`（先反斜杠后引号，
 /// 顺序颠倒会把已转义内容的反斜杠再次转义，产生错误字面量）。裸换行/回车转义为
 /// 字面 `\n`/`\r` 两字符——AppleScript 字符串字面量不允许裸换行，且归一后的载荷
@@ -269,8 +287,10 @@ fn app_running_guard(process: &str) -> String {
     )
 }
 
-/// 构造 iTerm2 写入脚本：遍历窗口/tab/session 定位 TTY 后缀，两步写入
+/// 构造 iTerm2 写入脚本：遍历窗口/tab/session 定位 TTY，两步写入
 /// （文本 `newline NO` + 空文本补回车）。`text` 为原文，内部完成转义。
+/// tty 匹配为**全路径相等**（P2-3：`tty of s is "/dev/{suffix}"`，参数仍收
+/// 后缀、脚本内补 `/dev/` 前缀——contains 有 ttys005 撞 ttys0050 的前缀撞号）。
 pub fn iterm_write_script(tty_suffix: &str, text: &str) -> String {
     format!(
         r#"{guard}
@@ -278,7 +298,7 @@ pub fn iterm_write_script(tty_suffix: &str, text: &str) -> String {
             repeat with w in windows
                 repeat with t in tabs of w
                     repeat with s in sessions of t
-                        if tty of s contains "{suffix}" then
+                        if tty of s is "/dev/{suffix}" then
                             write s text "{text}" newline NO
                             write s text ""
                             return "found"
@@ -297,6 +317,7 @@ pub fn iterm_write_script(tty_suffix: &str, text: &str) -> String {
 
 /// 构造 iTerm2 单键脚本：enter→`keystroke return`；esc→`key code 53`；
 /// 其余（单字符/未知多字符）→`keystroke "<key>"` 字面（内部完成转义）。
+/// tty 匹配为**全路径相等**（P2-3，同 [`iterm_write_script`]）。
 pub fn iterm_send_key_script(tty_suffix: &str, key: &str) -> String {
     format!(
         r#"{guard}
@@ -305,7 +326,7 @@ pub fn iterm_send_key_script(tty_suffix: &str, key: &str) -> String {
             repeat with w in windows
                 repeat with t in tabs of w
                     repeat with s in sessions of t
-                        if tty of s contains "{suffix}" then
+                        if tty of s is "/dev/{suffix}" then
                             select s
                             select t
                             set index of w to 1
@@ -326,18 +347,22 @@ pub fn iterm_send_key_script(tty_suffix: &str, key: &str) -> String {
     )
 }
 
-/// 构造 Terminal.app 执行脚本：窗口 tty 精确匹配（`/dev/` 前缀）后 `do script`
-/// （do script 自带回车）。`text` 为原文，内部完成转义。
+/// 构造 Terminal.app 执行脚本：**遍历窗口全部标签页**（P2-4：后台标签页可达，
+/// 旧实现只查窗口级 tty 漏掉后台标签），标签级 tty 全路径相等后
+/// `do script ... in t` 命中标签页本体（do script 自带回车）。`text` 为原文，
+/// 内部完成转义。
 pub fn terminal_do_script(tty_suffix: &str, text: &str) -> String {
     format!(
         r#"{guard}
         tell application "Terminal"
             repeat with w in windows
-                if tty of w is "/dev/{suffix}" then
-                    do script "{text}" in w
-                    set index of w to 1
-                    return "found"
-                end if
+                repeat with t in tabs of w
+                    if tty of t is "/dev/{suffix}" then
+                        do script "{text}" in t
+                        set index of w to 1
+                        return "found"
+                    end if
+                end repeat
             end repeat
         end tell
         return "not found"
@@ -349,20 +374,28 @@ pub fn terminal_do_script(tty_suffix: &str, text: &str) -> String {
 }
 
 /// 构造 Terminal.app 单键脚本（「activate + keystroke」变体，无 do-script
-/// 单键等价形态；按键形态归回传清单实测复核）。
+/// 单键等价形态；按键形态归回传清单实测复核）：**遍历窗口全部标签页**
+/// （P2-4），命中后**先选后发**——`set selected tab of w to t` 拉起后台标签
+/// → `set index` 置前 → activate → System Events keystroke。
 pub fn terminal_send_key_script(tty_suffix: &str, key: &str) -> String {
     format!(
         r#"{guard}
         tell application "Terminal"
-            activate
             set found to false
             repeat with w in windows
-                if tty of w is "/dev/{suffix}" then
-                    set index of w to 1
-                    set found to true
-                    exit repeat
-                end if
+                repeat with t in tabs of w
+                    if tty of t is "/dev/{suffix}" then
+                        set selected tab of w to t
+                        set index of w to 1
+                        set found to true
+                        exit repeat
+                    end if
+                end repeat
+                if found then exit repeat
             end repeat
+            if found then
+                activate
+            end if
         end tell
         if found then
             tell application "System Events"
@@ -430,7 +463,8 @@ impl Injector for RealInjector {
     fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
         let tty =
             crate::window::get_tty_for_pid(pid).map_err(|e| format!("定位终端失败：{}", e))?;
-        // tty 形如 /dev/ttys005；AppleScript 侧改用后缀匹配（ttys005）
+        // tty 形如 /dev/ttys005（ps 也可能返回裸后缀）；iTerm2/Terminal 脚本
+        // 收后缀、内部补 /dev/ 全路径相等匹配（P2-3）
         let suffix = tty.rsplit('/').next().unwrap_or(&tty);
         let mut errs: Vec<String> = Vec::new();
 
@@ -505,20 +539,14 @@ impl Injector for RealInjector {
 }
 
 /// 在 tmux 全局 pane 列表中按 tty 定位 pane target（`session:win.pane`）。
-/// tmux 不存在/无命中 → None。清单获取复用 [`crate::window::tmux::list_panes_lines`]
-/// （P3 Task 7：与聚焦侧同一份 Command+格式串，消除双份解析；匹配语义保持 contains
-/// 原样——精确匹配的修复归 Task 9 纯函数拆分）
+/// tmux 不存在/无命中 → None。执行层薄壳（cfg macos）：清单获取复用
+/// [`crate::window::tmux::list_panes_lines`]（P3 Task 7），匹配委托跨平台
+/// 纯函数 [`parse_panes_find`]（P2-3 Task 9：全路径相等；ps 返回的裸后缀
+/// 先归一为 `/dev/` 全路径——归一属执行层，纯函数只认全路径）。
 #[cfg(target_os = "macos")]
 fn find_tmux_pane(tty: &str) -> Option<String> {
-    for line in crate::window::tmux::list_panes_lines()? {
-        let mut parts = line.split_whitespace();
-        if let (Some(pane_tty), Some(target)) = (parts.next(), parts.next()) {
-            if pane_tty.contains(tty) {
-                return Some(target.to_string());
-            }
-        }
-    }
-    None
+    let lines = crate::window::tmux::list_panes_lines()?;
+    parse_panes_find(&lines, &crate::window::normalize_dev_tty(tty))
 }
 
 /// 执行 tmux 子命令：status.success() 判定，失败携带 stderr。
@@ -626,7 +654,7 @@ mod tests {
     #[test]
     fn iterm_script_finds_tty_and_writes_without_newline() {
         let s = iterm_write_script("ttys005", r#"say "hi""#);
-        assert!(s.contains(r#"tty of s contains "ttys005""#));
+        assert!(s.contains(r#"tty of s is "/dev/ttys005""#));
         // 先文本后回车两步（可校验）
         assert!(s.contains(r#"write s text "say \"hi\"" newline NO"#));
         assert!(s.contains(r#"write s text """#)); // 补回车
@@ -635,7 +663,7 @@ mod tests {
     #[test]
     fn iterm_send_key_script_dispatch() {
         let s = iterm_send_key_script("ttys005", "1");
-        assert!(s.contains(r#"tty of s contains "ttys005""#));
+        assert!(s.contains(r#"tty of s is "/dev/ttys005""#));
         assert!(s.contains(r#"keystroke "1""#));
         // esc 键码
         assert!(iterm_send_key_script("ttys005", "esc").contains("key code 53"));
@@ -644,18 +672,76 @@ mod tests {
     #[test]
     fn terminal_script_uses_do_script() {
         let s = terminal_do_script("ttys005", "hi");
-        assert!(s.contains(r#"tty of w is "/dev/ttys005""#));
-        assert!(s.contains(r#"do script "hi" in w"#));
+        assert!(s.contains(r#"tty of t is "/dev/ttys005""#));
+        assert!(s.contains(r#"do script "hi" in t"#));
     }
 
     #[test]
     fn terminal_send_key_script_activate_and_keystroke() {
-        // Terminal.app 单键走「activate + keystroke」变体，同窗口 tty 精确匹配
+        // Terminal.app 单键走「activate + keystroke」变体，标签级 tty 精确匹配
         let s = terminal_send_key_script("ttys005", "1");
-        assert!(s.contains(r#"tty of w is "/dev/ttys005""#));
+        assert!(s.contains(r#"tty of t is "/dev/ttys005""#));
         assert!(s.contains(r#"keystroke "1""#));
         assert!(terminal_send_key_script("ttys005", "enter").contains("keystroke return"));
         assert!(terminal_send_key_script("ttys005", "esc").contains("key code 53"));
+    }
+
+    #[test]
+    fn iterm_scripts_use_exact_tty() {
+        // P2-3 回归锁：iTerm2 两脚本 tty 一律全路径相等匹配（contains 会
+        // ttys005 撞 ttys0050——前缀撞号），脚本内补 /dev/ 前缀
+        let w = iterm_write_script("ttys005", "hi");
+        assert!(w.contains(r#"tty of s is "/dev/ttys005""#));
+        assert!(!w.contains(r#"tty of s contains"#));
+        let k = iterm_send_key_script("ttys005", "1");
+        assert!(k.contains(r#"tty of s is "/dev/ttys005""#));
+        assert!(!k.contains(r#"tty of s contains"#));
+    }
+
+    #[test]
+    fn tmux_pane_match_is_full_path() {
+        // P2-3 回归锁：parse_panes_find 全路径相等——构造清单含 /dev/ttys100
+        // 与 /dev/ttys1000，喂 /dev/ttys100 只命中前者（旧 contains 实现会先
+        // 撞上 ttys1000 那行——前缀撞号）
+        let lines: Vec<String> = ["/dev/ttys1000 main:0.0", "/dev/ttys100 work:1.2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            parse_panes_find(&lines, "/dev/ttys100").as_deref(),
+            Some("work:1.2")
+        );
+        assert_eq!(
+            parse_panes_find(&lines, "/dev/ttys1000").as_deref(),
+            Some("main:0.0")
+        );
+        // 裸后缀不命中：/dev/ 归一是执行层薄壳职责，纯函数只认全路径
+        assert_eq!(parse_panes_find(&lines, "ttys100"), None);
+        // 无命中 / 畸形行（只有 tty 无 target）→ None
+        assert_eq!(parse_panes_find(&lines, "/dev/ttys7"), None);
+        let malformed = vec!["/dev/ttys100".to_string()];
+        assert_eq!(parse_panes_find(&malformed, "/dev/ttys100"), None);
+    }
+
+    #[test]
+    fn terminal_scripts_traverse_tabs() {
+        // P2-4 回归锁：Terminal 两脚本遍历窗口全部标签页（后台标签可达），
+        // tty 按标签级全路径相等匹配
+        let d = terminal_do_script("ttys005", "hi");
+        assert!(d.contains("repeat with t in tabs of w"));
+        assert!(d.contains(r#"tty of t is "/dev/ttys005""#));
+        assert!(d.contains(r#"do script "hi" in t"#)); // 命中标签页本体
+        assert!(d.contains("set index of w to 1")); // 既有纪律不回退
+
+        let k = terminal_send_key_script("ttys005", "1");
+        assert!(k.contains("repeat with t in tabs of w"));
+        assert!(k.contains(r#"tty of t is "/dev/ttys005""#));
+        // 先选后发：set selected tab 前置于 keystroke（后台标签先拉前台再发键）
+        let select = k
+            .find(r#"set selected tab of w to t"#)
+            .expect("selected tab 前置");
+        let stroke = k.find(r#"keystroke "1""#).expect("keystroke 后置");
+        assert!(select < stroke);
     }
 
     /// 假布局（测试缝）：vk_of 恒等映射、scan_of = vk+1——不触任何平台 FFI，

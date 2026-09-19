@@ -39,6 +39,19 @@ pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
     }
 }
 
+/// TTY 归一为 `/dev/` 全路径形态（macOS）：ps / tmux client_tty 可能给出裸
+/// `ttys005` 后缀，而 `#{pane_tty}` 与 AppleScript `tty of s/t` 一律 `/dev/`
+/// 全路径——相等匹配（P2-3/R6 三处统一）的统一前置，注入链
+/// （inject/engine `find_tmux_pane`）与聚焦链（tmux/iterm/terminal_app）共用。
+#[cfg(target_os = "macos")]
+pub(crate) fn normalize_dev_tty(tty: &str) -> String {
+    if tty.starts_with("/dev/") {
+        tty.to_string()
+    } else {
+        format!("/dev/{}", tty)
+    }
+}
+
 /// 通过 ps 命令获取进程的 TTY
 #[cfg(target_os = "macos")]
 pub(crate) fn get_tty_for_pid(pid: u32) -> Result<String, String> {
