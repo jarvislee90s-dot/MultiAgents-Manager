@@ -6,7 +6,8 @@
 
 1. `brew install --cask iterm2 && brew install tmux`（如缺；测试前置，可逆）。
 2. **TCC 自动化授权**：MAM（尤其开发版）首次控制 Terminal/iTerm2 需在「系统设置 > 隐私与安全性 > 自动化」允许；被拒时 osascript 报 -1743——resume/注入回执已按此分类（M2 修复），按指引授权后重试。
-3. **iTerm2 3.7.2 + macOS 26 已知脆弱点**：`create window with command` 延迟物化/闪退/偶发 cd 失效；AppleScript 引擎冷启动被打断后会卡死（-1712）直到重启 iTerm2——遇注入批量 not found 先重启 iTerm2 再判工具问题。
+3. **iTerm2 3.7.2 + macOS 26 已知脆弱点**（2026-09-20 复验证实并升级）：`create window … with command "…"` **恒产 0-tab 死窗**（100% 复现，osascript 假成功 exit 0/stderr 空——「延迟物化」证伪，是硬断）——resume/开窗类操作勿依赖该形态，**出手后必须效果回查**；AppleScript 冷启动首次调用必 -1712 超时（60–120s），**超时后引擎自愈、无需重启 iTerm2**，热态仍可能数十秒——健康探测按「超时计数 + 短退避重试」设计，勿按「卡死即判死」。
+4. **resume 开窗通道顺序**：本机实测 Terminal.app `do script` 全通、iTerm2 带命令 create 恒死窗——macOS 上 Terminal 优先、iTerm2 次选 + 效果回查兜底。
 
 ## 四点验证清单
 
