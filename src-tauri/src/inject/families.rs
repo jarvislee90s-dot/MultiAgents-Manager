@@ -46,7 +46,8 @@ pub const SUBMIT_DELAY_MS: u64 = 150;
 pub const LONG_MSG_CHARS: usize = 2000;
 /// 背压模式占用回落阈值（事件数）：写停到占用 ≤ 此值再继续。
 pub const DRAIN_TO: u32 = 40;
-/// 占用 >0 持续此时长（毫秒）判异常（死锁/挂起，放弃等待）。
+/// 判冻窗口阈值：占用连续 ≥5s 且相邻采样无下降（逐样本下降口径，M9R 评审
+/// C1 修正后语义）→ 判冻。
 pub const OCC_ABNORMAL_MS: u64 = 5_000;
 /// 基础注入总预算（毫秒）：非背压路径的硬上限。
 pub const BASE_BUDGET_MS: u64 = 10_000;

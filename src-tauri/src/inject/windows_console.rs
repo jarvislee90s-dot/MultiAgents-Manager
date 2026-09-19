@@ -27,16 +27,16 @@
 //!   暂满、可重试（M6「消费墙首读预算 13~43 字符」叙事已被 M6R 推翻）→ 100ms
 //!   重试同块；错误码仅在 Err 时读取（F7：ok=true 时错误码为噪声）；
 //! - **P2-2 键域校验**：域外键在取锁/附加之前快速失败并报错，**不回退文本+回车**；
-//! - **Task 4 占用监控 + 冻结自愈（§8.1「背压与异常」行 / M6R F1）**：[`paced_write`]
-//!   在块写入后 / 背压轮询处 / 122·Ok(0) 重试睡眠后采样目标输入缓冲占用——
-//!   `pending>0` 且**相邻采样无下降**（逐样本口径，质量评审 C1 定案）持续 ≥
-//!   `families::OCC_ABNORMAL_MS`(5s) 判冻结（宿主选择模式：写入成功 TUI 读不到）
-//!   → [`try_unfreeze`] 向宿主窗口 PostMessage WM_KEYDOWN/WM_KEYUP VK_ESCAPE
-//!   解冻（成功置 [`InjectStats::unfroze`] 继续写；失败报中文错误——WT 宿主恢复
-//!   未验证由该文案覆盖，§8.3 实机复验项）；
+//! - **Task 4 占用监控 + 判冻回执（§8.1「背压与异常」行 / M6R F1 / D8 裁决：
+//!   不自动介入）**：[`paced_write`] 在块写入后 / 背压轮询处 / 122·Ok(0) 重试
+//!   睡眠后采样目标输入缓冲占用——`pending>0` 且**相邻采样无下降**（逐样本
+//!   口径，质量评审 C1 定案）持续 ≥ `families::OCC_ABNORMAL_MS`(5s) 判冻结
+//!   （宿主选择模式：写入成功 TUI 读不到）→ 本轮注入立即 Err，报中文状态回执
+//!   [`FREEZE_ERR`]（引导用户点一下终端窗口手动恢复后重试；旧「自动解冻」自愈
+//!   方案已撤除——评审/台账已裁决留痕，OccWatch 保留作诊断与错误归因）；
 //! - **Task 4 屏读层（CONOUT$）**：[`read_input_tail`] 读输入行尾部（直发滞留
 //!   回查与 Task 5 插队草稿确认用），与注入共用 [`CONSOLE_OP`] 单临界区；
-//! - **实机验证归属**：分块/预算/背压/续写/占用监控/冻结自愈/屏读的实机行为验证
+//! - **实机验证归属**：分块/预算/背压/续写/占用监控/判冻回执/屏读的实机行为验证
 //!   归 Task 12 `#[ignore]`（本任务门禁只锁编译 + 单测 + 既有 FFI 契约测试）。
 
 use std::thread::sleep;
@@ -46,21 +46,18 @@ use once_cell::sync::Lazy;
 use windows::core::Error as WinError;
 use windows::core::HRESULT;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE, LPARAM, WPARAM,
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
 use windows::Win32::System::Console::{
-    AttachConsole, FreeConsole, GetConsoleScreenBufferInfo, GetConsoleWindow,
-    GetNumberOfConsoleInputEvents, ReadConsoleOutputCharacterW, WriteConsoleInputW,
-    CONSOLE_SCREEN_BUFFER_INFO, COORD, INPUT_RECORD, KEY_EVENT,
+    AttachConsole, FreeConsole, GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents,
+    ReadConsoleOutputCharacterW, WriteConsoleInputW, CONSOLE_SCREEN_BUFFER_INFO, COORD,
+    INPUT_RECORD, KEY_EVENT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC, VK_ESCAPE,
-};
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC};
 
 use super::engine::{
     control_records, enter_records, text_records, vk_arrow_records, vt_seq_records, KeyLayout,
@@ -72,24 +69,12 @@ use super::families::{self, FamilySpec, TuiFamily};
 const RETRY_GAP: Duration = Duration::from_millis(100);
 /// 背压轮询间隔（§8.1：排空目标输入缓冲的 15ms 轮询步距，受 deadline 约束）
 const DRAIN_POLL_GAP: Duration = Duration::from_millis(15);
-/// 冻结自愈等待上限（§8.1：解冻发帖后等 drain 的最长时间；实际取
-/// `min(此值, 调用方 deadline 剩余)`，deadline 耗尽走既有超时错误路径）
-const UNFREEZE_WAIT_MS: u64 = 2_000;
-/// `WM_KEYDOWN` lparam（本地常量，标准键消息布局）：repeat=1、scancode=0x01
-/// （ESC 扫描码）、extended/context/previous/transition = 0。
-const ESC_LPARAM_DOWN: isize = 0x0001_0001;
-/// `WM_KEYUP` lparam（本地常量）：repeat=1、scancode=0x01、previous=1 +
-/// transition=1（抬起位，0xC0 高段）。
-const ESC_LPARAM_UP: isize = 0xC001_0001;
-/// 半成功防重警示后缀（I1，正文冻结错误与回车块错误共用）：前缀内容已进输入行、
+/// 半成功防重警示后缀（I1，正文判冻回执与回车块错误共用）：前缀内容已进输入行、
 /// 提交未完成，盲目重试会重复正文——对齐 macOS tmux「文本已入 pane」先例。
 const PARTIAL_WARN: &str = "；正文可能已写入输入行，重试将重复——建议先人工确认终端";
-/// 冻结错误前缀（§8.1/§8.3：WT 宿主下冻结恢复未验证由该文案覆盖并引导人工介入）
-const FREEZE_ERR: &str = "目标终端输入冻结（选择模式），自动解冻失败——请点一下该终端窗口后重试";
-/// M1 保守闸：`try_unfreeze` 入口剩余 deadline 不足此值时直接 `Ok(false)`
-/// 不发 ESC（短窗不发 ESC，由冻结错误（含防重警示）兜底——解冻等待本体 ≥2s，
-/// 低于该余量的窗口等不出有意义结果）。
-const UNFREEZE_MIN_MARGIN_MS: u64 = 500;
+/// 判冻状态回执（§8.1/§8.3；D8 裁决：不自动介入——判冻即终止本轮注入，引导
+/// 用户在电脑上点一下终端窗口手动恢复，点击即清除选择模式）
+const FREEZE_ERR: &str = "目标终端疑似进入选择模式或暂停读取输入（输入积压）。请在电脑上点一下该终端窗口后重试（点击即清除选择模式），或稍后重发";
 
 /// P1-2：进程级注入互斥。控制台「附加态」是进程全局唯一的资源，任何并发注入
 /// （多会话同时 flush）都会互踩 attach/detach；此处串行化全部
@@ -100,7 +85,7 @@ const UNFREEZE_MIN_MARGIN_MS: u64 = 500;
 /// 万字符最高 ≈460s）；等待方的 deadline 在**取锁之后**才起算——排队等待不计入
 /// 自身预算，只会排队而不会误报超时。Task 4 落地：`read_input_tail`（屏读层）
 /// 与注入共享此临界区（附加态的读侧同样互斥，杜绝读屏与写入互踩附加态/
-/// 交错改读同一输入行）；`try_unfreeze` 只在锁内被调用、自身不取锁。
+/// 交错改读同一输入行）。
 static CONSOLE_OP: Lazy<std::sync::Mutex<()>> = Lazy::new(|| std::sync::Mutex::new(()));
 
 /// P1-1：附加态 RAII 守卫——构造前调用方已 `AttachConsole` 成功；Drop 时无条件
@@ -126,20 +111,15 @@ pub struct InjectStats {
     pub written: usize,
     /// 本次注入是否走背压节流（§8.1 自适应：慢消费者或长文）
     pub backpressure: bool,
-    /// 冻结自愈是否发生（Task 4：占用监控判冻 → PostMessage ESC 解冻成功置位，§8.1）
-    pub unfroze: bool,
 }
 
 /// [`paced_write`] 结果（内部类型，Task 4）：`written` = 实写事件总数（含部分写
-/// 续写累计）；`unfroze` = 写入途中是否触发占用监控判冻并成功解冻（PostMessage
-/// ESC，§8.1）——text 路径由调用方透传进 [`InjectStats::unfroze`]（key 路径无
-/// stats，不透传）。
+/// 续写累计）。判冻不经返回值表达——判冻即 Err 中文状态回执（D8 裁决：不自动
+/// 介入；Task 12 E2E 只断言 backpressure，无解冻旗标消费面，字段随之撤除）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PacedOutcome {
     /// 成功写入的事件总数（含部分写续写累计）
     pub written: usize,
-    /// 写入途中是否成功解冻过（占用监控判冻 → [`try_unfreeze`] 成功）
-    pub unfroze: bool,
 }
 
 /// 平铺 KEY_EVENT `INPUT_RECORD`（blittable 20 字节）：EventType u16 + Reserved u16 +
@@ -313,8 +293,6 @@ struct OccWatch {
     last: u32,
     /// pending>0 且无逐样本下降的连续起点（None = 窗口未开/已重置）
     since: Option<Instant>,
-    /// 本轮写入是否成功解冻过（透传 [`PacedOutcome::unfroze`]）
-    unfroze: bool,
 }
 
 impl OccWatch {
@@ -322,15 +300,13 @@ impl OccWatch {
         Self {
             last: 0,
             since: None,
-            unfroze: false,
         }
     }
 
     /// 用既有查询结果推进判冻窗口（[`drain_to`] 轮询处复用同一 pending，
-    /// 不重复查询）。判冻触发 → [`try_unfreeze`] 自愈：成功置 `unfroze` 并重开
-    /// 窗口继续写；失败报中文冻结错误（§8.3：WT 宿主下冻结恢复未验证——实机
-    /// 复验项，该文案覆盖此限制并引导人工介入）。
-    fn observe(&mut self, pending: u32, handle: HANDLE, deadline: Instant) -> Result<(), String> {
+    /// 不重复查询）。判冻触发 → 直接 Err 中文状态回执（[`FREEZE_ERR`]，D8 裁决：
+    /// 不自动介入——OccWatch 保留作诊断与错误归因，判冻回执即其产出）。
+    fn observe(&mut self, pending: u32) -> Result<(), String> {
         if pending == 0 {
             // 完全重置：无积压（since 与 last 双清）
             self.last = 0;
@@ -350,16 +326,12 @@ impl OccWatch {
                     // 即该间隔内的真实消费量——不存在「假下降」。
                     self.since = Some(Instant::now());
                 } else if t0.elapsed().as_millis() as u64 >= families::OCC_ABNORMAL_MS {
-                    // 判冻（§8.1）：pending>0 且逐样本无下降持续 ≥5s
-                    if try_unfreeze(handle, deadline)? {
-                        self.unfroze = true;
-                        self.since = None; // 解冻成功：重开窗口继续写
-                    } else {
-                        // I1/N1（Task 4 复检）：冻结错误在此保持**裸** FREEZE_ERR——
-                        // 防重警示（PARTIAL_WARN）由调用点按路径拼接（正文有正文、
-                        // 键路径无正文），源头拼接会让回车路径双重警示
-                        return Err(FREEZE_ERR.to_string());
-                    }
+                    // 判冻（§8.1）：pending>0 且逐样本无下降持续 ≥5s → 本轮注入
+                    // 立即终止（D8 裁决：不自动介入）。I1/N1（Task 4 复检）：回执
+                    // 在此保持**裸** FREEZE_ERR——防重警示（PARTIAL_WARN）由调用点
+                    // 按路径拼接（正文有正文、键路径无正文），源头拼接会让回车路径
+                    // 双重警示
+                    return Err(FREEZE_ERR.to_string());
                 }
             }
         }
@@ -368,91 +340,20 @@ impl OccWatch {
 
     /// 采样一次占用并推进判冻窗口（块写入后 / 122·Ok(0) 重试睡眠后的独立查询点；
     /// 纯查询不睡眠，不改变既有块间节奏）。
-    fn sample(&mut self, handle: HANDLE, deadline: Instant) -> Result<(), String> {
+    fn sample(&mut self, handle: HANDLE) -> Result<(), String> {
         let pending = query_pending(handle)?;
-        self.observe(pending, handle, deadline)
-    }
-}
-
-/// 冻结自愈（Task 4，§8.1「背压与异常」行；M6R F1 实证：宿主选择模式冻结 =
-/// 写入成功 TUI 读不到，排队回车丢提交语义）：向**目标控制台宿主窗口**
-/// PostMessage WM_KEYDOWN/WM_KEYUP VK_ESCAPE 令宿主退出选择模式、输入缓冲恢复
-/// 消费，再轮询占用确认。
-///
-/// 锁纪律：调用点在 [`CONSOLE_OP`] 锁内 + [`AttachGuard`] 作用域内（附加态保证
-/// `GetConsoleWindow` 返回目标控制台宿主窗）；本函数**不得再取锁**（std Mutex
-/// 不可重入，嵌套即死锁）。等待上限 2s，实际取 `min(2s, deadline 剩余)`——
-/// deadline 耗尽由调用方既有循环顶部超时检查报错，本函数不另行超时报错；
-/// 入口保守闸（M1）：剩余 deadline < 500ms 时直接 `Ok(false)` 不发 ESC（发帖+
-/// 等待本体 ≥2s，短窗等不出有意义结果）——短窗不发 ESC，由冻结错误（含防重
-/// 警示）兜底。
-///
-/// 返回 `Ok(true)` = 已解冻（占用逐样本下降或归零）；`Ok(false)` = 等待超时
-/// 无下降（仍冻结，PostMessage 失败亦归此态）；`Err` 仅保留占用查询失败
-/// （控制台已失效）路径。WT 宿主下冻结恢复未验证（§8.3 实机复验项）。
-fn try_unfreeze(handle: HANDLE, deadline: Instant) -> Result<bool, String> {
-    // M1 保守闸：短剩余窗不发 ESC（见函数 doc）
-    if Instant::now() + Duration::from_millis(UNFREEZE_MIN_MARGIN_MS) >= deadline {
-        return Ok(false);
-    }
-    // SAFETY: FFI 调用；须处于目标控制台附加态（调用点由 AttachGuard 保证）
-    let hwnd = unsafe { GetConsoleWindow() };
-    if hwnd.0 == 0 {
-        log::warn!("try_unfreeze：GetConsoleWindow 返回无效窗口（附加态缺失？）");
-        return Ok(false);
-    }
-    // 发帖时占用基线（下降判定起点）
-    let baseline = query_pending(handle)?;
-    // SAFETY: FFI 调用；hwnd 为刚取回的目标宿主窗，lparam 为本地常量（标准键消息布局）
-    unsafe {
-        if let Err(e) = PostMessageW(
-            hwnd,
-            WM_KEYDOWN,
-            WPARAM(VK_ESCAPE.0 as usize),
-            LPARAM(ESC_LPARAM_DOWN),
-        ) {
-            log::warn!(
-                "try_unfreeze：PostMessage WM_KEYDOWN 失败（0x{:08X}）",
-                e.code().0 as u32
-            );
-            return Ok(false);
-        }
-        if let Err(e) = PostMessageW(
-            hwnd,
-            WM_KEYUP,
-            WPARAM(VK_ESCAPE.0 as usize),
-            LPARAM(ESC_LPARAM_UP),
-        ) {
-            log::warn!(
-                "try_unfreeze：PostMessage WM_KEYUP 失败（0x{:08X}）",
-                e.code().0 as u32
-            );
-            return Ok(false);
-        }
-    }
-    // 等 drain ≤2s：占用下降或归零 → 解冻成功。等待期内无注入 → pending 单调
-    // 不增，「< 发帖时 baseline」与逐样本下降口径等价（首次下降即首次跌破基线）
-    let wait_end = (Instant::now() + Duration::from_millis(UNFREEZE_WAIT_MS)).min(deadline);
-    loop {
-        let pending = query_pending(handle)?;
-        if pending == 0 || pending < baseline {
-            return Ok(true);
-        }
-        if Instant::now() >= wait_end {
-            return Ok(false);
-        }
-        sleep(DRAIN_POLL_GAP);
+        self.observe(pending)
     }
 }
 
 /// 背压排空（§8.1）：轮询目标输入缓冲占用直至 ≤ `families::DRAIN_TO`(40) 再继续；
 /// 15ms 步距（[`DRAIN_POLL_GAP`]），同样受 `deadline` 约束（P2-1 真总预算）。
 /// Task 4：每次轮询顺带喂 [`OccWatch`] 判冻监控（复用同一次占用查询，无额外
-/// 系统调用；判冻触发才可能拉长等待，属自愈语义而非节奏改变）。
+/// 系统调用；判冻触发即 Err 中文状态回执终止本轮——回执语义，非节奏改变）。
 fn drain_to(handle: HANDLE, deadline: Instant, watch: &mut OccWatch) -> Result<(), String> {
     loop {
         let pending = query_pending(handle)?;
-        watch.observe(pending, handle, deadline)?;
+        watch.observe(pending)?;
         if pending <= families::DRAIN_TO {
             return Ok(());
         }
@@ -473,10 +374,10 @@ fn drain_to(handle: HANDLE, deadline: Instant, watch: &mut OccWatch) -> Result<(
 /// - 非背压：块间 `families::CHUNK_GAP_MS`(50ms)；背压：每块后 [`drain_to`]；
 /// - Task 4 占用监控：每块写入后 / 背压轮询处（[`drain_to`] 内复用查询）/
 ///   122·Ok(0) 重试睡眠后采样输入缓冲占用（[`OccWatch`]）——判冻触发 →
-///   [`try_unfreeze`] 自愈（成功置 [`PacedOutcome::unfroze`] 继续写；失败报中文
-///   冻结错误）。采样为纯查询不睡眠，不改变既有块间节奏。
+///   Err 中文状态回执（[`FREEZE_ERR`]；D8 裁决：不自动介入）。采样为纯查询
+///   不睡眠，不改变既有块间节奏。
 ///
-/// 返回 [`PacedOutcome`]（实写事件总数 + 是否解冻过）。
+/// 返回 [`PacedOutcome`]（实写事件总数）。
 fn paced_write(
     handle: HANDLE,
     records: &[KeyRecordSpec],
@@ -507,14 +408,14 @@ fn paced_write(
                         sleep(Duration::from_millis(families::CHUNK_GAP_MS));
                     }
                     // 每块写入后采样判冻（Task 4，§8.1；含末块，纯查询不睡眠）
-                    watch.sample(handle, deadline)?;
+                    watch.sample(handle)?;
                 }
             }
             Ok(written) => {
                 if written == 0 {
                     // Ok(0) 不应发生（防御）：按 122 同款 100ms 重试同块，睡后采样
                     sleep(RETRY_GAP);
-                    watch.sample(handle, deadline)?;
+                    watch.sample(handle)?;
                 } else {
                     // M6R 纪律：实写 < 分片长，从偏移续写（续写不睡眠）
                     sent += written as usize;
@@ -525,7 +426,7 @@ fn paced_write(
                 // 100ms 后重试同块（§8.1）；deadline 由循环顶部统一把守；
                 // 睡后采样判冻（Task 4：重试等待期同步监控消费进展）
                 sleep(RETRY_GAP);
-                watch.sample(handle, deadline)?;
+                watch.sample(handle)?;
             }
             Err(e) => {
                 return Err(format!(
@@ -535,10 +436,7 @@ fn paced_write(
             }
         }
     }
-    Ok(PacedOutcome {
-        written: sent,
-        unfroze: watch.unfroze,
-    })
+    Ok(PacedOutcome { written: sent })
 }
 
 /// 对 pid 完整注入一条写入闭包（M9R 重写，取代旧 records 直传版）。
@@ -549,7 +447,8 @@ fn paced_write(
 /// → attach(target) → [`AttachGuard`] → open_conin → 写入闭包 → CloseHandle
 /// → guard Drop 复位。闭包在 guard 作用域内执行、不早退出；任何错误/panic
 /// 路径由 guard Drop 兜底复位（P1-1，CTRL_CLOSE_EVENT 防连带终止）。
-/// 泛型 `T`（Task 4）：闭包可携带结果出临界区（text 路径传出 unfroze 旗标）。
+/// 泛型 `T`（Task 4 引入）：闭包可携带结果出临界区（现调用方 `T = ()`，泛型
+/// 保留以不动注入链结构）。
 fn inject_via<T>(pid: u32, write: impl FnOnce(HANDLE) -> Result<T, String>) -> Result<T, String> {
     let target = resolve_target(pid)?;
     attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
@@ -583,30 +482,23 @@ pub fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<Injec
     let layout = WinKeyLayout;
     let body = text_records(text, &layout);
     let enter = enter_records(&layout);
-    // unfroze 透传（Task 4）：正文/回车任一块写入途中解冻成功即置位。
-    // 「解冻成功补发回车」的等价实现（§8.1 定案的补发针对的是**冻结吞掉的提交
-    // 回车**）：正文块写入途中解冻成功 → 既有流程的回车块照常发送即达成补发
-    // 语义；回车块写入前/写入中触发解冻成功 → 同理照常发送。故**不新增独立
-    // 补发逻辑**（避免双回车）；回车块因解冻失败而 Err → 既有半成功文案兜底。
-    let unfroze = inject_via(pid, move |handle| {
+    inject_via(pid, move |handle| {
         // N1：正文路径防重警示在调用点拼接（正文已部分写入输入行 → 任何正文错误
-        // 皆带防重提示；冻结错误源头为裸 FREEZE_ERR，杜绝双重拼接）
-        let body_out =
-            paced_write(handle, &body, bp, deadline).map_err(|e| format!("{e}{PARTIAL_WARN}"))?;
+        // 皆带防重提示；判冻回执源头为裸 FREEZE_ERR，杜绝双重拼接）
+        paced_write(handle, &body, bp, deadline).map_err(|e| format!("{e}{PARTIAL_WARN}"))?;
         // 提交回车：正文写完固定延迟后单批发（回车不进 chunk 计划，§8.1）
         sleep(Duration::from_millis(families::SUBMIT_DELAY_MS));
-        let enter_out = paced_write(handle, &enter, false, deadline).map_err(|e| {
+        paced_write(handle, &enter, false, deadline).map_err(|e| {
             // 半成功防重（对齐 macOS tmux「文本已入 pane」先例）：正文已进输入行、
             // 回车未提交，盲目重试会重复正文——追加人工确认提示（PARTIAL_WARN
-            // 与正文调用点共用拼接，I1；冻结错误源头裸 FREEZE_ERR，N1）
+            // 与正文调用点共用拼接，I1；判冻回执源头裸 FREEZE_ERR，N1）
             format!("{e}{PARTIAL_WARN}")
         })?;
-        Ok(body_out.unfroze || enter_out.unfroze)
+        Ok(())
     })?;
     Ok(InjectStats {
         written: chars, // Ok = 全量送达；written 记正文字符数（不含提交回车）
         backpressure: bp,
-        unfroze,
     })
 }
 
@@ -925,7 +817,7 @@ mod tests {
         );
     }
 
-    // ===== Task 4 实机探测（占用监控 / 冻结自愈 / 屏读层）=====
+    // ===== Task 4 实机探测（占用监控 / 判冻回执 / 屏读层）=====
     // 两条测试均涉及真实控制台子进程（弹真实 conhost 窗口），按批次全局约束
     // 一律 #[ignore]——常规门禁只编译；实机真跑归 Task 12。测试只碰 temp 目录
     // 探测会话，结束 taskkill 清场，零接触真实 ~/.mam。
@@ -977,17 +869,18 @@ mod tests {
             .status();
     }
 
-    /// Task 4 冻结自愈探测（#[ignore]：需要真实 conhost 子进程，实机真跑归
+    /// Task 4 判冻回执探测（#[ignore]：需要真实 conhost 子进程，实机真跑归
     /// Task 12）。运行：`cargo test --lib inject::windows_console -- --ignored --nocapture`
     ///
-    /// 流程：conhost cmd /k 拓扑 → 内部通道快速连写大批事件制造占用（背压模式
-    /// 块后排空，cmd 消费不及时即 pending>0）→ 调 [`try_unfreeze`] → 断言
-    /// 「占用归零/有净下降 **或** 返回含中文冻结错误」二选一放宽——真冻结态依赖
-    /// 宿主选择模式（写入成功 TUI 读不到），本探测无法确定性合成，真值验证归
+    /// 流程（D8 裁决：不自动介入，判冻只报中文状态回执）：conhost cmd /k 拓扑 →
+    /// 内部通道快速连写大批事件制造占用（背压模式块后排空，cmd 消费不及时即
+    /// pending>0）→ 断言「Ok 且完成（cmd 消费跟得上）**或** Err 含新回执文案
+    /// 关键词（『选择模式』/『输入积压』）」二选一放宽——真冻结态依赖宿主选择
+    /// 模式（写入成功 TUI 读不到），本探测无法确定性合成，真值验证归
     /// Task 12（§8.1 / §8.3）。
     #[test]
     #[ignore = "需要真实 conhost 窗口与外部进程，实机验证时以 --ignored 运行"]
-    fn occ_stuck_triggers_unfreeze_probe() {
+    fn occ_stuck_reports_freeze_receipt_probe() {
         let work = std::env::temp_dir().join(format!("mam-occ-probe-{}", std::process::id()));
         std::fs::create_dir_all(&work).unwrap();
         let pid = spawn_probe_cmd(&work, "occ");
@@ -1010,18 +903,6 @@ mod tests {
             Instant::now() + Duration::from_secs(120),
         );
         println!("occ-probe: paced_write={outcome:?}");
-        // 放宽项 b) 之一：连写途中即报中文冻结错误（真冻结且自愈失败路径）
-        let write_freeze_err = outcome
-            .as_ref()
-            .err()
-            .map(|e| e.contains("冻结"))
-            .unwrap_or(false);
-        let before = query_pending(handle).unwrap_or(0);
-        println!("occ-probe: pending before={before}");
-
-        // 冻结自愈：PostMessage ESC → 等 drain ≤2s（探测 deadline 给足 10s）
-        let unfroze = try_unfreeze(handle, Instant::now() + Duration::from_secs(10));
-        println!("occ-probe: try_unfreeze={unfroze:?}");
         let after = query_pending(handle).unwrap_or(0);
         println!("occ-probe: pending after={after}");
 
@@ -1032,30 +913,17 @@ mod tests {
         drop(guard); // FreeConsole 复位后再清场
         kill_probe(pid);
 
-        // 二选一放宽断言：a) 占用归零/有净下降（自愈生效或消费者自然消化）；或
-        // b) 返回含中文冻结语义错误（§8.3 WT 宿主未验证由文案覆盖）
-        let drained = after == 0 || after < before;
-        let unfreeze_chinese_err = unfroze
+        // 二选一放宽断言：a) Ok 且完成（cmd 消费跟得上，健康路径——逐样本下降
+        // 口径下背压锯齿稳态窗口持续重置，不会误判冻结）；或 b) Err 含判冻回执
+        // 文案关键词（『选择模式』/『输入积压』，D8 裁决的中文状态回执）
+        let freeze_receipt = outcome
             .as_ref()
             .err()
-            .map(|e| e.contains("冻结"))
+            .map(|e| e.contains("选择模式") || e.contains("输入积压"))
             .unwrap_or(false);
         assert!(
-            drained || write_freeze_err || unfreeze_chinese_err,
-            "应「占用归零/净下降」或「返回含中文冻结错误」：before={before} after={after} \
-             paced_write={outcome:?} try_unfreeze={unfroze:?}"
-        );
-
-        // M3/C1 实机回归钉：健康 cmd 消费者（背压锯齿稳态）连写必须成功且**不
-        // 触发冻结自愈**——逐样本下降口径（C1）修复前该断言不成立（历史最低
-        // 水位基线在锯齿稳态会例行误判冻结）
-        assert!(
-            outcome.as_ref().is_ok(),
-            "健康消费者背压连写应成功：{outcome:?}"
-        );
-        assert!(
-            !outcome.as_ref().unwrap().unfroze,
-            "健康消费者不应触发冻结自愈：{outcome:?}"
+            outcome.is_ok() || freeze_receipt,
+            "应「Ok 且完成」或「Err 含判冻回执关键词」：after={after} paced_write={outcome:?}"
         );
     }
 

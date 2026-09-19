@@ -18,10 +18,12 @@
 //! ## M9R 事件构造纯核（按族分支，M6R §8.1）
 //!
 //! 键事件统一由 [`KeyRecordSpec`]（vk + scan + UTF-16 字符 + down/up）描述，
-//! 按 TUI 族分支构造（族表见 `super::families`）：
+//! 按 TUI 族分支构造（族表见 `super::families`）。字符事件构造通用口径（两族
+//! 同规，不挂族分支）：正文非 ASCII 字符（CJK/emoji）一律 vk=0 纯字符流（M6R
+//! 实证 vk=0 被消费，与现役 ConIn.ps1 口径一致）；族分支只决定控制键/方向键的
+//! 事件形态：
 //! - **A 族（claude/kimi/opencode，原生 VT 流）**：方向键走 [`vt_seq_records`]
-//!   整条 VT 序列字符流（vk=0/scan=0，执行层须单批原子写）；正文非 ASCII 字符
-//!   一律 vk=0 纯字符流（M6R 实证 vk=0 被消费，与现役 ConIn.ps1 口径一致）；
+//!   整条 VT 序列字符流（vk=0/scan=0，执行层须单批原子写）；
 //! - **B 族（codex，crossterm）**：控制键/回车/方向键必须 VK+scan 键形态
 //!   （B 族丢弃 vk=0 控制字符）——[`enter_records`] / [`control_records`] /
 //!   [`vk_arrow_records`]。
@@ -857,6 +859,10 @@ mod tests {
         // 「a-z 0-9」取宽——良性偏离，保持旧 key_to_windows_vk 行为（VK 大写位
         // 大小写同键），此处钉值申报
         assert!(control_records("Y", &FakeLayout).is_some());
+        // F7⑨ 大写键 ch 原码差异补申报：与旧实现差异——大写键 ch = c as u16
+        // （0x59 'Y'），而旧 key_to_windows_vk 路径 ch 取小写 0x79——VK 位相同
+        // （VkKeyScanW 大小写同键位），UnicodeChar 字面更忠实于输入；Task 2 评审
+        // 已申报，此处补测试侧留痕
     }
 
     #[test]
