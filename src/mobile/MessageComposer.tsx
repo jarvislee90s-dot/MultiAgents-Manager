@@ -173,9 +173,11 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       if (j.status === "delivered") {
         setReceipt({ kind: "delivered" });
       } else {
-        // 200 failed 回执（忙时「投递进行中，请稍后重试」等）：先复核再定终态——
-        // 忙时失败的守卫方正是正在投递队首的 flush 循环，条目不在队大概率=已送达，
-        // 走中性 gone 收敛（评审裁决：不得落 failed「可重试」诱发重复注入）
+        // 非 delivered 回执先复核再定终态。queued（F1 后新语义：jump 守卫忙/
+        // 条目已被消费 → 回 queued{itemId,position}，前端 reconcileQueued 对账
+        // 兼容——条目仍在队恢复排队视图、确认不在队走中性 gone 收敛）与 failed
+        // （注入失败，行已退出 pending）同走复核——不得落 failed「可重试」诱发
+        // 重复注入（评审裁决）
         await reconcileQueued(itemId, position, () =>
           setReceipt({ kind: "gone", message: GONE_JUMP_MESSAGE })
         );
