@@ -36,12 +36,12 @@ families.rs 6 测 + engine.rs 18 测（含 macOS 构造，见 A6），共 24 测
 | paced_write 背压 / 真总预算 / 部分写续写 / 122 重试（实现层纪律，注释量化最坏持锁 ≈460s） | `inject/windows_console.rs` | 编译门禁 + 下方 #[ignore] 实机探针 |
 | CONSOLE_OP 全局互斥 + AttachGuard RAII 全路径 FreeConsole 复位（P1-1/P1-2） | `inject/windows_console.rs` | 实现层纪律（panic/错误路径复位由 RAII 结构保证） |
 
-`#[ignore]` 实机探针（Windows 本机真跑过，常规门禁只编译）：`ffi_hop_injects_into_fresh_console_cmd`（FFI 一跳落盘地面真值）、`occ_stuck_triggers_unfreeze_probe`（判冻解冻，含 `unfroze==false` 反向回归钉）、`read_input_tail_returns_recent_chars`（CONOUT$ 屏读）。
+`#[ignore]` 实机探针（Windows 本机真跑过，常规门禁只编译）：`ffi_hop_injects_into_fresh_console_cmd`（FFI 一跳落盘地面真值）、`occ_stuck_reports_freeze_receipt_probe`（判冻中文状态回执——「Ok 且完成」或「Err 含『选择模式』/『输入积压』回执关键词」二选一放宽断言；D8 裁决后不自动解冻，try_unfreeze 已随 d38dbd5 移除）、`read_input_tail_returns_recent_chars`（CONOUT$ 屏读）。
 
 ### A3 · 判冻窗口（R2）
 
 - 判定口径：占用>0 且**相邻采样无下降**（逐样本口径，质量评审 C1 定案）持续 ≥ `OCC_ABNORMAL_MS`(5s) 才判冻结——慢消费者合法 drain 不误报；常量钉值在 `families::constants_match_probe`。
-- 自动化覆盖形态 = A2 末条的 `#[ignore]` 实机探针（含反向断言）；**WT 宿主冻结恢复未实机验证**（§8.3 已知限制）——实机验收落点见 C-12。
+- 自动化覆盖形态 = A2 末条的 `#[ignore]` 实机探针（判冻回执，含放宽断言）；**WT 宿主判冻检测行为未实机验证**（§8.3 已知限制；D8 裁决 2026-09-19 后不自动介入，恢复=人工点窗）——实机验收落点见 C-12。
 
 ### A4 · 确认层（R2 / 裁决 A1）
 
@@ -129,7 +129,7 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 
 验收复跑合计 **4 passed / 0 failed · 273.73s**（全套实跑命令见上，`--test-threads=1`；执行序按字母序 long→short→http→key）。首跑全套连跑 293.82s；证据目录 `%USERPROFILE%\mam-probe-m6r\evidence\m9r-e2e\`（按 `<用例名>-<run-id>` 归档，run.log 随 run 累积）。慢用例（opencode 长文）按测试文件头「单例失败先隔离重跑再定因」纪律处理——**重跑即愈**为既定判定口径。F5 三例首跑合计 **3 passed / 0 failed · 102.82s**（2026-09-19，逐一显式跑；跨会话例为取证完整性连跑两次均绿）。
 
-**矩阵口径说明（F5 扩三例后，如实标注已测面/未测面）**：已测面 = conhost×短文×四家（`e2e_engine_matrix_short`）+ 10k×claude/opencode（`e2e_engine_matrix_long`）+ WT×2000×claude/codex（`e2e_wt_host_matrix`）+ codex 10k（`e2e_codex_long_10k`）+ 跨会话并发（claude+codex，`e2e_cross_session_no_crosstalk`）。**未测面如实留白**：WT 宿主 × kimi/opencode、WT 宿主 × 10k 长文、conhost × kimi/opencode 10k、跨会话并发 × kimi/opencode——以上组合无自动化覆盖，验收时如有需要按 B/C 段人工项补看；WT 判冻恢复仍为已知限制（§8.3，见 A3/C-12）。
+**矩阵口径说明（F5 扩三例后，如实标注已测面/未测面）**：已测面 = conhost×短文×四家（`e2e_engine_matrix_short`）+ 10k×claude/opencode（`e2e_engine_matrix_long`）+ WT×2000×claude/codex（`e2e_wt_host_matrix`）+ codex 10k（`e2e_codex_long_10k`）+ 跨会话并发（claude+codex，`e2e_cross_session_no_crosstalk`）。**未测面如实留白**：WT 宿主 × kimi/opencode、WT 宿主 × 10k 长文、conhost × kimi/opencode 10k、跨会话并发 × kimi/opencode——以上组合无自动化覆盖，验收时如有需要按 B/C 段人工项补看；WT 判冻检测行为仍为已知限制（§8.3，见 A3/C-12；D8 裁决后恢复=人工点窗，不自动介入）。
 
 ---
 
@@ -163,8 +163,10 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-9 | 审批 claude 计划模式 | claude 计划模式出计划 | 红卡点批准执行 | 计划被批准开始执行（「1」键，Windows 取证一致） |
 | C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open（仅移动端触发落账；桌面端 Tauri 路径不写审计——audit 需设备身份） |
 | C-11 | 审计页逐条可查 | 完成上述操作 | 设置 → 注入审计 | 逐条对应，无缺漏 |
-| C-12 | WT/conhost 判冻与自动解冻 | 任一 CLI 会话在持续输出/制造输出停顿 | 注入长文制造背压与停顿，观察占用判冻与自动解冻（PostMessage ESC 自愈） | 判冻解冻自动发生、正文最终命中；**WT 宿主恢复未验证为已知限制（§8.3）——异常即记录不判 FAIL** |
+| C-12 | WT/conhost 判冻与人工点窗恢复 | 任一 CLI 会话制造输出停顿/选择模式（如终端内文本框选） | 注入长文制造背压与停顿：注入回执出现「目标终端疑似进入选择模式…」中文状态回执（D8 裁决 2026-09-19：不自动介入）→ 用户点一下该终端窗口清除选择模式 → 重发 | 状态回执如实出现，点窗后重发成功、正文最终命中；**WT 宿主判冻检测行为未实机验证（OccWatch 探针为 #[ignore]，§8.3）——异常即记录不判 FAIL** |
 | C-13 | 滞留→屏读→补按回车恢复路径 | 任一快消费者会话（E10 尾字符丢失场景：正文已打入但尾字符/提交回车丢失） | 直发后若确认失败回执出现：终端可见已打内容但未提交——人工按一次回车即提交；或等确认层自动屏读回查补按（500ms 轮询 3s 窗，`confirm::RECHECK_MS`） | 滞留内容最终提交进会话（会话文件见戳），不重复双投；确认回执与实际落盘一致 |
+| C-14 | 锁屏场景注入/通知可达性（原 M7 遗留补充项） | Windows 锁屏态（命令备好于 mam-probe 报告 §6；macOS 侧锁屏项见 m7-m8 清单 #5） | 锁屏后远程发消息，观察注入与通知可达 | 占位：沿用既有验收口径，未在本批新增内容 |
+| C-15 | 真机蜂窝网络复验（原用户项） | 外网蜂窝网络手机 + Windows 实机 | 蜂窝网络下远程发消息走全链 | 占位：沿用既有验收口径，未在本批新增内容 |
 
 ---
 
