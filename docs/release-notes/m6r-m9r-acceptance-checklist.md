@@ -117,6 +117,12 @@ cd src-tauri
 cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 ```
 
+执行纪律三条（2026-09-19 追加，固化本批 E2E 假执行教训——见台账收尾小批 P2 E2E 重跑记录）：
+
+- 用绝对路径或在 `src-tauri/` 目录执行，勿依赖 shell 当前目录（后台管道下 CWD 错误会产生假执行）；
+- 判定绿以**退出码**为准，勿以管道 tail 输出判绿（`cmd | tail` 的退出码是 tail 的）；
+- 运行中的 MAM 应用会锁 `target/debug` 的 exe——用 `CARGO_TARGET_DIR=target/gate-run` 隔离跑测试（或先退出 MAM）。
+
 前置：Windows 宿主 + conhost 控制台拓扑（项目技能 `win-console-inject-probe` 起会话法）；本机四家 CLI 且版本与族规格指纹一致（claude 2.1.251 / codex 0.154.0——按 npm 包版本口径，TUI 自报允许漂移 / kimi 2.0.0 / opencode 1.18.31）；零接触真实 `~/.mam`（内存库），只读真实 CLI 会话存储（A1 确认语义所需）。硬杀测试进程会残留探测终端需手动关。
 
 | 用例 | 断言 | 首跑实绩（2026-09-19） | 验收复跑（2026-09-19，Task 13 终跑） |
@@ -197,3 +203,14 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 > spawn 路径现**等待完成并捕获 stderr/退出码**，失败回执 200 `{"status":"failed"}`
 > +「macOS 自动化授权缺失」指引、审计记 `open failed:*`，不再出现 audit `open ok`
 > 但无窗的账实背离。
+
+> **M1B 追记（macOS 审批红卡降级口径，2026-09-19 用户裁决定案；适用 D-4 / D-6 及 M8 映射项 M8-1/M8-2）**：
+> **macOS 审批红卡暂不可达，降级路径（普通发送键位字符→排队→插队投递）Mac 实测等效可用，M8-1/M8-2 经降级全部达效**。
+> 根因两处（任一独立成立即可卡死红卡，见 Mac 报告 §四-A：`docs/release-notes/mac-acceptance-report-55f37e7.md`）：
+> ① 审批等待期会话状态被判 **processing** 而非 Waiting（`available = status==Waiting && 映射 && detect(last_message)`）；
+> ② 审批提示是 TUI 层覆盖物**不落会话文件**，Windows 靠 CONOUT$ 屏读拿到，macOS 无屏读。
+> 降级链实测证据：claude 键位「1」经降级投递提示被正确应答、命令执行；codex 键位「y」经降级投递批准生效
+> （`~/Desktop/mam-accept-codex-test.txt` 落盘）；`POST /session-approve` 被 409 not_waiting 守卫正确拦截
+> （不向未等待会话发错误键位）。判定落账：D-4=PASS（有漂移记录，y/esc、1 键位不变）/
+> D-6=不适用（红卡不可达，approve 的 keystroke 路径无实机触发样本，未观察丢键）/
+> M8-1=部分（经降级达效）/ M8-2=PASS（经降级）。
