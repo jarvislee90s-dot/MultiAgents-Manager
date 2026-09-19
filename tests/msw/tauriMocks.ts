@@ -337,6 +337,10 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // 托盘统一重建（T16）：fire-and-forget，无返回值消费，显式 no-op 以闭合双 mock parity
     case "refresh_tray":
       return Promise.resolve();
+    // R5 一键 resume（M6R–M9R Task 11）：测试环境不真开终端，视为成功（双 mock parity，
+    // 与 src/tauri-mock.ts 的 session_open case 同步）
+    case "session_open":
+      return Promise.resolve(undefined);
     default:
       return Promise.resolve(undefined);
   }

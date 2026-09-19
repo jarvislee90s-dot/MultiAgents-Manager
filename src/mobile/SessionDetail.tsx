@@ -24,6 +24,7 @@ import {
   ApiError,
   fetchSessionFiles,
   fetchSessionMessages,
+  sessionOpen,
   type SessionFileEntry,
   type SessionMessage,
 } from "./api";
@@ -46,6 +47,27 @@ import type { Session } from "@/types/session";
 const PAGE_LIMIT = 200;
 /** 后端 limit clamp 上限：到达后不再提供「加载更早消息」 */
 const MAX_LIMIT = 1000;
+
+// R5 一键 resume（Task 11）：支持「在电脑上打开」的工具镜像表。
+// SSOT = src-tauri/src/inject/resume.rs 的 RESUME_TABLE（Step 1 实测取证），
+// 后端查证新工具回填后**两处必须同步**（前端镜像仅驱动按钮禁用态）。
+const RESUME_SUPPORTED_TOOLS: ReadonlySet<string> = new Set([
+  "claude",
+  "codex",
+  "kimi",
+  "opencode",
+]);
+
+/** 禁用原因（中文内联，移动端无 i18n 契约）：无 cwd / 无映射 → null = 可用 */
+function resumeUnavailableReason(session: Session): string | null {
+  if (!session.projectPath || !session.projectPath.trim()) {
+    return "该会话没有项目目录信息，无法在电脑上打开";
+  }
+  if (!RESUME_SUPPORTED_TOOLS.has(session.agentType)) {
+    return "该工具 resume 命令待查证，暂不支持一键打开";
+  }
+  return null;
+}
 
 interface SessionDetailProps {
   /** 完整会话对象（Task 8 裁决：详情页需要 status 判定自动折叠、projectName 页头、
@@ -431,6 +453,33 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     setError(null);
     setRefreshTick((t) => t + 1);
   }, []);
+
+  // ---- R5 一键 resume（在电脑上打开，Task 11）----
+  // 出手成功后按钮转「正在电脑上打开终端…」短暂提示；失败按 404 错误码分診中文
+  // 文案（与后端哨兵串一一对应），按钮恢复可点（可重试）
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const resumeReason = resumeUnavailableReason(session);
+  const handleSessionOpen = useCallback(async () => {
+    setOpening(true);
+    setOpenError(null);
+    try {
+      await sessionOpen(session.id);
+    } catch (e) {
+      const code = e instanceof ApiError ? (e.data?.error as string | undefined) : undefined;
+      setOpenError(
+        code === "no_cwd"
+          ? "打开失败：该会话没有项目目录信息"
+          : code === "no_resume_command"
+            ? "打开失败：该工具 resume 命令待查证"
+            : code === "no_session"
+              ? "打开失败：会话已不在当前列表"
+              : "打开失败，请稍后重试"
+      );
+    } finally {
+      setOpening(false);
+    }
+  }, [session.id]);
 
   // ---- 书签（M3+，2026-09-16 用户裁决）----
   // 恢复：拿到 MAM 进程 bootId 后从 localStorage 种回内存单例（刷新页面/
@@ -931,6 +980,33 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           {bookmarkBar}
+          {/* R5 一键 resume（在电脑上打开，Task 11）：无 cwd / 无映射 → 禁用 + 原因；
+            两分支（split / 正文）中只有正文视图挂载，与 ApproveCard 同口径 */}
+          <div className="shrink-0 px-3 pt-2">
+            <button
+              type="button"
+              data-testid="session-open"
+              disabled={resumeReason !== null || opening}
+              title={resumeReason ?? undefined}
+              onClick={handleSessionOpen}
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 enabled:hover:bg-slate-100 disabled:opacity-50 dark:border-slate-800 dark:text-slate-300 dark:enabled:hover:bg-slate-900"
+            >
+              {opening ? "正在电脑上打开终端…" : "在电脑上打开"}
+            </button>
+            {resumeReason && (
+              <p className="mt-1 text-center text-xs text-slate-400 dark:text-slate-500">
+                {resumeReason}
+              </p>
+            )}
+            {openError && (
+              <p
+                data-testid="session-open-error"
+                className="mt-1 text-center text-xs text-rose-600 dark:text-rose-400"
+              >
+                {openError}
+              </p>
+            )}
+          </div>
           {/* 审批红卡（M8 Task 12）：waiting 态且正文视图挂载（预览/分屏分支不挂），
               紧贴 messageArea 上方；available=false 时卡自身自隐（组件内部判定）。
               刷新机制事实口径：App 的 selected 是冻结快照，停留详情期间不会随 SSE

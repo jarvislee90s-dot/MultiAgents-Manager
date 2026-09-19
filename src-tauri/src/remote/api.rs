@@ -3,6 +3,7 @@
 // + session-messages（Task 7）+ session-files / file（M3 Task 8 文件路径提取与安全读取）
 // + session-send / send-info / queue 系（M7 Task 6 注入三端点）
 // + session-approve-options / session-approve（M8 Task 11 审批选项与一键应答）
+// + session-open（M6R–M9R Task 11 一键 resume，R5）
 
 use axum::{
     extract::{ConnectInfo, Query, State},
@@ -1488,8 +1489,9 @@ pub async fn session_approve(
                 Err("内部任务异常".to_string())
             }
         };
-    // 审计 action 词表（W5 词表 send|queue|flush|jump|retract|approve|reject|fail|key；
-    // open 预留：Task 11 resume 审计动作）：approve/reject 语义化；域外 id（KV 定制表
+    // 审计 action 词表（W5 词表 send|queue|flush|jump|retract|approve|reject|fail|key|open；
+    // open = Task 11 一键 resume（session-open 端点），Task 7 的预留标注已兑现）：
+    // approve/reject 语义化；域外 id（KV 定制表
     // 可含任意 id）不进词表——收敛为新增词表动作 "key" 并 log::warn 留痕，防自由文本
     // 污染审计 action 列（AuditLogSection 前端「原样小写展示」契约不受影响）
     let action = match option.id.as_str() {
@@ -1538,4 +1540,145 @@ pub async fn session_approve(
                 .into_response()
         }
     }
+}
+
+// ==== M6R–M9R Task 11：一键 resume 端点（R5，B 兜底可见性半部）====
+// 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写路径）：
+//   POST /session-open body {sessionId} → 200 {"status":"opening"}
+//     | 404 {"error":"no_session"}（会话不在快照）
+//     | 404 {"error":"no_resume_command"}（工具未入 resume 命令表——未查证不出手）
+//     | 404 {"error":"no_cwd"}（会话无项目目录）
+//     | 200 {"status":"failed","error":…}（spawn 出手失败，可重试回执，session-approve 同口径）。
+// 审计 action="open"（W5 词表追加项，Task 7「预留：Task 11」兑现）：仅在 spawn
+// 出手时落账（ok / failed:{e}）——404 校验失败不写审计（session-send 同口径）。
+// 终端选择在核心（inject::resume）：Windows 优先 wt、回退 conhost；macOS 优先
+// iTerm2、次选 Terminal.app。spawn 缝（RemoteState.resume_spawner）使端点测试
+// 零真开窗。
+
+/// POST /m/api/v1/session-open 请求体（camelCase；缺参不触发 axum 提取器 422，
+/// 由 handler 统一按契约给 400 bad_request）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionOpenReq {
+    #[serde(default)]
+    pub session_id: String,
+}
+
+/// POST /m/api/v1/session-open（R5 一键 resume）：查找会话 → inject::resume 核心
+/// （spawner 缝消费 RemoteState.resume_spawner）→ 按错误契约分诊。查找与 spawn
+/// 出手同在一个 spawn_blocking（会话扫描是重活，sessions handler 同一先例）。
+pub async fn session_open(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionOpenReq>,
+) -> Response {
+    // ① 参数校验（trim 判空——与 session-send 同口径）
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() {
+        return bad_request();
+    }
+    // ② 设备身份（防御 403 + 花名）
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // ③ 查找 + 核心（spawn_blocking：扫描是同步阻塞调用；核心内 wt 探测进程级缓存）。
+    // sid 移动副本进闭包，原值保留给审计（session-send 同一写法）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let outcome = match tokio::task::spawn_blocking(
+        move || -> Result<(String, Result<(), String>), String> {
+            // 复合键口径（Task 5 教训）：快照里按 id 找第一个匹配——契约如此
+            let Some(session) = (probe_st.session_source)()
+                .sessions
+                .into_iter()
+                .find(|s| s.id == probe_sid)
+            else {
+                return Err("no_session".to_string());
+            };
+            let tool = session.agent_type.tool_id().to_string();
+            let r = crate::inject::resume::open_session_terminal_with(
+                &session,
+                probe_st.resume_spawner.as_ref(),
+            );
+            Ok((tool, r))
+        },
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-open 会话扫描任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let (tool, result) = match outcome {
+        Ok(v) => v,
+        Err(code) => {
+            // 会话不在快照：无工具可审计（session-send 的 no_session 同口径不落账）
+            return (
+                StatusCode::NOT_FOUND,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": code })),
+            )
+                .into_response();
+        }
+    };
+    // ④ 错误契约分诊：哨兵串映射 404（校验失败不写审计、spawner 未被调用）；
+    // 其余为 spawn 出手后的失败 → 200 failed（可重试回执）+ 审计 failed
+    match result {
+        Ok(()) => {
+            // 审计 content = resume 命令摘要（audit_write 内 summarize 截断）
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &resume_command_for_audit(&tool, &sid),
+                "open",
+                "ok",
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "status": "opening" })),
+            )
+                .into_response()
+        }
+        Err(e) if e == "no_resume_command" || e == "no_cwd" => (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+        Err(e) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &resume_command_for_audit(&tool, &sid),
+                "open",
+                &format!("failed:{e}"),
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "status": "failed", "error": e })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// 审计 content 的 resume 命令摘要（与核心同一命令表产物；spawner 出手成功时
+/// 核心已构造过一次——此处再取一次纯表查询，代价可忽略，换取审计与出手同源）
+fn resume_command_for_audit(tool: &str, sid: &str) -> String {
+    crate::inject::resume::resume_command(tool, sid).unwrap_or_default()
 }

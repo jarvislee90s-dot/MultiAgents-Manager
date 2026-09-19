@@ -598,6 +598,11 @@ if (!isTauri) {
       case "refresh_tray":
         return Promise.resolve(undefined);
 
+      // R5 一键 resume（M6R–M9R Task 11）：浏览器 mock 下无法真开终端，视为成功
+      //（按钮态目验链路：成功 toast「正在电脑上打开终端…」）
+      case "session_open":
+        return Promise.resolve(undefined);
+
       case "detect_tools":
         return Promise.resolve([
           { id: "claude", name: "Claude Code", available: true, path: "/usr/local/bin/claude" },

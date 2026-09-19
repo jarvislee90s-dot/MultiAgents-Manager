@@ -620,6 +620,8 @@ mod tests {
             home_source: Box::new(|| None),
             injector,
             confirm_probe,
+            // R5 一键 resume spawn 缝（Task 11）：flush 路径不消费，注 no-op 桩（零真开窗）
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
         }
     }
 

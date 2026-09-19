@@ -282,6 +282,10 @@ pub struct RemoteState {
     /// 消费方：inject::queue::flush_one（flush 投递）+ session-send 直发（Task 6 已接线：
     /// 路由注册 / serve 挂 flush 循环 / 审计写口共用）——channel 名（审计）也取自本缝
     pub injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+    /// R5 一键 resume 终端 spawn 缝（Task 11）：生产 = inject::resume::spawn_terminal
+    /// （真开窗）；测试注入记录型假 spawner（零真开窗）。消费方：session-open 端点
+    /// （inject::resume::open_session_terminal_with 的 spawner 参数）
+    pub resume_spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
     /// A1 写入确认缝（M9R Task 5）：参数 = (tool, session_id, stamp)。生产 =
     /// 会话消息读路径查 24 字符尾戳（与 /session-messages 数据同源；读失败 =
     /// 未命中，诚实口径）；测试恒 true（确认失败用例就地覆盖恒 false）。
@@ -325,6 +329,9 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             get(api::session_approve_options),
         )
         .route("/session-approve", post(api::session_approve))
+        // M6R–M9R Task 11：一键 resume 端点（R5，PIN 门禁内层 gate 结构性覆盖，
+        // 新端点不需要各自鉴权代码；spawn 缝注入使测试零真开窗）
+        .route("/session-open", post(api::session_open))
         // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
         // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
         // 内层 fallback 403）
@@ -415,6 +422,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.mam
             // M7 Task 5：注入器缝——本组测试不触 flush 路径，用生产占位
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| {
@@ -955,6 +964,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
@@ -1322,6 +1333,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| {
@@ -1411,6 +1424,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -1608,6 +1623,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -1883,6 +1900,8 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -2022,6 +2041,8 @@ mod tests {
                 store: crate::remote::pairing::DeviceStore::memory(),
                 // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
                 injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+                // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+                resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
                 // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                 confirm_probe: std::sync::Arc::new(|_, _, _| true),
                 host_source: Box::new(|| serde_json::Value::Null),
@@ -2571,6 +2592,10 @@ mod tests {
                     store: crate::remote::pairing::DeviceStore::memory(),
                     // M7 Task 5：注入器缝——端点测试不触 flush 路径，用生产占位（Windows 为 Err 桩）
                     injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+                    // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
+                    resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| {
+                        Ok(())
+                    }),
                     // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                     confirm_probe: std::sync::Arc::new(|_, _, _| true),
                     host_source: Box::new(|| serde_json::Value::Null),
@@ -2802,6 +2827,8 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
+            // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -2962,6 +2989,8 @@ mod tests {
             }),
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
+            // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -3895,7 +3924,8 @@ mod tests {
 
     /// P3 审计动作词表（Task 7 P3c）：KV 定制映射含域外 id=other 的选项 → POST
     /// session-approve 照发键位（x）→ 审计 action 收敛为 "key"（W5 词表 send|queue|
-    /// flush|jump|retract|approve|reject|fail|key 之外的域外 id 不得原样进审计
+    /// flush|jump|retract|approve|reject|fail|key|open——open 已随 Task 11 一键
+    /// resume 兑现——之外的域外 id 不得原样进审计
     /// action 列——key 是本次新增的收敛动作）且不 panic；域外 warn 在实现侧 log，
     /// 测试不断言日志。
     /// KV 经内存库 seed（DeviceStore 缝，零接触真实 ~/.mam）；sess_j 全测试集唯一
@@ -4126,5 +4156,232 @@ mod tests {
             "detect 未命中严格档 hint 仍下发（短路序定格）"
         );
         assert!(fake.recorded_keys().is_empty(), "查询端点零按键投递");
+    }
+
+    // ==== M6R–M9R Task 11：session-open 端点（R5 一键 resume）====
+    // 零污染 + 零真开窗：spawn 缝（RemoteState.resume_spawner）注入记录型假
+    // spawner；会话快照/设备表/审计全走注入缝与内存库，不触真实 ~/.mam。
+
+    /// Task 11 记录型假 spawner：克隆记录 SpawnSpec 不真开窗（R5 硬约束：
+    /// spawner 缝使端点测试不真开窗；Windows 实开窗验证归用户手工/后续验收）
+    struct RecordingSpawner(
+        std::sync::Arc<std::sync::Mutex<Vec<crate::inject::resume::SpawnSpec>>>,
+    );
+
+    impl RecordingSpawner {
+        fn new() -> Self {
+            Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+        }
+        fn seam(&self) -> std::sync::Arc<crate::inject::resume::SpawnFn> {
+            let log = self.0.clone();
+            std::sync::Arc::new(move |spec: &crate::inject::resume::SpawnSpec| {
+                log.lock().unwrap().push(spec.clone());
+                Ok(())
+            })
+        }
+        fn recorded(&self) -> Vec<crate::inject::resume::SpawnSpec> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// Task 11 专用 state：会话夹具独占 id（守卫 id 立规的防串键纪律同源）——
+    /// sess_m（claude Waiting 正常 cwd）/ sess_n（claude Waiting 空白 cwd）/
+    /// sess_o（workbuddy Idle，未入 resume 命令表）；spawner 注入记录型假体。
+    /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.mam）。
+    fn open_state(spawner: std::sync::Arc<crate::inject::resume::SpawnFn>) -> Arc<RemoteState> {
+        let mut sess_m = inj_sess(
+            "sess_m",
+            crate::session::AgentType::Claude,
+            30,
+            crate::session::SessionStatus::Waiting,
+        );
+        sess_m.project_path = "/tmp/proj-m".into();
+        let mut sess_n = inj_sess(
+            "sess_n",
+            crate::session::AgentType::Claude,
+            31,
+            crate::session::SessionStatus::Waiting,
+        );
+        sess_n.project_path = "  ".into();
+        let sess_o = inj_sess(
+            "sess_o",
+            crate::session::AgentType::WorkBuddy,
+            32,
+            crate::session::SessionStatus::Idle,
+        );
+        let sessions = vec![sess_m, sess_n, sess_o];
+        Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: sessions.clone(),
+                total_count: sessions.len(),
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            resume_spawner: spawner,
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        })
+    }
+
+    /// 一键 resume 出手：200 opening + no-store + spawner 收到命令表产物 +
+    /// 审计 action=open result=ok；无 cookie → 403（PIN gate 照旧覆盖）
+    #[tokio::test]
+    async fn session_open_endpoint_opens_and_audits() {
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state(spawner_rec.seam());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 无 cookie → 403（nest 内层 gate 结构性覆盖新端点）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                None,
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "session-open 必须过 PIN 门禁");
+        // 有 cookie → 200 opening + no-store
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "打开回执是门禁下私有写路径，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"opening\""),
+            "一键 resume 应回执 opening：{body}"
+        );
+        // spawner 恰被调用一次，携带命令表产物（wt/conhost 分支的平台差异不断言）
+        let recorded = spawner_rec.recorded();
+        assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
+        assert!(
+            recorded[0]
+                .args
+                .iter()
+                .any(|a| a == "claude --resume sess_m"),
+            "spawn 计划必须携带 claude 的 resume 命令：{:?}",
+            recorded[0]
+        );
+        // 审计 action=open（Task 7 预留兑现）result=ok
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "open");
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(audits[0].session_id, "sess_m");
+        assert_eq!(audits[0].device_name, "测试设备");
+        assert_eq!(audits[0].agent_type, "claude");
+    }
+
+    /// 无 cwd：404 no_cwd + spawner 不出手 + 不写审计（校验失败不落账口径）
+    #[tokio::test]
+    async fn session_open_endpoint_no_cwd() {
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state(spawner_rec.seam());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_n"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert_eq!(body_string(r).await, "{\"error\":\"no_cwd\"}");
+        assert!(spawner_rec.recorded().is_empty(), "无 cwd 不得出手 spawn");
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(audits.is_empty(), "校验失败不写审计");
+    }
+
+    /// 无映射（workbuddy 未入命令表）：404 no_resume_command + spawner 不出手
+    #[tokio::test]
+    async fn session_open_endpoint_no_resume_command() {
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state(spawner_rec.seam());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_o"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert_eq!(body_string(r).await, "{\"error\":\"no_resume_command\"}");
+        assert!(
+            spawner_rec.recorded().is_empty(),
+            "未查证工具绝不出手 spawn"
+        );
+    }
+
+    /// 会话不在快照：404 no_session；缺参：400（与 session-send 同口径）
+    #[tokio::test]
+    async fn session_open_endpoint_no_session_and_bad_request() {
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state(spawner_rec.seam());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_zzz"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert_eq!(body_string(r).await, "{\"error\":\"no_session\"}");
+        // 缺参 → 400
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":""}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        assert!(spawner_rec.recorded().is_empty());
     }
 }

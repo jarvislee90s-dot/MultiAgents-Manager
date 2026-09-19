@@ -509,3 +509,37 @@ export async function sessionApprove(sessionId: string, optionId: string): Promi
   }
   return (await r.json()) as ApproveResult;
 }
+
+// ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====
+
+/** 一键 resume 回执（POST /session-open）：200 {status:"opening"} 表示电脑侧正在
+ *  打开终端恢复该会话；spawn 出手失败 → 200 {status:"failed",error}（可重试） */
+export type SessionOpenResult = { status: "opening" } | { status: "failed"; error: string };
+
+/** 一键 resume（R5）：请求电脑本机打开终端 + cd 项目目录 + 恢复会话 + 聚焦。
+ *  404 {error:"no_session"|"no_cwd"|"no_resume_command"} → 非 2xx 抛 ApiError
+ *  （错误码解析进 data.error，调用方分診禁用/失败文案——后端命令表未收录的工具
+ *  前端按钮本就禁用，404 是挂载后会话漂移的兜底） */
+export async function sessionOpen(sessionId: string): Promise<SessionOpenResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-open 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 404 错误码在响应体 data.error——解析进 data 供调用方分診（对齐 sessionApprove 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理注入页等）：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-open ${r.status}`, data);
+  }
+  return (await r.json()) as SessionOpenResult;
+}

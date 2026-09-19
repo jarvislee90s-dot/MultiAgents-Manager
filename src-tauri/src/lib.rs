@@ -123,6 +123,8 @@ pub fn run() {
         commands::session::focus_hwnd,
         commands::session::kill_session,
         commands::session::dismiss_session_card,
+        // M6R–M9R Task 11：R5 一键 resume（桌面卡「在电脑上打开」）
+        commands::session::session_open,
         commands::notification::show_notification_window,
         commands::pet::set_pet_visible,
         commands::pet::set_pet_always_on_top,

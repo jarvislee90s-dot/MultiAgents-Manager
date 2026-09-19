@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Cpu, Clock, Bot, ChevronRight, X, ArrowLeftRight } from "lucide-react";
+import { Cpu, Clock, Bot, ChevronRight, X, ArrowLeftRight, ExternalLink } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -8,6 +8,7 @@ import { StatusLight } from "@/components/sessions/StatusLight";
 import { useSessionJump } from "@/hooks/useSessionJump";
 import { AGENT_BADGE, getAgentLabel } from "@/lib/agentBadge";
 import { sessionTitleOrUndefined } from "@/lib/sessionTitle";
+import { RESUME_CAPABLE_TOOLS, sessionOpen } from "@/lib/api/session";
 import type { Session } from "@/types/session";
 
 function formatRuntime(lastActivityAt: string, t: (key: string) => string): string {
@@ -99,6 +100,25 @@ export function SessionCard({
       });
     } catch (e) {
       toast.error(t("sessions.jumpFailed", { error: e }));
+    }
+  };
+
+  // R5 一键 resume（Task 11「在电脑上打开」）：无 cwd / 无映射 → 禁用 + 原因
+  //（title 悬停提示）；出手成功 toast「正在电脑上打开终端…」，失败 toast 后端
+  // 转译后的中文文案（命令侧哨兵串已转译）
+  const resumeReason =
+    !session.projectPath || !session.projectPath.trim()
+      ? t("resume.noCwd")
+      : !RESUME_CAPABLE_TOOLS.has(session.agentType)
+        ? t("resume.noCmd")
+        : null;
+  const handleResumeOpen = async (e: React.MouseEvent) => {
+    e.stopPropagation(); // 不触发卡片跳转
+    try {
+      await sessionOpen(session.id);
+      toast.info(t("resume.opening"));
+    } catch (err) {
+      toast.error(t("resume.failed", { error: err }));
     }
   };
 
@@ -204,6 +224,18 @@ export function SessionCard({
               {t("sessions.subagents", { n: session.activeSubagentCount })}
             </span>
           )}
+          {/* R5 一键 resume（Task 11）：无 cwd / 无映射工具禁用（title 给原因） */}
+          <button
+            type="button"
+            data-testid="session-open"
+            disabled={resumeReason !== null}
+            title={resumeReason ?? t("resume.open")}
+            aria-label={resumeReason ?? t("resume.open")}
+            onClick={handleResumeOpen}
+            className="hover:bg-muted hover:text-foreground rounded p-0.5 disabled:pointer-events-none disabled:opacity-40"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </button>
           {session.jumpSupported && (
             <ChevronRight className="ml-auto h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
           )}

@@ -572,6 +572,13 @@
       "finished": "Finished"
     }
   },
+  "resume": {
+    "open": "Open on this computer",
+    "noCwd": "This session has no project directory info; cannot open on the computer",
+    "noCmd": "Resume command not verified for this tool yet",
+    "opening": "Opening a terminal on the computer…",
+    "failed": "Failed to open: {{error}}"
+  },
   "pet": {
     "menu": {
       "sound": "🔊 Sound",

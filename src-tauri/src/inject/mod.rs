@@ -4,6 +4,8 @@ pub mod engine;
 pub mod families;
 pub mod normalize;
 pub mod queue;
+// R5 一键 resume 窗口（M6R–M9R Task 11）：命令表 + 终端 spawn 核心（spawner 缝）
+pub mod resume;
 pub mod routing;
 #[cfg(windows)]
 pub mod windows_console;
@@ -29,6 +31,8 @@ pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
 /// 原 Task 5 的 queue.rs 私有版提升至此（Task 6）：flush/jump/fail 落账（queue::settle）
 /// 与 session-send / queue / retract 端点审计两处共用，单一出口防词表漂移。
 /// 字段化入参而非 QueueRow：端点侧审计（send/queue/retract）没有整行可传。
+/// action 词表（W5）：send|queue|flush|jump|retract|approve|reject|fail|key|open
+/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn audit_write(
     conn: &rusqlite::Connection,
