@@ -116,9 +116,12 @@ impl Drop for AttachGuard {
     }
 }
 
-/// 注入结果统计（跨任务接口契约，Task 4/5 消费）。
+/// 注入结果统计（跨任务接口契约，Task 4/5 消费）。可见性为 `pub` 仅因
+/// `super::e2e_support`（M9R Task 12 实机 E2E 测试支撑面）的 `pub use` re-export
+/// 对 `pub(crate)` 项不合法（E0365）——非公开 API 承诺：生产消费方不变（engine /
+/// confirm）， crate 内调用一律走 `Injector` 缝与旧薄壳。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InjectStats {
+pub struct InjectStats {
     /// 成功送达的正文字符数（`text.chars().count()`；Ok 即全量送达，不含提交回车）
     pub written: usize,
     /// 本次注入是否走背压节流（§8.1 自适应：慢消费者或长文）
@@ -567,11 +570,9 @@ fn inject_via<T>(pid: u32, write: impl FnOnce(HANDLE) -> Result<T, String>) -> R
 /// 事件对（固定 [`families::SUBMIT_DELAY_MS`] 后单批提交）。自适应节流与真总
 /// 预算由族规格驱动（§8.1 / P2-1）。
 /// `text` 已是 compose 后单行（含字面 \n 两字符场景也按字符事件直发）。
-pub(crate) fn inject_text_spec(
-    pid: u32,
-    text: &str,
-    spec: &FamilySpec,
-) -> Result<InjectStats, String> {
+/// 可见性 `pub` 仅服务 `super::e2e_support` 测试支撑面（E0365 缘由见
+/// [`InjectStats`] 注）；crate 内生产调用一律经 `Injector` 缝（engine.rs）。
+pub fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<InjectStats, String> {
     // P1-2：进程级串行（附加态全局唯一）；毒锁就地恢复（前次 panic 不放大为死锁）
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
     // 域内路径：锁内 resolve_target（探测附加+祖先回退全在锁内，杜绝并发附加竞态）
@@ -640,8 +641,9 @@ fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
 
 /// 单键注入（M9R spec 感知版）：键域内（enter/esc/tab/单字符字母数字/方向键）
 /// → 按族形态单批写入；域外 → **快速失败报错，不回退文本+回车**（P2-2 闭环）。
-/// 域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。
-pub(crate) fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), String> {
+/// 域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。可见性 `pub` 仅服务
+/// `super::e2e_support` 测试支撑面（缘由同 [`InjectStats`] 注）。
+pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), String> {
     // P2-2：域校验先行——必须在取锁/附加之前快速失败（不触任何控制台 API）
     let Some(records) = key_records_for(key, spec) else {
         return Err(format!(

@@ -10,6 +10,17 @@ pub mod routing;
 #[cfg(windows)]
 pub mod windows_console;
 
+/// 实机 E2E 专用测试支撑面（M9R–M9R 批次 Task 12，`tests/m9r_e2e.rs` 唯一消费方）。
+/// **非公开 API 承诺**：`doc(hidden)` 不进文档；只 re-export Windows 执行层的
+/// spec 感知入口与统计类型（四例 E2E 直调引擎所需的最小面），零新逻辑零转发。
+/// 生产代码不得消费本模块——生产注入一律经 `engine::Injector` 缝（`RealInjector`
+/// 装配）与旧薄壳（`locate_and_inject` / `locate_and_send_key`）。
+#[doc(hidden)]
+#[cfg(windows)]
+pub mod e2e_support {
+    pub use super::windows_console::{inject_key_spec, inject_text_spec, InjectStats};
+}
+
 /// 桌面端写审计查看（W5 只读入口）：返回最近 limit 条（缺省 100），最新在前。
 /// AuditRow serde camelCase 序列化即前端载荷；无 device_id 字段（设备标识不外泄，
 /// 展示侧只用 device_name）。st 不需要：审计读不走注入器/远端状态，全局 DB 直查。
