@@ -1,7 +1,7 @@
 # M6R–M9R · 验收测试清单（自动化 / computer-use / 人工三段 + Mac 回传追加）
 
 > 本清单对应批次设计 `docs/superpowers/specs/2026-09-18-phase2-m6r-m9r-injection-hardening-design.md` 的 R1–R7：
-> R1 探测补测（批外完成）· R2 Windows 注入引擎重写 · R3 队列与回执修复 · R4 审批补全（严格档）· R5 一键 resume · R6 macOS 匹配修复 · R7 杂项清理。
+> R1 探测补测（批外完成，证据归档 `research/refs/phase2-消息注入/`）· R2 Windows 注入引擎重写 · R3 队列与回执修复 · R4 审批补全（严格档）· R5 一键 resume · R6 macOS 匹配修复 · R7 杂项清理。
 > 结构四段：**A 自动化已覆盖（免人工）→ B computer-use 可辅助项（agent 可代看）→ C 人工主场景清单（用户真机）→ D Mac 回传清单追加**。
 > 基线：分支 `feat/phase2-injection`（Windows 侧本地提交链，未 push）。终态门禁见台账 `.superpowers/sdd/2026-09-18-phase2-injection-mainline/progress.md`。
 > 体例对齐 `docs/release-notes/m7-m8-macos-live-checklist.md`：实测结论不回写设计文档，问题按降级路径处理并回报用户裁决。
@@ -41,7 +41,7 @@ families.rs 6 测 + engine.rs 18 测（含 macOS 构造，见 A6），共 24 测
 ### A3 · 判冻窗口（R2）
 
 - 判定口径：占用>0 且**相邻采样无下降**（逐样本口径，质量评审 C1 定案）持续 ≥ `OCC_ABNORMAL_MS`(5s) 才判冻结——慢消费者合法 drain 不误报；常量钉值在 `families::constants_match_probe`。
-- 自动化覆盖形态 = A2 末条的 `#[ignore]` 实机探针（含反向断言）；**WT 宿主冻结恢复未实机验证**（§8.3 已知限制，见 C 段与已知限制）。
+- 自动化覆盖形态 = A2 末条的 `#[ignore]` 实机探针（含反向断言）；**WT 宿主冻结恢复未实机验证**（§8.3 已知限制）——实机验收落点见 C-12。
 
 ### A4 · 确认层（R2 / 裁决 A1）
 
@@ -106,19 +106,20 @@ families.rs 6 测 + engine.rs 18 测（含 macOS 构造，见 A6），共 24 测
 | resume 分诊（failed 文案上屏 / opening 提示 / 404 no_cwd 分诊 / 无 cwd 禁用镜像） | `tests/mobile/SessionDetail.test.tsx` | `评审 C1：200 failed 回执不得当成功…`、`200 opening → 成功提示条…`、`404 no_cwd → 按错误码分診中文文案…`、`无项目目录 → 按钮禁用 + 原因…` |
 | 审计页 | `tests/settings/AuditLogSection.test.tsx` | 失败态不伪装空态等 |
 
-### A11 · E2E 四例（R2 全链 + B1 四家矩阵，`#[ignore]` 实机显式跑）
+### A11 · E2E 四例（R2 全链 + 设计 B1 项四家矩阵，`#[ignore]` 实机显式跑）
 
 运行命令：
 
 ```text
+cd src-tauri
 cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 ```
 
-前置：Windows 宿主 + conhost 控制台拓扑（项目技能 `win-console-inject-probe` 起会话法）；本机四家 CLI 且版本与族规格指纹一致（claude 2.1.251 / codex 0.154.0 / kimi 2.0.0 / opencode 1.18.31）；零接触真实 `~/.mam`（内存库），只读真实 CLI 会话存储（A1 确认语义所需）。硬杀测试进程会残留探测终端需手动关。
+前置：Windows 宿主 + conhost 控制台拓扑（项目技能 `win-console-inject-probe` 起会话法）；本机四家 CLI 且版本与族规格指纹一致（claude 2.1.251 / codex 0.154.0——按 npm 包版本口径，TUI 自报允许漂移 / kimi 2.0.0 / opencode 1.18.31）；零接触真实 `~/.mam`（内存库），只读真实 CLI 会话存储（A1 确认语义所需）。硬杀测试进程会残留探测终端需手动关。
 
 | 用例 | 断言 | 首跑实绩（2026-09-19） | 验收复跑（2026-09-19，Task 13 终跑） |
 |---|---|---|---|
-| `e2e_engine_matrix_short` | 四家 stamp 全命中；背压旗标 opencode=true 其余 false | 76.6s，全过 | 四家 150 字符全过：背压旗标 opencode=true 其余 false；stamp 命中 0/17/2/1ms |
+| `e2e_engine_matrix_short` | 四家 stamp 全命中；背压旗标 opencode=true 其余 false | 76.6s，全过 | 四家 150 字符全过：背压旗标 opencode=true 其余 false；stamp 命中 0/17/2/1ms（顺序 claude/codex/kimi/opencode） |
 | `e2e_engine_matrix_long` | claude 10k <15s；opencode 10k ≤460s 预算；双 stamp 命中 | claude 10k=2.1s / opencode 10k=106.3s，全过 | claude 10k=2.1s（2098ms）/ opencode 10k=86.6s（86639ms，快于首跑）；双 stamp 命中 1ms |
 | `e2e_http_full_chain` | HTTP→路由→队列→引擎→确认→审计全链：delivered + stamp 命中 + 审计 send/flush 两行 | 39.7s，全过 | 200 `{"status":"delivered"}` + stamp 命中 0ms + 审计 send/flush 两行（channel=real） |
 | `e2e_key_domain_and_enter` | codex VK 回车提交生效（rollout 命中）；域外键拒绝 Err | 19.0s，全过 | codex rollout 命中（1506ms）+ stamp 命中 12ms；域外「bad!」拒绝 Err |
@@ -149,14 +150,15 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-1 | 四家各发短消息 | claude/codex/kimi/opencode 各一会话 | 手机发一条短消息 | 送达回执（delivered）+ 桌面终端可见 `[mobile 设备名]` 行 |
 | C-2 | 长消息 2000 字 | claude（快）与 opencode（慢）各一 | 发 2000 字消息 | claude 即时送达；opencode 先「投递中…」chip → 最终命中回执（慢消费者耗时见已知限制） |
 | C-3 | 黄排队→转闲自动 flush | 运行中会话 | 发消息得「排队中 第1位」→ 等任务完成 | ≤1s 自动送达，chip 收敛 |
-| C-4 | 立即发送插队 | claude 运行中 + 排队项 | 点「立即发送」 | claude busy 态入草稿/缓冲，转闲后命中（Windows busy 容量≈0 已禁插队，macOS/其他按实机行为记录） |
+| C-4 | 立即发送插队 | claude 运行中 + 排队项 | 点「立即发送」 | **Windows**：busy 态插队 → 命中排空回执，或 Failed +「正文可能已写入输入行」防重文案——两者均算 PASS；**macOS**：busy 入草稿/缓冲、转闲后命中，按实机行为记录 |
 | C-5 | 撤回 | 排队中条目 | 点「撤回」 | 条目消失，终端不出现该内容 |
 | C-6 | **关闭远程→队列冻结→重开续跑** | 有待发排队项 | 关闭远程开关 → 重开 | 关闭期间队列冻结不投递；重开后对账自动补投（裁决 19） |
 | C-7 | MAM 重启→待发自动补投 | 有 PENDING 条目 | 重启 MAM 应用 | 启动对账 flush 补投待发项 |
 | C-8 | 审批 codex（Read Only 档） | codex 沙箱调 Read Only 档触发审批框 | 红卡点「允许」/「拒绝」 | 终端收到 y/esc（Windows 取证键位），批准/拒绝生效；审计 action=approve/reject |
 | C-9 | 审批 claude 计划模式 | claude 计划模式出计划 | 红卡点批准执行 | 计划被批准开始执行（「1」键，Windows 取证一致） |
-| C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open |
+| C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open（仅移动端触发落账；桌面端 Tauri 路径不写审计——audit 需设备身份） |
 | C-11 | 审计页逐条可查 | 完成上述操作 | 设置 → 注入审计 | 逐条对应，无缺漏 |
+| C-12 | WT/conhost 判冻与自动解冻 | 任一 CLI 会话在持续输出/制造输出停顿 | 注入长文制造背压与停顿，观察占用判冻与自动解冻（PostMessage ESC 自愈） | 判冻解冻自动发生、正文最终命中；**WT 宿主恢复未验证为已知限制（§8.3）——异常即记录不判 FAIL** |
 
 ---
 
@@ -164,6 +166,7 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 
 > 以下各项同时追加于 `docs/release-notes/m7-m8-macos-live-checklist.md` 尾部，供 macOS 实机逐条验证。
 > Windows 侧已由单测锁构造行为（A6/A9），Mac 侧验证的是**实机语义**。
+> 判定与实测结论以本节为 SSOT，m7-m8 节为执行镜像勿单边修订。
 
 | # | 项 | 前置 | 步骤 | 预期观察 / 判定点 |
 |---|---|---|---|---|
