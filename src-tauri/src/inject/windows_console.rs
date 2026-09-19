@@ -874,8 +874,8 @@ mod tests {
     ///
     /// 流程（D8 裁决：不自动介入，判冻只报中文状态回执）：conhost cmd /k 拓扑 →
     /// 内部通道快速连写大批事件制造占用（背压模式块后排空，cmd 消费不及时即
-    /// pending>0）→ 断言「Ok 且完成（cmd 消费跟得上）**或** Err 含新回执文案
-    /// 关键词（『选择模式』/『输入积压』）」二选一放宽——真冻结态依赖宿主选择
+    /// pending>0）→ 独立硬断言：健康消费者（conhost cmd 会正常消费）连写 4000
+    /// 字符必须 `outcome.is_ok()`（C1 回归钉）——真冻结态依赖宿主选择
     /// 模式（写入成功 TUI 读不到），本探测无法确定性合成，真值验证归
     /// Task 12（§8.1 / §8.3）。
     #[test]
@@ -913,17 +913,13 @@ mod tests {
         drop(guard); // FreeConsole 复位后再清场
         kill_probe(pid);
 
-        // 二选一放宽断言：a) Ok 且完成（cmd 消费跟得上，健康路径——逐样本下降
-        // 口径下背压锯齿稳态窗口持续重置，不会误判冻结）；或 b) Err 含判冻回执
-        // 文案关键词（『选择模式』/『输入积压』，D8 裁决的中文状态回执）
-        let freeze_receipt = outcome
-            .as_ref()
-            .err()
-            .map(|e| e.contains("选择模式") || e.contains("输入积压"))
-            .unwrap_or(false);
+        // 独立硬断言：健康消费者（conhost cmd 会正常消费）连写 4000 字符必须 Ok
+        // （逐样本下降口径下背压锯齿稳态窗口持续重置，不会误判冻结）。C1 回归钉：
+        // 若健康消费者出现『选择模式』/『输入积压』Err = C1 回归（判冻口径破坏），
+        // 本断言按设计转红。
         assert!(
-            outcome.is_ok() || freeze_receipt,
-            "应「Ok 且完成」或「Err 含判冻回执关键词」：after={after} paced_write={outcome:?}"
+            outcome.is_ok(),
+            "健康消费者不应被误判冻结（『选择模式』/『输入积压』Err = C1 回归）：after={after} paced_write={outcome:?}"
         );
     }
 
