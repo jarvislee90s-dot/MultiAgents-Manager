@@ -91,7 +91,8 @@ junction = "1.2"
 # Console（AttachConsole/SetConsoleTitle 路线 B）、Diagnostics_ToolHelp + FileSystem
 # （父进程链遍历）为 mam-marker helper（src/bin）所需
 # Win32_UI_Input_KeyboardAndMouse（M9R：VkKeyScanW/MapVirtualKeyW 真实键位布局）；
-# Win32_UI_WindowsAndMessaging（既有）供 Task 4 PostMessageW
+# Win32_UI_WindowsAndMessaging：win32（窗口枚举）/ mam-marker（跳转 marker）/
+# deep_link（深链）
 windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 winreg = "0.52"
 

@@ -80,6 +80,8 @@ pub const PROBE_PENDING_REASON: &str = "键位待实测确认，请用普通发�
 ///   弹窗）、终端写输入（"Would you like to send input to the existing terminal?"——
 ///   向既有终端写输入的审批；命令执行审批由首条 marker 覆盖，不在此列）、MCP
 ///   elicitation 三类标题未覆盖 = 未取证不出键；命中失败降级普通发送。
+///   漏检（detect 未命中）时用户走普通发送，文本会打入活审批弹窗、映射首字符
+///   1/y 可能直接触发批准——用户已知悉并接受此残余风险（2026-09-19）。
 ///
 /// 实测差异照实记录：`/permissions` 实机档位序为 Read Only / Ask for approval /
 /// Approve for me / Full Access（与手册 A1 快照序不同），当前高亮为

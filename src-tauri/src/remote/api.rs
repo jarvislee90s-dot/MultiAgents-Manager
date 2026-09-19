@@ -458,9 +458,10 @@ pub async fn read_file(
 }
 
 /// 「按 (agent, session) 读消息」聚合内核（M9R Task 5 抽取）：session-messages
-/// 端点与注入确认层（`inject::confirm::session_stamp_hit`）共用——**数据同源**：
-/// 同走 `RemoteState.message_source` 缝（生产 = content::read_session_messages
-/// 八工具统一出口；测试假源对端点矩阵与确认语义同时生效）。
+/// 端点与注入确认层（`inject::confirm::session_stamp_hit`）——**数据同源（同一
+/// content 读路径）**：同走 `RemoteState.message_source` 缝；生产 confirm_probe
+/// 缝直调 `content::read_session_messages`（八工具统一出口，不经本函数），core
+/// 函数为端点侧封装（测试假源对端点矩阵与确认语义同时生效）。
 pub(crate) fn read_session_messages_core(
     st: &RemoteState,
     agent: &str,
@@ -540,8 +541,8 @@ pub async fn session_messages(
 //   POST /session-send          → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
 //   GET  /session-send-info     → {injectable, reasonCode?, reason?, channels, visibility}
 //   GET  /session-queue         → {items:[{id,content,enqueuedAt,position}]}
-//   POST /session-queue/jump    → delivered | failed{error} | 404 not_found
-//   POST /session-queue/retract → {ok:true} | 404 not_found
+//   POST /session-queue/jump    → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
+//   POST /session-queue/retract → {ok:true} | failed{error}（守卫忙让位） | 400 | 404 | 403
 // 零污染：DB 依赖全部经 RemoteState.store（测试 = 内存库）；会话快照走注入源
 // （数据同源铁律）；注入器走 st.injector 缝（端点测试用 FakeInjector）。
 

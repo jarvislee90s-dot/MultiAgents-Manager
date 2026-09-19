@@ -857,8 +857,10 @@ mod tests {
         );
     }
 
-    /// 契约 API（Task 6 消费）：session_stamp_hit 复用 message_source 读路径；
-    /// 读失败 = 未命中（诚实口径——确认不足不伪装成功）
+    /// 契约/测试面 API 回归（session_stamp_hit 唯一消费者=测试模块——生产确认经
+    /// confirm_probe 缝直调 content::read_session_messages，不经本函数）：本测覆盖
+    /// 其复用 message_source 读路径的失败语义；读失败 = 未命中（诚实口径——确认
+    /// 不足不伪装成功）
     #[test]
     fn session_stamp_hit_misses_when_read_fails() {
         // state_with 的 message_source 为恒 Err 桩：read_session_messages_core
