@@ -908,35 +908,51 @@ fn host_info() -> serde_json::Value {
 // 审批/直通命令已随密码制下线）
 // ============================================================
 
-/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名）。
-/// M5 A8：载荷带出 via（配对时刻接入通道，A1 落库列）——桌面花名册 via 徽标数据源
-#[tauri::command]
-pub fn remote_devices() -> serde_json::Value {
-    let now = chrono::Utc::now().timestamp_millis();
-    let rows: Vec<(String, String, String, i64, i64, i64)> = STATE.store.with(|c| {
-        c.prepare("SELECT id, name, via, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
-            // Rows 借用局部 Statement——必须在闭包内收集为 owned 值（E0515）
-            .and_then(|mut s| {
-                let rows: Vec<(String, String, String, i64, i64, i64)> = s
-                    .query_map([], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-                    })?
-                    .filter_map(Result::ok)
-                    .collect();
-                Ok(rows)
-            })
-            .unwrap_or_default()
-    });
-    serde_json::json!(rows
-        .iter()
+/// 设备花名册装配内核（可测核心，连接与 SSE 注册表判定注入）：DB 有效行（revoked=0，
+/// 按 first_paired_at 序）→ 前端载荷。**与远程开关态无关**——关闭远程只停对外服务，
+/// 花名册（吊销/重命名管理入口）不随停服清空（Mac 报告七-6「关闭期间面板 0/10 而
+/// DB 9 行」的根因在前端关闭态清表，后端口径本就恒为 DB）；online = is_online
+///（SSE 注册 ∨ 30s 过闸），关闭态注册表空、无人过闸 → 全行离线即真实状态
+fn roster_payload(
+    conn: &rusqlite::Connection,
+    registry_has: impl Fn(&str) -> bool,
+    now: i64,
+) -> Vec<serde_json::Value> {
+    let rows: Vec<(String, String, String, i64, i64, i64)> = conn
+        .prepare("SELECT id, name, via, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
+        // Rows 借用局部 Statement——必须在闭包内收集为 owned 值（E0515）
+        .and_then(|mut s| {
+            let rows: Vec<(String, String, String, i64, i64, i64)> = s
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?
+                .filter_map(Result::ok)
+                .collect();
+            Ok(rows)
+        })
+        .unwrap_or_default();
+    rows.iter()
         .filter(|(_, _, _, _, _, revoked)| *revoked == 0)
         .map(|(id, name, via, paired, seen, _)| {
             serde_json::json!({
                 "id": id, "name": name, "via": via, "firstPairedAt": paired,
-                "lastSeenAt": seen, "online": is_online(STATE.sse_registry.has(id), *seen, now),
+                "lastSeenAt": seen, "online": is_online(registry_has(id), *seen, now),
             })
         })
-        .collect::<Vec<_>>())
+        .collect()
+}
+
+/// 设备花名册（桌面面板数据源与操作入口；M5 A3 起配对仅 /pair/pin，
+/// 审批/直通命令已随密码制下线）。装配走 roster_payload 内核——与远程开关态
+/// 无关，关闭远程时面板仍列出已配对设备（Mac 报告七-6 定案）。
+/// 在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名。
+/// M5 A8：载荷带出 via（配对时刻接入通道，A1 落库列）——桌面花名册 via 徽标数据源
+#[tauri::command]
+pub fn remote_devices() -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    serde_json::json!(STATE
+        .store
+        .with(|c| roster_payload(c, |id| STATE.sse_registry.has(id), now)))
 }
 
 /// 单设备吊销：DB 置位 + SSE 即时断连（Task 1 注册表接线）+ 审计。
@@ -2407,6 +2423,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, "甲".repeat(40), "DAO 40 字截断贯穿命令内核");
+    }
+
+    /// 花名册与远程开关态解耦（Mac 报告七-6 定案锁）：关闭远程（SSE 注册表空、
+    /// 无人过闸）时花名册仍返回全部 DB 有效行——吊销/重命名管理是 DB 语义，
+    /// 不随停服清空；online 全 false 即真实状态（非隐藏）。revoked 行恒被过滤
+    #[test]
+    fn roster_payload_lists_paired_devices_even_when_remote_disabled() {
+        let conn = memory_conn();
+        let now = 1_000_000_000_000i64;
+        pairing::persist_device(&conn, &synth_device("d1", now - 60_000)).unwrap();
+        pairing::persist_device(&conn, &synth_device("d2", now - 3_600_000)).unwrap();
+        // 已吊销历史行：无论开关态都不上板
+        pairing::persist_device(&conn, &synth_device("dead", now - 120_000)).unwrap();
+        pairing::revoke_device(&conn, "dead").unwrap();
+        // 关闭态（注册表空）：花名册仍完整列出 DB 有效行（first_paired_at 升序——
+        // d2 配对更早排前）
+        let roster = roster_payload(&conn, |_| false, now);
+        let ids: Vec<&str> = roster.iter().filter_map(|r| r["id"].as_str()).collect();
+        assert_eq!(ids, vec!["d2", "d1"], "关闭态花名册仍返回 DB 有效行");
+        // 关闭态注册表空 + last_seen 超 30s 过闸窗 → 全行离线（真实状态，非隐藏）
+        assert!(
+            roster.iter().all(|r| r["online"].as_bool() == Some(false)),
+            "关闭态 online 应全 false: {roster:?}"
+        );
+        // 对照：在线口径仍活跃——注册表命中的行照常翻真（口径 = SSE ∨ 过闸，
+        // 不因「关闭态」这个展示场景被篡改）
+        let roster_hit = roster_payload(&conn, |id| id == "d2", now);
+        let d2 = roster_hit.iter().find(|r| r["id"] == "d2").unwrap();
+        assert_eq!(d2["online"].as_bool(), Some(true), "注册表命中 → online");
     }
 
     // ==== M5 A5：三通道独立开关（迁移映射 / bind 派生 / toggle 内核 / 恢复 / PIN / 载荷） ====

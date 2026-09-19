@@ -571,6 +571,44 @@ describe("RemoteSection 已接入设备列表（M5 A6）", () => {
     expect(await screen.findByText("No paired devices")).toBeTruthy();
     expect(screen.getByText("0 / 10")).toBeTruthy();
   });
+
+  it("远程关闭态（冷挂载）：花名册仍拉取并渲染 DB 行，徽标 5 / 10——不因停服清空（Mac 报告七-6 回归锁）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_status") return disabledStatus();
+      if (cmd === "get_setting") return null;
+      if (cmd === "remote_devices") return devicesOf();
+      return null;
+    });
+    render(<RemoteSection />);
+    // 关闭态下 remote_devices 照常发起（旧版 disabled 直接清空且不拉取），行照常渲染
+    expect(await screen.findByText("JARVIS 的 iPhone")).toBeTruthy();
+    expect(screen.getByText("matebook16s · Edge")).toBeTruthy();
+    expect(screen.getByText("5 / 10")).toBeTruthy();
+  });
+
+  it("总开关关掉：花名册保留不清空（吊销/重命名管理不随停服消失）", async () => {
+    let on = true;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_status") return on ? statusOf() : disabledStatus();
+      if (cmd === "remote_toggle") {
+        on = false;
+        return;
+      }
+      if (cmd === "get_setting") return null;
+      if (cmd === "remote_devices") return devicesOf();
+      return null;
+    });
+    render(<RemoteSection />);
+    const sw = screen.getByRole("switch", { name: /enable remote access/i });
+    await screen.findByText("JARVIS 的 iPhone");
+    fireEvent.click(sw);
+    // 旧版此处 enabled 翻 false → effect 立即 setDevices([]) 清空列表；修订后行保留
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: false })
+    );
+    expect(screen.getByText("JARVIS 的 iPhone")).toBeTruthy();
+    expect(screen.getByText("5 / 10")).toBeTruthy();
+  });
 });
 
 describe("RemoteSection 本机名称默认系统名（M5 A6）", () => {
