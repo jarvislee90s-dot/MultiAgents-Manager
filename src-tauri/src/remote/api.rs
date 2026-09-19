@@ -1170,12 +1170,16 @@ pub async fn session_queue_retract(
 // ==== M8 Task 11：审批端点（session-approve-options / session-approve）====
 // 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写/读路径）：
 //   GET  /session-approve-options?session_id= → 200 {available, options:[{id,label}],
-//        verifiedWith, currentVersion(…|null), drift}
+//        verifiedWith, currentVersion(…|null), drift, reason(…|null)}
 //        available = status==Waiting && 映射表有该工具映射 && detect 命中
 //        （数据同源快照判定）；工具无映射 / 未命中 / 非 Waiting → available=false
-//        （options 空）。options 只含 id+label——**键位不外泄给 UI**。
+//        （options 空）；严格档（M9R Task 10）：映射 verified_with==probe-pending →
+//        available=false + reason=降级文案（选项空，前端只渲染提示条）。
+//        options 只含 id+label——**键位不外泄给 UI**。
 //   POST /session-approve body {sessionId, optionId} → 200 {"status":"key_sent"}
-//        | 404 no_session | 409 not_waiting | 404 no_mapping（降级提示走普通发送）
+//        | 404 no_session | 409 not_waiting | 404 no_mapping（降级提示走普通发送；
+//        成因三态：无该工具映射 / optionId 无对应项 / probe-pending 严格档——
+//        未取证=映射缺失，M9R Task 10）
 //        | 200 failed{error}（注入失败 / in-flight 忙，可重试回执）。
 // 锁纪律（M4）：KV 映射读取并入 `st.store.with` 短临界区（load_mappings_conn 直用
 // 传入 conn、不自取锁，锁内只 SQL）；session_source 调用与 store.with **顺序执行不
@@ -1219,7 +1223,10 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         .find(|m| m.tool == tool)?;
     // 严格档（M9R Task 10 裁决：未取证不出键）：probe-pending 映射即使 Waiting+detect
     // 命中也压为不可批——选项不下发，只给降级原因（前端提示条）；drift 判定照常
-    // （probe-pending 恒判漂移，提示条与 drift 提示并存不冲突）
+    // （probe-pending 恒判漂移，提示条与 drift 提示并存不冲突）。
+    // **短路序勿动**：本判定在 detect 之前，detect 未命中同样下发 reason——提示条语义
+    // =键位取证状态（未取证），非「审批中」判定；若把短路「修」到 detect 之后，会让
+    // detect-miss 的真审批会话完全无提示（键位随时可能被 KV 定制回 probe-pending）
     if mapping.verified_with == crate::inject::approve::PROBE_PENDING {
         return Some(ApproveScanHit {
             available: false,
@@ -1363,8 +1370,8 @@ pub struct SessionApproveReq {
 /// - 缺参 → 400；设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
 /// - 会话不在快照 → 404 no_session；非 Waiting → 409 not_waiting（映射解析在其后，
 ///   运行中会话不付出 KV 读取代价）；
-/// - 映射表无该工具映射 / optionId 无对应项 → 404 no_mapping（降级提示走
-///   普通发送）；
+/// - 映射表无该工具映射 / optionId 无对应项 / probe-pending 严格档（M9R Task 10：
+///   未取证不出键，按键位映射缺失处理）→ 404 no_mapping（降级提示走普通发送）；
 /// - in-flight 守卫忙（flush 循环/直发/插队正在投递该会话）→ 200 failed 提示重试；
 /// - 投递 `injector.locate_and_send_key(pid, key)`：**不带 [mobile] 前缀**——按键非文本；
 ///   成功 → 200 key_sent；失败 → 200 failed{error}（可重试回执）。

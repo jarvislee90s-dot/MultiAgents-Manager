@@ -9,7 +9,9 @@
 //!   codex 0.154.0 M8R，Windows 本机）；KV 定制表若回填 `"probe-pending"` 触发
 //!   [`is_version_drift`] 恒判漂移，且远端端点按**严格档**处理（M9R Task 10 裁决：
 //!   未取证不出键——approve-options 不下发选项只给 [`PROBE_PENDING_REASON`] 提示，
-//!   session-approve 按映射缺失 404，见 remote/api.rs）。
+//!   session-approve 按映射缺失 404，见 remote/api.rs）。边界：KV 定制映射填**非
+//!   probe-pending 的任意版本号 = 用户自证**（键位自行担责），严格档不拦（W6
+//!   「用户定制覆盖优先」既定口径，端点不做版本真伪校验）。
 //!
 //! ## 锁纪律（M4，调用点必须遵守）
 //! KV 读取经调用方 `DeviceStore.with` 短临界区：[`load_mappings_conn`] 直用传入

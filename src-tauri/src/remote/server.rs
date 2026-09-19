@@ -2940,6 +2940,19 @@ mod tests {
                 s.last_message = Some("Would you like to make the following edits?".to_string());
                 s
             },
+            {
+                // M9R 质量评审补锁 probe_pending_hint_even_on_detect_miss 独占会话
+                // （Waiting codex，last_message 与任何 marker 无关——证明 detect 未命中
+                // 下严格档 hint 仍下发，短路序定格）；全测试集唯一 id（守卫 id 立规）
+                let mut s = inj_sess(
+                    "sess_l",
+                    crate::session::AgentType::Codex,
+                    22,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("无关文本".to_string());
+                s
+            },
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -3580,7 +3593,9 @@ mod tests {
 
     /// 审批选项（可批）：sess_a Waiting + last_message 命中 → 200 available=true +
     /// options 恰为 允许/拒绝 两项（**无 key 字段**——键位不外泄给 UI）+
-    /// verifiedWith=probe-pending + drift=true（probe-pending 恒判漂移）
+    /// reason=null（非严格档不可批形态不下发降级文案，前端按自隐处理）+
+    /// verifiedWith=2.1.251（M8R Task 10 取证回填；drift 按 verified/current 同源重算，
+    /// 本机 claude 探测命中同版则 false）
     #[tokio::test]
     async fn approve_options_available() {
         let fake = FakeInjector::ok();
@@ -3996,5 +4011,120 @@ mod tests {
         assert_eq!(r.status(), 404);
         assert!(body_string(r).await.contains("no_mapping"));
         assert!(fake.recorded_keys().is_empty(), "严格档不得有任何按键投递");
+    }
+
+    /// 质量评审补锁：非严格不可批三形态（非 Waiting / detect 未命中 / 无映射）的
+    /// reason 恒为 null——锁定前端 ApproveCard 契约「available=false 且无 reason →
+    /// 卡自隐」（reason 只属严格档 probe-pending 语义，不得挪作普通不可批提示）。
+    #[tokio::test]
+    async fn non_strict_unavailable_reason_is_null() {
+        let state_hit = approve_state(FakeInjector::ok(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state_hit, "mm", "测试设备");
+        let app_hit = router(state_hit);
+        // 非 Waiting（sess_b Processing）→ reason null
+        let r = app_hit
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_b",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false);
+        assert_eq!(
+            v["reason"],
+            serde_json::Value::Null,
+            "非 Waiting 不得带 reason（自隐契约）"
+        );
+        // 无映射（sess_d zcode）→ reason null
+        let r = app_hit
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_d",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false);
+        assert_eq!(
+            v["reason"],
+            serde_json::Value::Null,
+            "无映射不得带 reason（自隐契约）"
+        );
+        // detect 未命中（state_miss：sess_a last_message="无关"）与无 last_message
+        // （sess_e 夹具原样恒 None）→ reason null
+        let state_miss = approve_state(FakeInjector::ok(), Some("无关"));
+        persist_named_device(&state_miss, "mm", "测试设备");
+        let app_miss = router(state_miss);
+        for sid in ["sess_a", "sess_e"] {
+            let r = app_miss
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-approve-options?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200, "{sid}");
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(v["available"], false, "{sid}");
+            assert_eq!(
+                v["reason"],
+                serde_json::Value::Null,
+                "{sid} 不可批不得带 reason（自隐契约）"
+            );
+        }
+    }
+
+    /// 质量评审补锁（现实现选定行为定格）：严格档 hint 与 detect 命中无关——probe-pending
+    /// 映射 + last_message 与任何 marker 无关（sess_l）仍下发 reason。提示条语义=键位
+    /// 取证状态（未取证），非「审批中」判定；防后人把严格档短路「修」到 detect 之后
+    /// （那会让 detect-miss 的真审批会话完全无提示）。
+    #[tokio::test]
+    async fn probe_pending_hint_even_on_detect_miss() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        // probe-pending 定制映射 seed 进本测试自己的内存库（与其他测试零互染）
+        state.store.with(|c| {
+            crate::database::dao::settings::set_setting_conn(
+                c,
+                crate::inject::approve::KV_KEY,
+                r#"[{"tool":"codex","verified_with":"probe-pending",
+  "prompt_markers":["would you like to make the following"],
+  "options":[{"id":"approve","label":"允许","key":"y"}]}]"#,
+            )
+        });
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_l",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false);
+        assert!(
+            v["options"].as_array().unwrap().is_empty(),
+            "detect 未命中选项恒空"
+        );
+        assert_eq!(
+            v["reason"], "键位待实测确认，请用普通发送",
+            "detect 未命中严格档 hint 仍下发（短路序定格）"
+        );
+        assert!(fake.recorded_keys().is_empty(), "查询端点零按键投递");
     }
 }
