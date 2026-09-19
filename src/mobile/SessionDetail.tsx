@@ -9,6 +9,8 @@
 //   滚动，YAGNI——避免滚动位置管理复杂度）；
 // - SSE transition 仍不驱动详情页（M3 范围裁决不变）；页面可见时每 10s 静默轮询
 //   刷新会话内容（F6 评审裁决：hidden 暂停、恢复可见立即补刷，页头刷新按钮保留）。
+//   轮询刷新仅在「贴底」（距底 <120px）时自动跟随落底，上翻阅读历史不被动拽回
+//   （P2-B 评审修复）；首次加载与手动刷新仍无条件落底。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -50,6 +52,10 @@ const PAGE_LIMIT = 200;
 const MAX_LIMIT = 1000;
 /** F6：详情页轮询周期（页面可见时每 10s 静默刷新会话内容） */
 const DETAIL_REFRESH_MS = 10_000;
+/** P2-B（评审修复批）：轮询「贴底跟随」判定阈值——数据落地前采样，距底小于该值
+ *  （px）视为贴底，轮询刷新才自动跟随落底；上翻阅读（距底 ≥ 阈值）时轮询刷新
+ *  不改变滚动位置（首次加载 / 手动刷新不受此阈值约束，仍无条件落底） */
+const POLL_FOLLOW_THRESHOLD_PX = 120;
 
 // R5 一键 resume（Task 11）：支持「在电脑上打开」的工具镜像表。
 // SSOT = src-tauri/src/inject/resume.rs 的 RESUME_TABLE（Step 1 实测取证），
@@ -123,6 +129,13 @@ function collapsedLabel(m: SessionMessage): string {
 /** 已知路径按长度降序（最长优先替换：路径互为前缀时不被短路径截断） */
 function sortedPaths(files: Set<string>): string[] {
   return [...files].sort((a, b) => b.length - a.length);
+}
+
+/** 贴底判定（P2-B）：距底距离（scrollHeight - scrollTop - clientHeight）落在
+ *  阈值窗口内即贴底。轮询 tick 刷新前对消息滚动容器采样一次，作为该次刷新
+ *  数据落地后是否跟随落底的依据 */
+function isNearBottom(el: HTMLDivElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < POLL_FOLLOW_THRESHOLD_PX;
 }
 
 /** markdown 正文链接化预处理：把出现的已知路径替换为 `#file:` 内链，
@@ -203,6 +216,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const messageAreaRef = useRef<HTMLDivElement>(null);
   // 待回补的滚动锚（加载更早前记录；非 null 表示下次数据落地要做位置补偿）
   const pendingScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  // P2-B：下一次数据落地是否「跟随落底」的信号（等价于落底函数的 follow 参数）——
+  // 轮询 tick 刷新前采样贴底状态写入；手动刷新（retry）置 true 无条件落底；
+  // 初值 true 使首次加载落底。ref 而非 state：纯信号不驱动渲染
+  const pollFollowRef = useRef(true);
   // 当前形态对应的占比与写回口（横向/纵向各记一份，来回切换不丢用户拖出的比例）
   const fileRatio = preview?.mode === "split-h" ? fileRatioH : fileRatioV;
   const setFileRatio = preview?.mode === "split-h" ? setFileRatioH : setFileRatioV;
@@ -239,7 +256,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 无双触发；hidden 时暂停（清 interval），visibilitychange 恢复可见先立即补刷一次
   // （追回隐藏期间错过的更新）再重启 10s 节奏。卸载清理 interval + 监听，无泄漏。
   useEffect(() => {
-    const tick = () => setRefreshTick((t) => t + 1);
+    const tick = () => {
+      // P2-B：刷新前对消息滚动容器采样贴底状态——贴底（距底 <120px）该次刷新
+      // 数据落地后跟随落底；上翻阅读时刷新不改变滚动位置（ref 为 null 时按
+      // 贴底处理，保留旧版无条件落底行为）
+      const el = messageAreaRef.current;
+      pollFollowRef.current = el === null || isNearBottom(el);
+      setRefreshTick((t) => t + 1);
+    };
     let timer: ReturnType<typeof setInterval> | null = null;
     const stop = () => {
       if (timer !== null) {
@@ -486,6 +510,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
 
   const retry = useCallback(() => {
     setError(null);
+    // P2-B：手动刷新（页头刷新按钮 / 错误重试）无条件落底，保留既有行为
+    pollFollowRef.current = true;
     setRefreshTick((t) => t + 1);
   }, []);
 
@@ -661,6 +687,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 进入详情默认滚到最底部（最新消息在下方，用户裁决 2026-09-16）；且
   // 「加载更早消息」重拉后**保持原阅读位置**——记录重拉前的滚动高度差，
   // 新内容（更早消息）插在顶部后把差值补回去，视线不跳。
+  // P2-B：轮询刷新（F6）数据落地时，仅在刷新前采样为贴底（距底 <120px）才
+  // 跟随落底——上翻阅读历史时不被每 10s 拽回底部；首次加载与手动刷新
+  // （pollFollowRef 初值 true / retry 置 true）仍无条件落底。
   // 依赖 messages（而非 limit）：只在数据真正落地后执行一次对齐
   useEffect(() => {
     const el = messageAreaRef.current;
@@ -673,6 +702,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       pendingScrollRef.current = null;
       return;
     }
+    if (!pollFollowRef.current) return; // P2-B：上翻阅读中的轮询刷新不动滚动位置
     el.scrollTop = el.scrollHeight; // 首次（或手动刷新后）落到底部
   }, [messages]);
 

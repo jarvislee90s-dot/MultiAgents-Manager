@@ -126,7 +126,10 @@ function installFetch() {
     if (url.includes("/file?")) {
       if (routes.fileStatus) return new Response("no", { status: routes.fileStatus });
       return new Response(
-        JSON.stringify({ content: routes.fileContent ?? "", mime: routes.fileMime ?? "text/plain" }),
+        JSON.stringify({
+          content: routes.fileContent ?? "",
+          mime: routes.fileMime ?? "text/plain",
+        }),
         { status: 200 }
       );
     }
@@ -329,7 +332,8 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       msg({
         seq: 0,
         kind: "assistant",
-        content: "## 小节标题\n\n- 第一项\n- 第二项\n\n1. 有序\n\n> 引用\n\n| 列A | 列B |\n|---|---|\n| a | b |",
+        content:
+          "## 小节标题\n\n- 第一项\n- 第二项\n\n1. 有序\n\n> 引用\n\n| 列A | 列B |\n|---|---|\n| a | b |",
       }),
     ];
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
@@ -357,7 +361,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       msg({ seq: 3, kind: "tool-call", content: "调用 Grep", toolName: "Grep" }),
       msg({ seq: 4, kind: "assistant", content: "最终总结" }),
     ];
-    const { unmount } = render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    const { unmount } = render(
+      <SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />
+    );
     await screen.findByText("最终总结");
     // 计数 = 当前被折叠的可折叠条数（thinking / 中间 assistant / tool-call = 3；
     // user 直显、最终 assistant 总结直显，不计入）
@@ -421,8 +427,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.click(await screen.findByTestId("file-link"));
     const btn = (id: string) => screen.getByTestId(id);
     // SVG 的 className 是 SVGAnimatedString，取 class 属性字符串
-    const iconClass = (id: string) =>
-      btn(id).querySelector("svg")!.getAttribute("class") ?? "";
+    const iconClass = (id: string) => btn(id).querySelector("svg")!.getAttribute("class") ?? "";
     // 上下分屏（split）= 上下两格 → rows-2
     expect(iconClass("preview-toggle-split")).toContain("lucide-rows-2");
     // 左右分屏（split-h）= 左右两格 → columns-2
@@ -566,9 +571,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     // 挂载时已拉一次（scope 默认 200，用于正文链接化）
     await screen.findByTestId("file-panel-button");
     await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=200"))
-      ).toBe(true);
+      expect(fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=200"))).toBe(
+        true
+      );
     });
     const before = fetchMock.mock.calls.filter((c: unknown[]) =>
       String(c[0]).includes("/session-files")
@@ -683,9 +688,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const list = area.querySelector("ul");
     const loadMore = screen.getByTestId("load-more");
     expect(list).toBeTruthy();
-    expect(
-      list!.compareDocumentPosition(loadMore) & Node.DOCUMENT_POSITION_PRECEDING
-    ).toBeTruthy();
+    expect(list!.compareDocumentPosition(loadMore) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   }, 15000);
 
   it("点加载更早后保持阅读位置（顶部插入量补偿，视线不跳）", async () => {
@@ -699,16 +702,31 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     // 模拟：当前滚动位置 1000，内容总高 5000
     Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
     area.scrollTop = 1000;
-    // 点「加载更早」→ 记录锚点；随后重拉返回更多内容（总高变 8000）
+    // 点「加载更早」→ 记录锚点；limit=400 重拉在途。先挂起响应、注入新内容总高
+    // （8000）后放行——根治顺序竞态（旧版靠 detail-refresh 二次触发对齐断言瞬时值：
+    // 若首响落在几何量注入前，锚被 0 插入量消费，二次落底把 scrollTop 盖写为
+    // 8000，机器负载下偶发翻车）。
+    const inner = fetchMock;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gated = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/session-messages") && url.includes("limit=400")) {
+        await gate; // 挂起重拉响应，等几何量注入
+      }
+      return inner(input);
+    });
+    vi.stubGlobal("fetch", gated);
     fireEvent.click(screen.getByTestId("load-more"));
     await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=400"))
-      ).toBe(true);
+      expect(gated.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=400"))).toBe(
+        true
+      );
     });
     Object.defineProperty(area, "scrollHeight", { value: 8000, configurable: true });
-    // 再触发一次数据落地（等价于 limit=400 的响应到达）
-    fireEvent.click(screen.getByTestId("detail-refresh"));
+    release(); // 放行 limit=400 响应 → 数据落地 → 补偿对齐
     await waitFor(() => {
       // 补偿：1000 + (8000 - 5000) = 4000（视线停在原内容处）
       expect(area.scrollTop).toBe(4000);
@@ -728,13 +746,18 @@ describe("SessionDetail：文件链接化与预览联动", () => {
 
     const area = screen.getByTestId("message-area");
     // jsdom 无布局：注入几何量——容器顶边 100，seq 2 的底边 200（= 视口首条）
-    area.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 700, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
     const liOf = (seq: number) => screen.getByTestId(`msg-${seq}`);
     // 视口顶边 = 100：seq 0/1 已完全滚出上方（bottom ≤ 100），seq 2 是首条可见
-    liOf(0).getBoundingClientRect = () => ({ top: -60, bottom: -10, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
-    liOf(1).getBoundingClientRect = () => ({ top: 20, bottom: 90, left: 0, right: 400, width: 400, height: 70 }) as DOMRect;
-    liOf(2).getBoundingClientRect = () => ({ top: 110, bottom: 260, left: 0, right: 400, width: 400, height: 150 }) as DOMRect;
-    liOf(3).getBoundingClientRect = () => ({ top: 270, bottom: 400, left: 0, right: 400, width: 400, height: 130 }) as DOMRect;
+    liOf(0).getBoundingClientRect = () =>
+      ({ top: -60, bottom: -10, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    liOf(1).getBoundingClientRect = () =>
+      ({ top: 20, bottom: 90, left: 0, right: 400, width: 400, height: 70 }) as DOMRect;
+    liOf(2).getBoundingClientRect = () =>
+      ({ top: 110, bottom: 260, left: 0, right: 400, width: 400, height: 150 }) as DOMRect;
+    liOf(3).getBoundingClientRect = () =>
+      ({ top: 270, bottom: 400, left: 0, right: 400, width: 400, height: 130 }) as DOMRect;
 
     // 打标签：点 + → 选第一个颜色 → 落在视口首条（seq 2「待会回来看这条」）
     fireEvent.click(screen.getByTestId("bookmark-add"));
@@ -763,9 +786,12 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("乙");
     const area = screen.getByTestId("message-area");
-    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
-    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
-    screen.getByTestId("msg-1").getBoundingClientRect = () => ({ top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 100 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () =>
+      ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    screen.getByTestId("msg-1").getBoundingClientRect = () =>
+      ({ top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 100 }) as DOMRect;
 
     // 打两个不同颜色的标签
     fireEvent.click(screen.getByTestId("bookmark-add"));
@@ -791,8 +817,10 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("记住我");
     const area = screen.getByTestId("message-area");
-    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
-    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () =>
+      ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
     fireEvent.click(screen.getByTestId("bookmark-add"));
     fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[3]}`));
     expect(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[3]}`)).toBeTruthy();
@@ -813,8 +841,10 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("记住我");
     const area = screen.getByTestId("message-area");
-    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
-    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () =>
+      ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
     fireEvent.click(screen.getByTestId("bookmark-add"));
     fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[3]}`));
     expect(window.localStorage.getItem("mam-bookmarks")).toContain(BOOKMARK_COLORS[3]);
@@ -842,9 +872,7 @@ describe("SessionDetail：错误态与手动刷新", () => {
     installFetch();
     routes.messagesStatus = 404;
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    expect((await screen.findByTestId("detail-error")).textContent).toContain(
-      "无法读取该会话内容"
-    );
+    expect((await screen.findByTestId("detail-error")).textContent).toContain("无法读取该会话内容");
     routes.messagesStatus = undefined;
     routes.messages = [msg({ seq: 0, kind: "user", content: "恢复后可见" })];
     fireEvent.click(screen.getByTestId("detail-retry"));
@@ -889,10 +917,9 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
       const url = String(input);
       if (url.includes("/session-messages")) {
         const limit = Number(new URL(url, "http://x").searchParams.get("limit") ?? 200);
-        return new Response(
-          JSON.stringify({ messages: all.slice(-limit), truncated: true }),
-          { status: 200 }
-        );
+        return new Response(JSON.stringify({ messages: all.slice(-limit), truncated: true }), {
+          status: 200,
+        });
       }
       if (url.includes("/host")) {
         return new Response(
@@ -982,10 +1009,9 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
     // 逐级扩到 MAX_LIMIT（1000）仍未命中 → miss 横幅，且未发生任何滚动。
     // timeout 10s：四级扩窗（200→…→1000）在 CI 慢机上实测 >4s（本地快机 <1s），
     // 3s 曾在 CI 抖动失败（run 35314166316）
-    await waitFor(
-      () => expect(screen.getByTestId("bookmark-jump-miss")).toBeTruthy(),
-      { timeout: 10_000 }
-    );
+    await waitFor(() => expect(screen.getByTestId("bookmark-jump-miss")).toBeTruthy(), {
+      timeout: 10_000,
+    });
     expect(scrollSpy).not.toHaveBeenCalled();
   }, 15000);
 });
@@ -1044,9 +1070,8 @@ describe("SessionDetail：一键 resume 回执分诊（评审 C1）", () => {
 describe("SessionDetail：详情页 10s 轮询（F6）", () => {
   /** 只数 /session-messages 调用（/host、/session-files 的拉取不计入节奏断言） */
   function messagesCalls(): number {
-    return fetchMock.mock.calls.filter((c: unknown[]) =>
-      String(c[0]).includes("/session-messages")
-    ).length;
+    return fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-messages"))
+      .length;
   }
 
   beforeEach(() => {
@@ -1075,9 +1100,7 @@ describe("SessionDetail：详情页 10s 轮询（F6）", () => {
   it("hidden 暂停：推进计时器不触发；恢复 visible 立即补刷一次再续 10s 节奏", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
-    const visSpy = vi
-      .spyOn(document, "visibilityState", "get")
-      .mockReturnValue("visible");
+    const visSpy = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await act(async () => {});
     expect(messagesCalls()).toBe(1);
@@ -1102,5 +1125,103 @@ describe("SessionDetail：详情页 10s 轮询（F6）", () => {
     });
     expect(messagesCalls()).toBe(3);
     visSpy.mockRestore();
+  });
+});
+
+// ==== P2-B（评审修复批）：轮询滚动跟随条件化 ====
+// 轮询刷新数据落地时，仅在刷新前采样为「贴底」（距底 <120px）才跟随落底；
+// 上翻阅读历史不被每 10s 拽回底部。假计时器 + 滚动容器几何量 mock
+//（jsdom 无布局引擎：scrollHeight/clientHeight 逐实例注入，scrollTop 可赋可读）。
+describe("SessionDetail：轮询滚动跟随条件化（P2-B）", () => {
+  /** 只数 /session-messages 调用（证明刷新确实发生，断言不空转） */
+  function messagesCalls(): number {
+    return fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-messages"))
+      .length;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    // 假计时器必须还原（与文件内真实计时器用例共存，e39c3d9 自审提示）
+    vi.useRealTimers();
+  });
+
+  /** 注入消息滚动容器几何量（元素挂载后逐实例 defineProperty，重渲染不丢） */
+  function installGeometry(area: HTMLElement, geo: { scrollHeight: number; clientHeight: number }) {
+    Object.defineProperty(area, "scrollHeight", { value: geo.scrollHeight, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: geo.clientHeight, configurable: true });
+  }
+
+  it("poll_keeps_scroll_when_reading_history：上翻阅读（距底 ≥120px）两拍轮询刷新不拽回底部", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {}); // 首拉落地（首拉无条件落底；此刻 scrollHeight=0 → scrollTop=0）
+    const area = screen.getByTestId("message-area");
+    // 距底 = 2000 - 0 - 500 = 1500 ≥ 120 → 非贴底（用户上翻阅读历史）
+    installGeometry(area, { scrollHeight: 2000, clientHeight: 500 });
+    area.scrollTop = 0;
+    // 第一拍轮询：新消息落地（mock 按 routes 现取 → 新数组触发对齐 effect）
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "首拉" }),
+      msg({ seq: 1, kind: "assistant", content: "轮询新消息一" }),
+    ];
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(2); // 刷新确实发生
+    expect(area.scrollTop).toBe(0); // 但滚动位置不动（距底 ≥120px 不跟随）
+    // 第二拍轮询：仍不跟随
+    routes.messages = [
+      ...routes.messages,
+      msg({ seq: 2, kind: "assistant", content: "轮询新消息二" }),
+    ];
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(3);
+    expect(area.scrollTop).toBe(0);
+  });
+
+  it("poll_follows_when_near_bottom：贴底（距底 <120px）轮询刷新到新消息跟随落底", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {});
+    const area = screen.getByTestId("message-area");
+    // 距底 = 2000 - 1400 - 500 = 100 < 120 → 贴底
+    installGeometry(area, { scrollHeight: 2000, clientHeight: 500 });
+    area.scrollTop = 1400;
+    // 轮询拍新消息落地 → 跟随落底：scrollTop = scrollHeight = 2000
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "首拉" }),
+      msg({ seq: 1, kind: "assistant", content: "贴底时的新消息" }),
+    ];
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(2);
+    expect(area.scrollTop).toBe(2000);
+  });
+
+  it("first load 仍无条件落底：首拉对齐不依赖贴底采样（既有行为的显式回归锁）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    // 挂载前在 Element 原型注入 scrollHeight（元素尚不存在，无法逐实例注入；
+    // jsdom 将 scrollHeight 定义为 Element.prototype 自有 getter，jsdom 探明）：
+    // 首拉对齐量即可观测量 = scrollHeight
+    const scrollHeightSpy = vi
+      .spyOn(Element.prototype, "scrollHeight", "get")
+      .mockReturnValue(2000);
+    try {
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      await act(async () => {}); // 首拉落地
+      const area = screen.getByTestId("message-area");
+      // 首拉落底：scrollTop = scrollHeight = 2000（不采样、不受 120px 阈值约束）
+      expect(area.scrollTop).toBe(2000);
+    } finally {
+      scrollHeightSpy.mockRestore();
+    }
   });
 });
