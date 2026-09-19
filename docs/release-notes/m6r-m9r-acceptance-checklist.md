@@ -83,6 +83,8 @@ families.rs 6 测 + engine.rs 18 测（含 macOS 构造，见 A6），共 24 测
 | Windows spawn 构造（wt 优先 / conhost+CREATE_NEW_CONSOLE 回退一次） | `inject/resume.rs` | `build_spawn_command_windows`、`windows_wt_failure_falls_back_to_conhost_once` |
 | macOS 双通道脚本（cd+命令+聚焦+转义；哨兵先于 spawn） | `inject/resume.rs` | `macos_scripts_carry_cd_focus_and_escaping`、`macos_dual_channel_dispatches_via_seam`、`core_open_sentinels_before_spawn`、`core_open_dispatches_spawn_on_windows` |
 | 端点（200 opening+审计 open / 404 no_cwd / 404 no_resume_command / 404 no_session+坏请求） | `remote/server.rs` | `session_open_endpoint_opens_and_audits`、`session_open_endpoint_no_cwd`、`session_open_endpoint_no_resume_command`、`session_open_endpoint_no_session_and_bad_request` |
+| 端点失败回执（200 failed+审计 failed: / spawn 失败 / macOS TCC 指引形态，M2） | `remote/server.rs` | `session_open_endpoint_spawn_failure_reports_failed`、`session_open_endpoint_macos_tcc_guidance_reports_failed` |
+| osascript 错误分类（-1743 TCC→中文指引 / 其他→stderr 摘要截断，M2 纯函数跨平台可测） | `inject/resume.rs` | `classify_resume_error_maps_tcc_to_guidance`、`classify_resume_error_other_keeps_summary` |
 
 ### A9 · macOS 匹配构造（R6）
 
@@ -188,3 +190,10 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | D-7 | **Terminal raise 语义裁决** | Terminal.app 多窗口 | 观察按键/审批应答时的升窗行为 | 二选一裁决：升窗不升标签 vs 纯后台（当前实现先选 tab 后 activate，行为以实机观察为准回报用户定案） |
 | D-8 | **iTerm2/Terminal `tty of s/t` 全路径口径确认** | iTerm2 与 Terminal.app 各一 | 实机打印 `tty of (sessions/TAB)` 取值 | 确认返回 /dev/ttysNNN 全路径（相等匹配的匹配键前提；若返裸后缀则 normalize_dev_tty 兜底生效） |
 | D-9 | **normalize_dev_tty 实机验证** | macOS 终端跑 `ps -o tty` | 观察输出口径 | `ps` 返裸后缀（如 `ttys001`）时归一为 `/dev/ttys001` 后匹配成功（Windows 侧已单测锁构造，实机口径待验证） |
+
+> **M2 追记（Mac 验收 D-5 根因①处置，2026-09-19）**：开发版（未签名、无 bundle id）
+> 首跑 resume 前需在 **系统设置 > 隐私与安全性 > 自动化** 中手动允许 MAM 控制
+> Terminal / iTerm2 一次（TCC 不自动弹窗）。未授权时 osascript 以 -1743 失败——
+> spawn 路径现**等待完成并捕获 stderr/退出码**，失败回执 200 `{"status":"failed"}`
+> +「macOS 自动化授权缺失」指引、审计记 `open failed:*`，不再出现 audit `open ok`
+> 但无窗的账实背离。

@@ -1,7 +1,8 @@
 //! R5 一键 resume 窗口（M6R–M9R 批次 Task 11）：
 //! 手机或桌面点一下 → 本机自动打开终端 + 进入项目目录 + 恢复会话 + 置前聚焦，
 //! 用户零额外操作。终端选择：Windows 优先 Windows Terminal、未装回退 conhost；
-//! macOS 优先 iTerm2、次选 Terminal.app（复用 window::applescript::execute_applescript）。
+//! macOS 优先 iTerm2、次选 Terminal.app（osascript **等待执行 + 失败回执**——M2
+//! 修法，见 [`run_osascript_wait`] / [`classify_resume_error`] / [`spawn_terminal`]）。
 //!
 //! ## 结构（构造与执行分离，engine.rs 同款纪律；评审 I2：macOS 同样入缝）
 //! - [`resume_command`]：命令表纯函数（Step 1 实测取证，**未查证/不存在的工具绝不入表**
@@ -205,6 +206,108 @@ end tell
     )
 }
 
+// ==== M2（Mac 验收 D-5 根因①处置）：macOS spawn 回执化 ====
+// 实机教训（mac-acceptance-report-55f37e7 §四-B）：MAM dev 二进制（无 bundle id）缺
+// TCC 自动化授权时，osascript 以 -1743 失败，旧路径发射后不管 → stderr 被吞、audit
+// 照记 open ok——账实背离。现 macOS 出手等待完成（wait_timeout 10s）+ stderr/退出码
+// 捕获，失败经错误分类给可行动回执（200 failed + 审计 failed，端点既有 Err 臂承接）。
+
+/// osascript 等待上限（秒）：osascript 下发脚本即返回，正常 <1s；10s 给 TCC 首次
+/// 授权弹窗与冷启动留裕量，超时视为失败（kill + wait 收尸防僵尸，approve.rs 同口径）
+const OSASCRIPT_WAIT_SECS: u64 = 10;
+
+/// stderr 摘要截断上限（失败回执与审计 result 双消费防膨胀；normalize::summarize
+/// 按 chars 计，中文多字节安全）
+const RESUME_STDERR_SUMMARY_CHARS: usize = 120;
+
+/// TCC -1743（errAEEventNotHandled / 自动化授权拒绝）的中文指引文案（用户裁决口径，
+/// 固定长度有界——审计 result 直接承载）
+pub const MACOS_TCC_GUIDANCE: &str =
+    "macOS 自动化授权缺失：系统设置 > 隐私与安全性 > 自动化 中允许控制 Terminal/iTerm2 后重试（开发版首次需手动授权一次）";
+
+/// osascript 失败分类（**纯函数跨平台可测**，M2 裁决：错误分类与执行层分离——
+/// Windows 上即可单测，真实 osascript 路径只做编译验证）：
+/// - stderr 含 `-1743` 字样或 osascript 标准错误「Not authorized to send Apple
+///   events」（大小写不敏感）→ [`MACOS_TCC_GUIDANCE`] 指引文案；
+/// - 其他 → stderr 摘要（[`RESUME_STDERR_SUMMARY_CHARS`] 截断防膨胀）；
+/// - 空 stderr → 有界兜底文案（回执不悬空）。
+pub fn classify_resume_error(stderr: &str) -> String {
+    let tcc_hit = stderr.contains("-1743")
+        || stderr
+            .to_ascii_lowercase()
+            .contains("not authorized to send apple events");
+    if tcc_hit {
+        MACOS_TCC_GUIDANCE.to_string()
+    } else {
+        let s = stderr.trim();
+        if s.is_empty() {
+            "osascript 执行失败（无 stderr 输出）".to_string()
+        } else {
+            crate::inject::normalize::summarize(s, RESUME_STDERR_SUMMARY_CHARS)
+        }
+    }
+}
+
+/// resume 专用 osascript 等待执行（macOS 生产路径；区别于聚焦层
+/// window::applescript::execute_applescript——后者服务窗口聚焦/注入路径维持原语义
+/// 不动，M2 只收窄 resume 出手）：等待子进程完成（wait_timeout 10s）+ stderr/退出码
+/// 捕获，失败 Err 携带分类产物 → open_macos_with 双通道合并 → 端点既有 Err 臂 →
+/// 200 failed 回执 + 审计 failed。
+///
+/// 管道口径（approve.rs probe_cli_version 同源论证）：osascript 输出远小于管道缓冲
+/// （成功仅 `opened` 一行），先等后读无死锁风险；披露：输出超 ~64KB 管道缓冲的极端
+/// 脚本会在 wait 时被写满阻塞而假性超时——结果有界（10s 杀掉）非死锁。stdin 置
+/// null 防 osascript 等 stdin 白耗超时窗。不读 stdout 判「not found」：resume 脚本
+/// `return "opened"`，无聚焦层的 tab 查找语义。
+///
+/// 函数体全为跨平台 API（Command/Stdio/wait_timeout），故**不 cfg 隔离**——Windows
+/// 构建持续编译验证本函数（M2 裁决「cfg macos 构造层只做编译验证」的可执行化）；
+/// 仅调用点（[`spawn_terminal`] 的 macOS 臂）cfg 分派，运行时 macOS 独占触达，
+/// 非 macOS 构建下它不被调用故显式 allow(dead_code)。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn run_osascript_wait(script: &str) -> Result<(), String> {
+    use std::io::Read;
+    use wait_timeout::ChildExt;
+    let mut child = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("osascript 启动失败：{e}"))?;
+    match child.wait_timeout(std::time::Duration::from_secs(OSASCRIPT_WAIT_SECS)) {
+        // 正常退出：先收退出码分诊成败，再排空 stderr（子进程已退出，缓冲安全读）
+        Ok(Some(status)) => {
+            let mut raw = Vec::new();
+            if let Some(pipe) = child.stderr.as_mut() {
+                let _ = pipe.read_to_end(&mut raw);
+            }
+            let stderr = String::from_utf8_lossy(&raw);
+            if status.success() {
+                Ok(())
+            } else if stderr.trim().is_empty() {
+                // 退出码捕获：无 stderr 时它是唯一线索，直接进回执
+                Err(format!(
+                    "osascript 执行失败（退出码 {}）",
+                    status.code().unwrap_or(-1)
+                ))
+            } else {
+                Err(classify_resume_error(&stderr))
+            }
+        }
+        // 超时：杀 + 收尸（防僵尸），失败回执（与 spawn Err 同管道走端点 failed）
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(format!(
+                "osascript 执行超时（{OSASCRIPT_WAIT_SECS}s 上限，已终止）——请重试；若持续失败检查 macOS 自动化授权"
+            ))
+        }
+        Err(e) => Err(format!("osascript 等待失败：{e}")),
+    }
+}
+
 /// Windows 出手链（跨平台纯逻辑，wt 路径由调用方注入便于测试降级链）：wt 在场
 /// 先试；spawn 失败（应用执行别名停用/损坏等场景）**降级重试一次 conhost** 再报
 /// failed（两次错误合并披露，cwd 经 current_dir 继承不丢）。
@@ -253,11 +356,16 @@ fn open_macos_with(cwd: &str, resume: &str, spawner: &SpawnFn) -> Result<(), Str
     Err(format!("全部注入通道失败：{}", errs.join("；")))
 }
 
-/// 生产 spawner（RemoteState 生产装配 / Tauri 命令共用）：spawn fire-and-forget
-/// （不 wait——终端窗口生命周期独立于 MAM 进程），按变体 cfg 分派：
-/// - Windows 变体：CreateProcess；`current_dir` 消费 cwd（评审 I1——conhost 回退
-///   靠进程工作目录继承落在项目目录）；conhost 路径加 CREATE_NEW_CONSOLE(0x10)。
-/// - macOS 变体：复用 execute_applescript（脚本自带 activate 置前聚焦）。
+/// 生产 spawner（RemoteState 生产装配 / Tauri 命令共用），按变体 cfg 分派：
+/// - Windows 变体：CreateProcess **fire-and-forget（不 wait）**——wt/conhost 承载的
+///   `cmd /k` 是常驻交互 shell，等它退出只会空耗超时窗（M2 裁决：与 macOS 的不对称
+///   以此注释存证）；spawn 失败已由 `Command::spawn` Err → failed 回执覆盖。
+///   `current_dir` 消费 cwd（评审 I1——conhost 回退靠进程工作目录继承落在项目目录）；
+///   conhost 路径加 CREATE_NEW_CONSOLE(0x10)。
+/// - macOS 变体：**等待完成**（[`run_osascript_wait`]：wait_timeout 10s + stderr/
+///   退出码捕获）——osascript 下发脚本即返回（正常 <1s），等待代价可忽略，而失败
+///   回执杜绝「audit open ok 但无窗」的账实背离（M2：Mac 验收 D-5 唯一实机 FAIL
+///   根因①）。
 pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
     match spec {
         #[cfg(windows)]
@@ -285,9 +393,7 @@ pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
         #[cfg(not(windows))]
         SpawnSpec::Windows { program, .. } => Err(format!("当前平台不支持终端 spawn（{program}）")),
         #[cfg(target_os = "macos")]
-        SpawnSpec::MacosApplescript { script } => {
-            crate::window::applescript::execute_applescript(script)
-        }
+        SpawnSpec::MacosApplescript { script } => run_osascript_wait(script),
         #[cfg(not(target_os = "macos"))]
         SpawnSpec::MacosApplescript { .. } => {
             Err("AppleScript 执行层仅在 macOS 构建装配".to_string())
@@ -628,6 +734,53 @@ mod tests {
         assert!(
             second.contains(r#"do script "cd '/tmp/proj'"#),
             "次选是 Terminal.app 形态"
+        );
+    }
+
+    /// M2：osascript 错误分类（纯函数跨平台可测）——TCC -1743 /「Not authorized to
+    /// send Apple events」→ 中文授权指引（用户裁决口径原文）
+    #[test]
+    fn classify_resume_error_maps_tcc_to_guidance() {
+        // Mac 验收 D-5 实机 stderr 形态（osascript 标准错误原文，§四-B）
+        let real =
+            "script: execution error: Not authorized to send Apple events to Terminal (-1743).";
+        assert_eq!(classify_resume_error(real), MACOS_TCC_GUIDANCE);
+        // 仅 -1743 字样（退出码形态兜底路径）同样命中
+        assert_eq!(
+            classify_resume_error("execution error: (-1743)"),
+            MACOS_TCC_GUIDANCE
+        );
+        // 大小写不敏感（osascript 输出口径漂移容错）
+        assert_eq!(
+            classify_resume_error("not authorized to send apple events"),
+            MACOS_TCC_GUIDANCE
+        );
+    }
+
+    /// M2：osascript 错误分类——非 TCC 错误保持 stderr 摘要（截断防膨胀）；空
+    /// stderr 有界兜底（回执不悬空）
+    #[test]
+    fn classify_resume_error_other_keeps_summary() {
+        // 非 TCC 错误保留原始摘要（-1728 找不到应用），不得误报授权指引
+        let out =
+            classify_resume_error("execution error: Can't get application \"iTerm2\". (-1728)");
+        assert!(out.contains("-1728"), "摘要保留原始错误：{out}");
+        assert!(
+            !out.contains("自动化授权"),
+            "非 TCC 错误不得误报授权指引：{out}"
+        );
+        // 超长 stderr 截断（+1 为截断省略号）——回执与审计双消费均有界
+        let long = format!("execution error: {}", "x".repeat(500));
+        let out = classify_resume_error(&long);
+        assert!(
+            out.chars().count() <= RESUME_STDERR_SUMMARY_CHARS + 1,
+            "stderr 摘要必须截断：{} chars",
+            out.chars().count()
+        );
+        // 空/纯空白 stderr → 有界兜底文案
+        assert_eq!(
+            classify_resume_error("   "),
+            "osascript 执行失败（无 stderr 输出）"
         );
     }
 }

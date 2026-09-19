@@ -4606,4 +4606,49 @@ mod tests {
         );
         assert_eq!(audits[0].session_id, "sess_m");
     }
+
+    /// M2（Mac 验收 D-5 根因①）：macOS osascript TCC 失败形态回执——缝注入假
+    /// spawner 直接返回 [`classify_resume_error`] 的产物（分类函数本身跨平台单测
+    /// 覆盖；端点在此只验回执契约）：200 failed 携带「自动化授权」指引 + 审计
+    /// action=open result=failed: 前缀——账实一致，不再「open ok 但无窗」。
+    /// 注：本测试在 Windows 上跑走 Windows 分支（open_session_terminal_with 按
+    /// std::env::consts::OS 分派），但端点回执契约跨平台同形，与 OS 分派正交。
+    #[tokio::test]
+    async fn session_open_endpoint_macos_tcc_guidance_reports_failed() {
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state(spawner_rec.seam_failing(crate::inject::resume::MACOS_TCC_GUIDANCE));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "失败回执走 200 语义分诊（session-approve 同口径）"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("自动化授权"),
+            "失败回执必须携带 status=failed 与 TCC 授权指引：{body}"
+        );
+        assert!(!spawner_rec.recorded().is_empty(), "失败回执前提是确有出手");
+        // 审计 action=open result=failed: 前缀且指引在账（出手失败照实落账）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "open");
+        assert!(
+            audits[0].result.starts_with("failed:") && audits[0].result.contains("自动化授权"),
+            "审计必须 failed: 前缀且携带授权指引：{}",
+            audits[0].result
+        );
+    }
 }

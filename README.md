@@ -250,6 +250,11 @@ pnpm install
 pnpm tauri:dev
 ```
 
+> **macOS 开发版提示**：开发版（未签名打包）首次使用「一键恢复会话」开窗前，需在
+> **系统设置 > 隐私与安全性 > 自动化** 中手动允许 MultiAgents-Manager 控制
+> Terminal / iTerm2 一次（TCC 不会自动弹窗）。未授权时 osascript 以 -1743 失败，
+> resume 会回执「macOS 自动化授权缺失」并给出该指引。
+
 ### 构建
 
 ```bash
