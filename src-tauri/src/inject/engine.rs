@@ -376,7 +376,10 @@ pub fn terminal_do_script(tty_suffix: &str, text: &str) -> String {
 /// 构造 Terminal.app 单键脚本（「activate + keystroke」变体，无 do-script
 /// 单键等价形态；按键形态归回传清单实测复核）：**遍历窗口全部标签页**
 /// （P2-4），命中后**先选后发**——`set selected tab of w to t` 拉起后台标签
-/// → `set index` 置前 → activate → System Events keystroke。
+/// → `set index` 置前 → activate → System Events keystroke。新版 activate
+/// 在命中后才执行、且与 keystroke 零语句间隔——激活沉降存在时序竞争
+/// （P2-4 实测项）；实机抖动则降级预案为 activate 后加 `delay 0.2`
+/// （回传清单实测裁决，不在构造层预加）。
 pub fn terminal_send_key_script(tty_suffix: &str, key: &str) -> String {
     format!(
         r#"{guard}
@@ -742,6 +745,15 @@ mod tests {
             .expect("selected tab 前置");
         let stroke = k.find(r#"keystroke "1""#).expect("keystroke 后置");
         assert!(select < stroke);
+        // 负断言：activate 首次出现必须在 set selected tab 之后——旧缺陷形态
+        // 「未命中也抢焦点（activate 置顶，没找到目标照样把 App 拉前台）」不得回归
+        let activate = k.find("activate").expect("activate 后置");
+        assert!(select < activate);
+
+        // 组合断言：applescript_escape 载荷穿过标签循环后仍以转义形态落在
+        // 标签级 do script 里（转义在构造层完成，标签遍历不改写载荷）
+        let e = terminal_do_script("ttys005", r#"say "hi""#);
+        assert!(e.contains(r#"do script "say \"hi\"" in t"#));
     }
 
     /// 假布局（测试缝）：vk_of 恒等映射、scan_of = vk+1——不触任何平台 FFI，

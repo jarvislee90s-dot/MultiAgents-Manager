@@ -43,7 +43,9 @@ pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
 /// `ttys005` 后缀，而 `#{pane_tty}` 与 AppleScript `tty of s/t` 一律 `/dev/`
 /// 全路径——相等匹配（P2-3/R6 三处统一）的统一前置，注入链
 /// （inject/engine `find_tmux_pane`）与聚焦链（tmux/iterm/terminal_app）共用。
-#[cfg(target_os = "macos")]
+/// cfg(any(macos, test))：macOS 实际接线；Windows 侧仅测归一规则
+/// （同 tool_enumeration_allowed 先例模式）。
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn normalize_dev_tty(tty: &str) -> String {
     if tty.starts_with("/dev/") {
         tty.to_string()
@@ -212,5 +214,31 @@ mod stage3_gate_tests {
         assert!(tool_enumeration_allowed(1234, false));
         // pid 存活（CLI 会话 TTY 失败场景）：一律不放行
         assert!(!tool_enumeration_allowed(1234, true));
+    }
+}
+
+#[cfg(test)]
+mod normalize_dev_tty_tests {
+    use super::normalize_dev_tty;
+
+    #[test]
+    fn bare_suffix_gets_dev_prefix() {
+        // 裸后缀（ps -o tty= 口径）→ 补 /dev/ 全路径（相等匹配的入参形态）
+        assert_eq!(normalize_dev_tty("ttys005"), "/dev/ttys005");
+    }
+
+    #[test]
+    fn dev_prefixed_input_is_idempotent() {
+        // 已含 /dev/ 前缀 → 幂等直通（不叠前缀成 /dev/dev/ttys005）
+        assert_eq!(normalize_dev_tty("/dev/ttys005"), "/dev/ttys005");
+    }
+
+    #[test]
+    fn dev_without_trailing_slash_is_pinned() {
+        // "/dev"（无尾斜杠）不匹配 starts_with("/dev/") → 走补前缀分支，
+        // 产出 "/dev//dev"（双斜杠）——钉值申报：实现不特判裸 "/dev"（前缀
+        // 常量带尾斜杠），畸形输入产出畸形全路径，宁直白不静默改写（调用方
+        // 入参来自 ps/客户端 tty，实际不会出现该形态）
+        assert_eq!(normalize_dev_tty("/dev"), "/dev//dev");
     }
 }
