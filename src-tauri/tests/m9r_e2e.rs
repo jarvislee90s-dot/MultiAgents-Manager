@@ -1,10 +1,12 @@
 #![cfg(windows)]
-//! M9R–M9R 批次 Task 12 —— 四例实机 E2E 集成测试（全部 `#[ignore]`，实机显式跑）。
+//! M9R–M9R 批次 Task 12 四例 + 评审修复批 F5 扩三例（共七例）实机 E2E 集成测试
+//! （全部 `#[ignore]`，实机显式跑）。
 //!
 //! ## 前置条件（文档约定，测试头部备案）
 //! - Windows 宿主（conhost 控制台拓扑，复用项目技能 `win-console-inject-probe`
 //!   的起会话拓扑：conhost cmd /k 经 PowerShell `Start-Process`；探测基座
-//!   `%USERPROFILE%\mam-probe-m6r\`）；
+//!   `%USERPROFILE%\mam-probe-m6r\`）；F5 扩的 `e2e_wt_host_matrix` 另需本机
+//!   已装 Windows Terminal（`where wt` 命中；不在场即前置 panic，见该例自检）；
 //! - 本机已装四家 CLI 且版本与族规格表指纹一致：claude 2.1.251 / codex 0.154.0 /
 //!   kimi 2.0.0 / opencode 1.18.31（`inject::families::family_for` 的 verified_with）；
 //! - temp 探测目录可写（测试自建项目目录，run-id 唯一）；
@@ -36,6 +38,9 @@
 //! | 2026-09-19 | e2e_engine_matrix_long | 147.1s（单例）；全套连跑 293.8s | claude 10k=2.1s（<15s ✓）；opencode 10k=106.3s/连跑 107.5s（≤460s 预算 ✓）；双 stamp 命中 | evidence\m9r-e2e\engine-matrix-long-<run-id>\ |
 //! | 2026-09-19 | e2e_http_full_chain | 39.7s | 200 delivered + 目标会话 stamp 命中 + 审计 send/flush 两行（channel=real） | evidence\m9r-e2e\http-full-chain-<run-id>\ |
 //! | 2026-09-19 | e2e_key_domain_and_enter | 19.0s | codex rollout 命中文本（VK 回车提交生效）+ 域外拒绝 Err 含「不支持的按键」 | evidence\m9r-e2e\key-domain-enter-<run-id>\ |
+//! | 2026-09-19 | e2e_wt_host_matrix（F5） | 39.3s | WT×2000×claude/codex 全过：written=2000、背压旗标双 false（2000 恰不超阈值）；stamp 命中 2ms/9ms；TUI 定位 tui/cmd 双命中（wt -d 落目录经 cwd 标记匹配） | evidence\m9r-e2e\wt-host-matrix-20260919-162543-t5\ |
+//! | 2026-09-19 | e2e_codex_long_10k（F5） | 21.6s | written=10000、背压=true（快消费者 10000>2000 语义）；注入耗时 2143ms（≤460s 预算 ✓）；stamp 命中 21ms | evidence\m9r-e2e\codex-long-10k-20260919-162641-t6\ |
+//! | 2026-09-19 | e2e_cross_session_no_crosstalk（F5） | 41.9s（首跑 42.0s 同绿） | 双会话并行注入：A/B written=2000、背压双 false；A stamp 命中 0ms / B stamp 10ms；双向零串扰断言过（并行触发、CONSOLE_OP 内部串行） | evidence\m9r-e2e\cross-session-20260919-162801-t7\ |
 //!
 //! 实跑备注（同日活体实验定案，已内化为代码注释）：
 //! - 四家 CLI 会话存储均**懒创建**（首条用户消息后才落盘）→ 流水线固定
@@ -72,6 +77,9 @@ const STAMP_TIMEOUT_FAST: Duration = Duration::from_secs(30);
 const STAMP_TIMEOUT_SLOW: Duration = Duration::from_secs(180);
 /// 确认轮询步距（与生产 confirm::PROBE_INTERVAL_MS 同口径的测试侧常量）。
 const POLL_GAP: Duration = Duration::from_millis(500);
+/// WT 宿主目标进程发现窗（launch_cli 的 cmd 20s + TUI 45s 两段合并上限：
+/// sysinfo cwd 匹配一次扫描同时覆盖两类候选，取最宽段）。
+const WT_FIND_TIMEOUT: Duration = Duration::from_secs(45);
 
 // ============================================================
 // 证据与日志（追加式带 run-id；探测基座 mam-probe-m6r）
@@ -145,9 +153,13 @@ fn run_ps_with_parent(finder: &Path, parent: u32) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// 探测会话进程树（conhost → cmd → TUI 孙进程链）。
+/// 探测会话进程树（conhost → cmd → TUI 孙进程链；WT 拓扑见 [`launch_wt_cli`]）。
 struct ProbeProc {
-    conhost: u32,
+    /// 宿主清场补充 pid（cmd 树之外补杀的宿主）：conhost 拓扑 = `[conhost]`；
+    /// WT 拓扑 = `[]`——杀 cmd 树后 ConPTY 客户端退出、标签页自关，WindowsTerminal
+    /// 窗口进程属宿主所有（可能携带用户自己的其他标签页），**绝不代杀**
+    /// （纪律：只碰本测试新建的进程树）。
+    hosts: Vec<u32>,
     cmd: u32,
     /// 注入目标 pid = TUI 主进程（claude/codex/kimi/opencode 或其 node/bun
     /// 运行时），找不到 TUI 时回落 cmd.exe——同一控制台，M6R 同款兜底
@@ -165,13 +177,13 @@ impl Drop for ProbeProc {
 }
 
 impl ProbeProc {
-    /// 清场：taskkill /T /F 杀 cmd 进程树（含 TUI），再杀 conhost 宿主。幂等。
+    /// 清场：taskkill /T /F 杀 cmd 进程树（含 TUI），再补杀宿主集合。幂等。
     fn kill(&mut self) {
         if self.killed {
             return;
         }
         self.killed = true;
-        for pid in [self.cmd, self.conhost] {
+        for pid in std::iter::once(self.cmd).chain(self.hosts.iter().copied()) {
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .status();
@@ -260,7 +272,149 @@ fn launch_cli(cli: &str, tag: &str, ev: &Ev) -> ProbeProc {
     let target = tui.unwrap_or(cmd); // 同一控制台，cmd 兜底可注入（M6R 同款）
     ev.log(&format!("launch {cli}: tui={tui:?} target={target}"));
     ProbeProc {
-        conhost,
+        hosts: vec![conhost],
+        cmd,
+        target,
+        proj,
+        killed: false,
+    }
+}
+
+/// WT 前置自检：`where wt` 探测 Windows Terminal（生产 `resume::windows_terminal_
+/// path` 同款语义——该函数 crate 私有，测试侧同源复制，注释锚定单一来源；缓存
+/// **首行完整路径**，避开应用执行别名停用/损坏场景，同评审 M1 口径）。不在场 →
+/// panic 带明确中文提示（本例为实机显式跑场景，前置缺失即响亮失败可接受）。
+fn wt_path_or_panic() -> String {
+    use std::process::Stdio;
+    let out = std::process::Command::new("where")
+        .arg("wt")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("where wt 探测执行失败");
+    let path = if out.status.success() {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+    } else {
+        None
+    };
+    path.unwrap_or_else(|| panic!("本机未装 Windows Terminal，无法验收 WT 宿主"))
+}
+
+/// WT 宿主下按「既有进程发现口径」定位探测进程（monitor::process 同款 sysinfo
+/// 扫描——进程名 + cwd 匹配）。wt.exe 启动器移交 WindowsTerminal.exe 后即退，
+/// conhost 拓扑的「从启动 pid 走父子树」不可用；且 cmd 的 CommandLine 是裸
+/// `cmd /k <cli>`（不含目录），故以 **cwd 含探测标记** 锚定：`wt -d` 落目录经
+/// 进程继承传导（cmd → TUI），凡 cwd 含标记者必属本探测树（标记含 run-id，
+/// 跨运行/跨用户会话零碰撞）。返回 `(cmd pid, TUI pid)`：TUI 命中为注入目标；
+/// cmd 全程只作清场根（WT 下杀 TUI 树不关标签页——/k 壳存活，必须杀 cmd 根）
+/// 与 TUI 缺席时的回落目标。单次扫描同时收两类候选（sysinfo 进程表迭代序不定，
+/// 不可命中 TUI 即早退，须整表扫完才下结论）。
+fn find_wt_target(
+    cli: &str,
+    marker: &str,
+    ev: &Ev,
+    timeout: Duration,
+) -> (Option<u32>, Option<u32>) {
+    let tui_names = [
+        format!("{cli}.exe"),
+        "node.exe".to_string(),
+        "bun.exe".to_string(),
+    ];
+    let t0 = Instant::now();
+    loop {
+        let system = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::new().with_processes(
+                sysinfo::ProcessRefreshKind::new()
+                    .with_cmd(sysinfo::UpdateKind::Always)
+                    .with_cwd(sysinfo::UpdateKind::Always)
+                    .with_exe(sysinfo::UpdateKind::Always),
+            ),
+        );
+        let mut cmd_pid = None;
+        let mut tui_pid = None;
+        for (pid, process) in system.processes() {
+            let Some(cwd) = process.cwd() else {
+                continue;
+            };
+            if !norm_path(&cwd.to_string_lossy()).contains(&norm_path(marker)) {
+                continue;
+            }
+            let name = process.name().to_string_lossy().to_ascii_lowercase();
+            if tui_names.contains(&name) && tui_pid.is_none() {
+                tui_pid = Some(pid.as_u32());
+            } else if name == "cmd.exe" && cmd_pid.is_none() {
+                cmd_pid = Some(pid.as_u32());
+            }
+        }
+        if tui_pid.is_some() || t0.elapsed() >= timeout {
+            if let Some(t) = tui_pid {
+                ev.log(&format!(
+                    "wt target 命中：tui={t} cmd={cmd_pid:?}（{}ms）",
+                    t0.elapsed().as_millis()
+                ));
+            } else {
+                ev.log(&format!(
+                    "wt target 发现超时（cmd 回落={cmd_pid:?}，marker={marker}）"
+                ));
+            }
+            return (cmd_pid, tui_pid);
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+    }
+}
+
+/// 起 WT 宿主探测会话：`wt -d <proj> cmd /k <cli>`（Task 11 一键 resume 生产
+/// 同款命令形态；Start-Process 另设 -WorkingDirectory，同 resume.rs 生产 spawner
+/// 「-d + current_dir 双保险」语义）。目标定位走 [`find_wt_target`]（sysinfo
+/// cwd 标记匹配），清场根 = cmd（杀 TUI 树不关 WT 标签页，见其注）。
+fn launch_wt_cli(wt_path: &str, cli: &str, tag: &str, ev: &Ev) -> ProbeProc {
+    let proj = std::env::temp_dir().join(format!("mam-m9r-{tag}-{cli}"));
+    let _ = std::fs::remove_dir_all(&proj); // run-id 唯一，清理仅防理论碰撞
+    std::fs::create_dir_all(&proj).expect("建探测项目目录失败");
+
+    let script = format!(
+        "Start-Process '{}' -ArgumentList '-d','{}','cmd.exe','/k','{cli}' -WorkingDirectory '{}' -PassThru | Select-Object -ExpandProperty Id",
+        wt_path,
+        proj.display(),
+        proj.display()
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .expect("启动 powershell 失败");
+    let wt_pid: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| {
+            panic!(
+                "wt 启动失败（Start-Process 未返回 pid，stderr={}）",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        });
+    ev.log(&format!(
+        "launch wt {cli}: wt_pid={wt_pid}（启动器移交 WindowsTerminal 后即退，仅留档）proj={}",
+        proj.display()
+    ));
+
+    let marker = proj
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .expect("探测目录名");
+    let (cmd, tui) = find_wt_target(cli, &marker, ev, WT_FIND_TIMEOUT);
+    let cmd = cmd.unwrap_or_else(|| {
+        panic!("{cli}: WT 宿主 {WT_FIND_TIMEOUT:?} 内未定位到探测进程（cwd 含标记 {marker}）")
+    });
+    let target = tui.unwrap_or(cmd);
+    ev.log(&format!(
+        "launch wt {cli}: cmd={cmd} tui={tui:?} target={target}"
+    ));
+    ProbeProc {
+        hosts: Vec::new(), // WT 宿主进程绝不代杀（纪律见 ProbeProc.hosts 注）
         cmd,
         target,
         proj,
@@ -546,6 +700,17 @@ fn boot_probe_session(cli: &str, tag: &str, ev: &Ev) -> ProbeProc {
     let spec = family_for(cli).unwrap_or_else(|| panic!("{cli} 族规格缺失（families 表）"));
     let proc = launch_cli(cli, tag, ev);
     // TUI 冷启动绘制 + 信任对话框弹出窗（ffi_hop 前摇 + M6R E0 经验值）
+    std::thread::sleep(Duration::from_secs(8));
+    warmup_trust(&proc, cli, &spec, ev);
+    proc
+}
+
+/// WT 宿主版起会话（节奏与 [`boot_probe_session`] 全同）：launch_wt_cli + TUI
+/// 冷启动沉降 + 信任预热。WT 与 conhost 差异仅在宿主窗口层，ConPTY 输入面同构，
+/// 预热按键序列/沉降窗复用同一套经验值。
+fn boot_wt_session(wt_path: &str, cli: &str, tag: &str, ev: &Ev) -> ProbeProc {
+    let spec = family_for(cli).unwrap_or_else(|| panic!("{cli} 族规格缺失（families 表）"));
+    let proc = launch_wt_cli(wt_path, cli, tag, ev);
     std::thread::sleep(Duration::from_secs(8));
     warmup_trust(&proc, cli, &spec, ev);
     proc
@@ -1027,4 +1192,220 @@ fn e2e_key_domain_and_enter() {
     // 单一清场点：置于全部断言之后；域校验先行（P2-2）使②的断言与进程
     // 存活性无关（域外键不触任何控制台附加，活/死 pid 结果一致）
     proc.kill();
+}
+
+// ============================================================
+// Test 5（F5）—— WT 宿主矩阵：Windows Terminal × 2000 字符 × claude/codex
+// ============================================================
+
+#[test]
+#[ignore = "实机显式跑：真 Windows Terminal 开窗 + claude/codex 真会话（--test-threads=1）"]
+fn e2e_wt_host_matrix() {
+    let run_id = format!("{}-t5", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let ev = Ev::new("wt-host-matrix", &run_id);
+    ev.log(&format!("=== e2e_wt_host_matrix run={run_id} ==="));
+    // 前置自检：wt 不在场即 panic 明确中文提示（实机显式跑场景可接受）
+    let wt_path = wt_path_or_panic();
+    ev.log(&format!("wt 探测命中：{wt_path}"));
+
+    // (tool, 期望背压旗标)：2000 恰不超 LONG_MSG_CHARS(2000) 阈值 → 快消费者
+    // 两家均不背压（families::use_backpressure 语义：chars > 阈值才切）
+    let cases = [("claude", false), ("codex", false)];
+    let mut failures: Vec<String> = Vec::new();
+    for (tool, want_bp) in cases {
+        let tag = format!("wt-{tool}-{run_id}");
+        let r: Result<(), String> = (|| {
+            let mut proc = boot_wt_session(&wt_path, tool, &tag, &ev);
+            let text = e2e_text(tool, &run_id, 2_000);
+            assert_eq!(text.chars().count(), 2_000, "WT 矩阵固定 2000 字符档");
+            let spec = family_for(tool).unwrap();
+            let stamp = stamp_of(&text).to_string();
+            let stats = inject_text_spec(proc.target, &text, &spec)
+                .map_err(|e| format!("wt×{tool} inject_text_spec 失败: {e}"))?;
+            ev.log(&format!("{tag}: stats={stats:?}"));
+            if stats.backpressure != want_bp {
+                return Err(format!(
+                    "wt×{tool} 背压旗标不符：got={} want={want_bp}（2000 恰不超阈值）",
+                    stats.backpressure
+                ));
+            }
+            if stats.written != text.chars().count() {
+                return Err(format!("wt×{tool} written={} ≠ 全量 2000", stats.written));
+            }
+            // sid 发现在注入之后（会话存储懒创建），随后确认层轮询 stamp
+            let marker = proj_marker(&proc);
+            let sid = discover_session_id(&ev, tool, &marker, DISCOVER_TIMEOUT, &tag).ok_or_else(
+                || {
+                    format!(
+                        "wt×{tool} 注入后未发现会话 id（marker={marker}，{DISCOVER_TIMEOUT:?}）"
+                    )
+                },
+            )?;
+            let hit = poll_stamp(&ev, tool, &sid, &stamp, STAMP_TIMEOUT_FAST, &tag);
+            proc.kill();
+            if !hit {
+                return Err(format!("wt×{tool} stamp 未命中（sid={sid}）"));
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            ev.log(&format!("{tag}: FAIL {e}"));
+            failures.push(e);
+        }
+    }
+    assert!(failures.is_empty(), "WT 宿主矩阵存在失败：{failures:#?}");
+}
+
+// ============================================================
+// Test 6（F5）—— codex 万字符：快消费者 10k 切背压 + 460s 总预算
+// ============================================================
+
+#[test]
+#[ignore = "实机显式跑：codex 10000 字符长文（背压注入可达分钟级，耐心等待勿中途判定失败）"]
+fn e2e_codex_long_10k() {
+    let run_id = format!("{}-t6", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let ev = Ev::new("codex-long-10k", &run_id);
+    ev.log(&format!("=== e2e_codex_long_10k run={run_id} ==="));
+    // conhost 拓扑复用（宿主维度已由 Test 1/4 与本批 WT 例覆盖，本例只验长度维度）
+    let tag = format!("codex-10k-{run_id}");
+    let mut proc = boot_probe_session("codex", &tag, &ev);
+    let text = e2e_text("codex", &run_id, 10_000);
+    assert_eq!(text.chars().count(), 10_000);
+    let spec = family_for("codex").unwrap();
+    // 快消费者 10000 > LONG_MSG_CHARS(2000) → 按 families::use_backpressure 语义
+    // 切背压=true；总预算 = inject_budget_ms = 10s + 10000×45ms = 460s
+    let budget = multi_agents_manager_lib::inject::families::inject_budget_ms(&spec, 10_000);
+    let stamp = stamp_of(&text).to_string();
+    let t0 = Instant::now();
+    let r = inject_text_spec(proc.target, &text, &spec);
+    let elapsed = t0.elapsed();
+    ev.log(&format!(
+        "{tag}: elapsed={}ms r={:?}",
+        elapsed.as_millis(),
+        r.as_ref().map(|s| format!("{s:?}"))
+    ));
+    let mut failures: Vec<String> = Vec::new();
+    match r {
+        Ok(stats) => {
+            if !stats.backpressure {
+                failures.push(
+                    "codex 10k 应走背压（快消费者 10000>2000，use_backpressure 语义）".to_string(),
+                );
+            }
+            if elapsed.as_millis() as u64 > budget {
+                failures.push(format!(
+                    "codex 10k 耗时 {}ms > 背压总预算 {budget}ms",
+                    elapsed.as_millis()
+                ));
+            }
+            if stats.written != text.chars().count() {
+                failures.push(format!("codex 10k written={} ≠ 全量 10000", stats.written));
+            }
+        }
+        Err(e) => failures.push(format!("codex 10k 注入失败: {e}")),
+    }
+    // sid 发现在注入之后（rollout 懒创建），确认层轮询统一慢窗（见常量注）
+    let marker = proj_marker(&proc);
+    let sid = discover_session_id(&ev, "codex", &marker, DISCOVER_TIMEOUT, &tag)
+        .unwrap_or_else(|| panic!("codex 10k 注入后未发现会话 id（marker={marker}）"));
+    let hit = poll_stamp(&ev, "codex", &sid, &stamp, STAMP_TIMEOUT_SLOW, &tag);
+    // 单一清场点：置于全部断言之后（panic 路径由 Drop 守卫兜底）
+    proc.kill();
+    if !hit {
+        failures.push(format!("codex 10k stamp 未命中（sid={sid}）"));
+    }
+    assert!(failures.is_empty(), "codex 10k 长文存在失败：{failures:#?}");
+}
+
+// ============================================================
+// Test 7（F5）—— 跨会话并发互扰：两会话并行注入各自命中、零串扰
+// ============================================================
+
+#[test]
+#[ignore = "实机显式跑：claude+codex 双会话并行注入（各自 stamp 各自命中 + 对方零串扰）"]
+fn e2e_cross_session_no_crosstalk() {
+    let run_id = format!("{}-t7", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let ev = Ev::new("cross-session", &run_id);
+    ev.log(&format!(
+        "=== e2e_cross_session_no_crosstalk run={run_id} ==="
+    ));
+
+    // ① 两会话独立起手（各自独立 temp 目录与 run-id 标记）
+    let mut proc_a = boot_probe_session("claude", &format!("cross-a-{run_id}"), &ev);
+    let mut proc_b = boot_probe_session("codex", &format!("cross-b-{run_id}"), &ev);
+
+    // ② 各自 2000 字符（恰不超快家族长文阈值）+ 专属尾戳（XA/XB 区分双方，
+    //    尾戳即全量送达判据，也是串扰检测的异戳探针）
+    let tail_a = format!("M9R-E2E-XA-{run_id}-END");
+    let tail_b = format!("M9R-E2E-XB-{run_id}-END");
+    let text_a = format!("{}{tail_a}", "a".repeat(2_000 - tail_a.chars().count()));
+    let text_b = format!("{}{tail_b}", "b".repeat(2_000 - tail_b.chars().count()));
+    assert_eq!(text_a.chars().count(), 2_000);
+    assert_eq!(text_b.chars().count(), 2_000);
+    let stamp_a = stamp_of(&text_a).to_string();
+    let stamp_b = stamp_of(&text_b).to_string();
+
+    // ③ 两线程同时发起 inject_text_spec。引擎 CONSOLE_OP 进程级串行为既定行为
+    //    （控制台附加态进程全局唯一，B 在锁上排队等 A 的临界区放出）——本例
+    //    验收点不是并行度，而是「并行触发、内部串行」之下：各自 stamp 各自
+    //    命中 + 对方会话存储零串扰。
+    let spec_a = family_for("claude").unwrap();
+    let spec_b = family_for("codex").unwrap();
+    let pid_a = proc_a.target;
+    let pid_b = proc_b.target;
+    let t_a = std::thread::spawn(move || inject_text_spec(pid_a, &text_a, &spec_a));
+    let t_b = std::thread::spawn(move || inject_text_spec(pid_b, &text_b, &spec_b));
+    let stats_a = t_a
+        .join()
+        .expect("A（claude）注入线程 panic")
+        .expect("A 注入失败");
+    let stats_b = t_b
+        .join()
+        .expect("B（codex）注入线程 panic")
+        .expect("B 注入失败");
+    ev.log(&format!("cross: A stats={stats_a:?} B stats={stats_b:?}"));
+    assert!(!stats_a.backpressure, "A 2000 字符恰不超阈值不应背压");
+    assert!(!stats_b.backpressure, "B 2000 字符恰不超阈值不应背压");
+    assert_eq!(stats_a.written, 2_000, "A 应全量送达");
+    assert_eq!(stats_b.written, 2_000, "B 应全量送达");
+
+    // ④ sid 各自发现（两会话存储独立懒创建），随后各自确认层轮询
+    let marker_a = proj_marker(&proc_a);
+    let marker_b = proj_marker(&proc_b);
+    let sid_a = discover_session_id(&ev, "claude", &marker_a, DISCOVER_TIMEOUT, "cross-a")
+        .expect("A（claude）注入后未发现会话 id");
+    let sid_b = discover_session_id(&ev, "codex", &marker_b, DISCOVER_TIMEOUT, "cross-b")
+        .expect("B（codex）注入后未发现会话 id");
+    let hit_a = poll_stamp(
+        &ev,
+        "claude",
+        &sid_a,
+        &stamp_a,
+        STAMP_TIMEOUT_FAST,
+        "cross-a",
+    );
+    let hit_b = poll_stamp(
+        &ev,
+        "codex",
+        &sid_b,
+        &stamp_b,
+        STAMP_TIMEOUT_FAST,
+        "cross-b",
+    );
+
+    // ⑤ 零串扰双向断言（在各自命中之后读——页面已有本方消息，「异戳不在此页」
+    //    才是有效的零证据）
+    let a_page = read_session_messages("claude", &sid_a, PROBE_LIMIT).expect("读 A 会话存储失败");
+    let b_page = read_session_messages("codex", &sid_b, PROBE_LIMIT).expect("读 B 会话存储失败");
+    let a_has_b = stamp_hit_in_page(&a_page, &stamp_b);
+    let b_has_a = stamp_hit_in_page(&b_page, &stamp_a);
+
+    // 单一清场点：置于全部断言之后（panic 路径由 Drop 守卫兜底）
+    proc_a.kill();
+    proc_b.kill();
+
+    assert!(hit_a, "A stamp 应命中 A 会话存储（sid={sid_a}）");
+    assert!(hit_b, "B stamp 应命中 B 会话存储（sid={sid_b}）");
+    assert!(!a_has_b, "A（claude）会话存储出现 B 的 stamp——串扰！");
+    assert!(!b_has_a, "B（codex）会话存储出现 A 的 stamp——串扰！");
 }

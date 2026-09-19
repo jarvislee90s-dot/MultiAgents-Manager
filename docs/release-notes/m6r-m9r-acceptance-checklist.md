@@ -106,7 +106,7 @@ families.rs 6 测 + engine.rs 18 测（含 macOS 构造，见 A6），共 24 测
 | resume 分诊（failed 文案上屏 / opening 提示 / 404 no_cwd 分诊 / 无 cwd 禁用镜像） | `tests/mobile/SessionDetail.test.tsx` | `评审 C1：200 failed 回执不得当成功…`、`200 opening → 成功提示条…`、`404 no_cwd → 按错误码分診中文文案…`、`无项目目录 → 按钮禁用 + 原因…` |
 | 审计页 | `tests/settings/AuditLogSection.test.tsx` | 失败态不伪装空态等 |
 
-### A11 · E2E 四例（R2 全链 + 设计 B1 项四家矩阵，`#[ignore]` 实机显式跑）
+### A11 · E2E 七例（R2 全链 + 设计 B1 项四家矩阵 + F5 评审扩三例，`#[ignore]` 实机显式跑）
 
 运行命令：
 
@@ -123,8 +123,13 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | `e2e_engine_matrix_long` | claude 10k <15s；opencode 10k ≤460s 预算；双 stamp 命中 | claude 10k=2.1s / opencode 10k=106.3s，全过 | claude 10k=2.1s（2098ms）/ opencode 10k=86.6s（86639ms，快于首跑）；双 stamp 命中 1ms |
 | `e2e_http_full_chain` | HTTP→路由→队列→引擎→确认→审计全链：delivered + stamp 命中 + 审计 send/flush 两行 | 39.7s，全过 | 200 `{"status":"delivered"}` + stamp 命中 0ms + 审计 send/flush 两行（channel=real） |
 | `e2e_key_domain_and_enter` | codex VK 回车提交生效（rollout 命中）；域外键拒绝 Err | 19.0s，全过 | codex rollout 命中（1506ms）+ stamp 命中 12ms；域外「bad!」拒绝 Err |
+| `e2e_wt_host_matrix`（F5） | WT 宿主 × 2000 字符 × claude/codex：written=2000、背压旗标双 false（2000 恰不超 `LONG_MSG_CHARS` 阈值）、双 stamp 命中 | 39.3s，全过 | written=2000 ×2；stamp 命中 2ms（claude）/9ms（codex）；WT 下 TUI 定位 tui/cmd 双命中（`wt -d` 落目录经 sysinfo cwd 标记匹配） |
+| `e2e_codex_long_10k`（F5） | codex 10000 字符：背压=true（快消费者 10000>2000，`families::use_backpressure` 语义）、耗时 ≤460s 预算、stamp 命中 | 21.6s，全过 | written=10000、backpressure=true；注入耗时 2143ms（预算 460s，余量巨大）；stamp 命中 21ms |
+| `e2e_cross_session_no_crosstalk`（F5） | claude+codex 双会话并行注入：各自 stamp 各自命中 + 对方会话存储零串扰 | 41.9s，全过（首跑 42.0s 同绿） | A/B written=2000、背压双 false；A stamp 0ms / B stamp 10ms；双向异戳零命中（并行触发、CONSOLE_OP 内部串行） |
 
-验收复跑合计 **4 passed / 0 failed · 273.73s**（全套实跑命令见上，`--test-threads=1`；执行序按字母序 long→short→http→key）。首跑全套连跑 293.82s；证据目录 `%USERPROFILE%\mam-probe-m6r\evidence\m9r-e2e\`（按 `<用例名>-<run-id>` 归档，run.log 随 run 累积）。慢用例（opencode 长文）按测试文件头「单例失败先隔离重跑再定因」纪律处理——**重跑即愈**为既定判定口径。
+验收复跑合计 **4 passed / 0 failed · 273.73s**（全套实跑命令见上，`--test-threads=1`；执行序按字母序 long→short→http→key）。首跑全套连跑 293.82s；证据目录 `%USERPROFILE%\mam-probe-m6r\evidence\m9r-e2e\`（按 `<用例名>-<run-id>` 归档，run.log 随 run 累积）。慢用例（opencode 长文）按测试文件头「单例失败先隔离重跑再定因」纪律处理——**重跑即愈**为既定判定口径。F5 三例首跑合计 **3 passed / 0 failed · 102.82s**（2026-09-19，逐一显式跑；跨会话例为取证完整性连跑两次均绿）。
+
+**矩阵口径说明（F5 扩三例后，如实标注已测面/未测面）**：已测面 = conhost×短文×四家（`e2e_engine_matrix_short`）+ 10k×claude/opencode（`e2e_engine_matrix_long`）+ WT×2000×claude/codex（`e2e_wt_host_matrix`）+ codex 10k（`e2e_codex_long_10k`）+ 跨会话并发（claude+codex，`e2e_cross_session_no_crosstalk`）。**未测面如实留白**：WT 宿主 × kimi/opencode、WT 宿主 × 10k 长文、conhost × kimi/opencode 10k、跨会话并发 × kimi/opencode——以上组合无自动化覆盖，验收时如有需要按 B/C 段人工项补看；WT 判冻恢复仍为已知限制（§8.3，见 A3/C-12）。
 
 ---
 
@@ -159,6 +164,7 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open（仅移动端触发落账；桌面端 Tauri 路径不写审计——audit 需设备身份） |
 | C-11 | 审计页逐条可查 | 完成上述操作 | 设置 → 注入审计 | 逐条对应，无缺漏 |
 | C-12 | WT/conhost 判冻与自动解冻 | 任一 CLI 会话在持续输出/制造输出停顿 | 注入长文制造背压与停顿，观察占用判冻与自动解冻（PostMessage ESC 自愈） | 判冻解冻自动发生、正文最终命中；**WT 宿主恢复未验证为已知限制（§8.3）——异常即记录不判 FAIL** |
+| C-13 | 滞留→屏读→补按回车恢复路径 | 任一快消费者会话（E10 尾字符丢失场景：正文已打入但尾字符/提交回车丢失） | 直发后若确认失败回执出现：终端可见已打内容但未提交——人工按一次回车即提交；或等确认层自动屏读回查补按（500ms 轮询 3s 窗，`confirm::RECHECK_MS`） | 滞留内容最终提交进会话（会话文件见戳），不重复双投；确认回执与实际落盘一致 |
 
 ---
 
