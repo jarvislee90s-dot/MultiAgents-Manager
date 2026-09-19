@@ -2927,6 +2927,19 @@ mod tests {
                 20,
                 crate::session::SessionStatus::Waiting,
             ),
+            {
+                // M9R Task 10 probe_pending_strict_policy 独占会话（Waiting codex，
+                // last_message 恒为 codex 补丁审批框标题原文——证明 detect 命中下严格档
+                // 仍压为不可批）；全测试集唯一 id（守卫 id 立规）
+                let mut s = inj_sess(
+                    "sess_k",
+                    crate::session::AgentType::Codex,
+                    21,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("Would you like to make the following edits?".to_string());
+                s
+            },
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -3918,5 +3931,70 @@ mod tests {
         assert_eq!(audits[0].action, "key", "域外 id 审计 action 收敛为 key");
         assert_eq!(audits[0].result, "ok");
         assert_eq!(audits[0].session_id, "sess_j");
+    }
+
+    /// 严格档（M9R Task 10 裁决：未取证不出键，probe-pending 恒判漂移）：KV seed
+    /// verified_with="probe-pending" 的 codex 定制映射（复用 Task 7 audit_action_vocab 的
+    /// store.with 内存库 seed 模式，零接触真实 ~/.mam）→
+    /// - GET session-approve-options：available=false + options 空 + reason=「键位待实测确认，
+    ///   请用普通发送」（前端 ApproveCard 契约：available=false 且带 reason → 只渲染提示条）
+    ///   ——即使 sess_k 处 Waiting 且 last_message 命中 marker；
+    /// - POST session-approve：404 no_mapping（未取证=映射缺失，降级走普通发送），键位
+    ///   永不出手。
+    /// sess_k 全测试集唯一 id（守卫 id 立规）。
+    #[tokio::test]
+    async fn probe_pending_strict_policy() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        // probe-pending 定制映射 seed 进本测试自己的内存库（其他测试的 memory 库互不可见）
+        state.store.with(|c| {
+            crate::database::dao::settings::set_setting_conn(
+                c,
+                crate::inject::approve::KV_KEY,
+                r#"[{"tool":"codex","verified_with":"probe-pending",
+  "prompt_markers":["would you like to make the following"],
+  "options":[{"id":"approve","label":"允许","key":"y"},
+             {"id":"reject","label":"拒绝","key":"esc"}]}]"#,
+            )
+        });
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // GET：Waiting + detect 命中（sess_k last_message 即 codex 弹框标题原文）仍压为不可批
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_k",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false, "probe-pending 严格档恒不可批");
+        assert!(
+            v["options"].as_array().unwrap().is_empty(),
+            "严格档不下发选项（键位与选项均不出键）"
+        );
+        assert_eq!(
+            v["reason"], "键位待实测确认，请用普通发送",
+            "严格档必须下发降级原因（前端提示条渲染契约）"
+        );
+        assert_eq!(v["verifiedWith"], "probe-pending");
+        assert_eq!(v["drift"], true, "probe-pending 恒判漂移");
+        // POST：404 no_mapping（未取证=映射缺失），零按键投递
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_k","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_mapping"));
+        assert!(fake.recorded_keys().is_empty(), "严格档不得有任何按键投递");
     }
 }

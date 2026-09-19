@@ -5,10 +5,11 @@
 //! - 映射表是 `Vec<ToolMapping>` 的 serde JSON，SSOT 在 settings KV 键
 //!   [`KV_KEY`]（允许覆盖定制），缺省/损坏回退内置默认表
 //!   [`DEFAULT_MAPPINGS_JSON`]（**不写回**——保持默认表可随版本升级）；
-//! - 默认表 `verified_with` 按工具分态：claude 已实测回填真实版本（2.1.251，
-//!   2026-09-18 Windows 本机取证）；codex 仍 `"probe-pending"`（未经真实审批提示
-//!   实测取证，实机取证后回填）；[`is_version_drift`] 对 probe-pending 恒判
-//!   漂移 → UI 提示「映射待实测确认，若提示不符请用普通发送」。
+//! - 默认表 `verified_with` 均为实机取证版本（claude 2.1.251 Task 13/M8R 双场景、
+//!   codex 0.154.0 M8R，Windows 本机）；KV 定制表若回填 `"probe-pending"` 触发
+//!   [`is_version_drift`] 恒判漂移，且远端端点按**严格档**处理（M9R Task 10 裁决：
+//!   未取证不出键——approve-options 不下发选项只给 [`PROBE_PENDING_REASON`] 提示，
+//!   session-approve 按映射缺失 404，见 remote/api.rs）。
 //!
 //! ## 锁纪律（M4，调用点必须遵守）
 //! KV 读取经调用方 `DeviceStore.with` 短临界区：[`load_mappings_conn`] 直用传入
@@ -46,27 +47,44 @@ pub(crate) const KV_KEY: &str = "inject.approve_map";
 /// probe-pending 哨兵：键位未经真实审批提示实测取证（实机取证后回填真实版本号）
 pub const PROBE_PENDING: &str = "probe-pending";
 
+/// 严格档降级原因（M9R Task 10 裁决：未取证不出键）：verified_with 为
+/// [`PROBE_PENDING`] 时 approve-options 端点下发本原因 + available=false（前端
+/// ApproveCard 契约：available=false 且带 reason → 只渲染提示条不渲染按键）
+pub const PROBE_PENDING_REASON: &str = "键位待实测确认，请用普通发送";
+
 /// 默认映射（首批 Claude/Codex，裁决 14 由简到繁）。
-/// **取证状态（Task 13，2026-09-18 Windows 本机实测）**：
-/// - claude ✅ 已取证：真实审批提示原文「Do you want to create t13.txt? / 1. Yes /
-///   2. Yes, and switch to accept edits …(shift+tab) / 3. No / Esc to cancel」
-///   （claude-code 2.1.251，Write 工具触发；注入「1」实测批准生效——文件真实落盘，
-///   证据 mam-probe evidence\T13-claude-*）。markers 命中验证通过，键位 approve="1"
-///   （数字直选）、reject="esc"（Esc to cancel）。
-/// - codex ⚠️ 未取证（probe-pending）：0.154.0 默认 auto 审批模式不产生原生审批框
-///   （工作区写自动放行、越界写转对话式确认），原生键位无法触发；保持 pending，
-///   drift 提示常驻，待 Mac 侧或后续版本取证。
+/// **取证状态（Task 13 + M8R Task 10，Windows 本机实机取证）**：
+/// - claude ✅ 已取证（2.1.251，2026-09-18/09-19 双场景）：Write 工具审批（「Do you want
+///   to create t13.txt? / 1. Yes / …」）注入「1」批准生效，文件真实落盘（Task 13，证据
+///   mam-probe evidence\T13-claude-*）；plan 模式计划批准（「Claude has written up a plan
+///   and is ready to execute. Would you like to proceed?」）注入「1」**数字直选单键即执行**
+///   （plan-test.txt 落盘 + 状态栏转 auto mode on，M8R，证据 mam-probe-m6r
+///   evidence\M8R-approve-claude-*）→ approve="1" 双场景通用，reject="esc"（Write 审批
+///   "Esc to cancel"）；markers 增补 plan 批准标题短语 "would you like to proceed"。
+/// - codex ✅ 已取证（0.154.0，2026-09-19，`/permissions` 切 Read Only 档后工作区写必弹
+///   补丁审批）：弹框原文与源码快照逐字一致（"Would you like to make the following
+///   edits? / › 1. Yes, proceed (y) / 2. … (a) / 3. No, and tell Codex what to do
+///   differently (esc) / Press enter to confirm or esc to cancel"）；注入 y → hello.txt
+///   落盘；注入 VK Esc → world.txt 未落盘 + 对话内拒绝记录（证据 mam-probe-m6r
+///   evidence\M8R-approve-codex-*）→ approve="y"、reject="esc"；markers 换为源码
+///   approval_overlay.rs 弹窗标题短语（窄匹配，替换旧 "approve"/"allow" 宽词）。
+///
+/// 实测差异照实记录：`/permissions` 实机档位序为 Read Only / Ask for approval /
+/// Approve for me / Full Access（与手册 A1 快照序不同），当前高亮为
+/// Ask for approval（非首项，选 Read Only 实注 ↑+Enter 而非 ↓+Enter）。
 const DEFAULT_MAPPINGS_JSON: &str = r#"[
  {"tool":"claude","verified_with":"2.1.251",
-  "prompt_markers":["do you want","would you like","allow this","permission"],
+  "prompt_markers":["do you want","would you like","would you like to proceed","allow this","permission"],
   "options":[{"id":"approve","label":"允许","key":"1"},
              {"id":"reject","label":"拒绝","key":"esc"}]},
- {"tool":"codex","verified_with":"probe-pending",
-  "prompt_markers":["approve","allow","run this command"],
+ {"tool":"codex","verified_with":"0.154.0",
+  "prompt_markers":["would you like to run the following","would you like to make the following","do you want to approve network"],
   "options":[{"id":"approve","label":"允许","key":"y"},
-             {"id":"reject","label":"拒绝","key":"n"}]}
+             {"id":"reject","label":"拒绝","key":"esc"}]}
 ]"#;
-// 「不要再问」（claude 选项 2 等）不入首批表——Task 13 实测取证确认键位后追加
+// 「不要再问」（codex 选项 2 "(a)"、claude shift+tab 放行等）不入首批表——扩展键位待
+// 后续任务实测取证后追加；claude plan 批准框 reject 路径（Esc/选项3）未单独触发，
+// reject="esc" 以 Task 13 Write 审批 "Esc to cancel" 实证为准（结论不超出证据）
 
 /// KV 读取（store 缝版本，远端端点用）：直用调用方 `DeviceStore.with` 短临界区传入的
 /// conn（不自取任何锁，锁内只做这一条 SQL + 纯解析）。生产 `DeviceStore::Global` 即
@@ -230,15 +248,78 @@ mod tests {
         for o in &claude.options {
             assert!(o.id == "approve" || o.id == "reject");
         }
-        // Task 13 取证状态：claude 已实测回填（2.1.251，Windows 本机真实审批提示 +
-        // 「1」键批准生效）；codex 原生审批框未触发保持 pending（drift 提示常驻）
+        // Task 13 + M8R 取证状态：claude/codex 均已实测回填（codex 见
+        // codex_markers_are_source_phrases 的 M8R 专项回归）
         assert_eq!(claude.verified_with, "2.1.251");
         let codex = ms.iter().find(|m| m.tool == "codex").unwrap();
-        assert_eq!(codex.verified_with, PROBE_PENDING);
-        assert!(is_version_drift(&codex.verified_with, "0.154.0"));
+        assert_eq!(codex.verified_with, "0.154.0");
         assert!(!is_version_drift(&claude.verified_with, "2.1.251"));
         assert!(!is_version_drift(&claude.verified_with, "2.1.252")); // patch 漂移不告警
         assert!(is_version_drift(&claude.verified_with, "2.2.0")); // minor 漂移告警
+    }
+
+    /// M8R 取证回归（Task 10，2026-09-19 Windows 本机实机）：codex 默认表 markers 必须是
+    /// 源码 approval_overlay.rs 标题短语（源码 B2 快照 + 实机弹框抄录一致），verified_with
+    /// 回填实机版本（probe-pending 解除），detect 命中实机抄录原文；键位 y/esc 为实机
+    /// 落盘/未落盘双验证（证据 %USERPROFILE%\mam-probe-m6r\evidence\M8R-approve-codex-*）。
+    #[test]
+    fn codex_markers_are_source_phrases() {
+        let ms = load_mappings_from(None);
+        let codex = ms.iter().find(|m| m.tool == "codex").unwrap();
+        assert_eq!(
+            codex.prompt_markers,
+            vec![
+                "would you like to run the following",
+                "would you like to make the following",
+                "do you want to approve network",
+            ],
+            "codex markers 必须恰为源码弹窗标题三短语（窄匹配，替换旧宽词）"
+        );
+        // M8R 实测版本回填（codex-cli 0.154.0，Read Only 档补丁审批取证）；minor 漂移照告警
+        assert_eq!(codex.verified_with, "0.154.0");
+        assert!(!is_version_drift(&codex.verified_with, "0.154.0"));
+        assert!(is_version_drift(&codex.verified_with, "0.155.0"));
+        // detect 命中 M8R 实机抄录原文（补丁/命令/网络三形态标题）
+        assert!(detect(codex, "Would you like to make the following edits?"));
+        assert!(detect(
+            codex,
+            "Would you like to run the following command?"
+        ));
+        assert!(detect(
+            codex,
+            "Do you want to approve network access to \"example.com\"?"
+        ));
+        assert!(!detect(codex, "无关文本"));
+        // M8R 键位验证：y 批准（hello.txt 落盘）/ esc 拒绝（world.txt 未落盘+对话内拒绝记录）
+        assert_eq!(option_by_id(codex, "approve").unwrap().key, "y");
+        assert_eq!(option_by_id(codex, "reject").unwrap().key, "esc");
+    }
+
+    /// M8R 取证回归（Task 10，2026-09-19）：claude markers 含 plan 模式计划批准标题短语
+    /// （实机抄录「Claude has written up a plan and is ready to execute. Would you like to
+    /// proceed?」）；数字直选「1」单键即执行批准（plan-test.txt 落盘实证，证据
+    /// %USERPROFILE%\mam-probe-m6r\evidence\M8R-approve-claude-*）→ approve="1" 既有映射
+    /// 双场景通用，无需增补独立 plan 选项。
+    #[test]
+    fn claude_plan_marker_added() {
+        let ms = load_mappings_from(None);
+        let claude = ms.iter().find(|m| m.tool == "claude").unwrap();
+        assert!(
+            claude
+                .prompt_markers
+                .iter()
+                .any(|mk| mk == "would you like to proceed"),
+            "claude markers 必须含 plan 模式批准标题短语"
+        );
+        // 命中 M8R 实机标题原文（完整句）；既有 Write 审批命中不回归（Task 13 原文）
+        assert!(detect(
+            claude,
+            "Claude has written up a plan and is ready to execute. Would you like to proceed?"
+        ));
+        assert!(detect(claude, "Do you want to create t13.txt?"));
+        // plan 批准键位与 Write 审批同为「1」（数字直选单键执行），reject 仍 esc
+        assert_eq!(option_by_id(claude, "approve").unwrap().key, "1");
+        assert_eq!(option_by_id(claude, "reject").unwrap().key, "esc");
     }
 
     /// 内核三态：None → 默认表；损坏 JSON → 默认表（不 panic 不写回）；合法 → 原样解析

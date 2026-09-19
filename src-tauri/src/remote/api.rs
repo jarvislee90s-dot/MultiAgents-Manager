@@ -1189,12 +1189,18 @@ struct ApproveScanHit {
     verified_with: String,
     /// 工具标识（currentVersion 探测的数据源）
     tool: String,
+    /// 严格档降级原因（M9R Task 10）：verified_with==probe-pending 时下发
+    /// [`crate::inject::approve::PROBE_PENDING_REASON`]（前端 ApproveCard 只渲染提示条）；
+    /// 其余不可批形态（非 Waiting/未命中）不给 reason（前端按自隐处理）
+    reason: Option<String>,
 }
 
 /// 审批选项扫描（同步，spawn_blocking 内调用）：会话快照（数据同源，与看板同一份）→
-/// Waiting 判定 → 映射表（KV 经 store 缝）按工具找映射（tool_id 匹配）→ detect 命中判定。
+/// Waiting 判定 → 映射表（KV 经 store 缝）按工具找映射（tool_id 匹配）→ **严格档判定
+/// （probe-pending 恒不可批，未取证不出键）** → detect 命中判定。
 /// 返回 `None` = 不可批（会话不存在 / 非 Waiting / 无映射——统一 false，不给存在性
-/// 预言机）；`Some` = 映射存在，携带 detect 结果 / 选项表 / verifiedWith / tool。
+/// 预言机）；`Some` = 映射存在，携带 detect 结果 / 选项表 / verifiedWith / tool /
+/// 严格档 reason。
 /// 复合键说明（Task 5 教训）：本端点无 agent_type 入参，快照里按 id 找**第一个**匹配；
 /// id 跨工具撞名时取第一个匹配——契约如此。
 fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<ApproveScanHit> {
@@ -1211,6 +1217,18 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         .with(crate::inject::approve::load_mappings_conn)
         .into_iter()
         .find(|m| m.tool == tool)?;
+    // 严格档（M9R Task 10 裁决：未取证不出键）：probe-pending 映射即使 Waiting+detect
+    // 命中也压为不可批——选项不下发，只给降级原因（前端提示条）；drift 判定照常
+    // （probe-pending 恒判漂移，提示条与 drift 提示并存不冲突）
+    if mapping.verified_with == crate::inject::approve::PROBE_PENDING {
+        return Some(ApproveScanHit {
+            available: false,
+            options: Vec::new(),
+            verified_with: mapping.verified_with,
+            tool,
+            reason: Some(crate::inject::approve::PROBE_PENDING_REASON.to_string()),
+        });
+    }
     let hit = session
         .last_message
         .as_deref()
@@ -1232,6 +1250,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         options,
         verified_with: mapping.verified_with,
         tool,
+        reason: None,
     })
 }
 
@@ -1266,15 +1285,17 @@ pub async fn session_approve_options(
                     .into_response();
             }
         };
-    let (available, options, verified_with, tool) = match scan {
+    let (available, options, verified_with, tool, reason) = match scan {
         Some(hit) => (
             hit.available,
             hit.options,
             hit.verified_with,
             Some(hit.tool),
+            hit.reason,
         ),
-        // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空
-        None => (false, Vec::new(), String::new(), None),
+        // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
+        // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
+        None => (false, Vec::new(), String::new(), None, None),
     };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
     let current_version = match tool.as_deref() {
@@ -1319,6 +1340,9 @@ pub async fn session_approve_options(
             "verifiedWith": verified_with,
             "currentVersion": current_version,
             "drift": drift,
+            // 严格档降级原因（M9R Task 10）：probe-pending 时为中文提示原文，其余 null
+            // （前端 ApproveOptionsView.reason?: string，null 不触发提示条渲染）
+            "reason": reason,
         })),
     )
         .into_response()
@@ -1387,6 +1411,15 @@ pub async fn session_approve(
             .with(crate::inject::approve::load_mappings_conn)
             .into_iter()
             .find(|m| m.tool == tool);
+        // 严格档（M9R Task 10 裁决：未取证不出键）：probe-pending 映射按键位映射缺失
+        // 处理（与无映射同收敛 no_mapping 404，降级提示走普通发送）——未取证键位永不
+        // 经本端点出手
+        if mapping
+            .as_ref()
+            .is_none_or(|m| m.verified_with == crate::inject::approve::PROBE_PENDING)
+        {
+            return Err("no_mapping");
+        }
         let Some(option) =
             mapping.and_then(|m| crate::inject::approve::option_by_id(&m, &probe_opt).cloned())
         else {
