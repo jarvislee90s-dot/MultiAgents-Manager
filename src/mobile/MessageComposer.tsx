@@ -162,6 +162,13 @@ export default function MessageComposer({ session }: MessageComposerProps) {
    *  的条目（桌面端/他端排的队同样可见可操作）。乐观行（发送即时反馈/复核保守
    *  恢复）与权威列表（挂载拉取/3s 轮询）都收敛到这里 */
   const [queueItems, setQueueItems] = useState<QueueItemView[]>([]);
+  /** 本地队列认知最近一次翻转的时刻（T4 复评 I1/M1 时序防御）：发送乐观入队、
+   *  插队送达、撤回确认/404、复核三分支任一落地即前移。tick 快照若**发起**早于
+   *  该时刻，说明它反映的是翻转前的服务端视图——既不可整表覆盖（会抹乐观行 /
+   *  复活已确认出队的幽灵行），也不可据其判 gone（会把「刚入队」误判成已送达，
+   *  唯一条目时更会停摆轮询 → 用户重发 = 重复注入，本项目头号禁忌）。作废一份
+   *  快照的代价 ≤ 3s 自愈，方向一律保守（同毫秒按更旧处理，用 <=） */
+  const queueMutatedAtRef = useRef(0);
   /** 修改重发只入队标志（D6）：「修改」确认出队后置 true，下一次发送携带
    *  queueOnly=true 并清除（消费即清——失败重试不再带标志，回归普通发送语义）。
    *  保守语义：修改后的重发一律入队，用户手动改字不清除标志。入队后的放行节奏：
@@ -215,9 +222,17 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const queueTracked = receipt?.kind === "queued" || queueItems.length > 0;
   useEffect(() => {
     if (!queueTracked) return;
+    // I2：换会话/停轮询触发 effect 重建时置 false——此前会话的在途 tick 响应
+    // 一律作废（旧会话的行不得经无条件 setQueueItems 落入新会话，与挂载 effect
+    // 的 alive 守卫同款）
+    let alive = true;
     const iv = setInterval(() => {
+      // I1：先记快照发起时刻，再发 GET——响应到货时与本地认知翻转时刻比对
+      const issuedAt = Date.now();
       void fetchQueue(session.id)
         .then((items) => {
+          if (!alive) return; // I2：换会话/停轮询后的在途响应作废
+          if (issuedAt <= queueMutatedAtRef.current) return; // I1/M1：早于本地认知翻转的旧快照整份作废（防御见 ref 声明处）
           setQueueItems(items);
           setReceipt((prev) => {
             if (prev?.kind !== "queued") return prev;
@@ -240,7 +255,10 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           /* 单次轮询失败忽略，下轮再试 */
         });
     }, QUEUE_POLL_MS);
-    return () => clearInterval(iv);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
   }, [queueTracked, session.id]);
 
   const injectable = sendInfo !== null && sendInfo.injectable;
@@ -278,6 +296,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       } else if (res.status === "queued") {
         setText("");
         setAttachments([]);
+        // I1：本地「该条在队」认知自此成立——此前发起的在途 tick 快照可能不含
+        // 本条，不得据此判 gone / 整表覆盖（时序防御见 queueMutatedAtRef 声明处）
+        queueMutatedAtRef.current = Date.now();
         setReceipt({
           kind: "queued",
           itemId: res.itemId,
@@ -324,6 +345,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         const items = await fetchQueue(session.id);
         const mine = items.find((i) => i.id === itemId);
         if (mine) {
+          // 复核快照是点击时刻之后的服务端视图，比此前在途的 tick 更具新：落地即
+          // 前移认知时刻，作废可能显示「不在队」的旧 tick（防假 gone）
+          queueMutatedAtRef.current = Date.now();
           setReceipt({
             kind: "queued",
             itemId,
@@ -339,10 +363,14 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             })
           );
         } else {
+          // 确认不在队同理前移：此后到货的旧 tick 快照仍显示在队 → 不得复活幽灵行
+          queueMutatedAtRef.current = Date.now();
           setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
           onGone();
         }
       } catch {
+        // 保守恢复也是一次本地认知落地（「该条仍在队」）：同样作废此前在途旧快照
+        queueMutatedAtRef.current = Date.now();
         setReceipt({ kind: "queued", itemId, position: prevPosition, content: prevContent });
         setQueueItems((prev) =>
           prev.some((i) => i.id === itemId)
@@ -369,6 +397,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       try {
         const j = await queueJump(session.id, itemId);
         if (j.status === "delivered") {
+          // 本地认知翻转：该条已出队（时序防御见 queueMutatedAtRef 声明处）
+          queueMutatedAtRef.current = Date.now();
           setReceipt({ kind: "delivered" });
           // 立即发送成功 = 条目已出队：行即时移除（3s 轮询权威列表随后兜底）
           setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
@@ -406,7 +436,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         const r = await queueRetract(session.id, itemId);
         if ("ok" in r) {
           /* 服务端确认已撤（{ok:true}）：免复核，直接收敛（评审必须1——撤回目的已达成）；
-             行同步移除（快路径不拉队列，列表即权威呈现） */
+             行同步移除（快路径不拉队列，列表即权威呈现）。本地认知翻转前移，作废
+             可能仍显示在队的在途旧快照（M1：防幽灵行复活） */
+          queueMutatedAtRef.current = Date.now();
           setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
           onConfirmed();
         } else {
@@ -420,7 +452,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
           /* 404 not_found（已送达 / 他端撤回）：条目已不在队 → 中性收敛（不作失败
-             提示），行同步移除 */
+             提示），行同步移除；本地认知翻转前移（同 M1 防幽灵行） */
+          queueMutatedAtRef.current = Date.now();
           setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
           setReceipt({ kind: "gone", message: GONE_RETRACT_MESSAGE });
         } else {
@@ -575,9 +608,11 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           </span>
         </div>
       )}
-      {/* 单回执槽（D8 起只保留最近一次发送的终态）：delivered/submitted/failed/gone；
-          queued 态不再渲染 chip（由下方多列队列表取代），回执状态本身保留——发送后
-          到列表刷新之间的乐观行、失败对账与 3s 轮询仍以其驱动 */}
+      {/* 单回执槽（T4 复评 M3 语义对齐）：保留**最近一次队列操作**的终态——本端
+          发送，或对任意行（含他端排队条目）的立即发送/修改/撤回：
+          delivered/submitted/failed/gone。queued 态不再渲染 chip（由下方多列队
+          列表取代），回执状态本身保留——乐观行即时反馈、失败对账与 3s 轮询仍以
+          其驱动 */}
       {receipt !== null && receipt.kind !== "queued" && (
         <div className="mb-2 flex flex-wrap items-center gap-2">
           {receipt.kind === "delivered" && (

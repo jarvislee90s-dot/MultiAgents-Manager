@@ -37,6 +37,8 @@ interface Routes {
   retractBusy?: boolean;
   /** 队列列表 /session-queue 拉取网络层异常（复核失败场景） */
   queueReject?: boolean;
+  /** 队列列表挂起不响应（T4 复评 I1/I2 时序窗：在途 tick 快照由 releaseQueue 手动放行） */
+  queueHang?: boolean;
   /** 附件上传（2026-09-20）：成功载荷 / 413·404 等非 2xx 状态 */
   attach?: { path: string; size: number };
   attachStatus?: number;
@@ -51,11 +53,14 @@ let fetchMock: ReturnType<typeof vi.fn>;
 let releaseSend: ((r: Response) => void) | null = null;
 /** attachHang 挂起请求的放行器（上传中禁发测试用） */
 let releaseAttach: ((r: Response) => void) | null = null;
+/** queueHang 挂起请求的放行器（在途 tick 快照时序窗测试用） */
+let releaseQueue: ((r: Response) => void) | null = null;
 
 beforeEach(() => {
   routes = {};
   releaseSend = null;
   releaseAttach = null;
+  releaseQueue = null;
 });
 afterEach(() => {
   cleanup();
@@ -113,6 +118,11 @@ function installFetch() {
       );
     }
     if (url.includes("/session-queue")) {
+      if (routes.queueHang) {
+        return new Promise<Response>((resolve) => {
+          releaseQueue = resolve;
+        });
+      }
       if (routes.queueReject) throw new TypeError("queue 网络断开（模拟复核失败）");
       return new Response(JSON.stringify({ items: routes.queue ?? [] }), { status: 200 });
     }
@@ -1103,5 +1113,112 @@ describe("多列队 UI（D8）：单回执槽独立性", () => {
     fireEvent.click(screen.getByTestId("composer-send"));
     expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
     expect(screen.getByTestId("queue-row-22")).toBeTruthy();
+  });
+});
+
+// ==== T4 复评（I1/M1/I2）：轮询在途快照的时序防御 ====
+// 时序窗模拟：queueHang 让 tick GET 挂起 → 本地做一次认知翻转（入队/撤回/换会话）
+// → releaseQueue 放行「早于翻转发起」的旧快照，验证其被整份作废。
+describe("多列队 UI（D8）复评：在途 tick 快照时序防御", () => {
+  it("I1 发送入队后，早于入队发起的在途 tick 快照到货 → 整份作废：乐观行不抹、不假收敛 gone、轮询不停摆", async () => {
+    vi.useFakeTimers();
+    installFetch();
+    routes.info = sendInfo();
+    // 挂载即有既有条目（先让轮询转起来，才能制造「早于入队发出的 GET」）
+    routes.queue = [queueItem({ id: 9, position: 1, content: "既有条目" })];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await flushAsync(); // 挂载拉取落地 → 列表 [9]，轮询启动
+    routes.queueHang = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000); // tick1 GET 发出并挂起（早于下面的入队）
+    });
+    // tick1 在途期间发送入队：乐观行 X 上板，本地「X 在队」认知成立（晚于 tick1 发起）
+    routes.send = { status: "queued", itemId: 7, position: 2 };
+    routes.queueHang = false;
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "新入队条目" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await flushAsync();
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
+    // 放行 tick1 的旧快照：不含 X（入队前的服务端视图）→ 整份作废——
+    // 不抹乐观行、不落假 gone（否则 X 实际仍在队、转闲会被 flush，用户重发=重复注入）
+    await act(async () => {
+      releaseQueue!(
+        new Response(JSON.stringify({ items: [queueItem({ id: 9, position: 1 })] }), {
+          status: 200,
+        })
+      );
+    });
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
+    expect(screen.queryByTestId("send-receipt-gone")).toBeNull();
+    expect(screen.getByTestId("queue-row-9")).toBeTruthy(); // 旧视图未整表覆盖回退
+    // 下一轮（晚于入队发起）的快照正常应用：权威列表上板、轮询自愈未停摆
+    routes.queue = [
+      queueItem({ id: 9, position: 1, content: "既有条目" }),
+      queueItem({ id: 7, position: 2, content: "新入队条目" }),
+    ];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByTestId("queue-position-7").textContent).toBe("第2位");
+  });
+
+  it("I1/M1 撤回确认出队后，早于撤回发起的在途 tick 快照到货 → 不复活幽灵行", async () => {
+    vi.useFakeTimers();
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [queueItem({ id: 7, position: 1, content: "待撤条目" })];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await flushAsync(); // 挂载拉取 → 行 7 在列，轮询启动
+    routes.queueHang = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000); // tick1 GET 发出并挂起（早于撤回）
+    });
+    // 撤回确认（{ok:true} 快路径）：行移除 + 本地「该条不在队」认知成立
+    routes.queueHang = false;
+    fireEvent.click(within(screen.getByTestId("queue-row-7")).getByTestId("queue-retract"));
+    await flushAsync();
+    expect(screen.queryByTestId("queue-row-7")).toBeNull();
+    // 放行 tick1 旧快照（仍显示该条在队）→ 作废，幽灵行不得复活
+    await act(async () => {
+      releaseQueue!(
+        new Response(
+          JSON.stringify({ items: [queueItem({ id: 7, position: 1, content: "待撤条目" })] }),
+          { status: 200 }
+        )
+      );
+    });
+    expect(screen.queryByTestId("queue-row-7")).toBeNull();
+  });
+
+  it("I2 换会话时在途 tick 响应到货 → 旧会话的行不落入新会话（alive 会话换防）", async () => {
+    vi.useFakeTimers();
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [queueItem({ id: 9, position: 1, content: "旧会话的队列条目" })];
+    const view = render(<MessageComposer session={{ id: "sess-1" }} />);
+    await flushAsync(); // sess-1 挂载拉取 → [9]，轮询启动
+    routes.queueHang = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000); // sess-1 的 tick GET 发出并挂起
+    });
+    // 换会话：旧 tick effect 清理（alive=false）+ sess-2 挂载拉取（空列表）
+    routes.queueHang = false;
+    routes.queue = [];
+    view.rerender(<MessageComposer session={{ id: "sess-2" }} />);
+    await flushAsync(); // sess-2 的 send-info + 挂载队列拉取落地（微任务冲刷，假定时器下不用 findBy）
+    expect(screen.getByTestId("composer-input")).toBeTruthy(); // sess-2 渲染就绪（断言才有意义）
+    // 放行 sess-1 的在途 tick 快照（含旧会话条目）→ alive 守卫作废，不落入 sess-2
+    await act(async () => {
+      releaseQueue!(
+        new Response(
+          JSON.stringify({
+            items: [queueItem({ id: 9, position: 1, content: "旧会话的队列条目" })],
+          }),
+          { status: 200 }
+        )
+      );
+    });
+    expect(screen.queryByTestId("queue-row-9")).toBeNull();
+    expect(screen.queryByTestId("queue-list")).toBeNull();
   });
 });
