@@ -121,7 +121,8 @@ export default function BookmarkBar({
         </span>
 
         {/* 过程折叠开关（2026-09-20）：行最右；一键收起/展开思考与工具调用。
-            allCollapsed 时按钮动作变为全部展开（图标随之切换） */}
+            带文字按钮（2026-09-20 用户反馈：纯图标功能不明显）——文字跟随状态：
+            展开态显示「过程折叠」（点击收起），全折叠态显示「过程展开」（点击展开） */}
         {processToggle && (
           <button
             type="button"
@@ -134,9 +135,14 @@ export default function BookmarkBar({
                 : "折叠全部过程（思考/工具调用）"
             }
             onClick={processToggle.onToggle}
-            className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+            className={`flex shrink-0 items-center gap-0.5 rounded-full px-2 py-0.5 text-xs ${
+              processToggle.allCollapsed
+                ? "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"
+                : "bg-slate-200 text-slate-600 hover:bg-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+            }`}
           >
-            {processToggle.allCollapsed ? <UnfoldVertical size={14} /> : <FoldVertical size={14} />}
+            {processToggle.allCollapsed ? <UnfoldVertical size={13} /> : <FoldVertical size={13} />}
+            {processToggle.allCollapsed ? "过程展开" : "过程折叠"}
           </button>
         )}
       </div>
