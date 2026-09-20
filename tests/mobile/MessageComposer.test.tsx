@@ -595,8 +595,9 @@ describe("修改重发只入队（D6）", () => {
     fireEvent.click(screen.getByTestId("queue-edit"));
     await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
     expect((input as HTMLTextAreaElement).value).toBe("跑个长任务");
-    // 用户手动改字不清除标志（保守语义：修改后的重发一律入队；真空闲时后端
-    // flush 循环 ≤1s 转闲按序自动放行，行为收敛）
+    // 用户手动改字不清除标志（保守语义：修改后的重发一律入队）。入队后的放行
+    // 节奏：会话转闲跃迁后事件臂即时放行；已空闲且无跃迁时由 60s 周期兜底放行
+    // （可达分钟级）
     fireEvent.change(input, { target: { value: "改好的重发" } });
     routes.send = { status: "queued", itemId: 9, position: 1 };
     fireEvent.click(screen.getByTestId("composer-send"));
@@ -644,6 +645,52 @@ describe("修改重发只入队（D6）", () => {
     expect(sendCalls()).toHaveLength(3);
     const third = JSON.parse(String((sendCalls()[2][1] as RequestInit).body));
     expect("queueOnly" in third).toBe(false);
+  });
+
+  it("session_switch_drops_flag：换会话（同组件 rerender）即弃修改标志 → 新会话首条普通发送不含 queueOnly", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    const view = render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "旧会话排队" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-queued");
+    // 修改确认出队 → 标志置位（正文放回输入框）
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("旧会话排队");
+    // 同组件换会话：queueOnlyNext 随 session.id effect 复位——旧会话「修改」的
+    // 遗愿不得泄漏为新会话首条发送的入队意图
+    view.rerender(<MessageComposer session={{ id: "sess-2" }} />);
+    const input2 = await screen.findByTestId("composer-input"); // send-info 重拉后重新就绪
+    routes.send = { status: "delivered" };
+    fireEvent.change(input2, { target: { value: "新会话首条" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+    expect(sendCalls()).toHaveLength(2);
+    const body = JSON.parse(String((sendCalls()[1][1] as RequestInit).body));
+    expect("queueOnly" in body).toBe(false);
+    expect(body).toEqual({ sessionId: "sess-2", text: "新会话首条" });
+  });
+
+  it("edit_busy_failure_does_not_arm_flag：修改忙时失败（复核条目仍在队）→ 不置标志，随后的新文本发送不含 queueOnly", async () => {
+    routes.retractBusy = true; // 忙时拒收：条目未被撤、仍在队
+    routes.queue = [queueItem({ id: 7, position: 1, content: "跑个长任务" })];
+    const input = await sendIntoQueued("跑个长任务");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    // 复核条目仍在队 → 排队视图恢复、正文不放回（onConfirmed 未触发 → 标志未置位）
+    await waitFor(() => expect(queueListCalls()).toBeGreaterThan(0));
+    expect(screen.getByTestId("send-receipt-queued")).toBeTruthy();
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
+    // 随后输入全新文本发送：这是未经修改确认的普通发送，不得携带入队标志
+    routes.send = { status: "delivered" };
+    fireEvent.change(input, { target: { value: "全新消息" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+    expect(sendCalls()).toHaveLength(2);
+    const body = JSON.parse(String((sendCalls()[1][1] as RequestInit).body));
+    expect("queueOnly" in body).toBe(false);
   });
 });
 

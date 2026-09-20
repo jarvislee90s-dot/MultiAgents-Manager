@@ -22,7 +22,8 @@
 //   回执的 last-write-wins 竞态防线（按钮可见不可点，保持「不失联」意图）；
 // - 修改重发只入队（D6，验收问题 #4）：「修改」确认出队后置 queueOnlyNext 标志，
 //   下一次发送携带 queueOnly=true 强制入队——防「文件说闲、TUI 实忙」窗口把
-//   修改后的重发直发出去（变相插队）；真空闲时 flush 循环 ≤1s 自动放行，行为收敛；
+//   修改后的重发直发出去（变相插队）；入队后的放行节奏：会话转闲跃迁后事件臂
+//   即时放行，已空闲且无跃迁时由 60s 周期兜底放行（可达分钟级），行为收敛；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent } from "react";
@@ -112,9 +113,10 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const [receipt, setReceipt] = useState<Receipt>(null);
   /** 修改重发只入队标志（D6）：「修改」确认出队后置 true，下一次发送携带
    *  queueOnly=true 并清除（消费即清——失败重试不再带标志，回归普通发送语义）。
-   *  保守语义：修改后的重发一律入队，用户手动改字不清除标志；若会话真空闲，
-   *  flush 循环 ≤1s 转闲即按序自动放行，行为收敛不丢时效。队列存储不携带该
-   *  标志（后端仅影响入队决策，flush 循环对 queueOnly 项与普通队列项同权） */
+   *  保守语义：修改后的重发一律入队，用户手动改字不清除标志。入队后的放行节奏：
+   *  会话转闲跃迁后事件臂即时放行；已空闲且无跃迁时由 60s 周期兜底放行（可达
+   *  分钟级）。队列存储不携带该标志（后端仅影响入队决策，flush 循环对
+   *  queueOnly 项与普通队列项同权） */
   const [queueOnlyNext, setQueueOnlyNext] = useState(false);
 
   // 挂载拉取一次输入区可用性；任何失败静默保持隐藏
