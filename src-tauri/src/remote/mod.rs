@@ -219,6 +219,8 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // R5 一键 resume spawn 缝（Task 11）：生产 = 真 spawn 终端（wt / conhost /
         // macOS AppleScript）；session-open 端点消费
         resume_spawner: std::sync::Arc::new(crate::inject::resume::spawn_terminal),
+        archive_source: Box::new(crate::database::query_archive_all),
+        archive_delete: std::sync::Arc::new(crate::database::delete_archive),
         // A1 写入确认缝（M9R Task 5）：生产 = 会话消息读路径查 24 字符尾戳（与
         // /session-messages 数据同源；读失败 = 未命中，诚实口径）。生产装配无法
         // 捕获自身 Arc（与 injector 缝同构），故闭包内直调读路径——确认器「可插拔」

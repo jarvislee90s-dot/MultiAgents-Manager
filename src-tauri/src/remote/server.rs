@@ -237,6 +237,10 @@ pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send 
 /// [`ViaHostsSource`] 先例）：参数 = (tool, session_id, stamp)。
 pub type ConfirmProbeFn = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
 
+/// 归档删除缝类型（spec §6.1，clippy type_complexity 收敛别名，对齐
+/// [`ConfirmProbeFn`] 先例）：参数 = None（全删）| Some(session_id)。
+pub type ArchiveDeleteFn = dyn Fn(Option<&str>) -> usize + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -286,6 +290,11 @@ pub struct RemoteState {
     /// （真开窗）；测试注入记录型假 spawner（零真开窗）。消费方：session-open 端点
     /// （inject::resume::open_session_terminal_with 的 spawner 参数）
     pub resume_spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
+    /// 归档读源注入缝（spec §6.1）：生产 = database::query_archive_all（全量行，
+    /// 窗口/排除在端点内做）；测试注入固定行集（零真实 ~/.mam 接触）
+    pub archive_source: Box<dyn Fn() -> Vec<crate::database::SessionArchiveRow> + Send + Sync>,
+    /// 归档删除缝：生产 = database::delete_archive；测试记录型假体返回计数
+    pub archive_delete: std::sync::Arc<ArchiveDeleteFn>,
     /// A1 写入确认缝（M9R Task 5）：参数 = (tool, session_id, stamp)。生产 =
     /// 会话消息读路径查 24 字符尾戳（与 /session-messages 数据同源；读失败 =
     /// 未命中，诚实口径）；测试恒 true（确认失败用例就地覆盖恒 false）。
@@ -332,6 +341,11 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // M6R–M9R Task 11：一键 resume 端点（R5，PIN 门禁内层 gate 结构性覆盖，
         // 新端点不需要各自鉴权代码；spawn 缝注入使测试零真开窗）
         .route("/session-open", post(api::session_open))
+        // 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）：懒加载列表 + 手动管理
+        .route(
+            "/sessions-archived",
+            get(api::sessions_archived).delete(api::sessions_archived_delete),
+        )
         // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
         // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
         // 内层 fallback 403）
@@ -424,6 +438,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| {
@@ -966,6 +982,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
@@ -1335,6 +1353,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| {
@@ -1426,6 +1446,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -1625,6 +1647,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -1902,6 +1926,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -2043,6 +2069,8 @@ mod tests {
                 injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
                 // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
                 resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+                archive_source: Box::new(Vec::new),
+                archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
                 // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                 confirm_probe: std::sync::Arc::new(|_, _, _| true),
                 host_source: Box::new(|| serde_json::Value::Null),
@@ -2596,6 +2624,8 @@ mod tests {
                     resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| {
                         Ok(())
                     }),
+                    archive_source: Box::new(Vec::new),
+                    archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
                     // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                     confirm_probe: std::sync::Arc::new(|_, _, _| true),
                     host_source: Box::new(|| serde_json::Value::Null),
@@ -2850,6 +2880,8 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -3039,6 +3071,8 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
@@ -4384,6 +4418,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             resume_spawner: spawner,
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
@@ -4650,5 +4686,138 @@ mod tests {
             "审计必须 failed: 前缀且携带授权指引：{}",
             audits[0].result
         );
+    }
+
+    // ==== 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）====
+    mod archive_api_tests {
+        use super::*;
+        use crate::database::SessionArchiveRow;
+
+        fn arch_row(id: &str, tool: &str, proj: &str, seen_secs_ago: i64) -> SessionArchiveRow {
+            let seen = (chrono::Utc::now() - chrono::Duration::seconds(seen_secs_ago)).to_rfc3339();
+            SessionArchiveRow {
+                session_id: id.into(),
+                agent_type: tool.into(),
+                project_path: format!("/tmp/{proj}"),
+                project_name: proj.into(),
+                title: Some("标题".into()),
+                last_status: "idle".into(),
+                first_seen: seen.clone(),
+                last_seen: seen,
+                updated_at: String::new(),
+            }
+        }
+
+        fn archive_state(rows: Vec<SessionArchiveRow>) -> axum::Router {
+            // test_state() 返回 Arc<RemoteState>（引用计数 1、无他持）——Arc::get_mut
+            // 就地换缝（比整份 RemoteState 字面量轻 30+ 行；本文件既有测试均为全字面量
+            // 构造，此处引入 get_mut 模式属新写法，注释留痕）
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.archive_delete = std::sync::Arc::new(|_| 0);
+            // 简报原始形态无凭据——新路由结构性在 PIN gate 之后（nest 内层），
+            // 与全文件先例一致：persist_device 播种 + req 带 cookie 过闸（评审追记）
+            persist_device(&st, "arch");
+            crate::remote::server::router(st)
+        }
+
+        #[tokio::test]
+        async fn days_window_and_order() {
+            let app = archive_state(vec![
+                arch_row("fresh", "codex", "a", 3600),     // 1h 前 → 1 天窗内
+                arch_row("old2d", "kimi", "b", 2 * 86400), // 2 天前 → 仅 3/7 天窗
+            ]);
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived?days=1",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = v["archived"].as_array().unwrap();
+            assert_eq!(arr.len(), 1);
+            assert_eq!(arr[0]["sessionId"], "fresh");
+            let projects = v["projects"].as_array().unwrap();
+            assert_eq!(projects, &[serde_json::Value::from("a")]); // 窗口内项目聚合
+        }
+
+        #[tokio::test]
+        async fn days_invalid_clamped_to_one() {
+            let app = archive_state(vec![arch_row("old2d", "kimi", "b", 2 * 86400)]);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived?days=999",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["archived"].as_array().unwrap().len(), 0); // 夹到 1 天 → 排除
+        }
+
+        #[tokio::test]
+        async fn live_session_excluded_from_archive() {
+            let rows = vec![
+                arch_row("live-1", "codex", "a", 60),
+                arch_row("dead-1", "kimi", "b", 120),
+            ];
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.archive_delete = std::sync::Arc::new(|_| 0);
+            // 活板快照注入：session_source 类型 = Box<dyn Fn() -> SessionsResponse>
+            // （server.rs:242）；inj_sess 四参夹具（server.rs:2760，id/agent_type/pid/status）
+            s.session_source = Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![inj_sess(
+                    "live-1",
+                    crate::session::AgentType::Codex,
+                    1,
+                    crate::session::SessionStatus::Waiting,
+                )],
+                total_count: 1,
+                waiting_count: 0,
+            });
+            persist_device(&st, "arch");
+            let app = crate::remote::server::router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = v["archived"].as_array().unwrap();
+            assert_eq!(arr.len(), 1);
+            assert_eq!(arr[0]["sessionId"], "dead-1");
+        }
+
+        #[tokio::test]
+        async fn delete_requires_param() {
+            let app = archive_state(vec![]);
+            let r = app
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400);
+        }
     }
 }

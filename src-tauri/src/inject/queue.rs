@@ -660,6 +660,8 @@ mod tests {
             confirm_probe,
             // R5 一键 resume spawn 缝（Task 11）：flush 路径不消费，注 no-op 桩（零真开窗）
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
         }
     }
 

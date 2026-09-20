@@ -1567,6 +1567,139 @@ pub async fn session_approve(
     }
 }
 
+// ==== 历史会话区端点（spec 2026-09-20-mobile-archive-history §6.1）====
+
+/// GET /sessions-archived 响应条目（camelCase）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedSessionDto {
+    pub session_id: String,
+    pub agent_type: String,
+    pub project_path: String,
+    pub project_name: String,
+    pub title: Option<String>,
+    pub last_status: String,
+    pub last_seen_at: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionsArchivedResp {
+    pub archived: Vec<ArchivedSessionDto>,
+    pub projects: Vec<String>,
+}
+
+/// GET /m/api/v1/sessions-archived?days=1|3|7：懒加载归档列表。
+/// days 非法夹取 1；活板同 id 查期排除（不删行）；last_seen 降序；
+/// projects = 结果集内 distinct 项目名按该项目最大 last_seen 降序（下拉选项源）。
+/// 时间比较一律 parse_from_rfc3339 解析后比（不裸串比较）；畸形时间行防御性排除。
+pub async fn sessions_archived(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let days = match params.get("days").and_then(|s| s.parse::<i64>().ok()) {
+        Some(3) => 3,
+        Some(7) => 7,
+        _ => 1,
+    };
+    let st2 = st.clone();
+    let resp = tokio::task::spawn_blocking(move || {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+        let live_ids: std::collections::HashSet<String> = (st2.session_source)()
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        let mut items: Vec<(chrono::DateTime<chrono::Utc>, ArchivedSessionDto)> =
+            (st2.archive_source)()
+                .into_iter()
+                .filter_map(|row| {
+                    if live_ids.contains(&row.session_id) {
+                        return None;
+                    }
+                    let seen = chrono::DateTime::parse_from_rfc3339(&row.last_seen)
+                        .ok()?
+                        .with_timezone(&chrono::Utc);
+                    if seen < cutoff {
+                        return None;
+                    }
+                    Some((
+                        seen,
+                        ArchivedSessionDto {
+                            session_id: row.session_id,
+                            agent_type: row.agent_type,
+                            project_path: row.project_path,
+                            project_name: row.project_name,
+                            title: row.title,
+                            last_status: row.last_status,
+                            last_seen_at: row.last_seen,
+                        },
+                    ))
+                })
+                .collect();
+        items.sort_by_key(|b| std::cmp::Reverse(b.0));
+        // 项目聚合：distinct 项目名，按该项目条目最大 last_seen 降序
+        let mut best: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
+        for (seen, dto) in &items {
+            match best.iter_mut().find(|(n, _)| *n == dto.project_name) {
+                Some(e) => {
+                    if e.1 < *seen {
+                        e.1 = *seen;
+                    }
+                }
+                None => best.push((dto.project_name.clone(), *seen)),
+            }
+        }
+        best.sort_by_key(|b| std::cmp::Reverse(b.1));
+        SessionsArchivedResp {
+            archived: items.into_iter().map(|(_, dto)| dto).collect(),
+            projects: best.into_iter().map(|(n, _)| n).collect(),
+        }
+    })
+    .await;
+    match resp {
+        Ok(r) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            axum::Json(r),
+        )
+            .into_response(),
+        Err(e) => {
+            log::error!("sessions-archived 任务异常: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// DELETE /m/api/v1/sessions-archived?session_id=… 或 ?all=1：手动管理
+/// （spec 裁决 8：只增不删+手动）。归档管理不写 write_audit（W5 词表为注入动作域）。
+pub async fn sessions_archived_delete(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let all = params.get("all").map(|v| v == "1").unwrap_or(false);
+    let sid = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if !all && sid.is_none() {
+        return bad_request();
+    }
+    let target: Option<String> = if all { None } else { sid };
+    let deleted = (st.archive_delete)(target.as_deref());
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "ok": true, "deleted": deleted })),
+    )
+        .into_response()
+}
+
 // ==== M6R–M9R Task 11：一键 resume 端点（R5，B 兜底可见性半部）====
 // 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写路径）：
 //   POST /session-open body {sessionId} → 200 {"status":"opening"}
