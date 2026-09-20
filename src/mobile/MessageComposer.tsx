@@ -2,7 +2,10 @@
 // - 可用性：挂载拉取一次 /session-send-info；不可注入 → 输入区禁用 + reason 展示；
 //   拉取失败（网络异常等）静默不渲染——详情页正文照常（与 fetchSessionFiles
 //   静默降级同一惯例），403 设备失效同语境（上层会回配对页）；
-// - 发送：POST /session-send 三态回执 chip——delivered 绿「已送达终端」/ queued 黄
+// - 发送：POST /session-send 回执 chip——delivered 绿「已送达终端」/ submitted 灰
+//   「已投递至终端输入，agent 空闲后处理（未确认落盘）」（D7/T3 中性回执，验收
+//   问题 #5：注入 Ok + 戳未中 + 屏读无滞留草稿 = 已被 TUI 收进内部队列，非失败
+//   **不提供重试**，重试 = 双发且 TUI 那份无法撤回）/ queued 黄
 //   「排队中 第 N 位」+ [立即发送][撤回] / failed 红「发送失败：…」（重按发送即重试）；
 //   await 全程另有「投递中…」chip（灰3：慢消费者长文投递可达分钟级，界面不空白，
 //   完成后被结果 chip 覆盖）；正文上限与后端 MAX_SEND_CHARS 对齐（10000，双保险）；
@@ -60,6 +63,11 @@ type PendingAttachment = {
 
 type Receipt =
   | { kind: "delivered" }
+  | {
+      /** D7/T3 中性回执（验收问题 #5）：已投递未确认——消息已被 TUI 收进内部
+       *  队列，非失败、无重试入口（重试 = 双发且 TUI 那份无法撤回） */
+      kind: "submitted";
+    }
   | {
       kind: "queued";
       itemId: number;
@@ -199,6 +207,13 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         setText("");
         setAttachments([]);
         setReceipt({ kind: "delivered" });
+      } else if (res.status === "submitted") {
+        // D7/T3 中性回执：注入 Ok + 戳未中 + 屏读无滞留草稿 = 已被 TUI 收进内部
+        // 队列。消息已离开前端 → 输入框/附件清空对齐 delivered 口径；不提供重试
+        // （TUI 那份无法撤回，重按发送 = 双发——可重试语义仅属于 failed 态）
+        setText("");
+        setAttachments([]);
+        setReceipt({ kind: "submitted" });
       } else if (res.status === "queued") {
         setText("");
         setAttachments([]);
@@ -458,6 +473,17 @@ export default function MessageComposer({ session }: MessageComposerProps) {
               className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-400"
             >
               已送达终端
+            </span>
+          )}
+          {receipt.kind === "submitted" && (
+            // D7/T3 中性回执（非确认成功亦非失败）：已投递未确认——agent 空闲后
+            // 处理 TUI 内部队列里的消息；配色与 gone 同族（中性 slate），不带
+            // 「（可重试）」——该语义仅属于 failed 态，出现在此会诱导双发
+            <span
+              data-testid="send-receipt-submitted"
+              className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
+            >
+              已投递至终端输入，agent 空闲后处理（未确认落盘）
             </span>
           )}
           {receipt.kind === "queued" && (

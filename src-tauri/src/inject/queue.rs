@@ -51,7 +51,7 @@ fn is_input_ready_str(wire: &str) -> bool {
 }
 
 /// 单次投递结论（[`try_flush`] 的产出，[`settle`] 按此落账；P1-4 起同时是投递内核
-/// 的对外回执——端点按态精确映射 delivered/queued/failed）。
+/// 的对外回执——端点按态精确映射 delivered/submitted/queued/failed）。
 /// 可见性说明：`pub fn flush_one` 的返回类型必须同级可见（private_interfaces 门禁），
 /// 故自 Task 5 的 `pub(crate)` 收宽为 `pub`——裸枚举无泄露面（变体载荷只有 String）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,8 +59,15 @@ pub enum FlushOutcome {
     /// 注入成功且 A1 确认通过（直发=会话文件戳命中；插队=占用排空/best-effort）：
     /// mark_sent + 审计（action=flush|jump, result=ok）
     Sent,
-    /// 注入失败或 A1 确认失败（直发未确认含屏读回查仍未见戳）：mark_failed +
-    /// 审计（action=fail, result=failed:e）——确认失败才回失败回执，重试由用户判断
+    /// 注入成功 + 戳未中 + 屏读**无滞留草稿**（D7/T3 确认判据收紧）：消息已被 TUI
+    /// 收进内部队列 = **已投递未确认**（中性非失败）——mark_sent 消费（行退出
+    /// pending：消息已在 TUI 手里，flush 循环重投即双发）+ 审计
+    /// （action=flush, result=unconfirmed，与确认送达 ok / 确认失败 failed:e 三分，
+    /// 不冒充成功也不冒充失败）。**不提供重试**（TUI 那份无法撤回，重试 = 双发）
+    Submitted,
+    /// 注入失败或 A1 确认失败（滞留 + 补回车失败 / 补回车后 3s 仍未见戳——真失败，
+    /// D7/T3 后「非滞留」不再归本态）：mark_failed + 审计（action=fail,
+    /// result=failed:e）——防重警示文案保留，重试由用户判断
     Failed(String),
     /// 快照中无此会话（红·中断挂起，W2）：不消费不落账
     Suspended,
@@ -82,9 +89,11 @@ pub enum FlushOutcome {
 ///   复核（裁决 12 插队语义：运行中 TUI 把消息放进自身输入缓冲，用户显式要求即刻送达）；
 /// - 注入按族规格走 `locate_and_inject_spec`（spec = `families::family_for`，无族
 ///   回退 [`families::FALLBACK_SPEC`]——Task 3 trait 扩展正是为这里）；
-/// - **A1 分层写入确认（M9R Task 5，注入成功 ≠ 已送达）**：注入 Ok 后按 jump 分派
-///   ——直发以会话文件戳命中定「已送达」（超时走屏读回查：滞留判定 → 补按回车 →
-///   复查）；插队以占用排空确认（屏读 best-effort）。确认失败才 [`FlushOutcome::Failed`]；
+/// - **A1 分层写入确认（M9R Task 5，注入成功 ≠ 已送达）+ D7/T3 三态分诊**：注入 Ok
+///   后按 jump 分派——直发以会话文件戳命中定「已送达」（超时走屏读回查：滞留判定
+///   → 补按回车 → 复查，并按屏读结果分诊——非滞留 = Submitted 已投递未确认中性；
+///   滞留补回车失败 / 复查未中 = Failed）；插队以占用排空确认（屏读 best-effort）。
+///   真失败才 [`FlushOutcome::Failed`]；
 /// - content 已在入队时 compose 完毕（Task 6），flush 直发
 pub(crate) fn try_flush(
     st: &crate::remote::server::RemoteState,
@@ -122,27 +131,35 @@ pub(crate) fn try_flush_with(
         .injector
         .locate_and_inject_spec(session.pid, &item.content, &spec)
     {
-        Err(e) => Err(e),
+        // 注入失败短路确认（时序锁语义）：确认只在注入成功后起跑
+        Err(e) => super::confirm::DirectReceipt::Failed(e),
         Ok(()) => {
             if jump {
-                super::confirm::await_jump_receipt(st, &session, &item.content)
+                match super::confirm::await_jump_receipt(st, &session, &item.content) {
+                    Ok(()) => super::confirm::DirectReceipt::Confirmed,
+                    Err(e) => super::confirm::DirectReceipt::Failed(e),
+                }
             } else {
-                // timeout 同源下发（spec）；确认失败文案按「工具 × 平台」感知
-                // （F2：families::macos_enter_swallowed 投影表，mac-reverify §四-B）
+                // timeout 同源下发（spec）；确认结论为 D7/T3 三态分诊（非滞留 =
+                // Submitted 中性；滞留补回车后命中 = Confirmed；其余 = Failed），
+                // 失败文案按「工具 × 平台」感知（F2：families::macos_enter_swallowed
+                // 投影表，mac-reverify §四-B）
                 super::confirm::await_direct_receipt(st, &session, &item.content, confirm_timeout)
             }
         }
     };
     match receipt {
-        Ok(()) => FlushOutcome::Sent,
-        Err(e) => FlushOutcome::Failed(e),
+        super::confirm::DirectReceipt::Confirmed => FlushOutcome::Sent,
+        super::confirm::DirectReceipt::Submitted => FlushOutcome::Submitted,
+        super::confirm::DirectReceipt::Failed(e) => FlushOutcome::Failed(e),
     }
 }
 
 /// 落账（flush 的记账半边，conn 显式注入：生产 = `DB.lock()` 短临界区，测试 = 内存库；
 /// 锁内只做 SQL）。返回投递结论（Task 6 演进：bool → Result——端点直发/插队需要
 /// 失败原因作回执）：
-/// - `Ok(())` = 已发出（Sent）；或挂起/等待（行保持 pending 等下个跃迁，**非失败**）；
+/// - `Ok(())` = 已发出（Sent / D7/T3 Submitted 已投递未确认）；或挂起/等待（行保持
+///   pending 等下个跃迁，**非失败**）；
 /// - `Err(e)` = 注入失败原因（行已 mark_failed 退出 pending）。
 ///
 /// 挂起 / 等待分支不消费队首、不写审计（行保持 pending，等下一跃迁）。
@@ -170,6 +187,28 @@ pub(crate) fn settle(
             );
             Ok(())
         }
+        FlushOutcome::Submitted => {
+            // D7/T3：注入 Ok + 戳未中 + 屏读无滞留草稿 = 消息已被 TUI 收进内部
+            // 队列（已投递未确认）。行必须消费退出 pending——消息已在 TUI 手里，
+            // flush 循环再投即双发（TUI 那份无法撤回），故 mark_sent；但不得冒充
+            // 确认成功（Sent 的 ok）也不得误报失败（failed:e 会诱导重试 = 双发），
+            // 审计 result=unconfirmed 单列，与「确认送达 ok」「确认失败 failed:e」
+            // 三分。Submitted 仅直发分诊产出（jump 以占用排空定论），action 沿
+            // 路径标注仅为防呆对称
+            inject_queue::mark_sent_conn(conn, item.id, chrono::Utc::now().timestamp_millis());
+            super::audit_write(
+                conn,
+                st,
+                &item.device_id,
+                &item.device_name,
+                &item.agent_type,
+                &item.session_id,
+                &item.content,
+                if jump { "jump" } else { "flush" },
+                "unconfirmed",
+            );
+            Ok(())
+        }
         FlushOutcome::Failed(e) => {
             inject_queue::mark_failed_conn(conn, item.id, &e);
             super::audit_write(
@@ -191,9 +230,11 @@ pub(crate) fn settle(
 /// 单次投递内核（循环与端点共用）：jump=true 越过「仍在运行」复核（裁决 12 插队语义），
 /// 但仍要求快照中会话存在（红·中断挂起，W2）。成功/失败都写审计（DB + events::audit
 /// 日志并行）。
-/// 返回值（Task 6 P1-4 终态：Result → [`FlushOutcome`] 四态上抛，端点按态精确映射
-/// delivered/queued/failed）：
+/// 返回值（Task 6 P1-4 终态：Result → [`FlushOutcome`] 五态上抛，端点按态精确映射
+/// delivered/submitted/queued/failed）：
 /// - `Sent` = 已发出（行已 mark_sent）；
+/// - `Submitted` = 已投递未确认（D7/T3：消息已被 TUI 收进内部队列，行已 mark_sent
+///   消费退出 pending——防 flush 循环重投 = 双发；中性非失败，端点按 submitted 回执）；
 /// - `Failed(e)` = 注入失败原因（行已 mark_failed 退出 pending——失败不留残留，重试安全，W1）；
 /// - `Suspended` = 快照中无此会话（行保持 pending 等会话回来）；
 /// - `Deferred` = 仍在运行非插队 / 无 pending（行保持 pending 等下个跃迁，**非失败**——
@@ -287,7 +328,8 @@ pub(crate) fn flush_given_if_pending(
 /// → 逐会话取 in-flight 守卫（与 flush 循环事件臂/端点直发/插队互斥，防双投）→
 /// [`flush_one`] 常规路径补投。调用方保证运行于 spawn_blocking（flush_one 内的
 /// session_source 是同步阻塞调用）。结果处置与 flush 循环事件臂同口径：
-/// Sent 静默 / Failed(e) log::warn / 其余（Deferred/Suspended）静默。
+/// Sent 静默 / Failed(e) log::warn / 其余（Submitted 已投递未确认已落账、
+/// Deferred/Suspended 不消费不落账）静默。
 ///
 /// 守卫生命周期核对（Critical 1 同审）：守卫在本函数体内、与 [`flush_one`] 同栈同
 /// 生命周期——本函数整体跑在调用方的 spawn_blocking 阻塞段里（abort 只取消调用方
@@ -305,7 +347,9 @@ pub(crate) fn reconcile_once(state: &std::sync::Arc<crate::remote::server::Remot
         match flush_one(state, &sid, false) {
             FlushOutcome::Sent => {}
             FlushOutcome::Failed(e) => log::warn!("对账补投失败（会话 {sid}）: {e}"),
-            _ => {}
+            // Submitted（D7/T3）：已投递未确认，settle 已按 unconfirmed 落账——
+            // 非失败静默；Deferred/Suspended：不消费不落账——静默
+            FlushOutcome::Submitted | FlushOutcome::Deferred | FlushOutcome::Suspended => {}
         }
     }
 }
@@ -477,16 +521,23 @@ pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState
                                 })
                                 .await
                                 {
-                                    // P1-4 四态上抛：Sent 高频成功路径只记 debug；Failed 保留
-                                    // 既有 warn；Deferred/Suspended 静默（行保持 pending 等
-                                    // 下个跃迁/兜底，非失败——既有 Ok(()) 静默语义保持）
+                                    // P1-4 五态上抛：Sent 高频成功路径只记 debug；
+                                    // Submitted（D7/T3 已投递未确认）非失败，debug 留痕；
+                                    // Failed 保留既有 warn；Deferred/Suspended 静默（行保持
+                                    // pending 等下个跃迁/兜底，非失败——既有 Ok(()) 静默语义保持）
                                     Ok(FlushOutcome::Sent) => {
                                         log::debug!("flush 已投递（会话 {sid}）")
+                                    }
+                                    Ok(FlushOutcome::Submitted) => {
+                                        log::debug!(
+                                            "flush 已投递未确认（会话 {sid}，消息在 TUI 内部队列，\
+                                             agent 空闲后处理）"
+                                        )
                                     }
                                     Ok(FlushOutcome::Failed(e)) => {
                                         log::warn!("flush 投递失败（会话 {sid}）: {e}")
                                     }
-                                    Ok(_) => {}
+                                    Ok(FlushOutcome::Deferred | FlushOutcome::Suspended) => {}
                                     // 追记 4：JoinError（任务 panic/取消）不再静默吞掉
                                     Err(e) => log::warn!("flush 任务异常（会话 {sid}）: {e}"),
                                 }
@@ -857,30 +908,43 @@ mod tests {
 
     // ==== A1 写入确认（M9R Task 5）：直呼确认函数 + 小超时（避免 5s 慢测） ====
 
-    /// 直发确认失败（裁决 A1）：confirm_probe 恒 false（确认失败用例就地覆盖）→
-    /// 小超时轮询 + 屏读门槛不成立（假 pid 屏读必败，保守不动作）→ Err 失败回执
-    /// （claude 会话 → 投影表 false → 裁决 A1 原文案；tool 参数由 session 自带，
-    /// F2 后不再显式传族）
+    /// 直发确认分诊行为锁（D7/T3，原 `direct_confirm_failure_returns_err` 按新
+    /// 语义更新）：confirm_probe 恒 false + 假 pid（屏读必败 → 无滞留草稿证据）→
+    /// 小超时轮询未中 + 屏读回查——**Windows**：分诊走 NotStuck → Submitted 中性
+    /// 「已投递未确认」（旧断言「恒 Err」正是验收问题 #5 假失败的根因：屏读无
+    /// 滞留 = 字已被 TUI 收进内部队列，非滞留≠失败）；**非 Windows**：分诊不可达
+    /// → Failed 原文案路径保持（macOS 行为不变的任务书约束）
     #[test]
-    fn direct_confirm_failure_returns_err() {
+    fn direct_confirm_without_stamp_triages_by_screen_read() {
         let st = state_with_probe(
             vec![sess("s-cf", SessionStatus::Waiting, 21)],
             FakeInjector::ok(),
             std::sync::Arc::new(|_, _, _| false),
         );
         let s = sess("s-cf", SessionStatus::Waiting, 21);
-        let err = super::super::confirm::await_direct_receipt(&st, &s, "直发确认消息", 60)
-            .expect_err("确认未中必须失败回执");
+        let outcome = super::super::confirm::await_direct_receipt(&st, &s, "直发确认消息", 60);
+        #[cfg(windows)]
         assert!(
-            err.contains("已注入未确认"),
-            "失败回执须含裁决 A1 文案：{err}"
+            matches!(outcome, super::super::confirm::DirectReceipt::Submitted),
+            "Windows 假 pid 屏读必败 → 无滞留草稿 → 中性 Submitted：{outcome:?}"
         );
+        #[cfg(not(windows))]
+        match outcome {
+            super::super::confirm::DirectReceipt::Failed(e) => assert!(
+                e.contains("已注入未确认"),
+                "非 Windows 分诊不可达，保持失败回执原文案：{e}"
+            ),
+            other => panic!("非 Windows 应保持 Failed，实际 {other:?}"),
+        }
     }
 
-    /// 工具感知行为断言（M3B 接线锁 + F2 更正，mac-reverify §四-B）：kimi 会话
-    /// 直发确认失败的回执与纯函数选择器在「本机 OS」下的产出逐字一致——证明
-    /// tool 参数真实参与选文案（kimi = macOS 回车吞没投影表成员；Windows 上为
-    /// (kimi, windows) 原文案象限，macOS 上即新文案——与 confirm 表驱动单测互证）
+    /// 工具感知行为断言（M3B 接线锁 + F2 更正，mac-reverify §四-B；T3 按 D7 分诊
+    /// 语义更新）：kimi 会话直发确认（probe 恒 false）——**macOS** 上分诊不可达 →
+    /// Failed，回执与纯函数选择器在本机 OS 下的产出逐字一致（证明 tool 参数真实
+    /// 参与选文案）；**Windows** 上假 pid 无滞留证据 → Submitted 中性（分诊态与
+    /// 工具无关；kimi 文案只在 Failed 态显现，工具 × 平台感知由 confirm.rs
+    /// 表驱动测试 `direct_confirm_fail_copy_is_tool_platform_aware` 与分诊纯核
+    /// `direct_triage_screen_recovery_table` 的 kimi × macos 格覆盖）
     #[test]
     fn direct_confirm_failure_receipt_is_tool_consistent() {
         let st = state_with_probe(
@@ -889,13 +953,21 @@ mod tests {
             std::sync::Arc::new(|_, _, _| false),
         );
         let s = sess_kimi("s-cf2", SessionStatus::Waiting, 27);
-        let err = super::super::confirm::await_direct_receipt(&st, &s, "工具感知确认消息", 60)
-            .expect_err("确认未中必须失败回执");
-        assert_eq!(
-            err,
-            super::super::confirm::direct_confirm_fail_copy("kimi", std::env::consts::OS,),
-            "回执必须与纯函数选文案一致（工具 × 本机 OS）：{err}"
+        let outcome = super::super::confirm::await_direct_receipt(&st, &s, "工具感知确认消息", 60);
+        #[cfg(windows)]
+        assert!(
+            matches!(outcome, super::super::confirm::DirectReceipt::Submitted),
+            "Windows 假 pid 无滞留证据 → 中性 Submitted：{outcome:?}"
         );
+        #[cfg(not(windows))]
+        match outcome {
+            super::super::confirm::DirectReceipt::Failed(err) => assert_eq!(
+                err,
+                super::super::confirm::direct_confirm_fail_copy("kimi", std::env::consts::OS,),
+                "回执必须与纯函数选文案一致（工具 × 本机 OS）：{err}"
+            ),
+            other => panic!("macOS 分诊不可达应保持 Failed，实际 {other:?}"),
+        }
     }
 
     /// 插队 best-effort：假 pid 下排空查询基础设施失败（wait_input_drained Err）→
@@ -933,12 +1005,16 @@ mod tests {
         );
     }
 
-    /// flush_one 端到端确认失败（A1 主回执闭环，质量评审 Important 1）：注入 Ok +
-    /// probe 恒 false（小超时覆盖，无 5s 慢测）→ Err 含裁决文案全句、行 mark_failed
-    /// （failed_reason 与回执逐字命中）、审计 action=fail result=failed:e、行退出 pending。
-    /// 入队/断言全走 st.store 同一内存库（flush_one 的 DB 依赖经 store 缝）
+    /// flush_one 端到端确认分诊（A1 主回执闭环 + D7/T3 判据收紧，原
+    /// `flush_one_end_to_end_confirm_failure` 按新语义更新）：注入 Ok + probe 恒
+    /// false（小超时覆盖，无 5s 慢测）——**Windows**：屏读（假 pid）无滞留草稿 →
+    /// `Submitted` 中性：行 mark_sent 消费退出 pending（消息已在 TUI 手里，重投
+    /// 即双发）、审计 action=flush result=unconfirmed 与确认送达/确认失败三分、
+    /// 不落 failed_reason；**非 Windows**：分诊不可达 → `Failed` 既有口径不变
+    /// （mark_failed + failed:{e} + 防重警示文案全句）。注入确实发生的前提自证
+    /// 两臂共守（确认分诊而非注入失败）。入队/断言全走 st.store 同一内存库
     #[test]
-    fn flush_one_end_to_end_confirm_failure() {
+    fn flush_one_end_to_end_unconfirmed_triage() {
         let fake = FakeInjector::ok();
         let st = state_with_probe(
             vec![sess("s-e2f", SessionStatus::Waiting, 24)],
@@ -947,38 +1023,99 @@ mod tests {
         );
         let item_id = st.store.with(|c| enq(c, "s-e2f", "端到端确认消息"));
 
-        let err = match flush_one_with(&st, "s-e2f", false, Some(60)) {
-            FlushOutcome::Failed(e) => e,
-            other => panic!("注入成功但确认未中必须失败回执，实际 {other:?}"),
-        };
-        assert!(
-            err.contains("已注入未确认（未见会话记录），请检查终端后重试"),
-            "回执须含裁决 A1 文案全句：{err}"
-        );
+        let outcome = flush_one_with(&st, "s-e2f", false, Some(60));
         assert_eq!(
             fake.recorded(),
             vec![(24, "端到端确认消息".to_string())],
-            "前提自证：注入确实发生（确认失败而非注入失败）"
+            "前提自证：注入确实发生（分诊发生在注入成功之后）"
         );
-        let (failed_reason, sent_at) = st.store.with(|c| {
-            let row = inject_queue::get_conn(c, item_id).unwrap();
-            (row.failed_reason, row.sent_at)
-        });
-        assert_eq!(
-            failed_reason.as_deref(),
-            Some(err.as_str()),
-            "mark_failed 落 failed_reason 且与回执同源"
-        );
-        assert_eq!(sent_at, None, "确认失败不得落 sent_at");
-        let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
-        assert_eq!(audits.len(), 1);
-        assert_eq!(audits[0].action, "fail");
-        assert_eq!(audits[0].result, format!("failed:{err}"));
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                outcome,
+                FlushOutcome::Submitted,
+                "Windows 无滞留草稿证据 → 已投递未确认（中性非失败）"
+            );
+            let (failed_reason, sent_at) = st.store.with(|c| {
+                let row = inject_queue::get_conn(c, item_id).unwrap();
+                (row.failed_reason, row.sent_at)
+            });
+            assert_eq!(
+                failed_reason, None,
+                "Submitted 非失败：不落 failed_reason（不诱导重试）"
+            );
+            assert!(
+                sent_at.is_some(),
+                "Submitted 行 mark_sent 消费（退出 pending，防 flush 循环重投 = 双发）"
+            );
+            let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0].action, "flush");
+            assert_eq!(
+                audits[0].result, "unconfirmed",
+                "审计单列 unconfirmed：不冒充确认成功（ok）也不冒充失败（failed:e）"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let FlushOutcome::Failed(e) = outcome else {
+                panic!("非 Windows 分诊不可达应保持 Failed，实际 {outcome:?}")
+            };
+            assert!(
+                e.contains("已注入未确认（未见会话记录），请检查终端后重试"),
+                "非 Windows 保持失败回执文案全句：{e}"
+            );
+            let (failed_reason, sent_at) = st.store.with(|c| {
+                let row = inject_queue::get_conn(c, item_id).unwrap();
+                (row.failed_reason, row.sent_at)
+            });
+            assert_eq!(
+                failed_reason.as_deref(),
+                Some(e.as_str()),
+                "mark_failed 落 failed_reason 且与回执同源"
+            );
+            assert_eq!(sent_at, None, "确认失败不得落 sent_at");
+            let audits = st.store.with(|c| write_audit::recent_conn(c, 10));
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0].action, "fail");
+            assert_eq!(audits[0].result, format!("failed:{e}"));
+        }
         assert!(
             st.store
                 .with(|c| inject_queue::next_pending_conn(c, "s-e2f"))
                 .is_none(),
-            "确认失败行退出 pending（重试由用户判断，不自动重发）"
+            "行退出 pending（Submitted 防重投 / Failed 不自动重发，均不残留）"
+        );
+    }
+
+    /// settle 的 Submitted 落账（D7/T3，跨平台纯核）：mark_sent 消费 + 审计
+    /// action=flush result=unconfirmed——「确认送达 ok / 已投递未确认 unconfirmed /
+    /// 确认失败 failed:e」三分，不冒充成功也不冒充失败；settle 返回 Ok（非失败）
+    #[test]
+    fn settle_submitted_marks_sent_and_audits_unconfirmed() {
+        let c = mem();
+        enq(&c, "s-sub", "已投递未确认消息");
+        let fake = FakeInjector::ok();
+        let st = state_with(vec![sess("s-sub", SessionStatus::Waiting, 35)], fake);
+        let item = inject_queue::next_pending_conn(&c, "s-sub").unwrap();
+
+        assert!(
+            settle(&c, &st, &item, false, FlushOutcome::Submitted).is_ok(),
+            "Submitted 非失败（settle Ok）"
+        );
+        let row = inject_queue::get_conn(&c, item.id).unwrap();
+        assert!(
+            row.sent_at.is_some(),
+            "mark_sent 消费（行退出 pending，防重投 = 双发）"
+        );
+        assert_eq!(row.failed_reason, None, "非失败不落 failed_reason");
+        let audits = write_audit::recent_conn(&c, 10);
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "flush");
+        assert_eq!(audits[0].result, "unconfirmed");
+        assert!(
+            inject_queue::next_pending_conn(&c, "s-sub").is_none(),
+            "Submitted 行退出 pending（flush 循环不重投）"
         );
     }
 
@@ -1213,9 +1350,9 @@ mod tests {
         assert_eq!(audits[0].result, "ok");
     }
 
-    /// P1-4 四态上抛（flush_one 薄壳透传内核结论）：黄态 → Deferred；会话消失 →
-    /// Suspended（两态行均保持 pending 不落账；delivered/queued/failed 的端点映射
-    /// 在 server.rs 端点测试覆盖）
+    /// P1-4 五态上抛（flush_one 薄壳透传内核结论）：黄态 → Deferred；会话消失 →
+    /// Suspended（两态行均保持 pending 不落账；delivered/submitted/queued/failed
+    /// 的端点映射在 server.rs 端点测试覆盖）
     #[test]
     fn flush_outcome_passthrough() {
         // 黄态（Processing）常规路径 → Deferred

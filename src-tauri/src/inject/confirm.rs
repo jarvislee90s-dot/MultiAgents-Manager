@@ -2,9 +2,11 @@
 //!
 //! - **直发**（可输入态）：以**会话文件命中**定「已送达」（提交即时发生、秒级
 //!   命中）——轮询 `confirm_probe` 缝（500ms 步距、首轮立即查）查 24 字符尾戳；
-//!   超时未中走**屏读回查**（全程为恢复动作）：滞留输入行判定 → 补按回车 →
-//!   复查 3s；仍未中才回失败回执（重试由用户判断；E10 尾字符丢失 1/91 即本层
-//!   必要性实证）。
+//!   超时未中走**屏读回查 + 三态分诊**（D7/T3 确认判据收紧，全程为恢复动作）：
+//!   滞留输入行判定 → 补按回车 → 复查 3s；**分诊口径**——非滞留（屏读无滞留
+//!   草稿）= 字已被 TUI 收进内部队列 → 中性「已投递未确认」（Submitted，不重试）；
+//!   滞留 + 补回车 + 命中 → 已送达；滞留 + 补回车失败 / 复查仍未中 → 真失败
+//!   （防重警示文案保留；E10 尾字符丢失 1/91 即本层必要性实证）。
 //! - **插队**（busy 态）：以**占用排空**确认（Windows `wait_input_drained` ≤2s）；
 //!   屏读草稿尾为 best-effort 诊断（busy TUI 可能在屏读前已把草稿消费进自身
 //!   缓冲，不 Gate 结果）；排空超时 = 投递超时。
@@ -12,7 +14,9 @@
 //! ## 结构（纯核 / 执行侧分离）
 //! - **纯核（零 cfg，跨平台可测）**：[`stamp_of`]（尾戳）/ [`stamp_in_messages`]
 //!   （列表含戳）/ [`stamp_hit_in_page`]（user 侧过滤 + 含戳）/
-//!   [`direct_confirm_fail_copy`]（族 × 平台感知失败文案，Mac 报告 §四-C）；
+//!   [`direct_confirm_fail_copy`]（族 × 平台感知失败文案，Mac 报告 §四-C）/
+//!   [`triage_screen_recovery`]（D7/T3 分诊纯核：屏读回查结果 → 直发确认三态，
+//!   判定因果见该函数注）；
 //! - **契约/测试面 API**：[`session_stamp_hit`]（复用会话消息读路径；flush_one 不直接
 //!   用它——生产确认调用全部经 `RemoteState.confirm_probe` 缝，本函数不参加生产
 //!   调用链，当前唯一消费者是 queue 测试，零接触真实文件）；
@@ -166,20 +170,91 @@ fn screen_probe(content: &str) -> String {
     trimmed.chars().skip(skip).collect()
 }
 
-/// 直发确认（裁决 A1 直发语义）：轮询会话文件戳 → 超时未中走屏读回查（恢复动作：
-/// 滞留输入行判定 → 补按回车 → 复查 3s）→ 仍未中 = 确认失败（失败回执）。
+/// 屏读回查结果（D7/T3 分诊输入，平台执行侧产出、纯核消费）：
+/// 「戳超时未中」之后屏读回查（滞留判定 → 补按回车 → 复查）观察到的四种结局，
+/// 外加非 Windows 平台「无屏读能力」的降级格。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ScreenRecovery {
+    /// 屏读**无滞留草稿**：注入的字不在输入行上 = 已被 TUI 收进内部队列
+    /// （busy TUI 消费草稿的常态；屏读 Err 同归本格——无滞留证据，保守不补键）
+    NotStuck,
+    /// 滞留 + 补回车成功 + 复查窗内戳命中：补键提交成功，已确认落盘
+    Recovered,
+    /// 滞留 + 补回车成功 + 3s 复查仍未中：真失败（防重警示）
+    RecheckMissed,
+    /// 滞留但补按回车失败（携带原始错误，文案拼接交纯核统一处理）
+    EnterFailed(String),
+    /// 平台无屏读/占用 API（macOS 等）：分诊不可达——维持「未中即失败」既有口径。
+    /// 构造点仅非 Windows 执行侧（`direct_recovery` 降级臂）与 cfg(test) 分诊表
+    /// 测试——Windows 非测试构建下永不构造，按 resume.rs 先例条件化 allow
+    #[cfg_attr(all(windows, not(test)), allow(dead_code))]
+    Unavailable,
+}
+
+/// 直发确认三态结论（D7/T3，[`await_direct_receipt`] 的产出，`queue::try_flush_with`
+/// 按此映射 [`super::queue::FlushOutcome`]：Confirmed→Sent / Submitted→Submitted /
+/// Failed→Failed）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DirectReceipt {
+    /// 戳命中（轮询窗内，或屏读回查补回车后 3s 窗内）= 已确认落盘（→ Sent）
+    Confirmed,
+    /// 注入 Ok + 戳未中 + 屏读无滞留草稿 = **已投递未确认**（中性）：消息已被
+    /// TUI 收进内部队列，agent 空闲后处理——不失败、不提供重试（重试 = 双发，
+    /// 且 TUI 那份无法撤回；验收问题 #5 的「假失败诱导重试」根因即此态被误判）
+    Submitted,
+    /// 真失败（携带回执文案：防重警示 ± 补按回车失败原因，重试由用户判断）
+    Failed(String),
+}
+
+/// D7/T3 分诊纯核：屏读回查结果 → 直发确认三态结论。三条判定与因果（防后人
+/// 改回「非滞留即失败」的旧口径——那会把「已被 TUI 收进内部队列」误判成假失败，
+/// 诱导用户重试造成双发，验收问题 #5）：
+/// ① **非滞留**（[`ScreenRecovery::NotStuck`]）→ [`DirectReceipt::Submitted`]：
+///    无滞留草稿 = 字已被 TUI 收进内部队列，中性「已投递未确认」，**不失败不重试**；
+/// ② **滞留 + 补回车 + 命中**（[`ScreenRecovery::Recovered`]）→
+///    [`DirectReceipt::Confirmed`]（= Sent）：补键提交成功、会话文件见戳；
+/// ③ **滞留 + 补回车失败**（[`ScreenRecovery::EnterFailed`]）→
+///    [`DirectReceipt::Failed`]：`{防重警示}；补按回车失败：{e}`（两段文案保持）；
+/// ④ **滞留 + 补回车 + 3s 复查仍未中**（[`ScreenRecovery::RecheckMissed`]）→
+///    [`DirectReceipt::Failed`]：防重警示文案（[`direct_confirm_fail_copy`]），
+///    真失败、重试由用户判断；
+/// ⑤ **无屏读能力**（[`ScreenRecovery::Unavailable`]，macOS）→
+///    [`DirectReceipt::Failed`]：分诊不可达，行为与 T3 前一致（任务书明确不扩
+///    macOS 分诊；吞回车专用文案路径保持）。
+/// `tool` × `os` 参数化（同 [`direct_confirm_fail_copy`]）：任一平台可钉全表。
+pub(crate) fn triage_screen_recovery(
+    recovery: ScreenRecovery,
+    tool: &str,
+    os: &str,
+) -> DirectReceipt {
+    match recovery {
+        ScreenRecovery::NotStuck => DirectReceipt::Submitted,
+        ScreenRecovery::Recovered => DirectReceipt::Confirmed,
+        ScreenRecovery::EnterFailed(e) => DirectReceipt::Failed(format!(
+            "{}；补按回车失败：{e}",
+            direct_confirm_fail_copy(tool, os)
+        )),
+        ScreenRecovery::RecheckMissed | ScreenRecovery::Unavailable => {
+            DirectReceipt::Failed(direct_confirm_fail_copy(tool, os).to_string())
+        }
+    }
+}
+
+/// 直发确认（裁决 A1 直发语义 + D7/T3 三态分诊）：轮询会话文件戳 → 超时未中走
+/// 屏读回查（恢复动作：滞留判定 → 补按回车 → 复查 3s）并按屏读结果**分诊三态**
+/// （[`triage_screen_recovery`]，判定因果见其注）：非滞留 = 已投递未确认（中性
+/// Submitted）；滞留补回车后命中 = 已送达；滞留补回车失败 / 3s 仍未中 = 真失败。
 /// `timeout_ms` 由调用方按族规格下发（`families::FamilySpec::confirm_timeout_ms`，
 /// 无族回退快消费者默认 5000——见 `families::FALLBACK_SPEC`；测试经
-/// `queue::flush_one_with` 小超时覆盖，保持套件无 5s 级慢测）。确认失败文案按
-/// 「工具 × 平台」感知（[`direct_confirm_fail_copy`]，F2：macOS 回车吞没投影表
-/// families::macos_enter_swallowed——kimi 在 Windows 是 A 族，按族判定会漏），
-/// os 在本函数取 `std::env::consts::OS`。
+/// `queue::flush_one_with` 小超时覆盖，保持套件无 5s 级慢测）。失败文案按
+/// 「工具 × 平台」感知（[`direct_confirm_fail_copy`]），os 在本函数取
+/// `std::env::consts::OS`。
 pub(crate) fn await_direct_receipt(
     st: &crate::remote::server::RemoteState,
     session: &crate::session::Session,
     content: &str,
     timeout_ms: u64,
-) -> Result<(), String> {
+) -> DirectReceipt {
     let stamp = stamp_of(content);
     let tool = session.agent_type.tool_id();
     let sid = session.id.as_str();
@@ -187,28 +262,31 @@ pub(crate) fn await_direct_receipt(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         if probe_hits(st, tool, sid, stamp) {
-            return Ok(());
+            return DirectReceipt::Confirmed;
         }
         if Instant::now() >= deadline {
             break;
         }
         sleep(PROBE_INTERVAL_MS);
     }
-    // ② 屏读回查（恢复动作）：Windows 滞留判定 → 补按回车 → 复查；
-    //    macOS 无屏读 API → Ok(false)（直发未中直接 Failed——屏读门槛语义的
-    //    字面执行，报告已申报；Mac 回传清单已有确认机制复验项）
-    let fail_copy = direct_confirm_fail_copy(tool, std::env::consts::OS);
-    match direct_recovery(st, session, content, stamp) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(fail_copy.to_string()),
-        Err(e) => Err(format!("{fail_copy}；{e}")),
-    }
+    // ② 屏读回查（恢复动作）+ D7/T3 分诊：戳超时未中**不是失败的充分证据**——
+    //    屏读无滞留草稿 = 消息已被 TUI 收进内部队列（中性 Submitted，不重试）；
+    //    滞留 + 补回车 + 命中 = 已送达；滞留 + 补回车失败 / 3s 仍未中 = 真失败
+    //    （防重警示保留）。macOS 无屏读 API → Unavailable → Failed（分诊不可达，
+    //    行为与 T3 前一致，吞回车专用文案路径保持）
+    triage_screen_recovery(
+        direct_recovery(st, session, content, stamp),
+        tool,
+        std::env::consts::OS,
+    )
 }
 
 /// 屏读回查恢复动作（Windows）：滞留输入行判定 → 补按回车（跨平台缝经
-/// `st.injector.locate_and_send_key`——测试假体可观测）→ 复查 3s。
-/// 返回 `Ok(true)` = 复查命中（已送达）；`Ok(false)` = 门槛不成立或复查仍未中；
-/// `Err` = 补按回车失败（原因上抛，由调用方拼接进失败回执）。
+/// `st.injector.locate_and_send_key`——测试假体可观测）→ 复查 3s。产出
+/// [`ScreenRecovery`] 四种结局（分诊结论交 [`triage_screen_recovery`] 纯核）：
+/// 无滞留 → `NotStuck`（**非滞留≠失败**——D7/T3 判据收紧的落点，此处只如实
+/// 上报观察，不定结论）；补键失败 → `EnterFailed`；复查命中 → `Recovered`；
+/// 复查未中 → `RecheckMissed`。
 ///
 /// **双投后果披露（质量评审 Minor 2）**：补按回车的窗口内（屏读判定+补键数十 ms
 /// 级）若用户焦点恰落在该会话的审批对话框/选择菜单上，这颗空回车会激活其默认
@@ -220,38 +298,42 @@ fn direct_recovery(
     session: &crate::session::Session,
     content: &str,
     stamp: &str,
-) -> Result<bool, String> {
+) -> ScreenRecovery {
     if !stuck_on_input_line(session.pid, content) {
-        return Ok(false);
+        // D7/T3：屏读未见滞留草稿（含屏读 Err——无滞留证据，保守不补键）。
+        // 字已被 TUI 收进内部队列属常态，非滞留≠失败；结论由纯核分诊
+        // （NotStuck → Submitted 中性回执），本函数只如实上报观察
+        return ScreenRecovery::NotStuck;
     }
-    // 补按回车（提交滞留行）：失败即无法恢复，原因拼接进最终回执
-    st.injector
-        .locate_and_send_key(session.pid, "enter")
-        .map_err(|e| format!("补按回车失败：{e}"))?;
+    // 补按回车（提交滞留行）：失败即无法恢复，原始错误上抛（文案拼接在纯核）
+    if let Err(e) = st.injector.locate_and_send_key(session.pid, "enter") {
+        return ScreenRecovery::EnterFailed(e);
+    }
     let tool = session.agent_type.tool_id();
     let sid = session.id.as_str();
     let recheck = Instant::now() + Duration::from_millis(RECHECK_MS);
     loop {
         if probe_hits(st, tool, sid, stamp) {
-            return Ok(true);
+            return ScreenRecovery::Recovered;
         }
         if Instant::now() >= recheck {
-            return Ok(false);
+            return ScreenRecovery::RecheckMissed;
         }
         sleep(PROBE_INTERVAL_MS);
     }
 }
 
-/// 屏读回查降级（macOS 等非 Windows）：无屏读/占用 API——不回查，直发未中直接
-/// Failed（屏读门槛语义的字面执行，报告已申报；Mac 回传清单已有确认机制复验项）。
+/// 屏读回查降级（macOS 等非 Windows）：无屏读/占用 API——不回查、分诊不可达
+/// （`Unavailable` → 纯核判 Failed），维持「未中即失败」既有口径（屏读门槛语义
+/// 的字面执行 + T3 任务书明确不扩 macOS 分诊；Mac 回传清单已有确认机制复验项）。
 #[cfg(not(windows))]
 fn direct_recovery(
     _st: &crate::remote::server::RemoteState,
     _session: &crate::session::Session,
     _content: &str,
     _stamp: &str,
-) -> Result<bool, String> {
-    Ok(false)
+) -> ScreenRecovery {
+    ScreenRecovery::Unavailable
 }
 
 /// 滞留输入行判定（屏读门槛，Windows）：`read_input_tail(pid, 64)` 返回串含
@@ -487,5 +569,81 @@ mod tests {
             old_copy,
             "投影表外工具默认原文案"
         );
+    }
+
+    /// D7/T3 分诊纯核表驱动（判定因果与「已被 TUI 收进内部队列 = 中性非失败」
+    /// 的防改回注记见 [`super::triage_screen_recovery`]）：屏读回查四结局 + 无屏读
+    /// 降级格 → 三态结论全格钉；Failed 三格另钉 kimi × macos（工具 × 平台感知的
+    /// 文案选择在分诊输出端保持 F2 语义）
+    #[test]
+    fn direct_triage_screen_recovery_table() {
+        use super::ScreenRecovery;
+        let old_copy = "已注入未确认（未见会话记录），请检查终端后重试";
+        let mac_copy =
+            "已注入未确认：该类工具在 macOS 注入后可能需在终端按一次回车提交，请检查后重试";
+        let cases: Vec<(ScreenRecovery, &str, &str, DirectReceipt)> = vec![
+            // ① 非滞留（无滞留草稿）→ Submitted 中性（非滞留≠失败——本格即验收
+            //    问题 #5 假失败的翻案锁）
+            (
+                ScreenRecovery::NotStuck,
+                "claude",
+                "windows",
+                DirectReceipt::Submitted,
+            ),
+            // ② 滞留 + 补回车 + 命中 → Confirmed（= Sent）
+            (
+                ScreenRecovery::Recovered,
+                "claude",
+                "windows",
+                DirectReceipt::Confirmed,
+            ),
+            // ③ 滞留 + 补回车失败 → Failed（防重警示前缀 + 补按回车失败原因）
+            (
+                ScreenRecovery::EnterFailed("句柄失效".to_string()),
+                "claude",
+                "windows",
+                DirectReceipt::Failed(format!("{old_copy}；补按回车失败：句柄失效")),
+            ),
+            // ④ 滞留 + 补回车 + 3s 仍未中 → Failed（防重警示，真失败）
+            (
+                ScreenRecovery::RecheckMissed,
+                "claude",
+                "windows",
+                DirectReceipt::Failed(old_copy.to_string()),
+            ),
+            // ⑤ 无屏读能力（macOS 形态）→ Failed（分诊不可达，行为与 T3 前一致）
+            (
+                ScreenRecovery::Unavailable,
+                "claude",
+                "windows",
+                DirectReceipt::Failed(old_copy.to_string()),
+            ),
+            // kimi × macos：Failed 三格走吞回车专用文案（工具 × 平台感知保持）
+            (
+                ScreenRecovery::RecheckMissed,
+                "kimi",
+                "macos",
+                DirectReceipt::Failed(mac_copy.to_string()),
+            ),
+            (
+                ScreenRecovery::Unavailable,
+                "kimi",
+                "macos",
+                DirectReceipt::Failed(mac_copy.to_string()),
+            ),
+            (
+                ScreenRecovery::EnterFailed("no console".to_string()),
+                "kimi",
+                "macos",
+                DirectReceipt::Failed(format!("{mac_copy}；补按回车失败：no console")),
+            ),
+        ];
+        for (recovery, tool, os, want) in cases {
+            assert_eq!(
+                &triage_screen_recovery(recovery.clone(), tool, os),
+                &want,
+                "分诊格 ({recovery:?}, {tool}, {os})"
+            );
+        }
     }
 }

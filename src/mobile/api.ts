@@ -343,12 +343,15 @@ export async function fetchSendInfo(sessionId: string): Promise<SendInfo | null>
   return (await r.json()) as SendInfo;
 }
 
-/** 发送回执（POST /session-send 响应三态，HTTP 200 恒定，语义在 body.status）：
- *  delivered=已直送终端；queued=运行中留队（itemId+position 供插队/撤回/排队
- *  指示）；failed=注入失败回执（error 文案可直接展示；失败行已退出 pending，
- *  队列无残留，重按发送即重试） */
+/** 发送回执（POST /session-send 响应四态，HTTP 200 恒定，语义在 body.status）：
+ *  delivered=已直送终端；submitted=已投递未确认（D7/T3 确认判据收紧，验收问题 #5：
+ *  注入 Ok + 戳未中 + 屏读无滞留草稿 = 消息已被 TUI 收进内部队列，agent 空闲后
+ *  处理——中性态，非失败、**不提供重试**，重试 = 双发且 TUI 那份无法撤回）；
+ *  queued=运行中留队（itemId+position 供插队/撤回/排队指示）；failed=注入失败回执
+ *  （error 文案可直接展示；失败行已退出 pending，队列无残留，重按发送即重试） */
 export type SendResult =
   | { status: "delivered" }
+  | { status: "submitted" }
   | { status: "queued"; itemId: number; position: number }
   | { status: "failed"; error: string };
 
@@ -448,14 +451,17 @@ export async function fetchQueue(sessionId: string): Promise<QueueItemView[]> {
 }
 
 /** 插队直发（裁决 12）：按 itemId 点名该会话 pending 中的一条即刻注入。
- *  回执四态精确映射（F7④ 与后端契约对齐）：Sent → delivered；Failed(e) →
- *  failed{error}（注入失败行已退出 pending，可重发）；Deferred | Suspended →
+ *  回执五态精确映射（F7④ + D7/T3 与后端契约对齐）：Sent → delivered；Failed(e) →
+ *  failed{error}（注入失败行已退出 pending，可重发）；submitted → submitted
+ *  （防御性契约对齐：Submitted 仅直发分诊产出，插队以占用排空定论、后端本臂实际
+ *  不可达——前端按非 delivered 走对账收敛即可）；Deferred | Suspended →
  *  queued{itemId,position}（行保持 pending，语义即排队）；守卫忙（该会话
  *  in-flight 投递占用）→ queued{itemId,position}（F1 新语义：旧忙时回 failed
  *  逼客户端重试，现改 queued 让位给进行中的投递）。非 2xx（404 not_found
  *  条目已不在队）→ 抛 ApiError */
 export type QueueJumpResult =
   | { status: "delivered" }
+  | { status: "submitted" }
   | { status: "queued"; itemId: number; position: number }
   | { status: "failed"; error: string };
 

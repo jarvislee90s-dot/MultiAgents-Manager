@@ -652,13 +652,16 @@ fn find_session_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<crate::s
 /// - 设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
 /// - 会话不在快照 → 404 no_session；路由判不可注入 → 403 not_injectable（带
 ///   reasonCode/reason——W1 定位失败语义的前置闸，不入队）；
-/// - 可输入态（is_input_ready）→ 入队后即刻 flush_one 直发（jump=false），四态精确
-///   映射（P1-4）：Sent → 200 delivered；Failed(e) → 200 failed{error}（注入失败
-///   回执可重试，W1：失败行已 mark_failed 退出 pending，队列无残留）；
+/// - 可输入态（is_input_ready）→ 入队后即刻 flush_one 直发（jump=false），五态精确
+///   映射（P1-4 + D7/T3）：Sent → 200 delivered；Submitted → 200 submitted（已投递
+///   未确认中性回执——注入 Ok + 戳未中 + 屏读无滞留草稿 = 消息已被 TUI 收进内部
+///   队列，不冒充 delivered 也不误报失败诱导重试，验收问题 #5）；Failed(e) → 200
+///   failed{error}（注入失败 / 滞留补回车失败 / 补回车后仍未落盘的真失败回执可重试，
+///   W1：失败行已 mark_failed 退出 pending，队列无残留）；
 ///   Deferred | Suspended → 200 queued（行保持 pending 等会话回来/下个跃迁，语义即
 ///   排队——Suspended 亦 queued，红·中断挂起不谎报 delivered 也不误报失败）。直发
 ///   审计按态落 send|queue（flush_one 落账时已并行写 flush 审计——本端点按契约另写
-///   send 终态）；
+///   send 终态；Submitted 的 send 审计 result=unconfirmed，与确认送达 ok 区分）；
 /// - 运行中（is_running 等）→ 留队（黄灯），审计 action=queue，回执 queued+position。
 ///
 /// queueOnly 请求标志（D6 修改重发，语义详见 SessionSendReq::queue_only）：true 时
@@ -784,9 +787,10 @@ pub async fn session_send(
             log::error!("session-send 直发任务异常: {e}");
             crate::inject::queue::FlushOutcome::Failed("内部任务异常".to_string())
         });
-        // P1-4 四态精确映射（Sent/Failed/Deferred/Suspended →
-        // delivered/failed/queued/queued）；守卫忙让位归 Deferred，与黄态/挂起同臂——
-        // 单臂收敛（原 handler 帧守卫的 Some/None 双臂已删，审计 queue|ok 口径不变）
+        // P1-4 五态精确映射（D7/T3 增 Submitted）：Sent/Submitted/Failed/
+        // Deferred/Suspended → delivered/submitted/failed/queued/queued；守卫忙
+        // 让位归 Deferred，与黄态/挂起同臂——单臂收敛（原 handler 帧守卫的
+        // Some/None 双臂已删，审计 queue|ok 口径不变）
         return match outcome {
             crate::inject::queue::FlushOutcome::Sent => {
                 endpoint_audit(
@@ -803,6 +807,28 @@ pub async fn session_send(
                     StatusCode::OK,
                     [(axum::http::header::CACHE_CONTROL, "no-store")],
                     Json(serde_json::json!({ "status": "delivered" })),
+                )
+                    .into_response()
+            }
+            // D7/T3 中性回执（验收问题 #5）：注入 Ok + 戳未中 + 屏读无滞留草稿 =
+            // 消息已被 TUI 收进内部队列（已投递未确认）——不冒充 delivered（未确认
+            // 落盘）也不冒充 failed（防重警示会诱导重试 = 双发）；行已 mark_sent
+            // 消费退出 pending（settle 落账 result=unconfirmed），队列无残留
+            crate::inject::queue::FlushOutcome::Submitted => {
+                endpoint_audit(
+                    &st,
+                    &device_id,
+                    &device_name,
+                    &tool,
+                    &sid,
+                    &content,
+                    "send",
+                    "unconfirmed",
+                );
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "status": "submitted" })),
                 )
                     .into_response()
             }
@@ -1008,8 +1034,10 @@ pub async fn session_queue(
 /// POST /m/api/v1/session-queue/jump（裁决 12 插队）：按 itemId 点名该会话 pending 中
 /// 的条目（可非队首）即刻投递（黄态照发）——flush_given 内核，settle 落账审计 action=jump。
 /// - 缺参 → 400；无此 pending 项 → 404 not_found；
-/// - 四态精确映射（P1-4）：Sent → 200 delivered；Failed(e) → 200 failed{error}
-///   （注入失败行已退出 pending）；Deferred | Suspended → 200 queued + itemId/position
+/// - 五态精确映射（P1-4 + D7/T3）：Sent → 200 delivered；Failed(e) → 200 failed{error}
+///   （注入失败行已退出 pending）；Submitted → 200 submitted（防御性臂：Submitted
+///   仅直发分诊产出，插队以占用排空定论，本臂实际不可达）；Deferred | Suspended →
+///   200 queued + itemId/position
 ///   （行保持 pending 等会话回来/下个跃迁，语义即排队——jump 点名场景 Deferred 的黄态
 ///   臂实际不可达〔jump 跳过黄态复核〕，守卫忙让位与会话消失〔Suspended〕亦按 queued）；
 /// - in-flight 守卫忙 → 200 queued{itemId,position}（**回执契约变化，F1 裁决**：旧忙时
@@ -1087,6 +1115,14 @@ pub async fn session_queue_jump(
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
             Json(serde_json::json!({ "status": "delivered" })),
+        )
+            .into_response(),
+        // D7/T3：Submitted 仅直发确认分诊产出（插队以占用排空定论，本臂实际不可达，
+        // 为穷尽性保留）——防御性回中性 submitted，不冒充 delivered 也不冒充 failed
+        crate::inject::queue::FlushOutcome::Submitted => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": "submitted" })),
         )
             .into_response(),
         crate::inject::queue::FlushOutcome::Failed(e) => failed_body(e),

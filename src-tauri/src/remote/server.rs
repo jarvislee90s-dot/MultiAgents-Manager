@@ -2793,17 +2793,31 @@ mod tests {
         }
     }
 
-    /// Task 6 专用 state：夹具会话（sess_a Waiting / sess_b Processing / sess_c workbuddy
-    /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话 / sess_f
-    /// Processing 备用 / sess_i Waiting 独占——busy 直发测试专用）+ 指定注入器；
-    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）。
-    /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾的测试必须占**全测试集
-    /// 唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT 按裸 id 字符串全局占用，
-    /// 跨夹具撞 id 即跨夹具串键（sess_h 曾被本夹具 busy 测试与 approve_state 的
-    /// approve_sends_key 双方使用，实测 2/30 假红；本夹具侧已改名 sess_i 让 sess_h 归
-    /// approve 族独占）
+    /// Task 6 专用 state：夹具与 [`inject_state_with_probe`] 同一套，确认缝缺省
+    /// 恒命中（首轮即中，零延迟零等待）+ 指定注入器
     fn inject_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+    ) -> Arc<RemoteState> {
+        inject_state_with_probe(injector, std::sync::Arc::new(|_, _, _| true))
+    }
+
+    /// inject_state 变体：confirm_probe 可注入（D7/T3 直发未确认端点测试用——
+    /// probe 恒 false + Windows 屏读假 pid 无滞留草稿 → Submitted 中性回执）。
+    ///
+    /// Task 6 专用夹具会话（sess_a Waiting / sess_b Processing / sess_c workbuddy
+    /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话 /
+    /// sess_f Processing 备用 / sess_i Waiting 独占——busy 直发测试专用 / sess_t3
+    /// Waiting 独占——D7/T3 直发未确认端点测试专用）+ 指定注入器；其余缝与
+    /// test_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾（或长窗口占用）的
+    /// 测试必须占**全测试集唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT
+    /// 按裸 id 字符串全局占用，跨夹具撞 id 即跨夹具串键（sess_h 曾被本夹具 busy
+    /// 测试与 approve_state 的 approve_sends_key 双方使用，实测 2/30 假红；本夹具侧
+    /// 已改名 sess_i 让 sess_h 归 approve 族独占；sess_t3 同规——T3 端点测试 ~5s
+    /// 轮询窗内守卫全程占用，撞 id 会把对方挤成 queued 假红）
+    fn inject_state_with_probe(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
     ) -> Arc<RemoteState> {
         let sessions = vec![
             inj_sess(
@@ -2848,6 +2862,15 @@ mod tests {
                 19,
                 crate::session::SessionStatus::Waiting,
             ),
+            {
+                // D7/T3 直发未确认端点测试独占（守卫 id 立规，见本函数 doc）
+                inj_sess(
+                    "sess_t3",
+                    crate::session::AgentType::Claude,
+                    25,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -2859,8 +2882,8 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
-            // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
-            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // A1 写入确认缝（M9R Task 5）：参数化（inject_state 缺省恒命中）
+            confirm_probe,
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -3716,6 +3739,74 @@ mod tests {
         assert!(
             pending.is_empty(),
             "失败行必须退出 pending（W1：定位失败不入队重试）"
+        );
+    }
+
+    /// D7/T3 端点分诊（Windows）：注入 Ok + 戳未中 + 屏读（假 pid）无滞留草稿 →
+    /// 200 {"status":"submitted"}（中性回执，不冒充 delivered 也不冒充 failed——
+    /// 验收问题 #5：failed 文案会诱导重试 = 双发）+ 审计 action=send
+    /// result=unconfirmed 与确认送达 ok 区分（flush_one 落账并行写的 flush 审计
+    /// 同为 unconfirmed）+ 行 mark_sent 退出 pending（队列无残留，flush 循环不
+    /// 重投 = 防双发）。probe 恒 false 时直发确认走满族规格轮询窗（claude 快族
+    /// 5s，端点无超时缝），本例为全测试集唯一 5s 级用例（申报：套件「无 5s 级
+    /// 慢测」纪律的已知例外，见 T3 报告）；会话用全测试集唯一 id sess_t3——
+    /// ~5s 轮询期间 in-flight 守卫全程占用（守卫按裸 id 全局串键，守卫 id 立规）
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn send_reports_submitted_when_stamp_missed_no_stuck_draft() {
+        let fake = FakeInjector::ok();
+        let state = inject_state_with_probe(fake.clone(), std::sync::Arc::new(|_, _, _| false));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t3","text":"中性回执"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "submitted 回执同为门禁下私有数据，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"submitted\""),
+            "未确认但已投递 → 中性 submitted 回执：{body}"
+        );
+        assert_eq!(
+            fake.recorded().len(),
+            1,
+            "前提自证：注入确实发生（分诊发生在注入成功之后）"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(
+            audits.len(),
+            2,
+            "端点 send 终态审计 + flush_one 落账 flush 审计"
+        );
+        assert_eq!(audits[0].action, "send");
+        assert_eq!(
+            audits[0].result, "unconfirmed",
+            "端点 send 审计单列 unconfirmed（不冒充 ok 也不冒充 failed:e）"
+        );
+        assert_eq!(audits[1].action, "flush");
+        assert_eq!(audits[1].result, "unconfirmed");
+        let pending = state
+            .store
+            .with(|c| crate::database::dao::inject_queue::pending_for_session_conn(c, "sess_t3"));
+        assert!(
+            pending.is_empty(),
+            "Submitted 行已 mark_sent 消费，队列无残留（flush 循环不重投 = 防双发）"
         );
     }
 

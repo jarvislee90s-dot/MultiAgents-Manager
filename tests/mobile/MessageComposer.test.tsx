@@ -718,6 +718,46 @@ describe("排队条目他端消失（2026-09-20 调查修复）：轮询收敛�
   });
 });
 
+// ==== 直发确认分诊回执（D7/T3，验收问题 #5）：submitted 中性回执非失败 ====
+describe("直发确认分诊回执（D7/T3）", () => {
+  it("submitted 中性回执：中性文案、不带可重试、输入框已清空（对齐 delivered 口径）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "submitted" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "已被 TUI 收进队列的消息" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-submitted");
+    expect(chip.textContent).toBe("已投递至终端输入，agent 空闲后处理（未确认落盘）");
+    // 中性态：不冒充失败——failed chip 不在场、无「可重试」语义（重试 = 双发，
+    // TUI 那份无法撤回）
+    expect(chip.textContent).not.toContain("可重试");
+    expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
+    // 消息已离开前端 → 输入框清空（对齐 delivered 口径）
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("failed 防重警示回执照旧（T3 回归）：红 chip 携带后端防重文案与（可重试）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = {
+      status: "failed",
+      error: "已注入未确认（未见会话记录），请检查终端后重试",
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "滞留真失败" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-failed");
+    expect(chip.textContent).toContain("发送失败");
+    expect(chip.textContent).toContain("已注入未确认（未见会话记录），请检查终端后重试");
+    expect(chip.textContent).toContain("（可重试）");
+    // 分诊两态不混淆：failed 不得渲染成 submitted 中性 chip
+    expect(screen.queryByTestId("send-receipt-submitted")).toBeNull();
+  });
+});
+
 // ==== 附件上传（2026-09-20）：+ 钮 / 粘贴图片 / 发送拼内联标记行 ====
 describe("移动端附件上传（2026-09-20）", () => {
   /** jsdom 的 Blob 可能缺 arrayBuffer（Node 内建 File 才有）——兜底补齐 */
