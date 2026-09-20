@@ -549,3 +549,38 @@ export async function sessionOpen(sessionId: string): Promise<SessionOpenResult>
   }
   return (await r.json()) as SessionOpenResult;
 }
+
+// ==== 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）====
+export interface ArchivedSession {
+  sessionId: string;
+  agentType: string;
+  projectPath: string;
+  projectName: string;
+  title: string | null;
+  lastStatus: string;
+  lastSeenAt: string;
+}
+
+export interface ArchivedPayload {
+  archived: ArchivedSession[];
+  projects: string[];
+}
+
+/** 懒加载归档列表（进入历史页/切换天数时调用；403 → null 回配对页） */
+export async function fetchArchivedSessions(days: 1 | 3 | 7): Promise<ArchivedPayload | null> {
+  const r = await fetch(`/m/api/v1/sessions-archived?days=${days}`);
+  if (r.status === 403) return null;
+  if (!r.ok) {
+    throw new ApiError(r.status, `sessions-archived ${r.status}`);
+  }
+  return r.json() as Promise<ArchivedPayload>;
+}
+
+/** 归档手动管理（spec 裁决 8）：带 id = 单条移除；缺省 = 清空全部 */
+export async function deleteArchivedSession(sessionId?: string): Promise<number> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "?all=1";
+  const r = await fetch(`/m/api/v1/sessions-archived${qs}`, { method: "DELETE" });
+  if (!r.ok) throw new ApiError(r.status, `sessions-archived DELETE ${r.status}`);
+  const data = (await r.json()) as { deleted: number };
+  return data.deleted;
+}

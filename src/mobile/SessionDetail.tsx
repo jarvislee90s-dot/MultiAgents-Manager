@@ -40,6 +40,7 @@ import {
   type SessionMessage,
 } from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
+import { resumeUnavailableReason } from "./resume-gate";
 import {
   addBookmark,
   bookmarkPreview,
@@ -69,27 +70,6 @@ const POLL_FOLLOW_THRESHOLD_PX = 120;
  *  在底部、composer 占其底端——没有下限的话文件栏拖到 85% 时消息区会被压没。
  *  文件栏侧同步加 maxHeight = 100% - 该值，两处同源（常量单点） */
 const SPLIT_CONVERSATION_MIN_PX = 120;
-
-// R5 一键 resume（Task 11）：支持「在电脑上打开」的工具镜像表。
-// SSOT = src-tauri/src/inject/resume.rs 的 RESUME_TABLE（Step 1 实测取证），
-// 后端查证新工具回填后**两处必须同步**（前端镜像仅驱动按钮禁用态）。
-const RESUME_SUPPORTED_TOOLS: ReadonlySet<string> = new Set([
-  "claude",
-  "codex",
-  "kimi",
-  "opencode",
-]);
-
-/** 禁用原因（中文内联，移动端无 i18n 契约）：无 cwd / 无映射 → null = 可用 */
-function resumeUnavailableReason(session: Session): string | null {
-  if (!session.projectPath || !session.projectPath.trim()) {
-    return "该会话没有项目目录信息，无法在电脑上打开";
-  }
-  if (!RESUME_SUPPORTED_TOOLS.has(session.agentType)) {
-    return "该工具 resume 命令待查证，暂不支持一键打开";
-  }
-  return null;
-}
 
 interface SessionDetailProps {
   /** 完整会话对象（Task 8 裁决：详情页需要 status 判定自动折叠、projectName 页头、

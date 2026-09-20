@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, fetchHost, fetchSessions, pairWithPin, queueJump } from "@/mobile/api";
+import {
+  ApiError,
+  deleteArchivedSession,
+  fetchArchivedSessions,
+  fetchHost,
+  fetchSessions,
+  pairWithPin,
+  queueJump,
+} from "@/mobile/api";
 
 // setup.ts 的 msw server 会包一层全局 fetch；stub 覆盖其上，结束后还原防止泄漏到其他用例
 afterEach(() => {
@@ -86,5 +94,39 @@ describe("mobile api", () => {
     } else {
       throw new Error("queued 变体丢失：回执未按排队语义透传");
     }
+  });
+
+  it("fetchArchivedSessions 携带 days 且解析载荷", async () => {
+    const f = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ archived: [], projects: ["p1"] }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", f);
+    const p = await fetchArchivedSessions(7);
+    expect(f).toHaveBeenCalledWith("/m/api/v1/sessions-archived?days=7");
+    expect(p?.projects).toEqual(["p1"]);
+  });
+
+  it("fetchArchivedSessions 403 → null（回配对页口径与 fetchSessions 一致）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403 })));
+    expect(await fetchArchivedSessions(1)).toBeNull();
+  });
+
+  it("deleteArchivedSession 带 id 走单条、缺省走 all=1，返回删除计数", async () => {
+    const f = vi.fn(async () => new Response('{"ok":true,"deleted":2}', { status: 200 }));
+    vi.stubGlobal("fetch", f);
+    expect(await deleteArchivedSession("sess-1")).toBe(2);
+    expect(f).toHaveBeenLastCalledWith(
+      "/m/api/v1/sessions-archived?session_id=sess-1",
+      expect.objectContaining({ method: "DELETE" })
+    );
+    await deleteArchivedSession();
+    expect(f).toHaveBeenLastCalledWith(
+      "/m/api/v1/sessions-archived?all=1",
+      expect.objectContaining({ method: "DELETE" })
+    );
   });
 });
