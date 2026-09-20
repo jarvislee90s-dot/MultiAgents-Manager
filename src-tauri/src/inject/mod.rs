@@ -3,6 +3,7 @@ pub mod confirm;
 pub mod engine;
 pub mod families;
 pub mod normalize;
+pub mod question;
 pub mod queue;
 // R5 一键 resume 窗口（M6R–M9R Task 11）：命令表 + 终端 spawn 核心（spawner 缝）
 pub mod resume;
@@ -43,7 +44,9 @@ pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
 /// 与 session-send / queue / retract 端点审计两处共用，单一出口防词表漂移。
 /// 字段化入参而非 QueueRow：端点侧审计（send/queue/retract）没有整行可传。
 /// action 词表（W5）：send|queue|flush|jump|retract|approve|reject|fail|key|open
-/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。
+/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。批次乙 T8 追加
+/// `answer`（AskUserQuestion 问答应答，select/toggle/submit/cancel 四动作统一
+/// 记 answer，摘要区分见 question::AnswerAction::audit_label）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn audit_write(
     conn: &rusqlite::Connection,

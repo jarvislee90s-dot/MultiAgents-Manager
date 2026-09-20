@@ -19,6 +19,15 @@
 //!    （T2 落实，见 hooks.rs）。
 //! 4. payload 差异（claude/codex/kimi 的 tool_input / message 等）是 T2/T3 的事——
 //!    本内核只做「stdin JSON → session_id / hook_event_name → 事件文件」薄管道。
+//!    **T8 例外（AskUserQuestion 问答通道）**：`tool_name` 全事件照收（小字符串）；
+//!    `tool_input` **仅当** PreToolUse ∧ tool_name=="AskUserQuestion" 时附加（64KB
+//!    上限，超限整字段丢弃）——这是问答卡片的实时识别通道（通道 A）。实机取证
+//!    （2026-09-21 探测档案 research/refs/phase2-消息注入/
+//!    2026-09-21-claude-askuserquestion-按键语义探测.md）：问题 UI 弹出期间 pending
+//!    的 tool_use **不落盘**（会话 JSONL 停在 user 消息），纯文件路径实时不可达，
+//!    故问答识别的主通道是 claude 投递给 helper 的 PreToolUse hook payload
+//!    `{hook_event_name:"PreToolUse", tool_name:"AskUserQuestion",
+//!    tool_input:{questions:[…]}}`。
 //!
 //! # 事件文件格式（以读取侧 `monitor::hooks::read_hook_events_from` 为准，
 //! 自 HOOK_SCRIPT bash 版逐字段移植）
@@ -28,11 +37,25 @@
 //! 防御上限，真身 ≤ 44），
 //! 内容单行 JSON：`{"event","session_id","cwd","ts"(unix 秒),"last_event_at"(UTC
 //! ISO8601)}`——读取侧 `HookEvent` 消费 event/ts/last_event_at，30s TTL。同会话
-//! 覆盖写 = 保留最新状态（bash 版语义）。
+//! 覆盖写 = 保留最新状态（bash 版语义）。T8 起两个**向后兼容的可选字段**：payload
+//! 带 `tool_name`（非空）时追加 `"tool_name"`；PreToolUse ∧ AskUserQuestion 时追加
+//! `"tool_input"`（tool_input 的原文 JSON 串）。其余事件（无 tool_name）正文与
+//! T8 前**逐字节一致**（读取侧 serde default 兼容 bash 兜底脚本形态——bash 解析嵌套
+//! tool_input 不可靠，问题通道不承载，见 hooks.rs HOOK_SCRIPT 注释）。
 
 use serde_json::json;
 
-/// stdin 解析产物（薄管道三字段：事件文件格式所需的最小集）
+/// AskUserQuestion 工具名（T8 问答通道唯一识别名，claude 官方工具名原文）。
+/// 写侧（本模块问答分支）与读取侧（adapter 状态链 / 端点通道 B）共用同一常量，
+/// 单一事实源。本模块是 helper 独立编译单元，常量必须落在无 crate 依赖的这里
+pub const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// tool_input 附加字段字节上限（T8 任务书：64KB，超限截断丢弃该字段）。questions
+/// 真实形态是数百字节的选项表，上限只防御病态 payload（巨型 descriptions 等）；
+/// 丢弃策略=整字段 None（截半截 JSON 会产出不可解析的孤儿字段，不如不给）
+pub const TOOL_INPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// stdin 解析产物（薄管道三字段 + T8 问答通道两可选字段）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedHook {
     /// 会话 id（事件文件名键；白名单已校验）
@@ -42,6 +65,13 @@ pub struct ParsedHook {
     pub event_name: String,
     /// 工作目录（payload `cwd`，缺失记空串——bash 版 grep 不到时的同款语义）
     pub cwd: String,
+    /// payload `tool_name`（T8 全事件照收；缺失记空串。claude PreToolUse 携带
+    /// 被调工具名，codex PermissionRequest 也带——照收不分支，消费侧按需判定）
+    pub tool_name: String,
+    /// `tool_input` 原文 JSON 串（T8 问答通道：**仅当** PreToolUse ∧
+    /// tool_name==AskUserQuestion 时携带，64KB 上限；其余事件恒 None——事件文件
+    /// 体积与 bash 兜底形态兼容）
+    pub tool_input: Option<String>,
 }
 
 /// session_id 白名单（HOOK_SCRIPT `^[A-Za-z0-9-]+$` 同源移植 + 128 字符防御上限，
@@ -76,10 +106,31 @@ pub fn parse_hook_stdin(raw: &str) -> Option<ParsedHook> {
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
+    // T8 问答通道（通道 A 写侧）：tool_name 全事件照收（缺失空串）；tool_input
+    // 仅在「PreToolUse ∧ AskUserQuestion」分支序列化原文（64KB 上限整字段丢弃）
+    let tool_name = value
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tool_input = if event_name == "PreToolUse" && tool_name == ASK_USER_QUESTION_TOOL {
+        value.get("tool_input").and_then(|ti| {
+            let s = ti.to_string();
+            if s.len() <= TOOL_INPUT_MAX_BYTES {
+                Some(s)
+            } else {
+                None // 超限：整字段丢弃（截半截 JSON 不可解析，不如不给）
+            }
+        })
+    } else {
+        None
+    };
     Some(ParsedHook {
         session_id,
         event_name,
         cwd,
+        tool_name,
+        tool_input,
     })
 }
 
@@ -119,16 +170,24 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// 事件文件正文（与 HOOK_SCRIPT bash 版逐字段同构；serde_json 序列化天然转义，
 /// 根除 bash 版 grep+模板拼接对特殊字符不设防的注入面——调研 §2.4 遗留项）。
-/// 键序 event/session_id/cwd/ts/last_event_at 与 bash 版一致（preserve_order）
+/// 键序 event/session_id/cwd/ts/last_event_at 与 bash 版一致（preserve_order）。
+/// T8 可选字段：`tool_name`（payload 带非空 tool_name 时追加）与 `tool_input`
+/// （PreToolUse ∧ AskUserQuestion 时追加）——两者缺席时正文与 T8 前逐字节一致
+/// （非问答事件零变化回归锁见 `event_body_without_optional_fields_is_legacy_shape`）
 pub fn event_body(parsed: &ParsedHook, ts: i64) -> String {
-    json!({
-        "event": parsed.event_name,
-        "session_id": parsed.session_id,
-        "cwd": parsed.cwd,
-        "ts": ts,
-        "last_event_at": format_event_time(ts),
-    })
-    .to_string()
+    let mut obj = serde_json::Map::new();
+    obj.insert("event".into(), json!(parsed.event_name));
+    obj.insert("session_id".into(), json!(parsed.session_id));
+    obj.insert("cwd".into(), json!(parsed.cwd));
+    obj.insert("ts".into(), json!(ts));
+    obj.insert("last_event_at".into(), json!(format_event_time(ts)));
+    if !parsed.tool_name.is_empty() {
+        obj.insert("tool_name".into(), json!(parsed.tool_name));
+    }
+    if let Some(ti) = &parsed.tool_input {
+        obj.insert("tool_input".into(), json!(ti));
+    }
+    serde_json::Value::Object(obj).to_string()
 }
 
 /// 写事件文件（瞬时 + 原子）：同目录临时文件 + rename 覆盖（Windows 上
@@ -350,6 +409,8 @@ mod tests {
             session_id: "sid-x".into(),
             event_name: "Stop".into(),
             cwd: "/tmp".into(),
+            tool_name: String::new(),
+            tool_input: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&event_body(&parsed, 1_789_171_200)).unwrap();
@@ -368,6 +429,8 @@ mod tests {
             session_id: "01a08083-5ca0".into(),
             event_name: "Stop".into(),
             cwd: "/w".into(),
+            tool_name: String::new(),
+            tool_input: None,
         };
         write_event_file(&dir, &parsed, 1_789_171_200).unwrap();
         let dst = dir.join("01a08083-5ca0.json");
@@ -407,6 +470,8 @@ mod tests {
             session_id: "sid".into(),
             event_name: "Stop".into(),
             cwd: String::new(),
+            tool_name: String::new(),
+            tool_input: None,
         };
         assert!(write_event_file(&blocker.join("events"), &parsed, 0).is_err());
     }
@@ -418,5 +483,162 @@ mod tests {
             parsed.cwd, "",
             "cwd 缺失记空串（bash 版 grep 不到同款语义）"
         );
+    }
+
+    // ---------- T8 问答通道（通道 A 写侧）：PreToolUse ∧ AskUserQuestion ----------
+
+    /// T8①：claude 投递给 helper 的真实形态（探测档案 §1/§2 取证——AskUserQuestion
+    /// 触发时 claude 向 helper stdin 投递 PreToolUse payload，tool_input.questions
+    /// 为原样选项表；夹具取探测档案 §3 单选真实 JSON 缩录）→ ParsedHook 携带
+    /// tool_name + tool_input 原文（questions 原样保留）
+    #[test]
+    fn parse_pretooluse_askuserquestion_carries_tool_input() {
+        // 探测档案 §3 单选夹具（tool_input.questions 原样缩录；cwd 取档案 §1 实测形态）
+        let raw = concat!(
+            r#"{"session_id":"1b0ba2d5-eecd-48b6-b1e2-c1a784e0db1f","#,
+            r#""transcript_path":"/home/u/.claude/projects/x/1b0ba2d5.jsonl","#,
+            r#""cwd":"C:\\Users\\bunny\\AppData\\Local\\Temp\\mam-probe-askq-proj","#,
+            r#""hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
+            r#""permission_mode":"default","tool_input":{"questions":["#,
+            r#"{"header":"Next step","multiSelect":false,"options":["#,
+            r#"{"description":"Explain how AskUserQuestion works and when it's used.","label":"Tool demo"},"#,
+            r#"{"description":"Start a coding or file task in this directory.","label":"Start a task"},"#,
+            r#"{"description":"You have no further request for now.","label":"Nothing yet"}],"#,
+            r#""question":"This is a demo question — what would you like to do next?"}]}}"#
+        );
+        let parsed = parse_hook_stdin(raw).expect("claude AUQ payload 必须解析成功");
+        assert_eq!(parsed.event_name, "PreToolUse");
+        assert_eq!(parsed.tool_name, "AskUserQuestion");
+        let ti = parsed
+            .tool_input
+            .as_deref()
+            .expect("AUQ 必须携带 tool_input");
+        let v: serde_json::Value = serde_json::from_str(ti).expect("tool_input 是原文 JSON");
+        let questions = v["questions"].as_array().expect("questions 数组在场");
+        assert_eq!(questions.len(), 1, "探测档案单选夹具 = 单问题");
+        assert_eq!(questions[0]["header"], "Next step");
+        assert_eq!(questions[0]["multiSelect"], false);
+        assert_eq!(questions[0]["options"].as_array().unwrap().len(), 3);
+        assert_eq!(questions[0]["options"][1]["label"], "Start a task");
+        assert_eq!(
+            questions[0]["options"][0]["description"],
+            "Explain how AskUserQuestion works and when it's used."
+        );
+    }
+
+    /// T8① 反例：非 AskUserQuestion 的 PreToolUse（普通 Bash 调用等）→ tool_name
+    /// 照收但 **不带 tool_input**（问答通道不承载普通工具调用）
+    #[test]
+    fn pretooluse_other_tool_has_no_tool_input() {
+        let raw = r#"{"session_id":"sid-auq-2","hook_event_name":"PreToolUse","cwd":"/w","tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
+        let parsed = parse_hook_stdin(raw).unwrap();
+        assert_eq!(parsed.tool_name, "Bash");
+        assert!(
+            parsed.tool_input.is_none(),
+            "非 AUQ 的 PreToolUse 不得携带 tool_input"
+        );
+    }
+
+    /// T8① 反例：AskUserQuestion 但事件不是 PreToolUse（理论形态，防御性收窄）→
+    /// 不带 tool_input
+    #[test]
+    fn askuserquestion_on_other_event_has_no_tool_input() {
+        let raw = r#"{"session_id":"sid-auq-3","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[]}}"#;
+        let parsed = parse_hook_stdin(raw).unwrap();
+        assert!(parsed.tool_input.is_none(), "非 PreToolUse 恒不携带");
+    }
+
+    /// T8①：tool_input 序列化超 64KB → **整字段丢弃**（不截半截 JSON——孤儿字段
+    /// 不可解析；截断策略注释见 TOOL_INPUT_MAX_BYTES）
+    #[test]
+    fn oversized_tool_input_field_is_dropped() {
+        // 构造 >64KB 的 description（单字段即可把整体序列化推过上限）
+        let big = "x".repeat(TOOL_INPUT_MAX_BYTES + 1);
+        let raw = format!(
+            r#"{{"session_id":"sid-auq-4","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{{"questions":[{{"header":"h","question":"q","multiSelect":false,"options":[{{"label":"L","description":"{big}"}}]}}]}}}}"#
+        );
+        assert!(raw.len() > TOOL_INPUT_MAX_BYTES);
+        let parsed = parse_hook_stdin(&raw).expect("payload 本身合法，必须解析成功");
+        assert!(
+            parsed.tool_input.is_none(),
+            "超限 tool_input 必须整字段丢弃"
+        );
+        // 边界内（恰好 ≤ 上限）照常携带
+        let fit = "x".repeat(TOOL_INPUT_MAX_BYTES - 256);
+        let raw_fit = format!(
+            r#"{{"session_id":"sid-auq-4","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{{"questions":[{{"header":"h","question":"q","options":[{{"label":"L","description":"{fit}"}}]}}]}}}}"#
+        );
+        let parsed_fit = parse_hook_stdin(&raw_fit).unwrap();
+        assert!(parsed_fit.tool_input.is_some(), "上限内照常携带");
+    }
+
+    /// T8 回归锁：无 tool_name 的普通事件（Stop 等）事件正文与 T8 前**逐字节一致**
+    /// （可选字段缺席不落键；读取侧 serde default 兼容 bash 兜底形态）
+    #[test]
+    fn event_body_without_optional_fields_is_legacy_shape() {
+        let parsed = ParsedHook {
+            session_id: "sid-x".into(),
+            event_name: "Stop".into(),
+            cwd: "/tmp".into(),
+            tool_name: String::new(),
+            tool_input: None,
+        };
+        let body = event_body(&parsed, 1_789_171_200);
+        assert_eq!(
+            body,
+            r#"{"event":"Stop","session_id":"sid-x","cwd":"/tmp","ts":1789171200,"last_event_at":"2026-09-12T00:00:00Z"}"#,
+            "无 tool_name 事件正文必须与 bash 版逐字段同构（T8 零变化）"
+        );
+    }
+
+    /// T8：问答事件正文携带 tool_name + tool_input 两可选字段；非问答但带 tool_name
+    /// 的事件（codex PermissionRequest 形态）只带 tool_name
+    #[test]
+    fn event_body_includes_optional_fields_conditionally() {
+        let auq = ParsedHook {
+            session_id: "sid-q".into(),
+            event_name: "PreToolUse".into(),
+            cwd: String::new(),
+            tool_name: ASK_USER_QUESTION_TOOL.into(),
+            tool_input: Some(r#"{"questions":[]}"#.into()),
+        };
+        let v: serde_json::Value = serde_json::from_str(&event_body(&auq, 1)).unwrap();
+        assert_eq!(v["tool_name"], "AskUserQuestion");
+        assert_eq!(v["tool_input"], r#"{"questions":[]}"#);
+        // tool_input 是**原文 JSON 串**（string 字段），非嵌套对象——读取侧按
+        // Option<String> 透传，解析归端点/状态链消费侧
+        assert!(v["tool_input"].is_string());
+
+        let codex_like = ParsedHook {
+            session_id: "sid-c".into(),
+            event_name: "PermissionRequest".into(),
+            cwd: String::new(),
+            tool_name: "shell".into(),
+            tool_input: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(&event_body(&codex_like, 1)).unwrap();
+        assert_eq!(v["tool_name"], "shell");
+        assert!(v.get("tool_input").is_none());
+    }
+
+    /// T8 端到端（bin run 缝同款）：AUQ payload → 事件文件含 tool_name+tool_input
+    /// （questions 原样）；覆盖写语义不受新字段影响
+    #[test]
+    fn write_event_file_roundtrips_question_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = r#"{"session_id":"sid-qe2e","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"header":"Favorite fruits","multiSelect":true,"options":[{"description":"A sweet, crisp fruit available in many varieties.","label":"Apple"},{"description":"A soft, tropical fruit rich in potassium.","label":"Banana"}],"question":"Which fruits are your favorites? (Select all that apply)"}]}}"#;
+        let parsed = parse_hook_stdin(raw).unwrap();
+        write_event_file(tmp.path(), &parsed, 1_789_171_200).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("sid-qe2e.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["event"], "PreToolUse");
+        assert_eq!(v["tool_name"], "AskUserQuestion");
+        let ti: serde_json::Value =
+            serde_json::from_str(v["tool_input"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            ti["questions"][0]["options"][0]["label"], "Apple",
+            "questions 原样落盘（探测档案多选夹具）"
+        );
+        assert_eq!(ti["questions"][0]["multiSelect"], true);
     }
 }

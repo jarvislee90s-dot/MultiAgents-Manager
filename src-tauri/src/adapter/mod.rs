@@ -60,12 +60,29 @@ fn apply_wait_mark_overlay(session: &mut Session, marked: bool) {
 /// ——Entry=进入（写标记）/Clear=清除（删标记）/None。
 /// 红灯语义退役（计划 T3，用户裁定的「不落红」收窄再修订）：Stop 过期 → **Idle**
 /// （Stop=回合结束≠等审批；等待红由审批等待持久标记承担，无标记不假红）
+///
+/// **T8 问答分支**（函数顶部，先于通用 PreToolUse 映射）：PreToolUse ∧
+/// tool_name==AskUserQuestion → 返回 [`HookMarkAction::QuestionEntry`] 并强制
+/// Waiting。实机取证（探测档案 research/refs/phase2-消息注入/
+/// 2026-09-21-claude-askuserquestion-按键语义探测.md）：问题 UI 弹出期间会话 JSONL
+/// 停在 user 消息（pending tool_use 不落盘），文件推导判不出等待态——hook 事件是
+/// 唯一实时识别通道（通道 A）。问答等待**不走审批 Entry**（两类标记严格隔离，硬
+/// 约束①：问题标记不得触发审批红卡）
 fn apply_hook_event_to_session(
     session: &mut Session,
     event: &crate::monitor::hooks::HookEvent,
     grace: &mut HashMap<u32, (i64, i64)>,
     now_ts: i64,
 ) -> HookMarkAction {
+    // T8：AskUserQuestion 专属分支（先于 match——通用 PreToolUse 映射产 Processing
+    // 会覆盖问题等待态；清除族（PostToolUse/Stop/UserPromptSubmit/…）对该会话照常
+    // 返回 Clear，状态链据此同时清两类标记）
+    if matches!(event.event.as_str(), "PreToolUse" | "preToolUse")
+        && event.tool_name == crate::monitor::hook_listener::ASK_USER_QUESTION_TOOL
+    {
+        session.status = SessionStatus::Waiting;
+        return HookMarkAction::QuestionEntry;
+    }
     match event.event.as_str() {
         // 审批进入（claude Notification 已由注册侧 matcher=permission_prompt 收窄）
         "PermissionRequest" | "Notification" => {
@@ -157,6 +174,9 @@ enum HookMarkAction {
     Clear,
     /// 与标记无关
     None,
+    /// T8 问题进入（PreToolUse ∧ AskUserQuestion）：写**问题**等待标记
+    ///（与审批 Entry 分离——两类标记分表隔离，硬约束①）
+    QuestionEntry,
 }
 
 /// 记录每个 PID 最近一次 Stop 事件的 (时间戳, grace_duration_secs)，用于 grace period 判定
@@ -383,6 +403,12 @@ impl Drop for ScanFlightGuard {
     }
 }
 
+/// T8：问题事件的 tool_input 载荷提取（QuestionEntry 写标记时随行落库——questions
+/// 原文 JSON 透传，上限 64KB 已在 helper 写侧约束）
+fn event_payload(event: Option<&crate::monitor::hooks::HookEvent>) -> Option<&str> {
+    event.and_then(|e| e.tool_input.as_deref())
+}
+
 /// 实际扫描（单飞壳内执行；成功路径与原实现一致）
 fn get_all_sessions_inner() -> SessionsResponse {
     // W5：未勾选工具不参与会话扫描（看板卡/通知随之静默）
@@ -493,12 +519,20 @@ fn get_all_sessions_inner() -> SessionsResponse {
     // approval_wait_marks）——进入事件（PermissionRequest/Notification[注册侧已
     // matcher=permission_prompt 收窄]）写标记，清除事件（PostToolUse 系/Stop/
     // UserPromptSubmit/PermissionResult/Interrupt）删标记，叠加层据标记强制
-    // Waiting（issue #74 根因①：审批等待期文件推导判 processing 而非 Waiting）
+    // Waiting（issue #74 根因①：审批等待期文件推导判 processing 而非 Waiting）。
+    // T8 起问题等待同样持久化（question_wait_marks，与审批标记分表隔离）：进入=
+    // PreToolUse∧AskUserQuestion（探测档案定案——问题 UI 期间 pending tool_use 不
+    // 落盘，文件推导实时不可达）；清除族**同时清两类标记**（回合推进=问题已答/已取消）
     let hook_events = crate::monitor::hooks::read_hook_events();
     let now_ts = chrono::Utc::now().timestamp();
     let mut grace = STOP_GRACE.lock().unwrap();
     let mut wait_marks: HashMap<(String, String), i64> =
         crate::database::dao::approval_wait::list_all_wait()
+            .into_iter()
+            .map(|(tool, sid, ts)| ((tool, sid), ts))
+            .collect();
+    let mut q_marks: HashMap<(String, String), i64> =
+        crate::database::dao::question_wait::list_all_wait()
             .into_iter()
             .map(|(tool, sid, ts)| ((tool, sid), ts))
             .collect();
@@ -528,20 +562,41 @@ fn get_all_sessions_inner() -> SessionsResponse {
                 );
                 wait_marks.insert((tool.clone(), session.id.clone()), now_ts);
             }
+            HookMarkAction::QuestionEntry => {
+                // T8：questions 载荷随标记落库（问答端点 GET 据此出卡）；载荷上限
+                // 64KB 已在 helper 写侧截断丢弃，此处透传
+                crate::database::dao::question_wait::mark_wait(
+                    &tool,
+                    &session.id,
+                    now_ts,
+                    "等待回答",
+                    event_payload(hook_events.get(&session.id)),
+                );
+                q_marks.insert((tool.clone(), session.id.clone()), now_ts);
+                // 问题等待**不得**写审批标记（硬约束①的写侧隔离）
+            }
             HookMarkAction::Clear => {
+                // 清除族对两类标记都生效（硬约束①的清除面：审批/问题等待都随回合
+                // 推进解除——问题被回答或取消后 PostToolUse/Stop 必然到达）
                 crate::database::dao::approval_wait::clear_wait(&tool, &session.id);
+                crate::database::dao::question_wait::clear_wait(&tool, &session.id);
                 wait_marks.remove(&(tool.clone(), session.id.clone()));
+                q_marks.remove(&(tool.clone(), session.id.clone()));
             }
             HookMarkAction::None => {}
         }
-        // 叠加层：有等待标记 → 强制 Waiting（抽为 apply_wait_mark_overlay，F3② 可测缝）
+        // 叠加层：任一等待标记在场 → 强制 Waiting（抽为 apply_wait_mark_overlay，
+        // F3② 可测缝；T8：问题标记与审批标记同享强制语义——问答卡以 waiting 态为
+        // 挂载门，且会话在看板保持红色可见）
         apply_wait_mark_overlay(
             session,
-            wait_marks.contains_key(&(tool.clone(), session.id.clone())),
+            wait_marks.contains_key(&(tool.clone(), session.id.clone()))
+                || q_marks.contains_key(&(tool.clone(), session.id.clone())),
         );
     }
     // 会话消失清标记：标记对应会话不在本轮快照且标记足够旧才清（60s 容忍扫描抖动，
-    // 防瞬时缺席误清——审批进入事件只发一次，误清会丢 Waiting 直到用户重试）
+    // 防瞬时缺席误清——审批进入事件只发一次，误清会丢 Waiting 直到用户重试）。
+    // T8：问题标记同窗同语义（问题同样只在进入事件出现一次）
     {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let active: HashSet<(String, String)> = all_sessions
@@ -555,6 +610,15 @@ fn get_all_sessions_inner() -> SessionsResponse {
                 *ts,
             ) {
                 crate::database::dao::approval_wait::clear_wait(tool, sid);
+            }
+        }
+        for ((tool, sid), ts) in &q_marks {
+            if approval_mark_should_clear(
+                !active.contains(&(tool.clone(), sid.clone())),
+                now_ms,
+                *ts,
+            ) {
+                crate::database::dao::question_wait::clear_wait(tool, sid);
             }
         }
     }
@@ -709,6 +773,24 @@ mod tests {
             event: name.into(),
             ts,
             last_event_at: String::new(),
+            tool_name: String::new(),
+            tool_input: None,
+        }
+    }
+
+    /// T8：带 tool_name / tool_input 的事件构造（问答分支用例）
+    fn hook_ev_tool(
+        name: &str,
+        tool_name: &str,
+        tool_input: Option<&str>,
+        ts: i64,
+    ) -> crate::monitor::hooks::HookEvent {
+        crate::monitor::hooks::HookEvent {
+            event: name.into(),
+            ts,
+            last_event_at: String::new(),
+            tool_name: tool_name.into(),
+            tool_input: tool_input.map(str::to_string),
         }
     }
 
@@ -991,6 +1073,144 @@ mod tests {
             apply_hook_event_to_session(&mut s, &hook_ev("PreToolUse", 10_000), &mut grace, 10_000);
         assert_eq!(action, HookMarkAction::None);
         assert!(matches!(s.status, SessionStatus::Processing));
+    }
+
+    // ==== T8 问答分支：PreToolUse ∧ AskUserQuestion ====
+
+    /// T8② 问题进入事件：PreToolUse+AskUserQuestion → QuestionEntry（**不是**审批
+    /// Entry——两类标记严格隔离）+ 强制 Waiting（覆盖文件推导的 Processing——探测
+    /// 档案定案：问题 UI 期间 pending tool_use 不落盘，文件推导判不出等待）
+    #[test]
+    fn askuserquestion_pretooluse_is_question_entry_and_waiting() {
+        let mut s = hook_sess(SessionStatus::Processing);
+        let mut grace = HashMap::new();
+        let payload = r#"{"questions":[{"header":"Next step","multiSelect":false,"options":[{"label":"Tool demo","description":"d"}],"question":"q"}]}"#;
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev_tool("PreToolUse", "AskUserQuestion", Some(payload), 10_000),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(action, HookMarkAction::QuestionEntry, "问题事件≠审批 Entry");
+        assert_eq!(s.status, SessionStatus::Waiting, "问题等待强制 Waiting");
+        // 载荷提取随行（写标记时落库）
+        assert_eq!(
+            event_payload(Some(&hook_ev_tool(
+                "PreToolUse",
+                "AskUserQuestion",
+                Some(payload),
+                1
+            ))),
+            Some(payload)
+        );
+    }
+
+    /// T8② 回归：同为 PreToolUse 但 tool_name 非 AskUserQuestion（普通 Bash 调用）
+    /// → 走通用映射（None 动作 + Processing），问答分支不误捕
+    #[test]
+    fn pretooluse_other_tool_stays_generic_processing() {
+        let mut s = hook_sess(SessionStatus::Idle);
+        let mut grace = HashMap::new();
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev_tool("PreToolUse", "Bash", Some(r#"{"command":"ls"}"#), 10_000),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(action, HookMarkAction::None);
+        assert_eq!(s.status, SessionStatus::Processing);
+    }
+
+    /// T8② 硬约束①集成链（DAO 内存库 → 动作 → 叠加层 → 清除族，零接触真实
+    /// ~/.mam）：问题事件写**问题标记**（审批标记表必须保持为空）→ 两表叠加层都
+    /// 强制 Waiting → 清除事件（PostToolUse）**同时清两类标记** → 回落文件推导。
+    fn overlay_marks(
+        approval: &[(String, String, i64)],
+        question: &[(String, String, i64)],
+    ) -> HashMap<(String, String), i64> {
+        let mut m: HashMap<(String, String), i64> = approval
+            .iter()
+            .map(|(t, s, ts)| ((t.clone(), s.clone()), *ts))
+            .collect();
+        for (t, s, ts) in question {
+            m.insert((t.clone(), s.clone()), *ts);
+        }
+        m
+    }
+
+    #[test]
+    fn question_mark_waits_overlay_then_clear_family_clears_both() {
+        use crate::database::dao::{approval_wait, question_wait};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        let now = 20_000;
+        let mut grace = HashMap::new();
+        let mut s = hook_sess(SessionStatus::Processing);
+        let tool = s.agent_type.tool_id().to_string();
+        let payload = r#"{"questions":[]}"#;
+
+        // ① 问题事件 → QuestionEntry → 写问题标记（payload 随行）；审批表为空
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev_tool("PreToolUse", "AskUserQuestion", Some(payload), now),
+            &mut grace,
+            now,
+        );
+        assert_eq!(action, HookMarkAction::QuestionEntry);
+        question_wait::mark(&conn, &tool, &s.id, now, "等待回答", Some(payload));
+        assert!(
+            approval_wait::list_all(&conn).is_empty(),
+            "问题事件绝不得写审批标记（硬约束①写侧隔离）"
+        );
+        let mut s2 = hook_sess(SessionStatus::Processing);
+        s2.id = s.id.clone();
+        let marked = !question_wait::list_all(&conn).is_empty();
+        apply_wait_mark_overlay(&mut s2, marked);
+        assert_eq!(s2.status, SessionStatus::Waiting, "问题标记强制 Waiting");
+
+        // ② 审批标记在场时叠加层同样强制（两类标记同享叠加语义）——单独验证：
+        approval_wait::mark(&conn, &tool, "other-sess", now, "等待审批");
+        assert_eq!(
+            approval_wait::list_all(&conn).len(),
+            1,
+            "审批标记独立在场（分表）"
+        );
+        let both = overlay_marks(
+            &approval_wait::list_all(&conn),
+            &question_wait::list_all(&conn),
+        );
+        let mut s3 = hook_sess(SessionStatus::Idle);
+        s3.id = "other-sess".into();
+        apply_wait_mark_overlay(
+            &mut s3,
+            both.contains_key(&(tool.clone(), "other-sess".into())),
+        );
+        assert_eq!(s3.status, SessionStatus::Waiting, "审批标记叠加照旧");
+
+        // ③ 清除事件（PostToolUse）→ Clear → **两类标记都清** → 回落文件推导
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev("PostToolUse", now + 1),
+            &mut grace,
+            now + 1,
+        );
+        assert_eq!(action, HookMarkAction::Clear);
+        approval_wait::clear(&conn, &tool, &s.id);
+        question_wait::clear(&conn, &tool, &s.id);
+        assert!(question_wait::list_all(&conn).is_empty(), "问题标记已清");
+        let mut next = hook_sess(SessionStatus::Processing);
+        next.id = s.id.clone();
+        let both = overlay_marks(
+            &approval_wait::list_all(&conn),
+            &question_wait::list_all(&conn),
+        );
+        let next_id = next.id.clone();
+        apply_wait_mark_overlay(&mut next, both.contains_key(&(tool.clone(), next_id)));
+        assert_eq!(
+            next.status,
+            SessionStatus::Processing,
+            "清除后回落文件推导（不再假红）"
+        );
     }
 }
 /// 看板排序比较器：状态优先级 → 同状态组内未读卡排后（spec §5 前端「未读卡排后」）

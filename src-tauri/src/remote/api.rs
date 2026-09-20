@@ -1440,6 +1440,15 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     if session.status != crate::session::SessionStatus::Waiting && !marked {
         return None;
     }
+    // T8 硬约束①：问题等待标记在场 → 审批卡不可用（问答模式不出允许/拒绝——
+    // 问题标记同样强制 Waiting，会话满足上方 Waiting 门，须显式排除；隔离用例
+    // question_mark_never_triggers_approve_card，server.rs）
+    let question_marked = st
+        .store
+        .with(|conn| crate::database::dao::question_wait::has(conn, &tool, session_id));
+    if question_marked {
+        return None;
+    }
     let mapping = st
         .store
         .with(crate::inject::approve::load_mappings_conn)
@@ -1652,6 +1661,14 @@ pub async fn session_approve(
         if session.status != crate::session::SessionStatus::Waiting && !marked {
             return Err("not_waiting");
         }
+        // T8 硬约束①：问题等待标记在场 → 审批应答不可用（409 not_waiting 同形收敛，
+        // 键位永不出手——问答会话的键位面只有问答端点承载）
+        if probe_st
+            .store
+            .with(|conn| crate::database::dao::question_wait::has(conn, &tool, &probe_sid))
+        {
+            return Err("not_waiting");
+        }
         let mapping = probe_st
             .store
             .with(crate::inject::approve::load_mappings_conn)
@@ -1782,6 +1799,369 @@ pub async fn session_approve(
                 &sid,
                 &option_id,
                 action,
+                &format!("failed:{e}"),
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "status": "failed", "error": e })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ==== 批次乙 T8：问答端点（session-question / session-question/answer）====
+// 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写/读路径）：
+//   GET  /session-question?session_id= → 200 {available, questions:[{header, question,
+//        multiSelect, options:[{label, description}]}], source("mark"|"scan"|null)}
+//        available 判定走**双通道**（实机取证 2026-09-21 探测档案：pending 的
+//        tool_use 不落盘，问题 UI 弹出期间会话 JSONL 停在 user 消息，纯文件路径
+//        实时不可达——任务书原识别路径「等待态 + last_message 为 AUQ 调用」不可用，
+//        最小偏差双通道，主控裁决）：
+//        - **通道 A（主，实时）**：hook 事件——PreToolUse∧AskUserQuestion 经 helper
+//          问答通道落「问题等待标记」（question_wait_marks，tool_input 随标记落库）；
+//          标记在场即 available（跳过状态判定，T4 审批标记同款一等信号口径），
+//          载荷优先取标记 payload；
+//        - **通道 B（兜底）**：无标记 / 标记无有效载荷 → 扫描会话消息尾部，取最后
+//          一条 AskUserQuestion tool-call：其**之后不再有 tool-result** 才视为未答
+//          可用（可行口径——「标记/状态已退」需要跨轮状态，端点单次快照内以
+//          tool-result 在场为答完判据并注释；pending 未落盘场景通道 B 天然不可见，
+//          不误触发）→ 解析 tool_args 出 questions。历史进入页面 / 钩子未信任安装
+//          即此通道的价值面。
+//        审批等待标记在场 → **恒不可用**（硬约束①：审批标记不得触发问答卡）。
+//        questions.length>1：available=true 但前端按只读卡渲染（翻页键序未测——
+//        探测档案「结论不超证据」），注入面由 answer 端点拒绝。
+//   POST /session-question/answer body {sessionId, action:"select"|"toggle"|
+//        "submit"|"cancel", index?} → 200 {"status":"key_sent"} | 200 failed{error}
+//        （注入失败 / in-flight 忙让位，可重试回执）| 409 no_question（问答不在场，
+//        含会话不在快照与审批标记隔离——统一不给存在性预言机）| 409
+//        multi_questions（多问题只读，不出手）| 400 bad_request（缺参/域外 action/
+//        select|toggle 缺 index）| 400 bad_index（序号越界 / submit 用在单选题）。
+//        注入序列（探测定案，见 inject::question 模块注释）：select/toggle → 数字单键
+//        （单选数字即提交**无回车无 Esc**；多选数字=切换勾选）；submit → down ×(n+1)
+//        → enter → '1'（三段式——Enter 当提交是反直觉反例，实测抓获）；cancel → esc。
+//        序列逐键走 `injector.locate_and_send_key_spec(pid, key, spec)`（族规格同
+//        approve 端点 F2 口径）；全程持有 in-flight 守卫（复用 queue 的
+//        try_acquire_inflight——防与 flush/直发/审批对同一会话双投）。
+//        审计：action=answer（词表追加），content=动作摘要（select#2 / submit / …），
+//        result=ok/failed:{e}；忙让位/校验失败不落审计（无投递发生，approve 同口径）。
+// 锁纪律（M4）：DB 读取并入 store.with 短临界区；session_source 与 store.with 顺序
+// 执行不嵌套（approve 端点同款）。
+
+/// 通道 B 的消息尾部扫描窗口（条）：问答 tool-call 是回合尾部事件，40 条足够覆盖
+/// 回答前的往返且远小于 read_recent_lines 的 512KB 预算
+const QUESTION_SCAN_TAIL_LIMIT: usize = 40;
+
+/// 问答扫描产物（可用时载荷）
+struct QuestionScanHit {
+    questions: Vec<crate::inject::question::Question>,
+    /// "mark" = 通道 A（hook 标记载荷）；"scan" = 通道 B（会话消息兜底）
+    source: &'static str,
+}
+
+/// 问答扫描内核（同步，spawn_blocking 内调用；返回 None = 问答不在场，不给存在性
+/// 预言机之外的信息）。双通道 + 隔离的完整口径见上方端点契约注释。
+fn question_scan_sync(
+    st: &Arc<RemoteState>,
+    session_id: &str,
+) -> Option<(crate::session::Session, QuestionScanHit)> {
+    let session = find_session_sync(st, session_id)?;
+    let tool = session.agent_type.tool_id().to_string();
+    // 硬约束①：审批等待标记在场 → 问答卡不可用（审批会话的键位面只有审批端点承载）
+    let approval_marked = st
+        .store
+        .with(|conn| crate::database::dao::approval_wait::has(conn, &tool, session_id));
+    if approval_marked {
+        return None;
+    }
+    // 通道 A（主）：hook 问题标记——载荷优先取标记 payload（30s TTL 事件文件已被
+    // 覆盖写，payload 是标记写入时刻的定格，读它免竞态）
+    if st
+        .store
+        .with(|conn| crate::database::dao::question_wait::has(conn, &tool, session_id))
+    {
+        let payload = st
+            .store
+            .with(|conn| crate::database::dao::question_wait::payload_of(conn, &tool, session_id));
+        if let Some(qs) = payload
+            .as_deref()
+            .and_then(crate::inject::question::parse_questions)
+        {
+            return Some((
+                session,
+                QuestionScanHit {
+                    questions: qs,
+                    source: "mark",
+                },
+            ));
+        }
+        // 标记在场但 payload 缺失/不可解析（helper 旧版 / 64KB 截断丢弃）→ 落通道 B
+    }
+    // 通道 B（兜底）：会话消息尾部找最后一条 AskUserQuestion tool-call。
+    let page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()?;
+    let msgs = &page.messages;
+    let last = msgs.iter().rposition(|m| {
+        m.kind == "tool-call"
+            && m.tool_name.as_deref() == Some(crate::monitor::hook_listener::ASK_USER_QUESTION_TOOL)
+    })?;
+    // 答完判据（可行口径，注释申报）：tool-call 之后**任何** tool-result 在场即视为
+    // 已答（AUQ 的 tool_result 无论正常作答/自由文本/Esc 拒绝都会落盘——探测档案 §3
+    // 三形态；对应消息粒度比对需回读会话全文，快照尾部窗口内「其后无任何 tool-result」
+    // 是保守充分的替代口径）。其后无 tool-result + tool-call 已落盘 = 未答在场
+    //（pending 不落盘的场景通道 B 天然不可见，不误触发——空闲态注入风险由双通道
+    // 的在场判定收敛，残余风险见探测档案 K11 讨论）。
+    if msgs[last + 1..].iter().any(|m| m.kind == "tool-result") {
+        return None;
+    }
+    let qs = crate::inject::question::parse_questions(msgs[last].tool_args.as_deref()?)?;
+    Some((
+        session,
+        QuestionScanHit {
+            questions: qs,
+            source: "scan",
+        },
+    ))
+}
+
+/// GET /m/api/v1/session-question?session_id=（T8 问答卡数据源）：扫描在
+/// spawn_blocking（会话扫描/消息读取均为同步阻塞调用）。不可用（无会话/审批标记
+/// 隔离/双通道均未命中）→ available=false + questions 空（前端卡自隐，approve 同构）
+pub async fn session_question(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    let probe_st = st.clone();
+    let scan = match tokio::task::spawn_blocking(move || question_scan_sync(&probe_st, &sid)).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-question 会话扫描任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let (questions, source) = match scan {
+        Some((_, hit)) => (hit.questions, hit.source),
+        None => (Vec::new(), ""),
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "available": !questions.is_empty(),
+            "questions": questions
+                .iter()
+                .map(|q| serde_json::json!({
+                    "header": q.header,
+                    "question": q.question,
+                    "multiSelect": q.multi_select,
+                    "options": q
+                        .options
+                        .iter()
+                        .map(|o| serde_json::json!({
+                            "label": o.label,
+                            "description": o.description,
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+            // 识别通道（诊断用；不可用时 null）
+            "source": if source.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(source)
+            },
+        })),
+    )
+        .into_response()
+}
+
+/// POST /m/api/v1/session-question/answer 请求体（camelCase；字段全 default——缺参
+/// 不触发 axum 提取器 422，由 handler 统一按契约给 400 bad_request）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionQuestionAnswerReq {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub action: String,
+    /// 选项序号（0 起 wire 口径；UI 编号从 1 起，前端换算）。select/toggle 必填
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+/// POST /m/api/v1/session-question/answer（T8 问答应答）：参数校验 → 会话/隔离/双通道
+/// 复核（spawn_blocking）→ 序列构造（inject::question 纯函数）→ in-flight 守卫下逐键
+/// 投递（spawn_blocking 闭包内取守卫，断连双投洞封闭——approve 同款）→ 审计 answer。
+pub async fn session_question_answer(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionQuestionAnswerReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    let action = match crate::inject::question::AnswerAction::parse(req.action.trim()) {
+        Some(a) => a,
+        None => return bad_request(),
+    };
+    // select/toggle 必带序号；submit/cancel 不消费序号（带了也无害，不校验）
+    if matches!(
+        action,
+        crate::inject::question::AnswerAction::Select
+            | crate::inject::question::AnswerAction::Toggle
+    ) && req.index.is_none()
+    {
+        return bad_request();
+    }
+    if sid.is_empty() {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 会话查找 + 双通道复核 + 序列构造（一个 spawn_blocking；锁纪律同 approve）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let lookup = match tokio::task::spawn_blocking(move || {
+        let Some((session, hit)) = question_scan_sync(&probe_st, &probe_sid) else {
+            return Err("no_question");
+        };
+        // 「结论不超证据」（探测档案：多问题翻页键序未测）——多问题不出手，前端
+        // 渲染只读卡引导终端作答；本分支是直调 API 的兜底防线
+        if hit.questions.len() != 1 {
+            return Err("multi_questions");
+        }
+        let q = hit.questions.into_iter().next().unwrap_or_else(|| {
+            // unreachable（上面已判 len==1），防御性占位——序列构造会因选项越界拒绝
+            crate::inject::question::Question {
+                header: String::new(),
+                question: String::new(),
+                multi_select: false,
+                options: Vec::new(),
+            }
+        });
+        let seq = crate::inject::question::answer_key_sequence(action, req.index, &q)
+            .map_err(|_| "bad_index")?;
+        Ok((session, seq))
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-question/answer 会话扫描任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let (session, sequence) = match lookup {
+        Ok(v) => v,
+        Err(code) => {
+            // 校验失败零注入零审计（approve guards 同口径）：
+            // - no_question（409）：会话不在快照 / 审批标记隔离 / 双通道均未命中
+            //   ——统一 409（不给存在性预言机；审批标记在场时本就不得出问答键）
+            // - multi_questions（409）：多问题只读（探测未测面不出手）
+            // - bad_index（400）：select/toggle 序号越界 / submit 用在单选题
+            let status = if code == "bad_index" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::CONFLICT
+            };
+            return (
+                status,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": code })),
+            )
+                .into_response();
+        }
+    };
+    // F2：序列按键按该会话工具取族规格（先 family_for 再 FALLBACK 兜底）——"down"
+    // 的 A/B 族形态分发（claude=VT 序列 / codex=VK 键）由 spec 承载
+    let tool = session.agent_type.tool_id().to_string();
+    let spec = crate::inject::families::family_for(&tool)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let injector = st.injector.clone();
+    let pid = session.pid;
+    let answer_sid = sid.clone();
+    // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
+    // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
+    let attempt = tokio::task::spawn_blocking(move || {
+        let _guard = crate::inject::queue::try_acquire_inflight(&answer_sid)?;
+        // 序列逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
+        // 前端按 failed{error} 提示用户核对终端状态后重试）
+        let mut result = Ok(());
+        for key in &sequence {
+            if let Err(e) = injector.locate_and_send_key_spec(pid, key, &spec) {
+                result = Err(e);
+                break;
+            }
+        }
+        Some(result)
+    })
+    .await;
+    let sent = match attempt {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            // in-flight 守卫忙（与 flush 循环/直发/审批共用）→ 让位，200 failed 提示
+            // 重试（不双投；无投递发生故不写审计——忙让位同口径）
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "error": "投递进行中，请稍后重试"
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("session-question/answer 投递任务异常: {e}");
+            Err("内部任务异常".to_string())
+        }
+    };
+    let audit_label = action.audit_label(req.index);
+    match sent {
+        Ok(()) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &audit_label,
+                "answer",
+                "ok",
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "status": "key_sent" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &audit_label,
+                "answer",
                 &format!("failed:{e}"),
             );
             (

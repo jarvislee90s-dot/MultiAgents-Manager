@@ -12,6 +12,10 @@ use std::path::PathBuf;
 use crate::monitor::hook_listener;
 
 /// Hook 脚本内容（从 stdin 读 JSON，写入事件文件）
+/// **T8 处置申报**：bash 兜底脚本**不承载问答通道**——grep/sed 提取嵌套 tool_input
+/// 不可靠（引号/转义多层嵌套无解析保证），按 kimi「helper 缺席跳过」同款口径：helper
+/// 在场（claude 直启 / codex commandWindows / kimi 直启）才有问答卡；bash 兜底仅写
+/// 事件名等基础字段（问答识别回落通道 B=端点扫描会话消息，见 remote/api.rs 端点注释）
 const HOOK_SCRIPT: &str = r#"#!/bin/bash
 # MultiAgents Manager 状态 Hook 脚本
 # 从 stdin 读取 JSON，写入 ~/.mam/events/<session_id>.json
@@ -737,6 +741,15 @@ pub struct HookEvent {
     pub event: String,
     pub ts: i64,
     pub last_event_at: String,
+    /// 事件携带的工具名（T8 问答通道：helper 写侧全事件照收；bash 兜底/旧事件文件
+    /// 缺该键 → default 空串，向后兼容）
+    #[serde(default)]
+    pub tool_name: String,
+    /// `tool_input` 原文 JSON 串（T8：**仅** PreToolUse ∧ tool_name==AskUserQuestion
+    /// 时由 helper 附加，64KB 上限；其余事件恒 None。消费方=adapter 状态链的
+    /// AskUserQuestion 专属分支——questions 载荷随标记落 DB，端点据此出问答卡）
+    #[serde(default)]
+    pub tool_input: Option<String>,
 }
 
 /// T5 信号健康度：per-tool hook 通道状态（设置页「信号健康度」分区下发结构）

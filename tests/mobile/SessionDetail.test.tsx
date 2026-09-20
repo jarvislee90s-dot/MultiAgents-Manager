@@ -78,6 +78,9 @@ interface Routes {
     drift: boolean;
     reason?: string;
   };
+  /** 问答卡数据源（批次乙 T8，QuestionCard 挂载即拉）：available 为假时卡自隐——
+   *  缺省 available=false（不改既有用例渲染）；问答挂载断言需显式给可用载荷 */
+  questionInfo?: { available: boolean; questions: unknown[]; source?: string };
 }
 
 let routes: Routes;
@@ -145,6 +148,14 @@ function installFetch() {
         JSON.stringify(
           routes.sendInfo ?? { injectable: true, channels: ["tmux"], visibility: "realtime" }
         ),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/session-question")) {
+      // QuestionCard 挂载即拉（批次乙 T8）；缺省给 available=false（卡自隐，不改
+      // 既有用例渲染）。「问答卡挂载」用例须显式给可用载荷
+      return new Response(
+        JSON.stringify(routes.questionInfo ?? { available: false, questions: [] }),
         { status: 200 }
       );
     }
@@ -1832,4 +1843,72 @@ describe("SessionDetail：活状态流（T1）", () => {
     // 全程消息不重拉（一次打开，一次拉取）
     expect(appFetch.calls()).toBe(callsAfterOpen);
   });
+});
+
+// ==== 批次乙 T8：问答卡挂载（SessionDetail 正文视图，waiting 态）====
+describe("SessionDetail：问答卡挂载（批次乙 T8）", () => {
+  /** 探测档案 §3 单选真实夹具（缩录）——QuestionCard 可用载荷 */
+  const questionInfo = {
+    available: true,
+    source: "mark",
+    questions: [
+      {
+        header: "Next step",
+        question: "This is a demo question — what would you like to do next?",
+        multiSelect: false,
+        options: [
+          { label: "Tool demo", description: "Explain how AskUserQuestion works." },
+          { label: "Start a task", description: "Start a coding or file task." },
+        ],
+      },
+    ],
+  };
+
+  it("waiting 会话 + 问答可用：question-card 挂载在 messageArea 上方；问答会话上 approve-card 自隐（硬约束① UI 面）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    // last_message 给审批 marker 命中句也不出红卡——问答会话的审批不可用由后端
+    // 硬约束①保证（approve-options 载荷 available=false，ApproveCard 自隐）
+    render(
+      <SessionDetail
+        session={makeSession({ status: "waiting", lastMessage: "Do you want to proceed?" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    expect(screen.getByTestId("question-text").textContent).toContain("demo question");
+    expect(screen.getByTestId("question-option-0").textContent).toContain("Tool demo");
+    // 问答会话上无 允许/拒绝（approve 选项不可用即 null + 问答卡零允许/拒绝）
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+    expect(screen.queryByText("允许")).toBeNull();
+    expect(screen.queryByText("拒绝")).toBeNull();
+  });
+
+  it("非 waiting 会话：问答卡不挂载（与 ApproveCard 同一 waiting 门）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    render(
+      <SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />
+    );
+    await screen.findByText("proj"); // 页面就绪
+    await flushDetail();
+    expect(screen.queryByTestId("question-card")).toBeNull();
+  });
+
+  it("waiting 会话 + 问答不可用（缺省 available=false）：卡自隐，零问答 fetch 之外的副作用", async () => {
+    installFetch();
+    render(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+    await screen.findByText("proj");
+    await flushDetail();
+    expect(screen.queryByTestId("question-card")).toBeNull();
+  });
+
+  /** 冲刷挂载后的异步拉取链（mount fetch → setState） */
+  async function flushDetail() {
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+  }
 });

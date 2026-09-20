@@ -110,4 +110,41 @@ mod tests {
         assert!(v["ts"].is_i64(), "ts 必须是 unix 秒整数");
         assert!(v["last_event_at"].as_str().unwrap().ends_with('Z'));
     }
+
+    /// T8 问答通道（通道 A）bin 面：claude AUQ PreToolUse payload → 事件文件携带
+    /// tool_name + tool_input（questions 原样）；普通 Stop payload 不带两字段
+    /// （回归锁：非问答事件正文零变化）。stdin 夹具形态=探测档案真实 payload
+    /// （research/refs/phase2-消息注入/2026-09-21-claude-askuserquestion-按键语义探测.md）
+    #[test]
+    fn run_writes_question_channel_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            concat!(
+                r#"{"session_id":"bin-auq-1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","cwd":"/w","#,
+                r#""tool_input":{"questions":[{"header":"Next step","multiSelect":false,"#,
+                r#""options":[{"description":"Explain how AskUserQuestion works.","label":"Tool demo"}],"#,
+                r#""question":"What would you like to do next?"}]}}"#
+            ),
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-auq-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["tool_name"], "AskUserQuestion");
+        let ti: serde_json::Value =
+            serde_json::from_str(v["tool_input"].as_str().expect("tool_input 为 JSON 串")).unwrap();
+        assert_eq!(ti["questions"][0]["options"][0]["label"], "Tool demo");
+
+        // 非 AUQ 事件：两字段缺席（逐字节 legacy 形态）
+        run(
+            r#"{"session_id":"bin-auq-2","hook_event_name":"Stop","cwd":"/w"}"#,
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-auq-2.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(v.get("tool_name").is_none() && v.get("tool_input").is_none());
+    }
 }

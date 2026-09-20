@@ -1,5 +1,5 @@
 // 写审计表 DAO（M7）：移动端注入动作的只追加账本（谁在何时经哪个通道对哪个会话做了什么）
-// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key（由调用方约束，本层不校验）
+// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key | open | answer（由调用方约束，本层不校验；answer = 批次乙 T8 问答应答）
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 

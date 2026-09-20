@@ -568,6 +568,89 @@ export async function sessionApprove(sessionId: string, optionId: string): Promi
   return (await r.json()) as ApproveResult;
 }
 
+// ==== 批次乙 T8：问答卡（AskUserQuestion，claude 先行）====
+
+/** 问答选项视图（questions[].options[] 条目）：label + description——**编号是渲染层
+ *  按 index 生成**，键位/数字不在此列（投递层细节不外泄 UI，approve 同纪律） */
+export interface QuestionOptionView {
+  label: string;
+  description?: string;
+}
+
+/** 问答题目视图（GET /session-question 载荷 questions[] 条目，与 Rust
+ *  `session_question` 的 JSON 逐字段对应，勿漂移）：multiSelect=false → 单选，
+ *  点选项=直接提交；true → 多选，点选=勾选切换 + 「提交」钮。questions.length>1
+ *  → 前端按只读卡渲染（多问题翻页键序未测，不做注入） */
+export interface QuestionView {
+  header?: string;
+  question: string;
+  multiSelect: boolean;
+  options: QuestionOptionView[];
+}
+
+/** 问答可用性视图（GET /session-question 载荷）：available=false（双通道均未命中 /
+ *  审批标记隔离 / 会话不在快照）→ questions 恒空——移动端据此不渲染问答卡；
+ *  source = 识别通道诊断（"mark"=hook 标记〔通道 A〕/"scan"=会话消息兜底〔通道 B〕） */
+export interface QuestionInfoView {
+  available: boolean;
+  questions: QuestionView[];
+  source?: "mark" | "scan" | null;
+}
+
+/** 拉取问答卡数据源（卡片挂载时一次）。非 2xx → 抛 ApiError（调用方静默降级
+ *  不渲染，fetchApproveOptions 失败静默同惯例） */
+export async function fetchSessionQuestion(sessionId: string): Promise<QuestionInfoView> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-question?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-question 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-question ${r.status}`);
+  return (await r.json()) as QuestionInfoView;
+}
+
+/** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换；
+ *  submit=多选三段式提交；cancel=取消问题（Esc） */
+export type QuestionAnswerAction = "select" | "toggle" | "submit" | "cancel";
+
+/** 问答应答回执（POST /session-question/answer 响应，HTTP 200 恒定，语义在
+ *  body.status）：key_sent=按键序列已投递终端；failed=投递失败 / in-flight 忙让位
+ *  （error 为后端中文文案，可重试） */
+export type QuestionAnswerResult = { status: "key_sent" } | { status: "failed"; error: string };
+
+/** 问答一键应答（T8）。index = 选项序号（0 起；select/toggle 必填）。
+ *  409 {error:"no_question"|"multi_questions"} | 400 {error:"bad_request"|"bad_index"}
+ *  → 非 2xx 抛 ApiError（错误码解析进 data.error，调用方分診中文文案） */
+export async function sessionQuestionAnswer(
+  sessionId: string,
+  action: QuestionAnswerAction,
+  index?: number
+): Promise<QuestionAnswerResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-question/answer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action, index }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-question/answer 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 409/400 错误码在响应体 data.error——解析进 data 供调用方分診（sessionApprove 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-question/answer ${r.status}`, data);
+  }
+  return (await r.json()) as QuestionAnswerResult;
+}
+
 // ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====
 
 /** 一键 resume 回执（POST /session-open）：200 {status:"opening"} 表示电脑侧正在

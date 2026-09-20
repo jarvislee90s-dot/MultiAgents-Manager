@@ -329,6 +329,13 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             get(api::session_approve_options),
         )
         .route("/session-approve", post(api::session_approve))
+        // 批次乙 T8：问答端点（AskUserQuestion 问答卡——可用性/题目结构 + 应答注入
+        // 序列；PIN 门禁内层 gate 结构性覆盖，新端点不需要各自鉴权代码）
+        .route("/session-question", get(api::session_question))
+        .route(
+            "/session-question/answer",
+            post(api::session_question_answer),
+        )
         // 2026-09-20：移动端附件上传（落盘会话工作目录 .mam-attachments/<会话>/，
         // 路径随消息内联标记注入；PIN 门禁内层 gate 结构性覆盖；20MB 显式上限——
         // axum 默认 2MB；超限时 handler 先按 Content-Length 预检给结构化 413）
@@ -4358,10 +4365,888 @@ mod tests {
         assert!(fake.recorded().is_empty(), "审批走按键通道，不走文本注入");
     }
 
+    // ==== 批次乙 T8：session-question / session-question/answer 端点 ====
+    // 零污染：标记（question/approval）/审计/KV 全走 RemoteState.store = memory()；
+    // 会话快照与注入器走注入缝；通道 B 消息走 message_source 注入缝。不触真实 ~/.mam。
+    // **守卫 id 立规（approve_state 同款）**：每个 POST 用例独占会话 id（sess_u..
+    // sess_aj 为全测试集未占用段——approve/inject/open 三族夹具已占 sess_a..sess_q /
+    // sess_i / sess_t3 / sess_att）。
+
+    /// 探测档案 §3 单选真实夹具（缩录；questions JSON 原样）
+    const Q_SINGLE_PAYLOAD: &str = r#"{"questions":[{"header":"Next step","multiSelect":false,"options":[{"description":"Explain how AskUserQuestion works.","label":"Tool demo"},{"description":"Start a coding or file task in this directory.","label":"Start a task"},{"description":"You have no further request for now.","label":"Nothing yet"}],"question":"This is a demo question — what would you like to do next?"}]}"#;
+
+    /// 探测档案 §3 多选真实夹具（缩录）
+    const Q_MULTI_PAYLOAD: &str = r#"{"questions":[{"header":"Favorite fruits","multiSelect":true,"options":[{"description":"A sweet, crisp fruit.","label":"Apple"},{"description":"A soft, tropical fruit.","label":"Banana"},{"description":"A juicy summer fruit.","label":"Peach"}],"question":"Which fruits are your favorites? (Select all that apply)"}]}"#;
+
+    /// 多问题数组夹具（questions.length=2——只读形态，注入面由端点拒绝）
+    const Q_TWO_QUESTIONS_PAYLOAD: &str = r#"{"questions":[{"header":"A","question":"First?","options":[{"label":"a1"},{"label":"a2"}]},{"header":"B","question":"Second?","options":[{"label":"b1"},{"label":"b2"}]}]}"#;
+
+    /// 通道 B 的 AUQ tool-call 消息条目（content.rs SessionMessage 直构）
+    fn auq_tool_call(seq: i64, args: &str) -> crate::remote::content::SessionMessage {
+        crate::remote::content::SessionMessage {
+            seq,
+            role: "assistant".into(),
+            kind: "tool-call".into(),
+            content: "AskUserQuestion".into(),
+            ts: None,
+            tool_name: Some("AskUserQuestion".into()),
+            tool_args: Some(args.into()),
+            collapsed: true,
+        }
+    }
+
+    /// 通道 B 的 tool-result 消息条目（答完判据的反例形态）
+    fn tool_result_msg(seq: i64, content: &str) -> crate::remote::content::SessionMessage {
+        crate::remote::content::SessionMessage {
+            seq,
+            role: "assistant".into(),
+            kind: "tool-result".into(),
+            content: content.into(),
+            ts: None,
+            tool_name: None,
+            tool_args: None,
+            collapsed: true,
+        }
+    }
+
+    fn user_msg(seq: i64) -> crate::remote::content::SessionMessage {
+        crate::remote::content::SessionMessage {
+            seq,
+            role: "user".into(),
+            kind: "user".into(),
+            content: "继续".into(),
+            ts: None,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        }
+    }
+
+    /// T8 专用 state：会话夹具 + 问题/审批标记由各测试经 store.with 播种（内存库）。
+    /// 全部 claude；id 语义见各测试。通道 B 缺省为 Err 桩（不触消息源）。
+    fn question_state(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+    ) -> Arc<RemoteState> {
+        question_state_with_msgs(
+            injector,
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+        )
+    }
+
+    /// question_state 变体：message_source 可注入（通道 B 用例）。
+    /// 会话清单：sess_u（Waiting，标记夹具 GET）/ sess_v-w-x-y（POST select/toggle/
+    /// submit/cancel 各自独占）/ sess_z（busy 独占）/ sess_aa（多问题 409）/
+    /// sess_ab（标记载荷损坏 → 回落通道 B）/ sess_ac（bad_index 400）/
+    /// sess_ad（仅审批标记——隔离反差用）/ sess_ae（问题标记 + detect 命中文案——
+    /// 问题标记压审批卡的最强隔离形态）/ sess_af（无标记——no_question 409）/
+    /// sess_ai / sess_aj（Processing 无标记——通道 B 可用/已答反例）
+    fn question_state_with_msgs(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        message_source: Box<crate::remote::content::MessageSourceFn>,
+    ) -> Arc<RemoteState> {
+        let sess = |id: &str, pid: u32, status: crate::session::SessionStatus| {
+            inj_sess(id, crate::session::AgentType::Claude, pid, status)
+        };
+        let sessions = vec![
+            sess("sess_u", 31, crate::session::SessionStatus::Waiting),
+            sess("sess_v", 32, crate::session::SessionStatus::Waiting),
+            sess("sess_w", 33, crate::session::SessionStatus::Waiting),
+            sess("sess_x", 34, crate::session::SessionStatus::Waiting),
+            sess("sess_y", 35, crate::session::SessionStatus::Waiting),
+            sess("sess_z", 36, crate::session::SessionStatus::Waiting),
+            sess("sess_aa", 37, crate::session::SessionStatus::Waiting),
+            sess("sess_ab", 38, crate::session::SessionStatus::Waiting),
+            sess("sess_ac", 39, crate::session::SessionStatus::Waiting),
+            sess("sess_ad", 40, crate::session::SessionStatus::Waiting),
+            {
+                // 最强隔离形态：问题标记 + last_message 恰为审批 marker 命中句——
+                // 证明问题标记压审批卡不依赖 detect 未达
+                let mut s = sess("sess_ae", 41, crate::session::SessionStatus::Waiting);
+                s.last_message = Some(APPROVE_HIT_MSG.to_string());
+                s
+            },
+            sess("sess_af", 42, crate::session::SessionStatus::Waiting),
+            sess("sess_ai", 44, crate::session::SessionStatus::Processing),
+            sess("sess_aj", 45, crate::session::SessionStatus::Processing),
+        ];
+        Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: sessions.clone(),
+                total_count: sessions.len(),
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector,
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source,
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        })
+    }
+
+    /// 问答可用性（通道 A 标记路径）：sess_u 播种问题标记（探测档案单选夹具）→
+    /// 200 available=true + source="mark" + questions 结构（header/question/
+    /// multiSelect/options[{label,description}]）+ **无 key 字段**（键位不外泄给 UI）+
+    /// gate：无 cookie → 403。
+    #[tokio::test]
+    async fn question_options_available_via_mark() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_u",
+                1_000,
+                "等待回答",
+                Some(Q_SINGLE_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        // 无 cookie → 403（nest 内层 gate 结构性覆盖新端点）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_u",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "问答端点必须过 gate");
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_u",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "问答可用性是门禁下私有数据，禁止中间层缓存"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["source"], "mark");
+        let qs = v["questions"].as_array().expect("questions 应为数组");
+        assert_eq!(qs.len(), 1, "探测档案单选夹具 = 单问题");
+        assert_eq!(qs[0]["header"], "Next step");
+        assert_eq!(
+            qs[0]["question"],
+            "This is a demo question — what would you like to do next?"
+        );
+        assert_eq!(qs[0]["multiSelect"], false);
+        let opts = qs[0]["options"].as_array().unwrap();
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[0]["label"], "Tool demo");
+        assert_eq!(opts[0]["description"], "Explain how AskUserQuestion works.");
+        assert_eq!(opts[2]["label"], "Nothing yet");
+        assert!(
+            fake.recorded_keys().is_empty() && fake.recorded().is_empty(),
+            "查询端点不得触发任何注入"
+        );
+    }
+
+    /// 问答应答（单选 select）：sess_v → 200 key_sent + FakeInjector 收到 (pid=32, "2")
+    /// 恰一键（**无回车无 Esc**——探测 K1/K2：数字直接提交，后补 Esc 中断模型回合）+
+    /// 审计 action=answer result=ok content=select#2。
+    #[tokio::test]
+    async fn question_answer_select_sends_digit() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_v",
+                1_000,
+                "等待回答",
+                Some(Q_SINGLE_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_v","action":"select","index":1}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "问答应答回执是门禁下私有数据，禁止中间层缓存"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\""),
+            "单选 select 应回执 key_sent：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(32u32, "2".to_string())],
+            "select#2 = 单个数字键（无回车无 Esc，探测 K1/K2 定案）：{:?}",
+            fake.recorded_keys()
+        );
+        assert!(fake.recorded().is_empty(), "问答走按键通道，不走文本注入");
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(
+            audits[0].action, "answer",
+            "问答审计 action=answer（词表追加）"
+        );
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(audits[0].channel, "fake");
+        assert_eq!(audits[0].session_id, "sess_v");
+        assert_eq!(
+            audits[0].summary, "select#2",
+            "摘要 = 动作#UI编号（从 1 起）"
+        );
+    }
+
+    /// 问答应答（多选 toggle）：sess_w → 200 key_sent + (pid=33, "1") 恰一键
+    /// （切换勾选不提交——探测 K8）+ 审计 answer。
+    #[tokio::test]
+    async fn question_answer_toggle_sends_digit() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_w",
+                1_000,
+                "等待回答",
+                Some(Q_MULTI_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_w","action":"toggle","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.contains("\"status\":\"key_sent\""));
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(33u32, "1".to_string())],
+            "toggle#1 = 单个数字键（切换勾选，探测 K8）：{:?}",
+            fake.recorded_keys()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(audits[0].summary, "toggle#1");
+    }
+
+    /// 问答应答（多选 submit）：sess_x → 200 key_sent + 注入序列 **down ×(n+1) →
+    /// enter → '1'**（n=3 选项 → down×4；三段式探测 K10——Enter 当提交是反直觉
+    /// 反例 K9，序列中 enter 只出现在 Submit 行）。
+    #[tokio::test]
+    async fn question_answer_submit_three_phase() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_x",
+                1_000,
+                "等待回答",
+                Some(Q_MULTI_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_x","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.contains("\"status\":\"key_sent\""));
+        let down = (34u32, "down".to_string());
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![
+                down.clone(),
+                down.clone(),
+                down.clone(),
+                down,
+                (34u32, "enter".to_string()),
+                (34u32, "1".to_string()),
+            ],
+            "submit = down×(n+1) → enter → '1'（n=3，探测 K10 三段式）：{:?}",
+            fake.recorded_keys()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(audits[0].summary, "submit");
+    }
+
+    /// 问答应答（取消）：sess_y → 200 key_sent + (pid=35, "esc") 恰一键（探测 K3：
+    /// Esc=取消/拒绝整个问题）+ 审计 answer。
+    #[tokio::test]
+    async fn question_answer_cancel_sends_esc() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_y",
+                1_000,
+                "等待回答",
+                Some(Q_SINGLE_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_y","action":"cancel"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.contains("\"status\":\"key_sent\""));
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(35u32, "esc".to_string())],
+            "cancel = 单键 esc（探测 K3）：{:?}",
+            fake.recorded_keys()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(audits[0].summary, "cancel");
+    }
+
+    /// guard-busy 回归（F1 同款）：问答应答遇 in-flight 占用 → 200 failed{「投递进行中，
+    /// 请稍后重试」} + 零注入 + 不落审计。sess_z 独占（守卫持到测尾，守卫 id 立规）。
+    #[tokio::test]
+    async fn question_answer_busy_inflight_returns_failed_without_key() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_z",
+                1_000,
+                "等待回答",
+                Some(Q_SINGLE_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let _busy = crate::inject::queue::try_acquire_inflight("sess_z").unwrap();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_z","action":"select","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("投递进行中，请稍后重试"),
+            "in-flight 占用时问答应 200 failed 让位：{body}"
+        );
+        assert!(
+            fake.recorded_keys().is_empty() && fake.recorded().is_empty(),
+            "占用期间不得出手任何键（零注入）"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(audits.is_empty(), "忙让位不落审计");
+    }
+
+    /// 多问题只读（「结论不超证据」——探测档案：questions.length>1 翻页键序未测）：
+    /// sess_aa → 409 multi_questions + 零注入。GET 照常 available=true（前端按只读
+    /// 卡渲染，见 QuestionCard vitest）。
+    #[tokio::test]
+    async fn question_answer_multi_questions_refused() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_aa",
+                1_000,
+                "等待回答",
+                Some(Q_TWO_QUESTIONS_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        // GET：available=true（只读展示的数据源）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_aa",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["questions"].as_array().unwrap().len(), 2);
+        // POST：拒绝出手
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_aa","action":"select","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("multi_questions"));
+        assert!(fake.recorded_keys().is_empty(), "多问题零注入");
+    }
+
+    /// guard 矩阵：缺 index / 域外 action / 空 sessionId → 400 bad_request；越界
+    /// index 与单选 submit → 400 bad_index；无标记会话与不存在会话 → 409 no_question；
+    /// 全程零注入。
+    #[tokio::test]
+    async fn question_answer_guards() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_ac",
+                1_000,
+                "等待回答",
+                Some(Q_SINGLE_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        // select 缺 index → 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ac","action":"select"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        assert!(body_string(r).await.contains("bad_request"));
+        // 域外 action → 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ac","action":"bogus","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // 空 sessionId → 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"","action":"cancel"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // 越界 index（单选 3 选项取 #99）→ 400 bad_index
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ac","action":"select","index":99}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        assert!(body_string(r).await.contains("bad_index"));
+        // submit 用在单选题 → 400 bad_index（单选无独立提交步）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ac","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        assert!(body_string(r).await.contains("bad_index"));
+        // 无标记会话（sess_af）→ 409 no_question
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_af","action":"cancel"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("no_question"));
+        // 不存在会话 → 409 no_question（同形收敛，不给存在性预言机）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"nope","action":"cancel"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("no_question"));
+        assert!(fake.recorded_keys().is_empty(), "校验失败全程零注入");
+    }
+
+    /// 硬约束①（方向一）：**审批标记不得触发问答卡**——sess_ad 仅播审批标记 →
+    /// 问答 GET available=false、POST answer 409 no_question、零注入；同一会话
+    /// 审批 GET 照常 available（既有审批行为零回归）。
+    #[tokio::test]
+    async fn question_endpoints_blocked_by_approval_mark() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::approval_wait::mark(conn, "claude", "sess_ad", 1_000, "等待审批")
+        });
+        let app = router(state.clone());
+        // 问答 GET：不可用
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_ad",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "审批标记在场时问答卡不可用（硬约束①）"
+        );
+        // 问答 POST：409 no_question + 零注入
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ad","action":"cancel"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("no_question"));
+        assert!(fake.recorded_keys().is_empty());
+        // 同会话审批 GET：available=true（审批行为零回归——标记路径跳过 detect）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_ad",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true, "审批标记路径零回归");
+    }
+
+    /// 硬约束①（方向二）：**问题标记不得触发审批红卡**——sess_ae 播问题标记且
+    /// last_message 恰为审批 marker 命中句（最强隔离形态：不依赖 detect 未达）→
+    /// 审批 GET available=false、审批 POST 409 not_waiting、零审批键；问答 GET
+    /// 照常 available（问答行为零回归）。
+    #[tokio::test]
+    async fn question_mark_never_triggers_approve_card() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_ae",
+                1_000,
+                "等待回答",
+                Some(Q_SINGLE_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        // 审批 GET：available=false（问题标记显式排除——Waiting 门会被叠加层满足，
+        // 必须由问题标记检查拦下）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_ae",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "问题标记在场时审批卡不可用（硬约束①；detect 命中被显式压过）"
+        );
+        assert!(v["options"].as_array().unwrap().is_empty());
+        // 审批 POST：409 not_waiting + 零审批键
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ae","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("not_waiting"));
+        assert!(fake.recorded_keys().is_empty(), "审批键零出手");
+        // 问答 GET：available=true（问答行为零回归）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_ae",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+    }
+
+    /// 通道 B（兜底）：sess_ai（Processing、无标记）message_source 注入「user 消息 +
+    /// 已落盘 AUQ tool-call（无 tool-result）」→ GET available=true source="scan" +
+    /// questions 可解析；POST select → (pid=44, "1") 出键。
+    #[tokio::test]
+    async fn question_channel_b_scan_available_and_answerable() {
+        let fake = FakeInjector::ok();
+        let page = crate::remote::content::MessagesPage {
+            messages: vec![user_msg(0), auq_tool_call(1, Q_SINGLE_PAYLOAD)],
+            truncated: false,
+        };
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(move |_, sid: &str, _| {
+                if sid == "sess_ai" {
+                    Ok(page.clone())
+                } else {
+                    Err("无消息".to_string())
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_ai",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true, "未答 AUQ tool-call 在场 → 可用");
+        assert_eq!(v["source"], "scan", "通道 B 识别口径");
+        assert_eq!(v["questions"][0]["header"], "Next step");
+        // POST select：通道 B 会话照常出手
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ai","action":"select","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(body_string(r).await.contains("\"status\":\"key_sent\""));
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(44u32, "1".to_string())],
+            "通道 B select 出键：{:?}",
+            fake.recorded_keys()
+        );
+    }
+
+    /// 通道 B 答完判据（可行口径）：tool-call 之后任何 tool-result 在场 → 不再可用。
+    /// sess_aj 消息 = AUQ tool-call + tool_result → GET available=false、POST 409。
+    #[tokio::test]
+    async fn question_channel_b_not_available_after_tool_result() {
+        let fake = FakeInjector::ok();
+        let page = crate::remote::content::MessagesPage {
+            messages: vec![
+                auq_tool_call(0, Q_SINGLE_PAYLOAD),
+                tool_result_msg(1, "Your questions have been answered: \"q\"=\"Tool demo\"."),
+            ],
+            truncated: false,
+        };
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(move |_, sid: &str, _| {
+                if sid == "sess_aj" {
+                    Ok(page.clone())
+                } else {
+                    Err("无消息".to_string())
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_aj",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "tool_result 在场 = 已答，不再可用（可行口径：任何后随 tool-result 即判答完）"
+        );
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_aj","action":"cancel"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("no_question"));
+        assert!(fake.recorded_keys().is_empty());
+    }
+
+    /// 通道 A 载荷损坏回落：sess_ab 标记在场但 payload 不可解析（helper 旧版/
+    /// 64KB 截断丢弃形态）→ 无通道 B 消息源 → GET available=false（不误报可用）。
+    #[tokio::test]
+    async fn question_mark_bad_payload_falls_through() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_ab",
+                1_000,
+                "等待回答",
+                Some("not-json"),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_ab",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "标记载荷损坏且通道 B 未命中 → 不可用（不误报）"
+        );
+    }
+
     /// P3 审计动作词表（Task 7 P3c）：KV 定制映射含域外 id=other 的选项 → POST
     /// session-approve 照发键位（x）→ 审计 action 收敛为 "key"（W5 词表 send|queue|
     /// flush|jump|retract|approve|reject|fail|key|open——open 已随 Task 11 一键
-    /// resume 兑现——之外的域外 id 不得原样进审计
+    /// resume 兑现，批次乙 T8 再追加 answer（问答端点，锁定见 question_answer_* 族）——
+    /// 之外的域外 id 不得原样进审计
     /// action 列——key 是本次新增的收敛动作）且不 panic；域外 warn 在实现侧 log，
     /// 测试不断言日志。
     /// KV 经内存库 seed（DeviceStore 缝，零接触真实 ~/.mam）；sess_j 全测试集唯一

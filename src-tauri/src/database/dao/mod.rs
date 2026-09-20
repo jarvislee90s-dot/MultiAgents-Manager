@@ -5,6 +5,7 @@ pub mod extension;
 pub mod heartbeat_seen;
 pub mod inject_queue;
 pub mod preset;
+pub mod question_wait;
 pub mod resource_binding;
 pub mod session;
 pub mod settings;

@@ -28,6 +28,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
+import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
@@ -1172,6 +1173,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             {session.status === "waiting" && (
               <ApproveCard key={`approve-${session.id}`} session={session} />
             )}
+            {/* 问答卡（批次乙 T8）：waiting 态与 ApproveCard 同层挂载——问答会话上
+                后端硬约束①保证 approve 端点不可用（红卡自隐），本卡自隐同理（双通道
+                未命中时不渲染）；两卡至多可见其一，互不冲突。key 前缀 question-*
+                防同 key 兄弟复用错乱（上方注释同款 T1 防线） */}
+            {session.status === "waiting" && (
+              <QuestionCard key={`question-${session.id}`} session={session} />
+            )}
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
@@ -1297,6 +1305,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               错乱防线，T1 活状态流） */}
           {session.status === "waiting" && (
             <ApproveCard key={`approve-${session.id}`} session={session} />
+          )}
+          {/* 问答卡（批次乙 T8）：正文视图同一挂载口径（waiting 态 + question- 前缀），
+              语义见分屏分支注释（硬约束①两卡互斥自隐 + key 前缀防线） */}
+          {session.status === "waiting" && (
+            <QuestionCard key={`question-${session.id}`} session={session} />
           )}
           <MessageScrollArea
             fontScale={fontScale}
