@@ -1746,12 +1746,49 @@ pub async fn session_open(
     let outcome = match tokio::task::spawn_blocking(
         move || -> Result<(String, Result<(), String>), String> {
             // 复合键口径（Task 5 教训）：快照里按 id 找第一个匹配——契约如此
-            let Some(session) = (probe_st.session_source)()
+            let session = match (probe_st.session_source)()
                 .sessions
                 .into_iter()
                 .find(|s| s.id == probe_sid)
-            else {
-                return Err("no_session".to_string());
+            {
+                Some(s) => s,
+                // 归档回退（spec §6.2）：死会话经登记表复活。id 仍取自本机数据
+                // （登记行），不回显远端输入——resume.rs 安全口径不变；构造的
+                // Session 仅 resume 链消费的三字段有效（id/agent_type/project_path），
+                // 其余字段为中性缺省（不上面板）
+                None => {
+                    let Some(row) = (probe_st.archive_source)()
+                        .into_iter()
+                        .find(|r| r.session_id == probe_sid)
+                    else {
+                        return Err("no_session".to_string());
+                    };
+                    let Some(agent_type) =
+                        crate::database::agent_type_from_tool_id(&row.agent_type)
+                    else {
+                        // 未知 tool_id：resume_command 必返 None，提前以既有哨兵回退
+                        return Err("no_resume_command".to_string());
+                    };
+                    crate::session::Session {
+                        id: row.session_id,
+                        agent_type,
+                        project_name: row.project_name,
+                        project_path: row.project_path,
+                        title: row.title,
+                        git_branch: None,
+                        github_url: None,
+                        status: crate::session::SessionStatus::Waiting,
+                        last_message: None,
+                        last_message_role: None,
+                        last_activity_at: row.last_seen.clone(),
+                        pid: 0,
+                        cpu_usage: 0.0,
+                        active_subagent_count: 0,
+                        form: crate::session::ProcessForm::Cli,
+                        jump_supported: false,
+                        unread: false,
+                    }
+                }
             };
             let tool = session.agent_type.tool_id().to_string();
             let r = crate::inject::resume::open_session_terminal_with(

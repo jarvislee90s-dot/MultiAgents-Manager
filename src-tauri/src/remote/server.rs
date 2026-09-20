@@ -4820,4 +4820,142 @@ mod tests {
             assert_eq!(r.status(), 400);
         }
     }
+
+    // ==== Task 4：session-open 归档回退（spec 2026-09-20-mobile-archive-history §6.2）====
+    mod session_open_archive_fallback_tests {
+        use super::*;
+        use crate::database::SessionArchiveRow;
+
+        /// macOS 端点路径固定接生产效果回查探针（open_session_terminal_with →
+        /// open_macos_with → macos_effect_probe：轮询进程表 3s 找 resume 特征子串，
+        /// resume_effect_in_snapshot 按 cmd 拼接串 contains 命中）。spawner 假体 Ok
+        /// 后若探针未命中，双通道按「死窗」级联 failed——既有
+        /// session_open_endpoint_opens_and_audits 预存失败即此根因（task-3-report）。
+        /// 故出手时顺手种一个 argv 携 resume 特征的暗桩进程（`sh -c "sleep 5 # 特征"`，
+        /// 首轮/次轮采样即命中；5s > 3s 回查窗自灭，非终端窗口——「零真开窗」约束
+        /// 不破，~/.mam 零污染）。非 macOS 平台无回查探针，运行时 no-op。
+        fn spawn_effect_decoy(resume_cmd: &str) {
+            if !cfg!(target_os = "macos") {
+                return;
+            }
+            let _ = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("sleep 5 # {resume_cmd}"))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+
+        /// 归档回退测试 state：活快照保持 test_state 默认（空会话集）——只换归档缝
+        /// 与 spawn 缝。Arc::get_mut 就地换缝先例见 archive_api_tests::archive_state；
+        /// 新路由结构性在 PIN gate 之后（nest 内层）：persist_device 播种 + req 带
+        /// cookie 过闸（全文件先例；简报原始形态无凭据，同 Task 3 简报偏差修复 3）
+        fn fallback_state(
+            rows: Vec<SessionArchiveRow>,
+            spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
+        ) -> axum::Router {
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.resume_spawner = spawner;
+            persist_device(&st, "arch");
+            crate::remote::server::router(st)
+        }
+
+        /// 归档回退主路径：活快照未命中 + 登记表命中 → 构造 Session 走既有 resume
+        /// 链——spawner 收到的载荷必须携带归档行 cwd（/tmp/proj-dead）与 resume 命令
+        /// （codex resume dead-9，命令表 codex 条目产物），回执 200 opening，出手恰
+        /// 一次（id 取自登记行而非远端输入的口径由实现侧保证：载荷命令里的是登记行
+        /// session_id，若实现误回显远端输入，本测试输入与登记行同 id 无法区分——
+        /// 双未命中 404 用例 + 实现注释守此口径）。
+        /// 注：本测试在 Windows 上跑走 Windows 分支（open_session_terminal_with 按
+        /// std::env::consts::OS 分派；macos_tcc 先例 :4614 同注），载荷断言按 cfg
+        /// 分诊：macOS 断言 MacosApplescript 脚本全文、Windows 断言 SpawnSpec::Windows
+        /// 的 cwd/args 字段——两分支断言语义同构（cwd + resume 命令落点），跨平台
+        /// 均可编译（cfg! 运行时布尔，两分支全平台参与编译）。
+        #[tokio::test]
+        async fn dead_session_opens_from_archive() {
+            let row = SessionArchiveRow {
+                session_id: "dead-9".into(),
+                agent_type: "codex".into(),
+                project_path: "/tmp/proj-dead".into(),
+                project_name: "proj-dead".into(),
+                title: None,
+                last_status: "idle".into(),
+                first_seen: String::new(),
+                last_seen: chrono::Utc::now().to_rfc3339(),
+                updated_at: String::new(),
+            };
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let f2 = fired.clone();
+            let spawner: std::sync::Arc<crate::inject::resume::SpawnFn> =
+                std::sync::Arc::new(move |spec: &crate::inject::resume::SpawnSpec| {
+                    f2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if cfg!(windows) {
+                        // Windows 分支：cwd 字段 = 归档行项目目录，args 携 resume 命令
+                        // （wt 分支 `-d cwd cmd /k <resume>` / conhost 分支 `cmd /k`）
+                        let crate::inject::resume::SpawnSpec::Windows { cwd, args, .. } = spec
+                        else {
+                            return Err("Windows 应收 Windows spec".into());
+                        };
+                        if cwd == "/tmp/proj-dead"
+                            && args.iter().any(|a| a.contains("codex resume dead-9"))
+                        {
+                            Ok(())
+                        } else {
+                            Err(format!("payload 不含归档 cwd/resume 命令: {cwd} {args:?}"))
+                        }
+                    } else {
+                        // macOS 分支：断言 AppleScript 脚本全文携带归档 cwd/resume 命令
+                        let crate::inject::resume::SpawnSpec::MacosApplescript { script } = spec
+                        else {
+                            return Err("macOS 应收 MacosApplescript spec".into());
+                        };
+                        if !(script.contains("/tmp/proj-dead")
+                            && script.contains("codex resume dead-9"))
+                        {
+                            return Err(format!("payload 不含归档 cwd/resume 命令: {script}"));
+                        }
+                        // 效果回查要真命中：种 argv 携特征的暗桩（见 spawn_effect_decoy 注）
+                        spawn_effect_decoy("codex resume dead-9");
+                        Ok(())
+                    }
+                });
+            let app = fallback_state(vec![row], spawner);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-open",
+                    Some("mam_device=arch"),
+                    Some(r#"{"sessionId":"dead-9"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["status"], "opening");
+            assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        /// 双未命中：活快照空 + 登记表空 → 既有 404 no_session 契约不破（归档回退
+        /// 不得放宽未知 id 的拒绝口径）
+        #[tokio::test]
+        async fn neither_live_nor_archive_still_404() {
+            let spawner: std::sync::Arc<crate::inject::resume::SpawnFn> =
+                std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(()));
+            let app = fallback_state(Vec::new(), spawner);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-open",
+                    Some("mam_device=arch"),
+                    Some(r#"{"sessionId":"ghost"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404);
+        }
+    }
 }
