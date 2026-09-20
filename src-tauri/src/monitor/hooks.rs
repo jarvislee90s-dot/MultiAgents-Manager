@@ -1528,8 +1528,7 @@ fn run_live_event_check(tool: LiveTool) {
                     probe.push(extra);
                 }
             }
-            register_kimi_hooks_for_tool(&settings_path, &probe, &spec)
-                .expect("kimi 沙箱注册失败");
+            register_kimi_hooks_for_tool(&settings_path, &probe, &spec).expect("kimi 沙箱注册失败");
         }
     }
 
@@ -1598,7 +1597,10 @@ fn run_live_event_check(tool: LiveTool) {
     // 失败时给出 CLI 输出（kimi 的 No model configured 等前置问题一眼可辨）
     if landed.is_empty() {
         if let Ok(out) = child.wait_with_output() {
-            cli_output = String::from_utf8_lossy(&out.stdout).chars().take(600).collect();
+            cli_output = String::from_utf8_lossy(&out.stdout)
+                .chars()
+                .take(600)
+                .collect();
         }
     } else {
         let _ = child.kill();

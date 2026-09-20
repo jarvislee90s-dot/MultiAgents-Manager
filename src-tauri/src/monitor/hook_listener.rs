@@ -292,10 +292,20 @@ mod tests {
         // claude / codex：裸 UUID（连字符）
         assert!(session_id_allowed("ec770a70-519f-43c9-81ca-9c74038ead8d"));
         // kimi：session_ 前缀 + UUID（下划线 + 连字符）——F8 修复点
-        assert!(session_id_allowed("session_ec770a70-519f-43c9-81ca-9c74038ead8d"));
-        assert!(session_id_allowed("session_44554114-366e-4c61-9a57-733a3f3b79d0"));
+        assert!(session_id_allowed(
+            "session_ec770a70-519f-43c9-81ca-9c74038ead8d"
+        ));
+        assert!(session_id_allowed(
+            "session_44554114-366e-4c61-9a57-733a3f3b79d0"
+        ));
         // 下划线放行不引入穿越面：路径分隔符与点号仍拒绝
-        for bad in ["session_../x", "session_/x", "session_\\x", "session_.", ".._"] {
+        for bad in [
+            "session_../x",
+            "session_/x",
+            "session_\\x",
+            "session_.",
+            ".._",
+        ] {
             assert!(!session_id_allowed(bad), "{bad:?} 必须拒绝（防注入）");
         }
         // 端到端一致性：kimi 形态经 parse_hook_stdin 可达（不是只过了谓词）

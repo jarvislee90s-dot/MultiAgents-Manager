@@ -788,7 +788,11 @@ mod tests {
         let table: &[(&str, HookMarkAction, Option<SessionStatus>)] = &[
             // claude 九事件
             ("Stop", HookMarkAction::Clear, None), // 状态随 grace 分岔，另测
-            ("UserPromptSubmit", HookMarkAction::Clear, Some(SessionStatus::Thinking)),
+            (
+                "UserPromptSubmit",
+                HookMarkAction::Clear,
+                Some(SessionStatus::Thinking),
+            ),
             (
                 "SessionStart",
                 HookMarkAction::None,
@@ -799,7 +803,11 @@ mod tests {
                 HookMarkAction::Clear,
                 Some(SessionStatus::Finished),
             ),
-            ("PreToolUse", HookMarkAction::None, Some(SessionStatus::Processing)),
+            (
+                "PreToolUse",
+                HookMarkAction::None,
+                Some(SessionStatus::Processing),
+            ),
             ("PostToolUse", HookMarkAction::Clear, None),
             ("PostToolUseFailure", HookMarkAction::Clear, None),
             (
@@ -807,7 +815,11 @@ mod tests {
                 HookMarkAction::Entry,
                 Some(SessionStatus::Waiting),
             ),
-            ("Notification", HookMarkAction::Entry, Some(SessionStatus::Waiting)),
+            (
+                "Notification",
+                HookMarkAction::Entry,
+                Some(SessionStatus::Waiting),
+            ),
             // codex 追加：PermissionRequest（同 claude）+ Interrupt（清除族）
             ("Interrupt", HookMarkAction::Clear, None),
             // kimi 二事件：PermissionResult=清除（F1 修复点——审批后回落绿灯）
@@ -896,7 +908,11 @@ mod tests {
         let ts_secs: i64 = 1_000_000; // 标记写入时刻（秒）
         let now_ms = ts_secs * 1000;
         // 会话在场（不论多老）→ 不清
-        assert!(!approval_mark_should_clear(false, now_ms + 10_000_000, ts_secs));
+        assert!(!approval_mark_should_clear(
+            false,
+            now_ms + 10_000_000,
+            ts_secs
+        ));
         // 缺席但未超窗（59.9s）→ 不清
         assert!(!approval_mark_should_clear(true, now_ms + 59_900, ts_secs));
         // 缺席且刚超窗（60.1s）→ 清
@@ -923,7 +939,12 @@ mod tests {
         let tool = s.agent_type.tool_id().to_string();
 
         // ① 进入事件 → Entry → 写标记
-        let action = apply_hook_event_to_session(&mut s, &hook_ev("PermissionRequest", now), &mut grace, now);
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev("PermissionRequest", now),
+            &mut grace,
+            now,
+        );
         assert_eq!(action, HookMarkAction::Entry);
         if action == HookMarkAction::Entry {
             approval_wait::mark(&conn, &tool, &s.id, now, "等待审批");
@@ -937,7 +958,12 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Waiting, "有标记必须强制 Waiting");
 
         // ② 清除事件（kimi PermissionResult）→ Clear → 删标记 → 叠加层不介入
-        let action = apply_hook_event_to_session(&mut s, &hook_ev("PermissionResult", now + 1), &mut grace, now + 1);
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev("PermissionResult", now + 1),
+            &mut grace,
+            now + 1,
+        );
         assert_eq!(action, HookMarkAction::Clear, "kimi 审批完成必须产 Clear");
         approval_wait::clear(&conn, &tool, &s.id);
         // 回落：叠加层不再强制；重新按文件推导装配（模拟下一轮扫描判 Processing）
