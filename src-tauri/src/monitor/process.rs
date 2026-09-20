@@ -17,7 +17,9 @@ pub fn is_orphaned_process(system: &System, process: &sysinfo::Process) -> bool 
     }
     if let Some(parent_process) = system.process(parent_pid) {
         if let Some(grandparent_pid) = parent_process.parent() {
-            if grandparent_pid.as_u32() == 1 {
+            if grandparent_pid.as_u32() == 1
+                && !is_terminal_multiplexer(&parent_process.name().to_string_lossy())
+            {
                 return true;
             }
         }
@@ -25,6 +27,14 @@ pub fn is_orphaned_process(system: &System, process: &sysinfo::Process) -> bool 
         return true;
     }
     false
+}
+
+/// 终端复用器豁免（孤儿判定）：tmux/screen 的 server 进程被 launchd(PID 1) 收养是
+/// 常态（daemon 化），其直接子进程不是孤儿——npm shim exec 型工具（如 kimi）在
+/// tmux 直启时「父=tmux server、祖父=1」，此前被误判孤儿永不上板（Mac 实测
+/// 2026-09-20）；claude/codex 的 shim 是 spawn 不 exec（进程链多一层）不受影响。
+fn is_terminal_multiplexer(parent_name: &str) -> bool {
+    matches!(parent_name.to_lowercase().as_str(), "tmux" | "screen")
 }
 
 /// 归一化候选字符串：统一为 / 分隔、转小写，取 basename，去 Windows .exe 扩展名
@@ -234,7 +244,6 @@ mod tests {
             assert!(exe_matches("codex", &["codex", "Codex"]));
             assert!(exe_matches("claude", &["claude"]));
         }
-
         #[test]
         fn matches_unix_path_without_extension() {
             // 旧行为兼容：macOS 内嵌 codex app-server
@@ -383,6 +392,24 @@ mod tests {
             assert!(!codex_process_names().contains(&"chatgpt"));
             // 双平台都保留 codex（CLI 与 macOS 内嵌运行时）
             assert!(codex_process_names().contains(&"codex"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod multiplexer_exemption_tests {
+    use super::is_terminal_multiplexer;
+
+    /// 孤儿判定豁免回归锁（Mac 实测 2026-09-20）：tmux/screen server 父=launchd
+    /// 是常态，其直接子进程（npm shim exec 型工具如 kimi）不得判孤儿
+    #[test]
+    fn multiplexer_parents_are_exempt() {
+        for name in ["tmux", "TMUX", "screen", "Screen"] {
+            assert!(is_terminal_multiplexer(name), "{name}");
+        }
+        // 非复用器不豁免（如 zsh 退出后的 reparent 场景照常判孤儿）
+        for name in ["zsh", "bash", "login", "codex"] {
+            assert!(!is_terminal_multiplexer(name), "{name}");
         }
     }
 }

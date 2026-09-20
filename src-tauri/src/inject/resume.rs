@@ -374,22 +374,23 @@ pub fn resume_effect_in_snapshot(resume_cmd: &str, snapshot: &[String]) -> bool 
 /// 采命令行快照交 [`resume_effect_in_snapshot`] 判定（sysinfo 0.32：
 /// refresh_processes 增量关 + 全量刷；`cmd()` 为 OsStr 连接成串）。
 fn macos_effect_probe(resume_cmd: &str) -> bool {
-    use sysinfo::ProcessesToUpdate;
     let mut sys = sysinfo::System::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(EFFECT_CHECK_SECS);
+    let mut self_checked = false;
     loop {
-        sys.refresh_processes(ProcessesToUpdate::All, true);
-        let snapshot: Vec<String> = sys
-            .processes()
-            .values()
-            .map(|p| {
-                p.cmd()
-                    .iter()
-                    .map(|a| a.to_string_lossy().replace('\\', "/"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect();
+        let snapshot = refresh_cmd_snapshot(&mut sys);
+        // 数据源自检（每轮探针只报一次）：自身进程 cmd 为空 = 刷新配置失效
+        // （回归观测点——两参 refresh 默认 Kind 不刷 cmd 即此形态，2026-09-20 Mac 实测）
+        if !self_checked {
+            self_checked = true;
+            if let Some(me) = sys.process(sysinfo::Pid::from_u32(std::process::id())) {
+                if me.cmd().is_empty() {
+                    log::error!(
+                        "macos_effect_probe 自检：自身进程 cmd() 为空——进程刷新配置异常，效果回查将恒假阴性"
+                    );
+                }
+            }
+        }
         if resume_effect_in_snapshot(resume_cmd, &snapshot) {
             return true;
         }
@@ -398,6 +399,29 @@ fn macos_effect_probe(resume_cmd: &str) -> bool {
         }
         std::thread::sleep(std::time::Duration::from_millis(EFFECT_CHECK_POLL_MS));
     }
+}
+
+/// 进程表全量刷新并返回命令行快照。**必须用 specifics 显式刷 cmd**：sysinfo 0.32
+/// 两参 `refresh_processes` 的默认 `ProcessRefreshKind` 不含 cmd 字段——`cmd()`
+/// 全量返回空（Mac 实测 2026-09-20：662 进程 empty_cmd=662），效果回查恒假阴性。
+/// 与主扫描（adapter/mod.rs）同款口径。
+fn refresh_cmd_snapshot(sys: &mut sysinfo::System) -> Vec<String> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::new().with_cmd(UpdateKind::Always),
+    );
+    sys.processes()
+        .values()
+        .map(|p| {
+            p.cmd()
+                .iter()
+                .map(|a| a.to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
 /// macOS 双通道缝出手（F1 治理后：**Terminal.app 优先、iTerm2 次选**——mac-reverify
@@ -946,6 +970,25 @@ mod tests {
         assert_eq!(
             classify_resume_error("   "),
             "osascript 执行失败（无 stderr 输出）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cmd_snapshot_tests {
+    use super::refresh_cmd_snapshot;
+
+    /// sysinfo 两参 refresh 回归锁（Mac 实测 2026-09-20：默认 Kind 不刷 cmd，
+    /// 全量进程 cmd() 为空 → resume 效果回查恒假阴性）：specifics 刷新后
+    /// 自身进程命令行必须非空。跨平台常跑（Windows 门禁即锁）。
+    #[test]
+    fn cmd_snapshot_own_process_cmd_nonempty() {
+        let mut sys = sysinfo::System::new();
+        let _ = refresh_cmd_snapshot(&mut sys);
+        let me = sys.process(sysinfo::Pid::from_u32(std::process::id()));
+        assert!(
+            me.map(|p| !p.cmd().is_empty()).unwrap_or(false),
+            "自身进程 cmd() 为空——进程刷新配置回归（两参 refresh 默认 Kind 不含 cmd）"
         );
     }
 }
