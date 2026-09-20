@@ -1033,6 +1033,11 @@ async fn e2e_http_full_chain() {
         store: DeviceStore::memory(), // 内存库——零接触真实 ~/.mam/mam.db
         injector: Arc::new(multi_agents_manager_lib::inject::engine::RealInjector),
         resume_spawner: Arc::new(|_: &multi_agents_manager_lib::inject::resume::SpawnSpec| Ok(())),
+        // 历史会话区缝（spec 2026-09-20-mobile-archive-history §6.1）：E2E 不触归档
+        // 路径，注空桩。本文件 #![cfg(windows)]——macOS 开发机上编译为空，漏补会在
+        // Windows 测试构建上 E0063 missing fields（评审 Critical，2026-09-20）
+        archive_source: Box::new(Vec::new),
+        archive_delete: Arc::new(|_: Option<&str>| 0usize),
         // 真 confirm_probe（生产同源装配：读路径 + 尾戳 user 侧命中）
         confirm_probe: Arc::new(|tool: &str, s: &str, stamp: &str| -> bool {
             read_session_messages(tool, s, PROBE_LIMIT)
