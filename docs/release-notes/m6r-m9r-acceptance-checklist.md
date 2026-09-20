@@ -185,8 +185,10 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 
 > **F8 台账追记（2026-09-21，三家矩阵真实状态）**：
 > ① **claude** = 全链实测通（C-18 自检 1.1s 过，事件落盘含 SessionEnd/Stop 等；print
-> 模式 stdin 为空但生命周期事件照常触发，helper 管道不需 stdin 亦可判事件名——实测
-> SessionEnd 事件文件 sid/event 齐备）；
+> 模式 claude 进程的**会话** stdin 为空（探测 harness 的 tee 仅收 BOM）不影响钩子
+> 管道——钩子触发时 claude 照常向 helper 投递 payload JSON，helper 依赖并正常消费
+> 该 stdin 解析出 sid/event 才写事件文件（`hook_listener::parse_hook_stdin`），
+> 实测 SessionEnd 事件文件 sid/event 齐备正是管道正常工作的证据）；
 > ② **kimi** = 全链实测通（C-19 自检 2.3s 过；并发现并修复 session_id 下划线白名单
 > 缺陷，见 `hook_listener::session_id_allowed`）；
 > ③ **codex** = 链路通至信任门前一步（自检实跑：exec 会话正常完成、事件不落盘
