@@ -179,6 +179,20 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-15 | 真机蜂窝网络复验（原用户项） | 外网蜂窝网络手机 + Windows 实机 | 蜂窝网络下远程发消息走全链 | 占位：沿用既有验收口径，未在本批新增内容 |
 | C-16 | codex hooks 触发复验（**F3 PascalCase 修复后**，M1A 前置；**T2 后注册面扩为 8 键**） | codex 0.155.x 在场 | 跑 `cargo test --lib monitor::hooks::codex_pascal -- --ignored`（注册写入真实 ~/.codex/hooks.json）→ 跑一次真实 codex 交互会话 | hooks.json 出现 PascalCase 8 键（六状态键 + `PermissionRequest`/`Interrupt`，T2）且旧 camelCase 键被迁移清除；会话期间 `~/.mam/events/<session_id>.json` 出现（hook 真触发）。自动化形态：`cargo test --lib monitor::hooks::codex_hook_events_really_fire -- --ignored`（T2 沙箱自检，tempdir CODEX_HOME/MAM_HOME）。调研锚点：`research/refs/phase2-消息注入/2026-09-19-审批事件钩子通道调研.md`（0.155.1 键名 PascalCase 源码证据 §3.2；M1A 红卡=钩子信号+固定键位） |
 | C-17 | codex hooks 信任门（**T2 新增**，C-8 根因③） | codex 0.155.x 在场，MAM 已注册 hooks（先跑 C-16 步骤①） | 开 codex TUI → 输入 `/hooks` | MAM 钩子条目以 **Untrusted** 列出 → 逐条审阅并信任（trust 后 hash 落用户层 config，仅需一次）→ 重跑一次会话确认 `~/.mam/events/<session_id>.json` 出现；**未信任前钩子不触发**（事件文件缺席为预期行为，不算 FAIL）；重启 codex 后信任态保持（无需重复信任）。注册侧引导：MAM 每次注册成功 log::warn 提示本流程 |
+| C-18 | **claude hooks 触发复验（F8 新增）** | claude 在场（**无需登录**——实测未登录态钩子照常触发）；前置=debug helper 已构建 | 跑 `cargo test --lib monitor::hooks::claude_hook_events_really_fire -- --ignored` | 沙箱自检（tempdir `--settings` 文件 + MAM_HOME 重定向）：注册后跑真实 `claude -p` 一回合，`~/.mam/events/<session_id>.json` 落盘且形态合法（sid 白名单/UUID 形态、event 非空）。**实测已过（2026-09-21，1.1s）**。注意：claude **无信任门**（与 codex 的 C-17 不同族）、**无 `CLAUDE_CONFIG_DIR` 语义**（沙箱靠 `--settings <file>`）——两条均为本批实机取证结论 |
+| C-19 | **kimi hooks 触发复验（F8 新增）** | kimi 已装且 `~/.kimi-code/config.toml` 有可用模型；前置=debug helper 已构建 | 跑 `cargo test --lib monitor::hooks::kimi_hook_events_really_fire -- --ignored` | 沙箱自检（tempdir `KIMI_CODE_HOME`，config.toml 由真实配置只读复制后追加 `[[hooks]]`）：事件落盘且 **sid 为 `session_<uuid>` 形态**（下划线前缀——F8 修复点，旧白名单拒收该形态致 kimi 事件全量静默丢弃）。**实测已过（2026-09-21，2.3s）**。注意：**审批事件（PermissionRequest/PermissionResult）在无头 `-p` 模式不触发**（实测仅 SessionStart/UserPromptSubmit/Stop 触发），故自检注册面额外并入三个生命周期事件作管道探针——审批事件真触发归人工交互会话（C-20 矩阵） |
+| C-20 | **三家实机矩阵（claude / codex / kimi；F8 就绪）** | 三家 CLI 在场；codex 需先过信任门（C-17）；helper 已 debug 构建 | ① 三家各跑一条 `--ignored` 自检（C-16/C-18/C-19，自动化形态）；② **人工交互会话**（三家各一）：claude 触发权限提示、codex 触发审批框、kimi 触发审批请求，期间观察 `~/.mam/events/<session_id>.json` 内容与看板红卡 | ① 三条自检全绿（claude/kimi 本批实测已过；codex 至信任门前一步=事件不落盘为**设计内**，见 C-17）；② 人工会话中审批进入事件落盘 → 看板该会话**强制 Waiting 红卡**（T4 接铃铛）→ 手机上批准/拒绝 → 对应事件（claude PostToolUse/Stop、codex PostToolUse/Stop、kimi **PermissionResult**）清除标记 → 卡片回落绿灯（**F1 修复点**：kimi 清除链此前漏接 PermissionResult，红灯永不落）。**人工项归用户执行**（agent 不代做交互会话） |
+
+> **F8 台账追记（2026-09-21，三家矩阵真实状态）**：
+> ① **claude** = 全链实测通（C-18 自检 1.1s 过，事件落盘含 SessionEnd/Stop 等；print
+> 模式 stdin 为空但生命周期事件照常触发，helper 管道不需 stdin 亦可判事件名——实测
+> SessionEnd 事件文件 sid/event 齐备）；
+> ② **kimi** = 全链实测通（C-19 自检 2.3s 过；并发现并修复 session_id 下划线白名单
+> 缺陷，见 `hook_listener::session_id_allowed`）；
+> ③ **codex** = 链路通至信任门前一步（自检实跑：exec 会话正常完成、事件不落盘
+> =untrusted 钩子不触发的**设计内行为**，C-17）；信任后即达与 claude/kimi 同档。
+> 三家共用的 helper 薄管道、白名单、注册/迁移逻辑均已有 tempdir 单测覆盖（非
+> 实机面），实机面差异集中在「各 CLI 的事件触发策略」与「codex 的信任门」两处。
 
 ---
 

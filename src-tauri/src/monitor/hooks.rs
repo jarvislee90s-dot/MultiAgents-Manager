@@ -1349,6 +1349,298 @@ fn codex_hook_events_really_fire_in_real_session() {
     }
 }
 
+/// F8 实机自检（claude）：注册真实 helper 钩子 → 跑一次真实 claude 会话 →
+/// 断言 **事件文件真落盘**（全链取证：注册形态 → CLI 触发 → helper 管道 →
+/// `~/.mam/events/<session_id>.json`）。
+///
+/// 与 codex 版（[`codex_hook_events_really_fire_in_real_session`]）的三处差异，
+/// 均为 claude 侧实机取证结论（2026-09-21）：
+/// ① **沙箱靠 `--settings <file>` 而非 env**：claude 无 `CLAUDE_CONFIG_DIR` 语义
+///    （实测该变量对 settings.json 定位无效），`--settings` 显式指向沙箱 JSON 是
+///    零接触真实 `~/.claude` 的唯一干净路径；
+/// ② **无信任门**：claude 不校验钩子来源（codex 0.155 的 untrusted 门是 codex 独有），
+///    故本测试在裸环境即可全绿——这正是它与 codex 版最大的行为差；
+/// ③ **print 模式（`-p`）不发 stdin 且不出发审批事件**（实测：`-p` 下 SessionStart
+///    类钩子的 stdin 为空、PermissionRequest 不触发）——但 **SessionEnd 等生命周期
+///    事件照常触发**且 stdin 完整，故本测试以「有事件落盘」为判据即可覆盖管道全链；
+///    审批类事件的真触发归人工交互会话（验收清单 C-7/C-17 同族）。
+///
+/// 前置：claude 已安装（无需登录——实测未登录态钩子照常触发）；helper 已 debug
+/// 构建（MAM_HOME 重定向仅 debug 生效，release helper 会写真实 ~/.mam）。
+#[test]
+#[ignore = "实机验证：跑真实 claude 会话验证事件落盘（前置=debug helper；claude 无需登录）"]
+fn claude_hook_events_really_fire_in_real_session() {
+    run_live_event_check(LiveTool::Claude);
+}
+
+/// F8 实机自检（kimi）：注册真实 helper 钩子 → 跑一次真实 kimi 会话 → 断言事件落盘。
+///
+/// kimi 侧四处实机取证结论（2026-09-21，全部并入 F8 台账）：
+/// ① **沙箱靠 `KIMI_CODE_HOME`**（官方数据根重定向，config.toml 随根走）——但
+///    **必须带可用模型配置**：空根下 kimi 直接 `No model configured` 退出、钩子
+///    根本不进（实测），故本测试**复制真实 `~/.kimi-code/config.toml` 到沙箱**后
+///    追加 `[[hooks]]`（只读复制、不写真实文件；config 内含 provider key，仅本地
+///    拷贝不做任何外传，测试结束随 tempdir 回收）；
+/// ② **session_id 是 `session_<uuid>`**（下划线前缀）——helper 白名单 F8 前拒收
+///    该形态，kimi 事件曾全量静默丢弃（见 `hook_listener::session_id_allowed`）；
+///    本测试即该修复的端到端回归锁；
+/// ③ **stdin JSON 三家同形**（实测 kimi `-p` 模式：hook_event_name/session_id/cwd
+///    齐备，与 claude/codex 同管道）——helper 薄管道零特判即兼容；
+/// ④ **审批事件在无头模式不触发**（实测 `-p` 下 PermissionRequest/PermissionResult
+///    静默，仅 SessionStart/UserPromptSubmit/Stop 触发）——故本测试**额外注册三个
+///    生命周期事件**作为管道探针（kimi 生产注册面仍只有两个审批事件，不动），
+///    审批事件的真触发归人工交互会话（验收清单三家矩阵）。
+///
+/// 前置：kimi 已安装且 `~/.kimi-code/config.toml` 有可用模型（否则沙箱复制后仍
+/// `No model configured`，测试以清晰提示失败）；helper 已 debug 构建。
+#[test]
+#[ignore = "实机验证：跑真实 kimi 会话验证事件落盘（前置=debug helper + kimi 可用模型配置）"]
+fn kimi_hook_events_really_fire_in_real_session() {
+    run_live_event_check(LiveTool::Kimi);
+}
+
+/// F8 实机自检目标工具（两家共用同一取证骨架：沙箱装配 → 注册 → 跑会话 → 判落盘）
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum LiveTool {
+    Claude,
+    Kimi,
+}
+
+#[cfg(test)]
+impl LiveTool {
+    fn tool_id(self) -> &'static str {
+        match self {
+            LiveTool::Claude => "claude",
+            LiveTool::Kimi => "kimi",
+        }
+    }
+    /// CLI 可执行名（PATH 上的入口；Windows 下 claude/kimi 均为 .cmd/裸 exe 形态）
+    fn cli(self) -> &'static str {
+        self.tool_id()
+    }
+    /// print 模式单回合命令（无头跑一回合即退；两家参数形态实测同构）
+    fn print_args(self) -> Vec<&'static str> {
+        vec!["-p", "Reply with the single word: ok"]
+    }
+}
+
+/// 实机取证骨架（两家共用）：tempdir 沙箱（配置根 / MAM 数据根 / 工作目录）→
+/// 按生产规格注册全部事件 → spawn 真实 CLI 无头会话（env 注入沙箱根）→ 轮询
+/// events 目录 → 断言落盘 + 形态合法。零接触真实 `~/.mam`（MAM_HOME 重定向）与
+/// 真实工具配置（claude `--settings` / kimi 沙箱 KIMI_CODE_HOME）。
+#[cfg(test)]
+fn run_live_event_check(tool: LiveTool) {
+    use crate::adapter::AgentAdapter;
+
+    // 前置自检：CLI 在场（npm 全局目录补 PATH——后台/沙箱环境常缺）
+    let npm_dir = std::env::var("USERPROFILE")
+        .map(|u| format!("{}\\AppData\\Roaming\\npm", u))
+        .unwrap_or_default();
+    let aug_path = move |cmd: &mut std::process::Command| {
+        let p = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{npm_dir};{p}"));
+    };
+    let spawn_cli = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut bare = std::process::Command::new(tool.cli());
+        bare.args(args).stdin(std::process::Stdio::null());
+        aug_path(&mut bare);
+        let out = bare.output();
+        if out.is_ok() {
+            return out;
+        }
+        // .cmd 垫片回退（CreateProcess 不解析 .cmd；codex 版同款教训）
+        let mut sh = std::process::Command::new("cmd");
+        sh.args(["/c", tool.cli()])
+            .args(args)
+            .stdin(std::process::Stdio::null());
+        aug_path(&mut sh);
+        sh.output()
+    };
+    let ver = spawn_cli(&["--version"])
+        .unwrap_or_else(|e| panic!("{} 命令不可用（本测试需实机安装）：{e}", tool.cli()));
+    assert!(ver.status.success(), "{} --version 失败", tool.cli());
+
+    // helper 必须已 debug 构建（MAM_HOME 重定向仅 debug 生效）
+    let exe_name = if cfg!(windows) {
+        "mam-hook-listener.exe"
+    } else {
+        "mam-hook-listener"
+    };
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let helper = target_dir.join("debug").join(exe_name);
+    assert!(
+        helper.is_file(),
+        "helper 未构建：先跑 cargo build --bin mam-hook-listener --features hook-listener \
+         （必须 debug 构建——MAM_HOME 重定向仅 debug 生效）"
+    );
+
+    let cfg_home = tempfile::tempdir().unwrap();
+    let mam_home = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+    let adapter: &dyn AgentAdapter = match tool {
+        LiveTool::Claude => &crate::adapter::claude::ClaudeAdapter,
+        LiveTool::Kimi => &crate::adapter::kimi::KimiAdapter,
+    };
+    let events = adapter.hook_events();
+
+    // ---- 注册：按生产规格（claude JSON / kimi TOML），helper 指向已构建实体 ----
+    // claude 的注册目标不是 hooks 配置路径（settings.json）而是 --settings 文件；
+    // kimi 的注册目标即沙箱 config.toml
+    let settings_path = match tool {
+        LiveTool::Claude => cfg_home.path().join("settings.json"),
+        // kimi：复制真实 config.toml（含可用模型）后追加 [[hooks]]
+        LiveTool::Kimi => {
+            let real = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".kimi-code")
+                .join("config.toml");
+            let dst = cfg_home.path().join("config.toml");
+            let real_content = std::fs::read_to_string(&real).unwrap_or_else(|e| {
+                panic!(
+                    "读不到真实 kimi 配置 {}（前置：kimi 已装且有可用模型）：{e}",
+                    real.display()
+                )
+            });
+            std::fs::write(&dst, real_content).unwrap();
+            dst
+        }
+    };
+    let fake_script = cfg_home.path().join("status-hook.sh");
+    let spec = hook_command_spec_for(tool.tool_id(), &fake_script, Some(&helper));
+    match tool {
+        LiveTool::Claude => {
+            let matchers: Vec<(&str, &str)> = events
+                .iter()
+                .filter_map(|e| adapter.hook_event_matcher(e).map(|m| (*e, m)))
+                .collect();
+            register_hooks_for_tool(&settings_path, &events, true, &spec, &matchers)
+                .expect("claude 沙箱注册失败");
+        }
+        LiveTool::Kimi => {
+            // 探针事件并入（见 kimi 测试 doc ④）：审批事件无头模式不触发，注册面
+            // 补三个生命周期事件做管道取证；生产注册面（hook_events）不变
+            let mut probe: Vec<&str> = events.clone();
+            for extra in ["SessionStart", "UserPromptSubmit", "Stop"] {
+                if !probe.contains(&extra) {
+                    probe.push(extra);
+                }
+            }
+            register_kimi_hooks_for_tool(&settings_path, &probe, &spec)
+                .expect("kimi 沙箱注册失败");
+        }
+    }
+
+    // ---- 跑真实无头会话（沙箱 env 注入）----
+    let args = tool.print_args();
+    let mut bare = std::process::Command::new(tool.cli());
+    bare.args(&args)
+        .env("MAM_HOME", mam_home.path())
+        .env("KIMI_CODE_HOME", cfg_home.path())
+        .current_dir(workdir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let LiveTool::Claude = tool {
+        bare.arg("--settings").arg(&settings_path);
+    }
+    aug_path(&mut bare);
+    let mut sh = std::process::Command::new("cmd");
+    sh.args(["/c", tool.cli()])
+        .args(&args)
+        .env("MAM_HOME", mam_home.path())
+        .env("KIMI_CODE_HOME", cfg_home.path())
+        .current_dir(workdir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let LiveTool::Claude = tool {
+        sh.arg("--settings").arg(&settings_path);
+    }
+    aug_path(&mut sh);
+    let mut child = bare
+        .spawn()
+        .or_else(|_| sh.spawn())
+        .unwrap_or_else(|e| panic!("{} 无头会话启动失败：{e}", tool.cli()));
+
+    // ---- 轮询事件目录 ≤180s（与 codex 版同预算；会话自然退出后再判）----
+    let events_dir = mam_home.path().join(".mam").join("events");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let mut landed: Vec<std::path::PathBuf> = Vec::new();
+    let mut early_exit = false;
+    let mut cli_output = String::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(entries) = std::fs::read_dir(&events_dir) {
+            landed = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            if !landed.is_empty() {
+                break;
+            }
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            early_exit = true;
+            // 会话已退出：再给 2s 余量后按落盘结果判
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if let Ok(entries) = std::fs::read_dir(&events_dir) {
+                landed = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                    .collect();
+            }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // 失败时给出 CLI 输出（kimi 的 No model configured 等前置问题一眼可辨）
+    if landed.is_empty() {
+        if let Ok(out) = child.wait_with_output() {
+            cli_output = String::from_utf8_lossy(&out.stdout).chars().take(600).collect();
+        }
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    let hint = match tool {
+        LiveTool::Claude => {
+            "排查：① claude 版本无 hooks 系统；② --settings 路径未被接受".to_string()
+        }
+        LiveTool::Kimi => format!(
+            "排查：① 沙箱 config.toml 缺可用模型（复制自真实配置，见前置）；\
+             ② kimi 版本无 [[hooks]] 支持；③ CLI 输出：{cli_output}"
+        ),
+    };
+    assert!(
+        !landed.is_empty(),
+        "180s 内 ~/.mam/events 无事件文件落盘——{} 的钩子未触发（early_exit={early_exit}）。{hint}",
+        tool.cli()
+    );
+    // 事件文件形态抽验：文件名即 session_id（白名单）、内容为读取侧格式
+    for path in &landed {
+        let sid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        assert!(
+            crate::monitor::hook_listener::session_id_allowed(sid),
+            "落盘文件名必须是白名单 session_id: {sid:?}"
+        );
+        if matches!(tool, LiveTool::Kimi) {
+            assert!(
+                sid.starts_with("session_"),
+                "kimi session_id 应为 session_<uuid> 形态（F8 实机取证）：{sid:?}"
+            );
+        }
+        let body = std::fs::read_to_string(path).expect("事件文件可读");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("事件文件是合法 JSON");
+        assert!(
+            v["event"].as_str().is_some_and(|e| !e.is_empty()),
+            "event 字段非空: {body}"
+        );
+    }
+}
+
 /// T1 命令规格纯决策（windows_semantics 显式驱动，双平台语义任意平台可测）
 #[cfg(test)]
 mod helper_command_spec_tests {
