@@ -448,6 +448,11 @@ fn get_all_sessions_inner() -> SessionsResponse {
             &format!("{:?}", session.status),
         );
     }
+    // 历史会话登记（spec 2026-09-20-mobile-archive-history §5）：扫描的旁路消费者，
+    // 挂在产物定序/过滤/排序全部完成之后——all_sessions 已定型，本调用纯读消费，
+    // 扫描产物（SessionsResponse）在登记前后逐字节一致（预算契约零触碰）。
+    // 无 cwd 会话与写放大守卫在 DAO 内处理
+    crate::database::register_sessions(&all_sessions);
     // 清理不再活跃的会话缓存
     let active_ids: HashSet<String> = all_sessions.iter().map(|s| s.id.clone()).collect();
     crate::database::cleanup_stale_sessions(&active_ids);
