@@ -244,6 +244,17 @@ pub type ArchiveDeleteFn = dyn Fn(Option<&str>) -> usize + Send + Sync;
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
+    /// 看板隐藏集合读源（APP 软归档，2026-09-20 体验批二）：生产 =
+    /// database::board_hidden_ids；测试注入固定集合（零真实 ~/.mam 接触）
+    pub board_hidden_ids: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// 隐藏写缝（hide）：生产 = database::board_hidden_hide；测试记录型假体
+    pub board_hidden_hide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
+    /// 解除隐藏写缝（unhide / 自动回归懒解除）：生产 = database::board_hidden_unhide；
+    /// 测试记录型假体
+    pub board_hidden_unhide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
+    /// CLI 会话硬杀缝（/session-close）：生产 = commands::session::kill_pid；
+    /// 测试记录型假体（零真杀进程）
+    pub session_close: std::sync::Arc<dyn Fn(u32) -> Result<(), String> + Send + Sync>,
     /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.mam）
     pub store: super::pairing::DeviceStore,
     /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
@@ -346,6 +357,11 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             "/sessions-archived",
             get(api::sessions_archived).delete(api::sessions_archived_delete),
         )
+        // 看板关闭/软归档（2026-09-20 体验批二）：CLI 硬杀 + APP 软归档/移回，
+        // 同在 nest 内结构性继承 PIN gate
+        .route("/session-close", post(api::session_close))
+        .route("/session-hide", post(api::session_hide))
+        .route("/session-unhide", post(api::session_unhide))
         // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
         // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
         // 内层 fallback 403）
@@ -454,6 +470,10 @@ mod tests {
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -991,6 +1011,10 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1367,6 +1391,10 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1488,6 +1516,10 @@ mod tests {
             // 本测试不触 /session-files：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1667,6 +1699,10 @@ mod tests {
                 )
             }),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1934,6 +1970,10 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -2077,6 +2117,10 @@ mod tests {
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 path_source: Box::new(|_, _, _| (Vec::new(), false)),
                 watcher_tx: tokio::sync::broadcast::channel(64).0,
+                board_hidden_ids: Box::new(Vec::new),
+                board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+                board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+                session_close: std::sync::Arc::new(|_| Ok(())),
                 sse_registry: Arc::new(SseRegistry::default()),
                 max_devices_source: Box::new(move || max_devices),
                 pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -2632,6 +2676,10 @@ mod tests {
                     message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                     path_source: Box::new(|_, _, _| (Vec::new(), false)),
                     watcher_tx: tokio::sync::broadcast::channel(64).0,
+                    board_hidden_ids: Box::new(Vec::new),
+                    board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+                    board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+                    session_close: std::sync::Arc::new(|_| Ok(())),
                     sse_registry: Arc::new(SseRegistry::default()),
                     max_devices_source: Box::new(|| 3),
                     pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -2888,6 +2936,10 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -3079,6 +3131,10 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -4448,6 +4504,10 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -4930,6 +4990,324 @@ mod tests {
             assert_eq!(got[0].as_deref(), Some("s9"));
             assert_eq!(got[1], None);
             assert_eq!(got[2], None);
+        }
+    }
+
+    // ==== 看板关闭/软归档（2026-09-20 体验批二）====
+    mod board_close_hide_tests {
+        use super::*;
+
+        /// 固定活快照 + 过闸凭据的测试 state（缝默认假体，按需 Arc::get_mut 覆盖）
+        fn state_with_sessions(sessions: Vec<crate::session::Session>) -> Arc<RemoteState> {
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.session_source = Box::new(move || crate::session::SessionsResponse {
+                total_count: sessions.len(),
+                waiting_count: 0,
+                sessions: sessions.clone(),
+            });
+            persist_device(&st, "bh");
+            st
+        }
+
+        /// App 形态会话夹具（inj_sess 默认 Cli，覆盖 form）
+        fn app_session(id: &str, status: crate::session::SessionStatus) -> crate::session::Session {
+            let mut s = inj_sess(id, crate::session::AgentType::Codex, 42, status);
+            s.form = crate::session::ProcessForm::App;
+            s
+        }
+
+        #[tokio::test]
+        async fn sessions_hidden_green_is_filtered_and_counts_recomputed() {
+            let sessions = vec![
+                inj_sess(
+                    "live-1",
+                    crate::session::AgentType::Codex,
+                    1,
+                    crate::session::SessionStatus::Waiting,
+                ),
+                app_session("hidden-1", crate::session::SessionStatus::Idle),
+            ];
+            let mut st = state_with_sessions(sessions);
+            {
+                let s = std::sync::Arc::get_mut(&mut st).expect("独占");
+                s.board_hidden_ids = Box::new(|| vec!["hidden-1".into()]);
+            }
+            let app = router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions",
+                    Some("mam_device=bh"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value =
+                serde_json::from_str(&body_string(r).await).unwrap();
+            let arr = v["sessions"].as_array().unwrap();
+            assert_eq!(arr.len(), 1, "绿态隐藏会话应被剔除");
+            assert_eq!(arr[0]["id"], "live-1");
+            assert_eq!(v["totalCount"], 1, "counts 按过滤后重算");
+            assert_eq!(v["waitingCount"], 1);
+        }
+
+        #[tokio::test]
+        async fn sessions_hidden_active_auto_returns_and_unhides() {
+            let sessions = vec![app_session(
+                "busy-1",
+                crate::session::SessionStatus::Processing,
+            )];
+            let mut st = state_with_sessions(sessions);
+            let unhidden = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let u2 = unhidden.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut st).expect("独占");
+                s.board_hidden_ids = Box::new(|| vec!["busy-1".into()]);
+                s.board_hidden_unhide =
+                    std::sync::Arc::new(move |id| {
+                        u2.lock().unwrap().push(id.to_string());
+                        1
+                    });
+            }
+            let app = router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions",
+                    Some("mam_device=bh"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value =
+                serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(
+                v["sessions"].as_array().unwrap().len(),
+                1,
+                "有活动的隐藏会话保留在响应（一次性回归）"
+            );
+            assert_eq!(
+                unhidden.lock().unwrap().as_slice(),
+                ["busy-1".to_string()],
+                "懒解除隐藏缝被调用"
+            );
+        }
+
+        #[tokio::test]
+        async fn archived_includes_hidden_alive_first() {
+            let sessions = vec![app_session(
+                "alive-hidden",
+                crate::session::SessionStatus::Idle,
+            )];
+            let mut st = test_state();
+            {
+                let s = std::sync::Arc::get_mut(&mut st).expect("独占");
+                s.session_source = Box::new(move || crate::session::SessionsResponse {
+                    total_count: 1,
+                    waiting_count: 0,
+                    sessions: sessions.clone(),
+                });
+                s.board_hidden_ids = Box::new(|| vec!["alive-hidden".into()]);
+                let seen = (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+                s.archive_source = Box::new(move || {
+                    vec![crate::database::SessionArchiveRow {
+                        session_id: "dead-old".into(),
+                        agent_type: "kimi".into(),
+                        project_path: "/tmp/d".into(),
+                        project_name: "dead-proj".into(),
+                        title: None,
+                        last_status: "idle".into(),
+                        first_seen: seen.clone(),
+                        last_seen: seen.clone(),
+                        updated_at: String::new(),
+                    }]
+                });
+                persist_device(&st, "bh");
+            }
+            let app = router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived?days=7",
+                    Some("mam_device=bh"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            let arr = v["archived"].as_array().unwrap();
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0]["sessionId"], "alive-hidden", "hiddenAlive 排最前");
+            assert_eq!(arr[0]["hiddenAlive"], true);
+            assert_eq!(arr[1]["sessionId"], "dead-old");
+            assert_eq!(arr[1]["hiddenAlive"], false);
+        }
+
+        #[tokio::test]
+        async fn close_kills_cli_session_and_audits() {
+            let sessions = vec![inj_sess(
+                "cli-1",
+                crate::session::AgentType::Claude,
+                4242,
+                crate::session::SessionStatus::Processing,
+            )];
+            let mut state = state_with_sessions(sessions);
+            let killed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+            let k2 = killed.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.session_close = std::sync::Arc::new(move |pid| {
+                    k2.lock().unwrap().push(pid);
+                    Ok(())
+                });
+            }
+            let app = router(state.clone());
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-close",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"cli-1"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(killed.lock().unwrap().as_slice(), [4242u32], "pid 取自活快照");
+            let audits = state
+                .store
+                .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+            assert_eq!(audits[0].action, "close");
+            assert_eq!(audits[0].result, "ok");
+            assert_eq!(audits[0].channel, "process");
+            assert_eq!(audits[0].session_id, "cli-1");
+        }
+
+        #[tokio::test]
+        async fn close_rejects_app_form() {
+            let sessions = vec![app_session("app-1", crate::session::SessionStatus::Idle)];
+            let state = state_with_sessions(sessions);
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-close",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"app-1"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "App 形态杀不得（软归档走 /session-hide）");
+        }
+
+        #[tokio::test]
+        async fn close_unknown_session_404() {
+            let mut state = state_with_sessions(Vec::new());
+            let killed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+            let k2 = killed.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.session_close = std::sync::Arc::new(move |pid| {
+                    k2.lock().unwrap().push(pid);
+                    Ok(())
+                });
+            }
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-close",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"ghost"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404);
+            assert!(killed.lock().unwrap().is_empty(), "未命中不出手");
+        }
+
+        #[tokio::test]
+        async fn hide_green_app_session() {
+            let sessions = vec![app_session("app-g", crate::session::SessionStatus::Idle)];
+            let mut state = state_with_sessions(sessions);
+            let hid = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let h2 = hid.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.board_hidden_hide = std::sync::Arc::new(move |id| {
+                    h2.lock().unwrap().push(id.to_string());
+                    1
+                });
+            }
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-hide",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"app-g"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(hid.lock().unwrap().as_slice(), ["app-g".to_string()]);
+        }
+
+        #[tokio::test]
+        async fn hide_rejects_cli_and_non_green() {
+            let sessions = vec![
+                inj_sess(
+                    "cli-g",
+                    crate::session::AgentType::Claude,
+                    3,
+                    crate::session::SessionStatus::Idle,
+                ),
+                app_session("app-y", crate::session::SessionStatus::Processing),
+            ];
+            let state = state_with_sessions(sessions);
+            let app = router(state);
+            for (sid, why) in [("cli-g", "CLI 走 close"), ("app-y", "非绿态不可归档")] {
+                let body = format!(r#"{{"sessionId":"{sid}"}}"#);
+                let r = app
+                    .clone()
+                    .oneshot(req(
+                        "POST",
+                        "/m/api/v1/session-hide",
+                        Some("mam_device=bh"),
+                        Some(&body),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 400, "{why}");
+            }
+        }
+
+        #[tokio::test]
+        async fn unhide_calls_seam_idempotent() {
+            let mut state = state_with_sessions(Vec::new());
+            let unhid = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let u2 = unhid.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.board_hidden_unhide = std::sync::Arc::new(move |id| {
+                    u2.lock().unwrap().push(id.to_string());
+                    1
+                });
+            }
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-unhide",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"any-1"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(unhid.lock().unwrap().as_slice(), ["any-1".to_string()]);
         }
     }
 

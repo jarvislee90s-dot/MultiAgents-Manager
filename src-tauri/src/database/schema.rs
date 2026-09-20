@@ -172,6 +172,10 @@ pub fn init(conn: &Connection) {
             last_seen    TEXT NOT NULL,
             updated_at   TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS session_board_hidden (
+            session_id   TEXT PRIMARY KEY,
+            hidden_at    TEXT NOT NULL
+        );
         "#,
     )
     .expect("Failed to initialize database schema");

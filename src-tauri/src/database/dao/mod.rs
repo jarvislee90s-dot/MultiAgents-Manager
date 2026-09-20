@@ -1,6 +1,7 @@
 pub mod agent_tool;
 pub mod archive;
 pub mod base_snapshot;
+pub mod board_hidden;
 pub mod extension;
 pub mod heartbeat_seen;
 pub mod inject_queue;

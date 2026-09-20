@@ -253,6 +253,12 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // M5 A3：/pair/pin 认证端点接线
         pin_limiter: Mutex::new(pin::PinRateLimiter::new()),
         pin_source: Box::new(pin::get_pin),
+        // APP 软归档缝（2026-09-20 体验批二）：看板隐藏集合读写同源直调 DAO
+        board_hidden_ids: Box::new(crate::database::board_hidden_ids),
+        board_hidden_hide: std::sync::Arc::new(crate::database::board_hidden_hide),
+        board_hidden_unhide: std::sync::Arc::new(crate::database::board_hidden_unhide),
+        // CLI 会话硬杀缝（/session-close 与桌面 kill_session 同内核）
+        session_close: std::sync::Arc::new(crate::commands::session::kill_pid),
         now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
         // gate 回环豁免 / via 判定的隧道域名源（生产 = 双通道快照聚合抽取；M5 A5）
         tunnel_hosts_source: Box::new(tunnel_hosts_from_snapshot),

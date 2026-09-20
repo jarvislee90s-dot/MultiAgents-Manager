@@ -20,6 +20,48 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use super::server::{CleanupStream, RemoteState};
 
+/// 看板隐藏过滤（APP 软归档，2026-09-20 体验批二）：hidden∩绿态(idle/finished)
+/// 且无未读 → 从响应剔除（仅手机看板；桌面走 invoke 不经此端点，与「桌面端不动」
+/// 裁决一致）；hidden∩(非绿∨未读) → 懒解除隐藏（一次性回归）并保留在响应。
+/// counts 按过滤后集合重算。GET /sessions 与 SSE snapshot 帧共用本函数——
+/// 两个入口口径一致，隐藏卡片不会经另一通道诈尸。
+fn apply_board_hidden(
+    st: &Arc<RemoteState>,
+    mut resp: crate::session::SessionsResponse,
+) -> crate::session::SessionsResponse {
+    let hidden: std::collections::HashSet<String> =
+        (st.board_hidden_ids)().into_iter().collect();
+    if hidden.is_empty() {
+        return resp;
+    }
+    let mut returned: Vec<String> = Vec::new();
+    resp.sessions.retain(|s| {
+        if !hidden.contains(&s.id) {
+            return true;
+        }
+        let green = matches!(
+            s.status,
+            crate::session::SessionStatus::Idle | crate::session::SessionStatus::Finished
+        );
+        if green && !s.unread {
+            false // 软归档隐藏中
+        } else {
+            returned.push(s.id.clone());
+            true // 有活动 → 一次性回归
+        }
+    });
+    for id in &returned {
+        (st.board_hidden_unhide)(id);
+    }
+    resp.total_count = resp.sessions.len();
+    resp.waiting_count = resp
+        .sessions
+        .iter()
+        .filter(|s| matches!(s.status, crate::session::SessionStatus::Waiting))
+        .count();
+    resp
+}
+
 /// GET /m/api/v1/sessions：数据源注入（生产 = adapter::get_all_sessions），
 /// `SessionsResponse` 已 camelCase 序列化（前端约定 totalCount）。
 ///
@@ -31,7 +73,7 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
     // 闭包捕获 state 的 Arc（Send + Sync + 'static）：`session_source` 是 Box<dyn Fn> 不可
     // clone，故整体 move 进阻塞线程池，在池内调用注入源
     let st = st.clone();
-    let response = tokio::task::spawn_blocking(move || (st.session_source)())
+    let response = tokio::task::spawn_blocking(move || apply_board_hidden(&st, (st.session_source)()))
         .await
         .unwrap_or_else(|e| {
             // JoinError（任务 panic/取消）降级为空响应：移动端拿到 0 会话而非连接错误，
@@ -80,8 +122,10 @@ pub async fn events(
     let registry = st.sse_registry.clone();
     // 快照走 spawn_blocking：session_source 是同步阻塞调用（sysinfo 全进程刷新 + 各工具
     // 会话解析，冷启动可达数秒），直接 await 会周期性堵死 tokio worker——与 sessions
-    // handler 同一先例（实机教训见 commands/session.rs 的 get_all_sessions 注释）
-    let snapshot = tokio::task::spawn_blocking(move || (st.session_source)())
+    // handler 同一先例（实机教训见 commands/session.rs 的 get_all_sessions 注释）。
+    // 同过 apply_board_hidden 过滤（与 GET /sessions 同函数）：软归档隐藏卡片
+    // 不得经 SSE snapshot 通道诈尸
+    let snapshot = tokio::task::spawn_blocking(move || apply_board_hidden(&st, (st.session_source)()))
         .await
         .unwrap_or_else(|e| {
             // JoinError（任务 panic/取消）降级为空快照：移动端拿到 0 会话而非断流
@@ -1580,6 +1624,9 @@ pub struct ArchivedSessionDto {
     pub title: Option<String>,
     pub last_status: String,
     pub last_seen_at: String,
+    /// 软归档活会话标记（体验批二）：true = 看板隐藏中的活会话（APP 形态），
+    /// 详情页动作是「移回看板」而非「在桌面端打开」
+    pub hidden_alive: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1605,7 +1652,8 @@ pub async fn sessions_archived(
     let st2 = st.clone();
     let resp = tokio::task::spawn_blocking(move || {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
-        let live_ids: std::collections::HashSet<String> = (st2.session_source)()
+        let live = (st2.session_source)();
+        let live_ids: std::collections::HashSet<String> = live
             .sessions
             .iter()
             .map(|s| s.id.clone())
@@ -1633,11 +1681,40 @@ pub async fn sessions_archived(
                             title: row.title,
                             last_status: row.last_status,
                             last_seen_at: row.last_seen,
+                            hidden_alive: false,
                         },
                     ))
                 })
                 .collect();
-        items.sort_by_key(|b| std::cmp::Reverse(b.0));
+        // 软归档活会话合成条目（体验批二）：看板隐藏集合 ∩ 活快照——会话还活着，
+        // 历史页把它列出来（hiddenAlive 标记，详情页动作=移回看板），不列则手机上
+        // 找不到任何入口找回它。畸形 last_activity_at 按当前时间兜底（排序占位）
+        let hidden: std::collections::HashSet<String> = (st2.board_hidden_ids)()
+            .into_iter()
+            .collect();
+        for s in &live.sessions {
+            if !hidden.contains(&s.id) {
+                continue;
+            }
+            let seen = chrono::DateTime::parse_from_rfc3339(&s.last_activity_at)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            items.push((
+                seen,
+                ArchivedSessionDto {
+                    session_id: s.id.clone(),
+                    agent_type: s.agent_type.tool_id().to_string(),
+                    project_path: s.project_path.clone(),
+                    project_name: s.project_name.clone(),
+                    title: s.title.clone(),
+                    last_status: format!("{:?}", s.status).to_lowercase(),
+                    last_seen_at: s.last_activity_at.clone(),
+                    hidden_alive: true,
+                },
+            ));
+        }
+        // hiddenAlive 排最前（活会话优先处理），其余按 last_seen 降序
+        items.sort_by_key(|(seen, dto)| (!dto.hidden_alive, std::cmp::Reverse(*seen)));
         // 项目聚合：distinct 项目名，按该项目条目最大 last_seen 降序
         let mut best: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
         for (seen, dto) in &items {
@@ -1696,6 +1773,206 @@ pub async fn sessions_archived_delete(
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "ok": true, "deleted": deleted })),
+    )
+        .into_response()
+}
+
+// ==== 看板关闭/软归档端点（2026-09-20 体验批二）====
+
+/// {sessionId} 请求体（camelCase；close/hide/unhide 三端点共用）
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActionReq {
+    #[serde(default)]
+    pub session_id: String,
+}
+
+/// POST /session-close {sessionId}：CLI 会话硬杀（桌面 kill_session 同内核）。
+/// pid 取自活快照——id 本机口径，不回显远端输入（resume.rs 安全口径同源）；
+/// App 形态不支持杀（会话寄生宿主 APP 共进程）→ 软归档走 /session-hide。
+/// 审计：会话命中即写 close（ok/failed，词表 +close——远程杀进程是敏感动作）；
+/// 未命中不落账（无可 acting 对象，口径同「校验失败不落账」）。
+pub async fn session_close(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionActionReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    let st2 = st.clone();
+    let sid2 = sid.clone(); // 移动副本进闭包，原值保留给审计（session-open 同一写法）
+    // Err 携带 (工具串, 原因)：工具串供审计（活快照命中才有，no_session 为空串）
+    let outcome: Result<(String, ()), (String, String)> = tokio::task::spawn_blocking(move || {
+        let Some(s) = (st2.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == sid2)
+        else {
+            return Err((String::new(), "no_session".to_string()));
+        };
+        let tool = s.agent_type.tool_id().to_string();
+        if matches!(s.form, crate::session::ProcessForm::App) {
+            return Err((tool, "form_not_supported".to_string()));
+        }
+        match (st2.session_close)(s.pid) {
+            Ok(()) => Ok((tool, ())),
+            Err(e) => Err((tool, e)),
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::error!("session-close 任务异常: {e}");
+        Err((String::new(), "internal".to_string()))
+    });
+    let audit = |tool: &str, result: &str| {
+        // 审计走 store 内的 DB 连接（record_conn）：与 session-open 同一落账通道，
+        // 端点测试经 store.with(recent_conn) 可回读（全局 record() 会写真实 ~/.mam）
+        st.store.with(|conn| {
+            crate::database::dao::write_audit::record_conn(
+                conn,
+                chrono::Utc::now().timestamp_millis(),
+                &device_id,
+                &device_name,
+                tool,
+                &sid,
+                "process",
+                "close",
+                "远程关闭终端进程",
+                result,
+            );
+        });
+    };
+    match outcome {
+        Ok((tool, ())) => {
+            audit(&tool, "ok");
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "ok": true })),
+            )
+                .into_response()
+        }
+        Err((tool, reason)) => match reason.as_str() {
+            "no_session" => (
+                StatusCode::NOT_FOUND,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "no_session" })),
+            )
+                .into_response(),
+            "form_not_supported" => {
+                audit(&tool, "failed");
+                (
+                    StatusCode::BAD_REQUEST,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "error": "form_not_supported" })),
+                )
+                    .into_response()
+            }
+            other => {
+                audit(&tool, "failed");
+                log::error!("session-close 杀进程失败: {other}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "error": "internal" })),
+                )
+                    .into_response()
+            }
+        },
+    }
+}
+
+/// POST /session-hide {sessionId}：APP 形态软归档（看板隐藏，不杀进程、可逆）。
+/// 仅 App 形态且绿态（idle/finished，与前端 STATUS_COLOR_KIND 同源口径）可归档；
+/// CLI 会话走 /session-close。可逆登记动作，不入审计（W5 词表不膨胀）。
+pub async fn session_hide(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionActionReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() {
+        return bad_request();
+    }
+    let Some(_) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    let st2 = st.clone();
+    let outcome: Result<(), (String, String)> = tokio::task::spawn_blocking(move || {
+        let Some(s) = (st2.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == sid)
+        else {
+            return Err((String::new(), "no_session".to_string()));
+        };
+        if !matches!(s.form, crate::session::ProcessForm::App) {
+            return Err((String::new(), "form_not_supported".to_string()));
+        }
+        if !matches!(
+            s.status,
+            crate::session::SessionStatus::Idle | crate::session::SessionStatus::Finished
+        ) {
+            return Err((String::new(), "not_green".to_string()));
+        }
+        (st2.board_hidden_hide)(&s.id);
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::error!("session-hide 任务异常: {e}");
+        Err((String::new(), "internal".to_string()))
+    });
+    match outcome {
+        Ok(()) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "ok": true })),
+        )
+            .into_response(),
+        Err((_, reason)) => {
+            let status = match reason.as_str() {
+                "no_session" => StatusCode::NOT_FOUND,
+                "form_not_supported" | "not_green" => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (
+                status,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /session-unhide {sessionId}：解除软归档（移回看板）。幂等：不在隐藏集
+/// 也返回 200（removed=0）；若会话已死，其归档行照常在历史页可见（语义无损）。
+pub async fn session_unhide(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionActionReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() {
+        return bad_request();
+    }
+    let Some(_) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    let st2 = st.clone();
+    let removed = tokio::task::spawn_blocking(move || (st2.board_hidden_unhide)(&sid))
+        .await
+        .unwrap_or(0);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "ok": true, "removed": removed })),
     )
         .into_response()
 }
