@@ -601,16 +601,25 @@ export function RemoteSection() {
           <>
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone="blue">{t("settings.remote.badgePublic")}</Badge>
-              {quickAddr && (
-                <code className="bg-muted rounded-md px-2 py-0.5 font-mono text-[12.5px] break-all">
-                  {quickAddr}
-                </code>
-              )}
-              {quickAddr && (
-                <Button variant="outline" size="sm" onClick={() => void copy(quickAddr)}>
-                  {t("settings.remote.copy")}
-                </Button>
-              )}
+              {quickAddr ? (
+                <>
+                  <code className="bg-muted rounded-md px-2 py-0.5 font-mono text-[12.5px] break-all">
+                    {quickAddr}
+                  </code>
+                  <Button variant="outline" size="sm" onClick={() => void copy(quickAddr)}>
+                    {t("settings.remote.copy")}
+                  </Button>
+                </>
+              ) : // 运行中但地址尚未解析（cloudflared 启动/重试窗口）：占位提示而非
+                // 空白或旧值——脏/旧地址 + 「已获取」toast 的误导组合已在解析器侧治理
+                channels?.quick?.running && !quickErr ? (
+                <span
+                  data-testid="quick-fetching"
+                  className="text-muted-foreground animate-pulse text-xs"
+                >
+                  {t("settings.remote.quickFetching")}
+                </span>
+              ) : null}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {channels?.quick?.running && (
@@ -670,6 +679,16 @@ export function RemoteSection() {
                         <p className="text-muted-foreground mt-2">
                           {t("settings.remote.tutorialPost")}
                         </p>
+                        {/* 官方图文兜底：Cloudflare 面板 UI 迭代快，应用内步骤以简版
+                            为主，细节引导到官方文档（2026-09-20 用户裁决） */}
+                        <a
+                          href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1.5 inline-block text-xs text-blue-500 underline"
+                        >
+                          {t("settings.remote.tutorialDocs")}
+                        </a>
                       </div>
                     )}
                   </span>
