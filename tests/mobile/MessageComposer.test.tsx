@@ -575,6 +575,78 @@ describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
   });
 });
 
+// ==== 修改重发只入队（D6，验收问题 #4）：修改后的重发强制走队列，防变相插队 ====
+describe("修改重发只入队（D6）", () => {
+  /** 发送一条进入排队态的公共前缀：回执 queued{itemId:7,position:1,content} */
+  async function sendIntoQueued(text: string) {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-queued");
+    return input;
+  }
+
+  it("edit_resend_queues_only：修改确认出队后再发送 → 请求体带 queueOnly:true（手动改字不清标志）", async () => {
+    const input = await sendIntoQueued("跑个长任务");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    expect((input as HTMLTextAreaElement).value).toBe("跑个长任务");
+    // 用户手动改字不清除标志（保守语义：修改后的重发一律入队；真空闲时后端
+    // flush 循环 ≤1s 转闲按序自动放行，行为收敛）
+    fireEvent.change(input, { target: { value: "改好的重发" } });
+    routes.send = { status: "queued", itemId: 9, position: 1 };
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-queued");
+    // 调用序列：[0]=初次入队发送（不带标志），[1]=修改后的重发（带标志）
+    expect(sendCalls()).toHaveLength(2);
+    expect("queueOnly" in JSON.parse(String((sendCalls()[0][1] as RequestInit).body))).toBe(false);
+    expect(JSON.parse(String((sendCalls()[1][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      text: "改好的重发",
+      queueOnly: true,
+    });
+  });
+
+  it("normal_send_omits_flag：未经修改的普通发送 → 请求体不含 queueOnly 键", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "普通发送" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+    expect(sendCalls()).toHaveLength(1);
+    const body = JSON.parse(String((sendCalls()[0][1] as RequestInit).body));
+    // api.ts 口径：未修改不带该键（缺省键，保持既有请求体形态零漂移）
+    expect("queueOnly" in body).toBe(false);
+    expect(body).toEqual({ sessionId: "sess-1", text: "普通发送" });
+  });
+
+  it("flag_consumed_on_send：修改→发送（带标志）→再发送 → 第二次不再带标志（消费即清）", async () => {
+    await sendIntoQueued("第一版");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    routes.send = { status: "delivered" };
+    fireEvent.click(screen.getByTestId("composer-send")); // 修改后的重发：带标志
+    await screen.findByTestId("send-receipt-delivered");
+    // 调用序列：[0]=初次入队发送，[1]=修改后的重发（带标志）
+    expect(sendCalls()).toHaveLength(2);
+    expect(JSON.parse(String((sendCalls()[1][1] as RequestInit).body)).queueOnly).toBe(true);
+    // 第二次发送：标志已消费即清，回归普通发送语义（失败重试/新消息均不带）
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "下一条" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+    expect(sendCalls()).toHaveLength(3);
+    const third = JSON.parse(String((sendCalls()[2][1] as RequestInit).body));
+    expect("queueOnly" in third).toBe(false);
+  });
+});
+
 describe("排队条目他端消失（2026-09-20 调查修复）：轮询收敛留痕", () => {
   it("3s 轮询发现条目不在队 → 中性 gone 提示（含电脑端去向），不再静默消失", async () => {
     vi.useFakeTimers();

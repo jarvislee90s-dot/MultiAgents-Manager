@@ -20,6 +20,9 @@
 //   否则「忙时 + 复核也失败」双失败会让条目实际在队而 UI 永久失控；
 // - sending 期间插队/撤回按钮加闸（disabled=busy||sending，评审必须3）：与发送
 //   回执的 last-write-wins 竞态防线（按钮可见不可点，保持「不失联」意图）；
+// - 修改重发只入队（D6，验收问题 #4）：「修改」确认出队后置 queueOnlyNext 标志，
+//   下一次发送携带 queueOnly=true 强制入队——防「文件说闲、TUI 实忙」窗口把
+//   修改后的重发直发出去（变相插队）；真空闲时 flush 循环 ≤1s 自动放行，行为收敛；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent } from "react";
@@ -107,11 +110,20 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   // 插队/撤回进行中（与发送互斥，防连点）
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<Receipt>(null);
+  /** 修改重发只入队标志（D6）：「修改」确认出队后置 true，下一次发送携带
+   *  queueOnly=true 并清除（消费即清——失败重试不再带标志，回归普通发送语义）。
+   *  保守语义：修改后的重发一律入队，用户手动改字不清除标志；若会话真空闲，
+   *  flush 循环 ≤1s 转闲即按序自动放行，行为收敛不丢时效。队列存储不携带该
+   *  标志（后端仅影响入队决策，flush 循环对 queueOnly 项与普通队列项同权） */
+  const [queueOnlyNext, setQueueOnlyNext] = useState(false);
 
   // 挂载拉取一次输入区可用性；任何失败静默保持隐藏
   useEffect(() => {
     let alive = true;
     setInfoReady(false);
+    // 换会话即弃修改重发标志（D6）：queueOnlyNext 是上一个会话「修改」的遗愿，
+    // 不得泄漏到新会话的首发（保守方向虽无害，语义上仍属错位）
+    setQueueOnlyNext(false);
     fetchSendInfo(session.id)
       .then((info) => {
         if (!alive) return;
@@ -175,8 +187,12 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         .map((a) => (a.isImage ? `<image path="${a.path}">` : `<file path="${a.path}">`))
         .join("\n");
       const fullText = markup ? `${text}\n${markup}` : text;
+      // D6：修改重发的下一次发送带 queueOnly=true 强制入队，消费即清——本次发送
+      // 失败的话，用户重试走的是普通发送语义（后端失败行已退出 pending，可重发）
+      const forceQueue = queueOnlyNext;
+      setQueueOnlyNext(false);
       // 多行原样上行（trim 只用于判空，不改写正文——归一在服务端）
-      const res = await sessionSend(session.id, fullText);
+      const res = await sessionSend(session.id, fullText, forceQueue ? true : undefined);
       if (res.status === "delivered") {
         setText("");
         setAttachments([]);
@@ -203,7 +219,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     } finally {
       setSending(false);
     }
-  }, [text, attachments, sending, busy, sendInfo, session.id]);
+  }, [text, attachments, sending, busy, sendInfo, session.id, queueOnlyNext]);
 
   // P2-7 失败对账（插队/撤回共用）：失败后复核 /session-queue——
   // - 条目仍在 pending → 恢复排队视图（刷新队位，「立即发送/撤回」按钮保留可重试）；
@@ -310,12 +326,16 @@ export default function MessageComposer({ session }: MessageComposerProps) {
 
   /** 修改（2026-09-20 裁决）：确认出队后把正文放回输入框继续编辑——与撤回共用
    *  同一后端出队动作，差别仅在是否恢复文本。截断到 MAX_SEND_CHARS 与输入框
-   *  maxLength 对齐；恢复后聚焦输入框（移动端直接可改） */
+   *  maxLength 对齐；恢复后聚焦输入框（移动端直接可改）。
+   *  D6：确认出队后置 queueOnlyNext——修改后的重发一律入队（防「文件说闲、
+   *  TUI 实忙」窗口变相插队）；忙时失败/复核失败条目仍在队（onConfirmed 不触发）
+   *  则不置标志，取消「修改」意图后的排队视图照旧 */
   const handleEdit = useCallback(async () => {
     if (receipt?.kind !== "queued" || busy) return;
     const { itemId, position, content } = receipt;
     await retractWithOutcome(itemId, position, content, () => {
       setText(content.slice(0, MAX_SEND_CHARS));
+      setQueueOnlyNext(true);
       setReceipt(null);
       inputRef.current?.focus();
     });

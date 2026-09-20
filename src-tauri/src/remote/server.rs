@@ -3190,6 +3190,118 @@ mod tests {
         );
     }
 
+    /// D6 修改重发只入队：可输入态（Waiting）+ queueOnly=true → 回执 queued（不直发），
+    /// 注入器不被调用；审计 action=queue（与「运行中留队」同口径，无 send/failed 直发
+    /// 审计）；条目在 GET session-queue 可见（flush 循环转闲按序自动放行——与普通
+    /// 队列项同权）
+    #[tokio::test]
+    async fn send_queue_only_skips_direct_delivery() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_a","text":"修改后重发","queueOnly":true}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "queued", "queueOnly=true 可输入态也不得直发");
+        let item_id = v["itemId"].as_i64().expect("queued 回执必须带 itemId");
+        assert_eq!(v["position"], 1, "首条排队 position=1");
+        assert!(
+            fake.recorded().is_empty(),
+            "queueOnly=true 必须跳过直发尝试（防「文件说闲、TUI 实忙」窗口变相插队）"
+        );
+        // 审计：落 ⑦ 留队臂，action=queue 与「运行中留队」同口径
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "queue");
+        assert_eq!(audits[0].result, "ok");
+        // 条目在队列可见（不携带 queueOnly 标志，等 flush 循环自动放行）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-queue?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains(&format!("\"id\":{item_id}"))
+                && body.contains("[mobile 测试设备] 修改后重发"),
+            "queueOnly 条目应留在队列等自动放行：{body}"
+        );
+    }
+
+    /// D6 防回归对照：queueOnly 显式 false（与缺省同义）→ 可输入态直发行为不变
+    /// （200 delivered + 注入器收到 compose 产物），既有调用面零漂移
+    #[tokio::test]
+    async fn send_queue_only_false_keeps_direct_delivery() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_a","text":"普通发送","queueOnly":false}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(
+            body_string(r).await.contains("\"status\":\"delivered\""),
+            "queueOnly=false 可输入态照旧直发"
+        );
+        assert_eq!(
+            fake.recorded(),
+            vec![(11u32, "[mobile 测试设备] 普通发送".to_string())],
+            "queueOnly=false 直发行为不得漂移"
+        );
+    }
+
+    /// D6：queueOnly=true 且会话 running（Processing 黄态）→ 照常入队（与普通入队
+    /// 同路径同回执同审计），注入器不被调用
+    #[tokio::test]
+    async fn send_queue_only_when_running_queues_normally() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","text":"运行中也入队","queueOnly":true}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "queued");
+        assert_eq!(v["position"], 1, "与普通入队同回执形态");
+        assert!(fake.recorded().is_empty(), "运行中本就不直发");
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "queue");
+        assert_eq!(audits[0].result, "ok");
+    }
+
     /// 拒绝矩阵：workbuddy → 403 blackbox；zcode → 403 headless_only（均不入队）；
     /// 未知会话 → 404 no_session；空/全空白 text 与超长（MAX_SEND_CHARS+1）→ 400
     #[tokio::test]

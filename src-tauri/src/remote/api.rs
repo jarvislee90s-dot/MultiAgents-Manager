@@ -559,6 +559,14 @@ pub struct SessionSendReq {
     pub session_id: String,
     #[serde(default)]
     pub text: String,
+    /// 只入队标志（D6 修改重发）：语义为——**queueOnly 仅影响入队决策**（true 时
+    /// 跳过下方直发尝试，即使快照显示可输入也强制入队，防「文件说闲、TUI 实忙」
+    /// 窗口的变相插队）；**一旦入队，flush 循环对 queueOnly 项与普通队列项完全
+    /// 同权**（转闲按序自动放行，不做任何区别对待）；**队列存储不携带该标志**
+    /// （无需持久化——它是本次请求的分派意图，不是条目属性）。缺省/false = 普通发送
+    /// （可输入态照旧直发），既有调用面请求体形态不变。
+    #[serde(default)]
+    pub queue_only: Option<bool>,
 }
 
 /// POST /session-queue/jump 与 /retract 请求体（camelCase；item_id 走 Option——
@@ -653,6 +661,11 @@ fn find_session_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<crate::s
 ///   send 终态）；
 /// - 运行中（is_running 等）→ 留队（黄灯），审计 action=queue，回执 queued+position。
 ///
+/// queueOnly 请求标志（D6 修改重发，语义详见 SessionSendReq::queue_only）：true 时
+/// 跳过直发尝试（上述可输入态直发分支整体不触达）强制落留队臂——审计 action=queue、
+/// 回执 queued{itemId,position} 与「运行中留队」完全同路径；入队后 flush 循环对该项
+/// 与普通队列项同权（转闲按序自动放行），队列存储不携带该标志。缺省/false 行为不变。
+///
 /// 直发也走队列（先入队再 flush 队首）：与既有 pending 项保持 FIFO 串行
 /// （W2 单会话不变量），成功/失败行都退出 pending，队列无残留。
 pub async fn session_send(
@@ -713,6 +726,10 @@ pub async fn session_send(
     }
     // ⑤ 组装（W1 来源标记 + 裁决 6 归一在入队时一次完成）并入队（FIFO 保序）
     let content = crate::inject::normalize::compose_injection(&device_name, &req.text);
+    // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
+    // 注释），入队与 ⑦ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
+    // queueOnly 项与普通队列项同权（转闲按序自动放行），队列存储不携带该标志
+    let queue_only = req.queue_only.unwrap_or(false);
     let now = chrono::Utc::now().timestamp_millis();
     let (item_id, position) = st.store.with(|c| {
         let id = crate::database::dao::inject_queue::enqueue_conn(
@@ -745,8 +762,10 @@ pub async fn session_send(
     // ⑥ 可输入态 → 直发（flush_one 投递内核，jump=false；in-flight 守卫与 flush 循环共用，
     //    防同会话并发双投）。守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush
     //    循环事件臂同款，F1 断连双投修复）——handler 断连（弱网/隧道掐断慢投递）不再
-    //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位
-    if crate::inject::queue::is_input_ready(&session.status) {
+    //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位。
+    //    D6：queueOnly=true 时整个分支不触达（in-flight 守卫取用、四态回执映射、
+    //    send/failed 直发审计全部跳过），直接落 ⑦ 入队路径
+    if !queue_only && crate::inject::queue::is_input_ready(&session.status) {
         let flush_st = st.clone();
         let flush_sid = sid.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -842,7 +861,8 @@ pub async fn session_send(
             }
         };
     }
-    // ⑦ 运行中（黄灯）→ 留队等下一可输入态
+    // ⑦ 运行中（黄灯）→ 留队等下一可输入态（D6：queueOnly=true 的可输入态会话
+    //    也落此臂——审计 action=queue 与「运行中留队」同口径，回执同 queued{itemId,position}）
     endpoint_audit(
         &st,
         &device_id,
