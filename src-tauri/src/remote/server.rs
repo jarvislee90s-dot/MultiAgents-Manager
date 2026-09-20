@@ -3845,6 +3845,76 @@ mod tests {
         assert!(v["options"].as_array().unwrap().is_empty());
     }
 
+    /// T4 红卡接铃铛：等待标记路径——sess_b（Processing claude、无 last_message，
+    /// 旧判定下必 available=false）seed 审批等待标记 → GET available=true 且选项齐
+    /// （键位零泄漏）；POST approve 越过 409 not_waiting 直达键位分发（键位 "1"）。
+    /// 标记经 store.with 播种（内存库，零接触真实 ~/.mam）；state 实例按测试隔离
+    #[tokio::test]
+    async fn approve_endpoints_honor_wait_mark() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::approval_wait::mark(conn, "claude", "sess_b", 1_000, "测试标记")
+        });
+        let app = router(state.clone());
+        // GET：Processing + 标记 → available=true（跳过 detect）+ 键位零泄漏
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_b",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true, "标记存在即 available（跳过 detect）");
+        let options = v["options"].as_array().expect("标记路径应出全选项");
+        assert_eq!(options.len(), 2, "标记路径跳过 marker detect 直接出全选项");
+        for o in options {
+            assert!(o.get("key").is_none(), "键位不外泄");
+        }
+        // POST：Processing + 标记 → 越过 409 not_waiting，键位照常分发
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "标记路径越过 409 not_waiting");
+        assert!(
+            fake.recorded_keys().iter().any(|k| k.1 == "1"),
+            "批准键位应经注入器分发：{:?}",
+            fake.recorded_keys()
+        );
+    }
+
+    /// T4 回归锁：无标记 + 非 Waiting → 409 not_waiting 守卫保持（标记不扩大放行面）
+    #[tokio::test]
+    async fn approve_without_mark_still_409_on_processing() {
+        let fake = FakeInjector::ok();
+        let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_b","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "无标记 Processing 仍 409 not_waiting");
+    }
+
     /// 审批应答（批准）：sess_h optionId=approve → 200 key_sent + FakeInjector 收到
     /// (pid=18, "1")（**无 [mobile] 前缀**——按键非文本）+ 审计 action=approve result=ok。
     /// 独占会话 sess_h——契约行为不变（按键映射/无前缀/审计）；sess_h 全测试集唯一归

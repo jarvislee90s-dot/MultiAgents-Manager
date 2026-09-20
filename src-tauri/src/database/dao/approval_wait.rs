@@ -24,6 +24,17 @@ pub fn clear(conn: &Connection, tool_id: &str, session_id: &str) {
     );
 }
 
+/// 点查（审批端点 Waiting-or-mark 判定用；经 st.store.with 传入连接——
+/// 测试内存库零接触真实 ~/.mam，生产 DeviceStore::Global 与状态链写侧同库）
+pub fn has(conn: &Connection, tool_id: &str, session_id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM approval_wait_marks WHERE tool_id = ?1 AND session_id = ?2",
+        params![tool_id, session_id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// 全量加载（状态链每轮扫描一次：表只含「正在等待审批」的会话，行数天然有界）
 /// 返回 (tool_id, session_id, ts) 三元组。
 pub fn list_all(conn: &Connection) -> Vec<(String, String, i64)> {

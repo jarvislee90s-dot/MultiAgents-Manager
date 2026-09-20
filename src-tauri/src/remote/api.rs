@@ -1369,10 +1369,16 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         .sessions
         .into_iter()
         .find(|s| s.id == session_id)?;
-    if session.status != crate::session::SessionStatus::Waiting {
+    let tool = session.agent_type.tool_id().to_string();
+    // T4 红卡接铃铛：Waiting 门改「Waiting ∨ 等待标记」（issue #74 根因①——审批
+    // 等待期文件推导判 processing，标记是钩子事件落的一等信号；经 store.with 传
+    // 连接，测试内存库零接触真实 ~/.mam，生产 Global 与状态链写侧同库）
+    let marked = st
+        .store
+        .with(|conn| crate::database::dao::approval_wait::has(conn, &tool, session_id));
+    if session.status != crate::session::SessionStatus::Waiting && !marked {
         return None;
     }
-    let tool = session.agent_type.tool_id().to_string();
     let mapping = st
         .store
         .with(crate::inject::approve::load_mappings_conn)
@@ -1393,11 +1399,15 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             reason: Some(crate::inject::approve::PROBE_PENDING_REASON.to_string()),
         });
     }
-    let hit = session
-        .last_message
-        .as_deref()
-        .map(|msg| crate::inject::approve::detect(&mapping, msg))
-        .unwrap_or(false);
+    // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
+    // 平台上 detect 恒 miss——macOS 红卡由此可达）；marker detect 降级为无标记
+    // 时的旧路径（Windows 屏读/文本命中形态）
+    let hit = marked
+        || session
+            .last_message
+            .as_deref()
+            .map(|msg| crate::inject::approve::detect(&mapping, msg))
+            .unwrap_or(false);
     // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
     // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
     let options = if hit {
@@ -1572,10 +1582,15 @@ pub async fn session_approve(
         else {
             return Err("no_session");
         };
-        if session.status != crate::session::SessionStatus::Waiting {
+        // T4：Waiting 门改「Waiting ∨ 等待标记」（与 approve-options 同口径——
+        // 审批等待期状态判 processing，标记经 store.with 点查）
+        let tool = session.agent_type.tool_id().to_string();
+        let marked = probe_st
+            .store
+            .with(|conn| crate::database::dao::approval_wait::has(conn, &tool, &probe_sid));
+        if session.status != crate::session::SessionStatus::Waiting && !marked {
             return Err("not_waiting");
         }
-        let tool = session.agent_type.tool_id().to_string();
         let mapping = probe_st
             .store
             .with(crate::inject::approve::load_mappings_conn)
