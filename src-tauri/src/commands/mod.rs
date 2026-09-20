@@ -1,5 +1,6 @@
 // Tauri IPC 命令 - 按功能域拆分到子模块
 
+pub mod data_management;
 pub mod manifest;
 pub mod mcp;
 pub mod notification;

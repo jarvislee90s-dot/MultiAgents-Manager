@@ -204,6 +204,10 @@ pub fn run() {
         commands::settings::set_theme,
         commands::settings::detect_tools,
         commands::settings::detect_subagents,
+        // 2026-09-20：数据管理首版（移动端附件占用列出/清理——路径服务端解析，
+        // 清理目标必须命中上传索引，不接受客户端任意路径）
+        commands::data_management::list_attachment_projects,
+        commands::data_management::clean_attachment_project,
         commands::settings::list_sub_agents,
         commands::settings::mark_session_read,
         commands::settings::get_tool_settings,

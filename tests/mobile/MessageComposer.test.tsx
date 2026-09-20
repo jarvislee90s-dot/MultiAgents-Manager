@@ -37,16 +37,25 @@ interface Routes {
   retractBusy?: boolean;
   /** 队列列表 /session-queue 拉取网络层异常（复核失败场景） */
   queueReject?: boolean;
+  /** 附件上传（2026-09-20）：成功载荷 / 413·404 等非 2xx 状态 */
+  attach?: { path: string; size: number };
+  attachStatus?: number;
+  attachError?: string;
+  /** 附件上传挂起不响应（上传中禁发测试） */
+  attachHang?: boolean;
 }
 
 let routes: Routes;
 let fetchMock: ReturnType<typeof vi.fn>;
 /** sendHang 挂起请求的放行器（测试中手动 resolve 模拟响应到达） */
 let releaseSend: ((r: Response) => void) | null = null;
+/** attachHang 挂起请求的放行器（上传中禁发测试用） */
+let releaseAttach: ((r: Response) => void) | null = null;
 
 beforeEach(() => {
   routes = {};
   releaseSend = null;
+  releaseAttach = null;
 });
 afterEach(() => {
   cleanup();
@@ -86,6 +95,22 @@ function installFetch() {
         });
       }
       return new Response(JSON.stringify(routes.send ?? { status: "delivered" }), { status: 200 });
+    }
+    if (url.includes("/session-attachment")) {
+      if (routes.attachHang) {
+        return new Promise<Response>((resolve) => {
+          releaseAttach = resolve;
+        });
+      }
+      if (routes.attachStatus) {
+        return new Response(JSON.stringify({ error: routes.attachError ?? "too_large" }), {
+          status: routes.attachStatus,
+        });
+      }
+      return new Response(
+        JSON.stringify(routes.attach ?? { path: "E:/proj/.mam-attachments/s-1/1-a.png", size: 5 }),
+        { status: 200 }
+      );
     }
     if (url.includes("/session-queue")) {
       if (routes.queueReject) throw new TypeError("queue 网络断开（模拟复核失败）");
@@ -571,5 +596,148 @@ describe("排队条目他端消失（2026-09-20 调查修复）：轮询收敛�
     const gone = screen.getByTestId("send-receipt-gone");
     expect(gone.textContent).toContain("电脑端");
     vi.useRealTimers();
+  });
+});
+
+// ==== 附件上传（2026-09-20）：+ 钮 / 粘贴图片 / 发送拼内联标记行 ====
+describe("移动端附件上传（2026-09-20）", () => {
+  /** jsdom 的 Blob 可能缺 arrayBuffer（Node 内建 File 才有）——兜底补齐 */
+  function ensureFileArrayBuffer(file: File) {
+    const proto = Object.getPrototypeOf(file) as { arrayBuffer?: unknown };
+    if (typeof proto.arrayBuffer !== "function") {
+      (Object.getPrototypeOf(file) as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
+        async () => new TextEncoder().encode("x").buffer as ArrayBuffer;
+    }
+  }
+
+  function pngFile(name = "shot.png"): File {
+    const f = new File([new Uint8Array([0x89, 0x50])], name, { type: "image/png" });
+    ensureFileArrayBuffer(f);
+    return f;
+  }
+
+  async function sendIntoQueuedWithAttachment() {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-shot.png", size: 2 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "看这张图" } });
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile()] },
+    });
+    // 上传完成 → ready chip 出现（名字显示）
+    await screen.findByText("shot.png");
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+  }
+
+  it("选文件上传：chip 状态机 uploading→ready；发送文本含 <image path> 标记行", async () => {
+    await sendIntoQueuedWithAttachment();
+    const sendCall = sendCalls()[0];
+    const sent = JSON.parse(String((sendCall![1] as RequestInit).body)).text as string;
+    expect(sent).toContain("看这张图");
+    expect(sent).toContain('<image path="E:/proj/.mam-attachments/s-1/1-shot.png">');
+    // 发送成功 → chips 清空
+    expect(screen.queryByTestId(/^attach-chip-/)).toBeNull();
+    // 上传端点被调用（query 含 session_id 与文件名）
+    const attachCall = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-attachment")
+    );
+    expect(String(attachCall![0])).toContain("name=shot.png");
+  });
+
+  it("文档附件（非图片）发送拼 <file path> 标记行", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-报告.docx", size: 9 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "见附件" } });
+    const docx = new File([new Uint8Array([1, 2])], "报告.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    ensureFileArrayBuffer(docx);
+    fireEvent.change(screen.getByTestId("attach-file-input"), { target: { files: [docx] } });
+    await screen.findByText("报告.docx");
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+    const sendCall = sendCalls()[0];
+    const sent = JSON.parse(String((sendCall![1] as RequestInit).body)).text as string;
+    expect(sent).toContain('<file path="E:/proj/.mam-attachments/s-1/1-报告.docx">');
+  });
+
+  it("粘贴图片：textarea onPaste 捕获 clipboard 图片文件并走上传链路", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-paste.png", size: 2 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "贴图" } });
+    const file = pngFile("pasted.png");
+    fireEvent.paste(input, { clipboardData: { files: [file] } });
+    await screen.findByText("pasted.png");
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+    const sendCall = sendCalls()[0];
+    const sent = JSON.parse(String((sendCall![1] as RequestInit).body)).text as string;
+    expect(sent).toContain('<image path="E:/proj/.mam-attachments/s-1/1-paste.png">');
+  });
+
+  it("上传中禁发（挂起请求不放行）；放行后 ready 可发送", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attachHang = true;
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "边传边发？" } });
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("hang.png")] },
+    });
+    // chip 出现（uploading 态，文本前缀「上传中：」）→ 发送钮禁用
+    await screen.findByTestId("attachment-chips");
+    expect(screen.getByText("上传中：hang.png")).toBeTruthy();
+    expect((screen.getByTestId("composer-send") as HTMLButtonElement).disabled).toBe(true);
+    // 放行上传 → ready → 可发送
+    releaseAttach!(new Response(JSON.stringify({ path: "E:/p", size: 1 }), { status: 200 }));
+    await waitFor(() =>
+      expect((screen.getByTestId("composer-send") as HTMLButtonElement).disabled).toBe(false)
+    );
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-delivered");
+  });
+
+  it("404 no_cwd：chip 标失败 + 「+」钮禁用（与 resume 禁用口径同源）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attachStatus = 404;
+    routes.attachError = "no_cwd";
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("nc.png")] },
+    });
+    const chip = await screen.findByText("失败：nc.png", { exact: false });
+    expect(chip.textContent).toContain("该会话没有项目目录信息");
+    expect((screen.getByTestId("attach-add") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("「?」徽标：点开展开存储说明（含用户项目目录字样），再点收起", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    expect(screen.queryByTestId("attach-hint")).toBeNull();
+    fireEvent.click(screen.getByTestId("attach-help"));
+    const hint = screen.getByTestId("attach-hint");
+    expect(hint.textContent).toContain("用户项目目录");
+    expect(hint.textContent).toContain(".mam-attachments");
+    fireEvent.click(screen.getByTestId("attach-help"));
+    expect(screen.queryByTestId("attach-hint")).toBeNull();
   });
 });

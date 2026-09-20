@@ -5,6 +5,7 @@
 // + session-approve-options / session-approve（M8 Task 11 审批选项与一键应答）
 // + session-open（M6R–M9R Task 11 一键 resume，R5）
 
+use axum::body::Bytes;
 use axum::{
     extract::{ConnectInfo, Query, State},
     http::StatusCode,
@@ -1169,6 +1170,156 @@ pub async fn session_queue_retract(
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+// ==== 移动端附件上传（2026-09-20 用户裁决）====
+// 存储 = <会话 cwd>/.mam-attachments/<session_id>/（用户项目目录下——所有工具读
+// 工作区内文件天然零审批）；git 零污染 = 首份写入时幂等追加 .git/info/exclude
+// （本地管理区，非 .gitignore 跟踪文件）；非 git 项目跳过。消息侧以
+// <image|file path> 内联标记引用（文件池既有约定，自动入池「我上传的」）。
+
+/// 移动端附件上传（query 传 session_id + 文件名；body = 原始字节）。
+/// 错误契约（与既有端点同族）：400 参数空；403 防御；404 {"error":"no_session"|"no_cwd"}
+/// （no_cwd 与 resume 同源口径）；413 {"error":"too_large"}；200 {path,size}。
+/// 安全边界：cwd 由服务端解析（客户端零路径输入），文件名服务端消毒——杜绝任意写。
+pub async fn session_attachment(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    let no_store = [(axum::http::header::CACHE_CONTROL, "no-store")];
+    // ① 参数校验（trim 判空——与 session-send 同口径）
+    let sid = params.get("session_id").map(|s| s.trim().to_string());
+    let Some(sid) = sid.filter(|s| !s.is_empty()) else {
+        return bad_request();
+    };
+    let Some(raw_name) = params
+        .get("name")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    // ② 容量上限（结构化 413；Content-Length 预检可测，DefaultBodyLimit 为硬兜底）
+    if body.len() > crate::remote::attachments::MAX_ATTACHMENT_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            no_store,
+            Json(serde_json::json!({ "error": "too_large" })),
+        )
+            .into_response();
+    }
+    // ③ 设备身份（防御 403 + 花名）
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // ④ 会话查找（spawn_blocking：扫描是重活）——cwd 服务端解析的唯一来源
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let session =
+        match tokio::task::spawn_blocking(move || find_session_sync(&probe_st, &probe_sid)).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    no_store,
+                    Json(serde_json::json!({ "error": "no_session" })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                log::error!("session-attachment 会话扫描任务异常: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    no_store,
+                    Json(serde_json::json!({ "error": "internal" })),
+                )
+                    .into_response();
+            }
+        };
+    let cwd = session.project_path.trim().to_string();
+    if cwd.is_empty() {
+        // 与 resume 的 no_cwd 同源口径（该会话没有项目目录信息）
+        return (
+            StatusCode::NOT_FOUND,
+            no_store,
+            Json(serde_json::json!({ "error": "no_cwd" })),
+        )
+            .into_response();
+    }
+    let tool = session.agent_type.tool_id().to_string();
+    // ⑤ 写盘（spawn_blocking：同步 IO）+ 审计
+    let write_cwd = cwd.clone();
+    let write_sid = sid.clone();
+    let write_name = raw_name.clone();
+    let write_body = body;
+    let size = write_body.len();
+    let written = tokio::task::spawn_blocking(move || {
+        crate::remote::attachments::write_attachment(
+            std::path::Path::new(&write_cwd),
+            &write_sid,
+            &write_name,
+            &write_body,
+        )
+    })
+    .await;
+    let path = match written {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            log::error!("session-attachment 落盘失败: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                no_store,
+                Json(serde_json::json!({ "error": "io" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            log::error!("session-attachment 写盘任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                no_store,
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    endpoint_audit(
+        &st,
+        &device_id,
+        &device_name,
+        &tool,
+        &sid,
+        &raw_name,
+        "attachment",
+        "ok",
+    );
+    // 数据管理索引（C5）：追加一条（服务端写入；home 不可得则跳过——索引只服务
+    // 桌面管理面，丢失不影响附件本身）。测试态 home_source=None 自动跳过
+    if let Some(home) = (st.home_source)() {
+        crate::remote::attachments::append_index_entry(
+            std::path::Path::new(&home),
+            &crate::remote::attachments::AttachmentIndexEntry {
+                project: cwd,
+                session: sid,
+                tool,
+                name: crate::remote::attachments::sanitize_file_name(&raw_name),
+                path: path.to_string_lossy().into_owned(),
+                size: size as u64,
+                ts: (st.now_source)(),
+            },
+        );
+    }
+    (
+        StatusCode::OK,
+        no_store,
+        Json(serde_json::json!({
+            "path": path.to_string_lossy(),
+            "size": size,
+        })),
     )
         .into_response()
 }

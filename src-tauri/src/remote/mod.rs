@@ -4,6 +4,7 @@
 pub mod api;
 #[cfg(test)]
 pub mod attachment_fixtures;
+pub mod attachments;
 pub mod conn_owner;
 pub mod content;
 pub mod events;

@@ -329,6 +329,15 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             get(api::session_approve_options),
         )
         .route("/session-approve", post(api::session_approve))
+        // 2026-09-20：移动端附件上传（落盘会话工作目录 .mam-attachments/<会话>/，
+        // 路径随消息内联标记注入；PIN 门禁内层 gate 结构性覆盖；20MB 显式上限——
+        // axum 默认 2MB；超限时 handler 先按 Content-Length 预检给结构化 413）
+        .route(
+            "/session-attachment",
+            post(api::session_attachment).layer(axum::extract::DefaultBodyLimit::max(
+                crate::remote::attachments::MAX_ATTACHMENT_BYTES,
+            )),
+        )
         // M6R–M9R Task 11：一键 resume 端点（R5，PIN 门禁内层 gate 结构性覆盖，
         // 新端点不需要各自鉴权代码；spawn 缝注入使测试零真开窗）
         .route("/session-open", post(api::session_open))
@@ -4650,5 +4659,182 @@ mod tests {
             "审计必须 failed: 前缀且携带授权指引：{}",
             audits[0].result
         );
+    }
+
+    // ==== 移动端附件上传（2026-09-20）：落盘 <会话 cwd>/.mam-attachments/<会话>/ ====
+
+    /// 附件端点测试状态：单会话、project_path 指向 tempdir（零真实目录污染）
+    fn attach_state(project_path: std::path::PathBuf, empty_cwd: bool) -> Arc<RemoteState> {
+        let mut session = inj_sess(
+            "sess_att",
+            crate::session::AgentType::Claude,
+            21,
+            crate::session::SessionStatus::Processing,
+        );
+        session.project_path = if empty_cwd {
+            String::new()
+        } else {
+            project_path.to_string_lossy().into_owned()
+        };
+        Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "t", "platform": "macos", "version": "0.0.0-test" },
+                    "enabledTools": ["claude"]
+                })
+            }),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        })
+    }
+
+    fn attach_req(uri: &str, cookie: Option<&str>, body: Body) -> axum::http::Request<Body> {
+        let mut b = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/octet-stream");
+        if let Some(c) = cookie {
+            b = b.header("cookie", c);
+        }
+        b.body(body).unwrap()
+    }
+
+    fn attach_tempdir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "mam-attach-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(d.join(".git").join("info")).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn attachment_upload_lands_in_project_dir_and_excludes_from_git() {
+        let proj = attach_tempdir();
+        // 单一 state 实例：设备注册与 router 必须同源（DeviceStore::memory 每个实例独立，
+        // 分开构造会让注册的设备在 app 里不存在 → 403 假阴性）
+        let state = attach_state(proj.clone(), false);
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(attach_req(
+                "/m/api/v1/session-attachment?session_id=sess_att&name=shot.png",
+                Some("mam_device=mm"),
+                Body::from(b"\x89PNG fake".as_slice()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"path\"") && body.contains("\"size\":9"),
+            "{body}"
+        );
+        // 落盘 = <cwd>/.mam-attachments/<session>/，文件名尾段为消毒名
+        let dir = proj.join(".mam-attachments").join("sess_att");
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        let name = entries[0]
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.ends_with("-shot.png"), "{name}");
+        // git 本地排除：首份写入即幂等追加；二次上传不重复
+        let exclude =
+            std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();
+        assert_eq!(exclude.matches(".mam-attachments/").count(), 1);
+        // 二次上传：同一 state（设备注册仍有效），router 可重建
+        let app = router(state.clone());
+        let r = app
+            .oneshot(attach_req(
+                "/m/api/v1/session-attachment?session_id=sess_att&name=second.txt",
+                Some("mam_device=mm"),
+                Body::from("two"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let exclude =
+            std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();
+        assert_eq!(exclude.matches(".mam-attachments/").count(), 1, "幂等");
+        std::fs::remove_dir_all(&proj).ok();
+    }
+
+    #[tokio::test]
+    async fn attachment_gate_and_error_contracts() {
+        // 403：无设备 cookie（门禁防御）
+        let proj = attach_tempdir();
+        let state = attach_state(proj.clone(), false);
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(attach_req(
+                "/m/api/v1/session-attachment?session_id=sess_att&name=a.png",
+                None,
+                Body::from("x"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+        // 404 no_session：未知会话
+        let r = router(state.clone())
+            .oneshot(attach_req(
+                "/m/api/v1/session-attachment?session_id=nope&name=a.png",
+                Some("mam_device=mm"),
+                Body::from("x"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_session"));
+        // 404 no_cwd：会话无项目目录（与 resume 同源口径）；empty-cwd state 需另注册设备
+        let empty_state = attach_state(proj.clone(), true);
+        persist_named_device(&empty_state, "mm", "测试设备");
+        let r = router(empty_state)
+            .oneshot(attach_req(
+                "/m/api/v1/session-attachment?session_id=sess_att&name=a.png",
+                Some("mam_device=mm"),
+                Body::from("x"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        assert!(body_string(r).await.contains("no_cwd"));
+        // 413 too_large：超 20MB（DefaultBodyLimit 硬兜底）；复用已注册设备的 state
+        let big = vec![0u8; crate::remote::attachments::MAX_ATTACHMENT_BYTES + 1];
+        let r = router(state.clone())
+            .oneshot(attach_req(
+                "/m/api/v1/session-attachment?session_id=sess_att&name=a.bin",
+                Some("mam_device=mm"),
+                Body::from(big),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 413);
+        std::fs::remove_dir_all(&proj).ok();
     }
 }

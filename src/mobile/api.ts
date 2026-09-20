@@ -378,6 +378,41 @@ export async function sessionSend(sessionId: string, text: string): Promise<Send
   return (await r.json()) as SendResult;
 }
 
+/** 上传附件（2026-09-20）：原始字节 POST 到 /session-attachment——服务端落盘到
+ *  **用户项目目录** .mam-attachments/<会话>/，返回绝对路径供消息内联标记
+ *  （<image|file path>，文件池既有约定）引用。
+ *  错误契约：403 → null（设备失效，与 fetchSendInfo 同口径）；404 →
+ *  ApiError(404, "no_session"|"no_cwd")（composer 据后者禁用上传钮）；
+ *  413 → ApiError(413, "too_large")；其余非 2xx → ApiError(status) */
+export async function uploadAttachment(
+  sessionId: string,
+  file: File
+): Promise<{ path: string; size: number } | null> {
+  const q = new URLSearchParams({ session_id: sessionId, name: file.name });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-attachment?${q}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: await file.arrayBuffer(),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-attachment 网络异常: ${String(e)}`);
+  }
+  if (r.status === 403) return null; // 设备失效 → 回配对页（fetchSendInfo 同口径）
+  if (!r.ok) {
+    let reason = `session-attachment ${r.status}`;
+    try {
+      const j = (await r.json()) as { error?: unknown };
+      if (typeof j?.error === "string") reason = j.error;
+    } catch {
+      /* 响应体非 JSON：保留默认 reason */
+    }
+    throw new ApiError(r.status, reason);
+  }
+  return (await r.json()) as { path: string; size: number };
+}
+
 /** 排队条目视图（GET /session-queue 的 items 元素，camelCase 契约）：position =
  *  1 起队位；content 为入队时 compose 完成的最终注入文本（含设备名前缀） */
 export interface QueueItemView {

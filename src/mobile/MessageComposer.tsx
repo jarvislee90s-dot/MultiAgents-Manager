@@ -22,6 +22,8 @@
 //   回执的 last-write-wins 竞态防线（按钮可见不可点，保持「不失联」意图）；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ClipboardEvent as ReactClipboardEvent } from "react";
+import { CircleHelp, Plus } from "lucide-react";
 import {
   ApiError,
   fetchQueue,
@@ -29,6 +31,7 @@ import {
   queueJump,
   queueRetract,
   sessionSend,
+  uploadAttachment,
   type SendInfo,
 } from "./api";
 
@@ -40,6 +43,17 @@ interface MessageComposerProps {
 /** 回执条状态（与 SendResult 对应 + 网络层 ApiError 归入 failed；
  *  gone = 中性收敛（评审裁决）：条目经复核确认已离开队列——大概率已被送达，
  *  不标失败红色、不带「（可重试）」，防止用户重发造成重复注入） */
+/** 待发附件条目（组件内态）：status=uploading → ready/failed；
+ *  path = 服务端落盘后的绝对路径（仅 ready 有） */
+type PendingAttachment = {
+  id: string;
+  name: string;
+  isImage: boolean;
+  status: "uploading" | "ready" | "failed";
+  path?: string;
+  error?: string;
+};
+
 type Receipt =
   | { kind: "delivered" }
   | {
@@ -77,6 +91,16 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const [text, setText] = useState("");
   /** 输入框 ref：「修改」确认出队后把正文放回输入框时聚焦（移动端直接可改） */
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** 隐式文件选择器 ref：「+」钮 click 转发 */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  /** 待发附件（2026-09-20）：uploading → ready（含落盘绝对路径）/ failed；
+   *  发送时仅 ready 的拼内联标记行，failed 不上送（用户裁决：不做通用美化，
+   *  附件路径是给 agent 读的） */
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  /** 附件「?」说明展开态（2026-09-20 知情披露）：点开才显示，不平铺常驻 */
+  const [attachHintOpen, setAttachHintOpen] = useState(false);
+  /** 会话无项目目录（服务端 404 no_cwd 一次即知）：禁用上传钮（与 R5 禁用口径同源） */
+  const [noCwd, setNoCwd] = useState(false);
   const [sending, setSending] = useState(false);
   // 插队/撤回进行中（与发送互斥，防连点）
   const [busy, setBusy] = useState(false);
@@ -139,20 +163,30 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const handleSend = useCallback(async () => {
     const body = text.trim();
     if (!body || sending || busy || sendInfo === null || !sendInfo.injectable) return;
+    if (attachments.some((a) => a.status === "uploading")) return; // 上传中禁发（防消息先于落盘）
     setSending(true);
     try {
+      // 附件标记行（文件池既有约定 <image|file path>）：拼在正文之后随消息注入，
+      // agent 据路径读文件；failed 附件不拼（未落盘，拼了 agent 也读不到）
+      const markup = attachments
+        .filter((a) => a.status === "ready" && a.path)
+        .map((a) => (a.isImage ? `<image path="${a.path}">` : `<file path="${a.path}">`))
+        .join("\n");
+      const fullText = markup ? `${text}\n${markup}` : text;
       // 多行原样上行（trim 只用于判空，不改写正文——归一在服务端）
-      const res = await sessionSend(session.id, text);
+      const res = await sessionSend(session.id, fullText);
       if (res.status === "delivered") {
         setText("");
+        setAttachments([]);
         setReceipt({ kind: "delivered" });
       } else if (res.status === "queued") {
         setText("");
+        setAttachments([]);
         setReceipt({
           kind: "queued",
           itemId: res.itemId,
           position: res.position,
-          content: body,
+          content: fullText,
         });
       } else {
         setReceipt({ kind: "failed", error: res.error });
@@ -167,7 +201,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     } finally {
       setSending(false);
     }
-  }, [text, sending, busy, sendInfo, session.id]);
+  }, [text, attachments, sending, busy, sendInfo, session.id]);
 
   // P2-7 失败对账（插队/撤回共用）：失败后复核 /session-queue——
   // - 条目仍在 pending → 恢复排队视图（刷新队位，「立即发送/撤回」按钮保留可重试）；
@@ -285,10 +319,68 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     });
   }, [receipt, busy, retractWithOutcome]);
 
+  // 附件上传（2026-09-20）：逐个上传 → chips 状态机（uploading → ready/failed）。
+  // 404 no_cwd 一次即置 noCwd（会话无项目目录，+ 钮禁用——与 R5 禁用口径同源）；
+  // 403 设备失效抛 ApiError(403, "设备已失效…") → failed chip（Board 侧另有 403
+  // 全局判废通道，此处不重复处理）
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      for (const f of files) {
+        const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const isImage = f.type.startsWith("image/");
+        setAttachments((prev) => [
+          ...prev,
+          { id, name: f.name || (isImage ? "粘贴图片.png" : "file"), isImage, status: "uploading" },
+        ]);
+        try {
+          const res = await uploadAttachment(session.id, f);
+          if (res === null) throw new ApiError(403, "设备已失效，请重新配对");
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, status: "ready", path: res.path } : a))
+          );
+        } catch (e) {
+          const isNoCwd = e instanceof ApiError && e.status === 404 && e.message === "no_cwd";
+          if (isNoCwd) setNoCwd(true);
+          const reason =
+            e instanceof ApiError && isNoCwd
+              ? "该会话没有项目目录信息"
+              : String(e instanceof ApiError ? e.message : e);
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, status: "failed", error: reason } : a))
+          );
+        }
+      }
+    },
+    [session.id]
+  );
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  /** 粘贴图片（2026-09-20）：clipboard 里的图片文件走同上传链路（桌面浏览器粘贴
+   *  最顺；移动端以 + 钮文件选择为主）。非图片粘贴放行默认文本行为 */
+  const handlePaste = useCallback(
+    (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+      const images = Array.from(e.clipboardData?.files ?? []).filter((f) =>
+        f.type.startsWith("image/")
+      );
+      if (images.length === 0) return;
+      e.preventDefault();
+      void addFiles(images);
+    },
+    [addFiles]
+  );
+
   // 拉取未就绪 / 失败 / 403：不渲染（详情页正文照常）
   if (!infoReady || sendInfo === null) return null;
 
-  const canSend = injectable && !sending && !busy && text.trim().length > 0;
+  const canSend =
+    injectable &&
+    !sending &&
+    !busy &&
+    text.trim().length > 0 &&
+    !attachments.some((a) => a.status === "uploading");
 
   return (
     <div
@@ -389,7 +481,80 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           )}
         </div>
       )}
+      {/* 待发附件 chips（2026-09-20）：上传中/就绪/失败三态，可单个移除 */}
+      {attachments.length > 0 && (
+        <div className="mb-1 flex flex-wrap items-center gap-1.5" data-testid="attachment-chips">
+          {attachments.map((a) => (
+            <span
+              key={a.id}
+              data-testid={`attach-chip-${a.id}`}
+              className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
+                a.status === "failed"
+                  ? "bg-rose-500/10 text-rose-700 dark:bg-rose-400/10 dark:text-rose-400"
+                  : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+              }`}
+            >
+              {a.status === "uploading"
+                ? `上传中：${a.name}`
+                : a.status === "failed"
+                  ? `失败：${a.name}（${a.error}）`
+                  : a.name}
+              <button
+                type="button"
+                data-testid={`attach-remove-${a.id}`}
+                aria-label={`移除附件 ${a.name}`}
+                disabled={a.status === "uploading"}
+                onClick={() => removeAttachment(a.id)}
+                className="text-slate-400 hover:text-slate-600 disabled:opacity-40 dark:text-slate-500"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex items-end gap-2">
+        {/* 附件入口（2026-09-20）：+ 选择文件；「?」知情披露（存储到用户项目目录） */}
+        <span className="flex shrink-0 items-center gap-0.5">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            data-testid="attach-file-input"
+            onChange={(e) => {
+              const fs = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (fs.length > 0) void addFiles(fs);
+            }}
+          />
+          <button
+            type="button"
+            data-testid="attach-add"
+            aria-label="添加附件"
+            aria-expanded={attachHintOpen}
+            disabled={!injectable || noCwd}
+            title={
+              noCwd
+                ? "该会话没有项目目录信息，无法上传附件"
+                : "添加附件（保存到项目目录 .mam-attachments/）"
+            }
+            onClick={() => fileInputRef.current?.click()}
+            className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800"
+          >
+            <Plus size={16} />
+          </button>
+          <button
+            type="button"
+            data-testid="attach-help"
+            aria-label="附件存储说明"
+            aria-expanded={attachHintOpen}
+            onClick={() => setAttachHintOpen((v) => !v)}
+            className="shrink-0 rounded-full p-0.5 text-[10px] leading-none text-slate-400 hover:bg-slate-200 dark:text-slate-500 dark:hover:bg-slate-800"
+          >
+            <CircleHelp size={12} />
+          </button>
+        </span>
         <textarea
           ref={inputRef}
           data-testid="composer-input"
@@ -397,6 +562,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           value={text}
           maxLength={MAX_SEND_CHARS}
           onChange={(e) => setText(e.target.value.slice(0, MAX_SEND_CHARS))}
+          onPaste={handlePaste}
           rows={2}
           disabled={!injectable}
           placeholder={injectable ? "输入消息发送到终端…" : "该会话不支持远程注入"}
@@ -412,6 +578,17 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           {sending ? "发送中…" : "发送"}
         </button>
       </div>
+      {/* 知情披露（2026-09-20 用户要求）：「?」点开才显示——附件落在用户项目目录，
+          已本地 git 排除不会提交；项目收尾可整目录清理。看过即收、不平铺常驻 */}
+      {attachHintOpen && (
+        <p
+          data-testid="attach-hint"
+          className="mt-1 rounded-lg bg-slate-100 px-2 py-1.5 text-[11px] leading-4 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+        >
+          附件将保存到用户项目目录 .mam-attachments/&lt;会话&gt;/（已在本地 git
+          排除，不会提交）；项目收尾时可整目录清理。
+        </p>
+      )}
     </div>
   );
 }

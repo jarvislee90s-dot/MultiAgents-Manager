@@ -189,7 +189,6 @@
       "tutorialPost": "The address never changes afterwards; MAM downloads cloudflared automatically and keeps it running — no manual install needed.",
       "save": "Save",
       "tokenSaved": "Saved",
-
       "addrFallback": "last known",
       "pinTitle": "Access PIN",
       "pinHint": "Only applies to LAN / Quick tunnel / Named tunnel (not needed locally). Click Save to apply; a new device enters it once and stays trusted for 180 days; changing it signs out every device",
@@ -233,6 +232,20 @@
       "session": "Session",
       "action": "Action",
       "summary": "Summary"
+    },
+    "dataManagement": {
+      "title": "Data Management",
+      "refresh": "Refresh",
+      "empty": "No project attachments",
+      "project": "Project",
+      "files": "Files",
+      "size": "Size",
+      "clean": "Clean",
+      "cleanConfirm": "Delete all attachments of this project? The whole folder will be removed and cannot be recovered",
+      "cleaned": "Cleaned",
+      "overThreshold": "Large usage, consider cleaning",
+      "hint": "Attachments = images/docs uploaded from mobile messages, stored in each project's .mam-attachments/<session>/ (locally git-excluded)",
+      "loadError": "Failed to load data management list, please refresh"
     }
   },
   "home": {
