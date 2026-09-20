@@ -31,17 +31,26 @@ impl AgentAdapter for CodexAdapter {
     fn hook_supported(&self) -> bool {
         true
     }
+    // F3（存量 bug 修复，2026-09-20）：codex 0.155.x 的 hooks 配置键为 **PascalCase**
+    // （codex-rs/config/src/hook_config.rs serde rename 逐字段核对；payload
+    // hook_event_name 亦 PascalCase，与 claude 一致）——旧 CamelCase 注册写入
+    // "stop"/"userPromptSubmit" 等键，codex 不识别 → **hooks 链路整体不生效**
+    // （疑为 hooks 失效真根因）。证据：research/refs/phase2-消息注入/
+    // 2026-09-19-审批事件钩子通道调研.md §3.2/§3.3。读侧 mod.rs 消费 "Stop"|"stop"
+    // 双口径，事件名归 PascalCase 后与 claude 同形态，读侧零改动。
+    // 存量 hooks.json 重写语义：register_all_hooks 每次启动重跑（lib.rs），旧
+    // camelCase 键由 register_hooks_for_tool 的 F3 迁移步移除（仅 MAM 自写条目）。
     fn hook_event_case(&self) -> HookEventCase {
-        HookEventCase::CamelCase
+        HookEventCase::PascalCase
     }
     fn hook_events(&self) -> Vec<&'static str> {
         vec![
-            "stop",
-            "userPromptSubmit",
-            "sessionStart",
-            "sessionEnd",
-            "preToolUse",
-            "postToolUse",
+            "Stop",
+            "UserPromptSubmit",
+            "SessionStart",
+            "SessionEnd",
+            "PreToolUse",
+            "PostToolUse",
         ]
     }
     fn hook_config_path(&self) -> Option<std::path::PathBuf> {

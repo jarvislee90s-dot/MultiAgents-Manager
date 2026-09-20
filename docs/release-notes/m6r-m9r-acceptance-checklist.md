@@ -85,6 +85,7 @@ families.rs 6 测 + engine.rs 18 测（含 macOS 构造，见 A6），共 24 测
 | 端点（200 opening+审计 open / 404 no_cwd / 404 no_resume_command / 404 no_session+坏请求） | `remote/server.rs` | `session_open_endpoint_opens_and_audits`、`session_open_endpoint_no_cwd`、`session_open_endpoint_no_resume_command`、`session_open_endpoint_no_session_and_bad_request` |
 | 端点失败回执（200 failed+审计 failed: / spawn 失败 / macOS TCC 指引形态，M2） | `remote/server.rs` | `session_open_endpoint_spawn_failure_reports_failed`、`session_open_endpoint_macos_tcc_guidance_reports_failed` |
 | osascript 错误分类（-1743 TCC→中文指引 / 其他→stderr 摘要截断，M2 纯函数跨平台可测） | `inject/resume.rs` | `classify_resume_error_maps_tcc_to_guidance`、`classify_resume_error_other_keeps_summary` |
+| **F1 macOS 死窗治理（2026-09-20，mac-reverify §四-A）**：通道顺序 Terminal.app 优先、iTerm2 次选；出手后效果回查（3s 窗按 resume 命令特征查子进程，未命中转次选；双败 failed 回执+审计 open failed:*——「死窗」入账） | `inject/resume.rs` | `macos_dual_channel_dispatches_via_seam`（新序）、`macos_terminal_dead_window_check_miss_falls_to_iterm2`、`macos_both_channels_fail_merged_with_channel_labels`、`resume_effect_in_snapshot_pure` |
 
 ### A9 · macOS 匹配构造（R6）
 
@@ -170,12 +171,13 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-7 | MAM 重启→待发自动补投 | 有 PENDING 条目 | 重启 MAM 应用 | 启动对账 flush 补投待发项 |
 | C-8 | 审批 codex（Read Only 档） | codex 沙箱调 Read Only 档触发审批框 | 红卡点「允许」/「拒绝」 | 终端收到 y/esc（Windows 取证键位），批准/拒绝生效；审计 action=approve/reject |
 | C-9 | 审批 claude 计划模式 | claude 计划模式出计划 | 红卡点批准执行 | 计划被批准开始执行（「1」键，Windows 取证一致） |
-| C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open（仅移动端触发落账；桌面端 Tauri 路径不写审计——audit 需设备身份） |
+| C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open（仅移动端触发落账；桌面端 Tauri 路径不写审计——audit 需设备身份）。**F1 后 macOS 口径（2026-09-20）**：Terminal.app 优先出手 + 3s 效果回查，死窗自动转 iTerm2、双败回 failed 回执+审计 failed——macOS 实测记录新序与回查行为（iTerm2 死窗已知问题见 mac-reverify §四-A，上游升级复测后回翻） |
 | C-11 | 审计页逐条可查 | 完成上述操作 | 设置 → 注入审计 | 逐条对应，无缺漏 |
 | C-12 | WT/conhost 判冻与人工点窗恢复 | 任一 CLI 会话制造输出停顿/选择模式（如终端内文本框选） | 注入长文制造背压与停顿：注入回执出现「目标终端疑似进入选择模式…」中文状态回执（D8 裁决 2026-09-19：不自动介入）→ 用户点一下该终端窗口清除选择模式 → 重发 | 状态回执如实出现，点窗后重发成功、正文最终命中；**WT 宿主判冻检测行为未实机验证（OccWatch 探针为 #[ignore]，§8.3）——异常即记录不判 FAIL** |
 | C-13 | 滞留→屏读→补按回车恢复路径 | 任一快消费者会话（E10 尾字符丢失场景：正文已打入但尾字符/提交回车丢失） | 直发后若确认失败回执出现：终端可见已打内容但未提交——人工按一次回车即提交；或等确认层自动屏读回查补按（500ms 轮询 3s 窗，`confirm::RECHECK_MS`） | 滞留内容最终提交进会话（会话文件见戳），不重复双投；确认回执与实际落盘一致 |
 | C-14 | 锁屏场景注入/通知可达性（原 M7 遗留补充项） | Windows 锁屏态（命令备好于 mam-probe 报告 §6；macOS 侧锁屏项见 m7-m8 清单 #5） | 锁屏后远程发消息，观察注入与通知可达 | 占位：沿用既有验收口径，未在本批新增内容 |
 | C-15 | 真机蜂窝网络复验（原用户项） | 外网蜂窝网络手机 + Windows 实机 | 蜂窝网络下远程发消息走全链 | 占位：沿用既有验收口径，未在本批新增内容 |
+| C-16 | codex hooks 触发复验（**F3 PascalCase 修复后**，M1A 前置） | codex 0.155.x 在场 | 跑 `cargo test --lib monitor::hooks::codex_pascal -- --ignored`（注册写入真实 ~/.codex/hooks.json）→ 跑一次真实 codex 交互会话 | hooks.json 出现 PascalCase 六键且旧 camelCase 键被迁移清除；会话期间 `~/.mam/events/<session_id>.json` 出现（hook 真触发）。调研锚点：`research/refs/phase2-消息注入/2026-09-19-审批事件钩子通道调研.md`（0.155.1 键名 PascalCase 源码证据 §3.2；M1A 红卡=钩子信号+固定键位） |
 
 ---
 

@@ -28,6 +28,7 @@
 | M8-2 | 计划模式「批准执行」 | claude 计划模式会话出计划 | 红卡点批准执行 | 计划被批准开始执行（裁决 13 会话内应答范畴）。**Mac 实测：PASS（经降级）**——plan mode 出计划→"Would you like to proceed?"→降级投递「1」→批准执行（auto mode on、开始写码） |
 | M8-3 | 降级路径 | 把映射 KV 清掉（或用无映射工具） | 红卡不出现 → 普通发消息 | 不发错误键位；降级文案出现 |
 | M8-4 | codex 键位取证补测（**已于 M6R–M9R 批 T10 Windows 侧取证：codex y/esc，0.154.0 回填 DEFAULT_MAPPINGS_JSON**——本项仅保留 Mac 版本漂移复核，见 D-4） | codex `/approvals` 设为需审批模式（如 Ask always） | 触发原生审批框，抄录提示原文与键位 | 与 T10 取证口径核对一致；Mac 版本若有漂移，据实修订 DEFAULT_MAPPINGS_JSON 的 codex markers/keys/verified_with |
+| M8-5 | codex hooks 触发复验（**F3 PascalCase 修复后**，M1A 前置，2026-09-20 批新增） | codex 0.155.x 在场 | 跑 `cargo test --lib monitor::hooks::codex_pascal -- --ignored`（注册写入真实 ~/.codex/hooks.json）→ 跑一次真实 codex 交互会话 | hooks.json 出现 PascalCase 六键且旧 camelCase 键被迁移清除；会话期间 `~/.mam/events/<session_id>.json` 出现（hook 真触发）。**M1A 调研锚点**：`research/refs/phase2-消息注入/2026-09-19-审批事件钩子通道调研.md`（claude Notification permission_prompt 判定①②一步到位；codex 0.155.1 PascalCase hooks 源码证据 §3.2/§3.3；红卡=钩子信号+固定键位，marker 文本检测在 macOS 红卡路径可放弃） |
 
 ## 已知执行形态差异（实测时留意）
 

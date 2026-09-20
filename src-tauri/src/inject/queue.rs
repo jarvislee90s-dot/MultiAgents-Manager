@@ -127,15 +127,9 @@ pub(crate) fn try_flush_with(
             if jump {
                 super::confirm::await_jump_receipt(st, &session, &item.content)
             } else {
-                // family 与 timeout 同源下发（spec）——确认失败文案按族 × 平台感知
-                // （Mac 报告 §四-C：macOS crossterm 补「按一次回车」指引）
-                super::confirm::await_direct_receipt(
-                    st,
-                    &session,
-                    &item.content,
-                    confirm_timeout,
-                    spec.family,
-                )
+                // timeout 同源下发（spec）；确认失败文案按「工具 × 平台」感知
+                // （F2：families::macos_enter_swallowed 投影表，mac-reverify §四-B）
+                super::confirm::await_direct_receipt(st, &session, &item.content, confirm_timeout)
             }
         }
     };
@@ -620,6 +614,13 @@ mod tests {
         }
     }
 
+    /// kimi 会话夹具（F2 工具感知测试用——kimi = macOS 回车吞没投影表成员）
+    fn sess_kimi(id: &str, status: SessionStatus, pid: u32) -> Session {
+        let mut s = sess(id, status, pid);
+        s.agent_type = AgentType::Kimi;
+        s
+    }
+
     /// 测试态：session_source 注入给定快照，injector 注入假体（其余缝全空载，
     /// 形状对齐 server.rs test_state 先例——零 DB 零真实目录）；confirm_probe
     /// 恒命中（首轮即中，零延迟零等待）
@@ -856,9 +857,10 @@ mod tests {
 
     // ==== A1 写入确认（M9R Task 5）：直呼确认函数 + 小超时（避免 5s 慢测） ====
 
-    /// 直发确认失败：confirm_probe 恒 false（确认失败用例就地覆盖）→ 小超时轮询 +
-    /// 屏读门槛不成立（假 pid 屏读必败，保守不动作）→ Err 含裁决文案。
-    /// family 传 RawVt（对齐生产推导：claude 会话 → family_for("claude").family）
+    /// 直发确认失败（裁决 A1）：confirm_probe 恒 false（确认失败用例就地覆盖）→
+    /// 小超时轮询 + 屏读门槛不成立（假 pid 屏读必败，保守不动作）→ Err 失败回执
+    /// （claude 会话 → 投影表 false → 裁决 A1 原文案；tool 参数由 session 自带，
+    /// F2 后不再显式传族）
     #[test]
     fn direct_confirm_failure_returns_err() {
         let st = state_with_probe(
@@ -867,47 +869,32 @@ mod tests {
             std::sync::Arc::new(|_, _, _| false),
         );
         let s = sess("s-cf", SessionStatus::Waiting, 21);
-        let err = super::super::confirm::await_direct_receipt(
-            &st,
-            &s,
-            "直发确认消息",
-            60,
-            crate::inject::families::TuiFamily::RawVt,
-        )
-        .expect_err("确认未中必须失败回执");
+        let err = super::super::confirm::await_direct_receipt(&st, &s, "直发确认消息", 60)
+            .expect_err("确认未中必须失败回执");
         assert!(
             err.contains("已注入未确认"),
             "失败回执须含裁决 A1 文案：{err}"
         );
     }
 
-    /// 族感知行为断言（M3B 接线锁，Mac 报告 §四-C）：Crossterm 族直发确认失败的
-    /// 回执与纯函数选择器在「本机 OS」下的产出逐字一致——证明 family 参数真实参与
-    /// 选文案（macOS 上即 (Crossterm, macos) 新文案象限；Windows 上为
-    /// (Crossterm, windows) 原文案象限，与 confirm 四象限单测互证）
+    /// 工具感知行为断言（M3B 接线锁 + F2 更正，mac-reverify §四-B）：kimi 会话
+    /// 直发确认失败的回执与纯函数选择器在「本机 OS」下的产出逐字一致——证明
+    /// tool 参数真实参与选文案（kimi = macOS 回车吞没投影表成员；Windows 上为
+    /// (kimi, windows) 原文案象限，macOS 上即新文案——与 confirm 表驱动单测互证）
     #[test]
-    fn direct_confirm_failure_receipt_is_family_consistent() {
+    fn direct_confirm_failure_receipt_is_tool_consistent() {
         let st = state_with_probe(
-            vec![sess("s-cf2", SessionStatus::Waiting, 27)],
+            vec![sess_kimi("s-cf2", SessionStatus::Waiting, 27)],
             FakeInjector::ok(),
             std::sync::Arc::new(|_, _, _| false),
         );
-        let s = sess("s-cf2", SessionStatus::Waiting, 27);
-        let err = super::super::confirm::await_direct_receipt(
-            &st,
-            &s,
-            "族感知确认消息",
-            60,
-            crate::inject::families::TuiFamily::Crossterm,
-        )
-        .expect_err("确认未中必须失败回执");
+        let s = sess_kimi("s-cf2", SessionStatus::Waiting, 27);
+        let err = super::super::confirm::await_direct_receipt(&st, &s, "工具感知确认消息", 60)
+            .expect_err("确认未中必须失败回执");
         assert_eq!(
             err,
-            super::super::confirm::direct_confirm_fail_copy(
-                crate::inject::families::TuiFamily::Crossterm,
-                std::env::consts::OS,
-            ),
-            "回执必须与纯函数选文案一致（族 × 本机 OS）：{err}"
+            super::super::confirm::direct_confirm_fail_copy("kimi", std::env::consts::OS,),
+            "回执必须与纯函数选文案一致（工具 × 本机 OS）：{err}"
         );
     }
 

@@ -1,8 +1,12 @@
 //! R5 一键 resume 窗口（M6R–M9R 批次 Task 11）：
 //! 手机或桌面点一下 → 本机自动打开终端 + 进入项目目录 + 恢复会话 + 置前聚焦，
 //! 用户零额外操作。终端选择：Windows 优先 Windows Terminal、未装回退 conhost；
-//! macOS 优先 iTerm2、次选 Terminal.app（osascript **等待执行 + 失败回执**——M2
-//! 修法，见 [`run_osascript_wait`] / [`classify_resume_error`] / [`spawn_terminal`]）。
+//! macOS **Terminal.app 优先、iTerm2 次选**（F1 治理 2026-09-20：iTerm2 3.7.2+
+//! macOS26 带命令 create window 恒死窗假成功——mac-reverify-b9a501c §四-A/R1②，
+//! 上游升级复测后再翻转；osascript **等待执行 + 失败回执**（M2 修法）+ **出手后
+//! 效果回查**（F1②：2–3s 内按注入命令特征查子进程，未命中转次选，双败 failed
+//! 回执 + 审计 failed——「死窗」纳入账实一致），见 [`open_macos_with`] /
+//! [`resume_effect_in_snapshot`] / [`classify_resume_error`] / [`spawn_terminal`]）。
 //!
 //! ## 结构（构造与执行分离，engine.rs 同款纪律；评审 I2：macOS 同样入缝）
 //! - [`resume_command`]：命令表纯函数（Step 1 实测取证，**未查证/不存在的工具绝不入表**
@@ -79,8 +83,11 @@ pub enum SpawnSpec {
 ///   Without ID: interactively pick.`；
 /// - opencode 1.18.31：`-s, --session  session id to continue`（SQLite 类工具，
 ///   扫描契约豁免 L2/L3，与本表无关）；
-/// - 未安装/不适用（Step 1 如实记录，均 None）：zcode（CLI 未安装）、openclaw
-///   （CLI 未安装）、workbuddy（桌面 APP 形态无 CLI）、dsh（web 宿主）。
+/// - 未安装/不适用（Step 1 如实记录，均 None）：zcode（**包内 CLI 0.16.9 存在**
+///   （--resume/-c 可用，路径=应用包 Resources，不在 PATH——`where` 探测不到），
+///   但 zcode 的 resume 窗口语义待设计（桌面深链 vs 终端无头）——见
+///   docs/release-notes/2026-09-19-zcode-APP形态首触调查与互通矩阵.md，F4①），
+///   openclaw（CLI 未安装）、workbuddy（桌面 APP 形态无 CLI）、dsh（web 宿主）。
 const RESUME_TABLE: &[(&str, &str)] = &[
     ("claude", "claude --resume {id}"),
     ("codex", "codex resume {id}"),
@@ -338,22 +345,92 @@ fn open_windows_with(
     }
 }
 
-/// macOS 双通道缝出手（跨平台纯逻辑，Windows 上即可测）：iTerm2 优先、Terminal.app
-/// 次选——依次组装 [`SpawnSpec::MacosApplescript`] 交 spawner，首通道 Ok 即返回；
-/// 全败合并中文错误。实机开窗验证归 Mac 回传清单（执行层 = 生产 spawner 的
-/// AppleScript 臂）。
-fn open_macos_with(cwd: &str, resume: &str, spawner: &SpawnFn) -> Result<(), String> {
+/// 效果回查缝类型（F1②，mac-reverify-b9a501c §四-A）：出手成功后确认目标会话
+/// 真建立。入参 = resume 命令（会话 id 唯一，特征查子进程）；返回 false = 该通道
+/// 「死窗/会话未建立」。生产 = [`macos_effect_probe`]（进程表轮询）；测试 = 假体。
+pub type EffectCheckFn = dyn Fn(&str) -> bool + Send + Sync;
+
+/// 效果回查轮询窗（秒）与采样间隔（毫秒）：出手后 2–3s 内确认（Mac 复验报告
+/// §四-A 建议 ①）——Terminal `do script` → shell → 工具进程通常 <1.5s；3s 窗
+/// 给慢机留裕量。双通道最坏 ≈ 2×(osascript 10s + 3s)，仅失败路径触达。
+const EFFECT_CHECK_SECS: u64 = 3;
+const EFFECT_CHECK_POLL_MS: u64 = 500;
+
+/// 回查判定纯函数（跨平台可测）：进程命令行快照中存在含 resume 命令特征的条目
+/// → 该通道真建立了会话。resume 命令含会话 id（UUID 级唯一），npm shim 类工具
+/// （claude → `node …/claude --resume <id>`）命令行保留原参数，子串包含即命中。
+/// 空特征防御性返回 false（不把空串当通配）。
+///
+/// 无假阳性来源说明：出手（osascript）经 [`run_osascript_wait`]**等待退出后**才
+/// 回查——osascript 进程（命令行内嵌脚本全文含 resume 命令）在回查时已不存在，
+/// 不会自命中。
+pub fn resume_effect_in_snapshot(resume_cmd: &str, snapshot: &[String]) -> bool {
+    let sig = resume_cmd.trim();
+    !sig.is_empty() && snapshot.iter().any(|cl| cl.contains(sig))
+}
+
+/// 生产效果回查（macOS 运行时消费；跨平台 API 编译验证，Windows 构建不触达）：
+/// 轮询 [`EFFECT_CHECK_SECS`] 秒 × [`EFFECT_CHECK_POLL_MS`]，每次全量刷新进程表
+/// 采命令行快照交 [`resume_effect_in_snapshot`] 判定（sysinfo 0.32：
+/// refresh_processes 增量关 + 全量刷；`cmd()` 为 OsStr 连接成串）。
+fn macos_effect_probe(resume_cmd: &str) -> bool {
+    use sysinfo::ProcessesToUpdate;
+    let mut sys = sysinfo::System::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(EFFECT_CHECK_SECS);
+    loop {
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        let snapshot: Vec<String> = sys
+            .processes()
+            .values()
+            .map(|p| {
+                p.cmd()
+                    .iter()
+                    .map(|a| a.to_string_lossy().replace('\\', "/"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        if resume_effect_in_snapshot(resume_cmd, &snapshot) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(EFFECT_CHECK_POLL_MS));
+    }
+}
+
+/// macOS 双通道缝出手（F1 治理后：**Terminal.app 优先、iTerm2 次选**——mac-reverify
+/// b9a501c §四-A/R1②：iTerm2 3.7.2+macOS26 带命令 create window **恒产 0-tab 死窗**
+/// 且 osascript 假成功（exit 0/stderr 空），在 osascript 契约内不可辨；而 Terminal
+/// `do script` 同环境实测全通；R1③：上游升级复测后再翻转回 iTerm2 优先）。
+/// 每通道 = 组装 [`SpawnSpec::MacosApplescript`] 交 spawner，Ok 后过
+/// [`EffectCheckFn`] 效果回查：命中即收口；未命中（死窗）按**该通道失败**处理转
+/// 次选；双通道皆败（spawn Err 或回查未命中）合并中文错误（通道名标注进账——
+/// 端点 Err 臂 → 200 failed 回执 + 审计 `open failed:*`，把「死窗」纳入账实一致）。
+fn open_macos_with(
+    cwd: &str,
+    resume: &str,
+    spawner: &SpawnFn,
+    effect_check: &EffectCheckFn,
+) -> Result<(), String> {
     let mut errs: Vec<String> = Vec::new();
-    for script in [
-        iterm_open_window_script(cwd, resume),
-        terminal_open_script(cwd, resume),
+    for (name, script) in [
+        ("Terminal.app", terminal_open_script(cwd, resume)),
+        ("iTerm2", iterm_open_window_script(cwd, resume)),
     ] {
         match spawner(&SpawnSpec::MacosApplescript { script }) {
-            Ok(()) => return Ok(()),
-            Err(e) => errs.push(e),
+            Ok(()) => {
+                if effect_check(resume) {
+                    return Ok(());
+                }
+                log::warn!("resume {name} 出手后回查未命中（死窗/会话未建立），转次选通道");
+                errs.push(format!("{name} 出手后回查未命中（死窗/会话未建立）"));
+            }
+            Err(e) => errs.push(format!("{name}: {e}")),
         }
     }
-    Err(format!("全部注入通道失败：{}", errs.join("；")))
+    Err(format!("全部 resume 通道失败：{}", errs.join("；")))
 }
 
 /// 生产 spawner（RemoteState 生产装配 / Tauri 命令共用），按变体 cfg 分派：
@@ -421,9 +498,10 @@ pub fn open_session_terminal_with(session: &Session, spawner: &SpawnFn) -> Resul
     match std::env::consts::OS {
         // Windows：wt 在场先试、败降级 conhost 一次（open_windows_with 跨平台可测）
         "windows" => open_windows_with(windows_terminal_path().as_deref(), cwd, &resume, spawner),
-        // macOS：iTerm2 优先、Terminal.app 次选（双通道缝出手，open_macos_with
-        // 跨平台可测；实机验证归 Mac 回传清单）
-        "macos" => open_macos_with(cwd, &resume, spawner),
+        // macOS：Terminal.app 优先、iTerm2 次选（F1 治理，R1②/R1③）+ 出手后
+        // 效果回查（死窗→转次选；双败 failed 回执+审计）。open_macos_with 跨平台
+        // 可测（回查缝注入假体）；实机验证归 Mac 回传清单
+        "macos" => open_macos_with(cwd, &resume, spawner, &macos_effect_probe),
         _ => Err("当前平台不支持一键恢复会话".to_string()),
     }
 }
@@ -690,12 +768,13 @@ mod tests {
         assert_eq!(*calls2.lock().unwrap(), 1, "无 wt 恰一次出手");
     }
 
-    /// 评审 I2：macOS 双通道入缝（跨平台可测——构造与出手顺序在 Windows 上即可测）：
-    /// iTerm2 优先；首通道败 → Terminal.app 次选；全败合并错误。spec 恒
-    /// MacosApplescript 变体且携带 cd '<cwd>' && <resume> 载荷
+    /// F1 治理后 macOS 双通道入缝（跨平台可测）：**Terminal.app 优先**（R1②——
+    /// iTerm2 带命令 create window 恒死窗假成功）；首通道败（spawn Err 或回查未
+    /// 命中死窗）→ iTerm2 次选；spec 恒 MacosApplescript 变体且携带
+    /// cd '<cwd>' && <resume> 载荷
     #[test]
     fn macos_dual_channel_dispatches_via_seam() {
-        // ① 首通道（iTerm2）成功：恰一次出手，script 含 cd + activate
+        // ① 首通道（Terminal.app）成功 + 回查命中：恰一次出手，script 为 do script 形态
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let spawner = {
             let calls = calls.clone();
@@ -705,7 +784,7 @@ mod tests {
             }
         };
         assert_eq!(
-            open_macos_with("/tmp/proj", "claude --resume abc", &spawner),
+            open_macos_with("/tmp/proj", "claude --resume abc", &spawner, &|_| true),
             Ok(())
         );
         let recorded = calls.lock().unwrap().clone();
@@ -715,8 +794,12 @@ mod tests {
         };
         assert!(script.contains("cd '/tmp/proj' && claude --resume abc"));
         assert!(script.contains("activate"));
+        assert!(
+            script.contains(r#"do script "cd '/tmp/proj'"#),
+            "首通道是 Terminal.app 形态（F1：Terminal 优先）"
+        );
 
-        // ② 首通道失败：降级 Terminal.app 次选（第二次出手 do script 形态）
+        // ② 首通道 spawn 失败：降级 iTerm2 次选（第二次出手 create window 形态）
         let calls2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let spawner2 = {
             let calls2 = calls2.clone();
@@ -725,16 +808,98 @@ mod tests {
                 Err("osascript 失败".to_string())
             }
         };
-        let _ = open_macos_with("/tmp/proj", "claude --resume abc", &spawner2);
+        let _ = open_macos_with("/tmp/proj", "claude --resume abc", &spawner2, &|_| true);
         let recorded2 = calls2.lock().unwrap().clone();
         assert_eq!(recorded2.len(), 2, "首通道败必须降级第二通道");
         let SpawnSpec::MacosApplescript { script: second } = &recorded2[1] else {
             panic!("第二通道同为 AppleScript 变体");
         };
         assert!(
-            second.contains(r#"do script "cd '/tmp/proj'"#),
-            "次选是 Terminal.app 形态"
+            second.contains("create window with default profile command"),
+            "次选是 iTerm2 形态"
         );
+    }
+
+    /// F1② 核心序列：Terminal 出手 Ok 但**回查未命中（死窗）**→ 自动转 iTerm2
+    /// 次选；次选回查命中 → Ok。回查缝逐通道各被调一次（传 resume 命令）
+    #[test]
+    fn macos_terminal_dead_window_check_miss_falls_to_iterm2() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spawner = {
+            let calls = calls.clone();
+            move |spec: &SpawnSpec| {
+                calls.lock().unwrap().push(spec.clone());
+                Ok(())
+            }
+        };
+        let checks_ref = checks.clone();
+        let check = move |resume: &str| {
+            // 首通道（Terminal）回查未命中，次选命中——按出手次数区分
+            let n = checks_ref.lock().unwrap().len();
+            checks_ref.lock().unwrap().push(resume.to_string());
+            n >= 1
+        };
+        assert_eq!(
+            open_macos_with("/tmp/proj", "claude --resume abc", &spawner, &check),
+            Ok(()),
+            "Terminal 死窗必须自动转 iTerm2 次选"
+        );
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2, "死窗转次选恰两次出手");
+        assert!(
+            matches!(&recorded[0], SpawnSpec::MacosApplescript { script } if script.contains("do script")),
+            "首通道 Terminal.app"
+        );
+        assert!(
+            matches!(&recorded[1], SpawnSpec::MacosApplescript { script } if script.contains("create window")),
+            "次选 iTerm2"
+        );
+        let checked = checks.lock().unwrap().clone();
+        assert_eq!(checked.len(), 2, "每通道各回查一次");
+        assert_eq!(checked[0], "claude --resume abc", "回查收 resume 命令特征");
+    }
+
+    /// F1② 双通道皆败（spawn Err / 回查未命中两种失败混合）→ Err 合并且**逐通道
+    /// 标注**——端点 Err 臂 → 200 failed 回执 + 审计 open failed:*（账实一致，
+    /// 「死窗」入账；端点契约面由 server.rs session_open_endpoint_spawn_failure
+    /// 系列测试锁定）
+    #[test]
+    fn macos_both_channels_fail_merged_with_channel_labels() {
+        // 回查未命中形态（两通道双双死窗：恒 false 无状态假体，dyn Fn 要求 Fn）
+        let check = |_: &str| false;
+        let spawner = |spec: &SpawnSpec| {
+            let _ = spec;
+            Ok(())
+        };
+        let err =
+            open_macos_with("/tmp/proj", "claude --resume abc", &spawner, &check).unwrap_err();
+        assert!(err.contains("Terminal.app"), "错误必须标注首通道：{err}");
+        assert!(err.contains("iTerm2"), "错误必须标注次选通道：{err}");
+        assert!(
+            err.contains("回查未命中"),
+            "死窗失败必须点明回查未命中：{err}"
+        );
+
+        // 纯 spawn Err 形态（既有语义，通道名标注）
+        let spawner_err = |_: &SpawnSpec| Err("osascript 失败".to_string());
+        let err2 = open_macos_with("/tmp/proj", "claude --resume abc", &spawner_err, &|_| true)
+            .unwrap_err();
+        assert!(err2.contains("Terminal.app: osascript 失败"), "{err2}");
+        assert!(err2.contains("iTerm2: osascript 失败"), "{err2}");
+    }
+
+    /// F1② 回查判定纯函数：快照含特征 → 命中；不含 → 未命中；空特征防御 false
+    #[test]
+    fn resume_effect_in_snapshot_pure() {
+        let snap = vec![
+            "zsh -c cd '/tmp/p' && claude --resume abc".to_string(),
+            "node /usr/local/bin/claude --resume abc".to_string(),
+        ];
+        assert!(resume_effect_in_snapshot("claude --resume abc", &snap));
+        assert!(!resume_effect_in_snapshot("codex resume abc", &snap));
+        assert!(!resume_effect_in_snapshot("   ", &snap), "空特征不得通配");
+        assert!(!resume_effect_in_snapshot("claude --resume abc", &[]));
     }
 
     /// M2：osascript 错误分类（纯函数跨平台可测）——TCC -1743 /「Not authorized to

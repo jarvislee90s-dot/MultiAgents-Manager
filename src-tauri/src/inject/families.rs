@@ -93,6 +93,19 @@ pub fn use_backpressure(spec: &FamilySpec, chars: usize) -> bool {
     spec.slow_consumer || chars > LONG_MSG_CHARS
 }
 
+/// macOS 平台回车投影表（F2，mac-reverify-b9a501c §四-B）：族表（[`family_for`]）
+/// 平台无关——kimi 在 **Windows** 上实为 A 族（M6R 探测定案），而「macOS 注入后
+/// 尾随回车被 TUI 吞没、文本滞留 composer」是 **平台 × 工具** 特异行为（Mac 实测
+/// codex 与 kimi 同现、claude 对照正常）。数据源 = `research/refs/phase2-消息注入/`
+/// known-families.md 平台差异表（mac-verification.md「回车投影」概念入库）。
+///
+/// true = macOS 上直发确认失败须给「补按一次回车」指引文案（confirm.rs 消费）；
+/// Windows 及其他平台不消费本表（Windows crossterm 有真回车事件形态，语义不变）。
+/// 默认 false（未实测工具宁可少提示，不误报）。
+pub fn macos_enter_swallowed(tool: &str) -> bool {
+    matches!(tool, "codex" | "kimi")
+}
+
 /// 真总预算（毫秒）：背压路径按 [`BACKPRESSURE_MS_PER_CHAR`] 斜率放宽
 /// （[`BASE_BUDGET_MS`] + 每字符 45ms），非背压路径固定 [`BASE_BUDGET_MS`]。
 pub fn inject_budget_ms(spec: &FamilySpec, chars: usize) -> u64 {

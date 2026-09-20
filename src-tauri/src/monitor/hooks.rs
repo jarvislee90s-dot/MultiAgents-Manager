@@ -109,6 +109,55 @@ fn hook_command_for(script_path: &std::path::Path) -> String {
     }
 }
 
+/// F3 旧键迁移纯函数（PascalCase 注册形态专用；跨平台可测）：把 event（如 "Stop"）
+/// 的首字母小写旧键（"stop"）从 hooks 配置移除——**仅当旧键全部条目都是 MAM 注册**
+/// （每条 command 含本脚本路径，正反斜杠双形态判据对齐条目迁移逻辑）；混有用户
+/// 条目 → 保守不动（codex 对未知键不触发，残留无害）。旧键不存在 → false。
+/// 返回 true 表示发生了移除（计入 migrated 保证纯迁移场景也持久化）。
+fn remove_legacy_camel_key(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    script_path_str: &str,
+) -> bool {
+    let legacy: String = {
+        let mut chars = event.chars();
+        match chars.next() {
+            Some(first) => first.to_lowercase().chain(chars).collect::<String>(),
+            None => return false,
+        }
+    };
+    if legacy == event {
+        return false; // 本就全小写的事件名无 twins（防御）
+    }
+    let fwd = script_path_str.replace('\\', "/");
+    let all_ours = hooks_obj
+        .get(&legacy)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            !arr.is_empty()
+                && arr.iter().all(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|cmds| {
+                            !cmds.is_empty()
+                                && cmds.iter().all(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|s| s.contains(script_path_str) || s.contains(&fwd))
+                                        .unwrap_or(false)
+                                })
+                        })
+                        .unwrap_or(false)
+                })
+        });
+    if all_ours == Some(true) {
+        hooks_obj.remove(&legacy).is_some()
+    } else {
+        false
+    }
+}
+
 /// 为指定工具注册 Hook
 /// adapter_name: 工具名称, config_path: 配置文件路径, events: 事件列表, event_case: 大小写格式
 pub fn register_hooks_for_tool(
@@ -156,6 +205,14 @@ pub fn register_hooks_for_tool(
         // 为当前命令（追加会造成双写事件且旧条目继续触发 SessionStart 报错）
         let mut already = false;
         let mut migrated_this_event = 0usize;
+
+        // F3 旧键迁移（仅 PascalCase 注册形态；codex hook_event_case CamelCase→
+        // PascalCase 存量修正，2026-09-20）：旧注册把 MAM 条目写在首字母小写键下
+        // （如 "stop"），codex 0.155.x 只认 PascalCase 键——旧键永不触发但残留
+        // 文件。移除判据与计数见 [`remove_legacy_camel_key`]。
+        if is_pascal_case && remove_legacy_camel_key(hooks_obj, event, &script_path_str) {
+            migrated_this_event += 1;
+        }
         if let Some(arr) = hooks_obj
             .get_mut(&event_name)
             .and_then(|v| v.as_array_mut())
@@ -403,5 +460,126 @@ mod event_channel_tests {
         assert!(!HOOK_SCRIPT.contains("MAM_MARKER"));
         assert!(!HOOK_SCRIPT.contains("mam-marker"));
         assert!(HOOK_SCRIPT.contains("^[A-Za-z0-9-]+$")); // 白名单守卫在场
+    }
+}
+
+#[cfg(test)]
+mod legacy_camel_key_tests {
+    use super::remove_legacy_camel_key;
+
+    fn our_entry(cmd: &str) -> serde_json::Value {
+        serde_json::json!({ "matcher": "", "hooks": [{ "type": "command", "command": cmd }] })
+    }
+
+    #[test]
+    fn removes_legacy_key_when_all_entries_ours() {
+        // F3 存量形态：codex 旧注册把条目写在 "stop"（camelCase）下；
+        // 条目命令与传入脚本路径同源（正斜杠形态经 fwd 判据命中）
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "stop".into(),
+            serde_json::json!([our_entry("bash C:/Users/u/.mam/hooks/status-hook.sh")]),
+        );
+        assert!(remove_legacy_camel_key(
+            &mut obj,
+            "Stop",
+            r"C:\Users\u\.mam\hooks\status-hook.sh"
+        ));
+        assert!(obj.get("stop").is_none(), "全我们条目的旧键必须移除");
+    }
+
+    #[test]
+    fn keeps_legacy_key_with_user_entries() {
+        // 混有用户条目（command 不含脚本路径）→ 保守不动
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "stop".into(),
+            serde_json::json!([
+                our_entry("bash /home/u/.mam/hooks/status-hook.sh"),
+                { "matcher": "", "hooks": [{ "type": "command", "command": "user-own-script" }] }
+            ]),
+        );
+        assert!(!remove_legacy_camel_key(
+            &mut obj,
+            "Stop",
+            r"C:\u\.mam\hooks\status-hook.sh"
+        ));
+        assert!(obj.get("stop").is_some(), "混用户条目不得移除");
+    }
+
+    #[test]
+    fn absent_or_wrong_case_legacy_key_is_noop() {
+        let mut obj = serde_json::Map::new();
+        assert!(!remove_legacy_camel_key(
+            &mut obj,
+            "Stop",
+            "/x/status-hook.sh"
+        ));
+        // PascalCase 键名与 legacy 相同（防御：本就全小写事件名无 twins）
+        let mut obj2 = serde_json::Map::new();
+        obj2.insert("stop".into(), serde_json::json!([our_entry("x")]));
+        assert!(!remove_legacy_camel_key(
+            &mut obj2,
+            "stop",
+            "/x/status-hook.sh"
+        ));
+        assert!(obj2.get("stop").is_some());
+    }
+}
+
+/// F3 实机验证（#[ignore]：显式实机跑，M9R ffi_hop 先例；**M1A 前置**）——
+/// 注册后跑一次真实 codex 会话确认钩子真触发：
+/// ① 本测试（`cargo test --lib monitor::hooks::codex_pascal -- --ignored`）：
+///    按生产装配对真实 `~/.codex/hooks.json` 注册 codex 六事件（PascalCase），
+///    断言文件落盘 PascalCase 键 + 旧 camelCase 键被迁移清除；
+/// ② 人工步骤（Mac 回传清单 C-16）：跑一次真实 codex 交互会话，确认
+///    `~/.mam/events/<session_id>.json` 出现（hook 真触发）。
+/// 本机无 codex 时测试失败（前置自检 `codex --version`）。
+#[test]
+#[ignore = "实机验证：改写真实 ~/.codex/hooks.json（M1A 前置，显式 --ignored 跑）"]
+fn codex_pascal_case_registration_real_machine() {
+    use crate::adapter::AgentAdapter;
+
+    // 前置自检：codex 在场
+    let ver = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .expect("codex 命令不可用——本测试需要实机安装 codex");
+    assert!(ver.status.success(), "codex --version 失败");
+
+    let adapter = crate::adapter::codex::CodexAdapter;
+    let path = adapter
+        .hook_config_path()
+        .expect("codex 必须有 hooks 配置路径");
+    let events = adapter.hook_events();
+    let is_pascal = matches!(
+        adapter.hook_event_case(),
+        crate::adapter::HookEventCase::PascalCase
+    );
+    assert!(is_pascal, "F3 修复后 codex 必须是 PascalCase 注册形态");
+
+    register_hooks_for_tool(&path, &events, is_pascal).expect("codex hooks 注册失败");
+
+    let raw = std::fs::read_to_string(&path).expect("hooks.json 应存在");
+    let cfg: serde_json::Value = serde_json::from_str(&raw).expect("hooks.json 合法 JSON");
+    let hooks = cfg
+        .get("hooks")
+        .and_then(|h| h.as_object())
+        .expect("hooks 对象");
+    for ev in events {
+        assert!(
+            hooks.get(ev).is_some(),
+            "PascalCase 键 {ev} 必须在注册后出现：{}",
+            hooks.keys().cloned().collect::<Vec<_>>().join(",")
+        );
+        let legacy: String = {
+            let mut chars = ev.chars();
+            let first = chars.next().unwrap().to_lowercase();
+            first.chain(chars).collect()
+        };
+        assert!(
+            hooks.get(&legacy).is_none(),
+            "旧 camelCase 键 {legacy} 必须被 F3 迁移清除"
+        );
     }
 }

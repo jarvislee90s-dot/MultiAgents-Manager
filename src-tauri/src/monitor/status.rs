@@ -183,11 +183,29 @@ mod tests {
     fn assistant_text_is_idle_even_if_file_recent() {
         // 明确完成信号优先：assistant 正文 + 文件仍在年龄窗口内 → Idle（不再被拉回 Processing）
         assert_eq!(
-            determine_status(Some("assistant"), false, true, false, false, false, false, true),
+            determine_status(
+                Some("assistant"),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
             SessionStatus::Idle
         );
         assert_eq!(
-            determine_status(Some("assistant"), false, true, false, false, false, false, false),
+            determine_status(
+                Some("assistant"),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             SessionStatus::Idle
         );
     }
@@ -197,11 +215,29 @@ mod tests {
         // thinking-only 行（无正文无工具调用）是轮中思考产物 → Thinking，不得瞬绿；
         // 文件新旧两种情况都不得判 Idle
         assert_eq!(
-            determine_status(Some("assistant"), false, false, false, false, false, false, true),
+            determine_status(
+                Some("assistant"),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
             SessionStatus::Thinking
         );
         assert_eq!(
-            determine_status(Some("assistant"), false, false, false, false, false, false, false),
+            determine_status(
+                Some("assistant"),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             SessionStatus::Thinking
         );
     }
@@ -221,12 +257,30 @@ mod tests {
     #[test]
     fn assistant_tool_use_is_processing() {
         assert_eq!(
-            determine_status(Some("assistant"), true, false, false, false, false, false, false),
+            determine_status(
+                Some("assistant"),
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             SessionStatus::Processing
         );
         // 用户输入类工具（AskUserQuestion）→ Waiting
         assert_eq!(
-            determine_status(Some("assistant"), true, false, false, false, false, true, false),
+            determine_status(
+                Some("assistant"),
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false
+            ),
             SessionStatus::Waiting
         );
     }
