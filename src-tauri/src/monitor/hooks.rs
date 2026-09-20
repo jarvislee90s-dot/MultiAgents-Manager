@@ -739,6 +739,110 @@ pub struct HookEvent {
     pub last_event_at: String,
 }
 
+/// T5 信号健康度：per-tool hook 通道状态（设置页「信号健康度」分区下发结构）
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSignalHealth {
+    pub tool_id: String,
+    /// 工具显示名（adapter.name()，前端免二次查询）
+    pub label: String,
+    /// 注册 KV `hooks_registered_{tool_id}` = "true"（verified / 注册成功路径均置位）
+    pub registered: bool,
+    /// 该工具当前存在「活跃会话」（等待/运行/思考/压缩；Idle/Finished 不算）
+    pub has_active_sessions: bool,
+    /// 该工具会话最近一次 hook 事件时间（RFC3339 UTC；30s TTL 目录内无匹配事件 → None）
+    pub last_event_at: Option<String>,
+}
+
+/// 活跃会话判定：Idle（进程开着但空闲）与 Finished 不算——空闲会话本就长时间无
+/// 事件，计入会把「正常空闲」误报成「待信任」；判据的意图是捕捉「正在干活却收
+/// 不到任何事件」的通道断流（信任门未过的典型症状）
+fn session_is_active(status: &crate::session::SessionStatus) -> bool {
+    !matches!(
+        status,
+        crate::session::SessionStatus::Idle | crate::session::SessionStatus::Finished
+    )
+}
+
+/// 信号健康度核心逻辑（纯函数，tempdir 事件目录 + 注入闭包可测，不触全局状态）：
+/// 事件按 session_id 键 → 经会话列表建立 session→tool 归属 → per-tool 取 ts 最大
+/// 事件的时间。未匹配任何会话的事件（孤儿/旧 PPID 形态）不归属任何工具；同工具
+/// 多事件取最近一条。registered 由调用方注入（生产=读 KV，测试=闭包）
+pub fn compute_tool_signal_health(
+    tools: &[(&str, &str)],
+    registered_of: &dyn Fn(&str) -> bool,
+    events: &HashMap<String, HookEvent>,
+    sessions: &[crate::session::Session],
+) -> Vec<ToolSignalHealth> {
+    tools
+        .iter()
+        .map(|&(tool_id, label)| {
+            let tool_sessions: Vec<&crate::session::Session> = sessions
+                .iter()
+                .filter(|s| s.agent_type.tool_id() == tool_id)
+                .collect();
+            let has_active_sessions = tool_sessions.iter().any(|s| session_is_active(&s.status));
+            let last_event_at = tool_sessions
+                .iter()
+                .filter_map(|s| events.get(&s.id))
+                .max_by_key(|e| e.ts)
+                .map(|e| e.last_event_at.clone());
+            ToolSignalHealth {
+                tool_id: tool_id.to_string(),
+                label: label.to_string(),
+                registered: registered_of(tool_id),
+                has_active_sessions,
+                last_event_at,
+            }
+        })
+        .collect()
+}
+
+/// codex 信任门一次性通知的 KV 键（T5）。shown=已示过（永不再示）；pending=注册期
+/// 置位、setup 期消费——register_all_hooks 在 run() 早期执行，彼时 builder 尚未
+/// 构建、AppHandle 不可得，通知必须延迟到 setup 闭包（consume_codex_trust_notice）
+const CODEX_NOTICE_SHOWN_KEY: &str = "codex_hook_notice_shown";
+const CODEX_NOTICE_PENDING_KEY: &str = "codex_hook_notice_pending";
+
+/// 一次性判定（纯函数，内存库可测）：shown 已置 "true" → 永不再提醒。后续待办
+/// 状态常驻设置页信号健康度分区，不靠重复弹窗
+fn codex_notice_should_enqueue(shown: Option<&str>) -> bool {
+    shown != Some("true")
+}
+
+/// codex 注册成功路径调用：未示过 → 置 pending（登记「启动后要示一次」）
+fn enqueue_codex_trust_notice() {
+    if codex_notice_should_enqueue(crate::database::get_setting(CODEX_NOTICE_SHOWN_KEY).as_deref())
+    {
+        crate::database::set_setting(CODEX_NOTICE_PENDING_KEY, "true");
+    }
+}
+
+/// setup 期消费（AppHandle 已得）：pending 在场 → 发一次系统通知 → 落 shown。
+/// 通知发送失败也落 shown：一次性语义优先（失败重试会变成每次启动轰炸），待办
+/// 状态在设置页信号健康度分区常驻可见，信息不因通知失败而丢失。
+/// 文案不接 i18n：Rust 侧无 i18n 基建，通知一次性发出，双语完整文案在设置页分区
+pub fn consume_codex_trust_notice(app: &tauri::AppHandle) {
+    if crate::database::get_setting(CODEX_NOTICE_PENDING_KEY).as_deref() != Some("true") {
+        return;
+    }
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("MultiAgents Manager")
+        .body(
+            "Codex 钩子已注册，需信任后事件才会触发：请在 Codex 终端输入 /hooks \
+             并信任 MAM 条目（一次性）",
+        )
+        .show()
+    {
+        warn!("codex 信任门一次性通知发送失败: {e}");
+    }
+    crate::database::set_setting(CODEX_NOTICE_SHOWN_KEY, "true");
+    crate::database::set_setting(CODEX_NOTICE_PENDING_KEY, "false");
+}
+
 /// 为所有支持 Hook 的工具注册 Hook（在应用启动时调用）
 /// 核验实际配置状态而非信任 DB 标志：修复"全局单标志 + 永不核验"导致的假阳性
 /// （此前 claude 注册失败后因 codex 成功置位而永不重试）
@@ -824,6 +928,9 @@ pub fn register_all_hooks() {
                     warn!(
                         "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
                     );
+                    // T5 一次性桌面通知：仅首次（未示过）登记 pending，setup 期
+                    // AppHandle 就绪后消费发出；重复注册/重启不再弹（KV 一次性）
+                    enqueue_codex_trust_notice();
                 }
             }
             Err(e) => warn!(
@@ -2548,5 +2655,195 @@ mod t2_approval_registration_tests {
         )
         .unwrap();
         assert_eq!((added2, migrated2), (0, 0));
+    }
+}
+
+/// T5 信号健康度：核心纯逻辑（tempdir 事件目录 + 注入闭包/内存库，零触真实
+/// ~/.mam）与 codex 一次性通知 KV 标志
+#[cfg(test)]
+mod signal_health_tests {
+    use super::*;
+    use crate::database::dao::settings::{get_setting_conn, set_setting_conn};
+    use crate::session::{AgentType, ProcessForm, Session, SessionStatus};
+    use std::io::Write;
+
+    /// 内存库（settings 表就绪），供 KV 一次性通知标志断言
+    fn mem_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        conn
+    }
+
+    /// 写事件文件（文件名 = session_id；last_event_at 定值供断言）
+    fn write_event(dir: &std::path::Path, sid: &str, age_secs: i64) {
+        let ts = chrono::Utc::now().timestamp() - age_secs;
+        let body = format!(
+            r#"{{"event":"Stop","session_id":"{sid}","cwd":"/tmp","ts":{ts},"last_event_at":"2026-09-20T00:00:00Z"}}"#
+        );
+        let mut f = std::fs::File::create(dir.join(format!("{sid}.json"))).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    /// 测试会话构造（15 字段全列；Session 无 Default）
+    fn session(tool: AgentType, id: &str, status: SessionStatus) -> Session {
+        Session {
+            id: id.to_string(),
+            agent_type: tool,
+            project_name: "proj".to_string(),
+            project_path: "/proj".to_string(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-09-20T00:00:00Z".to_string(),
+            pid: 1,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        }
+    }
+
+    fn tools() -> Vec<(&'static str, &'static str)> {
+        vec![("codex", "Codex"), ("claude", "Claude Code")]
+    }
+
+    /// 注册 KV 真（codex 注册、claude 未注册）× 事件目录有该工具会话事件
+    /// → registered=true、has_active=true、last_event_at=Some（正常态）
+    #[test]
+    fn registered_with_matching_session_event_reports_last_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event(tmp.path(), "codex-sid-1", 0);
+        write_event(tmp.path(), "codex-sid-1", 0); // 同键覆盖（helper 语义），不重复
+        let events = read_hook_events_from(tmp.path());
+        let sessions = vec![
+            session(AgentType::Codex, "codex-sid-1", SessionStatus::Processing),
+            session(AgentType::Claude, "claude-sid-9", SessionStatus::Idle),
+        ];
+        let registered_of = |tool_id: &str| tool_id == "codex"; // codex 已注册，claude 未注册
+        let out = compute_tool_signal_health(&tools(), &registered_of, &events, &sessions);
+        assert_eq!(out.len(), 2);
+        let codex = out.iter().find(|h| h.tool_id == "codex").unwrap();
+        assert!(codex.registered);
+        assert!(codex.has_active_sessions);
+        assert_eq!(codex.last_event_at.as_deref(), Some("2026-09-20T00:00:00Z"));
+        assert_eq!(codex.label, "Codex");
+        let claude = out.iter().find(|h| h.tool_id == "claude").unwrap();
+        assert!(!claude.registered);
+        assert!(!claude.has_active_sessions, "Idle 会话不算活跃");
+    }
+
+    /// 注册真 × 事件目录空 × 有活跃会话 → last_event_at=None + has_active=true
+    ///（前端待办态「需信任」的判据输入）
+    #[test]
+    fn registered_active_session_zero_events_is_todo_input() {
+        let tmp = tempfile::tempdir().unwrap(); // 目录存在但无事件文件
+        let events = read_hook_events_from(tmp.path());
+        let sessions = vec![session(
+            AgentType::Codex,
+            "codex-sid-2",
+            SessionStatus::Waiting,
+        )];
+        let registered_of = |_tool_id: &str| true;
+        let out = compute_tool_signal_health(&tools(), &registered_of, &events, &sessions);
+        let codex = out.iter().find(|h| h.tool_id == "codex").unwrap();
+        assert!(codex.registered);
+        assert!(codex.has_active_sessions);
+        assert!(codex.last_event_at.is_none());
+    }
+
+    /// 注册假 × 事件目录有事件 → registered=false（未注册态与事件无关）
+    #[test]
+    fn unregistered_reports_false_even_with_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event(tmp.path(), "codex-sid-3", 0);
+        let events = read_hook_events_from(tmp.path());
+        let sessions = vec![session(
+            AgentType::Codex,
+            "codex-sid-3",
+            SessionStatus::Waiting,
+        )];
+        let registered_of = |_tool_id: &str| false;
+        let out = compute_tool_signal_health(&tools(), &registered_of, &events, &sessions);
+        let codex = out.iter().find(|h| h.tool_id == "codex").unwrap();
+        assert!(!codex.registered);
+        assert_eq!(codex.last_event_at.as_deref(), Some("2026-09-20T00:00:00Z"));
+    }
+
+    /// 会话归属相关性：事件只归属 session_id 匹配的工具——claude 会话的事件
+    /// 不得漏计到同场出卡的 codex 头上（否则 codex 会因别家事件伪装「正常」）
+    #[test]
+    fn events_do_not_leak_across_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event(tmp.path(), "claude-sid-a", 0);
+        let events = read_hook_events_from(tmp.path());
+        let sessions = vec![
+            session(AgentType::Claude, "claude-sid-a", SessionStatus::Idle),
+            session(AgentType::Codex, "codex-sid-b", SessionStatus::Processing),
+        ];
+        let registered_of = |_tool_id: &str| true;
+        let out = compute_tool_signal_health(&tools(), &registered_of, &events, &sessions);
+        let codex = out.iter().find(|h| h.tool_id == "codex").unwrap();
+        assert!(codex.last_event_at.is_none(), "claude 的事件不得归属 codex");
+        assert!(codex.has_active_sessions);
+        let claude = out.iter().find(|h| h.tool_id == "claude").unwrap();
+        assert_eq!(
+            claude.last_event_at.as_deref(),
+            Some("2026-09-20T00:00:00Z")
+        );
+    }
+
+    /// 同工具多事件取 ts 最大者（多会话并发时最近一条生效）
+    #[test]
+    fn multiple_events_pick_latest_by_ts() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event(tmp.path(), "codex-sid-old", 20);
+        write_event(tmp.path(), "codex-sid-new", 1);
+        let events = read_hook_events_from(tmp.path());
+        let sessions = vec![
+            session(AgentType::Codex, "codex-sid-old", SessionStatus::Idle),
+            session(AgentType::Codex, "codex-sid-new", SessionStatus::Idle),
+        ];
+        let registered_of = |_tool_id: &str| true;
+        let out = compute_tool_signal_health(&tools(), &registered_of, &events, &sessions);
+        let codex = out.iter().find(|h| h.tool_id == "codex").unwrap();
+        assert!(codex.last_event_at.is_some());
+        // Idle 会话不算活跃，但事件归属照常成立（正常态展示）
+        assert!(!codex.has_active_sessions);
+    }
+
+    /// codex 一次性通知 KV：未示过 → 置 pending；示过（shown=true）→ 永不再置
+    ///（内存库写断言，一次性语义）
+    #[test]
+    fn codex_notice_kv_is_one_shot() {
+        let conn = mem_conn();
+        // 首次注册：未示过（键缺省）→ 置 pending
+        if codex_notice_should_enqueue(get_setting_conn(&conn, CODEX_NOTICE_SHOWN_KEY).as_deref()) {
+            set_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY, "true");
+        }
+        assert_eq!(
+            get_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY).as_deref(),
+            Some("true"),
+            "首次注册必须登记 pending"
+        );
+        // setup 消费：发通知 → 落 shown + 清 pending（consume 的 KV 侧语义）
+        set_setting_conn(&conn, CODEX_NOTICE_SHOWN_KEY, "true");
+        set_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY, "false");
+        // 后续再次注册（重启/重注册）：已示过 → 不得再置 pending
+        if codex_notice_should_enqueue(get_setting_conn(&conn, CODEX_NOTICE_SHOWN_KEY).as_deref()) {
+            set_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY, "true");
+        }
+        assert_eq!(
+            get_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY).as_deref(),
+            Some("false"),
+            "已示过后不得再登记 pending（一次性）"
+        );
+        // 判定纯函数边界：shown 缺省/"false" 都算未示过（防半态脏数据卡死提醒）
+        assert!(codex_notice_should_enqueue(None));
+        assert!(codex_notice_should_enqueue(Some("false")));
+        assert!(!codex_notice_should_enqueue(Some("true")));
     }
 }
