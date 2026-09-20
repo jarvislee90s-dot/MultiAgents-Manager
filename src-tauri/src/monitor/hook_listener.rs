@@ -23,8 +23,9 @@
 //! # 事件文件格式（以读取侧 `monitor::hooks::read_hook_events_from` 为准，
 //! 自 HOOK_SCRIPT bash 版逐字段移植）
 //!
-//! 路径 `<events_dir>/<session_id>.json`（session_id 白名单 `[A-Za-z0-9-]` 防路径
-//! 注入，合法 UUID 形态永不触发；helper 侧另加 128 字符防御上限，真身 UUID ≤ 36），
+//! 路径 `<events_dir>/<session_id>.json`（session_id 白名单 `[A-Za-z0-9_-]` 防路径
+//! 注入，合法 UUID / kimi `session_<uuid>` 形态永不触发；helper 侧另加 128 字符
+//! 防御上限，真身 ≤ 44），
 //! 内容单行 JSON：`{"event","session_id","cwd","ts"(unix 秒),"last_event_at"(UTC
 //! ISO8601)}`——读取侧 `HookEvent` 消费 event/ts/last_event_at，30s TTL。同会话
 //! 覆盖写 = 保留最新状态（bash 版语义）。
@@ -43,13 +44,20 @@ pub struct ParsedHook {
     pub cwd: String,
 }
 
-/// session_id 白名单（HOOK_SCRIPT `^[A-Za-z0-9-]+$` 同源移植 + 128 字符防御上限）：
-/// 非空 + 仅 ASCII 字母数字与连字符。文件名 = `<session_id>.json`，白名单外的值
-/// 直接丢弃（防路径注入；合法 UUID 形态永不触发）。与读取侧
-/// `monitor::hooks::read_hook_events_from` 的 valid_sid 同一谓词（读取侧已改为
-/// 复用本函数，单一事实源）
+/// session_id 白名单（HOOK_SCRIPT `^[A-Za-z0-9-]+$` 同源移植 + 128 字符防御上限，
+/// **F8 实测扩下划线**）：非空 + 仅 ASCII 字母数字、连字符与下划线。文件名 =
+/// `<session_id>.json`，白名单外的值直接丢弃（防路径注入；`.`/`/`/`\` 仍拒绝，
+/// 故无穿越面）。**下划线是 kimi 的实际形态**（`session_<uuid>`，2026-09-21 实机
+/// 取证：kimi 2.0.2 stdin `session_id` 与 session_index.jsonl 的 sessionId 均为
+/// 该前缀形态）——旧白名单 `[A-Za-z0-9-]` 会把 kimi 全部事件静默丢弃（helper
+/// exit 0 无输出、事件文件不落，表现为「钩子注册了但状态链永远不动」）。
+/// 与读取侧 `monitor::hooks::read_hook_events_from` 的 valid_sid 同一谓词
+/// （读取侧复用本函数，单一事实源）
 pub fn session_id_allowed(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// 解析 hook stdin JSON（claude/codex/kimi 三家同形态：snake_case 键 + 公共字段
@@ -254,14 +262,46 @@ mod tests {
 
     #[test]
     fn parse_rejects_illegal_session_id() {
-        // 白名单外：路径注入形态 / 点号 / 空串 / 非 ASCII
-        for bad_sid in ["../evil", "a/b", "..", "a.b", "", "会话一", "sid space"] {
+        // 白名单外：路径注入形态 / 点号 / 空串 / 非 ASCII（下划线自 F8 起合法，
+        // 已从本清单移出——见 session_id_allowed 的 kimi 形态说明）
+        for bad_sid in [
+            "../evil",
+            "a/b",
+            "..",
+            "a.b",
+            "",
+            "会话一",
+            "sid space",
+            "a\\b",
+            "sid\ttab",
+        ] {
             let raw = format!(r#"{{"session_id":"{bad_sid}","hook_event_name":"Stop"}}"#);
             assert!(
                 parse_hook_stdin(&raw).is_none(),
                 "非法 session_id {bad_sid:?} 必须拒绝"
             );
         }
+    }
+
+    /// F8 实机取证回归锁：kimi 的 session_id 是 `session_<uuid>`（下划线前缀）——
+    /// 旧白名单 `[A-Za-z0-9-]` 会静默丢弃 kimi 全部事件（实机实证：同 payload
+    /// 换成裸 UUID 才落盘）。三家形态必须全部通过：claude/codex 裸 UUID、
+    /// kimi 下划线前缀。
+    #[test]
+    fn session_id_whitelist_accepts_all_three_tool_shapes() {
+        // claude / codex：裸 UUID（连字符）
+        assert!(session_id_allowed("ec770a70-519f-43c9-81ca-9c74038ead8d"));
+        // kimi：session_ 前缀 + UUID（下划线 + 连字符）——F8 修复点
+        assert!(session_id_allowed("session_ec770a70-519f-43c9-81ca-9c74038ead8d"));
+        assert!(session_id_allowed("session_44554114-366e-4c61-9a57-733a3f3b79d0"));
+        // 下划线放行不引入穿越面：路径分隔符与点号仍拒绝
+        for bad in ["session_../x", "session_/x", "session_\\x", "session_.", ".._"] {
+            assert!(!session_id_allowed(bad), "{bad:?} 必须拒绝（防注入）");
+        }
+        // 端到端一致性：kimi 形态经 parse_hook_stdin 可达（不是只过了谓词）
+        let raw = r#"{"session_id":"session_ec770a70-519f-43c9-81ca-9c74038ead8d","hook_event_name":"PermissionRequest","cwd":"C:/x"}"#;
+        let parsed = parse_hook_stdin(raw).expect("kimi 形态必须解析成功");
+        assert_eq!(parsed.event_name, "PermissionRequest");
     }
 
     #[test]

@@ -25,8 +25,10 @@ TS=$(date +%s)
 LAST_EVENT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # 事件以 session_id 为键（$PPID 在 claude 脱管 hook 进程里恒为 1，多会话互覆——
 # 2026-09-12 第三轮探测 C2 实证；session_id 来自 stdin）。字符白名单外的值
-# 直接丢弃（防路径注入；合法 UUID 形态永不触发）。同会话覆盖=保留最新状态
-if printf '%s' "$SESSION_ID" | grep -qE '^[A-Za-z0-9-]+$'; then
+# 直接丢弃（防路径注入；`.`/`/`/`\` 仍拒绝，无穿越面）。下划线为 kimi 形态
+# （`session_<uuid>`，F8 实机取证）——helper 侧 session_id_allowed 同口径
+# 同会话覆盖=保留最新状态
+if printf '%s' "$SESSION_ID" | grep -qE '^[A-Za-z0-9_-]+$'; then
   echo "{\"event\":\"$EVENT\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$CWD\",\"ts\":$TS,\"last_event_at\":\"$LAST_EVENT_AT\"}" > "$EVENTS_DIR/$SESSION_ID.json"
 fi
 "#;
@@ -895,7 +897,7 @@ mod event_channel_tests {
         assert!(HOOK_SCRIPT.contains("$SESSION_ID.json"));
         assert!(!HOOK_SCRIPT.contains("MAM_MARKER"));
         assert!(!HOOK_SCRIPT.contains("mam-marker"));
-        assert!(HOOK_SCRIPT.contains("^[A-Za-z0-9-]+$")); // 白名单守卫在场
+        assert!(HOOK_SCRIPT.contains("^[A-Za-z0-9_-]+$")); // 白名单守卫在场（含 kimi 下划线）
     }
 }
 
