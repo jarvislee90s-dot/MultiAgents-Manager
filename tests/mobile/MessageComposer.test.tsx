@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MessageComposer from "@/mobile/MessageComposer";
 import type { QueueItemView, SendInfo } from "@/mobile/api";
@@ -180,7 +180,7 @@ describe("MessageComposer：发送与回执（W4）", () => {
     expect((screen.getByTestId("composer-send") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("排队态：回执「排队中 第1位」+ 立即发送/撤回；撤回成功（{ok:true}）→ 免复核直接收敛", async () => {
+  it("排队态：列表行「第1位」+ 立即发送/撤回；撤回成功（{ok:true}）→ 免复核直接收敛", async () => {
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "queued", itemId: 7, position: 1 };
@@ -189,20 +189,22 @@ describe("MessageComposer：发送与回执（W4）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "跑个长任务" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    const chip = await screen.findByTestId("send-receipt-queued");
-    expect(chip.textContent).toContain("排队中 第1位");
+    // D8：排队呈现由列表行承担（单回执槽不再渲染 queued chip）
+    await screen.findByTestId("queue-row-7");
+    expect(screen.getByTestId("queue-position-7").textContent).toContain("第1位");
     expect(screen.getByTestId("queue-jump").textContent).toContain("立即发送");
     expect(screen.getByTestId("queue-retract").textContent).toContain("撤回");
     // 撤回：服务端确认已撤（200 {ok:true}）→ 免复核直接收敛（评审必须1快路径）
     fireEvent.click(screen.getByTestId("queue-retract"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     expect(
       fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-queue/retract"))
     ).toBe(true);
-    expect(queueListCalls()).toBe(0); // {ok:true} 快路径不再拉队列复核
+    // 挂载拉取 1 次 = 唯一的列表调用：{ok:true} 快路径不再拉队列复核（原锁保留）
+    expect(queueListCalls()).toBe(1);
   });
 
-  it("立即发送（插队）：按 itemId 点名直发，delivered 后回执转「已送达终端」", async () => {
+  it("立即发送（插队）：按 itemId 点名直发，delivered 后行移除且回执转「已送达终端」", async () => {
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "queued", itemId: 7, position: 1 };
@@ -211,7 +213,7 @@ describe("MessageComposer：发送与回执（W4）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "插队试试" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     fireEvent.click(screen.getByTestId("queue-jump"));
     expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
     const jumpCall = fetchMock.mock.calls.find((c: unknown[]) =>
@@ -222,7 +224,8 @@ describe("MessageComposer：发送与回执（W4）", () => {
       sessionId: "sess-1",
       itemId: 7,
     });
-    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+    // 条目已出队：行即时移除（原 queued chip 收敛断言的列表等价）
+    expect(screen.queryByTestId("queue-row-7")).toBeNull();
   });
 
   it("回车不触发发送（textarea 天然换行）；text.trim() 为空时发送按钮禁用", async () => {
@@ -281,31 +284,32 @@ describe("MessageComposer：发送与回执（W4）", () => {
 });
 
 describe("MessageComposer：排队轮询（3s 定时器，unmount 清理）", () => {
-  it("排队态 3s 轮询刷新队位；条目从队列消失则回执收敛；卸载后停止轮询", async () => {
+  it("排队态 3s 轮询刷新队位；条目从队列消失则行收敛；卸载后停止轮询", async () => {
     vi.useFakeTimers();
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "queued", itemId: 7, position: 1 };
     routes.queue = [queueItem({ id: 7, position: 2 })];
     const { unmount } = render(<MessageComposer session={{ id: "sess-1" }} />);
-    await flushAsync(); // send-info 落地
+    await flushAsync(); // send-info + 挂载队列拉取落地（D8：此时已有 id7 行，队位 2）
     fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "长任务" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await flushAsync(); // send → queued
-    expect(screen.getByTestId("send-receipt-queued").textContent).toContain("第1位");
-    expect(queueListCalls()).toBe(0); // 尚未到轮询点
-    // 3s 轮询一次：队位已前移（队首被 flush）→ chip 更新为 第2位
+    await flushAsync(); // send → queued（行乐观 upsert 为发送响应的队位 1）
+    expect(screen.getByTestId("queue-position-7").textContent).toContain("第1位");
+    // 挂载拉取 1 次；尚未到轮询点（原断言 0 的等价口径——挂载拉取计入）
+    expect(queueListCalls()).toBe(1);
+    // 3s 轮询一次：队位已前移（队首被 flush）→ 行更新为 第2位
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
-    expect(queueListCalls()).toBe(1);
-    expect(screen.getByTestId("send-receipt-queued").textContent).toContain("第2位");
-    // 条目消失（已被 flush 送达/他端撤回）→ 回执收敛
+    expect(queueListCalls()).toBe(2);
+    expect(screen.getByTestId("queue-position-7").textContent).toContain("第2位");
+    // 条目消失（已被 flush 送达/他端撤回）→ 行随权威列表收敛
     routes.queue = [];
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
-    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+    expect(screen.queryByTestId("queue-row-7")).toBeNull();
     // 卸载后定时器清理：不再轮询
     unmount();
     const before = queueListCalls();
@@ -328,12 +332,13 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "插队一下" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     // 插队遇忙 → 复核 /session-queue → 条目仍在 pending → 恢复排队视图，
-    // 队位刷新 第1位→第2位（队位变化即复核发生的真证据，不用调用计数——轮询同端点）
+    // 队位刷新 第1位→第2位（行位次变化即复核发生的真证据，不用调用计数——轮询同端点）
     fireEvent.click(screen.getByTestId("queue-jump"));
-    const chip = await screen.findByTestId("send-receipt-queued");
-    expect(chip.textContent).toContain("排队中 第2位");
+    await waitFor(() =>
+      expect(screen.getByTestId("queue-position-7").textContent).toContain("第2位")
+    );
     await waitFor(() =>
       expect((screen.getByTestId("queue-jump") as HTMLButtonElement).disabled).toBe(false)
     );
@@ -347,7 +352,7 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     expect(gone.textContent).toBe("条目已离开队列（可能已送达，可在会话内容中确认）");
     expect(gone.textContent).not.toContain("可重试");
     expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
-    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+    expect(screen.queryByTestId("queue-row-7")).toBeNull(); // 确认不在队 → 行同步移除
   });
 
   it("retract_failure_same_reconcile：撤回网络错 → 同款队列复核 → 条目仍在 → 恢复排队视图（不落 failed 终态，可重试）", async () => {
@@ -360,11 +365,11 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "待撤回" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     fireEvent.click(screen.getByTestId("queue-retract"));
     // 网络错 → 复核 /session-queue → 条目仍在队 → 排队视图恢复（按钮回到可点，可重试撤回）
-    const chip = await screen.findByTestId("send-receipt-queued");
-    expect(chip.textContent).toContain("排队中 第1位");
+    await screen.findByTestId("queue-row-7");
+    expect(screen.getByTestId("queue-position-7").textContent).toContain("第1位");
     await waitFor(() =>
       expect((screen.getByTestId("queue-retract") as HTMLButtonElement).disabled).toBe(false)
     );
@@ -419,7 +424,7 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     expect(chip.textContent).toContain("会话形态已漂移为黑盒，无法注入");
   });
 
-  it("queued position=0 容忍：并发消费窗口返回位次 0 → 显示「排队中」不带位次数字，按钮保留", async () => {
+  it("queued position=0 容忍：并发消费窗口返回位次 0 → 行显示「排队中」不带位次数字，按钮保留", async () => {
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "queued", itemId: 7, position: 0 };
@@ -427,8 +432,8 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "刚入队即撞上消费窗口" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    const chip = await screen.findByTestId("send-receipt-queued");
-    expect(chip.textContent).toBe("排队中");
+    await screen.findByTestId("queue-row-7");
+    expect(screen.getByTestId("queue-position-7").textContent).toBe("排队中");
     expect(screen.getByTestId("queue-jump")).toBeTruthy();
     expect(screen.getByTestId("queue-retract")).toBeTruthy();
   });
@@ -443,12 +448,13 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "撤回我" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     // 阶段一：忙时撤回 → 复核 /session-queue → 条目仍在 → 恢复排队视图；
-    // 队位 第1位→第2位（chip 变化即复核发生的真证据，不用调用计数——轮询同端点会污染）
+    // 队位 第1位→第2位（行位次变化即复核发生的真证据，不用调用计数——轮询同端点会污染）
     fireEvent.click(screen.getByTestId("queue-retract"));
-    const chip = await screen.findByTestId("send-receipt-queued");
-    expect(chip.textContent).toContain("排队中 第2位");
+    await waitFor(() =>
+      expect(screen.getByTestId("queue-position-7").textContent).toContain("第2位")
+    );
     await waitFor(() =>
       expect((screen.getByTestId("queue-retract") as HTMLButtonElement).disabled).toBe(false)
     );
@@ -458,11 +464,10 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     // 撤回/插队按钮不失控，3s 轮询随后自愈——不得落回执消失/终态
     routes.queueReject = true;
     fireEvent.click(screen.getByTestId("queue-retract"));
-    await screen.findByTestId("send-receipt-queued");
-    expect(screen.getByTestId("send-receipt-queued").textContent).toContain("排队中 第2位");
     await waitFor(() =>
       expect((screen.getByTestId("queue-retract") as HTMLButtonElement).disabled).toBe(false)
     );
+    expect(screen.getByTestId("queue-position-7").textContent).toContain("第2位");
     expect(screen.getByTestId("queue-jump")).toBeTruthy();
     expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
     expect(screen.queryByTestId("send-receipt-gone")).toBeNull();
@@ -478,13 +483,13 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "试试撤回" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     fireEvent.click(screen.getByTestId("queue-retract"));
     const gone = await screen.findByTestId("send-receipt-gone");
     expect(gone.textContent).toBe("条目已不在队列");
     expect(gone.textContent).not.toContain("可重试");
     expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
-    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+    expect(screen.queryByTestId("queue-row-7")).toBeNull();
   });
 
   it("sending 期间排队按钮加闸（评审必须3）：发送 await 未返回时 queue-jump/queue-retract 可见但禁用", async () => {
@@ -495,7 +500,7 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "第一条（入队）" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     // 第二条发送挂起（慢消费者）：sending=true 期间排队操作面可见但不可点
     routes.sendHang = true;
     fireEvent.change(screen.getByTestId("composer-input"), {
@@ -507,18 +512,22 @@ describe("MessageComposer：M9R 注入加固（P2-7 / 灰3 / P2-10）", () => {
     expect(screen.getByTestId("queue-retract")).toBeTruthy();
     expect((screen.getByTestId("queue-jump") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("queue-retract") as HTMLButtonElement).disabled).toBe(true);
-    // 放行第二条 → delivered：queued chip 收敛，闸随 sending 翻转解除
+    // 放行第二条 → delivered：单回执槽转 delivered；已排队的第一条仍按条保留在列
+    // （列表按条呈现，不随最近一次发送的回执消失），闸随 sending 翻转解除
     await act(async () => {
       releaseSend!(new Response(JSON.stringify({ status: "delivered" }), { status: 200 }));
     });
     expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
-    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
+    expect((screen.getByTestId("queue-jump") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("queue-retract") as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
 // ==== 「修改」按钮 + 排队条目他端消失提示（2026-09-20 用户裁决）====
 describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
-  /** 发送一条进入排队态的公共前缀：回执 queued{itemId:7,position:1,content} */
+  /** 发送一条进入排队态的公共前缀：D8 下排队呈现=列表行（queue-row-7），
+   *  queued 回执仅内部存在（不再渲染 chip） */
   async function sendIntoQueued(text = "跑个长任务") {
     installFetch();
     routes.info = sendInfo();
@@ -527,7 +536,7 @@ describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: text } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     return input;
   }
 
@@ -538,10 +547,10 @@ describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
     expect(screen.getByTestId("queue-retract").textContent).toContain("撤回");
   });
 
-  it("修改：确认出队（{ok:true}）→ 正文放回输入框（可继续编辑），回执收敛", async () => {
+  it("修改：确认出队（{ok:true}）→ 正文放回输入框（可继续编辑），行收敛", async () => {
     const input = await sendIntoQueued("跑个长任务");
     fireEvent.click(screen.getByTestId("queue-edit"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("跑个长任务");
     expect(
       fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-queue/retract"))
@@ -552,7 +561,7 @@ describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
     const long = "长".repeat(10001);
     const input = await sendIntoQueued(long);
     fireEvent.click(screen.getByTestId("queue-edit"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toHaveLength(10000);
   });
 
@@ -560,24 +569,26 @@ describe("排队回执：修改按钮（撤回保持丢弃语义）", () => {
     routes.retractBusy = true;
     routes.queue = [queueItem({ id: 7, position: 1, content: "跑个长任务" })];
     const input = await sendIntoQueued("跑个长任务");
+    // 复核发现条目仍在队 → 恢复排队视图；正文不得放回（否则队里 + 输入框双份）。
+    // 挂载拉取已计入列表调用，改用增量断言锁定「复核确已发生」
+    const callsBefore = queueListCalls();
     fireEvent.click(screen.getByTestId("queue-edit"));
-    // 复核发现条目仍在队 → 恢复排队视图；正文不得放回（否则队里 + 输入框双份）
-    await waitFor(() => expect(queueListCalls()).toBeGreaterThan(0));
-    expect(screen.getByTestId("send-receipt-queued")).toBeTruthy();
+    await waitFor(() => expect(queueListCalls()).toBeGreaterThan(callsBefore));
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
   });
 
-  it("撤回回归锁：仍为完全取消——确认出队后回执收敛且输入框保持为空", async () => {
+  it("撤回回归锁：仍为完全取消——确认出队后行收敛且输入框保持为空", async () => {
     const input = await sendIntoQueued("只想取消");
     fireEvent.click(screen.getByTestId("queue-retract"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
   });
 });
 
 // ==== 修改重发只入队（D6，验收问题 #4）：修改后的重发强制走队列，防变相插队 ====
 describe("修改重发只入队（D6）", () => {
-  /** 发送一条进入排队态的公共前缀：回执 queued{itemId:7,position:1,content} */
+  /** 发送一条进入排队态的公共前缀：D8 下排队呈现=列表行（queue-row-7） */
   async function sendIntoQueued(text: string) {
     installFetch();
     routes.info = sendInfo();
@@ -586,14 +597,14 @@ describe("修改重发只入队（D6）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: text } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     return input;
   }
 
   it("edit_resend_queues_only：修改确认出队后再发送 → 请求体带 queueOnly:true（手动改字不清标志）", async () => {
     const input = await sendIntoQueued("跑个长任务");
     fireEvent.click(screen.getByTestId("queue-edit"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     expect((input as HTMLTextAreaElement).value).toBe("跑个长任务");
     // 用户手动改字不清除标志（保守语义：修改后的重发一律入队）。入队后的放行
     // 节奏：会话转闲跃迁后事件臂即时放行；已空闲且无跃迁时由 60s 周期兜底放行
@@ -601,7 +612,7 @@ describe("修改重发只入队（D6）", () => {
     fireEvent.change(input, { target: { value: "改好的重发" } });
     routes.send = { status: "queued", itemId: 9, position: 1 };
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-9"); // 修改后的重发以新行回到列表
     // 调用序列：[0]=初次入队发送（不带标志），[1]=修改后的重发（带标志）
     expect(sendCalls()).toHaveLength(2);
     expect("queueOnly" in JSON.parse(String((sendCalls()[0][1] as RequestInit).body))).toBe(false);
@@ -631,7 +642,7 @@ describe("修改重发只入队（D6）", () => {
   it("flag_consumed_on_send：修改→发送（带标志）→再发送 → 第二次不再带标志（消费即清）", async () => {
     await sendIntoQueued("第一版");
     fireEvent.click(screen.getByTestId("queue-edit"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     routes.send = { status: "delivered" };
     fireEvent.click(screen.getByTestId("composer-send")); // 修改后的重发：带标志
     await screen.findByTestId("send-receipt-delivered");
@@ -655,10 +666,10 @@ describe("修改重发只入队（D6）", () => {
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "旧会话排队" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    await screen.findByTestId("send-receipt-queued");
+    await screen.findByTestId("queue-row-7");
     // 修改确认出队 → 标志置位（正文放回输入框）
     fireEvent.click(screen.getByTestId("queue-edit"));
-    await waitFor(() => expect(screen.queryByTestId("send-receipt-queued")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("queue-row-7")).toBeNull());
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("旧会话排队");
     // 同组件换会话：queueOnlyNext 随 session.id effect 复位——旧会话「修改」的
     // 遗愿不得泄漏为新会话首条发送的入队意图
@@ -678,10 +689,12 @@ describe("修改重发只入队（D6）", () => {
     routes.retractBusy = true; // 忙时拒收：条目未被撤、仍在队
     routes.queue = [queueItem({ id: 7, position: 1, content: "跑个长任务" })];
     const input = await sendIntoQueued("跑个长任务");
+    // 复核条目仍在队 → 排队视图恢复、正文不放回（onConfirmed 未触发 → 标志未置位）。
+    // 挂载拉取已计入列表调用，改用增量断言锁定「复核确已发生」
+    const callsBefore = queueListCalls();
     fireEvent.click(screen.getByTestId("queue-edit"));
-    // 复核条目仍在队 → 排队视图恢复、正文不放回（onConfirmed 未触发 → 标志未置位）
-    await waitFor(() => expect(queueListCalls()).toBeGreaterThan(0));
-    expect(screen.getByTestId("send-receipt-queued")).toBeTruthy();
+    await waitFor(() => expect(queueListCalls()).toBeGreaterThan(callsBefore));
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
     // 随后输入全新文本发送：这是未经修改确认的普通发送，不得携带入队标志
     routes.send = { status: "delivered" };
@@ -708,7 +721,7 @@ describe("排队条目他端消失（2026-09-20 调查修复）：轮询收敛�
     });
     fireEvent.click(screen.getByTestId("composer-send"));
     await act(async () => {});
-    expect(screen.getByTestId("send-receipt-queued")).toBeTruthy();
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3100);
     });
@@ -902,5 +915,193 @@ describe("移动端附件上传（2026-09-20）", () => {
     expect(hint.textContent).toContain(".mam-attachments");
     fireEvent.click(screen.getByTestId("attach-help"));
     expect(screen.queryByTestId("attach-hint")).toBeNull();
+  });
+});
+
+// ==== 多列队 UI（D8，验收问题 #6）：完整 /session-queue 列表 + 逐条操作 ====
+describe("多列队 UI（D8）：完整队列列表", () => {
+  /** 三条既有队列夹具（挂载拉取即见——桌面端/他端排的队）：分别覆盖
+   *  [mobile] 前缀剥离+截断 / 短文全显 / 附件标记替换 */
+  function threeQueueItems(): QueueItemView[] {
+    return [
+      queueItem({
+        id: 11,
+        position: 1,
+        content: "[mobile 测试机] 这是一条超过十二个字符的长消息需要截断显示",
+      }),
+      queueItem({ id: 12, position: 2, content: "短消息" }),
+      queueItem({ id: 13, position: 3, content: '<image path="E:/pool/a.png">看这张截图' }),
+    ];
+  }
+
+  it("挂载即拉既有队列：三行预览（去 [mobile] 前缀/截 12 字符/附件替换）+ 各自三钮 + 底部说明", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = threeQueueItems();
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const row11 = await screen.findByTestId("queue-row-11");
+    // 前缀剥离 + 截前 12 字符 + …，且 [mobile 前缀不得泄漏到预览
+    expect(row11.textContent).toContain("这是一条超过十二个字符的…");
+    expect(row11.textContent).not.toContain("[mobile");
+    // 不足 12 字符全显
+    expect(screen.getByTestId("queue-row-12").textContent).toContain("短消息");
+    // 附件内联标记替换为 [附件]
+    expect(screen.getByTestId("queue-row-13").textContent).toContain("[附件]看这张截图");
+    // 位次沿用「第 N 位」口径
+    expect(screen.getByTestId("queue-position-11").textContent).toBe("第1位");
+    expect(screen.getByTestId("queue-position-12").textContent).toBe("第2位");
+    expect(screen.getByTestId("queue-position-13").textContent).toBe("第3位");
+    // 逐条三钮（行内作用域）
+    for (const id of [11, 12, 13]) {
+      const row = screen.getByTestId(`queue-row-${id}`);
+      expect(within(row).getByTestId("queue-jump").textContent).toContain("立即发送");
+      expect(within(row).getByTestId("queue-edit").textContent).toContain("修改");
+      expect(within(row).getByTestId("queue-retract").textContent).toContain("撤回");
+    }
+    // 底部说明
+    expect(screen.getByTestId("queue-hint").textContent).toBe("空闲时将按序自动发送");
+  });
+
+  it("逐条操作带对 id：第二条立即发送 / 第三条撤回 / 第一条修改（放回正文去前缀）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = threeQueueItems();
+    routes.jump = { status: "delivered" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await screen.findByTestId("queue-row-11");
+    // 第二条「立即发送」→ jump 携带 itemId 12；成功后该行移除、他行保留
+    fireEvent.click(within(screen.getByTestId("queue-row-12")).getByTestId("queue-jump"));
+    await waitFor(() => expect(screen.queryByTestId("queue-row-12")).toBeNull());
+    const jumpCall = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-queue/jump")
+    );
+    expect(JSON.parse(String((jumpCall![1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      itemId: 12,
+    });
+    expect(screen.getByTestId("queue-row-11")).toBeTruthy();
+    expect(screen.getByTestId("queue-row-13")).toBeTruthy();
+    // 第三条「撤回」→ retract 携带 itemId 13
+    fireEvent.click(within(screen.getByTestId("queue-row-13")).getByTestId("queue-retract"));
+    await waitFor(() => expect(screen.queryByTestId("queue-row-13")).toBeNull());
+    const retractCalls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-queue/retract")
+    );
+    expect(JSON.parse(String((retractCalls[0][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      itemId: 13,
+    });
+    // 第一条「修改」→ retract 携带 itemId 11；放回正文剥离 [mobile] 前缀
+    // （行 content 是服务端 compose 后的带前缀文本，不剥则重发二次叠加）
+    fireEvent.click(within(screen.getByTestId("queue-row-11")).getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("queue-row-11")).toBeNull());
+    const retractCallsAfterEdit = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-queue/retract")
+    );
+    expect(retractCallsAfterEdit).toHaveLength(2);
+    expect(JSON.parse(String((retractCallsAfterEdit[1][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      itemId: 11,
+    });
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe(
+      "这是一条超过十二个字符的长消息需要截断显示"
+    );
+    // 列表清空 → 列表与说明整体退场
+    expect(screen.queryByTestId("queue-list")).toBeNull();
+  });
+
+  it("发送入队即时反馈：queued 回执不渲染 chip（单回执槽让位列表），乐观行立即在场", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    routes.queue = [];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "刚入队的消息" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const row = await screen.findByTestId("queue-row-7");
+    expect(screen.getByTestId("queue-position-7").textContent).toBe("第1位");
+    expect(row.textContent).toContain("刚入队的消息");
+    // 单回执槽：queued 态不再渲染回执 chip（由列表取代）；底部说明在场
+    expect(screen.queryByTestId("send-receipt-queued")).toBeNull();
+    expect(screen.getByTestId("queue-hint")).toBeTruthy();
+  });
+});
+
+// ==== D8：列表消费收敛与轮询生命周期（复用 3s 通道）====
+describe("多列队 UI（D8）：列表消费收敛与轮询生命周期", () => {
+  it("轮询发现我方条目消失（他条仍在）→ gone 留痕 + 我方行移除他条保留；列表全空 → 轮询停止", async () => {
+    vi.useFakeTimers();
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "queued", itemId: 7, position: 1 };
+    routes.queue = [];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await flushAsync();
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "我方的长任务" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await flushAsync();
+    expect(screen.getByTestId("queue-row-7")).toBeTruthy();
+    // 轮询一：我方条目已被消费（他端 flush / 桌面处理），他条仍在 → gone 中性留痕，
+    // 我方行随权威列表移除、他条保留可操作
+    routes.queue = [queueItem({ id: 9, position: 1, content: "[mobile 台式机] 他端排的队" })];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    const gone = screen.getByTestId("send-receipt-gone");
+    expect(gone.textContent).toContain("电脑端");
+    expect(screen.queryByTestId("queue-row-7")).toBeNull();
+    expect(screen.getByTestId("queue-row-9")).toBeTruthy();
+    // 轮询二：列表全空 → 行清空、轮询停止（interval 清除：再推进时间无新调用）
+    routes.queue = [];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.queryByTestId("queue-list")).toBeNull();
+    const before = queueListCalls();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+    expect(queueListCalls()).toBe(before);
+  });
+});
+
+// ==== D8：单回执槽独立性（最近发送的终态回执与列表并存）====
+describe("多列队 UI（D8）：单回执槽独立性", () => {
+  /** 挂载即有两条既有队列的公共前缀 */
+  async function renderWithExistingQueue() {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [
+      queueItem({ id: 21, position: 1, content: "既有甲" }),
+      queueItem({ id: 22, position: 2, content: "既有乙" }),
+    ];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await screen.findByTestId("queue-row-21");
+  }
+
+  it("最近发送 failed：红 chip 与既有列表并存（列表不因失败回执消失）", async () => {
+    await renderWithExistingQueue();
+    routes.send = { status: "failed", error: "定位终端失败" };
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "新消息" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(await screen.findByTestId("send-receipt-failed")).toBeTruthy();
+    expect(screen.getByTestId("queue-row-21")).toBeTruthy();
+    expect(screen.getByTestId("queue-row-22")).toBeTruthy();
+    expect(screen.getByTestId("queue-hint")).toBeTruthy();
+  });
+
+  it("最近发送 submitted/delivered：中性/绿色 chip 与既有列表并存", async () => {
+    await renderWithExistingQueue();
+    routes.send = { status: "submitted" };
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "消息一" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(await screen.findByTestId("send-receipt-submitted")).toBeTruthy();
+    expect(screen.getByTestId("queue-row-21")).toBeTruthy();
+    routes.send = { status: "delivered" };
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "消息二" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
+    expect(screen.getByTestId("queue-row-22")).toBeTruthy();
   });
 });
