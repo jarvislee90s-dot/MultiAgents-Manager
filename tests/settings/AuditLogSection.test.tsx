@@ -57,8 +57,7 @@ const rowsOf = () => [
 ];
 
 // inject_list_audit 调用次数（不关心附带参数形态，只数命令名）
-const auditCalls = () =>
-  invokeMock.mock.calls.filter((c) => c[0] === "inject_list_audit").length;
+const auditCalls = () => invokeMock.mock.calls.filter((c) => c[0] === "inject_list_audit").length;
 
 beforeEach(() => {
   invokeMock.mockReset();

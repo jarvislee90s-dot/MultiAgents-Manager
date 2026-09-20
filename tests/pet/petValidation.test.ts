@@ -1,9 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
-  AUDIO_EXTS, MAX_AUDIO_BYTES, MIN_DURATION_MS, MAX_DURATION_MS,
-  groupOfRel, nameFromRel, isAudioCandidate, diffManifestVsScan, judgeVoiceTier, voiceRowProblem,
-  manifestVoiceCapOnDisk, petNameProblem, petNameProblemKey,
-  type PetScan, type PetManifestView,
+  AUDIO_EXTS,
+  MAX_AUDIO_BYTES,
+  MIN_DURATION_MS,
+  MAX_DURATION_MS,
+  groupOfRel,
+  nameFromRel,
+  isAudioCandidate,
+  diffManifestVsScan,
+  judgeVoiceTier,
+  voiceRowProblem,
+  manifestVoiceCapOnDisk,
+  petNameProblem,
+  petNameProblemKey,
+  type PetScan,
+  type PetManifestView,
 } from "@/components/pet/petValidation";
 
 const scan = (files: { rel: string; size: number }[], sheetSize = 100): PetScan => ({
@@ -32,7 +43,13 @@ describe("petValidation", () => {
   });
 
   it("voiceRowProblem：时长/大小边界（spec §5.1 严格不等）", () => {
-    const ok = { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 2000 };
+    const ok = {
+      group: "general",
+      name: "a",
+      file: "voice/general/a.m4a",
+      sizeBytes: 1,
+      durationMs: 2000,
+    };
     expect(voiceRowProblem(ok)).toBeNull();
     expect(voiceRowProblem({ ...ok, durationMs: 1000 })).toBe("too-short");
     expect(voiceRowProblem({ ...ok, durationMs: 20000 })).toBe("too-long");
@@ -43,27 +60,56 @@ describe("petValidation", () => {
   it("judgeVoiceTier：四组各≥1 合法才开语音（全有或全无）", () => {
     const v = { rel: "", size: 1, durationMs: 2000 };
     const mk = (g: string) => ({ ...v, rel: `voice/${g}/a.m4a` });
-    expect(judgeVoiceTier([mk("general"), mk("approval"), mk("done"), mk("error")]).hasVoice).toBe(true);
+    expect(judgeVoiceTier([mk("general"), mk("approval"), mk("done"), mk("error")]).hasVoice).toBe(
+      true
+    );
     expect(judgeVoiceTier([mk("general"), mk("approval"), mk("done")]).hasVoice).toBe(false);
     expect(judgeVoiceTier([]).hasVoice).toBe(false);
     // 单组不合法即整组无覆盖
     expect(
-      judgeVoiceTier([mk("general"), mk("approval"), mk("done"), { ...mk("error"), durationMs: 25000 }]).hasVoice
+      judgeVoiceTier([
+        mk("general"),
+        mk("approval"),
+        mk("done"),
+        { ...mk("error"), durationMs: 25000 },
+      ]).hasVoice
     ).toBe(false);
   });
 
   it("diffManifestVsScan：一致无 issue；缺文件/大小变/多余文件/图集变（spec §6-3）", () => {
     const m: PetManifestView = {
-      id: "p", displayName: "P", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
-      voices: [{ group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 10, durationMs: 2000 }],
+      id: "p",
+      displayName: "P",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
+      voices: [
+        {
+          group: "general",
+          name: "a",
+          file: "voice/general/a.m4a",
+          sizeBytes: 10,
+          durationMs: 2000,
+        },
+      ],
     };
     expect(diffManifestVsScan(m, scan([{ rel: "voice/general/a.m4a", size: 10 }]))).toEqual([]);
     const issues = diffManifestVsScan(
       m,
-      scan([{ rel: "voice/general/a.m4a", size: 99 }, { rel: "voice/done/new.mp3", size: 5 }], 999)
+      scan(
+        [
+          { rel: "voice/general/a.m4a", size: 99 },
+          { rel: "voice/done/new.mp3", size: 5 },
+        ],
+        999
+      )
     );
-    expect(issues.map((i) => i.kind)).toEqual(["spritesheet-changed", "voice-changed", "voice-extra"]);
+    expect(issues.map((i) => i.kind)).toEqual([
+      "spritesheet-changed",
+      "voice-changed",
+      "voice-extra",
+    ]);
     const missing = diffManifestVsScan(m, scan([], 100));
     expect(missing.map((i) => i.kind)).toContain("voice-missing");
     const noSheet = diffManifestVsScan(m, scan([{ rel: "voice/general/a.m4a", size: 10 }], 0));
@@ -96,27 +142,38 @@ describe("petNameProblem / manifestVoiceCapOnDisk（issue #33-7/#33-8/#33-12）"
 
   it("manifestVoiceCapOnDisk：条目齐全且大小一致 → hasVoice 可信；缺失/大小变 → 保守 false", () => {
     const manifestWith = (voices: PetManifestView["voices"]): PetManifestView => ({
-      id: "p", displayName: "P", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100, voices,
+      id: "p",
+      displayName: "P",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
+      voices,
     });
     const voice = (sizeBytes: number) => ({
-      group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes, durationMs: 3000,
+      group: "general",
+      name: "a",
+      file: "voice/general/a.m4a",
+      sizeBytes,
+      durationMs: 3000,
     });
     // 齐全且大小一致 → manifest.hasVoice
     expect(
-      manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([{ rel: "voice/general/a.m4a", size: 10 }]))
+      manifestVoiceCapOnDisk(
+        manifestWith([voice(10)]),
+        scan([{ rel: "voice/general/a.m4a", size: 10 }])
+      )
     ).toBe(true);
     // manifest 本身无语音 → false
-    expect(
-      manifestVoiceCapOnDisk(manifestWith([]), scan([]))
-    ).toBe(false);
+    expect(manifestVoiceCapOnDisk(manifestWith([]), scan([]))).toBe(false);
     // 条目缺失 → false
-    expect(
-      manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([]))
-    ).toBe(false);
+    expect(manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([]))).toBe(false);
     // 大小已变（缓存前提破坏）→ false
     expect(
-      manifestVoiceCapOnDisk(manifestWith([voice(10)]), scan([{ rel: "voice/general/a.m4a", size: 99 }]))
+      manifestVoiceCapOnDisk(
+        manifestWith([voice(10)]),
+        scan([{ rel: "voice/general/a.m4a", size: 99 }])
+      )
     ).toBe(false);
   });
 });

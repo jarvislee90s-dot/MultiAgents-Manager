@@ -176,7 +176,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
         mockPresets.find((p) => p.id === (args as { presetId?: string })?.presetId) ?? null
       );
     case "get_active_preset":
-      return Promise.resolve((args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null);
+      return Promise.resolve(
+        (args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null
+      );
     case "list_active_presets":
       return Promise.resolve([{ toolId: "claude", presetId: "preset-1" }]);
     // (extensionId, kind, origin) 三元组，origin = "mam" | "native"（scan_tool_state 口径）
@@ -198,7 +200,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
       return Promise.resolve([]);
     // —— 一致性体检读命令（T15，与 src/tauri-mock.ts 形状一致）——
     case "get_preset_health":
-      return Promise.resolve(healthMode === "empty" ? mockPresetHealthEmpty : mockPresetHealthIssues);
+      return Promise.resolve(
+        healthMode === "empty" ? mockPresetHealthEmpty : mockPresetHealthIssues
+      );
     case "scan_ledger_drift":
       return Promise.resolve(mockLedgerDrift);
     // 空目录扫描（wave33 Item D）：读 fixture（与 get_preset_health 的 emptyDirs 同源）

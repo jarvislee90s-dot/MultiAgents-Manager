@@ -58,7 +58,9 @@ function installFetch() {
           status: routes.approveStatus,
         });
       }
-      return new Response(JSON.stringify(routes.approve ?? { status: "key_sent" }), { status: 200 });
+      return new Response(JSON.stringify(routes.approve ?? { status: "key_sent" }), {
+        status: 200,
+      });
     }
     throw new Error(`unexpected fetch: ${url}`);
   });
@@ -94,7 +96,7 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
     expect(container.querySelector("[data-testid='approve-drift']")).toBeNull();
   });
 
-  it("点「允许」：POST body {sessionId, optionId:\"approve\"} → 进入「已发送按键」态（按钮禁用）", async () => {
+  it('点「允许」：POST body {sessionId, optionId:"approve"} → 进入「已发送按键」态（按钮禁用）', async () => {
     installFetch();
     routes.options = approveOptions();
     routes.approve = { status: "key_sent" };
@@ -140,7 +142,9 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
       "该会话投递进行中，请稍后重试"
     );
     // 可重试：按钮保持可点，修正路由后重按即重试成功
-    expect((screen.getByTestId("approve-option-approve") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("approve-option-approve") as HTMLButtonElement).disabled).toBe(
+      false
+    );
     routes.approve = { status: "key_sent" };
     fireEvent.click(screen.getByTestId("approve-option-approve"));
     expect(await screen.findByTestId("approve-sent")).toBeTruthy();

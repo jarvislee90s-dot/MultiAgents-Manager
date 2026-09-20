@@ -76,9 +76,15 @@ describe("activatePet", () => {
 
   it("manifest 不一致 + 用户选更新：备份修复后激活（spec §6-3）", async () => {
     const manifest: PetManifestView = {
-      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
-      voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 10, durationMs: 3000 }],
+      id: "p1",
+      displayName: "P",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
+      voices: [
+        { group: "general", name: "a", file: g("general"), sizeBytes: 10, durationMs: 3000 },
+      ],
     };
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan") return Promise.resolve(scanOf(fourGroups)); // 旧条目 size 10 ≠ 5 → changed；其余 extra
@@ -94,8 +100,12 @@ describe("activatePet", () => {
 
   it("manifest 不一致 + 用户选忽略：voice-cap 按 manifest 条目在磁盘的存在性判定（FIX-3）", async () => {
     const manifest: PetManifestView = {
-      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      id: "p1",
+      displayName: "P",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
       voices: [
         { group: "general", name: "a", file: g("general"), sizeBytes: 10, durationMs: 3000 },
         { group: "done", name: "b", file: g("done"), sizeBytes: 10, durationMs: 3000 },
@@ -116,8 +126,12 @@ describe("activatePet", () => {
 
   it("manifest 不一致 + 忽略：manifest 条目全部在磁盘（含大小一致）→ voice-cap 保留 true", async () => {
     const manifest: PetManifestView = {
-      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      id: "p1",
+      displayName: "P",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
       // FIX-7：条目大小须与磁盘一致（5 = fourGroups[0].size）才视为可信
       voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 5, durationMs: 3000 }],
     };
@@ -135,10 +149,18 @@ describe("activatePet", () => {
   it("manifest 不一致 + 忽略：文件存在但大小与 manifest 不一致 → voice-cap=0（即便条目覆盖四组，FIX-7）", async () => {
     // 磁盘四组文件都在（大小 5），manifest 记录 sizeBytes=99（大小已变）→ 缓存不可信 → 保守无语音
     const manifest: PetManifestView = {
-      id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      id: "p1",
+      displayName: "P",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
       voices: ["general", "approval", "done", "error"].map((n) => ({
-        group: n, name: n, file: g(n), sizeBytes: 10, durationMs: 3000,
+        group: n,
+        name: n,
+        file: g(n),
+        sizeBytes: 10,
+        durationMs: 3000,
       })),
     };
     tauriInvokeMock.mockImplementation((cmd: string) => {
@@ -154,8 +176,13 @@ describe("activatePet", () => {
 
   it("用户选取消：不激活", async () => {
     const manifest: PetManifestView = {
-      id: "p1", displayName: "P", hasVoice: false, hasSubtitle: false,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 1, voices: [],
+      id: "p1",
+      displayName: "P",
+      hasVoice: false,
+      hasSubtitle: false,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 1,
+      voices: [],
     };
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan") return Promise.resolve(scanOf([], 999));
@@ -171,8 +198,12 @@ describe("activatePet", () => {
 describe("buildManifestFromScan / repairManifest", () => {
   it("repair 保留未变条目、重探变动与新增（spec §6-3 修复语义）", async () => {
     const old: PetManifestView = {
-      id: "p1", displayName: "Old", hasVoice: true, hasSubtitle: true,
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+      id: "p1",
+      displayName: "Old",
+      hasVoice: true,
+      hasSubtitle: true,
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
       voices: [
         { group: "general", name: "a", file: g("general"), sizeBytes: 5, durationMs: 3000 }, // 不变
         { group: "approval", name: "b", file: g("approval"), sizeBytes: 99, durationMs: 3000 }, // 变动
@@ -202,8 +233,12 @@ describe("activatePet 稳态快路径与 voiceCap 结果（issue #33-8/#33-11）
   });
 
   const manifestOf = (overrides: Partial<PetManifestView> = {}): PetManifestView => ({
-    id: "p1", displayName: "P", hasVoice: true, hasSubtitle: true,
-    spriteVersionNumber: 2, spritesheetSizeBytes: 100,
+    id: "p1",
+    displayName: "P",
+    hasVoice: true,
+    hasSubtitle: true,
+    spriteVersionNumber: 2,
+    spritesheetSizeBytes: 100,
     voices: [{ group: "general", name: "a", file: g("general"), sizeBytes: 5, durationMs: 3000 }],
     ...overrides,
   });
@@ -213,8 +248,7 @@ describe("activatePet 稳态快路径与 voiceCap 结果（issue #33-8/#33-11）
     vi.mocked(probeSheetRows).mockClear();
     // 磁盘与 manifest 完全一致 → 无 diff 直接激活，全程无需 Image 解码
     tauriInvokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "pet_scan")
-        return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }]));
+      if (cmd === "pet_scan") return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }]));
       if (cmd === "pet_read_manifest") return Promise.resolve(manifestOf());
       return Promise.resolve(undefined);
     });
@@ -239,8 +273,7 @@ describe("activatePet 稳态快路径与 voiceCap 结果（issue #33-8/#33-11）
   it("ignore 激活结果携带 voiceCap（任一条目缺失 → false；齐全且大小一致 → true）", async () => {
     // manifest 列两条（general+done），磁盘仅 general → done 缺失 → 保守 false
     tauriInvokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "pet_scan")
-        return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }], 999));
+      if (cmd === "pet_scan") return Promise.resolve(scanOf([{ rel: g("general"), size: 5 }], 999));
       if (cmd === "pet_read_manifest")
         return Promise.resolve(
           manifestOf({
@@ -264,7 +297,11 @@ describe("activatePet 稳态快路径与 voiceCap 结果（issue #33-8/#33-11）
         return Promise.resolve(
           manifestOf({
             voices: ["general", "approval", "done", "error"].map((n) => ({
-              group: n, name: n, file: g(n), sizeBytes: 5, durationMs: 3000,
+              group: n,
+              name: n,
+              file: g(n),
+              sizeBytes: 5,
+              durationMs: 3000,
             })),
           })
         );

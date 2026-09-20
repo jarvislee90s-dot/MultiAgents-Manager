@@ -26,7 +26,12 @@ describe("pet assets", () => {
     for (const v of manifest) {
       const p = resolve(ROOT, "voice", v.file);
       expect(existsSync(p)).toBe(true);
-      expect(v.name).toBe(v.file.replace(/\.(m4a|mp4)$/i, "").split("/").pop());
+      expect(v.name).toBe(
+        v.file
+          .replace(/\.(m4a|mp4)$/i, "")
+          .split("/")
+          .pop()
+      );
     }
   });
 });

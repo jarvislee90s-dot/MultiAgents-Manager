@@ -508,7 +508,9 @@ describe("PetManageDialog 校验与能力判定（issue #33-2/#33-7/#33-12）", 
     vi.mocked(buildManifestFromScan).mockClear();
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_list_pets")
-        return Promise.resolve([{ ...pets[0], id: "v0-pet", spriteVersionNumber: 0, manifestExists: false }]);
+        return Promise.resolve([
+          { ...pets[0], id: "v0-pet", spriteVersionNumber: 0, manifestExists: false },
+        ]);
       if (cmd === "pet_scan")
         return Promise.resolve({
           id: "v0-pet",
@@ -570,14 +572,22 @@ describe("PetManageDialog 校验与能力判定（issue #33-2/#33-7/#33-12）", 
           spriteVersionNumber: 1,
           spritesheetSizeBytes: 100,
           voices: [
-            { group: "general", name: "greet", file: "voice/general/greet.mp3", sizeBytes: 1000, durationMs: 3000 },
+            {
+              group: "general",
+              name: "greet",
+              file: "voice/general/greet.mp3",
+              sizeBytes: 1000,
+              durationMs: 3000,
+            },
           ],
         });
       return Promise.resolve(undefined);
     });
     render(<PetManageDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("manage-pick-starry-dew"));
-    fireEvent.change(await screen.findByTestId("manage-rename-input"), { target: { value: "dew" } });
+    fireEvent.change(await screen.findByTestId("manage-rename-input"), {
+      target: { value: "dew" },
+    });
     fireEvent.click(screen.getByTestId("manage-rename-btn"));
     await waitFor(() => expect(localStorage.getItem("mam-pet-active")).toBe("dew"));
     // 切回不再沿用 selected.hasVoice=true，按磁盘现状保守写 0

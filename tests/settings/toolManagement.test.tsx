@@ -54,7 +54,13 @@ beforeEach(() => {
     if (cmd === "update_tool_settings") {
       // 按 issue #36-4 的 ToolSettingsResult 真实形状返回（旧 mock 的 skipped 字段
       // 缺 skippedKept/skippedLost，会让 applyChanges 读 .length 抛错中断后续流程）
-      return { restored: [], restoredMcps: [], rebuildFailed: [], skippedKept: [], skippedLost: [] };
+      return {
+        restored: [],
+        restoredMcps: [],
+        rebuildFailed: [],
+        skippedKept: [],
+        skippedLost: [],
+      };
     }
     if (cmd === "list_enabled_tools") return rows.map((r) => ({ id: r.toolId, label: r.name }));
     return [];
@@ -119,13 +125,8 @@ describe("工具管理（review F7①②）", () => {
     expect(await screen.findByText("Unsaved Changes")).toBeInTheDocument();
     // 放弃更改 → 不落盘
     fireEvent.click(screen.getByText("Discard Changes"));
-    await waitFor(() =>
-      expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument()
-    );
-    expect(invokeMock).not.toHaveBeenCalledWith(
-      "update_tool_settings",
-      expect.anything()
-    );
+    await waitFor(() => expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument());
+    expect(invokeMock).not.toHaveBeenCalledWith("update_tool_settings", expect.anything());
     // 回到工具分区：开关为已保存状态（checked）、dirty 已重置（无保存按钮）
     fireEvent.click(await screen.findByRole("button", { name: "Tool Management" }));
     const opencode = await screen.findByText("OpenCode");
@@ -146,12 +147,7 @@ describe("工具管理（review F7①②）", () => {
     expect(screen.getByText("Keep Editing")).toBeInTheDocument();
     // 选「放弃更改」→ 关闭拦截解除、弹窗消失、不落盘
     fireEvent.click(screen.getByText("Discard Changes"));
-    await waitFor(() =>
-      expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument()
-    );
-    expect(invokeMock).not.toHaveBeenCalledWith(
-      "update_tool_settings",
-      expect.anything()
-    );
+    await waitFor(() => expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument());
+    expect(invokeMock).not.toHaveBeenCalledWith("update_tool_settings", expect.anything());
   });
 });

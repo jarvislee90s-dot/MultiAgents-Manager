@@ -65,7 +65,14 @@ function installFetch() {
         return new Response(
           JSON.stringify({
             messages: [
-              { seq: 0, role: "user", kind: "user", content: "详情页首条", ts: 1, collapsed: false },
+              {
+                seq: 0,
+                role: "user",
+                kind: "user",
+                content: "详情页首条",
+                ts: 1,
+                collapsed: false,
+              },
             ],
           }),
           { status: 200 }
