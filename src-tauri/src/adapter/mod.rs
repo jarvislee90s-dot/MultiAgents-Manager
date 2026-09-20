@@ -95,6 +95,14 @@ pub trait AgentAdapter: Send + Sync {
     fn hook_events(&self) -> Vec<&'static str> {
         Vec::new()
     }
+    /// 指定事件的注册 matcher（T2，issue #74）：claude 的 Notification 按
+    /// notification_type 过滤，官方注册形态
+    /// `{"Notification":[{"matcher":"permission_prompt","hooks":[...]}]}`——
+    /// 审批等待通知即 `permission_prompt` 类型（比弹窗晚约 6 秒，先被应答则不触发，
+    /// 调研 §2.1）。其余事件/工具返回 None → 注册器落空 matcher（现行形态不变）
+    fn hook_event_matcher(&self, _event: &str) -> Option<&'static str> {
+        None
+    }
     fn hook_config_path(&self) -> Option<std::path::PathBuf> {
         None
     }

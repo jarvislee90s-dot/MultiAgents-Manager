@@ -44,6 +44,15 @@ impl AgentAdapter for CodexAdapter {
         HookEventCase::PascalCase
     }
     fn hook_events(&self) -> Vec<&'static str> {
+        // T2 审批事件注册扩展（issue #74 / 调研 §3.2，2026-09-20）：
+        // - `PermissionRequest`：审批 UI 弹出**前**触发（官方 "runs in the approval
+        //   path, before guardian or user approval UI is shown"）；payload 无
+        //   message 字段，提示文本 T3 由 tool_input.description 本地拼装；
+        // - `Interrupt`：用户打断信号。**红线 2（任务书 §1）**：codex 命令钩子默认
+        //   600s 超时，但 Interrupt/SessionEnd **仅 1s**——事件写入必须瞬时完成；
+        //   helper 读 stdin→原子写→退出毫秒级（hook_listener 模块文档红线 2），1s
+        //   预算内富余；SessionEnd 同此约束（已注册，此处一并标注）。
+        // 其余六事件为既有注册面（F3 起 PascalCase），形态不动。
         vec![
             "Stop",
             "UserPromptSubmit",
@@ -51,6 +60,8 @@ impl AgentAdapter for CodexAdapter {
             "SessionEnd",
             "PreToolUse",
             "PostToolUse",
+            "PermissionRequest",
+            "Interrupt",
         ]
     }
     fn hook_config_path(&self) -> Option<std::path::PathBuf> {

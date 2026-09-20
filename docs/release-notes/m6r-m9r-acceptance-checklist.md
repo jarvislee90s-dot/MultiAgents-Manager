@@ -177,7 +177,8 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-13 | 滞留→屏读→补按回车恢复路径 | 任一快消费者会话（E10 尾字符丢失场景：正文已打入但尾字符/提交回车丢失） | 直发后若确认失败回执出现：终端可见已打内容但未提交——人工按一次回车即提交；或等确认层自动屏读回查补按（500ms 轮询 3s 窗，`confirm::RECHECK_MS`） | 滞留内容最终提交进会话（会话文件见戳），不重复双投；确认回执与实际落盘一致 |
 | C-14 | 锁屏场景注入/通知可达性（原 M7 遗留补充项） | Windows 锁屏态（命令备好于 mam-probe 报告 §6；macOS 侧锁屏项见 m7-m8 清单 #5） | 锁屏后远程发消息，观察注入与通知可达 | 占位：沿用既有验收口径，未在本批新增内容 |
 | C-15 | 真机蜂窝网络复验（原用户项） | 外网蜂窝网络手机 + Windows 实机 | 蜂窝网络下远程发消息走全链 | 占位：沿用既有验收口径，未在本批新增内容 |
-| C-16 | codex hooks 触发复验（**F3 PascalCase 修复后**，M1A 前置） | codex 0.155.x 在场 | 跑 `cargo test --lib monitor::hooks::codex_pascal -- --ignored`（注册写入真实 ~/.codex/hooks.json）→ 跑一次真实 codex 交互会话 | hooks.json 出现 PascalCase 六键且旧 camelCase 键被迁移清除；会话期间 `~/.mam/events/<session_id>.json` 出现（hook 真触发）。调研锚点：`research/refs/phase2-消息注入/2026-09-19-审批事件钩子通道调研.md`（0.155.1 键名 PascalCase 源码证据 §3.2；M1A 红卡=钩子信号+固定键位） |
+| C-16 | codex hooks 触发复验（**F3 PascalCase 修复后**，M1A 前置；**T2 后注册面扩为 8 键**） | codex 0.155.x 在场 | 跑 `cargo test --lib monitor::hooks::codex_pascal -- --ignored`（注册写入真实 ~/.codex/hooks.json）→ 跑一次真实 codex 交互会话 | hooks.json 出现 PascalCase 8 键（六状态键 + `PermissionRequest`/`Interrupt`，T2）且旧 camelCase 键被迁移清除；会话期间 `~/.mam/events/<session_id>.json` 出现（hook 真触发）。自动化形态：`cargo test --lib monitor::hooks::codex_hook_events_really_fire -- --ignored`（T2 沙箱自检，tempdir CODEX_HOME/MAM_HOME）。调研锚点：`research/refs/phase2-消息注入/2026-09-19-审批事件钩子通道调研.md`（0.155.1 键名 PascalCase 源码证据 §3.2；M1A 红卡=钩子信号+固定键位） |
+| C-17 | codex hooks 信任门（**T2 新增**，C-8 根因③） | codex 0.155.x 在场，MAM 已注册 hooks（先跑 C-16 步骤①） | 开 codex TUI → 输入 `/hooks` | MAM 钩子条目以 **Untrusted** 列出 → 逐条审阅并信任（trust 后 hash 落用户层 config，仅需一次）→ 重跑一次会话确认 `~/.mam/events/<session_id>.json` 出现；**未信任前钩子不触发**（事件文件缺席为预期行为，不算 FAIL）；重启 codex 后信任态保持（无需重复信任）。注册侧引导：MAM 每次注册成功 log::warn 提示本流程 |
 
 ---
 
