@@ -137,6 +137,16 @@ pub fn init(conn: &Connection) {
             session_id    TEXT NOT NULL,
             last_seen_at  INTEGER NOT NULL
         );
+        -- T3（手工验收修复批）：审批等待持久标记——hook 审批进入事件写入、清除事件/会话
+        -- 消失删除；状态链接入（adapter/mod.rs）据此强制 Waiting。不用 30s TTL 事件文件
+        -- 承载等待态（事件文件只是触发器，等待是一等持久信号，issue #74 根因①）
+        CREATE TABLE IF NOT EXISTS approval_wait_marks (
+            tool_id       TEXT NOT NULL,
+            session_id    TEXT NOT NULL,
+            ts            INTEGER NOT NULL,
+            summary       TEXT,
+            PRIMARY KEY (tool_id, session_id)
+        );
         CREATE TABLE IF NOT EXISTS inject_queue (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id    TEXT NOT NULL,

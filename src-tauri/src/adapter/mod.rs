@@ -33,6 +33,105 @@ fn get_app_grace_secs() -> i64 {
         .unwrap_or(30)
 }
 
+/// 审批等待标记的消失清理容忍窗：标记对应会话缺席快照超过该时长才删
+/// （审批进入事件只发一次，扫描瞬时缺席误清会丢 Waiting 态）
+const APPROVAL_MARK_ABSENCE_CLEAR_MS: i64 = 60_000;
+
+/// 单会话 hook 事件应用（T3 抽取自主循环，行为等价可测）：返回审批等待标记动作
+/// ——Entry=进入（写标记）/Clear=清除（删标记）/None。
+/// 红灯语义退役（计划 T3，用户裁定的「不落红」收窄再修订）：Stop 过期 → **Idle**
+/// （Stop=回合结束≠等审批；等待红由审批等待持久标记承担，无标记不假红）
+fn apply_hook_event_to_session(
+    session: &mut Session,
+    event: &crate::monitor::hooks::HookEvent,
+    grace: &mut HashMap<u32, (i64, i64)>,
+    now_ts: i64,
+) -> HookMarkAction {
+    match event.event.as_str() {
+        // 审批进入（claude Notification 已由注册侧 matcher=permission_prompt 收窄）
+        "PermissionRequest" | "Notification" => {
+            session.status = SessionStatus::Waiting;
+            HookMarkAction::Entry
+        }
+        "Stop" | "stop" => {
+            // 按形态计算 grace 时长：APP 形态更长（subagent 调度场景，单步间隔长），CLI 较短
+            let grace_secs = if matches!(session.form, ProcessForm::App) {
+                get_app_grace_secs()
+            } else {
+                get_cli_grace_secs()
+            };
+            // 记录 grace 时间戳和时长，不直接改 status — 由 grace 判定综合决定
+            grace.insert(session.pid, (event.ts, grace_secs));
+            if now_ts - event.ts < grace_secs {
+                // grace 期内：保持黄灯（覆盖 JSONL 推导的 Waiting/Idle）
+                if !matches!(
+                    session.status,
+                    SessionStatus::Processing | SessionStatus::Thinking | SessionStatus::Compacting
+                ) {
+                    log::debug!(
+                        "Stop grace 期内（{}s）保持黄灯: pid={}, form={:?}",
+                        grace_secs,
+                        session.pid,
+                        session.form
+                    );
+                    session.status = SessionStatus::Processing;
+                }
+            } else {
+                // 过期：回合已结束 → Idle（原版此处产 Waiting=污染层①，T3 退役——
+                // 「任务完成后不再假红 25 秒」回归锁见 tests::stop_expired_maps_idle_not_waiting）
+                session.status = SessionStatus::Idle;
+            }
+            // Stop=回合结束：属计划清除清单（审批等待随回合终止解除）
+            HookMarkAction::Clear
+        }
+        // 清除族：工具调用后/用户中断 → 删标记（grace 清除维持原语义；状态映射 None）
+        "PostToolUse" | "postToolUse" | "PostToolUseFailure" | "Interrupt" => {
+            grace.remove(&session.pid);
+            HookMarkAction::Clear
+        }
+        _ => {
+            // 其他事件：清 grace，正常映射
+            grace.remove(&session.pid);
+            let new_status = match event.event.as_str() {
+                "PreToolUse" | "preToolUse" => Some(SessionStatus::Processing),
+                "UserPromptSubmit" | "userPromptSubmit" => Some(SessionStatus::Thinking),
+                "SessionStart" | "sessionStart" => Some(SessionStatus::Idle),
+                "SessionEnd" | "sessionEnd" => Some(SessionStatus::Finished),
+                _ => None,
+            };
+            if let Some(status) = new_status {
+                log::debug!(
+                    "Hook event {} → {:?} for pid={}",
+                    event.event,
+                    status,
+                    session.pid
+                );
+                session.status = status;
+            }
+            // UserPromptSubmit 属计划清除清单（用户新输入=审批等待结束）
+            if matches!(
+                event.event.as_str(),
+                "UserPromptSubmit" | "userPromptSubmit"
+            ) {
+                HookMarkAction::Clear
+            } else {
+                HookMarkAction::None
+            }
+        }
+    }
+}
+
+/// 审批等待标记动作（hook 事件 → 标记持久化的桥）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookMarkAction {
+    /// 审批进入：写等待标记
+    Entry,
+    /// 清除信号：删等待标记
+    Clear,
+    /// 与标记无关
+    None,
+}
+
 /// 记录每个 PID 最近一次 Stop 事件的 (时间戳, grace_duration_secs)，用于 grace period 判定
 /// grace_duration 按进程形态区分：App 形态更长（30s），CLI 形态更短（5s）
 static STOP_GRACE: Lazy<Mutex<HashMap<u32, (i64, i64)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -363,74 +462,73 @@ fn get_all_sessions_inner() -> SessionsResponse {
     // W4：APP 类未读卡合并 + 未读池维护（宿主存活检查 / 变黄删除 / 过期清理）
     sync_unread_sessions(&mut all_sessions);
 
-    // Hook 事件集成：用新鲜事件（<30s）更新会话状态
+    // Hook 事件集成：用新鲜事件（<30s）更新会话状态；T3 起审批等待持久化（DB
+    // approval_wait_marks）——进入事件（PermissionRequest/Notification[注册侧已
+    // matcher=permission_prompt 收窄]）写标记，清除事件（PostToolUse 系/Stop/
+    // UserPromptSubmit/PermissionResult/Interrupt）删标记，叠加层据标记强制
+    // Waiting（issue #74 根因①：审批等待期文件推导判 processing 而非 Waiting）
     let hook_events = crate::monitor::hooks::read_hook_events();
     let now_ts = chrono::Utc::now().timestamp();
     let mut grace = STOP_GRACE.lock().unwrap();
+    let mut wait_marks: HashMap<(String, String), i64> =
+        crate::database::dao::approval_wait::list_all_wait()
+            .into_iter()
+            .map(|(tool, sid, ts)| ((tool, sid), ts))
+            .collect();
     for session in &mut all_sessions {
-        if let Some(event) = hook_events.get(&session.id) {
-            match event.event.as_str() {
-                "Stop" | "stop" => {
-                    // 按形态计算 grace 时长：APP 形态更长（subagent 调度场景，单步间隔长），CLI 较短
-                    let grace_secs = if matches!(session.form, ProcessForm::App) {
-                        get_app_grace_secs()
-                    } else {
-                        get_cli_grace_secs()
-                    };
-                    // 记录 grace 时间戳和时长，不直接改 status — 由 grace 判定综合决定
-                    grace.insert(session.pid, (event.ts, grace_secs));
-                    if now_ts - event.ts < grace_secs {
-                        // grace 期内：保持黄灯（覆盖 JSONL 推导的 Waiting/Idle）
-                        if !matches!(
-                            session.status,
-                            SessionStatus::Processing
-                                | SessionStatus::Thinking
-                                | SessionStatus::Compacting
-                        ) {
-                            log::debug!(
-                                "Stop grace 期内（{}s）保持黄灯: pid={}, form={:?}",
-                                grace_secs,
-                                session.pid,
-                                session.form
-                            );
-                            session.status = SessionStatus::Processing;
-                        }
-                    } else {
-                        // 过期：Agent 已停止活动超过 grace 期，进入等待用户态
-                        session.status = SessionStatus::Waiting;
+        let tool = session.agent_type.tool_id().to_string();
+        let action = match hook_events.get(&session.id) {
+            Some(event) => apply_hook_event_to_session(session, event, &mut grace, now_ts),
+            None => {
+                // 没有新事件但有过 Stop 记录 — 使用存储的 grace duration 判断过期
+                if let Some(&(stop_ts, grace_secs)) = grace.get(&session.pid) {
+                    if now_ts - stop_ts >= grace_secs {
+                        // grace 已过期：Agent 已停止活动，进入 Idle 状态
+                        session.status = SessionStatus::Idle;
+                        grace.remove(&session.pid);
                     }
                 }
-                _ => {
-                    // 其他事件：清 grace，正常映射
-                    grace.remove(&session.pid);
-                    let new_status = match event.event.as_str() {
-                        "PreToolUse" | "preToolUse" => Some(SessionStatus::Processing),
-                        "UserPromptSubmit" | "userPromptSubmit" => Some(SessionStatus::Thinking),
-                        "SessionStart" | "sessionStart" => Some(SessionStatus::Idle),
-                        "SessionEnd" | "sessionEnd" => Some(SessionStatus::Finished),
-                        _ => None,
-                    };
-                    if let Some(status) = new_status {
-                        log::debug!(
-                            "Hook event {} → {:?} for pid={}",
-                            event.event,
-                            status,
-                            session.pid
-                        );
-                        session.status = status;
-                    }
-                }
+                HookMarkAction::None
             }
-        } else if let Some(&(stop_ts, grace_secs)) = grace.get(&session.pid) {
-            // 没有新事件但有过 Stop 记录 — 使用存储的 grace duration 判断过期
-            if now_ts - stop_ts >= grace_secs {
-                // grace 已过期：Agent 已停止活动，进入 Idle 状态
-                session.status = SessionStatus::Idle;
-                grace.remove(&session.pid);
+        };
+        match action {
+            HookMarkAction::Entry => {
+                crate::database::dao::approval_wait::mark_wait(
+                    &tool,
+                    &session.id,
+                    now_ts,
+                    "等待审批",
+                );
+                wait_marks.insert((tool.clone(), session.id.clone()), now_ts);
+            }
+            HookMarkAction::Clear => {
+                crate::database::dao::approval_wait::clear_wait(&tool, &session.id);
+                wait_marks.remove(&(tool.clone(), session.id.clone()));
+            }
+            HookMarkAction::None => {}
+        }
+        // 叠加层：有等待标记 → 强制 Waiting（红=等待审批，覆盖文件推导——含污染层②
+        // codex 停更 300s 的 Waiting→Idle 强转；标记清除后自然回落文件推导）
+        if wait_marks.contains_key(&(tool.clone(), session.id.clone())) {
+            session.status = SessionStatus::Waiting;
+        }
+    }
+    // 会话消失清标记：标记对应会话不在本轮快照且标记足够旧才清（60s 容忍扫描抖动，
+    // 防瞬时缺席误清——审批进入事件只发一次，误清会丢 Waiting 直到用户重试）
+    {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let active: HashSet<(String, String)> = all_sessions
+            .iter()
+            .map(|s| (s.agent_type.tool_id().to_string(), s.id.clone()))
+            .collect();
+        for ((tool, sid), ts) in &wait_marks {
+            if !active.contains(&(tool.clone(), sid.clone()))
+                && now_ms - ts > APPROVAL_MARK_ABSENCE_CLEAR_MS
+            {
+                crate::database::dao::approval_wait::clear_wait(tool, sid);
             }
         }
     }
-
     // T2：用户 X 掉的 App 形态卡按 (tool, session, status) 过滤——放在 Hook 状态更新
     // 之后（status 已是最终值），排序之前。状态变化后 key 不匹配自然重现
     {
@@ -551,6 +649,112 @@ mod tests {
             );
         }
         eprintln!("=== END ===");
+    }
+
+    // ==== T3 状态链：hook 事件→标记动作抽取函数单测 ====
+
+    fn hook_sess(status: SessionStatus) -> Session {
+        Session {
+            id: "s-hook".into(),
+            agent_type: crate::session::AgentType::Claude,
+            project_name: "proj".into(),
+            project_path: "/tmp/proj".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-09-20T00:00:00Z".into(),
+            pid: 77,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: crate::session::ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        }
+    }
+
+    fn hook_ev(name: &str, ts: i64) -> crate::monitor::hooks::HookEvent {
+        crate::monitor::hooks::HookEvent {
+            event: name.into(),
+            ts,
+            last_event_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn stop_expired_maps_idle_not_waiting() {
+        // 污染层①退役回归锁：Stop 过期 → Idle（原版产 Waiting=「不落红」假红，
+        // 计划 T3 裁决退役——「任务完成后不再假红 25 秒」）
+        let mut s = hook_sess(SessionStatus::Processing);
+        let mut grace = HashMap::new();
+        let now = 10_000;
+        let action =
+            apply_hook_event_to_session(&mut s, &hook_ev("Stop", now - 3_600), &mut grace, now);
+        assert_eq!(action, HookMarkAction::Clear, "Stop 属清除清单");
+        assert!(
+            matches!(s.status, SessionStatus::Idle),
+            "Stop 过期必须 Idle（退役后不假红），实际 {:?}",
+            s.status
+        );
+    }
+
+    #[test]
+    fn stop_within_grace_holds_processing() {
+        let mut s = hook_sess(SessionStatus::Idle);
+        let mut grace = HashMap::new();
+        let now = 10_000;
+        let action =
+            apply_hook_event_to_session(&mut s, &hook_ev("Stop", now - 1), &mut grace, now);
+        assert_eq!(action, HookMarkAction::Clear);
+        assert!(matches!(s.status, SessionStatus::Processing));
+    }
+
+    #[test]
+    fn approval_entry_events_mark_and_wait() {
+        for name in ["PermissionRequest", "Notification"] {
+            let mut s = hook_sess(SessionStatus::Processing);
+            let mut grace = HashMap::new();
+            let action =
+                apply_hook_event_to_session(&mut s, &hook_ev(name, 10_000), &mut grace, 10_000);
+            assert_eq!(action, HookMarkAction::Entry, "{name}");
+            assert!(
+                matches!(s.status, SessionStatus::Waiting),
+                "{name} 应强制 Waiting，实际 {:?}",
+                s.status
+            );
+        }
+    }
+
+    #[test]
+    fn clear_family_actions_and_status_semantics() {
+        let now = 10_000;
+        // PostToolUse 系/Interrupt：Clear 动作，状态映射维持 None（Processing 保持）
+        for name in ["PostToolUse", "PostToolUseFailure", "Interrupt"] {
+            let mut s = hook_sess(SessionStatus::Processing);
+            let mut grace = HashMap::new();
+            let action = apply_hook_event_to_session(&mut s, &hook_ev(name, now), &mut grace, now);
+            assert_eq!(action, HookMarkAction::Clear, "{name}");
+            assert!(matches!(s.status, SessionStatus::Processing), "{name}");
+        }
+        // UserPromptSubmit：Clear 动作 + Thinking（既有映射保留）
+        let mut s = hook_sess(SessionStatus::Idle);
+        let mut grace = HashMap::new();
+        let action =
+            apply_hook_event_to_session(&mut s, &hook_ev("UserPromptSubmit", now), &mut grace, now);
+        assert_eq!(action, HookMarkAction::Clear);
+        assert!(matches!(s.status, SessionStatus::Thinking));
+    }
+
+    #[test]
+    fn unrelated_event_no_mark_action() {
+        let mut s = hook_sess(SessionStatus::Idle);
+        let mut grace = HashMap::new();
+        let action =
+            apply_hook_event_to_session(&mut s, &hook_ev("PreToolUse", 10_000), &mut grace, 10_000);
+        assert_eq!(action, HookMarkAction::None);
+        assert!(matches!(s.status, SessionStatus::Processing));
     }
 }
 /// 看板排序比较器：状态优先级 → 同状态组内未读卡排后（spec §5 前端「未读卡排后」）
