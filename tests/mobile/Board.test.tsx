@@ -1084,13 +1084,29 @@ describe("Board 卡片关闭/归档开关", () => {
     expect(screen.queryByTestId("card-close-a1")).toBeNull();
   });
 
-  it("APP 非绿态卡片不渲染归档钮", async () => {
+  it("APP 非绿态卡片同样显示归档钮且可归档（叉不挑颜色）", async () => {
     await renderWithCard(
       chipSession({
         id: "a2", agentType: "codex", lastActivityAt: "2026-09-20T10:00:00Z",
         form: "app", status: "processing",
       })
     );
+    const hideCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/session-hide")) {
+          hideCalls.push(String(url));
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    expect(screen.getByTestId("card-close-a2")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("card-close-a2"));
+    await advance(0);
+    expect(hideCalls).toHaveLength(1);
     expect(screen.queryByTestId("card-close-a2")).toBeNull();
   });
 

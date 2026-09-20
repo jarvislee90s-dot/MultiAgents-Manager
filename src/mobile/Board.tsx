@@ -218,13 +218,14 @@ export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHisto
   );
 
   /** 卡片关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀，进历史归档）；
-   *  APP=软归档（仅绿态可用，看板隐藏不杀进程，恢复活动自动回板）。二次确认防
-   *  误触；确认后乐观移除本地卡片（扫描/过滤 3s 内对齐；失败则卡片保留，扫描真相为准） */
+   *  APP=软归档（任意状态可归档——叉不挑颜色；等同桌面端叉掉：删未读池行 +
+   *  看板隐藏，不自动回归，可从历史页移回）。二次确认防误触；确认后乐观移除
+   *  本地卡片（扫描/过滤 3s 内对齐；失败则卡片保留，扫描真相为准） */
   const handleCardClose = useCallback((s: Session) => {
     const isCli = s.form === "cli";
     const msg = isCli
       ? "关闭桌面终端？该会话将进入历史归档"
-      : "归档该会话？将从手机看板隐藏，恢复活动时自动回来";
+      : "归档该会话？等同在桌面端叉掉：将从手机看板隐藏且不再自动回归，可从历史页移回";
     if (!window.confirm(msg)) return;
     void (isCli ? closeSession(s.id) : hideSession(s.id))
       .then(() => {
@@ -555,9 +556,9 @@ export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHisto
                   {formatRelativeTime(s.lastActivityAt, now)}
                 </span>
                 {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
-                    APP=软归档（仅绿态可用，恢复活动自动回板，非绿不渲染）。
-                    stopPropagation 防触发卡片点击进详情 */}
-                {(s.form === "cli" || STATUS_COLOR_KIND[s.status] === "green") && (
+                    APP=软归档（等同桌面端叉掉：任意状态可归档、不自动回归，可从
+                    历史页移回）。stopPropagation 防触发卡片点击进详情 */}
+                {(
                   <button
                     type="button"
                     data-testid={`card-close-${s.id}`}
