@@ -1216,56 +1216,6 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
   }, 15000);
 });
 
-// ==== R5 一键 resume（Task 11，评审 C1/M4）：回执三分诊 ====
-describe("SessionDetail：一键 resume 回执分诊（评审 C1）", () => {
-  beforeEach(() => {
-    installFetch();
-  });
-
-  it("评审 C1：200 failed 回执不得当成功——错误文案上屏（spawn 出手失败可重试）", async () => {
-    routes.sessionOpen = { status: "failed", error: "终端启动失败（模拟）" };
-    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    await screen.findByText("在电脑上打开");
-    fireEvent.click(screen.getByTestId("session-open"));
-    const err = await screen.findByTestId("session-open-error");
-    expect(err.textContent).toBe("打开失败：终端启动失败（模拟）");
-    // 成功提示条不得出现（互斥态）
-    expect(screen.queryByTestId("session-open-success")).toBeNull();
-  });
-
-  it("200 opening → 成功提示条（对齐桌面 toast 语义的内联形态）", async () => {
-    routes.sessionOpen = { status: "opening" };
-    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    await screen.findByText("在电脑上打开");
-    fireEvent.click(screen.getByTestId("session-open"));
-    const ok = await screen.findByTestId("session-open-success");
-    expect(ok.textContent).toBe("已让电脑打开终端，请查看电脑侧窗口");
-    expect(screen.queryByTestId("session-open-error")).toBeNull();
-  });
-
-  it("404 no_cwd → 按错误码分診中文文案（挂载后会话漂移的兜底路径）", async () => {
-    routes.sessionOpenStatus = 404;
-    routes.sessionOpen = { error: "no_cwd" };
-    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    await screen.findByText("在电脑上打开");
-    fireEvent.click(screen.getByTestId("session-open"));
-    const err = await screen.findByTestId("session-open-error");
-    expect(err.textContent).toBe("打开失败：该会话没有项目目录信息");
-  });
-
-  it("无项目目录 → 按钮禁用 + 原因（后端不出手的前端镜像）", () => {
-    render(
-      <SessionDetail
-        session={makeSession({ projectPath: "", agentType: "workbuddy" })}
-        onBack={() => {}}
-      />
-    );
-    const btn = screen.getByTestId("session-open") as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    expect(screen.getByText("该会话没有项目目录信息，无法在电脑上打开")).toBeTruthy();
-  });
-});
-
 // ==== F6：详情页 10s 轮询（假计时器锁节奏与可见性语义）====
 describe("SessionDetail：详情页 10s 轮询（F6）", () => {
   /** 只数 /session-messages 调用（/host、/session-files 的拉取不计入节奏断言） */

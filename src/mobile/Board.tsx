@@ -64,6 +64,8 @@ interface BoardProps {
   onUnpaired: () => void;
   /** 卡片点击回调（M3 Task 8）：进入会话详情；缺省时卡片不可点（既有测试/用法不受影响） */
   onOpenSession?: (session: Session) => void;
+  /** 历史入口点击回调（历史会话区 spec §7.1）：进入归档历史页 */
+  onOpenHistory: () => void;
 }
 
 // 移动看板：主通道为 SSE（快照首帧 + 跃迁增量），断流 2 次降级为 3s 轮询。
@@ -71,7 +73,7 @@ interface BoardProps {
 // + 横幅/提示音/振动提醒；降级 → 交给下方轮询 effect（复用 tick 的 in-flight 守卫）。
 // 失败口径：403 → 回配对页（只由 fetchSessions 的 null 触发，SSE 断流不算）；
 // 网络异常 → 保留上次数据 + 错误横幅继续重试（不白屏、不误踢回配对页）。
-export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProps) {
+export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHistory }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
   // SSE 已降级（连续 2 次失败）：单向闩——置位后由轮询 effect 接管数据拉取；
@@ -341,6 +343,14 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
       <header className="mb-3 flex items-baseline justify-between">
         <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">会话看板</h1>
         <span className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onOpenHistory}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+            aria-label="历史会话"
+          >
+            🕘 历史
+          </button>
           <span className="hidden text-xs text-slate-500 sm:inline">
             {data ? `${data.totalCount} 个会话` : "加载中…"}
           </span>
