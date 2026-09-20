@@ -4383,6 +4383,29 @@ mod tests {
         }
     }
 
+    /// macOS 端点路径固定接生产效果回查探针（open_session_terminal_with →
+    /// open_macos_with → macos_effect_probe：轮询进程表 3s 找 resume 特征子串，
+    /// resume_effect_in_snapshot 按 cmd 拼接串 contains 命中）。spawner 假体 Ok
+    /// 后若探针未命中，双通道按「死窗」级联 failed——既有
+    /// session_open_endpoint_opens_and_audits 预存失败即此根因（task-3-report）。
+    /// 故出手时顺手种一个 argv 携 resume 特征的暗桩进程（`sh -c "sleep 5 # 特征"`，
+    /// 首轮/次轮采样即命中；5s > 3s 回查窗自灭，非终端窗口——「零真开窗」约束
+    /// 不破，~/.mam 零污染）。非 macOS 平台无回查探针，运行时 no-op。
+    /// 共享作用域（原 nested 于 session_open_archive_fallback_tests，常红修复
+    /// 时上提）：opens_and_audits 与归档回退两类 session-open 测试同用。
+    fn spawn_effect_decoy(resume_cmd: &str) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let _ = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("sleep 5 # {resume_cmd}"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
     /// Task 11 专用 state：会话夹具独占 id（守卫 id 立规的防串键纪律同源）——
     /// sess_m（claude Waiting 正常 cwd）/ sess_n（claude Waiting 空白 cwd）/
     /// sess_o（workbuddy Idle，未入 resume 命令表）；spawner 注入记录型假体。
@@ -4456,7 +4479,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 403, "session-open 必须过 PIN 门禁");
-        // 有 cookie → 200 opening + no-store
+        // 有 cookie → 200 opening + no-store。出手前种 argv 携特征的暗桩进程：
+        // 生产效果回查探针（macos_effect_probe）要在进程表里找到 resume 特征才判
+        // opening——无窗测试环境不种桩必级联 failed（本测试原常红根因之一，见
+        // spawn_effect_decoy 注）。非 macOS 平台 no-op。
+        spawn_effect_decoy("claude --resume sess_m");
         let r = app
             .clone()
             .oneshot(req(
@@ -4493,8 +4520,15 @@ mod tests {
                 // 评审 I1：cwd 进 spec（conhost 分支的 current_dir 消费点）
                 assert_eq!(cwd, "/tmp/proj-m", "spawn 计划必须携带项目目录");
             }
-            crate::inject::resume::SpawnSpec::MacosApplescript { .. } => {
-                panic!("Windows 运行时不得派发 AppleScript 变体");
+            crate::inject::resume::SpawnSpec::MacosApplescript { script } => {
+                // 平台对等：macOS 断言脚本载荷（cwd + resume 命令，对齐
+                // dead_session_opens_from_archive 的 macOS 断言先例），Windows 臂原样。
+                // 原此处 panic!（「Windows 运行时不得派发 AppleScript 变体」）在 macOS
+                // 运行时必炸——本测试常红第二层根因，同批清除。
+                assert!(
+                    script.contains("/tmp/proj-m") && script.contains("claude --resume sess_m"),
+                    "spawn 计划必须携带项目目录与 claude resume 命令：{script}"
+                );
             }
         }
         // 审计 action=open（Task 7 预留兑现）result=ok
@@ -4904,27 +4938,6 @@ mod tests {
         use super::*;
         use crate::database::SessionArchiveRow;
 
-        /// macOS 端点路径固定接生产效果回查探针（open_session_terminal_with →
-        /// open_macos_with → macos_effect_probe：轮询进程表 3s 找 resume 特征子串，
-        /// resume_effect_in_snapshot 按 cmd 拼接串 contains 命中）。spawner 假体 Ok
-        /// 后若探针未命中，双通道按「死窗」级联 failed——既有
-        /// session_open_endpoint_opens_and_audits 预存失败即此根因（task-3-report）。
-        /// 故出手时顺手种一个 argv 携 resume 特征的暗桩进程（`sh -c "sleep 5 # 特征"`，
-        /// 首轮/次轮采样即命中；5s > 3s 回查窗自灭，非终端窗口——「零真开窗」约束
-        /// 不破，~/.mam 零污染）。非 macOS 平台无回查探针，运行时 no-op。
-        fn spawn_effect_decoy(resume_cmd: &str) {
-            if !cfg!(target_os = "macos") {
-                return;
-            }
-            let _ = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(format!("sleep 5 # {resume_cmd}"))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        }
-
         /// 归档回退测试 state：活快照保持 test_state 默认（空会话集）——只换归档缝
         /// 与 spawn 缝。Arc::get_mut 就地换缝先例见 archive_api_tests::archive_state；
         /// 新路由结构性在 PIN gate 之后（nest 内层）：persist_device 播种 + req 带
@@ -4995,8 +5008,8 @@ mod tests {
                         {
                             return Err(format!("payload 不含归档 cwd/resume 命令: {script}"));
                         }
-                        // 效果回查要真命中：种 argv 携特征的暗桩（见 spawn_effect_decoy 注）
-                        spawn_effect_decoy("codex resume dead-9");
+                        // 效果回查要真命中：种 argv 携特征的暗桩（见外层 spawn_effect_decoy 注）
+                        super::spawn_effect_decoy("codex resume dead-9");
                         Ok(())
                     }
                 });
