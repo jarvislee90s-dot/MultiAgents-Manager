@@ -7,6 +7,7 @@ pub mod codex_thread_parser;
 pub mod cwd;
 pub mod dsh;
 pub mod git;
+pub mod hook_listener;
 pub mod hooks;
 pub mod host;
 pub mod jsonl;
