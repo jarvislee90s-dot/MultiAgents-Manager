@@ -702,11 +702,15 @@ describe("移动端附件上传（2026-09-20）", () => {
     await screen.findByTestId("attachment-chips");
     expect(screen.getByText("上传中：hang.png")).toBeTruthy();
     expect((screen.getByTestId("composer-send") as HTMLButtonElement).disabled).toBe(true);
+    // 上传中 × 可点：移除 = 取消（中断在途 fetch，chip 消失，不再落盘）
+    fireEvent.click(screen.getByRole("button", { name: "移除附件 hang.png" }));
     // 放行上传 → ready → 可发送
     releaseAttach!(new Response(JSON.stringify({ path: "E:/p", size: 1 }), { status: 200 }));
     await waitFor(() =>
       expect((screen.getByTestId("composer-send") as HTMLButtonElement).disabled).toBe(false)
     );
+    // 取消后 chip 消失、发送钮恢复可用（无 ready 附件也不拦发送）
+    await waitFor(() => screen.queryByTestId("attach-chips") === null);
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-delivered");
   });
