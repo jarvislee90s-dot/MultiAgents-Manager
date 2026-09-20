@@ -1005,6 +1005,34 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
                     args,
                 ));
             }
+            "custom_tool_call" => {
+                // T5（手工验收修复批 D5）：apply_patch 补丁调用——从补丁**头行**提取
+                // 文件变更（*** Add/Update/Delete File: <path>），args 对齐 APP 线路
+                // fileChange 形态（{"changes":[{"op","path"}]}——files.rs PATH_KEYS
+                // 的 "path" 键据此吸收入文件面板）。只解析头行、不碰补丁正文；旧
+                // function_call+command 串「不收串内路径」防误收规则保持
+                let name = payload.get("name").and_then(|t| t.as_str());
+                let input = payload
+                    .get("input")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or_default();
+                let mut changes: Vec<serde_json::Value> = Vec::new();
+                let mut paths: Vec<String> = Vec::new();
+                for line in input.lines() {
+                    if let Some((op, path)) = parse_patch_header(line) {
+                        paths.push(path.clone());
+                        changes.push(serde_json::json!({ "op": op, "path": path }));
+                    }
+                }
+                if !paths.is_empty() {
+                    out.push(SessionMessage::tool_call(
+                        format!("修改 {}", paths.join(", ")),
+                        ts,
+                        name.map(String::from),
+                        serde_json::to_string(&changes).ok(),
+                    ));
+                }
+            }
             "function_call_output" => {
                 // output 双形态（字符串 / 对象）
                 let text = match payload.get("output") {
@@ -1039,6 +1067,26 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
         }
     }
     out
+}
+
+/// 解析 apply_patch 补丁头行：`*** Add File: <path>` / `*** Update File: <path>` /
+/// `*** Delete File: <path>` → (op, path)；其余行（含补丁正文 +前缀行）→ None。
+/// 只认这三个前缀——T5 防误收边界（路径带空格时取 `: ` 之后整段 trim）
+fn parse_patch_header(line: &str) -> Option<(&'static str, String)> {
+    let line = line.trim_end();
+    for (prefix, op) in [
+        ("*** Add File: ", "add"),
+        ("*** Update File: ", "update"),
+        ("*** Delete File: ", "delete"),
+    ] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            let path = path.trim();
+            if !path.is_empty() {
+                return Some((op, path.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Codex APP 线路：thread_history_*.sqlite 的 thread_items（codex_thread_parser
@@ -2212,6 +2260,48 @@ mod tests {
             Some(r#"{"cmd":"git status"}"#)
         );
         assert_eq!(msgs[4].content, "ok");
+    }
+
+    #[test]
+    fn codex_custom_tool_call_extracts_files() {
+        // T5（D5）：apply_patch（custom_tool_call）从整条丢弃改为头行提取上板——
+        // md×3/svg×1 出路径、PNG 照旧（view_image 结构化引用）、串内路径不误收
+        // patch 用 JSON 转义形态（字面 \n）——拼进 rollout 行后才是合法 JSON 字符串，
+        // serde 解析回真实换行（parse_patch_header 走 lines() 逐行吃）
+        let patch = "*** Begin Patch\\n*** Add File: notes/a.md\\n+# 计划\\n*** Add File: notes/b.svg\\n+<svg/>\\n*** Update File: docs/c.md\\n@@\\n*** End Patch";
+        let lines = vec![
+            format!(
+                r#"{{"timestamp":"2026-09-06T05:41:00.000Z","type":"response_item","payload":{{"type":"custom_tool_call","id":"ctc_1","name":"apply_patch","input":"{patch}"}}}}"#
+            ),
+            // PNG 照旧：view_image 结构化引用（file_path 键既有收集）
+            r#"{"timestamp":"2026-09-06T05:41:10.000Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"file_path\":\"/w/img.png\"}"}}"#.to_string(),
+            // 串内路径不误收：exec_command 的 cmd 串带类路径文本（PATH_KEYS 无 cmd 键）
+            r#"{"timestamp":"2026-09-06T05:41:20.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat src/lib.rs\"}"}}"#.to_string(),
+        ];
+        let msgs = map_codex_lines(&lines);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].kind, "tool-call");
+        assert_eq!(msgs[0].tool_name.as_deref(), Some("apply_patch"));
+        assert!(msgs[0].content.contains("notes/a.md"));
+        assert!(msgs[0].content.contains("notes/b.svg"));
+        assert!(msgs[0].content.contains("docs/c.md"));
+        let args = msgs[0]
+            .tool_args
+            .as_deref()
+            .expect("args 应为 changes JSON");
+        for p in ["notes/a.md", "notes/b.svg", "docs/c.md"] {
+            assert!(args.contains(p), "args 应含 {p}");
+        }
+        // files.rs PATH_KEYS 吸收（origin=tool_write）：纯收集函数对 args 的回收断言
+        let v: serde_json::Value = serde_json::from_str(args).unwrap();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        crate::remote::files::collect_path_values(&v, &mut out, &mut seen);
+        assert_eq!(out.len(), 3, "PATH_KEYS 按路径吸收三条变更");
+        assert!(out.iter().all(|p| !p.ends_with(".png")));
+        // PNG 照旧 + 串内不误收
+        assert!(msgs[1].tool_args.as_deref().unwrap().contains("img.png"));
+        assert!(msgs[2].tool_args.as_deref().unwrap().contains("src/lib.rs"));
     }
 
     #[test]

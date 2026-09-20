@@ -747,7 +747,11 @@ fn extract_inline_markup_paths(content: &str) -> Vec<String> {
 /// 递归走 JSON 树：对象键命中 PATH_KEYS 时收字符串值，其余结构下钻。
 /// `seen` 为**单条消息内**的判重集（跨消息去重由 extract_paths_from_messages_with
 /// 按归一化键完成——同一条 tool-call 里同路径重复键不该计成多次使用）
-fn collect_path_values(v: &serde_json::Value, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+pub(crate) fn collect_path_values(
+    v: &serde_json::Value,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
     match v {
         serde_json::Value::Object(map) => {
             for (k, val) in map {
