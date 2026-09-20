@@ -108,6 +108,14 @@ const SENSITIVE_DIRS: &[&str] = &[
                // 误伤 AppData 下的临时文件）
 ];
 
+/// 子路径豁免表（T6/D9，手工验收修复批）：SENSITIVE_DIRS 整目录拦截下的「agent
+/// 写给用户看的纯 markdown 产物」豁免——命中黑名单的路径若落在豁免子路径**子树**
+/// 内（段精确：`.claude/plans-x` 不误豁免 `.claude/plans`）则放行预览。
+/// 首例 `.claude/plans`（用户 C-10 发现计划文件「受安全策略保护」）；`.codex/plans`
+/// 为 T0 盘点第二例（<turn>/<uuid>/PLAN.md 子树，纯 md）。凭据/会话原始数据照拦
+/// （豁免只放产物目录；WorkBuddy 等其余候选待黑名单盲区补拦裁决，T0 盘点只记录）
+const EXEMPT_SUBPATHS: &[&str] = &[".claude/plans", ".codex/plans"];
+
 /// fail-closed 全段匹配面（基准不可用分支专用）：仅凭据类目录。AppData/Library
 /// 是「主目录内」语义段，不进全段面——Windows 的 TEMP 本就在 AppData 之下，
 /// 全局段匹配会误伤一切临时文件（含测试 tempdir，feat/phase2-injection 合并
@@ -214,7 +222,10 @@ pub fn read_file_safe(
         Some(home_canon) => {
             // firmlink 折叠与归属/段匹配收敛在 sensitive_under_home（纯函数、
             // 跨平台 CI 锁定——CI 无 macOS runner，平台门控的端到端锁永不执行）
-            if sensitive_under_home(&canon, &home_canon, cfg!(windows)) {
+            // T6：黑名单命中但落在豁免产物子树（.claude/plans 等）→ 放行预览
+            if sensitive_under_home(&canon, &home_canon, cfg!(windows))
+                && !exempt_subpath_under_home(&canon, &home_canon, cfg!(windows))
+            {
                 return Err(FileRejectReason::Sensitive);
             }
         }
@@ -257,6 +268,48 @@ fn is_sensitive_path(child: &str, home: &str, windows: bool) -> bool {
 /// fail-closed 全段面（基准不可用）：仅凭据目录参与（见 CREDENTIAL_DIRS 注释）
 fn is_credential_path(child: &str, windows: bool) -> bool {
     any_segment_hit(child, "/", CREDENTIAL_DIRS, windows)
+}
+
+/// 豁免子路径判定（T6 纯函数，平台语义可注入）：路径相对主目录的 rel 前缀命中
+/// EXEMPT_SUBPATHS 且段边界精确（`{entry}/` 前缀——`plans-x` 不吃 `plans` 的豁免）。
+/// 仅主目录内生效（fail-closed 基准缺失分支不豁免——无法验证落点时保守照拦）；
+/// 归一口径与 any_segment_hit 同源（双分隔符/verbatim 剥离/Windows 大小写）
+fn exempt_subpath_under_home(child: &Path, home_base: &Path, windows: bool) -> bool {
+    let child = fold_data_volume_alias(child);
+    let base = fold_data_volume_alias(home_base);
+    if !path_within(&child, &base) {
+        return false;
+    }
+    let norm = |s: &str| -> String {
+        let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s.to_string()
+        };
+        let mut s = s.replace('\\', "/");
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        if windows {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let rel = norm(&child.to_string_lossy())
+        .strip_prefix(&norm(&base.to_string_lossy()))
+        .map(|r| r.trim_start_matches('/').to_string())
+        .unwrap_or_default();
+    EXEMPT_SUBPATHS.iter().any(|e| {
+        let e = if windows {
+            e.to_lowercase()
+        } else {
+            e.to_string()
+        };
+        rel.starts_with(&format!("{e}/"))
+    })
 }
 
 /// 段匹配内核：child 相对 home 的路径段（home 之下取相对段，否则全段）与给定
@@ -1136,6 +1189,59 @@ mod tests {
     /// 折叠 + 归属 + 段匹配的组合判定锁（跨平台，纯字符串无 IO）：
     /// 覆盖 CI 不可达的 firmlink 别名形态——折叠被还原为恒等时，别名用例必红；
     /// 同时锁定裁决边界（主目录外含敏感段名不设防线、主目录内非敏感不误伤）。
+    /// T6（D9）：豁免子路径边界锁——`.claude/plans` 与 `.codex/plans` 子树放行
+    /// （黑名单命中但豁免），同工具其余路径（会话/凭据）照拦；段精确不误伤
+    /// （`plans-x` 不吃 `plans` 的豁免）。组合判定：sensitive 命中 ∧ 豁免成立
+    /// ⇒ 调用方放行（files.rs 主路径的 `&& !exempt` 形态）
+    #[test]
+    fn exempt_subpaths_allow_plan_artifacts_only() {
+        let home = Path::new("/Users/u");
+        // 豁免产物：黑名单命中 ∧ 豁免成立 → 放行
+        for p in [
+            "/Users/u/.claude/plans/shiny-words.md",
+            "/Users/u/.codex/plans/turn-1/018f-uuid/PLAN.md", // 子树嵌套（T0 盘点形态）
+        ] {
+            assert!(
+                sensitive_under_home(Path::new(p), home, false),
+                "{p} 应命中黑名单（否则豁免无从谈起）"
+            );
+            assert!(
+                exempt_subpath_under_home(Path::new(p), home, false),
+                "{p} 应豁免"
+            );
+        }
+        // 照拦：同工具非豁免路径（会话/凭据/记忆）
+        for p in [
+            "/Users/u/.claude/projects/abc.jsonl",
+            "/Users/u/.claude/credentials.yaml",
+            "/Users/u/.codex/auth.json",
+            "/Users/u/.codex/sessions/2026/09/20/rollout-x.jsonl",
+        ] {
+            assert!(
+                sensitive_under_home(Path::new(p), home, false),
+                "{p} 应照拦"
+            );
+            assert!(
+                !exempt_subpath_under_home(Path::new(p), home, false),
+                "{p} 不在豁免子树"
+            );
+        }
+        // 段精确：`plans-x` 目录不吃 `plans` 的豁免（前后缀相似不误伤，黑名单
+        // 同款裁决口径）
+        let p = "/Users/u/.claude/plans-x/secret.md";
+        assert!(sensitive_under_home(Path::new(p), home, false));
+        assert!(
+            !exempt_subpath_under_home(Path::new(p), home, false),
+            "段精确：plans-x 不豁免"
+        );
+        // Windows 语义（大小写不敏感 + 反斜杠）
+        assert!(exempt_subpath_under_home(
+            Path::new("C:/Users/u/.Claude/Plans/a.md"),
+            Path::new("C:/Users/u"),
+            true
+        ));
+    }
+
     #[test]
     fn sensitive_home_hit_covers_firmlink_alias_and_keeps_ruling_boundary() {
         let home = Path::new("/Users/u");
