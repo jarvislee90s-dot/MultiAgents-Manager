@@ -1051,6 +1051,7 @@ async fn e2e_http_full_chain() {
         board_hidden_ids: Box::new(Vec::new),
         board_hidden_hide: std::sync::Arc::new(|_| 0usize),
         board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+        unread_mark_read: std::sync::Arc::new(|_, _| ()),
         session_close: std::sync::Arc::new(|_| Ok(())),
         sse_registry: Arc::new(SseRegistry::default()),
         max_devices_source: Box::new(|| 3),

@@ -20,11 +20,13 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use super::server::{CleanupStream, RemoteState};
 
-/// 看板隐藏过滤（APP 软归档，2026-09-20 体验批二）：hidden∩绿态(idle/finished)
-/// 且无未读 → 从响应剔除（仅手机看板；桌面走 invoke 不经此端点，与「桌面端不动」
-/// 裁决一致）；hidden∩(非绿∨未读) → 懒解除隐藏（一次性回归）并保留在响应。
-/// counts 按过滤后集合重算。GET /sessions 与 SSE snapshot 帧共用本函数——
-/// 两个入口口径一致，隐藏卡片不会经另一通道诈尸。
+/// 看板隐藏过滤（APP 软归档=「叉」语义，2026-09-20 体验批二修订）：hidden →
+/// 一律从响应剔除（仅手机看板；桌面走 invoke 不经此端点）。**无自动回归**——
+/// 初版「非绿∨未读即回归」判据把 W4 持久未读（转绿插行、24h 过期、已读才删）
+/// 误当活动信号，导致带未读的会话归档后 3s 内必被拉回（实测废弃）。叉掉 =
+/// 不再跟踪管理，恢复只有历史页「移回看板」一条路。counts 按过滤后重算。
+/// GET /sessions 与 SSE snapshot 帧共用本函数——两个入口口径一致，隐藏卡片
+/// 不会经另一通道诈尸。
 fn apply_board_hidden(
     st: &Arc<RemoteState>,
     mut resp: crate::session::SessionsResponse,
@@ -34,25 +36,7 @@ fn apply_board_hidden(
     if hidden.is_empty() {
         return resp;
     }
-    let mut returned: Vec<String> = Vec::new();
-    resp.sessions.retain(|s| {
-        if !hidden.contains(&s.id) {
-            return true;
-        }
-        let green = matches!(
-            s.status,
-            crate::session::SessionStatus::Idle | crate::session::SessionStatus::Finished
-        );
-        if green && !s.unread {
-            false // 软归档隐藏中
-        } else {
-            returned.push(s.id.clone());
-            true // 有活动 → 一次性回归
-        }
-    });
-    for id in &returned {
-        (st.board_hidden_unhide)(id);
-    }
+    resp.sessions.retain(|s| !hidden.contains(&s.id));
     resp.total_count = resp.sessions.len();
     resp.waiting_count = resp
         .sessions
@@ -1887,9 +1871,11 @@ pub async fn session_close(
     }
 }
 
-/// POST /session-hide {sessionId}：APP 形态软归档（看板隐藏，不杀进程、可逆）。
-/// 仅 App 形态且绿态（idle/finished，与前端 STATUS_COLOR_KIND 同源口径）可归档；
-/// CLI 会话走 /session-close。可逆登记动作，不入审计（W5 词表不膨胀）。
+/// POST /session-hide {sessionId}：APP 形态软归档 =「叉」（看板隐藏，不杀进程、
+/// 可逆）。**任意状态可归档**（叉不挑颜色；2026-09-20 修订：原绿态门 + 自动回归
+/// 判据与 W4 持久未读冲突，归档 3s 内必被拉回，废弃）。与桌面端「叉」同源：
+/// 触发 unread_mark_read（删未读池行 + 已读 tombstone），未读不再把卡片拉回；
+/// 恢复唯一路径 = 历史页「移回看板」（/session-unhide）。CLI 会话走 /session-close。
 pub async fn session_hide(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -1914,12 +1900,10 @@ pub async fn session_hide(
         if !matches!(s.form, crate::session::ProcessForm::App) {
             return Err((String::new(), "form_not_supported".to_string()));
         }
-        if !matches!(
-            s.status,
-            crate::session::SessionStatus::Idle | crate::session::SessionStatus::Finished
-        ) {
-            return Err((String::new(), "not_green".to_string()));
-        }
+        let tool = s.agent_type.tool_id().to_string();
+        // 与桌面端「叉」同源：删未读池行 + 已读 tombstone——未读是 24h 持久标记，
+        // 不消费它会被看板过滤外的任何「未读即活动」逻辑反复拉回
+        (st2.unread_mark_read)(&tool, &s.id);
         (st2.board_hidden_hide)(&s.id);
         Ok(())
     })
@@ -1938,7 +1922,7 @@ pub async fn session_hide(
         Err((_, reason)) => {
             let status = match reason.as_str() {
                 "no_session" => StatusCode::NOT_FOUND,
-                "form_not_supported" | "not_green" => StatusCode::BAD_REQUEST,
+                "form_not_supported" => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             (

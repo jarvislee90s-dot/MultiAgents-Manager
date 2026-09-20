@@ -241,6 +241,11 @@ pub type ConfirmProbeFn = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
 /// [`ConfirmProbeFn`] 先例）：参数 = None（全删）| Some(session_id)。
 pub type ArchiveDeleteFn = dyn Fn(Option<&str>) -> usize + Send + Sync;
 
+/// 未读已读缝类型（体验批二修订，clippy type_complexity 收敛别名，对齐
+/// [`ArchiveDeleteFn`] 先例）：参数 = (tool_id, session_id)，与桌面端「叉」
+/// 共用 dao::unread::mark_read。
+pub type UnreadMarkReadFn = dyn Fn(&str, &str) + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -249,9 +254,12 @@ pub struct RemoteState {
     pub board_hidden_ids: Box<dyn Fn() -> Vec<String> + Send + Sync>,
     /// 隐藏写缝（hide）：生产 = database::board_hidden_hide；测试记录型假体
     pub board_hidden_hide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
-    /// 解除隐藏写缝（unhide / 自动回归懒解除）：生产 = database::board_hidden_unhide；
+    /// 解除隐藏写缝（unhide）：生产 = database::board_hidden_unhide；
     /// 测试记录型假体
     pub board_hidden_unhide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
+    /// 未读已读缝（体验批二修订，与桌面端「叉」同源）：生产 =
+    /// dao::unread::mark_read（删未读池行 + 已读 tombstone）；测试记录型假体
+    pub unread_mark_read: std::sync::Arc<UnreadMarkReadFn>,
     /// CLI 会话硬杀缝（/session-close）：生产 = commands::session::kill_pid；
     /// 测试记录型假体（零真杀进程）
     pub session_close: std::sync::Arc<dyn Fn(u32) -> Result<(), String> + Send + Sync>,
@@ -473,6 +481,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
@@ -1014,6 +1023,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
@@ -1394,6 +1404,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
@@ -1519,6 +1530,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
@@ -1702,6 +1714,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
@@ -1973,6 +1986,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -2120,6 +2134,7 @@ mod tests {
                 board_hidden_ids: Box::new(Vec::new),
                 board_hidden_hide: std::sync::Arc::new(|_| 0usize),
                 board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+                unread_mark_read: std::sync::Arc::new(|_, _| ()),
                 session_close: std::sync::Arc::new(|_| Ok(())),
                 sse_registry: Arc::new(SseRegistry::default()),
                 max_devices_source: Box::new(move || max_devices),
@@ -2679,6 +2694,7 @@ mod tests {
                     board_hidden_ids: Box::new(Vec::new),
                     board_hidden_hide: std::sync::Arc::new(|_| 0usize),
                     board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+                    unread_mark_read: std::sync::Arc::new(|_, _| ()),
                     session_close: std::sync::Arc::new(|_| Ok(())),
                     sse_registry: Arc::new(SseRegistry::default()),
                     max_devices_source: Box::new(|| 3),
@@ -2939,6 +2955,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -3134,6 +3151,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -4507,6 +4525,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -5054,7 +5073,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn sessions_hidden_active_auto_returns_and_unhides() {
+        async fn sessions_hidden_active_stays_hidden_and_no_unhide() {
             let sessions = vec![app_session(
                 "busy-1",
                 crate::session::SessionStatus::Processing,
@@ -5084,15 +5103,13 @@ mod tests {
             assert_eq!(r.status(), 200);
             let v: serde_json::Value =
                 serde_json::from_str(&body_string(r).await).unwrap();
-            assert_eq!(
-                v["sessions"].as_array().unwrap().len(),
-                1,
-                "有活动的隐藏会话保留在响应（一次性回归）"
-            );
-            assert_eq!(
-                unhidden.lock().unwrap().as_slice(),
-                ["busy-1".to_string()],
-                "懒解除隐藏缝被调用"
+            // 叉语义（体验批二修订）：非绿隐藏会话也保持剔除——初版「非绿∨未读
+            // 即回归」被 W4 持久未读（转绿插行、24h 才过期）击穿，已废弃
+            assert_eq!(v["sessions"].as_array().unwrap().len(), 0);
+            assert_eq!(v["totalCount"], 0);
+            assert!(
+                unhidden.lock().unwrap().is_empty(),
+                "无自动回归：解除隐藏缝不得被调用"
             );
         }
 
@@ -5229,46 +5246,28 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn hide_green_app_session() {
-            let sessions = vec![app_session("app-g", crate::session::SessionStatus::Idle)];
+        async fn hide_app_session_marks_read_and_hides_any_status() {
+            let sessions = vec![
+                app_session("app-g", crate::session::SessionStatus::Idle),
+                app_session("app-y", crate::session::SessionStatus::Processing),
+            ];
             let mut state = state_with_sessions(sessions);
             let hid = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             let h2 = hid.clone();
+            let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+            let r2 = reads.clone();
             {
                 let s = std::sync::Arc::get_mut(&mut state).expect("独占");
                 s.board_hidden_hide = std::sync::Arc::new(move |id| {
                     h2.lock().unwrap().push(id.to_string());
                     1
                 });
+                s.unread_mark_read = std::sync::Arc::new(move |tool, id| {
+                    r2.lock().unwrap().push((tool.to_string(), id.to_string()));
+                });
             }
             let app = router(state);
-            let r = app
-                .oneshot(req(
-                    "POST",
-                    "/m/api/v1/session-hide",
-                    Some("mam_device=bh"),
-                    Some(r#"{"sessionId":"app-g"}"#),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(r.status(), 200);
-            assert_eq!(hid.lock().unwrap().as_slice(), ["app-g".to_string()]);
-        }
-
-        #[tokio::test]
-        async fn hide_rejects_cli_and_non_green() {
-            let sessions = vec![
-                inj_sess(
-                    "cli-g",
-                    crate::session::AgentType::Claude,
-                    3,
-                    crate::session::SessionStatus::Idle,
-                ),
-                app_session("app-y", crate::session::SessionStatus::Processing),
-            ];
-            let state = state_with_sessions(sessions);
-            let app = router(state);
-            for (sid, why) in [("cli-g", "CLI 走 close"), ("app-y", "非绿态不可归档")] {
+            for sid in ["app-g", "app-y"] {
                 let body = format!(r#"{{"sessionId":"{sid}"}}"#);
                 let r = app
                     .clone()
@@ -5280,8 +5279,42 @@ mod tests {
                     ))
                     .await
                     .unwrap();
-                assert_eq!(r.status(), 400, "{why}");
+                assert_eq!(r.status(), 200, "{sid} 任意状态可归档（叉不挑颜色）");
             }
+            assert_eq!(
+                hid.lock().unwrap().as_slice(),
+                ["app-g".to_string(), "app-y".to_string()]
+            );
+            // 与桌面端「叉」同源：mark_read 删未读池行（tool, session_id）
+            assert_eq!(
+                reads.lock().unwrap().as_slice(),
+                [
+                    ("codex".to_string(), "app-g".to_string()),
+                    ("codex".to_string(), "app-y".to_string())
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn hide_rejects_cli() {
+            let sessions = vec![inj_sess(
+                "cli-g",
+                crate::session::AgentType::Claude,
+                3,
+                crate::session::SessionStatus::Idle,
+            )];
+            let state = state_with_sessions(sessions);
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-hide",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"cli-g"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "CLI 会话走 /session-close，不得软归档");
         }
 
         #[tokio::test]

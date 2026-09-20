@@ -651,6 +651,7 @@ mod tests {
             board_hidden_ids: Box::new(Vec::new),
             board_hidden_hide: std::sync::Arc::new(|_| 0usize),
             board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
             session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: std::sync::Arc::new(crate::remote::server::SseRegistry::default()),
             max_devices_source: Box::new(|| 3),

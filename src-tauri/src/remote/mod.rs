@@ -257,6 +257,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         board_hidden_ids: Box::new(crate::database::board_hidden_ids),
         board_hidden_hide: std::sync::Arc::new(crate::database::board_hidden_hide),
         board_hidden_unhide: std::sync::Arc::new(crate::database::board_hidden_unhide),
+        // 未读已读缝：与桌面端「叉」（mark_session_read）同源 dao 函数——远程归档
+        // 等同远程叉掉（删未读池行 + 已读 tombstone）
+        unread_mark_read: std::sync::Arc::new(crate::database::dao::unread::mark_read),
         // CLI 会话硬杀缝（/session-close 与桌面 kill_session 同内核）
         session_close: std::sync::Arc::new(crate::commands::session::kill_pid),
         now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
