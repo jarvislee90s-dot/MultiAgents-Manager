@@ -96,20 +96,36 @@ pub fn ensure_git_exclude(cwd: &Path, line: &str) {
     }
 }
 
-/// 唯一前缀：纳秒十六进制 + 内容短摘要（防同名同刻覆盖；内容寻址比随机数可复现）
-fn unique_prefix(bytes: &[u8]) -> String {
-    use std::hash::{Hash, Hasher};
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    format!("{n:x}-{:016x}", hasher.finish())
+/// 同名落盘去重（2026-09-20 用户裁决，对齐微信语义）：**保留原始文件名**——
+/// 文件池按名搜索、agent 识名都依赖原始名，任何哈希/纳秒前缀都会破坏索引；
+/// 同名已存在 → 追加 `(1)`、`(2)` 序号（a.txt → "a (1).txt"），不覆盖旧文件。
+/// 括号在消毒白名单内，标记路径 `path="X"` 引用安全。纯函数。
+fn unique_target(dir: &Path, base: &str) -> PathBuf {
+    let first = dir.join(base);
+    if !first.exists() {
+        return first;
+    }
+    let stem = Path::new(base)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| base.to_string());
+    let ext = Path::new(base)
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+    let mut n: u32 = 1;
+    loop {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
-/// 落盘（IO）：建目录 → 幂等确保本地排除 → 写 `<uuid>-<消毒名>` → 返回绝对路径。
-/// 会话 id 仅作子目录名（消毒后存储，各工具形态不同不做格式校验）。
+/// 落盘（IO）：建目录 → 幂等确保本地排除 → 写 **原始文件名**（同名追加序号，
+/// 不覆盖）→ 返回绝对路径。会话 id 仅作子目录名（消毒后存储，各工具形态不同
+/// 不做格式校验）。
 pub fn write_attachment(
     cwd: &Path,
     session_id: &str,
@@ -119,8 +135,7 @@ pub fn write_attachment(
     let dir = attachment_dir(cwd, session_id);
     std::fs::create_dir_all(&dir)?;
     ensure_git_exclude(cwd, GIT_EXCLUDE_LINE);
-    let name = format!("{}-{}", unique_prefix(bytes), sanitize_file_name(raw_name));
-    let path = dir.join(name);
+    let path = unique_target(&dir, &sanitize_file_name(raw_name));
     std::fs::write(&path, bytes)?;
     Ok(path)
 }
@@ -342,7 +357,7 @@ mod tests {
     // ---- write_attachment ----
 
     #[test]
-    fn write_roundtrip_lands_in_session_dir_with_unique_prefix() {
+    fn write_roundtrip_preserves_original_file_name() {
         let root = tempdir();
         std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
         let bytes = b"\x89PNG fake image bytes";
@@ -353,9 +368,10 @@ mod tests {
             root.join(".mam-attachments").join("sess_abc"),
             "落盘 = <cwd>/.mam-attachments/<session>/"
         );
+        // 2026-09-20 用户反馈：文件名保留原名（不加哈希前缀——文件池按名搜索、
+        // agent 识名都依赖原始名）
         let name = path.file_name().unwrap().to_string_lossy();
-        assert!(name.ends_with("-截图.png"), "{name}");
-        assert!(name.len() > "截图.png".len(), "应含唯一前缀");
+        assert_eq!(name, "截图.png");
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         // 首份写入即完成本地排除（同一刻）
         let content =
@@ -369,7 +385,13 @@ mod tests {
         let root = tempdir();
         let p1 = write_attachment(&root, "s", "a.txt", b"one").unwrap();
         let p2 = write_attachment(&root, "s", "a.txt", b"two").unwrap();
-        assert_ne!(p1, p2, "唯一前缀防撞——同名二次上传不得覆盖");
+        assert_ne!(p1, p2, "同名二次落盘追加序号，不覆盖首份");
+        // 微信语义：同名追加 (1) 尾缀，原名保留可读
+        assert_eq!(
+            p2.file_name().unwrap().to_string_lossy(),
+            "a (1).txt",
+            "同名第二次落盘 = a (1).txt"
+        );
         assert_eq!(std::fs::read(&p1).unwrap(), b"one");
         std::fs::remove_dir_all(&root).ok();
     }

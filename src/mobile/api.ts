@@ -386,7 +386,8 @@ export async function sessionSend(sessionId: string, text: string): Promise<Send
  *  413 → ApiError(413, "too_large")；其余非 2xx → ApiError(status) */
 export async function uploadAttachment(
   sessionId: string,
-  file: File
+  file: File,
+  signal?: AbortSignal
 ): Promise<{ path: string; size: number } | null> {
   const q = new URLSearchParams({ session_id: sessionId, name: file.name });
   let r: Response;
@@ -395,6 +396,7 @@ export async function uploadAttachment(
       method: "POST",
       headers: { "content-type": "application/octet-stream" },
       body: await file.arrayBuffer(),
+      signal,
     });
   } catch (e) {
     throw new ApiError(null, `session-attachment 网络异常: ${String(e)}`);

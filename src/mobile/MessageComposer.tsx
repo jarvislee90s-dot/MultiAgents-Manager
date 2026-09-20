@@ -91,6 +91,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const [text, setText] = useState("");
   /** 输入框 ref：「修改」确认出队后把正文放回输入框时聚焦（移动端直接可改） */
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** 在途上传的中断器（id → controller）：上传中移除 chip 时中断 fetch */
+  const uploadCtrlsRef = useRef(new Map<string, AbortController>());
   /** 隐式文件选择器 ref：「+」钮 click 转发 */
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 待发附件（2026-09-20）：uploading → ready（含落盘绝对路径）/ failed；
@@ -332,13 +334,22 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           ...prev,
           { id, name: f.name || (isImage ? "粘贴图片.png" : "file"), isImage, status: "uploading" },
         ]);
+        // AbortController：上传中可取消（× 移除 = 中断上传 + 移除 chip）——
+        // 大文件（视频）上传耗时长，不可取消会被迫干等（2026-09-20 用户实测）
+        const ctrl = new AbortController();
+        uploadCtrlsRef.current.set(id, ctrl);
         try {
-          const res = await uploadAttachment(session.id, f);
+          const res = await uploadAttachment(session.id, f, ctrl.signal);
           if (res === null) throw new ApiError(403, "设备已失效，请重新配对");
           setAttachments((prev) =>
             prev.map((a) => (a.id === id ? { ...a, status: "ready", path: res.path } : a))
           );
         } catch (e) {
+          if (ctrl.signal.aborted) {
+            // 用户取消：chip 已随 removeAttachment 移除，静默收尾
+            setAttachments((prev) => prev.filter((a) => a.id !== id));
+            continue;
+          }
           const isNoCwd = e instanceof ApiError && e.status === 404 && e.message === "no_cwd";
           if (isNoCwd) setNoCwd(true);
           const reason =
@@ -348,6 +359,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           setAttachments((prev) =>
             prev.map((a) => (a.id === id ? { ...a, status: "failed", error: reason } : a))
           );
+        } finally {
+          uploadCtrlsRef.current.delete(id);
         }
       }
     },
@@ -355,6 +368,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   );
 
   const removeAttachment = useCallback((id: string) => {
+    // 上传中移除 = 取消：中断在途 fetch，防止白传到底（2026-09-20 用户反馈）
+    uploadCtrlsRef.current.get(id)?.abort();
+    uploadCtrlsRef.current.delete(id);
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
@@ -503,9 +519,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                 type="button"
                 data-testid={`attach-remove-${a.id}`}
                 aria-label={`移除附件 ${a.name}`}
-                disabled={a.status === "uploading"}
                 onClick={() => removeAttachment(a.id)}
-                className="text-slate-400 hover:text-slate-600 disabled:opacity-40 dark:text-slate-500"
+                className="text-slate-400 hover:text-slate-600 dark:text-slate-500"
               >
                 ×
               </button>
