@@ -349,3 +349,13 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 ## 许可证
 
 本项目采用 MIT 许可证 —— 详见 [LICENSE](LICENSE) 文件。
+
+---
+
+## 商标与非官方声明
+
+MultiAgents-Manager 是一个独立的开源项目，与 Anthropic（Claude / Claude Code）、OpenAI（Codex / ChatGPT）、OpenCode、OpenClaw、月之暗面（Kimi Code）、WorkBuddy、ZCode、dsh 及本仓库提及的其他任何公司或产品均无关联、未获其背书或赞助。文中出现的名称与商标归其各自所有者所有，仅用于描述兼容性（名词性合理使用）。应用内图标为原创设计，部分配色仅用于辨识对应工具，不代表任何官方身份。
+
+## 官方渠道
+
+本项目唯一的官方发布渠道是本仓库的 [GitHub Releases](../../releases)。任何其他网站或渠道提供的下载均为第三方分发，请自行甄别风险。品牌使用规范见 [TRADEMARK.md](TRADEMARK.md)。
