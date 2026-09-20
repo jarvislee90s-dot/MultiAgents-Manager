@@ -135,7 +135,7 @@ mod tests {
         let proj = tempdir();
         seed_attachment(&home, &proj, "s1", "a.png", b"abc");
         assert!(proj.join(".mam-attachments").exists());
-        clean_attachment_project_with(&home, &proj.to_string_lossy().as_ref()).unwrap();
+        clean_attachment_project_with(&home, proj.to_string_lossy().as_ref()).unwrap();
         // 目录删除（含宿主空壳 .mam-attachments 移除）+ 索引剔空
         assert!(!proj.join(".mam-attachments").exists());
         assert!(crate::remote::attachments::read_index(&home).is_empty());
@@ -158,7 +158,7 @@ mod tests {
         seed_attachment(&home, &proj, "s1", "a.png", b"abc");
         // 用户手动删掉项目 → 索引残留；清理仍应成功（目录不存在 = 幂等）并剔索引
         std::fs::remove_dir_all(proj.join(".mam-attachments")).unwrap();
-        clean_attachment_project_with(&home, &proj.to_string_lossy().as_ref()).unwrap();
+        clean_attachment_project_with(&home, proj.to_string_lossy().as_ref()).unwrap();
         assert!(crate::remote::attachments::read_index(&home).is_empty());
         std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&proj).ok();
