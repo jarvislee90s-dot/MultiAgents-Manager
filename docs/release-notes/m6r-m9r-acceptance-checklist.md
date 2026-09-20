@@ -12,6 +12,11 @@
 
 > 以下各条均可在常规门禁复现（`cargo test` / `cargo test --test m9r_e2e -- --ignored` / `pnpm test`），
 > 测试名以 `src-tauri/src` 与 `src-tauri/tests` 实际代码为准（本清单逐条核对过源码，非计划文档抄录）。
+>
+> **批次乙（mfix-b）覆盖追记（2026-09-21）**：T1–T8 新增自动化覆盖（Rust lib **1061 过 / 0 败 / 7
+> ignored**，基线 1006→+55；vitest **674 过 / 78 文件**，基线 635→净增 39，无移仓）未逐条并入
+> 下方 A1–A11 各表（各表为 M6R–M9R 批口径）——对应人工验收落点见 C-3 / C-4 / C-9 / C-13
+> 重测口径与 C-21 / C-22 新增项。
 
 ### A1 · 族规格 / 事件构造 / 节流判定（R2）
 
@@ -164,17 +169,17 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 |---|---|---|---|---|
 | C-1 | 四家各发短消息 | claude/codex/kimi/opencode 各一会话 | 手机发一条短消息 | 送达回执（delivered）+ 桌面终端可见 `[mobile 设备名]` 行 |
 | C-2 | 长消息 2000 字 | claude（快）与 opencode（慢）各一 | 发 2000 字消息 | claude 即时送达；opencode 先「投递中…」chip → 最终命中回执（慢消费者耗时见已知限制） |
-| C-3 | 黄排队→转闲自动 flush | 运行中会话 | 发消息得「排队中 第1位」→ 等任务完成 | ≤1s 自动送达，chip 收敛 |
-| C-4 | 立即发送插队 | claude 运行中 + 排队项 | 点「立即发送」 | **Windows**：busy 态插队 → 命中排空回执，或 Failed +「正文可能已写入输入行」防重文案——两者均算 PASS；**macOS**：busy 入草稿/缓冲、转闲后命中，按实机行为记录 |
+| C-3 | 黄排队→转闲自动 flush（**批次乙 T2/T4 重测口径**） | 运行中会话 | 发消息 → 排队列表出现条目（D8 多列队 UI：排队态渲染**完整队列列表**，不再是单 chip）→ 等任务完成 | 会话转闲**跃迁**后事件臂即时放行、条目收敛；**已空闲且无跃迁时由 60s 周期兜底放行（可达分钟级，非即时）**——旧「≤1s 自动送达」措辞作废（T2 复评订正：flush 循环事件臂只由状态跃迁触发） |
+| C-4 | 立即发送插队（**批次乙 T4 重测口径**） | claude 运行中 + 排队列表 ≥2 条 | 在排队列表对**任一条目**点「立即发送」（逐条按钮，不限本端最近一条，按条 id 生效）；其余条目照常排队 | **Windows**：busy 态插队 → 命中排空回执，或 Failed +「正文可能已写入输入行」防重文案——两者均算 PASS（回执语义不变）；**macOS**：busy 入草稿/缓冲、转闲后命中，按实机行为记录 |
 | C-5 | 撤回 | 排队中条目 | 点「撤回」 | 条目消失，终端不出现该内容 |
 | C-6 | **关闭远程→队列冻结→重开续跑** | 有待发排队项 | 关闭远程开关 → 重开 | 关闭期间队列冻结不投递；重开后对账自动补投（裁决 19） |
 | C-7 | MAM 重启→待发自动补投 | 有 PENDING 条目 | 重启 MAM 应用 | 启动对账 flush 补投待发项 |
 | C-8 | 审批 codex（Read Only 档） | codex 沙箱调 Read Only 档触发审批框 | 红卡点「允许」/「拒绝」 | 终端收到 y/esc（Windows 取证键位），批准/拒绝生效；审计 action=approve/reject |
-| C-9 | 审批 claude 计划模式 | claude 计划模式出计划 | 红卡点批准执行 | 计划被批准开始执行（「1」键，Windows 取证一致） |
+| C-9 | 审批 claude 计划模式（**批次乙 T1 重测口径**） | claude 计划模式出计划 | 移动端查看计划卡 → 红卡点批准执行 | 计划正文以**常驻一等卡片**可见（ExitPlanMode 形态升格 kind=plan，总结模式豁免折叠；详情页随轮询活状态流）；批准仍走红卡（「1」键，Windows 取证一致；审批标记/Waiting 门不变） |
 | C-10 | resume 双端各一次（≥2 家工具） | 桌面端 + 移动端各一次 | 对 ≥2 家工具点「在电脑上打开」 | 新窗口打开、cwd 正确、前台聚焦；审计 action=open（仅移动端触发落账；桌面端 Tauri 路径不写审计——audit 需设备身份）。**F1 后 macOS 口径（2026-09-20）**：Terminal.app 优先出手 + 3s 效果回查，死窗自动转 iTerm2、双败回 failed 回执+审计 failed——macOS 实测记录新序与回查行为（iTerm2 死窗已知问题见 mac-reverify §四-A，上游升级复测后回翻） |
 | C-11 | 审计页逐条可查 | 完成上述操作 | 设置 → 注入审计 | 逐条对应，无缺漏 |
 | C-12 | WT/conhost 判冻与人工点窗恢复 | 任一 CLI 会话制造输出停顿/选择模式（如终端内文本框选） | 注入长文制造背压与停顿：注入回执出现「目标终端疑似进入选择模式…」中文状态回执（D8 裁决 2026-09-19：不自动介入）→ 用户点一下该终端窗口清除选择模式 → 重发 | 状态回执如实出现，点窗后重发成功、正文最终命中；**WT 宿主判冻检测行为未实机验证（OccWatch 探针为 #[ignore]，§8.3）——异常即记录不判 FAIL** |
-| C-13 | 滞留→屏读→补按回车恢复路径 | 任一快消费者会话（E10 尾字符丢失场景：正文已打入但尾字符/提交回车丢失） | 直发后若确认失败回执出现：终端可见已打内容但未提交——人工按一次回车即提交；或等确认层自动屏读回查补按（500ms 轮询 3s 窗，`confirm::RECHECK_MS`） | 滞留内容最终提交进会话（会话文件见戳），不重复双投；确认回执与实际落盘一致 |
+| C-13 | 滞留→屏读→补按回车恢复路径（**批次乙 T3 口径订正**） | 任一快消费者会话（E10 尾字符丢失场景：正文已打入但尾字符/提交回车丢失） | 直发后观察确认失败回执的**三分语义**（T3）：① 注入 Ok+戳未中+**屏读无滞留草稿** → 中性回执「已投递至终端输入，agent 空闲后处理（未确认落盘）」，**无重试入口**；② 屏读见滞留+补回车 3s 仍不落 → 真失败（防重警示保留）——人工按一次回车即提交，或等确认层自动屏读回查补按（500ms 轮询 3s 窗，`confirm::RECHECK_MS`）；③ macOS 无屏读维持原文案 | ① 中性回执不得诱导重复发送；② 滞留内容最终提交进会话（会话文件见戳），不重复双投；确认回执与实际落盘一致 |
 | C-14 | 锁屏场景注入/通知可达性（原 M7 遗留补充项） | Windows 锁屏态（命令备好于 mam-probe 报告 §6；macOS 侧锁屏项见 m7-m8 清单 #5） | 锁屏后远程发消息，观察注入与通知可达 | 占位：沿用既有验收口径，未在本批新增内容 |
 | C-15 | 真机蜂窝网络复验（原用户项） | 外网蜂窝网络手机 + Windows 实机 | 蜂窝网络下远程发消息走全链 | 占位：沿用既有验收口径，未在本批新增内容 |
 | C-16 | codex hooks 触发复验（**F3 PascalCase 修复后**，M1A 前置；**T2 后注册面扩为 8 键**） | codex 0.155.x 在场 | 跑 `cargo test --lib monitor::hooks::codex_pascal -- --ignored`（注册写入真实 ~/.codex/hooks.json）→ 跑一次真实 codex 交互会话 | hooks.json 出现 PascalCase 8 键（六状态键 + `PermissionRequest`/`Interrupt`，T2）且旧 camelCase 键被迁移清除；会话期间 `~/.mam/events/<session_id>.json` 出现（hook 真触发）。自动化形态：`cargo test --lib monitor::hooks::codex_hook_events_really_fire -- --ignored`（T2 沙箱自检，tempdir CODEX_HOME/MAM_HOME）。调研锚点：`research/refs/phase2-消息注入/2026-09-19-审批事件钩子通道调研.md`（0.155.1 键名 PascalCase 源码证据 §3.2；M1A 红卡=钩子信号+固定键位） |
@@ -182,6 +187,8 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-18 | **claude hooks 触发复验（F8 新增）** | claude 在场（**无需登录**——实测未登录态钩子照常触发）；前置=debug helper 已构建 | 跑 `cargo test --lib monitor::hooks::claude_hook_events_really_fire -- --ignored` | 沙箱自检（tempdir `--settings` 文件 + MAM_HOME 重定向）：注册后跑真实 `claude -p` 一回合，`~/.mam/events/<session_id>.json` 落盘且形态合法（sid 白名单/UUID 形态、event 非空）。**实测已过（2026-09-21，1.1s）**。注意：claude **无信任门**（与 codex 的 C-17 不同族）、**无 `CLAUDE_CONFIG_DIR` 语义**（沙箱靠 `--settings <file>`）——两条均为本批实机取证结论 |
 | C-19 | **kimi hooks 触发复验（F8 新增）** | kimi 已装且 `~/.kimi-code/config.toml` 有可用模型；前置=debug helper 已构建 | 跑 `cargo test --lib monitor::hooks::kimi_hook_events_really_fire -- --ignored` | 沙箱自检（tempdir `KIMI_CODE_HOME`，config.toml 由真实配置只读复制后追加 `[[hooks]]`）：事件落盘且 **sid 为 `session_<uuid>` 形态**（下划线前缀——F8 修复点，旧白名单拒收该形态致 kimi 事件全量静默丢弃）。**实测已过（2026-09-21，2.3s）**。注意：**审批事件（PermissionRequest/PermissionResult）在无头 `-p` 模式不触发**（实测仅 SessionStart/UserPromptSubmit/Stop 触发），故自检注册面额外并入三个生命周期事件作管道探针——审批事件真触发归人工交互会话（C-20 矩阵） |
 | C-20 | **三家实机矩阵（claude / codex / kimi；F8 就绪）** | 三家 CLI 在场；codex 需先过信任门（C-17）；helper 已 debug 构建 | ① 三家各跑一条 `--ignored` 自检（C-16/C-18/C-19，自动化形态）；② **人工交互会话**（三家各一）：claude 触发权限提示、codex 触发审批框、kimi 触发审批请求，期间观察 `~/.mam/events/<session_id>.json` 内容与看板红卡 | ① 三条自检全绿（claude/kimi 本批实测已过；codex 至信任门前一步=事件不落盘为**设计内**，见 C-17）；② 人工会话中审批进入事件落盘 → 看板该会话**强制 Waiting 红卡**（T4 接铃铛）→ 手机上批准/拒绝 → 对应事件（claude PostToolUse/Stop、codex PostToolUse/Stop、kimi **PermissionResult**）清除标记 → 卡片回落绿灯（**F1 修复点**：kimi 清除链此前漏接 PermissionResult，红灯永不落）。**人工项归用户执行**（agent 不代做交互会话） |
+| C-21 | **问答三形态（批次乙 T8 新增，claude 先行）** | claude 在场 + debug helper 已构建（同 C-18 前置） | ① claude 交互会话触发 AskUserQuestion（单选 / 多选各一次 + 自由文本入口）→ 移动端问答卡出现（等待态；PreToolUse hook 通道实时载荷）；② 单选点选项 / 多选勾选+提交 / 自由文本按引导走普通消息；③ 终端核对作答生效、审计 action=answer 落账 | 问答卡出现且作答送达生效；**问答模式不出允许/拒绝**（与审批红卡严格隔离）；多问题（questions>1）为只读卡+引导（未测面，不注入）；键位语义与注入序列依据 `research/refs/phase2-消息注入/2026-09-21-claude-askuserquestion-按键语义探测.md`（K1–K11 定案表 + questions JSON 夹具）。**人工项归用户执行**（agent 不代做交互会话） |
+| C-22 | **信号健康度走查（批次乙 T5 新增）** | MAM 运行；至少一工具已注册 hooks；codex 已注册但**未信任**（即未跑 C-17） | 桌面设置页「信号健康度」小节逐工具查看三态/待办文案；对 codex 待办行点「复制 /hooks」；在 codex TUI 完成信任后回看该行 | per-tool 行三态正确（未注册 / 正常·最近事件 xx 前 / 暂无活跃会话）；codex 未信任时判据命中（已注册∧活跃会话∧零事件）→ 显示信任待办文案 + 复制按钮，信任后待办消除；首次 codex 注册收到一次性桌面通知（重启不重复弹）。注：本行为 T5 新增的验收落点（任务书未点名清单项，收口裁量，已台账申报） |
 
 > **F8 台账追记（2026-09-21，三家矩阵真实状态）**：
 > ① **claude** = 全链实测通（C-18 自检 1.1s 过，事件落盘含 SessionEnd/Stop 等；print
@@ -195,6 +202,14 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 > =untrusted 钩子不触发的**设计内行为**，C-17）；信任后即达与 claude/kimi 同档。
 > 三家共用的 helper 薄管道、白名单、注册/迁移逻辑均已有 tempdir 单测覆盖（非
 > 实机面），实机面差异集中在「各 CLI 的事件触发策略」与「codex 的信任门」两处。
+
+> **批次乙追记（2026-09-21，T9 矩阵引用 + T10 另行立项）**：跨工具「向用户提问」机制
+> 问卷矩阵已探测归档 `research/refs/phase2-消息注入/2026-09-20-问卷交互跨工具矩阵.md`
+> ——opencode / kimi / claude 三家存储形态×TUI 键击双实测 **GO**；codex 机制与存储实锤
+> （rollout JSONL `request_user_input`），实机键击 **0 样本**（relay 403，用户侧接入链接
+> 问题）→ **GO 带复验条件**（用户侧修复 ark 接入后补 1 次键击实测）；zcode（M11/三期
+> app-server 协议路线）/ dsh（web 宿主无从代答）/ workbuddy、openclaw（无问用户机制）
+> 不探测（该文档 §3）。T10「其他工具问答卡」**另行立项**，家数与排期输入归用户裁决。
 
 ---
 
