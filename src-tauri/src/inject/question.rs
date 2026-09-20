@@ -141,7 +141,7 @@ fn digit_key(index: usize) -> Option<String> {
     if index >= 9 {
         return None;
     }
-    Some(((index + 1) as u8 + b'0') as char).map(|c| c.to_string())
+    Some((((index + 1) as u8 + b'0') as char).to_string())
 }
 
 /// 应答动作 → 按键序列（探测定案的纯函数化；键名走 `locate_and_send_key(_spec)`

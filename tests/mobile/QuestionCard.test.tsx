@@ -235,8 +235,9 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
       available: true,
       source: "mark",
       questions: [
-        { header: "A", question: "First?", multiSelect: false, options: [{ label: "a1" }, { label: "a2" }] },
-        { header: "B", question: "Second?", multiSelect: true, options: [{ label: "b1" }, { label: "b2" }] },
+        // description 恒在（后端 json! 无条件输出）——空串形态夹具
+        { header: "A", question: "First?", multiSelect: false, options: [{ label: "a1", description: "" }, { label: "a2", description: "" }] },
+        { header: "B", question: "Second?", multiSelect: true, options: [{ label: "b1", description: "" }, { label: "b2", description: "" }] },
       ],
     };
     const { container } = render(<QuestionCard session={{ id: "sess-4" }} />);
@@ -345,6 +346,5 @@ describe("QuestionCard 与 ApproveCard 联合（硬约束① UI 面）", () => {
     const urls = fetchMock.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(urls.some((u) => u.includes("/session-approve-options"))).toBe(true);
     expect(urls.some((u) => u.includes("/session-question"))).toBe(true);
-    expect(new Set(urls.map((u) => u.replace(/^.*\//, ""))).size).toBeGreaterThan(0);
   });
 });

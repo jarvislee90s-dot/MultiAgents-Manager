@@ -1187,14 +1187,21 @@ mod tests {
         );
         assert_eq!(s3.status, SessionStatus::Waiting, "审批标记叠加照旧");
 
-        // ③ 清除事件（PostToolUse）→ Clear → **两类标记都清** → 回落文件推导
+        // ③ 清除事件（PostToolUse）→ Clear → **两类标记都清** → 回落文件推导。
+        // 夹具保真（复评 Minor 2）：真实「答完」事件是 PostToolUse **且 tool_name=
+        // AskUserQuestion**（claude 对被调工具照投 tool_name）——锁问答分支只拦
+        // PreToolUse，带 tool_name 的 PostToolUse 必须穿透到 Clear 族
         let action = apply_hook_event_to_session(
             &mut s,
-            &hook_ev("PostToolUse", now + 1),
+            &hook_ev_tool("PostToolUse", "AskUserQuestion", None, now + 1),
             &mut grace,
             now + 1,
         );
-        assert_eq!(action, HookMarkAction::Clear);
+        assert_eq!(
+            action,
+            HookMarkAction::Clear,
+            "带 tool_name 的 PostToolUse 照常走清除族"
+        );
         approval_wait::clear(&conn, &tool, &s.id);
         question_wait::clear(&conn, &tool, &s.id);
         assert!(question_wait::list_all(&conn).is_empty(), "问题标记已清");

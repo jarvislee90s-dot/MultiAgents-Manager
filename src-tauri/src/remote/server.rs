@@ -4439,7 +4439,8 @@ mod tests {
     /// sess_ab（标记载荷损坏 → 回落通道 B）/ sess_ac（bad_index 400）/
     /// sess_ad（仅审批标记——隔离反差用）/ sess_ae（问题标记 + detect 命中文案——
     /// 问题标记压审批卡的最强隔离形态）/ sess_af（无标记——no_question 409）/
-    /// sess_ai / sess_aj（Processing 无标记——通道 B 可用/已答反例）
+    /// sess_ai / sess_aj（Processing 无标记——通道 B 可用/已答反例）/
+    /// sess_ak（submit 首错即停 + failed 审计独占，复评 Minor 1）
     fn question_state_with_msgs(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         message_source: Box<crate::remote::content::MessageSourceFn>,
@@ -4468,6 +4469,8 @@ mod tests {
             sess("sess_af", 42, crate::session::SessionStatus::Waiting),
             sess("sess_ai", 44, crate::session::SessionStatus::Processing),
             sess("sess_aj", 45, crate::session::SessionStatus::Processing),
+            // 复评 Minor 1：submit 首错即停 + failed 审计独占会话（守卫 id 立规）
+            sess("sess_ak", 46, crate::session::SessionStatus::Waiting),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -4725,6 +4728,62 @@ mod tests {
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
         assert_eq!(audits[0].action, "answer");
         assert_eq!(audits[0].summary, "submit");
+    }
+
+    /// 复评 Minor 1：submit 出手失败（FakeInjector::failing）→ 端点级零覆盖补齐——
+    /// 200 failed{error} 透传 + **recorded_keys() 恰为 [(pid, "down")] 一条**（锁
+    /// 「首错即停」：submit 六键序列首个 down 即 Err，后续 enter/'1' 不再出手）+
+    /// 审计 action=answer 且 result=failed:{e} 前缀。sess_ak 独占（守卫 id 立规）。
+    /// 不加 k 键失败模式（评审原话：不必）。
+    #[tokio::test]
+    async fn question_answer_submit_first_error_stops_sequence_and_audits_failed() {
+        let fake = FakeInjector::failing("注入通道拒绝");
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_ak",
+                1_000,
+                "等待回答",
+                Some(Q_MULTI_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ak","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("注入通道拒绝"),
+            "注入失败应 200 failed 并透传错误文案：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(46u32, "down".to_string())],
+            "首错即停：submit 序列首个 down 即 Err，恰记录一条、后续键不再出手：{:?}",
+            fake.recorded_keys()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(
+            audits[0].result, "failed:注入通道拒绝",
+            "审计 result = failed:错误文案 前缀口径"
+        );
+        assert_eq!(audits[0].summary, "submit");
+        assert_eq!(audits[0].session_id, "sess_ak");
     }
 
     /// 问答应答（取消）：sess_y → 200 key_sent + (pid=35, "esc") 恰一键（探测 K3：

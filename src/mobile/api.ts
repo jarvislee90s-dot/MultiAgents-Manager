@@ -571,10 +571,11 @@ export async function sessionApprove(sessionId: string, optionId: string): Promi
 // ==== 批次乙 T8：问答卡（AskUserQuestion，claude 先行）====
 
 /** 问答选项视图（questions[].options[] 条目）：label + description——**编号是渲染层
- *  按 index 生成**，键位/数字不在此列（投递层细节不外泄 UI，approve 同纪律） */
+ *  按 index 生成**，键位/数字不在此列（投递层细节不外泄 UI，approve 同纪律）；
+ *  description 恒在（后端 json! 无条件输出，缺省解析为空串）→ 必填 string */
 export interface QuestionOptionView {
   label: string;
-  description?: string;
+  description: string;
 }
 
 /** 问答题目视图（GET /session-question 载荷 questions[] 条目，与 Rust
