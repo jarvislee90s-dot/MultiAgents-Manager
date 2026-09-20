@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ArchiveDetail from "@/mobile/ArchiveDetail";
 import type { ArchivedSession } from "@/mobile/api";
@@ -6,6 +6,11 @@ import type { ArchivedSession } from "@/mobile/api";
 const card: ArchivedSession = {
   sessionId: "dead-1", agentType: "codex", projectPath: "/tmp/p1", projectName: "proj-1",
   title: "标题", lastStatus: "idle", lastSeenAt: new Date().toISOString(),
+};
+
+const DEFAULT_PAGE = {
+  messages: [{ seq: 1, role: "user", content: "旧消息", kind: "text", ts: 1 }],
+  truncated: false,
 };
 
 function installFetch(routes: Record<string, unknown>) {
@@ -22,10 +27,10 @@ function installFetch(routes: Record<string, unknown>) {
         });
       }
       if (url.includes("/session-messages")) {
-        return new Response(
-          JSON.stringify({ messages: [{ seq: 1, role: "user", content: "旧消息", kind: "text", ts: 1 }] }),
-          { headers: { "content-type": "application/json" } },
-        );
+        const page = (routes["messagesPage"] as Record<string, unknown> | undefined) ?? DEFAULT_PAGE;
+        return new Response(JSON.stringify(page), {
+          headers: { "content-type": "application/json" },
+        });
       }
       if (url.includes("/sessions-archived")) {
         return new Response(JSON.stringify({ deleted: 1 }), { headers: { "content-type": "application/json" } });
@@ -105,5 +110,114 @@ describe("ArchiveDetail：归档详情与激活", () => {
     fireEvent.click(screen.getByTestId("archive-remove-confirm"));
     await new Promise((r) => setTimeout(r, 0));
     expect(back).toHaveBeenCalled();
+  });
+
+  it("从归档移除是描边真按钮（样式契约：border + button 元素）", async () => {
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    await screen.findByText("旧消息");
+    const btn = screen.getByTestId("archive-remove");
+    expect(btn.tagName).toBe("BUTTON");
+    expect(btn.className).toContain("border");
+  });
+
+  it("进入落底：消息加载后滚动容器落到最底（对齐活会话首拉语义）", async () => {
+    let resolveFetch!: (r: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((res) => {
+            resolveFetch = res;
+          }),
+      ),
+    );
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    const area = screen.getByTestId("message-area");
+    // 几何量先注入再放行响应（活会话测试同款：jsdom 无布局引擎，scrollHeight 恒 0）
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: 1000, configurable: true });
+    await act(async () => {
+      resolveFetch(
+        new Response(
+          JSON.stringify({
+            messages: [
+              { seq: 1, role: "user", content: "开头消息", kind: "text", ts: 1 },
+              { seq: 2, role: "assistant", content: "结尾回复", kind: "assistant", ts: 2 },
+            ],
+            truncated: false,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    });
+    await waitFor(() => expect(area.scrollTop).toBe(5000));
+  });
+
+  it("双浮动钮：距顶/距底超阈值各自浮现，点击落顶/落底", async () => {
+    installFetch({
+      messagesPage: {
+        messages: Array.from({ length: 10 }, (_, i) => ({
+          seq: i + 1, role: "user", content: `第 ${i + 1} 条`, kind: "text", ts: i + 1,
+        })),
+        truncated: false,
+      },
+    });
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    await screen.findByText("第 1 条");
+    const area = screen.getByTestId("message-area");
+    Object.defineProperty(area, "scrollHeight", { value: 8000, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: 2000, configurable: true });
+    area.scrollTop = 3000; // 距顶 3000、距底 3000，双钮都该显
+    fireEvent.scroll(area);
+    expect(screen.getByTestId("jump-to-top")).toBeTruthy();
+    expect(screen.getByTestId("jump-to-bottom")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("jump-to-top"));
+    expect(area.scrollTop).toBe(0);
+    fireEvent.scroll(area);
+    expect(screen.queryByTestId("jump-to-top")).toBeNull();
+    area.scrollTop = 3000;
+    fireEvent.scroll(area);
+    fireEvent.click(screen.getByTestId("jump-to-bottom"));
+    expect(area.scrollTop).toBe(8000);
+    fireEvent.scroll(area);
+    expect(screen.queryByTestId("jump-to-bottom")).toBeNull();
+  });
+
+  it("总结模式默认折叠：过程消息折叠头可见、最后 assistant 直显；展开全部/收起", async () => {
+    installFetch({
+      messagesPage: {
+        messages: [
+          { seq: 1, role: "user", content: "帮我查下", kind: "text", ts: 1 },
+          { seq: 2, role: "assistant", content: "thinking 过程内容", kind: "thinking", ts: 2, collapsed: true },
+          { seq: 3, role: "assistant", content: "tool-call 过程内容", kind: "tool-call", ts: 3, toolName: "grep", collapsed: true },
+          { seq: 4, role: "assistant", content: "早先回复", kind: "assistant", ts: 4, collapsed: false },
+          { seq: 5, role: "assistant", content: "最终总结回复", kind: "assistant", ts: 5, collapsed: false },
+        ],
+        truncated: false,
+      },
+    });
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    expect(await screen.findByText("帮我查下")).toBeTruthy();
+    // user 与最后 assistant 直显；更早 assistant 与过程消息默认折叠
+    expect(screen.getByText("最终总结回复")).toBeTruthy();
+    expect(screen.queryByText("早先回复")).toBeNull();
+    expect(screen.queryByText("thinking 过程内容")).toBeNull();
+    expect(screen.getByTestId("msg-2-toggle").textContent).toContain("思考过程");
+    expect(screen.getByTestId("msg-3-toggle").textContent).toContain("调用 grep");
+    // 单条点开
+    fireEvent.click(screen.getByTestId("msg-2-toggle"));
+    expect(screen.getByText("thinking 过程内容")).toBeTruthy();
+    // 一键展开全部 → 一键收起回默认
+    fireEvent.click(screen.getByTestId("expand-all"));
+    expect(screen.getByText("早先回复")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("collapse-all"));
+    expect(screen.queryByText("早先回复")).toBeNull();
+    expect(screen.queryByText("thinking 过程内容")).toBeNull();
+  });
+
+  it("truncated → 窗口顶显示截断提示行", async () => {
+    installFetch({ messagesPage: { ...DEFAULT_PAGE, truncated: true } });
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    expect((await screen.findByTestId("archive-truncated")).textContent).toContain("200");
   });
 });

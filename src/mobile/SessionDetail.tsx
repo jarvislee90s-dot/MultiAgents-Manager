@@ -19,12 +19,14 @@ import rehypeHighlight from "rehype-highlight";
 import {
   ArrowDownToLine,
   ArrowLeft,
+  ArrowUpToLine,
   ChevronDown,
   ChevronRight,
   PanelLeft,
   RotateCw,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
+import { collapsedLabel, isProcessKind } from "./message-fold";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
@@ -101,21 +103,8 @@ interface LoadError {
 // 纯函数小件（组件外，独立可测）
 // ============================================================
 
-/** 折叠行的摘要标签 */
-function collapsedLabel(m: SessionMessage): string {
-  switch (m.kind) {
-    case "thinking":
-      return "思考过程";
-    case "tool-call":
-      return m.toolName ? `调用 ${m.toolName}` : "工具调用";
-    case "tool-result":
-      return "工具结果";
-    case "assistant":
-      return "更早的回复";
-    default:
-      return "已折叠消息";
-  }
-}
+// collapsedLabel / isProcessKind 迁至 ./message-fold（2026-09-20 归档详情对齐批，
+// 纯搬家零语义变化——归档页共用同一套摘要文案与过程 kind 判定）
 
 /** 已知路径按长度降序（最长优先替换：路径互为前缀时不被短路径截断） */
 function sortedPaths(files: Set<string>): string[] {
@@ -135,22 +124,28 @@ export const JUMP_SHOW_THRESHOLD_PX = 240;
 /** 消息滚动区（两个布局分支共用，2026-09-20 抽取）：滚动容器 + 右下角
  *  「跳到最新」浮动按钮。对话一长，手翻到最新要很久（用户实测）；
  *  点击瞬时落底并立即恢复轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」）。
+ *  「跳到顶部」（2026-09-20 归档对齐批）：右上角镜像钮，距顶超阈值浮现，点击落 0
+ *  （到顶 = 本次加载窗口的顶——更早内容靠「加载更早消息」分页）。
  *  wrapper 持 relative 定位、滚动容器在内层：浮动按钮若放进滚动容器内部
- *  会随内容滚走，放 wrapper 上才能常驻右下角 */
+ *  会随内容滚走，放 wrapper 上才能常驻边角 */
 function MessageScrollArea({
   ref: areaRef,
   fontScale,
   showJump,
+  showJumpTop,
   onScroll,
   onJump,
+  onJumpTop,
   children,
 }: {
   /** 滚动容器 ref（React 19 ref-prop 通道；自建 areaRef prop 触发 react-hooks/refs） */
   ref?: Ref<HTMLDivElement>;
   fontScale: number;
   showJump: boolean;
+  showJumpTop: boolean;
   onScroll: () => void;
   onJump: () => void;
+  onJumpTop: () => void;
   children: ReactNode;
 }) {
   return (
@@ -164,6 +159,18 @@ function MessageScrollArea({
       >
         {children}
       </div>
+      {showJumpTop && (
+        <button
+          type="button"
+          data-testid="jump-to-top"
+          aria-label="跳到顶部"
+          title="跳到顶部"
+          onClick={onJumpTop}
+          className="absolute right-3 top-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
+          <ArrowUpToLine size={16} />
+        </button>
+      )}
       {showJump && (
         <button
           type="button"
@@ -283,6 +290,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // onScroll 驱动（此前消息区没有 onScroll 监听）；不动 pollFollowRef——
   // P2-B 的轮询前采样语义保持原样
   const [showJump, setShowJump] = useState(false);
+  // 「跳到顶部」浮动钮显隐（距顶超阈值；2026-09-20 归档对齐批与归档页同款交互）
+  const [showJumpTop, setShowJumpTop] = useState(false);
   // P2-B：下一次数据落地是否「跟随落底」的信号（等价于落底函数的 follow 参数）——
   // 轮询 tick 刷新前采样贴底状态写入；手动刷新（retry）置 true 无条件落底；
   // 初值 true 使首次加载落底。ref 而非 state：纯信号不驱动渲染
@@ -748,10 +757,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 是否渲染折叠切换头：过程消息 + 总结模式下的「更早 assistant」；
   // 最终 assistant 总结直显正文（不给「更早的回复」头）
   const isToggleable = (m: SessionMessage) =>
-    m.kind === "thinking" ||
-    m.kind === "tool-call" ||
-    m.kind === "tool-result" ||
-    (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
+    isProcessKind(m.kind) || (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
 
   // Bug 8（M3 验收）：总结模式折叠提示。折叠数 = 当前被折叠的可折叠条数——
   // 70 条过程消息被静默折叠会被误读为「内容被截」，顶部提示行 + 展开/收起全部
@@ -787,11 +793,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const bookmarkByAnchor = useMemo(() => new Map(bookmarks.map((b) => [b.anchor, b])), [bookmarks]);
 
   // 「跳到最新」：距底超阈值时显示（onScroll 驱动）；点击瞬时落底并立即恢复
-  // 轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」的明确意图）
+  // 轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」的明确意图）。
+  // 「跳到顶部」（2026-09-20 归档对齐批）：距顶超阈值时显示，点击落 0——
+  // 上滑离开顶部后一键回顶，不触碰轮询跟随语义（落顶即视为上翻阅读中）
   const handleAreaScroll = useCallback(() => {
     const el = messageAreaRef.current;
     if (!el) return;
     setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_SHOW_THRESHOLD_PX);
+    setShowJumpTop(el.scrollTop > JUMP_SHOW_THRESHOLD_PX);
   }, []);
 
   const jumpToLatest = useCallback(() => {
@@ -800,6 +809,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     pollFollowRef.current = true;
     el.scrollTop = el.scrollHeight;
     setShowJump(false);
+  }, []);
+
+  const jumpToTop = useCallback(() => {
+    const el = messageAreaRef.current;
+    if (!el) return;
+    el.scrollTop = 0;
+    setShowJumpTop(false);
   }, []);
 
   // 书签条（两个布局分支共用同一份 JSX）。processToggle：过程一键折叠开关
@@ -1077,8 +1093,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
+              showJumpTop={showJumpTop}
               onScroll={handleAreaScroll}
               onJump={jumpToLatest}
+              onJumpTop={jumpToTop}
               ref={messageAreaRef}
             >
               {messageArea}
@@ -1160,8 +1178,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           <MessageScrollArea
             fontScale={fontScale}
             showJump={showJump}
+            showJumpTop={showJumpTop}
             onScroll={handleAreaScroll}
             onJump={jumpToLatest}
+            onJumpTop={jumpToTop}
             ref={messageAreaRef}
           >
             {messageArea}

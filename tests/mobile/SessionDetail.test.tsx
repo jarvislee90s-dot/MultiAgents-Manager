@@ -1533,6 +1533,29 @@ describe("SessionDetail：跳到最新（2026-09-20）", () => {
     expect(screen.queryByTestId("jump-to-bottom")).toBeNull();
   });
 
+  it("距顶超阈值（>240px）出现到顶钮；滚回顶部消失", async () => {
+    const area = await renderWithMessage();
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: 1000, configurable: true });
+    area.scrollTop = 2400; // 距顶 = scrollTop > 240
+    fireEvent.scroll(area);
+    expect(screen.getByTestId("jump-to-top")).toBeTruthy();
+    area.scrollTop = 0;
+    fireEvent.scroll(area);
+    expect(screen.queryByTestId("jump-to-top")).toBeNull();
+  });
+
+  it("点击到顶钮：scrollTop 瞬时落 0，按钮消失", async () => {
+    const area = await renderWithMessage();
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: 1000, configurable: true });
+    area.scrollTop = 2400;
+    fireEvent.scroll(area);
+    fireEvent.click(screen.getByTestId("jump-to-top"));
+    expect(area.scrollTop).toBe(0);
+    expect(screen.queryByTestId("jump-to-top")).toBeNull();
+  });
+
   it("分屏（split）分支同样可用", async () => {
     installFetch();
     routes.messages = [
