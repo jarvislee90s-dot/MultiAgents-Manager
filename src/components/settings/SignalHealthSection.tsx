@@ -116,15 +116,21 @@ export function SignalHealthSection() {
                     {t("settings.signalHealth.ok", { ago: ago(h.lastEventAt) })}
                   </span>
                 ) : h.hasActiveSessions ? (
-                  // 待办：判据命中（已注册 ∧ 活跃会话 ∧ 零事件）→ 信任门一次性引导
+                  // 待办：判据命中（已注册 ∧ 活跃会话 ∧ 零事件）。文案按工具区分：
+                  // codex 有信任门（注册成功 ≠ 事件触发）→ 专属引导 + 复制 /hooks；
+                  // 其余工具无信任门 → 通用零事件排查文案（复制 /hooks 无意义，不显示）
                   <>
                     <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
-                      {t("settings.signalHealth.trustNeeded", { tool: h.label })}
+                      {h.toolId === "codex"
+                        ? t("settings.signalHealth.trustNeeded", { tool: h.label })
+                        : t("settings.signalHealth.zeroEvents", { tool: h.label })}
                     </span>
-                    <Button variant="outline" size="sm" onClick={() => void copyCommand()}>
-                      <Copy className="mr-1 h-3 w-3" />
-                      {t("settings.signalHealth.copyCommand")}
-                    </Button>
+                    {h.toolId === "codex" && (
+                      <Button variant="outline" size="sm" onClick={() => void copyCommand()}>
+                        <Copy className="mr-1 h-3 w-3" />
+                        {t("settings.signalHealth.copyCommand")}
+                      </Button>
+                    )}
                   </>
                 ) : (
                   // 中性：已注册但无活跃会话（零事件属正常等待，不算故障）

@@ -54,6 +54,14 @@ const rowsOf = () => [
     // 10 秒前的事件（绿态相对时间稳定落在「秒」档，不踩 60s 边界）
     lastEventAt: new Date(Date.now() - 10_000).toISOString(),
   },
+  {
+    // 非 codex 的判据命中（复评：通用零事件文案，无 codex 专属复制按钮）
+    toolId: "zcode",
+    label: "ZCode",
+    registered: true,
+    hasActiveSessions: true,
+    lastEventAt: null,
+  },
 ];
 
 // hook_signal_health 调用次数（只数命令名，不关心附带参数形态）
@@ -80,17 +88,21 @@ afterEach(() => {
 });
 
 describe("SignalHealthSection 四态渲染（T5）", () => {
-  it("挂载即 invoke hook_signal_health，四行按判据渲染各自状态", async () => {
+  it("挂载即 invoke hook_signal_health，各行按判据渲染各自状态", async () => {
     render(<SignalHealthSection />);
     expect(await screen.findByText("Claude Code")).toBeTruthy();
     expect(invokeMock).toHaveBeenCalledWith("hook_signal_health");
     // 行数 = 工具数（data-signal-row 稳定钩子）
-    expect(document.querySelectorAll("[data-signal-row]").length).toBe(4);
+    expect(document.querySelectorAll("[data-signal-row]").length).toBe(5);
     // 未注册（灰）
     expect(screen.getByText("Not registered")).toBeTruthy();
-    // 判据命中（已注册 ∧ 活跃会话 ∧ 零事件）→ 待办文案（含工具名）
+    // 判据命中（已注册 ∧ 活跃会话 ∧ 零事件）→ codex 信任门文案（含工具名）
     expect(
       screen.getByText("Enter /hooks in the Codex terminal and trust the MAM entry (one-time)")
+    ).toBeTruthy();
+    // 非 codex 判据命中 → 通用零事件文案（无信任门措辞）
+    expect(
+      screen.getByText("Zero hook events, check that ZCode is registered and firing correctly")
     ).toBeTruthy();
     // 中性（已注册但无活跃会话）
     expect(screen.getByText("No active sessions, waiting for events")).toBeTruthy();
@@ -98,9 +110,10 @@ describe("SignalHealthSection 四态渲染（T5）", () => {
     expect(screen.getByText(/OK · last event \d+s ago/)).toBeTruthy();
   });
 
-  it("判据命中行出现复制命令按钮，点击写入剪贴板 /hooks 并 toast 成功", async () => {
+  it("复制命令按钮仅 codex 信任门行持有，点击写入剪贴板 /hooks 并 toast 成功", async () => {
     render(<SignalHealthSection />);
     const btn = await screen.findByRole("button", { name: /copy command/i });
+    // 5 行中仅 codex 显示复制按钮（/hooks 是 codex 信任门专属操作）
     expect(screen.getAllByRole("button", { name: /copy command/i })).toHaveLength(1);
     fireEvent.click(btn);
     await waitFor(() => expect(clipboardWrite).toHaveBeenCalledWith("/hooks"));
@@ -157,7 +170,7 @@ describe("SignalHealthSection 加载失败态", () => {
       await waitFor(() => expect(healthCalls()).toBe(2));
       expect(screen.getByText("Claude Code")).toBeTruthy();
       expect(screen.queryByTestId("signal-health-load-error")).toBeNull();
-      expect(document.querySelectorAll("[data-signal-row]").length).toBe(4);
+      expect(document.querySelectorAll("[data-signal-row]").length).toBe(5);
     } finally {
       errSpy.mockRestore();
     }

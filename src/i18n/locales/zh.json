@@ -243,6 +243,7 @@
       "ok": "正常 · 最近事件 {{ago}}",
       "noActiveSessions": "暂无活跃会话，等待事件",
       "trustNeeded": "需在 {{tool}} 终端输入 /hooks 并信任 MAM 条目（一次性）",
+      "zeroEvents": "钩子通道零事件，请检查 {{tool}} 是否已正确注册并触发",
       "copyCommand": "复制命令",
       "copied": "已复制 /hooks",
       "copyFailed": "复制失败",

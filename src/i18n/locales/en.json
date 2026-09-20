@@ -243,6 +243,7 @@
       "ok": "OK · last event {{ago}}",
       "noActiveSessions": "No active sessions, waiting for events",
       "trustNeeded": "Enter /hooks in the {{tool}} terminal and trust the MAM entry (one-time)",
+      "zeroEvents": "Zero hook events, check that {{tool}} is registered and firing correctly",
       "copyCommand": "Copy command",
       "copied": "Copied /hooks",
       "copyFailed": "Copy failed",

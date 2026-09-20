@@ -810,12 +810,20 @@ fn codex_notice_should_enqueue(shown: Option<&str>) -> bool {
     shown != Some("true")
 }
 
+/// conn 级内层（对齐 dao::settings 的 *_conn 模式）：KV 读写在同一连接内完成，
+/// 内存库单测走真实路径——防键名/条件改错后测试仍绿；生产壳持全局 DB 锁传入
+fn enqueue_codex_trust_notice_conn(conn: &rusqlite::Connection) {
+    if codex_notice_should_enqueue(
+        crate::database::dao::settings::get_setting_conn(conn, CODEX_NOTICE_SHOWN_KEY).as_deref(),
+    ) {
+        crate::database::dao::settings::set_setting_conn(conn, CODEX_NOTICE_PENDING_KEY, "true");
+    }
+}
+
 /// codex 注册成功路径调用：未示过 → 置 pending（登记「启动后要示一次」）
 fn enqueue_codex_trust_notice() {
-    if codex_notice_should_enqueue(crate::database::get_setting(CODEX_NOTICE_SHOWN_KEY).as_deref())
-    {
-        crate::database::set_setting(CODEX_NOTICE_PENDING_KEY, "true");
-    }
+    let conn = crate::database::connection::DB.lock().unwrap();
+    enqueue_codex_trust_notice_conn(&conn);
 }
 
 /// setup 期消费（AppHandle 已得）：pending 在场 → 发一次系统通知 → 落 shown。
@@ -2816,14 +2824,13 @@ mod signal_health_tests {
     }
 
     /// codex 一次性通知 KV：未示过 → 置 pending；示过（shown=true）→ 永不再置
-    ///（内存库写断言，一次性语义）
+    ///（内存库写断言，一次性语义）。走真实 enqueue_codex_trust_notice_conn 路径
+    ///（*_conn 模式）——键名/条件改错时本测试同步变红，不复刻逻辑
     #[test]
     fn codex_notice_kv_is_one_shot() {
         let conn = mem_conn();
         // 首次注册：未示过（键缺省）→ 置 pending
-        if codex_notice_should_enqueue(get_setting_conn(&conn, CODEX_NOTICE_SHOWN_KEY).as_deref()) {
-            set_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY, "true");
-        }
+        enqueue_codex_trust_notice_conn(&conn);
         assert_eq!(
             get_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY).as_deref(),
             Some("true"),
@@ -2833,9 +2840,7 @@ mod signal_health_tests {
         set_setting_conn(&conn, CODEX_NOTICE_SHOWN_KEY, "true");
         set_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY, "false");
         // 后续再次注册（重启/重注册）：已示过 → 不得再置 pending
-        if codex_notice_should_enqueue(get_setting_conn(&conn, CODEX_NOTICE_SHOWN_KEY).as_deref()) {
-            set_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY, "true");
-        }
+        enqueue_codex_trust_notice_conn(&conn);
         assert_eq!(
             get_setting_conn(&conn, CODEX_NOTICE_PENDING_KEY).as_deref(),
             Some("false"),
