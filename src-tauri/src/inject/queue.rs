@@ -1140,7 +1140,7 @@ mod tests {
 
         assert!(
             matches!(flush_one(&st, "s-sc", false), FlushOutcome::Failed(_)),
-            "注入失败必须返回 Failed（P1-4 四态上抛）"
+            "注入失败必须返回 Failed（P1-4 五态上抛）"
         );
         assert!(
             probe_calls.lock().unwrap().is_empty(),
@@ -1245,7 +1245,7 @@ mod tests {
         );
     }
 
-    // ==== 队列生命周期（裁决 19 停服冻结 + P2-5 对账/兜底 + P1-4 四态上抛） ====
+    // ==== 队列生命周期（裁决 19 停服冻结 + P2-5 对账/兜底 + P1-4 五态上抛） ====
 
     /// 裁决 19（停止远程 = 冻结队列）：spawn_flush_loop 后 FLUSH_LOOP_HANDLE 槽 live；
     /// abort_flush_loop 后槽空；重复 abort 幂等无害（槽空 take 得 None）。

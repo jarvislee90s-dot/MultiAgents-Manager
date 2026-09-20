@@ -176,7 +176,10 @@ fn screen_probe(content: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ScreenRecovery {
     /// 屏读**无滞留草稿**：注入的字不在输入行上 = 已被 TUI 收进内部队列
-    /// （busy TUI 消费草稿的常态；屏读 Err 同归本格——无滞留证据，保守不补键）
+    /// （busy TUI 消费草稿的常态；屏读 Err 同归本格——无滞留证据，保守不补键）。
+    /// **残差风险对称披露**：真滞留 + 屏读失败会误归本格 → 误回 Submitted 劝退
+    /// 重试、消息可能滞留输入行——但方向上仍优于旧口径（Failed + 重试的不可撤
+    /// 双发）；两害取其轻，判据锚定「无滞留证据不补键、不诬失败」
     NotStuck,
     /// 滞留 + 补回车成功 + 复查窗内戳命中：补键提交成功，已确认落盘
     Recovered,
@@ -191,18 +194,23 @@ pub(crate) enum ScreenRecovery {
     Unavailable,
 }
 
-/// 直发确认三态结论（D7/T3，[`await_direct_receipt`] 的产出，`queue::try_flush_with`
-/// 按此映射 [`super::queue::FlushOutcome`]：Confirmed→Sent / Submitted→Submitted /
-/// Failed→Failed）。
+/// flush 内核三态回执（D7/T3：**注入失败 / 插队 / 直发确认三路共用**，
+/// `queue::try_flush_with` 按此映射 [`super::queue::FlushOutcome`]：Confirmed→Sent /
+/// Submitted→Submitted / Failed→Failed）。`Submitted` 仅直发确认分诊产出；另两态
+/// 的构造点与载荷随路径而异（见各变体注）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DirectReceipt {
-    /// 戳命中（轮询窗内，或屏读回查补回车后 3s 窗内）= 已确认落盘（→ Sent）
+    /// 确认通过（→ Sent）。**跨路径载荷差异**：直发 = 戳命中（轮询窗内，或屏读
+    /// 回查补回车后 3s 窗内）= 已确认落盘；插队 = 占用排空 / best-effort（无戳
+    /// 可查，屏读只作诊断不 Gate）。
     Confirmed,
-    /// 注入 Ok + 戳未中 + 屏读无滞留草稿 = **已投递未确认**（中性）：消息已被
-    /// TUI 收进内部队列，agent 空闲后处理——不失败、不提供重试（重试 = 双发，
-    /// 且 TUI 那份无法撤回；验收问题 #5 的「假失败诱导重试」根因即此态被误判）
+    /// 注入 Ok + 戳未中 + 屏读无滞留草稿 = **已投递未确认**（中性，仅直发分诊
+    /// 产出）：消息已被 TUI 收进内部队列，agent 空闲后处理——不失败、不提供重试
+    /// （重试 = 双发，且 TUI 那份无法撤回；验收问题 #5 的「假失败诱导重试」根因
+    /// 即此态被误判）
     Submitted,
-    /// 真失败（携带回执文案：防重警示 ± 补按回车失败原因，重试由用户判断）
+    /// 失败（载荷随路径而异）：直发确认 = 防重警示文案 ± 补按回车失败原因（真
+    /// 失败，重试由用户判断）；注入失败 = 注入器错误原文（裸注入错误，短路确认）。
     Failed(String),
 }
 

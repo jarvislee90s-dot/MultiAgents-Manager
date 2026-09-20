@@ -766,8 +766,8 @@ pub async fn session_send(
     //    防同会话并发双投）。守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush
     //    循环事件臂同款，F1 断连双投修复）——handler 断连（弱网/隧道掐断慢投递）不再
     //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位。
-    //    D6：queueOnly=true 时整个分支不触达（in-flight 守卫取用、四态回执映射、
-    //    send/failed 直发审计全部跳过），直接落 ⑦ 入队路径
+    //    D6：queueOnly=true 时整个分支不触达（in-flight 守卫取用、五态回执映射、
+    //    send/unconfirmed/failed 直发审计全部跳过），直接落 ⑦ 入队路径
     if !queue_only && crate::inject::queue::is_input_ready(&session.status) {
         let flush_st = st.clone();
         let flush_sid = sid.clone();
