@@ -1328,8 +1328,11 @@ pub async fn session_attachment(
 // 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写/读路径）：
 //   GET  /session-approve-options?session_id= → 200 {available, options:[{id,label}],
 //        verifiedWith, currentVersion(…|null), drift, reason(…|null)}
-//        available = status==Waiting && 映射表有该工具映射 && detect 命中
-//        （数据同源快照判定）；工具无映射 / 未命中 / 非 Waiting → available=false
+//        available = **（status==Waiting ∨ 审批等待标记存在）** && 映射表有该工具
+//        映射 && （标记路径跳过 detect；无标记才走 detect 命中）（T4 口径：钩子
+//        事件落的等待标记是一等信号——审批等待期文件推导常判 processing，提示文本
+//        又不落会话文件，标记使 macOS 红卡可达；标记路径直接出全选项）
+//        ；工具无映射 / 未命中 / 非 Waiting 且无标记 → available=false
 //        （options 空）；严格档（M9R Task 10）：映射 verified_with==probe-pending →
 //        available=false + reason=降级文案（选项空，前端只渲染提示条）。
 //        options 只含 id+label——**键位不外泄给 UI**。
@@ -1338,6 +1341,8 @@ pub async fn session_attachment(
 //        成因三态：无该工具映射 / optionId 无对应项 / probe-pending 严格档——
 //        未取证=映射缺失，M9R Task 10）
 //        | 200 failed{error}（注入失败 / in-flight 忙，可重试回执）。
+//        等待门与 GET 同口径：**Waiting ∨ 标记**（T4）；无标记 + 非 Waiting 仍
+//        409，标记不扩大放行面（回归锁 approve_without_mark_still_409_on_processing）。
 // 锁纪律（M4）：KV 映射读取并入 `st.store.with` 短临界区（load_mappings_conn 直用
 // 传入 conn、不自取锁，锁内只 SQL）；session_source 调用与 store.with **顺序执行不
 // 嵌套**——生产 session_source 内部会锁同一把全局 DB，嵌套即自锁死锁。

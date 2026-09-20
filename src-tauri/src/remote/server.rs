@@ -4822,7 +4822,9 @@ mod tests {
             body.contains("\"path\"") && body.contains("\"size\":9"),
             "{body}"
         );
-        // 落盘 = <cwd>/.mam-attachments/<session>/，文件名尾段为消毒名
+        // 落盘 = <cwd>/.mam-attachments/<session>/，**文件名保真**（5dc540a 用户
+        // 裁决：移除纳秒+内容哈希前缀，保留原始名——文件池按名搜索、agent 识名
+        // 依赖原名；仅同名才追加 (1)(2) 序号。本断言系 5dc540a 漏改，F4 订正）
         let dir = proj.join(".mam-attachments").join("sess_att");
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(entries.len(), 1);
@@ -4832,7 +4834,7 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .into_owned();
-        assert!(name.ends_with("-shot.png"), "{name}");
+        assert_eq!(name, "shot.png", "原始文件名保真，无前缀污染");
         // git 本地排除：首份写入即幂等追加；二次上传不重复
         let exclude =
             std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();

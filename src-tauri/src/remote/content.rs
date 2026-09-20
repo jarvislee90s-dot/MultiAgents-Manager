@@ -2265,10 +2265,11 @@ mod tests {
     #[test]
     fn codex_custom_tool_call_extracts_files() {
         // T5（D5）：apply_patch（custom_tool_call）从整条丢弃改为头行提取上板——
-        // md×3/svg×1 出路径、PNG 照旧（view_image 结构化引用）、串内路径不误收
+        // md×3（新增×2 + 更新×1）/svg×1 出路径、PNG 照旧（view_image 结构化引用）、
+        // 串内路径不误收。F5③ 夹具补至 md×3（对齐真实 patch 形态：多文件批量变更）
         // patch 用 JSON 转义形态（字面 \n）——拼进 rollout 行后才是合法 JSON 字符串，
         // serde 解析回真实换行（parse_patch_header 走 lines() 逐行吃）
-        let patch = "*** Begin Patch\\n*** Add File: notes/a.md\\n+# 计划\\n*** Add File: notes/b.svg\\n+<svg/>\\n*** Update File: docs/c.md\\n@@\\n*** End Patch";
+        let patch = "*** Begin Patch\\n*** Add File: notes/a.md\\n+# 计划\\n*** Add File: notes/b.md\\n+## 附录\\n*** Add File: notes/b.svg\\n+<svg/>\\n*** Update File: docs/c.md\\n@@\\n*** End Patch";
         let lines = vec![
             format!(
                 r#"{{"timestamp":"2026-09-06T05:41:00.000Z","type":"response_item","payload":{{"type":"custom_tool_call","id":"ctc_1","name":"apply_patch","input":"{patch}"}}}}"#
@@ -2282,14 +2283,14 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].kind, "tool-call");
         assert_eq!(msgs[0].tool_name.as_deref(), Some("apply_patch"));
-        assert!(msgs[0].content.contains("notes/a.md"));
-        assert!(msgs[0].content.contains("notes/b.svg"));
-        assert!(msgs[0].content.contains("docs/c.md"));
+        for p in ["notes/a.md", "notes/b.md", "notes/b.svg", "docs/c.md"] {
+            assert!(msgs[0].content.contains(p), "content 应含 {p}");
+        }
         let args = msgs[0]
             .tool_args
             .as_deref()
             .expect("args 应为 changes JSON");
-        for p in ["notes/a.md", "notes/b.svg", "docs/c.md"] {
+        for p in ["notes/a.md", "notes/b.md", "notes/b.svg", "docs/c.md"] {
             assert!(args.contains(p), "args 应含 {p}");
         }
         // files.rs PATH_KEYS 吸收（origin=tool_write）：纯收集函数对 args 的回收断言
@@ -2297,8 +2298,14 @@ mod tests {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         crate::remote::files::collect_path_values(&v, &mut out, &mut seen);
-        assert_eq!(out.len(), 3, "PATH_KEYS 按路径吸收三条变更");
+        assert_eq!(out.len(), 4, "PATH_KEYS 按路径吸收四条变更");
         assert!(out.iter().all(|p| !p.ends_with(".png")));
+        // md×3 计数（F5③ 口径锁：三条 md 变更全部上板，无去重误并）
+        assert_eq!(
+            out.iter().filter(|p| p.ends_with(".md")).count(),
+            3,
+            "md 变更应为 3 条：{out:?}"
+        );
         // PNG 照旧 + 串内不误收
         assert!(msgs[1].tool_args.as_deref().unwrap().contains("img.png"));
         assert!(msgs[2].tool_args.as_deref().unwrap().contains("src/lib.rs"));
