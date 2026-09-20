@@ -259,9 +259,7 @@ export function useNotification() {
         clearGreenTimer(session.id);
         const timer = setTimeout(() => {
           greenTimers.current.delete(session.id);
-          const latest = useSessionStore
-            .getState()
-            .sessions.find((s) => s.id === session.id);
+          const latest = useSessionStore.getState().sessions.find((s) => s.id === session.id);
           if (!latest || statusToColor(latest.status) !== "green") return;
           const notified = lastNotified.current.get(session.id);
           if (notified && notified.color === "green" && Date.now() - notified.at < 5000) {

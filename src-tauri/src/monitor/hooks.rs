@@ -158,10 +158,35 @@ fn remove_legacy_camel_key(
     }
 }
 
-/// 为指定工具注册 Hook
-/// adapter_name: 工具名称, config_path: 配置文件路径, events: 事件列表, event_case: 大小写格式
+/// 启动核验判据（纯函数，跨平台可测）：command 在场 **且** 全部期望事件键按
+/// 该工具的键形态在场（PascalCase 工具查 PascalCase 键）。键形态核验是 F3
+/// 存量迁移的可达性前提——command 在旧/新注册间完全相同，只有键大小写不同。
+fn hooks_file_verified(
+    content: &str,
+    expected_cmd: &str,
+    events: &[&str],
+    is_pascal_case: bool,
+) -> bool {
+    if !content.contains(expected_cmd) {
+        return false;
+    }
+    events.iter().all(|e| {
+        let key = if is_pascal_case {
+            (*e).to_string()
+        } else {
+            let mut chars = e.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        };
+        content.contains(&format!("\"{key}\""))
+    })
+}
+
+/// 为指定工具注册 Hook（生产入口：脚本落盘 + 命令构造 + 核心）
 pub fn register_hooks_for_tool(
-    config_path: &PathBuf,
+    config_path: &std::path::Path,
     events: &[&str],
     is_pascal_case: bool,
 ) -> Result<(), String> {
@@ -170,7 +195,25 @@ pub fn register_hooks_for_tool(
 
     // Windows 无法直接执行 .sh，hook 命令经 bash 调用（Git Bash 随开发/使用环境存在）
     let command_str = hook_command_for(&script_path);
+    register_hooks_in_file(
+        config_path,
+        events,
+        is_pascal_case,
+        &script_path_str,
+        &command_str,
+    )
+    .map(|_| ())
+}
 
+/// 注册核心（tempfile 可测缝：脚本路径/命令显式注入，零接触真实 ~/.mam）。
+/// 返回 (新增条目数, 迁移条目数)。
+fn register_hooks_in_file(
+    config_path: &std::path::Path,
+    events: &[&str],
+    is_pascal_case: bool,
+    script_path_str: &str,
+    command_str: &str,
+) -> Result<(usize, usize), String> {
     // 读取现有配置（不存在则创建空对象）
     let existing = fs::read_to_string(config_path).unwrap_or_else(|_| "{}".to_string());
     let mut config: serde_json::Value =
@@ -209,10 +252,12 @@ pub fn register_hooks_for_tool(
         // F3 旧键迁移（仅 PascalCase 注册形态；codex hook_event_case CamelCase→
         // PascalCase 存量修正，2026-09-20）：旧注册把 MAM 条目写在首字母小写键下
         // （如 "stop"），codex 0.155.x 只认 PascalCase 键——旧键永不触发但残留
-        // 文件。移除判据与计数见 [`remove_legacy_camel_key`]。
-        if is_pascal_case && remove_legacy_camel_key(hooks_obj, event, &script_path_str) {
-            migrated_this_event += 1;
-        }
+        // 文件。移除判据见 [`remove_legacy_camel_key`]。
+        // 跨键移除只计入迁移日志（migrated），**不参与下方 skip 守卫**：旧键条目
+        // 已删除、新键可能尚不存在（纯存量 camelCase 文件），必须走下方追加建键
+        // ——共用计数会把纯存量文件迁成空 {"hooks":{}}（复评 P1-1，2026-09-20）
+        let legacy_removed =
+            is_pascal_case && remove_legacy_camel_key(hooks_obj, event, script_path_str);
         if let Some(arr) = hooks_obj
             .get_mut(&event_name)
             .and_then(|v| v.as_array_mut())
@@ -233,7 +278,7 @@ pub fn register_hooks_for_tool(
                     // 正斜杠形态的历史条目（如第四轮 1f8fcf4 产出的无引号形态），
                     // 它们会因识别不出而被当作用户条目跳过 → 坏条目残留 + 新条目追加
                     let fwd_path = script_path_str.replace('\\', "/");
-                    if !c.contains(&script_path_str) && !c.contains(&fwd_path) {
+                    if !c.contains(script_path_str) && !c.contains(&fwd_path) {
                         continue; // 用户自己的 hook 条目，不动
                     }
                     if c == command_str {
@@ -245,7 +290,7 @@ pub fn register_hooks_for_tool(
                 }
             }
         }
-        migrated += migrated_this_event;
+        migrated += migrated_this_event + usize::from(legacy_removed);
         // 已注册或本轮完成原地迁移：条目已等于当前命令，再追加会产生同命令重复
         // 条目（同事件双触发、双写事件），直接进入下一事件；持久化由 migrated 计数保证
         if already || migrated_this_event > 0 {
@@ -293,7 +338,7 @@ pub fn register_hooks_for_tool(
         }
     }
 
-    Ok(())
+    Ok((added, migrated))
 }
 
 /// 读取所有 Hook 事件文件，返回 session_id → 事件数据的映射（键由脚本侧
@@ -366,13 +411,16 @@ pub fn register_all_hooks() {
         };
         let tool_key = format!("hooks_registered_{}", adapter.agent_type().tool_id());
 
-        // 启动核验：配置文件实际引用**当前脚本绝对路径**且脚本存在才跳过。
-        // 只查 "status-hook.sh" 文件名子串会把旧位置的历史注册误判为已核验、
-        // 永不重写（2026-09-11 实机验收发现 2 弱点；codex 0.149.1 hook 链路
-        // 不执行是 codex 侧问题，此处保证 MAM 侧配置口径始终正确）
+        let events = adapter.hook_events();
+        let is_pascal = matches!(adapter.hook_event_case(), HookEventCase::PascalCase);
+        // 启动核验：配置文件实际引用**当前脚本绝对路径**、脚本存在、且**事件键
+        // 形态在场**（F3 键形态核验，2026-09-20）才跳过。只查 command 不够——
+        // 旧 camelCase 注册的 command 与当前完全相同（只有事件键大小写不同），
+        // 会把存量文件误判已核验、迁移永不触达（复评 P1-2）；此处保证 MAM 侧
+        // 配置口径（含键形态）始终正确
         let expected_cmd = hook_command_for(&script_path);
         let verified = fs::read_to_string(&config_path)
-            .map(|c| c.contains(&expected_cmd))
+            .map(|c| hooks_file_verified(&c, &expected_cmd, &events, is_pascal))
             .unwrap_or(false)
             && script_path.exists();
         if verified {
@@ -381,8 +429,6 @@ pub fn register_all_hooks() {
             continue;
         }
 
-        let events = adapter.hook_events();
-        let is_pascal = matches!(adapter.hook_event_case(), HookEventCase::PascalCase);
         match register_hooks_for_tool(&config_path, &events, is_pascal) {
             Ok(()) => {
                 info!("Hook 注册成功: {} → {:?}", adapter.name(), config_path);
@@ -524,6 +570,75 @@ mod legacy_camel_key_tests {
             "/x/status-hook.sh"
         ));
         assert!(obj2.get("stop").is_some());
+    }
+
+    /// 复评 P1-1 回归锁（2026-09-20）：纯存量 camelCase 文件（条目 command 与
+    /// 当前完全一致、只有键是旧形态）必须被完整迁移为 PascalCase 键——旧实现
+    /// 跨键移除计数误触 skip 守卫，六事件走完后落盘 {"hooks":{}}（迁空）。
+    #[test]
+    fn legacy_camel_full_migration_rebuilds_pascal_keys() {
+        use super::register_hooks_in_file;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("hooks.json");
+        let marker = "/fake-mam/hooks/status-hook.sh";
+        let cmd = format!("bash {marker}");
+        let legacy = serde_json::json!({"hooks": {
+            "stop": [our_entry(&cmd)],
+            "preToolUse": [our_entry(&cmd)],
+        }});
+        std::fs::write(&cfg, legacy.to_string()).unwrap();
+
+        register_hooks_in_file(&cfg, &["Stop", "PreToolUse"], true, marker, &cmd).unwrap();
+
+        let out: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let hooks = out.get("hooks").unwrap();
+        assert!(
+            hooks.get("Stop").is_some(),
+            "PascalCase Stop 必须重建: {out}"
+        );
+        assert!(
+            hooks.get("PreToolUse").is_some(),
+            "PascalCase PreToolUse 必须重建: {out}"
+        );
+        assert!(
+            hooks.get("stop").is_none() && hooks.get("preToolUse").is_none(),
+            "旧 camelCase 键应移除: {out}"
+        );
+        assert!(
+            std::fs::read_to_string(&cfg).unwrap().matches(&cmd).count() >= 2,
+            "重建条目须携带当前命令"
+        );
+    }
+
+    /// 复评 P1-2 回归锁（2026-09-20）：command 在场但事件键是旧 camelCase 形态
+    /// → 未核验（须走注册迁移）；全期望键按形态在场 → 才核验跳过。
+    #[test]
+    fn hooks_file_verified_requires_event_key_form() {
+        use super::hooks_file_verified;
+        let cmd = "bash /x/status-hook.sh";
+        let legacy = r#"{"hooks":{"stop":[{"hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
+        let modern = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
+        // PascalCase 工具 + 旧 camel 键：command 在场也不得核验（迁移入口保持可达）
+        assert!(!hooks_file_verified(legacy, cmd, &["Stop"], true));
+        // 全期望键在场：核验
+        assert!(hooks_file_verified(modern, cmd, &["Stop"], true));
+        // 多事件任缺一键：不核验
+        assert!(!hooks_file_verified(
+            modern,
+            cmd,
+            &["Stop", "PreToolUse"],
+            true
+        ));
+        // camelCase 形态工具按 camel 键核验（形态匹配即核验）
+        assert!(hooks_file_verified(legacy, cmd, &["stop"], false));
+        // command 缺席：不核验
+        assert!(!hooks_file_verified(
+            modern,
+            "bash /other.sh",
+            &["Stop"],
+            true
+        ));
     }
 }
 
