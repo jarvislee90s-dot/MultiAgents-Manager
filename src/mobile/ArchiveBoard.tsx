@@ -5,18 +5,11 @@ import {
   type ArchivedPayload,
   type ArchivedSession,
 } from "./api";
-import { filterArchivedByProject, filterArchivedByTool } from "./archive-logic";
-// 复用既有导出（勿自造）：TOOL_LABELS 工具中文 / formatRelativeTime 相对时间
-import { TOOL_LABELS, formatRelativeTime } from "./board-logic";
+import { chipLabel, filterArchivedByProject, filterArchivedByTool } from "./archive-logic";
+// 复用既有导出（勿自造）：formatRelativeTime 相对时间
+import { formatRelativeTime } from "./board-logic";
 
 type Days = 1 | 3 | 7;
-
-/** 工具 chips 文案：全部 / 工具中文（TOOL_LABELS，Record<AgentType,string> 以
- *  string 索引安全读——归档 agentType 是 string） */
-function chipLabel(t: string): string {
-  if (t === "all") return "全部";
-  return (TOOL_LABELS as Record<string, string>)[t] ?? t;
-}
 
 /** 历史会话页（spec §7.2）：懒加载（进页 days=1，切天数重拉，页内不轮询——
  *  死数据静态）；双维筛选（工具 chips × 项目下拉）独立于活板选择；卡片无按钮
@@ -24,9 +17,12 @@ function chipLabel(t: string): string {
 export default function ArchiveBoard({
   onBack,
   onOpenCard,
+  onUnpaired,
 }: {
   onBack: () => void;
   onOpenCard: (s: ArchivedSession) => void;
+  /** 403（配对态在历史页内过期）→ 透传 App 置 paired=false 回配对页（Board 同款） */
+  onUnpaired: () => void;
 }) {
   const [days, setDays] = useState<Days>(1);
   const [data, setData] = useState<ArchivedPayload | null>(null);
@@ -41,16 +37,24 @@ export default function ArchiveBoard({
   // 挂载时取一次快照。历史页是死数据静态页（页内不轮询），时长冻结在进页时刻即可
   const [now] = useState(() => Date.now());
 
-  const load = useCallback(async (d: Days) => {
-    setError(false);
-    try {
-      const p = await fetchArchivedSessions(d);
-      if (p === null) return; // 403：App 层配对态处理，此处静默
-      setData(p);
-    } catch {
-      setError(true);
-    }
-  }, []);
+  const load = useCallback(
+    async (d: Days) => {
+      setError(false);
+      try {
+        const p = await fetchArchivedSessions(d);
+        if (p === null) {
+          // 403：配对态在本页过期 → 透传 App 回配对页（评审 Minor：原静默吞掉，
+          // 用户停在历史页假活状态）
+          onUnpaired();
+          return;
+        }
+        setData(p);
+      } catch {
+        setError(true);
+      }
+    },
+    [onUnpaired],
+  );
 
   useEffect(() => {
     void load(days);
@@ -173,13 +177,20 @@ export default function ArchiveBoard({
           </button>
         </div>
       )}
+      {!error && data === null && (
+        <p className="py-8 text-center text-sm text-slate-400">加载中…</p>
+      )}
       {!error && data && rows.length === 0 && (
         <p className="py-8 text-center text-sm text-slate-400">
-          {days === 7
-            ? "暂无归档记录"
-            : days === 3
-              ? "最近 3 天没有非活跃会话，可试 7 天"
-              : "最近 1 天没有非活跃会话，可试 3 天 / 7 天"}
+          {tool === "all" && project === "all"
+            ? days === 7
+              ? "暂无归档记录"
+              : days === 3
+                ? "最近 3 天没有非活跃会话，可试 7 天"
+                : "最近 1 天没有非活跃会话，可试 3 天 / 7 天"
+            : // 有筛选残留（常见：选定项目后切小窗，新窗口不含该项目）——扩窗文案
+              // 会误导（扩了也没有），改显筛选语义（评审 Minor）
+              "当前筛选无匹配会话"}
         </p>
       )}
       <div className="flex flex-col gap-2 pb-8">

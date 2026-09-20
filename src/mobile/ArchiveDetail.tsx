@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  ApiError,
   deleteArchivedSession,
   fetchSessionMessages,
   sessionOpen,
@@ -8,7 +9,18 @@ import {
 } from "./api";
 // 复用既有导出（勿自造）：STATUS_LABELS 状态中文 / formatRelativeTime 相对时间
 import { STATUS_LABELS, formatRelativeTime } from "./board-logic";
-import { resumeUnavailableReason } from "./resume-gate";
+import { chipLabel } from "./archive-logic";
+import { RESUME_UNSUPPORTED_REASON, resumeUnavailableReason } from "./resume-gate";
+
+/** 打开失败文案分诊（评审 Minor：归档语境哨兵引导）。哨兵串与后端 api.rs 的
+ *  Err 哨兵对应（404 载荷 data.error）：no_session=活/档双未命中（归档记录可能
+ *  已被移除/清空，引导刷新）；no_resume_command=工具未入命令表（复用 resume-gate
+ *  门的文案）；其余透传后端原文。 */
+function openFailureCopy(error: string | null | undefined): string {
+  if (error === "no_session") return "归档记录已不存在，请刷新列表";
+  if (error === "no_resume_command") return `打开失败：${RESUME_UNSUPPORTED_REASON}`;
+  return `打开失败：${error ?? "未知错误"}`;
+}
 
 /** 归档详情页（spec §7.3）：只读消息（/session-messages 按 id 直读文件，零后端改动）
  *  + 唯一动作「在桌面端打开」（复用 sessionOpen）+ 次要动作「从归档移除」。 */
@@ -62,9 +74,12 @@ export default function ArchiveDetail({
         onActivated(); // 乐观回看板：活板 3s 内出卡，归档条目下次拉取自然消失
         return;
       }
-      setOpenError(`打开失败：${r.error ?? "未知错误"}`);
+      setOpenError(openFailureCopy(r.error));
     } catch (e) {
-      setOpenError(`打开失败：${String(e)}`);
+      // 404 哨兵在响应体 data.error（api.ts 解析进 ApiError.data）——命中哨兵走
+      // 归档语境文案，其余（网络异常等）维持原 String(e) 形态
+      const code = e instanceof ApiError ? (e.data?.error as string | undefined) : undefined;
+      setOpenError(code !== undefined ? openFailureCopy(code) : `打开失败：${String(e)}`);
     } finally {
       setOpening(false);
     }
@@ -84,7 +99,7 @@ export default function ArchiveDetail({
         <h1 className="text-lg font-semibold">{session.projectName}</h1>
       </header>
       <p className="mt-1 text-xs text-slate-500">
-        {session.agentType} · {session.projectPath} · {statusLabel} ·{" "}
+        {chipLabel(session.agentType)} · {session.projectPath} · {statusLabel} ·{" "}
         {formatRelativeTime(session.lastSeenAt, now)}结束
       </p>
 

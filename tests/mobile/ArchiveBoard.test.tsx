@@ -37,7 +37,7 @@ describe("ArchiveBoard：历史页", () => {
       calls.push(String(i));
       return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
     }));
-    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} />);
+    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} onUnpaired={() => {}} />);
     // selector 收窄到卡片 span：项目下拉 <option> 同文本，findByText 多匹配会抛错
     expect(await screen.findByText("proj-1", { selector: "span" })).toBeTruthy();
     expect(calls[0]).toContain("days=1");
@@ -50,7 +50,7 @@ describe("ArchiveBoard：历史页", () => {
       calls.push(String(i));
       return new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
     }));
-    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} />);
+    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} onUnpaired={() => {}} />);
     await screen.findByText("proj-1", { selector: "span" });
     fireEvent.click(screen.getByTestId("archive-days-7"));
     await waitFor(() => expect(calls.some((c) => c.includes("days=7"))).toBe(true));
@@ -58,7 +58,32 @@ describe("ArchiveBoard：历史页", () => {
 
   it("失败态显示重试按钮；点击重发", async () => {
     installFetch(false);
-    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} />);
+    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} onUnpaired={() => {}} />);
     expect(await screen.findByTestId("archive-retry")).toBeTruthy();
+  });
+
+  it("首载中显示「加载中…」", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {}))); // 永不 resolve
+    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} onUnpaired={() => {}} />);
+    expect(screen.getByText("加载中…")).toBeTruthy();
+  });
+
+  it("有筛选时空态改显「当前筛选无匹配会话」，不误导扩窗", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (i: RequestInfo | URL) => {
+      const url = String(i);
+      const empty = url.includes("days=7");
+      return new Response(
+        JSON.stringify(empty ? { archived: [], projects: [] } : payload),
+        { headers: { "content-type": "application/json" } },
+      );
+    }));
+    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} onUnpaired={() => {}} />);
+    expect(await screen.findByText("proj-1", { selector: "span" })).toBeTruthy();
+    // 真实路径构造「有筛选 + 空」组合：选定项目后切小窗，新窗口不含该项目
+    fireEvent.change(screen.getByLabelText("按项目筛选"), { target: { value: "proj-1" } });
+    fireEvent.click(screen.getByTestId("archive-days-7"));
+    expect(await screen.findByText("当前筛选无匹配会话")).toBeTruthy();
+    expect(screen.queryByText(/没有非活跃会话/)).toBeNull();
+    expect(screen.queryByText("暂无归档记录")).toBeNull();
   });
 });

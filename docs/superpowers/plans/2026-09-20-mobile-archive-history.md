@@ -1773,6 +1773,7 @@ git commit -m "docs(archive): 实机回传清单追加 E 段——历史会话�
 ## 计划自审记录（写完即查，问题就地修）
 
 1. **Spec 覆盖**：§3 裁决 1→Task 1/2（登记制）；2→Task 6 Step 6（按钮删除）；3→Task 6（仅移动端）；4→Task 3 Step 4（days 夹取）+ Task 6 Step 3（进页拉取/切天数重拉/手动刷新/无轮询）；5→Task 6 Step 6（独立页路由）；6→Task 6 Step 3/5（卡片无按钮、详情页唯一动作）；7→Task 5/6（项目下拉仅历史页，活板 Board 零改动）；8→Task 3 Step 4（DELETE 端点）+ Task 6（两个移除入口）。§5 表/守卫/不登记项→Task 1；§6.1→Task 3；§6.2→Task 4；§6.3 零改动→Task 6 Step 5 复用 fetchSessionMessages（畸形 404→「内容暂不可读」降级，ArchiveDetail contentError 分支）；§6.4 扫描零改动→Task 2 注释锚定；§7 四小节→Task 6；§8 边界 1/2/3/5/8 由数据流天然覆盖、4 明确非目标、6/7 由 Task 6 错误态覆盖；§9→各任务测试 + Task 7 E 段；§10 切分→Task 1–7 一一对应。**无缺口**。
+   - **复核后记（2026-09-20 收官批补记）**：上句「无缺口」与事实有出入——§9 的「回归锁：登记写入不改变扫描产物（旁路消费者断言）」未落为独立测试：`register_sessions(&all_sessions)` 以共享不可变借用消费产物，产物不变由编译期借用规则保证（adapter/mod.rs 挂点注释已陈述该口径），登记调用在 `SessionsResponse` 构造之前且无返回值消费，无行为路径可改变产物；独立「逐字节一致」断言测试在借用检查下无从构造，故以编译期保证 + 注释锚定替代测试锁。
 2. **占位符扫描**：无 TBD/TODO；Task 3 Step 1 构造点补齐以 grep 锚点给出（数量由既有代码决定，属机械重复）。
 3. **类型一致性**：`SessionArchiveRow` 九字段在 Task 1/3/4 三处使用一致；`ArchivedSession` 七字段 Task 5 定义与 Task 6 测试/组件一致；`archive_source`/`archive_delete` 签名 Task 3 定义、Task 4 消费一致；`filterArchived*` Task 5 定义与 Task 6 消费一致；`onActivated`/`onOpenCard`/`onBack` props 两组件与 App 接线一致。
 

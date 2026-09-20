@@ -9,6 +9,8 @@ export const RESUME_SUPPORTED_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /** 禁用原因（中文内联，移动端无 i18n 契约）：null = 可用 */
+export const RESUME_UNSUPPORTED_REASON = "该工具 resume 命令待查证，暂不支持一键打开";
+
 export function resumeUnavailableReason(session: {
   projectPath?: string | null;
   agentType: string;
@@ -17,7 +19,7 @@ export function resumeUnavailableReason(session: {
     return "该会话没有项目目录信息，无法在电脑上打开";
   }
   if (!RESUME_SUPPORTED_TOOLS.has(session.agentType)) {
-    return "该工具 resume 命令待查证，暂不支持一键打开";
+    return RESUME_UNSUPPORTED_REASON;
   }
   return null;
 }

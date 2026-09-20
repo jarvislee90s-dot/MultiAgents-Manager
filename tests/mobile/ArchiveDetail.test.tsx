@@ -57,10 +57,32 @@ describe("ArchiveDetail：归档详情与激活", () => {
   it("failed 回执 → 错误文案上屏、不回调（可重试）", async () => {
     const activated = vi.fn();
     installFetch({ sessionOpen: { status: "failed", error: "终端启动失败（模拟）" } });
-    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={activated} />);
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
     fireEvent.click(screen.getByTestId("session-open"));
     expect(await screen.findByTestId("session-open-error")).toBeTruthy();
     expect(activated).not.toHaveBeenCalled();
+  });
+
+  it("打开失败哨兵分诊：no_session（404 载荷）→ 归档不存在文案", async () => {
+    installFetch({ sessionOpen: { error: "no_session" }, sessionOpenStatus: 404 });
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    fireEvent.click(screen.getByTestId("session-open"));
+    expect(await screen.findByText("归档记录已不存在，请刷新列表")).toBeTruthy();
+  });
+
+  it("打开失败哨兵分诊：no_resume_command（404 载荷）→ 复用工具不支持文案", async () => {
+    installFetch({ sessionOpen: { error: "no_resume_command" }, sessionOpenStatus: 404 });
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    fireEvent.click(screen.getByTestId("session-open"));
+    expect(
+      await screen.findByText("打开失败：该工具 resume 命令待查证，暂不支持一键打开"),
+    ).toBeTruthy();
+  });
+
+  it("信息行 agentType 用 TOOL_LABELS 中文（不再裸显工具 id）", async () => {
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    await screen.findByText("旧消息");
+    expect(screen.getByText(/Codex · \/tmp\/p1 · /)).toBeTruthy();
   });
 
   it("不支持 resume 的工具 → 按钮禁用 + 原因（门迁移回归锁）", () => {

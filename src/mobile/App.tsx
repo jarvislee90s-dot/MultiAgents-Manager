@@ -48,7 +48,11 @@ export default function App() {
       )}
       {paired === true && selected && <SessionDetail session={selected} onBack={onBackToBoard} />}
       {paired === true && historyOpen && !archiveSelected && (
-        <ArchiveBoard onBack={() => setHistoryOpen(false)} onOpenCard={setArchiveSelected} />
+        <ArchiveBoard
+          onBack={() => setHistoryOpen(false)}
+          onOpenCard={setArchiveSelected}
+          onUnpaired={onUnpaired}
+        />
       )}
       {paired === true && historyOpen && archiveSelected && (
         <ArchiveDetail
