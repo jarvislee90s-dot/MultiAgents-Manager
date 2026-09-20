@@ -31,6 +31,10 @@ export default function ArchiveBoard({
   const [days, setDays] = useState<Days>(1);
   const [data, setData] = useState<ArchivedPayload | null>(null);
   const [error, setError] = useState(false);
+  // 清空归档失败的行内反馈（终审 Finding 3：Promise 拒绝无 .catch → 按钮无反应 +
+  // unhandled rejection）。不复用 error（那是加载失败语义，会带出 retry 按钮误导）；
+  // 下次操作或刷新时清除
+  const [manageError, setManageError] = useState(false);
   const [tool, setTool] = useState<string>("all");
   const [project, setProject] = useState<string>("all");
   // 相对时长基准时钟（react-hooks/purity 禁渲染期调 Date.now，同 Board 惯例）：
@@ -78,7 +82,10 @@ export default function ArchiveBoard({
             type="button"
             data-testid="archive-refresh"
             className="underline"
-            onClick={() => void load(days)}
+            onClick={() => {
+              setManageError(false);
+              void load(days);
+            }}
           >
             刷新
           </button>
@@ -88,13 +95,26 @@ export default function ArchiveBoard({
             className="underline"
             onClick={() => {
               if (!window.confirm("清空全部归档记录？")) return;
-              void deleteArchivedSession().then(() => void load(days));
+              setManageError(false);
+              deleteArchivedSession()
+                .then(() => void load(days))
+                .catch(() => setManageError(true));
             }}
           >
             清空归档
           </button>
         </span>
       </header>
+
+      {/* 清空归档失败反馈（终审 Finding 3）：小号红字贴近操作点，不触发 retry */}
+      {manageError && (
+        <p
+          data-testid="archive-manage-error"
+          className="mb-2 text-right text-xs text-red-600"
+        >
+          操作失败，请重试
+        </p>
+      )}
 
       {/* 第一行：工具 chips（文案复用 TOOL_LABELS；选中态样式从简，品牌色后续按需） */}
       <div className="mb-2 flex gap-2 overflow-x-auto">

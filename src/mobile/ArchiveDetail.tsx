@@ -26,6 +26,9 @@ export default function ArchiveDetail({
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  // 移除失败行内反馈（终审 Finding 3：Promise 拒绝无 .catch → 按钮无反应 +
+  // unhandled rejection）；不复用 contentError/openError（语义不同），下次点击清除
+  const [removeError, setRemoveError] = useState(false);
   // 相对时长基准时钟（react-hooks/purity 禁渲染期调 Date.now，同 Board 惯例）：
   // 挂载时取一次快照（归档详情为静态只读页，无需定时走动）
   const [now] = useState(() => Date.now());
@@ -104,7 +107,7 @@ export default function ArchiveDetail({
         )}
       </div>
 
-      <div className="mt-3 min-h-0 flex-1 flex-col gap-2 pb-8">
+      <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 pb-8">
         {contentError && (
           <p className="py-6 text-center text-sm text-slate-400">
             内容暂不可读（会话文件可能已被工具清理）
@@ -132,7 +135,10 @@ export default function ArchiveDetail({
               data-testid="archive-remove-confirm"
               className="flex-1 rounded-lg border border-red-300 px-3 py-1.5 text-xs text-red-600"
               onClick={() => {
-                void deleteArchivedSession(session.sessionId).then(onBack);
+                setRemoveError(false);
+                deleteArchivedSession(session.sessionId)
+                  .then(onBack)
+                  .catch(() => setRemoveError(true));
               }}
             >
               确认移除
@@ -154,6 +160,14 @@ export default function ArchiveDetail({
           >
             从归档移除
           </button>
+        )}
+        {removeError && (
+          <p
+            data-testid="archive-remove-error"
+            className="mt-1 text-center text-xs text-red-600"
+          >
+            操作失败，请重试
+          </p>
         )}
       </div>
     </div>

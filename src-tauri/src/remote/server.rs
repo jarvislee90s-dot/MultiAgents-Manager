@@ -4819,6 +4819,84 @@ mod tests {
                 .unwrap();
             assert_eq!(r.status(), 400);
         }
+
+        /// DELETE 参数→缝映射（终审 Important：破坏性端点成功路径零自动化覆盖）——
+        /// 记录型假体（Arc<Mutex<Vec>> 收参 + 固定返回 7）锁定三件事：①`?session_id=s9`
+        /// → 缝收到 `Some("s9")`；②`?all=1` → 收到 `None`；③**双参同在**
+        /// （`?all=1&session_id=s9`）→ 仍收到 `None`（all 优先语义，防「target 映射
+        /// 写反」一行回归）。响应形态 `{"ok":true,"deleted":<假体返回值>}` 一并断言。
+        /// 换缝沿用本模块 Arc::get_mut 先例；过闸沿用 persist_device + cookie 先例。
+        #[tokio::test]
+        async fn delete_param_mapping_and_all_precedence() {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+            let c2 = calls.clone();
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_delete = std::sync::Arc::new(move |target: Option<&str>| {
+                c2.lock()
+                    .expect("测试单线程持锁")
+                    .push(target.map(|t| t.to_string()));
+                7 // 固定返回计数：响应 deleted 字段断言其来源是缝返回值
+            });
+            persist_device(&st, "arch");
+            let app = crate::remote::server::router(st);
+
+            // ① 单 session_id → Some("s9")
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived?session_id=s9",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["deleted"], 7);
+
+            // ② all=1 → None
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived?all=1",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["deleted"], 7);
+
+            // ③ 双参同在 → 仍 None（all 优先）
+            let r = app
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived?all=1&session_id=s9",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["deleted"], 7);
+
+            let got = calls.lock().expect("测试单线程持锁");
+            assert_eq!(got.len(), 3);
+            assert_eq!(got[0].as_deref(), Some("s9"));
+            assert_eq!(got[1], None);
+            assert_eq!(got[2], None);
+        }
     }
 
     // ==== Task 4：session-open 归档回退（spec 2026-09-20-mobile-archive-history §6.2）====
