@@ -1116,10 +1116,29 @@ fn codex_pascal_case_registration_real_machine() {
     use crate::adapter::AgentAdapter;
 
     // 前置自检：codex 在场
-    let ver = std::process::Command::new("codex")
-        .arg("--version")
-        .output()
-        .expect("codex 命令不可用——本测试需要实机安装 codex");
+    // 灰1 同款：npm 全局 codex 在 Windows 是 .cmd 垫片，CreateProcess 只补 .exe——
+    // 裸名 spawn 失败回退 `cmd /c codex`（与 approve.rs probe_cli_version 同源）
+    let npm_dir = std::env::var("USERPROFILE")
+        .map(|u| format!("{}\\AppData\\Roaming\\npm", u))
+        .unwrap_or_default();
+    let aug_path = |cmd: &mut std::process::Command| {
+        let p = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{npm_dir};{p}"));
+    };
+    let spawn_codex = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut bare = std::process::Command::new("codex");
+        bare.args(args).stdin(std::process::Stdio::null());
+        aug_path(&mut bare);
+        bare.output().or_else(|_| {
+            let mut sh = std::process::Command::new("cmd");
+            sh.args(["/c", "codex"])
+                .args(args)
+                .stdin(std::process::Stdio::null());
+            aug_path(&mut sh);
+            sh.output()
+        })
+    };
+    let ver = spawn_codex(&["--version"]).expect("codex 命令不可用——本测试需要实机安装 codex");
     assert!(ver.status.success(), "codex --version 失败");
 
     let adapter = crate::adapter::codex::CodexAdapter;
@@ -1178,10 +1197,29 @@ fn codex_hook_events_really_fire_in_real_session() {
     use crate::adapter::AgentAdapter;
 
     // 前置自检：codex 在场
-    let ver = std::process::Command::new("codex")
-        .arg("--version")
-        .output()
-        .expect("codex 命令不可用——本测试需要实机安装 codex");
+    // 灰1 同款垫片回退 + PATH 追加 npm 全局目录（后台/沙箱环境 PATH 常缺
+    // %USERPROFILE%\AppData\Roaming\npm，codex.cmd 解析不到）
+    let npm_dir = std::env::var("USERPROFILE")
+        .map(|u| format!("{}\\AppData\\Roaming\\npm", u))
+        .unwrap_or_default();
+    let aug_path = |cmd: &mut std::process::Command| {
+        let p = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{npm_dir};{p}"));
+    };
+    let spawn_codex = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut bare = std::process::Command::new("codex");
+        bare.args(args).stdin(std::process::Stdio::null());
+        aug_path(&mut bare);
+        bare.output().or_else(|_| {
+            let mut sh = std::process::Command::new("cmd");
+            sh.args(["/c", "codex"])
+                .args(args)
+                .stdin(std::process::Stdio::null());
+            aug_path(&mut sh);
+            sh.output()
+        })
+    };
+    let ver = spawn_codex(&["--version"]).expect("codex 命令不可用——本测试需要实机安装 codex");
     assert!(ver.status.success(), "codex --version 失败");
 
     // helper 必须已构建（debug）：MAM_HOME 重定向仅 debug 生效，release helper 会
@@ -1224,7 +1262,9 @@ fn codex_hook_events_really_fire_in_real_session() {
     .expect("沙箱 hooks.json 注册失败");
 
     // 跑真实 codex 无头会话（env 注入 CODEX_HOME/MAM_HOME，子进程继承）
-    let mut child = std::process::Command::new("codex")
+    // exec 会话同样走垫片回退（spawn 失败 → cmd /c codex exec …）
+    let mut bare_exec = std::process::Command::new("codex");
+    bare_exec
         .args(["exec", "--skip-git-repo-check"])
         .arg("-C")
         .arg(workdir.path())
@@ -1232,9 +1272,23 @@ fn codex_hook_events_really_fire_in_real_session() {
         .env("CODEX_HOME", codex_home.path())
         .env("MAM_HOME", mam_home.path())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    aug_path(&mut bare_exec);
+    let mut sh_exec = std::process::Command::new("cmd");
+    sh_exec
+        .args(["/c", "codex", "exec", "--skip-git-repo-check"])
+        .arg("-C")
+        .arg(workdir.path())
+        .arg("Reply with the single word: ok")
+        .env("CODEX_HOME", codex_home.path())
+        .env("MAM_HOME", mam_home.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    aug_path(&mut sh_exec);
+    let mut child = bare_exec
         .spawn()
-        .expect("codex exec 启动失败（检查 codex 登录态）");
+        .or_else(|_| sh_exec.spawn())
+        .expect("codex exec 启动失败（检查 codex 登录态与 npm 全局目录是否在 PATH）");
 
     // 轮询事件目录 ≤180s（SessionStart/UserPromptSubmit 等会话期事件即应落盘；
     // 等 codex 自然退出再判，避免误杀慢启动）
