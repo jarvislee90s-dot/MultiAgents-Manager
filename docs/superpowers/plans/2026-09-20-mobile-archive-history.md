@@ -256,14 +256,8 @@ pub fn register_sessions_conn(conn: &Connection, sessions: &[Session]) -> usize 
             continue; // 守卫：零写事务
         }
         let now = chrono::Utc::now().to_rfc3339();
-        let first_seen = existing
-            .as_ref()
-            .map(|(_, _, _, _)| now.clone()) // 占位，下一行修正：first_seen 保留原值
-            ;
-        let first_seen = match existing.is_some() {
-            _ => now.clone(), // 见下——INSERT OR REPLACE 无法保留原列，改为显式两分支
-        };
-        let _ = first_seen; // （实现时直接按下方 SQL 分支，删除本占位链）
+        // UPDATE/INSERT 显式两分支而非 INSERT OR REPLACE——后者会整行重置 first_seen；
+        // UPDATE 分支不触碰 first_seen 列（天然保留原值），INSERT 分支三时间列同刻
         if existing.is_some() {
             conn.execute(
                 "UPDATE session_archive SET title=?1, last_status=?2, project_path=?3,
@@ -346,7 +340,7 @@ pub fn delete_archive_conn(conn: &Connection, session_id: Option<&str>) -> usize
 }
 ```
 
-**实现注意（把上面对照清干净的最终形态）**：`register_sessions_conn` 内 UPDATE/INSERT 两分支如上；写实现时删除 `first_seen` 占位链那几行伪码（那是推导痕迹）——UPDATE 分支不触碰 `first_seen` 列即天然保留原值，INSERT 分支三时间列同刻。
+**实现口径**：如上代码为最终形态（UPDATE 分支的 SQL 列清单不含 first_seen——保留原值靠「不写它」实现）；`agent_type.tool_id()` 是既有方法（`session/model.rs` AgentType impl）。
 
 - [ ] **Step 5: mod/re-export 接线**
 
@@ -457,14 +451,12 @@ server.rs 结构体（`resume_spawner` 字段后）追加：
         archive_delete: std::sync::Arc::new(crate::database::delete_archive),
 ```
 
-全部测试构造点（锚点 grep `resume_spawner:`，server.rs 内每处）同位补：
+全部测试构造点（锚点 grep `resume_spawner:`，server.rs 内每处）同位补（签名与缝声明精确一致）：
 
 ```rust
-            archive_source: Box::new(|_| Vec::new()),   // 注意：无参闭包 → Box::new(Vec::new) 形态见下
-            archive_delete: std::sync::Arc::new(|_| 0),
+            archive_source: Box::new(|| Vec::new()),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
 ```
-
-（闭包无参：写 `Box::new(|| Vec::new())` 与 `Arc::new(|_: Option<&str>| 0usize)`——按编译器推断微调，语义=空归档/零删除。）
 
 - [ ] **Step 2: 写失败测试（server.rs 既有测试区追加）**
 
@@ -490,9 +482,13 @@ server.rs 结构体（`resume_spawner` 字段后）追加：
         }
 
         fn archive_state(rows: Vec<SessionArchiveRow>) -> axum::Router {
+            // test_state() 返回 Arc<RemoteState>（引用计数 1、无他持）——Arc::get_mut
+            // 就地换缝（比整份 RemoteState 字面量轻 30+ 行；本文件既有测试均为全字面量
+            // 构造，此处引入 get_mut 模式属新写法，注释留痕）
             let mut st = test_state();
-            st.archive_source = Box::new(move || rows.clone());
-            st.archive_delete = std::sync::Arc::new(|_| 0);
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.archive_delete = std::sync::Arc::new(|_| 0);
             crate::remote::server::router(st)
         }
 
@@ -543,18 +539,25 @@ server.rs 结构体（`resume_spawner` 字段后）追加：
 
         #[tokio::test]
         async fn live_session_excluded_from_archive() {
-            // test_state 的 session_source 需带一条活会话（复用该文件既有夹具形态；
-            // 若 test_state 默认快照为空，就地改 st.session_source 返回含 "live-1" 的快照）
             let rows = vec![
                 arch_row("live-1", "codex", "a", 60),
                 arch_row("dead-1", "kimi", "b", 120),
             ];
             let mut st = test_state();
-            st.archive_source = Box::new(move || rows.clone());
-            st.archive_delete = std::sync::Arc::new(|_| 0);
-            // 活板快照注入（形态对齐本文件既有 session_source 假体写法）
-            st.session_source = Box::new(|| crate::remote::server::SessionsSnapshot {
-                sessions: vec![crate::remote::server::inj_sess("live-1")],
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.archive_delete = std::sync::Arc::new(|_| 0);
+            // 活板快照注入：session_source 类型 = Box<dyn Fn() -> SessionsResponse>
+            // （server.rs:242）；inj_sess 四参夹具（server.rs:2760，id/agent_type/pid/status）
+            s.session_source = Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![inj_sess(
+                    "live-1",
+                    crate::session::AgentType::Codex,
+                    1,
+                    crate::session::SessionStatus::Waiting,
+                )],
+                total_count: 1,
+                waiting_count: 0,
             });
             let app = crate::remote::server::router(st);
             let r = app
@@ -591,7 +594,7 @@ server.rs 结构体（`resume_spawner` 字段后）追加：
     }
 ```
 
-**注**：`inj_sess`/`SessionsSnapshot` 为 server.rs 既有测试夹具（resume 端点测试同款）；若实际名字不同，以本文件既有写法为准对齐——测试意图不变（活板含 `live-1`）。
+**夹具事实（已核对）**：`inj_sess` 位于 server.rs 测试区（:2760，四参）；`session_source` 字段类型 `Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>`（:242）；新测试模块嵌在既有 `mod tests` 内，`use super::*` 即达。
 
 - [ ] **Step 3: 跑测试确认失败**
 
@@ -792,11 +795,12 @@ git commit -m "feat(archive): GET/DELETE /sessions-archived 端点——days 夹
                 updated_at: String::new(),
             };
             let mut st = test_state();
-            // 活快照为空（复用 test_state 默认或就地注入空快照——形态对齐既有写法）
-            st.archive_source = Box::new(move || vec![row.clone()]);
+            // 活快照保持 test_state 默认（空会话集）——只换归档缝与 spawn 缝
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || vec![row.clone()]);
             let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let f2 = fired.clone();
-            st.resume_spawner = std::sync::Arc::new(move |spec| {
+            s.resume_spawner = std::sync::Arc::new(move |spec| {
                 f2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // 断言 cwd 落在归档行 project_path（构造的 SpawnSpec 携带脚本全文）
                 let crate::inject::resume::SpawnSpec::MacosApplescript { script } = spec
@@ -833,7 +837,8 @@ git commit -m "feat(archive): GET/DELETE /sessions-archived 端点——days 夹
         #[tokio::test]
         async fn neither_live_nor_archive_still_404() {
             let mut st = test_state();
-            st.archive_source = Box::new(|| Vec::new());
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(|| Vec::new());
             let app = crate::remote::server::router(st);
             let r = app
                 .oneshot(
@@ -947,18 +952,14 @@ git commit -m "feat(archive): session-open 归档回退——活快照未命中�
 **Interfaces:**
 - Produces:
   - `resume-gate.ts`: `export const RESUME_SUPPORTED_TOOLS: ReadonlySet<string>`（claude/codex/kimi/opencode）；`export function resumeUnavailableReason(session: { projectPath?: string | null; agentType: string }): string | null`
-  - `archive-logic.ts`: `export type ArchiveToolFilter = string`（"all" 或工具 id）；`export function filterArchivedByTool<T extends { agentType: string }>(rows: T[], filter: ArchiveToolFilter): T[]`；`export function filterArchivedByProject<T extends { projectName: string }>(rows: T[], project: string): T[]`（"all" 直通）；`export function relativeEndLabel(lastSeenAt: string, now?: number): string`（刚刚/N 分钟前/N 小时前/昨天/N 天前；畸形输入返回 "—"）
+  - `archive-logic.ts`: `export type ArchiveToolFilter = string`（"all" 或工具 id）；`export function filterArchivedByTool<T extends { agentType: string }>(rows: T[], filter: ArchiveToolFilter): T[]`；`export function filterArchivedByProject<T extends { projectName: string }>(rows: T[], project: string): T[]`（"all" 直通）。（相对时间**复用** `board-logic.ts:221 formatRelativeTime`——不复用检查结论，勿新造）
   - `api.ts`: `export interface ArchivedSession { sessionId: string; agentType: string; projectPath: string; projectName: string; title: string | null; lastStatus: string; lastSeenAt: string }`；`export interface ArchivedPayload { archived: ArchivedSession[]; projects: string[] }`；`export async function fetchArchivedSessions(days: 1 | 3 | 7): Promise<ArchivedPayload | null>`（403 → null 回配对页，与 fetchSessions 同口径）；`export async function deleteArchivedSession(sessionId?: string): Promise<number>`（缺省=清空全部）
 
 - [ ] **Step 1: 写失败测试 `tests/mobile/archive-logic.test.ts`**
 
 ```typescript
 import { describe, expect, it } from "vitest";
-import {
-  filterArchivedByProject,
-  filterArchivedByTool,
-  relativeEndLabel,
-} from "@/mobile/archive-logic";
+import { filterArchivedByProject, filterArchivedByTool } from "@/mobile/archive-logic";
 
 const rows = [
   { agentType: "codex", projectName: "proj-a" },
@@ -977,22 +978,9 @@ describe("archive-logic：工具×项目双维过滤", () => {
     expect(filterArchivedByProject(filterArchivedByTool(rows, "codex"), "proj-b")).toHaveLength(1);
   });
 });
-
-describe("relativeEndLabel：相对结束时间", () => {
-  const now = Date.parse("2026-09-20T12:00:00Z");
-  const at = (minusMin: number) => new Date(now - minusMin * 60_000).toISOString();
-  it("分档：刚刚 / 分钟 / 小时 / 昨天 / 天", () => {
-    expect(relativeEndLabel(at(2), now)).toBe("刚刚");
-    expect(relativeEndLabel(at(30), now)).toBe("30 分钟前");
-    expect(relativeEndLabel(at(90), now)).toBe("1 小时前");
-    expect(relativeEndLabel(at(26 * 60), now)).toBe("昨天");
-    expect(relativeEndLabel(at(3 * 24 * 60), now)).toBe("3 天前");
-  });
-  it("畸形输入返回 —（防御）", () => {
-    expect(relativeEndLabel("not-a-date", now)).toBe("—");
-  });
-});
 ```
+
+（相对时间不另测——`formatRelativeTime` 在 `tests/mobile/board-logic.test.ts:325` 已有行为锁，直接复用。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1002,8 +990,9 @@ Expected: FAIL（模块不存在）
 - [ ] **Step 3: 实现 `src/mobile/archive-logic.ts`**
 
 ```typescript
-// 历史会话过滤纯函数（spec §7.2）：工具 × 项目双维 + 相对时间换算。
-// 与 board-logic.ts 同风格：零时钟依赖（now 注入）、不改入参。
+// 历史会话过滤纯函数（spec §7.2）：工具 × 项目双维。与 board-logic.ts 同风格：
+// 不改入参。相对时间与状态中文**复用** board-logic 既有导出
+// （formatRelativeTime / STATUS_LABELS），本文件不自造。
 export type ArchiveToolFilter = string; // "all" 或工具 id
 
 export function filterArchivedByTool<T extends { agentType: string }>(
@@ -1020,20 +1009,6 @@ export function filterArchivedByProject<T extends { projectName: string }>(
 ): T[] {
   if (project === "all") return rows;
   return rows.filter((r) => r.projectName === project);
-}
-
-/** 相对结束时间标签：刚刚(<5min)/N 分钟前(<60)/N 小时前(<24h)/昨天(24–48h)/N 天前。
- *  畸形输入返回 "—"（防御——坏数据不冒泡成 NaN） */
-export function relativeEndLabel(lastSeenAt: string, now: number = Date.now()): string {
-  const t = Date.parse(lastSeenAt);
-  if (Number.isNaN(t)) return "—";
-  const min = Math.max(0, Math.floor((now - t) / 60_000));
-  if (min < 5) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
-  const hours = Math.floor(min / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  if (hours < 48) return "昨天";
-  return `${Math.floor(hours / 24)} 天前`;
 }
 ```
 
@@ -1106,7 +1081,43 @@ export async function deleteArchivedSession(sessionId?: string): Promise<number>
 }
 ```
 
-api.test.ts 追加两个用例（形态对齐该文件既有 fetch 桩写法）：`fetchArchivedSessions(7)` 断言 URL 带 `days=7` 且载荷解析；403 返回 null。
+api.test.ts 追加（describe "mobile api" 内、风格对齐既有用例；import 行补 `deleteArchivedSession, fetchArchivedSessions`）：
+
+```typescript
+  it("fetchArchivedSessions 携带 days 且解析载荷", async () => {
+    const f = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ archived: [], projects: ["p1"] }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    vi.stubGlobal("fetch", f);
+    const p = await fetchArchivedSessions(7);
+    expect(f).toHaveBeenCalledWith("/m/api/v1/sessions-archived?days=7");
+    expect(p?.projects).toEqual(["p1"]);
+  });
+
+  it("fetchArchivedSessions 403 → null（回配对页口径与 fetchSessions 一致）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403 })));
+    expect(await fetchArchivedSessions(1)).toBeNull();
+  });
+
+  it("deleteArchivedSession 带 id 走单条、缺省走 all=1，返回删除计数", async () => {
+    const f = vi.fn(async () => new Response('{"ok":true,"deleted":2}', { status: 200 }));
+    vi.stubGlobal("fetch", f);
+    expect(await deleteArchivedSession("sess-1")).toBe(2);
+    expect(f).toHaveBeenLastCalledWith(
+      "/m/api/v1/sessions-archived?session_id=sess-1",
+      expect.objectContaining({ method: "DELETE" })
+    );
+    await deleteArchivedSession();
+    expect(f).toHaveBeenLastCalledWith(
+      "/m/api/v1/sessions-archived?all=1",
+      expect.objectContaining({ method: "DELETE" })
+    );
+  });
+```
 
 - [ ] **Step 6: 跑测试确认通过 + 既有回归**
 
@@ -1117,7 +1128,7 @@ Expected: 全 PASS（SessionDetail 按钮仍在——本任务只迁定义）
 
 ```bash
 git add src/mobile/resume-gate.ts src/mobile/archive-logic.ts src/mobile/api.ts src/mobile/SessionDetail.tsx tests/mobile/
-git commit -m "feat(archive): 移动端纯层——fetchArchived/deleteArchived API、resume 门迁出 resume-gate、工具×项目过滤与相对时间纯函数"
+git commit -m "feat(archive): 移动端纯层——fetchArchived/deleteArchived API、resume 门迁出 resume-gate、工具×项目过滤纯函数（相对时间/状态中文复用 board-logic 既有导出）"
 ```
 
 ---
@@ -1221,10 +1232,18 @@ import {
   type ArchivedPayload,
   type ArchivedSession,
 } from "./api";
-import { filterArchivedByProject, filterArchivedByTool, relativeEndLabel } from "./archive-logic";
-import { AGENT_TYPES } from "./board-logic"; // 注：若 board-logic 未导出该常量，用下方内联 chips 集（实现时以 board-logic 实际导出为准）
+import { filterArchivedByProject, filterArchivedByTool } from "./archive-logic";
+// 复用既有导出（勿自造）：TOOL_LABELS 工具中文 / formatRelativeTime 相对时间
+import { TOOL_LABELS, formatRelativeTime } from "./board-logic";
 
 type Days = 1 | 3 | 7;
+
+/** 工具 chips 文案：全部 / 工具中文（TOOL_LABELS，Record<AgentType,string> 以
+ *  string 索引安全读——归档 agentType 是 string） */
+function chipLabel(t: string): string {
+  if (t === "all") return "全部";
+  return (TOOL_LABELS as Record<string, string>)[t] ?? t;
+}
 
 /** 历史会话页（spec §7.2）：懒加载（进页 days=1，切天数重拉，页内不轮询——
  *  死数据静态）；双维筛选（工具 chips × 项目下拉）独立于活板选择；卡片无按钮
@@ -1269,29 +1288,34 @@ export default function ArchiveBoard({
           <button type="button" onClick={onBack} className="text-sm text-slate-500" aria-label="返回看板">‹ 返回</button>
           <h1 className="text-lg font-semibold">历史会话</h1>
         </div>
-        <button
-          type="button"
-          data-testid="archive-clear"
-          className="text-xs text-slate-400"
-          onClick={() => {
-            if (!window.confirm("清空全部归档记录？")) return;
-            void deleteArchivedSession().then(() => void load(days));
-          }}
-        >
-          清空归档
-        </button>
+        <span className="flex items-center gap-2 text-xs text-slate-400">
+          <button type="button" data-testid="archive-refresh" className="underline" onClick={() => void load(days)}>
+            刷新
+          </button>
+          <button
+            type="button"
+            data-testid="archive-clear"
+            className="underline"
+            onClick={() => {
+              if (!window.confirm("清空全部归档记录？")) return;
+              void deleteArchivedSession().then(() => void load(days));
+            }}
+          >
+            清空归档
+          </button>
+        </span>
       </header>
 
-      {/* 第一行：工具 chips（复用 board-logic 的品牌色约定可选，首版中性样式） */}
+      {/* 第一行：工具 chips（文案复用 TOOL_LABELS；选中态样式从简，品牌色后续按需） */}
       <div className="mb-2 flex gap-2 overflow-x-auto">
         {tools.map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => setTool(t)}
-            className={`rounded-full px-3 py-1 text-xs ${t === tool ? "bg-blue-600 text-white" : "bg-slate-200 text-slate-700"}`}
+            className={`rounded-full px-3 py-1 text-xs ${t === tool ? "bg-blue-600 text-white" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"}`}
           >
-            {t === "all" ? "全部" : t}
+            {chipLabel(t)}
           </button>
         ))}
       </div>
@@ -1301,7 +1325,7 @@ export default function ArchiveBoard({
         <select
           value={project}
           onChange={(e) => setProject(e.target.value)}
-          className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2 py-1.5 text-sm"
+          className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-800"
           aria-label="按项目筛选"
         >
           <option value="all">项目：全部</option>
@@ -1316,7 +1340,7 @@ export default function ArchiveBoard({
               type="button"
               data-testid={`archive-days-${d}`}
               onClick={() => setDays(d)}
-              className={`rounded-lg px-2.5 py-1.5 text-xs ${d === days ? "bg-blue-600 text-white" : "bg-slate-200 text-slate-700"}`}
+              className={`rounded-lg px-2.5 py-1.5 text-xs ${d === days ? "bg-blue-600 text-white" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"}`}
             >
               {d}天
             </button>
@@ -1334,7 +1358,11 @@ export default function ArchiveBoard({
       )}
       {!error && data && rows.length === 0 && (
         <p className="py-8 text-center text-sm text-slate-400">
-          {days === 7 ? "暂无归档记录" : `最近 ${days} 天没有非活跃会话，可试 3 天 / 7 天`}
+          {days === 7
+            ? "暂无归档记录"
+            : days === 3
+              ? "最近 3 天没有非活跃会话，可试 7 天"
+              : "最近 1 天没有非活跃会话，可试 3 天 / 7 天"}
         </p>
       )}
       <div className="flex flex-col gap-2 pb-8">
@@ -1347,10 +1375,10 @@ export default function ArchiveBoard({
           >
             <div className="flex items-baseline justify-between">
               <span className="text-sm font-medium">{s.projectName}</span>
-              <span className="text-xs text-slate-400">{relativeEndLabel(s.lastSeenAt)}结束</span>
+              <span className="text-xs text-slate-400">{formatRelativeTime(s.lastSeenAt, Date.now())}结束</span>
             </div>
             <div className="mt-0.5 text-xs text-slate-500">
-              {s.agentType} · {s.title ?? "（无标题）"}
+              {chipLabel(s.agentType)} · {s.title ?? "（无标题）"}
             </div>
           </button>
         ))}
@@ -1360,7 +1388,7 @@ export default function ArchiveBoard({
 }
 ```
 
-**实现注意**：`AGENT_TYPES` 若 board-logic 未导出则删除该 import（chips 由结果集动态生成，本就不需要静态枚举）。
+**复用口径（复核后锁定）**：chips 文案 = `TOOL_LABELS`（board-logic.ts:29）；相对时间 = `formatRelativeTime`（:221，行为锁在 board-logic.test.ts:325）——两者均不自造；归档状态中文同理由 ArchiveDetail 消费 `STATUS_LABELS`（:183）。
 
 - [ ] **Step 4: 写失败测试 `tests/mobile/ArchiveDetail.test.tsx`（承接 SessionDetail :1220 迁出的回执分诊 + 门 + 乐观回调）**
 
@@ -1465,7 +1493,8 @@ import {
   type ArchivedSession,
   type SessionMessage,
 } from "./api";
-import { relativeEndLabel } from "./archive-logic";
+// 复用既有导出（勿自造）：STATUS_LABELS 状态中文 / formatRelativeTime 相对时间
+import { STATUS_LABELS, formatRelativeTime } from "./board-logic";
 import { resumeUnavailableReason } from "./resume-gate";
 
 /** 归档详情页（spec §7.3）：只读消息（/session-messages 按 id 直读文件，零后端改动）
@@ -1485,6 +1514,10 @@ export default function ArchiveDetail({
   const [openError, setOpenError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const reason = resumeUnavailableReason(session);
+  // 最后状态中文（spec §7.3 顶部信息行要求）：lastStatus 小写串与 STATUS_LABELS
+  // 六键（waiting/processing/thinking/compacting/idle/finished）精确对齐——Rust 端
+  // format!("{:?}", status).to_lowercase() 产物一致；未知串回退原文
+  const statusLabel = (STATUS_LABELS as Record<string, string>)[session.lastStatus] ?? session.lastStatus;
 
   useEffect(() => {
     let alive = true;
@@ -1518,7 +1551,8 @@ export default function ArchiveDetail({
         <h1 className="text-lg font-semibold">{session.projectName}</h1>
       </header>
       <p className="mt-1 text-xs text-slate-500">
-        {session.agentType} · {session.projectPath} · {relativeEndLabel(session.lastSeenAt)}结束
+        {session.agentType} · {session.projectPath} · {statusLabel} ·{" "}
+        {formatRelativeTime(session.lastSeenAt, Date.now())}结束
       </p>
 
       <div className="shrink-0 px-1 pt-3">
@@ -1630,25 +1664,46 @@ SessionDetail.tsx 删除（整块）：
 
 tests/mobile/SessionDetail.test.tsx：删除 `describe("SessionDetail：一键 resume 回执分诊（评审 C1）"…)` 整块（:1220–:1265 一带）及 `routes.sessionOpen*` mock 分路中仅被该块消费的断言（mock 分路本身保留无害可留）。
 
-- [ ] **Step 7: AppRouting 追加历史路由用例（复用该文件 installSse/installFetch 基建；installFetch 分路补 `/sessions-archived`）**
+- [ ] **Step 7: AppRouting 追加历史路由用例**
+
+先扩该文件既有 `installFetch`（在最后一个分路 `return new Response("{}", { status: 404 })` 之前插入）：
 
 ```typescript
-// ==== 历史会话路由（spec §7.1）：看板 ↔ 历史页 ↔ 归档详情 ====
-it("历史入口进入历史页（归档卡可见）；返回回到看板", async () => {
+      if (url.includes("/sessions-archived")) {
+        return new Response(
+          JSON.stringify({
+            archived: [
+              {
+                sessionId: "dead-1",
+                agentType: "claude",
+                projectPath: "/tmp/d",
+                projectName: "hist-proj",
+                title: null,
+                lastStatus: "idle",
+                lastSeenAt: new Date().toISOString(),
+              },
+            ],
+            projects: ["hist-proj"],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+```
+
+再在 `describe("App 路由：看板卡片 ↔ 会话详情"…)` 内追加用例（复用 installSse/okSessions/sessionFixture 基建）：
+
+```typescript
+// ==== 历史会话路由（spec §7.1）：看板 ↔ 历史页（Board 常驻 hidden，数据保持） ====
+it("历史入口进入历史页（归档卡可见，活板卡仍在 DOM）；返回后历史页卸载、看板回前台", async () => {
   installSse(okSessions([sessionFixture()]));
-  // installFetch 内追加分路：
-  //   url.includes("/sessions-archived") → Response(JSON.stringify({
-  //     archived: [{ sessionId: "dead-1", agentType: "claude", projectPath: "/tmp/d",
-  //       projectName: "hist-proj", title: null, lastStatus: "idle",
-  //       lastSeenAt: new Date().toISOString() }],
-  //     projects: ["hist-proj"] }))
   render(<App />);
   await screen.findByText("demo-proj"); // 看板就绪
   fireEvent.click(screen.getByRole("button", { name: "历史会话" }));
-  expect(await screen.findByText("hist-proj")).toBeTruthy();
-  expect(screen.queryByText("demo-proj")).toBeNull(); // Board hidden（数据保持）
+  expect(await screen.findByText("hist-proj")).toBeTruthy(); // 归档卡渲染
+  expect(screen.getByText("任务标题")).toBeTruthy(); // Board 常驻 hidden——活板卡仍在 DOM（数据保持）
   fireEvent.click(screen.getByRole("button", { name: "返回看板" }));
-  expect(await screen.findByText("demo-proj")).toBeTruthy();
+  expect(screen.queryByText("hist-proj")).toBeNull(); // 历史页卸载
+  expect(screen.getByText("demo-proj")).toBeTruthy(); // 看板数据原样（无需重拉）
 });
 ```
 
@@ -1717,6 +1772,32 @@ git commit -m "docs(archive): 实机回传清单追加 E 段——历史会话�
 
 ## 计划自审记录（写完即查，问题就地修）
 
-1. **Spec 覆盖**：§3 裁决 1→Task 1/2（登记制）；2→Task 6 Step 6（按钮删除）；3→Task 6（仅移动端）；4→Task 3 Step 4（days 夹取）+ Task 6 Step 3（进页拉取/切天数重拉/无轮询）；5→Task 6 Step 6（独立页路由）；6→Task 6 Step 3/5（卡片无按钮、详情页唯一动作）；7→Task 5/6（项目下拉仅历史页，活板 Board 零改动）；8→Task 3 Step 4（DELETE 端点）+ Task 6（两个移除入口）。§5 表/守卫/不登记项→Task 1；§6.1→Task 3；§6.2→Task 4；§6.3 零改动→Task 6 Step 5 复用 fetchSessionMessages（畸形 404→「内容暂不可读」降级，ArchiveDetail contentError 分支）；§6.4 扫描零改动→Task 2 注释锚定；§7 四小节→Task 6；§8 边界 1/2/3/5/8 由数据流天然覆盖、4 明确非目标、6/7 由 Task 6 错误态覆盖；§9→各任务测试 + Task 7 E 段；§10 切分→Task 1–7 一一对应。**无缺口**。
-2. **占位符扫描**：Task 1 Step 4 内含一段推导痕迹标注（「实现注意」指明删除占位链）——已在注释中显式标出，最终形态明确；Task 3 Step 1 构造点补齐以 grep 锚点给出（数量由既有代码决定，属机械重复）；Task 6 Step 3 的 `AGENT_TYPES` import 标注了删除路径。无 TBD/TODO。
-3. **类型一致性**：`SessionArchiveRow` 九字段在 Task 1/3/4 三处使用一致；`ArchivedSession` 七字段 Task 5 定义与 Task 6 测试/组件一致；`archive_source`/`archive_delete` 签名 Task 3 定义、Task 4 消费一致；`relativeEndLabel`/`filterArchived*` Task 5 定义与 Task 6 消费一致；`onActivated`/`onOpenCard`/`onBack` props 两组件与 App 接线一致。
+1. **Spec 覆盖**：§3 裁决 1→Task 1/2（登记制）；2→Task 6 Step 6（按钮删除）；3→Task 6（仅移动端）；4→Task 3 Step 4（days 夹取）+ Task 6 Step 3（进页拉取/切天数重拉/手动刷新/无轮询）；5→Task 6 Step 6（独立页路由）；6→Task 6 Step 3/5（卡片无按钮、详情页唯一动作）；7→Task 5/6（项目下拉仅历史页，活板 Board 零改动）；8→Task 3 Step 4（DELETE 端点）+ Task 6（两个移除入口）。§5 表/守卫/不登记项→Task 1；§6.1→Task 3；§6.2→Task 4；§6.3 零改动→Task 6 Step 5 复用 fetchSessionMessages（畸形 404→「内容暂不可读」降级，ArchiveDetail contentError 分支）；§6.4 扫描零改动→Task 2 注释锚定；§7 四小节→Task 6；§8 边界 1/2/3/5/8 由数据流天然覆盖、4 明确非目标、6/7 由 Task 6 错误态覆盖；§9→各任务测试 + Task 7 E 段；§10 切分→Task 1–7 一一对应。**无缺口**。
+2. **占位符扫描**：无 TBD/TODO；Task 3 Step 1 构造点补齐以 grep 锚点给出（数量由既有代码决定，属机械重复）。
+3. **类型一致性**：`SessionArchiveRow` 九字段在 Task 1/3/4 三处使用一致；`ArchivedSession` 七字段 Task 5 定义与 Task 6 测试/组件一致；`archive_source`/`archive_delete` 签名 Task 3 定义、Task 4 消费一致；`filterArchived*` Task 5 定义与 Task 6 消费一致；`onActivated`/`onOpenCard`/`onBack` props 两组件与 App 接线一致。
+
+## 第二轮复核记录（2026-09-20，交执行 Agent 前的终检——用户要求：前后矛盾 + spec 对账 + 代码名核实 + 最大化复用）
+
+**A. 编译级错误（已修）**
+1. Task 1 Step 4 原含 first_seen 推导占位链（伪码）→ 已删，Update/INSERT 显式两分支为最终形态，UPDATE 列清单不含 first_seen。
+2. Task 3 Step 1 构造点示例闭包签名错（`|_| Vec::new()`）→ 改 `|| Vec::new()` / `|_: Option<&str>| 0usize`。
+3. Task 3/4 测试原写法 `let mut st = test_state(); st.x = …` **编译不过**——`test_state() -> Arc<RemoteState>`（server.rs:415），Arc 后不可变体字段 → 全部改 `Arc::get_mut` 模式（新鲜 Arc 引用计数 1，get_mut 必得 Some；注释留痕为本文件新写法）。
+4. `inj_sess` 实为四参（server.rs:2760：id/agent_type/pid/status），原单参调用已修；快照类型名 `SessionsResponse`（server.rs:242 session_source 签名），原「SessionsSnapshot」已修。
+
+**B. 重复造轮子（已改复用，用户 2b）**
+1. `relativeEndLabel`（自造相对时间）→ 删除，复用 `board-logic.ts:221 formatRelativeTime`（行为锁已存在于 board-logic.test.ts:325；无「昨天」档属既有语义，不扩展）。
+2. 状态中文映射（原计划未显式、有自造风险）→ 复用 `board-logic.ts:183 STATUS_LABELS`（六键与 Rust `format!("{:?}").to_lowercase()` 产物精确对齐：waiting/processing/thinking/compacting/idle/finished）。
+3. chips 工具文案 → 复用 `board-logic.ts:29 TOOL_LABELS`（string 索引安全读 + 回退原文）；`AGENT_TYPES` import（原写法存疑）已删——chips 集本就由结果集动态生成。
+4. 既有复用确认项：`fetchSessionMessages(agentType, sessionId, limit)`（api.ts:101）、`sessionOpen`（api.ts:529）、`resume_spawner`/`message_source` 缝模式、DAO `_conn` 注入模式、schema/migration 模式、`bad_request()` 等 helper——计划引用名均已逐一核对。
+
+**C. 计划↔spec 对账修正**
+1. spec §7.3 顶部信息行要求「最后状态」——原计划漏显 → ArchiveDetail 信息行补 `statusLabel`（STATUS_LABELS）。
+2. spec §7.2「手动下拉刷新」→ 计划实现为页头「刷新」按钮（实现等价、更简），spec 措辞已同步为「手动刷新（页头刷新按钮）」。
+3. spec §7.2「···菜单（清空归档）」→ 计划直摆「清空归档」按钮（少一层嵌套、动作不变），spec 措辞已同步。
+4. 空态文案分档 bug（原 days=3 仍提示「可试 3 天」）→ 按 1/3/7 三档。
+5. Task 3 DELETE 响应含 `deleted` 计数（spec 只写 `{ok:true}`）——测试断言便利的微小扩展，已在此备案。
+
+**D. 功能面核查（用户 1a/1b）**
+- 过度设计：无（第二轮删掉的两处自造已改复用；无 spec 外新功能点）。
+- 凭空设计：无——全部功能可溯源至 spec §3 八项裁决或 §5–§8 明文；唯一超出 spec 字面的 `deleted` 计数已备案（C-5）。
+- 存疑点：无（无需要用户裁决的悬而未决项；95% 置信线以上）。
