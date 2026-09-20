@@ -59,9 +59,12 @@ pub fn stamp_in_messages<T: AsRef<str>>(msgs: &[T], stamp: &str) -> bool {
 
 /// 消息页含戳判定（纯核）：**user 侧过滤**——只有用户消息是注入产物的落点。
 /// role 归一化口径（`remote/content.rs` 的 `SessionMessage::text` / `tool_call`）：
-/// kind == "user" → role == "user"；thinking / tool-call / tool-result 一律归
-/// "assistant"（agent 侧工作产物）。故 `role == "user"` 恰好等价于「用户正文
+/// kind == "user" → role == "user"；thinking / tool-call / tool-result / plan 一律
+/// 归 "assistant"（agent 侧工作产物）。故 `role == "user"` 恰好等价于「用户正文
 /// 消息」，不含工具结果回显（工具回显可能恰好引用注入原文，过滤防误判命中）。
+/// **plan 消息不进 user 侧确认比对（T1 升格后的语义锁）**：计划一等消息
+/// role=assistant，正文是 agent 产出的计划 markdown——即使其中恰好包含与注入
+/// 正文相同的尾串，也不得判「已送达」（与 tool-result 回显同一条防误判线）。
 pub fn stamp_hit_in_page(pg: &crate::remote::content::MessagesPage, stamp: &str) -> bool {
     let user_texts: Vec<&str> = pg
         .messages
@@ -395,6 +398,44 @@ mod tests {
             truncated: false,
         };
         assert!(stamp_hit_in_page(&pg3, stamp));
+    }
+
+    /// T1 计划一等消息不进 user 侧确认比对（语义锁）：kind="plan" 的消息
+    /// role 归一化为 assistant，正文（计划 markdown）即使恰好包含注入戳全文，
+    /// stamp_hit_in_page 也不得判命中——戳比对行为与升格前完全一致（升格只改
+    /// 消息形态，不动确认层过滤语义）；user 正文命中路径不回归（对照格）
+    #[test]
+    fn plan_messages_excluded_from_stamp_hit() {
+        let stamp = stamp_of("[mobile t] body…");
+        let msg = |role: &str, kind: &str, content: &str| crate::remote::content::SessionMessage {
+            seq: 0,
+            role: role.to_string(),
+            kind: kind.to_string(),
+            content: content.to_string(),
+            ts: None,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        };
+        // plan 正文含戳 → 不命中（role=assistant 过滤）
+        let pg = crate::remote::content::MessagesPage {
+            messages: vec![msg(
+                "assistant",
+                "plan",
+                format!("# 计划\n\n执行步骤引用 {stamp}").as_str(),
+            )],
+            truncated: false,
+        };
+        assert!(!stamp_hit_in_page(&pg, stamp));
+        // 对照格：同流加一条 user 正文命中 → 照常命中（user 过滤通道无回归）
+        let pg2 = crate::remote::content::MessagesPage {
+            messages: vec![
+                msg("assistant", "plan", format!("计划引用 {stamp}").as_str()),
+                msg("user", "user", stamp),
+            ],
+            truncated: false,
+        };
+        assert!(stamp_hit_in_page(&pg2, stamp));
     }
 
     /// 直发确认失败文案表驱动（F2，mac-reverify-b9a501c §四-B）：按「工具 × 平台」

@@ -7,7 +7,10 @@
 // - 消息正文中的已知文件路径（/session-files 提取结果）渲染为可点链接 → 文件预览；
 // - 「加载更早消息」按钮以更大 limit 整页重拉（Task 8 裁决：M3 用按钮替代无限
 //   滚动，YAGNI——避免滚动位置管理复杂度）；
-// - SSE transition 仍不驱动详情页（M3 范围裁决不变）；页面可见时每 10s 静默轮询
+// - SSE transition 仍不驱动详情页的**消息内容**（M3 范围裁决不变；内容走 10s
+//   轮询），但会话**状态**随既有看板轮询数据保持同步（T1 活状态流：App 的
+//   selected 按 id 对齐 Board 数据——红卡与总结模式随状态自动切换，无需重进页面）；
+//   页面可见时每 10s 静默轮询
 //   刷新会话内容（F6 评审裁决：hidden 暂停、恢复可见立即补刷，页头刷新按钮保留）。
 //   轮询刷新仅在「贴底」（距底 <120px）时自动跟随落底，上翻阅读历史不被动拽回
 //   （P2-B 评审修复）；首次加载与手动刷新仍无条件落底。
@@ -134,6 +137,9 @@ function collapsedLabel(m: SessionMessage): string {
       return "工具结果";
     case "assistant":
       return "更早的回复";
+    case "plan":
+      // 防御位：plan 一等卡片不可折叠（isToggleable/isCollapsed 恒展开），正常不渲染此头
+      return "计划";
     default:
       return "已折叠消息";
   }
@@ -413,6 +419,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     (m: SessionMessage): boolean => {
       const forced = expandedOverride.get(m.seq);
       if (forced !== undefined) return forced; // 手动展开/再折叠优先
+      // T1：plan 一等卡片恒展开——运行态与总结态都不折叠（豁免总结模式折叠）
+      if (m.kind === "plan") return false;
       if (isSummary) {
         // 总结模式：user 直显；assistant 只显最后总结；过程消息全折叠
         if (m.kind === "user") return false;
@@ -574,6 +582,23 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               {renderLinkifiedText(m.content)}
             </pre>
           );
+        case "plan": {
+          // T1 一等计划卡片：后端已把 ExitPlanMode 形态（input.plan 非空）升格为
+          // kind="plan"，content 即计划 markdown 本体——无需 extractPlanBody，
+          // 直接渲染；恒展开（isCollapsed/isToggleable 豁免总结模式折叠）。
+          // 旧存量会话里未升格的 ExitPlanMode tool-call 仍走下方 extractPlanBody 分支
+          return (
+            <div
+              data-testid={`plan-${m.seq}`}
+              className="rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
+            >
+              <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
+                计划
+              </p>
+              {renderMarkdown(m.content)}
+            </div>
+          );
+        }
         case "tool-call": {
           // 计划类工具（ExitPlanMode / zcode 同形）：plan 字段是整篇 markdown，
           // 抽出来走 markdown 渲染；其余工具维持参数 JSON 原样（用户裁决不做通用美化）
@@ -811,7 +836,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, [messages]);
 
   // 是否渲染折叠切换头：过程消息 + 总结模式下的「更早 assistant」；
-  // 最终 assistant 总结直显正文（不给「更早的回复」头）
+  // 最终 assistant 总结直显正文（不给「更早的回复」头）。
+  // T1：plan 不在列 → 无折叠头（常驻计划卡片，不可折——与 isCollapsed 恒展开配套；
+  // 因此 toggleableMessages/总结横幅折叠计数天然不含 plan）
   const isToggleable = (m: SessionMessage) =>
     m.kind === "thinking" ||
     m.kind === "tool-call" ||
@@ -1138,7 +1165,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             style={preview.mode === "split" ? { minHeight: SPLIT_CONVERSATION_MIN_PX } : undefined}
           >
             {bookmarkBar}
-            {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
+            {/* 组件钥匙前缀区分（T1 活状态流修正）：红卡与 composer 同层且都按会话
+                强制重挂（M9R P3 语义保留），但 key 必须互异——同 key 兄弟在红卡
+                「停留期间插入/卸载」（活状态流下的常态）时会让 React 同 key 复用
+                错乱（duplicate key 警告 + 红卡卸不掉） */}
+            {session.status === "waiting" && (
+              <ApproveCard key={`approve-${session.id}`} session={session} />
+            )}
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
@@ -1148,7 +1181,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             >
               {messageArea}
             </MessageScrollArea>
-            <MessageComposer key={session.id} session={session} />
+            <MessageComposer key={`composer-${session.id}`} session={session} />
           </div>
           <SplitHandle
             orientation={preview.mode === "split-h" ? "horizontal" : "vertical"}
@@ -1252,13 +1285,19 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           </div>
           {/* 审批红卡（M8 Task 12）：waiting 态挂载；紧贴 messageArea 上方；
               available=false 时卡自身自隐（组件内部判定）。
-              刷新机制事实口径：App 的 selected 是冻结快照，停留详情期间不会随 SSE
-              重挂——红卡在「退出详情再进入 / PWA 重载」后出现；停留期间会话转为
-              非 waiting 时点按钮会收到 409 not_waiting 的中文降级文案（不误发键）。
+              刷新机制（T1 活状态流更新口径）：App 的 selected 按 (agentType,id)
+              从 Board 既有轮询数据（SSE 跃迁/快照 + 降级 3s 轮询）保持同步，
+              停留详情期间 status 变 waiting 红卡即出现、转非 waiting 自动卸载，
+              无需重进页面；组件钥匙 key={`approve-${session.id}`} 不随数据刷新变化 →
+              卡内 receipt/选项态不被误清。极端时序下点按钮收到 409 not_waiting 的
+              中文降级文案仍是兜底（不误发键）。
               **分屏分支（split/split-h）挂载同一份**（2026-09-19 用户裁决） */}
-          {/* 组件钥匙（M9R P3）：key={session.id}——复用实例切换会话时强制重挂，
-              清掉上一会话的陈旧 receipt / 选项态（跨会话串卡的防线） */}
-          {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
+          {/* 组件钥匙（M9R P3）：按会话强制重挂，清掉上一会话的陈旧 receipt /
+              选项态（跨会话串卡的防线）；前缀区分见分屏分支注释（同 key 兄弟复用
+              错乱防线，T1 活状态流） */}
+          {session.status === "waiting" && (
+            <ApproveCard key={`approve-${session.id}`} session={session} />
+          )}
           <MessageScrollArea
             fontScale={fontScale}
             showJump={showJump}
@@ -1270,8 +1309,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           </MessageScrollArea>
           {/* 发送输入区（M7 Task 7，W4）：**全布局态挂载**（正文 / split / split-h，
               2026-09-19 用户裁决）——分屏时对话列同样可发消息；
-              send-info 拉取失败时组件自静默，不影响对话渲染；key 同上（组件钥匙） */}
-          <MessageComposer key={session.id} session={session} />
+              send-info 拉取失败时组件自静默，不影响对话渲染；钥匙口径同上 */}
+          <MessageComposer key={`composer-${session.id}`} session={session} />
         </div>
       )}
 

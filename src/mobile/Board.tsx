@@ -64,6 +64,10 @@ interface BoardProps {
   onUnpaired: () => void;
   /** 卡片点击回调（M3 Task 8）：进入会话详情；缺省时卡片不可点（既有测试/用法不受影响） */
   onOpenSession?: (session: Session) => void;
+  /** T1 活状态流：看板数据每拍更新（SSE 快照/跃迁、降级 3s 轮询、30s 对账）时
+   *  上报当前会话列表。App 据此把进入详情时定格的 selected 快照按会话身份对齐到
+   *  活会话——停留详情页期间状态自动更新（红卡/总结横幅自动切换），不另起轮询 */
+  onSessionsChanged?: (sessions: Session[]) => void;
 }
 
 // 移动看板：主通道为 SSE（快照首帧 + 跃迁增量），断流 2 次降级为 3s 轮询。
@@ -71,7 +75,12 @@ interface BoardProps {
 // + 横幅/提示音/振动提醒；降级 → 交给下方轮询 effect（复用 tick 的 in-flight 守卫）。
 // 失败口径：403 → 回配对页（只由 fetchSessions 的 null 触发，SSE 断流不算）；
 // 网络异常 → 保留上次数据 + 错误横幅继续重试（不白屏、不误踢回配对页）。
-export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProps) {
+export default function Board({
+  onPaired,
+  onUnpaired,
+  onOpenSession,
+  onSessionsChanged,
+}: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
   // SSE 已降级（连续 2 次失败）：单向闩——置位后由轮询 effect 接管数据拉取；
@@ -245,6 +254,13 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
     const id = setInterval(() => setNow(Date.now()), CLOCK_MS);
     return () => clearInterval(id);
   }, []);
+
+  // T1 活状态流：数据任何一拍更新都上报宿主（回调引用稳定，App 内 useCallback）。
+  // data 引用变化才触发；详情页打开时 Board 仍在挂载（仅视觉隐藏），这条链路
+  // 就是 selected 活同步的唯一数据源——不新增任何轮询
+  useEffect(() => {
+    if (data !== null) onSessionsChanged?.(data.sessions);
+  }, [data, onSessionsChanged]);
 
   // 横幅定时器清理（卸载）：防离页后 setState 警告与定时器泄漏
   useEffect(() => {

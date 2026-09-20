@@ -1,8 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App from "@/mobile/App";
 import SessionDetail from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
 import { BOOKMARK_COLORS, clearBookmarks, messageAnchor } from "@/mobile/bookmarks";
+import { MockEventSource } from "./eventSourceMock";
 import type { Session } from "@/types/session";
 
 // M3 Task 8：ZCode 式会话详情页渲染矩阵。fetch 全量 stub（盖过 setup.ts 的 msw），
@@ -533,8 +535,11 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       const split = screen.getByTestId("split-container");
       expect(split).toBeTruthy();
       // 关键断言：红卡**在分屏容器内**（修正前分屏分支不挂红卡；仅断言
-      // findByTestId 会被非分屏分支或浮层误命中 → 必须用包含关系锁死）
-      expect(within(split).getByTestId("approve-card")).toBeTruthy();
+      // findByTestId 会被非分屏分支或浮层误命中 → 必须用包含关系锁死）。
+      // findBy 等选项载荷落地：T1 组件钥匙前缀区分后（approve-*/composer-* 互异，
+      // 防同 key 兄弟复用错乱），正文→分屏的布局切换是真实的卸载/重挂，红卡
+      // 选项拉取异步就绪——同步 getBy 会读到拉取前的自隐窗（既有语义不变）
+      expect(await within(split).findByTestId("approve-card")).toBeTruthy();
     });
 
     it("waiting 态左右分屏下审批红卡仍挂载", async () => {
@@ -558,7 +563,8 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       fireEvent.click(await screen.findByTestId("file-link"));
       fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
       const split = screen.getByTestId("split-container");
-      expect(within(split).getByTestId("approve-card")).toBeTruthy();
+      // 同上：包含关系锁死 + 等选项载荷落地（T1 组件钥匙前缀区分后的重挂语义）
+      expect(await within(split).findByTestId("approve-card")).toBeTruthy();
     });
 
     it("非 waiting 态分屏下不渲染红卡（状态门不变）", async () => {
@@ -1646,5 +1652,184 @@ describe("SessionDetail：过程一键折叠（2026-09-20）", () => {
     render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
     await screen.findByText("你好呀");
     expect(screen.queryByTestId("process-collapse-toggle")).toBeNull();
+  });
+});
+
+// ==== 计划一等卡片（T1 手工验收修复批）：ExitPlanMode 形态在后端升格 kind="plan" ====
+// content = 计划 markdown 本体，前端常驻渲染：无折叠头、豁免总结模式折叠、
+// 不计入总结横幅「已折叠 N 条」计数（用户裁决：不做消息合并/重复折叠，本件不碰）
+describe("SessionDetail：计划一等卡片（T1）", () => {
+  it("运行态：plan 消息渲染常驻计划卡片（markdown 直出，无折叠头）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 0,
+        kind: "plan",
+        content: "# 大计划\n\n- 步骤甲\n- 步骤乙",
+        toolName: "ExitPlanMode",
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    // markdown 结构化渲染（content 已是计划本体，无需展开动作）
+    expect((await screen.findByText("大计划")).tagName).toBe("H1");
+    expect(screen.getByText("步骤甲").tagName).toBe("LI");
+    // 「计划」标签 + 常驻卡片锚点；无折叠头（不可折叠）
+    expect(screen.getByText("计划")).toBeTruthy();
+    expect(screen.getByTestId("plan-0")).toBeTruthy();
+    expect(screen.queryByTestId("msg-0-toggle")).toBeNull();
+    expect(screen.getByTestId("msg-0").getAttribute("data-kind")).toBe("plan");
+  });
+
+  it("总结模式：plan 不折叠、不计入「已折叠 N 条」计数", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "做个计划" }),
+      msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+      msg({
+        seq: 2,
+        kind: "tool-call",
+        content: "调用 Bash",
+        toolName: "Bash",
+        toolArgs: '{"command":"ls"}',
+      }),
+      msg({ seq: 3, kind: "plan", content: "## 方案\n\n落地步骤", toolName: "ExitPlanMode" }),
+      msg({ seq: 4, kind: "assistant", content: "最终总结" }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    await screen.findByText("最终总结");
+    // 折叠计数只含 thinking + tool-call = 2（plan 豁免；user 与最终 assistant 本就直显）
+    expect(screen.getByTestId("summary-banner").textContent).toContain("已折叠 2 条过程消息");
+    // plan 常驻直出：正文可见、无折叠头
+    expect(screen.getByText("方案").tagName).toBe("H2");
+    expect(screen.getByTestId("plan-3")).toBeTruthy();
+    expect(screen.queryByTestId("msg-3-toggle")).toBeNull();
+  });
+});
+
+// ==== 活状态流（T1 可选项，本批裁决要做）：详情页停留期间 selected 随既有
+// 看板轮询数据（Board 的 SSE 跃迁/快照 + 降级 3s 轮询）自动更新——红卡与总结
+// 横幅随状态切换，无需重进页面。App 级集成测试：Board 数据一拍更新 →
+// onSessionsChanged 上报 → App 按 (agentType,id) 对齐 selected。反向 waiting→idle
+// 同验（总结横幅切换）。组件不重挂的判据：/session-messages 不重拉
+describe("SessionDetail：活状态流（T1）", () => {
+  /** 可手动投帧的 EventSource（不自动发快照，测试按节奏 emit） */
+  class ManualEventSource extends MockEventSource {}
+
+  /** App 级 fetch 分路：Board 三端点 + 详情页四端点；messagesCalls 计数用于
+   *  「组件不重挂」断言（重挂必触发 /session-messages 重拉） */
+  function installAppFetch() {
+    let messagesCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/session-messages")) {
+          messagesCalls += 1;
+          return new Response(
+            JSON.stringify({
+              messages: [
+                msg({ seq: 0, kind: "user", content: "详情页首条" }),
+                msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+                msg({ seq: 2, kind: "assistant", content: "回复正文" }),
+              ],
+              truncated: false,
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/session-files")) {
+          return new Response(JSON.stringify({ files: [], truncated: false }), { status: 200 });
+        }
+        if (url.includes("/session-approve-options")) {
+          // available=true：红卡真正渲染（false 会自隐，断言会变假阴性）
+          return new Response(
+            JSON.stringify({
+              available: true,
+              options: [{ id: "1", label: "允许" }],
+              verifiedWith: "test",
+              currentVersion: "1.0",
+              drift: false,
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/session-send-info")) {
+          return new Response(
+            JSON.stringify({ injectable: true, channels: ["tmux"], visibility: "realtime" }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/m/api/v1/host")) {
+          return new Response(
+            JSON.stringify({
+              host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
+              enabledTools: ["claude"],
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/m/api/v1/sessions")) {
+          return new Response(JSON.stringify({ sessions: [], totalCount: 0, waitingCount: 0 }), {
+            status: 200,
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+    return {
+      calls: () => messagesCalls,
+    };
+  }
+
+  function transition(from: Session["status"], to: Session["status"]) {
+    return {
+      sessionId: "sess-1",
+      agentType: "claude",
+      from,
+      to,
+      projectName: "proj",
+      lastMessage: null,
+      ts: 1,
+    };
+  }
+
+  it("idle 详情页停留期间收到 waiting 跃迁：红卡出现且组件不重挂；反向切回恢复总结横幅", async () => {
+    vi.stubGlobal("EventSource", ManualEventSource);
+    const appFetch = installAppFetch();
+    const idle = makeSession({ status: "idle" });
+    render(<App />);
+
+    // SSE 建连后手动投首帧快照（idle 会话上卡）→ 探测成功，看板出卡
+    const es = await waitFor(() => MockEventSource.latest());
+    act(() => {
+      es.emit("snapshot", { sessions: [idle], totalCount: 1, waitingCount: 0 });
+    });
+    // 卡片点击 → 进入详情：idle 是总结模式（横幅在），非 waiting（无红卡）
+    fireEvent.click(screen.getByText("proj").closest("li") as HTMLLIElement);
+    await screen.findByTestId("detail-back");
+    expect(await screen.findByTestId("summary-banner")).toBeTruthy();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+    const callsAfterOpen = appFetch.calls();
+    expect(callsAfterOpen).toBeGreaterThanOrEqual(1);
+
+    // 既有数据通道一拍跃迁（idle → waiting）：selected 同步 → 红卡出现。
+    // 组件不重挂：/session-messages 不重拉（重挂必重拉），detail-back 仍在
+    act(() => {
+      es.emit("transition", transition("idle", "waiting"));
+    });
+    expect(await screen.findByTestId("approve-card")).toBeTruthy();
+    expect(await screen.findByText("等待批准")).toBeTruthy();
+    expect(screen.queryByTestId("summary-banner")).toBeNull();
+    expect(appFetch.calls()).toBe(callsAfterOpen);
+    expect(screen.getByTestId("detail-back")).toBeTruthy();
+
+    // 反向跃迁（waiting → idle）：红卡卸载，总结横幅自动恢复
+    act(() => {
+      es.emit("transition", transition("waiting", "idle"));
+    });
+    await waitFor(() => expect(screen.queryByTestId("approve-card")).toBeNull());
+    expect(screen.getByTestId("summary-banner")).toBeTruthy();
+    // 全程消息不重拉（一次打开，一次拉取）
+    expect(appFetch.calls()).toBe(callsAfterOpen);
   });
 });

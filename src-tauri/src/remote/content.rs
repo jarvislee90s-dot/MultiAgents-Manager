@@ -26,22 +26,24 @@ use std::path::Path;
 
 /// 统一消息条目（camelCase 序列化 = 移动端契约，勿改字段名）。
 /// `seq` 是返回数组内的稳定顺序号（0 起文件序递增，前端按 seq 排序稳定）；
-/// `collapsed`：thinking 与 tool-call 默认折叠。
+/// `collapsed`：thinking 与 tool-call 默认折叠（plan 一等卡片恒展开）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMessage {
     pub seq: i64,
-    /// user / assistant（thinking、tool-call、tool-result 属 agent 侧工作产物，归 assistant）
+    /// user / assistant（thinking、tool-call、tool-result、plan 属 agent 侧工作产物，
+    /// 归 assistant）
     pub role: String,
-    /// user / assistant / thinking / tool-call / tool-result
+    /// user / assistant / thinking / tool-call / tool-result / plan
     pub kind: String,
-    /// 文本内容或工具摘要
+    /// 文本内容或工具摘要（kind = plan 时为计划 markdown 原文）
     pub content: String,
     /// epoch 毫秒（原生存储无时间戳的条目为 None）
     pub ts: Option<i64>,
-    /// kind = tool-call 时的工具名
+    /// kind = tool-call / plan 时的工具名（plan 保留原名供前端辨识，不参与折叠标签）
     pub tool_name: Option<String>,
-    /// kind = tool-call 时的参数 JSON 字符串（原生存储无参数则 None）
+    /// kind = tool-call 时的参数 JSON 字符串（原生存储无参数则 None；plan 恒 None——
+    /// 计划正文已升格进 content，参数串不再透传）
     pub tool_args: Option<String>,
     pub collapsed: bool,
 }
@@ -64,13 +66,41 @@ impl SessionMessage {
         }
     }
 
-    /// 工具调用条目（collapsed = true）
+    /// 工具调用条目（collapsed = true）。**计划形态升格收口（T1 一等卡片，按形态
+    /// 不按工具名）**：args JSON 顶层 `plan` 字段存在且为非空字符串（trim 口径）→
+    /// 改产出 kind="plan" 一等消息——content = 计划 markdown 原文、role=assistant、
+    /// tool_name 保留、tool_args=None、collapsed=false（默认展开，正合一等卡片语义）。
+    ///
+    /// 收口在本构造器的理由：八工具 13 个 tool-call 构造点全部经过此处，args 一律是
+    /// 序列化后的 JSON 字符串——codex function_call 的字符串形态 arguments 天然覆盖，
+    /// 无需逐点改写。解析失败 / plan 缺失 / plan 非字符串 / plan 空白 → 维持
+    /// tool-call 原状（不 panic、不丢条目）。本层是按需单会话读取路径（非 3s
+    /// 轮询），逐条 args 解析的开销可接受。
     fn tool_call(
         content: impl Into<String>,
         ts: Option<i64>,
         name: Option<String>,
         args: Option<String>,
     ) -> Self {
+        if let Some(args_str) = args.as_deref() {
+            let plan = serde_json::from_str::<serde_json::Value>(args_str)
+                .ok()
+                .and_then(|v| v.get("plan").and_then(|p| p.as_str()).map(String::from));
+            if let Some(plan) = plan {
+                if !plan.trim().is_empty() {
+                    return SessionMessage {
+                        seq: 0,
+                        role: "assistant".to_string(),
+                        kind: "plan".to_string(),
+                        content: plan,
+                        ts,
+                        tool_name: name,
+                        tool_args: None,
+                        collapsed: false,
+                    };
+                }
+            }
+        }
         SessionMessage {
             seq: 0,
             role: "assistant".to_string(),
@@ -2229,6 +2259,60 @@ mod tests {
             200
         )
         .is_err());
+    }
+
+    // ==== 计划形态升格（T1 一等卡片，按形态不按工具名）====
+
+    /// ① claude JSONL：tool_use(input.plan=非空 markdown) → kind="plan" 一等消息
+    /// （content=计划原文、role=assistant、collapsed=false、tool_name 保留、tool_args 清空）
+    #[test]
+    fn claude_plan_input_promotes_to_first_class_plan_message() {
+        let lines = vec![r##"{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ExitPlanMode","input":{"plan":"# 执行计划\n\n- 第一步\n- 第二步"}}]}}"##.to_string()];
+        let msgs = map_claude_lines(&lines);
+        assert_eq!(msgs.len(), 1, "升格后只产 plan 一条，不产 tool-call");
+        let m = &msgs[0];
+        assert_eq!(m.kind, "plan");
+        assert_eq!(m.role, "assistant");
+        assert_eq!(
+            m.content, "# 执行计划\n\n- 第一步\n- 第二步",
+            "计划原文原样"
+        );
+        assert!(!m.collapsed, "plan 默认展开（一等卡片）");
+        assert_eq!(m.tool_name.as_deref(), Some("ExitPlanMode"), "工具名保留");
+        assert_eq!(m.tool_args, None, "参数串不透传（正文已升格）");
+    }
+
+    /// ② input.plan 空串 / 空白 / 缺失 → 维持 tool-call 原样（不升格、不丢条目）
+    #[test]
+    fn claude_empty_or_missing_plan_keeps_tool_call() {
+        let lines = vec![
+            // plan 空串
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ExitPlanMode","input":{"plan":""}}]}}"#.to_string(),
+            // plan 纯空白（trim 口径视同空）
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"ExitPlanMode","input":{"plan":"  \n "}}]}}"#.to_string(),
+            // 无 plan 字段（普通工具）
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"ls"}}]}}"#.to_string(),
+            // args 非 JSON 形态（防御：解析失败维持原状，不 panic）
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:04.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t4","name":"Weird","input":"raw-string"}]}}"#.to_string(),
+        ];
+        let msgs = map_claude_lines(&lines);
+        assert_eq!(msgs.len(), 4, "四条都保留（形态不达标不升格也不丢弃）");
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(m.kind, "tool-call", "第 {i} 条应维持 tool-call");
+            assert!(m.collapsed, "tool-call 默认折叠语义不变");
+            assert!(m.tool_args.is_some(), "参数串原样透传");
+        }
+    }
+
+    /// ③ 非 ExitPlanMode 工具名但 input.plan 非空 → 同样升格（「按形态不按工具名」
+    /// 的回归锁——zcode 等工具记录的是显示 title，按名字匹配会漏）
+    #[test]
+    fn plan_promotion_is_form_based_not_name_based() {
+        let msgs = map_claude_lines(vec![r###"{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"SomeCustomPlanner","input":{"plan":"## 方案正文"}}]}}"###.to_string()].as_slice());
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, "plan", "工具名无关，形态命中即升格");
+        assert_eq!(msgs[0].content, "## 方案正文");
+        assert_eq!(msgs[0].tool_name.as_deref(), Some("SomeCustomPlanner"));
     }
 
     // ==== Codex（rollout 合成行 + thread_history tmp sqlite）====

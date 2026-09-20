@@ -73,13 +73,15 @@ export async function fetchHost<T = HostPayload>(): Promise<T | null> {
 
 /** 统一消息条目 — 与 Rust `remote::content::SessionMessage`（camelCase 序列化）逐字段
  *  对应，勿漂移：seq / role / content / kind / ts / toolName? / toolArgs? / collapsed。
- *  kind ∈ user / assistant / thinking / tool-call / tool-result；
- *  thinking 与 tool-call 的 collapsed 恒 true（wire 语义，运行中态的默认折叠依据） */
+ *  kind ∈ user / assistant / thinking / tool-call / tool-result / plan；
+ *  thinking 与 tool-call 的 collapsed 恒 true（wire 语义，运行中态的默认折叠依据）；
+ *  plan 是 T1 升格的一等计划消息（content = 计划 markdown 原文，collapsed 恒 false，
+ *  toolName 保留供辨识、toolArgs 恒空——不透传参数串） */
 export interface SessionMessage {
   seq: number;
   role: string;
   content: string;
-  kind: "user" | "assistant" | "thinking" | "tool-call" | "tool-result" | string;
+  kind: "user" | "assistant" | "thinking" | "tool-call" | "tool-result" | "plan" | string;
   ts: number | null;
   toolName?: string | null;
   toolArgs?: string | null;

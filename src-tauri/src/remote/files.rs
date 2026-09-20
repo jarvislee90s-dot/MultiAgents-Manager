@@ -1455,6 +1455,34 @@ mod tests {
         assert!(extract_paths_from_messages(&msgs).is_empty());
     }
 
+    /// T1 计划一等消息（kind="plan"）：落 `absorb_messages` 的 `_ => {}` 兜底分支——
+    /// 不进文件面板、不 panic。计划 markdown 正文里即使出现路径样串（改计划常引用
+    /// 待改文件）也不得误收——计划不是文件操作；同流 tool-call 照常提取（行为面无
+    /// 回归的对照：旧 ExitPlanMode tool-call 的 plan 参数本就抽不出路径，见
+    /// PATH_KEYS 无 plan 键）
+    #[test]
+    fn plan_messages_neither_panic_nor_produce_file_entries() {
+        let plan = SessionMessage {
+            seq: 2,
+            role: "assistant".into(),
+            kind: "plan".into(),
+            content: "# 计划\n\n- 修改 /tmp/proj/src/plan-target.rs\n- 新建 /tmp/proj/new.rs"
+                .into(),
+            ts: Some(1),
+            tool_name: Some("ExitPlanMode".into()),
+            tool_args: None,
+            collapsed: false,
+        };
+        // 纯 plan 流：无条目、不 panic
+        assert!(extract_paths_from_messages(std::slice::from_ref(&plan)).is_empty());
+        // 混合流：tool-call 照常提取，plan 不干扰（顺序、条数不受影响）
+        let msgs = vec![tool_call(r#"{"file_path":"/tmp/proj/src/a.rs"}"#), plan];
+        assert_eq!(
+            paths_of(&extract_paths_from_messages(&msgs)),
+            vec!["/tmp/proj/src/a.rs".to_string()]
+        );
+    }
+
     #[test]
     fn extract_accepts_relative_paths_and_bare_filenames_with_ext() {
         let msgs = vec![
