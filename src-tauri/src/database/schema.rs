@@ -161,6 +161,17 @@ pub fn init(conn: &Connection) {
             summary     TEXT NOT NULL,
             result      TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS session_archive (
+            session_id   TEXT PRIMARY KEY,
+            agent_type   TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            title        TEXT,
+            last_status  TEXT NOT NULL,
+            first_seen   TEXT NOT NULL,
+            last_seen    TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
         "#,
     )
     .expect("Failed to initialize database schema");

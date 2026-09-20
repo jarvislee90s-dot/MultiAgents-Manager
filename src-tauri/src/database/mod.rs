@@ -21,6 +21,10 @@ pub use dao::stash::StashEntryRecord;
 pub use dao::agent_tool::{
     enabled_tool_ids, ensure_tool_rows, get_tool_enabled, list_sub_agents, set_tool_enabled,
 };
+pub use dao::archive::{
+    agent_type_from_tool_id, delete_archive, query_archive_all, register_sessions,
+    SessionArchiveRow,
+};
 pub use dao::base_snapshot::{
     destroy_base_snapshot, get_base_snapshot, save_base_snapshot, set_active_preset,
 };

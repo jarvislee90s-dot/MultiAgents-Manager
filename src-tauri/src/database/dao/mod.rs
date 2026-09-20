@@ -1,4 +1,5 @@
 pub mod agent_tool;
+pub mod archive;
 pub mod base_snapshot;
 pub mod extension;
 pub mod heartbeat_seen;
