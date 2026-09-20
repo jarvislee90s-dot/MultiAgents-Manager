@@ -87,3 +87,29 @@ describe("ArchiveBoard：历史页", () => {
     expect(screen.queryByText("暂无归档记录")).toBeNull();
   });
 });
+
+describe("ArchiveBoard 软归档徽标（体验批二）", () => {
+  beforeEach(() => installFetch());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  it("hiddenAlive 条目带「未结束」徽标，时间后缀为「活跃」", async () => {
+    const alivePayload: ArchivedPayload = {
+      archived: [{ ...payload.archived[0], hiddenAlive: true }],
+      projects: ["proj-1"],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify(alivePayload), {
+          headers: { "content-type": "application/json" },
+        })
+      )
+    );
+    render(<ArchiveBoard onBack={() => {}} onOpenCard={() => {}} onUnpaired={() => {}} />);
+    expect((await screen.findByTestId("alive-badge")).textContent).toBe("未结束");
+    expect(screen.getByText(/活跃$/)).toBeTruthy();
+  });
+});

@@ -202,9 +202,21 @@ export default function ArchiveBoard({
             className="rounded-xl border border-slate-200 px-3 py-2.5 text-left enabled:hover:bg-slate-50 dark:border-slate-800"
           >
             <div className="flex items-baseline justify-between">
-              <span className="text-sm font-medium">{s.projectName}</span>
-              <span className="text-xs text-slate-400">
-                {formatRelativeTime(s.lastSeenAt, now)}结束
+              <span className="flex min-w-0 items-center gap-1.5">
+                {/* 软归档活会话徽标（体验批二）：未结束、看板隐藏中，详情页可移回 */}
+                {s.hiddenAlive && (
+                  <span
+                    data-testid="alive-badge"
+                    className="shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/40 dark:text-green-300"
+                  >
+                    未结束
+                  </span>
+                )}
+                <span className="truncate text-sm font-medium">{s.projectName}</span>
+              </span>
+              <span className="shrink-0 text-xs text-slate-400">
+                {formatRelativeTime(s.lastSeenAt, now)}
+                {s.hiddenAlive ? "活跃" : "结束"}
               </span>
             </div>
             <div className="mt-0.5 text-xs text-slate-500">

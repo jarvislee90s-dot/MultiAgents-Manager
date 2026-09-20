@@ -221,3 +221,79 @@ describe("ArchiveDetail：归档详情与激活", () => {
     expect((await screen.findByTestId("archive-truncated")).textContent).toContain("200");
   });
 });
+
+describe("ArchiveDetail 软归档与加载更早（体验批二）", () => {
+  beforeEach(() => installFetch({}));
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  it("hiddenAlive 会话：未结束徽标 + 移回看板（无打开按钮），成功后回历史页", async () => {
+    const back = vi.fn();
+    const unhideCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/session-unhide")) {
+          unhideCalls.push(url);
+          return new Response(JSON.stringify({ ok: true, removed: 1 }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("/session-messages")) {
+          return new Response(JSON.stringify(DEFAULT_PAGE), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    render(
+      <ArchiveDetail session={{ ...card, hiddenAlive: true }} onBack={back} onActivated={() => {}} />
+    );
+    expect(await screen.findByTestId("hidden-alive-badge")).toBeTruthy();
+    expect(screen.queryByTestId("session-open")).toBeNull();
+    expect(screen.queryByTestId("archive-remove")).toBeNull();
+    fireEvent.click(screen.getByTestId("unhide-session"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(unhideCalls).toHaveLength(1);
+    expect(back).toHaveBeenCalled();
+  });
+
+  it("加载更早消息：达 limit 显按钮，点击以翻倍 limit 整页重拉并锚定原顶部", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const requested: number[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/session-messages")) {
+          const limit = Number(
+            new URL(url, "http://localhost").searchParams.get("limit") ?? "0"
+          );
+          requested.push(limit);
+          return new Response(
+            JSON.stringify({
+              messages: Array.from({ length: limit }, (_, i) => ({
+                seq: i + 1, role: "user", content: `m${i + 1}`, kind: "text", ts: i + 1,
+              })),
+              truncated: false,
+            }),
+            { headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    expect(await screen.findByText("m200")).toBeTruthy();
+    expect(screen.getByTestId("load-more")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("load-more"));
+    expect(await screen.findByText("m400")).toBeTruthy();
+    expect(requested).toEqual([200, 400]);
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled(); // 锚定原顶部消息
+  });
+});
