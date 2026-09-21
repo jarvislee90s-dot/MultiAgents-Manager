@@ -300,3 +300,42 @@ describe("ApproveCard：审批点 plan 聚合（T8）", () => {
     expect(screen.queryByTestId("approve-plan")).toBeNull();
   });
 });
+
+// ==== 批次丙 R1-3：降级二元卡的防重警示（计划红线 3）====
+describe("ApproveCard：降级警示脚注（R1-3）", () => {
+  it("degradedHint 在场：二元卡渲染警示脚注（终端可能是多选对话框）", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      degradedHint: "未读到终端对话框选项——终端可能正显示多选项，二元键可能错位，建议到终端确认",
+    });
+    render(<ApproveCard session={{ id: "sess-deg" }} />);
+    const hint = await screen.findByTestId("approve-degraded-hint");
+    expect(hint.textContent).toContain("未读到终端对话框选项");
+    expect(hint.textContent).toContain("建议到终端确认");
+    // 二元按钮仍在（降级不是自隐——用户仍可操作，只是被警示）
+    expect(screen.getByTestId("approve-option-approve")).toBeTruthy();
+    expect(screen.getByTestId("approve-option-reject")).toBeTruthy();
+  });
+
+  it("degradedHint=null/缺省：不渲染脚注（未降级零变化）", async () => {
+    installFetch();
+    routes.options = approveOptions({ degradedHint: null });
+    render(<ApproveCard session={{ id: "sess-nodeg" }} />);
+    await screen.findByTestId("approve-option-approve");
+    expect(screen.queryByTestId("approve-degraded-hint")).toBeNull();
+  });
+
+  it("对话框模式（dialog=true）不渲染降级脚注（读到选项即未降级）", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "No" },
+      ],
+    });
+    render(<ApproveCard session={{ id: "sess-ok" }} />);
+    await screen.findByTestId("approve-option-dialog:1");
+    expect(screen.queryByTestId("approve-degraded-hint")).toBeNull();
+  });
+});

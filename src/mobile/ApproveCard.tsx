@@ -219,6 +219,16 @@ export default function ApproveCard({ session }: ApproveCardProps) {
           映射待实测确认，若提示不符请用普通发送
         </p>
       )}
+      {/* R1-3 降级警示（计划红线 3）：命中审批但未读到终端对话框选项 → 终端可能正
+          显示多选项而二元键可能错位，必须显式提示用户去终端核对（后端下发文案原文） */}
+      {typeof options.degradedHint === "string" && options.degradedHint.trim() !== "" && (
+        <p
+          data-testid="approve-degraded-hint"
+          className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+        >
+          {options.degradedHint}
+        </p>
+      )}
     </InteractiveCard>
   );
 }

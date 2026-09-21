@@ -1403,6 +1403,44 @@ pub async fn session_attachment(
 // 传入 conn、不自取锁，锁内只 SQL）；session_source 调用与 store.with **顺序执行不
 // 嵌套**——生产 session_source 内部会锁同一把全局 DB，嵌套即自锁死锁。
 
+/// 审批对话框的**键序档**（R1-2：按对话框模型分族，不按工具）。
+///
+/// 实机证据（2026-09-21，两处独立探测 + 本机复验）表明「同一工具的不同对话框
+/// 键序不同」：
+///
+/// | 对话框 | 数字键 | 可靠路径 | 证据 |
+/// |---|---|---|---|
+/// | claude **AskUserQuestion** | ✅ 即选即交 | 数字 | K1 实机（批次乙） |
+/// | claude **计划批准** | ❌ 无效 | ↓×k + Enter | R1-2 独立探测三样本 + 本机复验 |
+/// | kimi **计划批准**（Ready to build） | ⚠️ **不可依赖** | ↓×k + Enter | R1-1 独立探测：`'2'+Enter` 误批准、`'3'` 单键拒绝——行为不一致 |
+/// | codex Implement this plan | ✅ 有效 | 数字 | 本轮实机（`'1'` 关闭对话框并开工） |
+///
+/// 故 approve 侧不再「一律发数字」，改由本档决定：**数字直选** vs **导航确认**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApproveDialogKeys {
+    /// 数字键即选即交（claude AUQ / codex 计划批准）——实机验证可靠
+    DigitDirect,
+    /// 导航确认：`↓×k + Enter`（claude 计划批准 / kimi 计划批准类）——数字无效或
+    /// 不可依赖，必须按解析到的当前高亮位算步进
+    NavigateConfirm,
+}
+
+/// 会话工具 → 审批对话框键序档（R1-2）。
+///
+/// **收窄口径**：只有**已实机证明数字不可靠**的工具才走导航（claude/kimi）；codex
+/// 的数字键本轮实测有效（`'1'` 关了 `Implement this plan?` 并开工），维持数字直选。
+/// 未收录工具保守走 [`ApproveDialogKeys::NavigateConfirm`]？**不**——未知工具本就
+/// 没有映射表（`no_mapping` 404），到不了这里；此处只覆盖有映射的两家 + kimi。
+fn approve_dialog_keys(tool: &str) -> ApproveDialogKeys {
+    match tool {
+        // codex：本轮实测数字有效（Implement this plan → '1' 提交并开工）
+        "codex" => ApproveDialogKeys::DigitDirect,
+        // claude / kimi：计划批准类对话框数字无效或不可依赖 → 导航确认
+        // （注意：claude 的 AUQ 是**问答**路径，不走 approve 端点，故此处不影响 K1 语义）
+        _ => ApproveDialogKeys::NavigateConfirm,
+    }
+}
+
 /// 审批选项扫描产物（映射存在时的载荷；available=false 时 options 恒空）
 struct ApproveScanHit {
     available: bool,
@@ -1420,7 +1458,14 @@ struct ApproveScanHit {
     dialog: bool,
     /// T8：审批点关联的计划内容（None = 无计划消息在场 → 前端只渲染选项）
     plan_body: Option<ApprovePlanBody>,
+    /// R1-3：**降级警示**——命中审批但未读到对话框选项（终端可能正显示多选对话框，
+    /// 二元键可能错位）。下发文案，前端在二元卡渲染脚注。
+    degraded_hint: Option<String>,
 }
+
+/// R1-3 降级警示文案（前端 `degrade-hint` 脚注原文；中文，与既有 reason 提示同风格）
+const DEGRADED_DIALOG_HINT: &str =
+    "未读到终端对话框选项——终端可能正显示多选项，二元键可能错位，建议到终端确认";
 
 /// 对话框选项屏读（批次丙 T5）：Windows 屏读可见窗口 → 解析编号选项行。
 ///
@@ -1515,6 +1560,8 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             reason: Some(crate::inject::approve::PROBE_PENDING_REASON.to_string()),
             dialog: false,
             plan_body: None,
+            // 严格档是「未取证不出键」，与「降级警示」不同轴——此处不给降级文案
+            degraded_hint: None,
         });
     }
     // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
@@ -1545,6 +1592,15 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     } else {
         None
     };
+    // ===== R1-3：降级态必须**明确警示**（终审 Important）=====
+    //
+    // 计划红线 3 要求「解析失败降级二元卡 + **防重警示**」，但原实现只回落映射二元项、
+    // 无任何警示。危害面实证：终端若是多选对话框而用户点了二元「允许」→ 注入的键
+    // 可能错位命中**非预期选项**（幽灵标记误选选项 1 即此）。
+    //
+    // 警示条件：**命中审批（hit）但屏读/解析没拿到对话框选项** —— 即「终端可能正显示
+    // 一个我们没读到的多选对话框」。此时下发 `degradedHint`，前端在二元卡上渲染脚注。
+    let degraded = hit && dialog_options.is_none();
     // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
     // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
     let (options, dialog) = match dialog_options {
@@ -1594,6 +1650,11 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         reason: None,
         dialog,
         plan_body,
+        degraded_hint: if degraded {
+            Some(DEGRADED_DIALOG_HINT.to_string())
+        } else {
+            None
+        },
     })
 }
 
@@ -1675,20 +1736,31 @@ pub async fn session_approve_options(
                     .into_response();
             }
         };
-    let (available, options, verified_with, tool, reason, dialog, plan_body) = match scan {
-        Some(hit) => (
-            hit.available,
-            hit.options,
-            hit.verified_with,
-            Some(hit.tool),
-            hit.reason,
-            hit.dialog,
-            hit.plan_body,
-        ),
-        // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
-        // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
-        None => (false, Vec::new(), String::new(), None, None, false, None),
-    };
+    let (available, options, verified_with, tool, reason, dialog, plan_body, degraded_hint) =
+        match scan {
+            Some(hit) => (
+                hit.available,
+                hit.options,
+                hit.verified_with,
+                Some(hit.tool),
+                hit.reason,
+                hit.dialog,
+                hit.plan_body,
+                hit.degraded_hint,
+            ),
+            // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
+            // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
+            None => (
+                false,
+                Vec::new(),
+                String::new(),
+                None,
+                None,
+                false,
+                None,
+                None,
+            ),
+        };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
     let current_version = match tool.as_deref() {
         Some(t) => {
@@ -1745,6 +1817,9 @@ pub async fn session_approve_options(
                 Some(b) => serde_json::json!({ "content": b.content, "isFile": b.is_file }),
                 None => serde_json::Value::Null,
             },
+            // R1-3：降级警示（命中审批但未读到对话框选项）——前端在二元卡渲染脚注；
+            // null = 未降级（读到对话框选项，或本就非审批态）
+            "degradedHint": degraded_hint,
         })),
     )
         .into_response()
@@ -1848,19 +1923,34 @@ pub async fn session_approve(
         // 防 GET→POST 之间对话框变化导致注入陈旧数字；重解析失败即拒，不盲发）。
         if let Some(n_str) = probe_opt.strip_prefix("dialog:") {
             let n: u32 = n_str.parse().map_err(|_| "no_mapping")?;
+            // **现场重解析**（防 GET→POST 之间对话框变化导致注入陈旧键；同时导航
+            // 需要**当前高亮位**——那是此刻屏幕上的状态，不能用 GET 时的快照）
             let opts = read_dialog_options(&session).ok_or("no_mapping")?;
             if !opts.iter().any(|o| o.number == n) {
                 return Err("no_mapping");
             }
-            // 合成一个「键 = 数字字符」的选项（复用下方既有投递与审计管线）
+            // R1-1/R1-2：按对话框模型选键序档——claude/kimi 的计划批准类对话框
+            // 数字键无效或不可依赖（可能误批准）→ 走导航确认；codex 数字有效 → 直选
+            let keys = match approve_dialog_keys(&tool) {
+                ApproveDialogKeys::DigitDirect => vec![n.to_string()],
+                ApproveDialogKeys::NavigateConfirm => {
+                    crate::inject::dialog::navigation_sequence(&opts, n).map_err(|e| {
+                        log::debug!("R1 导航序列构造失败（{tool}）: {e}");
+                        "no_mapping"
+                    })?
+                }
+            };
             return Ok((
                 session,
                 tool,
                 crate::inject::approve::ApproveOption {
                     id: probe_opt.clone(),
                     label: format!("对话框选项 {n}"),
-                    key: n.to_string(),
+                    // key 字段承载**多键序列**（逗号分隔的既有约定见 families 注释？
+                    // 不——此处改为下方 seq 直传，key 保留首键仅为审计可读）
+                    key: keys.join(","),
                 },
+                keys,
             ));
         }
         let Some(option) =
@@ -1868,7 +1958,8 @@ pub async fn session_approve(
         else {
             return Err("no_mapping");
         };
-        Ok((session, tool, option))
+        let keys = vec![option.key.clone()];
+        Ok((session, tool, option, keys))
     })
     .await
     {
@@ -1883,7 +1974,7 @@ pub async fn session_approve(
                 .into_response();
         }
     };
-    let (session, tool, option) = match lookup {
+    let (session, tool, option, keys) = match lookup {
         Ok(v) => v,
         Err(code) => {
             let status = if code == "not_waiting" {
@@ -1906,7 +1997,6 @@ pub async fn session_approve(
     // M11：会话路由含无头通道时，此处按 approve option 分派 control_message 而非按键
     let injector = st.injector.clone();
     let pid = session.pid;
-    let key = option.key.clone();
     let approve_sid = sid.clone();
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，F1
     // 断连双投修复）：handler 断连（弱网/隧道掐断慢投递）不再提前释放守卫——detached
@@ -1915,7 +2005,20 @@ pub async fn session_approve(
     let attempt = tokio::task::spawn_blocking(move || {
         // `?` = 守卫忙（try_acquire_inflight 得 None）→ 闭包哨兵返回 None：让位不投递
         let _guard = crate::inject::queue::try_acquire_inflight(&approve_sid)?;
-        Some(injector.locate_and_send_key_spec(pid, &key, &spec))
+        // 逐键投递（导航确认是多键序列：↓×k + Enter）；首错即停
+        // （半途失败不可盲目重试全序列——已发键已生效，前端按 failed 提示核对终端）
+        let mut result = Ok(());
+        for key in &keys {
+            if let Err(e) = injector.locate_and_send_key_spec(pid, key, &spec) {
+                result = Err(e);
+                break;
+            }
+            // 导航键之间有间隔，给 TUI 重绘时间（实测 ↓ 后立即 Enter 偶有竞态）
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ));
+        }
+        Some(result)
     })
     .await;
     let sent = match attempt {
@@ -1946,6 +2049,10 @@ pub async fn session_approve(
     let action = match option.id.as_str() {
         "approve" => "approve",
         "reject" => "reject",
+        // R1-4：对话框选项（`dialog:N`）语义上是**批准动作**（用户在真实选项里选了一个），
+        // 归 approve——与 C-23 文档「审计 action=approve、content=dialog:N」一致。
+        // 原实现落 "key"+warn，属域外 id 兜底路径的误伤。
+        d if d.starts_with("dialog:") => "approve",
         other => {
             log::warn!("审批动作域外 id：{other}，审计记 key");
             "key"

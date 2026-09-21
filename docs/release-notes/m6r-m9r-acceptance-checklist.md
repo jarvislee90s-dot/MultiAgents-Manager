@@ -189,7 +189,7 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-20 | **三家实机矩阵（claude / codex / kimi；F8 就绪）** | 三家 CLI 在场；codex 需先过信任门（C-17）；helper 已 debug 构建 | ① 三家各跑一条 `--ignored` 自检（C-16/C-18/C-19，自动化形态）；② **人工交互会话**（三家各一）：claude 触发权限提示、codex 触发审批框、kimi 触发审批请求，期间观察 `~/.mam/events/<session_id>.json` 内容与看板红卡 | ① 三条自检全绿（claude/kimi 本批实测已过；codex 至信任门前一步=事件不落盘为**设计内**，见 C-17）；② 人工会话中审批进入事件落盘 → 看板该会话**强制 Waiting 红卡**（T4 接铃铛）→ 手机上批准/拒绝 → 对应事件（claude PostToolUse/Stop、codex PostToolUse/Stop、kimi **PermissionResult**）清除标记 → 卡片回落绿灯（**F1 修复点**：kimi 清除链此前漏接 PermissionResult，红灯永不落）。**人工项归用户执行**（agent 不代做交互会话） |
 | C-21 | **问答三形态（批次乙 T8 新增，claude 先行）** | claude 在场 + debug helper 已构建（同 C-18 前置） | ① claude 交互会话触发 AskUserQuestion（单选 / 多选各一次 + 自由文本入口）→ 移动端问答卡出现（等待态；PreToolUse hook 通道实时载荷）；② 单选点选项 / 多选勾选+提交 / 自由文本按引导走普通消息；③ 终端核对作答生效、审计 action=answer 落账 | 问答卡出现且作答送达生效；**问答模式不出允许/拒绝**（与审批红卡严格隔离）；多问题（questions>1）为只读卡+引导（未测面，不注入）；键位语义与注入序列依据 `research/refs/phase2-消息注入/2026-09-21-claude-askuserquestion-按键语义探测.md`（K1–K11 定案表 + questions JSON 夹具）。**人工项归用户执行**（agent 不代做交互会话） |
 | C-22 | **信号健康度走查（批次乙 T5 新增）** | MAM 运行；至少一工具已注册 hooks；codex 已注册但**未信任**（即未跑 C-17） | 桌面设置页「信号健康度」小节逐工具查看三态/待办文案；对 codex 待办行点「复制 /hooks」；在 codex TUI 完成信任后回看该行 | per-tool 行三态正确（未注册 / 正常·最近事件 xx 前 / 暂无活跃会话）；codex 未信任时判据命中（已注册∧活跃会话∧零事件）→ 显示信任待办文案 + 复制按钮，信任后待办消除；首次 codex 注册收到一次性桌面通知（重启不重复弹）。注：本行为 T5 新增的验收落点（任务书未点名清单项，收口裁量，已台账申报） |
-| C-23 | **N 选项审批对话框（T5 新增）** | Windows 实机；claude/codex/kimi 任一在场；**已完成 T2 部署**（`~/.mam/bin` helper 为含载荷的新构建） | ① 触发三类 N 选一对话框之一：claude 计划批准、codex `Implement this plan?`、kimi `Ready to build`；② 手机看红卡应显示**终端对话框的真实选项文本 + 编号徽标**（而非二元「允许/拒绝」）；③ 点第 N 项 → 终端对应选项被选中并提交 | 卡片选项与终端屏上选项**逐项对齐**；点按生效；审计 `action=approve`、`content=dialog:N`。**降级路径**（红线 3）：屏读失败 / 无连续编号簇（<2 或 >9 项）→ 回落**二元卡 + 防重警示**。**实机探测已完成（2026-09-21）**：三类对话框全部真机触发，档案 `research/refs/phase2-消息注入/2026-09-21-审批对话框N选项屏读解析实机探测.md`。**探测抓获两处缺陷并已修**：① 光标标记前缀（`›`/`❯`/`▶`）使首项永不匹配 → codex/kimi 解析 0 项降级、claude 簇错位拼接正文列表（修复 + 双回归锁）；② kimi 确认键是 **Enter** 而非矩阵记载的第二数字（修复 + 回归锁）。**待裁决开放项**：claude 计划批准框**数字键无效**（须 ↓+Enter）——当前编号键路径对该框不生效，修法方向=「↓×(n-1)+Enter」（已实测生效） |
+| C-23 | **N 选项审批对话框（T5 新增）** | Windows 实机；claude/codex/kimi 任一在场；**已完成 T2 部署**（`~/.mam/bin` helper 为含载荷的新构建） | ① 触发三类 N 选一对话框之一：claude 计划批准、codex `Implement this plan?`、kimi `Ready to build`；② 手机看红卡应显示**终端对话框的真实选项文本 + 编号徽标**（而非二元「允许/拒绝」）；③ 点第 N 项 → 终端对应选项被选中并提交 | 卡片选项与终端屏上选项**逐项对齐**；点按生效；审计 `action=approve`、`content=dialog:N`。**降级路径**（红线 3）：屏读失败 / 无连续编号簇（<2 或 >9 项）→ 回落**二元卡 + 防重警示**。**实机探测已完成（2026-09-21）**：三类对话框全部真机触发，档案 `research/refs/phase2-消息注入/2026-09-21-审批对话框N选项屏读解析实机探测.md`。**探测抓获两处缺陷并已修**：① 光标标记前缀（`›`/`❯`/`▶`）使首项永不匹配 → codex/kimi 解析 0 项降级、claude 簇错位拼接正文列表（修复 + 双回归锁）；② kimi 确认键是 **Enter** 而非矩阵记载的第二数字（修复 + 回归锁）。**R1 复评已修（2026-09-21）**：claude 计划批准框数字无效 + **kimi 数字通道不可依赖（可能误批准）** 两处 → 审批侧引入**按对话框模型的键序档**（`DigitDirect`=codex / `NavigateConfirm`=claude·kimi），导航序列 = **从解析到的当前高亮位算循环距离** → `[↓×k, Enter]`（无高亮信息则拒绝，不猜起点）。**本机端到端复验**：算法算出的 `[↓,Enter]`（目标=选项 2）→ 高亮移到行 2 → Enter 关闭框 → 状态栏 `manual mode on`（=选项 2，非选项 1）✅。降级态新增**防重警示脚注**（R1-3）；`dialog:N` 审计归 `approve`（R1-4） |
 | C-24 | **模式切换（T6 新增）** | 同上；四家各一在场 | ① 会话详情页「模式」栏显示当前档；② claude/opencode/kimi 点「切换模式」（shift+tab 循环切一档）；③ codex 点「计划」/「完全信任」；④ **opencode 专项**：切后屏读回读档位应变化 | ① opencode 档位回读**变化可见**；② 其余三家回执**如实标注 `verified=false` + 人工核对提示**；③ codex 无命令证据的两档不给按钮、直调 API 亦 409。**实机探测已完成（2026-09-21）**：档案 `research/refs/phase2-消息注入/2026-09-21-四家模式切换shift-tab实机探测.md`——**四家 shift+tab 全部生效**（底栏均明示 `shift+tab to cycle`）；**opencode 屏读回读 5/5 正确**（实现侧 `parse_mode_from_screen` 对全部真实快照逐例吻合，`Build`↔`Plan` 循环 4 次）；claude 实测四档环序（acceptEdits→plan→auto→manual）。**待裁决开放项**：codex 底栏亦明示 shift+tab（非仅斜杠命令）；claude/codex/kimi 底栏档位文本实际可读而实现侧 `mode_readback_supported` 偏保守（仅放开 opencode） |
 | C-25 | **打断式插队（T9 新增）** | claude 交互会话处于**运行中**（busy） | 在手机端对运行中的 claude 会话点「立即发送」 | ① 当前回合被 Esc 中断（"Interrupted · What should Claude do instead?"）；② 消息**即刻进入**（而非停在 TUI 内部队列）；③ 审计 `action=jump`。**降级**：Esc 注入失败/排空超时仍继续投递正文（best-effort）。**实机探测已完成（2026-09-21）**：档案 `research/refs/phase2-消息注入/2026-09-21-claude打断式插队Esc语义链实机探测.md`——busy 注入正文 → Enter 落**内部队列**（底栏原文 `Press up to edit queued messages`，**即计划书问题 10 的现场证据**）；**Esc 中断后队列消息被自动取出开新回合**（`Interrupted…` → `✢ Photosynthesizing…`，**消息不丢**）→ 确证「先 Esc 再投递」次序正确。**未测面（留白）**：`wait_input_drained` 3s 预算的精确边界未逐毫秒量化；多条队列消息的取舍顺序未测；**「Esc 是否清输入行草稿」仍未直接验**（本轮入队后输入行已空）；重复 Esc 时机未测 |
 
@@ -341,6 +341,31 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
    可读，实现侧 `mode_readback_supported` 仅放开 opencode（偏保守）。放开需注意
    claude 的 `auto mode`→MAM `Bypass`、`manual mode`→MAM `Default` 的映射（本档
    已实测该对应关系）。
+
+### E-7 · R1 复评修复包（2026-09-21，主线评审后）
+
+> 主线评审结论「批次通过，乙丙可合并验收，附必修包 R1（4 项）」。**一个 commit 修完**。
+
+| # | 项 | 性质 | 修法 | 证据/锁 |
+|---|---|---|---|---|
+| R1-1 | **kimi 键序修复不安全**（数字通道在该对话框上不可依赖，可能误批准） | **安全**（新抓获） | kimi 计划批准类改**导航确认**（与 claude 同档） | `navigation_sequence` + `ApproveDialogKeys::NavigateConfirm`；测试 `navigation_steps_from_highlight_position` / `navigation_refuses_when_start_unknown` |
+| R1-2 | claude 计划批准框数字键无效（= E-6 开放项 1，§4③ 缺口） | 必修（§4③ 完成条件） | approve 侧**按对话框模型分档**；步进从**解析到的高亮位**算循环距离，不盲发计数 | 同上 + **本机端到端复验**（算法输出 `[↓,Enter]` 目标=2 → 状态栏 `manual mode on` ✅） |
+| R1-3 | 降级二元卡缺警示（违计划红线 3） | Important | 命中审批但未读到对话框选项 → 下发 `degradedHint`，前端二元卡渲染脚注 | 后端 `degraded_hint` 字段 + 前端 `approve-degraded-hint`；前端测试 3 例 |
+| R1-4 | `dialog:N` 审计落 `key`（与 C-23 文档不符） | Minor | `dialog:` 前缀特判归 `approve` | 既有「域外 id 收敛为 key」测试仍绿（未误伤真域外 id） |
+
+**R1-1 的独立证据与本机佐证**：评审独立探测实测 `'2'+Enter` → **Approve 且模型真的写了文件**、
+另一实例 `'3'` 单键即拒绝（**行为不一致**）；本机复核其 `wire.jsonl`：kimi `Ready to build` 是
+`interaction.request kind=approval`（`toolName=ExitPlanMode`、`display.kind=plan_review`），
+**非 question 且无 `questions[]`**。**本批 E-6 §1.3 原结论（「数字选中 + Enter 确认」）被更强证据
+修正**——那次 `'1'+Enter` 观察不具判别力（默认高亮恰在第 1 项）。
+
+**导航语义本机全量复验**（claude 计划批准框，详见 T5 档 §7.2）：↓ 前进（尾部**循环回卷**）、
+↑ 反向回卷、**Enter 提交高亮行**（与编号无关）。故实现按「当前高亮位 → 目标位的循环距离」算步进；
+**无高亮信息则拒绝**（不猜起点——猜错正是「想拒绝却批准」的来源）。
+
+**未测面（留白）**：kimi 侧导航**未在本机复跑端到端**（其对话框与 claude 同族——同用 `▶` 标记、
+底栏同款 `↑/↓ select · 1/2/3 choose · ↵ confirm`，但未实测 ↓+Enter 在 kimi 上的效果；评审的独立
+探测已实锤该路径）；kimi 四选项变体（`▶ Write this file?`）导航未实测；导航键间隔未逐毫秒标定。
 
 ### E-5 · 批次丙交付清单（任务 × commit）
 

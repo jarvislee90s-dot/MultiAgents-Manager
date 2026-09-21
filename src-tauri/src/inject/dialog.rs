@@ -46,17 +46,28 @@
 /// 单个对话框选项（编号 + 文本原文）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogOption {
-    /// 编号（屏幕上显示的 1 起数字，即注入该数字键即可选中）
+    /// 编号（屏幕上显示的 1 起数字）
     pub number: u32,
     /// 选项文本原文（可能含该工具追加的说明；不裁剪、不改写——把终端所见原样
     /// 交给用户是 T5 的目标）
     pub label: String,
+    /// 该行是否带**光标标记**（`›`/`❯`/`▶`/`>`）——即 TUI 当前高亮项。
+    ///
+    /// **R1-2 起本字段是导航确认的必需输入**：对话框的 Enter 提交的是**高亮行**
+    /// 而非「编号 = 用户点击项」，故必须知道起点在哪一行才能算出步进数（见
+    /// [`navigation_sequence`]）。实测（2026-09-21）：claude 计划批准框 Enter
+    /// 提交高亮行，`↓×k` 使高亮前进 k 行（**循环**：3 行时 ↓ 从 3 回到 1）。
+    pub highlighted: bool,
 }
+
+/// 光标标记集合（实机三类，见 [`parse_option_line`] 注）
+const CURSOR_MARKERS: [char; 4] = ['\u{203a}', '\u{276f}', '\u{25b6}', '>'];
 
 /// 数字键域上限（与 [`super::question::digit_key`] 同口径：'1'..'9'）
 pub const MAX_DIALOG_OPTIONS: usize = 9;
 
 /// 判定一行是否是「编号选项行」并抽出 (编号, 文本)。行模式：
+/// 判定一行是否是「编号选项行」并抽出 (编号, 文本, 是否高亮)。行模式：
 /// `^[\s›❯>]*(\d+)\s*[.)]\s*(.+)$`——允许前导空白**与光标标记**、编号后跟
 /// `.` 或 `)`、其后至少一个空白（防把 `1.5x` 这类数字当选项）。
 ///
@@ -67,15 +78,25 @@ pub const MAX_DIALOG_OPTIONS: usize = 9;
 /// 实测证据：`%TEMP%\mam-probe-c3-20260921-150000\evidence\
 /// screen-t5-codex-implement-before.txt`（行 25 `› 1. Yes, implement this plan`）。
 /// claude 的同类标记是 `❯ `（U+276F，见同目录 screen-t5-claude-plan-before.txt），
-/// 故两家标记都要剥。`>` 是兜底形态（部分 TUI 用 ASCII 箭头）。
-fn parse_option_line(line: &str) -> Option<(u32, String)> {
-    // 剥前导空白 + 光标标记（可多枚/交替出现，如 "❯ › 1."）。
-    // 三类实机光标标记（2026-09-21 探测，逐家屏幕原文取证）：
-    //   codex `› 1.`（U+203A）/ claude `❯ 1.`（U+276F）/ kimi `▶ 1.`（U+25B6）；
-    //   `>` 为 ASCII 兜底形态。
-    let t = line.trim_start_matches(|c: char| {
-        c.is_whitespace() || matches!(c, '\u{203a}' | '\u{276f}' | '\u{25b6}' | '>')
-    });
+/// kimi 是 `▶ `（U+25B6）。`>` 是兜底形态（部分 TUI 用 ASCII 箭头）。
+///
+/// **返回值第三项=高亮**（R1-2 起）：行首出现光标标记即该选项是 TUI 当前高亮项。
+/// 这是导航确认的起点（Enter 提交高亮行，故须知道起点才能算步进）。
+fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
+    // 前导空白 + 光标标记的位置判定：标记必须出现在**编号之前**（前导区）才算高亮
+    let mut idx = 0usize;
+    let mut highlighted = false;
+    for c in line.chars() {
+        if c.is_whitespace() {
+            idx += c.len_utf8();
+        } else if CURSOR_MARKERS.contains(&c) {
+            highlighted = true;
+            idx += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let t = &line[idx..];
     let digits_len = t.chars().take_while(|c| c.is_ascii_digit()).count();
     if digits_len == 0 {
         return None;
@@ -93,7 +114,7 @@ fn parse_option_line(line: &str) -> Option<(u32, String)> {
     if label.is_empty() {
         return None;
     }
-    Some((num, label.to_string()))
+    Some((num, label.to_string(), highlighted))
 }
 
 /// 从屏读行集解析对话框选项表（纯函数，可测）。
@@ -111,18 +132,26 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
     let mut expect: u32 = 1;
     for line in lines {
         match parse_option_line(line) {
-            Some((num, label)) if num == expect => {
-                cur.push(DialogOption { number: num, label });
+            Some((num, label, hl)) if num == expect => {
+                cur.push(DialogOption {
+                    number: num,
+                    label,
+                    highlighted: hl,
+                });
                 expect += 1;
             }
-            Some((num, label)) if num == 1 => {
+            Some((num, label, hl)) if num == 1 => {
                 // 新的簇从 1 重新开始：保留更长的那个
                 if cur.len() > best.len() {
                     best = std::mem::take(&mut cur);
                 } else {
                     cur.clear();
                 }
-                cur.push(DialogOption { number: num, label });
+                cur.push(DialogOption {
+                    number: num,
+                    label,
+                    highlighted: hl,
+                });
                 expect = 2;
             }
             Some(_) => {
@@ -165,6 +194,59 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
         return None;
     }
     Some(best)
+}
+
+/// 目标选项的**导航确认**序列（R1 起：claude 计划批准 / kimi 计划批准类对话框）。
+///
+/// # 为什么需要（两处独立的实机证据）
+///
+/// **① claude 计划批准框：数字键无效。** 独立探测三样本零效果，而 `↓×(n-1)+Enter`
+/// 分别正确选到 1/2/3（含 JSONL 批准回执）。本机复验（2026-09-21 同批探测）：
+/// 高亮在第 1 行时注入 '2' → 对话框无变化；改为 ↓+Enter → 第 2 项被提交。
+///
+/// **② kimi 计划批准框：数字通道不可依赖（安全缺陷）。** 独立探测实测
+/// `'2'+Enter` 产出的是 **Approve 且模型真的执行写了文件**（数字被忽略、Enter 提交
+/// 的是**当前高亮行**），而另一实例 `'3'` 却单键即关框置 Rejected——行为不一致，
+/// 存在「**想拒绝却批准**」的现实后果。可靠路径 = ↓+Enter（`· Rejected` 实锤）。
+///
+/// # 语义（实测，2026-09-21）
+///
+/// - **Enter 提交的是当前高亮行**，与编号无关；
+/// - `↓×k` 使高亮**前进 k 行**，**到尾部循环回首个**（claude 3 行实测：↓ 从 3 回 1，
+///   ↑ 从 1 回 3）；↑ 同理反向；
+/// - 故步进数 = **从当前高亮位到目标位的循环距离**，不是 `target - 1`。
+///
+/// 本函数据此计算：取**唯一**高亮行（`highlighted`）为起点；无高亮信息（解析器未
+/// 见光标标记，某些 TUI 形态可能不渲染）→ **保守返回 Err**（不猜起点——猜错会提交
+/// 错误选项，正是我们要消除的「想拒绝却批准」）。多行同时带标记 → Err（形态异常）。
+///
+/// 返回：`[down × k, "enter"]`（k 可为 0，即高亮已在目标行时直接 Enter）。
+pub fn navigation_sequence(
+    options: &[DialogOption],
+    target_number: u32,
+) -> Result<Vec<String>, String> {
+    // 目标必须在选项表内
+    let target_idx = options
+        .iter()
+        .position(|o| o.number == target_number)
+        .ok_or_else(|| format!("目标编号 {target_number} 不在对话框选项表内"))?;
+    // 起点 = 唯一高亮行
+    let mut hl: Option<usize> = None;
+    for (i, o) in options.iter().enumerate() {
+        if o.highlighted {
+            if hl.is_some() {
+                return Err("对话框有多行高亮标记，形态异常，不出手".to_string());
+            }
+            hl = Some(i);
+        }
+    }
+    let start = hl.ok_or_else(|| "解析不到当前高亮行，无法计算步进（不猜起点）".to_string())?;
+    let n = options.len();
+    // 循环前进距离：从 start 走到 target（0..n 之间）
+    let steps = (target_idx + n - start) % n;
+    let mut seq = vec!["down".to_string(); steps];
+    seq.push("enter".to_string());
+    Ok(seq)
 }
 
 #[cfg(test)]
@@ -332,6 +414,86 @@ mod tests {
         let opts = parse_dialog_options(&v).unwrap();
         assert_eq!(opts.len(), 3, "取更长的簇");
         assert_eq!(opts[0].label, "X");
+    }
+
+    // ---- R1：导航确认序列（↓×k + Enter）----
+
+    /// R1 核心：步进数从**解析到的当前高亮位**算起（循环距离），不是 target-1
+    #[test]
+    fn navigation_steps_from_highlight_position() {
+        // 起点=第 1 行（高亮在 1），目标 3 → ↓×2 + Enter
+        let opts = vec![opt(1, "A", true), opt(2, "B", false), opt(3, "C", false)];
+        assert_eq!(
+            navigation_sequence(&opts, 3).unwrap(),
+            vec!["down", "down", "enter"],
+            "高亮在 1、目标 3 → ↓×2 + Enter"
+        );
+        // 起点=第 3 行（高亮在 3），目标 1 → **循环**前进 1 步（3→1）
+        let opts2 = vec![opt(1, "A", false), opt(2, "B", false), opt(3, "C", true)];
+        assert_eq!(
+            navigation_sequence(&opts2, 1).unwrap(),
+            vec!["down", "enter"],
+            "高亮在 3、目标 1 → ↓×1（循环回卷）+ Enter，而非 ↓×2 反向"
+        );
+        // 高亮已在目标行 → 直接 Enter（零步进）
+        let opts3 = vec![opt(1, "A", false), opt(2, "B", true)];
+        assert_eq!(navigation_sequence(&opts3, 2).unwrap(), vec!["enter"]);
+    }
+
+    /// R1 安全面：**解析不到高亮 / 多行高亮 / 目标越界 → 一律 Err**（不猜起点）
+    #[test]
+    fn navigation_refuses_when_start_unknown() {
+        // 无高亮信息（某些 TUI 形态可能不渲染光标标记）→ 拒绝（猜错会提交错误选项）
+        let no_hl = vec![opt(1, "A", false), opt(2, "B", false)];
+        assert!(
+            navigation_sequence(&no_hl, 2).is_err(),
+            "起点未知必须拒绝（这正是「想拒绝却批准」的防线）"
+        );
+        // 多行同时带标记 → 形态异常 → 拒绝
+        let multi = vec![opt(1, "A", true), opt(2, "B", true)];
+        assert!(navigation_sequence(&multi, 2).is_err());
+        // 目标不在表内 → 拒绝
+        let ok = vec![opt(1, "A", true), opt(2, "B", false)];
+        assert!(navigation_sequence(&ok, 9).is_err());
+    }
+
+    /// R1：解析器必须**报告高亮位**——用实机屏幕原文夹具（claude 计划批准框）
+    #[test]
+    fn parse_reports_highlight_from_real_screen() {
+        let claude = lines(&[
+            " Claude has written up a plan and is ready to execute. Would you like to proceed?",
+            "",
+            " ❯ 1. Yes, and use auto mode",
+            "   2. Yes, manually approve edits",
+            "   3. Tell Claude what to change",
+        ]);
+        let opts = parse_dialog_options(&claude).unwrap();
+        assert_eq!(opts.len(), 3);
+        assert!(opts[0].highlighted, "❯ 在第 1 行 → 该行为高亮");
+        assert!(!opts[1].highlighted);
+        assert!(!opts[2].highlighted);
+        // 端到端：点第 3 项 → 从高亮位 1 算 → ↓×2 + Enter（本机实机已验证该序列生效）
+        assert_eq!(
+            navigation_sequence(&opts, 3).unwrap(),
+            vec!["down", "down", "enter"]
+        );
+
+        // codex `›` / kimi `▶` 同样报告高亮
+        let codex = lines(&["› 1. Yes, implement", "  2. No, keep planning"]);
+        let co = parse_dialog_options(&codex).unwrap();
+        assert!(co[0].highlighted && !co[1].highlighted, "codex › 报高亮");
+        let kimi = lines(&["   ▶ 1. Approve", "     2. Reject", "     3. Revise"]);
+        let km = parse_dialog_options(&kimi).unwrap();
+        assert!(km[0].highlighted, "kimi ▶ 报高亮");
+        assert!(!km[2].highlighted);
+    }
+
+    fn opt(n: u32, label: &str, hl: bool) -> DialogOption {
+        DialogOption {
+            number: n,
+            label: label.to_string(),
+            highlighted: hl,
+        }
     }
 
     /// 数字键域文本（`1.5x` 之类不误判）
