@@ -519,6 +519,10 @@ export interface ApproveOptionsView {
   currentVersion: string | null;
   drift: boolean;
   reason?: string;
+  /** 批次丙 T8：审批点 plan 聚合——计划确认类审批卡主体带计划全文（claude/codex
+   *  的 kind="plan" 消息）或计划文件路径（kimi 的 kind="plan-file"，isFile=true
+   *  → 前端走文件预览读全文）。null/缺省 = 无计划在场（只渲染选项） */
+  plan?: { content: string; isFile: boolean } | null;
   /** 批次丙 T5：选项来自**对话框屏读**——id 形如 `dialog:<n>`，label 是屏上原文
    *  （如 "1. Yes, and use auto mode"）；前端据此渲染编号按钮组（点按注入数字键 n）。
    *  缺省/ false → 映射表二元项（既有渲染，前向兼容旧后端） */

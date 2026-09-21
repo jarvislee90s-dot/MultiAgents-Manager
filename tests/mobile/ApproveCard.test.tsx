@@ -257,3 +257,46 @@ describe("ApproveCard：N 选项对话框模式（T5）", () => {
     expect(screen.getByTestId("approve-option-approve")).toBeTruthy();
   });
 });
+
+// ==== 批次丙 T8：审批点 plan 聚合（计划确认卡带计划全文）====
+describe("ApproveCard：审批点 plan 聚合（T8）", () => {
+  it("plan 为 markdown：卡片主体渲染计划全文（markdown 直出）+ 选项照常可点", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "No, keep planning" },
+      ],
+      plan: { content: "# 实施计划\n\n- 第一步\n- 第二步", isFile: false },
+    });
+    render(<ApproveCard session={{ id: "sess-plan" }} />);
+    const planBox = await screen.findByTestId("approve-plan");
+    expect(planBox.getAttribute("data-plan-file")).toBe("false");
+    // markdown 结构化渲染（# → H1，- → LI）
+    expect(screen.getByText("实施计划").tagName).toBe("H1");
+    expect(screen.getByText("第一步").tagName).toBe("LI");
+    // 选项仍在（计划主体 + 选项并存）
+    expect(screen.getByTestId("approve-option-dialog:1")).toBeTruthy();
+  });
+
+  it("plan 为文件路径（kimi）：显「计划文件」+ 路径文本，不渲染 markdown", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      plan: { content: "/w/.kimi-code/sessions/x/agents/main/plans/p.md", isFile: true },
+    });
+    render(<ApproveCard session={{ id: "sess-pf" }} />);
+    const planBox = await screen.findByTestId("approve-plan");
+    expect(planBox.getAttribute("data-plan-file")).toBe("true");
+    expect(planBox.textContent).toContain("计划文件");
+    expect(screen.getByTestId("approve-plan-file").textContent).toContain("plans/p.md");
+  });
+
+  it("plan 为 null/缺省：不渲染计划主体（降级——只渲染选项，不阻塞审批）", async () => {
+    installFetch();
+    routes.options = approveOptions(); // 无 plan 字段
+    render(<ApproveCard session={{ id: "sess-noplan" }} />);
+    await screen.findByTestId("approve-option-approve");
+    expect(screen.queryByTestId("approve-plan")).toBeNull();
+  });
+});

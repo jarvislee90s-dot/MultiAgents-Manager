@@ -1418,6 +1418,8 @@ struct ApproveScanHit {
     /// T5：本次选项是否来自**对话框屏读**（true → options 的 id 形如 `dialog:<n>`，
     /// 提交时注入数字键 n；false → 映射表二元项，走既有 approve/reject 键）
     dialog: bool,
+    /// T8：审批点关联的计划内容（None = 无计划消息在场 → 前端只渲染选项）
+    plan_body: Option<ApprovePlanBody>,
 }
 
 /// 对话框选项屏读（批次丙 T5）：Windows 屏读可见窗口 → 解析编号选项行。
@@ -1512,6 +1514,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             tool,
             reason: Some(crate::inject::approve::PROBE_PENDING_REASON.to_string()),
             dialog: false,
+            plan_body: None,
         });
     }
     // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
@@ -1564,6 +1567,25 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             false,
         ),
     };
+    // ===== 批次丙 T8：审批点 plan 聚合 =====
+    //
+    // 问题 9：计划批准时 plan 内容与审批卡分离（计划在消息流/plan 文件里，批准卡孤立）
+    // ——happy 的 ExitPlanMode View 以 plan markdown 为**卡片主体**，是标准答案。
+    //
+    // 聚合口径（按会话工具取源，全部走既有数据面，无新增读路径）：
+    // - claude：消息流里最近的 `kind="plan"` 消息（T1 已把 ExitPlanMode input.plan
+    //   升格为一等计划消息）；
+    // - codex：同上（T4 已把 `<proposed_plan>` 标签消息升格——两类来源在消息层已统一
+    //   为 kind="plan"，故本处**不需要**按工具分支）；
+    // - kimi：T7 的计划文件卡（kind="plan-file"）——卡片主体给**文件路径**，前端走
+    //   预览读取全文（与消息流一致，不重复读文件正文）。
+    //
+    // 只取**最近一条**（审批针对的是最新计划）；命中即随 available 载荷下发。
+    let plan_body = if hit {
+        read_plan_for_approval(st, &tool, session_id)
+    } else {
+        None
+    };
     Some(ApproveScanHit {
         available: hit,
         options,
@@ -1571,7 +1593,55 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         tool,
         reason: None,
         dialog,
+        plan_body,
     })
+}
+
+/// 审批点 plan 聚合载荷（批次丙 T8）
+struct ApprovePlanBody {
+    /// 计划 markdown 全文（claude/codex：消息流 kind="plan" 消息）
+    /// 或计划文件路径（kimi：T7 的 kind="plan-file" 卡）
+    content: String,
+    /// true = content 是**文件路径**（前端走预览读全文）；false = 直接是 markdown
+    is_file: bool,
+}
+
+/// 计划聚合的尾部窗口（条）：与问答通道 B 同口径——计划批准必然发生在计划渲染
+/// 之后不久，40 条足够覆盖且远小于 read_recent_lines 预算
+const APPROVE_PLAN_TAIL_LIMIT: usize = 40;
+
+/// 读审批点关联的计划内容（批次丙 T8）：消息尾部窗口找**最近一条**计划类消息
+/// （`kind="plan"` 给 markdown 全文 / `kind="plan-file"` 给文件路径）。
+///
+/// 读失败/无计划消息 → None（前端不渲染计划主体，仅显示选项——降级不阻塞审批；
+/// 这正是 happy「兜底渲染」原则的应用）。
+fn read_plan_for_approval(
+    st: &Arc<RemoteState>,
+    tool: &str,
+    session_id: &str,
+) -> Option<ApprovePlanBody> {
+    let page = (st.message_source)(tool, session_id, APPROVE_PLAN_TAIL_LIMIT).ok()?;
+    let msgs = &page.messages;
+    // 从尾部向前找最近一条计划类消息（plan 优先于 plan-file？不——取**最近**的那条，
+    // 因为审批针对的是最新呈现给用户的计划；两类同属计划语义）
+    for m in msgs.iter().rev() {
+        match m.kind.as_str() {
+            "plan" => {
+                return Some(ApprovePlanBody {
+                    content: m.content.clone(),
+                    is_file: false,
+                });
+            }
+            "plan-file" => {
+                return Some(ApprovePlanBody {
+                    content: m.content.clone(),
+                    is_file: true,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// GET /m/api/v1/session-approve-options?session_id=（M8 审批选项卡数据源）：
@@ -1605,7 +1675,7 @@ pub async fn session_approve_options(
                     .into_response();
             }
         };
-    let (available, options, verified_with, tool, reason, dialog) = match scan {
+    let (available, options, verified_with, tool, reason, dialog, plan_body) = match scan {
         Some(hit) => (
             hit.available,
             hit.options,
@@ -1613,10 +1683,11 @@ pub async fn session_approve_options(
             Some(hit.tool),
             hit.reason,
             hit.dialog,
+            hit.plan_body,
         ),
         // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
         // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
-        None => (false, Vec::new(), String::new(), None, None, false),
+        None => (false, Vec::new(), String::new(), None, None, false, None),
     };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
     let current_version = match tool.as_deref() {
@@ -1667,6 +1738,13 @@ pub async fn session_approve_options(
             // T5：选项来自对话框屏读（true → 前端渲染「对话框选项」风格 + 编号徽标；
             // id 形如 dialog:<n>，点按注入数字键 n）
             "dialog": dialog,
+            // T8：审批点 plan 聚合（计划确认类审批卡主体聚合 plan 内容——happy 的
+            // ExitPlanMode View 以 plan markdown 为卡片主体，用户不必再去消息流翻）
+            // null = 无计划消息在场（前端只渲染选项，降级不阻塞审批）
+            "plan": match &plan_body {
+                Some(b) => serde_json::json!({ "content": b.content, "isFile": b.is_file }),
+                None => serde_json::Value::Null,
+            },
         })),
     )
         .into_response()

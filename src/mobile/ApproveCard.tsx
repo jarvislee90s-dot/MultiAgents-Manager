@@ -20,6 +20,8 @@
 // 页面数据刷新（SSE 快照 → 详情页重挂/卸载）自然带动；SSE 驱动卡内 re-fetch 属
 // Task 12 后优化，不在本任务范围。
 import { useCallback, useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ApiError, fetchApproveOptions, sessionApprove, type ApproveOptionsView } from "./api";
 
 interface ApproveCardProps {
@@ -135,6 +137,30 @@ export default function ApproveCard({ session }: ApproveCardProps) {
         >
           以下选项读自终端对话框，点按即代你按对应数字键
         </p>
+      )}
+      {/* T8：审批点 plan 聚合——计划确认类审批卡主体即见计划全文（不再要用户去
+          消息流翻）。markdown 直出（claude/codex 的 kind="plan"）；kimi 的
+          kind="plan-file" 是**文件路径**，此处以路径提示呈现（全文走文件预览，
+          与消息流口径一致，不重复读文件正文）。无计划（plan null）→ 不渲染 */}
+      {options.plan != null && options.plan.content.trim() !== "" && (
+        <div
+          data-testid="approve-plan"
+          data-plan-file={options.plan.isFile ? "true" : "false"}
+          className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-rose-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-rose-400/30 dark:bg-slate-900/60 dark:text-slate-200"
+        >
+          <p className="mb-1 text-[11px] font-medium tracking-wide text-rose-700/80 uppercase dark:text-rose-400/80">
+            {options.plan.isFile ? "计划文件" : "计划内容"}
+          </p>
+          {options.plan.isFile ? (
+            <p data-testid="approve-plan-file" className="font-mono break-all">
+              {options.plan.content}
+            </p>
+          ) : (
+            <div className="prose-sm max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{options.plan.content}</ReactMarkdown>
+            </div>
+          )}
+        </div>
       )}
       {options.drift && (
         <p data-testid="approve-drift" className="mt-1 text-xs text-amber-700 dark:text-amber-400">
