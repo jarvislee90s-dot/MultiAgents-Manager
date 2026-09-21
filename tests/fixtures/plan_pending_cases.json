@@ -1,0 +1,98 @@
+{
+  "_doc": [
+    "丁T2 复审 N2：计划待确认判据的**跨语言共享夹具**（唯一事实源）。",
+    "",
+    "两侧测试都读本文件、都按同一份期望断言：",
+    "- Rust：`src-tauri/src/remote/api.rs` 的 tests::plan_pending_cross_language_fixture_cases",
+    "  （经 env!(\"CARGO_MANIFEST_DIR\")/../tests/fixtures/ 读取，先例见 services/pet/error.rs）；",
+    "- 前端：`tests/mobile/SessionDetail.test.tsx` 的「M1 交叉引用锁」describe（ESM import JSON）。",
+    "",
+    "**本文件是唯一需要改的地方**：判据行为变化时，两侧实现与两侧期望都跟它对齐——",
+    "若有人只改一侧实现而不动本文件，该侧测试必红（另一侧仍绿，但这正是跨语言可达的",
+    "最强约束：漂移一定被抓，且抓它的期望来自共享表而非各自硬编码）。",
+    "",
+    "字段：tool（适用工具，两侧同名单）/kinds（消息 kind 序列，按 seq 顺序）",
+    "/pending（期望：判据为真 = true）/note（该用例的来源或语义）。",
+    "",
+    "可选字段 lenient_only（默认 false）：该用例只在**宽松档**成立（审批门/计划聚合），",
+    "严档（问答压制，F3-5）不认——两档唯一的分叉点就是「孤立 plan-file」形态。",
+    "两侧测试都必须按本字段分别断言两档（不是「跳过」，是「各按各的期望」）。"
+  ],
+  "cases": [
+    {
+      "tool": "codex",
+      "kinds": ["user", "assistant", "plan"],
+      "pending": true,
+      "note": "实机形态（17:19 rollout 缩录）：user → 前导文本 → proposed_plan 升格的 plan 卡，尾部无后续"
+    },
+    {
+      "tool": "kimi",
+      "kinds": ["user", "plan-file"],
+      "pending": true,
+      "lenient_only": true,
+      "note": "kimi Write this file? 变体：只有计划文件卡（R1-3 实测无 plan_review）——宽松档认（审批侧需要它），严档不认（F3-5：孤立文件卡不得压掉问答卡）"
+    },
+    {
+      "tool": "codex",
+      "kinds": ["plan", "plan-file"],
+      "pending": true,
+      "note": "丁T2 双卡顺序（正文在前、文件卡在后）——取最近一条仍属计划类"
+    },
+    {
+      "tool": "kimi",
+      "kinds": ["plan", "thinking", "assistant"],
+      "pending": true,
+      "note": "模型输出不消费计划提案（thinking/assistant 之后仍是在场）"
+    },
+    {
+      "tool": "codex",
+      "kinds": ["plan", "user"],
+      "pending": false,
+      "note": "清除信号①：用户消息（实机 Implement the plan.）——任务书口径的下一个用户消息注入"
+    },
+    {
+      "tool": "codex",
+      "kinds": ["plan", "tool-call"],
+      "pending": false,
+      "note": "清除信号②：工具事件（kimi 批准后 wire 立即落 ExitPlanMode 的 tool.call）"
+    },
+    {
+      "tool": "codex",
+      "kinds": ["plan", "tool-result"],
+      "pending": false,
+      "note": "清除信号③：工具结果（同上，tool.result 半）"
+    },
+    {
+      "tool": "codex",
+      "kinds": ["plan", "assistant", "user"],
+      "pending": false,
+      "note": "清除信号：assistant 夹在中间不豁免，user 仍在计划之后"
+    },
+    {
+      "tool": "kimi",
+      "kinds": ["plan-file", "tool-call"],
+      "pending": false,
+      "note": "文件卡 + 工具事件 → 清（与正文卡同判）"
+    },
+    {
+      "tool": "codex",
+      "kinds": ["plan", "tool-result", "plan"],
+      "pending": true,
+      "note": "旧计划已消费、新计划在尾 → 新预期态成立（取最近一条）"
+    },
+    {
+      "tool": "codex",
+      "kinds": [],
+      "pending": false,
+      "note": "零误报：空页"
+    },
+    {
+      "tool": "kimi",
+      "kinds": ["user", "assistant", "thinking", "tool-call"],
+      "pending": false,
+      "note": "零误报：普通会话（无计划类消息）"
+    }
+  ],
+  "non_plan_tools": ["claude", "opencode", "zcode", "dsh", "workbuddy", "openclaw", ""],
+  "non_plan_tools_note": "工具族收窄：非 codex/kimi 一律 false（即使尾部有计划类消息）——两侧同名单。空串对应 tool_id 兜底形态。"
+}

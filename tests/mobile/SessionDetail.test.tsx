@@ -6,6 +6,7 @@ import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
 import { BOOKMARK_COLORS, clearBookmarks, messageAnchor } from "@/mobile/bookmarks";
 import { MockEventSource } from "./eventSourceMock";
 import type { Session } from "@/types/session";
+import planPendingCases from "../fixtures/plan_pending_cases.json";
 
 // M3 Task 8：ZCode 式会话详情页渲染矩阵。fetch 全量 stub（盖过 setup.ts 的 msw），
 // 按 URL 分路到 messages / session-files / file 三端点；jsdom 无真实高亮，
@@ -2404,16 +2405,20 @@ describe("SessionDetail：计划待确认挂载门的真机状态矩阵（丁T2 
   });
 });
 
-// ==== 丁T2 复评 M1：前后端判据**交叉引用锁** ====
+// ==== 丁T2 复审 N2：前后端判据的**跨语言共享夹具锁**（真锁，非人工镜像）====
 //
-// `isPlanPending`（前端）与 `remote::api::plan_pending_tail_index`（后端）是**两份同口径
-// 实现**——判据一致、窗口不同（前端吃详情页已拉取的整页 200/1000 条；后端读 40 条尾部
-// 窗口，性能面）。两份实现无法互相 import（跨语言），故用**同一组夹具**分别驱动、断言
-// 判定一致：本组用例的每条夹具在 Rust 侧有同名对照（见 `remote::api::tests` 的
-// `strict_plan_pending_excludes_isolated_plan_file_only` 与
-// `plan_pending_cleared_by_user_or_tool_activity`）。**夹具集必须与 Rust 侧同步维护**
-// （单边漂移即本锁失败——这正是它存在的意义）。
-describe("丁T2 M1：isPlanPending 与后端 plan_pending_tail_index 的判据一致性（交叉引用锁）", () => {
+// `isPlanPending`（前端）与 `remote::api::plan_pending_tail_index` / `_strict_` 系列
+// （后端）是**两份同口径实现**——判据一致、窗口不同（前端吃详情页已拉取的整页
+// 200/1000 条；后端读 40 条尾部窗口，性能面）。
+//
+// **本组用例与 Rust 侧 `remote::api::tests::plan_pending_cross_language_fixture_cases`
+// 读同一份夹具文件**（`tests/fixtures/plan_pending_cases.json`）：夹具与期望都在文件里，
+// 两侧只负责「驱动各自实现 + 对照同一份期望」。**这才是跨语言可达的真约束**——
+// 只改一侧实现而不更新夹具文件，该侧必红（另一侧仍绿，但漂移一定被抓）。
+//
+// 前身（复评 M1）曾把这段写成「单边漂移即本锁失败」的**人工镜像**注释——那是不实声明
+// （跨语言无法 import，Rust 侧改动不会让 vitest 失败）；N2 已改为共享夹具，声明与实现对齐。
+describe("丁T2 N2：isPlanPending 与后端判据的跨语言共享夹具锁", () => {
   function m(kind: string): SessionMessage {
     return {
       seq: 0,
@@ -2426,51 +2431,54 @@ describe("丁T2 M1：isPlanPending 与后端 plan_pending_tail_index 的判据�
       collapsed: false,
     };
   }
-  const of = (kinds: string[]) => kinds.map(m);
 
-  it("在场：尾部计划（含文件卡形态）→ true；两族工具同判", () => {
-    // 与 Rust `plan_pending_detected_on_tail_plan` 同夹具
-    expect(isPlanPending(of(["user", "assistant", "plan"]), "codex")).toBe(true);
-    expect(isPlanPending(of(["user", "plan-file"]), "kimi")).toBe(true);
-    expect(isPlanPending(of(["plan", "plan-file"]), "codex")).toBe(true);
-    // thinking / assistant 之后的计划不清除（与 Rust 侧同判据）
-    expect(isPlanPending(of(["plan", "thinking", "assistant"]), "kimi")).toBe(true);
-  });
-
-  it("清除信号：其后有用户消息或工具事件 → false（与 Rust 侧同三条）", () => {
-    for (const tail of [
-      ["plan", "user"],
-      ["plan", "tool-call"],
-      ["plan", "tool-result"],
-      ["plan", "assistant", "user"],
-      ["plan-file", "tool-call"],
-    ]) {
-      expect(isPlanPending(of(tail), "codex")).toBe(false);
+  it("共享夹具逐例：前端 isPlanPending 与文件里的期望一致（与 Rust 侧同表）", () => {
+    let seenTrue = 0;
+    let seenFalse = 0;
+    let seenLenientOnly = 0;
+    for (const c of planPendingCases.cases) {
+      const msgs = c.kinds.map(m);
+      expect(isPlanPending(msgs, c.tool)).toBe(c.pending);
+      expect(msgs.length).toBe(c.kinds.length); // 夹具形态自检（防 map 退化）
+      if (c.pending) seenTrue += 1;
+      else seenFalse += 1;
+      if (c.lenient_only) seenLenientOnly += 1;
+      // 共享表只描述**宽松档**（前端 isPlanPending 即宽松档——它与后端审批侧同判据）；
+      // `lenient_only` 用例在前端同样为 true（严档是后端问答压制专用，前端不实现）
+      if (c.lenient_only) expect(c.pending).toBe(true);
     }
-    // 工具事件之后再出计划 → 新的预期态
-    expect(isPlanPending(of(["plan", "tool-result", "plan"]), "codex")).toBe(true);
+    // 用例集自检（与 Rust 侧同款断言，防「夹具被删空后测试恒绿」）
+    expect(seenTrue).toBeGreaterThan(0);
+    expect(seenFalse).toBeGreaterThan(0);
+    expect(seenLenientOnly).toBe(1);
   });
 
-  it("零误报：无计划消息 / 空页 → false", () => {
-    expect(isPlanPending([], "codex")).toBe(false);
-    expect(isPlanPending(null, "codex")).toBe(false);
-    expect(isPlanPending(of(["user", "assistant", "thinking", "tool-call"]), "kimi")).toBe(false);
-  });
-
-  it("工具族收窄：只有 codex/kimi 参与（与后端 plan_dialog_family 同名单）", () => {
+  it("共享夹具的工具族名单：非 codex/kimi 一律不参与（与后端 plan_dialog_family 同名单）", () => {
+    for (const tool of planPendingCases.non_plan_tools) {
+      // 用一条「在场」夹具驱动：工具不在族内 → 恒 false
+      expect(isPlanPending([m("plan")], tool)).toBe(false);
+    }
+    // 族内两家：同一夹具恒 true（对照，防「全员 false」的假绿）
     for (const tool of ["codex", "kimi"]) {
-      expect(isPlanPending(of(["plan"]), tool)).toBe(true);
+      expect(isPlanPending([m("plan")], tool)).toBe(true);
     }
-    for (const tool of ["claude", "opencode", "zcode", "dsh", "workbuddy", "openclaw", ""]) {
-      expect(isPlanPending(of(["plan"]), tool)).toBe(false);
-    }
-    // 缺省/ null 工具 → 不放宽
-    expect(isPlanPending(of(["plan"]), null)).toBe(false);
-    expect(isPlanPending(of(["plan"]), undefined)).toBe(false);
+    // 缺省/ null 工具 → 不放宽（不在族内）
+    expect(isPlanPending([m("plan")], null)).toBe(false);
+    expect(isPlanPending([m("plan")], undefined)).toBe(false);
   });
 
-  // **窗口差异的如实申报**（本锁不能覆盖的面）：前端整页 vs 后端 40 条尾部窗口——
-  // 计划卡若落在第 41+ 条历史里，后端看不到而前端看得到。此时前端会挂载卡片、后端回
-  // `available=false`，卡片按自隐契约立刻消失（代价 = **一次多余 GET**，不是错误界面）。
-  // 「卡片挂着但点了报错」由 POST 门与 GET 同口径保证（F3-2），不在本锁范围。
+  it("窗口差异的如实申报（本锁不能覆盖的面）", () => {
+    // 前端整页（200/1000）vs 后端 40 条尾部窗口：计划卡若落在第 41+ 条历史里，后端看不到
+    // 而前端看得到 → 前端挂载卡片、后端回 available=false、卡片按自隐契约消失
+    // （代价 = 一次多余 GET，不是错误界面）。「卡片挂着但点了报错」由 POST 门与 GET
+    // 同口径保证（F3-2 + N1），不在本锁范围。
+    const longHistory: SessionMessage[] = [];
+    for (let i = 0; i < 60; i += 1) longHistory.push(m("user"));
+    longHistory.push(m("plan"));
+    // 前端全页看得见尾部计划 → true（后端 40 条窗口会看不到）
+    expect(isPlanPending(longHistory, "codex")).toBe(true);
+    // 但若那 60 条里有用户消息紧跟在计划之后（真实消费信号），前端也判 false
+    const consumed = [...longHistory, m("user")];
+    expect(isPlanPending(consumed, "codex")).toBe(false);
+  });
 })

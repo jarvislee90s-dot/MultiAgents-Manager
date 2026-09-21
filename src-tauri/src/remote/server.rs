@@ -4680,6 +4680,45 @@ mod tests {
                 67,
                 crate::session::SessionStatus::Waiting,
             ),
+            // sess_bg：codex Idle + 尾部计划提案 —— **N1 用例独占**（守卫 id 立规：
+            //   N1 的 POST 遍历会成功投递吗？不会——预期态一律 404，不出手；但为
+            //   避免与 F3-2 用例共享 id 时 in-flight 守卫串键，仍占唯一 id）
+            inj_sess(
+                "sess_bg",
+                crate::session::AgentType::Codex,
+                68,
+                crate::session::SessionStatus::Idle,
+            ),
+            // sess_bh：claude Waiting（标记路径）—— **N1 反向锁独占**（该用例会真投递，
+            //   必须独占 id：INFLIGHT 按裸 id 字符串全局占用，跨用例撞 id 即串键）
+            inj_sess(
+                "sess_bh",
+                crate::session::AgentType::Claude,
+                69,
+                crate::session::SessionStatus::Waiting,
+            ),
+            // ===== N3 短路序计数族（sess_bi..sess_bk）=====
+            // sess_bi：codex **Waiting** + 计划族 → 门由状态满足（零读页臂）
+            inj_sess(
+                "sess_bi",
+                crate::session::AgentType::Codex,
+                70,
+                crate::session::SessionStatus::Waiting,
+            ),
+            // sess_bj：codex **Idle** + 审批标记（由用例播种）→ 门由标记满足（零读页臂）
+            inj_sess(
+                "sess_bj",
+                crate::session::AgentType::Codex,
+                71,
+                crate::session::SessionStatus::Idle,
+            ),
+            // sess_bk：**claude** Idle + 尾部计划 → 族收窄（零读页臂，T1 零额外 IO 口径）
+            inj_sess(
+                "sess_bk",
+                crate::session::AgentType::Claude,
+                72,
+                crate::session::SessionStatus::Idle,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -6169,7 +6208,10 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(v["available"], true, "GET 门（既有）");
-        // **F3-2 核心断言**：POST 不得回 not_waiting
+        // **F3-2 核心断言 + N1 收口**：POST 映射表 id → 必须**越过 not_waiting 门**
+        // （否则 F3-2 未修），但被 N1 拒为 no_mapping（404）——两个错误码的差异正是
+        // 「门已放宽 ∧ 输入面已收窄」的判据：not_waiting 来自门之前，no_mapping 来自
+        // 门之后。**零注入**是 N1 的核心（修前该组合注入 `y`）。
         let r = app
             .clone()
             .oneshot(req(
@@ -6186,11 +6228,15 @@ mod tests {
             !body.contains("not_waiting"),
             "F3-2：计划预期态下 POST 必须越过 not_waiting 门（实得 {body}）"
         );
-        // 走到映射层（codex 有映射）→ 200 key_sent（approve="y" 投递）
-        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            status, 404,
+            "N1：越过门后映射表 id 必须被拒（no_mapping；修前是 200 key_sent + 注入 y）：{body}"
+        );
+        assert!(body.contains("no_mapping"), "{body}");
         assert!(
-            body.contains("key_sent") || body.contains("failed"),
-            "越过门后应达投递层（key_sent / failed 皆可，failed 是投递侧失败）：{body}"
+            fake.recorded_keys().is_empty(),
+            "N1：计划预期态下映射键位零注入（修前实测注入 (63,\"y\")）：{:?}",
+            fake.recorded_keys()
         );
         // 反向锁：尾无计划（计划已被用户消息消费）→ POST 照旧 409 not_waiting
         let r = app
@@ -6209,25 +6255,80 @@ mod tests {
             "反向锁：codex 的 Idle 本身不等于放行——尾部无可确认计划时 POST 仍须 409"
         );
         assert!(body_string(r).await.contains("not_waiting"));
+        assert!(
+            fake.recorded_keys().is_empty(),
+            "反向锁：全用例零注入（409 与 404 两条路径都不出手）"
+        );
     }
 
-    /// **F3-3（Important）**：claude 的审批卡 plan 聚合自 `ed1a868` 起**静默失效**
-    /// （`tail_page` 被收窄成「仅无问答标记通道的工具」→ claude 恒 None → `plan_body`
-    /// 恒 None）。本锁保证批次丙 T8 的 claude 计划聚合**回归**。
+    /// **N1（复审 Important）**：计划预期态下 POST **只放行 `dialog:<n>`**。
     ///
-    /// 夹具：sess_bd = claude Waiting + 尾部 `kind="plan"`（ExitPlanMode input.plan 的
-    /// 升格产物）。断言：GET `plan.content` = 计划 markdown、`isFile=false`。
+    /// 端点上两种拒绝都收敛成 `no_mapping`，故本用例锁的是**「映射 id 被拒 + 零注入」**
+    /// 这一半（可观测面）；另一半「`dialog:<n>` 仍被接受」由纯函数单测
+    /// `plan_pending_post_accepts_dialog_options_only` 锁住——**CI 无法观测 dialog 的
+    /// 通过路径**（屏读依赖真实可见窗口：非 Windows 恒 None，Windows 上假 pid 的
+    /// AttachConsole 必失败），如实申报。
     ///
-    /// 同时是 **T1 裁决不退** 的锁：claude 仍**不**受尾部问答判据压制（既有
-    /// `claude_tail_question_does_not_suppress_approve` 覆盖）——本用例只动读页条件。
+    /// 对照面（kimi 同锁）：kimi 的计划审批同样在预期态下——其映射表 options 本就为空，
+    /// 但 KV 定制可能给出非空表，故 N1 的收敛点在 kimi 上同样成立（本用例用 codex，
+    /// 因为它的默认表**有** `approve="y"`，正是插桩实测命中的键）。
     #[tokio::test]
-    async fn claude_approve_card_aggregates_plan_body_again() {
+    async fn plan_pending_post_rejects_mapped_option_ids() {
         let fake = FakeInjector::ok();
         let state = question_state_with_msgs(
             fake.clone(),
             Box::new(|_, sid: &str, _| match sid {
-                "sess_bd" => Ok(crate::remote::content::MessagesPage {
-                    messages: vec![user_msg(0), plan_msg(1, "# 执行计划\n\n- 第一步")],
+                "sess_bg" => Ok(codex_plan_pending_page()),
+                _ => Err("无消息".to_string()),
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // 逐一遍历默认表全部 id + 若干域外 id：预期态下一律 no_mapping + 零注入
+        for option_id in [
+            "approve",
+            "reject",
+            "bogus",
+            "y",
+            "esc",
+            "dialog",
+            "dialogx:1",
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-approve",
+                    Some("mam_device=mm"),
+                    Some(&format!(
+                        r#"{{"sessionId":"sess_bg","optionId":"{option_id}"}}"#
+                    )),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404, "{option_id}：预期态必须拒为 no_mapping");
+            assert!(body_string(r).await.contains("no_mapping"), "{option_id}");
+        }
+        assert!(
+            fake.recorded_keys().is_empty(),
+            "N1：预期态下任何映射 id 都零注入：{:?}",
+            fake.recorded_keys()
+        );
+    }
+
+    /// **N1 反向锁**：`Waiting` 态的**既有映射键路径零回归**——同一端点、同一会话族，
+    /// 状态换成 Waiting（或带审批标记）时映射表 id 照常投递。
+    ///
+    /// 用 sess_bh（claude Waiting + 审批标记）——它的映射表
+    /// `approve="1"` 是 M8R 实证键位，POST 必须 200 key_sent 且注入 `1`。
+    #[tokio::test]
+    async fn waiting_state_post_still_delivers_mapped_keys() {
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(|_, sid: &str, _| match sid {
+                "sess_bh" => Ok(crate::remote::content::MessagesPage {
+                    messages: vec![user_msg(0), plan_msg(1, "# 执行计划")],
                     truncated: false,
                 }),
                 _ => Err("无消息".to_string()),
@@ -6235,145 +6336,168 @@ mod tests {
         );
         persist_named_device(&state, "mm", "测试设备");
         state.store.with(|conn| {
-            crate::database::dao::approval_wait::mark(conn, "claude", "sess_bd", 1_000, "计划批准")
+            crate::database::dao::approval_wait::mark(conn, "claude", "sess_bh", 1_000, "计划批准")
         });
         let app = router(state.clone());
         let r = app
             .oneshot(req(
-                "GET",
-                "/m/api/v1/session-approve-options?session_id=sess_bd",
+                "POST",
+                "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                None,
+                Some(r#"{"sessionId":"sess_bh","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
-        assert_eq!(v["available"], true, "标记路径（既有）");
+        assert!(body_string(r).await.contains("key_sent"));
         assert_eq!(
-            v["plan"]["content"], "# 执行计划\n\n- 第一步",
-            "F3-3 回归锁：claude 审批卡必须重新带回 ExitPlanMode 的 plan 正文（T8 行为）"
-        );
-        assert_eq!(v["plan"]["isFile"], false);
-        assert_eq!(
-            v["planPending"], false,
-            "claude 不属计划对话框族（门不放宽），预期态字段恒 false"
+            fake.recorded_keys(),
+            vec![(69u32, "1".to_string())],
+            "N1 反向锁：非预期态（标记路径）的映射键位路径零回归"
         );
     }
 
-    /// **F3-4（Important）**：kimi 的审批卡**不含 plan 正文**——任务书 T2 成文要求
-    /// 「正文由 §2.2 的 kimi 正文卡承担」。本锁把审批侧收口，并与「正文卡仍出」成对。
+    /// **N3（复审 Minor）**：F3-2 的**短路序/零 IO 口径**必须有回归锁——复审实测
+    /// 「删掉 `&& !marked && status != Waiting` 两个守卫（变成无条件读页）」时**全套 lib
+    /// 仍全绿**，即成本口径无保护（代码与注释都对，但将来有人调 `&&` 顺序不会红）。
     ///
-    /// 夹具：sess_be = kimi Waiting + 尾部 [plan(正文卡), plan-file(文件卡)]（丁T2 的
-    /// `interaction.request(plan_review)` 双卡产物）。
-    /// 断言：审批载荷 `plan == null`（正文不下发）——**同时**保证消息流的正文卡不受影响
-    /// （那是 `content::kimi_plan_cards` 的产物，与审批端点无关；其锁在 content.rs 的
-    /// `kimi_plan_review_yields_plan_and_file_cards`）。
+    /// 修法：用**计数 message_source** 断言读页次数——这是本条口径唯一可观测的面。
+    /// 五个场景覆盖全部短路臂与唯一的价值臂：
+    /// - **Waiting ∧ 计划族**（sess_bi：codex Waiting）→ 门由状态满足 → **零读页**；
+    /// - **标记态 ∧ 计划族**（sess_bj：codex Idle + 审批标记）→ 门由标记满足 → **零读页**；
+    /// - **非计划族**（sess_bk：claude Idle + 尾部计划）→ 族收窄 → **零读页**；
+    /// - **计划族 ∧ Idle ∧ 无标记 ∧ 尾部有计划**（sess_bb）→ 读**恰好一次**（价值臂）；
+    /// - **计划族 ∧ Idle ∧ 无标记 ∧ 尾部无计划**（sess_bc）→ 读恰好一次后判 false
+    ///   → 409（确认「读一次就够」）。
+    ///
+    /// **计数语义**：计数 `message_source` 的**调用次数**（不是成功次数）——桩返回 Err
+    /// 也计数（`ok()` 的失败路径同样是一次调用尝试）。用 Err 桩让用例不依赖消息内容，
+    /// 把断言收敛到「读没读」这一个自由度；需要「尾部有计划」的两例才给真页。
     #[tokio::test]
-    async fn kimi_approve_card_carries_no_plan_body() {
+    async fn post_plan_pending_read_page_only_when_needed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
         let fake = FakeInjector::ok();
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
         let state = question_state_with_msgs(
             fake.clone(),
-            Box::new(|_, sid: &str, _| match sid {
-                "sess_be" => Ok(crate::remote::content::MessagesPage {
-                    messages: vec![
-                        user_msg(0),
-                        plan_msg(1, "# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`."),
-                        plan_file_msg(
-                            2,
-                            "C:/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/p.md",
-                        ),
-                    ],
-                    truncated: false,
-                }),
-                _ => Err("无消息".to_string()),
+            Box::new(move |_, sid: &str, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // 只有「尾部有计划」的两个 id 给真页，其余给 Err（Err = 判据不成立）
+                match sid {
+                    "sess_bb" => Ok(codex_plan_pending_page()),
+                    "sess_bc" => Ok(codex_plan_consumed_page()),
+                    _ => Err("计数桩：不提供内容".to_string()),
+                }
             }),
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
+
+        // ① Waiting ∧ 计划族（codex）→ 状态门满足，`||` 短路在读页之前
         let r = app
+            .clone()
             .oneshot(req(
-                "GET",
-                "/m/api/v1/session-approve-options?session_id=sess_be",
+                "POST",
+                "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                None,
+                Some(r#"{"sessionId":"sess_bi","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 200);
-        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let s1 = r.status();
+        assert_ne!(s1, 404, "Waiting 态映射存在 → 不该 no_mapping");
         assert_eq!(
-            v["plan"],
-            serde_json::Value::Null,
-            "F3-4：kimi 审批卡不得下发 plan 正文（正文归 §2.2 的 kimi 正文卡）"
+            calls.load(Ordering::SeqCst),
+            0,
+            "N3：Waiting 态满足门 → 零读页（`status != Waiting` 守卫）"
         );
-        assert_eq!(
-            v["planPending"], true,
-            "预期态门照常（kimi 计划确认的入口）"
-        );
-    }
 
-    /// **F3-5（Important，只修「压掉问答卡」这一面）**：孤立的 `kind="plan-file"`
-    /// **不得**压掉问答卡——`plan-file` 是跨工具形态判据（任何工具结果提到
-    /// `plans/<名>.md` 就产卡），把它当预期态等于「工具结果提了个计划文件路径」
-    /// 就能压掉可作答的问答卡（**可用性受损**方向）。
-    ///
-    /// 夹具：sess_bf = kimi Waiting + 尾部 `[user, plan-file]`（**无** plan 正文卡）+
-    /// 播种问答标记（通道 A）。断言：问答 GET **available=true**（不被压掉）。
-    ///
-    /// **对照锁**（同一夹具加一张正文卡 → 必须压制）由
-    /// `kimi_plan_pending_blocks_question_card` 覆盖（它用的是 plan 正文卡形态）。
-    #[tokio::test]
-    async fn isolated_plan_file_does_not_suppress_question_card() {
-        let fake = FakeInjector::ok();
-        let state = question_state_with_msgs(
-            fake.clone(),
-            Box::new(|_, sid: &str, _| match sid {
-                "sess_bf" => Ok(crate::remote::content::MessagesPage {
-                    messages: vec![
-                        user_msg(0),
-                        plan_file_msg(
-                            1,
-                            "C:/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/p.md",
-                        ),
-                    ],
-                    truncated: false,
-                }),
-                _ => Err("无消息".to_string()),
-            }),
-        );
-        persist_named_device(&state, "mm", "测试设备");
+        // ② 标记态 ∧ 计划族（codex Idle + 审批标记）→ 门由标记满足
         state.store.with(|conn| {
-            crate::database::dao::question_wait::mark(
-                conn,
-                "kimi",
-                "sess_bf",
-                1_000,
-                "等待回答",
-                Some(KIMI_Q_PAYLOAD),
-            )
+            crate::database::dao::approval_wait::mark(conn, "codex", "sess_bj", 1_000, "工具审批")
         });
-        let app = router(state.clone());
         let r = app
+            .clone()
             .oneshot(req(
-                "GET",
-                "/m/api/v1/session-question?session_id=sess_bf",
+                "POST",
+                "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                None,
+                Some(r#"{"sessionId":"sess_bj","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 200);
-        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_ne!(r.status(), 409, "标记态不该 409 not_waiting");
         assert_eq!(
-            v["available"], true,
-            "F3-5 反锁：尾部只有孤立 plan-file（无正文卡）时问答卡必须仍可用——\
-             文件卡不是「有计划在等确认」的证据"
+            calls.load(Ordering::SeqCst),
+            0,
+            "N3：标记态满足门 → 零读页（`!marked` 守卫）"
         );
-        assert_eq!(v["source"], "mark");
-        assert!(fake.recorded_keys().is_empty());
+
+        // ③ 非计划族（claude Idle + 尾部计划）→ 族收窄，**恒不读页**
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_bk","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "非计划族 + 非 Waiting → 既有 409 口径");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "N3：非计划族工具恒不读页（`plan_dialog_family` 守卫——claude 零额外 IO）"
+        );
+
+        // ④ **价值臂**：计划族 ∧ Idle ∧ 无标记 ∧ 尾部有计划 → 读**恰好一次**并放行
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_bb","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            404,
+            "预期态下映射 id 被 N1 拒（此处只验读页次数）"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "N3 价值臂：唯一需要读页的形态 → 恰好一次（F3-2 的用武之地）"
+        );
+
+        // ⑤ 计划族 ∧ Idle ∧ 无标记 ∧ 尾部无计划 → 读一次后判 false → 409（不重读）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-approve",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_bc","optionId":"approve"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "N3：尾部无计划的计划族会话 → 读一次即判 false（不重读）"
+        );
     }
 
+    /// **丁T2 互斥（无标记路径）**：kimi 的审批在场 → 问答卡不可用（硬约束① 扩到
+    /// kimi 新卡）。
+    ///
     /// **可达态说明（为什么不构造「计划 + 待决 AUQ」）**：kimi 的交互是**阻塞式**——
     /// 问答未答完时模型不可能提出计划，故「尾部计划提案 ∧ 尾部待决 AUQ」在真实 wire
     /// 里不可达（真实序列：AUQ tool.call → interaction.request → resolved → tool.result；

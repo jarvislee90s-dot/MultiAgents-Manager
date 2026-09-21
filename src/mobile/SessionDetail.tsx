@@ -243,7 +243,12 @@ export function extractPlanBody(toolArgs: string): string | null {
  *  ——`available=false`（非码族工具 / 计划已消费 / 后端判定不同）时卡片照常自隐。
  *
  *  `tool` 收窄到计划对话框族（codex/kimi——镜像后端 `plan_dialog_family`）：claude 的计划
- *  批准走既有 waiting 门（有实证键位与标记通道），放宽它的门等于改既有行为。 */
+ *  批准走既有 waiting 门（有实证键位与标记通道），放宽它的门等于改既有行为。
+ *
+ *  **未覆盖面（丁T2 复审 N4，与后端判据同款，如实申报）**：三条清除信号（user /
+ *  tool-call / tool-result）并非穷尽——codex 选「No, stay in Plan mode」后既不注入用户
+ *  消息也不必然产工具事件，预期态可能长挂（提示条持续显示）。真机 203 条 rollout 未
+ *  观察到该样本，标为待取证（详见后端 `plan_pending_tail_index` 文档的同名小节）。 */
 export function isPlanPending(
   messages: SessionMessage[] | null,
   tool: string | null | undefined

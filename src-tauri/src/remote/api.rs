@@ -1552,6 +1552,20 @@ fn approve_plan_family(tool: &str) -> bool {
 /// 判据刻意**不看状态**：codex 计划提案之后不落 Waiting（`codex_parser` 的兜底红已
 /// 废），状态面没有信号——这正是本预期态存在的理由。
 ///
+/// # 未覆盖面（丁T2 复审 N4，如实申报——勿把本判据读成「覆盖全部清除路径」）
+///
+/// 三条清除信号（user / tool-call / tool-result）是从**实机 wire 序列**归出来的，
+/// 但**并非穷尽**：
+/// - **codex 选「No, stay in Plan mode」后**：既不注入用户消息、也**不必然**产工具事件
+///   （模型停在计划模式等下一轮输入）→ 尾部计划卡常在 → 预期态可能**长挂**（前端
+///   「计划待确认」条持续显示，直到用户注入或有工具事件）。
+/// - **取证状态（复审核查）**：203 条真机 rollout 上宽松档命中 5 条——4 条是孤立
+///   `plan-file`（F3-5 刻意保留的纳入面）、1 条是真计划尾；**未观察到上述样本**，
+///   故只能标为**待取证**（结论不超证据：不为其加判据、也不为它改行为）。
+/// - 若将来取证到该形态，收窄点候选：要求计划卡**紧邻前一条不是 tool-result**
+///   （排除「刚读完计划文件就报出正文」），或引入「codex plan 模式的模式位回读」
+///   （依赖 T4 的模式栏能力，属跨任务面）。
+///
 /// 与 [`pending_question_tail_index`] 同族（同一份消息页、同一「其后无后续形态」骨架），
 /// 两者都由 `approve_options_scan` 在**同一次**读页里消费。
 pub(crate) fn plan_pending_tail_index(
@@ -1610,6 +1624,32 @@ pub(crate) fn plan_pending_strict_tail_index(
         return None;
     }
     Some(last)
+}
+
+/// 丁T2 复审 N1：计划预期态下 POST 的**输入面判据**（纯函数，可测）。
+///
+/// `plan_pending` 为真时**只接受形态良好的 `dialog:<n>`**（`n` 可被 `u32` 解析——与
+/// 端点 dialog 分支的 `n_str.parse::<u32>()` 同判据）；其余 id（映射表的
+/// `approve`/`reject`/KV 定制 id，以及裸 `dialog:`/带空格的变体）一律拒绝。非预期态
+/// 恒接受（既有路径零回归——`Waiting`/`标记` 态下 `plan_pending` 恒 false，见其计算式
+/// 的短路守卫）。
+///
+/// **为什么必须同口径**：GET 在计划预期态下绝不下发映射键位（options 空），而 GET 的
+/// options 是 POST 的**唯一合法输入面**。若 POST 仍接受映射 id，则 GET 的「绝不下发」
+/// 只是前端可见面的自律，端点上留有一条键位通路（本仓库既有的 M-4 残余面的扩大）。
+///
+/// **本判据的充分性边界（如实申报）**：它只覆盖**输入形态**这一半——「该编号此刻真在
+/// 屏幕选项表内」由 dialog 分支的**现场重解析**保证（`read_dialog_options` + 编号成员
+/// 检查，防 GET→POST 之间对话框变化）。故本函数是**必要**条件而非充分条件
+/// （`dialog:0` 形态合法但编号不在表内 → 端点仍拒）。抽成纯函数的理由：端点两种拒绝
+/// 都收敛成 `no_mapping`，状态码分不开，不变式只能靠单测钉住。
+fn plan_pending_accepts_option_id(plan_pending: bool, option_id: &str) -> bool {
+    if !plan_pending {
+        return true;
+    }
+    option_id
+        .strip_prefix("dialog:")
+        .is_some_and(|n| n.parse::<u32>().is_ok())
 }
 
 /// 对话框选项屏读（批次丙 T5）：Windows 屏读可见窗口 → 解析编号选项行。
@@ -2171,6 +2211,15 @@ pub struct SessionApproveReq {
 /// - 会话不在快照 → 404 no_session；非 Waiting → 409 not_waiting（映射解析在其后，
 ///   运行中会话不付出 KV 读取代价）；
 ///
+/// **等待门（丁T2 F3-2 起）**：与 GET **同口径** = `Waiting ∨ 审批标记 ∨ 计划预期态`
+/// （计划预期态按 `plan_dialog_family` 收窄到 codex/kimi；判据用与 GET 同一份
+/// [`plan_pending_tail_index`]）。放宽的理由见该函数文档（codex 计划待确认的真机状态
+/// 是 Idle + 无标记——只放宽 GET 会让卡片挂上后点按必 409）。
+///
+/// **计划预期态下的输入面（丁T2 复审 N1）**：`plan_pending` 为真时**只接受
+/// `dialog:<n>`**，映射表 id（`approve`/`reject`/KV 定制的任意 id）一律 404 no_mapping
+/// ——与 GET 的「该态绝不下发映射键位」对称（GET 的 options 是 POST 的唯一合法输入面）。
+///
 /// **残余面如实申报（丁T1 复评 M-4）**：本端点**不走 detect**（既有契约：客户端只
 /// POST 它从 GET 拿到的 option id，而 GET 已把 detect / 待决问答两道门走过——见
 /// `approve_options_scan`）。因此「旁路客户端**直发** POST + 合法 optionId」不在
@@ -2179,8 +2228,13 @@ pub struct SessionApproveReq {
 /// 入口），正常路径不可达。若将来需要收口，落点是本 handler 的 Waiting 门之后加
 /// 同款判定（代价：每次 POST 多一次消息读——目前刻意不做，见 T1 复评裁决）。
 ///
+/// **M-4 残余的边界（N1 收口后）**：`plan_pending` 态的映射键位通路**已关闭**（N1）；
+/// 残余面仍限「Waiting/标记态 ∧ 未命中 detect ∧ 旁路直发」这一组合——与 T1 复评时
+/// 相比**未扩大**（F3-2 曾把它扩到计划预期态，N1 已收回）。
+///
 /// - 映射表无该工具映射 / optionId 无对应项 / probe-pending 严格档（M9R Task 10：
-///   未取证不出键，按键位映射缺失处理）→ 404 no_mapping（降级提示走普通发送）；
+///   未取证不出键，按键位映射缺失处理）/ 计划预期态下的非 dialog id（N1）→ 404
+///   no_mapping（降级提示走普通发送）；
 /// - in-flight 守卫忙（flush 循环/直发/插队/detached 旧投递正在投递该会话）→ 200
 ///   failed 提示重试。守卫取在 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，
 ///   F1 断连双投修复——handler 断连不再提前释放守卫）；忙让位无投递发生，不写审计
@@ -2320,6 +2374,30 @@ pub async fn session_approve(
         else {
             return Err("no_mapping");
         };
+        // ===== 丁T2 复审 N1（Important）：计划预期态下**只放行 dialog 选项** =====
+        //
+        // 契约不对称（复审读码 + 插桩实测确认）：GET 在计划预期态下**绝不下发映射键位**
+        // （`plan_pending_without_keys` → options 空；kimi 分支同理），而 POST 越过
+        // `not_waiting` 门后，非 `dialog:` 的 optionId 会落到这里取映射表键位——旁路
+        // 客户端 POST `{optionId:"approve"}` 实测注入 `y`（codex 计划框的补丁审批键位）。
+        // 修前该组合是 409（更安全）；F3-2 放宽门后变成了可达 → 属**本轮引入的面**，
+        // 故本轮收口。
+        //
+        // 为什么 GET 与 POST 在这一态必须同口径：GET 的 options 是 POST 的**唯一合法
+        // 输入面**（前端只 POST 它从 GET 拿到的 id）。GET 既然判定「此态无可安全下发的
+        // 映射键位」（计划框的键位语义与映射表二元键不同——见 `approve_plan_family`
+        // 文档），POST 就必须拒绝同类的映射键位 id；否则 GET 的「绝不下发」只是前端
+        // 可见面的自律，端点上仍有一条键位通路（本仓库既有的 M-4 残余面的扩大）。
+        //
+        // 判据走纯函数 [`plan_pending_accepts_option_id`]（**判据即行为**，不是并行声明
+        // ——端点两种拒绝都收敛成 `no_mapping`，从状态码无法区分，故把不变式抽出来
+        // 让单测直接钉住）。`dialog:<n>` 在上方分支已 return，走到这里只可能是映射 id。
+        if !plan_pending_accepts_option_id(plan_pending, &probe_opt) {
+            log::debug!(
+                "审批端点：计划预期态下不接受映射键位（{probe_opt}）→ no_mapping（N1 契约对齐）"
+            );
+            return Err("no_mapping");
+        }
         let keys = vec![option.key.clone()];
         Ok((session, tool, option, keys))
     })
@@ -3572,6 +3650,151 @@ mod tests {
         );
         assert!(plan_dialog_family("codex"));
         assert!(plan_dialog_family("kimi"));
+    }
+
+    // ==== 丁T2 复审 N1：计划预期态下 POST 的输入面判据 ====
+
+    /// N1 纯核：`plan_pending` 为真**只接受** `dialog:<n>`；非预期态恒接受（零回归）。
+    ///
+    /// 这条锁对应「GET 不下发 → POST 不接受」的对称契约（GET/POST 的两种拒绝在端点上
+    /// 都收敛成 `no_mapping`，状态码分不开，故用纯函数把不变式钉住）。
+    #[test]
+    fn plan_pending_post_accepts_dialog_options_only() {
+        // 预期态：只放行屏读选项
+        assert!(plan_pending_accepts_option_id(true, "dialog:1"));
+        assert!(plan_pending_accepts_option_id(true, "dialog:9"));
+        for mapped in ["approve", "reject", "allow", "y", ""] {
+            assert!(
+                !plan_pending_accepts_option_id(true, mapped),
+                "预期态必须拒绝映射表 id（含空串/自定义 id）：{mapped}"
+            );
+        }
+        // **形态判据要严**（防变体绕过）：只有 `dialog:<可解析 u32>` 才放行
+        // （`dialog:0` 形态合法但编号不在屏读表内 → 端点现场重解析仍拒——本函数是
+        // 必要条件而非充分条件，见其文档）
+        assert!(plan_pending_accepts_option_id(true, "dialog:0"));
+        for sneaky in [
+            "dialog",
+            "dialogx:1",
+            "xdiialog:1",
+            " dialog:1",
+            "dialog:",
+            "dialog:abc",
+            "dialog:1.5",
+            "dialog:-1",
+        ] {
+            assert!(
+                !plan_pending_accepts_option_id(true, sneaky),
+                "只有形态良好的 `dialog:<n>` 才放行：{sneaky}"
+            );
+        }
+        // 非预期态：既有路径零回归（Waiting/标记态的映射键照常接受）
+        for mapped in ["approve", "reject", "dialog:1", "", "anything"] {
+            assert!(
+                plan_pending_accepts_option_id(false, mapped),
+                "非预期态不得改变输入面（零回归）：{mapped}"
+            );
+        }
+    }
+
+    // ==== 丁T2 复审 N2：计划待确认判据的**跨语言共享夹具** ====
+
+    /// N2 真锁：读 `tests/fixtures/plan_pending_cases.json`（与前端 vitest 共用的**唯一
+    /// 事实源**）逐例驱动本节判据，断言与共享表里的期望一致。
+    ///
+    /// **为什么这是「真锁」而不是「人工镜像」**：两侧测试都从**同一个文件**取夹具与期望
+    /// ——判据行为变化时，若只改一侧实现而不更新本文件，该侧必红（另一侧仍绿，但漂移
+    /// 一定被抓，且抓它的期望来自共享表而非各自硬编码）。这是跨语言可达的最强约束形态。
+    ///
+    /// 读文件失败的处置：**panic 带明确信息**（不静默跳过）——先例见
+    /// `services::pet::error::tests::rpc_codes_have_i18n_keys` 读 `../src/i18n/locales/zh.json`。
+    ///
+    /// 覆盖：宽松档（审批门/计划聚合）与严档（问答压制，F3-5）。共享表的用例设计为
+    /// **两档同判**（不含「孤立 plan-file」——那是两档唯一的分叉点，由
+    /// `strict_plan_pending_excludes_isolated_plan_file_only` 专门覆盖），
+    /// 故本用例对两个函数都断言同一期望。
+    #[test]
+    fn plan_pending_cross_language_fixture_cases() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/plan_pending_cases.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "无法读取跨语言共享夹具（{}）: {e}——本判据的一致性测试要求该文件存在",
+                path.display()
+            )
+        });
+        let root: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("plan_pending_cases.json 不是合法 JSON: {e}"));
+        let cases = root
+            .get("cases")
+            .and_then(|c| c.as_array())
+            .unwrap_or_else(|| panic!("共享夹具缺少 cases 数组"));
+
+        let mut checked_true = 0usize;
+        let mut checked_false = 0usize;
+        let mut checked_lenient_only = 0usize;
+        for case in cases {
+            let note = case.get("note").and_then(|n| n.as_str()).unwrap_or("");
+            let kinds: Vec<&str> = case
+                .get("kinds")
+                .and_then(|k| k.as_array())
+                .unwrap_or_else(|| panic!("用例缺 kinds（{note}）"))
+                .iter()
+                .map(|k| k.as_str().unwrap_or_default())
+                .collect();
+            let expect = case
+                .get("pending")
+                .and_then(|p| p.as_bool())
+                .unwrap_or_else(|| panic!("用例缺 pending 布尔（{note}）"));
+            // `lenient_only`：该用例只在**宽松档**成立（两档唯一的分叉点 = 孤立 plan-file，
+            // 见 `plan_pending_strict_tail_index` 文档）——两侧都按本字段分别断言两档
+            let lenient_only = case
+                .get("lenient_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let msgs: Vec<SessionMessage> = kinds.iter().map(|k| msg(k)).collect();
+            assert_eq!(
+                plan_pending_tail_index(&msgs).is_some(),
+                expect,
+                "宽松档与共享夹具不符（kinds={kinds:?}；{note}）"
+            );
+            assert_eq!(
+                plan_pending_strict_tail_index(&msgs).is_some(),
+                expect && !lenient_only,
+                "严档与共享夹具不符（kinds={kinds:?}；lenient_only={lenient_only}；{note}）"
+            );
+            if expect {
+                checked_true += 1;
+            } else {
+                checked_false += 1;
+            }
+            if lenient_only {
+                assert!(expect, "lenient_only 只能标在宽松档为真的用例上（{note}）");
+                checked_lenient_only += 1;
+            }
+        }
+        // 用例集自检：两类都非空 + 分叉面有覆盖（防「夹具被删空后测试恒绿」的退化）
+        assert!(
+            checked_true > 0 && checked_false > 0,
+            "共享夹具必须同时含在场与不在场用例（实得 true={checked_true} false={checked_false}）"
+        );
+        assert_eq!(
+            checked_lenient_only, 1,
+            "两档分叉面（孤立 plan-file）必须恰有一例（防分叉逻辑被静默删掉）"
+        );
+
+        // 工具族收窄：非 codex/kimi 一律不参与（两侧同名单）
+        let tools = root
+            .get("non_plan_tools")
+            .and_then(|t| t.as_array())
+            .unwrap_or_else(|| panic!("共享夹具缺少 non_plan_tools"));
+        for t in tools {
+            let t = t.as_str().unwrap_or_default();
+            assert!(
+                !plan_dialog_family(t),
+                "共享夹具的 non_plan_tools 含计划对话框族成员：{t}"
+            );
+        }
     }
 
     // ==== 丁T2：审批卡计划聚合的「同一事件正文优先」 ====
