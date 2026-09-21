@@ -113,8 +113,23 @@ const SENSITIVE_DIRS: &[&str] = &[
 /// 内（段精确：`.claude/plans-x` 不误豁免 `.claude/plans`）则放行预览。
 /// 首例 `.claude/plans`（用户 C-10 发现计划文件「受安全策略保护」）；`.codex/plans`
 /// 为 T0 盘点第二例（<turn>/<uuid>/PLAN.md 子树，纯 md）。凭据/会话原始数据照拦
-/// （豁免只放产物目录；WorkBuddy 等其余候选待黑名单盲区补拦裁决，T0 盘点只记录）
-const EXEMPT_SUBPATHS: &[&str] = &[".claude/plans", ".codex/plans"];
+/// （豁免只放产物目录；WorkBuddy 等其余候选待黑名单盲区补拦裁决，T0 盘点只记录）。
+///
+/// **批次丙 T7 · 尾段序列匹配**：kimi 的计划产物在
+/// `~/.kimi-code/sessions/wd_<proj>_<hash>/session_<uuid>/agents/main/plans/*.md`
+/// ——前缀含**变量段**（会话 id、工作目录 hash），段精确的静态前缀表永远接不住。
+/// 故 `exempt_subpath_under_home` 增补第二条判据：豁免项作为**连续尾段序列**出现即
+/// 命中（`agents/main/plans` 在 rel 中连续同序出现）。段精确性保持不变（`plans-x`
+/// 不等于 `plans`；非连续同序不命中），凭据面照拦（`.kimi-code` 其余子路径仍被
+/// SENSITIVE_DIRS 拦截，只有明确列出的产物目录放行）。
+const EXEMPT_SUBPATHS: &[&str] = &[
+    ".claude/plans",
+    ".codex/plans",
+    // T7 第三例：kimi 计划文件（深路径，含会话 id 变量段 → 靠尾段序列匹配；
+    // 实测样本 `~/.kimi-code/sessions/wd_test_.../session_<uuid>/agents/main/plans/
+    // miss-martian-she-hulk-beast.md`）
+    "agents/main/plans",
+];
 
 /// fail-closed 全段匹配面（基准不可用分支专用）：仅凭据类目录。AppData/Library
 /// 是「主目录内」语义段，不进全段面——Windows 的 TEMP 本就在 AppData 之下，
@@ -302,13 +317,31 @@ fn exempt_subpath_under_home(child: &Path, home_base: &Path, windows: bool) -> b
         .strip_prefix(&norm(&base.to_string_lossy()))
         .map(|r| r.trim_start_matches('/').to_string())
         .unwrap_or_default();
+    let rel_segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
     EXEMPT_SUBPATHS.iter().any(|e| {
         let e = if windows {
             e.to_lowercase()
         } else {
             e.to_string()
         };
-        rel.starts_with(&format!("{e}/"))
+        // ① 前缀形态（既有）：`.claude/plans/...` —— rel 以该子路径开头
+        if rel.starts_with(&format!("{e}/")) {
+            return true;
+        }
+        // ② 尾段序列形态（批次丙 T7）：`.kimi-code/…/agents/main/plans/<f>.md`
+        // 这类**路径前缀含变量段**（会话 id）的产物目录接不住前缀形态，改用
+        // **尾段序列**匹配：rel 的**连续段序列**与豁免项段序列全等。
+        //
+        // 段精确不放松：比对的是完整段序列（`plans-x` 不等于 `plans`；
+        // `agents/main/plans` 只在**连续同序**出现时命中）。凭据面照拦——
+        // 豁免项本身写死为产物目录（见 EXEMPT_SUBPATHS 注释），不含会话/凭据目录。
+        let pat: Vec<&str> = e.split('/').filter(|s| !s.is_empty()).collect();
+        if pat.is_empty() || pat.len() > rel_segs.len() {
+            return false;
+        }
+        rel_segs
+            .windows(pat.len())
+            .any(|w| w.iter().zip(&pat).all(|(a, b)| a == b))
     })
 }
 
@@ -1238,6 +1271,49 @@ mod tests {
         assert!(exempt_subpath_under_home(
             Path::new("C:/Users/u/.Claude/Plans/a.md"),
             Path::new("C:/Users/u"),
+            true
+        ));
+    }
+
+    /// 批次丙 T7：**尾段序列匹配**——kimi 计划产物在深路径（前缀含会话 id 变量段），
+    /// 前缀形态接不住，靠「豁免项作为连续尾段序列出现」命中；段精确性与凭据面
+    /// 照旧（`plans-x` 不豁免、`.kimi-code` 其余路径照拦）
+    #[test]
+    fn exempt_tail_sequence_matches_kimi_plan_paths() {
+        let home = Path::new("/Users/u");
+        // 实机路径形态（本机实测样本）：wd_<proj>_<hash>/session_<uuid>/agents/main/plans/x.md
+        let hit = "/Users/u/.kimi-code/sessions/wd_test_72c4040eb71a/session_46b9cd5f-c817-4b84-a7ef-ee1ff8a4c59d/agents/main/plans/miss-martian-she-hulk-beast.md";
+        assert!(
+            sensitive_under_home(Path::new(hit), home, false),
+            "kimi 计划路径命中 .kimi-code 黑名单（否则豁免无从谈起）"
+        );
+        assert!(
+            exempt_subpath_under_home(Path::new(hit), home, false),
+            "T7：kimi 深路径计划文件应豁免（尾段序列 agents/main/plans）"
+        );
+        // 多级 plans 子目录同样命中（尾段序列不要求是叶子目录）
+        assert!(exempt_subpath_under_home(
+            Path::new("/Users/u/.kimi-code/x/y/agents/main/plans/sub/p.md"),
+            home,
+            false
+        ));
+        // 照拦：kimi 其余路径（会话数据/配置——凭据面不放松）
+        for p in [
+            "/Users/u/.kimi-code/config.toml",
+            "/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/wire.jsonl",
+            "/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans-x/secret.md",
+            // 段序列不连续 → 不命中（`agents/plans/main` 不等于 `agents/main/plans`）
+            "/Users/u/.kimi-code/sessions/x/agents/plans/main/f.md",
+        ] {
+            assert!(
+                !exempt_subpath_under_home(Path::new(p), home, false),
+                "{p} 应照拦"
+            );
+        }
+        // Windows 形态（反斜杠 + 大写盘符）
+        assert!(exempt_subpath_under_home(
+            Path::new(r"C:\Users\u\.kimi-code\sessions\wd_x\session_y\agents\main\plans\p.md"),
+            Path::new(r"C:\Users\u"),
             true
         ));
     }

@@ -1717,6 +1717,43 @@ describe("SessionDetail：计划一等卡片（T1）", () => {
   });
 });
 
+// ==== 计划文件卡（批次丙 T7）：kimi 计划是一等文件，后端从工具结果识别引用后
+// 补 kind="plan-file" 消息（content = 文件路径）→ 卡片显文件名 + 查看按钮 ====
+describe("SessionDetail：计划文件卡（T7）", () => {
+  it("plan-file 消息渲染计划文件卡：文件名可见、点击走文件预览", async () => {
+    installFetch();
+    const full =
+      "C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/miss-martian.md";
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "做个计划" }),
+      msg({
+        seq: 1,
+        kind: "tool-result",
+        content: `Wrote 4263 bytes to ${full}`,
+      }),
+      msg({ seq: 2, kind: "plan-file", content: full }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    expect(await screen.findByTestId("plan-file-2")).toBeTruthy();
+    // 「计划文件」标签 + 文件名（不含全路径，全路径在 title）
+    expect(screen.getByText("计划文件")).toBeTruthy();
+    expect(screen.getByTestId("plan-file-name-2").textContent).toBe("miss-martian.md");
+    // 工具结果原文仍在（卡片是追加而非替换）
+    expect(screen.getByText(/Wrote 4263 bytes to/)).toBeTruthy();
+    // 点击「查看计划」→ 进入文件预览（openFile → preview 层）
+    fireEvent.click(screen.getByTestId("plan-file-open-2"));
+    expect(await screen.findByTestId("file-preview")).toBeTruthy();
+  });
+
+  it("plan-file 是常驻卡：不折叠（无折叠头）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "plan-file", content: "/w/plans/a.md" })];
+    render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    expect(await screen.findByTestId("plan-file-0")).toBeTruthy();
+    expect(screen.queryByTestId("msg-0-toggle")).toBeNull();
+  });
+});
+
 // ==== 活状态流（T1 可选项，本批裁决要做）：详情页停留期间 selected 随既有
 // 看板轮询数据（Board 的 SSE 跃迁/快照 + 降级 3s 轮询）自动更新——红卡与总结
 // 横幅随状态切换，无需重进页面。App 级集成测试：Board 数据一拍更新 →

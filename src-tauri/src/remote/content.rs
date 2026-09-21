@@ -78,6 +78,72 @@ fn split_proposed_plan(text: &str) -> Option<(String, String)> {
     Some((preamble.to_string(), plan.to_string()))
 }
 
+/// 计划文件引用识别（批次丙 T7）：工具结果/消息正文里出现的**计划文件路径** →
+/// 消息流补一张「计划文件卡」（kind="plan-file"，前端渲染文件名 + 可点预览）。
+///
+/// **为何需要**：kimi 的计划是一等文件（`~/.kimi-code/sessions/…/agents/main/plans/
+/// x.md`），写入动作在消息流里只留一行工具结果（"Wrote 4263 bytes to …"）——手机端
+/// 因此只见一行而读不到计划全文（图1 诉求）。识别该引用后出卡，卡片经既有文件预览
+/// 端点打开（豁免面见 `files::EXEMPT_SUBPATHS` 的 T7 尾段序列匹配）。
+///
+/// **识别判据（实测形态，勿凭想象扩面）**：本机 kimi wire 实录的三种引用都含
+/// `plans/<name>.md` 路径片段——
+///
+/// - `Wrote <N> bytes to <path>/plans/x.md`（Write 工具结果，实测原文）
+/// - `Plan file: <path>` / `Planning: <path>`（前缀变体，防御性覆盖）
+///
+/// 判据 = 文本含 `plans` 目录段（`/` 或 `\` 分隔皆可——Windows 反斜杠形态实测存在）
+/// 且其后紧跟 `<文件名>.md`，且文件名不含空白/引号（防把整句吞进路径）。命中即
+/// 产出——**按形态不按工具名**（claude/codex 的同类引用一并接住）。
+///
+/// 只取**第一个**命中（一次工具结果通常只写一个计划文件；多个时按出现序取首个，
+/// 与「计划」语义一致）。
+fn extract_plan_file_ref(text: &str) -> Option<String> {
+    // 逐候选扫描 `plans` 目录段（双分隔符）：其后须紧跟 `<文件名>.md`
+    let mut search_from = 0usize;
+    while search_from < text.len() {
+        let fwd = text[search_from..].find("plans/").map(|i| search_from + i);
+        let bwd = text[search_from..].find("plans\\").map(|i| search_from + i);
+        let plans_at = match (fwd, bwd) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        let start = plans_at + "plans/".len();
+        let rest = &text[start..];
+        // 文件名：到 `.md` 为止，字符集排除空白与路径/引号分隔符
+        if let Some(name_end) = rest.find(".md") {
+            let name = &rest[..name_end];
+            let ok = !name.is_empty()
+                && !name.contains([' ', '\t', '\n', '\r', '"', '\'', '<', '>', '|'])
+                && !name.contains('/')
+                && !name.contains('\\');
+            if ok {
+                // 回取 `plans` 之前的路径部分（到最近的空白/引号/行首为止）——
+                // 拼出可直接交给文件预览端点的**完整路径**（端点按会话 cwd 或绝对
+                // 路径解析）。注意 `before` 取到 `plans` 之前，`tail` 从 `plans`
+                // 开始——两段拼起来才是完整路径（省掉 tail 就会丢 `plans/` 段）
+                let before = &text[..plans_at];
+                let path_start = before
+                    .rfind([' ', '\t', '\n', '\r', '"', '\'', '<', '>'])
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let full = format!(
+                    "{}{}",
+                    &before[path_start..],
+                    &text[plans_at..start + name_end + 3]
+                );
+                if !full.trim().is_empty() {
+                    return Some(full.trim().to_string());
+                }
+            }
+        }
+        search_from = start;
+    }
+    None
+}
+
 impl SessionMessage {
     /// 文本类条目（user / assistant / thinking / tool-result）。
     /// collapsed 由 kind 推导：thinking 恒折叠
@@ -124,6 +190,29 @@ impl SessionMessage {
             }
             None => vec![Self::text("assistant", text, ts)],
         }
+    }
+
+    /// 工具结果条目（批次丙 T7）：正文含**计划文件引用**时，除原 tool-result 外
+    /// **追加一张计划文件卡**（kind="plan-file"，content=可预览路径，默认展开）。
+    ///
+    /// 卡片与 tool-result **并存**（不替换）：工具结果原文（"Wrote 4263 bytes to …"）
+    /// 是操作事实，计划文件卡是「去读正文」的入口——两者对不同读者都有价值。
+    fn tool_result_with_plan_ref(content: impl Into<String>, ts: Option<i64>) -> Vec<Self> {
+        let text: String = content.into();
+        let mut out = vec![Self::text("tool-result", text.clone(), ts)];
+        if let Some(path) = extract_plan_file_ref(&text) {
+            out.push(Self {
+                seq: 0,
+                role: "assistant".to_string(),
+                kind: "plan-file".to_string(),
+                content: path,
+                ts,
+                tool_name: None,
+                tool_args: None,
+                collapsed: false, // 一等卡默认展开（入口卡，无需折叠）
+            });
+        }
+        out
     }
 
     /// 工具调用条目（collapsed = true）。**计划形态升格收口（T1 一等卡片，按形态
@@ -893,7 +982,8 @@ fn map_claude_lines(lines: &[String]) -> Vec<SessionMessage> {
                                     .get("content")
                                     .and_then(content_block_text)
                                     .unwrap_or_else(|| "工具结果".to_string());
-                                out.push(SessionMessage::text("tool-result", text, ts));
+                                // T7：含计划文件引用 → 追加计划文件卡（形态判据跨工具）
+                                out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
                             }
                             _ => {}
                         }
@@ -1137,7 +1227,8 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
                     _ => None,
                 }
                 .unwrap_or_else(|| "工具结果".to_string());
-                out.push(SessionMessage::text("tool-result", text, ts));
+                // T7：含计划文件引用 → 追加计划文件卡（codex 亦写 plans/x.md 形态）
+                out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
             }
             "reasoning" => {
                 // summary 元素双形态（实测纯字符串；亦容忍 {text} 对象）
@@ -1471,7 +1562,9 @@ pub(crate) fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
                                 _ => None,
                             })
                             .unwrap_or_else(|| "工具结果".to_string());
-                        out.push(SessionMessage::text("tool-result", text, ts));
+                        // T7：含计划文件引用 → 追加计划文件卡（kimi 计划是一等文件，
+                        // 消息流只有 "Wrote N bytes to …/plans/x.md" 一行——图1 诉求）
+                        out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
                     }
                     _ => {} // step.begin/end 等边界 → 跳过
                 }
@@ -1575,7 +1668,8 @@ fn map_workbuddy_lines(lines: &[String]) -> Vec<SessionMessage> {
                     _ => None,
                 }
                 .unwrap_or_else(|| "工具结果".to_string());
-                out.push(SessionMessage::text("tool-result", text, ts));
+                // T7：含计划文件引用 → 追加计划文件卡（形态判据跨工具）
+                out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
             }
             _ => {}
         }
@@ -2457,6 +2551,78 @@ mod tests {
         let msgs = map_codex_lines(&[plain.to_string()]);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].kind, "assistant");
+    }
+
+    // ---- 批次丙 T7：计划文件引用识别 ----
+
+    /// T7 纯函数：kimi 实测原文形态（"Wrote N bytes to …/plans/x.md"）→ 完整路径
+    #[test]
+    fn extract_plan_file_ref_handles_real_wire_text() {
+        // 本机 kimi wire 实测原文（Write 工具结果）
+        let real = "Wrote 4263 bytes to C:/Users/bunny/.kimi-code/sessions/wd_test_72c4040eb71a/session_46b9cd5f-c817-4b84-a7ef-ee1ff8a4c59d/agents/main/plans/miss-martian-she-hulk-beast.md";
+        assert_eq!(
+            extract_plan_file_ref(real).as_deref(),
+            Some("C:/Users/bunny/.kimi-code/sessions/wd_test_72c4040eb71a/session_46b9cd5f-c817-4b84-a7ef-ee1ff8a4c59d/agents/main/plans/miss-martian-she-hulk-beast.md")
+        );
+        // Windows 反斜杠形态
+        let win = r"Wrote 12 bytes to C:\Users\u\.kimi-code\sessions\s\agents\main\plans\p.md";
+        assert_eq!(
+            extract_plan_file_ref(win).as_deref(),
+            Some(r"C:\Users\u\.kimi-code\sessions\s\agents\main\plans\p.md")
+        );
+        // 前缀变体
+        assert!(extract_plan_file_ref("Plan file: /w/plans/a.md").is_some());
+        assert!(extract_plan_file_ref("Planning: /w/plans/a.md").is_some());
+        // 引号包裹（工具结果里 JSON 转义后的常见形态）
+        assert_eq!(
+            extract_plan_file_ref(r#""/w/plans/a.md""#).as_deref(),
+            Some("/w/plans/a.md")
+        );
+
+        // 不命中：无 plans/ / 非 .md / 文件名含空白（防吞整句）
+        for bad in [
+            "Wrote 5 bytes to /w/other/x.md",
+            "plans/note.txt",
+            "普通回复，没有路径",
+            "plans/ two words.md",
+        ] {
+            assert!(
+                extract_plan_file_ref(bad).is_none(),
+                "不得命中: {bad:?} → {:?}",
+                extract_plan_file_ref(bad)
+            );
+        }
+    }
+
+    /// T7：工具结果含计划文件引用 → 产 [tool-result 原文, plan-file 卡]（原文不丢）
+    #[test]
+    fn plan_file_ref_yields_card_alongside_tool_result() {
+        let text = "Wrote 99 bytes to /w/plans/round-1.md";
+        let msgs = SessionMessage::tool_result_with_plan_ref(text, Some(7));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].kind, "tool-result", "工具结果原文保留");
+        assert_eq!(msgs[0].content, text);
+        assert_eq!(msgs[1].kind, "plan-file", "追加计划文件卡");
+        assert_eq!(msgs[1].content, "/w/plans/round-1.md");
+        assert!(!msgs[1].collapsed, "入口卡默认展开");
+
+        // 无引用 → 只产 tool-result（零回归）
+        let plain = SessionMessage::tool_result_with_plan_ref("ok", Some(7));
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].kind, "tool-result");
+    }
+
+    /// T7 端到端：kimi wire 的 tool.result 行 → 消息流出 plan-file（走真实分派路径）
+    #[test]
+    fn kimi_wire_plan_write_yields_plan_file_kind() {
+        let line = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","toolCallId":"c1","result":{"output":"Wrote 4263 bytes to C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/plan-a.md"}}}"#;
+        let msgs = map_kimi_lines(&[line.to_string()]);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["tool-result", "plan-file"]);
+        assert!(msgs[1].content.ends_with("plans/plan-a.md"));
+        // 普通工具结果零回归
+        let plain = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","toolCallId":"c2","result":{"output":"done"}}}"#;
+        assert_eq!(map_kimi_lines(&[plain.to_string()]).len(), 1);
     }
 
     #[test]

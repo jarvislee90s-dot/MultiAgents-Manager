@@ -421,7 +421,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       const forced = expandedOverride.get(m.seq);
       if (forced !== undefined) return forced; // 手动展开/再折叠优先
       // T1：plan 一等卡片恒展开——运行态与总结态都不折叠（豁免总结模式折叠）
-      if (m.kind === "plan") return false;
+      // T7：plan-file 计划文件卡同为入口卡，恒展开（与 plan 同款豁免）
+      if (m.kind === "plan" || m.kind === "plan-file") return false;
       if (isSummary) {
         // 总结模式：user 直显；assistant 只显最后总结；过程消息全折叠
         if (m.kind === "user") return false;
@@ -597,6 +598,41 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 计划
               </p>
               {renderMarkdown(m.content)}
+            </div>
+          );
+        }
+        case "plan-file": {
+          // T7 计划文件卡：后端从工具结果/正文里识别出计划文件引用（如 kimi 的
+          // "Wrote 4263 bytes to …/plans/x.md"）→ 补一张 kind="plan-file" 消息，
+          // content = 文件路径。卡片显示文件名 + 「查看计划」按钮 → 走既有文件预览
+          // 面板（后端豁免面已放行 kimi 的 agents/main/plans 子树）。
+          const full = m.content;
+          const name = full.split(/[\\/]/).pop() || full;
+          return (
+            <div
+              data-testid={`plan-file-${m.seq}`}
+              className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-2 text-xs"
+            >
+              <p className="mb-1 text-[11px] font-medium tracking-wide text-emerald-700 uppercase dark:text-emerald-400">
+                计划文件
+              </p>
+              <div className="flex items-center gap-2">
+                <span
+                  data-testid={`plan-file-name-${m.seq}`}
+                  className="min-w-0 flex-1 truncate font-mono text-slate-700 dark:text-slate-300"
+                  title={full}
+                >
+                  {name}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`plan-file-open-${m.seq}`}
+                  className="shrink-0 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700"
+                  onClick={() => openFile(full)}
+                >
+                  查看计划
+                </button>
+              </div>
             </div>
           );
         }
