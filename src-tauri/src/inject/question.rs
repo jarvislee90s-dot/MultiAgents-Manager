@@ -275,13 +275,22 @@ pub fn answer_key_sequence_for(
                 if q.multi_select {
                     return Err("kimi 多选未实测，不出键".to_string());
                 }
-                // 两段式：数字选中 → Review 屏 → 数字 '1' Submit 确认
+                // 两段式：数字**选中**（不提交）→ **Enter 确认**
+                //
+                // **2026-09-21 实机复验修正**（本轮补跑的 T5/T6 探测抓获）：
+                // 原实现按 2026-09-20 矩阵记载发 `[数字, "1"]`（数字选中后按 '1'
+                // 提交）——实机证明**第二个数字无效**，确认键是 **Enter**：
+                // kimi 对话框底栏原文 `↑/↓ select · 1/2/3 choose · ↵ confirm`
+                // （证据 `%TEMP%\mam-probe-c3-20260921-150000\evidence\
+                // screen-t5-kimi-ready-before.txt` 行 26）。实测：注入 '1' 后对话框
+                // **仍在**（高亮项不变），再注入 Enter 才关闭并推进回合
+                // （screen-kimi-after-approve.txt → screen-kimi-after-enter-confirm.txt）。
                 let i = index.ok_or_else(|| "缺少选项序号".to_string())?;
                 if i >= q.options.len() {
                     return Err(format!("选项序号越界：{i}"));
                 }
                 let digit = digit_key(i).ok_or_else(|| format!("选项序号超键域：{i}"))?;
-                Ok(vec![digit, "1".to_string()])
+                Ok(vec![digit, "enter".to_string()])
             }
             AnswerAction::Toggle | AnswerAction::Submit => {
                 Err("kimi 多选提交未实测，不出键".to_string())
@@ -557,18 +566,21 @@ mod tests {
         );
     }
 
-    /// T3 · kimi 档（矩阵 §2.3 实机：数字 → Review 屏 → 数字确认的**两段式**）
+    /// T3 · kimi 档（**2026-09-21 实机复验修正**：数字选中 → **Enter 确认**）
+    ///
+    /// 矩阵原记载「数字 → Review 屏 → 数字 '1' 提交」被实机证伪：第二个数字无效，
+    /// 确认键是 Enter（底栏 `1/2/3 choose · ↵ confirm`）。
     #[test]
     fn kimi_profile_is_two_phase() {
         let q = single();
         assert_eq!(
             answer_key_sequence_for("kimi", AnswerAction::Select, Some(0), &q).unwrap(),
-            vec!["1", "1"],
-            "两段式：选中数字 → Review 屏 Submit 数字 '1'"
+            vec!["1", "enter"],
+            "两段式：数字选中 → Enter 确认（实机复验修正，原记为 [数字, '1']）"
         );
         assert_eq!(
             answer_key_sequence_for("kimi", AnswerAction::Select, Some(2), &q).unwrap(),
-            vec!["3", "1"]
+            vec!["3", "enter"]
         );
         // 越界/缺序号仍拒
         assert!(answer_key_sequence_for("kimi", AnswerAction::Select, Some(9), &q).is_err());

@@ -57,10 +57,25 @@ pub struct DialogOption {
 pub const MAX_DIALOG_OPTIONS: usize = 9;
 
 /// 判定一行是否是「编号选项行」并抽出 (编号, 文本)。行模式：
-/// `^\s*(\d+)\s*[.)]\s*(.+)$`——允许前导空白（对话框常在缩进区）、编号后跟
+/// `^[\s›❯>]*(\d+)\s*[.)]\s*(.+)$`——允许前导空白**与光标标记**、编号后跟
 /// `.` 或 `)`、其后至少一个空白（防把 `1.5x` 这类数字当选项）。
+///
+/// **光标标记为什么必须剥**（2026-09-21 实机探测抓获的真实缺陷）：codex 的
+/// `Implement this plan?` 对话框把**当前高亮项**渲染为 `› 1. Yes, ...`（U+203A），
+/// 未高亮项是 `  2. ...`。原实现只 `trim_start()`（仅空白）→ 高亮项**永不匹配** →
+/// 第一项编号缺失 → 连续簇从 2 起 → 解析返回 None → 整个对话框降级二元卡。
+/// 实测证据：`%TEMP%\mam-probe-c3-20260921-150000\evidence\
+/// screen-t5-codex-implement-before.txt`（行 25 `› 1. Yes, implement this plan`）。
+/// claude 的同类标记是 `❯ `（U+276F，见同目录 screen-t5-claude-plan-before.txt），
+/// 故两家标记都要剥。`>` 是兜底形态（部分 TUI 用 ASCII 箭头）。
 fn parse_option_line(line: &str) -> Option<(u32, String)> {
-    let t = line.trim_start();
+    // 剥前导空白 + 光标标记（可多枚/交替出现，如 "❯ › 1."）。
+    // 三类实机光标标记（2026-09-21 探测，逐家屏幕原文取证）：
+    //   codex `› 1.`（U+203A）/ claude `❯ 1.`（U+276F）/ kimi `▶ 1.`（U+25B6）；
+    //   `>` 为 ASCII 兜底形态。
+    let t = line.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '\u{203a}' | '\u{276f}' | '\u{25b6}' | '>')
+    });
     let digits_len = t.chars().take_while(|c| c.is_ascii_digit()).count();
     if digits_len == 0 {
         return None;
@@ -158,6 +173,73 @@ mod tests {
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 2026-09-21 实机探测抓获的**真实缺陷回归锁**：codex 把当前高亮项渲染为
+    /// `› 1. ...`（U+203A），未高亮项是 `  2. ...`。原实现只 trim 空白 → 高亮项
+    /// 永不匹配 → 首项缺失 → 连续簇失败 → 整个对话框降级二元卡。
+    /// 夹具=实机屏幕原文（`screen-t5-codex-implement-before.txt` 行 25–27）。
+    #[test]
+    fn parses_dialog_with_cursor_marker_prefix() {
+        let codex = lines(&[
+            "  Implement this plan?",
+            "",
+            "› 1. Yes, implement this plan          Switch to Default and start coding.",
+            "  2. Yes, clear context and implement  Fresh thread. Context: 2% used.",
+            "  3. No, stay in Plan mode             Continue planning with the model.",
+            "",
+            "  Press enter to confirm or esc to go back",
+        ]);
+        let opts = parse_dialog_options(&codex).expect("带 › 光标标记的真实对话框必须解析");
+        assert_eq!(opts.len(), 3, "高亮项不得因 › 前缀被漏掉");
+        assert_eq!(opts[0].number, 1);
+        assert_eq!(
+            opts[0].label,
+            "Yes, implement this plan          Switch to Default and start coding."
+        );
+        assert_eq!(
+            opts[2].label,
+            "No, stay in Plan mode             Continue planning with the model."
+        );
+
+        // claude 的同类标记 ❯（U+276F）——实机屏幕原文形态
+        let claude = lines(&[
+            " Claude has written up a plan and is ready to execute. Would you like to proceed?",
+            "",
+            " ❯ 1. Yes, and use auto mode",
+            "   2. Yes, manually approve edits",
+            "   3. Tell Claude what to change",
+            "      shift+tab to approve with this feedback",
+        ]);
+        let opts = parse_dialog_options(&claude).expect("带 ❯ 光标标记的 claude 对话框必须解析");
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[0].label, "Yes, and use auto mode");
+        assert_eq!(opts[2].label, "Tell Claude what to change");
+
+        // ASCII 兜底形态
+        let ascii = lines(&["> 1. First", "  2. Second"]);
+        assert_eq!(parse_dialog_options(&ascii).unwrap().len(), 2);
+    }
+
+    /// 2026-09-21 实机探测第二例：kimi `Ready to build?` 用 `▶`（U+25B6）作光标标记
+    /// ——夹具=实机屏幕原文（`screen-t5-kimi-ready-before.txt` 行 22–24）
+    #[test]
+    fn parses_kimi_ready_to_build_dialog() {
+        let kimi = lines(&[
+            "   ▶ Ready to build with this plan?",
+            "",
+            "   ▶ 1. Approve",
+            "     2. Reject",
+            "     3. Revise",
+            "",
+            "   ↑/↓ select · 1/2/3 choose · ↵ confirm",
+        ]);
+        let opts = parse_dialog_options(&kimi).expect("kimi Ready to build 必须解析（▶ 标记已剥）");
+        assert_eq!(opts.len(), 3, "▶ 前缀不得吃掉首项");
+        assert_eq!(opts[0].number, 1);
+        assert_eq!(opts[0].label, "Approve");
+        assert_eq!(opts[1].label, "Reject");
+        assert_eq!(opts[2].label, "Revise");
     }
 
     /// 三类真实对话框形态（计划书 §1 问题 6 列举的选项文本）→ 全部解析成功
