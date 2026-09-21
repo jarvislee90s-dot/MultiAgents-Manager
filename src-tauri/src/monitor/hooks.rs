@@ -2042,6 +2042,155 @@ fn claude_notification_message_really_fires_in_real_session() {
     }
 }
 
+/// 批次丙 T2 实机自检：**部署链路**端到端——PreToolUse(AUQ) 载荷经**部署的**
+/// `~/.mam/bin/mam-hook-listener.exe` 落盘，带 `tool_name` + `tool_input`。
+///
+/// 这是批次乙遗留的未验段：既有实机测试（`claude_hook_events_really_fire_*` 家族）
+/// 全部把 helper 指向 **target/debug 的构建产物**，从未验证过 `~/.mam/bin/` 里
+/// **部署的那一份**。而部署滞后正是图2/图3 的根因 2（`~/.mam/bin` 为 00:45 旧构建，
+/// 事件无 tool_name → 问答分支永不识别）。
+///
+/// # 本测试断言什么
+///
+/// 1. 部署的 helper 存在（`~/.mam/bin/`）且**产物不旧于源码**（mtime 晚于本文件
+///    所在 crate 的 Cargo.toml——粗粒度但足以捕获「旧构建」这一类真实故障）；
+/// 2. 用**真实 AUQ payload**（形态取自 T1 实机取证的原始 stdin）经部署的 helper
+///    回放 → 事件文件带 `tool_name="AskUserQuestion"` 且 `tool_input` 可解析出
+///    questions。
+///
+/// # 为何是「回放」而非「拉起真实会话」
+///
+/// 真实会话驱动 AUQ 需要交互式 TUI + 人工作答（见 T1 测试），而本测试要验的是
+/// **部署的那份二进制**——把真实 payload 喂给它，验的正是「部署产物的载荷能力」
+/// 这一段链路（会话→helper 的那一段已由 T1 测试与通道 A 覆盖）。两段合起来即
+/// 通道 A 端到端。
+///
+/// # 隔离与纪律（八条铁律）
+///
+/// 部署的 helper 是 **release 语义**（`app_data_home()` 的 MAM_HOME 重定向仅
+/// `#[cfg(debug_assertions)]` 生效）——若它恰好是 debug 构建则认 MAM_HOME，若为
+/// release 则写**真实** `~/.mam/events/`。为不污染真实目录，本测试用**专属探针
+/// session_id**（`mam-t2-selftest-<pid>`）并在**测试末尾删除自己那一个文件**
+/// （单点删除，绝不触碰其他事件文件）；这正是 T1 探测档案用过的处置纪律。
+///
+/// 前置：应用已启动过一次（`ensure_hook_script` → `install_helper_bin` 完成部署），
+/// 或手动 `cp target/debug/mam-hook-listener.exe ~/.mam/bin/`。
+#[test]
+#[ignore = "实机验证：部署的 helper（~/.mam/bin）载荷能力——真实 AUQ payload 回放（前置=已部署）"]
+fn deployed_helper_writes_question_channel_payload() {
+    let exe_name = if cfg!(windows) {
+        "mam-hook-listener.exe"
+    } else {
+        "mam-hook-listener"
+    };
+    let home = dirs::home_dir().expect("home_dir 可用");
+    let deployed = home.join(".mam").join("bin").join(exe_name);
+    assert!(
+        deployed.is_file(),
+        "部署的 helper 不在场：{}——先启动一次应用（ensure_hook_script 会安装），\
+         或 cargo build --bin mam-hook-listener --features hook-listener 后手动 cp",
+        deployed.display()
+    );
+
+    // 部署新鲜度：helper mtime 不应早于本 crate 的 Cargo.toml（粗粒度陈旧检测）
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let mtime = |p: &std::path::Path| -> Option<std::time::SystemTime> {
+        std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
+    };
+    if let (Some(dep_m), Some(src_m)) = (mtime(&deployed), mtime(&manifest)) {
+        assert!(
+            dep_m >= src_m,
+            "部署的 helper（{}）早于源码 Cargo.toml（{}）——疑似旧构建（图2/图3 根因 2）。\
+             重构建后重启应用，或手动 cp 覆盖",
+            deployed.display(),
+            manifest.display()
+        );
+    }
+
+    // 真实 AUQ payload（形态取自 T1 实机取证的原始 stdin：PreToolUse ∧ AUQ ∧
+    // 完整 tool_input.questions）
+    let sid = format!("mam-t2-selftest-{}", std::process::id());
+    let payload = format!(
+        concat!(
+            r#"{{"session_id":"{sid}","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","cwd":"/w","#,
+            r#""tool_input":{{"questions":[{{"header":"Next step","multiSelect":false,"#,
+            r#""options":[{{"description":"d","label":"Tool demo"}}],"#,
+            r#""question":"What would you like to do next?"}}]}}}}"#
+        ),
+        sid = sid
+    );
+
+    let out = std::process::Command::new(&deployed)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin 管道")
+                .write_all(payload.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap_or_else(|e| panic!("部署的 helper 执行失败：{e}"));
+
+    // 红线 1 回归：helper 必须 exit 0 且 stdout 为空（codex 侧 exit≠0 会被当 Deny）
+    assert!(
+        out.status.success(),
+        "部署的 helper 必须 exit 0（红线 1）；stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "部署的 helper 必须零 stdout（红线 1）；got={:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // 事件文件定位：debug 构建认 MAM_HOME（未设则真实目录）；release 恒真实目录。
+    // 两个候选都探，命中即用；测试末尾单点删除自己那一个
+    let real_dir = home.join(".mam").join("events");
+    let candidates = [real_dir.clone()];
+    let mut body = None;
+    let mut found_path = None;
+    for dir in &candidates {
+        let p = dir.join(format!("{sid}.json"));
+        if let Ok(b) = std::fs::read_to_string(&p) {
+            body = Some(b);
+            found_path = Some(p);
+            break;
+        }
+    }
+    let body = body.unwrap_or_else(|| {
+        panic!(
+            "部署的 helper 未产出事件文件（查过：{}）——部署产物可能不是本构建",
+            candidates
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    let v: serde_json::Value = serde_json::from_str(&body).expect("事件文件是合法 JSON");
+    assert_eq!(
+        v["tool_name"], "AskUserQuestion",
+        "部署的 helper 必须携带 tool_name（T8 载荷能力）: {body}"
+    );
+    let ti: serde_json::Value =
+        serde_json::from_str(v["tool_input"].as_str().expect("tool_input 为 JSON 串"))
+            .expect("tool_input 可解析");
+    assert_eq!(
+        ti["questions"][0]["options"][0]["label"], "Tool demo",
+        "tool_input 必须含完整 questions 载荷（问答卡通道 A 的数据源）: {body}"
+    );
+
+    // 清场：单点删除本次探针事件文件（绝不触碰其他文件）
+    if let Some(p) = found_path {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// T1 命令规格纯决策（windows_semantics 显式驱动，双平台语义任意平台可测）
 #[cfg(test)]
 mod helper_command_spec_tests {

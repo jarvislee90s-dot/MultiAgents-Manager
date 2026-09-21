@@ -272,6 +272,21 @@ pnpm tauri:dev
 pnpm tauri:build
 ```
 
+> **helper 构建门（批次丙 T2 固化）**：`mam-hook-listener`（hook 事件监听 helper）
+> 与 `mam-marker`（窗口标题标记）都挂在 Cargo `required-features` 门后——**不带
+> feature 时根本不构建**，应用启动的 `ensure_hook_script` 就找不到同目录 helper、
+> 跳过安装，`~/.mam/bin/` 里那份永远是旧构建（实测故障：事件缺 `tool_name` 载荷 →
+> 问答卡通道 A 永不识别）。
+>
+> - `pnpm tauri:dev` / `pnpm tauri:build` **已内置 feature**（`hook-listener` 与
+>   `marker-helper`，后者蕴含前者），照常用即可；
+> - 单独构建 helper（如跑实机 `#[ignore]` 测试）必须显式带上：
+>   `cd src-tauri && cargo build --bin mam-hook-listener --features hook-listener`；
+> - 跑 bin 测试同理：`cargo test --bin mam-hook-listener --features hook-listener`；
+> - macOS 打包（`release:macos` / release.yml 的 macOS job）走的是裸
+>   `pnpm tauri build` 显式参数，**不受**上述 npm script 影响——额外 bin 会令
+>   universal 打包失败，故 macOS 侧有意不带 feature（helper 为 Windows 通道）。
+
 ### 代码检查与格式化
 
 ```bash
