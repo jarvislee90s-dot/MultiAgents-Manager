@@ -77,7 +77,14 @@ interface Routes {
     currentVersion: string | null;
     drift: boolean;
     reason?: string;
+    /** 丁T2：计划待确认预期态（codex/kimi 的计划确认框入口） */
+    planPending?: boolean;
+    /** 丁T2：屏读选项（dialog:<n>）与计划聚合（T8） */
+    dialog?: boolean;
+    plan?: { content: string; isFile: boolean } | null;
   };
+  /** 审批应答 POST 回执（丁T2 全链用例） */
+  approve?: { status: string; error?: string };
   /** 问答卡数据源（批次乙 T8，QuestionCard 挂载即拉）：available 为假时卡自隐——
    *  缺省 available=false（不改既有用例渲染）；问答挂载断言需显式给可用载荷 */
   questionInfo?: { available: boolean; questions: unknown[]; source?: string };
@@ -183,6 +190,12 @@ function installFetch() {
         ),
         { status: 200 }
       );
+    }
+    if (url.includes("/session-approve")) {
+      // 审批应答 POST（丁T2 全链用例）；判序在 -options 之后（前缀包含关系，同 ApproveCard 测试）
+      return new Response(JSON.stringify(routes.approve ?? { status: "key_sent" }), {
+        status: 200,
+      });
     }
     if (url.includes("/file?")) {
       if (routes.fileStatus) return new Response("no", { status: routes.fileStatus });
@@ -2108,4 +2121,214 @@ describe("SessionDetail：问答卡挂载（批次乙 T8 / 丁T1 放宽）", () 
       "空窗载荷不得把终态洗掉（按钮仍禁用）"
     ).toBeNull();
   });
+});
+
+// ==== 丁T2：计划待确认（codex/kimi）——提示条挂载与提示条→检查→N 选项全链 ====
+describe("SessionDetail：计划待确认条（丁T2）", () => {
+  /** 微任务冲刷（本 describe 自带；外层 flushDetail 定义在别的 describe 作用域内） */
+  async function flushAsyncDetail() {
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+  }
+
+  /** 计划消息条目（T1/T4 升格产物同形） */
+  function planMsg(seq: number, content: string): SessionMessage {
+    return {
+      seq,
+      role: "assistant",
+      kind: "plan",
+      content,
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  /** 用户消息条目 */
+  function userMsg(seq: number, content = "继续"): SessionMessage {
+    return {
+      seq,
+      role: "user",
+      kind: "user",
+      content,
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  /** 工具事件条目（批准后 wire 落 ExitPlanMode 回执的形态） */
+  function toolMsg(seq: number, kind: "tool-call" | "tool-result"): SessionMessage {
+    return {
+      seq,
+      role: "assistant",
+      kind,
+      content: "ExitPlanMode",
+      ts: null,
+      toolName: kind === "tool-call" ? "ExitPlanMode" : null,
+      toolArgs: null,
+      collapsed: true,
+    };
+  }
+
+  it("codex processing + 尾部计划提案：挂载审批卡并渲染「计划待确认」条（waiting 门被数据形态门放宽）", async () => {
+    installFetch();
+    routes.messages = [userMsg(0), planMsg(1, "# 方案\n\n正文")];
+    routes.approveOptions = {
+      available: true,
+      options: [],
+      verifiedWith: "0.154.0",
+      currentVersion: "0.155.1",
+      drift: false,
+      planPending: true,
+      plan: { content: "# 方案\n\n正文", isFile: false },
+    };
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+  });
+
+  it("codex 计划之后已有用户消息（Implement the plan.）：不挂载审批卡（预期态清除，无新存储）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 方案"), userMsg(1, "Implement the plan.")];
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flushAsyncDetail();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  it("claude processing + 尾部计划（既有计划批准走 waiting 门）：不挂载（门不放宽到 claude——零回归）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 方案")];
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "claude" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flushAsyncDetail();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  it("计划后已有工具事件（批准后 ExitPlanMode 回执）：不挂载（预期态清除）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 方案"), toolMsg(1, "tool-call")];
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flushAsyncDetail();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  it("全链：提示条 → 点检查 → 屏读命中 N 选项 → 点按生效（POST dialog:<n>）", async () => {
+    installFetch();
+    routes.messages = [userMsg(0), planMsg(1, "# 方案")];
+    routes.approveOptions = {
+      available: true,
+      options: [],
+      verifiedWith: "0.154.0",
+      currentVersion: "0.155.1",
+      drift: false,
+      planPending: true,
+      plan: { content: "# 方案", isFile: false },
+    };
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    // 第一次拉取：计划待确认条（零选项）
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    // 第二次拉取（点检查）：屏读命中三选项
+    routes.approveOptions = {
+      available: true,
+      options: [
+        { id: "dialog:1", label: "Yes, implement this plan" },
+        { id: "dialog:2", label: "Yes, clear context and implement" },
+        { id: "dialog:3", label: "No, stay in Plan mode" },
+      ],
+      verifiedWith: "0.154.0",
+      currentVersion: "0.155.1",
+      drift: false,
+      dialog: true,
+    };
+    routes.approve = { status: "key_sent" };
+    fireEvent.click(screen.getByTestId("approve-plan-check"));
+    const opt = await screen.findByTestId("approve-option-dialog:1");
+    expect(opt.textContent).toContain("Yes, implement this plan");
+    fireEvent.click(opt);
+    expect(await screen.findByTestId("approve-sent")).toBeTruthy();
+    const post = fetchMock.mock.calls.find((c: unknown[]) =>
+      /\/session-approve$/.test(String(c[0]))
+    );
+    expect(JSON.parse(String((post?.[1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      optionId: "dialog:1",
+    });
+  });
+});
+
+// ==== 丁T2：计划待确认挂载门的边界（结束态不挂载——与 QuestionCard 挂载门同规）====
+describe("SessionDetail：计划待确认挂载门的结束态边界（丁T2）", () => {
+  it.each(["idle", "finished"] as const)(
+    "%s 会话 + 尾部计划提案：不挂载审批卡（结束态不必再打 GET；预期态在结束态即陈旧）",
+    async (status) => {
+      installFetch();
+      // 结束态走总结模式，消息渲染路径与运行态不同——夹具给最小可辨形态
+      routes.messages = [
+        {
+          seq: 0,
+          role: "user",
+          kind: "user",
+          content: "开始",
+          ts: null,
+          toolName: null,
+          toolArgs: null,
+          collapsed: false,
+        },
+        {
+          seq: 1,
+          role: "assistant",
+          kind: "plan",
+          content: "# 已结束会话里的旧计划",
+          ts: null,
+          toolName: null,
+          toolArgs: null,
+          collapsed: false,
+        },
+      ];
+      render(
+        <SessionDetail
+          session={makeSession({ status, agentType: "codex" })}
+          onBack={() => {}}
+        />
+      );
+      await screen.findByText("proj");
+      for (let i = 0; i < 6; i += 1) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(screen.queryByTestId("approve-card")).toBeNull();
+    }
+  );
 });

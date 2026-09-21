@@ -83,6 +83,25 @@ pub const PROBE_PENDING_REASON: &str = "键位待实测确认，请用普通发�
 ///   漏检（detect 未命中）时用户走普通发送，文本会打入活审批弹窗、映射首字符
 ///   1/y 可能直接触发批准——用户已知悉并接受此残余风险（2026-09-19）。
 ///
+/// - kimi ⚠️ **入表但零键位**（2.0.2，2026-09-21，丁T2）——**刻意的空表条目**，
+///   两个字段都为空是有据的：
+///   - `options: []`：R1-1 独立实机探测**证伪**了 kimi 计划批准框的数字通道
+///     （`'2'+Enter` 实测**误批准**并真的执行、`'3'` 却单键即拒绝——行为不一致，
+///     存在「想拒绝却批准」的现实后果）；可靠路径是「屏读高亮位 + `↓×k + Enter`」
+///     （`inject::dialog::navigation_sequence`，approve 端点已按 `NavigateConfirm`
+///     档分发）。**故 kimi 没有任何可安全下发的映射键位**——出卡靠屏读选项
+///     （`dialog:<n>`），屏读失败即降级（见 `remote/api.rs` 的 kimi 双态降级）。
+///   - `prompt_markers: []`：kimi 的审批提示词**不落任何会话文件**（`Ready to build
+///     with this plan?` 只存在于屏幕），`detect` 对它恒 miss——kimi 的命中判据走
+///     消息层的**计划预期态**（`interaction.request(display.plan)` 升格的 plan 卡 →
+///     `remote::api::plan_pending_tail_index`）与 hook 审批标记，两者都是一等信号，
+///     无需文本 marker。**留空是如实申报**（填未取证的短语会让 detect 假命中）。
+///   - `verified_with: "2.0.2"` = 本机 `kimi --version` 实测（R1 探测与 wire 形态取证
+///     的同一版本）——非 probe-pending（严格档会压掉整张卡，而本条的可见性由屏读
+///     与预期态门决定，不依赖键位取证状态）。
+///   - **KV 定制可覆盖**：`inject.approve_map` 里写非空 options 即恢复二元键路径
+///     （用户自证口径与 claude/codex 一致）；本条目只约束**默认表**。
+///
 /// 实测差异照实记录：`/permissions` 实机档位序为 Read Only / Ask for approval /
 /// Approve for me / Full Access（与手册 A1 快照序不同），当前高亮为
 /// Ask for approval（非首项，选 Read Only 实注 ↑+Enter 而非 ↓+Enter）。
@@ -94,7 +113,10 @@ const DEFAULT_MAPPINGS_JSON: &str = r#"[
  {"tool":"codex","verified_with":"0.154.0",
   "prompt_markers":["would you like to run the following","would you like to make the following","do you want to approve network"],
   "options":[{"id":"approve","label":"允许","key":"y"},
-             {"id":"reject","label":"拒绝","key":"esc"}]}
+             {"id":"reject","label":"拒绝","key":"esc"}]},
+ {"tool":"kimi","verified_with":"2.0.2",
+  "prompt_markers":[],
+  "options":[]}
 ]"#;
 // 「不要再问」（codex 选项 2 "(a)"、claude shift+tab 放行等）不入首批表——扩展键位待
 // 后续任务实测取证后追加；claude plan 批准框 reject 路径（Esc/选项3）未单独触发，
@@ -275,6 +297,37 @@ mod tests {
         assert!(!is_version_drift(&claude.verified_with, "2.1.251"));
         assert!(!is_version_drift(&claude.verified_with, "2.1.252")); // patch 漂移不告警
         assert!(is_version_drift(&claude.verified_with, "2.2.0")); // minor 漂移告警
+    }
+
+    /// 丁T2：kimi 默认表条目**入表但零键位**——这条锁住的是「R1-1 证伪后的刻意选择」，
+    /// 防未来有人「顺手补两个键位」（那会重演 `'2'+Enter` 误批准的安全缺陷）：
+    /// - `options` 恒空（无任何可安全下发的映射键位——出卡走屏读 `dialog:<n>`）；
+    /// - `prompt_markers` 恒空（kimi 提示词不落文件，detect 恒 miss；命中判据走
+    ///   计划预期态/审批标记两条一等信号，不留未取证的短语在表里骗 detect）；
+    /// - `verified_with` = 本机实测版本（非 probe-pending——本条的可见性由屏读与预期态
+    ///   门决定，严格档会连提示条一起压掉，反而不如实）。
+    #[test]
+    fn kimi_default_entry_has_no_keys_and_no_markers() {
+        let ms = load_mappings_from(None);
+        let kimi = ms
+            .iter()
+            .find(|m| m.tool == "kimi")
+            .expect("kimi 必须入默认表（否则审批端点 find 直接 None → 无卡，问题 3 根因）");
+        assert!(
+            kimi.options.is_empty(),
+            "kimi 不得有映射键位（R1-1 证伪数字通道；屏读导航才是可靠路径）：{:?}",
+            kimi.options
+        );
+        assert!(
+            kimi.prompt_markers.is_empty(),
+            "kimi 不留未取证的 detect 短语（提示词不落文件，detect 恒 miss）：{:?}",
+            kimi.prompt_markers
+        );
+        assert_eq!(
+            kimi.verified_with, "2.0.2",
+            "取本机实测版本（非 probe-pending）"
+        );
+        assert!(!is_version_drift(&kimi.verified_with, "2.0.2"));
     }
 
     /// M8R 取证回归（Task 10，2026-09-19 Windows 本机实机）：codex 默认表 markers 必须是

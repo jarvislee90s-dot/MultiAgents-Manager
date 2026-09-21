@@ -4385,6 +4385,18 @@ mod tests {
     /// 多问题数组夹具（questions.length=2——只读形态，注入面由端点拒绝）
     const Q_TWO_QUESTIONS_PAYLOAD: &str = r#"{"questions":[{"header":"A","question":"First?","options":[{"label":"a1"},{"label":"a2"}]},{"header":"B","question":"Second?","options":[{"label":"b1"},{"label":"b2"}]}]}"#;
 
+    /// 丁T2：kimi 映射表条目在默认表里的取证版本号（`kimi --version` 本机实测
+    /// 2.0.2；该版本正是 R1-1 探测与 wire 形态取证的版本）——断言用，防默认表被误改
+    const KIMI_NEVER_TESTED: &str = "2.0.2";
+
+    /// 丁T2：kimi 问答形态载荷（本机 wire 实测缩录：`interaction.request(kind=question)`
+    /// 的 request.questions 与 AUQ tool.call args 同形——后者才是消息流里的载体）
+    const KIMI_Q_PAYLOAD: &str = r#"{"questions":[{"question":"Which output folder should the build use?","header":"Output dir","options":[{"label":"dist","description":"d"},{"label":"out","description":"o"}],"multiSelect":false}]}"#;
+
+    /// 丁T2：kimi **多问题**载荷（本机 wire 实录 3 题缩录为 2 题——多题只读锁的夹具；
+    /// kimi 的 answers map 按**题干文本**键控，故题干是稳定回读点）
+    const KIMI_TWO_Q_PAYLOAD: &str = r#"{"questions":[{"question":"是否确认执行？","header":"清空确认","options":[{"label":"确认","description":"删除后重下"},{"label":"不清空","description":"直接下载"}]},{"question":"日期边界如何理解？","header":"日期边界","options":[{"label":"≥2026-07-01","description":"含7月"},{"label":"仅8月","description":"不含7月"}],"multiSelect":false}]}"#;
+
     /// 通道 B 的 AUQ tool-call 消息条目（content.rs SessionMessage 直构）
     fn auq_tool_call(seq: i64, args: &str) -> crate::remote::content::SessionMessage {
         crate::remote::content::SessionMessage {
@@ -4557,6 +4569,76 @@ mod tests {
                 s.last_message = Some("Do you want to proceed?".to_string());
                 s
             },
+            // ===== 丁T2 计划双卡族（问题 3/4）：sess_as..sess_ax =====
+            // 全测试集唯一 id（守卫 id 立规）。**kimi** 四例（sess_au..sess_ax）与
+            // **codex** 两例（sess_as/sess_at）：计划预期态是 codex/kimi 的计划确认
+            // 类对话框专属门（见 remote/api.rs 的 plan_dialog_family）。
+            //
+            // sess_as：codex **Processing**（实机计划提案后 codex 不落 Waiting）+
+            // 尾部计划提案 → 门放宽到预期态（问题 4 主用例）
+            inj_sess(
+                "sess_as",
+                crate::session::AgentType::Codex,
+                54,
+                crate::session::SessionStatus::Processing,
+            ),
+            // sess_at：codex 同形但计划之后已有用户消息 → 预期态清除（反向锁）
+            inj_sess(
+                "sess_at",
+                crate::session::AgentType::Codex,
+                55,
+                crate::session::SessionStatus::Processing,
+            ),
+            // sess_au：kimi 计划审批（Waiting——wire interaction.request 的红灯）→
+            // 审批卡主用例；sess_av：kimi 计划后已有工具事件 → 预期态清除
+            inj_sess(
+                "sess_au",
+                crate::session::AgentType::Kimi,
+                56,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_av",
+                crate::session::AgentType::Kimi,
+                57,
+                crate::session::SessionStatus::Processing,
+            ),
+            // sess_aw：kimi 审批在场（尾部计划提案）→ 问答卡必须不可用（互斥主用例）
+            // sess_ax：kimi 计划后已有工具事件（审批窗口关闭）→ 问答必须照常可用（反向锁）
+            inj_sess(
+                "sess_aw",
+                crate::session::AgentType::Kimi,
+                58,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_ax",
+                crate::session::AgentType::Kimi,
+                59,
+                crate::session::SessionStatus::Waiting,
+            ),
+            // 丁T2 多题只读扩面（sess_ay/sess_az）：codex 与 kimi 的多问题待决
+            // （message_source 按 sid 分派，见 multi_question_readonly_covers_*）
+            inj_sess(
+                "sess_ay",
+                crate::session::AgentType::Codex,
+                60,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_az",
+                crate::session::AgentType::Kimi,
+                61,
+                crate::session::SessionStatus::Waiting,
+            ),
+            // 丁T2 kimi 降级态（sess_ba）：Waiting + 审批标记但**无计划预期态**
+            // （带标记的 Write/command 审批）→ available=false + 提示条（无键可发）
+            inj_sess(
+                "sess_ba",
+                crate::session::AgentType::Kimi,
+                62,
+                crate::session::SessionStatus::Waiting,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -4963,6 +5045,79 @@ mod tests {
     /// 多问题只读（「结论不超证据」——探测档案：questions.length>1 翻页键序未测）：
     /// sess_aa → 409 multi_questions + 零注入。GET 照常 available=true（前端按只读
     /// 卡渲染，见 QuestionCard vitest）。
+    ///
+    /// **丁T2 扩面**：多题只读对 **codex / kimi 同样生效**（任务书「确认这条对 kimi 也
+    /// 生效即可」）——本用例在 claude 之外补两家：端点侧的 `questions.len() != 1` 判据
+    /// 在**工具分发之前**（`answer_key_sequence_for` 之前），故与键序档无关；本锁把它
+    /// 钉住，防未来某家升格档位时误放行多题注入。逐题注入列入下批（需实机定导航序）。
+    #[tokio::test]
+    async fn multi_question_readonly_covers_codex_and_kimi() {
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(|_, sid: &str, _| match sid {
+                // codex：待决多题 tool-call（其后无 tool-result）
+                "sess_ay" => Ok(crate::remote::content::MessagesPage {
+                    messages: vec![auq_tool_call(0, Q_TWO_QUESTIONS_PAYLOAD)],
+                    truncated: false,
+                }),
+                // kimi：同形（本机 wire 的 3 问题实录缩录为 2 题）
+                "sess_az" => Ok(crate::remote::content::MessagesPage {
+                    messages: vec![auq_tool_call(0, KIMI_TWO_Q_PAYLOAD)],
+                    truncated: false,
+                }),
+                _ => Err("无消息".to_string()),
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        for sid in ["sess_ay", "sess_az"] {
+            // GET：available=true（只读展示的数据源；前端按只读卡渲染）
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-question?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(v["available"], true, "{sid}：多题 GET 照常可用（只读展示）");
+            assert_eq!(v["questions"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                v["answerable"], true,
+                "{sid}：档位可作答 ≠ 多题可答（只读由 questions.len() 判据兜住）"
+            );
+            // POST：多题拒绝出手（零注入）——对已升格档位的工具同样成立
+            for action in ["select", "toggle", "submit"] {
+                let r = app
+                    .clone()
+                    .oneshot(req(
+                        "POST",
+                        "/m/api/v1/session-question/answer",
+                        Some("mam_device=mm"),
+                        Some(&format!(
+                            r#"{{"sessionId":"{sid}","action":"{action}","index":0}}"#
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 409, "{sid}/{action}：多题必须拒绝");
+                assert!(
+                    body_string(r).await.contains("multi_questions"),
+                    "{sid}/{action}：错误码必须是 multi_questions"
+                );
+            }
+        }
+        assert!(
+            fake.recorded_keys().is_empty(),
+            "多题只读：任何工具都零注入（未实测定导航序不出手）"
+        );
+    }
+
+    /// 多问题只读（claude 侧既有回归锁，丁T2 保留原样）
     #[tokio::test]
     async fn question_answer_multi_questions_refused() {
         let fake = FakeInjector::ok();
@@ -5612,6 +5767,439 @@ mod tests {
         assert_eq!(r.status(), 409);
         assert!(body_string(r).await.contains("no_question"));
         assert!(fake.recorded_keys().is_empty());
+    }
+
+    // ==== 丁T2：计划双卡 / 计划待确认 / kimi 审批互斥（问题 3/4/10/12）====
+    // 夹具族：在 question_state_with_msgs 的会话清单上再加 sess_as..sess_ax（全测试集
+    // 唯一 id，守卫 id 立规）。message_source 按 sid 分派返回各用例的消息页。
+
+    /// 计划类消息条目（`kind="plan"`——claude/codex/kimi 三家的正文卡在消息层同构）
+    fn plan_msg(seq: i64, content: &str) -> crate::remote::content::SessionMessage {
+        crate::remote::content::SessionMessage {
+            seq,
+            role: "assistant".into(),
+            kind: "plan".into(),
+            content: content.into(),
+            ts: None,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        }
+    }
+
+    /// 计划文件卡条目（`kind="plan-file"`，content=路径）
+    fn plan_file_msg(seq: i64, path: &str) -> crate::remote::content::SessionMessage {
+        crate::remote::content::SessionMessage {
+            seq,
+            role: "assistant".into(),
+            kind: "plan-file".into(),
+            content: path.into(),
+            ts: None,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        }
+    }
+
+    /// codex 实机消息尾（17:19 rollout 缩录）：<proposed_plan> 升格而成的 plan 卡之后
+    /// **无用户消息、无工具事件** = 计划待确认预期态在场。
+    fn codex_plan_pending_page() -> crate::remote::content::MessagesPage {
+        crate::remote::content::MessagesPage {
+            messages: vec![
+                user_msg(0),
+                plan_msg(1, "# 《末班车》情感救赎版改写方案\n\n## Summary\n改写重点…"),
+            ],
+            truncated: false,
+        }
+    }
+
+    /// 计划之后有用户消息（"Implement the plan." 实机形态）→ 预期态清除
+    fn codex_plan_consumed_page() -> crate::remote::content::MessagesPage {
+        crate::remote::content::MessagesPage {
+            messages: vec![user_msg(0), plan_msg(1, "# 计划"), user_msg(2), user_msg(3)],
+            truncated: false,
+        }
+    }
+
+    /// 计划之后有工具事件（kimi 批准后 wire 立即落 ExitPlanMode 的 tool.call/result）
+    fn plan_then_tool_event_page() -> crate::remote::content::MessagesPage {
+        crate::remote::content::MessagesPage {
+            messages: vec![
+                user_msg(0),
+                plan_msg(1, "# 计划"),
+                plan_file_msg(2, "C:/u/.kimi-code/sessions/s/agents/main/plans/a.md"),
+                crate::remote::content::SessionMessage {
+                    seq: 3,
+                    role: "assistant".into(),
+                    kind: "tool-call".into(),
+                    content: "ExitPlanMode".into(),
+                    ts: None,
+                    tool_name: Some("ExitPlanMode".into()),
+                    tool_args: Some("{}".into()),
+                    collapsed: true,
+                },
+                tool_result_msg(4, "Exited plan mode."),
+            ],
+            truncated: false,
+        }
+    }
+
+    /// codex 计划待确认全链（问题 4）：**非 Waiting**（Processing，实机 codex 不落红）
+    /// + 尾部计划提案 → 审批端点门放宽到「计划预期态」：
+    /// - GET available=true、`planPending=true`、options 空（y/esc 是补丁审批键位，对
+    ///   计划框未取证——不得下发）、plan 正文聚合（T8 机制，前端渲染计划全文）；
+    /// - 计划之后有用户消息 → 预期态消失 → available=false（任务书「下一个用户消息
+    ///   注入即清除」，无新存储）。
+    #[tokio::test]
+    async fn codex_plan_pending_opens_approve_gate() {
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(|_, sid: &str, _| match sid {
+                "sess_as" => Ok(codex_plan_pending_page()),
+                "sess_at" => Ok(codex_plan_consumed_page()),
+                _ => Err("无消息".to_string()),
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // sess_as：Processing + 尾部计划提案 → 门放宽
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_as",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "计划预期态必须打开审批端点门（否则详情页无从「检查终端对话框」）"
+        );
+        assert_eq!(
+            v["planPending"], true,
+            "预期态随载荷下发（前端提示条的数据源）"
+        );
+        assert!(
+            v["options"].as_array().unwrap().is_empty(),
+            "计划框未读到屏读选项时不得下发映射表键位（y/esc 是补丁审批键，未取证）"
+        );
+        assert_eq!(
+            v["plan"]["content"], "# 《末班车》情感救赎版改写方案\n\n## Summary\n改写重点…",
+            "计划正文聚合（T8 机制——点检查前用户先看到计划全文）"
+        );
+        assert_eq!(v["plan"]["isFile"], false);
+        // sess_at：计划之后有用户消息 → 预期态清除
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_at",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "计划后已有用户消息（Implement the plan.）→ 预期态清除（无新存储，尾部派生）"
+        );
+        assert_eq!(v["planPending"], false);
+        assert!(fake.recorded_keys().is_empty(), "本用例不触任何注入路径");
+    }
+
+    /// kimi 计划审批卡（问题 3 主体）：
+    /// - Waiting（实机 `interaction.request → Waiting` 红灯）+ 尾部 plan 卡（正文+文件卡）
+    ///   → 门过、`planPending=true`；
+    /// - **Windows 屏读拿到选项时**走 `dialog:<n>` N 选项（NavigateConfirm 键序）；
+    /// - **屏读不到选项时**（CI / 非 Windows / 对话框未绘制）→ kimi 专属两态收敛：
+    ///   **有计划预期态 → `available=true` + 零 options + `planPending=true`**（前端
+    ///   「计划待确认」条 +「检查终端对话框」按钮——与 codex 同形态）；
+    ///   无预期态（带标记的 Write/command 审批）→ `available=false` + reason 提示条。
+    ///   **两态都绝不下发映射表键位**（R1-1 证伪 kimi 数字通道，默认表 options 恒空）。
+    /// - **计划之后有工具事件**（批准后 wire 落 ExitPlanMode tool.call/result）→ 预期态
+    ///   清除 → available=false（否则批准后卡片一直挂着）。
+    ///
+    /// 屏读依赖真实窗口（本测试进程无 conhost 目标）——故分支断言「屏读命中 vs 未命中」
+    /// 两种合法形态，两者都必须满足「零映射键」这条硬约束。
+    #[tokio::test]
+    async fn kimi_plan_approval_card_never_emits_mapping_keys() {
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(|_, sid: &str, _| match sid {
+                "sess_au" => Ok(crate::remote::content::MessagesPage {
+                    messages: vec![
+                        user_msg(0),
+                        plan_msg(1, "# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`."),
+                        plan_file_msg(
+                            2,
+                            "C:/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/p.md",
+                        ),
+                    ],
+                    truncated: false,
+                }),
+                "sess_av" => Ok(plan_then_tool_event_page()),
+                _ => Err("无消息".to_string()),
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_au",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["verifiedWith"], KIMI_NEVER_TESTED,
+            "kimi 映射已入表（版本随实机）"
+        );
+        assert_eq!(v["planPending"], true, "尾部署名计划 ⇒ 预期态在场");
+        let options = v["options"].as_array().unwrap();
+        if v["dialog"] == true {
+            // 形态一：屏读命中（有真实窗口的机器）——选项全是 dialog:<n>，plan 正文随卡
+            assert!(!options.is_empty(), "dialog 模式下选项非空");
+            for o in options {
+                assert!(
+                    o["id"].as_str().unwrap().starts_with("dialog:"),
+                    "选项只能来自屏读（dialog:<n>）：{o}"
+                );
+            }
+            assert_eq!(v["plan"]["isFile"], false, "正文卡聚合（markdown 直出）");
+            assert!(v["plan"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Create hi.txt"));
+        } else {
+            // 形态二：屏读未命中（CI / 非 Windows / 对话框未绘制）——「计划待确认」条：
+            // available=true（这是**可操作**的卡：点检查重试）+ 零 options（无键可发）
+            // + plan 正文照常聚合。available=false + reason 是**无计划预期态**的降级
+            // （见 kimi_approval_without_plan_falls_back_to_hint），两态在此分界。
+            assert!(
+                options.is_empty(),
+                "kimi 屏读失败不得下发任何映射键位（R1-1 数字通道不可依赖）"
+            );
+            assert_eq!(
+                v["planPending"], true,
+                "计划预期态在场 → 屏读失败时下发「计划待确认」条（可点检查重试）"
+            );
+            assert!(
+                v["reason"].is_null(),
+                "计划待确认条不走严格档 reason 通道（reason 是 available=false 的）"
+            );
+            assert_eq!(
+                v["plan"]["content"], "# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`.",
+                "计划正文聚合（T8——用户在点检查前先看到计划全文）"
+            );
+        }
+        // sess_av：计划之后有工具事件 → 预期态清除（批准后卡片不得挂死）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_av",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["planPending"], false,
+            "计划之后已有工具事件（批准后 wire 落 ExitPlanMode 回执）→ 预期态清除"
+        );
+        assert!(fake.recorded_keys().is_empty(), "本用例不触任何注入路径");
+    }
+
+    /// kimi 审批的**另一态**：命中审批但**无计划预期态**（带标记的 Write/command 审批
+    /// ——R1-3 实测 kimi 有 `▶ Write this file?` 四选项工具批准框）→ 屏读不到选项时
+    /// 不给「计划待确认」条（那不是计划），走**降级提示条**（available=false + reason）：
+    /// 无键可发（R1-1），指引去终端（§2.8）。
+    ///
+    /// 夹具：sess_ba = kimi Waiting + **审批等待标记**（走标记路径跳过 detect）+ 消息页
+    /// 无计划（历史工具事件）→ 预期态不成立。
+    #[tokio::test]
+    async fn kimi_approval_without_plan_falls_back_to_hint() {
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(|_, sid: &str, _| match sid {
+                // 无计划类消息（纯工具往返）→ 预期态不成立
+                "sess_ba" => Ok(crate::remote::content::MessagesPage {
+                    messages: vec![
+                        user_msg(0),
+                        crate::remote::content::SessionMessage {
+                            seq: 1,
+                            role: "assistant".into(),
+                            kind: "tool-call".into(),
+                            content: "Write".into(),
+                            ts: None,
+                            tool_name: Some("Write".into()),
+                            tool_args: Some(r#"{"path":"hi.txt"}"#.into()),
+                            collapsed: true,
+                        },
+                    ],
+                    truncated: false,
+                }),
+                _ => Err("无消息".to_string()),
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::approval_wait::mark(conn, "kimi", "sess_ba", 1_000, "工具审批")
+        });
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_ba",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        if v["available"] == true {
+            // 屏读命中（真实窗口机器）：dialog 选项齐即可（本用例只锁「无计划不误导」）
+            assert_eq!(v["dialog"], true);
+            assert_eq!(v["planPending"], false, "无计划消息 → 预期态不成立");
+            assert!(v["plan"].is_null(), "无计划消息 → 不下发 plan 主体");
+        } else {
+            assert_eq!(
+                v["planPending"], false,
+                "无计划预期态 → 不得渲染「计划待确认」条（那不是计划）"
+            );
+            assert!(
+                v["reason"].as_str().is_some_and(|s| !s.is_empty()),
+                "无计划预期态的降级必须给中文提示条（available=false + reason）"
+            );
+            assert!(
+                v["options"].as_array().unwrap().is_empty(),
+                "无键可发（R1-1）——提示条形态零选项"
+            );
+        }
+        assert!(fake.recorded_keys().is_empty());
+    }
+
+    /// **丁T2 互斥（无标记路径）**：kimi 的审批在场 → 问答卡不可用（硬约束① 扩到
+    /// kimi 新卡）。
+    ///
+    /// **可达态说明（为什么不构造「计划 + 待决 AUQ」）**：kimi 的交互是**阻塞式**——
+    /// 问答未答完时模型不可能提出计划，故「尾部计划提案 ∧ 尾部待决 AUQ」在真实 wire
+    /// 里不可达（真实序列：AUQ tool.call → interaction.request → resolved → tool.result；
+    /// 计划审批序列：Write plan → interaction.request(plan_review) → resolved →
+    /// ExitPlanMode）。**真实可达的错位双卡**来自**陈旧问答标记**：kimi 的
+    /// `question_wait_marks` 行靠清除事件删除，MAM 未运行/清除事件丢失时会残留
+    /// （`mam.db` 现状即 `question_wait_marks` 表空、kimi 无标记通道的实证背景）——
+    /// 此时**批准在等计划确认、问答卡却按陈旧标记冒出来**，正是本门要拦的形态。
+    ///
+    /// 夹具：kimi 会话 + 播种问答标记（通道 A）+ 尾部计划提案（预期态）→ 问答必须
+    /// 不可用、审批照常可用；反向锁：尾部计划之后有工具事件（审批窗口已关）→ 问答
+    /// 照常可用（陈旧标记仍走既有通道 A —— 本门**不**扩大压制面）。
+    #[tokio::test]
+    async fn kimi_plan_pending_blocks_question_card() {
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(|_, sid: &str, _| match sid {
+                // 审批在场：尾部是计划提案（其前可能有历史工具事件，不影响判据）
+                "sess_aw" => Ok(crate::remote::content::MessagesPage {
+                    messages: vec![
+                        user_msg(0),
+                        plan_msg(1, "# 上一版计划"),
+                        tool_result_msg(2, "Wrote 400 bytes to …/plans/a.md"),
+                        plan_msg(3, "# 新版计划（审批中）"),
+                    ],
+                    truncated: false,
+                }),
+                // 审批已关：计划之后有工具事件（ExitPlanMode 回执）→ 预期态清除
+                "sess_ax" => Ok(plan_then_tool_event_page()),
+                _ => Err("无消息".to_string()),
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        // 陈旧问答标记（通道 A 形态）：两会话都播——sess_aw 应被预期态门拦下，
+        // sess_ax 应照常出卡（反向锁：不扩大压制面）
+        for sid in ["sess_aw", "sess_ax"] {
+            state.store.with(|conn| {
+                crate::database::dao::question_wait::mark(
+                    conn,
+                    "kimi",
+                    sid,
+                    1_000,
+                    "等待回答",
+                    Some(KIMI_Q_PAYLOAD),
+                )
+            });
+        }
+        let app = router(state.clone());
+        // sess_aw：kimi 审批在场（尾部计划）→ 问答不可用（陈旧标记被压）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_aw",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "kimi 审批在场（尾部计划提案）→ 问答卡不可用（硬约束① 扩面，无标记路径）"
+        );
+        assert!(v["questions"].as_array().unwrap().is_empty());
+        // 问答 POST 同源拒绝（双卡错位的注入面同样关死）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_aw","action":"select","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(body_string(r).await.contains("no_question"));
+        assert!(fake.recorded_keys().is_empty(), "问答键零出手");
+        // **审批侧不在本用例断言（如实申报）**：播种的陈旧问答标记会先撞上既有
+        // 硬约束①（`question_marked → 审批不可用`，批次乙 T8 的隔离规则），故本夹具下
+        // 审批也判不可用。**该优先级未动**（本轮不改批次丙的隔离裁决）——代价是
+        // 「陈旧标记 + 计划待确认」时两张卡都不出；受益面是「真问答在场时审批卡绝不
+        // 误出」的安全面保持原样。审批侧可用性由
+        // `kimi_plan_approval_card_never_emits_mapping_keys`（无标记形态）覆盖。
+        //
+        // sess_ax 反向锁：审批窗口已关 → 问答照常可用（陈旧标记走既有通道 A）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_ax",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "审批窗口已关（计划后有工具事件）→ 问答照常可用（门不扩大压制面）"
+        );
+        assert_eq!(v["source"], "mark");
     }
 
     /// **丁T1 复评 F-3 端到端**：opencode 的问答销卡信号——走**真实 reader**

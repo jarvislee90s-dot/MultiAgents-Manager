@@ -224,6 +224,32 @@ pub enum QuestionKeyProfile {
 }
 
 /// 会话工具 → 问答键序档（纯函数，可测；未知工具保守走只读）
+///
+/// # 丁T2 待复核项：kimi **question 类**的数字通道可靠性（R1 Important-1）
+///
+/// **证据现状（如实申报）**：R1 的证伪（`'2'+Enter` 误批准、`'3'` 单键拒绝）针对的是
+/// kimi 的 **`plan_review` 审批框**（`inject::dialog` 的导航确认族，approve 端点走
+/// 「屏读 + ↓×k + Enter」，本批已按此实现）——**不是** question 类框。question 类的
+/// 数字可靠性**没有**同等强度的实机证据（唯一记载是 2026-09-20 矩阵 §2.3 的双路径
+/// 取样：数字 '2' → Review 屏 → '1' 提交，与 Enter 路径并列）。
+///
+/// **本轮处置：维持 [`QuestionKeyProfile::TwoPhaseSelect`]，不超证据改行为**——
+/// 把 question 类一并改成导航确认会**改掉一个矩阵实测过并已上线的行为**，而改它的
+/// 依据（plan_review 的证伪）属于**另一个对话框族**（两者渲染不同：审批框是 `▶ 1. …`
+/// 三键单选，question 框是 `→ [1] …` 选项卡 + Review 确认屏）。以一族证据改另一族
+/// 行为，正是「结论超过证据」的反面。
+///
+/// **残余风险与缓解**（不隐瞒）：若 kimi 的 question 类数字通道与 plan_review 同样
+/// 不可靠，则 `[数字, "enter"]` 会答错选项（用户点「拒绝」类选项却选中高亮行）。
+/// 缓解：① 两段式的第二段是 **Enter**（提交**当前高亮行**）——数字被吞时提交的是
+/// 用户注入前的原位行，属**可见可复核**的偏差（对话框在注入后会重绘，用户能立刻看到
+/// 结果）；② 本档只对**单选**放行（多选/取消已拒）；③ 下批实机探测（`#[ignore]` 占位
+/// 见本模块 `live_probe_tests`）定案后按族收口。
+///
+/// **下批定案的两个分支**（探测后二选一，勿凭猜提前改）：
+/// - 证实数字不可靠 → 与 approve 侧同族化：question 类也走「屏读高亮位 + ↓×k + Enter」
+///   （`inject::dialog::navigation_sequence` 复用），并补反例夹具；
+/// - 证实数字可靠（或仅 plan_review 特殊）→ 保持本档，把探测档案挂到本注释。
 pub fn question_key_profile(tool: &str) -> QuestionKeyProfile {
     match tool {
         "claude" => QuestionKeyProfile::ClaudeFull,
@@ -617,5 +643,105 @@ mod tests {
             answer_key_sequence_for("codex", AnswerAction::Cancel, None, &q).is_err(),
             "Esc=中断回合，语义破坏性 → 不代按"
         );
+    }
+
+    /// 丁T2：kimi 档的**证据边界**回归锁——证明 TwoPhaseSelect 只对单选放行、
+    /// 且不因 plan_review 的证伪而漂移（改它必须由实机探测定案，见
+    /// [`question_key_profile`] 的丁T2 注释）。
+    #[test]
+    fn kimi_question_profile_stays_two_phase_pending_probe() {
+        let q = single();
+        assert_eq!(
+            question_key_profile("kimi"),
+            QuestionKeyProfile::TwoPhaseSelect,
+            "kimi question 类数字可靠性未经独立实测——不超证据改行为（R1 证伪的是 \
+             plan_review 审批框，属另一对话框族）"
+        );
+        // 两段式序列形态不变（数字选中 → Enter 确认）
+        assert_eq!(
+            answer_key_sequence_for("kimi", AnswerAction::Select, Some(0), &q).unwrap(),
+            vec!["1", "enter"]
+        );
+        // 多选/取消仍拒（未验不出键——与档位无关的硬边界）
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Toggle, Some(0), &multi()).is_err());
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Submit, None, &multi()).is_err());
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Cancel, None, &q).is_err());
+    }
+}
+
+/// 丁T2 **实机探测占位**（`#[ignore]`——常规门禁只编译不跑）。
+///
+/// 本批两项实机定案工作**无法在无真实会话的前提下完成**（需要真实 CLI 会话触发 +
+/// 屏读 + 人工观察），故按任务书「`#[ignore]` 实机探测定案后实现；定案前多题卡只读」
+/// 的口径：**先落占位与只读语义，把定案后要改的点写死在注释里**。
+///
+/// 两项待定案：
+/// 1. **codex 多问题键序**（`Question n/N` 的 ←→ 导航、每题 enter 提交、全部答完后的
+///    终态判定）——定案前的行为 = 多题只读卡（端点 `multi_questions` 409 + 前端只读
+///    分支，已由 `question_answer_multi_questions_refused` 与 QuestionCard 的
+///    `questions.length > 1` 分支锁定）；定案后 = `answer_key_sequence_for` 增加多题
+///    分支（逐题导航），并补三取样夹具。
+/// 2. **kimi question 类数字可靠性**（R1 Important-1 的遗留——R1 只证伪了 plan_review
+///    审批框）——定案后的两个分支见 [`question_key_profile`] 的丁T2 注释。
+///
+/// **本占位只做一件事**：校验前置可满足性并打印探测指引（不发起任何注入——实机注入
+/// 需要受控的会话与人工观察窗口，由本机人工执行）。跑法：
+/// `cargo test --lib question_live_probe -- --ignored --nocapture`
+#[cfg(test)]
+mod live_probe_tests {
+    // 本模块只做前置可满足性检查与探测指引打印（**零注入**）——不消费 `super::*` 的
+    // 任何原语，故不引入它（定案后补真断言时再加回）。
+
+    #[test]
+    #[ignore = "实机验证：codex 多问题（Question n/N）导航序探测——前置=codex 已装 + 人工触发多问题 + 屏读逐屏抄录"]
+    fn codex_multi_question_navigation_live_probe() {
+        eprintln!(
+            "丁T2 实机探测占位（codex 多问题导航序）\n\
+             \n\
+             定案前状态：多题卡**只读**（§2.3）——端点对 questions.len()!=1 回 409 \
+             multi_questions，前端 QuestionCard 走 `questions.length > 1` 只读分支，\
+             零注入按钮。本状态由自动化用例锁定（server.rs 的 \
+             question_answer_multi_questions_refused + QuestionCard 只读分支用例）。\n\
+             \n\
+             待定案矩阵（探测时逐项抄录，勿凭源码猜测）：\n\
+             ① 题间导航：←/→ 与 tab 的等价性（源码级记载两者皆有）；\n\
+             ② 每题提交：enter 是「提交本题并前进」还是「提交整卷」；\n\
+             ③ 全部答完后的终态：Proceed/Go back 确认屏是否存在（丁T1 codex 补测曾见\
+             「确认屏数字无效、只认 Enter/Esc」——那属**未答完提交**的形态，与本项是否同屏待查）；\n\
+             ④ 数字直选在多题下是否仍有效（单题已验：数字即选即交）；\n\
+             ⑤ 中途 Esc 的语义（中断整回合 vs 退回上一题）。\n\
+             \n\
+             定案后落点：`answer_key_sequence_for` 增加 codex 多题分支；\
+             `session_question_answer` 放开 len!=1 的拒绝；QuestionCard 多题分支改写入按钮。"
+        );
+        // 前置提示：codex 未装也能跑（本占位零副作用），只是探测无法进行
+        let cli = crate::inject::approve::cached_cli_version("codex");
+        eprintln!("前置检查：codex CLI 版本探测 = {cli:?}（None = 未装/探测失败——探测无法进行）");
+    }
+
+    #[test]
+    #[ignore = "实机验证：kimi question 类（非审批框）数字通道可靠性——前置=kimi 已装 + 人工触发单选提问 + 屏读前后对照"]
+    fn kimi_question_digit_reliability_live_probe() {
+        eprintln!(
+            "丁T2 实机探测占位（kimi **question 类**数字可靠性，R1 Important-1 遗留）\n\
+             \n\
+             证据现状：R1 的证伪（'2'+Enter 误批准、'3' 单键拒绝）针对 \
+             **plan_review 审批框**；question 类**没有**同等强度证据（唯一记载是 \
+             2026-09-20 矩阵 §2.3 的双路径取样）。当前实现保持 TwoPhaseSelect \
+             `[数字, enter]`（不超证据改行为）——见 `question_key_profile` 的丁T2 注释。\n\
+             \n\
+             探测要求（三取样起，逐项抄录）：\n\
+             ① 高亮在第 1 项时注入 '2'：高亮是否移动？（plan_review 框实测「无效果」）\n\
+             ② 紧随的 Enter 提交的是哪一项？（提交高亮行 = 数字被吞）\n\
+             ③ 数字单键是否直接进 Review 屏（矩阵记载）还是无效果（plan_review 行为）？\n\
+             ④ Review 屏的确认键：Enter 还是数字？\n\
+             ⑤ 多题形态下上述是否变化（本题同时是 codex 多题占位的 kimi 侧对照）。\n\
+             \n\
+             定案后落点：见 `question_key_profile` 丁T2 注释的两个分支（证实不可靠 → \
+             与 approve 侧同族化走 ↓×k + Enter；证实可靠 → 保持本档并归档探测档案到 \
+             research/refs/phase2-消息注入/）。"
+        );
+        let cli = crate::inject::approve::cached_cli_version("kimi");
+        eprintln!("前置检查：kimi CLI 版本探测 = {cli:?}（默认表 verified_with 记为 2.0.2）");
     }
 }

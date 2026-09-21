@@ -530,6 +530,12 @@ export interface ApproveOptionsView {
    *  （如 "1. Yes, and use auto mode"）；前端据此渲染编号按钮组（点按注入数字键 n）。
    *  缺省/ false → 映射表二元项（既有渲染，前向兼容旧后端） */
   dialog?: boolean;
+  /** 丁T2：**计划待确认预期态**（消息尾部派生，无新存储）——codex/kimi 的计划确认框
+   *  不落状态/标记，这是它唯一的可见信号。true 且 `dialog=false` 时前端渲染
+   *  「计划待确认」条 +「检查终端对话框」按钮（点它重拉本端点；后端屏读命中即出
+   *  N 选项）；此形态下 options 恒空**不是错误**，是「还没读到选项，点检查重试」。
+   *  缺省/false → 既有渲染（前向兼容旧后端） */
+  planPending?: boolean;
 }
 
 /** 拉取审批选项卡数据源（红卡挂载时一次）。非 2xx → 抛 ApiError（调用方静默

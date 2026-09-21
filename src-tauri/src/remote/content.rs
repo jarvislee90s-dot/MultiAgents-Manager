@@ -1569,9 +1569,103 @@ pub(crate) fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
                     _ => {} // step.begin/end 等边界 → 跳过
                 }
             }
-            // metadata / config.update / usage.record / turn.ended / interaction.* 等跳过
+            // ===== 丁T2：kimi 计划审批（`interaction.request`）→ 计划双卡 =====
+            //
+            // 根因（问题 3 的正文半）：`interaction.*` 原在本 `_ =>` 分支整类跳过，
+            // 于是 kimi 的计划**正文**（wire 的 `request.display.plan` 内联全文）从未
+            // 进入消息流——终端里看得见、手机上看不见，违反裁1「计划不得以未渲染形态
+            // 留在消息流里」。
+            //
+            // 数据形态（本机 wire 实录，`wd_proj-ki1_89e8318bc1ff`）：
+            // ```json
+            // {"type":"interaction.request","kind":"approval",
+            //  "request":{"toolName":"ExitPlanMode","action":"Presenting plan and exiting plan mode",
+            //   "display":{"kind":"plan_review","plan":"# Plan: …","path":"…/agents/main/plans/x.md"}}}
+            // ```
+            // `display.kind` 实测取值族：plan_review / file_io / command（另见 agent_call /
+            // skill_call / todo_list / url_fetch / goal_start）——**只有 plan_review 是计划**
+            // （file_io 的 path 是普通业务文件，拿它当计划文件会误出卡）。
+            //
+            // 产出（裁1 计划双卡矩阵：kimi 正文来源=**文件**，但 wire 已内联全文，
+            // 故直接吃内联正文、无需读盘；文件卡给出可预览路径）：
+            // - `display.plan` 非空白 → `kind="plan"`（正文卡，markdown 原文）；
+            // - `display.path` 非空白 → **追加** `kind="plan-file"`（文件卡，前端「查看
+            //   计划」按钮走既有文件预览；路径豁免见 files::EXEMPT_SUBPATHS 的
+            //   agents/main/plans）；
+            // - 两者皆缺 → 零产出（不产空卡，§2.8 兜底）。
+            "interaction.request" => {
+                if let Some((plan, path)) = kimi_plan_review_parts(&v) {
+                    out.extend(kimi_plan_cards(plan.as_deref(), path.as_deref(), ts));
+                }
+            }
+            // metadata / config.update / usage.record / turn.ended / interaction.resolved
+            // 等跳过
             _ => {}
         }
+    }
+    out
+}
+
+/// 从 kimi `interaction.request` 行里抽计划双卡的原料（纯函数；**只认计划审批形态**）。
+///
+/// 判据（实测形态，勿凭想象扩面）：`kind == "approval"` ∧
+/// `request.display.kind == "plan_review"`。命中后取 `display.plan`（内联正文）与
+/// `display.path`（落盘路径）两个**可缺省**字段（各自 trim 后非空才算在场）。
+///
+/// 非计划审批（file_io / command）与问答（kind=question）一律 None——file_io 的
+/// `path` 是业务文件，收它会让普通 Write 审批也冒出「计划文件卡」（误报）。
+fn kimi_plan_review_parts(v: &serde_json::Value) -> Option<(Option<String>, Option<String>)> {
+    if v.get("kind").and_then(|k| k.as_str()) != Some("approval") {
+        return None;
+    }
+    let display = v.pointer("/request/display")?;
+    if display.get("kind").and_then(|k| k.as_str()) != Some("plan_review") {
+        return None;
+    }
+    // 在场判据用 trim（空白不算正文），但**下发原文不 trim**——与
+    // [`SessionMessage::tool_call`] 的 claude 升格口径逐字一致（那边也是
+    // trim 判空、原样下发），两家的正文卡内容口径不得漂移
+    let raw = |key: &str| -> Option<String> {
+        display
+            .get(key)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from)
+    };
+    Some((raw("plan"), raw("path")))
+}
+
+/// 计划双卡构造（裁1「能上就都上」）：正文卡（`kind="plan"`，markdown 原文）在前、
+/// 文件卡（`kind="plan-file"`，路径）在后；任一侧缺失则只出另一侧，两者皆缺零产出。
+///
+/// 与 claude/codex 的升格口径一致（content=计划原文、role=assistant、collapsed=false
+/// ——一等卡默认展开），故前端渲染分支零新增（`SessionDetail.tsx` 的 plan / plan-file
+/// 两个 case 直接接住）。
+fn kimi_plan_cards(plan: Option<&str>, path: Option<&str>, ts: Option<i64>) -> Vec<SessionMessage> {
+    let mut out = Vec::with_capacity(2);
+    if let Some(plan) = plan {
+        out.push(SessionMessage {
+            seq: 0,
+            role: "assistant".to_string(),
+            kind: "plan".to_string(),
+            content: plan.to_string(),
+            ts,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        });
+    }
+    if let Some(path) = path {
+        out.push(SessionMessage {
+            seq: 0,
+            role: "assistant".to_string(),
+            kind: "plan-file".to_string(),
+            content: path.to_string(),
+            ts,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        });
     }
     out
 }
@@ -2683,6 +2777,144 @@ mod tests {
         let plain = SessionMessage::tool_result_with_plan_ref("ok", Some(7));
         assert_eq!(plain.len(), 1);
         assert_eq!(plain[0].kind, "tool-result");
+    }
+
+    // ---- 丁T2：kimi `interaction.request`（计划审批）→ 计划双卡（裁1）----
+
+    /// 真实形态夹具（本机 wire 实录，`wd_proj-ki1_89e8318bc1ff`）——`display.plan`
+    /// **内联全文** + `display.path` 落盘路径。缩录正文为最小可辨形态。
+    fn kimi_plan_review_line() -> String {
+        r##"{"type":"interaction.request","agentId":"main","id":"approval_38a02479","kind":"approval","toolCallId":"call_546f","request":{"id":"approval_38a02479","sessionId":"session_5f4b","agentId":"main","turnId":0,"toolCallId":"call_546f","toolName":"ExitPlanMode","action":"Presenting plan and exiting plan mode","display":{"kind":"plan_review","plan":"# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`.\n","path":"C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/rogue-multiple-man-fire.md"}},"time":1789977432472}"##.to_string()
+    }
+
+    /// 丁T2 主用例：`interaction.request(kind=approval, display.kind=plan_review)` →
+    /// 消息流产**计划双卡**（裁1「能上就都上」）：
+    /// - `kind="plan"`（正文卡）= `display.plan` 内联全文（**不读文件**——wire 已给全文）；
+    /// - `kind="plan-file"`（文件卡）= `display.path`（前端「查看计划」读文件预览）。
+    ///
+    /// 修复的根因（问题 3 的正文半）：`interaction.*` 原被 `_ => {}` 整类跳过，kimi 的
+    /// 计划正文因此**从未进入消息流**——终端里看得见、手机上看不见。
+    #[test]
+    fn kimi_plan_review_yields_plan_and_file_cards() {
+        let msgs = map_kimi_lines(&[kimi_plan_review_line()]);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["plan", "plan-file"],
+            "计划审批 → 正文卡 + 文件卡（正文在前，文件入口在后）"
+        );
+        assert_eq!(
+            msgs[0].content, "# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`.\n",
+            "正文卡 = display.plan 内联全文（markdown 原文，不做任何加工）"
+        );
+        assert!(!msgs[0].collapsed, "正文卡恒展开（一等卡语义）");
+        assert_eq!(msgs[0].role, "assistant");
+        assert_eq!(
+            msgs[1].content,
+            "C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/rogue-multiple-man-fire.md",
+            "文件卡 = display.path（可预览路径原样）"
+        );
+        assert!(!msgs[1].collapsed, "文件入口卡恒展开");
+        // 裁1 硬要求：计划不得以 JSON/未渲染形态留在消息流里
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("plan_review")
+                || m.content.contains("\"display\"")
+                || m.kind == "tool-call"),
+            "wire 的 interaction JSON 结构不得泄漏进消息流：{msgs:?}"
+        );
+        assert_eq!(msgs[0].ts, Some(1789977432472));
+    }
+
+    /// 丁T2 降级：`display.plan` 缺失/空白但 `display.path` 在场 → **只出文件卡**
+    /// （前端「查看计划」按钮读文件，正文照样可达——§2.8 兜底，不假造正文）。
+    #[test]
+    fn kimi_plan_review_without_inline_plan_yields_file_card_only() {
+        for display in [
+            r#"{"kind":"plan_review","path":"C:/u/.kimi-code/sessions/s/agents/main/plans/a.md"}"#,
+            r#"{"kind":"plan_review","plan":"   ","path":"C:/u/.kimi-code/sessions/s/agents/main/plans/a.md"}"#,
+        ] {
+            let line = format!(
+                r#"{{"type":"interaction.request","id":"approval_1","kind":"approval","request":{{"toolName":"ExitPlanMode","display":{display}}},"time":5}}"#
+            );
+            let msgs = map_kimi_lines(&[line]);
+            let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+            assert_eq!(kinds, vec!["plan-file"], "正文缺失 → 只出文件卡：{display}");
+            assert!(msgs[0].content.ends_with("plans/a.md"));
+        }
+        // 两者皆缺 → 零产出（不产空卡）
+        let line = r#"{"type":"interaction.request","id":"approval_1","kind":"approval","request":{"toolName":"ExitPlanMode","display":{"kind":"plan_review"}},"time":5}"#;
+        assert!(map_kimi_lines(&[line.to_string()]).is_empty());
+    }
+
+    /// 丁T2 范围守卫：**只有 `kind=approval ∧ display.kind=plan_review`** 产计划卡。
+    /// 其余 interaction 形态一律零产出（零回归）：
+    /// - `file_io`（Write 审批，display 是 {operation,path,content}——**不是计划**，不能
+    ///   拿 `path` 当计划文件：本机 wire 实测 file_io 的 path 常指向普通业务文件）；
+    /// - `kind=question`（问答，display 无 plan/path）；
+    /// - 缺 display / 缺 request / display.kind 未知。
+    #[test]
+    fn kimi_non_plan_review_interactions_yield_nothing() {
+        for line in [
+            // file_io：Write 审批（真实形态，path 是业务文件）
+            r#"{"type":"interaction.request","id":"a1","kind":"approval","request":{"toolName":"Write","display":{"kind":"file_io","operation":"write","path":"C:/tmp/hi.txt","content":"hi"}},"time":5}"#,
+            // command：Bash 审批
+            r#"{"type":"interaction.request","id":"a2","kind":"approval","request":{"toolName":"Bash","display":{"kind":"command","command":"ls"}},"time":5}"#,
+            // question：问答（不产计划卡——问答走问答端点）
+            r#"{"type":"interaction.request","id":"q1","kind":"question","request":{"questions":[{"question":"q","options":[{"label":"a"}]}]},"time":5}"#,
+            // 缺 request / 缺 display / 未知 display.kind
+            r#"{"type":"interaction.request","id":"a3","kind":"approval","time":5}"#,
+            r#"{"type":"interaction.request","id":"a4","kind":"approval","request":{},"time":5}"#,
+            r#"{"type":"interaction.request","id":"a5","kind":"approval","request":{"display":{"kind":"todo_list"}},"time":5}"#,
+            // resolved：销卡信号，不产消息
+            r#"{"type":"interaction.resolved","id":"a1","response":{"decision":"approved"},"time":6}"#,
+        ] {
+            assert!(
+                map_kimi_lines(&[line.to_string()]).is_empty(),
+                "非计划审批形态必须零产出：{line}"
+            );
+        }
+    }
+
+    /// 丁T2 端到端：真实 wire 序列（计划文件写入 → 计划审批 → 批准 → ExitPlanMode 回执）
+    /// 走完整映射，消息流末态形状与实机一致（plan 卡在场且其后跟着 tool-call/tool-result
+    /// ——后者是审批端点的「待决与否」判据输入，见 `remote::api::kimi_plan_approval_pending`）。
+    #[test]
+    fn kimi_wire_plan_review_sequence_end_to_end() {
+        let lines = vec![
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"plan a change"}],"time":1}"#
+                .to_string(),
+            r##"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Write","args":{"path":"p.md","content":"# P"}},"time":2}"##.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c1","result":{"output":"Wrote 400 bytes to C:/u/.kimi-code/sessions/s/agents/main/plans/plan-a.md"}},"time":3}"#.to_string(),
+            kimi_plan_review_line(),
+            r#"{"type":"interaction.resolved","id":"approval_38a02479","response":{"decision":"approved","selectedLabel":"Approve"},"time":4}"#.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c2","name":"ExitPlanMode","args":{}},"time":5}"#.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c2","result":{"output":"Exited plan mode."}},"time":6}"#.to_string(),
+        ];
+        let msgs = map_kimi_lines(&lines);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "user",
+                "tool-call",
+                "tool-result",
+                "plan-file",
+                "plan",
+                "plan-file",
+                "tool-call",
+                "tool-result"
+            ],
+            "实机序列末态形状（Write 计划 → T7 文件卡 → 审批正文卡+文件卡 → ExitPlanMode 回执）"
+        );
+        // 尾部（审批窗口关闭后）：最后一条 plan 之后存在 tool-call/tool-result
+        // → 审批端点的「待决」判据必须为假（本用例锁语义契约，判据单测见 api.rs）
+        let last_plan = msgs.iter().rposition(|m| m.kind == "plan").unwrap();
+        assert!(
+            msgs[last_plan + 1..]
+                .iter()
+                .any(|m| m.kind == "tool-call" || m.kind == "tool-result"),
+            "批准后 plan 之后必有工具事件（审批窗口已关）"
+        );
     }
 
     /// T7 端到端：kimi wire 的 tool.result 行 → 消息流出 plan-file（走真实分派路径）

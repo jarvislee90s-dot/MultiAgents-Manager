@@ -339,3 +339,105 @@ describe("ApproveCard：降级警示脚注（R1-3）", () => {
     expect(screen.queryByTestId("approve-degraded-hint")).toBeNull();
   });
 });
+
+// ==== 丁T2：计划待确认（planPending——codex/kimi 的计划确认框入口）====
+describe("ApproveCard：计划待确认条（丁T2）", () => {
+  /** 计划待确认载荷：可用但无键（y/esc 是补丁审批键位，对计划框未取证） */
+  function planPendingOptions(over: Partial<ApproveOptionsView> = {}): ApproveOptionsView {
+    return approveOptions({
+      available: true,
+      options: [],
+      planPending: true,
+      plan: { content: "# 计划正文\n\n- 第一步", isFile: false },
+      ...over,
+    });
+  }
+
+  it("planPending=true + 零选项：渲染计划待确认条 +「检查终端对话框」按钮，不出任何键位按钮", async () => {
+    installFetch();
+    routes.options = planPendingOptions();
+    render(<ApproveCard session={{ id: "sess-pp" }} />);
+    const bar = await screen.findByTestId("approve-plan-pending");
+    expect(bar.textContent).toContain("终端正在等待这个计划的确认");
+    // 卡标题（红卡语义：这是审批卡，不是普通消息）
+    expect(screen.getByTestId("approve-card").textContent).toContain("计划待确认");
+    // 检查按钮在场（用户点它 = 重拉一次选项；后端屏读命中即出 N 选项）
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    // 零键位按钮（不得下发映射表二元键——那是补丁审批的键位）
+    expect(screen.queryByTestId("approve-option-approve")).toBeNull();
+    expect(screen.queryByTestId("approve-option-reject")).toBeNull();
+    // 计划全文照常聚合（点检查前用户先看到计划）
+    expect(screen.getByTestId("approve-plan").textContent).toContain("计划正文");
+  });
+
+  it("点「检查终端对话框」：重拉一次选项端点；未命中时给降级提示（不假装成功）", async () => {
+    installFetch();
+    routes.options = planPendingOptions();
+    render(<ApproveCard session={{ id: "sess-pp2" }} />);
+    await screen.findByTestId("approve-plan-pending");
+    // 检查前无未命中提示（用户还没点过——提示只在点过之后出现）
+    expect(screen.queryByTestId("approve-plan-check-miss")).toBeNull();
+    fireEvent.click(screen.getByTestId("approve-plan-check"));
+    await flushAsync();
+    // 重拉发生（挂载 1 次 + 检查 1 次）
+    const optionsCalls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-approve-options")
+    );
+    expect(optionsCalls.length).toBeGreaterThanOrEqual(2);
+    // 屏读仍没读到选项 → 降级提示（不假装成功）
+    expect((await screen.findByTestId("approve-plan-check-miss")).textContent).toContain(
+      "未读到终端对话框选项"
+    );
+    // **检查未命中即清除预期态**（任务书语义）：待确认条不再显示（「终端正在等」是
+    // 未经验证的声明，§2.8 不假装）；检查钮保留（可再试）+ 计划正文保留（内容仍真实）
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan")).toBeTruthy();
+  });
+
+  it("检查后屏读命中（dialog 选项）：切到 N 选项编号按钮组，待确认条消失", async () => {
+    installFetch();
+    routes.options = planPendingOptions();
+    render(<ApproveCard session={{ id: "sess-pp3" }} />);
+    await screen.findByTestId("approve-plan-pending");
+    // 第二次拉取（点检查后）返回屏读选项
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, implement this plan" },
+        { id: "dialog:2", label: "Yes, clear context and implement" },
+        { id: "dialog:3", label: "No, stay in Plan mode" },
+      ],
+    });
+    fireEvent.click(screen.getByTestId("approve-plan-check"));
+    const opt = await screen.findByTestId("approve-option-dialog:1");
+    expect(opt.textContent).toContain("Yes, implement this plan");
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+    // 选项卡点按 → POST dialog:1（codex 走数字直选，后端分发）
+    fireEvent.click(opt);
+    await flushAsync();
+    expect(JSON.parse(String((approveCalls()[0][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-pp3",
+      optionId: "dialog:1",
+    });
+  });
+
+  it("planPending 缺省/ false：不渲染待确认条（前向兼容旧后端 + 普通审批零变化）", async () => {
+    installFetch();
+    routes.options = approveOptions();
+    render(<ApproveCard session={{ id: "sess-pp0" }} />);
+    await screen.findByTestId("approve-option-approve");
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+  });
+
+  it("planPending=true 但已有 dialog 选项：选项卡优先（待确认条不与选项并存）", async () => {
+    installFetch();
+    routes.options = planPendingOptions({
+      dialog: true,
+      options: [{ id: "dialog:1", label: "Approve" }],
+    });
+    render(<ApproveCard session={{ id: "sess-pp4" }} />);
+    await screen.findByTestId("approve-option-dialog:1");
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+  });
+});

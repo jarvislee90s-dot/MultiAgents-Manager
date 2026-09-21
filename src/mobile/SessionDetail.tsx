@@ -231,6 +231,41 @@ export function extractPlanBody(toolArgs: string): string | null {
   }
 }
 
+/** **计划待确认预期态**（丁T2，纯函数，镜像后端 `remote::api::plan_pending_tail_index`）：
+ *  消息尾部存在计划类消息（`kind="plan"` / `"plan-file"`）且其后**无**用户消息、无工具
+ *  事件 → 终端正在等这个计划的确认。
+ *
+ *  **为什么要在前端也判一份**（后端已判、字段为 `planPending`）：ApproveCard 的挂载门是
+ *  刻意的红灯门（丁T1 裁决），而 codex 的计划提案**不落 Waiting**（`codex_parser` 的兜底红
+ *  已废）——没有这一判据，卡根本不会挂载，后端就算把 `available=true` 算出来也没有消费方。
+ *  前端这份的作用是**决定要不要去打那一发 GET**（挂载门），后端那份才是**权威判定**
+ *  （`available` / `planPending` 载荷）；两者同源同判据，前端**只放宽门，不做可用性裁决**
+ *  ——`available=false`（非码族工具 / 计划已消费 / 后端判定不同）时卡片照常自隐。
+ *
+ *  `tool` 收窄到计划对话框族（codex/kimi——镜像后端 `plan_dialog_family`）：claude 的计划
+ *  批准走既有 waiting 门（有实证键位与标记通道），放宽它的门等于改既有行为。 */
+export function isPlanPending(
+  messages: SessionMessage[] | null,
+  tool: string | null | undefined
+): boolean {
+  if (messages === null || messages.length === 0) return false;
+  if (tool !== "codex" && tool !== "kimi") return false;
+  let last = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const k = messages[i].kind;
+    if (k === "plan" || k === "plan-file") {
+      last = i;
+      break;
+    }
+  }
+  if (last < 0) return false;
+  for (let i = last + 1; i < messages.length; i += 1) {
+    const k = messages[i].kind;
+    if (k === "user" || k === "tool-call" || k === "tool-result") return false;
+  }
+  return true;
+}
+
 /** markdown 正文链接化预处理：把出现的已知路径替换为 `#file:` 内链，
  *  再由 components.a 拦截渲染成可点按钮。路径含 markdown 特殊字符（[]()）时
  *  该处替换可能不成链（保持原样文本，M3 接受） */
@@ -323,6 +358,23 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
 
   // 总结模式（P9）：会话已结束/空闲 → 只显最后 assistant 总结，过程消息自动折叠
   const isSummary = session.status === "idle" || session.status === "finished";
+
+  // 丁T2：**计划待确认预期态**（详情页挂载门的数据源）——codex/kimi 的计划提案不落
+  // Waiting，仅靠 `status === "waiting"` 门会让审批卡永不挂载（问题 4 的挂载面根因）。
+  // 判据与后端 `remote::api::plan_pending_tail_index` 同源同口径（见上方 isPlanPending
+  // 注释）；此处**只放宽门**，可用性仍由后端载荷的 `available` 裁决（卡自隐兜底）。
+  //
+  // **非结束态限定**（与 QuestionCard 挂载门同规）：idle/finished 是「已聊完」的会话，
+  // 重进详情不必每次再打一发 GET；且结束态的计划提案早已被消费（用户必然已注入过
+  // 下一步指令或模型已继续），预期态在结束态出现即为陈旧信号——不挂载。
+  const planPending = useMemo(
+    () => !isSummary && isPlanPending(messages, session.agentType),
+    [isSummary, messages, session.agentType]
+  );
+  // ApproveCard 挂载门：红灯 ∨ 计划预期态（两个**并列**的门，不互相削弱——
+  // waiting 门仍是审批红灯的入口，T1 裁决未动；预期态门是 codex/kimi 计划确认的
+  // 唯一入口，两者都经同一张卡的 `available` 数据门做最终裁决）
+  const approveMounted = session.status === "waiting" || planPending;
 
   // 消息流拉取：挂载 / limit 变化 / 手动刷新时重拉（整页替换；M3 不做增量追加
   // 与滚动位置保持——「加载更多」按钮替代无限滚动的裁决即含此简化）
@@ -1207,9 +1259,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 强制重挂（M9R P3 语义保留），但 key 必须互异——同 key 兄弟在红卡
                 「停留期间插入/卸载」（活状态流下的常态）时会让 React 同 key 复用
                 错乱（duplicate key 警告 + 红卡卸不掉） */}
-            {session.status === "waiting" && (
-              <ApproveCard key={`approve-${session.id}`} session={session} />
-            )}
+            {approveMounted && <ApproveCard key={`approve-${session.id}`} session={session} />}
             {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：**非结束态**（!isSummary）挂载——
                 问答端点不看会话状态（可用性由数据形态门决定：双通道未命中/审批标记
                 隔离 → available=false），故挂载门只需排除「已结束」的 idle/finished
@@ -1217,7 +1267,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 每轮一 GET；QuestionCard 内部已有「拉取失败/available=false → 静默
                 自隐」（src/mobile/QuestionCard.tsx 的 `!ready || info === null ||
                 !info.available → return null`），所以放宽不会闪出空卡。
-                ApproveCard 保持 waiting 门（审批红灯是刻意的——见其注释）。
+                ApproveCard 丁T2 挂载门 = waiting ∨ 计划预期态（`approveMounted`；
+                两个并列门见其定义——waiting 门是 T1 的刻意红灯门，未拆）。
                 key 前缀 question-* 防同 key 兄弟复用错乱（上方注释同款 T1 防线） */}
             {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
             {/* 模式栏（批次丙 T6）：显示当前模式 + 切档入口。与审批/问答卡同层但
@@ -1347,12 +1398,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           {/* 组件钥匙（M9R P3）：按会话强制重挂，清掉上一会话的陈旧 receipt /
               选项态（跨会话串卡的防线）；前缀区分见分屏分支注释（同 key 兄弟复用
               错乱防线，T1 活状态流） */}
-          {session.status === "waiting" && (
-            <ApproveCard key={`approve-${session.id}`} session={session} />
-          )}
+          {approveMounted && <ApproveCard key={`approve-${session.id}`} session={session} />}
           {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：正文视图同一挂载口径
               （**非结束态** + question- 前缀），语义见分屏分支注释
-              （可用性自隐兜底 + key 前缀防线）。ApproveCard 保持 waiting 门 */}
+              （可用性自隐兜底 + key 前缀防线）。ApproveCard 丁T2 门 = waiting ∨
+              计划预期态（`approveMounted`，与分屏分支同源） */}
           {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
           {/* 模式栏（T6）：正文视图同一挂载口径，语义见分屏分支注释 */}
           <ModeBar key={`mode-${session.id}`} session={session} />

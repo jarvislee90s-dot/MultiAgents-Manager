@@ -1461,11 +1461,75 @@ struct ApproveScanHit {
     /// R1-3：**降级警示**——命中审批但未读到对话框选项（终端可能正显示多选对话框，
     /// 二元键可能错位）。下发文案，前端在二元卡渲染脚注。
     degraded_hint: Option<String>,
+    /// 丁T2：**计划待确认预期态**在场（消息尾部派生，见 [`plan_pending_tail_index`]）。
+    /// true 且无屏读选项 → 前端渲染「计划待确认」条 +「检查终端对话框」按钮（而不是
+    /// 二元/空选项组）——codex 的 `Implement this plan?` 不落状态、不落标记，这是它
+    /// 唯一的入口。
+    plan_pending: bool,
 }
 
 /// R1-3 降级警示文案（前端 `degrade-hint` 脚注原文；中文，与既有 reason 提示同风格）
 const DEGRADED_DIALOG_HINT: &str =
     "未读到终端对话框选项——终端可能正显示多选项，二元键可能错位，建议到终端确认";
+
+/// 丁T2 kimi 的「无屏读即不出键」降级文案（available=false + reason → 前端提示条）。
+/// 依据 R1-1 实机证伪：kimi 计划批准框的数字通道**不可依赖**（`'2'+Enter` 误批准、
+/// `'3'` 单键拒绝），故本工具**没有任何**可安全下发的映射表二元键——屏读失败即不出手。
+const KIMI_NO_DIALOG_REASON: &str =
+    "该审批需在终端对话框中选择，暂未读到选项——请在终端处理（数字键不可靠，不代按）";
+
+/// 丁T2：**计划确认类对话框族**（codex / kimi）——两家的计划确认框都是「屏读出选项、
+/// 数字/导航代按」形态，且**映射表二元键对计划框均未取证**：
+///
+/// - codex：映射表 `y/esc` 只对**补丁审批**（"Would you like to make the following
+///   edits?"）实机取证（M8R 0.154.0）；计划框实测的是**数字直选**（T5 档案 `'1'` 关框
+///   并开工），键位语义不同，不能拿 `y` 顶。
+/// - kimi：R1-1 独立探测证实计划框数字通道不可依赖，映射表无可用键位。
+///
+/// 故本族在两处收窄（见 `approve_options_scan`）：① 端点门放宽到「计划预期态」；
+/// ② 计划预期态命中且**未读到对话框选项**时不下发映射表/空选项键，改下发
+/// 「计划待确认」条（`plan_pending`）。
+///
+/// claude **不纳入**：它的计划批准走既有 `Waiting + detect`（映射表 `approve="1"` 有
+/// M8R 双场景取证），且其映射表在计划框外还有 Write 审批等已取证场景——放宽会改既有
+/// 行为，属本批范围外。
+fn plan_dialog_family(tool: &str) -> bool {
+    matches!(tool, "codex" | "kimi")
+}
+
+/// 丁T2：**计划待确认预期态**判定（纯函数，从消息尾部派生，**无新存储**）。
+///
+/// 返回尾部最后一条计划类消息的下标——其**之后**不存在下列消息：
+/// - `kind="user"`：用户已注入/发言 → 计划提案已被消费（任务书口径：「下一个用户
+///   消息注入即清除」）；
+/// - `kind="tool-call"` / `kind="tool-result"`：工具已继续执行 → 对话框已关闭
+///   （kimi 批准后 wire 立即落 `tool.call ExitPlanMode` + `tool.result`，而用户消息
+///   要等下一轮才出现——没有这条判据，kimi 的预期态会在批准后一直挂着）。
+///
+/// 计划类消息 = `kind="plan"`（claude 的 ExitPlanMode 升格 / codex 的
+/// `<proposed_plan>` 升格 / kimi 的 `interaction.request.display.plan`）或
+/// `kind="plan-file"`（kimi 的 plan 文件引用与 `display.path`——kimi 的「Write this
+/// file?」变体（R1-3 实测）没有 plan_review，只有计划文件卡，纳入才覆盖得到）。
+///
+/// 判据刻意**不看状态**：codex 计划提案之后不落 Waiting（`codex_parser` 的兜底红已
+/// 废），状态面没有信号——这正是本预期态存在的理由。
+///
+/// 与 [`pending_question_tail_index`] 同族（同一份消息页、同一「其后无后续形态」骨架），
+/// 两者都由 `approve_options_scan` 在**同一次**读页里消费。
+pub(crate) fn plan_pending_tail_index(
+    msgs: &[crate::remote::content::SessionMessage],
+) -> Option<usize> {
+    let last = msgs
+        .iter()
+        .rposition(|m| m.kind == "plan" || m.kind == "plan-file")?;
+    if msgs[last + 1..]
+        .iter()
+        .any(|m| matches!(m.kind.as_str(), "user" | "tool-call" | "tool-result"))
+    {
+        return None;
+    }
+    Some(last)
+}
 
 /// 对话框选项屏读（批次丙 T5）：Windows 屏读可见窗口 → 解析编号选项行。
 ///
@@ -1528,7 +1592,36 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     let marked = st
         .store
         .with(|conn| crate::database::dao::approval_wait::has(conn, &tool, session_id));
-    if session.status != crate::session::SessionStatus::Waiting && !marked {
+    // ===== 丁T2：计划预期态（codex/kimi 计划确认类对话框的唯一入口）=====
+    //
+    // 问题 4 根因：codex 的 `<proposed_plan>` 落盘后**没有状态变化**（codex 不落
+    // Waiting——`codex_parser` 的兜底红已废），于是详情页不知道「终端正在等一个计划
+    // 确认」→ 无提示条、无入口去点「检查终端对话框」。修法：**从消息尾部派生预期态**
+    // （无新存储，任务书硬要求）——尾部存在计划提案消息且其后无用户消息/工具事件。
+    //
+    // kimi 同样受益（问题 3）：它的计划审批有 `interaction.request → Waiting` 红灯，
+    // 走既有 Waiting 门；但「Write this file?」变体（R1-3 实测：无 plan_review，只有
+    // 计划文件卡）不落 Waiting——预期态把它一并接住。
+    //
+    // **短路序（必须在 Waiting 门之前）**：codex 计划待确认时状态不是 Waiting，先判
+    // Waiting 门会直接 None 掉——那正是问题 4 的根因。
+    //
+    // **成本**：为守短路序，`tail_page` 的读取**提前**到 Waiting 门之前——但只对
+    // [`plan_dialog_family`]（codex/kimi）提前；其余工具仍走原路径（门后才读，零额外
+    // IO）。下方丁T1 的尾部待决问答判定消费**同一页**（一次读，两处判据）。
+    let plan_family = plan_dialog_family(&tool);
+    let early_page = if plan_family {
+        (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()
+    } else {
+        None
+    };
+    // **计划对话框族专属**：尾部计划提案 → 预期态在场（其后无 user / 无工具事件）。
+    // 其余工具恒 false（不消费该判据——改它们的门等于改既有行为，超出本批范围）。
+    let plan_pending = plan_family
+        && early_page
+            .as_ref()
+            .is_some_and(|p| plan_pending_tail_index(&p.messages).is_some());
+    if session.status != crate::session::SessionStatus::Waiting && !marked && !plan_pending {
         return None;
     }
     // T8 硬约束①：问题等待标记在场 → 审批卡不可用（问答模式不出允许/拒绝——
@@ -1576,11 +1669,17 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     //   标记通道（`question_marked` 已在其前面拦下），且其「AUQ 被纯文本打断、
     //   tool_result 不落盘」形态会让本判据假阳性 → 排除；判据与依据见
     //   [`tool_lacks_question_mark_channel`]。
-    let tail_page = if tool_lacks_question_mark_channel(&tool) {
-        (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()
-    } else {
-        None // claude：不读页（零额外 IO），走既有 question_marked 隔离路径
-    };
+    //   丁T2：`tail_page` 的取用已提前到上方 Waiting 门处（计划预期态门需要它；
+    //   两者**同一次读**，这里只消费已取到的页）。
+    let tail_page = early_page.or_else(|| {
+        // 非计划族工具（claude）：门后才读页（丁T1 既有口径——零额外 IO for 非等待态；
+        // claude 的 plan 聚合也吃这一页，T8 行为零回归）
+        if tool_lacks_question_mark_channel(&tool) {
+            (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()
+        } else {
+            None
+        }
+    });
     if let Some(page) = tail_page.as_ref() {
         if pending_question_tail_index(&page.messages).is_some() {
             log::debug!("审批端点：尾部存在待决问答（无标记分支，{tool}）→ 审批不可用（硬约束①）");
@@ -1604,12 +1703,22 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             plan_body: None,
             // 严格档是「未取证不出键」，与「降级警示」不同轴——此处不给降级文案
             degraded_hint: None,
+            // 严格档先于一切「出卡」判定：未取证即不出键，计划预期态也不出卡
+            // （前端只渲染严格档提示条，与预期态条互斥——提示条优先）
+            plan_pending: false,
         });
     }
     // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
     // 平台上 detect 恒 miss——macOS 红卡由此可达）；marker detect 降级为无标记
     // 时的旧路径（Windows 屏读/文本命中形态）
+    //
+    // 丁T2：计划预期态也是**一等信号**（与标记同级）——预期态在场即视为「终端正在
+    // 等这个计划确认」，跳过 detect（codex 计划提案的最后一轮消息是计划本体，审批
+    // 框标题文本根本不落会话文件，detect 对它恒 miss——这与 macOS 上标记的必要性
+    // 同构）。kimi 的计划框同理：wire 落 `interaction.request`，屏上标题
+    // "Ready to build with this plan?" 不落任何文件。
     let hit = marked
+        || plan_pending
         || session
             .last_message
             .as_deref()
@@ -1634,6 +1743,40 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     } else {
         None
     };
+    // ===== 丁T2：kimi 的「无键位可发」防线（R1-1 安全裁决）=====
+    //
+    // kimi 的映射表 options 恒空（见 DEFAULT_MAPPINGS_JSON 注释：R1-1 实机证伪数字
+    // 通道不可依赖；默认表不落任何键位；KV 定制可覆盖——届时 `mapping.options` 非空，
+    // 本分支自然不再命中）。命中审批但没有对话框选项时分两态收敛：
+    //
+    // - **计划预期态在场**（Ready to build / Write this file? 两种计划确认框——R1-3
+    //   实测两形态）→ 走与 codex **同一形态**：available=true + 零 options +
+    //   `planPending=true` → 前端「计划待确认」条 +「检查终端对话框」按钮（用户点检查
+    //   重试屏读；对话框刚绘制出来的窗口期一次重试就能拿到 N 选项）。比死胡同提示条
+    //   多给一条**可操作路径**，且与 codex 的卡形态统一（两家的计划确认语义相同）。
+    // - **无计划预期态**（如带标记的 Write/command 审批）→ 降级提示条
+    //   （available=false + reason）：无键可发，指引去终端（§2.8）。
+    //
+    // **只在 kimi 落这条短路**（收窄口径）：claude/codex 的映射表有实证键位，通用降级
+    // 路径（二元卡 + degradedHint / 计划预期态空选项）是它们既有的正确行为，不得改动。
+    if tool == "kimi" && dialog_options.is_none() && !plan_pending {
+        log::debug!("审批端点：kimi 命中审批但未读到对话框选项（无计划预期态）→ 不出键（R1-1 数字通道不可依赖）");
+        // 计划正文照常聚合（提示条场景前端不渲染它，但保持载荷自洽——同一份数据面上
+        // 的字段不该因降级路径而缺失；读页失败 → None，与无计划同收敛）
+        let plan_body = tail_page.as_ref().and_then(|p| plan_from_page(&p.messages));
+        return Some(ApproveScanHit {
+            available: false,
+            options: Vec::new(),
+            verified_with: mapping.verified_with,
+            tool,
+            reason: Some(KIMI_NO_DIALOG_REASON.to_string()),
+            dialog: false,
+            plan_body,
+            degraded_hint: None,
+            // 无预期态的降级路径（上面条件已排除 plan_pending）
+            plan_pending: false,
+        });
+    }
     // ===== R1-3：降级态必须**明确警示**（终审 Important）=====
     //
     // 计划红线 3 要求「解析失败降级二元卡 + **防重警示**」，但原实现只回落映射二元项、
@@ -1642,9 +1785,21 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     //
     // 警示条件：**命中审批（hit）但屏读/解析没拿到对话框选项** —— 即「终端可能正显示
     // 一个我们没读到的多选对话框」。此时下发 `degradedHint`，前端在二元卡上渲染脚注。
-    let degraded = hit && dialog_options.is_none();
+    //
+    // 丁T2 收窄：**计划待确认形态不叠加本警示**（`!plan_pending_without_keys`）——该
+    // 形态前端**零按钮**（没有可点错的二元键），警示文案「二元键可能错位」在那里是
+    // 无的放矢；该形态自己的降级表达是「点检查未命中 → 脚注提示」（前端
+    // `approve-plan-check-miss`）。两处提示不重复。
+    let plan_pending_without_keys = plan_pending && dialog_options.is_none();
+    let degraded = hit && dialog_options.is_none() && !plan_pending_without_keys;
     // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
     // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
+    //
+    // 丁T2 第三档：**计划预期态 ∧ 无对话框选项 ∧ kimi** 已在上面短路掉；剩下
+    // 「计划预期态 ∧ 无对话框选项 ∧ codex」→ 映射表的 y/esc 是**补丁审批**键位
+    // （M8R 0.154.0 实证），对计划框未取证 → 也不能拿它顶（见 [`plan_dialog_family`]）。
+    // 该形态下发 available=true + 空 options + `planPending=true`：前端渲染「计划待确认」
+    // 条 +「检查终端对话框」按钮（不是二元键）。
     let (options, dialog) = match dialog_options {
         Some(opts) => (
             opts.iter()
@@ -1653,7 +1808,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             true,
         ),
         None => (
-            if hit {
+            if hit && !plan_pending_without_keys {
                 mapping
                     .options
                     .iter()
@@ -1675,8 +1830,9 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     //   升格为一等计划消息）；
     // - codex：同上（T4 已把 `<proposed_plan>` 标签消息升格——两类来源在消息层已统一
     //   为 kind="plan"，故本处**不需要**按工具分支）；
-    // - kimi：T7 的计划文件卡（kind="plan-file"）——卡片主体给**文件路径**，前端走
-    //   预览读取全文（与消息流一致，不重复读文件正文）。
+    // - kimi：T7 的计划文件卡（kind="plan-file"）与丁T2 的 `display.plan` 正文卡
+    //   （kind="plan"）——两者同源（同一条 wire 记录的两个字段），`plan_from_page`
+    //   取**最近一条**即正文卡，前端直接 markdown 直出。
     //
     // 只取**最近一条**（审批针对的是最新计划）；命中即随 available 载荷下发。
     // 丁T1 复评 F-2：计划聚合吃**上方已取到的同一页**（tail_page）——原先自读一页的
@@ -1699,6 +1855,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         } else {
             None
         },
+        plan_pending,
     })
 }
 
@@ -1725,27 +1882,34 @@ struct ApprovePlanBody {
 ///
 /// 无计划消息 → None（前端不渲染计划主体，仅显示选项——降级不阻塞审批；
 /// 这正是 happy「兜底渲染」原则的应用）。
+///
+/// **丁T2 补充：同一事件的「正文优先」**（kimi 专属形态）——丁T2 起 kimi 的一条
+/// `interaction.request(plan_review)` 会**同时**产正文卡（`kind="plan"`）与文件卡
+/// （`kind="plan-file"`，见 `content::kimi_plan_cards` 的固定顺序：正文在前）。
+/// 原来的「取最近一条」此时会选中**后出的文件卡**（路径），把已经拿到的 markdown
+/// 正文白白降级成路径提示。故：若最新的计划类消息是文件卡、且其**紧邻前一条**正是
+/// 正文卡，则取正文（同一事件的两半，markdown 是更完整的那半）。
+///
+/// **为什么用「紧邻」而不是「窗口内任意正文」**：避免把**更早**的正文卡（上一版计划）
+/// 与**最新**的文件卡（这一版计划）错配成一对——紧邻性是 `kimi_plan_cards` 的确定性
+/// 产物，只有同一事件的两半才满足。
 fn plan_from_page(msgs: &[crate::remote::content::SessionMessage]) -> Option<ApprovePlanBody> {
-    // 从尾部向前找最近一条计划类消息（plan 优先于 plan-file？不——取**最近**的那条，
-    // 因为审批针对的是最新呈现给用户的计划；两类同属计划语义）
-    for m in msgs.iter().rev() {
-        match m.kind.as_str() {
-            "plan" => {
-                return Some(ApprovePlanBody {
-                    content: m.content.clone(),
-                    is_file: false,
-                });
-            }
-            "plan-file" => {
-                return Some(ApprovePlanBody {
-                    content: m.content.clone(),
-                    is_file: true,
-                });
-            }
-            _ => {}
-        }
+    // 从尾部向前找最近一条计划类消息
+    let last = msgs
+        .iter()
+        .rposition(|m| matches!(m.kind.as_str(), "plan" | "plan-file"))?;
+    // 同一事件「正文优先」：最新是文件卡 ∧ 紧邻前一条是正文卡 → 取正文
+    if msgs[last].kind == "plan-file" && last > 0 && msgs[last - 1].kind == "plan" {
+        return Some(ApprovePlanBody {
+            content: msgs[last - 1].content.clone(),
+            is_file: false,
+        });
     }
-    None
+    let m = &msgs[last];
+    Some(ApprovePlanBody {
+        content: m.content.clone(),
+        is_file: m.kind == "plan-file",
+    })
 }
 
 /// GET /m/api/v1/session-approve-options?session_id=（M8 审批选项卡数据源）：
@@ -1779,31 +1943,42 @@ pub async fn session_approve_options(
                     .into_response();
             }
         };
-    let (available, options, verified_with, tool, reason, dialog, plan_body, degraded_hint) =
-        match scan {
-            Some(hit) => (
-                hit.available,
-                hit.options,
-                hit.verified_with,
-                Some(hit.tool),
-                hit.reason,
-                hit.dialog,
-                hit.plan_body,
-                hit.degraded_hint,
-            ),
-            // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
-            // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
-            None => (
-                false,
-                Vec::new(),
-                String::new(),
-                None,
-                None,
-                false,
-                None,
-                None,
-            ),
-        };
+    let (
+        available,
+        options,
+        verified_with,
+        tool,
+        reason,
+        dialog,
+        plan_body,
+        degraded_hint,
+        plan_pending,
+    ) = match scan {
+        Some(hit) => (
+            hit.available,
+            hit.options,
+            hit.verified_with,
+            Some(hit.tool),
+            hit.reason,
+            hit.dialog,
+            hit.plan_body,
+            hit.degraded_hint,
+            hit.plan_pending,
+        ),
+        // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
+        // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
+        None => (
+            false,
+            Vec::new(),
+            String::new(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            false,
+        ),
+    };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
     let current_version = match tool.as_deref() {
         Some(t) => {
@@ -1863,6 +2038,11 @@ pub async fn session_approve_options(
             // R1-3：降级警示（命中审批但未读到对话框选项）——前端在二元卡渲染脚注；
             // null = 未降级（读到对话框选项，或本就非审批态）
             "degradedHint": degraded_hint,
+            // 丁T2：**计划待确认预期态**（消息尾部派生）——codex/kimi 的计划确认框不落
+            // 状态/标记，这是它唯一的可见信号。前端据此渲染「计划待确认」条 +「检查终端
+            // 对话框」按钮（`available=true` 且此字段 true 且 `dialog=false` → 空 options
+            // 不是错误，是「还没读到选项，点检查重试」）。
+            "planPending": plan_pending,
         })),
     )
         .into_response()
@@ -2222,6 +2402,32 @@ fn question_scan_sync(
         .with(|conn| crate::database::dao::approval_wait::has(conn, &tool, session_id));
     if approval_marked {
         return None;
+    }
+    // ===== 丁T2 扩面：kimi 的审批/问答互斥（无标记分支）=====
+    //
+    // 缺口（批次丙的隔离规则只覆盖标记面）：kimi 的审批**未必落标记**——`~/.mam/mam.db`
+    // 的 `approval_wait_marks` 至今只有 claude 一行，因为 kimi 的 helper 部署/进程在场
+    // 都是前提（B2 勘察结论）。而 kimi 的计划审批在 wire 里是**一等结构化事件**
+    // （`interaction.request(kind=approval)`，丁T2 已映射为消息流的 plan 卡）——
+    // 它的在场必须与标记同效地压掉问答卡，否则会出现「同一屏既出审批选项又出问答选项」
+    // 的双卡错位（裁9 的安全面）。
+    //
+    // 判据：与审批端点**同一份**「计划预期态」纯函数（[`plan_pending_tail_index`]）——
+    // 两处口径永不漂移（T1 复评 F-2 的同款纪律）。只在 kimi 上启用：codex 的
+    // question 待决同样会出计划卡吗？**不会**——codex 计划提案（`<proposed_plan>`）与
+    // 问答工具调用是互斥的回合事件，但 codex 的问答走 `pending_question_tail_index`
+    // 兜底，且其 plan 尾部判据在问答在场时会被问答判定先行拦下（顺序见下）。
+    // 保守起见只在 kimi 启用（问题 3 的实际形态），codex 留待有实证再扩。
+    if tool == "kimi" {
+        // 与审批端点同样的读页代价（一页 40 条）；失败 = 无判据 = 不拦（fail-open 到
+        // 既有行为，不改问答端点的可达性——读失败时问答端点本来也拉不到通道 B 数据）
+        let page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok();
+        if let Some(page) = page.as_ref() {
+            if plan_pending_tail_index(&page.messages).is_some() {
+                log::debug!("问答端点：kimi 尾部存在计划待确认预期态 → 问答卡不可用（审批优先）");
+                return None;
+            }
+        }
     }
     // 通道 A（主）：hook 问题标记——载荷优先取标记 payload（30s TTL 事件文件已被
     // 覆盖写，payload 是标记写入时刻的定格，读它免竞态）
@@ -3075,5 +3281,174 @@ pub async fn session_mode_switch(
             })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::content::SessionMessage;
+
+    /// 纯核夹具：消息构造（kind 是唯一参与判据的字段）
+    fn msg(kind: &str) -> SessionMessage {
+        SessionMessage {
+            seq: 0,
+            role: if kind == "user" { "user" } else { "assistant" }.to_string(),
+            kind: kind.to_string(),
+            content: "x".to_string(),
+            ts: None,
+            tool_name: None,
+            tool_args: None,
+            collapsed: false,
+        }
+    }
+
+    fn kinds(msgs: &[&str]) -> Vec<SessionMessage> {
+        msgs.iter().map(|k| msg(k)).collect()
+    }
+
+    // ==== 丁T2：计划待确认预期态（`plan_pending_tail_index`，无新存储）====
+
+    /// 实机形态（codex 17:19 rollout）：user → assistant → plan（尾部）→ 预期态在场。
+    /// 判据 = 返回**最后一条计划类消息的下标**（供审批端点确认「审的是最新那份计划」）。
+    #[test]
+    fn plan_pending_detected_on_tail_plan() {
+        assert_eq!(
+            plan_pending_tail_index(&kinds(&["user", "assistant", "plan"])),
+            Some(2)
+        );
+        // plan-file 同为计划类（kimi 的「Write this file?」变体只有文件卡——R1-3 实测）
+        assert_eq!(
+            plan_pending_tail_index(&kinds(&["user", "plan-file"])),
+            Some(1)
+        );
+        // 混合：取**最近**一条（正文卡与文件卡并存时，后出的是文件卡——kimi 双卡顺序）
+        assert_eq!(
+            plan_pending_tail_index(&kinds(&["plan", "plan-file"])),
+            Some(1)
+        );
+    }
+
+    /// 预期态的三类清除信号（任务书「下一个用户消息注入或检查未命中时清除」的
+    /// 前半——「检查未命中」由端点侧表达为「屏读拿不到选项」的降级，不在这里）：
+    /// - 用户消息（注入 `Implement the plan.` 即清除，实机 17:19 line 149）；
+    /// - 工具事件（kimi 批准后 wire 立即落 ExitPlanMode 的 tool.call/result——
+    ///   用户消息要等下一轮，没有这条判据 kimi 的卡会在批准后挂死）。
+    #[test]
+    fn plan_pending_cleared_by_user_or_tool_activity() {
+        for tail in [
+            vec!["plan", "user"],
+            vec!["plan", "tool-call"],
+            vec!["plan", "tool-result"],
+            vec!["plan", "assistant", "user"],
+            vec!["plan-file", "tool-call"],
+            // 工具事件之后再出计划 → 新的预期态（取最近的计划）
+            vec!["plan", "tool-result", "plan"],
+        ] {
+            let msgs = kinds(&tail);
+            let expect = if tail.last() == Some(&"plan") {
+                Some(2)
+            } else {
+                None
+            };
+            assert_eq!(
+                plan_pending_tail_index(&msgs),
+                expect,
+                "尾序 {tail:?} 的预期态判定"
+            );
+        }
+    }
+
+    /// 无计划消息 / 空页 → None（零误报：普通会话不得凭空出「计划待确认」条）
+    #[test]
+    fn plan_pending_absent_without_plan_message() {
+        assert_eq!(plan_pending_tail_index(&[]), None);
+        assert_eq!(
+            plan_pending_tail_index(&kinds(&["user", "assistant", "thinking", "tool-call"])),
+            None
+        );
+        // thinking / assistant 之后的计划**不**清除预期态（模型输出不消费提案）
+        assert_eq!(
+            plan_pending_tail_index(&kinds(&["plan", "thinking", "assistant"])),
+            Some(0)
+        );
+    }
+
+    // ==== 丁T2：审批卡计划聚合的「同一事件正文优先」 ====
+
+    /// 计划聚合夹具（content 即 kind 语义的可辨串）
+    fn plan_pair(kinds: &[&str]) -> Vec<SessionMessage> {
+        kinds
+            .iter()
+            .map(|k| {
+                let mut m = msg(k);
+                m.content = match *k {
+                    "plan" => "# markdown 正文",
+                    "plan-file" => "C:/u/plans/p.md",
+                    _ => "x",
+                }
+                .to_string();
+                m
+            })
+            .collect()
+    }
+
+    /// 丁T2：kimi 的一条 `interaction.request(plan_review)` 同产正文卡与文件卡
+    /// （`content::kimi_plan_cards` 固定顺序：正文在前、文件卡在后）——聚合必须取
+    /// **正文**（markdown 比路径更完整），不得因文件卡更靠后而降级成路径提示。
+    #[test]
+    fn plan_from_page_prefers_body_adjacent_to_file_card() {
+        // kimi 形态：tool-result(...plan-file) → [plan, plan-file]（同事件两半）
+        let b = plan_from_page(&plan_pair(&["user", "plan", "plan-file"])).unwrap();
+        assert_eq!(b.content, "# markdown 正文");
+        assert!(!b.is_file, "同事件的正文优先（不降级为路径）");
+
+        // 只有文件卡（kimi 的 T7 引用形态 / display.plan 缺失）→ 仍给路径
+        let b = plan_from_page(&plan_pair(&["user", "plan-file"])).unwrap();
+        assert_eq!(b.content, "C:/u/plans/p.md");
+        assert!(b.is_file);
+
+        // 只有正文卡（claude/codex）→ 给 markdown
+        let b = plan_from_page(&plan_pair(&["user", "plan"])).unwrap();
+        assert_eq!(b.content, "# markdown 正文");
+        assert!(!b.is_file);
+    }
+
+    /// **错配反锁**：紧邻性判据防「上一版正文 + 这一版文件卡」被错凑成一对——
+    /// 中间隔着别类消息（不是同一事件的两半）时，文件卡照旧给路径。
+    #[test]
+    fn plan_from_page_does_not_pair_distant_body_with_file_card() {
+        let b = plan_from_page(&plan_pair(&["plan", "tool-result", "plan-file"])).unwrap();
+        assert_eq!(
+            b.content, "C:/u/plans/p.md",
+            "正文与文件卡不紧邻（中间隔了别类消息）→ 不配对，取最新一条（文件卡）"
+        );
+        assert!(b.is_file);
+
+        // 无计划类消息 → None（零误报）
+        assert!(plan_from_page(&plan_pair(&["user", "assistant", "tool-call"])).is_none());
+        assert!(plan_from_page(&[]).is_none());
+    }
+
+    /// 计划对话框族收窄（codex/kimi）——放宽审批门**只对这两家**（改 claude 的门
+    /// 等于改既有行为，超出本批范围；opencode 无独立计划机制）
+    #[test]
+    fn plan_dialog_family_is_codex_and_kimi_only() {
+        assert!(plan_dialog_family("codex"));
+        assert!(plan_dialog_family("kimi"));
+        for other in [
+            "claude",
+            "opencode",
+            "zcode",
+            "dsh",
+            "workbuddy",
+            "openclaw",
+            "",
+        ] {
+            assert!(
+                !plan_dialog_family(other),
+                "{other} 不属计划对话框族（门不放宽——既有行为零改动）"
+            );
+        }
     }
 }

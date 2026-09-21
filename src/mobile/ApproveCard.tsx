@@ -30,6 +30,13 @@ interface ApproveCardProps {
   session: { id: string };
 }
 
+/** 计划待确认条的脚注文案（丁T2）：预期态在场但后端没读到终端对话框选项——
+ *  与后端 `remote/api.rs` 的降级语义同源（终端对话框可能尚未绘制/已关闭/不在
+ *  Windows 可见窗口）。前端自持文案：后端在 available=true 形态下不下发 reason
+ *  （reason 是 available=false 的严格档通道），故此处由前端给同义提示。 */
+const PLAN_CHECK_MISS_HINT =
+  "未读到终端对话框选项——请再点一次「检查终端对话框」，或直接在终端处理该确认";
+
 export default function ApproveCard({ session }: ApproveCardProps) {
   // 选项可用性：ready=false（加载中 / 拉取失败）→ 不渲染（available/reason 分诊在渲染侧）
   const [options, setOptions] = useState<ApproveOptionsView | null>(null);
@@ -40,6 +47,9 @@ export default function ApproveCard({ session }: ApproveCardProps) {
   const [sent, setSent] = useState(false);
   // 失败文案（failed{error} 回执 / ApiError 分診）——非 null 展示，按钮保持可点（可重试）
   const [error, setError] = useState<string | null>(null);
+  // 丁T2：「检查终端对话框」进行中（防连点）+ 检查后仍未读到选项的降级提示
+  const [checking, setChecking] = useState(false);
+  const [checkMissed, setCheckMissed] = useState(false);
 
   // 挂载拉取一次选项可用性；拉取失败 → 静默保持隐藏。
   // ready 只表示「载荷已落地」（available/reason 的分诊移到渲染侧——严格档
@@ -60,6 +70,26 @@ export default function ApproveCard({ session }: ApproveCardProps) {
       alive = false;
     };
   }, [session.id]);
+
+  /** 「检查终端对话框」（丁T2）：重拉一次选项端点——后端在计划预期态下**现场屏读**，
+   *  命中即回 N 选项（id=`dialog:<n>`），未命中回零选项 + planPending=true。
+   *  与挂载那次拉取同一条数据通道（无新端点）；失败静默保留原载荷 + 显示降级提示。 */
+  const handleCheck = useCallback(async () => {
+    if (checking) return;
+    setChecking(true);
+    setCheckMissed(false);
+    try {
+      const v = await fetchApproveOptions(session.id);
+      setOptions(v);
+      // 仍未读到选项（planPending 仍立且无 dialog）→ 明示未命中，不假装成功
+      const stillPending = v.available === true && v.planPending === true && v.dialog !== true;
+      setCheckMissed(stillPending && v.options.length === 0);
+    } catch {
+      setCheckMissed(true);
+    } finally {
+      setChecking(false);
+    }
+  }, [checking, session.id]);
 
   const handleAnswer = useCallback(
     async (optionId: string) => {
@@ -116,6 +146,86 @@ export default function ApproveCard({ session }: ApproveCardProps) {
           {options.reason}
         </p>
       </div>
+    );
+  }
+
+  // ===== 丁T2：计划待确认条（codex/kimi 的计划确认框）=====
+  //
+  // 形态：`available=true ∧ planPending=true ∧ dialog≠true`（零选项是**预期**，不是错误）。
+  // 为什么单独一条渲染分支（而不是复用选项卡）：
+  // - 此形态下后端**刻意不下发**映射表键位（codex 的 y/esc 是补丁审批键位、kimi 的
+  //   数字通道已被 R1-1 证伪不可依赖）——没有可渲染的按钮，选项卡会渲染成空组；
+  // - 用户的下一步动作是**去终端看**（可能对话框没绘制/已关闭）或**点检查重试**
+  //   （对话框刚绘制出来时，屏读一次就能拿到 N 选项）。
+  //
+  // 计划正文照常渲染（T8 聚合机制，`plan` 字段）——用户点检查前先看到计划全文。
+  const planPendingOnly =
+    options.available && options.planPending === true && options.dialog !== true;
+  if (planPendingOnly) {
+    return (
+      <InteractiveCard
+        tone="approve"
+        testId="approve-card"
+        mode="plan-pending"
+        title="计划待确认"
+        footer={
+          <>
+            <button
+              type="button"
+              data-testid="approve-plan-check"
+              disabled={checking}
+              onClick={handleCheck}
+              className="mt-2 rounded-full bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-40"
+            >
+              {checking ? "检查中…" : "检查终端对话框"}
+            </button>
+            {/* 检查未命中：明示（红线 3——不假装成功）；命中则本条整个消失（走选项卡分支） */}
+            {checkMissed && (
+              <p
+                data-testid="approve-plan-check-miss"
+                className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+              >
+                {PLAN_CHECK_MISS_HINT}
+              </p>
+            )}
+          </>
+        }
+      >
+        {/* 计划待确认条：**检查未命中即清除**（任务书语义「预期态清除：下一个用户消息
+            注入或检查未命中时清除」）——点过检查且屏读仍没读到选项时，本条不再显示
+            （不再断言「终端正在等这个计划」——那是未经验证的声明，§2.8 不假装），
+            改为下方脚注的「未读到」明示 + 检查钮可再试。用户注入下一条消息后，
+            消息尾部判据（`isPlanPending`）会让整张卡不再挂载 = 预期态彻底清除。 */}
+        {!checkMissed && (
+          <p
+            data-testid="approve-plan-pending"
+            className="mt-1 text-xs text-rose-700/80 dark:text-rose-400/80"
+          >
+            终端正在等待这个计划的确认——请到终端对话框选择，或点下方按钮读取选项
+          </p>
+        )}
+        {/* 计划全文（T8 聚合；无计划消息 → 不渲染主体） */}
+        {options.plan != null && options.plan.content.trim() !== "" && (
+          <div
+            data-testid="approve-plan"
+            data-plan-file={options.plan.isFile ? "true" : "false"}
+            className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-rose-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-rose-400/30 dark:bg-slate-900/60 dark:text-slate-200"
+          >
+            <p className="mb-1 text-[11px] font-medium tracking-wide text-rose-700/80 uppercase dark:text-rose-400/80">
+              {options.plan.isFile ? "计划文件" : "计划内容"}
+            </p>
+            {options.plan.isFile ? (
+              <p data-testid="approve-plan-file" className="font-mono break-all">
+                {options.plan.content}
+              </p>
+            ) : (
+              <div className="prose-sm max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{options.plan.content}</ReactMarkdown>
+              </div>
+            )}
+          </div>
+        )}
+      </InteractiveCard>
     );
   }
 
