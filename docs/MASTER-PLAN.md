@@ -100,7 +100,7 @@
 |---|---|---|
 | F3.1 | 斜杠命令注入 | TUI 工具切模型/模式 = 注入 `/model X` 类命令；移动端模型选择器 UI |
 | F3.2 | 完整对话界面 | 读渲染（一期基座）+ 写注入（二期基座）→ 移动端聊天体验，含流式 |
-| F3.3 | 协议客户端矩阵 | ZCode Protocol（session/send/setModel/setMode/events）、codex app-server（thread/start·resume·turn/start；先 generate-json-schema）、ACP（SDK 2.0.0，收编多数 CLI 工具）；全部带版本门控+探针+降级；**审批事件原生化**（app-server 审批 / ACP request_permission → 移动端审批卡，D12 第一层） |
+| F3.3 | 协议客户端矩阵 | ZCode Protocol（session/send/setModel/setMode/events）、codex app-server（thread/start·resume·turn/start；先 generate-json-schema）、ACP（SDK 2.0.0，收编多数 CLI 工具）；全部带版本门控+探针+降级；**审批事件原生化**（app-server 审批 / ACP request_permission → 移动端审批卡，D12 第一层）。**参考实现：happy（slopus/happy，MIT）**——claude SDK 托管（canUseTool 审批应答 / setPermissionMode 编程切档）+ codex app-server JSON-RPC + ACP 三路先行，其审批/问答/plan 交互 UI 与状态机、统一模式枚举+各工具映射、兜底渲染原则可整段借鉴（2026-09-21 用户同意点名；调研归档 `research/refs/phase2-消息注入/2026-09-21-happy项目审批与模式切换调研.md`） |
 | F3.4 | 会话切换/跳转 | 会话列表 + "回电脑后点哪张卡"的远程跳转指引（复用现有聚焦/深链） |
 | F3.5 | 配置代理 | 模型/MCP/skill 配置的移动端读写（MAM 已有全部配置写能力，暴露到移动 API） |
 | F3.6 | 设置直达 | 按工具降级：深度链接 → MAM 代理配置 |
