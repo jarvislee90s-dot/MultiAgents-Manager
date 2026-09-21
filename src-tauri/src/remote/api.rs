@@ -3217,42 +3217,50 @@ fn resume_command_for_audit(tool: &str, sid: &str) -> String {
 // 批次丙 T6：模式切换端点（GET 当前档 + POST 切档）
 // ============================================================
 
-/// 当前模式扫描产物（GET /session-mode）
+/// 当前模式扫描产物（GET /session-mode；丁T4 起携带结构表）
 struct ModeScanHit {
-    /// 工具标识（前端据 switchKind 决定是否显示切换按钮）
+    /// 工具标识（前端据结构表决定渲染分支）
     tool: String,
-    /// 屏读到的当前档（None = 屏读失败/不支持回显 → 前端显示「未知」+ 人工核对提示）
+    /// 屏读到的当前模式档（None = 屏读失败/形态漂移/无回读源 → 前端「请人工核对」）
     current: Option<crate::inject::mode::MamMode>,
-    /// 该工具是否支持屏读回显（红线 4 的判据；false → 必须提示人工核对）
+    /// 该工具是否有屏读回显（红线 4 的判据；顶层兼容视图用）
     readback: bool,
-    /// 切换机制（前端据此显示「循环切换」或「命令」文案）
+    /// 切换机制（旧 `switchKind` 字段的取值来源）
     kind: crate::inject::mode::ModeSwitchKind,
+    /// 模式栏结构（裁5：二维两组 / 单轴一组 / 无）
+    structure: crate::inject::mode::ModeStructure,
 }
 
-/// 模式扫描（同步，spawn_blocking 内调用）：会话查找 → 机制分族 → （仅支持回显的
-/// 工具）屏读状态栏解析当前档。非 Windows / 屏读失败 → current=None（降级）。
+/// 模式扫描（同步，spawn_blocking 内调用）：会话查找 → 结构表 → 屏读（一次）解析
+/// 当前模式档。非 Windows / 屏读失败 / 形态认不出 → current=None（降级）。
+///
+/// **屏读只做一次**（阻塞 FFI 的代价不可重复付）：四家的**模式组**共用这一份行集；
+/// 权限组无底栏源（实测）→ GET 侧恒 null。
 fn mode_scan_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<ModeScanHit> {
     let session = (st.session_source)()
         .sessions
         .into_iter()
         .find(|s| s.id == session_id)?;
     let tool = session.agent_type.tool_id().to_string();
+    let structure = crate::inject::mode::mode_structure(&tool);
     let kind = crate::inject::mode::switch_kind(&tool);
     let readback = crate::inject::mode::mode_readback_supported(&tool);
-    let current = read_mode_from_screen(&session, readback);
+    let current = read_mode_from_screen(&session, &tool, readback);
     Some(ModeScanHit {
         tool,
         current,
         readback,
         kind,
+        structure,
     })
 }
 
-/// 屏读当前模式（批次丙 T6）：仅对支持回显的工具调用（当前 opencode——矩阵 §2.2
-/// 实测状态栏明示模式文本）。非 Windows / 屏读失败 / 解析不出 → None（调用方降级
-/// 为「档未知」+ 人工核对提示，红线 4：不假装成功）。
+/// 屏读当前模式（批次丙 T6；丁T4 改**分族解析**）。仅对支持回显的工具调用。
+/// 非 Windows / 屏读失败 / 该族词表认不出 → None（调用方降级为「档未知」+
+/// 人工核对提示，红线 4：不假装成功）。
 fn read_mode_from_screen(
     session: &crate::session::Session,
+    tool: &str,
     readback: bool,
 ) -> Option<crate::inject::mode::MamMode> {
     if !readback {
@@ -3262,12 +3270,12 @@ fn read_mode_from_screen(
     {
         match crate::inject::windows_console::read_screen_window(session.pid) {
             Ok(lines) => {
-                let m = crate::inject::mode::parse_mode_from_screen(&lines);
-                log::debug!("T6 屏读模式（pid={}）→ {:?}", session.pid, m);
+                let m = crate::inject::mode::parse_mode_from_screen(tool, &lines);
+                log::debug!("模式屏读（{tool} pid={}）→ {:?}", session.pid, m);
                 m
             }
             Err(e) => {
-                log::debug!("T6 屏读失败（pid={}: {e}）→ 档未知", session.pid);
+                log::debug!("模式屏读失败（{tool} pid={}: {e}）→ 档未知", session.pid);
                 None
             }
         }
@@ -3275,16 +3283,27 @@ fn read_mode_from_screen(
     #[cfg(not(windows))]
     {
         // macOS 无屏读 → 档未知（前端提示人工核对，红线 4）
-        let _ = session;
+        let _ = (session, tool);
         None
     }
 }
 
-/// GET /m/api/v1/session-mode?session_id=（T6）：返回当前档（尽力而为）+ 该工具的
-/// 切换机制与是否支持回显。会话不存在 → 404 no_session。
+/// GET /m/api/v1/session-mode?session_id=（T6；丁T4 扩二维结构 + 回读全开）：
+/// 返回**结构表**（二维两组 / 单轴一组 / 无）+ 每组的当前档与可选性 + 该工具的
+/// 切换机制。会话不存在 → 404 no_session。
 ///
-/// **降级语义（红线 4）**：`current` 为 null 表示「未知」（屏读失败或不支持回显）
-/// ——前端必须显示「请人工核对终端模式」，不得假装知道。
+/// **降级语义（红线 4）**：`current` 为 null 表示「未知」（屏读失败/形态漂移/该组
+/// 无回读源）——前端必须显示「请人工核对终端模式」，不得假装知道。丁T4 起该字段
+/// 是**每组一份**（`groups[].current`），顶层 `current` 保留为旧客户端的兼容视图。
+///
+/// **前向兼容（旧前端不破）**：顶层字段（`current`/`currentLabel`/`readback`/
+/// `switchKind`）**原样保留**，取值口径 = 模式组（旧前端只认一个轴，而模式组正是
+/// 旧实现的语义面）；新字段（`structure`/`groups`）是纯增量。旧后端对新前端同样
+/// 兼容（新前端在字段缺失时回落到「单轴渲染 + 顶层 current」，见 `ModeBar.tsx`）。
+/// 两端都为对方留了缺省，是「不强制同时升级」的最低要求。
+///
+/// 屏读**只做一次**（读一屏的代价是阻塞 FFI），四家的模式组共用这一份行集；
+/// 权限组无底栏源（实测）→ 恒 null。
 pub async fn session_mode(
     State(st): State<Arc<RemoteState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -3322,15 +3341,55 @@ pub async fn session_mode(
         crate::inject::mode::ModeSwitchKind::SlashCommand => "slashCommand",
         crate::inject::mode::ModeSwitchKind::Unsupported => "unsupported",
     };
+    // 组载荷：模式组带屏读到的当前档，权限组恒 null（无底栏源——如实）
+    let groups: Vec<serde_json::Value> = hit
+        .structure
+        .groups()
+        .into_iter()
+        .map(|g| {
+            let current = if g.id == crate::inject::mode::ModeGroupId::Mode {
+                hit.current
+            } else {
+                None
+            };
+            serde_json::json!({
+                "id": g.id.wire(),
+                "label": g.label,
+                "step": g.step,
+                "readback": g.readback,
+                "current": current.map(|m| m.wire()),
+                "currentLabel": current.map(|m| g.tiers.iter().find(|t| t.mode == m).map(|t| t.label).unwrap_or(m.label())),
+                "tiers": g.tiers.iter().map(|t| serde_json::json!({
+                    "mode": t.mode.wire(),
+                    "label": t.label,
+                    "selectable": t.selectable,
+                    "reason": t.reason,
+                })).collect::<Vec<_>>(),
+                // 裁7：退役旧档**如实展示**（前端不渲染为可点按钮）
+                "legacy": g.legacy.iter().map(|l| serde_json::json!({
+                    "label": l.label,
+                    "note": l.note,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    // 顶层兼容视图 = 模式组（旧前端只认一个轴，而模式组正是旧实现的语义面）
+    let mode_group = hit.structure.group(crate::inject::mode::ModeGroupId::Mode);
+    let top_current = mode_group
+        .map(|g| if g.readback { hit.current } else { None })
+        .unwrap_or(hit.current);
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
             "tool": hit.tool,
-            "current": hit.current.map(|m| m.wire()),
-            "currentLabel": hit.current.map(|m| m.label()),
-            "readback": hit.readback,
+            "current": top_current.map(|m| m.wire()),
+            "currentLabel": top_current.map(|m| m.label()),
+            "readback": mode_group.map(|g| g.readback).unwrap_or(hit.readback),
             "switchKind": kind,
+            // 丁T4 增量：结构 + 两组（旧前端忽略未知字段，零破坏）
+            "structure": hit.structure.wire(),
+            "groups": groups,
         })),
     )
         .into_response()
@@ -3341,7 +3400,11 @@ pub async fn session_mode(
 /// 的 `error` 码分诊并列——码供程序分支，文案供用户阅读）。
 const DIALOG_BLOCKS_CONTROL_REASON: &str = "终端有待决对话框，请先处理";
 
-/// POST /m/api/v1/session-mode 请求体（camelCase；字段全 default 防 422）
+/// POST /m/api/v1/session-mode 请求体（camelCase；字段全 default 防 422）。
+///
+/// **前向兼容**：`group` 是丁T4 的**新增可选字段**——旧客户端只发
+/// `{sessionId, target}`，由 [`crate::inject::mode::resolve_group`] 按档位归组
+/// （规则见该函数文档）；新客户端发 `group` 时必须是该工具结构里存在的组。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionModeReq {
@@ -3350,20 +3413,75 @@ pub struct SessionModeReq {
     /// 目标档（wire 词：plan/default/acceptEdits/bypass/readOnly）
     #[serde(default)]
     pub target: String,
+    /// 目标组（wire 词：mode/permission；缺省 = 按 target 推断）
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
-/// POST /m/api/v1/session-mode（T6 切档）：校验 → **对话框在场守卫（丁T3 接入①）** →
-/// 机制分派 → 注入 → 审计 mode。
+/// 两段式注入的菜单轮询预算（毫秒）——第一段 `/permissions` 回车后，菜单出现需要
+/// 一个重绘周期；实测（M9R 探针）菜单是**即时**弹出的（同批按键的后续 ↓/Enter 都
+/// 落在菜单上），故取一个保守的小窗即可。脆弱常量（宪法横切 6）：改值必须过测试。
+const MENU_POLL_TOTAL_MS: u64 = 600;
+/// 菜单轮询间隔（毫秒）
+const MENU_POLL_STEP_MS: u64 = 100;
+
+/// POST /m/api/v1/session-mode（T6 切档；丁T4 二维 + 两段式）：校验 → **对话框在场
+/// 守卫（丁T3 接入①）** → 机制分派 → 注入 →（可回读时）回读比对 → 审计 mode。
 ///
-/// 注入形态：
+/// # 注入形态（§2.6 逐格）
 ///
-/// - `ShiftTabCycle`（claude/opencode/kimi）：注入 **shift+tab 单键**（一次切一档，
-///   循环语义——目标档不参与按键构造，各家档位环序属未验面，不出手推算）；
-/// - `SlashCommand`（codex）：注入斜杠命令**文本 + 回车提交**（`/plan` 等）；
-/// - `Unsupported`：409 `no_mechanism`（前端只显示当前档）。
+/// - **步进组**（claude/opencode）：注入 **shift+tab 单键**（一次切一档，目标档不
+///   参与按键构造）；切完**回读**，与环序推算的应到档比对；
+/// - **直达文本**（codex 模式组 `/plan`；kimi 模式组 `/plan on|off`；kimi 权限组
+///   `/yolo`、`/auto`）：文本注入 + 回车提交；
+/// - **两段式菜单**（codex 权限组 `/permissions`；kimi 权限组「总是询问」）：
+///   见下节；
+/// - **无机制**（含 codex「退出计划模式」、退役档）：409 `no_mechanism` + `reason`.
 ///
-/// **回执如实**：屏读回显不支持时返回 `verified=false` + 人工核对提示（红线 4）
-/// ——绝不声称「已切到 X 档」。
+/// # 两段式的第二段与丁T3 守卫如何共存（**本任务最需要想清楚的一处**）
+///
+/// **冲突**：两段式的第一段打开菜单后，屏幕上**必然**出现一个待选菜单——而丁T3 的
+/// 守卫判据 `blocks_control_injection` 正是「屏上存在可选簇 ⇒ 拒绝控制类注入」。
+/// 若第二段再走一次守卫，它会**必然**拒绝自己刚打开的菜单（死锁：永远切不了权限档）。
+///
+/// **解法（三句话，逐句可验）**：
+/// 1. **一次请求 = 一次注入 = 一道守卫**：两段在**同一个 handler 调用内**串行完成，
+///    守卫在**任何注入之前**判一次（判的是「用户点按钮那一刻终端上有没有别的对话框」）。
+///    第二段投递的是**我们自己刚打开的那个菜单**，不是用户点按钮时就存在的对话框——
+///    它不是守卫要防的对象，所以**不重入守卫**。若把守卫挪到第二段前，判据会把
+///    自家菜单判成「待决对话框」，两段式永久不可用（这正是本任务要避免的自相矛盾）。
+/// 2. **第二段有硬锚，不靠「屏上有没有簇」**：定位用的是**权限菜单专用词表 + 行首
+///    匹配**（[`crate::inject::mode::locate_menu_items`]）——菜单里认不出目标档标签
+///    就**中止且不投递任何键**（如实回执「权限菜单未出现/读不到档位表，请人工核对」）。
+///    也就是说第二段**只对「确实是那个权限菜单」的屏**出手；屏上是别的对话框（包括
+///    用户在两次注入之间手动触发的）时，标签表匹配不上 → 中止。
+/// 3. **导航仍走审批同款序列**（[`crate::inject::dialog::navigation_sequence`]，
+///    从**解析到的当前高亮位**算循环距离；无高亮/多高亮/目标越界一律 Err → 中止）
+///    ——与 approve 端点的 navigate-confirm 档**同一份实现**，不是第二套。
+///
+/// **与 approve 端点 `dialog:N` 路径的关系（为什么不复用那条路）**：approve 的
+/// 导航序列是**一次请求内的单段**（屏上已有对话框，投递 ↓×k+Enter 即可），而权限档
+/// 切换需要**先开菜单**——若拆成两次请求（前端先 POST 开菜单、再 POST 导航），中间
+/// 用户可介入、菜单可消失，且第二段会被守卫拒（就是上面第 1 条的死锁）。故两段收在
+/// 同一 handler 内：守卫只过一道，菜单生命周期完全在同一临界区。
+///
+/// **守卫覆盖面的如实申报**：本函数的两段式**不再重入**守卫，因此「第一段与第二段
+/// 之间**用户手动**在终端里触发了另一个对话框」这条极窄窗口不在守卫覆盖内。窗口长度
+/// = 第一段回车到菜单屏读到（≤ `MENU_POLL_TOTAL_MS`），且此间 MAM 侧持有
+/// `INFLIGHT` 守卫（同一会话的其它注入被让位），实际可达性极低。**不假装这是全覆盖**。
+///
+/// # codex `/plan` 运行中不可用（§2.6 表末）→ 如实回执
+///
+/// 判据 = [`crate::inject::mode::codex_plan_busy`]（只对 codex × 模式组 × Plan；
+/// 「运行中」复用 [`crate::inject::queue::is_running`] 三态口径）。命中 → 200
+/// `{status:"failed", error:"…"}`，**零注入**（codex 自己会回 `Plan mode unavailable
+/// right now.`，MAM 提前拦下并说清楚）。**不落审计**（无投递发生，与忙让位同口径）。
+///
+/// # 回执如实（裁5 + 红线 4）
+///
+/// 回读成功且命中 → `verified=true`；回读成功但**不是**目标档 →
+/// `verified=false` + `hint` 报出两边（不假装成功）；无法判定（无回读源/屏读失败）
+/// → `verified=false` + 人工核对提示。`dialogChecked` 同丁T3。
 ///
 /// # 对话框在场守卫（丁T3 §2.7，裁8/9）—— `blocked_by_dialog`
 ///
@@ -3374,8 +3492,9 @@ pub struct SessionModeReq {
 /// 修法：投递前屏读可见窗口，[`crate::inject::dialog::blocks_control_injection`] 判
 /// 「编号选项对话框在场」→ **拒绝本轮注入**，回 409 `blocked_by_dialog` + 中文文案
 /// （与 `no_mechanism` 同用 409 CONFLICT：二者都是「当前状态不允许这个动作」，不是
-/// 参数错误也不是授权问题）。**Key 路（shift+tab）与 Text 路（斜杠命令）同受此门**
-/// ——两路都在本函数内、都在投递之前，守卫位置天然覆盖（不是两处判据）。
+/// 参数错误也不是授权问题）。**Key 路（shift+tab）与 Text 路（斜杠命令）与 Menu 路
+/// （两段式的第一段）同受此门**——三路都在本函数内、都在投递之前，守卫位置天然
+/// 覆盖（不是两处判据；第二段为何不再重入见上节）。
 ///
 /// **零注入零审计**：拒绝发生在任何注入调用与任何 `endpoint_audit` 之前（与
 /// session-approve / session-question 的「校验失败不投递不落审计」同口径）——账实
@@ -3395,8 +3514,16 @@ pub async fn session_mode_switch(
 ) -> Response {
     let sid = req.session_id.trim().to_string();
     let target = req.target.trim().to_string();
+    // 裁7：退役档在此**不可解析**（MamMode::parse 无对应 wire 词）→ 400
     let Some(mode) = crate::inject::mode::MamMode::parse(&target) else {
         return bad_request();
+    };
+    let requested_group = match req.group.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(g) => match crate::inject::mode::ModeGroupId::parse(g) {
+            Some(id) => Some(id),
+            None => return bad_request(),
+        },
     };
     if sid.is_empty() {
         return bad_request();
@@ -3404,22 +3531,44 @@ pub async fn session_mode_switch(
     let Some((device_id, device_name)) = device_identity(&st, &headers) else {
         return forbidden_defense();
     };
-    // 会话查找 + 机制/序列构造（一个 spawn_blocking；锁纪律同 approve）
+    // 会话查找 + 组推断 + 序列构造（一个 spawn_blocking；锁纪律同 approve）
     let probe_st = st.clone();
     let probe_sid = sid.clone();
-    let lookup = match tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
+    let lookup = match tokio::task::spawn_blocking(move || -> Result<_, String> {
         let session = (probe_st.session_source)()
             .sessions
             .into_iter()
             .find(|s| s.id == probe_sid)
-            .ok_or("no_session")?;
+            .ok_or_else(|| "no_session".to_string())?;
         let tool = session.agent_type.tool_id().to_string();
-        let plan = crate::inject::mode::mode_switch_sequence(&tool, mode).map_err(|e| {
-            log::debug!("T6 切档不可用（{tool}）：{e}");
-            "no_mechanism"
+        // 组推断（旧客户端不带 group 的兼容口径；显式 group 必须存在于结构）
+        let group = crate::inject::mode::resolve_group(&tool, requested_group, mode)
+            .map_err(|_| "no_mechanism".to_string())?;
+        // 该组里这一档是否可选（不可选 = 如实拒绝，附组内给出的原因）
+        let spec = crate::inject::mode::mode_structure(&tool)
+            .group(group)
+            .ok_or_else(|| "no_mechanism".to_string())?;
+        if let Some(tier) = spec.tiers.iter().find(|t| t.mode == mode) {
+            if !tier.selectable {
+                log::debug!("切档不可选（{tool}/{}）：{mode:?}", group.wire());
+                return Err("no_mechanism".to_string());
+            }
+        }
+        let plan = crate::inject::mode::mode_switch_plan(&tool, group, mode).map_err(|r| {
+            log::debug!("切档不可用（{tool}/{}）：{r:?}", group.wire());
+            "no_mechanism".to_string()
         })?;
+        // 组内目标档的**屏显标签**（回执与按钮标签同源）
+        let label = spec
+            .tiers
+            .iter()
+            .find(|t| t.mode == mode)
+            .map(|t| t.label)
+            .unwrap_or_else(|| mode.label());
         let readback = crate::inject::mode::mode_readback_supported(&tool);
-        Ok((session, tool, plan, readback))
+        // 切档前的当前档（步进组的预期档要按环序算）——屏读一次
+        let before = read_mode_from_screen(&session, &tool, readback);
+        Ok((session, tool, group, plan, readback, label, before))
     })
     .await
     {
@@ -3434,7 +3583,7 @@ pub async fn session_mode_switch(
                 .into_response();
         }
     };
-    let (session, tool, plan, readback) = match lookup {
+    let (session, tool, group, plan, readback, label, before) = match lookup {
         Ok(v) => v,
         Err(code) => {
             let status = if code == "no_session" {
@@ -3450,9 +3599,35 @@ pub async fn session_mode_switch(
                 .into_response();
         }
     };
+    // ===== codex `/plan` 运行中不可用（§2.6 表末）→ 如实回执、零注入零审计 =====
+    //
+    // 判据在**投递之前**（与守卫同位置）：codex 自己会回 `Plan mode unavailable right
+    // now.`，MAM 提前拦下是为了给用户一句能读懂的话，而不是让他对着没变化的屏幕猜。
+    // 「运行中」的口径 = queue::is_running（Processing/Thinking/Compacting，队列层
+    // 既有单一判据）。零审计：无投递发生（与忙让位同口径）。
+    if crate::inject::mode::codex_plan_busy(
+        &tool,
+        group,
+        mode,
+        crate::inject::queue::is_running(&session.status),
+    ) {
+        log::debug!(
+            "codex /plan 运行中不可用（sid={sid} status={:?}）",
+            session.status
+        );
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "status": "failed",
+                "error": "codex 运行中不接受 /plan（计划模式不可用），请等回合结束后重试",
+            })),
+        )
+            .into_response();
+    }
     // ===== 丁T3 接入①：对话框在场 = 控制类注入红线（§2.7 裁8/9）=====
     //
-    // 屏读在**投递之前**（与机制分派无关——Key/Text 两路都要过这道门），且在任何
+    // 屏读在**投递之前**（与机制分派无关——Key/Text/Menu 三路都要过这道门），且在任何
     // 注入调用与任何审计写入之前：拒绝 = 零注入零审计（与 approve/question 端点的
     // 校验失败口径一致）。屏读是阻塞 FFI，故放进 spawn_blocking（与既有端点纪律同）。
     //
@@ -3492,23 +3667,48 @@ pub async fn session_mode_switch(
     let injector = st.injector.clone();
     let pid = session.pid;
     let switch_sid = sid.clone();
+    // 注入闭包内的工具名副本（闭包 move 走了 tool，审计与回读还要用原值）
+    let tool_for_inject = tool.clone();
+    // ===== 注入：三路（Key / Text / Menu 两段式）=====
+    //
+    // 忙让位（None 哨兵）表达为外层 Option 的 `?`：None = 忙（不投递亦不落审计），
+    // Some(inner) = 真投递（inner 是投递结果）
     let attempt = tokio::task::spawn_blocking(move || {
-        // 忙让位（None 哨兵）表达为外层 Option 的 `?`：None = 忙（不投递亦不落审计），
-        // Some(inner) = 真投递（inner 是投递结果）
         let _guard = crate::inject::queue::try_acquire_inflight(&switch_sid)?;
         Some(match plan {
             crate::inject::mode::ModeSwitchPlan::Key(key) => {
-                injector.locate_and_send_key_spec(pid, &key, &spec)
+                injector.locate_and_send_key_spec(pid, key, &spec)
             }
             crate::inject::mode::ModeSwitchPlan::Text(cmd) => {
                 // 斜杠命令按**纯文本注入 + 提交回车**（不走 [mobile] 前缀——那是用户
                 // 消息的语义；斜杠命令是控制指令，加前缀会让命令失效）
-                match injector.locate_and_inject_spec(pid, &cmd, &spec) {
-                    Ok(()) => {
+                injector
+                    .locate_and_inject_spec(pid, cmd, &spec)
+                    .and_then(|()| {
                         std::thread::sleep(std::time::Duration::from_millis(
                             crate::inject::families::SUBMIT_DELAY_MS,
                         ));
                         injector.locate_and_send_key_spec(pid, "enter", &spec)
+                    })
+            }
+            crate::inject::mode::ModeSwitchPlan::Menu { open, target } => {
+                // 第一段：开菜单（命令 + 回车）
+                let opened = injector
+                    .locate_and_inject_spec(pid, open, &spec)
+                    .and_then(|()| {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                        injector.locate_and_send_key_spec(pid, "enter", &spec)
+                    });
+                match opened {
+                    Ok(()) => {
+                        // 第二段：等菜单画出 → 屏读 → 标签定位 → 导航确认
+                        //
+                        // **不重入对话框守卫**：屏上那个菜单是我们自己刚打开的（见本函数文档
+                        // 「两段式的第二段与丁T3 守卫如何共存」）。定位用权限菜单专用词表 +
+                        // 行首匹配；认不出目标档标签 → 中止且不投递任何键。
+                        second_stage_menu(&tool_for_inject, target, pid, &spec, &injector)
                     }
                     Err(e) => Err(e),
                 }
@@ -3541,7 +3741,13 @@ pub async fn session_mode_switch(
                 .into_response();
         }
     };
-    let audit_content = format!("切换模式至 {}", target);
+    // 组+档进审计摘要（二维工具的组是语义的一部分：只记「切换至默认」无法区分
+    // 是模式组的默认还是权限组的默认）
+    let audit_content = if group == crate::inject::mode::ModeGroupId::Mode {
+        format!("切换模式至 {label}")
+    } else {
+        format!("切换{}至 {label}", group.label())
+    };
     let (result_str, status_line) = match &result {
         Ok(()) => ("ok".to_string(), "key_sent"),
         Err(e) => (format!("failed:{e}"), "failed"),
@@ -3568,24 +3774,173 @@ pub async fn session_mode_switch(
             })),
         )
             .into_response(),
-        Ok(()) => (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
-                "status": status_line,
-                // 红线 4：回显不支持时明确 verified=false + 人工核对提示
-                "verified": readback,
-                "hint": if readback {
-                    serde_json::Value::Null
+        Ok(()) => {
+            // ===== 回读确认（裁5：切换后必须知道切到了哪；红线 4：不假装成功）=====
+            //
+            // 屏读是阻塞 FFI → 放进 spawn_blocking（与其它屏读点同纪律）。回读发生在
+            // 投递**之后**：此时 INFLIGHT 已释放（闭包已返回），理论上别的路径可并发
+            // 注入——如实申报：回读描述的是「本次投递后**我方读到的**屏」，不承诺
+            // 期间无第三方操作（这与 approve 的 A1 确认同口径：确认是证据，不是锁）。
+            let verify_st = st.clone();
+            let verify_tool = tool.clone();
+            let verify_pid = session.pid;
+            let expected = crate::inject::mode::expected_mode_after(&tool, group, mode, before);
+            let observed = match tokio::task::spawn_blocking(move || {
+                read_mode_from_screen_by_pid(&verify_st, verify_tool.as_str(), verify_pid, readback)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("session-mode 回读任务异常: {e}");
+                    None
+                }
+            };
+            let verdict = crate::inject::mode::verify_mode_switch(expected, observed);
+            let (verified, hint) = mode_verify_receipt(verdict, group, label);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": status_line,
+                    "verified": verified,
+                    "hint": hint,
+                    // 屏读到的当前档（前端可直接用它刷新显示，省一次 GET）
+                    "current": observed.map(|m| m.wire()),
+                    "currentLabel": observed.map(|m| m.label()),
+                    // 丁T3：本次是否真的做过对话框在场检测——false = 平台无屏读或屏读失败
+                    "dialogChecked": dialog_checked,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// 两段式的第二段（**只在持 INFLIGHT 的注入闭包内调用**）：等菜单画出 → 屏读 →
+/// 标签定位 → 导航确认。
+///
+/// 中止条件（任一命中即 Err，**零按键投递**——除了第一段已投递的开启命令）：
+/// 菜单轮询窗内都读不到屏 / 屏上没有可识别的权限菜单档位表 / 菜单里没有目标档标签 /
+/// 无高亮或多高亮（`navigation_sequence` 的既有保守面）。返回的 Err 文案即端点的
+/// 失败回执（用户看得懂「为什么没切」）。
+fn second_stage_menu(
+    tool: &str,
+    target: crate::inject::mode::MamMode,
+    pid: u32,
+    spec: &crate::inject::families::FamilySpec,
+    injector: &std::sync::Arc<dyn crate::inject::engine::Injector>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(MENU_POLL_TOTAL_MS);
+        loop {
+            match crate::inject::windows_console::read_screen_window(pid) {
+                Ok(lines) => {
+                    match crate::inject::mode::menu_navigation_sequence(&lines, tool, target) {
+                        Ok(keys) => {
+                            // 逐键投递（导航键之间留重绘间隔——与 approve 的
+                            // navigate-confirm 档同一节奏）
+                            for key in &keys {
+                                injector.locate_and_send_key_spec(pid, key, spec)?;
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    crate::inject::families::SUBMIT_DELAY_MS,
+                                ));
+                            }
+                            return Ok(());
+                        }
+                        Err(why) => {
+                            // 菜单还没画出（重绘竞态）→ 继续轮询；窗末仍读不到则如实回执
+                            if std::time::Instant::now() >= deadline {
+                                return Err(format!(
+                                    "{why}；请人工核对终端（命令已发送，档位未切）"
+                                ));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!("权限菜单屏读失败（{e}）；请人工核对终端"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // 非 Windows 无屏读 → 第二段无法定位（菜单导航必须知道当前高亮位）。
+        // **如实回执**：不盲发方向键（猜错会选到别的档——与导航序列的保守面同源）。
+        let _ = (tool, target, pid, spec, injector);
+        Err("本平台无屏读，权限菜单无法定位（命令已发送，请在终端选择档位）".to_string())
+    }
+}
+
+/// 回读（按 pid）：与 [`read_mode_from_screen`] 同一实现，区别是**投递后**没有
+/// `&Session` 可借（会话快照已 move 进查表闭包）——故只带 pid 与工具名。
+fn read_mode_from_screen_by_pid(
+    _st: &Arc<RemoteState>,
+    tool: &str,
+    pid: u32,
+    readback: bool,
+) -> Option<crate::inject::mode::MamMode> {
+    if !readback {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        match crate::inject::windows_console::read_screen_window(pid) {
+            Ok(lines) => crate::inject::mode::parse_mode_from_screen(tool, &lines),
+            Err(e) => {
+                log::debug!("模式回读失败（{tool} pid={pid}: {e}）→ 无法判定");
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (tool, pid);
+        None
+    }
+}
+
+/// 回读结论 → 回执字段 `(verified, hint)`。
+///
+/// **文案与判据同源**（不写两遍）：三种结论各有自己的说法——
+/// - 命中：`verified=true`、无 hint（前端显示「已切换到 X」）；
+/// - **不符**：`verified=false` + 报出「预期 A / 实际 B」（不假装成功，也不含糊说
+///   「请核对」——用户需要知道差在哪，才能判断是环序漂移还是注入没生效）；
+/// - 无法判定：`verified=false` + 人工核对提示（无回读源/屏读失败）。
+fn mode_verify_receipt(
+    verdict: crate::inject::mode::ModeVerify,
+    group: crate::inject::mode::ModeGroupId,
+    label: &str,
+) -> (bool, serde_json::Value) {
+    use crate::inject::mode::ModeVerify;
+    match verdict {
+        ModeVerify::Confirmed => (true, serde_json::Value::Null),
+        ModeVerify::Mismatch { expected, observed } => (
+            false,
+            serde_json::json!(format!(
+                "回读到的档与预期不符（预期「{}」、实际「{}」）——请人工核对终端",
+                expected.label(),
+                observed.label()
+            )),
+        ),
+        ModeVerify::Unverifiable => (
+            false,
+            serde_json::json!(format!(
+                "{}的当前档无法自动确认（无回读源或屏读失败）——请人工核对终端",
+                if group == crate::inject::mode::ModeGroupId::Mode {
+                    "模式".to_string()
                 } else {
-                    serde_json::json!("该工具的模式回显未实测，请人工核对终端当前模式")
-                },
-                // 丁T3：本次是否真的做过对话框在场检测——false = 平台无屏读或屏读失败
-                // （放行口径见本函数文档；前端可据此如实说明守卫未生效，不假装已检查）
-                "dialogChecked": dialog_checked,
-            })),
-        )
-            .into_response(),
+                    format!("{}「{}」", group.label(), label)
+                }
+            )),
+        ),
     }
 }
 
@@ -4143,6 +4498,151 @@ mod t3_live_probe_tests {
              锁住）。",
             std::env::consts::OS,
             crate::inject::approve::cached_cli_version("codex"),
+        );
+    }
+}
+
+/// 丁T4 **实机四家切一轮 + 回读逐例**占位（`#[ignore]`——常规门禁只编译不跑）。
+///
+/// 与 [`t3_live_probe_tests`] 同款：**先落占位与观测点清单**，把实跑时要抄录/断言
+/// 的东西写死在注释里；本模块不发起任何注入或 HTTP 请求（那需要受控会话与人工观察
+/// 窗口）。**T4 的自动化替代面**（门禁内已覆盖，跑这里之前先确认它们绿）：
+///
+/// | 观测点 | 自动化替代 | 位置 |
+/// |---|---|---|
+/// | 四家底栏 → 当前档 | `inject::mode` 的分族解析单测（夹具 = T6 真机屏幕原文逐字） | `inject/mode.rs` `parse_*_real_footers` |
+/// | claude 环序 | `cycle_next_follows_measured_ring`（四档环序 = 实测） | 同上 |
+/// | 两组结构 / 裁7 legacy / 裁6 默认 | GET 载荷断言 + 前端渲染断言 | `remote/server.rs` `session_mode_reports_*` + `tests/mobile/ModeBar.test.tsx` |
+/// | 两段式守卫只过一道 | `session_mode_switch_menu_guard_runs_once_before_first_stage` | `remote/server.rs` |
+/// | 权限菜单定位（标签/引文/高亮） | `locate_codex_menu_items` 等（夹具 = 菜单形态） | `inject/mode.rs` |
+/// | codex 运行中门 | `session_mode_switch_reports_codex_plan_busy` | `remote/server.rs` |
+///
+/// 跑法（实机显式，单线程避免终端互相干扰）：
+/// `cargo test --lib t4_live_probe -- --ignored --nocapture --test-threads=1`
+#[cfg(test)]
+mod t4_live_probe_tests {
+    /// 四家各切一轮 + 回读逐例核对（§2.6 表 + 裁5 验收：切换后回显当前模式）。
+    ///
+    /// **前置（逐家）**：
+    /// - Windows + 真 conhost 窗口（屏读是 Windows 能力；非 Windows 下回读恒 null，
+    ///   本场景不可观测——那是能力边界，回执会如实带 verified=false + 人工核对提示）；
+    /// - 四家 CLI 已装（claude / codex / kimi / opencode），MAM 远程服务开启，
+    ///   手机端在该会话详情页；
+    /// - 终端**空闲可输入**（无待决对话框——否则会先撞 T3 守卫，那是另一条用例）。
+    ///
+    /// **观测点（逐家逐例抄录；「屏上原文 → 解析器输出 → 与预期是否一致」三列）**：
+    ///
+    /// | # | 工具 | 动作 | 期望屏上 | 期望回执 |
+    /// |---|---|---|---|---|
+    /// | 1 | opencode | 点「切换模式」一次 | `Plan`（原 `Build`） | `verified=true` + GET 回显「计划」 |
+    /// | 2 | claude | 点「切换模式」一次（从 acceptEdits 起） | `⏸ plan mode on` | `verified=true` + 回显「计划」 |
+    /// | 3 | codex | 点模式组「计划」 | 底栏 `Plan mode (shift+tab to cycle)` | `verified=true` + 回显「计划」 |
+    /// | 4 | kimi | 点模式组「计划」 | 底栏 `plan` 前缀 | `verified=true` + 回显「计划」 |
+    /// | 5 | codex | 点权限组「只读」 | 菜单弹出 → 高亮落到 `Read Only` | 第一段立即；第二段按 `↑+Enter`（M9R 实测序） |
+    /// | 6 | kimi | 点权限组「永不询问」 | 底栏出现 `Never Ask`（若有） | `/auto` 直达（无回读源 → verified=false + 人工核对） |
+    ///
+    /// **必须如实抄录的反例（如实申报面）**：
+    /// - **kimi 漂移**（§2.6 表注）：计划批准后**自动切出 plan**——批准一次后立刻
+    ///   GET 一次模式，屏上 `plan` 前缀应消失；若解析器仍报 Plan，即为漂移未被捕获
+    ///   （本用例的观测量，不是期望的成功态）；
+    /// - **codex 运行中**：在 codex 干活时点模式组「计划」→ 期望 **200 failed**
+    ///   「运行中不接受 /plan」且终端**无变化**（如实回执，不是静默失败）；
+    /// - **codex 退出计划模式**：模式组「默认」在 UI 上是**不可点**的灰字（带原因）
+    ///   ——这条本身就是验收点（若它能点，说明前端渲染漏了 selectable 判断）。
+    ///
+    /// **本用例的边界（如实申报）**：只打印前置检查与清单，**不做自动断言**——真机
+    /// 观测需要人工在终端上看着屏幕逐条对（自动化替代面见模块文档的表）。抄录完成后
+    /// 把差异回填这里，再决定是否升级为 `tests/m9r_e2e.rs` 的真 HTTP 全链用例。
+    #[test]
+    #[ignore = "实机验证：opencode/claude/codex/kimi 各切一轮（含 codex+kimi 权限组两段式），回读逐例核对；含 kimi 批准漂移与 codex 运行中两个反例"]
+    fn t4_four_tools_switch_and_readback_live_probe() {
+        eprintln!(
+            "丁T4 实机探测占位（四家各切一轮 + 回读逐例）\n\
+             \n\
+             前置检查：\n\
+             - 平台 = {}（屏读是 Windows 能力；非 Windows 下回读恒 null，回执带 verified=false）\n\
+             - claude 版本 = {:?}\n\
+             - codex 版本 = {:?}\n\
+             - kimi 版本 = {:?}\n\
+             - opencode 版本 = {:?}\n\
+             \n\
+             步骤（人工，逐家；抄录三列：屏上原文 / GET current / 回执 verified+hint）：\n\
+             1. opencode：点「切换模式」→ 底栏 Build→Plan；GET 回显「计划」；\n\
+             2. claude：点「切换模式」→ 底栏 ⏸ plan mode on；GET 回显「计划」；\n\
+             3. codex：点模式组「计划」→ 底栏 Plan mode (shift+tab to cycle)；回显「计划」；\n\
+             4. kimi：点模式组「计划」→ 底栏 plan 前缀；回显「计划」；\n\
+             5. codex：点权限组「只读」→ 菜单弹出后高亮落到 Read Only（第二段 ↑+Enter）；\n\
+             6. kimi：点权限组「永不询问」→ /auto 直达（无回读源 → verified=false + 人工核对）；\n\
+             7. 反例 A（kimi 漂移）：在 kimi 计划批准框选 Approve → 立刻 GET 一次 →\n\
+                底栏 plan 前缀应消失（若仍报 Plan = 漂移未捕获，如实记入台账）；\n\
+             8. 反例 B（codex 运行中）：codex 干活时点模式组「计划」→ 期望 200 failed\n\
+                「运行中不接受 /plan」且终端无变化；\n\
+             9. 反例 C（codex 退出计划）：模式组「默认」应为**灰字不可点**（带原因），\n\
+                点不动才是对的。\n\
+             \n\
+             定案后落点：把逐例差异回填本模块文档的表，再决定是否升级为\n\
+             tests/m9r_e2e.rs 的真 HTTP 全链用例（先例 e2e_http_full_chain）。",
+            std::env::consts::OS,
+            crate::inject::approve::cached_cli_version("claude"),
+            crate::inject::approve::cached_cli_version("codex"),
+            crate::inject::approve::cached_cli_version("kimi"),
+            crate::inject::approve::cached_cli_version("opencode"),
+        );
+    }
+
+    /// **两段式权限菜单的屏读定位**（丁T4 最需要真机核对的一处）——菜单形态是
+    /// **从二进制内嵌文案推断**的（codex `Update Model Permissions` + 四个档位标签；
+    /// kimi `Select permission mode` + 三个档位标签），**没有实机屏幕快照**。
+    ///
+    /// **为什么这条必须实机跑**：`locate_menu_items` 的判据是「行首 = 已知档位标签」
+    /// ——若实机菜单把标签渲染成 `▸ Read Only`（别的标记）或标签文本与二进制文案有
+    /// 微差（大小写/标点），定位会失败 → 第二段中止（**不会盲发方向键**，安全，但
+    /// 功能不可用）。本用例就是去把真实菜单原文抄回来，据此校准 `menu_labels`。
+    ///
+    /// **前置**：Windows + 真 conhost + codex 0.155.1（或 kimi 2.0.2）空闲会话。
+    ///
+    /// **观测点**：
+    /// 1. 终端里手打 `/permissions` 回车 → 抄录弹窗**逐行原文**（标题、档位列、
+    ///    光标标记字符、footer）；若弹窗里没有 `Read Only` / `Ask for approval` /
+    ///    `Full Access` 这三个词，记下实际词——`menu_labels` 要按它改；
+    /// 2. 同一份原文喂 `inject::mode::locate_menu_items(lines, menu_labels(tool))` →
+    ///    期望解析出与屏幕上数量一致的菜单项 + 唯一高亮；
+    /// 3. 抄录高亮项的初始位置（M9R 记录是 `Ask for approval`，非首项——这是
+    ///    「导航从高亮位算」的依据）；
+    /// 4. kimi 同样跑一遍（`/permission`），词表期望 `Always Ask` / `Ask When Needed`
+    ///    / `Never Ask`。
+    #[test]
+    #[ignore = "实机验证：codex /permissions 与 kimi /permission 的菜单逐行原文 → 校正 menu_labels 与光标标记"]
+    fn t4_permission_menu_screen_shape_live_probe() {
+        eprintln!(
+            "丁T4 实机探测占位（权限菜单屏读形态校准）\n\
+             \n\
+             前置检查：\n\
+             - 平台 = {}\n\
+             - codex 版本 = {:?}\n\
+             - kimi 版本 = {:?}\n\
+             \n\
+             已知的推断面（**未实机核对的假设，跑本用例就是为了推翻它**）：\n\
+             - codex 菜单标题 `Update Model Permissions`（二进制文案），档位\n\
+               Read Only / Ask for approval / Approve for me / Full Access\n\
+               （M9R 实机记录，`inject::approve` 表注）；\n\
+             - kimi 菜单标题 `Select permission mode`（TUI 内嵌 i18n），档位\n\
+               Always Ask / Ask When Needed / Never Ask（同源）；\n\
+             - 光标标记：模式菜单用哪个字符**未知**（对话用 ›/❯/▶，菜单可能不同）。\n\
+             \n\
+             步骤（人工）：\n\
+             1. 终端手打 `/permissions`（codex）→ 抄录弹窗逐行原文（含前导空白与标记字符）；\n\
+             2. 同一份原文喂 `crate::inject::mode::locate_menu_items(&lines, menu_labels(\"codex\"))`\n\
+                → 期望：项数与屏上一致、高亮唯一；若解析不出，把真实原文回填\n\
+                `inject::mode` 的测试夹具与 `menu_labels`；\n\
+             3. 抄录高亮初始位置（M9R 在 codex 上是第 2 项 Ask for approval）；\n\
+             4. kimi 同样跑 `/permission`（期望三档标签）。\n\
+             \n\
+             定案后落点：`inject::mode::menu_labels` 的词表 + `locate_menu_items` 的\n\
+             测试夹具换成实机原文（当前夹具是形态推演，不是快照）。",
+            std::env::consts::OS,
+            crate::inject::approve::cached_cli_version("codex"),
+            crate::inject::approve::cached_cli_version("kimi"),
         );
     }
 }

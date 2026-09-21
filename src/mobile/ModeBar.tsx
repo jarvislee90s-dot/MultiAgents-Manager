@@ -3,26 +3,32 @@ import { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
   fetchSessionMode,
-  MAM_MODE_LABELS,
   sessionModeSwitch,
   type MamMode,
+  type ModeGroupId,
+  type ModeGroupView,
   type SessionModeView,
 } from "./api";
 
-/** 模式栏（批次丙 T6）：会话头部显示当前模式 + 一键切档。
+/** 模式栏（批次丙 T6；批次丁 T4 扩二维与回读全开）。
  *
- * 数据源 GET /session-mode（尽力而为：档位靠屏读回显，只有 opencode 有实测支撑）。
+ * 数据源 GET /session-mode。**丁T4 起后端下发结构表**（§2.6 规格表）：
+ * - 二维家（codex/kimi）→ `structure="twoAxis"`，`groups` = [模式组, 权限组]，
+ *   两组各自显示当前档 + 各自的按钮；
+ * - 单轴家（claude/opencode）→ `structure="singleAxis"`，`groups` = [模式轴]，
+ *   渲染「切换」钮 + 当前模式回显；
+ * - 旧后端（无 `structure`/`groups`）→ **回落**到「单轴渲染 + 顶层 current」，
+ *   调用 POST 时不带 `group`（后端按 target 归组）。
  *
- * **降级语义（T6 红线 4：不假装成功）**：
+ * **降级语义（T6 红线 4 + 裁5：不假装成功）**：
  * - `switchKind === "unsupported"` → 不渲染（该工具无实测切换机制）；
- * - `current === null` → 显示「模式未知」+「请人工核对终端」（屏读失败/不支持回显）；
- * - 切档回执 `verified === false` → 显示「已发送切换，请人工核对」（不声称已切到目标档）。
+ * - 某组 `current === null` → 该组显示「模式未知」+「请人工核对终端」；
+ * - 切档回执 `verified === false` → 显示后端下发的 `hint`（含「人工核对」语义），
+ *   **不声称已切到目标档**。
  *
- * 切档按钮：
- * - `shiftTab`（claude/opencode/kimi）→ 「切换模式」单钮（shift+tab 循环切一档；
- *   各家档位环序未实测，不提供「直达某档」的按钮——未验不出手）；
- * - `slashCommand`（codex）→ 逐档按钮（/plan、/permissions 有实测命令证据的档）；
- *   无命令证据的档位不渲染（target 传入也会被后端 409 拒绝）。
+ * **裁7（codex 退役旧档不作可选）**：`groups[].tiers[]` 里 `selectable=false` 的档
+ * 不渲染为可点按钮（它的 `reason` 会作为灰字提示显示，让用户知道为什么点不了）；
+ * `groups[].legacy[]`（untrusted/on-failure）只渲染为一行说明文本——**不是按钮**。
  */
 export default function ModeBar({ session }: { session: { id: string } }) {
   const [view, setView] = useState<SessionModeView | null>(null);
@@ -49,23 +55,34 @@ export default function ModeBar({ session }: { session: { id: string } }) {
     };
   }, [session.id]);
 
+  // 后端是否下发了结构表（旧后端没有 → 前端合成的单轴视图，POST 不带 `group`）。
+  // 抽成**布尔**再进依赖数组：直接依赖 `view?.groups` 会让 useCallback 的依赖
+  // 每次渲染都变（数组字面量），等于没 memo（eslint react-hooks 会点名）
+  const hasServerGroups = view?.groups !== undefined;
+
   const handleSwitch = useCallback(
-    async (target: MamMode) => {
+    async (target: MamMode, group?: ModeGroupId) => {
       setBusy(true);
       setError(null);
       setReceipt(null);
       try {
-        const res = await sessionModeSwitch(session.id, target);
+        // 旧后端（无 groups 字段）回落出来的那组是前端**合成的**——它的 id 不是
+        // 后端给的，故不带 `group` 发（后端按 target 自行归组，与旧调用逐字一致）
+        const g = hasServerGroups ? group : undefined;
+        const res = await sessionModeSwitch(session.id, target, g);
         if (res.status === "key_sent") {
-          // verified=false → 人工核对提示（红线 4）；true → 回读一次确认新档
           if (res.verified) {
+            // 回读命中：回执 + 重拉一次 GET 刷新显示（**不拿回执字段去改本地状态**：
+            // 回执只描述该组那一刻的观测，直接采信会把「屏读快照」当成结构表；
+            // 重拉失败则保留原视图——如实，不是把旧值刷成新值）
             setReceipt("已切换");
             try {
               setView(await fetchSessionMode(session.id));
             } catch {
-              /* 回读失败不清回执（切换本身已投递） */
+              /* 回读失败不清回执（切换本身已投递且已核实） */
             }
           } else {
+            // 红线 4：不假装成功——原样透出后端 hint（含「预期/实际」或「请人工核对」）
             setReceipt(res.hint ?? "已发送切换，请人工核对终端模式");
           }
         } else {
@@ -94,72 +111,34 @@ export default function ModeBar({ session }: { session: { id: string } }) {
         setBusy(false);
       }
     },
-    [session.id]
+    [session.id, hasServerGroups]
   );
 
   // 未就绪 / 拉取失败 / 无实测机制：不渲染
   if (!ready || view === null || view.switchKind === "unsupported") return null;
 
-  const currentText = view.currentLabel ?? "模式未知";
-
   // T10：本组件是**状态条**（非「等待用户输入」交互卡，任务书 §2.2 的容器契约
   // 针对 ApproveCard/QuestionCard 两类交互卡），故保留自身的横向布局；但**取色
   // 走统一 token**（InteractiveCard 的 mode 档）——四套界面同一套设计语言
   const t = toneTokens("mode");
+  const groups = modeGroups(view);
   return (
     <div
       data-testid="mode-bar"
       data-mode={view.current ?? "unknown"}
+      data-structure={view.structure ?? "legacy"}
       data-tone="mode"
-      className={`flex flex-wrap items-center gap-2 px-2 py-1 ${t.box}`}
+      className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1 ${t.box}`}
     >
-      <span className="text-xs text-slate-500 dark:text-slate-400">模式</span>
-      <span
-        data-testid="mode-current"
-        className={`text-xs font-semibold ${
-          view.current === null
-            ? "text-amber-700 dark:text-amber-400"
-            : "text-slate-800 dark:text-slate-200"
-        }`}
-      >
-        {currentText}
-      </span>
-      {view.current === null && (
-        <span
-          data-testid="mode-unknown-hint"
-          className="text-[11px] text-amber-700 dark:text-amber-400"
-        >
-          请人工核对终端当前模式
-        </span>
-      )}
-      {view.switchKind === "shiftTab" ? (
-        // 循环切换：单钮（shift+tab 切一档；目标档由循环决定，未实测不出手直达）
-        <button
-          type="button"
-          data-testid="mode-switch-next"
-          disabled={busy}
-          onClick={() => handleSwitch("default")}
-          className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
-        >
-          切换模式
-        </button>
-      ) : (
-        // codex：逐档按钮（只渲染有实测命令证据的档：/plan 与 /permissions）
-        <span className="flex gap-1">
-          {(["plan", "bypass"] as MamMode[]).map((m) => (
-            <button
-              key={m}
-              type="button"
-              data-testid={`mode-switch-${m}`}
-              disabled={busy}
-              onClick={() => handleSwitch(m)}
-              className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
-            >
-              {MAM_MODE_LABELS[m]}
-            </button>
-          ))}
-        </span>
-      )}
+      {groups.map((g) => (
+        <ModeGroupRow
+          key={g.id}
+          group={g}
+          showGroupLabel={groups.length > 1}
+          busy={busy}
+          onSwitch={(target) => handleSwitch(target, g.id)}
+        />
+      ))}
       {error !== null && (
         <span data-testid="mode-error" className="text-[11px] text-rose-600 dark:text-rose-400">
           {error}
@@ -174,5 +153,120 @@ export default function ModeBar({ session }: { session: { id: string } }) {
         </span>
       )}
     </div>
+  );
+}
+
+/** 视图 → 组清单。**
+ *
+ * 丁T4 的结构表来自后端；旧后端（无 `groups`）在此**回落到单轴视图**（用顶层
+ * current/readback + switchKind 合成一组）——这样渲染分支只有一套，不会出现
+ * 「新老两条渲染路径」的分叉（分叉正是口径漂移的温床）。 */
+function modeGroups(view: SessionModeView): ModeGroupView[] {
+  if (view.groups !== undefined && view.groups.length > 0) return view.groups;
+  // 旧后端回落：单轴 + 顶层 current。tiers 用通用的 MamMode 词表（旧后端不下发
+  // 屏显标签），并把顶层 current 作为当前档。
+  return [
+    {
+      id: "mode",
+      label: "模式",
+      step: view.switchKind === "shiftTab",
+      readback: view.readback,
+      current: view.current,
+      currentLabel: view.currentLabel,
+      tiers: [],
+      legacy: [],
+    },
+  ];
+}
+
+/** 单组渲染：组标题（仅二维时显示）+ 当前档 + 切换入口 */
+function ModeGroupRow({
+  group,
+  showGroupLabel,
+  busy,
+  onSwitch,
+}: {
+  group: ModeGroupView;
+  showGroupLabel: boolean;
+  busy: boolean;
+  onSwitch: (target: MamMode) => void;
+}) {
+  const currentText = group.currentLabel ?? "模式未知";
+  const unknown = group.current === null;
+  return (
+    <span data-testid={`mode-group-${group.id}`} className="flex items-center gap-2">
+      {showGroupLabel && (
+        <span className="text-[11px] text-slate-400 dark:text-slate-500">{group.label}</span>
+      )}
+      <span className="text-xs text-slate-500 dark:text-slate-400">模式</span>
+      <span
+        data-testid={`mode-current-${group.id}`}
+        className={`text-xs font-semibold ${
+          unknown ? "text-amber-700 dark:text-amber-400" : "text-slate-800 dark:text-slate-200"
+        }`}
+      >
+        {currentText}
+      </span>
+      {unknown && (
+        <span
+          data-testid={`mode-unknown-hint-${group.id}`}
+          className="text-[11px] text-amber-700 dark:text-amber-400"
+        >
+          请人工核对终端当前模式
+        </span>
+      )}
+      {group.step ? (
+        // 步进轴（claude/opencode）：单钮「切换模式」——shift+tab 一次一档，
+        // 目标档由环序决定（后端按实测环序回读核对，前端不假装直达）
+        <button
+          type="button"
+          data-testid={`mode-switch-next-${group.id}`}
+          disabled={busy}
+          onClick={() => onSwitch("default")}
+          className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+        >
+          切换模式
+        </button>
+      ) : (
+        // 直达轴（模式组/权限组）：逐档按钮。**只渲染 selectable 的档**（裁7 的
+        // 退役档根本不进 tiers；codex「默认」这类「在结构里但无机制」的档留在
+        // 结构里、以不可点 + reason 提示呈现——用户能看懂为什么点不了）
+        <span className="flex flex-wrap items-center gap-1">
+          {group.tiers.map((t) =>
+            t.selectable ? (
+              <button
+                key={t.mode}
+                type="button"
+                data-testid={`mode-switch-${group.id}-${t.mode}`}
+                disabled={busy}
+                onClick={() => onSwitch(t.mode)}
+                className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+              >
+                {t.label}
+              </button>
+            ) : (
+              // 不可选档：不渲染按钮，只给一句灰字（reason 来自后端，单一来源）
+              <span
+                key={t.mode}
+                data-testid={`mode-tier-disabled-${group.id}-${t.mode}`}
+                title={t.reason ?? undefined}
+                className="rounded-full border border-dashed border-slate-400/40 px-2 py-0.5 text-[11px] text-slate-400 dark:text-slate-500"
+              >
+                {t.label}（不可用）
+              </span>
+            )
+          )}
+        </span>
+      )}
+      {/* 裁7：退役旧档**只作说明**，不渲染为可点按钮 */}
+      {group.legacy !== undefined && group.legacy.length > 0 && (
+        <span
+          data-testid={`mode-legacy-${group.id}`}
+          className="text-[11px] text-slate-400 dark:text-slate-500"
+        >
+          已退役：{group.legacy.map((l) => l.label).join(" / ")}
+        </span>
+      )}
+    </span>
   );
 }

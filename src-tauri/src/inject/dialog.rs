@@ -66,7 +66,31 @@ const CURSOR_MARKERS: [char; 4] = ['\u{203a}', '\u{276f}', '\u{25b6}', '>'];
 /// 数字键域上限（与 [`super::question::digit_key`] 同口径：'1'..'9'）
 pub const MAX_DIALOG_OPTIONS: usize = 9;
 
-/// 判定一行是否是「编号选项行」并抽出 (编号, 文本)。行模式：
+/// 剥掉行首的**前导空白 + 光标标记**，返回 (剩余文本, 是否带光标标记)。
+///
+/// 光标标记必须出现在**编号之前**（前导区）才算高亮——`› 1. Yes` 是高亮项，
+/// `1. › 不是` 不是（标记在编号之后）。
+///
+/// **丁T4 起抽为 pub(crate) 单点**：模式权限菜单（`inject::mode::locate_menu_items`）
+/// 也要做同一件事（菜单项同样以光标标记标出当前档），而「光标标记集合」与「标记
+/// 必须在编号前」这两个判据必须**只有一份**——两处各写一遍就是本仓既往的
+/// 「同一判据两处实现 → 口径漂移」老路。
+pub(crate) fn strip_cursor_marker(line: &str) -> (&str, bool) {
+    let mut idx = 0usize;
+    let mut highlighted = false;
+    for c in line.chars() {
+        if c.is_whitespace() {
+            idx += c.len_utf8();
+        } else if CURSOR_MARKERS.contains(&c) {
+            highlighted = true;
+            idx += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (&line[idx..], highlighted)
+}
+
 /// 判定一行是否是「编号选项行」并抽出 (编号, 文本, 是否高亮)。行模式：
 /// `^[\s›❯>]*(\d+)\s*[.)]\s*(.+)$`——允许前导空白**与光标标记**、编号后跟
 /// `.` 或 `)`、其后至少一个空白（防把 `1.5x` 这类数字当选项）。
@@ -83,20 +107,7 @@ pub const MAX_DIALOG_OPTIONS: usize = 9;
 /// **返回值第三项=高亮**（R1-2 起）：行首出现光标标记即该选项是 TUI 当前高亮项。
 /// 这是导航确认的起点（Enter 提交高亮行，故须知道起点才能算步进）。
 fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
-    // 前导空白 + 光标标记的位置判定：标记必须出现在**编号之前**（前导区）才算高亮
-    let mut idx = 0usize;
-    let mut highlighted = false;
-    for c in line.chars() {
-        if c.is_whitespace() {
-            idx += c.len_utf8();
-        } else if CURSOR_MARKERS.contains(&c) {
-            highlighted = true;
-            idx += c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    let t = &line[idx..];
+    let (t, highlighted) = strip_cursor_marker(line);
     let digits_len = t.chars().take_while(|c| c.is_ascii_digit()).count();
     if digits_len == 0 {
         return None;
@@ -302,6 +313,58 @@ pub fn navigation_sequence(
     options: &[DialogOption],
     target_number: u32,
 ) -> Result<Vec<String>, String> {
+    let (start, target_idx) = navigation_anchors(options, target_number)?;
+    let n = options.len();
+    // 循环前进距离：从 start 走到 target（0..n 之间）
+    let steps = (target_idx + n - start) % n;
+    let mut seq = vec!["down".to_string(); steps];
+    seq.push("enter".to_string());
+    Ok(seq)
+}
+
+/// **方向感知**的导航确认序列（丁T4：模式权限菜单专用）。
+///
+/// # 与 [`navigation_sequence`] 的区别，以及为什么需要两个
+///
+/// `navigation_sequence` 只用 `↓`（**循环前进**），它成立的前提是「选择器到尾部
+/// 回卷到首个」——这条前提对 claude/kimi/codex 的**编号对话框**有实测（R1：claude
+/// 三行 ↓ 从 3 回 1），所以审批路径照用。
+///
+/// 而**权限菜单**（codex `/permissions` / kimi `/permission`）是无编号的 arrow-key
+/// 选择器，**是否回卷没有任何实测**。此时沿用循环前进会有一个危险的推论：目标在
+/// 高亮位**之上**时，算法会发出「↓ × (n-1)」——若该菜单不回卷，这串键会把高亮停在
+/// 末项并回车，**切到错误的权限档**（正是本仓反复防的「想拒绝却批准」同类事故）。
+///
+/// M9R 的 codex 实机取证恰好给了反向证据：目标 `Read Only` 位于高亮项
+/// `Ask for approval` **之上**，实机用的是 **↑+Enter**（见 `inject::approve` 的
+/// 表注）——即**方向可以显式指定，且这条路上 ↑ 是通的**。
+///
+/// 故本变体「按方向走最少步、**不假设回卷**」：目标在下方 → `↓ × k`；目标在上方 →
+/// `↑ × k`；同项 → 直接 Enter。两函数共享 [`navigation_anchors`]（目标越界 / 高亮
+/// 唯一性判据**只有一份**）。
+pub fn navigation_sequence_directional(
+    options: &[DialogOption],
+    target_number: u32,
+) -> Result<Vec<String>, String> {
+    let (start, target_idx) = navigation_anchors(options, target_number)?;
+    let mut seq: Vec<String> = if target_idx >= start {
+        vec!["down".to_string(); target_idx - start]
+    } else {
+        vec!["up".to_string(); start - target_idx]
+    };
+    seq.push("enter".to_string());
+    Ok(seq)
+}
+
+/// 两个导航序列的**公共锚点解析**：目标必须在表内 + 起点 = **唯一**高亮行。
+///
+/// 抽出来的理由与 [`blocks_control_injection`] 同源：这两条判据（尤其「不猜起点」）
+/// 是安全面，散在两份实现里迟早一处松一处紧——`navigation_sequence_directional`
+/// 与 `navigation_sequence` 共用本函数，任何一方都改不动另一半的严格度。
+fn navigation_anchors(
+    options: &[DialogOption],
+    target_number: u32,
+) -> Result<(usize, usize), String> {
     // 目标必须在选项表内
     let target_idx = options
         .iter()
@@ -318,12 +381,7 @@ pub fn navigation_sequence(
         }
     }
     let start = hl.ok_or_else(|| "解析不到当前高亮行，无法计算步进（不猜起点）".to_string())?;
-    let n = options.len();
-    // 循环前进距离：从 start 走到 target（0..n 之间）
-    let steps = (target_idx + n - start) % n;
-    let mut seq = vec!["down".to_string(); steps];
-    seq.push("enter".to_string());
-    Ok(seq)
+    Ok((start, target_idx))
 }
 
 #[cfg(test)]
@@ -532,6 +590,53 @@ mod tests {
         // 目标不在表内 → 拒绝
         let ok = vec![opt(1, "A", true), opt(2, "B", false)];
         assert!(navigation_sequence(&ok, 9).is_err());
+    }
+
+    // ---- 丁T4：方向感知变体（模式权限菜单用；与循环变体共享锚点判据）----
+
+    /// 方向感知：目标在上走 ↑、在下走 ↓、同项直接 Enter——**不假设回卷**。
+    /// 依据 = codex 权限菜单的 M9R 实机取证（高亮在 `Ask for approval`、目标
+    /// `Read Only` 在其上，实机序列是 ↑+Enter）。还原动作：把本函数改回
+    /// `navigation_sequence`（纯 ↓ 循环）→ 本断言先红（3 行时它会给出 ↓↓+Enter）。
+    #[test]
+    fn directional_navigation_picks_direction() {
+        let opts = vec![opt(1, "A", false), opt(2, "B", true), opt(3, "C", false)];
+        assert_eq!(
+            navigation_sequence_directional(&opts, 1).unwrap(),
+            vec!["up", "enter"],
+            "目标在高亮之上 → ↑×1"
+        );
+        assert_eq!(
+            navigation_sequence_directional(&opts, 3).unwrap(),
+            vec!["down", "enter"],
+            "目标在高亮之下 → ↓×1"
+        );
+        assert_eq!(
+            navigation_sequence_directional(&opts, 2).unwrap(),
+            vec!["enter"],
+            "高亮已在目标项 → 零步进"
+        );
+        // 两变体在「目标在下方」时同解（循环前进 = 直接前进）
+        assert_eq!(
+            navigation_sequence(&opts, 3).unwrap(),
+            navigation_sequence_directional(&opts, 3).unwrap()
+        );
+        // 两变体在「目标在上方」时**刻意分歧**（这正是本变体存在的理由）
+        assert_ne!(
+            navigation_sequence(&opts, 1).unwrap(),
+            navigation_sequence_directional(&opts, 1).unwrap()
+        );
+    }
+
+    /// 方向感知变体共享同一份保守面（不猜起点 / 目标越界 / 多高亮 → Err）
+    #[test]
+    fn directional_navigation_shares_refusals() {
+        let no_hl = vec![opt(1, "A", false), opt(2, "B", false)];
+        assert!(navigation_sequence_directional(&no_hl, 2).is_err());
+        let multi = vec![opt(1, "A", true), opt(2, "B", true)];
+        assert!(navigation_sequence_directional(&multi, 1).is_err());
+        let ok = vec![opt(1, "A", true), opt(2, "B", false)];
+        assert!(navigation_sequence_directional(&ok, 9).is_err());
     }
 
     /// R1：解析器必须**报告高亮位**——用实机屏幕原文夹具（claude 计划批准框）

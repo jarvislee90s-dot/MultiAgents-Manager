@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ModeBar from "@/mobile/ModeBar";
 import type { SessionModeView } from "@/mobile/api";
 
-// 批次丙 T6：模式栏。覆盖三件事——
-// ① 显示当前档（屏读回显成功时）；
-// ② 档未知时（屏读失败/不支持回显）**必须**显示人工核对提示，不得假装知道（红线 4）；
-// ③ unsupported 工具不渲染；切档回执 verified=false 时给人工核对文案。
+// 批次丙 T6 + 丁T4：模式栏。覆盖——
+// ① 显示当前档（屏读回显成功时）；② 档未知时**必须**显示人工核对提示（红线 4）；
+// ③ unsupported 工具不渲染；④ 切档回执 verified=false → 人工核对文案；
+// 丁T4 新增：⑤ 二维家（codex/kimi）两组按钮与各自的当前档；⑥ 单轴家切换钮 + 回显；
+// ⑦ 裁6 opencode「默认」（Build 已术语对齐）；⑧ 裁7 退役档不作可点按钮；
+// ⑨ 旧后端（无 groups 字段）回落单轴渲染且 POST 不带 group。
 
 interface Routes {
   mode?: SessionModeView;
@@ -51,6 +53,7 @@ function installFetch() {
   vi.stubGlobal("fetch", fetchMock);
 }
 
+/** 旧后端形态（无 groups/structure）——opencode 单轴 Plan 档 */
 function opencodePlan(): SessionModeView {
   return {
     tool: "opencode",
@@ -58,6 +61,82 @@ function opencodePlan(): SessionModeView {
     currentLabel: "计划",
     readback: true,
     switchKind: "shiftTab",
+  };
+}
+
+/** 丁T4 新后端形态：单轴（opencode，默认档） */
+function opencodeSingleAxis(): SessionModeView {
+  return {
+    tool: "opencode",
+    current: "default",
+    currentLabel: "默认",
+    readback: true,
+    switchKind: "shiftTab",
+    structure: "singleAxis",
+    groups: [
+      {
+        id: "mode",
+        label: "模式",
+        step: true,
+        readback: true,
+        current: "default",
+        currentLabel: "默认",
+        tiers: [
+          { mode: "default", label: "默认", selectable: true },
+          { mode: "plan", label: "计划", selectable: true },
+        ],
+        legacy: [],
+      },
+    ],
+  };
+}
+
+/** 丁T4 新后端形态：二维（codex；模式组 Plan、权限组无回读源） */
+function codexTwoAxis(): SessionModeView {
+  return {
+    tool: "codex",
+    current: "plan",
+    currentLabel: "计划",
+    readback: true,
+    switchKind: "slashCommand",
+    structure: "twoAxis",
+    groups: [
+      {
+        id: "mode",
+        label: "模式",
+        step: false,
+        readback: true,
+        current: "plan",
+        currentLabel: "计划",
+        tiers: [
+          {
+            mode: "default",
+            label: "默认",
+            selectable: false,
+            reason: "codex 退出计划模式无实测命令（可在终端按 shift+tab，或在计划批准框选第一项）",
+          },
+          { mode: "plan", label: "计划", selectable: true },
+        ],
+        legacy: [],
+      },
+      {
+        id: "permission",
+        label: "权限",
+        step: false,
+        readback: false,
+        current: null,
+        currentLabel: null,
+        tiers: [
+          { mode: "readOnly", label: "只读", selectable: true },
+          { mode: "default", label: "默认", selectable: true },
+          { mode: "bypass", label: "完全信任", selectable: true },
+        ],
+        legacy: [
+          { label: "untrusted", note: "官方 0.149.0 起退役（配置即拒启）——不作为可选档" },
+          { label: "on-failure", note: "官方已弃用（deprecated）——不作为可选档" },
+        ],
+      },
+    ],
   };
 }
 
@@ -73,11 +152,11 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
     render(<ModeBar session={{ id: "s1" }} />);
     expect(await screen.findByTestId("mode-bar")).toBeTruthy();
     expect(screen.getByTestId("mode-bar").getAttribute("data-mode")).toBe("plan");
-    expect(screen.getByTestId("mode-current").textContent).toBe("计划");
+    expect(screen.getByTestId("mode-current-mode").textContent).toBe("计划");
     // 回显成功 → 无「人工核对」提示
-    expect(screen.queryByTestId("mode-unknown-hint")).toBeNull();
+    expect(screen.queryByTestId("mode-unknown-hint-mode")).toBeNull();
     // shiftTab 档 → 单钮「切换模式」（循环切一档，不提供直达）
-    expect(screen.getByTestId("mode-switch-next")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-next-mode")).toBeTruthy();
   });
 
   it("档未知（屏读失败/不支持回显）：显示「模式未知」+ 必须给人工核对提示（红线 4）", async () => {
@@ -92,11 +171,11 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
     render(<ModeBar session={{ id: "s2" }} />);
     expect(await screen.findByTestId("mode-bar")).toBeTruthy();
     expect(screen.getByTestId("mode-bar").getAttribute("data-mode")).toBe("unknown");
-    expect(screen.getByTestId("mode-current").textContent).toBe("模式未知");
+    expect(screen.getByTestId("mode-current-mode").textContent).toBe("模式未知");
     // 红线 4：不假装成功——必须有核对提示
-    expect(screen.getByTestId("mode-unknown-hint").textContent).toContain("人工核对");
+    expect(screen.getByTestId("mode-unknown-hint-mode").textContent).toContain("人工核对");
     // 切换入口仍在（盲切是允许的，只是如实标注不可验证）
-    expect(screen.getByTestId("mode-switch-next")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-next-mode")).toBeTruthy();
   });
 
   it("切档 verified=false：回执为人工核对提示，不声称已切到目标档", async () => {
@@ -114,7 +193,7 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
       hint: "该工具的模式回显未实测，请人工核对终端当前模式",
     };
     render(<ModeBar session={{ id: "s3" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-next"));
+    fireEvent.click(await screen.findByTestId("mode-switch-next-mode"));
     const receipt = await screen.findByTestId("mode-receipt");
     expect(receipt.textContent).toContain("人工核对");
     expect(receipt.textContent).not.toContain("已切换到");
@@ -125,30 +204,6 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
     const body = JSON.parse(String((call![1] as RequestInit).body));
     expect(body.sessionId).toBe("s3");
     expect(body.target).toBe("default");
-  });
-
-  it("codex（slashCommand）：渲染逐档按钮（plan / bypass），点按提交对应 target", async () => {
-    installFetch();
-    routes.mode = {
-      tool: "codex",
-      current: null,
-      currentLabel: null,
-      readback: false,
-      switchKind: "slashCommand",
-    };
-    routes.switchBody = { status: "key_sent", verified: false, hint: "请人工核对" };
-    render(<ModeBar session={{ id: "s4" }} />);
-    expect(await screen.findByTestId("mode-switch-plan")).toBeTruthy();
-    expect(screen.getByTestId("mode-switch-bypass")).toBeTruthy();
-    // codex 无命令证据的档不渲染（acceptEdits/readOnly）
-    expect(screen.queryByTestId("mode-switch-acceptEdits")).toBeNull();
-    fireEvent.click(screen.getByTestId("mode-switch-plan"));
-    await flushAsync();
-    const call = fetchMock.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/switch")
-    );
-    const body = JSON.parse(String((call![1] as RequestInit).body));
-    expect(body.target).toBe("plan");
   });
 
   it("unsupported 工具：不渲染（无实测切换机制）", async () => {
@@ -176,17 +231,11 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
 
   it("409 no_mechanism：显示中文文案「该工具的模式切换未实测」", async () => {
     installFetch();
-    routes.mode = {
-      tool: "codex",
-      current: null,
-      currentLabel: null,
-      readback: false,
-      switchKind: "slashCommand",
-    };
+    routes.mode = codexTwoAxis();
     routes.switchStatus = 409;
     routes.switchBody = { error: "no_mechanism" };
     render(<ModeBar session={{ id: "s7" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-plan"));
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-plan"));
     expect((await screen.findByTestId("mode-error")).textContent).toContain("未实测");
   });
 });
@@ -208,7 +257,7 @@ describe("乙T3 对话框在场拒绝对接（blocked_by_dialog）", () => {
       reason: "终端有待决对话框，请先处理",
     };
     render(<ModeBar session={{ id: "s8" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-next"));
+    fireEvent.click(await screen.findByTestId("mode-switch-next-mode"));
     const err = await screen.findByTestId("mode-error");
     expect(err.textContent).toBe("终端有待决对话框，请先处理");
     // 不得误报为「已发送切换」/「未实测」——拒绝语义必须与另两态可分
@@ -227,9 +276,163 @@ describe("乙T3 对话框在场拒绝对接（blocked_by_dialog）", () => {
     routes.switchStatus = 409;
     routes.switchBody = { error: "blocked_by_dialog" };
     render(<ModeBar session={{ id: "s9" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-next"));
+    fireEvent.click(await screen.findByTestId("mode-switch-next-mode"));
     expect((await screen.findByTestId("mode-error")).textContent).toBe(
       "终端有待决对话框，请先处理"
     );
+  });
+});
+
+// ==== 丁T4 §2.6：二维结构 / 单轴 / 裁6 / 裁7 ====
+describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
+  it("二维家（codex）：渲染模式组 + 权限组两组，各自显示当前档；权限组无回读源 → 人工核对", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "t1" }} />);
+    expect(await screen.findByTestId("mode-bar")).toBeTruthy();
+    // 结构标记（前端渲染分支的判据）
+    expect(screen.getByTestId("mode-bar").getAttribute("data-structure")).toBe("twoAxis");
+    // 两组都在
+    expect(screen.getByTestId("mode-group-mode")).toBeTruthy();
+    expect(screen.getByTestId("mode-group-permission")).toBeTruthy();
+    // 模式组：回读命中「计划」；权限组：无回读源 → 模式未知 + 人工核对
+    expect(screen.getByTestId("mode-current-mode").textContent).toBe("计划");
+    expect(screen.getByTestId("mode-current-permission").textContent).toBe("模式未知");
+    expect(screen.getByTestId("mode-unknown-hint-permission").textContent).toContain("人工核对");
+    // 组标题可见（两组才显示，帮助用户区分两个轴）
+    expect(screen.getByTestId("mode-group-permission").textContent).toContain("权限");
+  });
+
+  it("二维家切档带 group：点权限组「只读」→ POST {group:'permission', target:'readOnly'}", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.switchBody = { status: "key_sent", verified: false, hint: "请人工核对终端" };
+    render(<ModeBar session={{ id: "t2" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-permission-readOnly"));
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBe("permission");
+    expect(body.target).toBe("readOnly");
+  });
+
+  it("裁7：codex 退役旧档（untrusted/on-failure）**不渲染为可点按钮**，只作说明", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "t3" }} />);
+    await screen.findByTestId("mode-bar");
+    // 没有任何按钮的 testid 含 untrusted / on-failure
+    const ids = Array.from(document.querySelectorAll("[data-testid]")).map((el) =>
+      el.getAttribute("data-testid")
+    );
+    expect(ids.some((id) => id !== null && /untrusted|on-failure/i.test(id))).toBe(false);
+    // 但必须如实说明「已退役」（用户看得见为什么没有这两个档）
+    expect(screen.getByTestId("mode-legacy-permission").textContent).toContain("untrusted");
+    expect(screen.getByTestId("mode-legacy-permission").textContent).toContain("on-failure");
+  });
+
+  it("裁7：不可选档（codex 模式组「默认」）不渲染按钮，渲染为不可用说明（带 reason）", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "t4" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.queryByTestId("mode-switch-mode-default")).toBeNull();
+    const disabled = screen.getByTestId("mode-tier-disabled-mode-default");
+    expect(disabled.textContent).toContain("默认");
+    expect(disabled.textContent).toContain("不可用");
+    expect(disabled.getAttribute("title")).toContain("无实测命令");
+  });
+
+  it("裁6 + 单轴：opencode 两档渲染「默认」/「计划」+ 切换钮 + 当前档回显", async () => {
+    installFetch();
+    routes.mode = opencodeSingleAxis();
+    render(<ModeBar session={{ id: "t5" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.getByTestId("mode-bar").getAttribute("data-structure")).toBe("singleAxis");
+    // 当前档回显：默认（**不是** Build——裁6 术语对齐）
+    expect(screen.getByTestId("mode-current-mode").textContent).toBe("默认");
+    expect(screen.queryByText(/Build/)).toBeNull();
+    // 单轴家仍渲染唯一的「切换模式」钮（不渲染逐档直达钮——shift+tab 一步一档）
+    expect(screen.getByTestId("mode-switch-next-mode")).toBeTruthy();
+    expect(screen.queryByTestId("mode-switch-mode-plan")).toBeNull();
+  });
+
+  it("单轴家只有一组 → 不渲染组标题（避免噪音）；二维家渲染", async () => {
+    installFetch();
+    routes.mode = opencodeSingleAxis();
+    const { unmount } = render(<ModeBar session={{ id: "t6" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.getByTestId("mode-group-mode").textContent).not.toContain("模式模式");
+    unmount();
+  });
+
+  it("旧后端（无 groups/structure）回落单轴渲染，且 POST **不带 group**（前向兼容）", async () => {
+    installFetch();
+    routes.mode = opencodePlan(); // 旧形态
+    routes.switchBody = { status: "key_sent", verified: false, hint: "请人工核对" };
+    render(<ModeBar session={{ id: "t7" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.getByTestId("mode-bar").getAttribute("data-structure")).toBe("legacy");
+    expect(screen.getByTestId("mode-current-mode").textContent).toBe("计划");
+    fireEvent.click(screen.getByTestId("mode-switch-next-mode"));
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBeUndefined();
+    expect(body.target).toBe("default");
+  });
+
+  it("回读命中（verified=true）：回执「已切换」+ 重拉 GET 刷新显示", async () => {
+    installFetch();
+    routes.mode = opencodeSingleAxis();
+    routes.switchBody = {
+      status: "key_sent",
+      verified: true,
+      hint: null,
+      current: "plan",
+      currentLabel: "计划",
+    };
+    render(<ModeBar session={{ id: "t8" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-next-mode"));
+    expect((await screen.findByTestId("mode-receipt")).textContent).toBe("已切换");
+    // 重拉了一次 GET（切换后确认新档）
+    const gets = fetchMock.mock.calls.filter(
+      (c: unknown[]) => String(c[0]).includes("/session-mode?") && !String(c[0]).includes("switch")
+    );
+    expect(gets.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("回读与预期不符（verified=false 带预期/实际）：回执原样透出后端 hint", async () => {
+    installFetch();
+    routes.mode = opencodeSingleAxis();
+    routes.switchBody = {
+      status: "key_sent",
+      verified: false,
+      hint: "回读到的档与预期不符（预期「计划」、实际「默认」）——请人工核对终端",
+    };
+    render(<ModeBar session={{ id: "t9" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-next-mode"));
+    const receipt = await screen.findByTestId("mode-receipt");
+    expect(receipt.textContent).toContain("预期「计划」");
+    expect(receipt.textContent).toContain("实际「默认」");
+    expect(receipt.textContent).not.toBe("已切换");
+  });
+
+  it("mode_switch_busy（codex 运行中）：failed 回执进 error 区，不进 receipt", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.switchBody = {
+      status: "failed",
+      error: "codex 运行中不接受 /plan（计划模式不可用），请等回合结束后重试",
+    };
+    render(<ModeBar session={{ id: "t10" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-plan"));
+    const err = await screen.findByTestId("mode-error");
+    expect(err.textContent).toContain("运行中不接受 /plan");
+    expect(screen.queryByTestId("mode-receipt")).toBeNull();
   });
 });

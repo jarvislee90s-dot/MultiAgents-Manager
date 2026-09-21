@@ -688,23 +688,71 @@ export const MAM_MODE_LABELS: Record<MamMode, string> = {
   readOnly: "只读",
 };
 
+/** 模式栏的**组**（丁T4 §2.6：二维工具的「模式组/权限组」与单轴工具的「模式」轴） */
+export type ModeGroupId = "mode" | "permission";
+
+/** 单档（GET 载荷 `groups[].tiers[]`）：屏显标签来自**工具自己的词表**（§2.6
+ *  「档位（屏显标签）」列）——kimi 权限组是「总是询问/按需询问/永不询问」，不是 MAM
+ *  通用名（用户看到的是终端上的词，对不上号等于没回显）。
+ *  `selectable=false` → 不渲染为可点按钮（`reason` 是后端给出的如实原因）。 */
+export interface ModeTierView {
+  mode: MamMode;
+  label: string;
+  selectable: boolean;
+  reason?: string | null;
+}
+
+/** 已退役旧档（裁7）：**不可选**，只作如实展示（codex 的 untrusted / on-failure） */
+export interface ModeLegacyView {
+  label: string;
+  note: string;
+}
+
+/** 单组（GET 载荷 `groups[]`）。`step=true` = 步进轴（shift+tab 一次一档，档位顺序即
+ *  实测环序）；`readback=false` = 该组无屏读源（前端必须显示「请人工核对」）。
+ *  `current=null` = 档未知（屏读失败或该组无回读源）→ **不得假装知道**（红线 4）。 */
+export interface ModeGroupView {
+  id: ModeGroupId;
+  label: string;
+  step: boolean;
+  readback: boolean;
+  current: MamMode | null;
+  currentLabel: string | null;
+  tiers: ModeTierView[];
+  legacy?: ModeLegacyView[];
+}
+
 /** 模式视图（GET /session-mode 载荷）。current=null 表示**档未知**（屏读失败或该
  *  工具不支持回显）→ 前端必须显示「未知」并要求人工核对（红线 4：不假装成功）。
- *  switchKind：unsupported → 不显示切换按钮（该工具无实测机制）。 */
+ *  switchKind：unsupported → 不显示切换按钮（该工具无实测机制）。
+ *
+ *  丁T4 增量（**全部可选**，与旧后端前向兼容）：`structure`/`groups` 缺失时前端回落
+ *  到「单轴渲染 + 顶层 current」。 */
 export interface SessionModeView {
   tool: string;
   current: MamMode | null;
   currentLabel: string | null;
   readback: boolean;
   switchKind: "shiftTab" | "slashCommand" | "unsupported";
+  /** "twoAxis" | "singleAxis" | "none"（旧后端无此字段） */
+  structure?: "twoAxis" | "singleAxis" | "none";
+  groups?: ModeGroupView[];
 }
 
 /** 切档回执（POST /session-mode/switch）。verified=false 时 hint 给出人工核对提示
  *  ——切换已投递但无法自动验证（屏读缺失），前端据此渲染提示而非「已切到 X 档」。
  *  丁T3：`dialogChecked` = 本次是否真的做过对话框在场检测（false = 平台无屏读或
- *  屏读失败；此时守卫按「无法判定」放行，前端不得声称已检查）。 */
+ *  屏读失败；此时守卫按「无法判定」放行，前端不得声称已检查）。
+ *  丁T4：`current`/`currentLabel` = 投递后回读到的档（命中时前端可直接用它刷新）。 */
 export type SessionModeSwitchResult =
-  | { status: "key_sent"; verified: boolean; hint?: string | null; dialogChecked?: boolean }
+  | {
+      status: "key_sent";
+      verified: boolean;
+      hint?: string | null;
+      dialogChecked?: boolean;
+      current?: MamMode | null;
+      currentLabel?: string | null;
+    }
   | { status: "failed"; error: string; dialogChecked?: boolean };
 
 /** 拉取当前模式（卡头显示用）。非 2xx → 抛 ApiError（调用方静默降级不显示） */
@@ -720,18 +768,27 @@ export async function fetchSessionMode(sessionId: string): Promise<SessionModeVi
   return (await r.json()) as SessionModeView;
 }
 
-/** 切档（T6）。404 no_session | 409 no_mechanism | **409 blocked_by_dialog**（丁T3
- *  §2.7 对话框在场红线：控制类注入被拒，data.reason 为中文文案）→ 非 2xx 抛 ApiError */
+/** 切档（T6；丁T4 加 `group`）。404 no_session | 409 no_mechanism |
+ *  **409 blocked_by_dialog**（丁T3 §2.7 对话框在场红线：控制类注入被拒，data.reason
+ *  为中文文案）→ 非 2xx 抛 ApiError。
+ *
+ *  `group` 是**可选**参数（丁T4）：不传 = 由后端按 target 归组（旧客户端的调用面，
+ *  语义见 Rust `inject::mode::resolve_group`）；二维工具（codex/kimi）的新前端传它。 */
 export async function sessionModeSwitch(
   sessionId: string,
-  target: MamMode
+  target: MamMode,
+  group?: ModeGroupId
 ): Promise<SessionModeSwitchResult> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-mode/switch", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, target }),
+      // group 缺省时**不发字段**（旧后端不认识它，发了也只是被 serde 忽略——
+      // 但省掉字段可让请求体与旧版本逐字一致，便于抓包比对）
+      body: JSON.stringify(
+        group === undefined ? { sessionId, target } : { sessionId, target, group }
+      ),
     });
   } catch (e) {
     throw new ApiError(null, `session-mode/switch 网络异常: ${String(e)}`);

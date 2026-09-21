@@ -8086,4 +8086,597 @@ mod tests {
         });
         (state, sid_out)
     }
+
+    /// 丁T4 建造器：单会话 + **指定会话状态**（codex 运行中门用）+ 缺省探针。
+    /// 与 [`mode_guard_state`] 同构，多一个 status 参数（其余缝同口径）。
+    fn mode_state_with_status(
+        sid: &str,
+        tool: crate::session::AgentType,
+        pid: u32,
+        status: crate::session::SessionStatus,
+    ) -> (Arc<RemoteState>, String) {
+        let session = inj_sess(sid, tool, pid, status);
+        let sid_out = session.id.clone();
+        let state = Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: FakeInjector::ok(),
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe: std::sync::Arc::new(|_, _| None),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        });
+        (state, sid_out)
+    }
+
+    /// 丁T4 建造器：单会话（指定状态）+ **指定注入器**（两段式投递用例用）。
+    fn mode_state_with_injector(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        sid: &str,
+        tool: crate::session::AgentType,
+        pid: u32,
+        status: crate::session::SessionStatus,
+        dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+    ) -> (Arc<RemoteState>, String) {
+        let session = inj_sess(sid, tool, pid, status);
+        let sid_out = session.id.clone();
+        let state = Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector,
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe,
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        });
+        (state, sid_out)
+    }
+
+    // ===== 丁T4：模式栏二维结构 / 回读全开 / 组切换 / 运行中门 =====
+    //
+    // 本组用例的共同前提：**CI/非 Windows 下屏读恒 None** → GET 的 `current` 为 null。
+    // 这对本组无碍：T4 的新面是**结构表与组路由**（纯表 + 请求面），屏读词表本身由
+    // `inject::mode` 的单测覆盖（夹具 = T6 探测档案的真机屏幕原文逐字快照）。
+
+    /// GET /session-mode 下发**结构表与两组**（裁5 的接口面）：codex 两组、权限组
+    /// 无回读源 → current=null；模式组 readback=true。裁7 的退役档也在载荷里
+    /// （`legacy`）——**前端不渲染为按钮**，由 `tests/mobile/ModeBar.test.tsx` 锁住。
+    #[tokio::test]
+    async fn session_mode_reports_two_axis_structure_for_codex() {
+        let (state, sid) = mode_state_with_status(
+            "sess_t4_get_codex",
+            crate::session::AgentType::Codex,
+            81,
+            crate::session::SessionStatus::Waiting,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["tool"], "codex");
+        assert_eq!(v["structure"], "twoAxis");
+        let groups = v["groups"].as_array().expect("groups 必须是数组");
+        assert_eq!(groups.len(), 2, "二维家出两组（裁5）");
+        assert_eq!(groups[0]["id"], "mode");
+        assert_eq!(groups[1]["id"], "permission");
+        // 权限组：无底栏回读源 → readback=false 且 current=null（**如实**，不假装知道）
+        assert_eq!(groups[1]["readback"], false);
+        assert!(groups[1]["current"].is_null());
+        assert_eq!(groups[0]["readback"], true);
+        // 档位：模式组 [默认(不可选), 计划]；权限组 [只读, 默认, 完全信任]
+        let mode_tiers = groups[0]["tiers"].as_array().unwrap();
+        assert_eq!(mode_tiers[0]["mode"], "default");
+        assert_eq!(mode_tiers[0]["selectable"], false);
+        assert!(
+            mode_tiers[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("无实测命令"),
+            "不可选档必须给原因（如实回执，不是静默禁用）"
+        );
+        assert_eq!(mode_tiers[1]["mode"], "plan");
+        assert_eq!(mode_tiers[1]["selectable"], true);
+        let perm_tiers = groups[1]["tiers"].as_array().unwrap();
+        assert_eq!(perm_tiers.len(), 3);
+        assert_eq!(
+            perm_tiers
+                .iter()
+                .map(|t| t["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["只读", "默认", "完全信任"]
+        );
+        // 裁7：退役档在 legacy 里如实登记，**不在 tiers 里**
+        let legacy = groups[1]["legacy"]
+            .as_array()
+            .expect("codex 权限组带 legacy");
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(legacy[0]["label"], "untrusted");
+        assert_eq!(legacy[1]["label"], "on-failure");
+        assert!(
+            !perm_tiers
+                .iter()
+                .any(|t| matches!(t["mode"].as_str(), Some("untrusted") | Some("on-failure"))),
+            "退役档不得作为可选档出现在 tiers 里（裁7）"
+        );
+        // 旧前端兼容视图仍在（顶层 current/switchKind）
+        assert_eq!(v["switchKind"], "slashCommand");
+        assert!(v["current"].is_null());
+    }
+
+    /// GET：kimi 两组 + **权限组的屏显标签是工具自己的词**（§2.6 kimi 列）
+    #[tokio::test]
+    async fn session_mode_reports_kimi_permission_labels() {
+        let (state, sid) = mode_state_with_status(
+            "sess_t4_get_kimi",
+            crate::session::AgentType::Kimi,
+            82,
+            crate::session::SessionStatus::Idle,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["structure"], "twoAxis");
+        let perm = &v["groups"][1];
+        assert_eq!(perm["id"], "permission");
+        assert_eq!(perm["label"], "权限");
+        assert_eq!(
+            perm["tiers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["总是询问", "按需询问", "永不询问"],
+            "kimi 权限组屏显标签 = 该工具自己的词（不是 MAM 通用名）"
+        );
+        // 三档全部可选（「总是询问」走两段式；另两档有直达变体）
+        assert!(perm["tiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["selectable"] == true));
+        assert!(perm["legacy"].as_array().unwrap().is_empty());
+    }
+
+    /// GET：单轴家（opencode）只有一组，且档位标签已按裁6 术语对齐
+    #[tokio::test]
+    async fn session_mode_reports_single_axis_for_opencode() {
+        let (state, sid) = mode_state_with_status(
+            "sess_t4_get_oc",
+            crate::session::AgentType::OpenCode,
+            83,
+            crate::session::SessionStatus::Idle,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["structure"], "singleAxis");
+        assert_eq!(v["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(v["groups"][0]["step"], true, "shift+tab 一步一档");
+        assert_eq!(
+            v["groups"][0]["tiers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["默认", "计划"],
+            "裁6：Build 改显「默认」"
+        );
+    }
+
+    /// GET：未实测工具 → structure="none" + 空 groups（前端不渲染）
+    #[tokio::test]
+    async fn session_mode_reports_none_for_untested_tool() {
+        let (state, sid) = mode_state_with_status(
+            "sess_t4_get_wb",
+            crate::session::AgentType::WorkBuddy,
+            84,
+            crate::session::SessionStatus::Idle,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["structure"], "none");
+        assert!(v["groups"].as_array().unwrap().is_empty());
+        assert_eq!(v["switchKind"], "unsupported");
+    }
+
+    /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
+    /// `/permissions` 两段式的**第一段**（文本 + 回车；第二段无真屏读 → 中止并如实回执）
+    #[tokio::test]
+    async fn session_mode_switch_routes_explicit_permission_group() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_perm",
+            crate::session::AgentType::Codex,
+            85,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"bypass","group":"permission"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        // 第一段已投递：`/permissions` 文本 + enter 键
+        assert_eq!(
+            fake.recorded(),
+            vec![(85u32, "/permissions".to_string())],
+            "两段式的第一段必须投递开启命令：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(85u32, "enter".to_string())],
+            "斜杠命令需回车提交"
+        );
+        // 第二段（CI 无屏读）→ 中止 + 如实回执（**不是**「已切换」）
+        assert!(
+            body.contains("\"status\":\"failed\""),
+            "第二段读不到菜单必须如实失败：{body}"
+        );
+        assert!(
+            body.contains("请人工核对终端"),
+            "失败文案要讲清「命令已发、档位未切」：{body}"
+        );
+    }
+
+    /// POST：**旧客户端不带 group** —— codex 的 `default` 由后端推断到权限组
+    /// （模式组的该档不可选；见 `resolve_group` 文档的歧义规则）
+    #[tokio::test]
+    async fn session_mode_switch_infers_group_for_legacy_client() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_infer",
+            crate::session::AgentType::Codex,
+            86,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"default"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        // 推断到权限组 → `/permissions` 被投递（旧实现也发这条命令，语义连续）
+        assert_eq!(
+            fake.recorded(),
+            vec![(86u32, "/permissions".to_string())],
+            "{body}"
+        );
+        // 审计摘要含**组名**（二维工具的组是语义的一部分）
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "mode");
+        assert!(
+            audits[0].summary.contains("权限"),
+            "二维家审计摘要要带组名（否则分不清是模式组还是权限组的默认）：{:?}",
+            audits[0].summary
+        );
+    }
+
+    /// POST：**退役档不可选**（裁7 的输入面）——POST `untrusted` → 400（零注入零审计）
+    #[tokio::test]
+    async fn session_mode_switch_rejects_legacy_enum() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_legacy",
+            crate::session::AgentType::Codex,
+            87,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        for target in ["untrusted", "on-failure"] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-mode/switch",
+                    Some("mam_device=mm"),
+                    Some(&format!(r#"{{"sessionId":"{sid}","target":"{target}"}}"#)),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "退役档不得作为可选档（裁7）：{target}");
+        }
+        assert!(fake.recorded().is_empty(), "拒绝路径零注入");
+        assert!(fake.recorded_keys().is_empty());
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(audits.is_empty(), "拒绝路径零审计：{audits:?}");
+    }
+
+    /// POST：**组里没有的档** → 409 no_mechanism（kimi 模式组没有只读档）
+    #[tokio::test]
+    async fn session_mode_switch_rejects_tier_outside_group() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_outgroup",
+            crate::session::AgentType::Kimi,
+            88,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"readOnly","group":"mode"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        let body = body_string(r).await;
+        assert!(body.contains("\"error\":\"no_mechanism\""), "{body}");
+        assert!(fake.recorded().is_empty() && fake.recorded_keys().is_empty());
+    }
+
+    /// **codex `/plan` 运行中不可用 → 如实回执**（§2.6 表末）：会话 Processing →
+    /// 200 failed + 中文说明，**零注入零审计**（codex 自己也会拒，MAM 提前拦）。
+    /// 还原动作：删掉 `codex_plan_busy` 那道门 → 本断言先红（会变成投递 `/plan`）。
+    #[tokio::test]
+    async fn session_mode_switch_reports_codex_plan_busy() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_busy",
+            crate::session::AgentType::Codex,
+            89,
+            crate::session::SessionStatus::Processing,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(body.contains("\"status\":\"failed\""), "{body}");
+        assert!(
+            body.contains("运行中不接受 /plan"),
+            "回执要讲清「为什么没切」（如实，不是静默失败）：{body}"
+        );
+        assert!(
+            fake.recorded().is_empty() && fake.recorded_keys().is_empty(),
+            "运行中门必须在投递之前：{:?}/{:?}",
+            fake.recorded(),
+            fake.recorded_keys()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(
+            audits.is_empty(),
+            "零投递零审计（与忙让位同口径）：{audits:?}"
+        );
+    }
+
+    /// codex 运行中门**只管 Plan 档**：同一 Processing 会话切权限组 → 照常出手
+    /// （权限菜单的可用性与回合状态无关；未实测有同类限制 → 不扩张）。
+    #[tokio::test]
+    async fn session_mode_switch_codex_busy_only_blocks_plan() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_busy_perm",
+            crate::session::AgentType::Codex,
+            90,
+            crate::session::SessionStatus::Processing,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"bypass","group":"permission"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            fake.recorded(),
+            vec![(90u32, "/permissions".to_string())],
+            "运行中门只拦 Plan 档（权限组照常出手）"
+        );
+    }
+
+    /// **两段式的第二段不重入守卫**（丁T4 的核心设计点）：第一段之前的守卫恰好调用
+    /// **一次**，第一段照常投递——若第二段重入守卫，屏上刚打开的菜单会被判成
+    /// 「待决对话框」→ 409 blocked_by_dialog（自相矛盾：权限档永远切不了）。
+    ///
+    /// **本用例能证明什么**：探针只在**第一段之前**被调用一次（守卫位）→ 断「调用
+    /// 次数恰好 1」+「第一段照常投递」。若有人在第二段前再插一次探针，计数变 2 → 先红。
+    #[tokio::test]
+    async fn session_mode_switch_menu_guard_runs_once_before_first_stage() {
+        let fake = FakeInjector::ok();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_probe = calls.clone();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_guard_once",
+            crate::session::AgentType::Codex,
+            91,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(move |_, _| {
+                // 第一次（也是唯一一次）报**不在场**：用户点按钮时终端上没有别人的
+                // 对话框；第一段之后出现的菜单**不经过探针**（这正是设计点）
+                calls_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                None
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"readOnly","group":"permission"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "第一段不得被自己的菜单拦下");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "守卫在位恰好调用一次（每请求一道门；第二段不重入）"
+        );
+        assert_eq!(
+            fake.recorded(),
+            vec![(91u32, "/permissions".to_string())],
+            "第一段照常投递"
+        );
+        assert_eq!(fake.recorded_keys(), vec![(91u32, "enter".to_string())]);
+    }
+
+    /// **第一段之前有真对话框 → 仍被守卫拒**（回归锁：守卫位置不得因为两段式改造
+    /// 而漂移）。用真机屏幕原文（codex `Implement this plan?`）作在场假体。
+    #[tokio::test]
+    async fn session_mode_switch_menu_blocked_when_foreign_dialog_present() {
+        let fake = FakeInjector::ok();
+        let opts = real_dialog_fixture();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_t4_menu_blocked",
+            crate::session::AgentType::Codex,
+            92,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"bypass","group":"permission"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "两段式也要过第一段前的那道守卫");
+        let body = body_string(r).await;
+        assert!(body.contains("\"error\":\"blocked_by_dialog\""), "{body}");
+        assert!(
+            fake.recorded().is_empty() && fake.recorded_keys().is_empty(),
+            "拒绝 = 零注入（含第一段的开启命令）"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(audits.is_empty(), "零审计：{audits:?}");
+    }
 }
