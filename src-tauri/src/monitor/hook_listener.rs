@@ -13,8 +13,12 @@
 //!    都不得产生 stdout 字节与非零退出码；stderr 保守起见同样全静默（helper 无
 //!    log 初始化，诊断依赖落盘结果本身）。
 //! 2. **瞬时完成**——codex 命令钩子默认 600s 超时、Interrupt/SessionEnd 仅 1s：
-//!    读 stdin → serde 解析 → 同目录临时文件+rename 原子写 → 退出，毫秒级；
-//!    无网络、无重试、无等待、无 fsync（TTL 30s 的临时数据不值得付落盘屏障延迟）。
+//!    读 stdin → serde 解析 → **同会话旧事件文件一次读**（T1 承接窗，见
+//!    [`with_carried_question_fields`]）→ 同目录临时文件+rename 原子写 → 退出，
+//!    毫秒级；无网络、无重试、无等待、无 fsync（TTL 30s 的临时数据不值得付落盘
+//!    屏障延迟）。承接读的最坏耗时 = 同目录 ≤（64KB tool_input + 4KB message，
+//!    约 68KB）文件的一次 page-cached 读 + parse；失败即降级为不承接（不是错误
+//!    路径，是保守回退），仍是毫秒级。
 //! 3. `async:true` 钩子被 codex 跳过——本内核天然同步快速；注册侧不得带 async
 //!    （T2 落实，见 hooks.rs）。
 //! 4. payload 差异（claude/codex/kimi 的 tool_input / message 等）是 T2/T3 的事——
@@ -54,7 +58,9 @@
 //! 覆盖写 = 保留最新状态（bash 版语义）。T8 起两个**向后兼容的可选字段**：payload
 //! 带 `tool_name`（非空）时追加 `"tool_name"`；PreToolUse ∧ AskUserQuestion 时追加
 //! `"tool_input"`（tool_input 的原文 JSON 串）。T1 起第三个可选字段：Notification
-//! 事件且 payload 带 `message`（非空字符串）时追加 `"message"`（4KB 前缀截断）。
+//! 事件且 payload **带 `message` 键**（含空串）时追加 `"message"`（4KB 前缀截断）
+//! ——空串照落键是刻意的：「观测到 message 但为空」本身有诊断价值，且读取侧
+//! `Option<String>` 下空串与缺席同义，不影响消费。
 //! 其余事件（无 tool_name / 无 message）正文与 T8 前**逐字节一致**（读取侧 serde
 //! default 兼容 bash 兜底脚本形态——bash 解析嵌套 tool_input 不可靠，问题通道不
 //! 承载，见 hooks.rs HOOK_SCRIPT 注释）。
@@ -112,8 +118,10 @@ pub struct ParsedHook {
     /// `message` 通知正文（批次丙 T1：**仅当** hook_event_name=="Notification" 时
     /// 携带，4KB 前缀截断上限；其余事件恒 None）。claude 的 Notification payload 带
     /// `message`/`title`/`notification_type` 三字段，permission_prompt 类型对
-    /// AskUserQuestion 待答也照发——消费侧据 message 的问答语义把该通知判为问答
-    /// 而非审批（幽灵审批标记修复的判据锚点）
+    /// AskUserQuestion 待答也照发。**实机取证结论：该文本不具判别力**——真实审批与
+    /// AUQ 待答的 message 逐字相同（均为 `Claude needs your permission`），故消费侧
+    /// 只作诊断留痕，判据锚点是 `tool_name`（见 adapter::is_question_entry_event）。
+    /// **空串照携带**（payload 带该键即为观测事实），读取侧与缺席同义
     pub notification_message: Option<String>,
 }
 
@@ -878,7 +886,8 @@ mod tests {
     }
 
     /// T1 回归锁（与 T8 同一条，扩到第三个可选字段）：无 tool_name / 无 message 的
-    /// 普通事件正文与 T8 前**逐字节一致**
+    /// 普通事件正文与 T8 前**逐字节一致**。含「payload 带 message 键但事件不是
+    /// Notification」的形态（message 只对 Notification 附加）
     #[test]
     fn event_body_with_message_absent_is_byte_identical() {
         let parsed = parse_hook_stdin(
@@ -893,8 +902,8 @@ mod tests {
     }
 
     /// T1：Notification 正文追加 `message` 键（键序在既有可选字段之后；其余键位
-    /// 不变）；message 为空串时**不落键**（空串无判据价值，且与 tool_name 的非空
-    /// 追加口径一致）
+    /// 不变）；payload 带 message 键时**含空串也落键**（「观测到但为空」有诊断价值，
+    /// 读取侧空串与缺席同义——见 ParsedHook::notification_message 注释）
     #[test]
     fn event_body_includes_message_for_notification_only() {
         let raw = r#"{"session_id":"sid-m1","hook_event_name":"Notification","cwd":"/w","message":"Claude needs your permission to use Bash"}"#;
@@ -907,14 +916,24 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v["message"].is_string(), "message 是 string 字段");
 
-        // 空串 message：不落键（正文回 legacy 形态）
+        // 空串 message：仍落键（正文相对「无 message 键」多一个键，故不属于
+        // legacy 形态——legacy 锁只覆盖「无 message 键」与非 Notification 两类）
         let empty = parse_hook_stdin(
             r#"{"session_id":"sid-m2","hook_event_name":"Notification","cwd":"/w","message":""}"#,
         )
         .unwrap();
         assert_eq!(empty.notification_message.as_deref(), Some(""));
-        // 读取侧 default 空串与缺席同义；写侧落键与否只影响字节，不影响消费
-        assert!(event_body(&empty, 1).contains("\"message\":\"\""));
+        assert!(
+            event_body(&empty, 1).contains("\"message\":\"\""),
+            "空串照落键（与注释/读取侧语义一致）"
+        );
+        // 对照：完全无 message 键的 Notification → 正文不含 message 键（legacy 形态）
+        let absent = parse_hook_stdin(
+            r#"{"session_id":"sid-m3","hook_event_name":"Notification","cwd":"/w"}"#,
+        )
+        .unwrap();
+        assert_eq!(absent.notification_message, None);
+        assert!(!event_body(&absent, 1).contains("\"message\""));
     }
 
     /// T1 端到端（bin run 缝同款）：Notification payload → 事件文件含 message 原文
