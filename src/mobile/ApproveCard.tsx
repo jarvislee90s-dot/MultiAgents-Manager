@@ -301,9 +301,10 @@ export default function ApproveCard({ session }: ApproveCardProps) {
         </p>
       )}
       {/* T8：审批点 plan 聚合——计划确认类审批卡主体即见计划全文（不再要用户去
-          消息流翻）。markdown 直出（claude/codex 的 kind="plan"）；kimi 的
-          kind="plan-file" 是**文件路径**，此处以路径提示呈现（全文走文件预览，
-          与消息流口径一致，不重复读文件正文）。无计划（plan null）→ 不渲染 */}
+          消息流翻）。markdown 直出（claude/codex 的 kind="plan"）；isFile=true 时以
+          路径提示呈现（全文走文件预览）。
+          **kimi 恒为 null**（丁T2 复评 F3-4：任务书成文要求 kimi 审批卡不含 plan
+          正文——正文由消息流的 kind="plan" 正文卡承担）；无计划（plan null）→ 不渲染 */}
       {options.plan != null && options.plan.content.trim() !== "" && (
         <div
           data-testid="approve-plan"

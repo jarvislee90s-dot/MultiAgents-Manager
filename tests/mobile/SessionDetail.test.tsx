@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/mobile/App";
-import SessionDetail from "@/mobile/SessionDetail";
+import SessionDetail, { isPlanPending } from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
 import { BOOKMARK_COLORS, clearBookmarks, messageAnchor } from "@/mobile/bookmarks";
 import { MockEventSource } from "./eventSourceMock";
@@ -2288,47 +2288,189 @@ describe("SessionDetail：计划待确认条（丁T2）", () => {
 });
 
 // ==== 丁T2：计划待确认挂载门的边界（结束态不挂载——与 QuestionCard 挂载门同规）====
-describe("SessionDetail：计划待确认挂载门的结束态边界（丁T2）", () => {
-  it.each(["idle", "finished"] as const)(
-    "%s 会话 + 尾部计划提案：不挂载审批卡（结束态不必再打 GET；预期态在结束态即陈旧）",
-    async (status) => {
-      installFetch();
-      // 结束态走总结模式，消息渲染路径与运行态不同——夹具给最小可辨形态
-      routes.messages = [
-        {
-          seq: 0,
-          role: "user",
-          kind: "user",
-          content: "开始",
-          ts: null,
-          toolName: null,
-          toolArgs: null,
-          collapsed: false,
-        },
-        {
-          seq: 1,
-          role: "assistant",
-          kind: "plan",
-          content: "# 已结束会话里的旧计划",
-          ts: null,
-          toolName: null,
-          toolArgs: null,
-          collapsed: false,
-        },
-      ];
-      render(
-        <SessionDetail
-          session={makeSession({ status, agentType: "codex" })}
-          onBack={() => {}}
-        />
-      );
-      await screen.findByText("proj");
-      for (let i = 0; i < 6; i += 1) {
-        await act(async () => {
-          await Promise.resolve();
-        });
-      }
-      expect(screen.queryByTestId("approve-card")).toBeNull();
+describe("SessionDetail：计划待确认挂载门的真机状态矩阵（丁T2 复评 F3-1）", () => {
+  /** 计划消息条目（T1/T4 升格产物同形） */
+  function planMsg(seq: number, content: string): SessionMessage {
+    return {
+      seq,
+      role: "assistant",
+      kind: "plan",
+      content,
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  /** 计划待确认的**真机载荷**（后端 `available=true` + 零 options + planPending） */
+  const realPlanPendingPayload = {
+    available: true,
+    options: [],
+    verifiedWith: "0.154.0",
+    currentVersion: "0.155.1",
+    drift: false,
+    planPending: true,
+    plan: { content: "# 方案", isFile: false },
+  };
+  async function flush() {
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
     }
-  );
+  }
+
+  // **F3-1 主用例**：codex 计划提案后的**真机状态就是 Idle**（assistant(<proposed_plan>)
+  // → task_complete → TurnEnd → Idle；codex 兜底红已废）。首版实现用 `!isSummary` 排除
+  // idle → 真机上卡片恒不挂载（后端 available=true 无消费方）。本用例锁死修复。
+  it("codex **idle**（真机形态）+ 尾部计划提案：审批卡必须挂载 + 计划待确认条出现", async () => {
+    installFetch();
+    // 真机尾序：user → assistant(前导文本) → plan(<proposed_plan> 升格产物)
+    routes.messages = [
+      {
+        seq: 0,
+        role: "user",
+        kind: "user",
+        content: "改写成情感救赎版",
+        ts: null,
+        toolName: null,
+        toolArgs: null,
+        collapsed: false,
+      },
+      planMsg(1, "# 《末班车》情感救赎版改写方案\n\n## Summary\n改写重点…"),
+    ];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "idle", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    // 挂载 → 拉载 → 提示条与检查钮在场（真机全链的入口）
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    expect(screen.getByTestId("approve-card").textContent).toContain("计划待确认");
+  });
+
+  // 边界对照：kimi 的计划审批真机落 **Waiting**（interaction.request 红灯），
+  // idle 只是防御位（MAM 未运行时状态可能回落）——两者都必须挂载。
+  it("kimi idle + 尾部计划提案：同样挂载（防御位——真机在 Waiting 已由既有用例覆盖）", async () => {
+    installFetch();
+    routes.messages = [
+      planMsg(0, "# Plan: Create hi.txt"),
+      planMsg(1, "# Plan: Create yo.txt"),
+    ];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "idle", agentType: "kimi" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+  });
+
+  // `finished` 仍排除：会话真的结束（进程退出/归档），重进详情不再打 GET。
+  it("codex finished + 尾部计划提案：不挂载（会话真的结束——唯一排除态）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 已结束会话里的旧计划")];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "finished", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flush();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  // 反向锁：**idle 不等于放宽一切**——claude 的预期态门本就不成立（非计划对话框族），
+  // 且 claude 未落 Waiting 时不得借 idle 冒卡（零回归）。
+  it("claude idle + 尾部计划：不挂载（门仍按计划对话框族收窄——零回归）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# claude 的计划")];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "idle", agentType: "claude" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flush();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
 });
+
+// ==== 丁T2 复评 M1：前后端判据**交叉引用锁** ====
+//
+// `isPlanPending`（前端）与 `remote::api::plan_pending_tail_index`（后端）是**两份同口径
+// 实现**——判据一致、窗口不同（前端吃详情页已拉取的整页 200/1000 条；后端读 40 条尾部
+// 窗口，性能面）。两份实现无法互相 import（跨语言），故用**同一组夹具**分别驱动、断言
+// 判定一致：本组用例的每条夹具在 Rust 侧有同名对照（见 `remote::api::tests` 的
+// `strict_plan_pending_excludes_isolated_plan_file_only` 与
+// `plan_pending_cleared_by_user_or_tool_activity`）。**夹具集必须与 Rust 侧同步维护**
+// （单边漂移即本锁失败——这正是它存在的意义）。
+describe("丁T2 M1：isPlanPending 与后端 plan_pending_tail_index 的判据一致性（交叉引用锁）", () => {
+  function m(kind: string): SessionMessage {
+    return {
+      seq: 0,
+      role: kind === "user" ? "user" : "assistant",
+      kind,
+      content: "x",
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  const of = (kinds: string[]) => kinds.map(m);
+
+  it("在场：尾部计划（含文件卡形态）→ true；两族工具同判", () => {
+    // 与 Rust `plan_pending_detected_on_tail_plan` 同夹具
+    expect(isPlanPending(of(["user", "assistant", "plan"]), "codex")).toBe(true);
+    expect(isPlanPending(of(["user", "plan-file"]), "kimi")).toBe(true);
+    expect(isPlanPending(of(["plan", "plan-file"]), "codex")).toBe(true);
+    // thinking / assistant 之后的计划不清除（与 Rust 侧同判据）
+    expect(isPlanPending(of(["plan", "thinking", "assistant"]), "kimi")).toBe(true);
+  });
+
+  it("清除信号：其后有用户消息或工具事件 → false（与 Rust 侧同三条）", () => {
+    for (const tail of [
+      ["plan", "user"],
+      ["plan", "tool-call"],
+      ["plan", "tool-result"],
+      ["plan", "assistant", "user"],
+      ["plan-file", "tool-call"],
+    ]) {
+      expect(isPlanPending(of(tail), "codex")).toBe(false);
+    }
+    // 工具事件之后再出计划 → 新的预期态
+    expect(isPlanPending(of(["plan", "tool-result", "plan"]), "codex")).toBe(true);
+  });
+
+  it("零误报：无计划消息 / 空页 → false", () => {
+    expect(isPlanPending([], "codex")).toBe(false);
+    expect(isPlanPending(null, "codex")).toBe(false);
+    expect(isPlanPending(of(["user", "assistant", "thinking", "tool-call"]), "kimi")).toBe(false);
+  });
+
+  it("工具族收窄：只有 codex/kimi 参与（与后端 plan_dialog_family 同名单）", () => {
+    for (const tool of ["codex", "kimi"]) {
+      expect(isPlanPending(of(["plan"]), tool)).toBe(true);
+    }
+    for (const tool of ["claude", "opencode", "zcode", "dsh", "workbuddy", "openclaw", ""]) {
+      expect(isPlanPending(of(["plan"]), tool)).toBe(false);
+    }
+    // 缺省/ null 工具 → 不放宽
+    expect(isPlanPending(of(["plan"]), null)).toBe(false);
+    expect(isPlanPending(of(["plan"]), undefined)).toBe(false);
+  });
+
+  // **窗口差异的如实申报**（本锁不能覆盖的面）：前端整页 vs 后端 40 条尾部窗口——
+  // 计划卡若落在第 41+ 条历史里，后端看不到而前端看得到。此时前端会挂载卡片、后端回
+  // `available=false`，卡片按自隐契约立刻消失（代价 = **一次多余 GET**，不是错误界面）。
+  // 「卡片挂着但点了报错」由 POST 门与 GET 同口径保证（F3-2），不在本锁范围。
+})

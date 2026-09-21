@@ -364,12 +364,31 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 判据与后端 `remote::api::plan_pending_tail_index` 同源同口径（见上方 isPlanPending
   // 注释）；此处**只放宽门**，可用性仍由后端载荷的 `available` 裁决（卡自隐兜底）。
   //
-  // **非结束态限定**（与 QuestionCard 挂载门同规）：idle/finished 是「已聊完」的会话，
-  // 重进详情不必每次再打一发 GET；且结束态的计划提案早已被消费（用户必然已注入过
-  // 下一步指令或模型已继续），预期态在结束态出现即为陈旧信号——不挂载。
+  // **只排除 `finished`，不用 isSummary**（丁T2 复评 F3-1，Critical 修复）：
+  // **codex 计划提案后的真机状态是 Idle**（`assistant(<proposed_plan>)` → `task_complete`
+  // → `TurnEnd → Idle`；codex 的兜底红已废，`codex_parser` 不落 Waiting）。而 `isSummary`
+  // （`:360`）把 idle 也算「已聊完」→ 首版实现下 `planPending` 恒 false →
+  // **审批卡永不挂载，后端算出的 `available=true` 没有消费方**。
+  //
+  // 为什么 `finished` 仍排除：那是**会话真的结束**（进程退出/归档），重进详情不必再打
+  // GET；`idle` 只是「当前无回合在跑」——恰恰是「终端在等一个计划确认」的常态（模型停下
+  // 来等用户），必须挂载。
+  //
+  // **不动 `isSummary` 本身**（它还管总结模式的消息折叠，既有行为一概保持）——
+  // 本处只在挂载门这一处换判据。
+  //
+  // **窗口差异（复评 M1）**：前端吃的是详情页**已拉取**的整页消息（200/1000 条），
+  // 后端 `approve_options_scan` 读的是 40 条尾部窗口（性能面——审批端点不该拉整页）。
+  // 判据同源同形，仅窗口不同。**两种窗口差异后果各异，如实申报**：
+  // - 前端窗口**更长**时可能多挂一次卡（后端看不到那条计划 → 回 `available=false`）
+  //   → 卡片按自隐契约立刻消失，代价是**一次多余 GET**，不是错误界面；
+  // - 前端窗口**更短**时（用户点过「加载更早」会到 1000 条，反之首屏 200 > 40）
+  //   实际不可能短于后端——前端首屏就是 200 条 > 40。
+  // 即差异只会造成「多一次 GET」，不会造成「卡片挂着但点了报错」（后者由 POST 门
+  // 与 GET 同口径保证）。
   const planPending = useMemo(
-    () => !isSummary && isPlanPending(messages, session.agentType),
-    [isSummary, messages, session.agentType]
+    () => session.status !== "finished" && isPlanPending(messages, session.agentType),
+    [session.status, messages, session.agentType]
   );
   // ApproveCard 挂载门：红灯 ∨ 计划预期态（两个**并列**的门，不互相削弱——
   // waiting 门仍是审批红灯的入口，T1 裁决未动；预期态门是 codex/kimi 计划确认的

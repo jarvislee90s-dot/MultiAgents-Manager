@@ -441,3 +441,42 @@ describe("ApproveCard：计划待确认条（丁T2）", () => {
     expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
   });
 });
+
+// ==== 丁T2 复评 F3-4：kimi 审批卡不含 plan 正文（任务书成文要求）====
+describe("ApproveCard：F3-4 kimi 审批卡不带 plan 正文", () => {
+  it("kimi 载荷 plan=null（后端 F3-4 收口）→ 不渲染计划主体，选项照常", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [{ id: "dialog:1", label: "Approve" }],
+      plan: null,
+    });
+    render(<ApproveCard session={{ id: "sess-kimi-noplan" }} />);
+    await screen.findByTestId("approve-option-dialog:1");
+    expect(screen.queryByTestId("approve-plan")).toBeNull();
+    expect(screen.queryByTestId("approve-plan-file")).toBeNull();
+  });
+
+  it("kimi 计划待确认条（planPending）同样不带正文 → 只渲染条 + 检查钮", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      available: true,
+      options: [],
+      planPending: true,
+      plan: null,
+    });
+    render(<ApproveCard session={{ id: "sess-kimi-pp" }} />);
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    expect(screen.queryByTestId("approve-plan")).toBeNull();
+  });
+
+  it("对照：claude/codex 的 plan 正文照常渲染（F3-4 只收 kimi，不误伤）", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      plan: { content: "# 计划正文", isFile: false },
+    });
+    render(<ApproveCard session={{ id: "sess-claude-plan" }} />);
+    expect((await screen.findByTestId("approve-plan")).textContent).toContain("计划正文");
+  });
+});
