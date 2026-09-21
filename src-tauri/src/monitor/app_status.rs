@@ -15,6 +15,14 @@ pub enum AppEntryKind {
     AssistantMessage,
     /// 工具调用（function_call / function_call_output / function_call_result）→ Processing
     ToolCall,
+    /// **用户输入类工具调用（待决）**→ Waiting。语义 = 「终端在等用户作答」：
+    /// 该工具调用的产物就是用户输入，调用尾部无配对结果即说明用户 UI 还开着
+    /// （丁T1，2026-09-21）。与 [`AppEntryKind::ToolCall`] 的区别是**语义红**而非
+    /// 启发式红——判据是 call_id 配对（见 [`pending_user_input_call`]），有明确
+    /// 证据，不是「停更猜等待」。已知唯一来源：codex `request_user_input`
+    /// （2026-09-21 本机 rollout 全库扫描：配对 22 次 / 未配对 1 次）。
+    /// **本变体不参与任何兜底路径**（兜底红由 `overlay_mtime_stale` 产生）。
+    UserInputToolCall,
     /// 回合开始（Codex event_msg task_started）→ Processing
     TurnStart,
     /// 回合结束（Codex event_msg task_complete）→ Idle
@@ -81,10 +89,41 @@ pub fn derive_app_status(entries: &[AppEntryKind]) -> Option<SessionStatus> {
         AppEntryKind::UserMessage => Some(SessionStatus::Thinking),
         AppEntryKind::AssistantMessage => Some(SessionStatus::Idle),
         AppEntryKind::ToolCall => Some(SessionStatus::Processing),
+        // 丁T1：用户输入类工具调用（待决）→ Waiting。**语义红**：不是「停更猜等待」，
+        // 而是「该工具调用的产物就是用户输入，且它还没被回答」这一明确证据。
+        // 调用方**不得**把它当兜底红就地转 Idle（codex 的兜底红消除只针对
+        // overlay_mtime_stale 产生的 Waiting——见 codex_parser::session_from_digest）
+        AppEntryKind::UserInputToolCall => Some(SessionStatus::Waiting),
         AppEntryKind::TurnStart => Some(SessionStatus::Processing),
         AppEntryKind::TurnEnd => Some(SessionStatus::Idle),
         AppEntryKind::Other => None,
     })
+}
+
+/// 配对判据（丁T1，纯函数，可测）：判定「终端在等用户作答」——某次用户输入类工具
+/// 调用（如 codex `request_user_input`）**没有**同名 call_id 的工具结果
+/// （`function_call_output`）即待决；有配对结果（用户已作答）不触发。
+///
+/// 为什么必须按 call_id 配对而不能只看「尾部是 function_call」：真实 rollout 里
+/// 工具调用与其结果相邻落盘，且同一文件内含多轮多次调用——只看形态会把**已答完的
+/// 历史调用**误判为待决（实测本机全库：`request_user_input` 配对 22 次 vs 未配对
+/// 1 次；其他工具配对 916 次 vs 未配对 6 次——只看形态的噪声面大得多）。
+///
+/// 集合口径（顺序无关）：真实数据里结果恒在调用之后，集合判定更宽容且实现更简；
+/// 调用方按「未配对的那个调用在 kinds 流里的位置」标注语义（见 codex_parser），
+/// 因此若其后还有更新的语义条目，尾扫仍由更新的条目胜出（不会误红）。
+pub fn unpaired_user_input_call_ids<'a>(calls: &[&'a str], outputs: &[&str]) -> Vec<&'a str> {
+    calls
+        .iter()
+        .filter(|id| !outputs.contains(*id))
+        .copied()
+        .collect()
+}
+
+/// [`unpaired_user_input_call_ids`] 的布尔形态：存在未配对的用户输入类调用
+/// = 终端在等用户作答
+pub fn pending_user_input_call(calls: &[&str], outputs: &[&str]) -> bool {
+    !unpaired_user_input_call_ids(calls, outputs).is_empty()
 }
 
 /// 尾部第一条有语义条目（= derive_app_status 的判定依据条目；全记账 → None）。
@@ -163,6 +202,90 @@ mod tests {
             derive_app_status(&[AppEntryKind::TurnEnd]),
             Some(SessionStatus::Idle)
         );
+    }
+
+    // ---- 丁T1：用户输入类工具调用（待决）语义 ----
+
+    /// 待决的用户输入类工具调用在尾 → Waiting（语义红：终端在等用户作答）
+    #[test]
+    fn user_input_tool_call_tail_is_waiting() {
+        assert_eq!(
+            derive_app_status(&[AppEntryKind::UserMessage, AppEntryKind::UserInputToolCall]),
+            Some(SessionStatus::Waiting)
+        );
+    }
+
+    /// 新变体参与尾扫（非 Other）：它比更早的条目优先，也会被更新的语义条目盖过
+    #[test]
+    fn user_input_tool_call_participates_in_tail_scan() {
+        // 尾扫取第一条有语义条目 = 新变体本身
+        assert_eq!(
+            tail_semantic_kind(&[
+                AppEntryKind::UserMessage,
+                AppEntryKind::UserInputToolCall,
+                AppEntryKind::Other,
+            ]),
+            Some(AppEntryKind::UserInputToolCall)
+        );
+        // 更新的 assistant 文本（回合收尾）盖过它 → Idle
+        assert_eq!(
+            derive_app_status(&[
+                AppEntryKind::UserInputToolCall,
+                AppEntryKind::AssistantMessage
+            ]),
+            Some(SessionStatus::Idle)
+        );
+    }
+
+    /// 回合守卫不看新变体：窗口内的开/闭对不影响 Waiting 判定（守卫只作用于
+    /// Idle→Processing 的中间 assistant 消息，不得把语义红改判掉）
+    #[test]
+    fn open_turn_does_not_override_user_input_waiting() {
+        let entries = [
+            AppEntryKind::TurnStart,
+            AppEntryKind::UserMessage,
+            AppEntryKind::UserInputToolCall,
+        ];
+        assert_eq!(turn_window_open(&entries), Some(true), "回合确实仍开");
+        assert_eq!(
+            derive_app_status(&entries),
+            Some(SessionStatus::Waiting),
+            "回合守卫不得把语义红改判（它只对 Idle→Processing 生效）"
+        );
+    }
+
+    // ---- 丁T1：call_id 配对判据（共享核纯函数） ----
+
+    /// 尾部 call 无配对 output → 待决
+    #[test]
+    fn pending_user_input_call_detects_unpaired() {
+        assert!(pending_user_input_call(&["call_1"], &[]));
+        // 前一个已配对、尾部这个未配对 → 仍待决
+        assert!(pending_user_input_call(&["call_1", "call_2"], &["call_1"]));
+    }
+
+    /// 有配对 output（用户已作答）→ 不触发；空流 → 不触发
+    #[test]
+    fn pending_user_input_call_requires_no_output() {
+        assert!(!pending_user_input_call(&[], &[]));
+        assert!(!pending_user_input_call(&["call_1"], &["call_1"]));
+        // 真实时序（2026-09-21 rollout）：call → 79s 后 output → 已答
+        assert!(!pending_user_input_call(
+            &["call_1"],
+            &["other_tool_call", "call_1"]
+        ));
+    }
+
+    /// 同名 call_id 的 output 只配对自己的 call（不同 id 不互相抵消）
+    #[test]
+    fn pending_user_input_call_pairs_by_call_id() {
+        // 别的 call_id 的 output 在场不算配对（真实 rollout：其他工具 output 916 次）
+        assert!(pending_user_input_call(&["call_1"], &["call_other"]));
+        // 多个调用里任一个未配对即待决
+        assert!(pending_user_input_call(
+            &["call_1", "call_2"],
+            &["call_2", "call_other"]
+        ));
     }
 
     #[test]

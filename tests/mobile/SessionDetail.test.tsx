@@ -1882,8 +1882,10 @@ describe("SessionDetail：活状态流（T1）", () => {
   });
 });
 
-// ==== 批次乙 T8：问答卡挂载（SessionDetail 正文视图，waiting 态）====
-describe("SessionDetail：问答卡挂载（批次乙 T8）", () => {
+// ==== 批次乙 T8：问答卡挂载（SessionDetail 正文视图）
+// 丁T1（2026-09-21）挂载口径变更：**非结束态**（!isSummary）挂载——问答端点不看
+// 状态（可用性由数据形态门决定），状态只是门牌；旧口径 waiting 门由本批放宽 ====
+describe("SessionDetail：问答卡挂载（批次乙 T8 / 丁T1 放宽）", () => {
   /** 探测档案 §3 单选真实夹具（缩录）——QuestionCard 可用载荷 */
   const questionInfo = {
     available: true,
@@ -1921,12 +1923,25 @@ describe("SessionDetail：问答卡挂载（批次乙 T8）", () => {
     expect(screen.queryByText("拒绝")).toBeNull();
   });
 
-  it("非 waiting 会话：问答卡不挂载（与 ApproveCard 同一 waiting 门）", async () => {
+  // 丁T1 放宽的核心断言：**运行态（processing/thinking）也挂载**——codex/opencode
+  // 的问题待决红灯由 T1 状态链给出，但问答卡的真正显示**不看状态**（数据形态门）；
+  // 旧的 waiting 门会在状态链尚未收敛时漏掉可作答的卡
+  it.each(["processing", "thinking"] as const)(
+    "丁T1：%s 会话（非结束态）+ 问答可用 → 卡照常挂载",
+    async (status) => {
+      installFetch();
+      routes.questionInfo = questionInfo;
+      render(<SessionDetail session={makeSession({ status })} onBack={() => {}} />);
+      expect(await screen.findByTestId("question-card")).toBeTruthy();
+      // ApproveCard 不受放宽影响：非 waiting 仍不挂载（审批红灯门是刻意的）
+      expect(screen.queryByTestId("approve-card")).toBeNull();
+    }
+  );
+
+  it("丁T1：结束态（idle/finished）不挂载问答卡（既已聊完，不必每进详情再打 GET）", async () => {
     installFetch();
     routes.questionInfo = questionInfo;
-    render(
-      <SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />
-    );
+    render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
     await screen.findByText("proj"); // 页面就绪
     await flushDetail();
     expect(screen.queryByTestId("question-card")).toBeNull();
@@ -1938,6 +1953,19 @@ describe("SessionDetail：问答卡挂载（批次乙 T8）", () => {
     await screen.findByText("proj");
     await flushDetail();
     expect(screen.queryByTestId("question-card")).toBeNull();
+  });
+
+  it("丁T1：运行态 + 问答不可用 → 放宽挂载也不闪空卡（可用性自隐兜底）", async () => {
+    installFetch();
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("proj");
+    await flushDetail();
+    expect(screen.queryByTestId("question-card")).toBeNull();
+    // 挂载确实发生了（否则本用例断言的是「没挂载」而非「自隐」）：GET 打过一发
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-question"))
+        .length
+    ).toBeGreaterThanOrEqual(1);
   });
 
   /** 冲刷挂载后的异步拉取链（mount fetch → setState） */

@@ -475,14 +475,70 @@ enum TailSignal {
     TurnDone,
     /// 步骤进行中 / 用户输入刚提交 / step-finish(reason≠stop) → Processing 黄
     Running,
+    /// **用户输入类工具待决**（丁T1，2026-09-21）→ Waiting 红：终端正显示问答 UI
+    /// 等用户作答。判据见 [`pending_question_part`]（状态 pending/running 且无
+    /// answers）——**语义红**（有明确证据），与「启发式假红」完全不同轴
+    WaitingForUser,
     /// 无部件或老格式无 step 信号（team-mode text/patch）→ 回退既有启发式
     Fallback,
+}
+
+/// opencode 的用户输入类工具名（丁T1）：调用产物就是用户输入。
+/// 来源 = 2026-09-21 本机 `~/.local/share/opencode/opencode.db` part 表全表扫描：
+/// `tool` 取值里 `question` 是唯一的问答工具（其余 bash/read/edit/write/glob/grep/
+/// skill/task/todowrite 均无 questions 入参形态）。**新增名字必须带实测证据**
+const USER_INPUT_TOOL_NAME: &str = "question";
+
+/// 待决 question part 判定（丁T1，纯函数，可测）：
+/// 尾部 part 是 question 工具的调用且**尚未作答** → true。
+///
+/// 判据三层（全部来自 2026-09-21 本机 part 表实证，13 条 question part 全表）：
+/// 1. **是不是 question**：`type=="tool"` 且（`tool=="question"` ∨ `state.input`
+///    含非空 `questions[]` 形态）——名字是权威、形态是加强面（工具改名也接住），
+///    与 codex 侧同款口径；
+/// 2. **在不在等**：`state.status` ∈ {`pending`, `running`}——事件日志实证
+///    pending 13 次 / running 13 次（同一调用的两次事件）；`completed` 与 `error`
+///    分别是已答与被拒/中断，**不触发**；
+/// 3. **有没有答过**：`state.metadata` 无 `answers` 键——completed 的 metadata
+///    实证形态 `{"answers":[["out"]],"truncated":false}`，pending/running 无 metadata。
+///    第三层与第二层冗余是有意的：未来若某版本在 pending 期间预写 metadata，
+///    有 answers 即视为已答（宁漏不误报）。
+fn pending_question_part(part: &serde_json::Value) -> bool {
+    if part.get("type").and_then(|t| t.as_str()) != Some("tool") {
+        return false;
+    }
+    let state = part.get("state").unwrap_or(&serde_json::Value::Null);
+    let by_name = part.get("tool").and_then(|t| t.as_str()) == Some(USER_INPUT_TOOL_NAME);
+    let by_shape = state
+        .pointer("/input/questions")
+        .and_then(|q| q.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !(by_name || by_shape) {
+        return false;
+    }
+    if !matches!(
+        state.get("status").and_then(|s| s.as_str()),
+        Some("pending") | Some("running")
+    ) {
+        return false;
+    }
+    // 已答（metadata.answers 在场）→ 不触发；metadata 缺失/null 视为未答
+    let answered = state
+        .get("metadata")
+        .and_then(|m| m.get("answers"))
+        .is_some_and(|a| !a.is_null());
+    !answered
 }
 
 /// 尾部部件 → 信号（纯函数）。词汇表活体取证 2026-09-16（opencode v1.18.22）：
 /// step-start / reasoning / tool / step-finish(reason=tool-calls|stop)。
 /// 注意 reason=length 归 Running（宁黄不假绿），与 ZCode part_entry_kind 的
-/// length→TurnEnd 语义相反，故不共享其映射（spec §8 决策 7）
+/// length→TurnEnd 语义相反，故不共享其映射（spec §8 决策 7）。
+///
+/// 丁T1 插入点：待决 question part → [`TailSignal::WaitingForUser`]（红灯）；
+/// **其余 tool 部件语义零变化**（仍 Running 黄）——顺序放在下方 `"step-start" |
+/// "reasoning" | "tool"` 臂**之前**，因为 question 也走 `"tool"` 臂
 fn tail_part_signal(
     part: &serde_json::Value,
     message_role: Option<&str>,
@@ -492,6 +548,13 @@ fn tail_part_signal(
     //（opencode 按回车后 ~130ms 即写空 assistant 行，末条 part 仍属 user 消息）
     if message_role == Some("user") {
         return TailSignal::Running;
+    }
+    // 丁T1：待决的用户输入类工具调用（question UI 开着，等用户作答）→ 语义红。
+    // 已答 / 被拒（error）的 question part 落回下方既有臂（tool → Running 黄），
+    // 与「红=失败/批准专用」的既有裁决不冲突：那条针对**启发式**假红（正常完成
+    // 不走红），本条是**证据红**（用户确实被问住了）
+    if pending_question_part(part) {
+        return TailSignal::WaitingForUser;
     }
     let ptype = part
         .get("type")
@@ -534,10 +597,18 @@ fn failed_request_status(error_name: Option<&str>) -> Option<SessionStatus> {
 }
 
 /// OpenCode 状态判断：tail=Running（会话尾部部件强信号——步骤进行中/用户输入/
-/// step-finish(reason≠stop)）→ 直接 Processing；否则——非 assistant 回复完且
-/// CPU > 15% → Processing，user 尾近期活跃 → Processing，其余（含 assistant
-/// 回复完）→ Idle 完成即绿（2026-09-17 用户裁决：红=失败/批准专用，
-/// 失败红由 failed_request_status 前置规则给出，本函数不再产出 Waiting）
+/// step-finish(reason≠stop)）→ 直接 Processing；tail=WaitingForUser（丁T1：待决
+/// question 部件）→ 直接 Waiting；否则——非 assistant 回复完且 CPU > 15% →
+/// Processing，user 尾近期活跃 → Processing，其余（含 assistant 回复完）→ Idle
+/// 完成即绿（2026-09-17 用户裁决：红=失败/批准专用，失败红由
+/// failed_request_status 前置规则给出，本函数不再产出**启发式** Waiting）。
+///
+/// **丁T1 与该裁决的关系（写清防误读）**：那条裁决否定的是「正常完成/停更猜等待」
+/// 这类**启发式**假红（旧实现 60s 窗内判 Waiting，用户验证是噪声）；本次新增的
+/// Waiting 是**语义红**——尾部存在待决的 question 部件（用户输入类工具调用没被
+/// 回答，问答 UI 就开在终端上），有明确证据，与「运行中不误红灯」不矛盾：
+/// 已答（metadata.answers）/ 被拒（state.status=error）的 question 都在
+/// [`pending_question_part`] 处被排除，落回既有语义
 fn determine_opencode_status(
     cpu: f32,
     last_role: Option<&str>,
@@ -549,6 +620,11 @@ fn determine_opencode_status(
     // 启发式（修「输入瞬间绿→红假语音」「运行全程红」「单步>60s 假绿」三症状）
     if tail == TailSignal::Running {
         return SessionStatus::Processing;
+    }
+    // 丁T1：待决问答 = 语义红（终端在等用户作答）——短路既有启发式（否则 60s 后
+    // 落 Idle 绿、问答卡挂不上去）
+    if tail == TailSignal::WaitingForUser {
+        return SessionStatus::Waiting;
     }
     // CPU 为瞬时采样噪声大：仅当会话不是"assistant 已回复完"且 CPU 明显高（阈值提高至 15%）
     // 才升级为 Processing，避免任务结束后后台活动（GC/索引）导致绿黄横跳
@@ -777,6 +853,159 @@ mod tail_signal_tests {
         }
     }
 
+    // ==== 丁T1 · 待决 question 部件 → 语义红 ====
+
+    /// 真实夹具（2026-09-21 本机 part 表实测形态）：question 工具调用，state.status
+    /// ∈ {pending, running}（事件日志实证各 13 次），无 metadata。input.questions
+    /// 为结构化题目数组
+    fn question_part(status: &str, metadata: Option<serde_json::Value>) -> serde_json::Value {
+        let mut state = serde_json::json!({
+            "status": status,
+            "input": {"questions": [{
+                "question": "Which folder should hold build output?",
+                "header": "Build output folder",
+                "options": [
+                    {"label": "dist", "description": "Place build output in the dist folder"},
+                    {"label": "out", "description": "Place build output in the out folder"}
+                ]
+            }]}
+        });
+        if let Some(m) = metadata {
+            state["metadata"] = m;
+        }
+        serde_json::json!({
+            "type": "tool",
+            "callID": "call_00_wYIBa5tx0EDcP9ttqb1W0316",
+            "tool": "question",
+            "state": state
+        })
+    }
+
+    /// 待决主判据（丁T1）：pending / running 的 question part → WaitingForUser；
+    /// 已答（completed + metadata.answers）与被拒（error）→ 不触发（落回既有语义）
+    #[test]
+    fn pending_question_part_detection() {
+        let answered = serde_json::json!({"answers": [["out"]], "truncated": false});
+        for status in ["pending", "running"] {
+            assert!(
+                pending_question_part(&question_part(status, None)),
+                "{status} 的 question part 必须判待决"
+            );
+        }
+        // 已答：completed + metadata.answers（真实形态，本机 9 次）
+        assert!(
+            !pending_question_part(&question_part("completed", Some(answered))),
+            "有 answers → 不触发"
+        );
+        // 被拒 / 中断：error（本机 4 次，error 字段形如 "The user dismissed this question"）
+        assert!(
+            !pending_question_part(&question_part("error", None)),
+            "error 状态落回既有语义（不抢 failed_request_status 的判定）"
+        );
+        // completed 但 metadata 缺失（防御）：仍视为已答（状态层排除）
+        assert!(!pending_question_part(&question_part("completed", None)));
+    }
+
+    /// 非 question 的 tool 部件 → 不触发（零回归）：既有 tool 部件仍走 Running 黄
+    #[test]
+    fn non_question_tool_part_is_not_pending() {
+        let bash_tool = serde_json::json!({
+            "type": "tool",
+            "tool": "bash",
+            "state": {"status": "running", "input": {"command": "ls"}}
+        });
+        assert!(!pending_question_part(&bash_tool));
+        assert_eq!(
+            tail_part_signal(&bash_tool, Some("assistant"), false),
+            TailSignal::Running,
+            "普通工具调用尾部仍是运行中（零回归）"
+        );
+        // 非 tool 类型的 part 也不触发
+        assert!(!pending_question_part(&serde_json::json!({"type": "text"})));
+    }
+
+    /// 形态加强面：工具改名但 `state.input.questions[]` 形态在场 → 同样接住
+    ///（与 codex 侧同款口径；风险边界见 codex_parser::arguments_have_questions_shape）
+    #[test]
+    fn question_shape_with_other_tool_name_also_pending() {
+        let renamed = question_part("running", None);
+        let mut v = renamed.clone();
+        v["tool"] = serde_json::json!("question_v2");
+        assert!(
+            pending_question_part(&v),
+            "问答形态加强面：工具改名不影响接住"
+        );
+        // 形态不存在（无 questions / 空数组）→ 不触发
+        let mut empty = renamed.clone();
+        empty["state"]["input"] = serde_json::json!({"questions": []});
+        empty["tool"] = serde_json::json!("other");
+        assert!(!pending_question_part(&empty));
+        let mut none = renamed;
+        none["state"]["input"] = serde_json::json!({"command": "ls"});
+        none["tool"] = serde_json::json!("other");
+        assert!(!pending_question_part(&none));
+    }
+
+    /// 待决部件 → 尾部信号 WaitingForUser；已答/被拒 → 落回原有 Running 黄
+    #[test]
+    fn tail_part_signal_routes_pending_question_to_waiting() {
+        assert_eq!(
+            tail_part_signal(&question_part("running", None), Some("assistant"), false),
+            TailSignal::WaitingForUser
+        );
+        let answered = serde_json::json!({"answers": [["out"]], "truncated": false});
+        assert_eq!(
+            tail_part_signal(
+                &question_part("completed", Some(answered)),
+                Some("assistant"),
+                false
+            ),
+            TailSignal::Running,
+            "已答的 question 是普通工具调用（黄，零回归）"
+        );
+        assert_eq!(
+            tail_part_signal(&question_part("error", None), Some("assistant"), false),
+            TailSignal::Running,
+            "被拒/中断的 question 落回既有 tool 语义"
+        );
+    }
+
+    /// WaitingForUser 短路启发式 → Waiting 红（与「完成即绿」裁决不冲突：
+    /// 那条针对启发式假红，本条是证据红）
+    #[test]
+    fn waiting_for_user_signal_short_circuits_to_waiting() {
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_eq!(
+            determine_opencode_status(0.0, Some("assistant"), now, now, TailSignal::WaitingForUser),
+            crate::session::SessionStatus::Waiting
+        );
+        // 超窗（1h 无新消息）同样红灯——问答 UI 开着与时间无关
+        let old = now - 3_600_000;
+        assert_eq!(
+            determine_opencode_status(0.0, Some("assistant"), old, old, TailSignal::WaitingForUser),
+            crate::session::SessionStatus::Waiting
+        );
+    }
+
+    /// 既有短路序不打架（丁T1）：末条消息 `data.error`（failed_request_status）
+    /// 优先于尾部部件信号——question 的 error 落在 **part 的 state**（非
+    /// message.data.error），二者互不遮蔽。本测试锁住两条路径各自的结果
+    #[test]
+    fn failed_request_precedence_does_not_conflict_with_question_state_error() {
+        // message.data.error 在场 → 前置规则胜（question 的 state.error 不在 message 上）
+        assert_eq!(
+            failed_request_status(Some("APIError")),
+            Some(crate::session::SessionStatus::Waiting)
+        );
+        // question 的 state.error（被拒）不产 message error → 前置规则返回 None，
+        // 状态由 tail signal 决定（被拒的 question 落 Running 黄）
+        assert_eq!(failed_request_status(None), None);
+        assert_eq!(
+            tail_part_signal(&question_part("error", None), Some("assistant"), false),
+            TailSignal::Running
+        );
+    }
+
     /// 尾部件查询：跨消息取会话末条 part + 所属 role（占位行空窗场景——末条 part 属 user 消息）
     #[test]
     fn session_tail_part_crosses_messages() {
@@ -999,5 +1228,122 @@ mod matching_tests {
             get_opencode_sessions_with_db(&db, &[fake_process(11, "C:\\Users\\x\\Desktop\\苏州")]);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "ses_new");
+    }
+
+    // ==== 丁T1 · 待决 question 端到端（DB fixture）====
+
+    /// 端到端主判据（丁T1）：`part` 表尾部是待决 question part → 会话卡 Waiting 红。
+    /// 夹具用 2026-09-21 本机 part 表实测形态（tool=question，state.status=pending/
+    /// running，input.questions 结构化数组，无 metadata）
+    #[test]
+    fn pending_question_part_end_to_end_is_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture_db(&db, &[("ses_q", "C:/Users/x/Q", "问答会话", 2000)]);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES ('m1','ses_q',100,'{\"role\":\"assistant\"}')",
+            [],
+        )
+        .unwrap();
+        let part = serde_json::json!({
+            "type": "tool",
+            "callID": "call_00_pending",
+            "tool": "question",
+            "state": {
+                "status": "running",
+                "input": {"questions": [{"header": "Build output folder", "question": "Which folder?", "options": [{"label": "dist", "description": "d"}, {"label": "out", "description": "o"}]}]},
+                "time": {"start": 1783326720870i64}
+            }
+        });
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, data, time_created) VALUES ('prt_q1','m1','ses_q',?1,1783326720870)",
+            rusqlite::params![part.to_string()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sessions = get_opencode_sessions_with_db(&db, &[fake_process(11, "C:\\Users\\x\\Q")]);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].status,
+            crate::session::SessionStatus::Waiting,
+            "待决 question 尾部必须红灯（终端在等用户作答）"
+        );
+    }
+
+    /// 端到端回归（丁T1「运行中不误红灯」）：已答 question（completed +
+    /// metadata.answers）与普通工具调用尾部都**不得**红灯。
+    /// 已答尾部回落到 Running 黄（question 是 tool 部件）
+    #[test]
+    fn answered_question_end_to_end_is_not_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        fixture_db(
+            &db,
+            &[
+                ("ses_done", "C:/Users/x/D", "已答会话", 2000),
+                ("ses_bash", "C:/Users/x/B", "普通工具会话", 2000),
+            ],
+        );
+        let conn = Connection::open(&db).unwrap();
+        for (mid, ses, data, ts) in [
+            (
+                "md1",
+                "ses_done",
+                serde_json::json!({
+                    "type": "tool",
+                    "tool": "question",
+                    "state": {
+                        "status": "completed",
+                        "input": {"questions": [{"question": "Which folder?", "options": [{"label": "out"}]}]},
+                        "metadata": {"answers": [["out"]], "truncated": false},
+                        "time": {"start": 1783326720870i64, "end": 1783326749518i64}
+                    }
+                })
+                .to_string(),
+                1783326749518i64,
+            ),
+            (
+                "md2",
+                "ses_bash",
+                serde_json::json!({
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {"status": "running", "input": {"command": "ls"}}
+                })
+                .to_string(),
+                1783326749518i64,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, 100, '{\"role\":\"assistant\"}')",
+                rusqlite::params![mid, ses],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![format!("prt_{mid}"), mid, ses, data, ts],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let sessions = get_opencode_sessions_with_db(
+            &db,
+            &[
+                fake_process(11, "C:\\Users\\x\\D"),
+                fake_process(22, "C:\\Users\\x\\B"),
+            ],
+        );
+        assert_eq!(sessions.len(), 2);
+        for s in &sessions {
+            assert_ne!(
+                s.status,
+                crate::session::SessionStatus::Waiting,
+                "{}：已答/普通工具尾部不得红灯（运行中不误报）",
+                s.id
+            );
+        }
     }
 }

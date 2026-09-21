@@ -1210,13 +1210,16 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             {session.status === "waiting" && (
               <ApproveCard key={`approve-${session.id}`} session={session} />
             )}
-            {/* 问答卡（批次乙 T8）：waiting 态与 ApproveCard 同层挂载——问答会话上
-                后端硬约束①保证 approve 端点不可用（红卡自隐），本卡自隐同理（双通道
-                未命中时不渲染）；两卡至多可见其一，互不冲突。key 前缀 question-*
-                防同 key 兄弟复用错乱（上方注释同款 T1 防线） */}
-            {session.status === "waiting" && (
-              <QuestionCard key={`question-${session.id}`} session={session} />
-            )}
+            {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：**非结束态**（!isSummary）挂载——
+                问答端点不看会话状态（可用性由数据形态门决定：双通道未命中/审批标记
+                隔离 → available=false），故挂载门只需排除「已结束」的 idle/finished
+                （那是既已聊完的会话，重进详情不必每次再打一发 GET）。成本 = 详情页
+                每轮一 GET；QuestionCard 内部已有「拉取失败/available=false → 静默
+                自隐」（src/mobile/QuestionCard.tsx 的 `!ready || info === null ||
+                !info.available → return null`），所以放宽不会闪出空卡。
+                ApproveCard 保持 waiting 门（审批红灯是刻意的——见其注释）。
+                key 前缀 question-* 防同 key 兄弟复用错乱（上方注释同款 T1 防线） */}
+            {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
             {/* 模式栏（批次丙 T6）：显示当前模式 + 切档入口。与审批/问答卡同层但
                 **不依赖 waiting 态**——模式是常驻信息（计划批准后切档可见性正是诉求）；
                 key 前缀 mode-* 互异（同 key 兄弟复用错乱防线，T1 活状态流同款） */}
@@ -1347,11 +1350,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           {session.status === "waiting" && (
             <ApproveCard key={`approve-${session.id}`} session={session} />
           )}
-          {/* 问答卡（批次乙 T8）：正文视图同一挂载口径（waiting 态 + question- 前缀），
-              语义见分屏分支注释（硬约束①两卡互斥自隐 + key 前缀防线） */}
-          {session.status === "waiting" && (
-            <QuestionCard key={`question-${session.id}`} session={session} />
-          )}
+          {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：正文视图同一挂载口径
+              （**非结束态** + question- 前缀），语义见分屏分支注释
+              （可用性自隐兜底 + key 前缀防线）。ApproveCard 保持 waiting 门 */}
+          {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
           {/* 模式栏（T6）：正文视图同一挂载口径，语义见分屏分支注释 */}
           <ModeBar key={`mode-${session.id}`} session={session} />
           <MessageScrollArea

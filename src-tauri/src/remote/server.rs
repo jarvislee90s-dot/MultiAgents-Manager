@@ -4475,6 +4475,31 @@ mod tests {
             sess("sess_aj", 45, crate::session::SessionStatus::Processing),
             // 复评 Minor 1：submit 首错即停 + failed 审计独占会话（守卫 id 立规）
             sess("sess_ak", 46, crate::session::SessionStatus::Waiting),
+            // 丁T1 回归锁独占会话（全测试集唯一 id，守卫 id 立规）：问题待决的**语义红**
+            // ——状态链（codex request_user_input 配对 / opencode question 部件）推出
+            // Waiting，但**没有**任何等待标记（这是本批新引入的形态）。last_message 为
+            // 真实问答文本（2026-09-21 rollout 实录形态），**不含**任何审批 marker——
+            // 锁「审批卡不得借红灯误出」
+            {
+                let mut s = inj_sess(
+                    "sess_al",
+                    crate::session::AgentType::Codex,
+                    47,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("构建产物放在哪个目录？".to_string());
+                s
+            },
+            {
+                let mut s = inj_sess(
+                    "sess_am",
+                    crate::session::AgentType::OpenCode,
+                    48,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("Which folder should hold build output?".to_string());
+                s
+            },
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -5158,6 +5183,73 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(v["available"], true);
+    }
+
+    /// **丁T1 回归锁（本批引入的新矛盾，任务书硬要求）**：codex / opencode 的问题
+    /// 待决被状态链推出**语义红 Waiting** 之后，审批卡**不得**借机误出。
+    ///
+    /// 与既有 `question_mark_never_triggers_approve_card`（问题**标记** + detect 命中
+    /// 的隔离）互补：本用例是**无标记**形态（问题标记只有 claude 钩子路径会写，
+    /// codex/opencode 无钩子通道）——会话靠状态链的语义红满足 approve 的 Waiting 门，
+    /// 此时唯一的拦截来自 detect 门（问题文本不含审批 marker → hit=false）。
+    /// 锁住的正是「新红灯不会把审批卡带出来」这条边。
+    ///
+    /// 断言（GET = 卡的数据源，**「approve 不可用」的判定面**）：available=false
+    /// （detect miss）+ options 空 + reason null（自隐契约，与严格档提示条区分）。
+    ///
+    /// **POST 面如实申报**：`session-approve` POST **不走 detect**（既有契约——
+    /// 客户端只 POST 它从 GET 拿到的 option id，GET 已把 detect 门走过；见
+    /// `audit_action_vocab`「POST 不走 detect，无需 last_message」与 F2 用例）。
+    /// 因此 POST 对本用例的两会话仍会按映射出键（codex 有默认映射）——这是 **T1 之前
+    /// 就存在**的契约面，不在本任务改动范围内（改它会让既有端点契约测试全红）。
+    /// 用户可见面已由 GET 的 available=false 关死：前端 ApproveCard 只在 available=true
+    /// 时渲染按钮，无按钮即无 POST 入口。残余面（旁路客户端直接 POST）记录在案。
+    #[tokio::test]
+    async fn question_pending_red_never_triggers_approve_card() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        for sid in ["sess_al", "sess_am"] {
+            // 审批 GET：不可用（问题文本不含审批 marker → detect miss）
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-approve-options?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(
+                v["available"], false,
+                "{sid}：问答待决的语义红不得触发审批卡（detect 门必须护住）"
+            );
+            assert!(
+                v["options"].as_array().unwrap().is_empty(),
+                "{sid}：不可用一律不下发选项"
+            );
+            assert_eq!(
+                v["reason"],
+                serde_json::Value::Null,
+                "{sid}：非严格档不可批不得带 reason（ApproveCard 自隐契约）"
+            );
+        }
+        assert!(fake.recorded_keys().is_empty(), "本用例不触任何注入路径");
+        // 问答 GET：照常可用（问答行为零回归）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_u",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
     }
 
     /// 通道 B（兜底）：sess_ai（Processing、无标记）message_source 注入「user 消息 +
