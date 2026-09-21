@@ -660,6 +660,78 @@ export async function sessionQuestionAnswer(
   return (await r.json()) as QuestionAnswerResult;
 }
 
+// ==== 批次丙 T6：模式切换 ====
+
+/** 统一模式档（与 Rust `inject::mode::MamMode` 的 wire 词一一对应，勿漂移）。
+ *  对齐 happy 的 8 值收敛为 MAM 5 值（auto/safe-yolo/yolo 合并为 bypass）。 */
+export type MamMode = "plan" | "default" | "acceptEdits" | "bypass" | "readOnly";
+
+/** 模式档中文名（前端渲染；与 Rust `MamMode::label` 同口径） */
+export const MAM_MODE_LABELS: Record<MamMode, string> = {
+  plan: "计划",
+  default: "默认",
+  acceptEdits: "接受编辑",
+  bypass: "完全信任",
+  readOnly: "只读",
+};
+
+/** 模式视图（GET /session-mode 载荷）。current=null 表示**档未知**（屏读失败或该
+ *  工具不支持回显）→ 前端必须显示「未知」并要求人工核对（红线 4：不假装成功）。
+ *  switchKind：unsupported → 不显示切换按钮（该工具无实测机制）。 */
+export interface SessionModeView {
+  tool: string;
+  current: MamMode | null;
+  currentLabel: string | null;
+  readback: boolean;
+  switchKind: "shiftTab" | "slashCommand" | "unsupported";
+}
+
+/** 切档回执（POST /session-mode/switch）。verified=false 时 hint 给出人工核对提示
+ *  ——切换已投递但无法自动验证（屏读缺失），前端据此渲染提示而非「已切到 X 档」。 */
+export type SessionModeSwitchResult =
+  | { status: "key_sent"; verified: boolean; hint?: string | null }
+  | { status: "failed"; error: string };
+
+/** 拉取当前模式（卡头显示用）。非 2xx → 抛 ApiError（调用方静默降级不显示） */
+export async function fetchSessionMode(sessionId: string): Promise<SessionModeView> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-mode?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-mode 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-mode ${r.status}`);
+  return (await r.json()) as SessionModeView;
+}
+
+/** 切档（T6）。404 no_session | 409 no_mechanism → 非 2xx 抛 ApiError */
+export async function sessionModeSwitch(
+  sessionId: string,
+  target: MamMode
+): Promise<SessionModeSwitchResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-mode/switch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, target }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-mode/switch 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体 */
+    }
+    throw new ApiError(r.status, `session-mode/switch ${r.status}`, data);
+  }
+  return (await r.json()) as SessionModeSwitchResult;
+}
+
 // ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====
 
 /** 一键 resume 回执（POST /session-open）：200 {status:"opening"} 表示电脑侧正在

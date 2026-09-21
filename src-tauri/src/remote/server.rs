@@ -336,6 +336,10 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             "/session-question/answer",
             post(api::session_question_answer),
         )
+        // 批次丙 T6：模式端点（当前档屏读 + 切档注入；PIN 门禁内层 gate 结构性
+        // 覆盖，新端点不需要各自鉴权代码）
+        .route("/session-mode", get(api::session_mode))
+        .route("/session-mode/switch", post(api::session_mode_switch))
         // 2026-09-20：移动端附件上传（落盘会话工作目录 .mam-attachments/<会话>/，
         // 路径随消息内联标记注入；PIN 门禁内层 gate 结构性覆盖；20MB 显式上限——
         // axum 默认 2MB；超限时 handler 先按 Content-Length 预检给结构化 413）

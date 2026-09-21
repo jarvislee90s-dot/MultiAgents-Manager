@@ -2469,3 +2469,304 @@ pub async fn session_open(
 fn resume_command_for_audit(tool: &str, sid: &str) -> String {
     crate::inject::resume::resume_command(tool, sid).unwrap_or_default()
 }
+
+// ============================================================
+// 批次丙 T6：模式切换端点（GET 当前档 + POST 切档）
+// ============================================================
+
+/// 当前模式扫描产物（GET /session-mode）
+struct ModeScanHit {
+    /// 工具标识（前端据 switchKind 决定是否显示切换按钮）
+    tool: String,
+    /// 屏读到的当前档（None = 屏读失败/不支持回显 → 前端显示「未知」+ 人工核对提示）
+    current: Option<crate::inject::mode::MamMode>,
+    /// 该工具是否支持屏读回显（红线 4 的判据；false → 必须提示人工核对）
+    readback: bool,
+    /// 切换机制（前端据此显示「循环切换」或「命令」文案）
+    kind: crate::inject::mode::ModeSwitchKind,
+}
+
+/// 模式扫描（同步，spawn_blocking 内调用）：会话查找 → 机制分族 → （仅支持回显的
+/// 工具）屏读状态栏解析当前档。非 Windows / 屏读失败 → current=None（降级）。
+fn mode_scan_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<ModeScanHit> {
+    let session = (st.session_source)()
+        .sessions
+        .into_iter()
+        .find(|s| s.id == session_id)?;
+    let tool = session.agent_type.tool_id().to_string();
+    let kind = crate::inject::mode::switch_kind(&tool);
+    let readback = crate::inject::mode::mode_readback_supported(&tool);
+    let current = read_mode_from_screen(&session, readback);
+    Some(ModeScanHit {
+        tool,
+        current,
+        readback,
+        kind,
+    })
+}
+
+/// 屏读当前模式（批次丙 T6）：仅对支持回显的工具调用（当前 opencode——矩阵 §2.2
+/// 实测状态栏明示模式文本）。非 Windows / 屏读失败 / 解析不出 → None（调用方降级
+/// 为「档未知」+ 人工核对提示，红线 4：不假装成功）。
+fn read_mode_from_screen(
+    session: &crate::session::Session,
+    readback: bool,
+) -> Option<crate::inject::mode::MamMode> {
+    if !readback {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        match crate::inject::windows_console::read_screen_window(session.pid) {
+            Ok(lines) => {
+                let m = crate::inject::mode::parse_mode_from_screen(&lines);
+                log::debug!("T6 屏读模式（pid={}）→ {:?}", session.pid, m);
+                m
+            }
+            Err(e) => {
+                log::debug!("T6 屏读失败（pid={}: {e}）→ 档未知", session.pid);
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // macOS 无屏读 → 档未知（前端提示人工核对，红线 4）
+        let _ = session;
+        None
+    }
+}
+
+/// GET /m/api/v1/session-mode?session_id=（T6）：返回当前档（尽力而为）+ 该工具的
+/// 切换机制与是否支持回显。会话不存在 → 404 no_session。
+///
+/// **降级语义（红线 4）**：`current` 为 null 表示「未知」（屏读失败或不支持回显）
+/// ——前端必须显示「请人工核对终端模式」，不得假装知道。
+pub async fn session_mode(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    let probe_st = st.clone();
+    let scan = match tokio::task::spawn_blocking(move || mode_scan_sync(&probe_st, &sid)).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-mode 会话扫描任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let Some(hit) = scan else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "error": "no_session" })),
+        )
+            .into_response();
+    };
+    let kind = match hit.kind {
+        crate::inject::mode::ModeSwitchKind::ShiftTabCycle => "shiftTab",
+        crate::inject::mode::ModeSwitchKind::SlashCommand => "slashCommand",
+        crate::inject::mode::ModeSwitchKind::Unsupported => "unsupported",
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "tool": hit.tool,
+            "current": hit.current.map(|m| m.wire()),
+            "currentLabel": hit.current.map(|m| m.label()),
+            "readback": hit.readback,
+            "switchKind": kind,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /m/api/v1/session-mode 请求体（camelCase；字段全 default 防 422）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModeReq {
+    #[serde(default)]
+    pub session_id: String,
+    /// 目标档（wire 词：plan/default/acceptEdits/bypass/readOnly）
+    #[serde(default)]
+    pub target: String,
+}
+
+/// POST /m/api/v1/session-mode（T6 切档）：校验 → 机制分派 → 注入 → 审计 mode。
+///
+/// 注入形态：
+///
+/// - `ShiftTabCycle`（claude/opencode/kimi）：注入 **shift+tab 单键**（一次切一档，
+///   循环语义——目标档不参与按键构造，各家档位环序属未验面，不出手推算）；
+/// - `SlashCommand`（codex）：注入斜杠命令**文本 + 回车提交**（`/plan` 等）；
+/// - `Unsupported`：409 `no_mechanism`（前端只显示当前档）。
+///
+/// **回执如实**：屏读回显不支持时返回 `verified=false` + 人工核对提示（红线 4）
+/// ——绝不声称「已切到 X 档」。
+pub async fn session_mode_switch(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionModeReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    let target = req.target.trim().to_string();
+    let Some(mode) = crate::inject::mode::MamMode::parse(&target) else {
+        return bad_request();
+    };
+    if sid.is_empty() {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 会话查找 + 机制/序列构造（一个 spawn_blocking；锁纪律同 approve）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let lookup = match tokio::task::spawn_blocking(move || -> Result<_, &'static str> {
+        let session = (probe_st.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == probe_sid)
+            .ok_or("no_session")?;
+        let tool = session.agent_type.tool_id().to_string();
+        let plan = crate::inject::mode::mode_switch_sequence(&tool, mode).map_err(|e| {
+            log::debug!("T6 切档不可用（{tool}）：{e}");
+            "no_mechanism"
+        })?;
+        let readback = crate::inject::mode::mode_readback_supported(&tool);
+        Ok((session, tool, plan, readback))
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-mode 会话扫描任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let (session, tool, plan, readback) = match lookup {
+        Ok(v) => v,
+        Err(code) => {
+            let status = if code == "no_session" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::CONFLICT
+            };
+            return (
+                status,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": code })),
+            )
+                .into_response();
+        }
+    };
+    let spec = crate::inject::families::family_for(&tool)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let injector = st.injector.clone();
+    let pid = session.pid;
+    let switch_sid = sid.clone();
+    let attempt = tokio::task::spawn_blocking(move || {
+        // 忙让位（None 哨兵）表达为外层 Option 的 `?`：None = 忙（不投递亦不落审计），
+        // Some(inner) = 真投递（inner 是投递结果）
+        let _guard = crate::inject::queue::try_acquire_inflight(&switch_sid)?;
+        Some(match plan {
+            crate::inject::mode::ModeSwitchPlan::Key(key) => {
+                injector.locate_and_send_key_spec(pid, &key, &spec)
+            }
+            crate::inject::mode::ModeSwitchPlan::Text(cmd) => {
+                // 斜杠命令按**纯文本注入 + 提交回车**（不走 [mobile] 前缀——那是用户
+                // 消息的语义；斜杠命令是控制指令，加前缀会让命令失效）
+                match injector.locate_and_inject_spec(pid, &cmd, &spec) {
+                    Ok(()) => {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                        injector.locate_and_send_key_spec(pid, "enter", &spec)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        })
+    })
+    .await;
+    let result = match attempt {
+        Ok(Some(Ok(()))) => Ok(()),
+        // 忙让位（None 哨兵）：不落审计（无投递发生）
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "error": "投递进行中，请稍后重试"
+                })),
+            )
+                .into_response();
+        }
+        Ok(Some(Err(e))) => Err(e),
+        Err(e) => {
+            log::error!("session-mode 投递任务异常: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+    let audit_content = format!("切换模式至 {}", target);
+    let (result_str, status_line) = match &result {
+        Ok(()) => ("ok".to_string(), "key_sent"),
+        Err(e) => (format!("failed:{e}"), "failed"),
+    };
+    endpoint_audit(
+        &st,
+        &device_id,
+        &device_name,
+        &tool,
+        &sid,
+        &audit_content,
+        "mode",
+        &result_str,
+    );
+    match result {
+        Err(e) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": status_line, "error": e })),
+        )
+            .into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "status": status_line,
+                // 红线 4：回显不支持时明确 verified=false + 人工核对提示
+                "verified": readback,
+                "hint": if readback {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!("该工具的模式回显未实测，请人工核对终端当前模式")
+                },
+            })),
+        )
+            .into_response(),
+    }
+}

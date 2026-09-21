@@ -5,6 +5,8 @@ pub mod confirm;
 pub mod dialog;
 pub mod engine;
 pub mod families;
+// 模式切换内核（批次丙 T6）：统一模式枚举 + 各工具切换机制映射 + 屏读回显解析
+pub mod mode;
 pub mod normalize;
 pub mod question;
 pub mod queue;

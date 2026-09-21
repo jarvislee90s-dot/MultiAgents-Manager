@@ -28,6 +28,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
+import ModeBar from "./ModeBar";
 import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
@@ -1216,6 +1217,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             {session.status === "waiting" && (
               <QuestionCard key={`question-${session.id}`} session={session} />
             )}
+            {/* 模式栏（批次丙 T6）：显示当前模式 + 切档入口。与审批/问答卡同层但
+                **不依赖 waiting 态**——模式是常驻信息（计划批准后切档可见性正是诉求）；
+                key 前缀 mode-* 互异（同 key 兄弟复用错乱防线，T1 活状态流同款） */}
+            <ModeBar key={`mode-${session.id}`} session={session} />
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
@@ -1347,6 +1352,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           {session.status === "waiting" && (
             <QuestionCard key={`question-${session.id}`} session={session} />
           )}
+          {/* 模式栏（T6）：正文视图同一挂载口径，语义见分屏分支注释 */}
+          <ModeBar key={`mode-${session.id}`} session={session} />
           <MessageScrollArea
             fontScale={fontScale}
             showJump={showJump}

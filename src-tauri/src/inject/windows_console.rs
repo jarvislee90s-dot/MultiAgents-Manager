@@ -156,10 +156,20 @@ impl From<&KeyRecordSpec> for FlatKeyRecord {
             // M9R：扫描码随规格下发（VK 形态事件必带，B 族 crossterm 以 VK+scan 为准）
             virtual_scan_code: spec.scan,
             unicode_char: spec.ch,
-            control_key_state: 0,
+            // T6：修饰位仅在 shift+tab 组合键时置位。该组合的唯一形态是
+            // `ch == 0 ∧ vk == VK_TAB`（[`crate::inject::engine::shift_tab_records`]）；
+            // 单字符/控制键/方向键记录一律 0，与既有行为逐字节一致。见 SHIFT_PRESSED
+            control_key_state: if spec.ch == 0 && spec.vk == 0x09 {
+                SHIFT_PRESSED
+            } else {
+                0
+            },
         }
     }
 }
+
+/// SHIFT_PRESSED 修饰位（Win32 `dwControlKeyState` 常量；批次丙 T6 shift+tab 用）
+const SHIFT_PRESSED: u32 = 0x0010;
 
 /// 真实键位布局（M9R，Windows FFI，供调用点迁移；执行层大重写归 Task 3）。
 /// 依据 M6R §8.1 定案：vk = VkKeyScanW(ch) & 0xFF，scan = MapVirtualKeyW(vk)。
@@ -517,6 +527,12 @@ const ARROW_VT_SEQS: [(&str, &str); 4] = [
 /// [`control_records`]；方向键按族分支——A 族 [`vt_seq_records`]（VT 字符流）/
 /// B 族 [`vk_arrow_records`]（VK+scan）。域外 → `None`。
 fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
+    // 批次丙 T6：shift+tab 组合键（模式切换主键）——不在 control_records 的既有
+    // 键域（那是个纯 VK 域，不带修饰位），单独分支；族无关（三家 A 族实测共性，
+    // B 族同样以 VK+修饰位表达组合键）
+    if key == "shift+tab" {
+        return Some(super::engine::shift_tab_records(&WinKeyLayout));
+    }
     if let Some(records) = control_records(key, &WinKeyLayout) {
         return Some(records);
     }

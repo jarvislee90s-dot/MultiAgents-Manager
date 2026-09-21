@@ -130,11 +130,40 @@ pub fn enter_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
     ]
 }
 
+/// shift+tab 组合键记录（批次丙 T6：模式切换的主键）。
+///
+/// **形态**：VK_TAB 键事件带 **SHIFT_PRESSED 修饰位**。Windows 控制台键事件用
+/// `dwControlKeyState` 表达修饰键（不是单独的 VK_SHIFT 事件）——因此调用方需把
+/// 本函数产出的记录映射到带修饰位的 INPUT_RECORD（见
+/// `windows_console::key_records_for` 的 `"shift+tab"` 分支）。
+/// `ch = 0`（组合键不产生字符）；成对 down/up。
+pub fn shift_tab_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
+    let vk = 0x09u16; // VK_TAB
+    let scan = layout.scan_of(vk);
+    vec![
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch: 0,
+            down: true,
+        },
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch: 0,
+            down: false,
+        },
+    ]
+}
+
 /// 控制键 → VK 形态事件对；**键域校验（P2-2）**：键域 = `"enter"`/`"esc"`/
 /// `"tab"` + 单字符 ASCII 字母数字（审批键位 "y"/"1" 走这里）；域外（空串/
 /// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab → VK_RETURN/VK_ESCAPE/
 /// VK_TAB 且 ch 同码；单字符 → `vk = layout.vk_of(c)`、`ch = c`；scan 一律
 /// `layout.scan_of(vk)` 派生；成对 down/up。
+///
+/// `"shift+tab"`（批次丙 T6）**不在本函数**——它需要修饰位，走
+/// [`shift_tab_records`]（执行层另分支）。本函数保持既有域不变（零回归）。
 pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecordSpec>> {
     let (vk, ch) = match key {
         "enter" => (0x0Du16, 0x0Du16), // VK_RETURN
