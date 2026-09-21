@@ -55,6 +55,10 @@ pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
 /// `mode`（T6 模式切换，摘要=「切换模式至 <target>」）。**T9 打断式插队不新增
 /// 词**：Esc 中断是 `jump` 动作的**内部分步**（先中断再投递），审计仍记 `jump`
 /// ——用户视角是一个动作（见 queue::try_flush_with 的 interrupt_first 分支）。
+/// **丁T3 追加 `slash`**（裁2：`/` 开头消息裸注入不带签名——前后缀都会破坏命令与
+/// 参数；终端不留痕是可接受的，溯源走审计页：action=slash + device_name 列。
+/// 判据与实际注入形态同源单点：`normalize::is_slash_message`，见 session_send 的
+/// action 选择处）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn audit_write(
     conn: &rusqlite::Connection,

@@ -641,7 +641,7 @@ if (!isTauri) {
               sessionId: "sess-abc-1",
               channel: "tmux",
               action: "send",
-              summary: "[mobile] 修复登录页空指针",
+              summary: "修复登录页空指针 [mobile 测试机]",
               result: "ok",
             },
             {
@@ -651,7 +651,7 @@ if (!isTauri) {
               sessionId: "sess-def-2",
               channel: "tmux",
               action: "queue",
-              summary: "[mobile] 跑一遍回归测试",
+              summary: "跑一遍回归测试 [mobile 测试机]",
               result: "ok",
             },
             {
@@ -661,7 +661,7 @@ if (!isTauri) {
               sessionId: "sess-ghi-3",
               channel: "tmux",
               action: "retract",
-              summary: "[mobile] 撤回上条消息",
+              summary: "撤回上条消息 [mobile 测试机]",
               result: "ok",
             },
           ],

@@ -6,12 +6,13 @@
 //   「已投递至终端输入，agent 空闲后处理（未确认落盘）」（D7/T3 中性回执，验收
 //   问题 #5：注入 Ok + 戳未中 + 屏读无滞留草稿 = 已被 TUI 收进内部队列，非失败
 //   **不提供重试**，重试 = 双发且 TUI 那份无法撤回）/ queued 黄
-//   「排队中 第 N 位」+ [立即发送][撤回] / failed 红「发送失败：…」（重按发送即重试）；
+//   「排队中 第 N 位」+ [立即发送][撤回] / failed 红「发送失败：…」（重按发送即重试）
+//   / blocked 中性 slate（丁T3 接入②：分流拦截——无注入尝试、无重试语义，文案是指路）；
 //   await 全程另有「投递中…」chip（灰3：慢消费者长文投递可达分钟级，界面不空白，
 //   完成后被结果 chip 覆盖）；正文上限与后端 MAX_SEND_CHARS 对齐（10000，双保险）；
 // - 多列队列表（D8，验收问题 #6）：完整渲染 /session-queue——挂载拉一次（进入会话
 //   即见桌面端/他端排的既有队列）+ 复用 3s 轮询通道（有排队回执或列表非空即持续，
-//   列表变空即停）；逐条 = 预览（去 [mobile 设备名] 前缀、附件标记替换 [附件]、
+//   列表变空即停）；逐条 = 预览（剥 [mobile 设备名] **尾**签名、附件标记替换 [附件]、
 //   截前 12 字符）+ 位次（position=0 容忍口径不变）+ 立即发送/修改/撤回三钮（按条
 //   id 走既有端点，不限本端发送的条目）；底部「空闲时将按序自动发送」说明。
 //   「排队中 第 N 位」chip 从回执槽移除（由列表取代）；queued 回执仍内部存在——
@@ -34,14 +35,30 @@
 //   下一次发送携带 queueOnly=true 强制入队——防「文件说闲、TUI 实忙」窗口把
 //   修改后的重发直发出去（变相插队）；入队后的放行节奏：会话转闲跃迁后事件臂
 //   即时放行，已空闲且无跃迁时由 60s 周期兜底放行（可达分钟级），行为收敛；
-// - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成。
+// - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成；
+// - **卡片在场分流（丁T3 接入②，§2.4 裁3 的安全面）**：终端上有待决对话框时，
+//   自由文本被 TUI 当成键盘输入理解——多选对话框里 **Enter = 切换高亮项**（问题 6
+//   实锤：composer 打自由文本 → 选项 1 被勾选/反勾），审批对话框里更可能被读成
+//   选项（kimi 误批准实锤）。本组件挂载/状态跃迁时探测两类卡片的在场（与两张卡
+//   自己拉的是同两个端点），在场则：
+//   - **问答卡在场** → placeholder 改「作为回答发送」语义的引导文案，发送被拦截
+//     （诚实回执：请在卡片输入框作答或在终端作答——**自由作答注入序列尚未实机定案**
+//     〔§2.4 各工具序列待定〕，本任务不假装能代发，见文件末的未覆盖面申报）；
+//   - **审批卡 / 计划待确认在场** → 拦截 + 「终端等待审批，请用卡片按钮」。
+//   **发送时刻再探一次**（快照可能陈旧：挂载后对话框才出现）——探针本身是前端
+//   尽力而为的第二道闸，**权威守卫**在后端注入时刻的屏读（接入①覆盖控制类；
+//   普通消息的屏读守卫不在本任务范围，见未覆盖面申报）。
+//   探针失败（网络异常）→ 按「不在场」放行（能力缺失不阻断，与后端
+//   `blocks_control_injection` 同裁决）；代价是弱网下退化为无分流，如实申报。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent } from "react";
 import { CircleHelp, Plus } from "lucide-react";
 import {
   ApiError,
+  fetchApproveOptions,
   fetchQueue,
   fetchSendInfo,
+  fetchSessionQuestion,
   queueJump,
   queueRetract,
   sessionSend,
@@ -86,6 +103,14 @@ type Receipt =
     }
   | { kind: "failed"; error: string }
   | { kind: "gone"; message: string }
+  | {
+      /** 丁T3 接入②：**被分流拦截**（终端卡片在场，本轮未发送）。与 failed 分列
+       *  的理由：拦截不是失败——没有任何注入尝试、没有「可重试」语义（重按发送
+       *  在同一形态下仍会被拦），文案是**指路**（去卡片按钮 / 去卡片输入框）。
+       *  渲染配色同 gone（中性 slate），避免红 chip 暗示「操作出错」。 */
+      kind: "blocked";
+      message: string;
+    }
   | null;
 
 /** 排队态轮询间隔（毫秒）：有排队项时刷新队位（与看板轮询同量级） */
@@ -106,21 +131,47 @@ const GONE_POLL_CONSUMED_MESSAGE = "该消息已不在队列（可能已送达�
 
 /** D8 队列预览截断长度（字符）：逐条预览只给「前十余字符」一眼可辨的量 */
 const PREVIEW_MAX_CHARS = 12;
-/** W1 来源标记前缀（服务端 compose_injection 注入，非用户正文）：预览与「修改」
- *  放回正文时剥离——不剥则修改重发会二次叠加前缀 */
-const MOBILE_PREFIX_RE = /^\[mobile[^\]]*\]\s*/;
+
+/** 终端卡片在场态（丁T3 接入②，§2.4）：由两个既有端点的载荷派生——
+ *  `question`（问答卡在场：/session-question 的 available）/
+ *  `approve`（审批卡或计划待确认在场：/session-approve-options 的
+ *  available=true，含 planPending 形态——那是「等一个计划确认」，放行自由文本
+ *  在 kimi 上会被读成批准）。`none` = 都不在场（或探针不可用）。 */
+type TerminalCardPresence = "none" | "question" | "approve";
+
+/** 分流文案（丁T3 §2.4 裁3）：
+ *  - 问答在场：placeholder 与回执用「作为回答发送」的语义（用户输入的是**答案**，
+ *    不是新消息）；发送被拦截——**自由作答注入序列尚未实机定案**（§2.4 各工具
+ *    序列待定），本任务不假装能代发，故落诚实回执（与「未验不出键」同一纪律）；
+ *  - 审批在场：裁3 的安全面——此类对话框**没有自由作答语义**，放行=误触选项
+ *    （kimi 误批准实锤），故拦截并指路卡片按钮。 */
+const QUESTION_PRESENT_PLACEHOLDER = "输入内容将作为回答发送（对话框待决）";
+const QUESTION_PRESENT_RECEIPT =
+  "终端正在等待回答：请在问答卡中输入作答，或直接在终端作答（自由作答序列尚未实机定案，本端不代发）";
+const APPROVE_PRESENT_RECEIPT = "终端等待审批，请用卡片按钮";
+
+/** W1 来源标记（服务端 compose_injection 注入，非用户正文）：预览与「修改」放回正文
+ *  时剥离——不剥则修改重发会二次叠加签名。
+ *
+ *  **丁T3 裁2 起签名在尾部**（原名在头部）：正则从 `^\[mobile…\]` 改为 `\s*\[mobile…\]$`
+ *  ——尾部形态（`{正文} [mobile 设备名]`）。不改为尾部就会在预览里残留签名、在
+ *  「修改」回填时把签名当正文带回输入框（重发即二次叠加）。
+ *  容错：正文里偶然出现 `[mobile …]` 字样但**不在尾部**时不剥（与 Rust 侧
+ *  `normalize::strip_mobile_signature` 同口径：只剥形态完整的尾签名）。 */
+const MOBILE_SIGNATURE_RE = /\s*\[mobile[^\]]*\]$/;
 /** 附件内联标记（文件池既有约定）：<image|file path="…"> → 预览中替换为 [附件] */
 const ATTACH_MARKUP_RE = /<(?:image|file)\s+path="[^"]*">/g;
 
-/** 剥离 [mobile 设备名] 前缀（正则不命中则原样返回）：预览与修改放回共用 */
-function stripMobilePrefix(content: string): string {
-  return content.replace(MOBILE_PREFIX_RE, "");
+/** 剥离尾部 `[mobile 设备名]` 签名（正则不命中则原样返回）：预览与修改放回共用。
+ *  前后空白一并剥（服务端产出形态为 `{正文} [mobile X]`）。 */
+function stripMobileSignature(content: string): string {
+  return content.replace(MOBILE_SIGNATURE_RE, "");
 }
 
-/** 队列条目预览（D8）：去 [mobile …] 前缀 → 附件标记替换 [附件] → 截前 12 字符
- *  （不足则全显）。仅用于展示；「修改」放回正文只剥前缀、保留附件标记行 */
+/** 队列条目预览（D8）：剥尾部 [mobile …] 签名 → 附件标记替换 [附件] → 截前 12 字符
+ *  （不足则全显）。仅用于展示；「修改」放回正文只剥签名、保留附件标记行 */
 function queueItemPreview(content: string): string {
-  const body = stripMobilePrefix(content).replace(ATTACH_MARKUP_RE, "[附件]");
+  const body = stripMobileSignature(content).replace(ATTACH_MARKUP_RE, "[附件]");
   return body.length > PREVIEW_MAX_CHARS ? `${body.slice(0, PREVIEW_MAX_CHARS)}…` : body;
 }
 
@@ -176,6 +227,24 @@ export default function MessageComposer({ session }: MessageComposerProps) {
    *  分钟级）。队列存储不携带该标志（后端仅影响入队决策，flush 循环对
    *  queueOnly 项与普通队列项同权） */
   const [queueOnlyNext, setQueueOnlyNext] = useState(false);
+  /** 终端卡片在场态（丁T3 接入②）：挂载/换会话拉一次 + **发送时刻复探**（快照会
+   *  陈旧——对话框可能在挂载之后才出现，而复探是发送前的最后一道前端闸）。
+   *  探针失败 = 不在场（能力缺失不阻断，与后端同裁决；见文件头注释）。 */
+  const [cardPresence, setCardPresence] = useState<TerminalCardPresence>("none");
+
+  /** 探测两类卡片在场（两张卡自己拉的是同两个端点——ApproveCard 的
+   *  `available`（含 planPending）/ QuestionCard 的 `available`）。二者并行，
+   *  任一失败按不在场处理（单点失败不连坐另一路）。 */
+  const probeCardPresence = useCallback(async (): Promise<TerminalCardPresence> => {
+    const [approve, question] = await Promise.all([
+      fetchApproveOptions(session.id).catch(() => null),
+      fetchSessionQuestion(session.id).catch(() => null),
+    ]);
+    // 审批优先（裁3 的安全面更重：审批框放行自由文本 = 误触选项/误批准）
+    if (approve?.available === true) return "approve";
+    if (question?.available === true) return "question";
+    return "none";
+  }, [session.id]);
 
   // 挂载拉取一次输入区可用性；任何失败静默保持隐藏
   useEffect(() => {
@@ -215,6 +284,26 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       alive = false;
     };
   }, [session.id]);
+
+  // 丁T3 接入②：挂载/换会话探一次卡片在场（placeholder 分流的数据源）。
+  // 成本申报：本组件因此每次挂载/换会话多打**两发** GET（/session-approve-options
+  // 与 /session-question）——这两条请求**卡片自己也会打**（ApproveCard / QuestionCard
+  // 各自挂载拉一次）。为什么不把在场态从 SessionDetail 传下来：那需要在 SessionDetail
+  // 里把「两张卡内部各自的拉取结果」提升为共享状态（两卡目前是自拉自用、失败自隐的
+  // 独立组件），改动面覆盖两张卡 + 详情页挂载门，超出 T3 范围；而自拉的代价只是
+  // **每挂载两发轻量 GET**（后端都是短查询；且本组件只在 `available=true` 时改变
+  // 行为，不会因多打而误判）。发送时刻另有复探（见 handleSend）——两发探针的成本
+  // 换来「对话框出现后不必等重挂即被发现」。
+  useEffect(() => {
+    let alive = true;
+    setCardPresence("none");
+    void probeCardPresence().then((p) => {
+      if (alive) setCardPresence(p);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [probeCardPresence]);
 
   // D8 排队列 3s 轮询（复用既有 3s 通道，不另起轮询）：有排队回执 **或** 列表非空
   // 即持续；列表变空（且无排队回执）→ 停轮询。依赖是布尔量而非列表本体——位次
@@ -269,6 +358,27 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     if (attachments.some((a) => a.status === "uploading")) return; // 上传中禁发（防消息先于落盘）
     setSending(true);
     try {
+      // ===== 丁T3 接入②：发送时刻**复探**卡片在场（§2.4 裁3 的安全面）=====
+      // 挂载时探到的是快照；对话框可能在挂载之后才出现（模型提问/请求批准是回合
+      // 内任意时刻的事），而放行自由文本的代价是**误触选项**（多选框 Enter=切换
+      // 高亮项 / 审批框被读成选择），故发送前再探一次、以此刻结论为准。
+      //
+      // 拦截的**回执语义**（诚实口径，不假装能代发）：
+      // - 问答在场：引导去卡片作答；**本端不代发**——自由作答注入序列尚未实机定案
+      //   （§2.4），假装能发就是对用户说谎（发了也没人保证落到「Type something」上）；
+      // - 审批/计划待确认在场：这类对话框没有自由作答语义，指路卡片按钮。
+      //
+      // 输入框内容**保留**（与 failed 态同口径：用户可复制到卡片输入框或终端）。
+      const presence = await probeCardPresence();
+      setCardPresence(presence);
+      if (presence === "approve") {
+        setReceipt({ kind: "blocked", message: APPROVE_PRESENT_RECEIPT });
+        return;
+      }
+      if (presence === "question") {
+        setReceipt({ kind: "blocked", message: QUESTION_PRESENT_RECEIPT });
+        return;
+      }
       // 附件标记行（文件池既有约定 <image|file path>）：拼在正文之后随消息注入，
       // agent 据路径读文件；failed 附件不拼（未落盘，拼了 agent 也读不到）
       const markup = attachments
@@ -306,7 +416,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           content: fullText,
         });
         // D8 即时反馈：行乐观 upsert（发送后到列表刷新之间不上墙等 3s）；content
-        // 用本端原文（此时服务端 compose 后的带前缀文本尚未回拉，3s 轮询整表覆盖）
+        // 用本端原文（此时服务端 compose 后的带签名文本尚未回拉，3s 轮询整表覆盖）
         setQueueItems((prev) =>
           upsertQueueItem(prev, {
             id: res.itemId,
@@ -328,7 +438,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     } finally {
       setSending(false);
     }
-  }, [text, attachments, sending, busy, sendInfo, session.id, queueOnlyNext]);
+  }, [text, attachments, sending, busy, sendInfo, session.id, queueOnlyNext, probeCardPresence]);
 
   // P2-7 失败对账（插队/撤回/修改共用）：失败后复核 /session-queue——
   // - 条目仍在 pending → 恢复排队视图（刷新队位，行同步更新，「立即发送/修改/撤回」
@@ -482,8 +592,8 @@ export default function MessageComposer({ session }: MessageComposerProps) {
 
   /** 修改（2026-09-20 裁决）：确认出队后把正文放回输入框继续编辑——与撤回共用
    *  同一后端出队动作，差别仅在是否恢复文本。D8：按条取行 content——放回前剥离
-   *  [mobile …] 前缀（行 content 是服务端 compose 后的最终注入文本，不剥则重发
-   *  二次叠加前缀）；附件标记行保留（重发仍引用同一落盘文件）。截断到
+   *  [mobile …] **尾**签名（丁T3 裁2 签名后置；行 content 是服务端 compose 后的最终
+   *  注入文本，不剥则重发二次叠加签名）；附件标记行保留（重发仍引用同一落盘文件）。截断到
    *  MAX_SEND_CHARS 与输入框 maxLength 对齐；恢复后聚焦输入框（移动端直接可改）。
    *  D6：确认出队后置 queueOnlyNext——修改后的重发一律入队（防「文件说闲、
    *  TUI 实忙」窗口变相插队）；忙时失败/复核失败条目仍在队（onConfirmed 不触发）
@@ -492,7 +602,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     async (item: QueueItemView) => {
       if (busy) return;
       await retractWithOutcome(item.id, item.position, item.content, () => {
-        setText(stripMobilePrefix(item.content).slice(0, MAX_SEND_CHARS));
+        setText(stripMobileSignature(item.content).slice(0, MAX_SEND_CHARS));
         setQueueOnlyNext(true);
         setReceipt(null);
         inputRef.current?.focus();
@@ -593,6 +703,20 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           {sendInfo.reasonCode ? `（${sendInfo.reasonCode}）` : ""}
         </p>
       )}
+      {/* 丁T3 接入②：终端卡片在场提示条（**输入区仍可用**——不把输入框整个禁用是
+          刻意的：用户可能正想把内容复制到卡片输入框；发送按钮仍可点，点了会落
+          拦截回执并说明去向）。文案与回执同源常量，两处不会漂移。 */}
+      {injectable && cardPresence !== "none" && (
+        <p
+          data-testid="composer-card-presence"
+          data-presence={cardPresence}
+          className="mb-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          {cardPresence === "approve"
+            ? "终端等待审批——本输入框直发已被拦截，请用上方卡片按钮应答"
+            : "终端正在等待回答——本输入框将作为回答发送；请在问答卡中作答"}
+        </p>
+      )}
       {/* 投递中（灰3）：send await 全程在场——慢消费者长文投递可达分钟级，
           期间不空白；与既有回执并存（排队态的撤回/插队按钮不因发送而失联），
           完成后被结果 chip 覆盖（sending 翻转 false 即消失） */}
@@ -647,6 +771,17 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             // 不标失败红色、不带「（可重试）」，防重复注入
             <span
               data-testid="send-receipt-gone"
+              className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
+            >
+              {receipt.message}
+            </span>
+          )}
+          {receipt.kind === "blocked" && (
+            // 丁T3 接入②：分流拦截（非失败——无注入尝试、无「可重试」语义）。
+            // 配色同 gone（中性 slate）：红 chip 会暗示「操作出错」，而这是**安全
+            // 侧的正确行为**（终端在等对话框，此刻直发会误触选项）
+            <span
+              data-testid="send-receipt-blocked"
               className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
             >
               {receipt.message}
@@ -806,7 +941,15 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           onPaste={handlePaste}
           rows={2}
           disabled={!injectable}
-          placeholder={injectable ? "输入消息发送到终端…" : "该会话不支持远程注入"}
+          placeholder={
+            !injectable
+              ? "该会话不支持远程注入"
+              : cardPresence === "question"
+                ? QUESTION_PRESENT_PLACEHOLDER
+                : cardPresence === "approve"
+                  ? "终端等待审批，请用卡片按钮"
+                  : "输入消息发送到终端…"
+          }
           className="min-h-0 flex-1 resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-sky-500/40 focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
         />
         <button

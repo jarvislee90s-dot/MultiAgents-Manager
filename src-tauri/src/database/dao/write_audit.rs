@@ -1,5 +1,8 @@
 // 写审计表 DAO（M7）：移动端注入动作的只追加账本（谁在何时经哪个通道对哪个会话做了什么）
-// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key | open | answer（由调用方约束，本层不校验；answer = 批次乙 T8 问答应答）
+// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key | open | answer | mode | slash
+//（由调用方约束，本层不校验；answer = 批次乙 T8 问答应答；mode = 批次丙 T6 模式切换；
+//  **slash = 丁T3 斜杠命令裸注入**——裁2：`/` 开头消息不带签名（前后缀都会破坏命令与
+//  参数），终端不留痕是可接受的，溯源只此一处：本表 action=slash + device_name 列）
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -124,7 +127,7 @@ mod tests {
             "s1",
             "tmux",
             "send",
-            "[mobile iPhone] hi",
+            "hi [mobile iPhone]",
             "ok",
         );
         record_conn(
@@ -136,7 +139,7 @@ mod tests {
             "s2",
             "tmux",
             "queue",
-            "[mobile iPhone] hi",
+            "hi [mobile iPhone]",
             "ok",
         );
         let rows = recent_conn(&c, 10);
@@ -147,7 +150,7 @@ mod tests {
         assert_eq!(rows[0].device_name, "iPhone");
         assert_eq!(rows[0].channel, "tmux");
         assert_eq!(rows[0].action, "queue");
-        assert_eq!(rows[0].summary, "[mobile iPhone] hi");
+        assert_eq!(rows[0].summary, "hi [mobile iPhone]");
         assert_eq!(rows[0].result, "ok");
         assert_eq!(rows[1].ts, 1000);
         assert_eq!(rows[1].action, "send");

@@ -700,10 +700,12 @@ export interface SessionModeView {
 }
 
 /** 切档回执（POST /session-mode/switch）。verified=false 时 hint 给出人工核对提示
- *  ——切换已投递但无法自动验证（屏读缺失），前端据此渲染提示而非「已切到 X 档」。 */
+ *  ——切换已投递但无法自动验证（屏读缺失），前端据此渲染提示而非「已切到 X 档」。
+ *  丁T3：`dialogChecked` = 本次是否真的做过对话框在场检测（false = 平台无屏读或
+ *  屏读失败；此时守卫按「无法判定」放行，前端不得声称已检查）。 */
 export type SessionModeSwitchResult =
-  | { status: "key_sent"; verified: boolean; hint?: string | null }
-  | { status: "failed"; error: string };
+  | { status: "key_sent"; verified: boolean; hint?: string | null; dialogChecked?: boolean }
+  | { status: "failed"; error: string; dialogChecked?: boolean };
 
 /** 拉取当前模式（卡头显示用）。非 2xx → 抛 ApiError（调用方静默降级不显示） */
 export async function fetchSessionMode(sessionId: string): Promise<SessionModeView> {
@@ -718,7 +720,8 @@ export async function fetchSessionMode(sessionId: string): Promise<SessionModeVi
   return (await r.json()) as SessionModeView;
 }
 
-/** 切档（T6）。404 no_session | 409 no_mechanism → 非 2xx 抛 ApiError */
+/** 切档（T6）。404 no_session | 409 no_mechanism | **409 blocked_by_dialog**（丁T3
+ *  §2.7 对话框在场红线：控制类注入被拒，data.reason 为中文文案）→ 非 2xx 抛 ApiError */
 export async function sessionModeSwitch(
   sessionId: string,
   target: MamMode

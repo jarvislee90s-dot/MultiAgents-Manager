@@ -234,6 +234,20 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
             .map(|pg| crate::inject::confirm::stamp_hit_in_page(&pg, stamp))
             .unwrap_or(false)
         }),
+        // 丁T3 §2.7：对话框在场探针——生产装配直指单点实现
+        // `inject::dialog::probe_screen_dialog`（Windows 屏读可见窗口 + 编号选项簇解析；
+        // 非 Windows 恒 None = 无法判定 ⇒ 不阻断控制类注入，裁决见
+        // `inject::dialog::blocks_control_injection` 文档）。缝收 (sid, pid)：sid 仅为
+        // 日志定位（实现按 pid attach 控制台——会话快照是 pid 的唯一来源，端点侧取出传入）。
+        dialog_probe: std::sync::Arc::new(
+            |sid: &str, pid: u32| -> Option<Vec<crate::inject::dialog::DialogOption>> {
+                let opts = crate::inject::dialog::probe_screen_dialog(pid);
+                if opts.is_some() {
+                    log::debug!("T3 控制类注入守卫：sid={sid} pid={pid} 屏读见编号选项对话框");
+                }
+                opts
+            },
+        ),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，

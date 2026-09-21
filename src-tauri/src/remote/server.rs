@@ -237,6 +237,23 @@ pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send 
 /// [`ViaHostsSource`] 先例）：参数 = (tool, session_id, stamp)。
 pub type ConfirmProbeFn = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
 
+/// 对话框在场探针缝类型（丁T3 §2.7，对齐 [`ConfirmProbeFn`] 先例）：
+/// 参数 = (session_id, pid)；返回 `Some(选项表)` = 屏读确认**编号选项对话框在场**。
+///
+/// **语义与 [`crate::inject::dialog::blocks_control_injection`] 同源**：`None` 表示
+/// 「无法判定或确实无对话框」（两义同收敛，能力缺失不阻断——裁决见该函数文档）。
+///
+/// **为什么需要这条缝**：屏读是 Windows 专有 FFI 能力（`read_screen_window` 需要真实
+/// conhost 与目标 pid），端点测试进程没有可 attach 的控制台 → 真实实现在 CI 上恒 `None`
+/// → 「在场即拒」这条红线**没有任何自动化证据**。缝把「屏读结果」变成可注入的输入，
+/// 使两种形态都能在门禁里断言：在场（假体返回真机屏幕原文解析出的选项表）→ 拒绝且
+/// 零投递零审计；不在场（假体返回 None）→ 照常投递。
+///
+/// 生产装配 = [`crate::inject::dialog::probe_screen_dialog`] 的同一实现（单点，
+/// 见 `remote/mod.rs`）。
+pub type DialogProbeFn =
+    dyn Fn(&str, u32) -> Option<Vec<crate::inject::dialog::DialogOption>> + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -293,6 +310,13 @@ pub struct RemoteState {
     /// 零接触真实文件）——与 injector 缝同模式（生产装配无法捕获自身 Arc，
     /// 故闭包内直调读路径）。
     pub confirm_probe: std::sync::Arc<ConfirmProbeFn>,
+    /// 对话框在场探针缝（丁T3 §2.7）：参数 = (session_id, pid)。生产 =
+    /// `inject::dialog::probe_screen_dialog`（Windows 屏读可见窗口 + 编号选项簇解析；
+    /// 非 Windows 恒 None）；测试注入假体（在场/不在场两形态可断言，零真实窗口）。
+    /// 消费方：`remote::api::session_mode_switch` 的控制类注入守卫（见
+    /// [`DialogProbeFn`] 的缝理由与 [`crate::inject::dialog::blocks_control_injection`]
+    /// 的裁决）。**注意 pid 也从参数传入**：端点侧已从会话快照取到，不让假体去猜。
+    pub dialog_probe: std::sync::Arc<DialogProbeFn>,
     /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
     /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
     /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
@@ -446,6 +470,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
@@ -988,6 +1015,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
@@ -1357,6 +1387,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "jarvis-win", "platform": "windows", "version": "9.9.9-test" },
@@ -1448,6 +1481,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(move |agent: &str, sid: &str, limit: usize| {
                 cap.lock()
@@ -1647,6 +1683,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| {
@@ -1924,6 +1963,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2065,6 +2107,9 @@ mod tests {
                 resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
                 // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                 confirm_probe: std::sync::Arc::new(|_, _, _| true),
+                // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+                // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+                dialog_probe: std::sync::Arc::new(|_, _| None),
                 host_source: Box::new(|| serde_json::Value::Null),
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2618,6 +2663,9 @@ mod tests {
                     }),
                     // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                     confirm_probe: std::sync::Arc::new(|_, _, _| true),
+                    // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+                    // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+                    dialog_probe: std::sync::Arc::new(|_, _| None),
                     host_source: Box::new(|| serde_json::Value::Null),
                     message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                     path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2809,7 +2857,20 @@ mod tests {
     fn inject_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
     ) -> Arc<RemoteState> {
-        inject_state_with_probe(injector, std::sync::Arc::new(|_, _, _| true))
+        inject_state_full(
+            injector,
+            std::sync::Arc::new(|_, _, _| true),
+            std::sync::Arc::new(|_, _| None),
+        )
+    }
+
+    /// 对话框在场探针可注入的 state（丁T3 模式切换守卫用例）：其余缝缺省（确认恒
+    /// 命中、无对话框）。
+    fn inject_state_with_dialog(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+    ) -> Arc<RemoteState> {
+        inject_state_full(injector, std::sync::Arc::new(|_, _, _| true), dialog_probe)
     }
 
     /// inject_state 变体：confirm_probe 可注入（D7/T3 直发未确认端点测试用——
@@ -2829,6 +2890,15 @@ mod tests {
     fn inject_state_with_probe(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
+    ) -> Arc<RemoteState> {
+        inject_state_full(injector, confirm_probe, std::sync::Arc::new(|_, _| None))
+    }
+
+    /// 全参数建造器（丁T3 起三缝可分）：确认探针 + 对话框在场探针。
+    fn inject_state_full(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
+        dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
     ) -> Arc<RemoteState> {
         let sessions = vec![
             inj_sess(
@@ -2895,6 +2965,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：参数化（inject_state 缺省恒命中）
             confirm_probe,
+            // 丁T3：对话框在场探针（同参数化）——缺省 None = 无法判定 ⇒ 控制类注入
+            // 照常投递；「在场即拒」用例经 inject_state_with_dialog 注入假体
+            dialog_probe,
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2910,7 +2983,8 @@ mod tests {
         })
     }
 
-    /// 预置带花名的有效设备（[mobile <名>] 前缀与审计设备名列的数据源）
+    /// 预置带花名的有效设备（丁T3 裁2 起 `[mobile <名>]` 是**尾**签名；审计设备名
+    /// 列同源）
     fn persist_named_device(state: &Arc<RemoteState>, id: &str, name: &str) {
         let now = chrono::Utc::now().timestamp_millis();
         state.store.with(|c| {
@@ -3084,6 +3158,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -3130,10 +3207,11 @@ mod tests {
             body.contains("\"status\":\"delivered\""),
             "可输入态直发应 delivered：{body}"
         );
-        // 注入器收到 (pid=11, "[mobile 测试设备] 你好\n继续")——真实换行归一为字面 \n（裁决 6）
+        // 注入器收到 (pid=11, "你好\n继续 [mobile 测试设备]")——真实换行归一为字面 \n
+        //（裁决 6）+ 丁T3 裁2 签名**后置**
         assert_eq!(
             fake.recorded(),
-            vec![(11u32, "[mobile 测试设备] 你好\\n继续".to_string())],
+            vec![(11u32, "你好\\n继续 [mobile 测试设备]".to_string())],
             "直发必须携带 W1 来源标记与归一正文"
         );
         // 审计：最新一条 action=send result=ok channel=fake
@@ -3217,7 +3295,7 @@ mod tests {
         let body = body_string(r).await;
         assert!(
             body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("[mobile 测试设备] 排队消息")
+                && body.contains("排队消息 [mobile 测试设备]")
                 && body.contains("\"position\":1")
                 && body.contains("\"enqueuedAt\":"),
             "排队视图应含 id/content/enqueuedAt/position，实际 {body}"
@@ -3273,7 +3351,7 @@ mod tests {
         let body = body_string(r).await;
         assert!(
             body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("[mobile 测试设备] 修改后重发"),
+                && body.contains("修改后重发 [mobile 测试设备]"),
             "queueOnly 条目应留在队列等自动放行：{body}"
         );
     }
@@ -3302,8 +3380,106 @@ mod tests {
         );
         assert_eq!(
             fake.recorded(),
-            vec![(11u32, "[mobile 测试设备] 普通发送".to_string())],
+            vec![(11u32, "普通发送 [mobile 测试设备]".to_string())],
             "queueOnly=false 直发行为不得漂移"
+        );
+    }
+
+    // ===== 丁T3 裁2：斜杠命令裸注入 + 审计 action=slash（问题 8）=====
+
+    /// **斜杠命令直发（可输入态）**：注入文本必须**裸**（无签名——问题 8 实锤：
+    /// 前缀会毁掉 `/permissons`；后缀同样破坏命令与参数），审计 action=**slash**
+    /// 且 device_name 在账（裁2：终端不留痕，溯源只此一处）。
+    #[tokio::test]
+    async fn slash_message_bare_injects_and_audits_slash() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_a","text":"/permissions"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(body.contains("\"status\":\"delivered\""), "{body}");
+        assert_eq!(
+            fake.recorded(),
+            vec![(11u32, "/permissions".to_string())],
+            "斜杠命令必须裸注入（不加签名——签名会破坏命令解析）"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        // 端点行（action=slash）在前，flush 落账行（机制记录 action=flush）紧随其后
+        assert_eq!(
+            audits[0].action, "slash",
+            "端点审计 action=slash（裁2 词表新增）"
+        );
+        assert_eq!(audits[0].result, "ok");
+        assert_eq!(
+            audits[0].device_name, "测试设备",
+            "slash 的溯源靠设备名在账"
+        );
+        assert_eq!(audits[0].session_id, "sess_a");
+        assert_eq!(
+            audits[0].summary, "/permissions",
+            "摘要即裸命令原文（无签名可读）"
+        );
+        // 机制行保持既有词表（投递路径判据不因 slash 消失——见 audit_action_for 注）
+        assert_eq!(audits[1].action, "flush");
+    }
+
+    /// **斜杠命令走队列（运行中会话）**：同样裸注入入队（队列存的就是 compose 产物）
+    /// + 端点审计 action=slash（不是 queue——用户动作是发命令，投递机制另记）。
+    #[tokio::test]
+    async fn slash_message_queued_keeps_bare_form_and_slash_action() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                // sess_b = Processing（留队臂）
+                Some(r#"{"sessionId":"sess_b","text":"/plan"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "queued");
+        assert!(fake.recorded().is_empty(), "留队臂不投递");
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "slash", "留队臂的端点审计同样记 slash");
+        // 队内内容 = 裸命令（flush 放行时直接照发，不会再加工）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-queue?session_id=sess_b",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"content\":\"/plan\""),
+            "队列条目必须是裸命令（flush 直接照发）：{body}"
+        );
+        assert!(
+            !body.contains("[mobile"),
+            "斜杠命令的队列条目不得带签名：{body}"
         );
     }
 
@@ -3570,7 +3746,7 @@ mod tests {
         // 注入器收到的是插队目标（第二条）的 compose 产物
         assert_eq!(
             fake.recorded(),
-            vec![(12u32, "[mobile 测试设备] 第二条".to_string())],
+            vec![(12u32, "第二条 [mobile 测试设备]".to_string())],
             "插队必须照发目标条目（运行中 TUI 把消息放进自身输入缓冲）"
         );
         // 审计 action=jump（settle 落账写入；此刻 retract 尚未发生，最新一条即 jump）
@@ -4730,6 +4906,9 @@ mod tests {
             injector,
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source,
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -6756,7 +6935,9 @@ mod tests {
     /// P3 审计动作词表（Task 7 P3c）：KV 定制映射含域外 id=other 的选项 → POST
     /// session-approve 照发键位（x）→ 审计 action 收敛为 "key"（W5 词表 send|queue|
     /// flush|jump|retract|approve|reject|fail|key|open——open 已随 Task 11 一键
-    /// resume 兑现，批次乙 T8 再追加 answer（问答端点，锁定见 question_answer_* 族）——
+    /// resume 兑现，批次乙 T8 再追加 answer（问答端点，锁定见 question_answer_* 族），
+    /// 批次丙 T6 追加 mode，**丁T3 追加 slash**（裁2 斜杠命令裸注入的溯源动作，
+    /// 锁定见 `slash_message_audits_action_slash` 用例）——
     /// 之外的域外 id 不得原样进审计
     /// action 列——key 是本次新增的收敛动作）且不 panic；域外 warn 在实现侧 log，
     /// 测试不断言日志。
@@ -7063,6 +7244,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             resume_spawner: spawner,
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -7355,6 +7539,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
+            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "t", "platform": "macos", "version": "0.0.0-test" },
@@ -7507,5 +7694,278 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 413);
         std::fs::remove_dir_all(&proj).ok();
+    }
+
+    // ===== 丁T3 接入①：模式切换的对话框在场守卫（§2.7 裁8/9，问题 5）=====
+    //
+    // 端点守卫的落点是「投递前屏读」——真实屏读需要 conhost 目标（CI 不可观测），
+    // 故经 `RemoteState.dialog_probe` 缝注入假体：在场形态用**真机屏幕原文**解析出的
+    // 选项表（`inject::dialog` 夹具同源，来自 2026-09-21 探测档案 screen-t5-*），
+    // 不在场/不可判定形态返回 None。四个用例把两路（shift+tab / slash）与三种探针
+    // 形态都钉住。
+
+    /// codex 计划批准框的**真机屏幕原文**（`screen-t5-codex-implement-before.txt`
+    /// 行 24–29）→ 解析成选项表（在场假体的载荷）。解析失败即断言红——夹具不合法
+    /// 时用例必须失败而不是静默放行。
+    fn real_dialog_fixture() -> Vec<crate::inject::dialog::DialogOption> {
+        let lines: Vec<String> = [
+            "  Implement this plan?",
+            "",
+            "› 1. Yes, implement this plan          Switch to Default and start coding.",
+            "  2. Yes, clear context and implement  Fresh thread. Context: 2% used.",
+            "  3. No, stay in Plan mode             Continue planning with the model.",
+            "",
+            "  Press enter to confirm or esc to go back",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        crate::inject::dialog::parse_dialog_options(&lines)
+            .expect("夹具必须是真机屏幕原文（能解析出编号选项簇）")
+    }
+
+    /// **Key 路（shift+tab）在场即拒**：claude 会话 + 假体报在场 → 409
+    /// `blocked_by_dialog` + 中文回执；**零注入**（injector 两个记录表全空）+
+    /// **零审计**（账只记真发生过的事）。
+    #[tokio::test]
+    async fn mode_switch_key_path_blocked_when_dialog_present() {
+        let fake = FakeInjector::ok();
+        let opts = real_dialog_fixture();
+        let state = inject_state_with_dialog(
+            fake.clone(),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                // sess_a = claude Waiting（shift+tab 路）
+                Some(r#"{"sessionId":"sess_a","target":"plan"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            409,
+            "对话框在场 → 控制类注入必须被拒（409 与 no_mechanism 同用 CONFLICT）"
+        );
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"error\":\"blocked_by_dialog\""),
+            "拒绝码须可程序分诊：{body}"
+        );
+        assert!(
+            body.contains("终端有待决对话框，请先处理"),
+            "中文回执须直给用户可读语义：{body}"
+        );
+        assert!(
+            fake.recorded_keys().is_empty(),
+            "拒绝必须零注入（shift+tab 未投递）：{:?}",
+            fake.recorded_keys()
+        );
+        assert!(fake.recorded().is_empty(), "拒绝路径不得有任何文本注入");
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(
+            audits.is_empty(),
+            "拒绝必须零审计（校验失败不落账，与 approve/question 同口径）：{audits:?}"
+        );
+    }
+
+    /// **Text 路（斜杠命令）同受此门**：codex 会话 + 假体报在场 → 同样 409 且零注入。
+    /// 这条是「两路都在投递之前」的锁——若守卫被误挪到 Key 分支内，本用例即变红。
+    #[tokio::test]
+    async fn mode_switch_slash_path_blocked_when_dialog_present() {
+        let fake = FakeInjector::ok();
+        let opts = real_dialog_fixture();
+        let state = inject_state_with_dialog(
+            fake.clone(),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        // sess_q = codex Waiting（approve 族夹具已有；本组用 inject_state 的会话清单，
+        // 故此处换用 sess_d：zcode → no_mechanism，不行；改走「会话快照里加 codex」）
+        // ——为保持夹具单一来源，本用例直接复用 inject_state 的 sess_a 会话但**改工具**
+        // 不可行（夹具是不可变的），故显式建造一个 codex 会话的 state。
+        let codex_sess = inj_sess(
+            "sess_t3b",
+            crate::session::AgentType::Codex,
+            71,
+            crate::session::SessionStatus::Waiting,
+        );
+        let state2 = Arc::new(RemoteState {
+            session_source: {
+                let s = codex_sess.clone();
+                Box::new(move || crate::session::SessionsResponse {
+                    sessions: vec![s.clone()],
+                    total_count: 1,
+                    waiting_count: 0,
+                })
+            },
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: fake.clone(),
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe: {
+                let opts = real_dialog_fixture();
+                std::sync::Arc::new(move |_, _| Some(opts.clone()))
+            },
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        });
+        persist_named_device(&state2, "mm", "测试设备");
+        let app = router(state2.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                // codex 的目标档 = 斜杠命令路（/plan）
+                Some(r#"{"sessionId":"sess_t3b","target":"plan"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "斜杠命令路同受对话框在场门");
+        let body = body_string(r).await;
+        assert!(body.contains("\"error\":\"blocked_by_dialog\""), "{body}");
+        assert!(
+            fake.recorded().is_empty() && fake.recorded_keys().is_empty(),
+            "斜杠命令必须零注入（文本与回车都不发）：{:?}/{:?}",
+            fake.recorded(),
+            fake.recorded_keys()
+        );
+        let audits = state2
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(audits.is_empty(), "零审计：{audits:?}");
+    }
+
+    /// **不在场正常投递**（回归锁：守卫不得把正常路径也拒掉）：假体返回 None →
+    /// 既有行为原样（claude shift+tab 入 key_calls + 审计 action=mode result=ok）。
+    /// 独占会话 `sess_t3c`（守卫 id 立规：INFLIGHT 按裸 id 全局占用，真投递的用例
+    /// 必须各占唯一 id，否则并行跑会互相挤成「投递进行中」假红）。
+    #[tokio::test]
+    async fn mode_switch_proceeds_when_dialog_absent() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_guard_state(
+            fake.clone(),
+            "sess_t3c",
+            crate::session::AgentType::Claude,
+            72,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "无对话框 → 照常投递");
+        let body = body_string(r).await;
+        assert!(body.contains("\"status\":\"key_sent\""), "{body}");
+        // 丁T3：如实标注「本次是否真的检测过」——None ≠ 在场，回执不得暗示已检查
+        assert!(
+            body.contains("\"dialogChecked\":false"),
+            "探针不可用时须如实标注未检测：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(72u32, "shift+tab".to_string())],
+            "shift+tab 键照常投递"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "mode", "正常路径审计不变");
+        assert_eq!(audits[0].result, "ok");
+    }
+
+    /// **在场检测成功 → 回执标注 dialogChecked:true**（与上一用例的 false 成对锁：
+    /// 该字段必须真实反映探针是否给出结论，而不是恒 true/false 的装饰）。独占会话
+    /// `sess_t3d`（守卫 id 立规，同上）。
+    #[tokio::test]
+    async fn mode_switch_reports_dialog_checked_when_probe_answered() {
+        let fake = FakeInjector::ok();
+        // 假体返回**空表**（构造上不可达——解析器下界 ≥2——但恰好用来表达「探针给出了
+        // 答案（Some）且判不在场」这一格：blocks_control_injection(Some(&[])) == false）
+        let (state, sid) = mode_guard_state(
+            fake.clone(),
+            "sess_t3d",
+            crate::session::AgentType::Claude,
+            73,
+            std::sync::Arc::new(|_, _| Some(vec![])),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(body.contains("\"dialogChecked\":true"), "{body}");
+        assert_eq!(fake.recorded_keys(), vec![(73u32, "shift+tab".to_string())]);
+    }
+
+    /// 单会话 + 可注入对话框探针的 state（丁T3 模式守卫用例专用建造器：会话 id/工具/
+    /// pid 与探针全部参数化——守卫 id 立规要求真投递用例各占唯一会话 id）。
+    fn mode_guard_state(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        sid: &str,
+        tool: crate::session::AgentType,
+        pid: u32,
+        dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+    ) -> (Arc<RemoteState>, String) {
+        let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
+        let sid_out = session.id.clone();
+        let state = Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector,
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe,
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        });
+        (state, sid_out)
     }
 }

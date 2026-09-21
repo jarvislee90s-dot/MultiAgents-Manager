@@ -77,6 +77,13 @@ export default function ModeBar({ session }: { session: { id: string } }) {
             setError("会话已结束，请返回看板刷新");
           } else if (e.status === 409 && e.data?.error === "no_mechanism") {
             setError("该工具的模式切换未实测");
+          } else if (e.status === 409 && e.data?.error === "blocked_by_dialog") {
+            // 丁T3 §2.7 对话框在场红线（裁8/9，问题 5）：控制类注入被拒——后端
+            // 屏读见编号选项对话框，切换键/斜杠命令会落进对话框（实机连点 17 次
+            // 全变「选第一项」）。文案用后端下发的 reason（单一来源），缺省给同义兜底
+            setError(
+              typeof e.data?.reason === "string" ? e.data.reason : "终端有待决对话框，请先处理"
+            );
           } else {
             setError(e.message);
           }

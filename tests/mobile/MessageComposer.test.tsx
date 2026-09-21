@@ -16,12 +16,21 @@ function sendInfo(overrides: Partial<SendInfo> = {}): SendInfo {
 
 /** 排队条目夹具（GET /session-queue 的 items 元素） */
 function queueItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
-  return { id: 7, content: "[mobile 测试机] 你好", enqueuedAt: 1000, position: 1, ...overrides };
+  // 丁T3 裁2：服务端 compose 形态为 `{正文} [mobile 设备名]`——夹具用**真机形态**
+  return { id: 7, content: "你好 [mobile 测试机]", enqueuedAt: 1000, position: 1, ...overrides };
 }
 
 interface Routes {
   info?: SendInfo;
   infoStatus?: number;
+  /** 丁T3 接入②：审批卡在场探针（/session-approve-options）载荷；缺省 available=false
+   *  （不在场）——只有显式给 true 的用例才走分流。 */
+  approveOptions?: { available: boolean; planPending?: boolean };
+  /** 探针端点非 2xx（探针失败路径：api.ts 抛 ApiError → composer 按不在场处理） */
+  approveOptionsStatus?: number;
+  questionStatus?: number;
+  /** 丁T3 接入②：问答卡在场探针（/session-question）载荷；缺省 available=false */
+  questionInfo?: { available: boolean };
   send?: Record<string, unknown>;
   sendStatus?: number;
   /** 非 2xx 时响应体 JSON（403 not_injectable{reason,reasonCode} 等，P2-10） */
@@ -75,6 +84,31 @@ function installFetch() {
     if (url.includes("/session-send-info")) {
       if (routes.infoStatus) return new Response("no", { status: routes.infoStatus });
       return new Response(JSON.stringify(routes.info ?? sendInfo()), { status: 200 });
+    }
+    // 丁T3 接入②：卡片在场探针（两条 GET，判序在 /session-send 之前——长路径优先）
+    if (url.includes("/session-approve-options")) {
+      if (routes.approveOptionsStatus) {
+        return new Response("no", { status: routes.approveOptionsStatus });
+      }
+      return new Response(
+        JSON.stringify(
+          routes.approveOptions ?? {
+            available: false,
+            options: [],
+            verifiedWith: "t",
+            currentVersion: null,
+            drift: false,
+          }
+        ),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/session-question")) {
+      if (routes.questionStatus) return new Response("no", { status: routes.questionStatus });
+      return new Response(
+        JSON.stringify(routes.questionInfo ?? { available: false, questions: [] }),
+        { status: 200 }
+      );
     }
     if (url.includes("/session-queue/jump")) {
       return new Response(JSON.stringify(routes.jump ?? { status: "delivered" }), { status: 200 });
@@ -931,13 +965,13 @@ describe("移动端附件上传（2026-09-20）", () => {
 // ==== 多列队 UI（D8，验收问题 #6）：完整 /session-queue 列表 + 逐条操作 ====
 describe("多列队 UI（D8）：完整队列列表", () => {
   /** 三条既有队列夹具（挂载拉取即见——桌面端/他端排的队）：分别覆盖
-   *  [mobile] 前缀剥离+截断 / 短文全显 / 附件标记替换 */
+   *  尾签名剥离+截断 / 短文全显 / 附件标记替换（丁T3 裁2：签名在尾部） */
   function threeQueueItems(): QueueItemView[] {
     return [
       queueItem({
         id: 11,
         position: 1,
-        content: "[mobile 测试机] 这是一条超过十二个字符的长消息需要截断显示",
+        content: "这是一条超过十二个字符的长消息需要截断显示 [mobile 测试机]",
       }),
       queueItem({ id: 12, position: 2, content: "短消息" }),
       queueItem({ id: 13, position: 3, content: '<image path="E:/pool/a.png">看这张截图' }),
@@ -950,7 +984,7 @@ describe("多列队 UI（D8）：完整队列列表", () => {
     routes.queue = threeQueueItems();
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const row11 = await screen.findByTestId("queue-row-11");
-    // 前缀剥离 + 截前 12 字符 + …，且 [mobile 前缀不得泄漏到预览
+    // 尾签名剥离 + 截前 12 字符 + …，且 [mobile 签名不得泄漏到预览（丁T3 裁2）
     expect(row11.textContent).toContain("这是一条超过十二个字符的…");
     expect(row11.textContent).not.toContain("[mobile");
     // 不足 12 字符全显
@@ -1001,8 +1035,8 @@ describe("多列队 UI（D8）：完整队列列表", () => {
       sessionId: "sess-1",
       itemId: 13,
     });
-    // 第一条「修改」→ retract 携带 itemId 11；放回正文剥离 [mobile] 前缀
-    // （行 content 是服务端 compose 后的带前缀文本，不剥则重发二次叠加）
+    // 第一条「修改」→ retract 携带 itemId 11；放回正文剥离 [mobile] **尾**签名
+    // （行 content 是服务端 compose 后的带签名文本，不剥则重发二次叠加）
     fireEvent.click(within(screen.getByTestId("queue-row-11")).getByTestId("queue-edit"));
     await waitFor(() => expect(screen.queryByTestId("queue-row-11")).toBeNull());
     const retractCallsAfterEdit = fetchMock.mock.calls.filter((c: unknown[]) =>
@@ -1054,7 +1088,7 @@ describe("多列队 UI（D8）：列表消费收敛与轮询生命周期", () =>
     expect(screen.getByTestId("queue-row-7")).toBeTruthy();
     // 轮询一：我方条目已被消费（他端 flush / 桌面处理），他条仍在 → gone 中性留痕，
     // 我方行随权威列表移除、他条保留可操作
-    routes.queue = [queueItem({ id: 9, position: 1, content: "[mobile 台式机] 他端排的队" })];
+    routes.queue = [queueItem({ id: 9, position: 1, content: "他端排的队 [mobile 台式机]" })];
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
@@ -1220,5 +1254,176 @@ describe("多列队 UI（D8）复评：在途 tick 快照时序防御", () => {
     });
     expect(screen.queryByTestId("queue-row-9")).toBeNull();
     expect(screen.queryByTestId("queue-list")).toBeNull();
+  });
+});
+
+// ==== 丁T3 裁2：签名后置（尾部）——预览与「修改」回填剥**尾**签名 ====
+describe("丁T3 签名后置：尾部签名剥离", () => {
+  it("预览剥尾部签名：真机形态 `{正文} [mobile 设备名]` 不得在预览里残留签名", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [
+      queueItem({
+        id: 31,
+        position: 1,
+        content: "这是一条超过十二个字符的长消息 [mobile iPhone 15]",
+      }),
+      queueItem({ id: 32, position: 2, content: "短消息 [mobile iPhone 15]" }),
+    ];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const row31 = await screen.findByTestId("queue-row-31");
+    expect(row31.textContent).toContain("这是一条超过十二个字符的…");
+    expect(row31.textContent).not.toContain("[mobile");
+    expect(screen.getByTestId("queue-row-32").textContent).not.toContain("[mobile");
+    expect(screen.getByTestId("queue-row-32").textContent).toContain("短消息");
+  });
+
+  it("「修改」回填剥尾部签名（防重发二次叠加）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [queueItem({ id: 41, position: 1, content: "跑个长任务 [mobile 测试机]" })];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await screen.findByTestId("queue-row-41");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("queue-row-41")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("跑个长任务");
+  });
+
+  it("正文里中段的 [mobile…] 字样**不误剥**（只剥形态完整的尾签名——与 Rust 同口径）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [
+      queueItem({ id: 42, position: 1, content: "看看 [mobile X] 这个标签怎么写 [mobile 测试机]" }),
+    ];
+    render(<MessageComposer session={{ id: "sess-2" }} />);
+    await screen.findByTestId("queue-row-42");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("queue-row-42")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe(
+      "看看 [mobile X] 这个标签怎么写"
+    );
+  });
+
+  it("无签名的队列条目（斜杠命令裸注入形态）原样回填，不被剥离改造", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.queue = [queueItem({ id: 43, position: 1, content: "/permissions" })];
+    render(<MessageComposer session={{ id: "sess-3" }} />);
+    await screen.findByTestId("queue-row-43");
+    fireEvent.click(screen.getByTestId("queue-edit"));
+    await waitFor(() => expect(screen.queryByTestId("queue-row-43")).toBeNull());
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe(
+      "/permissions"
+    );
+  });
+});
+
+// ==== 丁T3 接入②：卡片在场分流（§2.4 裁3）====
+describe("丁T3 卡片在场分流：审批拦截 / 问答引导", () => {
+  it("审批卡在场：发送被拦截（零 /session-send 调用）+ 回执提示用卡片按钮 + 输入保留", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.approveOptions = { available: true };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    // 在场提示条（挂载探针落地后）
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "approve"
+    );
+    fireEvent.change(input, { target: { value: "帮我改一下" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-blocked");
+    expect(chip.textContent).toContain("终端等待审批，请用卡片按钮");
+    // 零注入：session-send 未被调用（裁3 安全面——放行 = 误触选项/误批准）
+    expect(sendCalls()).toHaveLength(0);
+    // 拦截 ≠ 失败：不得渲染 failed（红 chip 带「可重试」会误导——重按仍会被拦）
+    expect(screen.queryByTestId("send-receipt-failed")).toBeNull();
+    // 输入保留（用户可复制到卡片输入框或终端）
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("帮我改一下");
+  });
+
+  it("问答卡在场：placeholder 改「作为回答发送」语义 + 发送落诚实回执（不假装代发）+ 零注入", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = { available: true };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "question"
+    );
+    expect(input.placeholder).toContain("作为回答发送");
+    fireEvent.change(input, { target: { value: "构建产物放 dist" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-blocked");
+    expect(chip.textContent).toContain("终端正在等待回答");
+    expect(chip.textContent).toContain("自由作答序列尚未实机定案");
+    expect(sendCalls()).toHaveLength(0);
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe(
+      "构建产物放 dist"
+    );
+  });
+
+  it("两者都在场：审批优先（裁3 安全面更重——审批框放行自由文本 = 误触选项）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.approveOptions = { available: true, planPending: true };
+    routes.questionInfo = { available: true };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "approve"
+    );
+  });
+
+  it("都不在场：placeholder 与发送行为完全不变（回归锁——分流不得污染正常路径）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    expect(input.placeholder).toBe("输入消息发送到终端…");
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
+    fireEvent.change(input, { target: { value: "普通消息" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
+    expect(sendCalls()).toHaveLength(1);
+  });
+
+  it("发送时刻复探（快照陈旧防线）：挂载时不在场，发送前对话框出现 → 本次发送被拦截", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    // 挂载探针已落地（不在场）
+    await flushAsync();
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
+    // 对话框在挂载之后出现（模型刚提问）——快照变陈旧
+    routes.approveOptions = { available: true };
+    fireEvent.change(input, { target: { value: "这条不能直发" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-blocked");
+    expect(chip.textContent).toContain("终端等待审批");
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it("探针失败（非 2xx）→ 按不在场放行（能力缺失不阻断，与后端 blocks_control_injection 同裁决）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    // 两个探针端点都返回非 2xx（api.ts 抛 ApiError → probeCardPresence 的 catch →
+    // 「none」）→ 发送照常。裁决依据：能力缺失 ≠ 对话框在场，混同会让弱网下
+    // 输入区永久失效，且回执文案会说假话（我们并不知道有没有对话框）。
+    routes.approveOptionsStatus = 500;
+    routes.questionStatus = 500;
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "照发" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
+    expect(sendCalls()).toHaveLength(1);
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
   });
 });

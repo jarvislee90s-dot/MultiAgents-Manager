@@ -213,7 +213,8 @@ mod tests {
         // ChunkPlan 刻意不含回车块——回车块归执行层（SUBMIT_DELAY_MS=150ms 后单批）；
         // 本测试只核正文分块计数与背压旗标
         let spec = family_for("claude").unwrap();
-        let plan = chunk_plan("[mobile test] hello", &spec);
+        // 丁T3 裁2 起签名在尾部——夹具用真机形态（本测试只看分块计数，形态对齐即可）
+        let plan = chunk_plan("hello [mobile test]", &spec);
         assert_eq!(plan.text_chunks, 1);
         assert!(!plan.backpressure);
         let spec_op = family_for("opencode").unwrap();

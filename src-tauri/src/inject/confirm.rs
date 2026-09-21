@@ -36,11 +36,33 @@ use std::time::{Duration, Instant};
 /// 「截断防超长」与「防撞车」间取平（跨任务接口契约，Task 6 直接消费）。
 const STAMP_CHARS: usize = 24;
 
-/// 尾戳（跨任务接口契约）：**先 `trim_end` 再截尾 24 字符**（F8 尾空格修剪——
-/// 终端输入行尾部空格不可见且易被 TUI/会话文件丢弃，戳含尾空格会系统性失配）；
-/// 短于 24 字符取全串。char 边界安全截取（多字节字符不可按字节切）。
+/// 尾戳（跨任务接口契约）：**先剥尾部签名 → `trim_end` → 截尾 24 字符**。
+///
+/// # 为什么必须先剥签名（丁T3 裁2，任务书点名的真 bug）
+///
+/// 裁2 把来源签名从消息**头部**移到了**尾部**（`{正文} [mobile {设备名}]`）。签名
+/// 一旦落在尾部，取 composed 尾部的旧口径就退化成**设备级**判据：同一设备的每条
+/// 消息尾部都相同（` [mobile iPhone]`）→ 第二条消息注入后，查询第一条的戳也会命中
+/// 第二条 → 确认层谎报「已送达」（跨消息假命中，`stamp_never_false_hits_across_
+/// same_device_messages` 即该不变式的锁）。
+///
+/// # 为什么剥签名放在**本函数内部**（而不是让调用方传正文）
+///
+/// `stamp_of` 是跨任务接口契约（`inject::queue` 的直发确认、`tests/m9r_e2e.rs` 的
+/// 独立复核、`remote/mod.rs` 生产装配的 probe 闭包多处消费）。若把「传正文而非
+/// composed」的责任交给调用方：① 每个调用点都要记得先调 `strip_mobile_signature`，
+/// 漏一处就静默退回假命中形态；② 未来新增调用方无从知晓这条隐性契约。放在函数内部
+/// 则**不变式与数据形态绑定**：无论喂 composed 还是裸正文，取到的都是正文尾部
+/// （对裸正文是恒等变换——`strip_mobile_signature` 只见形态完整的尾签名才剥）。
+///
+/// **注入到终端的文本仍然含签名**（正文本身当然含戳所指的那段字符，签名在其后不影响
+/// 会话文件里的子串命中——`stamp_in_messages` 是 `contains` 语义）。
+///
+/// 其余口径不变：`trim_end` 先做（F8 尾空格修剪——终端输入行尾部空格不可见且易被
+/// TUI/会话文件丢弃，戳含尾空格会系统性失配）；短于 24 字符取全串；char 边界安全
+/// 截取（多字节字符不可按字节切）。**斜杠命令裸注入**（裁2）本就无签名，剥签名恒等。
 pub fn stamp_of(content: &str) -> &str {
-    let trimmed = content.trim_end();
+    let trimmed = super::normalize::strip_mobile_signature(content);
     let total = trimmed.chars().count();
     if total <= STAMP_CHARS {
         return trimmed;
@@ -168,9 +190,12 @@ fn probe_hits(st: &crate::remote::server::RemoteState, tool: &str, sid: &str, st
     (st.confirm_probe)(tool, sid, stamp)
 }
 
-/// 屏读探针（trim 后正文末尾至多 16 字符，char 边界安全）
+/// 屏读探针（**签名之前的**正文末尾至多 16 字符，char 边界安全）。
+/// 丁T3 裁2 适配：与 [`stamp_of`] 同源的尾部判据——探针若含尾部签名，则同一设备的
+/// 任意消息在输入行上都能判「滞留」（滞留判定退化成设备级），补回车的恢复动作会在
+/// 消息其实已被消费时凭空多发一颗回车（那会误激活对话框的默认项）。
 fn screen_probe(content: &str) -> String {
-    let trimmed = content.trim_end();
+    let trimmed = super::normalize::strip_mobile_signature(content);
     let skip = trimmed.chars().count().saturating_sub(SCREEN_PROBE_CHARS);
     trimmed.chars().skip(skip).collect()
 }
@@ -419,6 +444,53 @@ mod tests {
     use super::*;
 
     // ==== Step 1 失败测试（纯核契约） ====
+
+    /// 丁T3 裁2 **安全项（任务书点名，不可省）**：签名后置后两条**同设备不同正文**
+    /// 的消息，尾部签名完全相同（` [mobile iPhone]`）——若戳取 composed 的尾部，
+    /// 第一条的戳会命中第二条（跨消息假命中 = 确认层谎报送达）。戳必须取**签名之前
+    /// 的正文尾部**：本用例即该不变式的锁。
+    #[test]
+    fn stamp_never_false_hits_across_same_device_messages() {
+        use crate::inject::normalize::compose_injection;
+        let a = compose_injection("iPhone", "第一条：把 login.ts 的空指针修掉");
+        let b = compose_injection("iPhone", "第二条：跑一遍回归测试并汇报");
+        let sa = stamp_of(&a);
+        let sb = stamp_of(&b);
+        // 戳是正文的尾部（签名不在戳里）——两条消息的戳必须**互不相同**
+        assert!(!sa.contains("[mobile"), "戳不得含签名：{sa:?}");
+        assert!(!sb.contains("[mobile"), "戳不得含签名：{sb:?}");
+        assert_ne!(sa, sb, "同设备两条不同正文的戳必须相异");
+        // 跨消息假命中锁：A 的戳不得在 B 的正文里命中（B 已注入到会话文件的情形）
+        assert!(
+            !stamp_in_messages(std::slice::from_ref(&b), sa),
+            "假命中：第一条的戳命中了第二条消息"
+        );
+        assert!(
+            stamp_in_messages(std::slice::from_ref(&b), sb),
+            "对照格：第二条自己的戳必须在第二条里命中"
+        );
+        // 回归锁：旧口径（取 composed 尾部）下两条的戳会是同一串 ` [mobile iPhone]`
+        // ——本断言把「戳里不得含签名」钉死，还原旧口径即变红
+        assert!(
+            !stamp_of(&a).contains("mobile") && !stamp_of(&b).contains("mobile"),
+            "戳必须取签名之前的正文尾部（旧口径回归锁）"
+        );
+        // 极短正文：戳=正文全量（签名同样不参与）
+        let short = compose_injection("iPhone", "好");
+        assert_eq!(stamp_of(&short), "好");
+    }
+
+    /// 丁T3：屏读探针同样取**签名之前的正文尾部**（同一类尾部判据，同一处适配）——
+    /// 否则滞留判定退化为设备级（任何一条本设备消息都会判「滞留」）
+    #[test]
+    fn screen_probe_uses_body_tail_too() {
+        use crate::inject::normalize::compose_injection;
+        let composed = compose_injection("iPhone", "一条用于屏读滞留判定的正文");
+        let probe = screen_probe(&composed);
+        assert!(!probe.contains("[mobile"), "探针不得含签名：{probe:?}");
+        assert!(composed.contains(&probe), "探针必须仍是 composed 的子串");
+        assert!(probe.ends_with("正文"), "探针取正文尾部：{probe:?}");
+    }
 
     /// 纯核：截尾 24 字符 + 先 trim_end（F8 尾空格修剪）
     #[test]

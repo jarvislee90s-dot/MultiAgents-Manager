@@ -190,3 +190,46 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
     expect((await screen.findByTestId("mode-error")).textContent).toContain("未实测");
   });
 });
+
+// ==== 丁T3 §2.7：对话框在场红线（裁8/9，问题 5）====
+describe("乙T3 对话框在场拒绝对接（blocked_by_dialog）", () => {
+  it("409 blocked_by_dialog：显示后端 reason 原文「终端有待决对话框，请先处理」", async () => {
+    installFetch();
+    routes.mode = {
+      tool: "claude",
+      current: null,
+      currentLabel: null,
+      readback: false,
+      switchKind: "shiftTab",
+    };
+    routes.switchStatus = 409;
+    routes.switchBody = {
+      error: "blocked_by_dialog",
+      reason: "终端有待决对话框，请先处理",
+    };
+    render(<ModeBar session={{ id: "s8" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-next"));
+    const err = await screen.findByTestId("mode-error");
+    expect(err.textContent).toBe("终端有待决对话框，请先处理");
+    // 不得误报为「已发送切换」/「未实测」——拒绝语义必须与另两态可分
+    expect(screen.queryByTestId("mode-receipt")).toBeNull();
+  });
+
+  it("blocked_by_dialog 无 reason 字段（旧后端/异体）→ 前端兜底同义文案，不显示空串", async () => {
+    installFetch();
+    routes.mode = {
+      tool: "claude",
+      current: null,
+      currentLabel: null,
+      readback: false,
+      switchKind: "shiftTab",
+    };
+    routes.switchStatus = 409;
+    routes.switchBody = { error: "blocked_by_dialog" };
+    render(<ModeBar session={{ id: "s9" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-next"));
+    expect((await screen.findByTestId("mode-error")).textContent).toBe(
+      "终端有待决对话框，请先处理"
+    );
+  });
+});

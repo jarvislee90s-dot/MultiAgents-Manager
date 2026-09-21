@@ -196,6 +196,83 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
     Some(best)
 }
 
+/// **对话框在场 = 控制类注入红线**（丁T3 §2.7，裁8/9）——判据的**单点实现**。
+///
+/// # 是什么、为什么要在这一层
+///
+/// 「在场」的判据就是本模块既有的解析能力本身：`parse_dialog_options` 返回 `Some`
+/// 意味着屏读可见窗口里存在一个**编号选项簇**（≥2 项、连续编号、落在数字键域内）
+/// ——那正是「TUI 正在等用户从编号项里选一个」的形态。丁T3 的问题 5/6 两条实机
+/// 事故（模式按钮连点 17 次全落进待决对话框 → 变成「选第一项」；composer 自由文本
+/// 被对话框理解成选项切换）根因都是**控制类注入（模式切换 / 斜杠命令）或自由文本
+/// 在对话框在场时被直接打进终端**。
+///
+/// 判据抽成独立函数而**不是**在调用点各写一遍 `is_some()`：本仓既往教训是「同一
+/// 判据两处实现 → 口径漂移」（见 `remote::api::plan_pending_tail_index` 的成对注释），
+/// 而这条判据的松紧直接决定「拒」与「放行」——放行的代价是把用户消息变成一次误选。
+///
+/// # None（检测不可用）与「无对话框」为何同收敛为**不阻断**
+///
+/// 本函数只对 `Some` 的选项表判在场，`None` 一律 `false`（不阻断）。理由（**刻意
+/// 选择，不是遗漏**）：
+/// - `None` 有两种来源：①屏读成功但没解析出编号簇（= 确实无对话框）；②**检测能力
+///   缺失**（非 Windows 无屏读 API / AttachConsole 失败 / 解析不到簇）。两者在调用
+///   点无法区分（同一条降级链），而把 ② 当「在场」会让**非 Windows 平台（macOS）
+///   的所有模式切换与斜杠命令永久 409**——那等于把一条已实测可用的能力线砍掉，
+///   与「红线 4：不假装成功」无关（那是**谎报成功**的禁令；此处拒绝注入既不谎报
+///   成功也不谎报失败，是能力缺失下的保守放行）。
+/// - 反向（能力缺失时拒绝）的另一面代价：用户手里明明有一个能用的模式按钮，只因
+///   为平台没有屏读就永远点不动，且回执语义变成「终端有对话框」——**那是假话**
+///   （我们并不知道有没有）。诚实做法 = 放行 + 由调用点如实标注「本次未做在场检测」
+///   （见 `remote::api::session_mode_switch` 的注释与 `dialog_probe` 缝的语义注）。
+///
+/// 实机依据（三类真实对话框的屏读原文见 [`parse_dialog_options`] 的测试夹具，
+/// 取自 2026-09-21 探测档案 `screen-t5-*` 系列）。
+pub fn blocks_control_injection(probe: Option<&[DialogOption]>) -> bool {
+    // 项数 ≥ 2 是 [`parse_dialog_options`] 的既有不变式（单行 `1.` 不算 N 选一），
+    // 此处复述为显式守卫：未来若解析器放宽下界，本红线判据不会跟着松掉
+    probe.is_some_and(|opts| opts.len() >= 2)
+}
+
+/// 屏读在场探测（**单点实现，工具无关**）——Windows 读可见窗口 → 解析编号选项簇。
+///
+/// 返回 `Some` = 屏读确认存在编号选项对话框（在场）；`None` = 无法判定或确实无对话
+/// 框（两义同收敛，见 [`blocks_control_injection`] 的裁决注）。
+///
+/// 入参是 **pid**（不是 `&Session`）：屏读只需要被 attach 的进程，接 pid 让本函数同时
+/// 是 `RemoteState.dialog_probe` 缝（`fn(&str, u32) -> Option<Vec<DialogOption>>`）的
+/// 生产实现本体——零适配层，也就零「两处实现」的漂移面。所有调用点（审批端点、
+/// 模式切换守卫、缝）都经此处，**不得**在别处再写一遍「屏读 + 解析」。
+///
+/// 屏读失败只记 debug 日志（不打断调用链——调用方按「无法判定」处理）。
+#[cfg(windows)]
+pub fn probe_screen_dialog(pid: u32) -> Option<Vec<DialogOption>> {
+    match crate::inject::windows_console::read_screen_window(pid) {
+        Ok(lines) => match parse_dialog_options(&lines) {
+            Some(opts) => {
+                log::debug!("对话框屏读：解析出 {} 个编号选项（pid={pid}）", opts.len());
+                Some(opts)
+            }
+            None => {
+                log::debug!("对话框屏读：无连续编号簇（pid={pid}）");
+                None
+            }
+        },
+        Err(e) => {
+            log::debug!("对话框屏读失败（pid={pid}: {e}）");
+            None
+        }
+    }
+}
+
+/// 非 Windows 降级：无屏读 API（macOS 等）→ 恒 `None`（= 无法判定）。
+/// 与 [`blocks_control_injection`] 的裁决配套：能力缺失**不阻断**控制类注入，
+/// 由调用点如实标注「本次未做在场检测」。
+#[cfg(not(windows))]
+pub fn probe_screen_dialog(_pid: u32) -> Option<Vec<DialogOption>> {
+    None
+}
+
 /// 目标选项的**导航确认**序列（R1 起：claude 计划批准 / kimi 计划批准类对话框）。
 ///
 /// # 为什么需要（两处独立的实机证据）
@@ -494,6 +571,79 @@ mod tests {
             label: label.to_string(),
             highlighted: hl,
         }
+    }
+
+    // ---- 丁T3 接入①：对话框在场判据（控制类注入红线，§2.7）----
+
+    /// 在场判据的**真机三形态**（夹具 = 2026-09-21 探测档案的屏幕原文，逐字抄录）：
+    /// claude 计划批准 / codex Implement this plan / kimi Ready to build——解析得出
+    /// 选项表 ⇒ 判在场（控制类注入必须被拒）。
+    #[test]
+    fn presence_blocks_on_three_real_dialogs() {
+        // claude（`screen-t5-claude-plan-before.txt` 尾 10 行）
+        let claude = parse_dialog_options(&lines(&[
+            " Claude has written up a plan and is ready to execute. Would you like to proceed?",
+            "",
+            " ❯ 1. Yes, and use auto mode",
+            "   2. Yes, manually approve edits",
+            "   3. Tell Claude what to change",
+            "      shift+tab to approve with this feedback",
+        ]));
+        assert!(
+            blocks_control_injection(claude.as_deref()),
+            "claude 计划批准框在场 ⇒ 控制类注入必须被拒"
+        );
+
+        // codex（`screen-t5-codex-implement-before.txt` 行 24–29）
+        let codex = parse_dialog_options(&lines(&[
+            "  Implement this plan?",
+            "",
+            "› 1. Yes, implement this plan          Switch to Default and start coding.",
+            "  2. Yes, clear context and implement  Fresh thread. Context: 2% used.",
+            "  3. No, stay in Plan mode             Continue planning with the model.",
+            "",
+            "  Press enter to confirm or esc to go back",
+        ]));
+        assert!(blocks_control_injection(codex.as_deref()));
+
+        // kimi（`screen-t5-kimi-ready-before.txt` 行 20–26）
+        let kimi = parse_dialog_options(&lines(&[
+            "   ▶ Ready to build with this plan?",
+            "",
+            "   ▶ 1. Approve",
+            "     2. Reject",
+            "     3. Revise",
+            "",
+            "   ↑/↓ select · 1/2/3 choose · ↵ confirm",
+        ]));
+        assert!(blocks_control_injection(kimi.as_deref()));
+    }
+
+    /// 无对话框的普通输出屏（运行中的 TUI 常态）→ 不阻断；`None`（检测不可用 / 无簇）
+    /// 同样不阻断——**能力缺失不阻断**是本判据的刻意裁决（理由见
+    /// [`blocks_control_injection`] 文档；macOS 无屏读时若判阻断，模式切换会永久 409）
+    #[test]
+    fn presence_absent_on_plain_screen_and_none_probe() {
+        // 普通输出（正文里出现孤立编号行也不成簇——解析器既有下界）
+        let plain = parse_dialog_options(&lines(&[
+            "> 帮我改一下 login.ts",
+            "",
+            "● 已完成修改，运行了 3 个测试",
+            "",
+            "  1. 只出现一项不算对话框",
+            "",
+            "> ",
+        ]));
+        assert!(!blocks_control_injection(plain.as_deref()));
+
+        // 检测不可用（非 Windows / 屏读失败 / 无簇）→ None → 不阻断
+        assert!(
+            !blocks_control_injection(None),
+            "无法判定 ≠ 在场（能力缺失放行，由调用点标注未检测）"
+        );
+        // 空表（构造上不可达——解析器下界 ≥2——但判据自身要守住下界）
+        assert!(!blocks_control_injection(Some(&[])));
+        assert!(!blocks_control_injection(Some(&[opt(1, "Only one", true)])));
     }
 
     /// 数字键域文本（`1.5x` 之类不误判）

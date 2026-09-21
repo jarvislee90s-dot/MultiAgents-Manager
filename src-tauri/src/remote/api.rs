@@ -647,6 +647,35 @@ fn find_session_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<crate::s
         .find(|s| s.id == session_id)
 }
 
+/// 端点审计 action 选择（丁T3 裁2，**单点**）：`/` 开头消息记 `slash`，其余按投递
+/// 路径记 `send` / `queue`。
+///
+/// # 为什么在端点层选（而不是在 queue::settle 也改）
+///
+/// 一次 `session-send` 最多落**两类**审计行，职责不同（既有架构，见 `inject::queue`
+/// 的 settle 注释）：
+/// - **端点行**（本函数消费）：用户动作记录——「谁（设备）用什么动作对哪个会话做了
+///   什么」；每条成功入队的请求**恰好一条**（send/queue/slash），是审计页按设备检索
+///   的入口；
+/// - **落账行**（`settle` 写 flush/jump/fail）：投递机制记录——这一条是「直发还是
+///   排队放行」「投递成功还是失败」。
+///
+/// 裁2 要求的「溯源走审计页（action=slash + 设备名）」落在**用户动作**这一层：把
+/// 机制行的 flush/jump 也改写成 slash 会让「排队放行 / 插队 / 失败」这些运维判据
+/// 消失（同一会话的 slash 与普通消息将无法在账上区分投递路径）。故本函数只改端点行
+/// 的 action，机制行保持既有词表——两行都在账上，`summary` 里是同一段 `/plan` 文本
+/// （裸注入，无签名，原样可读）。
+///
+/// 判据与注入形态同源：`normalize::is_slash_message` 同时决定「是否裸注入」——
+/// compose 与审计不可能脱节（同一函数两处消费）。
+fn audit_action_for(text: &str, base: &'static str) -> &'static str {
+    if crate::inject::normalize::is_slash_message(text) {
+        "slash"
+    } else {
+        base
+    }
+}
+
 /// POST /m/api/v1/session-send（W4 直发/入队分派）：
 /// - 缺参 / 空 text / 超 MAX_SEND_CHARS → 400 bad_request；
 /// - 设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
@@ -727,7 +756,14 @@ pub async fn session_send(
         )
             .into_response();
     }
-    // ⑤ 组装（W1 来源标记 + 裁决 6 归一在入队时一次完成）并入队（FIFO 保序）
+    // ⑤ 组装（裁决 6 归一在入队时一次完成）+ 入队（FIFO 保序）。
+    //
+    // 丁T3 裁2：compose_injection 内部**按内容分流**——普通消息 = `{正文} [mobile 设备名]`
+    // （签名**后置**），`/` 开头消息 = **裸注入无签名**（前后缀都会破坏命令与参数，问题 8
+    // 实锤）。分流为什么放在 compose 内：它是注入文本的唯一组装出口，队列存的就是它的
+    // 产物（flush 层无需再判一次，也就不会有「入队形态与投递形态不一致」的漂移面）。
+    // 审计 action 由同一判据（`is_slash_message`）给出 slash，见下方
+    // [`audit_action_for`] 的职责划分。
     let content = crate::inject::normalize::compose_injection(&device_name, &req.text);
     // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
     // 注释），入队与 ⑦ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
@@ -800,7 +836,7 @@ pub async fn session_send(
                     &tool,
                     &sid,
                     &content,
-                    "send",
+                    audit_action_for(&req.text, "send"),
                     "ok",
                 );
                 (
@@ -822,7 +858,7 @@ pub async fn session_send(
                     &tool,
                     &sid,
                     &content,
-                    "send",
+                    audit_action_for(&req.text, "send"),
                     "unconfirmed",
                 );
                 (
@@ -841,7 +877,7 @@ pub async fn session_send(
                     &tool,
                     &sid,
                     &content,
-                    "send",
+                    audit_action_for(&req.text, "send"),
                     &format!("failed:{e}"),
                 );
                 (
@@ -862,7 +898,7 @@ pub async fn session_send(
                     &tool,
                     &sid,
                     &content,
-                    "queue",
+                    audit_action_for(&req.text, "queue"),
                     "ok",
                 );
                 // position = 该条目在 pending 队列中的位次（第 1 位 = 1，评审 Minor 5
@@ -896,7 +932,7 @@ pub async fn session_send(
         &tool,
         &sid,
         &content,
-        "queue",
+        audit_action_for(&req.text, "queue"),
         "ok",
     );
     (
@@ -1652,45 +1688,30 @@ fn plan_pending_accepts_option_id(plan_pending: bool, option_id: &str) -> bool {
         .is_some_and(|n| n.parse::<u32>().is_ok())
 }
 
-/// 对话框选项屏读（批次丙 T5）：Windows 屏读可见窗口 → 解析编号选项行。
+/// 对话框选项屏读（批次丙 T5；丁T3 起**改经 `RemoteState.dialog_probe` 缝**）。
 ///
 /// 返回 None 的所有路径（调用方落回映射表二元卡——红线 3 降级）：
-/// 非 Windows / 屏读失败（Err）/ 解析不出连续编号簇（<2 或 >9 项）。
+/// 非 Windows / 屏读失败 / 解析不出连续编号簇（<2 或 >9 项）。
 ///
-/// 屏读只对**已命中审批等待**的会话调用（调用点已判 hit），故不会对空闲会话白读
-/// 一屏；失败仅记 debug 日志（不打断审批流）。
+/// **丁T3 改造理由（为什么不再直调 `windows_console::read_screen_window`）**：丁T3 的
+/// 控制类注入守卫（[`crate::inject::dialog::blocks_control_injection`]）与本函数消费
+/// 的是**同一份屏读结论**——两处各自直调 = 两份实现 + 两条降级链，而它们的松紧必须
+/// 一致（「屏读见到簇」在审批侧意味着「可下发 dialog 选项」，在守卫侧意味着「拒绝控制
+/// 类注入」；一处松一处紧就会出现「卡上有按钮但模式钮被拒」这类自相矛盾界面）。经缝
+/// 之后只有一个屏读入口（生产实现 = `inject::dialog::probe_screen_dialog`），且测试可
+/// 用假体驱动两条路径（真实屏读需要 conhost，CI 不可观测——参见 [`super::server::
+/// DialogProbeFn`] 的缝理由）。
+///
+/// 屏读只对**已命中审批等待**的会话调用（调用点已判 hit），故不会对空闲会话白读一屏。
 fn read_dialog_options(
+    st: &Arc<RemoteState>,
     session: &crate::session::Session,
 ) -> Option<Vec<crate::inject::dialog::DialogOption>> {
-    #[cfg(windows)]
-    {
-        match crate::inject::windows_console::read_screen_window(session.pid) {
-            Ok(lines) => match crate::inject::dialog::parse_dialog_options(&lines) {
-                Some(opts) => {
-                    log::debug!(
-                        "T5 屏读解析出 {} 个对话框选项（pid={}）",
-                        opts.len(),
-                        session.pid
-                    );
-                    Some(opts)
-                }
-                None => {
-                    log::debug!("T5 屏读无连续编号簇（pid={}）→ 降级二元卡", session.pid);
-                    None
-                }
-            },
-            Err(e) => {
-                log::debug!("T5 屏读失败（pid={}: {e}）→ 降级二元卡", session.pid);
-                None
-            }
-        }
+    let opts = (st.dialog_probe)(session.id.as_str(), session.pid);
+    if opts.is_none() {
+        log::debug!("T5 屏读无对话框选项（pid={}）→ 降级二元卡", session.pid);
     }
-    #[cfg(not(windows))]
-    {
-        // macOS 无屏读能力 → 恒降级（红线 4 同款语义：不假装成功）
-        let _ = session;
-        None
-    }
+    opts
 }
 
 /// 审批选项扫描（同步，spawn_blocking 内调用）：会话快照（数据同源，与看板同一份）→
@@ -1885,7 +1906,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     // ③ 解析成功且选项数 ≥ 2 → 下发对话框选项（**覆盖**映射表二元项——真实选项
     //    文本比「允许/拒绝」二元更准，这正是本任务的修复目标）。
     let dialog_options = if hit {
-        read_dialog_options(&session)
+        read_dialog_options(st, &session)
     } else {
         None
     };
@@ -2341,7 +2362,7 @@ pub async fn session_approve(
             let n: u32 = n_str.parse().map_err(|_| "no_mapping")?;
             // **现场重解析**（防 GET→POST 之间对话框变化导致注入陈旧键；同时导航
             // 需要**当前高亮位**——那是此刻屏幕上的状态，不能用 GET 时的快照）
-            let opts = read_dialog_options(&session).ok_or("no_mapping")?;
+            let opts = read_dialog_options(&probe_st, &session).ok_or("no_mapping")?;
             if !opts.iter().any(|o| o.number == n) {
                 return Err("no_mapping");
             }
@@ -3315,6 +3336,11 @@ pub async fn session_mode(
         .into_response()
 }
 
+/// 对话框在场拒绝对控制类注入的中文回执（丁T3 §2.7 裁8/9 的任务书成文语义：
+/// 「终端有待决对话框，请先处理」）。前端 ModeBar 直显 `reason`（与 no_mechanism
+/// 的 `error` 码分诊并列——码供程序分支，文案供用户阅读）。
+const DIALOG_BLOCKS_CONTROL_REASON: &str = "终端有待决对话框，请先处理";
+
 /// POST /m/api/v1/session-mode 请求体（camelCase；字段全 default 防 422）
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3326,7 +3352,8 @@ pub struct SessionModeReq {
     pub target: String,
 }
 
-/// POST /m/api/v1/session-mode（T6 切档）：校验 → 机制分派 → 注入 → 审计 mode。
+/// POST /m/api/v1/session-mode（T6 切档）：校验 → **对话框在场守卫（丁T3 接入①）** →
+/// 机制分派 → 注入 → 审计 mode。
 ///
 /// 注入形态：
 ///
@@ -3337,6 +3364,30 @@ pub struct SessionModeReq {
 ///
 /// **回执如实**：屏读回显不支持时返回 `verified=false` + 人工核对提示（红线 4）
 /// ——绝不声称「已切到 X 档」。
+///
+/// # 对话框在场守卫（丁T3 §2.7，裁8/9）—— `blocked_by_dialog`
+///
+/// **问题 5 实锤**：审计 17:36–38 连点 17 次模式钮，全部落进终端上那个待决对话框
+/// ——`shift+tab` 被对话框当成导航键、斜杠命令文本成了选择题的输入，用户的意图
+/// （切档）与终端的理解（「选第一项」）完全脱节，且**回合被打断**。
+///
+/// 修法：投递前屏读可见窗口，[`crate::inject::dialog::blocks_control_injection`] 判
+/// 「编号选项对话框在场」→ **拒绝本轮注入**，回 409 `blocked_by_dialog` + 中文文案
+/// （与 `no_mechanism` 同用 409 CONFLICT：二者都是「当前状态不允许这个动作」，不是
+/// 参数错误也不是授权问题）。**Key 路（shift+tab）与 Text 路（斜杠命令）同受此门**
+/// ——两路都在本函数内、都在投递之前，守卫位置天然覆盖（不是两处判据）。
+///
+/// **零注入零审计**：拒绝发生在任何注入调用与任何 `endpoint_audit` 之前（与
+/// session-approve / session-question 的「校验失败不投递不落审计」同口径）——账实
+/// 一致的前提是「账只记真发生过的事」。
+///
+/// **检测能力缺失时的处置（明确裁决）**：探针返回 `None`（非 Windows 无屏读 /
+/// AttachConsole 失败 / 解析无簇）→ **放行**，并在回执里带 `dialogChecked:false`
+/// 如实标注「本次未做在场检测」。理由见
+/// [`crate::inject::dialog::blocks_control_injection`] 的文档：能力缺失 ≠ 对话框在场，
+/// 把二者混同会让 macOS 的模式钮永久不可用、且回执文案会说假话（「终端有待决对话框」
+/// 是我们并不知道的事）。`dialogChecked:true` 时该字段为真，前端可据此选择是否向用户
+/// 说明守卫已生效。
 pub async fn session_mode_switch(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -3399,6 +3450,43 @@ pub async fn session_mode_switch(
                 .into_response();
         }
     };
+    // ===== 丁T3 接入①：对话框在场 = 控制类注入红线（§2.7 裁8/9）=====
+    //
+    // 屏读在**投递之前**（与机制分派无关——Key/Text 两路都要过这道门），且在任何
+    // 注入调用与任何审计写入之前：拒绝 = 零注入零审计（与 approve/question 端点的
+    // 校验失败口径一致）。屏读是阻塞 FFI，故放进 spawn_blocking（与既有端点纪律同）。
+    //
+    // 探针 None（能力缺失/屏读失败/无簇）→ 放行 + 回执带 dialogChecked:false 如实
+    // 标注未检测（裁决与理由见本函数文档与 blocks_control_injection）。
+    let probe_st = st.clone();
+    let probe_pid = session.pid;
+    let probe_sid_for_log = sid.clone();
+    let dialog_options = match tokio::task::spawn_blocking(move || {
+        (probe_st.dialog_probe)(probe_sid_for_log.as_str(), probe_pid)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // 探针任务本身 panic（join 失败）：按「无法判定」处理（放行 + 未检测标注），
+            // 不把基础设施异常转成对用户的拒绝
+            log::error!("session-mode 对话框在场探测任务异常: {e}");
+            None
+        }
+    };
+    let dialog_checked = dialog_options.is_some();
+    if crate::inject::dialog::blocks_control_injection(dialog_options.as_deref()) {
+        log::debug!("T3 控制类注入被拒：sid={sid} 屏读见编号选项对话框（模式切换零投递零审计）");
+        return (
+            StatusCode::CONFLICT,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "error": "blocked_by_dialog",
+                "reason": DIALOG_BLOCKS_CONTROL_REASON,
+            })),
+        )
+            .into_response();
+    }
     let spec = crate::inject::families::family_for(&tool)
         .unwrap_or(crate::inject::families::FALLBACK_SPEC);
     let injector = st.injector.clone();
@@ -3472,7 +3560,12 @@ pub async fn session_mode_switch(
         Err(e) => (
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": status_line, "error": e })),
+            Json(serde_json::json!({
+                "status": status_line,
+                "error": e,
+                // 丁T3：失败态也如实携带守卫信息（前端可区分「拒于对话框」与「投递失败」）
+                "dialogChecked": dialog_checked,
+            })),
         )
             .into_response(),
         Ok(()) => (
@@ -3487,6 +3580,9 @@ pub async fn session_mode_switch(
                 } else {
                     serde_json::json!("该工具的模式回显未实测，请人工核对终端当前模式")
                 },
+                // 丁T3：本次是否真的做过对话框在场检测——false = 平台无屏读或屏读失败
+                // （放行口径见本函数文档；前端可据此如实说明守卫未生效，不假装已检查）
+                "dialogChecked": dialog_checked,
             })),
         )
             .into_response(),
@@ -3873,5 +3969,180 @@ mod tests {
                 "{other} 不属计划对话框族（门不放宽——既有行为零改动）"
             );
         }
+    }
+
+    // ===== 丁T3 裁2：斜杠命令审计 action 选择的纯核锁 =====
+
+    /// `audit_action_for` 表驱动（裁2 的判据与注入形态单点同源）：
+    /// `/` 开头 → slash；其余 → 传入的基准动作。
+    #[test]
+    fn audit_action_for_routes_slash_only_for_slash_commands() {
+        for (text, base, want) in [
+            ("/permissions", "send", "slash"),
+            ("/plan", "queue", "slash"),
+            ("\x1b/permissions", "send", "slash"),
+            ("/", "queue", "slash"),
+            ("普通消息", "send", "send"),
+            ("普通消息", "queue", "queue"),
+            ("价格 /permissions 是多少", "queue", "queue"),
+            (" /permissions", "send", "send"),
+        ] {
+            assert_eq!(
+                audit_action_for(text, base),
+                want,
+                "判据格：{text:?}（基准 {base}）"
+            );
+        }
+    }
+}
+
+/// 丁T3 **实机三场景占位**（`#[ignore]`——常规门禁只编译不跑）。
+///
+/// 三场景都无法在无真实 CLI 会话的前提下完成（需要真实 conhost 窗口 + 真实 TUI
+/// 进入对话框态 + 人工观察），故按批次丁计划「实机测试一律 `#[ignore]`」的口径：
+/// **先落占位与观测点清单，把实跑时要抄录/断言的东西写死在注释里**。
+///
+/// 跑法（实机显式，单线程避免终端互相干扰）：
+/// `cargo test --lib t3_live_probe -- --ignored --nocapture --test-threads=1`
+///
+/// **占位的边界（如实申报）**：本模块与 `inject::question::live_probe_tests` 同款——
+/// 只做**前置可满足性检查与探测指引打印**，不发起任何注入或 HTTP 请求（那些需要受控
+/// 会话与人工观察窗口，由本机人工按清单执行）。三场景的自动化替代面已在门禁内覆盖：
+/// ①的守卫两路（假体屏读）见 `remote::server::tests::mode_switch_*`；②的前端分流见
+/// `tests/mobile/MessageComposer.test.tsx` 的「丁T3 卡片在场分流」族；③的裸注入与
+/// 审计见 `remote::server::tests::slash_message_*`。**未被自动化覆盖的只有「真终端
+/// 上是否真的不再发生图5/6/7」这一终极观测**——那正是本模块要人工去跑的部分。
+#[cfg(test)]
+mod t3_live_probe_tests {
+    /// 场景① **待决点模式钮 → 拒**（图5/问题 5）。
+    ///
+    /// 前置：Windows + claude（或 codex）已装；真 conhost 窗口里跑一个会话，
+    /// 让终端停在**待决对话框**态（claude：计划批准框 `❯ 1. Yes, and use auto mode`
+    /// ——探测档案 `screen-t5-claude-plan-before.txt`；或 AUQ 多选题；codex：
+    /// `Implement this plan?`）。MAM 远程服务开启，手机端在详情页。
+    ///
+    /// 观测点（逐条抄录）：
+    /// 1. 点模式栏的切档钮 → 回执必须是 **409 `blocked_by_dialog`** + 文案
+    ///    「终端有待决对话框，请先处理」（不再是「已发送切换」）；
+    /// 2. 终端屏幕**逐行比对无变化**（对话框仍开、高亮项未动——实机注入过的证据是
+    ///    shift+tab 会移动高亮/切档、斜杠命令会变成选择题输入）；
+    /// 3. 审计页**无新行**（拒绝=零注入零审计；这是与「投递失败」可分的关键口径）；
+    /// 4. 处理掉对话框（在终端选一项）后再点同一钮 → 正常投递（守卫不得把正常路径
+    ///    也拒掉——门禁内已有 `mode_switch_proceeds_when_dialog_absent` 锁）。
+    #[test]
+    #[ignore = "实机验证：真 claude/codex 会话停在待决对话框 + 点模式钮 → 409 blocked_by_dialog + 屏幕逐行无变化 + 零审计"]
+    fn t3_dialog_blocks_mode_switch_live_probe() {
+        eprintln!(
+            "丁T3 实机探测占位（场景① 待决点模式钮 → 拒）\n\
+             \n\
+             前置检查：\n\
+             - 平台 = {}（屏读是 Windows 能力；非 Windows 下守卫按「无法判定」放行，\
+             本场景不可观测——那不是缺陷，是能力边界，回执会带 dialogChecked:false）\n\
+             - claude CLI 版本 = {:?}\n\
+             - codex CLI 版本 = {:?}\n\
+             \n\
+             步骤（人工）：\n\
+             1. 真 conhost 里起 claude，要求它给一个计划并停在批准框（屏上应见 \
+             「Claude has written up a plan… ❯ 1. Yes, and use auto mode」）；\n\
+             2. 手机端进该会话详情页，点模式栏「切换模式」或 codex 的「计划」钮；\n\
+             3. 抄录回执 JSON（期望 409 + error=blocked_by_dialog + reason=终端有待决对话框，请先处理）；\n\
+             4. 抄录终端屏幕（与操作前逐行比对——必须完全相同）；\n\
+             5. 查审计页/审计表（期望**无** action=mode 新行）；\n\
+             6. 在终端选掉对话框，再点同一钮（期望 200 key_sent，恢复正常）。\n\
+             \n\
+             定案后落点：本占位改为断言式（读审计表 + 屏读前后比对），或升级为 \
+             tests/m9r_e2e.rs 的真 HTTP 全链用例（先例 e2e_http_full_chain）。",
+            std::env::consts::OS,
+            crate::inject::approve::cached_cli_version("claude"),
+            crate::inject::approve::cached_cli_version("codex"),
+        );
+    }
+
+    /// 场景② **composer 发送 → 自由作答**（图6/问题 6：多选框 Enter=切换高亮项）。
+    ///
+    /// 前置：Windows + claude；终端停在 **AskUserQuestion 单选题**（屏上应见
+    /// `N. Type something.` 那一行 + 编号选项）。
+    ///
+    /// 观测点：
+    /// 1. 手机端输入区的 placeholder/提示条应显示「作为回答发送」（问答卡在场分流）；
+    /// 2. 点发送 → **不回执 delivered**，而是提示条 + 诚实回执（自由作答序列尚未
+    ///    实机定案，本端不代发——见 `MessageComposer` 的常量文案）；
+    /// 3. 终端屏幕**无变化**（关键：放行的旧行为会让 `1` 被勾选/反勾——图6 实锤）；
+    /// 4. 在**问答卡输入框**作答（T5 交付）或在终端作答，终端正常进入下一题/收尾。
+    ///
+    /// **本任务只交付「分流与拦截」**（任务书原文），自由作答注入序列的实机定案
+    /// 归后续批次——定案后本场景的第 2 条观测改写成「点发送 → 注入自由作答序列 →
+    /// `Type something` 行被选中并提交答案」。
+    #[test]
+    #[ignore = "实机验证：真 claude 单选 AUQ 待决 + composer 发送 → 分流提示（不代发）+ 终端屏幕无变化（不做成勾选）"]
+    fn t3_composer_free_text_split_live_probe() {
+        eprintln!(
+            "丁T3 实机探测占位（场景② composer 发送 → 自由作答分流）\n\
+             \n\
+             前置检查：\n\
+             - 平台 = {}\n\
+             - claude CLI 版本 = {:?}\n\
+             \n\
+             步骤（人工）：\n\
+             1. 真 conhost 里起 claude，让它提一个单选问题（AskUserQuestion），\
+             终端停在对话框上；\n\
+             2. 手机端进详情页，观察输入区提示条（期望 data-presence=question，\
+             placeholder=「输入内容将作为回答发送（对话框待决）」）；\n\
+             3. 输入任意自由文本并点发送 → 抄录回执（期望拦截文案，**零** session-send \
+             请求到达服务端）；\n\
+             4. 抄录终端屏幕（与操作前逐行比对——**不得**出现任何选项被勾选/反勾，\
+             这是问题 6 的验收点）；\n\
+             5. 用问答卡作答（或终端作答）验证正常路径不受影响。\n\
+             \n\
+             **未覆盖面申报**：自由作答注入序列（claude 定位 Type something→文本→Enter；\
+             codex tab notes；opencode 选 own answer→文本→Enter；kimi Other/feedback）\
+             全部待实机定案（批次丁计划 §2.4）——本任务按任务书只做分流与拦截，\
+             定案后在此补第三段观测（序列注入生效）。",
+            std::env::consts::OS,
+            crate::inject::approve::cached_cli_version("claude"),
+        );
+    }
+
+    /// 场景③ **移动端 `/permissions` → 触发 + 审计**（图7/问题 8：前缀毁命令）。
+    ///
+    /// 前置：Windows + codex（`/permissions` 是 codex 的权限档命令，批次丙 T6 有
+    /// 命令证据）；终端**空闲可输入**（无待决对话框——否则会先撞场景①的守卫）。
+    ///
+    /// 观测点：
+    /// 1. 手机端 composer 输入 `/permissions` 并发送 → 回执 delivered/queued；
+    /// 2. **终端屏幕上命令原样出现**（`/permissions`，**无** `[mobile …]` 签名——
+    ///    有签名就会变成「找不到命令」或被当普通消息，图7 实锤）；
+    /// 3. codex 的模式/权限切换发生（底栏权限文本变化，或弹出权限菜单——后者属
+    ///    T4 的两段式范围，本场景只验「命令被识别」）；
+    /// 4. 审计页按设备名可查：新行 `action=slash`、`summary=/permissions`、
+    ///    `device_name=<该设备>`（裁2：终端不留痕，溯源只此一处）。
+    #[test]
+    #[ignore = "实机验证：真 codex 空闲会话 + 移动端发 /permissions → 终端原样收到裸命令 + 审计 action=slash 可按设备查"]
+    fn t3_slash_bare_injection_and_audit_live_probe() {
+        eprintln!(
+            "丁T3 实机探测占位（场景③ 移动端 /permissions → 触发 + 审计）\n\
+             \n\
+             前置检查：\n\
+             - 平台 = {}\n\
+             - codex CLI 版本 = {:?}\n\
+             \n\
+             步骤（人工）：\n\
+             1. 真 conhost 里起 codex（版本需与批次丙 T6 的命令证据档一致），\
+             确认终端空闲可输入（无待决对话框）；\n\
+             2. 手机端 composer 发 `/permissions`；\n\
+             3. 抄录终端屏幕（期望出现裸 `/permissions`，**无** [mobile …] 签名）；\n\
+             4. 按命令的实际效果观察（权限菜单/底栏文本变化——如实抄录，\
+             两段式选择属 T4 范围，此处只验命令被识别）；\n\
+             5. 打开桌面端审计页，按设备名过滤，确认新行 action=slash + \
+             summary=/permissions（**这是斜杠命令唯一的溯源留痕**）。\n\
+             \n\
+             回归面：同设备再发一条普通消息 → 终端应见 `正文 [mobile 设备名]`（签名在尾）\
+             （签名**在尾部**）——两个形态并存是裁2 的完整语义；且该消息的确认戳\
+             不因尾部签名与其他同设备消息假命中（门禁内已由 \
+             inject::confirm::tests::stamp_never_false_hits_across_same_device_messages \
+             锁住）。",
+            std::env::consts::OS,
+            crate::inject::approve::cached_cli_version("codex"),
+        );
     }
 }

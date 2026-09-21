@@ -776,6 +776,9 @@ mod tests {
             home_source: Box::new(|| None),
             injector,
             confirm_probe,
+            // 丁T3：对话框在场探针缝——本模块测试不触控制类注入守卫（恒 None =
+            // 无法判定；语义见 remote::server::DialogProbeFn）
+            dialog_probe: std::sync::Arc::new(|_, _| None),
             // R5 一键 resume spawn 缝（Task 11）：flush 路径不消费，注 no-op 桩（零真开窗）
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
         }
