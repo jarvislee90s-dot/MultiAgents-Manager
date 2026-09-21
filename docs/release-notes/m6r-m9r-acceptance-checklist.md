@@ -189,6 +189,9 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-20 | **三家实机矩阵（claude / codex / kimi；F8 就绪）** | 三家 CLI 在场；codex 需先过信任门（C-17）；helper 已 debug 构建 | ① 三家各跑一条 `--ignored` 自检（C-16/C-18/C-19，自动化形态）；② **人工交互会话**（三家各一）：claude 触发权限提示、codex 触发审批框、kimi 触发审批请求，期间观察 `~/.mam/events/<session_id>.json` 内容与看板红卡 | ① 三条自检全绿（claude/kimi 本批实测已过；codex 至信任门前一步=事件不落盘为**设计内**，见 C-17）；② 人工会话中审批进入事件落盘 → 看板该会话**强制 Waiting 红卡**（T4 接铃铛）→ 手机上批准/拒绝 → 对应事件（claude PostToolUse/Stop、codex PostToolUse/Stop、kimi **PermissionResult**）清除标记 → 卡片回落绿灯（**F1 修复点**：kimi 清除链此前漏接 PermissionResult，红灯永不落）。**人工项归用户执行**（agent 不代做交互会话） |
 | C-21 | **问答三形态（批次乙 T8 新增，claude 先行）** | claude 在场 + debug helper 已构建（同 C-18 前置） | ① claude 交互会话触发 AskUserQuestion（单选 / 多选各一次 + 自由文本入口）→ 移动端问答卡出现（等待态；PreToolUse hook 通道实时载荷）；② 单选点选项 / 多选勾选+提交 / 自由文本按引导走普通消息；③ 终端核对作答生效、审计 action=answer 落账 | 问答卡出现且作答送达生效；**问答模式不出允许/拒绝**（与审批红卡严格隔离）；多问题（questions>1）为只读卡+引导（未测面，不注入）；键位语义与注入序列依据 `research/refs/phase2-消息注入/2026-09-21-claude-askuserquestion-按键语义探测.md`（K1–K11 定案表 + questions JSON 夹具）。**人工项归用户执行**（agent 不代做交互会话） |
 | C-22 | **信号健康度走查（批次乙 T5 新增）** | MAM 运行；至少一工具已注册 hooks；codex 已注册但**未信任**（即未跑 C-17） | 桌面设置页「信号健康度」小节逐工具查看三态/待办文案；对 codex 待办行点「复制 /hooks」；在 codex TUI 完成信任后回看该行 | per-tool 行三态正确（未注册 / 正常·最近事件 xx 前 / 暂无活跃会话）；codex 未信任时判据命中（已注册∧活跃会话∧零事件）→ 显示信任待办文案 + 复制按钮，信任后待办消除；首次 codex 注册收到一次性桌面通知（重启不重复弹）。注：本行为 T5 新增的验收落点（任务书未点名清单项，收口裁量，已台账申报） |
+| C-23 | **N 选项审批对话框（T5 新增）** | Windows 实机；claude/codex/kimi 任一在场；**已完成 T2 部署**（`~/.mam/bin` helper 为含载荷的新构建） | ① 触发三类 N 选一对话框之一：claude 计划批准、codex `Implement this plan?`、kimi `Ready to build`；② 手机看红卡应显示**终端对话框的真实选项文本 + 编号徽标**（而非二元「允许/拒绝」）；③ 点第 N 项 → 终端对应选项被选中并提交 | 卡片选项与终端屏上选项**逐项对齐**；点按生效；审计 `action=approve`、`content=dialog:N`。**降级路径**（红线 3）：屏读失败 / 无连续编号簇（<2 或 >9 项）→ 回落**二元卡 + 防重警示**。**实机探测已完成（2026-09-21）**：三类对话框全部真机触发，档案 `research/refs/phase2-消息注入/2026-09-21-审批对话框N选项屏读解析实机探测.md`。**探测抓获两处缺陷并已修**：① 光标标记前缀（`›`/`❯`/`▶`）使首项永不匹配 → codex/kimi 解析 0 项降级、claude 簇错位拼接正文列表（修复 + 双回归锁）；② kimi 确认键是 **Enter** 而非矩阵记载的第二数字（修复 + 回归锁）。**待裁决开放项**：claude 计划批准框**数字键无效**（须 ↓+Enter）——当前编号键路径对该框不生效，修法方向=「↓×(n-1)+Enter」（已实测生效） |
+| C-24 | **模式切换（T6 新增）** | 同上；四家各一在场 | ① 会话详情页「模式」栏显示当前档；② claude/opencode/kimi 点「切换模式」（shift+tab 循环切一档）；③ codex 点「计划」/「完全信任」；④ **opencode 专项**：切后屏读回读档位应变化 | ① opencode 档位回读**变化可见**；② 其余三家回执**如实标注 `verified=false` + 人工核对提示**；③ codex 无命令证据的两档不给按钮、直调 API 亦 409。**实机探测已完成（2026-09-21）**：档案 `research/refs/phase2-消息注入/2026-09-21-四家模式切换shift-tab实机探测.md`——**四家 shift+tab 全部生效**（底栏均明示 `shift+tab to cycle`）；**opencode 屏读回读 5/5 正确**（实现侧 `parse_mode_from_screen` 对全部真实快照逐例吻合，`Build`↔`Plan` 循环 4 次）；claude 实测四档环序（acceptEdits→plan→auto→manual）。**待裁决开放项**：codex 底栏亦明示 shift+tab（非仅斜杠命令）；claude/codex/kimi 底栏档位文本实际可读而实现侧 `mode_readback_supported` 偏保守（仅放开 opencode） |
+| C-25 | **打断式插队（T9 新增）** | claude 交互会话处于**运行中**（busy） | 在手机端对运行中的 claude 会话点「立即发送」 | ① 当前回合被 Esc 中断（"Interrupted · What should Claude do instead?"）；② 消息**即刻进入**（而非停在 TUI 内部队列）；③ 审计 `action=jump`。**降级**：Esc 注入失败/排空超时仍继续投递正文（best-effort）。**实机探测已完成（2026-09-21）**：档案 `research/refs/phase2-消息注入/2026-09-21-claude打断式插队Esc语义链实机探测.md`——busy 注入正文 → Enter 落**内部队列**（底栏原文 `Press up to edit queued messages`，**即计划书问题 10 的现场证据**）；**Esc 中断后队列消息被自动取出开新回合**（`Interrupted…` → `✢ Photosynthesizing…`，**消息不丢**）→ 确证「先 Esc 再投递」次序正确。**未测面（留白）**：`wait_input_drained` 3s 预算的精确边界未逐毫秒量化；多条队列消息的取舍顺序未测；**「Esc 是否清输入行草稿」仍未直接验**（本轮入队后输入行已空）；重复 Esc 时机未测 |
 
 > **F8 台账追记（2026-09-21，三家矩阵真实状态）**：
 > ① **claude** = 全链实测通（C-18 自检 1.1s 过，事件落盘含 SessionEnd/Stop 等；print
@@ -282,9 +285,6 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 
 | # | 项 | 前置 | 步骤 | 预期观察 / 判定点 |
 |---|---|---|---|---|
-| C-23 | **N 选项审批对话框（T5 新增）** | Windows 实机；claude/codex/kimi 任一在场；**已完成 T2 部署**（`~/.mam/bin` helper 为含载荷的新构建） | ① 触发三类 N 选一对话框之一：claude 计划批准（1=auto/2=manual/3=tell-claude）、codex `Implement this plan?`（1/2/3）、kimi `Ready to build`（1=Approve/2=Reject/3=Revise）；② 手机看红卡应显示**终端对话框的真实选项文本 + 编号徽标**（而非二元「允许/拒绝」）；③ 点第 N 项 → 终端对应选项被选中并提交 | 卡片选项与终端屏上选项**逐项对齐**（编号=将注入的数字键）；点按生效（终端 UI 关闭、模型继续）；审计 `action=approve`、`content=dialog:N`。**降级路径**（红线 3）：屏读失败 / 无连续编号簇（<2 或 >9 项）→ 卡片回落**二元卡 + 防重警示**，不猜选项、不盲出键。**未验面**：本批做了解析器与屏读构造的单测（`inject/dialog.rs`）+ 端到端接线，但**「屏读真实对话框 → 按钮生效」一段未经实机** |
-| C-24 | **模式切换（T6 新增）** | 同上；四家各一在场 | ① 会话详情页「模式」栏显示当前档；② claude/opencode/kimi 点「切换模式」（shift+tab 循环切一档）；③ codex 点「计划」/「完全信任」（注入 `/plan` / `/permissions`）；④ **opencode 专项**：切后屏读回读档位应变化 | ① opencode：档位回读**变化可见**（矩阵实测其状态栏明示模式，本批实现了屏读解析）；② 其余三家：回执**如实标注 `verified=false` + 「请人工核对终端当前模式」**（红线 4：回显未实测，不假装成功）；③ codex 无命令证据的两档（acceptEdits/readOnly）不给按钮、直调 API 亦 409。**未验面**：shift+tab 的**键事件形态**（VK_TAB + SHIFT_PRESSED 修饰位）按 Win32 控制台语义构造，**「目标 TUI 是否认这个组合」未实机验证**；opencode 状态栏解析**未在真实屏读上验过** |
-| C-25 | **打断式插队（T9 新增）** | claude 交互会话处于**运行中**（busy） | 在手机端对运行中的 claude 会话点「立即发送」 | ① 当前回合被 Esc 中断（终端出现 "Interrupted · What should Claude do instead?"）；② 消息**即刻进入**（而非停在 TUI 内部队列）；③ 审计 `action=jump`（Esc 是 jump 的内部分步，不新增词）。**未验面**：任务书要求的前置探测（Esc 中断后 TUI 队列消息去向、Esc 是否清输入行）**未单独重跑**——本批直接采用 K2 既有实机取证（Esc 中断 busy 回合，三次复现）作为语义依据；**「中断后正文是否即刻进入」这一段端到端未经实机**；`wait_input_drained` 在「回合收尾」场景的排空判据可靠性同样未验。**降级**：Esc 注入失败/排空超时仍继续投递正文（best-effort，不丢用户消息） |
 | C-26 | **plan 文件预览扩展（T7 新增）** | kimi 在场（其计划是一等文件）；**已完成 T2 部署** | ① kimi 写计划到 `~/.kimi-code/sessions/.../agents/main/plans/*.md`；② 手机消息流出现**「计划文件」绿卡**（文件名 + 「查看计划」按钮）；③ 点开 → 文件预览显示计划全文 | ① 卡片出现（后端从工具结果 `Wrote N bytes to ...plans/x.md` 形态识别）；② 点开**可读全文**（豁免面 `agents/main/plans` 尾段序列放行，`.kimi-code` 其余路径仍 403）；③ `.claude/plans` / `.codex/plans` 既有豁免面**无回归**。**人工项归用户执行** |
 | C-27 | **审批点 plan 聚合（T8 新增）** | claude/codex/kimi 任一处于**计划批准**对话框 | 手机看红卡主体 | ① 卡片主体**即见计划全文**（claude=消息流 `input.plan` 升格 / codex=标签剥后升格 / kimi=计划文件路径提示），不再要用户去消息流翻；② markdown 结构化渲染（标题/列表）；③ 无计划在场时（`plan=null`）只渲染选项，**降级不阻塞审批** |
 | C-28 | **codex 计划无标签残留（T4 新增）** | codex Plan 模式产出计划 | 手机消息流查看计划 | 计划以**一等卡**渲染（绿系「计划」标签 + markdown），**无 `</proposed_plan>` 标签残留**；标签前的自由文本作为普通 assistant 消息保留在计划卡之前（不丢用户可见内容） |
@@ -307,6 +307,40 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 5. **T5/T6/T9 的实机端到端未跑**（见 C-23/C-24/C-25 各自的「未验面」段）：解析器/序列/守卫均有单测且形态取自实测档案，但「屏读真实对话框 → 按钮生效」「shift+tab 被目标 TUI 认」「中断后正文即刻进入」三段未经实机。**如实申报，不冒充已验**。
 6. **T2 部署已完成**：`~/.mam/bin/mam-hook-listener.exe` 13:37 新构建（含 T1 载荷），部署链路自检真跑通过。**用户侧需重启 MAM 应用**（`ensure_hook_script` 在启动时执行）以确认自动部署路径亦生效。
 7. **codex 探测子代理在报告阶段中止**（模型请求失败）：探测**证据完整落盘**（日志 + 12 张截图 + rollout），档案由主线**直接读原始日志**归纳，全部结论可指到证据行。
+
+### E-6 · 三项遗留实机探测的补跑结果（2026-09-21，本轮）
+
+> 补跑计划书 §3 点名的三项实机探测（此前以「未验面」如实申报）。一律遵守项目技能
+> `.agents/skills/win-console-inject-probe` 八条铁律；探测目录
+> `%TEMP%\mam-probe-c3-20260921-150000\`（logs 73 份 + evidence 42 份屏幕快照，保留）；
+> 四家探测 TUI + 宿主全数清场，**用户自有会话未触碰**。
+
+| 探测 | 结果 | 档案 |
+|---|---|---|
+| **T5 三类 N 选项对话框屏读解析 + 编号按钮生效** | ✅ **三类全部真机触发并解析**；**抓获两处实现缺陷**（光标标记前缀 / kimi 确认键）**均已修 + 回归锁** | `research/refs/phase2-消息注入/2026-09-21-审批对话框N选项屏读解析实机探测.md` |
+| **T6 四家模式切换（opencode 屏读回读）** | ✅ **四家 shift+tab 全部生效**；**opencode 档位回读 5/5 正确**（实现侧解析器对全部真实快照逐例吻合） | `research/refs/phase2-消息注入/2026-09-21-四家模式切换shift-tab实机探测.md` |
+| **T9 claude busy 注入正文 → Esc 语义链（含队列去向）** | ✅ **次序确证**；**队列消息去向已验**（Esc 后自动取出开新回合，消息不丢） | `research/refs/phase2-消息注入/2026-09-21-claude打断式插队Esc语义链实机探测.md` |
+
+**本轮探测新增的实现变更（commit `af627f2`）**：
+
+| # | 缺陷 | 根因（实机证据） | 修法 | 回归锁 |
+|---|---|---|---|---|
+| ① | 光标标记前缀使首项永不匹配 | 三类对话框把高亮项渲染为 `› 1.`/`❯ 1.`/`▶ 1.`，未高亮项是 `  2.`；原实现只 `trim_start()`（仅空白） | `parse_option_line` 前导剥除扩展为 `空白 + {U+203A, U+276F, U+25B6, '>'}` | `parses_dialog_with_cursor_marker_prefix`（codex+claude+ASCII）、`parses_kimi_ready_to_build_dialog`（kimi） |
+| ② | kimi 确认键错误 | 矩阵记载「数字 '1' 提交」；实机：'1' 后对话框仍在，**Enter** 才关闭（底栏 `1/2/3 choose · ↵ confirm`） | `TwoPhaseSelect` 的 select 由 `[数字,"1"]` 改 `[数字,"enter"]` | `kimi_profile_is_two_phase` 断言同步修正 |
+
+**本轮探测申报的待裁决开放项**（未改代码）：
+
+1. **claude 计划批准框数字键无效**（C-23 正文已记）：AUQ 是数字即选即交（K1 实机
+   取证），但**计划批准框**实测数字无效、必须 ↓+Enter。MAM 审批路径当前用编号键
+   （数字）驱动——对该框不生效。**修法方向**：claude 走「↓×(n-1) + Enter」
+   （本轮已实测该路径在此框生效）。
+2. **codex 亦用 shift+tab**（C-24 正文已记）：计划书假设 codex 走斜杠命令，实测
+   `/plan` 确实可用，但底栏自己写着 `shift+tab to cycle`——建议 `switch_kind("codex")`
+   并入 `ShiftTabCycle` 或增补等价入口。
+3. **三家模式回读可放开**（C-24 正文已记）：claude/codex/kimi 底栏档位文本实际
+   可读，实现侧 `mode_readback_supported` 仅放开 opencode（偏保守）。放开需注意
+   claude 的 `auto mode`→MAM `Bypass`、`manual mode`→MAM `Default` 的映射（本档
+   已实测该对应关系）。
 
 ### E-5 · 批次丙交付清单（任务 × commit）
 
