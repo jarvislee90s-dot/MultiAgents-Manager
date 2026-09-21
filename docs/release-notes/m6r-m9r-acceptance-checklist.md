@@ -248,3 +248,80 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 > （不向未等待会话发错误键位）。判定落账：D-4=PASS（有漂移记录，y/esc、1 键位不变）/
 > D-6=不适用（红卡不可达，approve 的 keystroke 路径无实机触发样本，未观察丢键）/
 > M8-1=部分（经降级达效）/ M8-2=PASS（经降级）。
+
+---
+
+## E. 批次丙（mfix-c）覆盖追记与新增人工项（2026-09-21）
+
+> 批次丙 = 手工验收修复批·丙（审批交互统一与 plan 全链），计划 `docs/superpowers/plans/2026-09-21-phase2-manual-acceptance-fixes-b.md`（T1–T11）。
+> 本批**不追记 M6R–M9R 设计文档**（沿用「实测结论不回写设计文档」惯例），落点集中在本节。
+>
+> **自动化覆盖追记**：Rust lib **1113 过 / 0 败 / 9 ignored**（批次乙基线 1061 → **+52**）；
+> bin `mam-hook-listener`（须 `--features hook-listener`）**43 过**；vitest **695 过 / 80 文件**
+> （基线 674 → **净增 21**，无移仓）；preset_v2_test 34 过 5 败（**与基线 `74fee5f` 逐名相同的
+> 环境白名单恒定名单**——已用 `git checkout 74fee5f -- src-tauri/` 对照复现，非本批引入）；
+> dao_test 7 过、reconcile_test 0 过（unix 门控）；pnpm check ✅ / build:mobile ✅。
+
+### E-1 · 本批新增的自动化覆盖（免人工）
+
+| 覆盖点 | 位置 | 代表测试 |
+|---|---|---|
+| 幽灵审批标记：误标不写 / 双保险清审批 / 正常审批不受影响 / **I1 守卫三例**（问答在飞忽略无工具名 Notification、无问答照常写、带工具名绕过守卫） | `adapter/mod.rs` | `permission_request_askuserquestion_is_question_entry_not_approval`、`question_entry_clears_preexisting_approval_mark`、`generic_approval_events_stay_approval_entry`、`plain_notification_while_question_inflight_is_ignored`、`plain_notification_without_question_still_marks_approval`、`tool_bearing_approval_events_bypass_the_guard` |
+| helper `message` 透传 + 承接窗（legacy 逐字节 / 只认进入事件 / 30s 窗 / 时钟倒退） | `monitor/hook_listener.rs`、`bin/mam-hook-listener.rs` | `event_body_with_message_absent_is_byte_identical`、`carry_forward_ignores_answer_signal_and_other_tools`、`carry_forward_respects_freshness_window`、`run_writes_question_channel_fields` |
+| **部署链路自检**（`~/.mam/bin` 那份 helper 的载荷能力 + 旧构建检测 + 两条红线回归） | `monitor/hooks.rs` | `deployed_helper_writes_question_channel_payload`（`#[ignore]`，**已真跑过**） |
+| 问答通道 B **形态判据**（codex/opencode/kimi 三家 args 形态解析）+ 键序分档（claude 全 / opencode·codex 数字直选 / kimi 两段式 / 未验只读） | `inject/question.rs` | `parse_accepts_codex_and_opencode_shapes`、`key_profile_routing`、`claude_profile_matches_legacy_sequences`、`opencode_profile_select_only`、`kimi_profile_is_two_phase`、`codex_profile_digit_select_only` |
+| codex `<proposed_plan>` 剥标签升格（真机形态 / 退化五例不升格 / 前导文本保留 / 端到端分派） | `remote/content.rs` | `split_proposed_plan_handles_real_shape`、`codex_proposed_plan_promotes_to_plan_card`、`codex_rollout_assistant_with_plan_tag_yields_plan_kind` |
+| plan 文件豁免**尾段序列匹配**（kimi 深路径 / 段精确不误伤 / 凭据面照拦）+ 计划文件引用识别（双分隔符 / 退化形态 / 卡产出 / kimi wire 端到端） | `remote/files.rs`、`remote/content.rs` | `exempt_tail_sequence_matches_kimi_plan_paths`、`extract_plan_file_ref_handles_real_wire_text`、`plan_file_ref_yields_card_alongside_tool_result`、`kimi_wire_plan_write_yields_plan_file_kind` |
+| N 选项对话框屏读解析（三类真实对话框形态 / 编号变体 / 降级面 / 非连续编号 / 分隔线不切断 / 数字变体防误判） | `inject/dialog.rs` | `parses_three_real_dialog_shapes`、`accepts_numbering_variants`、`degrades_when_unparseable`、`non_continuous_numbering_is_not_a_cluster`、`separator_lines_do_not_break_cluster`、`rejects_lookalikes` |
+| 模式切换内核（枚举往返 / 机制分族 / 回显判据 / 序列构造 / 命令映射 / 真实状态栏解析 / 词边界保守性） | `inject/mode.rs` | `mode_parse_roundtrip`、`switch_kind_routing`、`readback_only_for_opencode`、`sequence_construction`、`slash_command_mapping`、`parse_mode_from_real_status_bar`、`parse_mode_respects_word_boundaries` |
+| 打断式插队（**Esc 先于正文的序断言** / 空闲不注入 / 非 claude 不注入 / 普通 flush 零注入 / Esc 失败仍投递） | `inject/queue.rs` | `interrupt_jump_sends_esc_before_text_when_running`、`interrupt_jump_skips_esc_when_idle`、`interrupt_jump_is_claude_only`、`plain_flush_never_interrupts`、`interrupt_jump_continues_when_esc_fails` |
+| 统一交互卡容器（五段结构 / 四档 token 分族 / pulsing 开关 / 可选段缺省） | `src/mobile/InteractiveCard.tsx` | `tests/mobile/InteractiveCard.test.tsx`（5 测） |
+| 前端各卡（对话框选项编号组 + plan 聚合 + 只读档 + 模式栏三态） | 各卡组件 | `ApproveCard.test.tsx`（14 测）、`QuestionCard.test.tsx`（12 测）、`ModeBar.test.tsx`（7 测）、`SessionDetail.test.tsx`（计划文件卡） |
+
+### E-2 · 本批新增人工验收项
+
+| # | 项 | 前置 | 步骤 | 预期观察 / 判定点 |
+|---|---|---|---|---|
+| C-23 | **N 选项审批对话框（T5 新增）** | Windows 实机；claude/codex/kimi 任一在场；**已完成 T2 部署**（`~/.mam/bin` helper 为含载荷的新构建） | ① 触发三类 N 选一对话框之一：claude 计划批准（1=auto/2=manual/3=tell-claude）、codex `Implement this plan?`（1/2/3）、kimi `Ready to build`（1=Approve/2=Reject/3=Revise）；② 手机看红卡应显示**终端对话框的真实选项文本 + 编号徽标**（而非二元「允许/拒绝」）；③ 点第 N 项 → 终端对应选项被选中并提交 | 卡片选项与终端屏上选项**逐项对齐**（编号=将注入的数字键）；点按生效（终端 UI 关闭、模型继续）；审计 `action=approve`、`content=dialog:N`。**降级路径**（红线 3）：屏读失败 / 无连续编号簇（<2 或 >9 项）→ 卡片回落**二元卡 + 防重警示**，不猜选项、不盲出键。**未验面**：本批做了解析器与屏读构造的单测（`inject/dialog.rs`）+ 端到端接线，但**「屏读真实对话框 → 按钮生效」一段未经实机** |
+| C-24 | **模式切换（T6 新增）** | 同上；四家各一在场 | ① 会话详情页「模式」栏显示当前档；② claude/opencode/kimi 点「切换模式」（shift+tab 循环切一档）；③ codex 点「计划」/「完全信任」（注入 `/plan` / `/permissions`）；④ **opencode 专项**：切后屏读回读档位应变化 | ① opencode：档位回读**变化可见**（矩阵实测其状态栏明示模式，本批实现了屏读解析）；② 其余三家：回执**如实标注 `verified=false` + 「请人工核对终端当前模式」**（红线 4：回显未实测，不假装成功）；③ codex 无命令证据的两档（acceptEdits/readOnly）不给按钮、直调 API 亦 409。**未验面**：shift+tab 的**键事件形态**（VK_TAB + SHIFT_PRESSED 修饰位）按 Win32 控制台语义构造，**「目标 TUI 是否认这个组合」未实机验证**；opencode 状态栏解析**未在真实屏读上验过** |
+| C-25 | **打断式插队（T9 新增）** | claude 交互会话处于**运行中**（busy） | 在手机端对运行中的 claude 会话点「立即发送」 | ① 当前回合被 Esc 中断（终端出现 "Interrupted · What should Claude do instead?"）；② 消息**即刻进入**（而非停在 TUI 内部队列）；③ 审计 `action=jump`（Esc 是 jump 的内部分步，不新增词）。**未验面**：任务书要求的前置探测（Esc 中断后 TUI 队列消息去向、Esc 是否清输入行）**未单独重跑**——本批直接采用 K2 既有实机取证（Esc 中断 busy 回合，三次复现）作为语义依据；**「中断后正文是否即刻进入」这一段端到端未经实机**；`wait_input_drained` 在「回合收尾」场景的排空判据可靠性同样未验。**降级**：Esc 注入失败/排空超时仍继续投递正文（best-effort，不丢用户消息） |
+| C-26 | **plan 文件预览扩展（T7 新增）** | kimi 在场（其计划是一等文件）；**已完成 T2 部署** | ① kimi 写计划到 `~/.kimi-code/sessions/.../agents/main/plans/*.md`；② 手机消息流出现**「计划文件」绿卡**（文件名 + 「查看计划」按钮）；③ 点开 → 文件预览显示计划全文 | ① 卡片出现（后端从工具结果 `Wrote N bytes to ...plans/x.md` 形态识别）；② 点开**可读全文**（豁免面 `agents/main/plans` 尾段序列放行，`.kimi-code` 其余路径仍 403）；③ `.claude/plans` / `.codex/plans` 既有豁免面**无回归**。**人工项归用户执行** |
+| C-27 | **审批点 plan 聚合（T8 新增）** | claude/codex/kimi 任一处于**计划批准**对话框 | 手机看红卡主体 | ① 卡片主体**即见计划全文**（claude=消息流 `input.plan` 升格 / codex=标签剥后升格 / kimi=计划文件路径提示），不再要用户去消息流翻；② markdown 结构化渲染（标题/列表）；③ 无计划在场时（`plan=null`）只渲染选项，**降级不阻塞审批** |
+| C-28 | **codex 计划无标签残留（T4 新增）** | codex Plan 模式产出计划 | 手机消息流查看计划 | 计划以**一等卡**渲染（绿系「计划」标签 + markdown），**无 `</proposed_plan>` 标签残留**；标签前的自由文本作为普通 assistant 消息保留在计划卡之前（不丢用户可见内容） |
+| C-29 | **codex/opencode 问答卡出卡（T3 新增）** | codex（Plan 模式）或 opencode 在场 | 触发 `request_user_input` / `question` | 手机出现问答卡渲染**题干 + 编号选项**（**JSON 裸奔消失**）。codex 与 opencode 均已实机取证「数字单键即选即交」→ 可作答；**kimi 为两段式**（数字选中 → Review 屏 → 数字确认，select 序列 = `[数字, "1"]`）。未验工具的只读面由 C-30 覆盖 |
+| C-30 | **未验工具问答只读档（T3 新增）** | zcode/dsh/workbuddy/openclaw 任一（若其触发问答） | 手机看问答卡 | 卡片渲染**只读形态**（题干 + 编号选项文本 + 「该工具的远程作答尚未实测，请在终端完成作答」），**零注入按钮**（未验不出键）；直调 API 应答 → 409 `tool_readonly` |
+
+### E-3 · 本批实机取证档案（依据留痕）
+
+| 日期 | 档案 | 一句话结论 |
+|---|---|---|
+| 2026-09-21 | `research/refs/phase2-消息注入/2026-09-21-claude-notification-message-取证.md` | **推翻计划书 T1 的判据假设**：AUQ 待答与真实审批的 `Notification.message` **逐字相同**（`Claude needs your permission`）→ 判据改落 `tool_name`；且事件文件覆盖写使 Notification 常为唯一可见事件 → helper 需「承接窗」 |
+| 2026-09-21 | `research/refs/phase2-消息注入/2026-09-21-codex-request_user_input-键位实机补测.md` | **补齐矩阵遗留条件项**：codex 数字单键**即选即交**（三取样）、↓+Enter 亦可、**Esc=中断整个回合**、Tab=备注、←→ 切题；**确认屏数字无效只认 Enter/Esc**（推翻源码级 B 级记载）；pending `function_call` **即落盘**（≈43s 窗口）→ MAM 侧 codex 由只读**升格**为可作答 |
+
+### E-4 · 本批自裁决与已知限制（供评审追认）
+
+1. **T1 判据方向改判**（任务书假设被实机证伪 → 改落 tool_name）：已在取证档案与 commit message 双处留痕，属任务书自身「判据以实测 message 原文为准」的要求。
+2. **T1 承接窗**为修复所必需（事件文件覆盖写实证），非锦上添花；**正向残余面**（问答在飞 + 超窗裸 Notification）由 I1 守卫收口；**反向残余**（作答后那条提醒式 Notification 仍到达）经实机复核**不存在**——T1 探针原始日志（`%TEMP%\mam-probe-t1-20260921-111045\logs\events-collector-*.log`）显示通知由定时器在审批请求后 ≈6–7s 发出，**每次待答各恰一条**，作答后无二次通知。
+3. **T3 形态判据的风险边界**：只看结构（任何带 `questions[{question,options[]}]` 形状入参的工具都会被判问答）。本机四家矩阵无碰撞；误判后果（一张只读卡）轻于漏判后果（JSON 裸奔）。
+4. **T3 codex 升格但 cancel 拒**：Esc 在 codex 是「中断整个回合」（破坏性远大于 claude 的 is_error 拒答），故不代按。
+5. **T5/T6/T9 的实机端到端未跑**（见 C-23/C-24/C-25 各自的「未验面」段）：解析器/序列/守卫均有单测且形态取自实测档案，但「屏读真实对话框 → 按钮生效」「shift+tab 被目标 TUI 认」「中断后正文即刻进入」三段未经实机。**如实申报，不冒充已验**。
+6. **T2 部署已完成**：`~/.mam/bin/mam-hook-listener.exe` 13:37 新构建（含 T1 载荷），部署链路自检真跑通过。**用户侧需重启 MAM 应用**（`ensure_hook_script` 在启动时执行）以确认自动部署路径亦生效。
+7. **codex 探测子代理在报告阶段中止**（模型请求失败）：探测**证据完整落盘**（日志 + 12 张截图 + rollout），档案由主线**直接读原始日志**归纳，全部结论可指到证据行。
+
+### E-5 · 批次丙交付清单（任务 × commit）
+
+| 任务 | 内容 | commit |
+|---|---|---|
+| T1 | 幽灵审批标记修复（helper 透传 Notification.message + 误标不写 + 问答清审批双保险） | `7d0a54c` |
+| T1 复评 | I1 守卫（问答在飞忽略无工具名 Notification）+ M1/M2/M3 清账 | `d8c3f3c` |
+| T2 | helper 构建部署保障（feature 固化 + 部署链路实机自检） | `6ff89eb` |
+| T3 | 问答卡形态化匹配（codex/opencode/kimi 接入）+ 未验工具只读档 | `fa440f0`（+`0b9712e` prettier） |
+| T3 补测 | codex 键序实机取证，由只读升格为可作答 | `b83f684` |
+| T4 | codex proposed_plan 剥标签升格一等计划卡 | `f0b2639` |
+| T7 | plan 文件豁免/识别/渲染（kimi plans 子树 + 计划文件卡） | `471f68b` |
+| T5 | 通用 N 选项审批卡（屏读解析 + 编号按钮组） | `26137a7` |
+| T6 | 模式切换（统一枚举 + 四家映射 + shift+tab/斜杠注入 + 卡头显示） | `5d3b93d` |
+| T8 | 审批点 plan 聚合（计划批准卡主体即见全文） | `f9791db` |
+| T9 | claude 打断式插队（Esc 优先序 + best-effort 降级） | `027aba5` |
+| T10 | 统一交互卡 UI（InteractiveCard 容器族 + 四套界面同设计语言） | `deaa8bf` |
+| T11 | 收口（本节 + 台账 + handover） | 本 docs 提交 |
