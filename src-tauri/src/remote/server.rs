@@ -4500,6 +4500,47 @@ mod tests {
                 s.last_message = Some("Which folder should hold build output?".to_string());
                 s
             },
+            // 丁T1 复评 F-2 独占会话（全测试集唯一 id）：**最强对照形态**——问题待决
+            // 的语义红 + last_message **恰为审批 marker 命中句**（模型把问题写成审批
+            // 措辞的自然形态）。这正是 F-2 要拦的场景：detect 纯文本命中会误出审批卡，
+            // 唯一的拦截来自「尾部存在待决问答」判定（question_pending_red_* 用例）
+            {
+                let mut s = inj_sess(
+                    "sess_an",
+                    crate::session::AgentType::Codex,
+                    49,
+                    crate::session::SessionStatus::Waiting,
+                );
+                // codex 默认映射 marker 之一（DEFAULT_MAPPINGS_JSON）
+                s.last_message = Some("Would you like to run the following command?".to_string());
+                s
+            },
+            {
+                let mut s = inj_sess(
+                    "sess_ao",
+                    crate::session::AgentType::OpenCode,
+                    50,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("Would you like to run the following command?".to_string());
+                s
+            },
+            // 丁T1 复评 F-3 独占会话（全测试集唯一 id）：走**真实 opencode reader**
+            // （tempdir 内的 opencode.db）验证销卡信号——sess_ap 待决（应 available=true）、
+            // sess_aq 已答（completed，应 available=false）。**必须是 OpenCode 类型**：
+            // message_source 按 tool_id 派发到 opencode reader
+            inj_sess(
+                "sess_ap",
+                crate::session::AgentType::OpenCode,
+                51,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_aq",
+                crate::session::AgentType::OpenCode,
+                52,
+                crate::session::SessionStatus::Waiting,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -5189,10 +5230,13 @@ mod tests {
     /// 待决被状态链推出**语义红 Waiting** 之后，审批卡**不得**借机误出。
     ///
     /// 与既有 `question_mark_never_triggers_approve_card`（问题**标记** + detect 命中
-    /// 的隔离）互补：本用例是**无标记**形态（问题标记只有 claude 钩子路径会写，
-    /// codex/opencode 无钩子通道）——会话靠状态链的语义红满足 approve 的 Waiting 门，
-    /// 此时唯一的拦截来自 detect 门（问题文本不含审批 marker → hit=false）。
+    /// 的隔离）互补：本用例是**无标记 + detect 未命中**形态（问题标记只有 claude
+    /// 钩子路径会写，codex/opencode 无钩子通道）——会话靠状态链的语义红满足 approve 的
+    /// Waiting 门，此时拦截来自 detect 门（问题文本不含审批 marker → hit=false）。
     /// 锁住的正是「新红灯不会把审批卡带出来」这条边。
+    ///
+    /// **detect 命中形态另有用例**：`question_pending_red_beats_approval_marker_text`
+    /// （丁T1 复评 F-2，模型把问题写成审批措辞时 detect 会命中，靠尾部待决问答判定拦）。
     ///
     /// 断言（GET = 卡的数据源，**「approve 不可用」的判定面**）：available=false
     /// （detect miss）+ options 空 + reason null（自隐契约，与严格档提示条区分）。
@@ -5250,6 +5294,144 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    /// **丁T1 复评 F-2 主用例**：「问答在场 → 审批不可用」在 **detect 会命中**时也必须
+    /// 成立（最严形态，评审 I-3）。
+    ///
+    /// 场景：模型把问题写成审批措辞（"Would you like to run the following command?"，
+    /// 完全自然的问法）——`detect` 是**纯文本子串**命中，此时 `hit` 本会为 true，
+    /// 审批卡借语义红误出。拦截只能来自「尾部存在待决问答」判定
+    /// （`pending_question_tail_index`，与问答端点同一份判据）。
+    ///
+    /// 夹具构造：message_source 对 sess_an / sess_ao 返回「问答形态 tool-call 且其后
+    /// 无 tool-result」的消息页（= 待决问答在场）。
+    /// 断言：GET available=false + options 空 + reason null（与 detect-miss 形态同收敛，
+    /// 不给存在性预言机）；问答 GET 照常 available=true（问答零回归）。
+    #[tokio::test]
+    async fn question_pending_red_beats_approval_marker_text() {
+        let fake = FakeInjector::ok();
+        // 待决问答页（AUQ 形态 tool-call，其后无 tool-result）
+        let page = crate::remote::content::MessagesPage {
+            messages: vec![user_msg(0), auq_tool_call(1, Q_SINGLE_PAYLOAD)],
+            truncated: false,
+        };
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(move |_, sid: &str, _| {
+                if sid == "sess_an" || sid == "sess_ao" {
+                    Ok(page.clone())
+                } else {
+                    Err("无消息".to_string())
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        for sid in ["sess_an", "sess_ao"] {
+            // 审批 GET：detect 本会命中（last_message 是 codex marker 原文），但尾部
+            // 待决问答 → 硬约束①（无标记分支）压为不可用
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-approve-options?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(
+                v["available"], false,
+                "{sid}：尾部待决问答在场时审批必须不可用（即使 last_message 命中审批 marker）"
+            );
+            assert!(
+                v["options"].as_array().unwrap().is_empty(),
+                "{sid}：不可用一律不下发选项"
+            );
+            assert_eq!(
+                v["reason"],
+                serde_json::Value::Null,
+                "{sid}：硬约束① 的不可用不给 reason（与严格档提示条区分）"
+            );
+            // 问答 GET：照常可用（问答行为零回归；同一份判据在两处口径一致）
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-question?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(v["available"], true, "{sid}：问答照常可用");
+            assert_eq!(v["source"], "scan", "{sid}：通道 B 识别口径");
+        }
+        assert!(fake.recorded_keys().is_empty(), "本用例不触任何注入路径");
+    }
+
+    /// F-2 反向锁（防收窄过头）：**已答**的问答（tool-call 后随 tool-result）不再算
+    /// 「问答在场」——此时 detect 命中的真审批会话必须照常可用（否则新判定会把真
+    /// 审批卡压死）。夹具复用 sess_an 但消息页换成「tool-call + tool-result」。
+    #[tokio::test]
+    async fn answered_question_tail_does_not_block_approve() {
+        let fake = FakeInjector::ok();
+        let page = crate::remote::content::MessagesPage {
+            messages: vec![
+                auq_tool_call(0, Q_SINGLE_PAYLOAD),
+                tool_result_msg(1, "Your questions have been answered: \"q\"=\"Tool demo\"."),
+            ],
+            truncated: false,
+        };
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(move |_, sid: &str, _| {
+                if sid == "sess_an" {
+                    Ok(page.clone())
+                } else {
+                    Err("无消息".to_string())
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // sess_an：Waiting + last_message 命中 codex marker + 已答问答尾部 → 审批照常可用
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_an",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "已答问答不再构成「问答在场」——真审批会话照常可用（零回归）"
+        );
+        assert!(
+            !v["options"].as_array().unwrap().is_empty(),
+            "可批时下发选项"
+        );
+        // 问答 GET：已答 → 不可用（问答端点既有口径零回归）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_an",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], false, "已答 → 问答不可用（既有口径）");
     }
 
     /// 通道 B（兜底）：sess_ai（Processing、无标记）message_source 注入「user 消息 +
@@ -5363,8 +5545,123 @@ mod tests {
         assert!(fake.recorded_keys().is_empty());
     }
 
-    /// 通道 A 载荷损坏回落：sess_ab 标记在场但 payload 不可解析（helper 旧版/
-    /// 64KB 截断丢弃形态）→ 无通道 B 消息源 → GET available=false（不误报可用）。
+    /// **丁T1 复评 F-3 端到端**：opencode 的问答销卡信号——走**真实 reader**
+    /// （`read_opencode_messages_impl` + tempdir 内的 opencode.db），不复刻 reader 产物。
+    ///
+    /// 根因回顾：opencode reader 原先只产 tool-call 不产 tool-result → 问答端点的
+    /// 「其后无 tool-result」判据恒真 → **已答完的问题仍 available=true，卡片不消失**。
+    /// 修法：reader 对问答类部件的终态（completed/error）补一条 tool-result。
+    ///
+    /// 夹具（2026-09-21 本机 part 表实测形态）：sess_ap = running（待决）、
+    /// sess_aq = completed + metadata.answers（已答）。message_source 经
+    /// `read_session_messages_impl` 指向 tempdir home（零接触真实 ~/.local）。
+    #[tokio::test]
+    async fn opencode_question_availability_follows_part_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (message_id TEXT, session_id TEXT, data TEXT, time_created INTEGER);",
+        )
+        .unwrap();
+        let q_input = r#"{"questions":[{"header":"Build output folder","question":"Which folder?","options":[{"label":"dist","description":"d"},{"label":"out","description":"o"}]}]}"#;
+        for (ses, mid, status, extra) in [
+            ("sess_ap", "m_ap", "running", String::new()),
+            (
+                "sess_aq",
+                "m_aq",
+                "completed",
+                r#","metadata":{"answers":[["out"]],"truncated":false},"output":"{\"answers\":[[\"out\"]]}""#
+                    .to_string(),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, 100, '{\"role\":\"assistant\"}')",
+                rusqlite::params![mid, ses],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO part (message_id, session_id, data, time_created) VALUES (?1, ?2, ?3, 1783326720870)",
+                rusqlite::params![
+                    mid,
+                    ses,
+                    format!(
+                        r#"{{"type":"tool","tool":"question","state":{{"status":"{status}","input":{q_input}{extra}}}}}"#
+                    )
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        // 会话夹具：question_state 已含 sess_ap/aq（Waiting），此处把 pid 对上；
+        // message_source 走真实 reader（home = tempdir）
+        let home = tmp.path().to_path_buf();
+        let fake = FakeInjector::ok();
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(move |tool: &str, sid: &str, limit: usize| {
+                crate::remote::content::read_session_messages_impl(
+                    &home, None, None, tool, sid, limit,
+                )
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+
+        // 待决（running）→ available=true（卡该出，且不得被自己误销）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_ap",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "待决的 opencode 问答必须可用（待决窗口内不得被误销）"
+        );
+        assert_eq!(v["source"], "scan");
+
+        // 已答（completed + answers）→ available=false（销卡信号生效）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_aq",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], false,
+            "已答的 opencode 问答必须不可用（F-3：reader 补的 tool-result 销卡信号）"
+        );
+        // 已答 → 审批侧也不被问答压制（硬约束① 的反向：已答不再构成「问答在场」）
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_aq",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        // opencode 不在默认映射表 → 无映射 → available=false（但不是被问答压的）；
+        // 关键断言是它不 panic 且路径可达（映射缺失与问答隔离是两根轴）
+        assert_eq!(v["reason"], serde_json::Value::Null);
+        assert!(fake.recorded_keys().is_empty(), "本用例不触注入");
+    }
     #[tokio::test]
     async fn question_mark_bad_payload_falls_through() {
         let fake = FakeInjector::ok();

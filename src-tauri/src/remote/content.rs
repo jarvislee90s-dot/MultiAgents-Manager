@@ -1681,6 +1681,49 @@ fn map_workbuddy_lines(lines: &[String]) -> Vec<SessionMessage> {
 // OpenCode：~/.local/share/opencode/opencode.db（message + part 表）
 // ============================================================
 
+/// opencode 问答类部件的**终态**判定（丁T1 复评 F-3，纯函数可测）：
+/// `type=="tool"` 且（`tool=="question"` ∨ `state.input` 满足 T3 问答形态）且
+/// `state.status ∈ {"completed","error"}` → true（已答/被拒，销卡信号该补）。
+///
+/// 与 `monitor::opencode_parser::pending_question_part` 同口径的**互补面**：那边判
+/// 「待决」（pending/running 且无 answers → 红灯），这边判「终态」（该补 tool-result
+/// 让问答卡销掉）。两处判据必须同源同形——否则会出现「状态链说已答、端点说还在问」
+/// 的自相矛盾（F-3 的根因教训）。复评 F-4 后形态分支统一收窄到 T3 口径
+/// （`questions[]` 非空 + 元素含 question + options[] 非空 + 每项含 label）。
+fn is_answered_question_part(part: &serde_json::Value) -> bool {
+    if part.get("type").and_then(|t| t.as_str()) != Some("tool") {
+        return false;
+    }
+    let state = part.get("state").unwrap_or(&serde_json::Value::Null);
+    let by_name = part.get("tool").and_then(|t| t.as_str()) == Some("question");
+    let by_shape = state
+        .pointer("/input/questions")
+        .and_then(|q| q.as_array())
+        .map(|arr| {
+            !arr.is_empty()
+                && arr.iter().all(|q| {
+                    q.get("question").and_then(|x| x.as_str()).is_some()
+                        && q.get("options")
+                            .and_then(|o| o.as_array())
+                            .map(|opts| {
+                                !opts.is_empty()
+                                    && opts
+                                        .iter()
+                                        .all(|o| o.get("label").and_then(|l| l.as_str()).is_some())
+                            })
+                            .unwrap_or(false)
+                })
+        })
+        .unwrap_or(false);
+    if !(by_name || by_shape) {
+        return false;
+    }
+    matches!(
+        state.get("status").and_then(|s| s.as_str()),
+        Some("completed") | Some("error")
+    )
+}
+
 fn read_opencode_messages_with(
     home: &Path,
     session_id: &str,
@@ -1769,6 +1812,36 @@ fn read_opencode_messages_with(
                         name.map(String::from),
                         args,
                     ));
+                    // ===== 丁T1 复评 F-3：问答类部件的**销卡信号** =====
+                    //
+                    // 根因：本 reader 的 tool 分支**只产 tool-call、不产 tool-result**
+                    // （其他 reader 都产：codex L1231 / claude / kimi 同款），而问答端点
+                    // `question_scan_sync` 的销卡判据是「该 tool-call 之后**存在**
+                    // tool-result」——对 opencode 该条件**恒假**，于是已答完的 opencode
+                    // 问题仍判 available=true，问答卡永不消失（违反 T1 验收「回答后
+                    // 回落 / 正常运行零误报」）。
+                    //
+                    // **只对问答类部件补**（`tool=="question"` ∨ `state.input` 含非空
+                    // `questions[]` 形态——与 monitor::opencode_parser::pending_question_part
+                    // 同口径），且只在**终态**（`state.status ∈ {completed, error}`）补：
+                    // - 不动其它工具（bash/read/write/…）：它们的 tool-result 缺失是既有
+                    //   形态，补上会改变消息流的渲染与 T7 计划文件引用链（超出本任务面）；
+                    // - 待决期间（pending/running）**不补**：否则问答卡会在待决窗口内被
+                    //   自己误销（这正是 F-3 测试要锁的反面）。
+                    // 内容取 `state.output`（缺失给兜底文案）——问答端点的销卡判据只看
+                    // 「存在一条 tool-result」，不解析其内容。
+                    if is_answered_question_part(&pv) {
+                        let text = pv
+                            .pointer("/state/output")
+                            .map(|o| match o {
+                                serde_json::Value::String(s) => s.clone(),
+                                v if !v.is_null() => serde_json::to_string(v).unwrap_or_default(),
+                                _ => String::new(),
+                            })
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| "问题已作答".to_string());
+                        out.push(SessionMessage::text("tool-result", text, *ts));
+                    }
                 }
                 // step-start / patch / file / 未知 → 跳过
                 _ => {}
@@ -3069,6 +3142,137 @@ mod tests {
             .contains("\"cmd\":\"ls\""));
         // 未知会话 → Err
         assert!(read_session_messages_with(tmp.path(), "opencode", "ses_other", 200).is_err());
+    }
+
+    /// 丁T1 复评 F-3：opencode 问答类部件在**终态**（completed / error）→ 追加一条
+    /// tool-result（销卡信号，问答端点据此判「已答」让卡片消失）；
+    /// **待决**（pending/running）→ 不追加（否则卡片在待决窗口内被自己误销）。
+    /// 夹具用 2026-09-21 本机 part 表实测形态（state.status / input.questions / output）
+    #[test]
+    fn opencode_question_part_emits_tool_result_only_when_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (message_id TEXT, data TEXT, time_created INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', ?1, 100, '{\"role\":\"assistant\"}')",
+            [SID],
+        )
+        .unwrap();
+        // 已答（completed + metadata.answers + output）
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"question","state":{"status":"completed","input":{"questions":[{"question":"Which folder?","options":[{"label":"out"}]}]},"metadata":{"answers":[["out"]],"truncated":false},"output":"{\"answers\":[[\"out\"]]}"}}', 1)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call", "tool-result"],
+            "已答的 question 部件必须补一条 tool-result（销卡信号）"
+        );
+        assert!(
+            msgs[1].content.contains("out"),
+            "tool-result 取 state.output，实际：{}",
+            msgs[1].content
+        );
+
+        // 待决（running，无 answers/output）→ **不产** tool-result
+        conn.execute("DELETE FROM part", []).unwrap();
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"question","state":{"status":"running","input":{"questions":[{"question":"Which folder?","options":[{"label":"out"}]}]},"time":{"start":1783326720870}}}', 2)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call"],
+            "待决期间不得补 tool-result（否则卡片被自己误销）"
+        );
+
+        // 被拒（error，无 output）→ 补 tool-result（终态，兜底文案）
+        conn.execute("DELETE FROM part", []).unwrap();
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"question","state":{"status":"error","error":"The user dismissed this question","input":{"questions":[{"question":"q","options":[{"label":"a"}]}]}}}', 3)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call", "tool-result"],
+            "被拒（error）是终态 → 补销卡信号"
+        );
+        assert_eq!(msgs[1].content, "问题已作答", "缺 output → 兜底文案");
+
+        // 非问答工具（bash，即便 completed）→ **不产** tool-result（零回归锁：
+        // 其它工具的消息流形态不动，见上方 opencode_maps_message_parts 的 kinds 断言）
+        conn.execute("DELETE FROM part", []).unwrap();
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"cmd":"ls"},"output":"file.txt"}}', 4)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["tool-call"], "非问答工具仍不产 tool-result");
+    }
+
+    /// F-3 纯函数单测：判据本身的三层（名字 / 形态 / 终态），含「名字异但形态同」
+    /// 与「名字同但非终态」两个方向
+    #[test]
+    fn answered_question_part_predicate() {
+        let q = |tool: &str, status: &str, with_shape: bool| {
+            let input = if with_shape {
+                serde_json::json!({"questions": [{"question": "q", "options": [{"label": "a"}]}]})
+            } else {
+                serde_json::json!({"cmd": "ls"})
+            };
+            serde_json::json!({
+                "type": "tool",
+                "tool": tool,
+                "state": {"status": status, "input": input}
+            })
+        };
+        // 终态（两种）：名字命中 / 名字异但形态命中
+        assert!(is_answered_question_part(&q("question", "completed", true)));
+        assert!(is_answered_question_part(&q("question", "error", true)));
+        assert!(is_answered_question_part(&q(
+            "question_v2",
+            "completed",
+            true
+        )));
+        // 非终态 → 不判已答（待决窗口内不销卡）
+        assert!(!is_answered_question_part(&q("question", "pending", true)));
+        assert!(!is_answered_question_part(&q("question", "running", true)));
+        // 非问答工具 / 非 tool 类型 → 不判
+        assert!(!is_answered_question_part(&q("bash", "completed", false)));
+        assert!(!is_answered_question_part(
+            &serde_json::json!({"type": "text", "text": "x"})
+        ));
+        // 名字命中但形态缺失：仍按名字判（与 monitor 侧 pending_question_part 同口径）
+        assert!(is_answered_question_part(&q(
+            "question",
+            "completed",
+            false
+        )));
     }
 
     // ==== OpenClaw（acp_replay tmp sqlite + 优雅降级）====

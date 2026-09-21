@@ -484,18 +484,52 @@ enum TailSignal {
 }
 
 /// opencode 的用户输入类工具名（丁T1）：调用产物就是用户输入。
-/// 来源 = 2026-09-21 本机 `~/.local/share/opencode/opencode.db` part 表全表扫描：
-/// `tool` 取值里 `question` 是唯一的问答工具（其余 bash/read/edit/write/glob/grep/
-/// skill/task/todowrite 均无 questions 入参形态）。**新增名字必须带实测证据**
+/// 来源 = 2026-09-21 本机 `~/.local/share/opencode/opencode.db` part 表全表扫描
+/// （808 条 tool part）：`tool` 取值里 `question` 13 次，是唯一的问答工具；其余
+/// bash/read/edit/write/glob/grep/skill/task/todowrite 均无 questions 入参形态。
+/// **新增名字必须带实测证据**。
+///
+/// **形态加强面（复评 F-4 后收窄到 T3 同口径）**：名字外，`state.input` 满足
+/// 「`questions[]` 非空 + 元素含 question + options[] 非空 + 每项含 label」
+/// （= `inject::question::parse_questions` 的结构要求）也接住。
+/// **实测发现（复核口径：全库 part 表逐行扫 `type=="tool"` 计数）**：13 条 question
+/// part 里 12 条合 T3 口径，**1 条不合**——它用 `multiple` 键代替 `options`
+/// （`{"questions":[{"header":"处理方式","multiple":[…],"question":"如何处理…"}]}`），
+/// T3 的 `parse_questions` 会拒绝它（端点据此不出卡）。收窄前该条只靠名字命中；
+/// 收窄后形态分支同样不接（两处口径一致，不会出现「状态链说问答、端点说不出卡」的
+/// 自相矛盾）。名字分支仍兜住它（名字是权威判据，见上）。
 const USER_INPUT_TOOL_NAME: &str = "question";
+
+/// `state.input` 是否满足 T3 问答形态（`inject::question::parse_questions` 的
+/// 结构要求；此处手写同口径，理由同 codex 侧——monitor 不向 inject 倒挂）
+fn input_has_questions_shape(state: &serde_json::Value) -> bool {
+    let Some(arr) = state.pointer("/input/questions").and_then(|q| q.as_array()) else {
+        return false;
+    };
+    if arr.is_empty() {
+        return false;
+    }
+    arr.iter().all(|q| {
+        q.get("question").and_then(|x| x.as_str()).is_some()
+            && q.get("options")
+                .and_then(|o| o.as_array())
+                .map(|opts| {
+                    !opts.is_empty()
+                        && opts
+                            .iter()
+                            .all(|o| o.get("label").and_then(|l| l.as_str()).is_some())
+                })
+                .unwrap_or(false)
+    })
+}
 
 /// 待决 question part 判定（丁T1，纯函数，可测）：
 /// 尾部 part 是 question 工具的调用且**尚未作答** → true。
 ///
 /// 判据三层（全部来自 2026-09-21 本机 part 表实证，13 条 question part 全表）：
 /// 1. **是不是 question**：`type=="tool"` 且（`tool=="question"` ∨ `state.input`
-///    含非空 `questions[]` 形态）——名字是权威、形态是加强面（工具改名也接住），
-///    与 codex 侧同款口径；
+///    满足 T3 问答形态——见 [`input_has_questions_shape`]）——名字是权威、形态是
+///    加强面（工具改名也接住），与 codex 侧同款口径；
 /// 2. **在不在等**：`state.status` ∈ {`pending`, `running`}——事件日志实证
 ///    pending 13 次 / running 13 次（同一调用的两次事件）；`completed` 与 `error`
 ///    分别是已答与被拒/中断，**不触发**；
@@ -503,17 +537,25 @@ const USER_INPUT_TOOL_NAME: &str = "question";
 ///    实证形态 `{"answers":[["out"]],"truncated":false}`，pending/running 无 metadata。
 ///    第三层与第二层冗余是有意的：未来若某版本在 pending 期间预写 metadata，
 ///    有 answers 即视为已答（宁漏不误报）。
+///
+/// **判据在待决窗口可达的机理（复评 M-2 补充证据；数字由本实现独立复跑，
+/// 复核口径：part 表逐行取 question part 的 `time_created` 与 `state.time.start` /
+/// `state.time.end` / 所属 `session.time_updated` 三差）**：
+/// 13 条 question part 全表，`state.time.start - part.time_created` ∈
+/// **[5ms, 3970ms]**（多数 < 3s）——**part 行在工具启动时就落盘**；
+/// 而 `state.time.end - part.time_created` ∈ **[4.0s, 1900s]**（≈32 分钟），
+/// `session.time_updated - part.time_created` ∈ **[-4.2s, 875s]**——终态时刻远在其后。
+/// 即待决窗口内该行**存在且状态非终态**（pending/running），判据可达；
+/// 「只见过 completed/error」是**终态快照**的观感，不是行生命周期的事实。
+/// 待决窗口的实机确认由 `#[ignore]` 用例 `opencode_question_live_pending_and_answered`
+/// 承担（常规门禁只编译不跑）。
 fn pending_question_part(part: &serde_json::Value) -> bool {
     if part.get("type").and_then(|t| t.as_str()) != Some("tool") {
         return false;
     }
     let state = part.get("state").unwrap_or(&serde_json::Value::Null);
     let by_name = part.get("tool").and_then(|t| t.as_str()) == Some(USER_INPUT_TOOL_NAME);
-    let by_shape = state
-        .pointer("/input/questions")
-        .and_then(|q| q.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
+    let by_shape = input_has_questions_shape(state);
     if !(by_name || by_shape) {
         return false;
     }
@@ -946,6 +988,65 @@ mod tail_signal_tests {
         assert!(!pending_question_part(&none));
     }
 
+    /// 复评 F-4：形态分支收窄到 T3 口径（`questions[]` 非空 + 元素含 question +
+    /// options[] 非空 + 每项含 label）。**本机实测真实反例**：有一条 question part 用
+    /// `multiple` 键代替 `options`
+    /// （`{"questions":[{"header":"处理方式","multiple":[…],"question":"如何处理…"}]}`，
+    /// 2026-09-21 part 表全表 13 条中唯一不合 T3 口径者）——`parse_questions` 会拒绝它，
+    /// 故形态分支也不得接（两处口径一致，防「状态链说问答、端点说不出卡」的自相矛盾）；
+    /// 名字分支仍兜住它
+    #[test]
+    fn shape_branch_narrowed_to_t3_criterion() {
+        let mut real_multiple = question_part("running", None);
+        real_multiple["tool"] = serde_json::json!("question_renamed");
+        real_multiple["state"]["input"] = serde_json::json!({
+            "questions": [{
+                "header": "处理方式",
+                "multiple": [{"description": "重命名", "label": "隔离文件（推荐）"}],
+                "question": "如何处理这个损坏的会话日志？"
+            }]
+        });
+        assert!(
+            !pending_question_part(&real_multiple),
+            "用 multiple 键的真实反例：形态分支不接（与 parse_questions 口径一致）"
+        );
+        // 名字分支仍兜住（名字命中 → 不看形态）
+        let mut by_name = real_multiple.clone();
+        by_name["tool"] = serde_json::json!("question");
+        assert!(
+            pending_question_part(&by_name),
+            "名字是权威判据：名字命中时不看形态"
+        );
+        // 元素级不合（缺 label / options 空 / 缺 question）→ 形态分支不接
+        for bad_input in [
+            serde_json::json!({"questions": [{"question": "q", "options": [{"description": "d"}]}]}),
+            serde_json::json!({"questions": [{"question": "q", "options": []}]}),
+            serde_json::json!({"questions": [{"options": [{"label": "a"}]}]}),
+        ] {
+            let mut v = question_part("running", None);
+            v["tool"] = serde_json::json!("other");
+            v["state"]["input"] = bad_input.clone();
+            assert!(
+                !pending_question_part(&v),
+                "元素级不合 T3 口径 → 不接：{bad_input}"
+            );
+        }
+        // 一致性抽查：形态判据与 T3 的 parse_questions 对同一输入同判
+        for case in [
+            real_multiple["state"]["input"].to_string(),
+            serde_json::json!({"questions":[{"question":"q","options":[{"label":"a"}]}]})
+                .to_string(),
+        ] {
+            assert_eq!(
+                pending_question_part(
+                    &serde_json::json!({"type":"tool","tool":"other_tool","state":{"status":"running","input":serde_json::from_str::<serde_json::Value>(&case).unwrap()}})
+                ),
+                crate::inject::question::parse_questions(&case).is_some(),
+                "两处判据必须一致，输入：{case}"
+            );
+        }
+    }
+
     /// 待决部件 → 尾部信号 WaitingForUser；已答/被拒 → 落回原有 Running 黄
     #[test]
     fn tail_part_signal_routes_pending_question_to_waiting() {
@@ -1345,5 +1446,94 @@ mod matching_tests {
                 s.id
             );
         }
+    }
+}
+
+/// 复评 M-2：**实机验证占位**（`#[ignore]`——常规门禁只编译不跑）。
+///
+/// 验证目标：opencode 问答待决窗口内 `pending_question_part` 判据**真实可达**，
+/// 且答题后状态回落。
+///
+/// 机理（本机 part 表独立复跑，见 `pending_question_part` 文档）：
+/// `state.time.start - part.time_created` ∈ [5ms, 3970ms]——part 行在**工具启动时**
+/// 即落盘，故待决窗口内该行存在且 `state.status ∈ {pending, running}`；
+/// 「只见过 completed/error」是终态快照的观感。
+///
+/// 实跑前置（人工）：
+/// 1. `opencode` 已安装且在 PATH；本机 `~/.local/share/opencode/opencode.db` 可读；
+/// 2. 需要一个会在会话中调用 `question` 工具的 prompt（如「构建产物放哪个目录？
+///    请用 question 工具问我」）；
+/// 3. **人工作答**：脚本无法代答（本题验证的正是「未被作答」的窗口）。
+///
+/// 跑法：`cargo test --lib opencode_question_live -- --ignored --nocapture`
+///
+/// 断言口径（实机时逐条核对，失败即判据不可达，需改数据面）：
+/// - 触发 question 后**轮询期间**（同一 pid 的 `get_opencode_sessions_with_db`）
+///   至少一拍 status == Waiting（语义红：终端在等用户作答）；
+/// - 人工作答完成后，后续拍 status 不再为 Waiting（回落）。
+///
+/// 本测试只读真实 DB、零写入；不构造夹具（夹具已在
+/// `pending_question_part_end_to_end_is_waiting` 覆盖）。
+#[cfg(test)]
+mod live_probe_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "实机验证：spawn opencode → 触发 question → 待决期间判 Waiting、答题后回落（前置=opencode 已装 + 人工触发/作答）"]
+    fn opencode_question_live_pending_and_answered() {
+        let Some(home) = dirs::home_dir() else {
+            eprintln!("无主目录，跳过");
+            return;
+        };
+        let db = home
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db");
+        if !db.exists() {
+            eprintln!("opencode.db 不存在（{}），跳过", db.display());
+            return;
+        }
+        eprintln!(
+            "实机验证：请在本机 opencode 会话中触发一次 question 工具调用，\
+             然后在答题前后各观察一次本用例的轮询输出（当前仅打印 DB 里 question part 的状态分布，\
+             供人工比对；自动断言待实机跑通后补）"
+        );
+        // 只读探查：打印全部 question part 的状态分布（人工核对待决窗口是否出现非终态）
+        let Some(conn) = crate::monitor::sqlite::open_readonly_with_timeout(&db) else {
+            eprintln!("DB 不可读，跳过");
+            return;
+        };
+        let Ok(mut stmt) = conn.prepare("SELECT session_id, data FROM part") else {
+            eprintln!("part 表不可查，跳过");
+            return;
+        };
+        let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        else {
+            return;
+        };
+        let mut pending_seen = false;
+        for (sid, data) in rows.flatten() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            if !pending_question_part(&v) {
+                continue;
+            }
+            let status = v
+                .pointer("/state/status")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default();
+            pending_seen = true;
+            eprintln!("实机取证：session={sid} 存在**待决** question part（status={status}）");
+        }
+        eprintln!(
+            "本轮扫描：{}",
+            if pending_seen {
+                "命中待决 question part —— 判据在实机数据上可达 ✓"
+            } else {
+                "未命中待决 question part（此刻无 opencode 问答在等；请在提问窗口内重跑）"
+            }
+        );
     }
 }

@@ -1976,4 +1976,46 @@ describe("SessionDetail：问答卡挂载（批次乙 T8 / 丁T1 放宽）", () 
       });
     }
   }
+
+  // ==== 丁T1 复评 F-1：状态跃迁驱动问答卡重拉 ====
+  // 「回答后回落」在详情页停留期间必须可达：QuestionCard 的 effect deps 含
+  // session.status（Board 的既有数据通道把活会话 status 对齐进 selected）——
+  // status 一变即重拉 /session-question
+
+  it("丁T1 F-1：selected.status 跃迁（waiting → processing）→ 问答卡重拉", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    const questionCalls = () =>
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-question"))
+        .length;
+    const before = questionCalls();
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    // 模拟 App 数据通道把 status 对齐进来（同一会话对象被替换）
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(questionCalls()).toBeGreaterThan(before);
+  });
+
+  it("丁T1 F-1：反向跃迁（processing → waiting）同样重拉；id 不变不重挂（key 稳定）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />
+    );
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    const questionCalls = () =>
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-question"))
+        .length;
+    const before = questionCalls();
+    rerender(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(questionCalls()).toBeGreaterThan(before);
+    // 组件未重挂（卡仍在，无卸载-重建闪烁）：同一会话 id 的 key 稳定
+    expect(screen.getByTestId("question-card")).toBeTruthy();
+  });
 });

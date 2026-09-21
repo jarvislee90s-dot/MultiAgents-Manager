@@ -1545,6 +1545,42 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         .with(crate::inject::approve::load_mappings_conn)
         .into_iter()
         .find(|m| m.tool == tool)?;
+    // ===== 丁T1 复评 F-2：硬约束① 的无标记分支（codex / opencode）=====
+    //
+    // 根因：标记分支（上方 question_marked）只对**有钩子通道**的工具成立——claude
+    // 的 PreToolUse∧AskUserQuestion 落 question_wait_marks；**codex / opencode 没有
+    // 钩子**，标记永不落库，于是它们的问答在场只由「状态链语义红」体现。而
+    // `hit = marked || detect(mapping, last_message)` 的 detect 是**纯文本子串**命中，
+    // 问答文本由模型自由生成——模型把问题写成 "Would you like to run the following…?"
+    // 时 detect 即命中，审批卡会借语义红误出（评审 I-3；这是裁3/裁9 的安全面）。
+    //
+    // 修法：用与问答端点**同一份判据**（[`pending_question_tail_index`]）判定本会话
+    // 是否有**待决问答**在尾部——有则审批不可用（与硬约束① 同语义，只是数据源从
+    // hook 标记换成消息尾部形态）。
+    //
+    // **成本与短路顺序（F-2 要求写明）**：
+    // - 该判定需一次 `message_source` 读页；`read_plan_for_approval`（T8 计划聚合）
+    //   也要读——故本函数把两者**合并为同一次读**（`page` 只取一次，plan 聚合改为
+    //   吃已取到的页；见下方 `plan_from_page`）。零额外 IO。
+    // - **什么时候读**：只在 `hit` 候选成立时才需要（不命中审批时读页是白付）。
+    //   但 `hit` 自身依赖 detect——我们不可能先知道 hit。收敛口径：**Waiting 门
+    //   已过**（本函数开头，非 Waiting 且无标记已在 L1531 返回 None）才走到这里，
+    //   即「会话确实在等用户」——此时读一页判「等的是问答还是审批」是必要代价
+    //   （一页 = 40 条尾部窗口，与问答端点同量级；且审批卡本就是低频事件）。
+    //   未过 Waiting 门的会话（绝大多数轮询）**不读页**。
+    // - **与严格档的先后**：本判定放在严格档之前（probe-pending 是「键位未取证」
+    //   的另一根轴，但问答在场时连提示条都不该出——审批卡整体不适用）。严格档
+    //   短路序「在 detect 之前」的既有约束不受影响（本判定在其更前，且不消费
+    //   detect 结果）。
+    let tail_page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok();
+    if let Some(page) = tail_page.as_ref() {
+        if pending_question_tail_index(&page.messages).is_some() {
+            log::debug!(
+                "审批端点：尾部存在待决问答（无标记分支，codex/opencode）→ 审批不可用（硬约束①）"
+            );
+            return None;
+        }
+    }
     // 严格档（M9R Task 10 裁决：未取证不出键）：probe-pending 映射即使 Waiting+detect
     // 命中也压为不可批——选项不下发，只给降级原因（前端提示条）；drift 判定照常
     // （probe-pending 恒判漂移，提示条与 drift 提示并存不冲突）。
@@ -1637,8 +1673,10 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     //   预览读取全文（与消息流一致，不重复读文件正文）。
     //
     // 只取**最近一条**（审批针对的是最新计划）；命中即随 available 载荷下发。
+    // 丁T1 复评 F-2：计划聚合吃**上方已取到的同一页**（tail_page）——原先自读一页的
+    // 写法会把消息读两次；读失败（None）与无计划同收敛（降级不阻塞审批）
     let plan_body = if hit {
-        read_plan_for_approval(st, &tool, session_id)
+        tail_page.as_ref().and_then(|p| plan_from_page(&p.messages))
     } else {
         None
     };
@@ -1667,22 +1705,20 @@ struct ApprovePlanBody {
     is_file: bool,
 }
 
-/// 计划聚合的尾部窗口（条）：与问答通道 B 同口径——计划批准必然发生在计划渲染
-/// 之后不久，40 条足够覆盖且远小于 read_recent_lines 预算
-const APPROVE_PLAN_TAIL_LIMIT: usize = 40;
+// 计划聚合原用独立的 APPROVE_PLAN_TAIL_LIMIT=40（与问答通道 B 同口径）；丁T1 复评
+// F-2 把两者合并为**同一次读**后，窗口统一取 `QUESTION_SCAN_TAIL_LIMIT`（同为 40，
+// 覆盖面不变：计划批准必然发生在计划渲染之后不久）。
 
-/// 读审批点关联的计划内容（批次丙 T8）：消息尾部窗口找**最近一条**计划类消息
-/// （`kind="plan"` 给 markdown 全文 / `kind="plan-file"` 给文件路径）。
+/// 从**已取到的消息页**里找审批点关联的计划内容（批次丙 T8）：尾部窗口找最近一条
+/// 计划类消息（`kind="plan"` 给 markdown 全文 / `kind="plan-file"` 给文件路径）。
 ///
-/// 读失败/无计划消息 → None（前端不渲染计划主体，仅显示选项——降级不阻塞审批；
+/// 丁T1 复评 F-2：由 [`read_plan_for_approval`]（自读一页）改为吃页的纯函数——审批
+/// 端点现在把「待决问答判定」与「plan 聚合」合并到**同一次** `message_source` 读
+/// （两次读同一份数据纯属浪费，且两次读之间会话可能变化导致两处结论不一致）。
+///
+/// 无计划消息 → None（前端不渲染计划主体，仅显示选项——降级不阻塞审批；
 /// 这正是 happy「兜底渲染」原则的应用）。
-fn read_plan_for_approval(
-    st: &Arc<RemoteState>,
-    tool: &str,
-    session_id: &str,
-) -> Option<ApprovePlanBody> {
-    let page = (st.message_source)(tool, session_id, APPROVE_PLAN_TAIL_LIMIT).ok()?;
-    let msgs = &page.messages;
+fn plan_from_page(msgs: &[crate::remote::content::SessionMessage]) -> Option<ApprovePlanBody> {
     // 从尾部向前找最近一条计划类消息（plan 优先于 plan-file？不——取**最近**的那条，
     // 因为审批针对的是最新呈现给用户的计划；两类同属计划语义）
     for m in msgs.iter().rev() {
@@ -1840,6 +1876,15 @@ pub struct SessionApproveReq {
 /// - 缺参 → 400；设备 cookie 缺失 → 403 防御（gate 已拦，理论不可达）；
 /// - 会话不在快照 → 404 no_session；非 Waiting → 409 not_waiting（映射解析在其后，
 ///   运行中会话不付出 KV 读取代价）；
+///
+/// **残余面如实申报（丁T1 复评 M-4）**：本端点**不走 detect**（既有契约：客户端只
+/// POST 它从 GET 拿到的 option id，而 GET 已把 detect / 待决问答两道门走过——见
+/// `approve_options_scan`）。因此「旁路客户端**直发** POST + 合法 optionId」不在
+/// 防线内：问答待决（语义红）或审批文本未命中的会话，理论上仍能被直发 POST 触发
+/// 映射键位。前端唯一调用点是 ApproveCard（`available=false` 时零按钮、零 POST
+/// 入口），正常路径不可达。若将来需要收口，落点是本 handler 的 Waiting 门之后加
+/// 同款判定（代价：每次 POST 多一次消息读——目前刻意不做，见 T1 复评裁决）。
+///
 /// - 映射表无该工具映射 / optionId 无对应项 / probe-pending 严格档（M9R Task 10：
 ///   未取证不出键，按键位映射缺失处理）→ 404 no_mapping（降级提示走普通发送）；
 /// - in-flight 守卫忙（flush 循环/直发/插队/detached 旧投递正在投递该会话）→ 200
@@ -2194,7 +2239,7 @@ fn question_scan_sync(
         }
         // 标记在场但 payload 缺失/不可解析（helper 旧版 / 64KB 截断丢弃）→ 落通道 B
     }
-    // 通道 B（兜底）：会话消息尾部找最后一条**问答形态** tool-call。
+    // 通道 B（兜底）：会话消息尾部找最后一条**问答形态** tool-call，且其后无结果。
     //
     // **判据从工具名改为 args 形态（批次丙 T3）**：原实现按
     // `tool_name == "AskUserQuestion"` 精确匹配——claude 独有。实测（2026-09-21
@@ -2211,29 +2256,17 @@ fn question_scan_sync(
     // 取舍：① 该形态在本机四家矩阵里是问答工具独有的（无已知碰撞）；② 误判后果
     // 是「出一张只读问答卡」，而漏判后果是「JSON 裸奔、用户无法远程作答」——前者
     // 轻于后者。若后续出现碰撞，收窄点在 `parse_questions` 的结构要求上。
+    //
+    // 丁T1 复评 F-2：判定抽为 [`pending_question_tail_index`]（审批端点**复用同一
+    // 判据**做硬约束①的 codex/opencode 分支——那里没有 hook 问题标记可用）
     let page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()?;
-    let msgs = &page.messages;
-    let last = msgs.iter().rposition(|m| {
-        m.kind == "tool-call"
-            && m.tool_args
-                .as_deref()
-                .is_some_and(|a| crate::inject::question::parse_questions(a).is_some())
-    })?;
-    // 答完判据（可行口径，注释申报）：tool-call 之后**任何** tool-result 在场即视为
-    // 已答（AUQ 的 tool_result 无论正常作答/自由文本/Esc 拒绝都会落盘——探测档案 §3
-    // 三形态；对应消息粒度比对需回读会话全文，快照尾部窗口内「其后无任何 tool-result」
-    // 是保守充分的替代口径）。其后无 tool-result + tool-call 已落盘 = 未答在场
-    //（pending 不落盘的场景通道 B 天然不可见，不误触发——空闲态注入风险由双通道
-    // 的在场判定收敛，残余风险见探测档案 K11 讨论）。
-    if msgs[last + 1..].iter().any(|m| m.kind == "tool-result") {
-        return None;
-    }
+    let last = pending_question_tail_index(&page.messages)?;
     // 形态判据（工具名只作日志线索——codex/openclaw 等改名不影响接住）
     log::debug!(
         "问答通道 B 形态命中: tool={:?}（工具名不参与判据）",
-        msgs[last].tool_name
+        page.messages[last].tool_name
     );
-    let qs = crate::inject::question::parse_questions(msgs[last].tool_args.as_deref()?)?;
+    let qs = crate::inject::question::parse_questions(page.messages[last].tool_args.as_deref()?)?;
     Some((
         session,
         QuestionScanHit {
@@ -2241,6 +2274,40 @@ fn question_scan_sync(
             source: "scan",
         },
     ))
+}
+
+/// 会话消息尾部「**待决问答**」判定（丁T1 复评 F-2 抽出的可复用纯函数）：
+/// 返回最后一条问答形态 tool-call 的下标——其 args 可被
+/// `crate::inject::question::parse_questions` 解析（形态判据，工具名不参与），
+/// **且其后无任何 tool-result**（已答判据）；两个条件任一不满足 → None。
+///
+/// 抽出的动机：硬约束①「问答在场 → 审批不可用」原先只查 hook 问题标记
+/// （`question_wait::has`），而 **codex / opencode 没有钩子通道**——标记永不落库，
+/// 这两家的问答在场只能靠本函数识别（同一份消息尾部扫描）。问答端点与审批端点
+/// 共用本函数 = 两处口径永不漂移（F-2 的核心诉求）。
+///
+/// 答完判据（可行口径，注释申报）：tool-call 之后**任何** tool-result 在场即视为
+/// 已答（AUQ 的 tool_result 无论正常作答/自由文本/Esc 拒绝都会落盘——探测档案 §3
+/// 三形态；对应消息粒度比对需回读会话全文，快照尾部窗口内「其后无任何 tool-result」
+/// 是保守充分的替代口径）。其后无 tool-result + tool-call 已落盘 = 未答在场
+///（pending 不落盘的场景通道 B 天然不可见，不误触发——空闲态注入风险由双通道
+/// 的在场判定收敛，残余风险见探测档案 K11 讨论）。
+///
+/// 代价：调用方需先取一次消息页（`message_source`）——审批端点把它与
+/// `read_plan_for_approval` 合并为同一次读（见 `approve_options_scan`）。
+pub(crate) fn pending_question_tail_index(
+    msgs: &[crate::remote::content::SessionMessage],
+) -> Option<usize> {
+    let last = msgs.iter().rposition(|m| {
+        m.kind == "tool-call"
+            && m.tool_args
+                .as_deref()
+                .is_some_and(|a| crate::inject::question::parse_questions(a).is_some())
+    })?;
+    if msgs[last + 1..].iter().any(|m| m.kind == "tool-result") {
+        return None;
+    }
+    Some(last)
 }
 
 /// GET /m/api/v1/session-question?session_id=（T8 问答卡数据源）：扫描在

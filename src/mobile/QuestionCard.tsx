@@ -1,7 +1,11 @@
 // 移动端问答卡（批次乙 T8，AskUserQuestion 问答卡 · claude 先行）：挂在
-// SessionDetail 正文视图 / 分屏对话列（waiting 态；ApproveCard 同一挂载惯例，
-// key 前缀 question-* 与 approve-*/composer-* 互异防 duplicate-key）。
-// - 可用性：挂载拉取一次 /session-question；拉取失败 / 网络异常 → 静默自隐；
+// SessionDetail 正文视图 / 分屏对话列（**非结束态**；丁T1 放宽——ApproveCard 仍是
+// waiting 门，key 前缀 question-* 与 approve-*/composer-* 互异防 duplicate-key）。
+// - 可用性：挂载拉取一次 /session-question；**状态跃迁重拉**（丁T1 复评 F-1：
+//   effect deps 含 `session.status`——详情页停留期间 Board 的既有数据通道
+//   （SSE 跃迁/快照 + 降级轮询）把活会话 status 对齐进 selected，status 一变即
+//   重拉一次：终端答完题（waiting → processing/idle）卡随之消失，新问题出现
+//   （→ waiting）卡随之浮现；无需重进页面）；拉取失败 / 网络异常 → 静默自隐；
 //   available=false（双通道未命中 / 审批标记隔离）→ 自隐（fetchApproveOptions 惯例）；
 // - **问答模式不出 允许/拒绝**（ApproveCard 的映射键位对问答无意义——后端硬约束①
 //   同时保证问答会话上 approve 端点不可用，红卡自隐；本卡自身也零允许/拒绝字样）；
@@ -22,8 +26,10 @@
 //   可重试；ApiError（409/400 带 data.error）→ 分診中文文案：no_question→「当前没有
 //   待回答的问题」、multi_questions→「多个问题请回到终端完成作答」、bad_index→
 //   「选项序号无效，请刷新后重试」、其余显示 message。
-// 局限（ApproveCard 同款）：mount 只拉一次，卡内不做轮询——卡片的出现/消失依赖
-// 页面数据刷新（SSE 快照 → 详情页重挂/卸载）自然带动。
+// **已知限制（丁T1 复评 F-1，如实申报）**：重拉只由**状态跃迁**驱动，不做卡内轮询
+// （轮询超 T1 范围，丁T2 另有安排）。因此同一 waiting 窗口内的非跃迁变化——例如
+// 模型连续提两组问题、或用户改答但状态未变——不会自动重拉，需等下一次状态跃迁
+// （或重进详情页）。`session.id` 变化会重拉（跨会话串卡防线，`key` 也随 id 强制重挂）。
 import { useCallback, useEffect, useState } from "react";
 import InteractiveCard, { toneTokens } from "./InteractiveCard";
 import {
@@ -35,8 +41,9 @@ import {
 } from "./api";
 
 interface QuestionCardProps {
-  /** 会话（本组件只消费 id；结构化类型，完整 Session 可直接传入） */
-  session: { id: string };
+  /** 会话：只消费 id（请求键）与 status（重拉触发键，丁T1 复评 F-1）。
+   *  结构化类型——完整 Session 可直接传入，测试可只给这两字段 */
+  session: { id: string; status?: string };
 }
 
 export default function QuestionCard({ session }: QuestionCardProps) {
@@ -53,10 +60,17 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   // 失败文案（failed{error} 回执 / ApiError 分診）——非 null 展示，按钮保持可点
   const [error, setError] = useState<string | null>(null);
 
-  // 挂载拉取一次；拉取失败 → 静默保持隐藏（ready 只表示「载荷已落地」）
+  // 拉取（挂载一次 + 状态跃迁重拉，丁T1 复评 F-1）：deps 含 `session.status`——
+  // 详情页停留期间 Board 数据通道把活会话 status 对齐进 selected（App.tsx
+  // handleSessionsChanged），status 一变即重拉：答完题卡消失、新问题卡浮现。
+  // 「非状态跃迁的变更不自动重拉」是已知限制（见文件头注释）。
+  const status = session.status;
   useEffect(() => {
     let alive = true;
     setReady(false);
+    // 重拉时清掉上一轮的错误文案（陈旧「没有待回答的问题」会误导新一轮）；
+    // sent 不清——已投递按键的终态在同一次问答内仍属有效（跨问答由 key 重挂兜底）
+    setError(null);
     fetchSessionQuestion(session.id)
       .then((v) => {
         if (!alive) return;
@@ -69,7 +83,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     return () => {
       alive = false;
     };
-  }, [session.id]);
+  }, [session.id, status]);
 
   const handleAnswer = useCallback(
     async (action: QuestionAnswerAction, index?: number) => {

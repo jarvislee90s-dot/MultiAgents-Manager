@@ -42,32 +42,57 @@ struct CodexEntry {
 }
 
 /// 用户输入类工具名（丁T1）：当前唯一已知的「调用产物就是用户输入」的工具。
-/// 来源 = 2026-09-21 本机 rollout 全库扫描（~/.codex/sessions 全部 rollout）：
-/// `function_call.name` 取值清单里 `request_user_input` 23 次，无同名变体；
-/// 其余 7000+ 次工具调用（exec_command / shell_command / apply_patch / update_plan /
-/// MCP 工具等）均无 `questions[]` 入参形态。**新增工具名必须带实测证据**——
-/// 误判会把正常运行判成红灯（假红），比漏判更伤害看板可信度。
+///
+/// **数字与复核方法（丁T1 复评 F-4：可复核，勿凭记忆改）**——2026-09-21 本机
+/// rollout 全库扫描（`~/.codex/sessions/**/rollout-*.jsonl`，203 个文件）：
+/// `function_call` 事件 **15783** 次，其中 `name == "request_user_input"` **23** 次，
+/// 带合法 questions 形态（下述严格口径）的 **23** 次且**全部**是 request_user_input
+/// ——**名字外 0 碰撞、形态外 0 碰撞**。
+/// 复核方法：遍历全部 rollout 行，`payload.type == "function_call"` 计一次总数，
+/// 再按 `payload.name` 与 `payload.arguments`（JSON 字符串）分别统计。
+///
+/// **新增工具名必须带实测证据**——误判会把正常运行判成红灯（假红），比漏判更伤害
+/// 看板可信度。
 const USER_INPUT_TOOL_NAMES: &[&str] = &["request_user_input"];
 
-/// arguments 形态加强判据（丁T1）：顶层含**非空** `questions[]` 数组。
+/// arguments 形态加强判据（丁T1；复评 F-4 收窄到批次丙 T3 同口径）：
+/// 顶层 `questions[]` **非空**，且**每个元素**含 `question`（字符串）+ `options[]`
+/// （非空数组）+ 每个 option 含 `label`（字符串）——与
+/// `inject::question::parse_questions` 的结构要求**逐条对齐**
+///（含它宽容缺省 header/multiSelect/description、但**不容缺** label 的既有取舍）。
+/// 一致性由测试 `shape_matches_inject_parse_questions_criterion` 逐例锁住。
 ///
-/// **为什么不复用 `inject::question::parse_questions`**（任务书留给实现的二选一）：
+/// **为什么不直接复用 `inject::question::parse_questions`**（任务书留给实现的二选一）：
 /// monitor 是解析层、inject 是注入引擎（按键投递/终端族规格/平台 API），让每 3 秒
-/// 轮询的解析路径依赖注入链在模块方向上倒挂，且会把注入层的依赖面（终端族、探针）
-/// 拉进 monitor 的编译单元。此处只做最小结构检查（顶层 questions 为非空数组），
-/// 与 `parse_questions` 的判据**不等价声明**：后者还要求元素含 question+options[]，
-/// 这里不求（配对判据才是安全主键，形态只用于「名字改了也接住」的加强面）。
-/// 判据依据：2026-09-21 全库扫描 7014 次工具调用中，仅 request_user_input 带此形态
-/// （0 碰撞）；若后续出现碰撞，收窄点为「名字 ∧ 形态」。
+/// 轮询的解析路径依赖注入链在模块方向上倒挂，且会把注入层的依赖面拉进 monitor 的
+/// 编译单元。故此处手写同口径的最小检查并以测试锁一致性。
+///
+/// 判据依据（F-4 复核数字）：2026-09-21 全库扫描（203 个 rollout 文件）15783 次
+/// function_call 中，本口径命中 23 次且全是 `request_user_input`——**名字外 0 碰撞、
+/// 形态外 0 碰撞**；若后续出现碰撞，收窄点为「名字 ∧ 形态」。
 fn arguments_have_questions_shape(arguments: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|v| {
-            v.get("questions")
-                .and_then(|q| q.as_array())
-                .map(|a| !a.is_empty())
-        })
-        .unwrap_or(false)
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return false;
+    };
+    let Some(arr) = v.get("questions").and_then(|q| q.as_array()) else {
+        return false;
+    };
+    if arr.is_empty() {
+        return false;
+    }
+    // 元素级要求（T3 口径）：question 为字符串 + options 为非空数组 + 每项有 label
+    arr.iter().all(|q| {
+        q.get("question").and_then(|x| x.as_str()).is_some()
+            && q.get("options")
+                .and_then(|o| o.as_array())
+                .map(|opts| {
+                    !opts.is_empty()
+                        && opts
+                            .iter()
+                            .all(|o| o.get("label").and_then(|l| l.as_str()).is_some())
+                })
+                .unwrap_or(false)
+    })
 }
 
 /// 用户输入类工具的调用/结果事件（丁T1 配对判据的输入形态）
@@ -1317,6 +1342,60 @@ mod app_status_fixture_tests {
         let f = write_rollout(tmp.path(), &lines);
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(session.status, SessionStatus::Processing);
+    }
+
+    // ==== 丁T1 复评 F-4：形态判据与批次丙 T3 口径一致性锁 ====
+
+    /// `arguments_have_questions_shape` 必须与 `inject::question::parse_questions`
+    /// 的判据**逐例一致**（F-4 收窄要求：前者是后者的手写同口径副本，防止两处漂移）。
+    /// 用例集覆盖 T3 已锁的全部结构分支（parse_questions 的 tests 同源形态）
+    #[test]
+    fn shape_matches_inject_parse_questions_criterion() {
+        let cases = [
+            // ---- 两侧都该接受 ----
+            r#"{"questions":[{"question":"q","options":[{"label":"a"}]}]}"#,
+            // 真实 codex 形态（2026-09-21 rollout 实录，含 header/id/description）
+            r#"{"questions":[{"header":"输出目录","id":"build_output_folder","options":[{"description":"d","label":"dist (Recommended)"},{"description":"o","label":"out"}],"question":"构建产物放在哪个目录？"}]}"#,
+            // 宽容缺省：multiSelect / header / description 缺失
+            r#"{"questions":[{"question":"q","options":[{"label":"a"},{"label":"b","description":"d"}]}]}"#,
+            // ---- 两侧都该拒绝 ----
+            r#"{}"#,
+            r#"{"questions":"x"}"#,
+            r#"{"questions":[]}"#,
+            r#"{"questions":[{"options":[{"label":"a"}]}]}"#, // 缺 question
+            r#"{"questions":[{"question":"q"}]}"#,            // 缺 options
+            r#"{"questions":[{"question":"q","options":[]}]}"#, // options 空
+            r#"{"questions":[{"question":"q","options":[{"description":"no label"}]}]}"#, // label 缺失
+            "not json",
+            r#"{"questions":[{"question":"q","options":[{"label":"a"}]},{"question":"q2"}]}"#, // 多元素：其一不合
+        ];
+        for case in cases {
+            assert_eq!(
+                arguments_have_questions_shape(case),
+                crate::inject::question::parse_questions(case).is_some(),
+                "两处判据必须一致，分歧输入：{case}"
+            );
+        }
+    }
+
+    /// F-4 收窄的行为差异（收窄前宽松口径会误接的输入）：顶层 questions 非空但
+    /// 元素不合 T3 结构 → **不再**判为问答形态（落回 Processing 黄）
+    #[test]
+    fn loose_shape_no_longer_triggers_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        // questions 非空但元素缺 question/options（宽松口径会命中，严格口径不该命中）
+        lines.push(
+            r#"{"timestamp":"2026-09-21T14:00:00.000Z","ordinal":500,"type":"response_item","payload":{"type":"function_call","name":"some_other_tool","arguments":"{\"questions\":[{\"foo\":1}]}","call_id":"call_loose"}}"#
+                .to_string(),
+        );
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "元素不合 T3 结构 → 不判问答（F-4 收窄：假红面收窄）"
+        );
     }
 }
 
