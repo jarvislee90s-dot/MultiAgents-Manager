@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
   fetchSessionMode,
@@ -94,11 +95,16 @@ export default function ModeBar({ session }: { session: { id: string } }) {
 
   const currentText = view.currentLabel ?? "模式未知";
 
+  // T10：本组件是**状态条**（非「等待用户输入」交互卡，任务书 §2.2 的容器契约
+  // 针对 ApproveCard/QuestionCard 两类交互卡），故保留自身的横向布局；但**取色
+  // 走统一 token**（InteractiveCard 的 mode 档）——四套界面同一套设计语言
+  const t = toneTokens("mode");
   return (
     <div
       data-testid="mode-bar"
       data-mode={view.current ?? "unknown"}
-      className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-300/60 bg-slate-100/60 px-2 py-1 dark:border-slate-600/60 dark:bg-slate-800/40"
+      data-tone="mode"
+      className={`flex flex-wrap items-center gap-2 px-2 py-1 ${t.box}`}
     >
       <span className="text-xs text-slate-500 dark:text-slate-400">模式</span>
       <span

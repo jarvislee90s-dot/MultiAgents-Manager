@@ -25,6 +25,7 @@
 // 局限（ApproveCard 同款）：mount 只拉一次，卡内不做轮询——卡片的出现/消失依赖
 // 页面数据刷新（SSE 快照 → 详情页重挂/卸载）自然带动。
 import { useCallback, useEffect, useState } from "react";
+import InteractiveCard, { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
   fetchSessionQuestion,
@@ -129,15 +130,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   if (info.answerable === false) {
     const q0 = questions[0];
     return (
-      <div
-        data-testid="question-card"
-        data-mode="tool-readonly"
-        className="shrink-0 rounded-xl border border-sky-500/50 bg-sky-500/5 px-3 py-2 dark:border-sky-400/50 dark:bg-sky-400/5"
+      <InteractiveCard
+        tone="question"
+        testId="question-card"
+        mode="tool-readonly"
+        pulsing={false}
+        title="等待回答"
       >
-        <div className="flex items-center gap-1.5">
-          <span className="inline-block h-2 w-2 rounded-full bg-sky-500" />
-          <span className="text-sm font-semibold text-sky-700 dark:text-sky-400">等待回答</span>
-        </div>
         {q0.header && (
           <div
             data-testid="question-header"
@@ -170,24 +169,20 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         >
           该工具的远程作答尚未实测，请在终端完成作答
         </p>
-      </div>
+      </InteractiveCard>
     );
   }
 
   // 多问题：只读卡（翻页键序未测——零注入按钮，引导终端作答）
   if (questions.length > 1) {
     return (
-      <div
-        data-testid="question-card"
-        data-mode="readonly"
-        className="shrink-0 rounded-xl border border-sky-500/50 bg-sky-500/5 px-3 py-2 dark:border-sky-400/50 dark:bg-sky-400/5"
+      <InteractiveCard
+        tone="question"
+        testId="question-card"
+        mode="readonly"
+        pulsing={false}
+        title={`有 ${questions.length} 个问题等待回答`}
       >
-        <div className="flex items-center gap-1.5">
-          <span className="inline-block h-2 w-2 rounded-full bg-sky-500" />
-          <span className="text-sm font-semibold text-sky-700 dark:text-sky-400">
-            有 {questions.length} 个问题等待回答
-          </span>
-        </div>
         <ol className="mt-1.5 space-y-1">
           {questions.map((q, i) => (
             <li
@@ -210,32 +205,29 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         >
           请在终端完成作答
         </p>
-      </div>
+      </InteractiveCard>
     );
   }
 
   const q = questions[0];
 
   return (
-    <div
-      data-testid="question-card"
-      data-mode={q.multiSelect ? "multi" : "single"}
-      className="shrink-0 rounded-xl border-2 border-sky-500/60 bg-sky-500/5 px-3 py-2 dark:border-sky-400/60 dark:bg-sky-400/5"
-    >
-      <div className="flex items-center gap-1.5">
-        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-sky-500" />
-        <span className="text-sm font-semibold text-sky-700 dark:text-sky-400">
-          {q.multiSelect ? "等待回答（多选）" : "等待回答"}
-        </span>
-        {q.header && (
+    <InteractiveCard
+      tone="question"
+      testId="question-card"
+      mode={q.multiSelect ? "multi" : "single"}
+      title={q.multiSelect ? "等待回答（多选）" : "等待回答"}
+      titleSuffix={
+        q.header ? (
           <span
             data-testid="question-header"
-            className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400"
+            className={`rounded px-1.5 py-0.5 text-xs font-medium ${toneTokens("question").badge} ${toneTokens("question").title}`}
           >
             {q.header}
           </span>
-        )}
-      </div>
+        ) : null
+      }
+    >
       <p data-testid="question-text" className="mt-1 text-sm text-slate-800 dark:text-slate-200">
         {q.question}
       </p>
@@ -310,6 +302,6 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           </p>
         </>
       )}
-    </div>
+    </InteractiveCard>
   );
 }
