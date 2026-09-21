@@ -48,6 +48,36 @@ pub struct SessionMessage {
     pub collapsed: bool,
 }
 
+/// 计划标签（批次丙 T4）：codex 的「计划」是**含 `<proposed_plan>…</proposed_plan>`
+/// 标签的 assistant 消息**（非工具调用——这是 T1 工具参数升格接不住的那一类）。
+/// 实机形态（本机 rollout 实录 `~/.codex/sessions/2026/08/03/rollout-*.jsonl`）：
+/// 标签前可能还有一段自由文本（"未收到选择，按推荐默认：…以下是修复计划。"），
+/// 标签内是完整 markdown 计划，标签后无后缀。
+/// 升格口径：整段消息剥出标签内容 → `kind="plan"`（一等计划卡，默认展开）；标签**外**
+/// 的前导文本若非空，作为普通 assistant 消息保留在计划卡之前（不丢用户可见内容）。
+const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";
+const PROPOSED_PLAN_CLOSE: &str = "</proposed_plan>";
+
+/// 从 assistant 文本中剥出 `<proposed_plan>` 段（批次丙 T4 纯函数）。
+/// 返回 `(标签前的文本, 标签内计划正文)`：
+/// - 无开标签 / 无闭标签 / 标签内为空（trim）→ `None`（不升格，调用方原样出文本）；
+/// - 开闭标签顺序颠倒 → `None`（防御：不猜）；
+/// - 多个标签段 → 取**第一段**（实机只见一段；多段时第一段即主计划）。
+///
+/// 标签本身不进入 content（T4 的验收之一：无标签残留）。
+fn split_proposed_plan(text: &str) -> Option<(String, String)> {
+    let start = text.find(PROPOSED_PLAN_OPEN)?;
+    let after_open = start + PROPOSED_PLAN_OPEN.len();
+    let rest = &text[after_open..];
+    let close_rel = rest.find(PROPOSED_PLAN_CLOSE)?;
+    let plan = rest[..close_rel].trim();
+    if plan.is_empty() {
+        return None;
+    }
+    let preamble = text[..start].trim();
+    Some((preamble.to_string(), plan.to_string()))
+}
+
 impl SessionMessage {
     /// 文本类条目（user / assistant / thinking / tool-result）。
     /// collapsed 由 kind 推导：thinking 恒折叠
@@ -63,6 +93,36 @@ impl SessionMessage {
             ts,
             tool_name: None,
             tool_args: None,
+        }
+    }
+
+    /// assistant 文本条目（批次丙 T4）：含 `<proposed_plan>` 标签时**升格为一等计划卡**
+    /// ——剥标签产 `kind="plan"`（与工具参数升格同构，见 [`Self::tool_call`]）。
+    /// 返回 `Vec`（可能两条：前导文本 + 计划卡）；无标签 → 单条普通 assistant 消息。
+    ///
+    /// 收口在构造器侧（而非各工具的映射分支）：codex 走 `"message"` 分支产
+    /// assistant 文本，其他工具也可能出现同形标签（形态判据天然通用）。
+    fn assistant_text(content: impl Into<String>, ts: Option<i64>) -> Vec<Self> {
+        let text: String = content.into();
+        match split_proposed_plan(&text) {
+            Some((preamble, plan)) => {
+                let mut out = Vec::with_capacity(2);
+                if !preamble.is_empty() {
+                    out.push(Self::text("assistant", preamble, ts));
+                }
+                out.push(Self {
+                    seq: 0,
+                    role: "assistant".to_string(),
+                    kind: "plan".to_string(),
+                    content: plan,
+                    ts,
+                    tool_name: None,
+                    tool_args: None,
+                    collapsed: false, // 一等卡默认展开
+                });
+                out
+            }
+            None => vec![Self::text("assistant", text, ts)],
         }
     }
 
@@ -1017,9 +1077,15 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
                     .unwrap_or_default();
                 let text =
                     join_text_parts(payload.get("content").unwrap_or(&serde_json::Value::Null));
-                // user / assistant 正文（developer 等系统角色跳过）
+                // user / assistant 正文（developer 等系统角色跳过）。
+                // T4：assistant 侧走 [`SessionMessage::assistant_text`]——含
+                // `<proposed_plan>` 标签时升格一等计划卡（剥标签 + 前导文本保留）
                 if matches!(role, "user" | "assistant") && !text.trim().is_empty() {
-                    out.push(SessionMessage::text(role, text, ts));
+                    if role == "assistant" {
+                        out.extend(SessionMessage::assistant_text(text, ts));
+                    } else {
+                        out.push(SessionMessage::text(role, text, ts));
+                    }
                 }
             }
             "function_call" => {
@@ -2316,6 +2382,82 @@ mod tests {
     }
 
     // ==== Codex（rollout 合成行 + thread_history tmp sqlite）====
+
+    // ---- 批次丙 T4：`<proposed_plan>` 剥标签升格 ----
+
+    /// T4 纯函数：开闭标签剥出 + 前导文本分离（真实形态取自本机 rollout 实录）
+    #[test]
+    fn split_proposed_plan_handles_real_shape() {
+        // 真机实录形态：前导文本 + 标签 + markdown 计划 + 闭标签
+        let real = "未收到选择，按规则采用推荐默认：历史档案保留原样。以下是修复计划。\n\n<proposed_plan>\n# 修复 DM 文档同步遗留风险\n\n## 根因\n1. xxx\n</proposed_plan>";
+        let (pre, plan) = split_proposed_plan(real).expect("真实形态必须可剥");
+        assert_eq!(
+            pre,
+            "未收到选择，按规则采用推荐默认：历史档案保留原样。以下是修复计划。"
+        );
+        assert_eq!(plan, "# 修复 DM 文档同步遗留风险\n\n## 根因\n1. xxx");
+        assert!(!plan.contains("proposed_plan"), "剥离后不得有标签残留");
+
+        // 无前导文本（标签在开头）
+        let (pre, plan) = split_proposed_plan("<proposed_plan># P</proposed_plan>").unwrap();
+        assert!(pre.is_empty());
+        assert_eq!(plan, "# P");
+
+        // 退化形态 → None（不升格，不猜）
+        for bad in [
+            "普通消息，没有标签",
+            "<proposed_plan>只有开标签",
+            "</proposed_plan>先闭后开<proposed_plan>",
+            "<proposed_plan>   </proposed_plan>", // 空白内容
+            "<proposed_plan></proposed_plan>",    // 空内容
+        ] {
+            assert!(
+                split_proposed_plan(bad).is_none(),
+                "退化形态不得升格: {bad}"
+            );
+        }
+    }
+
+    /// T4：assistant 文本含 `<proposed_plan>` → 产 [前导 assistant 文本, plan 一等卡]
+    /// （kind=plan、collapsed=false、content=剥标签后的 markdown）
+    #[test]
+    fn codex_proposed_plan_promotes_to_plan_card() {
+        let text = "说明一句。\n<proposed_plan>\n# 计划标题\n\n- 步骤一\n</proposed_plan>";
+        let msgs = SessionMessage::assistant_text(text, Some(123));
+        assert_eq!(msgs.len(), 2, "前导文本 + 计划卡两条");
+        assert_eq!(msgs[0].kind, "assistant");
+        assert_eq!(msgs[0].content, "说明一句。");
+        assert_eq!(msgs[1].kind, "plan", "标签内容升格一等计划卡");
+        assert_eq!(msgs[1].content, "# 计划标题\n\n- 步骤一");
+        assert!(
+            !msgs[1].content.contains("proposed_plan"),
+            "计划卡不得有标签残留（T4 验收）"
+        );
+        assert!(!msgs[1].collapsed, "一等卡默认展开");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].seq, 0, "seq 由调用方统一编号（构造器恒 0）");
+    }
+
+    /// T4 端到端：codex rollout 的 assistant message 行 → 消息流出现 kind=plan
+    /// （走 `map_codex_lines` 真实分派路径，非只测纯函数）
+    #[test]
+    fn codex_rollout_assistant_with_plan_tag_yields_plan_kind() {
+        let line = r#"{"timestamp":"2026-08-03T17:16:27.100Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"以下是计划。\n<proposed_plan>\n## 方案\n1. 做 A\n</proposed_plan>"}]}}"#;
+        let msgs = map_codex_lines(&[line.to_string()]);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["assistant", "plan"],
+            "升格后两条（前导 + 计划）"
+        );
+        assert_eq!(msgs[1].content, "## 方案\n1. 做 A");
+        assert!(!msgs[1].content.contains("proposed_plan"));
+        // 无标签的 assistant 消息不受影响（零回归）
+        let plain = r#"{"timestamp":"2026-08-03T17:16:27.100Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"普通回复"}]}}"#;
+        let msgs = map_codex_lines(&[plain.to_string()]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, "assistant");
+    }
 
     #[test]
     fn codex_maps_rollout_lines() {
