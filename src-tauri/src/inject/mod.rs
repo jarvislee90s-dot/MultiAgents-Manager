@@ -1,7 +1,17 @@
 pub mod approve;
 pub mod confirm;
 // 通用 N 选项审批对话框屏读解析（批次丙 T5）：纯函数跨平台可测，屏读源在
-// windows_console::read_screen_window（仅 Windows 有屏读 → macOS 自然降级二元卡）
+// windows_console::read_screen_window（仅 Windows 有屏读 → macOS 自然降级二元卡）。
+// 丁T3 起同模块承载「对话框在场 = 控制类注入红线」的单点判据
+// （`blocks_control_injection` + 屏读探测 `probe_screen_dialog`，§2.7 裁8/9）与
+// `RemoteState.dialog_probe` 缝的生产实现。
+//
+// **守卫覆盖面（丁T3 现状 + 已知缺口登记，勿误读为全覆盖）**：
+// - **有守卫**：`remote::api::session_mode_switch`（模式切换的 shift+tab 与斜杠两路
+//   ——投递前屏读，在场即 409 `blocked_by_dialog`，零注入零审计）；
+// - **无守卫（已知缺口，下批收口点见 `queue` 模块文档的同名小节）**：队列放行
+//   （`queue::flush_one` / `try_flush`）与「立即发送」（`remote::api::session_queue_jump`）
+//   ——两条都在可输入态投递，而对话框在场时状态同样可能是 Waiting。
 pub mod dialog;
 pub mod engine;
 pub mod families;

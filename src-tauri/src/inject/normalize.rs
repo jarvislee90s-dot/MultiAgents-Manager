@@ -89,6 +89,36 @@ pub fn is_slash_message(text: &str) -> bool {
 /// **不做**的事：不识别旧版**前置**形态（`[mobile X] {正文}`）。理由：本函数服务于
 /// 「取正文尾部」这一判据，而旧形态的正文尾部本来就是真正的正文（前缀不在尾部），
 /// 取尾结论天然正确——升级窗口内既存队列项因此零特判即可工作。
+///
+/// # 已知边界：旧前缀形态 + 正文尾方括号 → 整段剥掉（F4-5 登记，不在生产路径上）
+///
+/// 判据是「以 `]` 结尾 + 能 `rfind("[mobile ")`」，故 `[mobile iPhone] 正文 [1]`
+/// 这种**同时**含旧前缀与正文尾方括号的串会被整段剥成 `""`（`rfind` 取的是第一个
+/// `[mobile ` 的位置）。与前端正则（`/\s*\[mobile[^\]]*\]$/`，要求签名紧贴尾部）
+/// 口径不同——前端会保留该串原样。
+///
+/// **为什么无害**（生产不可达 + 后果方向保守）：
+/// - 生产路径喂进来的只有 `compose_injection` 的两种产物：`{正文} [mobile X]`
+///   （尾部签名，正例）或斜杠命令裸注入（无签名，恒等变换）。旧前缀形态只存在于
+///   **升级窗口内既存队列项**（T3 之前入队的行），而那种行的正文尾部通常不是方括号
+///   ——此时串**不以 `]` 结尾**，本函数**原样返回**，取尾得到的正是真实正文尾，
+///   判据仍然成立；只有「旧前缀 + 正文尾恰好是 `[1]` 这类方括号」的交集才会多剥，
+///   实机未见；
+/// - 即便发生，后果是**戳变短/变空**：空戳在 [`super::confirm::stamp_in_messages`]
+///   里恒不中（`!stamp.is_empty()` 守卫）→ 确认层降级为 `Submitted`（中性「已投递
+///   未确认」）而非谎报送达——方向保守。
+///
+/// **实测对照**（由 `strips_known_boundary_old_prefix_plus_trailing_bracket` 钉住）：
+/// | 输入 | 产物 |
+/// |---|---|
+/// | `正文 [1] [mobile iPhone]`（生产形态） | `正文 [1]` |
+/// | `[mobile iPhone] 正文 [1]`（边界） | `""` |
+/// | `[mobile iPhone] 正文`（无尾方括号） | 原样返回（取尾即真实正文尾） |
+/// | `[mobile iPhone]`（纯签名） | `""` |
+///
+/// **收口点**：若未来需要在升级窗口内精确区分，判据改为「签名必须**紧贴尾部**
+/// （`]` 前无其他内容）且其前是空白或行首」即可与前端同口径；当前不做（为一个
+/// 不可达组合增加判据，会让主路径的容错面变窄）。
 pub fn strip_mobile_signature(content: &str) -> &str {
     let trimmed = content.trim_end();
     if !trimmed.ends_with(']') {
@@ -220,6 +250,57 @@ mod tests {
         // 空串 / 纯签名
         assert_eq!(strip_mobile_signature(""), "");
         assert_eq!(strip_mobile_signature("[mobile iPhone]"), "");
+    }
+
+    /// F4-5 **已知边界的回归锁**（把文档里的宣称变成可执行断言，防未来被「顺手修好」
+    /// 却没人知道口径变了）：**旧前缀形态 + 正文尾方括号**会被整段剥掉（取第一个
+    /// `[mobile ` 的位置），与前端正则（要求签名紧贴尾部）口径不同。
+    ///
+    /// 本断言**刻意钉住现状**而非期望值——生产路径喂不进这个组合（见
+    /// [`strip_mobile_signature`] 的边界小节），而后果方向保守（空戳恒不中 →
+    /// 确认层降级 Submitted，非谎报）。若将来收口（判据改为「签名紧贴尾部」），
+    /// 本用例必须显式改写并同步上游文档。
+    #[test]
+    fn strips_known_boundary_old_prefix_plus_trailing_bracket() {
+        // 现状（钉住）：整段剥成空
+        assert_eq!(
+            strip_mobile_signature("[mobile iPhone] 正文 [1]"),
+            "",
+            "F4-5 边界现状：旧前缀 + 尾方括号 → 整段剥（见函数文档「已知边界」）"
+        );
+        // 后果保守性（同一条注释的宣称也要可执行）：空产物作为戳恒不中
+        assert!(
+            !super::super::confirm::stamp_in_messages(
+                &["任意正文"],
+                super::super::confirm::stamp_of("")
+            ),
+            "空戳恒不中 ⇒ 该边界最坏只降级为 Submitted（非谎报送达）"
+        );
+        // 生产形态对照格：尾部签名（新口径）→ 正确剥出正文
+        assert_eq!(
+            strip_mobile_signature("正文 [1] [mobile iPhone]"),
+            "正文 [1]"
+        );
+        // 旧前缀形态但正文尾**无**方括号（不以 `]` 结尾）→ 原样返回；其取尾结果
+        // 仍是真实正文尾（判据成立——见函数文档的实测对照表）
+        assert_eq!(
+            strip_mobile_signature("[mobile iPhone] 正文"),
+            "[mobile iPhone] 正文",
+            "不以 `]` 结尾 ⇒ 原样返回（早期形态的取尾仍正确）"
+        );
+    }
+
+    /// 纯核：截尾 24 字符时签名不参与——`strip_mobile_signature` 的产物作为
+    /// `stamp_of` 输入的等价性（两函数组合的端到端锁，防未来只改一侧）
+    #[test]
+    fn strip_then_stamp_matches_stamp_of_directly() {
+        let composed = compose_injection("iPhone", "请帮我检查一下这个文件");
+        let manual = strip_mobile_signature(&composed);
+        assert_eq!(
+            super::super::confirm::stamp_of(&composed),
+            super::super::confirm::stamp_of(manual),
+            "stamp_of(composed) 必须等于 stamp_of(剥签名后的正文)"
+        );
     }
 
     /// 审计摘要：超长截断加省略号

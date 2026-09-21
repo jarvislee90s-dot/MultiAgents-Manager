@@ -447,34 +447,73 @@ mod tests {
 
     /// 丁T3 裁2 **安全项（任务书点名，不可省）**：签名后置后两条**同设备不同正文**
     /// 的消息，尾部签名完全相同（` [mobile iPhone]`）——若戳取 composed 的尾部，
-    /// 第一条的戳会命中第二条（跨消息假命中 = 确认层谎报送达）。戳必须取**签名之前
-    /// 的正文尾部**：本用例即该不变式的锁。
+    /// 同设备的消息会共享／互相包含尾戳（跨消息假命中 = 确认层谎报送达）。戳必须取
+    /// **签名之前的**正文尾部：本用例即该不变式的锁。
+    ///
+    /// # 夹具为什么必须让两条正文**共享 ≥24 字符的尾部**（F4-1 Critical 修复）
+    ///
+    /// 首版夹具用了两条尾部各不相同的正文（"…空指针修掉" / "…回归测试并汇报"）——
+    /// 那是**空断言**：旧口径（不剥签名）下两条的戳分别是
+    /// `"s 的空指针修掉 [mobile iPhone]"` 与 `"遍回归测试并汇报 [mobile iPhone]"`，
+    /// **本来就互不相同也互不包含** → `assert_ne!` 与 `contains` 断言在旧口径下
+    /// 同样通过，**无法杀回归**（唯一有区分力的是「戳不得含 `[mobile`」那条）。
+    ///
+    /// 现夹具让两条正文的公共尾段**长于戳长**（24 字符）：此时旧口径下两条的戳
+    /// **逐字符相同**（且都在对方消息里命中）——三条断言（假命中锁 / `assert_ne!` /
+    /// 对照格）才真正区分新旧口径。**变异验证（2026-09-21 本机实跑）**：把 `stamp_of`
+    /// 还原成「不剥签名」后，**先红的是排在最前的「假命中」断言**（报错消息
+    /// `假命中：第一条的戳命中了第二条消息（旧口径形态）：sa="检查一下这个文件 [mobile iPhone]"`）。
+    /// 夹具自检（`old_style` 相等）与断言顺序共同保证区分力——两者都不要动。
     #[test]
     fn stamp_never_false_hits_across_same_device_messages() {
         use crate::inject::normalize::compose_injection;
-        let a = compose_injection("iPhone", "第一条：把 login.ts 的空指针修掉");
-        let b = compose_injection("iPhone", "第二条：跑一遍回归测试并汇报");
+        // 公共尾段 = "请帮我检查一下这个文件" 的尾部（≥24 字符），前缀不同：
+        //   a 正文 = "请帮我检查一下这个文件"
+        //   b 正文 = "然后重新检查一下这个文件"
+        // 旧口径下两条的尾 24 字符都是 `"检查一下这个文件 [mobile iPhone]"`（相同）。
+        let a = compose_injection("iPhone", "请帮我检查一下这个文件");
+        let b = compose_injection("iPhone", "然后重新检查一下这个文件");
+        // 前置：夹具必须真的构成「共享长尾」形态（否则本用例退回空断言——
+        // 这条自检是 F4-1 的根因防线，勿删）
+        assert!(
+            a.chars().count() > STAMP_CHARS && b.chars().count() > STAMP_CHARS,
+            "夹具必须长于戳长（否则两条都取全串，共享尾段形态不成立）：{a:?} / {b:?}"
+        );
+        // 旧口径下的戳（= 不剥签名、直接截尾）在**本夹具**上必然相同——把这点写成
+        // 可执行断言，任何未来再次放宽夹具（尾段不再共享）都会在这里变红
+        let old_style = |c: &str| -> String {
+            let t = c.trim_end();
+            t.chars()
+                .skip(t.chars().count().saturating_sub(STAMP_CHARS))
+                .collect()
+        };
+        assert_eq!(
+            old_style(&a),
+            old_style(&b),
+            "夹具必须能构造出旧口径下的假命中（两条旧式尾戳相同）——F4-1 的区分力前提"
+        );
+
         let sa = stamp_of(&a);
         let sb = stamp_of(&b);
-        // 戳是正文的尾部（签名不在戳里）——两条消息的戳必须**互不相同**
-        assert!(!sa.contains("[mobile"), "戳不得含签名：{sa:?}");
-        assert!(!sb.contains("[mobile"), "戳不得含签名：{sb:?}");
-        assert_ne!(sa, sb, "同设备两条不同正文的戳必须相异");
-        // 跨消息假命中锁：A 的戳不得在 B 的正文里命中（B 已注入到会话文件的情形）
+        // ① **跨消息假命中锁（本用例的主断言，排在最前）**：A 的戳不得在 B 的正文里
+        //    命中（B 已注入到会话文件的情形）。旧口径下本夹具的 sa 是
+        //    `"检查一下这个文件 [mobile iPhone]"`（含签名且与 sb 相同）→ 它在 b 里
+        //    **命中** → 这一条先红（变异验证见上方文档）。
         assert!(
             !stamp_in_messages(std::slice::from_ref(&b), sa),
-            "假命中：第一条的戳命中了第二条消息"
+            "假命中：第一条的戳命中了第二条消息（旧口径形态）：sa={sa:?}"
         );
+        // ② 两条的戳必须**相异**（旧口径下相等——同为带签名的共享尾段）
+        assert_ne!(sa, sb, "同设备两条不同正文的戳必须相异");
+        // ③ 对照格：第二条自己的戳必须在第二条里命中（正命中通道未哑）
         assert!(
             stamp_in_messages(std::slice::from_ref(&b), sb),
             "对照格：第二条自己的戳必须在第二条里命中"
         );
-        // 回归锁：旧口径（取 composed 尾部）下两条的戳会是同一串 ` [mobile iPhone]`
-        // ——本断言把「戳里不得含签名」钉死，还原旧口径即变红
-        assert!(
-            !stamp_of(&a).contains("mobile") && !stamp_of(&b).contains("mobile"),
-            "戳必须取签名之前的正文尾部（旧口径回归锁）"
-        );
+        // ④ 戳不含签名（签名后置的**形态**断言——与 ① ② 分工不同：①② 锁住假命中，
+        //    本条约锁形态本身；两处都保留，缺一都会让某类回归失去信号）
+        assert!(!sa.contains("[mobile"), "戳不得含签名：{sa:?}");
+        assert!(!sb.contains("[mobile"), "戳不得含签名：{sb:?}");
         // 极短正文：戳=正文全量（签名同样不参与）
         let short = compose_injection("iPhone", "好");
         assert_eq!(stamp_of(&short), "好");

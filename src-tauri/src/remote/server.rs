@@ -3028,6 +3028,17 @@ mod tests {
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
     ) -> Arc<RemoteState> {
+        approve_state_with_dialog(injector, sess_a_last, std::sync::Arc::new(|_, _| None))
+    }
+
+    /// 丁T3 F4-2：approve_state + 可注入对话框探针（审批侧 `read_dialog_options` 经
+    /// 该缝取屏读结论——补上 T5 的 dialog 分支在门禁内的自动化证据：真实屏读需要
+    /// conhost，CI 恒 None 时那两条断言只在有窗口的机器上才走得到）。
+    fn approve_state_with_dialog(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        sess_a_last: Option<&str>,
+        dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+    ) -> Arc<RemoteState> {
         let sessions = vec![
             {
                 let mut s = inj_sess(
@@ -3158,9 +3169,9 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
-            // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
-            // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
-            dialog_probe: std::sync::Arc::new(|_, _| None),
+            // 丁T3 F4-2：对话框探针参数化（缺省「无法判定」；dialog 分支用例经
+            // approve_state_with_dialog 注入**真机屏幕原文**假体）
+            dialog_probe,
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -6937,7 +6948,7 @@ mod tests {
     /// flush|jump|retract|approve|reject|fail|key|open——open 已随 Task 11 一键
     /// resume 兑现，批次乙 T8 再追加 answer（问答端点，锁定见 question_answer_* 族），
     /// 批次丙 T6 追加 mode，**丁T3 追加 slash**（裁2 斜杠命令裸注入的溯源动作，
-    /// 锁定见 `slash_message_audits_action_slash` 用例）——
+    /// 锁定见 `slash_message_bare_injects_and_audits_slash` / `slash_message_queued_keeps_bare_form_and_slash_action` 两用例）——
     /// 之外的域外 id 不得原样进审计
     /// action 列——key 是本次新增的收敛动作）且不 panic；域外 warn 在实现侧 log，
     /// 测试不断言日志。
@@ -7929,6 +7940,113 @@ mod tests {
         let body = body_string(r).await;
         assert!(body.contains("\"dialogChecked\":true"), "{body}");
         assert_eq!(fake.recorded_keys(), vec![(73u32, "shift+tab".to_string())]);
+    }
+
+    // ===== 丁T3 F4-2：审批侧 dialog_probe 缝的两格自动化证据 =====
+    //
+    // 缺口（评审核实）：`read_dialog_options` 改经缝之后，`kimi_plan_approval_card_
+    // never_emits_mapping_keys` 的 `v["dialog"]==true` 分支**只在有真实窗口的机器上
+    // 才走得到**（CI 恒走 else）——缝的意义正是让屏读可测，故必须用假体把两格都钉住：
+    // ① 缝给真机选项表 → GET 下发 `dialog:<n>` + `dialog=true`（T5 主路径）；
+    // ② 缝给 None → 降级二元卡 + `degradedHint`（R1-3 防重警示，安全面）。
+    // 两格都是真断言（键位不外泄 / 降级文案原文），不是「不 panic」。
+
+    /// F4-2 格①：缝返回**真机屏幕原文**解析出的选项表（`real_dialog_fixture` =
+    /// codex `Implement this plan?` 框，`screen-t5-codex-implement-before.txt` 行 24–29）
+    /// → GET `/session-approve-options` 必须走 dialog 分支：`dialog=true` + 选项 id
+    /// 全为 `dialog:<n>` + label 是屏上原文。
+    #[tokio::test]
+    async fn approve_dialog_branch_emits_dialog_options_via_probe() {
+        let fake = FakeInjector::ok();
+        let opts = real_dialog_fixture();
+        let expected: Vec<(u32, String)> =
+            opts.iter().map(|o| (o.number, o.label.clone())).collect();
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some(APPROVE_HIT_MSG),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["dialog"], true, "缝给选项表 ⇒ dialog 分支必须成立");
+        let options = v["options"].as_array().expect("options 应为数组");
+        assert_eq!(
+            options.len(),
+            expected.len(),
+            "选项数必须等于屏读解析出的编号项数"
+        );
+        for (o, (num, label)) in options.iter().zip(expected.iter()) {
+            assert_eq!(
+                o["id"].as_str().unwrap(),
+                format!("dialog:{num}"),
+                "dialog 分支的 id 形态（点按注入该数字）：{o}"
+            );
+            assert_eq!(
+                o["label"].as_str().unwrap(),
+                label.as_str(),
+                "label 必须是屏上原文（T5 目标：把真实选项文本交给用户）：{o}"
+            );
+        }
+        // 降级警示**不得**在 dialog 分支出现（R1-3 的警示条件是「命中审批但没读到
+        // 对话框」——读到就不是降级态）
+        assert_eq!(
+            v["degradedHint"],
+            serde_json::Value::Null,
+            "读到选项时不叠加降级警示"
+        );
+    }
+
+    /// F4-2 格②：缝返回 `None`（CI/非 Windows/对话框未绘制）→ 降级二元卡 +
+    /// `degradedHint`（R1-3 防重警示：二元键可能错位命中非预期选项）。
+    /// 与格①成对：同一夹具、同一会话，只换探针结论。
+    #[tokio::test]
+    async fn approve_dialog_branch_degrades_with_hint_via_probe() {
+        let fake = FakeInjector::ok();
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some(APPROVE_HIT_MSG),
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true, "命中审批（映射存在且 detect 命中）");
+        assert_eq!(v["dialog"], false, "缝给 None ⇒ 降级二元卡");
+        let options = v["options"].as_array().unwrap();
+        assert_eq!(options.len(), 2, "降级 = 映射表二元项（允许/拒绝）");
+        assert!(
+            options
+                .iter()
+                .all(|o| !o["id"].as_str().unwrap().starts_with("dialog:")),
+            "降级路径不得夹带 dialog:<n>"
+        );
+        assert_eq!(
+            v["degradedHint"],
+            "未读到终端对话框选项——终端可能正显示多选项，二元键可能错位，建议到终端确认",
+            "R1-3 防重警示必须下发（前端二元卡脚注）"
+        );
     }
 
     /// 单会话 + 可注入对话框探针的 state（丁T3 模式守卫用例专用建造器：会话 id/工具/
