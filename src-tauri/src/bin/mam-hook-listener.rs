@@ -21,6 +21,9 @@
 //!    不得带 async（T2 落实）。
 //! 4. payload 差异（claude/codex/kimi 的 tool_input/message 等）是 T2/T3 的事——
 //!    本 helper 只做「stdin JSON → session_id/hook_event_name → 事件文件」薄管道。
+//!    T8/T1 两个例外见内核模块文档（tool_input 仅 PreToolUse∧AUQ；message 仅
+//!    Notification）——均为「有实机取证支撑才落盘」的可选字段，缺席时正文逐字节
+//!    与旧版一致。
 //!
 //! 逻辑本体在共享内核 [`hook_listener`]（`#[path]` 引入同一源文件，lib 侧
 //! `monitor::hook_listener` 同源可测；独立编译单元不链接整个 lib——mam-marker
@@ -146,5 +149,109 @@ mod tests {
         )
         .unwrap();
         assert!(v.get("tool_name").is_none() && v.get("tool_input").is_none());
+    }
+
+    /// 批次丙 T1 通知语义通道 bin 面：claude Notification payload（message/title/
+    /// notification_type 三专属字段）→ 事件文件携带 `message` 原文；非 Notification
+    /// 事件带同名字段不落盘（回归锁：只在我们有证据的事件上落新字段）。
+    /// stdin 夹具形态=实机取证档案（research/refs/phase2-消息注入/
+    /// 2026-09-21-claude-notification-message-取证.md）
+    #[test]
+    fn run_writes_notification_message_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            concat!(
+                r#"{"session_id":"bin-notif-1","hook_event_name":"Notification","cwd":"/w","#,
+                r#""message":"Claude needs your permission","#,
+                r#""title":"Claude Code","notification_type":"permission_prompt"}"#
+            ),
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-notif-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert_eq!(v["message"], "Claude needs your permission");
+
+        // 非 Notification 事件（Stop）带 message 键 → 不落盘（逐字节 legacy 形态）
+        run(
+            r#"{"session_id":"bin-notif-2","hook_event_name":"Stop","cwd":"/w","message":"x"}"#,
+            tmp.path(),
+        );
+        let body = std::fs::read_to_string(tmp.path().join("bin-notif-2.json")).unwrap();
+        assert!(
+            !body.contains("message"),
+            "非 Notification 事件的 message 不得落盘: {body}"
+        );
+    }
+
+    /// T1 bin 面回归锁：无 message 的 Notification（旧形态）正文与 T8 版**逐字节
+    /// 一致**——新增可选字段不得引入既有事件的文件形态漂移
+    #[test]
+    fn run_notification_without_message_is_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            r#"{"session_id":"bin-notif-3","hook_event_name":"Notification","cwd":"/w","notification_type":"permission_prompt"}"#,
+            tmp.path(),
+        );
+        let body = std::fs::read_to_string(tmp.path().join("bin-notif-3.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert!(v.get("message").is_none(), "message 缺席时不得落键: {body}");
+        // 键集合与 legacy 完全一致（event/session_id/cwd/ts/last_event_at）
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["event", "session_id", "cwd", "ts", "last_event_at"],
+            "键序与 legacy 同构"
+        );
+    }
+
+    /// 批次丙 T1 bin 面：未决问答字段承接全链（AUQ PermissionRequest → Notification）
+    /// ——helper 在同一事件目录内读写，承接后事件文件带 tool_name + tool_input，
+    /// 消费侧据此把「Notification 那一跳」仍判为问答而非审批。
+    /// 夹具事件序=实机取证序列（research/refs/phase2-消息注入/
+    /// 2026-09-21-claude-notification-message-取证.md）
+    #[test]
+    fn run_carries_forward_pending_question_fields_into_notification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = r#"{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Blue","description":"d"}],"multiSelect":false}]}"#;
+        run(
+            &format!(
+                r#"{{"session_id":"bin-cf1","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{payload}}}"#
+            ),
+            tmp.path(),
+        );
+        run(
+            r#"{"session_id":"bin-cf1","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}"#,
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-cf1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert_eq!(v["tool_name"], "AskUserQuestion", "承接工具名");
+        assert_eq!(v["tool_input"], payload, "承接 questions 载荷");
+        assert_eq!(v["message"], "Claude needs your permission");
+
+        // 反向：真实审批（Write）不触发承接
+        run(
+            r#"{"session_id":"bin-cf2","hook_event_name":"PermissionRequest","tool_name":"Write","tool_input":{"file_path":"C:\\x.txt"}}"#,
+            tmp.path(),
+        );
+        run(
+            r#"{"session_id":"bin-cf2","hook_event_name":"Notification","message":"Claude needs your permission"}"#,
+            tmp.path(),
+        );
+        let v2: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-cf2.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            v2.get("tool_name").is_none(),
+            "真实审批不得被承接成问答: {v2}"
+        );
     }
 }

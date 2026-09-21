@@ -56,13 +56,42 @@ fn apply_wait_mark_overlay(session: &mut Session, marked: bool) {
     }
 }
 
+/// 问答进入判据（批次丙 T1，幽灵审批标记修复的核心裁决；纯函数可测）。
+///
+/// **判据锚点 = 事件的 `tool_name`**（实机取证，见 research/refs/phase2-消息注入/
+/// 2026-09-21-claude-notification-message-取证.md）。claude 对 AskUserQuestion
+/// 待答投递的事件序为：
+/// `PreToolUse(AUQ)` → `PermissionRequest(AUQ)` → `Notification(permission_prompt)`，
+/// 后两者同属审批族事件（批次甲把 `PermissionRequest|Notification` 注册为审批信号
+/// → 误写 approval_wait_marks「等待审批」→ 审批红卡顶出、问答卡被 T8 隔离约束压死
+/// = 图2/图3 根因）。
+///
+/// **为何不用 `Notification.message` 判别**（任务书原假设，实机已证伪）：
+/// 真实审批与 AUQ 待答的 permission_prompt 通知 message **逐字相同**，均为
+/// `Claude needs your permission`（两种场景各实测一次，原文见取证档案）——该文本
+/// 不具判别力，用它会把真实审批误吞成问答、红卡永久不现。故 message 只作诊断
+/// 留痕（helper 透传 + 测试可断言），不参与裁决。
+///
+/// **PermissionRequest 携带判别字段**：与 PreToolUse 同形的
+/// `tool_name:"AskUserQuestion"` + 完整 `tool_input.questions`（实机取证）——
+/// 它才是本修复可依赖的工具级判据（helper 侧对两事件都采 tool_input，
+/// 见 `hook_listener::parse_hook_stdin`）。
+fn is_question_entry_event(event: &crate::monitor::hooks::HookEvent) -> bool {
+    event.tool_name == crate::monitor::hook_listener::ASK_USER_QUESTION_TOOL
+        && matches!(
+            event.event.as_str(),
+            "PreToolUse" | "preToolUse" | "PermissionRequest" | "Notification"
+        )
+}
+
 /// 单会话 hook 事件应用（T3 抽取自主循环，行为等价可测）：返回审批等待标记动作
 /// ——Entry=进入（写标记）/Clear=清除（删标记）/None。
 /// 红灯语义退役（计划 T3，用户裁定的「不落红」收窄再修订）：Stop 过期 → **Idle**
 /// （Stop=回合结束≠等审批；等待红由审批等待持久标记承担，无标记不假红）
 ///
-/// **T8 问答分支**（函数顶部，先于通用 PreToolUse 映射）：PreToolUse ∧
-/// tool_name==AskUserQuestion → 返回 [`HookMarkAction::QuestionEntry`] 并强制
+/// **问答进入分支**（函数最前，先于通用审批映射）：事件的 tool_name 为
+/// AskUserQuestion（PreToolUse / PermissionRequest / 承接了工具名的 Notification，
+/// 见 [`is_question_entry_event`]）→ 返回 [`HookMarkAction::QuestionEntry`] 并强制
 /// Waiting。实机取证（探测档案 research/refs/phase2-消息注入/
 /// 2026-09-21-claude-askuserquestion-按键语义探测.md）：问题 UI 弹出期间会话 JSONL
 /// 停在 user 消息（pending tool_use 不落盘），文件推导判不出等待态——hook 事件是
@@ -74,17 +103,18 @@ fn apply_hook_event_to_session(
     grace: &mut HashMap<u32, (i64, i64)>,
     now_ts: i64,
 ) -> HookMarkAction {
-    // T8：AskUserQuestion 专属分支（先于 match——通用 PreToolUse 映射产 Processing
-    // 会覆盖问题等待态；清除族（PostToolUse/Stop/UserPromptSubmit/…）对该会话照常
-    // 返回 Clear，状态链据此同时清两类标记）
-    if matches!(event.event.as_str(), "PreToolUse" | "preToolUse")
-        && event.tool_name == crate::monitor::hook_listener::ASK_USER_QUESTION_TOOL
-    {
+    // T8+T1：AskUserQuestion 专属分支（先于 match——通用 PreToolUse 映射产
+    // Processing 会覆盖问题等待态；清除族（PostToolUse/Stop/UserPromptSubmit/…）
+    // 对该会话照常返回 Clear，状态链据此同时清两类标记）。
+    // 注意 PostToolUse(AUQ)（答完信号）**不在** is_question_entry_event 的事件集里
+    // ——它必须穿透到清除族，否则答完的标记永不清除
+    if is_question_entry_event(event) {
         session.status = SessionStatus::Waiting;
         return HookMarkAction::QuestionEntry;
     }
     match event.event.as_str() {
-        // 审批进入（claude Notification 已由注册侧 matcher=permission_prompt 收窄）
+        // 审批进入（claude Notification 已由注册侧 matcher=permission_prompt 收窄，
+        // 且问答语义的事件已被上方分支截走）
         "PermissionRequest" | "Notification" => {
             session.status = SessionStatus::Waiting;
             HookMarkAction::Entry
@@ -564,7 +594,8 @@ fn get_all_sessions_inner() -> SessionsResponse {
             }
             HookMarkAction::QuestionEntry => {
                 // T8：questions 载荷随标记落库（问答端点 GET 据此出卡）；载荷上限
-                // 64KB 已在 helper 写侧截断丢弃，此处透传
+                // 64KB 已在 helper 写侧截断丢弃，此处透传。Notification 路径无载荷
+                // （None）——端点回落通道 B（会话消息扫描），见 remote/api.rs
                 crate::database::dao::question_wait::mark_wait(
                     &tool,
                     &session.id,
@@ -574,6 +605,19 @@ fn get_all_sessions_inner() -> SessionsResponse {
                 );
                 q_marks.insert((tool.clone(), session.id.clone()), now_ts);
                 // 问题等待**不得**写审批标记（硬约束①的写侧隔离）
+                // T1 双保险（互斥裁决）：问答标记写入时同步清除本会话审批标记——
+                // 防其他未知误标路径（先审批后问答的时序、注册面 matcher 漂移等）
+                // 让两类标记并存互斥。清除族已同时清两表（Clear 分支），此处的
+                // 清反面**无需**对称补偿：审批 Entry 若真到来（用户改主意点了审批
+                // 而不是作答），端点侧的隔离判据会让问答卡自隐，语义自洽。
+                // 残余风险（评估后不设防，如实留痕）：问答标记在飞期间若再来一条
+                // **不带工具名**的 Notification（判别力最弱形态），会走 Entry 写审批
+                // 标记 → 端点隔离把问答卡压死。实机三次复现均为「一次待答恰一条
+                // permission_prompt 通知」，且真实审批必然同时带
+                // PermissionRequest(工具名)，故该路径未被观测；若后续实测出现，
+                // 修复方向=「问答标记在飞时忽略不带工具名的 Notification」
+                crate::database::dao::approval_wait::clear_wait(&tool, &session.id);
+                wait_marks.remove(&(tool.clone(), session.id.clone()));
             }
             HookMarkAction::Clear => {
                 // 清除族对两类标记都生效（硬约束①的清除面：审批/问题等待都随回合
@@ -775,6 +819,7 @@ mod tests {
             last_event_at: String::new(),
             tool_name: String::new(),
             tool_input: None,
+            message: None,
         }
     }
 
@@ -791,6 +836,23 @@ mod tests {
             last_event_at: String::new(),
             tool_name: tool_name.into(),
             tool_input: tool_input.map(str::to_string),
+            message: None,
+        }
+    }
+
+    /// 批次丙 T1：带 Notification message 的事件构造（误标不写 / 正常审批用例）
+    fn hook_ev_msg(
+        event: &str,
+        message: Option<&str>,
+        ts: i64,
+    ) -> crate::monitor::hooks::HookEvent {
+        crate::monitor::hooks::HookEvent {
+            event: event.into(),
+            ts,
+            last_event_at: String::new(),
+            tool_name: String::new(),
+            tool_input: None,
+            message: message.map(str::to_string),
         }
     }
 
@@ -1119,6 +1181,250 @@ mod tests {
         );
         assert_eq!(action, HookMarkAction::None);
         assert_eq!(s.status, SessionStatus::Processing);
+    }
+
+    // ==== 批次丙 T1 幽灵审批标记修复：问答进入判据（tool_name 锚点） ====
+
+    /// 判据纯函数：AskUserQuestion 的**三个进入事件**（PreToolUse / PermissionRequest
+    /// / 承接了工具名的 Notification）判问答；答完信号 PostToolUse(AUQ) **不在此列**
+    /// ——它必须穿透到清除族（否则答完标记永不清除）
+    #[test]
+    fn question_entry_event_predicate_covers_all_three_entry_events() {
+        for ev in ["PreToolUse", "preToolUse", "PermissionRequest"] {
+            assert!(
+                is_question_entry_event(&hook_ev_tool(
+                    ev,
+                    "AskUserQuestion",
+                    Some(r#"{"questions":[]}"#),
+                    1
+                )),
+                "{ev} ∧ AUQ 必须判问答"
+            );
+        }
+        // Notification 承接了 tool_name=AUQ（helper 承接窗的产物）→ 同样判问答
+        assert!(is_question_entry_event(&hook_ev_tool(
+            "Notification",
+            "AskUserQuestion",
+            None,
+            1
+        )));
+        // 答完信号：PostToolUse(AUQ) 不在进入事件集（必须走清除族）
+        assert!(
+            !is_question_entry_event(&hook_ev_tool("PostToolUse", "AskUserQuestion", None, 1)),
+            "PostToolUse(AUQ) 是答完信号，必须穿透到 Clear 族"
+        );
+        // 其他工具恒不判问答
+        for tool in ["Bash", "Write", "shell", ""] {
+            assert!(!is_question_entry_event(&hook_ev_tool(
+                "PreToolUse",
+                tool,
+                None,
+                1
+            )));
+            assert!(!is_question_entry_event(&hook_ev("Notification", 1)));
+        }
+    }
+
+    /// T1 (a) 误标不写：**PermissionRequest(AUQ)** → QuestionEntry（**不是**审批
+    /// Entry）+ 强制 Waiting。这是图2/图3 根因的直接回归锁——实机取证显示 AUQ 待答
+    /// 会同时投递 PermissionRequest(AUQ)（带工具名载荷）与
+    /// Notification(permission_prompt)（不带工具名、message 与真实审批逐字相同）；
+    /// 修复前 PermissionRequest 走 `"PermissionRequest" | "Notification"` → Entry →
+    /// 误写审批标记
+    #[test]
+    fn permission_request_askuserquestion_is_question_entry_not_approval() {
+        let payload = r#"{"questions":[{"question":"Which fruit do you prefer?","header":"Fruit","options":[{"label":"Apple","description":"d"}],"multiSelect":false}]}"#;
+        let mut s = hook_sess(SessionStatus::Processing);
+        let mut grace = HashMap::new();
+        let ev = hook_ev_tool(
+            "PermissionRequest",
+            "AskUserQuestion",
+            Some(payload),
+            10_000,
+        );
+        let action = apply_hook_event_to_session(&mut s, &ev, &mut grace, 10_000);
+        assert_eq!(
+            action,
+            HookMarkAction::QuestionEntry,
+            "AUQ 的 PermissionRequest 必须按问答处理（误标不写的判据面）"
+        );
+        assert_eq!(s.status, SessionStatus::Waiting, "问答等待强制 Waiting");
+        // 载荷随行：实机取证确认 PermissionRequest 携带完整 tool_input.questions
+        // → 问答卡走通道 A（标记载荷），不必等通道 B
+        assert_eq!(event_payload(Some(&ev)), Some(payload));
+    }
+
+    /// T1：承接产物（Notification 带 tool_name=AUQ，helper 承接窗的形态）→
+    /// QuestionEntry。这是「Notification 那一跳」的回归锁：claude 对 AUQ 待答发
+    /// 的 Notification 本身不带 tool_name，helper 承接窗把未决的 AUQ 进入信号带过来
+    /// （见 hook_listener::with_carried_question_fields）
+    #[test]
+    fn carried_notification_with_question_tool_name_is_question_entry() {
+        let mut s = hook_sess(SessionStatus::Processing);
+        let mut grace = HashMap::new();
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev_tool("Notification", "AskUserQuestion", None, 10_000),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(action, HookMarkAction::QuestionEntry);
+        assert_eq!(s.status, SessionStatus::Waiting);
+    }
+
+    /// T1 (c) 正常审批不受影响（不误伤三分）：真实审批的
+    /// PermissionRequest(Bash) / Notification(permission_prompt，message 与 AUQ
+    /// 待答**逐字相同**的实测原文) / 无 tool_name 的 Notification → 照常审批 Entry
+    #[test]
+    fn generic_approval_events_stay_approval_entry() {
+        let mut grace = HashMap::new();
+        // ① 真实审批 PermissionRequest（Write，实机取证原文形态）
+        let mut s = hook_sess(SessionStatus::Processing);
+        let action = apply_hook_event_to_session(
+            &mut s,
+            &hook_ev_tool(
+                "PermissionRequest",
+                "Write",
+                Some(r#"{"file_path":"C:\\x.txt","content":"hello"}"#),
+                10_000,
+            ),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(action, HookMarkAction::Entry, "真实审批照常写审批标记");
+        assert_eq!(s.status, SessionStatus::Waiting);
+
+        // ② 真实审批的 Notification——message 与 AUQ 待答实测**逐字相同**
+        // （`Claude needs your permission`），且不带 tool_name → 必须仍是审批
+        let mut s2 = hook_sess(SessionStatus::Processing);
+        let action = apply_hook_event_to_session(
+            &mut s2,
+            &hook_ev_msg("Notification", Some("Claude needs your permission"), 10_000),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(
+            action,
+            HookMarkAction::Entry,
+            "message 不具判别力（实测逐字相同）——不带 tool_name 的通知必须走审批"
+        );
+
+        // ③ 无 message / 无 tool_name（旧 helper / bash 兜底 / 其他工具形态）→ 审批
+        let mut s3 = hook_sess(SessionStatus::Processing);
+        let action = apply_hook_event_to_session(
+            &mut s3,
+            &hook_ev_msg("Notification", None, 10_000),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(action, HookMarkAction::Entry);
+
+        // ④ codex PermissionRequest（tool_name="shell"）→ 照常审批
+        let mut s4 = hook_sess(SessionStatus::Processing);
+        let action = apply_hook_event_to_session(
+            &mut s4,
+            &hook_ev_tool("PermissionRequest", "shell", None, 10_000),
+            &mut grace,
+            10_000,
+        );
+        assert_eq!(action, HookMarkAction::Entry);
+    }
+
+    /// T1 (b) 双保险：审批标记已播种（先误标）→ 问答事件生效时审批标记被清、
+    /// 问答标记在场（互斥裁决）。DAO 内存库直测，零接触真实 ~/.mam
+    #[test]
+    fn question_entry_clears_preexisting_approval_mark() {
+        use crate::database::dao::{approval_wait, question_wait};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        let now = 20_000;
+        let mut grace = HashMap::new();
+
+        // ① 先误标（幽灵审批标记的历史形态）：审批标记 + 内存镜像同时在座
+        let mut s = hook_sess(SessionStatus::Processing);
+        let tool = s.agent_type.tool_id().to_string();
+        approval_wait::mark(&conn, &tool, &s.id, now, "等待审批");
+        assert!(approval_wait::has(&conn, &tool, &s.id));
+        let mut wait_marks: HashMap<(String, String), i64> =
+            HashMap::from([((tool.clone(), s.id.clone()), now)]);
+
+        // ② 问答事件到达（PreToolUse∧AUQ、PermissionRequest∧AUQ、承接了工具名的
+        // Notification 三路径各验一次）
+        for ev in [
+            hook_ev_tool(
+                "PreToolUse",
+                "AskUserQuestion",
+                Some(r#"{"questions":[]}"#),
+                now,
+            ),
+            hook_ev_tool(
+                "PermissionRequest",
+                "AskUserQuestion",
+                Some(r#"{"questions":[]}"#),
+                now,
+            ),
+            hook_ev_tool("Notification", "AskUserQuestion", None, now),
+        ] {
+            let action = apply_hook_event_to_session(&mut s, &ev, &mut grace, now);
+            assert_eq!(action, HookMarkAction::QuestionEntry, "两路径都判问答");
+            // 状态链主循环的 QuestionEntry 分支（镜像写侧序列）
+            question_wait::mark(
+                &conn,
+                &tool,
+                &s.id,
+                now,
+                "等待回答",
+                event_payload(Some(&ev)),
+            );
+            approval_wait::clear(&conn, &tool, &s.id);
+            wait_marks.remove(&(tool.clone(), s.id.clone()));
+
+            // ③ 双保险断言：审批标记被清、问答标记在场、审批内存镜像同步移除
+            assert!(
+                !approval_wait::has(&conn, &tool, &s.id),
+                "问答写入必须同步清除该会话审批标记（双保险互斥裁决）"
+            );
+            assert!(question_wait::has(&conn, &tool, &s.id), "问答标记在场");
+            assert!(
+                !wait_marks.contains_key(&(tool.clone(), s.id.clone())),
+                "审批标记内存镜像同步移除（叠加层不假红）"
+            );
+            // 叠加层只由问答标记驱动 → 仍强制 Waiting（问答卡挂载门）
+            let mut probe = hook_sess(SessionStatus::Idle);
+            probe.id = s.id.clone();
+            let marked = question_wait::has(&conn, &tool, &s.id)
+                || wait_marks.contains_key(&(tool.clone(), s.id.clone()));
+            apply_wait_mark_overlay(&mut probe, marked);
+            assert_eq!(probe.status, SessionStatus::Waiting);
+        }
+    }
+
+    /// T1 (d) 隔离测试面回归：两类标记互斥后，端点侧的双向隔离判据仍成立——
+    /// 问答在场 → 审批端点不可用；审批在场 → 问答端点不可用。判据与
+    /// `remote/api.rs`（question_scan_sync 的 approval_marked 早退）及
+    /// `remote/server.rs` 的审批端点（question 标记早退）同一谓词，此处以 DAO
+    /// 点查复刻（零接触真实 ~/.mam）
+    #[test]
+    fn approval_and_question_marks_guard_isolation_both_ways() {
+        use crate::database::dao::{approval_wait, question_wait};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        let (tool, sid) = ("claude".to_string(), "s-iso".to_string());
+        // 问答在场：审批端点判据 = approval 表命中 → false
+        question_wait::mark(&conn, &tool, &sid, 1000, "等待回答", None);
+        assert!(question_wait::has(&conn, &tool, &sid));
+        assert!(
+            !approval_wait::has(&conn, &tool, &sid),
+            "问答在场 → 审批端点不可用（T8 隔离面）"
+        );
+        // 审批在场（问答已随双保险清掉）：问答端点判据 = approval 命中 → 早退
+        question_wait::clear(&conn, &tool, &sid);
+        approval_wait::mark(&conn, &tool, &sid, 2000, "等待审批");
+        assert!(approval_wait::has(&conn, &tool, &sid));
+        assert!(
+            !question_wait::has(&conn, &tool, &sid),
+            "审批在场 → 问答端点不可用（T8 隔离面）"
+        );
     }
 
     /// T8② 硬约束①集成链（DAO 内存库 → 动作 → 叠加层 → 清除族，零接触真实

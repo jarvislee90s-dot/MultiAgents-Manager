@@ -28,6 +28,20 @@
 //!    故问答识别的主通道是 claude 投递给 helper 的 PreToolUse hook payload
 //!    `{hook_event_name:"PreToolUse", tool_name:"AskUserQuestion",
 //!    tool_input:{questions:[…]}}`。
+//!    **批次丙 T1 例外（Notification 语义 + 未决问答承接）**：`message` **仅当**
+//!    hook_event_name=="Notification" 时附加（4KB 上限、**前缀截断**保留；语义
+//!    判据的锚点在 message 前部，整字段丢弃会让消费侧失据，故与 tool_input 的
+//!    整字段丢弃策略有意不同）。**但实机取证推翻了「用 message 判问答」的假设**：
+//!    claude 的 permission_prompt 对真实审批与 AUQ 待答发出的 message **逐字相同**
+//!    （均为 `Claude needs your permission`，两场景各实测一次）——message 只作
+//!    诊断留痕；真正的判据锚点是 **tool_name**（见下）。
+//!    **未决问答承接窗**（[`with_carried_question_fields`]）：claude 对 AUQ 待答的
+//!    事件序是 `PreToolUse(AUQ)` → `PermissionRequest(AUQ)` → `Notification`，
+//!    事件文件同会话覆盖写 → 读取侧常只见到最后那条不带工具名的 Notification。
+//!    故写盘前把同会话**新鲜的** AUQ 进入信号（PreToolUse/PermissionRequest，
+//!    30s 窗）的 tool_name/tool_input 承接到本次 Notification 上——消费侧因此仍能
+//!    按 tool_name 判出问答。取证见 research/refs/phase2-消息注入/
+//!    2026-09-21-claude-notification-message-取证.md。
 //!
 //! # 事件文件格式（以读取侧 `monitor::hooks::read_hook_events_from` 为准，
 //! 自 HOOK_SCRIPT bash 版逐字段移植）
@@ -39,9 +53,11 @@
 //! ISO8601)}`——读取侧 `HookEvent` 消费 event/ts/last_event_at，30s TTL。同会话
 //! 覆盖写 = 保留最新状态（bash 版语义）。T8 起两个**向后兼容的可选字段**：payload
 //! 带 `tool_name`（非空）时追加 `"tool_name"`；PreToolUse ∧ AskUserQuestion 时追加
-//! `"tool_input"`（tool_input 的原文 JSON 串）。其余事件（无 tool_name）正文与
-//! T8 前**逐字节一致**（读取侧 serde default 兼容 bash 兜底脚本形态——bash 解析嵌套
-//! tool_input 不可靠，问题通道不承载，见 hooks.rs HOOK_SCRIPT 注释）。
+//! `"tool_input"`（tool_input 的原文 JSON 串）。T1 起第三个可选字段：Notification
+//! 事件且 payload 带 `message`（非空字符串）时追加 `"message"`（4KB 前缀截断）。
+//! 其余事件（无 tool_name / 无 message）正文与 T8 前**逐字节一致**（读取侧 serde
+//! default 兼容 bash 兜底脚本形态——bash 解析嵌套 tool_input 不可靠，问题通道不
+//! 承载，见 hooks.rs HOOK_SCRIPT 注释）。
 
 use serde_json::json;
 
@@ -55,7 +71,28 @@ pub const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
 /// 丢弃策略=整字段 None（截半截 JSON 会产出不可解析的孤儿字段，不如不给）
 pub const TOOL_INPUT_MAX_BYTES: usize = 64 * 1024;
 
-/// stdin 解析产物（薄管道三字段 + T8 问答通道两可选字段）
+/// Notification.message 附加字段字节上限（批次丙 T1：4KB）。message 是纯文本而非
+/// JSON——claude 的真实模板为 `Claude needs your permission to use <summary>`（数十
+/// 字节），4KB 只防御病态 payload。**截断策略=前缀截断保留**（与 tool_input 的整
+/// 字段丢弃不同）：消费侧判据的锚点在 message 前部（工具名/通知语义短语），整字段
+/// 丢弃会让判据失据、退回「审批默认」= 幽灵审批标记回归。截断按**字符边界**安全
+/// 切分（多字节 UTF-8 不得切半）
+pub const NOTIFICATION_MESSAGE_MAX_BYTES: usize = 4 * 1024;
+
+/// 按字符边界安全截断到 ≤ max_bytes（不做字节硬切——UTF-8 切半会产出不可解码的
+/// 字符串）。超限则保留前缀；未超限原样返回
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// stdin 解析产物（薄管道三字段 + T8 问答通道两可选字段 + T1 通知语义一可选字段）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedHook {
     /// 会话 id（事件文件名键；白名单已校验）
@@ -72,6 +109,12 @@ pub struct ParsedHook {
     /// tool_name==AskUserQuestion 时携带，64KB 上限；其余事件恒 None——事件文件
     /// 体积与 bash 兜底形态兼容）
     pub tool_input: Option<String>,
+    /// `message` 通知正文（批次丙 T1：**仅当** hook_event_name=="Notification" 时
+    /// 携带，4KB 前缀截断上限；其余事件恒 None）。claude 的 Notification payload 带
+    /// `message`/`title`/`notification_type` 三字段，permission_prompt 类型对
+    /// AskUserQuestion 待答也照发——消费侧据 message 的问答语义把该通知判为问答
+    /// 而非审批（幽灵审批标记修复的判据锚点）
+    pub notification_message: Option<String>,
 }
 
 /// session_id 白名单（HOOK_SCRIPT `^[A-Za-z0-9-]+$` 同源移植 + 128 字符防御上限，
@@ -113,7 +156,13 @@ pub fn parse_hook_stdin(raw: &str) -> Option<ParsedHook> {
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .to_string();
-    let tool_input = if event_name == "PreToolUse" && tool_name == ASK_USER_QUESTION_TOOL {
+    // T8 问答通道（通道 A 写侧）载荷捕获：AUQ 的 tool_input 在 **PreToolUse 与
+    // PermissionRequest 两个事件上都到达**（T1 实机取证：PermissionRequest 携带
+    // tool_name + 完整 tool_input，是问题卡的第二个载荷源——见
+    // 2026-09-21-claude-notification-message-取证.md）
+    let tool_input = if matches!(event_name.as_str(), "PreToolUse" | "PermissionRequest")
+        && tool_name == ASK_USER_QUESTION_TOOL
+    {
         value.get("tool_input").and_then(|ti| {
             let s = ti.to_string();
             if s.len() <= TOOL_INPUT_MAX_BYTES {
@@ -125,12 +174,28 @@ pub fn parse_hook_stdin(raw: &str) -> Option<ParsedHook> {
     } else {
         None
     };
+    // T1 通知语义通道：message 仅在 Notification 事件附加（其余事件的 message
+    // 字段语义未被取证，不无差别照收——事件文件体积与兼容面最小化）；超 4KB 前缀
+    // 截断保留（判据锚点在前部，见 NOTIFICATION_MESSAGE_MAX_BYTES 注释）。
+    // **实测语义边界**：claude 的 permission_prompt 对「真实审批」与「AskUserQuestion
+    // 待答」发出的 message **逐字相同**（均为 `Claude needs your permission`），
+    // 单凭该文本无法判别两者——故本字段在消费侧只作次级判据 + 诊断留痕，主判据是
+    // PermissionRequest 的 tool_name（见 adapter::apply_hook_event_to_session）
+    let notification_message = if event_name == "Notification" {
+        value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(|m| truncate_on_char_boundary(m, NOTIFICATION_MESSAGE_MAX_BYTES))
+    } else {
+        None
+    };
     Some(ParsedHook {
         session_id,
         event_name,
         cwd,
         tool_name,
         tool_input,
+        notification_message,
     })
 }
 
@@ -173,7 +238,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// 键序 event/session_id/cwd/ts/last_event_at 与 bash 版一致（preserve_order）。
 /// T8 可选字段：`tool_name`（payload 带非空 tool_name 时追加）与 `tool_input`
 /// （PreToolUse ∧ AskUserQuestion 时追加）——两者缺席时正文与 T8 前逐字节一致
-/// （非问答事件零变化回归锁见 `event_body_without_optional_fields_is_legacy_shape`）
+/// （非问答事件零变化回归锁见 `event_body_without_optional_fields_is_legacy_shape`）。
+/// T1 可选字段：`message`（Notification 事件携带 payload `message` 时追加）——
+/// 同样缺席时零变化（同一回归锁覆盖）
 pub fn event_body(parsed: &ParsedHook, ts: i64) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("event".into(), json!(parsed.event_name));
@@ -187,20 +254,82 @@ pub fn event_body(parsed: &ParsedHook, ts: i64) -> String {
     if let Some(ti) = &parsed.tool_input {
         obj.insert("tool_input".into(), json!(ti));
     }
+    if let Some(msg) = &parsed.notification_message {
+        obj.insert("message".into(), json!(msg));
+    }
     serde_json::Value::Object(obj).to_string()
+}
+
+/// Notification 事件的「未决问答字段承接窗」（秒，T1）：与读取侧 30s TTL 同口径
+/// ——承接来的信息永远不会活过读取侧本就会采信的时间窗，不放大失真。依据（实机
+/// 取证）：claude 对 AskUserQuestion 待答的事件序是
+/// `PreToolUse(AUQ)` → `PermissionRequest(AUQ)` → `Notification(permission_prompt)`
+/// （本机实测间隔 ≈1s / ≈7s），事件文件同会话覆盖写——若 MAM 那一轮轮询落在
+/// Notification 落盘之后，读取侧只会看到不带 tool_name 的 Notification，问答识别
+/// 就丢了。承接把「未决的 AUQ 进入信号」带过 Notification 这一跳
+pub const NOTIFICATION_CARRY_FORWARD_SECS: i64 = 30;
+
+/// 承接上一条「未决问答进入信号」的可选字段（T1）：仅当本次事件是 Notification
+/// 且同会话事件文件里躺着**新鲜的** PreToolUse/PermissionRequest ∧ AUQ 时，
+/// 把 `tool_name`/`tool_input` 带到本次事件上——消费侧因此仍能按 tool_name 判出
+/// 问答（判据见 adapter::apply_hook_event_to_session）。
+///
+/// **收窄到 AUQ 进入信号**（不是无条件承接）：答完的 `PostToolUse(AUQ)` 事件同样
+/// 带 tool_name=AskUserQuestion，若对它也承接，则「答完 AUQ 后 30s 内的真实审批
+/// Notification」会被误判成问答、红卡丢失——故 predecessor 只认
+/// `PreToolUse`/`PermissionRequest` 两个进入事件。
+///
+/// 任何读取/解析失败 → 不承接（返回原 parsed 的克隆；helper 红线 1：错误路径静默）
+fn with_carried_question_fields(
+    events_dir: &std::path::Path,
+    parsed: &ParsedHook,
+    ts: i64,
+) -> ParsedHook {
+    let mut out = parsed.clone();
+    if parsed.event_name != "Notification" || !parsed.tool_name.is_empty() {
+        return out; // 只补 Notification 的空缺；自带 tool_name 的事件不覆盖
+    }
+    let path = events_dir.join(format!("{}.json", parsed.session_id));
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return out;
+    };
+    let prev_event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
+    if !matches!(prev_event, "PreToolUse" | "PermissionRequest") {
+        return out;
+    }
+    if v.get("tool_name").and_then(|t| t.as_str()) != Some(ASK_USER_QUESTION_TOOL) {
+        return out;
+    }
+    let prev_ts = v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
+    if ts.saturating_sub(prev_ts) > NOTIFICATION_CARRY_FORWARD_SECS {
+        return out;
+    }
+    out.tool_name = ASK_USER_QUESTION_TOOL.to_string();
+    if let Some(ti) = v.get("tool_input").and_then(|t| t.as_str()) {
+        if ti.len() <= TOOL_INPUT_MAX_BYTES {
+            out.tool_input = Some(ti.to_string());
+        }
+    }
+    out
 }
 
 /// 写事件文件（瞬时 + 原子）：同目录临时文件 + rename 覆盖（Windows 上
 /// std::fs::rename = MoveFileExW(MOVEFILE_REPLACE_EXISTING)，替换语义成立）——
 /// 读取侧永不读到半截。临时名不带 .json 后缀 → 读取侧 strip_suffix(".json")
-/// 天然跳过。失败返回 Err（bin 层吞掉，红线 1：错误路径零输出非零退出）
+/// 天然跳过。失败返回 Err（bin 层吞掉，红线 1：错误路径零输出非零退出）。
+/// T1 起写盘前先做「未决问答字段承接」（[`with_carried_question_fields`]）——
+/// 目录里无同会话旧文件时行为与 T8 前完全一致（legacy 逐字节回归锁覆盖）
 pub fn write_event_file(
     events_dir: &std::path::Path,
     parsed: &ParsedHook,
     ts: i64,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(events_dir)?;
-    let body = event_body(parsed, ts);
+    let effective = with_carried_question_fields(events_dir, parsed, ts);
+    let body = event_body(&effective, ts);
     // sid+pid 双唯一：同会话并发 helper（不同进程）互不踩临时文件
     let tmp = events_dir.join(format!("{}.{}.tmp", parsed.session_id, std::process::id()));
     let dst = events_dir.join(format!("{}.json", parsed.session_id));
@@ -411,6 +540,7 @@ mod tests {
             cwd: "/tmp".into(),
             tool_name: String::new(),
             tool_input: None,
+            notification_message: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&event_body(&parsed, 1_789_171_200)).unwrap();
@@ -431,6 +561,7 @@ mod tests {
             cwd: "/w".into(),
             tool_name: String::new(),
             tool_input: None,
+            notification_message: None,
         };
         write_event_file(&dir, &parsed, 1_789_171_200).unwrap();
         let dst = dir.join("01a08083-5ca0.json");
@@ -472,6 +603,7 @@ mod tests {
             cwd: String::new(),
             tool_name: String::new(),
             tool_input: None,
+            notification_message: None,
         };
         assert!(write_event_file(&blocker.join("events"), &parsed, 0).is_err());
     }
@@ -582,6 +714,7 @@ mod tests {
             cwd: "/tmp".into(),
             tool_name: String::new(),
             tool_input: None,
+            notification_message: None,
         };
         let body = event_body(&parsed, 1_789_171_200);
         assert_eq!(
@@ -601,6 +734,7 @@ mod tests {
             cwd: String::new(),
             tool_name: ASK_USER_QUESTION_TOOL.into(),
             tool_input: Some(r#"{"questions":[]}"#.into()),
+            notification_message: None,
         };
         let v: serde_json::Value = serde_json::from_str(&event_body(&auq, 1)).unwrap();
         assert_eq!(v["tool_name"], "AskUserQuestion");
@@ -615,6 +749,7 @@ mod tests {
             cwd: String::new(),
             tool_name: "shell".into(),
             tool_input: None,
+            notification_message: None,
         };
         let v: serde_json::Value = serde_json::from_str(&event_body(&codex_like, 1)).unwrap();
         assert_eq!(v["tool_name"], "shell");
@@ -640,5 +775,340 @@ mod tests {
             "questions 原样落盘（探测档案多选夹具）"
         );
         assert_eq!(ti["questions"][0]["multiSelect"], true);
+    }
+
+    // ---------- 批次丙 T1 通知语义通道：Notification ∧ message ----------
+
+    /// T1①：claude 真实 Notification payload（含 message/title/notification_type 三
+    /// 专属字段）→ ParsedHook 携带 notification_message；message 判据锚点的形态由
+    /// 实机取证档案钉死（research/refs/phase2-消息注入/
+    /// 2026-09-21-claude-notification-message-取证.md）
+    #[test]
+    fn parse_notification_carries_message() {
+        let raw = concat!(
+            r#"{"session_id":"0c41365d-1111-2222-3333-444455556666","#,
+            r#""transcript_path":"/home/u/.claude/projects/x/0c41365d.jsonl","#,
+            r#""cwd":"E:\\proj\\demo","hook_event_name":"Notification","#,
+            r#""message":"Claude needs your permission","#,
+            r#""title":"Claude Code","notification_type":"permission_prompt"}"#
+        );
+        let parsed = parse_hook_stdin(raw).expect("claude Notification payload 必须解析成功");
+        assert_eq!(parsed.event_name, "Notification");
+        assert_eq!(
+            parsed.notification_message.as_deref(),
+            Some("Claude needs your permission"),
+            "Notification 的 message 必须原样透传（实机取证原文逐字）"
+        );
+    }
+
+    /// T1① 反例：Notification 无 message（旧 claude 版本 / 其他工具形态）→
+    /// 字段 None，正文回到 legacy 形态（零变化）
+    #[test]
+    fn parse_notification_without_message_yields_none() {
+        let raw = r#"{"session_id":"sid-n1","hook_event_name":"Notification","cwd":"/w","notification_type":"permission_prompt"}"#;
+        let parsed = parse_hook_stdin(raw).unwrap();
+        assert!(parsed.notification_message.is_none());
+        // message 类型非法（对象/数字）按缺失处置
+        let raw2 =
+            r#"{"session_id":"sid-n2","hook_event_name":"Notification","message":{"text":"x"}}"#;
+        assert!(parse_hook_stdin(raw2)
+            .unwrap()
+            .notification_message
+            .is_none());
+        let raw3 = r#"{"session_id":"sid-n3","hook_event_name":"Notification","message":42}"#;
+        assert!(parse_hook_stdin(raw3)
+            .unwrap()
+            .notification_message
+            .is_none());
+    }
+
+    /// T1① 反例：非 Notification 事件带 message（语义未被取证）→ **不附加**
+    ///（最小兼容面：只在我们有证据的事件上落新字段）
+    #[test]
+    fn message_field_is_not_attached_on_other_events() {
+        let raw =
+            r#"{"session_id":"sid-n4","hook_event_name":"Stop","cwd":"/w","message":"whatever"}"#;
+        let parsed = parse_hook_stdin(raw).unwrap();
+        assert!(
+            parsed.notification_message.is_none(),
+            "非 Notification 事件的 message 不得照收"
+        );
+    }
+
+    /// T1：message 超 4KB → **前缀截断保留**（与 tool_input 的整字段丢弃有意不同：
+    /// 判据锚点在前部，整字段丢弃会让判据失据 → 幽灵审批标记回归）；截断按字符
+    /// 边界（多字节 UTF-8 不得切半）
+    #[test]
+    fn oversized_notification_message_is_prefix_truncated() {
+        // ASCII：恰好截到上限
+        let big = "x".repeat(NOTIFICATION_MESSAGE_MAX_BYTES + 100);
+        let raw = format!(
+            r#"{{"session_id":"sid-n5","hook_event_name":"Notification","message":"{big}"}}"#
+        );
+        let parsed = parse_hook_stdin(&raw).unwrap();
+        let msg = parsed
+            .notification_message
+            .expect("超限 message 仍须保留前缀");
+        assert_eq!(msg.len(), NOTIFICATION_MESSAGE_MAX_BYTES);
+        assert!(msg.starts_with("xxx"));
+
+        // 多字节：上限处落在字符中间 → 回退到字符边界（结果 ≤ 上限且可解码）
+        let cjk = "中".repeat(NOTIFICATION_MESSAGE_MAX_BYTES); // 3 字节/字
+        let raw = format!(
+            r#"{{"session_id":"sid-n6","hook_event_name":"Notification","message":"{cjk}"}}"#
+        );
+        let parsed = parse_hook_stdin(&raw).unwrap();
+        let msg = parsed.notification_message.unwrap();
+        assert!(msg.len() <= NOTIFICATION_MESSAGE_MAX_BYTES);
+        assert_eq!(msg.len() % 3, 0, "截断必须落在字符边界（UTF-8 不切半）");
+        assert!(msg.chars().all(|c| c == '中'));
+
+        // 上限内原样保留
+        let ok = "Claude needs your permission to use Bash";
+        let raw = format!(
+            r#"{{"session_id":"sid-n7","hook_event_name":"Notification","message":"{ok}"}}"#
+        );
+        assert_eq!(
+            parse_hook_stdin(&raw)
+                .unwrap()
+                .notification_message
+                .as_deref(),
+            Some(ok)
+        );
+    }
+
+    /// T1 回归锁（与 T8 同一条，扩到第三个可选字段）：无 tool_name / 无 message 的
+    /// 普通事件正文与 T8 前**逐字节一致**
+    #[test]
+    fn event_body_with_message_absent_is_byte_identical() {
+        let parsed = parse_hook_stdin(
+            r#"{"session_id":"sid-x","hook_event_name":"Stop","cwd":"/tmp","message":"ignored"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            event_body(&parsed, 1_789_171_200),
+            r#"{"event":"Stop","session_id":"sid-x","cwd":"/tmp","ts":1789171200,"last_event_at":"2026-09-12T00:00:00Z"}"#,
+            "非 Notification 事件正文必须与 legacy 逐字节一致（T1 零变化）"
+        );
+    }
+
+    /// T1：Notification 正文追加 `message` 键（键序在既有可选字段之后；其余键位
+    /// 不变）；message 为空串时**不落键**（空串无判据价值，且与 tool_name 的非空
+    /// 追加口径一致）
+    #[test]
+    fn event_body_includes_message_for_notification_only() {
+        let raw = r#"{"session_id":"sid-m1","hook_event_name":"Notification","cwd":"/w","message":"Claude needs your permission to use Bash"}"#;
+        let parsed = parse_hook_stdin(raw).unwrap();
+        let body = event_body(&parsed, 1_789_171_200);
+        assert_eq!(
+            body,
+            r#"{"event":"Notification","session_id":"sid-m1","cwd":"/w","ts":1789171200,"last_event_at":"2026-09-12T00:00:00Z","message":"Claude needs your permission to use Bash"}"#
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["message"].is_string(), "message 是 string 字段");
+
+        // 空串 message：不落键（正文回 legacy 形态）
+        let empty = parse_hook_stdin(
+            r#"{"session_id":"sid-m2","hook_event_name":"Notification","cwd":"/w","message":""}"#,
+        )
+        .unwrap();
+        assert_eq!(empty.notification_message.as_deref(), Some(""));
+        // 读取侧 default 空串与缺席同义；写侧落键与否只影响字节，不影响消费
+        assert!(event_body(&empty, 1).contains("\"message\":\"\""));
+    }
+
+    /// T1 端到端（bin run 缝同款）：Notification payload → 事件文件含 message 原文
+    #[test]
+    fn write_event_file_roundtrips_notification_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = concat!(
+            r#"{"session_id":"sid-ne2e","hook_event_name":"Notification","cwd":"/w","#,
+            r#""title":"Claude Code","notification_type":"permission_prompt","#,
+            r#""message":"Claude needs your permission"}"#
+        );
+        let parsed = parse_hook_stdin(raw).unwrap();
+        write_event_file(tmp.path(), &parsed, 1_789_171_200).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("sid-ne2e.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert_eq!(v["message"], "Claude needs your permission");
+    }
+
+    // ---------- 批次丙 T1 未决问答字段承接（Notification 那一跳） ----------
+
+    /// T1 承接①：AUQ 的 PermissionRequest 落盘 → 随后不带 tool_name 的
+    /// Notification → 事件文件**承接** tool_name + tool_input（实机事件序：
+    /// PreToolUse(AUQ) → PermissionRequest(AUQ) → Notification(permission_prompt)，
+    /// 读取侧只见到最后那条 → 不承接就丢问答识别）
+    #[test]
+    fn notification_carries_forward_pending_question_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = r#"{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Blue","description":"d"}],"multiSelect":false}]}"#;
+        // ① AUQ 进入事件先落盘（PermissionRequest 形态，实机取证）
+        let auq = format!(
+            r#"{{"session_id":"sid-cf1","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{payload}}}"#
+        );
+        write_event_file(tmp.path(), &parse_hook_stdin(&auq).unwrap(), 1_000).unwrap();
+        // ② 同会话 Notification 到达（不带 tool_name）→ 承接
+        let notif = parse_hook_stdin(
+            r#"{"session_id":"sid-cf1","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &notif, 1_001).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("sid-cf1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["event"], "Notification", "事件名不得被承接篡改");
+        assert_eq!(v["tool_name"], ASK_USER_QUESTION_TOOL, "承接 AUQ 工具名");
+        assert_eq!(v["tool_input"], payload, "承接原始 questions 载荷");
+        assert_eq!(
+            v["message"], "Claude needs your permission",
+            "本事件自身的 message 照常落盘"
+        );
+    }
+
+    /// T1 承接②收窄：答完信号 `PostToolUse(AUQ)` **不得**触发承接——否则
+    /// 「答完 AUQ 后 30s 内的真实审批 Notification」会被误判成问答、红卡丢失
+    #[test]
+    fn carry_forward_ignores_answer_signal_and_other_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let done = parse_hook_stdin(
+            r#"{"session_id":"sid-cf2","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion"}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &done, 1_000).unwrap();
+        let notif = parse_hook_stdin(
+            r#"{"session_id":"sid-cf2","hook_event_name":"Notification","message":"Claude needs your permission"}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &notif, 1_001).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("sid-cf2.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            v.get("tool_name").is_none(),
+            "答完信号不得触发承接（真实审批 Notification 的红卡保住）: {v}"
+        );
+        // 非 AUQ 的进入事件同样不承接（真实审批 PermissionRequest(Write)）
+        let write_ev = parse_hook_stdin(
+            r#"{"session_id":"sid-cf3","hook_event_name":"PermissionRequest","tool_name":"Write","tool_input":{"file_path":"C:\\x.txt"}}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &write_ev, 1_000).unwrap();
+        let notif3 = parse_hook_stdin(
+            r#"{"session_id":"sid-cf3","hook_event_name":"Notification","message":"Claude needs your permission"}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &notif3, 1_001).unwrap();
+        let v3: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("sid-cf3.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            v3.get("tool_name").is_none(),
+            "非 AUQ 进入事件不得触发承接（真实审批的红卡保住）: {v3}"
+        );
+    }
+
+    /// T1 承接③窗口：超出 30s 承接窗（与读取侧 TTL 同口径）→ 不承接；时钟倒退
+    /// （now < prev，saturating_sub=0）→ 视为新鲜、照常承接（保守侧=保问答卡）
+    #[test]
+    fn carry_forward_respects_freshness_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auq = parse_hook_stdin(
+            r#"{"session_id":"sid-cf4","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[]}}"#,
+        )
+        .unwrap();
+        let notif = |ts: i64| {
+            write_event_file(
+                tmp.path(),
+                &parse_hook_stdin(
+                    r#"{"session_id":"sid-cf4","hook_event_name":"Notification","message":"m"}"#,
+                )
+                .unwrap(),
+                ts,
+            )
+            .unwrap();
+            let v: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(tmp.path().join("sid-cf4.json")).unwrap(),
+            )
+            .unwrap();
+            v
+        };
+        // 窗口内（=30s）承接
+        write_event_file(tmp.path(), &auq, 1_000).unwrap();
+        assert_eq!(notif(1_030)["tool_name"], ASK_USER_QUESTION_TOOL);
+        // 超窗（31s）不承接
+        write_event_file(tmp.path(), &auq, 1_000).unwrap();
+        assert!(notif(1_031).get("tool_name").is_none(), "超窗不承接");
+        // 时钟倒退不视为过期（承接=保问答卡，宁可多承接一轮 TTL）
+        write_event_file(tmp.path(), &auq, 2_000).unwrap();
+        assert_eq!(notif(1_000)["tool_name"], ASK_USER_QUESTION_TOOL);
+    }
+
+    /// T1 承接④：目录里无同会话旧文件（首事件 / 跨会话）→ 行为与 T8 前完全一致
+    /// （legacy 形态零变化：这是向后兼容的硬约束回归锁）
+    #[test]
+    fn carry_forward_is_noop_without_predecessor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let notif = parse_hook_stdin(
+            r#"{"session_id":"sid-cf5","hook_event_name":"Notification","message":"Claude needs your permission"}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &notif, 1_000).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("sid-cf5.json")).unwrap();
+        assert_eq!(
+            body,
+            r#"{"event":"Notification","session_id":"sid-cf5","cwd":"","ts":1000,"last_event_at":"1970-01-01T00:16:40Z","message":"Claude needs your permission"}"#,
+            "无前驱时正文与 T8 版逐字节一致（承接零副作用）"
+        );
+        // 损坏的旧文件 → 不承接、不 panic（红线 1：错误路径静默）
+        std::fs::write(tmp.path().join("sid-cf6.json"), b"{not json").unwrap();
+        let n2 = parse_hook_stdin(
+            r#"{"session_id":"sid-cf6","hook_event_name":"Notification","message":"m"}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &n2, 2_000).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("sid-cf6.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(v.get("tool_name").is_none(), "损坏前驱不承接且不炸");
+    }
+
+    /// T1 承接⑤：清除族事件（Stop/UserPromptSubmit 等）覆盖事件文件后，承接链
+    /// 自然打断——后续真实审批 Notification 读到的前驱已不是 AUQ 进入事件
+    #[test]
+    fn carry_forward_stops_after_clear_family_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auq = parse_hook_stdin(
+            r#"{"session_id":"sid-cf7","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[]}}"#,
+        )
+        .unwrap();
+        write_event_file(tmp.path(), &auq, 1_000).unwrap();
+        // 答完 → Stop（清除族）覆盖事件文件
+        write_event_file(
+            tmp.path(),
+            &parse_hook_stdin(r#"{"session_id":"sid-cf7","hook_event_name":"Stop"}"#).unwrap(),
+            1_001,
+        )
+        .unwrap();
+        // 随后的真实审批 Notification：前驱是 Stop → 不承接（红卡保住）
+        write_event_file(
+            tmp.path(),
+            &parse_hook_stdin(
+                r#"{"session_id":"sid-cf7","hook_event_name":"Notification","message":"Claude needs your permission"}"#,
+            )
+            .unwrap(),
+            1_002,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("sid-cf7.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(v.get("tool_name").is_none(), "清除族打断承接链: {v}");
     }
 }

@@ -742,7 +742,11 @@ pub struct HookEvent {
     pub ts: i64,
     pub last_event_at: String,
     /// 事件携带的工具名（T8 问答通道：helper 写侧全事件照收；bash 兜底/旧事件文件
-    /// 缺该键 → default 空串，向后兼容）
+    /// 缺该键 → default 空串，向后兼容）。**T1 起它还是问答进入判据的主锚点**：
+    /// claude 对 AskUserQuestion 待答投递 PermissionRequest(AUQ)（实机取证携带
+    /// tool_name + 完整 tool_input）与 Notification(permission_prompt)（不带工具名），
+    /// helper 的未决问答承接窗会把 AUQ 工具名带到 Notification 那一跳
+    /// （hook_listener::with_carried_question_fields）
     #[serde(default)]
     pub tool_name: String,
     /// `tool_input` 原文 JSON 串（T8：**仅** PreToolUse ∧ tool_name==AskUserQuestion
@@ -750,6 +754,14 @@ pub struct HookEvent {
     /// AskUserQuestion 专属分支——questions 载荷随标记落 DB，端点据此出问答卡）
     #[serde(default)]
     pub tool_input: Option<String>,
+    /// 通知正文（批次丙 T1：**仅** Notification 事件由 helper 附加，4KB 前缀截断；
+    /// 其余事件/旧事件文件/bash 兜底缺该键 → None）。诊断留痕 + 兼容旧判据形态。
+    /// **实测语义边界**：claude 的 permission_prompt 对「真实审批」与
+    /// 「AskUserQuestion 待答」发出的 message **逐字相同**（均为
+    /// `Claude needs your permission`）——本字段**不参与**问答裁决（裁决锚点是
+    /// tool_name，见 [`HookEvent::tool_name`]），仅作取证/日志依据
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// T5 信号健康度：per-tool hook 通道状态（设置页「信号健康度」分区下发结构）
@@ -1767,6 +1779,265 @@ fn run_live_event_check(tool: LiveTool) {
         assert!(
             v["event"].as_str().is_some_and(|e| !e.is_empty()),
             "event 字段非空: {body}"
+        );
+    }
+}
+
+/// 批次丙 T1 实机自检（claude）：跑一次**交互式**沙箱会话驱动 AskUserQuestion，
+/// 断言真实 Notification payload 的 `message` 落盘、并记录它与真实审批的判别力。
+///
+/// 与 [`claude_hook_events_really_fire_in_real_session`] 的差异：那条走 `-p` 无头
+/// （只验管道通；审批/问答类事件在无头模式不发），本条必须**交互式 TUI**——因为
+/// 只有真实待答才发 `Notification(permission_prompt)`。故本测试是**半自动**的：
+/// 它装配沙箱 + 拉起交互式 claude + 注入一轮提示 + 轮询事件目录，最后由**人**在
+/// 弹出的问题 UI 上作答/取消（或测试超时后 taskkill 清场）。
+///
+/// **实测结论（2026-09-21，本测试的取证来源）**：claude 对 AskUserQuestion 待答的
+/// 事件序是 `PreToolUse(AUQ)` → `PermissionRequest(AUQ，带 tool_name+tool_input)`
+/// → `Notification(permission_prompt，message="Claude needs your permission")`；
+/// **真实审批**（如 Write）的序与字段完全同形，Notification.message 与前者
+/// **逐字相同**——故 message 不具判别力，判据必须落在 tool_name 上
+/// （adapter::is_question_entry_event）。完整档案：
+/// research/refs/phase2-消息注入/2026-09-21-claude-notification-message-取证.md
+///
+/// 全程沙箱（`--settings` + MAM_HOME 重定向，零接触真实 `~/.claude` 与 `~/.mam`）。
+/// 前置：claude 已安装；helper 已 debug 构建（MAM_HOME 重定向仅 debug 生效）。
+#[test]
+#[ignore = "实机验证：交互式 claude 会话驱动 AskUserQuestion，取证 Notification.message 原文（前置=debug helper + claude 已装；需人工作答）"]
+fn claude_notification_message_really_fires_in_real_session() {
+    // 前置：claude 在场（npm 全局目录补 PATH——后台/沙箱环境常缺 .cmd 垫片）
+    let npm_dir = std::env::var("USERPROFILE")
+        .map(|u| format!("{}\\AppData\\Roaming\\npm", u))
+        .unwrap_or_default();
+    let aug_path = move |cmd: &mut std::process::Command| {
+        let p = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{npm_dir};{p}"));
+    };
+    // 启动器脚本里也要用（conhost 子进程不经过 aug_path）——单独留存一份
+    let npm_dir_for_launcher = std::env::var("USERPROFILE")
+        .map(|u| format!("{}\\AppData\\Roaming\\npm", u))
+        .unwrap_or_default();
+    let spawn_cli = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        let mut bare = std::process::Command::new("claude");
+        bare.args(args).stdin(std::process::Stdio::null());
+        aug_path(&mut bare);
+        let out = bare.output();
+        if out.is_ok() {
+            return out;
+        }
+        let mut sh = std::process::Command::new("cmd");
+        sh.args(["/c", "claude"])
+            .args(args)
+            .stdin(std::process::Stdio::null());
+        aug_path(&mut sh);
+        sh.output()
+    };
+    let ver = spawn_cli(&["--version"]).expect("claude 命令不可用——本测试需实机安装");
+    assert!(ver.status.success(), "claude --version 失败");
+
+    // helper 必须已 debug 构建（MAM_HOME 重定向仅 debug 生效）
+    let exe_name = if cfg!(windows) {
+        "mam-hook-listener.exe"
+    } else {
+        "mam-hook-listener"
+    };
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let helper = target_dir.join("debug").join(exe_name);
+    assert!(
+        helper.is_file(),
+        "helper 未构建：先跑 cargo build --bin mam-hook-listener --features hook-listener \
+         （必须 debug 构建——MAM_HOME 重定向仅 debug 生效）"
+    );
+
+    // 沙箱：settings（空 matcher 收全量 Notification，便于取证）+ MAM 数据根 + 工作目录。
+    // **工作目录固定**（非 tempdir）：claude 的工作区信任门按**工程路径**记在真实
+    // `~/.claude.json`，tempdir 每次变名 → 永远过不了门。固定路径使「信任一次、
+    // 之后每次可跑」（与 codex 版的信任门处置同一先例：首次失败给出信任指引，这
+    // 正是 C-17 验收项的自动形态）
+    let cfg_home = tempfile::tempdir().unwrap();
+    let mam_home = tempfile::tempdir().unwrap();
+    let workdir = std::path::PathBuf::from(std::env::var("TEMP").unwrap_or_else(|_| ".".into()))
+        .join("mam-t1-live-notif")
+        .join("proj");
+    std::fs::create_dir_all(&workdir).expect("固定探测工作目录创建失败");
+    let settings_path = cfg_home.path().join("settings.json");
+    let fake_script = cfg_home.path().join("status-hook.sh");
+    let spec = hook_command_spec_for("claude", &fake_script, Some(&helper));
+    let mut hooks = serde_json::Map::new();
+    for ev in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+    ] {
+        hooks.insert(
+            ev.to_string(),
+            serde_json::json!([{ "matcher": "", "hooks": [{ "type": "command", "command": spec.command }] }]),
+        );
+    }
+    // Notification / PermissionRequest 用**空 matcher**（生产是 permission_prompt；
+    // 取证要收全量，判据面才完整）
+    for ev in ["Notification", "PermissionRequest"] {
+        hooks.insert(
+            ev.to_string(),
+            serde_json::json!([{ "matcher": "", "hooks": [{ "type": "command", "command": spec.command }] }]),
+        );
+    }
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks })).unwrap(),
+    )
+    .unwrap();
+
+    // 拉起交互式 TUI（**不能**用 `-p`：实测无头模式根本不提供 AskUserQuestion 工具）。
+    //
+    // **启动形态的两个实机坑（本测试的教训）**：
+    // ① Rust `Command::args` 会把整条命令行当**单个参数**加引号 →
+    //    `cmd /k "<整条命令>"` 被当字面 token，claude 收不到参数。故用 `.cmd` 启动器
+    //    把引号面收敛到一个路径（`cmd /k <launcher>`）；
+    // ② Rust 直接 spawn `conhost.exe` 会**附着到测试进程自己的控制台**（TUI 转义
+    //    序列泻进调用方终端）且 claude 拿不到干净 TTY。故经 PowerShell
+    //    `Start-Process` 拉起（它创建独立控制台窗口，是探测套件验证过的路径）。
+    //
+    // 该 PowerShell 进程立即返回（-PassThru 仅用于记录 PID），claude 在独立控制台
+    // 里跑；清场按「窗口标题/命令行匹配本测试沙箱路径」精确杀，不碰其他会话。
+    let prompt =
+        "Use the AskUserQuestion tool to ask which fruit I prefer, one question, two options.";
+    let launcher = cfg_home.path().join("launch.cmd");
+    // 启动器内**必须**先补 PATH（npm 全局目录放前面）：后台/cargo 环境常缺
+    // `%USERPROFILE%\AppData\Roaming\npm`，`.cmd` 垫片解析不到 → claude 静默起不来
+    std::fs::write(
+        &launcher,
+        format!(
+            "@echo off\r\nset \"PATH={npm_dir_for_launcher};%PATH%\"\r\nclaude \"{prompt}\" --settings \"{}\"\r\n",
+            settings_path.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let ps = format!(
+        "$env:MAM_HOME='{}'; Start-Process -FilePath 'conhost.exe' -ArgumentList @('cmd.exe','/k','{}') -WorkingDirectory '{}'",
+        mam_home.path().to_string_lossy(),
+        launcher.to_string_lossy(),
+        workdir.to_string_lossy(),
+    );
+    let ps_out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("powershell 不可用（本测试需 Windows + PowerShell 拉起独立控制台）");
+    assert!(
+        ps_out.status.success(),
+        "conhost 拉起失败：{}",
+        String::from_utf8_lossy(&ps_out.stderr)
+    );
+
+    // 轮询事件目录 ≤240s：等 Notification 落盘（claude 冷启动 + 模型回合 ≈ 30s；
+    // 预算留足慢模型）。命中即停——问题 UI 保持 pending，不需要人工作答。
+    //
+    // **记录所有观察到的版本**（不只看第一条）：本沙箱的 claude 会**同时**读沙箱
+    // `--settings` 与用户真实 `~/.claude/settings.json`，后者若也注册了 MAM 钩子，
+    // 就会出现**两个 helper 写同一个事件文件**（生产 helper 是 release 语义、无视
+    // MAM_HOME，但它与沙箱 helper 可能落到不同目录；同目录时后写者胜）。故本测试
+    // 对事件文件的**任一版本**做断言，而非假定唯一写者。
+    let events_dir = mam_home.path().join(".mam").join("events");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    let mut seen: Vec<String> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(entries) = std::fs::read_dir(&events_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "json") {
+                    if let Ok(body) = std::fs::read_to_string(&p) {
+                        if body.contains("\"event\":\"Notification\"") && !seen.contains(&body) {
+                            seen.push(body);
+                        }
+                    }
+                }
+            }
+        }
+        // 停条件：Notification 已落盘即可停（承接版归属见文末说明，不作断言）
+        if !seen.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // 清场（八条铁律 6）：只杀本轮沙箱的 claude/cmd——按**命令行含本次 cfg 目录**
+    // 精确匹配（每个测试用例的 tempdir 唯一），绝不碰用户自己的终端/会话
+    let cfg_dir = cfg_home.path().to_string_lossy().replace('/', "\\");
+    let kill_ps = format!(
+        "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object {{ $_.CommandLine -like '*{cfg_dir}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}; \
+         Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object {{ $_.CommandLine -like '*{cfg_dir}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &kill_ps,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let body = seen
+        .iter()
+        .find(|b| b.contains("\"tool_name\":\"AskUserQuestion\""))
+        .or_else(|| seen.first())
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "240s 内无 Notification 事件落盘——交互式会话未产生待答。\
+                 排查：① conhost/cmd 未能拉起 claude（本测试需真实控制台）；\
+                 ② claude 工作区信任门拦住了首轮（沙箱工程目录首次进入会弹信任提示，\
+                 需先在真实 ~/.claude.json 的 projects 段预信任该目录）；\
+                 ③ claude 版本无 Notification 钩子；④ 模型太慢（加大超时预算）"
+            )
+        });
+    let v: serde_json::Value = serde_json::from_str(&body).expect("事件文件是合法 JSON");
+    assert_eq!(v["event"], "Notification");
+    // 实测锚点：message 原文（实机取证锚点；若 claude 改文案，此断言失败即提示
+    // 需复核判据面——**判据本身不依赖该文案**，见测试 doc）
+    assert_eq!(
+        v["message"], "Claude needs your permission",
+        "Notification.message 原文（实机取证锚点）: {body}"
+    );
+    // 判别力断言：message 不含工具名 → 单凭 message 无法判问答（这正是 T1 把判据
+    // 落在 tool_name 上的实测依据）
+    assert!(
+        !v["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains(crate::monitor::hook_listener::ASK_USER_QUESTION_TOOL),
+        "message 不得含工具名（否则可用它判问答；实机已证不含）: {body}"
+    );
+    // **T1 承接面**：本测试**不断言**承接结果——原因（实机发现的真实约束，属 T2
+    // 范围）：用户的真实 `~/.claude/settings.json` 也注册了 MAM 钩子，claude 会把
+    // `--settings` 与真实 settings **合并**触发，于是**两个 helper 写同一个事件文件**
+    // （生产 helper 若为 debug 构建会同样认 MAM_HOME → 落同一沙箱目录），后写者胜。
+    // 部署的 helper 滞后于本源码时，承接版会被覆盖成非承接版 → 断言必然 flaky。
+    //
+    // 承接的确定性验证在别处，且更可靠：
+    // ① 单元/bin 测试（hook_listener::tests::notification_carries_forward_*、
+    //    bin 的 run_carries_forward_pending_question_fields_into_notification）；
+    // ② 取证档案里的**真实 payload 回放**（stdin-raw 提取原文 → 重放 → 承接生效）。
+    // 此处只把观察到的版本全部打印出来，作为部署状态的诊断依据（若全部版本都缺
+    // tool_name，说明生产 helper 未同步，正是 T2 要落实的事）。
+    eprintln!(
+        "[T1] 观察到的 Notification 事件版本数={}，版本列表：",
+        seen.len()
+    );
+    for b in &seen {
+        eprintln!("[T1]   {b}");
+    }
+    if !seen.iter().any(|b| b.contains("AskUserQuestion")) {
+        eprintln!(
+            "[T1] 警告：所有版本都未承接 AUQ 工具名——请确认生产 helper \
+             （~/.mam/bin/mam-hook-listener.exe）已同步到含承接窗的版本（T2 职责）"
         );
     }
 }
