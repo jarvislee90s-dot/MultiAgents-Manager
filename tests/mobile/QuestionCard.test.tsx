@@ -256,7 +256,8 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(container.textContent).toBeTruthy();
   });
 
-  // 批次丙 T3：工具键序未实测（后端 answerable=false，如 codex）→ 只读卡
+  // 批次丙 T3：工具键序未实测（后端 answerable=false；codex 已于 2026-09-21 实机
+  // 补测升格，此处用通用夹具覆盖只读档本身）→ 只读卡
   it("answerable=false（工具键序未验）：只读卡渲染题干+选项文本，零注入按钮", async () => {
     installFetch();
     routes.question = singleQuestionInfo({ answerable: false });

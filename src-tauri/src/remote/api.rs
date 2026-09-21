@@ -1958,6 +1958,7 @@ const QUESTION_SCAN_TAIL_LIMIT: usize = 40;
 /// 该工具的问答键序是否未验（只读档，批次丙 T3）：未验工具的任何应答动作都拒绝，
 /// 端点据此回 409 `tool_readonly`（前端渲染只读卡 + 引导终端作答），与参数错误
 /// （400 bad_index）分诊开。判据单一事实源在 `inject::question::question_key_profile`
+/// （claude/opencode/kimi/codex 四家均已实测升格；zcode/dsh/workbuddy/openclaw 未验）
 fn question_profile_is_read_only(tool: &str) -> bool {
     crate::inject::question::question_key_profile(tool)
         == crate::inject::question::QuestionKeyProfile::ReadOnly
@@ -2094,7 +2095,8 @@ pub async fn session_question(
         None => (Vec::new(), "", String::new()),
     };
     // T3：工具键序档（前端据此决定渲染可作答按钮还是只读卡）——
-    // `answerable=false` 时前端渲染只读卡 + 引导终端作答（codex 等未实测工具）
+    // `answerable=false` 时前端渲染只读卡 + 引导终端作答（zcode/dsh 等未实测工具；
+    // codex 已于 2026-09-21 实机补测升格为可作答）
     let answerable = !tool_id.is_empty() && !question_profile_is_read_only(&tool_id);
     (
         StatusCode::OK,
@@ -2227,7 +2229,7 @@ pub async fn session_question_answer(
             // - no_question（409）：会话不在快照 / 审批标记隔离 / 双通道均未命中
             //   ——统一 409（不给存在性预言机；审批标记在场时本就不得出问答键）
             // - multi_questions（409）：多问题只读（探测未测面不出手）
-            // - tool_readonly（409，T3）：该工具问答键序未实测（codex 等）→ 只读卡
+            // - tool_readonly（409，T3）：该工具问答键序未实测（zcode/dsh 等）→ 只读卡
             // - bad_index（400）：select/toggle 序号越界 / submit 用在单选题
             let status = if code == "bad_index" {
                 StatusCode::BAD_REQUEST

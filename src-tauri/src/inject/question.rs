@@ -193,20 +193,29 @@ pub fn answer_key_sequence(
 /// | 工具 | 键序证据 | 状态 |
 /// |---|---|---|
 /// | claude | 2026-09-21 按键语义探测 K1–K11（本机实机，三重证据） | 全支持（单/多选 + cancel） |
-/// | opencode | 2026-09-20 跨工具矩阵 §2.2（本机实机 ×2：数字单键即选即交；↓+Enter） | 单选 select/toggle/cancel；多选提交**未测** |
-/// | kimi | 同上 §2.3（本机实机 ×2：数字 → Review 屏 → 数字确认的**两段式**） | 单选 select 两段式；多选未测 |
-/// | codex | 同上 §2.1：**实机 0 样本**（relay 403 拦截 4 次），键位仅源码级（B 级） | **不出键**（只读卡，等实机复验） |
+/// | opencode | 2026-09-20 跨工具矩阵 §2.2（本机实机 ×2：数字单键即选即交；↓+Enter） | 单选 select；多选/取消**未测** → 拒 |
+/// | kimi | 同上 §2.3（本机实机 ×2：数字 → Review 屏 → 数字确认的**两段式**） | 单选 select 两段式；多选/取消未测 → 拒 |
+/// | codex | **2026-09-21 实机补测**（T3 条件项，见下） | 单选 select 数字即选即交；多选/取消 → 拒 |
 ///
-/// codex 的源码级键位（`bottom_pane/request_user_input/mod.rs` @ rust-v0.155.1）：
-/// 数字 1–9 直选即提交 / ↑↓+Enter 提交 / Tab 备注 / Esc 取消——**与 claude 同形**，
-/// 但我们没在本机验证过（relay 403 是用户侧接入问题，本批未触碰 auth 配置）。
-/// 按「结论不得超过证据」，codex 走只读卡；用户侧修复接入后按快路径补 1 次实测即可
-/// 升格（届时在 `question_key_profile` 里加一行）。
+/// **codex 2026-09-21 实机补测（矩阵遗留条件项已补齐）**：档案
+/// `research/refs/phase2-消息注入/2026-09-21-codex-request_user_input-键位实机补测.md`
+/// （conhost + codex 0.155.1 + 三重证据）。定案：
+///
+/// - **数字单键即选即交**（'2'/'1' 三取样，注入→`function_call_output.answers` 落盘
+///   ≈277–363ms）——与 claude K1 同形，故并入 [`QuestionKeyProfile::SingleDigitSubmit`]；
+/// - ↓+Enter 亦可（移动高亮 + 提交）；
+/// - 多选形态本轮未触发（弹窗均为单选）→ toggle/submit 拒绝（未验不出键）；
+/// - 确认屏（未答完提交时弹）**数字无效**、只认 Enter/Esc——与源码级记载背离，
+///   以实测为准（本档不出手该屏，仅记录）。
+///
+/// **cancel 不代按**：codex 的 Esc 是「中断整个回合」（`function_call_output` 是纯
+/// 字符串 "aborted by user…" + `turn_aborted` 事件，**不是** claude 那种 is_error
+/// 拒答回执）——语义破坏性远大于 claude K3（会打断模型正在做的事），故不出手。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionKeyProfile {
     /// 全键序已验：单选直选、多选 toggle+三段式提交、esc 取消
     ClaudeFull,
-    /// 单选已验（数字即选即交）；多选/提交未测 → 提交动作拒绝
+    /// 单选已验（数字即选即交）；多选/提交/取消未测 → 这些动作拒绝
     SingleDigitSubmit,
     /// 单选两段式（数字选中 → Review 屏 → 数字确认）；多选未测
     TwoPhaseSelect,
@@ -223,7 +232,9 @@ pub fn question_key_profile(tool: &str) -> QuestionKeyProfile {
         // 矩阵 §2.3 实测：数字选中 → 自动进 "Review your answer before submit"
         // 确认屏（[1] Submit / [2] Cancel）→ 数字 '1' 提交。**两段式**
         "kimi" => QuestionKeyProfile::TwoPhaseSelect,
-        // codex：实机 0 样本（源码级键位与 claude 同形，但未验）→ 只读
+        // T3 实机补测（2026-09-21）：数字单键即选即交（三取样），与 opencode 同档；
+        // cancel 因 Esc=中断回合而拒（见上方表格注释）
+        "codex" => QuestionKeyProfile::SingleDigitSubmit,
         _ => QuestionKeyProfile::ReadOnly,
     }
 }
@@ -491,7 +502,12 @@ mod tests {
             question_key_profile("kimi"),
             QuestionKeyProfile::TwoPhaseSelect
         );
-        for unknown in ["codex", "zcode", "dsh", "workbuddy", "openclaw", ""] {
+        // T3 实机补测升格：codex 由只读 → SingleDigitSubmit（数字即选即交三取样）
+        assert_eq!(
+            question_key_profile("codex"),
+            QuestionKeyProfile::SingleDigitSubmit
+        );
+        for unknown in ["zcode", "dsh", "workbuddy", "openclaw", ""] {
             assert_eq!(
                 question_key_profile(unknown),
                 QuestionKeyProfile::ReadOnly,
@@ -562,21 +578,32 @@ mod tests {
         assert!(answer_key_sequence_for("kimi", AnswerAction::Cancel, None, &q).is_err());
     }
 
-    /// T3 · codex 档（实机 0 样本，仅源码级键位）→ **任何动作都只读**
-    ///（结论不得超过证据；用户侧修复 relay 接入后按快路径补测即可升格）
+    /// T3 · codex 档（2026-09-21 实机补测后）→ 单选 select 数字即选即交；
+    /// 多选（toggle/submit）与 cancel 仍拒（未验 / Esc=中断回合语义破坏性）
     #[test]
-    fn codex_profile_is_read_only() {
+    fn codex_profile_digit_select_only() {
         let q = single();
-        for action in [
-            AnswerAction::Select,
-            AnswerAction::Toggle,
-            AnswerAction::Submit,
-            AnswerAction::Cancel,
-        ] {
-            assert!(
-                answer_key_sequence_for("codex", action, Some(0), &q).is_err(),
-                "codex 问答键序未实测 → {action:?} 必须拒绝（只读卡）"
-            );
-        }
+        // 实机三取样：数字单键即选即交
+        assert_eq!(
+            answer_key_sequence_for("codex", AnswerAction::Select, Some(1), &q).unwrap(),
+            vec!["2"],
+            "数字单键即选即交（实机补测三取样）"
+        );
+        assert_eq!(
+            answer_key_sequence_for("codex", AnswerAction::Select, Some(0), &q).unwrap(),
+            vec!["1"]
+        );
+        // 越界/缺序号拒
+        assert!(answer_key_sequence_for("codex", AnswerAction::Select, Some(9), &q).is_err());
+        assert!(answer_key_sequence_for("codex", AnswerAction::Select, None, &q).is_err());
+        // 多选形态未验 → 拒
+        assert!(answer_key_sequence_for("codex", AnswerAction::Toggle, Some(0), &multi()).is_err());
+        assert!(answer_key_sequence_for("codex", AnswerAction::Submit, None, &multi()).is_err());
+        // cancel 拒：Esc 在 codex 是**中断整个回合**（实录 "aborted by user…" +
+        // turn_aborted），非 claude 的 is_error 拒答——不出手
+        assert!(
+            answer_key_sequence_for("codex", AnswerAction::Cancel, None, &q).is_err(),
+            "Esc=中断回合，语义破坏性 → 不代按"
+        );
     }
 }
