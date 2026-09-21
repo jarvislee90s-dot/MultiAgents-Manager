@@ -51,7 +51,10 @@ pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
 /// action 词表（W5）：send|queue|flush|jump|retract|approve|reject|fail|key|open
 /// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。批次乙 T8 追加
 /// `answer`（AskUserQuestion 问答应答，select/toggle/submit/cancel 四动作统一
-/// 记 answer，摘要区分见 question::AnswerAction::audit_label）。
+/// 记 answer，摘要区分见 question::AnswerAction::audit_label）。批次丙追加
+/// `mode`（T6 模式切换，摘要=「切换模式至 <target>」）。**T9 打断式插队不新增
+/// 词**：Esc 中断是 `jump` 动作的**内部分步**（先中断再投递），审计仍记 `jump`
+/// ——用户视角是一个动作（见 queue::try_flush_with 的 interrupt_first 分支）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn audit_write(
     conn: &rusqlite::Connection,

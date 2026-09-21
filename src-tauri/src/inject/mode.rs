@@ -38,6 +38,18 @@
 //! 不做各工具像素级复刻；不做自定义主题。macOS 屏读缺失 → 盲切 + 人工核对提示
 //! （红线 4：不假装成功）。
 
+/// 该工具是否支持**打断式插队**（批次丙 T9：运行中会话先 Esc 中断再投递）。
+///
+/// **只有 claude**：K2 实机取证（探测档案 2026-09-21-claude-askuserquestion）——
+/// Esc 落入 busy 回合 = 中断该回合（"Interrupted · What should Claude do instead?"），
+/// 这正是插队想要的语义。
+///
+/// 其他工具**未实测**（codex 的 Esc 实测同为「中断整个回合」，但其插队路径未经
+/// 端到端验证；opencode/kimi 未测）→ 一律 false（结论不得超过证据；未验不出手）。
+pub fn supports_interrupt(tool: &str) -> bool {
+    matches!(tool, "claude")
+}
+
 /// MAM 统一模式档（5 值，对齐 happy 8 值收敛——见模块文档表）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MamMode {

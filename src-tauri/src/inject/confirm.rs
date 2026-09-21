@@ -134,6 +134,11 @@ const DIRECT_CONFIRM_FAIL_MACOS_SWALLOWED: &str =
 const SCREEN_PROBE_CHARS: usize = 16;
 /// 插队等待占用排空上限（毫秒，§8.1）：busy TUI 消费写入缓冲的宽限
 const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
+
+/// T9 打断式插队：Esc 中断后等待输入行排空的预算（ms）。中断是异步生效的（模型
+/// 收尾 + TUI 重绘），预算比普通插队的 2s 宽一档；超时即继续投递（best-effort，
+/// 正文注入另有 backpressure 兜底）
+pub const INTERRUPT_DRAIN_TIMEOUT_MS: u64 = 3_000;
 /// 排空超时回执（对齐 PARTIAL_WARN 防重纪律，质量评审 Minor 3）：目标可能仍在
 /// 消费，盲目重试会叠加正文——先引导人工检查终端
 const DELIVERY_TIMEOUT_MSG: &str = "投递超时（目标可能仍在消费，重试前请检查终端）";

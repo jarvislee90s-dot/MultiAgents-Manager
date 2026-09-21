@@ -127,6 +127,56 @@ pub(crate) fn try_flush_with(
     let spec = crate::inject::families::family_for(&item.agent_type)
         .unwrap_or(crate::inject::families::FALLBACK_SPEC);
     let confirm_timeout = confirm_timeout_override.unwrap_or(spec.confirm_timeout_ms);
+    // ===== 批次丙 T9：打断式插队（仅 claude，运行中会话）=====
+    //
+    // 问题 10：busy 时「立即发送」只是进入 TUI 内部队列（仍排队中），终端需按 Esc
+    // 中断当前回合新消息才进。
+    //
+    // **实机依据（K2，探测档案 2026-09-21-claude-askuserquestion）：Esc 落入模型
+    // busy 回合 = 中断该回合**（"Interrupted · What should Claude do instead?"，
+    // 已提交的答案保留）。这正是本任务**想要**的行为（K2 的「禁止数字后补 Esc」
+    // 是问答作答场景的禁令，与本处语义相反）。
+    //
+    // 实现：运行中（`is_running`）+ jump + 该工具支持打断（当前仅 claude——其他
+    // 工具的 Esc 语义未实测）→ **先注入 Esc 中断**，等输入行排空（回合终止、输入行
+    // 可写），再注入正文。这是「Esc 优先」序：先中断再投递，消息不会落进将被丢弃的
+    // 旧回合队列。
+    //
+    // **降级（best-effort）**：Esc 注入失败/排空超时仍继续投递正文——不因为中断
+    // 不成功就丢弃用户消息（正文注入另有 backpressure 与确认层兜底）。
+    let interrupt_first = jump
+        && is_running(&session.status)
+        && crate::inject::mode::supports_interrupt(&item.agent_type);
+    if interrupt_first {
+        match st
+            .injector
+            .locate_and_send_key_spec(session.pid, "esc", &spec)
+        {
+            Ok(()) => {
+                // 中断是异步生效的：等输入缓冲排空（回合收尾 + 输入行可写）。
+                // 超时/查询失败都继续（best-effort，不阻塞用户消息）
+                #[cfg(windows)]
+                {
+                    match crate::inject::windows_console::wait_input_drained(
+                        session.pid,
+                        crate::inject::confirm::INTERRUPT_DRAIN_TIMEOUT_MS,
+                    ) {
+                        Ok(true) => log::debug!("T9 Esc 中断后输入行已排空（pid={}）", session.pid),
+                        Ok(false) => {
+                            log::debug!("T9 Esc 中断后排空超时（pid={}），继续投递", session.pid)
+                        }
+                        Err(e) => {
+                            log::debug!("T9 排空查询失败（pid={}: {e}），继续投递", session.pid)
+                        }
+                    }
+                }
+            }
+            Err(e) => log::warn!(
+                "T9 Esc 中断注入失败（pid={}: {e}），继续投递正文",
+                session.pid
+            ),
+        }
+    }
     let receipt = match st
         .injector
         .locate_and_inject_spec(session.pid, &item.content, &spec)
@@ -602,27 +652,39 @@ mod tests {
 
     // ==== 拆分内核驱动（Fake session_source + FakeInjector + 内存 DB，零接触真实 ~/.mam） ====
 
-    /// 注入器假体：记录 locate_and_inject 调用（pid, text）；fail=Some 时恒 Err
+    /// 注入器假体：记录 locate_and_inject 调用（pid, text）与**按键调用**（T9 序
+    /// 判定用）；fail=Some 时注入恒 Err；key_fail=Some 时按键恒 Err
     struct FakeInjector {
         calls: std::sync::Mutex<Vec<(u32, String)>>,
+        /// 按键调用序（T9 断言「Esc 先于正文」——两者共用同一日志序）
+        ops: std::sync::Mutex<Vec<String>>,
         fail: Option<&'static str>,
+        key_fail: Option<&'static str>,
     }
 
     impl FakeInjector {
         fn ok() -> std::sync::Arc<Self> {
             std::sync::Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                ops: std::sync::Mutex::new(Vec::new()),
                 fail: None,
+                key_fail: None,
             })
         }
         fn failing(reason: &'static str) -> std::sync::Arc<Self> {
             std::sync::Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                ops: std::sync::Mutex::new(Vec::new()),
                 fail: Some(reason),
+                key_fail: None,
             })
         }
         fn recorded(&self) -> Vec<(u32, String)> {
             self.calls.lock().unwrap().clone()
+        }
+        /// 操作序（"key:esc" / "text:<正文>"）——T9 断言 Esc 先于正文
+        fn ops(&self) -> Vec<String> {
+            self.ops.lock().unwrap().clone()
         }
     }
 
@@ -632,13 +694,18 @@ mod tests {
         }
         fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
             self.calls.lock().unwrap().push((pid, text.to_string()));
+            self.ops.lock().unwrap().push(format!("text:{text}"));
             match self.fail {
                 Some(e) => Err(e.to_string()),
                 None => Ok(()),
             }
         }
-        fn locate_and_send_key(&self, _pid: u32, _key: &str) -> Result<(), String> {
-            Ok(())
+        fn locate_and_send_key(&self, _pid: u32, key: &str) -> Result<(), String> {
+            self.ops.lock().unwrap().push(format!("key:{key}"));
+            match self.key_fail {
+                Some(e) => Err(e.to_string()),
+                None => Ok(()),
+            }
         }
     }
 
@@ -1391,5 +1458,96 @@ mod tests {
                 .is_empty(),
             "Suspended 不落账不写审计（红·中断非终态）"
         );
+    }
+
+    // ==== 批次丙 T9：打断式插队（Esc 优先序 + 降级面） ====
+
+    /// T9 主路径：**运行中** + jump + claude → Esc 先注入、正文后注入（序断言）
+    #[test]
+    fn interrupt_jump_sends_esc_before_text_when_running() {
+        let inj = FakeInjector::ok();
+        let st = state_with(
+            vec![sess("s-int", SessionStatus::Processing, 4242)],
+            inj.clone(),
+        );
+        st.store.with(|c| enq(c, "s-int", "插队消息"));
+        // jump=true 越过 is_running 复核（既有语义）
+        assert_eq!(flush_one(&st, "s-int", true), FlushOutcome::Sent);
+        let ops = inj.ops();
+        assert_eq!(ops.len(), 2, "应有两次操作：Esc 键 + 正文注入");
+        assert_eq!(ops[0], "key:esc", "**Esc 必须先于正文**（先中断再投递）");
+        assert!(ops[1].starts_with("text:"), "正文注入在后: {ops:?}");
+        assert!(ops[1].contains("插队消息"));
+    }
+
+    /// T9 边界①：**空闲态** + jump → 不注入 Esc（无需打断，避免误中断空闲会话）
+    #[test]
+    fn interrupt_jump_skips_esc_when_idle() {
+        let inj = FakeInjector::ok();
+        let st = state_with(vec![sess("s-idle", SessionStatus::Idle, 4243)], inj.clone());
+        st.store.with(|c| enq(c, "s-idle", "普通消息"));
+        assert_eq!(flush_one(&st, "s-idle", true), FlushOutcome::Sent);
+        let ops = inj.ops();
+        assert_eq!(ops.len(), 1, "空闲态不应有 Esc: {ops:?}");
+        assert!(ops[0].starts_with("text:"));
+    }
+
+    /// T9 边界②：**非 claude** 工具 + 运行中 + jump → 不注入 Esc（Esc 语义未实测，
+    /// 未验不出手；其他工具维持既有插队语义）
+    #[test]
+    fn interrupt_jump_is_claude_only() {
+        for tool in ["opencode", "kimi", "codex"] {
+            let inj = FakeInjector::ok();
+            let mut s = sess("s-other", SessionStatus::Processing, 4244);
+            s.agent_type = match tool {
+                "opencode" => AgentType::OpenCode,
+                "kimi" => AgentType::Kimi,
+                _ => AgentType::Codex,
+            };
+            let st = state_with(vec![s], inj.clone());
+            st.store.with(|c| enq(c, "s-other", "消息"));
+            let _ = flush_one(&st, "s-other", true);
+            let ops = inj.ops();
+            assert!(
+                ops.iter().all(|o| !o.starts_with("key:")),
+                "{tool} 的 Esc 语义未实测 → 不得注入 Esc: {ops:?}"
+            );
+        }
+    }
+
+    /// T9 边界③：**非 jump**（普通 flush）+ 运行中 → 不注入 Esc（既有语义：普通
+    /// flush 遇运行中走 Deferred，本测用 jump=false 且运行中验证 Deferred 保持）
+    #[test]
+    fn plain_flush_never_interrupts() {
+        let inj = FakeInjector::ok();
+        let st = state_with(
+            vec![sess("s-run", SessionStatus::Processing, 4245)],
+            inj.clone(),
+        );
+        st.store.with(|c| enq(c, "s-run", "消息"));
+        assert_eq!(flush_one(&st, "s-run", false), FlushOutcome::Deferred);
+        assert!(inj.ops().is_empty(), "Deferred 不得有任何注入（含 Esc）");
+    }
+
+    /// T9 降级：**Esc 注入失败**仍继续投递正文（best-effort——不因中断失败丢弃消息）
+    #[test]
+    fn interrupt_jump_continues_when_esc_fails() {
+        let inj = std::sync::Arc::new(FakeInjector {
+            calls: std::sync::Mutex::new(Vec::new()),
+            ops: std::sync::Mutex::new(Vec::new()),
+            fail: None,
+            key_fail: Some("Esc 注入失败（假体）"),
+        });
+        let st = state_with(
+            vec![sess("s-esc", SessionStatus::Processing, 4246)],
+            inj.clone(),
+        );
+        st.store.with(|c| enq(c, "s-esc", "仍要投递的消息"));
+        let outcome = flush_one(&st, "s-esc", true);
+        assert_eq!(outcome, FlushOutcome::Sent, "Esc 失败不阻断正文投递");
+        let ops = inj.ops();
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert_eq!(ops[0], "key:esc", "Esc 尝试在前（失败）");
+        assert!(ops[1].contains("仍要投递的消息"), "正文照常投递");
     }
 }
