@@ -1853,6 +1853,14 @@ pub async fn session_approve(
 /// 回答前的往返且远小于 read_recent_lines 的 512KB 预算
 const QUESTION_SCAN_TAIL_LIMIT: usize = 40;
 
+/// 该工具的问答键序是否未验（只读档，批次丙 T3）：未验工具的任何应答动作都拒绝，
+/// 端点据此回 409 `tool_readonly`（前端渲染只读卡 + 引导终端作答），与参数错误
+/// （400 bad_index）分诊开。判据单一事实源在 `inject::question::question_key_profile`
+fn question_profile_is_read_only(tool: &str) -> bool {
+    crate::inject::question::question_key_profile(tool)
+        == crate::inject::question::QuestionKeyProfile::ReadOnly
+}
+
 /// 问答扫描产物（可用时载荷）
 struct QuestionScanHit {
     questions: Vec<crate::inject::question::Question>,
@@ -1898,12 +1906,30 @@ fn question_scan_sync(
         }
         // 标记在场但 payload 缺失/不可解析（helper 旧版 / 64KB 截断丢弃）→ 落通道 B
     }
-    // 通道 B（兜底）：会话消息尾部找最后一条 AskUserQuestion tool-call。
+    // 通道 B（兜底）：会话消息尾部找最后一条**问答形态** tool-call。
+    //
+    // **判据从工具名改为 args 形态（批次丙 T3）**：原实现按
+    // `tool_name == "AskUserQuestion"` 精确匹配——claude 独有。实测（2026-09-21
+    // 问卷交互跨工具矩阵 research/refs/phase2-消息注入/2026-09-20-问卷交互跨工具
+    // 矩阵.md）：codex 的 `request_user_input`、opencode 的 `question` **工具名不同
+    // 但 args 形态相同**——顶层 `questions[]` 且元素含 question+options[]
+    //（codex rollout：function_call.arguments 字符串，09:30:45 pending 即落盘；
+    // opencode SQLite part：state.input 同形）。故判据 = 「args 可被
+    // `parse_questions` 解析」，工具名只作日志线索（形态判据天然接住三家，也接住
+    // claude 未来的改名）。
+    //
+    // 风险边界（如实申报）：形态判据**只看结构**——任何工具若恰好也带
+    // `{"questions":[{question,options[]}]}` 形状的入参都会被判为问答。这是刻意的
+    // 取舍：① 该形态在本机四家矩阵里是问答工具独有的（无已知碰撞）；② 误判后果
+    // 是「出一张只读问答卡」，而漏判后果是「JSON 裸奔、用户无法远程作答」——前者
+    // 轻于后者。若后续出现碰撞，收窄点在 `parse_questions` 的结构要求上。
     let page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()?;
     let msgs = &page.messages;
     let last = msgs.iter().rposition(|m| {
         m.kind == "tool-call"
-            && m.tool_name.as_deref() == Some(crate::monitor::hook_listener::ASK_USER_QUESTION_TOOL)
+            && m.tool_args
+                .as_deref()
+                .is_some_and(|a| crate::inject::question::parse_questions(a).is_some())
     })?;
     // 答完判据（可行口径，注释申报）：tool-call 之后**任何** tool-result 在场即视为
     // 已答（AUQ 的 tool_result 无论正常作答/自由文本/Esc 拒绝都会落盘——探测档案 §3
@@ -1914,6 +1940,11 @@ fn question_scan_sync(
     if msgs[last + 1..].iter().any(|m| m.kind == "tool-result") {
         return None;
     }
+    // 形态判据（工具名只作日志线索——codex/openclaw 等改名不影响接住）
+    log::debug!(
+        "问答通道 B 形态命中: tool={:?}（工具名不参与判据）",
+        msgs[last].tool_name
+    );
     let qs = crate::inject::question::parse_questions(msgs[last].tool_args.as_deref()?)?;
     Some((
         session,
@@ -1952,15 +1983,23 @@ pub async fn session_question(
                 .into_response();
         }
     };
-    let (questions, source) = match scan {
-        Some((_, hit)) => (hit.questions, hit.source),
-        None => (Vec::new(), ""),
+    let (questions, source, tool_id) = match scan {
+        Some((session, hit)) => (
+            hit.questions,
+            hit.source,
+            session.agent_type.tool_id().to_string(),
+        ),
+        None => (Vec::new(), "", String::new()),
     };
+    // T3：工具键序档（前端据此决定渲染可作答按钮还是只读卡）——
+    // `answerable=false` 时前端渲染只读卡 + 引导终端作答（codex 等未实测工具）
+    let answerable = !tool_id.is_empty() && !question_profile_is_read_only(&tool_id);
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
             "available": !questions.is_empty(),
+            "answerable": answerable,
             "questions": questions
                 .iter()
                 .map(|q| serde_json::json!({
@@ -2051,8 +2090,19 @@ pub async fn session_question_answer(
                 options: Vec::new(),
             }
         });
-        let seq = crate::inject::question::answer_key_sequence(action, req.index, &q)
-            .map_err(|_| "bad_index")?;
+        // T3：按**会话工具**分发键序（claude 全键序 / opencode·kimi 单选已验 /
+        // codex 等未验工具只读——「未验不出键」，见 question_key_profile 的表）
+        let tool_id = session.agent_type.tool_id();
+        let seq = crate::inject::question::answer_key_sequence_for(tool_id, action, req.index, &q)
+            .map_err(|e| {
+                // 未验工具的只读拒绝走 multi_questions 之外的码：前端按 409 只读卡兜底
+                log::debug!("问答键序不可用（{tool_id}）: {e}");
+                if question_profile_is_read_only(tool_id) {
+                    "tool_readonly"
+                } else {
+                    "bad_index"
+                }
+            })?;
         Ok((session, seq))
     })
     .await
@@ -2075,6 +2125,7 @@ pub async fn session_question_answer(
             // - no_question（409）：会话不在快照 / 审批标记隔离 / 双通道均未命中
             //   ——统一 409（不给存在性预言机；审批标记在场时本就不得出问答键）
             // - multi_questions（409）：多问题只读（探测未测面不出手）
+            // - tool_readonly（409，T3）：该工具问答键序未实测（codex 等）→ 只读卡
             // - bad_index（400）：select/toggle 序号越界 / submit 用在单选题
             let status = if code == "bad_index" {
                 StatusCode::BAD_REQUEST

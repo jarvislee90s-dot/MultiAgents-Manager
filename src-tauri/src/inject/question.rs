@@ -147,6 +147,9 @@ fn digit_key(index: usize) -> Option<String> {
 /// 应答动作 → 按键序列（探测定案的纯函数化；键名走 `locate_and_send_key(_spec)`
 /// 键域：单字符数字 / "enter" / "esc" / "down"——"down" 按族分发为 A 族 VT 序列
 /// 或 B 族 VK 形态，探测 K10 实证 VT 形态对 claude 生效）。
+///
+/// **本函数是 claude 形态**（批次乙 T8 探测定案，K1–K11 实机取证）。跨工具序列见
+/// [`answer_key_sequence_for`]——它按会话工具分发，未验工具降级为只读。
 /// - Select/Toggle：`index` 越界（≥ 选项数）或 ≥9 → Err；
 /// - Submit：仅多选合法（单选点数字即提交，无独立提交步）；序列 = down ×(选项数+1)
 ///   （跨过 TUI 自动追加的 "Type something." 行到 Submit 行，探测 K10）→ enter 进
@@ -181,6 +184,100 @@ pub fn answer_key_sequence(
             Ok(seq)
         }
         AnswerAction::Cancel => Ok(vec!["esc".to_string()]),
+    }
+}
+
+/// 问答注入键序的**工具支持面**（批次丙 T3）：哪些工具已有实机取证的键序、哪些
+/// 只能只读展示。**未验不出键**（探测纪律：结论不得超过证据）。
+///
+/// | 工具 | 键序证据 | 状态 |
+/// |---|---|---|
+/// | claude | 2026-09-21 按键语义探测 K1–K11（本机实机，三重证据） | 全支持（单/多选 + cancel） |
+/// | opencode | 2026-09-20 跨工具矩阵 §2.2（本机实机 ×2：数字单键即选即交；↓+Enter） | 单选 select/toggle/cancel；多选提交**未测** |
+/// | kimi | 同上 §2.3（本机实机 ×2：数字 → Review 屏 → 数字确认的**两段式**） | 单选 select 两段式；多选未测 |
+/// | codex | 同上 §2.1：**实机 0 样本**（relay 403 拦截 4 次），键位仅源码级（B 级） | **不出键**（只读卡，等实机复验） |
+///
+/// codex 的源码级键位（`bottom_pane/request_user_input/mod.rs` @ rust-v0.155.1）：
+/// 数字 1–9 直选即提交 / ↑↓+Enter 提交 / Tab 备注 / Esc 取消——**与 claude 同形**，
+/// 但我们没在本机验证过（relay 403 是用户侧接入问题，本批未触碰 auth 配置）。
+/// 按「结论不得超过证据」，codex 走只读卡；用户侧修复接入后按快路径补 1 次实测即可
+/// 升格（届时在 `question_key_profile` 里加一行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionKeyProfile {
+    /// 全键序已验：单选直选、多选 toggle+三段式提交、esc 取消
+    ClaudeFull,
+    /// 单选已验（数字即选即交）；多选/提交未测 → 提交动作拒绝
+    SingleDigitSubmit,
+    /// 单选两段式（数字选中 → Review 屏 → 数字确认）；多选未测
+    TwoPhaseSelect,
+    /// 未验：不出任何键（只读卡）
+    ReadOnly,
+}
+
+/// 会话工具 → 问答键序档（纯函数，可测；未知工具保守走只读）
+pub fn question_key_profile(tool: &str) -> QuestionKeyProfile {
+    match tool {
+        "claude" => QuestionKeyProfile::ClaudeFull,
+        // 矩阵 §2.2 实测：VK 数字 '2' 单键即选中并提交；↓+Enter 亦可（同为直选即交）
+        "opencode" => QuestionKeyProfile::SingleDigitSubmit,
+        // 矩阵 §2.3 实测：数字选中 → 自动进 "Review your answer before submit"
+        // 确认屏（[1] Submit / [2] Cancel）→ 数字 '1' 提交。**两段式**
+        "kimi" => QuestionKeyProfile::TwoPhaseSelect,
+        // codex：实机 0 样本（源码级键位与 claude 同形，但未验）→ 只读
+        _ => QuestionKeyProfile::ReadOnly,
+    }
+}
+
+/// 跨工具应答序列（批次丙 T3 分发点；端点调用它而非直接调
+/// [`answer_key_sequence`]）。
+///
+/// **kimi 两段式**（矩阵 §2.3 实机）：数字选中后 TUI 进 Review 确认屏，需再按 '1'
+/// 才提交——故 select 序列是 `[数字, "1"]`（两键）。取消键 kimi 未测 → 走只读
+/// （返回 Err，端点 409，前端只读卡）。
+///
+/// **codex ReadOnly**：任何动作都 Err（端点据此拒注入，前端只读卡）——「未验不出键」。
+pub fn answer_key_sequence_for(
+    tool: &str,
+    action: AnswerAction,
+    index: Option<usize>,
+    q: &Question,
+) -> Result<Vec<String>, String> {
+    match question_key_profile(tool) {
+        QuestionKeyProfile::ClaudeFull => answer_key_sequence(action, index, q),
+        QuestionKeyProfile::SingleDigitSubmit => match action {
+            // 矩阵 §2.2：数字单键即选即交（与 claude 同形）；多选 toggle 同键（若
+            // 该工具支持多选，勾选语义未测——故 multi_select 的 toggle 也拒）
+            AnswerAction::Select => {
+                if q.multi_select {
+                    return Err("opencode 多选未实测，不出键".to_string());
+                }
+                answer_key_sequence(action, index, q)
+            }
+            AnswerAction::Toggle => Err("opencode 多选未实测，不出键".to_string()),
+            // 提交（多选三段式）未测
+            AnswerAction::Submit => Err("opencode 多选提交未实测，不出键".to_string()),
+            // esc dismiss 有 footer 提示但**未实机验证**（矩阵 §5 未测面）→ 不出键
+            AnswerAction::Cancel => Err("opencode 取消未实测，不出键".to_string()),
+        },
+        QuestionKeyProfile::TwoPhaseSelect => match action {
+            AnswerAction::Select => {
+                if q.multi_select {
+                    return Err("kimi 多选未实测，不出键".to_string());
+                }
+                // 两段式：数字选中 → Review 屏 → 数字 '1' Submit 确认
+                let i = index.ok_or_else(|| "缺少选项序号".to_string())?;
+                if i >= q.options.len() {
+                    return Err(format!("选项序号越界：{i}"));
+                }
+                let digit = digit_key(i).ok_or_else(|| format!("选项序号超键域：{i}"))?;
+                Ok(vec![digit, "1".to_string()])
+            }
+            AnswerAction::Toggle | AnswerAction::Submit => {
+                Err("kimi 多选提交未实测，不出键".to_string())
+            }
+            AnswerAction::Cancel => Err("kimi 取消未实测，不出键".to_string()),
+        },
+        QuestionKeyProfile::ReadOnly => Err(format!("{tool} 问答键序未实测，只读展示")),
     }
 }
 
@@ -352,5 +449,134 @@ mod tests {
         );
         assert_eq!(AnswerAction::Submit.audit_label(None), "submit");
         assert_eq!(AnswerAction::Cancel.audit_label(None), "cancel");
+    }
+
+    // ---------- T3：形态化匹配 + 跨工具键序分发 ----------
+
+    /// T3 核心：**工具名不参与判据**——codex `request_user_input` 与 opencode
+    /// `question` 的 args 形态与 claude 相同，均被 `parse_questions` 接住
+    ///（真实形态取自 2026-09-20 跨工具矩阵 §2.1/§2.2 的实机摘录）
+    #[test]
+    fn parse_accepts_codex_and_opencode_shapes() {
+        // codex：function_call.arguments 字符串（rollout JSONL 实录形态）
+        let codex = r#"{"questions": [{"header": "历史档案", "id": "history_docs", "options": [{"description": "保留原样", "label": "保留原样 (Recommended)"}], "question": "历史文档如何处理？"}]}"#;
+        let qs = parse_questions(codex).expect("codex request_user_input 形态必须可解析");
+        assert_eq!(qs[0].header, "历史档案");
+        assert_eq!(qs[0].options[0].label, "保留原样 (Recommended)");
+        assert!(!qs[0].multi_select, "codex 无 multiSelect 字段 → 缺省单选");
+
+        // opencode：state.input（SQLite part.data 实录形态）
+        let oc = r#"{"questions": [{"header": "Build output folder", "options": [{"description": "Place build output in the dist folder", "label": "dist"}, {"description": "Place build output in the out folder", "label": "out"}], "question": "Which folder should hold build output?"}]}"#;
+        let qs = parse_questions(oc).expect("opencode question 形态必须可解析");
+        assert_eq!(qs[0].options.len(), 2);
+        assert_eq!(qs[0].options[1].label, "out");
+
+        // kimi：interaction.request.request.questions 同形（含 multiSelect:false）
+        let kimi = r#"{"questions":[{"question":"Which output folder should the build use?","header":"Output dir","options":[{"label":"dist","description":"d"},{"label":"out","description":"o"}],"multiSelect":false}]}"#;
+        assert!(parse_questions(kimi).is_some(), "kimi 形态必须可解析");
+    }
+
+    /// T3 键序档分发：工具 → 档（未知工具保守只读）
+    #[test]
+    fn key_profile_routing() {
+        assert_eq!(
+            question_key_profile("claude"),
+            QuestionKeyProfile::ClaudeFull
+        );
+        assert_eq!(
+            question_key_profile("opencode"),
+            QuestionKeyProfile::SingleDigitSubmit
+        );
+        assert_eq!(
+            question_key_profile("kimi"),
+            QuestionKeyProfile::TwoPhaseSelect
+        );
+        for unknown in ["codex", "zcode", "dsh", "workbuddy", "openclaw", ""] {
+            assert_eq!(
+                question_key_profile(unknown),
+                QuestionKeyProfile::ReadOnly,
+                "{unknown} 未实测 → 只读（未验不出键）"
+            );
+        }
+    }
+
+    /// T3：claude 档与原序列逐字节一致（分发不改变既有行为——回归锁）
+    #[test]
+    fn claude_profile_matches_legacy_sequences() {
+        let q = single();
+        assert_eq!(
+            answer_key_sequence_for("claude", AnswerAction::Select, Some(1), &q).unwrap(),
+            answer_key_sequence(AnswerAction::Select, Some(1), &q).unwrap()
+        );
+        assert_eq!(
+            answer_key_sequence_for("claude", AnswerAction::Cancel, None, &q).unwrap(),
+            vec!["esc"]
+        );
+        let m = multi();
+        assert_eq!(
+            answer_key_sequence_for("claude", AnswerAction::Submit, None, &m).unwrap(),
+            answer_key_sequence(AnswerAction::Submit, None, &m).unwrap()
+        );
+    }
+
+    /// T3 · opencode 档（矩阵 §2.2 实机：VK 数字单键即选即交）——select 已验；
+    /// 多选/提交/取消未测 → 全部拒绝（未验不出键）
+    #[test]
+    fn opencode_profile_select_only() {
+        let q = single();
+        assert_eq!(
+            answer_key_sequence_for("opencode", AnswerAction::Select, Some(1), &q).unwrap(),
+            vec!["2"],
+            "数字单键即选即交（矩阵实测）"
+        );
+        assert!(
+            answer_key_sequence_for("opencode", AnswerAction::Select, None, &q).is_err(),
+            "缺序号 → 拒"
+        );
+        // 未测面全部拒绝
+        assert!(answer_key_sequence_for("opencode", AnswerAction::Cancel, None, &q).is_err());
+        assert!(answer_key_sequence_for("opencode", AnswerAction::Submit, None, &multi()).is_err());
+        assert!(
+            answer_key_sequence_for("opencode", AnswerAction::Toggle, Some(0), &multi()).is_err()
+        );
+    }
+
+    /// T3 · kimi 档（矩阵 §2.3 实机：数字 → Review 屏 → 数字确认的**两段式**）
+    #[test]
+    fn kimi_profile_is_two_phase() {
+        let q = single();
+        assert_eq!(
+            answer_key_sequence_for("kimi", AnswerAction::Select, Some(0), &q).unwrap(),
+            vec!["1", "1"],
+            "两段式：选中数字 → Review 屏 Submit 数字 '1'"
+        );
+        assert_eq!(
+            answer_key_sequence_for("kimi", AnswerAction::Select, Some(2), &q).unwrap(),
+            vec!["3", "1"]
+        );
+        // 越界/缺序号仍拒
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Select, Some(9), &q).is_err());
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Select, None, &q).is_err());
+        // 未测面拒绝（多选未验、取消未验）
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Toggle, Some(0), &multi()).is_err());
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Cancel, None, &q).is_err());
+    }
+
+    /// T3 · codex 档（实机 0 样本，仅源码级键位）→ **任何动作都只读**
+    ///（结论不得超过证据；用户侧修复 relay 接入后按快路径补测即可升格）
+    #[test]
+    fn codex_profile_is_read_only() {
+        let q = single();
+        for action in [
+            AnswerAction::Select,
+            AnswerAction::Toggle,
+            AnswerAction::Submit,
+            AnswerAction::Cancel,
+        ] {
+            assert!(
+                answer_key_sequence_for("codex", action, Some(0), &q).is_err(),
+                "codex 问答键序未实测 → {action:?} 必须拒绝（只读卡）"
+            );
+        }
     }
 }

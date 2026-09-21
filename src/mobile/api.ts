@@ -591,9 +591,13 @@ export interface QuestionView {
 
 /** 问答可用性视图（GET /session-question 载荷）：available=false（双通道均未命中 /
  *  审批标记隔离 / 会话不在快照）→ questions 恒空——移动端据此不渲染问答卡；
- *  source = 识别通道诊断（"mark"=hook 标记〔通道 A〕/"scan"=会话消息兜底〔通道 B〕） */
+ *  answerable=false（T3：该工具的问答键序未实测，如 codex）→ 渲染**只读卡** +
+ *  引导终端作答，不显示可点选项（「未验不出键」）；source = 识别通道诊断
+ *  （"mark"=hook 标记〔通道 A〕/"scan"=会话消息兜底〔通道 B〕） */
 export interface QuestionInfoView {
   available: boolean;
+  /** 可选：旧后端不带该字段时按 true 处理（前向兼容——只有明确 false 才降只读） */
+  answerable?: boolean;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }

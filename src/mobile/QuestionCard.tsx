@@ -123,6 +123,66 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const questions = info.questions;
   if (questions.length === 0) return null;
 
+  // T3：该工具的问答键序未实测（answerable 明确 false，如 codex——实机 0 样本，
+  // 键位仅源码级）→ 只读卡 + 引导终端作答（「未验不出键」；渲染选项供阅读，
+  // 但不给可点按钮）。`answerable` 缺省按 true（前向兼容旧后端）
+  if (info.answerable === false) {
+    const q0 = questions[0];
+    return (
+      <div
+        data-testid="question-card"
+        data-mode="tool-readonly"
+        className="shrink-0 rounded-xl border border-sky-500/50 bg-sky-500/5 px-3 py-2 dark:border-sky-400/50 dark:bg-sky-400/5"
+      >
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-full bg-sky-500" />
+          <span className="text-sm font-semibold text-sky-700 dark:text-sky-400">
+            等待回答
+          </span>
+        </div>
+        {q0.header && (
+          <div
+            data-testid="question-header"
+            className="mt-1.5 inline-block rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400"
+          >
+            {q0.header}
+          </div>
+        )}
+        <p
+          data-testid="question-text"
+          className="mt-1 text-sm text-slate-800 dark:text-slate-200"
+        >
+          {q0.question}
+        </p>
+        <ol className="mt-1.5 space-y-0.5">
+          {q0.options.map((o, i) => (
+            <li
+              key={`question-ro-opt-${i}`}
+              data-testid={`question-readonly-option-${i}`}
+              className="text-xs text-slate-700 dark:text-slate-300"
+            >
+              <span className="mr-1 font-mono text-slate-500 dark:text-slate-400">
+                {i + 1}.
+              </span>
+              {o.label}
+              {o.description && (
+                <span className="ml-1 text-slate-500 dark:text-slate-400">
+                  — {o.description}
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+        <p
+          data-testid="question-tool-readonly-hint"
+          className="mt-1.5 text-xs text-sky-700 dark:text-sky-400"
+        >
+          该工具的远程作答尚未实测，请在终端完成作答
+        </p>
+      </div>
+    );
+  }
+
   // 多问题：只读卡（翻页键序未测——零注入按钮，引导终端作答）
   if (questions.length > 1) {
     return (

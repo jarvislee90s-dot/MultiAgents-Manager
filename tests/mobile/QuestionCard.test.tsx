@@ -256,8 +256,37 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(container.textContent).toBeTruthy();
   });
 
-  it("available=false / 拉取失败：组件自隐（container empty）", async () => {
+  // 批次丙 T3：工具键序未实测（后端 answerable=false，如 codex）→ 只读卡
+  it("answerable=false（工具键序未验）：只读卡渲染题干+选项文本，零注入按钮", async () => {
     installFetch();
+    routes.question = singleQuestionInfo({ answerable: false });
+    const { container } = render(<QuestionCard session={{ id: "sess-codex" }} />);
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    expect(screen.getByTestId("question-card").getAttribute("data-mode")).toBe("tool-readonly");
+    // 题干与选项以**文本**呈现（用户能读到问题内容——JSON 裸奔问题在此消失）
+    expect(screen.getByTestId("question-text").textContent).toContain("demo question");
+    expect(screen.getByTestId("question-readonly-option-0").textContent).toContain("Tool demo");
+    expect(screen.getByTestId("question-readonly-option-2").textContent).toContain("Nothing yet");
+    expect(screen.getByTestId("question-tool-readonly-hint").textContent).toContain(
+      "请在终端完成作答"
+    );
+    // 「未验不出键」：零注入按钮、零 POST
+    expect(screen.queryByTestId("question-option-0")).toBeNull();
+    expect(screen.queryByTestId("question-submit")).toBeNull();
+    expect(screen.queryByTestId("question-cancel")).toBeNull();
+    expect(answerCalls()).toHaveLength(0);
+    expect(container.textContent).toBeTruthy();
+  });
+
+  it("answerable 缺省（旧后端）：仍走可作答路径（前向兼容）", async () => {
+    installFetch();
+    // 夹具不带 answerable 字段
+    render(<QuestionCard session={{ id: "sess-legacy" }} />);
+    expect(await screen.findByTestId("question-option-0")).toBeTruthy();
+    expect(screen.queryByTestId("question-tool-readonly-hint")).toBeNull();
+  });
+
+  it("available=false / 拉取失败：组件自隐（container empty）", async () => {    installFetch();
     routes.question = singleQuestionInfo({ available: false, questions: [] });
     const { container } = render(<QuestionCard session={{ id: "sess-5" }} />);
     await flushAsync();
