@@ -136,9 +136,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
       >
         <div className="flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-full bg-sky-500" />
-          <span className="text-sm font-semibold text-sky-700 dark:text-sky-400">
-            等待回答
-          </span>
+          <span className="text-sm font-semibold text-sky-700 dark:text-sky-400">等待回答</span>
         </div>
         {q0.header && (
           <div
@@ -148,10 +146,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             {q0.header}
           </div>
         )}
-        <p
-          data-testid="question-text"
-          className="mt-1 text-sm text-slate-800 dark:text-slate-200"
-        >
+        <p data-testid="question-text" className="mt-1 text-sm text-slate-800 dark:text-slate-200">
           {q0.question}
         </p>
         <ol className="mt-1.5 space-y-0.5">
@@ -161,14 +156,10 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               data-testid={`question-readonly-option-${i}`}
               className="text-xs text-slate-700 dark:text-slate-300"
             >
-              <span className="mr-1 font-mono text-slate-500 dark:text-slate-400">
-                {i + 1}.
-              </span>
+              <span className="mr-1 font-mono text-slate-500 dark:text-slate-400">{i + 1}.</span>
               {o.label}
               {o.description && (
-                <span className="ml-1 text-slate-500 dark:text-slate-400">
-                  — {o.description}
-                </span>
+                <span className="ml-1 text-slate-500 dark:text-slate-400">— {o.description}</span>
               )}
             </li>
           ))}
