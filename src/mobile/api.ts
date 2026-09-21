@@ -519,6 +519,10 @@ export interface ApproveOptionsView {
   currentVersion: string | null;
   drift: boolean;
   reason?: string;
+  /** 批次丙 T5：选项来自**对话框屏读**——id 形如 `dialog:<n>`，label 是屏上原文
+   *  （如 "1. Yes, and use auto mode"）；前端据此渲染编号按钮组（点按注入数字键 n）。
+   *  缺省/ false → 映射表二元项（既有渲染，前向兼容旧后端） */
+  dialog?: boolean;
 }
 
 /** 拉取审批选项卡数据源（红卡挂载时一次）。非 2xx → 抛 ApiError（调用方静默

@@ -1415,6 +1415,50 @@ struct ApproveScanHit {
     /// [`crate::inject::approve::PROBE_PENDING_REASON`]（前端 ApproveCard 只渲染提示条）；
     /// 其余不可批形态（非 Waiting/未命中）不给 reason（前端按自隐处理）
     reason: Option<String>,
+    /// T5：本次选项是否来自**对话框屏读**（true → options 的 id 形如 `dialog:<n>`，
+    /// 提交时注入数字键 n；false → 映射表二元项，走既有 approve/reject 键）
+    dialog: bool,
+}
+
+/// 对话框选项屏读（批次丙 T5）：Windows 屏读可见窗口 → 解析编号选项行。
+///
+/// 返回 None 的所有路径（调用方落回映射表二元卡——红线 3 降级）：
+/// 非 Windows / 屏读失败（Err）/ 解析不出连续编号簇（<2 或 >9 项）。
+///
+/// 屏读只对**已命中审批等待**的会话调用（调用点已判 hit），故不会对空闲会话白读
+/// 一屏；失败仅记 debug 日志（不打断审批流）。
+fn read_dialog_options(
+    session: &crate::session::Session,
+) -> Option<Vec<crate::inject::dialog::DialogOption>> {
+    #[cfg(windows)]
+    {
+        match crate::inject::windows_console::read_screen_window(session.pid) {
+            Ok(lines) => match crate::inject::dialog::parse_dialog_options(&lines) {
+                Some(opts) => {
+                    log::debug!(
+                        "T5 屏读解析出 {} 个对话框选项（pid={}）",
+                        opts.len(),
+                        session.pid
+                    );
+                    Some(opts)
+                }
+                None => {
+                    log::debug!("T5 屏读无连续编号簇（pid={}）→ 降级二元卡", session.pid);
+                    None
+                }
+            },
+            Err(e) => {
+                log::debug!("T5 屏读失败（pid={}: {e}）→ 降级二元卡", session.pid);
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // macOS 无屏读能力 → 恒降级（红线 4 同款语义：不假装成功）
+        let _ = session;
+        None
+    }
 }
 
 /// 审批选项扫描（同步，spawn_blocking 内调用）：会话快照（数据同源，与看板同一份）→
@@ -1467,6 +1511,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             verified_with: mapping.verified_with,
             tool,
             reason: Some(crate::inject::approve::PROBE_PENDING_REASON.to_string()),
+            dialog: false,
         });
     }
     // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
@@ -1478,16 +1523,46 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             .as_deref()
             .map(|msg| crate::inject::approve::detect(&mapping, msg))
             .unwrap_or(false);
+    // ===== 批次丙 T5：N 选项审批对话框屏读解析 =====
+    //
+    // 图2/图3 根因：审批对话框是 N 选一（claude 计划批准 1/2/3、codex Implement
+    // this plan 1/2/3、kimi Ready to build 1=Approve/2=Reject/3=Revise），而映射表
+    // 只建模二元 approve/reject → 全部降级二元卡、用户盲发数字碰运气。
+    //
+    // 修法：命中审批等待时**屏读可见窗口**（Windows；多行块，输入行尾读法读不到）
+    // → 解析编号选项行 → 下发 N 选项（前端渲染编号按钮，点按注入该数字键）。
+    //
+    // **降级链（红线 3，任一步失败都不猜、不盲出键）**：
+    // ① 非 Windows / 屏读失败 → 落回映射表二元卡；
+    // ② 屏读成功但解析不出连续编号簇（<2 项或 >9 项）→ 同上回落；
+    // ③ 解析成功且选项数 ≥ 2 → 下发对话框选项（**覆盖**映射表二元项——真实选项
+    //    文本比「允许/拒绝」二元更准，这正是本任务的修复目标）。
+    let dialog_options = if hit {
+        read_dialog_options(&session)
+    } else {
+        None
+    };
     // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
     // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
-    let options = if hit {
-        mapping
-            .options
-            .iter()
-            .map(|o| (o.id.clone(), o.label.clone()))
-            .collect()
-    } else {
-        Vec::new()
+    let (options, dialog) = match dialog_options {
+        Some(opts) => (
+            opts.iter()
+                .map(|o| (format!("dialog:{}", o.number), o.label.clone()))
+                .collect::<Vec<_>>(),
+            true,
+        ),
+        None => (
+            if hit {
+                mapping
+                    .options
+                    .iter()
+                    .map(|o| (o.id.clone(), o.label.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            false,
+        ),
     };
     Some(ApproveScanHit {
         available: hit,
@@ -1495,6 +1570,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         verified_with: mapping.verified_with,
         tool,
         reason: None,
+        dialog,
     })
 }
 
@@ -1529,17 +1605,18 @@ pub async fn session_approve_options(
                     .into_response();
             }
         };
-    let (available, options, verified_with, tool, reason) = match scan {
+    let (available, options, verified_with, tool, reason, dialog) = match scan {
         Some(hit) => (
             hit.available,
             hit.options,
             hit.verified_with,
             Some(hit.tool),
             hit.reason,
+            hit.dialog,
         ),
         // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
         // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
-        None => (false, Vec::new(), String::new(), None, None),
+        None => (false, Vec::new(), String::new(), None, None, false),
     };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
     let current_version = match tool.as_deref() {
@@ -1587,6 +1664,9 @@ pub async fn session_approve_options(
             // 严格档降级原因（M9R Task 10）：probe-pending 时为中文提示原文，其余 null
             // （前端 ApproveOptionsView.reason?: string，null 不触发提示条渲染）
             "reason": reason,
+            // T5：选项来自对话框屏读（true → 前端渲染「对话框选项」风格 + 编号徽标；
+            // id 形如 dialog:<n>，点按注入数字键 n）
+            "dialog": dialog,
         })),
     )
         .into_response()
@@ -1682,6 +1762,28 @@ pub async fn session_approve(
             .is_none_or(|m| m.verified_with == crate::inject::approve::PROBE_PENDING)
         {
             return Err("no_mapping");
+        }
+        // ===== 批次丙 T5：对话框选项（id 形如 `dialog:<n>`）=====
+        //
+        // 屏读解析出的选项走**数字键**注入（n = 屏上编号）。安全性：只有「当前屏
+        // 幕上确实存在该连续编号簇」才下发（GET 与 POST 同源解析——POST 现场重解析，
+        // 防 GET→POST 之间对话框变化导致注入陈旧数字；重解析失败即拒，不盲发）。
+        if let Some(n_str) = probe_opt.strip_prefix("dialog:") {
+            let n: u32 = n_str.parse().map_err(|_| "no_mapping")?;
+            let opts = read_dialog_options(&session).ok_or("no_mapping")?;
+            if !opts.iter().any(|o| o.number == n) {
+                return Err("no_mapping");
+            }
+            // 合成一个「键 = 数字字符」的选项（复用下方既有投递与审计管线）
+            return Ok((
+                session,
+                tool,
+                crate::inject::approve::ApproveOption {
+                    id: probe_opt.clone(),
+                    label: format!("对话框选项 {n}"),
+                    key: n.to_string(),
+                },
+            ));
         }
         let Some(option) =
             mapping.and_then(|m| crate::inject::approve::option_by_id(&m, &probe_opt).cloned())

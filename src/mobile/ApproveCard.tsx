@@ -119,12 +119,23 @@ export default function ApproveCard({ session }: ApproveCardProps) {
   return (
     <div
       data-testid="approve-card"
+      data-mode={options.dialog ? "dialog" : "binary"}
       className="shrink-0 rounded-xl border-2 border-rose-500/60 bg-rose-500/5 px-3 py-2 dark:border-rose-400/60 dark:bg-rose-400/5"
     >
       <div className="flex items-center gap-1.5">
         <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-rose-500" />
-        <span className="text-sm font-semibold text-rose-700 dark:text-rose-400">等待批准</span>
+        <span className="text-sm font-semibold text-rose-700 dark:text-rose-400">
+          {options.dialog ? "等待批准（终端对话框）" : "等待批准"}
+        </span>
       </div>
+      {options.dialog && (
+        <p
+          data-testid="approve-dialog-label"
+          className="mt-1 text-xs text-rose-700/80 dark:text-rose-400/80"
+        >
+          以下选项读自终端对话框，点按即代你按对应数字键
+        </p>
+      )}
       {options.drift && (
         <p data-testid="approve-drift" className="mt-1 text-xs text-amber-700 dark:text-amber-400">
           映射待实测确认，若提示不符请用普通发送
@@ -143,19 +154,37 @@ export default function ApproveCard({ session }: ApproveCardProps) {
           已发送按键
         </p>
       )}
-      <div className="mt-2 flex gap-2">
-        {options.options.map((o) => (
-          <button
-            key={o.id}
-            type="button"
-            data-testid={`approve-option-${o.id}`}
-            disabled={busy || sent}
-            onClick={() => handleAnswer(o.id)}
-            className="flex-1 rounded-full bg-rose-500/10 px-3 py-1.5 text-sm text-rose-700 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
-          >
-            {o.label}
-          </button>
-        ))}
+      <div className={options.dialog ? "mt-2 space-y-1" : "mt-2 flex gap-2"}>
+        {/* T5：对话框选项 → 纵向编号列表（真实选项文本较长，纵向排布可读；
+            编号徽标 = 将注入的数字键，用户所见即所按）；二元项维持既有横排 */}
+        {options.dialog
+          ? options.options.map((o, i) => (
+              <button
+                key={o.id}
+                type="button"
+                data-testid={`approve-option-${o.id}`}
+                disabled={busy || sent}
+                onClick={() => handleAnswer(o.id)}
+                className="flex w-full items-start gap-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-left text-xs text-rose-700 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
+              >
+                <span className="shrink-0 rounded bg-rose-500/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold dark:bg-rose-400/20">
+                  {i + 1}
+                </span>
+                <span className="min-w-0 flex-1 break-words">{o.label}</span>
+              </button>
+            ))
+          : options.options.map((o) => (
+              <button
+                key={o.id}
+                type="button"
+                data-testid={`approve-option-${o.id}`}
+                disabled={busy || sent}
+                onClick={() => handleAnswer(o.id)}
+                className="flex-1 rounded-full bg-rose-500/10 px-3 py-1.5 text-sm text-rose-700 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
+              >
+                {o.label}
+              </button>
+            ))}
       </div>
     </div>
   );

@@ -1,5 +1,8 @@
 pub mod approve;
 pub mod confirm;
+// 通用 N 选项审批对话框屏读解析（批次丙 T5）：纯函数跨平台可测，屏读源在
+// windows_console::read_screen_window（仅 Windows 有屏读 → macOS 自然降级二元卡）
+pub mod dialog;
 pub mod engine;
 pub mod families;
 pub mod normalize;

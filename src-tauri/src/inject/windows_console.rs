@@ -614,6 +614,78 @@ fn read_tail_chars(handle: HANDLE, n: usize) -> Result<String, String> {
     Ok(String::from_utf16_lossy(&buf)) // 不 trim（契约：截尾/匹配语义归调用方）
 }
 
+/// 屏幕**可见窗口**读取（批次丙 T5：N 选项审批对话框屏读解析的数据源）。
+///
+/// 与 [`read_input_tail`] 的差异：后者只读光标所在的**同行**（输入行草稿判定用），
+/// 本函数读**整个可见窗口区**（`srWindow` 的每一行）——审批/计划批准对话框是
+/// 多行块（题干 + `1. xxx` / `2. xxx` 选项列表 + 提示行），只看输入行读不到。
+///
+/// 返回：按行拆分的字符串（行序 = 屏幕从上到下，**已 trim 行尾**——屏幕行宽用
+/// 空格补齐，保留会让解析器把空行当内容；行内前导空白保留，缩进是对话框的层级
+/// 信息）。行数上限 = 窗口高度（`srWindow` 高度，典型 ≤ 50）。
+///
+/// 已知界限（消费方需知）：① 只读**可见窗口**，滚出窗口的历史行读不到（对话框
+/// 必然在可见区，可接受）；② 每行读 `srWindow.Right - srWindow.Left + 1` 个 unit
+/// （窗口宽度），超宽内容被窗口裁掉（TUI 按窗口宽排版，实际不裁）；③ 与
+/// [`read_input_tail`] 同款锁纪律（[`CONSOLE_OP`] 单临界区 + 附加态复位）。
+///
+/// 失败语义：任何 FFI 失败 → Err（调用方按「屏读失败」降级——T5 红线 3/4：屏读
+/// 失败必须降级为二元卡 + 人工核对提示，不猜）。
+pub(crate) fn read_screen_window(pid: u32) -> Result<Vec<String>, String> {
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let target = resolve_target(pid)?;
+    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
+    let _guard = AttachGuard;
+    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
+    let handle = unsafe { open_conout() }?;
+    let result = read_window_lines(handle);
+    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result
+    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+}
+
+/// 可见窗口逐行读取实现体（[`read_screen_window`] 已开 CONOUT$ 句柄）。
+fn read_window_lines(handle: HANDLE) -> Result<Vec<String>, String> {
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    // SAFETY: FFI 调用；info 为本函数栈上缓冲
+    unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }.map_err(|e| {
+        format!(
+            "GetConsoleScreenBufferInfo 失败（0x{:08X}）",
+            e.code().0 as u32
+        )
+    })?;
+    let win = info.srWindow;
+    let width = (win.Right - win.Left + 1).max(0) as usize;
+    let height = (win.Bottom - win.Top + 1).max(0) as usize;
+    if width == 0 || height == 0 {
+        return Ok(Vec::new());
+    }
+    let mut lines = Vec::with_capacity(height);
+    let mut buf = vec![0u16; width];
+    for row in 0..height {
+        let mut read = 0u32;
+        let start = COORD {
+            X: win.Left,
+            Y: win.Top + row as i16,
+        };
+        // SAFETY: FFI 调用；buf 长度即读取上限（windows-rs 绑定以切片长度为 nLength）
+        unsafe { ReadConsoleOutputCharacterW(handle, &mut buf, start, &mut read) }.map_err(
+            |e| {
+                format!(
+                    "ReadConsoleOutputCharacterW 失败（0x{:08X}）",
+                    e.code().0 as u32
+                )
+            },
+        )?;
+        let line = String::from_utf16_lossy(&buf[..read as usize]);
+        lines.push(line.trim_end().to_string());
+    }
+    Ok(lines)
+}
+
 /// 插队确认排空判定专用（Task 5 / A1 插队语义）：轮询目标输入缓冲占用直至
 /// ≤ [`families::DRAIN_TO`]（15ms 步距）或超时——达标 `Ok(true)`、超时
 /// `Ok(false)`（调用方报「投递超时」）、基础设施失败 `Err` 上抛（调用方

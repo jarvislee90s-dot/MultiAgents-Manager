@@ -210,3 +210,50 @@ describe("ApproveCard：M9R 严格档与补锁", () => {
     expect(approveCalls()).toHaveLength(1);
   });
 });
+
+// ==== 批次丙 T5：N 选项审批对话框（屏读解析出的真实选项）====
+describe("ApproveCard：N 选项对话框模式（T5）", () => {
+  it("dialog=true：渲染编号按钮组（真实选项文本 + 编号徽标），点按提交 dialog:<n>", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "Yes, manually approve edits" },
+        { id: "dialog:3", label: "Tell Claude what to do differently" },
+      ],
+    });
+    render(<ApproveCard session={{ id: "sess-dlg" }} />);
+    // 卡在场 + 对话框模式标记 + 说明行
+    const card = await screen.findByTestId("approve-card");
+    expect(card.getAttribute("data-mode")).toBe("dialog");
+    expect(screen.getByTestId("approve-dialog-label").textContent).toContain("终端对话框");
+    // 三个真实选项文本可见（图2/图3 的修复目标：不降级成二元）
+    expect(screen.getByTestId("approve-option-dialog:1").textContent).toContain(
+      "Yes, and use auto mode"
+    );
+    expect(screen.getByTestId("approve-option-dialog:3").textContent).toContain(
+      "Tell Claude what to do differently"
+    );
+    // 编号徽标 = 将注入的数字键（所见即所按）
+    expect(screen.getByTestId("approve-option-dialog:2").textContent).toContain("2");
+    // 点第 3 项 → POST optionId = "dialog:3"
+    fireEvent.click(screen.getByTestId("approve-option-dialog:3"));
+    await flushAsync();
+    expect(approveCalls()).toHaveLength(1);
+    const body = JSON.parse(String((approveCalls()[0][1] as RequestInit).body));
+    expect(body).toEqual({ sessionId: "sess-dlg", optionId: "dialog:3" });
+    expect(await screen.findByTestId("approve-sent")).toBeTruthy();
+  });
+
+  it("dialog 缺省：维持二元渲染（前向兼容旧后端）", async () => {
+    installFetch();
+    routes.options = approveOptions(); // 无 dialog 字段
+    render(<ApproveCard session={{ id: "sess-bin" }} />);
+    expect((await screen.findByTestId("approve-card")).getAttribute("data-mode")).toBe("binary");
+    expect(screen.getByTestId("approve-card").textContent).toContain("等待批准");
+    expect(screen.queryByTestId("approve-dialog-label")).toBeNull();
+    // 二元项照常可点
+    expect(screen.getByTestId("approve-option-approve")).toBeTruthy();
+  });
+});
