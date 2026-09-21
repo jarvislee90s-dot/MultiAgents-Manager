@@ -81,6 +81,8 @@ interface Routes {
   /** 问答卡数据源（批次乙 T8，QuestionCard 挂载即拉）：available 为假时卡自隐——
    *  缺省 available=false（不改既有用例渲染）；问答挂载断言需显式给可用载荷 */
   questionInfo?: { available: boolean; questions: unknown[]; source?: string };
+  /** 问答应答 POST 回执（F2-1 用例需要 key_sent 终态；缺省 key_sent） */
+  questionAnswer?: { status: string; error?: string };
 }
 
 let routes: Routes;
@@ -150,6 +152,13 @@ function installFetch() {
         ),
         { status: 200 }
       );
+    }
+    if (url.includes("/session-question/answer")) {
+      // 问答应答 POST（F2-1 用例需要 key_sent 终态）；判序在 GET 之前——
+      // /session-question 是 /session-question/answer 的前缀（QuestionCard.test 同款教训）
+      return new Response(JSON.stringify(routes.questionAnswer ?? { status: "key_sent" }), {
+        status: 200,
+      });
     }
     if (url.includes("/session-question")) {
       // QuestionCard 挂载即拉（批次乙 T8）；缺省给 available=false（卡自隐，不改
@@ -1722,8 +1731,7 @@ describe("SessionDetail：计划一等卡片（T1）", () => {
 describe("SessionDetail：计划文件卡（T7）", () => {
   it("plan-file 消息渲染计划文件卡：文件名可见、点击走文件预览", async () => {
     installFetch();
-    const full =
-      "C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/miss-martian.md";
+    const full = "C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/miss-martian.md";
     routes.messages = [
       msg({ seq: 0, kind: "user", content: "做个计划" }),
       msg({
@@ -2017,5 +2025,87 @@ describe("SessionDetail：问答卡挂载（批次乙 T8 / 丁T1 放宽）", () 
     expect(questionCalls()).toBeGreaterThan(before);
     // 组件未重挂（卡仍在，无卸载-重建闪烁）：同一会话 id 的 key 稳定
     expect(screen.getByTestId("question-card")).toBeTruthy();
+  });
+
+  // ==== 丁T1 复评 F2-1：重拉只在**问题内容变化**时重置终态 ====
+  // 判据动机：同会话可连续多次提问（实测单会话连续 8 次 request_user_input，
+  // 其间无 task_complete），key 恒为 question-${id} 不重挂 → 无条件不清会让
+  // sent=true 残留到下一题（「已发送按键」且无按钮的伪终态卡）；而无条件清会在
+  // 「投递成功 → 状态回落」窗口内丢掉防连投语义。故取内容指纹判据。
+
+  /** 点击第一个选项造成 key_sent 终态（卡显示「已发送按键」、按钮消失） */
+  async function sendFirstOption() {
+    fireEvent.click(await screen.findByTestId("question-option-0"));
+    await flushDetail();
+    expect(screen.getByTestId("question-sent")).toBeTruthy();
+    expect(screen.queryByTestId("question-option-0")).toBeNull();
+  }
+
+  it("丁T1 F2-1：重拉拿到**相同**问题 → sent 保留（伪按钮不复活，防连投语义不破）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    await sendFirstOption();
+    // 状态跃迁触发重拉，但载荷是**同一个问题**（routes.questionInfo 未变）
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(screen.getByTestId("question-sent")).toBeTruthy();
+    expect(
+      screen.queryByTestId("question-option-0"),
+      "同一问题重拉后按钮不得复活（防连投）"
+    ).toBeNull();
+  });
+
+  it("丁T1 F2-1：重拉拿到**不同**问题 → sent 清（新问题可作答，无伪终态）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    await sendFirstOption();
+    // 换题（模型连续提问的第二问）：内容指纹变化 → 终态重置
+    routes.questionInfo = {
+      available: true,
+      source: "mark",
+      questions: [
+        {
+          header: "Ship it?",
+          question: "Second question — should the project ship a README?",
+          multiSelect: false,
+          options: [{ label: "Yes", description: "Add a README." }],
+        },
+      ],
+    };
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    expect(await screen.findByTestId("question-option-0")).toBeTruthy();
+    expect(screen.getByTestId("question-text").textContent).toContain("Second question");
+  });
+
+  it("丁T1 F2-1 边界：重拉拿到**不可用**载荷（opencode pending 拍 input 未就绪）→ sent 不清", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    await sendFirstOption();
+    // 不可用载荷（F2-3 的 opencode 空窗形态）：不是「换了题」，不得重置终态——
+    // 否则刚投递的 sent 被清、按钮复活、防连投语义削弱
+    routes.questionInfo = { available: false, questions: [] };
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    // 卡自隐（无题可显），但内部 sent 保留：再拿回**同一问题**时仍是终态
+    expect(screen.queryByTestId("question-card")).toBeNull();
+    routes.questionInfo = questionInfo;
+    rerender(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(screen.getByTestId("question-sent")).toBeTruthy();
+    expect(
+      screen.queryByTestId("question-option-0"),
+      "空窗载荷不得把终态洗掉（按钮仍禁用）"
+    ).toBeNull();
   });
 });

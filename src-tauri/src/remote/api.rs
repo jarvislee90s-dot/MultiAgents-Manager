@@ -1572,12 +1572,18 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     //   的另一根轴，但问答在场时连提示条都不该出——审批卡整体不适用）。严格档
     //   短路序「在 detect 之前」的既有约束不受影响（本判定在其更前，且不消费
     //   detect 结果）。
-    let tail_page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok();
+    // - **按工具收窄（复评 F2-2）**：仅对**无问答标记通道**的工具启用——claude 有
+    //   标记通道（`question_marked` 已在其前面拦下），且其「AUQ 被纯文本打断、
+    //   tool_result 不落盘」形态会让本判据假阳性 → 排除；判据与依据见
+    //   [`tool_lacks_question_mark_channel`]。
+    let tail_page = if tool_lacks_question_mark_channel(&tool) {
+        (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()
+    } else {
+        None // claude：不读页（零额外 IO），走既有 question_marked 隔离路径
+    };
     if let Some(page) = tail_page.as_ref() {
         if pending_question_tail_index(&page.messages).is_some() {
-            log::debug!(
-                "审批端点：尾部存在待决问答（无标记分支，codex/opencode）→ 审批不可用（硬约束①）"
-            );
+            log::debug!("审批端点：尾部存在待决问答（无标记分支，{tool}）→ 审批不可用（硬约束①）");
             return None;
         }
     }
@@ -1712,9 +1718,10 @@ struct ApprovePlanBody {
 /// 从**已取到的消息页**里找审批点关联的计划内容（批次丙 T8）：尾部窗口找最近一条
 /// 计划类消息（`kind="plan"` 给 markdown 全文 / `kind="plan-file"` 给文件路径）。
 ///
-/// 丁T1 复评 F-2：由 [`read_plan_for_approval`]（自读一页）改为吃页的纯函数——审批
-/// 端点现在把「待决问答判定」与「plan 聚合」合并到**同一次** `message_source` 读
-/// （两次读同一份数据纯属浪费，且两次读之间会话可能变化导致两处结论不一致）。
+/// 丁T1 复评 F-2：由原先自读一页的 `read_plan_for_approval`（**该函数已在本次重构中
+/// 删除**，勿再引用）改为吃页的纯函数——审批端点现在把「待决问答判定」与「plan
+/// 聚合」合并到**同一次** `message_source` 读（两次读同一份数据纯属浪费，且两次读
+/// 之间会话可能变化导致两处结论不一致）。
 ///
 /// 无计划消息 → None（前端不渲染计划主体，仅显示选项——降级不阻塞审批；
 /// 这正是 happy「兜底渲染」原则的应用）。
@@ -2258,7 +2265,8 @@ fn question_scan_sync(
     // 轻于后者。若后续出现碰撞，收窄点在 `parse_questions` 的结构要求上。
     //
     // 丁T1 复评 F-2：判定抽为 [`pending_question_tail_index`]（审批端点**复用同一
-    // 判据**做硬约束①的 codex/opencode 分支——那里没有 hook 问题标记可用）
+    // 判据**做硬约束①的「无标记通道工具」分支——见
+    // [`tool_lacks_question_mark_channel`]；claude 有标记通道，不叠加本判据）
     let page = (st.message_source)(&tool, session_id, QUESTION_SCAN_TAIL_LIMIT).ok()?;
     let last = pending_question_tail_index(&page.messages)?;
     // 形态判据（工具名只作日志线索——codex/openclaw 等改名不影响接住）
@@ -2294,7 +2302,7 @@ fn question_scan_sync(
 /// 的在场判定收敛，残余风险见探测档案 K11 讨论）。
 ///
 /// 代价：调用方需先取一次消息页（`message_source`）——审批端点把它与
-/// `read_plan_for_approval` 合并为同一次读（见 `approve_options_scan`）。
+/// `plan_from_page` 合并为同一次读（见 `approve_options_scan`）。
 pub(crate) fn pending_question_tail_index(
     msgs: &[crate::remote::content::SessionMessage],
 ) -> Option<usize> {
@@ -2308,6 +2316,53 @@ pub(crate) fn pending_question_tail_index(
         return None;
     }
     Some(last)
+}
+
+/// 该工具是否**没有**问答 hook 标记通道——即「问答在场」只能靠消息尾部形态识别。
+/// 审批端点用本函数把丁T1 新增的尾部判据门**按工具收窄**（复评 F2-2）。
+///
+/// **为什么必须收窄（评审 Important-2 根因）**：未收窄前该门对所有工具生效，而
+/// claude 本来就有标记通道（`adapter::apply_hook_event_to_session` 对
+/// PreToolUse/PermissionRequest/Notification ∧ tool_name==AskUserQuestion 写
+/// `question_wait_marks`；端点更早的 `question_marked` 检查已承担硬约束①）。
+/// 给 claude 再叠一道尾部判据不仅冗余，还有**明确的假阳性面**：claude 存在
+/// 「AUQ 被纯文本打断、`tool_result` 永不落盘」的真实形态（评审在真实库找到
+/// `0c41365d-…`：line 38 纯文本作答、line 30 的 AUQ 永无 result）——此时尾部判据
+/// 会把早已不在场的 AUQ 当成「待决」，其后的真审批会被静默压成
+/// `available=false, reason=null`（前端自隐：用户既看不到按钮也看不到提示）。
+/// 故 **claude 排除**（它走既有 `question_marked` 隔离路径）。
+///
+/// **判定依据（本机核实，逐条给证据）**——判据是「有无**问答标记**通道」，注意
+/// 与「有无 hooks」不是同一问题：codex/kimi 都有 hooks，但都没有「问答」这个语义
+/// 的钩子事件。写标记的唯一入口是 `adapter::is_question_entry_event`，其
+/// **工具名判据恒等于 `AskUserQuestion`**（claude 的官方工具名，常量
+/// `hook_listener::ASK_USER_QUESTION_TOOL`）：
+/// - **codex → 纳入**：问答工具名是 `request_user_input` ≠ `AskUserQuestion`，
+///   判据恒 false。本机 `~/.mam/events/` 实证：82 个事件文件中唯一带
+///   `tool_name=request_user_input` 的那条是 `PreToolUse`（codex 注册面），
+///   走通用分支，不产 `QuestionEntry`。
+/// - **opencode → 纳入**：`hook_supported()` 恒 false（无 hooks）。
+/// - **kimi → 纳入**：kimi 确有 hooks（`hook_events()` = PermissionRequest /
+///   PermissionResult），payload 也**确实**携带 `tool_name`（本机 `~/.mam/events/`
+///   5 条 kimi 形态事件实测：`tool_name ∈ {Write, ExitPlanMode}`，另有一条空串）——
+///   但 kimi 的 `[[hooks]]` 注册面**只有这两个事件**，而写问题标记要求事件名 ∈
+///   {PreToolUse, PermissionRequest, Notification} **且** tool_name ==
+///   `AskUserQuestion`。kimi 的问答工具在 wire 里**恰好就叫 `AskUserQuestion`**
+///   （本机 544 个 wire.jsonl 全库扫描：`tool.call.name == "AskUserQuestion"` **39 次**，
+///   且 39/39 都有配对 `tool.result`），理论上 PermissionRequest(AUQ) 能命中判据——
+///   但**本机 `question_wait_marks` 表为空**（0 行，`mam.db` 实证），即从未落过 kimi
+///   问题标记。原因是 PermissionRequest 的实际语义边界：kimi 的 `AskUserQuestion`
+///   是**会话内交互工具（interaction.request）而非权限工具**——本机 wire 全库
+///   39 次 AUQ 都未被 PermissionRequest 事件覆盖（kimi 的事件只覆盖
+///   Write/ExitPlanMode 这类需权限的工具）。
+///   故 kimi 的问答在场**同样只能靠尾部形态识别** → 纳入。
+///   **保守取向**：即便将来 kimi 对 AUQ 也发 PermissionRequest（标记通道打通），
+///   纳入本门只是多一道冗余判据（`question_marked` 已经在更前面拦下），
+///   而漏纳会留下「问答在场时审批误出」的安全缺口——两害相权取纳入。
+/// - 其余工具（workbuddy / zcode / dsh / openclaw）无 hook 问答通道 → 纳入
+///   （它们的问答形态即使未来出现，也同样只能走尾部识别）。
+fn tool_lacks_question_mark_channel(tool: &str) -> bool {
+    tool != "claude"
 }
 
 /// GET /m/api/v1/session-question?session_id=（T8 问答卡数据源）：扫描在

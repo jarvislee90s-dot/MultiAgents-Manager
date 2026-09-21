@@ -30,7 +30,16 @@
 // （轮询超 T1 范围，丁T2 另有安排）。因此同一 waiting 窗口内的非跃迁变化——例如
 // 模型连续提两组问题、或用户改答但状态未变——不会自动重拉，需等下一次状态跃迁
 // （或重进详情页）。`session.id` 变化会重拉（跨会话串卡防线，`key` 也随 id 强制重挂）。
-import { useCallback, useEffect, useState } from "react";
+// **已知限制之二（丁T1 复审 F2-3，opencode 的载荷就绪空窗）**：opencode 的 question
+// part 是「part 行先落盘、题目数据后到」——`pending` 事件里 `state.input` 恒为 `{}`
+// （questions 尚未写入），要到 `running` 拍才有。实测空窗 **5ms–4s**（数据源见
+// `monitor::opencode_parser::pending_question_part` 文档）。影响面：
+// - **红灯不受影响**：状态链用**工具名**分支判待决（`input` 为空也成立）；
+// - **卡片在这一拍确实无法渲染**：端点拿不到 questions，`available=false` → 卡自隐
+//   （没有任何题目文本可显示，不是逻辑错，是数据未就绪）；
+// - 卡片会在下一次**状态跃迁**驱动的重拉时出现（同属上一条「非跃迁变化不自动重拉」
+//   的限制族）。**不为它加占位卡或轮询**（超 T1 范围；重拉触发机制归丁T2 收口面）。
+import { useCallback, useEffect, useRef, useState } from "react";
 import InteractiveCard, { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
@@ -39,6 +48,23 @@ import {
   type QuestionAnswerAction,
   type QuestionInfoView,
 } from "./api";
+
+/** 问答载荷的**内容指纹**（丁T1 复评 F2-1，纯函数）：题干 + 每题的选项标签与顺序
+ *  + 多选标记 + 选项描述的组合摘要。同一问题重复拉取恒等；模型换题或改选项即变。
+ *  为何不用 `JSON.stringify(info)` 直接比：载荷里含 `source`（"mark"/"scan"）——
+ *  同一问题从标记通道落到扫描通道会翻字符串但问题并未变化，那不该重置终态。 */
+function questionFingerprint(info: QuestionInfoView): string {
+  return info.questions
+    .map((q) =>
+      [
+        q.header,
+        q.question,
+        q.multiSelect ? "m" : "s",
+        q.options.map((o) => `${o.label}\u0001${o.description}`).join("\u0002"),
+      ].join("\u0003")
+    )
+    .join("\u0004");
+}
 
 interface QuestionCardProps {
   /** 会话：只消费 id（请求键）与 status（重拉触发键，丁T1 复评 F-1）。
@@ -65,15 +91,42 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   // handleSessionsChanged），status 一变即重拉：答完题卡消失、新问题卡浮现。
   // 「非状态跃迁的变更不自动重拉」是已知限制（见文件头注释）。
   const status = session.status;
+  // 上一轮载荷的**内容指纹**（丁T1 复评 F2-1）：用于判定「这一轮拿到的是不是新问题」
+  const lastFingerprint = useRef<string | null>(null);
   useEffect(() => {
     let alive = true;
     setReady(false);
-    // 重拉时清掉上一轮的错误文案（陈旧「没有待回答的问题」会误导新一轮）；
-    // sent 不清——已投递按键的终态在同一次问答内仍属有效（跨问答由 key 重挂兜底）
+    // 重拉时清掉上一轮的错误文案（陈旧「没有待回答的问题」会误导新一轮）
     setError(null);
     fetchSessionQuestion(session.id)
       .then((v) => {
         if (!alive) return;
+        // **问题内容变化才重置终态/勾选态**（F2-1，2026-09-21 复评）：
+        // 同一会话内可连续多次提问（实测 rollout-2026-09-21T13-44-08：单会话连续
+        // 8 次 request_user_input，两两之间无 task_complete），而 key 是
+        // `question-${session.id}` → **不重挂** → `sent=true` 会残留到下一题，
+        // 用户看到一张写着「已发送按键」且无按钮的**伪终态**卡。
+        // 为什么不用「无条件清」：投递成功（key_sent）到状态回落之间有短暂窗口，
+        // 期间 `sent` 必须保留以**防连投**（同一次问答内重复按键会二次投递终端）。
+        // 故判据取「内容变了才是新问题」——指纹 = 题目结构摘要（题干 + 选项标签
+        // + 多选标记），对同一问题的重复拉取稳定不变。
+        //
+        // 边界：**不可用载荷不参与判据**（`available=false` → 指纹视为空串）——
+        // 「拉不到题」与「换了题」是两回事：opencode 的 pending 拍 input 未就绪
+        // （F2-3）就会短暂 available=false，若让它算「内容变化」，会把刚投递的
+        // sent 清掉 → 按钮复活 → 防连投语义被削弱。
+        const fp = v.available && v.questions.length > 0 ? questionFingerprint(v) : "";
+        // 只在「两次都是可用载荷且内容不同」时重置（空串一律不触发重置）
+        if (
+          lastFingerprint.current !== null &&
+          lastFingerprint.current !== "" &&
+          fp !== "" &&
+          lastFingerprint.current !== fp
+        ) {
+          setSent(false);
+          setChecked(new Set());
+        }
+        if (fp !== "") lastFingerprint.current = fp;
         setInfo(v);
         setReady(true);
       })

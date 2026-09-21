@@ -549,6 +549,14 @@ fn input_has_questions_shape(state: &serde_json::Value) -> bool {
 /// 「只见过 completed/error」是**终态快照**的观感，不是行生命周期的事实。
 /// 待决窗口的实机确认由 `#[ignore]` 用例 `opencode_question_live_pending_and_answered`
 /// 承担（常规门禁只编译不跑）。
+///
+/// **`pending` 拍 payload 未就绪（复审 F2-3 入档）**：实测 `pending` 事件里
+/// `state.input` 恒为 `{}`（questions 尚未写入），要到 `running` 拍才有；空窗
+/// **5ms–4s**（与上面的 `time.start - time_created` 区间同源）。对本函数无影响——
+/// **名字分支是这一拍的唯一判据**（`tool == "question"`，不依赖 input），待决红灯
+/// 照常成立。受影响的是**卡片**：端点拿不到 questions → `available=false` → 卡自隐
+/// 一拍，等下一次状态跃迁重拉补上（前端已知限制见 `src/mobile/QuestionCard.tsx`
+/// 文件头「已知限制之二」）。
 fn pending_question_part(part: &serde_json::Value) -> bool {
     if part.get("type").and_then(|t| t.as_str()) != Some("tool") {
         return false;
@@ -1467,10 +1475,19 @@ mod matching_tests {
 ///
 /// 跑法：`cargo test --lib opencode_question_live -- --ignored --nocapture`
 ///
-/// 断言口径（实机时逐条核对，失败即判据不可达，需改数据面）：
-/// - 触发 question 后**轮询期间**（同一 pid 的 `get_opencode_sessions_with_db`）
-///   至少一拍 status == Waiting（语义红：终端在等用户作答）；
+/// **本用例当前是「探查占位」，不是自动化断言**（复审 M-3：注释与代码必须一致——
+/// 原先这里写的「断言口径」承诺了两条断言而代码只有打印，已改正如实）：
+/// 它只做三件事——① 校验 opencode.db 在场（不在则打印跳过）；② 只读扫描 part 表，
+/// 打印所有**待决** question part（session + status）；③ 打印本轮是否命中。
+/// 人工据此核对「待决窗口内确实存在 pending/running 的 question part」
+/// （即 `pending_question_part` 的判据可达），以及答题后该行转为 completed/error。
+///
+/// **待补的自动断言**（实机跑通后固化，届时才把上面的打印升级为 assert）：
+/// - 触发 question 后**轮询期间**至少一拍 status == Waiting（语义红）；
 /// - 人工作答完成后，后续拍 status 不再为 Waiting（回落）。
+///
+/// 之所以现在不写死断言：需要一个受控的触发/作答时序（自动驱动 opencode 会话 +
+/// 模拟用户按键），属实机探测工作量，超 T1 范围。
 ///
 /// 本测试只读真实 DB、零写入；不构造夹具（夹具已在
 /// `pending_question_part_end_to_end_is_waiting` 覆盖）。

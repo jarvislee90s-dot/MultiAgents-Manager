@@ -4541,6 +4541,22 @@ mod tests {
                 52,
                 crate::session::SessionStatus::Waiting,
             ),
+            // 丁T1 复评 F2-2 独占会话（全测试集唯一 id）：**claude 假阳性反锁**——
+            // 尾部有「AUQ 形态 tool-call 无 result」（评审实测的 claude 真实形态：
+            // 0c41365d-… 的 AUQ 被纯文本作答、tool_result 永不落盘）+ last_message
+            // 命中 claude 审批 marker。claude 有钩子问答标记通道，故**不叠加**尾部
+            // 判据 → 审批必须照常可用（不被静默压制）
+            {
+                let mut s = inj_sess(
+                    "sess_ar",
+                    crate::session::AgentType::Claude,
+                    53,
+                    crate::session::SessionStatus::Waiting,
+                );
+                // claude 默认映射 marker 之一（DEFAULT_MAPPINGS_JSON）
+                s.last_message = Some("Do you want to proceed?".to_string());
+                s
+            },
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -5432,6 +5448,59 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(v["available"], false, "已答 → 问答不可用（既有口径）");
+    }
+
+    /// **丁T1 复评 F2-2 反锁**：新门按工具收窄——claude **不**受尾部判据压制。
+    ///
+    /// 场景（评审 Important-2 的假阳性形态，取自真实库 `0c41365d-…`）：claude 的
+    /// AUQ 被用户用**纯文本**作答，`tool_result` 永不落盘 → 消息尾部看起来像
+    /// 「待决问答」，实则早已不在场。若新门对 claude 也生效，其后落在 40 条窗口内的
+    /// **真审批**会被静默压成 `available=false, reason=null`（前端自隐：用户既看不到
+    /// 按钮也看不到提示）——本用例锁住「claude 不受该门影响」。
+    ///
+    /// 夹具：sess_ar（claude，Waiting）+ last_message = claude 审批 marker 原文 +
+    /// message_source 返回「AUQ tool-call 无 tool-result」的尾部。
+    /// 断言：审批 GET **available=true**（照常出选项），问答 GET 仍走既有通道 B。
+    #[tokio::test]
+    async fn claude_tail_question_does_not_suppress_approve() {
+        let fake = FakeInjector::ok();
+        let page = crate::remote::content::MessagesPage {
+            messages: vec![auq_tool_call(0, Q_SINGLE_PAYLOAD)],
+            truncated: false,
+        };
+        let state = question_state_with_msgs(
+            fake.clone(),
+            Box::new(move |_, sid: &str, _| {
+                if sid == "sess_ar" {
+                    Ok(page.clone())
+                } else {
+                    Err("无消息".to_string())
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_ar",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "claude 走既有 question_marked 隔离路径：尾部 AUQ 形态（纯文本作答、无 result）\
+             不得把真审批压成不可用（F2-2 收窄）"
+        );
+        assert!(
+            !v["options"].as_array().unwrap().is_empty(),
+            "claude 可批时必须下发选项（不被静默压制）"
+        );
     }
 
     /// 通道 B（兜底）：sess_ai（Processing、无标记）message_source 注入「user 消息 +
