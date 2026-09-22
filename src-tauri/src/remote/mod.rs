@@ -248,6 +248,29 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
                 opts
             },
         ),
+        // 丁T5：屏读**能力**缝（提交/自由作答阶段机的每段复核要用）。
+        // 生产 = `read_screen_window` 的逐行产物；非 Windows / 读屏失败 → `None`
+        // （阶段机据此**如实中止**并引导终端——不盲发后续键）。注意缝的是「能力」
+        // 而不是「结论」：判据留在内核（`inject::question` 的各 `probe_*`），理由见
+        // `remote::server::ScreenProbeFn` 文档。
+        screen_probe: std::sync::Arc::new(|sid: &str, pid: u32| -> Option<Vec<String>> {
+            #[cfg(windows)]
+            {
+                match crate::inject::windows_console::read_screen_window(pid) {
+                    Ok(lines) => Some(lines),
+                    Err(e) => {
+                        log::debug!("问答阶段机屏读失败（sid={sid} pid={pid}: {e}）→ 无法核验");
+                        None
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // 非 Windows 无屏读 API → 恒 None（阶段机各段会如实中止并引到终端）
+                let _ = (sid, pid);
+                None
+            }
+        }),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，

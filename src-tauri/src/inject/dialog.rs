@@ -106,7 +106,12 @@ pub(crate) fn strip_cursor_marker(line: &str) -> (&str, bool) {
 ///
 /// **返回值第三项=高亮**（R1-2 起）：行首出现光标标记即该选项是 TUI 当前高亮项。
 /// 这是导航确认的起点（Enter 提交高亮行，故须知道起点才能算步进）。
-fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
+///
+/// **丁T5 起提升为 `pub(crate)`**：问答的自由作答行定位（`inject::question::
+/// locate_free_text_row`）也要「把一行当编号行来解析」，而编号行的**行模式**与
+/// 光标标记集合必须只有一份（本仓既往的「同一判据两处实现 → 口径漂移」教训；
+/// 与 `strip_cursor_marker` 的抽法同源）。
+pub(crate) fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
     let (t, highlighted) = strip_cursor_marker(line);
     let digits_len = t.chars().take_while(|c| c.is_ascii_digit()).count();
     if digits_len == 0 {

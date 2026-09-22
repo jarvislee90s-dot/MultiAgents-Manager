@@ -2841,12 +2841,20 @@ pub async fn session_question(
     // `answerable=false` 时前端渲染只读卡 + 引导终端作答（zcode/dsh 等未实测工具；
     // codex 已于 2026-09-21 实机补测升格为可作答）
     let answerable = !tool_id.is_empty() && !question_profile_is_read_only(&tool_id);
+    // **丁T5 §2.4**：自由作答（卡内输入框）的支持面——只有 claude 的自由作答序列
+    // 已实机定案。前端据此决定「渲染输入框 + 作为回答发送」还是「渲染引导文案去终端」
+    // （§2.8 降级：序列未定案的工具**不假装能发**）。
+    // 独立于 `answerable` 的理由：codex/opencode 的**点选**已实测（answerable=true）
+    // 但**自由作答**未定案——两者是不同的能力面，不能用一个布尔表示。
+    let free_text_supported = crate::inject::question::free_text_supported(&tool_id);
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
             "available": !questions.is_empty(),
             "answerable": answerable,
+            // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
+            "freeText": free_text_supported,
             "questions": questions
                 .iter()
                 .map(|q| serde_json::json!({
@@ -2886,11 +2894,75 @@ pub struct SessionQuestionAnswerReq {
     /// 选项序号（0 起 wire 口径；UI 编号从 1 起，前端换算）。select/toggle 必填
     #[serde(default)]
     pub index: Option<usize>,
+    /// 自由作答文本（丁T5 §2.4 入口 1；仅 action="freeText" 消费，其余动作忽略）。
+    /// 走 `inject::normalize::normalize_newlines` 归一（注入通道唯一出口的安全面）
+    /// 后再进阶段机——**不带** `[mobile]` 签名（签名语义是「一条新消息」，作答文本
+    /// 不是消息，加签名会污染答案）。
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
-/// POST /m/api/v1/session-question/answer（T8 问答应答）：参数校验 → 会话/隔离/双通道
-/// 复核（spawn_blocking）→ 序列构造（inject::question 纯函数）→ in-flight 守卫下逐键
-/// 投递（spawn_blocking 闭包内取守卫，断连双投洞封闭——approve 同款）→ 审计 answer。
+/// 问答阶段机的**阶段名**（回执里回报「走到哪一段停住」，前端据此显示进度/中止原因）。
+/// 取值是 `inject::question` 编排各段的**稳定标识**（与中止文案里的段名同源）。
+pub const QUESTION_STAGE_SUBMIT_ROW: &str = "submit-row";
+/// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
+pub const QUESTION_STAGE_REVIEW: &str = "review";
+/// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
+pub const QUESTION_STAGE_CONFIRM: &str = "confirm";
+/// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
+pub const QUESTION_STAGE_RECEIPT: &str = "receipt";
+/// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
+pub const QUESTION_STAGE_FREE_ROW: &str = "free-row";
+/// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
+pub const QUESTION_STAGE_FREE_TEXT: &str = "free-text";
+
+/// **阶段机的轮询预算**（毫秒；单段）。实机依据（2026-09-21 探测档案）：
+/// 「数字直答延迟实测 <1s（截图即见 UI 关闭），多选三段式更久」——故单段给 2s
+/// 余量（本机探测里 `s8-submit` 到 `s8-submitted` 实测间隔约 1s 内）。
+/// **每段的轮询步长**用 `MENU_POLL_STEP_MS`（100ms，与模式菜单同节奏）。
+const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 2_000;
+
+/// POST /m/api/v1/session-question/answer（T8 问答应答；**丁T5 起提交/自由作答走阶段机**）：
+/// 参数校验 → 会话/隔离/双通道复核（spawn_blocking）→ **按动作分派**：
+///
+/// - `select` / `toggle` / `cancel`：**单键直发**（既有语义不变——一次动作一个键，
+///   无后续阶段可推进，故无需阶段机）；序列由 `inject::question` 构造；
+/// - `submit`（多选提交，§2.3 裁4）：**阶段机闭环**
+///   [`crate::inject::question::run_submit_stages`]——提交屏在场 → 闭环走位到 Submit 行
+///   → 回车 → **屏读确认 Review 屏** → 抄屏上编号确认 → 屏读核验终态。任一段不符即
+///   中止且不再发键（**禁止**盲发序列后显示「已发送按键」）；
+/// - `freeText`（自由作答，§2.4 裁3）：**阶段机闭环**
+///   [`crate::inject::question::run_free_text_stages`]——屏读定位 `Type something` 行
+///   → 发定位数字（仅移动焦点）→ 复核 → **文本走字符通道** → 回车。仅 claude 支持
+///   （其余工具序列未实测 → 409 `tool_readonly`，前端降级「请在终端作答」）。
+///
+/// # 回执形态（丁T5 起；**前向兼容**）
+///
+/// `status` 保持既有三词（旧前端只认这三个，故**不新增 status 值**）：
+/// - `key_sent`：按键已投递到终端。**单键动作**（select/toggle/cancel）用它，语义与
+///   批次丙一致；**阶段机动作**（submit/freeText）走完全链后用 `key_sent` + 新增
+///   `done:true` 标记（见下）；
+/// - `failed`：投递失败 / 忙让位（可重试）——**含阶段机中止**：`error` 是带段名的
+///   中文文案（用户看得懂卡在哪一段、为什么），`aborted:true` + `stage` 供新前端
+///   精确渲染（旧前端按 `failed` 展示 `error` 文案，行为不变）。
+///
+/// **新增字段全部是「附加」而非「改写」**（前向兼容的做法）：
+/// | 字段 | 类型 | 何时出现 | 旧前端 |
+/// |---|---|---|---|
+/// | `stage` | string | 阶段机动作的中止回执 | 忽略（读 `error` 文案即可） |
+/// | `aborted` | bool | 阶段机动作的中止回执（`true`） | 忽略（`status=failed` 已够） |
+/// | `done` | bool | 阶段机动作走完全链（`true`） | 忽略（`status=key_sent` 已够） |
+/// | `verified` | bool \| null | 阶段机动作的终态回执核验：`true`=屏读到终态锚；
+///   `false`=读到屏但未见锚；`null`=读屏不可用（**均不谎报完成**） | 忽略 |
+///
+/// 为什么**不**加 `status:"in_progress"` 之类的新值：`status` 是旧前端的分支键
+/// （`key_sent` / `failed` 两分支），加新值会让旧前端落进 else → 弹错误或卡在忙碌态。
+/// 「进行中」是**前端的呈现态**（请求未返回期间显示进行中），不需要后端下发状态——
+/// 后端这一趟是同步阻塞的（投递全过程在 handler 内完成才返回）。
+///
+/// 审计：action=`answer`（既有词，不新增），content=`answer::<stage>` 形态——
+/// 阶段机的**段名进审计摘要**（「走到哪」是事后排查的关键信息），result=`ok` /
+/// `aborted:<stage>` / `failed:<e>`。
 pub async fn session_question_answer(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -2901,7 +2973,7 @@ pub async fn session_question_answer(
         Some(a) => a,
         None => return bad_request(),
     };
-    // select/toggle 必带序号；submit/cancel 不消费序号（带了也无害，不校验）
+    // select/toggle 必带序号；freeText 必带非空文本；submit/cancel 不消费附加参数
     if matches!(
         action,
         crate::inject::question::AnswerAction::Select
@@ -2910,6 +2982,29 @@ pub async fn session_question_answer(
     {
         return bad_request();
     }
+    // 自由作答文本：空/纯空白 → 400（阶段机也有同样的守卫，但入口先拦能省一次会话扫描
+    // ——且 400 比 200 failed 更符合「参数就不对」的语义）
+    let free_text: Option<String> = if action == crate::inject::question::AnswerAction::FreeText {
+        let raw = req.text.as_deref().unwrap_or_default();
+        // **两道判空**（顺序要紧）：
+        // ① 原文 trim 后为空 → 用户没输入任何可见字符（含「只敲了回车/空格」）→ 400。
+        //    必须先判原文：归一会把换行变成**字面 `\n` 两字符**，只看归一产物的话
+        //    「只敲了一个回车」会变成一段「合法的可见文本」被当成答案发出去——
+        //    那不是用户的意思。
+        if raw.trim().is_empty() {
+            return bad_request();
+        }
+        // ② 归一（注入通道唯一出口的安全面）：换行 → 字面 `\n`、剥 C0/DEL/C1。
+        //    之后**不加** `[mobile]` 签名——作答文本不是消息。
+        let norm = crate::inject::normalize::normalize_newlines(raw);
+        // 归一**后**再判一次：纯控制字符输入（如只有 ESC）归一会把它剥光 → 空
+        if norm.trim().is_empty() {
+            return bad_request();
+        }
+        Some(norm)
+    } else {
+        None
+    };
     if sid.is_empty() {
         return bad_request();
     }
@@ -2938,19 +3033,35 @@ pub async fn session_question_answer(
             }
         });
         // T3：按**会话工具**分发键序（claude 全键序 / opencode·kimi 单选已验 /
-        // codex 等未验工具只读——「未验不出键」，见 question_key_profile 的表）
+        // codex 等未验工具只读——「未验不出键」，见 question_key_profile 的表）。
+        // **丁T5**：先过**可用性门**（`action_supported`——submit/freeText 的键序
+        // 依赖屏读，没有静态序列，但「支不支持」仍要判），再对**单键动作**取序列
+        // （submit/freeText 取到的会是 Err，那正是「无静态序列」的表达——它们走阶段机）
         let tool_id = session.agent_type.tool_id();
-        let seq = crate::inject::question::answer_key_sequence_for(tool_id, action, req.index, &q)
-            .map_err(|e| {
-                // 未验工具的只读拒绝走 multi_questions 之外的码：前端按 409 只读卡兜底
+        crate::inject::question::action_supported(tool_id, action, req.index, &q).map_err(|e| {
+            // 拒绝码分两档（见 `ActionRefusal`）：参数问题 → 400 bad_index（改参数
+            // 即可重试）；工具未实测 → 409 tool_readonly（前端渲染只读卡引到终端）
+            log::debug!("问答动作不可用（{tool_id}/{action:?}）: {}", e.reason());
+            match e {
+                crate::inject::question::ActionRefusal::BadParameter(_) => "bad_index",
+                crate::inject::question::ActionRefusal::ToolUnverified(_) => "tool_readonly",
+            }
+        })?;
+        // 单键动作才取静态序列；阶段机动作（submit/freeText）序列留空（由编排产生）
+        let seq = match action {
+            crate::inject::question::AnswerAction::Submit
+            | crate::inject::question::AnswerAction::FreeText => Vec::new(),
+            _ => crate::inject::question::answer_key_sequence_for(tool_id, action, req.index, &q)
+                .map_err(|e| {
                 log::debug!("问答键序不可用（{tool_id}）: {e}");
                 if question_profile_is_read_only(tool_id) {
                     "tool_readonly"
                 } else {
                     "bad_index"
                 }
-            })?;
-        Ok((session, seq))
+            })?,
+        };
+        Ok((session, seq, q))
     })
     .await
     {
@@ -2965,7 +3076,7 @@ pub async fn session_question_answer(
                 .into_response();
         }
     };
-    let (session, sequence) = match lookup {
+    let (session, sequence, q_for_plan) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -2995,23 +3106,29 @@ pub async fn session_question_answer(
     let injector = st.injector.clone();
     let pid = session.pid;
     let answer_sid = sid.clone();
+    // 阶段机计划（走位上限依赖选项数——在会话扫描之后才有，故在此构造）
+    let stage_plan = StagePlan::for_action(action, &q_for_plan);
+    let probe_st2 = st.clone();
+    // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
+    let tool_for_dispatch = tool.clone();
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
     // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
     let attempt = tokio::task::spawn_blocking(move || {
         let _guard = crate::inject::queue::try_acquire_inflight(&answer_sid)?;
-        // 序列逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
-        // 前端按 failed{error} 提示用户核对终端状态后重试）
-        let mut result = Ok(());
-        for key in &sequence {
-            if let Err(e) = injector.locate_and_send_key_spec(pid, key, &spec) {
-                result = Err(e);
-                break;
-            }
-        }
-        Some(result)
+        Some(dispatch_question_action(
+            &probe_st2,
+            action,
+            &tool_for_dispatch,
+            pid,
+            &spec,
+            injector.as_ref(),
+            &sequence,
+            free_text.as_deref(),
+            &stage_plan,
+        ))
     })
     .await;
-    let sent = match attempt {
+    let outcome = match attempt {
         Ok(Some(v)) => v,
         Ok(None) => {
             // in-flight 守卫忙（与 flush 循环/直发/审批共用）→ 让位，200 failed 提示
@@ -3028,30 +3145,103 @@ pub async fn session_question_answer(
         }
         Err(e) => {
             log::error!("session-question/answer 投递任务异常: {e}");
-            Err("内部任务异常".to_string())
+            QuestionDispatch::Internal("内部任务异常".to_string())
         }
     };
     let audit_label = action.audit_label(req.index);
-    match sent {
-        Ok(()) => {
+    match outcome {
+        QuestionDispatch::KeySent { stage } => {
+            // 审计摘要：单键动作保持批次丙的 `select#2` / `submit` 形态**逐字不变**
+            // （既有用例与审计页的读法都依赖它）；阶段机动作才追加 `::<stage>`
+            // （段名进审计是事后排查的关键信息）。用 `match` 而不是
+            // `format!("{}::{}", stage.unwrap_or(..))`，正是为了让「单键不追加」这件事
+            // 在代码上直接可读。
+            let audit_content = match stage {
+                None => audit_label.clone(),
+                Some(s) => format!("{audit_label}::{s}"),
+            };
             endpoint_audit(
                 &st,
                 &device_id,
                 &device_name,
                 &tool,
                 &sid,
-                &audit_label,
+                &audit_content,
                 "answer",
                 "ok",
             );
+            let mut body = serde_json::json!({ "status": "key_sent" });
+            if let Some(s) = stage {
+                // 阶段机动作：附加字段（旧前端忽略；见端点文档的表）
+                body["done"] = serde_json::json!(true);
+                body["stage"] = serde_json::json!(s);
+            }
             (
                 StatusCode::OK,
                 [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "key_sent" })),
+                Json(body),
             )
                 .into_response()
         }
-        Err(e) => {
+        QuestionDispatch::StageDone {
+            stage,
+            receipt_seen,
+        } => {
+            // 阶段机走完整条闭环：status 仍是 key_sent（旧前端语义不变），但带上
+            // done/stage/verified——`verified` 的三态见端点文档（**不谎报完成**）
+            let result = match receipt_seen {
+                Some(true) => "ok",
+                Some(false) => "ok:receipt-unseen",
+                None => "ok:receipt-unverifiable",
+            };
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &format!("{audit_label}::{stage}"),
+                "answer",
+                result,
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": stage,
+                    "verified": receipt_seen,
+                })),
+            )
+                .into_response()
+        }
+        QuestionDispatch::Aborted { stage, error } => {
+            // **中止**：与 failed 同槽（status=failed），但带 aborted/stage——前端能
+            // 精确渲染「进行到哪一段停住」，旧前端按 failed 的 error 文案走（不变）
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &format!("{audit_label}::{stage}"),
+                "answer",
+                &format!("aborted:{stage}"),
+            );
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "aborted": true,
+                    "stage": stage,
+                    "error": error,
+                })),
+            )
+                .into_response()
+        }
+        QuestionDispatch::Failed(error) => {
             endpoint_audit(
                 &st,
                 &device_id,
@@ -3060,15 +3250,317 @@ pub async fn session_question_answer(
                 &sid,
                 &audit_label,
                 "answer",
-                &format!("failed:{e}"),
+                &format!("failed:{error}"),
             );
             (
                 StatusCode::OK,
                 [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "failed", "error": e })),
+                Json(serde_json::json!({ "status": "failed", "error": error })),
             )
                 .into_response()
         }
+        QuestionDispatch::Internal(error) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": "failed", "error": error })),
+        )
+            .into_response(),
+    }
+}
+
+/// 阶段机动作的**静态计划**（端点侧构造、传给分派器；纯数据，可测）。
+///
+/// 存在的意义：把「这个动作要不要走阶段机、走位上限多少」这条判据从 handler 的分支
+/// 里提出来。走位上限依赖**选项数**，而选项数在会话扫描之后才知道——故计划在扫描后
+/// 构造（`for_action`），但它的形状（哪三档）与选项数无关，写在一处便于测试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagePlan {
+    /// 单键动作（select/toggle/cancel）：一次投递一个键，无后续阶段
+    SingleKey,
+    /// 多选提交阶段机；`max_down_steps` = 走位上限（选项数 + 2）
+    Submit { max_down_steps: usize },
+    /// 自由作答阶段机
+    FreeText,
+}
+
+impl StagePlan {
+    /// 按动作取计划。`index` 仅对单键动作有意义（这里不看它——它已在参数校验里消费）。
+    ///
+    /// **走位上限 = 选项数 + 2** 的推导：多选界面的行序是「模型选项 1..n」→
+    /// TUI 追加的 `Type something` 行（第 n+1 行）→ `Submit` 行（第 n+2 行）。
+    /// 从第 1 行最多需要 n+1 次 ↓ 到 Submit 行；再加 1 次容错（重绘竞态下一次按键
+    /// 未生效的情形不会白跑——上限只是**死循环兜底**，正常路径在每步复核里提前停手）。
+    fn for_action(
+        action: crate::inject::question::AnswerAction,
+        q: &crate::inject::question::Question,
+    ) -> Self {
+        use crate::inject::question::AnswerAction as A;
+        match action {
+            A::Select | A::Toggle | A::Cancel => Self::SingleKey,
+            A::Submit => Self::Submit {
+                max_down_steps: q.options.len() + 2,
+            },
+            A::FreeText => Self::FreeText,
+        }
+    }
+}
+
+/// 问答动作的**分派结果**（端点回执合成的唯一输入；见 `session_question_answer` 文档）。
+#[derive(Debug, Clone, PartialEq)]
+enum QuestionDispatch {
+    /// 单键动作投递成功（`stage` = `None`——单键动作没有阶段语义）
+    KeySent { stage: Option<&'static str> },
+    /// 阶段机走完整条闭环；`receipt_seen` 三态见端点文档（**不谎报完成**）
+    StageDone {
+        stage: &'static str,
+        receipt_seen: Option<bool>,
+    },
+    /// 阶段机**中止**在某一段（`error` 是带段名的中文文案）
+    Aborted { stage: &'static str, error: String },
+    /// 投递/读屏的**非阶段**失败（单键动作投递失败等，可重试）
+    Failed(String),
+    /// 内部任务异常（spawn_blocking panic 等）
+    Internal(String),
+}
+
+/// **动作分派器**：按 [`StagePlan`] 把动作路由到「单键直发」或两条阶段机之一。
+///
+/// 抽成独立函数（而不是写在 handler 的 `match` 里）的理由：它是**在持 in-flight 守卫
+/// 的闭包内**运行的——写进 `spawn_blocking` 闭包里就只有实机能覆盖。此处把它做成
+/// `fn(&RemoteState, ...) -> QuestionDispatch`，端点测试用假缝（`screen_probe` +
+/// `injector`）即可覆盖「段推进 / 段中止 / 回执三态」全部路径。
+///
+/// # 中止的段名映射（回执的 `stage` 字段从哪来）
+///
+/// 阶段机的 `Err` 文案里**已经含段名**（中文，面向用户），但程序化的回执需要一个稳定
+/// 标识——故此处按**已发出的键数**反推段名（编排各段的键序列是确定的：走位段发
+/// `down`、提交段发 `enter`、确认段发数字；自由作答是定位数字 → 文本 → 回车）。
+/// 反推失败（键序不在预期形态内）→ 用阶段机的首个可能的段名兜底（宁可粗一点，
+/// 也不编一个假的精确位置——文案里的中文说明才是给用户的）。
+#[allow(clippy::too_many_arguments)]
+fn dispatch_question_action(
+    st: &Arc<RemoteState>,
+    action: crate::inject::question::AnswerAction,
+    tool: &str,
+    pid: u32,
+    spec: &crate::inject::families::FamilySpec,
+    injector: &dyn crate::inject::engine::Injector,
+    sequence: &[String],
+    free_text: Option<&str>,
+    plan: &StagePlan,
+) -> QuestionDispatch {
+    match plan {
+        StagePlan::SingleKey => {
+            // 逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
+            // 前端按 failed{error} 提示用户核对终端状态后重试）
+            for key in sequence {
+                if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+            }
+            QuestionDispatch::KeySent { stage: None }
+        }
+        StagePlan::Submit { max_down_steps } => {
+            // 三段（+回执）：提交屏在场 → 闭环走位 → 回车 → Review 屏 → 确认 → 终态。
+            // **每段都在发键前屏读**；轮询/读屏全部经 `RemoteState.screen_probe` 缝。
+            let probe = |stage: &'static str| -> Option<Vec<String>> {
+                (st.screen_probe)(tool, pid).or_else(|| {
+                    log::debug!("问答阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
+                    None
+                })
+            };
+            let sid_log = tool;
+            let mut terminal = crate::inject::mode::Closures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_submit_stages(
+                || poll_question_stage(|| probe("submit-row"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_review_stage(|| probe("review"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_receipt_stage(|| probe("receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+                *max_down_steps,
+            );
+            let _ = (sid_log, action);
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_RECEIPT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => QuestionDispatch::Aborted {
+                    stage: stage_from_abort(&e),
+                    error: e,
+                },
+            }
+        }
+        StagePlan::FreeText => {
+            let Some(text) = free_text else {
+                // 防御：FreeText 计划却没带文本（参数校验已拦 400，不可达）
+                return QuestionDispatch::Failed("自由作答缺少文本".to_string());
+            };
+            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                // **文本走字符通道**（`locate_and_inject_spec`）——裁3 的安全面：
+                // 用户文本绝不进键通道。注意本调用**不带** `[mobile]` 签名（签名是
+                // 「一条新消息」的语义，作答文本不是消息；归一已在 handler 做过）。
+                send_text: |t: &str| {
+                    injector.locate_and_inject_spec(pid, t, spec)?;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    Ok(())
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_free_text_stages(
+                text,
+                || poll_question_stage(|| probe("free-row"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_receipt_stage(|| probe("free-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_FREE_TEXT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => QuestionDispatch::Aborted {
+                    stage: stage_from_abort(&e),
+                    error: e,
+                },
+            }
+        }
+    }
+}
+
+/// **中止段名反推**（回执 `stage` 字段；纯函数，可测）。
+///
+/// 依据 = 阶段机各段的中止文案里点名的**关键判据词**（那些文案是面向用户的，词面
+/// 稳定且与判据一一对应；比按键计数更直接——按键计数在「还没发键就中止」的段上
+/// 区分不出来）。反推不出 → 用 `submit-row`/`free-row` 这类**最靠前的段**兜底
+/// （宁可粗，不编假精度）。
+fn stage_from_abort(err: &str) -> &'static str {
+    // 提交路径（按「中止点从后往前」匹配：越靠后的段越具体）
+    if err.contains("读不到编号") || err.contains("确认项") {
+        return QUESTION_STAGE_CONFIRM;
+    }
+    if err.contains("未出现 Review 确认屏") || err.contains("Review 确认屏") {
+        return QUESTION_STAGE_REVIEW;
+    }
+    if err.contains("Submit 行") || err.contains("未把焦点移到") {
+        return QUESTION_STAGE_SUBMIT_ROW;
+    }
+    // 自由作答路径
+    if err.contains("自由作答行") || err.contains("未出现自由作答") {
+        // 「见不到自由作答行」的中止可能发生在定位段（还没发键）或定位后复核
+        // （已发定位键）——两者的用户动作不同（前者去终端看问题在不在，后者核对
+        // 焦点），故按文案里的复核特征词再分一次
+        if err.contains("已见不到自由作答行") {
+            return QUESTION_STAGE_FREE_TEXT;
+        }
+        return QUESTION_STAGE_FREE_ROW;
+    }
+    if err.contains("作答文本") {
+        return QUESTION_STAGE_FREE_TEXT;
+    }
+    // 兜底：不知道停在哪一段（理论上不可达——上面覆盖了所有中止文案）
+    log::debug!("问答阶段机中止：段名反推未命中（{err}）");
+    QUESTION_STAGE_SUBMIT_ROW
+}
+
+/// **阶段轮询的生产实现**（单段）：按 100ms 步长读屏，直到 `probe` 返回有效形态。
+///
+/// 与 `poll_menu_stage` 的差别：**判据是调用方给的闭包**（各段的锚不同），本函数只管
+/// 「读的节奏与窗尽语义」。窗尽 → `Ok(None)`（调用方按各段语义决定「不出现」是中止
+/// 还是可接受）。读屏本身失败也按「本轮没读到」处理（下一轮再试）——**只有整窗都
+/// 读不到**才是 `Ok(None)`，由调用方的文案说明「读不到屏幕」。
+fn poll_question_stage<P>(probe: P, total_ms: u64) -> Result<Option<Vec<String>>, String>
+where
+    P: Fn() -> Option<Vec<String>>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
+    loop {
+        if let Some(lines) = probe() {
+            return Ok(Some(lines));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
+    }
+}
+
+/// **Review 屏轮询**：窗内等到**该屏形态可行动**（`inject::question::probe_review_screen`
+/// 返回 `Ready`）才返回；`Fatal`（Review 屏在场但形态异常）立即上抛——等下去不会自洽。
+/// 窗尽 → `Ok(None)`（编排据此中止且**不发确认键**）。
+fn poll_review_stage<P>(probe: P, total_ms: u64) -> Result<Option<Vec<String>>, String>
+where
+    P: Fn() -> Option<Vec<String>>,
+{
+    use crate::inject::question::ScreenStep;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
+    loop {
+        if let Some(lines) = probe() {
+            match crate::inject::question::probe_review_screen(&lines) {
+                ScreenStep::Ready(l) => return Ok(Some(l)),
+                ScreenStep::Fatal(why) => return Err(format!("{why}；请人工核对终端")),
+                ScreenStep::NotYet(_) => {}
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
+    }
+}
+
+/// **终态回执轮询**：窗内等到屏上出现终态回执行
+/// （`inject::question::probe_answered_receipt`）→ `Ok(Some(屏))`。
+///
+/// 窗尽仍未见 → `Ok(None)`（**不是失败**：回执可能被后续输出刷走，也可能该版本文案
+/// 不同；调用方据此下发 `verified=false` + 请人工核对，见端点文档）。
+/// 读屏不可用（缝返回 `None` 全程）同样收敛为 `Ok(None)`——我们**没有证据**，故不声称成功。
+fn poll_receipt_stage<P>(probe: P, total_ms: u64) -> Result<Option<Vec<String>>, String>
+where
+    P: Fn() -> Option<Vec<String>>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
+    loop {
+        if let Some(lines) = probe() {
+            if crate::inject::question::probe_answered_receipt(&lines) {
+                return Ok(Some(lines));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
     }
 }
 

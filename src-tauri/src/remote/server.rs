@@ -254,6 +254,23 @@ pub type ConfirmProbeFn = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
 pub type DialogProbeFn =
     dyn Fn(&str, u32) -> Option<Vec<crate::inject::dialog::DialogOption>> + Send + Sync;
 
+/// **可见窗口屏读**探针缝类型（丁T5）：参数 = (session_id, pid)；返回**逐行屏幕文本**
+/// （`read_screen_window` 的产物形态；`None` = 读不到屏/平台无屏读能力）。
+///
+/// # 为什么需要第二条缝（与 [`DialogProbeFn`] 的关系）
+///
+/// [`DialogProbeFn`] 把「屏读 + 编号选项簇解析」的**结论**（是否在场）缝出来，够用
+/// 于「在场即拒」那种**单一布尔判据**。而丁T5 的提交/自由作答阶段机要在**多次读屏
+/// 之间**推进状态（提交行 → Review 屏 → 终态；定位 → 文本 → 终态），且每段的判据
+/// 各不相同（各自的锚文本）——若仍只缝「结论」，端点的轮询就得为每一段复制一遍
+/// 解析逻辑，那正是「同一判据两处实现」的老路。
+///
+/// 故本缝缝的是**能力**（读一屏）而不是结论：判据留在内核
+/// （`inject::question` 的各 `probe_*`），端点只提供「怎么读」与「读的节奏」。
+/// 测试用脚本化屏序列注入，则整条编排（分段、复核、中止）在门禁里可断言，
+/// 而不是只有真机能覆盖。
+pub type ScreenProbeFn = dyn Fn(&str, u32) -> Option<Vec<String>> + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -317,6 +334,13 @@ pub struct RemoteState {
     /// [`DialogProbeFn`] 的缝理由与 [`crate::inject::dialog::blocks_control_injection`]
     /// 的裁决）。**注意 pid 也从参数传入**：端点侧已从会话快照取到，不让假体去猜。
     pub dialog_probe: std::sync::Arc<DialogProbeFn>,
+    /// **可见窗口屏读**能力缝（丁T5）：参数 = (session_id, pid)，返回逐行屏幕文本。
+    /// 生产 = `inject::windows_console::read_screen_window`（Windows）；非 Windows 恒
+    /// None（无屏读 → 阶段机如实中止并引导终端，见 `inject::question` 各段的中止文案）。
+    /// 消费方：`remote::api::session_question_answer` 的提交/自由作答阶段机（缝的形态
+    /// 理由见 [`ScreenProbeFn`] 文档）。**测试注入脚本化屏序列**——否则
+    /// 「每段屏读复核」这条控制流只有实机能覆盖（本批已多次栽在这上面）。
+    pub screen_probe: std::sync::Arc<ScreenProbeFn>,
     /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
     /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
     /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
@@ -473,6 +497,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
@@ -1018,6 +1043,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null), // 本测试不触 /host
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             // 本组测试不触 /session-files /file：注入恒空的路径源
@@ -1390,6 +1416,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "jarvis-win", "platform": "windows", "version": "9.9.9-test" },
@@ -1484,6 +1511,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(move |agent: &str, sid: &str, limit: usize| {
                 cap.lock()
@@ -1686,6 +1714,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| {
@@ -1966,6 +1995,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2110,6 +2140,7 @@ mod tests {
                 // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
                 // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
                 dialog_probe: std::sync::Arc::new(|_, _| None),
+                screen_probe: std::sync::Arc::new(|_, _| None),
                 host_source: Box::new(|| serde_json::Value::Null),
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2666,6 +2697,7 @@ mod tests {
                     // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
                     // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
                     dialog_probe: std::sync::Arc::new(|_, _| None),
+                    screen_probe: std::sync::Arc::new(|_, _| None),
                     host_source: Box::new(|| serde_json::Value::Null),
                     message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                     path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -2968,6 +3000,7 @@ mod tests {
             // 丁T3：对话框在场探针（同参数化）——缺省 None = 无法判定 ⇒ 控制类注入
             // 照常投递；「在场即拒」用例经 inject_state_with_dialog 注入假体
             dialog_probe,
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -3009,8 +3042,12 @@ mod tests {
     // 同语义、测试 memory 自建库，缺省键回默认表），定制映射由各测试在内存库 seed。
     // 不触真实 ~/.mam。
 
-    /// Task 11 专用 state：会话夹具与 inject_state 同一套（sess_a Waiting / sess_b
-    /// Processing / sess_d zcode Waiting 无映射 / sess_e-f 备用），但 sess_a 可携带
+    /// Task 11 专用 state：会话夹具与 inject_state 同一套（sess_a Waiting / **sess_t5m**
+    /// Processing——原 id 叫 sess_b，但它与 `inject_state` 的 sess_b **撞了裸 id**
+    /// 且本族的 `approve_endpoints_honor_wait_mark` 会真投递：INFLIGHT 按裸 id 全局
+    /// 占用 → 并行跑时两条测试互抢守卫，`queue_jump_and_retract` 因此偶发假红
+    /// （丁T5 的变异验证轮复现：单跑恒绿、并行 3/3 红）。按「守卫 id 立规」② 改名
+    /// 独占。 / sess_d zcode Waiting 无映射 / sess_e-f 备用），但 sess_a 可携带
     /// last_message 供 detect 命中（inj_sess 夹具的 last_message 恒 None——approve_state
     /// 局部变体按需补设）；另加 sess_g（Waiting，独占 id）：in-flight 守卫按 session_id
     /// 全局占用，审批 POST 测试错开 id 防并行挤占（Task 6 夹具同规）。sess_h（Waiting，
@@ -3051,7 +3088,7 @@ mod tests {
                 s
             },
             inj_sess(
-                "sess_b",
+                "sess_t5m",
                 crate::session::AgentType::Claude,
                 12,
                 crate::session::SessionStatus::Processing,
@@ -3172,6 +3209,7 @@ mod tests {
             // 丁T3 F4-2：对话框探针参数化（缺省「无法判定」；dialog 分支用例经
             // approve_state_with_dialog 注入**真机屏幕原文**假体）
             dialog_probe,
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -4169,7 +4207,7 @@ mod tests {
         );
     }
 
-    /// 审批选项（不可批）：非 Waiting（sess_b Processing）→ available=false；
+    /// 审批选项（不可批）：非 Waiting（sess_t5m Processing）→ available=false；
     /// Waiting 但 last_message 与 marker 无关 → available=false；last_message=None
     /// （sess_e 夹具原样）→ available=false（None 不命中）
     #[tokio::test]
@@ -4177,12 +4215,12 @@ mod tests {
         let state_a_hit = approve_state(FakeInjector::ok(), Some(APPROVE_HIT_MSG));
         persist_named_device(&state_a_hit, "mm", "测试设备");
         let app = router(state_a_hit);
-        // sess_b Processing → available=false（Waiting 判定先于映射解析）
+        // sess_t5m Processing → available=false（Waiting 判定先于映射解析）
         let r = app
             .clone()
             .oneshot(req(
                 "GET",
-                "/m/api/v1/session-approve-options?session_id=sess_b",
+                "/m/api/v1/session-approve-options?session_id=sess_t5m",
                 Some("mam_device=mm"),
                 None,
             ))
@@ -4246,7 +4284,7 @@ mod tests {
         assert!(v["options"].as_array().unwrap().is_empty());
     }
 
-    /// T4 红卡接铃铛：等待标记路径——sess_b（Processing claude、无 last_message，
+    /// T4 红卡接铃铛：等待标记路径——sess_t5m（Processing claude、无 last_message，
     /// 旧判定下必 available=false）seed 审批等待标记 → GET available=true 且选项齐
     /// （键位零泄漏）；POST approve 越过 409 not_waiting 直达键位分发（键位 "1"）。
     /// 标记经 store.with 播种（内存库，零接触真实 ~/.mam）；state 实例按测试隔离
@@ -4256,7 +4294,7 @@ mod tests {
         let state = approve_state(fake.clone(), Some(APPROVE_HIT_MSG));
         persist_named_device(&state, "mm", "测试设备");
         state.store.with(|conn| {
-            crate::database::dao::approval_wait::mark(conn, "claude", "sess_b", 1_000, "测试标记")
+            crate::database::dao::approval_wait::mark(conn, "claude", "sess_t5m", 1_000, "测试标记")
         });
         let app = router(state.clone());
         // GET：Processing + 标记 → available=true（跳过 detect）+ 键位零泄漏
@@ -4264,7 +4302,7 @@ mod tests {
             .clone()
             .oneshot(req(
                 "GET",
-                "/m/api/v1/session-approve-options?session_id=sess_b",
+                "/m/api/v1/session-approve-options?session_id=sess_t5m",
                 Some("mam_device=mm"),
                 None,
             ))
@@ -4285,7 +4323,7 @@ mod tests {
                 "POST",
                 "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_b","optionId":"approve"}"#),
+                Some(r#"{"sessionId":"sess_t5m","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
@@ -4309,7 +4347,7 @@ mod tests {
                 "POST",
                 "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_b","optionId":"approve"}"#),
+                Some(r#"{"sessionId":"sess_t5m","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
@@ -4423,14 +4461,14 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 404);
         assert!(body_string(r).await.contains("no_mapping"));
-        // 非 Waiting（sess_b Processing）→ 409 not_waiting
+        // 非 Waiting（sess_t5m Processing）→ 409 not_waiting
         let r = app
             .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-approve",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_b","optionId":"approve"}"#),
+                Some(r#"{"sessionId":"sess_t5m","optionId":"approve"}"#),
             ))
             .await
             .unwrap();
@@ -4647,6 +4685,16 @@ mod tests {
     fn question_state_with_msgs(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         message_source: Box<crate::remote::content::MessageSourceFn>,
+    ) -> Arc<RemoteState> {
+        question_state_full(injector, message_source, std::sync::Arc::new(|_, _| None))
+    }
+
+    /// question_state 第三变体（丁T5）：`screen_probe` 缝可注入（阶段机用例的脚本化
+    /// 屏序列）。其余与会话清单同 [`question_state_with_msgs`]。
+    fn question_state_full(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        message_source: Box<crate::remote::content::MessageSourceFn>,
+        screen_probe: std::sync::Arc<crate::remote::server::ScreenProbeFn>,
     ) -> Arc<RemoteState> {
         let sess = |id: &str, pid: u32, status: crate::session::SessionStatus| {
             inj_sess(id, crate::session::AgentType::Claude, pid, status)
@@ -4906,6 +4954,37 @@ mod tests {
                 72,
                 crate::session::SessionStatus::Idle,
             ),
+            // ===== 丁T5 阶段机族（sess_t5a..sess_t5h）=====
+            // **守卫 id 立规**：阶段机用例会真投递，INFLIGHT 按裸 id 全局占用——
+            // 每个 POST 用例必须独占一个 id（与批次丙 sess_u..sess_bk 全段互异）。
+            // 全 claude Waiting（阶段机只对 claude 放行）。
+            sess("sess_t5a", 84, crate::session::SessionStatus::Waiting),
+            sess("sess_t5b", 85, crate::session::SessionStatus::Waiting),
+            sess("sess_t5c", 86, crate::session::SessionStatus::Waiting),
+            sess("sess_t5d", 87, crate::session::SessionStatus::Waiting),
+            sess("sess_t5e", 88, crate::session::SessionStatus::Waiting),
+            sess("sess_t5f", 89, crate::session::SessionStatus::Waiting),
+            sess("sess_t5g", 90, crate::session::SessionStatus::Waiting),
+            sess("sess_t5h", 91, crate::session::SessionStatus::Waiting),
+            // 工具面用例（非 claude 的拒绝路径不走阶段机，但同样要独占 id）
+            inj_sess(
+                "sess_t5i",
+                crate::session::AgentType::Codex,
+                92,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_t5j",
+                crate::session::AgentType::OpenCode,
+                93,
+                crate::session::SessionStatus::Waiting,
+            ),
+            inj_sess(
+                "sess_t5k",
+                crate::session::AgentType::Kimi,
+                94,
+                crate::session::SessionStatus::Waiting,
+            ),
         ];
         Arc::new(RemoteState {
             session_source: Box::new(move || crate::session::SessionsResponse {
@@ -4920,6 +4999,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe,
             host_source: Box::new(|| serde_json::Value::Null),
             message_source,
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -5116,112 +5196,734 @@ mod tests {
         assert_eq!(audits[0].summary, "toggle#1");
     }
 
-    /// 问答应答（多选 submit）：sess_x → 200 key_sent + 注入序列 **down ×(n+1) →
-    /// enter → '1'**（n=3 选项 → down×4；三段式探测 K10——Enter 当提交是反直觉
-    /// 反例 K9，序列中 enter 只出现在 Submit 行）。
-    #[tokio::test]
-    async fn question_answer_submit_three_phase() {
-        let fake = FakeInjector::ok();
-        let state = question_state(fake.clone());
-        persist_named_device(&state, "mm", "测试设备");
-        state.store.with(|conn| {
-            crate::database::dao::question_wait::mark(
-                conn,
-                "claude",
-                "sess_x",
-                1_000,
-                "等待回答",
-                Some(Q_MULTI_PAYLOAD),
-            )
-        });
-        let app = router(state.clone());
-        let r = app
-            .clone()
-            .oneshot(req(
-                "POST",
-                "/m/api/v1/session-question/answer",
-                Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_x","action":"submit"}"#),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 200);
-        assert!(body_string(r).await.contains("\"status\":\"key_sent\""));
-        let down = (34u32, "down".to_string());
-        assert_eq!(
-            fake.recorded_keys(),
-            vec![
-                down.clone(),
-                down.clone(),
-                down.clone(),
-                down,
-                (34u32, "enter".to_string()),
-                (34u32, "1".to_string()),
-            ],
-            "submit = down×(n+1) → enter → '1'（n=3，探测 K10 三段式）：{:?}",
-            fake.recorded_keys()
-        );
-        let audits = state
-            .store
-            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
-        assert_eq!(audits[0].action, "answer");
-        assert_eq!(audits[0].summary, "submit");
+    // ==== 丁T5：提交与自由作答的**阶段机端点用例** ====
+    //
+    // 阶段机要「每段屏读复核」，而真实屏读需要 conhost（CI 恒 None）→ 经
+    // `RemoteState.screen_probe` 缝注入**脚本化屏序列**：每一屏都是**真机屏幕原文**
+    // （2026-09-21 探测档案 `C-s8-*` / `C-s7-*` 逐字），序列按「按键会重绘」的时序
+    // 推进。于是「段推进 / 段中止 / 回执三态」全部在门禁里可断言。
+    //
+    // **推进纪律**：屏序列由**假注入器**推（每次 `locate_and_send_key_spec` /
+    // `locate_and_inject_spec` 调用推一格）——这模拟生产的时序（按键 → TUI 重绘），
+    // 而屏读缝本身**只读当前屏**（不推进）。两者分开才能在测试里表达「按键被吞」
+    // （发了键但屏不变）这类形态：那时把两次注入映射到同一屏即可。
+    mod stage_screen {
+        use std::sync::{Arc, Mutex};
+
+        /// 屏序列 + 推进计数（按键推一格）。`Arc` 便于注入到假注入器与屏读缝两处。
+        pub struct Script {
+            pub screens: Vec<Vec<String>>,
+            pub pos: Mutex<usize>,
+        }
+
+        impl Script {
+            pub fn new(screens: Vec<Vec<String>>) -> Arc<Self> {
+                Arc::new(Self {
+                    screens,
+                    pos: Mutex::new(0),
+                })
+            }
+            /// 当前屏（不推进）；序列为空 → None（= 读不到屏）
+            pub fn current(&self) -> Option<Vec<String>> {
+                let p = *self.pos.lock().unwrap();
+                self.screens
+                    .get(p.min(self.screens.len().saturating_sub(1)))
+                    .cloned()
+            }
+            /// 按键 → TUI 重绘（推一格；到末屏则停——生产侧「屏不再变」）
+            pub fn advance(&self) {
+                let mut p = self.pos.lock().unwrap();
+                if *p + 1 < self.screens.len() {
+                    *p += 1;
+                }
+            }
+            /// 屏读缝：只读当前屏（`None` = 读不到屏）
+            pub fn probe(self: &Arc<Self>) -> Arc<crate::remote::server::ScreenProbeFn> {
+                let me = self.clone();
+                Arc::new(move |_sid: &str, _pid: u32| me.current())
+            }
+        }
     }
 
-    /// 复评 Minor 1：submit 出手失败（FakeInjector::failing）→ 端点级零覆盖补齐——
-    /// 200 failed{error} 透传 + **recorded_keys() 恰为 [(pid, "down")] 一条**（锁
-    /// 「首错即停」：submit 六键序列首个 down 即 Err，后续 enter/'1' 不再出手）+
-    /// 审计 action=answer 且 result=failed:{e} 前缀。sess_ak 独占（守卫 id 立规）。
-    /// 不加 k 键失败模式（评审原话：不必）。
-    #[tokio::test]
-    async fn question_answer_submit_first_error_stops_sequence_and_audits_failed() {
-        let fake = FakeInjector::failing("注入通道拒绝");
-        let state = question_state(fake.clone());
+    /// 推屏的假注入器（在既有 [`FakeInjector`] 的记账之外，把每次注入映射成一次重绘）。
+    /// 直接复用 `FakeInjector` + 一个 `Script`：本包装只做「转发 + 推进」。
+    struct AdvancingInjector {
+        inner: Arc<FakeInjector>,
+        script: Arc<stage_screen::Script>,
+        /// 失败开关（透传给内层；本包装只需知道「是否推进」——失败时不推进，因为
+        /// 没送到终端就不会重绘）
+        failing: bool,
+    }
+
+    impl crate::inject::engine::Injector for AdvancingInjector {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
+            let r = self.inner.locate_and_inject(pid, text);
+            if r.is_ok() && !self.failing {
+                self.script.advance();
+            }
+            r
+        }
+        fn locate_and_send_key(&self, pid: u32, key: &str) -> Result<(), String> {
+            let r = self.inner.locate_and_send_key(pid, key);
+            if r.is_ok() && !self.failing {
+                self.script.advance();
+            }
+            r
+        }
+        fn locate_and_send_key_spec(
+            &self,
+            pid: u32,
+            key: &str,
+            spec: &crate::inject::families::FamilySpec,
+        ) -> Result<(), String> {
+            let r = self.inner.locate_and_send_key_spec(pid, key, spec);
+            if r.is_ok() && !self.failing {
+                self.script.advance();
+            }
+            r
+        }
+        fn locate_and_inject_spec(
+            &self,
+            pid: u32,
+            text: &str,
+            spec: &crate::inject::families::FamilySpec,
+        ) -> Result<(), String> {
+            let r = self.inner.locate_and_inject_spec(pid, text, spec);
+            if r.is_ok() && !self.failing {
+                self.script.advance();
+            }
+            r
+        }
+    }
+
+    /// 阶段机用例的 state：`question_state_full` + 脚本化屏读缝（会话清单同）。
+    fn question_state_scripted(
+        injector: Arc<dyn crate::inject::engine::Injector>,
+        script: Arc<stage_screen::Script>,
+    ) -> Arc<RemoteState> {
+        question_state_full(
+            injector,
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            script.probe(),
+        )
+    }
+
+    /// 阶段机用例的真机屏幕夹具（探测档案 2026-09-21 原文，逐字；与
+    /// `inject::question::tests` 的同名夹具同源——两处都是「一份原文两处引用」，
+    /// 端点侧需要独立可用的副本，否则测试模块间要提权互引）。
+    mod screen_fixtures {
+        fn lines(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| s.to_string()).collect()
+        }
+        /// `C-s8-cursor-submit-20260921-015844.png`（焦点在 Submit 行）
+        pub fn submit_focused() -> Vec<String> {
+            lines(&[
+                " ← ☒ Favorite fruits  ✔Submit  →",
+                "",
+                " Which fruits are your favorites? (Select all that apply)",
+                "",
+                " 1. [✓] Apple",
+                " A sweet, crisp fruit available in many varieties.",
+                " 2. [ ] Banana",
+                " A soft, tropical fruit rich in potassium.",
+                " 3. [ ] Peach",
+                " A juicy summer fruit with a stone pit.",
+                " 4. [ ] Type something",
+                " ❯   Submit",
+                " 5. Chat about this",
+                "",
+                " Enter to select · ↑/ to navigate · Esc to cancel",
+            ])
+        }
+        /// `C-s8-submitted-20260921-015906.png`（Review 确认屏）
+        pub fn review() -> Vec<String> {
+            lines(&[
+                " ← ☒ Favorite fruits  ✔Submit  →",
+                "",
+                " Review your answers",
+                "",
+                " ● Which fruits are your favorites? (Select all that apply)",
+                " → Banana, Apple",
+                "",
+                " Ready to submit your answers?",
+                "",
+                " 1. Submit answers",
+                " 2. Cancel",
+            ])
+        }
+        /// `C-s8-final-20260921-015941.png`（终态）
+        pub fn answered() -> Vec<String> {
+            lines(&[
+                " ● User answered Claude's questions:)",
+                " L  • Which fruits are your favorites? (Select all that apply) → Banana, Apple",
+                "",
+                " Thought for 2s (ctrl+o to expand)",
+            ])
+        }
+        /// 普通输出屏（无任何阶段锚）
+        pub fn plain() -> Vec<String> {
+            lines(&["  some output", " > "])
+        }
+        /// `C-s7-q-ui-20260921-015440.png`（单选自由作答屏）
+        pub fn free_row() -> Vec<String> {
+            lines(&[
+                " ☐ Preferred drink",
+                "",
+                " Which drink do you prefer?",
+                "",
+                " 1. Coffee",
+                " 2. Tea",
+                " 3. Type something.",
+                "",
+                " 4. Chat about this",
+            ])
+        }
+        /// 焦点已落在自由作答行（`C-s7-text-in-input-*` 形态）
+        pub fn free_row_focused() -> Vec<String> {
+            lines(&[
+                " ☐ Preferred drink",
+                "",
+                " Which drink do you prefer?",
+                "",
+                " 1. Coffee",
+                " 2. Tea",
+                " ❯ 3. Type something.",
+                "",
+                " 4. Chat about this",
+            ])
+        }
+    }
+
+    /// 阶段机用例的**装配**：脚本屏序列 + 推屏假注入器 + 注入缝的 state + 已配对设备。
+    /// 返回 `(state, fake, script)`——`fake` 用于断言「实际发了哪些键/哪些文本」。
+    fn stage_rig(
+        screens: Vec<Vec<String>>,
+        failing: bool,
+    ) -> (
+        Arc<RemoteState>,
+        Arc<FakeInjector>,
+        Arc<stage_screen::Script>,
+    ) {
+        let script = stage_screen::Script::new(screens);
+        let inner = if failing {
+            FakeInjector::failing("注入通道拒绝")
+        } else {
+            FakeInjector::ok()
+        };
+        let adv = Arc::new(AdvancingInjector {
+            inner: inner.clone(),
+            script: script.clone(),
+            failing,
+        });
+        let state = question_state_scripted(adv, script.clone());
         persist_named_device(&state, "mm", "测试设备");
+        (state, inner, script)
+    }
+
+    /// 播种问题标记（阶段机用例的公共前置；`sid` 由各用例独占——守卫 id 立规）。
+    fn mark_question(state: &Arc<RemoteState>, tool: &str, sid: &str, payload: &str) {
         state.store.with(|conn| {
             crate::database::dao::question_wait::mark(
                 conn,
-                "claude",
-                "sess_ak",
+                tool,
+                sid,
                 1_000,
                 "等待回答",
-                Some(Q_MULTI_PAYLOAD),
+                Some(payload),
             )
         });
+    }
+
+    /// **丁T5 端到端①（多选提交 happy path）**：提交屏（焦点已在 Submit 行）→ 回车 →
+    /// Review 屏 → 抄屏上编号 '1' → 终态屏。
+    ///
+    /// 断言：键序 = `[enter, "1"]`（**零 down**——焦点本就在提交行）；回执带
+    /// `done:true` + `verified:true`（屏读确认了终态）；审计摘要 = `submit::receipt`
+    /// （段名进摘要）。还原动作：把 `run_submit_stages` 换回批次丙的盲发序列
+    /// （down×4 + enter + '1'）→ 第一句键序断言先红。
+    #[tokio::test]
+    async fn question_submit_stage_machine_happy_path() {
+        let (state, fake, _script) = stage_rig(
+            vec![
+                screen_fixtures::submit_focused(),
+                screen_fixtures::review(),
+                screen_fixtures::answered(),
+            ],
+            false,
+        );
+        mark_question(&state, "claude", "sess_t5a", Q_MULTI_PAYLOAD);
         let app = router(state.clone());
         let r = app
-            .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ak","action":"submit"}"#),
+                Some(r#"{"sessionId":"sess_t5a","action":"submit"}"#),
             ))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
         let body = body_string(r).await;
         assert!(
-            body.contains("\"status\":\"failed\"") && body.contains("注入通道拒绝"),
-            "注入失败应 200 failed 并透传错误文案：{body}"
+            body.contains("\"status\":\"key_sent\"")
+                && body.contains("\"done\":true")
+                && body.contains("\"verified\":true"),
+            "闭环走完的回执 = key_sent + done + verified=true：{body}"
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(46u32, "down".to_string())],
-            "首错即停：submit 序列首个 down 即 Err，恰记录一条、后续键不再出手：{:?}",
+            vec![(84u32, "enter".to_string()), (84u32, "1".to_string())],
+            "键序 = [enter, '1']（焦点已在 Submit 行 → 零走位；确认键抄自 Review 屏）：{:?}",
             fake.recorded_keys()
         );
         let audits = state
             .store
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
-        assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].action, "answer");
         assert_eq!(
-            audits[0].result, "failed:注入通道拒绝",
-            "审计 result = failed:错误文案 前缀口径"
+            audits[0].summary, "submit::receipt",
+            "审计摘要带段名（走完的段 = receipt）"
         );
-        assert_eq!(audits[0].summary, "submit");
-        assert_eq!(audits[0].session_id, "sess_ak");
+        assert_eq!(audits[0].result, "ok");
+    }
+
+    /// **丁T5 端到端②（提交路径中止：未见 Review 屏）**——问题 7 的正解。
+    ///
+    /// 脚本：提交屏 → 回车后屏不变（Review 屏未出现，轮询窗尽）。断言：发了 enter、
+    /// **没发任何数字**；回执 `status:"failed"` + `aborted:true` + `stage:"review"`
+    /// + 中文 error（用户可读）；审计 result = `aborted:review`。
+    /// 还原动作：把 Review 段改回「不等屏读直接发 '1'」→ 第二句键序断言先红。
+    #[tokio::test]
+    async fn question_submit_stage_machine_aborts_when_review_absent() {
+        // 两屏都是提交屏：回车推进到第二屏（还是提交屏）→ Review 轮询窗尽
+        let (state, fake, _script) = stage_rig(
+            vec![
+                screen_fixtures::submit_focused(),
+                screen_fixtures::submit_focused(),
+            ],
+            false,
+        );
+        mark_question(&state, "claude", "sess_t5b", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5b","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "中止走 200 failed 槽（可重试语义）");
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"")
+                && body.contains("\"aborted\":true")
+                && body.contains("\"stage\":\"review\""),
+            "中止回执须可程序分诊到段（failed+aborted+stage）：{body}"
+        );
+        assert!(
+            body.contains("Review 确认屏"),
+            "error 文案须点名缺什么（用户可读）：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(85u32, "enter".to_string())],
+            "**绝不发确认数字**（Review 屏不在场）：{:?}",
+            fake.recorded_keys()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(audits[0].summary, "submit::review", "段名进审计摘要");
+        assert_eq!(audits[0].result, "aborted:review");
+    }
+
+    /// **丁T5 端到端③（走位失败中止）**：屏上只有提交屏但**焦点在选项行**（每次 ↓
+    /// 后屏不变 = 终端吞键）→ 走位上限耗尽 → 中止且**不发回车**。
+    ///
+    /// 断言：键全是 `down`（一个不落都是走位键）、**没有 enter**；`stage:"submit-row"`。
+    /// 还原动作：删掉走位复核（发满就回车）→ 第二句断言先红。
+    #[tokio::test]
+    async fn question_submit_stage_machine_aborts_when_walk_stalls() {
+        // 焦点永在选项行（屏不推进 → 每次读都是同一屏）
+        let mut stuck = screen_fixtures::submit_focused();
+        for l in stuck.iter_mut() {
+            if l.contains("❯   Submit") {
+                *l = "    Submit".to_string(); // 提交行在场但无焦点标记
+            }
+            if l.contains("1. [✓] Apple") {
+                *l = format!(" ❯{l}");
+            }
+        }
+        let (state, fake, _script) = stage_rig(vec![stuck], false);
+        mark_question(&state, "claude", "sess_t5c", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5c","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"stage\":\"submit-row\"") && body.contains("\"aborted\":true"),
+            "走位失败的中止段 = submit-row：{body}"
+        );
+        let keys = fake.recorded_keys();
+        assert!(
+            !keys.iter().any(|(_, k)| k == "enter"),
+            "走位未到位 ⇒ **绝不发回车**：{keys:?}"
+        );
+        assert!(
+            keys.iter().all(|(_, k)| k == "down") && !keys.is_empty(),
+            "只发过走位键（且确实发过——上限 3+2=5 次）：{keys:?}"
+        );
+    }
+
+    /// **丁T5 端到端④（终态回执未见 → 不谎报完成）**：闭环走完（提交屏 → Review →
+    /// 确认已发），但终态屏读窗内只有普通输出 → `verified:false`（**仍是 key_sent +
+    /// done**——键确实发出去了，事实是「投递完成、未见回执」）。
+    ///
+    /// 还原动作：把 `StageDone` 的 verified 改成恒 true → 第一句断言先红。
+    #[tokio::test]
+    async fn question_submit_stage_machine_receipt_unseen_not_lied() {
+        let (state, fake, _script) = stage_rig(
+            vec![
+                screen_fixtures::submit_focused(),
+                screen_fixtures::review(),
+                screen_fixtures::plain(),
+            ],
+            false,
+        );
+        mark_question(&state, "claude", "sess_t5d", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5d","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"done\":true") && body.contains("\"verified\":false"),
+            "闭环走完但未见终态回执 = done:true + verified:false（不谎报）：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(87u32, "enter".to_string()), (87u32, "1".to_string())]
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(
+            audits[0].result, "ok:receipt-unseen",
+            "审计如实记「已投递但未核验到回执」"
+        );
+    }
+
+    /// **丁T5 端到端⑤（读屏不可用 → 零投递中止）**：`screen_probe` 恒 `None`
+    /// （非 Windows / 屏读失败）→ 第 1 段就中止，**零按键**。这是安全面：读不到屏
+    /// 就绝不猜着发键。
+    /// 还原动作：把第 1 段的屏读检查删掉（默认形态成立）→ 本用例先红（会发 enter）。
+    #[tokio::test]
+    async fn question_submit_stage_machine_aborts_with_zero_keys_when_screen_unavailable() {
+        let (state, fake, _script) = stage_rig(vec![], false); // 空序列 → 恒 None
+        mark_question(&state, "claude", "sess_t5e", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5e","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"aborted\":true") && body.contains("\"stage\":\"submit-row\""),
+            "读不到屏的中止段 = submit-row：{body}"
+        );
+        assert!(
+            fake.recorded_keys().is_empty() && fake.recorded().is_empty(),
+            "读不到屏 ⇒ 零投递（一个键都不猜）：keys={:?} texts={:?}",
+            fake.recorded_keys(),
+            fake.recorded()
+        );
+    }
+
+    /// **丁T5 端到端⑥（自由作答 happy path，裁3 安全面）**：单选屏 → 定位 `Type
+    /// something`（屏上编号 3）→ 文本（**字符通道**）→ 回车 → 终态。
+    ///
+    /// 断言：键通道 = `['3', 'enter']`（**无 Esc 无第二数字**）；文本通道恰好一次且
+    /// 内容 = 用户文本、**不带** `[mobile]` 签名；回执 `done:true` +
+    /// `verified:true`；审计摘要 = `freeText::free-text`（**不含正文**）。
+    /// 还原动作：把文本改走 `locate_and_send_key_spec`（键通道）→ 第二句断言先红。
+    #[tokio::test]
+    async fn question_free_text_stage_happy_path_sends_text_via_text_channel() {
+        let (state, fake, _script) = stage_rig(
+            vec![
+                screen_fixtures::free_row(),
+                screen_fixtures::free_row_focused(),
+                screen_fixtures::free_row_focused(),
+                screen_fixtures::answered(),
+            ],
+            false,
+        );
+        mark_question(&state, "claude", "sess_t5f", Q_SINGLE_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5f","action":"freeText","text":"green tea please"}"#),
+            ))
+            .await
+            .unwrap();
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\"")
+                && body.contains("\"done\":true")
+                && body.contains("\"verified\":true"),
+            "自由作答闭环回执：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(89u32, "3".to_string()), (89u32, "enter".to_string())],
+            "键通道 = [定位数字(屏上编号 3), 提交回车]——**无 Esc 无第二数字**：{:?}",
+            fake.recorded_keys()
+        );
+        assert_eq!(
+            fake.recorded(),
+            vec![(89u32, "green tea please".to_string())],
+            "文本恰一次、走字符通道、**不带 [mobile] 签名**：{:?}",
+            fake.recorded()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(audits[0].summary, "freeText::free-text");
+        assert!(
+            !audits[0].summary.contains("green"),
+            "审计摘要**不得承载用户正文**：{}",
+            audits[0].summary
+        );
+    }
+
+    /// **丁T5 端到端⑦（自由作答文本归一）**：换行/控制字符经 `normalize_newlines`
+    /// 后的形态进字符通道（**不含裸换行 / 控制字符**——注入通道安全面）。
+    /// 还原动作：把归一那行删掉（直接投原文）→ 断言先红（文本里会出现裸换行）。
+    #[tokio::test]
+    async fn question_free_text_text_is_normalized_before_injection() {
+        let (state, fake, _script) = stage_rig(
+            vec![
+                screen_fixtures::free_row(),
+                screen_fixtures::free_row_focused(),
+                screen_fixtures::free_row_focused(),
+                screen_fixtures::answered(),
+            ],
+            false,
+        );
+        mark_question(&state, "claude", "sess_t5g", Q_SINGLE_PAYLOAD);
+        let app = router(state.clone());
+        // JSON 里的 \n 是**真换行**（JSON 转义），\u001b 是真 ESC
+        let payload =
+            r#"{"sessionId":"sess_t5g","action":"freeText","text":"第一行\n第二行\u001b[31m"}"#;
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(payload),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let texts = fake.recorded();
+        assert_eq!(texts.len(), 1, "文本恰一次：{texts:?}");
+        let sent = &texts[0].1;
+        assert!(
+            sent.contains("第一行\\n第二行") && sent.ends_with("[31m"),
+            "换行 → 字面 \\n、ESC 剥除（归一）：{sent:?}"
+        );
+        assert!(
+            !sent.chars().any(|c| (c as u32) <= 0x1F),
+            "注入文本零 C0 残留（通道安全面）：{sent:?}"
+        );
+        assert!(
+            !sent.contains("[mobile"),
+            "作答文本**不带** mobile 签名（签名是消息语义，作答不是消息）：{sent:?}"
+        );
+    }
+
+    /// **丁T5 端到端⑧（自由作答的空文本 → 400）**：入口参数校验拦下（比 200 failed
+    /// 更准确——「参数就不对」）。
+    /// 还原动作：删掉 handler 的 freeText 空文本检查 → 本用例先红（变成 200）。
+    #[tokio::test]
+    async fn question_free_text_empty_text_is_bad_request() {
+        let (state, fake, _script) = stage_rig(vec![screen_fixtures::free_row()], false);
+        mark_question(&state, "claude", "sess_t5h", Q_SINGLE_PAYLOAD);
+        let app = router(state.clone());
+        for payload in [
+            r#"{"sessionId":"sess_t5h","action":"freeText"}"#,
+            r#"{"sessionId":"sess_t5h","action":"freeText","text":"   "}"#,
+            r#"{"sessionId":"sess_t5h","action":"freeText","text":"\n\t"}"#,
+        ] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-question/answer",
+                    Some("mam_device=mm"),
+                    Some(payload),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "空/纯空白文本 → 400：{payload}");
+        }
+        assert!(
+            fake.recorded_keys().is_empty() && fake.recorded().is_empty(),
+            "400 路径零投递零审计"
+        );
+    }
+
+    /// 单工具 state（阶段机工具面用例共用）：会话清单仅一条 + 脚本屏读缝。
+    fn single_tool_scripted_state(
+        tool: crate::session::AgentType,
+        sid: &str,
+        pid: u32,
+        screens: Vec<Vec<String>>,
+    ) -> (
+        Arc<RemoteState>,
+        Arc<FakeInjector>,
+        Arc<stage_screen::Script>,
+    ) {
+        let script = stage_screen::Script::new(screens);
+        let inner = FakeInjector::ok();
+        let adv = Arc::new(AdvancingInjector {
+            inner: inner.clone(),
+            script: script.clone(),
+            failing: false,
+        });
+        let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
+        let state = Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: vec![session.clone()],
+                total_count: 1,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: adv,
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: script.probe(),
+            host_source: Box::new(|| serde_json::Value::Null),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+        });
+        persist_named_device(&state, "mm", "测试设备");
+        (state, inner, script)
+    }
+
+    /// **丁T5 端到端⑨（自由作答的工具面）**：非 claude 工具 → 409 `tool_readonly`
+    /// （不进阶段机、零投递）。这正是 §2.8 的降级：序列未定案的工具**不假装能发**。
+    /// 还原动作：把 `action_supported` 的 FreeText 分支改成恒 Ok → 本用例先红。
+    #[tokio::test]
+    async fn question_free_text_refused_for_unverified_tools() {
+        for (tool, tool_id, sid, pid) in [
+            (crate::session::AgentType::Codex, "codex", "sess_t5i", 92u32),
+            (
+                crate::session::AgentType::OpenCode,
+                "opencode",
+                "sess_t5j",
+                93u32,
+            ),
+        ] {
+            let (state, inner, _s) =
+                single_tool_scripted_state(tool, sid, pid, vec![screen_fixtures::free_row()]);
+            mark_question(&state, tool_id, sid, Q_SINGLE_PAYLOAD);
+            let app = router(state.clone());
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-question/answer",
+                    Some("mam_device=mm"),
+                    Some(&format!(
+                        r#"{{"sessionId":"{sid}","action":"freeText","text":"hi"}}"#
+                    )),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                r.status(),
+                409,
+                "{tool_id} 自由作答未实测 → 409（不假装能发）"
+            );
+            let body = body_string(r).await;
+            assert!(
+                body.contains("tool_readonly"),
+                "{tool_id} 的拒绝码须可程序分诊：{body}"
+            );
+            assert!(
+                inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
+                "{tool_id} 拒绝路径零投递"
+            );
+        }
+    }
+
+    /// **丁T5 端到端⑩（多选提交的工具面）**：非 claude → 409 `tool_readonly`
+    /// （多选三段式的 Review 屏判据只在 claude 实机取证；别家多选形态无样本）。
+    /// 还原动作：把 `action_supported` 的 Submit 分支去掉工具检查 → 本用例先红。
+    #[tokio::test]
+    async fn question_submit_refused_for_unverified_tools() {
+        let (state, inner, _s) = single_tool_scripted_state(
+            crate::session::AgentType::Kimi,
+            "sess_t5k",
+            94u32,
+            vec![screen_fixtures::submit_focused()],
+        );
+        mark_question(&state, "kimi", "sess_t5k", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5k","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "kimi 多选提交未实测 → 409");
+        let body = body_string(r).await;
+        assert!(body.contains("tool_readonly"), "拒绝码：{body}");
+        assert!(
+            inner.recorded_keys().is_empty(),
+            "拒绝路径零投递：{:?}",
+            inner.recorded_keys()
+        );
     }
 
     /// 问答应答（取消）：sess_y → 200 key_sent + (pid=35, "esc") 恰一键（探测 K3：
@@ -7258,6 +7960,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -7553,6 +8256,7 @@ mod tests {
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| {
                 serde_json::json!({
                     "host": { "name": "t", "platform": "macos", "version": "0.0.0-test" },
@@ -7825,6 +8529,9 @@ mod tests {
                 let opts = real_dialog_fixture();
                 std::sync::Arc::new(move |_, _| Some(opts.clone()))
             },
+            // 本用例只验控制类注入守卫（对话框在场即拒）——问答阶段机的屏读缝
+            // 缺省「读不到屏」（该用例不走问答路径）
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -8071,6 +8778,7 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe,
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -8108,6 +8816,7 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -8146,6 +8855,7 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe,
+            screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),

@@ -9,11 +9,13 @@ import type { QuestionInfoView } from "@/mobile/api";
 // 前缀包含关系：GET 路径是 POST 路径的前缀，长路径必须先判——ApproveCard 测试
 // 同款教训）。组件挂载即拉问答，用例先 findBy 选项按钮就绪再交互。
 
-/** 单选题夹具（探测档案 §3 真实 questions JSON 缩录） */
+/** 单选题夹具（探测档案 §3 真实 questions JSON 缩录）。
+ *  `freeText` 显式给 false（= 工具未定案形态）——需要输入框的用例自行覆盖为 true。 */
 function singleQuestionInfo(overrides: Partial<QuestionInfoView> = {}): QuestionInfoView {
   return {
     available: true,
     source: "mark",
+    freeText: false,
     questions: [
       {
         header: "Next step",
@@ -22,7 +24,7 @@ function singleQuestionInfo(overrides: Partial<QuestionInfoView> = {}): Question
         options: [
           { label: "Tool demo", description: "Explain how AskUserQuestion works." },
           { label: "Start a task", description: "Start a coding or file task." },
-          { label: "Nothing yet", description: "You have no further request." },
+          { label: "Nothing yet", description: "No further request." },
         ],
       },
     ],
@@ -35,6 +37,7 @@ function multiQuestionInfo(): QuestionInfoView {
   return {
     available: true,
     source: "mark",
+    freeText: false,
     questions: [
       {
         header: "Favorite fruits",
@@ -131,7 +134,7 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     routes.question = singleQuestionInfo();
     render(<QuestionCard session={{ id: "sess-1" }} />);
     expect(await screen.findByTestId("question-card")).toBeTruthy();
-    expect((screen.getByTestId("question-card").getAttribute("data-mode"))).toBe("single");
+    expect(screen.getByTestId("question-card").getAttribute("data-mode")).toBe("single");
     expect(screen.getByTestId("question-header").textContent).toBe("Next step");
     expect(screen.getByTestId("question-text").textContent).toBe(
       "This is a demo question — what would you like to do next?"
@@ -144,10 +147,12 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     );
     expect(screen.getByTestId("question-option-1").textContent).toContain("Start a task");
     expect(screen.getByTestId("question-option-2").textContent).toContain("Nothing yet");
-    // 自由文本引导文案（v1 不注入 Type something. 行——探测 K4-K7 定案）
+    // 自由文本入口：**freeText !== true 的工具**渲染「去终端作答」引导文案
+    // （丁T5 §2.8 降级：序列未定案不假装能发），且**不渲染输入框**
     expect(screen.getByTestId("question-freeform-hint").textContent).toContain(
-      "下方输入框直接回复"
+      "远程自由作答尚未实测，请在终端作答"
     );
+    expect(screen.queryByTestId("question-freetext-input")).toBeNull();
     // 问答模式零 允许/拒绝 键钮
     expect(screen.queryByText("允许")).toBeNull();
     expect(screen.queryByText("拒绝")).toBeNull();
@@ -188,7 +193,7 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     fireEvent.click(screen.getByTestId("question-option-0"));
     await flushAsync();
     expect(
-      (screen.getByTestId("question-option-0").getAttribute("class"))!.includes("bg-sky-500/20")
+      screen.getByTestId("question-option-0").getAttribute("class")!.includes("bg-sky-500/20")
     ).toBe(true);
     expect((screen.getByTestId("question-submit") as HTMLButtonElement).disabled).toBe(false);
     // 点选 2 再勾一个；再点 1 取消勾选（本地态翻转）
@@ -197,10 +202,10 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     fireEvent.click(screen.getByTestId("question-option-0"));
     await flushAsync();
     expect(
-      (screen.getByTestId("question-option-0").getAttribute("class"))!.includes("bg-sky-500/20")
+      screen.getByTestId("question-option-0").getAttribute("class")!.includes("bg-sky-500/20")
     ).toBe(false);
     expect(
-      (screen.getByTestId("question-option-2").getAttribute("class"))!.includes("bg-sky-500/20")
+      screen.getByTestId("question-option-2").getAttribute("class")!.includes("bg-sky-500/20")
     ).toBe(true);
     // toggle 不置终态：卡片仍可交互
     expect(screen.queryByTestId("question-sent")).toBeNull();
@@ -236,18 +241,32 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
       source: "mark",
       questions: [
         // description 恒在（后端 json! 无条件输出）——空串形态夹具
-        { header: "A", question: "First?", multiSelect: false, options: [{ label: "a1", description: "" }, { label: "a2", description: "" }] },
-        { header: "B", question: "Second?", multiSelect: true, options: [{ label: "b1", description: "" }, { label: "b2", description: "" }] },
+        {
+          header: "A",
+          question: "First?",
+          multiSelect: false,
+          options: [
+            { label: "a1", description: "" },
+            { label: "a2", description: "" },
+          ],
+        },
+        {
+          header: "B",
+          question: "Second?",
+          multiSelect: true,
+          options: [
+            { label: "b1", description: "" },
+            { label: "b2", description: "" },
+          ],
+        },
       ],
     };
     const { container } = render(<QuestionCard session={{ id: "sess-4" }} />);
     expect(await screen.findByTestId("question-card")).toBeTruthy();
-    expect((screen.getByTestId("question-card").getAttribute("data-mode"))).toBe("readonly");
+    expect(screen.getByTestId("question-card").getAttribute("data-mode")).toBe("readonly");
     expect(screen.getByTestId("question-readonly-0").textContent).toContain("First?");
     expect(screen.getByTestId("question-readonly-1").textContent).toContain("B");
-    expect(screen.getByTestId("question-readonly-hint").textContent).toContain(
-      "请在终端完成作答"
-    );
+    expect(screen.getByTestId("question-readonly-hint").textContent).toContain("请在终端完成作答");
     // 「结论不超证据」：多问题零注入面
     expect(screen.queryByTestId("question-option-0")).toBeNull();
     expect(screen.queryByTestId("question-submit")).toBeNull();
@@ -279,6 +298,166 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(container.textContent).toBeTruthy();
   });
 
+  // ===== 丁T5：进行中态 / 中止态 / 卡内自由文本 =====
+
+  it("进行中态：请求在途期间显示「进行中」而不是「已发送按键」，完成后转终态", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    // **受控 promise**：只把 **submit** 的响应挂在手里（toggle 立即成功——
+    // 否则提交钮一直是禁用态，看不到在途帧），这样才看得到「在途」那一帧
+    let releaseSubmit!: (v: Response) => void;
+    const pendingSubmit = new Promise<Response>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/session-question/answer")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { action?: string };
+        if (body.action === "submit") return pendingSubmit;
+        return new Response(JSON.stringify({ status: "key_sent" }), { status: 200 });
+      }
+      return new Response(JSON.stringify(multiQuestionInfo()), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<QuestionCard session={{ id: "sess-t5a" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-submit"));
+    // **在途帧**：进行中态在场（段名 = submit-row），终态文案不在
+    const progress = await screen.findByTestId("question-progress");
+    expect(progress.textContent).toContain("正在定位提交入口");
+    expect(progress.getAttribute("data-stage")).toBe("submit-row");
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    // 放行响应 → 转终态
+    releaseSubmit(
+      new Response(
+        JSON.stringify({ status: "key_sent", done: true, stage: "receipt", verified: true }),
+        { status: 200 }
+      )
+    );
+    expect(await screen.findByTestId("question-sent")).toBeTruthy();
+    expect(screen.queryByTestId("question-progress")).toBeNull();
+    expect(screen.queryByTestId("question-verified-unseen")).toBeNull();
+  });
+
+  it("阶段机中止：显示中止段 + 原因 + 引到终端（可重试），不是笼统的「已发送按键」", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    routes.answer = {
+      status: "failed",
+      aborted: true,
+      stage: "review",
+      error:
+        "已发回车但屏上未出现 Review 确认屏（未见「review your answers」/「ready to submit」）——已中止，未发确认键；请人工核对终端",
+    };
+    render(<QuestionCard session={{ id: "sess-t5b" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-submit"));
+    // 中止段名 + 后端整句原因 + 引到终端的提示
+    expect((await screen.findByTestId("question-aborted-stage")).textContent).toContain(
+      "等待确认屏"
+    );
+    expect(screen.getByTestId("question-error").textContent).toContain("Review 确认屏");
+    expect(screen.getByTestId("question-aborted-hint").textContent).toContain(
+      "请到终端查看当前对话框状态后重试"
+    );
+    // **可重试**：不置终态（提交钮仍在，按钮未锁死）
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    expect(screen.getByTestId("question-submit")).toBeTruthy();
+  });
+
+  it("阶段机走完但未见终态回执：如实提示「请到终端确认结果」（不谎报完成）", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    routes.answer = { status: "key_sent", done: true, stage: "receipt", verified: false };
+    render(<QuestionCard session={{ id: "sess-t5c" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-submit"));
+    expect(await screen.findByTestId("question-sent")).toBeTruthy();
+    expect(screen.getByTestId("question-verified-unseen").textContent).toContain(
+      "未在屏上见到完成回执"
+    );
+  });
+
+  it("卡内自由文本（freeText=true 的工具）：输入框 + 「作为回答发送」→ POST freeText{text}", async () => {
+    installFetch();
+    routes.question = singleQuestionInfo({ freeText: true });
+    routes.answer = { status: "key_sent", done: true, stage: "free-text", verified: true };
+    render(<QuestionCard session={{ id: "sess-t5d" }} />);
+    await screen.findByTestId("question-card");
+    // 输入框与发送钮在场；空文本时发送钮禁用（防空提交）
+    const input = (await screen.findByTestId("question-freetext-input")) as HTMLInputElement;
+    expect((screen.getByTestId("question-freetext-send") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: "green tea please" } });
+    expect((screen.getByTestId("question-freetext-send") as HTMLButtonElement).disabled).toBe(
+      false
+    );
+    fireEvent.click(screen.getByTestId("question-freetext-send"));
+    expect(await screen.findByTestId("question-sent")).toBeTruthy();
+    // POST body：action=freeText + text 原文（归一在后端；前端不加工）
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies).toEqual([
+      { sessionId: "sess-t5d", action: "freeText", text: "green tea please" },
+    ]);
+    // 成功后输入框清空（已投递；留着会让用户以为没发出去）——但终态下输入框整块不渲染
+    expect(screen.queryByTestId("question-freetext-input")).toBeNull();
+  });
+
+  it("多选卡也提供自由文本入口（freeText=true）：与勾选/提交并存，互不干扰", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    routes.question.freeText = true;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-t5e" }} />);
+    await screen.findByTestId("question-card");
+    // 三条路都在场：勾选钮（多选语义）+ 提交钮 + 自由文本输入框
+    expect(await screen.findByTestId("question-option-0")).toBeTruthy();
+    expect(screen.getByTestId("question-submit")).toBeTruthy();
+    expect(screen.getByTestId("question-freetext-input")).toBeTruthy();
+    // 自由作答不置勾选态（两条路各自独立）
+    fireEvent.change(screen.getByTestId("question-freetext-input"), {
+      target: { value: "别的回答" },
+    });
+    fireEvent.click(screen.getByTestId("question-freetext-send"));
+    await flushAsync();
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies).toEqual([{ sessionId: "sess-t5e", action: "freeText", text: "别的回答" }]);
+  });
+
+  it("freeText 缺省（旧后端 / 未定案工具）：不渲染输入框，渲染终端引导文案", async () => {
+    installFetch();
+    // 夹具不带 freeText 字段（旧后端形态）
+    const info = singleQuestionInfo();
+    delete (info as { freeText?: boolean }).freeText;
+    routes.question = info;
+    render(<QuestionCard session={{ id: "sess-t5f" }} />);
+    await screen.findByTestId("question-card");
+    expect(screen.queryByTestId("question-freetext-input")).toBeNull();
+    expect(screen.queryByTestId("question-freetext-send")).toBeNull();
+    expect(screen.getByTestId("question-freeform-hint").textContent).toContain("请在终端作答");
+  });
+
+  it("ApiError tool_readonly：分診为「该工具的远程作答尚未实测」并引到终端", async () => {
+    installFetch();
+    routes.question = singleQuestionInfo({ freeText: true });
+    routes.answerStatus = 409;
+    routes.answerBody = { error: "tool_readonly" };
+    render(<QuestionCard session={{ id: "sess-t5g" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.change(await screen.findByTestId("question-freetext-input"), {
+      target: { value: "hi" },
+    });
+    fireEvent.click(screen.getByTestId("question-freetext-send"));
+    expect((await screen.findByTestId("question-error")).textContent).toContain(
+      "该工具的远程作答尚未实测，请在终端完成作答"
+    );
+  });
+
   it("answerable 缺省（旧后端）：仍走可作答路径（前向兼容）", async () => {
     installFetch();
     // 夹具不带 answerable 字段
@@ -287,7 +466,8 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(screen.queryByTestId("question-tool-readonly-hint")).toBeNull();
   });
 
-  it("available=false / 拉取失败：组件自隐（container empty）", async () => {    installFetch();
+  it("available=false / 拉取失败：组件自隐（container empty）", async () => {
+    installFetch();
     routes.question = singleQuestionInfo({ available: false, questions: [] });
     const { container } = render(<QuestionCard session={{ id: "sess-5" }} />);
     await flushAsync();

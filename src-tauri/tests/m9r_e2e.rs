@@ -1056,6 +1056,21 @@ async fn e2e_http_full_chain() {
         dialog_probe: Arc::new(|_sid: &str, pid: u32| {
             multi_agents_manager_lib::inject::dialog::probe_screen_dialog(pid)
         }),
+        // 丁T5：问答阶段机的屏读**能力**缝——实机 E2E 走真实屏读（这条测试本来就
+        // 需要一个真 conhost 目标进程；非 Windows 上 `read_screen_window` 不存在，
+        // 故与生产装配同构：`#[cfg(windows)]` 直调，其它平台恒 None）。
+        screen_probe: {
+            #[cfg(windows)]
+            {
+                Arc::new(|_sid: &str, pid: u32| {
+                    multi_agents_manager_lib::inject::e2e_support::read_screen_lines(pid)
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                Arc::new(|_sid: &str, _pid: u32| None)
+            }
+        },
     });
 
     // 配对设备（server.rs 既有 persist_named_device 先例）：cookie 直指内存库设备行

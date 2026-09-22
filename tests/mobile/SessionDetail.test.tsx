@@ -1714,6 +1714,38 @@ describe("SessionDetail：计划一等卡片（T1）", () => {
     expect(screen.getByTestId("msg-0").getAttribute("data-kind")).toBe("plan");
   });
 
+  // 丁T5（问题 11 的真实断点）：计划卡此前**漏挂** `.md-body` 排版层——
+  // Tailwind v4 preflight 把 h1-h6 的字号/字重与 ul/ol 的 list-style 全重置，
+  // 故计划正文里的 `###` 小标题与 `-` 列表在这张卡上被拍平成正文
+  // （普通消息卡与「工具参数升格」卡都挂了 `.md-body`，唯独计划卡漏了）。
+  // 真机夹具：本机 rollout 2026-09-21T17-38-17 行 115（4 个 `###` + 14 行列表）。
+  it("计划卡必须挂 .md-body 排版层（preflight 拍平 ### 标题/列表的回归锁）", async () => {
+    installFetch();
+    // 真机计划原文缩录（结构不变：## 一级 + ### 二级 + 嵌套列表）
+    const realPlan =
+      "## 修改《末班车》情感救赎版\n\n### 概要\n在现有文件基础上改写为约 500 字的短篇版本。\n\n" +
+      "### 修改方案\n- 新建文件：`悬疑小说-末班车-情感救赎版-500字.md`，不覆盖原稿。\n- 开头直接进入场景。\n" +
+      "  - 嵌套项一\n  - 嵌套项二\n\n### 验证方式\n- 使用 UTF-8 读取新文件。\n";
+    routes.messages = [msg({ seq: 0, kind: "plan", content: realPlan, toolName: "codex" })];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    const card = (await screen.findByTestId("plan-0")) as HTMLElement;
+    // **判据**：卡片内存在挂 `.md-body` 的容器（排版层生效的锚点）——
+    // 只断言「渲染出了 H2/H3/LI」不足以锁住本 bug（ReactMarkdown 一直都能解析出来，
+    // 被 preflight 拍平的是**样式**；`.md-body` 类才是样式的载体）
+    const mdBody = card.querySelector(".md-body");
+    expect(mdBody).not.toBeNull();
+    // 结构也在（markdown 解析正常）：H2 / H3 / 列表项
+    expect(screen.getByText("修改《末班车》情感救赎版").tagName).toBe("H2");
+    expect(screen.getByText("概要").tagName).toBe("H3");
+    expect(screen.getByText("验证方式").tagName).toBe("H3");
+    // 列表项文本被行内 `<code>` 切分（`悬疑小说-…md` 是 code 元素），故按 li 元素断言
+    const items = mdBody!.querySelectorAll("li");
+    expect(items.length).toBeGreaterThanOrEqual(4);
+    expect(Array.from(items).some((li) => li.textContent?.includes("不覆盖原稿"))).toBe(true);
+    // 嵌套列表（真机原文的 `  - 嵌套项`）必须在 `.md-body` 内（排版层覆盖到嵌套层）
+    expect(mdBody!.contains(screen.getByText("嵌套项一"))).toBe(true);
+  });
+
   it("总结模式：plan 不折叠、不计入「已折叠 N 条」计数", async () => {
     installFetch();
     routes.messages = [
@@ -2357,10 +2389,7 @@ describe("SessionDetail：计划待确认挂载门的真机状态矩阵（丁T2 
   // idle 只是防御位（MAM 未运行时状态可能回落）——两者都必须挂载。
   it("kimi idle + 尾部计划提案：同样挂载（防御位——真机在 Waiting 已由既有用例覆盖）", async () => {
     installFetch();
-    routes.messages = [
-      planMsg(0, "# Plan: Create hi.txt"),
-      planMsg(1, "# Plan: Create yo.txt"),
-    ];
+    routes.messages = [planMsg(0, "# Plan: Create hi.txt"), planMsg(1, "# Plan: Create yo.txt")];
     routes.approveOptions = realPlanPendingPayload;
     render(
       <SessionDetail
@@ -2481,4 +2510,4 @@ describe("丁T2 N2：isPlanPending 与后端判据的跨语言共享夹具锁", 
     const consumed = [...longHistory, m("user")];
     expect(isPlanPending(consumed, "codex")).toBe(false);
   });
-})
+});

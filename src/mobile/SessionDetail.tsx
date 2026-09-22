@@ -674,7 +674,15 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
                 计划
               </p>
-              {renderMarkdown(m.content)}
+              {/* 丁T5 修复（问题 11 的真实断点）：本卡片此前**漏挂** `.md-body` 排版层
+                  ——Tailwind v4 preflight 把 h1-h6 的字号/字重与 ul/ol 的 list-style
+                  全部重置（见 mobile.css 排版层注释），故计划正文里的 `###` 小标题与
+                  `-` 列表在这张卡上被**拍平成正文**（消息流普通消息与「工具参数升格」
+                  那张卡都挂了 `.md-body`，唯独这里漏了）。
+                  真机证据：本机 rollout `~/.codex/sessions/2026/09/21/
+                  rollout-2026-09-21T17-38-17-…jsonl` 行 115 的计划含 4 个 `###` 小标题
+                  + 14 行列表——正是任务书问题 11 说的「markdown 不完整」。 */}
+              <div className="md-body">{renderMarkdown(m.content)}</div>
             </div>
           );
         }

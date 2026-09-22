@@ -35,6 +35,15 @@ pub mod windows_console;
 #[cfg(windows)]
 pub mod e2e_support {
     pub use super::windows_console::{inject_key_spec, inject_text_spec, InjectStats};
+    /// 丁T5：问答阶段机的屏读能力（E2E 夹具的 `screen_probe` 缝要按 pid 真读一屏）。
+    /// 与 [`super::dialog::probe_screen_dialog`] 的区别：后者返回**解析结论**，本项
+    /// 返回**逐行原文**——阶段机的各段判据在内核里，缝要给的是能力（理由见
+    /// `remote::server::ScreenProbeFn` 的文档）。薄壳而非 re-export：底层
+    /// `read_screen_window` 是 `pub(crate)`，re-export 不出 crate（且本模块的
+    /// `doc(hidden)` 面不该扩底层可见性）。
+    pub fn read_screen_lines(pid: u32) -> Option<Vec<String>> {
+        super::windows_console::read_screen_window(pid).ok()
+    }
 }
 
 /// 桌面端写审计查看（W5 只读入口）：返回最近 limit 条（缺省 100），最新在前。

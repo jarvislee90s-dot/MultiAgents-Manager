@@ -17,15 +17,26 @@
 //   K8）+ 本地勾选态（仅在成功回执后切换，防端点拒绝时本地状态漂移）+「提交」钮 →
 //   POST submit（后端三段式：down×(n+1) → enter → '1'，探测 K10——Enter 当提交是
 //   反直觉反例 K9，前端绝不自行拼 Enter）；
-// - 自由文本：TUI 自动追加的 "N. Type something." 行不在 questions 载荷（探测档案
-//   §2 UI 结构备注），v1 不做注入（K4-K7 定案：定位+文本+回车序列未纳入）——卡片
-//   渲染引导文案指向下方输入框普通消息发送；
+// - **丁T5 起三段式改为后端阶段机闭环**（§2.3 裁4）：submit 的响应带 `done`/`stage`/
+//   `verified`——走完整条（提交行 → 走位 → 回车 → Review 屏 → 抄屏上编号确认 → 终态）
+//   才显示完成；中途任一段屏读不符 → `failed{aborted:true, stage}`，卡片显示**中止在
+//   哪一段 + 原因 + 引到终端**（不是笼统的「已发送按键」）；
+// - **进行中态**（§2.3「卡片进行中态替代『已发送按键』」）：请求在途期间卡片显示
+//   「进行中（走到哪一段）」——后端的段推进是同步的（一次请求内走完），故前端只需
+//   一个总进行中态 + 段名文案（`QUESTION_STAGE_LABELS`）；
+// - 自由文本（**丁T5 §2.4 入口 1，仅单题卡 + 仅 `info.freeText === true` 的工具**）：
+//   卡内嵌输入框 + 「作为回答发送」→ POST freeText{text}。后端序列 = 定位
+//   `Type something` 行（数字，仅移动焦点）→ 文本（**字符通道**）→ 回车；文本经归一
+//   且**不带** `[mobile]` 签名。工具未定案（codex/kimi/opencode/未知）→ 渲染
+//   「请在终端作答」引导文案（**不假装能发**，§2.8）；
 // - 多问题（questions.length>1）：**只读卡**——题干罗列 +「请在终端完成作答」引导，
 //   零注入按钮（翻页键序未测，「结论不超证据」；后端 answer 端点同样拒绝）；
-// - 应答分診：key_sent → 「已发送按键」终态（按钮禁用）；failed{error} → 错误文案
-//   可重试；ApiError（409/400 带 data.error）→ 分診中文文案：no_question→「当前没有
-//   待回答的问题」、multi_questions→「多个问题请回到终端完成作答」、bad_index→
-//   「选项序号无效，请刷新后重试」、其余显示 message。
+// - 应答分診：key_sent → 终态（按钮禁用）——阶段机动作另显 `verified` 的三态；failed
+//   {error} → 错误文案可重试（`aborted:true` 时额外显示段名 + 引到终端）；ApiError
+//   （409/400 带 data.error）→ 分診中文文案：no_question→「当前没有待回答的问题」、
+//   multi_questions→「多个问题请回到终端完成作答」、tool_readonly→「该工具的远程作答
+//   尚未实测，请在终端完成作答」、bad_index→「选项序号无效，请刷新后重试」、
+//   其余显示 message。
 // **已知限制（丁T1 复评 F-1，如实申报）**：重拉只由**状态跃迁**驱动，不做卡内轮询
 // （轮询超 T1 范围，丁T2 另有安排）。因此同一 waiting 窗口内的非跃迁变化——例如
 // 模型连续提两组问题、或用户改答但状态未变——不会自动重拉，需等下一次状态跃迁
@@ -46,8 +57,35 @@ import {
   fetchSessionQuestion,
   sessionQuestionAnswer,
   type QuestionAnswerAction,
+  type QuestionAnswerStage,
   type QuestionInfoView,
 } from "./api";
+
+/** 阶段名 → 用户可读文案（**进行中态与中止回执共用**，两处不会漂移）。
+ *  取值与后端 `remote::api::QUESTION_STAGE_*` 逐字对应（见 api.ts 的
+ *  `QuestionAnswerStage` 注释）。 */
+const QUESTION_STAGE_LABELS: Record<QuestionAnswerStage, string> = {
+  "submit-row": "定位提交入口",
+  review: "等待确认屏",
+  confirm: "确认提交",
+  receipt: "核对完成回执",
+  "free-row": "定位自由作答行",
+  "free-text": "提交回答文本",
+};
+
+/** 阶段名 → 进行中文案（比 `QUESTION_STAGE_LABELS` 更像「正在做什么」——
+ *  同一段在「进行中」与「中止」两个语境里的措辞不同，两套文案都在本文件内。 */
+const QUESTION_STAGE_PROGRESS: Record<QuestionAnswerStage, string> = {
+  "submit-row": "正在定位提交入口（屏读确认）…",
+  review: "已提交勾选，正在等待确认屏…",
+  confirm: "确认屏已出现，正在确认提交…",
+  receipt: "正在核对完成回执…",
+  "free-row": "正在定位自由作答输入行…",
+  "free-text": "正在提交回答文本…",
+};
+
+/** 自由作答文本长度上限（与 composer 的 `MAX_SEND_CHARS` 对齐；后端同口径 400） */
+const MAX_FREE_TEXT_CHARS = 10000;
 
 /** 问答载荷的**内容指纹**（丁T1 复评 F2-1，纯函数）：题干 + 每题的选项标签与顺序
  *  + 多选标记 + 选项描述的组合摘要。同一问题重复拉取恒等；模型换题或改选项即变。
@@ -78,13 +116,27 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [ready, setReady] = useState(false);
   // 应答进行中（防连点）
   const [busy, setBusy] = useState(false);
+  // **进行中态**（丁T5 §2.3）：请求在途期间显示「进行中（走到哪一段）」——
+  // 阶段机动作（submit/freeText）是**一条同步请求内走完整条闭环**的，故前端拿不到
+  // 中间段；这里显示的是「已发起的动作」，段名文案按动作类型取首段（`stage` 字段
+  // 只有中止时才有真值）。请求返回即被终态或中止态取代。
+  const [inProgress, setInProgress] = useState<QuestionAnswerStage | null>(null);
   // 多选本地勾选态（仅在 toggle 成功回执后切换——端点拒绝时本地状态不漂移）
   const [checked, setChecked] = useState<Set<number>>(() => new Set());
   // 终态：按键序列已投递（key_sent）——按钮禁用 +「已发送按键」。**toggle 不算终态**
   // （多选点选后仍需「提交」，置终态会锁死提交钮）
   const [sent, setSent] = useState(false);
+  // 阶段机走完全链后的**终态回执核验**（丁T5）：true=屏读到终态锚（确认完成）；
+  // false=读到屏但未见锚（不谎报，提示人工核对）；null/undefined=读屏不可用。
+  // 非阶段机动作（select/toggle/cancel）恒 null（无此语义）。
+  const [verified, setVerified] = useState<boolean | null>(null);
   // 失败文案（failed{error} 回执 / ApiError 分診）——非 null 展示，按钮保持可点
   const [error, setError] = useState<string | null>(null);
+  // 中止的段名（丁T5：`failed{aborted:true, stage}`）——与 `error` 并存：
+  // error 是后端的整句中文说明，stage 供渲染「卡在哪一段」的进度语义
+  const [abortedStage, setAbortedStage] = useState<QuestionAnswerStage | null>(null);
+  // 自由作答输入框内容（**仅单题卡 + info.freeText === true 时渲染**）
+  const [freeText, setFreeText] = useState("");
 
   // 拉取（挂载一次 + 状态跃迁重拉，丁T1 复评 F-1）：deps 含 `session.status`——
   // 详情页停留期间 Board 数据通道把活会话 status 对齐进 selected（App.tsx
@@ -125,6 +177,10 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         ) {
           setSent(false);
           setChecked(new Set());
+          // 新问题的输入框清空（旧答案不该跟着新题走）
+          setFreeText("");
+          setVerified(null);
+          setAbortedStage(null);
         }
         if (fp !== "") lastFingerprint.current = fp;
         setInfo(v);
@@ -139,12 +195,15 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   }, [session.id, status]);
 
   const handleAnswer = useCallback(
-    async (action: QuestionAnswerAction, index?: number) => {
+    async (action: QuestionAnswerAction, index?: number, text?: string) => {
       if (busy || sent) return;
       setBusy(true);
       setError(null);
+      setAbortedStage(null);
+      // **进行中态**（丁T5）：按动作显示对应的首段文案（提交链/自由作答链）
+      setInProgress(action === "freeText" ? "free-row" : "submit-row");
       try {
-        const res = await sessionQuestionAnswer(session.id, action, index);
+        const res = await sessionQuestionAnswer(session.id, action, index, text);
         if (res.status === "key_sent") {
           if (action === "toggle" && typeof index === "number") {
             // 多选勾选切换：成功回执后翻本地位（下轮渲染高亮）；不置终态
@@ -158,11 +217,18 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               return next;
             });
           } else {
-            // select / submit / cancel：终态（数字已提交 / 三段式已发 / 已取消）
+            // select / submit / cancel / freeText：终态
+            // （select=数字已提交 / submit=阶段机走完 / cancel=已取消 / freeText=文本已提交）
             setSent(true);
+            // 阶段机动作带回 verified（三态）；单键动作无该字段 → 保持 null
+            setVerified(typeof res.verified === "boolean" ? res.verified : null);
+            // 自由作答成功后清空输入框（已投递；留着会让用户以为没发出去）
+            if (action === "freeText") setFreeText("");
           }
         } else {
+          // failed：区分「阶段机中止」（aborted+stage）与普通投递失败（可重试）
           setError(res.error);
+          if (res.aborted === true && res.stage) setAbortedStage(res.stage);
         }
       } catch (e) {
         if (e instanceof ApiError) {
@@ -171,6 +237,8 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             setError("当前没有待回答的问题");
           } else if (code === "multi_questions") {
             setError("多个问题请回到终端完成作答");
+          } else if (code === "tool_readonly") {
+            setError("该工具的远程作答尚未实测，请在终端完成作答");
           } else if (code === "bad_index") {
             setError("选项序号无效，请刷新后重试");
           } else {
@@ -181,6 +249,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         }
       } finally {
         setBusy(false);
+        setInProgress(null);
       }
     },
     [busy, sent, session.id]
@@ -277,6 +346,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   }
 
   const q = questions[0];
+  // 自由作答入口的**渲染条件**（丁T5 §2.4：v1 仅单题卡；工具未定案则降级）：
+  // - 单选/多选都提供（自由作答是「不用选项作答」的通用入口）；
+  // - `info.freeText === true`（后端按工具判：只有 claude 定案）才渲染输入框；
+  //   否则渲染引导文案（**不假装能发**）。
+  // 注意：**多选卡也提供**——多选走勾选+提交是「选选项」的路径，自由作答是另一条
+  // 路径（TUI 里同一屏的 `Type something` 行），两者不冲突。
+  const freeTextEnabled = info.freeText === true;
 
   return (
     <InteractiveCard
@@ -298,18 +374,54 @@ export default function QuestionCard({ session }: QuestionCardProps) {
       <p data-testid="question-text" className="mt-1 text-sm text-slate-800 dark:text-slate-200">
         {q.question}
       </p>
+      {/* **进行中态**（丁T5 §2.3）——替代「已发送按键」：提交/自由作答的整条闭环是
+          一次同步请求，期间显示「正在做什么」（段名文案），请求返回后本块消失。 */}
+      {busy && inProgress !== null && (
+        <p
+          data-testid="question-progress"
+          data-stage={inProgress}
+          className="mt-1.5 text-xs font-medium text-sky-700 dark:text-sky-400"
+        >
+          <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 align-middle" />
+          {QUESTION_STAGE_PROGRESS[inProgress]}
+        </p>
+      )}
       {error !== null && (
         <p data-testid="question-error" className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+          {/* 中止（阶段机）时把「卡在哪一段」放在原因之前——用户第一眼要知道停在哪 */}
+          {abortedStage !== null && (
+            <span data-testid="question-aborted-stage" className="font-medium">
+              中止于「{QUESTION_STAGE_LABELS[abortedStage]}」段：
+            </span>
+          )}
           {error}
         </p>
       )}
-      {sent && (
+      {abortedStage !== null && (
         <p
-          data-testid="question-sent"
-          className="mt-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+          data-testid="question-aborted-hint"
+          className="mt-1 text-xs text-amber-700 dark:text-amber-400"
         >
-          已发送按键
+          已停止投递后续按键——请到终端查看当前对话框状态后重试
         </p>
+      )}
+      {sent && (
+        <div className="mt-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+          <p data-testid="question-sent">
+            {/* 阶段机动作走完整条闭环 → 追加「已走完提交闭环」；单键动作与走完整条的
+                都保留「已发送按键」这句主文案（既有用例与用户习惯都认它）。 */}
+            已发送按键{verified !== null && "（已走完提交闭环）"}
+          </p>
+          {/* **终态回执核验**的三态（丁T5）：true 不额外提示；false/未核验要如实说 */}
+          {verified === false && (
+            <p
+              data-testid="question-verified-unseen"
+              className="mt-1 text-amber-700 dark:text-amber-400"
+            >
+              已按屏读完成提交，但未在屏上见到完成回执——请到终端确认结果
+            </p>
+          )}
+        </div>
       )}
       {!sent && (
         <>
@@ -361,12 +473,46 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           >
             取消回答
           </button>
-          <p
-            data-testid="question-freeform-hint"
-            className="mt-1.5 text-xs text-slate-500 dark:text-slate-400"
-          >
-            需自由作答？请用下方输入框直接回复
-          </p>
+          {/* ===== 丁T5 §2.4：卡内自由作答输入框（入口 1；仅单题卡，本分支恒单题）===== */}
+          {freeTextEnabled ? (
+            <div className="mt-2" data-testid="question-freetext">
+              <p
+                data-testid="question-freetext-label"
+                className="mb-1 text-xs text-slate-500 dark:text-slate-400"
+              >
+                或直接输入回答（将作为本题的答案发送到终端）
+              </p>
+              <div className="flex gap-1.5">
+                <input
+                  data-testid="question-freetext-input"
+                  aria-label="回答内容"
+                  type="text"
+                  value={freeText}
+                  maxLength={MAX_FREE_TEXT_CHARS}
+                  disabled={busy}
+                  onChange={(e) => setFreeText(e.target.value.slice(0, MAX_FREE_TEXT_CHARS))}
+                  placeholder="输入你的回答…"
+                  className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-sky-500/40 focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                />
+                <button
+                  type="button"
+                  data-testid="question-freetext-send"
+                  disabled={busy || freeText.trim() === ""}
+                  onClick={() => handleAnswer("freeText", undefined, freeText)}
+                  className="shrink-0 rounded-full bg-sky-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40 dark:bg-sky-500"
+                >
+                  作为回答发送
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p
+              data-testid="question-freeform-hint"
+              className="mt-1.5 text-xs text-slate-500 dark:text-slate-400"
+            >
+              需自由作答？该工具的远程自由作答尚未实测，请在终端作答
+            </p>
+          )}
         </>
       )}
     </InteractiveCard>

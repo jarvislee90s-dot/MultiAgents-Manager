@@ -615,6 +615,10 @@ export interface QuestionInfoView {
   available: boolean;
   /** 可选：旧后端不带该字段时按 true 处理（前向兼容——只有明确 false 才降只读） */
   answerable?: boolean;
+  /** 丁T5 §2.4：卡内自由作答输入框是否可用（**独立于 `answerable`**——
+   *  codex/opencode 的**点选**已实测可作答，但**自由作答序列未定案**）。
+   *  缺省/旧后端 → 按 false 处理：渲染「请在终端作答」引导文案，**不假装能发**。 */
+  freeText?: boolean;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }
@@ -634,28 +638,50 @@ export async function fetchSessionQuestion(sessionId: string): Promise<QuestionI
 }
 
 /** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换；
- *  submit=多选三段式提交；cancel=取消问题（Esc） */
-export type QuestionAnswerAction = "select" | "toggle" | "submit" | "cancel";
+ *  submit=多选提交（**阶段机闭环**：屏读确认每段后才推进）；
+ *  cancel=取消问题（Esc）；freeText=自由作答（**仅 claude**，阶段机闭环：
+ *  定位 `Type something` 行 → 文本 → 回车）。 */
+export type QuestionAnswerAction = "select" | "toggle" | "submit" | "cancel" | "freeText";
 
-/** 问答应答回执（POST /session-question/answer 响应，HTTP 200 恒定，语义在
- *  body.status）：key_sent=按键序列已投递终端；failed=投递失败 / in-flight 忙让位
- *  （error 为后端中文文案，可重试） */
-export type QuestionAnswerResult = { status: "key_sent" } | { status: "failed"; error: string };
+/** 阶段机动作的**段名**（回执 `stage` 字段的取值；与后端
+ *  `remote::api::QUESTION_STAGE_*` 常量逐字对应，勿漂移）。
+ *  提交链推进序：`submit-row`→`review`→`confirm`→`receipt`；
+ *  自由作答：`free-row`→`free-text`。 */
+export type QuestionAnswerStage =
+  "submit-row" | "review" | "confirm" | "receipt" | "free-row" | "free-text";
 
-/** 问答一键应答（T8）。index = 选项序号（0 起；select/toggle 必填）。
- *  409 {error:"no_question"|"multi_questions"} | 400 {error:"bad_request"|"bad_index"}
+/** 问答应答回执（POST /session-question/answer 响应，HTTP 200 恒定，语义在 body.status）。
+ *
+ *  **丁T5 起 status 仍是既有两词**（`key_sent` / `failed`），新增字段全部是**附加**
+ *  ——故旧前端（只读 status）行为不变：
+ *  - `key_sent`：按键已投递。**单键动作**（select/toggle/cancel）到此为止；
+ *    **阶段机动作**（submit/freeText）走完整条闭环时带 `done:true` + `stage`（走完的
+ *    段）+ `verified`（终态回执三态：true=屏读到终态锚；false=读到屏但未见锚；
+ *    null/缺省=读屏不可用。**false 与 null 都不是「失败」，是「未确认」**）；
+ *  - `failed`：投递失败 / in-flight 忙让位 / **阶段机中止**。`aborted:true` + `stage`
+ *    标记后者（`error` 是带段名的中文文案，用户可读）。 */
+export type QuestionAnswerResult =
+  | { status: "key_sent"; done?: boolean; stage?: QuestionAnswerStage; verified?: boolean | null }
+  | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
+
+/** 问答一键应答（T8；丁T5 起支持 freeText）。index = 选项序号（0 起；select/toggle
+ *  必填）；text = 自由作答正文（freeText 必填；后端归一后走**字符通道**注入，
+ *  不带 `[mobile]` 签名）。
+ *  409 {error:"no_question"|"multi_questions"|"tool_readonly"} |
+ *  400 {error:"bad_request"|"bad_index"}
  *  → 非 2xx 抛 ApiError（错误码解析进 data.error，调用方分診中文文案） */
 export async function sessionQuestionAnswer(
   sessionId: string,
   action: QuestionAnswerAction,
-  index?: number
+  index?: number,
+  text?: string
 ): Promise<QuestionAnswerResult> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-question/answer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, action, index }),
+      body: JSON.stringify({ sessionId, action, index, text }),
     });
   } catch (e) {
     throw new ApiError(null, `session-question/answer 网络异常: ${String(e)}`);
