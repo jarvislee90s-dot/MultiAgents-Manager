@@ -4681,7 +4681,9 @@ mod tests {
     /// sess_ad（仅审批标记——隔离反差用）/ sess_ae（问题标记 + detect 命中文案——
     /// 问题标记压审批卡的最强隔离形态）/ sess_af（无标记——no_question 409）/
     /// sess_ai / sess_aj（Processing 无标记——通道 B 可用/已答反例）/
-    /// sess_ak（submit 首错即停 + failed 审计独占，复评 Minor 1）
+    /// sess_ak（**阶段机中途投递失败**：首错即停 + `failed:<e>` 审计独占——原为
+    /// 批次乙「submit 首错即停」用例的夹具，本批重构时该用例被误删（复评 Important-2），
+    /// 丁T5 复评已补回同语义覆盖并继续用本夹具）
     fn question_state_with_msgs(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         message_source: Box<crate::remote::content::MessageSourceFn>,
@@ -5632,6 +5634,81 @@ mod tests {
         );
     }
 
+    /// **丁T5 复评 F6-2（恢复既有覆盖）：阶段机中途投递失败 = 「投递失败」而非「中止」**。
+    ///
+    /// 覆盖两条既有断言（父提交 `b92a658` 的
+    /// `question_answer_submit_first_error_stops_sequence_and_audits_failed` 锁的是
+    /// 同一件事，本批重构时被误删——复评 Important-2）：
+    /// ① **首错即停**：走位段第一个 `down` 就 Err → **后续键一个都不再投**；
+    /// ② 回执/审计语义：`status:"failed"` **不带** `aborted`（投递失败 ≠ 阶段判据中止），
+    ///    审计 `failed:<e>` 前缀口径逐字同批次丙。
+    ///
+    /// 用 `stage_rig(..., failing=true)`——该参数此前从未被传过 `true`（复评指出为
+    /// 死参数），本用例是它唯一的消费者。
+    /// 还原动作：把 `StageAbortKind::Delivery` 并回 `Screen`（回执变
+    /// `aborted:true`）→ 第二句断言先红；去掉首错即停（继续投后续键）→ 第一句先红。
+    #[tokio::test]
+    async fn question_submit_stage_machine_delivery_failure_stops_and_audits_failed() {
+        // 提交屏（焦点在选项行）→ 需要一个 down 才到位 → 第一个 down 即失败
+        let mut stuck = screen_fixtures::submit_focused();
+        for l in stuck.iter_mut() {
+            if l.contains("❯   Submit") {
+                *l = "    Submit".to_string();
+            }
+            if l.contains("1. [✓] Apple") {
+                *l = format!(" ❯{l}");
+            }
+        }
+        let (state, fake, _script) = stage_rig(vec![stuck], true); // failing=true
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "claude",
+                "sess_ak",
+                1_000,
+                "等待回答",
+                Some(Q_MULTI_PAYLOAD),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ak","action":"submit"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "投递失败走 200 failed 槽（可重试）");
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("注入通道拒绝"),
+            "投递失败须 200 failed 并透传错误文案：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(46u32, "down".to_string())],
+            "**首错即停**：走位第一个 down 即 Err，恰一条、后续键不再出手：{:?}",
+            fake.recorded_keys()
+        );
+        assert!(
+            !body.contains("\"aborted\""),
+            "投递失败**不得**报成阶段中止（aborted 是「屏上形态不符」的语义，两者用户动作不同）：{body}"
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "answer");
+        assert_eq!(
+            audits[0].result, "failed:下箭头投递失败（注入通道拒绝）",
+            "审计 result = failed:错误文案（与批次丙同前缀口径）"
+        );
+        assert_eq!(audits[0].summary, "submit", "投递失败不追加段名");
+        assert_eq!(audits[0].session_id, "sess_ak");
+    }
+
     /// **丁T5 端到端⑤（读屏不可用 → 零投递中止）**：`screen_probe` 恒 `None`
     /// （非 Windows / 屏读失败）→ 第 1 段就中止，**零按键**。这是安全面：读不到屏
     /// 就绝不猜着发键。
@@ -5892,6 +5969,60 @@ mod tests {
                 "{tool_id} 拒绝路径零投递"
             );
         }
+    }
+
+    /// **丁T5 复评 F6-3（多选卡的自由作答在端点被拒）**：claude（工具支持）但题目是
+    /// **多选** → 409 `tool_readonly` + 零投递。
+    ///
+    /// 依据（实机截图，复评核对）：多选屏的自由作答行渲染为 `4. [ ] Type something`
+    /// （带勾选框；`C-s8-cursor-submit-20260921-015844.png` 第 4 行），而
+    /// `locate_free_text_row` 的判据是「剥编号后以 `Type something` 开头」→ 不匹配 →
+    /// 定位恒失败。**在端点就拒绝**（而不是让用户白等一次必然中止的全链）。
+    ///
+    /// 还原动作：把 `action_supported` 的 FreeText 分支去掉 `free_text_shape_supported`
+    /// 检查 → 本用例先红（会 200 并走到 free-row 段中止）。
+    #[tokio::test]
+    async fn question_free_text_refused_on_multi_select_question() {
+        // 用多选夹具（Q_MULTI_PAYLOAD）+ **单选题不会触发**——这正是本用例的区分点
+        let (state, inner, _s) = single_tool_scripted_state(
+            crate::session::AgentType::Claude,
+            "sess_t5mft",
+            95u32,
+            vec![screen_fixtures::free_row()],
+        );
+        mark_question(&state, "claude", "sess_t5mft", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5mft","action":"freeText","text":"hi"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "多选卡的自由作答 → 409（不假装能发）");
+        let body = body_string(r).await;
+        assert!(
+            body.contains("tool_readonly"),
+            "拒绝码须可程序分诊（细分原因见后端日志与前端分診文案）：{body}"
+        );
+        // 契约说明：409 体**只回错误码**（既有口径——不给存在性预言机、不泄露细节）；
+        // 「多选题的自由作答请到终端完成」这句在 `ActionRefusal` 里，进 debug 日志与
+        // 前端分診（`tool_readonly` → 中文文案），**不进响应体**。本断言锁住这个口径。
+        assert!(
+            inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
+            "拒绝路径零投递：keys={:?} texts={:?}",
+            inner.recorded_keys(),
+            inner.recorded()
+        );
+        let audits = state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        assert!(
+            audits.is_empty(),
+            "校验失败零审计（approve/question 同口径）"
+        );
     }
 
     /// **丁T5 端到端⑩（多选提交的工具面）**：非 claude → 409 `tool_readonly`

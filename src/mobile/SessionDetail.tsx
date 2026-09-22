@@ -674,11 +674,15 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
                 计划
               </p>
-              {/* 丁T5 修复（问题 11 的真实断点）：本卡片此前**漏挂** `.md-body` 排版层
+              {/* 丁T5 修复（问题 11 的真实断点）：计划卡此前**漏挂** `.md-body` 排版层
                   ——Tailwind v4 preflight 把 h1-h6 的字号/字重与 ul/ol 的 list-style
                   全部重置（见 mobile.css 排版层注释），故计划正文里的 `###` 小标题与
-                  `-` 列表在这张卡上被**拍平成正文**（消息流普通消息与「工具参数升格」
-                  那张卡都挂了 `.md-body`，唯独这里漏了）。
+                  `-` 列表在这张卡上被**拍平成正文**。
+                  **订正（复评 F6-1）**：实际是「普通消息卡挂了，**计划卡与工具参数升格
+                  卡都没挂**」——本文件里三张用 `renderMarkdown` 的卡中只有
+                  `case "assistant"` 挂了 `.md-body`；下面 `case "tool-call"` 的升格支
+                  （claude ExitPlanMode 走的那条，即任务书问题 11 点名的路径）同样漏挂，
+                  本次两张一起补齐。
                   真机证据：本机 rollout `~/.codex/sessions/2026/09/21/
                   rollout-2026-09-21T17-38-17-…jsonl` 行 115 的计划含 4 个 `###` 小标题
                   + 14 行列表——正是任务书问题 11 说的「markdown 不完整」。 */}
@@ -746,7 +750,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
                     计划
                   </p>
-                  {renderMarkdown(planBody)}
+                  {/* 丁T5 复评 F6-1：本支（**工具参数升格**——claude 的 ExitPlanMode 走这
+                      里，任务书问题 11 点名的路径）与上面的 `case "plan"` 是同一缺陷的
+                      两半：都漏挂 `.md-body`，故 `###` 标题与 `-` 列表被 preflight 拍平。
+                      本次两张一起补齐。 */}
+                  <div className="md-body">{renderMarkdown(planBody)}</div>
                 </div>
               )}
             </div>

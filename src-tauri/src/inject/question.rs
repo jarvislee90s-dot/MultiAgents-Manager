@@ -415,9 +415,63 @@ pub const ANSWERED_RECEIPT_ANCHOR: &str = "user answered claude";
 /// （`Type something`），故两形态同一判据覆盖。
 pub const FREE_TEXT_ROW_LABEL: &str = "Type something";
 
+/// 阶段机中止的**类别**——决定端点回执的形态与审计的措辞（复评 F6-2）。
+///
+/// # 为什么要分两类（这是回执语义的一部分，不是内部细节）
+///
+/// 「中止」有两种成因，用户要做的事完全不同：
+/// - [`Screen`](Self::Screen)：**屏上形态与预期不符**（读不到屏 / 没有提交行 /
+///   Review 屏没出现 / 焦点走不动）。键**没有**发失败，是「按我们的判据不该继续发」
+///   → 回执 `failed{aborted:true, stage}`（前端显示中止段 + 引到终端）；
+/// - [`Delivery`](Self::Delivery)：**投递本身失败**（`Injector` 返回 Err——终端不可达、
+///   控制台附加失败、写超时）。这与阶段判据无关，语义等同批次丙的「投递失败」→
+///   回执 `failed{error}`（**不带** `aborted`），审计 `failed:<e>`。
+///
+/// 混为一谈的后果（本类存在的原因）：投递失败被报成「中止于某段」，用户会去终端找
+/// 「形态问题」，而实际问题是通道打不通——那是误导。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageAbort {
+    /// 中止类别
+    pub kind: StageAbortKind,
+    /// 面向用户的整句中文说明（端点直接透传到 `error` 字段）
+    pub message: String,
+}
+
+/// 见 [`StageAbort`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageAbortKind {
+    /// 屏读形态不符（阶段判据拒绝继续）
+    Screen,
+    /// 投递失败（`Injector`/终端通道返回 Err）
+    Delivery,
+}
+
+impl StageAbort {
+    /// 屏读形态不符的中止
+    fn screen(message: impl Into<String>) -> Self {
+        Self {
+            kind: StageAbortKind::Screen,
+            message: message.into(),
+        }
+    }
+    /// 投递失败的中止（包装 `Injector` 或终端写入返回的错误文案）
+    fn delivery(message: impl Into<String>) -> Self {
+        Self {
+            kind: StageAbortKind::Delivery,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for StageAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// 阶段机的一次屏读**语义结论**（三态语义与 [`crate::inject::mode::PollStep`] 一致：
-/// 可行动 / 可重试 / 形态异常）。载荷类型不同（这里各段要的东西不一样），故不复用
-/// 那个泛型枚举——共用一个会让两套判据的语义混进同一类型。
+/// 可行动 / 可重试 / 形态异常）。载荷类型与那个泛型枚举不同（这里各段要的东西不一
+/// 样），故不复用——共用一个会让两套判据的语义混进同一类型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenStep {
     /// 目标形态已出现（附该屏行集）
@@ -606,7 +660,7 @@ pub fn run_submit_stages<P, Q, R, T>(
     mut poll_receipt: R,
     terminal: &mut T,
     max_down_steps: usize,
-) -> Result<SubmitOutcome, String>
+) -> Result<SubmitOutcome, StageAbort>
 where
     P: FnMut() -> Result<Option<Vec<String>>, String>,
     Q: FnMut() -> Result<Option<Vec<String>>, String>,
@@ -615,50 +669,61 @@ where
 {
     let mut sent_keys: Vec<String> = Vec::new();
     // ===== 第 1 段：提交屏在场（不在场即中止，零按键）=====
-    let first = poll_submit()?.ok_or_else(|| {
-        "多选提交屏未出现或读不到屏幕（屏上无 Submit 行）——已中止，未发任何键；请人工核对终端"
-            .to_string()
+    // poll 的 Err = 形态异常（屏读类）——闭包签名保持既有 `Result<_, String>` 契约，
+    // 类别在编排这一层补齐（判据与分类同处一地，调用方不必知道）
+    let first = poll_submit().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(
+            "多选提交屏未出现或读不到屏幕（屏上无 Submit 行）——已中止，未发任何键；请人工核对终端",
+        )
     })?;
     if !first.iter().any(|l| submit_row_present(l)) {
-        return Err(
-            "屏读未见到 Submit 行（多选提交入口）——已中止，未发任何键；请人工核对终端".to_string(),
-        );
+        return Err(StageAbort::screen(
+            "屏读未见到 Submit 行（多选提交入口）——已中止，未发任何键；请人工核对终端",
+        ));
     }
     // ===== 第 2 段：走位（每步复核；到位才停）=====
     let mut down_steps = 0usize;
     loop {
         let lines = terminal.read().ok_or_else(|| {
-            format!("走位段读不到屏幕（已发 {down_steps} 个下箭头）——已中止，未发回车（不盲提交）")
+            StageAbort::screen(format!(
+                "走位段读不到屏幕（已发 {down_steps} 个下箭头）——已中止，未发回车（不盲提交）"
+            ))
         })?;
         match probe_submit_row(&lines) {
             ScreenStep::Ready(_) => break, // 焦点已在提交行
             ScreenStep::NotYet(_) => {}
-            ScreenStep::Fatal(why) => return Err(format!("{why}；请人工核对终端")),
+            ScreenStep::Fatal(why) => {
+                return Err(StageAbort::screen(format!("{why}；请人工核对终端")))
+            }
         }
         if down_steps >= max_down_steps {
-            return Err(format!(
+            return Err(StageAbort::screen(format!(
                 "已发 {down_steps} 个下箭头仍未把焦点移到 Submit 行（上限 {max_down_steps}）——已中止，未发回车；请人工核对终端"
-            ));
+            )));
         }
-        terminal.send("down")?;
+        terminal
+            .send("down")
+            .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
         sent_keys.push("down".to_string());
         down_steps += 1;
         terminal.settle();
     }
     // ===== 第 3 段：提交（焦点已在提交行——唯一的回车点）=====
-    terminal.send("enter")?;
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
     sent_keys.push("enter".to_string());
     terminal.settle();
     // ===== 第 4 段：Review 屏（未见即中止，**不发数字**）=====
-    let review_lines = poll_review()?.ok_or_else(|| {
-        format!(
+    let review_lines = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(format!(
             "已发回车但屏上未出现 Review 确认屏（未见「{REVIEW_TITLE_ANCHOR}」/「{REVIEW_SUBTITLE_ANCHOR}」）——已中止，未发确认键；请人工核对终端"
-        )
+        ))
     })?;
     // 复核（轮询拿到的屏再走一次同一判据——轮询闭包与复核用同一份探测器，
     // 不假定「轮询返回的就一定合判据」；形态在两次读之间变化时这里会如实拒）
     if let ScreenStep::NotYet(why) | ScreenStep::Fatal(why) = probe_review_screen(&review_lines) {
-        return Err(format!("{why}；请人工核对终端"));
+        return Err(StageAbort::screen(format!("{why}；请人工核对终端")));
     }
     // 确认项行 → 屏上编号（屏上编号由 TUI 给，不硬编码 '1'）
     // 确认项的唯一性已由上面那次 `probe_review_screen` 复核过（恰 1 行），此处取它，
@@ -667,12 +732,15 @@ where
         .into_iter()
         .next()
         .ok_or_else(|| {
-            "Review 确认屏在场但读不到带编号的确认项——已中止，未发确认键；请人工核对终端"
-                .to_string()
+            StageAbort::screen(
+                "Review 确认屏在场但读不到带编号的确认项——已中止，未发确认键；请人工核对终端",
+            )
         })?;
     let confirm_key = confirm_num.to_string();
     log::debug!("问答提交阶段机：Review 确认项「{confirm_line}」→ 确认键 '{confirm_key}'");
-    terminal.send(&confirm_key)?;
+    terminal
+        .send(&confirm_key)
+        .map_err(|e| StageAbort::delivery(format!("确认键 {confirm_key} 投递失败（{e}）")))?;
     sent_keys.push(confirm_key);
     terminal.settle();
     // ===== 第 5 段：终态回执核验（未见**不是失败**）=====
@@ -823,57 +891,68 @@ pub fn run_free_text_stages<P, R, T>(
     mut poll_free_row: P,
     mut poll_receipt: R,
     terminal: &mut T,
-) -> Result<FreeTextOutcome, String>
+) -> Result<FreeTextOutcome, StageAbort>
 where
     P: FnMut() -> Result<Option<Vec<String>>, String>,
     R: FnMut() -> Result<Option<Vec<String>>, String>,
     T: FreeTextTerminal,
 {
     if text.trim().is_empty() {
-        return Err("自由作答文本为空——已中止，未发任何键".to_string());
+        // 「文本为空」是**参数问题**（端点已在入口 400 拦），落到这里属防御：
+        // 归为屏读类（形态不符）而非投递类——**没有发生任何投递**
+        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
     }
     let mut sent_keys: Vec<String> = Vec::new();
     // ===== 第 1 段：自由作答行在场（不在场即中止，零按键——K7：未定位直接打字无效）=====
-    let lines = poll_free_row()?.ok_or_else(|| {
-        format!(
+    // poll 的 Err = 形态异常（屏读类）——闭包签名保持既有契约，类别在这一层补齐
+    let lines = poll_free_row()
+        .map_err(StageAbort::screen)?
+        .ok_or_else(|| {
+            StageAbort::screen(format!(
             "屏上未出现自由作答行（「{FREE_TEXT_ROW_LABEL}」）——已中止，未发任何键；请人工核对终端"
-        )
-    })?;
+        ))
+        })?;
     let row = locate_free_text_row(&lines).ok_or_else(|| {
-        format!(
+        StageAbort::screen(format!(
             "屏读未定位到自由作答行（「{FREE_TEXT_ROW_LABEL}」）——已中止，未发任何键；请人工核对终端"
-        )
+        ))
     })?;
     let locate_key = row.digit.ok_or_else(|| {
-        format!(
+        StageAbort::screen(format!(
             "自由作答行「{}」里读不到编号——已中止，未发任何键；请人工核对终端",
             row.text
-        )
+        ))
     })?;
     // ===== 第 2 段：定位（仅移动焦点，不提交）=====
-    terminal.send(&locate_key)?;
+    terminal
+        .send(&locate_key)
+        .map_err(|e| StageAbort::delivery(format!("定位键 {locate_key} 投递失败（{e}）")))?;
     sent_keys.push(locate_key.clone());
     terminal.settle();
     // **重读复核**：定位键之后必须重新屏读、确认自由作答行**仍在场**（焦点确实落上
     // 去了），而不是盲发作答文本。
     let after = terminal.read().ok_or_else(|| {
-        format!(
+        StageAbort::screen(format!(
             "发定位键 {locate_key} 后读不到屏幕——已中止，未发作答文本（不盲打字）；请人工核对终端"
-        )
+        ))
     })?;
     if locate_free_text_row(&after).is_none() {
-        return Err(format!(
+        return Err(StageAbort::screen(format!(
             "发定位键 {locate_key} 后屏上已见不到自由作答行——形态与预期不符，已中止，未发作答文本；请人工核对终端"
-        ));
+        )));
     }
     // ===== 第 3 段：文本（唯一走字符通道的一步）=====
-    terminal.send_text(text)?;
+    terminal
+        .send_text(text)
+        .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
     // 审计/回执里的键序用**占位符**记文本（不落正文——正文属用户隐私，且长度可泄露
     // 答案形态）；字符数足以证明「投了什么规模的东西」。
     sent_keys.push(format!("<text:{} chars>", text.chars().count()));
     terminal.settle();
     // ===== 第 4 段：提交（回车；**不带数字、不带 Esc**——K2）=====
-    terminal.send("enter")?;
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
     sent_keys.push("enter".to_string());
     terminal.settle();
     // ===== 第 5 段：终态回执核验（未见**不是失败**，同提交路径）=====
@@ -897,6 +976,30 @@ pub fn free_text_supported(tool: &str) -> bool {
     question_key_profile(tool) == QuestionKeyProfile::ClaudeFull
 }
 
+/// 自由作答的**题目形态支持面**（复评 F6-3：多选卡不提供自由作答）。
+///
+/// # 为什么多选卡不能提供（实机证据，不是保守猜测）
+///
+/// 多选屏的自由作答行**不是** [`FREE_TEXT_ROW_LABEL`] 的裸标签，而是带**勾选框**的
+/// `4. [ ] Type something`——实机截图 `C-s8-cursor-submit-20260921-015844.png`
+/// 的第 4 行逐字如此（本批复评时重新核对过该 PNG：`4. [ ] Type something`，
+/// 与单选屏 `C-s7-digit3-result-*.png` 的 `3. Type something.` 形态**不同**）。
+///
+/// 而 [`locate_free_text_row`] 的判据是「编号行的 label 以 `Type something` 开头」——
+/// 该行剥掉编号后的 label 是 `[ ] Type something`，**前缀不匹配** → 定位恒失败 →
+/// 自由作答在**多选屏上必然中止在 `free-row` 段**。
+///
+/// 这不是安全问题（中止即零投递，不会误勾选），但**功能对多选不可用**——所以：
+/// - **拒绝而不是放宽判据**（本函数的存在理由）：放宽需要「剥掉行首勾选框再匹配」
+///   的判据，而勾选框的**确切形态族**（`[ ]` / `[✓]` / 其它宽度对齐变体）没有取证
+///   （本批只有一张多选截图与二进制里的 `[" ","]` 拼接代码；单选屏根本不带勾选框）。
+///   在证据不足时收紧能力（拒绝）而不是放宽判据，是本仓一贯的「结论不超证据」；
+/// - 待办：若后续实机取证勾选框形态族（`#[ignore]` 占位已登记该观测点），再按证据
+///   放宽判定并补夹具。
+pub fn free_text_shape_supported(q: &Question) -> bool {
+    !q.multi_select
+}
+
 /// 自由作答形态的静态描述（见 [`free_text_shape`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FreeTextShape {
@@ -904,6 +1007,9 @@ pub struct FreeTextShape {
     pub locate_label: &'static str,
     /// 提交键（文本之后**唯一**的键——不带数字不带 Esc）
     pub submit_key: &'static str,
+    /// **是否只对单题卡成立**（当前恒 `true`——多选屏的行带勾选框，判据不匹配；
+    /// 见 [`free_text_shape_supported`] 的实机证据与放宽前提）
+    pub single_question_only: bool,
 }
 
 /// 自由作答序列的**纯构造快照**（供端点先做「能不能发」的判定与前端契约）。
@@ -919,6 +1025,10 @@ pub fn free_text_shape(tool: &str) -> Result<FreeTextShape, String> {
     Ok(FreeTextShape {
         locate_label: FREE_TEXT_ROW_LABEL,
         submit_key: "enter",
+        // **题目形态限制**（复评 F6-3）：本形态只对单题卡成立——多选屏的自由作答行
+        // 带勾选框（`4. [ ] Type something`），与 locate_label 的前缀判据不符。
+        // 消费方必须同时过 [`free_text_shape_supported`]（端点已如此）。
+        single_question_only: true,
     })
 }
 
@@ -997,6 +1107,16 @@ pub fn action_supported(
                 return Err(ActionRefusal::ToolUnverified(format!(
                     "{tool} 自由作答未实测，不出键"
                 )));
+            }
+            // 题目形态门（复评 F6-3）：多选屏的自由作答行带勾选框，定位判据（前缀
+            // `Type something`）不匹配 → 恒在 free-row 段中止。**在端点就拒绝**
+            // （而不是让用户白等一次必然失败的全链），前端据此不渲染输入框。
+            // 归 ToolUnverified（409 tool_readonly）而不是 BadParameter：用户要做的
+            // 是「去终端作答」，不是「改个参数重试」。
+            if !free_text_shape_supported(q) {
+                return Err(ActionRefusal::ToolUnverified(
+                    "多选题的自由作答请到终端完成（远程入口仅支持单题卡）".to_string(),
+                ));
             }
             Ok(())
         }
@@ -1450,7 +1570,7 @@ mod tests {
     }
 
     /// 阶段机脚本驱动器的返回：`(结果, 实际发出的键)`。
-    type SubmitScript = (Result<SubmitOutcome, String>, Vec<String>);
+    type SubmitScript = (Result<SubmitOutcome, StageAbort>, Vec<String>);
 
     /// 轮询探测的**唯一实现**（三个轮询闭包共用）：循环读当前屏直到 `probe` 命中。
     ///
@@ -1588,7 +1708,7 @@ mod tests {
         let (r, sent) = run_submit_script(script, 5);
         let err = r.as_ref().unwrap_err();
         assert!(
-            err.contains("仍未把焦点移到 Submit 行"),
+            err.message.contains("仍未把焦点移到 Submit 行"),
             "中止原因须点名走位失败：{err}"
         );
         assert!(
@@ -1615,7 +1735,7 @@ mod tests {
         let (r, sent) = run_submit_script(script, 5);
         let err = r.as_ref().unwrap_err();
         assert!(
-            err.contains("未出现 Review 确认屏"),
+            err.message.contains("未出现 Review 确认屏"),
             "中止原因须点名缺 Review 屏：{err}"
         );
         assert!(sent.contains(&"enter".to_string()), "回车已发出：{sent:?}");
@@ -1650,11 +1770,19 @@ mod tests {
     }
 
     /// **场景⑥：提交屏根本不在场 → 零按键中止**（防「不在多选提交屏上却按了键」）。
-    /// 还原动作：把第 1 段的在场检查删掉（直接从走位开始）→ 第一句断言先红（零按键变
-    /// 成发过 down）。
+    ///
+    /// **本用例覆盖的是「轮询窗尽未拿到屏」那条路径**（`poll_submit` → `Ok(None)`）：
+    /// 脚本驱动的 `poll_probe` 自带判据，单选屏永远不满足 → 窗尽 → 第 1 段的
+    /// `ok_or_else` 分支中止。
+    /// 还原动作：把第 1 段的 `ok_or_else` 去掉（`unwrap_or_default()`）→ 本用例先红
+    /// （会继续往下走并发键）。
+    ///
+    /// **注（复评 F6-5 订正）**：本条**不覆盖**紧随其后的「拿到了屏但屏上没有 Submit 行」
+    /// 那道检查——那是另一条分支，由下一条用例专门覆盖（脚本驱动的轮询判据会先把这种屏
+    /// 拦在窗尽，故必须换一种驱动方式）。
     #[test]
-    fn submit_stage_aborts_with_zero_keys_when_submit_row_absent() {
-        // 单选屏（无 Submit 行）
+    fn submit_stage_aborts_with_zero_keys_when_poll_window_exhausts() {
+        // 单选屏（无 Submit 行）——轮询判据永不满足 → 窗尽
         let script = vec![lines(&[
             " Which drink do you prefer?",
             " 1. Coffee",
@@ -1664,8 +1792,66 @@ mod tests {
         ])];
         let (r, sent) = run_submit_script(script, 5);
         let err = r.as_ref().unwrap_err();
-        assert!(err.contains("Submit 行"), "中止原因须点名缺提交入口：{err}");
+        assert!(
+            err.message.contains("Submit 行"),
+            "中止原因须点名缺提交入口：{err}"
+        );
         assert!(sent.is_empty(), "零按键中止（一个键都不能发）：{sent:?}");
+    }
+
+    /// **第 1 段的第二道检查：轮询拿到了屏，但屏上没有 Submit 行 → 零按键中止**。
+    ///
+    /// # 为什么要单独一条（复评 F6-5 的发现）
+    ///
+    /// 上一条用例走的是「窗尽」分支，**到不了**这道 `submit_row_present` 检查——脚本
+    /// 驱动的轮询自带判据，会把「没有 Submit 行的屏」先拦掉。而**生产侧不是这样**：
+    /// `remote::api::poll_question_stage` 只负责**读一屏**（它没有判据，判据单点在编排
+    /// 里）——所以生产上「读到屏但形态不符」是**真实可达**的路径，这条检查是承重的。
+    /// 本用例用**直调**（poll 无条件返回当前屏，模拟生产轮询的「只读不判」）覆盖它。
+    ///
+    /// 还原动作：删掉第 1 段的 `if !first.iter().any(|l| submit_row_present(l))` 检查
+    /// → 本用例先红（会继续往下走并发键）。
+    #[test]
+    fn submit_stage_aborts_with_zero_keys_when_polled_screen_lacks_submit_row() {
+        use std::cell::RefCell;
+        let single_select = lines(&[
+            " Which drink do you prefer?",
+            " 1. Coffee",
+            " 2. Tea",
+            " 3. Type something.",
+            " 4. Chat about this",
+        ]);
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let out = run_submit_stages(
+            // 生产语义的轮询：**只读不判**（返回当前屏，不挑形态）
+            || Ok(Some(single_select.clone())),
+            || Ok(None),
+            || Ok(None),
+            &mut crate::inject::mode::Closures {
+                read: || Some(single_select.clone()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+            5,
+        );
+        let err = out.expect_err("屏上没有 Submit 行 → 必须中止");
+        assert_eq!(
+            err.kind,
+            StageAbortKind::Screen,
+            "形态不符属屏读类中止（不是投递失败）"
+        );
+        assert!(
+            err.message.contains("Submit 行"),
+            "中止原因须点名缺提交入口：{err}"
+        );
+        assert!(
+            sent.borrow().is_empty(),
+            "零按键中止（一个键都不能发）：{:?}",
+            sent.borrow()
+        );
     }
 
     /// **场景⑦：Review 屏在场但确认项读不到编号 → 中止不发数字**（抄不到编号就不猜）。
@@ -1686,7 +1872,7 @@ mod tests {
         let (r, sent) = run_submit_script(script, 5);
         let err = r.as_ref().unwrap_err();
         assert!(
-            err.contains("读不到带编号的确认项"),
+            err.message.contains("读不到带编号的确认项"),
             "中止原因须点名编号缺失：{err}"
         );
         assert!(
@@ -1770,7 +1956,11 @@ mod tests {
     }
 
     /// 自由作答脚本驱动器的返回：`(结果, 发出的键, 发出的文本)`。
-    type FreeTextScript = (Result<FreeTextOutcome, String>, Vec<String>, Vec<String>);
+    type FreeTextScript = (
+        Result<FreeTextOutcome, StageAbort>,
+        Vec<String>,
+        Vec<String>,
+    );
 
     /// 自由作答的脚本驱动器（同 [`run_submit_script`] 的时序语义；文本通道单独记录）。
     fn run_free_text_script(screens: Vec<Vec<String>>, text: &str) -> FreeTextScript {
@@ -1870,7 +2060,7 @@ mod tests {
         ])];
         let (r, keys, texts) = run_free_text_script(script, "hi");
         let err = r.as_ref().unwrap_err();
-        assert!(err.contains("自由作答行"), "中止原因须点名：{err}");
+        assert!(err.message.contains("自由作答行"), "中止原因须点名：{err}");
         assert!(keys.is_empty() && texts.is_empty(), "零投递中止");
     }
 
@@ -1885,7 +2075,7 @@ mod tests {
         let (r, keys, texts) = run_free_text_script(script, "green tea please");
         let err = r.as_ref().unwrap_err();
         assert!(
-            err.contains("已见不到自由作答行"),
+            err.message.contains("已见不到自由作答行"),
             "中止原因须点名定位后形态不符：{err}"
         );
         assert_eq!(keys, vec!["3".to_string()], "定位键已发出（事实如实记录）");
@@ -2015,7 +2205,9 @@ mod tests {
 ///
 /// **本占位只做一件事**：校验前置可满足性并打印探测指引（不发起任何注入——实机注入
 /// 需要受控的会话与人工观察窗口，由本机人工执行）。跑法：
-/// `cargo test --lib question_live_probe -- --ignored --nocapture`
+/// `cargo test --lib live_probe -- --ignored --nocapture`（filter 取模块名子串
+/// `live_probe`——它命中 `live_probe_tests` 与 `live_probe_t5` 两个模块的全部用例；
+/// 原先写的 `question_live_probe` **命中不到任何用例**，复评 F6-4 已实测订正）
 #[cfg(test)]
 mod live_probe_tests {
     // 本模块只做前置可满足性检查与探测指引打印（**零注入**）——不消费 `super::*` 的
@@ -2094,7 +2286,9 @@ mod live_probe_tests {
 ///    依据是探测档案里「多选三段式更久」与 ≤1s 的观察——不是测量）。
 ///
 /// 跑法（需要真实 claude 会话与人工观察窗口；本占位**零注入**，只打印指引）：
-/// `cargo test --lib question_live_probe -- --ignored --nocapture`
+/// `cargo test --lib live_probe -- --ignored --nocapture`（filter 取模块名子串
+/// `live_probe`——它命中 `live_probe_tests` 与 `live_probe_t5` 两个模块的全部用例；
+/// 原先写的 `question_live_probe` **命中不到任何用例**，复评 F6-4 已实测订正）
 #[cfg(test)]
 mod live_probe_t5 {
     /// **丁T5 实机定案：claude 多选提交全链 + 自由作答全链的屏读对照**
@@ -2119,8 +2313,15 @@ mod live_probe_t5 {
     /// ④ 确认后终态：`User answered Claude's questions:` 是否在**同一次屏读**里出现
     ///    （回执行可能被后续输出顶出窗口 → `receipt_seen` 会如实为 false，那不是 bug
     ///    而是窗口限制——需据实调整 `QUESTION_STAGE_POLL_TOTAL_MS` 或判据措辞）；
-    /// ⑤ 自由作答链：`Type something` 行的屏读形态（单选带句点/多选不带）、定位数字
-    ///    是否等于屏上编号、文本注入后该行是否变成可编辑形态（复核判据是否仍成立）；
+    /// ⑤ 自由作答链：`Type something` 行的屏读形态（**单选**带句点 `3. Type something.`）、
+    ///    定位数字是否等于屏上编号、文本注入后该行是否变成可编辑形态（复核判据是否仍成立）；
+    /// ⑤' **多选屏的自由作答行形态**（复评 F6-3 的定案项——**当前已按「不可用」处置**）：
+    ///    MAM 现按截图判定为 `4. [ ] Type something`（带勾选框，故前缀判据不匹配 →
+    ///    端点 409 拒绝、前端不渲染输入框）。**探测要确认的事**：该行在屏读产物里的
+    ///    **确切文本**（勾选框是 `[ ]` / `[✓]` 还是别的宽度对齐变体？行内是否有额外空白？）
+    ///    ——若形态明确，可按「剥掉行首勾选框前缀再匹配」放宽判据（并在
+    ///    `free_text_shape_supported` 里按形态族收口），届时同步改前端
+    ///    `freeTextEnabled` 的多选排除；若形态不稳定，维持拒绝。
     /// ⑥ **中止路径的真机验证**：在 Review 屏出现前人为按 Esc（模拟「屏读没等到」），
     ///    观察 MAM 是否如实中止且**没有**发出确认数字（对照审计 result=aborted:review）。
     ///

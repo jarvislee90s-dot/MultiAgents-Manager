@@ -408,25 +408,28 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(screen.queryByTestId("question-freetext-input")).toBeNull();
   });
 
-  it("多选卡也提供自由文本入口（freeText=true）：与勾选/提交并存，互不干扰", async () => {
+  // 复评 F6-3：多选卡**不提供**自由文本入口——多选屏的自由作答行带勾选框
+  // （`4. [ ] Type something`，实机截图 C-s8-cursor-submit-*.png 第 4 行），而定位判据
+  // 是「剥编号后以 `Type something` 开头」→ 不匹配 → 定位恒失败 → 后端恒拒 409。
+  // 前端同步不渲染输入框（不给用户一个必然失败的按钮），改渲染终端引导。
+  // **即使后端 `freeText:true`（工具支持）也不渲染**——这是**题目形态**维度的限制。
+  it("多选卡不提供自由文本入口（复评 F6-3）：freeText=true 也不渲染输入框，改渲染终端引导", async () => {
     installFetch();
     routes.question = multiQuestionInfo();
-    routes.question.freeText = true;
-    routes.answer = { status: "key_sent" };
+    routes.question.freeText = true; // 工具支持，但题目是多选 → 仍不给
     render(<QuestionCard session={{ id: "sess-t5e" }} />);
     await screen.findByTestId("question-card");
-    // 三条路都在场：勾选钮（多选语义）+ 提交钮 + 自由文本输入框
+    // 勾选路与提交钮照常（多选的主路径）
     expect(await screen.findByTestId("question-option-0")).toBeTruthy();
     expect(screen.getByTestId("question-submit")).toBeTruthy();
-    expect(screen.getByTestId("question-freetext-input")).toBeTruthy();
-    // 自由作答不置勾选态（两条路各自独立）
-    fireEvent.change(screen.getByTestId("question-freetext-input"), {
-      target: { value: "别的回答" },
-    });
-    fireEvent.click(screen.getByTestId("question-freetext-send"));
-    await flushAsync();
-    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
-    expect(bodies).toEqual([{ sessionId: "sess-t5e", action: "freeText", text: "别的回答" }]);
+    // 自由文本入口**不在场**，走降级引导文案
+    expect(screen.queryByTestId("question-freetext-input")).toBeNull();
+    expect(screen.queryByTestId("question-freetext-send")).toBeNull();
+    expect(screen.getByTestId("question-freeform-hint").textContent).toContain(
+      "多选题请到终端作答"
+    );
+    // 零注入：不得有任何应答请求
+    expect(answerCalls()).toHaveLength(0);
   });
 
   it("freeText 缺省（旧后端 / 未定案工具）：不渲染输入框，渲染终端引导文案", async () => {

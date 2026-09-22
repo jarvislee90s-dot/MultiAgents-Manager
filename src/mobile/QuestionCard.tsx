@@ -24,11 +24,16 @@
 // - **进行中态**（§2.3「卡片进行中态替代『已发送按键』」）：请求在途期间卡片显示
 //   「进行中（走到哪一段）」——后端的段推进是同步的（一次请求内走完），故前端只需
 //   一个总进行中态 + 段名文案（`QUESTION_STAGE_LABELS`）；
-// - 自由文本（**丁T5 §2.4 入口 1，仅单题卡 + 仅 `info.freeText === true` 的工具**）：
+// - 自由文本（**丁T5 §2.4 入口 1；复评 F6-3 收紧为「仅单选单题卡 + 仅 claude」**）：
 //   卡内嵌输入框 + 「作为回答发送」→ POST freeText{text}。后端序列 = 定位
 //   `Type something` 行（数字，仅移动焦点）→ 文本（**字符通道**）→ 回车；文本经归一
-//   且**不带** `[mobile]` 签名。工具未定案（codex/kimi/opencode/未知）→ 渲染
-//   「请在终端作答」引导文案（**不假装能发**，§2.8）；
+//   且**不带** `[mobile]` 签名。
+//   **两个不渲染输入框的情形**（都渲染「请在终端作答」引导，**不假装能发**）：
+//   ① 工具未定案（codex/kimi/opencode/未知；`info.freeText !== true`，§2.8）；
+//   ② **多选题**（复评 F6-3）：多选屏的自由作答行带勾选框
+//      （`4. [ ] Type something`，实机截图 `C-s8-cursor-submit-*.png`），定位判据
+//      （剥编号后以 `Type something` 开头）不匹配 → 后端恒拒 409；前端同步不给按钮。
+//      证据与放宽前提见 `inject::question::free_text_shape_supported` 的文档；
 // - 多问题（questions.length>1）：**只读卡**——题干罗列 +「请在终端完成作答」引导，
 //   零注入按钮（翻页键序未测，「结论不超证据」；后端 answer 端点同样拒绝）；
 // - 应答分診：key_sent → 终态（按钮禁用）——阶段机动作另显 `verified` 的三态；failed
@@ -346,13 +351,18 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   }
 
   const q = questions[0];
-  // 自由作答入口的**渲染条件**（丁T5 §2.4：v1 仅单题卡；工具未定案则降级）：
-  // - 单选/多选都提供（自由作答是「不用选项作答」的通用入口）；
-  // - `info.freeText === true`（后端按工具判：只有 claude 定案）才渲染输入框；
-  //   否则渲染引导文案（**不假装能发**）。
-  // 注意：**多选卡也提供**——多选走勾选+提交是「选选项」的路径，自由作答是另一条
-  // 路径（TUI 里同一屏的 `Type something` 行），两者不冲突。
-  const freeTextEnabled = info.freeText === true;
+  // 自由作答入口的**渲染条件**（丁T5 §2.4；复评 F6-3 收紧）：
+  // - `info.freeText === true`（后端按**工具**判：只有 claude 定案）；
+  // - **且题目形态是单选**（后端 `free_text_shape_supported`）——多选屏的自由作答行
+  //   渲染为 `4. [ ] Type something`（带勾选框，实机截图
+  //   `C-s8-cursor-submit-20260921-015844.png` 第 4 行），与「剥编号后以
+  //   `Type something` 开头」的定位判据不符 → 后端已 409 拒绝。前端**同步不渲染**
+  //   输入框（否则是给用户一个必然失败的按钮），改渲染「请在终端作答」引导。
+  //
+  // 判据来源说明：前端**不猜**这个限制，而是与后端同源——`multiSelect` 来自同一份
+  // questions 载荷；`info.freeText` 由后端按工具给。两处判据合起来 = 后端的
+  // `free_text_supported(tool) && free_text_shape_supported(q)`。
+  const freeTextEnabled = info.freeText === true && !q.multiSelect;
 
   return (
     <InteractiveCard
@@ -510,7 +520,12 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               data-testid="question-freeform-hint"
               className="mt-1.5 text-xs text-slate-500 dark:text-slate-400"
             >
-              需自由作答？该工具的远程自由作答尚未实测，请在终端作答
+              {/* 降级文案**说清是哪种限制**（两种成因用户动作相同——都去终端——但原因
+                  不同，写清楚能少一次困惑）：① 多选题 → 「多选卡」限制（复评 F6-3，
+                  题目形态维度）；② 工具未定案 → 「该工具尚未实测」（§2.8，工具维度）。 */}
+              {q.multiSelect
+                ? "需自由作答？多选题请到终端作答（多选屏的自由作答行形态与远程入口不匹配）"
+                : "需自由作答？该工具的远程自由作答尚未实测，请在终端作答"}
             </p>
           )}
         </>

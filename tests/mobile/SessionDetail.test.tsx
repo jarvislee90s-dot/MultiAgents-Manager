@@ -1746,6 +1746,45 @@ describe("SessionDetail：计划一等卡片（T1）", () => {
     expect(mdBody!.contains(screen.getByText("嵌套项一"))).toBe(true);
   });
 
+  // 丁T5 复评 F6-1：问题 11 的另一半——`case "tool-call"` 的**工具参数升格支**
+  // （claude 的 ExitPlanMode 走这里）同样漏挂 `.md-body`。上面那条锁只覆盖
+  // `case "plan"`，对本支**零区分力**（复评实测：删掉本支的 `.md-body` → 上面仍绿）。
+  // 夹具：ExitPlanMode 的 toolArgs 里 `plan` 字段是整篇 markdown（真实形态，见
+  // `extractPlanBody`），含 `###` 二级标题与 `-` 列表。
+  it("工具参数升格支（tool-call 的 plan 字段）也必须挂 .md-body 排版层", async () => {
+    installFetch();
+    // 真实形态：toolArgs 是 JSON 串，顶层 plan 字段 = 计划 markdown 本体
+    routes.messages = [
+      msg({
+        seq: 0,
+        kind: "tool-call",
+        content: "调用 ExitPlanMode",
+        toolName: "ExitPlanMode",
+        toolArgs: JSON.stringify({
+          plan:
+            "## 修改《末班车》情感救赎版\n\n### 概要\n改写为约 500 字的短篇版本。\n\n" +
+            "### 修改方案\n- 新建文件，不覆盖原稿。\n  - 嵌套项一\n\n### 验证方式\n- 读取新文件确认无乱码。\n",
+        }),
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 ExitPlanMode");
+    // tool-call 行在本 describe 的渲染下**默认展开**（tool-call 卡在 run 态直出）；
+    // 若折叠开关在场则先展开（与「工具参数升格」既有 describe 的 expandToolCall 同法；
+    // 那个 helper 在另一个 describe 作用域内，此处就地取用）
+    const toggle = screen.queryByTestId("msg-0-toggle");
+    if (toggle) fireEvent.click(toggle);
+    const card = (await screen.findByTestId("tool-args-0")) as HTMLElement;
+    // **判据**：本支渲染出的卡片里存在挂 `.md-body` 的容器（与 `case "plan"` 同判据）
+    const mdBody = card.querySelector(".md-body");
+    expect(mdBody).not.toBeNull();
+    // 结构也在（markdown 解析正常，被 preflight 拍平的是样式）
+    expect(screen.getByText("修改《末班车》情感救赎版").tagName).toBe("H2");
+    expect(screen.getByText("概要").tagName).toBe("H3");
+    expect(mdBody!.querySelectorAll("li").length).toBeGreaterThanOrEqual(3);
+    expect(mdBody!.contains(screen.getByText("嵌套项一"))).toBe(true);
+  });
+
   it("总结模式：plan 不折叠、不计入「已折叠 N 条」计数", async () => {
     installFetch();
     routes.messages = [

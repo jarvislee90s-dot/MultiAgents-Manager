@@ -3117,7 +3117,6 @@ pub async fn session_question_answer(
         let _guard = crate::inject::queue::try_acquire_inflight(&answer_sid)?;
         Some(dispatch_question_action(
             &probe_st2,
-            action,
             &tool_for_dispatch,
             pid,
             &spec,
@@ -3340,7 +3339,6 @@ enum QuestionDispatch {
 #[allow(clippy::too_many_arguments)]
 fn dispatch_question_action(
     st: &Arc<RemoteState>,
-    action: crate::inject::question::AnswerAction,
     tool: &str,
     pid: u32,
     spec: &crate::inject::families::FamilySpec,
@@ -3369,7 +3367,6 @@ fn dispatch_question_action(
                     None
                 })
             };
-            let sid_log = tool;
             let mut terminal = crate::inject::mode::Closures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -3394,16 +3391,15 @@ fn dispatch_question_action(
                 &mut terminal,
                 *max_down_steps,
             );
-            let _ = (sid_log, action);
             match out {
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
                 },
-                Err(e) => QuestionDispatch::Aborted {
-                    stage: stage_from_abort(&e),
-                    error: e,
-                },
+                // **中止分类**（复评 F6-2）：屏读形态不符 → Aborted（带段名）；
+                // 投递失败 → Failed（**不带** aborted——语义等同批次丙的投递失败，
+                // 用户要做的是查通道而不是查终端形态）
+                Err(e) => dispatch_abort(e),
             }
         }
         StagePlan::FreeText => {
@@ -3450,12 +3446,25 @@ fn dispatch_question_action(
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
                 },
-                Err(e) => QuestionDispatch::Aborted {
-                    stage: stage_from_abort(&e),
-                    error: e,
-                },
+                Err(e) => dispatch_abort(e),
             }
         }
+    }
+}
+
+/// 阶段机中止 → 分派结果（**分类的单点**：见 `inject::question::StageAbort`）。
+///
+/// 屏读形态不符 → [`QuestionDispatch::Aborted`]（回执 `failed{aborted:true, stage}`）；
+/// 投递失败 → [`QuestionDispatch::Failed`]（回执 `failed{error}`，**不带** aborted，
+/// 审计 `failed:<e>`——与批次丙的失败口径逐字一致）。
+fn dispatch_abort(e: crate::inject::question::StageAbort) -> QuestionDispatch {
+    use crate::inject::question::StageAbortKind;
+    match e.kind {
+        StageAbortKind::Screen => QuestionDispatch::Aborted {
+            stage: stage_from_abort(&e.message),
+            error: e.message,
+        },
+        StageAbortKind::Delivery => QuestionDispatch::Failed(e.message),
     }
 }
 
