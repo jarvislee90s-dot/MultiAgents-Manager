@@ -36,15 +36,22 @@
 //   修改后的重发直发出去（变相插队）；入队后的放行节奏：会话转闲跃迁后事件臂
 //   即时放行，已空闲且无跃迁时由 60s 周期兜底放行（可达分钟级），行为收敛；
 // - 多行原样上行（textarea 天然换行，不做回车发送），归一在服务端入队时一次完成；
-// - **卡片在场分流（丁T3 接入②，§2.4 裁3 的安全面）**：终端上有待决对话框时，
-//   自由文本被 TUI 当成键盘输入理解——多选对话框里 **Enter = 切换高亮项**（问题 6
-//   实锤：composer 打自由文本 → 选项 1 被勾选/反勾），审批对话框里更可能被读成
-//   选项（kimi 误批准实锤）。本组件挂载/状态跃迁时探测两类卡片的在场（与两张卡
-//   自己拉的是同两个端点），在场则：
-//   - **问答卡在场** → placeholder 改「作为回答发送」语义的引导文案，发送被拦截
-//     （诚实回执：请在卡片输入框作答或在终端作答——**自由作答注入序列尚未实机定案**
-//     〔§2.4 各工具序列待定〕，本任务不假装能代发，见文件末的未覆盖面申报）；
-//   - **审批卡 / 计划待确认在场** → 拦截 + 「终端等待审批，请用卡片按钮」。
+// - **卡片在场分流（丁T3 接入②，§2.4 裁3 的安全面；丁T6 复评按契约补齐「转向」）**：
+//   终端上有待决对话框时，自由文本被 TUI 当成键盘输入理解——多选对话框里
+//   **Enter = 切换高亮项**（问题 6 实锤：composer 打自由文本 → 选项 1 被勾选/反勾）、
+//   审批对话框里更可能被读成选项（kimi 误批准实锤）。本组件挂载/状态跃迁时探测两类
+//   卡片的在场（与两张卡自己拉的是同两个端点），在场则按**四态**分流：
+//   - **`questionFreeText`（问答在场 + answerable + 单题 + 非多选 + 工具已验）** →
+//     placeholder 承诺**真发送**语义；发送**转向**卡内同一条 freeText 出口
+//     （`sessionQuestionAnswer(action="freeText")`，端点自 T5 起存在）——不再是
+//     拦截（§2.4 裁3「三个入口，同一个作答序列出口」；丁T3 原实现因序列未定案而
+//     拦截，T5 定案后由本批合并前复评收口）。成功后与 delivered 同口径清空输入框；
+//   - **`questionBlocked`（未验工具 / 多题 / 多选）** → 拦截（不假装能发：
+//     未验不出键；多题只读卡 §2.3；多选屏自由作答行判据不匹配，后端恒 409）；
+//   - **审批卡 / 计划待确认在场（`approve`）** → 拦截 + 「终端等待审批，请用卡片按钮」；
+//   - **`none`** → 原 `sessionSend` 路径不变。
+//   **转向路径不带附件标记行**（自由作答是「回答」不是「消息」，走字符通道、无
+//   `[mobile]` 签名）；带附件时**拦截**而不是静默丢（静默丢用户内容是坏体验）。
 //   **发送时刻再探一次**（快照可能陈旧：挂载后对话框才出现）——探针本身是前端
 //   尽力而为的第二道闸，**权威守卫**在后端注入时刻的屏读（接入①覆盖控制类；
 //   普通消息的屏读守卫不在本任务范围，见未覆盖面申报）。
@@ -61,6 +68,7 @@ import {
   fetchSessionQuestion,
   queueJump,
   queueRetract,
+  sessionQuestionAnswer,
   sessionSend,
   uploadAttachment,
   type QueueItemView,
@@ -132,23 +140,47 @@ const GONE_POLL_CONSUMED_MESSAGE = "该消息已不在队列（可能已送达�
 /** D8 队列预览截断长度（字符）：逐条预览只给「前十余字符」一眼可辨的量 */
 const PREVIEW_MAX_CHARS = 12;
 
-/** 终端卡片在场态（丁T3 接入②，§2.4）：由两个既有端点的载荷派生——
- *  `question`（问答卡在场：/session-question 的 available）/
- *  `approve`（审批卡或计划待确认在场：/session-approve-options 的
- *  available=true，含 planPending 形态——那是「等一个计划确认」，放行自由文本
- *  在 kimi 上会被读成批准）。`none` = 都不在场（或探针不可用）。 */
-type TerminalCardPresence = "none" | "question" | "approve";
+/** 终端卡片在场态（丁T3 接入②，§2.4 裁3；丁T6 复评扩为**四态**——原三态
+ *  `"none" | "question" | "approve"` 丢失了「这个问答卡能不能收自由文本」的信息，
+ *  导致所有问答在场都被拦截、composer 永远无法按裁3 走「同一个作答出口」）。
+ *
+ *  - `approve`：审批卡或计划待确认在场（/session-approve-options 的 `available=true`，
+ *    含 planPending 形态——那是「等一个计划确认」，放行自由文本在 kimi 上会被读成
+ *    批准）。**拦截**（裁3 安全面）。
+ *  - `questionFreeText`：问答在场 **且可远程自由作答**——即 `answerable === true`
+ *    **且** `freeText === true`（仅 claude 定案，见 api.ts 的 `QuestionInfoView.freeText`）
+ *    **且** `questions.length === 1`（多题只读卡，§2.3）**且** `!multiSelect`
+ *    （多选屏的自由作答行带勾选框，判据不匹配 → 后端恒 409，见
+ *    `question::free_text_shape_supported`）。composer 发送**转向**
+ *    `sessionQuestionAnswer(action="freeText")`——与卡内输入框**同一条出口**。
+ *  - `questionBlocked`：问答在场但**不能**走自由作答（工具未验 / 多题 / 多选）。
+ *    **拦截**（不假装能发，引导去终端或卡片按钮）。
+ *  - `none`：都不在场（或探针不可用）。原 `sessionSend` 路径。
+ */
+type TerminalCardPresence = "none" | "questionFreeText" | "questionBlocked" | "approve";
 
-/** 分流文案（丁T3 §2.4 裁3）：
- *  - 问答在场：placeholder 与回执用「作为回答发送」的语义（用户输入的是**答案**，
- *    不是新消息）；发送被拦截——**自由作答注入序列尚未实机定案**（§2.4 各工具
- *    序列待定），本任务不假装能代发，故落诚实回执（与「未验不出键」同一纪律）；
+/** 分流文案（丁T3 §2.4 裁3；丁T6 复评按四态改写）：
+ *  - 问答在场**可自由作答**：placeholder 承诺**真发送**（发送即调 freeText 端点）；
+ *  - 问答在场但不可自由作答（未验工具 / 多题 / 多选）：不承诺——引导终端；
  *  - 审批在场：裁3 的安全面——此类对话框**没有自由作答语义**，放行=误触选项
- *    （kimi 误批准实锤），故拦截并指路卡片按钮。 */
-const QUESTION_PRESENT_PLACEHOLDER = "输入内容将作为回答发送（对话框待决）";
-const QUESTION_PRESENT_RECEIPT =
-  "终端正在等待回答：请在问答卡中输入作答，或直接在终端作答（自由作答序列尚未实机定案，本端不代发）";
+ *    （kimi 误批准实锤），故拦截并指路卡片按钮。
+ *
+ *  **成功回执不另编文案**：转向 freeText 成功后复用本组件既有的 receipt 词汇
+ *  （`delivered` / `submitted`），按端点自带的 `verified` 三态分派——语义见
+ *  `SessionQuestionAnswerResult.verified`（true=屏读到终态锚 / false=读到屏但未见锚
+ *  / null=读屏不可用；**后两者都不是失败，是「未确认」**）。 */
+const QUESTION_FREETEXT_PLACEHOLDER = "输入内容将作为本题的回答发送";
+const QUESTION_BLOCKED_RECEIPT =
+  "终端正在等待回答，但本题不能在本输入框作答：请在问答卡中作答，或直接在终端作答";
 const APPROVE_PRESENT_RECEIPT = "终端等待审批，请用卡片按钮";
+
+/** 附件与「作为回答发送」的冲突拦截（丁T6 复评的用户裁决：**拦截而不是静默丢**）。
+ *  理由：自由作答是「回答」不是「消息」——后端 freeText 走**字符通道**（不带签名、
+ *  也不带附件标记行），卡内输入框同样没有附件入口。若 composer 带着附件转向
+ *  freeText，那些附件**必然被静默丢弃**（用户以为发出去了，agent 看不到路径）——
+ *  静默丢用户内容是坏体验（本仓「回执如实」纪律的同一面）。故拦截并说清去处。 */
+const FREETEXT_WITH_ATTACHMENT_RECEIPT =
+  "附件不能随「回答」发送（自由作答不带附件）。请移除附件后作为回答发送，或改用卡片按钮/终端";
 
 /** W1 来源标记（服务端 compose_injection 注入，非用户正文）：预览与「修改」放回正文
  *  时剥离——不剥则修改重发会二次叠加签名。
@@ -234,7 +266,21 @@ export default function MessageComposer({ session }: MessageComposerProps) {
 
   /** 探测两类卡片在场（两张卡自己拉的是同两个端点——ApproveCard 的
    *  `available`（含 planPending）/ QuestionCard 的 `available`）。二者并行，
-   *  任一失败按不在场处理（单点失败不连坐另一路）。 */
+   *  任一失败按不在场处理（单点失败不连坐另一路）。
+   *
+   *  **丁T6 复评：问答在场细分两态**（原实现只回 `"question"`，丢失了「能不能远程
+   *  自由作答」这层信息——见 `TerminalCardPresence` 的设计注）。判据**与后端同源**
+   *  （不前端自造规则）：三个字段全来自同一份 `fetchSessionQuestion` 载荷，
+   *  后端 `session_question_answer` 的 `action_supported` 门用的是同一组判据
+   *  （`free_text_supported(tool)` × `free_text_shape_supported(q)` × 单题）。
+   *
+   *  四条判据（全部满足才算 `questionFreeText`）：
+   *  1. `answerable !== false`（缺省按 true——旧后端兼容，见 api.ts:610 注释）；
+   *  2. `freeText === true`（**仅 claude 定案**；codex/opencode/kimi 的点选已验但
+   *     自由作答序列未定案 → 缺省/旧后端按 false 处理，不假装能发）；
+   *  3. `questions.length === 1`（多题只读卡，§2.3：翻页键序未测，后端同样 409）；
+   *  4. `!questions[0].multiSelect`（多选屏的自由作答行带勾选框，定位判据不匹配 →
+   *     后端恒 409，见 `question::free_text_shape_supported` 的实机证据）。 */
   const probeCardPresence = useCallback(async (): Promise<TerminalCardPresence> => {
     const [approve, question] = await Promise.all([
       fetchApproveOptions(session.id).catch(() => null),
@@ -242,8 +288,16 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     ]);
     // 审批优先（裁3 的安全面更重：审批框放行自由文本 = 误触选项/误批准）
     if (approve?.available === true) return "approve";
-    if (question?.available === true) return "question";
-    return "none";
+    if (question?.available !== true) return "none";
+    // 防御：旧后端/异常载荷可能没有 questions 数组（类型是必填，运行时仍设防——
+    // 本函数在挂载 effect 的 `.then` 里跑，抛异常会变成未处理的 rejection）
+    const q = question.questions ?? [];
+    const canFreeText =
+      question.answerable !== false &&
+      question.freeText === true &&
+      q.length === 1 &&
+      !q[0].multiSelect;
+    return canFreeText ? "questionFreeText" : "questionBlocked";
   }, [session.id]);
 
   // 挂载拉取一次输入区可用性；任何失败静默保持隐藏
@@ -363,20 +417,56 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       // 内任意时刻的事），而放行自由文本的代价是**误触选项**（多选框 Enter=切换
       // 高亮项 / 审批框被读成选择），故发送前再探一次、以此刻结论为准。
       //
-      // 拦截的**回执语义**（诚实口径，不假装能代发）：
-      // - 问答在场：引导去卡片作答；**本端不代发**——自由作答注入序列尚未实机定案
-      //   （§2.4），假装能发就是对用户说谎（发了也没人保证落到「Type something」上）；
-      // - 审批/计划待确认在场：这类对话框没有自由作答语义，指路卡片按钮。
+      // 分流矩阵（丁T6 复评按四态落地；**回执文案与卡内路径同口径**，不自编一套）：
+      // - `questionFreeText`（问答在场 + answerable + 单题 + 非多选 + 工具已验）→
+      //   **转向**：调 `sessionQuestionAnswer(action="freeText")`——与卡内输入框
+      //   **同一条出口**（§2.4 裁3「三个入口，同一个作答序列出口」）；
+      // - `questionBlocked`（问答在场但不可自由作答：未验工具 / 多题 / 多选）→
+      //   **拦截**（多题只读卡 §2.3；未验不出键）——不假装能发；
+      // - `approve`（审批 / 计划待确认在场）→ **拦截**（裁3 安全面：此类对话框没有
+      //   自由作答语义，放行=误触选项——kimi 误批准实锤）；
+      // - `none` → 原 `sessionSend` 路径（零回归）。
       //
-      // 输入框内容**保留**（与 failed 态同口径：用户可复制到卡片输入框或终端）。
+      // 拦截时输入框内容**保留**（与 failed 态同口径：用户可复制到卡片输入框或终端）。
       const presence = await probeCardPresence();
       setCardPresence(presence);
       if (presence === "approve") {
         setReceipt({ kind: "blocked", message: APPROVE_PRESENT_RECEIPT });
         return;
       }
-      if (presence === "question") {
-        setReceipt({ kind: "blocked", message: QUESTION_PRESENT_RECEIPT });
+      if (presence === "questionBlocked") {
+        setReceipt({ kind: "blocked", message: QUESTION_BLOCKED_RECEIPT });
+        return;
+      }
+      if (presence === "questionFreeText") {
+        // 附件不能随「回答」发送：freeText 走字符通道（不带附件标记行），卡内输入框
+        // 也没有附件入口——带了附件转向 freeText 必然**静默丢弃**它们（用户以为发
+        // 出去了）。故拦截而不是忽略（理由见常量注）。
+        if (attachments.length > 0) {
+          setReceipt({ kind: "blocked", message: FREETEXT_WITH_ATTACHMENT_RECEIPT });
+          return;
+        }
+        // 转向自由作答：**不带附件标记行**（自由作答是「回答」不是「消息」——
+        // 后端归一后走字符通道，不带 [mobile] 签名，见 api.ts 的
+        // `sessionQuestionAnswer` 注释）。
+        const res = await sessionQuestionAnswer(session.id, "freeText", undefined, text);
+        if (res.status === "key_sent") {
+          // 回执与卡内路径**同口径**（不另编一套文案）：
+          // - `verified === true`（屏读到终态锚 = 走完整条闭环）= delivered；
+          // - `verified === false`（读到屏但未见终态锚）/ `null`|缺省（读屏不可用）
+          //   → **中性** submitted（D7/T3 同一纪律：未确认 ≠ 失败，也**不得**冒充
+          //   已完成——`false` 的语义逐字是「已按屏读完成提交，但未在屏上见到完成
+          //   回执」，卡内也如实显示）。
+          // 两种都算「已投递」→ 与 delivered 同口径清空输入框（留着会让用户以为
+          // 没发出去）。**不提供重试语义**（TUI 那份无法撤回，重按 = 重发）。
+          setText("");
+          setReceipt(res.verified === true ? { kind: "delivered" } : { kind: "submitted" });
+        } else {
+          // failed：分诊与卡内同源——`aborted:true` 是阶段机中止（带段名，卡内
+          // 渲染段名徽标；composer 无该视觉位，展示 `error` 整句原文即可，其中已
+          // 含段名与原因），其余是投递失败（可重试）。**不另编文案**。
+          setReceipt({ kind: "failed", error: res.error });
+        }
         return;
       }
       // 附件标记行（文件池既有约定 <image|file path>）：拼在正文之后随消息注入，
@@ -703,9 +793,10 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           {sendInfo.reasonCode ? `（${sendInfo.reasonCode}）` : ""}
         </p>
       )}
-      {/* 丁T3 接入②：终端卡片在场提示条（**输入区仍可用**——不把输入框整个禁用是
-          刻意的：用户可能正想把内容复制到卡片输入框；发送按钮仍可点，点了会落
-          拦截回执并说明去向）。文案与回执同源常量，两处不会漂移。 */}
+      {/* 丁T3 接入② / 丁T6 复评：终端卡片在场提示条（**输入区仍可用**——不把输入框
+          整个禁用是刻意的：用户可能正想把内容复制到卡片输入框；发送按钮仍可点，
+          点了会按分流走。四态各一句话：可自由作答 → 承诺「作为回答发送」；
+          不可作答/审批 → 指路卡片按钮或终端）。文案与回执同源常量，两处不会漂移。 */}
       {injectable && cardPresence !== "none" && (
         <p
           data-testid="composer-card-presence"
@@ -714,7 +805,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         >
           {cardPresence === "approve"
             ? "终端等待审批——本输入框直发已被拦截，请用上方卡片按钮应答"
-            : "终端正在等待回答——本输入框将作为回答发送；请在问答卡中作答"}
+            : cardPresence === "questionFreeText"
+              ? "终端正在等待回答——本输入框发送的内容将作为本题的回答送到终端"
+              : "终端正在等待回答（本题不能在输入框作答）——请在问答卡中作答，或直接在终端作答"}
         </p>
       )}
       {/* 投递中（灰3）：send await 全程在场——慢消费者长文投递可达分钟级，
@@ -944,11 +1037,13 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           placeholder={
             !injectable
               ? "该会话不支持远程注入"
-              : cardPresence === "question"
-                ? QUESTION_PRESENT_PLACEHOLDER
-                : cardPresence === "approve"
-                  ? "终端等待审批，请用卡片按钮"
-                  : "输入消息发送到终端…"
+              : cardPresence === "questionFreeText"
+                ? QUESTION_FREETEXT_PLACEHOLDER
+                : cardPresence === "questionBlocked"
+                  ? "终端等待回答（本题请到卡片或终端作答）"
+                  : cardPresence === "approve"
+                    ? "终端等待审批，请用卡片按钮"
+                    : "输入消息发送到终端…"
           }
           className="min-h-0 flex-1 resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-sky-500/40 focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
         />

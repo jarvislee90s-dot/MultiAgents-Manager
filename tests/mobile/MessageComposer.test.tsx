@@ -29,8 +29,19 @@ interface Routes {
   /** 探针端点非 2xx（探针失败路径：api.ts 抛 ApiError → composer 按不在场处理） */
   approveOptionsStatus?: number;
   questionStatus?: number;
-  /** 丁T3 接入②：问答卡在场探针（/session-question）载荷；缺省 available=false */
-  questionInfo?: { available: boolean };
+  /** 丁T3 接入②：问答卡在场探针（/session-question）载荷；缺省 available=false。
+   *  丁T6 复评起载荷可带 **answerable / freeText / questions**——composer 据此判
+   *  「能否转向自由作答」（四态分流的数据源；判据与后端同源，见
+   *  MessageComposer 的 `probeCardPresence`）。 */
+  questionInfo?: {
+    available: boolean;
+    answerable?: boolean;
+    freeText?: boolean;
+    questions?: Array<{ question: string; multiSelect: boolean }>;
+  };
+  /** POST /session-question/answer 回执（丁T6：composer 转向 freeText 的路径；
+   *  缺省 key_sent+verified:true）*/
+  answer?: Record<string, unknown>;
   send?: Record<string, unknown>;
   sendStatus?: number;
   /** 非 2xx 时响应体 JSON（403 not_injectable{reason,reasonCode} 等，P2-10） */
@@ -100,6 +111,15 @@ function installFetch() {
             drift: false,
           }
         ),
+        { status: 200 }
+      );
+    }
+    // 丁T6 复评：问答应答端点（composer 转向 freeText 的出口）。**判序必须在
+    // /session-question 之前**——`/session-question/answer` ⊃ `/session-question`
+    // （与前缀包含关系同一惯例：长路径先判）
+    if (url.includes("/session-question/answer")) {
+      return new Response(
+        JSON.stringify(routes.answer ?? { status: "key_sent", done: true, verified: true }),
         { status: 200 }
       );
     }
@@ -176,6 +196,23 @@ function queueListCalls(): number {
     const u = String(c[0]);
     return u.includes("/session-queue?") || u.endsWith("/session-queue");
   }).length;
+}
+
+/** POST /session-question/answer 的调用（丁T6：composer 转向 freeText 的出口） */
+function answerCalls(): Array<Array<unknown>> {
+  return fetchMock.mock.calls.filter((c: unknown[]) =>
+    String(c[0]).includes("/session-question/answer")
+  );
+}
+
+/** 可自由作答的问答载荷夹具（claude 已定案形态：answerable + freeText + 单题单选） */
+function freeTextQuestionInfo(): NonNullable<Routes["questionInfo"]> {
+  return {
+    available: true,
+    answerable: true,
+    freeText: true,
+    questions: [{ question: "构建产物放哪个目录？", multiSelect: false }],
+  };
 }
 
 /** 放行 mock fetch 的 promise 链（若干轮微任务冲刷，足以走完 fetch→json→setState） */
@@ -1318,8 +1355,9 @@ describe("丁T3 签名后置：尾部签名剥离", () => {
   });
 });
 
-// ==== 丁T3 接入②：卡片在场分流（§2.4 裁3）====
-describe("丁T3 卡片在场分流：审批拦截 / 问答引导", () => {
+// ==== 丁T3 接入② / 丁T6 复评：卡片在场分流（§2.4 裁3）====
+// 四态矩阵：approve / questionFreeText / questionBlocked / none——各一条主用例。
+describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可作答拦截", () => {
   it("审批卡在场：发送被拦截（零 /session-send 调用）+ 回执提示用卡片按钮 + 输入保留", async () => {
     installFetch();
     routes.info = sendInfo();
@@ -1343,33 +1381,244 @@ describe("丁T3 卡片在场分流：审批拦截 / 问答引导", () => {
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("帮我改一下");
   });
 
-  it("问答卡在场：placeholder 改「作为回答发送」语义 + 发送落诚实回执（不假装代发）+ 零注入", async () => {
+  // ===== 丁T6 复评（契约 §2.4 裁3）：问答在场 + answerable + 单题 → **转向** freeText =====
+  it("问答可自由作答（claude 单题单选）：发送转向 freeText 端点（非 sessionSend）+ 成功清输入框", async () => {
     installFetch();
     routes.info = sendInfo();
-    routes.questionInfo = { available: true };
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.answer = { status: "key_sent", done: true, stage: "free-text", verified: true };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
     await screen.findByTestId("composer-card-presence");
     expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
-      "question"
+      "questionFreeText"
     );
-    expect(input.placeholder).toContain("作为回答发送");
+    expect(input.placeholder).toBe("输入内容将作为本题的回答发送");
     fireEvent.change(input, { target: { value: "构建产物放 dist" } });
     fireEvent.click(screen.getByTestId("composer-send"));
-    const chip = await screen.findByTestId("send-receipt-blocked");
-    expect(chip.textContent).toContain("终端正在等待回答");
-    expect(chip.textContent).toContain("自由作答序列尚未实机定案");
+    // 回执：verified=true（走完整条闭环）→ delivered（与卡内路径同口径）
+    expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
+    // **断言调用参数含用户文本**（转向的核心契约：走的是同一条 freeText 出口）
+    expect(answerCalls()).toHaveLength(1);
+    expect(JSON.parse(String((answerCalls()[0][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      action: "freeText",
+      text: "构建产物放 dist",
+    });
+    // 零 /session-send：转向路径**不得**走原直发（否则又落回「自由文本被读成选项」）
     expect(sendCalls()).toHaveLength(0);
-    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe(
-      "构建产物放 dist"
+    // 成功后清空输入框（与 delivered 同口径——留着会让用户以为没发出去）
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("问答可自由作答但回执 verified=false：中性 submitted 回执（不冒充完成）+ 仍清输入框", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.answer = { status: "key_sent", done: true, stage: "free-text", verified: false };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    fireEvent.change(input, { target: { value: "回答内容" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    // false = 「读到屏但未见终态锚」（不谎报完成）→ 走中性 submitted（D7/T3 同一纪律）
+    expect(await screen.findByTestId("send-receipt-submitted")).toBeTruthy();
+    expect(screen.queryByTestId("send-receipt-delivered")).toBeNull();
+    expect(answerCalls()).toHaveLength(1);
+    expect(sendCalls()).toHaveLength(0);
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("问答多题：仍拦截（不调 freeText、不调 sessionSend），placeholder 不承诺发送", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = {
+      available: true,
+      answerable: true,
+      freeText: true,
+      questions: [
+        { question: "问题一", multiSelect: false },
+        { question: "问题二", multiSelect: false },
+      ],
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "questionBlocked"
     );
+    expect(input.placeholder).toContain("本题请到卡片或终端作答");
+    fireEvent.change(input, { target: { value: "回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-blocked");
+    expect(chip.textContent).toContain("本题不能在本输入框作答");
+    expect(answerCalls()).toHaveLength(0);
+    expect(sendCalls()).toHaveLength(0);
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("回答");
+  });
+
+  it("问答 answerable=false（未验工具）：仍拦截（不调 freeText、不调 sessionSend）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = {
+      available: true,
+      answerable: false,
+      freeText: false,
+      questions: [{ question: "codex 的题", multiSelect: false }],
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "questionBlocked"
+    );
+    fireEvent.change(input, { target: { value: "回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-blocked");
+    expect(answerCalls()).toHaveLength(0);
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it("问答 freeText 未定案（answerable=true 但 freeText 缺省）：仍拦截（未验不出键）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    // codex/opencode/kimi 形态：点选已验（answerable=true）但自由作答未定案
+    routes.questionInfo = {
+      available: true,
+      answerable: true,
+      questions: [{ question: "点选可答但自由作答未验", multiSelect: false }],
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "questionBlocked"
+    );
+    fireEvent.change(input, { target: { value: "回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-blocked");
+    expect(answerCalls()).toHaveLength(0);
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it("answerable=false 是**独立判据**：freeText=true 也仍拦截（未验不出键优先）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    // 夹具刻意让 freeText=true（其他三条判据全过）——只有 answerable=false 拦住它。
+    // 这是「answerable 守卫不可省」的**隔离锁**（若只测「freeText 缺省」那种夹具，
+    // 把 answerable 条件删掉测试也不会红 = 空断言）
+    routes.questionInfo = {
+      available: true,
+      answerable: false,
+      freeText: true,
+      questions: [{ question: "未验工具的题", multiSelect: false }],
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "questionBlocked"
+    );
+    fireEvent.change(input, { target: { value: "回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-blocked");
+    expect(answerCalls()).toHaveLength(0);
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it("answerable 缺省（旧后端兼容）：freeText=true 单题单选 → 走转向（缺省按 true）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    // 旧后端不带 answerable 字段 → 按 true 处理（api.ts:610 注释的口径）。本用例锁
+    // 「缺省语义」：若有人把判据写成 `=== true`（严格要求字段在场），本测试会红
+    routes.questionInfo = {
+      available: true,
+      freeText: true,
+      questions: [{ question: "旧后端的题", multiSelect: false }],
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "questionFreeText"
+    );
+    fireEvent.change(input, { target: { value: "回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
+    expect(answerCalls()).toHaveLength(1);
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it("问答多选题：仍拦截（多选屏自由作答行判据不匹配，后端恒 409）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = {
+      available: true,
+      answerable: true,
+      freeText: true,
+      questions: [{ question: "选哪些？", multiSelect: true }],
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
+      "questionBlocked"
+    );
+    fireEvent.change(input, { target: { value: "回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await screen.findByTestId("send-receipt-blocked");
+    expect(answerCalls()).toHaveLength(0);
+  });
+
+  it("转向自由作答 + 带附件：拦截并提示（**不静默丢附件**）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-a.png", size: 5 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    await screen.findByTestId("composer-card-presence");
+    // 上传一个附件（走 + 钮同链路）
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [new File(["x"], "a.png", { type: "image/png" })] },
+    });
+    await screen.findByTestId("attachment-chips");
+    fireEvent.change(input, { target: { value: "带附件的回答" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-blocked");
+    expect(chip.textContent).toContain("附件不能随「回答」发送");
+    // 零调用：既不发 freeText（会丢附件）也不发 sessionSend（自由文本会被读成选项）
+    expect(answerCalls()).toHaveLength(0);
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it("转向 freeText 失败（failed 回执）：红 chip 展示后端 error 原文 + 输入保留可重试", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.answer = {
+      status: "failed",
+      aborted: true,
+      stage: "free-row",
+      error: "屏上未出现自由作答行",
+    };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    fireEvent.change(input, { target: { value: "回答内容" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-failed");
+    expect(chip.textContent).toContain("屏上未出现自由作答行");
+    expect(sendCalls()).toHaveLength(0);
+    // 失败保留输入（与既有 failed 态同口径：可重试）
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("回答内容");
   });
 
   it("两者都在场：审批优先（裁3 安全面更重——审批框放行自由文本 = 误触选项）", async () => {
     installFetch();
     routes.info = sendInfo();
     routes.approveOptions = { available: true, planPending: true };
-    routes.questionInfo = { available: true };
+    routes.questionInfo = freeTextQuestionInfo();
     render(<MessageComposer session={{ id: "sess-1" }} />);
     await screen.findByTestId("composer-card-presence");
     expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
@@ -1389,6 +1638,7 @@ describe("丁T3 卡片在场分流：审批拦截 / 问答引导", () => {
     fireEvent.click(screen.getByTestId("composer-send"));
     expect(await screen.findByTestId("send-receipt-delivered")).toBeTruthy();
     expect(sendCalls()).toHaveLength(1);
+    expect(answerCalls()).toHaveLength(0);
   });
 
   it("发送时刻复探（快照陈旧防线）：挂载时不在场，发送前对话框出现 → 本次发送被拦截", async () => {

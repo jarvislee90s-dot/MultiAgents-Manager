@@ -21,6 +21,7 @@
 //! | 模式回读（切档后读回当前档） | (a)(b) | [`crate::inject::mode::poll_mode_readback`] |
 //! | 权限菜单 / Full Access 确认框 / 成功回执 | (a)(b) | `remote::api::poll_menu_stage` / `poll_receipt` |
 //! | 问答阶段机各段 | (a)(b) | `remote::api::poll_question_stage`（同族 `poll_review_stage` / `poll_receipt_stage`） |
+//! | 插队「等回合停」（Esc 之后才投递正文） | (a)(b) | [`crate::inject::confirm::poll_turn_stopped`]（判据 = 忙态串消失，**等某串消失**形态） |
 //! | 对话框在场守卫（T3）/ 高亮快照 / 切档前的 `before` / GET 当前档 | **(c) 例外** | 单次读，不轮询——**不要**给它们加窗 |
 //! | 消息注入确认（`confirm.rs`） | 已是轮询（等的是**会话文件落盘**，不是屏幕） | 步距 500ms，`confirm::PROBE_INTERVAL_MS` |
 //!
@@ -117,6 +118,32 @@ pub const MODE_READBACK_POLL_TOTAL_MS: u64 = 1_500;
 /// 量出超窗，再按实测回填。
 pub const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 2_000;
 
+/// **插队「等回合停」**轮询窗（毫秒）：Esc 中断之后、投递正文之前，屏读轮询等
+/// claude 底栏的**忙态串消失**（判据见 `confirm::TURN_BUSY_MARKER`）——即「回合真的
+/// 停下来了」。
+///
+/// # 原 `confirm::INTERRUPT_DRAIN_TIMEOUT_MS`（值不变 3000ms，D20 起归本模块）
+///
+/// 旧名描述的是**旧实现等的东西**：输入缓冲排空（`wait_input_drained`）。2026-09-22
+/// 实机 bug 证明那条判据不成立——Esc 写进缓冲随即就空了，正文几乎紧接着 Esc 落进
+/// **正在收尾的旧回合窗口**（进 claude 内部队列、不开新回合），而回执报成功
+/// （审计 `jump ok` 但会话 JSONL 里搜不到消息正文 = 假成功）。改判据后本常量语义
+/// 变为「等回合停的窗」，故**改名并挪进时序单一事实源**（不新增同义常量：旧名已无
+/// 消费者，全仓检索见 `tests::timing_constants_are_pinned` 同批提交说明）。
+///
+/// **依据（自裁）**：中断是**异步**生效的（模型收尾 + TUI 重绘），与「注入后的下一次
+/// 重绘」同量级但更慢一档，故取三窗（1500ms）的 2 倍 = 3000ms。
+/// **与 [`super::confirm`] 的 `JUMP_DRAIN_TIMEOUT_MS`（2000ms）为何不等**：两者等的
+/// 是**不同的东西**——本窗等「终端状态变了没」（回合停），那个窗等「我们的键投出去
+/// 被消费了没」（投递完成）；前者由模型收尾时长决定，后者由输入缓冲消费速率决定，
+/// 没有理由取同值（旧注释把两者并列却不解释，正是本次补记的理由）。
+///
+/// **超时的语义（不是失败）**：窗尽仍读到忙态 → 回执**如实降级**为「已投递未确认」
+/// （`FlushOutcome::Submitted`）而不是 Sent——消息照发（best-effort，用户消息不能因
+/// 中断没等到就丢），但不冒充「已送达」。实测项见
+/// `d20_live_probe_tests::d20_turn_stop_latency_live_probe`。
+pub const TURN_STOP_POLL_TOTAL_MS: u64 = 3_000;
+
 /// 总窗（毫秒）→ **轮询轮数**（D20(b)：窗 = 步长 × 轮数）。
 ///
 /// 取整向上且至少 1 轮——`0 轮` 会让「窗」退化成「不读」，那不是有界轮询而是放弃。
@@ -202,13 +229,17 @@ mod tests {
             QUESTION_STAGE_POLL_TOTAL_MS, 2_000,
             "未随三窗调整（理由见其文档）"
         );
+        assert_eq!(
+            TURN_STOP_POLL_TOTAL_MS, 3_000,
+            "原 INTERRUPT_DRAIN_TIMEOUT_MS，D20 起判据改屏读、值不变（理由见其文档）"
+        );
         assert_eq!(CHUNK_CHARS, 80);
         assert_eq!(CHUNK_GAP_MS, 50);
         assert_eq!(SUBMIT_DELAY_MS, 150);
     }
 
-    /// 窗 → 轮数（D20(b) 的「步长 × 轮数」表达）：三窗与回读窗各 15 拍、问答 20 拍；
-    /// 非整除向上取整、0 也至少 1 拍（**不读**不是有界轮询）。
+    /// 窗 → 轮数（D20(b) 的「步长 × 轮数」表达）：三窗与回读窗各 15 拍、问答 20 拍、
+    /// 等回合停 30 拍；非整除向上取整、0 也至少 1 拍（**不读**不是有界轮询）。
     #[test]
     fn poll_rounds_are_bounded_and_nonzero() {
         assert_eq!(poll_rounds(MENU_POLL_TOTAL_MS), 15);
@@ -216,6 +247,11 @@ mod tests {
         assert_eq!(poll_rounds(RECEIPT_POLL_TOTAL_MS), 15);
         assert_eq!(poll_rounds(MODE_READBACK_POLL_TOTAL_MS), 15);
         assert_eq!(poll_rounds(QUESTION_STAGE_POLL_TOTAL_MS), 20);
+        assert_eq!(
+            poll_rounds(TURN_STOP_POLL_TOTAL_MS),
+            30,
+            "等回合停窗 = 3000ms / 100ms 步长 = 30 拍（D20(b) 的有界表达）"
+        );
         assert_eq!(
             poll_rounds(150),
             2,
@@ -263,6 +299,10 @@ mod tests {
         // 要求，与 families.rs 的 FALLBACK_SPEC 钉值同款）。**问答窗不得小于三窗**：
         // 它的依据是实测档（见其文档），若有人把它调到比自裁窗还小，本关先红。
         const _: () = assert!(QUESTION_STAGE_POLL_TOTAL_MS >= MENU_POLL_TOTAL_MS);
+        // 等回合停窗 ≥ 三窗：中断是异步生效的（模型收尾 + 重绘），比「注入后的下一次
+        // 重绘」更慢一档——若有人把它调到与三窗齐平或更小，本关先红（用户实机 bug 的
+        // 形态正是「窗内其实还没停」）
+        const _: () = assert!(TURN_STOP_POLL_TOTAL_MS >= MENU_POLL_TOTAL_MS);
     }
 }
 
@@ -308,6 +348,7 @@ mod tests {
 /// | [`d20_mode_readback_repaint_latency_live_probe`] | 切档动作 → 首次读**到目标档**的耗时 | [`MODE_READBACK_POLL_TOTAL_MS`]（1500ms）、[`POLL_STEP_MS`]（100ms） |
 /// | [`d20_menu_paint_latency_live_probe`] | `/permissions` 回车 → 菜单可屏读的耗时 | [`MENU_POLL_TOTAL_MS`]（1500ms） |
 /// | [`d20_confirm_and_receipt_latency_live_probe`] | Full Access 提交 → 确认框可读 / 确认后 → 成功回执行 | [`CONFIRM_POLL_TOTAL_MS`]（1500ms）、[`RECEIPT_POLL_TOTAL_MS`]（1500ms） |
+/// | [`d20_turn_stop_latency_live_probe`] | 插队 Esc 中断 → **忙态串消失**（回合真停）的耗时 | [`TURN_STOP_POLL_TOTAL_MS`]（3000ms） |
 ///
 /// 回填落点：改本模块常量 + `tests::timing_constants_are_pinned` 的钉值 + 在探针文档里
 /// 记下实测日期与读数（**三处一起改**，只改常量等于没回填）。
@@ -603,6 +644,85 @@ mod d20_live_probe_tests {
             "[D20-确认框探针] 结束：确认框={:?} 回执行={:?}（None = 窗内没等到——\
              若你确实走了那条路径，说明窗偏紧，回填；否则是动作没走到那一步）",
             confirm_at, receipt_at
+        );
+    }
+
+    /// **插队「等回合停」延迟的实测项**：Esc 中断 → 底栏忙态串（`esc to interrupt`）
+    /// 消失的耗时。
+    ///
+    /// 用于标定 [`TURN_STOP_POLL_TOTAL_MS`]（现自裁 3000ms）——**2026-09-22 用户实机
+    /// bug 的直接证据来源**：旧实现等的是「我们自己的输入缓冲排空」（写完即空，立刻
+    /// 返回 Ok），于是正文紧跟着 Esc 落进**正在收尾的旧回合窗口** → 消息进 claude
+    /// 内部队列（底栏 `Press up to edit queued messages`）而非开新回合，而回执报
+    /// 成功（假成功：审计 `jump ok` 但会话 JSONL 无消息正文）。
+    ///
+    /// # 观测点
+    ///
+    /// 1. **主读数**：Esc 按下 → 底栏不再含 `esc to interrupt` 的 elapsed_ms
+    ///    （这**就是**判据本身，不是「屏幕变了」——D20(a)）；
+    /// 2. 同一动作的**人工 Esc**（在终端手按 Esc）与 **MAM 插队**（手机点「立即发送」）
+    ///    各测一次，差 = 注入路径固定开销；
+    /// 3. 反例形态：若探针打印出「忙态→忙态→…→空闲」的多拍序列，那几拍的时间差就是
+    ///    「不等判据直接投递会落进旧回合」的窗口宽度——它应当远小于本窗。
+    ///
+    /// 判据实现与生产**同源**：`confirm::turn_stopped_in_lines`（真机原文夹具已把
+    /// 「忙态含 `esc to interrupt`、空闲态不含」两形态钉在门禁里）。
+    #[test]
+    #[ignore = "实机验证：Esc 中断 → 忙态串消失的耗时（标定 TURN_STOP_POLL_TOTAL_MS；前置=Windows + 真 conhost claude + MAM_D20_PROBE_PID）"]
+    fn d20_turn_stop_latency_live_probe() {
+        print_prelude(
+            "D20 实测项④：插队等回合停（Esc 中断 → 底栏忙态串消失）",
+            &format!(
+                "1. 确认目标终端是 **claude** 会话且**正在跑一个长回合**（底栏能看到\n\
+                 `esc to interrupt`——本探针首拍会打印当前判据状态）；\n\
+                 2. 人工在终端按一次 Esc，记下探针打印的「忙态串首次消失」elapsed_ms；\n\
+                 3. 让回合重新跑起来，再用手机端点一次队列条目的「立即发送」（MAM 注入\n\
+                 路径：先 Esc 再投递），记下同一条读数；\n\
+                 4. 对照 TURN_STOP_POLL_TOTAL_MS = {TURN_STOP_POLL_TOTAL_MS}ms：步骤 3 的\n\
+                 读数接近或超过它 → 说明窗偏紧，回填（并同步 tests::timing_constants_are_pinned）；\n\
+                 5. 抄下忙态与空闲态底栏逐行原文（判据串是否漂移的副产物）"
+            ),
+        );
+        let Some(pid) = probe_pid() else {
+            return;
+        };
+        let step = std::time::Duration::from_millis(POLL_STEP_MS);
+        // 探针窗取常量 4 倍：给人工留出「按下 Esc」的时间，读数才有意义
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(TURN_STOP_POLL_TOTAL_MS * 4);
+        let start = std::time::Instant::now();
+        let attempts = Cell::new(0u32);
+        let ok_reads = Cell::new(0u32);
+        // 只打印**判据变化**（没变化不刷屏）：`(elapsed_ms, 回合是否仍在跑)`
+        let mut last: Option<bool> = None;
+        while std::time::Instant::now() < deadline {
+            let lines = read_once(pid);
+            attempts.set(attempts.get() + 1);
+            if lines.is_some() {
+                ok_reads.set(ok_reads.get() + 1);
+            }
+            if let Some(lines) = lines.as_deref() {
+                let running = !crate::inject::confirm::turn_stopped_in_lines(lines);
+                if last != Some(running) {
+                    eprintln!(
+                        "[D20-回合停探针] elapsed={}ms 屏读#{} → 回合{}",
+                        start.elapsed().as_millis(),
+                        attempts.get(),
+                        if running {
+                            "仍在跑（忙态串在场）"
+                        } else {
+                            "已停（可投递）"
+                        }
+                    );
+                    last = Some(running);
+                }
+            }
+            std::thread::sleep(step);
+        }
+        assert_some_read(pid, attempts.get(), ok_reads.get());
+        eprintln!(
+            "[D20-回合停探针] 结束：当前自裁窗 TURN_STOP_POLL_TOTAL_MS={TURN_STOP_POLL_TOTAL_MS}ms；\
+             若你按 Esc 后窗内一直读到「仍在跑」，说明窗偏紧或回合在收尾更久——回填"
         );
     }
 }

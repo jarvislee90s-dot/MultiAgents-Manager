@@ -7,16 +7,26 @@
 //!   草稿）= 字已被 TUI 收进内部队列 → 中性「已投递未确认」（Submitted，不重试）；
 //!   滞留 + 补回车 + 命中 → 已送达；滞留 + 补回车失败 / 复查仍未中 → 真失败
 //!   （防重警示文案保留；E10 尾字符丢失 1/91 即本层必要性实证）。
-//! - **插队**（busy 态）：以**占用排空**确认（Windows `wait_input_drained` ≤2s）；
-//!   屏读草稿尾为 best-effort 诊断（busy TUI 可能在屏读前已把草稿消费进自身
-//!   缓冲，不 Gate 结果）；排空超时 = 投递超时。
+//! - **插队**（busy 态）：两段判据，**等的东西不同**（2026-09-22 R2 复评按实机
+//!   bug 拆分——详见 [`TurnStopWait`]）：
+//!   - **投递前**（仅 claude × 运行中 × jump）：Esc 中断后**屏读轮询等「回合已停」**
+//!     （判据 = 底栏忙态串 [`TURN_BUSY_MARKER`] 消失，D20(a)(b) 形态）——判据命中
+//!     才投递正文；窗尽未停也照投（best-effort），但回执**如实降级**为「已投递未
+//!     确认」（[`DirectReceipt::Submitted`]），不冒充送达；
+//!   - **投递后确认**（其余插队路径）：以**占用排空**确认（Windows
+//!     `wait_input_drained` ≤2s，[`JUMP_DRAIN_TIMEOUT_MS`]）——它判的是「我们投出去
+//!     的键被终端消费了没」，与「回合停没停」是两件事（见该常量注）。
+//!
+//! 屏读草稿尾在插队路径为 best-effort 诊断（busy TUI 可能在屏读前已把草稿消费进自身
+//! 缓冲，不 Gate 结果）。
 //!
 //! ## 结构（纯核 / 执行侧分离）
 //! - **纯核（零 cfg，跨平台可测）**：[`stamp_of`]（尾戳）/ [`stamp_in_messages`]
 //!   （列表含戳）/ [`stamp_hit_in_page`]（user 侧过滤 + 含戳）/
 //!   [`direct_confirm_fail_copy`]（族 × 平台感知失败文案，Mac 报告 §四-C）/
 //!   [`triage_screen_recovery`]（D7/T3 分诊纯核：屏读回查结果 → 直发确认三态，
-//!   判定因果见该函数注）；
+//!   判定因果见该函数注）/ [`turn_stopped_in_lines`] + [`poll_turn_stopped`]
+//!   （插队「等回合停」：判据纯函数 + 动态轮询内核，测试用脚本化屏序列驱动）；
 //! - **契约/测试面 API**：[`session_stamp_hit`]（复用会话消息读路径；flush_one 不直接
 //!   用它——生产确认调用全部经 `RemoteState.confirm_probe` 缝，本函数不参加生产
 //!   调用链，当前唯一消费者是 queue 测试，零接触真实文件）；
@@ -154,13 +164,212 @@ const DIRECT_CONFIRM_FAIL_MACOS_SWALLOWED: &str =
 /// 到光标所在尾视觉行（`windows_console::read_input_tail` 契约），长文首部滞留
 /// 不可见——判定成立才补回车，不成立不动作（保守方向安全）。
 const SCREEN_PROBE_CHARS: usize = 16;
-/// 插队等待占用排空上限（毫秒，§8.1）：busy TUI 消费写入缓冲的宽限
+/// 插队等待占用排空上限（毫秒，§8.1）：busy TUI 消费写入缓冲的宽限。
+///
+/// **它等的是「我们投出去的键被消费了没」**（`GetNumberOfConsoleInputEvents` 降到
+/// [`super::families::DRAIN_TO`] 以下）——**不是**「agent 把回合停下来了没」。后者
+/// 是另一件事、另一个窗（[`super::timing::TURN_STOP_POLL_TOTAL_MS`]，3000ms）：中断
+/// 由模型侧异步收尾，时长由模型决定；本窗由 TUI 消费速率决定。两者**刻意不等值**
+/// （2026-09-22 R2 复评补此注：旧版把 2000/3000 并列却不解释，被评审点名为「不对称
+/// 无注释」）。
 const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
 
-/// T9 打断式插队：Esc 中断后等待输入行排空的预算（ms）。中断是异步生效的（模型
-/// 收尾 + TUI 重绘），预算比普通插队的 2s 宽一档；超时即继续投递（best-effort，
-/// 正文注入另有 backpressure 兜底）
-pub const INTERRUPT_DRAIN_TIMEOUT_MS: u64 = 3_000;
+/// 插队「等回合停」的**判据串**（忙态标记，claude 真机原文核实）。
+///
+/// # 为什么它是判据（而不是「屏幕变了」）
+///
+/// 宪法 D20(a) 要求屏读**读到判据本身**。claude 底栏的忙态与空闲态原文（探测档案
+/// `%TEMP%\mam-probe-c3-20260921-150000\evidence\screen-t9-*.txt` / `screen-t6-*.txt`
+/// 逐字）：
+///
+/// | 状态 | 底栏逐字 |
+/// |---|---|
+/// | **忙**（回合运行中） | `⏵⏵ accept edits on (shift+tab to cycle) ·esc to interrupt ·←for agents` |
+/// | **闲**（回合已停） | `⏵⏵ accept edits on (shift+tab to cycle) · ← for agents` |
+/// | 闲（plan 档） | `⏸ plan mode on (shift+tab to cycle) ·  for agents` |
+/// | 闲（auto 档） | `⏵⏵ auto mode on (shift+tab to cycle) · ← for agents` |
+/// | 闲（manual 档） | `⏸ manual mode on · ? for shortuts ·←for agents` |
+///
+/// 四档空闲态**都没有**该串 → 「可见窗口内不存在 `esc to interrupt`」即「回合已停」。
+///
+/// # 与 D20 其余轮询的方向差（**等某串消失**，勿按「等出现」的模板改）
+///
+/// D20 的既有落点（模式回读、菜单、确认框、问答阶段机）都是「等某串**出现**」；
+/// 本处是「等某串**消失**」——同属「读到判据本身」，只是判据的极性相反。故
+/// [`turn_stopped_in_lines`] 返回的是 `!contains`，测试夹具也必须给**两态**（真机
+/// 忙屏 → 真机闲屏），不能只给「读不到屏」当已停（那会把「屏读失败」误判成「回合
+/// 已停」——见该函数的 `None` 语义）。
+///
+/// # 大小写（与 `parse_mode_from_screen` 同口径）
+///
+/// 逐行 `to_lowercase()` 后包含判定（真机原文全小写；TUI 改版印成 `Esc to interrupt`
+/// 时仍命中）。
+pub const TURN_BUSY_MARKER: &str = "esc to interrupt";
+
+/// **回合已停**判定（纯函数，跨平台可测）：可见窗口行集里**不存在**忙态串。
+///
+/// 语义边界（**保守方向**）：只看「有没有忙态串」，不做任何「空闲态串在场」的正向
+/// 判据——真机上忙态与空闲态的**唯一可靠差别**就是这一串（四档空闲态的 `for agents`
+/// 前缀各不相同：`· ← for agents` / `·  for agents` / `· ? for shortuts ·←for
+/// agents`，而忙态是 `·esc to interrupt ·←for agents`）。正向断言会把某档的排版
+/// 变体当成「没认出空闲」而永远等下去。
+///
+/// **空行集也判「已停」**（`lines.is_empty()` → `true`）：无内容即无忙态串。这是
+/// **有意的**——屏读能力不可用由调用方（[`poll_turn_stopped`] 的 `read` 闭包返回
+/// `None`）区分，而不是在这里；`None` 与「读到一屏空内容」是两回事（后者真机上就是
+/// 一个刚清屏的窗口）。
+pub fn turn_stopped_in_lines(lines: &[String]) -> bool {
+    !lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(TURN_BUSY_MARKER))
+}
+
+/// **插队「等回合停」的轮询内核**（宪法 D20(a)(b)）：最多 `rounds` 拍，每拍
+/// `read` 一屏 → [`turn_stopped_in_lines`] 判「回合已停」——命中**即刻停止**；
+/// 窗尽用**最后一拍**的观察定结论。
+///
+/// # 为什么走闭包（本批的硬要求，不许只有实机能覆盖）
+///
+/// 2026-09-22 实机 bug 的根因正是「这段控制流只有实机能覆盖」：旧实现等的是
+/// `wait_input_drained`（我们自己的输入缓冲事件数），在真机上**写完即空** → 立刻
+/// 返回 → 正文紧跟着 Esc 落进正在收尾的旧回合。把屏读做成可注入的 `read` 闭包后，
+/// 门禁内就能用**脚本化屏序列**驱动（真机忙屏 → 真机闲屏）并断言「等到了才投递」
+/// 「只读 2 拍」「窗尽仍是忙态 → 不冒充送达」。
+///
+/// 参数形态对齐 [`super::mode::poll_mode_readback`]：`read` 返回 `None` = **读不到屏**
+/// （平台无屏读能力 / attach 失败）；`settle` 给 TUI 重绘留时间（生产 =
+/// [`super::timing::POLL_STEP_MS`] 睡眠，测试 = 推进脚本的空操作）。
+///
+/// # 四类输入的语义（`None` 与「读到空屏」不同）
+///
+/// | `read()` | 本拍判定 | 产出 |
+/// |---|---|---|
+/// | `Some(含忙态串)` | 仍在跑，继续等 | 继续轮询 |
+/// | `Some(不含忙态串)` | **已停，立即返回** | [`TurnStopPoll::Stopped`] |
+/// | `None`（读不到屏） | **立即返回「判据不可得」** | [`TurnStopPoll::Unverifiable`] |
+///
+/// # 为什么首拍 None 不空转满窗（**本函数的短路径**）
+///
+/// 屏读 `None` = **这台目标上读不到屏**（非 Windows / attach 失败 / 无可见控制台）。
+/// 此时**没有任何可读的判据**——继续按拍睡下去不是 D20(a) 要的轮询（轮询的定义是
+/// 「屏读直至读到判据本身」），而正是 D20(a) **禁止的「用固定睡眠替代轮询」**。
+/// 既有先例同构：[`super::mode::poll_mode_readback`] 在「无判据可读」（`expected ==
+/// None`）时只读一拍也不把窗睡满，理由逐字相同。
+///
+/// 代价与方向（如实申报）：transient 的 attach 失败会让我们**少等**——但那条路径上
+/// 我们本来也无法验证回合停没停，投递仍是 best-effort，**回执保持既有的「已送达」
+/// 口径**（[`TurnStopWait::Unverifiable`]，理由见该变体注——与 D7/T3 在非 Windows 上
+/// 「分诊不可达则行为与 T3 前一致」同一裁决）。在真机（Windows conhost）上屏读可读，
+/// 本条不触发。
+///
+/// # 两种 `false` 的**本质区别**（[`TurnStopPoll`] 的第三态）
+///
+/// 「等过但没等到」（[`TurnStopPoll::StillRunning`]）与「判据根本不可用」
+/// （[`TurnStopPoll::Unverifiable`]）**不是同一件事**，回执语义相反：
+/// 前者如实降级为「已投递未确认」（消息可能落进旧回合队列——本 bug 的形态），
+/// 后者保持既有口径（无法验证 ≠ 验证为否）。合并成一个布尔就会把「没读屏」说成
+/// 「回合没停」，那是**编造**（本仓「结论不超证据」）。
+pub fn poll_turn_stopped<Rd, Sl>(rounds: u32, mut read: Rd, mut settle: Sl) -> TurnStopPoll
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    Sl: FnMut(),
+{
+    let effective = rounds.max(1); // 0 拍 = 不读 = 放弃，不是有界轮询
+    for i in 0..effective {
+        match read() {
+            // 屏读不可用：无判据可读 → 不空转满窗（理由见函数文档）
+            None => {
+                log::debug!(
+                    "插队等回合停：第 {}/{effective} 拍屏读不可用——无判据可读，不空转满窗\
+                     （D20(a)），回执保持既有 best-effort 口径",
+                    i + 1
+                );
+                return TurnStopPoll::Unverifiable { reads: i + 1 };
+            }
+            Some(lines) if turn_stopped_in_lines(&lines) => {
+                log::debug!(
+                    "插队等回合停：第 {}/{effective} 拍读到忙态串消失（命中即刻停止）",
+                    i + 1
+                );
+                return TurnStopPoll::Stopped { reads: i + 1 };
+            }
+            // 仍是忙态：继续等（D20(a) 动态轮询；末拍不再 settle）
+            Some(_) => {}
+        }
+        if i + 1 < effective {
+            settle();
+        }
+    }
+    log::debug!("插队等回合停：窗尽（{effective} 拍）仍未读到「回合已停」——如实降级（不冒充送达）");
+    TurnStopPoll::StillRunning { reads: effective }
+}
+
+/// [`poll_turn_stopped`] 的产物（**三态**，形态对齐 `mode::ModeReadbackOutcome`：
+/// 拍数可断言——「命中即停、只读 N 拍」这条 D20(a) 判据在门禁内要能钉住）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStopPoll {
+    /// 屏读到忙态串消失 = 回合真的停了
+    Stopped {
+        /// 实际屏读次数（命中那一拍）
+        reads: u32,
+    },
+    /// **等过但没等到**：屏读可用，但窗内每拍都读到忙态串（含窗尽）——「未及确认」
+    /// 的如实形态，**不得**当成成功（2026-09-22 实机假成功的形态正是把它当成功）
+    StillRunning {
+        /// 实际屏读次数（= 窗内拍数）
+        reads: u32,
+    },
+    /// **判据不可用**：首拍屏读即 `None`（非 Windows / attach 失败 / 无可见控制台）
+    /// ——「没读到」**不是**「回合没停」，也不是「回合已停」
+    Unverifiable {
+        /// 实际屏读次数（恒 1：首拍即返回，不空转满窗）
+        reads: u32,
+    },
+}
+
+impl TurnStopPoll {
+    /// 实际屏读次数（三态共用；日志与测试读它）
+    pub fn reads(self) -> u32 {
+        match self {
+            Self::Stopped { reads }
+            | Self::StillRunning { reads }
+            | Self::Unverifiable { reads } => reads,
+        }
+    }
+}
+
+/// 等回合停的**观察结果**（执行侧产出、[`crate::inject::queue::try_flush_with`] 消费）
+/// ——三态，与回执三态（Sent/Submitted/Failed）**不是**一一对应：投递本身另有成败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnStopWait {
+    /// 屏读到忙态串消失 = 回合真的停了 → 可投递且回执可为 `Sent`
+    Stopped,
+    /// **等过但没等到**：屏读可用但窗内每拍都是忙态 → **照投**（best-effort，用户消息
+    /// 不能丢），但回执只能落到「已投递未确认」（[`DirectReceipt::Submitted`]）——
+    /// 这正是 2026-09-22 实机 bug 的形态：消息可能落进旧回合的内部队列
+    StillRunning,
+    /// **判据不可用**（首拍屏读 `None`：非 Windows / attach 失败 / 无可见控制台）：
+    /// 「没读到」不是「回合没停」——回执**保持既有 best-effort 口径**（投递成功即
+    /// `Sent`），与 D7/T3 在非 Windows 上「分诊不可达 → 行为与 T3 前一致」同一裁决
+    /// （macOS 没有屏读能力，若因能力缺失就一律降级，等于把 macOS 的插队回执永久
+    /// 打成「已投递未确认」——那是**编造**，我们并不知道回合停没停）。
+    Unverifiable,
+    /// **本路径不需要等**：非 claude（Esc 语义未实测 → 不发 Esc）、或会话不在运行中
+    /// （本来就空闲，无回合可停）。回执按投递结果定（best-effort 语义不变）
+    NotApplicable,
+}
+
+impl TurnStopWait {
+    /// 从轮询产物映射（**[`TurnStopWait`] 的唯一构造点在执行侧]**，见 [`await_turn_stopped`]）
+    fn from_poll(p: TurnStopPoll) -> Self {
+        match p {
+            TurnStopPoll::Stopped { .. } => Self::Stopped,
+            TurnStopPoll::StillRunning { .. } => Self::StillRunning,
+            TurnStopPoll::Unverifiable { .. } => Self::Unverifiable,
+        }
+    }
+}
+
 /// 排空超时回执（对齐 PARTIAL_WARN 防重纪律，质量评审 Minor 3）：目标可能仍在
 /// 消费，盲目重试会叠加正文——先引导人工检查终端
 const DELIVERY_TIMEOUT_MSG: &str = "投递超时（目标可能仍在消费，重试前请检查终端）";
@@ -389,12 +598,67 @@ fn stuck_on_input_line(pid: u32, content: &str) -> bool {
     }
 }
 
+/// **插队「等回合停」**（投递**前**的屏读轮询，宪法 D20(a)(b)；2026-09-22 R2 复评）。
+///
+/// # 为什么需要它（旧实现错在哪，实机 bug 的根因）
+///
+/// 批次丙 T9 的插队次序是「Esc → 等输入缓冲排空（`wait_input_drained`）→ 投递正文」。
+/// 第二步等的是**我们自己的输入缓冲还剩多少事件**，而 Esc 写完缓冲随即就空 →
+/// [`super::windows_console::wait_input_drained`] **立刻返回 `Ok(true)`** → 正文几乎
+/// 紧跟着 Esc 注入。但 claude 处理 Esc 是**异步**的（要停下当前工具、收尾回合），
+/// 于是正文落进**正在收尾的旧回合窗口** → 进 claude 内部队列（底栏
+/// `Press up to edit queued messages`）而不是开新回合。
+///
+/// **用户实机证据（2026-09-22 18:30/18:31）**：审计两条 `action=jump result=ok`、
+/// `inject_queue.sent_at` 已写入，但消息正文在对应的 claude 会话 JSONL 里**搜不到**
+/// ——即**假成功**：回执说成功，消息实际没落地（对照 09-21 那条 `jump ok` 能在会话
+/// 文件里找到，那是侥幸成功）。
+///
+/// 用户裁定走 D20 精神：等**判据本身**（[`TURN_BUSY_MARKER`] 消失）而不是等缓冲。
+///
+/// # 调用前提（本函数不自己判）
+///
+/// 只在「jump × 该工具支持打断 × 会话正在运行 × Esc 已成功投递」之后调（见
+/// [`crate::inject::queue::try_flush_with`] 的 `interrupt_first` 分支）——非 claude
+/// 不发 Esc（Esc 语义未实测，未验不出手），无回合可停。
+///
+/// # 返回值
+///
+/// 三态见 [`TurnStopWait`]：`Stopped` = 读到忙态串消失；`StillRunning` = 屏读可用但
+/// 窗内未等到（**best-effort 照投**，回执降级为「已投递未确认」）；`Unverifiable`
+/// = 判据不可用（回执保持既有口径）。
+///
+/// # 终端 IO 走闭包（测试用脚本化屏序列驱动，不碰真 conhost）
+///
+/// `read` = 读一屏（生产经 `RemoteState.screen_probe` 缝 → `read_screen_window`；
+/// `None` = 读不到屏）；`settle` = 拍间隔（生产 [`super::timing::POLL_STEP_MS`] 睡眠，
+/// 测试 = 空操作/推进脚本）。**本函数是 [`poll_turn_stopped`] 的生产装配**——判据与
+/// 轮询逻辑全在内核里，故「等到了才投递」「窗尽不冒充送达」两条控制流在门禁内可断言。
+pub(crate) fn await_turn_stopped<Rd, Sl>(rounds: u32, read: Rd, settle: Sl) -> TurnStopWait
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    Sl: FnMut(),
+{
+    TurnStopWait::from_poll(poll_turn_stopped(rounds, read, settle))
+}
+
 /// 插队确认（裁决 A1 插队语义）：写后等占用排空 ≤2s（Windows
 /// `wait_input_drained`）——排空成功 → `Ok`（已送达；屏读草稿尾为 best-effort
 /// 诊断只进日志，不 Gate 结果）；排空超时 → `Err`（[`DELIVERY_TIMEOUT_MSG`]，
 /// 防重口径）；排空查询基础设施失败（假 pid / 控制台失效）→ best-effort 以
 /// 「写入成功」为准返回 Ok（诊断通道不可用不得误报投递超时，错误进日志）。
 /// macOS 无占用/屏读 API → 直接 Ok（保持既有行为，插队无 drain 可等）。
+///
+/// # 为什么本处**保留** drain 语义（R2 复评的裁决与理由）
+///
+/// 它判的是「**我们投出去的键被终端消费了没**」（输入缓冲事件数回落）——与
+/// [`await_turn_stopped`] 判的「**agent 把回合停下来了没**」是两件不同的事：
+/// - 前者是**投递已发生**的确认（键被 TUI 吃进去了）；
+/// - 后者是**投递时机**的门（回合停没停），发生在投递之前。
+///
+/// 改成屏读会**丢掉**「键有没有被消费」这条信息（屏读看不到我们的键），而换成
+/// 「回合停没停」在投递后已无意义（正文都发出去了）。故两处各守其职，**不合并**
+/// ——这正是本轮把 [`TurnStopWait`] 与 drain 分开的理由。
 pub(crate) fn await_jump_receipt(
     st: &crate::remote::server::RemoteState,
     session: &crate::session::Session,
@@ -768,6 +1032,227 @@ mod tests {
                 &want,
                 "分诊格 ({recovery:?}, {tool}, {os})"
             );
+        }
+    }
+
+    // ==== 2026-09-22 R2 复评：插队「等回合停」（屏读判据 + 动态轮询）====
+
+    /// 真机屏原文夹具（**逐字**，勿改）：探测档案
+    /// `%TEMP%\mam-probe-c3-20260921-150000\evidence\` 的四份快照。
+    ///
+    /// 忙态取自 `screen-t9-after-enter-busy.txt`（底栏含 `·esc to interrupt ·←for
+    /// agents`）；空闲态取自 `screen-t6-claude-before.txt`（`· ← for agents`，**无**
+    /// interrupt 串）。**夹具必须来自真机实录**（本批纪律：状态/形态类夹具用「看起来
+    /// 也行」的相邻态曾在门链两端各埋一个 Critical）。
+    mod real_screens {
+        /// 真机**忙态**底栏（claude 2.1.251，`screen-t9-after-enter-busy.txt` 末行逐字）
+        pub const CLAUDE_BUSY_FOOTER: &str =
+            "  ⏵⏵ accept edits on (shift+tab to cycle) ·esc to interrupt ·←for agents";
+        /// 真机**空闲态**底栏（`screen-t6-claude-before.txt` 末行逐字）
+        pub const CLAUDE_IDLE_FOOTER: &str =
+            "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
+        /// 真机空闲态（plan 档，`screen-t6-claude-st1.txt` 末行逐字）
+        pub const CLAUDE_IDLE_PLAN_FOOTER: &str =
+            "  ⏸ plan mode on (shift+tab to cycle) ·  for agents";
+        /// 真机空闲态（manual 档，`screen-t6-claude-st3.txt` 末行逐字）
+        pub const CLAUDE_IDLE_MANUAL_FOOTER: &str =
+            "  ⏸ manual mode on · ? for shortuts ·←for agents";
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// **判据纯核**：忙态 → 未停；四份真机**空闲**快照（四档底栏形态各不相同）→ 已停。
+    ///
+    /// 还原动作（变异①）：把 [`turn_stopped_in_lines`] 的 `!` 去掉（判据反相，等价
+    /// 「见到忙态串才算停」）→ 本测试**先红**（忙态格会断言失败；四档空闲格也全红）。
+    #[test]
+    fn turn_stopped_judges_on_real_chrome_footers() {
+        use real_screens::*;
+        // 忙态：底栏含 `esc to interrupt` → 回合仍在跑
+        assert!(
+            !turn_stopped_in_lines(&lines(&[
+                "●Thinking for 23s… (ctrl+o toexpakd)",
+                CLAUDE_BUSY_FOOTER
+            ])),
+            "真机忙态（含 `esc to interrupt`）必须判「仍未停」"
+        );
+        // 空闲态四档（accept edits / plan / auto / manual）——都不得误判成忙
+        for footer in [
+            CLAUDE_IDLE_FOOTER,
+            CLAUDE_IDLE_PLAN_FOOTER,
+            CLAUDE_IDLE_MANUAL_FOOTER,
+        ] {
+            assert!(
+                turn_stopped_in_lines(&lines(&["✻ Sautéed for 13s · done 14:56", footer])),
+                "真机空闲态底栏必须判「已停」：{footer:?}"
+            );
+        }
+        // 大小写不敏感（TUI 改版印成 `Esc to interrupt` 时仍命中）
+        assert!(
+            !turn_stopped_in_lines(&lines(&[
+                "  ⏵⏵ accept edits on · Esc to interrupt ·←for agents"
+            ])),
+            "大小写变体必须仍判「未停」（与 parse_mode_from_screen 同口径）"
+        );
+        // 空屏：无内容即无忙态串 → 判「已停」（屏读**能力**缺失由 `None` 表达，不是空行集）
+        assert!(
+            turn_stopped_in_lines(&[]),
+            "空行集判「已停」（无忙态串可读）"
+        );
+        // 正向哨兵：正文里引用该串也算忙（保守方向——宁可多等，不误投）
+        assert!(
+            !turn_stopped_in_lines(&lines(&["用户问：什么叫 esc to interrupt 提示？"])),
+            "正文引用该串同样判「未停」——保守方向（多等一拍不误投）"
+        );
+    }
+
+    /// **脚本化屏序列驱动内核**（对齐 `mode.rs::run_readback_script` 的既有做法）：
+    /// 逐拍取一屏（用尽后重复末屏）、`settle` 空操作零睡眠——返回值 = (轮询产物, 拍数,
+    /// settle 数)。
+    fn run_turn_stop_script(
+        rounds: u32,
+        screens: &[Option<&[String]>],
+    ) -> (TurnStopPoll, u32, u32) {
+        use std::cell::Cell;
+        let reads = Cell::new(0u32);
+        let settles = Cell::new(0u32);
+        let out = poll_turn_stopped(
+            rounds,
+            || {
+                let i = reads.get() as usize;
+                reads.set(reads.get() + 1);
+                let idx = i.min(screens.len().saturating_sub(1));
+                screens
+                    .get(idx)
+                    .and_then(|s| s.as_ref())
+                    .map(|s| s.to_vec())
+            },
+            || settles.set(settles.get() + 1),
+        );
+        (out, reads.get(), settles.get())
+    }
+
+    /// **① 忙屏 → 下一拍空闲态屏**：断言「等到了才停」且**只读 2 拍**（D20(a) 命中
+    /// 即刻停止——不是读满窗）。
+    ///
+    /// 夹具 = 真机忙态底栏 → 真机空闲态底栏（**两帧真机原文**）。
+    ///
+    /// 还原动作（变异②）：把 [`poll_turn_stopped`] 的命中分支 `return` 去掉（继续
+    /// 轮询满窗）→ 本测试的 `reads == 2` 与 `settles == 1` 两条断言**先红**（会读到
+    /// 30 拍、settle 29 次）。
+    #[test]
+    fn turn_stop_poll_hits_on_second_frame_and_stops_immediately() {
+        use real_screens::*;
+        let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
+        let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
+        let (out, reads, settles) = run_turn_stop_script(30, &[Some(&busy), Some(&idle)]);
+        assert_eq!(
+            out,
+            TurnStopPoll::Stopped { reads: 2 },
+            "第二拍读到忙态串消失 → 必须判「已停」（这一拍就是判据本身）"
+        );
+        assert_eq!(
+            reads, 2,
+            "**只读 2 拍**：命中即刻停止（D20(a)，不读满 30 拍）"
+        );
+        assert_eq!(settles, 1, "命中当拍不再 settle（两拍之间恰好等一次）");
+    }
+
+    /// **② 全程忙态（窗尽仍未停）**：断言落到 [`TurnStopPoll::StillRunning`] 且读满窗
+    /// ——调用方据此**仍投递**（best-effort）但回执落 `Submitted` 而非 `Sent`
+    /// （三态映射在 queue.rs 的 `interrupt_jump_*` 用例覆盖）。
+    ///
+    /// 还原动作（变异③）：把窗尽返回值改成 `Stopped`（等价「超时也当成功」）→
+    /// 本测试先红（**这正是 2026-09-22 实机假成功的形态**：回执说成功、消息没落地）。
+    #[test]
+    fn turn_stop_poll_window_exhausts_while_still_busy() {
+        use real_screens::*;
+        let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
+        let (out, reads, settles) = run_turn_stop_script(5, &[Some(&busy)]);
+        assert_eq!(
+            out,
+            TurnStopPoll::StillRunning { reads: 5 },
+            "窗尽仍是忙态 → 必须落「等过但没等到」\
+             （不得把超时当成功——回执据此降级为已投递未确认）"
+        );
+        assert_eq!(reads, 5, "读满窗（5 拍）：忙态每拍都读了");
+        assert_eq!(settles, 4, "末拍不再 settle");
+    }
+
+    /// **③ 屏读不可用（`None`）→ 首拍即返回 `Unverifiable`**（不空转满窗：无判据可读
+    /// 时把窗睡满正是 D20(a) 禁止的「用固定睡眠替代轮询」，与 `poll_mode_readback` 的
+    /// 「无判据只读一拍」先例同构）。
+    ///
+    /// **本态与 `StillRunning` 分列的存在意义**（防合并成布尔的回归）：合并会把「没读屏」
+    /// 说成「回合没停」——那是编造（本仓「结论不超证据」）。macOS 无屏读，若因此降级，
+    /// 它的插队回执会被永久打成「已投递未确认」。
+    ///
+    /// 还原动作（变异④）：把 `None` 分支改成「继续等满窗」→ 本测试的 `reads == 1` /
+    /// `settles == 0` / 变体断言三条**全红**。
+    #[test]
+    fn turn_stop_poll_reports_unverifiable_when_screen_unavailable() {
+        let (out, reads, settles) = run_turn_stop_script(30, &[None]);
+        assert_eq!(
+            out,
+            TurnStopPoll::Unverifiable { reads: 1 },
+            "屏读不可用（None）→ 判据不可得（**不是**「回合没停」，也不是「已停」）"
+        );
+        assert_eq!(
+            reads, 1,
+            "首拍 None 即返回：**不空转满窗**（D20(a) 禁固定睡眠）"
+        );
+        assert_eq!(settles, 0, "不 settle（没有下一拍可读）");
+        // 三态互斥（防有人把 Unverifiable 折进 StillRunning 的 `false` 语义）
+        assert_ne!(
+            TurnStopPoll::Unverifiable { reads: 1 },
+            TurnStopPoll::StillRunning { reads: 1 },
+            "「判据不可用」与「等过没等到」必须是两个不同的产物"
+        );
+    }
+
+    /// **判据不得被「旧帧」骗过**：忙屏 → 忙屏 → 空闲屏（第三拍才停）——断言停在第 3 拍
+    /// （多拍忙态不是「读到就停」，而是**每拍重判**）。
+    ///
+    /// 这条与 ① 分工：① 锁「命中即停」，本条锁「未命中不得提前停」（两拍忙态若被
+    /// 误判成「已停」，正文就会落进正在收尾的旧回合——正是本 bug 的形态）。
+    #[test]
+    fn turn_stop_poll_keeps_waiting_through_busy_frames() {
+        use real_screens::*;
+        let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
+        let busy2 = lines(&["✽ Nebulizing… (1m 51s ·↓3.1k tokens)", CLAUDE_BUSY_FOOTER]);
+        let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
+        let (out, reads, _) = run_turn_stop_script(30, &[Some(&busy), Some(&busy2), Some(&idle)]);
+        assert_eq!(
+            out,
+            TurnStopPoll::Stopped { reads: 3 },
+            "第三拍空闲态 → 已停"
+        );
+        assert_eq!(reads, 3, "两拍忙态不得提前停（每拍重判）");
+    }
+
+    /// **轮询产物 → 回执等待态的三态映射**（[`TurnStopWait::from_poll`] 的表驱动）：
+    /// 产物三态各自映射到**唯一个**回执等待态——防止将来加产物变体时映射静默漏项
+    /// （`match` 穷尽性在编译期也会提醒，但本表把「哪个映射到哪个」写成可执行断言）。
+    ///
+    /// 还原动作（变异⑤）：把 `Unverifiable => Stopped` 改成 `=> StillRunning` →
+    /// 本测试先红（macOS 插队回执会被误降级——见 `TurnStopWait::Unverifiable` 的注）。
+    #[test]
+    fn turn_stop_wait_maps_poll_states_one_to_one() {
+        let cases = [
+            (TurnStopPoll::Stopped { reads: 1 }, TurnStopWait::Stopped),
+            (
+                TurnStopPoll::StillRunning { reads: 30 },
+                TurnStopWait::StillRunning,
+            ),
+            (
+                TurnStopPoll::Unverifiable { reads: 1 },
+                TurnStopWait::Unverifiable,
+            ),
+        ];
+        for (poll, want) in cases {
+            assert_eq!(TurnStopWait::from_poll(poll), want, "映射格 {poll:?}");
         }
     }
 }
