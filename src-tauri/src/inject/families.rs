@@ -35,13 +35,14 @@ pub struct FamilySpec {
     pub confirm_timeout_ms: u64,
 }
 
-/// 每块字符数（80 字符 = 160 个 keydown+keyup 事件，单次写入单元）。
-pub const CHUNK_CHARS: usize = 80;
-/// 块间隔毫秒（给目标 TUI 留输入缓冲消费窗口）。
-pub const CHUNK_GAP_MS: u64 = 50;
-/// 正文写完后到提交回车的延迟毫秒（回车独立块不进 [`chunk_plan`]——执行层固定
-/// 此延迟后单批发回车）。
-pub const SUBMIT_DELAY_MS: u64 = 150;
+// 分块/提交延迟三常量（D20 起**定义在** [`super::timing`]，本模块只**转出**）：
+// 它们是「注入路径真实开销」的组成部分，与屏读轮询窗同属一个时序族——故按
+// 「单一事实源」收在 timing.rs（宪法 D20 / 计划 §2.9 的落地要求）。
+// 此处 `pub use` 只为保持既有路径（`families::CHUNK_CHARS` 等调用点与文档锚）不断，
+// **禁止**在本文件重新定义这三者（那就是「同一判据两处实现」的老路；
+// `inject::timing::tests::chunk_constants_have_one_definition` 会先红）。
+pub use super::timing::{CHUNK_CHARS, CHUNK_GAP_MS, SUBMIT_DELAY_MS};
+
 /// 长文阈值（字符数）：快消费者超过才切背压（恰好 2000 不背压）。
 pub const LONG_MSG_CHARS: usize = 2000;
 /// 背压模式占用回落阈值（事件数）：写停到占用 ≤ 此值再继续。

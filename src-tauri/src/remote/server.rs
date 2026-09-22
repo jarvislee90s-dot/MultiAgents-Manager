@@ -8973,6 +8973,35 @@ mod tests {
         status: crate::session::SessionStatus,
         dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
     ) -> (Arc<RemoteState>, String) {
+        mode_state_with_screen(
+            injector,
+            sid,
+            tool,
+            pid,
+            status,
+            dialog_probe,
+            // 缺省无屏读（CI/非 Windows 与既有用例的既有行为；D20 的屏读轮询窗需要
+            // 它的用例走 mode_state_with_screen 显式注入脚本化屏序列）
+            std::sync::Arc::new(|_, _| None),
+        )
+    }
+
+    /// D20 建造器：在 [`mode_state_with_injector`] 之上多一个**屏读能力缝**
+    /// （`RemoteState.screen_probe`）——回读轮询的脚本化屏序列从这里进。
+    ///
+    /// 为什么必须缝上：D20 之后**模式回读是一个轮询循环**（读几拍、命中即停、窗尽取
+    /// 最后一次判定），它是本批的新判据；不缝屏读，这条控制流就只有真机能覆盖
+    /// （本批已两次栽在这上面）。
+    #[allow(clippy::too_many_arguments)] // 7 个（建造器的每个缝都要显式传；不再加）
+    fn mode_state_with_screen(
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        sid: &str,
+        tool: crate::session::AgentType,
+        pid: u32,
+        status: crate::session::SessionStatus,
+        dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+        screen_probe: std::sync::Arc<crate::remote::server::ScreenProbeFn>,
+    ) -> (Arc<RemoteState>, String) {
         let session = inj_sess(sid, tool, pid, status);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
@@ -8986,7 +9015,7 @@ mod tests {
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe,
-            screen_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe,
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
@@ -9001,6 +9030,24 @@ mod tests {
             home_source: Box::new(|| None),
         });
         (state, sid_out)
+    }
+
+    /// D20：脚本化屏读缝（第 i 次读返回 `screens[i]`；用尽后**重复最后一屏**——
+    /// 与 `inject::mode::tests::run_readback_script` 同语义：模拟「屏不再变」）。
+    /// `None` 元素 = 那一拍读不到屏（读屏失败/平台无屏读）。
+    fn scripted_screen_probe(
+        screens: Vec<Option<Vec<String>>>,
+    ) -> std::sync::Arc<crate::remote::server::ScreenProbeFn> {
+        let pos = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::sync::Arc::new(move |_sid: &str, _pid: u32| {
+            let i = pos.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let idx = i.min(screens.len().saturating_sub(1));
+            screens.get(idx).and_then(|s| s.clone())
+        })
+    }
+
+    fn screen_lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
     }
 
     // ===== 丁T4：模式栏二维结构 / 回读全开 / 组切换 / 运行中门 =====
@@ -9519,5 +9566,264 @@ mod tests {
             .store
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
         assert!(audits.is_empty(), "零审计：{audits:?}");
+    }
+
+    // ===== D20：模式回读的**动态轮询**（宪法 §5.(c) 第 8 条 / 计划 §2.9）=====
+    //
+    // 本组用例把**端点侧**的回读路径（含缝接线与回执合成）钉在门禁里：内核的轮询语义
+    // 由 `inject::mode::tests::readback_poll_*` 覆盖，这里补的是「端点用不用它、用对
+    // 没有、回执怎么念」。屏序列经 `RemoteState.screen_probe` 缝注入（零 conhost）。
+
+    /// **用户实机观察①的回归锁（端点侧）**：claude 切档后**第一拍读到旧档**、后续拍读到
+    /// 目标档 → 回执必须是 `verified=true`（而不是旧实现的「回读与预期不符」）。
+    ///
+    /// 夹具用 claude 真机底栏原文（T6 探测档案逐字）。会话切档前是**默认档**
+    /// （`manual mode on`），目标 = `plan` → 机制是 shift+tab 一步，按实测环序
+    /// `[AcceptEdits, Plan, Bypass, Default]` 推算应到档 = **接受编辑**
+    /// （`⏵⏵ accept edits on`）——故重绘后的那一拍必须是这一条，才叫「命中」。
+    ///
+    /// 还原动作（变异①）：把端点改回「单次读」（不调 `poll_mode_readback`，只读一次屏）
+    /// → 本测试先红（`verified` 会是 false、hint 会是「与预期不符」）。
+    #[tokio::test]
+    async fn session_mode_switch_readback_polls_until_target_mode_appears() {
+        let fake = FakeInjector::ok();
+        let stale = screen_lines(&["  ⏸ manual mode on · ? for shortuts ·←for agents"]);
+        let fresh = screen_lines(&["  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents"]);
+        // 屏序列：① 切档前的 before（注入前的单次快照，D20(c) 例外）读到默认档；
+        // ② 投递后第一拍仍是旧档（重绘未及——观察① 的形态）；③ 第二拍拍到目标档
+        let probe = scripted_screen_probe(vec![Some(stale.clone()), Some(stale), Some(fresh)]);
+        let (state, sid) = mode_state_with_screen(
+            fake.clone(),
+            "sess_d20_readback_poll",
+            crate::session::AgentType::Claude,
+            93,
+            crate::session::SessionStatus::Idle,
+            std::sync::Arc::new(|_, _| None),
+            probe,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(fake.recorded_keys(), vec![(93u32, "shift+tab".to_string())]);
+        assert_eq!(
+            v["verified"], true,
+            "第一拍旧档、第二拍目标档 → 必须确认成功（观察①的修复形态）：{v}"
+        );
+        assert!(v["hint"].is_null(), "命中态不得带 hint（不假装失败）：{v}");
+        assert_eq!(
+            v["current"], "acceptEdits",
+            "回执的 current 取**最后一拍**读数：{v}"
+        );
+    }
+
+    /// **窗尽如实区分三态（端点侧文案）**：同一条端点、同样的投递，屏上「一直是旧档」
+    /// （不符）与「一直读不到屏」（未及确认）必须给出**两句不同的话**——D20(b) 明令
+    /// 不得退化成统一的「失败」。
+    ///
+    /// 还原动作（变异②）：把 `mode_verify_receipt` 的 `Mismatch` / `Unverifiable` 两支
+    /// 合并成同一句 hint → 本测试的 `assert_ne!` 与两处关键词断言先红。
+    #[tokio::test]
+    async fn session_mode_switch_readback_window_end_keeps_three_states_distinct() {
+        let fake = FakeInjector::ok();
+        let stale = screen_lines(&["  ⏸ manual mode on · ? for shortuts ·←for agents"]);
+
+        // ① 窗内一直是旧档 → 「不符」：必须报出预期/实际两边（预期 = 环序推算的 AcceptEdits）
+        let probe = scripted_screen_probe(vec![Some(stale.clone())]); // 用尽后重复 = 屏不变
+        let (state, sid) = mode_state_with_screen(
+            fake.clone(),
+            "sess_d20_mismatch",
+            crate::session::AgentType::Claude,
+            94,
+            crate::session::SessionStatus::Idle,
+            std::sync::Arc::new(|_, _| None),
+            probe,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let r = router(state)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["verified"], false);
+        let mismatch_hint = v["hint"].as_str().unwrap().to_string();
+        assert!(
+            mismatch_hint.contains("预期「接受编辑」") && mismatch_hint.contains("实际「默认」"),
+            "「不符」要把两边都报出来（预期 = 按实测环序推算的应到档）：{mismatch_hint}"
+        );
+        assert_eq!(
+            v["current"], "default",
+            "窗尽时的 current = 最后一拍读到的档（不是 null）：{v}"
+        );
+
+        // ② 窗内始终读不到屏 → 「未及确认」：另一句话，且 current 必须是 null
+        let probe = scripted_screen_probe(vec![None]);
+        let (state2, sid2) = mode_state_with_screen(
+            fake.clone(),
+            "sess_d20_unverifiable",
+            crate::session::AgentType::Claude,
+            95,
+            crate::session::SessionStatus::Idle,
+            std::sync::Arc::new(|_, _| None),
+            probe,
+        );
+        persist_named_device(&state2, "mm", "测试设备");
+        let r = router(state2)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid2}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["verified"], false);
+        let unverifiable_hint = v["hint"].as_str().unwrap().to_string();
+        assert!(
+            unverifiable_hint.contains("无法自动确认"),
+            "「未及确认」说的是「读不到」（另一句话）：{unverifiable_hint}"
+        );
+        assert!(
+            !unverifiable_hint.contains("与预期不符"),
+            "读不到 **不是**「不符」（D20(b)：两态不得混同）：{unverifiable_hint}"
+        );
+        assert!(
+            v["current"].is_null(),
+            "一格都没读到 → current 必须为 null（不给过期值）：{v}"
+        );
+        assert_ne!(
+            mismatch_hint, unverifiable_hint,
+            "两种超时的回执文案必须不同（D20(b)）"
+        );
+    }
+
+    /// **命中即停、窗尽有界**（端点侧的量）：屏序列第 2 拍即读到目标档 → 缝的读数**恰好
+    /// 3 次**（① before 快照 1 次 + 回读 2 拍），而不是把 15 拍的窗睡满。
+    ///
+    /// 这条同时钉住 D20(a) 的「禁止用固定睡眠替代轮询」在**端点侧**也成立：若有人把
+    /// 轮询换回「睡满窗再读一次」，读数次数会退化到 1（且本断言先红）。
+    #[tokio::test]
+    async fn session_mode_switch_readback_stops_at_first_hit_within_window() {
+        let fake = FakeInjector::ok();
+        let stale = screen_lines(&["  ⏸ manual mode on · ? for shortuts ·←for agents"]);
+        let fresh = screen_lines(&["  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents"]);
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_probe = reads.clone();
+        let pos = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe: std::sync::Arc<crate::remote::server::ScreenProbeFn> =
+            std::sync::Arc::new(move |_sid: &str, _pid: u32| {
+                reads_for_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let i = pos.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // 0 = before 快照（旧档）；1 = 回读首拍（仍是旧档，重绘未及）；
+                // 2 起 = 目标档（命中 → 停止轮询，不再读）
+                if i <= 1 {
+                    Some(stale.clone())
+                } else {
+                    Some(fresh.clone())
+                }
+            });
+        let (state, sid) = mode_state_with_screen(
+            fake.clone(),
+            "sess_d20_readback_stop",
+            crate::session::AgentType::Claude,
+            96,
+            crate::session::SessionStatus::Idle,
+            std::sync::Arc::new(|_, _| None),
+            probe,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let r = router(state)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(r#"{{"sessionId":"{sid}","target":"plan"}}"#)),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["verified"], true, "{v}");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "① before 快照 + ② 回读两拍（第二拍命中即停）——窗共 15 拍，不许睡满"
+        );
+    }
+
+    /// **无判据可读 → 不轮询**（D20(a)：判据不存在就没有轮询可做）：kimi 权限组的
+    /// `spec.readback == false`（实测底栏不含权限档文本）→ `expected_mode_after` 给
+    /// `None` → 内核只读一拍（`mode::poll_mode_readback` 的「短路径 ②」）。
+    ///
+    /// 读数断言 = **2**：① 注入前的 `before` 快照 1 次（D20(c) 的瞬时快照，kimi 整体
+    /// 支持回读故这一次会读）+ ② 回读一拍。若是 16（= 1 + 15 拍睡满窗）说明有人把
+    /// 短路径拆了——那正是 D20(a) 禁止的「固定睡眠」。
+    ///
+    /// 还原动作：把内核的 `if expected.is_some() { rounds.max(1) } else { 1 }` 改回
+    /// `rounds.max(1)` → 本测试先红（读数 16）。
+    #[tokio::test]
+    async fn session_mode_switch_does_not_spin_when_group_has_no_readback_source() {
+        let fake = FakeInjector::ok();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_probe = reads.clone();
+        let probe: std::sync::Arc<crate::remote::server::ScreenProbeFn> =
+            std::sync::Arc::new(move |_sid: &str, _pid: u32| {
+                reads_for_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // 屏读可用，但该组没有任何东西构成回读判据
+                Some(screen_lines(&[" GLM-5.3-Flash thinking: high  C:\\proj"]))
+            });
+        let (state, sid) = mode_state_with_screen(
+            fake.clone(),
+            "sess_d20_no_readback",
+            crate::session::AgentType::Kimi,
+            97,
+            crate::session::SessionStatus::Idle,
+            std::sync::Arc::new(|_, _| None),
+            probe,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let r = router(state)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"bypass","group":"permission"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            fake.recorded(), // `/auto` 是 kimi 权限组 Bypass 的直达命令
+            vec![(97u32, "/auto".to_string())],
+            "kimi 权限组 Bypass = /auto 直达：{v}"
+        );
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "① before 快照 1 次 + ② 无判据时只读一拍（不是 15 拍睡满窗）：{v}"
+        );
+        assert!(
+            v["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("无法自动确认"),
+            "无回读源 → 回执如实说「无法自动确认」（不假装）：{v}"
+        );
     }
 }

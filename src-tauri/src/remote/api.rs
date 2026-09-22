@@ -2916,11 +2916,13 @@ pub const QUESTION_STAGE_FREE_ROW: &str = "free-row";
 /// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
 pub const QUESTION_STAGE_FREE_TEXT: &str = "free-text";
 
-/// **阶段机的轮询预算**（毫秒；单段）。实机依据（2026-09-21 探测档案）：
-/// 「数字直答延迟实测 <1s（截图即见 UI 关闭），多选三段式更久」——故单段给 2s
-/// 余量（本机探测里 `s8-submit` 到 `s8-submitted` 实测间隔约 1s 内）。
-/// **每段的轮询步长**用 `MENU_POLL_STEP_MS`（100ms，与模式菜单同节奏）。
-const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 2_000;
+/// 屏读轮询步长（毫秒）——D20 起五路共用一处（原名 `MENU_POLL_STEP_MS`，已随常量族迁移）
+use crate::inject::timing::POLL_STEP_MS;
+/// **阶段机的轮询预算**（毫秒；单段）——**定义已迁至** [`crate::inject::timing`]
+/// （D20 的单一事实源），此处只 re-export 保持既有引用点不破。
+/// 实测依据与「为什么不随三窗调整」的理由见 `timing::QUESTION_STAGE_POLL_TOTAL_MS` 的文档。
+/// **每段的轮询步长**同为 `timing::POLL_STEP_MS`（100ms，五路同节奏）。
+pub use crate::inject::timing::QUESTION_STAGE_POLL_TOTAL_MS;
 
 /// POST /m/api/v1/session-question/answer（T8 问答应答；**丁T5 起提交/自由作答走阶段机**）：
 /// 参数校验 → 会话/隔离/双通道复核（spawn_blocking）→ **按动作分派**：
@@ -3503,38 +3505,40 @@ fn stage_from_abort(err: &str) -> &'static str {
     QUESTION_STAGE_SUBMIT_ROW
 }
 
-/// **阶段轮询的生产实现**（单段）：按 100ms 步长读屏，直到 `probe` 返回有效形态。
+/// **阶段轮询的生产实现**（单段）：读屏直到 `probe` 返回有效形态。
 ///
 /// 与 `poll_menu_stage` 的差别：**判据是调用方给的闭包**（各段的锚不同），本函数只管
 /// 「读的节奏与窗尽语义」。窗尽 → `Ok(None)`（调用方按各段语义决定「不出现」是中止
 /// 还是可接受）。读屏本身失败也按「本轮没读到」处理（下一轮再试）——**只有整窗都
 /// 读不到**才是 `Ok(None)`，由调用方的文案说明「读不到屏幕」。
+///
+/// **D20 起窗用「拍数」表达**（[`poll_rounds`] 把总窗换算成 步长 × 拍数，与其余四路
+/// 同一口径）——墙钟 deadline 在门禁里只能真等满窗，拍数则可在测试里确定性驱动。
 fn poll_question_stage<P>(probe: P, total_ms: u64) -> Result<Option<Vec<String>>, String>
 where
     P: Fn() -> Option<Vec<String>>,
 {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
-    loop {
-        if let Some(lines) = probe() {
-            return Ok(Some(lines));
-        }
-        if std::time::Instant::now() >= deadline {
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
-    }
+    Ok(crate::inject::timing::bounded_poll(
+        crate::inject::timing::poll_rounds(total_ms),
+        probe,
+        || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
+    ))
 }
 
 /// **Review 屏轮询**：窗内等到**该屏形态可行动**（`inject::question::probe_review_screen`
 /// 返回 `Ready`）才返回；`Fatal`（Review 屏在场但形态异常）立即上抛——等下去不会自洽。
 /// 窗尽 → `Ok(None)`（编排据此中止且**不发确认键**）。
+///
+/// **三态语义**（`Ready` 返回 / `Fatal` 上抛 / `NotYet` 重试）比 [`bounded_poll`] 的二值
+/// 产物多一态，故此处不套用该内核（硬塞会引入「用空串当哨兵」那类隐式约定，比重复
+/// 五行的循环更难读）；窗仍按同一口径用**拍数**表达（[`poll_rounds`]）。
 fn poll_review_stage<P>(probe: P, total_ms: u64) -> Result<Option<Vec<String>>, String>
 where
     P: Fn() -> Option<Vec<String>>,
 {
     use crate::inject::question::ScreenStep;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
-    loop {
+    let rounds = crate::inject::timing::poll_rounds(total_ms).max(1);
+    for i in 0..rounds {
         if let Some(lines) = probe() {
             match crate::inject::question::probe_review_screen(&lines) {
                 ScreenStep::Ready(l) => return Ok(Some(l)),
@@ -3542,11 +3546,11 @@ where
                 ScreenStep::NotYet(_) => {}
             }
         }
-        if std::time::Instant::now() >= deadline {
-            return Ok(None);
+        if i + 1 < rounds {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS));
         }
-        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
     }
+    Ok(None)
 }
 
 /// **终态回执轮询**：窗内等到屏上出现终态回执行
@@ -3559,18 +3563,11 @@ fn poll_receipt_stage<P>(probe: P, total_ms: u64) -> Result<Option<Vec<String>>,
 where
     P: Fn() -> Option<Vec<String>>,
 {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
-    loop {
-        if let Some(lines) = probe() {
-            if crate::inject::question::probe_answered_receipt(&lines) {
-                return Ok(Some(lines));
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
-    }
+    Ok(crate::inject::timing::bounded_poll(
+        crate::inject::timing::poll_rounds(total_ms),
+        || probe().filter(|lines| crate::inject::question::probe_answered_receipt(lines)),
+        || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
+    ))
 }
 
 // ==== M6R–M9R Task 11：一键 resume 端点（R5，B 兜底可见性半部）====
@@ -3746,7 +3743,7 @@ fn mode_scan_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<ModeScanHit
     let structure = crate::inject::mode::mode_structure(&tool);
     let kind = crate::inject::mode::switch_kind(&tool);
     let readback = crate::inject::mode::mode_readback_supported(&tool);
-    let current = read_mode_from_screen(&session, &tool, readback);
+    let current = read_mode_from_screen(st, &session, &tool, readback);
     Some(ModeScanHit {
         tool,
         current,
@@ -3759,7 +3756,16 @@ fn mode_scan_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<ModeScanHit
 /// 屏读当前模式（批次丙 T6；丁T4 改**分族解析**）。仅对支持回显的工具调用。
 /// 非 Windows / 屏读失败 / 该族词表认不出 → None（调用方降级为「档未知」+
 /// 人工核对提示，红线 4：不假装成功）。
+///
+/// **D20(c) 的瞬时快照**：这是注入**前**的决策依据（`before` 用于推算步进组的应到档）
+/// 与 GET 的当前档显示，故**单次读即返回、不轮询**——给快照加轮询会把「此刻是什么档」
+/// 变成「等 N 秒后的某个档」，语义相反（见 `inject::timing` 模块文档的合规映射表）。
+///
+/// **走 [`RemoteState::screen_probe`] 缝**（与回读轮询同一个能力缝）：生产装配 = 真屏读，
+/// 测试注入脚本化屏序列——否则「注入前的快照」与「注入后的轮询」两段控制流在门禁里
+/// 都只剩真机能覆盖。
 fn read_mode_from_screen(
+    st: &Arc<RemoteState>,
     session: &crate::session::Session,
     tool: &str,
     readback: bool,
@@ -3767,25 +3773,17 @@ fn read_mode_from_screen(
     if !readback {
         return None;
     }
-    #[cfg(windows)]
-    {
-        match crate::inject::windows_console::read_screen_window(session.pid) {
-            Ok(lines) => {
-                let m = crate::inject::mode::parse_mode_from_screen(tool, &lines);
-                log::debug!("模式屏读（{tool} pid={}）→ {:?}", session.pid, m);
-                m
-            }
-            Err(e) => {
-                log::debug!("模式屏读失败（{tool} pid={}: {e}）→ 档未知", session.pid);
-                None
-            }
+    match (st.screen_probe)(session.id.as_str(), session.pid) {
+        Some(lines) => {
+            let m = crate::inject::mode::parse_mode_from_screen(tool, &lines);
+            log::debug!("模式屏读（{tool} pid={}）→ {:?}", session.pid, m);
+            m
         }
-    }
-    #[cfg(not(windows))]
-    {
-        // macOS 无屏读 → 档未知（前端提示人工核对，红线 4）
-        let _ = (session, tool);
-        None
+        None => {
+            // 能力缺失（非 Windows）或屏读失败：**无法判定**（不是「默认档」）
+            log::debug!("模式屏读不可用（{tool} pid={}）→ 档未知", session.pid);
+            None
+        }
     }
 }
 
@@ -3919,43 +3917,32 @@ pub struct SessionModeReq {
     pub group: Option<String>,
 }
 
-/// 两段式注入的菜单轮询预算（毫秒）——第一段 `/permissions` 回车后，轮询等菜单画出，
+/// 两段式注入的**菜单轮询预算**（毫秒）——第一段 `/permissions` 回车后，轮询等菜单画出，
 /// 读不到就在本窗内重试，窗末仍读不到则**中止第二段并如实回执**（不盲发方向键）。
 ///
-/// # 取值的依据（**如实申报：这是自裁值，不是实测值**）
-///
-/// 本仓**没有「MAM 注入路径下菜单弹出耗时」的实测**。M9R 的 codex 取证是**人工在终端
-/// 敲 `/permissions` 后手按 ↑+Enter**（`inject::approve` 表注），它证明的是「菜单的档位
-/// 顺序与高亮项」，**不代表 MAM 注入的时序**（注入路径多了文本分块、`SUBMIT_DELAY_MS`
-/// 提交延迟、以及 TUI 的重绘周期）。
-///
-/// 因此本窗按**注入路径已知的时序量级**取保守值：第一段是「文本（远小于一个分块，
-/// 单批写完）+ `SUBMIT_DELAY_MS`(150ms) 后回车」，回车到菜单画出应落在同一量级；
-/// 600ms ≈ 4×150ms，给重绘与慢机器留余量，同时不至于让用户等太久。
-/// **与 `MENU_POLL_STEP_MS` 的关系**：窗内按 100ms 步长轮询（每步一次屏读），
-/// 故最多 6 次屏读尝试。**真实弹出耗时待实机校准**——`t4_permission_menu_screen_shape_live_probe`
-/// 跑完应把实测值回填这里（或确认自裁值足够）。脆弱常量（宪法横切 6）：改值必须过测试。
-const MENU_POLL_TOTAL_MS: u64 = 600;
-/// 菜单轮询间隔（毫秒；见 [`MENU_POLL_TOTAL_MS`] 的依据说明）
-const MENU_POLL_STEP_MS: u64 = 100;
+/// **取值与依据已迁至** [`crate::inject::timing::MENU_POLL_TOTAL_MS`]（D20 的单一事实源：
+/// 值、自裁说明与 `#[ignore]` 实测项的指向都在那里）——此处 re-export 保持既有引用点
+/// （[`menu_stages`] / [`session_mode_switch`] 的文档锚）不破。
+/// **D20 起 600ms → 1500ms**：旧值依据是「M9R 人工敲命令的时序」，不代表 MAM 注入路径
+/// （多了文本分块 + `SUBMIT_DELAY_MS` + TUI 重绘）——用户实机观察②即低估的表现。
+pub use crate::inject::timing::MENU_POLL_TOTAL_MS;
 
 /// **第三段（Full Access 二次确认框）**的轮询预算（毫秒）——第二段提交后等确认框画出。
 ///
-/// **取值的依据（如实申报：自裁值）**：确认框与菜单同属「提交后的下一次重绘」，量级
-/// 与 [`MENU_POLL_TOTAL_MS`] 相同，故取同值。**与菜单轮询的关键差别是超时的语义**：
+/// **取值与依据已迁至** [`crate::inject::timing::CONFIRM_POLL_TOTAL_MS`]。
+/// **与菜单轮询的关键差别是超时的语义**（这一条留在本模块，因为它约束的是调用方）：
 /// 菜单读不到 = 中止（功能不可用）；确认框读不到 = **不当作失败**——codex 二进制里有
 /// `Continue and don't warn again.`（用户此前关过该警告就不会再有确认框），此时应当
 /// 继续走成功回执核验，而不是报错（见 [`menu_stages`] 的文档）。
-const CONFIRM_POLL_TOTAL_MS: u64 = 600;
+pub use crate::inject::timing::CONFIRM_POLL_TOTAL_MS;
 
 /// **成功回执核验**的轮询预算（毫秒）——提交后等工具打印 `Permissions updated to …`
 /// / `Permission mode: …`。
 ///
-/// **取值的依据（如实申报：自裁值）**：回执行是提交后 TUI **立即**打印的一行
-/// （实机取证档案 §3/§5 的原文都是紧随提交出现），比菜单/确认框更快；给同量级的
-/// 窗即可。窗末仍未见 → `receipt_seen=false` → 回执 `verified:false` + 「请人工核对」，
+/// **取值与依据已迁至** [`crate::inject::timing::RECEIPT_POLL_TOTAL_MS`]。
+/// 窗末仍未见 → `receipt_seen=false` → 回执 `verified:false` + 「请人工核对」，
 /// **不当作失败**（回执可能被后续输出刷走）。
-const RECEIPT_POLL_TOTAL_MS: u64 = 600;
+pub use crate::inject::timing::RECEIPT_POLL_TOTAL_MS;
 
 /// POST /m/api/v1/session-mode（T6 切档；丁T4 二维 + 菜单两段式 + Full Access 第三段）：
 /// 校验 → **对话框在场守卫（丁T3 接入①）** → 机制分派 → 注入 → 回读/回执核验 → 审计 mode。
@@ -4030,6 +4017,11 @@ const RECEIPT_POLL_TOTAL_MS: u64 = 600;
 /// 回读成功且命中 → `verified=true`；回读成功但**不是**目标档 →
 /// `verified=false` + `hint` 报出两边（不假装成功）；无法判定（无回读源/屏读失败）
 /// → `verified=false` + 人工核对提示。`dialogChecked` 同丁T3。
+///
+/// **D20(a) 起回读是动态轮询**（旧实现是「固定睡 150ms 后单次读」——用户实机观察①
+/// 报出的「回读与预期不符」正由此而来）。三态语义与上面**逐字一致**，只是判定取自
+/// **窗内最后一拍**（命中则提前停）；窗与步长见
+/// [`crate::inject::timing::MODE_READBACK_POLL_TOTAL_MS`] / `timing::POLL_STEP_MS`。
 ///
 /// # 对话框在场守卫（丁T3 §2.7，裁8/9）—— `blocked_by_dialog`
 ///
@@ -4115,7 +4107,7 @@ pub async fn session_mode_switch(
             .unwrap_or_else(|| mode.label());
         let readback = crate::inject::mode::mode_readback_supported(&tool);
         // 切档前的当前档（步进组的预期档要按环序算）——屏读一次
-        let before = read_mode_from_screen(&session, &tool, readback);
+        let before = read_mode_from_screen(&probe_st, &session, &tool, readback);
         Ok((session, tool, group, plan, readback, label, before))
     })
     .await
@@ -4327,26 +4319,60 @@ pub async fn session_mode_switch(
         Ok(attempt) => {
             // ===== 回读确认（裁5：切换后必须知道切到了哪；红线 4：不假装成功）=====
             //
-            // 屏读是阻塞 FFI → 放进 spawn_blocking（与其它屏读点同纪律）。回读发生在
-            // 投递**之后**：此时 INFLIGHT 已释放（闭包已返回），理论上别的路径可并发
-            // 注入——如实申报：回读描述的是「本次投递后**我方读到的**屏」，不承诺
+            // **D20(a)：回读必须动态轮询**（宪法 §5.(c) 第 8 条 / 计划 §2.9）。旧实现是
+            // 「固定睡 150ms 后单次屏读」→ 屏幕重绘未及就读，读到旧档即报「回读与预期
+            // 不符」（用户实机观察①：终端其实已切、刷新浏览器即一致）。内核
+            // `mode::poll_mode_readback` 逐拍屏读直到**读到判据本身**（命中即停），
+            // 窗尽用最后一次判定定结论——三态语义（命中/不符/未及确认）原样保留。
+            //
+            // 屏读是阻塞 FFI → 整个轮询放进 spawn_blocking（与其它屏读点同纪律）。回读
+            // 发生在投递**之后**：此时 INFLIGHT 已释放（闭包已返回），理论上别的路径可
+            // 并发注入——如实申报：回读描述的是「本次投递后**我方读到的**屏」，不承诺
             // 期间无第三方操作（这与 approve 的 A1 确认同口径：确认是证据，不是锁）。
             let verify_st = st.clone();
+            let verify_sid = sid.clone();
             let verify_tool = tool.clone();
             let verify_pid = session.pid;
             let expected = crate::inject::mode::expected_mode_after(&tool, group, mode, before);
-            let observed = match tokio::task::spawn_blocking(move || {
-                read_mode_from_screen_by_pid(&verify_st, verify_tool.as_str(), verify_pid, readback)
+            // 窗（D20(b) 的有界）：步长 × 拍数全部取自单一事实源 `inject::timing`。
+            // **「该组有没有判据」不由本处判**：无回读源时 `expected_mode_after` 给 None，
+            // 内核据此只读一拍（判据单点在 `mode::poll_mode_readback` 的「短路径 ②」）
+            let rounds = crate::inject::timing::poll_rounds(
+                crate::inject::timing::MODE_READBACK_POLL_TOTAL_MS,
+            );
+            let settle_ms = crate::inject::timing::POLL_STEP_MS;
+            let outcome = match tokio::task::spawn_blocking(move || {
+                crate::inject::mode::poll_mode_readback(
+                    verify_tool.as_str(),
+                    expected,
+                    rounds,
+                    || {
+                        read_screen_for_readback(
+                            &verify_st,
+                            verify_sid.as_str(),
+                            verify_pid,
+                            readback,
+                        )
+                    },
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(settle_ms));
+                    },
+                )
             })
             .await
             {
                 Ok(v) => v,
                 Err(e) => {
                     log::error!("session-mode 回读任务异常: {e}");
-                    None
+                    crate::inject::mode::ModeReadbackOutcome {
+                        verdict: crate::inject::mode::ModeVerify::Unverifiable,
+                        observed: None,
+                        reads: 0,
+                    }
                 }
             };
-            let verdict = crate::inject::mode::verify_mode_switch(expected, observed);
+            let observed = outcome.observed;
+            let verdict = outcome.verdict;
             // T4 复评 I2：两段式（Menu）的「无法判定」要多带一句「屏读推算、未回读确认」
             // ——定位误判的现实后果是「可能切错档」，不能只回「看不见当前档」
             // 判据在 mode::ModeSwitchPlan::is_two_stage（内核单点）——不在此处写
@@ -4527,6 +4553,9 @@ fn menu_stages(
 ///   理由见 [`menu_stages`] 文档的「确认框超时不当作失败」）。
 ///
 /// `Fatal`（形态异常）两种模式都立即 `Err`——等下去也不会自洽。
+///
+/// **D20 起窗用「拍数」表达**（[`poll_rounds`]；与其余四路同口径）：墙钟 deadline 在
+/// 门禁里只能真等满窗，拍数则可在测试里确定性驱动。
 #[cfg(windows)]
 fn poll_menu_stage(
     pid: u32,
@@ -4544,30 +4573,34 @@ fn poll_menu_stage(
     } else {
         "命令已发送，档位未切"
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
-    // 「为什么还没等到」：每轮**重算**（首轮即写，故用 `let mut` 而非初值——
-    // 编译器对「初值从未被读」的写法会告 unused_assignments）
-    let mut last: String;
-    loop {
+    let rounds = crate::inject::timing::poll_rounds(total_ms).max(1);
+    // 「为什么还没等到」：每轮**重算**并记在 Option 里（首轮必写；用 Option 而非
+    // 初始空串是因为「初值从未被读」的写法会被 lint 抓——本变量只承载最后一轮的
+    // 未就绪原因）
+    let mut last: Option<String> = None;
+    for i in 0..rounds {
         match crate::inject::windows_console::read_screen_window(pid) {
             Ok(lines) => match plan.probe(&lines) {
                 PollStep::Ready(_) => return Ok(Some(lines)),
                 PollStep::Fatal(why) => return Err(format!("{why}；请人工核对终端（{advice}）")),
-                PollStep::NotYet(why) => last = why,
+                PollStep::NotYet(why) => last = Some(why),
             },
-            Err(e) => last = format!("{}屏读失败（{e}）", plan.stage()),
+            Err(e) => last = Some(format!("{}屏读失败（{e}）", plan.stage())),
         }
-        if std::time::Instant::now() >= deadline {
-            if optional {
-                // **不当作失败**：用户可能关过该警告（二进制 `Continue and don't warn
-                // again.`）→ 由回执核验如实判定
-                log::debug!("{}：窗内未出现（{last}）→ 按回执核验", plan.stage());
-                return Ok(None);
-            }
-            return Err(format!("{last}；请人工核对终端（{advice}）"));
+        if i + 1 < rounds {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS));
         }
-        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
     }
+    // `rounds ≥ 1` 已保证至少走过一轮，故 `last` 必有值；`unwrap_or_else` 只是
+    // 不去写一个「不可能发生」的 panic（防御式，文案本身仍如实）
+    let last = last.unwrap_or_else(|| format!("{}窗内未读屏", plan.stage()));
+    if optional {
+        // **不当作失败**：用户可能关过该警告（二进制 `Continue and don't warn
+        // again.`）→ 由回执核验如实判定
+        log::debug!("{}：窗内未出现（{last}）→ 按回执核验", plan.stage());
+        return Ok(None);
+    }
+    Err(format!("{last}；请人工核对终端（{advice}）"))
 }
 
 /// 轮询屏读**工具自己的成功回执行**（`receipt_seen`）。
@@ -4585,46 +4618,56 @@ fn poll_receipt(
     total_ms: u64,
 ) -> Result<Option<Vec<String>>, String> {
     let label = crate::inject::mode::menu_target_label(tool, target).unwrap_or("");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
-    loop {
-        if let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) {
-            if crate::inject::mode::permission_receipt_verified(tool, &lines, label) {
-                return Ok(Some(lines));
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            log::debug!("菜单路径：窗内未见成功回执行（{tool}/{label}）→ 按未核验回执");
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
+    // D20：窗 = 步长 × 拍数（与其余四路同口径）
+    let out = crate::inject::timing::bounded_poll(
+        crate::inject::timing::poll_rounds(total_ms),
+        || {
+            crate::inject::windows_console::read_screen_window(pid)
+                .ok()
+                .filter(|lines| {
+                    crate::inject::mode::permission_receipt_verified(tool, lines, label)
+                })
+        },
+        || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
+    );
+    if out.is_none() {
+        log::debug!("菜单路径：窗内未见成功回执行（{tool}/{label}）→ 按未核验回执");
     }
+    Ok(out)
 }
 
-/// 回读（按 pid）：与 [`read_mode_from_screen`] 同一实现，区别是**投递后**没有
-/// `&Session` 可借（会话快照已 move 进查表闭包）——故只带 pid 与工具名。
-fn read_mode_from_screen_by_pid(
-    _st: &Arc<RemoteState>,
-    tool: &str,
+/// **投递后的屏读能力**（按 pid 读一屏**原文**）——回读轮询的读入口。
+///
+/// 与 [`read_mode_from_screen`] 的关系：同一次屏读，区别是**投递后**没有 `&Session`
+/// 可借（会话快照已 move 进查表闭包）——故只带 sid/pid 与工具名。
+///
+/// **走 [`RemoteState::screen_probe`] 缝**（丁T5 引入的屏读**能力**缝，生产装配 =
+/// `inject::windows_console::read_screen_window`）：回读轮询的**控制流**（读几拍、
+/// 命中即停、窗尽取最后一次判定）是本任务的新判据，缝上能力才能在门禁里用脚本化屏
+/// 序列钉住它——本批两次栽在「真机路径没有自动化替代」上，同因同改。
+///
+/// **返回原文而不是解析结果**：解析
+/// （[`crate::inject::mode::parse_mode_from_screen`]）是**判据**，属轮询内核
+/// （[`crate::inject::mode::poll_mode_readback`]）——在这里就解析掉的话，端点侧又得为
+/// 「读到什么算命中」写一遍判据（同一判据两处实现的老路）。
+///
+/// `readback=false`（该工具无回读源）→ 直接 `None`：**不读屏**——没有回读源时读到的
+/// 任何东西都不构成判据。
+fn read_screen_for_readback(
+    st: &Arc<RemoteState>,
+    sid: &str,
     pid: u32,
     readback: bool,
-) -> Option<crate::inject::mode::MamMode> {
+) -> Option<Vec<String>> {
     if !readback {
         return None;
     }
-    #[cfg(windows)]
-    {
-        match crate::inject::windows_console::read_screen_window(pid) {
-            Ok(lines) => crate::inject::mode::parse_mode_from_screen(tool, &lines),
-            Err(e) => {
-                log::debug!("模式回读失败（{tool} pid={pid}: {e}）→ 无法判定");
-                None
-            }
+    match (st.screen_probe)(sid, pid) {
+        Some(lines) => Some(lines),
+        None => {
+            log::debug!("模式回读屏读不可用（sid={sid} pid={pid}）→ 本轮无读数");
+            None
         }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (tool, pid);
-        None
     }
 }
 
@@ -5532,8 +5575,13 @@ mod t4_live_probe_tests {
     ///
     /// **本用例的边界（如实申报）**：只打印前置检查与清单，**不做自动断言**——真机
     /// 观测需要人工在终端上看着屏幕逐条对（自动化替代面见下表的对应关系）。抄录完成后
-    /// 把差异回填本模块文档的表与 `MENU_POLL_TOTAL_MS` 等自裁常量，再决定是否升级为
-    /// `tests/m9r_e2e.rs` 的真 HTTP 全链用例。
+    /// 把差异回填本模块文档的表与 `inject::timing` 的对应常量（**D20 起时序常量的
+    /// 单一事实源在那里**），再决定是否升级为 `tests/m9r_e2e.rs` 的真 HTTP 全链用例。
+    ///
+    /// **时序读数归 D20 探针**（分工：本用例核**形态与档位**，D20 探针量**耗时**）：
+    /// 「动作 → 判据出现」的毫秒数由 `inject::timing` 的 `d20_live_probe_tests` 三条
+    /// 用例承担（跑法 `cargo test --lib d20_live_probe -- --ignored --nocapture`），
+    /// 回填落点是那里的常量 + `timing::tests::timing_constants_are_pinned`。
     ///
     /// # 门禁内的自动化替代（跑这里之前先确认它们绿）
     ///
@@ -5581,8 +5629,9 @@ mod t4_live_probe_tests {
              \n\
              **中止分支的抄录要求**：闭环的任一中止都会带中文原因（哪一段、为什么、建议怎么\n\
              做）——把它连同当时的屏幕原文一起抄下来。中止**不是缺陷**（安全面：宁可不切也\n\
-             不盲提交），但它是校准自裁常量的唯一证据（MENU_POLL_TOTAL_MS / CONFIRM_POLL_TOTAL_MS\n\
-             / RECEIPT_POLL_TOTAL_MS 都是自裁值，见 remote/api.rs 的常量文档）。\n\
+             不盲提交），但它是校准自裁常量的唯一证据（D20 起三窗与回读窗的取值、\n\
+             自裁说明与实测项都在 inject::timing——见该模块的模块文档与\n\
+             d20_live_probe_tests；本用例只管形态与档位）。\n\
              \n\
              定案后落点：把逐例差异回填本模块两条用例的文档表与对应常量，再决定是否升级为\n\
              tests/m9r_e2e.rs 的真 HTTP 全链用例（先例 e2e_http_full_chain）。",

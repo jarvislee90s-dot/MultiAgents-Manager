@@ -87,8 +87,20 @@
 //!
 //! # 脆弱常量
 //!
-//! 菜单轮询/回读等待等注入节奏常量集中在 [`super::families`]（宪法横切 6：脆弱常量
-//! 集中落点），本模块只放**纯判定与纯构造**。
+//! 注入节拍（分块/提交延迟）与屏读轮询窗（步长 + 各阶段总窗）集中在
+//! [`super::timing`]（宪法 D20 / 计划 §2.9 的**单一事实源**；宪法横切 6），
+//! 本模块只放**纯判定与纯构造** + 一条把窗用满的轮询内核
+//! （[`poll_mode_readback`]）。
+//!
+//! # D20：回读必须**动态轮询**（本模块的合规面）
+//!
+//! 宪法 D20（`docs/MASTER-PLAN.md` §5.(c) 第 8 条）与计划 §2.9：切档后**不得**「输入完
+//! 直接操作下一步」，必须轮询屏读至**读到判据本身**、有界、超时如实区分「未及确认」与
+//! 「不符」。本模块的落点：
+//! - [`poll_mode_readback`]——回读的轮询内核（命中即停；窗尽是**最后一次**判定）；
+//! - [`crate::inject::timing`]——步长与总窗（含每条自裁值指向的 `#[ignore]` 实测项）；
+//! - **例外**（D20(c)）：切档**前**的那次读取（`before`，用于推算步进组的应到档）与
+//!   GET 的当前档都是**瞬时快照**——单次读、不轮询，**不要**给它们加窗。
 
 use crate::inject::dialog::DialogOption;
 
@@ -916,6 +928,105 @@ pub fn verify_mode_switch(expected: Option<MamMode>, observed: Option<MamMode>) 
         },
         _ => ModeVerify::Unverifiable,
     }
+}
+
+/// **模式回读的轮询产物**（D20(a)(b) 的载体；端点回执据此下发 `verified`/`hint`/`current`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeReadbackOutcome {
+    /// 窗尽（或提前命中）时**最后一次**判定——`Confirmed` 时是提前停止的那一拍
+    pub verdict: ModeVerify,
+    /// **最后一次屏读**解析出的档（回执 `current` 字段用；`None` = 那一拍读不到/认不出）
+    ///
+    /// 口径说明：刻意**只记最后一拍**——早拍的读数是更旧的一屏，把它当「当前档」
+    /// 会谎报（红线 4 的同一道理：宁可 null，不给过期值）。
+    pub observed: Option<MamMode>,
+    /// 实际屏读次数（窗内拍数）
+    pub reads: u32,
+}
+
+/// **模式回读的动态轮询**（宪法 D20(a)(b) / 计划 §2.9；用户实机观察①的修复点）。
+///
+/// # 为什么要轮询（旧实现错在哪）
+///
+/// 旧实现是「固定睡 150ms → **单次**读屏」（`remote::api` 的 `read_mode_from_screen_by_pid`，D20 起已删）：屏幕重绘未及
+/// 就读，读到的还是**旧档** → `Mismatch` → 回执报「回读与预期不符」，但终端**其实已切**
+/// （用户目视确认、刷新浏览器即一致）。那正是 **D20(a) 点名禁止的「用固定睡眠替代轮询」**。
+///
+/// # 判据（逐条，与 [`verify_mode_switch`] 的三态一一对应）
+///
+/// 每拍：屏读 → 解析当前档 → `verify_mode_switch(expected, observed)`：
+/// - `Confirmed` → **立即停止**（D20(a)「命中即刻停止」，不浪费固定延迟）；
+/// - `Mismatch` → **继续轮询**（屏上还是旧档**可能只是没重绘完**——观察①的形态）；
+/// - `Unverifiable`（那一拍读不到屏/认不出形态）→ **继续轮询**至窗尽（同理）；
+/// - **窗尽**用**最后一次**判定定结论：`Confirmed`/`Mismatch`/`Unverifiable` 如实下发
+///   （D20(b)：超时**不得**统一成「失败」——「不符」与「未及确认」是两句不同的话，
+///   见 `remote::api::mode_verify_receipt`）。
+///
+/// # 两个刻意的短路径（都不是「省掉轮询」，是不做无判据的空转）
+///
+/// 1. **`settle` 只在两拍之间调**：命中当拍不再等待（命中即刻停止）。
+/// 2. **`expected == None` → 只读一拍**（该组无回读源 / 步进组当前档未知 → 应到档无从
+///    推算）：`verify_mode_switch(None, 任意)` 恒为 `Unverifiable`，**判据不存在**——
+///    转满窗也读不到判据本身。此时把窗睡满不是 D20 要的轮询，而是 D20(a) 禁止的固定
+///    睡眠。故读**一拍**（供回执的 `current` 用，与注入前的快照同口径）即返回。
+///    **判据只在这一处**：调用方把窗原样传进来即可，不必自己判「要不要轮询」。
+///
+/// # 终端 IO 走闭包（测试用脚本化屏序列驱动，不碰真 conhost）
+///
+/// `read` 返回一屏行集（`None` = 读不到屏）；`settle` 给 TUI 重绘留时间（生产 =
+/// [`crate::inject::timing::POLL_STEP_MS`] 睡眠，测试 = 空操作/推进脚本）。**测试驱动
+/// 方式见 `tests` 模块的 `run_readback_script`**。
+///
+/// # 参数
+///
+/// `rounds` = 窗内拍数（生产由 [`crate::inject::timing::poll_rounds`] 把总窗换算成
+/// 步长 × 拍数——**窗 = 步长 × 轮数**，D20(b) 的「有界」就体现在这两项上）。
+pub fn poll_mode_readback<Rd, Sl>(
+    tool: &str,
+    expected: Option<MamMode>,
+    rounds: u32,
+    mut read: Rd,
+    mut settle: Sl,
+) -> ModeReadbackOutcome
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    Sl: FnMut(),
+{
+    // 见文档「两个刻意的短路径」②：无判据可读 → 只读一拍即返回
+    let effective = if expected.is_some() { rounds.max(1) } else { 1 };
+    let mut last = ModeReadbackOutcome {
+        verdict: ModeVerify::Unverifiable,
+        observed: None,
+        reads: 0,
+    };
+    for i in 0..effective {
+        let observed = read().and_then(|lines| parse_mode_from_screen(tool, &lines));
+        let verdict = verify_mode_switch(expected, observed);
+        last = ModeReadbackOutcome {
+            verdict,
+            observed,
+            reads: i + 1,
+        };
+        if verdict == ModeVerify::Confirmed {
+            log::debug!(
+                "模式回读：第 {}/{effective} 拍命中目标档（命中即刻停止）",
+                i + 1
+            );
+            break;
+        }
+        // 末拍不再等（等下去也没有下一拍可读）
+        if i + 1 < effective {
+            settle();
+        }
+    }
+    if last.verdict != ModeVerify::Confirmed {
+        log::debug!(
+            "模式回读：窗尽（{effective} 拍）最后判定 = {:?}（reads={}）——如实回执",
+            last.verdict,
+            last.reads
+        );
+    }
+    last
 }
 
 // ===== 权限菜单路径：定位、闭环导航、第三段与成功回执（§2.6 codex/kimi 权限组）=====
@@ -2134,6 +2245,188 @@ mod tests {
             ModeVerify::Unverifiable,
             "屏读失败 → 不可判定"
         );
+    }
+
+    // ==== D20：模式回读的**动态轮询**（脚本化屏序列驱动，不碰真 conhost）====
+
+    /// **回读轮询的脚本化驱动器**：把一串「时间序列屏」喂给 [`poll_mode_readback`]，
+    /// 收集（产物, 实际屏读次数, settle 次数）。
+    ///
+    /// 脚本语义（对齐生产轮询语义，同 `run_stage_script` 的做法）：`screens[i]` 是
+    /// **第 i 拍读到的屏**；`None` 元素 = 那一拍读不到屏（模拟 AttachConsole 失败）；
+    /// 序列耗尽后**重复最后一屏**（模拟「屏不再变」= 窗内一直停在旧档）。
+    /// `settle` 空操作——测试不需要真等重绘（墙钟不前进，故 15 拍也是瞬时的）。
+    fn run_readback_script(
+        tool: &str,
+        expected: Option<MamMode>,
+        rounds: u32,
+        screens: &[Option<&[String]>],
+    ) -> (ModeReadbackOutcome, u32, u32) {
+        use std::cell::Cell;
+        let reads = Cell::new(0u32);
+        let settles = Cell::new(0u32);
+        let out = poll_mode_readback(
+            tool,
+            expected,
+            rounds,
+            || {
+                let i = reads.get() as usize;
+                reads.set(reads.get() + 1);
+                let idx = i.min(screens.len().saturating_sub(1));
+                screens
+                    .get(idx)
+                    .and_then(|s| s.as_ref())
+                    .map(|s| s.to_vec())
+            },
+            || settles.set(settles.get() + 1),
+        );
+        (out, reads.get(), settles.get())
+    }
+
+    /// **用户观察①的形态（本任务的主回归锁）**：第一拍读到**旧档**、后续拍读到**目标档**
+    /// → 最终必须是 `Confirmed`（而不是像旧实现那样报「回读与预期不符」）。
+    ///
+    /// 夹具用 claude 的真机底栏原文（T6 探测档案逐字）：`manual mode on`（默认档）→
+    /// 下一拍 `plan mode on`（目标档）——正是「屏幕重绘未及」的两帧。
+    ///
+    /// 还原动作（变异①）：把 `poll_mode_readback` 的循环去掉、改成「读一次就返回」
+    /// （等价于旧实现）→ 本测试先红（verdict 会是 Mismatch{Plan, Default}）。
+    #[test]
+    fn readback_poll_covers_observation_one_stale_frame() {
+        let stale = lines(&["  ⏸ manual mode on · ? for shortuts ·←for agents"]);
+        let fresh = lines(&["  ⏸ plan mode on (shift+tab to cycle) ·  for agents"]);
+        let (out, reads, settles) = run_readback_script(
+            "claude",
+            Some(MamMode::Plan),
+            15,
+            &[Some(stale.as_slice()), Some(fresh.as_slice())],
+        );
+        assert_eq!(
+            out.verdict,
+            ModeVerify::Confirmed,
+            "第一拍旧档、第二拍目标档 → 必须继续轮询并最终确认（观察①的修复形态）"
+        );
+        assert_eq!(
+            out.observed,
+            Some(MamMode::Plan),
+            "最后一拍读到的就是目标档"
+        );
+        assert_eq!(reads, 2, "命中即刻停止：只读两拍");
+        assert_eq!(settles, 1, "只在两拍之间等待一次（命中当拍不再等）");
+    }
+
+    /// **命中即刻停止**（D20(a)「不浪费固定延迟」）：首拍即读到目标档 → 只读一拍、
+    /// **一次都不 settle**（否则就是「固定睡眠」换了个位置）。
+    #[test]
+    fn readback_poll_stops_on_first_hit_without_sleeping() {
+        let fresh = lines(&["  ⏸ plan mode on (shift+tab to cycle)"]);
+        let (out, reads, settles) =
+            run_readback_script("claude", Some(MamMode::Plan), 15, &[Some(fresh.as_slice())]);
+        assert_eq!(out.verdict, ModeVerify::Confirmed);
+        assert_eq!(reads, 1, "首拍命中即停");
+        assert_eq!(settles, 0, "命中当拍不等待（禁止用固定睡眠替代轮询）");
+    }
+
+    /// **窗尽如实区分三态**（D20(b)）：同样跑满窗，三种屏序列给出三个**不同**的结论——
+    /// 「不符」（屏上明确是别的档，且**一直**是别的档）与「未及确认」（始终读不到屏）
+    /// 绝不能塌成一个「失败」。
+    ///
+    /// 还原动作（变异②）：把 `ModeVerify::Mismatch` 与 `Unverifiable` 在回执层合并成
+    /// 同一句话（`remote::api::mode_verify_receipt`）→ `remote::api` 的文案区分断言先红
+    /// （本测试同时钉住内核侧的两种产物确实不同）。
+    #[test]
+    fn readback_poll_distinguishes_mismatch_from_unverifiable_at_window_end() {
+        let stale = lines(&["  ⏸ manual mode on · ? for shortuts ·←for agents"]);
+        // ① 窗内**一直**是旧档（真的没切成）→ Mismatch（如实报两边）
+        let (m, reads, _) = run_readback_script(
+            "claude",
+            Some(MamMode::Plan),
+            3,
+            &[Some(stale.as_slice())], // 序列耗尽后重复最后一屏 = 屏不再变
+        );
+        assert_eq!(
+            m.verdict,
+            ModeVerify::Mismatch {
+                expected: MamMode::Plan,
+                observed: MamMode::Default,
+            },
+            "屏上明确是别的档 → 报「不符」并给出两边"
+        );
+        assert_eq!(
+            m.observed,
+            Some(MamMode::Default),
+            "回执的 current = 实际读到的档"
+        );
+        assert_eq!(reads, 3, "窗尽才停（3 拍全读）");
+
+        // ② 窗内**始终读不到屏** → Unverifiable（未及确认），**不是** Mismatch
+        let (u, reads_u, _) =
+            run_readback_script("claude", Some(MamMode::Plan), 3, &[None, None, None]);
+        assert_eq!(
+            u.verdict,
+            ModeVerify::Unverifiable,
+            "读不到屏 → 未及确认（不得与「不符」混为一谈）"
+        );
+        assert_eq!(
+            u.observed, None,
+            "没有读数 → current 必须为 null（不给过期值）"
+        );
+        assert_eq!(reads_u, 3, "读不到也要读满窗（可能只是没重绘完）");
+        assert_ne!(m.verdict, u.verdict, "两种超时的结论必须不同（D20(b)）");
+
+        // ③ **命中即停**：中间拍到目标档的那一拍就是终点——后续屏读（这里故意给
+        //    `None`）**不再发生**，结论固定为 Confirmed（D20(a)「命中即刻停止」，
+        //    不浪费固定延迟，也不「回头」重判）
+        let fresh = lines(&["  ⏸ plan mode on (shift+tab to cycle)"]);
+        let (f, reads_f, settles_f) = run_readback_script(
+            "claude",
+            Some(MamMode::Plan),
+            3,
+            &[Some(fresh.as_slice()), None],
+        );
+        assert_eq!(
+            f.verdict,
+            ModeVerify::Confirmed,
+            "命中即停，不受后续屏序列影响"
+        );
+        assert_eq!(f.observed, Some(MamMode::Plan));
+        assert_eq!(reads_f, 1, "命中当拍即停：第二拍根本不再读");
+        assert_eq!(settles_f, 0, "命中当拍也不等待");
+    }
+
+    /// **无判据可读时不空转**（D20(a) 的判据是「读到判据本身」——判据不存在就没有
+    /// 轮询可做）：`expected = None`（该组无回读源 / 步进组当前档未知）→ 本内核只读
+    /// 一拍、**不睡**，产物恒为 `Unverifiable`（回执据此说「请人工核对」，不假装）。
+    ///
+    /// 这条同时钉住「把 1.5s 睡满」那种伪轮询：若实现改成无条件跑满窗，
+    /// `settles` 会从 0 变成 14 → 先红。
+    #[test]
+    fn readback_poll_does_not_spin_without_a_criterion() {
+        let fresh = lines(&["  ⏸ plan mode on (shift+tab to cycle)"]);
+        let (out, reads, settles) =
+            run_readback_script("claude", None, 15, &[Some(fresh.as_slice())]);
+        assert_eq!(
+            out.verdict,
+            ModeVerify::Unverifiable,
+            "无应到档可推算 → 不可判定（即便屏上读到了明确档位）"
+        );
+        assert_eq!(
+            out.observed,
+            Some(MamMode::Plan),
+            "但仍带上读数供回执的 current 用"
+        );
+        assert_eq!(reads, 1, "只读一拍");
+        assert_eq!(settles, 0, "不睡（判据不存在，转窗也不会读到判据本身）");
+    }
+
+    /// **拍数下界为 1**：调用方传入 `rounds = 0` → 仍读一拍（0 拍 = 不读 = 无产物，
+    /// 那不是有界轮询而是放弃；`timing::poll_rounds` 已保证不下发 0，这里是纵深防御）。
+    #[test]
+    fn readback_poll_always_reads_at_least_once() {
+        let (out, reads, _) = run_readback_script("claude", Some(MamMode::Plan), 0, &[None]);
+        assert_eq!(out.reads, 1);
+        assert_eq!(reads, 1);
+        assert_eq!(out.verdict, ModeVerify::Unverifiable);
     }
 
     // ==== 屏读解析（分族；夹具 = 真机屏幕原文）====
