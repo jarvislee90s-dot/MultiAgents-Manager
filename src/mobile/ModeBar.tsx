@@ -156,15 +156,31 @@ export default function ModeBar({ session }: { session: { id: string } }) {
   );
 }
 
-/** 视图 → 组清单。**
+/** 视图 → 组清单。
  *
  * 丁T4 的结构表来自后端；旧后端（无 `groups`）在此**回落到单轴视图**（用顶层
  * current/readback + switchKind 合成一组）——这样渲染分支只有一套，不会出现
- * 「新老两条渲染路径」的分叉（分叉正是口径漂移的温床）。 */
+ * 「新老两条渲染路径」的分叉（分叉正是口径漂移的温床）。
+ *
+ * # 前向兼容的**如实边界**（T4 复评 M1：这不是「零损失」，是**降级**）
+ *
+ * 回落路径用 `step = switchKind === "shiftTab"` 决定渲染哪条分支，且 `tiers: []`
+ * （旧后端不下发档位表，前端无从知道该工具有哪些档、屏显标签叫什么）。后果：
+ * - `shiftTab` 的旧后端（claude / opencode，**以及 T4 之前的 kimi**）→ 渲染
+ *   「切换模式」钮 + 顶层 current 回显，与旧前端行为一致（**无损失**）；
+ * - `slashCommand` 的旧后端（codex）→ 旧前端渲染的是 `plan`/`bypass` **两个逐档按钮**
+ *   （`/plan` 与 `/permissions` 两条有命令证据的路），而 `tiers: []` 让新前端**一个
+ *   逐档按钮都渲染不出来** —— 只剩回显。**这是功能降级，不是等价兼容。**
+ *
+ * 为什么接受这个降级而不做「旧后端硬编码一份 codex 档位表」：那份表会立刻成为第二份
+ * 真源（§2.6 的规格表 + 后端结构表已经是两份，再加前端硬编码就是三份），而后端升级
+ * 到 T4 后它就变成**永不执行的死代码**——本仓既往的口径漂移大多源于这种「过渡期硬
+ * 编码」。过渡期的正确做法是**如实告知**：旧后端 + codex 时 ModeBar 只回显不给切换
+ * 入口，用户在终端操作或升级后端即可。 */
 function modeGroups(view: SessionModeView): ModeGroupView[] {
   if (view.groups !== undefined && view.groups.length > 0) return view.groups;
-  // 旧后端回落：单轴 + 顶层 current。tiers 用通用的 MamMode 词表（旧后端不下发
-  // 屏显标签），并把顶层 current 作为当前档。
+  // 旧后端回落：单轴 + 顶层 current。tiers 空（旧后端不下发档位表）——
+  // `slashCommand` 的旧后端（codex）因此失去逐档按钮（见上方如实边界）。
   return [
     {
       id: "mode",

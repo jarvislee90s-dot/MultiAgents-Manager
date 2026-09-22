@@ -679,14 +679,10 @@ export async function sessionQuestionAnswer(
  *  对齐 happy 的 8 值收敛为 MAM 5 值（auto/safe-yolo/yolo 合并为 bypass）。 */
 export type MamMode = "plan" | "default" | "acceptEdits" | "bypass" | "readOnly";
 
-/** 模式档中文名（前端渲染；与 Rust `MamMode::label` 同口径） */
-export const MAM_MODE_LABELS: Record<MamMode, string> = {
-  plan: "计划",
-  default: "默认",
-  acceptEdits: "接受编辑",
-  bypass: "完全信任",
-  readOnly: "只读",
-};
+// 注（T4 复评 M4）：批次丙 T6 的 `MAM_MODE_LABELS` 通用档名表已删除——丁T4 起
+// 按钮标签一律用**后端下发的屏显标签**（`groups[].tiers[].label`，§2.6：标签必须
+// 是工具自己的词，如 kimi 权限组的「总是询问/按需询问/永不询问」），通用档名只剩
+// 回执文案里的兜底（`MamMode::label`，后端侧）。前端再留一份 = 第二份真源 + 死代码。
 
 /** 模式栏的**组**（丁T4 §2.6：二维工具的「模式组/权限组」与单轴工具的「模式」轴） */
 export type ModeGroupId = "mode" | "permission";

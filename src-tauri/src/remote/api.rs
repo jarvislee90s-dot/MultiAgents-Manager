@@ -3418,11 +3418,24 @@ pub struct SessionModeReq {
     pub group: Option<String>,
 }
 
-/// 两段式注入的菜单轮询预算（毫秒）——第一段 `/permissions` 回车后，菜单出现需要
-/// 一个重绘周期；实测（M9R 探针）菜单是**即时**弹出的（同批按键的后续 ↓/Enter 都
-/// 落在菜单上），故取一个保守的小窗即可。脆弱常量（宪法横切 6）：改值必须过测试。
+/// 两段式注入的菜单轮询预算（毫秒）——第一段 `/permissions` 回车后，轮询等菜单画出，
+/// 读不到就在本窗内重试，窗末仍读不到则**中止第二段并如实回执**（不盲发方向键）。
+///
+/// # 取值的依据（**如实申报：这是自裁值，不是实测值**）
+///
+/// 本仓**没有「MAM 注入路径下菜单弹出耗时」的实测**。M9R 的 codex 取证是**人工在终端
+/// 敲 `/permissions` 后手按 ↑+Enter**（`inject::approve` 表注），它证明的是「菜单的档位
+/// 顺序与高亮项」，**不代表 MAM 注入的时序**（注入路径多了文本分块、`SUBMIT_DELAY_MS`
+/// 提交延迟、以及 TUI 的重绘周期）。
+///
+/// 因此本窗按**注入路径已知的时序量级**取保守值：第一段是「文本（远小于一个分块，
+/// 单批写完）+ `SUBMIT_DELAY_MS`(150ms) 后回车」，回车到菜单画出应落在同一量级；
+/// 600ms ≈ 4×150ms，给重绘与慢机器留余量，同时不至于让用户等太久。
+/// **与 `MENU_POLL_STEP_MS` 的关系**：窗内按 100ms 步长轮询（每步一次屏读），
+/// 故最多 6 次屏读尝试。**真实弹出耗时待实机校准**——`t4_permission_menu_screen_shape_live_probe`
+/// 跑完应把实测值回填这里（或确认自裁值足够）。脆弱常量（宪法横切 6）：改值必须过测试。
 const MENU_POLL_TOTAL_MS: u64 = 600;
-/// 菜单轮询间隔（毫秒）
+/// 菜单轮询间隔（毫秒；见 [`MENU_POLL_TOTAL_MS`] 的依据说明）
 const MENU_POLL_STEP_MS: u64 = 100;
 
 /// POST /m/api/v1/session-mode（T6 切档；丁T4 二维 + 两段式）：校验 → **对话框在场
@@ -3797,7 +3810,13 @@ pub async fn session_mode_switch(
                 }
             };
             let verdict = crate::inject::mode::verify_mode_switch(expected, observed);
-            let (verified, hint) = mode_verify_receipt(verdict, group, label);
+            // T4 复评 I2：两段式（Menu）的「无法判定」要多带一句「屏读推算、未回读确认」
+            // ——定位误判的现实后果是「可能切错档」，不能只回「看不见当前档」
+            // 判据在 mode::ModeSwitchPlan::is_two_stage（内核单点）——不在此处写
+            // matches!，将来加第三种两段式变体时回执不会静默漏掉限定
+            let mode_shot_from_screen = plan.is_two_stage();
+            let (verified, hint) =
+                mode_verify_receipt(verdict, group, label, mode_shot_from_screen);
             (
                 StatusCode::OK,
                 [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -3914,10 +3933,24 @@ fn read_mode_from_screen_by_pid(
 /// - **不符**：`verified=false` + 报出「预期 A / 实际 B」（不假装成功，也不含糊说
 ///   「请核对」——用户需要知道差在哪，才能判断是环序漂移还是注入没生效）；
 /// - 无法判定：`verified=false` + 人工核对提示（无回读源/屏读失败）。
+///
+/// # `mode_shot_from_screen`（T4 复评 I2）：第二段的「无法判定」要多带一句限定
+///
+/// 对**两段式菜单**（`mode_shot_from_screen=true`）来说，「无法判定」这一态的含义比
+/// 单段注入更弱一层：档位**是靠屏读菜单标签推算出来的**（`locate_menu_items` +
+/// `menu_items_coherent`），而菜单块形态**没有实机快照**（见 `inject::mode` 的窄面
+/// 申报）——定位一旦误判，方向键步进就可能落在**别的档**上。此时若只回「无法确认
+/// 当前档」，用户会以为「可能没切或切了但看不见」，而真实风险是「**可能切错档**」。
+/// 裁5 的「不假装成功」要覆盖这一态，故两段式的「无法判定」文案追加「本次为屏读
+/// 推算、未回读确认」——把风险说全，让用户知道该去终端核**对**（而不是只核有无）。
+///
+/// 单段（Key/Text）不追加：它的目标档由命令/按键直接决定（`/plan on` 就是进 Plan，
+/// shift+tab 就是前进一档），不存在「定位误判」这条额外风险源。
 fn mode_verify_receipt(
     verdict: crate::inject::mode::ModeVerify,
     group: crate::inject::mode::ModeGroupId,
     label: &str,
+    mode_shot_from_screen: bool,
 ) -> (bool, serde_json::Value) {
     use crate::inject::mode::ModeVerify;
     match verdict {
@@ -3925,19 +3958,29 @@ fn mode_verify_receipt(
         ModeVerify::Mismatch { expected, observed } => (
             false,
             serde_json::json!(format!(
-                "回读到的档与预期不符（预期「{}」、实际「{}」）——请人工核对终端",
+                "回读到的档与预期不符（预期「{}」、实际「{}」）——请人工核对终端{}",
                 expected.label(),
-                observed.label()
+                observed.label(),
+                if mode_shot_from_screen {
+                    "（本次为屏读推算、未回读确认）"
+                } else {
+                    ""
+                }
             )),
         ),
         ModeVerify::Unverifiable => (
             false,
             serde_json::json!(format!(
-                "{}的当前档无法自动确认（无回读源或屏读失败）——请人工核对终端",
+                "{}的当前档无法自动确认（无回读源或屏读失败）——请人工核对终端{}",
                 if group == crate::inject::mode::ModeGroupId::Mode {
                     "模式".to_string()
                 } else {
                     format!("{}「{}」", group.label(), label)
+                },
+                if mode_shot_from_screen {
+                    "；本次为屏读推算、未回读确认"
+                } else {
+                    ""
                 }
             )),
         ),
@@ -4348,6 +4391,61 @@ mod tests {
                 "判据格：{text:?}（基准 {base}）"
             );
         }
+    }
+
+    // ==== 丁T4 复评 I2：回执文案的「屏读推算」限定 ====
+
+    /// **两段式（Menu）的「无法判定」必须带「本次为屏读推算、未回读确认」**（裁5 的
+    /// 「不假装」要覆盖「可能切错档」这一态，不只是「不知道切没切」）。
+    ///
+    /// 还原动作：把 `mode_verify_receipt` 的 `mode_shot_from_screen` 参数去掉（或恒传
+    /// false）→ 本测试先红（hint 里缺那句限定）。
+    #[test]
+    fn two_stage_receipt_carries_screen_inference_caveat() {
+        use crate::inject::mode::{MamMode, ModeGroupId, ModeVerify};
+        let group = ModeGroupId::Permission;
+        // 两段式 × 无法判定（权限组无回读源 → 实机常态）
+        let (verified, hint) =
+            mode_verify_receipt(ModeVerify::Unverifiable, group, "完全信任", true);
+        assert!(!verified, "无回读源 → 不得声称已确认");
+        let h = hint.as_str().unwrap();
+        assert!(
+            h.contains("屏读推算"),
+            "两段式必须说明档位是推算来的（可能切错档）：{h}"
+        );
+        assert!(h.contains("未回读确认"), "并说明未回读：{h}");
+        assert!(h.contains("请人工核对终端"), "仍要给核对指引：{h}");
+        // 单段（Key/Text）× 无法判定：**不带**该限定（目标档由命令直接决定，
+        // 不存在「定位误判」这条额外风险源）——成对锁，防有人把限定一律加上去
+        let (_, hint_single) =
+            mode_verify_receipt(ModeVerify::Unverifiable, group, "完全信任", false);
+        let hs = hint_single.as_str().unwrap();
+        assert!(
+            !hs.contains("屏读推算"),
+            "单段注入没有定位误判风险 → 不加该限定：{hs}"
+        );
+        // 两段式 × 不符：同样带限定（此时「预期」本身就是推算值）
+        let (verified, hint) = mode_verify_receipt(
+            ModeVerify::Mismatch {
+                expected: MamMode::Bypass,
+                observed: MamMode::ReadOnly,
+            },
+            group,
+            "完全信任",
+            true,
+        );
+        assert!(!verified);
+        let h = hint.as_str().unwrap();
+        assert!(
+            h.contains("预期「完全信任」") && h.contains("实际「只读」"),
+            "{h}"
+        );
+        assert!(h.contains("屏读推算"), "不符态也要说明预期是推算的：{h}");
+        // 命中：无 hint（前端显示「已切换」）——两段式**永远走不到这一态**（无回读源），
+        // 但判据本身要保持三态齐全
+        let (verified, hint) = mode_verify_receipt(ModeVerify::Confirmed, group, "完全信任", true);
+        assert!(verified);
+        assert!(hint.is_null());
     }
 }
 

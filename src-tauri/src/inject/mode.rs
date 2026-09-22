@@ -578,6 +578,19 @@ pub enum ModeSwitchPlan {
     },
 }
 
+impl ModeSwitchPlan {
+    /// 本次注入是否**两段式菜单**（第一段开菜单、第二段屏读定位 + 导航确认）。
+    ///
+    /// 抽成方法而不是在端点写 `matches!(plan, ..Menu..)`：这个布尔决定**回执文案**
+    /// （`remote::api::mode_verify_receipt` 的「屏读推算、未回读确认」限定，T4 复评
+    /// I2）——判据若散在调用点，将来加变体（如第三种两段式）时回执会静默漏掉限定，
+    /// 而那正是「不假装成功」要覆盖的态。放在内核里，**加变体时编译器会提醒改这里**
+    /// （endpoint 用的就是本方法，不是自己的 matches）。
+    pub fn is_two_stage(self) -> bool {
+        matches!(self, Self::Menu { .. })
+    }
+}
+
 /// 拒绝切换的原因（**如实回执**，不是静默失败）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchRefusal {
@@ -729,8 +742,11 @@ pub fn codex_plan_busy(tool: &str, group: ModeGroupId, target: MamMode, is_runni
 ///   None（未知）而不是乱猜；
 /// - kimi 的底栏识别依赖 `thinking:`（实测两台模型皆有；无思考能力的模型可能不印
 ///   这段 → 返回 None = 未知，方向保守）；
-/// - claude/claude 的正文若出现与底栏**逐字相同**的短句且位于更下方，可能误判——
-///   实机由 `#[ignore]` 全量回读用例逐例核对（四个真机快照已在门禁内锁住）。
+/// - **claude / codex** 的正文若出现与底栏**逐字相同**的短句且位于更下方，可能误判
+///   ——两家的底栏判据是「含某子串」（`plan mode on` / `plan mode` + ` · `），
+///   自底向上扫描只能缓解不能消除「正文里也有同样一行」的情形。实机由 `#[ignore]`
+///   全量回读用例逐例核对（四个真机快照已在门禁内锁住；对话框遮挡时自然返回 None，
+///   见 `claude_dialog_does_not_fake_plan_mode`）。
 pub fn parse_mode_from_screen(tool: &str, lines: &[String]) -> Option<MamMode> {
     match tool {
         "claude" => parse_claude_footer(lines),
@@ -940,9 +956,30 @@ pub fn menu_target_label(tool: &str, target: MamMode) -> Option<&'static str> {
 /// `dialog::navigation_sequence` 文档里「想拒绝却批准」同类事故）。行首匹配把
 /// 引文行排除在外。
 ///
-/// 返回 `None`（端点据此**中止第二段并如实回执**，绝不盲发方向键）：
-/// 菜单项 < 2（不成菜单）/ 无高亮项 / 多行高亮——后两条由
-/// [`crate::inject::dialog::navigation_sequence`] 在下一步再判一次（同口径双保险）。
+/// 返回 `None`（端点据此**中止第二段并如实回执**，绝不盲发方向键）：菜单项 < 2
+/// （不成菜单）。**其余保守面在 [`menu_navigation_sequence`]**（那里知道是哪个工具，
+/// 才能判「这一家的菜单应当长什么样」）——本函数只做**原始定位**，其输出**不可直接
+/// 行动**（见 [`menu_items_coherent`] 的文档）。
+///
+/// # 已知窄面（T4 复评 I1；本批**选择如实申报 + 补一道可证据化的闸**，不做块簇加固）
+///
+/// **反例（评审抓获，成立）**：行首匹配**不能定位「菜单块」**。同屏若有别的**正文/
+/// 状态行以某个档位标签开头**（评审给的真机例子：codex `/status` 输出回显
+/// `Read Only (sandbox: read-only)`），它会被计为一个菜单项 → 项数凭空 +1 → 目标档的
+/// 步进**可能多一步**（评审的算例：目标 `Full Access` 从正确的 `↓,enter` 变成
+/// `↓↓,enter`；若菜单不回卷，多一步会把高亮停在**别的档**——用户点 Full Access
+/// 而实际切到 Read Only）。
+///
+/// **为什么选「如实申报 + 可证据化的闸」而不是「块簇 + 紧邻标题加固」（依据 = 证据量）**：
+/// 块簇加固需要「菜单块长什么样」的**实机屏幕逐行原文**——菜单标题文本（codex
+/// `Update Model Permissions` / kimi 的对应标题）、档位行之间是否夹描述行、光标标记
+/// 用哪个字符，这些**全部来自二进制内嵌文案，本仓没有一份实机菜单快照**（T4 已如实
+/// 申报；`t4_permission_menu_screen_shape_live_probe` 就是去取这个证据的用例）。
+/// 在无原文的前提下写「紧邻标题 + 连续成簇」的判据 = 拿推演当规范，正是本批反复栽
+/// 跟头的模式（T2 的 Processing、T3 的空断言、C1 的全 ASCII 夹具）。按「结论不得
+/// 超过证据」：**不加固块结构判据**，改为在 [`menu_items_coherent`] 上加一道
+/// **只依赖「菜单应含哪些档」这一事实**的闸（该事实有 §2.6 与 M9R 档位序记录支撑），
+/// 并把块簇加固列入下批（前置条件 = 实机菜单快照）。
 pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<DialogOption>> {
     let mut items: Vec<DialogOption> = Vec::new();
     for line in lines {
@@ -967,9 +1004,102 @@ pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<Dialog
     Some(items)
 }
 
-/// 前缀匹配（大小写不敏感；`text` 以 `prefix` 开头即命中）
+/// **菜单项表的一致性判据**（纯函数，可测）——[`locate_menu_items`] 的原始输出
+/// **必须过这道闸才能拿去算步进**。
+///
+/// # 两条不变式（都由「菜单应含哪些档」这一**有据事实**导出，不依赖菜单块形态）
+///
+/// 1. **每个档位标签恰好出现一次**：权限菜单每一档只渲染一行，故同一标签出现两次
+///    = 屏上混进了以该标签开头的正文/状态行（评审的反例：`/status` 回显
+///    `Read Only (sandbox: read-only)` 与真菜单项 `Read Only` **重复**）。这一条
+///    **正好命中评审的算例**——原始 4 项里 `Read Only` 出现两次 → 拒绝。
+/// 2. **目标档全集齐备**：该工具的三个用户可切档都得在场（§2.6 codex/kimi 各三档；
+///    M9R 记录 codex 实机档位序含 `Approve for me`，但它只在 Guardian 开启时出现，
+///    故**不算进**目标全集——把它算进会让 Guardian 关闭的正常菜单被判不完整而永久
+///    无法切档）。缺档 = 菜单被对话框/正文挤掉一部分 → 步进不可信 → 拒绝。
+///
+/// # 残留风险（如实申报，不假装已消除）
+///
+/// 若同屏混入的行**恰好补齐了缺席的目标档**（菜单只画出 2 档、正文里正好有一行以
+/// 第 3 个目标标签开头），两条不变式都会通过。这需要两个巧合同时发生（菜单不完整
+/// **且**正文给出恰好缺的那个标签），概率远低于评审的单行混入反例。**本条窄面留在
+/// 台账**，块簇加固在下批做（前置 = 实机菜单快照）。
+pub fn menu_items_coherent(items: &[DialogOption], tool: &str) -> bool {
+    let seen: Vec<&str> = items
+        .iter()
+        .filter_map(|o| o.label.split_once('|').map(|(l, _)| l))
+        .collect();
+    if seen.len() != items.len() {
+        return false; // 形态异常（label 未按 `标签|原文` 构造）
+    }
+    // 不变式 1：无重复
+    for (i, a) in seen.iter().enumerate() {
+        if seen[i + 1..].iter().any(|b| a.eq_ignore_ascii_case(b)) {
+            log::debug!("权限菜单定位：标签重复（{a}）→ 屏上混入正文行，中止（不盲发方向键）");
+            return false;
+        }
+    }
+    // 不变式 2：目标档全集齐备
+    let want = menu_target_labels(tool);
+    if want.is_empty() {
+        return false; // 未实测工具
+    }
+    let missing: Vec<&&str> = want
+        .iter()
+        .filter(|w| !seen.iter().any(|s| s.eq_ignore_ascii_case(w)))
+        .collect();
+    if !missing.is_empty() {
+        log::debug!("权限菜单定位：目标档不全（缺 {missing:?}）→ 中止（不盲发方向键）");
+        return false;
+    }
+    true
+}
+
+/// 工具 → **目标档标签全集**（用户可切的三档；codex/kimi 各三条，见 §2.6）。
+///
+/// **不含** codex 的 `Approve for me`：它只在 Guardian 开启时出现（M9R 表注），
+/// 且 §2.6 未把它列为目标档——算进完整集会误伤正常菜单。
+fn menu_target_labels(tool: &str) -> &'static [&'static str] {
+    match tool {
+        "codex" => &CODEX_TARGET_LABELS,
+        "kimi" => &KIMI_TARGET_LABELS,
+        _ => &[],
+    }
+}
+
+/// codex 权限菜单的**目标档标签全集**（与 [`menu_target_label`] 的取值一一对应）
+const CODEX_TARGET_LABELS: [&str; 3] = ["Read Only", "Ask for approval", "Full Access"];
+/// kimi 权限菜单的目标档标签全集（§2.6 三档）
+const KIMI_TARGET_LABELS: [&str; 3] = ["Always Ask", "Ask When Needed", "Never Ask"];
+
+/// 前缀匹配（**大小写不敏感的「以…开头」**；`text` 以 `prefix` 开头即命中）。
+///
+/// # 为什么按**字符**逐位比较，而不是 `text[..prefix.len()]`（T4 复评 C1 的根因）
+///
+/// 字节切片版本 `text[..prefix.len()]` 有一个致命的隐式前提：**`prefix.len()` 处
+/// 必须是字符边界**。屏读行里只要前 `prefix.len()` 个字节跨了非 ASCII 字符（真机
+/// 屏幕**每一份**都能凑出这种行——`—`(U+2014) 占 3 字节、`╭─`(U+256D)、中文都是），
+/// 切片即 panic：`end byte index 9 is not a char boundary; it is inside '—'`。
+///
+/// 后果链（T4 复评抓获）：本函数在 `second_stage_menu` 的 spawn_blocking 闭包内被
+/// 调用 → panic 让该任务 JoinError → 端点回 **500 internal**（而不是如实回执），
+/// 且第一段 `/permissions` 已经投出、菜单开在用户终端上**没人收尾**。
+/// **`#[cfg(windows)]` 之外的门禁永不覆盖这条路径**——正是「测试覆盖不到的实机路径」
+/// 的典型（旧夹具全是纯 ASCII，等于把实机形态排除在门禁之外；现已有非 ASCII 真机
+/// 夹具，见 `menu_locator_survives_real_non_ascii_screens`）。
+///
+/// 逐字符比较的语义与旧实现**完全一致**（`char::eq_ignore_ascii_case` 同样只折叠
+/// ASCII 大小写——与 `str::eq_ignore_ascii_case` 同口径），且不再有任何字节索引。
 fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
-    text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
+    let mut t = text.chars();
+    for pc in prefix.chars() {
+        match t.next() {
+            Some(tc) if pc.eq_ignore_ascii_case(&tc) => {}
+            _ => return false,
+        }
+    }
+    // prefix 走完即命中（空 prefix 恒真——调用方传的是非空标签表，此处不加特判）
+    true
 }
 
 /// **第二段的完整按键序列**（纯函数）：屏读行集 → 目标档的 `[↑/↓ × k, Enter]`。
@@ -978,6 +1108,10 @@ fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
 /// 回卷**——理由见该函数文档：权限菜单的回卷行为无实测，循环前进会在「目标在高亮之上」
 /// 时发出可能切错档的 ↓ 序列；codex 的 M9R 实机取证正是 ↑+Enter）。目标越界 /
 /// 无高亮 / 多高亮的保守面与审批路径共用同一份判据。
+///
+/// **定位结果先过 [`menu_items_coherent`]**（T4 复评 I1 的闸）：同屏混入的「以档位
+/// 标签开头的正文行」会破坏一致性（重复标签 / 目标档不齐）→ 本函数 Err → 端点中止
+/// 第二段 + 如实回执，**不盲发方向键**。窄面与残留风险见该函数文档。
 pub fn menu_navigation_sequence(
     lines: &[String],
     tool: &str,
@@ -988,6 +1122,11 @@ pub fn menu_navigation_sequence(
         .ok_or_else(|| format!("{tool} 的权限菜单里没有「{}」档", target.label()))?;
     let items = locate_menu_items(lines, labels)
         .ok_or_else(|| format!("{tool} 的权限菜单未出现或读不到档位表（不盲发方向键）"))?;
+    if !menu_items_coherent(&items, tool) {
+        return Err(format!(
+            "{tool} 的权限菜单档位表不自洽（可能混入了正文行或被遮挡）——不猜位置，请在终端选择"
+        ));
+    }
     let hit = items
         .iter()
         .find(|o| {
@@ -1300,6 +1439,20 @@ mod tests {
         );
     }
 
+    /// **两段式判据**（T4 复评 I2 的单点）：只有 Menu 变体为真——回执的「屏读推算」
+    /// 限定由它驱动（端点用本方法，不自己写 matches!）。
+    /// 还原动作：把 `is_two_stage` 改成恒 true → `two_stage_receipt_*` 的成对锁先红。
+    #[test]
+    fn two_stage_flag_is_menu_only() {
+        assert!(ModeSwitchPlan::Menu {
+            open: "/permissions",
+            target: MamMode::Bypass
+        }
+        .is_two_stage());
+        assert!(!ModeSwitchPlan::Key("shift+tab").is_two_stage());
+        assert!(!ModeSwitchPlan::Text("/plan on").is_two_stage());
+    }
+
     /// 未实测工具 → Unsupported（端点 409 no_mechanism）
     #[test]
     fn unsupported_tool_refuses() {
@@ -1408,7 +1561,12 @@ mod tests {
         assert_eq!(
             cycle_next("claude", MamMode::Default),
             Some(MamMode::AcceptEdits),
-            "环尾回到环首（实测 ↓ 到尾部循环回首个）"
+            // 依据 = **底栏 shift+tab 的环序实测**（T6 探测档案 §1.2：逐次 shift+tab
+            // 得到 acceptEdits → plan → auto → manual，第四次后又回到 acceptEdits）。
+            // 注意：这与 dialog::navigation_sequence 的「↓ 到尾部回卷」**不是同一条
+            // 证据**——那是 claude **编号对话框**的行选择器行为（R1 实测），此处用的是
+            // 模式栏的 shift+tab 循环。两条实测结论恰好一致（都回卷），但证据来源不同。
+            "环尾回到环首（依据 = T6 底栏 shift+tab 环序实测，非对话框 ↓ 回卷）"
         );
         assert_eq!(
             cycle_next("opencode", MamMode::Default),
@@ -1863,5 +2021,247 @@ mod tests {
             MamMode::Bypass
         )
         .is_err());
+    }
+
+    // ==== T4 复评 C1：非 ASCII 真机屏不得 panic（根因防线）====
+
+    /// **C1 根因防线**（T4 复评 Critical）：`starts_with_ignore_case` 的字节切片版本
+    /// 会在「前 N 字节跨非 ASCII 字符」时 panic，而**真机屏幕每一份都能凑出这种行**。
+    ///
+    /// 夹具 = 批次丙 T6 探测档案的真机屏幕原文（`%TEMP%\mam-probe-c3-20260921-150000\
+    /// evidence\` 的逐字抄录，去 `\r`），含三类非 ASCII：`—`(U+2014，3 字节)、
+    /// `╭─`(U+256D/U+2500，3 字节)、中文（3 字节/字）。**逐行喂进两条真入口**
+    /// （`locate_menu_items` 与 `menu_navigation_sequence`）——断言「不 panic」而不是
+    /// 「不编译」：旧实现会在**这些行上真的 panic**（见下条测试的变异说明）。
+    ///
+    /// **为什么这条测试必须存在**（本批第三次因「夹具不真机」栽跟头）：旧夹具全是纯
+    /// ASCII，而 C1 的触发条件恰恰是「非 ASCII 前导跨过前缀长度」——纯 ASCII 夹具把
+    /// 实机形态**排除在门禁之外**，于是 `#[cfg(windows)]` 之外永不覆盖这条路径，
+    /// panic 只在实机第二段注入时才现形（500 internal + 菜单开在终端没人收尾）。
+    #[test]
+    fn menu_locator_survives_real_non_ascii_screens() {
+        // 真机屏幕原文（含三类非 ASCII；行号标注其出处，便于回溯）
+        let real: Vec<&str> = vec![
+            // screen-t6-claude-before.txt:14（`—` U+2014 落在第 8..11 字节——C1 的
+            // 原始触发行；前缀 "Read Only" 的 9 字节切点正落在 `—` 内部）
+            "  hello() —is complete and verified (python main.py printed hi).",
+            // screen-codex-after-enter.txt:1（`╭─` 边框行；"Full Access" 的 11 字节切点
+            // 落在第二个 `─` 内）
+            "\u{feff}╭────────────────────────────────────────────────────────╮",
+            // screen-codex-after-st1.txt:2（中文正文；"Read Only" 的切点落在「如」内）
+            "  在 main.py 中新增一个 hello() 函数，返回 \"Hello, World!\"，不改动现有代码和其他文件。",
+            // screen-kimi-after-enter-confirm.txt:23（`└─` 边框）
+            "   └──────────────────────────────────────────────────────────────────────",
+            // screen-codex-planmd.txt:15（`·` 分隔的状态栏）
+            "  glm-5.3-flash medium · ~\\AppData\\Local\\Temp\\mam-probe-c3-20260921-150000\\proj-codex",
+            // screen-kimi-after-st.txt:29（`plan` 前缀底栏——本行**应当**被解析，见下）
+            " plan  GLM-5.3-Flash thinking: high  C:\\Users\\bunny\\AppData\\Local\\Temp\\proj-kimi",
+            // 纯 ASCII 短行（前缀比行长的边界格）
+            "hi",
+            "",
+        ];
+        let screen: Vec<String> = real.iter().map(|s| s.to_string()).collect();
+        // ① 定位器：不得 panic（旧实现在前四行上 panic）
+        for (tool, target) in [
+            ("codex", MamMode::ReadOnly),
+            ("codex", MamMode::Default),
+            ("codex", MamMode::Bypass),
+            ("kimi", MamMode::Default),
+            ("kimi", MamMode::AcceptEdits),
+            ("kimi", MamMode::Bypass),
+        ] {
+            // 这些屏上没有完整菜单 → 期望 Err（**如实中止**），但**绝不能 panic**
+            let r = menu_navigation_sequence(&screen, tool, target);
+            assert!(
+                r.is_err(),
+                "真机非 ASCII 屏上没有完整菜单 → 必须如实中止（{tool}/{target:?}）：{r:?}"
+            );
+        }
+        // ② 直接驱动前缀匹配（最小判据）：全部标签 × 全部分行都不得 panic
+        for line in &screen {
+            let (rest, _) = crate::inject::dialog::strip_cursor_marker(line);
+            let text = rest.trim();
+            for label in menu_labels("codex").iter().chain(menu_labels("kimi")) {
+                let _ = starts_with_ignore_case(text, label);
+            }
+            // 也过一遍逐行定位（其内部就是前缀匹配的批量形态）
+            let _ = locate_menu_items(&screen_of_one(text), menu_labels("codex"));
+        }
+    }
+
+    fn screen_of_one(s: &str) -> Vec<String> {
+        vec![s.to_string()]
+    }
+
+    /// **C1 的语义回归**：改成字符比较后，「大小写不敏感的前缀匹配」语义必须**不变**
+    /// ——若有人把它换成「包含」（语义放宽），本测试先红。
+    #[test]
+    fn prefix_match_still_means_prefix_not_contains() {
+        assert!(starts_with_ignore_case("Read Only (sandbox)", "Read Only"));
+        assert!(
+            starts_with_ignore_case("read only", "Read Only"),
+            "大小写不敏感"
+        );
+        assert!(
+            !starts_with_ignore_case("   Read Only", "Read Only"),
+            "前导空白必须由调用方 trim（本函数不做 trim——旧语义如此）"
+        );
+        assert!(
+            !starts_with_ignore_case(
+                "We strongly recommend selecting \"Ask for approval\" instead.",
+                "Ask for approval"
+            ),
+            "引文行不是前缀命中（行首匹配的全部意义）"
+        );
+        // 非 ASCII 前缀（当前词表没有，但语义要成立）
+        assert!(starts_with_ignore_case("只读模式", "只读"));
+        assert!(!starts_with_ignore_case("模式只读", "只读"));
+        // 短行 / 空行：前缀比行长 → false（不 panic）
+        assert!(!starts_with_ignore_case("hi", "Read Only"));
+        assert!(!starts_with_ignore_case("", "Read Only"));
+    }
+
+    // ==== T4 复评 I1：菜单一致性闸（评审反例的可执行锁）====
+
+    /// **评审反例的可执行锁**（T4 复评 I1）：同屏残留一行以档位标签开头的正文
+    /// （评审给的真机形态：codex `/status` 回显 `Read Only (sandbox: read-only)`）。
+    ///
+    /// **位置是判据的一部分**：混入行若在**高亮项之前或之后整体平移**，起点与目标
+    /// 编号同幅移动 → 步进不变（无害）；只有落在**高亮项与目标之间**时，目标编号被
+    /// 撑大而起点不动 → **步进偏大**（旧实现发出多一步的方向键：若菜单不回卷，多一步
+    /// 会把高亮停在别的档 → 用户点 Full Access 而实际切到 Read Only）。
+    /// 本夹具把残留行放在两行菜单之间（TUI overlay 下的背景正文行透出），正是那条
+    /// 会真出错的位置。
+    ///
+    /// 新实现的收口：`Read Only` **标签重复** → [`menu_items_coherent`] 判不自洽 →
+    /// `menu_navigation_sequence` Err → 端点中止第二段 + 如实回执（**不盲发方向键**）。
+    /// **还原动作**：删掉 `menu_navigation_sequence` 里的 `menu_items_coherent` 调用
+    /// → 本测试先红（得到被撑大的 `["down","down","enter"]`）。
+    #[test]
+    fn menu_gate_refuses_duplicated_label_from_bystander_line() {
+        let screen = lines(&[
+            "  Update Model Permissions",
+            "    Read Only",
+            " › Ask for approval",
+            // 残留正文（`/status` 输出回显）：与菜单项 Read Only **重复**，
+            // 且落在**高亮项与目标之间**（唯一会撑大错误步进的位置）
+            "  Read Only (sandbox: read-only)",
+            "    Full Access",
+        ]);
+        // 定位器本身仍会把它计进来（如实：定位器不做语义判断）
+        let raw = locate_menu_items(&screen, menu_labels("codex")).unwrap();
+        assert_eq!(
+            raw.len(),
+            4,
+            "定位器如实报出 4 行（两道闸分工：定位 vs 判据）"
+        );
+        assert!(
+            !menu_items_coherent(&raw, "codex"),
+            "标签重复 → 判不自洽（评审反例的收口点）"
+        );
+        // **被撑大的错序**：手工按「不过闸」的路径算一遍（高亮在第 2 项、目标编号被
+        // 残留行顶到第 4）——证明本夹具确实能证伪旧实现（正确步进是 ↓×1）
+        let wrong = crate::inject::dialog::navigation_sequence_directional(&raw, 4).unwrap();
+        assert_eq!(
+            wrong,
+            vec!["down", "down", "enter"],
+            "残留行插在高亮与目标之间 → 步进被撑成 ↓×2（正确是 ↓×1）"
+        );
+        // 行动入口必须拒绝（而不是带着错项数算步进）
+        let r = menu_navigation_sequence(&screen, "codex", MamMode::Bypass);
+        assert!(
+            r.is_err(),
+            "混入行破坏一致性 → 必须中止（旧行为会发出被撑大的步进）：{r:?}"
+        );
+        // 干净菜单：同样目标得到正确的 ↓×1（证明闸没有误伤正常路径）
+        let clean = lines(&[
+            "  Update Model Permissions",
+            "    Read Only",
+            " › Ask for approval",
+            "    Full Access",
+        ]);
+        assert_eq!(
+            menu_navigation_sequence(&clean, "codex", MamMode::Bypass).unwrap(),
+            vec!["down", "enter"],
+            "干净菜单的步进不受闸影响（高亮在 Ask for approval、目标 Full Access）"
+        );
+    }
+
+    /// 一致性闸的第二条不变式：**目标档全集齐备**——菜单被遮挡/只画出两档 → 中止
+    /// （步进不可信）。同时锁住「`Approve for me` 不算进全集」（Guardian 关闭的正常
+    /// 菜单不得被判不完整）。
+    #[test]
+    fn menu_gate_requires_all_target_tiers() {
+        // 三档齐备（含 Approve for me 的 Guardian 形态）→ 通过
+        let full = lines(&[
+            "  Update Model Permissions",
+            " › Read Only",
+            "    Ask for approval",
+            "    Approve for me",
+            "    Full Access",
+        ]);
+        assert!(menu_navigation_sequence(&full, "codex", MamMode::Bypass).is_ok());
+        // Guardian 关闭（无 Approve for me）→ **仍通过**（它是可选档，不算进全集）
+        let no_guardian = lines(&[
+            "  Update Model Permissions",
+            " › Read Only",
+            "    Ask for approval",
+            "    Full Access",
+        ]);
+        assert!(
+            menu_navigation_sequence(&no_guardian, "codex", MamMode::Bypass).is_ok(),
+            "Approve for me 缺席不得判不完整（§2.6 未把它列为目标档）"
+        );
+        // 只画出两档（缺 Full Access）→ 中止
+        let truncated = lines(&[
+            "  Update Model Permissions",
+            " › Read Only",
+            "    Ask for approval",
+        ]);
+        assert!(
+            menu_navigation_sequence(&truncated, "codex", MamMode::Bypass).is_err(),
+            "目标档不全 → 不猜位置"
+        );
+        // kimi 三档同样要求（用 kimi 的词表）
+        let kimi_ok = lines(&[
+            "  Select permission mode",
+            " › Always Ask",
+            "    Ask When Needed",
+            "    Never Ask",
+        ]);
+        assert_eq!(
+            menu_navigation_sequence(&kimi_ok, "kimi", MamMode::Bypass).unwrap(),
+            vec!["down", "down", "enter"]
+        );
+        let kimi_short = lines(&[
+            "  Select permission mode",
+            " › Always Ask",
+            "    Ask When Needed",
+        ]);
+        assert!(
+            menu_navigation_sequence(&kimi_short, "kimi", MamMode::Bypass).is_err(),
+            "kimi 菜单缺永不询问 → 中止"
+        );
+    }
+
+    /// 一致性闸的**残留风险**（如实申报的机器可验版本）：若混入行恰好补齐缺席的
+    /// 目标档，闸门不会拦。本测试**把这个已知缺口钉在测试里**——它不是「期望行为」，
+    /// 是「已知未覆盖面」的登记（下批块簇加固的验收点：本测试应从 err 变 ok 之外的
+    /// 形态被替换）。
+    #[test]
+    fn menu_gate_known_gap_is_documented_not_hidden() {
+        // 菜单只画出两档 + 正文恰好有一行以第三个目标标签开头 → 闸门通过（已知缺口）
+        let screen = lines(&[
+            "  Update Model Permissions",
+            " › Ask for approval",
+            "    Full Access",
+            "  Read Only (sandbox: read-only)",
+        ]);
+        let raw = locate_menu_items(&screen, menu_labels("codex")).unwrap();
+        assert_eq!(raw.len(), 3, "无重复标签（三个标签各一行）");
+        assert!(
+            menu_items_coherent(&raw, "codex"),
+            "已知缺口：无重复 + 全集齐备 → 闸门放行（本测试登记该缺口，不假装已消除）"
+        );
     }
 }
