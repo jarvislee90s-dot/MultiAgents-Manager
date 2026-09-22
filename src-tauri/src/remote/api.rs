@@ -2990,6 +2990,9 @@ pub async fn session_question(
     // 独立于 `answerable` 的理由：codex/opencode 的**点选**已实测（answerable=true）
     // 但**自由作答**未定案——两者是不同的能力面，不能用一个布尔表示。
     let free_text_supported = crate::inject::question::free_text_supported(&tool_id);
+    // **批次戊 E4-E6**：多题交互能力（kimi K-5 / codex Tab 备注 / opencode tab 切页
+    // ——三家键序已实机定案）；claude 多题未探（spec §1 非目标边界）保持只读。
+    let multi_question = matches!(tool_id.as_str(), "kimi" | "codex" | "opencode");
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -2998,6 +3001,8 @@ pub async fn session_question(
             "answerable": answerable,
             // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
             "freeText": free_text_supported,
+            // E4-E6：多题交互旗标（缺省按 false → 只读卡）
+            "multiQuestion": multi_question,
             "questions": questions
                 .iter()
                 .map(|q| serde_json::json!({
@@ -3043,6 +3048,11 @@ pub struct SessionQuestionAnswerReq {
     /// 不是消息，加签名会污染答案）。
     #[serde(default)]
     pub text: Option<String>,
+    /// **题目序号**（批次戊 E4-E6 多题交互：0 起，缺省 0）——多题卡逐题作答时
+    /// 指定 select/toggle 作用在哪一题的选项表上。单题卡缺省即第 0 题（旧客户端
+    /// 零破坏）；越界 → 400 bad_index。
+    #[serde(default)]
+    pub question_index: Option<usize>,
 }
 
 /// 问答阶段机的**阶段名**（回执里回报「走到哪一段停住」，前端据此显示进度/中止原因）。
@@ -3163,13 +3173,22 @@ pub async fn session_question_answer(
         let Some((session, hit)) = question_scan_sync(&probe_st, &probe_sid) else {
             return Err("no_question");
         };
-        // 「结论不超证据」（探测档案：多问题翻页键序未测）——多问题不出手，前端
-        // 渲染只读卡引导终端作答；本分支是直调 API 的兜底防线
-        if hit.questions.len() != 1 {
+        let tool_id = session.agent_type.tool_id();
+        // 「结论不超证据」→ 批次戊 E4-E6 更新：kimi（K-5 数字直选+自动推进+Review
+        // 汇总屏）/ codex（数字即答+Tab 备注+末题 submit all）/ opencode（tab 切页+
+        // Confirm 页提交）的多题形态已实机定案 → **交互放行**；claude 多题键序未探
+        // （spec §1 非目标边界）与其余工具维持只读（本分支是直调 API 的兜底防线）
+        let multi_question = hit.questions.len() > 1;
+        if multi_question && !matches!(tool_id, "kimi" | "codex" | "opencode") {
             return Err("multi_questions");
         }
-        let q = hit.questions.into_iter().next().unwrap_or_else(|| {
-            // unreachable（上面已判 len==1），防御性占位——序列构造会因选项越界拒绝
+        // 多题：select/toggle 作用在 `questionIndex` 指定的题（0 起缺省 0；越界 400）
+        let q_idx = req.question_index.unwrap_or(0);
+        if q_idx >= hit.questions.len() {
+            return Err("bad_index");
+        }
+        let q = hit.questions.into_iter().nth(q_idx).unwrap_or_else(|| {
+            // unreachable（上面已判界内），防御性占位——序列构造会因选项越界拒绝
             crate::inject::question::Question {
                 header: String::new(),
                 question: String::new(),
@@ -3182,7 +3201,6 @@ pub async fn session_question_answer(
         // **丁T5**：先过**可用性门**（`action_supported`——submit/freeText 的键序
         // 依赖屏读，没有静态序列，但「支不支持」仍要判），再对**单键动作**取序列
         // （submit/freeText 取到的会是 Err，那正是「无静态序列」的表达——它们走阶段机）
-        let tool_id = session.agent_type.tool_id();
         crate::inject::question::action_supported(tool_id, action, req.index, &q).map_err(|e| {
             // 拒绝码分两档（见 `ActionRefusal`）：参数问题 → 400 bad_index（改参数
             // 即可重试）；工具未实测 → 409 tool_readonly（前端渲染只读卡引到终端）
@@ -3192,10 +3210,21 @@ pub async fn session_question_answer(
                 crate::inject::question::ActionRefusal::ToolUnverified(_) => "tool_readonly",
             }
         })?;
-        // 单键动作才取静态序列；阶段机动作（submit/freeText）序列留空（由编排产生）
+        // 单键动作才取静态序列；阶段机动作（submit/freeText）序列留空（由编排产生）。
+        // **E4② kimi 多题 DigitAdvance**（A3 禁令）：多题形态的 Select = `[数字]`
+        // （直选+自动推进下一题，**禁尾 Enter**——Enter 会误作用下一题），
+        // 不走单题的两段式 `[数字, enter]`
         let seq = match action {
             crate::inject::question::AnswerAction::Submit
             | crate::inject::question::AnswerAction::FreeText => Vec::new(),
+            crate::inject::question::AnswerAction::Select
+                if tool_id == "kimi" && multi_question =>
+            {
+                crate::inject::question::kimi_digit_advance_keys(req.index, &q).map_err(|e| {
+                    log::debug!("问答键序不可用（kimi 多题）: {e}");
+                    "bad_index"
+                })?
+            }
             _ => crate::inject::question::answer_key_sequence_for(tool_id, action, req.index, &q)
                 .map_err(|e| {
                 log::debug!("问答键序不可用（{tool_id}）: {e}");
@@ -3206,7 +3235,7 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q))
+        Ok((session, seq, q, tool_id))
     })
     .await
     {
@@ -3221,7 +3250,7 @@ pub async fn session_question_answer(
                 .into_response();
         }
     };
-    let (session, sequence, q_for_plan) = match lookup {
+    let (session, sequence, q_for_plan, q_tool) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -3252,7 +3281,7 @@ pub async fn session_question_answer(
     let pid = session.pid;
     let answer_sid = sid.clone();
     // 阶段机计划（走位上限依赖选项数——在会话扫描之后才有，故在此构造）
-    let stage_plan = StagePlan::for_action(action, &q_for_plan);
+    let stage_plan = StagePlan::for_action(action, &q_for_plan, q_tool);
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
     let tool_for_dispatch = tool.clone();
@@ -3425,6 +3454,12 @@ enum StagePlan {
     Submit { max_down_steps: usize },
     /// 自由作答阶段机
     FreeText,
+    /// **kimi 多选/多题提交阶段机**（批次戊 E4）：Review 在场判读 → tab →
+    /// Review 汇总屏 → 屏上编号确认 → 终态
+    KimiSubmit,
+    /// **kimi Other 自由作答阶段机**（批次戊 E4）：Other 行数字 → 打字 → 回车保存
+    /// → Review 汇总屏 → 确认
+    KimiFreeText,
 }
 
 impl StagePlan {
@@ -3437,14 +3472,18 @@ impl StagePlan {
     fn for_action(
         action: crate::inject::question::AnswerAction,
         q: &crate::inject::question::Question,
+        tool: &str,
     ) -> Self {
         use crate::inject::question::AnswerAction as A;
-        match action {
-            A::Select | A::Toggle | A::Cancel => Self::SingleKey,
-            A::Submit => Self::Submit {
+        match (action, tool) {
+            // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
+            (A::Submit, "kimi") => Self::KimiSubmit,
+            (A::FreeText, "kimi") => Self::KimiFreeText,
+            (A::Submit, _) => Self::Submit {
                 max_down_steps: q.options.len() + 2,
             },
-            A::FreeText => Self::FreeText,
+            (A::FreeText, _) => Self::FreeText,
+            (A::Select | A::Toggle | A::Cancel, _) => Self::SingleKey,
         }
     }
 }
@@ -3594,6 +3633,86 @@ fn dispatch_question_action(
                 Err(e) => dispatch_abort(e),
             }
         }
+        // ===== 批次戊 E4：kimi 多选/多题提交阶段机 =====
+        StagePlan::KimiSubmit => {
+            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let mut terminal = crate::inject::mode::Closures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_kimi_submit_stages(
+                || probe("kimi-initial"),
+                || poll_question_stage(|| probe("kimi-review"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_RECEIPT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        // ===== 批次戊 E4：kimi Other 自由作答阶段机 =====
+        StagePlan::KimiFreeText => {
+            let Some(text) = free_text else {
+                return QuestionDispatch::Failed("自由作答缺少文本".to_string());
+            };
+            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                // 文本走字符通道（同 claude 自由作答：用户文本绝不进键通道、不带签名）
+                send_text: |t: &str| {
+                    injector.locate_and_inject_spec(pid, t, spec)?;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    Ok(())
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_kimi_free_text_stages(
+                text,
+                || probe("kimi-other"),
+                || poll_question_stage(|| probe("kimi-review"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_FREE_TEXT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
     }
 }
 
@@ -3621,6 +3740,10 @@ fn dispatch_abort(e: crate::inject::question::StageAbort) -> QuestionDispatch {
 /// （宁可粗，不编假精度）。
 fn stage_from_abort(err: &str) -> &'static str {
     // 提交路径（按「中止点从后往前」匹配：越靠后的段越具体）
+    // E4：kimi 的 Review 汇总屏中止文案先于通用「确认项」词匹配（否则被 confirm 段误收）
+    if err.contains("Review 汇总屏") || err.contains("未出现 Review 确认屏") {
+        return QUESTION_STAGE_REVIEW;
+    }
     if err.contains("读不到编号") || err.contains("确认项") {
         return QUESTION_STAGE_CONFIRM;
     }

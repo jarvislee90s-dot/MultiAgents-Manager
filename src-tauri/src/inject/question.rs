@@ -343,9 +343,11 @@ pub fn answer_key_sequence_for(
         QuestionKeyProfile::TwoPhaseSelect => match action {
             AnswerAction::Select => {
                 if q.multi_select {
-                    return Err("kimi 多选未实测，不出键".to_string());
+                    // E4：多选的「点选项」= **单次切勾**（数字），与 Toggle 同键——
+                    // 前端多选卡逐项点按即逐项切勾（单次，无尾随键）
+                    return kimi_toggle_keys(index, q);
                 }
-                // 两段式：数字**选中**（不提交）→ **Enter 确认**
+                // 两段式：数字**选中**（直达 Review 汇总屏）→ **Enter 确认**
                 //
                 // **2026-09-21 实机复验修正**（本轮补跑的 T5/T6 探测抓获）：
                 // 原实现按 2026-09-20 矩阵记载发 `[数字, "1"]`（数字选中后按 '1'
@@ -362,15 +364,277 @@ pub fn answer_key_sequence_for(
                 let digit = digit_key(i).ok_or_else(|| format!("选项序号超键域：{i}"))?;
                 Ok(vec![digit, "enter".to_string()])
             }
-            AnswerAction::Toggle | AnswerAction::Submit => {
-                Err("kimi 多选提交未实测，不出键".to_string())
-            }
+            // E4：多选切勾 = **单次数字**（N7 修复——`[数字,回车]` 双切抵消净零，
+            // 用户实测 KIMI3 缺陷形态；戊探B ×3 证数字单次切勾可靠）
+            AnswerAction::Toggle => kimi_toggle_keys(index, q),
+            // E4：多选提交走阶段机（run_kimi_submit_stages——tab → Review 汇总屏 →
+            // 屏上编号确认），静态序列已废弃
+            AnswerAction::Submit => Err(kimi_submit_static_keys_refused()),
             AnswerAction::Cancel => Err("kimi 取消未实测，不出键".to_string()),
-            // 自由作答序列未定案（§2.4 列的是 `Other/feedback`，未实机）→ 拒
-            AnswerAction::FreeText => Err("kimi 自由作答未实测，不出键".to_string()),
+            // E4：自由作答走阶段机（run_kimi_free_text_stages——Other 行数字 →
+            // 打字 → 回车保存 → Review → 确认），键序依赖屏读不产静态序列
+            AnswerAction::FreeText => {
+                Err("kimi 自由作答必须经阶段机（run_kimi_free_text_stages）".to_string())
+            }
         },
         QuestionKeyProfile::ReadOnly => Err(format!("{tool} 问答键序未实测，只读展示")),
     }
+}
+
+// ============================================================
+// 批次戊 E4：kimi 问答全链（N7 双切抵消修复 + A3 多题禁尾 Enter + Other 自由作答）
+// 定案输入 = 键序大词典 §3 问答节（清淤版）+ 戊探B + 用户 K-5 实录；spec §2
+// ============================================================
+
+/// kimi Review 汇总屏副题锚（K-5 实录 / 戊探B 实机逐字 `Ready to submit your answers?`；
+/// 单题 Review 屏同样含此行——screen-ki1-b1-after-char3.txt 原件）。
+pub const KIMI_REVIEW_SUMMARY_ANCHOR: &str = "ready to submit your answers?";
+/// kimi 确认后**终态锚**（transcript `● Collected your answers`，戊探B M1/M2 提交后
+/// 屏读原件逐字；落账侧另有 wire `interaction.resolved` 对账）。
+pub const KIMI_ANSWERED_ANCHOR: &str = "collected your answers";
+/// kimi Other（自由作答）行标签（`→ [5] Other` 行形；多选形态 Other 行无编号
+/// `[/] Other`——故自由作答只对**单选**放行，多选到终端作答）。
+pub const KIMI_OTHER_ROW_LABEL: &str = "other";
+
+/// kimi Review 汇总屏**在场**判定（纯函数）：副题锚在场，且存在 `[N] <文字>` 形态的
+/// 确认项行（`→ [1] Submit` / `[2] Cancel`——戊探B 原件行形）。
+///
+/// **为什么不用 claude 的 [`probe_review_screen`]**：claude 的确认项是 `1. Submit
+/// answers`（编号点隔形态 + "submit answers" 词），kimi 是**方括号编号** `[1] Submit`
+/// （无 "answers" 词）——判据同源不同形，各自锚定各家的真机原文。
+pub fn kimi_review_present(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(KIMI_REVIEW_SUMMARY_ANCHOR))
+        && kimi_review_confirm_digit(lines).is_some()
+}
+
+/// kimi Review 确认项的**确认键**（`→ [1] Submit` → `"1"`；戊探B：确认键 char '1'
+/// ×3 / VK '1' ×2 / VK Enter ×2 全通——取编号键最稳）。读不到 → None（调用方中止）。
+pub fn kimi_review_confirm_digit(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .filter_map(|l| parse_kimi_bracket_row(l))
+        .find(|(_, text)| text.to_lowercase().contains("submit"))
+        .map(|(digit, _)| digit)
+}
+
+/// kimi **Other 行定位**（自由作答入口）：`[N] Other` 行形 → 定位数字键（如 `"5"`）。
+/// 多选形态的 Other 行无编号（`[/] Other`）→ None（调用方如实拒绝：自由作答仅单选）。
+pub fn locate_kimi_other_digit(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .filter_map(|l| parse_kimi_bracket_row(l))
+        .find(|(_, text)| text.to_lowercase().trim().starts_with(KIMI_OTHER_ROW_LABEL))
+        .map(|(digit, _)| digit)
+}
+
+/// kimi 终态在场（提交完成判据）
+pub fn kimi_answered_present(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(KIMI_ANSWERED_ANCHOR))
+}
+
+/// kimi 方括号行形解析：`→ [1] Submit` / `  [2] Cancel` → `("1", "Submit")`。
+/// 行首允许空白与 `→`/`❯` 引导符；编号必须在方括号内（1 位数字），后随空白与文字。
+fn parse_kimi_bracket_row(line: &str) -> Option<(String, &str)> {
+    let t = line
+        .trim()
+        .trim_start_matches(['\u{2192}', '\u{276f}'])
+        .trim_start();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let close = t.find(']')?;
+    let num = &t[1..close];
+    if num.len() != 1 || !num.chars().next()?.is_ascii_digit() {
+        return None;
+    }
+    let text = t[close + 1..].trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some((num.to_string(), text))
+}
+
+/// kimi **多选切勾键序**（N7 修复的核心锁）：切勾 = **单次数字**（char/VK 两形态皆可，
+/// 戊探B ×3）——`[数字, 回车]` 序列=勾上又被回车切掉、净效果零（用户实测 KIMI3 缺陷
+/// 形态），**禁止尾随回车**。
+pub fn kimi_toggle_keys(index: Option<usize>, q: &Question) -> Result<Vec<String>, String> {
+    let i = index.ok_or_else(|| "缺少选项序号".to_string())?;
+    if i >= q.options.len() {
+        return Err(format!("选项序号越界：{i}"));
+    }
+    digit_key(i)
+        .map(|k| vec![k])
+        .ok_or_else(|| format!("选项序号超键域：{i}"))
+}
+
+/// kimi **多题 DigitAdvance 键序**（K-5 定案；A3 禁令的锁）：题屏数字=**直选+自动推进
+/// 下一题**——序列就是 `[数字]`，**禁止尾随 Enter**（Enter 会误作用在下一题/Review 屏，
+/// 矩阵 §6.6-A3）。单题与多题共用数字直选；差异只在「不补确认键」。
+pub fn kimi_digit_advance_keys(index: Option<usize>, q: &Question) -> Result<Vec<String>, String> {
+    // 键序与切勾同形（单次数字）；独立成函数是为了判据可读与各自演化（N7/A3 的
+    // 锁分别钉在两处的测试上，共享实现不共享语义）
+    kimi_toggle_keys(index, q)
+}
+
+/// kimi 多选**提交**的静态键序**已废弃**（走阶段机 [`run_kimi_submit_stages`]）——
+/// 与 claude 的 [`answer_key_sequence`] Submit 分支同一纪律：谁再想盲发立刻撞上可读 Err。
+pub fn kimi_submit_static_keys_refused() -> String {
+    "kimi 多选提交必须经阶段机（run_kimi_submit_stages）——盲发序列已废弃".to_string()
+}
+
+/// kimi 多选/多题**提交阶段机**（批次戊 E4；读屏/发键/等待全走闭包——门禁内脚本化
+/// 屏序列可覆盖，抽法理由同 [`run_submit_stages`]）。
+///
+/// # 各段与中止点（每步发键前屏读）
+///
+/// 1. **Review 已在场？**：多题流末题答完 TUI **自动**进 Review 汇总屏（K-5），多选
+///    单题则需要 `tab` 一次直达（戊探B tab→Submit 定案）。先读一屏：已在场 → **跳过
+///    tab**（在 Review 屏上再按 tab 会切页离开——危害防御）；不在场 → 发 `tab`；
+/// 2. **Review 汇总屏段**：轮询 [`kimi_review_present`]（副题锚 + `[N]` 确认项）。
+///    窗内未出现 → 中止，**不发确认键**（与 claude 的「未见 Review 不发数字」同一纪律）；
+/// 3. **确认段**：确认键 = 屏上编号（[`kimi_review_confirm_digit`]，不硬编码）；
+/// 4. **终态段**：轮询 [`KIMI_ANSWERED_ANCHOR`]——未见**不是失败**
+///    （`receipt_seen = Some(false)`，调用方如实下发「请人工核对」；落账侧另有 wire
+///    `interaction.resolved` 对账）。
+pub fn run_kimi_submit_stages<Rd, P, Q, T>(
+    mut read: Rd,
+    mut poll_review: P,
+    mut poll_receipt: Q,
+    terminal: &mut T,
+) -> Result<SubmitOutcome, StageAbort>
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    P: FnMut() -> Result<Option<Vec<String>>, String>,
+    Q: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: MenuTerminal,
+{
+    let mut sent_keys: Vec<String> = Vec::new();
+    // 1. Review 已在场？（多题自动推进形态）——读不到屏 → 中止零按键
+    let initial = read().ok_or_else(|| {
+        StageAbort::screen("kimi 提交：读不到屏幕——已中止，未发任何键；请人工核对终端")
+    })?;
+    if !kimi_review_present(&initial) {
+        terminal
+            .send("tab")
+            .map_err(|e| StageAbort::delivery(format!("tab 投递失败（{e}）")))?;
+        sent_keys.push("tab".to_string());
+        terminal.settle();
+    }
+    // 2. Review 汇总屏（未见即中止，不发确认键）
+    let review = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(format!(
+            "已发 tab 但屏上未出现 Review 汇总屏（未见「{KIMI_REVIEW_SUMMARY_ANCHOR}」）——已中止，未发确认键；请人工核对终端"
+        ))
+    })?;
+    if !kimi_review_present(&review) {
+        return Err(StageAbort::screen(
+            "Review 汇总屏形态不符（锚或确认项缺失）——已中止，未发确认键；请人工核对终端",
+        ));
+    }
+    // 3. 确认键 = 屏上编号（`→ [1] Submit` → '1'）
+    let confirm_key = kimi_review_confirm_digit(&review).ok_or_else(|| {
+        StageAbort::screen(
+            "Review 汇总屏在场但读不到确认项编号——已中止，未发确认键；请人工核对终端",
+        )
+    })?;
+    terminal
+        .send(&confirm_key)
+        .map_err(|e| StageAbort::delivery(format!("确认键 {confirm_key} 投递失败（{e}）")))?;
+    sent_keys.push(confirm_key);
+    terminal.settle();
+    // 4. 终态（未见不是失败——语义与 run_submit_stages 同源）
+    let receipt_seen = match poll_receipt() {
+        Ok(Some(lines)) => Some(kimi_answered_present(&lines)),
+        Ok(None) => Some(false),
+        Err(_) => None,
+    };
+    Ok(SubmitOutcome {
+        sent_keys,
+        down_steps: 0,
+        review_confirmed: true,
+        receipt_seen,
+    })
+}
+
+/// kimi **Other 自由作答阶段机**（批次戊 E4；`Other` 行数字 → 打字 → 回车保存 →
+/// Review → 确认——戊探B E-B8 全链定案）。仅**单选**形态放行（多选 Other 行无编号，
+/// [`locate_kimi_other_digit`] 恒 None → 第 1 段如实中止）。
+pub fn run_kimi_free_text_stages<Rd, P, Q, T>(
+    text: &str,
+    mut read: Rd,
+    mut poll_review: P,
+    mut poll_receipt: Q,
+    terminal: &mut T,
+) -> Result<FreeTextOutcome, StageAbort>
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    P: FnMut() -> Result<Option<Vec<String>>, String>,
+    Q: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: FreeTextTerminal,
+{
+    if text.trim().is_empty() {
+        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
+    }
+    let mut sent_keys: Vec<String> = Vec::new();
+    // 1. Other 行定位（读不到/无编号 → 中止零按键）
+    let first = read().ok_or_else(|| {
+        StageAbort::screen("kimi 自由作答：读不到屏幕——已中止，未发任何键；请人工核对终端")
+    })?;
+    let other_digit = locate_kimi_other_digit(&first).ok_or_else(|| {
+        StageAbort::screen(
+            "屏读未定位到 Other 行（自由作答入口；多选题的 Other 无编号请到终端作答）——已中止，未发任何键",
+        )
+    })?;
+    terminal
+        .send(&other_digit)
+        .map_err(|e| StageAbort::delivery(format!("Other 定位键投递失败（{e}）")))?;
+    sent_keys.push(other_digit);
+    terminal.settle();
+    // 2. 打字（字符通道——用户文本绝不进键通道）
+    terminal
+        .send_text(text)
+        .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
+    sent_keys.push("<text>".to_string());
+    terminal.settle();
+    // 3. 回车保存（自动进 Review）
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("保存回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    // 4. Review 汇总屏（未见即中止，不发确认键）
+    let review = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(format!(
+            "已保存作答但屏上未出现 Review 汇总屏（未见「{KIMI_REVIEW_SUMMARY_ANCHOR}」）——已中止，未发确认键；请人工核对终端"
+        ))
+    })?;
+    if !kimi_review_present(&review) {
+        return Err(StageAbort::screen(
+            "Review 汇总屏形态不符——已中止，未发确认键；请人工核对终端",
+        ));
+    }
+    let confirm_key = kimi_review_confirm_digit(&review).ok_or_else(|| {
+        StageAbort::screen("读不到确认项编号——已中止，未发确认键；请人工核对终端")
+    })?;
+    terminal
+        .send(&confirm_key)
+        .map_err(|e| StageAbort::delivery(format!("确认键 {confirm_key} 投递失败（{e}）")))?;
+    sent_keys.push(confirm_key);
+    terminal.settle();
+    // 5. 终态
+    let receipt_seen = match poll_receipt() {
+        Ok(Some(lines)) => Some(kimi_answered_present(&lines)),
+        Ok(None) => Some(false),
+        Err(_) => None,
+    };
+    Ok(FreeTextOutcome {
+        sent_keys,
+        receipt_seen,
+    })
 }
 
 // ============================================================
@@ -973,7 +1237,12 @@ where
 ///   `own answer` / kimi `Other` 均未实机取证）→ 端点按 §2.8 降级：前端渲染
 ///   「请在终端作答」，**不假装能发**。
 pub fn free_text_supported(tool: &str) -> bool {
-    question_key_profile(tool) == QuestionKeyProfile::ClaudeFull
+    // E4 起 kimi 支持（Other 行自由作答，戊探B E-B8 全链定案）；形态门仍只放单选
+    // （多选 Other 行无编号）——见 [`free_text_shape_supported`]
+    matches!(
+        question_key_profile(tool),
+        QuestionKeyProfile::ClaudeFull | QuestionKeyProfile::TwoPhaseSelect
+    )
 }
 
 /// 自由作答的**题目形态支持面**（复评 F6-3：多选卡不提供自由作答）。
@@ -1095,12 +1364,16 @@ pub fn action_supported(
                     "submit 仅用于多选题".to_string(),
                 ));
             }
-            if !matches!(question_key_profile(tool), QuestionKeyProfile::ClaudeFull) {
-                return Err(ActionRefusal::ToolUnverified(format!(
+            match question_key_profile(tool) {
+                // claude：多选三段式（Review 屏判据实机取证）
+                QuestionKeyProfile::ClaudeFull => Ok(()),
+                // E4 kimi：多选提交走 run_kimi_submit_stages（tab → Review 汇总屏 →
+                // 屏上编号确认——戊探B M1/M2 + K-5 实机定案）
+                QuestionKeyProfile::TwoPhaseSelect => Ok(()),
+                _ => Err(ActionRefusal::ToolUnverified(format!(
                     "{tool} 多选提交未实测，不出键"
-                )));
+                ))),
             }
-            Ok(())
         }
         AnswerAction::FreeText => {
             if !free_text_supported(tool) {
@@ -1417,8 +1690,12 @@ mod tests {
         // 越界/缺序号仍拒
         assert!(answer_key_sequence_for("kimi", AnswerAction::Select, Some(9), &q).is_err());
         assert!(answer_key_sequence_for("kimi", AnswerAction::Select, None, &q).is_err());
-        // 未测面拒绝（多选未验、取消未验）
-        assert!(answer_key_sequence_for("kimi", AnswerAction::Toggle, Some(0), &multi()).is_err());
+        // E4：多选切勾 = 单次数字（N7 修复）；取消仍未验拒绝
+        assert_eq!(
+            answer_key_sequence_for("kimi", AnswerAction::Toggle, Some(0), &multi()).unwrap(),
+            vec!["1"],
+            "N7 锁：切勾序列必须不含尾随回车（[数字,回车]=双切抵消净零）"
+        );
         assert!(answer_key_sequence_for("kimi", AnswerAction::Cancel, None, &q).is_err());
     }
 
@@ -1468,8 +1745,13 @@ mod tests {
             answer_key_sequence_for("kimi", AnswerAction::Select, Some(0), &q).unwrap(),
             vec!["1", "enter"]
         );
-        // 多选/取消仍拒（未验不出键——与档位无关的硬边界）
-        assert!(answer_key_sequence_for("kimi", AnswerAction::Toggle, Some(0), &multi()).is_err());
+        // E4 更新：多选切勾=单次数字（戊探B ×3 定案，N7 修复）；submit 的**静态序列**
+        // 仍拒（走 run_kimi_submit_stages 阶段机）；取消仍未验拒绝
+        assert_eq!(
+            answer_key_sequence_for("kimi", AnswerAction::Toggle, Some(0), &multi()).unwrap(),
+            vec!["1"],
+            "N7 锁：切勾禁尾随回车"
+        );
         assert!(answer_key_sequence_for("kimi", AnswerAction::Submit, None, &multi()).is_err());
         assert!(answer_key_sequence_for("kimi", AnswerAction::Cancel, None, &q).is_err());
     }
@@ -1479,6 +1761,183 @@ mod tests {
     // ============================================================
 
     // ---- 真机屏幕夹具（2026-09-21 探测档案原文，逐字抄录）----
+
+    // ==== 批次戊 E4：kimi 问答全链（真机夹具 + 阶段机脚本锁）====
+
+    /// e-stage2 屏读夹具读取（confirm/dialog/mode tests 同款）
+    #[cfg(test)]
+    fn e_stage2_screen(name: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/e-stage2")
+            .join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
+        raw.trim_start_matches('\u{feff}')
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    /// **kimi Review 汇总屏锚 × 真机夹具**（戊探B B1 单题 Review 屏原件）：
+    /// `Ready to submit your answers?` + `→ [1] Submit` / `[2] Cancel`。
+    #[test]
+    fn e4_kimi_review_anchor_on_real_fixture() {
+        let screen = e_stage2_screen("kimi-question-review.txt");
+        assert!(kimi_review_present(&screen), "真机 Review 屏必须在场");
+        assert_eq!(
+            kimi_review_confirm_digit(&screen).as_deref(),
+            Some("1"),
+            "确认键 = 屏上编号（→ [1] Submit）"
+        );
+        // 对照：多值答案 Review（m1-after-tab1 原件）同样命中
+        let multi_ans = e_stage2_screen("kimi-question-multi-q.txt");
+        assert!(kimi_review_present(&multi_ans));
+        assert_eq!(kimi_review_confirm_digit(&multi_ans).as_deref(), Some("1"));
+        // 普通问题屏（非 Review）不得误判
+        let dialog = e_stage2_screen("kimi-question-multiselect.txt");
+        assert!(
+            !kimi_review_present(&dialog),
+            "多选题屏（[ ] 复选形态）不是 Review 汇总屏"
+        );
+    }
+
+    /// **kimi Other 行定位**：单选形态 `[5] Other:` 可定位（戊探B B8 行形）；
+    /// 多选真机夹具的 Other 行无编号（`[ ] Other`）→ 不可定位（如实拒绝）。
+    #[test]
+    fn e4_kimi_other_row_locate() {
+        let screen = lines(&[
+            "   → [1] red",
+            "     [2] green",
+            "     [3] blue",
+            "     [4] yellow",
+            "   → [5] Other:",
+        ]);
+        assert_eq!(locate_kimi_other_digit(&screen).as_deref(), Some("5"));
+        let multi = e_stage2_screen("kimi-question-multiselect.txt");
+        assert_eq!(
+            locate_kimi_other_digit(&multi),
+            None,
+            "多选 Other 行无编号 → 自由作答不可达（到终端作答）"
+        );
+    }
+
+    /// **kimi 提交阶段机脚本锁（两形态）**：
+    /// ① 多题流（Review 已在场）→ **零 tab**，直接确认键 '1'；
+    /// ② 多选流（勾完在题目页）→ tab → Review → '1'。终态锚在场 → Some(true)、
+    /// 未见 → Some(false)（不谎报完成）。
+    #[test]
+    fn e4_kimi_submit_stage_scripted() {
+        let review = e_stage2_screen("kimi-question-review.txt");
+        let receipt = lines(&["● Collected your answers"]);
+        let mut sent: Vec<String> = Vec::new();
+        let mut terminal = crate::inject::mode::Closures {
+            read: || Some(review.clone()),
+            send: |k: &str| {
+                sent.push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_kimi_submit_stages(
+            || Some(review.clone()),
+            || Ok(Some(review.clone())),
+            || Ok(Some(receipt.clone())),
+            &mut terminal,
+        )
+        .expect("Review 在场 → 直接确认");
+        assert_eq!(
+            out.sent_keys,
+            vec!["1"],
+            "Review 已在场 → 零 tab，直发屏上编号"
+        );
+        assert_eq!(out.receipt_seen, Some(true), "终态锚在场");
+
+        // 多选流：题目页（多选夹具）→ tab → Review → '1'
+        let dialog = e_stage2_screen("kimi-question-multiselect.txt");
+        let mut sent2: Vec<String> = Vec::new();
+        let mut terminal2 = crate::inject::mode::Closures {
+            read: || Some(dialog.clone()),
+            send: |k: &str| {
+                sent2.push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out2 = run_kimi_submit_stages(
+            || Some(dialog.clone()),
+            || Ok(Some(review.clone())),
+            || Ok(None),
+            &mut terminal2,
+        )
+        .expect("tab 后 Review 出现 → 走完整条");
+        assert_eq!(
+            out2.sent_keys,
+            vec!["tab", "1"],
+            "题目页 → tab 切 Submit → 屏上编号确认"
+        );
+        assert_eq!(
+            out2.receipt_seen,
+            Some(false),
+            "终态未见 → 如实 Some(false)"
+        );
+    }
+
+    /// **kimi Other 自由作答阶段机脚本锁**：Other 行数字 → 文本 → 回车 → Review →
+    /// 确认（戊探B E-B8 全链）；多选屏（Other 无编号）→ 第 1 段中止零按键。
+    #[test]
+    fn e4_kimi_free_text_stage_scripted() {
+        let screen = lines(&["   → [1] red", "     [2] green", "   → [5] Other:"]);
+        let review = e_stage2_screen("kimi-question-review.txt");
+        let mut sent: Vec<String> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: || Some(screen.clone()),
+            send: |k: &str| {
+                sent.push(k.to_string());
+                Ok(())
+            },
+            send_text: |t: &str| {
+                texts.push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_kimi_free_text_stages(
+            "atlantis",
+            || Some(screen.clone()),
+            || Ok(Some(review.clone())),
+            || Ok(Some(lines(&["● Collected your answers"]))),
+            &mut terminal,
+        )
+        .expect("Other 行可定位 → 全链走通");
+        assert_eq!(out.sent_keys, vec!["5", "<text>", "enter", "1"]);
+        assert_eq!(texts, vec!["atlantis"], "文本走字符通道");
+        assert_eq!(out.receipt_seen, Some(true));
+
+        // 多选屏：Other 无编号 → 中止零按键
+        let multi = e_stage2_screen("kimi-question-multiselect.txt");
+        let mut sent2: Vec<String> = Vec::new();
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: || Some(multi.clone()),
+            send: |k: &str| {
+                sent2.push(k.to_string());
+                Ok(())
+            },
+            send_text: |_: &str| Ok(()),
+            settle: || {},
+        };
+        let err = run_kimi_free_text_stages(
+            "x",
+            || Some(multi.clone()),
+            || Ok(None),
+            || Ok(None),
+            &mut terminal2,
+        )
+        .expect_err("多选 Other 无编号 → 中止");
+        assert!(err.message.contains("Other 行"), "{err:?}");
+        assert!(sent2.is_empty(), "中止零按键");
+    }
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -2131,7 +2590,8 @@ mod tests {
             shape.submit_key, "enter",
             "文本之后唯一按键是回车（不带数字不带 Esc）"
         );
-        for tool in ["codex", "kimi", "opencode", "zcode", "dsh", "workbuddy", ""] {
+        // E4：kimi 升级为支持（Other 行阶段机），不再在本拒绝清单里
+        for tool in ["codex", "opencode", "zcode", "dsh", "workbuddy", ""] {
             let err =
                 free_text_shape(tool).expect_err(&format!("{tool} 的自由作答序列未定案，必须拒绝"));
             assert!(

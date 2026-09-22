@@ -143,6 +143,8 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [abortedStage, setAbortedStage] = useState<QuestionAnswerStage | null>(null);
   // 自由作答输入框内容（**仅单题卡 + info.freeText === true 时渲染**）
   const [freeText, setFreeText] = useState("");
+  // E4-E6 多题交互：当前作答到第几题（0 起；answer 成功且非末题时 +1）
+  const [mqIndex, setMqIndex] = useState(0);
 
   // 拉取（挂载一次 + 状态跃迁重拉，丁T1 复评 F-1）：deps 含 `session.status`——
   // 详情页停留期间 Board 数据通道把活会话 status 对齐进 selected（App.tsx
@@ -187,6 +189,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           setFreeText("");
           setVerified(null);
           setAbortedStage(null);
+          setMqIndex(0);
         }
         if (fp !== "") lastFingerprint.current = fp;
         setInfo(v);
@@ -201,7 +204,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   }, [session.id, status]);
 
   const handleAnswer = useCallback(
-    async (action: QuestionAnswerAction, index?: number, text?: string) => {
+    async (
+      action: QuestionAnswerAction,
+      index?: number,
+      text?: string,
+      /** E4-E6 多题交互：select/toggle 作用在第几题（0 起） */
+      questionIndex?: number
+    ) => {
       if (busy || sent) return;
       setBusy(true);
       setError(null);
@@ -209,7 +218,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
       // **进行中态**（丁T5）：按动作显示对应的首段文案（提交链/自由作答链）
       setInProgress(action === "freeText" ? "free-row" : "submit-row");
       try {
-        const res = await sessionQuestionAnswer(session.id, action, index, text);
+        const res = await sessionQuestionAnswer(session.id, action, index, text, questionIndex);
         if (res.status === "key_sent") {
           if (action === "toggle" && typeof index === "number") {
             // 多选勾选切换：成功回执后翻本地位（下轮渲染高亮）；不置终态
@@ -222,6 +231,15 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               }
               return next;
             });
+          } else if (
+            action === "select" &&
+            typeof questionIndex === "number" &&
+            info !== null &&
+            questionIndex < info.questions.length - 1
+          ) {
+            // E4-E6 多题逐题推进：本题数字已发（kimi DigitAdvance 自动切下一题），
+            // 本地切到下一题继续作答——**不置终态**（末题 select / submit 才终态）
+            setMqIndex(questionIndex + 1);
           } else {
             // select / submit / cancel / freeText：终态
             // （select=数字已提交 / submit=阶段机走完 / cancel=已取消 / freeText=文本已提交）
@@ -249,7 +267,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         setInProgress(null);
       }
     },
-    [busy, sent, session.id]
+    [busy, sent, session.id, info]
   );
 
   // 加载中 / 拉取失败 / info 未落地 / 不可用：不渲染（卡自隐）
@@ -306,38 +324,128 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     );
   }
 
-  // 多问题：只读卡（翻页键序未测——零注入按钮，引导终端作答）
+  // 多问题（批次戊 E4-E6）：键序已实机定案的三家（multiQuestion 旗标）→ **逐题交互
+  // 卡**——数字直选逐题推进（kimi DigitAdvance 自动切下一题 / codex 数字即答 /
+  // opencode tab 切页），答完全部题目出现「提交答案」钮（后端阶段机走 Review 汇总
+  // 屏闭环）。未定案工具维持只读（零注入按钮）。
   if (questions.length > 1) {
+    if (info.multiQuestion !== true) {
+      return (
+        <InteractiveCard
+          tone="question"
+          testId="question-card"
+          mode="readonly"
+          pulsing={false}
+          title={`有 ${questions.length} 个问题等待回答`}
+        >
+          <ol className="mt-1.5 space-y-1">
+            {questions.map((q, i) => (
+              <li
+                key={`question-readonly-${i}`}
+                data-testid={`question-readonly-${i}`}
+                className="text-xs text-slate-700 dark:text-slate-300"
+              >
+                {q.header && (
+                  <span className="mr-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400">
+                    {q.header}
+                  </span>
+                )}
+                {q.question}
+              </li>
+            ))}
+          </ol>
+          <p
+            data-testid="question-readonly-hint"
+            className="mt-1.5 text-xs text-sky-700 dark:text-sky-400"
+          >
+            请在终端完成作答
+          </p>
+        </InteractiveCard>
+      );
+    }
+    // 逐题交互：mqIndex = 当前作答的题（0 起）；全部答完 → 提交钮
+    const q = questions[Math.min(mqIndex, questions.length - 1)];
+    const isLast = mqIndex >= questions.length - 1;
     return (
       <InteractiveCard
         tone="question"
         testId="question-card"
-        mode="readonly"
+        mode="multi"
         pulsing={false}
-        title={`有 ${questions.length} 个问题等待回答`}
+        title={`有 ${questions.length} 个问题等待回答（第 ${mqIndex + 1} 题）`}
+        footer={
+          <>
+            {error !== null && (
+              <p
+                data-testid="question-error"
+                className="mt-1 text-xs text-rose-600 dark:text-rose-400"
+              >
+                {error}
+              </p>
+            )}
+            {abortedStage !== null && (
+              <p
+                data-testid="question-aborted"
+                className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+              >
+                卡在阶段：{QUESTION_STAGE_LABELS[abortedStage] ?? abortedStage}
+              </p>
+            )}
+            {sent && (
+              <p
+                data-testid="question-sent"
+                className="mt-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+              >
+                已发送按键
+              </p>
+            )}
+          </>
+        }
       >
-        <ol className="mt-1.5 space-y-1">
-          {questions.map((q, i) => (
-            <li
-              key={`question-readonly-${i}`}
-              data-testid={`question-readonly-${i}`}
-              className="text-xs text-slate-700 dark:text-slate-300"
+        <p
+          data-testid="question-multi-current"
+          className="mt-1 text-xs text-slate-700 dark:text-slate-300"
+        >
+          {q.header && (
+            <span className="mr-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400">
+              {q.header}
+            </span>
+          )}
+          {q.question}
+        </p>
+        <div className="mt-1.5 space-y-1">
+          {q.options.map((o, i) => (
+            <button
+              key={`mq-${mqIndex}-${i}`}
+              type="button"
+              data-testid={`question-multi-option-${i}`}
+              disabled={busy || sent}
+              onClick={() => handleAnswer("select", i, undefined, mqIndex)}
+              className="w-full rounded-lg bg-sky-500/10 px-2 py-1.5 text-left text-xs text-sky-800 hover:bg-sky-500/20 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-200"
             >
-              {q.header && (
-                <span className="mr-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400">
-                  {q.header}
+              <span className="mr-1.5 rounded bg-sky-600 px-1 py-0.5 font-mono text-[10px] font-semibold text-white">
+                {i + 1}
+              </span>
+              {o.label}
+              {o.description !== "" && (
+                <span className="ml-1 text-[10px] text-slate-500 dark:text-slate-400">
+                  {o.description}
                 </span>
               )}
-              {q.question}
-            </li>
+            </button>
           ))}
-        </ol>
-        <p
-          data-testid="question-readonly-hint"
-          className="mt-1.5 text-xs text-sky-700 dark:text-sky-400"
-        >
-          请在终端完成作答
-        </p>
+        </div>
+        {!sent && isLast && (
+          <button
+            type="button"
+            data-testid="question-multi-submit"
+            disabled={busy}
+            onClick={() => handleAnswer("submit")}
+            className="mt-2 rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+          >
+            提交答案
+          </button>
+        )}
       </InteractiveCard>
     );
   }

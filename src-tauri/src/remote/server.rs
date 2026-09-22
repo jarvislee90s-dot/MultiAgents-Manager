@@ -6025,11 +6025,13 @@ mod tests {
         );
     }
 
-    /// **丁T5 端到端⑩（多选提交的工具面）**：非 claude → 409 `tool_readonly`
-    /// （多选三段式的 Review 屏判据只在 claude 实机取证；别家多选形态无样本）。
-    /// 还原动作：把 `action_supported` 的 Submit 分支去掉工具检查 → 本用例先红。
+    /// **丁T5 端到端⑩（多选提交的工具面）→ 批次戊 E4 更新**：kimi 多选提交升格为
+    /// **阶段机**（run_kimi_submit_stages：Review 在场判读 → tab → Review 汇总屏 →
+    /// 屏上编号确认）。喂 claude 形态屏（无 kimi 锚）时阶段机在 review 段中止——
+    /// 回执 200 failed{aborted:true, stage:review}，已发键恰为 ["tab"]（Review 不在
+    /// 场的第一步），不发确认键。
     #[tokio::test]
-    async fn question_submit_refused_for_unverified_tools() {
+    async fn question_submit_kimi_goes_through_stage_machine() {
         let (state, inner, _s) = single_tool_scripted_state(
             crate::session::AgentType::Kimi,
             "sess_t5k",
@@ -6047,12 +6049,17 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 409, "kimi 多选提交未实测 → 409");
+        assert_eq!(r.status(), 200, "kimi 提交走阶段机（非 409 只读）");
         let body = body_string(r).await;
-        assert!(body.contains("tool_readonly"), "拒绝码：{body}");
         assert!(
-            inner.recorded_keys().is_empty(),
-            "拒绝路径零投递：{:?}",
+            body.contains("aborted"),
+            "屏无 kimi 锚 → 阶段机中止：{body}"
+        );
+        assert!(body.contains("review"), "中止段 = review：{body}");
+        assert_eq!(
+            inner.recorded_keys(),
+            vec![(94u32, "tab".to_string())],
+            "Review 不在场 → 先发 tab，之后中止（不发确认键）：{:?}",
             inner.recorded_keys()
         );
     }
@@ -6174,8 +6181,8 @@ mod tests {
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
+        // GET：两家多题 GET 照常可用（数据源不变）
         for sid in ["sess_ay", "sess_az"] {
-            // GET：available=true（只读展示的数据源；前端按只读卡渲染）
             let r = app
                 .clone()
                 .oneshot(req(
@@ -6187,36 +6194,54 @@ mod tests {
                 .await
                 .unwrap();
             let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
-            assert_eq!(v["available"], true, "{sid}：多题 GET 照常可用（只读展示）");
+            assert_eq!(v["available"], true, "{sid}：多题 GET 照常可用");
             assert_eq!(v["questions"].as_array().unwrap().len(), 2);
-            assert_eq!(
-                v["answerable"], true,
-                "{sid}：档位可作答 ≠ 多题可答（只读由 questions.len() 判据兜住）"
-            );
-            // POST：多题拒绝出手（零注入）——对已升格档位的工具同样成立
-            for action in ["select", "toggle", "submit"] {
-                let r = app
-                    .clone()
-                    .oneshot(req(
-                        "POST",
-                        "/m/api/v1/session-question/answer",
-                        Some("mam_device=mm"),
-                        Some(&format!(
-                            r#"{{"sessionId":"{sid}","action":"{action}","index":0}}"#
-                        )),
-                    ))
-                    .await
-                    .unwrap();
-                assert_eq!(r.status(), 409, "{sid}/{action}：多题必须拒绝");
-                assert!(
-                    body_string(r).await.contains("multi_questions"),
-                    "{sid}/{action}：错误码必须是 multi_questions"
-                );
-            }
         }
+        // **批次戊 E4 更新**：kimi 多题升格为**交互**（K-5 数字直选+自动推进+Review
+        // 汇总屏）——select 走 DigitAdvance 单数字键（**禁尾 Enter**，A3），200 key_sent；
+        // codex 多题在 E4 时点仍只读（E5 升格），409 tool_readonly。
+        // claude 多题只读由 question_answer_multi_questions_refused 继续钉住。
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_az","action":"select","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "kimi 多题 select：交互放行（DigitAdvance）"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(61u32, "1".to_string())],
+            "kimi 多题 select = 单个数字（无尾随 Enter——A3 禁令锁）：{:?}",
+            fake.recorded_keys()
+        );
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ay","action":"select","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        // codex 多题（E4 时点）：单选题的 select 走既有 SingleDigitSubmit 档
+        // （数字即交，200 key_sent）；多题完整交互（Tab 备注/切题）在 E5 升格
+        assert_eq!(r.status(), 200, "codex 单选题 select：既有数字直选档放行");
         assert!(
-            fake.recorded_keys().is_empty(),
-            "多题只读：任何工具都零注入（未实测定导航序不出手）"
+            body_string(r).await.contains("key_sent"),
+            "codex 单选题 select 照常 key_sent"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(61u32, "1".to_string()), (60u32, "1".to_string())],
+            "kimi 多题 DigitAdvance + codex 单选直选，各恰一键"
         );
     }
 

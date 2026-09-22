@@ -619,6 +619,9 @@ export interface QuestionInfoView {
    *  codex/opencode 的**点选**已实测可作答，但**自由作答序列未定案**）。
    *  缺省/旧后端 → 按 false 处理：渲染「请在终端作答」引导文案，**不假装能发**。 */
   freeText?: boolean;
+  /** 批次戊 E4-E6：多题交互能力（kimi/codex/opencode 已实机定案）——true 时多题卡
+   *  渲染逐题作答 UI；缺省/旧后端/false → 只读卡（红线不变） */
+  multiQuestion?: boolean;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }
@@ -692,14 +695,16 @@ export async function sessionQuestionAnswer(
   sessionId: string,
   action: QuestionAnswerAction,
   index?: number,
-  text?: string
+  text?: string,
+  /** 批次戊 E4-E6 多题交互：select/toggle 作用在第几题（0 起） */
+  questionIndex?: number
 ): Promise<QuestionAnswerResult> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-question/answer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, action, index, text }),
+      body: JSON.stringify({ sessionId, action, index, text, questionIndex }),
     });
   } catch (e) {
     throw new ApiError(null, `session-question/answer 网络异常: ${String(e)}`);

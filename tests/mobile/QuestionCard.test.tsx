@@ -561,3 +561,91 @@ describe("QuestionCard 与 ApproveCard 联合（硬约束① UI 面）", () => {
     expect(urls.some((u) => u.includes("/session-question"))).toBe(true);
   });
 });
+
+// ==== 批次戊 E4：多题交互卡（multiQuestion=true → 逐题作答 + 末题提交）====
+describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
+  /** 两题夹具（E4：kimi/codex/opencode 的多题交互面） */
+  function twoQuestionInteractive(): QuestionInfoView {
+    return {
+      available: true,
+      source: "mark",
+      multiQuestion: true,
+      questions: [
+        {
+          header: "A",
+          question: "First?",
+          multiSelect: false,
+          options: [
+            { label: "a1", description: "" },
+            { label: "a2", description: "" },
+          ],
+        },
+        {
+          header: "B",
+          question: "Second?",
+          multiSelect: true,
+          options: [
+            { label: "b1", description: "" },
+            { label: "b2", description: "" },
+          ],
+        },
+      ],
+    };
+  }
+
+  it("逐题作答：select 携 questionIndex 推进，末题出现提交钮 → submit", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-mq" }} />);
+    await screen.findByTestId("question-multi-current");
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
+    // 首题无提交钮（未到末题）
+    expect(screen.queryByTestId("question-multi-submit")).toBeNull();
+    // 答第 1 题 → 本地推进到第 2 题（questionIndex=0 上行）
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // 末题：提交钮出现；答末题 → 终态（sent）+ 提交钮消失
+    expect(screen.getByTestId("question-multi-submit")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("question-multi-option-1"));
+    await flushAsync();
+    expect(await screen.findByTestId("question-sent")).toBeTruthy();
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies).toEqual([
+      { sessionId: "sess-e4-mq", action: "select", index: 0, questionIndex: 0 },
+      { sessionId: "sess-e4-mq", action: "select", index: 1, questionIndex: 1 },
+    ]);
+  });
+
+  it("multiQuestion 缺省（旧后端）→ 维持只读卡", async () => {
+    installFetch();
+    routes.question = {
+      available: true,
+      source: "mark",
+      questions: [
+        {
+          header: "A",
+          question: "First?",
+          multiSelect: false,
+          options: [
+            { label: "a1", description: "" },
+            { label: "a2", description: "" },
+          ],
+        },
+        {
+          header: "B",
+          question: "Second?",
+          multiSelect: false,
+          options: [
+            { label: "b1", description: "" },
+            { label: "b2", description: "" },
+          ],
+        },
+      ],
+    };
+    render(<QuestionCard session={{ id: "sess-e4-ro" }} />);
+    expect(await screen.findByTestId("question-readonly-hint")).toBeTruthy();
+    expect(screen.queryByTestId("question-multi-option-0")).toBeNull();
+  });
+});
