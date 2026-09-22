@@ -21,7 +21,7 @@
 //! | 模式回读（切档后读回当前档） | (a)(b) | [`crate::inject::mode::poll_mode_readback`] |
 //! | 权限菜单 / Full Access 确认框 / 成功回执 | (a)(b) | `remote::api::poll_menu_stage` / `poll_receipt` |
 //! | 问答阶段机各段 | (a)(b) | `remote::api::poll_question_stage`（同族 `poll_review_stage` / `poll_receipt_stage`） |
-//! | 插队「等回合停」（Esc 之后才投递正文） | (a)(b) | [`crate::inject::confirm::poll_turn_stopped`]（判据 = 忙态串消失，**等某串消失**形态） |
+//! | 插队「等回合停」（Esc 之后才投递正文） | (a)(b) | [`crate::inject::confirm::poll_turn_stopped`]（判据 = 忙态串**连续两拍**缺席——稳定闸，**等某串消失**形态） |
 //! | 对话框在场守卫（T3）/ 高亮快照 / 切档前的 `before` / GET 当前档 | **(c) 例外** | 单次读，不轮询——**不要**给它们加窗 |
 //! | 消息注入确认（`confirm.rs`） | 已是轮询（等的是**会话文件落盘**，不是屏幕） | 步距 500ms，`confirm::PROBE_INTERVAL_MS` |
 //!
@@ -142,6 +142,19 @@ pub const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 2_000;
 /// （`FlushOutcome::Submitted`）而不是 Sent——消息照发（best-effort，用户消息不能因
 /// 中断没等到就丢），但不冒充「已送达」。实测项见
 /// `d20_live_probe_tests::d20_turn_stop_latency_live_probe`。
+///
+/// # 与稳定闸的关系（**有效判据拍数 = 窗内拍数**，2026-09-22 R2 必修项 3 对账）
+///
+/// 判「已停」要求**连续** [`super::confirm::TURN_STOP_STABLE_FRAMES`]（= 2）拍读到
+/// 忙态串缺席（单帧判据在重绘瞬态下会误判——见 `confirm::turn_stopped_in_lines` 注）。
+/// 本窗 3000ms / 100ms 步长 = **30 拍**，故：
+/// - **达成稳定判据的最小读数 = 2 拍**（最快 100ms 后停，比加闸前只多一拍）；
+/// - **最坏情况**：若每拍都在「忙/闲」间抖（不会收敛），30 拍全部用尽才降级——
+///   与加闸前同窗同上限（**窗未变**：稳定闸只改变「判据成立条件」，不改变预算）；
+/// - **30 拍 ≫ 2 拍**（余量 15 倍）：稳定闸不会把插队逼成恒定降级（那条对账做成了
+///   可执行断言，见 `confirm::tests::turn_stop_stable_frames_pinned_and_more_than_one`）。
+///   **不调窗**：加闸只让最快路径多等一拍（100ms），远不足以需要重定窗；改动本值需
+///   同步实测项读数（三处一起改，见模块文档的回填落点）。
 pub const TURN_STOP_POLL_TOTAL_MS: u64 = 3_000;
 
 /// 总窗（毫秒）→ **轮询轮数**（D20(b)：窗 = 步长 × 轮数）。
@@ -348,7 +361,7 @@ mod tests {
 /// | [`d20_mode_readback_repaint_latency_live_probe`] | 切档动作 → 首次读**到目标档**的耗时 | [`MODE_READBACK_POLL_TOTAL_MS`]（1500ms）、[`POLL_STEP_MS`]（100ms） |
 /// | [`d20_menu_paint_latency_live_probe`] | `/permissions` 回车 → 菜单可屏读的耗时 | [`MENU_POLL_TOTAL_MS`]（1500ms） |
 /// | [`d20_confirm_and_receipt_latency_live_probe`] | Full Access 提交 → 确认框可读 / 确认后 → 成功回执行 | [`CONFIRM_POLL_TOTAL_MS`]（1500ms）、[`RECEIPT_POLL_TOTAL_MS`]（1500ms） |
-/// | [`d20_turn_stop_latency_live_probe`] | 插队 Esc 中断 → **忙态串消失**（回合真停）的耗时 | [`TURN_STOP_POLL_TOTAL_MS`]（3000ms） |
+/// | [`d20_turn_stop_latency_live_probe`] | 插队 Esc 中断 → **忙态串连续两拍消失**（稳定判据）的耗时 | [`TURN_STOP_POLL_TOTAL_MS`]（3000ms）、`confirm::TURN_STOP_STABLE_FRAMES`（2） |
 ///
 /// 回填落点：改本模块常量 + `tests::timing_constants_are_pinned` 的钉值 + 在探针文档里
 /// 记下实测日期与读数（**三处一起改**，只改常量等于没回填）。
@@ -663,12 +676,16 @@ mod d20_live_probe_tests {
     /// 2. 同一动作的**人工 Esc**（在终端手按 Esc）与 **MAM 插队**（手机点「立即发送」）
     ///    各测一次，差 = 注入路径固定开销；
     /// 3. 反例形态：若探针打印出「忙态→忙态→…→空闲」的多拍序列，那几拍的时间差就是
-    ///    「不等判据直接投递会落进旧回合」的窗口宽度——它应当远小于本窗。
+    ///    「不等判据直接投递会落进旧回合」的窗口宽度——它应当远小于本窗；
+    /// 4. **稳定判据读数**（主读数）：连续 `TURN_STOP_STABLE_FRAMES`（2）拍无忙态串的
+    ///    时刻——这是生产实际用的判据（`poll_turn_stopped` 的稳定闸），回填本窗时用它；
+    ///    与单帧读数的差 = 稳定闸多等的时长（也顺带反映重绘瞬态在真机上的频率）。
     ///
-    /// 判据实现与生产**同源**：`confirm::turn_stopped_in_lines`（真机原文夹具已把
-    /// 「忙态含 `esc to interrupt`、空闲态不含」两形态钉在门禁里）。
+    /// 判据实现与生产**同源**：`confirm::turn_stopped_in_lines`（单帧原语；真机原文夹具
+    /// 已把「忙态含 `esc to interrupt`、空闲态不含」两形态钉在门禁里）+ 与生产同一套
+    /// 「连续两拍」的稳定读数。
     #[test]
-    #[ignore = "实机验证：Esc 中断 → 忙态串消失的耗时（标定 TURN_STOP_POLL_TOTAL_MS；前置=Windows + 真 conhost claude + MAM_D20_PROBE_PID）"]
+    #[ignore = "实机验证：Esc 中断 → 忙态串消失的耗时（标定 TURN_STOP_POLL_TOTAL_MS / TURN_STOP_STABLE_FRAMES；前置=Windows + 真 conhost claude + MAM_D20_PROBE_PID）"]
     fn d20_turn_stop_latency_live_probe() {
         print_prelude(
             "D20 实测项④：插队等回合停（Esc 中断 → 底栏忙态串消失）",
@@ -693,8 +710,14 @@ mod d20_live_probe_tests {
         let start = std::time::Instant::now();
         let attempts = Cell::new(0u32);
         let ok_reads = Cell::new(0u32);
-        // 只打印**判据变化**（没变化不刷屏）：`(elapsed_ms, 回合是否仍在跑)`
+        // 逐拍打印**单帧判据的变化**（没变化不刷屏），并在**连续两拍**无忙态串时打印
+        // 「稳定判据成立」的读数——**后者才是生产实际用的判据**（`poll_turn_stopped`
+        // 的稳定闸），也才是回填 TURN_STOP_POLL_TOTAL_MS 的主读数。
+        // 单帧读数留着：两者之差（若某次 Esc 后单帧先到、稳定判据晚到）就是**稳定闸
+        // 多等的时长**，直接反映重绘瞬态在真机上的频率。
         let mut last: Option<bool> = None;
+        let mut streak = 0u32;
+        let mut stable_at: Option<u128> = None;
         while std::time::Instant::now() < deadline {
             let lines = read_once(pid);
             attempts.set(attempts.get() + 1);
@@ -711,18 +734,37 @@ mod d20_live_probe_tests {
                         if running {
                             "仍在跑（忙态串在场）"
                         } else {
-                            "已停（可投递）"
+                            "单帧无忙态串（**未必已停**——可能是重绘瞬态）"
                         }
                     );
                     last = Some(running);
+                }
+                if running {
+                    streak = 0;
+                } else {
+                    streak += 1;
+                    if streak == crate::inject::confirm::TURN_STOP_STABLE_FRAMES
+                        && stable_at.is_none()
+                    {
+                        stable_at = Some(start.elapsed().as_millis());
+                        eprintln!(
+                            "[D20-回合停探针] **主读数**：elapsed={}ms → 稳定判据成立\
+                             （连续 {} 拍无忙态串；当前自裁窗 TURN_STOP_POLL_TOTAL_MS={TURN_STOP_POLL_TOTAL_MS}ms）",
+                            start.elapsed().as_millis(),
+                            streak
+                        );
+                    }
                 }
             }
             std::thread::sleep(step);
         }
         assert_some_read(pid, attempts.get(), ok_reads.get());
         eprintln!(
-            "[D20-回合停探针] 结束：当前自裁窗 TURN_STOP_POLL_TOTAL_MS={TURN_STOP_POLL_TOTAL_MS}ms；\
-             若你按 Esc 后窗内一直读到「仍在跑」，说明窗偏紧或回合在收尾更久——回填"
+            "[D20-回合停探针] 结束：稳定判据成立读数 = {stable_at:?}ms（None = 窗内没等到——\
+             若你确实按了 Esc，说明窗偏紧或回合在收尾更久，回填）；当前自裁窗 \
+             TURN_STOP_POLL_TOTAL_MS={TURN_STOP_POLL_TOTAL_MS}ms，稳定拍数 \
+             TURN_STOP_STABLE_FRAMES={}",
+            crate::inject::confirm::TURN_STOP_STABLE_FRAMES
         );
     }
 }

@@ -42,6 +42,10 @@ interface Routes {
   /** POST /session-question/answer 回执（丁T6：composer 转向 freeText 的路径；
    *  缺省 key_sent+verified:true）*/
   answer?: Record<string, unknown>;
+  /** 问答应答非 2xx（409/400；错误码在**响应体 `error` 字段**——与 /session-send 的
+   *  `reason` 字段**不同**，丁T6 复评核出并加锁） */
+  answerStatus?: number;
+  answerBody?: Record<string, unknown>;
   send?: Record<string, unknown>;
   sendStatus?: number;
   /** 非 2xx 时响应体 JSON（403 not_injectable{reason,reasonCode} 等，P2-10） */
@@ -118,6 +122,11 @@ function installFetch() {
     // /session-question 之前**——`/session-question/answer` ⊃ `/session-question`
     // （与前缀包含关系同一惯例：长路径先判）
     if (url.includes("/session-question/answer")) {
+      if (routes.answerStatus) {
+        return new Response(JSON.stringify(routes.answerBody ?? { error: "internal" }), {
+          status: routes.answerStatus,
+        });
+      }
       return new Response(
         JSON.stringify(routes.answer ?? { status: "key_sent", done: true, verified: true }),
         { status: 200 }
@@ -1612,6 +1621,59 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     expect(sendCalls()).toHaveLength(0);
     // 失败保留输入（与既有 failed 态同口径：可重试）
     expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("回答内容");
+  });
+
+  // ===== 丁T6 复评：问答端点的错误码分诊（**字段名与 /session-send 不同**）=====
+  // 问答端点的错误码在响应体 `error` 字段（`{error:"multi_questions"}`），而
+  // `/session-send` 的失败细节在 `reason` 字段——两条路径**不能复用同一段读取**。
+  // 下面三条锁住「按 `error` 读并映射成中文」（若误读 `reason`，会显示成
+  // 「session-question/answer 409」这种对用户无意义的串）。
+  it("转向 freeText 遇 409 multi_questions（TOCTOU：探针后终端换了多题）→ 中文分诊文案", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.answerStatus = 409;
+    routes.answerBody = { error: "multi_questions" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    fireEvent.change(input, { target: { value: "回答内容" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-failed");
+    expect(chip.textContent).toContain("多个问题请回到终端完成作答");
+    expect(chip.textContent).not.toContain("409");
+    // 失败保留输入（可重试）
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).value).toBe("回答内容");
+  });
+
+  it("转向 freeText 遇 409 tool_readonly → 中文分诊文案（未验不出键）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.answerStatus = 409;
+    routes.answerBody = { error: "tool_readonly" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    fireEvent.change(input, { target: { value: "回答内容" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-failed");
+    expect(chip.textContent).toContain("该工具的远程作答尚未实测，请在终端完成作答");
+  });
+
+  it("转向 freeText 遇 409 no_question（问答已消失）→ 中文分诊文案", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.questionInfo = freeTextQuestionInfo();
+    routes.answerStatus = 409;
+    routes.answerBody = { error: "no_question" };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
+    await screen.findByTestId("composer-card-presence");
+    fireEvent.change(input, { target: { value: "回答内容" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    const chip = await screen.findByTestId("send-receipt-failed");
+    expect(chip.textContent).toContain("当前没有待回答的问题");
   });
 
   it("两者都在场：审批优先（裁3 安全面更重——审批框放行自由文本 = 误触选项）", async () => {

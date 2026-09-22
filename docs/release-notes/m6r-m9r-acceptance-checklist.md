@@ -392,9 +392,12 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 > 批次丁 = 全终端问答/审批/模式闭环，计划 `docs/superpowers/plans/2026-09-21-phase2-batch-d-plan.md`（v3，T1–T5+收口）。
 > 本批**不追记 M6R–M9R 设计文档**（沿用「实测结论不回写设计文档」惯例），落点集中在本节。
 >
-> **自动化覆盖追记**：Rust lib **1302 过 / 0 败 / 21 ignored**（批次丙基线 1113 → **+189**）；
+> **自动化覆盖追记**：Rust lib **1302 过 / 0 败 / 21 ignored**（批次丙基线 1115 → **+187**）；
+> **丁T6 复评后**（合并前修复包）：**1317 过 / 0 败 / 22 ignored**（较 T6 收口 +15 过、+1 ignored
+> ——+10 来自 R2 复评两条修复、+4 稳定闸、+1 为 `d20_turn_stop_latency_live_probe`）；
 > bin `mam-hook-listener`（须 `--features hook-listener`）**43 过**；vitest **756 过 / 80 文件**
-> （批次丙 695 → **+61**）；preset_v2_test 34 过 5 败（**4 名恒定 + `mcp_import` 基线自抖 5/6 之间**，
+> （批次丙 695 → **+61**；**丁T6 复评后 768 过 / 80 文件**——+12 来自 composer 四态分流与错误码分诊）；
+> H-2b 记录的自动锁同批生效；preset_v2_test 34 过 5 败（**4 名恒定 + `mcp_import` 基线自抖 5/6 之间**，
 > 见 H-4 第 6 条）；dao_test 7 过；`live_probe -- --ignored` **12 过**（含 D20 三条探针）；
 > fmt ✅ / clippy `--all-targets -D warnings` **0 警告** / pnpm check ✅ / build:mobile ✅。
 
@@ -426,29 +429,31 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | C-35 | **codex 计划待确认全链**（T2） | codex 出 `<proposed_plan>`（终端停在 `Implement this plan?` 框） | ① 手机详情页看**提示条**；② 点「检查终端对话框」；③ 点某个 N 选项 | ① 提示条出现（真机状态是 **Idle**，非 waiting）；② 点检查后出 **N 选项卡**（屏读 `1. Yes, implement this plan / 2. Yes, clear context and implement / 3. No, stay in Plan mode`）；③ **点按生效**（codex 走数字直选档 `DigitDirect`，实机验证 `'1'` 关闭对话框并开工）；④ 计划全文在卡内可读；⑤ 注入用户消息后提示条**消失** |
 | C-36 | **多问题只读卡**（T2，§2.3） | codex 多问题（`Question 1/3`）任一 | 手机看问答卡 | 卡片为**只读**（题目列表 + 「请在终端完成作答」），**零注入按钮**；直调 API → 409 `multi_questions`。逐题注入**未实现**（导航序待实测，见 H-4 第 4 条） |
 | C-37 | **对话框在场时模式按钮被拒**（T3，裁9） | 任一待决对话框在场（如 kimi `Ready to build`） | 手机点模式切换（shift+tab 或斜杠两路） | ① 被**拒绝** + 中文回执「终端有待决对话框，请先处理」；② **零注入零审计**（终端上不该出现 shift+tab 效果）；③ 对话框消失后再点 → 正常切换。**注**：非 Windows / 屏读失败时回执标 `dialogChecked:false` 如实说明未检测（不假装检查过） |
-| C-38 | **composer 卡片在场分流**（T3 裁3；**丁T6 复评按契约补齐「转向」**） | ① 审批卡/计划待确认卡在场；② 问答卡在场且可自由作答（claude 单题单选）；③ 问答在场但不可自由作答（多题 / 多选 / 未验工具） | 在手机输入框打字发送 | ① 审批在场 → **被拦截** + 「终端等待审批，请用卡片按钮」（**关键安全项**：此前会误触选项——kimi 误批准实锤）；② **问答可自由作答 → 发送转向卡内同一条 freeText 出口**（`POST /session-question/answer {action:"freeText"}`，不再拦截；placeholder「输入内容将作为本题的回答发送」；回执按端点 `verified` 三态走 delivered / 中性 submitted，**不冒充完成**）；③ 问答不可自由作答 → **仍拦截**（未验不出键 / 多题只读卡 §2.3 / 多选屏判据不匹配）；④ 转向路径带附件 → **拦截并提示**（自由作答不带附件，静默丢是坏体验） |
+| C-38 | **composer 卡片在场分流**（T3 裁3；**丁T6 复评按契约补齐「转向」**） | ① 审批卡/计划待确认卡在场；② 问答卡在场且可自由作答（claude 单题单选）；③ 问答在场但不可自由作答（多题 / 多选 / 未验工具） | 在手机输入框打字发送 | ① 审批在场 → **被拦截** + 「终端等待审批，请用卡片按钮」（**关键安全项**：此前会误触选项——kimi 误批准实锤）；② **问答可自由作答 → 发送转向卡内同一条 freeText 出口**（`POST /session-question/answer {action:"freeText"}`，不再拦截；placeholder「输入内容将作为本题的回答发送」；回执按端点 `verified` 三态走 delivered / 中性 submitted，**不冒充完成**）；③ 问答不可自由作答 → **仍拦截**（未验不出键 / 多题只读卡 §2.3 / 多选屏判据不匹配——未验工具的残余风险登记见 **H-4 第 4 条③**）；④ 转向路径带附件 → **拦截并提示**（自由作答不带附件，静默丢是坏体验） |
 | C-39 | **移动端斜杠命令裸注入 + 审计**（T3，裁2） | 任一可注入会话 | 手机发 `/permissions`（或 `/plan`） | ① 终端出现**裸命令**（**无 `[mobile ...]` 前缀**——前缀会毁掉命令，问题 8 现场）；② 命令**生效**；③ 审计页可按 `action=slash` 查到 + **设备名可查**（终端不留痕是可接受的，审计必须留） |
 | C-40 | **签名后置 + 普通消息溯源**（T3，裁2） | 任一可注入会话 | 手机发普通消息 | ① 终端出现 `{正文} [mobile 设备名]`（**签名在末尾**，正文在前可读）；② 审计页可查设备；③ **队列预览与「修改」回填不含签名**（不剥会二次叠加） |
 | C-41 | **四家模式切换后回显当前模式**（T4，裁5/6/7） | 四家各一（codex / kimi / claude / opencode） | 各家切一档后看手机模式栏 | ① **codex/kimi**：**两组按钮**（模式组 + 权限组），各组显示当前档；② **claude/opencode**：单轴切换钮 + **当前模式回显**；③ **opencode 显示「默认」而非「Build」**（裁6）；④ **codex 无 untrusted/on-failure 可选档**（裁7）；⑤ 回读失败显示**「请人工核对」**，**不假装成功**（裁5）。**注**：codex/kimi 的**权限组**无回读源（底栏只有模式文本）→ 恒显示「请人工核对」，这是如实而非漏做 |
 | C-42 | **codex 权限两段式 + Full Access 三段式**（T4） | codex 在场 | 手机切权限档（只读/默认/完全信任） | ① 发 `/permissions` → 菜单屏读定位 → 导航确认；② 切 **1/2/3 档**：两段完成，屏上出现 `• Permissions updated to <档>`；③ 切 **Full Access**：**多一段**——弹出 `Enable full access?` 确认框 → 定位 `Yes, continue anyway` → 确认 → 出现 `Permissions updated to Full Access`；④ 手机回执 `verified` 反映**工具自证**（见到含目标档的成功回执行 → true）；⑤ 任一屏读不符 → **中止且不盲发后续键** + 具体阶段的中文原因 |
-| C-43 | **claude 多选提交一气呵成**（T5，裁4） | claude 出**多选题**（`multiSelect: true`） | ① 手机勾选若干选项；② 点「提交勾选」 | ① 勾选=仅切换（卡上本地勾选态 + 注入切换键，**不提交**）；② 点提交后**一气呵成走完三段**（走位到 Submit 行 → 进 Review 屏 → 确认），**不停在半路**；③ 卡片显示**进行中态**（不是「已发送按键」）；④ 完成后的终态回执；⑤ **不得出现误勾选/反勾选**（K9：多选里 Enter=切换勾选，实现须只在确认屏发 Enter） |
+| C-43 | **claude 多选提交一气呵成**（T5，裁4）——**人工实测通过（09-22 用户实机复验）**：VK 形态生效（多选勾选 ✓ / 提交勾选→Review 屏自动确认 ✓ / 单选即答 ✓） | claude 出**多选题**（`multiSelect: true`） | ① 手机勾选若干选项；② 点「提交勾选」 | ① 勾选=仅切换（卡上本地勾选态 + 注入切换键，**不提交**）；② 点提交后**一气呵成走完三段**（走位到 Submit 行 → 进 Review 屏 → 确认），**不停在半路**；③ 卡片显示**进行中态**（不是「已发送按键」）；④ 完成后的终态回执；⑤ **不得出现误勾选/反勾选**（K9：多选里 Enter=切换勾选，实现须只在确认屏发 Enter）。**复验结论（2026-09-22，用户实机）**：①②③④⑤ 全部通过——09-22 独立探测的「VK 零响应」归因于**该轮会话环境差异**，非实现问题；依据与留档见 H-3 与 `research/refs/phase2-消息注入/2026-09-22-批次丁主线复审独立核实探测.md` 的「后验」节 |
 | C-44 | **卡内自由文本作答（claude）**（T5，裁3） | claude 出**单选题**（单题卡） | 卡片内输入框打字 → 发送 | ① 序列 = 数字定位 `Type something` 行（仅移焦点）→ 文本 → 回车；② **用户输入的数字绝不被当成选项选择**（走文本通道，裁3 安全项）；③ 非 claude 工具**不渲染**输入框（渲染终端引导）；④ **多选卡也不渲染**（F6-3：多选屏的自由作答行带勾选框，判据不匹配，宁可拒绝） |
 | C-45 | **codex 计划卡 markdown 完整**（T5，问题 11） | codex 出含 `###` 小标题与列表的计划 | 手机消息流看计划卡 | ① `###` 标题有**层级字号**（不是与正文同大小）；② `-` 列表有**项目符号**（不是拍平成正文）；③ 计划卡与工具参数升格卡**都**挂排版层（本批修的就是这两处漏挂）。**依据**：真机 rollout `2026-09-21T17-38-17` 行 114（4 个 `###` + 14 行列表） |
 | C-46 | **回读不再误报（D20）** | claude 在场 | 反复切档，留意是否有「回读与预期不符」 | ① **不应再出现**「回读与预期不符」而终端实际已切的误报（本批前的高频现象：屏幕重绘未及，非切换失败）；② 若仍出现，说明终端确实切到了别的档（回执会给预期/实际两边）；③ 切换**体感不因轮询变慢**（命中即刻停止，不固定等待） |
-| C-47 | **插队「等回合停」不再假成功**（丁T6 复评，用户实机 bug 的验收项） | claude 交互会话正在跑**长回合**（底栏可见 `esc to interrupt`） | 在手机队列条目上点「立即发送」 | ① 终端**回合被中断**（`Interrupted · What should Claude do instead?`）**且消息开出新回合**（不再只是进 `Press up to edit queued messages` 内部队列）；② 消息正文**能在会话记录里搜到**（本 bug 的判据：此前审计 `jump ok` 但会话 JSONL 无正文 = 假成功）；③ 若终端回合收尾超过 3s，回执应为**「已投递至终端输入，agent 空闲后处理（未确认落盘）」**（中性，不冒充「已送达」）；④ 审计 `action=jump`。**注**：屏读不可用（非 Windows / 读屏失败）时保持既有 best-effort「已送达」口径 |
+| C-47 | **插队「等回合停」不再假成功**（丁T6 复评，用户实机 bug 的验收项） | claude 交互会话正在跑**长回合**（底栏可见 `esc to interrupt`） | 在手机队列条目上点「立即发送」 | ① 终端**回合被中断**（`Interrupted · What should Claude do instead?`）**且消息开出新回合**（不再只是进 `Press up to edit queued messages` 内部队列）；② 消息正文**能在会话记录里搜到**（本 bug 的判据：此前审计 `jump ok` 但会话 JSONL 无正文 = 假成功）；③ 若终端回合收尾超过 3s，回执应为**「已投递至终端输入，agent 空闲后处理（未确认落盘）」**（中性，不冒充「已送达」）；④ 审计 `action=jump`。**注**：① 判据是**连续两拍**忙态串缺席（稳定闸——单帧会被重绘瞬态骗过，R2-必修项 3）；② 屏读不可用（非 Windows / 读屏失败）时保持既有 best-effort「已送达」口径 |
 
-### H-2b · 丁T6 复评新增自动锁（合并前修复的两条，对应 C-38 / C-47）
+### H-2b · 丁T6 复评新增自动锁（合并前修复的三条，对应 C-38 / C-47 / C-47 稳定闸）
 
 | 修复 | 落点 | 锁（测试名） |
 |---|---|---|
-| **插队改屏读等回合已停**（原判据 `wait_input_drained` 等的是「我们自己的输入缓冲」，Esc 写完即空 → 正文落进正在收尾的旧回合 = 假成功） | `inject/confirm.rs`（判据纯核 `turn_stopped_in_lines` + 轮询内核 `poll_turn_stopped`）、`inject/queue.rs`（`try_flush_with` 的 `interrupt_first` 分支 + 三态回执映射）、`inject/timing.rs`（`TURN_STOP_POLL_TOTAL_MS`） | `turn_stopped_judges_on_real_chrome_footers`（**真机 T9/T6 屏原文夹具**）、`turn_stop_poll_hits_on_second_frame_and_stops_immediately`（命中即停只读 2 拍）、`turn_stop_poll_window_exhausts_while_still_busy`、`turn_stop_poll_reports_unverifiable_when_screen_unavailable`、`turn_stop_poll_keeps_waiting_through_busy_frames`、`turn_stop_wait_maps_poll_states_one_to_one`、`interrupt_jump_waits_for_turn_stop_before_delivering`、`interrupt_jump_still_busy_delivers_but_reports_submitted`、`interrupt_jump_keeps_best_effort_when_screen_unavailable`、`turn_stop_wait_only_applies_to_running_claude_jump` |
-| **composer 问答在场转向 freeText**（原实现一律拦截，与 §2.4 裁3「三个入口同一个出口」冲突） | `src/mobile/MessageComposer.tsx`（`TerminalCardPresence` 四态 + `probeCardPresence` 判据 + `handleSend` 分流） | `MessageComposer.test.tsx` 的「卡片在场分流：审批拦截 / 问答转向自由作答 / 不可作答拦截」describe（共 12 例） |
+| **插队改屏读等回合已停**（原判据 `wait_input_drained` 等的是「我们自己的输入缓冲」，Esc 写完即空 → 正文落进正在收尾的旧回合 = 假成功） | `inject/confirm.rs`（判据纯核 `turn_stopped_in_lines` + 轮询内核 `poll_turn_stopped`）、`inject/queue.rs`（`try_flush_with` 的 `interrupt_first` 分支 + 三态回执映射）、`inject/timing.rs`（`TURN_STOP_POLL_TOTAL_MS`） | `turn_stopped_judges_on_real_chrome_footers`（**真机 T9/T6 屏原文夹具**）、`turn_stop_poll_stops_on_stable_frames_immediately`（稳定判据成立即停）、`turn_stop_poll_window_exhausts_while_still_busy`、`turn_stop_poll_reports_unverifiable_when_screen_unavailable`、`turn_stop_poll_keeps_waiting_through_busy_frames`、`turn_stop_wait_maps_poll_states_one_to_one`、`interrupt_jump_waits_for_turn_stop_before_delivering`、`interrupt_jump_still_busy_delivers_but_reports_submitted`、`interrupt_jump_keeps_best_effort_when_screen_unavailable`、`turn_stop_wait_only_applies_to_running_claude_jump` |
+| **等回合停加稳定闸**（R2-必修项 3：单帧判据被重绘瞬态骗过——底栏截断/整行缺失的**一拍**就判「已停」→ 提前投递 = 本 bug 的窄化形态） | `inject/confirm.rs`（`TURN_STOP_STABLE_FRAMES`=2 + `poll_turn_stopped` 的连续计数/归零 + `TurnStopPoll::Stopped{reads, stable_frames}`）、`inject/timing.rs`（窗与稳定拍数的对账注释 + 实测项主读数改稳定判据） | `turn_stop_poll_ignores_redraw_transient_frame`（**★主锁**：缺底栏一拍不得提前停，拍数断言钉住）、`turn_stop_poll_resets_streak_on_busy_frame`（孤独空闲不足以判停）、`turn_stop_poll_window_edge_needs_one_more_frame`（窗沿只差一拍仍 `StillRunning`）、`turn_stop_stable_frames_pinned_and_more_than_one`（常量钉值 + 窗余量对账）、`interrupt_jump_never_delivers_on_redraw_transient`（**端到端**：瞬态帧不得让插队提前投递） |
+| **composer 问答在场转向 freeText**（原实现一律拦截，与 §2.4 裁3「三个入口同一个出口」冲突） | `src/mobile/MessageComposer.tsx`（`TerminalCardPresence` 四态 + `probeCardPresence` 判据 + `handleSend` 分流）、`src/mobile/api.ts`（`questionAnswerErrorCopy`——错误码→中文单点映射，卡内与 composer 共用；**问答端点的码在 `error` 字段、/session-send 的细节在 `reason` 字段，两者不同**） | `MessageComposer.test.tsx` 的「卡片在场分流：审批拦截 / 问答转向自由作答 / 不可作答拦截」describe（共 18 例；较 T6 收口 +3，均为错误码分诊） |
 
 ### H-3 · 本批实机取证档案（依据留痕）
 
 | 日期 | 档案 | 一句话结论 |
 |---|---|---|
 | 2026-09-22 | `research/refs/phase2-消息注入/2026-09-22-codex-kimi权限菜单与FullAccess三段式-用户实机取证.md` | **用户手工实机取证**推翻丁T4 的「权限菜单无编号」假设：codex 菜单**有编号**（`1. Read Only`…`› 2. Ask for approval (current)`…`4. Full Access`）→ 原行首匹配判据在真机**定位 0 项**、codex 权限切换完全不可用；kimi **无编号**（缩进 + `❯`，每档下跟一行描述）→ 评审提的「连续成簇+紧邻标题」**会误伤 kimi**。另实锤 **Full Access 有第三段确认框**（1/2/3 档无）；claude `/permissions` 是**色块高亮**（不可屏读定位）、**opencode 无该命令** → 两家单轴 shift+tab 获反证 |
+| 2026-09-22 | `research/refs/phase2-消息注入/2026-09-22-批次丁主线复审独立核实探测.md` | **R2 主线复审独立探测**：四家屏读/回读/守卫底料复现（§A–E）；另实证**弹窗首帧瞬态**（codex 首帧 `? 1. out` → 静止后 `› 1.`）——**该现象正是等回合停加稳定闸（必修项 3）的同类证据**。**后验（09-22 追加节，不改原结论）**：其 §D「VK 数字无效」经**用户实机复验**（多选勾选/提交→Review 确认/单选即答三例全过）**归因于该轮会话环境差异**，非注入形态问题；实现侧不改形态代码 |
 
 （本批另有多份依据档案在 `research/refs/phase2-消息注入/`（不入库）：`2026-09-21-审批对话框N选项屏读解析实机探测.md`（T5 用其 K10 三段式与截图）、`2026-09-21-四家模式切换shift-tab实机探测.md`（T4 底栏词表）、`2026-09-20-问卷交互跨工具矩阵.md` 等；批次丙 E-3 已列。）
 

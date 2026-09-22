@@ -1782,15 +1782,15 @@ mod tests {
         Some(vec![line.to_string()])
     }
 
-    /// **主回归锁（本 bug 的形态）**：运行中 claude 插队——真机忙屏 → 真机空闲屏 →
-    /// 断言 **① 等到了才投递正文**（屏读确实发生在正文注入之前，且命中即停只读 2 拍）、
+    /// **主回归锁（本 bug 的形态）**：运行中 claude 插队——真机忙屏 → 真机空闲屏 ×2 →
+    /// 断言 **① 等到了稳定判据才投递正文**（屏读确实发生在正文注入之前，且稳定成立即停）、
     /// **② 回执 = Sent**（回合确认已停）。
     ///
-    /// 夹具两帧都是**真机原文**（忙态含 `·esc to interrupt ·`；空闲态是 `· ← for agents`）。
+    /// 夹具三帧都是**真机原文**（忙态含 `·esc to interrupt ·`；空闲态是 `· ← for agents`）。
+    /// 两帧空闲是**稳定闸**（`confirm::TURN_STOP_STABLE_FRAMES`）要的「连续一致」。
     ///
     /// 还原动作（变异A）：把 `wait_turn_stopped` 的调用删掉（等价旧实现：不等判据直接
-    /// 投递）→ 本测试的「屏读帧数断言」先红（`remaining == 2` 会变成 2 与投递并发发生，
-    /// 但**先红的是 `Stopped` 派生的回执**：删掉调用后 `turn_stop` 恒 `NotApplicable`）；
+    /// 投递）→ 本测试的「屏读帧数断言」先红（帧不被消费，`remaining == 3`）；
     /// 另一路（更贴近旧实现）把屏源改成恒 `None`（等价旧 `wait_input_drained` 恒立刻
     /// 返回）→ 回执仍会是 Sent 但帧数断言会红。
     #[test]
@@ -1801,24 +1801,76 @@ mod tests {
             inj.clone(),
         );
         st.store.with(|c| enq(c, "s-turn1", "插队消息"));
-        let (mode, queue) = scripted(vec![frame(real_frames::BUSY), frame(real_frames::IDLE)]);
+        let (mode, queue) = scripted(vec![
+            frame(real_frames::BUSY),
+            frame(real_frames::IDLE),
+            frame(real_frames::IDLE),
+        ]);
         let outcome = flush_one_scripted(&st, "s-turn1", true, mode);
         assert_eq!(
             outcome,
             FlushOutcome::Sent,
-            "屏读到「回合已停」+ 投递成功 → Sent（这是修好后的形态）"
+            "屏读到**稳定**的「回合已停」+ 投递成功 → Sent（这是修好后的形态）"
         );
-        // 命中即停：两帧用完（只读 2 拍，不是读满 30 拍）
+        // 命中即停：三帧用完（只读 3 拍，不是读满 30 拍）
         assert_eq!(
             queue.lock().unwrap().len(),
             0,
-            "只读 2 拍即命中停止（D20(a)——剩余帧必须为 0，且不得多读）"
+            "只读 3 拍即命中停止（D20(a)——剩余帧必须为 0，且不得多读）"
         );
         // Esc 先于正文（T9 序保持）
         let ops = inj.ops();
         assert_eq!(ops[0], "key:esc", "{ops:?}");
         assert!(ops[1].starts_with("text:"), "{ops:?}");
         assert!(ops[1].contains("插队消息"));
+    }
+
+    /// **★ 必修项 3 端到端锁：重绘瞬态（缺底栏一拍）不得让插队提前投递**。
+    ///
+    /// 序列 = [忙态, **缺底栏一拍**, 忙态, 空闲, 空闲]——第 2 拍是重绘瞬态（单帧判据
+    /// 下恒判「已停」）。断言：**投递发生在稳定判据成立之后**（帧全被消费到第 5 拍）
+    /// 且回执 = Sent。
+    ///
+    /// 判别力：**若没有稳定闸**，第 2 拍即返回 `Stopped` → 只消费 2 帧、正文在第 2 拍
+    /// 之后就被投递（= 本必修项要杀的「窄化形态」）→ 本测试的帧数断言的剩余帧会是 3
+    /// 而不是 0。
+    ///
+    /// 还原动作（变异E）：把稳定闸拆掉（单帧即判停）→ 本测试先红（`remaining == 3`，
+    /// 且第 2 拍之后即投递 = 正文落进仍在跑的回合）。
+    #[test]
+    fn interrupt_jump_never_delivers_on_redraw_transient() {
+        let inj = FakeInjector::ok();
+        let st = state_with(
+            vec![sess("s-turn6", SessionStatus::Processing, 4255)],
+            inj.clone(),
+        );
+        st.store
+            .with(|c| enq(c, "s-turn6", "重绘瞬态期间不该投递的消息"));
+        // 第 2 帧 = 重绘瞬态：底栏整行缺失（既无忙态串，也无正常底栏）
+        let redraw_missing = Some(vec![
+            String::new(),
+            "  ⎿  Tip: Name your conversations with /rename".to_string(),
+        ]);
+        let (mode, queue) = scripted(vec![
+            frame(real_frames::BUSY),
+            redraw_missing,
+            frame(real_frames::BUSY),
+            frame(real_frames::IDLE),
+            frame(real_frames::IDLE),
+        ]);
+        let outcome = flush_one_scripted(&st, "s-turn6", true, mode);
+        assert_eq!(outcome, FlushOutcome::Sent, "稳定判据最终成立 → Sent");
+        assert_eq!(
+            queue.lock().unwrap().len(),
+            0,
+            "**关键断言**：帧读到第 5 拍才停——第 2 拍的瞬态不得让插队提前投递\
+             （若无稳定闸，这里会剩 3 帧 = 第 2 拍就投递 = 窄化形态）"
+        );
+        // 投递确实发生（且只有正文一次 + Esc 一次）
+        assert_eq!(inj.recorded().len(), 1, "正文照投（稳定判据成立后）");
+        let ops = inj.ops();
+        assert_eq!(ops[0], "key:esc", "Esc 仍先于正文：{ops:?}");
+        assert!(ops[1].contains("重绘瞬态期间不该投递的消息"), "{ops:?}");
     }
 
     /// **本 bug 的如实回执锁**：运行中 claude 插队 + **全程忙屏**（等回合停窗尽）→

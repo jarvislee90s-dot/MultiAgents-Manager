@@ -68,6 +68,7 @@ import {
   fetchSessionQuestion,
   queueJump,
   queueRetract,
+  questionAnswerErrorCopy,
   sessionQuestionAnswer,
   sessionSend,
   uploadAttachment,
@@ -449,7 +450,23 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         // 转向自由作答：**不带附件标记行**（自由作答是「回答」不是「消息」——
         // 后端归一后走字符通道，不带 [mobile] 签名，见 api.ts 的
         // `sessionQuestionAnswer` 注释）。
-        const res = await sessionQuestionAnswer(session.id, "freeText", undefined, text);
+        //
+        // **非 2xx 分诊在本臂内单独处理**（不复用外层 catch）：问答端点的错误码在
+        // `data.error`（`no_question`/`multi_questions`/`tool_readonly`/`bad_index`），
+        // 而 `/session-send` 的失败细节在 `data.reason`——两个端点的载荷字段**不同**
+        // （丁T6 复评核出：曾用同一段 `reason` 读取，问答 409 会显示成
+        // 「session-question/answer 409」这种对用户无意义的串）。文案走
+        // [`questionAnswerErrorCopy`]（与卡内**同一函数**，两入口不漂移）。
+        let res: Awaited<ReturnType<typeof sessionQuestionAnswer>>;
+        try {
+          res = await sessionQuestionAnswer(session.id, "freeText", undefined, text);
+        } catch (err) {
+          setReceipt({
+            kind: "failed",
+            error: err instanceof ApiError ? questionAnswerErrorCopy(err) : String(err),
+          });
+          return;
+        }
         if (res.status === "key_sent") {
           // 回执与卡内路径**同口径**（不另编一套文案）：
           // - `verified === true`（屏读到终态锚 = 走完整条闭环）= delivered；

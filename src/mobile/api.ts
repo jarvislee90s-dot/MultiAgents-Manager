@@ -664,12 +664,30 @@ export type QuestionAnswerResult =
   | { status: "key_sent"; done?: boolean; stage?: QuestionAnswerStage; verified?: boolean | null }
   | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
 
+/** 问答应答**错误码 → 用户可读中文文案**（丁T6 复评抽出：卡内与 composer 两条入口
+ *  必须**同口径**——两处各写一套 `if/else` 迟早漂移，且 composer 侧曾漏掉这条映射
+ *  （读的是 `data.reason` 而问答端点回的是 `data.error`）→ 409 会显示成
+ *  「session-question/answer 409」这种对用户无意义的串）。
+ *
+ *  取值来源：后端 `remote::api::session_question_answer` 的 409/400 错误码
+ *  （`no_question` / `multi_questions` / `tool_readonly` / `bad_index`；
+ *  另有 `bad_request` 兜底）。码不在表内 → 回原 message（不编文案）。 */
+export function questionAnswerErrorCopy(e: ApiError): string {
+  const code = typeof e.data?.error === "string" ? e.data.error : null;
+  if (code === "no_question") return "当前没有待回答的问题";
+  if (code === "multi_questions") return "多个问题请回到终端完成作答";
+  if (code === "tool_readonly") return "该工具的远程作答尚未实测，请在终端完成作答";
+  if (code === "bad_index") return "选项序号无效，请刷新后重试";
+  return e.message;
+}
+
 /** 问答一键应答（T8；丁T5 起支持 freeText）。index = 选项序号（0 起；select/toggle
  *  必填）；text = 自由作答正文（freeText 必填；后端归一后走**字符通道**注入，
  *  不带 `[mobile]` 签名）。
  *  409 {error:"no_question"|"multi_questions"|"tool_readonly"} |
  *  400 {error:"bad_request"|"bad_index"}
- *  → 非 2xx 抛 ApiError（错误码解析进 data.error，调用方分診中文文案） */
+ *  → 非 2xx 抛 ApiError（错误码解析进 data.error，调用方分診中文文案——
+ *  用 [`questionAnswerErrorCopy`]，勿另写一套） */
 export async function sessionQuestionAnswer(
   sessionId: string,
   action: QuestionAnswerAction,

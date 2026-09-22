@@ -60,6 +60,7 @@ import InteractiveCard, { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
   fetchSessionQuestion,
+  questionAnswerErrorCopy,
   sessionQuestionAnswer,
   type QuestionAnswerAction,
   type QuestionAnswerStage,
@@ -237,18 +238,9 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         }
       } catch (e) {
         if (e instanceof ApiError) {
-          const code = typeof e.data?.error === "string" ? e.data.error : null;
-          if (code === "no_question") {
-            setError("当前没有待回答的问题");
-          } else if (code === "multi_questions") {
-            setError("多个问题请回到终端完成作答");
-          } else if (code === "tool_readonly") {
-            setError("该工具的远程作答尚未实测，请在终端完成作答");
-          } else if (code === "bad_index") {
-            setError("选项序号无效，请刷新后重试");
-          } else {
-            setError(e.message);
-          }
+          // 错误码 → 中文文案走**单点映射**（`questionAnswerErrorCopy`）：
+          // composer 的问答转向路径用同一个函数，两条入口不会漂移（丁T6 复评抽出）
+          setError(questionAnswerErrorCopy(e));
         } else {
           setError(String(e));
         }

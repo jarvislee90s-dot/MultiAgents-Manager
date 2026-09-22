@@ -206,27 +206,64 @@ const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
 /// 时仍命中）。
 pub const TURN_BUSY_MARKER: &str = "esc to interrupt";
 
-/// **回合已停**判定（纯函数，跨平台可测）：可见窗口行集里**不存在**忙态串。
+/// **回合已停**判定（单帧，纯函数，跨平台可测）：可见窗口行集里**不存在**忙态串。
 ///
-/// 语义边界（**保守方向**）：只看「有没有忙态串」，不做任何「空闲态串在场」的正向
-/// 判据——真机上忙态与空闲态的**唯一可靠差别**就是这一串（四档空闲态的 `for agents`
-/// 前缀各不相同：`· ← for agents` / `·  for agents` / `· ? for shortuts ·←for
-/// agents`，而忙态是 `·esc to interrupt ·←for agents`）。正向断言会把某档的排版
-/// 变体当成「没认出空闲」而永远等下去。
+/// # 单帧判定**不足以**判「回合已停」（2026-09-22 R2 必修项 3）
+///
+/// 本函数只看**这一拍**的屏。而 claude/codex 重绘期间底栏会**短暂缺失或截断**
+/// （独立探测已实证同类瞬态：codex 弹窗首帧抓到 `? 1. out`、静止后才 `› 1.`）。
+/// 三份复刻夹具：
+///
+/// | 屏 | 本函数 | 应有结论 |
+/// |---|---|---|
+/// | 忙态（底栏完好在场） | `false` | 仍在跑 ✅ |
+/// | 重绘中（底栏**被截断**） | `true` | 仍在跑 ❌ 误判 |
+/// | 重绘中（底栏**整行缺失**） | `true` | 仍在跑 ❌ 误判 |
+///
+/// 提前投递的后果正是本批修掉的那个 bug 的**窄化形态**（正文落进旧回合队列）。
+/// 故本函数是**单帧原语**，判「已停」必须经 [`poll_turn_stopped`] 的**稳定闸**
+/// （连续 [`TURN_STOP_STABLE_FRAMES`] 拍一致）——**不要**直接拿本函数当结论用。
+///
+/// # 语义边界（保守方向）
+///
+/// 只看「有没有忙态串」，不做任何「空闲态串在场」的正向判据——真机上忙态与空闲态的
+/// **唯一可靠差别**就是这一串（四档空闲态的 `for agents` 前缀各不相同：
+/// `· ← for agents` / `·  for agents` / `· ? for shortuts ·←for agents`，而忙态是
+/// `·esc to interrupt ·←for agents`）。正向断言会把某档的排版变体当成「没认出空闲」
+/// 而永远等下去。
 ///
 /// **空行集也判「已停」**（`lines.is_empty()` → `true`）：无内容即无忙态串。这是
 /// **有意的**——屏读能力不可用由调用方（[`poll_turn_stopped`] 的 `read` 闭包返回
 /// `None`）区分，而不是在这里；`None` 与「读到一屏空内容」是两回事（后者真机上就是
-/// 一个刚清屏的窗口）。
+/// 一个刚清屏的窗口）。注意空屏在稳定闸下**需要连续两拍都是空的**才算数。
 pub fn turn_stopped_in_lines(lines: &[String]) -> bool {
     !lines
         .iter()
         .any(|l| l.to_lowercase().contains(TURN_BUSY_MARKER))
 }
 
+/// **稳定闸的连续拍数**（2026-09-22 R2 必修项 3）：「已停」是**稳定**属性，
+/// 需要**连续 N 拍**都读到「不含忙态串」才成立。
+///
+/// # 为什么是 2（取值理由）
+///
+/// 1. **瞬态的量级**：重绘期底栏缺失是**一帧**级现象（一次重绘期间的同屏），
+///    紧邻两拍**都**落在同一段重绘里需要两次独立的截断事件连续发生——概率远低于
+///    单拍；而 `POLL_STEP_MS` = 100ms 一拍，两拍间隔 ≥100ms 已跨过单次重绘；
+/// 2. **代价对称**：N 越大越保守（更少误判），但**多等 N−1 拍**（每次插队多 100ms）；
+///    N=2 用最小代价换掉最主要的误判源，N≥3 只是把已经很小的概率再压一点，
+///    却让**每次**插队都多付 100–200ms；
+/// 3. **与既有轮询纪律一致**：D20 的其余落点等的是「某串**出现**」（出现即证据，
+///    缺席才是噪声）；本处反向——**缺席**才是判据，而缺席天然被瞬态污染，
+///    故只需一道**最小**的抗噪闸（连续一致），不必要求长稳（那是「稳定」的过度解读：
+///    真机上「回合已停」是**持久**状态，两拍一致已经把它与一帧瞬态分开）。
+///
+/// 「连续一致」的定义见 [`poll_turn_stopped`]：中途任何一拍读到忙态串 → 计数归零。
+pub const TURN_STOP_STABLE_FRAMES: u32 = 2;
+
 /// **插队「等回合停」的轮询内核**（宪法 D20(a)(b)）：最多 `rounds` 拍，每拍
-/// `read` 一屏 → [`turn_stopped_in_lines`] 判「回合已停」——命中**即刻停止**；
-/// 窗尽用**最后一拍**的观察定结论。
+/// `read` 一屏 → [`turn_stopped_in_lines`] 判本帧 → **连续 [`TURN_STOP_STABLE_FRAMES`]
+/// 拍一致**才判「已停」（命中**即刻停止**）；窗尽用最后一拍的观察定结论。
 ///
 /// # 为什么走闭包（本批的硬要求，不许只有实机能覆盖）
 ///
@@ -234,18 +271,29 @@ pub fn turn_stopped_in_lines(lines: &[String]) -> bool {
 /// `wait_input_drained`（我们自己的输入缓冲事件数），在真机上**写完即空** → 立刻
 /// 返回 → 正文紧跟着 Esc 落进正在收尾的旧回合。把屏读做成可注入的 `read` 闭包后，
 /// 门禁内就能用**脚本化屏序列**驱动（真机忙屏 → 真机闲屏）并断言「等到了才投递」
-/// 「只读 2 拍」「窗尽仍是忙态 → 不冒充送达」。
+/// 「只读 N 拍」「窗尽仍是忙态 → 不冒充送达」。
 ///
-/// 参数形态对齐 [`super::mode::poll_mode_readback`]：`read` 返回 `None` = **读不到屏**
-/// （平台无屏读能力 / attach 失败）；`settle` 给 TUI 重绘留时间（生产 =
-/// [`super::timing::POLL_STEP_MS`] 睡眠，测试 = 推进脚本的空操作）。
+/// # 稳定闸（2026-09-22 R2 必修项 3：单帧判据不安全）
 ///
-/// # 四类输入的语义（`None` 与「读到空屏」不同）
+/// 单帧「不含忙态串」在**重绘瞬态**下为真却**不代表回合停了**（底栏被截断/整行缺失
+/// ——见 [`turn_stopped_in_lines`] 的三格表）。故判据是「**稳定的**缺席」：
+/// 连续 [`TURN_STOP_STABLE_FRAMES`] 拍都读到不含忙态串 → `Stopped`；中途任何一拍
+/// 读到忙态串 → **计数归零**重新起算（那一拍之前的无忙帧不算数）。
+///
+/// **判据本身包含「稳定」这一属性**（D20(a) 的读法）：瞬态不是判据。命中即刻停止的
+/// 语义保持——但「命中」现在是**连续 N 拍一致**，故最小读数为 `stable_frames` 拍。
+///
+/// # 参数形态（对齐 [`super::mode::poll_mode_readback`]）
+///
+/// `read` 返回 `None` = **读不到屏**（平台无屏读能力 / attach 失败）；`settle` 给
+/// TUI 重绘留时间（生产 = [`super::timing::POLL_STEP_MS`] 睡眠，测试 = 空操作）。
+///
+/// # 输入语义（`None` 与「读到空屏」不同）
 ///
 /// | `read()` | 本拍判定 | 产出 |
 /// |---|---|---|
-/// | `Some(含忙态串)` | 仍在跑，继续等 | 继续轮询 |
-/// | `Some(不含忙态串)` | **已停，立即返回** | [`TurnStopPoll::Stopped`] |
+/// | `Some(含忙态串)` | 仍在跑；**稳定计数归零** | 继续轮询 |
+/// | `Some(不含忙态串)` | 本帧「无忙态串」；连续计数 +1 | 达 [`TURN_STOP_STABLE_FRAMES`] → [`TurnStopPoll::Stopped`] |
 /// | `None`（读不到屏） | **立即返回「判据不可得」** | [`TurnStopPoll::Unverifiable`] |
 ///
 /// # 为什么首拍 None 不空转满窗（**本函数的短路径**）
@@ -260,7 +308,7 @@ pub fn turn_stopped_in_lines(lines: &[String]) -> bool {
 /// 我们本来也无法验证回合停没停，投递仍是 best-effort，**回执保持既有的「已送达」
 /// 口径**（[`TurnStopWait::Unverifiable`]，理由见该变体注——与 D7/T3 在非 Windows 上
 /// 「分诊不可达则行为与 T3 前一致」同一裁决）。在真机（Windows conhost）上屏读可读，
-/// 本条不触发。
+/// 本条不触发。**稳定闸不适用于本格**（没有「连续 N 拍」可言：一拍都读不到）。
 ///
 /// # 两种 `false` 的**本质区别**（[`TurnStopPoll`] 的第三态）
 ///
@@ -275,46 +323,75 @@ where
     Sl: FnMut(),
 {
     let effective = rounds.max(1); // 0 拍 = 不读 = 放弃，不是有界轮询
+                                   // 连续「无忙态串」的拍数（中途读到忙态串即归零——见函数文档的稳定闸一节）
+    let mut streak: u32 = 0;
+    let mut reads: u32 = 0;
     for i in 0..effective {
+        reads = i + 1;
         match read() {
             // 屏读不可用：无判据可读 → 不空转满窗（理由见函数文档）
             None => {
                 log::debug!(
-                    "插队等回合停：第 {}/{effective} 拍屏读不可用——无判据可读，不空转满窗\
-                     （D20(a)），回执保持既有 best-effort 口径",
-                    i + 1
+                    "插队等回合停：第 {reads}/{effective} 拍屏读不可用——无判据可读，不空转满窗\
+                     （D20(a)），回执保持既有 best-effort 口径"
                 );
-                return TurnStopPoll::Unverifiable { reads: i + 1 };
+                return TurnStopPoll::Unverifiable { reads };
             }
             Some(lines) if turn_stopped_in_lines(&lines) => {
+                streak += 1;
+                if streak >= TURN_STOP_STABLE_FRAMES {
+                    log::debug!(
+                        "插队等回合停：第 {reads}/{effective} 拍——连续 {streak} 拍读到忙态串\
+                         消失（**稳定判据成立**，命中即刻停止）"
+                    );
+                    return TurnStopPoll::Stopped {
+                        reads,
+                        stable_frames: streak,
+                    };
+                }
                 log::debug!(
-                    "插队等回合停：第 {}/{effective} 拍读到忙态串消失（命中即刻停止）",
-                    i + 1
+                    "插队等回合停：第 {reads}/{effective} 拍无忙态串（连续 {streak}/\
+                     {TURN_STOP_STABLE_FRAMES} 拍）——**还不够稳定**，继续等\
+                     （重绘截断/底栏缺失会伪装成「已停」，见 turn_stopped_in_lines 注）"
                 );
-                return TurnStopPoll::Stopped { reads: i + 1 };
             }
-            // 仍是忙态：继续等（D20(a) 动态轮询；末拍不再 settle）
-            Some(_) => {}
+            // 读到忙态串：回合仍在跑，**稳定计数归零**（此前那些无忙帧不算数）
+            Some(_) => {
+                if streak > 0 {
+                    log::debug!(
+                        "插队等回合停：第 {reads}/{effective} 拍又有忙态串——稳定计数归零\
+                         （此前 {streak} 拍无忙帧作废，重绘可能刚露出一帧半屏）"
+                    );
+                }
+                streak = 0;
+            }
         }
         if i + 1 < effective {
             settle();
         }
     }
-    log::debug!("插队等回合停：窗尽（{effective} 拍）仍未读到「回合已停」——如实降级（不冒充送达）");
-    TurnStopPoll::StillRunning { reads: effective }
+    log::debug!(
+        "插队等回合停：窗尽（{effective} 拍）仍未读到**稳定**的「回合已停」\
+         （最后一拍连续 {streak}/{TURN_STOP_STABLE_FRAMES}）——如实降级（不冒充送达）"
+    );
+    TurnStopPoll::StillRunning { reads }
 }
 
 /// [`poll_turn_stopped`] 的产物（**三态**，形态对齐 `mode::ModeReadbackOutcome`：
 /// 拍数可断言——「命中即停、只读 N 拍」这条 D20(a) 判据在门禁内要能钉住）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnStopPoll {
-    /// 屏读到忙态串消失 = 回合真的停了
+    /// 屏读到忙态串**连续 [`TURN_STOP_STABLE_FRAMES`] 拍缺席**（稳定判据）= 回合真的停了
     Stopped {
-        /// 实际屏读次数（命中那一拍）
+        /// 实际屏读次数（= 达成连续一致的那一拍）
         reads: u32,
+        /// 达成时的连续无忙帧数（**恒等于 [`TURN_STOP_STABLE_FRAMES`]**；携带它是为让
+        /// 「稳定闸确实生效」在断言里可直接读，而不是靠 `reads` 反推）
+        stable_frames: u32,
     },
-    /// **等过但没等到**：屏读可用，但窗内每拍都读到忙态串（含窗尽）——「未及确认」
-    /// 的如实形态，**不得**当成成功（2026-09-22 实机假成功的形态正是把它当成功）
+    /// **等过但没等到**：屏读可用，但窗内始终没有连续 N 拍一致的无忙帧（含窗尽）——
+    /// 「未及确认」的如实形态，**不得**当成成功（2026-09-22 实机假成功的形态正是把
+    /// 它当成功）
     StillRunning {
         /// 实际屏读次数（= 窗内拍数）
         reads: u32,
@@ -331,7 +408,7 @@ impl TurnStopPoll {
     /// 实际屏读次数（三态共用；日志与测试读它）
     pub fn reads(self) -> u32 {
         match self {
-            Self::Stopped { reads }
+            Self::Stopped { reads, .. }
             | Self::StillRunning { reads }
             | Self::Unverifiable { reads } => reads,
         }
@@ -1134,30 +1211,133 @@ mod tests {
         (out, reads.get(), settles.get())
     }
 
-    /// **① 忙屏 → 下一拍空闲态屏**：断言「等到了才停」且**只读 2 拍**（D20(a) 命中
-    /// 即刻停止——不是读满窗）。
+    /// **① 忙屏 → 空闲屏 → 空闲屏**：稳定闸（连续 [`TURN_STOP_STABLE_FRAMES`]）成立才停
+    /// ——断言「等到了稳定判据才停」且**只读 3 拍**（命中即刻停止，不是读满窗）。
     ///
-    /// 夹具 = 真机忙态底栏 → 真机空闲态底栏（**两帧真机原文**）。
+    /// 夹具 = 真机忙态底栏 → 两帧真机空闲态底栏（**真机原文**；第二帧是稳定闸要的
+    /// 「连续第二拍」）。
     ///
     /// 还原动作（变异②）：把 [`poll_turn_stopped`] 的命中分支 `return` 去掉（继续
-    /// 轮询满窗）→ 本测试的 `reads == 2` 与 `settles == 1` 两条断言**先红**（会读到
+    /// 轮询满窗）→ 本测试的 `reads == 3` 与 `settles == 2` 两条断言**先红**（会读到
     /// 30 拍、settle 29 次）。
     #[test]
-    fn turn_stop_poll_hits_on_second_frame_and_stops_immediately() {
+    fn turn_stop_poll_stops_on_stable_frames_immediately() {
         use real_screens::*;
         let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
         let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
-        let (out, reads, settles) = run_turn_stop_script(30, &[Some(&busy), Some(&idle)]);
+        let (out, reads, settles) =
+            run_turn_stop_script(30, &[Some(&busy), Some(&idle), Some(&idle)]);
         assert_eq!(
             out,
-            TurnStopPoll::Stopped { reads: 2 },
-            "第二拍读到忙态串消失 → 必须判「已停」（这一拍就是判据本身）"
+            TurnStopPoll::Stopped {
+                reads: 3,
+                stable_frames: 2
+            },
+            "连续两拍无忙态串（稳定判据成立）→ 判「已停」"
         );
         assert_eq!(
-            reads, 2,
-            "**只读 2 拍**：命中即刻停止（D20(a)，不读满 30 拍）"
+            reads, 3,
+            "**只读 3 拍**：稳定判据成立即停（D20(a)，不读满 30 拍）"
         );
-        assert_eq!(settles, 1, "命中当拍不再 settle（两拍之间恰好等一次）");
+        assert_eq!(settles, 2, "命中当拍不再 settle（三拍之间恰好等两次）");
+    }
+
+    /// **★ 必修项 3 主锁：重绘瞬态不得进**（单帧判据不安全）。
+    ///
+    /// 序列 = [忙态, **缺底栏一拍**, 忙态, 空闲, 空闲]——第二拍底栏整行缺失（或截断）
+    /// 是**重绘瞬态**的形态（独立探测实证同类：codex 弹窗首帧 `? 1. out` → 静止后
+    /// `› 1.`），它在**单帧判据**下恒判「已停」（`turn_stopped_in_lines` 三格表的
+    /// 中间两格）。本测试断言：**中途不在那一拍提前判停**，最终在稳定判据成立时
+    /// （第 5 拍）才 `Stopped`。
+    ///
+    /// 拍数断言的判别力：`reads == 5`——**若没有稳定闸**，第 2 拍就会返回 `Stopped
+    /// { reads: 2 }`（这正是本必修项要杀的形态）。故「不能是 2 拍」由本断言钉住。
+    ///
+    /// 还原动作（变异⑥）：把稳定闸拆掉（`streak >= 1` 或恢复单帧即返回）→ 本测试
+    /// 先红（`left: Stopped { reads: 2, … }, right: Stopped { reads: 5, … }`）。
+    #[test]
+    fn turn_stop_poll_ignores_redraw_transient_frame() {
+        use real_screens::*;
+        let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
+        // 重绘瞬态：底栏**整行缺失**（屏幕上只有正文与空行——既无忙态串，也无正常
+        // 底栏）。这是真机重绘期最典型的形态之一。
+        let redraw_missing = lines(&["", "  ⎿  Tip: Name your conversations with /rename", ""]);
+        // 另一种瞬态：底栏**被截断**（行还在但只剩后半段——忙态串那半段没画出来）
+        let redraw_truncated = lines(&["✽ Nebulizing…", "  tab to cycle) ·←for ago"]);
+        let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
+
+        // 前提自证（**夹具必须真的构成瞬态形态**，否则本用例退回空断言）：
+        // 两种瞬态在**单帧**判据下都判「已停」——这正是误判源，也是本测试的存在理由
+        for t in [&redraw_missing, &redraw_truncated] {
+            assert!(
+                turn_stopped_in_lines(t),
+                "夹具自检：重绘瞬态在单帧判据下**必然**判「已停」（这就是误判源）：{t:?}"
+            );
+        }
+
+        let (out, reads, _) = run_turn_stop_script(
+            30,
+            &[
+                Some(&busy),
+                Some(&redraw_missing),
+                Some(&busy),
+                Some(&idle),
+                Some(&idle),
+            ],
+        );
+        assert_eq!(
+            out,
+            TurnStopPoll::Stopped {
+                reads: 5,
+                stable_frames: 2
+            },
+            "重绘瞬态那一拍**不得**提前判停——稳定判据（第 4/5 拍连续）成立时才停"
+        );
+        assert_ne!(
+            reads, 2,
+            "**关键断言**：不得在第 2 拍（瞬态帧）就停——那正是「窄化形态」的假成功"
+        );
+        assert_eq!(reads, 5, "第 5 拍才达成连续两帧（第 4、5 拍）");
+    }
+
+    /// **★ 必修项 3 第二锁：稳定闸生效（中途单拍空闲不足以判停）**。
+    ///
+    /// 序列 = [忙态, 空闲, 忙态, 空闲, 空闲]——第 2 拍空闲是**孤立的**（前后都是忙态），
+    /// 稳定计数必须**归零**（第 3 拍的忙态作废了它）；真正的稳定判据在第 4/5 拍成立。
+    ///
+    /// 与上一锁分工：上一锁杀「瞬态缺帧」，本锁杀「**单拍偶然空闲**」（屏上确实是空闲
+    /// 态的排版，但只存在一拍——例如恰好读到回合切换的中间帧）。
+    ///
+    /// 还原动作（变异⑦）：把忙态分支的 `streak = 0` 删掉（计数不归零）→ 本测试先红
+    /// （第 4 拍读空闲时 `streak` 会是 1+2=3 ≥ 2，提前在 `reads: 4` 停；且第 2 拍后
+    /// 第 3 拍若按累加语义更早停在 3 拍）。
+    #[test]
+    fn turn_stop_poll_resets_streak_on_busy_frame() {
+        use real_screens::*;
+        let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
+        let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
+        let (out, reads, _) = run_turn_stop_script(
+            30,
+            &[
+                Some(&busy),
+                Some(&idle),
+                Some(&busy),
+                Some(&idle),
+                Some(&idle),
+            ],
+        );
+        assert_eq!(
+            out,
+            TurnStopPoll::Stopped {
+                reads: 5,
+                stable_frames: 2
+            },
+            "中途那一拍孤独空闲**不足以**判停（第 3 拍忙态把它作废），第 5 拍才达标"
+        );
+        assert_eq!(
+            reads, 5,
+            "稳定计数必须归零：若在 4 拍内就停，说明忙态没让计数归零"
+        );
     }
 
     /// **② 全程忙态（窗尽仍未停）**：断言落到 [`TurnStopPoll::StillRunning`] 且读满窗
@@ -1181,6 +1361,25 @@ mod tests {
         assert_eq!(settles, 4, "末拍不再 settle");
     }
 
+    /// **窗尽时「只差一拍」也仍是 `StillRunning`**（稳定闸把有效判据拍数少 1 的
+    /// 直接后果）：窗内只有**最后一拍**读到无忙态串（前 N−1 拍都忙）→ 连续数只有 1
+    /// < 2 → 不得判停。这是「窗沿」的边界锁。
+    ///
+    /// 还原动作（变异⑧）：把稳定闸拆掉 → 本测试先红（会返回 `Stopped { reads: 3 }`）。
+    #[test]
+    fn turn_stop_poll_window_edge_needs_one_more_frame() {
+        use real_screens::*;
+        let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
+        let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
+        // 3 拍窗：忙、忙、闲——最后一拍无忙帧但**连续数只有 1**
+        let (out, _, _) = run_turn_stop_script(3, &[Some(&busy), Some(&busy), Some(&idle)]);
+        assert_eq!(
+            out,
+            TurnStopPoll::StillRunning { reads: 3 },
+            "窗沿只有最后一拍无忙帧 → 连续数 1 < {TURN_STOP_STABLE_FRAMES}，不得判停"
+        );
+    }
+
     /// **③ 屏读不可用（`None`）→ 首拍即返回 `Unverifiable`**（不空转满窗：无判据可读
     /// 时把窗睡满正是 D20(a) 禁止的「用固定睡眠替代轮询」，与 `poll_mode_readback` 的
     /// 「无判据只读一拍」先例同构）。
@@ -1188,6 +1387,8 @@ mod tests {
     /// **本态与 `StillRunning` 分列的存在意义**（防合并成布尔的回归）：合并会把「没读屏」
     /// 说成「回合没停」——那是编造（本仓「结论不超证据」）。macOS 无屏读，若因此降级，
     /// 它的插队回执会被永久打成「已投递未确认」。
+    ///
+    /// **稳定闸不适用于本格**（没有「连续 N 拍」可言）：一拍都读不到即返回，故读数恒 1。
     ///
     /// 还原动作（变异④）：把 `None` 分支改成「继续等满窗」→ 本测试的 `reads == 1` /
     /// `settles == 0` / 变体断言三条**全红**。
@@ -1212,24 +1413,28 @@ mod tests {
         );
     }
 
-    /// **判据不得被「旧帧」骗过**：忙屏 → 忙屏 → 空闲屏（第三拍才停）——断言停在第 3 拍
-    /// （多拍忙态不是「读到就停」，而是**每拍重判**）。
+    /// **判据不得被「旧帧」骗过**：忙屏 → 忙屏 → 空闲屏 → 空闲屏（第四拍才停）——断言
+    /// 稳定判据在第 4 拍成立（多拍忙态不是「读到就停」，而是**每拍重判 + 连续计数**）。
     ///
-    /// 这条与 ① 分工：① 锁「命中即停」，本条锁「未命中不得提前停」（两拍忙态若被
-    /// 误判成「已停」，正文就会落进正在收尾的旧回合——正是本 bug 的形态）。
+    /// 这条与 ① 分工：① 锁「稳定判据成立即停」，本条锁「未达稳定不得提前停」（两拍忙态
+    /// 若被误判成「已停」，正文就会落进正在收尾的旧回合——正是本 bug 的形态）。
     #[test]
     fn turn_stop_poll_keeps_waiting_through_busy_frames() {
         use real_screens::*;
         let busy = lines(&["●Thinking for 23s…", CLAUDE_BUSY_FOOTER]);
         let busy2 = lines(&["✽ Nebulizing… (1m 51s ·↓3.1k tokens)", CLAUDE_BUSY_FOOTER]);
         let idle = lines(&["✻ Sautéed for 13s · done 14:56", CLAUDE_IDLE_FOOTER]);
-        let (out, reads, _) = run_turn_stop_script(30, &[Some(&busy), Some(&busy2), Some(&idle)]);
+        let (out, reads, _) =
+            run_turn_stop_script(30, &[Some(&busy), Some(&busy2), Some(&idle), Some(&idle)]);
         assert_eq!(
             out,
-            TurnStopPoll::Stopped { reads: 3 },
-            "第三拍空闲态 → 已停"
+            TurnStopPoll::Stopped {
+                reads: 4,
+                stable_frames: 2
+            },
+            "两拍忙态 + 两拍空闲 → 第 4 拍稳定判据成立"
         );
-        assert_eq!(reads, 3, "两拍忙态不得提前停（每拍重判）");
+        assert_eq!(reads, 4, "两拍忙态不得提前停（每拍重判 + 计数归零）");
     }
 
     /// **轮询产物 → 回执等待态的三态映射**（[`TurnStopWait::from_poll`] 的表驱动）：
@@ -1241,7 +1446,13 @@ mod tests {
     #[test]
     fn turn_stop_wait_maps_poll_states_one_to_one() {
         let cases = [
-            (TurnStopPoll::Stopped { reads: 1 }, TurnStopWait::Stopped),
+            (
+                TurnStopPoll::Stopped {
+                    reads: 2,
+                    stable_frames: 2,
+                },
+                TurnStopWait::Stopped,
+            ),
             (
                 TurnStopPoll::StillRunning { reads: 30 },
                 TurnStopWait::StillRunning,
@@ -1254,5 +1465,33 @@ mod tests {
         for (poll, want) in cases {
             assert_eq!(TurnStopWait::from_poll(poll), want, "映射格 {poll:?}");
         }
+    }
+
+    /// **稳定拍数常量钉值 + 它的取值必须 > 1**（稳定闸的语义下限）：`stable_frames == 1`
+    /// 等于没有闸（那正是本必修项要修的形态）。
+    ///
+    /// 还原动作（变异⑨）：把 `TURN_STOP_STABLE_FRAMES` 改成 1 → 本测试先红（同时另有
+    /// 三例（瞬态/孤独空闲/窗沿）也会红）。
+    #[test]
+    fn turn_stop_stable_frames_pinned_and_more_than_one() {
+        assert_eq!(
+            TURN_STOP_STABLE_FRAMES, 2,
+            "稳定闸拍数：改值必须过此关（并同步其文档与实测项）"
+        );
+        // 编译期断言（clippy::assertions_on_constants 要求：常量之间的比较走 const 块，
+        // 与 families.rs 的 FALLBACK_SPEC 钉值 / timing.rs 的窗间比较同款）
+        const _: () = assert!(
+            TURN_STOP_STABLE_FRAMES > 1,
+            "稳定闸 ≤ 1 等于没有闸——单帧判据在重绘瞬态下会误判（必修项 3 的形态）"
+        );
+        // 与窗的对账：窗内拍数必须显著大于稳定拍数（否则稳定闸永远达不成 =
+        // 插队恒定降级为「已投递未确认」，那是把功能打瘸而不是修 bug）
+        assert!(
+            crate::inject::timing::poll_rounds(crate::inject::timing::TURN_STOP_POLL_TOTAL_MS)
+                >= TURN_STOP_STABLE_FRAMES * 5,
+            "窗（{} 拍）必须远大于稳定拍数（{}）——否则插队恒定降级",
+            crate::inject::timing::poll_rounds(crate::inject::timing::TURN_STOP_POLL_TOTAL_MS),
+            TURN_STOP_STABLE_FRAMES
+        );
     }
 }
