@@ -23,10 +23,12 @@
 
 ## §1 范围
 
-**入**：四家（claude/codex/kimi/opencode）的 问答多题/多选交互、三家自由作答（issue #78）、对话框解析锚点、权限菜单解析加固、回读校准+档位高亮、打断式插队扩展（codex/kimi）、配色统一、composer 占位一致性。
+**入**：四家（claude/codex/kimi/opencode）的 问答多题/多选交互、三家自由作答（issue #78）、对话框解析锚点、权限菜单解析加固、回读校准+档位高亮、打断式插队扩展（codex/kimi；**opencode 于 Stage 1 用户实测后扩入**——Esc 打断直插 + Ctrl+C 禁注，裁19）、配色统一、composer 占位一致性。
 **不入**（维持批次丁 §5 与本轮追加）：kimi server API（未开）、opencode 会话内权限切档（官方无能力）、codex Permission Profiles（beta）、协议路线（三期）、zcode/dsh/workbuddy/openclaw。
 
 ## §2 现状基线
+
+> **注（2026-09-22 Stage 1 收口后）**：本节为 R2 时点快照，保留作历史基线；Stage 1 探测 + 三轮用户实测后的现状、定案与矛盾审计以差距矩阵 §6 为准。
 
 R2 后（HEAD 3c0929b）：四家「问答单选即答/审批二元/审批 N 选项（解析锚点待改）/模式切换+模式组回读/计划卡」可用；**缺口**=问答多选（kimi 双切抵消、opencode toggle 未实现）、问答多题（四家只读或缺失）、三家自由作答、权限菜单定位（kimi 总是询问/codex 有待决时）、权限档回读（codex/kimi）、打断式插队扩展（codex/kimi）、对话框解析误纳（claude 计划正文编号列表误纳实证）、配色与布局（裁11/12）。详见 gap 矩阵 §2。
 

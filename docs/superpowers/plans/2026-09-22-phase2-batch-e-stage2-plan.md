@@ -10,15 +10,15 @@
 | 本计划 | 设计文稿 §4 旧编号 | gap 矩阵 §3 旧编号 | 覆盖 |
 |---|---|---|---|
 | S2-T1 | —（§6.6-A1 新增） | — | 插队撤回窗口防护 |
-| S2-T2 | 戊5（部分） | 戊4（部分） | claude 审批数字优先双路径（A2） |
+| S2-T2 | 戊5（部分）+§6.6-A2 新增 | 戊4（部分）+§6.6-A2 新增 | claude 审批数字优先双路径（A2） |
 | S2-T3 | 戊6 | 戊5 | 权限菜单解析加固（A4/N6/N2②） |
-| S2-T4 | 戊6（部分）+戊8（部分） | 戊5（部分）+戊8 | codex Default 回读+守卫前置（A5/N2①③） |
+| S2-T4 | 戊6（部分）+戊7（部分） | 戊5（部分）+戊8 | codex Default 回读+守卫前置（A5/N2①③） |
 | S2-T5 | 戊5 | 戊4 | 对话框解析锚点+布局契约（N5/裁12） |
 | S2-T6 | 戊3 | 戊3 | kimi 问答键序重构（N7/A3） |
-| S2-T7 | 戊2 | 戊1 | codex 多题卡+Tab 备注（N1/issue#78） |
-| S2-T8 | 戊1 | 戊2 | opencode 多题/多选卡（N4） |
+| S2-T7 | 戊2+戊4（codex 面） | 戊1 | codex 多题卡+Tab 备注（N1/issue#78） |
+| S2-T8 | 戊1+戊4（opencode 面） | 戊2 | opencode 多题/多选卡（N4） |
 | S2-T9 | 戊4 | — | 三家自由作答统一（issue #78 关闭） |
-| S2-T10 | 戊8 | 戊8（部分） | 插队扩展三工具+队列语义 |
+| S2-T10 | 戊8+范围扩展（opencode 扩入） | —（矩阵 §2「其他」插队行） | 插队扩展三工具+队列语义 |
 | S2-T11 | 戊7 | 戊6 | 回读校准+档位高亮（N8） |
 | S2-T12 | 戊9 | 戊7 | 配色统一蓝系+composer 占位（裁11） |
 | S2-T13 | 丁T6' | 戊9 | 收口 |
@@ -27,7 +27,7 @@
 
 ## §1 夹具库（TDD 输入，先建后开工）
 
-全部取自探测档案「裁15 逐行原文」节，拷入 `src-tauri/tests/fixtures/e-stage2/`（跨语言共享，参照 `plan_pending_cases.json` 先例）：
+全部取自探测档案「裁15 逐行原文」节，拷入**仓库根** `tests/fixtures/e-stage2/`（跨语言共享先例=`tests/fixtures/plan_pending_cases.json`：Rust 侧经 `../tests/fixtures/e-stage2/` 读、vitest 同路径读）：
 
 | 夹具文件 | 来源档案 | 用途 |
 |---|---|---|
@@ -35,7 +35,7 @@
 | `claude-recall-state.txt` / `claude-interrupted-state.txt` | 戊探F claude 段（撤回态=消息回输入行；中断态=`Interrupted` 标记） | T1 撤回窗口判据 |
 | `codex-perm-menu-idle.txt` / `-busy.txt` | 戊探D codex 段（4 份 dump 行号一致；busy 混屏含滚动正文） | T3/T4 |
 | `kimi-perm-menu-{permission,yolo,auto}.txt` + `kimi-perm-receipt.txt` | 戊探D kimi 段 + K-1 回执实录 | T3/T11 |
-| `kimi-question-multi-q.txt` / `-review.txt` | 用户 K-5 实录（多题屏+Review 汇总屏） | T6 |
+| `kimi-question-multiselect.txt` / `kimi-question-multi-q.txt` / `kimi-question-review.txt` | 用户 K-5 实录（多选题屏/多题屏/Review 汇总屏）+ 戊探B 单题 Review 屏 | T6 |
 | `codex-notes-inline.txt` + rollout `user_note` 行 | 戊探C | T7 |
 | `opencode-confirm-page.txt` / `-checked.txt` | 戊探A（Confirm 页/勾选态） | T8 |
 
@@ -55,7 +55,7 @@
 
 ### S2-T3 · 权限菜单解析加固·codex+kimi（A4/N6/N2②）
 - **定案输入**：词典 §2「权限菜单三态」「busy 换档生效」+ §3「权限菜单定位」（五锚/两行组）——戊探D 两段。
-- **改动**：`inject/mode.rs` `locate_menu_items` 分家——**codex**：标题 `Update Model Permissions` ↔ footer `Press enter to confirm or esc to go back` 短语窗 + 编号项模式（折行不产新项）+ `(current)`；**kimi**：标题 `Select permission mode` ↔ footer 窗 + **两行组**（标签行+缩进描述行归属）+ `▶`(U+25B6) 光标 + `← current`；关键词簇判据退役（删除，不留兜底——词典裁20 口径）。
+- **改动**：`inject/mode.rs` `locate_menu_items` 分家——**codex**：标题 `Update Model Permissions` ↔ footer `Press enter to confirm or esc to go back` 短语窗 + 编号项模式（折行不产新项）+ `(current)`；**kimi**：标题 `Select permission mode` ↔ footer 窗 + **两行组**（标签行+缩进描述行归属）+ `▶`(U+25B6) 光标 + `← current`；关键词簇判据退役（删除，不留兜底——依据=戊探D kimi 段五锚实证 + N6 失败行归因；词典已按裁20 清为单一口径）。
 - **TDD**：kimi 三档定位 + 「总是询问」跨折行可达（N6 失败行 `Never interrupts you;…` 正确归属 Never Ask 描述行）；codex 4 项定位 + busy 混屏 dump（滚动正文 row≤18）不污染菜单块；折行归属锁。
 - **DoD**：kimi「总是询问」`#[ignore]` 实机切换成功（回执 `Permission mode: Always Ask`）。
 
@@ -94,6 +94,7 @@
 - **定案输入**：词典 §1–§4 busy/插队行（清淤版）+ 裁16/裁19。
 - **改动**：`inject/mode.rs` `supports_interrupt` 扩展 + `inject/queue.rs` 分家键序——**codex**=打字→Tab 入队→Esc 直插（回退=草稿+Esc+手动 Enter）；**opencode**=Esc 打断直插（草稿态）；**kimi**=busy 直接投递即**排队制**（回合结束自动开新回合，无需 Esc）+ 可选 **Ctrl+S 立即插队**（产品 Rust 引擎通道 `#[ignore]` 复验**通过才上**，不通过则只留排队制）；回执语义按**整队批量**（裁16）；**opencode Ctrl+C 全局禁注**（注入引擎层键黑名单，裁19）。
 - **TDD**：四家插队键序档路由锁；Ctrl+C 黑名单锁；kimi 排队回执语义锁（不谎报 delivered）。
+- **注**：opencode 插队全链（打字→Esc 后草稿去向/是否需手动提交）词典未定案——`#[ignore]` 实机首验时定案并回填词典，实现不得预填键序。
 - **DoD**：codex/opencode `#[ignore]` 实机插队各一；kimi Ctrl+S 复验结论落档（无论过否）。
 
 ### S2-T11 · 回读校准 + 档位高亮（N8；kimi 权限档部分依赖 T3）

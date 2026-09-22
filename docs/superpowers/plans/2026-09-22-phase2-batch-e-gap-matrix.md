@@ -169,3 +169,5 @@
 | A6 | 文档口径残留（低优先） | C-4「busy 插队命中排空回执」为批次乙旧口径（R2 已改屏读等回合停，C-25/C-47 为新口径） | — | Stage 2 收口（丁T6'）时统一清单新旧口径 |
 
 **B 类 · 新增行为（无现行实现冲突，按 §4 任务序补入）**：kimi 插队两路（Ctrl+S 不打断优先/Esc 打断版）+排队制回执（戊8）；codex 插队改用户键序=打字→Tab 入队→Esc 直插（探针「草稿+Esc+手动 Enter」为回退路径）（戊8）；opencode 插队=Esc 打断直插+⛔Ctrl+C 禁注（戊8）；kimi 多题卡=数字+自动推进+Review 汇总（与 codex/claude 同构）（戊3）；codex Tab 备注/自由文本 toggle+框内数字入文本（issue #78，戊4）；kimi 权限档回读锚 `Permission mode: <档名>`+codex `(current)`（戊6）；claude/kimi 队列整队批量语义（回执按整队设计）（戊8）；busy 态一律不拦权限/模式（守卫条件收窄，§6.5）。
+
+> **§6.6 落点映射（2026-09-22 补）**：修法落点已按 Stage 2 计划编号对齐（`2026-09-22-phase2-batch-e-stage2-plan.md`）——A1→S2-T1、A2→S2-T2、A3→S2-T6（任务约束）、A4→S2-T3、A5→S2-T4、A6→S2-T13；B 类→S2-T6–T12（T10 含 opencode 插队扩入，设计文稿 §1 已同步）。
