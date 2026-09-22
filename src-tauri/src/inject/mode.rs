@@ -104,19 +104,60 @@
 
 use crate::inject::dialog::DialogOption;
 
-/// 该工具是否支持**打断式插队**（批次丙 T9：运行中会话先 Esc 中断再投递）。
+/// 该工具是否支持**打断式插队**（批次丙 T9 定名；批次戊 E1 扩展为三家）。
 ///
-/// **只有 claude**：K2 实机取证（探测档案 2026-09-21-claude-askuserquestion）——
-/// Esc 落入 busy 回合 = 中断该回合（"Interrupted · What should Claude do instead?"），
-/// 这正是插队想要的语义。
+/// 语义 = busy 运行中「立即发送」需要 **Esc 类控制键**参与（[`jump_sequence`]
+/// 非 [`JumpSequence::QueueOnly`]）：
+/// - **claude**：Esc 中断 → 队列整队取出开新回合（丁T9 语义链 + 戊探F 2.1.278 复现；
+///   用户实测：撤回是功能非异常，防护见 confirm::claude_input_line_has_residue）；
+/// - **codex**：打字→Tab 入队→Esc×1 直插（用户人工实测 2026-09-22 两轮终裁；
+///   探测回退路径=草稿+Esc+手动 Enter，戊探F ×2）；
+/// - **opencode**：Esc 打断+直插（用户人工实测 2026-09-22）。
 ///
-/// 其他工具**未实测**（codex 的 Esc 实测同为「中断整个回合」，但其插队路径未经
-/// 端到端验证；opencode/kimi 未测）→ 一律 false（结论不得超过证据；未验不出手）。
+/// **kimi 恒 false**：busy 直接投递=**排队制**（回合结束 50–86ms 自动开新回合，
+/// 戊探F wire 对账 + 用户终裁），无需也不应注入 Esc（打断版插队 Esc 留作词典备选，
+/// 产品不预填）。Ctrl+S 立即插队为**条件项**——产品引擎通道复验通过才上，未验前
+/// 维持排队制（结论落台账）。
 ///
 /// **不要与 [`mode_readback_supported`] 混**（两条不同的轴）：回读是「能不能看见
 /// 当前档」，插队是「能不能打断运行中的回合」。
 pub fn supports_interrupt(tool: &str) -> bool {
-    matches!(tool, "claude")
+    !matches!(jump_sequence(tool), JumpSequence::QueueOnly)
+}
+
+/// 插队键序路由（批次戊 E1：busy 运行中「立即发送」的每家键序；唯一事实源=
+/// 键序大词典清淤版 §6 busy 态行，与实机冲突停下上台账——裁20 用户实测优先）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpSequence {
+    /// claude：**Esc×1 中断 → 屏读等回合停（含撤回窗口防护）→ 正文+回车**。
+    /// 投递前检查输入行残留（疑似被撤回消息）→ 命中中止+回执（不自动清空）。
+    EscInterruptThenText,
+    /// codex：**打字（草稿，无提交回车）→ Tab 入队 → Esc×1 直插**（用户终裁首选；
+    /// 探测回退=草稿+Esc+手动 Enter，戊探F ×2 实测，留 #[ignore] 实机面）。
+    /// Esc 落在队列态=打断前台+直插；菜单在场时 Esc 被菜单吸收（戊探D）——菜单
+    /// 在场属对话框守卫面，不在本路径处理。
+    DraftTabThenEsc,
+    /// opencode：**Esc×1 打断 → 正文+回车直插**。无忙态串判据（词典 §4 未记载
+    /// opencode busy 屏串）→ 不做等回合停轮询（无判据可轮询，D20 不适用）；
+    /// 「草稿 Esc 后去向」为未定面——实现不预填，`#[ignore]` 实机首测定案后回填
+    /// 词典再动。**Ctrl+C 一律禁注**（裁19，键黑名单见 engine::forbidden_key_reason）。
+    EscThenText,
+    /// kimi：**不打断直接投递=排队制**（回合结束自动开新回合，不丢）；回执按
+    /// 「已投递未确认」（消息尚未进入回合，不谎报 delivered——裁16 排队回执锁）。
+    QueueOnly,
+}
+
+/// 工具 → 插队键序路由（小写 tool_id，口径同 [`family_for`]；未知工具保守归
+/// [`JumpSequence::QueueOnly`]——无键序证据的工具不打控制键，直接投递由族规格
+/// 兜底；路由层（remote::api）本就不对黑盒工具开放注入）。
+pub fn jump_sequence(tool: &str) -> JumpSequence {
+    match tool {
+        "claude" => JumpSequence::EscInterruptThenText,
+        "codex" => JumpSequence::DraftTabThenEsc,
+        "opencode" => JumpSequence::EscThenText,
+        // kimi 与未知工具：直接投递（kimi=排队制；未知=无证据不出手）
+        _ => JumpSequence::QueueOnly,
+    }
 }
 
 /// MAM 统一模式档（5 值，对齐 happy 8 值收敛——见模块文档表）
@@ -1733,6 +1774,44 @@ mod tests {
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ==== E1 插队键序路由 ====
+
+    /// **E1 四家插队键序路由锁**（词典 §6 busy 态行/裁16/裁19 的代码面）：
+    /// claude=Esc 前置 / codex=草稿→Tab→Esc / opencode=Esc 打断直插 / kimi=排队制。
+    /// [`supports_interrupt`] 与路由同源（QueueOnly 之外的均为「需要 Esc 类控制键」）。
+    /// 还原动作（变异）：任一格改回 E1 前旧值（supports_interrupt 仅 claude）→ 先红。
+    #[test]
+    fn jump_sequence_routes_four_tools() {
+        assert_eq!(
+            jump_sequence("claude"),
+            JumpSequence::EscInterruptThenText,
+            "claude：Esc×1 中断→等回合停（含撤回防护）→正文"
+        );
+        assert_eq!(
+            jump_sequence("codex"),
+            JumpSequence::DraftTabThenEsc,
+            "codex：打字→Tab 入队→Esc×1 直插（用户终裁首选）"
+        );
+        assert_eq!(
+            jump_sequence("opencode"),
+            JumpSequence::EscThenText,
+            "opencode：Esc 打断+直插；Ctrl+C 禁注（裁19）"
+        );
+        assert_eq!(
+            jump_sequence("kimi"),
+            JumpSequence::QueueOnly,
+            "kimi：busy 直接投递=排队制，不打控制键；Ctrl+S=条件项未复验不上"
+        );
+        // 未知工具保守归排队制（无键序证据不出手）
+        assert_eq!(jump_sequence("workbuddy"), JumpSequence::QueueOnly);
+        // supports_interrupt 与路由同源：三家 true（kimi 恒 false）
+        assert!(supports_interrupt("claude"));
+        assert!(supports_interrupt("codex"));
+        assert!(supports_interrupt("opencode"));
+        assert!(!supports_interrupt("kimi"));
+        assert!(!supports_interrupt("workbuddy"));
     }
 
     // ==== 统一枚举 ====

@@ -156,6 +156,27 @@ pub fn shift_tab_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
     ]
 }
 
+/// **键注入黑名单**（批次戊 E1⑤，裁19）：禁注键 → `Some(拒绝原因)`；域外/允许键
+/// → `None`。独立于 [`control_records`] 的域校验**之前**执行——即使日后 ctrl+c 进了
+/// 键域，黑名单仍拒绝（防回归的单点）。
+///
+/// - **`ctrl+c`**：opencode 一律禁注（实测=直接退出应用，会话全丢——用户 2026-09-22
+///   裁决入词典 §6）；codex 的 Ctrl+C 仅「撤回」语义可用且未开放（产品撤回走 DB
+///   retract，不经终端键）→ **全工具统一拒绝**。
+/// - `ctrl+s`（kimi 立即插队条件项）：未复验前不进键域（维持排队制），未列黑名单
+///   ——域校验天然拒绝；复验通过后按词典定案再动。
+pub fn forbidden_key_reason(key: &str) -> Option<String> {
+    if key == "ctrl+c" {
+        Some(
+            "Ctrl+C 已禁注（裁19：opencode 按下即退出应用；codex 撤回语义未开放，\
+             产品撤回走队列撤回按钮）"
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 /// 控制键 → VK 形态事件对；**键域校验（P2-2）**：键域 = `"enter"`/`"esc"`/
 /// `"tab"` + 单字符 ASCII 字母数字（审批键位 "y"/"1" 走这里）；域外（空串/
 /// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab → VK_RETURN/VK_ESCAPE/
@@ -477,6 +498,20 @@ pub trait Injector: Send + Sync {
         let _ = spec;
         self.locate_and_inject(pid, text)
     }
+
+    /// **草稿注入**（批次戊 E1② codex 插队键序第一步：打字入 composer 成草稿，
+    /// **不带提交回车**——回车会把草稿直接提交，Tab 才是「入队」）。仅
+    /// [`JumpSequence::DraftTabThenEsc`] 消费。默认实现报错（平台未提供无回车
+    /// 形态：macOS 三通道里 tmux/iTerm 的文本/回车是绑定的两步，无法只做前半）；
+    /// Windows ConPTY 通道覆写（[`crate::inject::windows_console::inject_text_draft_spec`]）。
+    fn locate_and_inject_draft_spec(
+        &self,
+        _pid: u32,
+        _text: &str,
+        _spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        Err("草稿注入（无提交回车）仅 Windows ConPTY 通道支持".to_string())
+    }
     fn locate_and_send_key_spec(
         &self,
         pid: u32,
@@ -620,6 +655,14 @@ impl Injector for RealInjector {
     ) -> Result<(), String> {
         // stats 本层不消费（Task 5 确认子集才读）；族规格送达执行层即达成本方法使命
         crate::inject::windows_console::inject_text_spec(pid, text, spec).map(|_| ())
+    }
+    fn locate_and_inject_draft_spec(
+        &self,
+        pid: u32,
+        text: &str,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        crate::inject::windows_console::inject_text_draft_spec(pid, text, spec).map(|_| ())
     }
     fn locate_and_send_key_spec(
         &self,
@@ -892,6 +935,25 @@ mod tests {
         // （0x59 'Y'），而旧 key_to_windows_vk 路径 ch 取小写 0x79——VK 位相同
         // （VkKeyScanW 大小写同键位），UnicodeChar 字面更忠实于输入；Task 2 评审
         // 已申报，此处补测试侧留痕
+    }
+
+    /// E1⑤ Ctrl+C 黑名单（裁19）：唯一禁注键=ctrl+c，原因文案点名 opencode 退出
+    /// 应用；其余键（域内域外皆然）不归黑名单管（域外由域校验拒绝）。
+    /// 还原动作（变异）：把黑名单改成恒 None → 本测试先红。
+    #[test]
+    fn forbidden_key_blacklists_ctrl_c() {
+        let reason = forbidden_key_reason("ctrl+c").expect("ctrl+c 必须被禁注");
+        assert!(
+            reason.contains("opencode"),
+            "原因文案必须点名危害（opencode 退出应用）：{reason}"
+        );
+        assert!(
+            forbidden_key_reason("ctrl+s").is_none(),
+            "ctrl+s 未列黑名单（未复验前由域校验拒绝）"
+        );
+        for k in ["enter", "esc", "tab", "y", "1", "ctrl+z", ""] {
+            assert!(forbidden_key_reason(k).is_none(), "{k:?} 不在黑名单");
+        }
     }
 
     #[test]

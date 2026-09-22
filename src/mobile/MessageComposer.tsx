@@ -619,6 +619,13 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           setReceipt({ kind: "delivered" });
           // 立即发送成功 = 条目已出队：行即时移除（3s 轮询权威列表随后兜底）
           setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
+        } else if (j.status === "submitted") {
+          // E1 裁16 排队回执（kimi）：消息已进 TUI 内部队列（busy 直接投递=排队制，
+          // 回合结束自动开新回合）——已离开 MAM 队列 → 行移除 + 中性 submitted 回执
+          //（不谎报 delivered，也不落 failed；对账收敛会把它误报成 gone）
+          queueMutatedAtRef.current = Date.now();
+          setReceipt({ kind: "submitted" });
+          setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
         } else {
           // 非 delivered 回执先复核再定终态。queued（F1 后新语义：jump 守卫忙/
           // 条目已被消费 → 回 queued{itemId,position}，前端 reconcileQueued 对账

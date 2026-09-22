@@ -100,6 +100,14 @@ pub enum FlushOutcome {
     /// D7/T3 后「非滞留」不再归本态）：mark_failed + 审计（action=fail,
     /// result=failed:e）——防重警示文案保留，重试由用户判断
     Failed(String),
+    /// **投递中止**（批次戊 E1① 撤回窗口防护）：插队屏读等回合停后，composer 输入行
+    /// 留有疑似被撤回的消息（判据 [`crate::inject::confirm::claude_input_line_has_residue`]）
+    /// → **不注入正文**（注入会与残留拼接——A1 危害：两条消息并作一条发出），
+    /// 行 mark_failed 退出 pending（防 flush 循环对同一残留态重投）、审计
+    /// （action=jump/flush, result=aborted:<原因>）。载荷=中止原因短语（不含
+    /// 「未投递」前缀，回执文案由端点统一拼接——单一措辞出口）。
+    /// **不自动清空输入行**（claude 清空键未实测，spec §5 保守中止），请用户人工确认。
+    NotDelivered(String),
     /// 快照中无此会话（红·中断挂起，W2）：不消费不落账
     Suspended,
     /// 仍在运行且非插队：不消费不落账（等下个可输入态事件）。[`flush_one`] 无
@@ -164,19 +172,29 @@ pub(crate) fn try_flush_with(
     let spec = crate::inject::families::family_for(&item.agent_type)
         .unwrap_or(crate::inject::families::FALLBACK_SPEC);
     let confirm_timeout = confirm_timeout_override.unwrap_or(spec.confirm_timeout_ms);
-    // ===== 批次丙 T9：打断式插队（仅 claude，运行中会话）=====
+    // ===== 批次戊 E1：插队键序路由（四家各异；唯一事实源=键序大词典清淤版）=====
+    //
+    // 路由见 [`crate::inject::mode::jump_sequence`]：
+    // - claude  [`JumpSequence::EscInterruptThenText`]：Esc×1 中断 → 屏读等回合停 →
+    //   **撤回窗口防护**（输入行残留 → 中止+如实回执）→ 正文+回车；
+    // - codex   [`JumpSequence::DraftTabThenEsc`]：打字（草稿，无提交回车）→ Tab 入队 →
+    //   Esc×1 直插（用户终裁首选；探测回退=草稿+Esc+手动 Enter 戊探F ×2）；
+    // - opencode [`JumpSequence::EscThenText`]：Esc×1 打断 → 正文+回车直插（无忙态串
+    //   判据，不做等回合停轮询；草稿 Esc 后去向=未定面，实现不预填）；
+    // - kimi/未知 [`JumpSequence::QueueOnly`]：不打断直接投递=排队制（回合结束 50–86ms
+    //   自动开新回合）；回执落 Submitted（已投递未确认——消息尚未进入回合，不谎报
+    //   delivered，裁16 排队回执锁）。Ctrl+S 立即插队=条件项，复验通过才上（未验，
+    //   结论落台账）。
+    //
+    // ===== 批次丙 T9（历史，claude 分支沿用）：打断式插队 =====
     //
     // 问题 10：busy 时「立即发送」只是进入 TUI 内部队列（仍排队中），终端需按 Esc
     // 中断当前回合新消息才进。
     //
-    // **实机依据（K2，探测档案 2026-09-21-claude-askuserquestion）：Esc 落入模型
+    // **实机依据（K2，探测档案 2026-09-21-claude-askuserquestion）**：Esc 落入模型
     // busy 回合 = 中断该回合**（"Interrupted · What should Claude do instead?"，
     // 已提交的答案保留）。这正是本任务**想要**的行为（K2 的「禁止数字后补 Esc」
     // 是问答作答场景的禁令，与本处语义相反）。
-    //
-    // 实现：运行中（`is_running`）+ jump + 该工具支持打断（当前仅 claude——其他
-    // 工具的 Esc 语义未实测）→ **先注入 Esc 中断**，再**屏读轮询等「回合已停」的
-    // 判据本身**（D20(a)(b)），判据命中才注入正文。
     //
     // ===== 2026-09-22 R2 复评：第二步从「等缓冲排空」改为「屏读等回合停」=====
     //
@@ -187,10 +205,6 @@ pub(crate) fn try_flush_with(
     // 处理 Esc 是**异步**的（停当前工具 + 收尾回合），正文因此落进**正在收尾的旧
     // 回合窗口** → 进 claude 内部队列（底栏 `Press up to edit queued messages`）
     // 而不是开新回合（用户看到的现象：消息没进队列也没开新回合）。
-    //
-    // **实机证据**：审计 09-22 18:30/18:31 两条 `action=jump result=ok` +
-    // `inject_queue.sent_at` 已写，但消息正文在对应 claude 会话 JSONL 里搜不到
-    // ——**假成功**（回执说成功、消息没落地）。
     //
     // **修法（用户裁定：走 D20 精神——屏读等判据本身）**：判据 = claude 底栏忙态串
     // `esc to interrupt` 消失（真机两态原文与四档空闲态取证见
@@ -203,82 +217,174 @@ pub(crate) fn try_flush_with(
     // 正文**——不因为中断不成功就丢弃用户消息（正文注入另有 backpressure 与确认
     // 层兜底）。**但回执不再冒充成功**：超时未停 → `Submitted`（已投递未确认，
     // 中性）而不是 `Sent`——那正是本 bug 的形态（消息可能落在旧回合队列里）。
-    let interrupt_first = jump
+    let seq = crate::inject::mode::jump_sequence(&item.agent_type);
+    // Esc 前置门：仅「运行中 + jump + 工具需要 Esc 前置」的两家（claude/opencode）；
+    // codex 的 Esc 在投递尾部（DraftTabThenEsc），kimi/未知无 Esc（QueueOnly）
+    let esc_first = jump
         && is_running(&session.status)
-        && crate::inject::mode::supports_interrupt(&item.agent_type);
-    // 等回合停的结论（三态）；`NotApplicable` = 本路径不需要等（不投 Esc 的两类情形）
+        && crate::inject::mode::supports_interrupt(&item.agent_type)
+        && matches!(
+            seq,
+            crate::inject::mode::JumpSequence::EscInterruptThenText
+                | crate::inject::mode::JumpSequence::EscThenText
+        );
+    // 等回合停的结论（三态）；`NotApplicable` = 本路径不需要等（不发 Esc / 无判据）
     let mut turn_stop = crate::inject::confirm::TurnStopWait::NotApplicable;
-    if interrupt_first {
+    // 等回合停期间读到的**最后一帧屏**（撤回窗口防护的判据面；仅 Stopped 态消费）
+    let mut last_frame: Option<Vec<String>> = None;
+    if esc_first {
         match st
             .injector
             .locate_and_send_key_spec(session.pid, "esc", &spec)
         {
             Ok(()) => {
-                // 中断是异步生效的：**屏读轮询等「回合已停」的判据本身**
-                // （忙态串消失，D20(a) 命中即停 / (b) 有界且超时如实）。
-                // 超时/屏读不可用都继续投递（best-effort，不阻塞用户消息），
-                // 但结论传下去——回执据此降级为 Submitted（不冒充 Sent）
-                turn_stop = wait_turn_stopped(st, &session, turn_stop_mode);
-                match turn_stop {
-                    crate::inject::confirm::TurnStopWait::Stopped => log::debug!(
-                        "T9 插队：屏读到忙态串消失（回合已停，pid={}）",
-                        session.pid
-                    ),
-                    crate::inject::confirm::TurnStopWait::StillRunning => log::warn!(
-                        "T9 插队：窗内未读到「回合已停」（pid={}），仍投递正文但回执降级为已投递未确认",
-                        session.pid
-                    ),
-                    crate::inject::confirm::TurnStopWait::Unverifiable => log::debug!(
-                        "T9 插队：屏读不可用（pid={}），无法判定回合停否——保持既有 best-effort 口径",
-                        session.pid
-                    ),
-                    crate::inject::confirm::TurnStopWait::NotApplicable => {}
+                if matches!(seq, crate::inject::mode::JumpSequence::EscInterruptThenText) {
+                    // claude：中断异步生效——**屏读轮询等「回合已停」的判据本身**
+                    // （忙态串消失，D20(a) 命中即停 / (b) 有界且超时如实）。
+                    // 超时/屏读不可用都继续投递（best-effort，不阻塞用户消息），
+                    // 但结论传下去——回执据此降级为 Submitted（不冒充 Sent）
+                    let (stop, frame) = wait_turn_stopped(st, &session, turn_stop_mode);
+                    turn_stop = stop;
+                    last_frame = frame;
+                    match turn_stop {
+                        crate::inject::confirm::TurnStopWait::Stopped => log::debug!(
+                            "T9 插队：屏读到忙态串消失（回合已停，pid={}）",
+                            session.pid
+                        ),
+                        crate::inject::confirm::TurnStopWait::StillRunning => log::warn!(
+                            "T9 插队：窗内未读到「回合已停」（pid={}），仍投递正文但回执降级为已投递未确认",
+                            session.pid
+                        ),
+                        crate::inject::confirm::TurnStopWait::Unverifiable => log::debug!(
+                            "T9 插队：屏读不可用（pid={}），无法判定回合停否——保持既有 best-effort 口径",
+                            session.pid
+                        ),
+                        crate::inject::confirm::TurnStopWait::NotApplicable => {}
+                    }
+                } else {
+                    // opencode：词典 §4 无忙态串判据 → 无判据可轮询（D20 轮询的对象
+                    // 是「判据本身」，没有判据就没有轮询，也不得以固定睡眠替代）。
+                    // Esc→投递的时序竞态属未测面（#[ignore] 实机首测面），如实落台账
                 }
             }
             Err(e) => log::warn!(
-                "T9 Esc 中断注入失败（pid={}: {e}），继续投递正文",
+                "插队 Esc 注入失败（pid={}: {e}），继续投递正文",
                 session.pid
             ),
         }
     }
-    let receipt = match st
-        .injector
-        .locate_and_inject_spec(session.pid, &item.content, &spec)
+    // ===== E1① 撤回窗口防护（仅 claude，Stopped 且有屏读路径）=====
+    //
+    // 用户终裁（戊探F 后验）：已发出消息 Esc=**撤回回编辑态**（功能非异常）——
+    // 撤回后消息全文回到 composer 输入行。此刻若照常投递插队正文，正文会与残留
+    // **拼接**（两条消息并作一条发出）= A1 危害（矩阵 §6.6 唯一现行代码级危害）。
+    // 判据 = [`crate::inject::confirm::claude_input_line_has_residue`]（四份真机
+    // 整屏夹具锁定）。命中 → **中止投递**+如实回执（不自动清空——清空键未实测）。
+    //
+    // **StillRunning / Unverifiable 维持现状（不检查残留）的分派理由**：防护判据
+    // 只在「屏读稳定判停」的帧上可信——那是「Esc 已生效」后的稳定形态；回合仍在跑
+    // （StillRunning）时 composer 里的内容是 mid-turn 草稿（语义未定，claude 会把
+    // 后续 Enter 提交为排队），屏读不到（Unverifiable）时更无判据面。两条路径照旧
+    // best-effort 投递 + 回执降级 Submitted，不因防护缺失而中止（用户消息不丢优先，
+    // 与 R2 降级裁决同一取向）。
+    if matches!(seq, crate::inject::mode::JumpSequence::EscInterruptThenText)
+        && matches!(turn_stop, crate::inject::confirm::TurnStopWait::Stopped)
     {
-        // 注入失败短路确认（时序锁语义）：确认只在注入成功后起跑
-        Err(e) => super::confirm::DirectReceipt::Failed(e),
-        Ok(()) => {
-            if jump {
-                match super::confirm::await_jump_receipt(st, &session, &item.content) {
-                    Ok(()) => match turn_stop {
-                        // 回合确认已停（或本路径无需等）→ 既有的插队确认通过 = Sent
-                        crate::inject::confirm::TurnStopWait::Stopped
-                        | crate::inject::confirm::TurnStopWait::NotApplicable => {
-                            super::confirm::DirectReceipt::Confirmed
-                        }
-                        // **等回合停超时**（可能只是慢）：消息已投递但可能落在旧回合
-                        // 的内部队列里 —— 如实落「已投递未确认」（中性，不冒充
-                        // delivered、不冒充 failed——后者会诱导重试=双发）
-                        crate::inject::confirm::TurnStopWait::StillRunning => {
-                            super::confirm::DirectReceipt::Submitted
-                        }
-                        // **判据不可用**（屏读读不到）：既不能说停了也不能说没停 →
-                        // 保持既有 best-effort 口径（投递成功 = Sent）。理由见
-                        // `TurnStopWait::Unverifiable` 与 `poll_turn_stopped` 文档
-                        // （macOS 无屏读，若一律降级会把它的插队回执永久打成「已投递
-                        // 未确认」——那是编造）。
-                        crate::inject::confirm::TurnStopWait::Unverifiable => {
-                            super::confirm::DirectReceipt::Confirmed
-                        }
-                    },
-                    Err(e) => super::confirm::DirectReceipt::Failed(e),
+        if let Some(frame) = &last_frame {
+            if crate::inject::confirm::claude_input_line_has_residue(frame) {
+                log::warn!(
+                    "E1 撤回窗口防护：输入行有残留（疑似被撤回消息，pid={}），中止投递——请人工确认",
+                    session.pid
+                );
+                return FlushOutcome::NotDelivered(
+                    crate::inject::confirm::INPUT_LINE_RESIDUE_REASON.to_string(),
+                );
+            }
+        }
+    }
+    let receipt = if jump && matches!(seq, crate::inject::mode::JumpSequence::DraftTabThenEsc) {
+        // ===== codex：打字（草稿）→ Tab 入队 → Esc×1 直插 =====
+        // 每步如实：草稿写入后 Tab 失败 = 消息滞留 composer（TUI 可见，勿盲目重试
+        // ——重试叠加正文）；Tab 后 Esc 失败 = 消息在 codex 队列未直插（回合仍在跑）。
+        // 送达确认走占用排空 best-effort（Esc 直插后新回合即起，无 claude 式
+        // 「等回合停」窗——直插本身就是新回合的起点）
+        let drafted = st
+            .injector
+            .locate_and_inject_draft_spec(session.pid, &item.content, &spec)
+            .and_then(|()| {
+                st.injector
+                    .locate_and_send_key_spec(session.pid, "tab", &spec)
+                    .map_err(|e| format!("Tab 入队失败（草稿已入 composer，请人工检查终端）：{e}"))
+            })
+            .and_then(|()| {
+                st.injector
+                    .locate_and_send_key_spec(session.pid, "esc", &spec)
+                    .map_err(|e| {
+                        format!("Esc 直插失败（消息已入 codex 队列，请人工检查终端）：{e}")
+                    })
+            });
+        match drafted {
+            Err(e) => super::confirm::DirectReceipt::Failed(e),
+            Ok(()) => match super::confirm::await_jump_receipt(st, &session, &item.content) {
+                Ok(()) => super::confirm::DirectReceipt::Confirmed,
+                Err(e) => super::confirm::DirectReceipt::Failed(e),
+            },
+        }
+    } else {
+        match st
+            .injector
+            .locate_and_inject_spec(session.pid, &item.content, &spec)
+        {
+            // 注入失败短路确认（时序锁语义）：确认只在注入成功后起跑
+            Err(e) => super::confirm::DirectReceipt::Failed(e),
+            Ok(()) => {
+                // kimi 排队制回执锁（E1⑤，裁16）：运行中直接投递 = 消息进 kimi 的
+                // composer→排队态（回合结束 50–86ms 自动开新回合），**尚未进入任何
+                // 回合**——占用排空（await_jump_receipt）证明不了送达模型，谎报
+                // delivered 即假成功。回执恒落 Submitted（已投递未确认，中性）。
+                // 空闲态 kimi 不走本臂（is_running=false → 直送语义不变）
+                if jump
+                    && is_running(&session.status)
+                    && matches!(seq, crate::inject::mode::JumpSequence::QueueOnly)
+                {
+                    super::confirm::DirectReceipt::Submitted
+                } else if jump {
+                    match super::confirm::await_jump_receipt(st, &session, &item.content) {
+                        Ok(()) => match turn_stop {
+                            // 回合确认已停（或本路径无需等）→ 既有的插队确认通过 = Sent
+                            crate::inject::confirm::TurnStopWait::Stopped
+                            | crate::inject::confirm::TurnStopWait::NotApplicable => {
+                                super::confirm::DirectReceipt::Confirmed
+                            }
+                            // **等回合停超时**（可能只是慢）：消息已投递但可能落在旧回合
+                            // 的内部队列里 —— 如实落「已投递未确认」（中性，不冒充
+                            // delivered、不冒充 failed——后者会诱导重试=双发）
+                            crate::inject::confirm::TurnStopWait::StillRunning => {
+                                super::confirm::DirectReceipt::Submitted
+                            }
+                            // **判据不可用**（屏读读不到）：既不能说停了也不能说没停 →
+                            // 保持既有 best-effort 口径（投递成功 = Sent）。理由见
+                            // `TurnStopWait::Unverifiable` 与 `poll_turn_stopped` 文档
+                            // （macOS 无屏读，若一律降级会把它的插队回执永久打成「已投递
+                            // 未确认」——那是编造）。
+                            crate::inject::confirm::TurnStopWait::Unverifiable => {
+                                super::confirm::DirectReceipt::Confirmed
+                            }
+                        },
+                        Err(e) => super::confirm::DirectReceipt::Failed(e),
+                    }
+                } else {
+                    // timeout 同源下发（spec）；确认结论为 D7/T3 三态分诊（非滞留 =
+                    // Submitted 中性；滞留补回车后命中 = Confirmed；其余 = Failed），
+                    // 失败文案按「工具 × 平台」感知（F2：families::macos_enter_swallowed
+                    // 投影表，mac-reverify §四-B）
+                    super::confirm::await_direct_receipt(
+                        st,
+                        &session,
+                        &item.content,
+                        confirm_timeout,
+                    )
                 }
-            } else {
-                // timeout 同源下发（spec）；确认结论为 D7/T3 三态分诊（非滞留 =
-                // Submitted 中性；滞留补回车后命中 = Confirmed；其余 = Failed），
-                // 失败文案按「工具 × 平台」感知（F2：families::macos_enter_swallowed
-                // 投影表，mac-reverify §四-B）
-                super::confirm::await_direct_receipt(st, &session, &item.content, confirm_timeout)
             }
         }
     };
@@ -318,27 +424,39 @@ pub(crate) enum TurnStopMode {
 }
 
 /// 等回合停（投递前门）：按 [`TurnStopMode`] 取屏源，调判据内核
-/// [`crate::inject::confirm::await_turn_stopped`]。
+/// [`crate::inject::confirm::await_turn_stopped`]。返回 (结论, 最后一帧屏)——
+/// 最后一帧供 E1① 撤回窗口防护的输入行残留判定（仅 Stopped 态被消费；
+/// 无屏读/未执行 → `None`）。
 fn wait_turn_stopped(
     st: &crate::remote::server::RemoteState,
     session: &crate::session::Session,
     mode: TurnStopMode,
-) -> crate::inject::confirm::TurnStopWait {
+) -> (crate::inject::confirm::TurnStopWait, Option<Vec<String>>) {
     match mode {
         TurnStopMode::Production => {
             let pid = session.pid;
             let tool = session.agent_type.tool_id();
-            crate::inject::confirm::await_turn_stopped(
+            // 捕获最后一帧（E1① 判据面）：每次成功屏读都记录，轮询结束后即
+            // 「稳定判据达成那一拍」的屏（稳定闸 = 连续 N 拍一致，末帧即最新证据）
+            let last_frame = std::cell::RefCell::new(None::<Vec<String>>);
+            let result = crate::inject::confirm::await_turn_stopped(
                 crate::inject::timing::poll_rounds(crate::inject::timing::TURN_STOP_POLL_TOTAL_MS),
                 // 屏读经能力缝（生产 = read_screen_window；非 Windows / 读屏失败 →
                 // None → 内核保守判「仍在跑」→ 回执降级为 Submitted，不冒充送达）
-                || (st.screen_probe)(tool, pid),
+                || {
+                    let frame = (st.screen_probe)(tool, pid);
+                    if frame.is_some() {
+                        *last_frame.borrow_mut() = frame.clone();
+                    }
+                    frame
+                },
                 || {
                     std::thread::sleep(std::time::Duration::from_millis(
                         crate::inject::timing::POLL_STEP_MS,
                     ))
                 },
-            )
+            );
+            (result, last_frame.into_inner())
         }
         #[cfg(test)]
         TurnStopMode::Scripted(screens) => {
@@ -348,17 +466,23 @@ fn wait_turn_stopped(
                 .unwrap_or_else(|e| e.into_inner())
                 .len()
                 .max(1) as u32;
-            crate::inject::confirm::await_turn_stopped(
+            let last_frame = std::cell::RefCell::new(None::<Vec<String>>);
+            let result = crate::inject::confirm::await_turn_stopped(
                 rounds,
                 || {
-                    screens
+                    let frame = screens
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .pop_front()
-                        .flatten()
+                        .flatten();
+                    if frame.is_some() {
+                        *last_frame.borrow_mut() = frame.clone();
+                    }
+                    frame
                 },
                 || {},
-            )
+            );
+            (result, last_frame.into_inner())
         }
     }
 }
@@ -431,6 +555,25 @@ pub(crate) fn settle(
                 &format!("failed:{e}"),
             );
             Err(e)
+        }
+        FlushOutcome::NotDelivered(reason) => {
+            // E1① 撤回窗口防护落账：正文**未注入**（中止），行 mark_failed 退出
+            // pending——防 flush 循环对同一残留态重投（重投=与残留拼接，A1 危害原样）。
+            // 审计 action 沿路径（jump/flush），result=aborted:<原因>——与注入失败
+            // （action=fail, failed:e）分列：中止是防护动作，不是通道故障
+            inject_queue::mark_failed_conn(conn, item.id, &reason);
+            super::audit_write(
+                conn,
+                st,
+                &item.device_id,
+                &item.device_name,
+                &item.agent_type,
+                &item.session_id,
+                &item.content,
+                if jump { "jump" } else { "flush" },
+                &format!("aborted:{reason}"),
+            );
+            Err(format!("未投递：{reason}，请人工确认"))
         }
     }
 }
@@ -596,8 +739,11 @@ pub(crate) fn reconcile_once(state: &std::sync::Arc<crate::remote::server::Remot
             FlushOutcome::Sent => {}
             FlushOutcome::Failed(e) => log::warn!("对账补投失败（会话 {sid}）: {e}"),
             // Submitted（D7/T3）：已投递未确认，settle 已按 unconfirmed 落账——
-            // 非失败静默；Deferred/Suspended：不消费不落账——静默
+            // 非失败静默；Deferred/Suspended：不消费不落账——静默；
+            // NotDelivered（E1① 撤回防护中止）：settle 已按 aborted 落账——静默
+            //（常规路径 jump=false 本不产出本态，穷尽性防御臂）
             FlushOutcome::Submitted | FlushOutcome::Deferred | FlushOutcome::Suspended => {}
+            FlushOutcome::NotDelivered(_) => {}
         }
     }
 }
@@ -786,6 +932,14 @@ pub fn spawn_flush_loop(state: std::sync::Arc<crate::remote::server::RemoteState
                                         log::warn!("flush 投递失败（会话 {sid}）: {e}")
                                     }
                                     Ok(FlushOutcome::Deferred | FlushOutcome::Suspended) => {}
+                                    // E1① 撤回防护中止：settle 已按 aborted 落账——常规
+                                    // 路径（jump=false）本不产出本态，穷尽性防御臂（warn
+                                    // 留痕，出现即说明路由被误改）
+                                    Ok(FlushOutcome::NotDelivered(reason)) => {
+                                        log::warn!(
+                                            "flush 出现撤回防护中止（不应发生，会话 {sid}）：{reason}"
+                                        )
+                                    }
                                     // 追记 4：JoinError（任务 panic/取消）不再静默吞掉
                                     Err(e) => log::warn!("flush 任务异常（会话 {sid}）: {e}"),
                                 }
@@ -893,6 +1047,21 @@ mod tests {
         fn locate_and_inject(&self, pid: u32, text: &str) -> Result<(), String> {
             self.calls.lock().unwrap().push((pid, text.to_string()));
             self.ops.lock().unwrap().push(format!("text:{text}"));
+            match self.fail {
+                Some(e) => Err(e.to_string()),
+                None => Ok(()),
+            }
+        }
+        /// 草稿注入（E1② codex 键序第一步）：记录 op="draft:<正文>"——与 text 区分，
+        /// 序断言「draft 无提交回车、tab/esc 在后」
+        fn locate_and_inject_draft_spec(
+            &self,
+            pid: u32,
+            text: &str,
+            _spec: &crate::inject::families::FamilySpec,
+        ) -> Result<(), String> {
+            self.calls.lock().unwrap().push((pid, text.to_string()));
+            self.ops.lock().unwrap().push(format!("draft:{text}"));
             match self.fail {
                 Some(e) => Err(e.to_string()),
                 None => Ok(()),
@@ -1694,27 +1863,77 @@ mod tests {
         assert!(ops[0].starts_with("text:"));
     }
 
-    /// T9 边界②：**非 claude** 工具 + 运行中 + jump → 不注入 Esc（Esc 语义未实测，
-    /// 未验不出手；其他工具维持既有插队语义）
+    /// **E1 三家插队键序路由锁**（取代 T9 边界②「仅 claude」——codex/opencode 的
+    /// Esc 语义已经两轮用户实测 + 探测定案，不再「未验不出手」）：
+    /// - codex = `draft → tab → esc`（无提交回车；用户终裁「打字→Tab 入队→Esc 直插」）；
+    /// - opencode = `esc → text`（Esc 打断+直插）；
+    /// - kimi = 仅 `text`（排队制，无任何控制键）。
+    ///
+    /// 还原动作（变异）：把 [`crate::inject::mode::jump_sequence`] 任一格改回旧值
+    /// （如 codex 走 claude 的 esc-first / kimi 发 Esc）→ 本测试的 ops 序断言先红。
     #[test]
-    fn interrupt_jump_is_claude_only() {
-        for tool in ["opencode", "kimi", "codex"] {
-            let inj = FakeInjector::ok();
-            let mut s = sess("s-other", SessionStatus::Processing, 4244);
-            s.agent_type = match tool {
-                "opencode" => AgentType::OpenCode,
-                "kimi" => AgentType::Kimi,
-                _ => AgentType::Codex,
-            };
-            let st = state_with(vec![s], inj.clone());
-            st.store.with(|c| enq(c, "s-other", "消息"));
-            let _ = flush_one(&st, "s-other", true);
-            let ops = inj.ops();
-            assert!(
-                ops.iter().all(|o| !o.starts_with("key:")),
-                "{tool} 的 Esc 语义未实测 → 不得注入 Esc: {ops:?}"
-            );
-        }
+    fn jump_sequence_routes_per_tool() {
+        // codex：draft（无回车）→ tab → esc
+        let inj = FakeInjector::ok();
+        let mut s = sess("s-cx", SessionStatus::Processing, 4260);
+        s.agent_type = AgentType::Codex;
+        let st = state_with(vec![s], inj.clone());
+        st.store.with(|c| {
+            inject_queue::enqueue_conn(c, "s-cx", "codex", "dev-1", "测试设备", "codex 插队", 1000)
+        });
+        assert_eq!(flush_one(&st, "s-cx", true), FlushOutcome::Sent);
+        assert_eq!(
+            inj.ops(),
+            vec![
+                "draft:codex 插队".to_string(),
+                "key:tab".to_string(),
+                "key:esc".to_string(),
+            ],
+            "codex 键序必须是 打字(草稿)→Tab→Esc×1（无提交回车）"
+        );
+
+        // opencode：esc → text（打断+直插）
+        let inj2 = FakeInjector::ok();
+        let mut s2 = sess("s-oc", SessionStatus::Processing, 4261);
+        s2.agent_type = AgentType::OpenCode;
+        let st2 = state_with(vec![s2], inj2.clone());
+        st2.store.with(|c| {
+            inject_queue::enqueue_conn(
+                c,
+                "s-oc",
+                "opencode",
+                "dev-1",
+                "测试设备",
+                "opencode 插队",
+                1000,
+            )
+        });
+        assert_eq!(flush_one(&st2, "s-oc", true), FlushOutcome::Sent);
+        assert_eq!(
+            inj2.ops(),
+            vec!["key:esc".to_string(), "text:opencode 插队".to_string(),],
+            "opencode 键序必须是 Esc×1 → 正文（打断+直插）"
+        );
+
+        // kimi：仅正文（排队制，无 Esc/Tab）；回执 = Submitted（已投递未确认——
+        // 消息进 kimi 排队态、尚未进入回合，不谎报 delivered，裁16 排队回执锁）
+        let inj3 = FakeInjector::ok();
+        let mut s3 = sess("s-km", SessionStatus::Processing, 4262);
+        s3.agent_type = AgentType::Kimi;
+        let st3 = state_with(vec![s3], inj3.clone());
+        st3.store.with(|c| {
+            inject_queue::enqueue_conn(c, "s-km", "kimi", "dev-1", "测试设备", "kimi 插队", 1000)
+        });
+        assert_eq!(
+            flush_one(&st3, "s-km", true),
+            FlushOutcome::Submitted,
+            "kimi 排队制：运行中插队回执必须落 Submitted（不谎报 delivered）"
+        );
+        assert_eq!(
+            inj3.ops(),
+            vec!["text:kimi 插队".to_string()],
+            "kimi 不得注入任何控制键（busy 直接投递=排队制）"
+        );
     }
 
     /// T9 边界③：**非 jump**（普通 flush）+ 运行中 → 不注入 Esc（既有语义：普通
@@ -1873,6 +2092,155 @@ mod tests {
         assert!(ops[1].contains("重绘瞬态期间不该投递的消息"), "{ops:?}");
     }
 
+    // ==== 批次戊 E1①：撤回窗口防护（A1 危害的端到端锁）====
+
+    /// e-stage2 屏读夹具读取（confirm::tests 同款；跨测试模块不共享私有 helper，
+    /// 就地 12 行复制——两处消费同一夹具目录，单一事实源是夹具文件本身）
+    #[cfg(test)]
+    fn e_stage2_screen(name: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/e-stage2")
+            .join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
+        raw.trim_start_matches('\u{feff}')
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    /// **★ E1 主回归锁（A1 危害形态）**：运行中 claude 插队 → Esc 后屏读到
+    /// **撤回态**（消息全文回输入行，夹具=戊探F s2a 真机整屏）→ **中止投递**：
+    /// 零注入（正文不与残留拼接）、回执 = `NotDelivered`、行 mark_failed 退出
+    /// pending、审计 result=aborted:输入行残留（spec §6 reason 口径）。
+    ///
+    /// 还原动作（变异）：把 `claude_input_line_has_residue` 改恒 false（无防护）
+    /// → 本测试先红（注入发生 + 回执 Sent）；把防护分支删掉同理。
+    #[test]
+    fn interrupt_jump_aborts_on_recalled_input_residue() {
+        let inj = FakeInjector::ok();
+        let st = state_with(
+            vec![sess("s-res", SessionStatus::Processing, 4270)],
+            inj.clone(),
+        );
+        st.store.with(|c| enq(c, "s-res", "不得与残留拼接的消息"));
+        let recall = e_stage2_screen("claude-recall-state.txt");
+        assert!(
+            super::super::confirm::claude_input_line_has_residue(&recall),
+            "前提自证：夹具本身必须判残留（判据纯核在 confirm::tests）"
+        );
+        // 稳定闸需要连续 2 拍无忙帧：撤回屏 ×2 → Stopped，末帧=撤回态
+        let (mode, queue) = scripted(vec![
+            frame(real_frames::BUSY),
+            Some(recall.clone()),
+            Some(recall),
+        ]);
+        let outcome = flush_one_scripted(&st, "s-res", true, mode);
+        assert_eq!(
+            outcome,
+            FlushOutcome::NotDelivered(
+                super::super::confirm::INPUT_LINE_RESIDUE_REASON.to_string()
+            ),
+            "输入行有残留 → 中止投递（不自动清空，请人工确认）"
+        );
+        assert_eq!(
+            queue.lock().unwrap().len(),
+            0,
+            "3 拍读完（稳定判停后检查残留）"
+        );
+        assert_eq!(
+            inj.ops(),
+            vec!["key:esc".to_string()],
+            "中止=只发了 Esc（中断步），正文/草稿/后续按键都不得再发（正文与残留拼接=A1 危害）：{:?}",
+            inj.ops()
+        );
+        // 落账：行 mark_failed 退出 pending（防对同一残留态重投=拼接危害）+
+        // 审计 action=jump result=aborted:<原因>（spec §6 reason 口径）
+        st.store.with(|c| {
+            assert!(
+                inject_queue::next_pending_conn(c, "s-res").is_none(),
+                "中止行必须退出 pending（防 flush 循环重投）"
+            );
+            let audits = crate::database::dao::write_audit::recent_conn(c, 10);
+            assert_eq!(audits.len(), 1, "中止恰一条审计");
+            assert_eq!(audits[0].action, "jump");
+            assert_eq!(
+                audits[0].result,
+                format!(
+                    "aborted:{}",
+                    super::super::confirm::INPUT_LINE_RESIDUE_REASON
+                ),
+                "审计 result=aborted:<原因>（与注入失败 failed:e 分列——防护动作非通道故障）"
+            );
+        });
+    }
+
+    /// **E1 对照锁**：Esc 后屏读到**中断态**（`Interrupted` 标记 + composer 空，
+    /// 夹具=戊探F s2b 真机整屏）→ 照常投递（无残留），回执 Sent——防护不得误伤
+    /// 正常插队。
+    #[test]
+    fn interrupt_jump_delivers_when_input_clean_after_stop() {
+        let inj = FakeInjector::ok();
+        let st = state_with(
+            vec![sess("s-cln", SessionStatus::Processing, 4271)],
+            inj.clone(),
+        );
+        st.store.with(|c| enq(c, "s-cln", "干净输入行的正常插队"));
+        let interrupted = e_stage2_screen("claude-interrupted-state.txt");
+        let (mode, queue) = scripted(vec![
+            frame(real_frames::BUSY),
+            Some(interrupted.clone()),
+            Some(interrupted),
+        ]);
+        let outcome = flush_one_scripted(&st, "s-cln", true, mode);
+        assert_eq!(outcome, FlushOutcome::Sent, "无残留 → 照常投递");
+        assert_eq!(queue.lock().unwrap().len(), 0);
+        let ops = inj.ops();
+        assert_eq!(ops[0], "key:esc", "{ops:?}");
+        assert!(ops[1].contains("干净输入行的正常插队"), "{ops:?}");
+    }
+
+    /// **codex 半步失败如实回执**：草稿写入成功、Tab 失败（key_fail）→ Failed 且
+    /// 文案带「Tab 入队失败（草稿已入 composer…）」——滞留面如实透出，不冒充成功
+    /// （用户需人工检查终端，盲目重试会叠加正文）。
+    #[test]
+    fn codex_jump_tab_failure_reports_honest_failure() {
+        let inj = std::sync::Arc::new(FakeInjector {
+            calls: std::sync::Mutex::new(Vec::new()),
+            ops: std::sync::Mutex::new(Vec::new()),
+            fail: None,
+            key_fail: Some("按键写入失败（假体）"),
+        });
+        let mut s = sess("s-cxf", SessionStatus::Processing, 4272);
+        s.agent_type = AgentType::Codex;
+        let st = state_with(vec![s], inj.clone());
+        st.store.with(|c| {
+            inject_queue::enqueue_conn(
+                c,
+                "s-cxf",
+                "codex",
+                "dev-1",
+                "测试设备",
+                "codex 半步失败",
+                1000,
+            )
+        });
+        let outcome = flush_one(&st, "s-cxf", true);
+        let FlushOutcome::Failed(e) = outcome else {
+            panic!("半步失败必须 Failed，实际 {outcome:?}")
+        };
+        assert!(
+            e.contains("Tab 入队失败"),
+            "失败文案必须指出滞留面（草稿已入 composer）：{e}"
+        );
+        assert_eq!(
+            inj.ops(),
+            vec!["draft:codex 半步失败".to_string(), "key:tab".to_string()],
+            "Tab 失败后不得再发 Esc（消息滞留 composer，后续键会打到错误态；key 的 op 记录先于报错）"
+        );
+    }
+
     /// **本 bug 的如实回执锁**：运行中 claude 插队 + **全程忙屏**（等回合停窗尽）→
     /// 断言 **① 正文仍投递**（best-effort——用户消息不因中断没等到而丢）、
     /// **② 回执是 `Submitted` 而非 `Sent`**（不冒充送达：消息可能落在旧回合的内部队列
@@ -1987,9 +2355,12 @@ mod tests {
             )
         });
         let (mode2, queue2) = scripted(vec![frame(real_frames::BUSY), frame(real_frames::BUSY)]);
+        // E1 裁16 排队回执锁：kimi 运行中插队回执 = Submitted（排队制不谎报 delivered），
+        // 且屏源帧不得被消费（QueueOnly 无等回合停段）
         assert_eq!(
             flush_one_scripted(&st2, "s-turn5", true, mode2),
-            FlushOutcome::Sent
+            FlushOutcome::Submitted,
+            "kimi 排队制回执 = Submitted（不冒充 Sent）"
         );
         assert_eq!(
             queue2.lock().unwrap().len(),

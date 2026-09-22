@@ -512,6 +512,30 @@ pub fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<Injec
     })
 }
 
+/// 草稿注入（批次戊 E1②）：[`inject_text_spec`] 去**尾部提交回车**版——正文进
+/// composer 成草稿即止。唯一消费者 = codex 插队键序「打字→Tab 入队→Esc 直插」
+/// （[`super::mode::JumpSequence::DraftTabThenEsc`]）的第一步：回车会把草稿当场
+/// 提交，Tab 才是 codex 的「入队」键。分块/背压/预算与 [`inject_text_spec`] 全同。
+pub fn inject_text_draft_spec(
+    pid: u32,
+    text: &str,
+    spec: &FamilySpec,
+) -> Result<InjectStats, String> {
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let chars = text.chars().count();
+    let bp = families::use_backpressure(spec, chars);
+    let deadline = Instant::now() + Duration::from_millis(families::inject_budget_ms(spec, chars));
+    let layout = WinKeyLayout;
+    let body = text_records(text, &layout);
+    inject_via(pid, move |handle| {
+        paced_write(handle, &body, bp, deadline).map_err(|e| format!("{e}{PARTIAL_WARN}"))
+    })?;
+    Ok(InjectStats {
+        written: chars,
+        backpressure: bp,
+    })
+}
+
 /// A 族方向键 → VT 序列映射表（本地常量，M6R §8.1 定案：ESC [ + A/B/C/D 字母流，
 /// vk=0 字符形态整条单批原子写）。
 /// 探针派生脆弱常量——版本复验清单见 `super::families`（宪法横切 6 集中落点），
@@ -552,6 +576,11 @@ fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
 /// 域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。可见性 `pub` 仅服务
 /// `super::e2e_support` 测试支撑面（缘由同 [`InjectStats`] 注）。
 pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), String> {
+    // 键黑名单（批次戊 E1⑤，裁19）：先于域校验——ctrl+c 无论域内域外一律拒绝
+    // （opencode 按下即退出应用；单点拒绝防日后域扩展回归）
+    if let Some(reason) = super::engine::forbidden_key_reason(key) {
+        return Err(reason);
+    }
     // P2-2：域校验先行——必须在取锁/附加之前快速失败（不触任何控制台 API）
     let Some(records) = key_records_for(key, spec) else {
         return Err(format!(
@@ -793,6 +822,21 @@ mod tests {
         let err =
             inject_key_spec(424242, "bad!", &families::family_for("codex").unwrap()).unwrap_err();
         assert!(err.contains("不支持的按键"));
+    }
+
+    /// E1⑤ Ctrl+C 黑名单（裁19）集成锁：`inject_key_spec("ctrl+c")` 在**域校验与
+    /// 附加之前**拒绝（假 pid 不触控制台），报错含「禁注」与 opencode 危害点名。
+    /// 还原动作（变异）：把 inject_key_spec 的黑名单前置删掉（等价日后域扩展时
+    /// ctrl+c 漏网）→ 本测试先红（报错变成域文案或写入成功）。
+    #[test]
+    fn ctrl_c_rejected_before_domain_check() {
+        let err = inject_key_spec(424242, "ctrl+c", &families::family_for("opencode").unwrap())
+            .unwrap_err();
+        assert!(err.contains("禁注"), "黑名单文案：{err}");
+        assert!(
+            err.contains("opencode"),
+            "须点名 opencode 退出应用的危害：{err}"
+        );
     }
 
     /// 族分派单测（Minor 4）：同一方向键名按族规格分流——A 族（claude，RawVt）

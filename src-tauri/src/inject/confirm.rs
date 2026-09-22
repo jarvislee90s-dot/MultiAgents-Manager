@@ -242,6 +242,66 @@ pub fn turn_stopped_in_lines(lines: &[String]) -> bool {
         .any(|l| l.to_lowercase().contains(TURN_BUSY_MARKER))
 }
 
+/// composer 输入行标记（claude TUI 高亮符，U+276F；注意 codex 才是 › U+203A）。
+const CLAUDE_CURSOR: char = '\u{276F}';
+
+/// composer 空闲输入行的 hint 文案（队列在场时 composer 显示此提示而非空）。
+/// 命中 = 输入行**无**用户内容（队列展示区的另一条 `❯` 行才是带内容的——见函数文档）。
+const CLAUDE_QUEUE_HINT: &str = "press up to edit queued messages";
+
+/// 输入行残留的中止原因短语（[`claude_input_line_has_residue`] 命中时
+/// [`crate::inject::queue::FlushOutcome::NotDelivered`] 的载荷；回执文案
+/// 「未投递：<本短语>，请人工确认」由端点/settle 统一拼接——单一措辞出口）。
+pub const INPUT_LINE_RESIDUE_REASON: &str = "终端输入行有残留内容（可能是被撤回的消息）";
+
+/// **claude 输入行残留判定**（批次戊 E1① 撤回窗口防护的纯核）：投递正文前检查
+/// composer 输入行是否留有疑似被撤回的消息——命中则中止投递（A1 危害：残留正文
+/// 会被拼接，两条消息并作一条发出）。
+///
+/// # 判据（以 4 份真机整屏定案，夹具在 `tests/fixtures/e-stage2/`）
+///
+/// claude TUI 的 composer 是**整屏最后一个** `❯` 行：transcript 区的用户消息回显
+/// （如 Esc 取出队列消息后的 `❯ F-Q9-…` 行）与队列展示区（`❯ F-Q9-…`）都渲染在
+/// composer **上方**；composer 之下只有分隔线与状态栏（均无 `❯`）。故：
+///
+/// 1. 取整屏**最后一个**以 `❯` 开头的行 = composer 输入行（无 `❯` 行 → 无残留）；
+/// 2. 剥掉 `❯` 与空白后的内容为空 → 无残留（空闲/中断态）；
+/// 3. 内容是已知 hint 串（[`CLAUDE_QUEUE_HINT`]，队列在场时 composer 显示提示文案）
+///    → 无残留；否则 → **有残留**（真机撤回态：消息全文回到输入行）。
+///
+/// # 为什么「排除 hint 后取最底部 ❯」不够（判据陷阱，计划 E1① 明示）
+///
+/// `❯` 同时出现在输入行与队列展示区。队列在场态里 composer 行是 hint（排除后
+/// 「最底部 ❯」会落到队列展示区的消息行——**误报**）；「最后一个 ❯ 行」天然命中
+/// composer，再配 hint 排除即四态全对。四态验证：
+///
+/// | 真机屏（证据） | 最后一个 `❯` 行 | 判定 |
+/// |---|---|---|
+/// | 撤回态（screen-s2a-after-esc.txt → 夹具 claude-recall-state.txt） | `❯ F-G1e: …` 有内容 | **残留** ✅ |
+/// | 中断态（screen-s2b-after-esc.txt → 夹具 claude-interrupted-state.txt） | `❯` 空 | 无残留 ✅ |
+/// | 队列在场（screen-t9-after-queue.txt → 夹具 claude-queue-state.txt） | `❯ Press up to edit…` hint | 无残留 ✅ |
+/// | Esc 取出后（screen-t9-after-esc.txt → 夹具 claude-post-esc-echo.txt） | `❯` 空（transcript 回显在其上方，不误报） | 无残留 ✅ |
+///
+/// # 边界（如实）
+///
+/// 「编辑界面 Esc×2 取消编辑」后的中间态、撤回消息跨多行折行（首行内容非空，
+/// 判据仍命中）等未逐一真机采样；判据只断言「composer 有非 hint 内容」，对折行
+/// 首行恒有效。清空动作未实测——防护采「中止+如实回执」，不自动清空（spec §5）。
+pub fn claude_input_line_has_residue(lines: &[String]) -> bool {
+    let Some(last) = lines
+        .iter()
+        .rfind(|l| l.trim_start().starts_with(CLAUDE_CURSOR))
+    else {
+        return false;
+    };
+    let content = last
+        .trim_start()
+        .strip_prefix(CLAUDE_CURSOR)
+        .unwrap_or("")
+        .trim();
+    !content.is_empty() && !content.to_lowercase().contains(CLAUDE_QUEUE_HINT)
+}
+
 /// **稳定闸的连续拍数**（2026-09-22 R2 必修项 3）：「已停」是**稳定**属性，
 /// 需要**连续 N 拍**都读到「不含忙态串」才成立。
 ///
@@ -1183,6 +1243,57 @@ mod tests {
             !turn_stopped_in_lines(&lines(&["用户问：什么叫 esc to interrupt 提示？"])),
             "正文引用该串同样判「未停」——保守方向（多等一拍不误投）"
         );
+    }
+
+    // ==== 批次戊 E1①：claude 输入行残留判定（撤回窗口防护纯核）====
+
+    /// e-stage2 屏读夹具读取（仓库根 `tests/fixtures/e-stage2/`，与 api.rs 的
+    /// plan_pending_cases.json 同路径先例；vitest 同路径共用）。首行 `# source:`
+    /// 溯源头注与 BOM 剥离后逐行返回（BOM 只出现在文件首，先整体剥再按行过滤）。
+    fn e_stage2_screen(name: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/e-stage2")
+            .join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
+        raw.trim_start_matches('\u{feff}')
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    /// **残留判据 × 四份真机整屏夹具**（正反例各二，夹具即计划 §1 清单）：
+    /// 撤回态 → **残留**（中止投递）；中断态 / 队列在场 / Esc 取出后 → 无残留（照常投递）。
+    ///
+    /// 还原动作（变异锁）：把 [`claude_input_line_has_residue`] 改成恒 `false`
+    /// （等价「无防护」——A1 危害原样）→ 撤回态格**先红**；改成「任何带内容的 ❯ 行
+    /// 即残留」（忽视「最后一个是 composer」的陷阱）→ 队列在场 / Esc 取出后两格红。
+    #[test]
+    fn input_line_residue_judges_on_real_fixtures() {
+        // 撤回态：消息全文回输入行（s2a，戊探F §2.2）→ 残留
+        assert!(
+            claude_input_line_has_residue(&e_stage2_screen("claude-recall-state.txt")),
+            "撤回态（消息回输入行）必须判残留——A1 拼接危害的防护面"
+        );
+        // 中断态：`Interrupted` 标记 + composer 空（s2b）→ 无残留
+        assert!(
+            !claude_input_line_has_residue(&e_stage2_screen("claude-interrupted-state.txt")),
+            "中断态 composer 为空，不得误报残留"
+        );
+        // 队列在场态：队列展示区 `❯ 消息` 带内容，但最后一个是 composer hint → 无残留
+        assert!(
+            !claude_input_line_has_residue(&e_stage2_screen("claude-queue-state.txt")),
+            "队列在场态不得把队列展示区的消息行误判为输入行残留（判据陷阱）"
+        );
+        // Esc 取出后成功插队态：transcript 回显 `❯ 消息` 在 composer 上方 → 无残留
+        assert!(
+            !claude_input_line_has_residue(&e_stage2_screen("claude-post-esc-echo.txt")),
+            "Esc 取出后的 transcript 回显不得误报残留（否则正常插队全被中止）"
+        );
+        // 边界：全空屏（无 ❯ 行）→ 无残留；仅空白 composer → 无残留
+        assert!(!claude_input_line_has_residue(&[]));
+        assert!(!claude_input_line_has_residue(&lines(&["❯   "])));
     }
 
     /// **脚本化屏序列驱动内核**（对齐 `mode.rs::run_readback_script` 的既有做法）：

@@ -887,6 +887,29 @@ pub async fn session_send(
                 )
                     .into_response()
             }
+            // E1① 撤回窗口防护中止（理论不可达臂：本变体仅插队路径产出，穷尽性保留
+            // ——防御性回 failed，error=「未投递：<原因>，请人工确认」如实透出）
+            crate::inject::queue::FlushOutcome::NotDelivered(reason) => {
+                endpoint_audit(
+                    &st,
+                    &device_id,
+                    &device_name,
+                    &tool,
+                    &sid,
+                    &content,
+                    audit_action_for(&req.text, "send"),
+                    &format!("aborted:{reason}"),
+                );
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({
+                        "status": "failed",
+                        "error": format!("未投递：{reason}，请人工确认"),
+                    })),
+                )
+                    .into_response()
+            }
             // Deferred/Suspended（含守卫忙让位）：行保持 pending 等会话回来/下个跃迁，
             // 语义即排队（Suspended 亦 queued）——回查 pending 取该条目实时位次回执
             crate::inject::queue::FlushOutcome::Deferred
@@ -1161,6 +1184,13 @@ pub async fn session_queue_jump(
             Json(serde_json::json!({ "status": "submitted" })),
         )
             .into_response(),
+        // E1① 撤回窗口防护中止：正文**未注入**（输入行有疑似被撤回的残留，注入即
+        // 拼接危害）——行已 mark_failed 退出 pending，回 failed{error} 如实透出
+        // 「未投递：<原因>，请人工确认」（前端 handleJump 对非 delivered 走对账，
+        // 行不在队 → 中性 gone 收敛；原因文案在 failed 回执可见）
+        crate::inject::queue::FlushOutcome::NotDelivered(reason) => {
+            failed_body(format!("未投递：{reason}，请人工确认"))
+        }
         crate::inject::queue::FlushOutcome::Failed(e) => failed_body(e),
         // Deferred/Suspended（含守卫忙让位/已被他方消费）：行保持 pending 或已退出，
         // 语义即排队——回查 pending 取该条目实时位次回执
