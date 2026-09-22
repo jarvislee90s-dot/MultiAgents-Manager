@@ -436,3 +436,46 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     expect(screen.queryByTestId("mode-receipt")).toBeNull();
   });
 });
+
+// ==== 批次戊 E3④：当前档高亮 + 问答待决置灰 ====
+describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
+  it("当前档按钮高亮：data-current=true + 反色样式；其余档 data-current=false", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "s-e3-hl" }} />);
+    const planBtn = await screen.findByTestId("mode-switch-mode-plan");
+    expect(planBtn.getAttribute("data-current")).toBe("true");
+    expect(planBtn.className).toContain("font-semibold");
+    const readOnlyBtn = screen.getByTestId("mode-switch-permission-readOnly");
+    expect(readOnlyBtn.getAttribute("data-current")).toBe("false");
+    // 权限组 current=null → 无任何高亮（不假装知道当前档）
+    expect(readOnlyBtn.className).not.toContain("font-semibold");
+  });
+
+  it("问答待决：questionPending=true → 按钮全部禁用 + 原因文案 + data-question-pending", async () => {
+    installFetch();
+    routes.mode = { ...codexTwoAxis(), questionPending: true };
+    render(<ModeBar session={{ id: "s-e3-pending" }} />);
+    await screen.findByTestId("mode-question-pending-hint");
+    expect(screen.getByTestId("mode-bar").getAttribute("data-question-pending")).toBe("true");
+    expect(
+      (screen.getByTestId("mode-switch-mode-plan") as HTMLButtonElement).disabled
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("mode-switch-permission-readOnly") as HTMLButtonElement).disabled
+    ).toBe(true);
+  });
+
+  it("非待决（questionPending 缺省/ false）不置灰不显文案", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "s-e3-normal" }} />);
+    await screen.findByTestId("mode-switch-mode-plan");
+    expect(
+      screen.queryByTestId("mode-question-pending-hint")
+    ).toBeNull();
+    expect(
+      (screen.getByTestId("mode-switch-mode-plan") as HTMLButtonElement).disabled
+    ).toBe(false);
+  });
+});

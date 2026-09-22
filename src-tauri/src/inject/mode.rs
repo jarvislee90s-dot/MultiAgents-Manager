@@ -756,8 +756,55 @@ pub fn resolve_group(
     }
 }
 
-/// **codex `/plan` 运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。
+/// 模式/权限切换的**投递前拦截决策**（批次戊 E3② 守卫收窄的判据单点——
+/// `remote::api::session_mode_switch` 消费，测试在此钉死判定表）。
 ///
+/// # 判定表（裁17 / 守卫设计原则 §6.5：拦「破坏状态」，不拦「无效果」）
+///
+/// | 条件 | 判定 | 依据 |
+/// |---|---|---|
+/// | **对话框在场**（编号选项簇，注入前单次屏读快照——D20 例外条款） | [`SwitchBlock::Dialog`] | 既有控制类注入红线（丁T3 §2.7）：切档键被弹窗吞、Enter 误交默认答案 |
+/// | **kimi × 问答待决**（消息尾部形态判据） | [`SwitchBlock::QuestionPending`] | **含回车的整条注入硬拒绝**（戊探D ×2：斜杠文本被问答 UI 吞、尾随 Enter 被解释为「选中高亮项」推进 Review=**污染待决态**——不是无效果，是破坏状态） |
+/// | codex × 模式组 × Plan × 运行中 | [`SwitchBlock::CodexPlanBusy`] | codex 产品限制（`Plan mode unavailable right now.`），提前拦为给可读回执 |
+/// | **其余一切 busy 态** | `None`（**放行**） | **裁17**：busy 中切权限/模式直接生效且不打断运行（codex `/permissions`+Full Access 二段确认照常弹、kimi 同——CX-1/2/K-2 三方实测，「busy 不可用」彻底证伪） |
+///
+/// codex 的问答待决**不在此拦**：codex 的 `request_user_input` 弹窗本身是**编号选项
+/// 对话框**，落在「对话框在场」格（同一屏读快照即可判）；kimi 的问答框无编号簇
+/// （屏读判不到），才需要消息尾部的第二判据。前端置灰 + 原因文案消费同一判定表
+/// （spec §4 待决拦截硬约束）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchBlock {
+    /// 对话框在场（既有红线）
+    Dialog,
+    /// kimi 问答待决（含回车整条硬拒绝）
+    QuestionPending,
+    /// codex /plan 运行中（产品限制）
+    CodexPlanBusy,
+}
+
+/// 判定表本体（参数化全部条件，跨平台可测；`None` = 放行）
+pub fn mode_switch_block(
+    tool: &str,
+    group: ModeGroupId,
+    target: MamMode,
+    is_running: bool,
+    dialog_present: bool,
+    question_pending: bool,
+) -> Option<SwitchBlock> {
+    if dialog_present {
+        return Some(SwitchBlock::Dialog);
+    }
+    if tool == "kimi" && question_pending {
+        return Some(SwitchBlock::QuestionPending);
+    }
+    if codex_plan_busy(tool, group, target, is_running) {
+        return Some(SwitchBlock::CodexPlanBusy);
+    }
+    // busy（is_running）单独出现 → **放行**（裁17：busy 态不拦）
+    None
+}
+
+/// **codex `/plan` 运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。///
 /// 判据来源：codex 0.155.1 二进制内嵌文案 `Plan mode unavailable right now.`
 /// （`slash_dispatch` 分支，与 `/plan` 的 in-progress 门同源）——即 codex 自己就会
 /// 拒；MAM 侧**在投递前**判，才能给用户一份**如实回执**而不是「已发送」后无变化。
@@ -1112,85 +1159,133 @@ pub fn menu_target_label(tool: &str, target: MamMode) -> Option<&'static str> {
     }
 }
 
+/// **codex 权限菜单标题锚**（戊探D：4 份 dump 逐字唯一出现，短语锚最稳）
+pub(crate) const CODEX_MENU_TITLE_ANCHOR: &str = "update model permissions";
+/// **codex 权限菜单 footer 锚**（同上；与标题框出菜单窗，窗内编号行才参与定位）
+pub(crate) const CODEX_MENU_FOOTER_ANCHOR: &str = "press enter to confirm or esc to go back";
+/// **kimi 权限菜单标题锚**（戊探D kimi 段：三份 dump 逐字稳定）
+pub(crate) const KIMI_MENU_TITLE_ANCHOR: &str = "select permission mode";
+/// **kimi 权限菜单 footer 锚**（同上；kimi 的菜单项在 footer 行**之后**——
+/// footer 紧贴标题下方，项列表在其下，与 codex 的「项在标题与 footer 之间」相反）
+pub(crate) const KIMI_MENU_FOOTER_ANCHOR: &str = "enter select · esc cancel";
+/// kimi 档位行的**当前档后缀**（`← current`；与高亮 `❯` 双标记并存——
+/// `← current` 不随光标移动，是回读当前档的锚，用户 K-1 实测）
+pub(crate) const KIMI_CURRENT_SUFFIX: &str = "current";
+
 /// **菜单定位**（纯函数，菜单路径的第一步）：屏读行集 → 编号化的菜单项表。
 ///
-/// # 判据：**关键词包含 + 最小互斥**（丁T4 收尾按用户实机取证改写）
+/// # 判据：**标题/footer 锚窗 + 按家行形解析**（批次戊 E3① 重写；**关键词簇判据退役**）
 ///
-/// 逐行：剥掉前导空白与光标标记（[`crate::inject::dialog::strip_cursor_marker`]）后，
-/// **大小写不敏感地**数该行命中了几个已知档位标签（`to_lowercase()` + `contains`，
-/// **纯字符级**，任何地方都不做字节切片——C1 的 panic 教训）：
+/// 旧判据「关键词包含 + 计数互斥」对**整屏**逐行扫档位词，N6 实证其失败形态：kimi
+/// 描述行 `Never interrupts you; …` 含 `Never` 子串 → `Never Ask` 被计第 2 次 →
+/// 一致性闸判「档位表不自洽」→ 闭环中止（「总是询问」永不可达——失败全在 MAM 解析，
+/// TUI 导航无问题，用户 K-1 实测 ↓ 恰移一档）。戊探D 五锚实证（标题行 / footer 行 /
+/// `← current` / `❯` / 两行组）全部字符层可解析且唯一 → 本函数改为：
 ///
-/// | 命中数 | 判定 | 实机对应形态 |
-/// |---|---|---|
-/// | `0` | 非菜单项 → 跳过 | 标题行、空行、操作提示行 |
-/// | `≥2` | **提到多个档位的散文/警示行 → 跳过** | 二进制实证的 `We strongly recommend selecting "Ask for approval" instead.` 与全角说明文 |
-/// | `==1` | 菜单项；该行属于命中的那个档位 | `› 2. Ask for approval (current)  Codex can read …`（codex）/ `❯ Always Ask ← current`（kimi） |
+/// 1. **锚窗**：先找**标题锚**（codex `update model permissions` / kimi
+///    `select permission mode`），再找各自的 **footer 锚**；菜单行只在窗内取——
+///    标题之上/窗外的正文（busy 混屏流式行、历史摘要的编号行）天然不可达
+///    （戊探D：busy 开菜单时菜单块自身行序未被滚动正文污染）；
+/// 2. **按家行形**：
+///    - **codex**（项在标题↔footer 之间）：行 = `›? N. <档名标签>(current)? <描述>`，
+///      经 [`crate::inject::dialog::parse_option_line`] 取编号行——**折行不产新项**
+///      （折行是纯缩进描述续行，无 `N. ` 形态，天然不匹配；戊探D 间距 +1/+2 混合）；
+///    - **kimi**（项在 footer 之后，两行组）：标签行 = 剥掉光标标记后**恰为**
+///      `<档名> ← current` 或裸 `<档名>`（其余字符一律不收）——描述行（5 空格缩进、
+///      归属上方标签行）**永不命中**：`Never interrupts you; …` 剥掉 `Never` 后还有
+///      `interrupts…`，不满足「恰为」判据 → 正确归属为描述行（**N6 失败行的归宿**）。
+/// 3. 高亮 = 行首光标标记（[`crate::inject::dialog::strip_cursor_marker`] 单点；
+///    `← current` 是后缀标记、不影响高亮判定——双标记语义见常量注）。
 ///
-/// `number` 按**屏上出现顺序** 1 起递增——它是**内部序号**，与屏上是否印数字
-/// **无关**：codex 印编号（`1. Read Only` … `4. Full Access`），kimi 不印（缩进 +
-/// `❯`），两者共用这一套编号。
+/// `number` 按**屏上出现顺序** 1 起递增（内部序号，与屏上是否印数字无关）；
+/// `label` 存 `规范标签|屏上原文`（前半供一致性闸与导航比对，后半供回执/日志）。
 ///
-/// # 为什么不再用「行首标签前缀」（旧判据的失效点）
-///
-/// 旧判据断言「权限菜单不带编号（arrow-key 选择器）」并据此做行首前缀匹配。**该断言
-/// 来源是推演，被实机推翻**：codex 的菜单行逐字是 `› 2. Ask for approval (current)`
-/// ——行首是光标标记 + 编号，标签**不在行首** → 行首匹配在真机上定位到 **0 项**，
-/// 权限切换功能完全不可用（如实中止，不误选）。kimi 虽无编号，但**每档下面紧跟一行
-/// 描述**（档位行不连续），任何「连续成簇 + 紧邻标题」的结构假设都会误伤它。
-/// 两家形态不同，共同点只有「**一行只含自己那一个档位词**」——这正是本判据。
-/// 实机原文见 `research/refs/phase2-消息注入/2026-09-22-codex-kimi权限菜单与FullAccess三段式-用户实机取证.md` §1/§4/§5。
-///
-/// # 为什么 `≥2` 要跳过（而不是「取第一个命中的标签」）
-///
-/// 二进制实证：Full Access 档的说明文案里就有
-/// `We strongly recommend selecting "Ask for approval" instead.`（该串在
-/// `codex.exe` 内出现 1 次），另一条
-/// `We strongly recommend selecting "Approve for me" instead, and customizing the reviewer
-/// policy for your use case.`（同，1 次）——**真菜单项一行只含自己那一个档位词**，
-/// 而这两行是「提到别的档位」的散文。若按「取第一个命中」处理，它们会各被计成一个
-/// 菜单项 → 项数凭空 +1 → 步进算错。故 `≥2` 一律跳过（比中止更稳：跳过的是散文行，
-/// 而真菜单项永远只命中自己那一个词）。
-///
-/// # 为什么编号不再是判据
-///
-/// 编号在两家不通用（codex 印、kimi 不印），且**同一档的描述行/正文行也可能印编号**
-/// （编号对话框、列表）。定位若依赖编号，就得分族写死两套形态；改用「关键词 + 计数
-/// 互斥」后，同一份实现覆盖两家。编号只作为**内部序号**（[`DialogOption::number`]）
-/// 供导航索引与回执引用。
-///
-/// # 与二进制警示语的关系（如实申报：这是**部分**防线）
-///
-/// 上面两条警示语行单独出现时只命中 1 个标签 → 会被当作菜单项计入，**由
-/// [`menu_items_coherent`] 的不变式 1（每档恰好一次）拦下**——真菜单项已占用了该
-/// 标签，故重复即判不自洽。也就是说：**互斥规则拦住「一行的多个档位」，一致性闸拦住
-/// 「同档标签的第二行」**，两道闸分工，缺一不可。
-///
-/// 返回 `None`（调用方据此**中止并如实回执**，绝不盲发方向键）：菜单项 < 2（不成菜单）。
-/// 本函数只做**原始定位**，其输出**不可直接行动**（见 [`menu_items_coherent`]）。
+/// 返回 `None`（调用方据此**中止并如实回执**，绝不盲发方向键）：无标题锚（菜单未
+/// 出现）/ 窗内合法行 < 2。本函数只做**原始定位**，输出**不可直接行动**（仍须过
+/// [`menu_items_coherent`] 两不变式——锚窗已消灭 N6 的混入源，但「同档标签第二行」
+/// 的纵深防御不变式保持）。**busy 态照常解析**（裁17：菜单在 busy 中照常打开，
+/// 戊探D ×2 实测——守卫不拦 busy）。
 pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<DialogOption>> {
-    // 词表小写化只做一次（逐行 × 逐标签的 `to_lowercase()` 是二次方开销）
-    let lowered: Vec<(String, &str)> = labels.iter().map(|l| (l.to_lowercase(), *l)).collect();
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    let canon: Vec<(String, &str)> = labels.iter().map(|l| (l.to_lowercase(), *l)).collect();
+    // 标题锚分家：codex 优先（其标题词与 kimi 不相交），再 kimi；都无 → 菜单未出现
+    if let Some(t) = lowered
+        .iter()
+        .position(|l| l.contains(CODEX_MENU_TITLE_ANCHOR))
+    {
+        return locate_codex_menu(lines, &lowered, t, &canon);
+    }
+    let t = lowered
+        .iter()
+        .position(|l| l.contains(KIMI_MENU_TITLE_ANCHOR))?;
+    locate_kimi_menu(lines, &lowered, t, &canon)
+}
+
+/// codex 菜单定位：标题↔footer 窗内的**编号行**（折行不产新项）。
+fn locate_codex_menu(
+    lines: &[String],
+    lowered: &[String],
+    title_idx: usize,
+    canon: &[(String, &str)],
+) -> Option<Vec<DialogOption>> {
+    let footer_idx = lowered[title_idx..]
+        .iter()
+        .position(|l| l.contains(CODEX_MENU_FOOTER_ANCHOR))?
+        + title_idx;
     let mut items: Vec<DialogOption> = Vec::new();
-    for line in lines {
+    for line in &lines[title_idx + 1..footer_idx] {
+        // 编号行形态（`› 2. Ask for approval (current)  …`）；折行/空行/标题行自然落选
+        let Some((_, raw_label, highlighted)) = crate::inject::dialog::parse_option_line(line)
+        else {
+            continue;
+        };
+        let raw_lower = raw_label.to_lowercase();
+        if let Some((_, orig)) = canon.iter().find(|(lo, _)| raw_lower.starts_with(lo)) {
+            items.push(DialogOption {
+                number: items.len() as u32 + 1,
+                label: format!("{orig}|{}", raw_label.trim()),
+                highlighted,
+            });
+        }
+    }
+    if items.len() < 2 {
+        return None;
+    }
+    Some(items)
+}
+
+/// kimi 菜单定位：footer 之后的**两行组**标签行（「恰为 `<档名> ← current` 或裸
+/// `<档名>`」——描述行永不命中，N6 失败行 `Never interrupts you; …` 在此正确归属）。
+fn locate_kimi_menu(
+    lines: &[String],
+    lowered: &[String],
+    title_idx: usize,
+    canon: &[(String, &str)],
+) -> Option<Vec<DialogOption>> {
+    let footer_idx = lowered[title_idx..]
+        .iter()
+        .position(|l| l.contains(KIMI_MENU_FOOTER_ANCHOR))?
+        + title_idx;
+    let mut items: Vec<DialogOption> = Vec::new();
+    for line in &lines[footer_idx + 1..] {
         let (rest, highlighted) = crate::inject::dialog::strip_cursor_marker(line);
-        let text = rest.trim();
-        if text.is_empty() {
+        let trimmed = rest.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let lower = text.to_lowercase();
-        let hits: Vec<&str> = lowered
-            .iter()
-            .filter(|(lo, _)| lower.contains(lo.as_str()))
-            .map(|(_, orig)| *orig)
-            .collect();
-        // 0 = 非菜单项；≥2 = 散文/警示行（见文档「为什么 ≥2 要跳过」）
-        if hits.len() != 1 {
+        let lower = trimmed.to_lowercase();
+        let Some(hit) = canon.iter().find(|(lo, _)| lower.starts_with(lo)) else {
+            continue;
+        };
+        // 「恰为」判据：剥掉档名后，剩余只能是空（裸标签）或 `← current` 后缀——
+        // 描述行剥掉前缀子串后仍有正文 → 落选（N6 的解）
+        let remainder = lower[hit.0.len()..].trim();
+        if !remainder.is_empty() && !remainder.contains(KIMI_CURRENT_SUFFIX) {
             continue;
         }
         items.push(DialogOption {
             number: items.len() as u32 + 1,
-            // label 存 `规范标签|屏上原文`（前半供一致性闸与导航比对，后半供回执/日志引用）
-            label: format!("{}|{text}", hits[0]),
+            label: format!("{}|{trimmed}", hit.1),
             highlighted,
         });
     }
@@ -2747,7 +2842,8 @@ mod tests {
     // `←`(U+2190) / `↑↓·`(U+2191U+2193U+00B7) 等非 ASCII 字符与描述折行——
     // **本批的纪律要求：夹具必须含非 ASCII，必须来自真机**（T2/T4-C1 两次教训）。
 
-    /// codex `/permissions` 菜单（**档案 §1 逐字**；新窗口默认态，高亮在第 2 项）。
+    /// codex `/permissions` 菜单（**档案 §1 逐字**；新窗口默认态，高亮在第 2 项；
+    /// 尾行 footer 锚 = 真机 dump 逐字——E3① 起菜单定位以标题↔footer 锚窗为前提）。
     fn codex_menu_real() -> Vec<String> {
         lines(&[
             "  Update Model Permissions",
@@ -2759,6 +2855,8 @@ mod tests {
             "  3. Approve for me              Only ask for actions detected as potentially unsafe.",
             "  4. Full Access                 Codex can edit files outside this workspace and access the internet without asking",
             "                                 for approval. Exercise caution when using.",
+            "",
+            "  Press enter to confirm or esc to go back",
         ])
     }
 
@@ -2874,38 +2972,52 @@ mod tests {
     /// 2. **同时提到两档的散文** → 命中 ≥2 → **跳过**，不影响结果。
     #[test]
     fn distractor_lines_are_handled_by_the_two_gates() {
-        // ① 单档警示语：混进真机菜单 → 定位计入 5 项，但一致性闸拒绝
+        // ① 单档警示语（窗内）：新行形判据下**不是 `N. ` 编号行** → 定位阶段直接排除，
+        //    不再「计入 5 项后靠一致性闸兜底」（旧关键词判据的形态；E3① 起排除前移）
         let mut screen = codex_menu_real();
-        screen
-            .push("    We strongly recommend selecting \"Ask for approval\" instead.".to_string());
-        let raw = locate_menu_items(&screen, menu_labels("codex")).expect("定位仍报出原始项");
+        let warning =
+            "    We strongly recommend selecting \"Ask for approval\" instead.".to_string();
+        let insert_at = screen.len() - 1; // footer 行之前（窗内）
+        screen.insert(insert_at, warning.clone());
+        let raw = locate_menu_items(&screen, menu_labels("codex")).expect("菜单照常解析");
         assert_eq!(
             raw.len(),
-            5,
-            "警示语命中 `Ask for approval` **一个**标签 → 定位器如实计入（定位器不做语义判断）"
+            4,
+            "警示语行不是编号行 → 窗内也被行形判据排除（不再计入）"
         );
-        assert!(
-            !menu_items_coherent(&raw, "codex"),
-            "与真菜单项重复 → 不变式 1 拒绝（第二道闸的收口点）"
-        );
-        // 行动入口必须中止，且**不再往下走**（闭环的首次定位就会撞上这道闸）
-        let (script, sent) = run_scripted_nav(&screen, "codex", MamMode::Bypass, &[&screen]);
-        assert!(script.is_err(), "混入单档警示语 → 中止：{script:?}");
-        assert!(sent.is_empty(), "中止发生在首次定位 → **零按键**");
+        assert!(menu_items_coherent(&raw, "codex"), "四真项自洽");
+        //（导航行为不在此钉——脚本化单屏会触发「高亮不动」中止，与干扰行无关；
+        // 闭环导航的专门测试见 closed_loop_* 族）
 
-        // ② 同时提到两档的散文（≥2 命中 → 跳过）：不影响定位结果
+        // ② 同时提到两档的散文（窗内）：新行形判据下**不是 `N. ` 编号行** → 不进项表
         let mut screen2 = codex_menu_real();
-        screen2.push("  Compare Read Only with Full Access before choosing.".to_string());
-        let items = locate_menu_items(&screen2, menu_labels("codex")).expect("≥2 命中的行被跳过");
+        screen2.insert(
+            screen2.len() - 1,
+            "  Compare Read Only with Full Access before choosing.".to_string(),
+        );
+        let items = locate_menu_items(&screen2, menu_labels("codex")).expect("菜单照常解析");
         assert_eq!(
             items.len(),
             4,
-            "提到两档的散文行**跳过**（不是计入也不是中止）"
+            "两档散文行不是 `N. ` 编号行 → 窗内也不成项（行形判据天然排除）"
         );
         assert!(
             items.iter().all(|o| !o.label.contains("Compare")),
             "散文行不得成为菜单项：{items:?}"
         );
+
+        // ③ **窗外排除锁**（E3① 锚窗语义）：同样的警示语/摘要行放在 footer **之后**
+        // → 菜单窗外，定位器零吸收（旧关键词判据对整屏扫描会把它算进去）
+        let mut screen3 = codex_menu_real();
+        screen3.push(warning);
+        screen3.push("  1. 构建工具:npm".to_string());
+        let items3 = locate_menu_items(&screen3, menu_labels("codex")).expect("菜单照常解析");
+        assert_eq!(
+            items3.len(),
+            4,
+            "footer 之后的行一律不参与定位（锚窗纪律——busy 混屏不污染菜单块）"
+        );
+        assert!(menu_items_coherent(&items3, "codex"));
     }
 
     /// **编号不再是判据**（锁）：把同一份 codex 真机菜单的编号整体删掉（kimi 化——
@@ -2934,7 +3046,7 @@ mod tests {
                 format!("{}{}", if hl { "› " } else { "   " }, stripped)
             })
             .collect();
-        // 夹具自检：编号确实没了（否则本测试证伪不了编号依赖）
+        // 夹具自检：编号确实没了（否则本测试证伪不了行形依赖）
         assert!(
             !unnumbered.iter().any(|l| {
                 let t = l.trim_start_matches(['›', ' ']);
@@ -2942,10 +3054,270 @@ mod tests {
             }),
             "夹具构造失败：编号没有被删干净：{unnumbered:?}"
         );
-        let items = locate_menu_items(&unnumbered, menu_labels("codex"))
-            .expect("无编号形态（= kimi 形态）仍必须定位：编号不是判据");
-        assert_eq!(items.len(), 4, "删掉编号后仍是 4 项");
-        assert!(items[1].highlighted, "高亮位不依赖编号");
+        // E3① 行形判据的两侧：codex 窗内**必须**是 `N. ` 编号行——删号后行形不匹配
+        // → 如实返回 None（不定位）；kimi 侧则天然无编号（locate_kimi_menu_items_from_
+        // real_screen 已锁）。编号对 codex 是**行形的一部分**，不是可选判据
+        assert!(
+            locate_menu_items(&unnumbered, menu_labels("codex")).is_none(),
+            "codex 窗内无编号行形 → 不定位（如实返回，不猜）"
+        );
+    }
+
+    // ==== E3② 守卫收窄（裁17）判定表锁 ====
+
+    /// **busy 放行锁 ×2 + 待决拒绝锁 ×2**（判定表见 [`mode_switch_block`]）。
+    ///
+    /// 还原动作（变异）：在判定表加 `if is_running { return Some(..) }`（恢复旧
+    /// 「busy 拦」）→ busy 放行两格先红；删 kimi 待决格 → 待决拒绝格先红。
+    #[test]
+    fn mode_switch_block_truth_table() {
+        // busy 放行锁①：codex 权限组 × 运行中（Full Access 二段确认照常弹）→ 放行
+        assert_eq!(
+            mode_switch_block(
+                "codex",
+                ModeGroupId::Permission,
+                MamMode::Bypass,
+                true,
+                false,
+                false,
+            ),
+            None,
+            "busy 切权限不拦（裁17：CX-1/2 实测直接生效不打断）"
+        );
+        // busy 放行锁②：kimi 权限组 × 运行中 → 放行
+        assert_eq!(
+            mode_switch_block(
+                "kimi",
+                ModeGroupId::Permission,
+                MamMode::AcceptEdits,
+                true,
+                false,
+                false,
+            ),
+            None,
+            "busy 切权限不拦（裁17：K-2 实测运行中可切不打断）"
+        );
+        // 待决拒绝锁①：kimi × 问答待决 → 含回车整条硬拒绝（Enter 误选污染待决态）
+        assert_eq!(
+            mode_switch_block(
+                "kimi",
+                ModeGroupId::Permission,
+                MamMode::AcceptEdits,
+                false,
+                false,
+                true,
+            ),
+            Some(SwitchBlock::QuestionPending),
+            "kimi 待决态 = 硬拒绝（戊探D ×2：Enter 误选推进 Review）"
+        );
+        // 待决拒绝锁②：kimi 待决态**空闲**同样拒绝（危害与 busy 无关）
+        assert_eq!(
+            mode_switch_block("kimi", ModeGroupId::Mode, MamMode::Plan, false, false, true,),
+            Some(SwitchBlock::QuestionPending),
+        );
+        // codex 问答待决不落本格（其弹窗是编号对话框 → 落 Dialog 格）
+        assert_ne!(
+            mode_switch_block(
+                "codex",
+                ModeGroupId::Permission,
+                MamMode::ReadOnly,
+                false,
+                true,
+                false,
+            ),
+            None,
+        );
+        assert_eq!(
+            mode_switch_block(
+                "codex",
+                ModeGroupId::Permission,
+                MamMode::ReadOnly,
+                false,
+                false,
+                true,
+            ),
+            None,
+            "codex 待决依赖对话框判据（编号弹窗可屏读），不落 QuestionPending 格"
+        );
+        // codex /plan 运行中（产品限制格）
+        assert_eq!(
+            mode_switch_block(
+                "codex",
+                ModeGroupId::Mode,
+                MamMode::Plan,
+                true,
+                false,
+                false,
+            ),
+            Some(SwitchBlock::CodexPlanBusy),
+        );
+        // 对话框在场格优先级最高（守卫前置）
+        assert_eq!(
+            mode_switch_block(
+                "kimi",
+                ModeGroupId::Permission,
+                MamMode::AcceptEdits,
+                true,
+                true,
+                true,
+            ),
+            Some(SwitchBlock::Dialog),
+        );
+        // 空闲 + 无对话框 + 无待决 → 放行
+        assert_eq!(
+            mode_switch_block(
+                "claude",
+                ModeGroupId::Mode,
+                MamMode::Plan,
+                false,
+                false,
+                false,
+            ),
+            None,
+        );
+    }
+
+    // ==== E3①：锚点分家定位 × 真机夹具（戊探D evidence 原件）====
+
+    /// e-stage2 屏读夹具读取（confirm/dialog tests 同款；单一事实源=夹具文件本身）
+    #[cfg(test)]
+    fn e_stage2_screen(name: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/e-stage2")
+            .join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
+        raw.trim_start_matches('\u{feff}')
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    /// **codex 空闲菜单 × 真机夹具**：4 项、`(current)` 行高亮、上方历史摘要编号行
+    /// （`1. 构建工具:npm`——旧关键词判据的最现实混入源，戊探D §2.4-5）零吸收。
+    #[test]
+    fn e3_codex_idle_menu_fixture_parses_without_pollution() {
+        let screen = e_stage2_screen("codex-perm-menu-idle.txt");
+        let items = locate_menu_items(&screen, menu_labels("codex")).expect("真机空闲菜单必须解析");
+        assert_eq!(items.len(), 4);
+        let labels: Vec<String> = items
+            .iter()
+            .map(|o| o.label.split_once('|').unwrap().0.to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Read Only",
+                "Ask for approval",
+                "Approve for me",
+                "Full Access"
+            ]
+        );
+        assert!(items[1].highlighted, "› 在第 2 项");
+        assert!(
+            items.iter().all(|o| !o.label.contains("构建工具")),
+            "上方历史摘要的编号行（窗外）不得被吸收：{items:?}"
+        );
+        assert!(menu_items_coherent(&items, "codex"));
+    }
+
+    /// **codex busy 菜单 × 真机夹具**：流式正文与菜单块同屏（戊探D D③ busy 形态），
+    /// 菜单块自身解析不受滚动正文污染（裁17：busy 态照常解析、守卫不拦）。
+    #[test]
+    fn e3_codex_busy_menu_fixture_not_polluted() {
+        let screen = e_stage2_screen("codex-perm-menu-busy.txt");
+        let items = locate_menu_items(&screen, menu_labels("codex")).expect("busy 菜单必须解析");
+        assert_eq!(items.len(), 4);
+        assert!(items[1].highlighted);
+        assert!(menu_items_coherent(&items, "codex"));
+    }
+
+    /// **★ N6 收口锁（kimi「总是询问」可达）× 真机夹具**：`/permission` 菜单
+    /// （戊探D kimi 段原件）——描述行 `Never interrupts you; …`（含 `Never` 子串，
+    /// 旧关键词判据的精确触发行）被行形判据正确归属为描述行；三档项唯一 → 一致性闸
+    /// 通过 → 目标「Always Ask」的探测 Ready（= 总是询问跨折行可达，N6 关闭）。
+    ///
+    /// 还原动作（变异）：把 [`locate_menu_items`] 换回旧「关键词 contains 整屏扫描」
+    /// → `Never Ask` 重复命中 → 一致性闸拒绝 → probe 落 Fatal，本测试先红。
+    #[test]
+    fn e3_kimi_menu_fixture_n6_always_ask_reachable() {
+        let screen = e_stage2_screen("kimi-perm-menu-permission.txt");
+        let items =
+            locate_menu_items(&screen, menu_labels("kimi")).expect("真机 kimi 菜单必须解析");
+        assert_eq!(items.len(), 3, "三档项；两行组描述行不计入");
+        let labels: Vec<String> = items
+            .iter()
+            .map(|o| o.label.split_once('|').unwrap().0.to_string())
+            .collect();
+        assert_eq!(labels, vec!["Always Ask", "Ask When Needed", "Never Ask"]);
+        assert!(
+            !items.iter().any(|o| o.label.contains("interrupts")),
+            "N6 失败行 `Never interrupts you;…` 必须归属为描述行（不是菜单项）"
+        );
+        assert!(
+            items[0].label.contains("← current"),
+            "当前档后缀保留在屏上原文里"
+        );
+        assert!(items[0].highlighted, "❯ 在 Always Ask 行（夹具态的预选）");
+        assert!(
+            menu_items_coherent(&items, "kimi"),
+            "三档唯一 → 自洽（N6 关闭）"
+        );
+        // 行动入口：目标=「总是询问」（Default）的探测必须 Ready（旧判据在此 Fatal）
+        let plan = MenuNavPlan::PermissionTier {
+            tool: "kimi",
+            target: MamMode::Default,
+        };
+        match plan.probe(&screen) {
+            PollStep::Ready((_, target)) => assert_eq!(target, "Always Ask"),
+            other => panic!("总是询问必须可达（N6 关闭面）：{other:?}"),
+        }
+    }
+
+    /// **kimi 预选差异 × 真机夹具**：`/yolo` 预选 `Ask When Needed`（❯ 随预选移动）、
+    /// `/auto` 预选 `Never Ask`；`← current` 恒标 `Always Ask`（当前档不随光标动——
+    /// 用户 K-1 实测的双标记语义）。
+    #[test]
+    fn e3_kimi_yolo_auto_fixtures_highlight_preselect() {
+        for (name, tier_idx) in [
+            ("kimi-perm-menu-yolo.txt", 1usize),
+            ("kimi-perm-menu-auto.txt", 2),
+        ] {
+            let screen = e_stage2_screen(name);
+            let items = locate_menu_items(&screen, menu_labels("kimi"))
+                .unwrap_or_else(|| panic!("{name} 必须解析"));
+            assert_eq!(items.len(), 3, "{name}");
+            assert!(
+                items[tier_idx].highlighted,
+                "{name}：❯ 应在预选档（第 {} 项）",
+                tier_idx + 1
+            );
+            assert!(
+                !items[0].highlighted || tier_idx == 0,
+                "{name}：❯ 不得停在 Always Ask（预选已移走）"
+            );
+            assert!(
+                items[0].label.contains("← current"),
+                "{name}：← current 恒标当前档 Always Ask"
+            );
+            assert!(menu_items_coherent(&items, "kimi"), "{name}");
+        }
+    }
+
+    /// **无标题锚 → 不定位**（锚窗前提）：菜单行在屏但标题缺失（被刷走/遮挡）→ None，
+    /// 不 guess（调用方如实中止）
+    #[test]
+    fn e3_no_title_anchor_no_locate() {
+        let bare = lines(&[
+            "   ❯ Always Ask ← current",
+            "     Auto-read only.",
+            "     Ask When Needed",
+            "     Routine edits.",
+            "     Never Ask",
+            "     Never interrupts you.",
+        ]);
+        assert!(locate_menu_items(&bare, menu_labels("kimi")).is_none());
     }
 
     // ==== 丁T4 收尾：**闭环导航**（每步屏读复核；脚本化屏幕序列驱动）====
@@ -3105,9 +3477,9 @@ mod tests {
             "{r:?}"
         );
         assert!(sent.is_empty(), "零按键：{sent:?}");
-        // 多高亮
+        // 多高亮（E3① 起：dup 行插在**菜单窗内**——窗外行被锚窗排除，测不到多高亮）
         let mut multi = codex_menu_real();
-        multi.push("› 5. Read Only (dup)".to_string()); // 第二个高亮标记
+        multi.insert(multi.len() - 1, "› 5. Read Only (dup)".to_string());
         let (r2, sent2) = run_scripted_nav(&multi, "codex", MamMode::Bypass, &[&multi]);
         assert!(r2.is_err(), "多高亮 → 中止：{r2:?}");
         assert!(sent2.is_empty(), "零按键：{sent2:?}");
@@ -3620,22 +3992,42 @@ mod tests {
     /// （当前词表是纯 ASCII，但判据不得假定这一点）。
     #[test]
     fn keyword_match_is_case_insensitive_and_unicode_safe() {
-        // 大小写不敏感：真机原文是 Title Case，喂全大写也要命中
-        let upper = lines(&["› 2. ASK FOR APPROVAL (CURRENT)"]);
-        let mut padded = upper.clone();
-        padded.push("  1. READ ONLY".to_string());
-        padded.push("  3. FULL ACCESS".to_string());
+        // 大小写不敏感：真机原文是 Title Case，喂全大写也要命中（锚窗内行形不变）
+        let padded = lines(&[
+            "  UPDATE MODEL PERMISSIONS",
+            "  1. READ ONLY",
+            "› 2. ASK FOR APPROVAL (CURRENT)",
+            "  4. FULL ACCESS",
+            "  PRESS ENTER TO CONFIRM OR ESC TO GO BACK",
+        ]);
         let items = locate_menu_items(&padded, menu_labels("codex")).unwrap();
-        assert_eq!(items.len(), 3, "大小写不敏感");
-        // 非 ASCII 标签同样命中（判据不含任何字节索引）
-        let cn = lines(&["  只读", "  默认", "› 完全信任"]);
+        assert_eq!(items.len(), 3, "大小写不敏感（锚与行形全大写仍命中）");
+        assert!(items[1].highlighted);
+        let _ = padded;
+
+        // 非 ASCII 标签同样命中（判据不含任何字节索引；kimi 锚窗 + kimi 行形，
+        // 标签词表是参数——自定义词表走同一锚窗）
+        let cn = lines(&[
+            "  Select permission mode",
+            "  ↑↓ navigate · Enter select · Esc cancel",
+            "  只读 ← current",
+            "❯ 默认",
+            "  完全信任",
+        ]);
         let items2 = locate_menu_items(&cn, &["只读", "默认", "完全信任"]).unwrap();
         assert_eq!(items2.len(), 3);
-        assert!(items2[2].highlighted);
-        // 一行含两个非 ASCII 标签 → ≥2 → 跳过
-        let cn_prose = lines(&["  只读", "  默认", "  完全信任", "  只读与完全信任的区别"]);
+        assert!(items2[1].highlighted);
+        // 窗内散文行（含两档词）不进项表（行形判据与字符集无关）
+        let cn2 = lines(&[
+            "  Select permission mode",
+            "  ↑↓ navigate · Enter select · Esc cancel",
+            "  只读",
+            "  默认",
+            "  完全信任",
+            "  只读与完全信任的区别",
+        ]);
         assert_eq!(
-            locate_menu_items(&cn_prose, &["只读", "默认", "完全信任"])
+            locate_menu_items(&cn2, &["只读", "默认", "完全信任"])
                 .unwrap()
                 .len(),
             3
@@ -3647,39 +4039,64 @@ mod tests {
     /// **评审反例的可执行锁**（T4 复评 I1，夹具**换成用户真机原文**）：同屏残留正文里
     /// 出现档位标签（评审给的真机形态：codex `/status` 回显 `Read Only (sandbox: read-only)`）。
     ///
-    /// 新判据下的形态：该行**只命中一个**标签 → 定位器如实计入（5 项），但与真菜单项
-    /// **重复** → [`menu_items_coherent`] 的不变式 1 拒绝 → 闭环首次定位即中止，**零按键**。
-    ///
-    /// **还原动作（变异 4）**：删掉闭环 `snapshot` 里的 `menu_items_coherent` 调用 →
-    /// 本测试先红（闭环会带着 5 项的表继续走，`sent` 非空）。
+    /// **E3① 后的形态**：该行不是 `N. ` 编号行 → 行形判据在**定位阶段**直接排除（4 项、
+    /// 自洽、闭环可走）；「同档标签第二行」的一致性闸纵深防御由**编号重复行**锁
+    /// （`menu_gate_refuses_duplicated_label_from_bystander_line`）。
     #[test]
     fn menu_gate_refuses_duplicated_label_from_bystander_line() {
         let mut screen = codex_menu_real();
-        // 残留正文插在**高亮项与目标之间**（唯一会撑大错误步进的位置）
+        // 残留正文插在**高亮项与目标之间**（唯一会撑大错误步进的位置）——非编号行被排除
         screen.insert(4, "  Read Only (sandbox: read-only)".to_string());
         let raw = locate_menu_items(&screen, menu_labels("codex")).unwrap();
-        assert_eq!(raw.len(), 5, "定位器如实报出 5 行（分工：定位 vs 判据）");
+        assert_eq!(raw.len(), 4, "非编号行不进项表（行形判据前移排除）");
+        assert!(menu_items_coherent(&raw, "codex"), "四真项自洽");
+        let (r, _sent) = run_scripted_nav(&screen, "codex", MamMode::Bypass, &[&screen]);
         assert!(
-            !menu_items_coherent(&raw, "codex"),
-            "标签重复 → 判不自洽（评审反例的收口点）"
+            r.is_err(),
+            "单屏脚本高亮不动 → 闭环中止（与干扰行无关）：{r:?}"
         );
-        let (r, sent) = run_scripted_nav(&screen, "codex", MamMode::Bypass, &[&screen]);
-        assert!(r.is_err(), "混入行破坏一致性 → 必须中止：{r:?}");
-        assert!(sent.is_empty(), "中止发生在首次定位 ⇒ **零按键**：{sent:?}");
+
+        // **编号重复行**（窗内）：一致性闸不变式 1 的纵深防御仍生效——5 项、重复 → 拒绝
+        let mut dup = codex_menu_real();
+        dup.insert(4, "  5. Read Only (sandbox: read-only)".to_string());
+        let raw_dup = locate_menu_items(&dup, menu_labels("codex")).unwrap();
+        assert_eq!(raw_dup.len(), 5, "编号行如实计入");
+        assert!(
+            !menu_items_coherent(&raw_dup, "codex"),
+            "标签重复 → 判不自洽（第二道闸的收口点）"
+        );
+        let (r2, sent2) = run_scripted_nav(&dup, "codex", MamMode::Bypass, &[&dup]);
+        assert!(r2.is_err(), "混入编号重复行 → 必须中止：{r2:?}");
+        assert!(
+            sent2.is_empty(),
+            "中止发生在首次定位 ⇒ **零按键**：{sent2:?}"
+        );
     }
 
     /// 一致性闸的第二条不变式：**目标档全集齐备**——菜单被遮挡/只画出两档 → 中止。
     /// 同时锁住「`Approve for me` 不算进全集」（Guardian 关闭的正常菜单不得被判不完整）。
     #[test]
     fn menu_gate_requires_all_target_tiers() {
+        // E3① 锚窗助手：行集包进 codex 标题↔footer（下同）
+        let anchored = |rows: &[&str]| -> Vec<String> {
+            let mut v = lines(&["  Update Model Permissions"]);
+            v.extend(rows.iter().map(|s| s.to_string()));
+            v.push("  Press enter to confirm or esc to go back".to_string());
+            v
+        };
         // 真机形态（含 Approve for me）→ 通过
-        let full = codex_menu_real();
+        let full = anchored(&[
+            "  1. Read Only",
+            "› 2. Ask for approval (current)",
+            "  3. Approve for me",
+            "  4. Full Access",
+        ]);
         assert!(menu_items_coherent(
             &locate_menu_items(&full, menu_labels("codex")).unwrap(),
             "codex"
         ));
         // Guardian 关闭（无 Approve for me）→ **仍通过**（它是可选档，不算进全集）
-        let no_guardian = lines(&[
+        let no_guardian = anchored(&[
             "  1. Read Only",
             "› 2. Ask for approval (current)",
             "  4. Full Access",
@@ -3692,14 +4109,19 @@ mod tests {
             "Approve for me 缺席不得判不完整（§2.6 未把它列为目标档）"
         );
         // 只画出两档（缺 Full Access）→ 中止
-        let truncated = lines(&["  1. Read Only", "› 2. Ask for approval (current)"]);
+        let truncated = anchored(&["  1. Read Only", "› 2. Ask for approval (current)"]);
         let raw = locate_menu_items(&truncated, menu_labels("codex")).unwrap();
         assert!(!menu_items_coherent(&raw, "codex"), "目标档不全 → 不猜位置");
         let (r, sent) = run_scripted_nav(&truncated, "codex", MamMode::Default, &[&truncated]);
         assert!(r.is_err(), "不完整菜单 → 中止：{r:?}");
         assert!(sent.is_empty(), "零按键：{sent:?}");
         // kimi 三档同样要求
-        let kimi_short = lines(&["   ❯ Always Ask ← current", "     Ask When Needed"]);
+        let kimi_short = lines(&[
+            "  Select permission mode",
+            "  ↑↓ navigate · Enter select · Esc cancel",
+            "   ❯ Always Ask ← current",
+            "     Ask When Needed",
+        ]);
         let raw_k = locate_menu_items(&kimi_short, menu_labels("kimi")).unwrap();
         assert!(
             !menu_items_coherent(&raw_k, "kimi"),
@@ -3707,26 +4129,28 @@ mod tests {
         );
     }
 
-    /// 一致性闸的**残留风险**（如实申报的机器可验版本）：若混入行恰好补齐缺席的目标档
-    /// **且不与真项重复**，两条不变式都会通过。本测试把这个已知缺口**钉在测试里**
-    /// ——它不是「期望行为」，是「已知未覆盖面」的登记。
-    ///
-    /// **闭环对本缺口的缓解**（不声称消除）：闭环每步复核「位移恰好 1 行」，若混入行
-    /// 落在高亮与目标之间，终端的一步会跳出 ±1 → **中止**；只有混入行落在**步进路径
-    /// 之外**（如目标下方）时才可能蒙混——那种位置对步进无影响（编号平移同幅）。
+    /// 一致性闸的**残留风险**（E3① 更新：原「已知缺口」已被行形判据关闭）——
+    /// 正文散文行（`Read Only (sandbox: read-only)`，非编号行）在**定位阶段**就被
+    /// 排除，不再能「恰好补齐缺席的目标档」骗过两条不变式。本测试把缺口关闭钉成锁。
     #[test]
     fn menu_gate_known_gap_is_documented_not_hidden() {
-        // 菜单只画出两档 + 正文恰好有一行含缺席的第三个目标标签（且不重复）→ 闸门通过
+        // 菜单只画出两档 + 正文恰好有一行含缺席的第三个目标标签（且不重复）
         let screen = lines(&[
+            "  Update Model Permissions",
             "  1. Ask for approval",
             "› 2. Full Access",
             "  Read Only (sandbox: read-only)",
+            "  Press enter to confirm or esc to go back",
         ]);
         let raw = locate_menu_items(&screen, menu_labels("codex")).unwrap();
-        assert_eq!(raw.len(), 3, "三个标签各一行（无重复）");
+        assert_eq!(
+            raw.len(),
+            2,
+            "散文行被行形判据排除 → 只有 2 真项（旧关键词判据会计入 3 项）"
+        );
         assert!(
-            menu_items_coherent(&raw, "codex"),
-            "已知缺口：无重复 + 全集齐备 → 闸门放行（本测试登记该缺口，不假装已消除）"
+            !menu_items_coherent(&raw, "codex"),
+            "缺 Read Only 目标档 → 闸门拒绝（旧「已知缺口」经 E3① 行形判据关闭）"
         );
     }
 

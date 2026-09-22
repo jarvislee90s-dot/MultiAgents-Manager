@@ -3957,8 +3957,10 @@ pub async fn session_mode(
     else {
         return bad_request();
     };
+    let scan_sid = sid.clone();
     let probe_st = st.clone();
-    let scan = match tokio::task::spawn_blocking(move || mode_scan_sync(&probe_st, &sid)).await {
+    let scan = match tokio::task::spawn_blocking(move || mode_scan_sync(&probe_st, &scan_sid)).await
+    {
         Ok(v) => v,
         Err(e) => {
             log::error!("session-mode 会话扫描任务异常: {e}");
@@ -4020,6 +4022,25 @@ pub async fn session_mode(
     let top_current = mode_group
         .map(|g| if g.readback { hit.current } else { None })
         .unwrap_or(hit.current);
+    // E3④：问答待决旗标（前端置灰数据源）——二维家的切档注入含回车，问答待决时
+    // 会被问答框误消费（codex 交默认答案 / kimi 误选推进待决态）；前端据此置灰 +
+    // 原因文案（spec §4 待决拦截的前端半边）。判定与 POST 守卫同源
+    // （[`pending_question_tail_index`]）。
+    let question_pending = if matches!(hit.kind, crate::inject::mode::ModeSwitchKind::SlashCommand)
+    {
+        let ms = st.clone();
+        let p_sid = sid.clone();
+        let p_tool = hit.tool.clone();
+        tokio::task::spawn_blocking(move || {
+            (ms.message_source)(&p_tool, &p_sid, QUESTION_SCAN_TAIL_LIMIT)
+                .map(|p| pending_question_tail_index(&p.messages).is_some())
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -4029,6 +4050,7 @@ pub async fn session_mode(
             "currentLabel": top_current.map(|m| m.label()),
             "readback": mode_group.map(|g| g.readback).unwrap_or(hit.readback),
             "switchKind": kind,
+            "questionPending": question_pending,
             // 丁T4 增量：结构 + 两组（旧前端忽略未知字段，零破坏）
             "structure": hit.structure.wire(),
             "groups": groups,
@@ -4282,33 +4304,7 @@ pub async fn session_mode_switch(
                 .into_response();
         }
     };
-    // ===== codex `/plan` 运行中不可用（§2.6 表末）→ 如实回执、零注入零审计 =====
-    //
-    // 判据在**投递之前**（与守卫同位置）：codex 自己会回 `Plan mode unavailable right
-    // now.`，MAM 提前拦下是为了给用户一句能读懂的话，而不是让他对着没变化的屏幕猜。
-    // 「运行中」的口径 = queue::is_running（Processing/Thinking/Compacting，队列层
-    // 既有单一判据）。零审计：无投递发生（与忙让位同口径）。
-    if crate::inject::mode::codex_plan_busy(
-        &tool,
-        group,
-        mode,
-        crate::inject::queue::is_running(&session.status),
-    ) {
-        log::debug!(
-            "codex /plan 运行中不可用（sid={sid} status={:?}）",
-            session.status
-        );
-        return (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
-                "status": "failed",
-                "error": "codex 运行中不接受 /plan（计划模式不可用），请等回合结束后重试",
-            })),
-        )
-            .into_response();
-    }
-    // ===== 丁T3 接入①：对话框在场 = 控制类注入红线（§2.7 裁8/9）=====
+    // ===== 丁T3 接入① + 批次戊 E3②：投递前拦截判定（单点 [`mode_switch_block`]）=====
     //
     // 屏读在**投递之前**（与机制分派无关——Key/Text/Menu 三路都要过这道门），且在任何
     // 注入调用与任何审计写入之前：拒绝 = 零注入零审计（与 approve/question 端点的
@@ -4316,6 +4312,12 @@ pub async fn session_mode_switch(
     //
     // 探针 None（能力缺失/屏读失败/无簇）→ 放行 + 回执带 dialogChecked:false 如实
     // 标注未检测（裁决与理由见本函数文档与 blocks_control_injection）。
+    //
+    // **E3② 增 kimi 问答待决判据**：kimi 问答框无编号簇（屏读判不到），「待决」改由
+    // 消息尾部形态识别（[`pending_question_tail_index`]，与问答端点同一份判据）——
+    // 待决时 kimi 的切档注入（恒含回车）会被问答框解释为「选中高亮项」污染待决态
+    // （戊探D ×2）→ **含回车整条硬拒绝**（spec §4）。codex 的问答弹窗是编号对话框，
+    // 落在对话框在场格，无需第二判据。判定表：busy 一律放行（裁17）。
     let probe_st = st.clone();
     let probe_pid = session.pid;
     let probe_sid_for_log = sid.clone();
@@ -4333,17 +4335,81 @@ pub async fn session_mode_switch(
         }
     };
     let dialog_checked = dialog_options.is_some();
-    if crate::inject::dialog::blocks_control_injection(dialog_options.as_deref()) {
-        log::debug!("T3 控制类注入被拒：sid={sid} 屏读见编号选项对话框（模式切换零投递零审计）");
-        return (
-            StatusCode::CONFLICT,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
-                "error": "blocked_by_dialog",
-                "reason": DIALOG_BLOCKS_CONTROL_REASON,
-            })),
-        )
-            .into_response();
+    let dialog_blocked = crate::inject::dialog::blocks_control_injection(dialog_options.as_deref());
+    // kimi × 问答待决（消息尾部形态；只对 kimi 读页——判定表只消费 kimi 格）
+    let question_pending = if tool == "kimi" {
+        let ms = st.clone();
+        let p_sid = sid.clone();
+        let p_tool = tool.clone();
+        match tokio::task::spawn_blocking(move || {
+            (ms.message_source)(&p_tool, &p_sid, QUESTION_SCAN_TAIL_LIMIT)
+                .map(|p| pending_question_tail_index(&p.messages).is_some())
+                .unwrap_or(false)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("session-mode 问答待决判定任务异常: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let is_running = crate::inject::queue::is_running(&session.status);
+    match crate::inject::mode::mode_switch_block(
+        &tool,
+        group,
+        mode,
+        is_running,
+        dialog_blocked,
+        question_pending,
+    ) {
+        Some(crate::inject::mode::SwitchBlock::Dialog) => {
+            log::debug!(
+                "T3 控制类注入被拒：sid={sid} 屏读见编号选项对话框（模式切换零投递零审计）"
+            );
+            return (
+                StatusCode::CONFLICT,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "error": "blocked_by_dialog",
+                    "reason": DIALOG_BLOCKS_CONTROL_REASON,
+                })),
+            )
+                .into_response();
+        }
+        Some(crate::inject::mode::SwitchBlock::QuestionPending) => {
+            log::debug!(
+                "E3 待决拦截：sid={sid} kimi 问答待决（切档注入含回车=污染待决态）→ 硬拒绝"
+            );
+            return (
+                StatusCode::CONFLICT,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "error": "blocked_by_question",
+                    "reason": "终端正有待答的问题——切权限/模式的命令会误选答案，请先在问答卡作答",
+                })),
+            )
+                .into_response();
+        }
+        Some(crate::inject::mode::SwitchBlock::CodexPlanBusy) => {
+            log::debug!(
+                "codex /plan 运行中不可用（sid={sid} status={:?}）",
+                session.status
+            );
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "status": "failed",
+                    "error": "codex 运行中不接受 /plan（计划模式不可用），请等回合结束后重试",
+                })),
+            )
+                .into_response();
+        }
+        None => {}
     }
     let spec = crate::inject::families::family_for(&tool)
         .unwrap_or(crate::inject::families::FALLBACK_SPEC);

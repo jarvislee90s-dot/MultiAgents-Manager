@@ -774,6 +774,10 @@ export interface SessionModeView {
   currentLabel: string | null;
   readback: boolean;
   switchKind: "shiftTab" | "slashCommand" | "unsupported";
+  /** E3④：终端问答待决（消息尾部形态）——切档注入含回车会被问答框误消费
+   *  （codex 交默认答案 / kimi 误选推进待决态）→ 前端置灰按钮 + 原因文案。
+   *  旧后端无此字段（undefined = 未知，不置灰——与「无法判定放行」同一取向）。 */
+  questionPending?: boolean;
   /** "twoAxis" | "singleAxis" | "none"（旧后端无此字段） */
   structure?: "twoAxis" | "singleAxis" | "none";
   groups?: ModeGroupView[];

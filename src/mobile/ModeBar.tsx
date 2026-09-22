@@ -101,6 +101,14 @@ export default function ModeBar({ session }: { session: { id: string } }) {
             setError(
               typeof e.data?.reason === "string" ? e.data.reason : "终端有待决对话框，请先处理"
             );
+          } else if (e.status === 409 && e.data?.error === "blocked_by_question") {
+            // E3② 待决拦截（硬）：kimi 问答待决时切档注入（含回车）会误选答案——
+            // 后端整条拒绝；文案用后端 reason（单一来源）
+            setError(
+              typeof e.data?.reason === "string"
+                ? e.data.reason
+                : "终端有待答的问题，请先在问答卡作答"
+            );
           } else {
             setError(e.message);
           }
@@ -122,11 +130,16 @@ export default function ModeBar({ session }: { session: { id: string } }) {
   // 走统一 token**（InteractiveCard 的 mode 档）——四套界面同一套设计语言
   const t = toneTokens("mode");
   const groups = modeGroups(view);
+  // E3④ 待决置灰：终端问答待决时切档注入（含回车）会被问答框误消费
+  // （codex 交默认答案 / kimi 误选推进待决态）→ 全部按钮禁用 + 原因文案。
+  // undefined（旧后端）= 未知，不置灰（与后端「无法判定放行」同一取向）
+  const questionPending = view.questionPending === true;
   return (
     <div
       data-testid="mode-bar"
       data-mode={view.current ?? "unknown"}
       data-structure={view.structure ?? "legacy"}
+      data-question-pending={questionPending ? "true" : "false"}
       data-tone="mode"
       className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1 ${t.box}`}
     >
@@ -135,10 +148,19 @@ export default function ModeBar({ session }: { session: { id: string } }) {
           key={g.id}
           group={g}
           showGroupLabel={groups.length > 1}
-          busy={busy}
+          busy={busy || questionPending}
+          questionPending={questionPending}
           onSwitch={(target) => handleSwitch(target, g.id)}
         />
       ))}
+      {questionPending && (
+        <span
+          data-testid="mode-question-pending-hint"
+          className="text-[11px] text-amber-700 dark:text-amber-400"
+        >
+          终端有待答的问题——切权限/模式的命令会误选答案，请先在问答卡作答
+        </span>
+      )}
       {error !== null && (
         <span data-testid="mode-error" className="text-[11px] text-rose-600 dark:text-rose-400">
           {error}
@@ -195,16 +217,19 @@ function modeGroups(view: SessionModeView): ModeGroupView[] {
   ];
 }
 
-/** 单组渲染：组标题（仅二维时显示）+ 当前档 + 切换入口 */
+/** 单组渲染：组标题（仅二维时显示）+ 当前档 + 切换入口。
+ *  E3④：当前档按钮**高亮**（data-current + 反色样式）；问答待决时全组禁用。 */
 function ModeGroupRow({
   group,
   showGroupLabel,
   busy,
+  questionPending,
   onSwitch,
 }: {
   group: ModeGroupView;
   showGroupLabel: boolean;
   busy: boolean;
+  questionPending: boolean;
   onSwitch: (target: MamMode) => void;
 }) {
   const currentText = group.currentLabel ?? "模式未知";
@@ -246,17 +271,25 @@ function ModeGroupRow({
       ) : (
         // 直达轴（模式组/权限组）：逐档按钮。**只渲染 selectable 的档**（裁7 的
         // 退役档根本不进 tiers；codex「默认」这类「在结构里但无机制」的档留在
-        // 结构里、以不可点 + reason 提示呈现——用户能看懂为什么点不了）
+        // 结构里、以不可点 + reason 提示呈现——用户能看懂为什么点不了）。
+        // **当前档高亮**（E3④）：`group.current === t.mode` 的按钮反色 + data-current
+        // ——回读/漂移口径如实显示（kimi 批准后自动切出 plan 时高亮跟着回读走）。
         <span className="flex flex-wrap items-center gap-1">
-          {group.tiers.map((t) =>
-            t.selectable ? (
+          {group.tiers.map((t) => {
+            const isCurrent = group.current !== null && group.current === t.mode;
+            return t.selectable ? (
               <button
                 key={t.mode}
                 type="button"
                 data-testid={`mode-switch-${group.id}-${t.mode}`}
+                data-current={isCurrent ? "true" : "false"}
                 disabled={busy}
                 onClick={() => onSwitch(t.mode)}
-                className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+                className={`rounded-full px-2 py-0.5 text-[11px] disabled:opacity-40 ${
+                  isCurrent
+                    ? "bg-slate-700 font-semibold text-white dark:bg-slate-200 dark:text-slate-900"
+                    : "bg-slate-500/15 text-slate-700 dark:bg-slate-400/15 dark:text-slate-300"
+                }`}
               >
                 {t.label}
               </button>
@@ -270,8 +303,8 @@ function ModeGroupRow({
               >
                 {t.label}（不可用）
               </span>
-            )
-          )}
+            );
+          })}
         </span>
       )}
       {/* 裁7：退役旧档**只作说明**，不渲染为可点按钮 */}
