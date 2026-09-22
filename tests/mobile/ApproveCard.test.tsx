@@ -520,3 +520,35 @@ describe("ApproveCard：裁12 计划正文折叠", () => {
     expect(screen.queryByTestId("approve-plan-toggle")).toBeNull();
   });
 });
+
+// ==== 批次戊 E7：裁11 配色（对话框卡并入 sky 蓝系；二元审批保留红系）====
+describe("ApproveCard：裁11 配色 tone 映射", () => {
+  it("对话框卡：data-tone=question（sky 蓝系）+ 选项按钮用蓝族 token", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "Yes, manually approve edits" },
+      ],
+    });
+    render(<ApproveCard session={{ id: "sess-e7-dialog" }} />);
+    const card = await screen.findByTestId("approve-card");
+    expect(card.getAttribute("data-tone")).toBe("question");
+    expect(card.className).toContain("border-sky-500/60");
+    const btn = screen.getByTestId("approve-option-dialog:1");
+    expect(btn.className).toContain("bg-sky-500/10");
+    expect(btn.className).not.toContain("bg-rose-500/10");
+  });
+
+  it("二元审批卡：保留红系 data-tone=approve（裁11 活口注明）", async () => {
+    installFetch();
+    routes.options = approveOptions();
+    render(<ApproveCard session={{ id: "sess-e7-binary" }} />);
+    const card = await screen.findByTestId("approve-card");
+    expect(card.getAttribute("data-tone")).toBe("approve");
+    expect(card.className).toContain("border-rose-500/60");
+    const btn = screen.getByTestId("approve-option-approve");
+    expect(btn.className).toContain("bg-rose-500/10");
+  });
+});

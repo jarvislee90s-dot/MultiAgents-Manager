@@ -149,7 +149,7 @@ const PREVIEW_MAX_CHARS = 12;
  *    含 planPending 形态——那是「等一个计划确认」，放行自由文本在 kimi 上会被读成
  *    批准）。**拦截**（裁3 安全面）。
  *  - `questionFreeText`：问答在场 **且可远程自由作答**——即 `answerable === true`
- *    **且** `freeText === true`（仅 claude 定案，见 api.ts 的 `QuestionInfoView.freeText`）
+ *    **且** `freeText === true`（E4-E6 起四家定案，见 api.ts 的 `QuestionInfoView.freeText`）
  *    **且** `questions.length === 1`（多题只读卡，§2.3）**且** `!multiSelect`
  *    （多选屏的自由作答行带勾选框，判据不匹配 → 后端恒 409，见
  *    `question::free_text_shape_supported`）。composer 发送**转向**
@@ -277,8 +277,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
    *
    *  四条判据（全部满足才算 `questionFreeText`）：
    *  1. `answerable !== false`（缺省按 true——旧后端兼容，见 api.ts:610 注释）；
-   *  2. `freeText === true`（**仅 claude 定案**；codex/opencode/kimi 的点选已验但
-   *     自由作答序列未定案 → 缺省/旧后端按 false 处理，不假装能发）；
+   *  2. `freeText === true`（批次戊 E4-E6 起四家定案：claude Type something /
+   *     codex Tab 备注 / kimi Other 行 / opencode own answer——各走各家阶段机；
+   *     缺省/旧后端按 false 处理，不假装能发）；
    *  3. `questions.length === 1`（多题只读卡，§2.3：翻页键序未测，后端同样 409）；
    *  4. `!questions[0].multiSelect`（多选屏的自由作答行带勾选框，定位判据不匹配 →
    *     后端恒 409，见 `question::free_text_shape_supported` 的实机证据）。 */

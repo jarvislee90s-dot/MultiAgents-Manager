@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import InteractiveCard, { toneTokens } from "./InteractiveCard";
+import InteractiveCard, { toneTokens, type InteractiveCardTone } from "./InteractiveCard";
 import { ApiError, fetchApproveOptions, sessionApprove, type ApproveOptionsView } from "./api";
 
 interface ApproveCardProps {
@@ -264,9 +264,13 @@ export default function ApproveCard({ session }: ApproveCardProps) {
     );
   }
 
+  // 裁11：审批**对话框卡**并入问答同族蓝系（sky）——同一「读自终端选项」的交互
+  // 形态共用一套色彩语言；**二元审批**默认保留红系警示（裁11 留的活口：可随 UI
+  // 方案并入蓝系，届时只改本行）。按钮 token 跟随同一 tone。
+  const dialogTone: InteractiveCardTone = options.dialog ? "question" : "approve";
   return (
     <InteractiveCard
-      tone="approve"
+      tone={dialogTone}
       testId="approve-card"
       mode={options.dialog ? "dialog" : "binary"}
       title={options.dialog ? "等待批准（终端对话框）" : "等待批准"}
@@ -302,10 +306,10 @@ export default function ApproveCard({ session }: ApproveCardProps) {
                   data-testid={`approve-option-${o.id}`}
                   disabled={busy || sent}
                   onClick={() => handleAnswer(o.id)}
-                  className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${toneTokens("approve").action}`}
+                  className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${toneTokens(dialogTone).action}`}
                 >
                   <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens("approve").badge}`}
+                    className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens(dialogTone).badge}`}
                   >
                     {i + 1}
                   </span>
@@ -330,7 +334,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
       {options.dialog && (
         <p
           data-testid="approve-dialog-label"
-          className="mt-1 text-xs text-rose-700/80 dark:text-rose-400/80"
+          className="mt-1 text-xs text-sky-700/80 dark:text-sky-400/80"
         >
           以下选项读自终端对话框，点按即代你按对应数字键
         </p>
