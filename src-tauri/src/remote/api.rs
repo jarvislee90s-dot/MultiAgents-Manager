@@ -3438,8 +3438,26 @@ const MENU_POLL_TOTAL_MS: u64 = 600;
 /// 菜单轮询间隔（毫秒；见 [`MENU_POLL_TOTAL_MS`] 的依据说明）
 const MENU_POLL_STEP_MS: u64 = 100;
 
-/// POST /m/api/v1/session-mode（T6 切档；丁T4 二维 + 两段式）：校验 → **对话框在场
-/// 守卫（丁T3 接入①）** → 机制分派 → 注入 →（可回读时）回读比对 → 审计 mode。
+/// **第三段（Full Access 二次确认框）**的轮询预算（毫秒）——第二段提交后等确认框画出。
+///
+/// **取值的依据（如实申报：自裁值）**：确认框与菜单同属「提交后的下一次重绘」，量级
+/// 与 [`MENU_POLL_TOTAL_MS`] 相同，故取同值。**与菜单轮询的关键差别是超时的语义**：
+/// 菜单读不到 = 中止（功能不可用）；确认框读不到 = **不当作失败**——codex 二进制里有
+/// `Continue and don't warn again.`（用户此前关过该警告就不会再有确认框），此时应当
+/// 继续走成功回执核验，而不是报错（见 [`menu_stages`] 的文档）。
+const CONFIRM_POLL_TOTAL_MS: u64 = 600;
+
+/// **成功回执核验**的轮询预算（毫秒）——提交后等工具打印 `Permissions updated to …`
+/// / `Permission mode: …`。
+///
+/// **取值的依据（如实申报：自裁值）**：回执行是提交后 TUI **立即**打印的一行
+/// （实机取证档案 §3/§5 的原文都是紧随提交出现），比菜单/确认框更快；给同量级的
+/// 窗即可。窗末仍未见 → `receipt_seen=false` → 回执 `verified:false` + 「请人工核对」，
+/// **不当作失败**（回执可能被后续输出刷走）。
+const RECEIPT_POLL_TOTAL_MS: u64 = 600;
+
+/// POST /m/api/v1/session-mode（T6 切档；丁T4 二维 + 菜单两段式 + Full Access 第三段）：
+/// 校验 → **对话框在场守卫（丁T3 接入①）** → 机制分派 → 注入 → 回读/回执核验 → 审计 mode。
 ///
 /// # 注入形态（§2.6 逐格）
 ///
@@ -3447,38 +3465,54 @@ const MENU_POLL_STEP_MS: u64 = 100;
 ///   参与按键构造）；切完**回读**，与环序推算的应到档比对；
 /// - **直达文本**（codex 模式组 `/plan`；kimi 模式组 `/plan on|off`；kimi 权限组
 ///   `/yolo`、`/auto`）：文本注入 + 回车提交；
-/// - **两段式菜单**（codex 权限组 `/permissions`；kimi 权限组「总是询问」）：
+/// - **菜单两段式/三段式**（codex 权限组 `/permissions`；kimi 权限组「总是询问」）：
 ///   见下节；
 /// - **无机制**（含 codex「退出计划模式」、退役档）：409 `no_mechanism` + `reason`.
 ///
-/// # 两段式的第二段与丁T3 守卫如何共存（**本任务最需要想清楚的一处**）
+/// # 菜单路径的分段（第二段 / 第三段 / 回执核验）
 ///
-/// **冲突**：两段式的第一段打开菜单后，屏幕上**必然**出现一个待选菜单——而丁T3 的
+/// - **第二段**：等菜单画出 → **闭环导航**（[`crate::inject::mode::navigate_until_highlighted`]：
+///   每发一个方向键重新屏读复核高亮位移，**只有**高亮确实落在目标档行才 `enter`）；
+/// - **第三段**（**仅** codex × 权限组 × Full Access，实机取证档案 §3：1/2/3 档无此段）：
+///   等 `Enable full access?` 确认框 → 定位**唯一**肯定项 → 同一套闭环 → `enter`。
+///   窗内未见确认框**不当作失败**（用户可能此前关过该警告，二进制有
+///   `Continue and don't warn again.`）→ 继续走回执核验；
+/// - **回执核验**（所有档位）：屏读工具自己的成功回执行
+///   （codex `• Permissions updated to Full Access` / kimi `Permission mode: Always Ask`）
+///   → 见到且含目标档 ⇒ `verified=true`（工具自证比档位回读更强，一票通过）；未见
+///   ⇒ `verified=false` + 「请人工核对」，**不当作失败**。见 [`receipt_and_verdict`]。
+///
+/// # 菜单路径与丁T3 守卫如何共存（**本任务最需要想清楚的一处**）
+///
+/// **冲突**：菜单路径的第一段打开菜单后，屏幕上**必然**出现一个待选菜单——而丁T3 的
 /// 守卫判据 `blocks_control_injection` 正是「屏上存在可选簇 ⇒ 拒绝控制类注入」。
 /// 若第二段再走一次守卫，它会**必然**拒绝自己刚打开的菜单（死锁：永远切不了权限档）。
 ///
 /// **解法（三句话，逐句可验）**：
-/// 1. **一次请求 = 一次注入 = 一道守卫**：两段在**同一个 handler 调用内**串行完成，
+/// 1. **一次请求 = 一次注入 = 一道守卫**：各段在**同一个 handler 调用内**串行完成，
 ///    守卫在**任何注入之前**判一次（判的是「用户点按钮那一刻终端上有没有别的对话框」）。
 ///    第二段投递的是**我们自己刚打开的那个菜单**，不是用户点按钮时就存在的对话框——
 ///    它不是守卫要防的对象，所以**不重入守卫**。若把守卫挪到第二段前，判据会把
-///    自家菜单判成「待决对话框」，两段式永久不可用（这正是本任务要避免的自相矛盾）。
-/// 2. **第二段有硬锚，不靠「屏上有没有簇」**：定位用的是**权限菜单专用词表 + 行首
-///    匹配**（[`crate::inject::mode::locate_menu_items`]）——菜单里认不出目标档标签
-///    就**中止且不投递任何键**（如实回执「权限菜单未出现/读不到档位表，请人工核对」）。
-///    也就是说第二段**只对「确实是那个权限菜单」的屏**出手；屏上是别的对话框（包括
-///    用户在两次注入之间手动触发的）时，标签表匹配不上 → 中止。
-/// 3. **导航仍走审批同款序列**（[`crate::inject::dialog::navigation_sequence`]，
-///    从**解析到的当前高亮位**算循环距离；无高亮/多高亮/目标越界一律 Err → 中止）
-///    ——与 approve 端点的 navigate-confirm 档**同一份实现**，不是第二套。
+///    自家菜单判成「待决对话框」，菜单路径永久不可用（这正是本任务要避免的自相矛盾）。
+/// 2. **各段有硬锚，不靠「屏上有没有簇」**：第二段的定位用**权限菜单专用词表 + 关键词
+///    包含 + 计数互斥**（[`crate::inject::mode::locate_menu_items`]，判据依据 = 实机
+///    取证档案 §1/§4/§5 的逐字原文）并过一致性闸（`menu_items_coherent`）；第三段的
+///    定位用**确认框的肯定项关键词**（[`crate::inject::mode::FULL_ACCESS_AFFIRMATIVE_KEYWORD`]）。
+///    认不出就直接**中止且不投递任何键**（如实回执）。也就是说各段**只对「确实是那个
+///    菜单/那个确认框」的屏**出手；屏上是别的对话框（包括用户在两次注入之间手动触发
+///    的）时，锚匹配不上 → 中止。
+/// 3. **导航走闭环**（[`crate::inject::mode::navigate_until_highlighted`]）：每一步都
+///    重新屏读、复核高亮存在且位移恰好 1 行且标签合法；`enter` 只在标签等于目标行时
+///    发出。**不再**走审批路径的 `navigation_sequence_directional`（那条是「一次算步进
+///    + 盲发」，正是本批被实机证据推翻的部分；审批路径仍在用它，勿动）。
 ///
 /// **与 approve 端点 `dialog:N` 路径的关系（为什么不复用那条路）**：approve 的
 /// 导航序列是**一次请求内的单段**（屏上已有对话框，投递 ↓×k+Enter 即可），而权限档
 /// 切换需要**先开菜单**——若拆成两次请求（前端先 POST 开菜单、再 POST 导航），中间
-/// 用户可介入、菜单可消失，且第二段会被守卫拒（就是上面第 1 条的死锁）。故两段收在
+/// 用户可介入、菜单可消失，且第二段会被守卫拒（就是上面第 1 条的死锁）。故各段收在
 /// 同一 handler 内：守卫只过一道，菜单生命周期完全在同一临界区。
 ///
-/// **守卫覆盖面的如实申报**：本函数的两段式**不再重入**守卫，因此「第一段与第二段
+/// **守卫覆盖面的如实申报**：本函数的菜单路径**不再重入**守卫，因此「第一段与第二段
 /// 之间**用户手动**在终端里触发了另一个对话框」这条极窄窗口不在守卫覆盖内。窗口长度
 /// = 第一段回车到菜单屏读到（≤ `MENU_POLL_TOTAL_MS`），且此间 MAM 侧持有
 /// `INFLIGHT` 守卫（同一会话的其它注入被让位），实际可达性极低。**不假装这是全覆盖**。
@@ -3682,16 +3716,17 @@ pub async fn session_mode_switch(
     let switch_sid = sid.clone();
     // 注入闭包内的工具名副本（闭包 move 走了 tool，审计与回读还要用原值）
     let tool_for_inject = tool.clone();
-    // ===== 注入：三路（Key / Text / Menu 两段式）=====
+    let group_for_inject = group;
+    // ===== 注入：三路（Key / Text / Menu 两段式/三段式）=====
     //
     // 忙让位（None 哨兵）表达为外层 Option 的 `?`：None = 忙（不投递亦不落审计），
     // Some(inner) = 真投递（inner 是投递结果）
     let attempt = tokio::task::spawn_blocking(move || {
         let _guard = crate::inject::queue::try_acquire_inflight(&switch_sid)?;
         Some(match plan {
-            crate::inject::mode::ModeSwitchPlan::Key(key) => {
-                injector.locate_and_send_key_spec(pid, key, &spec)
-            }
+            crate::inject::mode::ModeSwitchPlan::Key(key) => injector
+                .locate_and_send_key_spec(pid, key, &spec)
+                .map(|()| InjectAttempt::Plain),
             crate::inject::mode::ModeSwitchPlan::Text(cmd) => {
                 // 斜杠命令按**纯文本注入 + 提交回车**（不走 [mobile] 前缀——那是用户
                 // 消息的语义；斜杠命令是控制指令，加前缀会让命令失效）
@@ -3703,6 +3738,7 @@ pub async fn session_mode_switch(
                         ));
                         injector.locate_and_send_key_spec(pid, "enter", &spec)
                     })
+                    .map(|()| InjectAttempt::Plain)
             }
             crate::inject::mode::ModeSwitchPlan::Menu { open, target } => {
                 // 第一段：开菜单（命令 + 回车）
@@ -3715,14 +3751,14 @@ pub async fn session_mode_switch(
                         injector.locate_and_send_key_spec(pid, "enter", &spec)
                     });
                 match opened {
-                    Ok(()) => {
-                        // 第二段：等菜单画出 → 屏读 → 标签定位 → 导航确认
-                        //
-                        // **不重入对话框守卫**：屏上那个菜单是我们自己刚打开的（见本函数文档
-                        // 「两段式的第二段与丁T3 守卫如何共存」）。定位用权限菜单专用词表 +
-                        // 行首匹配；认不出目标档标签 → 中止且不投递任何键。
-                        second_stage_menu(&tool_for_inject, target, pid, &spec, &injector)
-                    }
+                    Ok(()) => menu_stages(
+                        &tool_for_inject,
+                        group_for_inject,
+                        target,
+                        pid,
+                        &spec,
+                        &injector,
+                    ),
                     Err(e) => Err(e),
                 }
             }
@@ -3730,7 +3766,7 @@ pub async fn session_mode_switch(
     })
     .await;
     let result = match attempt {
-        Ok(Some(Ok(()))) => Ok(()),
+        Ok(Some(Ok(attempt))) => Ok(attempt),
         // 忙让位（None 哨兵）：不落审计（无投递发生）
         Ok(None) => {
             return (
@@ -3762,7 +3798,7 @@ pub async fn session_mode_switch(
         format!("切换{}至 {label}", group.label())
     };
     let (result_str, status_line) = match &result {
-        Ok(()) => ("ok".to_string(), "key_sent"),
+        Ok(_) => ("ok".to_string(), "key_sent"),
         Err(e) => (format!("failed:{e}"), "failed"),
     };
     endpoint_audit(
@@ -3787,7 +3823,7 @@ pub async fn session_mode_switch(
             })),
         )
             .into_response(),
-        Ok(()) => {
+        Ok(attempt) => {
             // ===== 回读确认（裁5：切换后必须知道切到了哪；红线 4：不假装成功）=====
             //
             // 屏读是阻塞 FFI → 放进 spawn_blocking（与其它屏读点同纪律）。回读发生在
@@ -3817,6 +3853,17 @@ pub async fn session_mode_switch(
             let mode_shot_from_screen = plan.is_two_stage();
             let (verified, hint) =
                 mode_verify_receipt(verdict, group, label, mode_shot_from_screen);
+            // 菜单路的**额外证据**：工具自己打印的成功回执行（实机原文逐字可见）。
+            // 这是**比档位回读更强**的一手证据（回读描述「屏上现在的档位」，
+            // 回执描述「工具自己宣布切换完成」）——故它对回执有一票之力：见到且
+            // 含目标档 → 直接 verified=true（屏读回读失败也不能抹掉工具的自证）；
+            // 未见到 → **不当作失败**，但要把「请人工核对」如实带上（见下）。
+            let (verified, hint) = match attempt {
+                InjectAttempt::Plain => (verified, hint),
+                InjectAttempt::Menu { receipt_seen } => {
+                    receipt_and_verdict(receipt_seen, verified, hint, label)
+                }
+            };
             (
                 StatusCode::OK,
                 [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -3836,65 +3883,219 @@ pub async fn session_mode_switch(
     }
 }
 
-/// 两段式的第二段（**只在持 INFLIGHT 的注入闭包内调用**）：等菜单画出 → 屏读 →
-/// 标签定位 → 导航确认。
+/// 菜单路的回执合成：**工具自证**（成功回执行）与**档位回读**两路证据合并。
 ///
-/// 中止条件（任一命中即 Err，**零按键投递**——除了第一段已投递的开启命令）：
-/// 菜单轮询窗内都读不到屏 / 屏上没有可识别的权限菜单档位表 / 菜单里没有目标档标签 /
-/// 无高亮或多高亮（`navigation_sequence` 的既有保守面）。返回的 Err 文案即端点的
-/// 失败回执（用户看得懂「为什么没切」）。
-fn second_stage_menu(
+/// 三种组合，逐条写明（判据与文案同源，不散两处）：
+/// - 回执**见到**（`Some(true)`）→ `verified=true`、无 hint。工具自己宣布切到了目标档
+///   （`• Permissions updated to Full Access` / `Permission mode: Always Ask`），
+///   这是比档位回读更强的一手证据（回读只是「屏上现在写着什么档」，可能被后续输出
+///   干扰；回执是「工具宣布完成」）——故它**一票通过**，回读失败也抹不掉；
+/// - 回执**未见**（`Some(false)`）→ `verified=false` + 「请人工核对」**限定**（即便档位
+///   回读命中）：回执可能被后续输出刷走，此时档位回读仍是一手证据——但它只说明
+///   「屏上此刻是目标档」，而裁5 要的是「切换真的完成了」。宁可让用户多看一眼，
+///   也不把「可能切到但没收到确认」说成成功。**这不是失败**（第二段/第三段都已按
+///   闭环完成投递，没有键被盲发）；
+/// - **无法核验**（`None`，非 Windows 无屏读）→ 保留档位回读的结论，并在 hint 里
+///   追加「本次未核验工具回执」。
+fn receipt_and_verdict(
+    receipt_seen: Option<bool>,
+    verified: bool,
+    hint: serde_json::Value,
+    label: &str,
+) -> (bool, serde_json::Value) {
+    match receipt_seen {
+        Some(true) => (true, serde_json::Value::Null),
+        Some(false) => {
+            // 档位回读的既有 hint（若有：不符态会报出「预期/实际」两边）**保留**，
+            // 只追加「缺工具回执」这一条——两路证据各说各的，不是二选一
+            let base = hint.as_str().map(|s| format!("{s}；")).unwrap_or_default();
+            (
+                false,
+                serde_json::json!(format!(
+                    "{base}已按屏读定位完成「{label}」切换投递，但未在屏上见到该工具的成功回执——请人工核对终端"
+                )),
+            )
+        }
+        None => (verified, hint),
+    }
+}
+
+/// 菜单路径的**注入结果**（三路共用；`Menu` 带出核验结果供回执使用）。
+enum InjectAttempt {
+    /// Key / Text 路：投递完成，无额外核验
+    Plain,
+    /// Menu 路：三/四段全部完成，`receipt_seen` = 是否屏读到工具的成功回执行
+    /// （`None` = 非 Windows 无屏读 → 无法核验；回执据此如实说明）
+    Menu { receipt_seen: Option<bool> },
+}
+
+/// 菜单路径的**第二段 + 第三段 + 成功回执核验**（**只在持 INFLIGHT 的注入闭包内调用**）。
+///
+/// 逐段（每段都可独立中止，中止原因带阶段名——用户看得懂「卡在哪一段、为什么」）：
+/// 1. **第二段（权限菜单）**：轮询等菜单画出（[`MENU_POLL_TOTAL_MS`]）→ **闭环导航**
+///    （[`crate::inject::mode::navigate_until_highlighted`]：每发一个方向键重新屏读复核，
+///    只有高亮确实落在目标档行才发 `enter`）→ 确认框轮询；
+/// 2. **第三段（仅 codex × Full Access）**：轮询等 `Enable full access?` 确认框
+///    （[`CONFIRM_POLL_TOTAL_MS`]）→ 闭环导航到**唯一**肯定项 → `enter`；
+/// 3. **成功回执核验**（所有档位）：轮询屏读工具的成功回执行
+///    （[`RECEIPT_POLL_TOTAL_MS`]）→ `receipt_seen`。
+///
+/// # 确认框超时**不当作失败**（与菜单超时的语义差别）
+///
+/// 菜单超时 = 中止（功能不可用，如实回执）；确认框超时 = **可能是用户此前关过该警告**
+/// （codex 二进制有 `Continue and don't warn again.` 文案）→ 若真关过，`enter` 提交后
+/// 会**直接完成**，此时屏上只有成功回执行、没有确认框。故此处继续走第 3 步按回执
+/// 核验结果如实回执（这正是「不假装成功」的正确形态：**有证据才说成功**）。
+///
+/// # 中止条件（任一命中即 Err，**此后不再投递任何键**）
+///
+/// 菜单轮询窗内读不到屏/读不到档位表；档位表不自洽；闭环导航的每一条保守面
+/// （见该函数文档）；确认框形态异常（肯定项不唯一/多个簇）；`enter` 投递本身失败。
+/// 返回的 Err 文案即端点的失败回执。
+fn menu_stages(
     tool: &str,
+    group: crate::inject::mode::ModeGroupId,
     target: crate::inject::mode::MamMode,
     pid: u32,
     spec: &crate::inject::families::FamilySpec,
     injector: &std::sync::Arc<dyn crate::inject::engine::Injector>,
-) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(MENU_POLL_TOTAL_MS);
-        loop {
-            match crate::inject::windows_console::read_screen_window(pid) {
-                Ok(lines) => {
-                    match crate::inject::mode::menu_navigation_sequence(&lines, tool, target) {
-                        Ok(keys) => {
-                            // 逐键投递（导航键之间留重绘间隔——与 approve 的
-                            // navigate-confirm 档同一节奏）
-                            for key in &keys {
-                                injector.locate_and_send_key_spec(pid, key, spec)?;
-                                std::thread::sleep(std::time::Duration::from_millis(
-                                    crate::inject::families::SUBMIT_DELAY_MS,
-                                ));
-                            }
-                            return Ok(());
-                        }
-                        Err(why) => {
-                            // 菜单还没画出（重绘竞态）→ 继续轮询；窗末仍读不到则如实回执
-                            if std::time::Instant::now() >= deadline {
-                                return Err(format!(
-                                    "{why}；请人工核对终端（命令已发送，档位未切）"
-                                ));
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
-                        }
-                    }
-                }
-                Err(e) => {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(format!("权限菜单屏读失败（{e}）；请人工核对终端"));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
-                }
-            }
-        }
-    }
+) -> Result<InjectAttempt, String> {
     #[cfg(not(windows))]
     {
-        // 非 Windows 无屏读 → 第二段无法定位（菜单导航必须知道当前高亮位）。
-        // **如实回执**：不盲发方向键（猜错会选到别的档——与导航序列的保守面同源）。
-        let _ = (tool, target, pid, spec, injector);
-        Err("本平台无屏读，权限菜单无法定位（命令已发送，请在终端选择档位）".to_string())
+        // 非 Windows 无屏读 → 菜单路径无法定位（闭环导航必须知道当前高亮行）。
+        // **如实回执**：不盲发方向键（猜错会选到别的档——与导航的保守面同源）。
+        let _ = (tool, group, target, pid, spec, injector);
+        return Err("本平台无屏读，权限菜单无法定位（命令已发送，请在终端选择档位）".to_string());
+    }
+    #[cfg(windows)]
+    {
+        let read = || crate::inject::windows_console::read_screen_window(pid).ok();
+        let key_delay = || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ))
+        };
+        // **段编排在内核**（`mode::run_menu_stages`）——「第三段只对 codex×Full Access
+        // 走」「确认框缺席不算失败」「回执核验」这些控制流是判据的一部分，写在
+        // `#[cfg(windows)]` 里就只剩实机能覆盖。此处只提供**生产侧的能力**：
+        // 轮询（`poll`）、读屏/发键/等待（`MenuTerminal` 的三面）。
+        let mut terminal = crate::inject::mode::Closures {
+            read,
+            // `|key: &str|` 的类型标注是**必须**的：省略参数类型时闭包的生命周期会被
+            // 推断成某个具体生命周期，而 `MenuTerminal::send(&str)` 要求对**任意**生命
+            // 周期成立（higher-ranked）——缺标注即 `implementation of FnMut is not general
+            // enough` 编译错。
+            send: |key: &str| {
+                let r = injector.locate_and_send_key_spec(pid, key, spec);
+                if r.is_ok() {
+                    key_delay();
+                }
+                r
+            },
+            settle: key_delay,
+        };
+        let outcome = crate::inject::mode::run_menu_stages(
+            tool,
+            group,
+            target,
+            |plan, optional| poll_menu_stage(pid, plan, optional),
+            || poll_receipt(pid, tool, target, RECEIPT_POLL_TOTAL_MS),
+            &mut terminal,
+        )?;
+        log::debug!(
+            "模式菜单：闭环完成（菜单 {} 键：{}；确认框 {}；回执 {:?}）",
+            outcome.menu_keys.len(),
+            outcome.menu_keys.join(","),
+            if outcome.confirm_done {
+                "已走完"
+            } else {
+                "未出现"
+            },
+            outcome.receipt_seen
+        );
+        Ok(InjectAttempt::Menu {
+            receipt_seen: outcome.receipt_seen,
+        })
+    }
+}
+
+/// 菜单路径的**生产轮询**：按阶段取预算，轮询读屏直到 `plan` 可行动。
+///
+/// - `optional = false`（第二段菜单）：窗尽未出现 → `Err`（菜单必须出现，否则功能不可用）；
+/// - `optional = true`（第三段确认框）：窗尽未出现 → `Ok(None)`（**不当作失败**，
+///   理由见 [`menu_stages`] 文档的「确认框超时不当作失败」）。
+///
+/// `Fatal`（形态异常）两种模式都立即 `Err`——等下去也不会自洽。
+#[cfg(windows)]
+fn poll_menu_stage(
+    pid: u32,
+    plan: &crate::inject::mode::MenuNavPlan<'_>,
+    optional: bool,
+) -> Result<Option<Vec<String>>, String> {
+    use crate::inject::mode::PollStep;
+    let total_ms = if optional {
+        CONFIRM_POLL_TOTAL_MS
+    } else {
+        MENU_POLL_TOTAL_MS
+    };
+    let advice = if optional {
+        "Full Access 可能未生效"
+    } else {
+        "命令已发送，档位未切"
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
+    // 「为什么还没等到」：每轮**重算**（首轮即写，故用 `let mut` 而非初值——
+    // 编译器对「初值从未被读」的写法会告 unused_assignments）
+    let mut last: String;
+    loop {
+        match crate::inject::windows_console::read_screen_window(pid) {
+            Ok(lines) => match plan.probe(&lines) {
+                PollStep::Ready(_) => return Ok(Some(lines)),
+                PollStep::Fatal(why) => return Err(format!("{why}；请人工核对终端（{advice}）")),
+                PollStep::NotYet(why) => last = why,
+            },
+            Err(e) => last = format!("{}屏读失败（{e}）", plan.stage()),
+        }
+        if std::time::Instant::now() >= deadline {
+            if optional {
+                // **不当作失败**：用户可能关过该警告（二进制 `Continue and don't warn
+                // again.`）→ 由回执核验如实判定
+                log::debug!("{}：窗内未出现（{last}）→ 按回执核验", plan.stage());
+                return Ok(None);
+            }
+            return Err(format!("{last}；请人工核对终端（{advice}）"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
+    }
+}
+
+/// 轮询屏读**工具自己的成功回执行**（`receipt_seen`）。
+///
+/// 窗末仍未见 → `Ok(None)`（**不是失败**：回执可能被后续输出刷走，也可能根本没打印）
+/// ——调用方据此下发 `verified:false` + 「请人工核对」（见 [`receipt_and_verdict`]）。
+/// 屏读本身失败（读不到屏）也收敛为 `Ok(None)`：我们**没有证据**，故不声称成功。
+/// `Err` 只用于「读屏任务本身异常」这一条不会发生的路径（保留 `Result` 与
+/// [`crate::inject::mode::run_menu_stages`] 的签名一致）。
+#[cfg(windows)]
+fn poll_receipt(
+    pid: u32,
+    tool: &str,
+    target: crate::inject::mode::MamMode,
+    total_ms: u64,
+) -> Result<Option<Vec<String>>, String> {
+    let label = crate::inject::mode::menu_target_label(tool, target).unwrap_or("");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
+    loop {
+        if let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) {
+            if crate::inject::mode::permission_receipt_verified(tool, &lines, label) {
+                return Ok(Some(lines));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            log::debug!("菜单路径：窗内未见成功回执行（{tool}/{label}）→ 按未核验回执");
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(MENU_POLL_STEP_MS));
     }
 }
 
@@ -3934,18 +4135,21 @@ fn read_mode_from_screen_by_pid(
 ///   「请核对」——用户需要知道差在哪，才能判断是环序漂移还是注入没生效）；
 /// - 无法判定：`verified=false` + 人工核对提示（无回读源/屏读失败）。
 ///
-/// # `mode_shot_from_screen`（T4 复评 I2）：第二段的「无法判定」要多带一句限定
+/// # `mode_shot_from_screen`（T4 复评 I2）：菜单路径的「无法判定」要多带一句限定
 ///
-/// 对**两段式菜单**（`mode_shot_from_screen=true`）来说，「无法判定」这一态的含义比
-/// 单段注入更弱一层：档位**是靠屏读菜单标签推算出来的**（`locate_menu_items` +
-/// `menu_items_coherent`），而菜单块形态**没有实机快照**（见 `inject::mode` 的窄面
-/// 申报）——定位一旦误判，方向键步进就可能落在**别的档**上。此时若只回「无法确认
-/// 当前档」，用户会以为「可能没切或切了但看不见」，而真实风险是「**可能切错档**」。
-/// 裁5 的「不假装成功」要覆盖这一态，故两段式的「无法判定」文案追加「本次为屏读
+/// 对**菜单路径**（`mode_shot_from_screen=true`）来说，「无法判定」这一态的含义比单段
+/// 注入更弱一层：档位是靠**屏读定位 + 闭环步进**到达的（`locate_menu_items` +
+/// `navigate_until_highlighted`），而定位的判据是**文案匹配**（实机取证档支撑，但版本
+/// 升级会让文案漂移）——定位一旦误判，方向键就可能落在**别的档**上。此时若只回「无法
+/// 确认当前档」，用户会以为「可能没切或切了但看不见」，而真实风险是「**可能切错档**」。
+/// 裁5 的「不假装成功」要覆盖这一态，故菜单路径的「无法判定」文案追加「本次为屏读
 /// 推算、未回读确认」——把风险说全，让用户知道该去终端核**对**（而不是只核有无）。
 ///
 /// 单段（Key/Text）不追加：它的目标档由命令/按键直接决定（`/plan on` 就是进 Plan，
 /// shift+tab 就是前进一档），不存在「定位误判」这条额外风险源。
+///
+/// **与 [`receipt_and_verdict`] 的关系**：本函数只说「档位回读」这一路的结论；菜单路径
+/// 还有**工具自证**（成功回执行）这一路更强的证据，两路在 [`receipt_and_verdict`] 合并。
 fn mode_verify_receipt(
     verdict: crate::inject::mode::ModeVerify,
     group: crate::inject::mode::ModeGroupId,
@@ -4447,6 +4651,78 @@ mod tests {
         assert!(verified);
         assert!(hint.is_null());
     }
+
+    // ==== 丁T4 收尾：成功回执核验 → 回执合成的三条判据（`receipt_and_verdict`）====
+
+    /// **工具自证 = 一票通过**（比档位回读更强的一手证据）：见到
+    /// `• Permissions updated to <目标档>` → `verified=true`、无 hint——**即便档位回读
+    /// 那一路判了「无法判定」**（权限组无回读源，实机常态）。
+    ///
+    /// 还原动作：把 `receipt_and_verdict` 的 `Some(true)` 分支改成 `(verified, hint)`
+    /// （即让回读覆盖回执）→ 本测试先红（verified 会是 false）。
+    #[test]
+    fn menu_receipt_seen_wins_over_readback_unverifiable() {
+        // 实机形态：权限组无底栏回读 → verdict=Unverifiable → hint 是「请人工核对」
+        let (rb_verified, rb_hint) = mode_verify_receipt(
+            crate::inject::mode::ModeVerify::Unverifiable,
+            crate::inject::mode::ModeGroupId::Permission,
+            "完全信任",
+            true,
+        );
+        assert!(!rb_verified, "无回读源时档位回读这一路本就是 false");
+        let (verified, hint) = receipt_and_verdict(Some(true), rb_verified, rb_hint, "完全信任");
+        assert!(
+            verified,
+            "见到工具自己的成功回执 → 一票通过（工具宣布切换完成，强于「屏上现在写着什么」）"
+        );
+        assert!(hint.is_null(), "命中时无 hint（前端显示「已切换」）");
+    }
+
+    /// **未见回执 → verified=false + 「请人工核对」**，但**不是失败**（`status` 仍
+    /// `key_sent`，编排本身已成功走完）；且**保留档位回读那一路的说法**（两路证据各说
+    /// 各的，不是二选一）。
+    ///
+    /// 还原动作：把 `Some(false)` 分支改成 `(verified, hint)` → 第一条断言先红
+    /// （档位回读命中时 verified 会是 true，等于把「可能切到但没收到确认」说成成功）。
+    #[test]
+    fn menu_receipt_absent_reports_unverified_but_keeps_readback_note() {
+        // ① 档位回读命中（有回读源时才会发生）——但回执未见 → 仍不得声称成功
+        let (verified, hint) =
+            receipt_and_verdict(Some(false), true, serde_json::Value::Null, "只读");
+        assert!(
+            !verified,
+            "未见工具回执 → 不把「屏上此刻写着目标档」说成「切换已完成」（裁5）"
+        );
+        let h = hint.as_str().unwrap();
+        assert!(h.contains("未在屏上见到该工具的成功回执"), "{h}");
+        assert!(h.contains("请人工核对终端"), "要给核对指引：{h}");
+        assert!(h.contains("只读"), "点名目标档（用户知道该核对什么）：{h}");
+        // ② 档位回读那一路有话说（不符态）→ 两句话都在（不是把回读的话丢掉）
+        let (_, rb_hint) = mode_verify_receipt(
+            crate::inject::mode::ModeVerify::Mismatch {
+                expected: crate::inject::mode::MamMode::Bypass,
+                observed: crate::inject::mode::MamMode::ReadOnly,
+            },
+            crate::inject::mode::ModeGroupId::Permission,
+            "完全信任",
+            true,
+        );
+        let (verified, hint) = receipt_and_verdict(Some(false), false, rb_hint, "完全信任");
+        assert!(!verified);
+        let h = hint.as_str().unwrap();
+        assert!(
+            h.contains("预期「完全信任」") && h.contains("实际「只读」"),
+            "回读的话保留：{h}"
+        );
+        assert!(
+            h.contains("未在屏上见到该工具的成功回执"),
+            "回执的话也保留：{h}"
+        );
+        // ③ 无法核验（非 Windows 无屏读）→ 原样透传档位回读的结论
+        let (verified, hint) = receipt_and_verdict(None, true, serde_json::Value::Null, "只读");
+        assert!(verified, "无屏读时回执核验不参与，交给档位回读");
+        assert!(hint.is_null());
+    }
 }
 
 /// 丁T3 **实机三场景占位**（`#[ignore]`——常规门禁只编译不跑）。
@@ -4600,35 +4876,134 @@ mod t3_live_probe_tests {
     }
 }
 
-/// 丁T4 **实机四家切一轮 + 回读逐例**占位（`#[ignore]`——常规门禁只编译不跑）。
+/// 丁T4 收尾 **实机形态复核**占位（`#[ignore]`——常规门禁只编译不跑）。
 ///
-/// 与 [`t3_live_probe_tests`] 同款：**先落占位与观测点清单**，把实跑时要抄录/断言
-/// 的东西写死在注释里；本模块不发起任何注入或 HTTP 请求（那需要受控会话与人工观察
-/// 窗口）。**T4 的自动化替代面**（门禁内已覆盖，跑这里之前先确认它们绿）：
+/// # 本模块的两条用例各去取什么（**与代码一致，不做超出证据的宣称**）
 ///
-/// | 观测点 | 自动化替代 | 位置 |
-/// |---|---|---|
-/// | 四家底栏 → 当前档 | `inject::mode` 的分族解析单测（夹具 = T6 真机屏幕原文逐字） | `inject/mode.rs` `parse_*_real_footers` |
-/// | claude 环序 | `cycle_next_follows_measured_ring`（四档环序 = 实测） | 同上 |
-/// | 两组结构 / 裁7 legacy / 裁6 默认 | GET 载荷断言 + 前端渲染断言 | `remote/server.rs` `session_mode_reports_*` + `tests/mobile/ModeBar.test.tsx` |
-/// | 两段式守卫只过一道 | `session_mode_switch_menu_guard_runs_once_before_first_stage` | `remote/server.rs` |
-/// | 权限菜单定位（标签/引文/高亮） | `locate_codex_menu_items` 等（夹具 = 菜单形态） | `inject/mode.rs` |
-/// | codex 运行中门 | `session_mode_switch_reports_codex_plan_busy` | `remote/server.rs` |
+/// 丁T4 收尾的核心改动（权限菜单关键词定位、闭环导航、Full Access 第三段）**依据的是
+/// 用户手工实机取证**（`research/refs/phase2-消息注入/2026-09-22-codex-kimi权限菜单与
+/// FullAccess三段式-用户实机取证.md`），该档是**用户逐字转抄的屏幕原文**，不是 MAM
+/// 自己注入路径下的产物。两条用例各自去补一层：
+///
+/// 1. [`t4_permission_menu_screen_shape_live_probe`]：菜单/确认框/回执行的**逐行原文**
+///    与 `menu_labels`、`FULL_ACCESS_AFFIRMATIVE_KEYWORD`、两个回执行锚是否**逐字一致**
+///    （版本升级后最先漂移的就是文案）；
+/// 2. [`t4_four_tools_switch_and_readback_live_probe`]：**MAM 自己的注入路径**下逐家切一轮
+///    ——取证档是「人手敲命令」，不覆盖 MAM 的文本分块、`SUBMIT_DELAY_MS`、轮询窗与
+///    闭环按键节拍。
+///
+/// 两条都**只做前置可满足性检查与探测指引打印**，不发起任何注入或 HTTP 请求（那需要
+/// 受控会话与人工观察窗口）。**未被自动化覆盖的只有「真终端上这套键序是否真的切对档」
+/// 这一终极观测**——其余每一格都有门禁内的自动化替代（见下表的对应关系）。
 ///
 /// 跑法（实机显式，单线程避免终端互相干扰）：
 /// `cargo test --lib t4_live_probe -- --ignored --nocapture --test-threads=1`
 #[cfg(test)]
 mod t4_live_probe_tests {
+    /// **权限菜单 / Full Access 确认框 / 成功回执行的实机形态复核**（丁T4 收尾新增）。
+    ///
+    /// # 为什么必须有这条（本批的两次夹具教训）
+    ///
+    /// T4 首版的菜单定位判据基于**推演**（「权限菜单不带编号，用行首标签匹配」），实机
+    /// 取证显示 codex 的菜单行是 `› 2. Ask for approval (current) …`——标签**不在行首**
+    /// → 真机定位 0 项、权限切换**完全不可用**（如实中止，不误选）。现在的判据改成
+    /// 「关键词包含 + 计数互斥」，夹具全部换成取证档的**逐字原文**；但**版本升级仍会
+    /// 让文案漂移**（档位词、`(current)` 后缀、`continue` 肯定项、回执行锚），故需要一条
+    /// 把「屏上原文 ↔ 词表 ↔ 锚」逐字对账的用例。
+    ///
+    /// # 前置（逐家）
+    ///
+    /// - **Windows + 真 conhost 窗口**（屏读是 Windows 能力；非 Windows 下菜单路径恒
+    ///   `Err`「本平台无屏读」，本场景不可观测——那是能力边界，回执会如实说明）；
+    /// - codex / kimi 已装且**空闲可输入**（无待决对话框——否则先撞丁T3 守卫，那是另一条
+    ///   用例）；Guardian 开启与否会影响 `Approve for me` 是否在场（两种都合法）；
+    /// - MAM 远程服务开启（若要跑注入路径的两条）。
+    ///
+    /// # 观测点（**逐条抄录「屏上原文」，与下面的期望值逐字比对**）
+    ///
+    /// | # | 动作（人工在终端里做） | 期望屏上原文 | 期望解析结果 |
+    /// |---|---|---|---|
+    /// | 1 | codex 手打 `/permissions` 回车 | 标题 `Update Model Permissions`；四档 `1. Read Only` … `4. Full Access`（Guardian 关则无 `Approve for me`）；高亮行带 `› `；当前档带 ` (current)` 后缀；描述在**同行右侧列**（折行续行是纯缩进） | 喂 `locate_menu_items(&lines, menu_labels("codex"))` → **4 项**（或 3 项，Guardian 关）、顺序 = 屏上序、恰好一项 `highlighted` |
+    /// | 2 | kimi 手打 `/permission` 回车 | 标题 `Select permission mode`；提示行 `↑↓ navigate · Enter select · Esc cancel`；三档 `Always Ask` / `Ask When Needed` / `Never Ask`，**每档下面紧跟一行描述**；高亮带 `❯ `；当前档带 ` ← current` 后缀 | 喂 `locate_menu_items(&lines, menu_labels("kimi"))` → **3 项**、第 1 项 `highlighted`（若默认档不是「总是询问」则高亮随实际档移动） |
+    /// | 3 | codex 在菜单里选到 `4. Full Access` 回车 | 二次确认框标题 `Enable full access?`；`› 1. Yes, continue anyway  Apply full access for this session` / `  2. Cancel                Go back without enabling full access` | `MenuNavPlan::ConfirmAffirmative{tool:"codex", keyword:"continue"}.probe(&lines)` → `Ready`，目标行标签 = 屏上第 1 项的原文；若该版本把肯定项改成别的词（如 `Continue and don't warn again.`），记下实际词并回填 `FULL_ACCESS_AFFIRMATIVE_KEYWORD` |
+    /// | 4 | codex 提交后 | `• Permissions updated to Full Access`（1/2/3 档同形，档名不同） | `permission_receipt_verified("codex", &lines, "Full Access")` → `true`；锚文本若有变（如 `Permissions updated to` 改了大小写/词序），回填 `CODEX_PERMISSION_RECEIPT_ANCHOR` |
+    /// | 5 | kimi 任选一档回车 | `Permission mode: Always Ask`（档名随所选） | `permission_receipt_verified("kimi", &lines, "Always Ask")` → `true`；锚变了回填 `KIMI_PERMISSION_RECEIPT_ANCHOR` |
+    /// | 6 | codex 切 **1/2/3 档**（不选 Full Access） | **不出现** `Enable full access?`，直接回执行 | 这印证 [`crate::inject::mode::needs_full_access_confirm`] 的「只对 Bypass 为真」；若某版本给 1/2/3 也加了确认框 → 那是**判据失效**，必须回填 |
+    ///
+    /// # 门禁内的自动化替代（跑本用例之前先确认它们绿）
+    ///
+    /// | 观测点 | 自动化替代（夹具 = 取证档逐字原文） |
+    /// |---|---|
+    /// | 1 | `inject::mode::tests::locate_codex_menu_items_from_real_screen` / `numbering_is_not_a_criterion` / `distractor_lines_are_handled_by_the_two_gates` |
+    /// | 2 | `inject::mode::tests::locate_kimi_menu_items_from_real_screen` |
+    /// | 3 | `full_access_confirm_locates_affirmative` / `full_access_confirm_refuses_ambiguous_or_missing` / `full_access_confirm_beats_menu_overlay` |
+    /// | 4 / 5 | `permission_receipt_requires_anchor_and_target_label` |
+    /// | 6 | `full_access_confirm_is_codex_permission_bypass_only` |
+    ///
+    /// # 本用例的边界（如实申报）
+    ///
+    /// 只打印前置检查（平台 + 两家版本）与上述清单，**不做自动断言**——真机观测需要人工
+    /// 在终端上看着屏幕逐条对。抄录完成后把差异回填本模块文档的表与对应的常量/词表。
+    #[test]
+    #[ignore = "实机验证：codex /permissions 与 kimi /permission 的菜单/确认框/回执行逐行原文 → 对账 menu_labels、FULL_ACCESS_AFFIRMATIVE_KEYWORD 与两个回执锚"]
+    fn t4_permission_menu_screen_shape_live_probe() {
+        eprintln!(
+            "丁T4 收尾 实机形态复核（权限菜单 / Full Access 确认框 / 成功回执行）\n\
+             \n\
+             前置检查：\n\
+             - 平台 = {}（屏读是 Windows 能力；非 Windows 下菜单路径恒 Err「本平台无屏读」）\n\
+             - codex 版本 = {:?}\n\
+             - kimi 版本 = {:?}\n\
+             \n\
+             当前代码依据的原文（**取自用户实机取证档，本用例就是去核它是否仍逐字成立**）：\n\
+             - codex 档位词 = Read Only / Ask for approval / Approve for me / Full Access；\n\
+               高亮标记 `›`(U+203A)；当前档后缀 ` (current)`；标题 `Update Model Permissions`；\n\
+             - kimi 档位词 = Always Ask / Ask When Needed / Never Ask；高亮标记 `❯`(U+276F)；\n\
+               当前档后缀 ` ← current`；标题 `Select permission mode`；\n\
+             - 第三段肯定项关键词 = `continue`（覆盖 `Yes, continue anyway` 与\n\
+               `Continue and don't warn again.`）；仅 codex × 权限组 × Full Access 有此段；\n\
+             - 回执行锚：codex `permissions updated to`（原文 `• Permissions updated to X`）、\n\
+               kimi `permission mode:`（原文 `Permission mode: X`）。\n\
+             \n\
+             步骤（人工，逐条；抄录「屏上原文」那一列）：\n\
+             1. codex 手打 /permissions 回车 → 抄录弹窗逐行原文（标题/档位行/描述列/高亮标记/\n\
+                当前档后缀），确认四档词与上面逐字一致；\n\
+             2. 同一份原文喂 crate::inject::mode::locate_menu_items(&lines, menu_labels(\"codex\"))\n\
+                → 期望项数 = 屏上档位数、恰好一项 highlighted；不一致就把真实原文回填\n\
+                inject::mode 的夹具与 menu_labels；\n\
+             3. 在菜单里移到第 4 项回车 → 抄录确认框逐行原文 → 喂\n\
+                MenuNavPlan::ConfirmAffirmative{{tool:\"codex\", keyword:\"continue\"}}.probe(&lines)\n\
+                → 期望 Ready；若肯定项不是 continue 类文案，回填 FULL_ACCESS_AFFIRMATIVE_KEYWORD；\n\
+             4. 确认后抄录成功回执行 → 喂 permission_receipt_verified 核对锚；\n\
+             5. 再切 1/2/3 档各一次 → 确认**不出现**确认框（档案 §3），只有回执行；\n\
+             6. kimi 手打 /permission → 同样抄录与对账（三档 + 每档下的描述行 + ← current 后缀）。\n\
+             \n\
+             定案后落点：inject::mode 的 menu_labels / 测试夹具 / FULL_ACCESS_AFFIRMATIVE_KEYWORD\n\
+             / CODEX_PERMISSION_RECEIPT_ANCHOR / KIMI_PERMISSION_RECEIPT_ANCHOR，以及本模块文档的表。",
+            std::env::consts::OS,
+            crate::inject::approve::cached_cli_version("codex"),
+            crate::inject::approve::cached_cli_version("kimi"),
+        );
+    }
+
     /// 四家各切一轮 + 回读逐例核对（§2.6 表 + 裁5 验收：切换后回显当前模式）。
     ///
-    /// **前置（逐家）**：
+    /// # 与上一条的分工
+    ///
+    /// 上一条核「屏上原文 ↔ 词表/锚」；本条约核「**MAM 注入路径**下这套键序真的能切对档」
+    /// ——取证档是用户**手敲命令**得到的（人工按 ↑/Enter），它证明的是「菜单长什么样、
+    /// 高亮在哪」，**不代表 MAM 的注入节拍**（文本分块、`SUBMIT_DELAY_MS`、轮询窗、
+    /// 闭环每步的重绘复核）。这两层证据缺一不可。
+    ///
+    /// # 前置（逐家）
+    ///
     /// - Windows + 真 conhost 窗口（屏读是 Windows 能力；非 Windows 下回读恒 null，
-    ///   本场景不可观测——那是能力边界，回执会如实带 verified=false + 人工核对提示）；
+    ///   本场景不可观测——回执会如实带 verified=false + 人工核对提示）；
     /// - 四家 CLI 已装（claude / codex / kimi / opencode），MAM 远程服务开启，
     ///   手机端在该会话详情页；
-    /// - 终端**空闲可输入**（无待决对话框——否则会先撞 T3 守卫，那是另一条用例）。
+    /// - 终端**空闲可输入**（无待决对话框——否则先撞丁T3 守卫，那是另一条用例）。
     ///
-    /// **观测点（逐家逐例抄录；「屏上原文 → 解析器输出 → 与预期是否一致」三列）**：
+    /// # 观测点（逐家逐例抄录；「屏上原文 → GET current → 回执 verified+hint」三列）
     ///
     /// | # | 工具 | 动作 | 期望屏上 | 期望回执 |
     /// |---|---|---|---|---|
@@ -4636,26 +5011,45 @@ mod t4_live_probe_tests {
     /// | 2 | claude | 点「切换模式」一次（从 acceptEdits 起） | `⏸ plan mode on` | `verified=true` + 回显「计划」 |
     /// | 3 | codex | 点模式组「计划」 | 底栏 `Plan mode (shift+tab to cycle)` | `verified=true` + 回显「计划」 |
     /// | 4 | kimi | 点模式组「计划」 | 底栏 `plan` 前缀 | `verified=true` + 回显「计划」 |
-    /// | 5 | codex | 点权限组「只读」 | 菜单弹出 → 高亮落到 `Read Only` | 第一段立即；第二段按 `↑+Enter`（M9R 实测序） |
-    /// | 6 | kimi | 点权限组「永不询问」 | 底栏出现 `Never Ask`（若有） | `/auto` 直达（无回读源 → verified=false + 人工核对） |
+    /// | 5 | codex | 点权限组「只读」 | 菜单弹出 → 高亮逐步移到 `Read Only`（闭环每步复核） | `verified=true`（见到 `• Permissions updated to Read Only`）、`hint=null` |
+    /// | 6 | codex | 点权限组「完全信任」 | 菜单 → `Full Access` → **二次确认框** → 确认 → 回执行 | `verified=true`（见到 `• Permissions updated to Full Access`）；**若用户关过该警告**（确认框不出现）→ 仍应走通回执核验（不应报失败） |
+    /// | 7 | kimi | 点权限组「总是询问」 | 菜单弹出 → 高亮移到 `Always Ask` | `verified=true`（见到 `Permission mode: Always Ask`） |
+    /// | 8 | kimi | 点权限组「永不询问」 | 底栏出现 `Never Ask`（若有） | `/auto` 直达（无回读源 → 回读那一路 null，`verified` 由**回执核验**决定） |
     ///
-    /// **必须如实抄录的反例（如实申报面）**：
-    /// - **kimi 漂移**（§2.6 表注）：计划批准后**自动切出 plan**——批准一次后立刻
-    ///   GET 一次模式，屏上 `plan` 前缀应消失；若解析器仍报 Plan，即为漂移未被捕获
+    /// # 必须如实抄录的反例（如实申报面）
+    ///
+    /// - **kimi 漂移**（§2.6 表注）：计划批准后**自动切出 plan**——批准一次后立刻 GET 一次
+    ///   模式，屏上 `plan` 前缀应消失；若解析器仍报 Plan，即为漂移未被捕获
     ///   （本用例的观测量，不是期望的成功态）；
     /// - **codex 运行中**：在 codex 干活时点模式组「计划」→ 期望 **200 failed**
     ///   「运行中不接受 /plan」且终端**无变化**（如实回执，不是静默失败）；
     /// - **codex 退出计划模式**：模式组「默认」在 UI 上是**不可点**的灰字（带原因）
-    ///   ——这条本身就是验收点（若它能点，说明前端渲染漏了 selectable 判断）。
+    ///   ——这条本身就是验收点（若它能点，说明前端渲染漏了 selectable 判断）；
+    /// - **权限菜单的每一步都要在终端肉眼确认高亮确实移动了**——闭环若中止，回执会给出
+    ///   具体原因（「高亮未移动，终端可能未响应」/「位移了 N 行」等），把它原样抄下来：
+    ///   那正是这条用例最有价值的观测（说明实机的按键节拍与我们假设的不同）。
     ///
     /// **本用例的边界（如实申报）**：只打印前置检查与清单，**不做自动断言**——真机
-    /// 观测需要人工在终端上看着屏幕逐条对（自动化替代面见模块文档的表）。抄录完成后
-    /// 把差异回填这里，再决定是否升级为 `tests/m9r_e2e.rs` 的真 HTTP 全链用例。
+    /// 观测需要人工在终端上看着屏幕逐条对（自动化替代面见下表的对应关系）。抄录完成后
+    /// 把差异回填本模块文档的表与 `MENU_POLL_TOTAL_MS` 等自裁常量，再决定是否升级为
+    /// `tests/m9r_e2e.rs` 的真 HTTP 全链用例。
+    ///
+    /// # 门禁内的自动化替代（跑这里之前先确认它们绿）
+    ///
+    /// | 观测点 | 自动化替代 | 位置 |
+    /// |---|---|---|
+    /// | 1–4 底栏 → 当前档 | 分族解析单测（夹具 = T6 真机屏幕原文逐字） | `inject/mode.rs` `parse_*_real_footers` |
+    /// | claude 环序 | `cycle_next_follows_measured_ring` | 同上 |
+    /// | 两组结构 / 裁7 legacy / 裁6 默认 | GET 载荷断言 + 前端渲染断言 | `remote/server.rs` `session_mode_reports_*` + `tests/mobile/ModeBar.test.tsx` |
+    /// | 菜单路径守卫只过一道 | `session_mode_switch_menu_guard_runs_once_before_first_stage` | `remote/server.rs` |
+    /// | 5–7 菜单/确认框的定位与闭环 | `locate_*_from_real_screen`、`closed_loop_*`、`full_access_confirm_*`、`stage_flow_*` | `inject/mode.rs` |
+    /// | 8 回执核验与回执合成 | `permission_receipt_requires_anchor_and_target_label` + `menu_receipt_*` | `inject/mode.rs` / `remote/api.rs` |
+    /// | codex 运行中门 | `session_mode_switch_reports_codex_plan_busy` | `remote/server.rs` |
     #[test]
-    #[ignore = "实机验证：opencode/claude/codex/kimi 各切一轮（含 codex+kimi 权限组两段式），回读逐例核对；含 kimi 批准漂移与 codex 运行中两个反例"]
+    #[ignore = "实机验证：opencode/claude/codex/kimi 各切一轮（含 codex 三段式 Full Access、kimi 两段式），回读与回执逐例核对；含 kimi 批准漂移与 codex 运行中两个反例"]
     fn t4_four_tools_switch_and_readback_live_probe() {
         eprintln!(
-            "丁T4 实机探测占位（四家各切一轮 + 回读逐例）\n\
+            "丁T4 实机探测占位（四家各切一轮 + 回读/回执逐例）\n\
              \n\
              前置检查：\n\
              - 平台 = {}（屏读是 Windows 能力；非 Windows 下回读恒 null，回执带 verified=false）\n\
@@ -4669,78 +5063,33 @@ mod t4_live_probe_tests {
              2. claude：点「切换模式」→ 底栏 ⏸ plan mode on；GET 回显「计划」；\n\
              3. codex：点模式组「计划」→ 底栏 Plan mode (shift+tab to cycle)；回显「计划」；\n\
              4. kimi：点模式组「计划」→ 底栏 plan 前缀；回显「计划」；\n\
-             5. codex：点权限组「只读」→ 菜单弹出后高亮落到 Read Only（第二段 ↑+Enter）；\n\
-             6. kimi：点权限组「永不询问」→ /auto 直达（无回读源 → verified=false + 人工核对）；\n\
-             7. 反例 A（kimi 漂移）：在 kimi 计划批准框选 Approve → 立刻 GET 一次 →\n\
+             5. codex：点权限组「只读」→ 菜单弹出，闭环逐步把高亮移到 Read Only → 回执\n\
+                `verified=true`（见到 • Permissions updated to Read Only）；\n\
+             6. codex：点权限组「完全信任」→ 菜单移到 Full Access → **二次确认框**\n\
+                （Enable full access?）→ 闭环移到 Yes, continue anyway → 提交 →\n\
+                回执 `verified=true`（见到 • Permissions updated to Full Access）；\n\
+             7. kimi：点权限组「总是询问」→ 菜单闭环移到 Always Ask → 回执 verified=true\n\
+                （见到 Permission mode: Always Ask）；\n\
+             8. kimi：点权限组「永不询问」→ /auto 直达；回读那一路 null，verified 由回执核验决定；\n\
+             9. 反例 A（kimi 漂移）：在 kimi 计划批准框选 Approve → 立刻 GET 一次 →\n\
                 底栏 plan 前缀应消失（若仍报 Plan = 漂移未捕获，如实记入台账）；\n\
-             8. 反例 B（codex 运行中）：codex 干活时点模式组「计划」→ 期望 200 failed\n\
-                「运行中不接受 /plan」且终端无变化；\n\
-             9. 反例 C（codex 退出计划）：模式组「默认」应为**灰字不可点**（带原因），\n\
-                点不动才是对的。\n\
+             10. 反例 B（codex 运行中）：codex 干活时点模式组「计划」→ 期望 200 failed\n\
+                 「运行中不接受 /plan」且终端无变化；\n\
+             11. 反例 C（codex 退出计划）：模式组「默认」应为**灰字不可点**（带原因），\n\
+                 点不动才是对的。\n\
              \n\
-             定案后落点：把逐例差异回填本模块文档的表，再决定是否升级为\n\
+             **中止分支的抄录要求**：闭环的任一中止都会带中文原因（哪一段、为什么、建议怎么\n\
+             做）——把它连同当时的屏幕原文一起抄下来。中止**不是缺陷**（安全面：宁可不切也\n\
+             不盲提交），但它是校准自裁常量的唯一证据（MENU_POLL_TOTAL_MS / CONFIRM_POLL_TOTAL_MS\n\
+             / RECEIPT_POLL_TOTAL_MS 都是自裁值，见 remote/api.rs 的常量文档）。\n\
+             \n\
+             定案后落点：把逐例差异回填本模块两条用例的文档表与对应常量，再决定是否升级为\n\
              tests/m9r_e2e.rs 的真 HTTP 全链用例（先例 e2e_http_full_chain）。",
             std::env::consts::OS,
             crate::inject::approve::cached_cli_version("claude"),
             crate::inject::approve::cached_cli_version("codex"),
             crate::inject::approve::cached_cli_version("kimi"),
             crate::inject::approve::cached_cli_version("opencode"),
-        );
-    }
-
-    /// **两段式权限菜单的屏读定位**（丁T4 最需要真机核对的一处）——菜单形态是
-    /// **从二进制内嵌文案推断**的（codex `Update Model Permissions` + 四个档位标签；
-    /// kimi `Select permission mode` + 三个档位标签），**没有实机屏幕快照**。
-    ///
-    /// **为什么这条必须实机跑**：`locate_menu_items` 的判据是「行首 = 已知档位标签」
-    /// ——若实机菜单把标签渲染成 `▸ Read Only`（别的标记）或标签文本与二进制文案有
-    /// 微差（大小写/标点），定位会失败 → 第二段中止（**不会盲发方向键**，安全，但
-    /// 功能不可用）。本用例就是去把真实菜单原文抄回来，据此校准 `menu_labels`。
-    ///
-    /// **前置**：Windows + 真 conhost + codex 0.155.1（或 kimi 2.0.2）空闲会话。
-    ///
-    /// **观测点**：
-    /// 1. 终端里手打 `/permissions` 回车 → 抄录弹窗**逐行原文**（标题、档位列、
-    ///    光标标记字符、footer）；若弹窗里没有 `Read Only` / `Ask for approval` /
-    ///    `Full Access` 这三个词，记下实际词——`menu_labels` 要按它改；
-    /// 2. 同一份原文喂 `inject::mode::locate_menu_items(lines, menu_labels(tool))` →
-    ///    期望解析出与屏幕上数量一致的菜单项 + 唯一高亮；
-    /// 3. 抄录高亮项的初始位置（M9R 记录是 `Ask for approval`，非首项——这是
-    ///    「导航从高亮位算」的依据）；
-    /// 4. kimi 同样跑一遍（`/permission`），词表期望 `Always Ask` / `Ask When Needed`
-    ///    / `Never Ask`。
-    #[test]
-    #[ignore = "实机验证：codex /permissions 与 kimi /permission 的菜单逐行原文 → 校正 menu_labels 与光标标记"]
-    fn t4_permission_menu_screen_shape_live_probe() {
-        eprintln!(
-            "丁T4 实机探测占位（权限菜单屏读形态校准）\n\
-             \n\
-             前置检查：\n\
-             - 平台 = {}\n\
-             - codex 版本 = {:?}\n\
-             - kimi 版本 = {:?}\n\
-             \n\
-             已知的推断面（**未实机核对的假设，跑本用例就是为了推翻它**）：\n\
-             - codex 菜单标题 `Update Model Permissions`（二进制文案），档位\n\
-               Read Only / Ask for approval / Approve for me / Full Access\n\
-               （M9R 实机记录，`inject::approve` 表注）；\n\
-             - kimi 菜单标题 `Select permission mode`（TUI 内嵌 i18n），档位\n\
-               Always Ask / Ask When Needed / Never Ask（同源）；\n\
-             - 光标标记：模式菜单用哪个字符**未知**（对话用 ›/❯/▶，菜单可能不同）。\n\
-             \n\
-             步骤（人工）：\n\
-             1. 终端手打 `/permissions`（codex）→ 抄录弹窗逐行原文（含前导空白与标记字符）；\n\
-             2. 同一份原文喂 `crate::inject::mode::locate_menu_items(&lines, menu_labels(\"codex\"))`\n\
-                → 期望：项数与屏上一致、高亮唯一；若解析不出，把真实原文回填\n\
-                `inject::mode` 的测试夹具与 `menu_labels`；\n\
-             3. 抄录高亮初始位置（M9R 在 codex 上是第 2 项 Ask for approval）；\n\
-             4. kimi 同样跑 `/permission`（期望三档标签）。\n\
-             \n\
-             定案后落点：`inject::mode::menu_labels` 的词表 + `locate_menu_items` 的\n\
-             测试夹具换成实机原文（当前夹具是形态推演，不是快照）。",
-            std::env::consts::OS,
-            crate::inject::approve::cached_cli_version("codex"),
-            crate::inject::approve::cached_cli_version("kimi"),
         );
     }
 }

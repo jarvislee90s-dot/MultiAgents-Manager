@@ -128,19 +128,27 @@ fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
     Some((num, label.to_string(), highlighted))
 }
 
-/// 从屏读行集解析对话框选项表（纯函数，可测）。
+/// 从屏读行集解析**全部**连续编号簇（1 → 2 → 3 …，步长必须为 1），按出现顺序返回。
 ///
-/// 算法：逐行找**连续编号簇**（1 → 2 → 3 …，步长必须为 1）；取最长簇；簇内每行
-/// 产一个 [`DialogOption`]。要求簇长 ≥ 2（单个 `1.` 行不是「N 选一」对话框——
-/// 可能只是正文列表，不出手）。簇长 > [`MAX_DIALOG_OPTIONS`] → None（超数字键域，
-/// 降级）。
+/// 这是 [`parse_dialog_options`] 的**同一套算法**的「不取最长」视图——丁T4 收尾的
+/// Full Access 二次确认框需要它：确认框出现时，权限菜单可能**仍在屏上**（overlay），
+/// 此时屏上同时有两个编号簇（菜单 1..4 与确认框 1..2），而「取最长簇」的
+/// [`parse_dialog_options`] 会选中**菜单**（4 > 2）→ 肯定项关键词找不到 → 永远切不了
+/// Full Access。按簇逐一看「哪一簇里恰好有一个肯定项」才能定位到确认框。
 ///
-/// 返回 None 的所有情形（调用方据此降级二元卡 + 防重警示）：无簇 / 簇长 < 2 /
-/// 簇长 > 9。
-pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
-    let mut best: Vec<DialogOption> = Vec::new();
+/// 簇的构造与切断规则与 [`parse_dialog_options`] **逐字同源**（空行/横线不切断，
+/// 其余非选项行切断）——两处不得各写一遍（本仓既往的「同一判据两处实现」教训）。
+pub fn parse_dialog_clusters(lines: &[String]) -> Vec<Vec<DialogOption>> {
+    let mut out: Vec<Vec<DialogOption>> = Vec::new();
     let mut cur: Vec<DialogOption> = Vec::new();
     let mut expect: u32 = 1;
+    // 收尾当前簇（与旧实现的 `if cur.len() > best.len() { best = take(cur) } else { cur.clear() }`
+    // 的「finalize」语义一致：非空才产出）
+    fn flush(cur: &mut Vec<DialogOption>, out: &mut Vec<Vec<DialogOption>>) {
+        if !cur.is_empty() {
+            out.push(std::mem::take(cur));
+        }
+    }
     for line in lines {
         match parse_option_line(line) {
             Some((num, label, hl)) if num == expect => {
@@ -152,12 +160,8 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
                 expect += 1;
             }
             Some((num, label, hl)) if num == 1 => {
-                // 新的簇从 1 重新开始：保留更长的那个
-                if cur.len() > best.len() {
-                    best = std::mem::take(&mut cur);
-                } else {
-                    cur.clear();
-                }
+                // 新的簇从 1 重新开始
+                flush(&mut cur, &mut out);
                 cur.push(DialogOption {
                     number: num,
                     label,
@@ -167,32 +171,42 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
             }
             Some(_) => {
                 // 编号不连续（跳到 3 而期待 2 等）→ 当前簇终止
-                if cur.len() > best.len() {
-                    best = std::mem::take(&mut cur);
-                } else {
-                    cur.clear();
-                }
+                flush(&mut cur, &mut out);
                 expect = 1;
             }
             None => {
                 // 非选项行：**不立刻终止簇**——对话框选项行之间可能夹着空行/说明行
-                // （实测 TUI 布局有分隔线）；但也不推进 expect。为防跨段落误连，只在
-                // 连续两个非选项行后终止簇。
-                // 简化实现：空行不终止（分隔线常为空或全横线），其余非选项行终止。
+                // （实测 TUI 布局有分隔线）；但也不推进 expect。分隔线（空行/全横线）
+                // 不切断，其余非选项行切断（与旧实现逐字一致）。
                 if !line.trim().is_empty() && !line.trim().chars().all(|c| c == '-' || c == '─') {
-                    if cur.len() > best.len() {
-                        best = std::mem::take(&mut cur);
-                    } else {
-                        cur.clear();
-                    }
+                    flush(&mut cur, &mut out);
                     expect = 1;
                 }
             }
         }
     }
-    if cur.len() > best.len() {
-        best = cur;
-    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// 从屏读行集解析对话框选项表（纯函数，可测）。
+///
+/// 算法：逐行找**连续编号簇**（1 → 2 → 3 …，步长必须为 1）；取最长簇（**等长时取
+/// 最先出现的**）；簇内每行产一个 [`DialogOption`]。要求簇长 ≥ 2（单个 `1.` 行不是
+/// 「N 选一」对话框——可能只是正文列表，不出手）。簇长 > [`MAX_DIALOG_OPTIONS`] → None
+/// （超数字键域，降级）。
+///
+/// 返回 None 的所有情形（调用方据此降级二元卡 + 防重警示）：无簇 / 簇长 < 2 /
+/// 簇长 > 9。
+pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
+    // 取最长簇（等长时取最先出现的——`fold` 的 `>` 比较保持 `best` 不变，与旧实现的
+    // `if cur.len() > best.len()` 同口径）
+    let best = parse_dialog_clusters(lines)
+        .into_iter()
+        .fold(
+            Vec::new(),
+            |best, c| if c.len() > best.len() { c } else { best },
+        );
     if best.len() < 2 || best.len() > MAX_DIALOG_OPTIONS {
         return None;
     }
@@ -322,7 +336,7 @@ pub fn navigation_sequence(
     Ok(seq)
 }
 
-/// **方向感知**的导航确认序列（丁T4：模式权限菜单专用）。
+/// **方向感知**的导航确认序列（丁T4；**菜单路径已改为闭环、不再用它**——见下）。
 ///
 /// # 与 [`navigation_sequence`] 的区别，以及为什么需要两个
 ///
@@ -330,10 +344,10 @@ pub fn navigation_sequence(
 /// 回卷到首个」——这条前提对 claude/kimi/codex 的**编号对话框**有实测（R1：claude
 /// 三行 ↓ 从 3 回 1），所以审批路径照用。
 ///
-/// 而**权限菜单**（codex `/permissions` / kimi `/permission`）是无编号的 arrow-key
-/// 选择器，**是否回卷没有任何实测**。此时沿用循环前进会有一个危险的推论：目标在
-/// 高亮位**之上**时，算法会发出「↓ × (n-1)」——若该菜单不回卷，这串键会把高亮停在
-/// 末项并回车，**切到错误的权限档**（正是本仓反复防的「想拒绝却批准」同类事故）。
+/// 而**权限菜单**（codex `/permissions` / kimi `/permission`）**是否回卷没有任何实测**。
+/// 此时沿用循环前进会有一个危险的推论：目标在高亮位**之上**时算法会发出「↓ × (n-1)」
+/// ——若该菜单不回卷，这串键会把高亮停在末项并回车，**切到错误的权限档**（正是本仓
+/// 反复防的「想拒绝却批准」同类事故）。
 ///
 /// M9R 的 codex 实机取证恰好给了反向证据：目标 `Read Only` 位于高亮项
 /// `Ask for approval` **之上**，实机用的是 **↑+Enter**（见 `inject::approve` 的
@@ -342,6 +356,19 @@ pub fn navigation_sequence(
 /// 故本变体「按方向走最少步、**不假设回卷**」：目标在下方 → `↓ × k`；目标在上方 →
 /// `↑ × k`；同项 → 直接 Enter。两函数共享 [`navigation_anchors`]（目标越界 / 高亮
 /// 唯一性判据**只有一份**）。
+///
+/// # 菜单路径自丁T4 收尾起**不再使用本函数**（**仅审批路径在用，勿动**）
+///
+/// 本变体仍是「**一次算步进 + 盲发序列**」：它假定「按 k 次键就一定前进 k 行」，而
+/// 实机取证的**方法论要求**是「每按一次 ↓ 或 ↑ 就重新屏读、确认高亮确实移到下一项」
+/// （用户实机取证档 §8 原文）。菜单路径因此改为
+/// [`crate::inject::mode::navigate_until_highlighted`] 的**闭环**：每步复核、只有高亮确实
+/// 落在目标行才发回车。
+///
+/// **审批路径不改**：那里的屏上对话框在**投递期间不会变**（选项固定、投递完即结束，
+/// 且 approve 端点投递前刚做过一次现场重解析），不存在菜单那种「边发键边重绘」的窗口；
+/// 更重要的是**本批没有审批路径的闭环证据**（没有实机观测到它出过错）——按「未验证不
+/// 出手」不动它。**两个函数的保守面（不猜起点）仍然共享。**
 pub fn navigation_sequence_directional(
     options: &[DialogOption],
     target_number: u32,
