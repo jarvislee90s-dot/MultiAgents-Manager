@@ -5925,20 +5925,17 @@ mod tests {
         (state, inner, script)
     }
 
-    /// **丁T5 端到端⑨（自由作答的工具面）**：非 claude 工具 → 409 `tool_readonly`
-    /// （不进阶段机、零投递）。这正是 §2.8 的降级：序列未定案的工具**不假装能发**。
-    /// 还原动作：把 `action_supported` 的 FreeText 分支改成恒 Ok → 本用例先红。
+    /// **丁T5 端到端⑨（自由作答的工具面）→ 批次戊 E4/E5 更新**：kimi（Other 行）
+    /// 与 codex（Tab 备注）已升格走各自阶段机；仍未定案的 opencode → 409
+    /// `tool_readonly`（不进阶段机、零投递；E6 升格 own answer 形态时再改）。
     #[tokio::test]
     async fn question_free_text_refused_for_unverified_tools() {
-        for (tool, tool_id, sid, pid) in [
-            (crate::session::AgentType::Codex, "codex", "sess_t5i", 92u32),
-            (
-                crate::session::AgentType::OpenCode,
-                "opencode",
-                "sess_t5j",
-                93u32,
-            ),
-        ] {
+        for (tool, tool_id, sid, pid) in [(
+            crate::session::AgentType::OpenCode,
+            "opencode",
+            "sess_t5j",
+            93u32,
+        )] {
             let (state, inner, _s) =
                 single_tool_scripted_state(tool, sid, pid, vec![screen_fixtures::free_row()]);
             mark_question(&state, tool_id, sid, Q_SINGLE_PAYLOAD);

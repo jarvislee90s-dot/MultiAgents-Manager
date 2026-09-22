@@ -3460,6 +3460,9 @@ enum StagePlan {
     /// **kimi Other 自由作答阶段机**（批次戊 E4）：Other 行数字 → 打字 → 回车保存
     /// → Review 汇总屏 → 确认
     KimiFreeText,
+    /// **codex Tab 备注阶段机**（批次戊 E5）：弹窗 footer 锚判读 → Tab → 打字 →
+    /// Enter 提交（当前高亮项+备注）→ 终态
+    CodexNotes,
 }
 
 impl StagePlan {
@@ -3479,6 +3482,7 @@ impl StagePlan {
             // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
             (A::Submit, "kimi") => Self::KimiSubmit,
             (A::FreeText, "kimi") => Self::KimiFreeText,
+            (A::FreeText, "codex") => Self::CodexNotes,
             (A::Submit, _) => Self::Submit {
                 max_down_steps: q.options.len() + 2,
             },
@@ -3703,6 +3707,50 @@ fn dispatch_question_action(
                 || probe("kimi-other"),
                 || poll_question_stage(|| probe("kimi-review"), QUESTION_STAGE_POLL_TOTAL_MS),
                 || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_FREE_TEXT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        // ===== 批次戊 E5：codex Tab 备注阶段机 =====
+        StagePlan::CodexNotes => {
+            let Some(text) = free_text else {
+                return QuestionDispatch::Failed("自由作答缺少文本".to_string());
+            };
+            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                send_text: |t: &str| {
+                    injector.locate_and_inject_spec(pid, t, spec)?;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    Ok(())
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_codex_notes_stages(
+                text,
+                || probe("codex-notes"),
+                || poll_receipt_stage(|| probe("codex-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
             match out {

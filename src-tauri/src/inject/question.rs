@@ -638,6 +638,126 @@ where
 }
 
 // ============================================================
+// 批次戊 E5：codex Tab 备注（issue #78 codex 面；戊探C 全链定案）
+// 键序 = Tab（就地展开内联备注行）→ 打字（VK 携带字符）→ Enter（提交当前高亮项+备注
+// 并自动推进）；落账 = `answers.<qid>.answers` 数组第二元素 `"user_note: <全文>"`
+// ============================================================
+
+/// codex 弹窗**答案态** footer 锚（`tab to add notes | enter to submit answer | …`，
+/// 戊探C 原件）——Tab 前置判据：锚在场 = request_user_input 弹窗在场且未在备注态。
+pub const CODEX_NOTES_OPEN_FOOTER: &str = "tab to add notes";
+/// codex 弹窗**备注态** footer 锚（`tab or esc to clear notes | …`）——已在备注态时
+/// 不再发 Tab（否则清空备注，戊探C footer 语义）。
+pub const CODEX_NOTES_OPENED_FOOTER: &str = "tab or esc to clear notes";
+/// codex 提交完成**终态锚**（摘要头 `• Questions 1/1 answered`，戊探C 原件；
+/// 落账侧另有 rollout `answers.<qid>` 对账——见 [`codex_user_note_from_output`]）。
+pub const CODEX_ANSWERED_ANCHOR: &str = "answered";
+
+/// codex 终态在场判定（小写 contains；「answered」是摘要头专属词——弹窗进行中显示
+/// `Question 1/2 (N unanswered)`，语义相反不冲突）
+pub fn codex_answered_present(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(CODEX_ANSWERED_ANCHOR))
+}
+
+/// codex **备注自由作答阶段机**：Tab 切备注态 → 打字（字符通道）→ Enter 一次提交
+/// 「当前高亮项 + 备注」并自动推进（戊探C ③：备注态 Enter **无未答确认屏**）。
+///
+/// # 各段与中止点
+///
+/// 1. **弹窗在场判读**：屏上须含 [`CODEX_NOTES_OPEN_FOOTER`]（答案态）或
+///    [`CODEX_NOTES_OPENED_FOOTER`]（备注态）之一——都不在 = 弹窗不在场，**中止
+///    零按键**（Tab 落在 composer 上会插入制表符）；已开过备注（第二次自由作答）
+///    则跳过 Tab（再按一次 = 清空备注，戊探C footer 语义）；
+/// 2. 打字（字符通道——用户文本绝不进键通道；框内含数字全进文本，CX-5）；
+/// 3. **Enter 提交**（唯一回车点：高亮默认在选项 1，净效果 = 默认项+备注）；
+/// 4. **终态段**：轮询 [`codex_answered_present`]——未见不是失败（`Some(false)`，
+///    如实请人工核对；落账侧以 rollout `user_note:` 对账为准）。
+pub fn run_codex_notes_stages<Rd, Q, T>(
+    text: &str,
+    mut read: Rd,
+    mut poll_receipt: Q,
+    terminal: &mut T,
+) -> Result<FreeTextOutcome, StageAbort>
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    Q: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: FreeTextTerminal,
+{
+    if text.trim().is_empty() {
+        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
+    }
+    let mut sent_keys: Vec<String> = Vec::new();
+    // 1. 弹窗在场判读（两 footer 锚任一在场才动手）
+    let first = read().ok_or_else(|| {
+        StageAbort::screen("codex 备注：读不到屏幕——已中止，未发任何键；请人工核对终端")
+    })?;
+    let lower: Vec<String> = first.iter().map(|l| l.to_lowercase()).collect();
+    let notes_opened = lower.iter().any(|l| l.contains(CODEX_NOTES_OPENED_FOOTER));
+    let notes_available = notes_opened || lower.iter().any(|l| l.contains(CODEX_NOTES_OPEN_FOOTER));
+    if !notes_available {
+        return Err(StageAbort::screen(
+            "屏读未见到 request_user_input 弹窗（footer 锚缺席）——已中止，未发任何键（Tab 不能落在弹窗之外）；请人工核对终端",
+        ));
+    }
+    // 2. 未在备注态 → Tab 开备注行；已在备注态 → 跳过（再按一次 = 清空备注）
+    if !notes_opened {
+        terminal
+            .send("tab")
+            .map_err(|e| StageAbort::delivery(format!("Tab 投递失败（{e}）")))?;
+        sent_keys.push("tab".to_string());
+        terminal.settle();
+    }
+    // 3. 打字（字符通道）
+    terminal
+        .send_text(text)
+        .map_err(|e| StageAbort::delivery(format!("备注文本投递失败（{e}）")))?;
+    sent_keys.push("<text>".to_string());
+    terminal.settle();
+    // 4. Enter 提交（当前高亮项 + 备注，自动推进）
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    // 5. 终态（未见不是失败）
+    let receipt_seen = match poll_receipt() {
+        Ok(Some(lines)) => Some(codex_answered_present(&lines)),
+        Ok(None) => Some(false),
+        Err(_) => None,
+    };
+    Ok(FreeTextOutcome {
+        sent_keys,
+        receipt_seen,
+    })
+}
+
+/// codex rollout **user_note 对账解析**（纯函数）：`function_call_output.output`
+/// （双重 JSON 字符串，外层 `{"answers":{<qid>:{"answers":[...]}}}`）→ 取首个带
+/// `user_note: ` 前缀的数组元素并返回备注全文（戊探C ④定案：备注不是独立字段，
+/// 是 answers 数组第二元素）。无备注 → None。
+/// 消费：验收对账（`tests/fixtures/e-stage2/codex-rollout-user-note.txt` 夹具锁）+
+/// `#[ignore]` 实机用例的落账断言。
+pub fn codex_user_note_from_output(output: &str) -> Option<String> {
+    let outer: serde_json::Value = serde_json::from_str(output).ok()?;
+    let answers = outer.get("answers")?.as_object()?;
+    for (_qid, v) in answers {
+        let Some(arr) = v.get("answers").and_then(|a| a.as_array()) else {
+            continue;
+        };
+        for e in arr {
+            if let Some(s) = e.as_str() {
+                if let Some(note) = s.strip_prefix("user_note: ") {
+                    return Some(note.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+// ============================================================
 // 丁T5：多选提交阶段机 + 自由作答阶段机（§2.3 裁4 / §2.4 裁3）
 // ============================================================
 
@@ -1237,12 +1357,11 @@ where
 ///   `own answer` / kimi `Other` 均未实机取证）→ 端点按 §2.8 降级：前端渲染
 ///   「请在终端作答」，**不假装能发**。
 pub fn free_text_supported(tool: &str) -> bool {
-    // E4 起 kimi 支持（Other 行自由作答，戊探B E-B8 全链定案）；形态门仍只放单选
-    // （多选 Other 行无编号）——见 [`free_text_shape_supported`]
-    matches!(
-        question_key_profile(tool),
-        QuestionKeyProfile::ClaudeFull | QuestionKeyProfile::TwoPhaseSelect
-    )
+    // 批次戊 E4/E5 更新：kimi（Other 行，戊探B E-B8 全链）与 codex（Tab 备注，
+    // 戊探C 全链：Tab → 打字 → Enter=提交当前高亮项+备注）均已实机定案；
+    // 形态门仍只放单选（codex 多选形态未取证 / kimi 多选 Other 无编号）——
+    // 见 [`free_text_shape_supported`]。opencode 走 E6 的 own answer 形态，另行升格。
+    matches!(tool, "claude" | "kimi" | "codex")
 }
 
 /// 自由作答的**题目形态支持面**（复评 F6-3：多选卡不提供自由作答）。
@@ -1761,6 +1880,110 @@ mod tests {
     // ============================================================
 
     // ---- 真机屏幕夹具（2026-09-21 探测档案原文，逐字抄录）----
+
+    // ==== 批次戊 E5：codex Tab 备注（阶段机脚本锁 + rollout 对账夹具）====
+
+    /// **codex 备注阶段机脚本锁（三态）**：
+    /// ① 答案态 footer（`tab to add notes`）→ tab → 文本 → enter；
+    /// ② 已在备注态（`tab or esc to clear notes`）→ **零 tab**（再按 = 清空备注）；
+    /// ③ 弹窗不在场 → 第 1 段中止零按键（Tab 不能落在弹窗之外）。
+    #[test]
+    fn e5_codex_notes_stage_scripted() {
+        let answer_footer = lines(&[
+            "  › 1. MIT (Recommended)",
+            "  tab to add notes | enter to submit answer",
+        ]);
+        let opened_footer = lines(&[
+            "  › 1. MIT (Recommended)",
+            "  › NOTE-TEXT",
+            "  tab or esc to clear notes | enter to submit answer",
+        ]);
+        let receipt = lines(&["• Questions 1/1 answered"]);
+        let run = |screen: &[String], texts: &mut Vec<String>, sent: &mut Vec<String>| {
+            let scr = screen.to_vec();
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: || Some(scr.clone()),
+                send: |k: &str| {
+                    sent.push(k.to_string());
+                    Ok(())
+                },
+                send_text: |t: &str| {
+                    texts.push(t.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            };
+            run_codex_notes_stages(
+                "NOTE-XYZ",
+                || Some(screen.to_vec()),
+                || Ok(Some(receipt.clone())),
+                &mut terminal,
+            )
+        };
+        // ① 答案态：tab → 文本 → enter
+        let mut texts = Vec::new();
+        let mut sent = Vec::new();
+        let out = run(&answer_footer, &mut texts, &mut sent).expect("答案态 footer → 全链");
+        assert_eq!(out.sent_keys, vec!["tab", "<text>", "enter"]);
+        assert_eq!(texts, vec!["NOTE-XYZ"], "备注走字符通道");
+        assert_eq!(out.receipt_seen, Some(true));
+        // ② 已在备注态：跳过 tab
+        let mut texts2 = Vec::new();
+        let mut sent2 = Vec::new();
+        let out2 = run(&opened_footer, &mut texts2, &mut sent2).expect("备注态 → 不重复 Tab");
+        assert_eq!(out2.sent_keys, vec!["<text>", "enter"], "零 tab");
+        // ③ 弹窗不在场 → 中止零按键
+        let bare = lines(&["some composer screen"]);
+        let mut texts3 = Vec::new();
+        let mut sent3 = Vec::new();
+        let err = run(&bare, &mut texts3, &mut sent3).expect_err("无 footer 锚 → 中止");
+        assert!(err.message.contains("request_user_input 弹窗"), "{err:?}");
+        assert!(sent3.is_empty(), "中止零按键");
+    }
+
+    /// **rollout user_note 对账夹具**（戊探C ⑤ 原件：双题各挂各 qid 的
+    /// `function_call_output`）——解析出 `user_note: ` 第二元素备注全文。
+    /// 还原动作（变异）：把解析改成只取数组首元素 → 本测试先红（取到 label 而非备注）。
+    #[test]
+    fn e5_codex_user_note_reconciliation_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/e-stage2/codex-rollout-user-note.txt");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // 夹具带 `# source:` 头注与 `=== ... ===` 前言行——JSON 从首个 `{` 行开始
+        let json = raw
+            .lines()
+            .skip_while(|l| !l.trim_start().starts_with('{'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let payload: serde_json::Value =
+            serde_json::from_str(&json).expect("对账夹具必须是合法 JSON");
+        let output = payload["output"].as_str().expect("output 字段");
+        let note = codex_user_note_from_output(output).expect("user_note 必须可解析");
+        assert_eq!(
+            note, "NOTE-Q2-EC5-ATTRIBUTION-BETA",
+            "取首个 user_note: 前缀元素的全文（戊探C 落账形态）"
+        );
+    }
+
+    /// **codex 多题 DigitAdvance 锁**：多题的单选题 select = 单个数字（自动推进，
+    /// 无尾随键）——数字直选档对多题形态天然成立（戊探C：数字即选即交并推进）。
+    #[test]
+    fn e5_codex_multi_question_select_single_digit() {
+        let qs = parse_questions(
+            r#"{"questions":[
+                {"header":"A","question":"a?","multiSelect":false,"options":[{"label":"x","description":""},{"label":"y","description":""}]},
+                {"header":"B","question":"b?","multiSelect":false,"options":[{"label":"p","description":""},{"label":"q","description":""}]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(qs.len(), 2);
+        assert_eq!(
+            answer_key_sequence_for("codex", AnswerAction::Select, Some(0), &qs[0]).unwrap(),
+            vec!["1"],
+            "codex 多题：单数字直选+自动推进（E5 放行后的键序形态）"
+        );
+        assert!(action_supported("codex", AnswerAction::Select, Some(0), &qs[0]).is_ok());
+    }
 
     // ==== 批次戊 E4：kimi 问答全链（真机夹具 + 阶段机脚本锁）====
 
@@ -2590,8 +2813,9 @@ mod tests {
             shape.submit_key, "enter",
             "文本之后唯一按键是回车（不带数字不带 Esc）"
         );
-        // E4：kimi 升级为支持（Other 行阶段机），不再在本拒绝清单里
-        for tool in ["codex", "opencode", "zcode", "dsh", "workbuddy", ""] {
+        // E4/E5：kimi（Other 行）与 codex（Tab 备注）升级为支持，不再在本拒绝清单里；
+        // opencode 的 own answer 形态留 E6
+        for tool in ["opencode", "zcode", "dsh", "workbuddy", ""] {
             let err =
                 free_text_shape(tool).expect_err(&format!("{tool} 的自由作答序列未定案，必须拒绝"));
             assert!(
