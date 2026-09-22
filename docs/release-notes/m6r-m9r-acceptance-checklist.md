@@ -384,3 +384,93 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | T9 | claude 打断式插队（Esc 优先序 + best-effort 降级） | `027aba5` |
 | T10 | 统一交互卡 UI（InteractiveCard 容器族 + 四套界面同设计语言） | `deaa8bf` |
 | T11 | 收口（本节 + 台账 + handover） | 本 docs 提交 |
+
+---
+
+## H. 批次丁（mfix-d）覆盖追记与新增人工项（2026-09-22）
+
+> 批次丁 = 全终端问答/审批/模式闭环，计划 `docs/superpowers/plans/2026-09-21-phase2-batch-d-plan.md`（v3，T1–T5+收口）。
+> 本批**不追记 M6R–M9R 设计文档**（沿用「实测结论不回写设计文档」惯例），落点集中在本节。
+>
+> **自动化覆盖追记**：Rust lib **1302 过 / 0 败 / 21 ignored**（批次丙基线 1113 → **+189**）；
+> bin `mam-hook-listener`（须 `--features hook-listener`）**43 过**；vitest **756 过 / 80 文件**
+> （批次丙 695 → **+61**）；preset_v2_test 34 过 5 败（**4 名恒定 + `mcp_import` 基线自抖 5/6 之间**，
+> 见 H-4 第 6 条）；dao_test 7 过；`live_probe -- --ignored` **12 过**（含 D20 三条探针）；
+> fmt ✅ / clippy `--all-targets -D warnings` **0 警告** / pnpm check ✅ / build:mobile ✅。
+
+### H-1 · 本批新增的自动化覆盖（免人工）
+
+| 覆盖点 | 位置 | 代表测试 |
+|---|---|---|
+| **codex/opencode 问答待决判红灯**（call_id 配对 / 语义红与兜底红分离 / 已答不触发 / 零误报） | `monitor/codex_parser.rs`、`monitor/app_status.rs` | `pending_request_user_input_is_waiting`、`pending_request_user_input_survives_stale_mtime`、`answered_request_user_input_is_not_waiting`、`other_tool_calls_do_not_trigger_waiting`、`pending_user_input_call_pairs_by_call_id` |
+| **opencode 待决 question part + 销卡信号**（status 门 / 已答不判红 / 非 question 工具零回归 / reader 只对已答产 tool-result） | `monitor/opencode_parser.rs`、`remote/content.rs` | `pending_question_part_detection`、`non_question_tool_part_is_not_pending`、`opencode_question_part_emits_tool_result_only_when_answered`、`opencode_question_availability_follows_part_status` |
+| **问答卡挂载放宽 + 审批误出回归锁** | `src/mobile/SessionDetail.tsx`、`remote/server.rs` | `question_pending_red_never_triggers_approve_card`、`question_pending_red_beats_approval_marker_text`、`answered_question_tail_does_not_block_approve`（真机状态矩阵：processing/thinking 挂载、idle 挂载、finished 不挂） |
+| **kimi 计划正文卡 + 审批卡**（`interaction.request` 三形态 / 只认 plan_review / 映射表空键位 / 无键不出手） | `remote/content.rs`、`inject/approve.rs` | `kimi_plan_review_yields_plan_and_file_cards`、`kimi_non_plan_review_interactions_yield_nothing`、`kimi_default_entry_has_no_keys_and_no_markers`、`kimi_plan_approval_card_never_emits_mapping_keys` |
+| **codex 计划待确认全链**（预期态纯函数 / 门放宽 / POST 同口径 / 正文优先 / 只放行 dialog 选项） | `remote/api.rs`、`remote/server.rs` | `plan_pending_detected_on_tail_plan`、`codex_plan_pending_opens_approve_post_gate`、`codex_plan_pending_opens_approve_gate`、`plan_from_page_prefers_body_adjacent_to_file_card`、`plan_pending_post_accepts_dialog_options_only` |
+| **跨语言共享夹具锁**（计划预期态判据，Rust 与 vitest 读同一份 JSON） | `tests/fixtures/plan_pending_cases.json` | `plan_pending_cross_language_fixture_cases` + 前端 N2 describe |
+| **K10 提交阶段机闭环**（走位复核 / 进 Review 才发确认键 / 确认键抄屏上编号 / 各段零投递中止 / 投递失败与形态中止分类） | `inject/question.rs`、`remote/server.rs` | `submit_stage_walks_down_until_submit_row_focused`、`submit_stage_aborts_without_digit_when_review_screen_absent`、`submit_stage_confirm_key_comes_from_screen_number_not_hardcoded`、`question_submit_stage_machine_delivery_failure_stops_and_audits_failed` |
+| **卡内自由文本（仅 claude）+ 裁3 文本通道锁** | `inject/question.rs`、`QuestionCard.tsx` | `free_text_stage_sends_digit_then_text_then_enter`、`free_text_user_digits_never_reach_key_channel`、`free_text_supported_only_for_claude`、`question_free_text_refused_on_multi_select_question` |
+| **签名后置 + stamp 跨消息假命中修复**（共享 ≥24 字符尾段的真机形态夹具 + 可执行自检） | `inject/normalize.rs`、`inject/confirm.rs` | `stamp_never_false_hits_across_same_device_messages`、`compose_suffixes_and_normalizes`、`slash_messages_are_bare`、`strips_trailing_signature_only_when_well_formed` |
+| **对话框在场=注入红线**（单点原语 / 模式切换两路守卫 / 零注入零审计 / 非 Windows 放行+如实标注） | `inject/dialog.rs`、`remote/api.rs` | `presence_blocks_on_three_real_dialogs`、`mode_switch_key_path_blocked_when_dialog_present`、`mode_switch_slash_path_blocked_when_dialog_present`、`mode_switch_proceeds_when_dialog_absent` |
+| **权限菜单关键词定位 + 闭环导航 + Full Access 第三段**（真机原文夹具 / 编号非判据 / 干扰行两闸 / 每步位移复核 / 成功回执核验） | `inject/mode.rs`、`remote/api.rs` | `locate_codex_menu_items_from_real_screen`、`locate_kimi_menu_items_from_real_screen`、`numbering_is_not_a_criterion`、`closed_loop_aborts_when_one_step_jumps_two_rows`、`stage_flow_full_access_three_stages`、`permission_receipt_requires_anchor_and_target_label` |
+| **D20 宪法条款落地**（模式回读动态轮询 / 三态区分 / 命中即停 / 常量单一事实源） | `inject/mode.rs`、`inject/timing.rs` | `readback_poll_covers_observation_one_stale_frame`、`readback_poll_stops_on_first_hit_without_sleeping`、`readback_poll_distinguishes_mismatch_from_unverifiable_at_window_end`、`timing_constants_are_pinned`、`chunk_constants_have_one_definition` |
+
+### H-2 · 本批新增人工验收项
+
+| # | 项 | 前置 | 步骤 | 预期观察 / 判定点 |
+|---|---|---|---|---|
+| C-31 | **codex 问答待决红灯 + 问答卡**（T1） | codex 在场（需 **Plan 模式**，Default 模式系统提示抑制选择题） | 发消息显式要求用 `request_user_input` 工具提问 | ① 看板该会话**红灯**（此前恒黄）；② 详情页出**问答卡**（题干 + 选项）；③ 作答后**红灯回落**（卡消失）；④ **正常运行零误报**（已答/历史问题不出红）。**注**：`(current)` 类陈旧卡不自动刷新属已知限制（见 H-4 第 3 条） |
+| C-32 | **opencode 问答待决红灯 + 问答卡**（T1） | opencode 在场 | 发消息显式要求用 `question` 工具提问 | ① 红灯（此前恒黄）；② 问答卡出；③ 答完**卡消失**（销卡信号由 reader 补的 tool-result 承担）；④ 零误报 |
+| C-33 | **kimi 计划正文卡**（T2，§2.2 裁1） | kimi 在场 | 让 kimi 出计划（Plan 模式 / 显式要求） | 消息流出现**「计划」正文卡**（markdown 渲染，来自 wire `interaction.request.display.plan` 内联全文）+ **「计划文件」卡**（路径来自 `display.path`）。**两张都在场**（裁1「能上就都上」） |
+| C-34 | **kimi 计划审批三钮卡（`Ready to build`）**（T2） | kimi 出计划待批（终端显示 `▶ Ready to build with this plan?`） | 手机看审批卡 → 点 **Reject** | ① 卡片出（红灯 + 审批卡）；② 三钮（Approve/Reject/Revise）来自**屏读**（非映射表——kimi 映射表 options 刻意留空）；③ **点 Reject 必达**（`↓×k + Enter` 导航确认，非数字键）；④ 屏读失败时降级为「计划待确认」空选项条 + 提示（**不盲出键**）。**注**：此项限 `Ready to build` 三钮框；kimi 的 `Write this file?` 四选项框本批**未接**（见 H-4 第 4 条） |
+| C-35 | **codex 计划待确认全链**（T2） | codex 出 `<proposed_plan>`（终端停在 `Implement this plan?` 框） | ① 手机详情页看**提示条**；② 点「检查终端对话框」；③ 点某个 N 选项 | ① 提示条出现（真机状态是 **Idle**，非 waiting）；② 点检查后出 **N 选项卡**（屏读 `1. Yes, implement this plan / 2. Yes, clear context and implement / 3. No, stay in Plan mode`）；③ **点按生效**（codex 走数字直选档 `DigitDirect`，实机验证 `'1'` 关闭对话框并开工）；④ 计划全文在卡内可读；⑤ 注入用户消息后提示条**消失** |
+| C-36 | **多问题只读卡**（T2，§2.3） | codex 多问题（`Question 1/3`）任一 | 手机看问答卡 | 卡片为**只读**（题目列表 + 「请在终端完成作答」），**零注入按钮**；直调 API → 409 `multi_questions`。逐题注入**未实现**（导航序待实测，见 H-4 第 4 条） |
+| C-37 | **对话框在场时模式按钮被拒**（T3，裁9） | 任一待决对话框在场（如 kimi `Ready to build`） | 手机点模式切换（shift+tab 或斜杠两路） | ① 被**拒绝** + 中文回执「终端有待决对话框，请先处理」；② **零注入零审计**（终端上不该出现 shift+tab 效果）；③ 对话框消失后再点 → 正常切换。**注**：非 Windows / 屏读失败时回执标 `dialogChecked:false` 如实说明未检测（不假装检查过） |
+| C-38 | **composer 卡片在场分流**（T3，裁3） | ① 审批卡/计划待确认卡在场；② 问答卡在场 | 在手机输入框打字发送 | ① 审批在场 → **被拦截** + 「终端等待审批，请用卡片按钮」（**关键安全项**：此前会误触选项——kimi 误批准实锤）；② 问答在场 → placeholder 变「作为回答发送」+ 落诚实回执（**不代发**，见 H-4 第 2 条） |
+| C-39 | **移动端斜杠命令裸注入 + 审计**（T3，裁2） | 任一可注入会话 | 手机发 `/permissions`（或 `/plan`） | ① 终端出现**裸命令**（**无 `[mobile ...]` 前缀**——前缀会毁掉命令，问题 8 现场）；② 命令**生效**；③ 审计页可按 `action=slash` 查到 + **设备名可查**（终端不留痕是可接受的，审计必须留） |
+| C-40 | **签名后置 + 普通消息溯源**（T3，裁2） | 任一可注入会话 | 手机发普通消息 | ① 终端出现 `{正文} [mobile 设备名]`（**签名在末尾**，正文在前可读）；② 审计页可查设备；③ **队列预览与「修改」回填不含签名**（不剥会二次叠加） |
+| C-41 | **四家模式切换后回显当前模式**（T4，裁5/6/7） | 四家各一（codex / kimi / claude / opencode） | 各家切一档后看手机模式栏 | ① **codex/kimi**：**两组按钮**（模式组 + 权限组），各组显示当前档；② **claude/opencode**：单轴切换钮 + **当前模式回显**；③ **opencode 显示「默认」而非「Build」**（裁6）；④ **codex 无 untrusted/on-failure 可选档**（裁7）；⑤ 回读失败显示**「请人工核对」**，**不假装成功**（裁5）。**注**：codex/kimi 的**权限组**无回读源（底栏只有模式文本）→ 恒显示「请人工核对」，这是如实而非漏做 |
+| C-42 | **codex 权限两段式 + Full Access 三段式**（T4） | codex 在场 | 手机切权限档（只读/默认/完全信任） | ① 发 `/permissions` → 菜单屏读定位 → 导航确认；② 切 **1/2/3 档**：两段完成，屏上出现 `• Permissions updated to <档>`；③ 切 **Full Access**：**多一段**——弹出 `Enable full access?` 确认框 → 定位 `Yes, continue anyway` → 确认 → 出现 `Permissions updated to Full Access`；④ 手机回执 `verified` 反映**工具自证**（见到含目标档的成功回执行 → true）；⑤ 任一屏读不符 → **中止且不盲发后续键** + 具体阶段的中文原因 |
+| C-43 | **claude 多选提交一气呵成**（T5，裁4） | claude 出**多选题**（`multiSelect: true`） | ① 手机勾选若干选项；② 点「提交勾选」 | ① 勾选=仅切换（卡上本地勾选态 + 注入切换键，**不提交**）；② 点提交后**一气呵成走完三段**（走位到 Submit 行 → 进 Review 屏 → 确认），**不停在半路**；③ 卡片显示**进行中态**（不是「已发送按键」）；④ 完成后的终态回执；⑤ **不得出现误勾选/反勾选**（K9：多选里 Enter=切换勾选，实现须只在确认屏发 Enter） |
+| C-44 | **卡内自由文本作答（claude）**（T5，裁3） | claude 出**单选题**（单题卡） | 卡片内输入框打字 → 发送 | ① 序列 = 数字定位 `Type something` 行（仅移焦点）→ 文本 → 回车；② **用户输入的数字绝不被当成选项选择**（走文本通道，裁3 安全项）；③ 非 claude 工具**不渲染**输入框（渲染终端引导）；④ **多选卡也不渲染**（F6-3：多选屏的自由作答行带勾选框，判据不匹配，宁可拒绝） |
+| C-45 | **codex 计划卡 markdown 完整**（T5，问题 11） | codex 出含 `###` 小标题与列表的计划 | 手机消息流看计划卡 | ① `###` 标题有**层级字号**（不是与正文同大小）；② `-` 列表有**项目符号**（不是拍平成正文）；③ 计划卡与工具参数升格卡**都**挂排版层（本批修的就是这两处漏挂）。**依据**：真机 rollout `2026-09-21T17-38-17` 行 114（4 个 `###` + 14 行列表） |
+| C-46 | **回读不再误报（D20）** | claude 在场 | 反复切档，留意是否有「回读与预期不符」 | ① **不应再出现**「回读与预期不符」而终端实际已切的误报（本批前的高频现象：屏幕重绘未及，非切换失败）；② 若仍出现，说明终端确实切到了别的档（回执会给预期/实际两边）；③ 切换**体感不因轮询变慢**（命中即刻停止，不固定等待） |
+
+### H-3 · 本批实机取证档案（依据留痕）
+
+| 日期 | 档案 | 一句话结论 |
+|---|---|---|
+| 2026-09-22 | `research/refs/phase2-消息注入/2026-09-22-codex-kimi权限菜单与FullAccess三段式-用户实机取证.md` | **用户手工实机取证**推翻丁T4 的「权限菜单无编号」假设：codex 菜单**有编号**（`1. Read Only`…`› 2. Ask for approval (current)`…`4. Full Access`）→ 原行首匹配判据在真机**定位 0 项**、codex 权限切换完全不可用；kimi **无编号**（缩进 + `❯`，每档下跟一行描述）→ 评审提的「连续成簇+紧邻标题」**会误伤 kimi**。另实锤 **Full Access 有第三段确认框**（1/2/3 档无）；claude `/permissions` 是**色块高亮**（不可屏读定位）、**opencode 无该命令** → 两家单轴 shift+tab 获反证 |
+
+（本批另有多份依据档案在 `research/refs/phase2-消息注入/`（不入库）：`2026-09-21-审批对话框N选项屏读解析实机探测.md`（T5 用其 K10 三段式与截图）、`2026-09-21-四家模式切换shift-tab实机探测.md`（T4 底栏词表）、`2026-09-20-问卷交互跨工具矩阵.md` 等；批次丙 E-3 已列。）
+
+### H-4 · 本批自裁决与已知限制（供评审追认）
+
+1. **两个 Critical 由真机状态暴露、夹具偏差是共同根因**：T2 的后端夹具用 `Processing`、前端用 `status:"processing"`，而 codex 计划提案后真机状态是 **`Idle`** —— 同一类夹具偏差在门链两端各埋了一个 Critical（前端挂载门被 `isSummary` 吞、POST 门未随 GET 放宽）。**教训已写进派发纪律**：状态类测试的夹具状态必须来自真机实录，不得用「看起来也行」的相邻态。
+2. **T5 阶段机与 T4 权限菜单的实机时序均未对照**：阶段机判据取自 2026-09-21 截图与二进制字符串（`read_screen_window` 的产物与截图是否逐行一致未验）；三窗值与 `QUESTION_STAGE_POLL_TOTAL_MS` 均为**自裁值**（已在 `inject/timing.rs` 注明并指向 `#[ignore]` 实测项）。**D20 探针本轮已实跑**（本机 conhost：回读 `elapsed=5ms`、菜单 `7ms 定位 8 项`、bogus pid → panic），但**三窗的实测值仍需人工在窗内动作**才能读数。
+3. **问答卡/审批卡的自动刷新是有限度的**：卡片可用性靠「挂载 + 状态跃迁重拉」；**非状态跃迁的变化不会自动重拉**（如同一 waiting 内出现第二个问题）。另 opencode 的 `pending` 拍 `state.input` 为空（题目数据未就绪，空窗 5ms–4s）→ 该拍红灯已判但**卡片无内容可渲染**。两者均归 T2 收口面（重拉机制：轮询/SSE 驱动）。
+4. **本批未做的相邻面（如实登记，非缺陷）**：① **kimi 的 `Write this file?` 四选项框未接**（只做 `plan_review` 类；该框走降级提示条）——故 C-34 的三钮验收**限 `Ready to build`**；② **codex 多题导航序未实测**（`#[ignore]` 占位），多题卡只读；③ **kimi `question` 类数字可靠性未独立实测**（R1 证伪的是 `plan_review` 审批框，question 是另一渲染族；保留 `TwoPhaseSelect` + 占位 + 残余风险申报）；④ **队列放行与 `queueJump` 无对话框在场守卫**（T3 评审发现：这两条路径在会话转 Idle/Waiting 时投递，而对话框在场时状态同样可能是 Waiting → 排队消息可能被打进对话框；前端 `handleJump` 也不走在场判定）——已在 `inject/queue.rs` 模块文档登记缺口与下批收口点；⑤ **普通消息发送无后端注入时刻守卫**（任务书明确只要求控制类；权威守卫覆盖模式切换，composer 分流为第二道闸）。
+5. **审批 POST 的旁路残余面（既有契约，未改）**：`session-approve` POST 不走 detect，旁路客户端直发可用 GET 拿不到的 option id → 注入映射键。前端唯一调用点在 ApproveCard（`available=false` 时零按钮零 POST 入口），故用户可见面已关死；本批新增的「`plan_pending` 态只放行 `dialog:` 选项」进一步收窄（让 GET 的「绝不下发映射键位」成为端点级真命题）。
+6. **`preset_v2_test` 的 5 名恒定失败中，`mcp_import_and_backfill_register_rows` 基线自抖**（实测同命令连跑失败数在 5/6 之间）——故准确口径是「**4 名恒定 + 1 名自抖**」，非「5 名恒定」。**vitest 另有基线固有 flaky**（同批代码连跑 4 次失败数 0/1/2 抖且名字每次不同；`git stash` 后基线同样抖）——与本批无关，数字按跑通那次记。
+7. **本批新增宪法条款 D20**（终端交互动态轮询，用户 2026-09-22 在场批准 + 三期适用）——见 `docs/MASTER-PLAN.md` §5.(c) 第 8 条与 §3.(c) D20 行；批次丁计划文档同步 §2.9。**该条款对三期切模型等同类终端交互同样适用**。
+
+### H-5 · 批次丁交付清单（任务 × commit）
+
+| 任务 | 内容 | commit |
+|---|---|---|
+| T1 | 红灯与状态链（codex call_id 配对 / opencode status 门 / 问答卡挂载放宽 / 审批误出回归锁） | `99442b5` |
+| T1 修复 | 问答卡状态跃迁重拉 + 审批门收窄 + opencode 销卡信号 + 形态判据收窄 | `d8db990` |
+| T1 复审补丁 | 重拉重置 sent + 审批新门按工具收窄 + 已知限制入档 | `ed1a868` |
+| T2 | 缺失的卡片（kimi 审批卡与计划正文卡 / codex 计划待确认 / 多问题只读） | `1fc211d` |
+| T2 修复 | 计划待确认挂载门与 POST 门对齐真机状态 + claude 计划聚合回归 + kimi 卡正文收口 | `eba4a30` |
+| T2 复审补丁 | plan_pending 态 POST 只放行 dialog 选项 + 跨语言共享夹具锁 | `63421df` |
+| T3 | 注入守卫与签名后置（对话框在场红线 / composer 分流 / stamp 适配 / slash 审计） | `dc12f9d` |
+| T3 修复 | 跨消息假命中锁换有效夹具 + 审批侧 dialog_probe 两格 + 引用订正 | `567948d` |
+| T4 | 模式二维与回读全开（两组正交 / 四家分族回读 / Build→默认 / legacy 标） | `2b93b2f` |
+| T4 修复 | 菜单定位字符边界 panic + 菜单块簇判据 + 注释如实性 | `d1728b1` |
+| T4 收尾 | 权限菜单关键词定位（弃行首假设）+ 闭环导航 + Full Access 第三段 | `b92a658` |
+| T5 | 提交闭环与渲染（多选阶段机闭环 / 卡内自由文本 / 计划卡排版层） | `8d3d169` |
+| T5 修复 | tool-call 升格支补排版层 + 恢复中途投递失败覆盖 + 多选自由文本如实拒绝 | `9a6288b` |
+| D20 落地 | 模式回读改动态轮询 + 时序常量单一事实源 + 三窗放大 | `5afcaf1` |
+| 宪法 D20 | §5.(c) 第 8 条 + §3.(c) D20 行 + 计划 §2.9（用户在场批准） | `fa22122` |
+| T6 收口 | 本节 + 台账批次丁节 + handover 新档 | 本 docs 提交 |
