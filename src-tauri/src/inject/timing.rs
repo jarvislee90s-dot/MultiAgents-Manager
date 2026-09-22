@@ -118,6 +118,15 @@ pub const MODE_READBACK_POLL_TOTAL_MS: u64 = 1_500;
 /// 量出超窗，再按实测回填。
 pub const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 2_000;
 
+/// **审批数字直选验证窗**（批次戊 E2① DigitFirstWithVerify）：claude 计划批准框发
+/// 数字后，屏读轮询等「对话框已消失」（= 数字生效）——窗内仍在 → 导航回退。
+///
+/// **依据（自裁）**：claude 单选/批准框数字直答延迟实测 <1s（2026-09-21 K1 档案
+/// 「截图即见 UI 关闭」；用户复测 CL-3 终裁数字直选+渲染等待）。窗取 1500ms 与
+/// 三窗（[`MENU_POLL_TOTAL_MS`] 系）同量级、大于实测延迟一倍余量；步长
+/// [`POLL_STEP_MS`]。实测项：E2 DoD 的 `#[ignore]` 实机（登记未跑时窗值维持自裁）。
+pub const DIGIT_VERIFY_POLL_TOTAL_MS: u64 = 1_500;
+
 /// **插队「等回合停」**轮询窗（毫秒）：Esc 中断之后、投递正文之前，屏读轮询等
 /// claude 底栏的**忙态串消失**（判据见 `confirm::TURN_BUSY_MARKER`）——即「回合真的
 /// 停下来了」。

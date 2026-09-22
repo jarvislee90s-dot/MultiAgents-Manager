@@ -37,6 +37,58 @@ interface ApproveCardProps {
 const PLAN_CHECK_MISS_HINT =
   "未读到终端对话框选项——请再点一次「检查终端对话框」，或直接在终端处理该确认";
 
+/** 裁12 折叠阈值：计划正文超过该字符数**默认折叠**（长内容不得把 composer 顶出
+ *  首屏——卡体总高度上限由 max-h 封顶、长文再默认折叠，点开查看全文） */
+const PLAN_COLLAPSE_CHARS = 600;
+
+/** 审批卡的计划正文块（T8 聚合；两个渲染分支共用——裁12 布局契约单点）：
+ *  - **总高度上限**：容器恒 max-h 封顶（折叠 max-h-24 / 展开 max-h-64 内滚）——
+ *    任何内容量都不把 composer 顶出首屏；
+ *  - **长内容默认折叠**：content 超过 [`PLAN_COLLAPSE_CHARS`] 字符默认折叠
+ *    （max-h-24 + overflow-hidden + 渐隐提示），点「展开全文」切换到 max-h-64
+ *    内滚视图；短内容直接完整渲染（无按钮）。 */
+function PlanBody({ plan }: { plan: { content: string; isFile: boolean } }) {
+  // 展开/收起默认折叠（长文）；短文 expanded 恒 true 且不渲染按钮
+  const [expanded, setExpanded] = useState(false);
+  const long = plan.content.length > PLAN_COLLAPSE_CHARS;
+  const collapsed = long && !expanded;
+  return (
+    <div>
+      <div
+        data-testid="approve-plan"
+        data-plan-file={plan.isFile ? "true" : "false"}
+        data-collapsed={collapsed ? "true" : "false"}
+        className={`mt-2 rounded-lg border border-rose-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-rose-400/30 dark:bg-slate-900/60 dark:text-slate-200 ${
+          collapsed ? "max-h-24 overflow-hidden" : "max-h-64 overflow-y-auto"
+        }`}
+      >
+        <p className="mb-1 text-[11px] font-medium tracking-wide text-rose-700/80 uppercase dark:text-rose-400/80">
+          {plan.isFile ? "计划文件" : "计划内容"}
+        </p>
+        {plan.isFile ? (
+          <p data-testid="approve-plan-file" className="font-mono break-all">
+            {plan.content}
+          </p>
+        ) : (
+          <div className="prose-sm max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{plan.content}</ReactMarkdown>
+          </div>
+        )}
+      </div>
+      {long && (
+        <button
+          type="button"
+          data-testid="approve-plan-toggle"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-[11px] font-medium text-rose-700/80 underline dark:text-rose-400/80"
+        >
+          {expanded ? "收起计划" : "展开全文"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function ApproveCard({ session }: ApproveCardProps) {
   // 选项可用性：ready=false（加载中 / 拉取失败）→ 不渲染（available/reason 分诊在渲染侧）
   const [options, setOptions] = useState<ApproveOptionsView | null>(null);
@@ -204,26 +256,9 @@ export default function ApproveCard({ session }: ApproveCardProps) {
             终端正在等待这个计划的确认——请到终端对话框选择，或点下方按钮读取选项
           </p>
         )}
-        {/* 计划全文（T8 聚合；无计划消息 → 不渲染主体） */}
+        {/* 计划全文（T8 聚合；无计划消息 → 不渲染主体）——裁12 布局契约见 PlanBody */}
         {options.plan != null && options.plan.content.trim() !== "" && (
-          <div
-            data-testid="approve-plan"
-            data-plan-file={options.plan.isFile ? "true" : "false"}
-            className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-rose-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-rose-400/30 dark:bg-slate-900/60 dark:text-slate-200"
-          >
-            <p className="mb-1 text-[11px] font-medium tracking-wide text-rose-700/80 uppercase dark:text-rose-400/80">
-              {options.plan.isFile ? "计划文件" : "计划内容"}
-            </p>
-            {options.plan.isFile ? (
-              <p data-testid="approve-plan-file" className="font-mono break-all">
-                {options.plan.content}
-              </p>
-            ) : (
-              <div className="prose-sm max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{options.plan.content}</ReactMarkdown>
-              </div>
-            )}
-          </div>
+          <PlanBody plan={options.plan} />
         )}
       </InteractiveCard>
     );
@@ -304,26 +339,10 @@ export default function ApproveCard({ session }: ApproveCardProps) {
           消息流翻）。markdown 直出（claude/codex 的 kind="plan"）；isFile=true 时以
           路径提示呈现（全文走文件预览）。
           **kimi 恒为 null**（丁T2 复评 F3-4：任务书成文要求 kimi 审批卡不含 plan
-          正文——正文由消息流的 kind="plan" 正文卡承担）；无计划（plan null）→ 不渲染 */}
+          正文——正文由消息流的 kind="plan" 正文卡承担）；无计划（plan null）→ 不渲染。
+          裁12 布局契约见 PlanBody */}
       {options.plan != null && options.plan.content.trim() !== "" && (
-        <div
-          data-testid="approve-plan"
-          data-plan-file={options.plan.isFile ? "true" : "false"}
-          className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-rose-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-rose-400/30 dark:bg-slate-900/60 dark:text-slate-200"
-        >
-          <p className="mb-1 text-[11px] font-medium tracking-wide text-rose-700/80 uppercase dark:text-rose-400/80">
-            {options.plan.isFile ? "计划文件" : "计划内容"}
-          </p>
-          {options.plan.isFile ? (
-            <p data-testid="approve-plan-file" className="font-mono break-all">
-              {options.plan.content}
-            </p>
-          ) : (
-            <div className="prose-sm max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{options.plan.content}</ReactMarkdown>
-            </div>
-          )}
-        </div>
+        <PlanBody plan={options.plan} />
       )}
       {options.drift && (
         <p data-testid="approve-drift" className="mt-1 text-xs text-amber-700 dark:text-amber-400">

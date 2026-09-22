@@ -144,19 +144,33 @@ pub(crate) fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
 /// 簇的构造与切断规则与 [`parse_dialog_options`] **逐字同源**（空行/横线不切断，
 /// 其余非选项行切断）——两处不得各写一遍（本仓既往的「同一判据两处实现」教训）。
 pub fn parse_dialog_clusters(lines: &[String]) -> Vec<Vec<DialogOption>> {
-    let mut out: Vec<Vec<DialogOption>> = Vec::new();
+    parse_dialog_clusters_indexed(lines)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// 簇解析的**索引视图**（E2② 锚点策略的内层）：每簇附**起始行号**——「标题行之下
+/// 的第一条 N. 行」「离底栏最近」两个锚都需要簇的位置，无位置即无法下锚。
+/// 簇构造与切断规则与本模块文档一致（空行/横线不切断，其余非选项行切断）；
+/// [`parse_dialog_clusters`] 是本函数的丢索引视图（单一实现，勿在外重复）。
+fn parse_dialog_clusters_indexed(lines: &[String]) -> Vec<(usize, Vec<DialogOption>)> {
+    let mut out: Vec<(usize, Vec<DialogOption>)> = Vec::new();
     let mut cur: Vec<DialogOption> = Vec::new();
+    let mut cur_start: usize = 0;
     let mut expect: u32 = 1;
-    // 收尾当前簇（与旧实现的 `if cur.len() > best.len() { best = take(cur) } else { cur.clear() }`
-    // 的「finalize」语义一致：非空才产出）
-    fn flush(cur: &mut Vec<DialogOption>, out: &mut Vec<Vec<DialogOption>>) {
+    // 收尾当前簇（非空才产出；起点=簇首选项所在行）
+    fn flush(cur: &mut Vec<DialogOption>, start: usize, out: &mut Vec<(usize, Vec<DialogOption>)>) {
         if !cur.is_empty() {
-            out.push(std::mem::take(cur));
+            out.push((start, std::mem::take(cur)));
         }
     }
-    for line in lines {
+    for (idx, line) in lines.iter().enumerate() {
         match parse_option_line(line) {
             Some((num, label, hl)) if num == expect => {
+                if cur.is_empty() {
+                    cur_start = idx;
+                }
                 cur.push(DialogOption {
                     number: num,
                     label,
@@ -166,7 +180,8 @@ pub fn parse_dialog_clusters(lines: &[String]) -> Vec<Vec<DialogOption>> {
             }
             Some((num, label, hl)) if num == 1 => {
                 // 新的簇从 1 重新开始
-                flush(&mut cur, &mut out);
+                flush(&mut cur, cur_start, &mut out);
+                cur_start = idx;
                 cur.push(DialogOption {
                     number: num,
                     label,
@@ -176,7 +191,7 @@ pub fn parse_dialog_clusters(lines: &[String]) -> Vec<Vec<DialogOption>> {
             }
             Some(_) => {
                 // 编号不连续（跳到 3 而期待 2 等）→ 当前簇终止
-                flush(&mut cur, &mut out);
+                flush(&mut cur, cur_start, &mut out);
                 expect = 1;
             }
             None => {
@@ -184,37 +199,60 @@ pub fn parse_dialog_clusters(lines: &[String]) -> Vec<Vec<DialogOption>> {
                 // （实测 TUI 布局有分隔线）；但也不推进 expect。分隔线（空行/全横线）
                 // 不切断，其余非选项行切断（与旧实现逐字一致）。
                 if !line.trim().is_empty() && !line.trim().chars().all(|c| c == '-' || c == '─') {
-                    flush(&mut cur, &mut out);
+                    flush(&mut cur, cur_start, &mut out);
                     expect = 1;
                 }
             }
         }
     }
-    flush(&mut cur, &mut out);
+    flush(&mut cur, cur_start, &mut out);
     out
 }
 
+/// **claude 计划批准框标题行锚**（戊探E 定案 b：2/2 框中逐字节稳定、位于真选项簇
+/// 上方——「其下第一条 `N.` 行即真选项簇首」）。小写 contains 比对（容忍行首空白/
+/// 高亮符），不锚定全句（尾半句跨版本漂移面小，标题短语本身稳定）。
+pub(crate) const PLAN_TITLE_ANCHOR: &str = "claude has written up a plan";
+
 /// 从屏读行集解析对话框选项表（纯函数，可测）。
 ///
-/// 算法：逐行找**连续编号簇**（1 → 2 → 3 …，步长必须为 1）；取最长簇（**等长时取
-/// 最先出现的**）；簇内每行产一个 [`DialogOption`]。要求簇长 ≥ 2（单个 `1.` 行不是
-/// 「N 选一」对话框——可能只是正文列表，不出手）。簇长 > [`MAX_DIALOG_OPTIONS`] → None
-/// （超数字键域，降级）。
+/// # 簇选择（E2② 重定案：**弃「最长簇」**，改「标题行锚 + 离底栏最近合格簇」）
 ///
-/// 返回 None 的所有情形（调用方据此降级二元卡 + 防重警示）：无簇 / 簇长 < 2 /
-/// 簇长 > 9。
+/// 旧策略「取最长簇」在 claude 计划批准框会被**计划正文编号列表**误纳（N5：正文
+/// 3.–8. 项与真选项同屏，见 `tests/fixtures/e-stage2/claude-approve-dialog-e2.txt`
+/// ——同屏 9 个 `N.` 形态行，假 6 真 3）。戊探E 锚点定案（2/2 屏实证）：
+///
+/// 1. **标题行锚**（优先）：`claude has written up a plan` 标题之下第一条 `N.` 行
+///    所在的簇 = 真选项簇；
+/// 2. **离底栏最近合格簇**（无标题/标题失效时回退）：TUI 的**活动对话框永远渲染在
+///    可见窗底部**——屏上最后一个合格簇即真选项。
+///
+/// 两锚皆不依赖簇长度，正文假簇（编号列表被续行切断成碎片）天然落选。
+///
+/// # 合格簇与降级（红线 3，语义不变）
+///
+/// 合格 = 簇长 ≥ 2（单个 `1.` 行不是 N 选一）且 ≤ [`MAX_DIALOG_OPTIONS`]（超数字键域
+/// 降级）。无合格簇 → None（端点降级二元卡 + 防重警示）。编号严格连续（1..=len）
+/// 不变式保持。
 pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
-    // 取最长簇（等长时取最先出现的——`fold` 的 `>` 比较保持 `best` 不变，与旧实现的
-    // `if cur.len() > best.len()` 同口径）
-    let best = parse_dialog_clusters(lines)
+    let eligible: Vec<(usize, Vec<DialogOption>)> = parse_dialog_clusters_indexed(lines)
         .into_iter()
-        .fold(
-            Vec::new(),
-            |best, c| if c.len() > best.len() { c } else { best },
-        );
-    if best.len() < 2 || best.len() > MAX_DIALOG_OPTIONS {
-        return None;
-    }
+        .filter(|(_, c)| c.len() >= 2 && c.len() <= MAX_DIALOG_OPTIONS)
+        .collect();
+    // 标题行锚优先：标题之下起始的**最后一个**合格簇（若标题在屏，真选项簇必在其下
+    // ——戊探E 定案 b）；标题在所有簇之后（异常布局）→ 回退离底栏最近簇
+    let title_idx = lines
+        .iter()
+        .position(|l| l.to_lowercase().contains(PLAN_TITLE_ANCHOR));
+    let chosen = match title_idx {
+        Some(t) => eligible
+            .iter()
+            .rev()
+            .find(|(start, _)| *start > t)
+            .or_else(|| eligible.last()),
+        None => eligible.last(),
+    };
+    let best = chosen.map(|(_, c)| c)?;
     // 编号必须严格连续（1..=len）——簇的构造已保证，此处为显式不变式断言
     if best
         .iter()
@@ -223,7 +261,7 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
     {
         return None;
     }
-    Some(best)
+    Some(best.clone())
 }
 
 /// **对话框在场 = 控制类注入红线**（丁T3 §2.7，裁8/9）——判据的**单点实现**。
@@ -576,11 +614,96 @@ mod tests {
             2,
             "空行与横线是布局分隔，不切断选项簇"
         );
-        // 正文行切断：两个独立簇取更长的
+        // 正文行切断：两个独立簇取**离底栏最近**的（E2② 新口径；本例恰好也是更长的）
         let v = lines(&["1. A", "2. B", "some prose here", "1. X", "2. Y", "3. Z"]);
         let opts = parse_dialog_options(&v).unwrap();
-        assert_eq!(opts.len(), 3, "取更长的簇");
+        assert_eq!(opts.len(), 3, "取离底栏最近合格簇");
         assert_eq!(opts[0].label, "X");
+    }
+
+    // ==== E2②：N5 误纳回归（真机夹具）+ 锚点策略 ====
+
+    /// e-stage2 屏读夹具读取（confirm/queue tests 同款；单一事实源=夹具文件本身）
+    #[cfg(test)]
+    fn e_stage2_screen(name: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/e-stage2")
+            .join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
+        raw.trim_start_matches('\u{feff}')
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    /// **★ N5 误纳永久回归锁**（夹具=戊探E E-E2 真机 30 行整屏：计划正文编号项
+    /// 3.–8. 与真选项 1.–3. 同屏，同屏 9 个 `N.` 形态行）。断言：解析出**恰 3 真选项**
+    /// ——旧「最长簇」策略在正文编号连续成簇的布局下会误纳（N5 实证形态），锚点
+    /// 策略（标题行锚+离底栏最近）在真机夹具上必须稳定选中真选项。
+    #[test]
+    fn e2_misacceptance_fixture_parses_three_true_options() {
+        let e2 = e_stage2_screen("claude-approve-dialog-e2.txt");
+        let opts = parse_dialog_options(&e2).expect("误纳夹具必须解析出真选项簇");
+        assert_eq!(opts.len(), 3, "真选项恰 3 项（正文编号 3.–8. 不得误纳）");
+        assert_eq!(opts[0].number, 1);
+        assert_eq!(opts[0].label, "Yes, and use auto mode");
+        assert_eq!(opts[1].label, "Yes, manually approve edits");
+        assert_eq!(opts[2].label, "Tell Claude what to change");
+        assert!(opts[0].highlighted, "❯ 在真选项首行");
+    }
+
+    /// 干净对照（戊探E E-E1：正文编号滚出可视窗）不回归——单簇形态照常解析
+    #[test]
+    fn e1_clean_fixture_still_parses() {
+        let e1 = e_stage2_screen("claude-approve-dialog-e1.txt");
+        let opts = parse_dialog_options(&e1).expect("干净对照必须解析");
+        assert_eq!(opts.len(), 3);
+        assert_eq!(opts[2].label, "Tell Claude what to change");
+    }
+
+    /// **标题行锚判别锁**：正文假簇（连续编号 1..5，比真选项更长）在标题**上方**、
+    /// 真选项簇在标题**下方**——标题锚必须选真簇。
+    /// 还原动作（变异）：把簇选择改回「取最长」→ 本测试先红（假簇 5>3 被误选，
+    /// 正是 N5 误纳的判别形态）；把标题锚删掉只留「离底栏最近」→ 本测试仍绿
+    /// （真簇也在最底），故另需 `bottom_most_fallback_without_title` 锁回退臂本身。
+    #[test]
+    fn title_anchor_prefers_cluster_below_title() {
+        let scr = lines(&[
+            "  1. body one",
+            "  2. body two",
+            "  3. body three",
+            "  4. body four",
+            "  5. body five",
+            " Claude has written up a plan and is ready to execute. Would you like to proceed?",
+            "",
+            " ❯ 1. Yes, and use auto mode",
+            "   2. Yes, manually approve edits",
+            "   3. Tell Claude what to change",
+        ]);
+        let opts = parse_dialog_options(&scr).expect("标题锚必须定位到真选项簇");
+        assert_eq!(opts.len(), 3, "真选项 3 项（更长的正文假簇 5 项不得误选）");
+        assert_eq!(opts[0].label, "Yes, and use auto mode");
+    }
+
+    /// **离底栏最近**回退臂（无标题形态）：底部真选项簇 vs 上方更长的假簇——选底部。
+    /// 还原动作（变异）：改回「取最长」→ 先红。
+    #[test]
+    fn bottom_most_fallback_without_title() {
+        let scr = lines(&[
+            "  1. body one",
+            "  2. body two",
+            "  3. body three",
+            "  4. body four",
+            "  ────────",
+            "  Some unrelated pane footer",
+            " ❯ 1. Yes",
+            "   2. No",
+        ]);
+        let opts = parse_dialog_options(&scr).expect("底部对话框必须被选中");
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].label, "Yes");
     }
 
     // ---- R1：导航确认序列（↓×k + Enter）----

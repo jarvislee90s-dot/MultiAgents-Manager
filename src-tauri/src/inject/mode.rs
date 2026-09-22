@@ -3323,7 +3323,10 @@ mod tests {
         }
 
         // ③ **反向形态**（本判据的存在理由）：菜单是**连续 4 项簇**（不带折行的版本）
-        // → 「取最长簇」会选中菜单、跳过确认框；逐簇找仍然命中确认框
+        // → 逐簇找仍然命中确认框。**E2② 起 `parse_dialog_options` 也改「离底栏最近
+        // 合格簇」**——overlay 形态下它同样选中确认框（2 项，活动对话框恒在底部），
+        // 与旧「取最长」（选菜单 4 项）分道；`parse_dialog_clusters` 仍是逐簇关键词
+        // 扫描与簇位置的内层视图（菜单路径消费的是它，不是 parse_dialog_options）
         let mut contiguous = lines(&[
             "  1. Read Only",
             "  2. Ask for approval (current)",
@@ -3337,13 +3340,17 @@ mod tests {
                 .map(|c| c.len())
                 .collect::<Vec<_>>(),
             vec![4, 2],
-            "簇长 [4, 2]：取最长 = 菜单（这就是不能用 parse_dialog_options 的形态）"
+            "簇长 [4, 2]：逐簇关键词扫描的输入形态"
         );
-        let longest = crate::inject::dialog::parse_dialog_options(&contiguous).expect("有簇");
-        assert_eq!(longest.len(), 4);
+        let bottom_most = crate::inject::dialog::parse_dialog_options(&contiguous).expect("有簇");
+        assert_eq!(
+            bottom_most.len(),
+            2,
+            "E2② 离底栏最近：overlay 下选中确认框（活动对话框恒在底部）"
+        );
         assert!(
-            !longest.iter().any(|o| o.label.contains("continue")),
-            "最长簇（菜单）里没有肯定项 → 取最长会跳过确认框"
+            bottom_most.iter().any(|o| o.label.contains("continue")),
+            "底部簇就是确认框（含肯定项）"
         );
         match plan.probe(&contiguous) {
             PollStep::Ready((items, target)) => {

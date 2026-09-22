@@ -480,3 +480,43 @@ describe("ApproveCard：F3-4 kimi 审批卡不带 plan 正文", () => {
     expect((await screen.findByTestId("approve-plan")).textContent).toContain("计划正文");
   });
 });
+
+// ==== 批次戊 E2③：裁12 布局契约（卡体高度上限 + 长内容默认折叠 + 点开）====
+describe("ApproveCard：裁12 计划正文折叠", () => {
+  /** 构造超过折叠阈值的计划正文（阈值 600 字符，见组件 PLAN_COLLAPSE_CHARS） */
+  const longPlan = "# 长计划\n\n" + "正文段落，用于撑破折叠阈值。".repeat(60);
+
+  it("长内容默认折叠：data-collapsed=true + 渲染「展开全文」按钮", async () => {
+    installFetch();
+    routes.options = approveOptions({ plan: { content: longPlan, isFile: false } });
+    render(<ApproveCard session={{ id: "sess-e2-fold" }} />);
+    const body = await screen.findByTestId("approve-plan");
+    expect(body.getAttribute("data-collapsed")).toBe("true");
+    expect(body.className).toContain("max-h-24");
+    const toggle = screen.getByTestId("approve-plan-toggle");
+    expect(toggle.textContent).toBe("展开全文");
+  });
+
+  it("点开切换：展开后 data-collapsed=false + max-h-64 内滚 + 按钮变「收起计划」", async () => {
+    installFetch();
+    routes.options = approveOptions({ plan: { content: longPlan, isFile: false } });
+    render(<ApproveCard session={{ id: "sess-e2-open" }} />);
+    await screen.findByTestId("approve-plan");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("approve-plan-toggle"));
+    });
+    const body = screen.getByTestId("approve-plan");
+    expect(body.getAttribute("data-collapsed")).toBe("false");
+    expect(body.className).toContain("max-h-64");
+    expect(screen.getByTestId("approve-plan-toggle").textContent).toBe("收起计划");
+  });
+
+  it("短内容不折叠：无按钮、data-collapsed=false（完整渲染）", async () => {
+    installFetch();
+    routes.options = approveOptions({ plan: { content: "# 短计划\n\n一两行。", isFile: false } });
+    render(<ApproveCard session={{ id: "sess-e2-short" }} />);
+    const body = await screen.findByTestId("approve-plan");
+    expect(body.getAttribute("data-collapsed")).toBe("false");
+    expect(screen.queryByTestId("approve-plan-toggle")).toBeNull();
+  });
+});

@@ -1500,25 +1500,34 @@ pub async fn session_attachment(
 /// 复验走项目技能 `win-console-inject-probe`（单工具规格定案表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApproveDialogKeys {
-    /// 数字键即选即交（claude AUQ / codex 计划批准）——实机验证可靠
+    /// 数字键即选即交（codex 计划批准）——实机验证可靠
     DigitDirect,
-    /// 导航确认：`↓×k + Enter`（claude 计划批准 / kimi 计划批准类）——数字无效或
-    /// 不可依赖，必须按解析到的当前高亮位算步进
+    /// **数字优先+屏读验证+导航回退**（批次戊 E2①，用户终裁 CL-3：claude 计划批准框
+    /// 数字**直接选中**——丁复审/戊探E 的「数字无效 ×5」系**注入早于选项渲染**的
+    /// 假阴性）。序列：注入前屏读确认选项簇已渲染（未就绪在
+    /// [`crate::inject::timing::MENU_POLL_TOTAL_MS`] 窗内轮询——裁18 通用规则）→
+    /// 发数字 → 屏读验证「对话框已消失」（[`crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS`]
+    /// 窗）→ 未生效走导航回退（既有 [`Self::NavigateConfirm`] 序列）。
+    DigitFirstWithVerify,
+    /// 导航确认：`↓×k + Enter`（kimi 计划批准类）——数字不可依赖（'2'+Enter 误批准
+    /// 实证，未被推翻），必须按解析到的当前高亮位算步进。**kimi 恒定本档，数字禁令
+    /// 是永久性安全锁（E2 加锁）**。
     NavigateConfirm,
 }
 
-/// 会话工具 → 审批对话框键序档（R1-2）。
+/// 会话工具 → 审批对话框键序档（R1-2 定档；E2① claude 改数字优先双路径）。
 ///
-/// **收窄口径**：只有**已实机证明数字不可靠**的工具才走导航（claude/kimi）；codex
-/// 的数字键本轮实测有效（`'1'` 关了 `Implement this plan?` 并开工），维持数字直选。
-/// 未收录工具保守走 [`ApproveDialogKeys::NavigateConfirm`]？**不**——未知工具本就
-/// 没有映射表（`no_mapping` 404），到不了这里；此处只覆盖有映射的两家 + kimi。
+/// **收窄口径**：codex 数字直选（实测有效）；claude 数字优先+验证回退（用户终裁，
+/// 渲染等待规则消除假阴性）；kimi 导航确认（数字禁令）。未收录工具保守走
+/// [`ApproveDialogKeys::NavigateConfirm`]？**不**——未知工具本就没有映射表
+/// （`no_mapping` 404），到不了这里；此处只覆盖有映射的两家 + kimi。
 fn approve_dialog_keys(tool: &str) -> ApproveDialogKeys {
     match tool {
-        // codex：本轮实测数字有效（Implement this plan → '1' 提交并开工）
+        // claude：数字直接选中（用户终裁）+ 渲染等待 + 屏读验证 + 导航回退
+        "claude" => ApproveDialogKeys::DigitFirstWithVerify,
+        // codex：实测数字有效（Implement this plan → '1' 提交并开工）
         "codex" => ApproveDialogKeys::DigitDirect,
-        // claude / kimi：计划批准类对话框数字无效或不可依赖 → 导航确认
-        // （注意：claude 的 AUQ 是**问答**路径，不走 approve 端点，故此处不影响 K1 语义）
+        // kimi：数字禁令（'2'+Enter 误批准实证）→ 导航确认（E2 锁：不得改数字档）
         _ => ApproveDialogKeys::NavigateConfirm,
     }
 }
@@ -1742,6 +1751,33 @@ fn read_dialog_options(
         log::debug!("T5 屏读无对话框选项（pid={}）→ 降级二元卡", session.pid);
     }
     opts
+}
+
+/// **渲染等待版**的对话框屏读（E2①，裁18 通用规则「注入前屏读确认选项簇已渲染」）：
+/// 单次屏读可能撞上重绘/未渲染（戊探E 定案：数字「无效」×5 的根因是注入早于渲染的
+/// 假阴性）——在 [`crate::inject::timing::MENU_POLL_TOTAL_MS`] 窗内按
+/// [`crate::inject::timing::POLL_STEP_MS`] 轮询，首个 `Some` 即返回（D20(a) 命中即停）；
+/// 窗尽仍 `None` → `None`（照旧降级，不盲发数字）。
+///
+/// **仅 claude 数字路径消费**（渲染等待对数字档是正确性前提）；导航档不需要（不依赖
+/// 渲染时序），且端点对已知失败形态不该白等一窗——故不替换 [`read_dialog_options`]
+/// 的其他调用点。
+fn read_dialog_options_render_wait(
+    st: &Arc<RemoteState>,
+    session: &crate::session::Session,
+) -> Option<Vec<crate::inject::dialog::DialogOption>> {
+    let rounds = crate::inject::timing::poll_rounds(crate::inject::timing::MENU_POLL_TOTAL_MS);
+    for i in 0..rounds {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::timing::POLL_STEP_MS,
+            ));
+        }
+        if let Some(opts) = read_dialog_options(st, session) {
+            return Some(opts);
+        }
+    }
+    None
 }
 
 /// 审批选项扫描（同步，spawn_blocking 内调用）：会话快照（数据同源，与看板同一份）→
@@ -2391,8 +2427,23 @@ pub async fn session_approve(
         if let Some(n_str) = probe_opt.strip_prefix("dialog:") {
             let n: u32 = n_str.parse().map_err(|_| "no_mapping")?;
             // **现场重解析**（防 GET→POST 之间对话框变化导致注入陈旧键；同时导航
-            // 需要**当前高亮位**——那是此刻屏幕上的状态，不能用 GET 时的快照）
-            let opts = read_dialog_options(&probe_st, &session).ok_or("no_mapping")?;
+            // 需要**当前高亮位**——那是此刻屏幕上的状态，不能用 GET 时的快照）。
+            // E2① 渲染等待（裁18，仅 claude 数字路径）：数字档的假阴性根因是「注入
+            // 早于选项渲染」——claude 的重解析在 MENU_POLL_TOTAL_MS 窗内轮询，簇
+            // 未渲染不注入；codex/kimi 维持单次读（导航档不依赖渲染时序，且避免
+            // 端点对已知失败形态白等一窗）
+            let digit_first = matches!(
+                approve_dialog_keys(&tool),
+                ApproveDialogKeys::DigitFirstWithVerify
+            );
+            // E2① 验证信号：数字档 → Some(n)（投递后屏读验证 + 导航回退）；其余档 None
+            let digit_verify = if digit_first { Some(n) } else { None };
+            let opts = if digit_first {
+                read_dialog_options_render_wait(&probe_st, &session)
+            } else {
+                read_dialog_options(&probe_st, &session)
+            }
+            .ok_or("no_mapping")?;
             if !opts.iter().any(|o| o.number == n) {
                 return Err("no_mapping");
             }
@@ -2400,6 +2451,8 @@ pub async fn session_approve(
             // 数字键无效或不可依赖（可能误批准）→ 走导航确认；codex 数字有效 → 直选
             let keys = match approve_dialog_keys(&tool) {
                 ApproveDialogKeys::DigitDirect => vec![n.to_string()],
+                // E2① 数字优先：首段发数字（生效与否由投递段屏读验证 + 导航回退）
+                ApproveDialogKeys::DigitFirstWithVerify => vec![n.to_string()],
                 ApproveDialogKeys::NavigateConfirm => {
                     crate::inject::dialog::navigation_sequence(&opts, n).map_err(|e| {
                         log::debug!("R1 导航序列构造失败（{tool}）: {e}");
@@ -2418,6 +2471,7 @@ pub async fn session_approve(
                     key: keys.join(","),
                 },
                 keys,
+                digit_verify,
             ));
         }
         let Some(option) =
@@ -2450,7 +2504,7 @@ pub async fn session_approve(
             return Err("no_mapping");
         }
         let keys = vec![option.key.clone()];
-        Ok((session, tool, option, keys))
+        Ok((session, tool, option, keys, None))
     })
     .await
     {
@@ -2465,7 +2519,7 @@ pub async fn session_approve(
                 .into_response();
         }
     };
-    let (session, tool, option, keys) = match lookup {
+    let (session, tool, option, keys, digit_verify) = match lookup {
         Ok(v) => v,
         Err(code) => {
             let status = if code == "not_waiting" {
@@ -2489,6 +2543,9 @@ pub async fn session_approve(
     let injector = st.injector.clone();
     let pid = session.pid;
     let approve_sid = sid.clone();
+    // E2①：数字优先验证信号（Some(n) = claude 数字档——发数字后屏读验证，未生效
+    // 导航回退；来源=lookup 的 dialog 分支，非数字档恒 None）
+    let digit_verify: Option<u32> = digit_verify;
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，F1
     // 断连双投修复）：handler 断连（弱网/隧道掐断慢投递）不再提前释放守卫——detached
     // 投递全程占位，新触发取不到名额即让位。忙 → None 哨兵：让位不投递亦不落审计
@@ -2508,6 +2565,62 @@ pub async fn session_approve(
             std::thread::sleep(std::time::Duration::from_millis(
                 crate::inject::families::SUBMIT_DELAY_MS,
             ));
+        }
+        // ===== E2① 屏读验证 + 导航回退（仅 claude 数字档，且首段投递成功）=====
+        if let (Some(n), true) = (digit_verify, result.is_ok()) {
+            // 数字生效判据 = **对话框消失**：DIGIT_VERIFY_POLL_TOTAL_MS 窗内轮询
+            // （D20 形态——等判据本身，非固定睡一拍）；窗内消失即完成。
+            let rounds = crate::inject::timing::poll_rounds(
+                crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+            );
+            let mut gone = false;
+            let mut last_opts: Option<Vec<crate::inject::dialog::DialogOption>> = None;
+            for _ in 0..rounds {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::timing::POLL_STEP_MS,
+                ));
+                match crate::inject::dialog::probe_screen_dialog(pid) {
+                    // 对话框已消失 = 数字已生效（提交完成）
+                    None => {
+                        gone = true;
+                        break;
+                    }
+                    // 仍在场：留作导航回退的起点（最后一份选项表含当前高亮位）
+                    Some(opts) => last_opts = Some(opts),
+                }
+            }
+            if !gone {
+                // 数字未生效（渲染假阴性等）→ **导航回退**（既有 NavigateConfirm）：
+                // 从**最新屏读**算循环步进（不猜起点——高亮不可解析则回退也放弃，
+                // 与导航档同一保守面）；回退后不再二次验证（一次回退是计划口径，
+                // 连环验证会拖长投递链）
+                if let Some(opts) = last_opts {
+                    match crate::inject::dialog::navigation_sequence(&opts, n) {
+                        Ok(seq) => {
+                            log::info!(
+                                "E2 数字直选未生效（对话框仍在），导航回退 ↓×{}+Enter（pid={pid}）",
+                                seq.len().saturating_sub(1)
+                            );
+                            for key in &seq {
+                                if let Err(e) =
+                                    injector.locate_and_send_key_spec(pid, key, &spec)
+                                {
+                                    result = Err(e);
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    crate::inject::families::SUBMIT_DELAY_MS,
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("E2 导航回退构造失败（{e}）——数字与导航均未出手，请人工核对终端（pid={pid}）");
+                        }
+                    }
+                } else {
+                    log::warn!("E2 验证窗内屏读恒失败，无法回退——请人工核对终端（pid={pid}）");
+                }
+            }
         }
         Some(result)
     })
@@ -4769,6 +4882,30 @@ fn mode_verify_receipt(
 mod tests {
     use super::*;
     use crate::remote::content::SessionMessage;
+
+    /// **E2① 键序档锁**（用户终裁 CL-3 + kimi 数字禁令）：
+    /// claude=数字优先+验证回退（渲染等待消除假阴性）；codex=数字直选；
+    /// **kimi 恒导航确认**（'2'+Enter 误批准实证未被推翻——数字档是永久禁令）。
+    /// 还原动作（变异）：把 kimi 格改成任何数字档 → 本测试先红（安全锁）。
+    #[test]
+    fn approve_dialog_keys_locks_e2() {
+        assert_eq!(
+            approve_dialog_keys("claude"),
+            ApproveDialogKeys::DigitFirstWithVerify,
+            "claude 数字直接选中（用户终裁）+渲染等待+验证回退"
+        );
+        assert_eq!(approve_dialog_keys("codex"), ApproveDialogKeys::DigitDirect);
+        assert_eq!(
+            approve_dialog_keys("kimi"),
+            ApproveDialogKeys::NavigateConfirm,
+            "kimi 计划批准框数字禁令（'2'+Enter 误批准实证）——永久导航档"
+        );
+        assert_eq!(
+            approve_dialog_keys("opencode"),
+            ApproveDialogKeys::NavigateConfirm,
+            "未取证工具保守导航（到不了此路，纵深防御）"
+        );
+    }
 
     /// 纯核夹具：消息构造（kind 是唯一参与判据的字段）
     fn msg(kind: &str) -> SessionMessage {
