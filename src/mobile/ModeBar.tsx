@@ -149,7 +149,6 @@ export default function ModeBar({ session }: { session: { id: string } }) {
           group={g}
           showGroupLabel={groups.length > 1}
           busy={busy || questionPending}
-          questionPending={questionPending}
           onSwitch={(target) => handleSwitch(target, g.id)}
         />
       ))}
@@ -223,13 +222,12 @@ function ModeGroupRow({
   group,
   showGroupLabel,
   busy,
-  questionPending,
   onSwitch,
 }: {
   group: ModeGroupView;
   showGroupLabel: boolean;
+  /** E3④：busy 含问答待决置灰（父层合并——待决时全组按钮禁用） */
   busy: boolean;
-  questionPending: boolean;
   onSwitch: (target: MamMode) => void;
 }) {
   const currentText = group.currentLabel ?? "模式未知";
