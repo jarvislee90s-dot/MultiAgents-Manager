@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探B-kimi问答键序定案.md §2.3 M1（kimi 多选弹窗：[ ] 复选+Other+footer toggle，screen-ki1-m1-dialog.txt 原件）
+﻿  ⠹ working… · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"
+ ● You chose atlantis — not one of the four
+  ⠼ working… · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"
+ ● You chose atlantis — not one of the four listed options, but
+ ● You chose atlantis — not one of the four listed options, but noted all the same. (Stamp E-B8)
+
+
+ ✨ Ask me one question via AskUserQuestion with multi_select=true (multiple answers allowed): Which techs do you use?
+    Options: alpha, bravo, charlie, delta. Stamp E-M1. After I submit, just say done.
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  question
+
+   Techs    Submit
+
+  ? Which techs do you use?
+
+   [ ] alpha
+         Tech alpha
+   [ ] bravo
+         Tech bravo
+   [ ] charlie
+         Tech charlie
+   [ ] delta
+         Tech delta
+   [ ] Other
+
+   ↑↓ select  1-5 / ↵ toggle  ←/→/tab switch  esc cancel
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ GLM-5.3-Flash thinking: high  C:\Users\bunny\AppData\Local\Temp\mam-probe-eb-20260922-215419\proj-ki1
+                                                                                               context: 3% (28.6k/977k)
