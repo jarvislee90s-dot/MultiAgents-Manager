@@ -5925,9 +5925,10 @@ mod tests {
         (state, inner, script)
     }
 
-    /// **丁T5 端到端⑨（自由作答的工具面）→ 批次戊 E4/E5 更新**：kimi（Other 行）
-    /// 与 codex（Tab 备注）已升格走各自阶段机；仍未定案的 opencode → 409
-    /// `tool_readonly`（不进阶段机、零投递；E6 升格 own answer 形态时再改）。
+    /// **丁T5 端到端⑨（自由作答的工具面）→ 批次戊 E4/E5/E6 更新**：kimi（Other 行）
+    /// /codex（Tab 备注）/opencode（own answer）均已升格走各自阶段机。本用例改钉
+    /// opencode freeText 的**阶段机中止**：喂无 opencode 锚的屏（claude free_row 形态）
+    /// → 第 1 段定位不到 own answer 行 → 200 failed{aborted:true}（零投递）。
     #[tokio::test]
     async fn question_free_text_refused_for_unverified_tools() {
         for (tool, tool_id, sid, pid) in [(
@@ -5951,19 +5952,15 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(
-                r.status(),
-                409,
-                "{tool_id} 自由作答未实测 → 409（不假装能发）"
-            );
+            assert_eq!(r.status(), 200, "opencode freeText 走阶段机（非 409）");
             let body = body_string(r).await;
             assert!(
-                body.contains("tool_readonly"),
-                "{tool_id} 的拒绝码须可程序分诊：{body}"
+                body.contains("aborted"),
+                "无 own answer 锚 → 阶段机中止：{body}"
             );
             assert!(
                 inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
-                "{tool_id} 拒绝路径零投递"
+                "第 1 段定位即中止 → 零投递"
             );
         }
     }

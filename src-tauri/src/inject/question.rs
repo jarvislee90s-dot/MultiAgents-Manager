@@ -326,18 +326,36 @@ pub fn answer_key_sequence_for(
         QuestionKeyProfile::SingleDigitSubmit => match action {
             // 矩阵 §2.2：数字单键即选即交（与 claude 同形）；多选 toggle 同键（若
             // 该工具支持多选，勾选语义未测——故 multi_select 的 toggle 也拒）
+            // **批次戊 E6（戊探A 定案）**：opencode 多选题里数字=**toggle**（与单选
+            // 「即交」语义不同）；单次切换不提交；codex 多选未取证维持拒绝
             AnswerAction::Select => {
                 if q.multi_select {
-                    return Err("opencode 多选未实测，不出键".to_string());
+                    if tool == "opencode" {
+                        return answer_key_sequence(action, index, q);
+                    }
+                    return Err("codex 多选未实测，不出键".to_string());
                 }
                 answer_key_sequence(action, index, q)
             }
-            AnswerAction::Toggle => Err("opencode 多选未实测，不出键".to_string()),
-            // 提交（多选三段式）未测
-            AnswerAction::Submit => Err("opencode 多选提交未实测，不出键".to_string()),
-            // esc dismiss 有 footer 提示但**未实机验证**（矩阵 §5 未测面）→ 不出键
+            // E6：多选切勾 = 单次数字（char/VK 两形态皆 toggle ×3；空格两形态均无效
+            // ——空格键永不入序）
+            AnswerAction::Toggle if tool == "opencode" => {
+                answer_key_sequence(AnswerAction::Select, index, q)
+            }
+            AnswerAction::Toggle => Err("codex 多选未实测，不出键".to_string()),
+            // opencode 提交走阶段机（OpencodeSubmit：tab → Confirm 页 → enter）
+            AnswerAction::Submit if tool == "opencode" => {
+                Err("opencode 多选提交必须经阶段机（run_opencode_submit_stages）".to_string())
+            }
+            AnswerAction::Submit => Err("codex 多选提交未实测，不出键".to_string()),
+            // E6：esc = 单次 dismiss（state.status=error + dismissed 落账，戊探A
+            // E-A4）——与其他家「esc=中断回合」不同构
+            AnswerAction::Cancel if tool == "opencode" => Ok(vec!["esc".to_string()]),
             AnswerAction::Cancel => Err("opencode 取消未实测，不出键".to_string()),
-            // 自由作答序列未定案（§2.4 列的是 `own answer → 文本 → Enter`，未实机）→ 拒
+            // opencode 自由作答走阶段机（own answer 开行守卫，E6）
+            AnswerAction::FreeText if tool == "opencode" => {
+                Err("opencode 自由作答必须经阶段机（run_opencode_own_answer_stages）".to_string())
+            }
             AnswerAction::FreeText => Err("opencode 自由作答未实测，不出键".to_string()),
         },
         QuestionKeyProfile::TwoPhaseSelect => match action {
@@ -755,6 +773,235 @@ pub fn codex_user_note_from_output(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ============================================================
+// 批次戊 E6：opencode 多题/多选（N4；戊探A 全链定案）
+// 键序 = tab 前向切页（题目页↔Confirm 页）/enter 或数字=toggle（空格禁用）
+// /Confirm 页 enter 一次提交；own answer=enter 开输入行→打字→enter（裸打字守卫）
+// ============================================================
+
+/// opencode **Confirm 页锚**（戊探A 原件：footer `⇆ tab enter submit esc dismiss`——
+/// 「enter submit」为 Confirm 页专属词形，题目页是 `enter toggle`）。
+pub const OPENCODE_CONFIRM_FOOTER: &str = "enter submit";
+/// opencode **提交完成锚**（提交后 transcript 摘要段 `# Questions`，戊探A E-A1 原件）。
+pub const OPENCODE_ANSWERED_ANCHOR: &str = "# questions";
+/// opencode 自由作答行标签（`Type your own answer`；开启输入行后行下新增**无编号
+/// 占位行**——「输入行已开启」的屏读判据）。
+pub const OPENCODE_OWN_ANSWER_LABEL: &str = "type your own answer";
+
+/// opencode Confirm 页在场判定（footer 锚）
+pub fn opencode_confirm_present(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(OPENCODE_CONFIRM_FOOTER))
+}
+
+/// opencode 提交完成在场判定
+pub fn opencode_answered_present(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(OPENCODE_ANSWERED_ANCHOR))
+}
+
+/// opencode **own answer 输入行已开启**判定（裸打字守卫的判据面）：开行后行下新增
+/// 一条**无编号**的 `Type your own answer` 占位行（戊探A E-A2：`4. Type your own
+/// answer` 之下出现 `   Type your own answer`）——「带编号的行」是选项本身，
+/// 「无编号的行」才是已开启的输入行。
+pub fn opencode_own_answer_input_open(lines: &[String]) -> bool {
+    lines.iter().any(|l| {
+        // 剥掉框线（opencode 弹窗的 ┃ 边框）、引导符与空白后**以标签开头** = 占位行；
+        // 选项行（`5. …` / `[ ] …`）虽含同串但开头是编号/复选框 → 排除
+        let t = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
+            .trim_start();
+        let lower = t.to_lowercase();
+        lower.starts_with(OPENCODE_OWN_ANSWER_LABEL)
+            && !lower.contains("[ ]")
+            && crate::inject::dialog::parse_option_line(t).is_none()
+    })
+}
+
+/// opencode **多选提交阶段机**：tab 切页 → Confirm 页 → enter 一次提交全部答案
+/// （戊探A ④：Confirm 页 enter 提交 ×3 全通）。未答题的 Confirm 页显示
+/// `(not answered)`（戊探A E-A2 顺带实证）——是否可提交未测，阶段机不判。
+pub fn run_opencode_submit_stages<P, Q, T>(
+    mut poll_confirm: P,
+    mut poll_receipt: Q,
+    terminal: &mut T,
+) -> Result<SubmitOutcome, StageAbort>
+where
+    P: FnMut() -> Result<Option<Vec<String>>, String>,
+    Q: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: MenuTerminal,
+{
+    let mut sent_keys: Vec<String> = Vec::new();
+    // 1. tab 切页（题目页 → Confirm 页；前向循环，戊探A ①）
+    terminal
+        .send("tab")
+        .map_err(|e| StageAbort::delivery(format!("tab 投递失败（{e}）")))?;
+    sent_keys.push("tab".to_string());
+    terminal.settle();
+    // 2. Confirm 页（未见 → 中止，不发提交键）
+    let confirm = poll_confirm().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(format!(
+            "tab 后未出现 Confirm 页（未见「{OPENCODE_CONFIRM_FOOTER}」footer）——已中止，未发提交键；请人工核对终端"
+        ))
+    })?;
+    if !opencode_confirm_present(&confirm) {
+        return Err(StageAbort::screen(
+            "Confirm 页形态不符——已中止，未发提交键；请人工核对终端",
+        ));
+    }
+    // 3. enter 提交（Confirm 页唯一回车点）
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    // 4. 终态（未见不是失败）
+    let receipt_seen = match poll_receipt() {
+        Ok(Some(lines)) => Some(opencode_answered_present(&lines)),
+        Ok(None) => Some(false),
+        Err(_) => None,
+    };
+    Ok(SubmitOutcome {
+        sent_keys,
+        down_steps: 0,
+        review_confirmed: true,
+        receipt_seen,
+    })
+}
+
+/// opencode **own answer 自由作答阶段机**（裸打字守卫——计划 E6② 判据核心）：
+/// ↓ 定位（按屏上行序，从**首行**起算——弹窗打开时高亮在首选项，戊探A E-A2）→
+/// enter 开输入行 → **屏读确认输入行已开启**（[`opencode_own_answer_input_open`]，
+/// 未开启绝不发文本——裸打字会被当导航/勾选指令：'l' 切页、'2' 勾选，戊探A §4
+/// 意外事件归因）→ 打字（字符通道）→ enter 提交。
+///
+/// **位置假设的边界（如实申报）**：opencode 高亮在字符层不可见（属性级 0x0003，
+/// MAM 屏读不携带）→ 无法闭环验证当前高亮位。本阶段机只对「弹窗刚打开、未做过
+/// 任何选择」的鲜态安全（高亮=首行）；若用户已在终端手动移动过高亮，↓×(n-1) 会
+/// 停在错误的行——前置判据无法消除该风险，失败模式是「答错行」而非「卡死」，
+/// 终态锚核验如实回执，残余风险登记台账。
+pub fn run_opencode_own_answer_stages<Q, T>(
+    text: &str,
+    mut poll_receipt: Q,
+    terminal: &mut T,
+) -> Result<FreeTextOutcome, StageAbort>
+where
+    Q: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: FreeTextTerminal,
+{
+    if text.trim().is_empty() {
+        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
+    }
+    let mut sent_keys: Vec<String> = Vec::new();
+    // 1. 定位 own answer 行
+    let first = terminal.read().ok_or_else(|| {
+        StageAbort::screen("opencode 自由作答：读不到屏幕——已中止，未发任何键；请人工核对终端")
+    })?;
+    if opencode_own_answer_input_open(&first) {
+        return Err(StageAbort::screen(
+            "输入行似乎已开启（先前未完成的作答？）——为防文本误入导航，已中止；请人工核对终端",
+        ));
+    }
+    let own_pos = locate_opencode_own_answer_position(&first).ok_or_else(|| {
+        StageAbort::screen(
+            "屏读未定位到 Type your own answer 行——已中止，未发任何键；请人工核对终端",
+        )
+    })?;
+    // 2. ↓×(pos-1) 定位（pos 1 起行序；首行 = 零步）
+    for _ in 0..own_pos.saturating_sub(1) {
+        terminal
+            .send("down")
+            .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
+        sent_keys.push("down".to_string());
+        terminal.settle();
+    }
+    // 3. enter 开输入行
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("开输入行回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    // 4. **裸打字守卫**：屏读确认输入行已开启（占位行出现）才发文本
+    let opened = terminal.read().ok_or_else(|| {
+        StageAbort::screen(
+            "已发回车但读不到屏幕（无法确认输入行开启）——已中止，未发文本（裸打字会被当导航/勾选指令）；请人工核对终端",
+        )
+    })?;
+    eprintln!("DEBUG verify frame={:?}", opened);
+    if !opencode_own_answer_input_open(&opened) {
+        return Err(StageAbort::screen(
+            "输入行未开启（屏上无占位行）——已中止，未发文本（裸打字守卫）；请人工核对终端",
+        ));
+    }
+    terminal
+        .send_text(text)
+        .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
+    sent_keys.push("<text>".to_string());
+    terminal.settle();
+    // 5. enter 提交（自动推进下一题/进 Confirm）
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    // 6. 终态（未见不是失败）
+    let receipt_seen = match poll_receipt() {
+        Ok(Some(lines)) => Some(opencode_answered_present(&lines)),
+        Ok(None) => Some(false),
+        Err(_) => None,
+    };
+    Ok(FreeTextOutcome {
+        sent_keys,
+        receipt_seen,
+    })
+}
+
+/// own answer 行的**1 起行序**定位：优先带编号形态（`N. [ ]? Type your own answer`），
+/// 无编号（多选 `[ ] Type your own answer`）→ 按行序计。
+fn locate_opencode_own_answer_position(lines: &[String]) -> Option<usize> {
+    let mut pos: Option<usize> = None;
+    let mut idx = 0usize;
+    for l in lines {
+        let t = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
+            .trim_start();
+        let lower = t.to_lowercase();
+        if let Some((num, _, _)) = crate::inject::dialog::parse_option_line(t) {
+            idx = num as usize;
+            if lower.contains(OPENCODE_OWN_ANSWER_LABEL) && pos.is_none() {
+                pos = Some(num as usize);
+            }
+        } else if lower.contains(OPENCODE_OWN_ANSWER_LABEL) {
+            idx += 1;
+            if pos.is_none() {
+                pos = Some(idx);
+            }
+        }
+    }
+    pos
+}
+
+/// opencode SQLite **answers 对账解析**（纯函数）：`state.metadata` 的
+/// `{"answers":[[...],[...]],"truncated":bool}` → 二维数组（按题序对齐，非题干键控；
+/// 内层序=勾选序——戊探A ⑥ 定案；多选标志字段名=`multiple`）。解析失败 → None。
+pub fn parse_opencode_answers(metadata_json: &str) -> Option<Vec<Vec<String>>> {
+    let v: serde_json::Value = serde_json::from_str(metadata_json).ok()?;
+    let arr = v.get("answers")?.as_array()?;
+    arr.iter()
+        .map(|inner| {
+            inner
+                .as_array()?
+                .iter()
+                .map(|x| x.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()
+        })
+        .collect()
 }
 
 // ============================================================
@@ -1361,7 +1608,7 @@ pub fn free_text_supported(tool: &str) -> bool {
     // 戊探C 全链：Tab → 打字 → Enter=提交当前高亮项+备注）均已实机定案；
     // 形态门仍只放单选（codex 多选形态未取证 / kimi 多选 Other 无编号）——
     // 见 [`free_text_shape_supported`]。opencode 走 E6 的 own answer 形态，另行升格。
-    matches!(tool, "claude" | "kimi" | "codex")
+    matches!(tool, "claude" | "kimi" | "codex" | "opencode")
 }
 
 /// 自由作答的**题目形态支持面**（复评 F6-3：多选卡不提供自由作答）。
@@ -1505,7 +1752,9 @@ pub fn action_supported(
             // （而不是让用户白等一次必然失败的全链），前端据此不渲染输入框。
             // 归 ToolUnverified（409 tool_readonly）而不是 BadParameter：用户要做的
             // 是「去终端作答」，不是「改个参数重试」。
-            if !free_text_shape_supported(q) {
+            // E6：opencode 的 own answer 形态单/多选皆可（戊探A E-A2/E-A3 双形态
+            // 实测）；claude/kimi 维持仅单选（多选行带勾选框/无编号，定位判据不匹配）
+            if tool != "opencode" && !free_text_shape_supported(q) {
                 return Err(ActionRefusal::ToolUnverified(
                     "多选题的自由作答请到终端完成（远程入口仅支持单题卡）".to_string(),
                 ));
@@ -1782,12 +2031,19 @@ mod tests {
             answer_key_sequence_for("opencode", AnswerAction::Select, None, &q).is_err(),
             "缺序号 → 拒"
         );
-        // 未测面全部拒绝
-        assert!(answer_key_sequence_for("opencode", AnswerAction::Cancel, None, &q).is_err());
-        assert!(answer_key_sequence_for("opencode", AnswerAction::Submit, None, &multi()).is_err());
-        assert!(
-            answer_key_sequence_for("opencode", AnswerAction::Toggle, Some(0), &multi()).is_err()
+        // 批次戊 E6 更新：多选 toggle = 单次数字（空格不入序）；esc = 单次 dismiss；
+        // submit 静态序列仍拒（走 run_opencode_submit_stages 阶段机）
+        assert_eq!(
+            answer_key_sequence_for("opencode", AnswerAction::Toggle, Some(0), &multi()).unwrap(),
+            vec!["1"],
+            "E6：多选切勾=单次数字（enter/数字 toggle，空格无效）"
         );
+        assert_eq!(
+            answer_key_sequence_for("opencode", AnswerAction::Cancel, None, &q).unwrap(),
+            vec!["esc"],
+            "E6：esc=单次 dismiss（state.error 落账，非中断回合）"
+        );
+        assert!(answer_key_sequence_for("opencode", AnswerAction::Submit, None, &multi()).is_err());
     }
 
     /// T3 · kimi 档（**2026-09-21 实机复验修正**：数字选中 → **Enter 确认**）
@@ -1880,6 +2136,184 @@ mod tests {
     // ============================================================
 
     // ---- 真机屏幕夹具（2026-09-21 探测档案原文，逐字抄录）----
+
+    // ==== 批次戊 E6：opencode 多题/多选（阶段机脚本锁 + 对账解析）====
+
+    /// **opencode Confirm/own answer 锚 × 真机夹具**（戊探A E-A1 原件）：
+    /// 勾选态题页不是 Confirm 页；Confirm 页 footer 锚命中；占位行守卫判据
+    /// （带编号=选项行，无编号=已开输入行）。
+    #[test]
+    fn e6_opencode_anchors_on_real_fixtures() {
+        let checked = e_stage2_screen("opencode-checked.txt");
+        assert!(!opencode_confirm_present(&checked), "题页不是 Confirm 页");
+        assert!(
+            !opencode_own_answer_input_open(&checked),
+            "带编号的 `5. [ ] Type your own answer` 是选项行，不是已开输入行"
+        );
+        let confirm = e_stage2_screen("opencode-confirm-page.txt");
+        assert!(
+            opencode_confirm_present(&confirm),
+            "Confirm 页 footer 锚命中"
+        );
+        // own answer 行定位：勾选态夹具 = `5. [ ] Type your own answer`（编号 5）
+        assert_eq!(locate_opencode_own_answer_position(&checked), Some(5));
+    }
+
+    /// **opencode 提交阶段机脚本锁**：tab → Confirm 页 → enter；Confirm 缺席 →
+    /// 中止不发提交键；终态锚（`# Questions`）在场 → Some(true)。
+    #[test]
+    fn e6_opencode_submit_stage_scripted() {
+        let confirm = e_stage2_screen("opencode-confirm-page.txt");
+        let receipt = lines(&["# Questions", "bravo, charlie, delta"]);
+        let mut sent: Vec<String> = Vec::new();
+        let mut terminal = crate::inject::mode::Closures {
+            read: || Some(confirm.clone()),
+            send: |k: &str| {
+                sent.push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_opencode_submit_stages(
+            || Ok(Some(confirm.clone())),
+            || Ok(Some(receipt.clone())),
+            &mut terminal,
+        )
+        .expect("tab → Confirm → enter");
+        assert_eq!(out.sent_keys, vec!["tab", "enter"]);
+        assert_eq!(out.receipt_seen, Some(true));
+        // Confirm 缺席：中止且只发了 tab
+        let dialog = e_stage2_screen("opencode-checked.txt");
+        let mut sent2: Vec<String> = Vec::new();
+        let mut terminal2 = crate::inject::mode::Closures {
+            read: || Some(dialog.clone()),
+            send: |k: &str| {
+                sent2.push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let err =
+            run_opencode_submit_stages(|| Ok(Some(dialog.clone())), || Ok(None), &mut terminal2)
+                .expect_err("Confirm 不出现 → 中止");
+        assert_eq!(sent2, vec!["tab"], "只发了 tab，提交键未发");
+        assert!(err.message.contains("Confirm 页"), "{err:?}");
+    }
+
+    /// **opencode own answer 阶段机脚本锁（裸打字守卫）**：
+    /// 鲜态（高亮=首行）→ ↓×4 → enter 开行 → 占位行确认 → 文本 → enter；
+    /// 守卫失败（开行后无占位行）→ 中止**不发文本**。
+    #[test]
+    fn e6_opencode_own_answer_stage_scripted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        let fresh = vec![
+            "1. [ ] alpha".to_string(),
+            "2. [ ] bravo".to_string(),
+            "3. [ ] charlie".to_string(),
+            "4. [ ] delta".to_string(),
+            "5. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let opened = vec![
+            "5. [ ] Type your own answer".to_string(),
+            "   Type your own answer".to_string(),
+        ];
+        let receipt = vec!["# Questions".to_string()];
+
+        // 鲜态：↓×4 → enter 开行（屏换占位行态）→ 文本 → enter
+        let downs = std::sync::Arc::new(AtomicUsize::new(0));
+        let texts: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(vec![]));
+        let sent = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (dr, ds) = (downs.clone(), downs.clone());
+        let (fr, fs) = (fresh.clone(), sent.clone());
+        let (or_, tx) = (opened.clone(), texts.clone());
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let d = dr.load(Ordering::SeqCst);
+                eprintln!(
+                    "DEBUG read d={d} -> {}",
+                    if d >= 4 { "opened" } else { "fresh" }
+                );
+                if d >= 4 {
+                    Some(or_.clone())
+                } else {
+                    Some(fr.clone())
+                }
+            },
+            send: move |k: &str| {
+                if k == "down" {
+                    ds.fetch_add(1, Ordering::SeqCst);
+                }
+                fs.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                tx.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages(
+            "custom purple",
+            || Ok(Some(receipt.clone())),
+            &mut terminal,
+        )
+        .expect("鲜态全链走通");
+        assert_eq!(
+            out.sent_keys,
+            vec!["down", "down", "down", "down", "enter", "<text>", "enter"]
+        );
+        assert_eq!(
+            texts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["custom purple"]
+        );
+        assert_eq!(out.receipt_seen, Some(true));
+
+        // 守卫失败：开行后屏上仍无占位行 → 中止且未发文本
+        let sent2 = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let texts2: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(vec![]));
+        let fr2 = fresh.clone();
+        let (s2r, t2r) = (sent2.clone(), texts2.clone());
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: move || Some(fr2.clone()),
+            send: move |k: &str| {
+                s2r.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                t2r.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let err = run_opencode_own_answer_stages("x", || Ok(None), &mut terminal2)
+            .expect_err("占位行未出现 → 裸打字守卫中止");
+        assert!(err.message.contains("裸打字守卫"), "{err:?}");
+        assert!(
+            texts2.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "文本未发出"
+        );
+    }
+
+    /// **opencode answers 二维数组对账**（戊探A ⑥ 录得形态：按题序对齐 + 内层勾选序）。
+    #[test]
+    fn e6_opencode_answers_two_dimensional_reconciliation() {
+        let meta = r#"{"answers":[["teal accent E-A2"],["tracing","logging"]],"truncated":false}"#;
+        let answers = parse_opencode_answers(meta).expect("二维数组解析");
+        assert_eq!(answers.len(), 2, "按题序对齐（非题干键控）");
+        assert_eq!(answers[0], vec!["teal accent E-A2"]);
+        assert_eq!(answers[1], vec!["tracing", "logging"], "内层序=勾选序");
+        assert!(parse_opencode_answers(r#"{"answers":"oops"}"#).is_none());
+    }
 
     // ==== 批次戊 E5：codex Tab 备注（阶段机脚本锁 + rollout 对账夹具）====
 
@@ -2813,9 +3247,9 @@ mod tests {
             shape.submit_key, "enter",
             "文本之后唯一按键是回车（不带数字不带 Esc）"
         );
-        // E4/E5：kimi（Other 行）与 codex（Tab 备注）升级为支持，不再在本拒绝清单里；
-        // opencode 的 own answer 形态留 E6
-        for tool in ["opencode", "zcode", "dsh", "workbuddy", ""] {
+        // E4/E5/E6：kimi（Other 行）/codex（Tab 备注）/opencode（own answer）均已
+        // 升格为支持；仍未定案的只剩黑盒/无头家
+        for tool in ["zcode", "dsh", "workbuddy", ""] {
             let err =
                 free_text_shape(tool).expect_err(&format!("{tool} 的自由作答序列未定案，必须拒绝"));
             assert!(

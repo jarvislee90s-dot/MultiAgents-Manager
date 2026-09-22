@@ -3463,6 +3463,9 @@ enum StagePlan {
     /// **codex Tab 备注阶段机**（批次戊 E5）：弹窗 footer 锚判读 → Tab → 打字 →
     /// Enter 提交（当前高亮项+备注）→ 终态
     CodexNotes,
+    /// **opencode own answer 阶段机**（批次戊 E6）：行序定位 → enter 开行 →
+    /// 裸打字守卫（屏读确认占位行）→ 打字 → enter 提交
+    OpencodeOwnAnswer,
 }
 
 impl StagePlan {
@@ -3483,6 +3486,7 @@ impl StagePlan {
             (A::Submit, "kimi") => Self::KimiSubmit,
             (A::FreeText, "kimi") => Self::KimiFreeText,
             (A::FreeText, "codex") => Self::CodexNotes,
+            (A::FreeText, "opencode") => Self::OpencodeOwnAnswer,
             (A::Submit, _) => Self::Submit {
                 max_down_steps: q.options.len() + 2,
             },
@@ -3751,6 +3755,49 @@ fn dispatch_question_action(
                 text,
                 || probe("codex-notes"),
                 || poll_receipt_stage(|| probe("codex-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_FREE_TEXT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        // ===== 批次戊 E6：opencode own answer 阶段机 =====
+        StagePlan::OpencodeOwnAnswer => {
+            let Some(text) = free_text else {
+                return QuestionDispatch::Failed("自由作答缺少文本".to_string());
+            };
+            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                send_text: |t: &str| {
+                    injector.locate_and_inject_spec(pid, t, spec)?;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    Ok(())
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_opencode_own_answer_stages(
+                text,
+                || poll_receipt_stage(|| probe("oc-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
             match out {
