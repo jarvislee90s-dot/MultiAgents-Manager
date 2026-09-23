@@ -212,7 +212,21 @@ fn parse_dialog_clusters_indexed(lines: &[String]) -> Vec<(usize, Vec<DialogOpti
 /// **claude 计划批准框标题行锚**（戊探E 定案 b：2/2 框中逐字节稳定、位于真选项簇
 /// 上方——「其下第一条 `N.` 行即真选项簇首」）。小写 contains 比对（容忍行首空白/
 /// 高亮符），不锚定全句（尾半句跨版本漂移面小，标题短语本身稳定）。
-pub(crate) const PLAN_TITLE_ANCHOR: &str = "claude has written up a plan";
+///
+/// **2026-09-23 起真源移入账本**（[`crate::inject::anchor_ledger`]，`claude/
+/// plan_approve/title`）：上游改词时按账本格式追加一行即可（append-only），不再
+/// 改代码常量。本函数从账本取，取不到时回落到已入账的那一条（编译期常量兜底，
+/// 保证行为不因账本表被误删而静默失效）。
+pub(crate) fn plan_title_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::PLAN_APPROVE,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("claude has written up a plan")
+}
 
 /// 从屏读行集解析对话框选项表（纯函数，可测）。
 ///
@@ -243,7 +257,7 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
     // ——戊探E 定案 b）；标题在所有簇之后（异常布局）→ 回退离底栏最近簇
     let title_idx = lines
         .iter()
-        .position(|l| l.to_lowercase().contains(PLAN_TITLE_ANCHOR));
+        .position(|l| l.to_lowercase().contains(plan_title_anchor()));
     let chosen = match title_idx {
         Some(t) => eligible
             .iter()

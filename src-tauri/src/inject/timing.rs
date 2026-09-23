@@ -145,7 +145,7 @@ pub const MODE_STEP_MIN_GAP_MS: u64 = 500;
 pub const CODEX_MENU_OPEN_POLL_TOTAL_MS: u64 = 3_000;
 
 /// **插队「等回合停」**轮询窗（毫秒）：Esc 中断之后、投递正文之前，屏读轮询等
-/// claude 底栏的**忙态串消失**（判据见 `confirm::TURN_BUSY_MARKER`）——即「回合真的
+/// claude 底栏的**忙态串消失**（判据见 `confirm::turn_busy_marker`）——即「回合真的
 /// 停下来了」。
 ///
 /// # 原 `confirm::INTERRUPT_DRAIN_TIMEOUT_MS`（值不变 3000ms，D20 起归本模块）

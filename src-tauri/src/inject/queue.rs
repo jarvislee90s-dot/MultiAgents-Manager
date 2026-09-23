@@ -208,7 +208,7 @@ pub(crate) fn try_flush_with(
     //
     // **修法（用户裁定：走 D20 精神——屏读等判据本身）**：判据 = claude 底栏忙态串
     // `esc to interrupt` 消失（真机两态原文与四档空闲态取证见
-    // [`crate::inject::confirm::TURN_BUSY_MARKER`]），步长
+    // [`crate::inject::confirm::turn_busy_marker`]），步长
     // [`crate::inject::timing::POLL_STEP_MS`]、总窗
     // [`crate::inject::timing::TURN_STOP_POLL_TOTAL_MS`]（原
     // `INTERRUPT_DRAIN_TIMEOUT_MS` 的值，语义变更同批改名）。

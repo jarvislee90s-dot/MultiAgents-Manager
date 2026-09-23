@@ -10,7 +10,7 @@
 //! - **插队**（busy 态）：两段判据，**等的东西不同**（2026-09-22 R2 复评按实机
 //!   bug 拆分——详见 [`TurnStopWait`]）：
 //!   - **投递前**（仅 claude × 运行中 × jump）：Esc 中断后**屏读轮询等「回合已停」**
-//!     （判据 = 底栏忙态串 [`TURN_BUSY_MARKER`] 消失，D20(a)(b) 形态）——判据命中
+//!     （判据 = 底栏忙态串 [`turn_busy_marker`] 消失，D20(a)(b) 形态）——判据命中
 //!     才投递正文；窗尽未停也照投（best-effort），但回执**如实降级**为「已投递未
 //!     确认」（[`DirectReceipt::Submitted`]），不冒充送达；
 //!   - **投递后确认**（其余插队路径）：以**占用排空**确认（Windows
@@ -204,7 +204,19 @@ const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
 ///
 /// 逐行 `to_lowercase()` 后包含判定（真机原文全小写；TUI 改版印成 `Esc to interrupt`
 /// 时仍命中）。
-pub const TURN_BUSY_MARKER: &str = "esc to interrupt";
+/// **2026-09-23 起真源移入账本**（[`crate::inject::anchor_ledger`] 的
+/// `claude/turn_state/busy`）：上游改词时按账本格式**追加**一行即可（append-only），
+/// 不必改代码。取不到时回落已入账那一条（编译期常量兜底）。
+pub fn turn_busy_marker() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::TURN_STATE,
+        crate::inject::anchor_ledger::slot::BUSY,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("esc to interrupt")
+}
 
 /// **回合已停**判定（单帧，纯函数，跨平台可测）：可见窗口行集里**不存在**忙态串。
 ///
@@ -239,7 +251,7 @@ pub const TURN_BUSY_MARKER: &str = "esc to interrupt";
 pub fn turn_stopped_in_lines(lines: &[String]) -> bool {
     !lines
         .iter()
-        .any(|l| l.to_lowercase().contains(TURN_BUSY_MARKER))
+        .any(|l| l.to_lowercase().contains(turn_busy_marker()))
 }
 
 /// composer 输入行标记（claude TUI 高亮符，U+276F；注意 codex 才是 › U+203A）。
@@ -247,7 +259,18 @@ const CLAUDE_CURSOR: char = '\u{276F}';
 
 /// composer 空闲输入行的 hint 文案（队列在场时 composer 显示此提示而非空）。
 /// 命中 = 输入行**无**用户内容（队列展示区的另一条 `❯` 行才是带内容的——见函数文档）。
-const CLAUDE_QUEUE_HINT: &str = "press up to edit queued messages";
+///
+/// **2026-09-23 起真源移入账本**（`claude/queue_hint/present`）；取不到时回落常量。
+fn claude_queue_hint() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::QUEUE_HINT,
+        crate::inject::anchor_ledger::slot::PRESENT,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("press up to edit queued messages")
+}
 
 /// 输入行残留的中止原因短语（[`claude_input_line_has_residue`] 命中时
 /// [`crate::inject::queue::FlushOutcome::NotDelivered`] 的载荷；回执文案
@@ -266,7 +289,7 @@ pub const INPUT_LINE_RESIDUE_REASON: &str = "终端输入行有残留内容（�
 ///
 /// 1. 取整屏**最后一个**以 `❯` 开头的行 = composer 输入行（无 `❯` 行 → 无残留）；
 /// 2. 剥掉 `❯` 与空白后的内容为空 → 无残留（空闲/中断态）；
-/// 3. 内容是已知 hint 串（[`CLAUDE_QUEUE_HINT`]，队列在场时 composer 显示提示文案）
+/// 3. 内容是已知 hint 串（[`claude_queue_hint`]，队列在场时 composer 显示提示文案）
 ///    → 无残留；否则 → **有残留**（真机撤回态：消息全文回到输入行）。
 ///
 /// # 为什么「排除 hint 后取最底部 ❯」不够（判据陷阱，计划 E1① 明示）
@@ -299,7 +322,7 @@ pub fn claude_input_line_has_residue(lines: &[String]) -> bool {
         .strip_prefix(CLAUDE_CURSOR)
         .unwrap_or("")
         .trim();
-    !content.is_empty() && !content.to_lowercase().contains(CLAUDE_QUEUE_HINT)
+    !content.is_empty() && !content.to_lowercase().contains(claude_queue_hint())
 }
 
 /// **稳定闸的连续拍数**（2026-09-22 R2 必修项 3）：「已停」是**稳定**属性，
@@ -751,7 +774,7 @@ fn stuck_on_input_line(pid: u32, content: &str) -> bool {
 /// ——即**假成功**：回执说成功，消息实际没落地（对照 09-21 那条 `jump ok` 能在会话
 /// 文件里找到，那是侥幸成功）。
 ///
-/// 用户裁定走 D20 精神：等**判据本身**（[`TURN_BUSY_MARKER`] 消失）而不是等缓冲。
+/// 用户裁定走 D20 精神：等**判据本身**（[`turn_busy_marker`] 消失）而不是等缓冲。
 ///
 /// # 调用前提（本函数不自己判）
 ///

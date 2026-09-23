@@ -52,6 +52,15 @@ pub mod scenario {
     pub const PERMISSION_MENU: &str = "permission_menu";
     /// Full Access 二次确认框（codex `Enable full access?`）
     pub const FULL_ACCESS_CONFIRM: &str = "full_access_confirm";
+    /// claude **计划批准框**（`Claude has written up a plan`，dialog.rs 的
+    /// `locate_plan_dialog` 用它定位计划体范围）
+    pub const PLAN_APPROVE: &str = "plan_approve";
+    /// **回合忙/闲**屏读判据（`esc to interrupt` 等底栏标记；confirm.rs 的
+    /// 回合停等 + queue.rs 插队等回合停都消费）
+    pub const TURN_STATE: &str = "turn_state";
+    /// claude **队列在场**提示（`press up to edit queued messages`；confirm.rs 用它
+    /// 判输入行内容是否其实是排队消息回显）
+    pub const QUEUE_HINT: &str = "queue_hint";
 }
 
 /// 槽位 wire 词（账本 `slot` 字段）：同一场景内的不同位置。
@@ -62,6 +71,10 @@ pub mod slot {
     pub const FOOTER: &str = "footer";
     /// 成功回执行锚（工具自己宣布完成）
     pub const RECEIPT: &str = "receipt";
+    /// **忙态标记**（回合运行中屏上的提示语，如 `esc to interrupt`）
+    pub const BUSY: &str = "busy";
+    /// **在场提示**（某状态在场的证据行，如排队消息提示）
+    pub const PRESENT: &str = "present";
 }
 
 /// 账本单行：一条**屏读文案**及其取证元数据。
@@ -154,6 +167,33 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "permission mode:",
         observed_version: "2.0.2",
         evidence: "键序大词典 §3（夹具 kimi-perm-receipt.txt）",
+    },
+    // ===== claude 计划批准框标题（dialog.rs，原 PLAN_TITLE_ANCHOR）=====
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::PLAN_APPROVE,
+        slot: slot::TITLE,
+        text: "claude has written up a plan",
+        observed_version: "2.1.251",
+        evidence: "戊探E 2026-09-22 claude 对话框选项锚点底料（夹具 claude-approve-dialog-e1.txt）",
+    },
+    // ===== 回合忙态标记（confirm.rs TURN_BUSY_MARKER，2026-09-23 起入账本）=====
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::TURN_STATE,
+        slot: slot::BUSY,
+        text: "esc to interrupt",
+        observed_version: "2.1.251",
+        evidence: "真机快照 screen-t9-after-enter-busy.txt（queue.rs tests::real_frames 同源）",
+    },
+    // ===== claude 队列在场提示（confirm.rs CLAUDE_QUEUE_HINT）=====
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::QUEUE_HINT,
+        slot: slot::PRESENT,
+        text: "press up to edit queued messages",
+        observed_version: "2.1.251",
+        evidence: "戊探F 2026-09-22 打断式插队扩展底料（夹具 claude-queue-state.txt）",
     },
 ];
 
