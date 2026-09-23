@@ -84,6 +84,27 @@ function installFetch() {
       if (url.includes("/file?")) {
         return new Response(JSON.stringify({ content: "x", mime: "text/plain" }), { status: 200 });
       }
+      // 归档列表（历史会话区）：必须在 /sessions 分路之前——/sessions-archived
+      // 字符串包含 /m/api/v1/sessions，顺序颠倒会被活板分路截胡
+      if (url.includes("/sessions-archived")) {
+        return new Response(
+          JSON.stringify({
+            archived: [
+              {
+                sessionId: "dead-1",
+                agentType: "claude",
+                projectPath: "/tmp/d",
+                projectName: "hist-proj",
+                title: null,
+                lastStatus: "idle",
+                lastSeenAt: new Date().toISOString(),
+              },
+            ],
+            projects: ["hist-proj"],
+          }),
+          { status: 200 }
+        );
+      }
       if (url.includes("/m/api/v1/sessions")) {
         return new Response(JSON.stringify(okSessions([])), { status: 200 });
       }
@@ -140,5 +161,20 @@ describe("App 路由：看板卡片 ↔ 会话详情", () => {
     });
     expect(screen.getByText("MAM 远程接入")).toBeTruthy();
     expect(screen.queryByTestId("detail-back")).toBeNull();
+  });
+
+  // ==== 历史会话路由（spec §7.1）：看板 ↔ 历史页（Board 常驻 hidden，数据保持） ====
+  it("历史入口进入历史页（归档卡可见，活板卡仍在 DOM）；返回后历史页卸载、看板回前台", async () => {
+    installSse(okSessions([sessionFixture()]));
+    installFetch(); // afterEach unstubAllGlobals：本文件惯例每用例自装 fetch mock
+    render(<App />);
+    await screen.findByText("demo-proj"); // 看板就绪
+    fireEvent.click(screen.getByRole("button", { name: "历史会话" }));
+    // selector 收窄到卡片 span：项目下拉 <option> 同文本，findByText 多匹配会抛错
+    expect(await screen.findByText("hist-proj", { selector: "span" })).toBeTruthy(); // 归档卡渲染
+    expect(screen.getByText("任务标题")).toBeTruthy(); // Board 常驻 hidden——活板卡仍在 DOM（数据保持）
+    fireEvent.click(screen.getByRole("button", { name: "返回看板" }));
+    expect(screen.queryByText("hist-proj")).toBeNull(); // 历史页卸载
+    expect(screen.getByText("demo-proj")).toBeTruthy(); // 看板数据原样（无需重拉）
   });
 });

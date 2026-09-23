@@ -237,6 +237,15 @@ pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send 
 /// [`ViaHostsSource`] 先例）：参数 = (tool, session_id, stamp)。
 pub type ConfirmProbeFn = dyn Fn(&str, &str, &str) -> bool + Send + Sync;
 
+/// 归档删除缝类型（spec §6.1，clippy type_complexity 收敛别名，对齐
+/// [`ConfirmProbeFn`] 先例）：参数 = None（全删）| Some(session_id)。
+pub type ArchiveDeleteFn = dyn Fn(Option<&str>) -> usize + Send + Sync;
+
+/// 未读已读缝类型（体验批二修订，clippy type_complexity 收敛别名，对齐
+/// [`ArchiveDeleteFn`] 先例）：参数 = (tool_id, session_id)，与桌面端「叉」
+/// 共用 dao::unread::mark_read。
+pub type UnreadMarkReadFn = dyn Fn(&str, &str) + Send + Sync;
+
 /// 对话框在场探针缝类型（丁T3 §2.7，对齐 [`ConfirmProbeFn`] 先例）：
 /// 参数 = (session_id, pid)；返回 `Some(选项表)` = 屏读确认**编号选项对话框在场**。
 ///
@@ -274,6 +283,20 @@ pub type ScreenProbeFn = dyn Fn(&str, u32) -> Option<Vec<String>> + Send + Sync;
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
+    /// 看板隐藏集合读源（APP 软归档，2026-09-20 体验批二）：生产 =
+    /// database::board_hidden_ids；测试注入固定集合（零真实 ~/.mam 接触）
+    pub board_hidden_ids: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// 隐藏写缝（hide）：生产 = database::board_hidden_hide；测试记录型假体
+    pub board_hidden_hide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
+    /// 解除隐藏写缝（unhide）：生产 = database::board_hidden_unhide；
+    /// 测试记录型假体
+    pub board_hidden_unhide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
+    /// 未读已读缝（体验批二修订，与桌面端「叉」同源）：生产 =
+    /// dao::unread::mark_read（删未读池行 + 已读 tombstone）；测试记录型假体
+    pub unread_mark_read: std::sync::Arc<UnreadMarkReadFn>,
+    /// CLI 会话硬杀缝（/session-close）：生产 = commands::session::kill_pid；
+    /// 测试记录型假体（零真杀进程）
+    pub session_close: std::sync::Arc<dyn Fn(u32) -> Result<(), String> + Send + Sync>,
     /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.mam）
     pub store: super::pairing::DeviceStore,
     /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
@@ -320,6 +343,11 @@ pub struct RemoteState {
     /// （真开窗）；测试注入记录型假 spawner（零真开窗）。消费方：session-open 端点
     /// （inject::resume::open_session_terminal_with 的 spawner 参数）
     pub resume_spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
+    /// 归档读源注入缝（spec §6.1）：生产 = database::query_archive_all（全量行，
+    /// 窗口/排除在端点内做）；测试注入固定行集（零真实 ~/.mam 接触）
+    pub archive_source: Box<dyn Fn() -> Vec<crate::database::SessionArchiveRow> + Send + Sync>,
+    /// 归档删除缝：生产 = database::delete_archive；测试记录型假体返回计数
+    pub archive_delete: std::sync::Arc<ArchiveDeleteFn>,
     /// A1 写入确认缝（M9R Task 5）：参数 = (tool, session_id, stamp)。生产 =
     /// 会话消息读路径查 24 字符尾戳（与 /session-messages 数据同源；读失败 =
     /// 未命中，诚实口径）；测试恒 true（确认失败用例就地覆盖恒 false）。
@@ -404,6 +432,16 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // M6R–M9R Task 11：一键 resume 端点（R5，PIN 门禁内层 gate 结构性覆盖，
         // 新端点不需要各自鉴权代码；spawn 缝注入使测试零真开窗）
         .route("/session-open", post(api::session_open))
+        // 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）：懒加载列表 + 手动管理
+        .route(
+            "/sessions-archived",
+            get(api::sessions_archived).delete(api::sessions_archived_delete),
+        )
+        // 看板关闭/软归档（2026-09-20 体验批二）：CLI 硬杀 + APP 软归档/移回，
+        // 同在 nest 内结构性继承 PIN gate
+        .route("/session-close", post(api::session_close))
+        .route("/session-hide", post(api::session_hide))
+        .route("/session-unhide", post(api::session_unhide))
         // M5 A3：访问密码端点——密码制唯一换 cookie 入口（gate 放行名单同步收口为
         // /pair/pin 精确相等；旧 /pair 直通与 /pair/* 审批路由已删除，未知路径落
         // 内层 fallback 403）
@@ -496,6 +534,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -514,6 +554,11 @@ mod tests {
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             // M3 Task 5：测试用空事件通道（不启动 watcher——零后台扫描）
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -1042,6 +1087,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -1053,6 +1100,11 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1415,6 +1467,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -1431,6 +1485,11 @@ mod tests {
             // 本组测试不触 /session-files /file：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0, // M3 Task 5：空事件通道
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1510,6 +1569,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -1554,6 +1615,11 @@ mod tests {
             // 本测试不触 /session-files：注入恒空的路径源
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1713,6 +1779,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -1735,6 +1803,11 @@ mod tests {
                 )
             }),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             // M4 T0a：本组测试不触 SSE 断连，空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             // M4 T2（brief 指定）：审批队列固定生成器（code 恒 "0000"——本组测试不触
@@ -1994,6 +2067,8 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -2004,6 +2079,11 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -2139,6 +2219,8 @@ mod tests {
                 injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
                 // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
                 resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+                archive_source: Box::new(Vec::new),
+                archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
                 // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                 confirm_probe: std::sync::Arc::new(|_, _, _| true),
                 // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -2149,6 +2231,11 @@ mod tests {
                 message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                 path_source: Box::new(|_, _, _| (Vec::new(), false)),
                 watcher_tx: tokio::sync::broadcast::channel(64).0,
+                board_hidden_ids: Box::new(Vec::new),
+                board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+                board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+                unread_mark_read: std::sync::Arc::new(|_, _| ()),
+                session_close: std::sync::Arc::new(|_| Ok(())),
                 sse_registry: Arc::new(SseRegistry::default()),
                 max_devices_source: Box::new(move || max_devices),
                 pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -2696,6 +2783,8 @@ mod tests {
                     resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| {
                         Ok(())
                     }),
+                    archive_source: Box::new(Vec::new),
+                    archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
                     // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
                     confirm_probe: std::sync::Arc::new(|_, _, _| true),
                     // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
@@ -2706,6 +2795,11 @@ mod tests {
                     message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
                     path_source: Box::new(|_, _, _| (Vec::new(), false)),
                     watcher_tx: tokio::sync::broadcast::channel(64).0,
+                    board_hidden_ids: Box::new(Vec::new),
+                    board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+                    board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+                    unread_mark_read: std::sync::Arc::new(|_, _| ()),
+                    session_close: std::sync::Arc::new(|_| Ok(())),
                     sse_registry: Arc::new(SseRegistry::default()),
                     max_devices_source: Box::new(|| 3),
                     pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -2999,6 +3093,8 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：参数化（inject_state 缺省恒命中）
             confirm_probe,
             // 丁T3：对话框在场探针（同参数化）——缺省 None = 无法判定 ⇒ 控制类注入
@@ -3009,6 +3105,11 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -3208,6 +3309,8 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3 F4-2：对话框探针参数化（缺省「无法判定」；dialog 分支用例经
@@ -3218,6 +3321,11 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -5057,6 +5165,13 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null),
             message_source,
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -5963,6 +6078,13 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -8123,6 +8245,29 @@ mod tests {
         }
     }
 
+    /// macOS 端点路径固定接生产效果回查探针（open_session_terminal_with →
+    /// open_macos_with → macos_effect_probe：轮询进程表 3s 找 resume 特征子串，
+    /// resume_effect_in_snapshot 按 cmd 拼接串 contains 命中）。spawner 假体 Ok
+    /// 后若探针未命中，双通道按「死窗」级联 failed——既有
+    /// session_open_endpoint_opens_and_audits 预存失败即此根因（task-3-report）。
+    /// 故出手时顺手种一个 argv 携 resume 特征的暗桩进程（`sh -c "sleep 5 # 特征"`，
+    /// 首轮/次轮采样即命中；5s > 3s 回查窗自灭，非终端窗口——「零真开窗」约束
+    /// 不破，~/.mam 零污染）。非 macOS 平台无回查探针，运行时 no-op。
+    /// 共享作用域（原 nested 于 session_open_archive_fallback_tests，常红修复
+    /// 时上提）：opens_and_audits 与归档回退两类 session-open 测试同用。
+    fn spawn_effect_decoy(resume_cmd: &str) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let _ = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("sleep 5 # {resume_cmd}"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
     /// Task 11 专用 state：会话夹具独占 id（守卫 id 立规的防串键纪律同源）——
     /// sess_m（claude Waiting 正常 cwd）/ sess_n（claude Waiting 空白 cwd）/
     /// sess_o（workbuddy Idle，未入 resume 命令表）；spawner 注入记录型假体。
@@ -8158,6 +8303,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             resume_spawner: spawner,
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
@@ -8167,6 +8314,11 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -8202,7 +8354,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 403, "session-open 必须过 PIN 门禁");
-        // 有 cookie → 200 opening + no-store
+        // 有 cookie → 200 opening + no-store。出手前种 argv 携特征的暗桩进程：
+        // 生产效果回查探针（macos_effect_probe）要在进程表里找到 resume 特征才判
+        // opening——无窗测试环境不种桩必级联 failed（本测试原常红根因之一，见
+        // spawn_effect_decoy 注）。非 macOS 平台 no-op。
+        spawn_effect_decoy("claude --resume sess_m");
         let r = app
             .clone()
             .oneshot(req(
@@ -8239,8 +8395,15 @@ mod tests {
                 // 评审 I1：cwd 进 spec（conhost 分支的 current_dir 消费点）
                 assert_eq!(cwd, "/tmp/proj-m", "spawn 计划必须携带项目目录");
             }
-            crate::inject::resume::SpawnSpec::MacosApplescript { .. } => {
-                panic!("Windows 运行时不得派发 AppleScript 变体");
+            crate::inject::resume::SpawnSpec::MacosApplescript { script } => {
+                // 平台对等：macOS 断言脚本载荷（cwd + resume 命令，对齐
+                // dead_session_opens_from_archive 的 macOS 断言先例），Windows 臂原样。
+                // 原此处 panic!（「Windows 运行时不得派发 AppleScript 变体」）在 macOS
+                // 运行时必炸——本测试常红第二层根因，同批清除。
+                assert!(
+                    script.contains("/tmp/proj-m") && script.contains("claude --resume sess_m"),
+                    "spawn 计划必须携带项目目录与 claude resume 命令：{script}"
+                );
             }
         }
         // 审计 action=open（Task 7 预留兑现）result=ok
@@ -8442,6 +8605,684 @@ mod tests {
         );
     }
 
+    // ==== 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）====
+    mod archive_api_tests {
+        use super::*;
+        use crate::database::SessionArchiveRow;
+
+        fn arch_row(id: &str, tool: &str, proj: &str, seen_secs_ago: i64) -> SessionArchiveRow {
+            let seen = (chrono::Utc::now() - chrono::Duration::seconds(seen_secs_ago)).to_rfc3339();
+            SessionArchiveRow {
+                session_id: id.into(),
+                agent_type: tool.into(),
+                project_path: format!("/tmp/{proj}"),
+                project_name: proj.into(),
+                title: Some("标题".into()),
+                last_status: "idle".into(),
+                first_seen: seen.clone(),
+                last_seen: seen,
+                updated_at: String::new(),
+            }
+        }
+
+        fn archive_state(rows: Vec<SessionArchiveRow>) -> axum::Router {
+            // test_state() 返回 Arc<RemoteState>（引用计数 1、无他持）——Arc::get_mut
+            // 就地换缝（比整份 RemoteState 字面量轻 30+ 行；本文件既有测试均为全字面量
+            // 构造，此处引入 get_mut 模式属新写法，注释留痕）
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.archive_delete = std::sync::Arc::new(|_| 0);
+            // 简报原始形态无凭据——新路由结构性在 PIN gate 之后（nest 内层），
+            // 与全文件先例一致：persist_device 播种 + req 带 cookie 过闸（评审追记）
+            persist_device(&st, "arch");
+            crate::remote::server::router(st)
+        }
+
+        #[tokio::test]
+        async fn days_window_and_order() {
+            let app = archive_state(vec![
+                arch_row("fresh", "codex", "a", 3600),     // 1h 前 → 1 天窗内
+                arch_row("old2d", "kimi", "b", 2 * 86400), // 2 天前 → 仅 3/7 天窗
+            ]);
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived?days=1",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = v["archived"].as_array().unwrap();
+            assert_eq!(arr.len(), 1);
+            assert_eq!(arr[0]["sessionId"], "fresh");
+            let projects = v["projects"].as_array().unwrap();
+            assert_eq!(projects, &[serde_json::Value::from("a")]); // 窗口内项目聚合
+        }
+
+        #[tokio::test]
+        async fn days_invalid_clamped_to_one() {
+            let app = archive_state(vec![arch_row("old2d", "kimi", "b", 2 * 86400)]);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived?days=999",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["archived"].as_array().unwrap().len(), 0); // 夹到 1 天 → 排除
+        }
+
+        #[tokio::test]
+        async fn live_session_excluded_from_archive() {
+            let rows = vec![
+                arch_row("live-1", "codex", "a", 60),
+                arch_row("dead-1", "kimi", "b", 120),
+            ];
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.archive_delete = std::sync::Arc::new(|_| 0);
+            // 活板快照注入：session_source 类型 = Box<dyn Fn() -> SessionsResponse>
+            // （server.rs:242）；inj_sess 四参夹具（server.rs:2760，id/agent_type/pid/status）
+            s.session_source = Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![inj_sess(
+                    "live-1",
+                    crate::session::AgentType::Codex,
+                    1,
+                    crate::session::SessionStatus::Waiting,
+                )],
+                total_count: 1,
+                waiting_count: 0,
+            });
+            persist_device(&st, "arch");
+            let app = crate::remote::server::router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let arr = v["archived"].as_array().unwrap();
+            assert_eq!(arr.len(), 1);
+            assert_eq!(arr[0]["sessionId"], "dead-1");
+        }
+
+        #[tokio::test]
+        async fn delete_requires_param() {
+            let app = archive_state(vec![]);
+            let r = app
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400);
+        }
+
+        /// DELETE 参数→缝映射（终审 Important：破坏性端点成功路径零自动化覆盖）——
+        /// 记录型假体（Arc<Mutex<Vec>> 收参 + 固定返回 7）锁定三件事：①`?session_id=s9`
+        /// → 缝收到 `Some("s9")`；②`?all=1` → 收到 `None`；③**双参同在**
+        /// （`?all=1&session_id=s9`）→ 仍收到 `None`（all 优先语义，防「target 映射
+        /// 写反」一行回归）。响应形态 `{"ok":true,"deleted":<假体返回值>}` 一并断言。
+        /// 换缝沿用本模块 Arc::get_mut 先例；过闸沿用 persist_device + cookie 先例。
+        #[tokio::test]
+        async fn delete_param_mapping_and_all_precedence() {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+            let c2 = calls.clone();
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_delete = std::sync::Arc::new(move |target: Option<&str>| {
+                c2.lock()
+                    .expect("测试单线程持锁")
+                    .push(target.map(|t| t.to_string()));
+                7 // 固定返回计数：响应 deleted 字段断言其来源是缝返回值
+            });
+            persist_device(&st, "arch");
+            let app = crate::remote::server::router(st);
+
+            // ① 单 session_id → Some("s9")
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived?session_id=s9",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["deleted"], 7);
+
+            // ② all=1 → None
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived?all=1",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["deleted"], 7);
+
+            // ③ 双参同在 → 仍 None（all 优先）
+            let r = app
+                .oneshot(req(
+                    "DELETE",
+                    "/m/api/v1/sessions-archived?all=1&session_id=s9",
+                    Some("mam_device=arch"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["deleted"], 7);
+
+            let got = calls.lock().expect("测试单线程持锁");
+            assert_eq!(got.len(), 3);
+            assert_eq!(got[0].as_deref(), Some("s9"));
+            assert_eq!(got[1], None);
+            assert_eq!(got[2], None);
+        }
+    }
+
+    // ==== 看板关闭/软归档（2026-09-20 体验批二）====
+    mod board_close_hide_tests {
+        use super::*;
+
+        /// 固定活快照 + 过闸凭据的测试 state（缝默认假体，按需 Arc::get_mut 覆盖）
+        fn state_with_sessions(sessions: Vec<crate::session::Session>) -> Arc<RemoteState> {
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.session_source = Box::new(move || crate::session::SessionsResponse {
+                total_count: sessions.len(),
+                waiting_count: 0,
+                sessions: sessions.clone(),
+            });
+            persist_device(&st, "bh");
+            st
+        }
+
+        /// App 形态会话夹具（inj_sess 默认 Cli，覆盖 form）
+        fn app_session(id: &str, status: crate::session::SessionStatus) -> crate::session::Session {
+            let mut s = inj_sess(id, crate::session::AgentType::Codex, 42, status);
+            s.form = crate::session::ProcessForm::App;
+            s
+        }
+
+        #[tokio::test]
+        async fn sessions_hidden_green_is_filtered_and_counts_recomputed() {
+            let sessions = vec![
+                inj_sess(
+                    "live-1",
+                    crate::session::AgentType::Codex,
+                    1,
+                    crate::session::SessionStatus::Waiting,
+                ),
+                app_session("hidden-1", crate::session::SessionStatus::Idle),
+            ];
+            let mut st = state_with_sessions(sessions);
+            {
+                let s = std::sync::Arc::get_mut(&mut st).expect("独占");
+                s.board_hidden_ids = Box::new(|| vec!["hidden-1".into()]);
+            }
+            let app = router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions",
+                    Some("mam_device=bh"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            let arr = v["sessions"].as_array().unwrap();
+            assert_eq!(arr.len(), 1, "绿态隐藏会话应被剔除");
+            assert_eq!(arr[0]["id"], "live-1");
+            assert_eq!(v["totalCount"], 1, "counts 按过滤后重算");
+            assert_eq!(v["waitingCount"], 1);
+        }
+
+        #[tokio::test]
+        async fn sessions_hidden_active_stays_hidden_and_no_unhide() {
+            let sessions = vec![app_session(
+                "busy-1",
+                crate::session::SessionStatus::Processing,
+            )];
+            let mut st = state_with_sessions(sessions);
+            let unhidden = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let u2 = unhidden.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut st).expect("独占");
+                s.board_hidden_ids = Box::new(|| vec!["busy-1".into()]);
+                s.board_hidden_unhide = std::sync::Arc::new(move |id| {
+                    u2.lock().unwrap().push(id.to_string());
+                    1
+                });
+            }
+            let app = router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions",
+                    Some("mam_device=bh"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            // 叉语义（体验批二修订）：非绿隐藏会话也保持剔除——初版「非绿∨未读
+            // 即回归」被 W4 持久未读（转绿插行、24h 才过期）击穿，已废弃
+            assert_eq!(v["sessions"].as_array().unwrap().len(), 0);
+            assert_eq!(v["totalCount"], 0);
+            assert!(
+                unhidden.lock().unwrap().is_empty(),
+                "无自动回归：解除隐藏缝不得被调用"
+            );
+        }
+
+        #[tokio::test]
+        async fn archived_includes_hidden_alive_first() {
+            let sessions = vec![app_session(
+                "alive-hidden",
+                crate::session::SessionStatus::Idle,
+            )];
+            let mut st = test_state();
+            {
+                let s = std::sync::Arc::get_mut(&mut st).expect("独占");
+                s.session_source = Box::new(move || crate::session::SessionsResponse {
+                    total_count: 1,
+                    waiting_count: 0,
+                    sessions: sessions.clone(),
+                });
+                s.board_hidden_ids = Box::new(|| vec!["alive-hidden".into()]);
+                let seen = (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+                s.archive_source = Box::new(move || {
+                    vec![crate::database::SessionArchiveRow {
+                        session_id: "dead-old".into(),
+                        agent_type: "kimi".into(),
+                        project_path: "/tmp/d".into(),
+                        project_name: "dead-proj".into(),
+                        title: None,
+                        last_status: "idle".into(),
+                        first_seen: seen.clone(),
+                        last_seen: seen.clone(),
+                        updated_at: String::new(),
+                    }]
+                });
+                persist_device(&st, "bh");
+            }
+            let app = router(st);
+            let r = app
+                .oneshot(req(
+                    "GET",
+                    "/m/api/v1/sessions-archived?days=7",
+                    Some("mam_device=bh"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            let arr = v["archived"].as_array().unwrap();
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr[0]["sessionId"], "alive-hidden", "hiddenAlive 排最前");
+            assert_eq!(arr[0]["hiddenAlive"], true);
+            assert_eq!(arr[1]["sessionId"], "dead-old");
+            assert_eq!(arr[1]["hiddenAlive"], false);
+        }
+
+        #[tokio::test]
+        async fn close_kills_cli_session_and_audits() {
+            let sessions = vec![inj_sess(
+                "cli-1",
+                crate::session::AgentType::Claude,
+                4242,
+                crate::session::SessionStatus::Processing,
+            )];
+            let mut state = state_with_sessions(sessions);
+            let killed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+            let k2 = killed.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.session_close = std::sync::Arc::new(move |pid| {
+                    k2.lock().unwrap().push(pid);
+                    Ok(())
+                });
+            }
+            let app = router(state.clone());
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-close",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"cli-1"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(
+                killed.lock().unwrap().as_slice(),
+                [4242u32],
+                "pid 取自活快照"
+            );
+            let audits = state
+                .store
+                .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+            assert_eq!(audits[0].action, "close");
+            assert_eq!(audits[0].result, "ok");
+            assert_eq!(audits[0].channel, "process");
+            assert_eq!(audits[0].session_id, "cli-1");
+        }
+
+        #[tokio::test]
+        async fn close_rejects_app_form() {
+            let sessions = vec![app_session("app-1", crate::session::SessionStatus::Idle)];
+            let state = state_with_sessions(sessions);
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-close",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"app-1"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "App 形态杀不得（软归档走 /session-hide）");
+        }
+
+        #[tokio::test]
+        async fn close_unknown_session_404() {
+            let mut state = state_with_sessions(Vec::new());
+            let killed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+            let k2 = killed.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.session_close = std::sync::Arc::new(move |pid| {
+                    k2.lock().unwrap().push(pid);
+                    Ok(())
+                });
+            }
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-close",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"ghost"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404);
+            assert!(killed.lock().unwrap().is_empty(), "未命中不出手");
+        }
+
+        #[tokio::test]
+        async fn hide_app_session_marks_read_and_hides_any_status() {
+            let sessions = vec![
+                app_session("app-g", crate::session::SessionStatus::Idle),
+                app_session("app-y", crate::session::SessionStatus::Processing),
+            ];
+            let mut state = state_with_sessions(sessions);
+            let hid = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let h2 = hid.clone();
+            let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+            let r2 = reads.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.board_hidden_hide = std::sync::Arc::new(move |id| {
+                    h2.lock().unwrap().push(id.to_string());
+                    1
+                });
+                s.unread_mark_read = std::sync::Arc::new(move |tool, id| {
+                    r2.lock().unwrap().push((tool.to_string(), id.to_string()));
+                });
+            }
+            let app = router(state);
+            for sid in ["app-g", "app-y"] {
+                let body = format!(r#"{{"sessionId":"{sid}"}}"#);
+                let r = app
+                    .clone()
+                    .oneshot(req(
+                        "POST",
+                        "/m/api/v1/session-hide",
+                        Some("mam_device=bh"),
+                        Some(&body),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 200, "{sid} 任意状态可归档（叉不挑颜色）");
+            }
+            assert_eq!(
+                hid.lock().unwrap().as_slice(),
+                ["app-g".to_string(), "app-y".to_string()]
+            );
+            // 与桌面端「叉」同源：mark_read 删未读池行（tool, session_id）
+            assert_eq!(
+                reads.lock().unwrap().as_slice(),
+                [
+                    ("codex".to_string(), "app-g".to_string()),
+                    ("codex".to_string(), "app-y".to_string())
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn hide_rejects_cli() {
+            let sessions = vec![inj_sess(
+                "cli-g",
+                crate::session::AgentType::Claude,
+                3,
+                crate::session::SessionStatus::Idle,
+            )];
+            let state = state_with_sessions(sessions);
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-hide",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"cli-g"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "CLI 会话走 /session-close，不得软归档");
+        }
+
+        #[tokio::test]
+        async fn unhide_calls_seam_idempotent() {
+            let mut state = state_with_sessions(Vec::new());
+            let unhid = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let u2 = unhid.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("独占");
+                s.board_hidden_unhide = std::sync::Arc::new(move |id| {
+                    u2.lock().unwrap().push(id.to_string());
+                    1
+                });
+            }
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-unhide",
+                    Some("mam_device=bh"),
+                    Some(r#"{"sessionId":"any-1"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(unhid.lock().unwrap().as_slice(), ["any-1".to_string()]);
+        }
+    }
+
+    // ==== Task 4：session-open 归档回退（spec 2026-09-20-mobile-archive-history §6.2）====
+    mod session_open_archive_fallback_tests {
+        use super::*;
+        use crate::database::SessionArchiveRow;
+
+        /// 归档回退测试 state：活快照保持 test_state 默认（空会话集）——只换归档缝
+        /// 与 spawn 缝。Arc::get_mut 就地换缝先例见 archive_api_tests::archive_state；
+        /// 新路由结构性在 PIN gate 之后（nest 内层）：persist_device 播种 + req 带
+        /// cookie 过闸（全文件先例；简报原始形态无凭据，同 Task 3 简报偏差修复 3）
+        fn fallback_state(
+            rows: Vec<SessionArchiveRow>,
+            spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
+        ) -> axum::Router {
+            let mut st = test_state();
+            let s = std::sync::Arc::get_mut(&mut st).expect("test_state 独占引用");
+            s.archive_source = Box::new(move || rows.clone());
+            s.resume_spawner = spawner;
+            persist_device(&st, "arch");
+            crate::remote::server::router(st)
+        }
+
+        /// 归档回退主路径：活快照未命中 + 登记表命中 → 构造 Session 走既有 resume
+        /// 链——spawner 收到的载荷必须携带归档行 cwd（/tmp/proj-dead）与 resume 命令
+        /// （codex resume dead-9，命令表 codex 条目产物），回执 200 opening，出手恰
+        /// 一次（id 取自登记行而非远端输入的口径由实现侧保证：载荷命令里的是登记行
+        /// session_id，若实现误回显远端输入，本测试输入与登记行同 id 无法区分——
+        /// 双未命中 404 用例 + 实现注释守此口径）。
+        /// 注：本测试在 Windows 上跑走 Windows 分支（open_session_terminal_with 按
+        /// std::env::consts::OS 分派；macos_tcc 先例 :4614 同注），载荷断言按 cfg
+        /// 分诊：macOS 断言 MacosApplescript 脚本全文、Windows 断言 SpawnSpec::Windows
+        /// 的 cwd/args 字段——两分支断言语义同构（cwd + resume 命令落点），跨平台
+        /// 均可编译（cfg! 运行时布尔，两分支全平台参与编译）。
+        #[tokio::test]
+        #[cfg_attr(
+            not(any(windows, target_os = "macos")),
+            ignore = "归档回退 resume 走注入/开窗链（platform 门）：仅 Windows/macOS"
+        )]
+        async fn dead_session_opens_from_archive() {
+            let row = SessionArchiveRow {
+                session_id: "dead-9".into(),
+                agent_type: "codex".into(),
+                project_path: "/tmp/proj-dead".into(),
+                project_name: "proj-dead".into(),
+                title: None,
+                last_status: "idle".into(),
+                first_seen: String::new(),
+                last_seen: chrono::Utc::now().to_rfc3339(),
+                updated_at: String::new(),
+            };
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let f2 = fired.clone();
+            let spawner: std::sync::Arc<crate::inject::resume::SpawnFn> =
+                std::sync::Arc::new(move |spec: &crate::inject::resume::SpawnSpec| {
+                    f2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if cfg!(windows) {
+                        // Windows 分支：cwd 字段 = 归档行项目目录，args 携 resume 命令
+                        // （wt 分支 `-d cwd cmd /k <resume>` / conhost 分支 `cmd /k`）
+                        let crate::inject::resume::SpawnSpec::Windows { cwd, args, .. } = spec
+                        else {
+                            return Err("Windows 应收 Windows spec".into());
+                        };
+                        if cwd == "/tmp/proj-dead"
+                            && args.iter().any(|a| a.contains("codex resume dead-9"))
+                        {
+                            Ok(())
+                        } else {
+                            Err(format!("payload 不含归档 cwd/resume 命令: {cwd} {args:?}"))
+                        }
+                    } else {
+                        // macOS 分支：断言 AppleScript 脚本全文携带归档 cwd/resume 命令
+                        let crate::inject::resume::SpawnSpec::MacosApplescript { script } = spec
+                        else {
+                            return Err("macOS 应收 MacosApplescript spec".into());
+                        };
+                        if !(script.contains("/tmp/proj-dead")
+                            && script.contains("codex resume dead-9"))
+                        {
+                            return Err(format!("payload 不含归档 cwd/resume 命令: {script}"));
+                        }
+                        // 效果回查要真命中：种 argv 携特征的暗桩（见外层 spawn_effect_decoy 注）
+                        super::spawn_effect_decoy("codex resume dead-9");
+                        Ok(())
+                    }
+                });
+            let app = fallback_state(vec![row], spawner);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-open",
+                    Some("mam_device=arch"),
+                    Some(r#"{"sessionId":"dead-9"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["status"], "opening");
+            assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        /// 双未命中：活快照空 + 登记表空 → 既有 404 no_session 契约不破（归档回退
+        /// 不得放宽未知 id 的拒绝口径）
+        #[tokio::test]
+        async fn neither_live_nor_archive_still_404() {
+            let spawner: std::sync::Arc<crate::inject::resume::SpawnFn> =
+                std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(()));
+            let app = fallback_state(Vec::new(), spawner);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-open",
+                    Some("mam_device=arch"),
+                    Some(r#"{"sessionId":"ghost"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404);
+        }
+    }
     // ==== 移动端附件上传（2026-09-20）：落盘 <会话 cwd>/.mam-attachments/<会话>/ ====
 
     /// 附件端点测试状态：单会话、project_path 指向 tempdir（零真实目录污染）
@@ -8479,6 +9320,13 @@ mod tests {
             }),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -8749,6 +9597,13 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -8996,6 +9851,13 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -9034,6 +9896,13 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
@@ -9102,6 +9971,13 @@ mod tests {
             host_source: Box::new(|| serde_json::Value::Null),
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),

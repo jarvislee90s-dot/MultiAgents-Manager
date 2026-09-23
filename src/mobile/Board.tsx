@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Moon, Sun, Volume2, VolumeX } from "lucide-react";
-import { connectEvents, fetchHost, fetchSessions, type HostPayload } from "./api";
+import { Archive, Moon, Power, Sun, Volume2, VolumeX } from "lucide-react";
+import {
+  closeSession,
+  connectEvents,
+  fetchHost,
+  fetchSessions,
+  hideSession,
+  type HostPayload,
+} from "./api";
 import { getInitialTheme, toggleTheme, type Theme } from "./theme";
 import { getSoundEnabled, playCompletionChime, toggleSoundEnabled } from "./sound";
 import {
@@ -62,6 +69,8 @@ interface BoardProps {
   onUnpaired: () => void;
   /** 卡片点击回调（M3 Task 8）：进入会话详情；缺省时卡片不可点（既有测试/用法不受影响） */
   onOpenSession?: (session: Session) => void;
+  /** 历史入口点击回调（历史会话区 spec §7.1）：进入归档历史页 */
+  onOpenHistory: () => void;
   /** T1 活状态流：看板数据每拍更新（SSE 快照/跃迁、降级 3s 轮询、30s 对账）时
    *  上报当前会话列表。App 据此把进入详情时定格的 selected 快照按会话身份对齐到
    *  活会话——停留详情页期间状态自动更新（红卡/总结横幅自动切换），不另起轮询 */
@@ -77,6 +86,7 @@ export default function Board({
   onPaired,
   onUnpaired,
   onOpenSession,
+  onOpenHistory,
   onSessionsChanged,
 }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
@@ -118,6 +128,12 @@ export default function Board({
   const aliveRef = useRef(false);
   // in-flight 守卫：慢网下上一拍未返回时跳过新拍，防早发慢到的旧响应覆盖新数据
   const inFlightRef = useRef(false);
+  // data 镜像 ref（体验批二）：handleTransition 是稳定引用（SSE 订阅不重连），
+  // 需要在回调内读最新会话列表判断「跃迁会话是否已知」时经本 ref 取
+  const dataRef = useRef(data);
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
   // 横幅自动消失定时器（键 = 横幅 key）：同会话新跃迁覆盖旧横幅时须撤销旧定时器，
   // 否则旧定时器会提前清掉新横幅
   const bannerTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -189,6 +205,24 @@ export default function Board({
       // 命中会话才换数组引用；未命中（新会话 / 已消失 / 坏状态串）返回原引用，
       // setData 走引用相等短路零重渲染
       setData((prev) => (prev ? { ...prev, sessions: applyTransition(prev.sessions, ev) } : prev));
+      // 软归档自动回归到达路径（体验批二）：跃迁会话不在当前看板 = 可能正被软归档
+      // 隐藏且有了活动——服务端已在 /sessions 懒解除隐藏，但 SSE transition 只 patch
+      // 已知卡片（applyTransition 忽略未知 id），静默重拉一次全量把回归卡片接回来。
+      // 经 dataRef 读最新列表（handleTransition 稳定引用，SSE 订阅不因 data 变化重连）
+      if (!(dataRef.current?.sessions.some((x) => x.id === ev.sessionId) ?? false)) {
+        void (async () => {
+          try {
+            const s = await fetchSessions<SessionsResponse>();
+            if (s) {
+              dataRef.current = s;
+              setData(s);
+              setNow(Date.now());
+            }
+          } catch {
+            /* 静默：30s 对账 tick 兜底 */
+          }
+        })();
+      }
       setNow(Date.now());
       pushBanner(ev);
       maybeChime(ev);
@@ -197,6 +231,31 @@ export default function Board({
     },
     [pushBanner, maybeChime]
   );
+
+  /** 卡片关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀，进历史归档）；
+   *  APP=软归档（任意状态可归档——叉不挑颜色；等同桌面端叉掉：删未读池行 +
+   *  看板隐藏，不自动回归，可从历史页移回）。二次确认防误触；确认后乐观移除
+   *  本地卡片（扫描/过滤 3s 内对齐；失败则卡片保留，扫描真相为准） */
+  const handleCardClose = useCallback((s: Session) => {
+    const isCli = s.form === "cli";
+    const msg = isCli
+      ? "关闭桌面终端？该会话将进入历史归档"
+      : "归档该会话？等同在桌面端叉掉：将从手机看板隐藏且不再自动回归，可从历史页移回";
+    if (!window.confirm(msg)) return;
+    void (isCli ? closeSession(s.id) : hideSession(s.id))
+      .then(() => {
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                sessions: prev.sessions.filter((x) => x.id !== s.id),
+                totalCount: Math.max(0, prev.totalCount - 1),
+              }
+            : prev
+        );
+      })
+      .catch(() => {}); // 失败静默：卡片保留，服务端扫描真相为准
+  }, []);
 
   const tick = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -355,6 +414,14 @@ export default function Board({
       <header className="mb-3 flex items-baseline justify-between">
         <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">会话看板</h1>
         <span className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onOpenHistory}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+            aria-label="历史会话"
+          >
+            🕘 历史
+          </button>
           <span className="hidden text-xs text-slate-500 sm:inline">
             {data ? `${data.totalCount} 个会话` : "加载中…"}
           </span>
@@ -510,6 +577,24 @@ export default function Board({
                 <span className="ml-auto shrink-0 text-xs text-slate-600 dark:text-slate-500">
                   {formatRelativeTime(s.lastActivityAt, now)}
                 </span>
+                {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
+                    APP=软归档（等同桌面端叉掉：任意状态可归档、不自动回归，可从
+                    历史页移回）。stopPropagation 防触发卡片点击进详情 */}
+                {
+                  <button
+                    type="button"
+                    data-testid={`card-close-${s.id}`}
+                    aria-label={s.form === "cli" ? "关闭终端" : "归档会话"}
+                    title={s.form === "cli" ? "关闭终端" : "归档会话"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCardClose(s);
+                    }}
+                    className="shrink-0 rounded-full p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                  >
+                    {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
+                  </button>
+                }
                 {/* 三色圆点：与桌面 StatusLight 同语义（waiting 附加呼吸动画） */}
                 <span
                   className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT_COLOR[s.status]} ${

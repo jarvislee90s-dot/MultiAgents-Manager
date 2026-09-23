@@ -22,12 +22,14 @@ import rehypeHighlight from "rehype-highlight";
 import {
   ArrowDownToLine,
   ArrowLeft,
+  ArrowUpToLine,
   ChevronDown,
   ChevronRight,
   PanelLeft,
   RotateCw,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
+import { collapsedLabel, isProcessKind } from "./message-fold";
 import ModeBar from "./ModeBar";
 import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
@@ -40,7 +42,6 @@ import {
   ApiError,
   fetchSessionFiles,
   fetchSessionMessages,
-  sessionOpen,
   type SessionFileEntry,
   type SessionMessage,
 } from "./api";
@@ -75,35 +76,6 @@ const POLL_FOLLOW_THRESHOLD_PX = 120;
  *  文件栏侧同步加 maxHeight = 100% - 该值，两处同源（常量单点） */
 const SPLIT_CONVERSATION_MIN_PX = 120;
 
-// R5 一键 resume（Task 11）：支持「在电脑上打开」的工具镜像表。
-// SSOT = src-tauri/src/inject/resume.rs 的 RESUME_TABLE（Step 1 实测取证），
-// 后端查证新工具回填后**两处必须同步**（前端镜像仅驱动按钮禁用态）。
-const RESUME_SUPPORTED_TOOLS: ReadonlySet<string> = new Set([
-  "claude",
-  "codex",
-  "kimi",
-  "opencode",
-]);
-
-/** 禁用原因（中文内联，移动端无 i18n 契约）：无 cwd / 无映射 → null = 可用 */
-function resumeUnavailableReason(session: Session): string | null {
-  if (!session.projectPath || !session.projectPath.trim()) {
-    return "该会话没有项目目录信息，无法在电脑上打开";
-  }
-  if (!RESUME_SUPPORTED_TOOLS.has(session.agentType)) {
-    return "该工具 resume 命令待查证，暂不支持一键打开";
-  }
-  return null;
-}
-
-/** 一键打开的失败文案（catch 分支）：按后端 404 哨兵码分診，未知码回落通用文案 */
-function resumeOpenErrorText(code: string | undefined): string {
-  if (code === "no_cwd") return "打开失败：该会话没有项目目录信息";
-  if (code === "no_resume_command") return "打开失败：该工具 resume 命令待查证";
-  if (code === "no_session") return "打开失败：会话已不在当前列表";
-  return "打开失败，请稍后重试";
-}
-
 interface SessionDetailProps {
   /** 完整会话对象（Task 8 裁决：详情页需要 status 判定自动折叠、projectName 页头、
    *  agentType；比传 id+agentType 再反查简单） */
@@ -136,24 +108,8 @@ interface LoadError {
 // 纯函数小件（组件外，独立可测）
 // ============================================================
 
-/** 折叠行的摘要标签 */
-function collapsedLabel(m: SessionMessage): string {
-  switch (m.kind) {
-    case "thinking":
-      return "思考过程";
-    case "tool-call":
-      return m.toolName ? `调用 ${m.toolName}` : "工具调用";
-    case "tool-result":
-      return "工具结果";
-    case "assistant":
-      return "更早的回复";
-    case "plan":
-      // 防御位：plan 一等卡片不可折叠（isToggleable/isCollapsed 恒展开），正常不渲染此头
-      return "计划";
-    default:
-      return "已折叠消息";
-  }
-}
+// collapsedLabel / isProcessKind 迁至 ./message-fold（2026-09-20 归档详情对齐批，
+// 纯搬家零语义变化——归档页共用同一套摘要文案与过程 kind 判定）
 
 /** 已知路径按长度降序（最长优先替换：路径互为前缀时不被短路径截断） */
 function sortedPaths(files: Set<string>): string[] {
@@ -173,22 +129,28 @@ export const JUMP_SHOW_THRESHOLD_PX = 240;
 /** 消息滚动区（两个布局分支共用，2026-09-20 抽取）：滚动容器 + 右下角
  *  「跳到最新」浮动按钮。对话一长，手翻到最新要很久（用户实测）；
  *  点击瞬时落底并立即恢复轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」）。
+ *  「跳到顶部」（2026-09-20 归档对齐批）：右上角镜像钮，距顶超阈值浮现，点击落 0
+ *  （到顶 = 本次加载窗口的顶——更早内容靠「加载更早消息」分页）。
  *  wrapper 持 relative 定位、滚动容器在内层：浮动按钮若放进滚动容器内部
- *  会随内容滚走，放 wrapper 上才能常驻右下角 */
+ *  会随内容滚走，放 wrapper 上才能常驻边角 */
 function MessageScrollArea({
   ref: areaRef,
   fontScale,
   showJump,
+  showJumpTop,
   onScroll,
   onJump,
+  onJumpTop,
   children,
 }: {
   /** 滚动容器 ref（React 19 ref-prop 通道；自建 areaRef prop 触发 react-hooks/refs） */
   ref?: Ref<HTMLDivElement>;
   fontScale: number;
   showJump: boolean;
+  showJumpTop: boolean;
   onScroll: () => void;
   onJump: () => void;
+  onJumpTop: () => void;
   children: ReactNode;
 }) {
   return (
@@ -202,6 +164,18 @@ function MessageScrollArea({
       >
         {children}
       </div>
+      {showJumpTop && (
+        <button
+          type="button"
+          data-testid="jump-to-top"
+          aria-label="跳到顶部"
+          title="跳到顶部"
+          onClick={onJumpTop}
+          className="absolute top-3 right-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
+          <ArrowUpToLine size={16} />
+        </button>
+      )}
       {showJump && (
         <button
           type="button"
@@ -361,6 +335,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // onScroll 驱动（此前消息区没有 onScroll 监听）；不动 pollFollowRef——
   // P2-B 的轮询前采样语义保持原样
   const [showJump, setShowJump] = useState(false);
+  // 「跳到顶部」浮动钮显隐（距顶超阈值；2026-09-20 归档对齐批与归档页同款交互）
+  const [showJumpTop, setShowJumpTop] = useState(false);
   // P2-B：下一次数据落地是否「跟随落底」的信号（等价于落底函数的 follow 参数）——
   // 轮询 tick 刷新前采样贴底状态写入；手动刷新（retry）置 true 无条件落底；
   // 初值 true 使首次加载落底。ref 而非 state：纯信号不驱动渲染
@@ -783,39 +759,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // ---- R5 一键 resume（在电脑上打开，Task 11）----
-  // 回执三分诊（评审 C1：HTTP 200 恒定、语义在 body.status，不得只看成功抛错）：
-  // - 404/网络失败（抛 ApiError）→ 按 404 错误码分診中文文案（与后端哨兵串对应）；
-  // - 200 {status:"failed",error} → 展示后端中文错误（spawn 出手失败，可重试）；
-  // - 200 {status:"opening"} → 短暂成功提示条（对齐桌面 toast 语义，移动端用
-  //   内联提示形态，3s 自清），按钮恢复可点（可重开）
-  const [opening, setOpening] = useState(false);
-  const [openError, setOpenError] = useState<string | null>(null);
-  const [openSuccess, setOpenSuccess] = useState<string | null>(null);
-  const resumeReason = resumeUnavailableReason(session);
-  // 成功提示条自清定时器：重开/切会话时先清旧提示，卸载/重提示时收掉定时器不泄漏
-  useEffect(() => {
-    if (openSuccess === null) return;
-    const t = setTimeout(() => setOpenSuccess(null), 3000);
-    return () => clearTimeout(t);
-  }, [openSuccess]);
-  const handleSessionOpen = useCallback(async () => {
-    setOpening(true);
-    setOpenError(null);
-    setOpenSuccess(null);
-    try {
-      const result = await sessionOpen(session.id);
-      if (result.status === "failed") {
-        setOpenError(`打开失败：${result.error}`);
-      } else {
-        setOpenSuccess("已让电脑打开终端，请查看电脑侧窗口");
-      }
-    } catch (e) {
-      const code = e instanceof ApiError ? (e.data?.error as string | undefined) : undefined;
-      setOpenError(resumeOpenErrorText(code));
-    } finally {
-      setOpening(false);
-    }
-  }, [session.id]);
+  // 2026-09-20 归档区裁决 2（spec 2026-09-20-mobile-archive-history，验收 E-6）：
+  // 活会话详情页不再提供「在电脑上打开」——resume 能力归 ArchiveDetail（历史页
+  // 「在桌面端打开」），可用性门与错误文案在 ./resume-gate.ts 共享。
 
   // ---- 书签（M3+，2026-09-16 用户裁决）----
   // 恢复：拿到 MAM 进程 bootId 后从 localStorage 种回内存单例（刷新页面/
@@ -970,10 +916,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // T1：plan 不在列 → 无折叠头（常驻计划卡片，不可折——与 isCollapsed 恒展开配套；
   // 因此 toggleableMessages/总结横幅折叠计数天然不含 plan）
   const isToggleable = (m: SessionMessage) =>
-    m.kind === "thinking" ||
-    m.kind === "tool-call" ||
-    m.kind === "tool-result" ||
-    (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
+    isProcessKind(m.kind) || (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
 
   // Bug 8（M3 验收）：总结模式折叠提示。折叠数 = 当前被折叠的可折叠条数——
   // 70 条过程消息被静默折叠会被误读为「内容被截」，顶部提示行 + 展开/收起全部
@@ -1009,11 +952,14 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const bookmarkByAnchor = useMemo(() => new Map(bookmarks.map((b) => [b.anchor, b])), [bookmarks]);
 
   // 「跳到最新」：距底超阈值时显示（onScroll 驱动）；点击瞬时落底并立即恢复
-  // 轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」的明确意图）
+  // 轮询跟随（P2-B 采样语义不变——跳底本就是「我要贴底」的明确意图）。
+  // 「跳到顶部」（2026-09-20 归档对齐批）：距顶超阈值时显示，点击落 0——
+  // 上滑离开顶部后一键回顶，不触碰轮询跟随语义（落顶即视为上翻阅读中）
   const handleAreaScroll = useCallback(() => {
     const el = messageAreaRef.current;
     if (!el) return;
     setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > JUMP_SHOW_THRESHOLD_PX);
+    setShowJumpTop(el.scrollTop > JUMP_SHOW_THRESHOLD_PX);
   }, []);
 
   const jumpToLatest = useCallback(() => {
@@ -1022,6 +968,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     pollFollowRef.current = true;
     el.scrollTop = el.scrollHeight;
     setShowJump(false);
+  }, []);
+
+  const jumpToTop = useCallback(() => {
+    const el = messageAreaRef.current;
+    if (!el) return;
+    el.scrollTop = 0;
+    setShowJumpTop(false);
   }, []);
 
   // 书签条（两个布局分支共用同一份 JSX）。processToggle：过程一键折叠开关
@@ -1318,8 +1271,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
+              showJumpTop={showJumpTop}
               onScroll={handleAreaScroll}
               onJump={jumpToLatest}
+              onJumpTop={jumpToTop}
               ref={messageAreaRef}
             >
               {messageArea}
@@ -1382,43 +1337,6 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           {bookmarkBar}
-          {/* R5 一键 resume（在电脑上打开，Task 11）：无 cwd / 无映射 → 禁用 + 原因。
-              注：本件仍仅正文视图挂载——它是「离开本页去电脑端」的入口，
-              与分屏无关；ApproveCard / MessageComposer 已改为全布局态挂载
-              （2026-09-19 用户裁决，见分屏分支注释） */}
-          <div className="shrink-0 px-3 pt-2">
-            <button
-              type="button"
-              data-testid="session-open"
-              disabled={resumeReason !== null || opening}
-              title={resumeReason ?? undefined}
-              onClick={handleSessionOpen}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 enabled:hover:bg-slate-100 disabled:opacity-50 dark:border-slate-800 dark:text-slate-300 dark:enabled:hover:bg-slate-900"
-            >
-              {opening ? "正在电脑上打开终端…" : "在电脑上打开"}
-            </button>
-            {resumeReason && (
-              <p className="mt-1 text-center text-xs text-slate-400 dark:text-slate-500">
-                {resumeReason}
-              </p>
-            )}
-            {openError && (
-              <p
-                data-testid="session-open-error"
-                className="mt-1 text-center text-xs text-rose-600 dark:text-rose-400"
-              >
-                {openError}
-              </p>
-            )}
-            {openSuccess && !openError && (
-              <p
-                data-testid="session-open-success"
-                className="mt-1 text-center text-xs text-emerald-600 dark:text-emerald-400"
-              >
-                {openSuccess}
-              </p>
-            )}
-          </div>
           {/* 审批红卡（M8 Task 12）：waiting 态挂载；紧贴 messageArea 上方；
               available=false 时卡自身自隐（组件内部判定）。
               刷新机制（T1 活状态流更新口径）：App 的 selected 按 (agentType,id)
@@ -1442,8 +1360,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           <MessageScrollArea
             fontScale={fontScale}
             showJump={showJump}
+            showJumpTop={showJumpTop}
             onScroll={handleAreaScroll}
             onJump={jumpToLatest}
+            onJumpTop={jumpToTop}
             ref={messageAreaRef}
           >
             {messageArea}

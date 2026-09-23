@@ -994,3 +994,80 @@ export async function sessionOpen(sessionId: string): Promise<SessionOpenResult>
   }
   return (await r.json()) as SessionOpenResult;
 }
+
+// ==== 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）====
+export interface ArchivedSession {
+  sessionId: string;
+  agentType: string;
+  projectPath: string;
+  projectName: string;
+  title: string | null;
+  lastStatus: string;
+  lastSeenAt: string;
+  /** 软归档活会话标记（体验批二）：true = 看板隐藏中的活会话（APP 形态），
+   *  详情页动作是「移回看板」而非「在桌面端打开」 */
+  hiddenAlive?: boolean;
+}
+
+export interface ArchivedPayload {
+  archived: ArchivedSession[];
+  projects: string[];
+}
+
+/** 懒加载归档列表（进入历史页/切换天数时调用；403 → null 回配对页） */
+export async function fetchArchivedSessions(days: 1 | 3 | 7): Promise<ArchivedPayload | null> {
+  const r = await fetch(`/m/api/v1/sessions-archived?days=${days}`);
+  if (r.status === 403) return null;
+  if (!r.ok) {
+    throw new ApiError(r.status, `sessions-archived ${r.status}`);
+  }
+  return r.json() as Promise<ArchivedPayload>;
+}
+
+/** 归档手动管理（spec 裁决 8）：带 id = 单条移除；缺省 = 清空全部 */
+export async function deleteArchivedSession(sessionId?: string): Promise<number> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "?all=1";
+  const r = await fetch(`/m/api/v1/sessions-archived${qs}`, { method: "DELETE" });
+  if (!r.ok) throw new ApiError(r.status, `sessions-archived DELETE ${r.status}`);
+  const data = (await r.json()) as { deleted: number };
+  return data.deleted;
+}
+
+// ==== 看板关闭/软归档（2026-09-20 体验批二）====
+
+/** {sessionId} 请求体（close/hide/unhide 三端点共用） */
+function sessionActionBody(sessionId: string): string {
+  return JSON.stringify({ sessionId });
+}
+
+/** 远程硬杀 CLI 会话终端（桌面 kill_session 同内核）：进程死 → 3s 内下板 → 进历史归档。
+ *  App 形态端点拒绝（400 form_not_supported）——软归档走 hideSession */
+export async function closeSession(sessionId: string): Promise<void> {
+  const r = await fetch("/m/api/v1/session-close", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: sessionActionBody(sessionId),
+  });
+  if (!r.ok) throw new ApiError(r.status, `session-close ${r.status}`);
+}
+
+/** APP 形态软归档（看板隐藏，不杀进程、可逆）：仅绿态可用（非绿 400 not_green），
+ *  会话恢复活动时服务端自动解除隐藏回板 */
+export async function hideSession(sessionId: string): Promise<void> {
+  const r = await fetch("/m/api/v1/session-hide", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: sessionActionBody(sessionId),
+  });
+  if (!r.ok) throw new ApiError(r.status, `session-hide ${r.status}`);
+}
+
+/** 解除软归档（移回看板）。幂等：不在隐藏集也 ok（removed=0） */
+export async function unhideSession(sessionId: string): Promise<void> {
+  const r = await fetch("/m/api/v1/session-unhide", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: sessionActionBody(sessionId),
+  });
+  if (!r.ok) throw new ApiError(r.status, `session-unhide ${r.status}`);
+}

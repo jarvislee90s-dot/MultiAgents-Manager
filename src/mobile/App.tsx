@@ -1,7 +1,10 @@
 import { useCallback, useState } from "react";
+import ArchiveBoard from "./ArchiveBoard";
+import ArchiveDetail from "./ArchiveDetail";
 import Board from "./Board";
 import PairPage from "./PairPage";
 import SessionDetail from "./SessionDetail";
+import type { ArchivedSession } from "./api";
 import type { Session } from "@/types/session";
 
 /** Session 字段全为原始值（string|number|boolean|null）→ 逐字段浅比较即全等。
@@ -29,6 +32,10 @@ export default function App() {
   // 对齐到 Board 既有轮询数据（SSE 跃迁/快照 + 降级 3s 轮询）——停留详情期间
   // status 自动更新（红卡/总结横幅自动切换），无需重进页面
   const [selected, setSelected] = useState<Session | null>(null);
+  // 历史会话区（spec §7.1）：historyOpen = 历史页开关；archiveSelected = 当前查看的
+  // 归档会话（历史页 → 归档详情）。激活回执（onActivated）一次清两级——乐观回看板
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [archiveSelected, setArchiveSelected] = useState<ArchivedSession | null>(null);
   // onPaired 双通道复用（PairPage 手动配对成功 / Board 首拍探测成功）：
   // Board 侧一次挂载只发一次，重复置 true 时 React 对相同值自动 bail out，无谓重渲染可忽略
   const onPaired = useCallback(() => setPaired(true), []);
@@ -50,18 +57,37 @@ export default function App() {
 
   return (
     <>
-      {/* Board 常驻持轮询（探测也来自轮询首拍）；未配对态 / 查看详情时隐藏 */}
+      {/* Board 常驻持轮询（探测也来自轮询首拍）；未配对态 / 查看详情 / 历史页时隐藏
+          （hidden 而非卸载：会话数据与轮询保持，返回免重拉） */}
       {paired !== false && (
-        <div className={paired === true && !selected ? "contents" : "hidden"}>
+        <div className={paired === true && !selected && !historyOpen ? "contents" : "hidden"}>
           <Board
             onPaired={onPaired}
             onUnpaired={onUnpaired}
             onOpenSession={setSelected}
+            onOpenHistory={() => setHistoryOpen(true)}
             onSessionsChanged={handleSessionsChanged}
           />
         </div>
       )}
       {paired === true && selected && <SessionDetail session={selected} onBack={onBackToBoard} />}
+      {paired === true && historyOpen && !archiveSelected && (
+        <ArchiveBoard
+          onBack={() => setHistoryOpen(false)}
+          onOpenCard={setArchiveSelected}
+          onUnpaired={onUnpaired}
+        />
+      )}
+      {paired === true && historyOpen && archiveSelected && (
+        <ArchiveDetail
+          session={archiveSelected}
+          onBack={() => setArchiveSelected(null)}
+          onActivated={() => {
+            setArchiveSelected(null);
+            setHistoryOpen(false);
+          }}
+        />
+      )}
       {/* M5 P3-b：null（探测中）与 false（未配对）分診——探测期渲染连接指示器，
           不再出现密码表单（实测走隧道探测有一二十秒延迟，密码页先出像「时滞掉线」） */}
       {paired !== true && <PairPage onPaired={onPaired} probing={paired === null} />}

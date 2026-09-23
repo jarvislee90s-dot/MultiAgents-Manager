@@ -1112,6 +1112,11 @@ mod tests {
             message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
             sse_registry: std::sync::Arc::new(crate::remote::server::SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
@@ -1128,6 +1133,8 @@ mod tests {
             screen_probe: std::sync::Arc::new(|_, _| None),
             // R5 一键 resume spawn 缝（Task 11）：flush 路径不消费，注 no-op 桩（零真开窗）
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
         }
     }
 

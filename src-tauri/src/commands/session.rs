@@ -389,15 +389,24 @@ fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, Str
     v
 }
 
-#[tauri::command]
-pub fn kill_session(pid: u32) -> Result<(), String> {
+/// 杀进程内核（CLI 会话硬杀）：桌面 kill_session 与远程 /session-close 共用。
+/// sysinfo kill_with(Signal::Term)：macOS/Linux=SIGTERM；Windows 不支持 Term 信号
+/// （kill_with 返回 None）→ 回落 process.kill()（TerminateProcess），两平台都保证结束。
+pub fn kill_pid(pid: u32) -> Result<(), String> {
     use sysinfo::{Pid, Signal};
     if let Some(process) = sysinfo::System::new_all().process(Pid::from_u32(pid)) {
-        process.kill_with(Signal::Term);
+        if process.kill_with(Signal::Term).is_none() {
+            process.kill();
+        }
         Ok(())
     } else {
         Err(format!("进程 {} 不存在", pid))
     }
+}
+
+#[tauri::command]
+pub fn kill_session(pid: u32) -> Result<(), String> {
+    kill_pid(pid)
 }
 
 #[cfg(test)]

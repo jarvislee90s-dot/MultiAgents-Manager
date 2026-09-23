@@ -1021,3 +1021,132 @@ describe("Board 卡片暗色边框（2026-09-16 用户裁决）", () => {
     expect(cls).not.toContain("dark:border-transparent");
   });
 });
+
+// ==== 卡片关闭/归档开关（体验批二）====
+describe("Board 卡片关闭/归档开关", () => {
+  function renderWithCard(s: Session) {
+    installSse(sessionsWith([s]));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 404 }))
+    );
+    render(<Board onPaired={() => {}} onUnpaired={() => {}} />);
+    return advance(0);
+  }
+
+  it("CLI 卡片显示关闭终端钮：确认后调 session-close 并乐观移除卡片", async () => {
+    await renderWithCard(
+      chipSession({ id: "c1", agentType: "claude", lastActivityAt: "2026-09-20T10:00:00Z" })
+    );
+    const closeCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/session-close")) {
+          closeCalls.push(String(url));
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    expect(screen.getByTestId("card-close-c1")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("card-close-c1"));
+    await advance(0);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(closeCalls).toHaveLength(1);
+    expect(screen.queryByTestId("card-close-c1")).toBeNull(); // 乐观移除
+  });
+
+  it("APP 绿态卡片显示归档钮：确认后调 session-hide", async () => {
+    await renderWithCard(
+      chipSession({
+        id: "a1", agentType: "codex", lastActivityAt: "2026-09-20T10:00:00Z",
+        form: "app", status: "idle",
+      })
+    );
+    const hideCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/session-hide")) {
+          hideCalls.push(String(url));
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    expect(screen.getByTestId("card-close-a1")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("card-close-a1"));
+    await advance(0);
+    expect(hideCalls).toHaveLength(1);
+    expect(screen.queryByTestId("card-close-a1")).toBeNull();
+  });
+
+  it("APP 非绿态卡片同样显示归档钮且可归档（叉不挑颜色）", async () => {
+    await renderWithCard(
+      chipSession({
+        id: "a2", agentType: "codex", lastActivityAt: "2026-09-20T10:00:00Z",
+        form: "app", status: "processing",
+      })
+    );
+    const hideCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/session-hide")) {
+          hideCalls.push(String(url));
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    expect(screen.getByTestId("card-close-a2")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("card-close-a2"));
+    await advance(0);
+    expect(hideCalls).toHaveLength(1);
+    expect(screen.queryByTestId("card-close-a2")).toBeNull();
+  });
+
+  it("取消确认不发请求不移除卡片", async () => {
+    await renderWithCard(
+      chipSession({ id: "c2", agentType: "claude", lastActivityAt: "2026-09-20T10:00:00Z" })
+    );
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(String(url));
+        return new Response("{}", { status: 200 });
+      })
+    );
+    vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+    fireEvent.click(screen.getByTestId("card-close-c2"));
+    await advance(0);
+    expect(calls.filter((c) => c.includes("/session-close"))).toHaveLength(0);
+    expect(screen.getByTestId("card-close-c2")).toBeTruthy(); // 卡片保留
+  });
+
+  it("未知会话的跃迁触发静默重拉（软归档自动回归到达路径）", async () => {
+    installSse(sessionsWith([]));
+    let sessionsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/m/api/v1/sessions")) {
+          sessionsCalls += 1;
+          return new Response(JSON.stringify(sessionsWith([])), { status: 200 });
+        }
+        return new Response("", { status: 403 });
+      })
+    );
+    render(<Board onPaired={() => {}} onUnpaired={() => {}} />);
+    await advance(0);
+    const before = sessionsCalls;
+    emitFrame("transition", transitionEvent({ sessionId: "unknown-1" }));
+    await advance(0);
+    expect(sessionsCalls).toBeGreaterThan(before);
+  });
+});
