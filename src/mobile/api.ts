@@ -1051,8 +1051,9 @@ export async function closeSession(sessionId: string): Promise<void> {
   if (!r.ok) throw new ApiError(r.status, `session-close ${r.status}`);
 }
 
-/** APP 形态软归档（看板隐藏，不杀进程、可逆）：仅绿态可用（非绿 400 not_green），
- *  会话恢复活动时服务端自动解除隐藏回板 */
+/** APP 形态软归档（看板隐藏，不杀进程、可逆）：任意状态可归档（叉不挑颜色），
+ *  等同桌面端叉掉——不自动回归，恢复唯一路径 = 历史页「移回看板」（unhideSession）；
+ *  CLI 会话端点拒绝（400 form_not_supported）——硬杀走 closeSession */
 export async function hideSession(sessionId: string): Promise<void> {
   const r = await fetch("/m/api/v1/session-hide", {
     method: "POST",

@@ -205,10 +205,11 @@ export default function Board({
       // 命中会话才换数组引用；未命中（新会话 / 已消失 / 坏状态串）返回原引用，
       // setData 走引用相等短路零重渲染
       setData((prev) => (prev ? { ...prev, sessions: applyTransition(prev.sessions, ev) } : prev));
-      // 软归档自动回归到达路径（体验批二）：跃迁会话不在当前看板 = 可能正被软归档
-      // 隐藏且有了活动——服务端已在 /sessions 懒解除隐藏，但 SSE transition 只 patch
-      // 已知卡片（applyTransition 忽略未知 id），静默重拉一次全量把回归卡片接回来。
-      // 经 dataRef 读最新列表（handleTransition 稳定引用，SSE 订阅不因 data 变化重连）
+      // 未知会话的跃迁到达（体验批二）：新会话首拍（此前不在板上）或软归档隐藏
+      // 会话的活动（隐藏卡片仍被 /sessions 过滤——无自动回归，重拉无害）——SSE
+      // transition 只 patch 已知卡片（applyTransition 忽略未知 id），静默重拉一次
+      // 全量把新卡片接进来。经 dataRef 读最新列表（handleTransition 稳定引用，
+      // SSE 订阅不因 data 变化重连）
       if (!(dataRef.current?.sessions.some((x) => x.id === ev.sessionId) ?? false)) {
         void (async () => {
           try {
@@ -580,21 +581,19 @@ export default function Board({
                 {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
                     APP=软归档（等同桌面端叉掉：任意状态可归档、不自动回归，可从
                     历史页移回）。stopPropagation 防触发卡片点击进详情 */}
-                {
-                  <button
-                    type="button"
-                    data-testid={`card-close-${s.id}`}
-                    aria-label={s.form === "cli" ? "关闭终端" : "归档会话"}
-                    title={s.form === "cli" ? "关闭终端" : "归档会话"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleCardClose(s);
-                    }}
-                    className="shrink-0 rounded-full p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-                  >
-                    {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
-                  </button>
-                }
+                <button
+                  type="button"
+                  data-testid={`card-close-${s.id}`}
+                  aria-label={s.form === "cli" ? "关闭终端" : "归档会话"}
+                  title={s.form === "cli" ? "关闭终端" : "归档会话"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleCardClose(s);
+                  }}
+                  className="shrink-0 rounded-full p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                >
+                  {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
+                </button>
                 {/* 三色圆点：与桌面 StatusLight 同语义（waiting 附加呼吸动画） */}
                 <span
                   className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT_COLOR[s.status]} ${
