@@ -144,7 +144,9 @@ pub fn session_stamp_hit(
 
 /// 直发确认轮询间隔（毫秒）：提交即时发生、秒级命中口径下的步距
 const PROBE_INTERVAL_MS: Duration = Duration::from_millis(500);
-/// 补按回车后的复查窗（毫秒）：回车提交后会话文件落盘的宽限
+/// 补按回车后的复查窗（毫秒）：回车提交后会话文件落盘的宽限。仅 Windows 执行侧
+/// （direct_recovery 屏读复查）消费——非 Windows 编译下按先例条件化 allow
+#[cfg_attr(not(windows), allow(dead_code))]
 const RECHECK_MS: u64 = 3_000;
 /// 直发确认失败回执（裁决 A1 文案）：注入成功但会话文件未见戳——提交未发生，
 /// 重试由用户判断（重试语义 = 用户先检查终端再重试，不自动重发防重复正文）
@@ -163,6 +165,7 @@ const DIRECT_CONFIRM_FAIL_MACOS_SWALLOWED: &str =
 /// 提示符文本与超短消息理论上可撞车（探针恰为终端提示符片段）；折行长文只能读
 /// 到光标所在尾视觉行（`windows_console::read_input_tail` 契约），长文首部滞留
 /// 不可见——判定成立才补回车，不成立不动作（保守方向安全）。
+#[cfg_attr(not(windows), allow(dead_code))]
 const SCREEN_PROBE_CHARS: usize = 16;
 /// 插队等待占用排空上限（毫秒，§8.1）：busy TUI 消费写入缓冲的宽限。
 ///
@@ -172,6 +175,7 @@ const SCREEN_PROBE_CHARS: usize = 16;
 /// 由模型侧异步收尾，时长由模型决定；本窗由 TUI 消费速率决定。两者**刻意不等值**
 /// （2026-09-22 R2 复评补此注：旧版把 2000/3000 并列却不解释，被评审点名为「不对称
 /// 无注释」）。
+#[cfg_attr(not(windows), allow(dead_code))]
 const JUMP_DRAIN_TIMEOUT_MS: u64 = 2_000;
 
 /// 插队「等回合停」的**判据串**（忙态标记，claude 真机原文核实）。
@@ -532,6 +536,7 @@ impl TurnStopWait {
 
 /// 排空超时回执（对齐 PARTIAL_WARN 防重纪律，质量评审 Minor 3）：目标可能仍在
 /// 消费，盲目重试会叠加正文——先引导人工检查终端
+#[cfg_attr(not(windows), allow(dead_code))]
 const DELIVERY_TIMEOUT_MSG: &str = "投递超时（目标可能仍在消费，重试前请检查终端）";
 
 /// 直发确认失败文案选择（纯函数，F2 更正：文案按「工具 × 平台」感知，跨平台
@@ -563,6 +568,8 @@ fn probe_hits(st: &crate::remote::server::RemoteState, tool: &str, sid: &str, st
 /// 丁T3 裁2 适配：与 [`stamp_of`] 同源的尾部判据——探针若含尾部签名，则同一设备的
 /// 任意消息在输入行上都能判「滞留」（滞留判定退化成设备级），补回车的恢复动作会在
 /// 消息其实已被消费时凭空多发一颗回车（那会误激活对话框的默认项）。
+/// 仅 Windows 执行侧（direct_recovery 屏读分诊）调用。
+#[cfg_attr(not(windows), allow(dead_code))]
 fn screen_probe(content: &str) -> String {
     let trimmed = super::normalize::strip_mobile_signature(content);
     let skip = trimmed.chars().count().saturating_sub(SCREEN_PROBE_CHARS);
@@ -573,6 +580,7 @@ fn screen_probe(content: &str) -> String {
 /// 「戳超时未中」之后屏读回查（滞留判定 → 补按回车 → 复查）观察到的四种结局，
 /// 外加非 Windows 平台「无屏读能力」的降级格。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) enum ScreenRecovery {
     /// 屏读**无滞留草稿**：注入的字不在输入行上 = 已被 TUI 收进内部队列
     /// （busy TUI 消费草稿的常态；屏读 Err 同归本格——无滞留证据，保守不补键）。

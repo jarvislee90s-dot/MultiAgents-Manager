@@ -5467,6 +5467,8 @@ fn receipt_and_verdict(
 }
 
 /// 菜单路径的**注入结果**（三路共用；`Menu` 带出核验结果供回执使用）。
+/// `Menu` 构造点在 Windows 菜单路径内——非 Windows 编译下按先例条件化 allow。
+#[cfg_attr(not(windows), allow(dead_code))]
 enum InjectAttempt {
     /// Key / Text 路：投递完成，无额外核验
     Plain,
@@ -5518,7 +5520,7 @@ fn menu_stages(
         // 非 Windows 无屏读 → 菜单路径无法定位（数字直达与闭环导航都必须屏读）。
         // **如实回执**：不盲发（猜错会选到别的档——与导航的保守面同源）。
         let _ = (tool, group, target, open_cmd, pid, spec, injector);
-        return Err("本平台无屏读，权限菜单无法定位（命令已发送，请在终端选择档位）".to_string());
+        Err("本平台无屏读，权限菜单无法定位（命令已发送，请在终端选择档位）".to_string())
     }
     #[cfg(windows)]
     {
