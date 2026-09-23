@@ -4247,23 +4247,47 @@ fn read_mode_from_screen(
 /// 「模式未知」。本表记录**每次 verified=true 的权限组切换**（session_id → 档 wire
 /// 词），GET 从此回放（无记录 = null，前端照旧显示「模式未知」）。
 ///
-/// 已知边界（如实登记，台账「codex 模式切换改造」节）：进程内存（重启即清）；
-/// 用户在终端手改档位后记忆会失真——前端以「上次切换」标注明示口径，不声称实时。
+/// 已知边界（如实登记，台账「codex 模式切换改造」节）：用户在终端手改档位后记忆
+/// 会失真——前端以「上次切换」标注明示口径，不声称实时。**持久化（2026-09-23 二轮
+/// 用户反馈「模式未知」）**：内存 + settings KV（`mode:perm-tier:<sid>`）双写，重启
+/// 后内存清零但 GET 从 KV 回放——不再每次部署/重启都退回「模式未知」。
 static PERMISSION_TIER_MEMORY: once_cell::sync::Lazy<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// 记录一次 verified 的权限组切换结果
-pub(crate) fn remember_permission_tier(sid: &str, tier_wire: &str) {
+fn permission_tier_kv_key(sid: &str) -> String {
+    format!("mode:perm-tier:{sid}")
+}
+
+/// 记录一次 verified 的权限组切换结果（内存 + settings KV 双写；KV 走
+/// `store.with`——测试注入 memory 库，零接触真实 ~/.mam）
+pub(crate) fn remember_permission_tier(
+    store: &super::pairing::DeviceStore,
+    sid: &str,
+    tier_wire: &str,
+) {
     if let Ok(mut m) = PERMISSION_TIER_MEMORY.lock() {
         m.insert(sid.to_string(), tier_wire.to_string());
     }
+    let key = permission_tier_kv_key(sid);
+    store.with(|c| crate::database::dao::settings::set_setting_conn(c, &key, tier_wire));
 }
 
-/// 回放某会话最近一次 verified 的权限档（无记录 / 解析失败 → None）
-pub(crate) fn recall_permission_tier(sid: &str) -> Option<crate::inject::mode::MamMode> {
-    let wire = PERMISSION_TIER_MEMORY.lock().ok()?.get(sid).cloned()?;
-    crate::inject::mode::MamMode::parse(&wire)
+/// 回放某会话最近一次 verified 的权限档（内存未命中查 KV 并回填；都无 / 解析失败 → None）
+pub(crate) fn recall_permission_tier(
+    store: &super::pairing::DeviceStore,
+    sid: &str,
+) -> Option<crate::inject::mode::MamMode> {
+    if let Some(wire) = PERMISSION_TIER_MEMORY.lock().ok()?.get(sid).cloned() {
+        return crate::inject::mode::MamMode::parse(&wire);
+    }
+    let key = permission_tier_kv_key(sid);
+    let wire = store.with(|c| crate::database::dao::settings::get_setting_conn(c, &key))?;
+    let mode = crate::inject::mode::MamMode::parse(&wire)?;
+    if let Ok(mut m) = PERMISSION_TIER_MEMORY.lock() {
+        m.insert(sid.to_string(), wire);
+    }
+    Some(mode)
 }
 
 pub async fn session_mode(
@@ -4315,7 +4339,7 @@ pub async fn session_mode(
             let current = if g.id == crate::inject::mode::ModeGroupId::Mode {
                 hit.current
             } else {
-                recall_permission_tier(&sid)
+                recall_permission_tier(&st.store, &sid)
             };
             serde_json::json!({
                 "id": g.id.wire(),
@@ -4943,7 +4967,7 @@ pub async fn session_mode_switch(
             // 权限档记忆：verified=true 的权限组切换写入「上次切换」表
             // （GET 的权限组 current 回放数据源；见 [`PERMISSION_TIER_MEMORY`]）
             if verified && group == crate::inject::mode::ModeGroupId::Permission {
-                remember_permission_tier(&sid, mode.wire());
+                remember_permission_tier(&st.store, &sid, mode.wire());
             }
             (
                 StatusCode::OK,
@@ -5060,6 +5084,7 @@ fn menu_stages(
         // codex 走**数字直达**编排（2026-09-23 用户实测：菜单内按档位数字键直达；
         // 方向键闭环退役——kimi 菜单无屏上编号，仍走闭环）
         if tool == "codex" {
+            let started = std::time::Instant::now();
             let key_delay = || {
                 std::thread::sleep(std::time::Duration::from_millis(
                     crate::inject::families::SUBMIT_DELAY_MS,
@@ -5100,15 +5125,18 @@ fn menu_stages(
                 },
                 &mut terminal,
             )?;
-            log::debug!(
-                "codex 权限菜单：数字直达完成（菜单键：{}；确认框 {}；回执 {:?}）",
+            log::info!(
+                "codex 权限直达完成（目标 {}；菜单键 {}；确认框 {}；回执 {:?}；总耗时 {}ms，含步骤间硬性 ≥{}ms 间隔）",
+                target.label(),
                 outcome.menu_keys.join(","),
                 if outcome.confirm_done {
                     "已走完"
                 } else {
                     "未出现"
                 },
-                outcome.receipt_seen
+                outcome.receipt_seen,
+                started.elapsed().as_millis(),
+                crate::inject::timing::MODE_STEP_MIN_GAP_MS,
             );
             return Ok(InjectAttempt::Menu {
                 receipt_seen: outcome.receipt_seen,

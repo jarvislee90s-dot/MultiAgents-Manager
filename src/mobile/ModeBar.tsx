@@ -247,7 +247,11 @@ function ModeGroupRow({
       {showGroupLabel && (
         <span className="text-[11px] text-slate-400 dark:text-slate-500">{group.label}</span>
       )}
-      <span className="text-xs text-slate-500 dark:text-slate-400">模式</span>
+      {/* 单组（无组标题）时给当前档一个「当前」前缀；二维两行组已有组标题
+          （模式/权限），再叠「模式」二字会读成「模式 模式 …」（用户 2026-09-23） */}
+      {!showGroupLabel && (
+        <span className="text-xs text-slate-500 dark:text-slate-400">当前</span>
+      )}
       <span
         data-testid={`mode-current-${group.id}`}
         className={`text-xs font-semibold ${

@@ -9180,7 +9180,7 @@ mod tests {
         assert!(v["groups"][1]["current"].is_null(), "无记忆 → 模式未知");
 
         // 记忆后：GET 回放为 current/currentLabel（模拟一次 verified=true 的切换）
-        crate::remote::api::remember_permission_tier(&sid, "readOnly");
+        crate::remote::api::remember_permission_tier(&state.store, &sid, "readOnly");
         let app = router(state);
         let r = app
             .oneshot(req(

@@ -5032,6 +5032,61 @@ mod tests {
         assert_eq!(opens, 0, "纯净未验证前不得开菜单");
     }
 
+    /// **实机取证探针（#[ignore]，零注入）**：codex composer 前缀码点定案工具。
+    ///
+    /// 背景：`composer_residue` 的判据=「footer 之上最近的光标标记行」（标记集合
+    /// ›/❯/▶/>），但 **codex composer 前缀的真实码点无档案记录**——用户 2026-09-23
+    /// 反馈输入行残留清理未生效，需要 composer 行的屏读原文+码点定判据。
+    ///
+    /// 跑法：codex TUI 正在运行、composer 里先随便打几个字符（如 `ab1`，不要提交）
+    /// → `cargo test --lib codex_composer_codepoint -- --ignored --nocapture`
+    /// → 输出=每个 codex 进程可见窗底部 14 行 + 每行前 4 字符的码点；贴回即定案。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机取证：codex composer 前缀码点（前置=codex TUI 运行中 + composer 已打字）"]
+    fn codex_composer_codepoint_live_probe() {
+        use sysinfo::ProcessesToUpdate;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always),
+        );
+        let pids: Vec<u32> = system
+            .processes()
+            .values()
+            .filter(|p| {
+                let name = p.name().to_string_lossy().to_lowercase();
+                name.contains("codex") && !name.contains("multi-agents-manager")
+            })
+            .map(|p| p.pid().as_u32())
+            .collect();
+        eprintln!("发现 codex 进程：{pids:?}");
+        if pids.is_empty() {
+            eprintln!("未发现 codex 进程——请先启动 codex TUI 并在 composer 打几个字");
+            return;
+        }
+        for pid in pids {
+            let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+                eprintln!("pid={pid} 屏读失败（无控制台/权限不足）");
+                continue;
+            };
+            eprintln!(
+                "==== pid={pid} 可见窗 {} 行；底部 14 行（前 4 字符码点）====",
+                lines.len()
+            );
+            let start = lines.len().saturating_sub(14);
+            for (i, l) in lines[start..].iter().enumerate() {
+                let codes: Vec<String> = l
+                    .chars()
+                    .take(4)
+                    .map(|c| format!("U+{:04X}", c as u32))
+                    .collect();
+                eprintln!("行{} {:?}  码点[{}]", start + i, l, codes.join(" "));
+            }
+        }
+    }
+
     /// **数字直达的输入行残留现场（真机夹具）**：用户走查截图里堆积的
     /// `/permissions/permissions` 与 `Plan mode` 底栏——同屏条件下 footer 解析
     /// 仍判 Plan（残留不干扰回读）、菜单判据不受历史回显影响。
