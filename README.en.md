@@ -22,17 +22,61 @@ English · [中文](README.md)
 
 Real-time traffic-light status board for all active AI coding tool sessions.
 
-| Status | Meaning |
-|--------|---------|
-| 🔴 Red | Waiting for user input |
-| 🟡 Yellow | Processing / Thinking |
-| 🟢 Green | Idle / Finished |
+| Status    | Meaning                |
+| --------- | ---------------------- |
+| 🔴 Red    | Waiting for user input |
+| 🟡 Yellow | Processing / Thinking  |
+| 🟢 Green  | Idle / Finished        |
 
 - Auto-discovers running **Claude Code**, **Codex CLI/APP**, **OpenCode**, **OpenClaw**, **Kimi Code**, **WorkBuddy**, **ZCode**, and **dsh** sessions
 - Distinguishes CLI vs. desktop APP form: APP sessions support session-level deep-link jumps (`workbuddy://chat/<id>`, `codex://threads/<id>`, with APP-foreground fallback) and persistent unread cards (kept across restarts, cleared when the host exits); dsh (web-hosted) jumps focus/open the dsh tab in your browser (macOS)
 - Shows project name, git branch, last message preview, CPU usage, runtime
 - Sorts by priority: waiting → running → idle
 - System tray icon reflects aggregate status (🔴/🟡/🟢)
+
+### Remote Access & Mobile Board (LAN / Quick Tunnel / Named Tunnel)
+
+Open the same eight-tool session board from your phone browser. Settings → Remote Access offers **three connection methods, each with its own switch and usable simultaneously**:
+
+| Method                          | When to use                                                   | Notes                                                                                                                                                                                                 |
+| ------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 📶 LAN                          | Phone and computer on the same WiFi / cable (**recommended**) | Fastest; requires the access PIN                                                                                                                                                                      |
+| 🔀 Quick tunnel                 | You're away and your phone is on cellular                     | Public, no signup (Cloudflare); **address changes every time it's enabled**                                                                                                                           |
+| 🌐 Named tunnel (custom domain) | You want a stable entry point                                 | Needs a Cloudflare account (free plan works) + a Tunnel Token; the address is **permanent** once configured — MAM downloads and supervises cloudflared for you, with a step-by-step guide in Settings |
+
+A "Local" channel is always on alongside the master switch: loopback-only, no PIN, and it doubles as the relay endpoint for tunnel traffic (not used by phones).
+
+![Remote Access · desktop settings page](docs/images/remote-settings-v0.5.0.png)
+
+How to connect: turn on "Enable Remote Access" → enable the channel you want → click its card to reveal the address / QR code (**the link already contains the PIN, so scanning fills it in automatically**) → open it on your phone (**the URL must end with `/m`**). The PIN applies to LAN and both tunnels: enter it once per device for **180 days**, and after a PIN change every device must re-enter it. Paired devices can be renamed or kicked from the "Paired Devices" list (up to 10).
+
+**Live board**: session status changes are pushed to your phone within ~2 seconds (SSE as the primary channel) — banner, chime, and vibration, with a tap taking you straight to that session; if the stream drops it degrades to 3-second polling automatically. Transition deduplication uses the same server-side logic as desktop notifications.
+
+**Session detail page** (ZCode-style conversation view, unified across all eight tools):
+
+- Expand details while running (thinking / tool calls are collapsible), auto-collapse to the final summary once a turn completes
+- Markdown rendering (headings / lists / tables / code highlighting); project file paths in the text become clickable links
+- **File panel**: aggregates the files a session touched, newest first, with document/image filters and a **200 / 500 / 1000 message** look-back range; **modified** files are highlighted and **read-only** ones are neutral (both previewable), and tapping the secondary line reveals the full path
+- **File preview**: markdown / syntax highlighting / inline images; three switchable layouts — side-by-side (chat left, file right), stacked, and fullscreen overlay — with a draggable splitter; readable scope is the session project directory plus your home directory (sensitive directories such as keys are always refused)
+- **Message bookmarks**: mark a spot to revisit with a colored dot (up to 10, one per color), jump back by tapping it, delete individually or clear all; stored in the browser — refresh-proof, cleared when MAM restarts or the tab is closed
+- **Font size**: 50% / 75% / 100% / 125% for message and file text only
+- **Archived history**: finished or unreachable sessions stop cluttering the board — registry-based archiving (history page lazy-loads 1/3/7 days), tap a card for a read-only detail view with one-tap reactivation; board cards can be closed/archived (CLI sessions stop their process, APP sessions get a true "close")
+
+### Remote Control · send messages & approve from your phone (v0.5.0, experimental)
+
+Not just looking — you can **act**: send messages, approve tool calls, answer questions, and switch permission modes from your phone (currently **Claude Code / Codex CLI / Kimi Code / OpenCode**, experimental):
+
+- **Send & queue**: messages queue automatically while a session is busy, "send now" interrupts and jumps the queue (per-tool key sequences measured on real machines), and queued messages can be retracted. Every message uses **key-sequence injection with a screen-read receipt** (character-by-character tail verification) — a non-delivery is reported honestly, never faked as success
+- **Remote approvals**: tool-call approval (allow/deny), plan confirmation (plan body plus terminal dialog options synced live from the screen, direct digit selection)
+- **Remote Q&A**: single-choice, multi-select, free-form answers, per-question progression with a confirmation card; multi-select taps only toggle, "next question" advances explicitly — the phone and the terminal always stay on the same question
+- **Permission modes**: kimi's three-tier menu with two-key navigation and a mode receipt; codex switches via the terminal menu single-select
+- **Guards**: while a dialog is pending, ordinary message injection is blocked (to avoid answering the default by accident); input-line residue is detected to prevent double sends; dangerous keys (such as Ctrl+C, which quits OpenCode) are blacklisted
+
+|                Session detail · messages                |              Send · queue & jump               |
+| :-----------------------------------------------------: | :--------------------------------------------: |
+| ![Session detail](docs/images/mobile-detail-v0.5.0.png) |  ![Send](docs/images/mobile-send-v0.5.0.png)   |
+|                  **Approvals · plan**                   |             **Q&A · multi-select**             |
+|   ![Approvals](docs/images/mobile-approve-v0.5.0.png)   | ![Q&A](docs/images/mobile-question-v0.5.0.png) |
 
 ### Foxbell Desktop Pet
 
@@ -65,12 +109,12 @@ Since v0.3.0 the pet format is open — Foxbell is no longer the only companion:
 
 Click a session card to instantly focus the corresponding terminal tab:
 
-| Terminal | Support |
-|----------|---------|
-| iTerm2 | ✅ AppleScript |
-| Terminal.app | ✅ AppleScript |
-| tmux | ✅ pane selection + terminal focus |
-| Wayland | ❌ Graceful fallback message |
+| Terminal     | Support                            |
+| ------------ | ---------------------------------- |
+| iTerm2       | ✅ AppleScript                     |
+| Terminal.app | ✅ AppleScript                     |
+| tmux         | ✅ pane selection + terminal focus |
+| Wayland      | ❌ Graceful fallback message       |
 
 Terminal tools (Claude Code / Codex CLI / OpenCode / Kimi Code) resolve through process-tree and window-content disambiguation; **same-project dual-open jumps land directly**: for Kimi / OpenCode, the window title is matched against the session title (kimi `state.json` title / OpenCode DB title) after normalization — a unique hit locks onto the window, so dual terminals no longer raise a picker. On Windows, resolution also stamps a one-shot identity marker onto the target terminal title (` — MAM:xxxxxxxxxxxx`, cleared automatically after focus) for positive locking; markers never stack, and when the card↔terminal pairing is uncertain (same-project multi-open) the app **raises a picker rather than risking the wrong window**, and focus refusals surface an explicit error instead of failing silently.
 
@@ -117,17 +161,17 @@ A dedicated settings section to decide which tools MAM monitors and manages:
 
 Capabilities across the 8 terminal-class AI coding tools (✅ supported / ◐ partial / 🧪 experimental / ❌ not supported):
 
-| Capability | Claude Code | Codex CLI | OpenCode | OpenClaw | Kimi Code | WorkBuddy | ZCode | dsh |
-|---|---|---|---|---|---|---|---|---|
-| Session monitoring | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Desktop notifications | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Skill management | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ read-only |
-| MCP management | ✅ JSON | ✅ TOML | ✅ JSONC | ✅ JSON | ✅ JSON | ✅ JSON | ✅ JSON subtree | ❌ |
-| Plugin management | ✅ | ✅ | ✅ | ✅ | ◐ file-based | ❌ | ❌ | ❌ |
-| Status hooks | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Mobile · message viewing | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Mobile · file preview | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Mobile · send messages (injection) | 🧪 | 🧪 | 🧪 | ❌ | 🧪 | ❌ | ❌ | ❌ |
+| Capability                         | Claude Code | Codex CLI | OpenCode | OpenClaw | Kimi Code    | WorkBuddy | ZCode           | dsh         |
+| ---------------------------------- | ----------- | --------- | -------- | -------- | ------------ | --------- | --------------- | ----------- |
+| Session monitoring                 | ✅          | ✅        | ✅       | ✅       | ✅           | ✅        | ✅              | ✅          |
+| Desktop notifications              | ✅          | ✅        | ✅       | ✅       | ✅           | ✅        | ✅              | ✅          |
+| Skill management                   | ✅          | ✅        | ✅       | ✅       | ✅           | ✅        | ✅              | ◐ read-only |
+| MCP management                     | ✅ JSON     | ✅ TOML   | ✅ JSONC | ✅ JSON  | ✅ JSON      | ✅ JSON   | ✅ JSON subtree | ❌          |
+| Plugin management                  | ✅          | ✅        | ✅       | ✅       | ◐ file-based | ❌        | ❌              | ❌          |
+| Status hooks                       | ✅          | ✅        | ❌       | ❌       | ✅           | ❌        | ❌              | ❌          |
+| Mobile · message viewing           | ✅          | ✅        | ✅       | ✅       | ✅           | ✅        | ✅              | ✅          |
+| Mobile · file preview              | ✅          | ✅        | ✅       | ✅       | ✅           | ✅        | ✅              | ✅          |
+| Mobile · send messages (injection) | 🧪          | 🧪        | 🧪       | ❌       | 🧪           | ❌        | ❌              | ❌          |
 
 **Mobile remote control (v0.5.0, experimental)**: message viewing and file preview cover all 8 tools; **sending messages to CLI sessions from your phone is experimental**, currently supporting Claude Code / Codex CLI / OpenCode / Kimi Code. Messages are injected as keystrokes into the terminal and verified by screen-reading receipts (no false "delivered"); queueing, interrupt-and-jump, remote approvals, question answering, and permission-mode switching are included. See the Chinese README for illustrated walkthroughs and per-tool limitations.
 
@@ -135,16 +179,16 @@ Capabilities across the 8 terminal-class AI coding tools (✅ supported / ◐ pa
 
 ## Tech Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Desktop Framework | [Tauri v2](https://v2.tauri.app/) (Rust) |
-| Frontend | [React 19](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/) |
-| UI Components | [shadcn/ui](https://ui.shadcn.com/) (Radix UI) |
-| Styling | [Tailwind CSS v4](https://tailwindcss.com/) |
-| State Management | [Zustand](https://zustand-demo.pmnd.rs/) |
-| i18n | [i18next](https://www.i18next.com/) (Chinese / English) |
-| Database | [SQLite](https://www.sqlite.org/) (via [rusqlite](https://github.com/rusqlite/rusqlite)) |
-| Process Monitoring | [sysinfo](https://github.com/GuillaumeGomez/sysinfo) |
+| Layer              | Technology                                                                               |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| Desktop Framework  | [Tauri v2](https://v2.tauri.app/) (Rust)                                                 |
+| Frontend           | [React 19](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/)           |
+| UI Components      | [shadcn/ui](https://ui.shadcn.com/) (Radix UI)                                           |
+| Styling            | [Tailwind CSS v4](https://tailwindcss.com/)                                              |
+| State Management   | [Zustand](https://zustand-demo.pmnd.rs/)                                                 |
+| i18n               | [i18next](https://www.i18next.com/) (Chinese / English)                                  |
+| Database           | [SQLite](https://www.sqlite.org/) (via [rusqlite](https://github.com/rusqlite/rusqlite)) |
+| Process Monitoring | [sysinfo](https://github.com/GuillaumeGomez/sysinfo)                                     |
 
 ## Architecture
 
@@ -263,26 +307,26 @@ pnpm lint:fix     # ESLint auto-fix
 
 The app stores its data in `~/.mam/`:
 
-| Path | Purpose |
-|------|---------|
-| `~/.mam/mam.db` | SQLite database (settings, extensions, presets, session cache) |
-| `~/.mam/skills/` | Global skill repository |
-| `~/.mam/mcp/` | Global MCP server configs |
-| `~/.mam/hooks/status-hook.sh` | Shared Hook script for status events |
-| `~/.mam/events/` | Hook event files (auto-cleaned, 30s TTL) |
+| Path                          | Purpose                                                        |
+| ----------------------------- | -------------------------------------------------------------- |
+| `~/.mam/mam.db`               | SQLite database (settings, extensions, presets, session cache) |
+| `~/.mam/skills/`              | Global skill repository                                        |
+| `~/.mam/mcp/`                 | Global MCP server configs                                      |
+| `~/.mam/hooks/status-hook.sh` | Shared Hook script for status events                           |
+| `~/.mam/events/`              | Hook event files (auto-cleaned, 30s TTL)                       |
 
 ### Supported Tool Configs
 
-| Tool | Skill Directory | MCP Config | MCP Format | Hook Support |
-|------|----------------|------------|------------|-------------|
-| Claude Code | `~/.claude/skills/` | `~/.claude.json` | JSON | ✅ (PascalCase) |
-| Codex CLI | `~/.codex/skills/` | `~/.codex/config.toml` | TOML | ✅ (camelCase) |
-| OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
-| OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
-| Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌ (status parsed from wire) |
-| WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌ (status derived from heartbeat + JSONL) |
-| ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON (nested `mcp.servers` subtree) | ❌ (status derived from SQLite message-stream tail) |
-| dsh | `~/.dsh/skills/` | N/A (probed unsupported) | N/A | ❌ (status derived from lock cross-check + event stream) |
+| Tool        | Skill Directory              | MCP Config                         | MCP Format                          | Hook Support                                             |
+| ----------- | ---------------------------- | ---------------------------------- | ----------------------------------- | -------------------------------------------------------- |
+| Claude Code | `~/.claude/skills/`          | `~/.claude.json`                   | JSON                                | ✅ (PascalCase)                                          |
+| Codex CLI   | `~/.codex/skills/`           | `~/.codex/config.toml`             | TOML                                | ✅ (camelCase)                                           |
+| OpenCode    | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC                               | ❌                                                       |
+| OpenClaw    | `~/.openclaw/skills/`        | N/A                                | N/A                                 | ❌                                                       |
+| Kimi Code   | `~/.kimi-code/skills/`       | `~/.kimi-code/mcp.json`            | JSON                                | ❌ (status parsed from wire)                             |
+| WorkBuddy   | `~/.workbuddy/skills/`       | `~/.workbuddy/mcp.json`            | JSON                                | ❌ (status derived from heartbeat + JSONL)               |
+| ZCode       | `~/.zcode/skills/`           | `~/.zcode/cli/config.json`         | JSON (nested `mcp.servers` subtree) | ❌ (status derived from SQLite message-stream tail)      |
+| dsh         | `~/.dsh/skills/`             | N/A (probed unsupported)           | N/A                                 | ❌ (status derived from lock cross-check + event stream) |
 
 > Note: `~/.agents/skills/` is the cross-tool shared directory of the Agent Skills open standard (read directly by codex / zcode and other compliant tools). MAM's skill activation directory for codex is the private `~/.codex/skills/`; `.agents` serves only as a read-only shared import source (source label `agents-shared`) — MAM scans it into the repository, with no tool attribution, no linking, and never writes to it (sole exception: one-time migration of MAM-created legacy links).
 
