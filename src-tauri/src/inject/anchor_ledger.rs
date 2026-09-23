@@ -540,8 +540,11 @@ mod tests {
             ("opencode", scenario::QUESTION, slot::RECEIPT, "# questions"),
         ];
         for (tool, scenario, slot, pre_collection) in cases {
+            // copied()：AnchorRow 是 'static 引用目标（Copy），避免临时 Vec 在语句末
+            // 释放而 row 跨语句借用（E0716）
             let row = candidates(tool, scenario, slot)
                 .first()
+                .copied()
                 .unwrap_or_else(|| panic!("{tool}/{scenario}/{slot} 账本缺条目"));
             assert_eq!(
                 row.text, *pre_collection,
