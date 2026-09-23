@@ -562,14 +562,17 @@ describe("QuestionCard 与 ApproveCard 联合（硬约束① UI 面）", () => {
   });
 });
 
-// ==== 批次戊 E4：多题交互卡（multiQuestion=true → 逐题作答 + 末题提交）====
+// ==== 批次戊 E4：多题交互卡（multiQuestion=true → 逐题作答）====
+// ==== 2026-09-23 错位修复：多选题 toggle 不推进 + 「切换题目」钮 + 确认卡 ====
 describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
-  /** 两题夹具（E4：kimi/codex/opencode 的多题交互面） */
+  /** 两题夹具（E4：kimi/codex/opencode 的多题交互面）；`advance` 显式给 true
+   *  （= opencode 形态：多选题渲染「切换题目」钮）——降级形态的用例自行覆盖 */
   function twoQuestionInteractive(): QuestionInfoView {
     return {
       available: true,
       source: "mark",
       multiQuestion: true,
+      advance: true,
       questions: [
         {
           header: "A",
@@ -593,29 +596,115 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     };
   }
 
-  it("逐题作答：select 携 questionIndex 推进，末题出现提交钮 → submit", async () => {
+  it("全链：单选 select 推进 → 多选 toggle 只勾选 → 切换题目 → 确认卡提交", async () => {
     installFetch();
     routes.question = twoQuestionInteractive();
     routes.answer = { status: "key_sent" };
     render(<QuestionCard session={{ id: "sess-e4-mq" }} />);
     await screen.findByTestId("question-multi-current");
     expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
-    // 首题无提交钮（未到末题）
-    expect(screen.queryByTestId("question-multi-submit")).toBeNull();
-    // 答第 1 题 → 本地推进到第 2 题（questionIndex=0 上行）
+    // 答第 1 题（单选）→ 本地推进到第 2 题（questionIndex=0 上行）
     fireEvent.click(screen.getByTestId("question-multi-option-0"));
     await flushAsync();
     expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
-    // 末题：提交钮出现；答末题 → 终态（sent）+ 提交钮消失
-    expect(screen.getByTestId("question-multi-submit")).toBeTruthy();
+    // **错位回归锁**：第 2 题是多选 → 点选项发 **toggle**（不是 select），只翻
+    // 勾选态、**不推进题目**（终端多选页数字=toggle 不切页，前端同步停在本题）
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    expect(
+      screen.getByTestId("question-multi-option-0").getAttribute("data-checked")
+    ).toBe("true");
     fireEvent.click(screen.getByTestId("question-multi-option-1"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // 「切换题目」钮 → advance → **确认卡**（提交/返回/取消）
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
+    // 确认卡提交 → submit 动作 → 终态
+    fireEvent.click(screen.getByTestId("question-confirm-submit"));
     await flushAsync();
     expect(await screen.findByTestId("question-sent")).toBeTruthy();
     const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
     expect(bodies).toEqual([
       { sessionId: "sess-e4-mq", action: "select", index: 0, questionIndex: 0 },
-      { sessionId: "sess-e4-mq", action: "select", index: 1, questionIndex: 1 },
+      { sessionId: "sess-e4-mq", action: "toggle", index: 0, questionIndex: 1 },
+      { sessionId: "sess-e4-mq", action: "toggle", index: 1, questionIndex: 1 },
+      { sessionId: "sess-e4-mq", action: "advance" },
+      { sessionId: "sess-e4-mq", action: "submit" },
     ]);
+  });
+
+  it("多选题点选不推进（2026-09-23 错位回归锁）：toggle 后仍停在本题", async () => {
+    // 复现原缺陷的夹具形态：第 1 题就是多选——旧行为点选项发 select 且前端直接
+    // 跳到第 2 题（终端还停在第 1 题），本测锁死「toggle 不推进」
+    installFetch();
+    const mqFirst = twoQuestionInteractive();
+    mqFirst.questions[0].multiSelect = true;
+    mqFirst.questions[1].multiSelect = false;
+    routes.question = mqFirst;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-misalign" }} />);
+    await screen.findByTestId("question-multi-current");
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies).toEqual([
+      { sessionId: "sess-e4-misalign", action: "toggle", index: 0, questionIndex: 0 },
+    ]);
+  });
+
+  it("末题单选答完 → 推进到确认卡（不锁死在终态）", async () => {
+    installFetch();
+    const mq = twoQuestionInteractive();
+    // 题型对调：第 1 题多选（勾完用「切换题目」前进）、末题单选（终端自动进
+    // Confirm/Review 页）
+    mq.questions[0].multiSelect = true;
+    mq.questions[1].multiSelect = false;
+    routes.question = mq;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-last" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 第 1 题（多选）勾选 → 切换题目 → 第 2 题
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // 末题单选 select → 前端推进到确认卡（旧判据会把卡片锁死在「已发送按键」）
+    fireEvent.click(screen.getByTestId("question-multi-option-1"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    // 确认卡「返回题目修改」→ advance 回绕到第 1 题
+    fireEvent.click(screen.getByTestId("question-confirm-back"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies[2]).toEqual({
+      sessionId: "sess-e4-last",
+      action: "select",
+      index: 1,
+      questionIndex: 1,
+    });
+    expect(bodies[3]).toEqual({ sessionId: "sess-e4-last", action: "advance" });
+  });
+
+  it("advance 旗标缺省（kimi/codex 形态）→ 多选题不渲染切换钮、渲染终端引导", async () => {
+    installFetch();
+    const kimiLike = twoQuestionInteractive();
+    delete kimiLike.advance;
+    routes.question = kimiLike;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-noadvance" }} />);
+    await screen.findByTestId("question-multi-current");
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    expect(screen.queryByTestId("question-multi-advance")).toBeNull();
+    expect(screen.getByTestId("question-multi-advance-unavailable")).toBeTruthy();
   });
 
   it("multiQuestion 缺省（旧后端）→ 维持只读卡", async () => {

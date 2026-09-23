@@ -34,8 +34,10 @@
 //      （`4. [ ] Type something`，实机截图 `C-s8-cursor-submit-*.png`），定位判据
 //      （剥编号后以 `Type something` 开头）不匹配 → 后端恒拒 409；前端同步不给按钮。
 //      证据与放宽前提见 `inject::question::free_text_shape_supported` 的文档；
-// - 多问题（questions.length>1）：**只读卡**——题干罗列 +「请在终端完成作答」引导，
-//   零注入按钮（翻页键序未测，「结论不超证据」；后端 answer 端点同样拒绝）；
+// - 多问题（questions.length>1，批次戊 E4-E6 起）：**逐题交互卡**——单选题点数字
+//   即答（终端自动推进下一题，前端同步切题）；多选题点数字=仅勾选（**不切题**，
+//   2026-09-23 错位修复）+「切换题目」钮显式发 tab（仅 opencode，`advance` 旗标）；
+//   全部题目翻完后出**确认卡**（提交/返回题目/取消）。未定案工具维持只读。
 // - 应答分診：key_sent → 终态（按钮禁用）——阶段机动作另显 `verified` 的三态；failed
 //   {error} → 错误文案可重试（`aborted:true` 时额外显示段名 + 引到终端）；ApiError
 //   （409/400 带 data.error）→ 分診中文文案：no_question→「当前没有待回答的问题」、
@@ -129,6 +131,10 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [inProgress, setInProgress] = useState<QuestionAnswerStage | null>(null);
   // 多选本地勾选态（仅在 toggle 成功回执后切换——端点拒绝时本地状态不漂移）
   const [checked, setChecked] = useState<Set<number>>(() => new Set());
+  // **多题卡**按题记忆的勾选态（2026-09-23 错位修复）：toggle 只作用于当前题，
+  // 「切换题目/返回题目」后各题勾选态保留（与终端实际勾选一致——手机端做过的
+  // 每次 toggle 都记录在案；用户在终端手动改动仍无法感知，属既有已知限制）
+  const [mqChecked, setMqChecked] = useState<Record<number, Set<number>>>(() => ({}));
   // 终态：按键序列已投递（key_sent）——按钮禁用 +「已发送按键」。**toggle 不算终态**
   // （多选点选后仍需「提交」，置终态会锁死提交钮）
   const [sent, setSent] = useState(false);
@@ -190,6 +196,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           setVerified(null);
           setAbortedStage(null);
           setMqIndex(0);
+          setMqChecked({});
         }
         if (fp !== "") lastFingerprint.current = fp;
         setInfo(v);
@@ -221,24 +228,46 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         const res = await sessionQuestionAnswer(session.id, action, index, text, questionIndex);
         if (res.status === "key_sent") {
           if (action === "toggle" && typeof index === "number") {
-            // 多选勾选切换：成功回执后翻本地位（下轮渲染高亮）；不置终态
-            setChecked((prev) => {
-              const next = new Set(prev);
-              if (next.has(index)) {
-                next.delete(index);
-              } else {
-                next.add(index);
-              }
-              return next;
-            });
+            if (typeof questionIndex === "number") {
+              // **多题卡**勾选切换（2026-09-23 错位修复）：按题记忆本地位；
+              // toggle 只翻勾选，**不推进题目**——opencode 多选题页的数字键就是
+              // toggle 语义（终端不切页），推进只由 advance 显式触发，两通道同步
+              setMqChecked((prev) => {
+                const cur = new Set(prev[questionIndex] ?? []);
+                if (cur.has(index)) {
+                  cur.delete(index);
+                } else {
+                  cur.add(index);
+                }
+                return { ...prev, [questionIndex]: cur };
+              });
+            } else {
+              // 单题卡勾选切换：成功回执后翻本地位（下轮渲染高亮）；不置终态
+              setChecked((prev) => {
+                const next = new Set(prev);
+                if (next.has(index)) {
+                  next.delete(index);
+                } else {
+                  next.add(index);
+                }
+                return next;
+              });
+            }
+          } else if (action === "advance") {
+            // **切换题目**（opencode tab 前向切页）：题目页 → 下一题/Confirm 卡；
+            // Confirm 卡上的「返回题目」（Confirm 页 tab=回绕第 1 题）→ 回第 1 题。
+            // 与终端同步推进——**不置终态**（导航动作，作答继续）
+            setMqIndex((prev) => (info !== null && prev >= info.questions.length ? 0 : prev + 1));
           } else if (
             action === "select" &&
             typeof questionIndex === "number" &&
             info !== null &&
-            questionIndex < info.questions.length - 1
+            questionIndex < info.questions.length
           ) {
-            // E4-E6 多题逐题推进：本题数字已发（kimi DigitAdvance 自动切下一题），
-            // 本地切到下一题继续作答——**不置终态**（末题 select / submit 才终态）
+            // E4-E6 多题逐题推进：本题数字已发（单选题终端自动推进下一题；**末题
+            // 单选答完终端自动进 Review/Confirm 页** → 前端也推进到确认卡——
+            // 2026-09-23 修复：旧判据 `< length - 1` 把末题单选误置终态，卡片锁死
+            // 在「已发送按键」，手机端走不到提交）。**不置终态**（submit/cancel 才终态）
             setMqIndex(questionIndex + 1);
           } else {
             // select / submit / cancel / freeText：终态
@@ -325,9 +354,15 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   }
 
   // 多问题（批次戊 E4-E6）：键序已实机定案的三家（multiQuestion 旗标）→ **逐题交互
-  // 卡**——数字直选逐题推进（kimi DigitAdvance 自动切下一题 / codex 数字即答 /
-  // opencode tab 切页），答完全部题目出现「提交答案」钮（后端阶段机走 Review 汇总
-  // 屏闭环）。未定案工具维持只读（零注入按钮）。
+  // 卡**。推进语义按题型分派（2026-09-23 错位修复的核心）：
+  // - **单选题**：点数字=选中即答，终端**自动推进**下一题（kimi DigitAdvance /
+  //   opencode `enter confirm` 页 / codex 数字即交）→ 前端 select 成功后同步 +1；
+  // - **多选题**：点数字=仅 toggle 勾选，终端**停在原题**（opencode 多选页数字
+  //   与切页键是两回事，戊探A ③）→ 前端 toggle 成功后只翻勾选态；「切换题目」钮
+  //   （`advance` 旗标，仅 opencode）显式发 tab，成功后前端才切题——两通道永远
+  //   同步，不再出现「手机在第 2 题、终端停在第 1 题」的错位；
+  // - **确认卡**（mqIndex == questions.length）：提交（submit 阶段机）/ 返回题目
+  //   （advance 回绕）/ 取消（esc dismiss）。
   if (questions.length > 1) {
     if (info.multiQuestion !== true) {
       return (
@@ -363,9 +398,84 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         </InteractiveCard>
       );
     }
-    // 逐题交互：mqIndex = 当前作答的题（0 起）；全部答完 → 提交钮
-    const q = questions[Math.min(mqIndex, questions.length - 1)];
-    const isLast = mqIndex >= questions.length - 1;
+    // 逐题交互：mqIndex = 当前作答的题（0 起）；**mqIndex === questions.length =
+    // 确认卡**（2026-09-23 错位修复：全部题目翻完后显式确认——提交/返回/取消）
+    const multiFooter = (
+      <>
+        {error !== null && (
+          <p data-testid="question-error" className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+            {error}
+          </p>
+        )}
+        {abortedStage !== null && (
+          <p
+            data-testid="question-aborted"
+            className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+          >
+            卡在阶段：{QUESTION_STAGE_LABELS[abortedStage] ?? abortedStage}
+          </p>
+        )}
+        {sent && (
+          <p
+            data-testid="question-sent"
+            className="mt-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+          >
+            已发送按键
+          </p>
+        )}
+      </>
+    );
+    if (mqIndex >= questions.length) {
+      return (
+        <InteractiveCard
+          tone="question"
+          testId="question-card"
+          mode="multi-confirm"
+          pulsing={false}
+          title={`有 ${questions.length} 个问题等待回答（确认提交）`}
+          footer={multiFooter}
+        >
+          <p
+            data-testid="question-confirm-hint"
+            className="mt-1 text-xs text-slate-700 dark:text-slate-300"
+          >
+            全部题目已翻页完毕，终端应已停在 Confirm（Review）页——提交后模型会收到全部答案。
+          </p>
+          {!sent && (
+            <div className="mt-2 space-y-1.5">
+              <button
+                type="button"
+                data-testid="question-confirm-submit"
+                disabled={busy}
+                onClick={() => handleAnswer("submit")}
+                className="w-full rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+              >
+                提交答案
+              </button>
+              <button
+                type="button"
+                data-testid="question-confirm-back"
+                disabled={busy}
+                onClick={() => handleAnswer("advance")}
+                className="w-full rounded-full bg-sky-500/10 px-3 py-1.5 text-xs text-sky-800 hover:bg-sky-500/20 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-200"
+              >
+                返回题目修改
+              </button>
+              <button
+                type="button"
+                data-testid="question-confirm-cancel"
+                disabled={busy}
+                onClick={() => handleAnswer("cancel")}
+                className="w-full rounded-full bg-slate-500/10 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-500/20 disabled:opacity-40 dark:bg-slate-400/10 dark:text-slate-300"
+              >
+                取消回答
+              </button>
+            </div>
+          )}
+        </InteractiveCard>
+      );
+    }
+    const q = questions[mqIndex];
     return (
       <InteractiveCard
         tone="question"
@@ -373,34 +483,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         mode="multi"
         pulsing={false}
         title={`有 ${questions.length} 个问题等待回答（第 ${mqIndex + 1} 题）`}
-        footer={
-          <>
-            {error !== null && (
-              <p
-                data-testid="question-error"
-                className="mt-1 text-xs text-rose-600 dark:text-rose-400"
-              >
-                {error}
-              </p>
-            )}
-            {abortedStage !== null && (
-              <p
-                data-testid="question-aborted"
-                className="mt-1 text-xs text-amber-700 dark:text-amber-400"
-              >
-                卡在阶段：{QUESTION_STAGE_LABELS[abortedStage] ?? abortedStage}
-              </p>
-            )}
-            {sent && (
-              <p
-                data-testid="question-sent"
-                className="mt-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
-              >
-                已发送按键
-              </p>
-            )}
-          </>
-        }
+        footer={multiFooter}
       >
         <p
           data-testid="question-multi-current"
@@ -412,39 +495,73 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             </span>
           )}
           {q.question}
+          {q.multiSelect && (
+            <span
+              data-testid="question-multi-multiselect-badge"
+              className="ml-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400"
+            >
+              多选
+            </span>
+          )}
         </p>
         <div className="mt-1.5 space-y-1">
-          {q.options.map((o, i) => (
-            <button
-              key={`mq-${mqIndex}-${i}`}
-              type="button"
-              data-testid={`question-multi-option-${i}`}
-              disabled={busy || sent}
-              onClick={() => handleAnswer("select", i, undefined, mqIndex)}
-              className="w-full rounded-lg bg-sky-500/10 px-2 py-1.5 text-left text-xs text-sky-800 hover:bg-sky-500/20 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-200"
-            >
-              <span className="mr-1.5 rounded bg-sky-600 px-1 py-0.5 font-mono text-[10px] font-semibold text-white">
-                {i + 1}
-              </span>
-              {o.label}
-              {o.description !== "" && (
-                <span className="ml-1 text-[10px] text-slate-500 dark:text-slate-400">
-                  {o.description}
+          {q.options.map((o, i) => {
+            // 多选题的勾选高亮：按题记忆（mqChecked），仅在 toggle 成功回执后变化
+            const checkedHere = q.multiSelect && (mqChecked[mqIndex]?.has(i) ?? false);
+            return (
+              <button
+                key={`mq-${mqIndex}-${i}`}
+                type="button"
+                data-testid={`question-multi-option-${i}`}
+                data-checked={checkedHere ? "true" : undefined}
+                disabled={busy || sent}
+                onClick={() =>
+                  handleAnswer(q.multiSelect ? "toggle" : "select", i, undefined, mqIndex)
+                }
+                className={`w-full rounded-lg px-2 py-1.5 text-left text-xs hover:bg-sky-500/20 disabled:opacity-40 dark:hover:bg-sky-400/20 ${
+                  checkedHere
+                    ? "bg-sky-500/25 text-sky-900 dark:bg-sky-400/25 dark:text-sky-100"
+                    : "bg-sky-500/10 text-sky-800 dark:bg-sky-400/10 dark:text-sky-200"
+                }`}
+              >
+                <span className="mr-1.5 rounded bg-sky-600 px-1 py-0.5 font-mono text-[10px] font-semibold text-white">
+                  {i + 1}
                 </span>
-              )}
-            </button>
-          ))}
+                {q.multiSelect && (
+                  <span className="mr-1 font-mono text-[10px]">{checkedHere ? "[✓]" : "[ ]"}</span>
+                )}
+                {o.label}
+                {o.description !== "" && (
+                  <span className="ml-1 text-[10px] text-slate-500 dark:text-slate-400">
+                    {o.description}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
-        {!sent && isLast && (
+        {/* **切换题目**（2026-09-23 错位修复）：多选题勾完由用户显式切页——发 tab
+            （opencode 前向切页）成功后前端才切下一题/进确认卡。单选题不渲染（终端
+            自动推进）；`advance` 旗标未下发的工具（kimi/codex 切页键未验）不渲染
+            按钮、改渲染终端引导——不假装能发。 */}
+        {!sent && q.multiSelect && info.advance === true && (
           <button
             type="button"
-            data-testid="question-multi-submit"
+            data-testid="question-multi-advance"
             disabled={busy}
-            onClick={() => handleAnswer("submit")}
-            className="mt-2 rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+            onClick={() => handleAnswer("advance")}
+            className="mt-2 w-full rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
           >
-            提交答案
+            切换题目{mqIndex < questions.length - 1 ? "" : "（进入确认页）"}
           </button>
+        )}
+        {!sent && q.multiSelect && info.advance !== true && (
+          <p
+            data-testid="question-multi-advance-unavailable"
+            className="mt-2 text-xs text-slate-500 dark:text-slate-400"
+          >
+            多选题勾选后请到终端切换下一题并提交
+          </p>
         )}
       </InteractiveCard>
     );

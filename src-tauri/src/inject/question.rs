@@ -86,6 +86,13 @@ pub enum AnswerAction {
     /// 自由作答（丁T5 §2.4 入口 1）：数字定位 `Type something` 行 → 文本字符 → 回车
     /// ——**走阶段机** [`run_free_text_stages`]（键序依赖屏读定位，不产静态序列）
     FreeText,
+    /// 多题**切换题目**（2026-09-23 错位修复）：opencode 页签式多题的 tab 前向切页
+    /// （戊探A ①定案：题目页→下一题/Confirm 页，前向循环回绕）。**仅 opencode 放行**
+    /// ——kimi/codex 的多题切页键未实测（「未验不出键」）。与 `Select` 的区别：
+    /// Select 是「作答本题」（终端可能自动推进），Advance 是**纯导航**（不改任何
+    /// 勾选/作答态）——这正是错位修复的语义切分点：多选题点选只 toggle 不推进，
+    /// 推进只由本动作显式触发。
+    Advance,
 }
 
 impl AnswerAction {
@@ -97,6 +104,7 @@ impl AnswerAction {
             "submit" => Some(Self::Submit),
             "cancel" => Some(Self::Cancel),
             "freeText" => Some(Self::FreeText),
+            "advance" => Some(Self::Advance),
             _ => None,
         }
     }
@@ -113,6 +121,7 @@ impl AnswerAction {
             (Self::Submit, _) => "submit".to_string(),
             (Self::Cancel, _) => "cancel".to_string(),
             (Self::FreeText, _) => "freeText".to_string(),
+            (Self::Advance, _) => "advance".to_string(),
             // select/toggle 缺 index 在端点参数校验已拦（400），防御形态原样
             (Self::Select, None) => "select".to_string(),
             (Self::Toggle, None) => "toggle".to_string(),
@@ -123,8 +132,9 @@ impl AnswerAction {
 /// 解析 tool_input 原文 JSON（helper 问答通道携带 / 通道 B 的 tool_args）中的
 /// questions[]。结构不符（缺 questions 数组 / 空 / 条目缺 question 或 options）→
 /// None（端点据此回落通道 B 或判不可用）。
-/// 宽容口径：header 缺省空串、multiSelect 缺省 false、description 缺省空串——
-/// 与探测档案单选夹具的缺省形态一致。
+/// 宽容口径：header 缺省空串、多选标志缺省 false、description 缺省空串——与探测
+/// 档案单选夹具的缺省形态一致。**多选标志双字段兼容**：claude `multiSelect` /
+/// opencode `multiple`（bool；戊探A ⑥，见解析处注释）。
 pub fn parse_questions(tool_input_json: &str) -> Option<Vec<Question>> {
     let v: serde_json::Value = serde_json::from_str(tool_input_json).ok()?;
     let arr = v.get("questions")?.as_array()?;
@@ -161,9 +171,17 @@ pub fn parse_questions(tool_input_json: &str) -> Option<Vec<Question>> {
                 .and_then(|x| x.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            // 多选标志**按工具双字段兼容**：claude 口径 `multiSelect`；opencode 的
+            // 字段名是 **`multiple`**（戊探A ⑥定案：state.input.questions[] 每题
+            // `{header, question, options[…], multiple: bool}`）——只读 multiSelect
+            // 会让 opencode 多选题在整条链路恒显单选（前端发 select+推进 = 手机端
+            // 与终端错位，2026-09-23 用户实机复现）。`multiple` 的**数组形态**
+            // （question_renamed 工具的选项列表，T3 口径外）经 as_bool() 恒 None，
+            // 不会误判成标志。
             multi_select: q
                 .get("multiSelect")
                 .and_then(|m| m.as_bool())
+                .or_else(|| q.get("multiple").and_then(|m| m.as_bool()))
                 .unwrap_or(false),
             options,
         });
@@ -226,6 +244,9 @@ pub fn answer_key_sequence(
         AnswerAction::FreeText => {
             Err("自由作答必须经阶段机（run_free_text_stages）——键序依赖屏读定位".to_string())
         }
+        // 切题导航是**多题专用**动作，claude 多题键序未探（spec §1 非目标边界）
+        // → 拒绝（多题载荷在端点已按 multi_questions 只读，这里是直调兜底）
+        AnswerAction::Advance => Err("claude 多题切页键序未实测，不出键".to_string()),
     }
 }
 
@@ -359,6 +380,11 @@ pub fn answer_key_sequence_for(
                 Err("opencode 自由作答必须经阶段机（run_opencode_own_answer_stages）".to_string())
             }
             AnswerAction::FreeText => Err("opencode 自由作答未实测，不出键".to_string()),
+            // **切换题目**（2026-09-23 错位修复）：opencode 页签式多题 tab=前向切页
+            // （戊探A ①：题目页→下一题/Confirm 页，前向循环回绕；单键、纯导航、
+            // 不触碰勾选态）。仅 opencode——kimi/codex 切页键未验不出键
+            AnswerAction::Advance if tool == "opencode" => Ok(vec!["tab".to_string()]),
+            AnswerAction::Advance => Err(format!("{tool} 多题切页键序未实测，不出键")),
         },
         QuestionKeyProfile::TwoPhaseSelect => match action {
             AnswerAction::Select => {
@@ -396,6 +422,9 @@ pub fn answer_key_sequence_for(
             AnswerAction::FreeText => {
                 Err("kimi 自由作答必须经阶段机（run_kimi_free_text_stages）".to_string())
             }
+            // kimi 多题的**切页键**未实测（K-5 定案的是数字直选自动推进——单选题
+            // 不需要显式切页；多选题切页键无实机样本）→ 不出键，多选题切题引导终端
+            AnswerAction::Advance => Err("kimi 多题切页键序未实测，不出键".to_string()),
         },
         QuestionKeyProfile::ReadOnly => Err(format!("{tool} 问答键序未实测，只读展示")),
     }
@@ -828,24 +857,38 @@ pub fn opencode_own_answer_input_open(lines: &[String]) -> bool {
 /// opencode **多选提交阶段机**：tab 切页 → Confirm 页 → enter 一次提交全部答案
 /// （戊探A ④：Confirm 页 enter 提交 ×3 全通）。未答题的 Confirm 页显示
 /// `(not answered)`（戊探A E-A2 顺带实证）——是否可提交未测，阶段机不判。
-pub fn run_opencode_submit_stages<P, Q, T>(
+///
+/// **首段「Confirm 已在场则跳过 tab」**（2026-09-23 错位修复的交互兼容）：手机端
+/// 「切换题目」按钮已把终端切到 Confirm 页后，再发 tab 会**回绕到题目页**（戊探A ①
+/// 前向循环）把提交屏切走——故先读一屏，footer 锚已命中就直接 enter。与
+/// [`run_kimi_submit_stages`] 首段「Review 已在场跳过 tab」同款防御。读不到屏 →
+/// 中止零按键（不盲发）。
+pub fn run_opencode_submit_stages<Rd, P, Q, T>(
+    mut read: Rd,
     mut poll_confirm: P,
     mut poll_receipt: Q,
     terminal: &mut T,
 ) -> Result<SubmitOutcome, StageAbort>
 where
+    Rd: FnMut() -> Option<Vec<String>>,
     P: FnMut() -> Result<Option<Vec<String>>, String>,
     Q: FnMut() -> Result<Option<Vec<String>>, String>,
     T: MenuTerminal,
 {
     let mut sent_keys: Vec<String> = Vec::new();
-    // 1. tab 切页（题目页 → Confirm 页；前向循环，戊探A ①）
-    terminal
-        .send("tab")
-        .map_err(|e| StageAbort::delivery(format!("tab 投递失败（{e}）")))?;
-    sent_keys.push("tab".to_string());
-    terminal.settle();
-    // 2. Confirm 页（未见 → 中止，不发提交键）
+    // 1. Confirm 已在场判读（读不到屏 → 中止零按键）
+    let initial = read().ok_or_else(|| {
+        StageAbort::screen("opencode 提交：读不到屏幕——已中止，未发任何键；请人工核对终端")
+    })?;
+    // 2. 不在 Confirm 页 → tab 切页（题目页 → Confirm 页；前向循环，戊探A ①）
+    if !opencode_confirm_present(&initial) {
+        terminal
+            .send("tab")
+            .map_err(|e| StageAbort::delivery(format!("tab 投递失败（{e}）")))?;
+        sent_keys.push("tab".to_string());
+        terminal.settle();
+    }
+    // 3. Confirm 页（未见 → 中止，不发提交键）
     let confirm = poll_confirm().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen(format!(
             "tab 后未出现 Confirm 页（未见「{OPENCODE_CONFIRM_FOOTER}」footer）——已中止，未发提交键；请人工核对终端"
@@ -856,13 +899,13 @@ where
             "Confirm 页形态不符——已中止，未发提交键；请人工核对终端",
         ));
     }
-    // 3. enter 提交（Confirm 页唯一回车点）
+    // 4. enter 提交（Confirm 页唯一回车点）
     terminal
         .send("enter")
         .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
     sent_keys.push("enter".to_string());
     terminal.settle();
-    // 4. 终态（未见不是失败）
+    // 5. 终态（未见不是失败）
     let receipt_seen = match poll_receipt() {
         Ok(Some(lines)) => Some(opencode_answered_present(&lines)),
         Ok(None) => Some(false),
@@ -1737,6 +1780,11 @@ pub fn action_supported(
                 // E4 kimi：多选提交走 run_kimi_submit_stages（tab → Review 汇总屏 →
                 // 屏上编号确认——戊探B M1/M2 + K-5 实机定案）
                 QuestionKeyProfile::TwoPhaseSelect => Ok(()),
+                // E6 opencode（2026-09-23 接线补全）：多选提交走
+                // run_opencode_submit_stages（tab → Confirm 页 → enter——戊探A ④
+                // 三轮全通；阶段机首段屏读「Confirm 已在场则跳过 tab」，与手机端
+                // 先切页到 Confirm 的交互兼容）。codex 同档但多选未实测 → 不放行
+                QuestionKeyProfile::SingleDigitSubmit if tool == "opencode" => Ok(()),
                 _ => Err(ActionRefusal::ToolUnverified(format!(
                     "{tool} 多选提交未实测，不出键"
                 ))),
@@ -1778,6 +1826,24 @@ pub fn action_supported(
     }
 }
 
+/// **多题载荷的提交可用性**（2026-09-23 错位修复）：多题卡的「提交答案」作用于
+/// **整张问卷**（kimi 的 Review 汇总屏 / opencode 的 Confirm 页），不作用于
+/// `questionIndex` 指定的某一题——[`action_supported`] 里「submit 仅用于多选题」
+/// 的防呆（单题卡语义：单选点数字即提交、无独立提交步）对多题载荷不成立（否则
+/// 第 1 题是单选的多题问卷会被误拒 400）。按工具档判：kimi/opencode 已实机定案
+/// 放行，其余（含 claude 多题整体只读、codex 多选未实测）不出键。
+pub fn multi_question_submit_supported(tool: &str) -> Result<(), ActionRefusal> {
+    match question_key_profile(tool) {
+        // kimi：run_kimi_submit_stages（戊探B + K-5 定案）
+        QuestionKeyProfile::TwoPhaseSelect => Ok(()),
+        // opencode：run_opencode_submit_stages（戊探A ④ 三轮全通；2026-09-23 接线）
+        QuestionKeyProfile::SingleDigitSubmit if tool == "opencode" => Ok(()),
+        _ => Err(ActionRefusal::ToolUnverified(format!(
+            "{tool} 多题提交未实测，不出键"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1814,6 +1880,28 @@ mod tests {
         assert!(qs[0].multi_select, "multiSelect: true → 多选");
         let labels: Vec<&str> = qs[0].options.iter().map(|o| o.label.as_str()).collect();
         assert_eq!(labels, vec!["Apple", "Banana", "Peach"]);
+    }
+
+    /// opencode 的多选标志字段名是 **`multiple`**（bool），不是 claude 的
+    /// `multiSelect`（戊探A ⑥定案，2026-09-23 用户实机错位复现的根因）——
+    /// 只读 multiSelect 会让 opencode 多选题在整条链路恒显单选。回归锁：
+    /// multiple: true 必须解析为多选；multiple 缺省仍单选；**数组形态**
+    /// （question_renamed 的选项列表）不得误判成标志。
+    #[test]
+    fn parse_opencode_multiple_flag_field() {
+        // opencode 多选题真实形态（戊探A ⑥）：options 数组 + multiple: bool
+        let qs = parse_questions(
+            r#"{"questions":[{"header":"修改方向","multiple":true,"options":[{"description":"a","label":"以「优化版」为底本"},{"description":"b","label":"以「精简版」为底本"}],"question":"你希望这次按哪些方向修改？（可多选）"}]}"#,
+        )
+        .expect("opencode 多选夹具必须可解析");
+        assert!(
+            qs[0].multi_select,
+            "opencode 的 multiple: true → 多选（字段名与 claude 不同）"
+        );
+        // 缺省：两字段都不在 → 单选（宽容口径不变）
+        let qs = parse_questions(r#"{"questions":[{"question":"q","options":[{"label":"a"}]}]}"#)
+            .unwrap();
+        assert!(!qs[0].multi_select);
     }
 
     #[test]
@@ -2160,15 +2248,20 @@ mod tests {
         assert_eq!(locate_opencode_own_answer_position(&checked), Some(5));
     }
 
-    /// **opencode 提交阶段机脚本锁**：tab → Confirm 页 → enter；Confirm 缺席 →
-    /// 中止不发提交键；终态锚（`# Questions`）在场 → Some(true)。
+    /// **opencode 提交阶段机脚本锁**（2026-09-23 更新：首段「Confirm 已在场跳过
+    /// tab」——手机端「切换题目」已把终端切到 Confirm 页时直接 enter，不再发 tab
+    /// 把提交屏回绕切走）三个场景：题页起 → tab → Confirm → enter；**Confirm 已
+    /// 在场 → 直接 enter**；tab 后 Confirm 缺席 → 中止不发提交键。终态锚
+    /// （`# Questions`）在场 → Some(true)。
     #[test]
     fn e6_opencode_submit_stage_scripted() {
+        let dialog = e_stage2_screen("opencode-checked.txt");
         let confirm = e_stage2_screen("opencode-confirm-page.txt");
         let receipt = lines(&["# Questions", "bravo, charlie, delta"]);
+        // 场景 1：题页起（Confirm 不在场）→ tab → enter
         let mut sent: Vec<String> = Vec::new();
         let mut terminal = crate::inject::mode::Closures {
-            read: || Some(confirm.clone()),
+            read: || Some(dialog.clone()),
             send: |k: &str| {
                 sent.push(k.to_string());
                 Ok(())
@@ -2176,6 +2269,7 @@ mod tests {
             settle: || {},
         };
         let out = run_opencode_submit_stages(
+            || Some(dialog.clone()),
             || Ok(Some(confirm.clone())),
             || Ok(Some(receipt.clone())),
             &mut terminal,
@@ -2183,22 +2277,88 @@ mod tests {
         .expect("tab → Confirm → enter");
         assert_eq!(out.sent_keys, vec!["tab", "enter"]);
         assert_eq!(out.receipt_seen, Some(true));
-        // Confirm 缺席：中止且只发了 tab
-        let dialog = e_stage2_screen("opencode-checked.txt");
+        // 场景 2（跳 tab 防御）：Confirm 已在场（手机端已切页）→ 直接 enter
         let mut sent2: Vec<String> = Vec::new();
         let mut terminal2 = crate::inject::mode::Closures {
-            read: || Some(dialog.clone()),
+            read: || Some(confirm.clone()),
             send: |k: &str| {
                 sent2.push(k.to_string());
                 Ok(())
             },
             settle: || {},
         };
-        let err =
-            run_opencode_submit_stages(|| Ok(Some(dialog.clone())), || Ok(None), &mut terminal2)
-                .expect_err("Confirm 不出现 → 中止");
-        assert_eq!(sent2, vec!["tab"], "只发了 tab，提交键未发");
+        let out2 = run_opencode_submit_stages(
+            || Some(confirm.clone()),
+            || Ok(Some(confirm.clone())),
+            || Ok(Some(receipt.clone())),
+            &mut terminal2,
+        )
+        .expect("Confirm 已在场 → 直接 enter");
+        assert_eq!(
+            out2.sent_keys,
+            vec!["enter"],
+            "跳过 tab——Confirm 页上 tab 会把提交屏回绕切走（戊探A ①）"
+        );
+        assert_eq!(out2.receipt_seen, Some(true));
+        // 场景 3：题页起但 tab 后 Confirm 不出现 → 中止且只发了 tab
+        let mut sent3: Vec<String> = Vec::new();
+        let mut terminal3 = crate::inject::mode::Closures {
+            read: || Some(dialog.clone()),
+            send: |k: &str| {
+                sent3.push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let err = run_opencode_submit_stages(
+            || Some(dialog.clone()),
+            || Ok(None),
+            || Ok(None),
+            &mut terminal3,
+        )
+        .expect_err("Confirm 不出现 → 中止");
+        assert_eq!(sent3, vec!["tab"], "只发了 tab，提交键未发");
         assert!(err.message.contains("Confirm 页"), "{err:?}");
+    }
+
+    /// **2026-09-23 错位修复回归锁**：Advance（多题切页）仅 opencode 放行
+    /// （tab 单键——戊探A ①定案）；claude/kimi/codex 拒绝（kimi/codex 的多题切页键
+    /// 无实机样本、claude 多题整体只读——「未验不出键」）。
+    #[test]
+    fn advance_keys_opencode_only() {
+        let q = multi();
+        assert_eq!(
+            answer_key_sequence_for("opencode", AnswerAction::Advance, None, &q).unwrap(),
+            vec!["tab"],
+            "opencode 多题切页 = tab 前向切页（戊探A ①）"
+        );
+        assert!(answer_key_sequence_for("kimi", AnswerAction::Advance, None, &q).is_err());
+        assert!(answer_key_sequence_for("codex", AnswerAction::Advance, None, &q).is_err());
+        assert!(answer_key_sequence_for("claude", AnswerAction::Advance, None, &q).is_err());
+    }
+
+    /// **2026-09-23 接线回归锁**：可用性门——opencode 的 advance / 多选 submit
+    /// 放行；codex 同档（SingleDigitSubmit）但 advance/多选 submit 不放行；单选题
+    /// submit 防呆保持；多题 submit 专用门不看题目形态（第 1 题是单选的问卷也放行
+    /// kimi/opencode）。
+    #[test]
+    fn action_gates_for_opencode_multi_question_line() {
+        let m = multi();
+        let s = single();
+        // advance：opencode 放行（纯导航，与题目形态无关）；codex 拒
+        assert!(action_supported("opencode", AnswerAction::Advance, None, &m).is_ok());
+        assert!(action_supported("codex", AnswerAction::Advance, None, &m).is_err());
+        // opencode 多选 submit：接线后放行（走 run_opencode_submit_stages）
+        assert!(action_supported("opencode", AnswerAction::Submit, None, &m).is_ok());
+        // codex 多选 submit 仍拒（多选未实测）
+        assert!(action_supported("codex", AnswerAction::Submit, None, &m).is_err());
+        // 单选题 submit 防呆保持（单选点数字即提交，无独立提交步）
+        assert!(action_supported("opencode", AnswerAction::Submit, None, &s).is_err());
+        // 多题 submit 专用门：kimi/opencode 放行、codex/claude 拒
+        assert!(multi_question_submit_supported("opencode").is_ok());
+        assert!(multi_question_submit_supported("kimi").is_ok());
+        assert!(multi_question_submit_supported("codex").is_err());
+        assert!(multi_question_submit_supported("claude").is_err());
     }
 
     /// **opencode own answer 阶段机脚本锁（裸打字守卫）**：
