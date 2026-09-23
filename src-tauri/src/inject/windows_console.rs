@@ -584,7 +584,7 @@ pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), Str
     // P2-2：域校验先行——必须在取锁/附加之前快速失败（不触任何控制台 API）
     let Some(records) = key_records_for(key, spec) else {
         return Err(format!(
-            "不支持的按键：{key}（域：enter/esc/tab/单字符字母数字/方向键）"
+            "不支持的按键：{key}（域：enter/esc/tab/backspace/shift+tab/单字符字母数字/方向键）"
         ));
     };
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
@@ -850,6 +850,26 @@ mod tests {
         let codex = families::family_for("codex").unwrap();
         let up_vk = key_records_for("up", &codex).unwrap();
         assert_eq!(up_vk[0].vk, 0x26); // VK_UP 键形态
+    }
+
+    /// backspace 键契约（2026-09-23 斜杠命令纯净准则的执行原语）：VK_BACK=0x08
+    /// 且 ch 携带 0x08（crossterm 解析 ueChar=0x08 → KeyCode::Backspace）、成对
+    /// down/up、无修饰位。消费方 = codex 权限路编排段 0.5 的输入行清理。
+    #[test]
+    fn backspace_key_record_contract() {
+        let codex = families::family_for("codex").unwrap();
+        let recs = key_records_for("backspace", &codex).expect("backspace 在键域内");
+        assert_eq!(recs.len(), 2, "成对 down/up");
+        assert!(recs[0].down && !recs[1].down);
+        assert!(
+            recs.iter().all(|r| r.vk == 0x08 && r.ch == 0x08),
+            "VK_BACK 且字符同码"
+        );
+        let flat: Vec<FlatKeyRecord> = recs.iter().map(Into::into).collect();
+        assert!(
+            flat.iter().all(|f| f.control_key_state == 0),
+            "backspace 不带修饰位（SHIFT_PRESSED 仅 shift+tab）"
+        );
     }
 
     /// shift+tab 组合键契约（2026-09-23 codex 模式组 toggle 改造的覆盖缺口补锁）：

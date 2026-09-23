@@ -179,17 +179,23 @@ pub fn forbidden_key_reason(key: &str) -> Option<String> {
 
 /// 控制键 → VK 形态事件对；**键域校验（P2-2）**：键域 = `"enter"`/`"esc"`/
 /// `"tab"` + 单字符 ASCII 字母数字（审批键位 "y"/"1" 走这里）；域外（空串/
-/// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab → VK_RETURN/VK_ESCAPE/
-/// VK_TAB 且 ch 同码；单字符 → `vk = layout.vk_of(c)`、`ch = c`；scan 一律
-/// `layout.scan_of(vk)` 派生；成对 down/up。
+/// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab/backspace → VK_RETURN/
+/// VK_ESCAPE/VK_TAB/VK_BACK 且 ch 同码；单字符 → `vk = layout.vk_of(c)`、
+/// `ch = c`；scan 一律 `layout.scan_of(vk)` 派生；成对 down/up。
 ///
 /// `"shift+tab"`（批次丙 T6）**不在本函数**——它需要修饰位，走
 /// [`shift_tab_records`]（执行层另分支）。本函数保持既有域不变（零回归）。
+///
+/// `"backspace"`（2026-09-23 新增）：**斜杠命令注入前置纯净准则**的执行原语——
+/// 输入行残留逐字符删除（A 族写 `\u{0008}`=BS 字符、B 族 VK_BACK 键事件，
+/// 两族语义一致；crossterm 把 ueChar=0x08 解析为 Backspace）。消费方=
+/// `mode::run_codex_permission_stages` 段 0.5（屏读判残留→逐字符删→闭环验证）。
 pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecordSpec>> {
     let (vk, ch) = match key {
-        "enter" => (0x0Du16, 0x0Du16), // VK_RETURN
-        "esc" => (0x1Bu16, 0x1Bu16),   // VK_ESCAPE
-        "tab" => (0x09u16, 0x09u16),   // VK_TAB
+        "enter" => (0x0Du16, 0x0Du16),     // VK_RETURN
+        "esc" => (0x1Bu16, 0x1Bu16),       // VK_ESCAPE
+        "tab" => (0x09u16, 0x09u16),       // VK_TAB
+        "backspace" => (0x08u16, 0x08u16), // VK_BACK
         _ => {
             let mut chars = key.chars();
             match (chars.next(), chars.next()) {

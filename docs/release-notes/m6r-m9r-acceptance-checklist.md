@@ -512,6 +512,7 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
 | I-1k | codex 计划/操作 toggle | codex | 手机点「计划 ⇄ 操作」→ 终端 footer `Plan mode` 出现/消失（模式组回读 verified=true）；再点一次切回 | 2026-09-23 改造（用户已实测双向可切） |
 | I-1l | codex 权限数字直达 | codex | 点「只读/默认/自动审批」→ `/permissions` 菜单 → 数字直达（无回车）→ `Permissions updated to <档>`；**Guardian 关/开两种形态各走一遍**（Approve for me 缺席时编号前移，编号从屏读不受影响） | 2026-09-23 改造（1/2/3 直选用户已实测） |
 | I-1m | codex 完全信任二阶段+残留防护 | codex | ① 确认条「确认启用」→ 数字 4 → `Enable full access?` → 肯定项数字 1 → 回执 Full Access；② 手动留一个开着的权限菜单再点任一档位 → MAM **先 esc 关残留菜单**再走直达（终端不出现回车误确认当前项、输入行不堆积 `/permissions`） | 2026-09-23 改造（4→1 用户已实测；esc 防护为新增，登记未跑） |
+| I-1n | **斜杠命令纯净前置（通用准则）四家盘点** | codex 先行；kimi 待取证 | ① **codex**（已接入）：输入行有残留（如 `/permissions/permissions`）时点权限档位 → MAM backspace 逐字符清 → 屏读验证纯净 → 才发 `/permissions`；清不净如实中止（不盲发脏命令）。② **claude/opencode**：模式切换走 shift+tab 键路、无斜杠命令，不涉及（claude 插队正文已有 A1 残留中止先例）。③ **kimi**（待取证）：`/plan on|off`、`/yolo`、`/auto`、`/permission` 斜杠路暂无纯净检查——先取证 kimi composer 屏读形态（前缀码点/占位词/footer 锚）再接入同一准则 | 2026-09-23 用户指令成文（词典 §6 通用准则行） |
 
 ### I-2 · 人工走查项（界面/交互）
 
@@ -554,3 +555,10 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
    （shift+tab 运行中行为未实测，保守沿用）；⑦ 旧客户端裸发 `default` 的组推断从
    权限组改落模式组（Default 可选化后与 kimi 同规）。键序词典更新已在台账
    「codex 模式切换改造」节逐条登记；实机复验项=I-1k/I-1l/I-1m/I-2f。
+8. **斜杠命令纯净前置=通用准则（2026-09-23 用户指令）**：任何斜杠命令类文本注入前，
+   输入行必须纯净（残留会与命令拼接成脏命令，实测 `/permissions/permissions`）。
+   落地=「有判据则清+闭环验证，无判据则取证后接入」：codex 权限路已接入
+   （overlay 清场→composer backspace 逐字符清→屏读验证纯净→才发命令，清不净如实
+   中止）；claude/opencode 模式切换走 shift+tab 键路无斜杠命令不涉及（claude 插队
+   正文已有 A1 残留中止先例）；kimi 三条斜杠路待 composer 屏读判据取证后接入
+   （I-1n）。词典 §6 已登记同款准则行；backspace 入键域（VK_BACK，屏读闭环兜底）。

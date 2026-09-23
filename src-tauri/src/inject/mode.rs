@@ -1372,6 +1372,59 @@ pub(crate) const CODEX_FULL_ACCESS_CONFIRM_ANCHOR: &str = "enable full access?";
 /// 再选」的兜底之一：清场不干净绝不开新菜单。
 pub(crate) const RESIDUE_CLEAR_MAX_READS: usize = 5;
 
+/// codex composer 的**占位文案**（空输入行显示的提示词，小写匹配）。屏读里占位
+/// 与真实输入同形，只能按词表豁免——版本改词会导致「恒判残留」→ 守卫按 fail-safe
+/// 中止（不误发，只是不可用），届时更新词表即可（台账「codex 模式切换改造」节登记）。
+pub(crate) const CODEX_COMPOSER_PLACEHOLDERS: [&str; 1] = ["ask codex to do anything"];
+
+/// 输入行清理的单次 backspace 上限（防呆：真实残留远小于此；超标按上限清）。
+pub(crate) const COMPOSER_CLEAR_MAX_KEYS: usize = 64;
+
+/// **输入行残留判定**（纯函数）——通用准则「**斜杠命令注入前，输入行必须纯净**」
+/// （2026-09-23 用户指令）的 codex 判据。返回 `Some(可见字符数)` = composer 有残留
+/// （须清理后再发命令，否则 `/permissions` 会与残留拼接成 `/permissions/permissions`
+/// 之类的脏命令——用户实机走查事故现场）；`None` = 纯净或判据不可得。
+///
+/// # 判据（自底向上，全部复用既有单点）
+///
+/// 1. **footer 行** = 最后一条含状态栏分隔符 ` · ` 的行（与 [`parse_codex_footer`]
+///    同锚——composer 恒在底栏之上）；
+/// 2. **composer 行** = footer 之上最近的一条**光标标记行**（[`crate::inject::dialog::
+///    strip_cursor_marker`]，标记集合覆盖 ›/❯/▶/>——composer 前缀码点无档案记录，
+///    用集合不押单一码点；只认「带标记」的行，纯空白缩进行不误命中）；
+/// 3. 剥标记 trim 后：**空** → 纯净；**命中占位词表** → 纯净（空输入行显示提示词，
+///    屏读与真实输入同形只能按词豁免）；否则 → 残留（字符数 = 清理键数）。
+///
+/// # 判据不可得 → `None`（放行）
+///
+/// 找不到 footer/composer 行（屏读异常、形态漂移）时**不阻断**——与守卫原则
+/// 「判不清放行」同口径：主流程后续各段（菜单轮询、编号读取、回执核验）的屏读
+/// 验证兜底。**已知边界**：历史回显（如已执行过的 `› /permissions`）位于对话流
+/// 中部、不满足「footer 之上最近标记行」，天然不误判（夹具
+/// `codex-input-residue.txt` 锁定）。
+pub(crate) fn composer_residue(lines: &[String]) -> Option<usize> {
+    let footer_idx = lines.iter().rposition(|l| l.contains(" · "))?;
+    for line in lines[..footer_idx].iter().rev() {
+        let (rest, highlighted) = crate::inject::dialog::strip_cursor_marker(line);
+        if !highlighted {
+            continue; // 无光标标记前缀 → 不是 composer 行
+        }
+        let text = rest.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let lower = text.to_lowercase();
+        if CODEX_COMPOSER_PLACEHOLDERS
+            .iter()
+            .any(|p| lower.contains(p))
+        {
+            return None;
+        }
+        return Some(text.chars().count());
+    }
+    None
+}
+
 /// **残留 overlay 判定**（纯函数）：发 `/permissions` 前的一拍屏读里，是否已有
 /// 上次遗留的**权限菜单或 Full Access 确认框**在屏（标题锚在屏即判——footer 锚
 /// 可能被正文挤出可见窗，标题锚是存在的最低证据）。
@@ -1957,8 +2010,13 @@ where
 /// # 各段（每段都可独立中止）
 ///
 /// 0. **残留防护**（事故根因，见 [`residual_overlay_present`]）：读一拍屏，已有上次
-///    遗留的权限菜单 → 先 `esc` 关闭再开新菜单。读不到屏 → 跳过防护（后续段会
-///    如实失败，不因防护失败而额外报错）；
+///    遗留的权限菜单/确认框 → 先 `esc` 关闭再开新菜单（条件等待锚消失）。读不到屏
+///    → 跳过防护（后续段会如实失败，不因防护失败而额外报错）；
+///
+/// 0.5. **输入行纯净前置**（通用准则 2026-09-23，[`composer_residue`]）：composer
+///      有残留 → backspace 逐字符清 + **闭环屏读验证**（清完仍不纯净 → 如实中止，
+///      不盲发脏命令）；
+///
 /// 1. **开菜单**：`open_menu()`（生产 = `/permissions` 文本 + 回车）；
 /// 2. **数字直达**：`poll_digit()` 轮询窗内读目标档**屏上编号**
 ///    （[`codex_permission_digit_probe`]）→ 发该数字键（**无回车**——实测数字键
@@ -1993,19 +2051,32 @@ where
     // 完全信任）；且 esc 后**必须条件等待锚消失**——esc 到 TUI 重绘完成有时间差，
     // 立刻开菜单仍可能撞上未消散的旧 overlay（「数字敲在旧对话框里」的根因）。
     // 固定睡不可靠（condition-based-waiting）：轮询读屏直到锚消失，窗尽如实中止。
-    if let Some(lines) = terminal.read() {
-        if residual_overlay_present(&lines) {
+    //
+    // ===== 段 0.5：输入行纯净前置（通用准则，2026-09-23 用户指令）=====
+    //
+    // 「斜杠命令注入前，输入行必须纯净」：残留命令会与本次注入拼接成脏命令
+    // （实测现场 `/permissions/permissions`）。有判据 → backspace 逐字符清 +
+    // **闭环屏读验证**（清完必须纯净，否则如实中止——不盲发脏命令）；判据不可得
+    // → 放行（后续段屏读验证兜底）。清空键未实测前不跨家推广（kimi 登记取证）。
+    let mut latest = terminal.read();
+    if let Some(lines) = latest.as_ref() {
+        if residual_overlay_present(lines) {
             log::debug!("codex 权限切换：屏上已有残留 overlay（菜单/确认框）→ esc 清场");
             terminal.send("esc")?;
             terminal.settle();
             let mut cleared = false;
             for _ in 0..RESIDUE_CLEAR_MAX_READS {
                 match terminal.read() {
-                    Some(lines) if !residual_overlay_present(&lines) => {
-                        cleared = true;
-                        break;
+                    Some(l) => {
+                        let clean = !residual_overlay_present(&l);
+                        latest = Some(l);
+                        if clean {
+                            cleared = true;
+                            break;
+                        }
+                        terminal.settle();
                     }
-                    _ => terminal.settle(),
+                    None => terminal.settle(),
                 }
             }
             if !cleared {
@@ -2014,6 +2085,20 @@ where
                         .to_string(),
                 );
             }
+        }
+    }
+    if let Some(residue) = latest.as_ref().and_then(|l| composer_residue(l)) {
+        log::debug!("codex 权限切换：输入行残留 {residue} 字符 → backspace 清理后再发命令");
+        for _ in 0..residue.min(COMPOSER_CLEAR_MAX_KEYS) {
+            terminal.send("backspace")?;
+        }
+        terminal.settle();
+        let pure = matches!(terminal.read(), Some(ref l) if composer_residue(l).is_none());
+        if !pure {
+            return Err(
+                "codex 输入行残留清理后仍不纯净（或读不到屏复核）——不盲发斜杠命令；请人工清空输入行后重试"
+                    .to_string(),
+            );
         }
     }
     // ===== 段 1：开菜单 =====
@@ -4430,7 +4515,9 @@ mod tests {
     /// # 脚本语义（**对齐生产轮询语义**，不是「每次读屏取下一屏」）
     ///
     /// `screens` 是终端内容的**时间序列**，`cursor` 指向「此刻屏上是什么」：
-    /// - `send(key)`：记录按键并**推进 cursor**（按键会让 TUI 重绘）；
+    /// - `send(key)`：记录按键（**不推进**——连续多键如 backspace 清行只重绘一次）；
+    /// - `settle()`：**推进 cursor**（= 生产侧「按键后给 TUI 重绘留时间」，重绘后
+    ///   屏面才变化）；
     /// - `read()`：返回**当前**屏（闭环的每次复核都读当前屏）；
     /// - `poll(plan, optional)`：**循环**读当前屏直到 `plan` 可行动——`Ready` → 返回；
     ///   `Fatal` → Err（立即中止）；`NotYet` → 推进 cursor 再试；**序列耗尽** = 生产侧
@@ -4506,10 +4593,11 @@ mod tests {
                 read: || Some(cur()),
                 send: |k: &str| {
                     sent.borrow_mut().push(k.to_string());
-                    advance(&cursor, n); // 按键 → TUI 重绘（脚本里推进到下一屏）
                     Ok(())
                 },
-                settle: || {},
+                settle: || {
+                    advance(&cursor, n); // settle = 重绘窗口（脚本里推进到下一屏）
+                },
             },
         );
         (outcome, sent.into_inner(), poll_calls.into_inner())
@@ -4590,10 +4678,11 @@ mod tests {
                 read: || Some(cur()),
                 send: |k: &str| {
                     sent.borrow_mut().push(k.to_string());
-                    advance(&cursor, n); // 按键 → TUI 重绘（脚本推进）
                     Ok(())
                 },
-                settle: || {},
+                settle: || {
+                    advance(&cursor, n); // settle = 重绘窗口（脚本推进）
+                },
             },
         );
         (outcome, sent.into_inner(), opens.get())
@@ -4836,6 +4925,91 @@ mod tests {
         assert!(!residual_overlay_present(&lines(&[
             "  glm-5.3-flash medium · ~\\proj-codex  Plan mode"
         ])));
+    }
+
+    /// **输入行残留判定（composer 判据）**——通用准则「斜杠命令注入前输入行必须
+    /// 纯净」的判据锁。
+    #[test]
+    fn composer_residue_detection() {
+        // 真机夹具：底部 composer = 占位文案（空输入行）→ 纯净
+        let screen = e_stage2_screen("codex-input-residue.txt");
+        assert_eq!(
+            composer_residue(&screen),
+            None,
+            "占位 composer = 纯净（历史回显的 /permissions 在对话流中部，不得误判）"
+        );
+        // 变异（真机夹具为底）：占位行换成残留命令 → Some(字符数)
+        let mut dirty = screen.clone();
+        let pos = dirty
+            .iter()
+            .position(|l| l.contains("Ask Codex to do anything"))
+            .expect("夹具含占位 composer 行");
+        dirty[pos] = "\u{276f} /permissions/permissions".to_string();
+        assert_eq!(
+            composer_residue(&dirty),
+            Some(24),
+            "残留 24 字符 = backspace 清理键数"
+        );
+        // 无 footer（判据不可得）→ None（放行，守卫原则「判不清放行」）
+        assert_eq!(composer_residue(&lines(&["some text"])), None);
+        // 裸标记行（空 composer 另一形态）→ 纯净
+        assert_eq!(
+            composer_residue(&lines(&[
+                "  glm-5.3-flash medium · ~\\proj-codex",
+                "\u{276f}",
+            ])),
+            None
+        );
+    }
+
+    /// **段 0.5：输入行残留清理全链**——composer 有残留 → backspace×N → 屏读验证
+    /// 纯净 → 才开菜单（通用准则「斜杠命令注入前输入行必须纯净」）。
+    #[test]
+    fn stage_flow_digit_clears_composer_residue() {
+        let mut dirty = e_stage2_screen("codex-input-residue.txt");
+        let pos = dirty
+            .iter()
+            .position(|l| l.contains("Ask Codex to do anything"))
+            .expect("夹具含占位 composer 行");
+        dirty[pos] = "\u{276f} /permissions/permissions".to_string();
+        let clean = e_stage2_screen("codex-input-residue.txt"); // 占位 = 已清干净
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        let receipt = lines(&["• Permissions updated to Read Only"]);
+        let (r, sent, opens) =
+            run_codex_stage_script(vec![dirty, clean, menu, receipt], MamMode::ReadOnly);
+        let out = r.expect("输入行清干净后全链走通");
+        let cleared: Vec<&String> = sent.iter().filter(|k| k.as_str() == "backspace").collect();
+        assert_eq!(
+            cleared.len(),
+            24,
+            "逐字符删除（残留 24 字符 backspace）：{sent:?}"
+        );
+        assert_eq!(
+            sent.last().map(|s| s.as_str()),
+            Some("1"),
+            "清理后才是数字直达"
+        );
+        assert_eq!(opens, 1, "清干净才开菜单");
+        assert_eq!(out.menu_keys, vec!["1"]);
+        assert_eq!(out.receipt_seen, Some(true));
+    }
+
+    /// **段 0.5：清不净 → 如实中止**（backspace 后屏上仍是残留 = 删除键未生效/
+    /// 有异常——不盲发斜杠命令，零 /permissions 投递）。
+    #[test]
+    fn stage_flow_digit_unclearable_composer_aborts() {
+        let mut dirty = e_stage2_screen("codex-input-residue.txt");
+        let pos = dirty
+            .iter()
+            .position(|l| l.contains("Ask Codex to do anything"))
+            .expect("夹具含占位 composer 行");
+        dirty[pos] = "\u{276f} /permissions/permissions".to_string();
+        // 单屏脚本：backspace 后屏面不变（清理未生效）
+        let (r, sent, opens) = run_codex_stage_script(vec![dirty], MamMode::Default);
+        let err = r.unwrap_err();
+        assert!(err.contains("仍不纯净"), "清不净要如实中止：{err}");
+        assert!(sent.iter().all(|k| k == "backspace"), "{sent:?}");
+        assert_eq!(opens, 0, "纯净未验证前不得开菜单");
     }
 
     /// **数字直达的输入行残留现场（真机夹具）**：用户走查截图里堆积的
