@@ -1766,14 +1766,27 @@ fn read_dialog_options_render_wait(
     st: &Arc<RemoteState>,
     session: &crate::session::Session,
 ) -> Option<Vec<crate::inject::dialog::DialogOption>> {
-    let rounds = crate::inject::timing::poll_rounds(crate::inject::timing::MENU_POLL_TOTAL_MS);
+    read_dialog_options_render_wait_with(
+        || read_dialog_options(st, session),
+        crate::inject::timing::poll_rounds(crate::inject::timing::MENU_POLL_TOTAL_MS),
+    )
+}
+
+/// 渲染等待的**可注入内核**（评审修复抽出：`rounds` 参数化——门禁内小窗可测，
+/// 不用真等 1.5s）。`probe` 返回首个 `Some` 即命中（D20(a) 命中即停）；窗尽仍
+/// `None` → `None`（调用方照旧降级/拒绝——**不注入**，数字档的「未渲染不注入」面）。
+fn read_dialog_options_render_wait_with(
+    mut probe: impl FnMut() -> Option<Vec<crate::inject::dialog::DialogOption>>,
+    rounds: u32,
+) -> Option<Vec<crate::inject::dialog::DialogOption>> {
+    let rounds = rounds.max(1);
     for i in 0..rounds {
         if i > 0 {
             std::thread::sleep(std::time::Duration::from_millis(
                 crate::inject::timing::POLL_STEP_MS,
             ));
         }
-        if let Some(opts) = read_dialog_options(st, session) {
+        if let Some(opts) = probe() {
             return Some(opts);
         }
     }
@@ -2568,57 +2581,45 @@ pub async fn session_approve(
         }
         // ===== E2① 屏读验证 + 导航回退（仅 claude 数字档，且首段投递成功）=====
         if let (Some(n), true) = (digit_verify, result.is_ok()) {
-            // 数字生效判据 = **对话框消失**：DIGIT_VERIFY_POLL_TOTAL_MS 窗内轮询
-            // （D20 形态——等判据本身，非固定睡一拍）；窗内消失即完成。
-            let rounds = crate::inject::timing::poll_rounds(
-                crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+            let (fallback_keys, send_err) = verify_digit_then_fallback(
+                n,
+                || crate::inject::dialog::probe_screen_dialog(pid),
+                |key| injector.locate_and_send_key_spec(pid, key, &spec),
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::timing::POLL_STEP_MS,
+                    ));
+                },
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                },
+                crate::inject::timing::poll_rounds(
+                    crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                ),
             );
-            let mut gone = false;
-            let mut last_opts: Option<Vec<crate::inject::dialog::DialogOption>> = None;
-            for _ in 0..rounds {
-                std::thread::sleep(std::time::Duration::from_millis(
-                    crate::inject::timing::POLL_STEP_MS,
-                ));
-                match crate::inject::dialog::probe_screen_dialog(pid) {
-                    // 对话框已消失 = 数字已生效（提交完成）
-                    None => {
-                        gone = true;
-                        break;
-                    }
-                    // 仍在场：留作导航回退的起点（最后一份选项表含当前高亮位）
-                    Some(opts) => last_opts = Some(opts),
+            match (fallback_keys, send_err) {
+                (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
+                    result = Err(e);
+                    log::warn!(
+                        "E2 导航回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
+                    );
                 }
-            }
-            if !gone {
-                // 数字未生效（渲染假阴性等）→ **导航回退**（既有 NavigateConfirm）：
-                // 从**最新屏读**算循环步进（不猜起点——高亮不可解析则回退也放弃，
-                // 与导航档同一保守面）；回退后不再二次验证（一次回退是计划口径，
-                // 连环验证会拖长投递链）
-                if let Some(opts) = last_opts {
-                    match crate::inject::dialog::navigation_sequence(&opts, n) {
-                        Ok(seq) => {
-                            log::info!(
-                                "E2 数字直选未生效（对话框仍在），导航回退 ↓×{}+Enter（pid={pid}）",
-                                seq.len().saturating_sub(1)
-                            );
-                            for key in &seq {
-                                if let Err(e) =
-                                    injector.locate_and_send_key_spec(pid, key, &spec)
-                                {
-                                    result = Err(e);
-                                    break;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(
-                                    crate::inject::families::SUBMIT_DELAY_MS,
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("E2 导航回退构造失败（{e}）——数字与导航均未出手，请人工核对终端（pid={pid}）");
-                        }
-                    }
-                } else {
-                    log::warn!("E2 验证窗内屏读恒失败，无法回退——请人工核对终端（pid={pid}）");
+                (DigitVerifyOutcome::Confirmed, None) => {
+                    log::debug!("E2 数字直选生效（对话框已消失，pid={pid}）")
+                }
+                (DigitVerifyOutcome::FellBack { keys }, None) => {
+                    log::info!("E2 数字直选未生效（对话框仍在），导航回退 {keys:?}（pid={pid}）")
+                }
+                (DigitVerifyOutcome::NavigationRefused(why), None) => {
+                    log::warn!("E2 导航回退未出手（{why}）——请人工核对终端（pid={pid}）")
+                }
+                // 不可达组合（Confirmed/NavigationRefused 不发回退键→无 send_err）
+                // ——穷尽性防御臂，出现即说明内核被误改
+                (outcome, Some(e)) => {
+                    log::warn!("E2 验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
+                    result = Err(e);
                 }
             }
         }
@@ -3512,6 +3513,83 @@ enum QuestionDispatch {
     Failed(String),
     /// 内部任务异常（spawn_blocking panic 等）
     Internal(String),
+}
+
+/// E2① 数字直选「**屏读验证 + 导航回退**」的结论（审计/断言用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DigitVerifyOutcome {
+    /// 验证窗内对话框消失 = 数字已生效（零额外按键）
+    Confirmed,
+    /// 数字未生效 → 导航回退（`keys` = 已发出的回退键序）
+    FellBack { keys: Vec<String> },
+    /// 回退构造失败（无高亮/目标越界——不猜起点，导航档同一保守面）
+    NavigationRefused(String),
+}
+
+/// E2① 数字直选「屏读验证 + 导航回退」**内核**（评审修复抽出：原实现写在
+/// spawn_blocking 闭包里只有实机能覆盖——抽取理由与 [`dispatch_question_action`]
+/// 同源，参照 E4-E6 阶段机先例）。读屏/发键/等待全走闭包，门禁内脚本化可测。
+///
+/// # 语义（spec §3 / 词典 §1 计划批准框行——用户终裁 CL-3）
+///
+/// 1. **验证段**：至多 `poll_rounds` 拍（生产 =
+///    [`crate::inject::timing::poll_rounds(DIGIT_VERIFY_POLL_TOTAL_MS)`]），每拍
+///    `poll_settle` → `read` 一屏：**对话框消失 = 数字已生效**（D20 命中即停）；
+///    仍在场 → 留作回退起点（最后一份选项表含当前高亮位）；读屏不可用视同「仍在场」
+///    （无证据不断言生效）。
+/// 2. **回退段**（窗尽仍在场才走）：从最后一份选项表算循环步进
+///    （[`crate::inject::dialog::navigation_sequence`]——不猜起点），逐键 `send_key`
+///    （键间 `key_settle` 给 TUI 重绘时间）；**回退后不再二次验证**（一次回退是计划
+///    口径，连环验证会拖长投递链）。回退中首键失败即停（半途失败不可盲目重试全序列）。
+///
+/// 返回 (结论, 回退键发送失败原因 Option)——send_err 非空时调用方把投递结果置 Err。
+#[allow(clippy::too_many_arguments)]
+fn verify_digit_then_fallback<Rd, Snd, PollSettle, KeySettle>(
+    target: u32,
+    mut read: Rd,
+    mut send_key: Snd,
+    mut poll_settle: PollSettle,
+    mut key_settle: KeySettle,
+    poll_rounds: u32,
+) -> (DigitVerifyOutcome, Option<String>)
+where
+    Rd: FnMut() -> Option<Vec<crate::inject::dialog::DialogOption>>,
+    Snd: FnMut(&str) -> Result<(), String>,
+    PollSettle: FnMut(),
+    KeySettle: FnMut(),
+{
+    let rounds = poll_rounds.max(1);
+    let mut last_opts: Option<Vec<crate::inject::dialog::DialogOption>> = None;
+    for _ in 0..rounds {
+        poll_settle();
+        match read() {
+            // 对话框已消失 = 数字已生效（提交完成）
+            None => return (DigitVerifyOutcome::Confirmed, None),
+            Some(opts) => last_opts = Some(opts),
+        }
+    }
+    // 窗尽仍在场 → 导航回退
+    let Some(opts) = last_opts else {
+        // 全窗屏读不可用：无回退起点（不猜位置）——调用方按「无法回退」如实记 warn
+        return (
+            DigitVerifyOutcome::NavigationRefused("验证窗内屏读恒失败，无法回退".to_string()),
+            None,
+        );
+    };
+    match crate::inject::dialog::navigation_sequence(&opts, target) {
+        Ok(seq) => {
+            let mut sent = Vec::new();
+            for key in &seq {
+                if let Err(e) = send_key(key) {
+                    return (DigitVerifyOutcome::FellBack { keys: sent }, Some(e));
+                }
+                sent.push(key.clone());
+                key_settle();
+            }
+            (DigitVerifyOutcome::FellBack { keys: sent }, None)
+        }
+        Err(e) => (DigitVerifyOutcome::NavigationRefused(e), None),
+    }
 }
 
 /// **动作分派器**：按 [`StagePlan`] 把动作路由到「单键直发」或两条阶段机之一。
@@ -5189,6 +5267,133 @@ mod tests {
             ApproveDialogKeys::NavigateConfirm,
             "未取证工具保守导航（到不了此路，纵深防御）"
         );
+    }
+
+    // ==== 批次戊 E2①（评审修复）：DigitFirstWithVerify 执行流三例 ====
+
+    /// 选项表夹具（3 项、高亮在第 1 项——claude 计划批准框形态）
+    fn three_options_highlight_first() -> Vec<crate::inject::dialog::DialogOption> {
+        vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "Yes, and use auto mode".into(),
+                highlighted: true,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "Yes, manually approve edits".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 3,
+                label: "Tell Claude what to change".into(),
+                highlighted: false,
+            },
+        ]
+    }
+
+    /// **① 数字成功**：首拍屏读即「对话框消失」（probe → None）→ `Confirmed`、
+    /// **零回退键**（数字已生效，不再发任何键）。
+    #[test]
+    fn e2_digit_verify_confirmed_when_dialog_gone() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let (outcome, send_err) = verify_digit_then_fallback(
+            3,
+            || None, // 对话框已消失
+            |k: &str| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            || {},
+            || {},
+            3,
+        );
+        assert_eq!(
+            outcome,
+            DigitVerifyOutcome::Confirmed,
+            "对话框消失 = 数字生效"
+        );
+        assert_eq!(send_err, None);
+        assert!(
+            sent.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "数字已生效 → 零回退键"
+        );
+    }
+
+    /// **② 数字无效转导航**：窗内对话框恒在场（probe 恒 Some）→ `FellBack`，回退键序
+    /// = 从**最后一份选项表**算循环步进（高亮在 1、目标 3 → ↓×2+Enter）。
+    /// 还原动作（变异）：内核删掉回退段（窗尽直接返回 Confirmed）→ 本测试先红。
+    #[test]
+    fn e2_digit_verify_falls_back_to_navigation_when_still_present() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let (outcome, send_err) = verify_digit_then_fallback(
+            3,
+            || Some(three_options_highlight_first()), // 恒在场（渲染假阴性形态）
+            |k: &str| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            || {},
+            || {},
+            2,
+        );
+        assert_eq!(send_err, None);
+        match outcome {
+            DigitVerifyOutcome::FellBack { keys } => assert_eq!(
+                keys,
+                vec!["down", "down", "enter"],
+                "回退键序 = 循环步进（高亮 1 → 目标 3）"
+            ),
+            other => panic!("窗尽仍在场必须转导航回退：{other:?}"),
+        }
+        assert_eq!(
+            sent.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["down", "down", "enter"],
+            "回退键真实发出（经 send_key 闭包）"
+        );
+    }
+
+    /// **③ 未渲染不注入**：渲染等待窗内 probe 恒 `None`（选项簇未画出）→ 返回
+    /// `None` → 端点 `no_mapping` 409 → **零注入**（数字档的假阴性防线——注入早于
+    /// 渲染正是丁复审「数字无效 ×5」的根因）；中途画出的（None→Some）→ 命中即返回。
+    #[test]
+    fn e2_render_wait_never_injects_before_rendered() {
+        let calls = std::cell::Cell::new(0u32);
+        // 窗内恒未渲染 → None（不注入）
+        let got = read_dialog_options_render_wait_with(
+            || {
+                calls.set(calls.get() + 1);
+                None
+            },
+            2,
+        );
+        assert_eq!(got, None, "窗尽未渲染 → None（端点据此拒绝注入）");
+        assert_eq!(calls.get(), 2, "读满窗（每拍都探测）");
+        // 中途渲染（第 2 拍画出）→ 命中即停（D20(a)）
+        let calls2 = std::cell::Cell::new(0u32);
+        let got2 = read_dialog_options_render_wait_with(
+            || {
+                calls2.set(calls2.get() + 1);
+                if calls2.get() >= 2 {
+                    Some(three_options_highlight_first())
+                } else {
+                    None
+                }
+            },
+            5,
+        );
+        assert_eq!(got2.map(|o| o.len()), Some(3), "渲染出现即命中");
+        assert_eq!(calls2.get(), 2, "命中即停（不多读）");
     }
 
     /// 纯核夹具：消息构造（kind 是唯一参与判据的字段）

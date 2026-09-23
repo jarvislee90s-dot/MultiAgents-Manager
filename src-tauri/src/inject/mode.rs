@@ -1130,9 +1130,11 @@ where
 /// （见 [`locate_menu_items`]），行首形态、编号、缩进、光标标记都不参与词表判据——
 /// 两家实机形态不同（codex 编号 + `›`、kimi 无编号 + `❯`），但**同一个词表**即可覆盖。
 ///
-/// **本表顺序不参与导航计算**——导航从**屏上实际高亮位**出发逐步复核
-/// （[`navigate_until_highlighted`]），本表只回答「哪些词算这一档」。弹窗里缺失的项
-/// （如 Guardian 关闭时的 `Approve for me`）因此天然不参与步进。
+/// **本表（E3① 起）只回答「哪些词算这一档」**——定位已改「标题/footer 锚窗+按家
+/// 行形」（[`locate_menu_items`]），导航从**屏上实际高亮位**出发逐步复核
+/// （[`navigate_until_highlighted`]），步进数与本表顺序无关。弹窗里缺失的项
+/// （如 Guardian 关闭时的 `Approve for me`）因此天然不参与步进；一致性闸
+/// （[`menu_items_coherent`]）的目标档全集仍按 [`menu_target_labels`]。
 pub fn menu_labels(tool: &str) -> &'static [&'static str] {
     match tool {
         "codex" => &[

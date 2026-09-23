@@ -351,7 +351,9 @@ pub fn answer_key_sequence_for(
             // E6：esc = 单次 dismiss（state.status=error + dismissed 落账，戊探A
             // E-A4）——与其他家「esc=中断回合」不同构
             AnswerAction::Cancel if tool == "opencode" => Ok(vec!["esc".to_string()]),
-            AnswerAction::Cancel => Err("opencode 取消未实测，不出键".to_string()),
+            // codex 取消未实测 → 不出键（Esc=「中断整个回合」，语义破坏性大于
+            // opencode 的 dismiss——工具名如实，勿写成别家）
+            AnswerAction::Cancel => Err("codex 取消未实测，不出键".to_string()),
             // opencode 自由作答走阶段机（own answer 开行守卫，E6）
             AnswerAction::FreeText if tool == "opencode" => {
                 Err("opencode 自由作答必须经阶段机（run_opencode_own_answer_stages）".to_string())
@@ -932,7 +934,6 @@ where
             "已发回车但读不到屏幕（无法确认输入行开启）——已中止，未发文本（裸打字会被当导航/勾选指令）；请人工核对终端",
         )
     })?;
-    eprintln!("DEBUG verify frame={:?}", opened);
     if !opencode_own_answer_input_open(&opened) {
         return Err(StageAbort::screen(
             "输入行未开启（屏上无占位行）——已中止，未发文本（裸打字守卫）；请人工核对终端",
@@ -2231,10 +2232,6 @@ mod tests {
         let mut terminal = crate::inject::question::FreeTextClosures {
             read: move || {
                 let d = dr.load(Ordering::SeqCst);
-                eprintln!(
-                    "DEBUG read d={d} -> {}",
-                    if d >= 4 { "opened" } else { "fresh" }
-                );
                 if d >= 4 {
                     Some(or_.clone())
                 } else {
