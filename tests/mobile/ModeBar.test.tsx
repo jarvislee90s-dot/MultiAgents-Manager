@@ -91,12 +91,20 @@ function opencodeSingleAxis(): SessionModeView {
   };
 }
 
-/** 丁T4 新后端形态：二维（codex；模式组 Plan、权限组无回读源） */
-function codexTwoAxis(): SessionModeView {
+/** 丁T4 新后端形态：二维（codex）。2026-09-23 codex 模式切换改造后：模式组 =
+ *  单钮 toggle（计划 ⇄ 操作，shift+tab 双向）；权限组四档（含自动审批）。
+ *  `modeCurrent` 驱动 toggle 的翻转方向；`permissionCurrent` 用来测「上次切换」
+ *  记忆标注（null = 无记忆 → 模式未知）。 */
+function codexTwoAxis(opts?: {
+  modeCurrent?: MamMode;
+  permissionCurrent?: MamMode | null;
+}): SessionModeView {
+  const modeCurrent = opts?.modeCurrent ?? "plan";
+  const permissionCurrent = opts?.permissionCurrent ?? null;
   return {
     tool: "codex",
-    current: "plan",
-    currentLabel: "计划",
+    current: modeCurrent,
+    currentLabel: modeCurrent === "plan" ? "计划" : "操作",
     readback: true,
     switchKind: "slashCommand",
     structure: "twoAxis",
@@ -106,15 +114,11 @@ function codexTwoAxis(): SessionModeView {
         label: "模式",
         step: false,
         readback: true,
-        current: "plan",
-        currentLabel: "计划",
+        layout: "toggle",
+        current: modeCurrent,
+        currentLabel: modeCurrent === "plan" ? "计划" : "操作",
         tiers: [
-          {
-            mode: "default",
-            label: "默认",
-            selectable: false,
-            reason: "codex 退出计划模式无实测命令（可在终端按 shift+tab，或在计划批准框选第一项）",
-          },
+          { mode: "default", label: "操作", selectable: true },
           { mode: "plan", label: "计划", selectable: true },
         ],
         legacy: [],
@@ -124,11 +128,12 @@ function codexTwoAxis(): SessionModeView {
         label: "权限",
         step: false,
         readback: false,
-        current: null,
-        currentLabel: null,
+        current: permissionCurrent,
+        currentLabel: permissionCurrent === null ? null : "只读",
         tiers: [
           { mode: "readOnly", label: "只读", selectable: true },
           { mode: "default", label: "默认", selectable: true },
+          { mode: "acceptEdits", label: "自动审批", selectable: true },
           { mode: "bypass", label: "完全信任", selectable: true },
         ],
         legacy: [
@@ -235,7 +240,7 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
     routes.switchStatus = 409;
     routes.switchBody = { error: "no_mechanism" };
     render(<ModeBar session={{ id: "s7" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-plan"));
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
     expect((await screen.findByTestId("mode-error")).textContent).toContain("未实测");
   });
 });
@@ -333,16 +338,17 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     expect(screen.getByTestId("mode-legacy-permission").textContent).toContain("on-failure");
   });
 
-  it("裁7：不可选档（codex 模式组「默认」）不渲染按钮，渲染为不可用说明（带 reason）", async () => {
+  it("2026-09-23：codex 模式组 = 单钮 toggle「计划 ⇄ 操作」（不再有逐档按钮/不可用档）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t4" }} />);
     await screen.findByTestId("mode-bar");
+    // 单钮 toggle 在（shift+tab 双向，目标档由前端按当前档翻转）
+    expect(screen.getByTestId("mode-switch-mode-toggle")).toBeTruthy();
+    // 不再有逐档直达按钮，也不再有「不可用」说明档
     expect(screen.queryByTestId("mode-switch-mode-default")).toBeNull();
-    const disabled = screen.getByTestId("mode-tier-disabled-mode-default");
-    expect(disabled.textContent).toContain("默认");
-    expect(disabled.textContent).toContain("不可用");
-    expect(disabled.getAttribute("title")).toContain("无实测命令");
+    expect(screen.queryByTestId("mode-switch-mode-plan")).toBeNull();
+    expect(screen.queryByTestId("mode-tier-disabled-mode-default")).toBeNull();
   });
 
   it("裁6 + 单轴：opencode 两档渲染「默认」/「计划」+ 切换钮 + 当前档回显", async () => {
@@ -427,12 +433,12 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     routes.mode = codexTwoAxis();
     routes.switchBody = {
       status: "failed",
-      error: "codex 运行中不接受 /plan（计划模式不可用），请等回合结束后重试",
+      error: "codex 运行中不接受模式切换（shift+tab），请等回合结束后重试",
     };
     render(<ModeBar session={{ id: "t10" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-plan"));
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
     const err = await screen.findByTestId("mode-error");
-    expect(err.textContent).toContain("运行中不接受 /plan");
+    expect(err.textContent).toContain("运行中不接受模式切换");
     expect(screen.queryByTestId("mode-receipt")).toBeNull();
   });
 });
@@ -441,15 +447,17 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
 describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
   it("当前档按钮高亮：data-current=true + 反色样式；其余档 data-current=false", async () => {
     installFetch();
-    routes.mode = codexTwoAxis();
+    // 权限组带「上次切换」记忆（readOnly）→ 逐档高亮断言落在权限组
+    routes.mode = codexTwoAxis({ permissionCurrent: "readOnly" });
     render(<ModeBar session={{ id: "s-e3-hl" }} />);
-    const planBtn = await screen.findByTestId("mode-switch-mode-plan");
-    expect(planBtn.getAttribute("data-current")).toBe("true");
-    expect(planBtn.className).toContain("font-semibold");
-    const readOnlyBtn = screen.getByTestId("mode-switch-permission-readOnly");
-    expect(readOnlyBtn.getAttribute("data-current")).toBe("false");
-    // 权限组 current=null → 无任何高亮（不假装知道当前档）
-    expect(readOnlyBtn.className).not.toContain("font-semibold");
+    const readOnlyBtn = await screen.findByTestId("mode-switch-permission-readOnly");
+    expect(readOnlyBtn.getAttribute("data-current")).toBe("true");
+    expect(readOnlyBtn.className).toContain("font-semibold");
+    const bypassBtn = screen.getByTestId("mode-switch-permission-bypass");
+    expect(bypassBtn.getAttribute("data-current")).toBe("false");
+    expect(bypassBtn.className).not.toContain("font-semibold");
+    // 模式组是 toggle 单钮：data-current 直接承载当前档（plan）
+    expect(screen.getByTestId("mode-switch-mode-toggle").getAttribute("data-current")).toBe("plan");
   });
 
   it("问答待决：questionPending=true → 按钮全部禁用 + 原因文案 + data-question-pending", async () => {
@@ -458,9 +466,9 @@ describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
     render(<ModeBar session={{ id: "s-e3-pending" }} />);
     await screen.findByTestId("mode-question-pending-hint");
     expect(screen.getByTestId("mode-bar").getAttribute("data-question-pending")).toBe("true");
-    expect(
-      (screen.getByTestId("mode-switch-mode-plan") as HTMLButtonElement).disabled
-    ).toBe(true);
+    expect((screen.getByTestId("mode-switch-mode-toggle") as HTMLButtonElement).disabled).toBe(
+      true
+    );
     expect(
       (screen.getByTestId("mode-switch-permission-readOnly") as HTMLButtonElement).disabled
     ).toBe(true);
@@ -470,12 +478,139 @@ describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "s-e3-normal" }} />);
-    await screen.findByTestId("mode-switch-mode-plan");
+    await screen.findByTestId("mode-switch-mode-toggle");
+    expect(screen.queryByTestId("mode-question-pending-hint")).toBeNull();
+    expect((screen.getByTestId("mode-switch-mode-toggle") as HTMLButtonElement).disabled).toBe(
+      false
+    );
+  });
+});
+
+// ==== 2026-09-23 codex 模式切换改造：toggle 翻转 / bypass 二次确认 / 档位记忆 ====
+describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", () => {
+  it("toggle 点击 = shift+tab 语义：current=plan 时发 {group:'mode', target:'default'}", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis(); // mode 组 current = plan
+    routes.switchBody = { status: "key_sent", verified: true, hint: null };
+    render(<ModeBar session={{ id: "mc-t1" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBe("mode");
+    expect(body.target).toBe("default", "当前是计划 → 点击切到操作");
+  });
+
+  it("权限组 current 有值时 toggle 翻转方向相反：current=default → 发 target=plan", async () => {
+    installFetch();
+    // mode 组 current = 操作（default）→ 点击应发 target=plan（切到计划）
+    routes.mode = codexTwoAxis({ modeCurrent: "default" });
+    routes.switchBody = { status: "key_sent", verified: true, hint: null };
+    render(<ModeBar session={{ id: "mc-t2" }} />);
+    const toggle = await screen.findByTestId("mode-switch-mode-toggle");
+    expect(toggle.getAttribute("data-current")).toBe("default");
+    fireEvent.click(toggle);
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.target).toBe("plan");
+  });
+
+  it("权限组 current=未知时 toggle 禁用（盲按会 50% 误切）", async () => {
+    installFetch();
+    // 权限组记忆不影响模式组——用旧后端回落形态让 mode 组 current=null
+    routes.mode = {
+      tool: "codex",
+      current: null,
+      currentLabel: null,
+      readback: false,
+      switchKind: "shiftTab",
+      structure: "twoAxis",
+      groups: [
+        {
+          id: "mode",
+          label: "模式",
+          step: false,
+          readback: false,
+          layout: "toggle",
+          current: null,
+          currentLabel: null,
+          tiers: [
+            { mode: "default", label: "操作", selectable: true },
+            { mode: "plan", label: "计划", selectable: true },
+          ],
+          legacy: [],
+        },
+      ],
+    };
+    render(<ModeBar session={{ id: "mc-t2b" }} />);
+    const toggle = await screen.findByTestId("mode-switch-mode-toggle");
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    expect(toggle.getAttribute("data-current")).toBe("unknown");
+  });
+
+  it("权限组四档渲染：自动审批（acceptEdits）档出现在只读/默认与完全信任之间", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "mc-t3" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.getByTestId("mode-switch-permission-acceptEdits").textContent).toBe("自动审批");
+    expect(screen.getByTestId("mode-switch-permission-readOnly")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-permission-default")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-permission-bypass")).toBeTruthy();
+  });
+
+  it("完全信任二次确认：点完全信任先出确认条且**不发请求**；确认后才发 bypass", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.switchBody = { status: "key_sent", verified: true, hint: null };
+    render(<ModeBar session={{ id: "mc-t4" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-permission-bypass"));
+    await flushAsync();
+    // 确认条出现，但**零 POST**（未确认不发任何键）
+    expect(screen.getByTestId("mode-bypass-confirm").textContent).toContain("两次按键");
     expect(
-      screen.queryByTestId("mode-question-pending-hint")
-    ).toBeNull();
-    expect(
-      (screen.getByTestId("mode-switch-mode-plan") as HTMLButtonElement).disabled
+      fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-mode/switch"))
     ).toBe(false);
+    // 确认启用 → POST {group:'permission', target:'bypass'}
+    fireEvent.click(screen.getByTestId("mode-bypass-confirm-yes"));
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBe("permission");
+    expect(body.target).toBe("bypass");
+  });
+
+  it("完全信任二次确认：取消收起确认条，全程零请求", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    render(<ModeBar session={{ id: "mc-t5" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-permission-bypass"));
+    expect(screen.getByTestId("mode-bypass-confirm")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("mode-bypass-confirm-no"));
+    expect(screen.queryByTestId("mode-bypass-confirm")).toBeNull();
+    expect(
+      fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-mode/switch"))
+    ).toBe(false);
+  });
+
+  it("权限组记忆标注：current 有值（上次切换）→ 显示档名 +「（上次切换）」，无未知提示", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis({ permissionCurrent: "readOnly" });
+    render(<ModeBar session={{ id: "mc-t6" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
+    expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
+    expect(screen.queryByTestId("mode-unknown-hint-permission")).toBeNull();
+    // 只读按钮按记忆高亮
+    expect(screen.getByTestId("mode-switch-permission-readOnly").getAttribute("data-current")).toBe(
+      "true"
+    );
   });
 });

@@ -755,12 +755,16 @@ export interface ModeLegacyView {
 
 /** 单组（GET 载荷 `groups[]`）。`step=true` = 步进轴（shift+tab 一次一档，档位顺序即
  *  实测环序）；`readback=false` = 该组无屏读源（前端必须显示「请人工核对」）。
- *  `current=null` = 档未知（屏读失败或该组无回读源）→ **不得假装知道**（红线 4）。 */
+ *  `current=null` = 档未知（屏读失败或该组无回读源）→ **不得假装知道**（红线 4）。
+ *  `layout`（2026-09-23 codex 模式切换改造）：`"toggle"` = 单钮循环（点击向终端发一次
+ *  循环键——codex 模式组「计划 ⇄ 操作」= shift+tab，目标档由前端按当前档翻转）；
+ *  缺省/`"tiers"` = 逐档按钮。 */
 export interface ModeGroupView {
   id: ModeGroupId;
   label: string;
   step: boolean;
   readback: boolean;
+  layout?: "tiers" | "toggle";
   current: MamMode | null;
   currentLabel: string | null;
   tiers: ModeTierView[];

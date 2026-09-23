@@ -217,7 +217,14 @@ function modeGroups(view: SessionModeView): ModeGroupView[] {
 }
 
 /** 单组渲染：组标题（仅二维时显示）+ 当前档 + 切换入口。
- *  E3④：当前档按钮**高亮**（data-current + 反色样式）；问答待决时全组禁用。 */
+ *  E3④：当前档按钮**高亮**（data-current + 反色样式）；问答待决时全组禁用。
+ *  2026-09-23 codex 模式切换改造新增三个面：
+ *  - `layout === "toggle"`（codex 模式组）→ 单钮「计划 ⇄ 操作」（点击 = 向终端发一次
+ *    shift+tab，目标档按当前档翻转；**当前档未知时禁用**——盲按会 50% 误切）；
+ *  - 「完全信任」二次确认（用户裁决）：点完全信任先出确认条，确认后才发——codex 会
+ *    连发两次按键（4→1）并代按终端的风险确认框；
+ *  - 权限组（无屏读源）current 有值时标注「（上次切换）」——它是 MAM 的记忆，不是
+ *    实时屏读（终端手改会失真，如实声明口径）。 */
 function ModeGroupRow({
   group,
   showGroupLabel,
@@ -232,8 +239,11 @@ function ModeGroupRow({
 }) {
   const currentText = group.currentLabel ?? "模式未知";
   const unknown = group.current === null;
+  // 完全信任二次确认的待确认态（只在含 bypass 档的权限组用得上）
+  const [bypassArmed, setBypassArmed] = useState(false);
+  const hasBypass = group.tiers.some((t) => t.mode === "bypass" && t.selectable);
   return (
-    <span data-testid={`mode-group-${group.id}`} className="flex items-center gap-2">
+    <span data-testid={`mode-group-${group.id}`} className="flex flex-wrap items-center gap-2">
       {showGroupLabel && (
         <span className="text-[11px] text-slate-400 dark:text-slate-500">{group.label}</span>
       )}
@@ -246,6 +256,14 @@ function ModeGroupRow({
       >
         {currentText}
       </span>
+      {!unknown && group.id === "permission" && group.readback === false && (
+        <span
+          data-testid={`mode-current-source-${group.id}`}
+          className="text-[10px] text-slate-400 dark:text-slate-500"
+        >
+          （上次切换）
+        </span>
+      )}
       {unknown && (
         <span
           data-testid={`mode-unknown-hint-${group.id}`}
@@ -254,7 +272,30 @@ function ModeGroupRow({
           请人工核对终端当前模式
         </span>
       )}
-      {group.step ? (
+      {group.layout === "toggle" ? (
+        // 单钮 toggle（codex 模式组）：点击向终端发一次 shift+tab，终端在
+        // 计划/操作间循环；目标档按当前档翻转（current 未知 → 禁用，防盲按误切）
+        (() => {
+          const toggleTarget: MamMode = group.current === "plan" ? "default" : "plan";
+          return (
+            <button
+              type="button"
+              data-testid={`mode-switch-${group.id}-toggle`}
+              data-current={group.current ?? "unknown"}
+              disabled={busy || unknown}
+              title={
+                unknown
+                  ? "请先人工核对终端当前模式（当前档未知时盲按会误切）"
+                  : "向终端发送 shift+tab，在计划/操作间切换"
+              }
+              onClick={() => onSwitch(toggleTarget)}
+              className="rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white disabled:opacity-40 dark:bg-blue-500"
+            >
+              计划 ⇄ 操作
+            </button>
+          );
+        })()
+      ) : group.step ? (
         // 步进轴（claude/opencode）：单钮「切换模式」——shift+tab 一次一档，
         // 目标档由环序决定（后端按实测环序回读核对，前端不假装直达）
         <button
@@ -268,10 +309,9 @@ function ModeGroupRow({
         </button>
       ) : (
         // 直达轴（模式组/权限组）：逐档按钮。**只渲染 selectable 的档**（裁7 的
-        // 退役档根本不进 tiers；codex「默认」这类「在结构里但无机制」的档留在
-        // 结构里、以不可点 + reason 提示呈现——用户能看懂为什么点不了）。
-        // **当前档高亮**（E3④）：`group.current === t.mode` 的按钮反色 + data-current
-        // ——回读/漂移口径如实显示（kimi 批准后自动切出 plan 时高亮跟着回读走）。
+        // 退役档根本不进 tiers）。
+        // **当前档高亮**（E3④）：`group.current === t.mode` 的按钮反色 + data-current。
+        // 「完全信任」特例（2026-09-23 用户裁决）：先武装二次确认条，确认后才发。
         <span className="flex flex-wrap items-center gap-1">
           {group.tiers.map((t) => {
             const isCurrent = group.current !== null && group.current === t.mode;
@@ -282,7 +322,13 @@ function ModeGroupRow({
                 data-testid={`mode-switch-${group.id}-${t.mode}`}
                 data-current={isCurrent ? "true" : "false"}
                 disabled={busy}
-                onClick={() => onSwitch(t.mode)}
+                onClick={() => {
+                  if (t.mode === "bypass") {
+                    setBypassArmed(true); // 不直接发——等「确认启用」
+                  } else {
+                    onSwitch(t.mode);
+                  }
+                }}
                 className={`rounded-full px-2 py-0.5 text-[11px] disabled:opacity-40 ${
                   isCurrent
                     ? "bg-slate-700 font-semibold text-white dark:bg-slate-200 dark:text-slate-900"
@@ -312,6 +358,36 @@ function ModeGroupRow({
           className="text-[11px] text-slate-400 dark:text-slate-500"
         >
           已退役：{group.legacy.map((l) => l.label).join(" / ")}
+        </span>
+      )}
+      {/* 完全信任二次确认条（2026-09-23 用户裁决的前端防线；未确认不发任何请求） */}
+      {hasBypass && bypassArmed && (
+        <span
+          data-testid="mode-bypass-confirm"
+          className="flex w-full flex-wrap items-center gap-2 rounded-lg bg-rose-500/10 px-2 py-1 text-[11px] text-rose-700 dark:text-rose-300"
+        >
+          <span>将连发两次按键（4→1）启用完全信任：终端会弹出风险确认框，由 MAM 代按确认。</span>
+          <button
+            type="button"
+            data-testid="mode-bypass-confirm-yes"
+            disabled={busy}
+            onClick={() => {
+              setBypassArmed(false);
+              onSwitch("bypass");
+            }}
+            className="rounded-full bg-rose-600 px-2 py-0.5 font-semibold text-white disabled:opacity-40 dark:bg-rose-500"
+          >
+            确认启用
+          </button>
+          <button
+            type="button"
+            data-testid="mode-bypass-confirm-no"
+            disabled={busy}
+            onClick={() => setBypassArmed(false)}
+            className="rounded-full bg-slate-500/15 px-2 py-0.5 text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+          >
+            取消
+          </button>
         </span>
       )}
     </span>
