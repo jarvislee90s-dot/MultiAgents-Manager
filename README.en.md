@@ -333,3 +333,13 @@ Please read [AGENTS.md](AGENTS.md) for project architecture and development guid
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Trademarks & Non-Affiliation
+
+MultiAgents-Manager is an independent, open-source project. It is not affiliated with, endorsed by, or sponsored by Anthropic (Claude / Claude Code), OpenAI (Codex / ChatGPT), OpenCode, OpenClaw, Moonshot AI (Kimi Code), WorkBuddy, ZCode, dsh, or any other company or product mentioned in this repository. All product names, logos, and brands are the property of their respective owners; they are used here solely to describe compatibility (nominative fair use). Icons in this app are original designs; some color schemes are used only to help identify the corresponding tool and do not imply any official status.
+
+## Official Channels
+
+The only official distribution channel for this project is the [GitHub Releases](../../releases) page of this repository. Downloads offered anywhere else are third-party redistribution. See [TRADEMARK.md](TRADEMARK.md) for brand usage guidelines.
