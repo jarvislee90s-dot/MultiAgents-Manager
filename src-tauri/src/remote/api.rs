@@ -4641,7 +4641,7 @@ pub async fn session_mode_menu(
                     ))
                 };
                 let mut terminal = crate::inject::mode::Closures {
-                    read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+                    read: || read_screen_lines(pid),
                     send: |key: &str| {
                         let r = injector.locate_and_send_key_spec(pid, key, &spec);
                         if r.is_ok() {
@@ -4758,7 +4758,7 @@ pub async fn session_mode_menu(
             ))
         };
         let mut terminal = crate::inject::mode::Closures {
-            read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+            read: || read_screen_lines(pid),
             send: |key: &str| {
                 let r = injector.locate_and_send_key_spec(pid, key, &spec);
                 if r.is_ok() {
@@ -4770,7 +4770,7 @@ pub async fn session_mode_menu(
         };
         let pick = crate::inject::mode::run_codex_menu_pick(
             number,
-            || crate::inject::windows_console::read_screen_window(pid).ok(),
+            || read_screen_lines(pid),
             || poll_confirm_cluster(pid),
             || {
                 std::thread::sleep(std::time::Duration::from_millis(
@@ -5532,7 +5532,7 @@ fn menu_stages(
                 ))
             };
             let mut terminal = crate::inject::mode::Closures {
-                read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+                read: || read_screen_lines(pid),
                 send: |key: &str| {
                     let r = injector.locate_and_send_key_spec(pid, key, spec);
                     if r.is_ok() {
@@ -5587,7 +5587,7 @@ fn menu_stages(
                 receipt_seen: outcome.receipt_seen,
             });
         }
-        let read = || crate::inject::windows_console::read_screen_window(pid).ok();
+        let read = || read_screen_lines(pid);
         let key_delay = || {
             std::thread::sleep(std::time::Duration::from_millis(
                 crate::inject::families::SUBMIT_DELAY_MS,
@@ -5673,6 +5673,9 @@ fn poll_menu_digit(pid: u32, target: crate::inject::mode::MamMode) -> Result<Str
 /// codex Full Access 二阶段确认框的**生产轮询**：产出确认框**簇**（供编排取肯定项
 /// 的屏上编号直达——与 [`poll_menu_stage`] 的 `optional=true` 同窗同「缺席不当作
 /// 失败」语义，但返回簇而不是屏幕行）。
+///
+/// **平台缝**：屏读实现仅 Windows（`inject/mod.rs` 门控）——非 Windows 侧由下方
+/// 桩降级（Err 明示不支持，不装作读到空屏）。
 #[cfg(windows)]
 fn poll_confirm_cluster(
     pid: u32,
@@ -5706,6 +5709,30 @@ fn poll_confirm_cluster(
         last.unwrap_or_default()
     );
     Ok(None)
+}
+
+/// [`poll_confirm_cluster`] 的非 Windows 桩：屏读实现仅 Windows——macOS 等平台
+/// 走不到这里（codex 菜单拾取端点在非 Windows 拒绝注入），编译期兜底防 cfg 断链，
+/// Err 文案如实（不装作读到空屏）。
+#[cfg(not(windows))]
+fn poll_confirm_cluster(
+    _pid: u32,
+) -> Result<Option<Vec<crate::inject::dialog::DialogOption>>, String> {
+    Err("确认框屏读簇仅 Windows 支持".to_string())
+}
+
+/// **平台中立读屏缝**（丁T3 同思路）：仅 Windows 有屏读实现；非 Windows 一律
+/// `None`——上层闭包按「读不到屏」自然降级（阶段机中止零按键 / 二元卡），不因
+/// 平台差断编译。Windows 侧等价 `windows_console::read_screen_window(pid).ok()`。
+#[cfg(windows)]
+fn read_screen_lines(pid: u32) -> Option<Vec<String>> {
+    crate::inject::windows_console::read_screen_window(pid).ok()
+}
+
+/// [`read_screen_lines`] 的非 Windows 桩（见上）。
+#[cfg(not(windows))]
+fn read_screen_lines(_pid: u32) -> Option<Vec<String>> {
+    None
 }
 
 /// 菜单路径的**生产轮询**：按阶段取预算，轮询读屏直到 `plan` 可行动。
