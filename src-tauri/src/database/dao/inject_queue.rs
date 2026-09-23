@@ -4,8 +4,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::database::connection::DB;
-
 /// SELECT 列清单（顺序与 row_to_queue 对齐）
 const COLS: &str = "id, session_id, agent_type, device_id, device_name, content, enqueued_at, sent_at, failed_reason";
 
@@ -41,63 +39,6 @@ pub struct QueueRow {
     pub enqueued_at: i64,
     pub sent_at: Option<i64>,
     pub failed_reason: Option<String>,
-}
-
-/// 入队（全局 DB）
-pub fn enqueue(
-    session_id: &str,
-    agent_type: &str,
-    device_id: &str,
-    device_name: &str,
-    content: &str,
-    enqueued_at: i64,
-) -> i64 {
-    let conn = DB.lock().unwrap();
-    enqueue_conn(
-        &conn,
-        session_id,
-        agent_type,
-        device_id,
-        device_name,
-        content,
-        enqueued_at,
-    )
-}
-
-/// 某会话全部待发消息，FIFO（全局 DB）
-pub fn pending_for_session(session_id: &str) -> Vec<QueueRow> {
-    let conn = DB.lock().unwrap();
-    pending_for_session_conn(&conn, session_id)
-}
-
-/// 队首（全局 DB）
-pub fn next_pending(session_id: &str) -> Option<QueueRow> {
-    let conn = DB.lock().unwrap();
-    next_pending_conn(&conn, session_id)
-}
-
-/// 标记已发送（全局 DB）
-pub fn mark_sent(id: i64, now: i64) {
-    let conn = DB.lock().unwrap();
-    mark_sent_conn(&conn, id, now);
-}
-
-/// 标记失败（全局 DB）
-pub fn mark_failed(id: i64, reason: &str) {
-    let conn = DB.lock().unwrap();
-    mark_failed_conn(&conn, id, reason);
-}
-
-/// 撤回（仅当该行属于 sid 才删）（全局 DB）
-pub fn retract(session_id: &str, id: i64) -> bool {
-    let conn = DB.lock().unwrap();
-    retract_conn(&conn, session_id, id)
-}
-
-/// 按 id 查单行（全局 DB；mark_sent / mark_failed 后观察落库状态用）
-pub fn get(id: i64) -> Option<QueueRow> {
-    let conn = DB.lock().unwrap();
-    get_conn(&conn, id)
 }
 
 /// 入队：插入一行 pending，返回新 id

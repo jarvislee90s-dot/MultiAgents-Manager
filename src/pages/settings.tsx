@@ -24,10 +24,12 @@ import {
   Keyboard,
   Bell,
   Volume2,
+  Database,
   Dog,
   Wrench,
   HeartPulse,
   RefreshCw,
+  RadioTower,
   Smartphone,
   ScrollText,
 } from "lucide-react";
@@ -60,6 +62,8 @@ import { useEnabledToolsQuery } from "@/lib/query/queries/tools";
 import { usePresetHealthQuery } from "@/lib/query/queries/health";
 import { RemoteSection } from "@/components/settings/RemoteSection";
 import { AuditLogSection } from "@/components/settings/AuditLogSection";
+import { SignalHealthSection } from "@/components/settings/SignalHealthSection";
+import { DataManagementSection } from "@/components/settings/DataManagementSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -140,7 +144,16 @@ function HealthSummary() {
 }
 
 type SettingSection =
-  "appearance" | "shortcut" | "notifications" | "pet" | "tools" | "health" | "remote" | "audit";
+  | "appearance"
+  | "shortcut"
+  | "notifications"
+  | "pet"
+  | "tools"
+  | "health"
+  | "signal"
+  | "remote"
+  | "audit"
+  | "data";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
 type ToolRow = {
@@ -449,6 +462,11 @@ export default function SettingsPage() {
       icon: HeartPulse,
     },
     {
+      id: "signal" as SettingSection,
+      label: t("settings.signalHealth.title"),
+      icon: RadioTower,
+    },
+    {
       id: "remote" as SettingSection,
       label: t("settings.remote.title"),
       icon: Smartphone,
@@ -457,6 +475,11 @@ export default function SettingsPage() {
       id: "audit" as SettingSection,
       label: t("settings.audit.title"),
       icon: ScrollText,
+    },
+    {
+      id: "data" as SettingSection,
+      label: t("settings.dataManagement.title"),
+      icon: Database,
     },
   ];
 
@@ -840,8 +863,12 @@ export default function SettingsPage() {
             </div>
           )}
           {activeSection === "remote" && <RemoteSection />}
+          {/* T5：信号健康度（hook 通道自查 + codex 信任门引导，与 RemoteSection 同级独立分区） */}
+          {activeSection === "signal" && <SignalHealthSection />}
           {/* M7 W5：注入审计桌面查看入口（与 RemoteSection 同级独立分区） */}
           {activeSection === "audit" && <AuditLogSection />}
+          {/* 2026-09-20：数据管理首版（移动端附件占用列出/清理，C5） */}
+          {activeSection === "data" && <DataManagementSection />}
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />

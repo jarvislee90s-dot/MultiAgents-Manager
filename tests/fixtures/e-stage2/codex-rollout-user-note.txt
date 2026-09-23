@@ -1,0 +1,12 @@
+# source: 2026-09-22-戊探C-codexTab备注全链.md §2.5（rollout function_call_output：answers.<qid>.answers=[label,"user_note: <全文>"] 双题实录，session-co1-c5-answers-two-notes.txt 原件）
+=== rollout line 29 payload.type=function_call_output ===
+{
+ "type": "function_call_output",
+ "id": "fco_01a0c971-e6ab-7533-aaf5-f8c2e33baaf2",
+ "call_id": "call_f32aa926e4224bfbb4b8d8af",
+ "output": "{\"answers\":{\"ci_system\":{\"answers\":[\"GitHub Actions (Recommended)\",\"user_note: NOTE-Q2-EC5-ATTRIBUTION-BETA\"]},\"build_tool\":{\"answers\":[\"npm (Recommended)\",\"user_note: NOTE-Q1-EC5-ATTRIBUTION-ALPHA\"]}}}",
+ "internal_chat_message_metadata_passthrough": {
+  "turn_id": "01a0c96d-a027-71a3-8df2-98a67c7e3ae5",
+  "create_time": 1790086080.1710398
+ }
+}

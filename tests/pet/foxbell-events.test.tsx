@@ -7,13 +7,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    show: vi.fn(), hide: vi.fn(), setAlwaysOnTop: vi.fn(), setIgnoreCursorEvents: vi.fn(),
-    setPosition: vi.fn(), setSize: vi.fn(), outerPosition: vi.fn(), outerSize: vi.fn(),
-    scaleFactor: vi.fn(), currentMonitor: vi.fn(),
+    show: vi.fn(),
+    hide: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
+    setIgnoreCursorEvents: vi.fn(),
+    setPosition: vi.fn(),
+    setSize: vi.fn(),
+    outerPosition: vi.fn(),
+    outerSize: vi.fn(),
+    scaleFactor: vi.fn(),
+    currentMonitor: vi.fn(),
   }),
 }));
 // 组件自 Task 12 起 import 了 emit（onHide 广播显隐）：补齐导出，避免 vitest mock 代理缺属性在运行时报错
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}), emit: vi.fn(async () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+  emit: vi.fn(async () => {}),
+}));
 const manifest = [
   { index: 0, group: "done", name: "搞定咯", file: "done/x.m4a" },
   { index: 1, group: "approval", name: "快批快批", file: "approval/y.m4a" },
@@ -27,9 +37,22 @@ vi.mock("@/lib/query/queries/sessions", () => ({ useSessionsQuery: () => ({ data
 import { FoxbellPet } from "@/components/pet/FoxbellPet";
 
 const mk = (id: string, status: string) => ({
-  id, agentType: "claude", projectName: "P", projectPath: "/", title: null, gitBranch: null,
-  githubUrl: null, status, lastMessage: "m", lastMessageRole: null, lastActivityAt: "",
-  pid: 1, cpuUsage: 0, activeSubagentCount: 0, form: "cli", jumpSupported: true,
+  id,
+  agentType: "claude",
+  projectName: "P",
+  projectPath: "/",
+  title: null,
+  gitBranch: null,
+  githubUrl: null,
+  status,
+  lastMessage: "m",
+  lastMessageRole: null,
+  lastActivityAt: "",
+  pid: 1,
+  cpuUsage: 0,
+  activeSubagentCount: 0,
+  form: "cli",
+  jumpSupported: true,
 });
 
 describe("FoxbellPet 事件接线", () => {
@@ -47,10 +70,14 @@ describe("FoxbellPet 事件接线", () => {
   it("运行中 → idle：播 done 组语音 + 绿卡（spec D1/D2）", async () => {
     data = { sessions: [mk("a", "thinking")], totalCount: 1, waitingCount: 0 };
     const { rerender } = render(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); }); // 首帧 + manifest
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    }); // 首帧 + manifest
     data = { sessions: [mk("a", "idle")], totalCount: 1, waitingCount: 0 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     expect(screen.queryByTestId("pet-bubble")?.textContent).toBe("搞定咯");
     expect(screen.getByTestId("pet-card-a").textContent).toContain("已完成");
   });
@@ -58,10 +85,14 @@ describe("FoxbellPet 事件接线", () => {
   it("运行中 → waiting：播 approval 组语音且绿卡不出现（spec D2/D3）", async () => {
     data = { sessions: [mk("a", "processing")], totalCount: 1, waitingCount: 0 };
     const { rerender } = render(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     data = { sessions: [mk("a", "waiting")], totalCount: 1, waitingCount: 1 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     expect(screen.queryByTestId("pet-bubble")?.textContent).toBe("快批快批");
     expect(screen.getByTestId("pet-card-a").textContent).toContain("等待操作");
   });
@@ -73,17 +104,25 @@ describe("FoxbellPet 事件接线", () => {
     //   断言点 t≈3100 ∈ (2550, 4600)：无闸门时气泡2（≈2100 起、至 ≈4600）仍在 → 测试失败；有闸门 → 通过
     data = { sessions: [mk("a", "processing")], totalCount: 1, waitingCount: 0 };
     const { rerender } = render(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); }); // 首帧 + manifest
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    }); // 首帧 + manifest
     data = { sessions: [mk("a", "waiting")], totalCount: 1, waitingCount: 1 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     expect(screen.queryByTestId("pet-bubble")?.textContent).toBe("快批快批");
     data = { sessions: [mk("a", "processing")], totalCount: 1, waitingCount: 0 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // t≈2100，仍处 10s 限频窗
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    }); // t≈2100，仍处 10s 限频窗
     data = { sessions: [mk("a", "waiting")], totalCount: 1, waitingCount: 1 };
     rerender(<FoxbellPet />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); // t≈3100：气泡1 已过期、气泡2（若有）未过期
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    }); // t≈3100：气泡1 已过期、气泡2（若有）未过期
     expect(screen.queryByTestId("pet-bubble")).toBeNull();
   });
 });

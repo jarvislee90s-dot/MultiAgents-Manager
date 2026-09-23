@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探A-opencode多选多题键序.md §2 E-A1 步10（opencode Confirm 页：Review+答案摘要+enter submit footer，screen-ea1-tab-confirm.txt 原件）
+﻿
+  ┃
+  ┃  Use the question tool now with exactly one question and multiSelect enabled so several options can be toggled.
+  ┃  header E-A1 multi. question Which modules should the probe build include E-A1. options exactly four alpha bravo
+  ┃  charlie delta. Just ask and wait for my answers.
+  ┃
+
+     + Thought: 601ms              h
+
+     →Asked 1 question            h
+                                   h
+     ▣ Build · DeepSeek V4.1 Flash
+
+
+
+
+
+
+
+
+  ┃
+  ┃   E-A1 multi   Confirm
+  ┃
+  ┃  Review
+  ┃
+  ┃  E-A1 multi: bravo, charlie, delta
+  ┃
+  ┃  ⇆ tab  enter submit  esc dismiss
+  ┃
+

@@ -57,6 +57,25 @@ pub trait KeyLayout {
     fn scan_of(&self, vk: u16) -> u16;
 }
 
+/// 单键 **down/up 成对**事件（M9R 纪律：字符/键事件一律成对构造，keyup 由各家执行层
+/// 过滤/忽略——本模块五个构造函数共用的最小拼装单元，成对纪律只此一份）。
+fn key_pair(vk: u16, scan: u16, ch: u16) -> [KeyRecordSpec; 2] {
+    [
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch,
+            down: true,
+        },
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch,
+            down: false,
+        },
+    ]
+}
+
 /// 文本 → 键事件序列（一律 keydown+keyup 成对，M9R 按字符分流构造）：
 /// - **ASCII 字符** → VK 形态：`vk = layout.vk_of(c)`（真实布局不可键入时为 0）、
 ///   `scan = layout.scan_of(vk)`、`ch = c`；
@@ -73,35 +92,12 @@ pub fn text_records(text: &str, layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
         if c.is_ascii() {
             let vk = layout.vk_of(c);
             let scan = layout.scan_of(vk);
-            let ch = c as u16;
-            records.push(KeyRecordSpec {
-                vk,
-                scan,
-                ch,
-                down: true,
-            });
-            records.push(KeyRecordSpec {
-                vk,
-                scan,
-                ch,
-                down: false,
-            });
+            records.extend(key_pair(vk, scan, c as u16));
         } else {
             // char::encode_utf16 写入栈上缓冲（单字符最长代理对 2 个 code unit）
             let mut buf = [0u16; 2];
             for unit in c.encode_utf16(&mut buf) {
-                records.push(KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: *unit,
-                    down: true,
-                });
-                records.push(KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: *unit,
-                    down: false,
-                });
+                records.extend(key_pair(0, 0, *unit));
             }
         }
     }
@@ -114,32 +110,62 @@ pub fn text_records(text: &str, layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
 pub fn enter_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
     let vk = layout.vk_of('\r');
     let scan = layout.scan_of(vk);
-    vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0x0D,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0x0D,
-            down: false,
-        },
-    ]
+    Vec::from(key_pair(vk, scan, 0x0D))
+}
+
+/// shift+tab 组合键记录（批次丙 T6：模式切换的主键）。
+///
+/// **形态**：VK_TAB 键事件带 **SHIFT_PRESSED 修饰位**。Windows 控制台键事件用
+/// `dwControlKeyState` 表达修饰键（不是单独的 VK_SHIFT 事件）——因此调用方需把
+/// 本函数产出的记录映射到带修饰位的 INPUT_RECORD（见
+/// `windows_console::key_records_for` 的 `"shift+tab"` 分支）。
+/// `ch = 0`（组合键不产生字符）；成对 down/up。
+pub fn shift_tab_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
+    let vk = 0x09u16; // VK_TAB
+    let scan = layout.scan_of(vk);
+    Vec::from(key_pair(vk, scan, 0))
+}
+
+/// **键注入黑名单**（批次戊 E1⑤，裁19）：禁注键 → `Some(拒绝原因)`；域外/允许键
+/// → `None`。独立于 [`control_records`] 的域校验**之前**执行——即使日后 ctrl+c 进了
+/// 键域，黑名单仍拒绝（防回归的单点）。
+///
+/// - **`ctrl+c`**：opencode 一律禁注（实测=直接退出应用，会话全丢——用户 2026-09-22
+///   裁决入词典 §6）；codex 的 Ctrl+C 仅「撤回」语义可用且未开放（产品撤回走 DB
+///   retract，不经终端键）→ **全工具统一拒绝**。
+/// - `ctrl+s`（kimi 立即插队条件项）：未复验前不进键域（维持排队制），未列黑名单
+///   ——域校验天然拒绝；复验通过后按词典定案再动。
+pub fn forbidden_key_reason(key: &str) -> Option<String> {
+    if key == "ctrl+c" {
+        Some(
+            "Ctrl+C 已禁注（裁19：opencode 按下即退出应用；codex 撤回语义未开放，\
+             产品撤回走队列撤回按钮）"
+                .to_string(),
+        )
+    } else {
+        None
+    }
 }
 
 /// 控制键 → VK 形态事件对；**键域校验（P2-2）**：键域 = `"enter"`/`"esc"`/
 /// `"tab"` + 单字符 ASCII 字母数字（审批键位 "y"/"1" 走这里）；域外（空串/
-/// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab → VK_RETURN/VK_ESCAPE/
-/// VK_TAB 且 ch 同码；单字符 → `vk = layout.vk_of(c)`、`ch = c`；scan 一律
-/// `layout.scan_of(vk)` 派生；成对 down/up。
+/// 多字符/非 ASCII）→ `None`。构造：enter/esc/tab/backspace → VK_RETURN/
+/// VK_ESCAPE/VK_TAB/VK_BACK 且 ch 同码；单字符 → `vk = layout.vk_of(c)`、
+/// `ch = c`；scan 一律 `layout.scan_of(vk)` 派生；成对 down/up。
+///
+/// `"shift+tab"`（批次丙 T6）**不在本函数**——它需要修饰位，走
+/// [`shift_tab_records`]（执行层另分支）。本函数保持既有域不变（零回归）。
+///
+/// `"backspace"`（2026-09-23 新增）：**斜杠命令注入前置纯净准则**的执行原语——
+/// 输入行残留逐字符删除（A 族写 `\u{0008}`=BS 字符、B 族 VK_BACK 键事件，
+/// 两族语义一致；crossterm 把 ueChar=0x08 解析为 Backspace）。消费方=
+/// `mode::run_codex_permission_stages` 段 0.5（屏读判残留→逐字符删→闭环验证）。
 pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecordSpec>> {
     let (vk, ch) = match key {
-        "enter" => (0x0Du16, 0x0Du16), // VK_RETURN
-        "esc" => (0x1Bu16, 0x1Bu16),   // VK_ESCAPE
-        "tab" => (0x09u16, 0x09u16),   // VK_TAB
+        "enter" => (0x0Du16, 0x0Du16),     // VK_RETURN
+        "esc" => (0x1Bu16, 0x1Bu16),       // VK_ESCAPE
+        "tab" => (0x09u16, 0x09u16),       // VK_TAB
+        "backspace" => (0x08u16, 0x08u16), // VK_BACK
         _ => {
             let mut chars = key.chars();
             match (chars.next(), chars.next()) {
@@ -149,20 +175,7 @@ pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecor
         }
     };
     let scan = layout.scan_of(vk);
-    Some(vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch,
-            down: false,
-        },
-    ])
+    Some(Vec::from(key_pair(vk, scan, ch)))
 }
 
 /// VT 序列 → 整条字符流事件（A 族方向键等，M6R 定案）：按 `encode_utf16()`
@@ -170,22 +183,7 @@ pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecor
 /// **执行层须整条单批原子写**（M6R：ESC 拆批会被 B 族当按键吃）。
 pub fn vt_seq_records(seq: &str) -> Vec<KeyRecordSpec> {
     seq.encode_utf16()
-        .flat_map(|unit| {
-            [
-                KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: unit,
-                    down: true,
-                },
-                KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: unit,
-                    down: false,
-                },
-            ]
-        })
+        .flat_map(|unit| key_pair(0, 0, unit))
         .collect()
 }
 
@@ -202,20 +200,7 @@ pub fn vk_arrow_records(seq: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyReco
         _ => return None,
     };
     let scan = layout.scan_of(vk);
-    Some(vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0,
-            down: false,
-        },
-    ])
+    Some(Vec::from(key_pair(vk, scan, 0)))
 }
 
 /// 构造 tmux 发送文本参数：`-l` 字面量 + `--` 终止选项解析。
@@ -448,6 +433,20 @@ pub trait Injector: Send + Sync {
         let _ = spec;
         self.locate_and_inject(pid, text)
     }
+
+    /// **草稿注入**（批次戊 E1② codex 插队键序第一步：打字入 composer 成草稿，
+    /// **不带提交回车**——回车会把草稿直接提交，Tab 才是「入队」）。仅
+    /// [`JumpSequence::DraftTabThenEsc`] 消费。默认实现报错（平台未提供无回车
+    /// 形态：macOS 三通道里 tmux/iTerm 的文本/回车是绑定的两步，无法只做前半）；
+    /// Windows ConPTY 通道覆写（[`crate::inject::windows_console::inject_text_draft_spec`]）。
+    fn locate_and_inject_draft_spec(
+        &self,
+        _pid: u32,
+        _text: &str,
+        _spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        Err("草稿注入（无提交回车）仅 Windows ConPTY 通道支持".to_string())
+    }
     fn locate_and_send_key_spec(
         &self,
         pid: u32,
@@ -591,6 +590,14 @@ impl Injector for RealInjector {
     ) -> Result<(), String> {
         // stats 本层不消费（Task 5 确认子集才读）；族规格送达执行层即达成本方法使命
         crate::inject::windows_console::inject_text_spec(pid, text, spec).map(|_| ())
+    }
+    fn locate_and_inject_draft_spec(
+        &self,
+        pid: u32,
+        text: &str,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        crate::inject::windows_console::inject_text_draft_spec(pid, text, spec).map(|_| ())
     }
     fn locate_and_send_key_spec(
         &self,
@@ -863,6 +870,25 @@ mod tests {
         // （0x59 'Y'），而旧 key_to_windows_vk 路径 ch 取小写 0x79——VK 位相同
         // （VkKeyScanW 大小写同键位），UnicodeChar 字面更忠实于输入；Task 2 评审
         // 已申报，此处补测试侧留痕
+    }
+
+    /// E1⑤ Ctrl+C 黑名单（裁19）：唯一禁注键=ctrl+c，原因文案点名 opencode 退出
+    /// 应用；其余键（域内域外皆然）不归黑名单管（域外由域校验拒绝）。
+    /// 还原动作（变异）：把黑名单改成恒 None → 本测试先红。
+    #[test]
+    fn forbidden_key_blacklists_ctrl_c() {
+        let reason = forbidden_key_reason("ctrl+c").expect("ctrl+c 必须被禁注");
+        assert!(
+            reason.contains("opencode"),
+            "原因文案必须点名危害（opencode 退出应用）：{reason}"
+        );
+        assert!(
+            forbidden_key_reason("ctrl+s").is_none(),
+            "ctrl+s 未列黑名单（未复验前由域校验拒绝）"
+        );
+        for k in ["enter", "esc", "tab", "y", "1", "ctrl+z", ""] {
+            assert!(forbidden_key_reason(k).is_none(), "{k:?} 不在黑名单");
+        }
     }
 
     #[test]

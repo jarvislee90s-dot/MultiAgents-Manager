@@ -53,7 +53,7 @@ export default function ArchiveBoard({
         setError(true);
       }
     },
-    [onUnpaired],
+    [onUnpaired]
   );
 
   useEffect(() => {
@@ -112,10 +112,7 @@ export default function ArchiveBoard({
 
       {/* 清空归档失败反馈（终审 Finding 3）：小号红字贴近操作点，不触发 retry */}
       {manageError && (
-        <p
-          data-testid="archive-manage-error"
-          className="mb-2 text-right text-xs text-red-600"
-        >
+        <p data-testid="archive-manage-error" className="mb-2 text-right text-xs text-red-600">
           操作失败，请重试
         </p>
       )}

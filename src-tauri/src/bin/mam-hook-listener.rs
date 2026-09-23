@@ -1,0 +1,257 @@
+//! mam-hook-listener — 原生 hook 事件监听 helper（批次甲 T1 · issue #74 根因 2）
+//!
+//! 使命：替代 hooks.rs 生成的 bash 版 status-hook.sh——三家 CLI 的 hook 脚本现为
+//! bash，在 codex 原生 shell（cmd 包装+清环境）下裸 `bash` 不可解析，钩子从未运行
+//! （「Hook failed exit 1」根因）。本 helper 是 Rust 编译的零 shell 依赖原生进程，
+//! hook 配置直接指向本 exe 绝对路径（claude `command` / codex 官方 `commandWindows`
+//! 字段，注册与迁移见 `monitor::hooks`）。
+//!
+//! # 实现红线（任务书 §1，违反即返工；内核侧单测在 hook_listener 模块文末）
+//!
+//! 1. **监听模式统一 exit 0 + 空 stdout**——codex 侧 exit 2+stderr = Deny（劫持
+//!    审批）、JSON stdout = 劫持审批框（与 claude 语义相反，claude 的 exit 2 不
+//!    生效）；只有「0 + 空输出」= decline to decide → 审批流原样继续。任何输入
+//!    （非法 JSON / 空 stdin / 非 UTF-8 / 写盘失败 / 未预期 panic）都不得产生
+//!    stdout 字节与非零退出码。本 bin 用「静默 panic hook + catch_unwind + 全路径
+//!    吞错」三重保证；stderr 保守起见同样完全静默（helper 无 log 初始化）。
+//! 2. **瞬时完成**——codex 命令钩子默认 600s 超时、Interrupt/SessionEnd 仅 1s：
+//!    读 stdin → serde 解析 → 同目录临时文件+rename 原子写 → 退出，毫秒级；
+//!    无网络、无重试、无等待。
+//! 3. `async:true` 钩子被 codex 跳过——本 helper 天然同步快速，注册侧（hooks.rs）
+//!    不得带 async（T2 落实）。
+//! 4. payload 差异（claude/codex/kimi 的 tool_input/message 等）是 T2/T3 的事——
+//!    本 helper 只做「stdin JSON → session_id/hook_event_name → 事件文件」薄管道。
+//!    T8/T1 两个例外见内核模块文档（tool_input 仅 PreToolUse∧AUQ；message 仅
+//!    Notification）——均为「有实机取证支撑才落盘」的可选字段，缺席时正文逐字节
+//!    与旧版一致。
+//!
+//! 逻辑本体在共享内核 [`hook_listener`]（`#[path]` 引入同一源文件，lib 侧
+//! `monitor::hook_listener` 同源可测；独立编译单元不链接整个 lib——mam-marker
+//! 先例，保证体积小、启动毫秒级）。bin 主体 = 读 stdin → 内核 → 写文件 → exit 0。
+//!
+//! 分发：应用启动时由 `monitor::hooks::ensure_hook_script` 把与主程序同目录的本
+//! exe 拷到 `~/.mam/bin/`（mam-marker 同一管道，无条件覆盖保证升级生效）；helper
+//! 未构建/未随包分发是合法状态——注册侧检测不到即回落 bash 形态（零回归）。
+//!
+//! 构建：本 bin 挂 `required-features = ["hook-listener"]` 门（Cargo.toml；
+//! marker-helper 蕴含本 feature，release.yml / CI 已显式携带 marker-helper，
+//! 发行与门禁自动构建，macOS universal 打包不受影响——mam-marker 同款门控理由）。
+//! 事件目录经 `hook_listener::default_events_dir()`（MAM_HOME debug 重定向同
+//! connection.rs 先例），测试一律 tempdir 直注（零接触真实 ~/.mam）。
+
+#[path = "../monitor/hook_listener.rs"]
+mod hook_listener;
+
+use std::io::Read;
+
+fn main() {
+    // 红线 1 双保险：panic hook 静默（默认 panic 输出走 stderr 且 exit 101，同样
+    // 污染钩子通道）+ catch_unwind 压平为正常返回（隐式 exit 0）。release profile
+    // 未开 panic=abort，unwind 可用
+    std::panic::set_hook(Box::new(|_| {}));
+    let _ = std::panic::catch_unwind(run_main);
+}
+
+/// 进程主流程：读 stdin → 内核解析 → 原子写事件文件 → 返回（调用方隐式 exit 0）。
+/// 全路径不打印、不以非零码退出
+fn run_main() {
+    let mut input = String::new();
+    // 读失败（管道关闭/非法 UTF-8）静默吞掉：红线 1 优先于一切诊断
+    let _ = std::io::stdin().read_to_string(&mut input);
+    run(&input, &hook_listener::default_events_dir());
+}
+
+/// 主流程内核（tempdir 可测缝）：解析失败/白名单不过 → 不落盘；写失败 → 吞掉。
+/// 任何输入不 panic、不输出（bin 侧单测断言）
+fn run(input: &str, events_dir: &std::path::Path) {
+    if let Some(parsed) = hook_listener::parse_hook_stdin(input) {
+        let ts = hook_listener::now_unix();
+        let _ = hook_listener::write_event_file(events_dir, &parsed, ts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 红线 1 bin 面：一切非法输入零落盘零输出（不 panic、不写任何文件）
+    #[test]
+    fn run_is_silent_noop_on_invalid_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = [
+            "",                                                          // 空 stdin
+            "not json at all",                                           // 非 JSON
+            "{\"session_id\":",                                          // 截断 JSON
+            "{\"hook_event_name\":\"Stop\"}",                            // 缺 session_id
+            "{\"session_id\":\"sid-1\"}",                                // 缺 event_name
+            "{\"session_id\":123,\"hook_event_name\":\"Stop\"}",         // 类型非法
+            "{\"session_id\":\"../evil\",\"hook_event_name\":\"Stop\"}", // 路径注入
+        ];
+        for bad in cases {
+            run(bad, tmp.path());
+        }
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            0,
+            "非法输入不得产生任何文件"
+        );
+    }
+
+    /// 合法 payload（claude 形态样本）→ 事件文件按读取侧格式落盘
+    #[test]
+    fn run_writes_event_for_valid_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            r#"{"session_id":"01a08083-5ca0","hook_event_name":"Stop","cwd":"E:\\proj"}"#,
+            tmp.path(),
+        );
+        let body = std::fs::read_to_string(tmp.path().join("01a08083-5ca0.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["event"], "Stop");
+        assert_eq!(v["session_id"], "01a08083-5ca0");
+        assert_eq!(v["cwd"], "E:\\proj");
+        assert!(v["ts"].is_i64(), "ts 必须是 unix 秒整数");
+        assert!(v["last_event_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    /// T8 问答通道（通道 A）bin 面：claude AUQ PreToolUse payload → 事件文件携带
+    /// tool_name + tool_input（questions 原样）；普通 Stop payload 不带两字段
+    /// （回归锁：非问答事件正文零变化）。stdin 夹具形态=探测档案真实 payload
+    /// （research/refs/phase2-消息注入/2026-09-21-claude-askuserquestion-按键语义探测.md）
+    #[test]
+    fn run_writes_question_channel_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            concat!(
+                r#"{"session_id":"bin-auq-1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","cwd":"/w","#,
+                r#""tool_input":{"questions":[{"header":"Next step","multiSelect":false,"#,
+                r#""options":[{"description":"Explain how AskUserQuestion works.","label":"Tool demo"}],"#,
+                r#""question":"What would you like to do next?"}]}}"#
+            ),
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-auq-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["tool_name"], "AskUserQuestion");
+        let ti: serde_json::Value =
+            serde_json::from_str(v["tool_input"].as_str().expect("tool_input 为 JSON 串")).unwrap();
+        assert_eq!(ti["questions"][0]["options"][0]["label"], "Tool demo");
+
+        // 非 AUQ 事件：两字段缺席（逐字节 legacy 形态）
+        run(
+            r#"{"session_id":"bin-auq-2","hook_event_name":"Stop","cwd":"/w"}"#,
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-auq-2.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(v.get("tool_name").is_none() && v.get("tool_input").is_none());
+    }
+
+    /// 批次丙 T1 通知语义通道 bin 面：claude Notification payload（message/title/
+    /// notification_type 三专属字段）→ 事件文件携带 `message` 原文；非 Notification
+    /// 事件带同名字段不落盘（回归锁：只在我们有证据的事件上落新字段）。
+    /// stdin 夹具形态=实机取证档案（research/refs/phase2-消息注入/
+    /// 2026-09-21-claude-notification-message-取证.md）
+    #[test]
+    fn run_writes_notification_message_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            concat!(
+                r#"{"session_id":"bin-notif-1","hook_event_name":"Notification","cwd":"/w","#,
+                r#""message":"Claude needs your permission","#,
+                r#""title":"Claude Code","notification_type":"permission_prompt"}"#
+            ),
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-notif-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert_eq!(v["message"], "Claude needs your permission");
+
+        // 非 Notification 事件（Stop）带 message 键 → 不落盘（逐字节 legacy 形态）
+        run(
+            r#"{"session_id":"bin-notif-2","hook_event_name":"Stop","cwd":"/w","message":"x"}"#,
+            tmp.path(),
+        );
+        let body = std::fs::read_to_string(tmp.path().join("bin-notif-2.json")).unwrap();
+        assert!(
+            !body.contains("message"),
+            "非 Notification 事件的 message 不得落盘: {body}"
+        );
+    }
+
+    /// T1 bin 面回归锁：无 message 的 Notification（旧形态）正文与 T8 版**逐字节
+    /// 一致**——新增可选字段不得引入既有事件的文件形态漂移
+    #[test]
+    fn run_notification_without_message_is_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        run(
+            r#"{"session_id":"bin-notif-3","hook_event_name":"Notification","cwd":"/w","notification_type":"permission_prompt"}"#,
+            tmp.path(),
+        );
+        let body = std::fs::read_to_string(tmp.path().join("bin-notif-3.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert!(v.get("message").is_none(), "message 缺席时不得落键: {body}");
+        // 键集合与 legacy 完全一致（event/session_id/cwd/ts/last_event_at）
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["event", "session_id", "cwd", "ts", "last_event_at"],
+            "键序与 legacy 同构"
+        );
+    }
+
+    /// 批次丙 T1 bin 面：未决问答字段承接全链（AUQ PermissionRequest → Notification）
+    /// ——helper 在同一事件目录内读写，承接后事件文件带 tool_name + tool_input，
+    /// 消费侧据此把「Notification 那一跳」仍判为问答而非审批。
+    /// 夹具事件序=实机取证序列（research/refs/phase2-消息注入/
+    /// 2026-09-21-claude-notification-message-取证.md）
+    #[test]
+    fn run_carries_forward_pending_question_fields_into_notification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = r#"{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Blue","description":"d"}],"multiSelect":false}]}"#;
+        run(
+            &format!(
+                r#"{{"session_id":"bin-cf1","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{payload}}}"#
+            ),
+            tmp.path(),
+        );
+        run(
+            r#"{"session_id":"bin-cf1","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}"#,
+            tmp.path(),
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-cf1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["event"], "Notification");
+        assert_eq!(v["tool_name"], "AskUserQuestion", "承接工具名");
+        assert_eq!(v["tool_input"], payload, "承接 questions 载荷");
+        assert_eq!(v["message"], "Claude needs your permission");
+
+        // 反向：真实审批（Write）不触发承接
+        run(
+            r#"{"session_id":"bin-cf2","hook_event_name":"PermissionRequest","tool_name":"Write","tool_input":{"file_path":"C:\\x.txt"}}"#,
+            tmp.path(),
+        );
+        run(
+            r#"{"session_id":"bin-cf2","hook_event_name":"Notification","message":"Claude needs your permission"}"#,
+            tmp.path(),
+        );
+        let v2: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("bin-cf2.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            v2.get("tool_name").is_none(),
+            "真实审批不得被承接成问答: {v2}"
+        );
+    }
+}

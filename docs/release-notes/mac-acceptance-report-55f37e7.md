@@ -89,7 +89,8 @@
 ### A.（Important）macOS 审批红卡整体不可达（M8-1/D-4/D-6 根因）
 
 - **复现**：claude 出现权限提示（"Do you want to proceed? 1.Yes/2.Yes-auto/3.No"）或 codex 审批框（"Would you like to run the following command? … (y)/(p)/(esc)"）时，GET `/m/api/v1/session-approve-options` 恒 `available:false, options:[]`。
-- **初步归因（两处叠加）**：① `available = status==Waiting && 映射 && detect(last_message)`——两 CLI 在审批等待期会话状态均判 **processing** 而非 Waiting；② `detect` 吃 `last_message`，而审批提示是 TUI 层覆盖物**不落会话文件**——Windows 靠 CONOUT$ 屏读拿到，macOS 无屏读。两边独立成立，任一即可卡死红卡。
+- **初步归因（两处叠加）**：① `available = status==Waiting && 映射 && detect(last_message)`——两 CLI 在审批等待期会话状态均判 **processing** 而非 Waiting；② `detect` 吃 `last_message`，而审批提示是 TUI 层覆盖物**不落会话文件**。两边独立成立，任一即可卡死红卡。
+  > **【2026-09-20 更正】** 本条原文称「Windows 靠 CONOUT$ 屏读拿到（提示文本）」——经 Windows 侧代码复核（2026-09-20 C-8 调查），**审批判定链路中不存在任何屏读**（屏读仅用于注入后确认层），Windows 红卡与 macOS 同样被上述两判据卡死。红卡跨平台统一解 = M1A（issue #74：钩子等待信号 + 固定键位）。
 - **降级链实测（全部达效）**：普通发送键位字符（1/y）→ 排队 → jump 投递 → 提示被正确应答（claude 命令执行、codex 文件落盘 `~/Desktop/mam-accept-codex-test.txt`=hello）；`POST /session-approve` 被 409 not_waiting 守卫正确拦截（不发错误键位）。
 - **截图**：审批框原文在 evidence/m7-1c-codex-terminal.png 会话流与对话记录中。
 

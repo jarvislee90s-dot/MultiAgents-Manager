@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探E-claude对话框选项锚点底料.md §2.2 E-E2（N5 误纳几何：正文编号 3.-8. 与真选项同屏，screen-e2-dialog.txt 原件）
+﻿ 3. Populate the matrix columns with the identifiers V01 through V08, giving each row a stable ID, a short description
+    of the property being verified, the concrete method or command used to check it, the expected result, and an
+    initially empty-or-pending status cell that will be filled in during execution of the checks.
+ 4. Assign the first four matrix rows to structural checks covering file existence, the presence of the top-level
+    title, the presence of the matrix section heading, and the exact row count of the table, so that the most basic
+    structural guarantees are verified before any content-level properties are examined at all.
+ 5. Assign the remaining four matrix rows to content checks covering column completeness for every row, the absence of
+    unresolved TODO or placeholder text anywhere in the document, clean UTF-8 encoding without a byte-order mark, and
+    status values restricted to pass, fail, or pending so the file stays machine-checkable.
+ 6. Execute each verification method one row at a time immediately after writing the file, recording pass or fail in
+    the status cell of the corresponding row, so that the documented matrix and the actual observed state of the file
+    never drift apart from each other during the same working session.
+ 7. Rerun any verification whose status cell shows fail after applying the necessary correction, and append a brief
+    dated note under the matrix describing what was wrong and how it was fixed, so the document also doubles as a
+    lightweight audit trail of the verification process that produced it.
+ 8. Confirm the finished document renders correctly by re-reading it with the Read tool, checking that the pipe table
+    is well formed, that no stray characters or broken lines were introduced by the edits, and that all eight status
+    cells read pass before declaring the task complete to the user.
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+ ❯ 1. Yes, and use auto mode
+   2. Yes, manually approve edits
+   3. Tell Claude what to change
+      shift+tab to approve with this feedback
+
+ ctrl+g to edit in Notepad ·~\.claude\plans\e-e1-write-a-detailed-magical-aurora.md
+

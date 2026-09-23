@@ -156,16 +156,25 @@ impl From<&KeyRecordSpec> for FlatKeyRecord {
             // M9R：扫描码随规格下发（VK 形态事件必带，B 族 crossterm 以 VK+scan 为准）
             virtual_scan_code: spec.scan,
             unicode_char: spec.ch,
-            control_key_state: 0,
+            // T6：修饰位仅在 shift+tab 组合键时置位。该组合的唯一形态是
+            // `ch == 0 ∧ vk == VK_TAB`（[`crate::inject::engine::shift_tab_records`]）；
+            // 单字符/控制键/方向键记录一律 0，与既有行为逐字节一致。见 SHIFT_PRESSED
+            control_key_state: if spec.ch == 0 && spec.vk == 0x09 {
+                SHIFT_PRESSED
+            } else {
+                0
+            },
         }
     }
 }
+
+/// SHIFT_PRESSED 修饰位（Win32 `dwControlKeyState` 常量；批次丙 T6 shift+tab 用）
+const SHIFT_PRESSED: u32 = 0x0010;
 
 /// 真实键位布局（M9R，Windows FFI，供调用点迁移；执行层大重写归 Task 3）。
 /// 依据 M6R §8.1 定案：vk = VkKeyScanW(ch) & 0xFF，scan = MapVirtualKeyW(vk)。
 pub(crate) struct WinKeyLayout;
 
-#[cfg(windows)]
 impl KeyLayout for WinKeyLayout {
     /// 字符 → 虚拟键码：`'\r'` 直返 VK_RETURN（控制字符的 VkKeyScanW 语义不可靠，
     /// 回车 VK 形态三家统一）；非 ASCII → 0（纯字符流，与现役 ConIn.ps1 口径
@@ -464,6 +473,26 @@ fn inject_via<T>(pid: u32, write: impl FnOnce(HANDLE) -> Result<T, String>) -> R
     // _guard 在此 Drop → FreeConsole 复位（无论成败；幂等，M6 探测实证）
 }
 
+/// CONOUT$ 屏读的临界区骨架（[`inject_via`] 的读侧同款）：锁 → [`resolve_target`]
+/// → attach → [`AttachGuard`] → `open_conout` → 读闭包 → CloseHandle → Drop 复位。
+/// [`read_input_tail`] 与 [`read_screen_window`] 共用——读侧同样独占附加态
+/// （Task 4），两处各写一遍即锁纪律漂移面。
+fn read_via<T>(pid: u32, read: impl FnOnce(HANDLE) -> Result<T, String>) -> Result<T, String> {
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let target = resolve_target(pid)?;
+    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
+    let _guard = AttachGuard;
+    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
+    let handle = unsafe { open_conout() }?;
+    let result = read(handle);
+    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result
+    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+}
+
 /// 文本注入（「打字 + 回车」铁则，M9R spec 感知版）：正文按 [`text_records`]
 /// 分流构造（ASCII 走 VK 形态、非 ASCII 走 vk=0 字符流）+ 尾部 VK 形态回车
 /// 事件对（固定 [`families::SUBMIT_DELAY_MS`] 后单批提交）。自适应节流与真总
@@ -502,6 +531,30 @@ pub fn inject_text_spec(pid: u32, text: &str, spec: &FamilySpec) -> Result<Injec
     })
 }
 
+/// 草稿注入（批次戊 E1②）：[`inject_text_spec`] 去**尾部提交回车**版——正文进
+/// composer 成草稿即止。唯一消费者 = codex 插队键序「打字→Tab 入队→Esc 直插」
+/// （[`super::mode::JumpSequence::DraftTabThenEsc`]）的第一步：回车会把草稿当场
+/// 提交，Tab 才是 codex 的「入队」键。分块/背压/预算与 [`inject_text_spec`] 全同。
+pub fn inject_text_draft_spec(
+    pid: u32,
+    text: &str,
+    spec: &FamilySpec,
+) -> Result<InjectStats, String> {
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let chars = text.chars().count();
+    let bp = families::use_backpressure(spec, chars);
+    let deadline = Instant::now() + Duration::from_millis(families::inject_budget_ms(spec, chars));
+    let layout = WinKeyLayout;
+    let body = text_records(text, &layout);
+    inject_via(pid, move |handle| {
+        paced_write(handle, &body, bp, deadline).map_err(|e| format!("{e}{PARTIAL_WARN}"))
+    })?;
+    Ok(InjectStats {
+        written: chars,
+        backpressure: bp,
+    })
+}
+
 /// A 族方向键 → VT 序列映射表（本地常量，M6R §8.1 定案：ESC [ + A/B/C/D 字母流，
 /// vk=0 字符形态整条单批原子写）。
 /// 探针派生脆弱常量——版本复验清单见 `super::families`（宪法横切 6 集中落点），
@@ -517,6 +570,12 @@ const ARROW_VT_SEQS: [(&str, &str); 4] = [
 /// [`control_records`]；方向键按族分支——A 族 [`vt_seq_records`]（VT 字符流）/
 /// B 族 [`vk_arrow_records`]（VK+scan）。域外 → `None`。
 fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
+    // 批次丙 T6：shift+tab 组合键（模式切换主键）——不在 control_records 的既有
+    // 键域（那是个纯 VK 域，不带修饰位），单独分支；族无关（三家 A 族实测共性，
+    // B 族同样以 VK+修饰位表达组合键）
+    if key == "shift+tab" {
+        return Some(super::engine::shift_tab_records(&WinKeyLayout));
+    }
     if let Some(records) = control_records(key, &WinKeyLayout) {
         return Some(records);
     }
@@ -536,10 +595,15 @@ fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
 /// 域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。可见性 `pub` 仅服务
 /// `super::e2e_support` 测试支撑面（缘由同 [`InjectStats`] 注）。
 pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), String> {
+    // 键黑名单（批次戊 E1⑤，裁19）：先于域校验——ctrl+c 无论域内域外一律拒绝
+    // （opencode 按下即退出应用；单点拒绝防日后域扩展回归）
+    if let Some(reason) = super::engine::forbidden_key_reason(key) {
+        return Err(reason);
+    }
     // P2-2：域校验先行——必须在取锁/附加之前快速失败（不触任何控制台 API）
     let Some(records) = key_records_for(key, spec) else {
         return Err(format!(
-            "不支持的按键：{key}（域：enter/esc/tab/单字符字母数字/方向键）"
+            "不支持的按键：{key}（域：enter/esc/tab/backspace/shift+tab/单字符字母数字/方向键）"
         ));
     };
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
@@ -559,23 +623,10 @@ pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), Str
 /// 「同行向前」以屏幕缓冲**视觉行**为准——输入行逻辑折行时只能读到光标所在的
 /// 最后一视觉行，读不到上一视觉行的行首部分。
 ///
-/// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——
-/// 锁 → [`resolve_target`]（无锁内部版，调用方持锁）→ attach → [`AttachGuard`]
-/// → CONOUT$ 读 → CloseHandle → guard Drop 复位 → 解锁。
+/// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——见
+/// [`read_via`]（读侧临界区骨架）。
 pub(crate) fn read_input_tail(pid: u32, n: usize) -> Result<String, String> {
-    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
-    let target = resolve_target(pid)?;
-    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
-    let _guard = AttachGuard;
-    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
-    let handle = unsafe { open_conout() }?;
-    let result = read_tail_chars(handle, n);
-    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    result
-    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+    read_via(pid, |handle| read_tail_chars(handle, n))
 }
 
 /// 屏读实现体（[`read_input_tail`] 已开 CONOUT$ 句柄）：`GetConsoleScreenBufferInfo`
@@ -614,40 +665,95 @@ fn read_tail_chars(handle: HANDLE, n: usize) -> Result<String, String> {
     Ok(String::from_utf16_lossy(&buf)) // 不 trim（契约：截尾/匹配语义归调用方）
 }
 
+/// 屏幕**可见窗口**读取（批次丙 T5：N 选项审批对话框屏读解析的数据源）。
+///
+/// 与 [`read_input_tail`] 的差异：后者只读光标所在的**同行**（输入行草稿判定用），
+/// 本函数读**整个可见窗口区**（`srWindow` 的每一行）——审批/计划批准对话框是
+/// 多行块（题干 + `1. xxx` / `2. xxx` 选项列表 + 提示行），只看输入行读不到。
+///
+/// 返回：按行拆分的字符串（行序 = 屏幕从上到下，**已 trim 行尾**——屏幕行宽用
+/// 空格补齐，保留会让解析器把空行当内容；行内前导空白保留，缩进是对话框的层级
+/// 信息）。行数上限 = 窗口高度（`srWindow` 高度，典型 ≤ 50）。
+///
+/// 已知界限（消费方需知）：① 只读**可见窗口**，滚出窗口的历史行读不到（对话框
+/// 必然在可见区，可接受）；② 每行读 `srWindow.Right - srWindow.Left + 1` 个 unit
+/// （窗口宽度），超宽内容被窗口裁掉（TUI 按窗口宽排版，实际不裁）；③ 与
+/// [`read_input_tail`] 同款锁纪律（[`CONSOLE_OP`] 单临界区 + 附加态复位）。
+///
+/// 失败语义：任何 FFI 失败 → Err（调用方按「屏读失败」降级——T5 红线 3/4：屏读
+/// 失败必须降级为二元卡 + 人工核对提示，不猜）。
+///
+/// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——见
+/// [`read_via`]（读侧临界区骨架）。
+pub(crate) fn read_screen_window(pid: u32) -> Result<Vec<String>, String> {
+    read_via(pid, read_window_lines)
+}
+
+/// 可见窗口逐行读取实现体（[`read_screen_window`] 已开 CONOUT$ 句柄）。
+fn read_window_lines(handle: HANDLE) -> Result<Vec<String>, String> {
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    // SAFETY: FFI 调用；info 为本函数栈上缓冲
+    unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }.map_err(|e| {
+        format!(
+            "GetConsoleScreenBufferInfo 失败（0x{:08X}）",
+            e.code().0 as u32
+        )
+    })?;
+    let win = info.srWindow;
+    let width = (win.Right - win.Left + 1).max(0) as usize;
+    let height = (win.Bottom - win.Top + 1).max(0) as usize;
+    if width == 0 || height == 0 {
+        return Ok(Vec::new());
+    }
+    let mut lines = Vec::with_capacity(height);
+    let mut buf = vec![0u16; width];
+    for row in 0..height {
+        let mut read = 0u32;
+        let start = COORD {
+            X: win.Left,
+            Y: win.Top + row as i16,
+        };
+        // SAFETY: FFI 调用；buf 长度即读取上限（windows-rs 绑定以切片长度为 nLength）
+        unsafe { ReadConsoleOutputCharacterW(handle, &mut buf, start, &mut read) }.map_err(
+            |e| {
+                format!(
+                    "ReadConsoleOutputCharacterW 失败（0x{:08X}）",
+                    e.code().0 as u32
+                )
+            },
+        )?;
+        let line = String::from_utf16_lossy(&buf[..read as usize]);
+        lines.push(line.trim_end().to_string());
+    }
+    Ok(lines)
+}
+
 /// 插队确认排空判定专用（Task 5 / A1 插队语义）：轮询目标输入缓冲占用直至
 /// ≤ [`families::DRAIN_TO`]（15ms 步距）或超时——达标 `Ok(true)`、超时
 /// `Ok(false)`（调用方报「投递超时」）、基础设施失败 `Err` 上抛（调用方
 /// best-effort 以「写入成功」为准处理）。与注入共用 [`CONSOLE_OP`] 串行
-/// （附加态互斥；锁纪律与 [`read_input_tail`] 同款：锁 → resolve → attach →
-/// guard → CONIN$ 查询 → CloseHandle → guard Drop 复位 → 解锁）。
+/// （附加态互斥；锁在此取一次，CONIN$ 句柄的临界区骨架复用 [`inject_via`]——
+/// 与注入同一纪律：锁 → resolve → attach → guard → CONIN$ 查询 → CloseHandle →
+/// guard Drop 复位 → 解锁）。
 pub(crate) fn wait_input_drained(pid: u32, timeout_ms: u64) -> Result<bool, String> {
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
-    let target = resolve_target(pid)?;
-    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
-    let _guard = AttachGuard;
-    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
-    let handle = unsafe { open_conin() }?;
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let result = loop {
-        match query_pending(handle) {
-            Ok(pending) => {
-                if pending <= families::DRAIN_TO {
-                    break Ok(true);
+    inject_via(pid, |handle| {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            match query_pending(handle) {
+                Ok(pending) => {
+                    if pending <= families::DRAIN_TO {
+                        return Ok(true);
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                    sleep(DRAIN_POLL_GAP);
                 }
-                if Instant::now() >= deadline {
-                    break Ok(false);
-                }
-                sleep(DRAIN_POLL_GAP);
+                Err(e) => return Err(e),
             }
-            Err(e) => break Err(e),
         }
-    };
-    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    result
-    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+    })
 }
 
 /// 旧薄壳（保留供 trait 默认路径与既有调用编译）：无族回退 [`families::FALLBACK_SPEC`]
@@ -707,6 +813,21 @@ mod tests {
         assert!(err.contains("不支持的按键"));
     }
 
+    /// E1⑤ Ctrl+C 黑名单（裁19）集成锁：`inject_key_spec("ctrl+c")` 在**域校验与
+    /// 附加之前**拒绝（假 pid 不触控制台），报错含「禁注」与 opencode 危害点名。
+    /// 还原动作（变异）：把 inject_key_spec 的黑名单前置删掉（等价日后域扩展时
+    /// ctrl+c 漏网）→ 本测试先红（报错变成域文案或写入成功）。
+    #[test]
+    fn ctrl_c_rejected_before_domain_check() {
+        let err = inject_key_spec(424242, "ctrl+c", &families::family_for("opencode").unwrap())
+            .unwrap_err();
+        assert!(err.contains("禁注"), "黑名单文案：{err}");
+        assert!(
+            err.contains("opencode"),
+            "须点名 opencode 退出应用的危害：{err}"
+        );
+    }
+
     /// 族分派单测（Minor 4）：同一方向键名按族规格分流——A 族（claude，RawVt）
     /// 走 VT 字符流（vk=0 整条单批原子写），B 族（codex，Crossterm）走 VK+scan
     /// 键形态（VK_UP=0x26）。
@@ -718,6 +839,51 @@ mod tests {
         let codex = families::family_for("codex").unwrap();
         let up_vk = key_records_for("up", &codex).unwrap();
         assert_eq!(up_vk[0].vk, 0x26); // VK_UP 键形态
+    }
+
+    /// backspace 键契约（2026-09-23 斜杠命令纯净准则的执行原语）：VK_BACK=0x08
+    /// 且 ch 携带 0x08（crossterm 解析 ueChar=0x08 → KeyCode::Backspace）、成对
+    /// down/up、无修饰位。消费方 = codex 权限路编排段 0.5 的输入行清理。
+    #[test]
+    fn backspace_key_record_contract() {
+        let codex = families::family_for("codex").unwrap();
+        let recs = key_records_for("backspace", &codex).expect("backspace 在键域内");
+        assert_eq!(recs.len(), 2, "成对 down/up");
+        assert!(recs[0].down && !recs[1].down);
+        assert!(
+            recs.iter().all(|r| r.vk == 0x08 && r.ch == 0x08),
+            "VK_BACK 且字符同码"
+        );
+        let flat: Vec<FlatKeyRecord> = recs.iter().map(Into::into).collect();
+        assert!(
+            flat.iter().all(|f| f.control_key_state == 0),
+            "backspace 不带修饰位（SHIFT_PRESSED 仅 shift+tab）"
+        );
+    }
+
+    /// shift+tab 组合键契约（2026-09-23 codex 模式组 toggle 改造的覆盖缺口补锁）：
+    /// 键名分派命中 `shift_tab_records`（族无关特例）→ VK_TAB+ch=0 的成对 down/up，
+    /// 且 `FlatKeyRecord` 转换携带 SHIFT_PRESSED 修饰位——B 族 crossterm 以
+    /// `dwControlKeyState` 表达 Shift（戊探C 实机证据），丢修饰位 = 终端收到裸 Tab
+    /// （自动补全而不是切模式）。还原动作：删 `From<&KeyRecordSpec>` 的修饰位置位
+    /// 或 `key_records_for` 的特例分支 → 任一断言先红。
+    #[test]
+    fn shift_tab_records_carry_shift_modifier() {
+        let codex = families::family_for("codex").unwrap();
+        let recs = key_records_for("shift+tab", &codex).expect("shift+tab 在键域内");
+        assert_eq!(recs.len(), 2, "成对 down/up");
+        assert!(recs[0].down && !recs[1].down);
+        assert!(
+            recs.iter().all(|r| r.vk == 0x09 && r.ch == 0),
+            "VK_TAB 无字符"
+        );
+        let flat: Vec<FlatKeyRecord> = recs.iter().map(Into::into).collect();
+        assert!(
+            flat.iter().all(|f| f.control_key_state == SHIFT_PRESSED),
+            "两条记录都带 SHIFT_PRESSED"
+        );
+        assert_eq!(flat[0].virtual_key_code, 0x09);
+        assert!(flat.iter().all(|f| f.unicode_char == 0));
     }
 
     /// WinKeyLayout 真 FFI 契约单测（无需目标控制台，常规 cargo test 可跑）：

@@ -190,16 +190,14 @@ export function SessionCard({
                 />
               )}
             </div>
-            {
-              <button
-                onClick={handleClose}
-                className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
-                title={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
-                aria-label={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            }
+            <button
+              onClick={handleClose}
+              className="text-muted-foreground hover:bg-muted hover:text-foreground rounded p-0.5"
+              title={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
+              aria-label={session.unread ? t("sessions.markRead") : t("sessions.dismissCard")}
+            >
+              <X className="h-3 w-3" />
+            </button>
           </div>
         </div>
 

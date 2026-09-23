@@ -234,6 +234,39 @@
       "session": "会话",
       "action": "动作",
       "summary": "摘要"
+    },
+    "signalHealth": {
+      "title": "信号健康度",
+      "description": "Hook 通道自查：工具已注册且会话活跃却长时间零事件，通常是钩子尚未被信任。",
+      "refresh": "刷新",
+      "empty": "暂无支持 Hook 通道的工具",
+      "loadError": "信号状态加载失败，请刷新重试",
+      "statusUnregistered": "未注册",
+      "ok": "正常 · 最近事件 {{ago}}",
+      "noActiveSessions": "暂无活跃会话，等待事件",
+      "trustNeeded": "需在 {{tool}} 终端输入 /hooks 并信任 MAM 条目（一次性）",
+      "zeroEvents": "钩子通道零事件，请检查 {{tool}} 是否已正确注册并触发",
+      "copyCommand": "复制命令",
+      "copied": "已复制 /hooks",
+      "copyFailed": "复制失败",
+      "secondsAgo": "{{n}} 秒前",
+      "minutesAgo": "{{n}} 分钟前",
+      "hoursAgo": "{{n}} 小时前",
+      "daysAgo": "{{n}} 天前"
+    },
+    "dataManagement": {
+      "title": "数据管理",
+      "refresh": "刷新",
+      "empty": "暂无项目附件",
+      "project": "项目",
+      "files": "附件数",
+      "size": "占用",
+      "clean": "清理",
+      "cleanConfirm": "确认清理该项目的全部附件？整目录删除，不可恢复",
+      "cleaned": "已清理",
+      "overThreshold": "占用较大，建议清理",
+      "hint": "附件 = 移动端发消息时上传的图片/文档，存于各项目目录 .mam-attachments/<会话>/（已本地 git 排除）",
+      "loadError": "数据管理列表加载失败，请刷新重试"
     }
   },
   "home": {

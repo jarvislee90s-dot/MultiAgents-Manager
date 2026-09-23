@@ -60,9 +60,15 @@ describe("remote api wrappers", () => {
     await toggleChannel("lan", true);
     expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", { channel: "lan", on: true });
     await toggleChannel("quick", false);
-    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", { channel: "quick", on: false });
+    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", {
+      channel: "quick",
+      on: false,
+    });
     await toggleChannel("named", true);
-    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", { channel: "named", on: true });
+    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", {
+      channel: "named",
+      on: true,
+    });
   });
 
   it("setPin 以 { pin } 形态传参（remote_set_pin(pin: String)）", async () => {

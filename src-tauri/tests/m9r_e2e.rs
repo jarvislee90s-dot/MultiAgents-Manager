@@ -1061,6 +1061,26 @@ async fn e2e_http_full_chain() {
         tunnel_hosts_source: Box::new(|| Some(Vec::new())),
         via_hosts_source: Box::new(|| None),
         home_source: Box::new(|| None),
+        // 丁T3：对话框在场探针——实机 E2E 装配**生产同源实现**（真屏读，非假体）；
+        // 本用例不触控制类注入守卫，此处只为构造完整性
+        dialog_probe: Arc::new(|_sid: &str, pid: u32| {
+            multi_agents_manager_lib::inject::dialog::probe_screen_dialog(pid)
+        }),
+        // 丁T5：问答阶段机的屏读**能力**缝——实机 E2E 走真实屏读（这条测试本来就
+        // 需要一个真 conhost 目标进程；非 Windows 上 `read_screen_window` 不存在，
+        // 故与生产装配同构：`#[cfg(windows)]` 直调，其它平台恒 None）。
+        screen_probe: {
+            #[cfg(windows)]
+            {
+                Arc::new(|_sid: &str, pid: u32| {
+                    multi_agents_manager_lib::inject::e2e_support::read_screen_lines(pid)
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                Arc::new(|_sid: &str, _pid: u32| None)
+            }
+        },
     });
 
     // 配对设备（server.rs 既有 persist_named_device 先例）：cookie 直指内存库设备行
@@ -1127,6 +1147,10 @@ async fn e2e_http_full_chain() {
     // ⑤ 目标会话文件命中 stamp（确认层已在服务端命中过——此处独立复核落盘）。
     //    poll_stamp 为同步轮询：此处服务端投递已完成（响应已回），同步阻塞
     //    轮询只读文件，不与运行时任务争抢（安全）
+    // 丁T3 裁2：compose 产出 `{正文} [mobile E2E手机]`（签名后置）；stamp_of 内部
+    // 剥尾签名后取正文尾 24 字符——本处直接喂 composed 即验证了那条适配在真实
+    // 会话文件上成立（假命中防护见 inject::confirm 的
+    // stamp_never_false_hits_across_same_device_messages）
     let composed = compose_injection("E2E手机", &text);
     let stamp = stamp_of(&composed).to_string();
     let hit = poll_stamp(

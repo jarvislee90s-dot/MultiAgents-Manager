@@ -19,6 +19,10 @@ export function collapsedLabel(m: SessionMessage): string {
       return "工具结果";
     case "assistant":
       return "更早的回复";
+    case "plan":
+      // 防御位：plan 一等卡片不可折叠（isToggleable/isCollapsed 恒展开），正常不渲染此头
+      // （2026-09-23 main 侧批次丁/戊计划卡合入时移植，保持与活会话页同源）
+      return "计划";
     default:
       return "已折叠消息";
   }

@@ -62,13 +62,8 @@ describe("LegacySkillMigrationDialog", () => {
   it("点击取消 → migrate 的 invoke 未被调用，对话框关闭（spec §6 关闭语义）", async () => {
     render(<Harness />);
     fireEvent.click(await screen.findByText("暂不处理"));
-    await waitFor(() =>
-      expect(screen.queryByText("受影响的技能")).not.toBeInTheDocument()
-    );
-    expect(invokeMock).not.toHaveBeenCalledWith(
-      "migrate_legacy_agents_links",
-      expect.anything()
-    );
+    await waitFor(() => expect(screen.queryByText("受影响的技能")).not.toBeInTheDocument());
+    expect(invokeMock).not.toHaveBeenCalledWith("migrate_legacy_agents_links", expect.anything());
   });
 
   it("点击「迁移到 .codex/skills」→ 以 mode: migrate 调用并展示逐条结果", async () => {

@@ -137,6 +137,30 @@ pub fn init(conn: &Connection) {
             session_id    TEXT NOT NULL,
             last_seen_at  INTEGER NOT NULL
         );
+        -- T3（手工验收修复批）：审批等待持久标记——hook 审批进入事件写入、清除事件/会话
+        -- 消失删除；状态链接入（adapter/mod.rs）据此强制 Waiting。不用 30s TTL 事件文件
+        -- 承载等待态（事件文件只是触发器，等待是一等持久信号，issue #74 根因①）
+        CREATE TABLE IF NOT EXISTS approval_wait_marks (
+            tool_id       TEXT NOT NULL,
+            session_id    TEXT NOT NULL,
+            ts            INTEGER NOT NULL,
+            summary       TEXT,
+            PRIMARY KEY (tool_id, session_id)
+        );
+        -- T8（手工验收修复批·批次乙）：问题等待持久标记——AskUserQuestion 的 PreToolUse
+        -- hook 事件写入、清除事件/会话消失删除；叠加层同样强制 Waiting。**与
+        -- approval_wait_marks 严格分表**（硬约束：问题标记不得触发审批红卡、审批标记
+        -- 不得触发问答卡——分表使两类标记在 DAO 层天然隔离，隔离用例见 server.rs /
+        -- adapter/mod.rs tests）。payload = 事件携带的 tool_input 原文 JSON（questions
+        -- 载荷随标记落库，问答端点据此出卡；helper 问答通道 64KB 上限同源约束）
+        CREATE TABLE IF NOT EXISTS question_wait_marks (
+            tool_id       TEXT NOT NULL,
+            session_id    TEXT NOT NULL,
+            ts            INTEGER NOT NULL,
+            summary       TEXT,
+            payload       TEXT,
+            PRIMARY KEY (tool_id, session_id)
+        );
         CREATE TABLE IF NOT EXISTS inject_queue (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id    TEXT NOT NULL,

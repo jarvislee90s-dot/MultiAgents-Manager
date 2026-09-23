@@ -35,15 +35,99 @@ fn is_strippable_control(c: char) -> bool {
     cp <= 0x1F || cp == 0x7F || (0x80..=0x9F).contains(&cp)
 }
 
-/// 组装最终注入文本：`[mobile <设备花名>] <归一正文>`（W1 来源标记，桌面一眼可辨）
+/// 组装最终注入文本（**注入通道唯一出口**）——丁T3 裁2 起两种形态：
+///
+/// - **普通消息**：`{归一正文} [mobile {设备花名}]`——**签名后置**（原名在**最前**，
+///   用户动机：正文在前一眼可读、溯源信息不变，见批次丁计划 §2.5 裁2）；
+/// - **斜杠命令**（[`is_slash_message`]，正文以 `/` 开头）：**裸注入**——无签名。
+///   斜杠命令的前后缀都会破坏命令解析（问题 8 实锤：手打 `/permissons` 被前缀
+///   毁掉），故裸注入；其溯源走 MAM 审计页（`action=slash` + 设备名，裁2 明确
+///   「终端不留痕是可接受的，审计页必须留」）。
+///
+/// **为什么在**本函数判斜杠（而不是入队层 / flush 层）：本函数是注入文本的唯一组装
+/// 出口，队列存的就是它的产物（`content = 入队时 compose 完毕`，见 `inject::queue`
+/// 的文档），故在这里分流 = 队列/投递/审计三处天然一致，flush 层无需再判一次
+/// （在 flush 层判就得从 composed 文本反推原始正文，那正是双重判定漂移的来源）。
 ///
 /// 设备花名同样归一：昵称来自手机端用户输入，可能含换行，不得破坏单行不变量。
 pub fn compose_injection(device_name: &str, text: &str) -> String {
-    format!(
-        "[mobile {}] {}",
-        normalize_newlines(device_name),
-        normalize_newlines(text)
-    )
+    let body = normalize_newlines(text);
+    if is_slash_message(text) {
+        // 裸注入：不加签名（斜杠命令的任何附加文本都会使其失效）
+        return body;
+    }
+    format!("{} [mobile {}]", body, normalize_newlines(device_name))
+}
+
+/// 是否「斜杠命令消息」（裁2 的裸注入判据，**单点**——compose 分流与审计 action 取用
+/// 同一份判据，两处不可能漂移）。
+///
+/// 判据落在**归一后**的正文上（不是原始串）：终端最终看到的是归一产物，`\x1b/permissions`
+/// 这类含控制字符的输入归一后才是 `/permissions`，以原始串判会把它当普通消息并追加签名
+/// ——那正是问题 8 的形态。前导空白**不**跳过（TUI 的斜杠命令要求行首即 `/`，带前导
+/// 空格的输入本就无法触发命令，按普通消息处理让签名语义保持可预期）。
+pub fn is_slash_message(text: &str) -> bool {
+    normalize_newlines(text).starts_with('/')
+}
+
+/// 剥去**尾部** `[mobile 设备名]` 签名，返回注入正文（丁T3 裁2 的连带改造）。
+///
+/// # 为什么必须存在（一个真 bug 的根线）
+///
+/// 签名后置后，**同一设备的所有消息共享同一个尾部**（` [mobile iPhone]`）。任何
+/// 「取尾 N 字符」的判据（确认戳 [`super::confirm::stamp_of`]、屏读探针）都会因此
+/// 退化成「设备级」判据：第二条消息的尾部与第一条相同 → 第一条的戳在第二条上假命中
+/// （裁2 点名要求适配的正是这条）。故尾部类判据一律先经本函数取正文，再截尾。
+///
+/// 容错口径（宽进严出，只剥**形态完整**的尾部签名）：
+/// - 先 `trim_end`（终端输入行尾部空白不可见，F8 既有口径）；
+/// - 必须**以 `]` 结尾**且能 `rfind("[mobile ")` 到签名起点——两者缺一即原样返回
+///   （正文里偶然出现 `[mobile` 字样不误剥）；
+/// - 签名前的分隔空白随签名一并剥掉（compose 产出形态为 `{正文} [mobile X]`）；
+/// - 设备名可含空格与多字节（compose 侧的归一产物），按 `rfind` + 尾 `]` 整段切。
+///
+/// **不做**的事：不识别旧版**前置**形态（`[mobile X] {正文}`）。理由：本函数服务于
+/// 「取正文尾部」这一判据，而旧形态的正文尾部本来就是真正的正文（前缀不在尾部），
+/// 取尾结论天然正确——升级窗口内既存队列项因此零特判即可工作。
+///
+/// # 已知边界：旧前缀形态 + 正文尾方括号 → 整段剥掉（F4-5 登记，不在生产路径上）
+///
+/// 判据是「以 `]` 结尾 + 能 `rfind("[mobile ")`」，故 `[mobile iPhone] 正文 [1]`
+/// 这种**同时**含旧前缀与正文尾方括号的串会被整段剥成 `""`（`rfind` 取的是第一个
+/// `[mobile ` 的位置）。与前端正则（`/\s*\[mobile[^\]]*\]$/`，要求签名紧贴尾部）
+/// 口径不同——前端会保留该串原样。
+///
+/// **为什么无害**（生产不可达 + 后果方向保守）：
+/// - 生产路径喂进来的只有 `compose_injection` 的两种产物：`{正文} [mobile X]`
+///   （尾部签名，正例）或斜杠命令裸注入（无签名，恒等变换）。旧前缀形态只存在于
+///   **升级窗口内既存队列项**（T3 之前入队的行），而那种行的正文尾部通常不是方括号
+///   ——此时串**不以 `]` 结尾**，本函数**原样返回**，取尾得到的正是真实正文尾，
+///   判据仍然成立；只有「旧前缀 + 正文尾恰好是 `[1]` 这类方括号」的交集才会多剥，
+///   实机未见；
+/// - 即便发生，后果是**戳变短/变空**：空戳在 [`super::confirm::stamp_in_messages`]
+///   里恒不中（`!stamp.is_empty()` 守卫）→ 确认层降级为 `Submitted`（中性「已投递
+///   未确认」）而非谎报送达——方向保守。
+///
+/// **实测对照**（由 `strips_known_boundary_old_prefix_plus_trailing_bracket` 钉住）：
+/// | 输入 | 产物 |
+/// |---|---|
+/// | `正文 [1] [mobile iPhone]`（生产形态） | `正文 [1]` |
+/// | `[mobile iPhone] 正文 [1]`（边界） | `""` |
+/// | `[mobile iPhone] 正文`（无尾方括号） | 原样返回（取尾即真实正文尾） |
+/// | `[mobile iPhone]`（纯签名） | `""` |
+///
+/// **收口点**：若未来需要在升级窗口内精确区分，判据改为「签名必须**紧贴尾部**
+/// （`]` 前无其他内容）且其前是空白或行首」即可与前端同口径；当前不做（为一个
+/// 不可达组合增加判据，会让主路径的容错面变窄）。
+pub fn strip_mobile_signature(content: &str) -> &str {
+    let trimmed = content.trim_end();
+    if !trimmed.ends_with(']') {
+        return trimmed;
+    }
+    let Some(idx) = trimmed.rfind("[mobile ") else {
+        return trimmed;
+    };
+    trimmed[..idx].trim_end()
 }
 
 /// 审计摘要（W5：只存摘要不入全文，防审计库膨胀）
@@ -72,12 +156,150 @@ mod tests {
         assert_eq!(normalize_newlines("a\r\nb"), "a\\nb"); // \r\n 整体归一，杜绝裸 \r
     }
 
-    /// W1：[mobile 设备名] 前缀 + 归一正文
+    /// W1 回归（丁T3 裁2 改写：前缀 → **后缀**）[mobile 设备名] + 归一正文
     #[test]
-    fn compose_prefixes_and_normalizes() {
+    fn compose_suffixes_and_normalizes() {
         assert_eq!(
             compose_injection("iPhone", "改一下\n继续"),
-            "[mobile iPhone] 改一下\\n继续"
+            "改一下\\n继续 [mobile iPhone]"
+        );
+    }
+
+    /// 丁T3 裁2：`/` 开头消息**裸注入**（无前缀无签名）——问题 8 实锤（手打
+    /// `/permissons` 被前缀毁掉）。判据落在**归一后**正文（控制字符先滤再判）
+    #[test]
+    fn slash_messages_are_bare() {
+        assert_eq!(compose_injection("iPhone", "/permissions"), "/permissions");
+        assert_eq!(compose_injection("iPhone", "/plan"), "/plan");
+        assert_eq!(
+            compose_injection("iPhone", "/permissions  申请写入"),
+            "/permissions  申请写入",
+            "斜杠命令后的参数原样保留（签名会破坏参数解析）"
+        );
+        // 归一先行：裸 ESC 前缀的「斜杠命令」归一后才是 `/permissions`，必须以归一
+        // 产物判（否则控制字符脏输入会被当普通消息并追加签名=问题 8 形态复发）
+        assert_eq!(
+            compose_injection("iPhone", "\x1b/permissions"),
+            "/permissions"
+        );
+        // 多行归一同样生效
+        assert_eq!(compose_injection("iPhone", "/plan\n额外"), "/plan\\n额外");
+        // 非行首斜杠不是命令（TUI 的斜杠命令要求行首即 `/`）→ 走普通消息带签名
+        assert_eq!(
+            compose_injection("iPhone", "价格 /permissions 是多少"),
+            "价格 /permissions 是多少 [mobile iPhone]"
+        );
+        assert_eq!(
+            compose_injection("iPhone", " /permissions"),
+            " /permissions [mobile iPhone]",
+            "前导空白不跳过（带空格的输入本就无法触发命令）"
+        );
+    }
+
+    /// `is_slash_message` 与 compose 的裸注入判据同源（单点判据的自锁）：
+    /// 审计 action=slash 的判定与实际注入形态必须逐一对应，不得有一处漂移
+    #[test]
+    fn slash_predicate_matches_compose_bare_form() {
+        for (text, is_slash) in [
+            ("/permissions", true),
+            ("/plan on", true),
+            ("\x1b/permissions", true),
+            ("/", true),
+            ("普通消息", false),
+            (" /permissions", false),
+            ("", false),
+        ] {
+            assert_eq!(is_slash_message(text), is_slash, "判据格：{text:?}");
+            let composed = compose_injection("iPhone", text);
+            assert_eq!(
+                composed.contains("[mobile iPhone]"),
+                !is_slash,
+                "判据与注入形态必须一致（{text:?} → {composed:?}）"
+            );
+        }
+    }
+
+    /// 丁T3：尾部签名剥离（stamp/屏读探针取「正文尾部」的第一步）。
+    /// 只剥**形态完整**的尾部签名；正文里偶然出现 `[mobile` 字样不误剥
+    #[test]
+    fn strips_trailing_signature_only_when_well_formed() {
+        assert_eq!(strip_mobile_signature("正文 [mobile iPhone]"), "正文");
+        assert_eq!(
+            strip_mobile_signature("多行\\n正文 [mobile iPhone\\n15]"),
+            "多行\\n正文"
+        );
+        // 尾空白先 trim（终端输入行尾部不可见空白，F8 同口径）
+        assert_eq!(strip_mobile_signature("正文 [mobile iPhone]   "), "正文");
+        // 无签名 → 原样
+        assert_eq!(strip_mobile_signature("正文"), "正文");
+        // 未闭合的 `[mobile` 不剥（避免吃掉正文）
+        assert_eq!(
+            strip_mobile_signature("正文 [mobile iPhone"),
+            "正文 [mobile iPhone"
+        );
+        // 中段出现（旧版前置形态 / 正文引用）→ 尾部无 `]` 签名时不剥
+        assert_eq!(
+            strip_mobile_signature("[mobile iPhone] 正文"),
+            "[mobile iPhone] 正文"
+        );
+        // 正文里引用签名样式但不以 `]` 结尾 → 不剥
+        assert_eq!(
+            strip_mobile_signature("看看这个 [mobile X] 标签"),
+            "看看这个 [mobile X] 标签"
+        );
+        // 空串 / 纯签名
+        assert_eq!(strip_mobile_signature(""), "");
+        assert_eq!(strip_mobile_signature("[mobile iPhone]"), "");
+    }
+
+    /// F4-5 **已知边界的回归锁**（把文档里的宣称变成可执行断言，防未来被「顺手修好」
+    /// 却没人知道口径变了）：**旧前缀形态 + 正文尾方括号**会被整段剥掉（取第一个
+    /// `[mobile ` 的位置），与前端正则（要求签名紧贴尾部）口径不同。
+    ///
+    /// 本断言**刻意钉住现状**而非期望值——生产路径喂不进这个组合（见
+    /// [`strip_mobile_signature`] 的边界小节），而后果方向保守（空戳恒不中 →
+    /// 确认层降级 Submitted，非谎报）。若将来收口（判据改为「签名紧贴尾部」），
+    /// 本用例必须显式改写并同步上游文档。
+    #[test]
+    fn strips_known_boundary_old_prefix_plus_trailing_bracket() {
+        // 现状（钉住）：整段剥成空
+        assert_eq!(
+            strip_mobile_signature("[mobile iPhone] 正文 [1]"),
+            "",
+            "F4-5 边界现状：旧前缀 + 尾方括号 → 整段剥（见函数文档「已知边界」）"
+        );
+        // 后果保守性（同一条注释的宣称也要可执行）：空产物作为戳恒不中
+        assert!(
+            !super::super::confirm::stamp_in_messages(
+                &["任意正文"],
+                super::super::confirm::stamp_of("")
+            ),
+            "空戳恒不中 ⇒ 该边界最坏只降级为 Submitted（非谎报送达）"
+        );
+        // 生产形态对照格：尾部签名（新口径）→ 正确剥出正文
+        assert_eq!(
+            strip_mobile_signature("正文 [1] [mobile iPhone]"),
+            "正文 [1]"
+        );
+        // 旧前缀形态但正文尾**无**方括号（不以 `]` 结尾）→ 原样返回；其取尾结果
+        // 仍是真实正文尾（判据成立——见函数文档的实测对照表）
+        assert_eq!(
+            strip_mobile_signature("[mobile iPhone] 正文"),
+            "[mobile iPhone] 正文",
+            "不以 `]` 结尾 ⇒ 原样返回（早期形态的取尾仍正确）"
+        );
+    }
+
+    /// 纯核：截尾 24 字符时签名不参与——`strip_mobile_signature` 的产物作为
+    /// `stamp_of` 输入的等价性（两函数组合的端到端锁，防未来只改一侧）
+    #[test]
+    fn strip_then_stamp_matches_stamp_of_directly() {
+        let composed = compose_injection("iPhone", "请帮我检查一下这个文件");
+        let manual = strip_mobile_signature(&composed);
+        assert_eq!(
+            super::super::confirm::stamp_of(&composed),
+            super::super::confirm::stamp_of(manual),
+            "stamp_of(composed) 必须等于 stamp_of(剥签名后的正文)"
         );
     }
 
@@ -95,12 +317,12 @@ mod tests {
         assert_eq!(normalize_newlines("a\rb"), "a\\nb");
     }
 
-    /// 设备花名同样归一（用户可设昵称，堵单行不变量缺口）
+    /// 设备花名同样归一（用户可设昵称，堵单行不变量缺口）——丁T3 起签名在**尾部**
     #[test]
     fn compose_normalizes_device_name_too() {
         assert_eq!(
             compose_injection("iPhone\n15", "hi"),
-            "[mobile iPhone\\n15] hi"
+            "hi [mobile iPhone\\n15]"
         );
     }
 

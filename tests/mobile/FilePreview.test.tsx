@@ -45,7 +45,10 @@ function installFileFetch(impl: (url: string) => Response) {
   );
 }
 
-function renderPreview(filePath = "/tmp/proj/main.rs", mode: "split" | "fullscreen" = "fullscreen") {
+function renderPreview(
+  filePath = "/tmp/proj/main.rs",
+  mode: "split" | "fullscreen" = "fullscreen"
+) {
   return render(
     <FilePreview session={makeSession()} filePath={filePath} mode={mode} onClose={() => {}} />
   );
@@ -115,9 +118,7 @@ describe("FilePreview：错误态与模式标记", () => {
   it("403（越界/超限/不存在不可区分）→「无法预览该文件」+ 重试按钮", async () => {
     installFileFetch(() => new Response("", { status: 403 }));
     renderPreview();
-    expect((await screen.findByTestId("preview-error")).textContent).toContain(
-      "无法预览该文件"
-    );
+    expect((await screen.findByTestId("preview-error")).textContent).toContain("无法预览该文件");
     expect(screen.getByTestId("preview-retry")).toBeTruthy();
   });
 
@@ -224,34 +225,24 @@ describe("FilePreview 403 原因分診（M5 P2-a）", () => {
 
   it("sensitive → 安全策略文案", async () => {
     case403("sensitive");
-    expect((await screen.findByTestId("preview-error")).textContent).toContain(
-      "安全策略保护"
-    );
+    expect((await screen.findByTestId("preview-error")).textContent).toContain("安全策略保护");
   });
 
   it("too_large → 上限文案（文本 500KB / 图片 5MB）", async () => {
     case403("too_large");
-    expect((await screen.findByTestId("preview-error")).textContent).toContain(
-      "500KB"
-    );
-    expect((await screen.findByTestId("preview-error")).textContent).toContain(
-      "5MB"
-    );
+    expect((await screen.findByTestId("preview-error")).textContent).toContain("500KB");
+    expect((await screen.findByTestId("preview-error")).textContent).toContain("5MB");
   });
 
   it("not_found → 不存在文案", async () => {
     case403("not_found");
-    expect((await screen.findByTestId("preview-error")).textContent).toContain(
-      "不存在或已被移动"
-    );
+    expect((await screen.findByTestId("preview-error")).textContent).toContain("不存在或已被移动");
   });
 
   it("空错误体（旧后端/代理）→ 兜底文案「无法预览该文件」", async () => {
     installFileFetch(() => new Response("", { status: 403 }));
     renderPreview();
-    expect((await screen.findByTestId("preview-error")).textContent).toContain(
-      "无法预览该文件"
-    );
+    expect((await screen.findByTestId("preview-error")).textContent).toContain("无法预览该文件");
   });
 });
 
@@ -299,7 +290,8 @@ describe("FilePreview HTML 缩放与源码换行（M5 P2-b）", () => {
 
   it("代码类（.rs）源码保持横向滚动不换行", async () => {
     installFileFetch(
-      () => new Response(JSON.stringify({ content: "fn a() {}", mime: "text/rust" }), { status: 200 })
+      () =>
+        new Response(JSON.stringify({ content: "fn a() {}", mime: "text/rust" }), { status: 200 })
     );
     renderPreview("/tmp/proj/a.rs");
     const pre = await screen.findByTestId("preview-code");

@@ -1,18 +1,11 @@
 // tests/notification/firstSeenUnread.test.ts — review F5：首见未读卡补发通知的新鲜度门控
 // 重启/补偿场景下 lastActivityAt（转绿时间）超过 2 分钟的老卡必须静默显示，不重放历史通知
 import { describe, expect, it } from "vitest";
-import {
-  FIRST_SEEN_UNREAD_FRESH_MS,
-  isFreshFirstSeenUnread,
-} from "@/hooks/useNotification";
+import { FIRST_SEEN_UNREAD_FRESH_MS, isFreshFirstSeenUnread } from "@/hooks/useNotification";
 
 const NOW = 1_800_000_000_000;
 
-const mkSession = (overrides: {
-  unread?: boolean;
-  status?: string;
-  lastActivityAt?: string;
-}) => ({
+const mkSession = (overrides: { unread?: boolean; status?: string; lastActivityAt?: string }) => ({
   unread: overrides.unread ?? true,
   status: overrides.status ?? "idle",
   lastActivityAt: overrides.lastActivityAt ?? new Date(NOW - 30_000).toISOString(),

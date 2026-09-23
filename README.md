@@ -72,6 +72,8 @@ v0.3.0 起桌宠格式开放，不再只有 Foxbell：
 | iTerm2 | ✅ AppleScript |
 | Terminal.app | ✅ AppleScript |
 | tmux | ✅ pane 选择 + 终端聚焦 |
+| Windows Terminal / conhost | ✅ 进程树消歧 + 一次性标题标记锁定（Windows） |
+| 浏览器标签（dsh） | ✅ 标签页聚焦/打开（macOS） |
 | Wayland | ❌ 优雅降级提示 |
 
 终端类工具（Claude Code / Codex CLI / OpenCode / Kimi Code）经进程树 + 窗口内容逐层消歧聚焦；**同项目双开直达**：Kimi / OpenCode 的窗口标题与会话标题（kimi `state.json` 标题 / OpenCode DB 标题）归一化比对，唯一命中即锁定，双开终端不再弹选择器。Windows 上消歧还会对目标终端贴一次性身份标记（` — MAM:xxxxxxxxxxxx`，聚焦成功后自动清除）正向锁定，且标记不会叠加残留；卡片↔终端配对存疑（同项目多开）时**宁可弹选择器也不锁错窗**，聚焦被系统拒绝时显式报错而非静默假成功。
@@ -123,6 +125,22 @@ Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 - **字号档位**：对话正文字号 50% / 75% / 100% / 125% 四档可调（只影响正文与文件内容，界面控件不变）
 - 进入会话默认停在最新消息处；往上翻到顶有「加载更早消息」按钮，续读时视线停在原处不跳
 
+### 远程操控（试验性 · v0.5.0 起）
+
+不止看，还能**操作**——手机端向 CLI 会话发消息、批准、答题、切权限（支持 **Claude Code / Codex CLI / Kimi Code / OpenCode** 四家，试验性）：
+
+- **发消息与排队**：会话忙时消息自动排队不丢失；「立即发送」打断插队（各家按实测键序：claude = Esc 中断 + 队列整批取出、codex = Tab 原生队列 / Esc 插队 / Ctrl+C 撤回、kimi = 回合结束自动续发）；排队消息可撤回。每条消息走**键序注入 + 屏读回执闭环**（尾戳逐字校验），未投递如实告知，绝不谎报成功
+- **远程审批**：工具调用批准（允许/拒绝）、计划确认（计划正文 + 终端对话框选项屏读实时同步、数字直选）、claude 计划批准数字键直达
+- **远程问答**：单选/多选/自由作答，多题逐题推进 + 答完确认卡；多选题点选只勾选、「切换题目」显式推进——手机与终端永远同题不错位
+- **权限模式切换**：kimi 三档菜单两键导航 + 档位回执；codex 走终端菜单单选题
+- **守卫**：对话框挂起时拦截普通消息注入（防误答默认项）、输入行残留检测防双发、Ctrl+C 等危险键黑名单（如 opencode 会整应用退出）
+
+| 会话详情 · 消息查看 | 发消息 · 排队与插队 |
+|:---:|:---:|
+| ![会话详情·消息查看](docs/images/mobile-detail-v0.5.0.png) | ![发消息·排队与插队](docs/images/mobile-send-v0.5.0.png) |
+| **审批 · 计划确认** | **问答 · 多选题与确认卡** |
+| ![审批·计划确认](docs/images/mobile-approve-v0.5.0.png) | ![问答·多选题](docs/images/mobile-question-v0.5.0.png)
+
 **连不上？按这几条排查（均为实测踩过的坑）：**
 
 1. **路由器开了「终端隔离 / AP 隔离 / 访客网络」** —— 最隐蔽的一个：手机和电脑明明连着同一个 WiFi，路由器却禁止无线设备互访，怎么都连不通。到路由器后台关闭该设置（实测踩坑：其余全部排查正常，最后就是它）。
@@ -139,6 +157,41 @@ Skill / MCP 服务器 / 插件的统一仓库，一键映射到各工具：
 - 行式开关列表：图标 + 名称 + 安装状态 badge，本地暂存、批量保存，保存前确认弹窗列出还原/回溯清单，未保存离开自动拦截
 - 取消勾选 = 彻底还原：符号链接还原为真实文件、MCP 条目从工具配置移除、未读卡清空；SSOT 仓库与 DB 分配关系保留，重新勾选按原分配整体重建（失败自动回滚，重新保存即幂等重试）
 - 未勾选工具彻底隐藏：会话扫描跳过、通知静音、资源/预设界面不出现，相关写命令返回明确错误（结构化错误码 + 中英文案）
+
+### 信号健康度（Hook 信任门自查）
+
+设置页独立分区，自查各工具的 Hook 通道是否真正在工作：
+
+- 每个支持 Hook 的工具显示注册状态、最近事件时间与待办提示（数据来自既有 Hook 事件目录与会话扫描快照，打开分区/手动刷新时各拉一次，无后台轮询）
+- 判据：已注册 + 该工具存在活跃会话 + 30 秒窗口内零事件 → 显示「需在工具终端输入 /hooks 并信任 MAM 条目（一次性）」，附一键复制 `/hooks` 命令
+- codex 存在信任门：MAM 注册成功 ≠ 事件触发，需在 Codex TUI 内输入 `/hooks` 人工信任一次（信任后哈希落用户层配置）；首次注册完成 MAM 会发一条一次性桌面通知提醒
+
+> 已知限制：判据基于 30 秒 TTL 事件窗口，活跃会话单次长操作静默超过 30 秒时会短暂误报待办——本分区是启发式自查面板，以工具终端实际状态为准。
+
+## 多终端适配支持矩阵
+
+8 个终端类 AI 编程工具的能力一览（✅ 支持 / ◐ 部分 / 🧪 试验性 / ❌ 不支持，随版本更新）：
+
+| 能力 | Claude Code | Codex CLI | OpenCode | OpenClaw | Kimi Code | WorkBuddy | ZCode | dsh |
+|---|---|---|---|---|---|---|---|---|
+| 会话监控（红绿灯） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 本机桌面通知 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Skill 管理 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ 只读 |
+| MCP 管理 | ✅ JSON | ✅ TOML | ✅ JSONC | ✅ JSON | ✅ JSON | ✅ JSON | ✅ JSON 子树 | ❌ |
+| 插件管理 | ✅ | ✅ | ✅ | ✅ | ◐ 文件型 | ❌ | ❌ | ❌ |
+| 状态 Hook | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| 手机 · 消息查看 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 手机 · 文件预览 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 手机 · 发消息（注入） | 🧪 | 🧪 | 🧪 | ❌ | 🧪 | ❌ | ❌ | ❌ |
+
+**手机操控**：消息查看与文件预览对 8 家全覆盖（同一会话快照与内容派发链）；**发消息（注入）处于试验阶段**，目前支持 Claude Code / Codex CLI / OpenCode / Kimi Code 四家。OpenClaw / WorkBuddy 为黑盒形态（无外部写通道）、ZCode 预留无头通道、dsh 写通道另评——工具差异如实呈现，不假装统一。
+
+**四个可注入终端的现状与不足（如实呈报）**：
+
+- **Claude Code**：忙时消息排队不丢；「立即发送」= Esc 打断 + 队列整批取出开新回合；撤回窗口保护（输入行有残留时拒绝投递并如实回报）。不足：多问题问卷形态未定案（只读引导终端）。
+- **Codex CLI**：Tab 进原生队列（不打断当前回合）、Esc 插队打断、Ctrl+C 撤回排队消息、问答支持备注栏。不足：多题切页键未实测（多题切题引导终端完成）。
+- **Kimi Code**：忙时排队回合结束自动续发；权限三档菜单导航切换 + 档位回执；多问题数字直选自动推进。不足：审批数字选择禁用（与菜单键冲突，改走导航）；`Ctrl+S` 立即引导未产品化。
+- **OpenCode**：问答 enter / 数字切换选择；Esc 打断插队。不足：Ctrl+C 全局禁用（会直接退出 opencode 应用）；多选题需「切换题目」钮显式推进。
 
 ---
 
@@ -262,6 +315,21 @@ pnpm tauri:dev
 pnpm tauri:build
 ```
 
+> **helper 构建门（批次丙 T2 固化）**：`mam-hook-listener`（hook 事件监听 helper）
+> 与 `mam-marker`（窗口标题标记）都挂在 Cargo `required-features` 门后——**不带
+> feature 时根本不构建**，应用启动的 `ensure_hook_script` 就找不到同目录 helper、
+> 跳过安装，`~/.mam/bin/` 里那份永远是旧构建（实测故障：事件缺 `tool_name` 载荷 →
+> 问答卡通道 A 永不识别）。
+>
+> - `pnpm tauri:dev` / `pnpm tauri:build` **已内置 feature**（`hook-listener` 与
+>   `marker-helper`，后者蕴含前者），照常用即可；
+> - 单独构建 helper（如跑实机 `#[ignore]` 测试）必须显式带上：
+>   `cd src-tauri && cargo build --bin mam-hook-listener --features hook-listener`；
+> - 跑 bin 测试同理：`cargo test --bin mam-hook-listener --features hook-listener`；
+> - macOS 打包（`release:macos` / release.yml 的 macOS job）走的是裸
+>   `pnpm tauri build` 显式参数，**不受**上述 npm script 影响——额外 bin 会令
+>   universal 打包失败，故 macOS 侧有意不带 feature（helper 为 Windows 通道）。
+
 ### 代码检查与格式化
 
 ```bash
@@ -290,13 +358,13 @@ pnpm lint:fix     # ESLint 自动修复
 | 工具 | Skill 目录 | MCP 配置 | MCP 格式 | Hook 支持 |
 |------|-----------|----------|----------|----------|
 | Claude Code | `~/.claude/skills/` | `~/.claude.json` | JSON | ✅（PascalCase） |
-| Codex CLI | `~/.codex/skills/` | `~/.codex/config.toml` | TOML | ✅（camelCase） |
+| Codex CLI | `~/.codex/skills/` | `~/.codex/config.toml` | TOML | ✅（PascalCase） |
 | OpenCode | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` | JSONC | ❌ |
-| OpenClaw | `~/.openclaw/skills/` | N/A | N/A | ❌ |
-| Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ❌（状态经 wire 解析） |
+| OpenClaw | `~/.openclaw/skills/` | `~/.openclaw/openclaw.json` | JSON | ❌ |
+| Kimi Code | `~/.kimi-code/skills/` | `~/.kimi-code/mcp.json` | JSON | ✅（PermissionRequest / PermissionResult） |
 | WorkBuddy | `~/.workbuddy/skills/` | `~/.workbuddy/mcp.json` | JSON | ❌（状态经心跳 + JSONL 推导） |
 | ZCode | `~/.zcode/skills/` | `~/.zcode/cli/config.json` | JSON（`mcp.servers` 嵌套子树） | ❌（状态经 SQLite 消息流尾部推导） |
-| dsh | `~/.dsh/skills/` | N/A（探测不支持） | N/A | ❌（状态经 lock 交叉判定 + 事件流推导） |
+| dsh | ◐ 只读接入 + 启停 | N/A（探测不支持） | N/A | ❌（状态经 lock 交叉判定 + 事件流推导） |
 
 > 注：`~/.agents/skills/` 是 Agent Skills 开放标准的跨工具共享目录（codex / zcode 等直接读取）。MAM 对 codex 的 skill 激活目录为私有 `~/.codex/skills/`；`.agents` 仅作只读共享导入源（来源标签 `agents-shared`）——MAM 扫描入库、不归属工具、不建链；除一次性迁移 MAM 自建遗留链接外，永不写入该目录。
 
@@ -332,8 +400,18 @@ Kimi Code 支持 `KIMI_CODE_HOME` 环境变量重定向数据根（默认 `~/.ki
 - [x] GitHub Releases 自动更新
 - [x] 暗色/亮色主题跟随系统
 - [x] Windows 支持（NSIS 安装包 + 深度链接 + 近祖窗口聚焦）
+- [x] 远程操控二期（v0.5.0 · 试验性）——手机端发消息/排队插队/远程审批/问答/权限切换（Claude Code / Codex CLI / Kimi Code / OpenCode）
+- [x] 移动端历史会话区（登记制归档 + 重新激活闭环）
 - [ ] Linux 支持
 - [ ] Kitty & WezTerm 终端跳转支持
+
+---
+
+## 写在 v0.5.0 预发布
+
+这是一个比较早期的版本。远程操控的键序注入链路（注入 → 屏读 → 回执）已用四个工具逐键实测打磨，但终端形态千变万化，边缘场景一定还有没踩到的坑。
+
+中秋与国庆假期快到了：希望更多朋友能体验「人离开桌面，Agent 不停工」——看板上的红绿灯在手机里跳动，批准一次计划只需一次点击。**使用中遇到任何问题，欢迎直接提 [Issue](https://github.com/jarvislee90s-dot/MultiAgents-Manager/issues)**（附终端工具与版本号）；作者休假期间也会尽量远程响应大家的需求。
 
 ---
 

@@ -1,0 +1,27 @@
+# source: 用户实机走查截图 2026-09-23（codex Full Access 二阶段确认框 Enable full access?；肯定项 1. Yes, continue anyway / 否定项 2. Cancel；上文含 Permissions updated to Read Only 历史回执；实机屏读人工转写）
+server failed: connection closed: initialize response: connection closed: initialize
+response
+
+⚠MCP startup incomplete (failed: playwright-mcp)
+
+• Permissions updated to Ask for approval
+
+• Permissions updated to Ask for approval
+
+⚠MCP client for `playwright-mcp` failed to start: MCP startup failed: handshaking with MCP
+server failed: connection closed: initialize response: connection closed: initialize
+response
+
+⚠MCP startup incomplete (failed: playwright-mcp)
+
+• Permissions updated to Read Only
+
+  Enable full access?
+  When Codex runs with full access, it can edit any file on your computer and run commands
+  with network, without your approval. Exercise caution when enabling full access. This
+  significantly increases the risk of data loss, leaks, or unexpected behavior.
+
+› 1. Yes, continue anyway  Apply full access for this session
+  2. Cancel                Go back without enabling full access
+
+  Press enter to confirm or esc to go back

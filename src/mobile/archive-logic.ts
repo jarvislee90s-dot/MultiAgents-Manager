@@ -15,7 +15,7 @@ export function chipLabel(t: string): string {
 
 export function filterArchivedByTool<T extends { agentType: string }>(
   rows: T[],
-  filter: ArchiveToolFilter,
+  filter: ArchiveToolFilter
 ): T[] {
   if (filter === "all") return rows;
   return rows.filter((r) => r.agentType === filter);
@@ -23,7 +23,7 @@ export function filterArchivedByTool<T extends { agentType: string }>(
 
 export function filterArchivedByProject<T extends { projectName: string }>(
   rows: T[],
-  project: string,
+  project: string
 ): T[] {
   if (project === "all") return rows;
   return rows.filter((r) => r.projectName === project);

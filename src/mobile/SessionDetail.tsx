@@ -7,7 +7,10 @@
 // - 消息正文中的已知文件路径（/session-files 提取结果）渲染为可点链接 → 文件预览；
 // - 「加载更早消息」按钮以更大 limit 整页重拉（Task 8 裁决：M3 用按钮替代无限
 //   滚动，YAGNI——避免滚动位置管理复杂度）；
-// - SSE transition 仍不驱动详情页（M3 范围裁决不变）；页面可见时每 10s 静默轮询
+// - SSE transition 仍不驱动详情页的**消息内容**（M3 范围裁决不变；内容走 10s
+//   轮询），但会话**状态**随既有看板轮询数据保持同步（T1 活状态流：App 的
+//   selected 按 id 对齐 Board 数据——红卡与总结模式随状态自动切换，无需重进页面）；
+//   页面可见时每 10s 静默轮询
 //   刷新会话内容（F6 评审裁决：hidden 暂停、恢复可见立即补刷，页头刷新按钮保留）。
 //   轮询刷新仅在「贴底」（距底 <120px）时自动跟随落底，上翻阅读历史不被动拽回
 //   （P2-B 评审修复）；首次加载与手动刷新仍无条件落底。
@@ -27,6 +30,8 @@ import {
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
 import { collapsedLabel, isProcessKind } from "./message-fold";
+import ModeBar from "./ModeBar";
+import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
@@ -166,7 +171,7 @@ function MessageScrollArea({
           aria-label="跳到顶部"
           title="跳到顶部"
           onClick={onJumpTop}
-          className="absolute right-3 top-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+          className="absolute top-3 right-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
         >
           <ArrowUpToLine size={16} />
         </button>
@@ -208,6 +213,46 @@ export function extractPlanBody(toolArgs: string): string | null {
   }
 }
 
+/** **计划待确认预期态**（丁T2，纯函数，镜像后端 `remote::api::plan_pending_tail_index`）：
+ *  消息尾部存在计划类消息（`kind="plan"` / `"plan-file"`）且其后**无**用户消息、无工具
+ *  事件 → 终端正在等这个计划的确认。
+ *
+ *  **为什么要在前端也判一份**（后端已判、字段为 `planPending`）：ApproveCard 的挂载门是
+ *  刻意的红灯门（丁T1 裁决），而 codex 的计划提案**不落 Waiting**（`codex_parser` 的兜底红
+ *  已废）——没有这一判据，卡根本不会挂载，后端就算把 `available=true` 算出来也没有消费方。
+ *  前端这份的作用是**决定要不要去打那一发 GET**（挂载门），后端那份才是**权威判定**
+ *  （`available` / `planPending` 载荷）；两者同源同判据，前端**只放宽门，不做可用性裁决**
+ *  ——`available=false`（非码族工具 / 计划已消费 / 后端判定不同）时卡片照常自隐。
+ *
+ *  `tool` 收窄到计划对话框族（codex/kimi——镜像后端 `plan_dialog_family`）：claude 的计划
+ *  批准走既有 waiting 门（有实证键位与标记通道），放宽它的门等于改既有行为。
+ *
+ *  **未覆盖面（丁T2 复审 N4，与后端判据同款，如实申报）**：三条清除信号（user /
+ *  tool-call / tool-result）并非穷尽——codex 选「No, stay in Plan mode」后既不注入用户
+ *  消息也不必然产工具事件，预期态可能长挂（提示条持续显示）。真机 203 条 rollout 未
+ *  观察到该样本，标为待取证（详见后端 `plan_pending_tail_index` 文档的同名小节）。 */
+export function isPlanPending(
+  messages: SessionMessage[] | null,
+  tool: string | null | undefined
+): boolean {
+  if (messages === null || messages.length === 0) return false;
+  if (tool !== "codex" && tool !== "kimi") return false;
+  let last = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const k = messages[i].kind;
+    if (k === "plan" || k === "plan-file") {
+      last = i;
+      break;
+    }
+  }
+  if (last < 0) return false;
+  for (let i = last + 1; i < messages.length; i += 1) {
+    const k = messages[i].kind;
+    if (k === "user" || k === "tool-call" || k === "tool-result") return false;
+  }
+  return true;
+}
+
 /** markdown 正文链接化预处理：把出现的已知路径替换为 `#file:` 内链，
  *  再由 components.a 拦截渲染成可点按钮。路径含 markdown 特殊字符（[]()）时
  *  该处替换可能不成链（保持原样文本，M3 接受） */
@@ -220,15 +265,15 @@ function linkifyMarkdown(text: string, files: string[]): string {
   return out;
 }
 
+/** 链接化分段元素：文本段或命中已知路径的文件段 */
+type LinkSegment = { type: "text" | "file"; value: string };
+
 /** 纯文本分段链接化：按已知路径把正文切成文本段与文件段（thinking / tool-result 用） */
-function linkifySegments(
-  text: string,
-  files: string[]
-): Array<{ type: "text" | "file"; value: string }> {
-  let segments: Array<{ type: "text" | "file"; value: string }> = [{ type: "text", value: text }];
+function linkifySegments(text: string, files: string[]): LinkSegment[] {
+  let segments: LinkSegment[] = [{ type: "text", value: text }];
   for (const p of files) {
     if (!p) continue;
-    const next: Array<{ type: "text" | "file"; value: string }> = [];
+    const next: LinkSegment[] = [];
     for (const seg of segments) {
       if (seg.type !== "text" || !seg.value.includes(p)) {
         next.push(seg);
@@ -302,6 +347,42 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
 
   // 总结模式（P9）：会话已结束/空闲 → 只显最后 assistant 总结，过程消息自动折叠
   const isSummary = session.status === "idle" || session.status === "finished";
+
+  // 丁T2：**计划待确认预期态**（详情页挂载门的数据源）——codex/kimi 的计划提案不落
+  // Waiting，仅靠 `status === "waiting"` 门会让审批卡永不挂载（问题 4 的挂载面根因）。
+  // 判据与后端 `remote::api::plan_pending_tail_index` 同源同口径（见上方 isPlanPending
+  // 注释）；此处**只放宽门**，可用性仍由后端载荷的 `available` 裁决（卡自隐兜底）。
+  //
+  // **只排除 `finished`，不用 isSummary**（丁T2 复评 F3-1，Critical 修复）：
+  // **codex 计划提案后的真机状态是 Idle**（`assistant(<proposed_plan>)` → `task_complete`
+  // → `TurnEnd → Idle`；codex 的兜底红已废，`codex_parser` 不落 Waiting）。而 `isSummary`
+  // （`:360`）把 idle 也算「已聊完」→ 首版实现下 `planPending` 恒 false →
+  // **审批卡永不挂载，后端算出的 `available=true` 没有消费方**。
+  //
+  // 为什么 `finished` 仍排除：那是**会话真的结束**（进程退出/归档），重进详情不必再打
+  // GET；`idle` 只是「当前无回合在跑」——恰恰是「终端在等一个计划确认」的常态（模型停下
+  // 来等用户），必须挂载。
+  //
+  // **不动 `isSummary` 本身**（它还管总结模式的消息折叠，既有行为一概保持）——
+  // 本处只在挂载门这一处换判据。
+  //
+  // **窗口差异（复评 M1）**：前端吃的是详情页**已拉取**的整页消息（200/1000 条），
+  // 后端 `approve_options_scan` 读的是 40 条尾部窗口（性能面——审批端点不该拉整页）。
+  // 判据同源同形，仅窗口不同。**两种窗口差异后果各异，如实申报**：
+  // - 前端窗口**更长**时可能多挂一次卡（后端看不到那条计划 → 回 `available=false`）
+  //   → 卡片按自隐契约立刻消失，代价是**一次多余 GET**，不是错误界面；
+  // - 前端窗口**更短**时（用户点过「加载更早」会到 1000 条，反之首屏 200 > 40）
+  //   实际不可能短于后端——前端首屏就是 200 条 > 40。
+  // 即差异只会造成「多一次 GET」，不会造成「卡片挂着但点了报错」（后者由 POST 门
+  // 与 GET 同口径保证）。
+  const planPending = useMemo(
+    () => session.status !== "finished" && isPlanPending(messages, session.agentType),
+    [session.status, messages, session.agentType]
+  );
+  // ApproveCard 挂载门：红灯 ∨ 计划预期态（两个**并列**的门，不互相削弱——
+  // waiting 门仍是审批红灯的入口，T1 裁决未动；预期态门是 codex/kimi 计划确认的
+  // 唯一入口，两者都经同一张卡的 `available` 数据门做最终裁决）
+  const approveMounted = session.status === "waiting" || planPending;
 
   // 消息流拉取：挂载 / limit 变化 / 手动刷新时重拉（整页替换；M3 不做增量追加
   // 与滚动位置保持——「加载更多」按钮替代无限滚动的裁决即含此简化）
@@ -400,6 +481,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     (m: SessionMessage): boolean => {
       const forced = expandedOverride.get(m.seq);
       if (forced !== undefined) return forced; // 手动展开/再折叠优先
+      // T1：plan 一等卡片恒展开——运行态与总结态都不折叠（豁免总结模式折叠）
+      // T7：plan-file 计划文件卡同为入口卡，恒展开（与 plan 同款豁免）
+      if (m.kind === "plan" || m.kind === "plan-file") return false;
       if (isSummary) {
         // 总结模式：user 直显；assistant 只显最后总结；过程消息全折叠
         if (m.kind === "user") return false;
@@ -561,6 +645,70 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               {renderLinkifiedText(m.content)}
             </pre>
           );
+        case "plan": {
+          // T1 一等计划卡片：后端已把 ExitPlanMode 形态（input.plan 非空）升格为
+          // kind="plan"，content 即计划 markdown 本体——无需 extractPlanBody，
+          // 直接渲染；恒展开（isCollapsed/isToggleable 豁免总结模式折叠）。
+          // 旧存量会话里未升格的 ExitPlanMode tool-call 仍走下方 extractPlanBody 分支
+          return (
+            <div
+              data-testid={`plan-${m.seq}`}
+              className="rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
+            >
+              <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
+                计划
+              </p>
+              {/* 丁T5 修复（问题 11 的真实断点）：计划卡此前**漏挂** `.md-body` 排版层
+                  ——Tailwind v4 preflight 把 h1-h6 的字号/字重与 ul/ol 的 list-style
+                  全部重置（见 mobile.css 排版层注释），故计划正文里的 `###` 小标题与
+                  `-` 列表在这张卡上被**拍平成正文**。
+                  **订正（复评 F6-1）**：实际是「普通消息卡挂了，**计划卡与工具参数升格
+                  卡都没挂**」——本文件里三张用 `renderMarkdown` 的卡中只有
+                  `case "assistant"` 挂了 `.md-body`；下面 `case "tool-call"` 的升格支
+                  （claude ExitPlanMode 走的那条，即任务书问题 11 点名的路径）同样漏挂，
+                  本次两张一起补齐。
+                  真机证据：本机 rollout `~/.codex/sessions/2026/09/21/
+                  rollout-2026-09-21T17-38-17-…jsonl` 行 115 的计划含 4 个 `###` 小标题
+                  + 14 行列表——正是任务书问题 11 说的「markdown 不完整」。 */}
+              <div className="md-body">{renderMarkdown(m.content)}</div>
+            </div>
+          );
+        }
+        case "plan-file": {
+          // T7 计划文件卡：后端从工具结果/正文里识别出计划文件引用（如 kimi 的
+          // "Wrote 4263 bytes to …/plans/x.md"）→ 补一张 kind="plan-file" 消息，
+          // content = 文件路径。卡片显示文件名 + 「查看计划」按钮 → 走既有文件预览
+          // 面板（后端豁免面已放行 kimi 的 agents/main/plans 子树）。
+          const full = m.content;
+          const name = full.split(/[\\/]/).pop() || full;
+          return (
+            <div
+              data-testid={`plan-file-${m.seq}`}
+              className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-2 text-xs"
+            >
+              <p className="mb-1 text-[11px] font-medium tracking-wide text-emerald-700 uppercase dark:text-emerald-400">
+                计划文件
+              </p>
+              <div className="flex items-center gap-2">
+                <span
+                  data-testid={`plan-file-name-${m.seq}`}
+                  className="min-w-0 flex-1 truncate font-mono text-slate-700 dark:text-slate-300"
+                  title={full}
+                >
+                  {name}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`plan-file-open-${m.seq}`}
+                  className="shrink-0 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700"
+                  onClick={() => openFile(full)}
+                >
+                  查看计划
+                </button>
+              </div>
+            </div>
+          );
+        }
         case "tool-call": {
           // 计划类工具（ExitPlanMode / zcode 同形）：plan 字段是整篇 markdown，
           // 抽出来走 markdown 渲染；其余工具维持参数 JSON 原样（用户裁决不做通用美化）
@@ -586,7 +734,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
                     计划
                   </p>
-                  {renderMarkdown(planBody)}
+                  {/* 丁T5 复评 F6-1：本支（**工具参数升格**——claude 的 ExitPlanMode 走这
+                      里，任务书问题 11 点名的路径）与上面的 `case "plan"` 是同一缺陷的
+                      两半：都漏挂 `.md-body`，故 `###` 标题与 `-` 列表被 preflight 拍平。
+                      本次两张一起补齐。 */}
+                  <div className="md-body">{renderMarkdown(planBody)}</div>
                 </div>
               )}
             </div>
@@ -605,6 +757,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     pollFollowRef.current = true;
     setRefreshTick((t) => t + 1);
   }, []);
+
+  // ---- R5 一键 resume（在电脑上打开，Task 11）----
+  // 2026-09-20 归档区裁决 2（spec 2026-09-20-mobile-archive-history，验收 E-6）：
+  // 活会话详情页不再提供「在电脑上打开」——resume 能力归 ArchiveDetail（历史页
+  // 「在桌面端打开」），可用性门与错误文案在 ./resume-gate.ts 共享。
 
   // ---- 书签（M3+，2026-09-16 用户裁决）----
   // 恢复：拿到 MAM 进程 bootId 后从 localStorage 种回内存单例（刷新页面/
@@ -755,7 +912,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, [messages]);
 
   // 是否渲染折叠切换头：过程消息 + 总结模式下的「更早 assistant」；
-  // 最终 assistant 总结直显正文（不给「更早的回复」头）
+  // 最终 assistant 总结直显正文（不给「更早的回复」头）。
+  // T1：plan 不在列 → 无折叠头（常驻计划卡片，不可折——与 isCollapsed 恒展开配套；
+  // 因此 toggleableMessages/总结横幅折叠计数天然不含 plan）
   const isToggleable = (m: SessionMessage) =>
     isProcessKind(m.kind) || (isSummary && m.kind === "assistant" && m.seq !== lastAssistantSeq);
 
@@ -1089,7 +1248,26 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             style={preview.mode === "split" ? { minHeight: SPLIT_CONVERSATION_MIN_PX } : undefined}
           >
             {bookmarkBar}
-            {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
+            {/* 组件钥匙前缀区分（T1 活状态流修正）：红卡与 composer 同层且都按会话
+                强制重挂（M9R P3 语义保留），但 key 必须互异——同 key 兄弟在红卡
+                「停留期间插入/卸载」（活状态流下的常态）时会让 React 同 key 复用
+                错乱（duplicate key 警告 + 红卡卸不掉） */}
+            {approveMounted && <ApproveCard key={`approve-${session.id}`} session={session} />}
+            {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：**非结束态**（!isSummary）挂载——
+                问答端点不看会话状态（可用性由数据形态门决定：双通道未命中/审批标记
+                隔离 → available=false），故挂载门只需排除「已结束」的 idle/finished
+                （那是既已聊完的会话，重进详情不必每次再打一发 GET）。成本 = 详情页
+                每轮一 GET；QuestionCard 内部已有「拉取失败/available=false → 静默
+                自隐」（src/mobile/QuestionCard.tsx 的 `!ready || info === null ||
+                !info.available → return null`），所以放宽不会闪出空卡。
+                ApproveCard 丁T2 挂载门 = waiting ∨ 计划预期态（`approveMounted`；
+                两个并列门见其定义——waiting 门是 T1 的刻意红灯门，未拆）。
+                key 前缀 question-* 防同 key 兄弟复用错乱（上方注释同款 T1 防线） */}
+            {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
+            {/* 模式栏（批次丙 T6）：显示当前模式 + 切档入口。与审批/问答卡同层但
+                **不依赖 waiting 态**——模式是常驻信息（计划批准后切档可见性正是诉求）；
+                key 前缀 mode-* 互异（同 key 兄弟复用错乱防线，T1 活状态流同款） */}
+            <ModeBar key={`mode-${session.id}`} session={session} />
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
@@ -1101,7 +1279,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             >
               {messageArea}
             </MessageScrollArea>
-            <MessageComposer key={session.id} session={session} />
+            <MessageComposer key={`composer-${session.id}`} session={session} />
           </div>
           <SplitHandle
             orientation={preview.mode === "split-h" ? "horizontal" : "vertical"}
@@ -1123,13 +1301,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   }
             }
           >
-            {preview.view === "list" ? (
-              <div
-                data-testid="preview-shell"
-                data-view="list"
-                data-mode={preview.mode}
-                className="h-full"
-              >
+            <div
+              data-testid="preview-shell"
+              data-view={preview.view}
+              data-mode={preview.mode}
+              className="h-full"
+            >
+              {preview.view === "list" ? (
                 <FilePanel
                   entries={fileEntries}
                   truncated={fileTruncated}
@@ -1142,14 +1320,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   fontScale={fontScale}
                   onClose={closePreview}
                 />
-              </div>
-            ) : (
-              <div
-                data-testid="preview-shell"
-                data-view="file"
-                data-mode={preview.mode}
-                className="h-full"
-              >
+              ) : (
                 <FilePreview
                   session={session}
                   filePath={preview.path}
@@ -1159,8 +1330,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   onBack={preview.backToList ? backToList : undefined}
                   onClose={closePreview}
                 />
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       ) : (
@@ -1168,13 +1339,24 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           {bookmarkBar}
           {/* 审批红卡（M8 Task 12）：waiting 态挂载；紧贴 messageArea 上方；
               available=false 时卡自身自隐（组件内部判定）。
-              刷新机制事实口径：App 的 selected 是冻结快照，停留详情期间不会随 SSE
-              重挂——红卡在「退出详情再进入 / PWA 重载」后出现；停留期间会话转为
-              非 waiting 时点按钮会收到 409 not_waiting 的中文降级文案（不误发键）。
+              刷新机制（T1 活状态流更新口径）：App 的 selected 按 (agentType,id)
+              从 Board 既有轮询数据（SSE 跃迁/快照 + 降级 3s 轮询）保持同步，
+              停留详情期间 status 变 waiting 红卡即出现、转非 waiting 自动卸载，
+              无需重进页面；组件钥匙 key={`approve-${session.id}`} 不随数据刷新变化 →
+              卡内 receipt/选项态不被误清。极端时序下点按钮收到 409 not_waiting 的
+              中文降级文案仍是兜底（不误发键）。
               **分屏分支（split/split-h）挂载同一份**（2026-09-19 用户裁决） */}
-          {/* 组件钥匙（M9R P3）：key={session.id}——复用实例切换会话时强制重挂，
-              清掉上一会话的陈旧 receipt / 选项态（跨会话串卡的防线） */}
-          {session.status === "waiting" && <ApproveCard key={session.id} session={session} />}
+          {/* 组件钥匙（M9R P3）：按会话强制重挂，清掉上一会话的陈旧 receipt /
+              选项态（跨会话串卡的防线）；前缀区分见分屏分支注释（同 key 兄弟复用
+              错乱防线，T1 活状态流） */}
+          {approveMounted && <ApproveCard key={`approve-${session.id}`} session={session} />}
+          {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：正文视图同一挂载口径
+              （**非结束态** + question- 前缀），语义见分屏分支注释
+              （可用性自隐兜底 + key 前缀防线）。ApproveCard 丁T2 门 = waiting ∨
+              计划预期态（`approveMounted`，与分屏分支同源） */}
+          {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
+          {/* 模式栏（T6）：正文视图同一挂载口径，语义见分屏分支注释 */}
+          <ModeBar key={`mode-${session.id}`} session={session} />
           <MessageScrollArea
             fontScale={fontScale}
             showJump={showJump}
@@ -1188,8 +1370,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           </MessageScrollArea>
           {/* 发送输入区（M7 Task 7，W4）：**全布局态挂载**（正文 / split / split-h，
               2026-09-19 用户裁决）——分屏时对话列同样可发消息；
-              send-info 拉取失败时组件自静默，不影响对话渲染；key 同上（组件钥匙） */}
-          <MessageComposer key={session.id} session={session} />
+              send-info 拉取失败时组件自静默，不影响对话渲染；钥匙口径同上 */}
+          <MessageComposer key={`composer-${session.id}`} session={session} />
         </div>
       )}
 

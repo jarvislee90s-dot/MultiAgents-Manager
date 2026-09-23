@@ -1,0 +1,31 @@
+# source: 用户实机走查截图 2026-09-23（codex Update Model Permissions 四项；与戊探D idle 夹具的形态差异=高亮行标签后无同行描述、描述折行在下方；MCP 警告=噪声污染源；实机屏读人工转写）
+⚠MCP client for `playwright-mcp` failed to start: MCP startup failed: handshaking with MCP
+server failed: connection closed: initialize response: connection closed: initialize
+response
+
+⚠MCP startup incomplete (failed: playwright-mcp)
+
+• Permissions updated to Ask for approval
+
+• Permissions updated to Ask for approval
+
+⚠MCP client for `playwright-mcp` failed to start: MCP startup failed: handshaking with MCP
+server failed: connection closed: initialize response: connection closed: initialize
+response
+
+⚠MCP startup incomplete (failed: playwright-mcp)
+
+  Update Model Permissions
+
+  1. Read Only         Codex can read files in the current workspace. Approval is
+                       required to edit files or access the internet.
+› 2. Ask for approval (current)
+                       Codex can read and edit files in the current workspace, and
+                       run commands. Approval is required to access the internet
+                       or edit other files.
+  3. Approve for me    Only ask for actions detected as potentially unsafe.
+  4. Full Access       Codex can edit files outside this workspace and access the
+                       internet without asking for approval. Exercise caution when
+                       using.
+
+  Press enter to confirm or esc to go back

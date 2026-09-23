@@ -31,7 +31,8 @@ const rowsOf = () => [
     sessionId: "sess-abc-1",
     channel: "tmux",
     action: "send",
-    summary: "[mobile] 修复登录页空指针",
+    // 丁T3 裁2：签名后置（真机形态 `{正文} [mobile 设备名]`）
+    summary: "修复登录页空指针 [mobile JARVIS 的 iPhone]",
     result: "ok",
   },
   {
@@ -41,7 +42,7 @@ const rowsOf = () => [
     sessionId: "sess-def-2",
     channel: "tmux",
     action: "queue",
-    summary: "[mobile] 跑一遍回归测试",
+    summary: "跑一遍回归测试 [mobile iPad]",
     result: "ok",
   },
   {
@@ -50,15 +51,15 @@ const rowsOf = () => [
     agentType: "claude",
     sessionId: "sess-ghi-3",
     channel: "tmux",
-    action: "retract",
-    summary: "[mobile] 撤回上条消息",
+    // 丁T3：斜杠命令裸注入——摘要即命令原文（终端不留痕，溯源靠本表 action+设备名）
+    action: "slash",
+    summary: "/permissions",
     result: "ok",
   },
 ];
 
 // inject_list_audit 调用次数（不关心附带参数形态，只数命令名）
-const auditCalls = () =>
-  invokeMock.mock.calls.filter((c) => c[0] === "inject_list_audit").length;
+const auditCalls = () => invokeMock.mock.calls.filter((c) => c[0] === "inject_list_audit").length;
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -82,10 +83,11 @@ describe("AuditLogSection 渲染（M7 W5）", () => {
     // 动作列：词表原样小写展示
     expect(screen.getByText("send")).toBeTruthy();
     expect(screen.getByText("queue")).toBeTruthy();
-    expect(screen.getByText("retract")).toBeTruthy();
+    expect(screen.getByText("slash")).toBeTruthy();
     // 摘要列：后端已截断的 summary 原文
-    expect(screen.getByText("[mobile] 修复登录页空指针")).toBeTruthy();
-    expect(screen.getByText("[mobile] 跑一遍回归测试")).toBeTruthy();
+    expect(screen.getByText("修复登录页空指针 [mobile JARVIS 的 iPhone]")).toBeTruthy();
+    expect(screen.getByText("跑一遍回归测试 [mobile iPad]")).toBeTruthy();
+    expect(screen.getByText("/permissions")).toBeTruthy();
     // 会话列：sessionId 原文
     expect(screen.getByText("sess-abc-1")).toBeTruthy();
     // 时间列：短时间格式（MM-dd HH:mm:ss），三行各一个

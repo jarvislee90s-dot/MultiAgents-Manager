@@ -94,7 +94,10 @@ export default function ArchiveDetail({
 
   // 加载更早消息（活会话同款）：limit 翻倍整页重拉，锚定原顶部消息不甩屏
   const hasLoadMore =
-    messages !== null && !contentError && (messages.length >= limit || truncated) && limit < MAX_LIMIT;
+    messages !== null &&
+    !contentError &&
+    (messages.length >= limit || truncated) &&
+    limit < MAX_LIMIT;
 
   const loadMore = useCallback(() => {
     const first = messages?.[0];
@@ -116,7 +119,7 @@ export default function ArchiveDetail({
   const isToggleable = useCallback(
     (m: SessionMessage) =>
       isProcessKind(m.kind) || (m.kind === "assistant" && m.seq !== lastAssistantSeq),
-    [lastAssistantSeq],
+    [lastAssistantSeq]
   );
 
   const isCollapsed = useCallback(
@@ -124,7 +127,7 @@ export default function ArchiveDetail({
       const forced = expandedOverride.get(m.seq);
       return forced !== undefined ? forced : isToggleable(m);
     },
-    [expandedOverride, isToggleable],
+    [expandedOverride, isToggleable]
   );
 
   const toggleCollapsed = useCallback(
@@ -135,12 +138,12 @@ export default function ArchiveDetail({
         return next;
       });
     },
-    [isCollapsed],
+    [isCollapsed]
   );
 
   const toggleableMessages = useMemo(
     () => (messages !== null ? messages.filter((m) => isToggleable(m)) : []),
-    [messages, isToggleable],
+    [messages, isToggleable]
   );
   const collapsedCount = toggleableMessages.filter((m) => isCollapsed(m)).length;
 
@@ -258,7 +261,12 @@ export default function ArchiveDetail({
         >
           <span>{collapsedCount} 条过程内容已折叠</span>
           <span className="flex gap-2">
-            <button type="button" data-testid="expand-all" className="underline" onClick={expandAll}>
+            <button
+              type="button"
+              data-testid="expand-all"
+              className="underline"
+              onClick={expandAll}
+            >
               展开全部
             </button>
             <button
@@ -328,11 +336,11 @@ export default function ArchiveDetail({
                         <span className="truncate">{collapsedLabel(m)}</span>
                       </button>
                       {!collapsed && (
-                        <div className="mt-1 whitespace-pre-wrap break-words">{m.content}</div>
+                        <div className="mt-1 break-words whitespace-pre-wrap">{m.content}</div>
                       )}
                     </>
                   ) : (
-                    <div className="whitespace-pre-wrap break-words">
+                    <div className="break-words whitespace-pre-wrap">
                       <span className="mr-2 text-xs text-slate-400">{m.role}</span>
                       {m.content}
                     </div>
@@ -349,7 +357,7 @@ export default function ArchiveDetail({
             aria-label="跳到顶部"
             title="跳到顶部"
             onClick={jumpToTop}
-            className="absolute right-2 top-2 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="absolute top-2 right-2 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
           >
             <ArrowUpToLine size={16} />
           </button>
@@ -413,48 +421,45 @@ export default function ArchiveDetail({
       </div>
 
       {!session.hiddenAlive && (
-        <div className="shrink-0 pb-6 pt-2">
-        {confirmRemove ? (
-          <span className="flex gap-2">
+        <div className="shrink-0 pt-2 pb-6">
+          {confirmRemove ? (
+            <span className="flex gap-2">
+              <button
+                type="button"
+                data-testid="archive-remove-confirm"
+                className="flex-1 rounded-lg border border-red-300 px-3 py-1.5 text-xs text-red-600"
+                onClick={() => {
+                  setRemoveError(false);
+                  deleteArchivedSession(session.sessionId)
+                    .then(onBack)
+                    .catch(() => setRemoveError(true));
+                }}
+              >
+                确认移除
+              </button>
+              <button
+                type="button"
+                className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs"
+                onClick={() => setConfirmRemove(false)}
+              >
+                取消
+              </button>
+            </span>
+          ) : (
             <button
               type="button"
-              data-testid="archive-remove-confirm"
-              className="flex-1 rounded-lg border border-red-300 px-3 py-1.5 text-xs text-red-600"
-              onClick={() => {
-                setRemoveError(false);
-                deleteArchivedSession(session.sessionId)
-                  .then(onBack)
-                  .catch(() => setRemoveError(true));
-              }}
+              data-testid="archive-remove"
+              className="w-full rounded-lg border border-red-300 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:border-red-900 dark:hover:bg-red-950/40"
+              onClick={() => setConfirmRemove(true)}
             >
-              确认移除
+              从归档移除
             </button>
-            <button
-              type="button"
-              className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs"
-              onClick={() => setConfirmRemove(false)}
-            >
-              取消
-            </button>
-          </span>
-        ) : (
-          <button
-            type="button"
-            data-testid="archive-remove"
-            className="w-full rounded-lg border border-red-300 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:border-red-900 dark:hover:bg-red-950/40"
-            onClick={() => setConfirmRemove(true)}
-          >
-            从归档移除
-          </button>
-        )}
-        {removeError && (
-          <p
-            data-testid="archive-remove-error"
-            className="mt-1 text-center text-xs text-red-600"
-          >
-            操作失败，请重试
-          </p>
-        )}
+          )}
+          {removeError && (
+            <p data-testid="archive-remove-error" className="mt-1 text-center text-xs text-red-600">
+              操作失败，请重试
+            </p>
+          )}
         </div>
       )}
     </div>

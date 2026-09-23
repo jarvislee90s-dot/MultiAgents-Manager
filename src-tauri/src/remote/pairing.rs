@@ -116,7 +116,8 @@ pub fn touch_device(conn: &rusqlite::Connection, device_id: &str, now: i64) {
     );
 }
 
-/// 按设备 id 查花名（M7 Task 6：注入来源标记 `[mobile <名>]` 与审计设备名列的数据源）。
+/// 按设备 id 查花名（M7 Task 6：注入来源标记 `[mobile <名>]`——丁T3 裁2 起在**尾部**
+/// ——与审计设备名列的数据源）。
 /// 形态对齐 device_valid/touch_device：锁内只 SQL 的轻量查询。
 /// 查无该行（不存在 / id 非法）→ 回落 "unknown"（端点侧不因设备行缺失而中断注入流程）。
 pub fn device_name(conn: &rusqlite::Connection, device_id: &str) -> String {
@@ -455,7 +456,7 @@ mod tests {
     }
 
     /// device_name（M7 Task 6）：命中行返回花名；查无该行回落 "unknown"
-    /// （注入前缀 [mobile <名>] 的数据源，缺失行不得中断端点流程）
+    /// （注入尾签名 [mobile <名>] 的数据源，缺失行不得中断端点流程）
     #[test]
     fn device_name_hits_row_and_falls_back_to_unknown() {
         let conn = memory_conn();

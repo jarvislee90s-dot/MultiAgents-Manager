@@ -1,9 +1,10 @@
 // 写审计表 DAO（M7）：移动端注入动作的只追加账本（谁在何时经哪个通道对哪个会话做了什么）
-// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key（由调用方约束，本层不校验）
+// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key | open | answer | mode | slash
+//（由调用方约束，本层不校验；answer = 批次乙 T8 问答应答；mode = 批次丙 T6 模式切换；
+//  **slash = 丁T3 斜杠命令裸注入**——裁2：`/` 开头消息不带签名（前后缀都会破坏命令与
+//  参数），终端不留痕是可接受的，溯源只此一处：本表 action=slash + device_name 列）
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-
-use crate::database::connection::DB;
 
 /// 审计行（不含 id / device_id：对外展示只要时间戳与设备名）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,40 +18,6 @@ pub struct AuditRow {
     pub action: String,
     pub summary: String,
     pub result: String,
-}
-
-/// 记录一条审计（全局 DB；签名按契约全参数透传，9 参豁免 too_many_arguments）
-#[allow(clippy::too_many_arguments)]
-pub fn record(
-    ts: i64,
-    device_id: &str,
-    device_name: &str,
-    agent_type: &str,
-    session_id: &str,
-    channel: &str,
-    action: &str,
-    summary: &str,
-    result: &str,
-) {
-    let conn = DB.lock().unwrap();
-    record_conn(
-        &conn,
-        ts,
-        device_id,
-        device_name,
-        agent_type,
-        session_id,
-        channel,
-        action,
-        summary,
-        result,
-    );
-}
-
-/// 最近 limit 条审计，最新在前（全局 DB）
-pub fn recent(limit: i64) -> Vec<AuditRow> {
-    let conn = DB.lock().unwrap();
-    recent_conn(&conn, limit)
 }
 
 /// 记录一条审计（只追加，不更新不删除）
@@ -124,7 +91,7 @@ mod tests {
             "s1",
             "tmux",
             "send",
-            "[mobile iPhone] hi",
+            "hi [mobile iPhone]",
             "ok",
         );
         record_conn(
@@ -136,7 +103,7 @@ mod tests {
             "s2",
             "tmux",
             "queue",
-            "[mobile iPhone] hi",
+            "hi [mobile iPhone]",
             "ok",
         );
         let rows = recent_conn(&c, 10);
@@ -147,7 +114,7 @@ mod tests {
         assert_eq!(rows[0].device_name, "iPhone");
         assert_eq!(rows[0].channel, "tmux");
         assert_eq!(rows[0].action, "queue");
-        assert_eq!(rows[0].summary, "[mobile iPhone] hi");
+        assert_eq!(rows[0].summary, "hi [mobile iPhone]");
         assert_eq!(rows[0].result, "ok");
         assert_eq!(rows[1].ts, 1000);
         assert_eq!(rows[1].action, "send");

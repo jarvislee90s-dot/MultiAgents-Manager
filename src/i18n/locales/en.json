@@ -234,6 +234,39 @@
       "session": "Session",
       "action": "Action",
       "summary": "Summary"
+    },
+    "signalHealth": {
+      "title": "Signal Health",
+      "description": "Hook channel self-check: a registered tool with active sessions but zero events usually means the hook is not yet trusted.",
+      "refresh": "Refresh",
+      "empty": "No tools with hook channels",
+      "loadError": "Failed to load signal health, please refresh",
+      "statusUnregistered": "Not registered",
+      "ok": "OK · last event {{ago}}",
+      "noActiveSessions": "No active sessions, waiting for events",
+      "trustNeeded": "Enter /hooks in the {{tool}} terminal and trust the MAM entry (one-time)",
+      "zeroEvents": "Zero hook events, check that {{tool}} is registered and firing correctly",
+      "copyCommand": "Copy command",
+      "copied": "Copied /hooks",
+      "copyFailed": "Copy failed",
+      "secondsAgo": "{{n}}s ago",
+      "minutesAgo": "{{n}}m ago",
+      "hoursAgo": "{{n}}h ago",
+      "daysAgo": "{{n}}d ago"
+    },
+    "dataManagement": {
+      "title": "Data Management",
+      "refresh": "Refresh",
+      "empty": "No project attachments",
+      "project": "Project",
+      "files": "Files",
+      "size": "Size",
+      "clean": "Clean",
+      "cleanConfirm": "Delete all attachments of this project? The whole folder will be removed and cannot be recovered",
+      "cleaned": "Cleaned",
+      "overThreshold": "Large usage, consider cleaning",
+      "hint": "Attachments = images/docs uploaded from mobile messages, stored in each project's .mam-attachments/<session>/ (locally git-excluded)",
+      "loadError": "Failed to load data management list, please refresh"
     }
   },
   "home": {

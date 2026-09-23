@@ -395,8 +395,7 @@ pub fn parse_quick_url(line: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
         .collect();
-    if host.is_empty() || host == "api.trycloudflare.com" || !host.ends_with(".trycloudflare.com")
-    {
+    if host.is_empty() || host == "api.trycloudflare.com" || !host.ends_with(".trycloudflare.com") {
         return None;
     }
     Some(format!("https://{host}"))
@@ -1182,8 +1181,10 @@ mod tests {
         );
         // JSON value 形态（URL 嵌在引号逗号之间）→ 剥标点后正常解析
         assert_eq!(
-            parse_quick_url(r#"INF {"url":"https://some-random-words.trycloudflare.com","line":1}"#)
-                .as_deref(),
+            parse_quick_url(
+                r#"INF {"url":"https://some-random-words.trycloudflare.com","line":1}"#
+            )
+            .as_deref(),
             Some("https://some-random-words.trycloudflare.com")
         );
         // 带路径的行剥成 origin（quick 看板地址恒为裸域名，与 parse_named_url 同口径）

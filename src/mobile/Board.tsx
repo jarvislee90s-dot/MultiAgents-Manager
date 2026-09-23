@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Archive, Moon, Power, Sun, Volume2, VolumeX } from "lucide-react";
-import { closeSession, connectEvents, fetchHost, fetchSessions, hideSession, type HostPayload } from "./api";
+import {
+  closeSession,
+  connectEvents,
+  fetchHost,
+  fetchSessions,
+  hideSession,
+  type HostPayload,
+} from "./api";
 import { getInitialTheme, toggleTheme, type Theme } from "./theme";
 import { getSoundEnabled, playCompletionChime, toggleSoundEnabled } from "./sound";
 import {
@@ -54,8 +61,6 @@ interface TransitionBanner {
 // （两音上行 + 包络；复用桌面 12 音效资产不可行——资产不在移动产物内，见该文件注释）。
 // 本组件只负责**何时响**：见 handleTransition 的转绿过滤 + 5 秒同色去重，
 // 口径照抄桌面 hooks/useNotification（currColor === "green" + lastNotified）。
-//
-// 跃迁横幅条目：key = `工具-会话id`（展示层防叠键，见 pushBanner 注释）
 
 interface BoardProps {
   /** 首次成功拉到数据时回调（一次）：探测成功信号，App 由此把 paired null→true（已配对设备免重配） */
@@ -66,6 +71,10 @@ interface BoardProps {
   onOpenSession?: (session: Session) => void;
   /** 历史入口点击回调（历史会话区 spec §7.1）：进入归档历史页 */
   onOpenHistory: () => void;
+  /** T1 活状态流：看板数据每拍更新（SSE 快照/跃迁、降级 3s 轮询、30s 对账）时
+   *  上报当前会话列表。App 据此把进入详情时定格的 selected 快照按会话身份对齐到
+   *  活会话——停留详情页期间状态自动更新（红卡/总结横幅自动切换），不另起轮询 */
+  onSessionsChanged?: (sessions: Session[]) => void;
 }
 
 // 移动看板：主通道为 SSE（快照首帧 + 跃迁增量），断流 2 次降级为 3s 轮询。
@@ -73,7 +82,13 @@ interface BoardProps {
 // + 横幅/提示音/振动提醒；降级 → 交给下方轮询 effect（复用 tick 的 in-flight 守卫）。
 // 失败口径：403 → 回配对页（只由 fetchSessions 的 null 触发，SSE 断流不算）；
 // 网络异常 → 保留上次数据 + 错误横幅继续重试（不白屏、不误踢回配对页）。
-export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHistory }: BoardProps) {
+export default function Board({
+  onPaired,
+  onUnpaired,
+  onOpenSession,
+  onOpenHistory,
+  onSessionsChanged,
+}: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
   // SSE 已降级（连续 2 次失败）：单向闩——置位后由轮询 effect 接管数据拉取；
@@ -296,6 +311,13 @@ export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHisto
     const id = setInterval(() => setNow(Date.now()), CLOCK_MS);
     return () => clearInterval(id);
   }, []);
+
+  // T1 活状态流：数据任何一拍更新都上报宿主（回调引用稳定，App 内 useCallback）。
+  // data 引用变化才触发；详情页打开时 Board 仍在挂载（仅视觉隐藏），这条链路
+  // 就是 selected 活同步的唯一数据源——不新增任何轮询
+  useEffect(() => {
+    if (data !== null) onSessionsChanged?.(data.sessions);
+  }, [data, onSessionsChanged]);
 
   // 横幅定时器清理（卸载）：防离页后 setState 警告与定时器泄漏
   useEffect(() => {
@@ -558,7 +580,7 @@ export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHisto
                 {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
                     APP=软归档（等同桌面端叉掉：任意状态可归档、不自动回归，可从
                     历史页移回）。stopPropagation 防触发卡片点击进详情 */}
-                {(
+                {
                   <button
                     type="button"
                     data-testid={`card-close-${s.id}`}
@@ -572,7 +594,7 @@ export default function Board({ onPaired, onUnpaired, onOpenSession, onOpenHisto
                   >
                     {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
                   </button>
-                )}
+                }
                 {/* 三色圆点：与桌面 StatusLight 同语义（waiting 附加呼吸动画） */}
                 <span
                   className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT_COLOR[s.status]} ${

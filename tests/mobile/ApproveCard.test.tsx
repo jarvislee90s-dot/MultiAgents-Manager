@@ -58,7 +58,9 @@ function installFetch() {
           status: routes.approveStatus,
         });
       }
-      return new Response(JSON.stringify(routes.approve ?? { status: "key_sent" }), { status: 200 });
+      return new Response(JSON.stringify(routes.approve ?? { status: "key_sent" }), {
+        status: 200,
+      });
     }
     throw new Error(`unexpected fetch: ${url}`);
   });
@@ -94,7 +96,7 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
     expect(container.querySelector("[data-testid='approve-drift']")).toBeNull();
   });
 
-  it("点「允许」：POST body {sessionId, optionId:\"approve\"} → 进入「已发送按键」态（按钮禁用）", async () => {
+  it('点「允许」：POST body {sessionId, optionId:"approve"} → 进入「已发送按键」态（按钮禁用）', async () => {
     installFetch();
     routes.options = approveOptions();
     routes.approve = { status: "key_sent" };
@@ -140,7 +142,9 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
       "该会话投递进行中，请稍后重试"
     );
     // 可重试：按钮保持可点，修正路由后重按即重试成功
-    expect((screen.getByTestId("approve-option-approve") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("approve-option-approve") as HTMLButtonElement).disabled).toBe(
+      false
+    );
     routes.approve = { status: "key_sent" };
     fireEvent.click(screen.getByTestId("approve-option-approve"));
     expect(await screen.findByTestId("approve-sent")).toBeTruthy();
@@ -204,5 +208,347 @@ describe("ApproveCard：M9R 严格档与补锁", () => {
       "会话已结束"
     );
     expect(approveCalls()).toHaveLength(1);
+  });
+});
+
+// ==== 批次丙 T5：N 选项审批对话框（屏读解析出的真实选项）====
+describe("ApproveCard：N 选项对话框模式（T5）", () => {
+  it("dialog=true：渲染编号按钮组（真实选项文本 + 编号徽标），点按提交 dialog:<n>", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "Yes, manually approve edits" },
+        { id: "dialog:3", label: "Tell Claude what to do differently" },
+      ],
+    });
+    render(<ApproveCard session={{ id: "sess-dlg" }} />);
+    // 卡在场 + 对话框模式标记 + 说明行
+    const card = await screen.findByTestId("approve-card");
+    expect(card.getAttribute("data-mode")).toBe("dialog");
+    expect(screen.getByTestId("approve-dialog-label").textContent).toContain("终端对话框");
+    // 三个真实选项文本可见（图2/图3 的修复目标：不降级成二元）
+    expect(screen.getByTestId("approve-option-dialog:1").textContent).toContain(
+      "Yes, and use auto mode"
+    );
+    expect(screen.getByTestId("approve-option-dialog:3").textContent).toContain(
+      "Tell Claude what to do differently"
+    );
+    // 编号徽标 = 将注入的数字键（所见即所按）
+    expect(screen.getByTestId("approve-option-dialog:2").textContent).toContain("2");
+    // 点第 3 项 → POST optionId = "dialog:3"
+    fireEvent.click(screen.getByTestId("approve-option-dialog:3"));
+    await flushAsync();
+    expect(approveCalls()).toHaveLength(1);
+    const body = JSON.parse(String((approveCalls()[0][1] as RequestInit).body));
+    expect(body).toEqual({ sessionId: "sess-dlg", optionId: "dialog:3" });
+    expect(await screen.findByTestId("approve-sent")).toBeTruthy();
+  });
+
+  it("dialog 缺省：维持二元渲染（前向兼容旧后端）", async () => {
+    installFetch();
+    routes.options = approveOptions(); // 无 dialog 字段
+    render(<ApproveCard session={{ id: "sess-bin" }} />);
+    expect((await screen.findByTestId("approve-card")).getAttribute("data-mode")).toBe("binary");
+    expect(screen.getByTestId("approve-card").textContent).toContain("等待批准");
+    expect(screen.queryByTestId("approve-dialog-label")).toBeNull();
+    // 二元项照常可点
+    expect(screen.getByTestId("approve-option-approve")).toBeTruthy();
+  });
+});
+
+// ==== 批次丙 T8：审批点 plan 聚合（计划确认卡带计划全文）====
+describe("ApproveCard：审批点 plan 聚合（T8）", () => {
+  it("plan 为 markdown：卡片主体渲染计划全文（markdown 直出）+ 选项照常可点", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "No, keep planning" },
+      ],
+      plan: { content: "# 实施计划\n\n- 第一步\n- 第二步", isFile: false },
+    });
+    render(<ApproveCard session={{ id: "sess-plan" }} />);
+    const planBox = await screen.findByTestId("approve-plan");
+    expect(planBox.getAttribute("data-plan-file")).toBe("false");
+    // markdown 结构化渲染（# → H1，- → LI）
+    expect(screen.getByText("实施计划").tagName).toBe("H1");
+    expect(screen.getByText("第一步").tagName).toBe("LI");
+    // 选项仍在（计划主体 + 选项并存）
+    expect(screen.getByTestId("approve-option-dialog:1")).toBeTruthy();
+  });
+
+  it("plan 为文件路径（kimi）：显「计划文件」+ 路径文本，不渲染 markdown", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      plan: { content: "/w/.kimi-code/sessions/x/agents/main/plans/p.md", isFile: true },
+    });
+    render(<ApproveCard session={{ id: "sess-pf" }} />);
+    const planBox = await screen.findByTestId("approve-plan");
+    expect(planBox.getAttribute("data-plan-file")).toBe("true");
+    expect(planBox.textContent).toContain("计划文件");
+    expect(screen.getByTestId("approve-plan-file").textContent).toContain("plans/p.md");
+  });
+
+  it("plan 为 null/缺省：不渲染计划主体（降级——只渲染选项，不阻塞审批）", async () => {
+    installFetch();
+    routes.options = approveOptions(); // 无 plan 字段
+    render(<ApproveCard session={{ id: "sess-noplan" }} />);
+    await screen.findByTestId("approve-option-approve");
+    expect(screen.queryByTestId("approve-plan")).toBeNull();
+  });
+});
+
+// ==== 批次丙 R1-3：降级二元卡的防重警示（计划红线 3）====
+describe("ApproveCard：降级警示脚注（R1-3）", () => {
+  it("degradedHint 在场：二元卡渲染警示脚注（终端可能是多选对话框）", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      degradedHint: "未读到终端对话框选项——终端可能正显示多选项，二元键可能错位，建议到终端确认",
+    });
+    render(<ApproveCard session={{ id: "sess-deg" }} />);
+    const hint = await screen.findByTestId("approve-degraded-hint");
+    expect(hint.textContent).toContain("未读到终端对话框选项");
+    expect(hint.textContent).toContain("建议到终端确认");
+    // 二元按钮仍在（降级不是自隐——用户仍可操作，只是被警示）
+    expect(screen.getByTestId("approve-option-approve")).toBeTruthy();
+    expect(screen.getByTestId("approve-option-reject")).toBeTruthy();
+  });
+
+  it("degradedHint=null/缺省：不渲染脚注（未降级零变化）", async () => {
+    installFetch();
+    routes.options = approveOptions({ degradedHint: null });
+    render(<ApproveCard session={{ id: "sess-nodeg" }} />);
+    await screen.findByTestId("approve-option-approve");
+    expect(screen.queryByTestId("approve-degraded-hint")).toBeNull();
+  });
+
+  it("对话框模式（dialog=true）不渲染降级脚注（读到选项即未降级）", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "No" },
+      ],
+    });
+    render(<ApproveCard session={{ id: "sess-ok" }} />);
+    await screen.findByTestId("approve-option-dialog:1");
+    expect(screen.queryByTestId("approve-degraded-hint")).toBeNull();
+  });
+});
+
+// ==== 丁T2：计划待确认（planPending——codex/kimi 的计划确认框入口）====
+describe("ApproveCard：计划待确认条（丁T2）", () => {
+  /** 计划待确认载荷：可用但无键（y/esc 是补丁审批键位，对计划框未取证） */
+  function planPendingOptions(over: Partial<ApproveOptionsView> = {}): ApproveOptionsView {
+    return approveOptions({
+      available: true,
+      options: [],
+      planPending: true,
+      plan: { content: "# 计划正文\n\n- 第一步", isFile: false },
+      ...over,
+    });
+  }
+
+  it("planPending=true + 零选项：渲染计划待确认条 +「检查终端对话框」按钮，不出任何键位按钮", async () => {
+    installFetch();
+    routes.options = planPendingOptions();
+    render(<ApproveCard session={{ id: "sess-pp" }} />);
+    const bar = await screen.findByTestId("approve-plan-pending");
+    expect(bar.textContent).toContain("终端正在等待这个计划的确认");
+    // 卡标题（红卡语义：这是审批卡，不是普通消息）
+    expect(screen.getByTestId("approve-card").textContent).toContain("计划待确认");
+    // 检查按钮在场（用户点它 = 重拉一次选项；后端屏读命中即出 N 选项）
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    // 零键位按钮（不得下发映射表二元键——那是补丁审批的键位）
+    expect(screen.queryByTestId("approve-option-approve")).toBeNull();
+    expect(screen.queryByTestId("approve-option-reject")).toBeNull();
+    // 计划全文照常聚合（点检查前用户先看到计划）
+    expect(screen.getByTestId("approve-plan").textContent).toContain("计划正文");
+  });
+
+  it("点「检查终端对话框」：重拉一次选项端点；未命中时给降级提示（不假装成功）", async () => {
+    installFetch();
+    routes.options = planPendingOptions();
+    render(<ApproveCard session={{ id: "sess-pp2" }} />);
+    await screen.findByTestId("approve-plan-pending");
+    // 检查前无未命中提示（用户还没点过——提示只在点过之后出现）
+    expect(screen.queryByTestId("approve-plan-check-miss")).toBeNull();
+    fireEvent.click(screen.getByTestId("approve-plan-check"));
+    await flushAsync();
+    // 重拉发生（挂载 1 次 + 检查 1 次）
+    const optionsCalls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-approve-options")
+    );
+    expect(optionsCalls.length).toBeGreaterThanOrEqual(2);
+    // 屏读仍没读到选项 → 降级提示（不假装成功）
+    expect((await screen.findByTestId("approve-plan-check-miss")).textContent).toContain(
+      "未读到终端对话框选项"
+    );
+    // **检查未命中即清除预期态**（任务书语义）：待确认条不再显示（「终端正在等」是
+    // 未经验证的声明，§2.8 不假装）；检查钮保留（可再试）+ 计划正文保留（内容仍真实）
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan")).toBeTruthy();
+  });
+
+  it("检查后屏读命中（dialog 选项）：切到 N 选项编号按钮组，待确认条消失", async () => {
+    installFetch();
+    routes.options = planPendingOptions();
+    render(<ApproveCard session={{ id: "sess-pp3" }} />);
+    await screen.findByTestId("approve-plan-pending");
+    // 第二次拉取（点检查后）返回屏读选项
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, implement this plan" },
+        { id: "dialog:2", label: "Yes, clear context and implement" },
+        { id: "dialog:3", label: "No, stay in Plan mode" },
+      ],
+    });
+    fireEvent.click(screen.getByTestId("approve-plan-check"));
+    const opt = await screen.findByTestId("approve-option-dialog:1");
+    expect(opt.textContent).toContain("Yes, implement this plan");
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+    // 选项卡点按 → POST dialog:1（codex 走数字直选，后端分发）
+    fireEvent.click(opt);
+    await flushAsync();
+    expect(JSON.parse(String((approveCalls()[0][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-pp3",
+      optionId: "dialog:1",
+    });
+  });
+
+  it("planPending 缺省/ false：不渲染待确认条（前向兼容旧后端 + 普通审批零变化）", async () => {
+    installFetch();
+    routes.options = approveOptions();
+    render(<ApproveCard session={{ id: "sess-pp0" }} />);
+    await screen.findByTestId("approve-option-approve");
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+  });
+
+  it("planPending=true 但已有 dialog 选项：选项卡优先（待确认条不与选项并存）", async () => {
+    installFetch();
+    routes.options = planPendingOptions({
+      dialog: true,
+      options: [{ id: "dialog:1", label: "Approve" }],
+    });
+    render(<ApproveCard session={{ id: "sess-pp4" }} />);
+    await screen.findByTestId("approve-option-dialog:1");
+    expect(screen.queryByTestId("approve-plan-pending")).toBeNull();
+  });
+});
+
+// ==== 丁T2 复评 F3-4：kimi 审批卡不含 plan 正文（任务书成文要求）====
+describe("ApproveCard：F3-4 kimi 审批卡不带 plan 正文", () => {
+  it("kimi 载荷 plan=null（后端 F3-4 收口）→ 不渲染计划主体，选项照常", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [{ id: "dialog:1", label: "Approve" }],
+      plan: null,
+    });
+    render(<ApproveCard session={{ id: "sess-kimi-noplan" }} />);
+    await screen.findByTestId("approve-option-dialog:1");
+    expect(screen.queryByTestId("approve-plan")).toBeNull();
+    expect(screen.queryByTestId("approve-plan-file")).toBeNull();
+  });
+
+  it("kimi 计划待确认条（planPending）同样不带正文 → 只渲染条 + 检查钮", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      available: true,
+      options: [],
+      planPending: true,
+      plan: null,
+    });
+    render(<ApproveCard session={{ id: "sess-kimi-pp" }} />);
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    expect(screen.queryByTestId("approve-plan")).toBeNull();
+  });
+
+  it("对照：claude/codex 的 plan 正文照常渲染（F3-4 只收 kimi，不误伤）", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      plan: { content: "# 计划正文", isFile: false },
+    });
+    render(<ApproveCard session={{ id: "sess-claude-plan" }} />);
+    expect((await screen.findByTestId("approve-plan")).textContent).toContain("计划正文");
+  });
+});
+
+// ==== 批次戊 E2③：裁12 布局契约（卡体高度上限 + 长内容默认折叠 + 点开）====
+describe("ApproveCard：裁12 计划正文折叠", () => {
+  /** 构造超过折叠阈值的计划正文（阈值 600 字符，见组件 PLAN_COLLAPSE_CHARS） */
+  const longPlan = "# 长计划\n\n" + "正文段落，用于撑破折叠阈值。".repeat(60);
+
+  it("长内容默认折叠：data-collapsed=true + 渲染「展开全文」按钮", async () => {
+    installFetch();
+    routes.options = approveOptions({ plan: { content: longPlan, isFile: false } });
+    render(<ApproveCard session={{ id: "sess-e2-fold" }} />);
+    const body = await screen.findByTestId("approve-plan");
+    expect(body.getAttribute("data-collapsed")).toBe("true");
+    expect(body.className).toContain("max-h-24");
+    const toggle = screen.getByTestId("approve-plan-toggle");
+    expect(toggle.textContent).toBe("展开全文");
+  });
+
+  it("点开切换：展开后 data-collapsed=false + max-h-64 内滚 + 按钮变「收起计划」", async () => {
+    installFetch();
+    routes.options = approveOptions({ plan: { content: longPlan, isFile: false } });
+    render(<ApproveCard session={{ id: "sess-e2-open" }} />);
+    await screen.findByTestId("approve-plan");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("approve-plan-toggle"));
+    });
+    const body = screen.getByTestId("approve-plan");
+    expect(body.getAttribute("data-collapsed")).toBe("false");
+    expect(body.className).toContain("max-h-64");
+    expect(screen.getByTestId("approve-plan-toggle").textContent).toBe("收起计划");
+  });
+
+  it("短内容不折叠：无按钮、data-collapsed=false（完整渲染）", async () => {
+    installFetch();
+    routes.options = approveOptions({ plan: { content: "# 短计划\n\n一两行。", isFile: false } });
+    render(<ApproveCard session={{ id: "sess-e2-short" }} />);
+    const body = await screen.findByTestId("approve-plan");
+    expect(body.getAttribute("data-collapsed")).toBe("false");
+    expect(screen.queryByTestId("approve-plan-toggle")).toBeNull();
+  });
+});
+
+// ==== 批次戊 E7：裁11 配色（对话框卡并入 sky 蓝系；二元审批保留红系）====
+describe("ApproveCard：裁11 配色 tone 映射", () => {
+  it("对话框卡：data-tone=question（sky 蓝系）+ 选项按钮用蓝族 token", async () => {
+    installFetch();
+    routes.options = approveOptions({
+      dialog: true,
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "Yes, manually approve edits" },
+      ],
+    });
+    render(<ApproveCard session={{ id: "sess-e7-dialog" }} />);
+    const card = await screen.findByTestId("approve-card");
+    expect(card.getAttribute("data-tone")).toBe("question");
+    expect(card.className).toContain("border-sky-500/60");
+    const btn = screen.getByTestId("approve-option-dialog:1");
+    expect(btn.className).toContain("bg-sky-500/10");
+    expect(btn.className).not.toContain("bg-rose-500/10");
+  });
+
+  it("二元审批卡：保留红系 data-tone=approve（裁11 活口注明）", async () => {
+    installFetch();
+    routes.options = approveOptions();
+    render(<ApproveCard session={{ id: "sess-e7-binary" }} />);
+    const card = await screen.findByTestId("approve-card");
+    expect(card.getAttribute("data-tone")).toBe("approve");
+    expect(card.className).toContain("border-rose-500/60");
+    const btn = screen.getByTestId("approve-option-approve");
+    expect(btn.className).toContain("bg-rose-500/10");
   });
 });
