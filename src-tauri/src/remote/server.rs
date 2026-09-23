@@ -9123,13 +9123,17 @@ mod tests {
         assert_eq!(mode_tiers[1]["mode"], "plan");
         assert_eq!(mode_tiers[1]["selectable"], true);
         let perm_tiers = groups[1]["tiers"].as_array().unwrap();
-        assert_eq!(perm_tiers.len(), 3);
+        assert_eq!(
+            perm_tiers.len(),
+            4,
+            "2026-09-23 起四档（含自动审批=Approve for me）"
+        );
         assert_eq!(
             perm_tiers
                 .iter()
                 .map(|t| t["label"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["只读", "默认", "完全信任"]
+            vec!["只读", "默认", "自动审批", "完全信任"]
         );
         // 裁7：退役档在 legacy 里如实登记，**不在 tiers 里**
         let legacy = groups[1]["legacy"]
@@ -9147,6 +9151,49 @@ mod tests {
         // 旧前端兼容视图仍在（顶层 current/switchKind）
         assert_eq!(v["switchKind"], "slashCommand");
         assert!(v["current"].is_null());
+    }
+
+    /// GET：权限组 current 来自「**上次切换**」记忆（2026-09-23 codex 模式切换改造
+    /// 的显示面）——verified 切换写入 `PERMISSION_TIER_MEMORY` 后，GET 把它回放为
+    /// 权限组的 current/currentLabel；无记录的会话权限组仍恒 null（模式未知，如实）。
+    #[tokio::test]
+    async fn session_mode_reports_permission_tier_from_memory() {
+        let (state, sid) = mode_state_with_status(
+            "sess_mc_get_mem",
+            crate::session::AgentType::Codex,
+            92,
+            crate::session::SessionStatus::Waiting,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        // 无记录：权限组恒 null（不假装知道）
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert!(v["groups"][1]["current"].is_null(), "无记忆 → 模式未知");
+
+        // 记忆后：GET 回放为 current/currentLabel（模拟一次 verified=true 的切换）
+        crate::remote::api::remember_permission_tier(&sid, "readOnly");
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["groups"][1]["current"], "readOnly");
+        assert_eq!(v["groups"][1]["currentLabel"], "只读");
     }
 
     /// GET：kimi 两组 + **权限组的屏显标签是工具自己的词**（§2.6 kimi 列）

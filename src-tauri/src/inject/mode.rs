@@ -397,13 +397,16 @@ const CODEX_MODE_TIERS: [ModeTier; 2] = [
     },
 ];
 
-/// codex 权限组：只读 / 默认 / 完全信任（§2.6）。
+/// codex 权限组：只读 / 默认 / 自动审批 / 完全信任（2026-09-23 起四档）。
 ///
-/// 屏显标签对应实测菜单项（`/permissions` 弹窗 `Update Model Permissions`，M9R
-/// 实机档位序 Read Only / Ask for approval / Approve for me / Full Access）：
-/// 只读=`Read Only`、默认=`Ask for approval`、完全信任=`Full Access`。
-/// **`Approve for me` 不在 §2.6 的三档里**（Guardian 开启时才出现），故不作目标档。
-const CODEX_PERMISSION_TIERS: [ModeTier; 3] = [
+/// 屏显标签对应实测菜单项（`/permissions` 弹窗 `Update Model Permissions`，实机
+/// 档位序 Read Only / Ask for approval / Approve for me / Full Access——用户
+/// 2026-09-23 实机走查再次确认四项，且第 3 项按数字键可直达）：
+/// 只读=`Read Only`、默认=`Ask for approval`、自动审批=`Approve for me`、
+/// 完全信任=`Full Access`。旧「`Approve for me` 不作目标档」的保守裁决
+/// （§2.6 三档）由用户实测推翻（裁20：数字 1/2/3 实测分别选中前三项）——
+/// 台账「codex 模式切换改造」节登记。
+const CODEX_PERMISSION_TIERS: [ModeTier; 4] = [
     ModeTier {
         mode: MamMode::ReadOnly,
         label: "只读",
@@ -413,6 +416,12 @@ const CODEX_PERMISSION_TIERS: [ModeTier; 3] = [
     ModeTier {
         mode: MamMode::Default,
         label: "默认",
+        selectable: true,
+        reason: None,
+    },
+    ModeTier {
+        mode: MamMode::AcceptEdits,
+        label: "自动审批",
         selectable: true,
         reason: None,
     },
@@ -708,15 +717,18 @@ pub fn mode_switch_plan(
         // 目标档不参与按键构造，落点由屏读回读验证：`plan mode` 短语 / ` · ` 状态栏）
         ("codex", ModeGroupId::Mode, MamMode::Plan)
         | ("codex", ModeGroupId::Mode, MamMode::Default) => Ok(ModeSwitchPlan::Key("shift+tab")),
-        // codex 权限组：`/permissions` 两段式（命令→菜单→屏读定位→导航确认）
+        // codex 权限组：`/permissions` 两段式（命令→菜单→**数字直达**——2026-09-23
+        // 用户实测：菜单开着时按档位数字键直接选中并生效，1/2/3 一次直达、4 弹
+        // 二阶段确认框再按 1；方向键闭环退役为 kimi 专用。台账登记）
         ("codex", ModeGroupId::Permission, MamMode::ReadOnly)
         | ("codex", ModeGroupId::Permission, MamMode::Default)
+        | ("codex", ModeGroupId::Permission, MamMode::AcceptEdits)
         | ("codex", ModeGroupId::Permission, MamMode::Bypass) => Ok(ModeSwitchPlan::Menu {
             open: "/permissions",
             target,
         }),
         ("codex", ModeGroupId::Permission, _) => Err(SwitchRefusal::NoMechanism(
-            "codex 权限菜单无该档（实测档位：只读 / Ask for approval / Full Access）",
+            "codex 权限菜单无该档（实测档位：只读 / Ask for approval / Approve for me / Full Access）",
         )),
         // kimi 模式组：`/plan on|off` 带参直达（TUI 内嵌实现：subcmd on/off/clear）
         ("kimi", ModeGroupId::Mode, MamMode::Plan) => Ok(ModeSwitchPlan::Text("/plan on")),
@@ -1180,6 +1192,8 @@ pub fn menu_target_label(tool: &str, target: MamMode) -> Option<&'static str> {
     match (tool, target) {
         ("codex", MamMode::ReadOnly) => Some("Read Only"),
         ("codex", MamMode::Default) => Some("Ask for approval"),
+        // 2026-09-23 起第 3 档（实机 `Approve for me`，数字键 3 直达）
+        ("codex", MamMode::AcceptEdits) => Some("Approve for me"),
         ("codex", MamMode::Bypass) => Some("Full Access"),
         ("kimi", MamMode::Default) => Some("Always Ask"),
         ("kimi", MamMode::AcceptEdits) => Some("Ask When Needed"),
@@ -1238,11 +1252,8 @@ pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<Dialog
     let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
     let canon: Vec<(String, &str)> = labels.iter().map(|l| (l.to_lowercase(), *l)).collect();
     // 标题锚分家：codex 优先（其标题词与 kimi 不相交），再 kimi；都无 → 菜单未出现
-    if let Some(t) = lowered
-        .iter()
-        .position(|l| l.contains(CODEX_MENU_TITLE_ANCHOR))
-    {
-        return locate_codex_menu(lines, &lowered, t, &canon);
+    if lowered.iter().any(|l| l.contains(CODEX_MENU_TITLE_ANCHOR)) {
+        return locate_codex_menu(lines, &lowered, &canon);
     }
     let t = lowered
         .iter()
@@ -1250,17 +1261,26 @@ pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<Dialog
     locate_kimi_menu(lines, &lowered, t, &canon)
 }
 
-/// codex 菜单定位：标题↔footer 窗内的**编号行**（折行不产新项）。
-fn locate_codex_menu(
-    lines: &[String],
-    lowered: &[String],
-    title_idx: usize,
-    canon: &[(String, &str)],
-) -> Option<Vec<DialogOption>> {
+/// codex 菜单**锚窗**（标题锚行 → footer 锚行的行区间；两锚都在才成窗）。
+/// [`locate_codex_menu`] 与 [`codex_permission_digit_probe`] 共用（同一判据单一实现）。
+fn codex_menu_window(lowered: &[String]) -> Option<(usize, usize)> {
+    let title_idx = lowered
+        .iter()
+        .position(|l| l.contains(CODEX_MENU_TITLE_ANCHOR))?;
     let footer_idx = lowered[title_idx..]
         .iter()
         .position(|l| l.contains(CODEX_MENU_FOOTER_ANCHOR))?
         + title_idx;
+    Some((title_idx, footer_idx))
+}
+
+/// codex 菜单定位：标题↔footer 窗内的**编号行**（折行不产新项）。
+fn locate_codex_menu(
+    lines: &[String],
+    lowered: &[String],
+    canon: &[(String, &str)],
+) -> Option<Vec<DialogOption>> {
+    let (title_idx, footer_idx) = codex_menu_window(lowered)?;
     let mut items: Vec<DialogOption> = Vec::new();
     for line in &lines[title_idx + 1..footer_idx] {
         // 编号行形态（`› 2. Ask for approval (current)  …`）；折行/空行/标题行自然落选
@@ -1281,6 +1301,80 @@ fn locate_codex_menu(
         return None;
     }
     Some(items)
+}
+
+/// codex 权限菜单的**数字直达探测**（2026-09-23 用户实测裁决：菜单开着时按档位
+/// 数字键直接选中并生效——1/2/3 一次直达、4 弹二阶段确认框再按 1。取代方向键
+/// 闭环成为 codex 权限组第二段，台账「codex 模式切换改造」节登记）。
+///
+/// 判据 = 标题/footer 锚窗（[`codex_menu_window`]，与 [`locate_codex_menu`] 同窗）
+/// 内按 [`crate::inject::dialog::parse_option_line`] 解析编号行、按 [`menu_labels`]
+/// 词表认档，**目标档标签恰命中一行** → 返回该行的**屏上编号**（如 `"3"`）。发该
+/// 数字键即直选该档（kimi 菜单无屏上编号，仍走方向键闭环——数字直达是 codex 专属）。
+///
+/// # 与闭环判据的差别（放宽与收紧各一条，均有据）
+///
+/// - **不做全集闸**（[`menu_items_coherent`] 的目标档齐备不变式）：Guardian 关闭时
+///   `Approve for me` 缺席、后续档编号前移——编号从**目标行自身**读出，缺席档不
+///   影响目标行编号的正确性（这正是数字直达优于方向键的一处：无编号重排风险）。
+///   非目标档的重复/异常不查：编号只取自目标行，别行的混入不改变目标行自身。
+/// - **目标标签必须恰命中一行**（收紧）：0 行 = 菜单未画全（NotYet，可重试）；
+///   \>1 行 = 屏上混入了含目标档名词的正文行（不变式 1 同源防线）→ Fatal 不猜。
+/// - **屏上编号必须在 1..=9**：数字键域是单字符（B 族 `control_records`），
+///   两位数意味着解析到了非菜单行 → Fatal。
+pub(crate) fn codex_permission_digit_probe(lines: &[String], target: MamMode) -> PollStep<String> {
+    let Some(target_label) = menu_target_label("codex", target) else {
+        return PollStep::Fatal(format!(
+            "codex 的权限菜单里没有「{}」档（不猜位置）",
+            target.label()
+        ));
+    };
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    let Some((title_idx, footer_idx)) = codex_menu_window(&lowered) else {
+        return PollStep::NotYet(
+            "codex 的权限菜单未出现或读不到档位表（不盲发数字键）".to_string(),
+        );
+    };
+    let target_lower = target_label.to_lowercase();
+    let mut hit: Option<u32> = None;
+    for line in &lines[title_idx + 1..footer_idx] {
+        let Some((digit, raw_label, _)) = crate::inject::dialog::parse_option_line(line) else {
+            continue;
+        };
+        if !raw_label.to_lowercase().starts_with(&target_lower) {
+            continue;
+        }
+        if hit.is_some() {
+            return PollStep::Fatal(format!(
+                "codex 权限菜单里「{target_label}」出现多行（屏上混入正文行）——不猜编号，已中止（不盲发数字键）"
+            ));
+        }
+        hit = Some(digit);
+    }
+    match hit {
+        Some(d) if (1..=9).contains(&d) => PollStep::Ready(d.to_string()),
+        Some(d) => PollStep::Fatal(format!(
+            "codex 权限菜单「{target_label}」的屏上编号（{d}）超出数字键域（1-9）——不猜，已中止"
+        )),
+        None => PollStep::NotYet(format!(
+            "codex 权限菜单窗内未见「{target_label}」行（菜单可能未画全）"
+        )),
+    }
+}
+
+/// **残留菜单判定**（纯函数）：发 `/permissions` 前的一拍屏读里，是否已有上次
+/// 遗留的权限菜单在屏（标题锚在屏即判——footer 锚可能被正文挤出可见窗，标题
+/// 锚是菜单存在的最低证据）。
+///
+/// 2026-09-23 用户实机走查的**事故根因**：切换失败后菜单**留在屏上**，下一次
+/// 点击注入的 `/permissions` 字符被 modal 菜单吞掉、回车**落在菜单上 = 确认当前
+/// 高亮项**（用户看到 `Permissions updated to Ask for approval` 与输入行堆积
+/// `/permissions/permissions`）。投递前检出残留 → 先发一次 `esc` 关闭再走正常
+/// 流程（菜单 footer 锚原文 `esc to go back` 实证 esc 关菜单）。
+pub(crate) fn residual_menu_present(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(CODEX_MENU_TITLE_ANCHOR))
 }
 
 /// kimi 菜单定位：footer 之后的**两行组**标签行（「恰为 `<档名> ← current` 或裸
@@ -1531,7 +1625,7 @@ impl MenuNavPlan<'_> {
 ///   `Continue and don't warn again.` 文案）；
 /// - 同一簇里含关键词的选项 ≠ 1，或**多个簇**各含一个 → `Fatal`（不猜，零投递）；
 /// - 恰好一个 → 可导航（行表 + 该行的屏上标签原文）。
-fn confirm_box_probe(
+pub(crate) fn confirm_box_probe(
     lines: &[String],
     tool: &str,
     keyword: &str,
@@ -1842,10 +1936,92 @@ where
     })
 }
 
+/// **codex 权限组的数字直达编排**（2026-09-23 用户实测裁决；取代 [`run_menu_stages`]
+/// 在 codex 上的职责，kimi 仍走闭环——kimi 菜单无屏上编号，数字键无意义）。
+///
+/// # 各段（每段都可独立中止）
+///
+/// 0. **残留防护**（事故根因，见 [`residual_menu_present`]）：读一拍屏，已有上次
+///    遗留的权限菜单 → 先 `esc` 关闭再开新菜单。读不到屏 → 跳过防护（后续段会
+///    如实失败，不因防护失败而额外报错）；
+/// 1. **开菜单**：`open_menu()`（生产 = `/permissions` 文本 + 回车）；
+/// 2. **数字直达**：`poll_digit()` 轮询窗内读目标档**屏上编号**
+///    （[`codex_permission_digit_probe`]）→ 发该数字键（**无回车**——实测数字键
+///    一次直达，回车是旧闭环的提交键，这里发了反而可能误确认）；
+/// 3. **二阶段确认**（仅 Full Access，[`needs_full_access_confirm`]）：`poll_confirm()`
+///    等确认框簇 → 肯定项（唯一含 `continue` 项）的**屏上编号**直达（用户实测：
+///    `Enable full access?` 按 `1` = Yes, continue anyway）；确认框缺席**不当作失败**
+///    （用户可能关过该警告，与 [`run_menu_stages`] 同语义）；
+/// 4. **回执核验**：`poll_receipt()` 找 `permissions updated to <目标档>`。
+///
+/// 抽进内核的理由与 [`run_menu_stages`] 同源：段间控制流（残留防护、确认框缺席
+/// 不算失败）是判据的一部分，写在端点 `#[cfg(windows)]` 闭包里就只有实机能覆盖。
+pub fn run_codex_permission_stages<O, P, Q, R, T>(
+    target: MamMode,
+    mut open_menu: O,
+    mut poll_digit: P,
+    mut poll_confirm: Q,
+    mut poll_receipt: R,
+    terminal: &mut T,
+) -> Result<MenuStagesOutcome, String>
+where
+    O: FnMut() -> Result<(), String>,
+    P: FnMut() -> Result<String, String>,
+    Q: FnMut() -> Result<Option<Vec<DialogOption>>, String>,
+    R: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: MenuTerminal,
+{
+    // ===== 段 0：残留菜单防护 =====
+    if let Some(lines) = terminal.read() {
+        if residual_menu_present(&lines) {
+            log::debug!("codex 权限切换：屏上已有残留菜单 → 先 esc 关闭再开新菜单");
+            terminal.send("esc")?;
+            terminal.settle();
+        }
+    }
+    // ===== 段 1：开菜单 =====
+    open_menu()?;
+    // ===== 段 2：数字直达 =====
+    let digit = poll_digit()?;
+    terminal.send(&digit)?;
+    terminal.settle();
+    let menu_keys = vec![digit];
+    // ===== 段 3：Full Access 二阶段确认 =====
+    let mut confirm_done = false;
+    if needs_full_access_confirm("codex", ModeGroupId::Permission, target) {
+        if let Some(cluster) = poll_confirm()? {
+            let affirmative = cluster.iter().find(|o| {
+                o.label
+                    .to_lowercase()
+                    .contains(FULL_ACCESS_AFFIRMATIVE_KEYWORD)
+            });
+            let Some(o) = affirmative else {
+                return Err(
+                    "codex Full Access 确认框肯定项定位丢失——已中止，未发确认键；请人工核对终端（Full Access 可能未生效）"
+                        .to_string(),
+                );
+            };
+            terminal.send(&o.number.to_string())?;
+            terminal.settle();
+            confirm_done = true;
+        } else {
+            log::debug!("codex 权限切换：未出现 Full Access 二次确认框（可能用户已关闭该警告）");
+        }
+    }
+    // ===== 段 4：成功回执核验 =====
+    let receipt_seen = poll_receipt()?.is_some();
+    Ok(MenuStagesOutcome {
+        menu_keys,
+        confirm_done,
+        receipt_seen: Some(receipt_seen),
+    })
+}
+
 /// **是否需要第三段**（Full Access 二次确认框）——**仅** codex × 权限组 × Full Access。
 ///
-/// 依据 = 实机取证档案 §3：切 1/2/3 档**不出现**确认框，直接回 `• Permissions updated
-/// to …`；只有切到第 4 档（Full Access）才有 `Enable full access?`（档案 §2）。
+/// 依据 = 实机取证档案 §3 + 用户 2026-09-23 实机走查：切 1/2/3 档**不出现**确认框，
+/// 直接回 `• Permissions updated to …`；只有切到第 4 档（Full Access）才有
+/// `Enable full access?`（按 1 = Yes, continue anyway 才生效）。
 pub fn needs_full_access_confirm(tool: &str, group: ModeGroupId, target: MamMode) -> bool {
     tool == "codex" && group == ModeGroupId::Permission && target == MamMode::Bypass
 }
@@ -2060,10 +2236,16 @@ mod tests {
         assert_eq!(p.label, "权限");
         assert_eq!(p.layout, GroupLayout::Tiers, "权限组仍是逐档按钮");
         let labels: Vec<&str> = p.tiers.iter().map(|t| t.label).collect();
-        assert_eq!(labels, vec!["只读", "默认", "完全信任"]);
+        assert_eq!(labels, vec!["只读", "默认", "自动审批", "完全信任"]);
         assert_eq!(
             p.tiers.iter().map(|t| t.mode).collect::<Vec<_>>(),
-            vec![MamMode::ReadOnly, MamMode::Default, MamMode::Bypass]
+            vec![
+                MamMode::ReadOnly,
+                MamMode::Default,
+                MamMode::AcceptEdits,
+                MamMode::Bypass
+            ],
+            "2026-09-23 起四档（第 3 档 = 实机 Approve for me，数字键 3 直达）"
         );
 
         // kimi：两组（模式组 默认/计划；权限组 总是询问/按需询问/永不询问）
@@ -2186,12 +2368,14 @@ mod tests {
         }
     }
 
-    /// codex 权限组：三档都走 `/permissions` 两段式；非三档 → 拒绝
+    /// codex 权限组：**四档**都走 `/permissions` 两段式（2026-09-23 起含第 3 档
+    /// 「自动审批」=`Approve for me`，用户实测数字直达）；非四档 → 拒绝
     #[test]
     fn codex_permission_is_two_stage_menu() {
         for (target, _label) in [
             (MamMode::ReadOnly, "Read Only"),
             (MamMode::Default, "Ask for approval"),
+            (MamMode::AcceptEdits, "Approve for me"),
             (MamMode::Bypass, "Full Access"),
         ] {
             assert_eq!(
@@ -2203,7 +2387,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            mode_switch_plan("codex", ModeGroupId::Permission, MamMode::AcceptEdits),
+            mode_switch_plan("codex", ModeGroupId::Permission, MamMode::Plan),
             Err(SwitchRefusal::NoMechanism(_))
         ));
     }
@@ -3540,11 +3724,12 @@ mod tests {
         let (r, sent) = run_scripted_nav(
             &s1,
             "codex",
-            MamMode::AcceptEdits, // 目标档不在 codex 菜单里 → 首次定位即无「目标行」标签
+            MamMode::Plan, // codex 权限菜单没有 Plan 档（menu_target_label → None）
             &[&s2],
         );
-        // 这一条覆盖的是「目标档标签在词表里、但不在屏上的档位表里」——codex 词表没有
-        // AcceptEdits 对应的标签（menu_target_label 返回 None）→ 首次即中止，零按键
+        // 这一条覆盖的是「目标档标签在词表里、但不在屏上的档位表里」——codex 权限
+        // 菜单没有 Plan 档（menu_target_label 返回 None）→ 首次即中止，零按键
+        // （2026-09-23 起原用的 AcceptEdits 已成第 3 档「Approve for me」，不再适用）
         assert!(r.is_err(), "{r:?}");
         assert!(sent.is_empty(), "零按键：{sent:?}");
 
@@ -4293,170 +4478,338 @@ mod tests {
         (outcome, sent.into_inner(), poll_calls.into_inner())
     }
 
-    /// **场景①：1/2/3 档 —— 菜单导航 → enter → 见 `Permissions updated to <档>` → verified**
+    // ==== 2026-09-23 codex 数字直达：整条编排（残留防护 → 开菜单 → 数字直达 →
+    //      二阶段确认 → 回执核验）的脚本化驱动 ====
+
+    /// codex 数字直达编排的**脚本化驱动器**（[`run_codex_permission_stages`]）。
     ///
-    /// 脚本（时间序）：① 菜单刚画出（高亮在第 2 项 `Ask for approval` = 目标档）
-    /// → ② 提交后工具打印回执行。
+    /// 脚本语义与 [`run_stage_script`] 同款（cursor 指向当前屏、send/开菜单推进），
+    /// 差异：`open_menu` 记录开菜单动作并推进 cursor（菜单不是「键」）；digit 与
+    /// 确认框轮询分别走 [`codex_permission_digit_probe`] 与 [`confirm_box_probe`]。
+    /// 返回 `(编排结果, 实际发出的键, 开菜单动作次数)`。
+    fn run_codex_stage_script(
+        screens: Vec<Vec<String>>,
+        target: MamMode,
+    ) -> (Result<MenuStagesOutcome, String>, Vec<String>, usize) {
+        use crate::inject::mode::PollStep;
+        use std::cell::{Cell, RefCell};
+        let cursor = Cell::new(0usize);
+        let cur = || screens[cursor.get().min(screens.len() - 1)].clone();
+        fn advance(cursor: &Cell<usize>, n: usize) -> bool {
+            if cursor.get() + 1 < n {
+                cursor.set(cursor.get() + 1);
+                true
+            } else {
+                false
+            }
+        }
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let opens: Cell<usize> = Cell::new(0);
+        let n = screens.len();
+        let outcome = run_codex_permission_stages(
+            target,
+            || {
+                opens.set(opens.get() + 1);
+                advance(&cursor, n); // 开菜单 → 菜单画出（脚本推进）
+                Ok(())
+            },
+            || loop {
+                match codex_permission_digit_probe(&cur(), target) {
+                    PollStep::Ready(d) => return Ok(d),
+                    PollStep::Fatal(why) => return Err(format!("{why}；请人工核对终端")),
+                    PollStep::NotYet(_) => {
+                        if !advance(&cursor, n) {
+                            return Err(
+                                "codex 的权限菜单未出现或读不到档位表（脚本窗尽）；请人工核对终端"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            },
+            || loop {
+                match confirm_box_probe(&cur(), "codex", FULL_ACCESS_AFFIRMATIVE_KEYWORD) {
+                    PollStep::Ready((c, _)) => return Ok(Some(c)),
+                    PollStep::Fatal(why) => return Err(format!("{why}；请人工核对终端")),
+                    PollStep::NotYet(_) => {
+                        if !advance(&cursor, n) {
+                            return Ok(None); // 窗尽：确认框缺席不当作失败
+                        }
+                    }
+                }
+            },
+            || {
+                loop {
+                    let label = menu_target_label("codex", target).unwrap_or("");
+                    if permission_receipt_verified("codex", &cur(), label) {
+                        return Ok(Some(cur()));
+                    }
+                    if !advance(&cursor, n) {
+                        return Ok(None); // 窗尽未见到回执行（不是失败）
+                    }
+                }
+            },
+            &mut Closures {
+                read: || Some(cur()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    advance(&cursor, n); // 按键 → TUI 重绘（脚本推进）
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        (outcome, sent.into_inner(), opens.get())
+    }
+
+    /// **场景①：1/2/3 档 —— 残留检查（无）→ 开菜单 → 数字直达 → 回执 → verified**
     ///
-    /// 断言：`[enter]`（高亮已在目标档，零方向键）+ `receipt_seen=true` + **没有第三段**。
+    /// 脚本（时间序）：① 干净屏（无残留菜单）→ ② 开菜单后菜单画出（目标=只读，
+    /// 屏上编号 1）→ ③ 发数字后回执行出现。
+    ///
+    /// 断言：`menu_keys=["1"]`（**无回车**——数字直达不需要提交键）+ 零 esc +
+    /// `receipt_seen=true` + 无确认段。菜单屏用**真机四项夹具**（用户 2026-09-23
+    /// 走查截图转写，含 MCP 警告噪声行）。
     #[test]
-    fn stage_flow_menu_only_tier_with_receipt() {
-        let menu = codex_menu_with_highlight(2); // 高亮 = Ask for approval（= 目标）
-        let receipt = lines(&["• Permissions updated to Ask for approval"]);
-        let script = vec![menu, receipt];
-        let (r, sent, polls) =
-            run_stage_script(script, "codex", ModeGroupId::Permission, MamMode::Default);
-        let out = r.expect("1/2/3 档：两段走完");
-        assert_eq!(out.menu_keys, vec!["enter"], "高亮已在目标档 → 直接提交");
-        assert_eq!(sent, vec!["enter"], "**没有第三段**（1/2/3 无确认框）");
+    fn stage_flow_digit_tier_with_receipt() {
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        let receipt = lines(&["• Permissions updated to Read Only"]);
+        let (r, sent, opens) =
+            run_codex_stage_script(vec![clean, menu, receipt], MamMode::ReadOnly);
+        let out = r.expect("1/2/3 档：数字直达走完");
+        assert_eq!(out.menu_keys, vec!["1"], "只读 = 屏上编号 1，直达");
+        assert_eq!(sent, vec!["1"], "**无回车**（数字直达无提交键），无第三段");
+        assert_eq!(opens, 1, "干净屏：无残留防护动作，开菜单恰好一次");
         assert!(!out.confirm_done, "未走确认框");
         assert_eq!(
             out.receipt_seen,
             Some(true),
-            "屏上有 `• Permissions updated to Ask for approval` → 回执核验通过"
-        );
-        assert_eq!(
-            polls,
-            vec![("权限菜单".to_string(), false)],
-            "只有菜单一段轮询（1/2/3 档无确认框轮询）"
+            "屏上有 `• Permissions updated to Read Only` → 回执核验通过"
         );
     }
 
-    /// **场景②：Full Access —— 菜单 → enter → 确认框 → 肯定项 → enter → 回执 → verified**
+    /// **场景②：Full Access —— 数字 4 → 确认框 → 肯定项编号 1 → 回执**
     ///
-    /// 脚本（时间序）：① 菜单（高亮第 2 项）→ ② ↓ 后（第 3 项）→ ③ ↓ 后（第 4 项
-    /// = Full Access）→ ④ enter 后确认框出现（高亮在肯定项）→ ⑤ enter 后回执行。
+    /// 用户实测（2026-09-23）：「4 的需要二阶段确认，此时按 1」。确认框屏用
+    /// **真机夹具**（`Enable full access?` + `1. Yes, continue anyway`）。
     #[test]
-    fn stage_flow_full_access_three_stages() {
-        let m2 = codex_menu_with_highlight(2);
-        let m3 = codex_menu_with_highlight(3);
-        let m4 = codex_menu_with_highlight(4);
-        let confirm = full_access_confirm_real(); // 高亮在肯定项
+    fn stage_flow_digit_full_access_with_confirm() {
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        let confirm = e_stage2_screen("codex-full-access-confirm.txt");
         let receipt = lines(&["• Permissions updated to Full Access"]);
-        let script = vec![m2, m3, m4, confirm, receipt];
-        let (r, sent, polls) =
-            run_stage_script(script, "codex", ModeGroupId::Permission, MamMode::Bypass);
-        let out = r.expect("Full Access 三段全链必须走通");
-        assert_eq!(
-            out.menu_keys,
-            vec!["down", "down", "enter"],
-            "第二段：↓↓ + enter"
-        );
-        assert!(out.confirm_done, "第三段确认框已出现并走完");
+        let (r, sent, _) =
+            run_codex_stage_script(vec![clean, menu, confirm, receipt], MamMode::Bypass);
+        let out = r.expect("Full Access 全链必须走通");
+        assert_eq!(out.menu_keys, vec!["4"], "完全信任 = 屏上编号 4");
+        assert!(out.confirm_done, "二阶段确认框已出现并走完");
         assert_eq!(
             sent,
-            vec!["down", "down", "enter", "enter"],
-            "共 4 键：菜单 ↓↓+enter、确认框高亮已在肯定项 → 再一个 enter"
+            vec!["4", "1"],
+            "数字 4 直达 + 确认框肯定项编号 1 直达"
         );
         assert_eq!(out.receipt_seen, Some(true));
-        assert_eq!(
-            polls,
-            vec![
-                ("权限菜单".to_string(), false),
-                ("Full Access 确认框".to_string(), true),
-            ],
-            "两段轮询：菜单（必须出现）+ 确认框（可出现）"
-        );
     }
 
-    /// **场景②之二：确认框里高亮在 `Cancel`（第 2 项）** → 闭环 `↑` 后提交
-    /// （断言：确认框那一步走的是 `up` 而不是盲发 `enter`——这是第三段的闭环证据）
+    /// **场景②之二：确认键 = 肯定项的屏上编号，与高亮位置无关**（数字直达与
+    /// 闭环的本质差别——实测按 `1` 就是 Yes，不看点位）。
     #[test]
-    fn stage_flow_confirm_navigates_from_actual_highlight() {
-        let m2 = codex_menu_with_highlight(2);
-        let m3 = codex_menu_with_highlight(3);
-        let m4 = codex_menu_with_highlight(4);
-        // 确认框形态：Cancel 被高亮（TUI 记住了上次位置 / 用户按过 ↓）
+    fn stage_flow_digit_confirm_ignores_highlight() {
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        // 确认框高亮在 Cancel（第 2 项）——数字直达仍发肯定项编号 1
         let confirm_hl_cancel = lines(&[
             " Enable full access?",
             "  1. Yes, continue anyway  Apply full access for this session",
             "› 2. Cancel                Go back without enabling full access",
         ]);
-        let confirm_hl_yes = full_access_confirm_real();
         let receipt = lines(&["• Permissions updated to Full Access"]);
-        let script = vec![m2, m3, m4, confirm_hl_cancel, confirm_hl_yes, receipt];
-        let (r, sent, _) =
-            run_stage_script(script, "codex", ModeGroupId::Permission, MamMode::Bypass);
-        let out = r.expect("第三段从实际高亮位导航");
-        assert_eq!(out.menu_keys, vec!["down", "down", "enter"]);
+        let (r, sent, _) = run_codex_stage_script(
+            vec![clean, menu, confirm_hl_cancel, receipt],
+            MamMode::Bypass,
+        );
+        let out = r.expect("高亮在否定项也不影响编号直达");
         assert_eq!(
             sent,
-            vec!["down", "down", "enter", "up", "enter"],
-            "确认框高亮在 Cancel → ↑ 到肯定项 → enter（**不盲点回车**）"
+            vec!["4", "1"],
+            "确认键=肯定项屏上编号 1（与高亮无关）"
         );
         assert_eq!(out.receipt_seen, Some(true));
     }
 
-    /// **场景③：肯定项不唯一 → 立即中止（Fatal），且确认框阶段零投递**
+    /// **场景③：肯定项不唯一 → 中止（Fatal），确认框阶段零投递**
     #[test]
-    fn stage_flow_confirm_ambiguous_aborts_before_any_send() {
-        let m2 = codex_menu_with_highlight(2);
-        let m3 = codex_menu_with_highlight(3);
-        let m4 = codex_menu_with_highlight(4);
-        // 同一簇内两个含 `continue` 的项（二进制有 `Continue and don't warn again.` 变体
-        // 文案）→ 分不清哪个是肯定项 → **不猜**，零投递
+    fn stage_flow_digit_confirm_ambiguous_aborts() {
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        // 同一簇内两个含 `continue` 的项（二进制有 `Continue and don't warn again.`
+        // 变体文案）→ 分不清哪个是肯定项 → **不猜**
         let ambiguous = lines(&[
             " Enable full access?",
             "› 1. Yes, continue anyway",
             "  2. Continue and don't warn again",
             "  3. Cancel",
         ]);
-        let script = vec![m2, m3, m4, ambiguous];
-        let (r, sent, _) =
-            run_stage_script(script, "codex", ModeGroupId::Permission, MamMode::Bypass);
+        let (r, sent, _) = run_codex_stage_script(vec![clean, menu, ambiguous], MamMode::Bypass);
         let err = r.as_ref().unwrap_err();
         assert!(err.contains("有 2 个"), "肯定项不唯一必须点名：{err}");
         assert_eq!(
             sent,
-            vec!["down", "down", "enter"],
-            "菜单那段已到目标档并提交；**确认框一步都没发**（确认框的零投递）"
+            vec!["4"],
+            "菜单数字已发（必要投递）；**确认框一步都没发**"
         );
     }
 
     /// **场景③之二：确认框在场但无肯定项** → 按「未出现」处理（**不当作失败**）→
     /// 继续回执核验；**确认框零投递**（宁可不切也不误点 `Cancel`）。
     #[test]
-    fn stage_flow_confirm_without_affirmative_is_not_failure() {
-        let m2 = codex_menu_with_highlight(2);
-        let m3 = codex_menu_with_highlight(3);
-        let m4 = codex_menu_with_highlight(4);
+    fn stage_flow_digit_confirm_without_affirmative_is_not_failure() {
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         // 两个选项都不含 `continue`（某变体把 Yes 改写成别的词）
         let no_affirmative = lines(&[" Enable full access?", "› 1. Yes", "  2. Cancel"]);
-        let script = vec![m2, m3, m4, no_affirmative];
-        let (r, sent, polls) =
-            run_stage_script(script, "codex", ModeGroupId::Permission, MamMode::Bypass);
+        let (r, sent, _) =
+            run_codex_stage_script(vec![clean, menu, no_affirmative], MamMode::Bypass);
         let out = r.expect("无肯定项 → 按「未出现」处理，**不中止全链**");
         assert!(!out.confirm_done, "确认框未走完");
-        assert_eq!(sent, vec!["down", "down", "enter"], "确认框零投递");
+        assert_eq!(sent, vec!["4"], "确认框零投递");
         assert_eq!(out.receipt_seen, Some(false), "也没见回执 → verified=false");
+    }
+
+    /// **场景④：残留菜单防护**——首屏已有上次遗留的菜单（标题锚在屏）→ 先 `esc`
+    /// 关闭再开菜单。2026-09-23 事故根因：残留菜单吞字符、回车误确认当前项
+    /// （用户实测现场 `Permissions updated to Ask for approval` + 输入行堆积）。
+    #[test]
+    fn stage_flow_digit_clears_residual_menu_first() {
+        let residual = e_stage2_screen("codex-perm-menu-4tier.txt"); // 遗留菜单在屏
+        let clean_after_esc = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        let receipt = lines(&["• Permissions updated to Read Only"]);
+        let (r, sent, opens) = run_codex_stage_script(
+            vec![residual, clean_after_esc, menu, receipt],
+            MamMode::ReadOnly,
+        );
+        let out = r.expect("残留防护后全链走通");
         assert_eq!(
-            polls,
-            vec![
-                ("权限菜单".to_string(), false),
-                ("Full Access 确认框".to_string(), true)
-            ],
-            "确认框那一段确实被轮询过（只是窗尽未出现）"
+            sent.first().map(|s| s.as_str()),
+            Some("esc"),
+            "**esc 先行**（关掉上次遗留的菜单再开新的）：{sent:?}"
+        );
+        assert_eq!(opens, 1, "开菜单恰好一次（防护后正常流程）");
+        assert_eq!(out.menu_keys, vec!["1"]);
+        assert_eq!(out.receipt_seen, Some(true));
+    }
+
+    /// **场景⑤：菜单窗尽（读不到目标编号）→ 中止，数字键零投递（不盲发）**
+    #[test]
+    fn stage_flow_digit_window_exhausted_aborts() {
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let blank = lines(&["  still loading..."]);
+        let (r, sent, opens) = run_codex_stage_script(vec![clean, blank], MamMode::Default);
+        let err = r.unwrap_err();
+        assert!(
+            err.contains("未出现或读不到档位表"),
+            "中止文案要讲清「命令已发、档位未切」：{err}"
+        );
+        assert!(sent.is_empty(), "数字键零投递（不盲发数字键）：{sent:?}");
+        assert_eq!(opens, 1, "开菜单已发（命令投递了，但档位键没发）");
+    }
+
+    // ==== 2026-09-23 codex 数字直达：判据级单测（真机夹具 + 变异锁）====
+
+    /// **数字直达探测（真机四项夹具）**：四档各自读到**屏上编号** 1-4
+    /// （含 `Approve for me` = 第 3 档——2026-09-23 起是可选目标档）。
+    #[test]
+    fn digit_probe_reads_screen_numbers_from_real_fixture() {
+        let screen = e_stage2_screen("codex-perm-menu-4tier.txt");
+        for (target, digit) in [
+            (MamMode::ReadOnly, "1"),
+            (MamMode::Default, "2"),
+            (MamMode::AcceptEdits, "3"),
+            (MamMode::Bypass, "4"),
+        ] {
+            assert_eq!(
+                codex_permission_digit_probe(&screen, target),
+                PollStep::Ready(digit.to_string()),
+                "{target:?} 应读到屏上编号 {digit}"
+            );
+        }
+    }
+
+    /// **数字直达探测（Guardian 关的三档形态）**：`Approve for me` 缺席 →
+    /// `Full Access` 的屏上编号前移为 3——编号从**目标行自身**读出，不做全集闸
+    /// （变异自真机四项夹具：删第 3 档行 + 按真实渲染重编号，非手造屏）。
+    #[test]
+    fn digit_probe_survives_missing_approve_for_me_tier() {
+        let mut screen = e_stage2_screen("codex-perm-menu-4tier.txt");
+        screen.retain(|l| !l.contains("Approve for me"));
+        for l in screen.iter_mut() {
+            if l.contains("Full Access") {
+                *l = l.replacen("4.", "3.", 1);
+            }
+        }
+        assert_eq!(
+            codex_permission_digit_probe(&screen, MamMode::Bypass),
+            PollStep::Ready("3".to_string()),
+            "Guardian 关时 Full Access 编号前移，编号直达照样读对"
         );
     }
 
-    /// **场景④：未见成功回执 → `receipt_seen=Some(false)` 但不算失败**
+    /// **数字直达探测的保守面**：目标标签在窗内出现多行（混入 `/status` 回显类
+    /// 编号行）→ Fatal 不猜；无菜单 → NotYet（可重试）。
     #[test]
-    fn stage_flow_receipt_absent_is_not_a_failure() {
-        let m2 = codex_menu_with_highlight(2);
-        let m3 = codex_menu_with_highlight(3);
-        let m4 = codex_menu_with_highlight(4);
-        let confirm = full_access_confirm_real();
-        // 末屏是普通输出（没有任何成功回执行）——回执轮询走到末屏仍未命中 → Ok(None)
-        let plain = lines(&["  some output", "  > "]);
-        let script = vec![m2, m3, m4, confirm, plain];
-        let (r, _, _) = run_stage_script(script, "codex", ModeGroupId::Permission, MamMode::Bypass);
-        let out = r.expect("回执未见**不是**投递失败：整条编排仍 Ok");
-        assert_eq!(
-            out.receipt_seen,
-            Some(false),
-            "未见回执 → Some(false)（端点据此下发 verified=false + 请人工核对）"
+    fn digit_probe_refuses_ambiguous_or_absent_menu() {
+        let mut screen = e_stage2_screen("codex-perm-menu-4tier.txt");
+        // 在真菜单第 1 项行后插入一行编号行形态的混入行（窗内、含目标档名词）
+        let pos = screen
+            .iter()
+            .position(|l| l.contains("1. Read Only"))
+            .expect("夹具含第 1 项行")
+            + 1;
+        screen.insert(pos, "  6. Read Only (sandbox: read-only)".to_string());
+        assert!(
+            matches!(
+                codex_permission_digit_probe(&screen, MamMode::ReadOnly),
+                PollStep::Fatal(_)
+            ),
+            "目标标签两行 → Fatal（不猜编号）"
         );
-        assert!(out.confirm_done, "第三段仍如实记为已走完");
+        assert!(
+            matches!(
+                codex_permission_digit_probe(&lines(&["hello world"]), MamMode::ReadOnly),
+                PollStep::NotYet(_)
+            ),
+            "无菜单 → NotYet（轮询可重试）"
+        );
+    }
+
+    /// **残留菜单判定**：标题锚在屏即判真（footer 可能被正文挤出可见窗）。
+    #[test]
+    fn residual_menu_detection() {
+        assert!(residual_menu_present(&e_stage2_screen(
+            "codex-perm-menu-4tier.txt"
+        )));
+        assert!(!residual_menu_present(&lines(&[
+            "  glm-5.3-flash medium · ~\\proj-codex  Plan mode"
+        ])));
+    }
+
+    /// **数字直达的输入行残留现场（真机夹具）**：用户走查截图里堆积的
+    /// `/permissions/permissions` 与 `Plan mode` 底栏——同屏条件下 footer 解析
+    /// 仍判 Plan（残留不干扰回读）、菜单判据不受历史回显影响。
+    #[test]
+    fn input_residue_fixture_keeps_footer_and_menu_verdicts() {
+        let screen = e_stage2_screen("codex-input-residue.txt");
+        assert_eq!(
+            parse_mode_from_screen("codex", &screen),
+            Some(MamMode::Plan),
+            "底栏 `… · …  Plan mode` → 计划（残留不干扰回读）"
+        );
+        assert!(
+            !residual_menu_present(&screen),
+            "历史回显的 `/permissions` 不算残留菜单（判据是标题锚，不是命令词）"
+        );
     }
 
     /// **kimi 两段式**（无第三段）：菜单闭环 → enter → 回执 `Permission mode: Always Ask`。

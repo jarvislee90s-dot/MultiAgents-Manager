@@ -4242,6 +4242,30 @@ fn read_mode_from_screen(
 ///
 /// 屏读**只做一次**（读一屏的代价是阻塞 FFI），四家的模式组共用这一份行集；
 /// 权限组无底栏源（实测）→ 恒 null。
+/// 权限档「**上次切换**」记忆（2026-09-23 codex 模式切换改造）：codex/kimi 权限组
+/// 无被动回读源（底栏不印档位文本）→ GET 的权限组 `current` 原本恒 null、前端恒显
+/// 「模式未知」。本表记录**每次 verified=true 的权限组切换**（session_id → 档 wire
+/// 词），GET 从此回放（无记录 = null，前端照旧显示「模式未知」）。
+///
+/// 已知边界（如实登记，台账「codex 模式切换改造」节）：进程内存（重启即清）；
+/// 用户在终端手改档位后记忆会失真——前端以「上次切换」标注明示口径，不声称实时。
+static PERMISSION_TIER_MEMORY: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// 记录一次 verified 的权限组切换结果
+pub(crate) fn remember_permission_tier(sid: &str, tier_wire: &str) {
+    if let Ok(mut m) = PERMISSION_TIER_MEMORY.lock() {
+        m.insert(sid.to_string(), tier_wire.to_string());
+    }
+}
+
+/// 回放某会话最近一次 verified 的权限档（无记录 / 解析失败 → None）
+pub(crate) fn recall_permission_tier(sid: &str) -> Option<crate::inject::mode::MamMode> {
+    let wire = PERMISSION_TIER_MEMORY.lock().ok()?.get(sid).cloned()?;
+    crate::inject::mode::MamMode::parse(&wire)
+}
+
 pub async fn session_mode(
     State(st): State<Arc<RemoteState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -4281,7 +4305,8 @@ pub async fn session_mode(
         crate::inject::mode::ModeSwitchKind::SlashCommand => "slashCommand",
         crate::inject::mode::ModeSwitchKind::Unsupported => "unsupported",
     };
-    // 组载荷：模式组带屏读到的当前档，权限组恒 null（无底栏源——如实）
+    // 组载荷：模式组带屏读到的当前档；权限组从「上次切换」记忆回放
+    // （无被动回读源——verified 切换写入 [`PERMISSION_TIER_MEMORY`]，无记录 = null）
     let groups: Vec<serde_json::Value> = hit
         .structure
         .groups()
@@ -4290,7 +4315,7 @@ pub async fn session_mode(
             let current = if g.id == crate::inject::mode::ModeGroupId::Mode {
                 hit.current
             } else {
-                None
+                recall_permission_tier(&sid)
             };
             serde_json::json!({
                 "id": g.id.wire(),
@@ -4741,25 +4766,42 @@ pub async fn session_mode_switch(
                     .map(|()| InjectAttempt::Plain)
             }
             crate::inject::mode::ModeSwitchPlan::Menu { open, target } => {
-                // 第一段：开菜单（命令 + 回车）
-                let opened = injector
-                    .locate_and_inject_spec(pid, open, &spec)
-                    .and_then(|()| {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                        injector.locate_and_send_key_spec(pid, "enter", &spec)
-                    });
-                match opened {
-                    Ok(()) => menu_stages(
+                if tool_for_inject == "codex" {
+                    // codex：**编排全权接管**（2026-09-23 数字直达）——段 0 残留防护、
+                    // 段 1 开菜单都在 [`run_codex_permission_stages`] 内（open_menu
+                    // 闭包注入本命令）。此处**不得**再预注入一遍（同命令两次投递 =
+                    // 菜单被 esc/回车错序搅乱——正是本批要消灭的事故形态）。
+                    menu_stages(
                         &tool_for_inject,
                         group_for_inject,
                         target,
+                        open,
                         pid,
                         &spec,
                         &injector,
-                    ),
-                    Err(e) => Err(e),
+                    )
+                } else {
+                    // kimi 等：第一段先开菜单（命令 + 回车），再进闭环编排
+                    let opened = injector
+                        .locate_and_inject_spec(pid, open, &spec)
+                        .and_then(|()| {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                crate::inject::families::SUBMIT_DELAY_MS,
+                            ));
+                            injector.locate_and_send_key_spec(pid, "enter", &spec)
+                        });
+                    match opened {
+                        Ok(()) => menu_stages(
+                            &tool_for_inject,
+                            group_for_inject,
+                            target,
+                            open,
+                            pid,
+                            &spec,
+                            &injector,
+                        ),
+                        Err(e) => Err(e),
+                    }
                 }
             }
         })
@@ -4898,6 +4940,11 @@ pub async fn session_mode_switch(
                     receipt_and_verdict(receipt_seen, verified, hint, label)
                 }
             };
+            // 权限档记忆：verified=true 的权限组切换写入「上次切换」表
+            // （GET 的权限组 current 回放数据源；见 [`PERMISSION_TIER_MEMORY`]）
+            if verified && group == crate::inject::mode::ModeGroupId::Permission {
+                remember_permission_tier(&sid, mode.wire());
+            }
             (
                 StatusCode::OK,
                 [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -4965,44 +5012,102 @@ enum InjectAttempt {
 
 /// 菜单路径的**第二段 + 第三段 + 成功回执核验**（**只在持 INFLIGHT 的注入闭包内调用**）。
 ///
+/// **按工具分派**（2026-09-23）：codex 走 [`run_codex_permission_stages`] 的**数字
+/// 直达**（本函数同时负责其**段 1 开菜单**——端点侧不再预注入）；其余（kimi）先由
+/// 端点开菜单、再进 [`run_menu_stages`] 的闭环导航。
+///
 /// 逐段（每段都可独立中止，中止原因带阶段名——用户看得懂「卡在哪一段、为什么」）：
-/// 1. **第二段（权限菜单）**：轮询等菜单画出（[`MENU_POLL_TOTAL_MS`]）→ **闭环导航**
+/// 1. **第二段（权限菜单）**：codex = 菜单锚窗内读目标档**屏上编号** → 发数字键
+///    （无回车）；kimi = 轮询等菜单画出（[`MENU_POLL_TOTAL_MS`]）→ **闭环导航**
 ///    （[`crate::inject::mode::navigate_until_highlighted`]：每发一个方向键重新屏读复核，
-///    只有高亮确实落在目标档行才发 `enter`）→ 确认框轮询；
+///    只有高亮确实落在目标档行才发 `enter`）；
 /// 2. **第三段（仅 codex × Full Access）**：轮询等 `Enable full access?` 确认框
-///    （[`CONFIRM_POLL_TOTAL_MS`]）→ 闭环导航到**唯一**肯定项 → `enter`；
+///    （[`CONFIRM_POLL_TOTAL_MS`]）→ 肯定项**屏上编号**直达（实测按 `1`）；
 /// 3. **成功回执核验**（所有档位）：轮询屏读工具的成功回执行
 ///    （[`RECEIPT_POLL_TOTAL_MS`]）→ `receipt_seen`。
 ///
 /// # 确认框超时**不当作失败**（与菜单超时的语义差别）
 ///
 /// 菜单超时 = 中止（功能不可用，如实回执）；确认框超时 = **可能是用户此前关过该警告**
-/// （codex 二进制有 `Continue and don't warn again.` 文案）→ 若真关过，`enter` 提交后
-/// 会**直接完成**，此时屏上只有成功回执行、没有确认框。故此处继续走第 3 步按回执
+/// （codex 二进制有 `Continue and don't warn again.` 文案）→ 若真关过，提交后会
+/// **直接完成**，此时屏上只有成功回执行、没有确认框。故此处继续走第 3 步按回执
 /// 核验结果如实回执（这正是「不假装成功」的正确形态：**有证据才说成功**）。
 ///
 /// # 中止条件（任一命中即 Err，**此后不再投递任何键**）
 ///
-/// 菜单轮询窗内读不到屏/读不到档位表；档位表不自洽；闭环导航的每一条保守面
-/// （见该函数文档）；确认框形态异常（肯定项不唯一/多个簇）；`enter` 投递本身失败。
+/// 菜单轮询窗内读不到屏/读不到档位表；目标档标签多行（混入正文）；闭环导航的每一条
+/// 保守面（kimi，见该函数文档）；确认框形态异常（肯定项不唯一/多个簇）；键投递本身失败。
 /// 返回的 Err 文案即端点的失败回执。
+#[allow(clippy::too_many_arguments)]
 fn menu_stages(
     tool: &str,
     group: crate::inject::mode::ModeGroupId,
     target: crate::inject::mode::MamMode,
+    open_cmd: &str,
     pid: u32,
     spec: &crate::inject::families::FamilySpec,
     injector: &std::sync::Arc<dyn crate::inject::engine::Injector>,
 ) -> Result<InjectAttempt, String> {
     #[cfg(not(windows))]
     {
-        // 非 Windows 无屏读 → 菜单路径无法定位（闭环导航必须知道当前高亮行）。
-        // **如实回执**：不盲发方向键（猜错会选到别的档——与导航的保守面同源）。
-        let _ = (tool, group, target, pid, spec, injector);
+        // 非 Windows 无屏读 → 菜单路径无法定位（数字直达与闭环导航都必须屏读）。
+        // **如实回执**：不盲发（猜错会选到别的档——与导航的保守面同源）。
+        let _ = (tool, group, target, open_cmd, pid, spec, injector);
         return Err("本平台无屏读，权限菜单无法定位（命令已发送，请在终端选择档位）".to_string());
     }
     #[cfg(windows)]
     {
+        // codex 走**数字直达**编排（2026-09-23 用户实测：菜单内按档位数字键直达；
+        // 方向键闭环退役——kimi 菜单无屏上编号，仍走闭环）
+        if tool == "codex" {
+            let key_delay = || {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ))
+            };
+            let mut terminal = crate::inject::mode::Closures {
+                read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        key_delay();
+                    }
+                    r
+                },
+                settle: key_delay,
+            };
+            let outcome = crate::inject::mode::run_codex_permission_stages(
+                target,
+                // 段 1：开菜单（机制表下发的 open 命令 + 回车）——残留防护在编排段 0
+                || {
+                    injector
+                        .locate_and_inject_spec(pid, open_cmd, spec)
+                        .and_then(|()| {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                crate::inject::families::SUBMIT_DELAY_MS,
+                            ));
+                            injector.locate_and_send_key_spec(pid, "enter", spec)
+                        })
+                },
+                || poll_menu_digit(pid, target),
+                || poll_confirm_cluster(pid),
+                || poll_receipt(pid, tool, target, RECEIPT_POLL_TOTAL_MS),
+                &mut terminal,
+            )?;
+            log::debug!(
+                "codex 权限菜单：数字直达完成（菜单键：{}；确认框 {}；回执 {:?}）",
+                outcome.menu_keys.join(","),
+                if outcome.confirm_done {
+                    "已走完"
+                } else {
+                    "未出现"
+                },
+                outcome.receipt_seen
+            );
+            return Ok(InjectAttempt::Menu {
+                receipt_seen: outcome.receipt_seen,
+            });
+        }
         let read = || crate::inject::windows_console::read_screen_window(pid).ok();
         let key_delay = || {
             std::thread::sleep(std::time::Duration::from_millis(
@@ -5051,6 +5156,75 @@ fn menu_stages(
             receipt_seen: outcome.receipt_seen,
         })
     }
+}
+
+/// codex 数字直达的**生产轮询**：轮询读屏直到 [`crate::inject::mode::
+/// codex_permission_digit_probe`] 读到目标档的屏上编号。
+///
+/// 窗尽未读到 → `Err`（菜单必须出现且目标档可读，否则功能不可用——与
+/// [`poll_menu_stage`] 的 `optional=false` 同语义，advice 同文案）。
+#[cfg(windows)]
+fn poll_menu_digit(pid: u32, target: crate::inject::mode::MamMode) -> Result<String, String> {
+    use crate::inject::mode::PollStep;
+    let rounds = crate::inject::timing::poll_rounds(MENU_POLL_TOTAL_MS).max(1);
+    let mut last: Option<String> = None;
+    for i in 0..rounds {
+        match crate::inject::windows_console::read_screen_window(pid) {
+            Ok(lines) => match crate::inject::mode::codex_permission_digit_probe(&lines, target) {
+                PollStep::Ready(digit) => return Ok(digit),
+                PollStep::Fatal(why) => {
+                    return Err(format!("{why}；请人工核对终端（命令已发送，档位未切）"))
+                }
+                PollStep::NotYet(why) => last = Some(why),
+            },
+            Err(e) => last = Some(format!("权限菜单屏读失败（{e}）")),
+        }
+        if i + 1 < rounds {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS));
+        }
+    }
+    Err(format!(
+        "{}；请人工核对终端（命令已发送，档位未切）",
+        last.unwrap_or_else(|| "权限菜单窗内未读屏".to_string())
+    ))
+}
+
+/// codex Full Access 二阶段确认框的**生产轮询**：产出确认框**簇**（供编排取肯定项
+/// 的屏上编号直达——与 [`poll_menu_stage`] 的 `optional=true` 同窗同「缺席不当作
+/// 失败」语义，但返回簇而不是屏幕行）。
+#[cfg(windows)]
+fn poll_confirm_cluster(
+    pid: u32,
+) -> Result<Option<Vec<crate::inject::dialog::DialogOption>>, String> {
+    use crate::inject::mode::PollStep;
+    let rounds = crate::inject::timing::poll_rounds(CONFIRM_POLL_TOTAL_MS).max(1);
+    let mut last: Option<String> = None;
+    for i in 0..rounds {
+        match crate::inject::windows_console::read_screen_window(pid) {
+            Ok(lines) => {
+                match crate::inject::mode::confirm_box_probe(
+                    &lines,
+                    "codex",
+                    crate::inject::mode::FULL_ACCESS_AFFIRMATIVE_KEYWORD,
+                ) {
+                    PollStep::Ready((cluster, _)) => return Ok(Some(cluster)),
+                    PollStep::Fatal(why) => {
+                        return Err(format!("{why}；请人工核对终端（Full Access 可能未生效）"))
+                    }
+                    PollStep::NotYet(why) => last = Some(why),
+                }
+            }
+            Err(e) => last = Some(format!("确认框屏读失败（{e}）")),
+        }
+        if i + 1 < rounds {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS));
+        }
+    }
+    log::debug!(
+        "Full Access 确认框：窗内未出现（{}）→ 按回执核验",
+        last.unwrap_or_default()
+    );
+    Ok(None)
 }
 
 /// 菜单路径的**生产轮询**：按阶段取预算，轮询读屏直到 `plan` 可行动。
