@@ -617,7 +617,11 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
     await flushPanel();
     // 点第 3 项 → 发 number=3（**不是前端算的「第 2 项」**——屏上印的是 3，就敲 3）
-    routes.menuBody = { status: "done", verified: true, hint: "终端回执：Permissions updated to Approve for me" };
+    routes.menuBody = {
+      status: "done",
+      verified: true,
+      hint: "终端回执：Permissions updated to Approve for me",
+    };
     fireEvent.click(screen.getByTestId("mode-menu-option-3"));
     await flushPanel();
     const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
@@ -638,7 +642,11 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     render(<ModeBar session={{ id: "mc-p3" }} />);
     fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
     await flushPanel();
-    routes.menuBody = { status: "done", verified: true, hint: "终端回执：Permissions updated to Read Only" };
+    routes.menuBody = {
+      status: "done",
+      verified: true,
+      hint: "终端回执：Permissions updated to Read Only",
+    };
     fireEvent.click(screen.getByTestId("mode-menu-option-1"));
     const receipt = await screen.findByTestId("mode-receipt");
     expect(receipt.textContent).toContain("Permissions updated to Read Only");

@@ -306,7 +306,7 @@ function ModeGroupRow({
         // 选项表 → 用户点选哪项就敲哪个数字键。前端**不硬编码「哪档对应哪个数字」**
         // （档位编号随 Guardian 配置前移，硬编码会错位）。
         <PermissionPicker sessionId={sessionId} disabled={busy} onDone={onPicked} />
-      ) : group.layout === "toggle" ? (        // 单钮 toggle（codex 模式组）：点击向终端发一次 shift+tab，终端在
+      ) : group.layout === "toggle" ? ( // 单钮 toggle（codex 模式组）：点击向终端发一次 shift+tab，终端在
         // 计划/操作间循环；目标档按当前档翻转（current 未知 → 禁用，防盲按误切）
         (() => {
           const toggleTarget: MamMode = group.current === "plan" ? "default" : "plan";
