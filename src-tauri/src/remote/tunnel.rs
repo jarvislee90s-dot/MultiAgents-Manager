@@ -376,13 +376,30 @@ pub fn parsed_board_url(line: &str, quick: bool) -> Option<String> {
     parsed.map(|u| board_url(&u))
 }
 
-/// quick stderr 地址解析（纯函数）：行内 https://*.trycloudflare.com 才算
+/// quick stderr 地址解析（纯函数）：行内 https://*.trycloudflare.com 才算。
+/// 两层防御（2026-09-20 Mac 实测：临时隧道重试期 stderr 打出含注册端点的 JSON 行，
+/// 旧实现把 `https://api.trycloudflare.com/tunnel":` 当地址写入快照并弹「公网地址
+/// 已获取」，用户拿到的 URL 无法访问——与 named 侧穿透事故同型的解析缺陷）：
+/// ① host 按 URL 字符集（字母数字/点/横杠）连续截取——天然免疫 JSON 引号/冒号/
+///    逗号黏连与路径（cloudflared 把 URL 作为 JSON key/value 嵌在标点之间）；
+/// ② 只认 `*.trycloudflare.com` 后缀并**排除注册端点 `api.trycloudflare.com`**
+///    （获取临时地址的 API 本身不是看板地址）。
 pub fn parse_quick_url(line: &str) -> Option<String> {
-    let (s, e) = (line.find("https://")?, line.find(".trycloudflare.com")?);
+    let s = line.find("https://")?;
+    let e = line.find(".trycloudflare.com")?;
     if e <= s {
         return None;
     }
-    Some(line[s..].split_whitespace().next()?.to_string())
+    const SCHEME: &str = "https://";
+    let host: String = line[s + SCHEME.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .collect();
+    if host.is_empty() || host == "api.trycloudflare.com" || !host.ends_with(".trycloudflare.com")
+    {
+        return None;
+    }
+    Some(format!("https://{host}"))
 }
 
 /// 守护退避（纯函数）：连续失败 n 次后的下次重启等待；None = 放弃
@@ -1148,6 +1165,32 @@ mod tests {
         // 普通日志行/其他域名不误报
         assert_eq!(parse_quick_url("INF Registered tunnel connection"), None);
         assert_eq!(parse_quick_url("see https://docs.cloudflare.com/"), None);
+    }
+
+    #[test]
+    fn quick_url_excludes_api_endpoint_and_strips_punctuation() {
+        // 2026-09-20 Mac 实测回归锁：临时隧道重试期 stderr 的 JSON 形态行——
+        // 注册端点 api.trycloudflare.com 不是看板地址，旧实现产出
+        // `https://api.trycloudflare.com/tunnel":/m` 脏地址并误弹「已获取」
+        assert_eq!(
+            parse_quick_url(r#"INF "https://api.trycloudflare.com/tunnel": failed"#),
+            None
+        );
+        assert_eq!(
+            parse_quick_url("INF POST https://api.trycloudflare.com/tunnel retrying"),
+            None
+        );
+        // JSON value 形态（URL 嵌在引号逗号之间）→ 剥标点后正常解析
+        assert_eq!(
+            parse_quick_url(r#"INF {"url":"https://some-random-words.trycloudflare.com","line":1}"#)
+                .as_deref(),
+            Some("https://some-random-words.trycloudflare.com")
+        );
+        // 带路径的行剥成 origin（quick 看板地址恒为裸域名，与 parse_named_url 同口径）
+        assert_eq!(
+            parse_quick_url("INF https://real-words.trycloudflare.com/api/v1/x"),
+            Some("https://real-words.trycloudflare.com".to_string())
+        );
     }
 
     // ==== 裸域名 404 修复：board_url 归一（纯字符串，平台无关） ====
