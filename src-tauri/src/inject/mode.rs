@@ -1377,7 +1377,11 @@ pub(crate) fn codex_menu_options(
         }
         items.push(DialogOption {
             number, // 屏上实读编号
-            label: raw_label.trim().to_string(),
+            // **只取档名部分**（剥掉右侧描述列）：codex 的菜单项是 `2. Ask for
+            // approval (current)  <描述>` 单行形态（描述在同行右侧，实机 dump 已见），
+            // 全行文本给用户看会被描述淹掉。截断点 = 词表匹配项之后的第一个
+            // 「两空格以上」间隙（TUI 用它分栏；档名本身不含双空格）。
+            label: menu_label_only(&raw_label, &canon),
             highlighted,
         });
     }
@@ -1386,9 +1390,29 @@ pub(crate) fn codex_menu_options(
     }
     Some(items)
 }
+
+/// 菜单项行 → **只取档名部分**（剥掉右侧描述列）。
+///
+/// codex 的菜单项是 `2. Ask for approval (current)  <右侧描述>` 单行形态（2026-09-23
+/// 实机 dump 确认：描述在同一行右侧，`(current)`/`(non-admin sandbox)` 是档名的内联
+/// 后缀）。把整行给用户看会被描述淹没——picker 面板要的是**档名**。
+///
+/// 截断规则：词表命中项之后，遇到**两个及以上空格**即截断（TUI 用双空格分栏；档名
+/// 本体不含双空格——`(current)`、`(non-admin sandbox)` 都是单空格分隔）。找不到分栏
+/// 间隙时返回原文（宁可多给不可少给——用户核对时看到完整行也不算错）。
+fn menu_label_only(raw_label: &str, canon: &[String]) -> String {
+    let lower = raw_label.to_lowercase();
+    let Some(hit) = canon.iter().find(|c| lower.starts_with(c.as_str())) else {
+        return raw_label.trim().to_string();
+    };
+    let after = &raw_label[hit.len().min(raw_label.len())..];
+    match after.find("  ") {
+        Some(pos) => raw_label[..hit.len() + pos].trim().to_string(),
+        None => raw_label.trim().to_string(),
+    }
+}
 ///
 /// 判据 = 标题/footer 锚窗（[`codex_menu_window`]，与 [`locate_codex_menu`] 同窗）
-/// 内按 [`crate::inject::dialog::parse_option_line`] 解析编号行、按 [`menu_labels`]
 /// 词表认档，**目标档标签恰命中一行** → 返回该行的**屏上编号**（如 `"3"`）。发该
 /// 数字键即直选该档（kimi 菜单无屏上编号，仍走方向键闭环——数字直达是 codex 专属）。
 ///
@@ -5263,6 +5287,20 @@ mod tests {
             "屏上原文（含内联后缀）必须原样保留给用户核对：{:?}",
             opts[1].label
         );
+        // 右侧描述列必须被剥掉（否则面板上每个选项都拖着一串英文说明）
+        assert!(
+            !opts[1].label.contains("Codex can read and edit"),
+            "档名之外的右侧描述列应剥掉：{:?}",
+            opts[1].label
+        );
+        assert!(
+            !opts[0].label.contains("Codex can read files"),
+            "档名之外的右侧描述列应剥掉：{:?}",
+            opts[0].label
+        );
+        assert_eq!(opts[0].label, "Read Only", "纯档名");
+        assert_eq!(opts[2].label, "Approve for me", "纯档名");
+        assert_eq!(opts[3].label, "Full Access", "纯档名");
         assert!(opts[1].highlighted, "第 2 档是当前高亮项（›）");
         // 说明段的两行不得混入
         assert!(
@@ -5750,7 +5788,23 @@ mod tests {
             .values()
             .filter(|p| {
                 let name = p.name().to_string_lossy().to_lowercase();
-                name.contains("codex") && !name.contains("multi-agents-manager")
+                if name.contains("multi-agents-manager") {
+                    return false;
+                }
+                if name.contains("codex") {
+                    return true;
+                }
+                // codex 经 npm 安装时主体是 `node.exe .../codex/bin/codex.js`——
+                // 只按进程名找会漏（2026-09-23 实测：探针扫不到自建会话）。命令行
+                // 里含 codex 包路径也算（与 adapter 的进程发现同口径）。
+                let cmd = p
+                    .cmd()
+                    .iter()
+                    .map(|c| c.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase();
+                name.contains("node") && cmd.contains("codex")
             })
             .map(|p| p.pid().as_u32())
             .collect();
@@ -5797,6 +5851,66 @@ mod tests {
                 eprintln!("FIXTURE|{l}");
             }
             eprintln!("---- FIXTURE| 止 ----");
+        }
+    }
+
+    /// **实机验证探针（#[ignore]）**：用**修复后的内核**读真实终端上的 codex 权限
+    /// 菜单——本次事故的端到端复验（不是单测、不是夹具，是真的读一个开着的菜单）。
+    ///
+    /// 跑法：先开好 codex 权限菜单（注入 `/permissions` + 回车，或手动按）→
+    /// `MAM_PROBE_PID=<pid> cargo test --lib codex_menu_live_kernel_probe -- --ignored --nocapture`
+    ///
+    /// 输出 = overlay 种类 + 读回的选项表（屏上编号/高亮/原文）+ composer 判据结论。
+    /// **只碰 MAM_PROBE_PID 指定的进程**（红线：实机只碰自建会话）。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机验证：codex 权限菜单读回（前置=菜单已打开 + MAM_PROBE_PID=<pid>）"]
+    fn codex_menu_live_kernel_probe() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰自建会话进程）");
+            return;
+        };
+        let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+            eprintln!("pid={pid} 屏读失败");
+            return;
+        };
+        let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+        eprintln!("---- pid={pid} 屏读 {} 行 ----", lines.len());
+        eprintln!("overlay 种类：{:?}", codex_overlay_kind(&lowered));
+        assert!(
+            codex_overlay_present(&lowered),
+            "屏上应有权限菜单（先开好菜单再跑本探针）"
+        );
+        let opts = codex_menu_options(&lines, &lowered).expect("修复后的内核必须能读回菜单选项");
+        eprintln!("==== 读回的菜单选项（修复后内核，实机）====");
+        for o in &opts {
+            eprintln!(
+                "  屏上编号 {} | 高亮={} | 文本={:?}",
+                o.number, o.highlighted, o.label
+            );
+        }
+        eprintln!("==== composer 判据（不得被菜单污染）====");
+        eprintln!("codex_composer_text = {:?}", codex_composer_text(&lines));
+        eprintln!("composer_residue    = {:?}", composer_residue(&lines));
+        assert!(
+            composer_residue(&lines).is_none(),
+            "菜单在屏时不得判输入行有残留（否则段 0.5 会 backspace 清菜单）"
+        );
+        assert!(opts.len() >= 3, "真机菜单至少三档：{opts:?}");
+        // 数字直达路径在新 footer 下同样可用（四档各自的屏上编号可读）
+        for target in [
+            MamMode::ReadOnly,
+            MamMode::Default,
+            MamMode::AcceptEdits,
+            MamMode::Bypass,
+        ] {
+            match codex_permission_digit_probe(&lines, target) {
+                PollStep::Ready(d) => eprintln!("  {target:?} → 屏上编号 {d} ✅"),
+                other => panic!("{target:?} 数字直达应 Ready，实际 {other:?}"),
+            }
         }
     }
 
