@@ -1362,19 +1362,34 @@ pub(crate) fn codex_permission_digit_probe(lines: &[String], target: MamMode) ->
     }
 }
 
-/// **残留菜单判定**（纯函数）：发 `/permissions` 前的一拍屏读里，是否已有上次
-/// 遗留的权限菜单在屏（标题锚在屏即判——footer 锚可能被正文挤出可见窗，标题
-/// 锚是菜单存在的最低证据）。
+/// **codex Full Access 二阶段确认框标题锚**（实机原文 `Enable full access?`，用户
+/// 2026-09-23 走查截图逐字；小写比较）。两个消费点：残留清场判据（见
+/// [`residual_overlay_present`]）与确认框在场的最低证据。
+pub(crate) const CODEX_FULL_ACCESS_CONFIRM_ANCHOR: &str = "enable full access?";
+
+/// 残留清场 esc 后**等待锚消失**的最大读屏拍数（每拍间隔 = `settle()`，生产为
+/// SUBMIT_DELAY_MS=150ms ⇒ 兜底等待至多 ~750ms）。这就是「数字键等界面渲染出来
+/// 再选」的兜底之一：清场不干净绝不开新菜单。
+pub(crate) const RESIDUE_CLEAR_MAX_READS: usize = 5;
+
+/// **残留 overlay 判定**（纯函数）：发 `/permissions` 前的一拍屏读里，是否已有
+/// 上次遗留的**权限菜单或 Full Access 确认框**在屏（标题锚在屏即判——footer 锚
+/// 可能被正文挤出可见窗，标题锚是存在的最低证据）。
 ///
-/// 2026-09-23 用户实机走查的**事故根因**：切换失败后菜单**留在屏上**，下一次
-/// 点击注入的 `/permissions` 字符被 modal 菜单吞掉、回车**落在菜单上 = 确认当前
-/// 高亮项**（用户看到 `Permissions updated to Ask for approval` 与输入行堆积
-/// `/permissions/permissions`）。投递前检出残留 → 先发一次 `esc` 关闭再走正常
-/// 流程（菜单 footer 锚原文 `esc to go back` 实证 esc 关菜单）。
-pub(crate) fn residual_menu_present(lines: &[String]) -> bool {
-    lines
-        .iter()
-        .any(|l| l.to_lowercase().contains(CODEX_MENU_TITLE_ANCHOR))
+/// 2026-09-23 用户实机走查的**事故根因**（两段）：
+/// 1. 切换失败后菜单**留在屏上**，下一次点击注入的 `/permissions` 字符被 modal
+///    菜单吞掉、回车**落在菜单上 = 确认当前高亮项**（用户看到 `Permissions
+///    updated to Ask for approval` 与输入行堆积 `/permissions/permissions`）；
+/// 2. （首轮修复漏掉的形态）**Full Access 确认框残留**不在菜单锚判据内——确认框
+///    开着时 `/permissions` 被吞、enter **确认当前项**（`1. Yes, continue anyway`
+///    = **意外启用完全信任**，用户点「只读」却得到 Full Access 的危害级误切）。
+///
+/// 故判据必须**同时覆盖两种 overlay**；检出 → 先 `esc` 清场再走正常流程。
+pub(crate) fn residual_overlay_present(lines: &[String]) -> bool {
+    lines.iter().any(|l| {
+        let lower = l.to_lowercase();
+        lower.contains(CODEX_MENU_TITLE_ANCHOR) || lower.contains(CODEX_FULL_ACCESS_CONFIRM_ANCHOR)
+    })
 }
 
 /// kimi 菜单定位：footer 之后的**两行组**标签行（「恰为 `<档名> ← current` 或裸
@@ -1941,7 +1956,7 @@ where
 ///
 /// # 各段（每段都可独立中止）
 ///
-/// 0. **残留防护**（事故根因，见 [`residual_menu_present`]）：读一拍屏，已有上次
+/// 0. **残留防护**（事故根因，见 [`residual_overlay_present`]）：读一拍屏，已有上次
 ///    遗留的权限菜单 → 先 `esc` 关闭再开新菜单。读不到屏 → 跳过防护（后续段会
 ///    如实失败，不因防护失败而额外报错）；
 /// 1. **开菜单**：`open_menu()`（生产 = `/permissions` 文本 + 回车）；
@@ -1971,12 +1986,34 @@ where
     R: FnMut() -> Result<Option<Vec<String>>, String>,
     T: MenuTerminal,
 {
-    // ===== 段 0：残留菜单防护 =====
+    // ===== 段 0：残留 overlay 清场（菜单或 Full Access 确认框）=====
+    //
+    // 2026-09-23 用户实机走查复盘：残留**确认框**同样必须清（确认框开着时
+    // `/permissions` 被吞、enter 会确认 `1. Yes, continue anyway` = 意外启用
+    // 完全信任）；且 esc 后**必须条件等待锚消失**——esc 到 TUI 重绘完成有时间差，
+    // 立刻开菜单仍可能撞上未消散的旧 overlay（「数字敲在旧对话框里」的根因）。
+    // 固定睡不可靠（condition-based-waiting）：轮询读屏直到锚消失，窗尽如实中止。
     if let Some(lines) = terminal.read() {
-        if residual_menu_present(&lines) {
-            log::debug!("codex 权限切换：屏上已有残留菜单 → 先 esc 关闭再开新菜单");
+        if residual_overlay_present(&lines) {
+            log::debug!("codex 权限切换：屏上已有残留 overlay（菜单/确认框）→ esc 清场");
             terminal.send("esc")?;
             terminal.settle();
+            let mut cleared = false;
+            for _ in 0..RESIDUE_CLEAR_MAX_READS {
+                match terminal.read() {
+                    Some(lines) if !residual_overlay_present(&lines) => {
+                        cleared = true;
+                        break;
+                    }
+                    _ => terminal.settle(),
+                }
+            }
+            if !cleared {
+                return Err(
+                    "codex 屏上残留的权限菜单/确认框按 esc 后仍未消失——不盲发任何键；请人工核对终端（手动按 esc 关闭后重试）"
+                        .to_string(),
+                );
+            }
         }
     }
     // ===== 段 1：开菜单 =====
@@ -4784,13 +4821,19 @@ mod tests {
         );
     }
 
-    /// **残留菜单判定**：标题锚在屏即判真（footer 可能被正文挤出可见窗）。
+    /// **残留 overlay 判定**：权限菜单**或** Full Access 确认框的标题锚在屏即判真
+    /// （2026-09-23 二轮修复：确认框残留不在旧菜单锚判据内 → enter 误确认
+    /// `1. Yes, continue anyway` = 意外启用完全信任的危害级误切）。
     #[test]
-    fn residual_menu_detection() {
-        assert!(residual_menu_present(&e_stage2_screen(
+    fn residual_overlay_detection() {
+        assert!(residual_overlay_present(&e_stage2_screen(
             "codex-perm-menu-4tier.txt"
         )));
-        assert!(!residual_menu_present(&lines(&[
+        assert!(
+            residual_overlay_present(&e_stage2_screen("codex-full-access-confirm.txt")),
+            "确认框残留必须被清场判据覆盖"
+        );
+        assert!(!residual_overlay_present(&lines(&[
             "  glm-5.3-flash medium · ~\\proj-codex  Plan mode"
         ])));
     }
@@ -4807,9 +4850,45 @@ mod tests {
             "底栏 `… · …  Plan mode` → 计划（残留不干扰回读）"
         );
         assert!(
-            !residual_menu_present(&screen),
-            "历史回显的 `/permissions` 不算残留菜单（判据是标题锚，不是命令词）"
+            !residual_overlay_present(&screen),
+            "历史回显的 `/permissions` 不算残留 overlay（判据是标题锚，不是命令词）"
         );
+    }
+
+    /// **确认框残留的清场（2026-09-23 二轮修复）**：屏上开着 `Enable full access?`
+    /// （上一轮 Full Access 切换留下的确认框）→ esc 清场 → 等锚消失 → 才开菜单。
+    /// 用户实测事故：确认框在场时判据漏判 → `/permissions` 被吞、enter 误确认。
+    #[test]
+    fn stage_flow_digit_clears_residual_confirm_box() {
+        let residual = e_stage2_screen("codex-full-access-confirm.txt"); // 确认框在屏
+        let clean_after_esc = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
+        let receipt = lines(&["• Permissions updated to Read Only"]);
+        let (r, sent, opens) = run_codex_stage_script(
+            vec![residual, clean_after_esc, menu, receipt],
+            MamMode::ReadOnly,
+        );
+        let out = r.expect("确认框残留清场后全链走通");
+        assert_eq!(
+            sent.first().map(|s| s.as_str()),
+            Some("esc"),
+            "**esc 先行**（清掉残留确认框）：{sent:?}"
+        );
+        assert_eq!(opens, 1, "清场完成才开菜单，恰好一次");
+        assert_eq!(out.menu_keys, vec!["1"]);
+        assert_eq!(out.receipt_seen, Some(true));
+    }
+
+    /// **清场失败（esc 无效）→ 如实中止，零后续投递**：单屏脚本（esc 后屏不变）
+    /// ——锚消不了说明有东西挡着/形态异常，不盲发任何键。
+    #[test]
+    fn stage_flow_digit_residue_wont_clear_aborts() {
+        let residual = e_stage2_screen("codex-perm-menu-4tier.txt");
+        let (r, sent, opens) = run_codex_stage_script(vec![residual], MamMode::Default);
+        let err = r.unwrap_err();
+        assert!(err.contains("仍未消失"), "清场失败要如实中止：{err}");
+        assert_eq!(sent, vec!["esc"], "只发过清场 esc：{sent:?}");
+        assert_eq!(opens, 0, "清场未完成不得开菜单（零 /permissions 投递）");
     }
 
     /// **kimi 两段式**（无第三段）：菜单闭环 → enter → 回执 `Permission mode: Always Ask`。

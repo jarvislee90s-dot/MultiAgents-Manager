@@ -143,12 +143,39 @@ fn codex_user_input_event(entry: &CodexEntry) -> Option<CodexUserInputEvent> {
     }
 }
 
+/// codex **Esc 打断墓碑**标记（2026-09-23 用户实机走查缺陷修复）：回合被 Esc
+/// 打断后，codex 往 rollout 写一条 `role=user`、文本以 `<turn_aborted>` 开头的
+/// message（截断的前回合摘要）——它是**回合已死的墓碑**，模型不会回应它。
+pub(crate) const CODEX_TURN_ABORTED_MARKER: &str = "<turn_aborted>";
+
+/// codex message 的**文本内容**（content 为 string 或 `[{text:…}]` 数组两形态；
+/// 与读路径 `last_message` 的提取同一判据——单一实现，勿在外重复）。
+fn codex_message_text(payload: &serde_json::Value) -> Option<String> {
+    let content = payload.get("content")?;
+    match content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Array(arr) => arr.iter().find_map(|v| {
+            v.get("text")
+                .and_then(|t| t.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        }),
+        _ => None,
+    }
+}
+
 /// Codex 条目 → 归一化 APP 条目（issue #6 格式翻译适配器）：
 /// 解包 response_item / event_msg 外壳，映射到共享判定核（monitor::app_status）的
 /// AppEntryKind。修复点：function_call / function_call_output 等不带 role 的条目
 /// 旧实现全被跳过（第二轮从第一条 assistant message 落盘起「最后带 role 的条目」
 /// 恒为 assistant 纯文本 → 恒判 Idle），现在工具调用条目参与判定；
 /// reasoning / token_count / item_completed 等记账条目 → Other（跳过，不参与判定）
+///
+/// **Esc 打断墓碑 → Other（2026-09-23 用户实测缺陷）**：`<turn_aborted>` user
+/// message 若判 [`AppEntryKind::UserMessage`]，尾部倒扫会把它当「用户刚发消息等
+/// 模型回」→ 会话恒判 **Thinking**（黄灯）→ `inject::queue::is_running` 为真 →
+/// codex 模式切换被「运行中不接受模式切换」误拦（实际回合已死、无人会回应）。
+/// 墓碑归 Other 后尾扫跳过它，取更早的语义条目（task_complete/assistant → 空闲）。
 ///
 /// 丁T1：用户输入类工具的 **待决** 调用（无配对 output）不在此处定型——本函数是
 /// 无状态翻译，配对需要整文件视野，由 `read_codex_digest` 在收齐事件后把对应位置
@@ -160,7 +187,15 @@ fn codex_entry_kind(entry: &CodexEntry) -> AppEntryKind {
     match entry.entry_type.as_deref() {
         Some("response_item") => match payload.get("type").and_then(|v| v.as_str()) {
             Some("message") => match payload.get("role").and_then(|v| v.as_str()) {
-                Some("user") => AppEntryKind::UserMessage,
+                Some("user") => {
+                    if codex_message_text(payload)
+                        .is_some_and(|t| t.starts_with(CODEX_TURN_ABORTED_MARKER))
+                    {
+                        AppEntryKind::Other
+                    } else {
+                        AppEntryKind::UserMessage
+                    }
+                }
                 Some("assistant") => AppEntryKind::AssistantMessage,
                 _ => AppEntryKind::Other, // developer 等系统角色不参与判定
             },
@@ -496,23 +531,11 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
                     // 找最后一条文本消息（含 role 记录，展示用 last_message_role；
                     // 与旧实现一致：仅在有内容的消息上记录角色）
                     if last_message.is_none() {
-                        let payload = entry.payload.as_ref();
-                        let content = payload.and_then(|p| p.get("content"));
-                        if let Some(c) = content {
-                            let text = match c {
-                                serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
-                                serde_json::Value::Array(arr) => arr.iter().find_map(|v| {
-                                    v.get("text")
-                                        .and_then(|t| t.as_str())
-                                        .filter(|s| !s.is_empty())
-                                        .map(String::from)
-                                }),
-                                _ => None,
-                            };
-                            if text.is_some() {
-                                last_message = text;
+                        if let Some(payload) = entry.payload.as_ref() {
+                            if let Some(text) = codex_message_text(payload) {
+                                last_message = Some(text);
                                 last_role = payload
-                                    .and_then(|p| p.get("role"))
+                                    .get("role")
                                     .and_then(|v| v.as_str())
                                     .map(String::from);
                             }
@@ -993,6 +1016,55 @@ mod app_status_fixture_tests {
         let f = write_rollout(tmp.path(), &round_one());
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    /// **Esc 打断墓碑不得判 Thinking**（2026-09-23 用户实测缺陷）：回合被 Esc
+    /// 打断后 codex 写入 `role=user`、文本以 `<turn_aborted>` 开头的墓碑消息——
+    /// 模型不会回应它。旧实现判 UserMessage → 尾扫 Thinking（黄灯卡死）→
+    /// `is_running` 为真 → 模式切换被「codex 运行中不接受模式切换」误拦
+    /// （用户实机：会话空闲却被拦，消息流里两条 `<turn_aborted>`）。
+    /// 墓碑归 Other → 尾扫取更早语义条目（task_complete → Idle）。
+    #[test]
+    fn turn_aborted_tombstone_is_not_thinking() {
+        let mut lines = round_one();
+        lines.push(user_msg(
+            "2026-09-06T05:42:00.000Z",
+            20,
+            "<turn_aborted> The user interrupted the previous turn on purpose.",
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_ne!(
+            session.status,
+            SessionStatus::Thinking,
+            "墓碑消息不得把会话卡在 Thinking（黄灯）"
+        );
+        assert_eq!(
+            session.status,
+            SessionStatus::Idle,
+            "墓碑跳过后 task_complete 语义胜出 → 空闲（模式切换不再被误拦）"
+        );
+    }
+
+    /// 墓碑**之后**的真实用户消息仍正常判 Thinking（特判不误伤正常输入）
+    #[test]
+    fn real_user_message_after_tombstone_still_thinking() {
+        let mut lines = round_one();
+        lines.push(user_msg(
+            "2026-09-06T05:42:00.000Z",
+            20,
+            "<turn_aborted> The user interrupted the previous turn on purpose.",
+        ));
+        lines.push(user_msg("2026-09-06T05:43:00.000Z", 21, "接着帮我同步"));
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Thinking,
+            "真实 user 消息在尾 = 用户在等模型 → Thinking 正常"
+        );
     }
 
     #[test]
