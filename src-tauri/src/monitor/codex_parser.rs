@@ -171,11 +171,14 @@ fn codex_message_text(payload: &serde_json::Value) -> Option<String> {
 /// 恒为 assistant 纯文本 → 恒判 Idle），现在工具调用条目参与判定；
 /// reasoning / token_count / item_completed 等记账条目 → Other（跳过，不参与判定）
 ///
-/// **Esc 打断墓碑 → Other（2026-09-23 用户实测缺陷）**：`<turn_aborted>` user
-/// message 若判 [`AppEntryKind::UserMessage`]，尾部倒扫会把它当「用户刚发消息等
-/// 模型回」→ 会话恒判 **Thinking**（黄灯）→ `inject::queue::is_running` 为真 →
-/// codex 模式切换被「运行中不接受模式切换」误拦（实际回合已死、无人会回应）。
-/// 墓碑归 Other 后尾扫跳过它，取更早的语义条目（task_complete/assistant → 空闲）。
+/// **Esc 打断墓碑 → TurnEnd（2026-09-23 用户实测缺陷，二轮修正）**：`<turn_aborted>`
+/// user message 是**回合终结信号**——它终结的是「它之前那条尚未被回应的 user 消息」
+/// （用户实测现场：`4/permissions` → `<turn_aborted>` → `1/permissions` →
+/// `<turn_aborted>`，两条注入内容都被打断、模型从未回应）。若墓碑仅判 Other（一轮
+/// 修复）或 UserMessage（原始缺陷），尾部倒扫最终都会落在**墓碑之前那条被遗弃的
+/// user 消息**上 → 恒判 Thinking（黄灯）→ `is_running` 为真 → codex 模式切换被
+/// 「运行中不接受模式切换」误拦。判 **TurnEnd**（回合结束）后倒扫遇墓碑即判空闲，
+/// 不再回看被打断回合里的任何遗留；墓碑**之后**的真实 user 消息仍正常 Thinking。
 ///
 /// 丁T1：用户输入类工具的 **待决** 调用（无配对 output）不在此处定型——本函数是
 /// 无状态翻译，配对需要整文件视野，由 `read_codex_digest` 在收齐事件后把对应位置
@@ -191,7 +194,8 @@ fn codex_entry_kind(entry: &CodexEntry) -> AppEntryKind {
                     if codex_message_text(payload)
                         .is_some_and(|t| t.starts_with(CODEX_TURN_ABORTED_MARKER))
                     {
-                        AppEntryKind::Other
+                        // 回合终结信号（语义见函数文档）——不是「用户在等模型」
+                        AppEntryKind::TurnEnd
                     } else {
                         AppEntryKind::UserMessage
                     }
@@ -1045,6 +1049,32 @@ mod app_status_fixture_tests {
             SessionStatus::Idle,
             "墓碑跳过后 task_complete 语义胜出 → 空闲（模式切换不再被误拦）"
         );
+    }
+
+    /// 墓碑**终结它之前的被遗弃 user 消息**（用户实机现场 2026-09-23 二轮）：
+    /// `user("4/permissions") → <turn_aborted>`——注入内容与残留拼接后提交、随即
+    /// 被打断，模型**永远不会回应**它。一轮修复（墓碑=Other）倒扫会穿过墓碑命中
+    /// 这条被遗弃 user → 仍判 Thinking → 模式切换仍被误拦。墓碑=TurnEnd 后倒扫
+    /// 即终结 → Idle。**这是用户实测拦截的最终形态**。
+    #[test]
+    fn abandoned_user_message_before_tombstone_is_idle() {
+        let mut lines = round_one();
+        lines.push(user_msg("2026-09-06T05:42:00.000Z", 20, "4/permissions"));
+        lines.push(user_msg(
+            "2026-09-06T05:42:01.000Z",
+            21,
+            "<turn_aborted> The user interrupted the previous turn on purpose.",
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_ne!(
+            session.status,
+            SessionStatus::Thinking,
+            "被打断回合的遗留 user 消息不得判 Thinking：{:?}",
+            session.status
+        );
+        assert_eq!(session.status, SessionStatus::Idle, "墓碑终结回合 → 空闲");
     }
 
     /// 墓碑**之后**的真实用户消息仍正常判 Thinking（特判不误伤正常输入）

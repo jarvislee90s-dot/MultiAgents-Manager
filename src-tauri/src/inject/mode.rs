@@ -2029,12 +2029,13 @@ where
 ///
 /// 抽进内核的理由与 [`run_menu_stages`] 同源：段间控制流（残留防护、确认框缺席
 /// 不算失败）是判据的一部分，写在端点 `#[cfg(windows)]` 闭包里就只有实机能覆盖。
-pub fn run_codex_permission_stages<O, P, Q, R, T>(
+pub fn run_codex_permission_stages<O, P, Q, R, W, T>(
     target: MamMode,
     mut open_menu: O,
     mut poll_digit: P,
     mut poll_confirm: Q,
     mut poll_receipt: R,
+    mut wait_floor: W,
     terminal: &mut T,
 ) -> Result<MenuStagesOutcome, String>
 where
@@ -2042,6 +2043,7 @@ where
     P: FnMut() -> Result<String, String>,
     Q: FnMut() -> Result<Option<Vec<DialogOption>>, String>,
     R: FnMut() -> Result<Option<Vec<String>>, String>,
+    W: FnMut(),
     T: MenuTerminal,
 {
     // ===== 段 0：残留 overlay 清场（菜单或 Full Access 确认框）=====
@@ -2103,6 +2105,10 @@ where
     }
     // ===== 段 1：开菜单 =====
     open_menu()?;
+    // **硬性最短间隔**（用户指令 2026-09-23：相邻步骤 ≥0.5s，与轮询「并存取最大」
+    // ——先硬等满 0.5s 再进入下一步的轮询窗；轮询 Ready 再快也不早于 0.5s）。
+    // 见 [`crate::inject::timing::MODE_STEP_MIN_GAP_MS`]。
+    wait_floor();
     // ===== 段 2：数字直达 =====
     let digit = poll_digit()?;
     terminal.send(&digit)?;
@@ -2111,6 +2117,8 @@ where
     // ===== 段 3：Full Access 二阶段确认 =====
     let mut confirm_done = false;
     if needs_full_access_confirm("codex", ModeGroupId::Permission, target) {
+        // 步骤②→③ 同样硬性 ≥0.5s（用户指令）
+        wait_floor();
         if let Some(cluster) = poll_confirm()? {
             let affirmative = cluster.iter().find(|o| {
                 o.label
@@ -4611,11 +4619,11 @@ mod tests {
     /// 脚本语义与 [`run_stage_script`] 同款（cursor 指向当前屏、send/开菜单推进），
     /// 差异：`open_menu` 记录开菜单动作并推进 cursor（菜单不是「键」）；digit 与
     /// 确认框轮询分别走 [`codex_permission_digit_probe`] 与 [`confirm_box_probe`]。
-    /// 返回 `(编排结果, 实际发出的键, 开菜单动作次数)`。
+    /// 返回 `(编排结果, 实际发出的键, 开菜单动作次数, 硬性间隔等待次数)`。
     fn run_codex_stage_script(
         screens: Vec<Vec<String>>,
         target: MamMode,
-    ) -> (Result<MenuStagesOutcome, String>, Vec<String>, usize) {
+    ) -> (Result<MenuStagesOutcome, String>, Vec<String>, usize, usize) {
         use crate::inject::mode::PollStep;
         use std::cell::{Cell, RefCell};
         let cursor = Cell::new(0usize);
@@ -4630,6 +4638,7 @@ mod tests {
         }
         let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let opens: Cell<usize> = Cell::new(0);
+        let waits: Cell<usize> = Cell::new(0);
         let n = screens.len();
         let outcome = run_codex_permission_stages(
             target,
@@ -4674,6 +4683,9 @@ mod tests {
                     }
                 }
             },
+            || {
+                waits.set(waits.get() + 1); // 硬性间隔（生产=睡 MODE_STEP_MIN_GAP_MS）
+            },
             &mut Closures {
                 read: || Some(cur()),
                 send: |k: &str| {
@@ -4685,7 +4697,7 @@ mod tests {
                 },
             },
         );
-        (outcome, sent.into_inner(), opens.get())
+        (outcome, sent.into_inner(), opens.get(), waits.get())
     }
 
     /// **场景①：1/2/3 档 —— 残留检查（无）→ 开菜单 → 数字直达 → 回执 → verified**
@@ -4701,12 +4713,16 @@ mod tests {
         let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
         let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         let receipt = lines(&["• Permissions updated to Read Only"]);
-        let (r, sent, opens) =
+        let (r, sent, opens, waits) =
             run_codex_stage_script(vec![clean, menu, receipt], MamMode::ReadOnly);
         let out = r.expect("1/2/3 档：数字直达走完");
         assert_eq!(out.menu_keys, vec!["1"], "只读 = 屏上编号 1，直达");
         assert_eq!(sent, vec!["1"], "**无回车**（数字直达无提交键），无第三段");
         assert_eq!(opens, 1, "干净屏：无残留防护动作，开菜单恰好一次");
+        assert_eq!(
+            waits, 1,
+            "步骤①开菜单 → 步骤②数字之间恰好一次硬性 ≥0.5s 间隔（用户指令）"
+        );
         assert!(!out.confirm_done, "未走确认框");
         assert_eq!(
             out.receipt_seen,
@@ -4725,7 +4741,7 @@ mod tests {
         let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         let confirm = e_stage2_screen("codex-full-access-confirm.txt");
         let receipt = lines(&["• Permissions updated to Full Access"]);
-        let (r, sent, _) =
+        let (r, sent, _, waits) =
             run_codex_stage_script(vec![clean, menu, confirm, receipt], MamMode::Bypass);
         let out = r.expect("Full Access 全链必须走通");
         assert_eq!(out.menu_keys, vec!["4"], "完全信任 = 屏上编号 4");
@@ -4734,6 +4750,10 @@ mod tests {
             sent,
             vec!["4", "1"],
             "数字 4 直达 + 确认框肯定项编号 1 直达"
+        );
+        assert_eq!(
+            waits, 2,
+            "两处硬性 ≥0.5s：步骤①→②（开菜单→数字）+ 步骤②→③（数字→确认框）"
         );
         assert_eq!(out.receipt_seen, Some(true));
     }
@@ -4751,7 +4771,7 @@ mod tests {
             "› 2. Cancel                Go back without enabling full access",
         ]);
         let receipt = lines(&["• Permissions updated to Full Access"]);
-        let (r, sent, _) = run_codex_stage_script(
+        let (r, sent, _, _) = run_codex_stage_script(
             vec![clean, menu, confirm_hl_cancel, receipt],
             MamMode::Bypass,
         );
@@ -4777,7 +4797,7 @@ mod tests {
             "  2. Continue and don't warn again",
             "  3. Cancel",
         ]);
-        let (r, sent, _) = run_codex_stage_script(vec![clean, menu, ambiguous], MamMode::Bypass);
+        let (r, sent, _, _) = run_codex_stage_script(vec![clean, menu, ambiguous], MamMode::Bypass);
         let err = r.as_ref().unwrap_err();
         assert!(err.contains("有 2 个"), "肯定项不唯一必须点名：{err}");
         assert_eq!(
@@ -4795,7 +4815,7 @@ mod tests {
         let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         // 两个选项都不含 `continue`（某变体把 Yes 改写成别的词）
         let no_affirmative = lines(&[" Enable full access?", "› 1. Yes", "  2. Cancel"]);
-        let (r, sent, _) =
+        let (r, sent, _, _waits) =
             run_codex_stage_script(vec![clean, menu, no_affirmative], MamMode::Bypass);
         let out = r.expect("无肯定项 → 按「未出现」处理，**不中止全链**");
         assert!(!out.confirm_done, "确认框未走完");
@@ -4812,7 +4832,7 @@ mod tests {
         let clean_after_esc = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
         let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         let receipt = lines(&["• Permissions updated to Read Only"]);
-        let (r, sent, opens) = run_codex_stage_script(
+        let (r, sent, opens, _waits) = run_codex_stage_script(
             vec![residual, clean_after_esc, menu, receipt],
             MamMode::ReadOnly,
         );
@@ -4832,7 +4852,7 @@ mod tests {
     fn stage_flow_digit_window_exhausted_aborts() {
         let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
         let blank = lines(&["  still loading..."]);
-        let (r, sent, opens) = run_codex_stage_script(vec![clean, blank], MamMode::Default);
+        let (r, sent, opens, _waits) = run_codex_stage_script(vec![clean, blank], MamMode::Default);
         let err = r.unwrap_err();
         assert!(
             err.contains("未出现或读不到档位表"),
@@ -4975,7 +4995,7 @@ mod tests {
         let clean = e_stage2_screen("codex-input-residue.txt"); // 占位 = 已清干净
         let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         let receipt = lines(&["• Permissions updated to Read Only"]);
-        let (r, sent, opens) =
+        let (r, sent, opens, _waits) =
             run_codex_stage_script(vec![dirty, clean, menu, receipt], MamMode::ReadOnly);
         let out = r.expect("输入行清干净后全链走通");
         let cleared: Vec<&String> = sent.iter().filter(|k| k.as_str() == "backspace").collect();
@@ -5005,7 +5025,7 @@ mod tests {
             .expect("夹具含占位 composer 行");
         dirty[pos] = "\u{276f} /permissions/permissions".to_string();
         // 单屏脚本：backspace 后屏面不变（清理未生效）
-        let (r, sent, opens) = run_codex_stage_script(vec![dirty], MamMode::Default);
+        let (r, sent, opens, _waits) = run_codex_stage_script(vec![dirty], MamMode::Default);
         let err = r.unwrap_err();
         assert!(err.contains("仍不纯净"), "清不净要如实中止：{err}");
         assert!(sent.iter().all(|k| k == "backspace"), "{sent:?}");
@@ -5038,7 +5058,7 @@ mod tests {
         let clean_after_esc = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
         let menu = e_stage2_screen("codex-perm-menu-4tier.txt");
         let receipt = lines(&["• Permissions updated to Read Only"]);
-        let (r, sent, opens) = run_codex_stage_script(
+        let (r, sent, opens, _waits) = run_codex_stage_script(
             vec![residual, clean_after_esc, menu, receipt],
             MamMode::ReadOnly,
         );
@@ -5058,7 +5078,7 @@ mod tests {
     #[test]
     fn stage_flow_digit_residue_wont_clear_aborts() {
         let residual = e_stage2_screen("codex-perm-menu-4tier.txt");
-        let (r, sent, opens) = run_codex_stage_script(vec![residual], MamMode::Default);
+        let (r, sent, opens, _waits) = run_codex_stage_script(vec![residual], MamMode::Default);
         let err = r.unwrap_err();
         assert!(err.contains("仍未消失"), "清场失败要如实中止：{err}");
         assert_eq!(sent, vec!["esc"], "只发过清场 esc：{sent:?}");

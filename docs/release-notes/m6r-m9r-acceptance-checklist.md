@@ -562,3 +562,8 @@ cargo test --test m9r_e2e -- --ignored --nocapture --test-threads=1
    中止）；claude/opencode 模式切换走 shift+tab 键路无斜杠命令不涉及（claude 插队
    正文已有 A1 残留中止先例）；kimi 三条斜杠路待 composer 屏读判据取证后接入
    （I-1n）。词典 §6 已登记同款准则行；backspace 入键域（VK_BACK，屏读闭环兜底）。
+9. **步骤间硬性 ≥0.5s（2026-09-23 用户指令二轮补充）**：codex 权限切换的
+   步骤① `/permissions`+回车 → 步骤② 数字、步骤② → 步骤③（仅完全信任）
+   之间各硬等 ≥500ms（`MODE_STEP_MIN_GAP_MS`），与屏读轮询**并存取最大**
+   ——轮询 Ready 不早于 0.5s，0.5s 先满则轮询到点即触发。实测根因：注入快于
+   TUI 重绘，数字落在未消散的旧对话框上。

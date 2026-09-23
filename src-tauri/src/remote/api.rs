@@ -5092,6 +5092,12 @@ fn menu_stages(
                 || poll_menu_digit(pid, target),
                 || poll_confirm_cluster(pid),
                 || poll_receipt(pid, tool, target, RECEIPT_POLL_TOTAL_MS),
+                // 相邻步骤硬性 ≥0.5s（用户指令 2026-09-23：轮询+硬控并存取最大）
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::timing::MODE_STEP_MIN_GAP_MS,
+                    ));
+                },
                 &mut terminal,
             )?;
             log::debug!(
