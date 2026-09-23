@@ -54,8 +54,6 @@ interface TransitionBanner {
 // （两音上行 + 包络；复用桌面 12 音效资产不可行——资产不在移动产物内，见该文件注释）。
 // 本组件只负责**何时响**：见 handleTransition 的转绿过滤 + 5 秒同色去重，
 // 口径照抄桌面 hooks/useNotification（currColor === "green" + lastNotified）。
-//
-// 跃迁横幅条目：key = `工具-会话id`（展示层防叠键，见 pushBanner 注释）
 
 interface BoardProps {
   /** 首次成功拉到数据时回调（一次）：探测成功信号，App 由此把 paired null→true（已配对设备免重配） */

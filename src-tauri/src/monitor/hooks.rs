@@ -929,15 +929,16 @@ pub fn register_all_hooks() {
         // bash 条目与 codex 规格的 command 相同（只差 commandWindows），T1 迁移
         // 也要求核验覆盖 Windows 覆盖字段。kimi 走 TOML 核验（[[hooks]] 事件+
         // 命令逐条在场）
-        let verified = (if tool_id == "kimi" {
-            fs::read_to_string(&config_path)
-                .map(|c| hooks_toml_verified(&c, &spec.command, &events))
-                .unwrap_or(false)
-        } else {
-            fs::read_to_string(&config_path)
-                .map(|c| hooks_file_verified(&c, &spec, &events, is_pascal, &matchers))
-                .unwrap_or(false)
-        }) && script_path.exists();
+        let verified = fs::read_to_string(&config_path)
+            .map(|c| {
+                if tool_id == "kimi" {
+                    hooks_toml_verified(&c, &spec.command, &events)
+                } else {
+                    hooks_file_verified(&c, &spec, &events, is_pascal, &matchers)
+                }
+            })
+            .unwrap_or(false)
+            && script_path.exists();
         if verified {
             crate::database::set_setting(&tool_key, "true");
             debug!("{} Hook 已确认: {:?}", adapter.name(), config_path);

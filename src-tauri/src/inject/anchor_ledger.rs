@@ -61,6 +61,15 @@ pub mod scenario {
     /// claude **队列在场**提示（`press up to edit queued messages`；confirm.rs 用它
     /// 判输入行内容是否其实是排队消息回显）
     pub const QUEUE_HINT: &str = "queue_hint";
+    /// **问答场景**（AskUserQuestion / request_user_input 卡片）：答题完成的
+    /// **终态回执锚**（claude `User answered Claude's questions:` / kimi
+    /// `● Collected your answers` / codex `• Questions 1/1 answered` / opencode
+    /// `# Questions`）——question.rs 各阶段机的终态段消费
+    pub const QUESTION: &str = "question";
+    /// 问答**提交前确认屏**（claude `Review your answers` 确认屏 / kimi
+    /// `Ready to submit your answers?` Review 汇总屏）——question.rs 各阶段机
+    /// 判「确认屏在场」的标题锚
+    pub const QUESTION_REVIEW: &str = "question_review";
 }
 
 /// 槽位 wire 词（账本 `slot` 字段）：同一场景内的不同位置。
@@ -75,6 +84,8 @@ pub mod slot {
     pub const BUSY: &str = "busy";
     /// **在场提示**（某状态在场的证据行，如排队消息提示）
     pub const PRESENT: &str = "present";
+    /// **确认项行锚**（Review 确认屏上的提交选项行，如 claude `1. Submit answers`）
+    pub const CONFIRM: &str = "confirm";
 }
 
 /// 账本单行：一条**屏读文案**及其取证元数据。
@@ -194,6 +205,75 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "press up to edit queued messages",
         observed_version: "2.1.251",
         evidence: "戊探F 2026-09-22 打断式插队扩展底料（夹具 claude-queue-state.txt）",
+    },
+    // ===== claude 问答 Review 确认屏 + 终态回执（question.rs，原 REVIEW_*_ANCHOR /
+    // ANSWERED_RECEIPT_ANCHOR，2026-09-23 收编——ceb2e1d 搁置项）=====
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::QUESTION_REVIEW,
+        slot: slot::TITLE,
+        text: "review your answers",
+        observed_version: "2.1.251",
+        evidence: "2026-09-21 AskUserQuestion 按键语义探测 C-s8-submitted 截图 + claude 二进制 title:\"Review your answers\"（question.rs 模块文档判据表）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::QUESTION_REVIEW,
+        slot: slot::PRESENT,
+        text: "ready to submit",
+        observed_version: "2.1.251",
+        evidence: "同上副题 Ready to submit your answers?——矮窗口下标题行可能滚出可见区，副题是确认屏在场的证据行（question.rs REVIEW_SUBTITLE_ANCHOR 注）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::QUESTION_REVIEW,
+        slot: slot::CONFIRM,
+        text: "submit answers",
+        observed_version: "2.1.251",
+        evidence: "C-s8-submitted 截图 `1. Submit answers` + claude 二进制 confirmLabel:\"Submit answers\"",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::QUESTION,
+        slot: slot::RECEIPT,
+        text: "user answered claude",
+        observed_version: "2.1.251",
+        evidence: "C-s8-final 截图 `User answered Claude's questions:`（question.rs ANSWERED_RECEIPT_ANCHOR）",
+    },
+    // ===== kimi 问答 Review 汇总屏 + 终态回执（戊探B 实机 + 用户 K-5 实录）=====
+    AnchorRow {
+        tool: "kimi",
+        scenario: scenario::QUESTION_REVIEW,
+        slot: slot::TITLE,
+        text: "ready to submit your answers?",
+        observed_version: "2.0.2",
+        evidence: "戊探B + 用户 K-5 实录（screen-ki1-b1-after-char3.txt 原件；单题 Review 屏同含此行）",
+    },
+    AnchorRow {
+        tool: "kimi",
+        scenario: scenario::QUESTION,
+        slot: slot::RECEIPT,
+        text: "collected your answers",
+        observed_version: "2.0.2",
+        evidence: "戊探B M1/M2 提交后屏读原件 `● Collected your answers`（question.rs KIMI_ANSWERED_ANCHOR）",
+    },
+    // ===== codex 问答终态回执（戊探C 全链）=====
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::QUESTION,
+        slot: slot::RECEIPT,
+        text: "answered",
+        observed_version: "0.155.1",
+        evidence: "戊探C 原件摘要头 `• Questions 1/1 answered`（question.rs CODEX_ANSWERED_ANCHOR）",
+    },
+    // ===== opencode 问答终态回执（戊探A 全链）=====
+    AnchorRow {
+        tool: "opencode",
+        scenario: scenario::QUESTION,
+        slot: slot::RECEIPT,
+        text: "# questions",
+        observed_version: "1.18.32",
+        evidence: "戊探A E-A1 提交后 transcript 摘要段 `# Questions`（question.rs OPENCODE_ANSWERED_ANCHOR）",
     },
 ];
 
@@ -410,5 +490,94 @@ mod tests {
             slot::FOOTER
         )
         .is_none());
+    }
+
+    /// **question.rs 锚点收编的回归锁**（2026-09-23 收编 8 条，ceb2e1d 搁置项）：
+    /// 每槽账本**首条**文案必须与收编前的编译期兜底常量**逐字一致**——收编不改
+    /// 行为（question.rs 各锚函数 `.first()` 取账本、取不到回落同值常量），账本行
+    /// 与兜底值一旦分叉本测即红。真机原文（原大小写）小写化后可认出。
+    #[test]
+    fn question_anchors_ledger_matches_pre_collection_constants() {
+        // (tool, scenario, slot, 收编前常量值)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "claude",
+                scenario::QUESTION_REVIEW,
+                slot::TITLE,
+                "review your answers",
+            ),
+            (
+                "claude",
+                scenario::QUESTION_REVIEW,
+                slot::PRESENT,
+                "ready to submit",
+            ),
+            (
+                "claude",
+                scenario::QUESTION_REVIEW,
+                slot::CONFIRM,
+                "submit answers",
+            ),
+            (
+                "claude",
+                scenario::QUESTION,
+                slot::RECEIPT,
+                "user answered claude",
+            ),
+            (
+                "kimi",
+                scenario::QUESTION_REVIEW,
+                slot::TITLE,
+                "ready to submit your answers?",
+            ),
+            (
+                "kimi",
+                scenario::QUESTION,
+                slot::RECEIPT,
+                "collected your answers",
+            ),
+            ("codex", scenario::QUESTION, slot::RECEIPT, "answered"),
+            ("opencode", scenario::QUESTION, slot::RECEIPT, "# questions"),
+        ];
+        for (tool, scenario, slot, pre_collection) in cases {
+            let row = candidates(tool, scenario, slot)
+                .first()
+                .unwrap_or_else(|| panic!("{tool}/{scenario}/{slot} 账本缺条目"));
+            assert_eq!(
+                row.text, *pre_collection,
+                "{tool}/{scenario}/{slot} 账本文案与收编前常量不一致（行为漂移）"
+            );
+        }
+        // 真机原文（原大小写）小写化后可认：claude Review 确认屏三锚
+        let review = lower(&[
+            "  Review your answers",
+            "  Ready to submit your answers?",
+            "  1. Submit answers",
+        ]);
+        assert!(detect(&review, "claude", scenario::QUESTION_REVIEW, slot::TITLE).is_some());
+        assert!(detect(&review, "claude", scenario::QUESTION_REVIEW, slot::PRESENT).is_some());
+        assert!(detect(&review, "claude", scenario::QUESTION_REVIEW, slot::CONFIRM).is_some());
+        // kimi Review 汇总屏副题锚
+        assert!(detect(
+            &lower(&[
+                "  ↑↓ navigate · ↵ confirm",
+                "  Ready to submit your answers?"
+            ]),
+            "kimi",
+            scenario::QUESTION_REVIEW,
+            slot::TITLE
+        )
+        .is_some());
+        // 四家终态回执各自可认
+        let receipts = lower(&[
+            "  User answered Claude's questions:",
+            "  ● Collected your answers",
+            "  • Questions 1/1 answered",
+            "  # Questions",
+        ]);
+        assert!(detect(&receipts, "claude", scenario::QUESTION, slot::RECEIPT).is_some());
+        assert!(detect(&receipts, "kimi", scenario::QUESTION, slot::RECEIPT).is_some());
+        assert!(detect(&receipts, "codex", scenario::QUESTION, slot::RECEIPT).is_some());
+        assert!(detect(&receipts, "opencode", scenario::QUESTION, slot::RECEIPT).is_some());
     }
 }

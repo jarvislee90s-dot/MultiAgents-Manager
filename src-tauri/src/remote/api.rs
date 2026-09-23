@@ -579,24 +579,31 @@ pub struct QueueItemReq {
     pub item_id: Option<i64>,
 }
 
-/// 400 bad_request（缺参 / 空 text / 超长）
-fn bad_request() -> Response {
+/// 状态码 + JSON 载荷的统一 no-store 响应（本文件各端点带状态码的 Json 回执共用
+/// 样板——门禁下私有读写路径一律 `Cache-Control: no-store`，见文件头 M7 契约注释）
+fn json_no_store(status: StatusCode, body: serde_json::Value) -> Response {
     (
-        StatusCode::BAD_REQUEST,
+        status,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({ "error": "bad_request" })),
+        Json(body),
     )
         .into_response()
 }
 
+/// 400 bad_request（缺参 / 空 text / 超长）
+fn bad_request() -> Response {
+    json_no_store(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({ "error": "bad_request" }),
+    )
+}
+
 /// 403 防御（gate 已拦设备，理论不可达——handler 直取 cookie 失败时兜底）
 fn forbidden_defense() -> Response {
-    (
+    json_no_store(
         StatusCode::FORBIDDEN,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({ "error": "forbidden" })),
+        serde_json::json!({ "error": "forbidden" }),
     )
-        .into_response()
 }
 
 /// 设备侧公共前置：cookie 提取（防御 403 的判定源）+ 花名查询（查无回落 unknown）。
@@ -722,21 +729,17 @@ pub async fn session_send(
             Ok(v) => v,
             Err(e) => {
                 log::error!("session-send 会话扫描任务异常: {e}");
-                return (
+                return json_no_store(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "error": "internal" })),
-                )
-                    .into_response();
+                    serde_json::json!({ "error": "internal" }),
+                );
             }
         };
     let Some(session) = session else {
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "no_session" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "no_session" }),
+        );
     };
     // ④ 路由判定（W3 纯核；platform = 本机 OS）。不可注入 → 403（带原因），不入队
     let tool = session.agent_type.tool_id().to_string();
@@ -745,16 +748,14 @@ pub async fn session_send(
         reason,
     } = crate::inject::routing::route(&tool, session.form, session.pid, std::env::consts::OS)
     {
-        return (
+        return json_no_store(
             StatusCode::FORBIDDEN,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "not_injectable",
                 "reason": reason,
                 "reasonCode": reason_code,
-            })),
-        )
-            .into_response();
+            }),
+        );
     }
     // ⑤ 组装（裁决 6 归一在入队时一次完成）+ 入队（FIFO 保序）。
     //
@@ -786,12 +787,10 @@ pub async fn session_send(
     });
     if item_id == 0 {
         // DAO 写失败哨兵（enqueue_conn 失败返回 0 并 log）：不下发 delivered 谎报
-        return (
+        return json_no_store(
             StatusCode::INTERNAL_SERVER_ERROR,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "internal" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "internal" }),
+        );
     }
     let queued = serde_json::json!({
         "status": "queued",
@@ -839,12 +838,7 @@ pub async fn session_send(
                     audit_action_for(&req.text, "send"),
                     "ok",
                 );
-                (
-                    StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "status": "delivered" })),
-                )
-                    .into_response()
+                json_no_store(StatusCode::OK, serde_json::json!({ "status": "delivered" }))
             }
             // D7/T3 中性回执（验收问题 #5）：注入 Ok + 戳未中 + 屏读无滞留草稿 =
             // 消息已被 TUI 收进内部队列（已投递未确认）——不冒充 delivered（未确认
@@ -861,12 +855,7 @@ pub async fn session_send(
                     audit_action_for(&req.text, "send"),
                     "unconfirmed",
                 );
-                (
-                    StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "status": "submitted" })),
-                )
-                    .into_response()
+                json_no_store(StatusCode::OK, serde_json::json!({ "status": "submitted" }))
             }
             // 注入/确认失败（行已 mark_failed，队列无残留——回执可重试，W1/W4）
             crate::inject::queue::FlushOutcome::Failed(e) => {
@@ -880,12 +869,10 @@ pub async fn session_send(
                     audit_action_for(&req.text, "send"),
                     &format!("failed:{e}"),
                 );
-                (
+                json_no_store(
                     StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "status": "failed", "error": e })),
+                    serde_json::json!({ "status": "failed", "error": e }),
                 )
-                    .into_response()
             }
             // E1① 撤回窗口防护中止（理论不可达臂：本变体仅插队路径产出，穷尽性保留
             // ——防御性回 failed，error=「未投递：<原因>，请人工确认」如实透出）
@@ -900,15 +887,13 @@ pub async fn session_send(
                     audit_action_for(&req.text, "send"),
                     &format!("aborted:{reason}"),
                 );
-                (
+                json_no_store(
                     StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "status": "failed",
                         "error": format!("未投递：{reason}，请人工确认"),
-                    })),
+                    }),
                 )
-                    .into_response()
             }
             // Deferred/Suspended（含守卫忙让位）：行保持 pending 等会话回来/下个跃迁，
             // 语义即排队（Suspended 亦 queued）——回查 pending 取该条目实时位次回执
@@ -933,16 +918,14 @@ pub async fn session_send(
                         .position(|i| i.id == item_id)
                         .map_or(0, |p| p as i64 + 1)
                 });
-                (
+                json_no_store(
                     StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "status": "queued",
                         "itemId": item_id,
                         "position": pos,
-                    })),
+                    }),
                 )
-                    .into_response()
             }
         };
     }
@@ -958,12 +941,7 @@ pub async fn session_send(
         audit_action_for(&req.text, "queue"),
         "ok",
     );
-    (
-        StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(queued),
-    )
-        .into_response()
+    json_no_store(StatusCode::OK, queued)
 }
 
 /// routing Channel → wire 小写字符串（枚举未派生 serde，端点侧手工映射防漂移）
@@ -1006,21 +984,17 @@ pub async fn session_send_info(
             Ok(v) => v,
             Err(e) => {
                 log::error!("session-send-info 会话扫描任务异常: {e}");
-                return (
+                return json_no_store(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "error": "internal" })),
-                )
-                    .into_response();
+                    serde_json::json!({ "error": "internal" }),
+                );
             }
         };
     let Some(session) = session else {
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "no_session" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "no_session" }),
+        );
     };
     let tool = session.agent_type.tool_id().to_string();
     let body =
@@ -1045,12 +1019,7 @@ pub async fn session_send_info(
                 })
             }
         };
-    (
-        StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(body),
-    )
-        .into_response()
+    json_no_store(StatusCode::OK, body)
 }
 
 /// GET /m/api/v1/session-queue?session_id=（W4 排队视图）：该会话全部待发消息
@@ -1082,12 +1051,7 @@ pub async fn session_queue(
             })
         })
         .collect();
-    (
-        StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({ "items": views })),
-    )
-        .into_response()
+    json_no_store(StatusCode::OK, serde_json::json!({ "items": views }))
 }
 
 /// POST /m/api/v1/session-queue/jump（裁决 12 插队）：按 itemId 点名该会话 pending 中
@@ -1119,12 +1083,10 @@ pub async fn session_queue_jump(
         return forbidden_defense();
     }
     let failed_body = |e: String| {
-        (
+        json_no_store(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": "failed", "error": e })),
+            serde_json::json!({ "status": "failed", "error": e }),
         )
-            .into_response()
     };
     // 前查归属（借 retract 语义）+ 取整行（点名投递需要 item 字段），无 pending 项 → 404
     let target = st.store.with(|c| {
@@ -1133,12 +1095,10 @@ pub async fn session_queue_jump(
             .find(|i| i.id == item_id)
     });
     let Some(item) = target else {
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "not_found" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "not_found" }),
+        );
     };
     let flush_st = st.clone();
     let flush_sid = sid.clone();
@@ -1170,20 +1130,14 @@ pub async fn session_queue_jump(
         }
     };
     match outcome {
-        crate::inject::queue::FlushOutcome::Sent => (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": "delivered" })),
-        )
-            .into_response(),
+        crate::inject::queue::FlushOutcome::Sent => {
+            json_no_store(StatusCode::OK, serde_json::json!({ "status": "delivered" }))
+        }
         // D7/T3：Submitted 仅直发确认分诊产出（插队以占用排空定论，本臂实际不可达，
         // 为穷尽性保留）——防御性回中性 submitted，不冒充 delivered 也不冒充 failed
-        crate::inject::queue::FlushOutcome::Submitted => (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": "submitted" })),
-        )
-            .into_response(),
+        crate::inject::queue::FlushOutcome::Submitted => {
+            json_no_store(StatusCode::OK, serde_json::json!({ "status": "submitted" }))
+        }
         // E1① 撤回窗口防护中止：正文**未注入**（输入行有疑似被撤回的残留，注入即
         // 拼接危害）——行已 mark_failed 退出 pending，回 failed{error} 如实透出
         // 「未投递：<原因>，请人工确认」（前端 handleJump 对非 delivered 走对账，
@@ -1204,16 +1158,14 @@ pub async fn session_queue_jump(
                     .position(|i| i.id == item_id)
                     .map_or(0, |p| p as i64 + 1)
             });
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "queued",
                     "itemId": item_id,
                     "position": pos,
-                })),
+                }),
             )
-                .into_response()
         }
     }
 }
@@ -1241,12 +1193,10 @@ pub async fn session_queue_retract(
         return forbidden_defense();
     };
     let failed_body = |e: String| {
-        (
+        json_no_store(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": "failed", "error": e })),
+            serde_json::json!({ "status": "failed", "error": e }),
         )
-            .into_response()
     };
     // P2-6 共守卫（与 flush 循环/直发/插队互斥）：投递进行中 → 撤回让位，短回执提示重试
     let Some(_guard) = crate::inject::queue::try_acquire_inflight(&sid) else {
@@ -1259,24 +1209,20 @@ pub async fn session_queue_retract(
             .find(|i| i.id == item_id)
     });
     let Some(item) = target else {
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "not_found" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "not_found" }),
+        );
     };
     let removed = st
         .store
         .with(|c| crate::database::dao::inject_queue::retract_conn(c, &sid, item_id));
     if !removed {
         // 前查后竞态被他人删走：按 404 语义（DAO 二次校验未命中）
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "not_found" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "not_found" }),
+        );
     }
     endpoint_audit(
         &st,
@@ -1288,12 +1234,7 @@ pub async fn session_queue_retract(
         "retract",
         "ok",
     );
-    (
-        StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({ "ok": true })),
-    )
-        .into_response()
+    json_no_store(StatusCode::OK, serde_json::json!({ "ok": true }))
 }
 
 // ==== 移动端附件上传（2026-09-20 用户裁决）====
@@ -1312,7 +1253,6 @@ pub async fn session_attachment(
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    let no_store = [(axum::http::header::CACHE_CONTROL, "no-store")];
     // ① 参数校验（trim 判空——与 session-send 同口径）
     let sid = params.get("session_id").map(|s| s.trim().to_string());
     let Some(sid) = sid.filter(|s| !s.is_empty()) else {
@@ -1327,12 +1267,10 @@ pub async fn session_attachment(
     };
     // ② 容量上限（结构化 413；Content-Length 预检可测，DefaultBodyLimit 为硬兜底）
     if body.len() > crate::remote::attachments::MAX_ATTACHMENT_BYTES {
-        return (
+        return json_no_store(
             StatusCode::PAYLOAD_TOO_LARGE,
-            no_store,
-            Json(serde_json::json!({ "error": "too_large" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "too_large" }),
+        );
     }
     // ③ 设备身份（防御 403 + 花名）
     let Some((device_id, device_name)) = device_identity(&st, &headers) else {
@@ -1345,32 +1283,26 @@ pub async fn session_attachment(
         match tokio::task::spawn_blocking(move || find_session_sync(&probe_st, &probe_sid)).await {
             Ok(Some(s)) => s,
             Ok(None) => {
-                return (
+                return json_no_store(
                     StatusCode::NOT_FOUND,
-                    no_store,
-                    Json(serde_json::json!({ "error": "no_session" })),
-                )
-                    .into_response();
+                    serde_json::json!({ "error": "no_session" }),
+                );
             }
             Err(e) => {
                 log::error!("session-attachment 会话扫描任务异常: {e}");
-                return (
+                return json_no_store(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    no_store,
-                    Json(serde_json::json!({ "error": "internal" })),
-                )
-                    .into_response();
+                    serde_json::json!({ "error": "internal" }),
+                );
             }
         };
     let cwd = session.project_path.trim().to_string();
     if cwd.is_empty() {
         // 与 resume 的 no_cwd 同源口径（该会话没有项目目录信息）
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            no_store,
-            Json(serde_json::json!({ "error": "no_cwd" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "no_cwd" }),
+        );
     }
     let tool = session.agent_type.tool_id().to_string();
     // ⑤ 写盘（spawn_blocking：同步 IO）+ 审计
@@ -1392,21 +1324,17 @@ pub async fn session_attachment(
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             log::error!("session-attachment 落盘失败: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                no_store,
-                Json(serde_json::json!({ "error": "io" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "io" }),
+            );
         }
         Err(e) => {
             log::error!("session-attachment 写盘任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                no_store,
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     endpoint_audit(
@@ -1435,15 +1363,13 @@ pub async fn session_attachment(
             },
         );
     }
-    (
+    json_no_store(
         StatusCode::OK,
-        no_store,
-        Json(serde_json::json!({
+        serde_json::json!({
             "path": path.to_string_lossy(),
             "size": size,
-        })),
+        }),
     )
-        .into_response()
 }
 
 // ==== M8 Task 11：审批端点（session-approve-options / session-approve）====
@@ -2182,12 +2108,10 @@ pub async fn session_approve_options(
             Ok(v) => v,
             Err(e) => {
                 log::error!("session-approve-options 会话扫描任务异常: {e}");
-                return (
+                return json_no_store(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "error": "internal" })),
-                )
-                    .into_response();
+                    serde_json::json!({ "error": "internal" }),
+                );
             }
         };
     let (
@@ -2257,10 +2181,9 @@ pub async fn session_approve_options(
             &verified_with,
             current_version.as_deref().unwrap_or("unknown"),
         );
-    (
+    json_no_store(
         StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({
+        serde_json::json!({
             "available": available,
             "options": options
                 .iter()
@@ -2290,9 +2213,8 @@ pub async fn session_approve_options(
             // 对话框」按钮（`available=true` 且此字段 true 且 `dialog=false` → 空 options
             // 不是错误，是「还没读到选项，点检查重试」）。
             "planPending": plan_pending,
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// POST /m/api/v1/session-approve 请求体（camelCase；字段全 default——缺参不触发
@@ -2524,12 +2446,10 @@ pub async fn session_approve(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-approve 会话扫描任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     let (session, tool, option, keys, digit_verify) = match lookup {
@@ -2540,12 +2460,7 @@ pub async fn session_approve(
             } else {
                 StatusCode::NOT_FOUND
             };
-            return (
-                status,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": code })),
-            )
-                .into_response();
+            return json_no_store(status, serde_json::json!({ "error": code }));
         }
     };
     // F2：按键按该会话工具取族规格（先 family_for 再 FALLBACK 兜底，与 Task 5
@@ -2631,15 +2546,13 @@ pub async fn session_approve(
         Ok(None) => {
             // in-flight 守卫忙（与 flush 循环/直发/插队共用）→ 让位，200 failed 提示
             // 重试（不双投；无投递发生故不写审计——忙让位同口径）
-            return (
+            return json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "failed",
                     "error": "投递进行中，请稍后重试"
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         Err(e) => {
             log::error!("session-approve 投递任务异常: {e}");
@@ -2675,12 +2588,7 @@ pub async fn session_approve(
                 action,
                 "ok",
             );
-            (
-                StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "key_sent" })),
-            )
-                .into_response()
+            json_no_store(StatusCode::OK, serde_json::json!({ "status": "key_sent" }))
         }
         Err(e) => {
             endpoint_audit(
@@ -2693,12 +2601,10 @@ pub async fn session_approve(
                 action,
                 &format!("failed:{e}"),
             );
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "failed", "error": e })),
+                serde_json::json!({ "status": "failed", "error": e }),
             )
-                .into_response()
         }
     }
 }
@@ -2965,12 +2871,10 @@ pub async fn session_question(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-question 会话扫描任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     let (questions, source, tool_id) = match scan {
@@ -2998,10 +2902,9 @@ pub async fn session_question(
     // （tab=前向切页，戊探A ①定案）。kimi/codex 的多题切页键未验 → 旗标 false，前端
     // 对这两家的多选题渲染「请到终端切题」引导而不是切换按钮。单题卡无页可切，恒 false。
     let advance = tool_id == "opencode" && questions.len() > 1;
-    (
+    json_no_store(
         StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({
+        serde_json::json!({
             "available": !questions.is_empty(),
             "answerable": answerable,
             // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
@@ -3032,9 +2935,8 @@ pub async fn session_question(
             } else {
                 serde_json::json!(source)
             },
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// POST /m/api/v1/session-question/answer 请求体（camelCase；字段全 default——缺参
@@ -3266,12 +3168,10 @@ pub async fn session_question_answer(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-question/answer 会话扫描任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     let (session, sequence, q_for_plan, q_tool) = match lookup {
@@ -3288,12 +3188,7 @@ pub async fn session_question_answer(
             } else {
                 StatusCode::CONFLICT
             };
-            return (
-                status,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": code })),
-            )
-                .into_response();
+            return json_no_store(status, serde_json::json!({ "error": code }));
         }
     };
     // F2：序列按键按该会话工具取族规格（先 family_for 再 FALLBACK 兜底）——"down"
@@ -3330,15 +3225,13 @@ pub async fn session_question_answer(
         Ok(None) => {
             // in-flight 守卫忙（与 flush 循环/直发/审批共用）→ 让位，200 failed 提示
             // 重试（不双投；无投递发生故不写审计——忙让位同口径）
-            return (
+            return json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "failed",
                     "error": "投递进行中，请稍后重试"
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         Err(e) => {
             log::error!("session-question/answer 投递任务异常: {e}");
@@ -3373,12 +3266,7 @@ pub async fn session_question_answer(
                 body["done"] = serde_json::json!(true);
                 body["stage"] = serde_json::json!(s);
             }
-            (
-                StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(body),
-            )
-                .into_response()
+            json_no_store(StatusCode::OK, body)
         }
         QuestionDispatch::StageDone {
             stage,
@@ -3401,17 +3289,15 @@ pub async fn session_question_answer(
                 "answer",
                 result,
             );
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "key_sent",
                     "done": true,
                     "stage": stage,
                     "verified": receipt_seen,
-                })),
+                }),
             )
-                .into_response()
         }
         QuestionDispatch::Aborted { stage, error } => {
             // **中止**：与 failed 同槽（status=failed），但带 aborted/stage——前端能
@@ -3426,17 +3312,15 @@ pub async fn session_question_answer(
                 "answer",
                 &format!("aborted:{stage}"),
             );
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "failed",
                     "aborted": true,
                     "stage": stage,
                     "error": error,
-                })),
+                }),
             )
-                .into_response()
         }
         QuestionDispatch::Failed(error) => {
             endpoint_audit(
@@ -3449,19 +3333,15 @@ pub async fn session_question_answer(
                 "answer",
                 &format!("failed:{error}"),
             );
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "failed", "error": error })),
+                serde_json::json!({ "status": "failed", "error": error }),
             )
-                .into_response()
         }
-        QuestionDispatch::Internal(error) => (
+        QuestionDispatch::Internal(error) => json_no_store(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": "failed", "error": error })),
-        )
-            .into_response(),
+            serde_json::json!({ "status": "failed", "error": error }),
+        ),
     }
 }
 
@@ -3565,8 +3445,8 @@ enum DigitVerifyOutcome {
 /// 1. **验证段**：至多 `poll_rounds` 拍（生产 =
 ///    [`crate::inject::timing::poll_rounds(DIGIT_VERIFY_POLL_TOTAL_MS)`]），每拍
 ///    `poll_settle` → `read` 一屏：**对话框消失 = 数字已生效**（D20 命中即停）；
-///    仍在场 → 留作回退起点（最后一份选项表含当前高亮位）；读屏不可用视同「仍在场」
-///    （无证据不断言生效）。
+///    仍在场 → 留作回退起点（最后一份选项表含当前高亮位）；读屏不可用同样返回
+///    `None`，与「对话框已消失」同走 Confirmed 口径。
 /// 2. **回退段**（窗尽仍在场才走）：从最后一份选项表算循环步进
 ///    （[`crate::inject::dialog::navigation_sequence`]——不猜起点），逐键 `send_key`
 ///    （键间 `key_settle` 给 TUI 重绘时间）；**回退后不再二次验证**（一次回退是计划
@@ -4140,24 +4020,17 @@ pub async fn session_open(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-open 会话扫描任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     let (tool, result) = match outcome {
         Ok(v) => v,
         Err(code) => {
             // 会话不在快照：无工具可审计（session-send 的 no_session 同口径不落账）
-            return (
-                StatusCode::NOT_FOUND,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": code })),
-            )
-                .into_response();
+            return json_no_store(StatusCode::NOT_FOUND, serde_json::json!({ "error": code }));
         }
     };
     // ④ 错误契约分诊：哨兵串映射 404（校验失败不写审计、spawner 未被调用）；
@@ -4175,19 +4048,11 @@ pub async fn session_open(
                 "open",
                 "ok",
             );
-            (
-                StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "opening" })),
-            )
-                .into_response()
+            json_no_store(StatusCode::OK, serde_json::json!({ "status": "opening" }))
         }
-        Err(e) if e == "no_resume_command" || e == "no_cwd" => (
-            StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) if e == "no_resume_command" || e == "no_cwd" => {
+            json_no_store(StatusCode::NOT_FOUND, serde_json::json!({ "error": e }))
+        }
         Err(e) => {
             endpoint_audit(
                 &st,
@@ -4199,12 +4064,10 @@ pub async fn session_open(
                 "open",
                 &format!("failed:{e}"),
             );
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "status": "failed", "error": e })),
+                serde_json::json!({ "status": "failed", "error": e }),
             )
-                .into_response()
         }
     }
 }
@@ -4373,21 +4236,17 @@ pub async fn session_mode(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-mode 会话扫描任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     let Some(hit) = scan else {
-        return (
+        return json_no_store(
             StatusCode::NOT_FOUND,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "error": "no_session" })),
-        )
-            .into_response();
+            serde_json::json!({ "error": "no_session" }),
+        );
     };
     let kind = match hit.kind {
         crate::inject::mode::ModeSwitchKind::ShiftTabCycle => "shiftTab",
@@ -4453,10 +4312,9 @@ pub async fn session_mode(
     } else {
         false
     };
-    (
+    json_no_store(
         StatusCode::OK,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({
+        serde_json::json!({
             "tool": hit.tool,
             "current": top_current.map(|m| m.wire()),
             "currentLabel": top_current.map(|m| m.label()),
@@ -4466,9 +4324,8 @@ pub async fn session_mode(
             // 丁T4 增量：结构 + 两组（旧前端忽略未知字段，零破坏）
             "structure": hit.structure.wire(),
             "groups": groups,
-        })),
+        }),
     )
-        .into_response()
 }
 
 /// 对话框在场拒绝对控制类注入的中文回执（丁T3 §2.7 裁8/9 的任务书成文语义：
@@ -4645,12 +4502,7 @@ fn mode_menu_err(status: StatusCode, code: &str, reason: Option<&str>) -> Respon
     if let Some(r) = reason {
         body["reason"] = serde_json::json!(r);
     }
-    (
-        status,
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(body),
-    )
-        .into_response()
+    json_no_store(status, body)
 }
 
 /// **`POST /m/api/v1/session-mode/menu`**——codex 权限组的「终端菜单单选题」两动作
@@ -4836,38 +4688,32 @@ pub async fn session_mode_menu(
                     .collect();
                 (
                     "ok".to_string(),
-                    (
+                    json_no_store(
                         StatusCode::OK,
-                        [(axum::http::header::CACHE_CONTROL, "no-store")],
-                        Json(serde_json::json!({
+                        serde_json::json!({
                             "status": "menu",
                             "options": items,
                             "dialogChecked": dialog_checked,
-                        })),
-                    )
-                        .into_response(),
+                        }),
+                    ),
                 )
             }
             Ok(Ok(Err(e))) if e.is_empty() => (
                 "busy".to_string(),
-                (
+                json_no_store(
                     StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "status": "failed",
                         "error": "投递进行中，请稍后重试"
-                    })),
-                )
-                    .into_response(),
+                    }),
+                ),
             ),
             Ok(Ok(Err(e))) => (
                 format!("failed:{e}"),
-                (
+                json_no_store(
                     StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(serde_json::json!({ "status": "failed", "error": e })),
-                )
-                    .into_response(),
+                    serde_json::json!({ "status": "failed", "error": e }),
+                ),
             ),
             Ok(Err(e)) => {
                 log::error!("session-mode/menu open 任务异常: {e}");
@@ -4992,15 +4838,7 @@ pub async fn session_mode_menu(
                     "dialogChecked": dialog_checked,
                 }),
             };
-            (
-                "ok".to_string(),
-                (
-                    StatusCode::OK,
-                    [(axum::http::header::CACHE_CONTROL, "no-store")],
-                    Json(body),
-                )
-                    .into_response(),
-            )
+            ("ok".to_string(), json_no_store(StatusCode::OK, body))
         }
         Ok(Err(e)) => (
             format!("failed:{e}"),
@@ -5172,12 +5010,10 @@ pub async fn session_mode_menu_read(
     })
     .await;
     match r {
-        Ok((status, items)) => (
+        Ok((status, items)) => json_no_store(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({ "status": status, "options": items })),
-        )
-            .into_response(),
+            serde_json::json!({ "status": status, "options": items }),
+        ),
         Err(e) => {
             log::error!("session-mode/menu 读取任务异常: {e}");
             mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None)
@@ -5253,12 +5089,10 @@ pub async fn session_mode_switch(
         Ok(v) => v,
         Err(e) => {
             log::error!("session-mode 会话扫描任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     let (session, tool, group, plan, readback, label, before) = match lookup {
@@ -5269,12 +5103,7 @@ pub async fn session_mode_switch(
             } else {
                 StatusCode::CONFLICT
             };
-            return (
-                status,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": code })),
-            )
-                .into_response();
+            return json_no_store(status, serde_json::json!({ "error": code }));
         }
     };
     // ===== 丁T3 接入① + 批次戊 E3②：投递前拦截判定（单点 [`mode_switch_block`]）=====
@@ -5343,44 +5172,38 @@ pub async fn session_mode_switch(
             log::debug!(
                 "T3 控制类注入被拒：sid={sid} 屏读见编号选项对话框（模式切换零投递零审计）"
             );
-            return (
+            return json_no_store(
                 StatusCode::CONFLICT,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": "blocked_by_dialog",
                     "reason": DIALOG_BLOCKS_CONTROL_REASON,
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         Some(crate::inject::mode::SwitchBlock::QuestionPending) => {
             log::debug!(
                 "E3 待决拦截：sid={sid} kimi 问答待决（切档注入含回车=污染待决态）→ 硬拒绝"
             );
-            return (
+            return json_no_store(
                 StatusCode::CONFLICT,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": "blocked_by_question",
                     "reason": "终端正有待答的问题——切权限/模式的命令会误选答案，请先在问答卡作答",
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         Some(crate::inject::mode::SwitchBlock::CodexPlanBusy) => {
             log::debug!(
                 "codex 模式组运行中拦截（sid={sid} status={:?}）",
                 session.status
             );
-            return (
+            return json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "failed",
                     "error": "codex 运行中不接受模式切换（shift+tab），请等回合结束后重试",
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         None => {}
     }
@@ -5461,25 +5284,21 @@ pub async fn session_mode_switch(
         Ok(Some(Ok(attempt))) => Ok(attempt),
         // 忙让位（None 哨兵）：不落审计（无投递发生）
         Ok(None) => {
-            return (
+            return json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": "failed",
                     "error": "投递进行中，请稍后重试"
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         Ok(Some(Err(e))) => Err(e),
         Err(e) => {
             log::error!("session-mode 投递任务异常: {e}");
-            return (
+            return json_no_store(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({ "error": "internal" })),
-            )
-                .into_response();
+                serde_json::json!({ "error": "internal" }),
+            );
         }
     };
     // 组+档进审计摘要（二维工具的组是语义的一部分：只记「切换至默认」无法区分
@@ -5504,17 +5323,15 @@ pub async fn session_mode_switch(
         &result_str,
     );
     match result {
-        Err(e) => (
+        Err(e) => json_no_store(
             StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({
+            serde_json::json!({
                 "status": status_line,
                 "error": e,
                 // 丁T3：失败态也如实携带守卫信息（前端可区分「拒于对话框」与「投递失败」）
                 "dialogChecked": dialog_checked,
-            })),
-        )
-            .into_response(),
+            }),
+        ),
         Ok(attempt) => {
             // ===== 回读确认（裁5：切换后必须知道切到了哪；红线 4：不假装成功）=====
             //
@@ -5595,10 +5412,9 @@ pub async fn session_mode_switch(
             if verified && group == crate::inject::mode::ModeGroupId::Permission {
                 remember_permission_tier(&st.store, &sid, mode.wire());
             }
-            (
+            json_no_store(
                 StatusCode::OK,
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(serde_json::json!({
+                serde_json::json!({
                     "status": status_line,
                     "verified": verified,
                     "hint": hint,
@@ -5607,9 +5423,8 @@ pub async fn session_mode_switch(
                     "currentLabel": observed.map(|m| m.label()),
                     // 丁T3：本次是否真的做过对话框在场检测——false = 平台无屏读或屏读失败
                     "dialogChecked": dialog_checked,
-                })),
+                }),
             )
-                .into_response()
         }
     }
 }

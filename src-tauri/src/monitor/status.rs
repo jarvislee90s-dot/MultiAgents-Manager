@@ -3,18 +3,16 @@
 
 use crate::session::SessionStatus;
 
+/// content 数组是否含指定 type 的块（has_tool_use / has_text_block / has_tool_result
+/// 三判定的共用骨架）
+fn has_block_of_type(content: &serde_json::Value, ty: &str) -> bool {
+    matches!(content, serde_json::Value::Array(arr)
+        if arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some(ty)))
+}
+
 /// 检查 content 是否包含 tool_use 块
 pub fn has_tool_use(content: &serde_json::Value) -> bool {
-    if let serde_json::Value::Array(arr) = content {
-        arr.iter().any(|item| {
-            item.get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "tool_use")
-                .unwrap_or(false)
-        })
-    } else {
-        false
-    }
+    has_block_of_type(content, "tool_use")
 }
 
 /// 检查是否所有 tool_use 都是用户输入类工具（如 AskUserQuestion）— 这些应算 Waiting
@@ -45,30 +43,12 @@ pub fn is_waiting_for_user_input(content: &serde_json::Value) -> bool {
 /// 检查 content 是否包含 text 块（正文输出；严格按 type=="text" 判定，
 /// 不用 extract_text_content 的宽松 "text" 键抓取，避免把 thinking 等块误判为正文）
 pub fn has_text_block(content: &serde_json::Value) -> bool {
-    if let serde_json::Value::Array(arr) = content {
-        arr.iter().any(|item| {
-            item.get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "text")
-                .unwrap_or(false)
-        })
-    } else {
-        false
-    }
+    has_block_of_type(content, "text")
 }
 
 /// 检查 content 是否包含 tool_result 块
 pub fn has_tool_result(content: &serde_json::Value) -> bool {
-    if let serde_json::Value::Array(arr) = content {
-        arr.iter().any(|item| {
-            item.get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "tool_result")
-                .unwrap_or(false)
-        })
-    } else {
-        false
-    }
+    has_block_of_type(content, "tool_result")
 }
 
 fn extract_text_content(content: &serde_json::Value) -> &str {

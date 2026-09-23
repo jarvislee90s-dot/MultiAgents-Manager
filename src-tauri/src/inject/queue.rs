@@ -502,21 +502,26 @@ pub(crate) fn settle(
     jump: bool,
     outcome: FlushOutcome,
 ) -> Result<(), String> {
+    // 四分支共用的审计出口（设备/会话/正文参数整组一致，只 action × result 不同）——
+    // 收口为局部闭包防参数漂移：audit_write 的调用面只剩「何时记、记什么」两个决策
+    let audit = |conn: &rusqlite::Connection, action: &str, result: &str| {
+        super::audit_write(
+            conn,
+            st,
+            &item.device_id,
+            &item.device_name,
+            &item.agent_type,
+            &item.session_id,
+            &item.content,
+            action,
+            result,
+        );
+    };
     match outcome {
         FlushOutcome::Suspended | FlushOutcome::Deferred => Ok(()),
         FlushOutcome::Sent => {
             inject_queue::mark_sent_conn(conn, item.id, chrono::Utc::now().timestamp_millis());
-            super::audit_write(
-                conn,
-                st,
-                &item.device_id,
-                &item.device_name,
-                &item.agent_type,
-                &item.session_id,
-                &item.content,
-                if jump { "jump" } else { "flush" },
-                "ok",
-            );
+            audit(conn, if jump { "jump" } else { "flush" }, "ok");
             Ok(())
         }
         FlushOutcome::Submitted => {
@@ -528,32 +533,12 @@ pub(crate) fn settle(
             // 三分。Submitted 仅直发分诊产出（jump 以占用排空定论），action 沿
             // 路径标注仅为防呆对称
             inject_queue::mark_sent_conn(conn, item.id, chrono::Utc::now().timestamp_millis());
-            super::audit_write(
-                conn,
-                st,
-                &item.device_id,
-                &item.device_name,
-                &item.agent_type,
-                &item.session_id,
-                &item.content,
-                if jump { "jump" } else { "flush" },
-                "unconfirmed",
-            );
+            audit(conn, if jump { "jump" } else { "flush" }, "unconfirmed");
             Ok(())
         }
         FlushOutcome::Failed(e) => {
             inject_queue::mark_failed_conn(conn, item.id, &e);
-            super::audit_write(
-                conn,
-                st,
-                &item.device_id,
-                &item.device_name,
-                &item.agent_type,
-                &item.session_id,
-                &item.content,
-                "fail",
-                &format!("failed:{e}"),
-            );
+            audit(conn, "fail", &format!("failed:{e}"));
             Err(e)
         }
         FlushOutcome::NotDelivered(reason) => {
@@ -562,14 +547,8 @@ pub(crate) fn settle(
             // 审计 action 沿路径（jump/flush），result=aborted:<原因>——与注入失败
             // （action=fail, failed:e）分列：中止是防护动作，不是通道故障
             inject_queue::mark_failed_conn(conn, item.id, &reason);
-            super::audit_write(
+            audit(
                 conn,
-                st,
-                &item.device_id,
-                &item.device_name,
-                &item.agent_type,
-                &item.session_id,
-                &item.content,
                 if jump { "jump" } else { "flush" },
                 &format!("aborted:{reason}"),
             );

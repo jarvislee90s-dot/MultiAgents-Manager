@@ -57,6 +57,25 @@ pub trait KeyLayout {
     fn scan_of(&self, vk: u16) -> u16;
 }
 
+/// 单键 **down/up 成对**事件（M9R 纪律：字符/键事件一律成对构造，keyup 由各家执行层
+/// 过滤/忽略——本模块五个构造函数共用的最小拼装单元，成对纪律只此一份）。
+fn key_pair(vk: u16, scan: u16, ch: u16) -> [KeyRecordSpec; 2] {
+    [
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch,
+            down: true,
+        },
+        KeyRecordSpec {
+            vk,
+            scan,
+            ch,
+            down: false,
+        },
+    ]
+}
+
 /// 文本 → 键事件序列（一律 keydown+keyup 成对，M9R 按字符分流构造）：
 /// - **ASCII 字符** → VK 形态：`vk = layout.vk_of(c)`（真实布局不可键入时为 0）、
 ///   `scan = layout.scan_of(vk)`、`ch = c`；
@@ -73,35 +92,12 @@ pub fn text_records(text: &str, layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
         if c.is_ascii() {
             let vk = layout.vk_of(c);
             let scan = layout.scan_of(vk);
-            let ch = c as u16;
-            records.push(KeyRecordSpec {
-                vk,
-                scan,
-                ch,
-                down: true,
-            });
-            records.push(KeyRecordSpec {
-                vk,
-                scan,
-                ch,
-                down: false,
-            });
+            records.extend(key_pair(vk, scan, c as u16));
         } else {
             // char::encode_utf16 写入栈上缓冲（单字符最长代理对 2 个 code unit）
             let mut buf = [0u16; 2];
             for unit in c.encode_utf16(&mut buf) {
-                records.push(KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: *unit,
-                    down: true,
-                });
-                records.push(KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: *unit,
-                    down: false,
-                });
+                records.extend(key_pair(0, 0, *unit));
             }
         }
     }
@@ -114,20 +110,7 @@ pub fn text_records(text: &str, layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
 pub fn enter_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
     let vk = layout.vk_of('\r');
     let scan = layout.scan_of(vk);
-    vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0x0D,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0x0D,
-            down: false,
-        },
-    ]
+    Vec::from(key_pair(vk, scan, 0x0D))
 }
 
 /// shift+tab 组合键记录（批次丙 T6：模式切换的主键）。
@@ -140,20 +123,7 @@ pub fn enter_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
 pub fn shift_tab_records(layout: &dyn KeyLayout) -> Vec<KeyRecordSpec> {
     let vk = 0x09u16; // VK_TAB
     let scan = layout.scan_of(vk);
-    vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0,
-            down: false,
-        },
-    ]
+    Vec::from(key_pair(vk, scan, 0))
 }
 
 /// **键注入黑名单**（批次戊 E1⑤，裁19）：禁注键 → `Some(拒绝原因)`；域外/允许键
@@ -205,20 +175,7 @@ pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecor
         }
     };
     let scan = layout.scan_of(vk);
-    Some(vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch,
-            down: false,
-        },
-    ])
+    Some(Vec::from(key_pair(vk, scan, ch)))
 }
 
 /// VT 序列 → 整条字符流事件（A 族方向键等，M6R 定案）：按 `encode_utf16()`
@@ -226,22 +183,7 @@ pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecor
 /// **执行层须整条单批原子写**（M6R：ESC 拆批会被 B 族当按键吃）。
 pub fn vt_seq_records(seq: &str) -> Vec<KeyRecordSpec> {
     seq.encode_utf16()
-        .flat_map(|unit| {
-            [
-                KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: unit,
-                    down: true,
-                },
-                KeyRecordSpec {
-                    vk: 0,
-                    scan: 0,
-                    ch: unit,
-                    down: false,
-                },
-            ]
-        })
+        .flat_map(|unit| key_pair(0, 0, unit))
         .collect()
 }
 
@@ -258,20 +200,7 @@ pub fn vk_arrow_records(seq: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyReco
         _ => return None,
     };
     let scan = layout.scan_of(vk);
-    Some(vec![
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0,
-            down: true,
-        },
-        KeyRecordSpec {
-            vk,
-            scan,
-            ch: 0,
-            down: false,
-        },
-    ])
+    Some(Vec::from(key_pair(vk, scan, 0)))
 }
 
 /// 构造 tmux 发送文本参数：`-l` 字面量 + `--` 终止选项解析。

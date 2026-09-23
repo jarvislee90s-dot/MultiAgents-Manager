@@ -611,8 +611,8 @@ export function RemoteSection() {
                   </Button>
                 </>
               ) : // 运行中但地址尚未解析（cloudflared 启动/重试窗口）：占位提示而非
-                // 空白或旧值——脏/旧地址 + 「已获取」toast 的误导组合已在解析器侧治理
-                channels?.quick?.running && !quickErr ? (
+              // 空白或旧值——脏/旧地址 + 「已获取」toast 的误导组合已在解析器侧治理
+              channels?.quick?.running && !quickErr ? (
                 <span
                   data-testid="quick-fetching"
                   className="text-muted-foreground animate-pulse text-xs"

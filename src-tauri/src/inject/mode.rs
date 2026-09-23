@@ -850,7 +850,7 @@ pub fn mode_switch_block(
     None
 }
 
-/// **codex 模式组运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。///
+/// **codex 模式组运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。
 /// 判据来源：codex 0.155.1 二进制内嵌文案 `Plan mode unavailable right now.`
 /// （`slash_dispatch` 分支，与 `/plan` 的 in-progress 门同源）——即 codex 自己就会
 /// 拒；MAM 侧**在投递前**判，才能给用户一份**如实回执**而不是「已发送」后无变化。
@@ -1211,16 +1211,6 @@ pub fn menu_target_label(tool: &str, target: MamMode) -> Option<&'static str> {
     }
 }
 
-/// **kimi 权限菜单标题锚**（戊探D kimi 段：三份 dump 逐字稳定；与账本同源，见
-/// [`crate::inject::anchor_ledger`] 的 kimi 行）
-pub(crate) const KIMI_MENU_TITLE_ANCHOR: &str = "select permission mode";
-/// **kimi 权限菜单 footer 锚**（同上；kimi 的菜单项在 footer 行**之后**——
-/// footer 紧贴标题下方，项列表在其下，与 codex 的「项在标题与 footer 之间」相反）
-///
-/// **与 codex 新 footer 的辨析**：两者前缀都是 `enter select`，靠后缀区分
-/// （`· esc cancel` vs `· esc back`）——各自只在自己的标题锚之下找，不会互相污染
-/// （账本 `codex_and_kimi_footers_do_not_cross_match` 锁定该不变式）。
-pub(crate) const KIMI_MENU_FOOTER_ANCHOR: &str = "enter select · esc cancel";
 /// kimi 档位行的**当前档后缀**（`← current`；与高亮 `❯` 双标记并存——
 /// `← current` 不随光标移动，是回读当前档的锚，用户 K-1 实测）
 pub(crate) const KIMI_CURRENT_SUFFIX: &str = "current";
@@ -1262,7 +1252,10 @@ pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<Dialog
     let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
     let canon: Vec<(String, &str)> = labels.iter().map(|l| (l.to_lowercase(), *l)).collect();
     // 标题锚分家：codex 优先（其标题词与 kimi 不相交），再 kimi；都无 → 菜单未出现。
-    // codex/kimi 的锚都经**账本**查（真源单点；见 [`crate::inject::anchor_ledger`]）
+    // codex/kimi 的锚都经**账本**查（真源单点；见 [`crate::inject::anchor_ledger`]——
+    // kimi 标题锚 `select permission mode` / footer 锚 `enter select · esc cancel` 同
+    // 在账本 kimi 行；两 footer 前缀相同靠后缀分家，互不污染由账本测试
+    // `codex_and_kimi_footers_do_not_cross_match` 锁定）
     if crate::inject::anchor_ledger::detect(
         &lowered,
         "codex",
@@ -1273,9 +1266,13 @@ pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<Dialog
     {
         return locate_codex_menu(lines, &lowered, &canon);
     }
-    let t = lowered
-        .iter()
-        .position(|l| l.contains(KIMI_MENU_TITLE_ANCHOR))?;
+    let t = crate::inject::anchor_ledger::detect(
+        &lowered,
+        "kimi",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )?
+    .line_index;
     locate_kimi_menu(lines, &lowered, t, &canon)
 }
 
@@ -1636,15 +1633,21 @@ pub(crate) fn residual_overlay_present(lines: &[String]) -> bool {
 
 /// kimi 菜单定位：footer 之后的**两行组**标签行（「恰为 `<档名> ← current` 或裸
 /// `<档名>`」——描述行永不命中，N6 失败行 `Never interrupts you; …` 在此正确归属）。
+/// 标题/footer 锚均经账本查（kimi 的菜单项在 footer 行**之后**——footer 紧贴标题
+/// 下方，项列表在其下，与 codex 的「项在标题与 footer 之间」相反）。
 fn locate_kimi_menu(
     lines: &[String],
     lowered: &[String],
     title_idx: usize,
     canon: &[(String, &str)],
 ) -> Option<Vec<DialogOption>> {
-    let footer_idx = lowered[title_idx..]
-        .iter()
-        .position(|l| l.contains(KIMI_MENU_FOOTER_ANCHOR))?
+    let footer_idx = crate::inject::anchor_ledger::detect(
+        &lowered[title_idx..],
+        "kimi",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::FOOTER,
+    )?
+    .line_index
         + title_idx;
     let mut items: Vec<DialogOption> = Vec::new();
     for line in &lines[footer_idx + 1..] {
@@ -2235,26 +2238,14 @@ where
     W: FnMut(),
     T: MenuTerminal,
 {
-    // ===== 段 0：残留 overlay 清场（菜单或 Full Access 确认框）=====
-    //
-    // 2026-09-23 用户实机走查复盘：残留**确认框**同样必须清（确认框开着时
-    // `/permissions` 被吞、enter 会确认 `1. Yes, continue anyway` = 意外启用
-    // 完全信任）；且 esc 后**必须条件等待锚消失**——esc 到 TUI 重绘完成有时间差，
-    // 立刻开菜单仍可能撞上未消散的旧 overlay（「数字敲在旧对话框里」的根因）。
-    // 固定睡不可靠（condition-based-waiting）：轮询读屏直到锚消失，窗尽如实中止。
-    //
-    // ===== 段 0.5：输入行纯净前置（通用准则，2026-09-23 用户指令）=====
-    //
-    // 「斜杠命令注入前，输入行必须纯净」：残留命令会与本次注入拼接成脏命令
-    // （实测现场 `/permissions/permissions`）。有判据 → backspace 逐字符清 +
-    // **闭环屏读验证**（清完必须纯净，否则如实中止——不盲发脏命令）；判据不可得
     // ===== 段 0 + 段 0.5：残留 overlay 清场 + 输入行纯净（公共前置，见
     // [`codex_preflight`]）=====
     //
     // 2026-09-23 用户实机走查复盘：残留**确认框**同样必须清（确认框开着时
     // `/permissions` 被吞、enter 会确认 `1. Yes, continue anyway` = 意外启用
     // 完全信任）；且 esc 后**必须条件等待锚消失**——esc 到 TUI 重绘完成有时间差，
-    // 立刻开菜单仍可能撞上未消散的旧 overlay（「数字敲在旧对话框里」的根因）。
+    // 立刻开菜单仍可能撞上未消散的旧 overlay（「数字敲在旧对话框里」的根因）；
+    // 固定睡不可靠（condition-based-waiting）：轮询读屏直到锚消失，窗尽如实中止。
     // 通用准则「斜杠命令注入前输入行必须纯净」同在此段（实测现场
     // `/permissions/permissions`）。
     let _ = codex_preflight(terminal)?;

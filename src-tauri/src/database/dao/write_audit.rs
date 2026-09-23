@@ -6,8 +6,6 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::database::connection::DB;
-
 /// 审计行（不含 id / device_id：对外展示只要时间戳与设备名）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,40 +18,6 @@ pub struct AuditRow {
     pub action: String,
     pub summary: String,
     pub result: String,
-}
-
-/// 记录一条审计（全局 DB；签名按契约全参数透传，9 参豁免 too_many_arguments）
-#[allow(clippy::too_many_arguments)]
-pub fn record(
-    ts: i64,
-    device_id: &str,
-    device_name: &str,
-    agent_type: &str,
-    session_id: &str,
-    channel: &str,
-    action: &str,
-    summary: &str,
-    result: &str,
-) {
-    let conn = DB.lock().unwrap();
-    record_conn(
-        &conn,
-        ts,
-        device_id,
-        device_name,
-        agent_type,
-        session_id,
-        channel,
-        action,
-        summary,
-        result,
-    );
-}
-
-/// 最近 limit 条审计，最新在前（全局 DB）
-pub fn recent(limit: i64) -> Vec<AuditRow> {
-    let conn = DB.lock().unwrap();
-    recent_conn(&conn, limit)
 }
 
 /// 记录一条审计（只追加，不更新不删除）

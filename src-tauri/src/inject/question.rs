@@ -437,10 +437,36 @@ pub fn answer_key_sequence_for(
 
 /// kimi Review 汇总屏副题锚（K-5 实录 / 戊探B 实机逐字 `Ready to submit your answers?`；
 /// 单题 Review 屏同样含此行——screen-ki1-b1-after-char3.txt 原件）。
-pub const KIMI_REVIEW_SUMMARY_ANCHOR: &str = "ready to submit your answers?";
+///
+/// **2026-09-23 起真源移入账本**（[`crate::inject::anchor_ledger`] 的
+/// `kimi/question_review/title`）：上游改词时按账本格式**追加**一行即可
+/// （append-only），不必改代码。取不到时回落已入账那一条（编译期常量兜底）。
+pub fn kimi_review_summary_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "kimi",
+        crate::inject::anchor_ledger::scenario::QUESTION_REVIEW,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("ready to submit your answers?")
+}
+
 /// kimi 确认后**终态锚**（transcript `● Collected your answers`，戊探B M1/M2 提交后
 /// 屏读原件逐字；落账侧另有 wire `interaction.resolved` 对账）。
-pub const KIMI_ANSWERED_ANCHOR: &str = "collected your answers";
+///
+/// **2026-09-23 起真源移入账本**（`kimi/question/receipt`）；取不到时回落已入账
+/// 那一条。
+pub fn kimi_answered_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "kimi",
+        crate::inject::anchor_ledger::scenario::QUESTION,
+        crate::inject::anchor_ledger::slot::RECEIPT,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("collected your answers")
+}
 /// kimi Other（自由作答）行标签（`→ [5] Other` 行形；多选形态 Other 行无编号
 /// `[/] Other`——故自由作答只对**单选**放行，多选到终端作答）。
 pub const KIMI_OTHER_ROW_LABEL: &str = "other";
@@ -454,7 +480,7 @@ pub const KIMI_OTHER_ROW_LABEL: &str = "other";
 pub fn kimi_review_present(lines: &[String]) -> bool {
     lines
         .iter()
-        .any(|l| l.to_lowercase().contains(KIMI_REVIEW_SUMMARY_ANCHOR))
+        .any(|l| l.to_lowercase().contains(kimi_review_summary_anchor()))
         && kimi_review_confirm_digit(lines).is_some()
 }
 
@@ -482,7 +508,7 @@ pub fn locate_kimi_other_digit(lines: &[String]) -> Option<String> {
 pub fn kimi_answered_present(lines: &[String]) -> bool {
     lines
         .iter()
-        .any(|l| l.to_lowercase().contains(KIMI_ANSWERED_ANCHOR))
+        .any(|l| l.to_lowercase().contains(kimi_answered_anchor()))
 }
 
 /// kimi 方括号行形解析：`→ [1] Submit` / `  [2] Cancel` → `("1", "Submit")`。
@@ -546,7 +572,7 @@ pub fn kimi_submit_static_keys_refused() -> String {
 /// 2. **Review 汇总屏段**：轮询 [`kimi_review_present`]（副题锚 + `[N]` 确认项）。
 ///    窗内未出现 → 中止，**不发确认键**（与 claude 的「未见 Review 不发数字」同一纪律）；
 /// 3. **确认段**：确认键 = 屏上编号（[`kimi_review_confirm_digit`]，不硬编码）；
-/// 4. **终态段**：轮询 [`KIMI_ANSWERED_ANCHOR`]——未见**不是失败**
+/// 4. **终态段**：轮询 [`kimi_answered_anchor`]——未见**不是失败**
 ///    （`receipt_seen = Some(false)`，调用方如实下发「请人工核对」；落账侧另有 wire
 ///    `interaction.resolved` 对账）。
 pub fn run_kimi_submit_stages<Rd, P, Q, T>(
@@ -576,7 +602,8 @@ where
     // 2. Review 汇总屏（未见即中止，不发确认键）
     let review = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen(format!(
-            "已发 tab 但屏上未出现 Review 汇总屏（未见「{KIMI_REVIEW_SUMMARY_ANCHOR}」）——已中止，未发确认键；请人工核对终端"
+            "已发 tab 但屏上未出现 Review 汇总屏（未见「{}」）——已中止，未发确认键；请人工核对终端",
+            kimi_review_summary_anchor()
         ))
     })?;
     if !kimi_review_present(&review) {
@@ -596,11 +623,7 @@ where
     sent_keys.push(confirm_key);
     terminal.settle();
     // 4. 终态（未见不是失败——语义与 run_submit_stages 同源）
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(kimi_answered_present(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, kimi_answered_present);
     Ok(SubmitOutcome {
         sent_keys,
         down_steps: 0,
@@ -658,7 +681,8 @@ where
     // 4. Review 汇总屏（未见即中止，不发确认键）
     let review = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen(format!(
-            "已保存作答但屏上未出现 Review 汇总屏（未见「{KIMI_REVIEW_SUMMARY_ANCHOR}」）——已中止，未发确认键；请人工核对终端"
+            "已保存作答但屏上未出现 Review 汇总屏（未见「{}」）——已中止，未发确认键；请人工核对终端",
+            kimi_review_summary_anchor()
         ))
     })?;
     if !kimi_review_present(&review) {
@@ -675,11 +699,7 @@ where
     sent_keys.push(confirm_key);
     terminal.settle();
     // 5. 终态
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(kimi_answered_present(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, kimi_answered_present);
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
@@ -700,14 +720,26 @@ pub const CODEX_NOTES_OPEN_FOOTER: &str = "tab to add notes";
 pub const CODEX_NOTES_OPENED_FOOTER: &str = "tab or esc to clear notes";
 /// codex 提交完成**终态锚**（摘要头 `• Questions 1/1 answered`，戊探C 原件；
 /// 落账侧另有 rollout `answers.<qid>` 对账——见 [`codex_user_note_from_output`]）。
-pub const CODEX_ANSWERED_ANCHOR: &str = "answered";
+///
+/// **2026-09-23 起真源移入账本**（`codex/question/receipt`）；取不到时回落已入账
+/// 那一条。
+pub fn codex_answered_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "codex",
+        crate::inject::anchor_ledger::scenario::QUESTION,
+        crate::inject::anchor_ledger::slot::RECEIPT,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("answered")
+}
 
 /// codex 终态在场判定（小写 contains；「answered」是摘要头专属词——弹窗进行中显示
 /// `Question 1/2 (N unanswered)`，语义相反不冲突）
 pub fn codex_answered_present(lines: &[String]) -> bool {
     lines
         .iter()
-        .any(|l| l.to_lowercase().contains(CODEX_ANSWERED_ANCHOR))
+        .any(|l| l.to_lowercase().contains(codex_answered_anchor()))
 }
 
 /// codex **备注自由作答阶段机**：Tab 切备注态 → 打字（字符通道）→ Enter 一次提交
@@ -771,11 +803,7 @@ where
     sent_keys.push("enter".to_string());
     terminal.settle();
     // 5. 终态（未见不是失败）
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(codex_answered_present(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, codex_answered_present);
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
@@ -816,7 +844,19 @@ pub fn codex_user_note_from_output(output: &str) -> Option<String> {
 /// 「enter submit」为 Confirm 页专属词形，题目页是 `enter toggle`）。
 pub const OPENCODE_CONFIRM_FOOTER: &str = "enter submit";
 /// opencode **提交完成锚**（提交后 transcript 摘要段 `# Questions`，戊探A E-A1 原件）。
-pub const OPENCODE_ANSWERED_ANCHOR: &str = "# questions";
+///
+/// **2026-09-23 起真源移入账本**（`opencode/question/receipt`）；取不到时回落
+/// 已入账那一条。
+pub fn opencode_answered_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "opencode",
+        crate::inject::anchor_ledger::scenario::QUESTION,
+        crate::inject::anchor_ledger::slot::RECEIPT,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("# questions")
+}
 /// opencode 自由作答行标签（`Type your own answer`；开启输入行后行下新增**无编号
 /// 占位行**——「输入行已开启」的屏读判据）。
 pub const OPENCODE_OWN_ANSWER_LABEL: &str = "type your own answer";
@@ -832,7 +872,7 @@ pub fn opencode_confirm_present(lines: &[String]) -> bool {
 pub fn opencode_answered_present(lines: &[String]) -> bool {
     lines
         .iter()
-        .any(|l| l.to_lowercase().contains(OPENCODE_ANSWERED_ANCHOR))
+        .any(|l| l.to_lowercase().contains(opencode_answered_anchor()))
 }
 
 /// opencode **own answer 输入行已开启**判定（裸打字守卫的判据面）：开行后行下新增
@@ -906,11 +946,7 @@ where
     sent_keys.push("enter".to_string());
     terminal.settle();
     // 5. 终态（未见不是失败）
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(opencode_answered_present(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, opencode_answered_present);
     Ok(SubmitOutcome {
         sent_keys,
         down_steps: 0,
@@ -994,11 +1030,7 @@ where
     sent_keys.push("enter".to_string());
     terminal.settle();
     // 6. 终态（未见不是失败）
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(opencode_answered_present(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, opencode_answered_present);
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
@@ -1071,18 +1103,70 @@ pub const SUBMIT_FOCUS_MARKER: char = '\u{276F}';
 pub const SUBMIT_ROW_LABEL: &str = "Submit";
 
 /// Review 确认屏的**标题锚**（实机逐字，见模块文档判据表）。
-pub const REVIEW_TITLE_ANCHOR: &str = "review your answers";
+///
+/// **2026-09-23 起真源移入账本**（[`crate::inject::anchor_ledger`] 的
+/// `claude/question_review/title`）：上游改词时按账本格式追加一行即可
+/// （append-only），不必改代码。取不到时回落已入账那一条（编译期常量兜底）。
+pub fn review_title_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::QUESTION_REVIEW,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("review your answers")
+}
+
 /// Review 确认屏的**副题锚**（实机逐字；与标题**任一**在场即判 Review 屏在场）。
 ///
 /// 为什么允许「任一」而不是「必须两者同时」：屏读只读**可见窗口**，而 Review 屏出现
 /// 在提问 UI 的位置——用户终端若字号较大/窗口较矮，标题行可能被滚出可见区（副题与
 /// 选项行仍在）。两个锚都是该屏的**专属文案**（正常对话流不会出现），取「任一在场」
 /// 既保住判据的排他性，又不在矮窗口下误判为缺席。
-pub const REVIEW_SUBTITLE_ANCHOR: &str = "ready to submit";
+///
+/// **2026-09-23 起真源移入账本**（`claude/question_review/present`——副题即确认屏
+/// 在场的证据行）；取不到时回落已入账那一条。
+pub fn review_subtitle_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::QUESTION_REVIEW,
+        crate::inject::anchor_ledger::slot::PRESENT,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("ready to submit")
+}
+
 /// Review 确认屏的确认项文本（实机 `1. Submit answers`）。
-pub const REVIEW_CONFIRM_ANCHOR: &str = "submit answers";
+///
+/// **2026-09-23 起真源移入账本**（`claude/question_review/confirm`）；取不到时回落
+/// 已入账那一条。
+pub fn review_confirm_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::QUESTION_REVIEW,
+        crate::inject::anchor_ledger::slot::CONFIRM,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("submit answers")
+}
+
 /// 确认后**终态锚**（实机 `User answered Claude's questions:`——工具回执落进对话流）。
-pub const ANSWERED_RECEIPT_ANCHOR: &str = "user answered claude";
+///
+/// **2026-09-23 起真源移入账本**（`claude/question/receipt`）；取不到时回落已入账
+/// 那一条。
+pub fn answered_receipt_anchor() -> &'static str {
+    crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::QUESTION,
+        crate::inject::anchor_ledger::slot::RECEIPT,
+    )
+    .first()
+    .map(|r| r.text)
+    .unwrap_or("user answered claude")
+}
 
 /// 自由作答行（TUI 自动追加）的标签文本。**两形态**：单选是 `Type something.`
 /// （带句点）、多选是 `Type something`（无句点）——claude 二进制
@@ -1141,6 +1225,22 @@ impl StageAbort {
 impl std::fmt::Display for StageAbort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
+    }
+}
+
+/// 阶段机**终态轮询的三态归一**（各阶段机末段同形段收口为单一实现）：
+/// `Ok(Some(屏))` → `present` 判终态回执行在场；`Ok(None)` 窗尽未见 →
+/// `Some(false)`（未见**不是失败**——回执行可能被后续输出刷走，调用方如实请人工
+/// 核对）；`Err` 读屏不可用 → `None`（无法核验，不冒充）。
+fn stage_receipt_seen<P, F>(poll: &mut P, present: F) -> Option<bool>
+where
+    P: FnMut() -> Result<Option<Vec<String>>, String>,
+    F: FnOnce(&[String]) -> bool,
+{
+    match poll() {
+        Ok(Some(lines)) => Some(present(&lines)),
+        Ok(None) => Some(false),
+        Err(_) => None,
     }
 }
 
@@ -1216,7 +1316,7 @@ fn probe_submit_row(lines: &[String]) -> ScreenStep {
 }
 
 /// Review 确认屏的**确认项**抽取（判据的单点实现）：屏上**带编号**且文本含
-/// [`REVIEW_CONFIRM_ANCHOR`] 的行 → `(屏上编号, 行原文)`。
+/// [`review_confirm_anchor`] 的行 → `(屏上编号, 行原文)`。
 ///
 /// **为什么返回编号而不只是行原文**：确认键要发的是**屏上那个编号**（不硬编码 `'1'`
 /// ——屏上编号由 TUI 给，抄它比自己编号稳）。编号在这里就解析出来了，调用方拿不到
@@ -1227,7 +1327,7 @@ pub(crate) fn review_confirm_items(lines: &[String]) -> Vec<(u32, String)> {
     lines
         .iter()
         .filter_map(|l| crate::inject::dialog::parse_option_line(l))
-        .filter(|(_, label, _)| label.to_lowercase().contains(REVIEW_CONFIRM_ANCHOR))
+        .filter(|(_, label, _)| label.to_lowercase().contains(review_confirm_anchor()))
         .map(|(num, label, _)| (num, format!("{num}. {label}")))
         .collect()
 }
@@ -1240,7 +1340,7 @@ pub(crate) fn review_confirm_lines(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Review 确认屏的一次屏读探测（判据锚见各常量文档）。`Ready` 载荷 = **该屏行集**
+/// Review 确认屏的一次屏读探测（判据锚见各锚点函数文档）。`Ready` 载荷 = **该屏行集**
 /// （与其它探测器同形态）。
 /// - 命中「标题锚 ∨ 副题锚」且**恰好一行**确认项 → `Ready(屏)`；
 /// - 命中标题/副题但**读不到带编号的确认项** → `Fatal`（Review 屏在场却无法确认，
@@ -1250,7 +1350,7 @@ pub(crate) fn review_confirm_lines(lines: &[String]) -> Vec<String> {
 pub(crate) fn probe_review_screen(lines: &[String]) -> ScreenStep {
     let has_title = lines.iter().any(|l| {
         let low = l.to_lowercase();
-        low.contains(REVIEW_TITLE_ANCHOR) || low.contains(REVIEW_SUBTITLE_ANCHOR)
+        low.contains(review_title_anchor()) || low.contains(review_subtitle_anchor())
     });
     if !has_title {
         return ScreenStep::NotYet(
@@ -1265,12 +1365,13 @@ pub(crate) fn probe_review_screen(lines: &[String]) -> ScreenStep {
         ),
         1 => ScreenStep::Ready(lines.to_vec()),
         n => ScreenStep::Fatal(format!(
-            "Review 确认屏上含「{REVIEW_CONFIRM_ANCHOR}」的编号行有 {n} 行（应恰好 1 行）——不猜，已中止"
+            "Review 确认屏上含「{}」的编号行有 {n} 行（应恰好 1 行）——不猜，已中止",
+            review_confirm_anchor()
         )),
     }
 }
 
-/// **终态锚**探测：屏上是否出现「本问题已答完」的回执行（[`ANSWERED_RECEIPT_ANCHOR`]）。
+/// **终态锚**探测：屏上是否出现「本问题已答完」的回执行（[`answered_receipt_anchor`]）。
 ///
 /// 用于提交/自由作答的最后一段回执核验——**未见不是失败**：回执可能被后续输出刷走，
 /// 也可能该版本的文案不同，调用方据此下发 `Some(false)` 而不是谎报完成（同 `mode`
@@ -1278,7 +1379,7 @@ pub(crate) fn probe_review_screen(lines: &[String]) -> ScreenStep {
 pub(crate) fn probe_answered_receipt(lines: &[String]) -> bool {
     lines
         .iter()
-        .any(|l| l.to_lowercase().contains(ANSWERED_RECEIPT_ANCHOR))
+        .any(|l| l.to_lowercase().contains(answered_receipt_anchor()))
 }
 
 /// 多选题提交的**阶段机编排结果**（[`run_submit_stages`]）。
@@ -1392,7 +1493,9 @@ where
     // ===== 第 4 段：Review 屏（未见即中止，**不发数字**）=====
     let review_lines = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen(format!(
-            "已发回车但屏上未出现 Review 确认屏（未见「{REVIEW_TITLE_ANCHOR}」/「{REVIEW_SUBTITLE_ANCHOR}」）——已中止，未发确认键；请人工核对终端"
+            "已发回车但屏上未出现 Review 确认屏（未见「{}」/「{}」）——已中止，未发确认键；请人工核对终端",
+            review_title_anchor(),
+            review_subtitle_anchor()
         ))
     })?;
     // 复核（轮询拿到的屏再走一次同一判据——轮询闭包与复核用同一份探测器，
@@ -1426,11 +1529,7 @@ where
     //   如实回执 `verified=false` + 请人工核对；
     // - `None`：读屏不可用（`Err`/窗尽无一屏）——无法核验。
     //   三者中后两者都**不**谎报完成，差别只在回执文案的措辞。
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(probe_answered_receipt(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, probe_answered_receipt);
     Ok(SubmitOutcome {
         sent_keys,
         down_steps,
@@ -1631,11 +1730,7 @@ where
     sent_keys.push("enter".to_string());
     terminal.settle();
     // ===== 第 5 段：终态回执核验（未见**不是失败**，同提交路径）=====
-    let receipt_seen = match poll_receipt() {
-        Ok(Some(lines)) => Some(probe_answered_receipt(&lines)),
-        Ok(None) => Some(false),
-        Err(_) => None,
-    };
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, probe_answered_receipt);
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,

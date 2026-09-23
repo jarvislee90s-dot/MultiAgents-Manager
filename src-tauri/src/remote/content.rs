@@ -162,6 +162,22 @@ impl SessionMessage {
         }
     }
 
+    /// 一等计划卡构造（`plan` / `plan-file` 共用形态骨架，五处升格点的差异只在
+    /// kind / content / tool_name）：role=assistant、collapsed=false（一等卡默认
+    /// 展开）、tool_args=None——正文已升格进 content，参数串不再透传
+    fn plan_card(kind: &str, content: String, ts: Option<i64>, tool_name: Option<String>) -> Self {
+        SessionMessage {
+            seq: 0,
+            role: "assistant".to_string(),
+            kind: kind.to_string(),
+            content,
+            ts,
+            tool_name,
+            tool_args: None,
+            collapsed: false,
+        }
+    }
+
     /// assistant 文本条目（批次丙 T4）：含 `<proposed_plan>` 标签时**升格为一等计划卡**
     /// ——剥标签产 `kind="plan"`（与工具参数升格同构，见 [`Self::tool_call`]）。
     /// 返回 `Vec`（可能两条：前导文本 + 计划卡）；无标签 → 单条普通 assistant 消息。
@@ -176,16 +192,7 @@ impl SessionMessage {
                 if !preamble.is_empty() {
                     out.push(Self::text("assistant", preamble, ts));
                 }
-                out.push(Self {
-                    seq: 0,
-                    role: "assistant".to_string(),
-                    kind: "plan".to_string(),
-                    content: plan,
-                    ts,
-                    tool_name: None,
-                    tool_args: None,
-                    collapsed: false, // 一等卡默认展开
-                });
+                out.push(Self::plan_card("plan", plan, ts, None));
                 out
             }
             None => vec![Self::text("assistant", text, ts)],
@@ -201,16 +208,7 @@ impl SessionMessage {
         let text: String = content.into();
         let mut out = vec![Self::text("tool-result", text.clone(), ts)];
         if let Some(path) = extract_plan_file_ref(&text) {
-            out.push(Self {
-                seq: 0,
-                role: "assistant".to_string(),
-                kind: "plan-file".to_string(),
-                content: path,
-                ts,
-                tool_name: None,
-                tool_args: None,
-                collapsed: false, // 一等卡默认展开（入口卡，无需折叠）
-            });
+            out.push(Self::plan_card("plan-file", path, ts, None));
         }
         out
     }
@@ -237,16 +235,7 @@ impl SessionMessage {
                 .and_then(|v| v.get("plan").and_then(|p| p.as_str()).map(String::from));
             if let Some(plan) = plan {
                 if !plan.trim().is_empty() {
-                    return SessionMessage {
-                        seq: 0,
-                        role: "assistant".to_string(),
-                        kind: "plan".to_string(),
-                        content: plan,
-                        ts,
-                        tool_name: name,
-                        tool_args: None,
-                        collapsed: false,
-                    };
+                    return Self::plan_card("plan", plan, ts, name);
                 }
             }
         }
@@ -1644,28 +1633,20 @@ fn kimi_plan_review_parts(v: &serde_json::Value) -> Option<(Option<String>, Opti
 fn kimi_plan_cards(plan: Option<&str>, path: Option<&str>, ts: Option<i64>) -> Vec<SessionMessage> {
     let mut out = Vec::with_capacity(2);
     if let Some(plan) = plan {
-        out.push(SessionMessage {
-            seq: 0,
-            role: "assistant".to_string(),
-            kind: "plan".to_string(),
-            content: plan.to_string(),
+        out.push(SessionMessage::plan_card(
+            "plan",
+            plan.to_string(),
             ts,
-            tool_name: None,
-            tool_args: None,
-            collapsed: false,
-        });
+            None,
+        ));
     }
     if let Some(path) = path {
-        out.push(SessionMessage {
-            seq: 0,
-            role: "assistant".to_string(),
-            kind: "plan-file".to_string(),
-            content: path.to_string(),
+        out.push(SessionMessage::plan_card(
+            "plan-file",
+            path.to_string(),
             ts,
-            tool_name: None,
-            tool_args: None,
-            collapsed: false,
-        });
+            None,
+        ));
     }
     out
 }

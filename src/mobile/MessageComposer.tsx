@@ -81,9 +81,6 @@ interface MessageComposerProps {
   session: { id: string };
 }
 
-/** 回执条状态（与 SendResult 对应 + 网络层 ApiError 归入 failed；
- *  gone = 中性收敛（评审裁决）：条目经复核确认已离开队列——大概率已被送达，
- *  不标失败红色、不带「（可重试）」，防止用户重发造成重复注入） */
 /** 待发附件条目（组件内态）：status=uploading → ready/failed；
  *  path = 服务端落盘后的绝对路径（仅 ready 有） */
 type PendingAttachment = {
@@ -95,6 +92,9 @@ type PendingAttachment = {
   error?: string;
 };
 
+/** 回执条状态（与 SendResult 对应 + 网络层 ApiError 归入 failed；
+ *  gone = 中性收敛（评审裁决）：条目经复核确认已离开队列——大概率已被送达，
+ *  不标失败红色、不带「（可重试）」，防止用户重发造成重复注入） */
 type Receipt =
   | { kind: "delivered" }
   | {

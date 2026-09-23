@@ -175,7 +175,6 @@ const SHIFT_PRESSED: u32 = 0x0010;
 /// 依据 M6R §8.1 定案：vk = VkKeyScanW(ch) & 0xFF，scan = MapVirtualKeyW(vk)。
 pub(crate) struct WinKeyLayout;
 
-#[cfg(windows)]
 impl KeyLayout for WinKeyLayout {
     /// 字符 → 虚拟键码：`'\r'` 直返 VK_RETURN（控制字符的 VkKeyScanW 语义不可靠，
     /// 回车 VK 形态三家统一）；非 ASCII → 0（纯字符流，与现役 ConIn.ps1 口径
@@ -474,6 +473,26 @@ fn inject_via<T>(pid: u32, write: impl FnOnce(HANDLE) -> Result<T, String>) -> R
     // _guard 在此 Drop → FreeConsole 复位（无论成败；幂等，M6 探测实证）
 }
 
+/// CONOUT$ 屏读的临界区骨架（[`inject_via`] 的读侧同款）：锁 → [`resolve_target`]
+/// → attach → [`AttachGuard`] → `open_conout` → 读闭包 → CloseHandle → Drop 复位。
+/// [`read_input_tail`] 与 [`read_screen_window`] 共用——读侧同样独占附加态
+/// （Task 4），两处各写一遍即锁纪律漂移面。
+fn read_via<T>(pid: u32, read: impl FnOnce(HANDLE) -> Result<T, String>) -> Result<T, String> {
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let target = resolve_target(pid)?;
+    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
+    let _guard = AttachGuard;
+    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
+    let handle = unsafe { open_conout() }?;
+    let result = read(handle);
+    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result
+    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+}
+
 /// 文本注入（「打字 + 回车」铁则，M9R spec 感知版）：正文按 [`text_records`]
 /// 分流构造（ASCII 走 VK 形态、非 ASCII 走 vk=0 字符流）+ 尾部 VK 形态回车
 /// 事件对（固定 [`families::SUBMIT_DELAY_MS`] 后单批提交）。自适应节流与真总
@@ -604,23 +623,10 @@ pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), Str
 /// 「同行向前」以屏幕缓冲**视觉行**为准——输入行逻辑折行时只能读到光标所在的
 /// 最后一视觉行，读不到上一视觉行的行首部分。
 ///
-/// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——
-/// 锁 → [`resolve_target`]（无锁内部版，调用方持锁）→ attach → [`AttachGuard`]
-/// → CONOUT$ 读 → CloseHandle → guard Drop 复位 → 解锁。
+/// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——见
+/// [`read_via`]（读侧临界区骨架）。
 pub(crate) fn read_input_tail(pid: u32, n: usize) -> Result<String, String> {
-    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
-    let target = resolve_target(pid)?;
-    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
-    let _guard = AttachGuard;
-    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
-    let handle = unsafe { open_conout() }?;
-    let result = read_tail_chars(handle, n);
-    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    result
-    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+    read_via(pid, |handle| read_tail_chars(handle, n))
 }
 
 /// 屏读实现体（[`read_input_tail`] 已开 CONOUT$ 句柄）：`GetConsoleScreenBufferInfo`
@@ -676,20 +682,11 @@ fn read_tail_chars(handle: HANDLE, n: usize) -> Result<String, String> {
 ///
 /// 失败语义：任何 FFI 失败 → Err（调用方按「屏读失败」降级——T5 红线 3/4：屏读
 /// 失败必须降级为二元卡 + 人工核对提示，不猜）。
+///
+/// 锁纪律：全程与注入共用 [`CONSOLE_OP`] 单临界区（毒锁恢复同既有）——见
+/// [`read_via`]（读侧临界区骨架）。
 pub(crate) fn read_screen_window(pid: u32) -> Result<Vec<String>, String> {
-    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
-    let target = resolve_target(pid)?;
-    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
-    let _guard = AttachGuard;
-    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
-    let handle = unsafe { open_conout() }?;
-    let result = read_window_lines(handle);
-    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    result
-    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+    read_via(pid, read_window_lines)
 }
 
 /// 可见窗口逐行读取实现体（[`read_screen_window`] 已开 CONOUT$ 句柄）。
@@ -735,36 +732,28 @@ fn read_window_lines(handle: HANDLE) -> Result<Vec<String>, String> {
 /// ≤ [`families::DRAIN_TO`]（15ms 步距）或超时——达标 `Ok(true)`、超时
 /// `Ok(false)`（调用方报「投递超时」）、基础设施失败 `Err` 上抛（调用方
 /// best-effort 以「写入成功」为准处理）。与注入共用 [`CONSOLE_OP`] 串行
-/// （附加态互斥；锁纪律与 [`read_input_tail`] 同款：锁 → resolve → attach →
-/// guard → CONIN$ 查询 → CloseHandle → guard Drop 复位 → 解锁）。
+/// （附加态互斥；锁在此取一次，CONIN$ 句柄的临界区骨架复用 [`inject_via`]——
+/// 与注入同一纪律：锁 → resolve → attach → guard → CONIN$ 查询 → CloseHandle →
+/// guard Drop 复位 → 解锁）。
 pub(crate) fn wait_input_drained(pid: u32, timeout_ms: u64) -> Result<bool, String> {
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
-    let target = resolve_target(pid)?;
-    attach(target).map_err(|code| format!("AttachConsole(pid={target}) 失败（0x{code:08X}）"))?;
-    let _guard = AttachGuard;
-    // SAFETY: FFI 调用；句柄生命周期收敛于本函数（下方无条件 CloseHandle）
-    let handle = unsafe { open_conin() }?;
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let result = loop {
-        match query_pending(handle) {
-            Ok(pending) => {
-                if pending <= families::DRAIN_TO {
-                    break Ok(true);
+    inject_via(pid, |handle| {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            match query_pending(handle) {
+                Ok(pending) => {
+                    if pending <= families::DRAIN_TO {
+                        return Ok(true);
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                    sleep(DRAIN_POLL_GAP);
                 }
-                if Instant::now() >= deadline {
-                    break Ok(false);
-                }
-                sleep(DRAIN_POLL_GAP);
+                Err(e) => return Err(e),
             }
-            Err(e) => break Err(e),
         }
-    };
-    // SAFETY: FFI 调用；handle 为本函数刚打开的内核句柄
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    result
-    // _guard 在此 Drop → FreeConsole 复位；_lock 在此释放
+    })
 }
 
 /// 旧薄壳（保留供 trait 默认路径与既有调用编译）：无族回退 [`families::FALLBACK_SPEC`]

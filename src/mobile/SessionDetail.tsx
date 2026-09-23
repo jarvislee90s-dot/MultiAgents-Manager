@@ -96,6 +96,14 @@ function resumeUnavailableReason(session: Session): string | null {
   return null;
 }
 
+/** 一键打开的失败文案（catch 分支）：按后端 404 哨兵码分診，未知码回落通用文案 */
+function resumeOpenErrorText(code: string | undefined): string {
+  if (code === "no_cwd") return "打开失败：该会话没有项目目录信息";
+  if (code === "no_resume_command") return "打开失败：该工具 resume 命令待查证";
+  if (code === "no_session") return "打开失败：会话已不在当前列表";
+  return "打开失败，请稍后重试";
+}
+
 interface SessionDetailProps {
   /** 完整会话对象（Task 8 裁决：详情页需要 status 判定自动折叠、projectName 页头、
    *  agentType；比传 id+agentType 再反查简单） */
@@ -283,15 +291,15 @@ function linkifyMarkdown(text: string, files: string[]): string {
   return out;
 }
 
+/** 链接化分段元素：文本段或命中已知路径的文件段 */
+type LinkSegment = { type: "text" | "file"; value: string };
+
 /** 纯文本分段链接化：按已知路径把正文切成文本段与文件段（thinking / tool-result 用） */
-function linkifySegments(
-  text: string,
-  files: string[]
-): Array<{ type: "text" | "file"; value: string }> {
-  let segments: Array<{ type: "text" | "file"; value: string }> = [{ type: "text", value: text }];
+function linkifySegments(text: string, files: string[]): LinkSegment[] {
+  let segments: LinkSegment[] = [{ type: "text", value: text }];
   for (const p of files) {
     if (!p) continue;
-    const next: Array<{ type: "text" | "file"; value: string }> = [];
+    const next: LinkSegment[] = [];
     for (const seg of segments) {
       if (seg.type !== "text" || !seg.value.includes(p)) {
         next.push(seg);
@@ -803,15 +811,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       }
     } catch (e) {
       const code = e instanceof ApiError ? (e.data?.error as string | undefined) : undefined;
-      setOpenError(
-        code === "no_cwd"
-          ? "打开失败：该会话没有项目目录信息"
-          : code === "no_resume_command"
-            ? "打开失败：该工具 resume 命令待查证"
-            : code === "no_session"
-              ? "打开失败：会话已不在当前列表"
-              : "打开失败，请稍后重试"
-      );
+      setOpenError(resumeOpenErrorText(code));
     } finally {
       setOpening(false);
     }
@@ -1346,13 +1346,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   }
             }
           >
-            {preview.view === "list" ? (
-              <div
-                data-testid="preview-shell"
-                data-view="list"
-                data-mode={preview.mode}
-                className="h-full"
-              >
+            <div
+              data-testid="preview-shell"
+              data-view={preview.view}
+              data-mode={preview.mode}
+              className="h-full"
+            >
+              {preview.view === "list" ? (
                 <FilePanel
                   entries={fileEntries}
                   truncated={fileTruncated}
@@ -1365,14 +1365,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   fontScale={fontScale}
                   onClose={closePreview}
                 />
-              </div>
-            ) : (
-              <div
-                data-testid="preview-shell"
-                data-view="file"
-                data-mode={preview.mode}
-                className="h-full"
-              >
+              ) : (
                 <FilePreview
                   session={session}
                   filePath={preview.path}
@@ -1382,8 +1375,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   onBack={preview.backToList ? backToList : undefined}
                   onClose={closePreview}
                 />
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       ) : (
