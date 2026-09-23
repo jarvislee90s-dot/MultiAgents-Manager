@@ -5119,6 +5119,10 @@ fn menu_stages(
                 || poll_receipt(pid, tool, target, RECEIPT_POLL_TOTAL_MS),
                 // 相邻步骤硬性 ≥0.5s（用户指令 2026-09-23：轮询+硬控并存取最大）
                 || {
+                    log::info!(
+                        "codex 权限切换：步骤间硬性等待 {}ms",
+                        crate::inject::timing::MODE_STEP_MIN_GAP_MS
+                    );
                     std::thread::sleep(std::time::Duration::from_millis(
                         crate::inject::timing::MODE_STEP_MIN_GAP_MS,
                     ));
@@ -5200,7 +5204,9 @@ fn menu_stages(
 #[cfg(windows)]
 fn poll_menu_digit(pid: u32, target: crate::inject::mode::MamMode) -> Result<String, String> {
     use crate::inject::mode::PollStep;
-    let rounds = crate::inject::timing::poll_rounds(MENU_POLL_TOTAL_MS).max(1);
+    let rounds =
+        crate::inject::timing::poll_rounds(crate::inject::timing::CODEX_MENU_OPEN_POLL_TOTAL_MS)
+            .max(1);
     let mut last: Option<String> = None;
     for i in 0..rounds {
         match crate::inject::windows_console::read_screen_window(pid) {

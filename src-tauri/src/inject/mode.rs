@@ -1380,49 +1380,52 @@ pub(crate) const CODEX_COMPOSER_PLACEHOLDERS: [&str; 1] = ["ask codex to do anyt
 /// 输入行清理的单次 backspace 上限（防呆：真实残留远小于此；超标按上限清）。
 pub(crate) const COMPOSER_CLEAR_MAX_KEYS: usize = 64;
 
-/// **输入行残留判定**（纯函数）——通用准则「**斜杠命令注入前，输入行必须纯净**」
-/// （2026-09-23 用户指令）的 codex 判据。返回 `Some(可见字符数)` = composer 有残留
-/// （须清理后再发命令，否则 `/permissions` 会与残留拼接成 `/permissions/permissions`
-/// 之类的脏命令——用户实机走查事故现场）；`None` = 纯净或判据不可得。
+/// 提取 codex **composer 行的文本**（剥光标标记、trim；找不到 composer 行 → None）。
+/// [`composer_residue`] 与段 2 窗尽兜底（判「/permissions 是否还留在输入行未执行」）
+/// 共用此提取（单一实现）。
 ///
-/// # 判据（自底向上，全部复用既有单点）
-///
-/// 1. **footer 行** = 最后一条含状态栏分隔符 ` · ` 的行（与 [`parse_codex_footer`]
-///    同锚——composer 恒在底栏之上）；
-/// 2. **composer 行** = footer 之上最近的一条**光标标记行**（[`crate::inject::dialog::
-///    strip_cursor_marker`]，标记集合覆盖 ›/❯/▶/>——composer 前缀码点无档案记录，
-///    用集合不押单一码点；只认「带标记」的行，纯空白缩进行不误命中）；
-/// 3. 剥标记 trim 后：**空** → 纯净；**命中占位词表** → 纯净（空输入行显示提示词，
-///    屏读与真实输入同形只能按词豁免）；否则 → 残留（字符数 = 清理键数）。
-///
-/// # 判据不可得 → `None`（放行）
-///
-/// 找不到 footer/composer 行（屏读异常、形态漂移）时**不阻断**——与守卫原则
-/// 「判不清放行」同口径：主流程后续各段（菜单轮询、编号读取、回执核验）的屏读
-/// 验证兜底。**已知边界**：历史回显（如已执行过的 `› /permissions`）位于对话流
-/// 中部、不满足「footer 之上最近标记行」，天然不误判（夹具
-/// `codex-input-residue.txt` 锁定）。
-pub(crate) fn composer_residue(lines: &[String]) -> Option<usize> {
+/// 判据（自底向上）：footer 行 = 最后一条含状态栏分隔符 ` · ` 的行（与
+/// [`parse_codex_footer`] 同锚，composer 恒在底栏之上）；composer 行 = footer 之上
+/// 最近的一条**光标标记行**（[`crate::inject::dialog::strip_cursor_marker`]，标记
+/// 集合覆盖 ›/❯/▶/>）。**实机取证（2026-09-23 探针
+/// `codex_composer_codepoint_live_probe`）**：codex composer 前缀 = `›`(U+203A)+
+/// 空格，与菜单高亮同字符——探针输出锁定，不再凭图像猜码点。
+pub(crate) fn codex_composer_text(lines: &[String]) -> Option<String> {
     let footer_idx = lines.iter().rposition(|l| l.contains(" · "))?;
     for line in lines[..footer_idx].iter().rev() {
         let (rest, highlighted) = crate::inject::dialog::strip_cursor_marker(line);
         if !highlighted {
             continue; // 无光标标记前缀 → 不是 composer 行
         }
-        let text = rest.trim();
-        if text.is_empty() {
-            return None;
-        }
-        let lower = text.to_lowercase();
-        if CODEX_COMPOSER_PLACEHOLDERS
-            .iter()
-            .any(|p| lower.contains(p))
-        {
-            return None;
-        }
-        return Some(text.chars().count());
+        return Some(rest.trim().to_string());
     }
     None
+}
+
+/// **输入行残留判定**（纯函数）——通用准则「**斜杠命令注入前，输入行必须纯净**」
+/// （2026-09-23 用户指令）的 codex 判据。返回 `Some(可见字符数)` = composer 有残留
+/// （须清理后再发命令，否则 `/permissions` 会与残留拼接成 `/permissions/permissions`
+/// 之类的脏命令——用户实机走查事故现场）；`None` = 纯净或判据不可得。
+///
+/// 纯净 = composer 文本为空，或命中**占位词表**（空输入行显示提示词，屏读与真实
+/// 输入同形只能按词豁免；版本改词会导致「恒判残留」→ 守卫按 fail-safe 中止不误发，
+/// 届时更新词表即可）。**判据不可得 → `None`（放行）**：与守卫原则「判不清放行」
+/// 同口径，主流程后续各段的屏读验证兜底。**已知边界**：历史回显（如已执行过的
+/// `› /permissions`）位于对话流中部、不满足「footer 之上最近标记行」，天然不误判
+/// （夹具 `codex-input-residue.txt` 锁定）。
+pub(crate) fn composer_residue(lines: &[String]) -> Option<usize> {
+    let text = codex_composer_text(lines)?;
+    if text.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    if CODEX_COMPOSER_PLACEHOLDERS
+        .iter()
+        .any(|p| lower.contains(p))
+    {
+        return None;
+    }
+    Some(text.chars().count())
 }
 
 /// **残留 overlay 判定**（纯函数）：发 `/permissions` 前的一拍屏读里，是否已有
@@ -2110,7 +2113,27 @@ where
     // 见 [`crate::inject::timing::MODE_STEP_MIN_GAP_MS`]。
     wait_floor();
     // ===== 段 2：数字直达 =====
-    let digit = poll_digit()?;
+    let digit = match poll_digit() {
+        Ok(d) => d,
+        Err(why) => {
+            // **窗尽兜底（2026-09-23 用户实测：菜单迟迟未出现）**：enter 落下时
+            // codex TUI 可能正忙（如 MCP 报错刷屏/重绘），命令**没被提交**——
+            // `/permissions` 还留在输入行。判据 = composer 文本含 `/permissions`
+            // → **补发一次 enter**（命令文本还在，不重复注入）再等一窗；composer
+            // 干净/读不到屏 → 无从补救，如实失败。
+            let leftover = terminal
+                .read()
+                .and_then(|l| codex_composer_text(&l))
+                .is_some_and(|t| t.contains("/permissions"));
+            if !leftover {
+                return Err(why);
+            }
+            log::info!("codex 权限切换：菜单窗尽且输入行仍有 /permissions（enter 未生效）→ 补发一次 enter 再等一窗");
+            terminal.send("enter")?;
+            terminal.settle();
+            poll_digit()?
+        }
+    };
     terminal.send(&digit)?;
     terminal.settle();
     let menu_keys = vec![digit];
@@ -5012,6 +5035,98 @@ mod tests {
         assert_eq!(opens, 1, "清干净才开菜单");
         assert_eq!(out.menu_keys, vec!["1"]);
         assert_eq!(out.receipt_seen, Some(true));
+    }
+
+    /// **段 2 窗尽兜底：/permissions 留在输入行未提交 → 补发一次 enter**（2026-09-23
+    /// 用户实测：codex TUI 忙时 enter 被吞，菜单根本没开——轮询窗尽后检查输入行，
+    /// 命令还在就补提交再等一窗；脚本：①干净屏 ②enter 被吞（/permissions 停在
+    /// composer）③补 enter 后菜单画出 ④回执。
+    #[test]
+    fn stage_flow_digit_reenter_when_command_not_submitted() {
+        use std::cell::Cell;
+        use std::cell::RefCell;
+        // 场景脚本（按 digit 轮询的「窗」划分）：
+        //   第一窗：窗尽 Err（菜单未出现）；窗尽后 read → composer 留着 /permissions
+        //   补 enter → 第二窗：Ready("1")
+        let digit_calls = Cell::new(0usize);
+        let clean = lines(&["  glm-5.3-flash medium · ~\\proj-codex"]);
+        let unsubmitted = lines(&[
+            "\u{276f} /permissions",
+            "  glm-5.3-flash medium · ~\\proj-codex",
+        ]);
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let outcome = run_codex_permission_stages(
+            MamMode::ReadOnly,
+            || Ok(()), // 开菜单（opens 断言不在本用例重点）
+            || {
+                if digit_calls.get() == 0 {
+                    digit_calls.set(1);
+                    Err("codex 的权限菜单未出现或读不到档位表（不盲发数字键）".to_string())
+                } else {
+                    Ok("1".to_string())
+                }
+            },
+            || Ok(None),
+            || Ok(None),
+            || {}, // wait_floor
+            &mut Closures {
+                // 段 0 读干净屏；窗尽兜底读 → composer 留着 /permissions 的屏
+                read: || {
+                    if digit_calls.get() == 0 {
+                        Some(clean.clone())
+                    } else {
+                        Some(unsubmitted.clone())
+                    }
+                },
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        let out = outcome.expect("补发 enter 后全链走通");
+        assert_eq!(
+            sent.borrow().first().map(|s| s.as_str()),
+            Some("enter"),
+            "补发的 enter 是第一个键"
+        );
+        assert_eq!(sent.borrow().last().map(|s| s.as_str()), Some("1"));
+        assert_eq!(out.menu_keys, vec!["1"]);
+        // 对照：composer 干净（无 /permissions）时窗尽 → 如实失败、不补 enter
+        let read_hits = Cell::new(0usize);
+        let sent2: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let digit_calls2 = Cell::new(0usize);
+        let err = run_codex_permission_stages(
+            MamMode::ReadOnly,
+            || Ok(()),
+            || {
+                digit_calls2.set(digit_calls2.get() + 1);
+                Err("窗尽".to_string())
+            },
+            || Ok(None),
+            || Ok(None),
+            || {},
+            &mut Closures {
+                read: || {
+                    read_hits.set(read_hits.get() + 1);
+                    Some(clean.clone())
+                },
+                send: |k: &str| {
+                    sent2.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        assert!(err.is_err(), "无残留可补 → 如实失败");
+        assert!(
+            sent2.borrow().is_empty(),
+            "composer 干净时窗尽零投递：{:?}",
+            sent2.borrow()
+        );
+        assert_eq!(digit_calls2.get(), 1, "只轮询了一窗");
+        let _ = read_hits.get();
     }
 
     /// **段 0.5：清不净 → 如实中止**（backspace 后屏上仍是残留 = 删除键未生效/

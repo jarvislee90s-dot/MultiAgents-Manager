@@ -137,6 +137,13 @@ pub const DIGIT_VERIFY_POLL_TOTAL_MS: u64 = 1_500;
 /// 慢时由轮询窗继续兜底。数字直达慢终端实测的兜底之一；若实测不足再按实机回填。
 pub const MODE_STEP_MIN_GAP_MS: u64 = 500;
 
+/// **codex 权限菜单「打开」专用轮询窗**（毫秒；2026-09-23 用户实测放宽）：
+/// 数字直达的步骤②等菜单出现用的窗。用户环境（MCP 报错刷屏、TUI 忙）实测
+/// `/permissions` 后菜单渲染可能明显超过通用三窗的 1500ms → codex 开菜单窗
+/// **放宽到 3000ms**（只影响失败路径的等待时长，成功路径不变）。kimi 菜单仍用
+/// [`MENU_POLL_TOTAL_MS`]（本常量不被 kimi 消费）。
+pub const CODEX_MENU_OPEN_POLL_TOTAL_MS: u64 = 3_000;
+
 /// **插队「等回合停」**轮询窗（毫秒）：Esc 中断之后、投递正文之前，屏读轮询等
 /// claude 底栏的**忙态串消失**（判据见 `confirm::TURN_BUSY_MARKER`）——即「回合真的
 /// 停下来了」。
