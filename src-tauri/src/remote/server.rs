@@ -388,6 +388,10 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // 覆盖，新端点不需要各自鉴权代码）
         .route("/session-mode", get(api::session_mode))
         .route("/session-mode/switch", post(api::session_mode_switch))
+        // 2026-09-23 用户方案：codex 权限组的「终端菜单单选题」——open/pick 两动作
+        // （POST）+ 纯屏读重同步（GET，零注入）
+        .route("/session-mode/menu", post(api::session_mode_menu))
+        .route("/session-mode/menu", get(api::session_mode_menu_read))
         // 2026-09-20：移动端附件上传（落盘会话工作目录 .mam-attachments/<会话>/，
         // 路径随消息内联标记注入；PIN 门禁内层 gate 结构性覆盖；20MB 显式上限——
         // axum 默认 2MB；超限时 handler 先按 Content-Length 预检给结构化 413）
@@ -9111,7 +9115,10 @@ mod tests {
         assert_eq!(groups[0]["readback"], true);
         // 档位：模式组 [操作(可选), 计划(可选)] = shift+tab toggle；权限组 [只读, 默认, 完全信任]
         assert_eq!(groups[0]["layout"], "toggle", "codex 模式组=单钮 toggle");
-        assert_eq!(groups[1]["layout"], "tiers");
+        assert_eq!(
+            groups[1]["layout"], "picker",
+            "codex 权限组=单选面板（2026-09-23 用户方案：读回终端菜单选项供用户点选）"
+        );
         let mode_tiers = groups[0]["tiers"].as_array().unwrap();
         assert_eq!(mode_tiers[0]["mode"], "default");
         assert_eq!(mode_tiers[0]["label"], "操作");

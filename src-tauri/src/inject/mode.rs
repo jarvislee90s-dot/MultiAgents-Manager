@@ -297,6 +297,11 @@ pub enum GroupLayout {
     /// 单钮 toggle（点击=向终端发一次循环键，目标档由前端按当前档翻转——
     /// codex 模式组的「计划 ⇄ 操作」= shift+tab，2026-09-23 用户实测裁决）
     Toggle,
+    /// **单选面板**（2026-09-23 用户方案）：单钮「切换权限」→ 点开后由后端**读回
+    /// 终端菜单的选项表**（编号 = 屏上实读值、文本 = 屏上原文）→ 用户点选哪项，
+    /// MAM 就敲哪个数字键。**MAM 不再猜「该敲哪个数」**——codex 权限组用此布局
+    /// （档位编号随 Guardian 配置前移，硬编码「4→1」会错）。
+    Picker,
 }
 
 impl GroupLayout {
@@ -305,6 +310,7 @@ impl GroupLayout {
         match self {
             Self::Tiers => "tiers",
             Self::Toggle => "toggle",
+            Self::Picker => "picker",
         }
     }
 }
@@ -553,7 +559,10 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 step: false,
                 // 权限档**没有**底栏回读源（实测底栏只有模式文本）→ 前端「请人工核对」
                 readback: false,
-                layout: GroupLayout::Tiers,
+                // **单选面板**（2026-09-23 用户方案）：MAM 读回终端菜单的选项表交给
+                // 用户点，点哪项敲哪个数字键——不再由后端猜「该敲哪个数」（档位编号
+                // 随 Guardian 配置前移，硬编码「4→1」会错）
+                layout: GroupLayout::Picker,
                 tiers: &CODEX_PERMISSION_TIERS,
                 legacy: &CODEX_PERMISSION_LEGACY,
             },
@@ -1202,14 +1211,15 @@ pub fn menu_target_label(tool: &str, target: MamMode) -> Option<&'static str> {
     }
 }
 
-/// **codex 权限菜单标题锚**（戊探D：4 份 dump 逐字唯一出现，短语锚最稳）
-pub(crate) const CODEX_MENU_TITLE_ANCHOR: &str = "update model permissions";
-/// **codex 权限菜单 footer 锚**（同上；与标题框出菜单窗，窗内编号行才参与定位）
-pub(crate) const CODEX_MENU_FOOTER_ANCHOR: &str = "press enter to confirm or esc to go back";
-/// **kimi 权限菜单标题锚**（戊探D kimi 段：三份 dump 逐字稳定）
+/// **kimi 权限菜单标题锚**（戊探D kimi 段：三份 dump 逐字稳定；与账本同源，见
+/// [`crate::inject::anchor_ledger`] 的 kimi 行）
 pub(crate) const KIMI_MENU_TITLE_ANCHOR: &str = "select permission mode";
 /// **kimi 权限菜单 footer 锚**（同上；kimi 的菜单项在 footer 行**之后**——
 /// footer 紧贴标题下方，项列表在其下，与 codex 的「项在标题与 footer 之间」相反）
+///
+/// **与 codex 新 footer 的辨析**：两者前缀都是 `enter select`，靠后缀区分
+/// （`· esc cancel` vs `· esc back`）——各自只在自己的标题锚之下找，不会互相污染
+/// （账本 `codex_and_kimi_footers_do_not_cross_match` 锁定该不变式）。
 pub(crate) const KIMI_MENU_FOOTER_ANCHOR: &str = "enter select · esc cancel";
 /// kimi 档位行的**当前档后缀**（`← current`；与高亮 `❯` 双标记并存——
 /// `← current` 不随光标移动，是回读当前档的锚，用户 K-1 实测）
@@ -1251,8 +1261,16 @@ pub(crate) const KIMI_CURRENT_SUFFIX: &str = "current";
 pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<DialogOption>> {
     let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
     let canon: Vec<(String, &str)> = labels.iter().map(|l| (l.to_lowercase(), *l)).collect();
-    // 标题锚分家：codex 优先（其标题词与 kimi 不相交），再 kimi；都无 → 菜单未出现
-    if lowered.iter().any(|l| l.contains(CODEX_MENU_TITLE_ANCHOR)) {
+    // 标题锚分家：codex 优先（其标题词与 kimi 不相交），再 kimi；都无 → 菜单未出现。
+    // codex/kimi 的锚都经**账本**查（真源单点；见 [`crate::inject::anchor_ledger`]）
+    if crate::inject::anchor_ledger::detect(
+        &lowered,
+        "codex",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .is_some()
+    {
         return locate_codex_menu(lines, &lowered, &canon);
     }
     let t = lowered
@@ -1263,13 +1281,25 @@ pub fn locate_menu_items(lines: &[String], labels: &[&str]) -> Option<Vec<Dialog
 
 /// codex 菜单**锚窗**（标题锚行 → footer 锚行的行区间；两锚都在才成窗）。
 /// [`locate_codex_menu`] 与 [`codex_permission_digit_probe`] 共用（同一判据单一实现）。
+///
+/// **两锚均经账本查**（[`crate::inject::anchor_ledger`]）：footer 自 0.156.1 起有
+/// 两个变体（`press enter to confirm or esc to go back` / `enter select · esc back`），
+/// 账本「认任意一句」——写死单句正是 2026-09-23 实机事故的根因。
 fn codex_menu_window(lowered: &[String]) -> Option<(usize, usize)> {
-    let title_idx = lowered
-        .iter()
-        .position(|l| l.contains(CODEX_MENU_TITLE_ANCHOR))?;
-    let footer_idx = lowered[title_idx..]
-        .iter()
-        .position(|l| l.contains(CODEX_MENU_FOOTER_ANCHOR))?
+    let title_idx = crate::inject::anchor_ledger::detect(
+        lowered,
+        "codex",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )?
+    .line_index;
+    let footer_idx = crate::inject::anchor_ledger::detect(
+        &lowered[title_idx..],
+        "codex",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::FOOTER,
+    )?
+    .line_index
         + title_idx;
     Some((title_idx, footer_idx))
 }
@@ -1303,9 +1333,59 @@ fn locate_codex_menu(
     Some(items)
 }
 
-/// codex 权限菜单的**数字直达探测**（2026-09-23 用户实测裁决：菜单开着时按档位
-/// 数字键直接选中并生效——1/2/3 一次直达、4 弹二阶段确认框再按 1。取代方向键
-/// 闭环成为 codex 权限组第二段，台账「codex 模式切换改造」节登记）。
+/// codex 权限菜单的**选项清单**（单一实现）：窗内编号行 → 结构化选项表，**编号取
+/// 屏上实读值**（不是自编序号）。
+///
+/// 这是 picker（移动端「终端菜单单选题」面板）与既有数字直达
+/// （[`codex_permission_digit_probe`]）**共用**的一步——两者都从屏上读出「屏上编号 +
+/// 屏上原文」，差别只在消费者：前者把整表交给用户点，后者按目标档挑一行取编号。
+///
+/// # 为什么编号必须取屏上实读值（而不是像 [`locate_codex_menu`] 那样按出现顺序自编）
+///
+/// Guardian 关闭时 `Approve for me` 会**缺席**、其后档位编号前移（实机已见
+/// `(non-admin sandbox)` 这类形态变体）——用户看到的编号是屏上印的那个，MAM 敲的
+/// 必须**同一个数**。自编序号只在「菜单整齐从 1 连续」时与屏上一致，一旦缺档就错位。
+///
+/// # 过滤（两道，都必要）
+///
+/// 1. **锚窗**：只在标题↔footer 之间取行——窗外的正文（busy 混屏流式行、历史摘要
+///    编号行）天然不可达；
+/// 2. **词表**：编号行文本必须**前缀命中** [`menu_labels`]（codex 四档）——滤掉
+///    窗内可能混入的其它编号行（如说明段里的列表）。**前缀匹配**使 `(current)`、
+///    `(non-admin sandbox)` 这类内联后缀天然不影响识别。
+///
+/// `label` 存**屏上原文**（picker 要展示给用户，且用户据此核对终端）——不裁剪、
+/// 不改写。`None` = 锚窗不成立（菜单未出现/文案未入账）。
+pub(crate) fn codex_menu_options(
+    lines: &[String],
+    lowered: &[String],
+) -> Option<Vec<DialogOption>> {
+    let (title_idx, footer_idx) = codex_menu_window(lowered)?;
+    let canon: Vec<String> = menu_labels("codex")
+        .iter()
+        .map(|l| l.to_lowercase())
+        .collect();
+    let mut items: Vec<DialogOption> = Vec::new();
+    for line in &lines[title_idx + 1..footer_idx] {
+        let Some((number, raw_label, highlighted)) = crate::inject::dialog::parse_option_line(line)
+        else {
+            continue;
+        };
+        let raw_lower = raw_label.to_lowercase();
+        if !canon.iter().any(|c| raw_lower.starts_with(c.as_str())) {
+            continue; // 非档位行的编号行（正文/说明段列表）不入表
+        }
+        items.push(DialogOption {
+            number, // 屏上实读编号
+            label: raw_label.trim().to_string(),
+            highlighted,
+        });
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(items)
+}
 ///
 /// 判据 = 标题/footer 锚窗（[`codex_menu_window`]，与 [`locate_codex_menu`] 同窗）
 /// 内按 [`crate::inject::dialog::parse_option_line`] 解析编号行、按 [`menu_labels`]
@@ -1330,47 +1410,96 @@ pub(crate) fn codex_permission_digit_probe(lines: &[String], target: MamMode) ->
         ));
     };
     let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
-    let Some((title_idx, footer_idx)) = codex_menu_window(&lowered) else {
+    let Some(options) = codex_menu_options(lines, &lowered) else {
         return PollStep::NotYet(
             "codex 的权限菜单未出现或读不到档位表（不盲发数字键）".to_string(),
         );
     };
     let target_lower = target_label.to_lowercase();
-    let mut hit: Option<u32> = None;
-    for line in &lines[title_idx + 1..footer_idx] {
-        let Some((digit, raw_label, _)) = crate::inject::dialog::parse_option_line(line) else {
-            continue;
-        };
-        if !raw_label.to_lowercase().starts_with(&target_lower) {
-            continue;
-        }
-        if hit.is_some() {
-            return PollStep::Fatal(format!(
-                "codex 权限菜单里「{target_label}」出现多行（屏上混入正文行）——不猜编号，已中止（不盲发数字键）"
-            ));
-        }
-        hit = Some(digit);
-    }
-    match hit {
-        Some(d) if (1..=9).contains(&d) => PollStep::Ready(d.to_string()),
-        Some(d) => PollStep::Fatal(format!(
+    let hits: Vec<u32> = options
+        .iter()
+        .filter(|o| o.label.to_lowercase().starts_with(&target_lower))
+        .map(|o| o.number)
+        .collect();
+    match hits.as_slice() {
+        [d] if (1..=9).contains(d) => PollStep::Ready(d.to_string()),
+        [d] => PollStep::Fatal(format!(
             "codex 权限菜单「{target_label}」的屏上编号（{d}）超出数字键域（1-9）——不猜，已中止"
         )),
-        None => PollStep::NotYet(format!(
+        [] => PollStep::NotYet(format!(
             "codex 权限菜单窗内未见「{target_label}」行（菜单可能未画全）"
+        )),
+        _ => PollStep::Fatal(format!(
+            "codex 权限菜单里「{target_label}」出现多行（屏上混入正文行）——不猜编号，已中止（不盲发数字键）"
         )),
     }
 }
 
-/// **codex Full Access 二阶段确认框标题锚**（实机原文 `Enable full access?`，用户
-/// 2026-09-23 走查截图逐字；小写比较）。两个消费点：残留清场判据（见
-/// [`residual_overlay_present`]）与确认框在场的最低证据。
-pub(crate) const CODEX_FULL_ACCESS_CONFIRM_ANCHOR: &str = "enable full access?";
-
-/// 残留清场 esc 后**等待锚消失**的最大读屏拍数（每拍间隔 = `settle()`，生产为
+/// **残留清场 esc 后**等待锚消失的最大读屏拍数（每拍间隔 = `settle()`，生产为
 /// SUBMIT_DELAY_MS=150ms ⇒ 兜底等待至多 ~750ms）。这就是「数字键等界面渲染出来
 /// 再选」的兜底之一：清场不干净绝不开新菜单。
 pub(crate) const RESIDUE_CLEAR_MAX_READS: usize = 5;
+
+/// 屏上**是否存在 codex 权限 overlay**（菜单或 Full Access 确认框）——经**账本**
+/// 判（标题槽位在屏即判；footer 可能被正文挤出可见窗，标题锚是存在的最低证据）。
+///
+/// 与 [`residual_overlay_present`] 的区别：本函数是**中性事实**（"屏上有 overlay"），
+/// 后者是**该事实在清场语义下的名字**。picker 路径需要前者（overlay 在屏正是本次
+/// 操作对象，不是「残留」），清场路径需要后者。
+pub(crate) fn codex_overlay_present(lowered: &[String]) -> bool {
+    crate::inject::anchor_ledger::detect(
+        lowered,
+        "codex",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .is_some()
+        || crate::inject::anchor_ledger::detect(
+            lowered,
+            "codex",
+            crate::inject::anchor_ledger::scenario::FULL_ACCESS_CONFIRM,
+            crate::inject::anchor_ledger::slot::TITLE,
+        )
+        .is_some()
+}
+
+/// 屏上 overlay 的**种类**（picker 路径用：菜单在场与确认框在场是两种不同面板）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexOverlay {
+    /// 权限档位菜单（`Update Model Permissions`）
+    PermissionMenu,
+    /// Full Access 二次确认框（`Enable full access?`）
+    ///
+    /// **判据顺序**：确认框优先——确认框弹出时菜单**可能仍在屏上**（overlay 叠加，
+    /// 见 [`crate::inject::dialog::parse_dialog_clusters`] 的同源注记），此时用户要
+    /// 面对的是确认框。
+    FullAccessConfirm,
+}
+
+/// 屏上 overlay 是哪种（都无 → `None`）。
+pub(crate) fn codex_overlay_kind(lowered: &[String]) -> Option<CodexOverlay> {
+    if crate::inject::anchor_ledger::detect(
+        lowered,
+        "codex",
+        crate::inject::anchor_ledger::scenario::FULL_ACCESS_CONFIRM,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .is_some()
+    {
+        return Some(CodexOverlay::FullAccessConfirm);
+    }
+    if crate::inject::anchor_ledger::detect(
+        lowered,
+        "codex",
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::TITLE,
+    )
+    .is_some()
+    {
+        return Some(CodexOverlay::PermissionMenu);
+    }
+    None
+}
 
 /// codex composer 的**占位文案**（空输入行显示的提示词，小写匹配）。屏读里占位
 /// 与真实输入同形，只能按词表豁免——版本改词会导致「恒判残留」→ 守卫按 fail-safe
@@ -1384,15 +1513,38 @@ pub(crate) const COMPOSER_CLEAR_MAX_KEYS: usize = 64;
 /// [`composer_residue`] 与段 2 窗尽兜底（判「/permissions 是否还留在输入行未执行」）
 /// 共用此提取（单一实现）。
 ///
-/// 判据（自底向上）：footer 行 = 最后一条含状态栏分隔符 ` · ` 的行（与
-/// [`parse_codex_footer`] 同锚，composer 恒在底栏之上）；composer 行 = footer 之上
-/// 最近的一条**光标标记行**（[`crate::inject::dialog::strip_cursor_marker`]，标记
-/// 集合覆盖 ›/❯/▶/>）。**实机取证（2026-09-23 探针
+/// 判据（自底向上）：footer 行 = 最后一条含状态栏分隔符 ` · ` 的**非编号选项行**
+/// （与 [`parse_codex_footer`] 同锚，composer 恒在底栏之上）；composer 行 = footer
+/// 之上最近的一条**光标标记行**（[`crate::inject::dialog::strip_cursor_marker`]，
+/// 标记集合覆盖 ›/❯/▶/>）。**实机取证（2026-09-23 探针
 /// `codex_composer_codepoint_live_probe`）**：codex composer 前缀 = `›`(U+203A)+
 /// 空格，与菜单高亮同字符——探针输出锁定，不再凭图像猜码点。
+///
+/// **0.156.1 起新增的排除条件（必须，否则判据被自身菜单污染）**：新菜单 footer
+/// `enter select · esc back` **本身含 ` · `**，且它落在状态栏之上——若不排除，
+/// 菜单开着时「最后一条含 ` · ` 的行」会落在菜单 footer 上；再往上找「最近的光标
+/// 标记行」会**穿过整个菜单**回溯到对话流里的历史回显（如 `› D:/…/permissions`）
+/// → [`composer_residue`] 把历史行当输入行 → 段 0.5 触发至多 64 次 backspace 后
+/// 如实中止（功能不可用；更糟的是 backspace 会被**菜单**消费）。
+///
+/// 故两道排除：
+/// 1. **overlay 在场 → 直接返回 `None`**（那一片区域属于菜单/确认框，不是 composer
+///    ——判据在此时此地不适用，见 [`composer_residue`] 的「放行」口径）；
+/// 2. **编号选项行不参与**（`parse_option_line` 命中即跳过）——底栏定位与候选行
+///    两处都排除。真实状态栏形如 `… · C:\… · f2 to view`，不含 `N. ` 前缀。
 pub(crate) fn codex_composer_text(lines: &[String]) -> Option<String> {
-    let footer_idx = lines.iter().rposition(|l| l.contains(" · "))?;
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    if codex_overlay_present(&lowered) {
+        return None;
+    }
+    let footer_idx = lines.iter().rposition(|l| {
+        l.contains(" · ") && crate::inject::dialog::parse_option_line(l).is_none()
+    })?;
     for line in lines[..footer_idx].iter().rev() {
+        // 候选 composer 行同样不得是编号选项行（菜单高亮行 `› 2. …` 也带光标标记）
+        if crate::inject::dialog::parse_option_line(line).is_some() {
+            continue;
+        }
         let (rest, highlighted) = crate::inject::dialog::strip_cursor_marker(line);
         if !highlighted {
             continue; // 无光标标记前缀 → 不是 composer 行
@@ -1414,6 +1566,15 @@ pub(crate) fn codex_composer_text(lines: &[String]) -> Option<String> {
 /// `› /permissions`）位于对话流中部、不满足「footer 之上最近标记行」，天然不误判
 /// （夹具 `codex-input-residue.txt` 锁定）。
 pub(crate) fn composer_residue(lines: &[String]) -> Option<usize> {
+    // **overlay 在场时判据不适用**（0.156.1 新 footer 含 ` · ` 暴露的形态）：菜单/
+    // 确认框开着时，屏幕底部区域属于 overlay——那里没有 composer，且此时发 backspace
+    // 会被**菜单**消费（不是清输入行，是改菜单选项，危害级）。故 overlay 在场一律
+    // 返回「判据不可得」放行；调用方（[`codex_preflight`]）的顺序是**先清 overlay
+    // 再查输入行**，保护不因此减弱（清场后重读的那一屏才做本判据）。
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    if codex_overlay_present(&lowered) {
+        return None;
+    }
     let text = codex_composer_text(lines)?;
     if text.is_empty() {
         return None;
@@ -1441,11 +1602,12 @@ pub(crate) fn composer_residue(lines: &[String]) -> Option<usize> {
 ///    = **意外启用完全信任**，用户点「只读」却得到 Full Access 的危害级误切）。
 ///
 /// 故判据必须**同时覆盖两种 overlay**；检出 → 先 `esc` 清场再走正常流程。
+///
+/// 判据本体见 [`codex_overlay_present`]（账本查；本函数只是它在「残留」语义下的
+/// 名字——同一事实两个语义，**不得**各写一遍扫描逻辑）。
 pub(crate) fn residual_overlay_present(lines: &[String]) -> bool {
-    lines.iter().any(|l| {
-        let lower = l.to_lowercase();
-        lower.contains(CODEX_MENU_TITLE_ANCHOR) || lower.contains(CODEX_FULL_ACCESS_CONFIRM_ANCHOR)
-    })
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    codex_overlay_present(&lowered)
 }
 
 /// kimi 菜单定位：footer 之后的**两行组**标签行（「恰为 `<档名> ← current` 或裸
@@ -2062,50 +2224,16 @@ where
     // 「斜杠命令注入前，输入行必须纯净」：残留命令会与本次注入拼接成脏命令
     // （实测现场 `/permissions/permissions`）。有判据 → backspace 逐字符清 +
     // **闭环屏读验证**（清完必须纯净，否则如实中止——不盲发脏命令）；判据不可得
-    // → 放行（后续段屏读验证兜底）。清空键未实测前不跨家推广（kimi 登记取证）。
-    let mut latest = terminal.read();
-    if let Some(lines) = latest.as_ref() {
-        if residual_overlay_present(lines) {
-            log::debug!("codex 权限切换：屏上已有残留 overlay（菜单/确认框）→ esc 清场");
-            terminal.send("esc")?;
-            terminal.settle();
-            let mut cleared = false;
-            for _ in 0..RESIDUE_CLEAR_MAX_READS {
-                match terminal.read() {
-                    Some(l) => {
-                        let clean = !residual_overlay_present(&l);
-                        latest = Some(l);
-                        if clean {
-                            cleared = true;
-                            break;
-                        }
-                        terminal.settle();
-                    }
-                    None => terminal.settle(),
-                }
-            }
-            if !cleared {
-                return Err(
-                    "codex 屏上残留的权限菜单/确认框按 esc 后仍未消失——不盲发任何键；请人工核对终端（手动按 esc 关闭后重试）"
-                        .to_string(),
-                );
-            }
-        }
-    }
-    if let Some(residue) = latest.as_ref().and_then(|l| composer_residue(l)) {
-        log::debug!("codex 权限切换：输入行残留 {residue} 字符 → backspace 清理后再发命令");
-        for _ in 0..residue.min(COMPOSER_CLEAR_MAX_KEYS) {
-            terminal.send("backspace")?;
-        }
-        terminal.settle();
-        let pure = matches!(terminal.read(), Some(ref l) if composer_residue(l).is_none());
-        if !pure {
-            return Err(
-                "codex 输入行残留清理后仍不纯净（或读不到屏复核）——不盲发斜杠命令；请人工清空输入行后重试"
-                    .to_string(),
-            );
-        }
-    }
+    // ===== 段 0 + 段 0.5：残留 overlay 清场 + 输入行纯净（公共前置，见
+    // [`codex_preflight`]）=====
+    //
+    // 2026-09-23 用户实机走查复盘：残留**确认框**同样必须清（确认框开着时
+    // `/permissions` 被吞、enter 会确认 `1. Yes, continue anyway` = 意外启用
+    // 完全信任）；且 esc 后**必须条件等待锚消失**——esc 到 TUI 重绘完成有时间差，
+    // 立刻开菜单仍可能撞上未消散的旧 overlay（「数字敲在旧对话框里」的根因）。
+    // 通用准则「斜杠命令注入前输入行必须纯净」同在此段（实测现场
+    // `/permissions/permissions`）。
+    let _ = codex_preflight(terminal)?;
     // ===== 段 1：开菜单 =====
     open_menu()?;
     // **硬性最短间隔**（用户指令 2026-09-23：相邻步骤 ≥0.5s，与轮询「并存取最大」
@@ -2170,7 +2298,175 @@ where
     })
 }
 
-/// **是否需要第三段**（Full Access 二次确认框）——**仅** codex × 权限组 × Full Access。
+/// **codex 斜杠命令注入前的公共前置**（残留 overlay 清场 + 输入行纯净）——
+/// [`run_codex_permission_stages`]（旧自动路径）与 [`run_codex_menu_open`]
+/// （picker 路径）**共用**，同一判据单一实现。
+///
+/// 段 0：屏上有残留 overlay（菜单/确认框）→ `esc` + **条件等待锚消失**（固定睡不
+/// 可靠）；清不掉 → 如实中止（不盲发任何键）。
+/// 段 0.5：输入行有残留 → `backspace` 逐字符清 + **闭环屏读复核**；清不净 → 如实中止。
+///
+/// 返回清场后最后读到的一屏（供调用方续用，省一次屏读）。
+fn codex_preflight<T: MenuTerminal>(terminal: &mut T) -> Result<Option<Vec<String>>, String> {
+    let mut latest = terminal.read();
+    if let Some(lines) = latest.as_ref() {
+        if residual_overlay_present(lines) {
+            log::debug!("codex：屏上已有残留 overlay（菜单/确认框）→ esc 清场");
+            terminal.send("esc")?;
+            terminal.settle();
+            let mut cleared = false;
+            for _ in 0..RESIDUE_CLEAR_MAX_READS {
+                match terminal.read() {
+                    Some(l) => {
+                        let clean = !residual_overlay_present(&l);
+                        latest = Some(l);
+                        if clean {
+                            cleared = true;
+                            break;
+                        }
+                        terminal.settle();
+                    }
+                    None => terminal.settle(),
+                }
+            }
+            if !cleared {
+                return Err(
+                    "codex 屏上残留的权限菜单/确认框按 esc 后仍未消失——不盲发任何键；请人工核对终端（手动按 esc 关闭后重试）"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    if let Some(residue) = latest.as_ref().and_then(|l| composer_residue(l)) {
+        log::debug!("codex：输入行残留 {residue} 字符 → backspace 清理后再发命令");
+        for _ in 0..residue.min(COMPOSER_CLEAR_MAX_KEYS) {
+            terminal.send("backspace")?;
+        }
+        terminal.settle();
+        match terminal.read() {
+            Some(ref l) if composer_residue(l).is_none() => {
+                latest = Some(l.clone());
+            }
+            _ => {
+                return Err(
+                    "codex 输入行残留清理后仍不纯净（或读不到屏复核）——不盲发斜杠命令；请人工清空输入行后重试"
+                        .to_string(),
+                )
+            }
+        }
+    }
+    Ok(latest)
+}
+
+/// **picker 第一动作：打开菜单并读回选项清单**（移动端「终端菜单单选题」的数据源）。
+///
+/// 流程 = [`codex_preflight`] → `open_menu()`（`/permissions` + enter）→ `wait_floor()`
+/// （与旧路径同一条 ≥0.5s 硬控，见 [`crate::inject::timing::MODE_STEP_MIN_GAP_MS`]）
+/// → `read_options()` 轮询到菜单画全。
+///
+/// **与旧自动路径的关键差别**：本函数**不挑档、不敲数字**——它把屏上选项原样交给
+/// 调用方（进而交给用户点）。「用户自己选」正是 2026-09-23 用户方案的要点：MAM 不再
+/// 猜「该敲哪个数」，只负责读屏与投递用户点选的那个数。
+pub fn run_codex_menu_open<T, O, P, W>(
+    mut open_menu: O,
+    mut read_options: P,
+    mut wait_floor: W,
+    terminal: &mut T,
+) -> Result<Vec<DialogOption>, String>
+where
+    O: FnMut() -> Result<(), String>,
+    P: FnMut() -> Result<Option<Vec<DialogOption>>, String>,
+    W: FnMut(),
+    T: MenuTerminal,
+{
+    codex_preflight(terminal)?;
+    open_menu()?;
+    wait_floor();
+    match read_options()? {
+        Some(opts) if !opts.is_empty() => Ok(opts),
+        _ => Err(
+            "codex 的权限菜单未出现或读不到档位表——请人工核对终端（命令已发送，档位未切）"
+                .to_string(),
+        ),
+    }
+}
+
+/// **picker 第二动作：按用户点选的屏上编号敲键**（无回车——实测数字键一次直达）。
+///
+/// # 硬前置（**不盲发**，本批的红线）
+///
+/// 敲键前**必须**屏读确认「菜单或确认框确实在屏」：
+/// - 都不在屏 → `Err`（零投递：用户看到的可能是过期面板，敲进去会落到输入行）；
+/// - 在屏 → 发该数字键；随后再读屏：
+///   - **确认框在屏** → 交回调用方（[`MenuPick::Confirm`]，二阶段由用户点）；
+///   - 否则 → 回执核验（[`MenuPick::Done`]）。
+///
+/// 本段**绝不做 esc 清场**（overlay 在屏正是本次操作对象，不是"残留"——这正是它
+/// 不能走 [`codex_preflight`] 的原因）。
+pub fn run_codex_menu_pick<T, R, Q, W>(
+    number: u32,
+    mut read_screen: R,
+    mut poll_confirm: Q,
+    mut wait_floor: W,
+    terminal: &mut T,
+) -> Result<MenuPick, String>
+where
+    R: FnMut() -> Option<Vec<String>>,
+    Q: FnMut() -> Result<Option<Vec<DialogOption>>, String>,
+    W: FnMut(),
+    T: MenuTerminal,
+{
+    if !(1..=9).contains(&number) {
+        return Err(format!(
+            "屏上编号 {number} 超出数字键域（1-9）——零投递（面板数据可能过期，请重新读取）"
+        ));
+    }
+    // 硬前置：屏上确有 overlay 才动手
+    let Some(lines) = read_screen() else {
+        return Err("读不到终端屏面——零投递（请人工核对终端；或点「重新读取」）".to_string());
+    };
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    let Some(kind) = codex_overlay_kind(&lowered) else {
+        return Err(
+            "屏上没有权限菜单或确认框——零投递（面板数据可能已过期，请点「重新读取」）".to_string(),
+        );
+    };
+    if kind == CodexOverlay::FullAccessConfirm {
+        // 确认框在屏：本次该点的是确认框里的项，不是菜单项（面板与终端不一致）
+        return Err(
+            "屏上当前是 Full Access 确认框——请点确认框里的选项（面板数据已过期，请重新读取）"
+                .to_string(),
+        );
+    }
+    terminal.send(&number.to_string())?;
+    terminal.settle();
+    // 步骤②→③ 硬性 ≥0.5s（与旧路径同一条）
+    wait_floor();
+    // 读屏判走向：确认框在屏 → 交用户点；否则做回执核验
+    if let Some(cluster) = poll_confirm()? {
+        return Ok(MenuPick::Confirm(cluster));
+    }
+    match read_screen() {
+        Some(l) => {
+            let low: Vec<String> = l.iter().map(|x| x.to_lowercase()).collect();
+            if codex_overlay_kind(&low) == Some(CodexOverlay::FullAccessConfirm) {
+                return Ok(MenuPick::Confirm(Vec::new()));
+            }
+            Ok(MenuPick::Done { screen: l })
+        }
+        None => Ok(MenuPick::Done { screen: Vec::new() }),
+    }
+}
+
+/// [`run_codex_menu_pick`] 的走向。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuPick {
+    /// 敲键后屏上出现二次确认框（Full Access）——选项表交用户点；空表 = 读不到选项
+    /// （前端提示「请重新读取」）。
+    Confirm(Vec<DialogOption>),
+    /// 已投递且无确认框；`screen` = 敲键后的屏（供回执核验）。
+    Done { screen: Vec<String> },
+}
 ///
 /// 依据 = 实机取证档案 §3 + 用户 2026-09-23 实机走查：切 1/2/3 档**不出现**确认框，
 /// 直接回 `• Permissions updated to …`；只有切到第 4 档（Full Access）才有
@@ -2179,12 +2475,21 @@ pub fn needs_full_access_confirm(tool: &str, group: ModeGroupId, target: MamMode
     tool == "codex" && group == ModeGroupId::Permission && target == MamMode::Bypass
 }
 
-/// 工具的成功回执行**锚**（实机原文逐字）：
+/// 工具的成功回执行**锚**（实机原文逐字；真源经账本，见
+/// [`crate::inject::anchor_ledger`] 的 `slot::RECEIPT` 行）：
 /// - codex：`• Permissions updated to Full Access`（档案 §3，1/2/3 与 4 档同形）；
 /// - kimi：`Permission mode: Always Ask`（档案 §5.1–5.3）。
-const CODEX_PERMISSION_RECEIPT_ANCHOR: &str = "permissions updated to";
-/// kimi 的成功回执行锚（见 [`CODEX_PERMISSION_RECEIPT_ANCHOR`]）
-const KIMI_PERMISSION_RECEIPT_ANCHOR: &str = "permission mode:";
+///
+/// 未入账的工具 → `None`（[`permission_receipt_verified`] 据此返回 false，不出手）。
+fn permission_receipt_anchor(tool: &str) -> Option<&'static str> {
+    crate::inject::anchor_ledger::candidates(
+        tool,
+        crate::inject::anchor_ledger::scenario::PERMISSION_MENU,
+        crate::inject::anchor_ledger::slot::RECEIPT,
+    )
+    .first()
+    .map(|r| r.text)
+}
 
 /// **成功回执核验**（纯函数，可测）：屏读行集里是否出现「成功切到**目标档**」的回执行。
 ///
@@ -2206,10 +2511,8 @@ const KIMI_PERMISSION_RECEIPT_ANCHOR: &str = "permission mode:";
 /// 故此处显式短路（这条与 `menu_target_label` 的调用方兜底**成对**：任一侧改松都不会
 /// 静默放行）。
 pub fn permission_receipt_verified(tool: &str, lines: &[String], target_label: &str) -> bool {
-    let anchor = match tool {
-        "codex" => CODEX_PERMISSION_RECEIPT_ANCHOR,
-        "kimi" => KIMI_PERMISSION_RECEIPT_ANCHOR,
-        _ => return false,
+    let Some(anchor) = permission_receipt_anchor(tool) else {
+        return false; // 未入账工具：不出手（与旧实现的 `_ => return false` 同口径）
     };
     if target_label.trim().is_empty() {
         return false; // 见文档「空标签必须短路」
@@ -2219,6 +2522,24 @@ pub fn permission_receipt_verified(tool: &str, lines: &[String], target_label: &
         let lower = l.to_lowercase();
         lower.contains(anchor) && lower.contains(want.as_str())
     })
+}
+
+/// **成功回执行**原文提取（picker 用）：屏上出现该工具的回执锚即返回**该行原文**
+/// （未出现 → `None`）。
+///
+/// # 与 [`permission_receipt_verified`] 的差别（为什么两个都要）
+///
+/// 后者要求「锚 + **目标档标签**」同在——因为它的场景里 MAM 自己知道目标档（旧自动
+/// 路径按 wire 档敲）。picker 场景**目标档未知**：用户点的是**屏上编号**（1..N），
+/// 后端不知道它对应哪个 wire 档（档位集合随 Guardian 配置变化，用户也可能点了本机
+/// codex 新加的档）。故 picker 只能判「有没有成功回执行」，并把**原文**回给前端显示
+/// （用户自己看得见切到了哪档）——这是「如实」，不是「假装知道」。
+pub fn permission_receipt_seen(tool: &str, lines: &[String]) -> Option<String> {
+    let anchor = permission_receipt_anchor(tool)?;
+    lines
+        .iter()
+        .find(|l| l.to_lowercase().contains(anchor))
+        .map(|l| l.trim().to_string())
 }
 
 #[cfg(test)]
@@ -2387,7 +2708,12 @@ mod tests {
         assert_eq!(labels, vec!["操作", "计划"]);
         let p = codex.group(ModeGroupId::Permission).unwrap();
         assert_eq!(p.label, "权限");
-        assert_eq!(p.layout, GroupLayout::Tiers, "权限组仍是逐档按钮");
+        assert_eq!(
+            p.layout,
+            GroupLayout::Picker,
+            "权限组是**单选面板**（2026-09-23 用户方案：MAM 读回终端菜单选项，用户点选哪项就敲哪个数字）\
+             ——不再是逐档按钮（那需要前端硬编码「哪档对应哪个数字」，而档位编号随 Guardian 配置前移）"
+        );
         let labels: Vec<&str> = p.tiers.iter().map(|t| t.label).collect();
         assert_eq!(labels, vec!["只读", "默认", "自动审批", "完全信任"]);
         assert_eq!(
@@ -4885,6 +5211,258 @@ mod tests {
         assert_eq!(opens, 1, "开菜单已发（命令投递了，但档位键没发）");
     }
 
+    // ==== 2026-09-23 账本接线：新 footer 变体（本次实机事故的回归锁）====
+
+    /// **新 footer 变体（真机 dump 夹具）必须成窗**——本次实机事故的直接回归锁：
+    /// codex 0.156.1 的 footer 是 `enter select · esc back`，旧实现写死单句
+    /// `press enter to confirm or esc to go back` → 窗不成立 → 整条权限切换静默失效。
+    /// 夹具来源 = 自建会话探针 dump（codex-cli 0.156.1）。
+    #[test]
+    fn menu_window_opens_with_new_footer_variant() {
+        let screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        let lowered: Vec<String> = screen.iter().map(|l| l.to_lowercase()).collect();
+        let (title_idx, footer_idx) =
+            codex_menu_window(&lowered).expect("新 footer 变体必须能成窗（本次事故的修复）");
+        assert!(
+            title_idx < footer_idx,
+            "窗序必须正确：{title_idx} < {footer_idx}"
+        );
+
+        // 四档编号照常读到（数字直达在新形态下可用）
+        for (target, digit) in [
+            (MamMode::ReadOnly, "1"),
+            (MamMode::Default, "2"),
+            (MamMode::AcceptEdits, "3"),
+            (MamMode::Bypass, "4"),
+        ] {
+            assert_eq!(
+                codex_permission_digit_probe(&screen, target),
+                PollStep::Ready(digit.to_string()),
+                "{target:?} 在新 footer 形态下应读到屏上编号 {digit}"
+            );
+        }
+    }
+
+    /// **第 2 档带内联后缀 `(non-admin sandbox)`**（宽版布局夹具，用户截图转写）：
+    /// `2. Ask for approval (non-admin sandbox) (current)` —— 前缀匹配使内联后缀
+    /// 不影响认档；且 footer 之上的说明段（`The non-admin sandbox protects …`）
+    /// **不得**进入菜单项集合（靠编号行形态天然过滤，本测锁死该不变式）。
+    #[test]
+    fn menu_options_tolerate_inline_suffix_and_explainer_block() {
+        let screen = e_stage2_screen("codex-perm-menu-nonadmin-sandbox.txt");
+        let lowered: Vec<String> = screen.iter().map(|l| l.to_lowercase()).collect();
+        let opts = codex_menu_options(&screen, &lowered).expect("带内联后缀的菜单必须能解析");
+        assert_eq!(opts.len(), 4, "恰好四档（说明段不得入表）：{opts:?}");
+        assert_eq!(
+            opts.iter().map(|o| o.number).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "编号取屏上实读值"
+        );
+        assert!(
+            opts[1].label.contains("non-admin sandbox"),
+            "屏上原文（含内联后缀）必须原样保留给用户核对：{:?}",
+            opts[1].label
+        );
+        assert!(opts[1].highlighted, "第 2 档是当前高亮项（›）");
+        // 说明段的两行不得混入
+        assert!(
+            !opts
+                .iter()
+                .any(|o| o.label.contains("setup-default-sandbox")),
+            "说明段不得入表：{opts:?}"
+        );
+        // 四档的屏上编号照常读到
+        for (target, digit) in [
+            (MamMode::ReadOnly, "1"),
+            (MamMode::Default, "2"),
+            (MamMode::AcceptEdits, "3"),
+            (MamMode::Bypass, "4"),
+        ] {
+            assert_eq!(
+                codex_permission_digit_probe(&screen, target),
+                PollStep::Ready(digit.to_string()),
+                "{target:?} 在带内联后缀形态下应读到 {digit}"
+            );
+        }
+    }
+
+    /// **composer 判据不被自身菜单污染**（0.156.1 新 footer 含 ` · ` 引入的连带陷阱）：
+    /// 菜单开着时，`codex_composer_text` **不得**把高亮菜单项（`› 2. …`）认成 composer
+    /// ——否则 `composer_residue` 恒报残留 → 段 0.5 backspace×64 后如实中止（功能不可用）。
+    /// 反例（变异）：去掉 `parse_option_line` 排除条件 → 本测红。
+    #[test]
+    fn composer_text_not_polluted_by_own_menu() {
+        let screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        // 该夹具里菜单 footer 是最后一条含 ` · ` 的行，其上方紧邻高亮菜单项
+        let text = codex_composer_text(&screen);
+        // 判据不可得（None）也是**合格结果**——关键是不能把菜单项当 composer
+        if let Some(t) = text {
+            assert!(
+                !t.starts_with("2. Ask for approval"),
+                "菜单高亮项被误认成 composer（` · ` 陷阱）：{t:?}"
+            );
+            assert!(
+                !t.contains("/permissions") && !t.contains("Read Only"),
+                "菜单内容不得被当成输入行文本：{t:?}"
+            );
+        }
+        // 更强的锁：残留判定不得因菜单在场而报「有残留」
+        assert!(
+            composer_residue(&screen).is_none(),
+            "菜单在屏时不得判输入行有残留（否则段 0.5 会 backspace 清菜单）"
+        );
+    }
+
+    /// **overlay 种类判定**：新 footer 夹具 → 权限菜单；确认框锚在屏 → 确认框优先
+    /// （确认框弹出时菜单可能仍在屏，见 `parse_dialog_clusters` 同源注记）。
+    #[test]
+    fn overlay_kind_prefers_confirm_box() {
+        let menu = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        let lowered: Vec<String> = menu.iter().map(|l| l.to_lowercase()).collect();
+        assert_eq!(
+            codex_overlay_kind(&lowered),
+            Some(CodexOverlay::PermissionMenu)
+        );
+        assert!(codex_overlay_present(&lowered));
+
+        // 菜单 + 确认框同屏 → 判确认框
+        let mut both = menu.clone();
+        both.push("  Enable full access?".to_string());
+        let lowered: Vec<String> = both.iter().map(|l| l.to_lowercase()).collect();
+        assert_eq!(
+            codex_overlay_kind(&lowered),
+            Some(CodexOverlay::FullAccessConfirm),
+            "确认框与菜单同屏时，用户面对的是确认框"
+        );
+
+        // 干净屏 → 无 overlay
+        let clean: Vec<String> = lines(&["  普通输出", "• done"]);
+        let lowered: Vec<String> = clean.iter().map(|l| l.to_lowercase()).collect();
+        assert_eq!(codex_overlay_kind(&lowered), None);
+        assert!(!codex_overlay_present(&lowered));
+    }
+
+    /// **picker 第二动作的硬前置**（不盲发）：屏上没有 overlay → 零投递。
+    /// 这是「面板数据过期」情形（用户看到的菜单其实已关）——敲进去会落到输入行。
+    #[test]
+    fn pick_without_overlay_never_sends() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let clean = lines(&["  普通输出", "• done"]);
+        let r = run_codex_menu_pick(
+            2,
+            || Some(clean.clone()),
+            || Ok(None),
+            || {},
+            &mut Closures {
+                read: || Some(clean.clone()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        let err = r.unwrap_err();
+        assert!(err.contains("零投递"), "{err}");
+        assert!(sent.borrow().is_empty(), "零投递：{:?}", sent.borrow());
+    }
+
+    /// **picker：确认框在屏时不得按菜单项**（面板与终端不一致）→ 零投递。
+    #[test]
+    fn pick_refuses_when_confirm_box_on_screen() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut confirm_screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        confirm_screen.push("  Enable full access?".to_string());
+        let r = run_codex_menu_pick(
+            2,
+            || Some(confirm_screen.clone()),
+            || Ok(None),
+            || {},
+            &mut Closures {
+                read: || Some(confirm_screen.clone()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        let err = r.unwrap_err();
+        assert!(err.contains("Full Access 确认框"), "{err}");
+        assert!(sent.borrow().is_empty(), "零投递：{:?}", sent.borrow());
+    }
+
+    /// **picker：overlay 在屏 → 发该数字键（无回车）**，屏上出现确认框 → 返回 Confirm。
+    #[test]
+    fn pick_sends_digit_and_reports_confirm() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let menu = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        let cluster: std::cell::RefCell<Option<Vec<DialogOption>>> = std::cell::RefCell::new(None);
+        let r = run_codex_menu_pick(
+            4,
+            || Some(menu.clone()),
+            || {
+                *cluster.borrow_mut() = Some(vec![DialogOption {
+                    number: 1,
+                    label: "Yes, continue anyway".to_string(),
+                    highlighted: true,
+                }]);
+                Ok(cluster.borrow().clone())
+            },
+            || {},
+            &mut Closures {
+                read: || Some(menu.clone()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        match r {
+            Ok(MenuPick::Confirm(opts)) => {
+                assert_eq!(opts.len(), 1, "确认框选项交用户点");
+            }
+            other => panic!("应返回 Confirm：{other:?}"),
+        }
+        assert_eq!(sent.borrow().as_slice(), ["4"], "只发数字键、无回车");
+    }
+
+    /// **picker 第一动作（open）全链**：清场 → 开菜单 → 读回选项表（不挑档、不敲数字）。
+    #[test]
+    fn open_returns_options_without_picking() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        let opens = std::cell::Cell::new(0usize);
+        let r = run_codex_menu_open(
+            || {
+                opens.set(opens.get() + 1);
+                Ok(())
+            },
+            || {
+                let lowered: Vec<String> = screen.iter().map(|l| l.to_lowercase()).collect();
+                Ok(codex_menu_options(&screen, &lowered))
+            },
+            || {},
+            &mut Closures {
+                read: || Some(lines(&["  普通输出"])),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        let opts = r.expect("开菜单应成功并读回选项");
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opens.get(), 1, "开菜单恰好一次");
+        assert!(
+            sent.borrow().is_empty(),
+            "open 不敲任何数字键：{:?}",
+            sent.borrow()
+        );
+    }
+
     // ==== 2026-09-23 codex 数字直达：判据级单测（真机夹具 + 变异锁）====
 
     /// **数字直达探测（真机四项夹具）**：四档各自读到**屏上编号** 1-4
@@ -5181,6 +5759,18 @@ mod tests {
             eprintln!("未发现 codex 进程——请先启动 codex TUI 并在 composer 打几个字");
             return;
         }
+        // 只读**自己 spawn 的**探针会话（红线：实机只碰自建进程）。默认不扫全机——
+        // 用户会话的屏上含其对话内容，不应进入探针输出/夹具。
+        let only: Option<u32> = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        let pids: Vec<u32> = match only {
+            Some(p) => pids.into_iter().filter(|x| *x == p).collect(),
+            None => {
+                eprintln!("提示：未设 MAM_PROBE_PID，将 dump 全部 codex 进程（含用户会话）；建议只 dump 自建会话");
+                pids
+            }
+        };
         for pid in pids {
             let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
                 eprintln!("pid={pid} 屏读失败（无控制台/权限不足）");
@@ -5199,6 +5789,14 @@ mod tests {
                     .collect();
                 eprintln!("行{} {:?}  码点[{}]", start + i, l, codes.join(" "));
             }
+            // 2026-09-23：菜单新形态取证——整屏逐行输出（`FIXTURE|` 前缀便于直接
+            // 转存 tests/fixtures/e-stage2/*.txt；夹具红线禁止手造，故必须由本探针
+            // 的实机 dump 原样落盘，人工只做"截取窗口"不做"改写文字"）
+            eprintln!("---- FIXTURE| 起（pid={pid}，逐字原文，勿手改）----");
+            for l in &lines {
+                eprintln!("FIXTURE|{l}");
+            }
+            eprintln!("---- FIXTURE| 止 ----");
         }
     }
 

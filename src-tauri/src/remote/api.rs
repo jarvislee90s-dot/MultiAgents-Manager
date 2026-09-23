@@ -2994,6 +2994,10 @@ pub async fn session_question(
     // **批次戊 E4-E6**：多题交互能力（kimi K-5 / codex Tab 备注 / opencode tab 切页
     // ——三家键序已实机定案）；claude 多题未探（spec §1 非目标边界）保持只读。
     let multi_question = matches!(tool_id.as_str(), "kimi" | "codex" | "opencode");
+    // **切换题目**（2026-09-23 错位修复）：多题卡多选题的显式切页动作——仅 opencode
+    // （tab=前向切页，戊探A ①定案）。kimi/codex 的多题切页键未验 → 旗标 false，前端
+    // 对这两家的多选题渲染「请到终端切题」引导而不是切换按钮。单题卡无页可切，恒 false。
+    let advance = tool_id == "opencode" && questions.len() > 1;
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -3004,6 +3008,8 @@ pub async fn session_question(
             "freeText": free_text_supported,
             // E4-E6：多题交互旗标（缺省按 false → 只读卡）
             "multiQuestion": multi_question,
+            // 切换题目能力旗标（缺省按 false → 不渲染切换钮，旧后端前向兼容）
+            "advance": advance,
             "questions": questions
                 .iter()
                 .map(|q| serde_json::json!({
@@ -3202,15 +3208,32 @@ pub async fn session_question_answer(
         // **丁T5**：先过**可用性门**（`action_supported`——submit/freeText 的键序
         // 依赖屏读，没有静态序列，但「支不支持」仍要判），再对**单键动作**取序列
         // （submit/freeText 取到的会是 Err，那正是「无静态序列」的表达——它们走阶段机）
-        crate::inject::question::action_supported(tool_id, action, req.index, &q).map_err(|e| {
-            // 拒绝码分两档（见 `ActionRefusal`）：参数问题 → 400 bad_index（改参数
-            // 即可重试）；工具未实测 → 409 tool_readonly（前端渲染只读卡引到终端）
-            log::debug!("问答动作不可用（{tool_id}/{action:?}）: {}", e.reason());
-            match e {
-                crate::inject::question::ActionRefusal::BadParameter(_) => "bad_index",
-                crate::inject::question::ActionRefusal::ToolUnverified(_) => "tool_readonly",
-            }
-        })?;
+        // **多题 submit 走专用门**（2026-09-23）：它作用于整张问卷而非 q_idx 指定的
+        // 那一题——单题防呆「submit 仅用于多选题」在多题载荷下会把「第 1 题是单选」
+        // 的问卷提交误拒 400，故按工具档直判（kimi/opencode 放行）
+        if multi_question && action == crate::inject::question::AnswerAction::Submit {
+            crate::inject::question::multi_question_submit_supported(tool_id).map_err(|e| {
+                log::debug!("问答动作不可用（{tool_id}/多题 submit）: {}", e.reason());
+                match e {
+                    crate::inject::question::ActionRefusal::BadParameter(_) => "bad_index",
+                    crate::inject::question::ActionRefusal::ToolUnverified(_) => "tool_readonly",
+                }
+            })?;
+        } else {
+            crate::inject::question::action_supported(tool_id, action, req.index, &q).map_err(
+                |e| {
+                    // 拒绝码分两档（见 `ActionRefusal`）：参数问题 → 400 bad_index（改参数
+                    // 即可重试）；工具未实测 → 409 tool_readonly（前端渲染只读卡引到终端）
+                    log::debug!("问答动作不可用（{tool_id}/{action:?}）: {}", e.reason());
+                    match e {
+                        crate::inject::question::ActionRefusal::BadParameter(_) => "bad_index",
+                        crate::inject::question::ActionRefusal::ToolUnverified(_) => {
+                            "tool_readonly"
+                        }
+                    }
+                },
+            )?;
+        }
         // 单键动作才取静态序列；阶段机动作（submit/freeText）序列留空（由编排产生）。
         // **E4② kimi 多题 DigitAdvance**（A3 禁令）：多题形态的 Select = `[数字]`
         // （直选+自动推进下一题，**禁尾 Enter**——Enter 会误作用下一题），
@@ -3467,6 +3490,9 @@ enum StagePlan {
     /// **opencode own answer 阶段机**（批次戊 E6）：行序定位 → enter 开行 →
     /// 裸打字守卫（屏读确认占位行）→ 打字 → enter 提交
     OpencodeOwnAnswer,
+    /// **opencode 多选提交阶段机**（批次戊 E6，2026-09-23 接线）：首段屏读
+    /// 「Confirm 已在场则跳过 tab」→（不在场才 tab）→ Confirm 页 → enter 提交
+    OpencodeSubmit,
 }
 
 impl StagePlan {
@@ -3485,6 +3511,9 @@ impl StagePlan {
         match (action, tool) {
             // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
             (A::Submit, "kimi") => Self::KimiSubmit,
+            // E6：opencode 多选提交阶段机（2026-09-23 接线——此前 opencode 的 Submit
+            // 误落下面的 claude Submit 行走位形态，屏读判据在 opencode 屏上必失败）
+            (A::Submit, "opencode") => Self::OpencodeSubmit,
             (A::FreeText, "kimi") => Self::KimiFreeText,
             (A::FreeText, "codex") => Self::CodexNotes,
             (A::FreeText, "opencode") => Self::OpencodeOwnAnswer,
@@ -3492,7 +3521,8 @@ impl StagePlan {
                 max_down_steps: q.options.len() + 2,
             },
             (A::FreeText, _) => Self::FreeText,
-            (A::Select | A::Toggle | A::Cancel, _) => Self::SingleKey,
+            // Advance 是单键纯导航（tab），与 select/toggle/cancel 同通道
+            (A::Advance | A::Select | A::Toggle | A::Cancel, _) => Self::SingleKey,
         }
     }
 }
@@ -3881,6 +3911,41 @@ fn dispatch_question_action(
             match out {
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
+                    receipt_seen: o.receipt_seen,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        // ===== 批次戊 E6：opencode 多选提交阶段机（2026-09-23 接线）=====
+        StagePlan::OpencodeSubmit => {
+            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let mut terminal = crate::inject::mode::Closures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_opencode_submit_stages(
+                // 首段「Confirm 已在场判读」的单次读屏——与编排内的发键后读屏同缝
+                || probe("oc-initial"),
+                || poll_question_stage(|| probe("oc-confirm"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_receipt_stage(|| probe("oc-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
                 },
                 Err(e) => dispatch_abort(e),
@@ -4559,6 +4624,567 @@ pub use crate::inject::timing::RECEIPT_POLL_TOTAL_MS;
 /// 把二者混同会让 macOS 的模式钮永久不可用、且回执文案会说假话（「终端有待决对话框」
 /// 是我们并不知道的事）。`dialogChecked:true` 时该字段为真，前端可据此选择是否向用户
 /// 说明守卫已生效。
+/// POST /m/api/v1/session-mode/menu 请求体（camelCase；字段全 default——缺参不触发
+/// axum 提取器 422，由 handler 统一按契约给 400）。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModeMenuReq {
+    #[serde(default)]
+    pub session_id: String,
+    /// 动作：`open`（开菜单并读回选项）/ `pick`（按用户点选的屏上编号敲键）
+    #[serde(default)]
+    pub action: String,
+    /// `pick` 用：用户点选的**屏上编号**（1..=9）
+    #[serde(default)]
+    pub number: Option<u32>,
+}
+
+/// picker 端点的错误码（与 `session_mode_switch` 分诊口径一致）
+fn mode_menu_err(status: StatusCode, code: &str, reason: Option<&str>) -> Response {
+    let mut body = serde_json::json!({ "error": code });
+    if let Some(r) = reason {
+        body["reason"] = serde_json::json!(r);
+    }
+    (
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// **`POST /m/api/v1/session-mode/menu`**——codex 权限组的「终端菜单单选题」两动作
+/// （2026-09-23 用户方案）。
+///
+/// # 为什么需要这条端点（而不是复用 `session-mode/switch`）
+///
+/// 旧路径是「后端猜目标档的屏上编号 → 自己敲」。用户实机走查暴露的问题：档位编号会
+/// 随 Guardian 配置前移（`Approve for me` 缺席时 `Full Access` 从 4 变 3），而前端文案
+/// 与后端逻辑都按「4→1」写死——**猜编号这件事本身不可靠**。用户方案把这一步交给用户：
+/// MAM 只负责**读回终端菜单的选项表**（编号 = 屏上实读值、文本 = 屏上原文），用户点哪
+/// 一项就敲哪个数字键。于是「猜」被消灭，而不是被修得更准。
+///
+/// # 两动作
+///
+/// - `action:"open"`：清场（残留 overlay + 输入行纯净）→ `/permissions` + enter →
+///   等 ≥0.5s → 读回菜单选项表 → `{status:"menu", options:[…]}`；
+/// - `action:"pick"`：**先屏读确认菜单/确认框确实在屏**（不在 → 零投递，如实拒绝）
+///   → 发用户点选的数字键（无回车）→ 若屏上出现 Full Access 确认框 →
+///   `{status:"confirm", options:[…]}`（二阶段继续交给用户点）；否则做回执核验 →
+///   `{status:"done", verified, hint, …}`。
+///
+/// # 守卫与审计
+///
+/// 复用 `mode_switch_block` 三态（对话框在场 / kimi 问答待决 / codex 模式组运行中），
+/// 但 codex 自己的权限菜单/确认框从「对话框在场」判据里**豁免**（否则 picker 会被自己
+/// 的守卫拦死——菜单的编号行本身就是编号簇）。审计经 `endpoint_audit`（action=`mode`，
+/// 摘要含「终端菜单第 N 项」）。
+pub async fn session_mode_menu(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionModeMenuReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    if sid.is_empty() {
+        return bad_request();
+    }
+    let action = req.action.trim().to_string();
+    if action != "open" && action != "pick" {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 会话查找（与 switch 端点同纪律：一个 spawn_blocking）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        (probe_st.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == probe_sid)
+    })
+    .await;
+    let session = match found {
+        Ok(Some(s)) => s,
+        Ok(None) => return mode_menu_err(StatusCode::NOT_FOUND, "no_session", None),
+        Err(e) => {
+            log::error!("session-mode/menu 会话扫描任务异常: {e}");
+            return mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None);
+        }
+    };
+    let tool = session.agent_type.tool_id().to_string();
+    if tool != "codex" {
+        // 单选面板目前**只有 codex**（kimi 菜单无屏上编号，数字直达不适用；其余工具
+        // 无权限菜单）。如实拒绝，不假装支持。
+        return mode_menu_err(
+            StatusCode::CONFLICT,
+            "no_mechanism",
+            Some("终端菜单选择仅支持 codex（其它工具的权限档不提供屏上编号）"),
+        );
+    }
+    if session.pid == 0 {
+        return mode_menu_err(
+            StatusCode::CONFLICT,
+            "no_mechanism",
+            Some("该会话没有可读屏的终端进程"),
+        );
+    }
+    // ===== 守卫（三态，与 switch 端点同源；codex 自身 overlay 豁免）=====
+    let pid = session.pid;
+    let guard_st = st.clone();
+    let guard_sid = sid.clone();
+    let guard = tokio::task::spawn_blocking(move || {
+        let dialog = (guard_st.dialog_probe)(guard_sid.as_str(), pid);
+        let screen = (guard_st.screen_probe)(guard_sid.as_str(), pid);
+        (dialog, screen)
+    })
+    .await;
+    let (dialog_options, screen_lines) = match guard {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-mode/menu 守卫探测任务异常: {e}");
+            (None, None)
+        }
+    };
+    // codex 自身 overlay 在场 → 从「对话框在场」判据豁免（见函数文档）
+    let own_overlay = screen_lines
+        .as_ref()
+        .map(|l| {
+            let lowered: Vec<String> = l.iter().map(|x| x.to_lowercase()).collect();
+            crate::inject::mode::codex_overlay_present(&lowered)
+        })
+        .unwrap_or(false);
+    let dialog_checked = dialog_options.is_some();
+    let dialog_blocked =
+        crate::inject::dialog::blocks_control_injection(dialog_options.as_deref()) && !own_overlay;
+    let is_running = crate::inject::queue::is_running(&session.status);
+    // codex 模式组的运行中拦截不适用本端点（本端点只服务权限组）；对话框在场仍拦
+    // （用户消息/自由文本不该在别的工具对话框待决时打进终端）
+    if dialog_blocked {
+        log::debug!("picker 被拒：屏读见编号选项对话框（非 codex 自身 overlay）");
+        return mode_menu_err(
+            StatusCode::CONFLICT,
+            "blocked_by_dialog",
+            Some(DIALOG_BLOCKS_CONTROL_REASON),
+        );
+    }
+    let _ = is_running;
+    let spec = crate::inject::families::family_for(&tool)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let injector = st.injector.clone();
+    if action == "open" {
+        // ===== open：清场 → 开菜单 → 读回选项表 =====
+        let do_sid = sid.clone();
+        // 闭包返回 `Result<Result<Vec<..>, String>, String>`：外 Err = 忙让位（哨兵），
+        // 内 Err = 真失败（与 `menu_stages` 的两层语义同源）
+        let r = tokio::task::spawn_blocking(
+            move || -> Result<Result<Vec<crate::inject::dialog::DialogOption>, String>, String> {
+                let Some(_guard) = crate::inject::queue::try_acquire_inflight(&do_sid) else {
+                    return Ok(Err(String::new())); // 忙让位：空文案，外层据此给 busy 回执
+                };
+                let key_delay = || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                };
+                let mut terminal = crate::inject::mode::Closures {
+                    read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+                    send: |key: &str| {
+                        let r = injector.locate_and_send_key_spec(pid, key, &spec);
+                        if r.is_ok() {
+                            key_delay();
+                        }
+                        r
+                    },
+                    settle: key_delay,
+                };
+                let out = crate::inject::mode::run_codex_menu_open(
+                    || {
+                        injector
+                            .locate_and_inject_spec(pid, "/permissions", &spec)
+                            .and_then(|()| {
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    crate::inject::families::SUBMIT_DELAY_MS,
+                                ));
+                                injector.locate_and_send_key_spec(pid, "enter", &spec)
+                            })
+                    },
+                    || poll_menu_options(pid),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::MODE_STEP_MIN_GAP_MS,
+                        ))
+                    },
+                    &mut terminal,
+                );
+                Ok(out)
+            },
+        )
+        .await;
+        let (result_str, response) = match r {
+            Ok(Ok(Ok(opts))) => {
+                let items: Vec<serde_json::Value> = opts
+                    .iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "number": o.number,
+                            "label": o.label,
+                            "highlighted": o.highlighted,
+                        })
+                    })
+                    .collect();
+                (
+                    "ok".to_string(),
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CACHE_CONTROL, "no-store")],
+                        Json(serde_json::json!({
+                            "status": "menu",
+                            "options": items,
+                            "dialogChecked": dialog_checked,
+                        })),
+                    )
+                        .into_response(),
+                )
+            }
+            Ok(Ok(Err(e))) if e.is_empty() => (
+                "busy".to_string(),
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({
+                        "status": "failed",
+                        "error": "投递进行中，请稍后重试"
+                    })),
+                )
+                    .into_response(),
+            ),
+            Ok(Ok(Err(e))) => (
+                format!("failed:{e}"),
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(serde_json::json!({ "status": "failed", "error": e })),
+                )
+                    .into_response(),
+            ),
+            Ok(Err(e)) => {
+                log::error!("session-mode/menu open 任务异常: {e}");
+                (
+                    "internal".to_string(),
+                    mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None),
+                )
+            }
+            Err(e) => {
+                log::error!("session-mode/menu open 任务异常: {e}");
+                (
+                    "internal".to_string(),
+                    mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None),
+                )
+            }
+        };
+        endpoint_audit(
+            &st,
+            &device_id,
+            &device_name,
+            &tool,
+            &sid,
+            "打开权限菜单（终端菜单单选）",
+            "mode",
+            &result_str,
+        );
+        return response;
+    }
+    // ===== pick：硬前置（overlay 在屏）→ 发数字键 → 确认框 / 回执 =====
+    let Some(number) = req.number else {
+        return bad_request();
+    };
+    let pick_sid = sid.clone();
+    let pick_tool = tool.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<PickOutcome, String> {
+        let Some(_guard) = crate::inject::queue::try_acquire_inflight(&pick_sid) else {
+            return Err("投递进行中，请稍后重试".to_string());
+        };
+        let key_delay = || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ))
+        };
+        let mut terminal = crate::inject::mode::Closures {
+            read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+            send: |key: &str| {
+                let r = injector.locate_and_send_key_spec(pid, key, &spec);
+                if r.is_ok() {
+                    key_delay();
+                }
+                r
+            },
+            settle: key_delay,
+        };
+        let pick = crate::inject::mode::run_codex_menu_pick(
+            number,
+            || crate::inject::windows_console::read_screen_window(pid).ok(),
+            || poll_confirm_cluster(pid),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::timing::MODE_STEP_MIN_GAP_MS,
+                ))
+            },
+            &mut terminal,
+        )?;
+        match pick {
+            crate::inject::mode::MenuPick::Confirm(cluster) => {
+                if cluster.is_empty() {
+                    // 确认框在屏但选项读不到 → 如实回执（前端提示重新读取）
+                    return Ok(PickOutcome::ConfirmUnreadable);
+                }
+                let opts: Vec<crate::inject::dialog::DialogOption> = cluster;
+                Ok(PickOutcome::Confirm(opts))
+            }
+            crate::inject::mode::MenuPick::Done { screen } => {
+                // 回执核验：屏上是否出现「成功切到某档」的回执行。**目标档未知**
+                // （用户点的是屏上编号，后端不知道对应哪个 wire 档）——故按
+                // 「锚在屏」判，并把回执行原文回给前端显示（用户自己看得见切到哪档）。
+                let seen = crate::inject::mode::permission_receipt_seen(&pick_tool, &screen);
+                Ok(PickOutcome::Done {
+                    receipt: seen,
+                    screen_tail: screen.iter().rev().take(6).cloned().collect::<Vec<_>>(),
+                })
+            }
+        }
+    })
+    .await;
+    let (result_str, response) = match r {
+        Ok(Ok(o)) => {
+            let body = match &o {
+                PickOutcome::Confirm(opts) => {
+                    let items: Vec<serde_json::Value> = opts
+                        .iter()
+                        .map(|x| {
+                            serde_json::json!({
+                                "number": x.number,
+                                "label": x.label,
+                                "highlighted": x.highlighted,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "status": "confirm",
+                        "options": items,
+                        "dialogChecked": dialog_checked,
+                    })
+                }
+                PickOutcome::ConfirmUnreadable => serde_json::json!({
+                    "status": "confirm",
+                    "options": [],
+                    "hint": "终端已弹出风险确认框，但选项未读到——请点「重新读取」再选",
+                    "dialogChecked": dialog_checked,
+                }),
+                PickOutcome::Done { receipt, .. } => serde_json::json!({
+                    "status": "done",
+                    // 用户点的是屏上编号，后端不知道对应哪个 wire 档 —— 见 PickOutcome 文档
+                    "verified": receipt.is_some(),
+                    "hint": match receipt {
+                        Some(line) => format!("终端回执：{line}"),
+                        None => "已按你点选的编号投递，但未在屏上读到成功回执——请人工核对终端".to_string(),
+                    },
+                    "dialogChecked": dialog_checked,
+                }),
+            };
+            (
+                "ok".to_string(),
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CACHE_CONTROL, "no-store")],
+                    Json(body),
+                )
+                    .into_response(),
+            )
+        }
+        Ok(Err(e)) => (
+            format!("failed:{e}"),
+            mode_menu_err(StatusCode::OK, "pick_failed", Some(&e)),
+        ),
+        Err(e) => {
+            log::error!("session-mode/menu pick 任务异常: {e}");
+            (
+                "internal".to_string(),
+                mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None),
+            )
+        }
+    };
+    endpoint_audit(
+        &st,
+        &device_id,
+        &device_name,
+        &tool,
+        &sid,
+        &format!("终端菜单第 {number} 项（权限切换）"),
+        "mode",
+        &result_str,
+    );
+    response
+}
+
+/// pick 的走向（端点内部类型）
+enum PickOutcome {
+    /// 屏上出现 Full Access 二次确认框——选项表交用户点
+    Confirm(Vec<crate::inject::dialog::DialogOption>),
+    /// 确认框在屏但选项读不到
+    ConfirmUnreadable,
+    /// 无确认框：`receipt` = 屏上读到的成功回执行原文（None = 未读到）
+    Done {
+        receipt: Option<String>,
+        #[allow(dead_code)]
+        screen_tail: Vec<String>,
+    },
+}
+
+/// codex 菜单选项的生产轮询（picker 的 `open` 用）：窗内读回选项表。
+#[cfg(windows)]
+fn poll_menu_options(pid: u32) -> Result<Option<Vec<crate::inject::dialog::DialogOption>>, String> {
+    let rounds =
+        crate::inject::timing::poll_rounds(crate::inject::timing::CODEX_MENU_OPEN_POLL_TOTAL_MS)
+            .max(1);
+    for i in 0..rounds {
+        match crate::inject::windows_console::read_screen_window(pid) {
+            Ok(lines) => {
+                let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+                if let Some(opts) = crate::inject::mode::codex_menu_options(&lines, &lowered) {
+                    return Ok(Some(opts));
+                }
+            }
+            Err(e) => log::debug!("菜单选项屏读失败（pid={pid}: {e}）"),
+        }
+        if i + 1 < rounds {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS));
+        }
+    }
+    Ok(None)
+}
+
+/// 非 Windows：无屏读 → 恒 None（如实降级，与其它屏读路径同口径）。
+#[cfg(not(windows))]
+fn poll_menu_options(
+    _pid: u32,
+) -> Result<Option<Vec<crate::inject::dialog::DialogOption>>, String> {
+    Ok(None)
+}
+
+/// **`GET /m/api/v1/session-mode/menu?session_id=`**——**纯屏读、零注入**：读回当前
+/// 屏上的菜单/确认框选项表（供移动端面板的「重新读取」重同步）。
+///
+/// 与 POST 的 `open` 动作的区别：本端点**不注入任何东西**（不 `/permissions`、不清场），
+/// 只回答「此刻屏上有什么」。用途：
+/// - 用户手动在终端开了菜单，想在手机上点选；
+/// - 上一步读屏竞态（面板显示的选项与终端不一致）时重同步。
+///
+/// 响应：`{status:"menu", options:[…]}` / `{status:"confirm", options:[…]}` /
+/// `{status:"none"}`（屏上无 overlay）。
+pub async fn session_mode_menu_read(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request();
+    };
+    if device_identity(&st, &headers).is_none() {
+        return forbidden_defense();
+    }
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        (probe_st.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == probe_sid)
+    })
+    .await;
+    let session = match found {
+        Ok(Some(s)) => s,
+        Ok(None) => return mode_menu_err(StatusCode::NOT_FOUND, "no_session", None),
+        Err(e) => {
+            log::error!("session-mode/menu 读取任务异常: {e}");
+            return mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None);
+        }
+    };
+    if session.agent_type.tool_id() != "codex" {
+        return mode_menu_err(
+            StatusCode::CONFLICT,
+            "no_mechanism",
+            Some("终端菜单选择仅支持 codex"),
+        );
+    }
+    let pid = session.pid;
+    let read_sid = sid.clone();
+    let read_st = st.clone();
+    let r = tokio::task::spawn_blocking(move || -> (String, Vec<serde_json::Value>) {
+        let Some(lines) = (read_st.screen_probe)(read_sid.as_str(), pid) else {
+            return ("none".to_string(), Vec::new());
+        };
+        let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+        match crate::inject::mode::codex_overlay_kind(&lowered) {
+            Some(crate::inject::mode::CodexOverlay::PermissionMenu) => {
+                let items = crate::inject::mode::codex_menu_options(&lines, &lowered)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "number": o.number,
+                            "label": o.label,
+                            "highlighted": o.highlighted,
+                        })
+                    })
+                    .collect();
+                ("menu".to_string(), items)
+            }
+            Some(crate::inject::mode::CodexOverlay::FullAccessConfirm) => {
+                // 确认框：用簇解析（与 poll_confirm_cluster 同源）
+                let items = crate::inject::dialog::parse_dialog_clusters(&lines)
+                    .into_iter()
+                    .find(|c| {
+                        c.iter().any(|o| {
+                            o.label
+                                .to_lowercase()
+                                .contains(crate::inject::mode::FULL_ACCESS_AFFIRMATIVE_KEYWORD)
+                        })
+                    })
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "number": o.number,
+                            "label": o.label,
+                            "highlighted": o.highlighted,
+                        })
+                    })
+                    .collect();
+                ("confirm".to_string(), items)
+            }
+            None => ("none".to_string(), Vec::new()),
+        }
+    })
+    .await;
+    match r {
+        Ok((status, items)) => (
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "status": status, "options": items })),
+        )
+            .into_response(),
+        Err(e) => {
+            log::error!("session-mode/menu 读取任务异常: {e}");
+            mode_menu_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", None)
+        }
+    }
+}
+
 pub async fn session_mode_switch(
     State(st): State<Arc<RemoteState>>,
     headers: axum::http::HeaderMap,
@@ -5482,6 +6108,42 @@ mod tests {
             approve_dialog_keys("opencode"),
             ApproveDialogKeys::NavigateConfirm,
             "未取证工具保守导航（到不了此路，纵深防御）"
+        );
+    }
+
+    /// **2026-09-23 接线回归锁**：opencode 多选 submit 必须分派到
+    /// [`StagePlan::OpencodeSubmit`]（首段「Confirm 已在场跳过 tab」→ enter），
+    /// 而不是落进 claude 的 Submit 行走位形态（屏读判据在 opencode 屏上必失败）；
+    /// advance 分派到单键通道。还原动作：删掉 `(Submit, "opencode")` 分支 → 本测试先红。
+    #[test]
+    fn stage_plan_dispatch_opencode_submit_is_wired() {
+        let q = crate::inject::question::parse_questions(
+            r#"{"questions":[{"question":"q","multiSelect":true,"options":[{"label":"a"},{"label":"b"}]}]}"#,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Submit,
+                &q,
+                "opencode"
+            ),
+            StagePlan::OpencodeSubmit,
+            "opencode 多选 submit 走 OpencodeSubmit 阶段机"
+        );
+        assert_eq!(
+            StagePlan::for_action(crate::inject::question::AnswerAction::Submit, &q, "claude"),
+            StagePlan::Submit { max_down_steps: 4 },
+            "claude 多选 submit 维持 Submit 行走位形态（选项 2 + 2）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                &q,
+                "opencode"
+            ),
+            StagePlan::SingleKey,
+            "advance 是单键纯导航（tab），与 select/toggle/cancel 同通道"
         );
     }
 

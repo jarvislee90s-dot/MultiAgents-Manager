@@ -1,0 +1,41 @@
+# source: 2026-09-23 用户实机走查截图逐字转写（**非探针 dump**，如实声明；用户会话
+#   codex-cli 0.156.1，屏宽较宽 → 描述折行为四行，与自建会话的窄版形态互补）
+# 与 codex-perm-menu-newfooter-escback.txt 的差异（同一版本、两种屏宽布局）：
+#   1) 第 2 档标签带内联后缀 `(non-admin sandbox)`：`› 2. Ask for approval (non-admin sandbox) (current)`；
+#   2) footer 之上有说明段（The non-admin sandbox protects ... /setup-default-sandbox.）
+#      —— 该段**不得**进入菜单项集合（靠编号行形态天然过滤，本夹具锁死该不变式）。
+# 转写纪律：只做逐字转写，不改写文字；转写来源为用户走查截图（见台账同日追记）。
+  Codex can now safely edit files and execute commands in your computer
+
+• Model changed to glm-5.3-flash medium for Plan mode.
+
+• Model changed to glm-5.3-flash high for Default mode.
+
+  Update Model Permissions
+
+
+  1. Read Only                                       Codex can read files in the
+                                                     current workspace. Approval
+                                                     is required to edit files
+                                                     or access the internet.
+› 2. Ask for approval (non-admin sandbox) (current)  Codex can read and edit
+                                                     files in the current
+                                                     workspace, and run
+                                                     commands. Approval is
+                                                     required to access the
+                                                     internet or edit other
+                                                     files.
+  3. Approve for me                                  Only ask for actions
+                                                     detected as potentially
+                                                     unsafe.
+  4. Full Access                                     Codex can edit files
+                                                     outside this workspace and
+                                                     access the internet without
+                                                     asking for approval.
+                                                     Exercise caution when
+                                                     using.
+
+  The non-admin sandbox protects your files and prevents network access under
+  most circumstances. However, it carries greater risk if prompt injected. To
+  upgrade to the default sandbox, run /setup-default-sandbox.
+  enter select · esc back

@@ -16,6 +16,9 @@ interface Routes {
   modeNetworkFail?: boolean;
   switchBody?: Record<string, unknown>;
   switchStatus?: number;
+  /** 2026-09-23 picker：/session-mode/menu 的响应体（open/pick/GET 重读同形） */
+  menuBody?: Record<string, unknown>;
+  menuStatus?: number;
 }
 
 let routes: Routes;
@@ -32,6 +35,17 @@ afterEach(() => {
 function installFetch() {
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    // 长路径必须先判（否则被 `/session-mode` 前缀吞）：picker 的菜单端点在 switch 之前
+    if (url.includes("/session-mode/menu")) {
+      if (routes.menuStatus) {
+        return new Response(JSON.stringify(routes.menuBody ?? { error: "internal" }), {
+          status: routes.menuStatus,
+        });
+      }
+      return new Response(JSON.stringify(routes.menuBody ?? { status: "none", options: [] }), {
+        status: 200,
+      });
+    }
     if (url.includes("/session-mode/switch")) {
       if (routes.switchStatus) {
         return new Response(JSON.stringify(routes.switchBody ?? { error: "internal" }), {
@@ -92,7 +106,8 @@ function opencodeSingleAxis(): SessionModeView {
 }
 
 /** 丁T4 新后端形态：二维（codex）。2026-09-23 codex 模式切换改造后：模式组 =
- *  单钮 toggle（计划 ⇄ 操作，shift+tab 双向）；权限组四档（含自动审批）。
+ *  单钮 toggle（计划 ⇄ 操作，shift+tab 双向）；权限组 = **单选面板**（picker，
+ *  用户方案：后端读回终端菜单选项，用户点选哪项就敲哪个数字键）。
  *  `modeCurrent` 驱动 toggle 的翻转方向；`permissionCurrent` 用来测「上次切换」
  *  记忆标注（null = 无记忆 → 模式未知）。 */
 function codexTwoAxis(opts?: {
@@ -128,6 +143,7 @@ function codexTwoAxis(opts?: {
         label: "权限",
         step: false,
         readback: false,
+        layout: "picker",
         current: permissionCurrent,
         currentLabel: permissionCurrent === null ? null : "只读",
         tiers: [
@@ -149,6 +165,14 @@ async function flushAsync() {
   for (let i = 0; i < 6; i += 1) {
     await Promise.resolve();
   }
+}
+
+/** picker 的 fetch 链比切档长（async 回调里再 await + setState），6 轮微任务不够
+ *  ——用一轮宏任务（0ms 定时器）等 React 把面板状态刷完。 */
+async function flushPanel() {
+  await flushAsync();
+  await new Promise((res) => setTimeout(res, 0));
+  await flushAsync();
 }
 
 describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
@@ -308,19 +332,17 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     expect(screen.getByTestId("mode-group-permission").textContent).toContain("权限");
   });
 
-  it("二维家切档带 group：点权限组「只读」→ POST {group:'permission', target:'readOnly'}", async () => {
+  it("二维家：权限组是**单选面板**（picker）——不渲染逐档按钮，只出一颗「切换权限」钮", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
-    routes.switchBody = { status: "key_sent", verified: false, hint: "请人工核对终端" };
     render(<ModeBar session={{ id: "t2" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-permission-readOnly"));
-    await flushAsync();
-    const call = fetchMock.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/switch")
-    );
-    const body = JSON.parse(String((call![1] as RequestInit).body));
-    expect(body.group).toBe("permission");
-    expect(body.target).toBe("readOnly");
+    expect(await screen.findByTestId("mode-picker-permission-open")).toBeTruthy();
+    // 旧逐档按钮**不在了**（前端不再硬编码「哪档对应哪个数字」——档位编号随
+    // Guardian 配置前移，硬编码会错位；编号一律来自终端屏读）
+    expect(screen.queryByTestId("mode-switch-permission-readOnly")).toBeNull();
+    expect(screen.queryByTestId("mode-switch-permission-bypass")).toBeNull();
+    // 面板未点开时不出
+    expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
   });
 
   it("裁7：codex 退役旧档（untrusted/on-failure）**不渲染为可点按钮**，只作说明", async () => {
@@ -445,22 +467,20 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
 
 // ==== 批次戊 E3④：当前档高亮 + 问答待决置灰 ====
 describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
-  it("当前档按钮高亮：data-current=true + 反色样式；其余档 data-current=false", async () => {
+  it("当前档高亮：toggle 单钮 data-current=当前档；权限组高亮走「上次切换」记忆（无逐档按钮）", async () => {
     installFetch();
-    // 权限组带「上次切换」记忆（readOnly）→ 逐档高亮断言落在权限组
     routes.mode = codexTwoAxis({ permissionCurrent: "readOnly" });
     render(<ModeBar session={{ id: "s-e3-hl" }} />);
-    const readOnlyBtn = await screen.findByTestId("mode-switch-permission-readOnly");
-    expect(readOnlyBtn.getAttribute("data-current")).toBe("true");
-    expect(readOnlyBtn.className).toContain("font-semibold");
-    const bypassBtn = screen.getByTestId("mode-switch-permission-bypass");
-    expect(bypassBtn.getAttribute("data-current")).toBe("false");
-    expect(bypassBtn.className).not.toContain("font-semibold");
+    await screen.findByTestId("mode-picker-permission-open");
     // 模式组是 toggle 单钮：data-current 直接承载当前档（plan）
     expect(screen.getByTestId("mode-switch-mode-toggle").getAttribute("data-current")).toBe("plan");
+    // 权限组是 picker：当前档由「上次切换」记忆显示（高亮不再落在按钮上——
+    // 逐档按钮已退役，编号一律来自终端屏读）
+    expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
+    expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
   });
 
-  it("问答待决：questionPending=true → 按钮全部禁用 + 原因文案 + data-question-pending", async () => {
+  it("E3④ 问答待决：questionPending=true → 按钮全部禁用 + 原因文案 + data-question-pending", async () => {
     installFetch();
     routes.mode = { ...codexTwoAxis(), questionPending: true };
     render(<ModeBar session={{ id: "s-e3-pending" }} />);
@@ -469,9 +489,9 @@ describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
     expect((screen.getByTestId("mode-switch-mode-toggle") as HTMLButtonElement).disabled).toBe(
       true
     );
-    expect(
-      (screen.getByTestId("mode-switch-permission-readOnly") as HTMLButtonElement).disabled
-    ).toBe(true);
+    expect((screen.getByTestId("mode-picker-permission-open") as HTMLButtonElement).disabled).toBe(
+      true
+    );
   });
 
   it("非待决（questionPending 缺省/ false）不置灰不显文案", async () => {
@@ -553,64 +573,198 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(toggle.getAttribute("data-current")).toBe("unknown");
   });
 
-  it("权限组四档渲染：自动审批（acceptEdits）档出现在只读/默认与完全信任之间", async () => {
+  it("picker：点「切换权限」→ POST {action:'open'} → 渲染终端菜单选项（编号+屏上原文）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
-    render(<ModeBar session={{ id: "mc-t3" }} />);
-    await screen.findByTestId("mode-bar");
-    expect(screen.getByTestId("mode-switch-permission-acceptEdits").textContent).toBe("自动审批");
-    expect(screen.getByTestId("mode-switch-permission-readOnly")).toBeTruthy();
-    expect(screen.getByTestId("mode-switch-permission-default")).toBeTruthy();
-    expect(screen.getByTestId("mode-switch-permission-bypass")).toBeTruthy();
-  });
-
-  it("完全信任二次确认：点完全信任先出确认条且**不发请求**；确认后才发 bypass", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.switchBody = { status: "key_sent", verified: true, hint: null };
-    render(<ModeBar session={{ id: "mc-t4" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-permission-bypass"));
-    await flushAsync();
-    // 确认条出现，但**零 POST**（未确认不发任何键）
-    expect(screen.getByTestId("mode-bypass-confirm").textContent).toContain("两次按键");
-    expect(
-      fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-mode/switch"))
-    ).toBe(false);
-    // 确认启用 → POST {group:'permission', target:'bypass'}
-    fireEvent.click(screen.getByTestId("mode-bypass-confirm-yes"));
-    await flushAsync();
+    routes.menuBody = {
+      status: "menu",
+      options: [
+        { number: 1, label: "Read Only", highlighted: false },
+        { number: 2, label: "Ask for approval (non-admin sandbox) (current)", highlighted: true },
+        { number: 3, label: "Approve for me", highlighted: false },
+        { number: 4, label: "Full Access", highlighted: false },
+      ],
+    };
+    render(<ModeBar session={{ id: "mc-p1" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
     const call = fetchMock.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/switch")
+      String(c[0]).includes("/session-mode/menu")
     );
     const body = JSON.parse(String((call![1] as RequestInit).body));
-    expect(body.group).toBe("permission");
-    expect(body.target).toBe("bypass");
+    expect(body.action).toBe("open");
+    // 选项渲染：编号徽标 = 屏上编号；文本 = 屏上原文（含内联后缀原样展示）
+    expect(screen.getByTestId("mode-menu-option-1").textContent).toContain("1");
+    expect(screen.getByTestId("mode-menu-option-2").textContent).toContain(
+      "Ask for approval (non-admin sandbox) (current)"
+    );
+    expect(screen.getByTestId("mode-menu-option-2").getAttribute("data-highlighted")).toBe("true");
+    expect(screen.getByTestId("mode-menu-option-4")).toBeTruthy();
+    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("menu");
   });
 
-  it("完全信任二次确认：取消收起确认条，全程零请求", async () => {
+  it("picker：点选项 → POST {action:'pick', number}（发的是**屏上编号**）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
-    render(<ModeBar session={{ id: "mc-t5" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-permission-bypass"));
-    expect(screen.getByTestId("mode-bypass-confirm")).toBeTruthy();
-    fireEvent.click(screen.getByTestId("mode-bypass-confirm-no"));
-    expect(screen.queryByTestId("mode-bypass-confirm")).toBeNull();
-    expect(
-      fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("/session-mode/switch"))
-    ).toBe(false);
+    routes.menuBody = {
+      status: "menu",
+      options: [
+        { number: 1, label: "Read Only", highlighted: false },
+        { number: 3, label: "Approve for me", highlighted: false },
+      ],
+    };
+    render(<ModeBar session={{ id: "mc-p2" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    // 点第 3 项 → 发 number=3（**不是前端算的「第 2 项」**——屏上印的是 3，就敲 3）
+    routes.menuBody = { status: "done", verified: true, hint: "终端回执：Permissions updated to Approve for me" };
+    fireEvent.click(screen.getByTestId("mode-menu-option-3"));
+    await flushPanel();
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/menu")
+    );
+    const pickBody = JSON.parse(String((calls[calls.length - 1]![1] as RequestInit).body));
+    expect(pickBody.action).toBe("pick");
+    expect(pickBody.number).toBe(3);
+  });
+
+  it("picker：done + verified → 收起面板 + 显示后端回执原文（含终端回执行）", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 1, label: "Read Only", highlighted: false }],
+    };
+    render(<ModeBar session={{ id: "mc-p3" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    routes.menuBody = { status: "done", verified: true, hint: "终端回执：Permissions updated to Read Only" };
+    fireEvent.click(screen.getByTestId("mode-menu-option-1"));
+    const receipt = await screen.findByTestId("mode-receipt");
+    expect(receipt.textContent).toContain("Permissions updated to Read Only");
+    expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
+  });
+
+  it("picker：done + **verified=false** → 不假装成功（原样透出后端文案 + 显红色错误位）", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 1, label: "Read Only", highlighted: false }],
+    };
+    render(<ModeBar session={{ id: "mc-p4" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    routes.menuBody = {
+      status: "done",
+      verified: false,
+      hint: "已按你点选的编号投递，但未在屏上读到成功回执——请人工核对终端",
+    };
+    fireEvent.click(screen.getByTestId("mode-menu-option-1"));
+    const err = await screen.findByTestId("mode-error");
+    expect(err.textContent).toContain("请人工核对终端");
+    expect(screen.queryByTestId("mode-receipt")).toBeNull();
+  });
+
+  it("picker 二阶段：pick 返回 confirm → 面板切为确认框选项（由用户再点，MAM 不代按）", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 4, label: "Full Access", highlighted: false }],
+    };
+    render(<ModeBar session={{ id: "mc-p5" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    routes.menuBody = {
+      status: "confirm",
+      options: [
+        { number: 1, label: "Yes, continue anyway", highlighted: true },
+        { number: 2, label: "Cancel", highlighted: false },
+      ],
+    };
+    fireEvent.click(screen.getByTestId("mode-menu-option-4"));
+    await flushPanel();
+    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("confirm");
+    expect(screen.getByTestId("mode-menu-option-1").textContent).toContain("Yes, continue anyway");
+    // 确认框选项也要用户点——**第二次请求前不发任何东西**
+    const before = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/menu")
+    ).length;
+    expect(before).toBe(2, "open + pick 两次；确认键尚未发");
+  });
+
+  it("picker：关闭按钮只收起面板，零请求", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 1, label: "Read Only", highlighted: false }],
+    };
+    render(<ModeBar session={{ id: "mc-p6" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    const before = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByTestId("mode-menu-close"));
+    expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
+  it("picker：「重新读取」用 GET（零注入）重同步", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 1, label: "Read Only", highlighted: false }],
+    };
+    render(<ModeBar session={{ id: "mc-p7" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 2, label: "Ask for approval (current)", highlighted: true }],
+    };
+    fireEvent.click(screen.getByTestId("mode-menu-reload"));
+    await flushPanel();
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/menu")
+    );
+    const last = calls[calls.length - 1]!;
+    const init = last[1] as RequestInit | undefined;
+    expect(init?.method ?? "GET").toBe("GET");
+    expect(screen.getByTestId("mode-menu-option-2")).toBeTruthy();
+  });
+
+  it("picker：failed → 保留面板 + 显示后端失败原文（用户可重读或重选）", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.menuBody = {
+      status: "menu",
+      options: [{ number: 1, label: "Read Only", highlighted: false }],
+    };
+    render(<ModeBar session={{ id: "mc-p8" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    routes.menuBody = {
+      status: "failed",
+      error: "屏上没有权限菜单或确认框——零投递（面板数据可能已过期，请点「重新读取」）",
+    };
+    fireEvent.click(screen.getByTestId("mode-menu-option-1"));
+    const note = await screen.findByTestId("mode-menu-note");
+    expect(note.textContent).toContain("零投递");
+    // 面板**不收起**（不逼用户重新开菜单）
+    expect(screen.getByTestId("mode-menu-panel")).toBeTruthy();
   });
 
   it("权限组记忆标注：current 有值（上次切换）→ 显示档名 +「（上次切换）」，无未知提示", async () => {
     installFetch();
     routes.mode = codexTwoAxis({ permissionCurrent: "readOnly" });
     render(<ModeBar session={{ id: "mc-t6" }} />);
-    await screen.findByTestId("mode-bar");
+    await screen.findByTestId("mode-picker-permission-open");
     expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
     expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
     expect(screen.queryByTestId("mode-unknown-hint-permission")).toBeNull();
-    // 只读按钮按记忆高亮
-    expect(screen.getByTestId("mode-switch-permission-readOnly").getAttribute("data-current")).toBe(
-      "true"
-    );
+    // 权限组不渲染逐档按钮（编号一律来自终端屏读）
+    expect(screen.queryByTestId("mode-switch-permission-readOnly")).toBeNull();
   });
 });

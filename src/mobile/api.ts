@@ -622,6 +622,10 @@ export interface QuestionInfoView {
   /** 批次戊 E4-E6：多题交互能力（kimi/codex/opencode 已实机定案）——true 时多题卡
    *  渲染逐题作答 UI；缺省/旧后端/false → 只读卡（红线不变） */
   multiQuestion?: boolean;
+  /** 切换题目能力（2026-09-23 错位修复）：多题卡多选题的显式切页动作——仅 opencode
+   *  （tab=前向切页，实测定案）。缺省/旧后端 → 按 false：多选题不渲染「切换题目」钮，
+   *  改渲染「请到终端切题」引导（不假装能发）。 */
+  advance?: boolean;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }
@@ -643,8 +647,10 @@ export async function fetchSessionQuestion(sessionId: string): Promise<QuestionI
 /** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换；
  *  submit=多选提交（**阶段机闭环**：屏读确认每段后才推进）；
  *  cancel=取消问题（Esc）；freeText=自由作答（**仅 claude**，阶段机闭环：
- *  定位 `Type something` 行 → 文本 → 回车）。 */
-export type QuestionAnswerAction = "select" | "toggle" | "submit" | "cancel" | "freeText";
+ *  定位 `Type something` 行 → 文本 → 回车）；
+ *  advance=多题切换题目（**仅 opencode**，tab 前向切页——纯导航，不触碰勾选态）。 */
+export type QuestionAnswerAction =
+  "select" | "toggle" | "submit" | "cancel" | "freeText" | "advance";
 
 /** 阶段机动作的**段名**（回执 `stage` 字段的取值；与后端
  *  `remote::api::QUESTION_STAGE_*` 常量逐字对应，勿漂移）。
@@ -758,13 +764,15 @@ export interface ModeLegacyView {
  *  `current=null` = 档未知（屏读失败或该组无回读源）→ **不得假装知道**（红线 4）。
  *  `layout`（2026-09-23 codex 模式切换改造）：`"toggle"` = 单钮循环（点击向终端发一次
  *  循环键——codex 模式组「计划 ⇄ 操作」= shift+tab，目标档由前端按当前档翻转）；
- *  缺省/`"tiers"` = 逐档按钮。 */
+ *  缺省/`"tiers"` = 逐档按钮；`"picker"` = **单选面板**（codex 权限组，2026-09-23 用户
+ *  方案）：单钮「切换权限」→ 后端读回**终端菜单的选项表**（编号 = 屏上实读值）→ 用户
+ *  点选哪项，MAM 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。 */
 export interface ModeGroupView {
   id: ModeGroupId;
   label: string;
   step: boolean;
   readback: boolean;
-  layout?: "tiers" | "toggle";
+  layout?: "tiers" | "toggle" | "picker";
   current: MamMode | null;
   currentLabel: string | null;
   tiers: ModeTierView[];
@@ -856,6 +864,101 @@ export async function sessionModeSwitch(
     throw new ApiError(r.status, `session-mode/switch ${r.status}`, data);
   }
   return (await r.json()) as SessionModeSwitchResult;
+}
+
+// ==== 2026-09-23：codex 权限组的「终端菜单单选题」（用户方案）====
+
+/** 终端菜单里的一项。`number` = **屏上实读的编号**（用户点它 → MAM 敲同一个数字键）；
+ *  `label` = 屏上原文（原样展示，供用户与终端核对）；`highlighted` = 终端当前高亮项。 */
+export interface ModeMenuOption {
+  number: number;
+  label: string;
+  highlighted: boolean;
+}
+
+/** 终端菜单面板的载荷（POST /session-mode/menu 的 `open`/`pick`，
+ *  与 GET /session-mode/menu 的重读同形）。
+ *
+ *  - `menu`：菜单开着，`options` = 档位表（用户点选）；
+ *  - `confirm`：Full Access 的**二阶段风险确认框**在屏，`options` = 确认框选项
+ *    （空数组 + `hint` = 确认框在屏但选项未读到，提示重读）；
+ *  - `done`：已投递且无确认框。`verified` = 屏上是否读到成功回执行；
+ *    `hint` 原样带出后端文案（含回执行原文）——**不假装成功**（目标档未知：
+ *    用户点的是屏上编号，后端不知道对应哪个 wire 档，故只报「有没有回执」）；
+ *  - `none`：屏上无菜单/确认框（仅 GET 重读会给）；
+ *  - `failed`：如实失败文案。 */
+export type ModeMenuResult =
+  | { status: "menu"; options: ModeMenuOption[]; dialogChecked?: boolean }
+  | {
+      status: "confirm";
+      options: ModeMenuOption[];
+      hint?: string | null;
+      dialogChecked?: boolean;
+    }
+  | {
+      status: "done";
+      verified: boolean;
+      hint?: string | null;
+      dialogChecked?: boolean;
+    }
+  | { status: "none"; options: ModeMenuOption[] }
+  | { status: "failed"; error: string };
+
+/** 面板错误体（非 2xx）→ 解析进 ApiError.data（错误码分诊：no_session / no_mechanism
+ *  / blocked_by_dialog），与 `sessionModeSwitch` 同口径。 */
+async function modeMenuFetch(init: RequestInit, path: string): Promise<ModeMenuResult> {
+  let r: Response;
+  try {
+    r = await fetch(path, init);
+  } catch (e) {
+    throw new ApiError(null, `session-mode/menu 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体 */
+    }
+    throw new ApiError(r.status, `session-mode/menu ${r.status}`, data);
+  }
+  return (await r.json()) as ModeMenuResult;
+}
+
+/** **打开终端权限菜单**并读回选项表（注入 `/permissions` + 回车）。
+ *  非 2xx → ApiError（409 blocked_by_dialog 等，与切档端点同分诊）。 */
+export async function sessionModeMenuOpen(sessionId: string): Promise<ModeMenuResult> {
+  return modeMenuFetch(
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action: "open" }),
+    },
+    "/m/api/v1/session-mode/menu"
+  );
+}
+
+/** **按用户点选的屏上编号敲键**（无回车）。硬前置由后端把关：屏上没有菜单/确认框 →
+ *  零投递并如实报错（`failed` 或抛 ApiError）。 */
+export async function sessionModeMenuPick(
+  sessionId: string,
+  number: number
+): Promise<ModeMenuResult> {
+  return modeMenuFetch(
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action: "pick", number }),
+    },
+    "/m/api/v1/session-mode/menu"
+  );
+}
+
+/** **重新读取**（纯屏读、零注入）：把面板与终端当前屏面对齐。用于用户手动在终端开了
+ *  菜单、或上一步读屏竞态时。 */
+export async function fetchSessionModeMenu(sessionId: string): Promise<ModeMenuResult> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  return modeMenuFetch({ method: "GET" }, `/m/api/v1/session-mode/menu?${q}`);
 }
 
 // ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====

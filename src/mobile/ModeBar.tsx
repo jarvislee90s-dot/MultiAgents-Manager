@@ -3,10 +3,14 @@ import { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
   fetchSessionMode,
+  fetchSessionModeMenu,
+  sessionModeMenuOpen,
+  sessionModeMenuPick,
   sessionModeSwitch,
   type MamMode,
   type ModeGroupId,
   type ModeGroupView,
+  type ModeMenuOption,
   type SessionModeView,
 } from "./api";
 
@@ -149,7 +153,24 @@ export default function ModeBar({ session }: { session: { id: string } }) {
           group={g}
           showGroupLabel={groups.length > 1}
           busy={busy || questionPending}
+          sessionId={session.id}
           onSwitch={(target) => handleSwitch(target, g.id)}
+          onPicked={(hint, ok) => {
+            // picker 走完：ok=true 时刷新视图（后端可能已改档，重拉 GET 拿权威结构），
+            // 否则只显示后端原样文案——**不假装成功**（与 handleSwitch 同红线）
+            if (ok) {
+              setError(null);
+              setReceipt(hint);
+              void fetchSessionMode(session.id)
+                .then(setView)
+                .catch(() => {
+                  /* 重拉失败保留原视图——如实，不是把旧值刷成新值 */
+                });
+            } else {
+              setReceipt(null);
+              setError(hint);
+            }
+          }}
         />
       ))}
       {questionPending && (
@@ -229,13 +250,19 @@ function ModeGroupRow({
   group,
   showGroupLabel,
   busy,
+  sessionId,
   onSwitch,
+  onPicked,
 }: {
   group: ModeGroupView;
   showGroupLabel: boolean;
   /** E3④：busy 含问答待决置灰（父层合并——待决时全组按钮禁用） */
   busy: boolean;
+  /** 单选面板（picker）要用会话 id 调 /session-mode/menu */
+  sessionId: string;
   onSwitch: (target: MamMode) => void;
+  /** picker 走完（done/failed）→ 父层刷新视图与回执 */
+  onPicked: (hint: string, ok: boolean) => void;
 }) {
   const currentText = group.currentLabel ?? "模式未知";
   const unknown = group.current === null;
@@ -249,9 +276,7 @@ function ModeGroupRow({
       )}
       {/* 单组（无组标题）时给当前档一个「当前」前缀；二维两行组已有组标题
           （模式/权限），再叠「模式」二字会读成「模式 模式 …」（用户 2026-09-23） */}
-      {!showGroupLabel && (
-        <span className="text-xs text-slate-500 dark:text-slate-400">当前</span>
-      )}
+      {!showGroupLabel && <span className="text-xs text-slate-500 dark:text-slate-400">当前</span>}
       <span
         data-testid={`mode-current-${group.id}`}
         className={`text-xs font-semibold ${
@@ -276,8 +301,12 @@ function ModeGroupRow({
           请人工核对终端当前模式
         </span>
       )}
-      {group.layout === "toggle" ? (
-        // 单钮 toggle（codex 模式组）：点击向终端发一次 shift+tab，终端在
+      {group.layout === "picker" ? (
+        // **单选面板**（2026-09-23 用户方案）：单钮「切换权限」→ 后端读回终端菜单的
+        // 选项表 → 用户点选哪项就敲哪个数字键。前端**不硬编码「哪档对应哪个数字」**
+        // （档位编号随 Guardian 配置前移，硬编码会错位）。
+        <PermissionPicker sessionId={sessionId} disabled={busy} onDone={onPicked} />
+      ) : group.layout === "toggle" ? (        // 单钮 toggle（codex 模式组）：点击向终端发一次 shift+tab，终端在
         // 计划/操作间循环；目标档按当前档翻转（current 未知 → 禁用，防盲按误切）
         (() => {
           const toggleTarget: MamMode = group.current === "plan" ? "default" : "plan";
@@ -396,4 +425,233 @@ function ModeGroupRow({
       )}
     </span>
   );
+}
+
+/** **终端菜单单选面板**（codex 权限组，2026-09-23 用户方案）。
+ *
+ * 交互：单钮「切换权限」→ 点开后后端注入 `/permissions` + 回车并**读回终端菜单的
+ * 选项表**（编号 = 屏上实读值、文本 = 屏上原文）→ 这里渲染成一列编号按钮 →
+ * 用户点哪项，MAM 就敲哪个数字键。
+ *
+ * # 为什么这样比「后端自己敲」好（用户实机走查的结论）
+ *
+ * 旧路径是后端按目标档**猜**屏上编号（前端文案还硬编码「4→1」）。而档位编号会随
+ * Guardian 配置前移（`Approve for me` 缺席时 `Full Access` 从 4 变 3）——猜错的
+ * 后果是切到**别的档**（用户点只读、实际启用完全信任）。本面板把这一步交给用户：
+ * 编号来自屏幕实读，MAM 只是投递，**不猜**。
+ *
+ * # 两阶段
+ *
+ * 切 Full Access 时终端会弹风险确认框 → 后端返回 `status:"confirm"` → 面板切为
+ * 确认框的选项（同样读自终端原文），由用户再点一次。**MAM 不代按**。
+ *
+ * # 面板形态
+ *
+ * 内联展开（不引入遮罩/portal——沿用移动端既有惯例），配色与审批卡的「终端对话框
+ * 选项」同款（那是现成的同形先例：编号徽标 + 纵向按钮 + 「点按即代你按对应数字键」）。
+ */
+function PermissionPicker({
+  sessionId,
+  disabled,
+  onDone,
+}: {
+  sessionId: string;
+  disabled: boolean;
+  onDone: (hint: string, ok: boolean) => void;
+}) {
+  /** 面板态：null = 收起；menu = 菜单选项；confirm = 二阶段确认框选项 */
+  const [panel, setPanel] = useState<null | "menu" | "confirm">(null);
+  const [options, setOptions] = useState<ModeMenuOption[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const runOpen = useCallback(async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await sessionModeMenuOpen(sessionId);
+      if (r.status === "menu") {
+        setOptions(r.options);
+        setPanel("menu");
+      } else if (r.status === "confirm") {
+        // 开菜单时确认框已在屏（上次残留）——直接进二阶段
+        setOptions(r.options);
+        setPanel("confirm");
+        setNote(r.hint ?? null);
+      } else if (r.status === "failed") {
+        setNote(r.error);
+        setPanel(null);
+      } else {
+        setNote("终端没有可读的权限菜单——请人工核对终端");
+        setPanel(null);
+      }
+    } catch (e) {
+      setNote(menuErrorText(e));
+      setPanel(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [sessionId]);
+
+  const runReload = useCallback(async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await fetchSessionModeMenu(sessionId);
+      if (r.status === "menu") {
+        setOptions(r.options);
+        setPanel("menu");
+      } else if (r.status === "confirm") {
+        setOptions(r.options);
+        setPanel("confirm");
+      } else if (r.status === "none") {
+        setNote("终端屏上现在没有权限菜单或确认框（可能已关闭）——可重新打开");
+      } else if (r.status === "failed") {
+        setNote(r.error);
+      }
+    } catch (e) {
+      setNote(menuErrorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [sessionId]);
+
+  const runPick = useCallback(
+    async (number: number) => {
+      setBusy(true);
+      setNote(null);
+      try {
+        const r = await sessionModeMenuPick(sessionId, number);
+        if (r.status === "confirm") {
+          setOptions(r.options);
+          setPanel("confirm");
+          setNote(r.hint ?? "终端弹出风险确认框——请再点一次确认项");
+        } else if (r.status === "done") {
+          setPanel(null);
+          setOptions([]);
+          onDone(r.hint ?? (r.verified ? "已切换" : "已投递，请人工核对终端"), r.verified);
+        } else if (r.status === "failed") {
+          // 失败**保留面板**（用户可重读或重选——不逼他重新开菜单）
+          setNote(r.error);
+        } else {
+          setNote("终端屏上没有菜单或确认框——请点「重新读取」");
+        }
+      } catch (e) {
+        setNote(menuErrorText(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [sessionId, onDone]
+  );
+
+  const t = toneTokens("question");
+  const isConfirm = panel === "confirm";
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="mode-picker-permission-open"
+        disabled={disabled || busy}
+        title="向终端发送 /permissions 打开权限菜单，然后由你点选档位"
+        onClick={() => void runOpen()}
+        className="rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white disabled:opacity-40 dark:bg-blue-500"
+      >
+        {busy && panel === null ? "读取终端菜单…" : "切换权限"}
+      </button>
+      {panel !== null && (
+        <div
+          data-testid="mode-menu-panel"
+          data-panel={panel}
+          className={`mt-1 w-full rounded-lg px-2 py-1.5 ${t.box}`}
+        >
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold text-sky-700 dark:text-sky-300">
+              {isConfirm ? "终端二次确认" : "终端权限菜单"}
+            </span>
+            <span className="flex gap-1">
+              <button
+                type="button"
+                data-testid="mode-menu-reload"
+                disabled={busy}
+                onClick={() => void runReload()}
+                className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+              >
+                重新读取
+              </button>
+              <button
+                type="button"
+                data-testid="mode-menu-close"
+                disabled={busy}
+                onClick={() => {
+                  setPanel(null);
+                  setOptions([]);
+                  setNote(null);
+                }}
+                className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+              >
+                关闭
+              </button>
+            </span>
+          </div>
+          <p className="mb-1 text-[11px] text-sky-700/80 dark:text-sky-400/80">
+            {isConfirm
+              ? "以下选项读自终端的风险确认框，点按即代你按对应数字键"
+              : "以下选项读自终端，点按即代你按对应数字键（编号 = 屏幕上那个数字）"}
+          </p>
+          <div className="space-y-1">
+            {options.length === 0 && (
+              <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                未读到选项——请点「重新读取」再选
+              </p>
+            )}
+            {options.map((o) => (
+              <button
+                key={o.number}
+                type="button"
+                data-testid={`mode-menu-option-${o.number}`}
+                data-highlighted={o.highlighted ? "true" : "false"}
+                disabled={busy}
+                onClick={() => void runPick(o.number)}
+                className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${t.action}`}
+              >
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${t.badge}`}
+                >
+                  {o.number}
+                </span>
+                <span className="min-w-0 flex-1 break-words">{o.label}</span>
+              </button>
+            ))}
+          </div>
+          {note !== null && (
+            <p
+              data-testid="mode-menu-note"
+              className="mt-1 text-[11px] text-amber-700 dark:text-amber-400"
+            >
+              {note}
+            </p>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** 面板的 ApiError → 中文文案（错误码分诊与 `handleSwitch` 同口径：不把「网络挂了」
+ *  和「终端有对话框」说成一句话）。 */
+function menuErrorText(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 404 && e.data?.error === "no_session") {
+      return "会话已结束，请返回看板刷新";
+    }
+    if (e.status === 409 && e.data?.error === "no_mechanism") {
+      return typeof e.data?.reason === "string" ? e.data.reason : "该工具不支持终端菜单选择";
+    }
+    if (e.status === 409 && e.data?.error === "blocked_by_dialog") {
+      return typeof e.data?.reason === "string" ? e.data.reason : "终端有待决对话框，请先处理";
+    }
+    return e.message;
+  }
+  return String(e);
 }
