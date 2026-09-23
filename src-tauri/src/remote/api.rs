@@ -4297,6 +4297,8 @@ pub async fn session_mode(
                 "label": g.label,
                 "step": g.step,
                 "readback": g.readback,
+                // 按钮布局（tiers=逐档钮 / toggle=单钮循环——codex 模式组）
+                "layout": g.layout.wire(),
                 "current": current.map(|m| m.wire()),
                 "currentLabel": current.map(|m| g.tiers.iter().find(|t| t.mode == m).map(|t| t.label).unwrap_or(m.label())),
                 "tiers": g.tiers.iter().map(|t| serde_json::json!({
@@ -4692,7 +4694,7 @@ pub async fn session_mode_switch(
         }
         Some(crate::inject::mode::SwitchBlock::CodexPlanBusy) => {
             log::debug!(
-                "codex /plan 运行中不可用（sid={sid} status={:?}）",
+                "codex 模式组运行中拦截（sid={sid} status={:?}）",
                 session.status
             );
             return (
@@ -4700,7 +4702,7 @@ pub async fn session_mode_switch(
                 [(axum::http::header::CACHE_CONTROL, "no-store")],
                 Json(serde_json::json!({
                     "status": "failed",
-                    "error": "codex 运行中不接受 /plan（计划模式不可用），请等回合结束后重试",
+                    "error": "codex 运行中不接受模式切换（shift+tab），请等回合结束后重试",
                 })),
             )
                 .into_response();

@@ -852,6 +852,31 @@ mod tests {
         assert_eq!(up_vk[0].vk, 0x26); // VK_UP 键形态
     }
 
+    /// shift+tab 组合键契约（2026-09-23 codex 模式组 toggle 改造的覆盖缺口补锁）：
+    /// 键名分派命中 `shift_tab_records`（族无关特例）→ VK_TAB+ch=0 的成对 down/up，
+    /// 且 `FlatKeyRecord` 转换携带 SHIFT_PRESSED 修饰位——B 族 crossterm 以
+    /// `dwControlKeyState` 表达 Shift（戊探C 实机证据），丢修饰位 = 终端收到裸 Tab
+    /// （自动补全而不是切模式）。还原动作：删 `From<&KeyRecordSpec>` 的修饰位置位
+    /// 或 `key_records_for` 的特例分支 → 任一断言先红。
+    #[test]
+    fn shift_tab_records_carry_shift_modifier() {
+        let codex = families::family_for("codex").unwrap();
+        let recs = key_records_for("shift+tab", &codex).expect("shift+tab 在键域内");
+        assert_eq!(recs.len(), 2, "成对 down/up");
+        assert!(recs[0].down && !recs[1].down);
+        assert!(
+            recs.iter().all(|r| r.vk == 0x09 && r.ch == 0),
+            "VK_TAB 无字符"
+        );
+        let flat: Vec<FlatKeyRecord> = recs.iter().map(Into::into).collect();
+        assert!(
+            flat.iter().all(|f| f.control_key_state == SHIFT_PRESSED),
+            "两条记录都带 SHIFT_PRESSED"
+        );
+        assert_eq!(flat[0].virtual_key_code, 0x09);
+        assert!(flat.iter().all(|f| f.unicode_char == 0));
+    }
+
     /// WinKeyLayout 真 FFI 契约单测（无需目标控制台，常规 cargo test 可跑）：
     /// 不硬编码键位（规避键盘布局差异误报）——vk_of('a') 与 `VkKeyScanW('a')`
     /// 低字节直接对拍；另钉三条铁律：'\r' → VK_RETURN 契约、非 ASCII → 0

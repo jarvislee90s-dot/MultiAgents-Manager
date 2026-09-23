@@ -289,6 +289,26 @@ pub struct LegacyTier {
     pub note: &'static str,
 }
 
+/// 组的按钮布局（前端渲染分支；数据驱动——前端不硬编码「哪个工具哪组是 toggle」）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupLayout {
+    /// 逐档按钮（每档一个可点钮）
+    Tiers,
+    /// 单钮 toggle（点击=向终端发一次循环键，目标档由前端按当前档翻转——
+    /// codex 模式组的「计划 ⇄ 操作」= shift+tab，2026-09-23 用户实测裁决）
+    Toggle,
+}
+
+impl GroupLayout {
+    /// wire 词（GET 载荷 `groups[].layout`）
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Tiers => "tiers",
+            Self::Toggle => "toggle",
+        }
+    }
+}
+
 /// 单个组（模式组或权限组）的完整描述（纯静态表，可测）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModeGroupSpec {
@@ -301,6 +321,8 @@ pub struct ModeGroupSpec {
     pub step: bool,
     /// 该组是否有屏读回读源（false → 前端只显示「请人工核对」，不假装知道当前档）
     pub readback: bool,
+    /// 按钮布局（[`GroupLayout`]）
+    pub layout: GroupLayout,
     /// 档位（**顺序即环序**——单轴组用 [`cycle_next`] 按此推进；二维组顺序即
     /// §2.6 表的档位列序）
     pub tiers: &'static [ModeTier],
@@ -354,22 +376,18 @@ impl ModeStructure {
 
 // ===== 档位表（§2.6 逐格；屏显标签 = 该格「档位（屏显标签）」列原文）=====
 
-/// codex 模式组：默认 / 计划。
+/// codex 模式组：操作 / 计划——**双向 shift+tab toggle**。
 ///
-/// **默认档不可选**：§2.6 只给了 `/plan`（进 Plan）——**退出** Plan 在本仓没有任何
-/// 实测命令（实测可用的另一条路是 `Implement this plan?` 对话框选项 1
-/// `Switch to Default and start coding`，那属审批流，不是模式组的下行通路）。
-/// 用户实测底栏写着 `shift+tab to cycle`，但 §2.6 是刚性表格（模式组机制点名 `/plan`），
-/// 故**不把 shift+tab 加为等价入口**——改为把「默认」标为不可选 + 写明原因（如实回执，
-/// 而不是点下去没反应）。
+/// 2026-09-23 用户实机走查裁决（裁20「用户实测优先」）：shift+tab 在 计划/操作
+/// 间双向循环可用，覆盖 §2.6 旧「仅 `/plan` 单向、退出无实测命令」的保守裁决
+/// （台账「codex 模式切换改造」节登记）。两档 `selectable`，前端按
+/// [`GroupLayout::Toggle`] 渲染单钮（目标档由前端按当前档翻转）。
 const CODEX_MODE_TIERS: [ModeTier; 2] = [
     ModeTier {
         mode: MamMode::Default,
-        label: "默认",
-        selectable: false,
-        reason: Some(
-            "codex 退出计划模式无实测命令（可在终端按 shift+tab，或在计划批准框选第一项）",
-        ),
+        label: "操作",
+        selectable: true,
+        reason: None,
     },
     ModeTier {
         mode: MamMode::Plan,
@@ -516,6 +534,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 step: false,
                 // 底栏 `Plan mode (shift+tab to cycle)`；缺席即 Default（§2.6 表末口径）
                 readback: true,
+                layout: GroupLayout::Toggle,
                 tiers: &CODEX_MODE_TIERS,
                 legacy: &[],
             },
@@ -525,6 +544,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 step: false,
                 // 权限档**没有**底栏回读源（实测底栏只有模式文本）→ 前端「请人工核对」
                 readback: false,
+                layout: GroupLayout::Tiers,
                 tiers: &CODEX_PERMISSION_TIERS,
                 legacy: &CODEX_PERMISSION_LEGACY,
             },
@@ -536,6 +556,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 step: false,
                 // 底栏 `plan` 前缀；缺席即 Default（§2.6 表末口径）
                 readback: true,
+                layout: GroupLayout::Tiers,
                 tiers: &KIMI_MODE_TIERS,
                 legacy: &[],
             },
@@ -545,6 +566,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 step: false,
                 // kimi 底栏**不含**权限档文本（实测：`plan  <模型> thinking: high  <cwd>`）
                 readback: false,
+                layout: GroupLayout::Tiers,
                 tiers: &KIMI_PERMISSION_TIERS,
                 legacy: &[],
             },
@@ -556,6 +578,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 // shift+tab 一步一档：目标档不参与按键构造（§2.6「切换钮=shift+tab 一步+回读确认」）
                 step: true,
                 readback: true,
+                layout: GroupLayout::Tiers,
                 tiers: &CLAUDE_AXIS_TIERS,
                 legacy: &[],
             },
@@ -566,6 +589,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 label: ModeGroupId::Mode.label(),
                 step: true,
                 readback: true,
+                layout: GroupLayout::Tiers,
                 tiers: &OPENCODE_AXIS_TIERS,
                 legacy: &[],
             },
@@ -607,6 +631,8 @@ pub enum ModeSwitchKind {
 /// 直达），不再是「盲切一档」；权限组是 `/permission` + `/yolo`/`/auto`。旧值
 /// `ShiftTabCycle` 会让前端渲染「循环一步」钮（新结构下已由 `groups[].step` 驱动），
 /// 故此处与事实对齐——本字段现在是**旧客户端的降级路径**，不是机制的唯一来源。
+/// codex 保持 `SlashCommand`：其权限组仍是 `/permissions` 两段式（模式组 2026-09-23
+/// 起虽改 shift+tab，但旧降级路径不做组级精细区分）。
 pub fn switch_kind(tool: &str) -> ModeSwitchKind {
     match tool {
         "claude" | "opencode" => ModeSwitchKind::ShiftTabCycle,
@@ -678,11 +704,10 @@ pub fn mode_switch_plan(
         ("claude", ModeGroupId::Mode, _) | ("opencode", ModeGroupId::Mode, _) => {
             Ok(ModeSwitchPlan::Key("shift+tab"))
         }
-        // codex 模式组：`/plan` 进 Plan（实测命令清单原文 "switch to Plan mode"）
-        ("codex", ModeGroupId::Mode, MamMode::Plan) => Ok(ModeSwitchPlan::Text("/plan")),
-        ("codex", ModeGroupId::Mode, _) => Err(SwitchRefusal::NoMechanism(
-            "codex 退出计划模式无实测命令（可在终端按 shift+tab，或在计划批准框选第一项）",
-        )),
+        // codex 模式组：双向 shift+tab toggle（2026-09-23 用户实测裁决——裁20；
+        // 目标档不参与按键构造，落点由屏读回读验证：`plan mode` 短语 / ` · ` 状态栏）
+        ("codex", ModeGroupId::Mode, MamMode::Plan)
+        | ("codex", ModeGroupId::Mode, MamMode::Default) => Ok(ModeSwitchPlan::Key("shift+tab")),
         // codex 权限组：`/permissions` 两段式（命令→菜单→屏读定位→导航确认）
         ("codex", ModeGroupId::Permission, MamMode::ReadOnly)
         | ("codex", ModeGroupId::Permission, MamMode::Default)
@@ -804,16 +829,18 @@ pub fn mode_switch_block(
     None
 }
 
-/// **codex `/plan` 运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。///
+/// **codex 模式组运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。///
 /// 判据来源：codex 0.155.1 二进制内嵌文案 `Plan mode unavailable right now.`
 /// （`slash_dispatch` 分支，与 `/plan` 的 in-progress 门同源）——即 codex 自己就会
 /// 拒；MAM 侧**在投递前**判，才能给用户一份**如实回执**而不是「已发送」后无变化。
 ///
 /// 「运行中」的口径复用 [`crate::inject::queue::is_running`]（Processing / Thinking /
-/// Compacting 三态——队列层既有单一判据，不另立一份）。只对 **codex × 模式组 × Plan**
-/// 生效：其余家其余档**未实测**是否有同类限制，不扩张（结论不得超过证据）。
+/// Compacting 三态——队列层既有单一判据，不另立一份）。2026-09-23 起拦截面扩为
+/// **模式组任意档**（shift+tab 取代 /plan 后，运行中 shift+tab 的行为同样未实测——
+/// 保守沿用旧拦截面，不盲扩到权限组；扩张决定在台账「codex 模式切换改造」节登记）。
 pub fn codex_plan_busy(tool: &str, group: ModeGroupId, target: MamMode, is_running: bool) -> bool {
-    tool == "codex" && group == ModeGroupId::Mode && target == MamMode::Plan && is_running
+    let _ = target;
+    tool == "codex" && group == ModeGroupId::Mode && is_running
 }
 
 /// 屏读文本 → 当前模式（**按工具分族解析**，纯函数可测）。
@@ -2009,16 +2036,29 @@ mod tests {
     /// §2.6 规格表逐格：结构 / 档位标签 / 顺序
     #[test]
     fn structure_matches_spec_table() {
-        // codex：两组（模式组 默认/计划；权限组 只读/默认/完全信任）
+        // codex：两组（模式组 操作/计划 = shift+tab toggle；权限组 只读/默认/完全信任）
         let codex = mode_structure("codex");
         assert_eq!(codex.wire(), "twoAxis");
         let m = codex.group(ModeGroupId::Mode).unwrap();
         assert_eq!(m.label, "模式");
-        assert!(!m.step, "codex 模式组是逐档按钮（/plan）");
+        assert!(
+            !m.step,
+            "codex 模式组非步进：单钮 toggle，目标档由前端按 current 翻转"
+        );
+        assert_eq!(
+            m.layout,
+            GroupLayout::Toggle,
+            "codex 模式组=单钮 toggle（2026-09-23 用户实测裁决）"
+        );
+        assert!(
+            m.tiers.iter().all(|t| t.selectable),
+            "操作/计划两档全部可选（shift+tab 双向）"
+        );
         let labels: Vec<&str> = m.tiers.iter().map(|t| t.label).collect();
-        assert_eq!(labels, vec!["默认", "计划"]);
+        assert_eq!(labels, vec!["操作", "计划"]);
         let p = codex.group(ModeGroupId::Permission).unwrap();
         assert_eq!(p.label, "权限");
+        assert_eq!(p.layout, GroupLayout::Tiers, "权限组仍是逐档按钮");
         let labels: Vec<&str> = p.tiers.iter().map(|t| t.label).collect();
         assert_eq!(labels, vec!["只读", "默认", "完全信任"]);
         assert_eq!(
@@ -2131,22 +2171,18 @@ mod tests {
         }
     }
 
-    /// codex：`/plan` 进 Plan；退出 Plan **如实拒绝**（无实测命令）
+    /// codex 模式组：**双向 shift+tab toggle**（2026-09-23 用户实机走查裁决——
+    /// 裁20「用户实测优先」：shift+tab 在 计划/操作 间双向循环，实测可切。
+    /// 覆盖 §2.6 旧「仅 `/plan` 单向、退出无实测命令」的保守裁决；词典更新在台账
+    /// 「codex 模式切换改造」节登记）。
     #[test]
-    fn codex_mode_group_plan_and_honest_refusal() {
-        assert_eq!(
-            mode_switch_plan("codex", ModeGroupId::Mode, MamMode::Plan).unwrap(),
-            ModeSwitchPlan::Text("/plan")
-        );
-        let refusal = mode_switch_plan("codex", ModeGroupId::Mode, MamMode::Default).unwrap_err();
-        match refusal {
-            SwitchRefusal::NoMechanism(reason) => {
-                assert!(
-                    reason.contains("退出计划模式"),
-                    "如实回执要讲清原因：{reason}"
-                )
-            }
-            other => panic!("期望 NoMechanism，得到 {other:?}"),
+    fn codex_mode_group_is_shift_tab_toggle() {
+        for target in [MamMode::Plan, MamMode::Default] {
+            assert_eq!(
+                mode_switch_plan("codex", ModeGroupId::Mode, target).unwrap(),
+                ModeSwitchPlan::Key("shift+tab"),
+                "codex 模式组双向 toggle（shift+tab），目标档不参与按键构造"
+            );
         }
     }
 
@@ -2249,11 +2285,12 @@ mod tests {
             resolve_group("codex", None, MamMode::Bypass),
             Ok(ModeGroupId::Permission)
         );
-        // codex default：两组都有 → 模式组的该档**不可选**（无退出命令）→ 落权限组
+        // codex default：两组都有且**都可选**（2026-09-23 起 Default = shift+tab
+        // toggle 档）→ 模式组（与 kimi default 同规则：两组可选取模式组）
         assert_eq!(
             resolve_group("codex", None, MamMode::Default),
-            Ok(ModeGroupId::Permission),
-            "歧义时取「可取的那一组」（codex 默认档在模式组不可选）"
+            Ok(ModeGroupId::Mode),
+            "codex Default 可选化后歧义消解与 kimi 同规：两组可选取模式组"
         );
         // kimi default：两组都有且**都可选** → 模式组（旧 shift+tab 语义 = 切计划档）
         assert_eq!(
@@ -2279,29 +2316,29 @@ mod tests {
 
     // ==== codex 运行中门（§2.6 表末）====
 
-    /// `/plan` 运行中不可用：只对 codex × 模式组 × Plan 生效，其余不扩张
+    /// codex 模式组运行中门：**模式组任意档**都拦（shift+tab 运行中行为未实测，
+    /// 保守沿用 `/plan` 时代的拦截面——拦截范围扩张在台账「codex 模式切换改造」
+    /// 节登记）；权限组不受此门（裁17 + CX-1/2 实测 busy 可切权限）。
     #[test]
     fn codex_plan_busy_predicate() {
         let busy = true;
-        assert!(codex_plan_busy(
-            "codex",
-            ModeGroupId::Mode,
-            MamMode::Plan,
-            busy
-        ));
-        assert!(!codex_plan_busy(
-            "codex",
-            ModeGroupId::Mode,
-            MamMode::Plan,
-            false
-        ));
-        // 只有 Plan 档受限（权限组不受此门——未实测有同类限制，不扩张）
-        assert!(!codex_plan_busy(
-            "codex",
-            ModeGroupId::Permission,
+        for target in [MamMode::Plan, MamMode::Default] {
+            assert!(codex_plan_busy("codex", ModeGroupId::Mode, target, busy));
+            assert!(!codex_plan_busy("codex", ModeGroupId::Mode, target, false));
+        }
+        for target in [
+            MamMode::ReadOnly,
+            MamMode::Default,
+            MamMode::AcceptEdits,
             MamMode::Bypass,
-            busy
-        ));
+        ] {
+            assert!(!codex_plan_busy(
+                "codex",
+                ModeGroupId::Permission,
+                target,
+                busy
+            ));
+        }
         // 其他家不套用 codex 的门（未实测）
         for t in ["claude", "kimi", "opencode"] {
             assert!(!codex_plan_busy(t, ModeGroupId::Mode, MamMode::Plan, busy));

@@ -9109,16 +9109,16 @@ mod tests {
         assert_eq!(groups[1]["readback"], false);
         assert!(groups[1]["current"].is_null());
         assert_eq!(groups[0]["readback"], true);
-        // 档位：模式组 [默认(不可选), 计划]；权限组 [只读, 默认, 完全信任]
+        // 档位：模式组 [操作(可选), 计划(可选)] = shift+tab toggle；权限组 [只读, 默认, 完全信任]
+        assert_eq!(groups[0]["layout"], "toggle", "codex 模式组=单钮 toggle");
+        assert_eq!(groups[1]["layout"], "tiers");
         let mode_tiers = groups[0]["tiers"].as_array().unwrap();
         assert_eq!(mode_tiers[0]["mode"], "default");
-        assert_eq!(mode_tiers[0]["selectable"], false);
+        assert_eq!(mode_tiers[0]["label"], "操作");
+        assert_eq!(mode_tiers[0]["selectable"], true);
         assert!(
-            mode_tiers[0]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("无实测命令"),
-            "不可选档必须给原因（如实回执，不是静默禁用）"
+            mode_tiers[0]["reason"].is_null(),
+            "可选档不带 reason（如实回执的反面是不乱贴标签）"
         );
         assert_eq!(mode_tiers[1]["mode"], "plan");
         assert_eq!(mode_tiers[1]["selectable"], true);
@@ -9255,6 +9255,49 @@ mod tests {
         assert_eq!(v["switchKind"], "unsupported");
     }
 
+    /// POST：**codex 模式组 shift+tab toggle**（2026-09-23 用户实测裁决）——显式
+    /// `group:"mode"` + `target:"plan"|"default"` → 只投递一次 `shift+tab` 键
+    /// （无斜杠命令、无额外回车）；落点由回读轮询核验（CI 无屏读 → Unverifiable，
+    /// 不影响投递本身）。
+    #[tokio::test]
+    async fn session_mode_switch_codex_mode_group_sends_shift_tab() {
+        for target in ["plan", "default"] {
+            let fake = FakeInjector::ok();
+            let (state, sid) = mode_state_with_injector(
+                fake.clone(),
+                "sess_mc_mode_toggle",
+                crate::session::AgentType::Codex,
+                91,
+                crate::session::SessionStatus::Waiting,
+                std::sync::Arc::new(|_, _| None),
+            );
+            persist_named_device(&state, "mm", "测试设备");
+            let app = router(state);
+            let r = app
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-mode/switch",
+                    Some("mam_device=mm"),
+                    Some(&format!(
+                        r#"{{"sessionId":"{sid}","target":"{target}","group":"mode"}}"#
+                    )),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let body = body_string(r).await;
+            assert!(
+                fake.recorded().is_empty(),
+                "模式组 shift+tab 不投递任何文本：{body}"
+            );
+            assert_eq!(
+                fake.recorded_keys(),
+                vec![(91u32, "shift+tab".to_string())],
+                "目标档 {target} 同样只发一次 shift+tab：{body}"
+            );
+        }
+    }
+
     /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
     /// `/permissions` 两段式的**第一段**（文本 + 回车；第二段无真屏读 → 中止并如实回执）
     #[tokio::test]
@@ -9305,8 +9348,9 @@ mod tests {
         );
     }
 
-    /// POST：**旧客户端不带 group** —— codex 的 `default` 由后端推断到权限组
-    /// （模式组的该档不可选；见 `resolve_group` 文档的歧义规则）
+    /// POST：**旧客户端不带 group** —— codex 的 `default` 由后端推断到模式组
+    /// （2026-09-23 起 Default 两组都可选 → 歧义消解与 kimi 同规：取模式组，
+    /// shift+tab toggle；见 `resolve_group` 文档与 `group_inference_rules`）
     #[tokio::test]
     async fn session_mode_switch_infers_group_for_legacy_client() {
         let fake = FakeInjector::ok();
@@ -9331,10 +9375,11 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 200);
         let body = body_string(r).await;
-        // 推断到权限组 → `/permissions` 被投递（旧实现也发这条命令，语义连续）
+        // 推断到模式组 → shift+tab 被投递（Key 路，无斜杠命令）
+        assert!(fake.recorded().is_empty(), "{body}");
         assert_eq!(
-            fake.recorded(),
-            vec![(86u32, "/permissions".to_string())],
+            fake.recorded_keys(),
+            vec![(86u32, "shift+tab".to_string())],
             "{body}"
         );
         // 审计摘要含**组名**（二维工具的组是语义的一部分）
@@ -9343,7 +9388,7 @@ mod tests {
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
         assert_eq!(audits[0].action, "mode");
         assert!(
-            audits[0].summary.contains("权限"),
+            audits[0].summary.contains("模式"),
             "二维家审计摘要要带组名（否则分不清是模式组还是权限组的默认）：{:?}",
             audits[0].summary
         );
@@ -9444,7 +9489,7 @@ mod tests {
         let body = body_string(r).await;
         assert!(body.contains("\"status\":\"failed\""), "{body}");
         assert!(
-            body.contains("运行中不接受 /plan"),
+            body.contains("运行中不接受模式切换"),
             "回执要讲清「为什么没切」（如实，不是静默失败）：{body}"
         );
         assert!(
