@@ -1423,6 +1423,7 @@ fn menu_label_only(raw_label: &str, canon: &[String]) -> String {
 ///   \>1 行 = 屏上混入了含目标档名词的正文行（不变式 1 同源防线）→ Fatal 不猜。
 /// - **屏上编号必须在 1..=9**：数字键域是单字符（B 族 `control_records`），
 ///   两位数意味着解析到了非菜单行 → Fatal。
+///
 /// 仅 Windows 执行侧（codex 菜单数字直达阶段机经屏读调用）消费——非 Windows
 /// 编译下按 confirm.rs 先例条件化 allow。
 #[cfg_attr(not(windows), allow(dead_code))]
