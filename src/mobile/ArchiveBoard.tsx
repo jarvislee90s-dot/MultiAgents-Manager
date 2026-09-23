@@ -11,6 +11,16 @@ import { formatRelativeTime } from "./board-logic";
 
 type Days = 1 | 3 | 7;
 
+/** 空态文案：无筛选时按当前天数给扩窗引导（7 天已到顶 → 暂无）；有筛选残留
+ * （常见：选定项目后切小窗，新窗口不含该项目）——扩窗文案会误导（扩了也没有），
+ * 改显筛选语义（评审 Minor） */
+function emptyStateText(days: Days, tool: string, project: string): string {
+  if (tool !== "all" || project !== "all") return "当前筛选无匹配会话";
+  if (days === 7) return "暂无归档记录";
+  if (days === 3) return "最近 3 天没有非活跃会话，可试 7 天";
+  return "最近 1 天没有非活跃会话，可试 3 天 / 7 天";
+}
+
 /** 历史会话页（spec §7.2）：懒加载（进页 days=1，切天数重拉，页内不轮询——
  *  死数据静态）；双维筛选（工具 chips × 项目下拉）独立于活板选择；卡片无按钮
  *  （裁决 6——打开动作只在详情页）。 */
@@ -179,15 +189,7 @@ export default function ArchiveBoard({
       )}
       {!error && data && rows.length === 0 && (
         <p className="py-8 text-center text-sm text-slate-400">
-          {tool === "all" && project === "all"
-            ? days === 7
-              ? "暂无归档记录"
-              : days === 3
-                ? "最近 3 天没有非活跃会话，可试 7 天"
-                : "最近 1 天没有非活跃会话，可试 3 天 / 7 天"
-            : // 有筛选残留（常见：选定项目后切小窗，新窗口不含该项目）——扩窗文案
-              // 会误导（扩了也没有），改显筛选语义（评审 Minor）
-              "当前筛选无匹配会话"}
+          {emptyStateText(days, tool, project)}
         </p>
       )}
       <div className="flex flex-col gap-2 pb-8">

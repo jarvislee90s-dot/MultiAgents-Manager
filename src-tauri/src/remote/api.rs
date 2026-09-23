@@ -2771,7 +2771,7 @@ pub async fn sessions_archived_delete(
     State(st): State<Arc<RemoteState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let all = params.get("all").map(|v| v == "1").unwrap_or(false);
+    let all = params.get("all").is_some_and(|v| v == "1");
     let sid = params
         .get("session_id")
         .map(|s| s.trim().to_string())
