@@ -116,6 +116,19 @@ pub fn touch_device(conn: &rusqlite::Connection, device_id: &str, now: i64) {
     );
 }
 
+/// 按设备 id 查花名（M7 Task 6：注入来源标记 `[mobile <名>]`——丁T3 裁2 起在**尾部**
+/// ——与审计设备名列的数据源）。
+/// 形态对齐 device_valid/touch_device：锁内只 SQL 的轻量查询。
+/// 查无该行（不存在 / id 非法）→ 回落 "unknown"（端点侧不因设备行缺失而中断注入流程）。
+pub fn device_name(conn: &rusqlite::Connection, device_id: &str) -> String {
+    conn.query_row(
+        "SELECT name FROM remote_devices WHERE id = ?1",
+        [device_id],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|_| "unknown".to_string())
+}
+
 pub fn revoke_all(conn: &rusqlite::Connection) -> Result<usize, String> {
     conn.execute("UPDATE remote_devices SET revoked = 1", [])
         .map_err(|e| format!("revoke_all: {e}"))
@@ -183,7 +196,10 @@ impl DeviceStore {
     pub fn with<R>(&self, f: impl FnOnce(&rusqlite::Connection) -> R) -> R {
         match self {
             DeviceStore::Global => {
-                let c = crate::database::connection::DB.lock().unwrap();
+                // 锁自愈取锁（P3 统一）：Global 是生产全局咽喉，毒锁不连坐全部 DB 访问方
+                let c = crate::database::connection::DB
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 f(&c)
             }
             DeviceStore::Owned(arc) => {
@@ -437,5 +453,15 @@ mod tests {
         // 前后空白 trim
         assert!(rename_device(&conn, "d1", "  平板  ").unwrap());
         assert_eq!(row(&conn, "d1").0, "平板");
+    }
+
+    /// device_name（M7 Task 6）：命中行返回花名；查无该行回落 "unknown"
+    /// （注入尾签名 [mobile <名>] 的数据源，缺失行不得中断端点流程）
+    #[test]
+    fn device_name_hits_row_and_falls_back_to_unknown() {
+        let conn = memory_conn();
+        persist_device(&conn, &dev("d1", "UA", "1.1.1.1", 1000)).unwrap();
+        assert_eq!(device_name(&conn, "d1"), "自报名-d1");
+        assert_eq!(device_name(&conn, "no-such"), "unknown");
     }
 }

@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探D-权限菜单屏读底料.md §2.1 D①（codex 空闲菜单 4 项+折行+current+›，上方带历史摘要编号行=污染源，screen-co1-d1-perm-menu-s1.txt 原件）
+﻿  system does this project use? [E-C5]
+
+
+• Questions 2/2 answered
+  • 这个项目使用哪种构建工具?
+    answer: npm (Recommended)
+    note: NOTE-Q1-EC5-ATTRIBUTION-ALPHA
+  • 这个项目使用哪种 CI 系统?
+    answer: GitHub Actions (Recommended)
+    note: NOTE-Q2-EC5-ATTRIBUTION-BETA
+
+• 已确认:
+
+  1. 构建工具:npm
+  2. CI 系统:GitHub Actions
+
+  Worked for 4m 44s · done 10:08 PM
+
+
+  Update Model Permissions
+
+  1. Read Only                   Codex can read files in the current workspace. Approval is required to edit files or
+                                 access the internet.
+› 2. Ask for approval (current)  Codex can read and edit files in the current workspace, and run commands. Approval is
+                                 required to access the internet or edit other files.
+  3. Approve for me              Only ask for actions detected as potentially unsafe.
+  4. Full Access                 Codex can edit files outside this workspace and access the internet without asking
+                                 for approval. Exercise caution when using.
+
+  Press enter to confirm or esc to go back

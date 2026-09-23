@@ -598,6 +598,14 @@ if (!isTauri) {
       case "refresh_tray":
         return Promise.resolve(undefined);
 
+      // R5 一键 resume（M6R–M9R Task 11）：浏览器 mock 下无法真开终端，视为成功
+      //（按钮态目验链路：成功 toast「正在电脑上打开终端…」）。评审 M4 失败开关：
+      // localStorage["mam-mock-session-open"] = "fail" → 拒绝（桌面失败 toast 目验）
+      case "session_open":
+        return localStorage.getItem("mam-mock-session-open") === "fail"
+          ? Promise.reject("终端启动失败（mock 注入）")
+          : Promise.resolve(undefined);
+
       case "detect_tools":
         return Promise.resolve([
           { id: "claude", name: "Claude Code", available: true, path: "/usr/local/bin/claude" },
@@ -620,6 +628,44 @@ if (!isTauri) {
           },
           { id: "sub-2", name: "backend-dev", tool_id: "claude", skills: ["systematic-debugging"] },
         ]);
+
+      // 写审计样例（M7 W5 桌面查看入口）：与 Rust AuditRow（serde camelCase）同构，
+      // 最新在前；无 device_id 字段（与后端对外载荷一致，设备标识不外泄）
+      case "inject_list_audit":
+        return Promise.resolve({
+          items: [
+            {
+              ts: 1758132000000,
+              deviceName: "JARVIS 的 iPhone",
+              agentType: "claude",
+              sessionId: "sess-abc-1",
+              channel: "tmux",
+              action: "send",
+              summary: "修复登录页空指针 [mobile 测试机]",
+              result: "ok",
+            },
+            {
+              ts: 1758128400000,
+              deviceName: "iPad",
+              agentType: "codex",
+              sessionId: "sess-def-2",
+              channel: "tmux",
+              action: "queue",
+              summary: "跑一遍回归测试 [mobile 测试机]",
+              result: "ok",
+            },
+            {
+              ts: 1758124800000,
+              deviceName: "Desktop-A",
+              agentType: "claude",
+              sessionId: "sess-ghi-3",
+              channel: "tmux",
+              action: "retract",
+              summary: "撤回上条消息 [mobile 测试机]",
+              result: "ok",
+            },
+          ],
+        });
 
       case "get_setting":
         if (args?.key === "notifications_enabled") return Promise.resolve(true);

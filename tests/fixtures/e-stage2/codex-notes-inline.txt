@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探C-codexTab备注全链.md §2.2（codex 备注态：› 内联备注行 3 行折行+footer tab or esc to clear notes，screen-co1-c2-after-note-long.txt 原件）
+﻿╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.155.1)                           │
+│                                                      │
+│ model:     glm-5.3-flash medium   /model to change   │
+│ directory: ~\…\mam-probe-ec-20260922-215448\proj-co1 │
+╰──────────────────────────────────────────────────────╯
+
+  Tip: New Build faster with Codex.
+
+⚠ 8 startup issues (1 MCP) · ctrl + t for details
+
+
+› Use request_user_input now: ask 1 question in one call: which license does this project use? [E-C1]
+
+
+
+  Question 1/1 (1 unanswered)
+  这个项目使用哪种开源许可证?
+
+  › 1. MIT (Recommended)  宽松许可,允许自由使用、修改和分发,需保留版权声明。
+    2. Apache-2.0         宽松许可,附带明确的专利授权条款,需保留版权与许可声明。
+    3. GPL-3.0            强 Copyleft 许可,衍生作品也需以相同许可开源。
+    4. None of the above  Optionally, add details in notes (tab).
+
+  › SHORT-NOTE-ABCDEF123456MID-SEG-80-abcdefghij0123456789abcdefghij0123456789LONGSEG-END-
+    X0123456789X0123456789X0123456789X0123456789X0123456789X0123456789X0123456789X0123456789X0123456789X0123456789X01
+    2
+
+  tab or esc to clear notes | enter to submit answer
+

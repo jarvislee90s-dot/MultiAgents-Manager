@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseManifest, pickIndex, subtitleMs, VoicePlayer, type VoiceEntry } from "@/components/pet/petVoices";
+import {
+  parseManifest,
+  pickIndex,
+  subtitleMs,
+  VoicePlayer,
+  type VoiceEntry,
+} from "@/components/pet/petVoices";
 
 describe("petVoices", () => {
   it("parseManifest：组序重排索引、组内 zh 排序、忽略非法项", () => {

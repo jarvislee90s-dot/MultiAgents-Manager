@@ -344,6 +344,178 @@ describe("Board 跃迁提醒（SSE transition）", () => {
   });
 });
 
+// 提示音触发口径（2026-09-19 用户裁决）：**仅「变为绿」时响**，与桌面端统一。
+// 修正前移动端对任意状态值变化无条件发声——一轮回合内 processing↔thinking↔compacting
+// 多次跃迁会连响数次，用户实测为噪声（黄→黄的细分跃迁视觉上只看到「一直是黄」）。
+describe("Board 提示音触发口径（仅转绿 + 5 秒去重）", () => {
+  // 提示音开关持久化在 localStorage——本组内有用例会写 off，若不清理会
+  // 污染后续用例的挂载初值（实测：开关态用例读到上一用例留下的 off 而假红）
+  beforeEach(() => {
+    localStorage.removeItem("mam-mobile-sound");
+  });
+
+  /** 装 Web Audio 桩并 spy 播放函数；返回调用计数查询口。
+   *  spy 打在 Board 实际 import 的 sound 模块上——真实渲染路径，不是重写副本 */
+  async function withChimeSpy() {
+    const chime = vi.fn();
+    const sound = await import("@/mobile/sound");
+    const spy = vi.spyOn(sound, "playCompletionChime").mockImplementation(chime);
+    return { chime, spy };
+  }
+
+  it("黄→黄细分跃迁（processing→thinking）不响——视觉上仍是黄，响即为噪声", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "thinking" }));
+      await advance(0);
+      expect(chime).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("黄→黄（processing→compacting）同样不响", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "compacting" }));
+      await advance(0);
+      expect(chime).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("转绿（processing→idle）响一次", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(chime).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("红→绿（waiting→idle）也响——口径按目标颜色，与桌面端一致", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "waiting", to: "idle" }));
+      await advance(0);
+      expect(chime).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("转红（processing→waiting）不响——红是「等你操作」不是「完成」", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "waiting" }));
+      await advance(0);
+      expect(chime).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("finished 也算绿：processing→finished 响", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "finished" }));
+      await advance(0);
+      expect(chime).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("同一会话 5 秒内二次转绿被去重（防状态抖动连响）", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(chime).toHaveBeenCalledTimes(1);
+      // 立刻再转一次绿（抖动）：去重窗口内不响
+      emitFrame("transition", transitionEvent({ from: "processing", to: "finished" }));
+      await advance(0);
+      expect(chime).toHaveBeenCalledTimes(1); // 仍是 1
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("不同会话各自独立去重：s1 转绿后 s2 转绿照响", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ sessionId: "s1", to: "idle" }));
+      await advance(0);
+      emitFrame("transition", transitionEvent({ sessionId: "s2", to: "idle" }));
+      await advance(0);
+      expect(chime).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("关闭开关后转绿不响", async () => {
+    installSse(okSessions(0));
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      // 点开关关掉
+      act(() => {
+        fireEvent.click(screen.getByTestId("sound-toggle"));
+      });
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(chime).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("开关按钮反映状态：开/关切换 aria-label 与图标", async () => {
+    installSse(okSessions(0));
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    const btn = screen.getByTestId("sound-toggle");
+    expect(btn).toHaveAttribute("aria-label", "关闭完成提示音");
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+    act(() => {
+      fireEvent.click(btn);
+    });
+    expect(btn).toHaveAttribute("aria-label", "开启完成提示音");
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+    // 持久化：重新读取为关
+    expect(localStorage.getItem("mam-mobile-sound")).toBe("off");
+  });
+});
+
 // M3 Task 1：页头品牌行（P8a 版本号 + P8b 本机名）
 describe("Board 页头品牌行", () => {
   it("挂载时拉一次 /host，品牌行显示 MAM + v{version} + 本机名；host 403 不踢回配对页", async () => {
@@ -477,7 +649,9 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     );
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => (url === "/m/api/v1/host" ? okHost(["claude", "codex"]) : okSessions(0)))
+      vi.fn(async (url: string) =>
+        url === "/m/api/v1/host" ? okHost(["claude", "codex"]) : okSessions(0)
+      )
     );
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
@@ -506,7 +680,9 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     );
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => (url === "/m/api/v1/host" ? okHost(["claude", "zcode"]) : okSessions(0)))
+      vi.fn(async (url: string) =>
+        url === "/m/api/v1/host" ? okHost(["claude", "zcode"]) : okSessions(0)
+      )
     );
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);

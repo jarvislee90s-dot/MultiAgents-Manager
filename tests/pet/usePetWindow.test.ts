@@ -1,6 +1,12 @@
 // tests/pet/usePetWindow.test.ts
 import { describe, expect, it } from "vitest";
-import { bottomAnchoredY, clampToWorkArea, hitTest, stepFall, GRAVITY } from "@/components/pet/usePetWindow";
+import {
+  bottomAnchoredY,
+  clampToWorkArea,
+  hitTest,
+  stepFall,
+  GRAVITY,
+} from "@/components/pet/usePetWindow";
 
 describe("usePetWindow pure helpers", () => {
   it("bottomAnchoredY：新高度下保持底边不动（spec §4.2）", () => {
@@ -35,6 +41,6 @@ describe("usePetWindow pure helpers", () => {
     expect(s.vx).toBeLessThan(24); // 阻尼后静止
     // 无初速垂直坠落 0.5s：y ≈ ½gt²
     const f = stepFall({ x: 0, y: 0, vx: 0, vy: 0 }, 0.5, 100000);
-    expect(Math.abs(f.y - (0.5 * GRAVITY * 0.25))).toBeLessThan(1e-6);
+    expect(Math.abs(f.y - 0.5 * GRAVITY * 0.25)).toBeLessThan(1e-6);
   });
 });

@@ -25,9 +25,16 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    show: vi.fn(), hide: vi.fn(), setAlwaysOnTop: vi.fn(), setIgnoreCursorEvents: vi.fn(),
-    setPosition: vi.fn(), setSize: vi.fn(), outerPosition: vi.fn(), outerSize: vi.fn(),
-    scaleFactor: vi.fn(), currentMonitor: vi.fn(),
+    show: vi.fn(),
+    hide: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
+    setIgnoreCursorEvents: vi.fn(),
+    setPosition: vi.fn(),
+    setSize: vi.fn(),
+    outerPosition: vi.fn(),
+    outerSize: vi.fn(),
+    scaleFactor: vi.fn(),
+    currentMonitor: vi.fn(),
   }),
 }));
 vi.mock("sonner", () => ({ toast: toastMock }));
@@ -70,7 +77,11 @@ describe("宠物歧义候选点选失败（P2-7）", () => {
     focusMock.mockResolvedValue([{ hwnd: 111, title: "候选窗", process: "wezterm" }]);
     focusHwndMock.mockRejectedValue(new Error("窗口聚焦被系统拒绝"));
     const f1: Frame = { sessions: [mk("s1", "thinking")], totalCount: 1, waitingCount: 0 };
-    const f2: Frame = { sessions: [mk("s1", "idle", { unread: true })], totalCount: 1, waitingCount: 0 };
+    const f2: Frame = {
+      sessions: [mk("s1", "idle", { unread: true })],
+      totalCount: 1,
+      waitingCount: 0,
+    };
     frame.current = f1;
     const view = render(<FoxbellPet />);
     await screen.findByTestId("pet-card-s1");

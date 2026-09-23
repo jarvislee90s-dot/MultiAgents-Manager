@@ -10,13 +10,18 @@ edition = "2021"
 default-run = "multi-agents-manager"
 
 [features]
-# mam-marker helper 的构建门（默认关）：helper 是 Windows-only 功能，而 macOS
-# universal 打包只对主二进制 lipo（tauri-cli desktop.rs build_target），额外 bin
-# 会被打包器要求存在于 universal 目录而必然失败（2026-09-14 v0.4.0 tag 构建实证，
-# 9 月 10 日草稿能构建成功是当时 src/bin/mam-marker.rs 尚不存在）。Windows 发布
-# 构建（release.yml）与 CI windows-gnu 门禁显式 `--features marker-helper`；
-# 本地需要构建 helper 时同理。声明 [[bin]] 后 bin 自动发现关闭，两个 bin 均显式声明
-marker-helper = []
+# helper bin 的构建门（默认关）：额外 bin 在 macOS universal 打包下会必然失败
+# （打包器要求额外 bin 存在于 universal 目录，2026-09-14 v0.4.0 tag 构建实证），
+# 故全部挂 required-features 门。两个 helper：
+#   - marker-helper：mam-marker（issue #43 窗口标题标记注入，Windows-only）
+#   - hook-listener：mam-hook-listener（批次甲 T1 hook 事件监听 helper）
+# marker-helper 蕴含 hook-listener——Windows 发布构建（release.yml）与 CI
+# windows-gnu 门禁 / ubuntu 测试步已显式 `--features marker-helper`，发行与门禁
+# 自动同时构建两个 helper（工作流零改动）；本地单建 hook helper 时用
+# `cargo build --bin mam-hook-listener --features hook-listener`。
+# 声明 [[bin]] 后 bin 自动发现关闭，三个 bin 均显式声明
+hook-listener = []
+marker-helper = ["hook-listener"]
 
 [[bin]]
 name = "multi-agents-manager"
@@ -26,6 +31,11 @@ path = "src/main.rs"
 name = "mam-marker"
 path = "src/bin/mam-marker.rs"
 required-features = ["marker-helper"]
+
+[[bin]]
+name = "mam-hook-listener"
+path = "src/bin/mam-hook-listener.rs"
+required-features = ["hook-listener"]
 
 [lib]
 name = "multi_agents_manager_lib"
@@ -56,7 +66,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 dashmap = "6"
 tokio = { version = "1", features = ["full"] }
 fs2 = "0.4"
-notify = "7"
 toml = "0.8"
 toml_edit = "0.22"
 trash = "5"
@@ -82,12 +91,18 @@ rand = "0.8"
 # 组合首帧快照与增量流
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
+# M9R 灰1（Task 7）：CLI 版本探测的有界等待——`--version` 子进程挂死时 3s 超时
+# kill+收尸，不再无限等待拖垮端点（wait_timeout::ChildExt::wait_timeout）
+wait-timeout = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1.2"
 # Console（AttachConsole/SetConsoleTitle 路线 B）、Diagnostics_ToolHelp + FileSystem
 # （父进程链遍历）为 mam-marker helper（src/bin）所需
-windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+# Win32_UI_Input_KeyboardAndMouse（M9R：VkKeyScanW/MapVirtualKeyW 真实键位布局）；
+# Win32_UI_WindowsAndMessaging：win32（窗口枚举）/ mam-marker（跳转 marker）/
+# deep_link（深链）
+windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 winreg = "0.52"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

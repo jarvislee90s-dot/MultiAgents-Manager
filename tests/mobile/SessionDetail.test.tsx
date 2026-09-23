@@ -1,9 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import SessionDetail from "@/mobile/SessionDetail";
+import App from "@/mobile/App";
+import SessionDetail, { isPlanPending } from "@/mobile/SessionDetail";
 import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
 import { BOOKMARK_COLORS, clearBookmarks, messageAnchor } from "@/mobile/bookmarks";
+import { MockEventSource } from "./eventSourceMock";
 import type { Session } from "@/types/session";
+import planPendingCases from "../fixtures/plan_pending_cases.json";
 
 // M3 Task 8：ZCode 式会话详情页渲染矩阵。fetch 全量 stub（盖过 setup.ts 的 msw），
 // 按 URL 分路到 messages / session-files / file 三端点；jsdom 无真实高亮，
@@ -59,6 +62,35 @@ interface Routes {
   fileContent?: string;
   fileMime?: string;
   fileStatus?: number;
+  /** 评审 M4：/session-open 路由（缺省 200 opening；failed 载荷驱动 C1 分诊测试）；
+   *  sessionOpenStatus 驱动 404 错误码分支（no_cwd / no_resume_command / no_session） */
+  sessionOpen?: { status?: string; error?: string };
+  sessionOpenStatus?: number;
+  /** 发送能力探测（MessageComposer 挂载即拉）：可注入态夹具。
+   *  组件在 infoReady 前 / sendInfo 为 null 时自隐——缺省给可注入，使 composer 渲染 */
+  sendInfo?: { injectable: boolean; channels: string[]; visibility: string };
+  /** 审批选项卡数据源（ApproveCard 挂载即拉）：available 为假时卡自隐——
+   *  分屏挂载断言需给 available=true，否则断言的是「卡自隐」而非「没挂载」 */
+  approveOptions?: {
+    available: boolean;
+    options: { id: string; label: string }[];
+    verifiedWith: string;
+    currentVersion: string | null;
+    drift: boolean;
+    reason?: string;
+    /** 丁T2：计划待确认预期态（codex/kimi 的计划确认框入口） */
+    planPending?: boolean;
+    /** 丁T2：屏读选项（dialog:<n>）与计划聚合（T8） */
+    dialog?: boolean;
+    plan?: { content: string; isFile: boolean } | null;
+  };
+  /** 审批应答 POST 回执（丁T2 全链用例） */
+  approve?: { status: string; error?: string };
+  /** 问答卡数据源（批次乙 T8，QuestionCard 挂载即拉）：available 为假时卡自隐——
+   *  缺省 available=false（不改既有用例渲染）；问答挂载断言需显式给可用载荷 */
+  questionInfo?: { available: boolean; questions: unknown[]; source?: string };
+  /** 问答应答 POST 回执（F2-1 用例需要 key_sent 终态；缺省 key_sent） */
+  questionAnswer?: { status: string; error?: string };
 }
 
 let routes: Routes;
@@ -114,10 +146,65 @@ function installFetch() {
         { status: 200 }
       );
     }
+    if (url.includes("/session-open")) {
+      return new Response(JSON.stringify(routes.sessionOpen ?? { status: "opening" }), {
+        status: routes.sessionOpenStatus ?? 200,
+      });
+    }
+    if (url.includes("/session-send-info")) {
+      // MessageComposer 挂载即拉；缺省给可注入，使分屏态 composer 真正渲染出来
+      // （sendInfo 为 null 时组件自隐，会把「分屏有没有挂载」的断言变成假阴性）
+      return new Response(
+        JSON.stringify(
+          routes.sendInfo ?? { injectable: true, channels: ["tmux"], visibility: "realtime" }
+        ),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/session-question/answer")) {
+      // 问答应答 POST（F2-1 用例需要 key_sent 终态）；判序在 GET 之前——
+      // /session-question 是 /session-question/answer 的前缀（QuestionCard.test 同款教训）
+      return new Response(JSON.stringify(routes.questionAnswer ?? { status: "key_sent" }), {
+        status: 200,
+      });
+    }
+    if (url.includes("/session-question")) {
+      // QuestionCard 挂载即拉（批次乙 T8）；缺省给 available=false（卡自隐，不改
+      // 既有用例渲染）。「问答卡挂载」用例须显式给可用载荷
+      return new Response(
+        JSON.stringify(routes.questionInfo ?? { available: false, questions: [] }),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/session-approve-options")) {
+      // ApproveCard 挂载即拉；缺省给 available=false 无 reason（卡自隐，不改既有用例渲染）。
+      // 「分屏红卡挂载」用例须显式给 available=true——否则断言的是卡自隐而非没挂载
+      return new Response(
+        JSON.stringify(
+          routes.approveOptions ?? {
+            available: false,
+            options: [],
+            verifiedWith: "test",
+            currentVersion: null,
+            drift: false,
+          }
+        ),
+        { status: 200 }
+      );
+    }
+    if (url.includes("/session-approve")) {
+      // 审批应答 POST（丁T2 全链用例）；判序在 -options 之后（前缀包含关系，同 ApproveCard 测试）
+      return new Response(JSON.stringify(routes.approve ?? { status: "key_sent" }), {
+        status: 200,
+      });
+    }
     if (url.includes("/file?")) {
       if (routes.fileStatus) return new Response("no", { status: routes.fileStatus });
       return new Response(
-        JSON.stringify({ content: routes.fileContent ?? "", mime: routes.fileMime ?? "text/plain" }),
+        JSON.stringify({
+          content: routes.fileContent ?? "",
+          mime: routes.fileMime ?? "text/plain",
+        }),
         { status: 200 }
       );
     }
@@ -320,7 +407,8 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       msg({
         seq: 0,
         kind: "assistant",
-        content: "## 小节标题\n\n- 第一项\n- 第二项\n\n1. 有序\n\n> 引用\n\n| 列A | 列B |\n|---|---|\n| a | b |",
+        content:
+          "## 小节标题\n\n- 第一项\n- 第二项\n\n1. 有序\n\n> 引用\n\n| 列A | 列B |\n|---|---|\n| a | b |",
       }),
     ];
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
@@ -348,7 +436,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
       msg({ seq: 3, kind: "tool-call", content: "调用 Grep", toolName: "Grep" }),
       msg({ seq: 4, kind: "assistant", content: "最终总结" }),
     ];
-    const { unmount } = render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    const { unmount } = render(
+      <SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />
+    );
     await screen.findByText("最终总结");
     // 计数 = 当前被折叠的可折叠条数（thinking / 中间 assistant / tool-call = 3；
     // user 直显、最终 assistant 总结直显，不计入）
@@ -412,12 +502,134 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     fireEvent.click(await screen.findByTestId("file-link"));
     const btn = (id: string) => screen.getByTestId(id);
     // SVG 的 className 是 SVGAnimatedString，取 class 属性字符串
-    const iconClass = (id: string) =>
-      btn(id).querySelector("svg")!.getAttribute("class") ?? "";
+    const iconClass = (id: string) => btn(id).querySelector("svg")!.getAttribute("class") ?? "";
     // 上下分屏（split）= 上下两格 → rows-2
     expect(iconClass("preview-toggle-split")).toContain("lucide-rows-2");
     // 左右分屏（split-h）= 左右两格 → columns-2
     expect(iconClass("preview-toggle-split-h")).toContain("lucide-columns-2");
+  });
+
+  // 分屏态对话能力（2026-09-19 用户裁决）：分屏 = 对话列 + 文件列的并列布局，
+  // 对话列必须保有完整对话能力。原实现把 MessageComposer / ApproveCard 排除在
+  // 分屏分支外（仅非分屏正文视图挂载），致分屏看文件时**输入框消失、红卡不可见**——
+  // 用户实测报告，且该行为在 docs/ 全库无任何设计依据（系实现越权）。
+  // 本组为用户可见行为的回归锁：分屏两态（split / split-h）下两者都必须挂载。
+  describe("分屏态对话能力（2026-09-19 用户裁决回归锁）", () => {
+    it("上下分屏（split）下发送输入框仍挂载——分屏看文件也能发消息", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+      const split = screen.getByTestId("split-container");
+      // 关键断言：输入框**在分屏容器内**（修正前分屏分支不挂 composer；
+      // 必须用包含关系锁死，避免被其他分支误命中）
+      expect(await within(split).findByTestId("message-composer")).toBeTruthy();
+    });
+
+    it("左右分屏（split-h）下发送输入框仍挂载", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+      const split = screen.getByTestId("split-container");
+      expect(await within(split).findByTestId("message-composer")).toBeTruthy();
+    });
+
+    it("waiting 态上下分屏下审批红卡仍挂载——分屏也必须能看到待审批", async () => {
+      installFetch();
+      // 消息正文须含项目文件路径才会渲染 file-link（openFile 入口）
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "等批准，相关文件 /tmp/proj/src/app.rs" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      routes.approveOptions = {
+        available: true,
+        options: [
+          { id: "allow", label: "允许" },
+          { id: "deny", label: "拒绝" },
+        ],
+        verifiedWith: "claude 2.1.251",
+        currentVersion: "claude 2.1.251",
+        drift: false,
+      };
+      render(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+      const split = screen.getByTestId("split-container");
+      expect(split).toBeTruthy();
+      // 关键断言：红卡**在分屏容器内**（修正前分屏分支不挂红卡；仅断言
+      // findByTestId 会被非分屏分支或浮层误命中 → 必须用包含关系锁死）。
+      // findBy 等选项载荷落地：T1 组件钥匙前缀区分后（approve-*/composer-* 互异，
+      // 防同 key 兄弟复用错乱），正文→分屏的布局切换是真实的卸载/重挂，红卡
+      // 选项拉取异步就绪——同步 getBy 会读到拉取前的自隐窗（既有语义不变）
+      expect(await within(split).findByTestId("approve-card")).toBeTruthy();
+    });
+
+    it("waiting 态左右分屏下审批红卡仍挂载", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "等批准，相关文件 /tmp/proj/src/app.rs" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      routes.approveOptions = {
+        available: true,
+        options: [
+          { id: "allow", label: "允许" },
+          { id: "deny", label: "拒绝" },
+        ],
+        verifiedWith: "claude 2.1.251",
+        currentVersion: "claude 2.1.251",
+        drift: false,
+      };
+      render(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+      const split = screen.getByTestId("split-container");
+      // 同上：包含关系锁死 + 等选项载荷落地（T1 组件钥匙前缀区分后的重挂语义）
+      expect(await within(split).findByTestId("approve-card")).toBeTruthy();
+    });
+
+    it("非 waiting 态分屏下不渲染红卡（状态门不变）", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+      expect(screen.getByTestId("split-container")).toBeTruthy();
+      expect(screen.queryByTestId("approve-card")).toBeNull();
+      // 但输入框仍在（两者门控条件不同：红卡看状态，输入框无条件）
+      expect(await screen.findByTestId("message-composer")).toBeTruthy();
+    });
+
+    it("全屏浮层态：红卡与输入框不挂载（浮层覆盖对话属预期，非本裁决范围）", async () => {
+      installFetch();
+      routes.messages = [
+        msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+      ];
+      routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+      routes.fileContent = "fn main() {}";
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      fireEvent.click(await screen.findByTestId("file-link"));
+      // file-link 打开默认即全屏
+      expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
+      expect(screen.queryByTestId("split-container")).toBeNull();
+    });
   });
 
   it("需求：分屏分隔条可拖动——横向拖动改变文件栏宽度，纵向拖动改变高度", async () => {
@@ -453,6 +665,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(parseFloat(filePane.style.width)).toBeCloseTo(narrower + 15, 1);
 
     // ---- 纵向分屏：拖分隔条 → 文件栏高度变化 ----
+    // 2026-09-20 用户裁决：竖屏 split 换位为文件在上、对话在下（ratioPane="before"）——
+    // 文件栏在分隔条**上方**，拖动方向随之取反：向下拖 = 分隔条下移把上方文件栏撑大。
+    // 「分隔条跟随指针」裁决不变（拖哪边文件栏都变小）
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
     const containerV = screen.getByTestId("split-container");
     containerV.getBoundingClientRect = () =>
@@ -461,21 +676,60 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const filePaneV = screen.getByTestId("split-file-pane");
     const h0 = parseFloat(filePaneV.style.height);
     fireEvent.pointerDown(handleV, { clientY: 400 });
-    fireEvent.pointerMove(window, { clientY: 300 });
+    fireEvent.pointerMove(window, { clientY: 500 });
     fireEvent.pointerUp(window);
-    // 向上拖 100px / 容器高 800 → 分隔条上移 → 下方文件栏变高 12.5 个百分点
-    // （2026-09-16 用户裁决：分隔条跟随指针——向上拖条子上移，下方文件区变大）
+    // 向下拖 100px / 容器高 800 → 分隔条下移 → 上方文件栏变高 12.5 个百分点
     expect(parseFloat(filePaneV.style.height)).toBeCloseTo(h0 + 12.5, 1);
+    // 反向：向上拖回（上方文件栏变矮）
+    fireEvent.pointerDown(handleV, { clientY: 500 });
+    fireEvent.pointerMove(window, { clientY: 400 });
+    fireEvent.pointerUp(window);
+    expect(parseFloat(filePaneV.style.height)).toBeCloseTo(h0, 1);
 
     // ---- 拖动不得越界（钳制 15%–85%） ----
-    fireEvent.pointerDown(handleV, { clientY: 800 });
+    fireEvent.pointerDown(handleV, { clientY: 0 });
     fireEvent.pointerMove(window, { clientY: -100000 });
     fireEvent.pointerUp(window);
-    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
-    fireEvent.pointerDown(handleV, { clientY: 0 });
+    expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
+    fireEvent.pointerDown(handleV, { clientY: 800 });
     fireEvent.pointerMove(window, { clientY: 100000 });
     fireEvent.pointerUp(window);
-    expect(parseFloat(filePaneV.style.height)).toBeGreaterThanOrEqual(14.9);
+    expect(parseFloat(filePaneV.style.height)).toBeLessThanOrEqual(85.1);
+  });
+
+  // 竖屏分屏换位（2026-09-20 用户裁决）：split 视觉顺序 = 文件在上、对话在下
+  // （输入框贴底）；split-h 维持对话在左、文件在右。CSS order 视觉换位，
+  // DOM 顺序两态一致（对话优先，a11y 不变）
+  it("竖屏 split 视觉换位：文件 order-1 在上、对话 order-3 在下；split-h 无 order", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+    const container = screen.getByTestId("split-container");
+    const convCol = container.querySelector(".flex.min-h-0.min-w-0.flex-1.flex-col")!;
+    const filePane = screen.getByTestId("split-file-pane");
+    const handle = screen.getByTestId("split-handle");
+    expect(convCol.className).toContain("order-3");
+    expect(filePane.className).toContain("order-1");
+    expect(handle.className).toContain("order-2");
+    // 最小高度保护（仅 split）：对话列有 minHeight，文件栏有 maxHeight 上限
+    expect(convCol.getAttribute("style")).toContain("min-height");
+    expect(filePane.getAttribute("style")).toContain("max-height");
+
+    // 切横向分屏：两态语义各自独立——无 order 类、无高度保护
+    fireEvent.click(await screen.findByTestId("preview-toggle-split-h"));
+    const containerH = screen.getByTestId("split-container");
+    const convColH = containerH.querySelector(".flex.min-h-0.min-w-0.flex-1.flex-col")!;
+    const filePaneH = screen.getByTestId("split-file-pane");
+    expect(convColH.className).not.toContain("order-");
+    expect(filePaneH.className).not.toContain("order-");
+    expect(convColH.getAttribute("style")).not.toContain("min-height");
+    expect(filePaneH.getAttribute("style")).not.toContain("max-height");
   });
 
   it("切换器只保留预览页头一份（2026-09-16 裁决），不占详情页头空间", async () => {
@@ -557,9 +811,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     // 挂载时已拉一次（scope 默认 200，用于正文链接化）
     await screen.findByTestId("file-panel-button");
     await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=200"))
-      ).toBe(true);
+      expect(fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=200"))).toBe(
+        true
+      );
     });
     const before = fetchMock.mock.calls.filter((c: unknown[]) =>
       String(c[0]).includes("/session-files")
@@ -674,9 +928,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const list = area.querySelector("ul");
     const loadMore = screen.getByTestId("load-more");
     expect(list).toBeTruthy();
-    expect(
-      list!.compareDocumentPosition(loadMore) & Node.DOCUMENT_POSITION_PRECEDING
-    ).toBeTruthy();
+    expect(list!.compareDocumentPosition(loadMore) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   }, 15000);
 
   it("点加载更早后保持阅读位置（顶部插入量补偿，视线不跳）", async () => {
@@ -690,16 +942,31 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     // 模拟：当前滚动位置 1000，内容总高 5000
     Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
     area.scrollTop = 1000;
-    // 点「加载更早」→ 记录锚点；随后重拉返回更多内容（总高变 8000）
+    // 点「加载更早」→ 记录锚点；limit=400 重拉在途。先挂起响应、注入新内容总高
+    // （8000）后放行——根治顺序竞态（旧版靠 detail-refresh 二次触发对齐断言瞬时值：
+    // 若首响落在几何量注入前，锚被 0 插入量消费，二次落底把 scrollTop 盖写为
+    // 8000，机器负载下偶发翻车）。
+    const inner = fetchMock;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gated = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/session-messages") && url.includes("limit=400")) {
+        await gate; // 挂起重拉响应，等几何量注入
+      }
+      return inner(input);
+    });
+    vi.stubGlobal("fetch", gated);
     fireEvent.click(screen.getByTestId("load-more"));
     await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=400"))
-      ).toBe(true);
+      expect(gated.mock.calls.some((c: unknown[]) => String(c[0]).includes("limit=400"))).toBe(
+        true
+      );
     });
     Object.defineProperty(area, "scrollHeight", { value: 8000, configurable: true });
-    // 再触发一次数据落地（等价于 limit=400 的响应到达）
-    fireEvent.click(screen.getByTestId("detail-refresh"));
+    release(); // 放行 limit=400 响应 → 数据落地 → 补偿对齐
     await waitFor(() => {
       // 补偿：1000 + (8000 - 5000) = 4000（视线停在原内容处）
       expect(area.scrollTop).toBe(4000);
@@ -719,13 +986,18 @@ describe("SessionDetail：文件链接化与预览联动", () => {
 
     const area = screen.getByTestId("message-area");
     // jsdom 无布局：注入几何量——容器顶边 100，seq 2 的底边 200（= 视口首条）
-    area.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 700, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
     const liOf = (seq: number) => screen.getByTestId(`msg-${seq}`);
     // 视口顶边 = 100：seq 0/1 已完全滚出上方（bottom ≤ 100），seq 2 是首条可见
-    liOf(0).getBoundingClientRect = () => ({ top: -60, bottom: -10, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
-    liOf(1).getBoundingClientRect = () => ({ top: 20, bottom: 90, left: 0, right: 400, width: 400, height: 70 }) as DOMRect;
-    liOf(2).getBoundingClientRect = () => ({ top: 110, bottom: 260, left: 0, right: 400, width: 400, height: 150 }) as DOMRect;
-    liOf(3).getBoundingClientRect = () => ({ top: 270, bottom: 400, left: 0, right: 400, width: 400, height: 130 }) as DOMRect;
+    liOf(0).getBoundingClientRect = () =>
+      ({ top: -60, bottom: -10, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    liOf(1).getBoundingClientRect = () =>
+      ({ top: 20, bottom: 90, left: 0, right: 400, width: 400, height: 70 }) as DOMRect;
+    liOf(2).getBoundingClientRect = () =>
+      ({ top: 110, bottom: 260, left: 0, right: 400, width: 400, height: 150 }) as DOMRect;
+    liOf(3).getBoundingClientRect = () =>
+      ({ top: 270, bottom: 400, left: 0, right: 400, width: 400, height: 130 }) as DOMRect;
 
     // 打标签：点 + → 选第一个颜色 → 落在视口首条（seq 2「待会回来看这条」）
     fireEvent.click(screen.getByTestId("bookmark-add"));
@@ -754,9 +1026,12 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("乙");
     const area = screen.getByTestId("message-area");
-    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
-    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
-    screen.getByTestId("msg-1").getBoundingClientRect = () => ({ top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 100 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () =>
+      ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    screen.getByTestId("msg-1").getBoundingClientRect = () =>
+      ({ top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 100 }) as DOMRect;
 
     // 打两个不同颜色的标签
     fireEvent.click(screen.getByTestId("bookmark-add"));
@@ -782,8 +1057,10 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("记住我");
     const area = screen.getByTestId("message-area");
-    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
-    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () =>
+      ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
     fireEvent.click(screen.getByTestId("bookmark-add"));
     fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[3]}`));
     expect(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[3]}`)).toBeTruthy();
@@ -804,8 +1081,10 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("记住我");
     const area = screen.getByTestId("message-area");
-    area.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
-    screen.getByTestId("msg-0").getBoundingClientRect = () => ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
+    area.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 600, left: 0, right: 400, width: 400, height: 600 }) as DOMRect;
+    screen.getByTestId("msg-0").getBoundingClientRect = () =>
+      ({ top: 0, bottom: 50, left: 0, right: 400, width: 400, height: 50 }) as DOMRect;
     fireEvent.click(screen.getByTestId("bookmark-add"));
     fireEvent.click(screen.getByTestId(`bookmark-color-${BOOKMARK_COLORS[3]}`));
     expect(window.localStorage.getItem("mam-bookmarks")).toContain(BOOKMARK_COLORS[3]);
@@ -833,9 +1112,7 @@ describe("SessionDetail：错误态与手动刷新", () => {
     installFetch();
     routes.messagesStatus = 404;
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    expect((await screen.findByTestId("detail-error")).textContent).toContain(
-      "无法读取该会话内容"
-    );
+    expect((await screen.findByTestId("detail-error")).textContent).toContain("无法读取该会话内容");
     routes.messagesStatus = undefined;
     routes.messages = [msg({ seq: 0, kind: "user", content: "恢复后可见" })];
     fireEvent.click(screen.getByTestId("detail-retry"));
@@ -880,10 +1157,9 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
       const url = String(input);
       if (url.includes("/session-messages")) {
         const limit = Number(new URL(url, "http://x").searchParams.get("limit") ?? 200);
-        return new Response(
-          JSON.stringify({ messages: all.slice(-limit), truncated: true }),
-          { status: 200 }
-        );
+        return new Response(JSON.stringify({ messages: all.slice(-limit), truncated: true }), {
+          status: 200,
+        });
       }
       if (url.includes("/host")) {
         return new Response(
@@ -935,12 +1211,18 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
     Element.prototype.scrollIntoView = scrollSpy;
     fireEvent.click(screen.getByTestId(`bookmark-dot-${BOOKMARK_COLORS[1]}`));
 
-    // 自动扩窗：limit 200→400 重拉，目标（seq 10）出现并被滚动定位
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("limit=400"));
-    });
+    // 自动扩窗：limit 200→400 重拉，目标（seq 10）出现并被滚动定位。
+    // timeout 10s：与下例「扩窗到顶」同因——扩窗重拉在整库并行负载下可超 waitFor
+    // 默认 1s（Task 8 门前实测整库跑两次假失败两次，单文件连跑 5/5 绿）；
+    // 只放宽等待上限，断言语义不变
+    await waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("limit=400"));
+      },
+      { timeout: 10_000 }
+    );
     await screen.findByTestId("msg-10");
-    await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalled(), { timeout: 10_000 });
     expect(scrollSpy.mock.calls[0][0]).toMatchObject({ block: "start" });
     // 定位成功：加载/miss 横幅均不在场
     expect(screen.queryByTestId("bookmark-jump-miss")).toBeNull();
@@ -967,10 +1249,1304 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
     // 逐级扩到 MAX_LIMIT（1000）仍未命中 → miss 横幅，且未发生任何滚动。
     // timeout 10s：四级扩窗（200→…→1000）在 CI 慢机上实测 >4s（本地快机 <1s），
     // 3s 曾在 CI 抖动失败（run 35314166316）
-    await waitFor(
-      () => expect(screen.getByTestId("bookmark-jump-miss")).toBeTruthy(),
-      { timeout: 10_000 }
-    );
+    await waitFor(() => expect(screen.getByTestId("bookmark-jump-miss")).toBeTruthy(), {
+      timeout: 10_000,
+    });
     expect(scrollSpy).not.toHaveBeenCalled();
   }, 15000);
+});
+
+// ==== R5 一键 resume（Task 11，评审 C1/M4）：回执三分诊 ====
+describe("SessionDetail：一键 resume 回执分诊（评审 C1）", () => {
+  beforeEach(() => {
+    installFetch();
+  });
+
+  it("评审 C1：200 failed 回执不得当成功——错误文案上屏（spawn 出手失败可重试）", async () => {
+    routes.sessionOpen = { status: "failed", error: "终端启动失败（模拟）" };
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("在电脑上打开");
+    fireEvent.click(screen.getByTestId("session-open"));
+    const err = await screen.findByTestId("session-open-error");
+    expect(err.textContent).toBe("打开失败：终端启动失败（模拟）");
+    // 成功提示条不得出现（互斥态）
+    expect(screen.queryByTestId("session-open-success")).toBeNull();
+  });
+
+  it("200 opening → 成功提示条（对齐桌面 toast 语义的内联形态）", async () => {
+    routes.sessionOpen = { status: "opening" };
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("在电脑上打开");
+    fireEvent.click(screen.getByTestId("session-open"));
+    const ok = await screen.findByTestId("session-open-success");
+    expect(ok.textContent).toBe("已让电脑打开终端，请查看电脑侧窗口");
+    expect(screen.queryByTestId("session-open-error")).toBeNull();
+  });
+
+  it("404 no_cwd → 按错误码分診中文文案（挂载后会话漂移的兜底路径）", async () => {
+    routes.sessionOpenStatus = 404;
+    routes.sessionOpen = { error: "no_cwd" };
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await screen.findByText("在电脑上打开");
+    fireEvent.click(screen.getByTestId("session-open"));
+    const err = await screen.findByTestId("session-open-error");
+    expect(err.textContent).toBe("打开失败：该会话没有项目目录信息");
+  });
+
+  it("无项目目录 → 按钮禁用 + 原因（后端不出手的前端镜像）", () => {
+    render(
+      <SessionDetail
+        session={makeSession({ projectPath: "", agentType: "workbuddy" })}
+        onBack={() => {}}
+      />
+    );
+    const btn = screen.getByTestId("session-open") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(screen.getByText("该会话没有项目目录信息，无法在电脑上打开")).toBeTruthy();
+  });
+});
+
+// ==== F6：详情页 10s 轮询（假计时器锁节奏与可见性语义）====
+describe("SessionDetail：详情页 10s 轮询（F6）", () => {
+  /** 只数 /session-messages 调用（/host、/session-files 的拉取不计入节奏断言） */
+  function messagesCalls(): number {
+    return fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-messages"))
+      .length;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("节奏：挂载首拉 1 次，+10s 轮询第 2 次，再 +10s 第 3 次（首拉不双触发）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {}); // 挂载首拉落地（轮询 interval 首拍在 +10s，不立即触发）
+    expect(messagesCalls()).toBe(1);
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(2);
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(3);
+  });
+
+  it("hidden 暂停：推进计时器不触发；恢复 visible 立即补刷一次再续 10s 节奏", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    const visSpy = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {});
+    expect(messagesCalls()).toBe(1);
+    // 切后台（hidden + visibilitychange）：暂停轮询——推进 30s 零新增拉取
+    visSpy.mockReturnValue("hidden");
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(messagesCalls()).toBe(1);
+    // 切回前台：立即补刷一次（追回隐藏期间错过的更新）
+    visSpy.mockReturnValue("visible");
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(messagesCalls()).toBe(2);
+    // 补刷后重启节奏：+10s 下一拍
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(3);
+    visSpy.mockRestore();
+  });
+
+  // 收尾批 P2：F6 卸载清理回归钉（评审修复批遗留的显式验证）——unmount 必须
+  // 清 interval + 移除 visibilitychange 监听，长驻页面来回进出不泄漏计时器/监听。
+  // 监听移除按 spyOn add/removeEventListener 捕获引用比对（同一函数引用注册且移除）；
+  // interval 清理由 getTimerCount 直证（泄漏则卸载后仍挂 1 个待触发拍），并按
+  // 「clearAllTimers 后再推进不再触发拉取」行为口径兜底断言
+  it("unmount 清理：interval 已清 + visibilitychange 监听已移除", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    const addSpy = vi.spyOn(document, "addEventListener");
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+    try {
+      const { unmount } = render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      await act(async () => {}); // 挂载首拉落地
+      expect(messagesCalls()).toBe(1);
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(messagesCalls()).toBe(2); // 轮询确实在跑（前提自证，断言不空转）
+      unmount();
+      // visibilitychange 监听已移除：注册与移除是同一函数引用（组件只挂这一个
+      // document 级监听——比对引用即精确钉住 F6 effect 的清理半边）
+      const visListener = addSpy.mock.calls.find((c) => c[0] === "visibilitychange")?.[1];
+      expect(visListener).toBeDefined();
+      expect(removeSpy).toHaveBeenCalledWith("visibilitychange", visListener);
+      // interval 已清：卸载后零待触发计时器（泄漏则此处为 1）
+      expect(vi.getTimerCount()).toBe(0);
+      // 行为口径兜底：清掉全部计时器再推进，不再触发任何拉取
+      vi.clearAllTimers();
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(messagesCalls()).toBe(2);
+    } finally {
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+  });
+});
+
+// ==== P2-B（评审修复批）：轮询滚动跟随条件化 ====
+// 轮询刷新数据落地时，仅在刷新前采样为「贴底」（距底 <120px）才跟随落底；
+// 上翻阅读历史不被每 10s 拽回底部。假计时器 + 滚动容器几何量 mock
+//（jsdom 无布局引擎：scrollHeight/clientHeight 逐实例注入，scrollTop 可赋可读）。
+describe("SessionDetail：轮询滚动跟随条件化（P2-B）", () => {
+  /** 只数 /session-messages 调用（证明刷新确实发生，断言不空转） */
+  function messagesCalls(): number {
+    return fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-messages"))
+      .length;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    // 假计时器必须还原（与文件内真实计时器用例共存，e39c3d9 自审提示）
+    vi.useRealTimers();
+  });
+
+  /** 注入消息滚动容器几何量（元素挂载后逐实例 defineProperty，重渲染不丢） */
+  function installGeometry(area: HTMLElement, geo: { scrollHeight: number; clientHeight: number }) {
+    Object.defineProperty(area, "scrollHeight", { value: geo.scrollHeight, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: geo.clientHeight, configurable: true });
+  }
+
+  it("poll_keeps_scroll_when_reading_history：上翻阅读（距底 ≥120px）两拍轮询刷新不拽回底部", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {}); // 首拉落地（首拉无条件落底；此刻 scrollHeight=0 → scrollTop=0）
+    const area = screen.getByTestId("message-area");
+    // 距底 = 2000 - 0 - 500 = 1500 ≥ 120 → 非贴底（用户上翻阅读历史）
+    installGeometry(area, { scrollHeight: 2000, clientHeight: 500 });
+    area.scrollTop = 0;
+    // 第一拍轮询：新消息落地（mock 按 routes 现取 → 新数组触发对齐 effect）
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "首拉" }),
+      msg({ seq: 1, kind: "assistant", content: "轮询新消息一" }),
+    ];
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(2); // 刷新确实发生
+    expect(area.scrollTop).toBe(0); // 但滚动位置不动（距底 ≥120px 不跟随）
+    // 第二拍轮询：仍不跟随
+    routes.messages = [
+      ...routes.messages,
+      msg({ seq: 2, kind: "assistant", content: "轮询新消息二" }),
+    ];
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(3);
+    expect(area.scrollTop).toBe(0);
+  });
+
+  it("poll_follows_when_near_bottom：贴底（距底 <120px）轮询刷新到新消息跟随落底", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    await act(async () => {});
+    const area = screen.getByTestId("message-area");
+    // 距底 = 2000 - 1400 - 500 = 100 < 120 → 贴底
+    installGeometry(area, { scrollHeight: 2000, clientHeight: 500 });
+    area.scrollTop = 1400;
+    // 轮询拍新消息落地 → 跟随落底：scrollTop = scrollHeight = 2000
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "首拉" }),
+      msg({ seq: 1, kind: "assistant", content: "贴底时的新消息" }),
+    ];
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(messagesCalls()).toBe(2);
+    expect(area.scrollTop).toBe(2000);
+  });
+
+  it("first load 仍无条件落底：首拉对齐不依赖贴底采样（既有行为的显式回归锁）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "user", content: "首拉" })];
+    // 挂载前在 Element 原型注入 scrollHeight（元素尚不存在，无法逐实例注入；
+    // jsdom 将 scrollHeight 定义为 Element.prototype 自有 getter，jsdom 探明）：
+    // 首拉对齐量即可观测量 = scrollHeight
+    const scrollHeightSpy = vi
+      .spyOn(Element.prototype, "scrollHeight", "get")
+      .mockReturnValue(2000);
+    try {
+      render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+      await act(async () => {}); // 首拉落地
+      const area = screen.getByTestId("message-area");
+      // 首拉落底：scrollTop = scrollHeight = 2000（不采样、不受 120px 阈值约束）
+      expect(area.scrollTop).toBe(2000);
+    } finally {
+      scrollHeightSpy.mockRestore();
+    }
+  });
+});
+
+// ==== 计划正文渲染（2026-09-20 用户实测：ExitPlanMode 整篇计划在详情页是 \n 字面量汤）====
+// 根因：后端把工具输入原封透传为 JSON 串（字符串值换行全为 \n 转义），前端 <pre> 原样上屏。
+// 修法：toolArgs 解析出非空字符串 plan 字段 → 该正文走 markdown 渲染；不看 toolName——
+// zcode 的 ExitPlanMode 输入同为 {plan} 但 MAM 记录的是显示 title，按名字匹配会漏。
+// 其他工具参数维持原样（用户裁决：不做通用美化）。
+describe("SessionDetail：计划正文渲染（2026-09-20）", () => {
+  function expandToolCall(seq: number) {
+    fireEvent.click(screen.getByTestId(`msg-${seq}-toggle`));
+  }
+
+  it("ExitPlanMode：plan 字段按 markdown 渲染（标题/列表正常排版，配「计划」标签）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 4,
+        kind: "tool-call",
+        content: "调用 ExitPlanMode",
+        toolName: "ExitPlanMode",
+        toolArgs: JSON.stringify({ plan: "# 计划标题\n\n- 第一步\n- 第二步" }),
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 ExitPlanMode");
+    expandToolCall(4);
+    // markdown 已渲染：# 标题 → H1，列表项 → LI（对齐既有 markdown 断言的 tagName 手法）
+    expect(screen.getByText("计划标题").tagName).toBe("H1");
+    expect(screen.getByText("第一步").tagName).toBe("LI");
+    // 「计划」标签存在（标识这是计划正文）
+    expect(screen.getByText("计划")).toBeTruthy();
+  });
+
+  it("zcode 同形覆盖：toolName 是显示 title 也能命中 plan 字段（形态识别回归锁）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 5,
+        kind: "tool-call",
+        content: "调用 制定执行计划",
+        toolName: "制定执行计划",
+        toolArgs: JSON.stringify({ plan: "## 方案\n\n正文段落" }),
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 制定执行计划");
+    expandToolCall(5);
+    expect(screen.getByText("方案").tagName).toBe("H2");
+  });
+
+  it("无 plan 字段：维持原样渲染（既有 command 断言不改）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 6,
+        kind: "tool-call",
+        content: "调用 Bash",
+        toolName: "Bash",
+        toolArgs: '{"command":"ls"}',
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 Bash");
+    expandToolCall(6);
+    expect(screen.getByTestId("tool-args-6").textContent).toBe('{"command":"ls"}');
+    expect(screen.queryByText("计划")).toBeNull();
+  });
+
+  it("坏 JSON / plan 非字符串 / 空串：均原样回落，不抛错", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 7, kind: "tool-call", content: "t7", toolName: "T7", toolArgs: '{"plan":' }),
+      msg({ seq: 8, kind: "tool-call", content: "t8", toolName: "T8", toolArgs: '{"plan":123}' }),
+      msg({ seq: 9, kind: "tool-call", content: "t9", toolName: "T9", toolArgs: '{"plan":""}' }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 T7");
+    expandToolCall(7);
+    expect(screen.getByTestId("tool-args-7").textContent).toBe('{"plan":');
+    expandToolCall(8);
+    expect(screen.getByTestId("tool-args-8").textContent).toBe('{"plan":123}');
+    expandToolCall(9);
+    expect(screen.getByTestId("tool-args-9").textContent).toBe('{"plan":""}');
+  });
+});
+
+// ==== 跳到最新（2026-09-20）：距底超阈值出现浮动按钮，点击瞬时落底 ====
+describe("SessionDetail：跳到最新（2026-09-20）", () => {
+  /** jsdom 无布局引擎：注入滚动几何量（既有 :841 手法），distance = 距底像素 */
+  function stubGeometry(area: HTMLElement, distance: number) {
+    Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
+    Object.defineProperty(area, "clientHeight", { value: 1000, configurable: true });
+    area.scrollTop = 5000 - 1000 - distance;
+  }
+
+  function renderWithMessage() {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "一段回复" })];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    return waitFor(() => screen.getByTestId("message-area"));
+  }
+
+  it("距底超阈值（>240px）出现按钮；滚回贴底消失", async () => {
+    const area = await renderWithMessage();
+    stubGeometry(area, 3000);
+    fireEvent.scroll(area);
+    expect(screen.getByTestId("jump-to-bottom")).toBeTruthy();
+    stubGeometry(area, 0);
+    fireEvent.scroll(area);
+    expect(screen.queryByTestId("jump-to-bottom")).toBeNull();
+  });
+
+  it("点击按钮：scrollTop 瞬时落到 scrollHeight，按钮消失（正文分支）", async () => {
+    const area = await renderWithMessage();
+    stubGeometry(area, 3000);
+    fireEvent.scroll(area);
+    fireEvent.click(screen.getByTestId("jump-to-bottom"));
+    expect(area.scrollTop).toBe(5000);
+    expect(screen.queryByTestId("jump-to-bottom")).toBeNull();
+  });
+
+  it("分屏（split）分支同样可用", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
+    ];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    routes.fileContent = "fn main() {}";
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-link"));
+    fireEvent.click(await screen.findByTestId("preview-toggle-split"));
+    const area = await screen.findByTestId("message-area");
+    stubGeometry(area, 3000);
+    fireEvent.scroll(area);
+    fireEvent.click(screen.getByTestId("jump-to-bottom"));
+    expect(area.scrollTop).toBe(5000);
+  });
+});
+
+// ==== 过程一键折叠（2026-09-20）：书签栏右侧开关，运行态/总结态都可用 ====
+describe("SessionDetail：过程一键折叠（2026-09-20）", () => {
+  function runningMessages() {
+    return [
+      msg({ seq: 0, kind: "user", content: "查一下" }),
+      msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+      msg({
+        seq: 2,
+        kind: "tool-call",
+        content: "调用 Bash",
+        toolName: "Bash",
+        toolArgs: '{"command":"ls"}',
+      }),
+      msg({ seq: 3, kind: "assistant", content: "结论" }),
+    ];
+  }
+
+  it("运行态（非总结模式）折叠开关出现：默认全折叠 → 一键全展 → 一键全收", async () => {
+    installFetch();
+    routes.messages = runningMessages();
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("结论");
+    const toggle = screen.getByTestId("process-collapse-toggle");
+    // 运行态默认 thinking/tool-call 折叠 → allCollapsed=true → 动作=全部展开
+    expect(toggle.getAttribute("aria-label")).toBe("展开全部过程");
+    expect(screen.queryByText("内部思考内容")).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByText("内部思考内容")).toBeTruthy();
+    expect(screen.getByTestId("process-collapse-toggle").getAttribute("aria-label")).toBe(
+      "折叠全部过程"
+    );
+    // 再点全收
+    fireEvent.click(screen.getByTestId("process-collapse-toggle"));
+    expect(screen.queryByText("内部思考内容")).toBeNull();
+  });
+
+  it("无过程消息（纯 user/assistant）：折叠开关不渲染", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "你好" }),
+      msg({ seq: 1, kind: "assistant", content: "你好呀" }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("你好呀");
+    expect(screen.queryByTestId("process-collapse-toggle")).toBeNull();
+  });
+});
+
+// ==== 计划一等卡片（T1 手工验收修复批）：ExitPlanMode 形态在后端升格 kind="plan" ====
+// content = 计划 markdown 本体，前端常驻渲染：无折叠头、豁免总结模式折叠、
+// 不计入总结横幅「已折叠 N 条」计数（用户裁决：不做消息合并/重复折叠，本件不碰）
+describe("SessionDetail：计划一等卡片（T1）", () => {
+  it("运行态：plan 消息渲染常驻计划卡片（markdown 直出，无折叠头）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({
+        seq: 0,
+        kind: "plan",
+        content: "# 大计划\n\n- 步骤甲\n- 步骤乙",
+        toolName: "ExitPlanMode",
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    // markdown 结构化渲染（content 已是计划本体，无需展开动作）
+    expect((await screen.findByText("大计划")).tagName).toBe("H1");
+    expect(screen.getByText("步骤甲").tagName).toBe("LI");
+    // 「计划」标签 + 常驻卡片锚点；无折叠头（不可折叠）
+    expect(screen.getByText("计划")).toBeTruthy();
+    expect(screen.getByTestId("plan-0")).toBeTruthy();
+    expect(screen.queryByTestId("msg-0-toggle")).toBeNull();
+    expect(screen.getByTestId("msg-0").getAttribute("data-kind")).toBe("plan");
+  });
+
+  // 丁T5（问题 11 的真实断点）：计划卡此前**漏挂** `.md-body` 排版层——
+  // Tailwind v4 preflight 把 h1-h6 的字号/字重与 ul/ol 的 list-style 全重置，
+  // 故计划正文里的 `###` 小标题与 `-` 列表在这张卡上被拍平成正文
+  // （普通消息卡与「工具参数升格」卡都挂了 `.md-body`，唯独计划卡漏了）。
+  // 真机夹具：本机 rollout 2026-09-21T17-38-17 行 115（4 个 `###` + 14 行列表）。
+  it("计划卡必须挂 .md-body 排版层（preflight 拍平 ### 标题/列表的回归锁）", async () => {
+    installFetch();
+    // 真机计划原文缩录（结构不变：## 一级 + ### 二级 + 嵌套列表）
+    const realPlan =
+      "## 修改《末班车》情感救赎版\n\n### 概要\n在现有文件基础上改写为约 500 字的短篇版本。\n\n" +
+      "### 修改方案\n- 新建文件：`悬疑小说-末班车-情感救赎版-500字.md`，不覆盖原稿。\n- 开头直接进入场景。\n" +
+      "  - 嵌套项一\n  - 嵌套项二\n\n### 验证方式\n- 使用 UTF-8 读取新文件。\n";
+    routes.messages = [msg({ seq: 0, kind: "plan", content: realPlan, toolName: "codex" })];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    const card = (await screen.findByTestId("plan-0")) as HTMLElement;
+    // **判据**：卡片内存在挂 `.md-body` 的容器（排版层生效的锚点）——
+    // 只断言「渲染出了 H2/H3/LI」不足以锁住本 bug（ReactMarkdown 一直都能解析出来，
+    // 被 preflight 拍平的是**样式**；`.md-body` 类才是样式的载体）
+    const mdBody = card.querySelector(".md-body");
+    expect(mdBody).not.toBeNull();
+    // 结构也在（markdown 解析正常）：H2 / H3 / 列表项
+    expect(screen.getByText("修改《末班车》情感救赎版").tagName).toBe("H2");
+    expect(screen.getByText("概要").tagName).toBe("H3");
+    expect(screen.getByText("验证方式").tagName).toBe("H3");
+    // 列表项文本被行内 `<code>` 切分（`悬疑小说-…md` 是 code 元素），故按 li 元素断言
+    const items = mdBody!.querySelectorAll("li");
+    expect(items.length).toBeGreaterThanOrEqual(4);
+    expect(Array.from(items).some((li) => li.textContent?.includes("不覆盖原稿"))).toBe(true);
+    // 嵌套列表（真机原文的 `  - 嵌套项`）必须在 `.md-body` 内（排版层覆盖到嵌套层）
+    expect(mdBody!.contains(screen.getByText("嵌套项一"))).toBe(true);
+  });
+
+  // 丁T5 复评 F6-1：问题 11 的另一半——`case "tool-call"` 的**工具参数升格支**
+  // （claude 的 ExitPlanMode 走这里）同样漏挂 `.md-body`。上面那条锁只覆盖
+  // `case "plan"`，对本支**零区分力**（复评实测：删掉本支的 `.md-body` → 上面仍绿）。
+  // 夹具：ExitPlanMode 的 toolArgs 里 `plan` 字段是整篇 markdown（真实形态，见
+  // `extractPlanBody`），含 `###` 二级标题与 `-` 列表。
+  it("工具参数升格支（tool-call 的 plan 字段）也必须挂 .md-body 排版层", async () => {
+    installFetch();
+    // 真实形态：toolArgs 是 JSON 串，顶层 plan 字段 = 计划 markdown 本体
+    routes.messages = [
+      msg({
+        seq: 0,
+        kind: "tool-call",
+        content: "调用 ExitPlanMode",
+        toolName: "ExitPlanMode",
+        toolArgs: JSON.stringify({
+          plan:
+            "## 修改《末班车》情感救赎版\n\n### 概要\n改写为约 500 字的短篇版本。\n\n" +
+            "### 修改方案\n- 新建文件，不覆盖原稿。\n  - 嵌套项一\n\n### 验证方式\n- 读取新文件确认无乱码。\n",
+        }),
+      }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("调用 ExitPlanMode");
+    // tool-call 行在本 describe 的渲染下**默认展开**（tool-call 卡在 run 态直出）；
+    // 若折叠开关在场则先展开（与「工具参数升格」既有 describe 的 expandToolCall 同法；
+    // 那个 helper 在另一个 describe 作用域内，此处就地取用）
+    const toggle = screen.queryByTestId("msg-0-toggle");
+    if (toggle) fireEvent.click(toggle);
+    const card = (await screen.findByTestId("tool-args-0")) as HTMLElement;
+    // **判据**：本支渲染出的卡片里存在挂 `.md-body` 的容器（与 `case "plan"` 同判据）
+    const mdBody = card.querySelector(".md-body");
+    expect(mdBody).not.toBeNull();
+    // 结构也在（markdown 解析正常，被 preflight 拍平的是样式）
+    expect(screen.getByText("修改《末班车》情感救赎版").tagName).toBe("H2");
+    expect(screen.getByText("概要").tagName).toBe("H3");
+    expect(mdBody!.querySelectorAll("li").length).toBeGreaterThanOrEqual(3);
+    expect(mdBody!.contains(screen.getByText("嵌套项一"))).toBe(true);
+  });
+
+  it("总结模式：plan 不折叠、不计入「已折叠 N 条」计数", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "做个计划" }),
+      msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+      msg({
+        seq: 2,
+        kind: "tool-call",
+        content: "调用 Bash",
+        toolName: "Bash",
+        toolArgs: '{"command":"ls"}',
+      }),
+      msg({ seq: 3, kind: "plan", content: "## 方案\n\n落地步骤", toolName: "ExitPlanMode" }),
+      msg({ seq: 4, kind: "assistant", content: "最终总结" }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    await screen.findByText("最终总结");
+    // 折叠计数只含 thinking + tool-call = 2（plan 豁免；user 与最终 assistant 本就直显）
+    expect(screen.getByTestId("summary-banner").textContent).toContain("已折叠 2 条过程消息");
+    // plan 常驻直出：正文可见、无折叠头
+    expect(screen.getByText("方案").tagName).toBe("H2");
+    expect(screen.getByTestId("plan-3")).toBeTruthy();
+    expect(screen.queryByTestId("msg-3-toggle")).toBeNull();
+  });
+});
+
+// ==== 计划文件卡（批次丙 T7）：kimi 计划是一等文件，后端从工具结果识别引用后
+// 补 kind="plan-file" 消息（content = 文件路径）→ 卡片显文件名 + 查看按钮 ====
+describe("SessionDetail：计划文件卡（T7）", () => {
+  it("plan-file 消息渲染计划文件卡：文件名可见、点击走文件预览", async () => {
+    installFetch();
+    const full = "C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/miss-martian.md";
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "做个计划" }),
+      msg({
+        seq: 1,
+        kind: "tool-result",
+        content: `Wrote 4263 bytes to ${full}`,
+      }),
+      msg({ seq: 2, kind: "plan-file", content: full }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    expect(await screen.findByTestId("plan-file-2")).toBeTruthy();
+    // 「计划文件」标签 + 文件名（不含全路径，全路径在 title）
+    expect(screen.getByText("计划文件")).toBeTruthy();
+    expect(screen.getByTestId("plan-file-name-2").textContent).toBe("miss-martian.md");
+    // 工具结果原文仍在（卡片是追加而非替换）
+    expect(screen.getByText(/Wrote 4263 bytes to/)).toBeTruthy();
+    // 点击「查看计划」→ 进入文件预览（openFile → preview 层）
+    fireEvent.click(screen.getByTestId("plan-file-open-2"));
+    expect(await screen.findByTestId("file-preview")).toBeTruthy();
+  });
+
+  it("plan-file 是常驻卡：不折叠（无折叠头）", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "plan-file", content: "/w/plans/a.md" })];
+    render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    expect(await screen.findByTestId("plan-file-0")).toBeTruthy();
+    expect(screen.queryByTestId("msg-0-toggle")).toBeNull();
+  });
+});
+
+// ==== 活状态流（T1 可选项，本批裁决要做）：详情页停留期间 selected 随既有
+// 看板轮询数据（Board 的 SSE 跃迁/快照 + 降级 3s 轮询）自动更新——红卡与总结
+// 横幅随状态切换，无需重进页面。App 级集成测试：Board 数据一拍更新 →
+// onSessionsChanged 上报 → App 按 (agentType,id) 对齐 selected。反向 waiting→idle
+// 同验（总结横幅切换）。组件不重挂的判据：/session-messages 不重拉
+describe("SessionDetail：活状态流（T1）", () => {
+  /** 可手动投帧的 EventSource（不自动发快照，测试按节奏 emit） */
+  class ManualEventSource extends MockEventSource {}
+
+  /** App 级 fetch 分路：Board 三端点 + 详情页四端点；messagesCalls 计数用于
+   *  「组件不重挂」断言（重挂必触发 /session-messages 重拉） */
+  function installAppFetch() {
+    let messagesCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/session-messages")) {
+          messagesCalls += 1;
+          return new Response(
+            JSON.stringify({
+              messages: [
+                msg({ seq: 0, kind: "user", content: "详情页首条" }),
+                msg({ seq: 1, kind: "thinking", content: "内部思考内容" }),
+                msg({ seq: 2, kind: "assistant", content: "回复正文" }),
+              ],
+              truncated: false,
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/session-files")) {
+          return new Response(JSON.stringify({ files: [], truncated: false }), { status: 200 });
+        }
+        if (url.includes("/session-approve-options")) {
+          // available=true：红卡真正渲染（false 会自隐，断言会变假阴性）
+          return new Response(
+            JSON.stringify({
+              available: true,
+              options: [{ id: "1", label: "允许" }],
+              verifiedWith: "test",
+              currentVersion: "1.0",
+              drift: false,
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/session-send-info")) {
+          return new Response(
+            JSON.stringify({ injectable: true, channels: ["tmux"], visibility: "realtime" }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/m/api/v1/host")) {
+          return new Response(
+            JSON.stringify({
+              host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
+              enabledTools: ["claude"],
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/m/api/v1/sessions")) {
+          return new Response(JSON.stringify({ sessions: [], totalCount: 0, waitingCount: 0 }), {
+            status: 200,
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      })
+    );
+    return {
+      calls: () => messagesCalls,
+    };
+  }
+
+  function transition(from: Session["status"], to: Session["status"]) {
+    return {
+      sessionId: "sess-1",
+      agentType: "claude",
+      from,
+      to,
+      projectName: "proj",
+      lastMessage: null,
+      ts: 1,
+    };
+  }
+
+  it("idle 详情页停留期间收到 waiting 跃迁：红卡出现且组件不重挂；反向切回恢复总结横幅", async () => {
+    vi.stubGlobal("EventSource", ManualEventSource);
+    const appFetch = installAppFetch();
+    const idle = makeSession({ status: "idle" });
+    render(<App />);
+
+    // SSE 建连后手动投首帧快照（idle 会话上卡）→ 探测成功，看板出卡
+    const es = await waitFor(() => MockEventSource.latest());
+    act(() => {
+      es.emit("snapshot", { sessions: [idle], totalCount: 1, waitingCount: 0 });
+    });
+    // 卡片点击 → 进入详情：idle 是总结模式（横幅在），非 waiting（无红卡）
+    fireEvent.click(screen.getByText("proj").closest("li") as HTMLLIElement);
+    await screen.findByTestId("detail-back");
+    expect(await screen.findByTestId("summary-banner")).toBeTruthy();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+    const callsAfterOpen = appFetch.calls();
+    expect(callsAfterOpen).toBeGreaterThanOrEqual(1);
+
+    // 既有数据通道一拍跃迁（idle → waiting）：selected 同步 → 红卡出现。
+    // 组件不重挂：/session-messages 不重拉（重挂必重拉），detail-back 仍在
+    act(() => {
+      es.emit("transition", transition("idle", "waiting"));
+    });
+    expect(await screen.findByTestId("approve-card")).toBeTruthy();
+    expect(await screen.findByText("等待批准")).toBeTruthy();
+    expect(screen.queryByTestId("summary-banner")).toBeNull();
+    expect(appFetch.calls()).toBe(callsAfterOpen);
+    expect(screen.getByTestId("detail-back")).toBeTruthy();
+
+    // 反向跃迁（waiting → idle）：红卡卸载，总结横幅自动恢复
+    act(() => {
+      es.emit("transition", transition("waiting", "idle"));
+    });
+    await waitFor(() => expect(screen.queryByTestId("approve-card")).toBeNull());
+    expect(screen.getByTestId("summary-banner")).toBeTruthy();
+    // 全程消息不重拉（一次打开，一次拉取）
+    expect(appFetch.calls()).toBe(callsAfterOpen);
+  });
+});
+
+// ==== 批次乙 T8：问答卡挂载（SessionDetail 正文视图）
+// 丁T1（2026-09-21）挂载口径变更：**非结束态**（!isSummary）挂载——问答端点不看
+// 状态（可用性由数据形态门决定），状态只是门牌；旧口径 waiting 门由本批放宽 ====
+describe("SessionDetail：问答卡挂载（批次乙 T8 / 丁T1 放宽）", () => {
+  /** 探测档案 §3 单选真实夹具（缩录）——QuestionCard 可用载荷 */
+  const questionInfo = {
+    available: true,
+    source: "mark",
+    questions: [
+      {
+        header: "Next step",
+        question: "This is a demo question — what would you like to do next?",
+        multiSelect: false,
+        options: [
+          { label: "Tool demo", description: "Explain how AskUserQuestion works." },
+          { label: "Start a task", description: "Start a coding or file task." },
+        ],
+      },
+    ],
+  };
+
+  it("waiting 会话 + 问答可用：question-card 挂载在 messageArea 上方；问答会话上 approve-card 自隐（硬约束① UI 面）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    // last_message 给审批 marker 命中句也不出红卡——问答会话的审批不可用由后端
+    // 硬约束①保证（approve-options 载荷 available=false，ApproveCard 自隐）
+    render(
+      <SessionDetail
+        session={makeSession({ status: "waiting", lastMessage: "Do you want to proceed?" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    expect(screen.getByTestId("question-text").textContent).toContain("demo question");
+    expect(screen.getByTestId("question-option-0").textContent).toContain("Tool demo");
+    // 问答会话上无 允许/拒绝（approve 选项不可用即 null + 问答卡零允许/拒绝）
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+    expect(screen.queryByText("允许")).toBeNull();
+    expect(screen.queryByText("拒绝")).toBeNull();
+  });
+
+  // 丁T1 放宽的核心断言：**运行态（processing/thinking）也挂载**——codex/opencode
+  // 的问题待决红灯由 T1 状态链给出，但问答卡的真正显示**不看状态**（数据形态门）；
+  // 旧的 waiting 门会在状态链尚未收敛时漏掉可作答的卡
+  it.each(["processing", "thinking"] as const)(
+    "丁T1：%s 会话（非结束态）+ 问答可用 → 卡照常挂载",
+    async (status) => {
+      installFetch();
+      routes.questionInfo = questionInfo;
+      render(<SessionDetail session={makeSession({ status })} onBack={() => {}} />);
+      expect(await screen.findByTestId("question-card")).toBeTruthy();
+      // ApproveCard 不受放宽影响：非 waiting 仍不挂载（审批红灯门是刻意的）
+      expect(screen.queryByTestId("approve-card")).toBeNull();
+    }
+  );
+
+  it("丁T1：结束态（idle/finished）不挂载问答卡（既已聊完，不必每进详情再打 GET）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    render(<SessionDetail session={makeSession({ status: "idle" })} onBack={() => {}} />);
+    await screen.findByText("proj"); // 页面就绪
+    await flushDetail();
+    expect(screen.queryByTestId("question-card")).toBeNull();
+  });
+
+  it("waiting 会话 + 问答不可用（缺省 available=false）：卡自隐，零问答 fetch 之外的副作用", async () => {
+    installFetch();
+    render(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+    await screen.findByText("proj");
+    await flushDetail();
+    expect(screen.queryByTestId("question-card")).toBeNull();
+  });
+
+  it("丁T1：运行态 + 问答不可用 → 放宽挂载也不闪空卡（可用性自隐兜底）", async () => {
+    installFetch();
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("proj");
+    await flushDetail();
+    expect(screen.queryByTestId("question-card")).toBeNull();
+    // 挂载确实发生了（否则本用例断言的是「没挂载」而非「自隐」）：GET 打过一发
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-question"))
+        .length
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  /** 冲刷挂载后的异步拉取链（mount fetch → setState） */
+  async function flushDetail() {
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+  }
+
+  // ==== 丁T1 复评 F-1：状态跃迁驱动问答卡重拉 ====
+  // 「回答后回落」在详情页停留期间必须可达：QuestionCard 的 effect deps 含
+  // session.status（Board 的既有数据通道把活会话 status 对齐进 selected）——
+  // status 一变即重拉 /session-question
+
+  it("丁T1 F-1：selected.status 跃迁（waiting → processing）→ 问答卡重拉", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    const questionCalls = () =>
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-question"))
+        .length;
+    const before = questionCalls();
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    // 模拟 App 数据通道把 status 对齐进来（同一会话对象被替换）
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(questionCalls()).toBeGreaterThan(before);
+  });
+
+  it("丁T1 F-1：反向跃迁（processing → waiting）同样重拉；id 不变不重挂（key 稳定）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />
+    );
+    expect(await screen.findByTestId("question-card")).toBeTruthy();
+    const questionCalls = () =>
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-question"))
+        .length;
+    const before = questionCalls();
+    rerender(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(questionCalls()).toBeGreaterThan(before);
+    // 组件未重挂（卡仍在，无卸载-重建闪烁）：同一会话 id 的 key 稳定
+    expect(screen.getByTestId("question-card")).toBeTruthy();
+  });
+
+  // ==== 丁T1 复评 F2-1：重拉只在**问题内容变化**时重置终态 ====
+  // 判据动机：同会话可连续多次提问（实测单会话连续 8 次 request_user_input，
+  // 其间无 task_complete），key 恒为 question-${id} 不重挂 → 无条件不清会让
+  // sent=true 残留到下一题（「已发送按键」且无按钮的伪终态卡）；而无条件清会在
+  // 「投递成功 → 状态回落」窗口内丢掉防连投语义。故取内容指纹判据。
+
+  /** 点击第一个选项造成 key_sent 终态（卡显示「已发送按键」、按钮消失） */
+  async function sendFirstOption() {
+    fireEvent.click(await screen.findByTestId("question-option-0"));
+    await flushDetail();
+    expect(screen.getByTestId("question-sent")).toBeTruthy();
+    expect(screen.queryByTestId("question-option-0")).toBeNull();
+  }
+
+  it("丁T1 F2-1：重拉拿到**相同**问题 → sent 保留（伪按钮不复活，防连投语义不破）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    await sendFirstOption();
+    // 状态跃迁触发重拉，但载荷是**同一个问题**（routes.questionInfo 未变）
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(screen.getByTestId("question-sent")).toBeTruthy();
+    expect(
+      screen.queryByTestId("question-option-0"),
+      "同一问题重拉后按钮不得复活（防连投）"
+    ).toBeNull();
+  });
+
+  it("丁T1 F2-1：重拉拿到**不同**问题 → sent 清（新问题可作答，无伪终态）", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    await sendFirstOption();
+    // 换题（模型连续提问的第二问）：内容指纹变化 → 终态重置
+    routes.questionInfo = {
+      available: true,
+      source: "mark",
+      questions: [
+        {
+          header: "Ship it?",
+          question: "Second question — should the project ship a README?",
+          multiSelect: false,
+          options: [{ label: "Yes", description: "Add a README." }],
+        },
+      ],
+    };
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    expect(await screen.findByTestId("question-option-0")).toBeTruthy();
+    expect(screen.getByTestId("question-text").textContent).toContain("Second question");
+  });
+
+  it("丁T1 F2-1 边界：重拉拿到**不可用**载荷（opencode pending 拍 input 未就绪）→ sent 不清", async () => {
+    installFetch();
+    routes.questionInfo = questionInfo;
+    const { rerender } = render(
+      <SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />
+    );
+    await sendFirstOption();
+    // 不可用载荷（F2-3 的 opencode 空窗形态）：不是「换了题」，不得重置终态——
+    // 否则刚投递的 sent 被清、按钮复活、防连投语义削弱
+    routes.questionInfo = { available: false, questions: [] };
+    rerender(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await flushDetail();
+    // 卡自隐（无题可显），但内部 sent 保留：再拿回**同一问题**时仍是终态
+    expect(screen.queryByTestId("question-card")).toBeNull();
+    routes.questionInfo = questionInfo;
+    rerender(<SessionDetail session={makeSession({ status: "waiting" })} onBack={() => {}} />);
+    await flushDetail();
+    expect(screen.getByTestId("question-sent")).toBeTruthy();
+    expect(
+      screen.queryByTestId("question-option-0"),
+      "空窗载荷不得把终态洗掉（按钮仍禁用）"
+    ).toBeNull();
+  });
+});
+
+// ==== 丁T2：计划待确认（codex/kimi）——提示条挂载与提示条→检查→N 选项全链 ====
+describe("SessionDetail：计划待确认条（丁T2）", () => {
+  /** 微任务冲刷（本 describe 自带；外层 flushDetail 定义在别的 describe 作用域内） */
+  async function flushAsyncDetail() {
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+  }
+
+  /** 计划消息条目（T1/T4 升格产物同形） */
+  function planMsg(seq: number, content: string): SessionMessage {
+    return {
+      seq,
+      role: "assistant",
+      kind: "plan",
+      content,
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  /** 用户消息条目 */
+  function userMsg(seq: number, content = "继续"): SessionMessage {
+    return {
+      seq,
+      role: "user",
+      kind: "user",
+      content,
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  /** 工具事件条目（批准后 wire 落 ExitPlanMode 回执的形态） */
+  function toolMsg(seq: number, kind: "tool-call" | "tool-result"): SessionMessage {
+    return {
+      seq,
+      role: "assistant",
+      kind,
+      content: "ExitPlanMode",
+      ts: null,
+      toolName: kind === "tool-call" ? "ExitPlanMode" : null,
+      toolArgs: null,
+      collapsed: true,
+    };
+  }
+
+  it("codex processing + 尾部计划提案：挂载审批卡并渲染「计划待确认」条（waiting 门被数据形态门放宽）", async () => {
+    installFetch();
+    routes.messages = [userMsg(0), planMsg(1, "# 方案\n\n正文")];
+    routes.approveOptions = {
+      available: true,
+      options: [],
+      verifiedWith: "0.154.0",
+      currentVersion: "0.155.1",
+      drift: false,
+      planPending: true,
+      plan: { content: "# 方案\n\n正文", isFile: false },
+    };
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+  });
+
+  it("codex 计划之后已有用户消息（Implement the plan.）：不挂载审批卡（预期态清除，无新存储）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 方案"), userMsg(1, "Implement the plan.")];
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flushAsyncDetail();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  it("claude processing + 尾部计划（既有计划批准走 waiting 门）：不挂载（门不放宽到 claude——零回归）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 方案")];
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "claude" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flushAsyncDetail();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  it("计划后已有工具事件（批准后 ExitPlanMode 回执）：不挂载（预期态清除）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 方案"), toolMsg(1, "tool-call")];
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flushAsyncDetail();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  it("全链：提示条 → 点检查 → 屏读命中 N 选项 → 点按生效（POST dialog:<n>）", async () => {
+    installFetch();
+    routes.messages = [userMsg(0), planMsg(1, "# 方案")];
+    routes.approveOptions = {
+      available: true,
+      options: [],
+      verifiedWith: "0.154.0",
+      currentVersion: "0.155.1",
+      drift: false,
+      planPending: true,
+      plan: { content: "# 方案", isFile: false },
+    };
+    render(
+      <SessionDetail
+        session={makeSession({ status: "processing", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    // 第一次拉取：计划待确认条（零选项）
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    // 第二次拉取（点检查）：屏读命中三选项
+    routes.approveOptions = {
+      available: true,
+      options: [
+        { id: "dialog:1", label: "Yes, implement this plan" },
+        { id: "dialog:2", label: "Yes, clear context and implement" },
+        { id: "dialog:3", label: "No, stay in Plan mode" },
+      ],
+      verifiedWith: "0.154.0",
+      currentVersion: "0.155.1",
+      drift: false,
+      dialog: true,
+    };
+    routes.approve = { status: "key_sent" };
+    fireEvent.click(screen.getByTestId("approve-plan-check"));
+    const opt = await screen.findByTestId("approve-option-dialog:1");
+    expect(opt.textContent).toContain("Yes, implement this plan");
+    fireEvent.click(opt);
+    expect(await screen.findByTestId("approve-sent")).toBeTruthy();
+    const post = fetchMock.mock.calls.find((c: unknown[]) =>
+      /\/session-approve$/.test(String(c[0]))
+    );
+    expect(JSON.parse(String((post?.[1] as RequestInit).body))).toEqual({
+      sessionId: "sess-1",
+      optionId: "dialog:1",
+    });
+  });
+});
+
+// ==== 丁T2：计划待确认挂载门的边界（结束态不挂载——与 QuestionCard 挂载门同规）====
+describe("SessionDetail：计划待确认挂载门的真机状态矩阵（丁T2 复评 F3-1）", () => {
+  /** 计划消息条目（T1/T4 升格产物同形） */
+  function planMsg(seq: number, content: string): SessionMessage {
+    return {
+      seq,
+      role: "assistant",
+      kind: "plan",
+      content,
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+  /** 计划待确认的**真机载荷**（后端 `available=true` + 零 options + planPending） */
+  const realPlanPendingPayload = {
+    available: true,
+    options: [],
+    verifiedWith: "0.154.0",
+    currentVersion: "0.155.1",
+    drift: false,
+    planPending: true,
+    plan: { content: "# 方案", isFile: false },
+  };
+  async function flush() {
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+  }
+
+  // **F3-1 主用例**：codex 计划提案后的**真机状态就是 Idle**（assistant(<proposed_plan>)
+  // → task_complete → TurnEnd → Idle；codex 兜底红已废）。首版实现用 `!isSummary` 排除
+  // idle → 真机上卡片恒不挂载（后端 available=true 无消费方）。本用例锁死修复。
+  it("codex **idle**（真机形态）+ 尾部计划提案：审批卡必须挂载 + 计划待确认条出现", async () => {
+    installFetch();
+    // 真机尾序：user → assistant(前导文本) → plan(<proposed_plan> 升格产物)
+    routes.messages = [
+      {
+        seq: 0,
+        role: "user",
+        kind: "user",
+        content: "改写成情感救赎版",
+        ts: null,
+        toolName: null,
+        toolArgs: null,
+        collapsed: false,
+      },
+      planMsg(1, "# 《末班车》情感救赎版改写方案\n\n## Summary\n改写重点…"),
+    ];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "idle", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    // 挂载 → 拉载 → 提示条与检查钮在场（真机全链的入口）
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+    expect(screen.getByTestId("approve-plan-check")).toBeTruthy();
+    expect(screen.getByTestId("approve-card").textContent).toContain("计划待确认");
+  });
+
+  // 边界对照：kimi 的计划审批真机落 **Waiting**（interaction.request 红灯），
+  // idle 只是防御位（MAM 未运行时状态可能回落）——两者都必须挂载。
+  it("kimi idle + 尾部计划提案：同样挂载（防御位——真机在 Waiting 已由既有用例覆盖）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# Plan: Create hi.txt"), planMsg(1, "# Plan: Create yo.txt")];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "idle", agentType: "kimi" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+  });
+
+  // `finished` 仍排除：会话真的结束（进程退出/归档），重进详情不再打 GET。
+  it("codex finished + 尾部计划提案：不挂载（会话真的结束——唯一排除态）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# 已结束会话里的旧计划")];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "finished", agentType: "codex" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flush();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+
+  // 反向锁：**idle 不等于放宽一切**——claude 的预期态门本就不成立（非计划对话框族），
+  // 且 claude 未落 Waiting 时不得借 idle 冒卡（零回归）。
+  it("claude idle + 尾部计划：不挂载（门仍按计划对话框族收窄——零回归）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# claude 的计划")];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "idle", agentType: "claude" })}
+        onBack={() => {}}
+      />
+    );
+    await screen.findByText("proj");
+    await flush();
+    expect(screen.queryByTestId("approve-card")).toBeNull();
+  });
+});
+
+// ==== 丁T2 复审 N2：前后端判据的**跨语言共享夹具锁**（真锁，非人工镜像）====
+//
+// `isPlanPending`（前端）与 `remote::api::plan_pending_tail_index` / `_strict_` 系列
+// （后端）是**两份同口径实现**——判据一致、窗口不同（前端吃详情页已拉取的整页
+// 200/1000 条；后端读 40 条尾部窗口，性能面）。
+//
+// **本组用例与 Rust 侧 `remote::api::tests::plan_pending_cross_language_fixture_cases`
+// 读同一份夹具文件**（`tests/fixtures/plan_pending_cases.json`）：夹具与期望都在文件里，
+// 两侧只负责「驱动各自实现 + 对照同一份期望」。**这才是跨语言可达的真约束**——
+// 只改一侧实现而不更新夹具文件，该侧必红（另一侧仍绿，但漂移一定被抓）。
+//
+// 前身（复评 M1）曾把这段写成「单边漂移即本锁失败」的**人工镜像**注释——那是不实声明
+// （跨语言无法 import，Rust 侧改动不会让 vitest 失败）；N2 已改为共享夹具，声明与实现对齐。
+describe("丁T2 N2：isPlanPending 与后端判据的跨语言共享夹具锁", () => {
+  function m(kind: string): SessionMessage {
+    return {
+      seq: 0,
+      role: kind === "user" ? "user" : "assistant",
+      kind,
+      content: "x",
+      ts: null,
+      toolName: null,
+      toolArgs: null,
+      collapsed: false,
+    };
+  }
+
+  it("共享夹具逐例：前端 isPlanPending 与文件里的期望一致（与 Rust 侧同表）", () => {
+    let seenTrue = 0;
+    let seenFalse = 0;
+    let seenLenientOnly = 0;
+    for (const c of planPendingCases.cases) {
+      const msgs = c.kinds.map(m);
+      expect(isPlanPending(msgs, c.tool)).toBe(c.pending);
+      expect(msgs.length).toBe(c.kinds.length); // 夹具形态自检（防 map 退化）
+      if (c.pending) seenTrue += 1;
+      else seenFalse += 1;
+      if (c.lenient_only) seenLenientOnly += 1;
+      // 共享表只描述**宽松档**（前端 isPlanPending 即宽松档——它与后端审批侧同判据）；
+      // `lenient_only` 用例在前端同样为 true（严档是后端问答压制专用，前端不实现）
+      if (c.lenient_only) expect(c.pending).toBe(true);
+    }
+    // 用例集自检（与 Rust 侧同款断言，防「夹具被删空后测试恒绿」）
+    expect(seenTrue).toBeGreaterThan(0);
+    expect(seenFalse).toBeGreaterThan(0);
+    expect(seenLenientOnly).toBe(1);
+  });
+
+  it("共享夹具的工具族名单：非 codex/kimi 一律不参与（与后端 plan_dialog_family 同名单）", () => {
+    for (const tool of planPendingCases.non_plan_tools) {
+      // 用一条「在场」夹具驱动：工具不在族内 → 恒 false
+      expect(isPlanPending([m("plan")], tool)).toBe(false);
+    }
+    // 族内两家：同一夹具恒 true（对照，防「全员 false」的假绿）
+    for (const tool of ["codex", "kimi"]) {
+      expect(isPlanPending([m("plan")], tool)).toBe(true);
+    }
+    // 缺省/ null 工具 → 不放宽（不在族内）
+    expect(isPlanPending([m("plan")], null)).toBe(false);
+    expect(isPlanPending([m("plan")], undefined)).toBe(false);
+  });
+
+  it("窗口差异的如实申报（本锁不能覆盖的面）", () => {
+    // 前端整页（200/1000）vs 后端 40 条尾部窗口：计划卡若落在第 41+ 条历史里，后端看不到
+    // 而前端看得到 → 前端挂载卡片、后端回 available=false、卡片按自隐契约消失
+    // （代价 = 一次多余 GET，不是错误界面）。「卡片挂着但点了报错」由 POST 门与 GET
+    // 同口径保证（F3-2 + N1），不在本锁范围。
+    const longHistory: SessionMessage[] = [];
+    for (let i = 0; i < 60; i += 1) longHistory.push(m("user"));
+    longHistory.push(m("plan"));
+    // 前端全页看得见尾部计划 → true（后端 40 条窗口会看不到）
+    expect(isPlanPending(longHistory, "codex")).toBe(true);
+    // 但若那 60 条里有用户消息紧跟在计划之后（真实消费信号），前端也判 false
+    const consumed = [...longHistory, m("user")];
+    expect(isPlanPending(consumed, "codex")).toBe(false);
+  });
 });

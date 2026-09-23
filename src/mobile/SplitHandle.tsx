@@ -6,10 +6,12 @@
 //   保留（横向拖宽度、纵向拖高度互不干扰）；
 // - 拖动期间用 window 级 pointermove/pointerup 监听（而非 setPointerCapture：
 //   jsdom 无该方法，且 window 监听在指针滑出 handle 后仍持续跟踪）；
-// - 坐标换算：横向按 clientX 增量 / 容器宽；纵向按 clientY 增量 / 容器高
-//   （增量取负——向下拖 = 对话区变高 = 文件栏变矮）；
+// - 坐标换算：横向按 clientX 增量 / 容器宽；纵向按 clientY 增量 / 容器高。
+//   **方向取决于 ratioPane**（文件栏在分隔条之前还是之后，见 prop 注释）——
+//   不变式只有一条：分隔条跟随指针（2026-09-16 用户裁决），拖向文件栏 = 文件栏变小；
 // - 钳制 [MIN_RATIO, MAX_RATIO]：任一区不被拖到消失（15%–85%）；
 // - 键盘可达：handle 为 button，方向键微调 2%（无障碍，不限于指针设备）；
+//   方向同样随 ratioPane 取反；
 // - touch-action: none 关掉浏览器滚动手势，避免手机上拖动被识别为滚动。
 import { useCallback, useEffect, useRef } from "react";
 
@@ -28,6 +30,13 @@ interface SplitHandleProps {
   onRatioChange: (ratio: number) => void;
   /** 容器尺寸读数（拖动换算的分母来源） */
   containerRef: React.RefObject<HTMLElement | null>;
+  /** 文件栏在分隔条之前还是之后（2026-09-20 竖屏换位引入）：
+   *  - "after"（默认，split-h 现状）：布局 [对话][分隔条][文件栏]；
+   *  - "before"（split 换位后）：布局 [文件栏][分隔条][对话]——文件栏在上方，
+   *    拖动/键盘方向据此取反，「分隔条跟随指针」不变式两态均保持 */
+  ratioPane?: "after" | "before";
+  /** 附加到 handle 的类（竖屏换位用 CSS order 视觉换位时传 order-2） */
+  className?: string;
 }
 
 export default function SplitHandle({
@@ -35,6 +44,8 @@ export default function SplitHandle({
   ratio,
   onRatioChange,
   containerRef,
+  ratioPane = "after",
+  className,
 }: SplitHandleProps) {
   // 拖动起始快照（起点坐标 + 起点占比）：每次 pointerdown 重置
   const dragRef = useRef<{ pos: number; ratio: number } | null>(null);
@@ -64,12 +75,14 @@ export default function SplitHandle({
       const span = orientation === "horizontal" ? rect.width : rect.height;
       if (span <= 0) return; // 无布局引擎 / 未挂载：不换算
       const now = orientation === "horizontal" ? e.clientX : e.clientY;
-      // 语义：分隔条跟随指针（两方向同式，均取负差值）。布局恒为
-      // [对话 flex-1][分隔条][文件栏 占比 ratio]——文件栏在分隔条**之后**，
-      // 指针朝文件栏方向拖 = 分隔条跟随过去 = 文件栏被压小 = 占比减。
-      // 横向：右拖（now 增）→ 右侧文件栏变窄；纵向：下拖 → 下方文件栏变矮。
-      // 原横向用正差值（拖右反而变大＝逆着指针走），2026-09-16 用户裁决修正
-      const delta = drag.pos - now;
+      // 语义：分隔条跟随指针（2026-09-16 用户裁决；方向随 ratioPane 取反，两态
+      // 拖向文件栏都 = 文件栏被压小）。
+      // - "after"（文件栏在分隔条之后，split-h 现状 [对话][分隔条][文件栏]）：
+      //   取负差值——横向右拖（now 增）→ 右侧文件栏变窄；纵向下拖 → 下方文件栏变矮。
+      //   原横向曾用正差值（拖右反而变大＝逆着指针走），用户裁决修正。
+      // - "before"（文件栏在分隔条之前，split 换位后 [文件栏][分隔条][对话]）：
+      //   取正差值——纵向下拖 → 分隔条下移把上方文件栏撑大 = 占比增。
+      const delta = ratioPane === "after" ? drag.pos - now : now - drag.pos;
       onRatioChange(clamp(drag.ratio + delta / span));
     };
     const onUp = () => {
@@ -83,13 +96,28 @@ export default function SplitHandle({
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, [containerRef, onRatioChange, orientation]);
+  }, [containerRef, onRatioChange, orientation, ratioPane]);
 
-  // 键盘微调：方向键按「让文件栏变大的方向」直觉映射
+  // 键盘微调：方向键按「让文件栏变大的方向」直觉映射；ratioPane="before"
+  // （文件栏在上/左）时取反——竖屏换位后 ArrowDown 才是「文件栏变大」
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLButtonElement>) => {
-      const bigger = orientation === "horizontal" ? "ArrowRight" : "ArrowUp";
-      const smaller = orientation === "horizontal" ? "ArrowLeft" : "ArrowDown";
+      const bigger =
+        ratioPane === "before"
+          ? orientation === "horizontal"
+            ? "ArrowLeft"
+            : "ArrowDown"
+          : orientation === "horizontal"
+            ? "ArrowRight"
+            : "ArrowUp";
+      const smaller =
+        ratioPane === "before"
+          ? orientation === "horizontal"
+            ? "ArrowRight"
+            : "ArrowUp"
+          : orientation === "horizontal"
+            ? "ArrowLeft"
+            : "ArrowDown";
       if (e.key === bigger) {
         e.preventDefault();
         onRatioChange(clamp(ratio + KEY_STEP));
@@ -98,7 +126,7 @@ export default function SplitHandle({
         onRatioChange(clamp(ratio - KEY_STEP));
       }
     },
-    [onRatioChange, orientation, ratio]
+    [onRatioChange, orientation, ratio, ratioPane]
   );
 
   return (
@@ -115,9 +143,10 @@ export default function SplitHandle({
       onKeyDown={onKeyDown}
       style={{ touchAction: "none" }}
       className={
-        orientation === "horizontal"
+        (className ? className + " " : "") +
+        (orientation === "horizontal"
           ? "w-1.5 shrink-0 cursor-col-resize bg-slate-200 hover:bg-sky-400/60 dark:bg-slate-800 dark:hover:bg-sky-500/60"
-          : "h-1.5 shrink-0 cursor-row-resize bg-slate-200 hover:bg-sky-400/60 dark:bg-slate-800 dark:hover:bg-sky-500/60"
+          : "h-1.5 shrink-0 cursor-row-resize bg-slate-200 hover:bg-sky-400/60 dark:bg-slate-800 dark:hover:bg-sky-500/60")
       }
     />
   );

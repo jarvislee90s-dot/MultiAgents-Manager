@@ -3,18 +3,16 @@
 
 use crate::session::SessionStatus;
 
+/// content 数组是否含指定 type 的块（has_tool_use / has_text_block / has_tool_result
+/// 三判定的共用骨架）
+fn has_block_of_type(content: &serde_json::Value, ty: &str) -> bool {
+    matches!(content, serde_json::Value::Array(arr)
+        if arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some(ty)))
+}
+
 /// 检查 content 是否包含 tool_use 块
 pub fn has_tool_use(content: &serde_json::Value) -> bool {
-    if let serde_json::Value::Array(arr) = content {
-        arr.iter().any(|item| {
-            item.get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "tool_use")
-                .unwrap_or(false)
-        })
-    } else {
-        false
-    }
+    has_block_of_type(content, "tool_use")
 }
 
 /// 检查是否所有 tool_use 都是用户输入类工具（如 AskUserQuestion）— 这些应算 Waiting
@@ -42,18 +40,15 @@ pub fn is_waiting_for_user_input(content: &serde_json::Value) -> bool {
     }
 }
 
+/// 检查 content 是否包含 text 块（正文输出；严格按 type=="text" 判定，
+/// 不用 extract_text_content 的宽松 "text" 键抓取，避免把 thinking 等块误判为正文）
+pub fn has_text_block(content: &serde_json::Value) -> bool {
+    has_block_of_type(content, "text")
+}
+
 /// 检查 content 是否包含 tool_result 块
 pub fn has_tool_result(content: &serde_json::Value) -> bool {
-    if let serde_json::Value::Array(arr) = content {
-        arr.iter().any(|item| {
-            item.get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "tool_result")
-                .unwrap_or(false)
-        })
-    } else {
-        false
-    }
+    has_block_of_type(content, "tool_result")
 }
 
 fn extract_text_content(content: &serde_json::Value) -> &str {
@@ -114,9 +109,15 @@ pub fn is_local_slash_command(content: &serde_json::Value) -> bool {
 }
 
 /// 根据最后一条消息推导会话状态
+///
+/// `last_has_text`：assistant 行是否含 text（正文）块。thinking-only 行（只有
+/// thinking 块、无正文无工具调用）是轮中产物，不算完成信号——否则长思考期间
+/// 每落一条 thinking 行就会瞬绿一次（2026-09-19 实测 5 分钟误报 6 次）
+#[allow(clippy::too_many_arguments)] // 标志位族全参数透传（同 codex_thread_parser 先例）
 pub fn determine_status(
     last_msg_type: Option<&str>,
     has_tool_use: bool,
+    last_has_text: bool,
     _has_tool_result: bool,
     is_local_command: bool,
     is_interrupted: bool,
@@ -129,9 +130,12 @@ pub fn determine_status(
                 SessionStatus::Waiting
             } else if has_tool_use {
                 SessionStatus::Processing
-            } else {
+            } else if last_has_text {
                 // Assistant finished responding, no pending tool calls → idle
                 SessionStatus::Idle
+            } else {
+                // 只有 thinking/redacted_thinking 等非正文块：轮中思考产物 → 黄
+                SessionStatus::Thinking
             }
         }
         Some("user") => {
@@ -157,26 +161,106 @@ mod tests {
 
     #[test]
     fn assistant_text_is_idle_even_if_file_recent() {
-        // 明确完成信号优先：assistant 纯文本 + 文件仍在年龄窗口内 → Idle（不再被拉回 Processing）
+        // 明确完成信号优先：assistant 正文 + 文件仍在年龄窗口内 → Idle（不再被拉回 Processing）
         assert_eq!(
-            determine_status(Some("assistant"), false, false, false, false, false, true),
+            determine_status(
+                Some("assistant"),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
             SessionStatus::Idle
         );
         assert_eq!(
-            determine_status(Some("assistant"), false, false, false, false, false, false),
+            determine_status(
+                Some("assistant"),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             SessionStatus::Idle
         );
     }
 
     #[test]
+    fn thinking_only_assistant_is_not_idle() {
+        // thinking-only 行（无正文无工具调用）是轮中思考产物 → Thinking，不得瞬绿；
+        // 文件新旧两种情况都不得判 Idle
+        assert_eq!(
+            determine_status(
+                Some("assistant"),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            SessionStatus::Thinking
+        );
+        assert_eq!(
+            determine_status(
+                Some("assistant"),
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
+            SessionStatus::Thinking
+        );
+    }
+
+    #[test]
+    fn has_text_block_ignores_thinking_blocks() {
+        // has_text_block 严格认 type=="text"，thinking/redacted_thinking 不算正文
+        let thinking_only = serde_json::json!([{ "type": "thinking", "thinking": "hmm" }]);
+        assert!(!has_text_block(&thinking_only));
+        let with_text = serde_json::json!([
+            { "type": "thinking", "thinking": "hmm" },
+            { "type": "text", "text": "done" }
+        ]);
+        assert!(has_text_block(&with_text));
+    }
+
+    #[test]
     fn assistant_tool_use_is_processing() {
         assert_eq!(
-            determine_status(Some("assistant"), true, false, false, false, false, false),
+            determine_status(
+                Some("assistant"),
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             SessionStatus::Processing
         );
         // 用户输入类工具（AskUserQuestion）→ Waiting
         assert_eq!(
-            determine_status(Some("assistant"), true, false, false, false, true, false),
+            determine_status(
+                Some("assistant"),
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false
+            ),
             SessionStatus::Waiting
         );
     }
@@ -185,11 +269,11 @@ mod tests {
     fn fallback_branch_still_uses_file_age() {
         // 兜底分支保留 file_recently_modified 语义
         assert_eq!(
-            determine_status(None, false, false, false, false, false, true),
+            determine_status(None, false, false, false, false, false, false, true),
             SessionStatus::Processing
         );
         assert_eq!(
-            determine_status(None, false, false, false, false, false, false),
+            determine_status(None, false, false, false, false, false, false, false),
             SessionStatus::Waiting
         );
     }

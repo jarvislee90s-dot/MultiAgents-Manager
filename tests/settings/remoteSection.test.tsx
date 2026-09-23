@@ -42,11 +42,13 @@ import { RemoteSection } from "@/components/settings/RemoteSection";
 void i18n;
 
 // ---- mock 载荷工厂（形状契约 = Rust channels_payload 注释，M5 A5）----
-const channelsOf = (over: {
-  lan?: Record<string, unknown>;
-  quick?: Record<string, unknown>;
-  named?: Record<string, unknown>;
-} = {}) => ({
+const channelsOf = (
+  over: {
+    lan?: Record<string, unknown>;
+    quick?: Record<string, unknown>;
+    named?: Record<string, unknown>;
+  } = {}
+) => ({
   local: { running: true, address: "http://127.0.0.1:9420/m" },
   lan: {
     enabled: true,
@@ -102,13 +104,11 @@ afterEach(() => {
 });
 
 // 卡片定位（线稿四卡一排；data-card 是卡片可点击容器的稳定钩子）
-const card = (key: string) =>
-  document.querySelector(`[data-card="${key}"]`) as HTMLElement;
+const card = (key: string) => document.querySelector(`[data-card="${key}"]`) as HTMLElement;
 const cardSwitch = (key: string) => within(card(key)).getByRole("switch");
 const liveDot = (key: string) => card(key).querySelector("[data-live]") as HTMLElement;
 // 唯一展开区（同时只显示一个）
-const expandedKey = () =>
-  document.querySelector("[data-expand]")?.getAttribute("data-expand");
+const expandedKey = () => document.querySelector("[data-expand]")?.getAttribute("data-expand");
 
 describe("RemoteSection 四卡渲染与 live 态映射（M5 A6）", () => {
   it("四张卡按线稿顺序渲染，live 点与开关态 = enabled||running（本机=总开关）", async () => {
@@ -179,9 +179,7 @@ describe("RemoteSection 点卡片唯一展开详情区（M5 A6）", () => {
     expect(screen.getByText("http://127.0.0.1:9420/m")).toBeTruthy();
     expect(screen.getByText(/forwarding target for tunnel traffic/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /copy link/i }));
-    await waitFor(() =>
-      expect(toastSuccessMock).toHaveBeenCalled()
-    );
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
   });
 
   it("局域网详情：推荐徽标落首条地址 + 二维码（地址#pin=<pin>）+ 换网络说明", async () => {
@@ -210,10 +208,7 @@ describe("RemoteSection 本机卡开关锁死（M5 A6）", () => {
     expect(sw).toBeDisabled();
     expect(sw).toHaveAttribute("title", "Always on while remote access is enabled");
     fireEvent.click(sw);
-    expect(invokeMock).not.toHaveBeenCalledWith(
-      "remote_toggle_channel",
-      expect.anything()
-    );
+    expect(invokeMock).not.toHaveBeenCalledWith("remote_toggle_channel", expect.anything());
   });
 });
 
@@ -261,7 +256,9 @@ describe("RemoteSection lan 开关 P7 TLS Dialog 流（M5 A6）", () => {
     await waitFor(() => expect(lanTries).toBe(2));
     // 顺序契约：先置位 ack（后端门据此放行）再重试
     expect(calls.indexOf("remote_confirm_public")).toBeGreaterThan(-1);
-    expect(calls.indexOf("remote_confirm_public")).toBeLessThan(calls.lastIndexOf("remote_toggle_channel"));
+    expect(calls.indexOf("remote_confirm_public")).toBeLessThan(
+      calls.lastIndexOf("remote_toggle_channel")
+    );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
@@ -304,7 +301,10 @@ describe("RemoteSection lan 开关 P7 TLS Dialog 流（M5 A6）", () => {
     fireEvent.click(cardSwitch("quick"));
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", { channel: "quick", on: false });
+    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", {
+      channel: "quick",
+      on: false,
+    });
   });
 });
 
@@ -356,9 +356,7 @@ describe("RemoteSection 命名隧道：Token 保存与教程 popover（M5 A6）"
     await waitFor(() => expect(input.value).toBe("eyJh-saved-token"));
     fireEvent.change(input, { target: { value: "eyJh-new-token" } });
     // Token 保存按钮与 PIN 保存同名（线稿均为「保存」），作用域限定在 Token 输入框所在行
-    fireEvent.click(
-      within(input.closest("div")!).getByRole("button", { name: /^save$/i })
-    );
+    fireEvent.click(within(input.closest("div")!).getByRole("button", { name: /^save$/i }));
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("set_setting", {
         key: "remote.tunnel_token",
@@ -488,8 +486,22 @@ describe("RemoteSection 访问密码（M5 A6）", () => {
 
 describe("RemoteSection 已接入设备列表（M5 A6）", () => {
   const devicesOf = () => [
-    { id: "d1", name: "JARVIS 的 iPhone", firstPairedAt: 1, lastSeenAt: Date.now(), online: true, via: "quick" },
-    { id: "d2", name: "matebook16s · Edge", firstPairedAt: 2, lastSeenAt: Date.now() - 7_200_000, online: false, via: "lan" },
+    {
+      id: "d1",
+      name: "JARVIS 的 iPhone",
+      firstPairedAt: 1,
+      lastSeenAt: Date.now(),
+      online: true,
+      via: "quick",
+    },
+    {
+      id: "d2",
+      name: "matebook16s · Edge",
+      firstPairedAt: 2,
+      lastSeenAt: Date.now() - 7_200_000,
+      online: false,
+      via: "lan",
+    },
     { id: "d3", name: "Desktop-A", firstPairedAt: 3, lastSeenAt: 3, online: false, via: "local" },
     { id: "d4", name: "iPad", firstPairedAt: 4, lastSeenAt: 4, online: false, via: "named" },
     { id: "d5", name: "Legacy", firstPairedAt: 5, lastSeenAt: 5, online: false },
@@ -571,6 +583,44 @@ describe("RemoteSection 已接入设备列表（M5 A6）", () => {
     expect(await screen.findByText("No paired devices")).toBeTruthy();
     expect(screen.getByText("0 / 10")).toBeTruthy();
   });
+
+  it("远程关闭态（冷挂载）：花名册仍拉取并渲染 DB 行，徽标 5 / 10——不因停服清空（Mac 报告七-6 回归锁）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_status") return disabledStatus();
+      if (cmd === "get_setting") return null;
+      if (cmd === "remote_devices") return devicesOf();
+      return null;
+    });
+    render(<RemoteSection />);
+    // 关闭态下 remote_devices 照常发起（旧版 disabled 直接清空且不拉取），行照常渲染
+    expect(await screen.findByText("JARVIS 的 iPhone")).toBeTruthy();
+    expect(screen.getByText("matebook16s · Edge")).toBeTruthy();
+    expect(screen.getByText("5 / 10")).toBeTruthy();
+  });
+
+  it("总开关关掉：花名册保留不清空（吊销/重命名管理不随停服消失）", async () => {
+    let on = true;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_status") return on ? statusOf() : disabledStatus();
+      if (cmd === "remote_toggle") {
+        on = false;
+        return;
+      }
+      if (cmd === "get_setting") return null;
+      if (cmd === "remote_devices") return devicesOf();
+      return null;
+    });
+    render(<RemoteSection />);
+    const sw = screen.getByRole("switch", { name: /enable remote access/i });
+    await screen.findByText("JARVIS 的 iPhone");
+    fireEvent.click(sw);
+    // 旧版此处 enabled 翻 false → effect 立即 setDevices([]) 清空列表；修订后行保留
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: false })
+    );
+    expect(screen.getByText("JARVIS 的 iPhone")).toBeTruthy();
+    expect(screen.getByText("5 / 10")).toBeTruthy();
+  });
 });
 
 describe("RemoteSection 本机名称默认系统名（M5 A6）", () => {
@@ -619,12 +669,8 @@ describe("RemoteSection i18n zh/en 无缺键（M5 A6）", () => {
   it("源码引用键 zh/en 双语齐备，且两 locale 的 settings.remote 键集相等", () => {
     const zh = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/zh.json"), "utf8"));
     const en = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/en.json"), "utf8"));
-    const zhKeys = new Set(
-      flat(zh.settings.remote).map((k) => `settings.remote.${k}`)
-    );
-    const enKeys = new Set(
-      flat(en.settings.remote).map((k) => `settings.remote.${k}`)
-    );
+    const zhKeys = new Set(flat(zh.settings.remote).map((k) => `settings.remote.${k}`));
+    const enKeys = new Set(flat(en.settings.remote).map((k) => `settings.remote.${k}`));
     // 两 locale 键集相等（对齐 scripts/check-i18n 的子树版）
     expect([...zhKeys].filter((k) => !enKeys.has(k))).toEqual([]);
     expect([...enKeys].filter((k) => !zhKeys.has(k))).toEqual([]);

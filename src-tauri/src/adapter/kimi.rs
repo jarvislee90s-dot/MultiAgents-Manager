@@ -33,12 +33,36 @@ impl AgentAdapter for KimiAdapter {
         monitor::kimi_parser::kimi_home()
     }
 
+    // T2 hooks 通道接入（issue #74 / 官方 hooks 文档，2026-09-20）：config.toml
+    // `[[hooks]]`（字段仅 event/matcher/command/timeout 四个，无 type/commandWindows
+    // /async）；事件名 PascalCase。注册 `PermissionRequest`（审批等待前触发——判定①
+    // Waiting 信号）+ `PermissionResult`（审批完成——T3 持久等待标记的清除信号）。
+    // kimi 此前无 hook 通道（hook_supported 恒 false）→ **无存量迁移面**；注册由
+    // monitor::hooks::register_all_hooks 的 TOML 分支承载（register_kimi_hooks_in_file）。
+    // 官方文档锚点：kimi.com/code/docs .../customization/hooks.html（stdin JSON 含
+    // hook_event_name/session_id/cwd，helper 薄管道零改动兼容；exit 0 = allow 且
+    // stdout 会进上下文——helper 空输出不污染上下文，exit 2 = block 但 helper 恒 0）
     fn hook_supported(&self) -> bool {
-        // Kimi 支持 [[hooks]]（config.toml，PascalCase 事件，stdin JSON 含
-        // hook_event_name/session_id/cwd），但现有注册器只写 Claude 风格 JSON 配置，
-        // TOML [[hooks]] 注册器作为后续扩展（见 IMPLEMENTATION_NOTES）；
-        // 状态判定由 wire.jsonl 尾部解析承担，与 opencode/openclaw 同档
-        false
+        true
+    }
+
+    fn hook_event_case(&self) -> HookEventCase {
+        HookEventCase::PascalCase
+    }
+
+    fn hook_events(&self) -> Vec<&'static str> {
+        vec!["PermissionRequest", "PermissionResult"]
+    }
+
+    fn hook_event_matcher(&self, _event: &str) -> Option<&'static str> {
+        // 官方 [[hooks]] matcher 为可选正则（按目标过滤）；审批事件无需过滤 → 不带
+        None
+    }
+
+    fn hook_config_path(&self) -> Option<std::path::PathBuf> {
+        // 官方文档：hooks 以 `[[hooks]]` 数组表落在 $KIMI_CODE_HOME/config.toml
+        // （与 MCP 的 mcp.json 分离——config.toml 本身是 TOML 但不放 MCP 配置）
+        Some(monitor::kimi_parser::kimi_home().join("config.toml"))
     }
 
     fn mcp_format(&self) -> McpFormat {

@@ -29,7 +29,9 @@ describe("VoiceGroupEditor", () => {
   it("渲染分组、文件、问题徽标与组含义 tooltip（EP9）", () => {
     render(<VoiceGroupEditor rows={rows} onAdd={() => {}} onRemove={() => {}} />);
     expect(screen.getByTestId("voice-group-general")).toBeInTheDocument();
-    expect(screen.getByTestId("voice-row-voice/general/b.mp3")).toHaveTextContent(/too-long|≥20s|时长 ≥20s/);
+    expect(screen.getByTestId("voice-row-voice/general/b.mp3")).toHaveTextContent(
+      /too-long|≥20s|时长 ≥20s/
+    );
     expect(screen.getByTestId("voice-group-general")).toHaveAttribute("title"); // 组含义 tooltip
   });
 

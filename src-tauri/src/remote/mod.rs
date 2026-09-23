@@ -4,6 +4,7 @@
 pub mod api;
 #[cfg(test)]
 pub mod attachment_fixtures;
+pub mod attachments;
 pub mod conn_owner;
 pub mod content;
 pub mod events;
@@ -213,6 +214,63 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
         store: pairing::DeviceStore::global(),
+        // M7 Task 5（方案 A）：注入器生产装配——消费方 flush_one / session-send 直发；
+        // Task 6 已接线：api_router 注册 session-send 等路由 + serve() 挂 spawn_flush_loop
+        injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+        // R5 一键 resume spawn 缝（Task 11）：生产 = 真 spawn 终端（wt / conhost /
+        // macOS AppleScript）；session-open 端点消费
+        resume_spawner: std::sync::Arc::new(crate::inject::resume::spawn_terminal),
+        // A1 写入确认缝（M9R Task 5）：生产 = 会话消息读路径查 24 字符尾戳（与
+        // /session-messages 数据同源；读失败 = 未命中，诚实口径）。生产装配无法
+        // 捕获自身 Arc（与 injector 缝同构），故闭包内直调读路径——确认器「可插拔」
+        // 不建 per-tool 确认器，opencode 等 SQLite 家经同一派发天然覆盖。测试态恒
+        // true（server.rs / queue.rs 夹具），确认失败用例就地覆盖恒 false。
+        confirm_probe: std::sync::Arc::new(|tool: &str, sid: &str, stamp: &str| -> bool {
+            crate::remote::content::read_session_messages(
+                tool,
+                sid,
+                crate::inject::confirm::PROBE_MESSAGE_LIMIT,
+            )
+            .map(|pg| crate::inject::confirm::stamp_hit_in_page(&pg, stamp))
+            .unwrap_or(false)
+        }),
+        // 丁T3 §2.7：对话框在场探针——生产装配直指单点实现
+        // `inject::dialog::probe_screen_dialog`（Windows 屏读可见窗口 + 编号选项簇解析；
+        // 非 Windows 恒 None = 无法判定 ⇒ 不阻断控制类注入，裁决见
+        // `inject::dialog::blocks_control_injection` 文档）。缝收 (sid, pid)：sid 仅为
+        // 日志定位（实现按 pid attach 控制台——会话快照是 pid 的唯一来源，端点侧取出传入）。
+        dialog_probe: std::sync::Arc::new(
+            |sid: &str, pid: u32| -> Option<Vec<crate::inject::dialog::DialogOption>> {
+                let opts = crate::inject::dialog::probe_screen_dialog(pid);
+                if opts.is_some() {
+                    log::debug!("T3 控制类注入守卫：sid={sid} pid={pid} 屏读见编号选项对话框");
+                }
+                opts
+            },
+        ),
+        // 丁T5：屏读**能力**缝（提交/自由作答阶段机的每段复核要用）。
+        // 生产 = `read_screen_window` 的逐行产物；非 Windows / 读屏失败 → `None`
+        // （阶段机据此**如实中止**并引导终端——不盲发后续键）。注意缝的是「能力」
+        // 而不是「结论」：判据留在内核（`inject::question` 的各 `probe_*`），理由见
+        // `remote::server::ScreenProbeFn` 文档。
+        screen_probe: std::sync::Arc::new(|sid: &str, pid: u32| -> Option<Vec<String>> {
+            #[cfg(windows)]
+            {
+                match crate::inject::windows_console::read_screen_window(pid) {
+                    Ok(lines) => Some(lines),
+                    Err(e) => {
+                        log::debug!("问答阶段机屏读失败（sid={sid} pid={pid}: {e}）→ 无法核验");
+                        None
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // 非 Windows 无屏读 API → 恒 None（阶段机各段会如实中止并引到终端）
+                let _ = (sid, pid);
+                None
+            }
+        }),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，
@@ -522,6 +580,14 @@ fn stop_server_core(
     if let Some(h) = handle {
         h.abort();
     }
+    // 裁决 19 冻结队列：停服 = 不再**发起新**投递（投递循环随服务同停），pending 冻结
+    // 在账、重开续跑。abort 只取消循环 future——在途投递（spawn_blocking 阻塞段）不受
+    // 影响，detached 跑完并正常落账（账面自洽）；投递守卫在阻塞闭包内（queue.rs
+    // Critical 1 修订）随投递全程占位 → 热重启后的新循环/对账经 INFLIGHT 互斥让位，
+    // 停服→热重启无双投。启动对账（P2-5）真正兜底的窗口 = 进程崩溃/强杀的「注入成功
+    // 后、落账前」+ stop→start 间隙丢失的跃迁事件。abort_flush_loop 自取
+    // FLUSH_LOOP_HANDLE 自己的锁，与 SERVER_HANDLE 不嵌套（两把锁不嵌套纪律保持）
+    crate::inject::queue::abort_flush_loop();
     // M4 T0a：停止 = 已建立 SSE 连接即时断开。热重启路径同样断——监听没了连接必死，
     // 显式断开让注册表即刻一致，不依赖任务 abort 的 Drop 时序
     disconnect_all();
@@ -880,35 +946,51 @@ fn host_info() -> serde_json::Value {
 // 审批/直通命令已随密码制下线）
 // ============================================================
 
-/// 设备花名册（在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名）。
-/// M5 A8：载荷带出 via（配对时刻接入通道，A1 落库列）——桌面花名册 via 徽标数据源
-#[tauri::command]
-pub fn remote_devices() -> serde_json::Value {
-    let now = chrono::Utc::now().timestamp_millis();
-    let rows: Vec<(String, String, String, i64, i64, i64)> = STATE.store.with(|c| {
-        c.prepare("SELECT id, name, via, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
-            // Rows 借用局部 Statement——必须在闭包内收集为 owned 值（E0515）
-            .and_then(|mut s| {
-                let rows: Vec<(String, String, String, i64, i64, i64)> = s
-                    .query_map([], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-                    })?
-                    .filter_map(Result::ok)
-                    .collect();
-                Ok(rows)
-            })
-            .unwrap_or_default()
-    });
-    serde_json::json!(rows
-        .iter()
+/// 设备花名册装配内核（可测核心，连接与 SSE 注册表判定注入）：DB 有效行（revoked=0，
+/// 按 first_paired_at 序）→ 前端载荷。**与远程开关态无关**——关闭远程只停对外服务，
+/// 花名册（吊销/重命名管理入口）不随停服清空（Mac 报告七-6「关闭期间面板 0/10 而
+/// DB 9 行」的根因在前端关闭态清表，后端口径本就恒为 DB）；online = is_online
+///（SSE 注册 ∨ 30s 过闸），关闭态注册表空、无人过闸 → 全行离线即真实状态
+fn roster_payload(
+    conn: &rusqlite::Connection,
+    registry_has: impl Fn(&str) -> bool,
+    now: i64,
+) -> Vec<serde_json::Value> {
+    let rows: Vec<(String, String, String, i64, i64, i64)> = conn
+        .prepare("SELECT id, name, via, first_paired_at, last_seen_at, revoked FROM remote_devices ORDER BY first_paired_at")
+        // Rows 借用局部 Statement——必须在闭包内收集为 owned 值（E0515）
+        .and_then(|mut s| {
+            let rows: Vec<(String, String, String, i64, i64, i64)> = s
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?
+                .filter_map(Result::ok)
+                .collect();
+            Ok(rows)
+        })
+        .unwrap_or_default();
+    rows.iter()
         .filter(|(_, _, _, _, _, revoked)| *revoked == 0)
         .map(|(id, name, via, paired, seen, _)| {
             serde_json::json!({
                 "id": id, "name": name, "via": via, "firstPairedAt": paired,
-                "lastSeenAt": seen, "online": is_online(STATE.sse_registry.has(id), *seen, now),
+                "lastSeenAt": seen, "online": is_online(registry_has(id), *seen, now),
             })
         })
-        .collect::<Vec<_>>())
+        .collect()
+}
+
+/// 设备花名册（桌面面板数据源与操作入口；M5 A3 起配对仅 /pair/pin，
+/// 审批/直通命令已随密码制下线）。装配走 roster_payload 内核——与远程开关态
+/// 无关，关闭远程时面板仍列出已配对设备（Mac 报告七-6 定案）。
+/// 在线口径 = SSE 注册表 ∨ 30s 过闸；name 直出——配对落库即带设备名。
+/// M5 A8：载荷带出 via（配对时刻接入通道，A1 落库列）——桌面花名册 via 徽标数据源
+#[tauri::command]
+pub fn remote_devices() -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    serde_json::json!(STATE
+        .store
+        .with(|c| roster_payload(c, |id| STATE.sse_registry.has(id), now)))
 }
 
 /// 单设备吊销：DB 置位 + SSE 即时断连（Task 1 注册表接线）+ 审计。
@@ -1889,12 +1971,20 @@ mod tests {
                 vec!["mam.example.com".to_string()]
             ))
         );
+        // 豁免并集 = 双通道域名链式聚合 + 本机命名附加主机（named_extra_hosts 读真实
+        // settings，测试进程无法零接触隔离——按机器相关项做相对断言，通道聚合语义不变）
+        let mut expected_union = vec![
+            "q-test.trycloudflare.com".to_string(),
+            "mam.example.com".to_string(),
+        ];
+        let extras: Vec<String> = named_extra_hosts()
+            .into_iter()
+            .filter(|h| !expected_union.contains(&h.to_string()))
+            .collect();
+        expected_union.extend(extras);
         assert_eq!(
-            tunnel_hosts_from_status(&tunnel::snapshot(), &[]),
-            Some(vec![
-                "q-test.trycloudflare.com".to_string(),
-                "mam.example.com".to_string()
-            ]),
+            tunnel_hosts_from_snapshot(),
+            Some(expected_union),
             "豁免并集 = 双通道域名链式聚合"
         );
         // 错误通道不宣称 + **哨兵同源**：任一通道错误 → via 判定与豁免一起收 None
@@ -2106,6 +2196,9 @@ mod tests {
     /// drop 可观测终结——tx 随被取消的任务 drop，rx 端 Disconnected）
     #[test]
     fn stop_server_core_explicit_close_revokes_and_teardowns_in_order() {
+        // Important 4：本测真实调 abort_flush_loop 清全局 FLUSH_LOOP_HANDLE 槽——与
+        // queue.rs 的 stop_freezes_flush_loop 共用测试串行锁，杜绝并行清槽/验槽假红
+        let _serial = crate::inject::queue::LOOP_HANDLE_TEST_LOCK.lock().unwrap();
         let arc = std::sync::Arc::new(std::sync::Mutex::new(memory_conn()));
         let store = pairing::DeviceStore::Owned(arc.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -2162,6 +2255,8 @@ mod tests {
     /// 形态见 server.rs 的 gate 级回归
     #[test]
     fn stop_server_core_hot_restart_keeps_devices_valid() {
+        // Important 4：同上——真实调 abort_flush_loop 的内核测试持测试串行锁
+        let _serial = crate::inject::queue::LOOP_HANDLE_TEST_LOCK.lock().unwrap();
         let arc = std::sync::Arc::new(std::sync::Mutex::new(memory_conn()));
         let store = pairing::DeviceStore::Owned(arc.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -2366,6 +2461,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, "甲".repeat(40), "DAO 40 字截断贯穿命令内核");
+    }
+
+    /// 花名册与远程开关态解耦（Mac 报告七-6 定案锁）：关闭远程（SSE 注册表空、
+    /// 无人过闸）时花名册仍返回全部 DB 有效行——吊销/重命名管理是 DB 语义，
+    /// 不随停服清空；online 全 false 即真实状态（非隐藏）。revoked 行恒被过滤
+    #[test]
+    fn roster_payload_lists_paired_devices_even_when_remote_disabled() {
+        let conn = memory_conn();
+        let now = 1_000_000_000_000i64;
+        pairing::persist_device(&conn, &synth_device("d1", now - 60_000)).unwrap();
+        pairing::persist_device(&conn, &synth_device("d2", now - 3_600_000)).unwrap();
+        // 已吊销历史行：无论开关态都不上板
+        pairing::persist_device(&conn, &synth_device("dead", now - 120_000)).unwrap();
+        pairing::revoke_device(&conn, "dead").unwrap();
+        // 关闭态（注册表空）：花名册仍完整列出 DB 有效行（first_paired_at 升序——
+        // d2 配对更早排前）
+        let roster = roster_payload(&conn, |_| false, now);
+        let ids: Vec<&str> = roster.iter().filter_map(|r| r["id"].as_str()).collect();
+        assert_eq!(ids, vec!["d2", "d1"], "关闭态花名册仍返回 DB 有效行");
+        // 关闭态注册表空 + last_seen 超 30s 过闸窗 → 全行离线（真实状态，非隐藏）
+        assert!(
+            roster.iter().all(|r| r["online"].as_bool() == Some(false)),
+            "关闭态 online 应全 false: {roster:?}"
+        );
+        // 对照：在线口径仍活跃——注册表命中的行照常翻真（口径 = SSE ∨ 过闸，
+        // 不因「关闭态」这个展示场景被篡改）
+        let roster_hit = roster_payload(&conn, |id| id == "d2", now);
+        let d2 = roster_hit.iter().find(|r| r["id"] == "d2").unwrap();
+        assert_eq!(d2["online"].as_bool(), Some(true), "注册表命中 → online");
     }
 
     // ==== M5 A5：三通道独立开关（迁移映射 / bind 派生 / toggle 内核 / 恢复 / PIN / 载荷） ====

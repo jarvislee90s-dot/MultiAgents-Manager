@@ -73,13 +73,15 @@ export async function fetchHost<T = HostPayload>(): Promise<T | null> {
 
 /** 统一消息条目 — 与 Rust `remote::content::SessionMessage`（camelCase 序列化）逐字段
  *  对应，勿漂移：seq / role / content / kind / ts / toolName? / toolArgs? / collapsed。
- *  kind ∈ user / assistant / thinking / tool-call / tool-result；
- *  thinking 与 tool-call 的 collapsed 恒 true（wire 语义，运行中态的默认折叠依据） */
+ *  kind ∈ user / assistant / thinking / tool-call / tool-result / plan；
+ *  thinking 与 tool-call 的 collapsed 恒 true（wire 语义，运行中态的默认折叠依据）；
+ *  plan 是 T1 升格的一等计划消息（content = 计划 markdown 原文，collapsed 恒 false，
+ *  toolName 保留供辨识、toolArgs 恒空——不透传参数串） */
 export interface SessionMessage {
   seq: number;
   role: string;
   content: string;
-  kind: "user" | "assistant" | "thinking" | "tool-call" | "tool-result" | string;
+  kind: "user" | "assistant" | "thinking" | "tool-call" | "tool-result" | "plan" | string;
   ts: number | null;
   toolName?: string | null;
   toolArgs?: string | null;
@@ -96,7 +98,8 @@ export interface SessionMessagesPage {
 
 /** 拉取单会话消息流尾部（八工具统一出口）。读取失败（会话不存在 / 存储不可读）
  *  以 ApiError 抛出：404 = 会话内容不可读；网络异常 status=null。
- *  不自动轮询（M3 范围裁决：SSE transition 不驱动详情页，下拉手动刷新） */
+ *  本层无状态：SSE transition 不驱动详情页（M3 范围裁决不变），10s 轮询节奏由
+ *  SessionDetail 页面层驱动（F6），此处只负责单次拉取 */
 export async function fetchSessionMessages(
   agentType: string,
   sessionId: string,
@@ -306,4 +309,688 @@ export function connectEvents(
     es = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
   };
+}
+
+// ==== M7 Task 7：注入发送（W4 移动端发送 UI）====
+
+/** 输入区可用性矩阵（GET /session-send-info 载荷，与 Rust `session_send_info`
+ *  的 JSON 逐字段对应，勿漂移）：injectable=false 时 reasonCode/reason 携带不可
+ *  注入原因（如 WorkBuddy 黑盒），**channels/visibility 不返回**（后端
+ *  RouteOutcome::NotInjectable 分支只给 {injectable,reasonCode,reason}）→ 前端
+ *  类型须 optional（M9R P2-10 对齐）；injectable=true 时 channels 为候选注入
+ *  通道（tmux/iterm2/…），visibility=after_refresh 表示注入后需刷新才见回显 */
+export interface SendInfo {
+  injectable: boolean;
+  reasonCode?: string;
+  reason?: string;
+  channels?: string[];
+  visibility?: "realtime" | "after_refresh";
+}
+
+/** 拉取输入区可用性（W4：输入区挂载时一次）。403（设备失效，与 fetchSessions
+ *  同语义）→ null；其余失败（404 会话不在快照 / 网络异常）→ 抛 ApiError，
+ *  由调用方静默降级（不渲染输入区，详情页正文照常） */
+export async function fetchSendInfo(sessionId: string): Promise<SendInfo | null> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-send-info?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-send-info 网络异常: ${String(e)}`);
+  }
+  if (r.status === 403) return null; // 设备失效 → 回配对页
+  if (!r.ok) throw new ApiError(r.status, `session-send-info ${r.status}`);
+  return (await r.json()) as SendInfo;
+}
+
+/** 发送回执（POST /session-send 响应四态，HTTP 200 恒定，语义在 body.status）：
+ *  delivered=已直送终端；submitted=已投递未确认（D7/T3 确认判据收紧，验收问题 #5：
+ *  注入 Ok + 戳未中 + 屏读无滞留草稿 = 消息已被 TUI 收进内部队列，agent 空闲后
+ *  处理——中性态，非失败、**不提供重试**，重试 = 双发且 TUI 那份无法撤回）；
+ *  queued=运行中留队（itemId+position 供插队/撤回/排队指示）；failed=注入失败回执
+ *  （error 文案可直接展示；失败行已退出 pending，队列无残留，重按发送即重试） */
+export type SendResult =
+  | { status: "delivered" }
+  | { status: "submitted" }
+  | { status: "queued"; itemId: number; position: number }
+  | { status: "failed"; error: string };
+
+/** 发送消息（W4 直发/入队分派，后端按输入态路由；多行原样上行，归一在服务端
+ *  入队时一次完成）。非 2xx（400 参数非法 / 404 会话消失 / 403 不可注入）→
+ *  抛 ApiError。
+ *  queueOnly（D6 修改重发，可选）：true = 只入队（后端跳过直发尝试，即使快照显示
+ *  可输入也强制入队，防变相插队）；入队后 flush 循环对其与普通队列项同权（转闲
+ *  按序自动放行）。**缺省不带该键**——保持既有请求体形态不变（普通发送路径零漂移） */
+export async function sessionSend(
+  sessionId: string,
+  text: string,
+  queueOnly?: boolean
+): Promise<SendResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, text, ...(queueOnly ? { queueOnly: true } : {}) }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-send 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 403 not_injectable{reason,reasonCode}（如挂载后会话漂移为 APP/黑盒形态）——
+    // 后端已备好中文 reason，解析进 data 供调用方展示（对齐 fetchFile 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 交验失败保持 null */
+    }
+    throw new ApiError(r.status, `session-send ${r.status}`, data);
+  }
+  return (await r.json()) as SendResult;
+}
+
+/** 上传附件（2026-09-20）：原始字节 POST 到 /session-attachment——服务端落盘到
+ *  **用户项目目录** .mam-attachments/<会话>/，返回绝对路径供消息内联标记
+ *  （<image|file path>，文件池既有约定）引用。
+ *  错误契约：403 → null（设备失效，与 fetchSendInfo 同口径）；404 →
+ *  ApiError(404, "no_session"|"no_cwd")（composer 据后者禁用上传钮）；
+ *  413 → ApiError(413, "too_large")；其余非 2xx → ApiError(status) */
+export async function uploadAttachment(
+  sessionId: string,
+  file: File,
+  signal?: AbortSignal
+): Promise<{ path: string; size: number } | null> {
+  const q = new URLSearchParams({ session_id: sessionId, name: file.name });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-attachment?${q}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: await file.arrayBuffer(),
+      signal,
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-attachment 网络异常: ${String(e)}`);
+  }
+  if (r.status === 403) return null; // 设备失效 → 回配对页（fetchSendInfo 同口径）
+  if (!r.ok) {
+    let reason = `session-attachment ${r.status}`;
+    try {
+      const j = (await r.json()) as { error?: unknown };
+      if (typeof j?.error === "string") reason = j.error;
+    } catch {
+      /* 响应体非 JSON：保留默认 reason */
+    }
+    throw new ApiError(r.status, reason);
+  }
+  return (await r.json()) as { path: string; size: number };
+}
+
+/** 排队条目视图（GET /session-queue 的 items 元素，camelCase 契约）：position =
+ *  1 起队位；content 为入队时 compose 完成的最终注入文本（含设备名前缀） */
+export interface QueueItemView {
+  id: number;
+  content: string;
+  enqueuedAt: number;
+  position: number;
+}
+
+/** 拉取该会话待发队列（FIFO，W4 排队指示/轮询刷新的数据源）。非 2xx → 抛 ApiError */
+export async function fetchQueue(sessionId: string): Promise<QueueItemView[]> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-queue?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-queue 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-queue ${r.status}`);
+  const j = (await r.json()) as { items?: QueueItemView[] };
+  return Array.isArray(j.items) ? j.items : [];
+}
+
+/** 插队直发（裁决 12）：按 itemId 点名该会话 pending 中的一条即刻注入。
+ *  回执五态精确映射（F7④ + D7/T3 与后端契约对齐）：Sent → delivered；Failed(e) →
+ *  failed{error}（注入失败行已退出 pending，可重发）；submitted → submitted
+ *  （防御性契约对齐：Submitted 仅直发分诊产出，插队以占用排空定论、后端本臂实际
+ *  不可达——前端按非 delivered 走对账收敛即可）；Deferred | Suspended →
+ *  queued{itemId,position}（行保持 pending，语义即排队）；守卫忙（该会话
+ *  in-flight 投递占用）→ queued{itemId,position}（F1 新语义：旧忙时回 failed
+ *  逼客户端重试，现改 queued 让位给进行中的投递）。非 2xx（404 not_found
+ *  条目已不在队）→ 抛 ApiError */
+export type QueueJumpResult =
+  | { status: "delivered" }
+  | { status: "submitted" }
+  | { status: "queued"; itemId: number; position: number }
+  | { status: "failed"; error: string };
+
+export async function queueJump(sessionId: string, itemId: number): Promise<QueueJumpResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-queue/jump", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, itemId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-queue/jump 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-queue/jump ${r.status}`);
+  return (await r.json()) as QueueJumpResult;
+}
+
+/** 撤回排队条目（W4）：200 {ok:true} 撤回成功；P2-6 忙时（该会话投递进行中）
+ *  → 200 {status:"failed",error:后端中文文案}（条目**未被撤**、仍在队——前端不
+ *  消费该文案，以 fetchQueue 复核结果为准）；条目已不在队（已送达 / 他端撤回）
+ *  → 404 not_found → 抛 ApiError（调用方按「已不在队列」收敛，不作失败提示） */
+export async function queueRetract(
+  sessionId: string,
+  itemId: number
+): Promise<{ ok: true } | { status: "failed"; error: string }> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-queue/retract", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, itemId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-queue/retract 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-queue/retract ${r.status}`);
+  return (await r.json()) as { ok: true } | { status: "failed"; error: string };
+}
+
+// ==== M8 Task 12：审批选项卡（红卡一键应答，W6）====
+
+/** 审批选项视图（GET /session-approve-options 载荷，与 Rust `session_approve_options`
+ *  的 JSON 逐字段对应，勿漂移）：available=false（会话非 Waiting / 工具无映射 /
+ *  提示未命中）时 options 恒空——移动端据此不渲染审批卡；options 只含 id+label，
+ *  **键位不外泄给 UI**（投递层机密）；verifiedWith = 映射实测版本，currentVersion =
+ *  CLI 探测版本（探测失败为 null），drift=true 时红卡提示降级路径（普通发送）；
+ *  reason = 严格档降级原因（Task 10 下发，如「键位待实测确认，请用普通发送」）：
+ *  available=false 且 reason 存在 → 卡片只渲染提示条不渲染按键（M9R 消费）；
+ *  旧分支（非 Waiting / 无映射 / 未命中）不给该键 → optional */
+export interface ApproveOptionsView {
+  available: boolean;
+  options: { id: string; label: string }[];
+  verifiedWith: string;
+  currentVersion: string | null;
+  drift: boolean;
+  reason?: string;
+  /** 批次丙 T8：审批点 plan 聚合——计划确认类审批卡主体带计划全文（claude/codex
+   *  的 kind="plan" 消息）或计划文件路径（kimi 的 kind="plan-file"，isFile=true
+   *  → 前端走文件预览读全文）。null/缺省 = 无计划在场（只渲染选项） */
+  plan?: { content: string; isFile: boolean } | null;
+  /** 批次丙 R1-3：**降级警示**——命中审批但未读到终端对话框选项（终端可能正显示
+   *  多选项，二元键可能错位）。前端在二元卡渲染脚注。null/缺省 = 未降级 */
+  degradedHint?: string | null;
+  /** 批次丙 T5：选项来自**对话框屏读**——id 形如 `dialog:<n>`，label 是屏上原文
+   *  （如 "1. Yes, and use auto mode"）；前端据此渲染编号按钮组（点按注入数字键 n）。
+   *  缺省/ false → 映射表二元项（既有渲染，前向兼容旧后端） */
+  dialog?: boolean;
+  /** 丁T2：**计划待确认预期态**（消息尾部派生，无新存储）——codex/kimi 的计划确认框
+   *  不落状态/标记，这是它唯一的可见信号。true 且 `dialog=false` 时前端渲染
+   *  「计划待确认」条 +「检查终端对话框」按钮（点它重拉本端点；后端屏读命中即出
+   *  N 选项）；此形态下 options 恒空**不是错误**，是「还没读到选项，点检查重试」。
+   *  缺省/false → 既有渲染（前向兼容旧后端） */
+  planPending?: boolean;
+}
+
+/** 拉取审批选项卡数据源（红卡挂载时一次）。非 2xx → 抛 ApiError（调用方静默
+ *  降级不渲染，与 fetchSendInfo 失败静默同惯例） */
+export async function fetchApproveOptions(sessionId: string): Promise<ApproveOptionsView> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-approve-options?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-approve-options 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-approve-options ${r.status}`);
+  return (await r.json()) as ApproveOptionsView;
+}
+
+/** 审批应答回执（POST /session-approve 响应，HTTP 200 恒定，语义在 body.status）：
+ *  key_sent=按键已投递终端；failed=投递失败 / in-flight 忙让位（error 为后端中文
+ *  文案，如「该会话投递进行中，请稍后重试」，可重试） */
+export type ApproveResult = { status: "key_sent" } | { status: "failed"; error: string };
+
+/** 审批一键应答（M8 红卡）。200 {status:"key_sent"} | 200 {status:"failed",error}；
+ *  409 {error:"not_waiting"} | 404 {error:"no_mapping"|"no_session"} → 非 2xx 抛
+ *  ApiError（错误码解析进 data.error，调用方分診中文文案——not_waiting 已不在
+ *  等待、no_mapping 降级走普通发送） */
+export async function sessionApprove(sessionId: string, optionId: string): Promise<ApproveResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-approve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, optionId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-approve 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 409/404 错误码在响应体 data.error——解析进 data 供调用方分診（对齐 sessionSend 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理注入页等）：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-approve ${r.status}`, data);
+  }
+  return (await r.json()) as ApproveResult;
+}
+
+// ==== 批次乙 T8：问答卡（AskUserQuestion，claude 先行）====
+
+/** 问答选项视图（questions[].options[] 条目）：label + description——**编号是渲染层
+ *  按 index 生成**，键位/数字不在此列（投递层细节不外泄 UI，approve 同纪律）；
+ *  description 恒在（后端 json! 无条件输出，缺省解析为空串）→ 必填 string */
+export interface QuestionOptionView {
+  label: string;
+  description: string;
+}
+
+/** 问答题目视图（GET /session-question 载荷 questions[] 条目，与 Rust
+ *  `session_question` 的 JSON 逐字段对应，勿漂移）：multiSelect=false → 单选，
+ *  点选项=直接提交；true → 多选，点选=勾选切换 + 「提交」钮。questions.length>1
+ *  → 前端按只读卡渲染（多问题翻页键序未测，不做注入） */
+export interface QuestionView {
+  header?: string;
+  question: string;
+  multiSelect: boolean;
+  options: QuestionOptionView[];
+}
+
+/** 问答可用性视图（GET /session-question 载荷）：available=false（双通道均未命中 /
+ *  审批标记隔离 / 会话不在快照）→ questions 恒空——移动端据此不渲染问答卡；
+ *  answerable=false（T3：该工具的问答键序未实测，如 codex）→ 渲染**只读卡** +
+ *  引导终端作答，不显示可点选项（「未验不出键」）；source = 识别通道诊断
+ *  （"mark"=hook 标记〔通道 A〕/"scan"=会话消息兜底〔通道 B〕） */
+export interface QuestionInfoView {
+  available: boolean;
+  /** 可选：旧后端不带该字段时按 true 处理（前向兼容——只有明确 false 才降只读） */
+  answerable?: boolean;
+  /** 丁T5 §2.4：卡内自由作答输入框是否可用（**独立于 `answerable`**——
+   *  codex/opencode 的**点选**已实测可作答，但**自由作答序列未定案**）。
+   *  缺省/旧后端 → 按 false 处理：渲染「请在终端作答」引导文案，**不假装能发**。 */
+  freeText?: boolean;
+  /** 批次戊 E4-E6：多题交互能力（kimi/codex/opencode 已实机定案）——true 时多题卡
+   *  渲染逐题作答 UI；缺省/旧后端/false → 只读卡（红线不变） */
+  multiQuestion?: boolean;
+  /** 切换题目能力（2026-09-23 错位修复）：多题卡多选题的显式切页动作——仅 opencode
+   *  （tab=前向切页，实测定案）。缺省/旧后端 → 按 false：多选题不渲染「切换题目」钮，
+   *  改渲染「请到终端切题」引导（不假装能发）。 */
+  advance?: boolean;
+  questions: QuestionView[];
+  source?: "mark" | "scan" | null;
+}
+
+/** 拉取问答卡数据源（卡片挂载时一次）。非 2xx → 抛 ApiError（调用方静默降级
+ *  不渲染，fetchApproveOptions 失败静默同惯例） */
+export async function fetchSessionQuestion(sessionId: string): Promise<QuestionInfoView> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-question?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-question 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-question ${r.status}`);
+  return (await r.json()) as QuestionInfoView;
+}
+
+/** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换；
+ *  submit=多选提交（**阶段机闭环**：屏读确认每段后才推进）；
+ *  cancel=取消问题（Esc）；freeText=自由作答（**仅 claude**，阶段机闭环：
+ *  定位 `Type something` 行 → 文本 → 回车）；
+ *  advance=多题切换题目（**仅 opencode**，tab 前向切页——纯导航，不触碰勾选态）。 */
+export type QuestionAnswerAction =
+  "select" | "toggle" | "submit" | "cancel" | "freeText" | "advance";
+
+/** 阶段机动作的**段名**（回执 `stage` 字段的取值；与后端
+ *  `remote::api::QUESTION_STAGE_*` 常量逐字对应，勿漂移）。
+ *  提交链推进序：`submit-row`→`review`→`confirm`→`receipt`；
+ *  自由作答：`free-row`→`free-text`。 */
+export type QuestionAnswerStage =
+  "submit-row" | "review" | "confirm" | "receipt" | "free-row" | "free-text";
+
+/** 问答应答回执（POST /session-question/answer 响应，HTTP 200 恒定，语义在 body.status）。
+ *
+ *  **丁T5 起 status 仍是既有两词**（`key_sent` / `failed`），新增字段全部是**附加**
+ *  ——故旧前端（只读 status）行为不变：
+ *  - `key_sent`：按键已投递。**单键动作**（select/toggle/cancel）到此为止；
+ *    **阶段机动作**（submit/freeText）走完整条闭环时带 `done:true` + `stage`（走完的
+ *    段）+ `verified`（终态回执三态：true=屏读到终态锚；false=读到屏但未见锚；
+ *    null/缺省=读屏不可用。**false 与 null 都不是「失败」，是「未确认」**）；
+ *  - `failed`：投递失败 / in-flight 忙让位 / **阶段机中止**。`aborted:true` + `stage`
+ *    标记后者（`error` 是带段名的中文文案，用户可读）。 */
+export type QuestionAnswerResult =
+  | { status: "key_sent"; done?: boolean; stage?: QuestionAnswerStage; verified?: boolean | null }
+  | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
+
+/** 问答应答**错误码 → 用户可读中文文案**（丁T6 复评抽出：卡内与 composer 两条入口
+ *  必须**同口径**——两处各写一套 `if/else` 迟早漂移，且 composer 侧曾漏掉这条映射
+ *  （读的是 `data.reason` 而问答端点回的是 `data.error`）→ 409 会显示成
+ *  「session-question/answer 409」这种对用户无意义的串）。
+ *
+ *  取值来源：后端 `remote::api::session_question_answer` 的 409/400 错误码
+ *  （`no_question` / `multi_questions` / `tool_readonly` / `bad_index`；
+ *  另有 `bad_request` 兜底）。码不在表内 → 回原 message（不编文案）。 */
+export function questionAnswerErrorCopy(e: ApiError): string {
+  const code = typeof e.data?.error === "string" ? e.data.error : null;
+  if (code === "no_question") return "当前没有待回答的问题";
+  if (code === "multi_questions") return "多个问题请回到终端完成作答";
+  if (code === "tool_readonly") return "该工具的远程作答尚未实测，请在终端完成作答";
+  if (code === "bad_index") return "选项序号无效，请刷新后重试";
+  return e.message;
+}
+
+/** 问答一键应答（T8；丁T5 起支持 freeText）。index = 选项序号（0 起；select/toggle
+ *  必填）；text = 自由作答正文（freeText 必填；后端归一后走**字符通道**注入，
+ *  不带 `[mobile]` 签名）。
+ *  409 {error:"no_question"|"multi_questions"|"tool_readonly"} |
+ *  400 {error:"bad_request"|"bad_index"}
+ *  → 非 2xx 抛 ApiError（错误码解析进 data.error，调用方分診中文文案——
+ *  用 [`questionAnswerErrorCopy`]，勿另写一套） */
+export async function sessionQuestionAnswer(
+  sessionId: string,
+  action: QuestionAnswerAction,
+  index?: number,
+  text?: string,
+  /** 批次戊 E4-E6 多题交互：select/toggle 作用在第几题（0 起） */
+  questionIndex?: number
+): Promise<QuestionAnswerResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-question/answer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action, index, text, questionIndex }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-question/answer 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 409/400 错误码在响应体 data.error——解析进 data 供调用方分診（sessionApprove 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-question/answer ${r.status}`, data);
+  }
+  return (await r.json()) as QuestionAnswerResult;
+}
+
+// ==== 批次丙 T6：模式切换 ====
+
+/** 统一模式档（与 Rust `inject::mode::MamMode` 的 wire 词一一对应，勿漂移）。
+ *  对齐 happy 的 8 值收敛为 MAM 5 值（auto/safe-yolo/yolo 合并为 bypass）。 */
+export type MamMode = "plan" | "default" | "acceptEdits" | "bypass" | "readOnly";
+
+// 注（T4 复评 M4）：批次丙 T6 的 `MAM_MODE_LABELS` 通用档名表已删除——丁T4 起
+// 按钮标签一律用**后端下发的屏显标签**（`groups[].tiers[].label`，§2.6：标签必须
+// 是工具自己的词，如 kimi 权限组的「总是询问/按需询问/永不询问」），通用档名只剩
+// 回执文案里的兜底（`MamMode::label`，后端侧）。前端再留一份 = 第二份真源 + 死代码。
+
+/** 模式栏的**组**（丁T4 §2.6：二维工具的「模式组/权限组」与单轴工具的「模式」轴） */
+export type ModeGroupId = "mode" | "permission";
+
+/** 单档（GET 载荷 `groups[].tiers[]`）：屏显标签来自**工具自己的词表**（§2.6
+ *  「档位（屏显标签）」列）——kimi 权限组是「总是询问/按需询问/永不询问」，不是 MAM
+ *  通用名（用户看到的是终端上的词，对不上号等于没回显）。
+ *  `selectable=false` → 不渲染为可点按钮（`reason` 是后端给出的如实原因）。 */
+export interface ModeTierView {
+  mode: MamMode;
+  label: string;
+  selectable: boolean;
+  reason?: string | null;
+}
+
+/** 已退役旧档（裁7）：**不可选**，只作如实展示（codex 的 untrusted / on-failure） */
+export interface ModeLegacyView {
+  label: string;
+  note: string;
+}
+
+/** 单组（GET 载荷 `groups[]`）。`step=true` = 步进轴（shift+tab 一次一档，档位顺序即
+ *  实测环序）；`readback=false` = 该组无屏读源（前端必须显示「请人工核对」）。
+ *  `current=null` = 档未知（屏读失败或该组无回读源）→ **不得假装知道**（红线 4）。
+ *  `layout`（2026-09-23 codex 模式切换改造）：`"toggle"` = 单钮循环（点击向终端发一次
+ *  循环键——codex 模式组「计划 ⇄ 操作」= shift+tab，目标档由前端按当前档翻转）；
+ *  缺省/`"tiers"` = 逐档按钮；`"picker"` = **单选面板**（codex 权限组，2026-09-23 用户
+ *  方案）：单钮「切换权限」→ 后端读回**终端菜单的选项表**（编号 = 屏上实读值）→ 用户
+ *  点选哪项，MAM 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。 */
+export interface ModeGroupView {
+  id: ModeGroupId;
+  label: string;
+  step: boolean;
+  readback: boolean;
+  layout?: "tiers" | "toggle" | "picker";
+  current: MamMode | null;
+  currentLabel: string | null;
+  tiers: ModeTierView[];
+  legacy?: ModeLegacyView[];
+}
+
+/** 模式视图（GET /session-mode 载荷）。current=null 表示**档未知**（屏读失败或该
+ *  工具不支持回显）→ 前端必须显示「未知」并要求人工核对（红线 4：不假装成功）。
+ *  switchKind：unsupported → 不显示切换按钮（该工具无实测机制）。
+ *
+ *  丁T4 增量（**全部可选**，与旧后端前向兼容）：`structure`/`groups` 缺失时前端回落
+ *  到「单轴渲染 + 顶层 current」。 */
+export interface SessionModeView {
+  tool: string;
+  current: MamMode | null;
+  currentLabel: string | null;
+  readback: boolean;
+  switchKind: "shiftTab" | "slashCommand" | "unsupported";
+  /** E3④：终端问答待决（消息尾部形态）——切档注入含回车会被问答框误消费
+   *  （codex 交默认答案 / kimi 误选推进待决态）→ 前端置灰按钮 + 原因文案。
+   *  旧后端无此字段（undefined = 未知，不置灰——与「无法判定放行」同一取向）。 */
+  questionPending?: boolean;
+  /** "twoAxis" | "singleAxis" | "none"（旧后端无此字段） */
+  structure?: "twoAxis" | "singleAxis" | "none";
+  groups?: ModeGroupView[];
+}
+
+/** 切档回执（POST /session-mode/switch）。verified=false 时 hint 给出人工核对提示
+ *  ——切换已投递但无法自动验证（屏读缺失），前端据此渲染提示而非「已切到 X 档」。
+ *  丁T3：`dialogChecked` = 本次是否真的做过对话框在场检测（false = 平台无屏读或
+ *  屏读失败；此时守卫按「无法判定」放行，前端不得声称已检查）。
+ *  丁T4：`current`/`currentLabel` = 投递后回读到的档（命中时前端可直接用它刷新）。 */
+export type SessionModeSwitchResult =
+  | {
+      status: "key_sent";
+      verified: boolean;
+      hint?: string | null;
+      dialogChecked?: boolean;
+      current?: MamMode | null;
+      currentLabel?: string | null;
+    }
+  | { status: "failed"; error: string; dialogChecked?: boolean };
+
+/** 拉取当前模式（卡头显示用）。非 2xx → 抛 ApiError（调用方静默降级不显示） */
+export async function fetchSessionMode(sessionId: string): Promise<SessionModeView> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-mode?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-mode 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-mode ${r.status}`);
+  return (await r.json()) as SessionModeView;
+}
+
+/** 切档（T6；丁T4 加 `group`）。404 no_session | 409 no_mechanism |
+ *  **409 blocked_by_dialog**（丁T3 §2.7 对话框在场红线：控制类注入被拒，data.reason
+ *  为中文文案）→ 非 2xx 抛 ApiError。
+ *
+ *  `group` 是**可选**参数（丁T4）：不传 = 由后端按 target 归组（旧客户端的调用面，
+ *  语义见 Rust `inject::mode::resolve_group`）；二维工具（codex/kimi）的新前端传它。 */
+export async function sessionModeSwitch(
+  sessionId: string,
+  target: MamMode,
+  group?: ModeGroupId
+): Promise<SessionModeSwitchResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-mode/switch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // group 缺省时**不发字段**（旧后端不认识它，发了也只是被 serde 忽略——
+      // 但省掉字段可让请求体与旧版本逐字一致，便于抓包比对）
+      body: JSON.stringify(
+        group === undefined ? { sessionId, target } : { sessionId, target, group }
+      ),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-mode/switch 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体 */
+    }
+    throw new ApiError(r.status, `session-mode/switch ${r.status}`, data);
+  }
+  return (await r.json()) as SessionModeSwitchResult;
+}
+
+// ==== 2026-09-23：codex 权限组的「终端菜单单选题」（用户方案）====
+
+/** 终端菜单里的一项。`number` = **屏上实读的编号**（用户点它 → MAM 敲同一个数字键）；
+ *  `label` = 屏上原文（原样展示，供用户与终端核对）；`highlighted` = 终端当前高亮项。 */
+export interface ModeMenuOption {
+  number: number;
+  label: string;
+  highlighted: boolean;
+}
+
+/** 终端菜单面板的载荷（POST /session-mode/menu 的 `open`/`pick`，
+ *  与 GET /session-mode/menu 的重读同形）。
+ *
+ *  - `menu`：菜单开着，`options` = 档位表（用户点选）；
+ *  - `confirm`：Full Access 的**二阶段风险确认框**在屏，`options` = 确认框选项
+ *    （空数组 + `hint` = 确认框在屏但选项未读到，提示重读）；
+ *  - `done`：已投递且无确认框。`verified` = 屏上是否读到成功回执行；
+ *    `hint` 原样带出后端文案（含回执行原文）——**不假装成功**（目标档未知：
+ *    用户点的是屏上编号，后端不知道对应哪个 wire 档，故只报「有没有回执」）；
+ *  - `none`：屏上无菜单/确认框（仅 GET 重读会给）；
+ *  - `failed`：如实失败文案。 */
+export type ModeMenuResult =
+  | { status: "menu"; options: ModeMenuOption[]; dialogChecked?: boolean }
+  | {
+      status: "confirm";
+      options: ModeMenuOption[];
+      hint?: string | null;
+      dialogChecked?: boolean;
+    }
+  | {
+      status: "done";
+      verified: boolean;
+      hint?: string | null;
+      dialogChecked?: boolean;
+    }
+  | { status: "none"; options: ModeMenuOption[] }
+  | { status: "failed"; error: string };
+
+/** 面板错误体（非 2xx）→ 解析进 ApiError.data（错误码分诊：no_session / no_mechanism
+ *  / blocked_by_dialog），与 `sessionModeSwitch` 同口径。 */
+async function modeMenuFetch(init: RequestInit, path: string): Promise<ModeMenuResult> {
+  let r: Response;
+  try {
+    r = await fetch(path, init);
+  } catch (e) {
+    throw new ApiError(null, `session-mode/menu 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体 */
+    }
+    throw new ApiError(r.status, `session-mode/menu ${r.status}`, data);
+  }
+  return (await r.json()) as ModeMenuResult;
+}
+
+/** **打开终端权限菜单**并读回选项表（注入 `/permissions` + 回车）。
+ *  非 2xx → ApiError（409 blocked_by_dialog 等，与切档端点同分诊）。 */
+export async function sessionModeMenuOpen(sessionId: string): Promise<ModeMenuResult> {
+  return modeMenuFetch(
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action: "open" }),
+    },
+    "/m/api/v1/session-mode/menu"
+  );
+}
+
+/** **按用户点选的屏上编号敲键**（无回车）。硬前置由后端把关：屏上没有菜单/确认框 →
+ *  零投递并如实报错（`failed` 或抛 ApiError）。 */
+export async function sessionModeMenuPick(
+  sessionId: string,
+  number: number
+): Promise<ModeMenuResult> {
+  return modeMenuFetch(
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action: "pick", number }),
+    },
+    "/m/api/v1/session-mode/menu"
+  );
+}
+
+/** **重新读取**（纯屏读、零注入）：把面板与终端当前屏面对齐。用于用户手动在终端开了
+ *  菜单、或上一步读屏竞态时。 */
+export async function fetchSessionModeMenu(sessionId: string): Promise<ModeMenuResult> {
+  const q = new URLSearchParams({ session_id: sessionId });
+  return modeMenuFetch({ method: "GET" }, `/m/api/v1/session-mode/menu?${q}`);
+}
+
+// ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====
+
+/** 一键 resume 回执（POST /session-open）：200 {status:"opening"} 表示电脑侧正在
+ *  打开终端恢复该会话；spawn 出手失败 → 200 {status:"failed",error}（可重试） */
+export type SessionOpenResult = { status: "opening" } | { status: "failed"; error: string };
+
+/** 一键 resume（R5）：请求电脑本机打开终端 + cd 项目目录 + 恢复会话 + 聚焦。
+ *  404 {error:"no_session"|"no_cwd"|"no_resume_command"} → 非 2xx 抛 ApiError
+ *  （错误码解析进 data.error，调用方分診禁用/失败文案——后端命令表未收录的工具
+ *  前端按钮本就禁用，404 是挂载后会话漂移的兜底） */
+export async function sessionOpen(sessionId: string): Promise<SessionOpenResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-open 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    // 404 错误码在响应体 data.error——解析进 data 供调用方分診（对齐 sessionApprove 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理注入页等）：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-open ${r.status}`, data);
+  }
+  return (await r.json()) as SessionOpenResult;
 }

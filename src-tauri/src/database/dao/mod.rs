@@ -1,11 +1,15 @@
 pub mod agent_tool;
+pub mod approval_wait;
 pub mod base_snapshot;
 pub mod extension;
 pub mod heartbeat_seen;
+pub mod inject_queue;
 pub mod preset;
+pub mod question_wait;
 pub mod resource_binding;
 pub mod session;
 pub mod settings;
 pub mod stash;
 pub mod tool_resident;
 pub mod unread;
+pub mod write_audit;

@@ -101,9 +101,7 @@ describe("PairPage 访问密码单入口（M5 A7）", () => {
   });
 
   it("401 pin_not_set → 桌面端尚未设置密码文案", async () => {
-    vi.mocked(pairWithPin).mockRejectedValue(
-      new ApiError(401, "401", { error: "pin_not_set" })
-    );
+    vi.mocked(pairWithPin).mockRejectedValue(new ApiError(401, "401", { error: "pin_not_set" }));
     render(<PairPage onPaired={vi.fn()} />);
     fireEvent.change(screen.getByPlaceholderText("0000"), { target: { value: "1111" } });
     fireEvent.click(screen.getByRole("button", { name: "进入看板" }));

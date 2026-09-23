@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探D-权限菜单屏读底料.md §2.3 D③（codex busy 菜单：流式正文+菜单块同屏且菜单块不被污染，screen-co1-d3-busy-menu-stable.txt 原件）
+﻿  面前束手无策；位图索引则在低基数列的分析型工作负载中展现出惊人的压缩效率与多维过滤能力。理解这些结构的原理、适用场景与
+  内在局限，是每一个数据库工程师、后端工程师和数据架构师的必修课。
+
+  本文将系统性地剖析这四类主流索引结构，深入探讨它们的算法原理、物理布局、性能特征、失效模式与优化技巧，并在最后给出选型
+  决策的框架与最佳实践建议。
+
+  ## 二、B-tree 索引：平衡的艺术
+
+  ### 2.1 基本原理与结构
+
+  B-tree(及其变体 B+-tree)是 1970 年代由 Rudolf Bayer 和 Edward McCreight 提出的自平衡多路搜索树。它的核心思想是：将树的
+  高度控制在极低的水平(通常 3~4 层即可索引数十亿行)，使得任何一次查找最多只需要访问 3~4 个磁盘页，从而将随机 I/O 次数压
+  缩到最小。
+
+  B+-tree 与经典 B-tree 的关键区别在于：B+-tree 将所有实际数据(或行指针)仅存储在叶子节点，内部节点只存储用于导航的键值和
+  子节点指针。这种设计使得内部节点可以容纳更多的键(因为不需要存储完整的数据行)，进一步降低树的高度。同时，所有叶子节点通
+  过双向链表串联，使得范围扫描可以沿链表顺序遍历，而不需要回溯到上层节点。
+
+
+  Update Model Permissions
+
+  1. Read Only                   Codex can read files in the current workspace. Approval is required to edit files or
+                                 access the internet.
+› 2. Ask for approval (current)  Codex can read and edit files in the current workspace, and run commands. Approval is
+                                 required to access the internet or edit other files.
+  3. Approve for me              Only ask for actions detected as potentially unsafe.
+  4. Full Access                 Codex can edit files outside this workspace and access the internet without asking
+                                 for approval. Exercise caution when using.
+
+  Press enter to confirm or esc to go back

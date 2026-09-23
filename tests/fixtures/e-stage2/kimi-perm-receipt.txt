@@ -1,0 +1,6 @@
+# source: 2026-09-22-键序大词典.md §3 切档回执行（K-1 用户实录 2026-09-22：Permission mode: <档名>+三档描述行词形实录；无整屏 dump，按实录原文行固化）
+Permission mode: Ask When Needed
+Routine edits and commands run automatically; risky actions, questions, and plans still ask.
+Permission mode: Never Ask
+Never interrupts you; everything runs and is decided automatically.
+Permission mode: Always Ask

@@ -161,6 +161,19 @@ export const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
   finished: "bg-green-500",
 };
 
+/** 三色语义（红/黄/绿）——提示音判定用（2026-09-19）。
+ *  与 STATUS_DOT_COLOR 同源同口径，只是产出语义名而非 tailwind 类；
+ *  **与桌面 hooks/useNotification.statusToColor 逐值一致**（两端提示音口径统一的前提）。
+ *  穷尽 Record：状态增删时此处编译报错，不会静默漏判 */
+export const STATUS_COLOR_KIND: Record<SessionStatus, "red" | "yellow" | "green"> = {
+  waiting: "red",
+  processing: "yellow",
+  thinking: "yellow",
+  compacting: "yellow",
+  idle: "green",
+  finished: "green",
+};
+
 /** 状态中文名（M3 Task 6 跃迁横幅「变化方向」用；文案对齐桌面 i18n
  *  sessionList.statusLabels：waiting=等待操作 / finished=已结束）。
  *  Record<SessionStatus, string> 穷尽守卫：状态增删时此处编译报错，横幅不会静默缺文案 */

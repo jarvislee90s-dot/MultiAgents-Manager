@@ -11,7 +11,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...a: unknown[]) => pick(..
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: (...a: unknown[]) => openUrlMock(...a) }));
 vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@/components/pet/petRuntime")>();
-  return { ...orig, probeSheetRows: vi.fn().mockResolvedValue(9), probeAudioDurationMs: vi.fn().mockResolvedValue(3000) };
+  return {
+    ...orig,
+    probeSheetRows: vi.fn().mockResolvedValue(9),
+    probeAudioDurationMs: vi.fn().mockResolvedValue(3000),
+  };
 });
 
 const staged = {
@@ -30,7 +34,11 @@ describe("PetImportDialog", () => {
     openUrlMock.mockClear();
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_stage_from_folder") return Promise.resolve(staged);
-      if (cmd === "pet_finalize_import") return Promise.resolve({ id: staged.suggestedName, displayName: staged.suggestedDisplayName });
+      if (cmd === "pet_finalize_import")
+        return Promise.resolve({
+          id: staged.suggestedName,
+          displayName: staged.suggestedDisplayName,
+        });
       return Promise.resolve(undefined);
     });
     pick.mockResolvedValue("C:/pets/starry-dew");
@@ -131,7 +139,9 @@ describe("PetImportDialog", () => {
     await screen.findByTestId("import-config");
     fireEvent.click(await screen.findByTestId("import-cancel"));
     await waitFor(() =>
-      expect(tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_cancel_import")?.[1]?.stagingId).toBe("s1")
+      expect(
+        tauriInvokeMock.mock.calls.find((c) => c[0] === "pet_cancel_import")?.[1]?.stagingId
+      ).toBe("s1")
     );
   });
 });
@@ -203,7 +213,9 @@ describe("PetImportDialog 探测竞态与校验（issue #33-3/#33-5/#33-7）", (
     fireEvent.click(await screen.findByTestId("import-pick-folder"));
     await screen.findByTestId("import-config");
     // suggestedName 即已导入 id → 进入配置页立刻提示（测试环境 i18n 未初始化，渲染键名）
-    expect(await screen.findByTestId("import-name-problem")).toHaveTextContent("pet.import.nameDup");
+    expect(await screen.findByTestId("import-name-problem")).toHaveTextContent(
+      "pet.import.nameDup"
+    );
     expect(screen.getByTestId("import-execute")).toBeDisabled();
   });
 });

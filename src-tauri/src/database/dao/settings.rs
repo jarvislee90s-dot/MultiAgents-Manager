@@ -14,16 +14,17 @@ pub fn set_setting(key: &str, value: &str) {
     set_setting_conn(&conn, key, value);
 }
 
-/// 连接级实现（供单测直连内存库，与 session.rs 的 *_conn 模式一致）
-fn get_setting_conn(conn: &Connection, key: &str) -> Option<String> {
+/// 连接级实现（供 DeviceStore.with 短临界区与单测直连内存库，与 session.rs 的 *_conn
+/// 模式一致）：调用方持锁传入 conn，本函数不自取任何锁
+pub(crate) fn get_setting_conn(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM settings WHERE key = ?", [key], |row| {
         row.get(0)
     })
     .ok()
 }
 
-/// 连接级实现（供单测直连内存库）
-fn set_setting_conn(conn: &Connection, key: &str, value: &str) {
+/// 连接级实现（供 DeviceStore.with 短临界区与单测直连内存库）
+pub(crate) fn set_setting_conn(conn: &Connection, key: &str, value: &str) {
     let _ = conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
         params![key, value],

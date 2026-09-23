@@ -2,8 +2,13 @@ use super::applescript::execute_applescript;
 use super::{iterm, terminal_app};
 use std::process::Command;
 
-/// 通过 TTY 匹配并聚焦 tmux pane
-pub fn focus_tmux_pane_by_tty(tty: &str) -> Result<(), String> {
+/// tmux 全局 pane 清单（`list-panes -a` + 既有格式串）：每行
+/// `#{pane_tty} #{session_name}:#{window_index}.#{pane_index}`。
+/// tmux 不存在 / 命令失败 → None（调用方降级下一通道）。
+/// 注入链（inject/engine `find_tmux_pane`）与聚焦链（本模块）共用同一份
+/// Command+格式串（P3 Task 7）与同一份匹配纯函数（Task 9：匹配归一
+/// `inject::engine::parse_panes_find`，双份 contains 匹配逻辑就此消灭）
+pub(crate) fn list_panes_lines() -> Option<Vec<String>> {
     let output = Command::new("tmux")
         .args([
             "list-panes",
@@ -12,29 +17,33 @@ pub fn focus_tmux_pane_by_tty(tty: &str) -> Result<(), String> {
             "#{pane_tty} #{session_name}:#{window_index}.#{pane_index}",
         ])
         .output()
-        .map_err(|e| format!("Failed to run tmux: {}", e))?;
+        .ok()?;
     if !output.status.success() {
-        return Err("tmux not running or no sessions".to_string());
+        return None;
     }
-    let panes = String::from_utf8_lossy(&output.stdout);
-    for line in panes.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let pane_tty = parts[0];
-            let target = parts[1];
-            if pane_tty.contains(tty) || pane_tty.ends_with(tty) {
-                let _ = Command::new("tmux")
-                    .args(["select-window", "-t", target])
-                    .output();
-                let _ = Command::new("tmux")
-                    .args(["select-pane", "-t", target])
-                    .output();
-                focus_tmux_client_terminal()?;
-                return Ok(());
-            }
-        }
-    }
-    Err("Pane not found in tmux".to_string())
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// 通过 TTY 匹配并聚焦 tmux pane。匹配归一 `inject::engine::parse_panes_find`
+/// （Task 9，P2-3）：全路径相等（杜绝 contains/ends_with 的 ttys005 撞 ttys0050
+/// 前缀撞号），与注入侧同一份逻辑；入参裸后缀先归一 `/dev/` 全路径。
+pub fn focus_tmux_pane_by_tty(tty: &str) -> Result<(), String> {
+    let lines = list_panes_lines().ok_or_else(|| "tmux not running or no sessions".to_string())?;
+    let target = crate::inject::engine::parse_panes_find(&lines, &super::normalize_dev_tty(tty))
+        .ok_or("Pane not found in tmux")?;
+    let _ = Command::new("tmux")
+        .args(["select-window", "-t", &target])
+        .output();
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", &target])
+        .output();
+    focus_tmux_client_terminal()?;
+    Ok(())
 }
 
 fn focus_tmux_client_terminal() -> Result<(), String> {

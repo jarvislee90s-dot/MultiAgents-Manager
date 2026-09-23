@@ -2,7 +2,8 @@
 // 公共设施（cwd 归一化、git URL 缓存、JSONL 尾部读取）见 monitor::{cwd,git,jsonl,project}
 
 use super::app_status::{
-    derive_app_status, overlay_mtime_stale, tail_semantic_kind, turn_window_open, AppEntryKind,
+    derive_app_status, overlay_mtime_stale, tail_semantic_kind, turn_window_open,
+    unpaired_user_input_call_ids, AppEntryKind,
 };
 use super::cwd::normalize_cwd_for_match;
 use super::git::get_github_url;
@@ -40,12 +41,148 @@ struct CodexEntry {
     payload: Option<serde_json::Value>,
 }
 
+/// 用户输入类工具名（丁T1）：当前唯一已知的「调用产物就是用户输入」的工具。
+///
+/// **数字与复核方法（丁T1 复评 F-4：可复核，勿凭记忆改）**——2026-09-21 本机
+/// rollout 全库扫描（`~/.codex/sessions/**/rollout-*.jsonl`，203 个文件）：
+/// `function_call` 事件 **15783** 次，其中 `name == "request_user_input"` **23** 次，
+/// 带合法 questions 形态（下述严格口径）的 **23** 次且**全部**是 request_user_input
+/// ——**名字外 0 碰撞、形态外 0 碰撞**。
+/// 复核方法：遍历全部 rollout 行，`payload.type == "function_call"` 计一次总数，
+/// 再按 `payload.name` 与 `payload.arguments`（JSON 字符串）分别统计。
+///
+/// **新增工具名必须带实测证据**——误判会把正常运行判成红灯（假红），比漏判更伤害
+/// 看板可信度。
+const USER_INPUT_TOOL_NAMES: &[&str] = &["request_user_input"];
+
+/// arguments 形态加强判据（丁T1；复评 F-4 收窄到批次丙 T3 同口径）：
+/// 顶层 `questions[]` **非空**，且**每个元素**含 `question`（字符串）+ `options[]`
+/// （非空数组）+ 每个 option 含 `label`（字符串）——与
+/// `inject::question::parse_questions` 的结构要求**逐条对齐**
+///（含它宽容缺省 header/multiSelect/description、但**不容缺** label 的既有取舍）。
+/// 一致性由测试 `shape_matches_inject_parse_questions_criterion` 逐例锁住。
+///
+/// **为什么不直接复用 `inject::question::parse_questions`**（任务书留给实现的二选一）：
+/// monitor 是解析层、inject 是注入引擎（按键投递/终端族规格/平台 API），让每 3 秒
+/// 轮询的解析路径依赖注入链在模块方向上倒挂，且会把注入层的依赖面拉进 monitor 的
+/// 编译单元。故此处手写同口径的最小检查并以测试锁一致性。
+///
+/// 判据依据（F-4 复核数字）：2026-09-21 全库扫描（203 个 rollout 文件）15783 次
+/// function_call 中，本口径命中 23 次且全是 `request_user_input`——**名字外 0 碰撞、
+/// 形态外 0 碰撞**；若后续出现碰撞，收窄点为「名字 ∧ 形态」。
+fn arguments_have_questions_shape(arguments: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return false;
+    };
+    let Some(arr) = v.get("questions").and_then(|q| q.as_array()) else {
+        return false;
+    };
+    if arr.is_empty() {
+        return false;
+    }
+    // 元素级要求（T3 口径）：question 为字符串 + options 为非空数组 + 每项有 label
+    arr.iter().all(|q| {
+        q.get("question").and_then(|x| x.as_str()).is_some()
+            && q.get("options")
+                .and_then(|o| o.as_array())
+                .map(|opts| {
+                    !opts.is_empty()
+                        && opts
+                            .iter()
+                            .all(|o| o.get("label").and_then(|l| l.as_str()).is_some())
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// 用户输入类工具的调用/结果事件（丁T1 配对判据的输入形态）
+struct CodexUserInputEvent {
+    /// true = `function_call`（调用）；false = `function_call_output`（结果）
+    is_call: bool,
+    call_id: String,
+}
+
+/// 抽取参与配对的工具事件（丁T1）：**调用**侧仅用户输入类工具（名字命中常量表，
+/// 或以 questions 形态加强命中）；**结果**侧取全部 function_call_output（call_id
+/// 全局唯一，收全集更稳——结果只需配对，不参与「是不是用户输入类」判定）。
+/// 其余条目（message / reasoning / 记账）→ None
+fn codex_user_input_event(entry: &CodexEntry) -> Option<CodexUserInputEvent> {
+    let payload = entry.payload.as_ref()?;
+    if entry.entry_type.as_deref() != Some("response_item") {
+        return None;
+    }
+    match payload.get("type").and_then(|v| v.as_str())? {
+        "function_call" => {
+            let name = payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let by_name = USER_INPUT_TOOL_NAMES.contains(&name);
+            let by_shape = payload
+                .get("arguments")
+                .and_then(|a| a.as_str())
+                .is_some_and(arguments_have_questions_shape);
+            if !(by_name || by_shape) {
+                return None;
+            }
+            let call_id = payload.get("call_id").and_then(|v| v.as_str())?.to_string();
+            Some(CodexUserInputEvent {
+                is_call: true,
+                call_id,
+            })
+        }
+        "function_call_output" => {
+            // 结果条目无 name；call_id 缺失的输出无从配对（宁缺勿错，直接跳过）
+            let call_id = payload.get("call_id").and_then(|v| v.as_str())?.to_string();
+            Some(CodexUserInputEvent {
+                is_call: false,
+                call_id,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// codex **Esc 打断墓碑**标记（2026-09-23 用户实机走查缺陷修复）：回合被 Esc
+/// 打断后，codex 往 rollout 写一条 `role=user`、文本以 `<turn_aborted>` 开头的
+/// message（截断的前回合摘要）——它是**回合已死的墓碑**，模型不会回应它。
+pub(crate) const CODEX_TURN_ABORTED_MARKER: &str = "<turn_aborted>";
+
+/// codex message 的**文本内容**（content 为 string 或 `[{text:…}]` 数组两形态；
+/// 与读路径 `last_message` 的提取同一判据——单一实现，勿在外重复）。
+fn codex_message_text(payload: &serde_json::Value) -> Option<String> {
+    let content = payload.get("content")?;
+    match content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Array(arr) => arr.iter().find_map(|v| {
+            v.get("text")
+                .and_then(|t| t.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        }),
+        _ => None,
+    }
+}
+
 /// Codex 条目 → 归一化 APP 条目（issue #6 格式翻译适配器）：
 /// 解包 response_item / event_msg 外壳，映射到共享判定核（monitor::app_status）的
 /// AppEntryKind。修复点：function_call / function_call_output 等不带 role 的条目
 /// 旧实现全被跳过（第二轮从第一条 assistant message 落盘起「最后带 role 的条目」
 /// 恒为 assistant 纯文本 → 恒判 Idle），现在工具调用条目参与判定；
 /// reasoning / token_count / item_completed 等记账条目 → Other（跳过，不参与判定）
+///
+/// **Esc 打断墓碑 → TurnEnd（2026-09-23 用户实测缺陷，二轮修正）**：`<turn_aborted>`
+/// user message 是**回合终结信号**——它终结的是「它之前那条尚未被回应的 user 消息」
+/// （用户实测现场：`4/permissions` → `<turn_aborted>` → `1/permissions` →
+/// `<turn_aborted>`，两条注入内容都被打断、模型从未回应）。若墓碑仅判 Other（一轮
+/// 修复）或 UserMessage（原始缺陷），尾部倒扫最终都会落在**墓碑之前那条被遗弃的
+/// user 消息**上 → 恒判 Thinking（黄灯）→ `is_running` 为真 → codex 模式切换被
+/// 「运行中不接受模式切换」误拦。判 **TurnEnd**（回合结束）后倒扫遇墓碑即判空闲，
+/// 不再回看被打断回合里的任何遗留；墓碑**之后**的真实 user 消息仍正常 Thinking。
+///
+/// 丁T1：用户输入类工具的 **待决** 调用（无配对 output）不在此处定型——本函数是
+/// 无状态翻译，配对需要整文件视野，由 `read_codex_digest` 在收齐事件后把对应位置
+/// 改写为 [`AppEntryKind::UserInputToolCall`]（见该函数）
 fn codex_entry_kind(entry: &CodexEntry) -> AppEntryKind {
     let Some(payload) = entry.payload.as_ref() else {
         return AppEntryKind::Other;
@@ -53,7 +190,16 @@ fn codex_entry_kind(entry: &CodexEntry) -> AppEntryKind {
     match entry.entry_type.as_deref() {
         Some("response_item") => match payload.get("type").and_then(|v| v.as_str()) {
             Some("message") => match payload.get("role").and_then(|v| v.as_str()) {
-                Some("user") => AppEntryKind::UserMessage,
+                Some("user") => {
+                    if codex_message_text(payload)
+                        .is_some_and(|t| t.starts_with(CODEX_TURN_ABORTED_MARKER))
+                    {
+                        // 回合终结信号（语义见函数文档）——不是「用户在等模型」
+                        AppEntryKind::TurnEnd
+                    } else {
+                        AppEntryKind::UserMessage
+                    }
+                }
                 Some("assistant") => AppEntryKind::AssistantMessage,
                 _ => AppEntryKind::Other, // developer 等系统角色不参与判定
             },
@@ -66,6 +212,51 @@ fn codex_entry_kind(entry: &CodexEntry) -> AppEntryKind {
             _ => AppEntryKind::Other, // token_count / item_completed / thread_settings_applied 等
         },
         _ => AppEntryKind::Other, // session_meta / token_usage_record / world_state / turn_context
+    }
+}
+
+/// 把「待决的用户输入类工具调用」在归一化条目流里标成语义红（丁T1）。
+///
+/// 判据（调用共享核对函数 [`pending_user_input_call`]）：某个用户输入类调用
+/// **没有**同名 call_id 的 function_call_output。注意这是**逐调用**判定而非
+/// 「尾部是不是 function_call」——同一文件多轮多调用，只看形态会把已答完的历史
+/// 调用误判为待决。
+///
+/// 落点选择：把**未配对的那些调用**所在下标改写为 [`AppEntryKind::UserInputToolCall`]，
+/// 而不是全流覆盖一个布尔——尾扫（`derive_app_status` 从尾部倒扫取第一条有语义条目）
+/// 于是天然正确：若待决调用之后还有更新的语义条目（用户已作答/回合结束），那条会
+/// 胜出，不会误红；只有它确实在尾（其后只有记账条目）才落红灯。
+fn mark_pending_user_input_calls(
+    kinds: &mut [AppEntryKind],
+    events: &[Option<CodexUserInputEvent>],
+) {
+    // 收集调用/结果 id（均按文件序；下标与 kinds 对齐）
+    let calls: Vec<&str> = events
+        .iter()
+        .flatten()
+        .filter(|e| e.is_call)
+        .map(|e| e.call_id.as_str())
+        .collect();
+    if calls.is_empty() {
+        return;
+    }
+    let outputs: Vec<&str> = events
+        .iter()
+        .flatten()
+        .filter(|e| !e.is_call)
+        .map(|e| e.call_id.as_str())
+        .collect();
+    let pending: Vec<&str> = unpaired_user_input_call_ids(&calls, &outputs);
+    if pending.is_empty() {
+        return;
+    }
+    for (i, ev) in events.iter().enumerate() {
+        let Some(ev) = ev else { continue };
+        if ev.is_call && pending.contains(&ev.call_id.as_str()) {
+            if let Some(kind) = kinds.get_mut(i) {
+                *kind = AppEntryKind::UserInputToolCall;
+            }
+        }
     }
 }
 
@@ -319,6 +510,9 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
     let mut last_timestamp: Option<String> = None;
     // 归一化条目序列（文件顺序），供共享判定核尾部倒扫
     let mut kinds: Vec<AppEntryKind> = Vec::new();
+    // 用户输入类工具的调用/结果事件（与 kinds 下标一一对应；无事件的条目填 None，
+    // 反转回文件序后据配对结果把待决调用位改写为 UserInputToolCall——丁T1）
+    let mut ui_events: Vec<Option<CodexUserInputEvent>> = Vec::new();
     for line in recent.iter().rev() {
         if let Ok(entry) = serde_json::from_str::<CodexEntry>(line) {
             // 顶层 timestamp 作为最后活动时间（最近一条 entry）
@@ -341,23 +535,11 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
                     // 找最后一条文本消息（含 role 记录，展示用 last_message_role；
                     // 与旧实现一致：仅在有内容的消息上记录角色）
                     if last_message.is_none() {
-                        let payload = entry.payload.as_ref();
-                        let content = payload.and_then(|p| p.get("content"));
-                        if let Some(c) = content {
-                            let text = match c {
-                                serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
-                                serde_json::Value::Array(arr) => arr.iter().find_map(|v| {
-                                    v.get("text")
-                                        .and_then(|t| t.as_str())
-                                        .filter(|s| !s.is_empty())
-                                        .map(String::from)
-                                }),
-                                _ => None,
-                            };
-                            if text.is_some() {
-                                last_message = text;
+                        if let Some(payload) = entry.payload.as_ref() {
+                            if let Some(text) = codex_message_text(payload) {
+                                last_message = Some(text);
                                 last_role = payload
-                                    .and_then(|p| p.get("role"))
+                                    .get("role")
                                     .and_then(|v| v.as_str())
                                     .map(String::from);
                             }
@@ -365,17 +547,24 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
                     }
                     // 记录归一化条目（含 role 的 message 与不带 role 的 function_call 等）
                     kinds.push(codex_entry_kind(&entry));
+                    // 同下标对齐：无配对语义的条目填 None（用户输入类事件只可能
+                    // 落在 function_call/function_call_output 上，二者恒产上面这条 kind）
+                    ui_events.push(codex_user_input_event(&entry));
                 }
                 Some("event_msg") => {
                     // task_started / task_complete 参与判定；token_count / item_completed 等记账条目 → Other
                     kinds.push(codex_entry_kind(&entry));
+                    ui_events.push(None);
                 }
+                // session_meta / token_usage_record / world_state / turn_context：不参与判定
                 _ => {}
             }
         }
     }
     // 倒扫时按文件顺序 push，此处反转回文件顺序（旧 → 新）供共享核尾部倒扫
     kinds.reverse();
+    ui_events.reverse();
+    mark_pending_user_input_calls(&mut kinds, &ui_events);
 
     // 头尾拼接（2026-09-18 修复，活体取证 11.4MB/2801 行）：长会话（> RECENT_LINES
     // 行）尾窗不含文件头的 session_meta，身份缺失会让整个 digest 作废 → Phase 1
@@ -426,9 +615,15 @@ fn read_codex_digest(jsonl_path: &Path) -> Option<CodexFileDigest> {
 /// task_started → Processing；task_complete → Idle；记账条目跳过。
 /// 无任何语义条目（如仅 session_meta 的 rollout）→ 兜底按形态：APP 文件新鲜
 /// （<300s）→ Processing，停更 → Idle（绿灯）；CLI 保持 60s 阈值。
-/// codex 全线不落兜底红（2026-09-10 用户决策）：停更后无法区分"等用户输入"与
-/// "对话已结束"，红灯「等待操作」会对每次聊完的会话误报；落绿灯接入
-/// 「完成转绿 → 未读徽标 → 已读后绿卡剔除」既有管线（与 codex_thread_parser 同语义）
+///
+/// **兜底红 vs 语义红（丁T1 的边界，最易做错处）**：codex 全线不落**兜底**红
+/// （2026-09-10 用户决策）：停更后无法区分"等用户输入"与"对话已结束"，红灯
+/// 「等待操作」会对每次聊完的会话误报；落绿灯接入「完成转绿 → 未读徽标 → 已读后
+/// 绿卡剔除」既有管线（与 codex_thread_parser 同语义）。丁T1 新增的
+/// [`AppEntryKind::UserInputToolCall`] 是**语义红**——有明确证据（用户输入类工具
+/// 调用无配对结果，终端 UI 就开在那里），不是停更猜的等待。**那条 Waiting→Idle
+/// 消除只作用于兜底红**（overlay_mtime_stale 产生的），语义红必须原样存活；
+/// 否则问答待决永远显示绿灯，本任务的修复目标落空
 fn session_from_digest(
     digest: &CodexFileDigest,
     process_form: ProcessForm,
@@ -450,17 +645,22 @@ fn session_from_digest(
     };
     // 回合守卫（spec 假绿治理 §4.1 方案 A）：回合仍开（最后一个 TurnStart 晚于最后一个
     // TurnEnd）时，尾部的 assistant 消息是回合内中间消息而非完成信号——改判 Processing，
-    // 拦截「中间消息短暂占据尾部」的瞬态假绿；窗口内无边界事件 → 不仲裁，回退尾扫语义
+    // 拦截「中间消息短暂占据尾部」的瞬态假绿；窗口内无干预 → 不仲裁，回退尾扫语义。
+    // 注意守卫**只**作用于「尾部是 assistant 文本的 Idle」→ 对语义红（Waiting）零影响
     if status == SessionStatus::Idle
         && tail_semantic_kind(&digest.kinds) == Some(AppEntryKind::AssistantMessage)
         && turn_window_open(&digest.kinds) == Some(true)
     {
         status = SessionStatus::Processing;
     }
+    // 语义红标记（丁T1）：尾部第一条有语义条目就是待决的用户输入类调用 → 该 Waiting
+    // 是证据红，豁免下方的兜底红消除
+    let semantic_waiting =
+        tail_semantic_kind(&digest.kinds) == Some(AppEntryKind::UserInputToolCall);
     // 叠加 300s 规则（共享核）：Processing（工具尾部 / 兜底新鲜 / 上方回合守卫改判）
-    // 且 JSONL mtime 停更 >= 300s → Waiting；codex 不落红灯，Waiting 一律就地转 Idle
+    // 且 JSONL mtime 停更 >= 300s → Waiting；codex 的**兜底**红一律就地转 Idle
     let status = overlay_mtime_stale(status, file_age_secs.map_or(0, |a| (a * 1000.0) as u64));
-    let status = if status == SessionStatus::Waiting {
+    let status = if status == SessionStatus::Waiting && !semantic_waiting {
         SessionStatus::Idle
     } else {
         status
@@ -703,6 +903,30 @@ mod app_status_fixture_tests {
         )
     }
 
+    /// 用户输入类工具调用（丁T1 真实 rollout 形态，2026-09-21 本机取证
+    /// `rollout-2026-09-21T13-44-08-01a0c27e-*.jsonl` 第 121 行）：
+    /// `payload.type=function_call`、`name=request_user_input`、`call_id` 为配对键、
+    /// `arguments` 是**字符串**形态的 questions JSON（内嵌引号在 JSON 文本里转义）
+    fn request_user_input_call(ts: &str, ordinal: u32, call_id: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"function_call","id":"fc_0217899701645190","name":"request_user_input","arguments":"{{\"questions\":[{{\"header\":\"输出目录\",\"id\":\"build_output_folder\",\"options\":[{{\"description\":\"大多数前端构建工具的默认输出目录。\",\"label\":\"dist (Recommended)\"}},{{\"description\":\"部分项目或配置会使用 out 作为输出目录。\",\"label\":\"out\"}}],\"question\":\"构建产物放在哪个目录？\"}}]}}","call_id":"{call_id}"}}}}"#
+        )
+    }
+
+    /// 用户输入类工具调用的配对结果（真实形态：`output` 为 answers JSON 字符串）
+    fn request_user_input_output(ts: &str, ordinal: u32, call_id: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"function_call_output","call_id":"{call_id}","output":"{{\"answers\":{{\"build_output_folder\":{{\"answers\":[\"dist (Recommended)\"]}}}}}}"}}}}"#
+        )
+    }
+
+    /// 其他工具的 function_call（带 call_id；用于配对抗扰动）
+    fn other_function_call(ts: &str, ordinal: u32, call_id: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"response_item","payload":{{"type":"function_call","id":"fc_2","name":"exec_command","arguments":"{{\"cmd\":\"git status\"}}","call_id":"{call_id}"}}}}"#
+        )
+    }
+
     fn token_count(ts: &str, ordinal: u32) -> String {
         format!(
             r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{{"type":"token_count","info":{{}}}}}}"#
@@ -796,6 +1020,81 @@ mod app_status_fixture_tests {
         let f = write_rollout(tmp.path(), &round_one());
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    /// **Esc 打断墓碑不得判 Thinking**（2026-09-23 用户实测缺陷）：回合被 Esc
+    /// 打断后 codex 写入 `role=user`、文本以 `<turn_aborted>` 开头的墓碑消息——
+    /// 模型不会回应它。旧实现判 UserMessage → 尾扫 Thinking（黄灯卡死）→
+    /// `is_running` 为真 → 模式切换被「codex 运行中不接受模式切换」误拦
+    /// （用户实机：会话空闲却被拦，消息流里两条 `<turn_aborted>`）。
+    /// 墓碑归 Other → 尾扫取更早语义条目（task_complete → Idle）。
+    #[test]
+    fn turn_aborted_tombstone_is_not_thinking() {
+        let mut lines = round_one();
+        lines.push(user_msg(
+            "2026-09-06T05:42:00.000Z",
+            20,
+            "<turn_aborted> The user interrupted the previous turn on purpose.",
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_ne!(
+            session.status,
+            SessionStatus::Thinking,
+            "墓碑消息不得把会话卡在 Thinking（黄灯）"
+        );
+        assert_eq!(
+            session.status,
+            SessionStatus::Idle,
+            "墓碑跳过后 task_complete 语义胜出 → 空闲（模式切换不再被误拦）"
+        );
+    }
+
+    /// 墓碑**终结它之前的被遗弃 user 消息**（用户实机现场 2026-09-23 二轮）：
+    /// `user("4/permissions") → <turn_aborted>`——注入内容与残留拼接后提交、随即
+    /// 被打断，模型**永远不会回应**它。一轮修复（墓碑=Other）倒扫会穿过墓碑命中
+    /// 这条被遗弃 user → 仍判 Thinking → 模式切换仍被误拦。墓碑=TurnEnd 后倒扫
+    /// 即终结 → Idle。**这是用户实测拦截的最终形态**。
+    #[test]
+    fn abandoned_user_message_before_tombstone_is_idle() {
+        let mut lines = round_one();
+        lines.push(user_msg("2026-09-06T05:42:00.000Z", 20, "4/permissions"));
+        lines.push(user_msg(
+            "2026-09-06T05:42:01.000Z",
+            21,
+            "<turn_aborted> The user interrupted the previous turn on purpose.",
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_ne!(
+            session.status,
+            SessionStatus::Thinking,
+            "被打断回合的遗留 user 消息不得判 Thinking：{:?}",
+            session.status
+        );
+        assert_eq!(session.status, SessionStatus::Idle, "墓碑终结回合 → 空闲");
+    }
+
+    /// 墓碑**之后**的真实用户消息仍正常判 Thinking（特判不误伤正常输入）
+    #[test]
+    fn real_user_message_after_tombstone_still_thinking() {
+        let mut lines = round_one();
+        lines.push(user_msg(
+            "2026-09-06T05:42:00.000Z",
+            20,
+            "<turn_aborted> The user interrupted the previous turn on purpose.",
+        ));
+        lines.push(user_msg("2026-09-06T05:43:00.000Z", 21, "接着帮我同步"));
+        let tmp = tempfile::tempdir().unwrap();
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Thinking,
+            "真实 user 消息在尾 = 用户在等模型 → Thinking 正常"
+        );
     }
 
     #[test]
@@ -926,6 +1225,279 @@ mod app_status_fixture_tests {
         let f = write_rollout(tmp.path(), &lines);
         let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    // ==== 丁T1 · 用户输入类工具调用待决 → 语义红（Waiting）====
+
+    /// 待决主判据（丁T1）：尾部 `function_call(request_user_input)` 无配对 output →
+    /// **Waiting 红灯**（终端在等用户作答）。夹具用 2026-09-21 真实 rollout 形态；
+    /// 尾随记账条目（token_usage_record 等）不影响判定
+    #[test]
+    fn pending_request_user_input_is_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 真实待决样本时序（rollout-2026-09-21T13-44-08 第 120-123 行）：
+        // item_completed → reasoning → function_call(request_user_input) → token_usage_record
+        let mut lines = round_one();
+        lines.push(item_completed("2026-09-21T05:56:07.800Z", 119));
+        lines.push(reasoning("2026-09-21T05:56:07.810Z", 120));
+        lines.push(request_user_input_call(
+            "2026-09-21T05:56:07.814Z",
+            121,
+            "call_1a6474f34e25436abaa16e54",
+        ));
+        lines.push(token_count("2026-09-21T05:56:07.826Z", 122));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Waiting,
+            "问答 UI 打开期间必须红灯（语义红：待决 tool-call 有明确证据）"
+        );
+    }
+
+    /// 语义红不得被「codex 一律把 Waiting 转 Idle」的兜底红消除决策吞掉（丁T1 最易
+    /// 做错的边界）：那条转换针对 overlay_mtime_stale 产生的**兜底** Waiting（停更
+    /// 无法区分「等输入」与「对话结束」，2026-09-10 用户决策），本测试把文件 mtime
+    /// 拨到停更 301s 之后——语义红必须仍然存活
+    #[test]
+    fn pending_request_user_input_survives_stale_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(request_user_input_call(
+            "2026-09-21T05:56:07.814Z",
+            121,
+            "call_pending_stale",
+        ));
+        let f = write_rollout(tmp.path(), &lines);
+        let stale = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(301))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Waiting,
+            "语义红不得被兜底红的 Waiting→Idle 消除吞掉"
+        );
+    }
+
+    /// 「运行中不误红灯」回归（1/2）：配对 output 已落盘（用户已作答）→ 不触发 Waiting。
+    /// 真实时序（rollout-2026-09-21T09-25-30）：call 09:17:09.528 → output 09:18:28.856
+    ///（隔 79 秒 = 用户作答耗时）——output 之后尾部是工具活动 → Processing
+    #[test]
+    fn answered_request_user_input_is_not_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let call_id = "call_e9667217bc434a9591bbda65";
+        let mut lines = round_one();
+        lines.push(request_user_input_call(
+            "2026-09-21T09:17:09.528Z",
+            133,
+            call_id,
+        ));
+        lines.push(request_user_input_output(
+            "2026-09-21T09:18:28.856Z",
+            135,
+            call_id,
+        ));
+        // 回答后模型继续干活（真实形态：output 后跟 token_count / 后续工具调用）
+        lines.push(function_call("2026-09-21T09:18:29.100Z", 136));
+        lines.push(token_count("2026-09-21T09:18:29.200Z", 137));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "已答 + 后续工具活动 = 运行中，不得红灯"
+        );
+    }
+
+    /// 「运行中不误红灯」回归（2/2）：已答的历史问答不得让**当前**回合误红。
+    /// 扰动面：其他工具（exec_command 等）的 function_call/output 与问答同型
+    ///（不带 role 的 response_item），本测试证明只有 request_user_input 参与判据
+    #[test]
+    fn other_tool_calls_do_not_trigger_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(other_function_call(
+            "2026-09-21T09:00:00.000Z",
+            100,
+            "call_x1",
+        ));
+        lines.push(function_call_output("2026-09-21T09:00:00.500Z", 101));
+        // 尾部是普通的未配对工具调用（exec_command 执行中）→ Processing 不是 Waiting
+        lines.push(other_function_call(
+            "2026-09-21T09:00:01.000Z",
+            102,
+            "call_x2",
+        ));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "普通工具调用尾部仍是运行中（只有用户输入类工具才有语义红）"
+        );
+    }
+
+    /// 判据按 call_id 配对：**另一个** call_id 的 output 在场不构成配对
+    ///（防「尾扫到任何 output 就当已答」的宽松误实现）。真实形态：同文件多轮里
+    /// 其他工具的 function_call_output 大量存在（全库 916 次）
+    #[test]
+    fn mismatched_call_id_output_does_not_clear_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        // 其他工具的调用+结果（不同 call_id）落在问答之前
+        lines.push(other_function_call(
+            "2026-09-21T09:59:58.000Z",
+            198,
+            "call_other_id",
+        ));
+        lines.push(function_call_output("2026-09-21T09:59:58.500Z", 199));
+        // 随后问答待决（无配对 output）
+        lines.push(request_user_input_call(
+            "2026-09-21T10:00:00.000Z",
+            200,
+            "call_pending",
+        ));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Waiting,
+            "call_id 不匹配不算配对（待决仍在）"
+        );
+    }
+
+    /// CLI 形态同样适用（状态链不分形态——同一 session_from_digest）
+    #[test]
+    fn pending_request_user_input_is_waiting_for_cli_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(request_user_input_call(
+            "2026-09-21T11:00:00.000Z",
+            300,
+            "call_cli_pending",
+        ));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::Cli).unwrap();
+        assert_eq!(session.status, SessionStatus::Waiting);
+    }
+
+    /// 工具名是权威判据：`name=request_user_input` 即便 arguments 不成 questions 形态
+    ///（防御形态 / 未来改名前的过渡）也参与配对判据（丁T1 硬要求「只认
+    /// request_user_input」，常量表见 `USER_INPUT_TOOL_NAMES`）
+    #[test]
+    fn request_user_input_name_is_authoritative_regardless_of_arguments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(
+            r#"{"timestamp":"2026-09-21T12:00:00.000Z","ordinal":400,"type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{}","call_id":"call_name_only"}}"#
+                .to_string(),
+        );
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Waiting,
+            "名字命中即可（形态只是加强面）"
+        );
+    }
+
+    /// 加强面（可选实现，任务书二选一）：`questions[]` **形态**判据比工具名更耐改名
+    /// ——名字变了但入参仍是问答形态时同样接住。
+    /// **风险边界（如实申报）**：形态判据只看结构，任何恰好带
+    /// `{"questions":[...]}` 入参的工具都会被判为用户输入类。2026-09-21 本机全库
+    /// 扫描（7014 次 function_call）0 碰撞，且误判后果是「一张卡多红」而漏判后果是
+    /// 「问答永远黄」，故取形态加强。若后续出现碰撞，收窄点为「名字 ∧ 形态」
+    #[test]
+    fn questions_shape_with_other_name_also_triggers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(
+            r#"{"timestamp":"2026-09-21T12:30:00.000Z","ordinal":410,"type":"response_item","payload":{"type":"function_call","name":"request_user_input_v2","arguments":"{\"questions\":[{\"question\":\"q\",\"options\":[{\"label\":\"a\"}]}]}","call_id":"call_v2"}}"#
+                .to_string(),
+        );
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Waiting,
+            "问答形态加强面：工具改名不影响接住（形态判据）"
+        );
+    }
+
+    /// 非问答形态的普通工具（无 questions[]）→ 仍是运行中（形态判据不误伤）
+    #[test]
+    fn tool_without_questions_shape_stays_processing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        lines.push(other_function_call(
+            "2026-09-21T13:00:00.000Z",
+            420,
+            "call_plain",
+        ));
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(session.status, SessionStatus::Processing);
+    }
+
+    // ==== 丁T1 复评 F-4：形态判据与批次丙 T3 口径一致性锁 ====
+
+    /// `arguments_have_questions_shape` 必须与 `inject::question::parse_questions`
+    /// 的判据**逐例一致**（F-4 收窄要求：前者是后者的手写同口径副本，防止两处漂移）。
+    /// 用例集覆盖 T3 已锁的全部结构分支（parse_questions 的 tests 同源形态）
+    #[test]
+    fn shape_matches_inject_parse_questions_criterion() {
+        let cases = [
+            // ---- 两侧都该接受 ----
+            r#"{"questions":[{"question":"q","options":[{"label":"a"}]}]}"#,
+            // 真实 codex 形态（2026-09-21 rollout 实录，含 header/id/description）
+            r#"{"questions":[{"header":"输出目录","id":"build_output_folder","options":[{"description":"d","label":"dist (Recommended)"},{"description":"o","label":"out"}],"question":"构建产物放在哪个目录？"}]}"#,
+            // 宽容缺省：multiSelect / header / description 缺失
+            r#"{"questions":[{"question":"q","options":[{"label":"a"},{"label":"b","description":"d"}]}]}"#,
+            // ---- 两侧都该拒绝 ----
+            r#"{}"#,
+            r#"{"questions":"x"}"#,
+            r#"{"questions":[]}"#,
+            r#"{"questions":[{"options":[{"label":"a"}]}]}"#, // 缺 question
+            r#"{"questions":[{"question":"q"}]}"#,            // 缺 options
+            r#"{"questions":[{"question":"q","options":[]}]}"#, // options 空
+            r#"{"questions":[{"question":"q","options":[{"description":"no label"}]}]}"#, // label 缺失
+            "not json",
+            r#"{"questions":[{"question":"q","options":[{"label":"a"}]},{"question":"q2"}]}"#, // 多元素：其一不合
+        ];
+        for case in cases {
+            assert_eq!(
+                arguments_have_questions_shape(case),
+                crate::inject::question::parse_questions(case).is_some(),
+                "两处判据必须一致，分歧输入：{case}"
+            );
+        }
+    }
+
+    /// F-4 收窄的行为差异（收窄前宽松口径会误接的输入）：顶层 questions 非空但
+    /// 元素不合 T3 结构 → **不再**判为问答形态（落回 Processing 黄）
+    #[test]
+    fn loose_shape_no_longer_triggers_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines = round_one();
+        // questions 非空但元素缺 question/options（宽松口径会命中，严格口径不该命中）
+        lines.push(
+            r#"{"timestamp":"2026-09-21T14:00:00.000Z","ordinal":500,"type":"response_item","payload":{"type":"function_call","name":"some_other_tool","arguments":"{\"questions\":[{\"foo\":1}]}","call_id":"call_loose"}}"#
+                .to_string(),
+        );
+        let f = write_rollout(tmp.path(), &lines);
+        let session = parse_codex_jsonl(&f, ProcessForm::App).unwrap();
+        assert_eq!(
+            session.status,
+            SessionStatus::Processing,
+            "元素不合 T3 结构 → 不判问答（F-4 收窄：假红面收窄）"
+        );
     }
 }
 
