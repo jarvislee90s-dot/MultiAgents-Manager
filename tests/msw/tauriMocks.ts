@@ -176,7 +176,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
         mockPresets.find((p) => p.id === (args as { presetId?: string })?.presetId) ?? null
       );
     case "get_active_preset":
-      return Promise.resolve((args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null);
+      return Promise.resolve(
+        (args as { toolId?: string })?.toolId === "claude" ? "preset-1" : null
+      );
     case "list_active_presets":
       return Promise.resolve([{ toolId: "claude", presetId: "preset-1" }]);
     // (extensionId, kind, origin) 三元组，origin = "mam" | "native"（scan_tool_state 口径）
@@ -198,7 +200,9 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
       return Promise.resolve([]);
     // —— 一致性体检读命令（T15，与 src/tauri-mock.ts 形状一致）——
     case "get_preset_health":
-      return Promise.resolve(healthMode === "empty" ? mockPresetHealthEmpty : mockPresetHealthIssues);
+      return Promise.resolve(
+        healthMode === "empty" ? mockPresetHealthEmpty : mockPresetHealthIssues
+      );
     case "scan_ledger_drift":
       return Promise.resolve(mockLedgerDrift);
     // 空目录扫描（wave33 Item D）：读 fixture（与 get_preset_health 的 emptyDirs 同源）
@@ -337,6 +341,12 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // 托盘统一重建（T16）：fire-and-forget，无返回值消费，显式 no-op 以闭合双 mock parity
     case "refresh_tray":
       return Promise.resolve();
+    // R5 一键 resume（M6R–M9R Task 11）：测试环境不真开终端，视为成功（双 mock parity，
+    // 与 src/tauri-mock.ts 的 session_open case 同步；失败开关在桌面侧为
+    // localStorage["mam-mock-session-open"]="fail"——vitest 单测直接驱动 Rust 侧
+    // spawner 缝，无需在此模拟）
+    case "session_open":
+      return Promise.resolve(undefined);
     default:
       return Promise.resolve(undefined);
   }

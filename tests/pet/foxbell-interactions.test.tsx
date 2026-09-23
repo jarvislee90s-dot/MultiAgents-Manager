@@ -79,9 +79,28 @@ describe("FoxbellPet 指针交互", () => {
       await vi.advanceTimersByTimeAsync(20);
     });
     // 铆钉式拖动（问题 1 修复）：增量基于 screenX/screenY，jsdom 默认 0 需显式传
-    fireEvent.pointerDown(sprite, { pointerId: 1, button: 0, clientX: 100, clientY: 300, screenX: 500, screenY: 700 });
-    fireEvent.pointerMove(sprite, { pointerId: 1, clientX: 100, clientY: 300, screenX: 500, screenY: 700 }); // 建立采样基线（movedY=0）
-    fireEvent.pointerMove(sprite, { pointerId: 1, clientX: 100, clientY: 250, screenX: 500, screenY: 650 }); // movedY=-50
+    fireEvent.pointerDown(sprite, {
+      pointerId: 1,
+      button: 0,
+      clientX: 100,
+      clientY: 300,
+      screenX: 500,
+      screenY: 700,
+    });
+    fireEvent.pointerMove(sprite, {
+      pointerId: 1,
+      clientX: 100,
+      clientY: 300,
+      screenX: 500,
+      screenY: 700,
+    }); // 建立采样基线（movedY=0）
+    fireEvent.pointerMove(sprite, {
+      pointerId: 1,
+      clientX: 100,
+      clientY: 250,
+      screenX: 500,
+      screenY: 650,
+    }); // movedY=-50
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10);
     });

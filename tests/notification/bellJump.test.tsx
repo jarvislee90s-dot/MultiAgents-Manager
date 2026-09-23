@@ -63,10 +63,7 @@ describe("铃铛历史跳转透传 form（review）", () => {
     fireEvent.click(screen.getByTitle(i18n.t("notifications.historyTitle")));
     fireEvent.click(await screen.findByText(/项目A ·/));
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith(
-        "focus_session",
-        expect.objectContaining({ pid: 42 })
-      )
+      expect(invokeMock).toHaveBeenCalledWith("focus_session", expect.objectContaining({ pid: 42 }))
     );
   });
 });

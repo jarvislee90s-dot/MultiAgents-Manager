@@ -235,20 +235,19 @@ export function RemoteSection() {
 
   const enabled = status?.enabled ?? false;
 
-  // 配对面板与花名册轮询：enabled 时 3s 轮询 status + devices（与移动端看板同节奏）；
-  // disabled 清空设备表——不展示陈旧花名册
+  // 花名册与状态 3s 轮询恒开（与移动端看板同节奏）。花名册是 DB 语义（已配对设备
+  // 的吊销/重命名管理入口），不随远程关闭清空——Mac 报告七-6「关闭期间 0/10 而 DB
+  // 9 行」的根因即旧版「disabled 清空设备表」；后端 remote_devices 本就无关开关态
+  // （恒查 remote_devices 表 revoked=0），关闭态行内 online 点全灰即真实状态。
+  // status 同拍轮询保持开关/通道态新鲜（PIN/本机名回填有 ref 闸，不 clobber 编辑中输入框）
   useEffect(() => {
-    if (!enabled) {
-      setDevices([]);
-      return;
-    }
     void refreshDevices();
     const timer = setInterval(() => {
       void refreshStatus();
       void refreshDevices();
     }, 3000);
     return () => clearInterval(timer);
-  }, [enabled, refreshDevices, refreshStatus]);
+  }, [refreshDevices, refreshStatus]);
 
   const channels = status?.channels;
   // 设备上限（后端 KV 可改；未载荷时回落 10 = 决策 #17 默认值）
@@ -602,16 +601,25 @@ export function RemoteSection() {
           <>
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone="blue">{t("settings.remote.badgePublic")}</Badge>
-              {quickAddr && (
-                <code className="bg-muted rounded-md px-2 py-0.5 font-mono text-[12.5px] break-all">
-                  {quickAddr}
-                </code>
-              )}
-              {quickAddr && (
-                <Button variant="outline" size="sm" onClick={() => void copy(quickAddr)}>
-                  {t("settings.remote.copy")}
-                </Button>
-              )}
+              {quickAddr ? (
+                <>
+                  <code className="bg-muted rounded-md px-2 py-0.5 font-mono text-[12.5px] break-all">
+                    {quickAddr}
+                  </code>
+                  <Button variant="outline" size="sm" onClick={() => void copy(quickAddr)}>
+                    {t("settings.remote.copy")}
+                  </Button>
+                </>
+              ) : // 运行中但地址尚未解析（cloudflared 启动/重试窗口）：占位提示而非
+              // 空白或旧值——脏/旧地址 + 「已获取」toast 的误导组合已在解析器侧治理
+              channels?.quick?.running && !quickErr ? (
+                <span
+                  data-testid="quick-fetching"
+                  className="text-muted-foreground animate-pulse text-xs"
+                >
+                  {t("settings.remote.quickFetching")}
+                </span>
+              ) : null}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {channels?.quick?.running && (
@@ -671,6 +679,16 @@ export function RemoteSection() {
                         <p className="text-muted-foreground mt-2">
                           {t("settings.remote.tutorialPost")}
                         </p>
+                        {/* 官方图文兜底：Cloudflare 面板 UI 迭代快，应用内步骤以简版
+                            为主，细节引导到官方文档（2026-09-20 用户裁决） */}
+                        <a
+                          href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1.5 inline-block text-xs text-blue-500 underline"
+                        >
+                          {t("settings.remote.tutorialDocs")}
+                        </a>
                       </div>
                     )}
                   </span>

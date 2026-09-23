@@ -26,24 +26,122 @@ use std::path::Path;
 
 /// 统一消息条目（camelCase 序列化 = 移动端契约，勿改字段名）。
 /// `seq` 是返回数组内的稳定顺序号（0 起文件序递增，前端按 seq 排序稳定）；
-/// `collapsed`：thinking 与 tool-call 默认折叠。
+/// `collapsed`：thinking 与 tool-call 默认折叠（plan 一等卡片恒展开）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMessage {
     pub seq: i64,
-    /// user / assistant（thinking、tool-call、tool-result 属 agent 侧工作产物，归 assistant）
+    /// user / assistant（thinking、tool-call、tool-result、plan 属 agent 侧工作产物，
+    /// 归 assistant）
     pub role: String,
-    /// user / assistant / thinking / tool-call / tool-result
+    /// user / assistant / thinking / tool-call / tool-result / plan
     pub kind: String,
-    /// 文本内容或工具摘要
+    /// 文本内容或工具摘要（kind = plan 时为计划 markdown 原文）
     pub content: String,
     /// epoch 毫秒（原生存储无时间戳的条目为 None）
     pub ts: Option<i64>,
-    /// kind = tool-call 时的工具名
+    /// kind = tool-call / plan 时的工具名（plan 保留原名供前端辨识，不参与折叠标签）
     pub tool_name: Option<String>,
-    /// kind = tool-call 时的参数 JSON 字符串（原生存储无参数则 None）
+    /// kind = tool-call 时的参数 JSON 字符串（原生存储无参数则 None；plan 恒 None——
+    /// 计划正文已升格进 content，参数串不再透传）
     pub tool_args: Option<String>,
     pub collapsed: bool,
+}
+
+/// 计划标签（批次丙 T4）：codex 的「计划」是**含 `<proposed_plan>…</proposed_plan>`
+/// 标签的 assistant 消息**（非工具调用——这是 T1 工具参数升格接不住的那一类）。
+/// 实机形态（本机 rollout 实录 `~/.codex/sessions/2026/08/03/rollout-*.jsonl`）：
+/// 标签前可能还有一段自由文本（"未收到选择，按推荐默认：…以下是修复计划。"），
+/// 标签内是完整 markdown 计划，标签后无后缀。
+/// 升格口径：整段消息剥出标签内容 → `kind="plan"`（一等计划卡，默认展开）；标签**外**
+/// 的前导文本若非空，作为普通 assistant 消息保留在计划卡之前（不丢用户可见内容）。
+const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";
+const PROPOSED_PLAN_CLOSE: &str = "</proposed_plan>";
+
+/// 从 assistant 文本中剥出 `<proposed_plan>` 段（批次丙 T4 纯函数）。
+/// 返回 `(标签前的文本, 标签内计划正文)`：
+/// - 无开标签 / 无闭标签 / 标签内为空（trim）→ `None`（不升格，调用方原样出文本）；
+/// - 开闭标签顺序颠倒 → `None`（防御：不猜）；
+/// - 多个标签段 → 取**第一段**（实机只见一段；多段时第一段即主计划）。
+///
+/// 标签本身不进入 content（T4 的验收之一：无标签残留）。
+fn split_proposed_plan(text: &str) -> Option<(String, String)> {
+    let start = text.find(PROPOSED_PLAN_OPEN)?;
+    let after_open = start + PROPOSED_PLAN_OPEN.len();
+    let rest = &text[after_open..];
+    let close_rel = rest.find(PROPOSED_PLAN_CLOSE)?;
+    let plan = rest[..close_rel].trim();
+    if plan.is_empty() {
+        return None;
+    }
+    let preamble = text[..start].trim();
+    Some((preamble.to_string(), plan.to_string()))
+}
+
+/// 计划文件引用识别（批次丙 T7）：工具结果/消息正文里出现的**计划文件路径** →
+/// 消息流补一张「计划文件卡」（kind="plan-file"，前端渲染文件名 + 可点预览）。
+///
+/// **为何需要**：kimi 的计划是一等文件（`~/.kimi-code/sessions/…/agents/main/plans/
+/// x.md`），写入动作在消息流里只留一行工具结果（"Wrote 4263 bytes to …"）——手机端
+/// 因此只见一行而读不到计划全文（图1 诉求）。识别该引用后出卡，卡片经既有文件预览
+/// 端点打开（豁免面见 `files::EXEMPT_SUBPATHS` 的 T7 尾段序列匹配）。
+///
+/// **识别判据（实测形态，勿凭想象扩面）**：本机 kimi wire 实录的三种引用都含
+/// `plans/<name>.md` 路径片段——
+///
+/// - `Wrote <N> bytes to <path>/plans/x.md`（Write 工具结果，实测原文）
+/// - `Plan file: <path>` / `Planning: <path>`（前缀变体，防御性覆盖）
+///
+/// 判据 = 文本含 `plans` 目录段（`/` 或 `\` 分隔皆可——Windows 反斜杠形态实测存在）
+/// 且其后紧跟 `<文件名>.md`，且文件名不含空白/引号（防把整句吞进路径）。命中即
+/// 产出——**按形态不按工具名**（claude/codex 的同类引用一并接住）。
+///
+/// 只取**第一个**命中（一次工具结果通常只写一个计划文件；多个时按出现序取首个，
+/// 与「计划」语义一致）。
+fn extract_plan_file_ref(text: &str) -> Option<String> {
+    // 逐候选扫描 `plans` 目录段（双分隔符）：其后须紧跟 `<文件名>.md`
+    let mut search_from = 0usize;
+    while search_from < text.len() {
+        let fwd = text[search_from..].find("plans/").map(|i| search_from + i);
+        let bwd = text[search_from..].find("plans\\").map(|i| search_from + i);
+        let plans_at = match (fwd, bwd) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        let start = plans_at + "plans/".len();
+        let rest = &text[start..];
+        // 文件名：到 `.md` 为止，字符集排除空白与路径/引号分隔符
+        if let Some(name_end) = rest.find(".md") {
+            let name = &rest[..name_end];
+            let ok = !name.is_empty()
+                && !name.contains([' ', '\t', '\n', '\r', '"', '\'', '<', '>', '|'])
+                && !name.contains('/')
+                && !name.contains('\\');
+            if ok {
+                // 回取 `plans` 之前的路径部分（到最近的空白/引号/行首为止）——
+                // 拼出可直接交给文件预览端点的**完整路径**（端点按会话 cwd 或绝对
+                // 路径解析）。注意 `before` 取到 `plans` 之前，`tail` 从 `plans`
+                // 开始——两段拼起来才是完整路径（省掉 tail 就会丢 `plans/` 段）
+                let before = &text[..plans_at];
+                let path_start = before
+                    .rfind([' ', '\t', '\n', '\r', '"', '\'', '<', '>'])
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let full = format!(
+                    "{}{}",
+                    &before[path_start..],
+                    &text[plans_at..start + name_end + 3]
+                );
+                if !full.trim().is_empty() {
+                    return Some(full.trim().to_string());
+                }
+            }
+        }
+        search_from = start;
+    }
+    None
 }
 
 impl SessionMessage {
@@ -64,13 +162,83 @@ impl SessionMessage {
         }
     }
 
-    /// 工具调用条目（collapsed = true）
+    /// 一等计划卡构造（`plan` / `plan-file` 共用形态骨架，五处升格点的差异只在
+    /// kind / content / tool_name）：role=assistant、collapsed=false（一等卡默认
+    /// 展开）、tool_args=None——正文已升格进 content，参数串不再透传
+    fn plan_card(kind: &str, content: String, ts: Option<i64>, tool_name: Option<String>) -> Self {
+        SessionMessage {
+            seq: 0,
+            role: "assistant".to_string(),
+            kind: kind.to_string(),
+            content,
+            ts,
+            tool_name,
+            tool_args: None,
+            collapsed: false,
+        }
+    }
+
+    /// assistant 文本条目（批次丙 T4）：含 `<proposed_plan>` 标签时**升格为一等计划卡**
+    /// ——剥标签产 `kind="plan"`（与工具参数升格同构，见 [`Self::tool_call`]）。
+    /// 返回 `Vec`（可能两条：前导文本 + 计划卡）；无标签 → 单条普通 assistant 消息。
+    ///
+    /// 收口在构造器侧（而非各工具的映射分支）：codex 走 `"message"` 分支产
+    /// assistant 文本，其他工具也可能出现同形标签（形态判据天然通用）。
+    fn assistant_text(content: impl Into<String>, ts: Option<i64>) -> Vec<Self> {
+        let text: String = content.into();
+        match split_proposed_plan(&text) {
+            Some((preamble, plan)) => {
+                let mut out = Vec::with_capacity(2);
+                if !preamble.is_empty() {
+                    out.push(Self::text("assistant", preamble, ts));
+                }
+                out.push(Self::plan_card("plan", plan, ts, None));
+                out
+            }
+            None => vec![Self::text("assistant", text, ts)],
+        }
+    }
+
+    /// 工具结果条目（批次丙 T7）：正文含**计划文件引用**时，除原 tool-result 外
+    /// **追加一张计划文件卡**（kind="plan-file"，content=可预览路径，默认展开）。
+    ///
+    /// 卡片与 tool-result **并存**（不替换）：工具结果原文（"Wrote 4263 bytes to …"）
+    /// 是操作事实，计划文件卡是「去读正文」的入口——两者对不同读者都有价值。
+    fn tool_result_with_plan_ref(content: impl Into<String>, ts: Option<i64>) -> Vec<Self> {
+        let text: String = content.into();
+        let mut out = vec![Self::text("tool-result", text.clone(), ts)];
+        if let Some(path) = extract_plan_file_ref(&text) {
+            out.push(Self::plan_card("plan-file", path, ts, None));
+        }
+        out
+    }
+
+    /// 工具调用条目（collapsed = true）。**计划形态升格收口（T1 一等卡片，按形态
+    /// 不按工具名）**：args JSON 顶层 `plan` 字段存在且为非空字符串（trim 口径）→
+    /// 改产出 kind="plan" 一等消息——content = 计划 markdown 原文、role=assistant、
+    /// tool_name 保留、tool_args=None、collapsed=false（默认展开，正合一等卡片语义）。
+    ///
+    /// 收口在本构造器的理由：八工具 13 个 tool-call 构造点全部经过此处，args 一律是
+    /// 序列化后的 JSON 字符串——codex function_call 的字符串形态 arguments 天然覆盖，
+    /// 无需逐点改写。解析失败 / plan 缺失 / plan 非字符串 / plan 空白 → 维持
+    /// tool-call 原状（不 panic、不丢条目）。本层是按需单会话读取路径（非 3s
+    /// 轮询），逐条 args 解析的开销可接受。
     fn tool_call(
         content: impl Into<String>,
         ts: Option<i64>,
         name: Option<String>,
         args: Option<String>,
     ) -> Self {
+        if let Some(args_str) = args.as_deref() {
+            let plan = serde_json::from_str::<serde_json::Value>(args_str)
+                .ok()
+                .and_then(|v| v.get("plan").and_then(|p| p.as_str()).map(String::from));
+            if let Some(plan) = plan {
+                if !plan.trim().is_empty() {
+                    return Self::plan_card("plan", plan, ts, name);
+                }
+            }
+        }
         SessionMessage {
             seq: 0,
             role: "assistant".to_string(),
@@ -803,7 +971,8 @@ fn map_claude_lines(lines: &[String]) -> Vec<SessionMessage> {
                                     .get("content")
                                     .and_then(content_block_text)
                                     .unwrap_or_else(|| "工具结果".to_string());
-                                out.push(SessionMessage::text("tool-result", text, ts));
+                                // T7：含计划文件引用 → 追加计划文件卡（形态判据跨工具）
+                                out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
                             }
                             _ => {}
                         }
@@ -987,9 +1156,15 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
                     .unwrap_or_default();
                 let text =
                     join_text_parts(payload.get("content").unwrap_or(&serde_json::Value::Null));
-                // user / assistant 正文（developer 等系统角色跳过）
+                // user / assistant 正文（developer 等系统角色跳过）。
+                // T4：assistant 侧走 [`SessionMessage::assistant_text`]——含
+                // `<proposed_plan>` 标签时升格一等计划卡（剥标签 + 前导文本保留）
                 if matches!(role, "user" | "assistant") && !text.trim().is_empty() {
-                    out.push(SessionMessage::text(role, text, ts));
+                    if role == "assistant" {
+                        out.extend(SessionMessage::assistant_text(text, ts));
+                    } else {
+                        out.push(SessionMessage::text(role, text, ts));
+                    }
                 }
             }
             "function_call" => {
@@ -1005,6 +1180,34 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
                     args,
                 ));
             }
+            "custom_tool_call" => {
+                // T5（手工验收修复批 D5）：apply_patch 补丁调用——从补丁**头行**提取
+                // 文件变更（*** Add/Update/Delete File: <path>），args 对齐 APP 线路
+                // fileChange 形态（{"changes":[{"op","path"}]}——files.rs PATH_KEYS
+                // 的 "path" 键据此吸收入文件面板）。只解析头行、不碰补丁正文；旧
+                // function_call+command 串「不收串内路径」防误收规则保持
+                let name = payload.get("name").and_then(|t| t.as_str());
+                let input = payload
+                    .get("input")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or_default();
+                let mut changes: Vec<serde_json::Value> = Vec::new();
+                let mut paths: Vec<String> = Vec::new();
+                for line in input.lines() {
+                    if let Some((op, path)) = parse_patch_header(line) {
+                        paths.push(path.clone());
+                        changes.push(serde_json::json!({ "op": op, "path": path }));
+                    }
+                }
+                if !paths.is_empty() {
+                    out.push(SessionMessage::tool_call(
+                        format!("修改 {}", paths.join(", ")),
+                        ts,
+                        name.map(String::from),
+                        serde_json::to_string(&changes).ok(),
+                    ));
+                }
+            }
             "function_call_output" => {
                 // output 双形态（字符串 / 对象）
                 let text = match payload.get("output") {
@@ -1013,7 +1216,8 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
                     _ => None,
                 }
                 .unwrap_or_else(|| "工具结果".to_string());
-                out.push(SessionMessage::text("tool-result", text, ts));
+                // T7：含计划文件引用 → 追加计划文件卡（codex 亦写 plans/x.md 形态）
+                out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
             }
             "reasoning" => {
                 // summary 元素双形态（实测纯字符串；亦容忍 {text} 对象）
@@ -1039,6 +1243,26 @@ fn map_codex_lines(lines: &[String]) -> Vec<SessionMessage> {
         }
     }
     out
+}
+
+/// 解析 apply_patch 补丁头行：`*** Add File: <path>` / `*** Update File: <path>` /
+/// `*** Delete File: <path>` → (op, path)；其余行（含补丁正文 +前缀行）→ None。
+/// 只认这三个前缀——T5 防误收边界（路径带空格时取 `: ` 之后整段 trim）
+fn parse_patch_header(line: &str) -> Option<(&'static str, String)> {
+    let line = line.trim_end();
+    for (prefix, op) in [
+        ("*** Add File: ", "add"),
+        ("*** Update File: ", "update"),
+        ("*** Delete File: ", "delete"),
+    ] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            let path = path.trim();
+            if !path.is_empty() {
+                return Some((op, path.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Codex APP 线路：thread_history_*.sqlite 的 thread_items（codex_thread_parser
@@ -1327,14 +1551,102 @@ pub(crate) fn map_kimi_lines(lines: &[String]) -> Vec<SessionMessage> {
                                 _ => None,
                             })
                             .unwrap_or_else(|| "工具结果".to_string());
-                        out.push(SessionMessage::text("tool-result", text, ts));
+                        // T7：含计划文件引用 → 追加计划文件卡（kimi 计划是一等文件，
+                        // 消息流只有 "Wrote N bytes to …/plans/x.md" 一行——图1 诉求）
+                        out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
                     }
                     _ => {} // step.begin/end 等边界 → 跳过
                 }
             }
-            // metadata / config.update / usage.record / turn.ended / interaction.* 等跳过
+            // ===== 丁T2：kimi 计划审批（`interaction.request`）→ 计划双卡 =====
+            //
+            // 根因（问题 3 的正文半）：`interaction.*` 原在本 `_ =>` 分支整类跳过，
+            // 于是 kimi 的计划**正文**（wire 的 `request.display.plan` 内联全文）从未
+            // 进入消息流——终端里看得见、手机上看不见，违反裁1「计划不得以未渲染形态
+            // 留在消息流里」。
+            //
+            // 数据形态（本机 wire 实录，`wd_proj-ki1_89e8318bc1ff`）：
+            // ```json
+            // {"type":"interaction.request","kind":"approval",
+            //  "request":{"toolName":"ExitPlanMode","action":"Presenting plan and exiting plan mode",
+            //   "display":{"kind":"plan_review","plan":"# Plan: …","path":"…/agents/main/plans/x.md"}}}
+            // ```
+            // `display.kind` 实测取值族：plan_review / file_io / command（另见 agent_call /
+            // skill_call / todo_list / url_fetch / goal_start）——**只有 plan_review 是计划**
+            // （file_io 的 path 是普通业务文件，拿它当计划文件会误出卡）。
+            //
+            // 产出（裁1 计划双卡矩阵：kimi 正文来源=**文件**，但 wire 已内联全文，
+            // 故直接吃内联正文、无需读盘；文件卡给出可预览路径）：
+            // - `display.plan` 非空白 → `kind="plan"`（正文卡，markdown 原文）；
+            // - `display.path` 非空白 → **追加** `kind="plan-file"`（文件卡，前端「查看
+            //   计划」按钮走既有文件预览；路径豁免见 files::EXEMPT_SUBPATHS 的
+            //   agents/main/plans）；
+            // - 两者皆缺 → 零产出（不产空卡，§2.8 兜底）。
+            "interaction.request" => {
+                if let Some((plan, path)) = kimi_plan_review_parts(&v) {
+                    out.extend(kimi_plan_cards(plan.as_deref(), path.as_deref(), ts));
+                }
+            }
+            // metadata / config.update / usage.record / turn.ended / interaction.resolved
+            // 等跳过
             _ => {}
         }
+    }
+    out
+}
+
+/// 从 kimi `interaction.request` 行里抽计划双卡的原料（纯函数；**只认计划审批形态**）。
+///
+/// 判据（实测形态，勿凭想象扩面）：`kind == "approval"` ∧
+/// `request.display.kind == "plan_review"`。命中后取 `display.plan`（内联正文）与
+/// `display.path`（落盘路径）两个**可缺省**字段（各自 trim 后非空才算在场）。
+///
+/// 非计划审批（file_io / command）与问答（kind=question）一律 None——file_io 的
+/// `path` 是业务文件，收它会让普通 Write 审批也冒出「计划文件卡」（误报）。
+fn kimi_plan_review_parts(v: &serde_json::Value) -> Option<(Option<String>, Option<String>)> {
+    if v.get("kind").and_then(|k| k.as_str()) != Some("approval") {
+        return None;
+    }
+    let display = v.pointer("/request/display")?;
+    if display.get("kind").and_then(|k| k.as_str()) != Some("plan_review") {
+        return None;
+    }
+    // 在场判据用 trim（空白不算正文），但**下发原文不 trim**——与
+    // [`SessionMessage::tool_call`] 的 claude 升格口径逐字一致（那边也是
+    // trim 判空、原样下发），两家的正文卡内容口径不得漂移
+    let raw = |key: &str| -> Option<String> {
+        display
+            .get(key)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from)
+    };
+    Some((raw("plan"), raw("path")))
+}
+
+/// 计划双卡构造（裁1「能上就都上」）：正文卡（`kind="plan"`，markdown 原文）在前、
+/// 文件卡（`kind="plan-file"`，路径）在后；任一侧缺失则只出另一侧，两者皆缺零产出。
+///
+/// 与 claude/codex 的升格口径一致（content=计划原文、role=assistant、collapsed=false
+/// ——一等卡默认展开），故前端渲染分支零新增（`SessionDetail.tsx` 的 plan / plan-file
+/// 两个 case 直接接住）。
+fn kimi_plan_cards(plan: Option<&str>, path: Option<&str>, ts: Option<i64>) -> Vec<SessionMessage> {
+    let mut out = Vec::with_capacity(2);
+    if let Some(plan) = plan {
+        out.push(SessionMessage::plan_card(
+            "plan",
+            plan.to_string(),
+            ts,
+            None,
+        ));
+    }
+    if let Some(path) = path {
+        out.push(SessionMessage::plan_card(
+            "plan-file",
+            path.to_string(),
+            ts,
+            None,
+        ));
     }
     out
 }
@@ -1431,7 +1743,8 @@ fn map_workbuddy_lines(lines: &[String]) -> Vec<SessionMessage> {
                     _ => None,
                 }
                 .unwrap_or_else(|| "工具结果".to_string());
-                out.push(SessionMessage::text("tool-result", text, ts));
+                // T7：含计划文件引用 → 追加计划文件卡（形态判据跨工具）
+                out.extend(SessionMessage::tool_result_with_plan_ref(text, ts));
             }
             _ => {}
         }
@@ -1442,6 +1755,49 @@ fn map_workbuddy_lines(lines: &[String]) -> Vec<SessionMessage> {
 // ============================================================
 // OpenCode：~/.local/share/opencode/opencode.db（message + part 表）
 // ============================================================
+
+/// opencode 问答类部件的**终态**判定（丁T1 复评 F-3，纯函数可测）：
+/// `type=="tool"` 且（`tool=="question"` ∨ `state.input` 满足 T3 问答形态）且
+/// `state.status ∈ {"completed","error"}` → true（已答/被拒，销卡信号该补）。
+///
+/// 与 `monitor::opencode_parser::pending_question_part` 同口径的**互补面**：那边判
+/// 「待决」（pending/running 且无 answers → 红灯），这边判「终态」（该补 tool-result
+/// 让问答卡销掉）。两处判据必须同源同形——否则会出现「状态链说已答、端点说还在问」
+/// 的自相矛盾（F-3 的根因教训）。复评 F-4 后形态分支统一收窄到 T3 口径
+/// （`questions[]` 非空 + 元素含 question + options[] 非空 + 每项含 label）。
+fn is_answered_question_part(part: &serde_json::Value) -> bool {
+    if part.get("type").and_then(|t| t.as_str()) != Some("tool") {
+        return false;
+    }
+    let state = part.get("state").unwrap_or(&serde_json::Value::Null);
+    let by_name = part.get("tool").and_then(|t| t.as_str()) == Some("question");
+    let by_shape = state
+        .pointer("/input/questions")
+        .and_then(|q| q.as_array())
+        .map(|arr| {
+            !arr.is_empty()
+                && arr.iter().all(|q| {
+                    q.get("question").and_then(|x| x.as_str()).is_some()
+                        && q.get("options")
+                            .and_then(|o| o.as_array())
+                            .map(|opts| {
+                                !opts.is_empty()
+                                    && opts
+                                        .iter()
+                                        .all(|o| o.get("label").and_then(|l| l.as_str()).is_some())
+                            })
+                            .unwrap_or(false)
+                })
+        })
+        .unwrap_or(false);
+    if !(by_name || by_shape) {
+        return false;
+    }
+    matches!(
+        state.get("status").and_then(|s| s.as_str()),
+        Some("completed") | Some("error")
+    )
+}
 
 fn read_opencode_messages_with(
     home: &Path,
@@ -1531,6 +1887,36 @@ fn read_opencode_messages_with(
                         name.map(String::from),
                         args,
                     ));
+                    // ===== 丁T1 复评 F-3：问答类部件的**销卡信号** =====
+                    //
+                    // 根因：本 reader 的 tool 分支**只产 tool-call、不产 tool-result**
+                    // （其他 reader 都产：codex L1231 / claude / kimi 同款），而问答端点
+                    // `question_scan_sync` 的销卡判据是「该 tool-call 之后**存在**
+                    // tool-result」——对 opencode 该条件**恒假**，于是已答完的 opencode
+                    // 问题仍判 available=true，问答卡永不消失（违反 T1 验收「回答后
+                    // 回落 / 正常运行零误报」）。
+                    //
+                    // **只对问答类部件补**（`tool=="question"` ∨ `state.input` 含非空
+                    // `questions[]` 形态——与 monitor::opencode_parser::pending_question_part
+                    // 同口径），且只在**终态**（`state.status ∈ {completed, error}`）补：
+                    // - 不动其它工具（bash/read/write/…）：它们的 tool-result 缺失是既有
+                    //   形态，补上会改变消息流的渲染与 T7 计划文件引用链（超出本任务面）；
+                    // - 待决期间（pending/running）**不补**：否则问答卡会在待决窗口内被
+                    //   自己误销（这正是 F-3 测试要锁的反面）。
+                    // 内容取 `state.output`（缺失给兜底文案）——问答端点的销卡判据只看
+                    // 「存在一条 tool-result」，不解析其内容。
+                    if is_answered_question_part(&pv) {
+                        let text = pv
+                            .pointer("/state/output")
+                            .map(|o| match o {
+                                serde_json::Value::String(s) => s.clone(),
+                                v if !v.is_null() => serde_json::to_string(v).unwrap_or_default(),
+                                _ => String::new(),
+                            })
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| "问题已作答".to_string());
+                        out.push(SessionMessage::text("tool-result", text, *ts));
+                    }
                 }
                 // step-start / patch / file / 未知 → 跳过
                 _ => {}
@@ -2183,7 +2569,347 @@ mod tests {
         .is_err());
     }
 
+    // ==== 计划形态升格（T1 一等卡片，按形态不按工具名）====
+
+    /// ① claude JSONL：tool_use(input.plan=非空 markdown) → kind="plan" 一等消息
+    /// （content=计划原文、role=assistant、collapsed=false、tool_name 保留、tool_args 清空）
+    #[test]
+    fn claude_plan_input_promotes_to_first_class_plan_message() {
+        let lines = vec![r##"{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ExitPlanMode","input":{"plan":"# 执行计划\n\n- 第一步\n- 第二步"}}]}}"##.to_string()];
+        let msgs = map_claude_lines(&lines);
+        assert_eq!(msgs.len(), 1, "升格后只产 plan 一条，不产 tool-call");
+        let m = &msgs[0];
+        assert_eq!(m.kind, "plan");
+        assert_eq!(m.role, "assistant");
+        assert_eq!(
+            m.content, "# 执行计划\n\n- 第一步\n- 第二步",
+            "计划原文原样"
+        );
+        assert!(!m.collapsed, "plan 默认展开（一等卡片）");
+        assert_eq!(m.tool_name.as_deref(), Some("ExitPlanMode"), "工具名保留");
+        assert_eq!(m.tool_args, None, "参数串不透传（正文已升格）");
+    }
+
+    /// ② input.plan 空串 / 空白 / 缺失 → 维持 tool-call 原样（不升格、不丢条目）
+    #[test]
+    fn claude_empty_or_missing_plan_keeps_tool_call() {
+        let lines = vec![
+            // plan 空串
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ExitPlanMode","input":{"plan":""}}]}}"#.to_string(),
+            // plan 纯空白（trim 口径视同空）
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"ExitPlanMode","input":{"plan":"  \n "}}]}}"#.to_string(),
+            // 无 plan 字段（普通工具）
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"ls"}}]}}"#.to_string(),
+            // args 非 JSON 形态（防御：解析失败维持原状，不 panic）
+            r#"{"type":"assistant","timestamp":"2026-09-15T00:00:04.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t4","name":"Weird","input":"raw-string"}]}}"#.to_string(),
+        ];
+        let msgs = map_claude_lines(&lines);
+        assert_eq!(msgs.len(), 4, "四条都保留（形态不达标不升格也不丢弃）");
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(m.kind, "tool-call", "第 {i} 条应维持 tool-call");
+            assert!(m.collapsed, "tool-call 默认折叠语义不变");
+            assert!(m.tool_args.is_some(), "参数串原样透传");
+        }
+    }
+
+    /// ③ 非 ExitPlanMode 工具名但 input.plan 非空 → 同样升格（「按形态不按工具名」
+    /// 的回归锁——zcode 等工具记录的是显示 title，按名字匹配会漏）
+    #[test]
+    fn plan_promotion_is_form_based_not_name_based() {
+        let msgs = map_claude_lines(vec![r###"{"type":"assistant","timestamp":"2026-09-15T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"SomeCustomPlanner","input":{"plan":"## 方案正文"}}]}}"###.to_string()].as_slice());
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, "plan", "工具名无关，形态命中即升格");
+        assert_eq!(msgs[0].content, "## 方案正文");
+        assert_eq!(msgs[0].tool_name.as_deref(), Some("SomeCustomPlanner"));
+    }
+
     // ==== Codex（rollout 合成行 + thread_history tmp sqlite）====
+
+    // ---- 批次丙 T4：`<proposed_plan>` 剥标签升格 ----
+
+    /// T4 纯函数：开闭标签剥出 + 前导文本分离（真实形态取自本机 rollout 实录）
+    #[test]
+    fn split_proposed_plan_handles_real_shape() {
+        // 真机实录形态：前导文本 + 标签 + markdown 计划 + 闭标签
+        let real = "未收到选择，按规则采用推荐默认：历史档案保留原样。以下是修复计划。\n\n<proposed_plan>\n# 修复 DM 文档同步遗留风险\n\n## 根因\n1. xxx\n</proposed_plan>";
+        let (pre, plan) = split_proposed_plan(real).expect("真实形态必须可剥");
+        assert_eq!(
+            pre,
+            "未收到选择，按规则采用推荐默认：历史档案保留原样。以下是修复计划。"
+        );
+        assert_eq!(plan, "# 修复 DM 文档同步遗留风险\n\n## 根因\n1. xxx");
+        assert!(!plan.contains("proposed_plan"), "剥离后不得有标签残留");
+
+        // 无前导文本（标签在开头）
+        let (pre, plan) = split_proposed_plan("<proposed_plan># P</proposed_plan>").unwrap();
+        assert!(pre.is_empty());
+        assert_eq!(plan, "# P");
+
+        // 退化形态 → None（不升格，不猜）
+        for bad in [
+            "普通消息，没有标签",
+            "<proposed_plan>只有开标签",
+            "</proposed_plan>先闭后开<proposed_plan>",
+            "<proposed_plan>   </proposed_plan>", // 空白内容
+            "<proposed_plan></proposed_plan>",    // 空内容
+        ] {
+            assert!(
+                split_proposed_plan(bad).is_none(),
+                "退化形态不得升格: {bad}"
+            );
+        }
+    }
+
+    /// T4：assistant 文本含 `<proposed_plan>` → 产 [前导 assistant 文本, plan 一等卡]
+    /// （kind=plan、collapsed=false、content=剥标签后的 markdown）
+    #[test]
+    fn codex_proposed_plan_promotes_to_plan_card() {
+        let text = "说明一句。\n<proposed_plan>\n# 计划标题\n\n- 步骤一\n</proposed_plan>";
+        let msgs = SessionMessage::assistant_text(text, Some(123));
+        assert_eq!(msgs.len(), 2, "前导文本 + 计划卡两条");
+        assert_eq!(msgs[0].kind, "assistant");
+        assert_eq!(msgs[0].content, "说明一句。");
+        assert_eq!(msgs[1].kind, "plan", "标签内容升格一等计划卡");
+        assert_eq!(msgs[1].content, "# 计划标题\n\n- 步骤一");
+        assert!(
+            !msgs[1].content.contains("proposed_plan"),
+            "计划卡不得有标签残留（T4 验收）"
+        );
+        assert!(!msgs[1].collapsed, "一等卡默认展开");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].seq, 0, "seq 由调用方统一编号（构造器恒 0）");
+    }
+
+    /// T4 端到端：codex rollout 的 assistant message 行 → 消息流出现 kind=plan
+    /// （走 `map_codex_lines` 真实分派路径，非只测纯函数）
+    #[test]
+    fn codex_rollout_assistant_with_plan_tag_yields_plan_kind() {
+        let line = r#"{"timestamp":"2026-08-03T17:16:27.100Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"以下是计划。\n<proposed_plan>\n## 方案\n1. 做 A\n</proposed_plan>"}]}}"#;
+        let msgs = map_codex_lines(&[line.to_string()]);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["assistant", "plan"],
+            "升格后两条（前导 + 计划）"
+        );
+        assert_eq!(msgs[1].content, "## 方案\n1. 做 A");
+        assert!(!msgs[1].content.contains("proposed_plan"));
+        // 无标签的 assistant 消息不受影响（零回归）
+        let plain = r#"{"timestamp":"2026-08-03T17:16:27.100Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"普通回复"}]}}"#;
+        let msgs = map_codex_lines(&[plain.to_string()]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, "assistant");
+    }
+
+    // ---- 批次丙 T7：计划文件引用识别 ----
+
+    /// T7 纯函数：kimi 实测原文形态（"Wrote N bytes to …/plans/x.md"）→ 完整路径
+    #[test]
+    fn extract_plan_file_ref_handles_real_wire_text() {
+        // 本机 kimi wire 实测原文（Write 工具结果）
+        let real = "Wrote 4263 bytes to C:/Users/bunny/.kimi-code/sessions/wd_test_72c4040eb71a/session_46b9cd5f-c817-4b84-a7ef-ee1ff8a4c59d/agents/main/plans/miss-martian-she-hulk-beast.md";
+        assert_eq!(
+            extract_plan_file_ref(real).as_deref(),
+            Some("C:/Users/bunny/.kimi-code/sessions/wd_test_72c4040eb71a/session_46b9cd5f-c817-4b84-a7ef-ee1ff8a4c59d/agents/main/plans/miss-martian-she-hulk-beast.md")
+        );
+        // Windows 反斜杠形态
+        let win = r"Wrote 12 bytes to C:\Users\u\.kimi-code\sessions\s\agents\main\plans\p.md";
+        assert_eq!(
+            extract_plan_file_ref(win).as_deref(),
+            Some(r"C:\Users\u\.kimi-code\sessions\s\agents\main\plans\p.md")
+        );
+        // 前缀变体
+        assert!(extract_plan_file_ref("Plan file: /w/plans/a.md").is_some());
+        assert!(extract_plan_file_ref("Planning: /w/plans/a.md").is_some());
+        // 引号包裹（工具结果里 JSON 转义后的常见形态）
+        assert_eq!(
+            extract_plan_file_ref(r#""/w/plans/a.md""#).as_deref(),
+            Some("/w/plans/a.md")
+        );
+
+        // 不命中：无 plans/ / 非 .md / 文件名含空白（防吞整句）
+        for bad in [
+            "Wrote 5 bytes to /w/other/x.md",
+            "plans/note.txt",
+            "普通回复，没有路径",
+            "plans/ two words.md",
+        ] {
+            assert!(
+                extract_plan_file_ref(bad).is_none(),
+                "不得命中: {bad:?} → {:?}",
+                extract_plan_file_ref(bad)
+            );
+        }
+    }
+
+    /// T7：工具结果含计划文件引用 → 产 [tool-result 原文, plan-file 卡]（原文不丢）
+    #[test]
+    fn plan_file_ref_yields_card_alongside_tool_result() {
+        let text = "Wrote 99 bytes to /w/plans/round-1.md";
+        let msgs = SessionMessage::tool_result_with_plan_ref(text, Some(7));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].kind, "tool-result", "工具结果原文保留");
+        assert_eq!(msgs[0].content, text);
+        assert_eq!(msgs[1].kind, "plan-file", "追加计划文件卡");
+        assert_eq!(msgs[1].content, "/w/plans/round-1.md");
+        assert!(!msgs[1].collapsed, "入口卡默认展开");
+
+        // 无引用 → 只产 tool-result（零回归）
+        let plain = SessionMessage::tool_result_with_plan_ref("ok", Some(7));
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].kind, "tool-result");
+    }
+
+    // ---- 丁T2：kimi `interaction.request`（计划审批）→ 计划双卡（裁1）----
+
+    /// 真实形态夹具（本机 wire 实录，`wd_proj-ki1_89e8318bc1ff`）——`display.plan`
+    /// **内联全文** + `display.path` 落盘路径。缩录正文为最小可辨形态。
+    fn kimi_plan_review_line() -> String {
+        r##"{"type":"interaction.request","agentId":"main","id":"approval_38a02479","kind":"approval","toolCallId":"call_546f","request":{"id":"approval_38a02479","sessionId":"session_5f4b","agentId":"main","turnId":0,"toolCallId":"call_546f","toolName":"ExitPlanMode","action":"Presenting plan and exiting plan mode","display":{"kind":"plan_review","plan":"# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`.\n","path":"C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/rogue-multiple-man-fire.md"}},"time":1789977432472}"##.to_string()
+    }
+
+    /// 丁T2 主用例：`interaction.request(kind=approval, display.kind=plan_review)` →
+    /// 消息流产**计划双卡**（裁1「能上就都上」）：
+    /// - `kind="plan"`（正文卡）= `display.plan` 内联全文（**不读文件**——wire 已给全文）；
+    /// - `kind="plan-file"`（文件卡）= `display.path`（前端「查看计划」读文件预览）。
+    ///
+    /// 修复的根因（问题 3 的正文半）：`interaction.*` 原被 `_ => {}` 整类跳过，kimi 的
+    /// 计划正文因此**从未进入消息流**——终端里看得见、手机上看不见。
+    #[test]
+    fn kimi_plan_review_yields_plan_and_file_cards() {
+        let msgs = map_kimi_lines(&[kimi_plan_review_line()]);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["plan", "plan-file"],
+            "计划审批 → 正文卡 + 文件卡（正文在前，文件入口在后）"
+        );
+        assert_eq!(
+            msgs[0].content, "# Plan: Create hi.txt\n\n## Goal\nCreate `hi.txt`.\n",
+            "正文卡 = display.plan 内联全文（markdown 原文，不做任何加工）"
+        );
+        assert!(!msgs[0].collapsed, "正文卡恒展开（一等卡语义）");
+        assert_eq!(msgs[0].role, "assistant");
+        assert_eq!(
+            msgs[1].content,
+            "C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/rogue-multiple-man-fire.md",
+            "文件卡 = display.path（可预览路径原样）"
+        );
+        assert!(!msgs[1].collapsed, "文件入口卡恒展开");
+        // 裁1 硬要求：计划不得以 JSON/未渲染形态留在消息流里
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("plan_review")
+                || m.content.contains("\"display\"")
+                || m.kind == "tool-call"),
+            "wire 的 interaction JSON 结构不得泄漏进消息流：{msgs:?}"
+        );
+        assert_eq!(msgs[0].ts, Some(1789977432472));
+    }
+
+    /// 丁T2 降级：`display.plan` 缺失/空白但 `display.path` 在场 → **只出文件卡**
+    /// （前端「查看计划」按钮读文件，正文照样可达——§2.8 兜底，不假造正文）。
+    #[test]
+    fn kimi_plan_review_without_inline_plan_yields_file_card_only() {
+        for display in [
+            r#"{"kind":"plan_review","path":"C:/u/.kimi-code/sessions/s/agents/main/plans/a.md"}"#,
+            r#"{"kind":"plan_review","plan":"   ","path":"C:/u/.kimi-code/sessions/s/agents/main/plans/a.md"}"#,
+        ] {
+            let line = format!(
+                r#"{{"type":"interaction.request","id":"approval_1","kind":"approval","request":{{"toolName":"ExitPlanMode","display":{display}}},"time":5}}"#
+            );
+            let msgs = map_kimi_lines(&[line]);
+            let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+            assert_eq!(kinds, vec!["plan-file"], "正文缺失 → 只出文件卡：{display}");
+            assert!(msgs[0].content.ends_with("plans/a.md"));
+        }
+        // 两者皆缺 → 零产出（不产空卡）
+        let line = r#"{"type":"interaction.request","id":"approval_1","kind":"approval","request":{"toolName":"ExitPlanMode","display":{"kind":"plan_review"}},"time":5}"#;
+        assert!(map_kimi_lines(&[line.to_string()]).is_empty());
+    }
+
+    /// 丁T2 范围守卫：**只有 `kind=approval ∧ display.kind=plan_review`** 产计划卡。
+    /// 其余 interaction 形态一律零产出（零回归）：
+    /// - `file_io`（Write 审批，display 是 {operation,path,content}——**不是计划**，不能
+    ///   拿 `path` 当计划文件：本机 wire 实测 file_io 的 path 常指向普通业务文件）；
+    /// - `kind=question`（问答，display 无 plan/path）；
+    /// - 缺 display / 缺 request / display.kind 未知。
+    #[test]
+    fn kimi_non_plan_review_interactions_yield_nothing() {
+        for line in [
+            // file_io：Write 审批（真实形态，path 是业务文件）
+            r#"{"type":"interaction.request","id":"a1","kind":"approval","request":{"toolName":"Write","display":{"kind":"file_io","operation":"write","path":"C:/tmp/hi.txt","content":"hi"}},"time":5}"#,
+            // command：Bash 审批
+            r#"{"type":"interaction.request","id":"a2","kind":"approval","request":{"toolName":"Bash","display":{"kind":"command","command":"ls"}},"time":5}"#,
+            // question：问答（不产计划卡——问答走问答端点）
+            r#"{"type":"interaction.request","id":"q1","kind":"question","request":{"questions":[{"question":"q","options":[{"label":"a"}]}]},"time":5}"#,
+            // 缺 request / 缺 display / 未知 display.kind
+            r#"{"type":"interaction.request","id":"a3","kind":"approval","time":5}"#,
+            r#"{"type":"interaction.request","id":"a4","kind":"approval","request":{},"time":5}"#,
+            r#"{"type":"interaction.request","id":"a5","kind":"approval","request":{"display":{"kind":"todo_list"}},"time":5}"#,
+            // resolved：销卡信号，不产消息
+            r#"{"type":"interaction.resolved","id":"a1","response":{"decision":"approved"},"time":6}"#,
+        ] {
+            assert!(
+                map_kimi_lines(&[line.to_string()]).is_empty(),
+                "非计划审批形态必须零产出：{line}"
+            );
+        }
+    }
+
+    /// 丁T2 端到端：真实 wire 序列（计划文件写入 → 计划审批 → 批准 → ExitPlanMode 回执）
+    /// 走完整映射，消息流末态形状与实机一致（plan 卡在场且其后跟着 tool-call/tool-result
+    /// ——后者是审批端点的「待决与否」判据输入，见 `remote::api::kimi_plan_approval_pending`）。
+    #[test]
+    fn kimi_wire_plan_review_sequence_end_to_end() {
+        let lines = vec![
+            r#"{"type":"turn.prompt","input":[{"type":"text","text":"plan a change"}],"time":1}"#
+                .to_string(),
+            r##"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c1","name":"Write","args":{"path":"p.md","content":"# P"}},"time":2}"##.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c1","result":{"output":"Wrote 400 bytes to C:/u/.kimi-code/sessions/s/agents/main/plans/plan-a.md"}},"time":3}"#.to_string(),
+            kimi_plan_review_line(),
+            r#"{"type":"interaction.resolved","id":"approval_38a02479","response":{"decision":"approved","selectedLabel":"Approve"},"time":4}"#.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"c2","name":"ExitPlanMode","args":{}},"time":5}"#.to_string(),
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"c2","result":{"output":"Exited plan mode."}},"time":6}"#.to_string(),
+        ];
+        let msgs = map_kimi_lines(&lines);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "user",
+                "tool-call",
+                "tool-result",
+                "plan-file",
+                "plan",
+                "plan-file",
+                "tool-call",
+                "tool-result"
+            ],
+            "实机序列末态形状（Write 计划 → T7 文件卡 → 审批正文卡+文件卡 → ExitPlanMode 回执）"
+        );
+        // 尾部（审批窗口关闭后）：最后一条 plan 之后存在 tool-call/tool-result
+        // → 审批端点的「待决」判据必须为假（本用例锁语义契约，判据单测见 api.rs）
+        let last_plan = msgs.iter().rposition(|m| m.kind == "plan").unwrap();
+        assert!(
+            msgs[last_plan + 1..]
+                .iter()
+                .any(|m| m.kind == "tool-call" || m.kind == "tool-result"),
+            "批准后 plan 之后必有工具事件（审批窗口已关）"
+        );
+    }
+
+    /// T7 端到端：kimi wire 的 tool.result 行 → 消息流出 plan-file（走真实分派路径）
+    #[test]
+    fn kimi_wire_plan_write_yields_plan_file_kind() {
+        let line = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","toolCallId":"c1","result":{"output":"Wrote 4263 bytes to C:/Users/u/.kimi-code/sessions/wd_x/session_y/agents/main/plans/plan-a.md"}}}"#;
+        let msgs = map_kimi_lines(&[line.to_string()]);
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["tool-result", "plan-file"]);
+        assert!(msgs[1].content.ends_with("plans/plan-a.md"));
+        // 普通工具结果零回归
+        let plain = r#"{"type":"context.append_loop_event","agentId":"main","event":{"type":"tool.result","toolCallId":"c2","result":{"output":"done"}}}"#;
+        assert_eq!(map_kimi_lines(&[plain.to_string()]).len(), 1);
+    }
 
     #[test]
     fn codex_maps_rollout_lines() {
@@ -2212,6 +2938,55 @@ mod tests {
             Some(r#"{"cmd":"git status"}"#)
         );
         assert_eq!(msgs[4].content, "ok");
+    }
+
+    #[test]
+    fn codex_custom_tool_call_extracts_files() {
+        // T5（D5）：apply_patch（custom_tool_call）从整条丢弃改为头行提取上板——
+        // md×3（新增×2 + 更新×1）/svg×1 出路径、PNG 照旧（view_image 结构化引用）、
+        // 串内路径不误收。F5③ 夹具补至 md×3（对齐真实 patch 形态：多文件批量变更）
+        // patch 用 JSON 转义形态（字面 \n）——拼进 rollout 行后才是合法 JSON 字符串，
+        // serde 解析回真实换行（parse_patch_header 走 lines() 逐行吃）
+        let patch = "*** Begin Patch\\n*** Add File: notes/a.md\\n+# 计划\\n*** Add File: notes/b.md\\n+## 附录\\n*** Add File: notes/b.svg\\n+<svg/>\\n*** Update File: docs/c.md\\n@@\\n*** End Patch";
+        let lines = vec![
+            format!(
+                r#"{{"timestamp":"2026-09-06T05:41:00.000Z","type":"response_item","payload":{{"type":"custom_tool_call","id":"ctc_1","name":"apply_patch","input":"{patch}"}}}}"#
+            ),
+            // PNG 照旧：view_image 结构化引用（file_path 键既有收集）
+            r#"{"timestamp":"2026-09-06T05:41:10.000Z","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"file_path\":\"/w/img.png\"}"}}"#.to_string(),
+            // 串内路径不误收：exec_command 的 cmd 串带类路径文本（PATH_KEYS 无 cmd 键）
+            r#"{"timestamp":"2026-09-06T05:41:20.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat src/lib.rs\"}"}}"#.to_string(),
+        ];
+        let msgs = map_codex_lines(&lines);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].kind, "tool-call");
+        assert_eq!(msgs[0].tool_name.as_deref(), Some("apply_patch"));
+        for p in ["notes/a.md", "notes/b.md", "notes/b.svg", "docs/c.md"] {
+            assert!(msgs[0].content.contains(p), "content 应含 {p}");
+        }
+        let args = msgs[0]
+            .tool_args
+            .as_deref()
+            .expect("args 应为 changes JSON");
+        for p in ["notes/a.md", "notes/b.md", "notes/b.svg", "docs/c.md"] {
+            assert!(args.contains(p), "args 应含 {p}");
+        }
+        // files.rs PATH_KEYS 吸收（origin=tool_write）：纯收集函数对 args 的回收断言
+        let v: serde_json::Value = serde_json::from_str(args).unwrap();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        crate::remote::files::collect_path_values(&v, &mut out, &mut seen);
+        assert_eq!(out.len(), 4, "PATH_KEYS 按路径吸收四条变更");
+        assert!(out.iter().all(|p| !p.ends_with(".png")));
+        // md×3 计数（F5③ 口径锁：三条 md 变更全部上板，无去重误并）
+        assert_eq!(
+            out.iter().filter(|p| p.ends_with(".md")).count(),
+            3,
+            "md 变更应为 3 条：{out:?}"
+        );
+        // PNG 照旧 + 串内不误收
+        assert!(msgs[1].tool_args.as_deref().unwrap().contains("img.png"));
+        assert!(msgs[2].tool_args.as_deref().unwrap().contains("src/lib.rs"));
     }
 
     #[test]
@@ -2580,6 +3355,137 @@ mod tests {
             .contains("\"cmd\":\"ls\""));
         // 未知会话 → Err
         assert!(read_session_messages_with(tmp.path(), "opencode", "ses_other", 200).is_err());
+    }
+
+    /// 丁T1 复评 F-3：opencode 问答类部件在**终态**（completed / error）→ 追加一条
+    /// tool-result（销卡信号，问答端点据此判「已答」让卡片消失）；
+    /// **待决**（pending/running）→ 不追加（否则卡片在待决窗口内被自己误销）。
+    /// 夹具用 2026-09-21 本机 part 表实测形态（state.status / input.questions / output）
+    #[test]
+    fn opencode_question_part_emits_tool_result_only_when_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (message_id TEXT, data TEXT, time_created INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', ?1, 100, '{\"role\":\"assistant\"}')",
+            [SID],
+        )
+        .unwrap();
+        // 已答（completed + metadata.answers + output）
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"question","state":{"status":"completed","input":{"questions":[{"question":"Which folder?","options":[{"label":"out"}]}]},"metadata":{"answers":[["out"]],"truncated":false},"output":"{\"answers\":[[\"out\"]]}"}}', 1)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call", "tool-result"],
+            "已答的 question 部件必须补一条 tool-result（销卡信号）"
+        );
+        assert!(
+            msgs[1].content.contains("out"),
+            "tool-result 取 state.output，实际：{}",
+            msgs[1].content
+        );
+
+        // 待决（running，无 answers/output）→ **不产** tool-result
+        conn.execute("DELETE FROM part", []).unwrap();
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"question","state":{"status":"running","input":{"questions":[{"question":"Which folder?","options":[{"label":"out"}]}]},"time":{"start":1783326720870}}}', 2)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call"],
+            "待决期间不得补 tool-result（否则卡片被自己误销）"
+        );
+
+        // 被拒（error，无 output）→ 补 tool-result（终态，兜底文案）
+        conn.execute("DELETE FROM part", []).unwrap();
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"question","state":{"status":"error","error":"The user dismissed this question","input":{"questions":[{"question":"q","options":[{"label":"a"}]}]}}}', 3)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tool-call", "tool-result"],
+            "被拒（error）是终态 → 补销卡信号"
+        );
+        assert_eq!(msgs[1].content, "问题已作答", "缺 output → 兜底文案");
+
+        // 非问答工具（bash，即便 completed）→ **不产** tool-result（零回归锁：
+        // 其它工具的消息流形态不动，见上方 opencode_maps_message_parts 的 kinds 断言）
+        conn.execute("DELETE FROM part", []).unwrap();
+        conn.execute(
+            r#"INSERT INTO part VALUES ('m1', '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"cmd":"ls"},"output":"file.txt"}}', 4)"#,
+            [],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["tool-call"], "非问答工具仍不产 tool-result");
+    }
+
+    /// F-3 纯函数单测：判据本身的三层（名字 / 形态 / 终态），含「名字异但形态同」
+    /// 与「名字同但非终态」两个方向
+    #[test]
+    fn answered_question_part_predicate() {
+        let q = |tool: &str, status: &str, with_shape: bool| {
+            let input = if with_shape {
+                serde_json::json!({"questions": [{"question": "q", "options": [{"label": "a"}]}]})
+            } else {
+                serde_json::json!({"cmd": "ls"})
+            };
+            serde_json::json!({
+                "type": "tool",
+                "tool": tool,
+                "state": {"status": status, "input": input}
+            })
+        };
+        // 终态（两种）：名字命中 / 名字异但形态命中
+        assert!(is_answered_question_part(&q("question", "completed", true)));
+        assert!(is_answered_question_part(&q("question", "error", true)));
+        assert!(is_answered_question_part(&q(
+            "question_v2",
+            "completed",
+            true
+        )));
+        // 非终态 → 不判已答（待决窗口内不销卡）
+        assert!(!is_answered_question_part(&q("question", "pending", true)));
+        assert!(!is_answered_question_part(&q("question", "running", true)));
+        // 非问答工具 / 非 tool 类型 → 不判
+        assert!(!is_answered_question_part(&q("bash", "completed", false)));
+        assert!(!is_answered_question_part(
+            &serde_json::json!({"type": "text", "text": "x"})
+        ));
+        // 名字命中但形态缺失：仍按名字判（与 monitor 侧 pending_question_part 同口径）
+        assert!(is_answered_question_part(&q(
+            "question",
+            "completed",
+            false
+        )));
     }
 
     // ==== OpenClaw（acp_replay tmp sqlite + 优雅降级）====

@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探A-opencode多选多题键序.md §2 E-A1 步9（opencode 勾选态：2.[✓]3.[✓]4.[✓]+own answer 行+toggle footer，screen-ea1-after-digit4-vk-delta.txt 原件）
+﻿  ┃
+  ┃  Use the question tool now with exactly one question and multiSelect enabled so several options can be toggled.
+  ┃  header E-A1 multi. question Which modules should the probe build include E-A1. options exactly four alpha bravo
+  ┃  charlie delta. Just ask and wait for my answers.
+  ┃
+
+     + Thought: 601ms
+                                   h
+     →Asked 1 question
+                                   h
+     ▣ Build · DeepSeek V4.1 Flash
+
+  ┃
+  ┃   E-A1 multi   Confirm
+  ┃
+  ┃  Which modules should the probe build include E-A1 (select all that apply)
+  ┃
+  ┃  1. [ ] alpha
+  ┃     Include module alpha
+  ┃  2. [✓] bravo
+  ┃     Include module bravo
+  ┃  3. [✓] charlie
+  ┃     Include module charlie
+  ┃  4. [✓] delta
+  ┃     Include module delta
+  ┃  5. [ ] Type your own answer
+  ┃
+  ┃  ⇆ tab  ↑ select  enter toggle  esc dismiss
+  ┃
+

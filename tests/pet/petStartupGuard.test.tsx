@@ -15,11 +15,17 @@ vi.mock("@/components/pet/petActivation", async (importOriginal) => {
 });
 
 const manifest = {
-  id: "p1", displayName: "P", hasVoice: false, hasSubtitle: false,
-  spriteVersionNumber: 2, spritesheetSizeBytes: 100, voices: [],
+  id: "p1",
+  displayName: "P",
+  hasVoice: false,
+  hasSubtitle: false,
+  spriteVersionNumber: 2,
+  spritesheetSizeBytes: 100,
+  voices: [],
 };
 const scanOk = {
-  id: "p1", dir: "/x/p1",
+  id: "p1",
+  dir: "/x/p1",
   spritesheet: { rel: "spritesheet.webp", exists: true, size: 100 },
   voiceFiles: [{ rel: "voice/done/new.mp3", exists: true, size: 5 }], // extra → issue
 };
@@ -58,7 +64,10 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     localStorage.setItem("mam-pet-active", "p1");
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan")
-        return Promise.resolve({ ...scanOk, spritesheet: { rel: "spritesheet.webp", exists: false, size: 0 } });
+        return Promise.resolve({
+          ...scanOk,
+          spritesheet: { rel: "spritesheet.webp", exists: false, size: 0 },
+        });
       if (cmd === "pet_read_manifest") return Promise.resolve(manifest);
       return Promise.resolve(undefined);
     });
@@ -74,7 +83,11 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     // i18n 未初始化时 t() 返回键名：断言 fatal 行走映射键 pet.startup.fatalScan + pet.rpc.pet-not-found
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan")
-        return Promise.reject({ code: "pet-not-found", params: { id: "p1" }, detail: "宠物不存在: p1" });
+        return Promise.reject({
+          code: "pet-not-found",
+          params: { id: "p1" },
+          detail: "宠物不存在: p1",
+        });
       return Promise.resolve(undefined);
     });
     render(<PetStartupGuard />);
@@ -91,7 +104,8 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan")
         return Promise.resolve({
-          id: "p1", dir: "/x/p1",
+          id: "p1",
+          dir: "/x/p1",
           spritesheet: { rel: "spritesheet.webp", exists: false, size: 0 },
           voiceFiles: [],
         });
@@ -102,7 +116,9 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     expect(screen.queryByTestId("pet-startup-update")).toBeNull(); // 致命分支无更新按钮
     // PetError（sheet-missing）经 petErrMsg → pet.err.sheet-missing，前缀走原 fatal 而非 fatalScan
     expect(screen.getByTestId("pet-startup-dialog").textContent).toContain("pet.startup.fatal");
-    expect(screen.getByTestId("pet-startup-dialog").textContent).not.toContain("pet.startup.fatalScan");
+    expect(screen.getByTestId("pet-startup-dialog").textContent).not.toContain(
+      "pet.startup.fatalScan"
+    );
   });
 
   it("直投（无 manifest）更新 → buildManifestFromScan，字幕默认跟随 hasVoice（FIX-4）", async () => {
@@ -110,8 +126,13 @@ describe("PetStartupGuard（EP2 启动弹窗）", () => {
     const { buildManifestFromScan } = await import("@/components/pet/petActivation");
     vi.mocked(buildManifestFromScan).mockClear();
     vi.mocked(buildManifestFromScan).mockResolvedValue({
-      id: "p1", displayName: "p1", hasVoice: false, hasSubtitle: false, // 四组不全 → 无语音 → 无字幕
-      spriteVersionNumber: 2, spritesheetSizeBytes: 100, voices: [],
+      id: "p1",
+      displayName: "p1",
+      hasVoice: false,
+      hasSubtitle: false, // 四组不全 → 无语音 → 无字幕
+      spriteVersionNumber: 2,
+      spritesheetSizeBytes: 100,
+      voices: [],
     });
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan") return Promise.resolve(scanOk);
@@ -154,8 +175,7 @@ describe("PetStartupGuard 更新失败处理（issue #33-1）", () => {
     tauriInvokeMock.mockImplementation((cmd: string) => {
       if (cmd === "pet_scan") return Promise.resolve(scanOk);
       if (cmd === "pet_read_manifest") return Promise.resolve(manifest);
-      if (cmd === "pet_update_manifest")
-        return Promise.reject({ code: "manifest-write-failed" });
+      if (cmd === "pet_update_manifest") return Promise.reject({ code: "manifest-write-failed" });
       return Promise.resolve(undefined);
     });
     const errSpy = vi.spyOn(toast, "error").mockImplementation(() => {});

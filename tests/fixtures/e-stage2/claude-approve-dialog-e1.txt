@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探E-claude对话框选项锚点底料.md §2.1 E-E1（干净对照：正文编号滚出窗，screen-e1-dialog.txt 原件）
+﻿ the matrix render incorrectly or fail the row-count check; this is mitigated by verifying the table immediately after
+ writing. A minor risk is encoding artifacts, since the Write tool's output on Windows could theoretically introduce a
+ byte-order mark or line-ending surprises; the V07 check exists specifically to catch this. Overall none of these risks
+ affect anything beyond the single new file.
+
+ Rollback
+
+ Rollback is trivial because the change consists solely of one newly created file. If the file is judged unnecessary or
+ incorrect, delete verification-matrix.md from the project root, which restores the directory exactly to its prior
+ empty state. No configuration, registry, environment, or other-file changes need to be reverted, and no process
+ restarts or cache clears are required. Since the directory is not a git repository, deletion is the complete and
+ sufficient rollback mechanism, and it can be performed at any time with a single Remove-Item command.
+
+ Verification of this plan's implementation
+
+ After writing the file, run checks V01–V08exactly as specified in the matrix (Glob/Read for structure, Grep for
+ heading and placeholder absence, Read-based row/cell counts, and a PowerShell hex dump for encoding). All eight rows
+ must read pass in the Status column before reporting success; any fail is corrected and re-verified per step 7 above.
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+ ❯ 1. Yes, and use auto mode
+   2. Yes, manually approve edits
+   3. Tell Claude what to change
+      shift+tab to approve with this feedback
+
+ ctrl+g to edit in Notepad ·~\.claude\plans\e-e1-write-a-detailed-magical-aurora.md
+

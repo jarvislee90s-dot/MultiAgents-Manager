@@ -329,6 +329,38 @@ pub fn dismiss_session_card(agent_type: String, session_id: String, status: Stri
     ));
 }
 
+/// R5 一键 resume（桌面卡「在电脑上打开」）：按 session_id 在当前快照里找会话，
+/// 交 inject::resume 核心开终端恢复（Windows wt/conhost、macOS iTerm2/Terminal）。
+/// 数据同源：直调 adapter::get_all_sessions（与看板同一份快照）；id 跨工具撞名取
+/// 第一个匹配（远端 session-open 端点同口径）。命令表未收录的工具 / 无 cwd 由核心
+/// 返回哨兵串，转译为前端可展示的中文文案；本机路径不写审计（audit_write 需设备
+/// 身份，审计口径 = 远端设备动作留痕，见 inject::resume 模块注释）。
+/// 评审 M3：扫描 + 核心并进同一 spawn_blocking——核心内 `where wt` 首调探测是
+/// 同步进程等待，留在闭包里不占 tokio worker。
+#[tauri::command]
+pub async fn session_open(session_id: String) -> Result<(), String> {
+    let sid = session_id.trim().to_string();
+    if sid.is_empty() {
+        return Err("缺少 session_id".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = crate::adapter::get_all_sessions()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == sid)
+            .ok_or_else(|| "会话不在当前列表（可能已退出）".to_string())?;
+        crate::inject::resume::open_session_terminal(&session)
+    })
+    .await
+    .map_err(|e| format!("会话扫描任务异常: {e}"))?
+    .map_err(|e| match e.as_str() {
+        // 哨兵串转译（前端 toast 直展；与移动端禁用原因文案同义）
+        "no_resume_command" => "该工具 resume 命令待查证，暂不支持一键打开".to_string(),
+        "no_cwd" => "该会话没有项目目录信息，无法在电脑上打开".to_string(),
+        other => other.to_string(),
+    })
+}
+
 /// 从进程快照收集运行会话的 (工具id, 项目目录名)——仅进程扫描，无文件解析开销
 #[cfg(windows)]
 fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, String)> {
@@ -357,15 +389,24 @@ fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, Str
     v
 }
 
-#[tauri::command]
-pub fn kill_session(pid: u32) -> Result<(), String> {
+/// 杀进程内核（CLI 会话硬杀）：桌面 kill_session 与远程 /session-close 共用。
+/// sysinfo kill_with(Signal::Term)：macOS/Linux=SIGTERM；Windows 不支持 Term 信号
+/// （kill_with 返回 None）→ 回落 process.kill()（TerminateProcess），两平台都保证结束。
+pub fn kill_pid(pid: u32) -> Result<(), String> {
     use sysinfo::{Pid, Signal};
     if let Some(process) = sysinfo::System::new_all().process(Pid::from_u32(pid)) {
-        process.kill_with(Signal::Term);
+        if process.kill_with(Signal::Term).is_none() {
+            process.kill();
+        }
         Ok(())
     } else {
         Err(format!("进程 {} 不存在", pid))
     }
+}
+
+#[tauri::command]
+pub fn kill_session(pid: u32) -> Result<(), String> {
+    kill_pid(pid)
 }
 
 #[cfg(test)]

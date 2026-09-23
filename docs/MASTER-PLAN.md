@@ -28,7 +28,7 @@
 | 通道抽象 | 四模式可插拔：直连域名 / named tunnel / quick tunnel（零配置默认）/ Tailscale | 一期 |
 | 移动端 | PWA（React 第二入口，rust-embed 内嵌伺服）；API 按"原生 APP 可复用"形态设计（token + REST + SSE） | 一期建骨架，三期演进 |
 | 读通道 | 八工具会话状态判定 + 会话内容全量读（`read_session_messages`） | 一期（现有解析器扩展） |
-| 写通道 | 终端注入引擎（tmux/iTerm2/Terminal）+ 无头通道（zcode/claude/codex/kimi CLI）+ 路由表 | 二期 |
+| 写通道 | 终端注入引擎（tmux/iTerm2/Terminal + Windows 终端通道【D18】）+ 无头通道（zcode/claude/codex/kimi/opencode CLI）+ 路由表〔2026-09-19 措辞修订：opencode 并入无头五家，对齐二期 spec 裁决 7，D19〕 | 二期 |
 | 协议客户端 | ZCode Protocol / codex app-server / ACP 客户端矩阵（版本门控） | 三期 |
 | 流转设施 | HandoffStore / Export / Import / 工作区在册感知 | 三期（基座在一二期埋） |
 
@@ -53,11 +53,11 @@
 | F1.3 | 移动看板 | 会话卡片（状态/项目/分支/最后消息预览/运行时长），按状态优先级排序，SSE 实时刷新 |
 | F1.4 | 会话内容只读 | `read_session_messages`：按会话全量读（ZCode db.sqlite、Claude/Codex JSONL、OpenCode SQLite、Kimi wire、WorkBuddy JSONL、dsh sessions） |
 | F1.5 | 页面内提醒 | SSE 边沿触发（状态跃迁才推）+ 横幅/提示音/振动 + PWA manifest |
-| F1.6 | 系统级推送 **（2026-09-16 移出期，见 D17 修订）**：移至二期与 APK 壳同期交付 | **推送网关抽象**（同一事件源多出口）：Bark（iOS）/ ntfy（Android；**华为无 GMS 机型 Web Push 不可达，ntfy 为其默认出口**）；APK 出口（内置长连接，二期随 APK 交付）预留 |
+| F1.6 | 系统级推送 **（2026-09-16 移出期；2026-09-18 随 D17 再修订移至三期收尾）**：与 APK 壳同期交付 | **推送网关抽象**（同一事件源多出口）：Bark（iOS）/ ntfy（Android；**华为无 GMS 机型 Web Push 不可达，ntfy 为其默认出口**）；APK 出口（内置长连接，三期收尾随 APK 交付）预留 |
 | F1.7 | 设置页 | 远程开关、通道配置、配对面板、设备花名册、电源开关（D13）、安全警示文案 |
 | F1.8 | 后端事件桥 | `SessionWatcher` tokio 任务：定时快照 → diff 状态跃迁 → broadcast（SSE；推送转发器随 D17 二期接入） |
 | F1.9 | 电源锁 | 远程开启时阻止系统/磁盘休眠（caffeinate / SetThreadExecutionState；Windows 可代设硬盘休眠），默认开（D13） |
-| F1.10 | APK 加强包 **（2026-09-15 移出期，见 D15 修订）**：移至二期收尾——「手机端网页发送消息」落地后交付；Capacitor 壳 + 内置长连接推送 + 通知点击直达 |
+| F1.10 | APK 加强包 **（2026-09-15 移出期，见 D15 修订；2026-09-18 随 D15 再修订移至三期收尾——网页版体验已足够好，套壳不紧急）**：三期收尾交付；Capacitor 壳 + 内置长连接推送 + 通知点击直达 |
 
 **一期明确不做**：一切写操作（发消息/切模型/任何改变 agent 状态的动作）。
 
@@ -74,8 +74,8 @@
 
 | # | 功能 | 说明 |
 |---|---|---|
-| F2.1 | 终端注入引擎 | tmux `send-keys -l` / iTerm2 `write text` / Terminal.app `do script`；复用现有窗口/pane/tty 定位链路 |
-| F2.2 | 状态门控队列 | 黄=排队、转红自动 flush；消息带 `[mobile <设备名>]` 来源标记；单会话串行 |
+| F2.1 | 终端注入引擎 | tmux `send-keys -l` / iTerm2 `write text` / Terminal.app `do script`；Windows 终端通道同期纳入（D18，写入路径由 M6 探测定案）；复用现有窗口/pane/tty 定位链路 |
+| F2.2 | 状态门控队列 | 黄=排队、回到**可输入态**（红·等待或绿·完成空闲）自动 flush〔2026-09-19 措辞修订：完整化原文「转红」口径，对齐二期 spec W2，D19〕；消息带 `[mobile <设备名>]` 来源标记；单会话串行 |
 | F2.3 | ZCode 无头通道 | `zcode --resume sess_xxx --prompt`（**限定在册工作区** → 桌面 UI/官方远程网页可见，判定 F）；app-server 为升级路径 |
 | F2.4 | Claude/Codex/Kimi 无头通道 | `claude -p --resume --output-format stream-json` / `codex exec`·app-server / `kimi -p -S <id>`；AionCore 进程管理骨架（Spawner trait、进程注册表、空闲挂起、版本门控） |
 | F2.5 | 注入路由表 | 会话宿主 → 通道映射（tmux/iTerm/Terminal/ZCode 无头/通用无头），有头可见性预期标注 |
@@ -100,7 +100,7 @@
 |---|---|---|
 | F3.1 | 斜杠命令注入 | TUI 工具切模型/模式 = 注入 `/model X` 类命令；移动端模型选择器 UI |
 | F3.2 | 完整对话界面 | 读渲染（一期基座）+ 写注入（二期基座）→ 移动端聊天体验，含流式 |
-| F3.3 | 协议客户端矩阵 | ZCode Protocol（session/send/setModel/setMode/events）、codex app-server（thread/start·resume·turn/start；先 generate-json-schema）、ACP（SDK 2.0.0，收编多数 CLI 工具）；全部带版本门控+探针+降级；**审批事件原生化**（app-server 审批 / ACP request_permission → 移动端审批卡，D12 第一层） |
+| F3.3 | 协议客户端矩阵 | ZCode Protocol（session/send/setModel/setMode/events）、codex app-server（thread/start·resume·turn/start；先 generate-json-schema）、ACP（SDK 2.0.0，收编多数 CLI 工具）；全部带版本门控+探针+降级；**审批事件原生化**（app-server 审批 / ACP request_permission → 移动端审批卡，D12 第一层）。**参考实现：happy（slopus/happy，MIT）**——claude SDK 托管（canUseTool 审批应答 / setPermissionMode 编程切档）+ codex app-server JSON-RPC + ACP 三路先行，其审批/问答/plan 交互 UI 与状态机、统一模式枚举+各工具映射、兜底渲染原则可整段借鉴（2026-09-21 用户同意点名；调研归档 `research/refs/phase2-消息注入/2026-09-21-happy项目审批与模式切换调研.md`） |
 | F3.4 | 会话切换/跳转 | 会话列表 + "回电脑后点哪张卡"的远程跳转指引（复用现有聚焦/深链） |
 | F3.5 | 配置代理 | 模型/MCP/skill 配置的移动端读写（MAM 已有全部配置写能力，暴露到移动 API） |
 | F3.6 | 设置直达 | 按工具降级：深度链接 → MAM 代理配置 |
@@ -126,7 +126,7 @@
 | F1.3 看板 | 手机请求 `/m/api/sessions`（cookie 过闸） | JSON：会话卡数组（agent_type/session_id/状态/项目/预览/时长），数据源=直调 `get_all_sessions`（不经 Tauri IPC） |
 | F1.4 会话内容 | `/m/api/session-messages?agent=&session=` | JSON：消息数组（role/content/ts/工具调用摘要），数据源=各 adapter 全量读 |
 | F1.5 SSE | 手机订阅 `/m/api/events` | 首帧全量快照 + 增量跃迁事件 `{session_id, from, to, preview}`；断线自动重连；隧道不支持 SSE 时降级轮询 |
-| F1.6 系统推送 | **（D17：移二期随 APK 同期交付）**设置：Bark/ntfy URL；触发=状态跃迁 | HTTP POST 到推送服务（标题=工具+项目，正文=跃迁方向+预览）；失败静默重试一次 |
+| F1.6 系统推送 | **（D17：随 APK 移三期收尾）**设置：Bark/ntfy URL；触发=状态跃迁 | HTTP POST 到推送服务（标题=工具+项目，正文=跃迁方向+预览）；失败静默重试一次 |
 | F1.8 SessionWatcher | 定时器（2s） | 内存快照 diff → broadcast；无磁盘写入；与桌面通知（前端轮询驱动）互不干扰 |
 
 ### 2.2 二期
@@ -134,7 +134,7 @@
 | 功能点 | 输入 | 输出 |
 |---|---|---|
 | F2.1 注入 | `/m/api/session-send`（session_id、文本）；路由表解析宿主 | tmux send-keys / AppleScript write text / do script 执行；副作用=目标终端收到一行输入+回车 |
-| F2.2 队列 | 注入请求 + 会话当前状态（Watcher 提供） | 状态黄：入队（SQLite 队列表，含设备花名/时间戳）；转红：逐条 flush；移动端可查队列/撤回未发 |
+| F2.2 队列 | 注入请求 + 会话当前状态（Watcher 提供） | 状态黄：入队（SQLite 队列表，含设备花名/时间戳）；回到可输入态：逐条 flush〔D19〕；移动端可查队列/撤回未发 |
 | F2.3 ZCode 无头 | session_id + 文本；工作区在册校验 | spawn `zcode --resume <id> --prompt <text> --cwd <项目> --json`；stdout 的 sessionId/turn 结果回执；副作用=db.sqlite 追加消息（同会话，判定 A） |
 | F2.4 通用无头 | session_id + 文本 | 对应 CLI 无头进程一次 turn；回执=末条 assistant 消息 + token 用量；进程按 AionCore 骨架管理（挂起/重生） |
 | F2.5 路由表 | 会话的宿主形态（MAM 已区分 CLI/APP/终端类型） | 通道决策 + 有头可见性预期（实时/刷新后/不可见）返回给移动端展示 |
@@ -164,8 +164,8 @@
 | 实时推送 | **SSE**（首选）+ 轮询降级 |
 | 配对/门禁 | 自研 Rust 移植 dsh-remote-web-ui 状态机（单活跃一次性 token + 设备表） |
 | 隧道 | **cloudflared 子进程**（quick/named 二合一）+ 直连模式 + Tailscale 文档指引 |
-| 推送 | Bark / ntfy HTTP 转发（一期移出，随 D17 二期交付） |
-| 终端注入 | tmux CLI + AppleScript（iTerm2/Terminal） |
+| 推送 | Bark / ntfy HTTP 转发（一期移出；2026-09-18 随 D15/D17 再修订移至三期收尾） |
+| 终端注入 | tmux CLI + AppleScript（iTerm2/Terminal）+ Windows 终端通道（D18） |
 | 无头通道 | 各官方 CLI（zcode/claude/codex/kimi）子进程 + JSONL/stdout 解析 |
 | 协议客户端（三期） | ZCode Protocol（行协议自实现）、codex app-server（schema 生成）、ACP（官方 Rust SDK） |
 | 移动 UI | React 19 复用（组件/i18n/主题共享）+ PWA manifest |
@@ -199,9 +199,12 @@
 | D12 | **审批通道两层**：协议原生优先（Claude control 通道 / codex app-server 审批事件 / ACP request_permission / OpenCode API，三期随协议矩阵接入）；已开 TUI 会话用注入应答（机制通用，按键映射每 CLI 一次探测入库+版本探针，二期）；一期只做"等待用户"通知 | 2026-09-12 |
 | D13 | **电源策略**：远程开启时 MAM 持有系统电源锁（macOS caffeinate / Windows SetThreadExecutionState；阻止系统+磁盘休眠，显示器可睡；Windows 可代设电源计划的硬盘休眠项），开关默认开；界面明示合盖/电池限制 | 2026-09-12 |
 | D14 | **dsh（DeepSeek harness）纳入第八受管工具**：一期只读监控（读其 storages/sessions；它本身是本地 web 架构，读其 HTTP API 亦可评估），写通道视其 web API/插件生态另评。**2026-09-14 用户裁决补充**：Skill 符号链接管理（写 `~/.dsh/skills`）纳入一期——属 MAM 资源管理能力而非消息写通道；未读语义对齐全工具口径（红/blocked 不挂角标，绿卡走通用未读池） | 2026-09-12（09-14 补裁决） |
-| D15 | **移动端交付形态**：网页版 + 推送网关为一期主体。**2026-09-15 用户修订：APK 壳（Capacitor 壳 + 内置长连接推送 + 通知点击直达）移至二期收尾**——触发条件：二期「手机端网页发送消息」能力落地验收后再做套壳；原则不变：链路做稳，套壳收尾（顺带修正：推送通道为内置长连接，2026-09-14 v4 已定案，原「HMS Push/ntfy 兜底」表述作废） | 2026-09-12（09-15 修订） |
+| D15 | **移动端交付形态**：网页版 + 推送网关为一期主体。**2026-09-15 用户修订：APK 壳（Capacitor 壳 + 内置长连接推送 + 通知点击直达）移至二期收尾**。**2026-09-18 用户再修订：APK 壳与推送网关（D17）一并移至三期收尾**——网页版体验已足够好，套壳与系统级推送不紧急；原「二期触发条件」条款作废；原则不变：链路做稳，套壳收尾 | 2026-09-12（09-15/09-18 修订） |
 | D16 | **远期路线 · 桌面大操作台套壳回 Tauri**（三期后评估）：当三期「会话在智能体之间流转」（F3.7）落地且功能逐步完善后，把电脑端的整体控制交互面板套壳回 Tauri 体系——默认轻量化入口仍是消息看板（现有主窗），特殊通道（快捷键/托盘/设置入口）打开**大看板操作台**（完整操控面板，复用远程 Web 面板套壳集成）。在此之前桌面主窗维持现状 | 2026-09-15 |
-| D17 | **系统级推送移期**：F1.6 推送网关（Bark/ntfy，页面关时的系统通知出口）移至二期，与 APK 壳（D15）同期交付——APK 移期后系统级推送的最大价值（页面关、系统通知）随 APK 走，页面开着的实时提醒已由 F1.5 SSE（M3 交付）覆盖；一期验收「2s 内收到提醒」以页面开时的 SSE 提醒为口径。移动端构建分包（manualChunks）同批计入二期套壳期 | 2026-09-16 |
+| D17 | **系统级推送移期**：F1.6 推送网关（Bark/ntfy，页面关时的系统通知出口）原移至二期。**2026-09-18 用户再修订：随 APK 壳（D15）一并移至三期收尾**——网页版体验已足够好，系统级推送不紧急；页面开着的实时提醒已由 F1.5 SSE（M3 交付）覆盖；一期验收「2s 内收到提醒」以页面开时的 SSE 提醒为口径。移动端构建分包（manualChunks）同批随 APK 计入三期收尾 | 2026-09-16（09-18 修订） |
+| D18 | **Windows 终端注入纳入二期**：终端注入引擎在 macOS 三通道之外新增 Windows 终端通道——写入路径（WriteConsoleInput / ConPTY 附加写入 / Windows Terminal 通道）由二期首个里程碑 M6 探测定案（前置实证：PowerShell AttachConsole(pid) 附加 claude ConPTY 成功，见跳转 marker 三轮实机验收 issue #43）；二期验收含 Windows 实机同口径复验 | 2026-09-18 |
+| D19 | **措辞级修订（用户在席批准，非语义变更）**：①F2.2 队列 flush 口径完整化为「回到可输入态（红·等待或绿·完成空闲）」——原文「转红」为简写，二期 spec W2 已按完整语义实施；②无头通道清单并入 opencode（五家，对齐二期 spec 裁决 7）。同步落点：§0.1 写通道行 / §1.2 F2.2 / §2.2 F2.2 / §5.b 二期验收 | 2026-09-19 |
+| D20 | **终端交互的动态轮询**：任何改变终端状态的输入（斜杠命令 `/plan`、`/permissions`、`/permission`、三期的 **切换模型命令** 等 / shift+tab 切档 / 菜单与对话框中的上下键选择）之后，**一律不得「输入完直接操作下一步」**——必须动态轮询屏读至**读到判据本身**（非「屏幕变了」），命中即停、**禁止**用固定睡眠替代；有界超时如实回执并区分「未及确认」与「不符」；**例外**：注入**前**的决策依据（对话框是否在场、高亮在哪一项）为瞬时快照，单次读不轮询。**依据**：2026-09-22 用户实机观察（claude 切档后回读报「与预期不符」而终端实际已切、刷新即一致；codex `/permissions` 菜单屏读未及）。同步落点：§5.(c) 第 8 条 | 2026-09-22 |
 
 ### 3.(d) 可比选型对照（重点补充）
 
@@ -264,7 +267,7 @@
 | 候选 | 优势 | 劣势 | 结论 |
 |---|---|---|---|
 | **规则摘要** ✅（默认） | 零成本、零依赖、可离线 | 质量一般（尾部截取+状态拼接） | 采用 |
-| **LLM 摘要** ✅（可选） | 质量高（.handoff 先例即 agent 自总结） | 消耗 token；依赖无头通道 | 采用（复用二期无头通道执行） |
+| **LLM 摘要** ✅（可选） | 质量高（.handoff 先例即 agent 自总结） | 消耗 token | 采用（**2026-09-18 修订：执行器 = 注入自总结**——由会话本体 Agent 执行〔二期 spec 裁决 17〕，无头执行器不做） |
 | 全量 JSON 导出（opencode export 式） | 无损 | 目标 harness 读不懂别家 JSON | 作为附本随 HANDOFF 落盘，不作主载体 |
 
 ---
@@ -311,7 +314,7 @@
 | 切模型/会话（F3.1/3.4） | 命令注入 + 会话列表 | F1.3 会话列表（移动版） | F2.1 注入通道（命令=特殊消息） |
 | 协议客户端（F3.3） | 进程管理 + 事件流 | F1.8 SessionWatcher（broadcast 通道复用） | F2.4 无头进程管理骨架（Spawner/注册表/挂起）直接长出协议客户端 |
 | 配置代理（F3.5） | 配置读写暴露 | `/m/api` 门禁框架（新端点即插） | — |
-| 流转 Export（F3.7） | 全量读+摘要执行器 | **F1.4 read_session_messages = Export 的读取件** | **F2.4 无头通道 = LLM 摘要的执行器**；F2.7 导出落地 |
+| 流转 Export（F3.7） | 全量读+摘要执行器 | **F1.4 read_session_messages = Export 的读取件** | **F2.1 注入通道 = LLM 摘要执行器（注入自总结，2026-09-18 修订；原「F2.4 无头通道执行」作废）**；F2.7 导出落地 |
 | 流转 Import（F3.7） | 投递通道 | — | **F2.1–F2.5 = Import 的投递通道**（路由表直接复用） |
 | 有头可见性预期（F3.8） | 在册感知 | F1.3 看板可先展示"宿主形态"字段 | F2.5 路由表已含可见性预期 |
 
@@ -319,9 +322,9 @@
 
 ### 5.(b) 各期验收标准（简）
 
-- **一期**：外网手机扫码→看到八工具会话状态与内容；杀掉一个 agent 会话状态跃迁→手机 2s 内收到提醒；配对码刷新旧码失效；"停止远程"后所有设备 403；quick tunnel 断网自动恢复。（2026-09-15：APK 验收项随 D15 修订移至二期；2026-09-16：页面关系统推送随 D17 移至二期，"2s 提醒"以页面开时 SSE 为验收口径）
-- **二期**：手机对 tmux/iTerm2/Terminal 里的会话发消息→终端出现 `[mobile]` 标记输入；黄状态消息排队、转红 flush；对 ZCode 在册会话无头发消息→桌面刷新后可见（判定 F 复现）；导出 HANDOFF.md 人可读、agent 可续。**二期收尾（D15 修订）**：APK 在华为机收到 MAM 自有通知并点击直达会话。
-- **三期**：移动端切换 Claude Code 模型生效；移动端与 ZCode 会话流式对话；HANDOFF 从 ZCode 会话导出→导入到同 cwd 的 Claude 会话→首轮确认回执；协议探针失败时降级路径可用。
+- **一期**：外网手机扫码→看到八工具会话状态与内容；杀掉一个 agent 会话状态跃迁→手机 2s 内收到提醒；配对码刷新旧码失效；"停止远程"后所有设备 403；quick tunnel 断网自动恢复。（2026-09-15：APK 验收项随 D15 修订移出；2026-09-16：页面关系统推送随 D17 移出，"2s 提醒"以页面开时 SSE 为验收口径；2026-09-18：二者随 D15/D17 再修订最终移至三期收尾）
+- **二期**：手机对 tmux/iTerm2/Terminal 里的会话发消息→终端出现 `[mobile]` 标记输入；黄状态消息排队、回到可输入态 flush〔D19〕；对 ZCode 在册会话无头发消息→桌面刷新后可见（判定 F 复现）；导出 HANDOFF.md 人可读、agent 可续；Windows 终端注入同口径实机复验（D18）。
+- **三期**：移动端切换 Claude Code 模型生效；移动端与 ZCode 会话流式对话；HANDOFF 从 ZCode 会话导出→导入到同 cwd 的 Claude 会话→首轮确认回执；协议探针失败时降级路径可用；**三期收尾（2026-09-18 D15/D17 再修订移入）**：页面关系统推送到达（Bark/ntfy，华为机实测）+ APK 在华为机收到 MAM 自有通知并点击直达会话。
 
 ### 5.(c) 横切原则（宪法条款）
 
@@ -332,6 +335,7 @@
 5. 桌面体验不回退：新增能力不得影响现有监控/通知/资源管理
 6. 版本漂移受控：无头/协议通道均非公开稳定 API，实现必须带版本门控+探针+降级
 7. 文档权威：本文档最高；修改需用户在场明确同意；冲突时停下报告
+8. **终端交互的动态轮询〔D20〕**：任何通过输入改变终端状态的操作——斜杠命令（`/plan`、`/permissions`、`/permission`、三期切换模型的命令等）、shift+tab 切档、上下键在菜单/对话框中选择、以及任何后续步骤依赖终端新状态的操作——一律不得「输入完直接操作下一步」，必须：(a) **动态轮询**屏读直至**读到判据本身**（不是「屏幕变了」），命中即刻停止（**禁止**用固定睡眠替代轮询）；(b) **有界**：设步长与总窗上限，超时**如实回执**且区分「未及确认」与「不符」；(c) **例外**：注入**前**的决策依据（对话框是否在场、高亮在哪一项）为**瞬时快照**，单次读即返回、不轮询——守卫语义是「此刻的快照」，加轮询会把「拒绝注入」变成「等 N 秒再拒绝」。**跨期适用**：三期切模型等同类终端交互同规则。**依据**：2026-09-22 用户实机观察——claude 切档后回读过快（终端已切、回读报不符，刷新即一致）与 codex `/permissions` 菜单屏读未及
 
 ---
 

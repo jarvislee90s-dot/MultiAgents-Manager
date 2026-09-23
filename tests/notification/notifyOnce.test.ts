@@ -65,11 +65,13 @@ describe("首见未读通知（review F7③ + F5 门控）", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
 
-    // 首次出现新鲜未读绿卡 → 恰好 1 条系统通知
+    // 首次出现新鲜未读绿卡 → 过绿灯稳定窗（GREEN_STABLE_MS=3s）后恰好 1 条系统通知
     act(() => {
       useSessionStore.setState({ sessions: [{ ...freshUnread }] });
     });
-    await waitFor(() => expect(sendNotificationMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(sendNotificationMock).toHaveBeenCalledTimes(1), {
+      timeout: 5000,
+    });
 
     // 同一会话再次轮询（新数组、同内容）→ 不重发
     act(() => {

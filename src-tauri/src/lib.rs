@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod commands;
 pub mod database;
+pub mod inject;
 pub mod linker;
 pub mod monitor;
 pub mod plugins;
@@ -103,6 +104,10 @@ pub fn run() {
             });
             // M4：全局句柄落位（先于 restore_on_launch——隧道自启即可发通知）
             let _ = crate::remote::events::APP_HANDLE.set(app.handle().clone());
+            // T5：codex 信任门一次性桌面通知——register_all_hooks 在 run() 早期
+            // 执行（彼时 builder 未构建、AppHandle 不可得）只置 pending KV，此处
+            // 句柄就绪后消费：pending 在场才发，一次落地 shown 后永不再弹
+            monitor::hooks::consume_codex_trust_notice(app.handle());
             // M2 远程接入：按设置恢复远程服务器（开机自启语义；内部用
             // tauri::async_runtime，无 runtime 上下文的主线程可安全调用）
             crate::remote::restore_on_launch();
@@ -122,6 +127,8 @@ pub fn run() {
         commands::session::focus_hwnd,
         commands::session::kill_session,
         commands::session::dismiss_session_card,
+        // M6R–M9R Task 11：R5 一键 resume（桌面卡「在电脑上打开」）
+        commands::session::session_open,
         commands::notification::show_notification_window,
         commands::pet::set_pet_visible,
         commands::pet::set_pet_always_on_top,
@@ -201,11 +208,17 @@ pub fn run() {
         commands::settings::set_theme,
         commands::settings::detect_tools,
         commands::settings::detect_subagents,
+        // 2026-09-20：数据管理首版（移动端附件占用列出/清理——路径服务端解析，
+        // 清理目标必须命中上传索引，不接受客户端任意路径）
+        commands::data_management::list_attachment_projects,
+        commands::data_management::clean_attachment_project,
         commands::settings::list_sub_agents,
         commands::settings::mark_session_read,
         commands::settings::get_tool_settings,
         commands::settings::update_tool_settings,
         commands::settings::list_enabled_tools,
+        // T5 信号健康度：per-tool hook 通道状态（设置页「信号健康度」分区按需查询）
+        commands::settings::hook_signal_health,
         commands::screenshot::capture_window_screenshot,
         commands::screenshot::list_screenshots,
         commands::manifest::validate_manifest,
@@ -224,6 +237,8 @@ pub fn run() {
         remote::remote_rename_device,
         // M5 A5：三通道独立开关（旧 remote_set_channel 单值三选一已随之下线）
         remote::remote_toggle_channel,
+        // M7 W5：桌面端写审计查看（最近 N 条，只读）
+        inject::inject_list_audit,
     ]);
 
     #[cfg(not(debug_assertions))]

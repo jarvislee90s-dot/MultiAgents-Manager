@@ -21,9 +21,14 @@ pub use dao::stash::StashEntryRecord;
 pub use dao::agent_tool::{
     enabled_tool_ids, ensure_tool_rows, get_tool_enabled, list_sub_agents, set_tool_enabled,
 };
+pub use dao::archive::{
+    agent_type_from_tool_id, delete_archive, query_archive_all, register_sessions,
+    SessionArchiveRow,
+};
 pub use dao::base_snapshot::{
     destroy_base_snapshot, get_base_snapshot, save_base_snapshot, set_active_preset,
 };
+pub use dao::board_hidden::{board_hidden_hide, board_hidden_ids, board_hidden_unhide};
 pub use dao::extension::{
     delete_assignments_for, delete_extension, disable_subagent_assignment, ensure_extension,
     insert_extension, list_all_assignments, list_assignments, list_extensions,

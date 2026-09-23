@@ -176,6 +176,7 @@
       "lanDetailHint": "换网络后地址会变；扫码或打开地址后密码自动填入。",
       "quickWarn": "⚠ 每次开关此通道，隧道地址都会重新生成（旧链接失效）。切换其它通道、修改其它设置不影响本通道。",
       "quickDetailHint": "手机蜂窝网络也能访问（走 Cloudflare 网络）。",
+      "quickFetching": "正在获取公共地址…",
       "tunnelToken": "Tunnel Token",
       "tokenHint": "Cloudflare Zero Trust → Networks → Tunnels 创建后复制",
       "tutorialToggle": "使用教程（点击展开/收起）",
@@ -184,12 +185,12 @@
       "tutorialStep2": "左侧 Networks → Tunnels，点 Create a tunnel，连接类型选 Cloudflared；",
       "tutorialStep3": "给隧道起个名字（如 mam-jarvis）→ Save tunnel；",
       "tutorialStep4": "安装方式页不用装任何东西——复制页面里那串 eyJh... 开头的 Token；",
-      "tutorialStep5": "切到 Public Hostname 标签：子域填 mam、域名选你的域名、Service 填 HTTP://localhost:9420 → Save；",
+      "tutorialStep5": "切到 Public Hostname 标签：子域填 mam、域名选你的域名、Service 填 HTTP://localhost:9420 → Save（此步必须做——漏做时隧道虽显示 Healthy，但域名无解析、地址打不开）；",
       "tutorialStep6": "回到 MAM 本页，把 Token 粘贴进输入框点「保存」，状态变「运行中」即完成。",
       "tutorialPost": "之后地址永久不变；MAM 会自动下载 cloudflared 并守护进程，无需手动安装。",
+      "tutorialDocs": "详细图文（Cloudflare 官方）：Create a tunnel (dashboard)",
       "save": "保存",
       "tokenSaved": "已保存",
-
       "addrFallback": "上次地址",
       "pinTitle": "访问密码",
       "pinHint": "仅对 局域网 / 临时隧道 / 命名隧道 生效（本机无需）。输入后点「保存」生效；新设备输入一次，180 天免输入；修改后所有设备需重新输入",
@@ -222,6 +223,50 @@
       "addrCopiedToast": "已复制远程地址",
       "toggleFailedTitle": "MAM 远程开关失败",
       "toggleFailedToast": "远程开关失败: {{error}}"
+    },
+    "audit": {
+      "title": "注入审计",
+      "refresh": "刷新",
+      "empty": "暂无记录",
+      "loadError": "审计加载失败，请刷新重试",
+      "time": "时间",
+      "device": "设备",
+      "session": "会话",
+      "action": "动作",
+      "summary": "摘要"
+    },
+    "signalHealth": {
+      "title": "信号健康度",
+      "description": "Hook 通道自查：工具已注册且会话活跃却长时间零事件，通常是钩子尚未被信任。",
+      "refresh": "刷新",
+      "empty": "暂无支持 Hook 通道的工具",
+      "loadError": "信号状态加载失败，请刷新重试",
+      "statusUnregistered": "未注册",
+      "ok": "正常 · 最近事件 {{ago}}",
+      "noActiveSessions": "暂无活跃会话，等待事件",
+      "trustNeeded": "需在 {{tool}} 终端输入 /hooks 并信任 MAM 条目（一次性）",
+      "zeroEvents": "钩子通道零事件，请检查 {{tool}} 是否已正确注册并触发",
+      "copyCommand": "复制命令",
+      "copied": "已复制 /hooks",
+      "copyFailed": "复制失败",
+      "secondsAgo": "{{n}} 秒前",
+      "minutesAgo": "{{n}} 分钟前",
+      "hoursAgo": "{{n}} 小时前",
+      "daysAgo": "{{n}} 天前"
+    },
+    "dataManagement": {
+      "title": "数据管理",
+      "refresh": "刷新",
+      "empty": "暂无项目附件",
+      "project": "项目",
+      "files": "附件数",
+      "size": "占用",
+      "clean": "清理",
+      "cleanConfirm": "确认清理该项目的全部附件？整目录删除，不可恢复",
+      "cleaned": "已清理",
+      "overThreshold": "占用较大，建议清理",
+      "hint": "附件 = 移动端发消息时上传的图片/文档，存于各项目目录 .mam-attachments/<会话>/（已本地 git 排除）",
+      "loadError": "数据管理列表加载失败，请刷新重试"
     }
   },
   "home": {
@@ -560,6 +605,13 @@
       "idle": "空闲",
       "finished": "已结束"
     }
+  },
+  "resume": {
+    "open": "在电脑上打开",
+    "noCwd": "该会话没有项目目录信息，无法在电脑上打开",
+    "noCmd": "该工具 resume 命令待查证，暂不支持一键打开",
+    "opening": "正在电脑上打开终端…",
+    "failed": "打开失败: {{error}}"
   },
   "pet": {
     "menu": {

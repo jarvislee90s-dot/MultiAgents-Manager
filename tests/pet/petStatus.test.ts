@@ -4,14 +4,32 @@ import type { Session } from "@/types/session";
 import { computePetStatus, ackDone, cardsFromState } from "@/components/pet/petStatus";
 
 const mk = (id: string, status: Session["status"], over: Partial<Session> = {}): Session => ({
-  id, agentType: "claude", projectName: "P", projectPath: "/p", title: null, gitBranch: null,
-  githubUrl: null, status, lastMessage: "msg", lastMessageRole: null, lastActivityAt: "",
-  pid: 1, cpuUsage: 0, activeSubagentCount: 0, form: "cli", jumpSupported: true, ...over,
+  id,
+  agentType: "claude",
+  projectName: "P",
+  projectPath: "/p",
+  title: null,
+  gitBranch: null,
+  githubUrl: null,
+  status,
+  lastMessage: "msg",
+  lastMessageRole: null,
+  lastActivityAt: "",
+  pid: 1,
+  cpuUsage: 0,
+  activeSubagentCount: 0,
+  form: "cli",
+  jumpSupported: true,
+  ...over,
 });
 
 describe("computePetStatus", () => {
   it("灯色映射：waiting红 / 运行三态黄 / idle·finished绿（spec D2）", () => {
-    const first = computePetStatus([mk("a", "waiting"), mk("b", "thinking"), mk("c", "idle")], null, 0);
+    const first = computePetStatus(
+      [mk("a", "waiting"), mk("b", "thinking"), mk("c", "idle")],
+      null,
+      0
+    );
     const lights = Object.fromEntries(first.cards.map((c) => [c.id, c.light]));
     expect(lights).toEqual({ a: "waiting", b: "running" }); // 绿无未读不显示卡
   });
@@ -26,7 +44,11 @@ describe("computePetStatus", () => {
     const s1 = computePetStatus([mk("c", "thinking")], null, 0);
     const s2 = computePetStatus([mk("c", "idle")], s1.state, 1000);
     expect(s2.events.newCompletion).toEqual(["c"]);
-    expect(s2.cards.find((x) => x.id === "c")).toMatchObject({ light: "done", unread: true, lines: ["已完成"] });
+    expect(s2.cards.find((x) => x.id === "c")).toMatchObject({
+      light: "done",
+      unread: true,
+      lines: ["已完成"],
+    });
     const s3 = computePetStatus([mk("c", "idle")], s2.state, 2000);
     expect(s3.events.newCompletion).toEqual([]);
     expect(s3.cards.find((x) => x.id === "c")?.unread).toBe(true); // 未读保留（C4）
@@ -71,7 +93,12 @@ describe("computePetStatus", () => {
       return computePetStatus([mk(i, "idle")], a.state, 10).state;
     };
     let state = { ...mkDone("d1"), ...mkDone("d2") };
-    const sess = [mk("w", "waiting"), mk("r1", "processing"), mk("r2", "compacting"), ...["d1", "d2"].map((i) => mk(i, "idle"))];
+    const sess = [
+      mk("w", "waiting"),
+      mk("r1", "processing"),
+      mk("r2", "compacting"),
+      ...["d1", "d2"].map((i) => mk(i, "idle")),
+    ];
     const r = computePetStatus(sess, state, 100);
     expect(r.cards.slice(0, 3).map((c) => c.light)).toEqual(["waiting", "running", "running"]);
     expect(r.cards.length).toBeLessThanOrEqual(6);
@@ -79,7 +106,11 @@ describe("computePetStatus", () => {
   });
 
   it("卡片题头与摘要：题头=工具名+项目+会话名（问题 3），lastMessage 截断（H3）", () => {
-    const r = computePetStatus([mk("a", "processing", { title: "自定义标题", lastMessage: "x".repeat(200) })], null, 0);
+    const r = computePetStatus(
+      [mk("a", "processing", { title: "自定义标题", lastMessage: "x".repeat(200) })],
+      null,
+      0
+    );
     const card = r.cards[0];
     // 题头与看板 SessionCard 一致：agentLabel + projectName + 会话名
     expect(card.title).toBe("Claude    P    自定义标题");
@@ -88,7 +119,11 @@ describe("computePetStatus", () => {
   });
 
   it("无会话名时题头回退 id 前 8 位；codex 区分 APP/CLI 形态", () => {
-    const r = computePetStatus([mk("abcdefgh1234", "waiting", { agentType: "codex", form: "app" })], null, 0);
+    const r = computePetStatus(
+      [mk("abcdefgh1234", "waiting", { agentType: "codex", form: "app" })],
+      null,
+      0
+    );
     expect(r.cards[0].title).toBe("Codex APP    P    abcdefgh");
   });
 
@@ -103,7 +138,11 @@ describe("computePetStatus", () => {
     const read = computePetStatus([mk("d", "idle", { unread: false, form: "app" })], null, 0);
     expect(read.cards.find((x) => x.id === "d")).toBeUndefined();
     // 后续帧本地差分接管：持续亮（不依赖 payload 继续携带 unread）
-    const second = computePetStatus([mk("c", "idle", { unread: false, form: "app" })], first.state, 1000);
+    const second = computePetStatus(
+      [mk("c", "idle", { unread: false, form: "app" })],
+      first.state,
+      1000
+    );
     expect(second.cards.find((x) => x.id === "c")).toMatchObject({ light: "done", unread: true });
   });
 
@@ -112,7 +151,11 @@ describe("computePetStatus", () => {
     // 本地差分必须优先——否则已消卡闪回
     const first = computePetStatus([mk("c", "idle", { unread: true, form: "app" })], null, 0);
     ackDone(first.state, "c");
-    const second = computePetStatus([mk("c", "idle", { unread: true, form: "app" })], first.state, 1000);
+    const second = computePetStatus(
+      [mk("c", "idle", { unread: true, form: "app" })],
+      first.state,
+      1000
+    );
     expect(second.cards.find((x) => x.id === "c")).toBeUndefined();
   });
 });

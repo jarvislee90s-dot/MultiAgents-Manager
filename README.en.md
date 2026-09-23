@@ -113,6 +113,26 @@ A dedicated settings section to decide which tools MAM monitors and manages:
 
 ---
 
+## Tool Support Matrix
+
+Capabilities across the 8 terminal-class AI coding tools (✅ supported / ◐ partial / 🧪 experimental / ❌ not supported):
+
+| Capability | Claude Code | Codex CLI | OpenCode | OpenClaw | Kimi Code | WorkBuddy | ZCode | dsh |
+|---|---|---|---|---|---|---|---|---|
+| Session monitoring | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Desktop notifications | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Skill management | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ◐ read-only |
+| MCP management | ✅ JSON | ✅ TOML | ✅ JSONC | ✅ JSON | ✅ JSON | ✅ JSON | ✅ JSON subtree | ❌ |
+| Plugin management | ✅ | ✅ | ✅ | ✅ | ◐ file-based | ❌ | ❌ | ❌ |
+| Status hooks | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Mobile · message viewing | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Mobile · file preview | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Mobile · send messages (injection) | 🧪 | 🧪 | 🧪 | ❌ | 🧪 | ❌ | ❌ | ❌ |
+
+**Mobile remote control (v0.5.0, experimental)**: message viewing and file preview cover all 8 tools; **sending messages to CLI sessions from your phone is experimental**, currently supporting Claude Code / Codex CLI / OpenCode / Kimi Code. Messages are injected as keystrokes into the terminal and verified by screen-reading receipts (no false "delivered"); queueing, interrupt-and-jump, remote approvals, question answering, and permission-mode switching are included. See the Chinese README for illustrated walkthroughs and per-tool limitations.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |

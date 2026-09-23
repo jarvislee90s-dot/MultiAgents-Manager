@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探F-打断式插队扩展底料.md §2.1 步2（Esc 取出后成功插队态：transcript ❯ 回显在 composer 上方、composer 空——判据须不误报，screen-t9-after-esc.txt 原件）
+﻿  761
+  762
+  763
+  764
+  765
+  766
+  767
+  768
+  769
+  770
+  771
+  772
+  773
+  774
+  775
+  776
+  777
+  778
+  ⎿  Interrupted ·What should Claude do instead?
+
+❯ F-Q9-QUEUE-PROBE-MESSAGE
+
+✶ Julienning…
+  ⎿  Tip: Say "fan out subagents" and Claude sends a team. Each one digs deep so nothing gets missed.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ plan mode on (shift+tab to cycle) ·esc to interrupt ·←for agents
+

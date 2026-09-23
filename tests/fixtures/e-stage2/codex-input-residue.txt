@@ -1,0 +1,23 @@
+# source: 用户实机走查截图 2026-09-23（codex 输入行 /permissions/permissions 残留 + 底栏 Plan mode；重试事故现场——菜单残留态下回车误确认当前项、命令文本堆积；实机屏读人工转写）
+  Tip: Use /statusline to configure which items appear in the status line.
+
+⚠8 startup issues (1 MCP) · ctrl + t for details
+
+› hi
+
+⚠MCP startup incomplete (failed: playwright-mcp)
+
+• 你好！有什么我可以帮你的吗？
+
+  done 9:04 AM
+
+• Permissions updated to Ask for approval
+
+› /permissions/permissions
+
+■ Conversation interrupted – tell the model what to do differently. Something went wrong? Hit
+`/feedback` to report the issue.
+
+› Ask Codex to do anything
+
+  glm-5.3-flash medium · E:\LLMproject\Github\Test · renaming… ⋮   Plan mode

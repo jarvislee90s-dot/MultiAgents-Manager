@@ -66,6 +66,8 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 └── README.md              # 项目说明
 ```
 
+**项目专属技能（`.agents/skills/`，本地不入库）**：`win-console-inject-probe` —— Windows 终端注入探测工作流（P1 输入模式分族 + 确认子集 P0–P7 快路径 + 全量方法论 + M6R 验证脚本套件）。**凡涉及以下任务必须主动调用该技能**（读其 SKILL.md 按流程执行，勿从零自研探测方法）：①新 CLI 工具接入前的 Windows 注入规格探测；②注入故障诊断（写不进/被吞/打完字不提交/停摆）；③工具大版本升级后的注入规格复验。产出 = 单工具规格定案表，归档 `research/refs/phase2-消息注入/`。
+
 ## 架构概览
 
 **Tauri 2 桌面应用**，Rust 后端 + React 19 前端，通过 Tauri IPC (`invoke`) 通信。

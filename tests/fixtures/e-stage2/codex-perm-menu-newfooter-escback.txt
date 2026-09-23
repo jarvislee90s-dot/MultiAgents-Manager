@@ -1,0 +1,37 @@
+# source: 2026-09-23 自建 codex 会话实机 dump（codex-cli 0.156.1；探针 codex_composer_codepoint_live_probe，MAM_PROBE_PID 过滤只读自建会话）
+# 本次实机事故的直接原因（该 footer 与代码内旧锚逐字不符 → 菜单窗不成立）：
+#   footer = `enter select · esc back`（分隔符 · 是 U+00B7，与 kimi footer 同码点），
+#   而旧锚为 `press enter to confirm or esc to go back`。
+# 另含两条真实噪声（原样保留）：① 上方 `› D:/Program Files/Git/permissions` 是残留回显
+#   （历史行，位于对话流中部）；② 菜单紧贴 footer、无中间说明段（窄版布局形态）。
+# 逐字原文（探针 dump，人工未改一字）；读取器丢弃 `# ` 开头行。
+  Tip: New Build faster with Codex.
+
+• Sandbox ready
+  Codex can now safely edit files and execute commands in your computer
+
+
+› D:/Program Files/Git/permissions
+
+
+• 你发的是 D:/Program Files/Git/permissions，但没说明要做什么。
+
+  需要你明确一下目标：是要我检查这个路径是否存在、读取内容、排查 Git 权限问题，还是把它作为某项操作的参数？另外它不在当
+  前项目目录内，按你给的规则需要你确认后我才能读取或操作。
+
+  16:47
+
+
+  Update Model Permissions
+
+
+  1. Read Only                   Codex can read files in the current workspace. Approval is required to edit files or
+                                 access the internet.
+› 2. Ask for approval (current)  Codex can read and edit files in the current workspace, and run commands. Approval is
+                                 required to access the internet or edit other files.
+  3. Approve for me              Only ask for actions detected as potentially unsafe.
+  4. Full Access                 Codex can edit files outside this workspace and access the internet without asking for
+                                 approval. Exercise caution when using.
+
+  enter select · esc back
+

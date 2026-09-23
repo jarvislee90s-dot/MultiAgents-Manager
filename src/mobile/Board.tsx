@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Moon, Sun } from "lucide-react";
-import { connectEvents, fetchHost, fetchSessions, type HostPayload } from "./api";
+import { Archive, Moon, Power, Sun, Volume2, VolumeX } from "lucide-react";
+import {
+  closeSession,
+  connectEvents,
+  fetchHost,
+  fetchSessions,
+  hideSession,
+  type HostPayload,
+} from "./api";
 import { getInitialTheme, toggleTheme, type Theme } from "./theme";
+import { getSoundEnabled, playCompletionChime, toggleSoundEnabled } from "./sound";
 import {
   CHIP_LIGHT_TEXT_FACTOR,
+  STATUS_COLOR_KIND,
   STATUS_DOT_COLOR,
   TOOL_BRAND_COLORS,
   TOOL_BRAND_COLORS_DARK,
@@ -48,38 +57,10 @@ interface TransitionBanner {
   text: string;
 }
 
-// 提醒音（M3 Task 6 提醒三件套之二）：Web Audio 极简 beep。
-// **不复用桌面 src/lib/audio.ts**：其 12 个音效资产在 public/ 下（约 9.5MB），
-// 未随移动产物分发（vite.config.mobile.ts 的 publicDir=public-mobile），且那套
-// 配置/试听 UI 属桌面域——移动 bundle 引它必然拿不到音频文件而静默失败。
-// 懒建单例 AudioContext：Safari 对每页 AudioContext 数量有硬上限（约 6 个），
-// 每次提醒新建会在数次提醒后耗尽配额、之后全部静默失败。
-// 整体 try/catch：提示音是锦上添花，任何失败（无该 API / 自动播放策略挂起）
-// 都不得中断提醒链路（横幅与振动仍在）
-let beepCtx: AudioContext | null = null;
-function beep() {
-  try {
-    if (!beepCtx) {
-      const Ctx = window.AudioContext;
-      if (!Ctx) return; // 无 Web Audio 的环境（含 jsdom / 老浏览器）：跳过
-      beepCtx = new Ctx();
-    }
-    const ctx = beepCtx;
-    // 自动播放策略：无用户手势时 context 处于 suspended，resume 可能被拒——
-    // 拒绝即本次无声，用户下次触摸页面后的提醒会正常出声，不额外处理
-    if (ctx.state === "suspended") ctx.resume().catch(() => {});
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "sine";
-    osc.frequency.value = 880; // A5 短音：清晰可辨
-    gain.gain.value = 0.08; // 低增益：手机默认音量下不刺耳
-    osc.connect(gain).connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.15); // 150ms
-  } catch {
-    /* 静默降级：无提示音，其余提醒通道不受影响 */
-  }
-}
+// 提醒音（M3 Task 6 提醒三件套之二）：合成音实现与开关已抽到 ./sound.ts
+// （两音上行 + 包络；复用桌面 12 音效资产不可行——资产不在移动产物内，见该文件注释）。
+// 本组件只负责**何时响**：见 handleTransition 的转绿过滤 + 5 秒同色去重，
+// 口径照抄桌面 hooks/useNotification（currColor === "green" + lastNotified）。
 
 interface BoardProps {
   /** 首次成功拉到数据时回调（一次）：探测成功信号，App 由此把 paired null→true（已配对设备免重配） */
@@ -88,6 +69,12 @@ interface BoardProps {
   onUnpaired: () => void;
   /** 卡片点击回调（M3 Task 8）：进入会话详情；缺省时卡片不可点（既有测试/用法不受影响） */
   onOpenSession?: (session: Session) => void;
+  /** 历史入口点击回调（历史会话区 spec §7.1）：进入归档历史页 */
+  onOpenHistory: () => void;
+  /** T1 活状态流：看板数据每拍更新（SSE 快照/跃迁、降级 3s 轮询、30s 对账）时
+   *  上报当前会话列表。App 据此把进入详情时定格的 selected 快照按会话身份对齐到
+   *  活会话——停留详情页期间状态自动更新（红卡/总结横幅自动切换），不另起轮询 */
+  onSessionsChanged?: (sessions: Session[]) => void;
 }
 
 // 移动看板：主通道为 SSE（快照首帧 + 跃迁增量），断流 2 次降级为 3s 轮询。
@@ -95,7 +82,13 @@ interface BoardProps {
 // + 横幅/提示音/振动提醒；降级 → 交给下方轮询 effect（复用 tick 的 in-flight 守卫）。
 // 失败口径：403 → 回配对页（只由 fetchSessions 的 null 触发，SSE 断流不算）；
 // 网络异常 → 保留上次数据 + 错误横幅继续重试（不白屏、不误踢回配对页）。
-export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProps) {
+export default function Board({
+  onPaired,
+  onUnpaired,
+  onOpenSession,
+  onOpenHistory,
+  onSessionsChanged,
+}: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
   const [loadError, setLoadError] = useState(false);
   // SSE 已降级（连续 2 次失败）：单向闩——置位后由轮询 effect 接管数据拉取；
@@ -123,11 +116,24 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
   // 与 mobile.html 防闪白脚本、main.tsx applyInitialTheme 三处同源同优先级。
   // 真实 DOM 类由 toggleTheme 直接切（非渲染派生），本 state 仅驱动按钮图标/可达名
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  // 提示音总开关（2026-09-19）：初值从 localStorage 读；只控提示音，不影响横幅/振动
+  const [soundOn, setSoundOn] = useState<boolean>(() => getSoundEnabled());
+  // 上次实际响铃记录：同会话 5 秒内重复翻转到绿色只响一次（防状态抖动连响）。
+  // 口径照抄桌面 useNotification 的 lastNotified——消费者侧 UI 层防抖兜底，
+  // 与 SessionWatcher 层的跃迁去重（铁律 4）不冲突：那层去的是「状态边沿」，
+  // 这层去的是「同一会话在短时间内反复回到绿」的重复提醒
+  const lastChimed = useRef<Map<string, number>>(new Map());
   // 首个成功快照/首拍只发一次 onPaired：防重复回调导致父级无谓重渲染；
   // 重挂载（403 后重配）时随组件自然复位
   const aliveRef = useRef(false);
   // in-flight 守卫：慢网下上一拍未返回时跳过新拍，防早发慢到的旧响应覆盖新数据
   const inFlightRef = useRef(false);
+  // data 镜像 ref（体验批二）：handleTransition 是稳定引用（SSE 订阅不重连），
+  // 需要在回调内读最新会话列表判断「跃迁会话是否已知」时经本 ref 取
+  const dataRef = useRef(data);
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
   // 横幅自动消失定时器（键 = 横幅 key）：同会话新跃迁覆盖旧横幅时须撤销旧定时器，
   // 否则旧定时器会提前清掉新横幅
   const bannerTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -174,20 +180,82 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
   }, []);
 
   /** 状态跃迁（watcher 已去重的边沿，铁律 4：本层不独立去重，来一条处理一条）：
-   *  卡片实时刷新（F1.3「SSE 实时刷新」）+ 提醒三件套（横幅 / 提示音 / 振动） */
+   *  卡片实时刷新（F1.3「SSE 实时刷新」）+ 提醒三件套（横幅 / 提示音 / 振动）。
+   *  **提示音只在「变为绿」（任务完成）时响**（2026-09-19 用户裁决，与桌面端统一）：
+   *  按**目标颜色**判定——red→green 与 yellow→green 均响（口径同桌面
+   *  useNotification 的 currColor === "green"）；黄态细分跃迁
+   *  （processing↔thinking↔compacting）不响。修正前对任意状态值变化无条件响，
+   *  一轮回合内多次黄态细分跃迁会连响数次（用户实测为噪声）。
+   *  横幅与振动保持「每条跃迁都提醒」不变——它们是最低打扰的通道。 */
+  const maybeChime = useCallback(
+    (ev: TransitionEvent) => {
+      if (!soundOn) return;
+      if (STATUS_COLOR_KIND[ev.to] !== "green") return;
+      const last = lastChimed.current.get(ev.sessionId);
+      const nowMs = Date.now();
+      if (last !== undefined && nowMs - last < 5000) return; // 5 秒同会话去重
+      lastChimed.current.set(ev.sessionId, nowMs);
+      playCompletionChime();
+    },
+    [soundOn]
+  );
+
   const handleTransition = useCallback(
     (ev: TransitionEvent) => {
       // 命中会话才换数组引用；未命中（新会话 / 已消失 / 坏状态串）返回原引用，
       // setData 走引用相等短路零重渲染
       setData((prev) => (prev ? { ...prev, sessions: applyTransition(prev.sessions, ev) } : prev));
+      // 软归档自动回归到达路径（体验批二）：跃迁会话不在当前看板 = 可能正被软归档
+      // 隐藏且有了活动——服务端已在 /sessions 懒解除隐藏，但 SSE transition 只 patch
+      // 已知卡片（applyTransition 忽略未知 id），静默重拉一次全量把回归卡片接回来。
+      // 经 dataRef 读最新列表（handleTransition 稳定引用，SSE 订阅不因 data 变化重连）
+      if (!(dataRef.current?.sessions.some((x) => x.id === ev.sessionId) ?? false)) {
+        void (async () => {
+          try {
+            const s = await fetchSessions<SessionsResponse>();
+            if (s) {
+              dataRef.current = s;
+              setData(s);
+              setNow(Date.now());
+            }
+          } catch {
+            /* 静默：30s 对账 tick 兜底 */
+          }
+        })();
+      }
       setNow(Date.now());
       pushBanner(ev);
-      beep();
+      maybeChime(ev);
       // 振动（能力检测）：桌面浏览器与 iOS Safari 均无此 API，缺失即跳过
       navigator.vibrate?.(200);
     },
-    [pushBanner]
+    [pushBanner, maybeChime]
   );
+
+  /** 卡片关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀，进历史归档）；
+   *  APP=软归档（任意状态可归档——叉不挑颜色；等同桌面端叉掉：删未读池行 +
+   *  看板隐藏，不自动回归，可从历史页移回）。二次确认防误触；确认后乐观移除
+   *  本地卡片（扫描/过滤 3s 内对齐；失败则卡片保留，扫描真相为准） */
+  const handleCardClose = useCallback((s: Session) => {
+    const isCli = s.form === "cli";
+    const msg = isCli
+      ? "关闭桌面终端？该会话将进入历史归档"
+      : "归档该会话？等同在桌面端叉掉：将从手机看板隐藏且不再自动回归，可从历史页移回";
+    if (!window.confirm(msg)) return;
+    void (isCli ? closeSession(s.id) : hideSession(s.id))
+      .then(() => {
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                sessions: prev.sessions.filter((x) => x.id !== s.id),
+                totalCount: Math.max(0, prev.totalCount - 1),
+              }
+            : prev
+        );
+      })
+      .catch(() => {}); // 失败静默：卡片保留，服务端扫描真相为准
+  }, []);
 
   const tick = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -243,6 +311,13 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
     const id = setInterval(() => setNow(Date.now()), CLOCK_MS);
     return () => clearInterval(id);
   }, []);
+
+  // T1 活状态流：数据任何一拍更新都上报宿主（回调引用稳定，App 内 useCallback）。
+  // data 引用变化才触发；详情页打开时 Board 仍在挂载（仅视觉隐藏），这条链路
+  // 就是 selected 活同步的唯一数据源——不新增任何轮询
+  useEffect(() => {
+    if (data !== null) onSessionsChanged?.(data.sessions);
+  }, [data, onSessionsChanged]);
 
   // 横幅定时器清理（卸载）：防离页后 setState 警告与定时器泄漏
   useEffect(() => {
@@ -333,14 +408,34 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
           <span className="ml-auto text-sm">{host.name}</span>
         </header>
       )}
-      {/* 标题行右端常驻 P8f 主题切换按钮（不随 host 拉取成败进退）：
-          日/夜图标 + 可达名描述「点下去切到什么」，aria-label 供测试与无障碍精确定位 */}
+      {/* 标题行右端常驻 P8f 主题切换 + 提示音开关（不随 host 拉取成败进退）：
+          图标 + 可达名描述「点下去切到什么」，aria-label 供测试与无障碍精确定位。
+          会话计数在窄屏会让位（主题/音效两个按钮优先）——计数是信息、按钮是操作 */}
       <header className="mb-3 flex items-baseline justify-between">
         <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">会话看板</h1>
         <span className="flex items-center gap-2">
-          <span className="text-xs text-slate-500">
+          <button
+            type="button"
+            onClick={onOpenHistory}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+            aria-label="历史会话"
+          >
+            🕘 历史
+          </button>
+          <span className="hidden text-xs text-slate-500 sm:inline">
             {data ? `${data.totalCount} 个会话` : "加载中…"}
           </span>
+          <button
+            type="button"
+            data-testid="sound-toggle"
+            onClick={() => setSoundOn(toggleSoundEnabled())}
+            aria-label={soundOn ? "关闭完成提示音" : "开启完成提示音"}
+            aria-pressed={soundOn}
+            title={soundOn ? "完成提示音：开" : "完成提示音：关"}
+            className="rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          >
+            {soundOn ? <Volume2 size={16} /> : <VolumeX size={16} />}
+          </button>
           <button
             type="button"
             onClick={() => setTheme(toggleTheme())}
@@ -482,6 +577,24 @@ export default function Board({ onPaired, onUnpaired, onOpenSession }: BoardProp
                 <span className="ml-auto shrink-0 text-xs text-slate-600 dark:text-slate-500">
                   {formatRelativeTime(s.lastActivityAt, now)}
                 </span>
+                {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
+                    APP=软归档（等同桌面端叉掉：任意状态可归档、不自动回归，可从
+                    历史页移回）。stopPropagation 防触发卡片点击进详情 */}
+                {
+                  <button
+                    type="button"
+                    data-testid={`card-close-${s.id}`}
+                    aria-label={s.form === "cli" ? "关闭终端" : "归档会话"}
+                    title={s.form === "cli" ? "关闭终端" : "归档会话"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCardClose(s);
+                    }}
+                    className="shrink-0 rounded-full p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                  >
+                    {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
+                  </button>
+                }
                 {/* 三色圆点：与桌面 StatusLight 同语义（waiting 附加呼吸动画） */}
                 <span
                   className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT_COLOR[s.status]} ${

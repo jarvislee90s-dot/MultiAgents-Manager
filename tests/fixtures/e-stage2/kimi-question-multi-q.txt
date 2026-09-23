@@ -1,0 +1,31 @@
+# source: 2026-09-22-戊探B-kimi问答键序定案.md §2.3 M1（偏差申报：计划原文=K-5 两题屏，K-5 为用户口述实录无 dump——以真机多值答案 Review 屏代之（→ bravo, charlie, delta 逗号单字符串形态），两题 tab 栏形态由 E4 #[ignore] 实机测试覆盖；screen-ki1-m1-after-tab1.txt 原件）
+﻿ ● You chose atlantis — not one of the four
+  ⠼ working… · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"
+ ● You chose atlantis — not one of the four listed options, but
+ ● You chose atlantis — not one of the four listed options, but noted all the same. (Stamp E-B8)
+
+
+ ✨ Ask me one question via AskUserQuestion with multi_select=true (multiple answers allowed): Which techs do you use?
+    Options: alpha, bravo, charlie, delta. Stamp E-M1. After I submit, just say done.
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  question
+
+  (✓) Techs   Submit
+
+  Review your answer before submit
+
+   Q  Which techs do you use?
+   →  bravo, charlie, delta
+
+  Ready to submit your answers?
+
+   → [1] Submit
+     [2] Cancel
+
+   ↑↓ select  1/2 choose  ↵ confirm  ←/→/tab switch  esc cancel
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ GLM-5.3-Flash thinking: high  C:\Users\bunny\AppData\Local\Temp\mam-probe-eb-20260922-215419\proj-ki1
+                                                                                               context: 3% (28.6k/977k)
+
+
+

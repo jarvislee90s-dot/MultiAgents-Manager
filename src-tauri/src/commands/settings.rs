@@ -139,3 +139,41 @@ pub fn list_enabled_tools() -> Vec<EnabledTool> {
         })
         .collect()
 }
+
+/// T5 信号健康度：per-tool hook 通道状态（设置页「信号健康度」分区按需查询；
+/// 无轮询——仅分区打开/手动刷新时调用）。数据链路全复用既有设施：注册状态读
+/// KV、事件读 30s TTL 事件目录、会话归属走 adapter::get_all_sessions（自带单飞
+/// 护栏，与看板轮询共用快照/复扫同一份）——零新增扫描预算
+#[tauri::command]
+pub async fn hook_signal_health() -> Vec<crate::monitor::hooks::ToolSignalHealth> {
+    // 会话扫描是重活（sysinfo 全进程刷新 + 文件解析），同步命令在主线程执行会
+    // 冻结全部窗口 IPC——移到运行时阻塞线程池执行（同 get_all_sessions 命令惯例）
+    tauri::async_runtime::spawn_blocking(|| {
+        let tools: Vec<(String, String)> = crate::adapter::all_adapters()
+            .into_iter()
+            .filter(|a| a.hook_supported())
+            .map(|a| (a.agent_type().tool_id().to_string(), a.name().to_string()))
+            .collect();
+        let response = crate::adapter::get_all_sessions();
+        let registered_of = |tool_id: &str| {
+            crate::database::get_setting(&format!("hooks_registered_{tool_id}")).as_deref()
+                == Some("true")
+        };
+        let tools_ref: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(id, label)| (id.as_str(), label.as_str()))
+            .collect();
+        crate::monitor::hooks::compute_tool_signal_health(
+            &tools_ref,
+            &registered_of,
+            &crate::monitor::hooks::read_hook_events(),
+            &response.sessions,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // JoinError（后台任务 panic）→ 空表（前端渲染空态，不伪装成功数据）
+        ::log::error!("hook_signal_health 扫描任务异常: {e}");
+        Vec::new()
+    })
+}

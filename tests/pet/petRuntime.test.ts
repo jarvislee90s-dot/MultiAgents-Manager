@@ -91,8 +91,20 @@ describe("petRuntime", () => {
             hasSubtitle: true,
             spriteVersionNumber: 2,
             voices: [
-              { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 3000 },
-              { group: "done", name: "b", file: "voice/done/b.m4a", sizeBytes: 1, durationMs: 3000 },
+              {
+                group: "general",
+                name: "a",
+                file: "voice/general/a.m4a",
+                sizeBytes: 1,
+                durationMs: 3000,
+              },
+              {
+                group: "done",
+                name: "b",
+                file: "voice/done/b.m4a",
+                sizeBytes: 1,
+                durationMs: 3000,
+              },
             ],
           });
         return Promise.resolve(undefined);
@@ -140,7 +152,10 @@ describe("petRuntime", () => {
       }
       vi.stubGlobal("Image", FakeImage);
       // fetch blob 失败（文件锁定/同大小损坏）→ snapshotVoices 整体降级 null
-      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, blob: async () => ({}) })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: false, blob: async () => ({}) }))
+      );
       const { resolveActivePet, loadVoiceCap } = await import("@/components/pet/petRuntime");
       const { tauriInvokeMock: mock } = await import("../msw/tauriMocks");
       mock.mockReset();
@@ -161,7 +176,13 @@ describe("petRuntime", () => {
             hasSubtitle: true,
             spriteVersionNumber: 2,
             voices: [
-              { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 3000 },
+              {
+                group: "general",
+                name: "a",
+                file: "voice/general/a.m4a",
+                sizeBytes: 1,
+                durationMs: 3000,
+              },
             ],
           });
         return Promise.resolve(undefined);
@@ -182,7 +203,10 @@ describe("petRuntime", () => {
         }
       }
       vi.stubGlobal("Image", FakeImage);
-      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, blob: async () => ({}) })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true, blob: async () => ({}) }))
+      );
       vi.spyOn(URL, "createObjectURL").mockImplementation(() => "blob:mock-ok");
       vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
       const { resolveActivePet, loadVoiceCap } = await import("@/components/pet/petRuntime");
@@ -205,7 +229,13 @@ describe("petRuntime", () => {
             hasSubtitle: true,
             spriteVersionNumber: 2,
             voices: [
-              { group: "general", name: "a", file: "voice/general/a.m4a", sizeBytes: 1, durationMs: 3000 },
+              {
+                group: "general",
+                name: "a",
+                file: "voice/general/a.m4a",
+                sizeBytes: 1,
+                durationMs: 3000,
+              },
             ],
           });
         return Promise.resolve(undefined);

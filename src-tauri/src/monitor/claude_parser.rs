@@ -116,6 +116,7 @@ struct ClaudeFileDigest {
     last_timestamp: Option<String>,
     last_msg_type: Option<String>,
     last_has_tool_use: bool,
+    last_has_text: bool,
     last_has_tool_result: bool,
     last_is_local: bool,
     last_is_interrupted: bool,
@@ -135,6 +136,7 @@ fn read_claude_digest(jsonl_path: &Path) -> ClaudeFileDigest {
     let mut last_role = None;
     let mut last_msg_type = None;
     let mut last_has_tool_use = false;
+    let mut last_has_text = false;
     let mut last_has_tool_result = false;
     let mut last_is_local = false;
     let mut last_is_interrupted = false;
@@ -174,6 +176,7 @@ fn read_claude_digest(jsonl_path: &Path) -> ClaudeFileDigest {
                             last_msg_type = msg.msg_type.clone();
                             last_role = content.role.clone();
                             last_has_tool_use = has_tool_use(c);
+                            last_has_text = has_text_block(c);
                             last_has_tool_result = has_tool_result(c);
                             last_is_local = is_local_slash_command(c);
                             last_is_interrupted = is_interrupted_request(c);
@@ -228,6 +231,7 @@ fn read_claude_digest(jsonl_path: &Path) -> ClaudeFileDigest {
         last_timestamp,
         last_msg_type,
         last_has_tool_use,
+        last_has_text,
         last_has_tool_result,
         last_is_local,
         last_is_interrupted,
@@ -266,6 +270,7 @@ fn parse_claude_jsonl(
         determine_status(
             digest.last_msg_type.as_deref(),
             digest.last_has_tool_use,
+            digest.last_has_text,
             digest.last_has_tool_result,
             digest.last_is_local,
             digest.last_is_interrupted,
@@ -331,5 +336,42 @@ mod title_tests {
             parse_claude_jsonl(&jsonl, "/work/demo", &fake_process(1)).expect("应解析出会话");
         // "会话🔥x" 共 4 个字符，不足 8 位时整串即标题
         assert_eq!(session.title.as_deref(), Some("会话🔥x"));
+    }
+
+    /// 末行 = thinking-only assistant（无正文无工具调用）→ Thinking（黄），不得瞬绿。
+    /// 这是「长思考期间每落一条 thinking 行就误报任务完成」的回归锁（2026-09-19）
+    #[test]
+    fn thinking_only_assistant_tail_is_thinking_not_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &jsonl,
+            concat!(
+                r#"{"sessionId":"sess-thinking-1","cwd":"/work/demo","timestamp":"2026-01-01T00:00:00Z","#,
+                r#""type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"推演中……"}]}}"#
+            ),
+        )
+        .unwrap();
+        let session =
+            parse_claude_jsonl(&jsonl, "/work/demo", &fake_process(1)).expect("应解析出会话");
+        assert_eq!(session.status, crate::session::SessionStatus::Thinking);
+    }
+
+    /// 末行 = assistant 正文（有 text 无 tool_use）→ Idle（绿），确认新参数不误伤完成信号
+    #[test]
+    fn assistant_text_tail_still_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &jsonl,
+            concat!(
+                r#"{"sessionId":"sess-text-1","cwd":"/work/demo","timestamp":"2026-01-01T00:00:00Z","#,
+                r#""type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"完成了"}]}}"#
+            ),
+        )
+        .unwrap();
+        let session =
+            parse_claude_jsonl(&jsonl, "/work/demo", &fake_process(1)).expect("应解析出会话");
+        assert_eq!(session.status, crate::session::SessionStatus::Idle);
     }
 }

@@ -41,7 +41,10 @@ describe("petErrMsg（P3-6 错误码 → i18n）", () => {
 
   describe("PetRpcError 分支（第六轮 Commit 3）", () => {
     it("结构化 RpcError → t(pet.rpc.<code>, params) 正常映射", () => {
-      const msg = petErrMsg({ code: "pet-exists", params: { name: "dup" }, detail: "宠物已存在: dup" }, t);
+      const msg = petErrMsg(
+        { code: "pet-exists", params: { name: "dup" }, detail: "宠物已存在: dup" },
+        t
+      );
       expect(msg).toBe("pet.rpc.pet-exists:dup");
       expect(t).toHaveBeenCalledWith("pet.rpc.pet-exists", { name: "dup" });
     });

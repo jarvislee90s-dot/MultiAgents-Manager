@@ -225,10 +225,7 @@ describe("useVoiceDurationProbe（第九轮 Bug2）", () => {
         await Promise.resolve();
       });
       expect(probe).toHaveBeenCalledTimes(4);
-      expect(probe).toHaveBeenNthCalledWith(
-        4,
-        expect.stringContaining("voice/general/bad.mp3")
-      );
+      expect(probe).toHaveBeenNthCalledWith(4, expect.stringContaining("voice/general/bad.mp3"));
       expect(result.current.rows[0].durationMs).toBe(3000); // 手动重测成功回填
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2000);

@@ -228,6 +228,17 @@ fn load_latest_turn_status(conn: &Connection, thread_id: &str) -> Option<String>
 /// 高层事件 → 共享判定核条目（与 rollout 的 codex_entry_kind 语义对齐：
 /// userMessage→UserMessage、agentMessage→AssistantMessage、commandExecution→ToolCall；
 /// reasoning/fileChange/imageView/plan 为记账条目 → Other）
+///
+/// **丁T1 边界（如实申报，勿读成漏做）**：rollout 路径新增的
+/// [`AppEntryKind::UserInputToolCall`]（用户输入类工具待决 → 语义红）在本路径
+/// **无法**落地——本机 `~/.codex/thread_history_*.sqlite` 的 thread_items 全表扫描
+/// （2026-09-21，24913 行）实测 `item_type` 取值只有 agentMessage / reasoning /
+/// fileChange / userMessage / mcpToolCall / commandExecution / contextCompaction /
+/// webSearch / plan / imageView——**内置工具调用（request_user_input / exec_command /
+/// apply_patch）根本不进 SQLite 投影**（item_json 里命中 request_user_input 的 109 行
+/// 全是 reasoning 正文提到该词，非工具条目）。判据（call_id 配对）在数据层不可用，
+/// 故本路径保持既有语义（无投影 → updated_at 兜底），APP 形态的问答待决暂不出红。
+/// 结论由 T1 实现者申报，**不假装 APP 路径已覆盖**
 fn item_entry_kind(item_type: &str) -> AppEntryKind {
     match item_type {
         "userMessage" => AppEntryKind::UserMessage,

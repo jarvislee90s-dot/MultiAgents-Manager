@@ -1,7 +1,10 @@
 use super::applescript::execute_applescript;
 
-/// 通过 TTY 聚焦 Terminal.app 标签页
+/// 通过 TTY 聚焦 Terminal.app 标签页。tty 匹配为**全路径相等**（Task 9，R6
+/// 「三处统一」：与注入侧脚本同口径，contains 有前缀撞号）；入参裸后缀先
+/// 归一 `/dev/` 全路径。
 pub fn focus_terminal_app_by_tty(tty: &str) -> Result<(), String> {
+    let full_tty = super::normalize_dev_tty(tty);
     let check_script = r#"
         tell application "System Events"
             return exists process "Terminal"
@@ -23,7 +26,7 @@ pub fn focus_terminal_app_by_tty(tty: &str) -> Result<(), String> {
             repeat with w in windows
                 repeat with t in tabs of w
                     try
-                        if tty of t contains "{}" then
+                        if tty of t is "{}" then
                             set selected of t to true
                             set index of w to 1
                             return "found"
@@ -34,7 +37,7 @@ pub fn focus_terminal_app_by_tty(tty: &str) -> Result<(), String> {
         end tell
         return "not found"
     "#,
-        tty
+        full_tty
     );
     execute_applescript(&script)
 }

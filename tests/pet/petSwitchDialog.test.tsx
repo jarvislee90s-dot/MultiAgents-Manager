@@ -19,11 +19,25 @@ const manifest = {
   spriteVersionNumber: 1,
   spritesheetSizeBytes: 100,
   voices: [
-    { group: "general", name: "greet", file: "voice/general/greet.mp3", sizeBytes: 10, durationMs: 3000 },
+    {
+      group: "general",
+      name: "greet",
+      file: "voice/general/greet.mp3",
+      sizeBytes: 10,
+      durationMs: 3000,
+    },
   ],
 };
 const pets = [
-  { id: "p1", displayName: "P", spriteVersionNumber: 1, hasVoice: true, hasSubtitle: true, manifestExists: true, dir: "/x/p1" },
+  {
+    id: "p1",
+    displayName: "P",
+    spriteVersionNumber: 1,
+    hasVoice: true,
+    hasSubtitle: true,
+    manifestExists: true,
+    dir: "/x/p1",
+  },
 ];
 
 // ignore 场景：manifest 记录 greet 但磁盘没有（另有 done/other）→ mismatch（voice-missing + voice-extra）
@@ -66,9 +80,7 @@ describe("PetSwitchDialog（issue #33-4/#33-5/#33-8）", () => {
     mockBackend([{ rel: "voice/done/other.mp3", size: 5 }]);
     render(<PetSwitchDialog open onOpenChange={() => {}} />);
     fireEvent.click(await screen.findByTestId("pet-card-p1"));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Ignore, run degraded from disk" })
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Ignore, run degraded from disk" }));
     await waitFor(() => expect(localStorage.getItem("mam-pet-voice-cap")).toBe("0"));
     // 卡片 🔊 徽标从点亮变熄灭（旧实现仍 text-primary）
     const card = screen.getByTestId("pet-card-p1");
