@@ -9194,6 +9194,10 @@ mod tests {
         /// 的 cwd/args 字段——两分支断言语义同构（cwd + resume 命令落点），跨平台
         /// 均可编译（cfg! 运行时布尔，两分支全平台参与编译）。
         #[tokio::test]
+        #[cfg_attr(
+            not(any(windows, target_os = "macos")),
+            ignore = "归档回退 resume 走注入/开窗链（platform 门）：仅 Windows/macOS"
+        )]
         async fn dead_session_opens_from_archive() {
             let row = SessionArchiveRow {
                 session_id: "dead-9".into(),
