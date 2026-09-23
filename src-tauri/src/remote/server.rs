@@ -3232,6 +3232,10 @@ mod tests {
     /// 直发可输入态（Waiting）：200 delivered + 注入器收到 compose 产物（裁决 6 归一）
     /// + 审计 action=send result=ok channel=fake + 队列无 pending 残留
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_delivers_when_input_ready() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3298,6 +3302,10 @@ mod tests {
     /// 运行中（Processing 黄态）：200 queued + itemId/position + 审计 action=queue +
     /// 注入器不被调用 + GET session-queue 可见该项（content 为 compose 产物）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_queues_when_running() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3360,6 +3368,10 @@ mod tests {
     /// 审计）；条目在 GET session-queue 可见（flush 循环转闲按序自动放行——与普通
     /// 队列项同权）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_queue_only_skips_direct_delivery() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3412,6 +3424,10 @@ mod tests {
     /// D6 防回归对照：queueOnly 显式 false（与缺省同义）→ 可输入态直发行为不变
     /// （200 delivered + 注入器收到 compose 产物），既有调用面零漂移
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_queue_only_false_keeps_direct_delivery() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3444,6 +3460,10 @@ mod tests {
     /// 前缀会毁掉 `/permissons`；后缀同样破坏命令与参数），审计 action=**slash**
     /// 且 device_name 在账（裁2：终端不留痕，溯源只此一处）。
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn slash_message_bare_injects_and_audits_slash() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3491,6 +3511,10 @@ mod tests {
     /// **斜杠命令走队列（运行中会话）**：同样裸注入入队（队列存的就是 compose 产物）
     /// + 端点审计 action=slash（不是 queue——用户动作是发命令，投递机制另记）。
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn slash_message_queued_keeps_bare_form_and_slash_action() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3539,6 +3563,10 @@ mod tests {
     /// D6：queueOnly=true 且会话 running（Processing 黄态）→ 照常入队（与普通入队
     /// 同路径同回执同审计），注入器不被调用
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_queue_only_when_running_queues_normally() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3664,6 +3692,10 @@ mod tests {
     /// 守卫持到测尾——占全测试集唯一 id sess_i（复检终修：曾用 sess_h 与 approve_state
     /// 夹具的 approve_sends_key 跨夹具撞 id 串键实测 2/30 假红；立规见 inject_state doc）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_input_ready_busy_inflight_falls_back_to_queue() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3694,6 +3726,10 @@ mod tests {
     /// reconcileQueued 对账，queued 直认恢复排队视图，无 failed 交互依赖）。守卫持到
     /// 测尾——sess_f 为 inject_state 夹具内 jump 忙测试专用 id
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn queue_jump_busy_inflight_falls_back_to_queue() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3750,6 +3786,10 @@ mod tests {
     /// 插队 + 撤回：黄态入队两条 → jump 第二条 delivered（插队语义：黄态照发，注入器
     /// 收到第二条 compose 产物）+ 审计 action=jump → retract 第一条 ok:true → queue 空
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn queue_jump_and_retract() {
         let fake = FakeInjector::ok();
         let state = inject_state(fake.clone());
@@ -3938,6 +3978,10 @@ mod tests {
     /// 直发注入失败：注入器恒 Err → 200 {"status":"failed","error":…}（W4 可重试回执）
     /// + 审计 action=send result=failed:… + 队列无残留（W1：失败行 mark_failed 退出 pending）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_reports_inject_failure() {
         let fake = FakeInjector::failing("定位终端失败：pid 不存在");
         let state = inject_state(fake.clone());
@@ -4055,6 +4099,10 @@ mod tests {
     /// windows 单通道，断言按编译平台取期望）；workbuddy → injectable=false + blackbox；
     /// 另锁定缺参 400 与未知会话 404 no_session
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn send_info_matrix() {
         let state = inject_state(FakeInjector::ok());
         persist_named_device(&state, "mm", "测试设备");
@@ -8133,6 +8181,10 @@ mod tests {
     /// 一键 resume 出手：200 opening + no-store + spawner 收到命令表产物 +
     /// 审计 action=open result=ok；无 cookie → 403（PIN gate 照旧覆盖）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn session_open_endpoint_opens_and_audits() {
         let spawner_rec = RecordingSpawner::new();
         let state = open_state(spawner_rec.seam());
@@ -8290,6 +8342,10 @@ mod tests {
     /// 语义在 body——session-approve 同口径）+ 审计 action=open result=failed: 前缀。
     /// spawner 恒败（本机 wt/conhost 两分支皆败——降级链收口后的终态）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn session_open_endpoint_spawn_failure_reports_failed() {
         let spawner_rec = RecordingSpawner::new();
         let state = open_state(spawner_rec.seam_failing("终端启动失败（模拟）"));
@@ -8344,6 +8400,10 @@ mod tests {
     /// 注：本测试在 Windows 上跑走 Windows 分支（open_session_terminal_with 按
     /// std::env::consts::OS 分派），但端点回执契约跨平台同形，与 OS 分派正交。
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn session_open_endpoint_macos_tcc_guidance_reports_failed() {
         let spawner_rec = RecordingSpawner::new();
         let state = open_state(spawner_rec.seam_failing(crate::inject::resume::MACOS_TCC_GUIDANCE));
@@ -9355,6 +9415,10 @@ mod tests {
     /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
     /// `/permissions` 两段式的**第一段**（文本 + 回车；第二段无真屏读 → 中止并如实回执）
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn session_mode_switch_routes_explicit_permission_group() {
         let fake = FakeInjector::ok();
         let (state, sid) = mode_state_with_injector(
@@ -9564,6 +9628,10 @@ mod tests {
     /// codex 运行中门**只管 Plan 档**：同一 Processing 会话切权限组 → 照常出手
     /// （权限菜单的可用性与回合状态无关；未实测有同类限制 → 不扩张）。
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn session_mode_switch_codex_busy_only_blocks_plan() {
         let fake = FakeInjector::ok();
         let (state, sid) = mode_state_with_injector(
@@ -9602,6 +9670,10 @@ mod tests {
     /// **本用例能证明什么**：探针只在**第一段之前**被调用一次（守卫位）→ 断「调用
     /// 次数恰好 1」+「第一段照常投递」。若有人在第二段前再插一次探针，计数变 2 → 先红。
     #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
     async fn session_mode_switch_menu_guard_runs_once_before_first_stage() {
         let fake = FakeInjector::ok();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

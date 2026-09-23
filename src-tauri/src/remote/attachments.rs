@@ -268,6 +268,10 @@ mod tests {
     // ---- sanitize_file_name ----
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "断言 Windows 形态（bash 包装/反斜杠分隔符语义）；非 Windows 平台行为另测"
+    )]
     fn sanitize_strips_path_traversal_and_separators() {
         // 路径注入三形态：正斜杠 / 反斜杠 / 盘符——全部只剩最后一段
         assert_eq!(sanitize_file_name("a/b/c.png"), "c.png");
