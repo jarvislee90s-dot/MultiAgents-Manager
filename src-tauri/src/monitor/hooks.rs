@@ -316,29 +316,32 @@ fn remove_legacy_camel_key(
     }
 }
 
-/// 启动核验判据（纯函数，跨平台可测）：当前命令在场 **且**（codex）commandWindows
-/// 期望命令在场 **且** 全部期望事件键按该工具的键形态在场（PascalCase 工具查
-/// PascalCase 键）**且** 带 matcher 的事件（T2：claude Notification →
-/// permission_prompt）matcher 期望值在场。键形态核验是 F3 存量迁移的可达性前提；
-/// commandWindows 核验是 T1 存量迁移的可达性前提——只查 command 不够：旧 bash 条目
-/// 的 command 与 codex 规格的 command 完全相同（差异只在 commandWindows 有无），会
-/// 把存量文件误判已核验、commandWindows 迁移永不触达。matcher 核验同理：只查事件
-/// 键在场不够，matcher 缺失/漂移时核验跳过会让注册修复路径永不可达。
+/// 启动核验判据（纯函数，跨平台可测）：**每个期望事件的我方条目恰好一条且已等于
+/// 当前规格**——matcher 符合期望、（claude/kimi）command 等于规格命令、（codex）
+/// commandWindows 等于规格覆盖。键形态核验是 F3 存量迁移的可达性前提；
+/// commandWindows 核验是 T1 存量迁移的可达性前提；**我方条目数核验（2026-09-24）
+/// 是双注册残留收敛的可达性前提**——旧判据只查「规格命令是否在文件某处出现」，
+/// helper 条目在场即判已核验，与 helper 并存的旧 bash 条目（同为我方标记）就永远
+/// 不进注册路径：两 hook 同事件双触发、双写同一事件文件，bash 兜底只写基础字段且
+/// 后写覆盖 helper 的富载荷（`tool_name`/`tool_input` 丢失 → claude AUQ 被误判成
+/// 审批，取证见 `research/refs/phase2-消息注入/2026-09-24-claude多选多题键序-用户
+/// 实机取证.md` 关联根因）。判据从字符串级升级为 JSON 解析级（注册文件恒为本
+/// 注册器/官方工具产出的 pretty JSON）。
 fn hooks_file_verified(
     content: &str,
+    script_path_str: &str,
     spec: &HookCommandSpec,
     events: &[&str],
     is_pascal_case: bool,
     matchers: &[(&str, &str)],
 ) -> bool {
-    if !content.contains(&spec.command) {
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(content) else {
         return false;
-    }
-    if let Some(want) = &spec.command_windows {
-        if !content.contains(want.as_str()) {
-            return false;
-        }
-    }
+    };
+    let Some(hooks) = config.get("hooks") else {
+        return false;
+    };
+    let markers = ours_markers(script_path_str, spec);
     events.iter().all(|e| {
         let key = if is_pascal_case {
             (*e).to_string()
@@ -349,16 +352,83 @@ fn hooks_file_verified(
                 None => String::new(),
             }
         };
-        if !content.contains(&format!("\"{key}\"")) {
-            return false;
-        }
-        // T2：带 matcher 的事件要求期望 matcher 值在注册文件中在场（字符串级判据与
-        // 上方 command/commandWindows 同口径——文件由本注册器 pretty JSON 产出）
-        match matchers.iter().find(|(ev, _)| *ev == *e) {
-            Some((_, m)) => content.contains(&format!("\"{m}\"")),
-            None => true,
-        }
+        let expected_matcher = matchers
+            .iter()
+            .find(|(ev, _)| *ev == *e)
+            .map(|(_, m)| *m)
+            .unwrap_or("");
+        event_hooks_converged(hooks, &key, &markers, spec, expected_matcher)
     })
+}
+
+/// 单事件的「我方条目收敛」判据（核验侧纯函数）：该事件下我方条目（条目内任一
+/// command 命中标记集）**恰好一条**，且该条目 matcher 符合期望（缺 matcher 字段按
+/// 空串——注册器产出的条目恒带 matcher，历史/官方文件可能缺省）、其内**所有我方
+/// command 及 codex 的 commandWindows** 等于当前规格。多于一条 = 双注册残留；
+/// 一条但形态旧 = 待迁移；零条 = 待追加——三种形态都判未核验，注册路径保持可达。
+fn event_hooks_converged(
+    hooks: &serde_json::Value,
+    event_key: &str,
+    markers: &[String],
+    spec: &HookCommandSpec,
+    expected_matcher: &str,
+) -> bool {
+    let Some(arr) = hooks.get(event_key).and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let mut ours_entries = 0usize;
+    let mut converged = false;
+    for entry in arr {
+        let Some(cmds) = entry.get("hooks").and_then(|h| h.as_array()) else {
+            continue;
+        };
+        let has_ours = cmds
+            .iter()
+            .any(|h| hook_command_is_ours(h, markers));
+        if !has_ours {
+            continue;
+        }
+        ours_entries += 1;
+        let matcher_ok = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("")
+            == expected_matcher;
+        let cmds_ok = cmds
+            .iter()
+            .all(|h| hook_command_matches_spec(h, markers, spec));
+        if matcher_ok && cmds_ok {
+            converged = true;
+        }
+    }
+    ours_entries == 1 && converged
+}
+
+/// 单个 hook 命令对象是否 MAM 注册（command 命中我方标记集）
+fn hook_command_is_ours(h: &serde_json::Value, markers: &[String]) -> bool {
+    h.get("command")
+        .and_then(|c| c.as_str())
+        .map(|s| command_is_ours(s, markers))
+        .unwrap_or(false)
+}
+
+/// 单个 hook 命令对象是否已等于当前规格：非我方命令（用户自己的）不判过；
+/// 我方 command 必须相等，且（spec 有 Windows 覆盖时）commandWindows 必须在场且相等
+fn hook_command_matches_spec(h: &serde_json::Value, markers: &[String], spec: &HookCommandSpec) -> bool {
+    let Some(c) = h.get("command").and_then(|c| c.as_str()) else {
+        return true; // 无 command 字段的条目不是我们产出的命令，交给用户语义
+    };
+    if !command_is_ours(c, markers) {
+        return true; // 用户命令混在我方条目内：不判（注册侧也只动我方命令）
+    }
+    if c != spec.command {
+        return false;
+    }
+    match (
+        &spec.command_windows,
+        h.get("commandWindows").and_then(|w| w.as_str()),
+    ) {
+        (Some(want), Some(cur)) => cur == want,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
 }
 
 /// 为指定工具注册 Hook（生产入口：脚本落盘 + helper 安装 + 命令规格注入核心）。
@@ -524,6 +594,14 @@ fn register_hooks_in_file(
                 }
             }
         }
+        // 2026-09-24 双注册残留收敛（先于 skip 守卫与计数汇总）：同一事件下我方
+        // **命令**只保留一条（第一条——上方迁移段已把它改写为当前规格），其余条目
+        // 内的我方命令移除、被掏空的条目整条删除——双条目会让两个 hook 同事件双
+        // 触发并双写同一事件文件，bash 兜底只写基础字段且后写覆盖 helper 的富载荷
+        // （tool_name/tool_input 丢失 = claude AUQ 被误判审批的根因，取证见
+        // 2026-09-24-claude多选多题键序-用户实机取证）。用户命令永不触碰。
+        let pruned = prune_extra_ours_entries(hooks_obj.get_mut(&event_name), &markers);
+        migrated_this_event += pruned;
         migrated += migrated_this_event + usize::from(legacy_removed);
         // 已注册或本轮完成原地迁移：条目已等于当前规格，再追加会产生同命令重复
         // 条目（同事件双触发、双写事件），直接进入下一事件；持久化由 migrated 计数保证
@@ -577,6 +655,49 @@ fn register_hooks_in_file(
     }
 
     Ok((added, migrated))
+}
+
+/// 同一事件下「我方命令多于一条」的收敛（注册侧，2026-09-24）：跨全部条目**只保留
+/// 第一条我方命令**（迁移段已把它改写为当前规格），其余我方命令逐一移除；条目被
+/// 掏空（hooks 数组为空）则整条移除。返回移除的我方命令数（0 = 无残留）。
+/// 用户命令（不命中标记集）永不触碰；混合条目只掏我方命令、用户命令原地保留。
+///
+/// 实机形态（claude settings.json，2026-09-23 取证）：每个事件下 helper 条目与
+/// 旧 bash 兜底条目**并存**——两者同触发、写同一事件文件，bash 后写覆盖 helper 的
+/// 富载荷（无 tool_name/tool_input），问答通道因此整体失效。本函数与
+/// [`hooks_file_verified`] 的「我方条目恰好一条」判据配套：核验发现残留 → 注册
+/// 路径进来 → 迁移改写 + 本函数收敛 → 下次核验通过。
+fn prune_extra_ours_entries(arr: Option<&mut serde_json::Value>, markers: &[String]) -> usize {
+    let Some(arr) = arr.and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let mut seen_ours = false;
+    let mut pruned = 0usize;
+    let mut empty_entries: Vec<usize> = Vec::new();
+    for (idx, entry) in arr.iter_mut().enumerate() {
+        let Some(cmds) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            continue;
+        };
+        let before = cmds.len();
+        cmds.retain(|h| {
+            if !hook_command_is_ours(h, markers) {
+                return true; // 用户命令保留
+            }
+            if !seen_ours {
+                seen_ours = true;
+                return true; // 全事件第一条我方命令保留
+            }
+            false // 其余我方命令移除（含同条目内的重复形态）
+        });
+        pruned += before - cmds.len();
+        if before > 0 && cmds.is_empty() {
+            empty_entries.push(idx);
+        }
+    }
+    for idx in empty_entries.into_iter().rev() {
+        arr.remove(idx);
+    }
+    pruned
 }
 
 /// kimi hooks 注册（T2 接入，config.toml `[[hooks]]` 数组表）：事件名 PascalCase
@@ -923,18 +1044,23 @@ pub fn register_all_hooks() {
             continue;
         }
         // 启动核验：配置文件实际引用**当前命令规格**（含 codex 的 commandWindows）、
-        // 脚本存在、且**事件键形态在场**（F3 键形态核验，2026-09-20）才跳过。只查
-        // command 不够——旧 camelCase 注册的 command 与当前完全相同（只有事件键大
-        // 小写不同），会把存量文件误判已核验、迁移永不触达（复评 P1-2）；同理旧
-        // bash 条目与 codex 规格的 command 相同（只差 commandWindows），T1 迁移
-        // 也要求核验覆盖 Windows 覆盖字段。kimi 走 TOML 核验（[[hooks]] 事件+
-        // 命令逐条在场）
+        // 脚本存在、**事件键形态在场**（F3 键形态核验，2026-09-20）、且**每个事件
+        // 的我方条目恰好一条**（2026-09-24 双注册残留核验——helper 与旧 bash 兜底
+        // 并存会双写同一事件文件、后者覆盖前者的富载荷，claude AUQ 误判审批的根因）
+        // 才跳过。kimi 走 TOML 核验（[[hooks]] 事件+命令逐条在场）
         let verified = fs::read_to_string(&config_path)
             .map(|c| {
                 if tool_id == "kimi" {
                     hooks_toml_verified(&c, &spec.command, &events)
                 } else {
-                    hooks_file_verified(&c, &spec, &events, is_pascal, &matchers)
+                    hooks_file_verified(
+                        &c,
+                        &script_path.to_string_lossy(),
+                        &spec,
+                        &events,
+                        is_pascal,
+                        &matchers,
+                    )
                 }
             })
             .unwrap_or(false)
@@ -1179,32 +1305,35 @@ mod legacy_camel_key_tests {
     #[test]
     fn hooks_file_verified_requires_event_key_form() {
         use super::hooks_file_verified;
-        let (_, spec) = bash_spec("/x/status-hook.sh", "bash /x/status-hook.sh");
+        let script = "/x/status-hook.sh";
+        let (_, spec) = bash_spec(script, "bash /x/status-hook.sh");
         let legacy = r#"{"hooks":{"stop":[{"hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
         let modern = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
         // PascalCase 工具 + 旧 camel 键：command 在场也不得核验（迁移入口保持可达）
-        assert!(!hooks_file_verified(legacy, &spec, &["Stop"], true, &[]));
+        assert!(!hooks_file_verified(legacy, script, &spec, &["Stop"], true, &[]));
         // 全期望键在场：核验
-        assert!(hooks_file_verified(modern, &spec, &["Stop"], true, &[]));
+        assert!(hooks_file_verified(modern, script, &spec, &["Stop"], true, &[]));
         // 多事件任缺一键：不核验
         assert!(!hooks_file_verified(
             modern,
+            script,
             &spec,
             &["Stop", "PreToolUse"],
             true,
             &[]
         ));
         // camelCase 形态工具按 camel 键核验（形态匹配即核验）
-        assert!(hooks_file_verified(legacy, &spec, &["stop"], false, &[]));
+        assert!(hooks_file_verified(legacy, script, &spec, &["stop"], false, &[]));
         // command 缺席：不核验
-        let (_, other) = bash_spec("/x/status-hook.sh", "bash /other.sh");
-        assert!(!hooks_file_verified(modern, &other, &["Stop"], true, &[]));
+        let (_, other) = bash_spec(script, "bash /other.sh");
+        assert!(!hooks_file_verified(modern, script, &other, &["Stop"], true, &[]));
         // T2：带 matcher 的事件要求期望 matcher 在场——缺/漂移均不核验
         // （matcher 修复入口保持可达），matcher 命中才核验通过
         let notif_legacy = r#"{"hooks":{"Notification":[{"matcher":"","hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
         let notif_ok = r#"{"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
         assert!(!hooks_file_verified(
             notif_legacy,
+            script,
             &spec,
             &["Notification"],
             true,
@@ -1212,6 +1341,7 @@ mod legacy_camel_key_tests {
         ));
         assert!(hooks_file_verified(
             notif_ok,
+            script,
             &spec,
             &["Notification"],
             true,
@@ -1225,6 +1355,7 @@ mod legacy_camel_key_tests {
     #[test]
     fn hooks_file_verified_requires_command_windows_when_spec_has_one() {
         use super::hooks_file_verified;
+        let script = "/x/status-hook.sh";
         let legacy = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
         let migrated = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh","commandWindows":"C:/u/.mam/bin/mam-hook-listener.exe"}]}]}}"#;
         let spec = HookCommandSpec {
@@ -1233,12 +1364,178 @@ mod legacy_camel_key_tests {
             helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
         };
         assert!(
-            !hooks_file_verified(legacy, &spec, &["Stop"], true, &[]),
+            !hooks_file_verified(legacy, script, &spec, &["Stop"], true, &[]),
             "缺 commandWindows 的旧条目不得核验通过"
         );
         assert!(
-            hooks_file_verified(migrated, &spec, &["Stop"], true, &[]),
+            hooks_file_verified(migrated, script, &spec, &["Stop"], true, &[]),
             "commandWindows 齐备才核验通过"
+        );
+    }
+
+    /// 2026-09-24 双注册残留核验（实机根因回归锁）：helper 条目在场但同事件下
+    /// **另有**我方 bash 兜底条目 → 不得核验——旧判据（字符串 contains 规格命令）
+    /// 会放行，残留 bash 后写覆盖 helper 富载荷，claude AUQ 被误判成审批。
+    /// 收敛后（单条 helper）才核验通过；同条目内两条我方命令同样算残留。
+    #[test]
+    fn hooks_file_verified_rejects_duplicate_our_entries() {
+        use super::hooks_file_verified;
+        let script = "/u/.mam/hooks/status-hook.sh";
+        let helper_cmd = "C:/u/.mam/bin/mam-hook-listener.exe";
+        let spec = HookCommandSpec {
+            command: helper_cmd.to_string(),
+            command_windows: None,
+            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+        };
+        // 实机形态（2026-09-23 claude settings.json）：helper 条目 + bash 兜底条目并存
+        let live = serde_json::json!({"hooks": {"PreToolUse": [
+            { "matcher": "", "hooks": [{ "type": "command", "command": helper_cmd }] },
+            { "matcher": "", "hooks": [{ "type": "command", "command": format!("bash {script}") }] },
+        ]}});
+        assert!(
+            !hooks_file_verified(
+                &live.to_string(),
+                script,
+                &spec,
+                &["PreToolUse"],
+                true,
+                &[]
+            ),
+            "我方条目两条并存不得核验（收敛入口必须可达）"
+        );
+        // 同一条目内两条我方命令：同样算残留
+        let same_entry = serde_json::json!({"hooks": {"PreToolUse": [
+            { "matcher": "", "hooks": [
+                { "type": "command", "command": helper_cmd },
+                { "type": "command", "command": format!("bash {script}") },
+            ]},
+        ]}});
+        assert!(
+            !hooks_file_verified(
+                &same_entry.to_string(),
+                script,
+                &spec,
+                &["PreToolUse"],
+                true,
+                &[]
+            ),
+            "同条目两条我方命令不得核验"
+        );
+        // 收敛形态（单条 helper）：核验通过
+        let converged = serde_json::json!({"hooks": {"PreToolUse": [
+            { "matcher": "", "hooks": [{ "type": "command", "command": helper_cmd }] },
+        ]}});
+        assert!(hooks_file_verified(
+            &converged.to_string(),
+            script,
+            &spec,
+            &["PreToolUse"],
+            true,
+            &[]
+        ));
+    }
+
+    /// 2026-09-24 双注册残留收敛（注册侧回归锁）：helper + bash 并存 + 用户条目
+    /// 混排的实机形态 → 注册一轮后必须收敛为**单条**我方命令（bash 移除、被掏空
+    /// 条目整条删除、用户条目原样保留），且收敛结果通过核验（幂等）。
+    #[test]
+    fn register_hooks_prunes_duplicate_bash_residual_and_keeps_user_entries() {
+        use super::{hooks_file_verified, register_hooks_in_file};
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("settings.json");
+        let script = "/u/.mam/hooks/status-hook.sh";
+        let helper_cmd = "C:/u/.mam/bin/mam-hook-listener.exe";
+        let user_cmd = "node ~/my-own-hook.js";
+        // 实机形态：helper（已等于规格）+ bash 兜底 + 用户条目，同一事件数组
+        let live = serde_json::json!({"hooks": {"PreToolUse": [
+            { "matcher": "", "hooks": [{ "type": "command", "command": helper_cmd }] },
+            { "matcher": "", "hooks": [{ "type": "command", "command": format!("bash {script}") }] },
+            { "matcher": "", "hooks": [{ "type": "command", "command": user_cmd }] },
+        ]}});
+        std::fs::write(&cfg, live.to_string()).unwrap();
+
+        let spec = HookCommandSpec {
+            command: helper_cmd.to_string(),
+            command_windows: None,
+            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+        };
+        let (added, migrated) =
+            register_hooks_in_file(&cfg, &["PreToolUse"], true, script, &spec, &[]).unwrap();
+        assert_eq!(added, 0, "已有我方条目，不得再追加");
+        assert!(migrated >= 2, "bash 改写 + 收敛移除都计入迁移：{migrated}");
+
+        let out: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let entries = out["hooks"]["PreToolUse"].as_array().unwrap();
+        let ours: Vec<&str> = entries
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .filter_map(|h| h["command"].as_str())
+            .filter(|c| c.contains("status-hook.sh") || c.contains("mam-hook-listener"))
+            .collect();
+        assert_eq!(
+            ours,
+            vec![helper_cmd],
+            "我方命令必须收敛为单条 helper：{out}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["hooks"].as_array().is_some_and(|a| a
+                    .iter()
+                    .any(|h| h["command"].as_str() == Some(user_cmd)))),
+            "用户条目必须原样保留：{out}"
+        );
+        // 幂等：收敛后的文件通过核验（下一轮启动直接跳过）
+        assert!(hooks_file_verified(
+            &std::fs::read_to_string(&cfg).unwrap(),
+            script,
+            &spec,
+            &["PreToolUse"],
+            true,
+            &[]
+        ));
+    }
+
+    /// 收敛的混合条目面：我方命令与用户命令**同条目**混排时只掏我方命令，
+    /// 用户命令留在原条目里（不整条删除）。
+    #[test]
+    fn prune_keeps_user_commands_inside_mixed_entries() {
+        use super::register_hooks_in_file;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("settings.json");
+        let script = "/u/.mam/hooks/status-hook.sh";
+        let helper_cmd = "C:/u/.mam/bin/mam-hook-listener.exe";
+        let user_cmd = "node ~/my-own-hook.js";
+        let live = serde_json::json!({"hooks": {"Stop": [
+            { "matcher": "", "hooks": [
+                { "type": "command", "command": helper_cmd },
+                { "type": "command", "command": user_cmd },
+            ]},
+            { "matcher": "", "hooks": [{ "type": "command", "command": format!("bash {script}") }] },
+        ]}});
+        std::fs::write(&cfg, live.to_string()).unwrap();
+
+        let spec = HookCommandSpec {
+            command: helper_cmd.to_string(),
+            command_windows: None,
+            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+        };
+        register_hooks_in_file(&cfg, &["Stop"], true, script, &spec, &[]).unwrap();
+
+        let out: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let commands: Vec<&str> = out["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().unwrap())
+            .filter_map(|h| h["command"].as_str())
+            .collect();
+        assert_eq!(
+            commands,
+            vec![helper_cmd, user_cmd],
+            "混合条目只掏我方命令、用户命令原地保留：{out}"
         );
     }
 }
