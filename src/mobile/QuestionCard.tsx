@@ -13,10 +13,12 @@
 //   编号从 1 起）；「取消」钮 = Esc（探测 K3：取消/拒绝整个问题）；
 // - 单选（multiSelect=false）：点选项 → POST select{index}（后端注入对应数字单键——
 //   探测 K1/K2 定案：数字直接勾选并提交，无回车、严禁后补 Esc）；
-// - 多选（multiSelect=true）：点选 = POST toggle{index}（后端注入数字切换勾选，探测
-//   K8）+ 本地勾选态（仅在成功回执后切换，防端点拒绝时本地状态漂移）+「提交」钮 →
-//   POST submit（后端三段式：down×(n+1) → enter → '1'，探测 K10——Enter 当提交是
-//   反直觉反例 K9，前端绝不自行拼 Enter）；
+// - 多选（multiSelect=true）：点选 = POST toggle{index}（后端**闭环切勾阶段机**：
+//   屏读定位 → 方向键走位 → 空格 → 屏读校验翻转——2026-09-24 数字路径被用户实机
+//   推翻废止，档案 2026-09-24-claude多选多题键序-用户实机取证）+ 本地勾选态
+//   （回执带 `checked` 屏读真值时以它为准；缺失才盲翻）+「提交」钮 → POST submit
+//   （后端三段式：走位到推进行（Submit/Next）→ enter → 屏上编号确认，探测 K10——
+//   Enter 当提交是反直觉反例 K9，前端绝不自行拼 Enter）；
 // - **丁T5 起三段式改为后端阶段机闭环**（§2.3 裁4）：submit 的响应带 `done`/`stage`/
 //   `verified`——走完整条（提交行 → 走位 → 回车 → Review 屏 → 抄屏上编号确认 → 终态）
 //   才显示完成；中途任一段屏读不符 → `failed{aborted:true, stage}`，卡片显示**中止在
@@ -79,6 +81,8 @@ const QUESTION_STAGE_LABELS: Record<QuestionAnswerStage, string> = {
   receipt: "核对完成回执",
   "free-row": "定位自由作答行",
   "free-text": "提交回答文本",
+  "toggle-row": "定位选项行并切勾",
+  advance: "切换到下一题",
 };
 
 /** 阶段名 → 进行中文案（比 `QUESTION_STAGE_LABELS` 更像「正在做什么」——
@@ -90,6 +94,8 @@ const QUESTION_STAGE_PROGRESS: Record<QuestionAnswerStage, string> = {
   receipt: "正在核对完成回执…",
   "free-row": "正在定位自由作答输入行…",
   "free-text": "正在提交回答文本…",
+  "toggle-row": "正在定位选项行并按空格切勾（屏读校验）…",
+  advance: "正在走到 Next 行并回车切题…",
 };
 
 /** 自由作答文本长度上限（与 composer 的 `MAX_SEND_CHARS` 对齐；后端同口径 400） */
@@ -222,42 +228,66 @@ export default function QuestionCard({ session }: QuestionCardProps) {
       setBusy(true);
       setError(null);
       setAbortedStage(null);
-      // **进行中态**（丁T5）：按动作显示对应的首段文案（提交链/自由作答链）
-      setInProgress(action === "freeText" ? "free-row" : "submit-row");
+      // **进行中态**（丁T5）：按动作显示对应的首段文案（toggle 切勾链/advance 切题链/
+      // 提交链/自由作答链）
+      setInProgress(
+        action === "freeText"
+          ? "free-row"
+          : action === "toggle"
+            ? "toggle-row"
+            : action === "advance"
+              ? "advance"
+              : "submit-row"
+      );
       try {
         const res = await sessionQuestionAnswer(session.id, action, index, text, questionIndex);
         if (res.status === "key_sent") {
           if (action === "toggle" && typeof index === "number") {
-            if (typeof questionIndex === "number") {
-              // **多题卡**勾选切换（2026-09-23 错位修复）：按题记忆本地位；
-              // toggle 只翻勾选，**不推进题目**——opencode 多选题页的数字键就是
-              // toggle 语义（终端不切页），推进只由 advance 显式触发，两通道同步
-              setMqChecked((prev) => {
-                const cur = new Set(prev[questionIndex] ?? []);
-                if (cur.has(index)) {
-                  cur.delete(index);
-                } else {
-                  cur.add(index);
-                }
-                return { ...prev, [questionIndex]: cur };
-              });
-            } else {
-              // 单题卡勾选切换：成功回执后翻本地位（下轮渲染高亮）；不置终态
-              setChecked((prev) => {
-                const next = new Set(prev);
-                if (next.has(index)) {
-                  next.delete(index);
-                } else {
+            // 勾选态同步（2026-09-24）：回执带 `checked`（屏读核验到的**终端真值**）
+            // 时**以它为准**设置本地位——不再盲翻（旧实现「成功即翻」会在屏读真值
+            // 与预期不符时把卡面漂移掉）；`checked` 缺失/为 null（旧后端 / 读不到屏
+            // 无法核验）→ 回落盲翻（toggle 本就是幂等切换，一次翻动是合理近似）。
+            const applyChecked = (cur: Set<number>): Set<number> => {
+              if (typeof res.checked === "boolean") {
+                if (res.checked === cur.has(index)) return cur;
+                const next = new Set(cur);
+                if (res.checked) {
                   next.add(index);
+                } else {
+                  next.delete(index);
                 }
                 return next;
-              });
+              }
+              const next = new Set(cur);
+              if (next.has(index)) {
+                next.delete(index);
+              } else {
+                next.add(index);
+              }
+              return next;
+            };
+            if (typeof questionIndex === "number") {
+              // **多题卡**勾选切换（2026-09-23 错位修复）：按题记忆本地位；
+              // toggle 只翻勾选，**不推进题目**——多选题页的切勾不切页，
+              // 推进只由 advance 显式触发，两通道同步
+              setMqChecked((prev) => ({
+                ...prev,
+                [questionIndex]: applyChecked(new Set(prev[questionIndex] ?? [])),
+              }));
+            } else {
+              // 单题卡勾选切换：成功回执后同步本地位（下轮渲染高亮）；不置终态
+              setChecked((prev) => applyChecked(prev));
             }
           } else if (action === "advance") {
-            // **切换题目**（opencode tab 前向切页）：题目页 → 下一题/Confirm 卡；
-            // Confirm 卡上的「返回题目」（Confirm 页 tab=回绕第 1 题）→ 回第 1 题。
-            // 与终端同步推进——**不置终态**（导航动作，作答继续）
-            setMqIndex((prev) => (info !== null && prev >= info.questions.length ? 0 : prev + 1));
+            // **切换题目**（opencode tab 前向切页 / claude 走位到 Next+回车）：题目页
+            // → 下一题/Confirm 卡；Confirm 卡上的「返回题目」→ claude 已在 Review 屏
+            // 时回执 `advanced:false`（零按键——← 回退未实测）→ **不推进**，停在确认卡
+            // （opencode 的 Confirm 页 tab=回绕第 1 题，回执无该字段 → 维持回绕行为）
+            if (res.advanced === false) {
+              setInProgress(null);
+            } else {
+              setMqIndex((prev) => (info !== null && prev >= info.questions.length ? 0 : prev + 1));
+            }
           } else if (
             action === "select" &&
             typeof questionIndex === "number" &&
@@ -658,6 +688,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 key={`question-option-${i}`}
                 type="button"
                 data-testid={`question-option-${i}`}
+                data-checked={q.multiSelect && checked.has(i) ? "true" : undefined}
                 disabled={busy}
                 onClick={() => handleAnswer(q.multiSelect ? "toggle" : "select", i)}
                 className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm disabled:opacity-40 ${
@@ -669,6 +700,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-sky-500/15 text-[10px] font-semibold text-sky-700 dark:bg-sky-400/15 dark:text-sky-400">
                   {i + 1}
                 </span>
+                {/* 多选：勾选框字形（与终端 `[ ]`/`[✓]` 同形——2026-09-24「手机端
+                    同步终端操作逻辑」；与多题卡的 checkedHere 字形同一形态） */}
+                {q.multiSelect && (
+                  <span className="mt-0.5 mr-0.5 font-mono text-xs text-sky-700 dark:text-sky-400">
+                    {checked.has(i) ? "[✓]" : "[ ]"}
+                  </span>
+                )}
                 <span className="min-w-0">
                   <span className="block font-medium">{o.label}</span>
                   {o.description && (

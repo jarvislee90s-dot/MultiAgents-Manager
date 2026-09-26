@@ -58,11 +58,11 @@ function PlanBody({ plan }: { plan: { content: string; isFile: boolean } }) {
         data-testid="approve-plan"
         data-plan-file={plan.isFile ? "true" : "false"}
         data-collapsed={collapsed ? "true" : "false"}
-        className={`mt-2 rounded-lg border border-rose-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-rose-400/30 dark:bg-slate-900/60 dark:text-slate-200 ${
+        className={`mt-2 rounded-lg border border-sky-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-sky-400/30 dark:bg-slate-900/60 dark:text-slate-200 ${
           collapsed ? "max-h-24 overflow-hidden" : "max-h-64 overflow-y-auto"
         }`}
       >
-        <p className="mb-1 text-[11px] font-medium tracking-wide text-rose-700/80 uppercase dark:text-rose-400/80">
+        <p className="mb-1 text-[11px] font-medium tracking-wide text-sky-700/80 uppercase dark:text-sky-400/80">
           {plan.isFile ? "计划文件" : "计划内容"}
         </p>
         {plan.isFile ? (
@@ -80,7 +80,7 @@ function PlanBody({ plan }: { plan: { content: string; isFile: boolean } }) {
           type="button"
           data-testid="approve-plan-toggle"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-[11px] font-medium text-rose-700/80 underline dark:text-rose-400/80"
+          className="mt-1 text-[11px] font-medium text-sky-700/80 underline dark:text-sky-400/80"
         >
           {expanded ? "收起计划" : "展开全文"}
         </button>
@@ -216,7 +216,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
   if (planPendingOnly) {
     return (
       <InteractiveCard
-        tone="approve"
+        tone="question"
         testId="approve-card"
         mode="plan-pending"
         title="计划待确认"
@@ -227,7 +227,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
               data-testid="approve-plan-check"
               disabled={checking}
               onClick={handleCheck}
-              className="mt-2 rounded-full bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-40"
+              className="mt-2 rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
             >
               {checking ? "检查中…" : "检查终端对话框"}
             </button>
@@ -251,7 +251,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
         {!checkMissed && (
           <p
             data-testid="approve-plan-pending"
-            className="mt-1 text-xs text-rose-700/80 dark:text-rose-400/80"
+            className="mt-1 text-xs text-sky-700/80 dark:text-sky-400/80"
           >
             终端正在等待这个计划的确认——请到终端对话框选择，或点下方按钮读取选项
           </p>
@@ -264,13 +264,14 @@ export default function ApproveCard({ session }: ApproveCardProps) {
     );
   }
 
-  // 裁11：审批**对话框卡**并入问答同族蓝系（sky）——同一「读自终端选项」的交互
-  // 形态共用一套色彩语言；**二元审批**默认保留红系警示（裁11 留的活口：可随 UI
-  // 方案并入蓝系，届时只改本行）。按钮 token 跟随同一 tone。
-  const dialogTone: InteractiveCardTone = options.dialog ? "question" : "approve";
+  // 裁11 活口收口（2026-09-24 用户裁决「完全并成一套」）：审批卡与问答卡统一蓝系
+  // （sky）+ 同一**纵向编号列表**形态——两者只差选项数目。原「二元审批保留红系
+  // 警示」的活口由用户本次关闭；`mode` 数据属性仍区分 binary/dialog（测试/可观测
+  // 面）。警示类脚注（drift/degradedHint）保留琥珀——那是告警语义层，不是选项层。
+  const cardTone: InteractiveCardTone = "question";
   return (
     <InteractiveCard
-      tone={dialogTone}
+      tone={cardTone}
       testId="approve-card"
       mode={options.dialog ? "dialog" : "binary"}
       title={options.dialog ? "等待批准（终端对话框）" : "等待批准"}
@@ -295,39 +296,31 @@ export default function ApproveCard({ session }: ApproveCardProps) {
         </>
       }
       actions={
-        <div className={options.dialog ? "space-y-1" : "flex gap-2"}>
-          {/* T5：对话框选项 → 纵向编号列表（真实选项文本较长，纵向排布可读；
-              编号徽标 = 将注入的数字键，用户所见即所按）；二元项维持既有横排 */}
-          {options.dialog
-            ? options.options.map((o, i) => (
-                <button
-                  key={o.id}
-                  type="button"
-                  data-testid={`approve-option-${o.id}`}
-                  disabled={busy || sent}
-                  onClick={() => handleAnswer(o.id)}
-                  className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${toneTokens(dialogTone).action}`}
+        <div className="space-y-1">
+          {/* 纵向编号列表（与问答卡同形态——「一套，只差选项数目」）。编号徽标 =
+              将注入的数字键，**只在 dialog 分支渲染**（屏读到的选项才有真实编号）；
+              二元分支的键位不外泄给 UI（载荷只有 id/label——契约锚点），且各家键位
+              不同（claude 允许='1' / codex 允许='y' / 拒绝=esc），编造序号或硬编码
+              键名都会谎报「将按什么」——评审 I2：不渲染徽标是唯一不撒谎的形态 */}
+          {options.options.map((o, i) => (
+            <button
+              key={o.id}
+              type="button"
+              data-testid={`approve-option-${o.id}`}
+              disabled={busy || sent}
+              onClick={() => handleAnswer(o.id)}
+              className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${toneTokens(cardTone).action}`}
+            >
+              {options.dialog && (
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens(cardTone).badge}`}
                 >
-                  <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens(dialogTone).badge}`}
-                  >
-                    {i + 1}
-                  </span>
-                  <span className="min-w-0 flex-1 break-words">{o.label}</span>
-                </button>
-              ))
-            : options.options.map((o) => (
-                <button
-                  key={o.id}
-                  type="button"
-                  data-testid={`approve-option-${o.id}`}
-                  disabled={busy || sent}
-                  onClick={() => handleAnswer(o.id)}
-                  className={`flex-1 rounded-full px-3 py-1.5 text-sm disabled:opacity-40 ${toneTokens("approve").action}`}
-                >
-                  {o.label}
-                </button>
-              ))}
+                  {i + 1}
+                </span>
+              )}
+              <span className="min-w-0 flex-1 break-words">{o.label}</span>
+            </button>
+          ))}
         </div>
       }
     >
