@@ -590,10 +590,10 @@ fn key_records_for(key: &str, spec: &FamilySpec) -> Option<Vec<KeyRecordSpec>> {
     }
 }
 
-/// 单键注入（M9R spec 感知版）：键域内（enter/esc/tab/单字符字母数字/方向键）
-/// → 按族形态单批写入；域外 → **快速失败报错，不回退文本+回车**（P2-2 闭环）。
-/// 域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。可见性 `pub` 仅服务
-/// `super::e2e_support` 测试支撑面（缘由同 [`InjectStats`] 注）。
+/// 单键注入（M9R spec 感知版）：键域内（enter/esc/tab/backspace/space/单字符字母数字/
+/// 方向键/shift+tab）→ 按族形态单批写入；域外 → **快速失败报错，不回退文本+回车**
+/// （P2-2 闭环）。域校验在取锁/附加之前（假 pid 也不触发任何控制台附加）。可见性
+/// `pub` 仅服务 `super::e2e_support` 测试支撑面（缘由同 [`InjectStats`] 注）。
 pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), String> {
     // 键黑名单（批次戊 E1⑤，裁19）：先于域校验——ctrl+c 无论域内域外一律拒绝
     // （opencode 按下即退出应用；单点拒绝防日后域扩展回归）
@@ -603,7 +603,7 @@ pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), Str
     // P2-2：域校验先行——必须在取锁/附加之前快速失败（不触任何控制台 API）
     let Some(records) = key_records_for(key, spec) else {
         return Err(format!(
-            "不支持的按键：{key}（域：enter/esc/tab/backspace/shift+tab/单字符字母数字/方向键）"
+            "不支持的按键：{key}（域：enter/esc/tab/backspace/space/shift+tab/单字符字母数字/方向键）"
         ));
     };
     let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());

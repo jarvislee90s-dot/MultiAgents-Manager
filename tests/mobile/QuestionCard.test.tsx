@@ -221,6 +221,49 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     ]);
   });
 
+  it("多选：勾选框字形与终端同形（[ ]/[✓]）；toggle 回执带 checked 屏读真值时以它为准同步（不盲翻）", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    // 回执带 checked（claude 切勾闭环的屏读核验真值）
+    routes.answer = { status: "key_sent", done: true, stage: "toggle-row", checked: true };
+    render(<QuestionCard session={{ id: "sess-2b" }} />);
+    const card = await screen.findByTestId("question-card");
+    // 初始：未勾 → 字形 [ ]（与终端多选屏同形，2026-09-24「手机端同步终端操作逻辑」）
+    expect(card.textContent).toContain("[ ]");
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[ ]");
+    // 点选 1：回执 checked=true → 字形 [✓] + data-checked
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    const opt = screen.getByTestId("question-option-0");
+    expect(opt.textContent).toContain("[✓]");
+    expect(opt.getAttribute("data-checked")).toBe("true");
+    // **屏读真值优先于盲翻**：再次点选但回执 checked 仍为 true（终端态没变——
+    // 比如上一击其实没翻转）→ 卡面保持勾选（不翻回），与终端一致
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[✓]");
+    // 回执 checked=false → 卡面如实取消勾选
+    routes.answer = { status: "key_sent", done: true, stage: "toggle-row", checked: false };
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[ ]");
+    expect(screen.getByTestId("question-option-0").getAttribute("data-checked")).toBe(null);
+  });
+
+  it("多选：回执无 checked（旧后端/读屏不可用）→ 回落盲翻（既有行为不变）", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-2c" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[✓]");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[ ]");
+  });
+
   it("取消钮：POST cancel →「已发送按键」终态", async () => {
     installFetch();
     routes.question = singleQuestionInfo();

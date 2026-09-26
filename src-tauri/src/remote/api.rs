@@ -3250,13 +3250,15 @@ pub async fn session_question(
     // 独立于 `answerable` 的理由：codex/opencode 的**点选**已实测（answerable=true）
     // 但**自由作答**未定案——两者是不同的能力面，不能用一个布尔表示。
     let free_text_supported = crate::inject::question::free_text_supported(&tool_id);
-    // **批次戊 E4-E6**：多题交互能力（kimi K-5 / codex Tab 备注 / opencode tab 切页
-    // ——三家键序已实机定案）；claude 多题未探（spec §1 非目标边界）保持只读。
-    let multi_question = matches!(tool_id.as_str(), "kimi" | "codex" | "opencode");
-    // **切换题目**（2026-09-23 错位修复）：多题卡多选题的显式切页动作——仅 opencode
-    // （tab=前向切页，戊探A ①定案）。kimi/codex 的多题切页键未验 → 旗标 false，前端
-    // 对这两家的多选题渲染「请到终端切题」引导而不是切换按钮。单题卡无页可切，恒 false。
-    let advance = tool_id == "opencode" && questions.len() > 1;
+    // **批次戊 E4-E6 + 2026-09-24**：多题交互能力（kimi K-5 / codex Tab 备注 /
+    // opencode tab 切页 / claude Next+回车切题——用户实机取证 2.1.278）。
+    let multi_question = matches!(tool_id.as_str(), "kimi" | "codex" | "opencode" | "claude");
+    // **切换题目**（2026-09-23 错位修复 + 2026-09-24 claude 接入）：多题卡多选题的
+    // 显式切页动作——opencode（tab=前向切页，戊探A ①定案）与 claude（走位到尾部
+    // 推进行 `Next` + 回车 + 读屏分类，阶段机 run_advance_stages）。kimi/codex 的
+    // 多题切页键未验 → 旗标 false，前端对这两家的多选题渲染「请到终端切题」引导。
+    // 单题卡无页可切，恒 false。
+    let advance = matches!(tool_id.as_str(), "opencode" | "claude") && questions.len() > 1;
     json_no_store(
         StatusCode::OK,
         serde_json::json!({
@@ -3332,6 +3334,12 @@ pub const QUESTION_STAGE_RECEIPT: &str = "receipt";
 pub const QUESTION_STAGE_FREE_ROW: &str = "free-row";
 /// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
 pub const QUESTION_STAGE_FREE_TEXT: &str = "free-text";
+/// claude 多选**闭环切勾**段的段名（2026-09-24：`run_toggle_stages` 的中止段名——
+/// 前端 `QUESTION_STAGE_LABELS` 同步收词）。命名对齐既有「-row」走位段风格。
+pub const QUESTION_STAGE_TOGGLE: &str = "toggle-row";
+/// claude 多题**切题**段的段名（2026-09-24：`run_advance_stages` 的段名——前端
+/// `QUESTION_STAGE_LABELS` 同步收词）。
+pub const QUESTION_STAGE_ADVANCE: &str = "advance";
 
 /// 屏读轮询步长（毫秒）——D20 起五路共用一处（原名 `MENU_POLL_STEP_MS`，已随常量族迁移）
 use crate::inject::timing::POLL_STEP_MS;
@@ -3438,13 +3446,22 @@ pub async fn session_question_answer(
             return Err("no_question");
         };
         let tool_id = session.agent_type.tool_id();
-        // 「结论不超证据」→ 批次戊 E4-E6 更新：kimi（K-5 数字直选+自动推进+Review
-        // 汇总屏）/ codex（数字即答+Tab 备注+末题 submit all）/ opencode（tab 切页+
-        // Confirm 页提交）的多题形态已实机定案 → **交互放行**；claude 多题键序未探
-        // （spec §1 非目标边界）与其余工具维持只读（本分支是直调 API 的兜底防线）
+        // 「结论不超证据」→ 批次戊 E4-E6 + 2026-09-24 更新：kimi（K-5 数字直选+自动
+        // 推进+Review 汇总屏）/ codex（数字即答+Tab 备注+末题 submit all）/ opencode
+        // （tab 切页+Confirm 页提交）/ claude（空格切勾+Next 回车切题——用户实机取证
+        // 2.1.278）的多题形态定案 → **交互放行**；其余工具维持只读（本分支是直调
+        // API 的兜底防线）
         let multi_question = hit.questions.len() > 1;
-        if multi_question && !matches!(tool_id, "kimi" | "codex" | "opencode") {
+        if multi_question && !matches!(tool_id, "kimi" | "codex" | "opencode" | "claude") {
             return Err("multi_questions");
+        }
+        // claude 的切题动作（2026-09-24）：阶段机（走位到 Next+回车+分类），只对
+        // 多题载荷有意义——单题载荷上的 advance 是参数错（400，防误触走位提交）
+        if action == crate::inject::question::AnswerAction::Advance
+            && tool_id == "claude"
+            && !multi_question
+        {
+            return Err("bad_request");
         }
         // 多题：select/toggle 作用在 `questionIndex` 指定的题（0 起缺省 0；越界 400）
         let q_idx = req.question_index.unwrap_or(0);
@@ -3491,13 +3508,18 @@ pub async fn session_question_answer(
                 },
             )?;
         }
-        // 单键动作才取静态序列；阶段机动作（submit/freeText）序列留空（由编排产生）。
+        // 单键动作才取静态序列；阶段机动作（submit/freeText/**claude 的 toggle 与
+        // advance**）序列留空（由编排产生）。claude toggle 的静态数字路径 2026-09-24
+        // 废止（用户实机推翻 K8）——切勾走 run_toggle_stages（空格 + 闭环 + 屏读校验）；
+        // claude advance 走 run_advance_stages（走位到 Next + 回车 + 分类）。
         // **E4② kimi 多题 DigitAdvance**（A3 禁令）：多题形态的 Select = `[数字]`
         // （直选+自动推进下一题，**禁尾 Enter**——Enter 会误作用下一题），
         // 不走单题的两段式 `[数字, enter]`
         let seq = match action {
             crate::inject::question::AnswerAction::Submit
             | crate::inject::question::AnswerAction::FreeText => Vec::new(),
+            crate::inject::question::AnswerAction::Toggle if tool_id == "claude" => Vec::new(),
+            crate::inject::question::AnswerAction::Advance if tool_id == "claude" => Vec::new(),
             crate::inject::question::AnswerAction::Select
                 if tool_id == "kimi" && multi_question =>
             {
@@ -3538,7 +3560,9 @@ pub async fn session_question_answer(
             // - multi_questions（409）：多问题只读（探测未测面不出手）
             // - tool_readonly（409，T3）：该工具问答键序未实测（zcode/dsh 等）→ 只读卡
             // - bad_index（400）：select/toggle 序号越界 / submit 用在单选题
-            let status = if code == "bad_index" {
+            // - bad_request（400）：域外用法（claude 单题载荷上的 advance——切题只对
+            //   多题有意义，防误触走位提交）
+            let status = if code == "bad_index" || code == "bad_request" {
                 StatusCode::BAD_REQUEST
             } else {
                 StatusCode::CONFLICT
@@ -3555,7 +3579,7 @@ pub async fn session_question_answer(
     let pid = session.pid;
     let answer_sid = sid.clone();
     // 阶段机计划（走位上限依赖选项数——在会话扫描之后才有，故在此构造）
-    let stage_plan = StagePlan::for_action(action, &q_for_plan, q_tool);
+    let stage_plan = StagePlan::for_action(action, req.index, &q_for_plan, q_tool);
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
     let tool_for_dispatch = tool.clone();
@@ -3654,6 +3678,60 @@ pub async fn session_question_answer(
                 }),
             )
         }
+        QuestionDispatch::ToggleDone { checked, verified } => {
+            // 切勾闭环：status=key_sent + checked/verified——前端用 `checked` 同步
+            // 本地勾选态（屏读真值，替代「盲翻本地 Set」）；verified=false 表示
+            // 键已发出但无法屏读核验（不谎报成功）
+            let result = if verified {
+                "ok"
+            } else {
+                "ok:toggle-unverified"
+            };
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                format!("{audit_label}::{}", QUESTION_STAGE_TOGGLE).as_str(),
+                "answer",
+                result,
+            );
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": QUESTION_STAGE_TOGGLE,
+                    "checked": checked,
+                    "verified": verified,
+                }),
+            )
+        }
+        QuestionDispatch::AdvanceDone { advanced } => {
+            // 切题闭环：status=key_sent + advanced（false = 已在 Review 屏零按键——
+            // 前端**不**推进，停在确认卡）
+            let result = if advanced { "ok" } else { "ok:already-review" };
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                format!("{audit_label}::{}", QUESTION_STAGE_ADVANCE).as_str(),
+                "answer",
+                result,
+            );
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": QUESTION_STAGE_ADVANCE,
+                    "advanced": advanced,
+                }),
+            )
+        }
         QuestionDispatch::Aborted { stage, error } => {
             // **中止**：与 failed 同槽（status=failed），但带 aborted/stage——前端能
             // 精确渲染「进行到哪一段停住」，旧前端按 failed 的 error 文案走（不变）
@@ -3728,6 +3806,13 @@ enum StagePlan {
     /// **opencode 多选提交阶段机**（批次戊 E6，2026-09-23 接线）：首段屏读
     /// 「Confirm 已在场则跳过 tab」→（不在场才 tab）→ Confirm 页 → enter 提交
     OpencodeSubmit,
+    /// **claude 多选闭环切勾阶段机**（2026-09-24）：屏读定位 → 方向键走位（每步
+    /// 复核）→ 空格 → 屏读校验翻转。`target` = 0 起的模型选项下标（数字路径已被
+    /// 用户实机推翻，切勾必须经此编排）
+    ClaudeToggle { target: usize },
+    /// **claude 多题切题阶段机**（2026-09-24）：走位到尾部推进行（多题为 `Next`）
+    /// + 回车 + 读屏分类（下一题页 / Review 确认屏）。`max_steps` = 走位上限
+    ClaudeAdvance { max_steps: usize },
 }
 
 impl StagePlan {
@@ -3739,11 +3824,22 @@ impl StagePlan {
     /// 未生效的情形不会白跑——上限只是**死循环兜底**，正常路径在每步复核里提前停手）。
     fn for_action(
         action: crate::inject::question::AnswerAction,
+        index: Option<usize>,
         q: &crate::inject::question::Question,
         tool: &str,
     ) -> Self {
         use crate::inject::question::AnswerAction as A;
         match (action, tool) {
+            // 2026-09-24：claude 多选切勾走阶段机（数字路径废止）——target 由请求
+            // 的 index 给（参数校验已保证 toggle 必带 index，此处兜底 0 不可达）
+            (A::Toggle, "claude") => Self::ClaudeToggle {
+                target: index.unwrap_or(0),
+            },
+            // 2026-09-24：claude 多题切题走阶段机（走位上限与 submit 同推导——
+            // 走位目标是尾部推进行，行序同为「选项 1..n + Type something + 推进行」）
+            (A::Advance, "claude") => Self::ClaudeAdvance {
+                max_steps: q.options.len() + 2,
+            },
             // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
             (A::Submit, "kimi") => Self::KimiSubmit,
             // E6：opencode 多选提交阶段机（2026-09-23 接线——此前 opencode 的 Submit
@@ -3772,6 +3868,17 @@ enum QuestionDispatch {
         stage: &'static str,
         receipt_seen: Option<bool>,
     },
+    /// **claude 多选切勾闭环**的结论（2026-09-24）：`checked` = 屏读核验到的目标行
+    /// 新勾选态（`None` = 键已发出但读不到屏无法核验——不谎报也不误报失败）；
+    /// `verified` = 勾选态确实翻转
+    ToggleDone {
+        checked: Option<bool>,
+        verified: bool,
+    },
+    /// **claude 多题切题闭环**的结论（2026-09-24）：`advanced` = 终端已前移（下一题
+    /// 页或 Review 确认屏——前端推进到下一题/确认卡）；`false` = 已在 Review 屏、
+    /// 零按键（「返回题目」在 claude 上不可达，显式报告不发键乱试）
+    AdvanceDone { advanced: bool },
     /// 阶段机**中止**在某一段（`error` 是带段名的中文文案）
     Aborted { stage: &'static str, error: String },
     /// 投递/读屏的**非阶段**失败（单键动作投递失败等，可重试）
@@ -3934,6 +4041,82 @@ fn dispatch_question_action(
                 // **中止分类**（复评 F6-2）：屏读形态不符 → Aborted（带段名）；
                 // 投递失败 → Failed（**不带** aborted——语义等同批次丙的投递失败，
                 // 用户要做的是查通道而不是查终端形态）
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        StagePlan::ClaudeToggle { target } => {
+            // 闭环切勾：题屏在场 → 方向键走位（每步复核）→ 空格 → 屏读校验翻转。
+            // 轮询/读屏全部经 `RemoteState.screen_probe` 缝（与 Submit 段同装配）。
+            let probe = |stage: &'static str| -> Option<Vec<String>> {
+                (st.screen_probe)(tool, pid).or_else(|| {
+                    log::debug!("问答切勾阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
+                    None
+                })
+            };
+            let mut terminal = crate::inject::mode::Closures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_toggle_stages(
+                *target,
+                || poll_question_stage(|| probe("toggle-row"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::ToggleDone {
+                    checked: o.checked_now,
+                    verified: o.verified,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        StagePlan::ClaudeAdvance { max_steps } => {
+            // 多题切题：走位到尾部推进行（Next）→ 回车 → 读屏分类（下一题 / Review）。
+            let probe = |stage: &'static str| -> Option<Vec<String>> {
+                (st.screen_probe)(tool, pid).or_else(|| {
+                    log::debug!("问答切题阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
+                    None
+                })
+            };
+            let mut terminal = crate::inject::mode::Closures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_advance_stages(
+                || poll_question_stage(|| probe("advance"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+                *max_steps,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::AdvanceDone {
+                    advanced: o.advanced,
+                },
                 Err(e) => dispatch_abort(e),
             }
         }
@@ -4212,6 +4395,21 @@ fn dispatch_abort(e: crate::inject::question::StageAbort) -> QuestionDispatch {
 /// 区分不出来）。反推不出 → 用 `submit-row`/`free-row` 这类**最靠前的段**兜底
 /// （宁可粗，不编假精度）。
 fn stage_from_abort(err: &str) -> &'static str {
+    // 切题路径（2026-09-24，先于其余路径匹配——切题的走位/分类文案须归 advance 段）
+    if err.contains("切题") || err.contains("下一题") {
+        return QUESTION_STAGE_ADVANCE;
+    }
+    // 切勾路径（2026-09-24，先于提交路径匹配——「仍未把焦点移到目标选项行」会被
+    // 下方 Submit 行臂误收，切勾的走位目标是选项行不是推进行）
+    if err.contains("选项块")
+        || err.contains("问答屏")
+        || err.contains("目标选项行")
+        || err.contains("勾选")
+        || err.contains("空格")
+        || err.contains("唯一焦点行")
+    {
+        return QUESTION_STAGE_TOGGLE;
+    }
     // 提交路径（按「中止点从后往前」匹配：越靠后的段越具体）
     // E4：kimi 的 Review 汇总屏中止文案先于通用「确认项」词匹配（否则被 confirm 段误收）
     if err.contains("Review 汇总屏") || err.contains("未出现 Review 确认屏") {
@@ -6361,6 +6559,7 @@ mod tests {
         assert_eq!(
             StagePlan::for_action(
                 crate::inject::question::AnswerAction::Submit,
+                None,
                 &q,
                 "opencode"
             ),
@@ -6368,13 +6567,39 @@ mod tests {
             "opencode 多选 submit 走 OpencodeSubmit 阶段机"
         );
         assert_eq!(
-            StagePlan::for_action(crate::inject::question::AnswerAction::Submit, &q, "claude"),
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Submit,
+                None,
+                &q,
+                "claude"
+            ),
             StagePlan::Submit { max_down_steps: 4 },
             "claude 多选 submit 维持 Submit 行走位形态（选项 2 + 2）"
         );
         assert_eq!(
             StagePlan::for_action(
+                crate::inject::question::AnswerAction::Toggle,
+                Some(1),
+                &q,
+                "claude"
+            ),
+            StagePlan::ClaudeToggle { target: 1 },
+            "claude 多选 toggle 走闭环切勾阶段机（2026-09-24 数字路径废止）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Toggle,
+                Some(0),
+                &q,
+                "opencode"
+            ),
+            StagePlan::SingleKey,
+            "opencode toggle 维持单键（enter 切勾，戊探A 定案）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
                 crate::inject::question::AnswerAction::Advance,
+                None,
                 &q,
                 "opencode"
             ),
