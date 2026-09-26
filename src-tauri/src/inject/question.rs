@@ -1445,11 +1445,13 @@ pub(crate) struct QuestionRow {
     pub label: String,
 }
 
-/// 分隔线行判定（`─`（U+2500）连串）：问答题屏在推进行与 `Chat about this` 之间的
-/// 分隔（丁复审 dump + 用户截图同形态）。**线下不在走位路径上**（K10 实证走位止于
-/// 推进行）。
+/// 分隔线行判定（`─`/`━`（U+2500/U+2501）连串）：问答题屏在推进行与
+/// `Chat about this` 之间的分隔（丁复审 dump + 用户截图同形态）。**线下不在走位
+/// 路径上**（K10 实证走位止于推进行）。只认制表符族、不收 ASCII `-`（评审 Minor-4：
+/// 对话滚回区的 markdown `----` 水平线会提前翻转 below_separator 饿死行块解析）；
+/// 阈值按字符数（`t.len()` 是字节数，对多字节字形不对称）。
 fn is_separator_line(t: &str) -> bool {
-    t.len() >= 4 && t.chars().all(|c| c == '─' || c == '━' || c == '-')
+    t.chars().count() >= 4 && t.chars().all(|c| c == '─' || c == '━')
 }
 
 /// 行首编号剥离：`"1. [ ] Apple"` → `(1, "[ ] Apple")`；无 `N. ` 形态 → `None`。
@@ -1617,6 +1619,43 @@ fn walk_direction_to_advance(lines: &[String]) -> Option<&'static str> {
     Some(if cur > advance { "up" } else { "down" })
 }
 
+/// 屏上题目与载荷题干的**身份一致性**判定（2026-09-24 评审 I1 修复）：
+/// 取「页签栏（含 `←` 的行）→ 首个编号行」之间的区域（题干渲染区），去空白拼接
+/// 后须**包含**载荷题干的去空白全文。用户实测量到 ←/→ 可手动切题——手机卡的
+/// 题号与终端脱钩后，切勾会作用到**别的题**的选项上（按键效果闭环验得过、目标
+/// 身份却错）；本判据补上身份面：不匹配即中止零按键（不猜）。
+///
+/// 退化与兜底（如实申报）：
+/// - 题干去空白后不足 4 字符 → 恒 `true`（判别力不足，不硬拦——此时仅靠屏读闭环）；
+/// - 页签栏不在可见窗口（窄窗滚出）→ 区域回落为「首个编号行上方至多 4 行」；
+/// - 题干被 TUI 折行/加饰（如多选后缀）→ 去空白包含判据天然覆盖（用户实机形态：
+///   载荷含 `（可多选）` 时屏面逐字同现；载荷不含时屏面是否追加未取证——包含判据
+///   只要求载荷侧是屏面子串，屏面多装饰不影响）。
+fn screen_question_matches(lines: &[String], expected: &str) -> bool {
+    let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let expected = norm(expected);
+    if expected.chars().count() < 4 {
+        return true; // 判别力不足（超短题干）——不硬拦
+    }
+    let tab_idx = lines.iter().position(|l| l.contains('←'));
+    let first_option = lines.iter().position(|l| {
+        parse_question_row(l).is_some_and(|(num, ..)| num.is_some())
+    });
+    let Some(first) = first_option else {
+        return false; // 连编号行都没有——交给行块解析段报形态不符（此处恒 false 不影响）
+    };
+    let start = match tab_idx {
+        Some(t) if t < first => t + 1,
+        // 页签栏不在窗内：回落为首个编号行上方至多 4 行（题干就在选项区正上方）
+        _ => first.saturating_sub(4),
+    };
+    let region = lines[start..first]
+        .iter()
+        .map(|l| norm(l))
+        .collect::<String>();
+    region.contains(&expected)
+}
+
 /// 目标选项（0 起模型选项下标）→ 行块下标（屏上编号 = 下标+1；找不到 → `None`）。
 fn locate_option_row(rows: &[QuestionRow], target: usize) -> Option<usize> {
     rows.iter().position(|r| {
@@ -1636,15 +1675,18 @@ pub struct ToggleOutcome {
 }
 
 /// **多选闭环切勾编排**（2026-09-24）：数字路径已被用户实测推翻（2.1.278 多选屏
-/// 数字无反应），切勾一律走「屏读定位 → 方向键走位（每步复核）→ 空格 → 屏读核验
-/// 翻转」。
+/// 数字无反应），切勾一律走「屏读定位 → 题目身份核验 → 方向键走位（每步复核）
+/// → 空格 → 屏读核验翻转」。
 ///
 /// # 各段与中止点（每一步都在发键前屏读；任何一段不符即中止且不再发键）
 ///
 /// 1. **题屏段**：`poll_screen` 读一屏并解析行块（[`parse_question_rows`]）。
-///    解析不出块 / 无唯一焦点行 / 目标选项不在块内 → 中止，**零按键**；
+///    解析不出块 / **屏上题干与载荷题干不一致**（[`screen_question_matches`]——
+///    用户手动 ←/→ 切题后手机卡与终端脱钩，切勾会作用到别的题上）/ 无唯一焦点行 /
+///    目标选项不在块内 → 中止，**零按键**；
 /// 2. **走位段**：焦点已在目标行 → 直接入下一段；否则按方向发一个 `up`/`down`
-///    → `settle()` → 重读复核：焦点位移恰 1 行且朝目标方向、目标行仍在块内。
+///    → `settle()` → 重读复核：焦点**沿目标方向**位移恰 1 行（反向位移同样中止，
+///    评审 Minor-3）。
 ///    复核不过（焦点不动 / 块形态崩）→ 中止**不发空格**。步数上限 = 块行数 + 2
 ///    （死循环兜底）；
 /// 3. **切勾段**：目标行须带勾选框（多选形态）——无勾选框说明屏是单选形态，
@@ -1656,6 +1698,7 @@ pub struct ToggleOutcome {
 ///    不谎报也不误报失败）。
 pub fn run_toggle_stages<P, T>(
     target_option: usize,
+    expected_question: &str,
     mut poll_screen: P,
     terminal: &mut T,
 ) -> Result<ToggleOutcome, StageAbort>
@@ -1664,7 +1707,7 @@ where
     T: MenuTerminal,
 {
     let mut sent_keys: Vec<String> = Vec::new();
-    // ===== 第 1 段：题屏在场 + 行块解析（形态不符即中止，零按键）=====
+    // ===== 第 1 段：题屏在场 + 行块解析 + 题目身份核验（形态不符即中止，零按键）=====
     let first = poll_screen().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen("读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端")
     })?;
@@ -1672,6 +1715,13 @@ where
     if rows.is_empty() {
         return Err(StageAbort::screen(
             "屏上解析不出问答选项块（未见推进行 Submit/Next 或编号块不连续）——已中止，未发任何键；请人工核对终端",
+        ));
+    }
+    // 身份核验（2026-09-24 评审 I1）：屏上题干与载荷题干不一致 = 终端显示的不是
+    // 手机卡当前的题（用户已手动 ←/→ 切题）——切勾会作用到别的题上，必须中止
+    if !screen_question_matches(&first, expected_question) {
+        return Err(StageAbort::screen(
+            "屏幕上的题目与手机卡片不一致（可能已在终端手动切题）——已中止，未发任何键；请在终端回到当前题目后重试",
         ));
     }
     let mut cur = unique_focused_row(&rows).ok_or_else(|| {
@@ -1684,7 +1734,7 @@ where
             target_option + 1
         ))
     })?;
-    // ===== 第 2 段：走位（方向感知；每步复核位移恰 1 行）=====
+    // ===== 第 2 段：走位（方向感知；每步复核沿目标方向位移恰 1 行）=====
     let max_steps = rows.len() + 2;
     let mut steps = 0usize;
     while cur != target {
@@ -1714,10 +1764,13 @@ where
         let next_cur = unique_focused_row(&next_rows).ok_or_else(|| {
             StageAbort::screen("步进后屏上解析不到唯一焦点行——已中止，未发空格；请人工核对终端")
         })?;
+        // 位移校验（评审 Minor-3）：必须**沿目标方向**恰好 1 行——反向位移（终端
+        // 自行移动了焦点）同样中止，防「乒乓走到上限」的浪费按键路径
+        let expected_move: i64 = if key == "down" { 1 } else { -1 };
         let moved = next_cur as i64 - cur as i64;
-        if moved != 1 && moved != -1 {
+        if moved != expected_move {
             return Err(StageAbort::screen(format!(
-                "按一次 {key} 后焦点位移了 {moved} 行（应为 1 行）——屏幕行序与预期不一致，已中止（未发空格）"
+                "按一次 {key} 后焦点位移了 {moved} 行（应沿目标方向恰 1 行）——屏幕行序与预期不一致，已中止（未发空格）"
             )));
         }
         rows = next_rows;
@@ -4279,6 +4332,7 @@ mod tests {
     /// 首段轮询 = 题屏在场（行块可解析）。
     fn run_toggle_script(
         target: usize,
+        expected_question: &str,
         screens: Vec<Vec<String>>,
     ) -> (Result<ToggleOutcome, StageAbort>, Vec<String>) {
         use std::cell::{Cell, RefCell};
@@ -4288,6 +4342,7 @@ mod tests {
         let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let result = run_toggle_stages(
             target,
+            expected_question,
             || {
                 let s = cur();
                 if parse_question_rows(&s).is_empty() {
@@ -4310,6 +4365,10 @@ mod tests {
         );
         (result, sent.into_inner())
     }
+
+    /// 夹具屏的题干原文（multi()/MULTI_JSON 的 question 与屏面第 2 行同文）——
+    /// run_toggle_script 各用例的身份核验输入
+    const FIXTURE_QUESTION: &str = "Which fruits are your favorites? (Select all that apply)";
 
     /// 夹具工厂：多选题屏、指定焦点行（0=首选项 … 3=Type something、4=Submit 行）
     /// 与首项勾选态——基于实机夹具形态生成。
@@ -4335,6 +4394,7 @@ mod tests {
     fn toggle_stage_happy_path_focus_on_target() {
         let (r, sent) = run_toggle_script(
             0,
+            FIXTURE_QUESTION,
             vec![
                 multi_screen_focus_at(0, false),
                 multi_screen_focus_at(0, true),
@@ -4358,6 +4418,7 @@ mod tests {
         };
         let (r, sent) = run_toggle_script(
             2,
+            FIXTURE_QUESTION,
             vec![
                 multi_screen_focus_at(0, false),
                 multi_screen_focus_at(1, false),
@@ -4390,6 +4451,7 @@ mod tests {
         };
         let (r, sent) = run_toggle_script(
             0,
+            FIXTURE_QUESTION,
             vec![
                 multi_screen_focus_at(4, false),
                 multi_screen_focus_at(3, false),
@@ -4412,6 +4474,7 @@ mod tests {
     fn toggle_stage_aborts_when_flip_not_seen() {
         let (r, sent) = run_toggle_script(
             0,
+            FIXTURE_QUESTION,
             vec![
                 multi_screen_focus_at(0, false),
                 multi_screen_focus_at(0, false), // 空格后屏无变化
@@ -4434,7 +4497,7 @@ mod tests {
             s[4] = "  1. [ ] Apple".to_string();
             s
         };
-        let (r, sent) = run_toggle_script(0, vec![no_focus]);
+        let (r, sent) = run_toggle_script(0, FIXTURE_QUESTION, vec![no_focus]);
         let err = r.expect_err("无焦点必须中止");
         assert!(err.message.contains("唯一焦点行"), "{err}");
         assert!(sent.is_empty(), "零按键：{sent:?}");
@@ -4443,10 +4506,102 @@ mod tests {
     /// 场景⑥：目标选项不在块内（序号越界到屏上没有的编号）→ 零键中止。
     #[test]
     fn toggle_stage_aborts_when_target_absent() {
-        let (r, sent) = run_toggle_script(9, vec![multi_screen_focus_at(0, false)]);
+        let (r, sent) = run_toggle_script(9, FIXTURE_QUESTION, vec![multi_screen_focus_at(0, false)]);
         let err = r.expect_err("目标不在块内必须中止");
         assert!(err.message.contains("第 10 个模型选项"), "{err}");
         assert!(sent.is_empty());
+    }
+
+    /// **评审 I1 回归锁（2026-09-24）**：屏上题干与载荷题干不一致（用户已手动
+    /// ←/→ 切题、手机卡停在旧题）→ 切勾**零键中止**——闭环验得了按键效果，验不了
+    /// 目标身份；没有本判据，切勾会作用到**别的题**的选项上（翻转验得过、题错了）。
+    /// 还原动作：删掉第 1 段的 screen_question_matches 判据 → 本用例先红。
+    #[test]
+    fn toggle_stage_aborts_on_question_identity_mismatch() {
+        // 屏面仍是「Favorite fruits」题，但载荷当前题是另一道（多题第 2 题）
+        let (r, sent) = run_toggle_script(
+            0,
+            "Which output folder should the build use?",
+            vec![multi_screen_focus_at(0, false)],
+        );
+        let err = r.expect_err("题干不一致必须中止");
+        assert!(
+            err.message.contains("题目与手机卡片不一致"),
+            "中止原因须点名身份核验：{err}"
+        );
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// 评审 I1 的**通过面**：题干一致（含载荷是屏面子串的折行/短文形态）→ 正常
+    /// 切勾——身份判据不得误伤正常路径。
+    #[test]
+    fn toggle_stage_passes_identity_when_payload_is_screen_substr() {
+        // 载荷题干是屏面题干的前缀（短文载荷 / 屏面带装饰后缀的形态）
+        let (r, sent) = run_toggle_script(
+            0,
+            "Which fruits are your favorites?",
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(0, true),
+            ],
+        );
+        let out = r.expect("题干一致（子串形态）必须放行");
+        assert!(out.verified);
+        assert_eq!(sent, vec!["space".to_string()]);
+    }
+
+    /// **评审 Minor-3 回归锁**：走位后焦点**反向**位移（发 down 却向上跳）→ 中止
+    /// 不发空格——原实现只校验位移绝对值，反向位移会乒乓走到上限（仍安全但浪费按键）。
+    #[test]
+    fn toggle_stage_aborts_on_reverse_displacement() {
+        // 屏 1 焦点在选项 1（目标 3 → 方向 down）；发 down 后屏上焦点跳到**上方**
+        // （终端自行移动焦点的形态）→ moved=-1 ≠ +1 → 中止
+        let (r, sent) = run_toggle_script(
+            2,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(0, true), // 任意异屏（焦点仍在行 0，moved=0≠1 同样触发）
+            ],
+        );
+        let err = r.expect_err("反向位移必须中止");
+        assert!(
+            err.message.contains("应沿目标方向恰 1 行"),
+            "中止原因须点名方向校验：{err}"
+        );
+        assert_eq!(sent, vec!["down".to_string()], "只发过一个 down：{sent:?}");
+    }
+
+    /// **评审 Minor-4 回归锁**：对话滚回区的 markdown 水平线（ASCII `----`）不是
+    /// 题屏分隔线——制表符判定收紧后，`----` 上方的选项行照常进块（旧谓词会把
+    /// 后续行误判到分隔线下而丢块）。
+    #[test]
+    fn parse_rows_ignores_ascii_markdown_rule_as_separator() {
+        let screen = lines(&[
+            " Some prose above",
+            " ----",
+            " ← ☒ Favorite fruits  ✔Submit  →",
+            "",
+            " Which fruits are your favorites? (Select all that apply)",
+            "",
+            " ❯ 1. [ ] Apple",
+            " 2. [ ] Banana",
+            " 3. [ ] Peach",
+            "    Submit",
+            " ────────────────",
+            " 4. Chat about this",
+        ]);
+        let rows = parse_question_rows(&screen);
+        assert_eq!(
+            rows.len(),
+            4,
+            "ASCII ---- 不触发分隔判定，选项行照常进块：{rows:?}"
+        );
+        assert_eq!(rows[3].kind, QuestionRowKind::Advance);
+        // 真·制表符分隔线（─）依然生效：Chat 行仍在块外
+        assert!(!rows.iter().any(|r| r.label.contains("Chat")));
+        assert!(is_separator_line("────────"));
+        assert!(!is_separator_line("----"), "ASCII 水平线不算题屏分隔线");
     }
 }
 

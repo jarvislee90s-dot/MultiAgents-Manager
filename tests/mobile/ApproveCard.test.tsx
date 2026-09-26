@@ -541,7 +541,7 @@ describe("ApproveCard：裁11 配色 tone 映射", () => {
     expect(btn.className).not.toContain("bg-rose-500/10");
   });
 
-  it("二元审批卡：并入问答同族蓝系 data-tone=question + 纵向编号列表（2026-09-24 用户裁决「完全并成一套」，裁11 活口收口）", async () => {
+  it("二元审批卡：并入问答同族蓝系 data-tone=question + 纵向列表（2026-09-24 用户裁决「完全并成一套」，裁11 活口收口）；徽标只在 dialog 分支渲染（评审 I2：二元键位各家不同且不外泄，编造序号=谎报）", async () => {
     installFetch();
     routes.options = approveOptions();
     render(<ApproveCard session={{ id: "sess-e7-binary" }} />);
@@ -550,8 +550,9 @@ describe("ApproveCard：裁11 配色 tone 映射", () => {
     expect(card.className).toContain("border-sky-500/60");
     const btn = screen.getByTestId("approve-option-approve");
     expect(btn.className).toContain("bg-sky-500/10");
-    // 纵向列表形态（与问答卡同款）：reject 的徽标如实显示将注入的键名 esc（非编造序号）
     expect(btn.className).not.toContain("bg-rose-500/10");
-    expect(screen.getByTestId("approve-option-reject").textContent).toContain("esc");
+    // 二元分支不编造编号徽标：按钮文本 = 纯 label（不夹带序号/键名）
+    expect(screen.getByTestId("approve-option-approve").textContent).toBe("允许");
+    expect(screen.getByTestId("approve-option-reject").textContent).toBe("拒绝");
   });
 });

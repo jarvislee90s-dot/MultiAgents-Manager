@@ -699,6 +699,38 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     ]);
   });
 
+  it("advance 回执 advanced:false（claude 已在 Review 屏、零按键）→ 前端不推进、停在确认卡（2026-09-24 评审 M6 回归锁）", async () => {
+    installFetch();
+    const mq = twoQuestionInteractive();
+    mq.questions[0].multiSelect = true;
+    mq.questions[1].multiSelect = false;
+    routes.question = mq;
+    // 前半程：advance 正常前移（advanced:true——claude 走位到 Next+回车成功的回执）
+    routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: true };
+    render(<QuestionCard session={{ id: "sess-e4-advfalse" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 第 1 题（多选）勾选 → 切换题目 → 第 2 题
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // 末题单选 → 确认卡
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
+    // 确认卡上「返回题目修改」再发 advance——把回执翻成 claude「已在 Review 屏」
+    // 形态（advanced:false，零按键）→ **停在确认卡**（claude 的 ← 回退未实测，
+    // 后端不按键，前端也不得谎报回退能力）
+    routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: false };
+    fireEvent.click(screen.getByTestId("question-confirm-back"));
+    await flushAsync();
+    expect(
+      screen.getByTestId("question-confirm-hint"),
+      "advanced:false 不得推进（回到题目页=对 claude 谎报能力）"
+    ).toBeTruthy();
+  });
+
   it("末题单选答完 → 推进到确认卡（不锁死在终态）", async () => {
     installFetch();
     const mq = twoQuestionInteractive();

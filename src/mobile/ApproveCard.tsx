@@ -298,8 +298,10 @@ export default function ApproveCard({ session }: ApproveCardProps) {
       actions={
         <div className="space-y-1">
           {/* 纵向编号列表（与问答卡同形态——「一套，只差选项数目」）。编号徽标 =
-              将注入的数字键（dialog 分支）；二元分支的 reject 键是 esc，徽标如实
-              显示键名而不是编造序号——用户所见即所按 */}
+              将注入的数字键，**只在 dialog 分支渲染**（屏读到的选项才有真实编号）；
+              二元分支的键位不外泄给 UI（载荷只有 id/label——契约锚点），且各家键位
+              不同（claude 允许='1' / codex 允许='y' / 拒绝=esc），编造序号或硬编码
+              键名都会谎报「将按什么」——评审 I2：不渲染徽标是唯一不撒谎的形态 */}
           {options.options.map((o, i) => (
             <button
               key={o.id}
@@ -309,11 +311,13 @@ export default function ApproveCard({ session }: ApproveCardProps) {
               onClick={() => handleAnswer(o.id)}
               className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${toneTokens(cardTone).action}`}
             >
-              <span
-                className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens(cardTone).badge}`}
-              >
-                {options.dialog ? i + 1 : o.id === "reject" ? "esc" : i + 1}
-              </span>
+              {options.dialog && (
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens(cardTone).badge}`}
+                >
+                  {i + 1}
+                </span>
+              )}
               <span className="min-w-0 flex-1 break-words">{o.label}</span>
             </button>
           ))}

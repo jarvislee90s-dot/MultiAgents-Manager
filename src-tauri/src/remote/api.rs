@@ -3583,6 +3583,9 @@ pub async fn session_question_answer(
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
     let tool_for_dispatch = tool.clone();
+    // 切勾目标身份核验的题干（评审 I1）：多题卡当前题的 question 文本，随计划
+    // 传给分派器（run_toggle_stages 第 1 段与屏面题干比对，不一致=已手动切题→中止）
+    let expected_question = q_for_plan.question.clone();
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
     // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
     let attempt = tokio::task::spawn_blocking(move || {
@@ -3596,6 +3599,7 @@ pub async fn session_question_answer(
             &sequence,
             free_text.as_deref(),
             &stage_plan,
+            &expected_question,
         ))
     })
     .await;
@@ -3988,6 +3992,7 @@ fn dispatch_question_action(
     sequence: &[String],
     free_text: Option<&str>,
     plan: &StagePlan,
+    expected_question: &str,
 ) -> QuestionDispatch {
     match plan {
         StagePlan::SingleKey => {
@@ -4072,6 +4077,7 @@ fn dispatch_question_action(
             };
             let out = crate::inject::question::run_toggle_stages(
                 *target,
+                expected_question,
                 || poll_question_stage(|| probe("toggle-row"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
