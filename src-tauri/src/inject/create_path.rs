@@ -1,0 +1,220 @@
+//! 新建会话路径校验纯核（spec §2）。只判不建；创建（create_dir_all）在状态机校验段执行。
+//! 黑名单 = 两张表：
+//! ① remote::files::SENSITIVE_DIRS（读侧凭据表）——create 域**策略扩展**为全局段匹配
+//!    （读侧原语义是「仅主目录内」，见 files.rs 表注释：「黑名单仅作用于**用户主目录
+//!    范围内**（凭据高价值区）；主目录之外不设路径级防线」；扩展理由：起 CLI 的目录
+//!    与读文件同等敏感——会话工作目录落在凭据目录里同样不可接受）；
+//! ② CREATE_SYSTEM_DIRS（create 专属）——系统关键目录，读侧从不需要（低敏）但建会话必须拦。
+//!
+//! 失败码词表（wire 值，端点层直出）：empty / non_ascii_path / not_local_volume /
+//! bad_windows_form / not_absolute / blacklisted。
+
+/// 路径拒绝原因：`code` 为 wire 失败码（移动端按码出文案），`message` 为诊断备注。
+#[derive(Debug)]
+pub struct PathReject {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// 系统关键目录（create 专属；windows = 段匹配：大小写折叠 + 分隔符双态归一）。
+const CREATE_SYSTEM_DIRS_WIN: &[&str] = &[
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+];
+
+/// 系统关键目录（create 专属；macos = 前缀匹配，须卡段边界——`/usr` 命中 `/usr/bin`
+/// 而不误伤 `/Users/...`）。
+const CREATE_SYSTEM_DIRS_MAC: &[&str] = &[
+    "/system", "/library", "/private", "/bin", "/sbin", "/etc", "/usr",
+];
+
+/// 新建会话路径校验（纯函数，只判不建；递归创建在状态机校验段）。
+/// `platform` = "windows" | "macos"（仅识别 "windows"，其余值一律走 POSIX 形态判别
+/// ——Windows 形态会以 `not_absolute` 拒、不会放行，fail-closed）。
+/// **trim 契约（评审 I1）**：判定基于 `trim()` 后形态；调用方（C6 状态机）必须以
+/// **同一 trim 后的路径**执行 `create_dir_all` 与起窗 cwd——不得拿原始串落盘，
+/// 否则尾随空白会在盘上建出带空格的目录。
+pub fn validate(path: &str, platform: &str) -> Result<(), PathReject> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err(rej("empty", "路径为空"));
+    }
+    if !p.is_ascii() {
+        return Err(rej("non_ascii_path", "v1 路径限纯 ASCII（CJK 路径留后批）"));
+    }
+    // UNC / 网络路径先拦（`\\` 与 `//` 双形态，平台无关；spec：v1 仅本地卷）
+    if p.starts_with(r"\\") || p.starts_with("//") {
+        return Err(rej("not_local_volume", "v1 仅本地卷，UNC/网络路径不入本批"));
+    }
+    if platform == "windows" {
+        // 三态判别（验收 SSOT：测试逐条驱动）：
+        //   `/` 开头 = POSIX 形态跑在 windows → bad_windows_form；
+        //   `X:\` / `X:/` 盘符形态 → 过；
+        //   其余（无盘符的相对/裸名）→ not_absolute。
+        if p.starts_with('/') {
+            return Err(rej(
+                "bad_windows_form",
+                "POSIX 形态路径不能作 Windows 绝对路径",
+            ));
+        }
+        let b = p.as_bytes();
+        let drive = b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'\\' || b[2] == b'/');
+        if !drive {
+            return Err(rej("not_absolute", "Windows 路径须为 X:\\ 盘符绝对形态"));
+        }
+    } else if !p.starts_with('/') {
+        return Err(rej("not_absolute", "macOS 路径须为 / 开头绝对路径"));
+    }
+    if hits_blacklist(p, platform) {
+        return Err(rej("blacklisted", "路径命中危险目录黑名单"));
+    }
+    Ok(())
+}
+
+/// 黑名单双表命中判定（纯函数）：① 凭据表（SENSITIVE_DIRS）全局段匹配；② create
+/// 专属系统目录表（按平台语义）。归一 = 小写折叠 + `/`→`\`，段匹配与平台无关。
+fn hits_blacklist(p: &str, platform: &str) -> bool {
+    let seg_norm = p.to_ascii_lowercase().replace('/', "\\");
+    let seg_hit = crate::remote::files::SENSITIVE_DIRS
+        .iter()
+        .any(|d| seg_contains(&seg_norm, &d.to_ascii_lowercase().replace('/', "\\")));
+    if seg_hit {
+        return true;
+    }
+    if platform == "windows" {
+        CREATE_SYSTEM_DIRS_WIN
+            .iter()
+            .any(|d| seg_contains(&seg_norm, &d.to_ascii_lowercase()))
+    } else {
+        let posix = seg_norm.replace('\\', "/");
+        CREATE_SYSTEM_DIRS_MAC
+            .iter()
+            .any(|pfx| posix == *pfx || posix.starts_with(&format!("{pfx}/")))
+    }
+}
+
+/// 段精确命中：`\d\` 出现或 `\d` 收尾（`.ssh2` 这类前缀相似目录不误伤）。
+fn seg_contains(haystack_norm: &str, needle: &str) -> bool {
+    haystack_norm.contains(&format!("\\{needle}\\"))
+        || haystack_norm.ends_with(&format!("\\{needle}"))
+}
+
+fn rej(code: &'static str, msg: &str) -> PathReject {
+    PathReject {
+        code,
+        message: msg.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejects_empty_relative_nonascii_unc() {
+        assert_eq!(validate("", "windows").err().unwrap().code, "empty");
+        assert_eq!(
+            validate(r"relative\path", "windows").err().unwrap().code,
+            "not_absolute"
+        );
+        assert_eq!(
+            validate(r"E:\项目\demo", "windows").err().unwrap().code,
+            "non_ascii_path"
+        );
+        assert_eq!(
+            validate("/项目/demo", "macos").err().unwrap().code,
+            "non_ascii_path"
+        );
+        assert_eq!(
+            validate(r"\\server\share\p", "windows").err().unwrap().code,
+            "not_local_volume"
+        );
+        assert_eq!(
+            validate("//server/share", "macos").err().unwrap().code,
+            "not_local_volume"
+        );
+    }
+    #[test]
+    fn windows_requires_drive_form_macos_requires_slash() {
+        assert_eq!(
+            validate(r"/tmp/x", "windows").err().unwrap().code,
+            "bad_windows_form"
+        );
+        assert!(validate(r"C:\Users\u\proj", "windows").is_ok());
+        assert!(validate("/Users/u/proj", "macos").is_ok());
+    }
+    #[test]
+    fn credential_blacklist_hits_globally() {
+        // SENSITIVE_DIRS（读侧表）在 create 域升级为全局段匹配（策略扩展，文件头声明）
+        assert_eq!(
+            validate(r"D:\keys\.ssh\k", "windows").err().unwrap().code,
+            "blacklisted"
+        );
+        assert_eq!(
+            validate("/Users/u/.claude/x", "macos").err().unwrap().code,
+            "blacklisted"
+        );
+    }
+    #[test]
+    fn system_dirs_blocked_via_create_table() {
+        // 系统关键目录：SENSITIVE_DIRS 不含，须由 CREATE_SYSTEM_DIRS 拦
+        assert_eq!(
+            validate(r"C:\Windows\System32\x", "windows")
+                .err()
+                .unwrap()
+                .code,
+            "blacklisted"
+        );
+        assert_eq!(
+            validate(r"C:\Program Files\app", "windows")
+                .err()
+                .unwrap()
+                .code,
+            "blacklisted"
+        );
+        assert_eq!(
+            validate("/System/Volumes", "macos").err().unwrap().code,
+            "blacklisted"
+        );
+        assert_eq!(
+            validate("/usr/bin", "macos").err().unwrap().code,
+            "blacklisted"
+        );
+        // 普通路径不误伤（用户目录名撞系统段的情况不在 v1 处理面，如实登记）
+        assert!(validate(r"D:\work\proj", "windows").is_ok());
+        assert!(validate("/Users/u/work/proj", "macos").is_ok());
+    }
+    #[test]
+    fn segment_boundary_and_case_fold_locks() {
+        // 敏感目录作为路径**末段**（ends_with 半支）与 mac 前缀**精确相等**支（评审 M1）
+        assert_eq!(
+            validate(r"C:\Users\u\.ssh", "windows").err().unwrap().code,
+            "blacklisted"
+        );
+        assert_eq!(
+            validate(r"C:\Windows", "windows").err().unwrap().code,
+            "blacklisted"
+        );
+        assert_eq!(validate("/etc", "macos").err().unwrap().code, "blacklisted");
+        // 前缀相似目录不误伤（模块 doc 明写承诺，create 侧补锁，评审 M2）
+        assert!(validate(r"D:\work\.ssh2\k", "windows").is_ok());
+        // 小写盘符合法（评审 M3）
+        assert!(validate(r"c:\Users\u\proj", "windows").is_ok());
+        // 大小写折叠：凭据段大小写变体照拦
+        assert_eq!(
+            validate(r"D:\KEYS\.SSH\id", "windows").err().unwrap().code,
+            "blacklisted"
+        );
+        // macos 相对路径 → not_absolute
+        assert_eq!(
+            validate("relative/path", "macos").err().unwrap().code,
+            "not_absolute"
+        );
+        // trim 契约（评审 I1）：判定基于 trim 后形态——首尾空白不改变判定结果
+        assert!(validate("  /Users/u/proj  ", "macos").is_ok());
+    }
+}

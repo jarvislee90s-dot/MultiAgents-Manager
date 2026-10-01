@@ -60,6 +60,11 @@ pub enum SpawnSpec {
         /// 进程工作目录（生产 spawner 经 `Command::current_dir` 消费——conhost 回退
         /// 无 `-d` 等价物，cwd 靠继承落在项目目录；wt 分支同设无害）
         cwd: String,
+        /// 新建会话场景专用环境变量（C3）：create 显式设 `DISABLE_AUTOUPDATER=1`
+        /// （spec §4.2 环境红线，防工具自更新打断起窗）；resume 场景恒空（零行为
+        /// 变更）。macOS（MacosApplescript 变体）走 AppleScript 脚本内联 env，
+        /// 归 Mac 后补批。
+        env: Vec<(String, String)>,
         /// CREATE_NEW_CONSOLE 标记：conhost 回退必须自带（0x10）才开新控制台窗；
         /// wt 自开新标签无此需求
         new_console: bool,
@@ -110,6 +115,9 @@ pub fn resume_command(tool: &str, session_id: &str) -> Option<String> {
 /// spawner 经 current_dir 消费（见 [`spawn_terminal`]）：
 /// - 有 wt：`<wt 路径> -d <cwd> cmd /k <resume>`（wt 自开新标签并落在 cwd）；
 /// - 无 wt：`conhost.exe cmd /k <resume>` + CREATE_NEW_CONSOLE（全新控制台窗）。
+///
+/// C3 起末参亦承接**新建会话的裸工具名**（create 复用本构造后覆写 env，见
+/// [`build_create_spawn_spec`]）——`<resume>` 占位读作「resume 命令或裸工具名」。
 pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) -> SpawnSpec {
     match wt {
         Some(path) => SpawnSpec::Windows {
@@ -122,15 +130,29 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
                 resume.to_string(),
             ],
             cwd: cwd.to_string(),
+            env: Vec::new(),
             new_console: false,
         },
         None => SpawnSpec::Windows {
             program: "conhost.exe".to_string(),
             args: vec!["cmd".to_string(), "/k".to_string(), resume.to_string()],
             cwd: cwd.to_string(),
+            env: Vec::new(),
             new_console: true,
         },
     }
+}
+
+/// 新建会话起窗规格：裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境红线；
+/// S2 实测 conhost/WT 双宿主 4/4 透传，形态A=spawn 显式设 env）。
+/// macOS（MacosApplescript 变体）归 Mac 后补批：脚本内联 `env K=V ` 前缀（Mac 探测 M2 实证）。
+#[cfg(windows)]
+pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> SpawnSpec {
+    let mut spec = build_spawn_command_windows(wt, cwd, tool);
+    if let SpawnSpec::Windows { env, .. } = &mut spec {
+        *env = vec![("DISABLE_AUTOUPDATER".to_string(), "1".to_string())];
+    }
+    spec
 }
 
 /// `where wt` 探测 Windows Terminal（进程级缓存 OnceLock，approve.rs VERSION_CACHE
@@ -139,7 +161,7 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
 /// where 命中的真实 exe 不受影响）。`where.exe` 是 System32 上的真实可执行文件
 /// （非 cmd 内建），裸名直 spawn 即可。
 #[cfg(windows)]
-fn windows_terminal_path() -> Option<String> {
+pub(crate) fn windows_terminal_path() -> Option<String> {
     static WT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     WT.get_or_init(|| {
         std::process::Command::new("where")
@@ -163,7 +185,7 @@ fn windows_terminal_path() -> Option<String> {
 
 /// 非 Windows 平台无 wt 语义（构造层恒 None；该平台走 AppleScript 分支）。
 #[cfg(not(windows))]
-fn windows_terminal_path() -> Option<String> {
+pub(crate) fn windows_terminal_path() -> Option<String> {
     None
 }
 
@@ -474,11 +496,15 @@ pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
             program,
             args,
             cwd,
+            env,
             new_console,
         } => {
             use std::os::windows::process::CommandExt;
             let mut cmd = std::process::Command::new(program);
             cmd.args(args);
+            // 新建会话环境红线（C3，spec §4.2）：DISABLE_AUTOUPDATER=1 等显式注入
+            // 子进程环境；resume 规格 env 恒空（空迭代器 no-op，零行为变更）
+            cmd.envs(env.iter().map(|(k, v)| (k, v)));
             // conhost 回退的 cwd 继承点（wt 同设无害：-d 已双保险）
             if !cwd.is_empty() {
                 cmd.current_dir(cwd);
@@ -606,6 +632,7 @@ mod tests {
             args,
             cwd,
             new_console,
+            ..
         } = wt
         else {
             panic!("wt 在场必须构造 Windows 变体");
@@ -634,6 +661,7 @@ mod tests {
             args,
             cwd,
             new_console,
+            ..
         } = conhost
         else {
             panic!("无 wt 必须构造 Windows 变体（conhost）");
@@ -650,6 +678,50 @@ mod tests {
         );
         assert_eq!(cwd, r"E:\proj", "评审 I1：conhost 回退不得丢 cwd");
         assert!(new_console, "conhost 必须 CREATE_NEW_CONSOLE 开新窗");
+    }
+
+    /// C3：新建会话起窗规格——裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境
+    /// 红线）；resume 既有规格 env 恒空（零回归锚，既有 resume 行为不变）
+    #[cfg(windows)]
+    #[test]
+    fn create_spawn_spec_carries_env_and_bare_command() {
+        let s = build_create_spawn_spec(None, r"C:\proj", "claude");
+        match s {
+            SpawnSpec::Windows {
+                program, args, env, ..
+            } => {
+                assert_eq!(program, "conhost.exe");
+                assert_eq!(args, vec!["cmd", "/k", "claude"]);
+                assert!(env
+                    .iter()
+                    .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"));
+            }
+            _ => panic!("Windows 平台必须是 Windows 变体"),
+        }
+        let w = build_create_spawn_spec(Some(r"C:\wt\wt.exe"), r"C:\proj", "codex");
+        match w {
+            SpawnSpec::Windows { args, env, .. } => {
+                assert_eq!(args, vec!["-d", r"C:\proj", "cmd", "/k", "codex"]);
+                assert!(env
+                    .iter()
+                    .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"));
+            }
+            _ => panic!(),
+        }
+        // resume 既有规格 env 恒空（零回归锚，wt/conhost 双分支都锁）；
+        // super:: 显式路径防被同名测试遮蔽
+        match super::build_spawn_command_windows(None, r"C:\p", "claude --resume x") {
+            SpawnSpec::Windows { env, .. } => assert!(env.is_empty()),
+            _ => panic!(),
+        }
+        match super::build_spawn_command_windows(
+            Some(r"C:\wt\wt.exe"),
+            r"C:\p",
+            "claude --resume x",
+        ) {
+            SpawnSpec::Windows { env, .. } => assert!(env.is_empty()),
+            _ => panic!(),
+        }
     }
 
     /// macOS 构造层（跨平台可测）：cd '<cwd>' && <resume> 进脚本 + activate 置前；

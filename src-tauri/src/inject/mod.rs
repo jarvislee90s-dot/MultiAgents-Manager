@@ -6,6 +6,12 @@ pub mod approve;
 pub mod anchor_ledger;
 pub mod capability;
 pub mod confirm;
+// 新建会话状态机内核（spec §4，C4 进程锚定段起）：起窗后按「目标目录 cwd + 新进程」
+// 发现 TUI pid；C5 弹窗处置状态机追加于本文件。
+pub mod create;
+// 新建会话路径校验纯核（spec §2，C2）：只判不建（递归创建在状态机校验段）；黑名单双表
+// ——SENSITIVE_DIRS 凭据表全局段匹配（策略扩展，见模块文档）+ CREATE_SYSTEM_DIRS 系统目录表。
+pub mod create_path;
 // 通用 N 选项审批对话框屏读解析（批次丙 T5）：纯函数跨平台可测，屏读源在
 // windows_console::read_screen_window（仅 Windows 有屏读 → macOS 自然降级二元卡）。
 // 丁T3 起同模块承载「对话框在场 = 控制类注入红线」的单点判据
