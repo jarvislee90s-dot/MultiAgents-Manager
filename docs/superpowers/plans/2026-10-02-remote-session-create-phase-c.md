@@ -8,19 +8,25 @@
 
 **Tech Stack:** Rust（axum 端点、sysinfo 进程锚定、CONOUT$ 屏读缝）+ React/TS（`src/mobile/`）。
 
-**上位文档（执行前必读）：**
-- spec：`docs/superpowers/specs/2026-09-27-remote-session-create-design.md`（§4 管线语义与红线为准）
-- 探测定案 SSOT：`research/refs/phase2-消息注入/2026-09-27-新建会话四家探测定案.md`（**锚文案逐字、键序、时延、物化判据的唯一来源**——账本条目与键序常量从这里抄，禁止手造）
+**上位文档（执行前必读，顺序不可换）：**
+1. `AGENTS.md`（项目纪律：语言规范/构建门禁命令/扫描预算契约）
+2. `docs/MASTER-PLAN.md`（宪法；本功能 = D21 + F2.8）
+3. `docs/superpowers/specs/2026-09-27-remote-session-create-design.md`（§4 管线语义与红线为准）
+4. 本计划（任务书 SSOT）
+5. `research/refs/phase2-消息注入/2026-09-27-新建会话四家探测定案.md`（**锚文案逐字、键序、时延、物化判据唯一来源**——账本条目与键序常量从这里抄，禁止手造）
 
-**接口对账记录（2026-10-02 已核实，执行者勿改判）：**
-- `SpawnSpec` 是**枚举**（`resume.rs:53`：`Windows{program,args,cwd,new_console}` / `MacosApplescript{script}`）——env 扩展加在 Windows 变体；macOS 走脚本内联 `env K=V`（Mac 探测 M2 实证形态，归 Mac 后补批）。
-- `Injector` 域（`engine.rs:424`）：`locate_and_inject_spec(pid, text, spec)` / `locate_and_send_key_spec(pid, key, spec)`——键域已支持单字符 `'2'`（`engine.rs control_records` 的 is_ascii_alphanumeric 分支）。
-- `RemoteState` 既有缝（`server.rs:283`）：`session_source` / `store` / `injector` / `resume_spawner: Arc<dyn Fn(SpawnSpec)->Result<(),String>>` / `confirm_probe: Arc<dyn Fn(&str,&str,&str)->bool>` / `screen_probe: Arc<dyn Fn(&str,u32)->Option<Vec<String>>>` / `archive_source: Box<dyn Fn()->Vec<SessionArchiveRow>>`。
-- `monitor::cwd::normalize_cwd_for_match` 为 `pub(crate)`（create.rs 同 crate 直用）。
-- `remote/files.rs::is_sensitive_path` 是 **home 域语义**（只拦主目录基准内的敏感段）——create 需要**全局路径**黑名单，故复用 `SENSITIVE_DIRS` **表**（升 pub(crate)）而非该函数。
-- `session_archive.last_seen` 为 RFC3339 UTC 字符串（`archive.rs` 写入 `chrono::Utc::now().to_rfc3339()`）——7 天窗用 `DateTime::parse_from_rfc3339`。
-- 桌面审计页对 `action` **原样渲染**（`AuditLogSection.tsx:108`，无枚举映射）——新增 `create`/`dialog` action 零前端适配。
-- enabledTools 数据源 = `host_source()`（settings DAO 同源）——create 端点工具门读同一源。
+**接口对账记录（2026-10-02 两轮核实，执行者勿改判；发现计划与实况冲突时停下登记回报，不自行改判）：**
+- `SpawnSpec` 是**枚举**（`resume.rs:53`：`Windows{program,args,cwd,new_console}` / `MacosApplescript{script}`）——env 扩展加在 Windows 变体；macOS 走脚本内联 `env K=V`（归 Mac 后补批）。
+- `resume.rs::windows_terminal_path` 当前为私有 `#[cfg(windows)] fn`——C3 顺带升 `pub(crate)`。
+- `Injector` 域（`engine.rs:424`）：`locate_and_inject_spec(pid, text, spec)` / `locate_and_send_key_spec(pid, key, spec)`；键域已支持单字符 `'2'`（`engine.rs control_records` is_ascii_alphanumeric 分支）。
+- `RemoteState` 既有缝（`server.rs:283`）：`session_source` / `store` / `injector` / `resume_spawner: Arc<dyn Fn(SpawnSpec)->Result<(),String>>` / `confirm_probe: Arc<dyn Fn(&str,&str,&str)->bool>` / `screen_probe: Arc<dyn Fn(&str,u32)->Option<Vec<String>>>`（首参 sid 仅日志用）/ `archive_source: Box<dyn Fn()->Vec<SessionArchiveRow>>`。
+- `monitor::cwd::normalize_cwd_for_match` 为 `pub(crate)`（同 crate 直用）。
+- **`remote/files.rs::SENSITIVE_DIRS` 是主目录凭据清单**（.ssh/.aws/.claude/.mam/AppData/Library 等，**不含 windows/system32**），且其设计语义为「仅主目录范围内拦截」——create 域复用该表须声明为**策略扩展（全局段匹配）**并**另补系统目录清单**（C2）。其 `is_sensitive_path` 函数是 home 域语义，不复用。
+- `session_archive.last_seen` 为 RFC3339 UTC（`archive.rs`）。
+- 桌面审计页对 `action` **原样渲染**（`AuditLogSection.tsx:108`）——新增 `create`/`dialog` 零前端适配。
+- enabledTools 数据源 = `host_source()`（settings DAO 同源）。
+- `confirm::stamp_of` 内部自带 `strip_mobile_signature`——直接喂 compose 产物即可。
+- `Session` 结构体被全部 adapter 构造——**不加字段**；配对标记在端点层包 JSON（C7）。
 
 ---
 
@@ -32,7 +38,9 @@
 4. **零接触红线**：单测用内存库（`DeviceStore::memory`）/ tempdir，绝不写真实 `~/.mam`（E2E 例外：审计/队列落真实库为验收语义，沿用 m9r_e2e 口径）；E2E 只碰自建临时目录会话，结束 `taskkill /T /F` 清场。
 5. **键序红线（探测实证，测试锁死）**：claude 信任框默认 `❯ No, exit` → 必须 `down`+`enter`（直按 enter=退出）；codex 更新框默认 `Update now` → 必须字符 `'2'`（esc 无效、enter 禁用）；codex/kimi 信任框 enter 直通。
 6. **锚文案来源红线**：账本 `text` 逐字取探测定案表 §4/§5/§7，`evidence` 指向 `create-probe/20260927-100552` 或 Mac 报告；缺锚先补探测，禁止手造。
-7. **路径约束（v1）**：纯 ASCII（`non_ascii_path`）、本地卷（UNC 拒绝 `not_local_volume`）、黑名单（`blacklisted`）、绝对路径、缺失递归创建（失败 `mkdir_failed`）。
+7. **路径约束（v1）**：纯 ASCII（`non_ascii_path`）、本地卷（UNC 拒绝 `not_local_volume`）、黑名单（`blacklisted`，= SENSITIVE_DIRS 全局段匹配 ∪ 系统目录清单）、绝对路径、缺失递归创建（失败 `mkdir_failed`）。
+8. **执行方式**：可用子代理逐任务实现，但 git commit、门禁运行、验收标准核对一律在主会话统一做；子代理不碰 git。
+9. **计划冲突处置**：任何「计划写的接口/表/文案与代码实况不符」→ 停下登记进简报，不自行改判（宪法精神：冲突交裁决）。
 
 ## §1 文件结构总览
 
@@ -40,9 +48,9 @@
 |---|---|---|---|
 | `docs/MASTER-PLAN.md` | 改 | D21 + F2.8 | C0 |
 | `src-tauri/src/inject/anchor_ledger.rs` | 改 | 四场景常量 + 账本条目 | C1 |
-| `src-tauri/src/inject/create_path.rs` | 建 | 路径校验纯核 | C2 |
+| `src-tauri/src/inject/create_path.rs` | 建 | 路径校验纯核（双表黑名单） | C2 |
 | `src-tauri/src/remote/files.rs` | 改 | `SENSITIVE_DIRS` 升 pub(crate) | C2 |
-| `src-tauri/src/inject/resume.rs` | 改 | SpawnSpec::Windows 增 env + create 规格 | C3 |
+| `src-tauri/src/inject/resume.rs` | 改 | SpawnSpec::Windows 增 env + create 规格 + wt 路径升可见 | C3 |
 | `src-tauri/src/inject/create.rs` | 建 | 进程锚定 + 状态机内核 | C4/C5 |
 | `src-tauri/src/remote/server.rs`、`api.rs`、`mod.rs` | 改 | 任务注册缝 + 三端点 + 审计 + 配对信号 | C6/C7 |
 | `src-tauri/src/commands/session.rs` | 改 | `running_projects_from_processes` 升 pub(crate) | C7 |
@@ -77,9 +85,11 @@
 
 - [ ] **Step 4** Commit：`docs(charter): D21 远程新建会话提前为二期收尾（F2.8）`
 
+**验收标准**：① 三处插入位置正确（F2.7 后 / 2.2 表末 / D20 后）；② 未动 MASTER-PLAN 其他任何行（`git diff` 仅三段新增）；③ 单独 commit。
+
 ### Task C1: 锚点账本「新建会话」四场景
 
-**Files:** Modify `src-tauri/src/inject/anchor_ledger.rs`；锚文案逐字取探测定案表 §4/§5/§7
+**Files:** Modify `src-tauri/src/inject/anchor_ledger.rs`
 
 - [ ] **Step 1: 失败测试**（tests 模块追加）：
 
@@ -122,89 +132,16 @@ fn create_scenarios_anchors_hit_verbatim() {
 ```
 
 - [ ] **Step 2** `cargo test create_scenarios_anchors --lib` → 编译错（常量不存在）。
-- [ ] **Step 3: 实现**——`scenario` 模块追加：
-
-```rust
-/// 新建会话·信任框（spec §4.4；探测 create-probe/20260927-100552 P3a + Mac §③）
-pub const CREATE_TRUST: &str = "create_trust";
-/// 新建会话·更新提示（codex 实机构造 P3b + claude 横幅 Mac §③）
-pub const CREATE_UPDATE: &str = "create_update";
-/// 新建会话·空闲输入框（首句注入前置判据，P2b）
-pub const CREATE_IDLE: &str = "create_idle";
-/// 新建会话·首装/登录不可处置态（识别后专属报错，P3c）
-pub const CREATE_ONBOARD: &str = "create_onboard";
-```
-
-`ANCHOR_LEDGER` 末尾追加（`text` 小写逐字；`evidence` 指向探测段；**claude 选项行放 CONFIRM 槽**——选项行语义，危险默认与信任项同槽并存）：
-
-```rust
-// ===== 新建会话·信任框（create_trust）=====
-AnchorRow { tool: "claude", scenario: scenario::CREATE_TRUST, slot: slot::TITLE,
-    text: "quick safety check", observed_version: "2.1.278",
-    evidence: "create-probe/20260927-100552 p3a-claude（Mac 2.1.283 同文案）" },
-AnchorRow { tool: "claude", scenario: scenario::CREATE_TRUST, slot: slot::CONFIRM,
-    text: "no, exit", observed_version: "2.1.278",
-    evidence: "同上——危险默认项，处置必须 down+enter（键序红线）" },
-AnchorRow { tool: "claude", scenario: scenario::CREATE_TRUST, slot: slot::CONFIRM,
-    text: "yes, i trust this folder", observed_version: "2.1.278",
-    evidence: "create-probe/20260927-100552 p3a-claude" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_TRUST, slot: slot::TITLE,
-    text: "folder access", observed_version: "0.156.1",
-    evidence: "create-probe/20260927-100552 p3a-codex-r2（Windows 形态）" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_TRUST, slot: slot::TITLE,
-    text: "do you trust the contents of this directory", observed_version: "0.155.1",
-    evidence: "Mac 报告 §③（Mac 形态；同槽多文案 append-only）" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_TRUST, slot: slot::CONFIRM,
-    text: "1. trust and continue", observed_version: "0.156.1",
-    evidence: "create-probe/20260927-100552 p3a-codex-r2（Windows）" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_TRUST, slot: slot::CONFIRM,
-    text: "yes, continue", observed_version: "0.155.1",
-    evidence: "Mac 报告 §③（`› 1. Yes, continue`）" },
-AnchorRow { tool: "kimi", scenario: scenario::CREATE_TRUST, slot: slot::TITLE,
-    text: "trust this folder?", observed_version: "2.0.2",
-    evidence: "create-probe/20260927-100552 p3a-kimi（per-folder，与 HOME 无关）" },
-// ===== 新建会话·更新提示（create_update）=====
-AnchorRow { tool: "codex", scenario: scenario::CREATE_UPDATE, slot: slot::TITLE,
-    text: "update available", observed_version: "0.156.1",
-    evidence: "create-probe/20260927-100552 p3b（真实版本落差构造）" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_UPDATE, slot: slot::CONFIRM,
-    text: "1. update now", observed_version: "0.156.1",
-    evidence: "同上——危险默认项，处置必须字符 '2'（esc 无效、enter 禁用）" },
-AnchorRow { tool: "claude", scenario: scenario::CREATE_UPDATE, slot: slot::PRESENT,
-    text: "update installed · restart to apply", observed_version: "2.1.283",
-    evidence: "Mac 报告 §③ 自然构造（非阻塞横幅，不处置不阻断 idle 判定）" },
-// ===== 新建会话·空闲输入框（create_idle；claude 双版本同槽）=====
-AnchorRow { tool: "claude", scenario: scenario::CREATE_IDLE, slot: slot::PRESENT,
-    text: "? for shortcuts", observed_version: "2.1.278",
-    evidence: "create-probe/20260927-100552 p2b（Windows 双宿主一致）" },
-AnchorRow { tool: "claude", scenario: scenario::CREATE_IDLE, slot: slot::PRESENT,
-    text: "auto mode on (shift+tab to cycle)", observed_version: "2.1.283",
-    evidence: "Mac 报告 §③（同槽多文案，版本仅备注——2026-09-23 账本裁决）" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_IDLE, slot: slot::PRESENT,
-    text: "ask codex to do anything", observed_version: "0.156.1",
-    evidence: "create-probe/20260927-100552 p2b" },
-AnchorRow { tool: "kimi", scenario: scenario::CREATE_IDLE, slot: slot::PRESENT,
-    text: "no session yet", observed_version: "2.0.2",
-    evidence: "同上——新建会话特有锚，兼验确为新会话" },
-AnchorRow { tool: "opencode", scenario: scenario::CREATE_IDLE, slot: slot::PRESENT,
-    text: "ask anything", observed_version: "1.18.32",
-    evidence: "create-probe/20260927-100552 p2b（首帧即达，无信任框）" },
-// ===== 新建会话·首装/登录不可处置（create_onboard）=====
-AnchorRow { tool: "claude", scenario: scenario::CREATE_ONBOARD, slot: slot::TITLE,
-    text: "unable to connect to anthropic services", observed_version: "2.1.278",
-    evidence: "create-probe/20260927-100552 p3c（403 网络墙）" },
-AnchorRow { tool: "codex", scenario: scenario::CREATE_ONBOARD, slot: slot::TITLE,
-    text: "sign in with chatgpt", observed_version: "0.156.1",
-    evidence: "同上（登录三选屏，需真人）" },
-```
-
+- [ ] **Step 3: 实现**——`scenario` 模块追加四常量（`CREATE_TRUST`/`CREATE_UPDATE`/`CREATE_IDLE`/`CREATE_ONBOARD`，wire 词 `create_trust` 等，doc 注明 spec §4.4 与探测出处）；`ANCHOR_LEDGER` 末尾追加 **18 条** `AnchorRow`：claude trust（TITLE=`quick safety check`；CONFIRM=`no, exit` + `yes, i trust this folder`）、codex trust（TITLE=`folder access` + `do you trust the contents of this directory` 双形态；CONFIRM=`1. trust and continue` + `yes, continue`）、kimi trust（TITLE=`trust this folder?`）、codex update（TITLE=`update available`；CONFIRM=`1. update now`）、claude update（PRESENT=`update installed · restart to apply`）、idle 四家五条（claude 两条同槽：`? for shortcuts` + `auto mode on (shift+tab to cycle)`；codex `ask codex to do anything`；kimi `no session yet`；opencode `ask anything`）、onboard 两条（claude `unable to connect to anthropic services`；codex `sign in with chatgpt`）。每条 `text` 小写逐字、`evidence` 指向 `create-probe/20260927-100552` 对应段或 Mac 报告 §③（**形态见 Step 1 断言的原文**）。
 - [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): 锚点账本新建会话四场景（探测逐字取证，codex 双形态同槽）`
 
-### Task C2: 路径校验纯核
+**验收标准**：① 新测试 PASS 且既有账本测试全绿（append-only 零回归）；② `ANCHOR_LEDGER` 条目数 = 原数 + 18，全部带非空 `evidence`；③ `cargo test --lib` 全量零失败。
+
+### Task C2: 路径校验纯核（双表黑名单）
 
 **Files:** Create `src-tauri/src/inject/create_path.rs`；Modify `src/inject/mod.rs`（挂模块）、`src/remote/files.rs`（`const SENSITIVE_DIRS` → `pub(crate) const`，调用点零改动）
 
-- [ ] **Step 1: 失败测试**（create_path.rs 内嵌）：
+- [ ] **Step 1: 失败测试**：
 
 ```rust
 #[cfg(test)]
@@ -226,10 +163,21 @@ mod tests {
         assert!(validate("/Users/u/proj", "macos").is_ok());
     }
     #[test]
-    fn blacklist_hits_and_passes() {
+    fn credential_blacklist_hits_globally() {
+        // SENSITIVE_DIRS（读侧表）在 create 域升级为全局段匹配（策略扩展，文件头声明）
+        assert_eq!(validate(r"D:\keys\.ssh\k", "windows").err().unwrap().code, "blacklisted");
+        assert_eq!(validate("/Users/u/.claude/x", "macos").err().unwrap().code, "blacklisted");
+    }
+    #[test]
+    fn system_dirs_blocked_via_create_table() {
+        // 系统关键目录：SENSITIVE_DIRS 不含，须由 CREATE_SYSTEM_DIRS 拦
         assert_eq!(validate(r"C:\Windows\System32\x", "windows").err().unwrap().code, "blacklisted");
-        assert_eq!(validate("/Users/u/.ssh/keys", "macos").err().unwrap().code, "blacklisted");
-        assert!(validate(r"D:\work\proj", "windows").is_ok()); // 普通路径不误伤
+        assert_eq!(validate(r"C:\Program Files\app", "windows").err().unwrap().code, "blacklisted");
+        assert_eq!(validate("/System/Volumes", "macos").err().unwrap().code, "blacklisted");
+        assert_eq!(validate("/usr/bin", "macos").err().unwrap().code, "blacklisted");
+        // 普通路径不误伤（用户目录名撞系统段的情况不在 v1 处理面，如实登记）
+        assert!(validate(r"D:\work\proj", "windows").is_ok());
+        assert!(validate("/Users/u/work/proj", "macos").is_ok());
     }
 }
 ```
@@ -238,11 +186,16 @@ mod tests {
 - [ ] **Step 3: 实现**：
 
 ```rust
-//! 新建会话路径校验纯核（spec §2：纯 ASCII / 本地卷 / 绝对路径 / 黑名单）。
-//! 只判不建；创建（create_dir_all）在状态机校验段执行并如实回执。
-//! 黑名单复用 remote::files::SENSITIVE_DIRS 表（非其 is_sensitive_path 函数——
-//! 那是 home 域语义，create 需要全局路径拦截）。
+//! 新建会话路径校验纯核（spec §2）。只判不建；创建（create_dir_all）在状态机校验段执行。
+//! 黑名单 = 两张表：
+//! ① remote::files::SENSITIVE_DIRS（读侧凭据表）——create 域**策略扩展**为全局段匹配
+//!    （读侧原语义是「仅主目录内」，见 files.rs 表注释；扩展理由：起 CLI 的目录同等敏感）；
+//! ② CREATE_SYSTEM_DIRS（create 专属）——系统关键目录，读侧从不需要（低敏）但建会话必须拦。
 pub struct PathReject { pub code: &'static str, pub message: String }
+
+/// 系统关键目录（create 专属；windows=段匹配，macos=前缀匹配）
+const CREATE_SYSTEM_DIRS_WIN: &[&str] = &["windows", "program files", "program files (x86)", "programdata"];
+const CREATE_SYSTEM_DIRS_MAC: &[&str] = &["/system", "/library", "/private", "/bin", "/sbin", "/etc", "/usr"];
 
 pub fn validate(path: &str, platform: &str) -> Result<(), PathReject> {
     let p = path.trim();
@@ -258,33 +211,42 @@ pub fn validate(path: &str, platform: &str) -> Result<(), PathReject> {
     } else if !p.starts_with('/') {
         return Err(rej("not_absolute", "macOS 路径须为 / 开头绝对路径"));
     }
-    if hits_blacklist(p) { return Err(rej("blacklisted", "路径命中系统危险目录黑名单")); }
+    if hits_blacklist(p, platform) { return Err(rej("blacklisted", "路径命中危险目录黑名单")); }
     Ok(())
 }
-/// 全局路径黑名单命中（分隔符双态 + 段边界，与 files.rs 的表同源不同域）
-fn hits_blacklist(p: &str) -> bool {
+fn hits_blacklist(p: &str, platform: &str) -> bool {
     let low = p.to_ascii_lowercase().replace('/', "\\");
-    crate::remote::files::SENSITIVE_DIRS.iter().any(|d| {
+    let seg_hit = crate::remote::files::SENSITIVE_DIRS.iter().any(|d| {
         let d = d.to_ascii_lowercase().replace('/', "\\");
         low.contains(&format!("\\{d}\\")) || low.ends_with(&format!("\\{d}"))
-    })
+    });
+    if seg_hit { return true; }
+    if platform == "windows" {
+        CREATE_SYSTEM_DIRS_WIN.iter().any(|d| {
+            let d = d.to_ascii_lowercase();
+            low.contains(&format!("\\{d}\\")) || low.ends_with(&format!("\\{d}"))
+        })
+    } else {
+        CREATE_SYSTEM_DIRS_MAC.iter().any(|pfx| low.replace('\\', "/").starts_with(pfx))
+    }
 }
 fn rej(code: &'static str, msg: &str) -> PathReject { PathReject { code, message: msg.to_string() } }
 ```
 
-（`/Users/u/.ssh/keys` 例依赖 `SENSITIVE_DIRS` 含 `.ssh`——执行时以表实况为准调整测试断言，表内容不改。）
-- [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): 路径校验纯核（ASCII/本地卷/黑名单/绝对路径）`
+- [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): 路径校验纯核（凭据表全局扩展+系统目录表）`
+
+**验收标准**：① 四个测试函数全 PASS（含 `.ssh` 全域拦截与 System32 拦截两条不同表的路径）；② `cargo test --lib` 零回归；③ files.rs 仅可见性改动（diff 一行）。
 
 ### Task C3: 起窗规格（SpawnSpec env 扩展）
 
 **Files:** Modify `src-tauri/src/inject/resume.rs`
 
-- [ ] **Step 1: 失败测试**：
+- [ ] **Step 1: 失败测试**（`#[cfg(windows)]` 标注——CI linux 不编译此测试）：
 
 ```rust
+#[cfg(windows)]
 #[test]
 fn create_spawn_spec_carries_env_and_bare_command() {
-    // conhost 分支：枚举事实形态（resume.rs:53 SpawnSpec::Windows）
     let s = build_create_spawn_spec(None, r"C:\proj", "claude");
     match s {
         SpawnSpec::Windows { program, args, env, .. } => {
@@ -294,7 +256,6 @@ fn create_spawn_spec_carries_env_and_bare_command() {
         }
         _ => panic!("Windows 平台必须是 Windows 变体"),
     }
-    // WT 分支：命令同为裸工具名、env 同带
     let w = build_create_spawn_spec(Some(r"C:\wt\wt.exe"), r"C:\proj", "codex");
     match w {
         SpawnSpec::Windows { args, env, .. } => {
@@ -303,16 +264,21 @@ fn create_spawn_spec_carries_env_and_bare_command() {
         }
         _ => panic!(),
     }
+    // resume 既有规格 env 恒空（零回归锚）
+    match build_spawn_command_windows(None, r"C:\p", "claude --resume x") {
+        SpawnSpec::Windows { env, .. } => assert!(env.is_empty()),
+        _ => panic!(),
+    }
 }
 ```
 
 - [ ] **Step 2** 确认失败（`env` 字段与函数均不存在）。
-- [ ] **Step 3: 实现**——① `SpawnSpec::Windows` 变体增 `env: Vec<(String, String)>` 字段（`build_spawn_command_windows` 两处构造补 `env: Vec::new()`，行为零变化）；② `spawn_terminal` Windows 分支 `Command` 追加 `.envs(spec.env.iter().map(|(k, v)| (k, v)))`；③ 新增：
+- [ ] **Step 3: 实现**——① `SpawnSpec::Windows` 增 `env: Vec<(String, String)>`（`build_spawn_command_windows` 两处构造补 `env: Vec::new()`）；② `spawn_terminal` Windows 分支 `Command` 追加 `.envs(spec.env.iter().map(|(k, v)| (k, v)))`；③ `windows_terminal_path` 升 `pub(crate)`（C6 用）；④ 新增：
 
 ```rust
 /// 新建会话起窗规格：裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境红线；
 /// S2 实测 conhost/WT 双宿主 4/4 透传，形态A=spawn 显式设 env）。
-/// macOS 侧（MacosApplescript 变体）归 Mac 后补批：脚本内联 `env K=V ` 前缀（Mac 探测 M2 实证）。
+/// macOS（MacosApplescript 变体）归 Mac 后补批：脚本内联 `env K=V ` 前缀（Mac 探测 M2 实证）。
 #[cfg(windows)]
 pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> SpawnSpec {
     let mut spec = build_spawn_command_windows(wt, cwd, tool);
@@ -323,11 +289,13 @@ pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> Spawn
 }
 ```
 
-- [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): 起窗规格携带 DISABLE_AUTOUPDATER（SpawnSpec env 扩展）`
+- [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): 起窗规格携带 DISABLE_AUTOUPDATER（SpawnSpec env 扩展+wt 路径升可见）`
+
+**验收标准**：① 新测试 PASS（三段断言含 resume 零回归锚）；② `cargo test --lib` 全量零失败（resume 既有 spawn 测试不破）；③ linux CI 兼容（cfg(windows) 测试不编译）。
 
 ### Task C4: TUI 进程锚定
 
-**Files:** Create `src-tauri/src/inject/create.rs`（本任务建文件，先只放本函数 + mod.rs 挂模块）
+**Files:** Create `src-tauri/src/inject/create.rs`（先只放本函数）+ `mod.rs` 挂模块
 
 - [ ] **Step 1: 失败测试**：
 
@@ -341,7 +309,7 @@ mod tests {
         assert!(is_tui_candidate("claude", &norm(r"E:\proj\demo"), "claude.exe", &norm("e:/proj/demo")));
         assert!(is_tui_candidate("codex", &norm(r"E:\p"), "node.exe", &norm(r"E:\p")));
         assert!(!is_tui_candidate("claude", &norm(r"E:\other"), "claude.exe", &norm(r"E:\p")));
-        assert!(!is_tui_candidate("kimi", &norm(r"E:\p"), "cmd.exe", &norm(r"E:\p"))); // 中间壳不算
+        assert!(!is_tui_candidate("kimi", &norm(r"E:\p"), "cmd.exe", &norm(r"E:\p")));
         assert!(!is_tui_candidate("kimi", &norm(r"E:\p"), "powershell.exe", &norm(r"E:\p")));
     }
 }
@@ -374,7 +342,8 @@ pub fn find_tui_pid(tool: &str, dir: &std::path::Path, timeout: std::time::Durat
         );
         for (pid, process) in system.processes() {
             if let Some(cwd) = process.cwd() {
-                if is_tui_candidate(tool, &crate::monitor::cwd::normalize_cwd_for_match(&cwd.to_string_lossy()),
+                if is_tui_candidate(tool,
+                    &crate::monitor::cwd::normalize_cwd_for_match(&cwd.to_string_lossy()),
                     &process.name().to_string_lossy(), &want) {
                     return Ok(pid.as_u32());
                 }
@@ -390,101 +359,93 @@ pub fn find_tui_pid(tool: &str, dir: &std::path::Path, timeout: std::time::Durat
 
 - [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): TUI 进程锚定（cwd+进程名，中间壳排除）`
 
+**验收标准**：① 判据测试 5 条断言全 PASS；② `find_tui_pid` 编译进 lib 且 clippy 零警告（实机验证归 C8）。
+
 ### Task C5: 创建状态机内核
 
 **Files:** Modify `src-tauri/src/inject/create.rs`
 
-- [ ] **Step 1: 失败测试**：
+- [ ] **Step 1: 失败测试**（RefCell 驱动 fake，跨平台可编译）：
 
 ```rust
 #[cfg(test)]
 mod pipeline_tests {
     use super::*;
-    /// 缝集合（测试 fake；生产由 C6 从 RemoteState 装配）
+    use std::cell::RefCell;
     struct CreateDeps<'a> {
         screen: &'a dyn Fn(u32) -> Option<Vec<String>>,
         send_key: &'a dyn Fn(u32, &str) -> Result<(), String>,
         send_text: &'a dyn Fn(u32, &str) -> Result<(), String>,
     }
-    fn deps_recording(screens: Vec<Vec<String>>, keys: &mut Vec<String>) -> CreateDeps<'static> {
-        // 屏读按调用序弹 screens；键注入记录进 keys；文本注入恒 Ok
-        let mut it = screens.into_iter();
-        let screen: &'static dyn Fn(u32) -> Option<Vec<String>> = Box::leak(Box::new(move |_pid| it.next()));
-        let key_sink: &'static std::sync::Mutex<Vec<String>> = Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
-        let recorder: &'static dyn Fn(u32, &str) -> Result<(), String> = Box::leak(Box::new(move |_p, k| {
-            key_sink.lock().unwrap().push(k.to_string()); Ok(())
-        }));
-        // 把外部 keys 桥接到 sink（测试结束取回）
-        *key_sink.lock().unwrap() = keys.clone();
-        let text: &'static dyn Fn(u32, &str) -> Result<(), String> = Box::leak(Box::new(|_, _| Ok(())));
-        CreateDeps { screen, send_key: recorder, send_text: text }
+    /// 屏读按调用序弹 screens；键序从 outcome.keys_sent 断言（无需外部桥接）
+    fn deps(screens: Vec<Vec<String>>, text_called: Option<&std::cell::Cell<bool>>) -> CreateDeps<'static> {
+        let screens: &'static RefCell<std::vec::IntoIter<Vec<String>>> =
+            Box::leak(Box::new(RefCell::new(screens.into_iter())));
+        let text_flag: &'static std::cell::Cell<bool> = Box::leak(Box::new(std::cell::Cell::new(false)));
+        if let Some(c) = text_called { /* 外部观察用同一 Cell 引用 */ }
+        CreateDeps {
+            screen: &|_pid| screens.borrow_mut().next(),
+            send_key: &|_, _| Ok(()),
+            send_text: &|_, _| { text_flag.set(true); Ok(()) },
+        }
     }
-
     fn params(tool: &str) -> Params { Params { tool: tool.into(), dir: "C:\\t".into(),
         first_message: "hi".into(), composed: "hi [mobile test-dev]".into() } }
 
     #[test]
     fn claude_trust_requires_down_then_enter() {
-        let screens = vec![
+        let d = deps(vec![
             vec!["Quick safety check: Is this a project you created or one you trust?".into(), "❯ No, exit".into()],
-            vec!["Quick safety check: ...".into(), "❯ No, exit".into()],
+            vec!["Quick safety check".into()],
             vec!["manual mode on · ? for shortcuts".into()],
-        ];
-        let mut keys = Vec::new();
-        let deps = deps_recording(screens, &mut keys);
-        let out = run_pipeline(&deps, &params("claude"));
+        ], None);
+        let out = run_pipeline(&d, &params("claude"));
         assert!(matches!(out.status, CreateStatus::WaitingMaterialize));
         assert_eq!(out.keys_sent, vec!["down", "enter"]); // 红线：直按 enter=退出
     }
     #[test]
     fn codex_update_then_trust_with_char2() {
-        let screens = vec![
+        let d = deps(vec![
             vec!["Update available".into(), "1. Update now (runs npm install -g @openai/codex)".into(), "2. Skip".into()],
-            vec!["Update available".into(), "1. Update now".into()],
+            vec!["Update available".into()],
             vec!["Folder access".into(), "Trust this folder?".into(), "1. Trust and continue".into()],
             vec!["Ask Codex to do anything".into()],
-        ];
-        let mut keys = Vec::new();
-        let deps = deps_recording(screens, &mut keys);
-        let out = run_pipeline(&deps, &params("codex"));
+        ], None);
+        let out = run_pipeline(&d, &params("codex"));
         assert!(matches!(out.status, CreateStatus::WaitingMaterialize));
         assert_eq!(out.keys_sent, vec!["2", "enter"]); // '2'=Skip（esc 无效、enter 禁用）
     }
     #[test]
     fn unrecognized_screen_fails_without_any_key() {
-        let screens = (0..16).map(|_| vec!["某种未识别界面".to_string()]).collect();
-        let mut keys = Vec::new();
-        let deps = deps_recording(screens, &mut keys);
-        let out = run_pipeline(&deps, &params("claude"));
+        let d = deps((0..16).map(|_| vec!["某种未识别界面".to_string()]).collect(), None);
+        let out = run_pipeline(&d, &params("claude"));
         assert!(matches!(out.status, CreateStatus::Failed { code, .. } if code == "unrecognized_screen"));
-        assert!(keys.is_empty()); // 不盲打
+        assert!(out.keys_sent.is_empty()); // 不盲打
     }
     #[test]
     fn onboard_screen_fails_with_specific_code() {
-        let screens = (0..2).map(|_| vec!["Unable to connect to Anthropic services".into()]).collect();
-        let mut keys = Vec::new();
-        let deps = deps_recording(screens, &mut keys);
-        let out = run_pipeline(&deps, &params("claude"));
+        let d = deps((0..2).map(|_| vec!["Unable to connect to Anthropic services".into()]).collect(), None);
+        let out = run_pipeline(&d, &params("claude"));
         assert!(matches!(out.status, CreateStatus::Failed { code, .. } if code == "network_wall"));
-        let mut k2 = Vec::new();
-        let d2 = deps_recording((0..2).map(|_| vec!["Sign in with ChatGPT".into()]).collect(), &mut k2);
+        let d2 = deps((0..2).map(|_| vec!["Sign in with ChatGPT".into()]).collect(), None);
         let o2 = run_pipeline(&d2, &params("codex"));
         assert!(matches!(o2.status, CreateStatus::Failed { code, .. } if code == "login_wall"));
     }
     #[test]
     fn first_message_blocked_until_idle_anchor() {
-        // 屏幕停在信任框（未到 idle）→ 阶段窗耗尽 failed，send_text 从未被调
-        let screens = (0..16).map(|_| vec!["Quick safety check".to_string()]).collect();
-        let text_called = std::sync::atomic::AtomicBool::new(false);
-        let screen_vec = screens; let mut it = screen_vec.into_iter();
-        let deps = CreateDeps {
-            screen: &|_p| it.next(),
+        let flag = std::cell::Cell::new(false);
+        // 屏幕停在信任框 → 阶段窗耗尽 failed；text 注入恒未发生
+        let screens: &'static RefCell<std::vec::IntoIter<Vec<String>>> =
+            Box::leak(Box::new(RefCell::new((0..16).map(|_| vec!["Quick safety check".to_string()]).collect::<Vec<_>>().into_iter())));
+        let f: &'static std::cell::Cell<bool> = Box::leak(Box::new(flag));
+        let d = CreateDeps {
+            screen: &|_p| screens.borrow_mut().next(),
             send_key: &|_, _| Ok(()),
-            send_text: &|_, _| { text_called.store(true, SeqCst); Ok(()) },
+            send_text: &|_, _| { f.set(true); Ok(()) },
         };
-        let out = run_pipeline(&deps, &params("kimi"));
+        let out = run_pipeline(&d, &params("kimi"));
         assert!(matches!(out.status, CreateStatus::Failed { .. }));
-        assert!(!text_called.load(SeqCst));
+        assert!(!flag.get());
     }
 }
 ```
@@ -510,57 +471,67 @@ fn disposal_keys(tool: &str, scenario: &str) -> Vec<&'static str> {
         _ => vec!["enter"],
     }
 }
-/// 状态机主循环（纯内核 + 缝）：2s 步距屏读 → anchor_ledger 逐场景 detect →
-/// CREATE_ONBOARD 命中即 Failed（专属码）→ CREATE_UPDATE 的 PRESENT（claude 横幅）
-/// 不处置不阻断 → 处置前重读确认场景在场 → CREATE_IDLE/PRESENT 命中才 send_text
-/// （composed 已含签名）→ WaitingMaterialize。连续 15 轮（30s）无任何锚 →
-/// Failed(unrecognized_screen)。物化轮询不在本层（归 C6 调用层）。
-pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome { /* 按上述语义实现 */ }
+/// 状态机主循环（纯内核 + 缝）。语义：
+/// ① 2s 步距屏读（deps.screen），None 计一次未识别；连续 15 轮（30s）无任何锚命中
+///    → Failed{code:"unrecognized_screen"}，不发任何键；
+/// ② CREATE_ONBOARD 命中即 Failed（claude→network_wall / codex→login_wall，其余工具
+///    按文案归属），不发键；
+/// ③ CREATE_UPDATE 的 PRESENT 形态（claude 横幅）不处置不阻断（探测定案：非阻塞）；
+///    TITLE+CONFIRM 形态（codex 框）按 disposal_keys 处置，处置前重读确认场景在场；
+/// ④ CREATE_IDLE/PRESENT 命中 → send_text(composed)（一次）→ WaitingMaterialize；
+/// ⑤ 发键间隔 1.5s、发后 2.5s 沉降（探测 P3a 实测处置→idle 1–4.5s）；
+/// ⑥ keys_sent/dialog_log 全程记录。物化轮询不在本层（归 C6 调用层）。
+pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome { /* 按上述六条语义实现 */ }
 ```
 
-  实现注释要点：① 屏读 `None` 计一次「未识别」；② 发键间隔 1.5s、发后 2.5s 沉降（探测 P3a 实测处置→idle 1–4.5s）；③ `keys_sent` 记录实际所发键供断言与审计。
 - [ ] **Step 4** 测试过 → 门禁 → Commit `feat(create): 创建状态机内核（锚点驱动处置+idle 门+首句注入）`
+
+**验收标准**：① 五个测试全 PASS（含键序红线两条与「不盲打」两条）；② 状态机为纯内核零 IO（除缝调用）；③ clippy 零警告。
 
 ### Task C6: API 三端点 + 任务注册表 + 审计
 
-**Files:** Modify `src-tauri/src/remote/server.rs`（RemoteState + 路由）、`api.rs`（端点）、`mod.rs`（STATE 装配）；Modify `src-tauri/src/inject/create.rs`（物化发现函数）
+**Files:** Modify `src-tauri/src/remote/server.rs`（RemoteState + 路由）、`api.rs`、`mod.rs`；`src-tauri/src/inject/create.rs`（物化发现）
 
-- [ ] **Step 1: 失败端点测试**（server.rs 既有内存库 + fake 缝模式）：
+- [ ] **Step 1: 失败端点测试**（server.rs 既有内存库 + fake 缝模式，六组断言）：
 
 ```rust
 #[test]
 fn session_create_contract() {
     // ① 非法路径 → 400 {error:"bad_request", reasonCode:"non_ascii_path"}
     // ② 未装/未启用工具 → 400 reasonCode:"tool_unavailable"
-    // ③ 合法 → 200 {taskId}；任务在飞第二个请求 → 409 {error:"conflict"}
-    // ④ status：未知 taskId → 404；在飞 → {phase, detail?}
-    // ⑤ 审计三类行：action=create（成功/failed:<code>）、action=dialog（summary=场景+键序）、
-    //    action=send（首句，设备=发起设备 cookie）
+    // ③ 合法 → 200 {taskId}；任务在飞（非终态）第二个请求 → 409 {error:"conflict"}
+    // ④ status：未知 taskId → 404；在飞 → {phase, detail?}；终态任务可查不占单飞额度
+    // ⑤ 审计三类行：action=create（result=ok / failed:<code>）、action=dialog
+    //    （summary=场景+键序）、action=send（首句，device_name=发起设备 cookie 名）
     // ⑥ create-projects：archive fake 给 7 天内/8 天前/非 ASCII 三条 + session fake 一条活跃
-    //    → 响应只含 7 天内与活跃项（去重、按 lastActiveAt 排序、字段
+    //    → 响应只含 7 天内与活跃项（去重、lastActiveAt 排序、字段
     //    {path, lastActiveAt, tools[], activeTools[]}）
 }
 ```
 
 - [ ] **Step 2** 确认失败 → **Step 3: 实现**：
-  - `RemoteState` 增 `pub create_tasks: Arc<Mutex<HashMap<u64, CreateTaskShared>>>`（自增 id；`CreateTaskShared { phase, detail, session_id, spawned_pid }`，短临界区快照读写）；STATE 装配空表。
-  - **工具门**：`tool_available(tool)` = enabledTools（`host_source()` 同源 settings）∩ 安装探测（PATH 目录扫描 `tool.exe`，OnceLock 缓存——探测 P0 已证 `where` 形态）。
-  - **POST /session-create**：校验（工具门 → `create_path::validate` → `create_dir_all` 失败 400 `mkdir_failed`）→ 单飞 409 → `spawn_blocking` 管线：`build_create_spawn_spec`（WT 探测复用 `resume::windows_terminal_path` 口径）→ `st.resume_spawner` → `find_tui_pid`（30s 窗）→ `run_pipeline`（缝装配：`screen` = `st.screen_probe("", pid)`、`send_key`/`send_text` = `st.injector.locate_and_send_key_spec / locate_and_inject_spec` + `families::family_for(tool)`；`composed` = `normalize::compose_injection(&device_name, first_message)`）→ **物化**：`discover_new_session(tool, dir, since)`（claude=`~/.claude/projects/<slug>/` mtime>since 最新 jsonl 取 sid；codex=今日 rollout 且首行 cwd 匹配；kimi=sessions 下 wd_* 新目录取 session id；opencode=**拷 db+wal+shm 三件套**查 session 表 by directory——探测 P4 红线）→ `st.confirm_probe(tool, sid, stamp)`（stamp=`confirm::stamp_of(&composed)` 剥签名后）命中 → Done；全程审计三类行（物化前 session_id 传 `""`，失败行 result=`failed:<code>`）。
-  - **GET /session-create/status**：注册表快照 → `{phase, detail?, sessionId?}`；未知 404。
-  - **GET /create-projects?days=**：`(st.session_source)()` ∪ `(st.archive_source)()`（RFC3339 解析过 N 天），双方过 `create_path::validate` 的 ASCII 检查，去重，`activeTools` 由快照同目录活跃会话聚合。
+  - `RemoteState` 增 `pub create_tasks: Arc<Mutex<HashMap<u64, CreateTaskShared>>>`（自增 id；`CreateTaskShared{phase, detail, session_id, spawned_pid}`）；STATE 装配空表。
+  - **工具门** `tool_available(tool)`：enabledTools（`host_source()` 同源）∩ 安装探测（PATH 目录扫描 `tool.exe`，OnceLock 缓存）。
+  - **POST /session-create**：校验（工具门→`create_path::validate`→`create_dir_all` 失败 400 `mkdir_failed`）→ 单飞 409（仅非终态占用）→ `spawn_blocking` 管线：`build_create_spawn_spec(resume::windows_terminal_path().ok(), dir, tool)` → `st.resume_spawner` → `find_tui_pid`（30s）→ `run_pipeline`（缝：screen=`st.screen_probe("", pid)`、key/text=`st.injector.locate_and_send_key_spec`/`locate_and_inject_spec` + `families::family_for(tool)`（None→`FALLBACK_SPEC` 口径，登记日志））→ 物化：`discover_new_session(tool, dir, since)`（claude=项目 slug 目录 mtime>since 最新 jsonl 取 sid；codex=今日 rollout 且首行 cwd 匹配；kimi=sessions 下 wd_* 新目录 session id；opencode=**拷 db+wal+shm 三件套**查 session 表 by directory——P4 红线）→ `st.confirm_probe(tool, sid, stamp)`（stamp=`confirm::stamp_of(&composed)`，内部自剥签名）命中 → Done；审计三类行（物化前 session_id 传 `""`；失败行 result=`failed:<code>`；Done 附 codex hooks 信任提示进 detail——读 T5 信号健康度同源状态，无现成查询口则读 settings KV 一行判断，不新建机制）。
+  - **GET /session-create/status**：快照 `{phase, detail?, sessionId?}`；未知 404。
+  - **GET /create-projects?days=**：session_source ∪ archive_source（RFC3339 过 N 天），过 ASCII 检查，去重排序，`activeTools` 由快照同目录活跃会话聚合。
 - [ ] **Step 4** 端点测试过 → fmt/clippy/test → Commit `feat(create): session-create 三端点+内存任务态+审计三类行`
+
+**验收标准**：① 六组断言全 PASS；② 单飞语义=仅非终态占用（done/failed 后可再建）；③ 审计三类行在内存库可查且设备名正确；④ 常规门禁零回归。
 
 ### Task C7: 配对不确定信号暴露
 
 **Files:** Modify `src-tauri/src/commands/session.rs`（`running_projects_from_processes` 升 `pub(crate)`，桌面门逻辑零改动）、`src-tauri/src/remote/api.rs`
 
-- [ ] **Step 1: 失败测试**：sessions 响应含 `pairingAmbiguous: true`（fake 快照两条同工具同项目 + 进程计数 ≥2）；session-send 成功回执追加 `pairingHint: true`（同态，**不拦截**，delivered 照常）；单会话时两字段均 false/缺席。
-- [ ] **Step 2: 实现**：api.rs 增 `fn pairing_ambiguous_set() -> HashSet<(String, String)>`（sysinfo 快照 → `running_projects_from_processes` 计数 ≥2 → (tool, project_name) 小写归一——与桌面门 require_evidence 同判据同口径）；sessions 序列化前打标；session_send 成功回执 JSON 追加 `pairingHint`。桌面门不动。
-- [ ] **Step 3** 测试过 → 门禁 → Commit `feat(create): 配对不确定信号暴露（sessions 标记+投递回执提示，不拦截）`
+- [ ] **Step 1: 失败测试**：/sessions 响应每会话含 `pairingAmbiguous`（fake 快照两条同工具同项目 + 进程计数 ≥2 → true；单会话 → false）；session-send 成功回执追加 `pairingHint`（同态 true，**不拦截**，delivered 语义不变）。
+- [ ] **Step 2: 实现**：api.rs 增 `fn pairing_ambiguous_set() -> HashSet<(String, String)>`（sysinfo 快照 → `running_projects_from_processes` 计数 ≥2 → (tool, project_name) 小写归一——与桌面门 require_evidence 同判据）；**不动 `Session` 结构体**——/sessions handler 序列化后按 set 打标（serde_json::Value 层附加字段，零 adapter 触碰）；session_send 成功回执 JSON 追加 `pairingHint`。
+- [ ] **Step 3** 测试过 → 门禁 → Commit `feat(create): 配对不确定信号暴露（端点层打标+投递回执提示，不拦截）`
+
+**验收标准**：① 两条断言 PASS；② `Session` 结构体与其全部构造点零改动（`git diff` 证明）；③ 桌面跳转门行为零变化（既有 commands/session.rs 测试全绿）。
 
 ### Task C8: 四家实机 E2E
 
-**Files:** Create `src-tauri/tests/create_e2e.rs`（全 `#[ignore]`，复用 m9r_e2e 的 Ev/清场纪律；不依赖 MAM dev——直调生产内核 + 真缝）
+**Files:** Create `src-tauri/tests/create_e2e.rs`（全 `#[ignore]`；复用 m9r_e2e 的 Ev/清场纪律；不依赖 MAM dev——直调生产内核 + 真缝）
 
 - [ ] **Step 1: 写 E2E**：
 
@@ -572,51 +543,62 @@ fn session_create_contract() {
 #[test] #[ignore = "实机显式跑"] fn e2e_create_matrix_four_tools() { /* … */ }
 ```
 
-- [ ] **Step 2** 实机跑 `cargo test --test create_e2e -- --ignored --nocapture --test-threads=1` 四家全过；实跑台账写文件头注释（m9r_e2e 同款）。
+- [ ] **Step 2** 实机跑 `cargo test --test create_e2e -- --ignored --nocapture --test-threads=1` 四家全过；实跑台账写文件头注释（m9r_e2e 同款：日期/耗时/断言/证据目录）。可选辅助：computer-use 对终端窗口目检/截图佐证存证据目录。
 - [ ] **Step 3** Commit `test(create): 四家新建全链实机 E2E + 台账`
+
+**验收标准**：① 四家全 PASS（信任框路径真实触发——全新目录保证）；② keys_sent 实机断言与键序红线一致；③ 会话文件首条用户消息逐字节等于 compose 产物；④ 清场零残留（taskkill 树 + 证据留存）。
 
 ### Task C9: HTTP 端到端总测试（产品路径全链）
 
 **Files:** Modify `src-tauri/tests/create_e2e.rs`
 
-- [ ] **Step 1: 写用例**（`#[ignore]`，模式 = m9r_e2e 的 http-full-chain：内存库起 axum 服务 + 真注入器/真 spawner）：
+- [ ] **Step 1: 写用例**（`#[ignore]`；模式 = m9r_e2e 的 http-full-chain：内存库起 axum + 真注入器/真 spawner）：
 
 ```rust
-/// 端到端总测试（移动端等效路径）：临时目录 → POST /m/api/v1/session-create
-/// （带设备 cookie）→ 轮询 /session-create/status 至 done{sessionId} →
-/// GET /sessions 含新会话卡 → POST /session-send 第二条消息 delivered →
-/// 审计页五类行可查（create + dialog + send×2 + flush）→ taskkill 清场。
+/// 端到端总测试（移动端等效路径）：临时目录 → POST /m/api/v1/session-create（带设备
+/// cookie）→ 轮询 /session-create/status 至 done{sessionId} → GET /sessions 含新会话卡
+/// （pairingAmbiguous=false）→ POST /session-send 第二条消息 delivered → 审计五类行可查
+/// （create + dialog + send×2 + flush）→ taskkill 清场。
 #[test] #[ignore = "实机显式跑"] fn e2e_create_http_full_chain() { /* … */ }
 ```
 
 - [ ] **Step 2** 实机跑通过 → Commit `test(create): HTTP 端到端总测试（创建→物化→上板→二次投递→审计全链）`
 
+**验收标准**：① 全链一次通过（不做分段 mock）；② sessionId 三处一致（status 回执 / sessions 卡 / 会话文件）；③ 审计五行齐且第二句 send 的设备名同 cookie；④ 清场零残留。
+
 ### Task C10: 移动端 API 客户端
 
 **Files:** Modify `src/mobile/api.ts`
-- [ ] 失败测试（vitest，mock fetch）→ 实现 `fetchCreateProjects(days)` / `createSession(body)` / `fetchCreateStatus(taskId)`（409/404/400 reasonCode 分支类型化）→ `pnpm test` 过 → Commit `feat(mobile): 新建会话 API 客户端三方法`
+- [ ] 失败测试（vitest，mock fetch）→ 实现 `fetchCreateProjects(days)` / `createSession(body)` / `fetchCreateStatus(taskId)`（409/404/400 reasonCode 分支类型化）→ `pnpm test` 过 → Commit。
+
+**验收标准**：① 三方法 + 类型齐；② 409/404/400-reasonCode 三分支各有测试且 PASS；③ `pnpm check` 零新告警。
 
 ### Task C11: 新建会话 UI（表单 + 进度 + 跳转）
 
-**Files:** Create `src/mobile/CreateSessionSheet.tsx`；Modify `src/mobile/Board.tsx`（头部操作区「+」入口，样式对齐既有 chips/BookmarkBar）、`src/mobile/mobile.css`（如需）
+**Files:** Create `src/mobile/CreateSessionSheet.tsx`；Modify `src/mobile/Board.tsx`（头部操作区「+」入口）、`mobile.css`（如需）
 - [ ] 失败测试（vitest）→ 实现三段：
-  1. **表单**：工具四选（host.enabledTools ∩ 安装探测结果置灰带原因）；目录候选下拉（create-projects，显示 lastActiveAt+tools）+ 手填切换（前端形态提示，服务端权威）；首句输入默认占位 `hi`；**黄字**：选中 tool ∈ 该项目 `activeTools` 时显示「该项目已有该工具的活跃会话，多实例下后续消息路由可能混淆」（spec §2 语义：≥1 活跃会话；与 pairingAmbiguous 投递提示分层）。
-  2. **进度态**：phase → 中文（校验/开终端/处置弹窗/注入首句/等待上板），2s 轮询 status；`done.sessionId` → 等看板快照见新卡后跳 SessionDetail（复用既有导航）；`failed` → 分阶段原因 + 重试；404 → 「任务已失效（主机可能重启），请重试」。
-  3. 409 → 「已有创建任务进行中」。
-- [ ] `pnpm check && pnpm test && pnpm build:mobile` → Commit `feat(mobile): 新建会话入口+表单+进度态+自动跳转`
+  1. **表单**：工具四选（host.enabledTools 置灰未启用项并标原因）；目录候选下拉（create-projects，显示 lastActiveAt+tools）+ 手填切换（前端形态提示，服务端权威）；首句默认占位 `hi`；**黄字**：选中 tool ∈ 该项目 `activeTools` →「该项目已有该工具的活跃会话，多实例下后续消息路由可能混淆」（≥1 语义，与 pairingAmbiguous 分层）。
+  2. **进度态**：phase → 中文（开终端/处置弹窗/注入首句/等待上板），2s 轮询；`done.sessionId` → 看板快照见新卡后跳 SessionDetail（复用既有导航）；`failed` → 分阶段原因 + 重试；404 →「任务已失效（主机可能重启），请重试」。
+  3. 409 →「已有创建任务进行中」。
+- [ ] `pnpm check && pnpm test && pnpm build:mobile` → Commit。
+
+**验收标准**：① 黄字按 activeTools 触发（vitest 断言 ≥1 语义）；② phase 全五态中文映射有测试；③ done→跳转路径复用既有导航（不新造路由）；④ 三门禁过。
 
 ### Task C12: 验收清单 + 六门禁终跑 + 交付停点
 
 **Files:** Create `docs/release-notes/create-acceptance-checklist.md`
-- [ ] 清单覆盖 spec §7 全部人工项：四家全链（含信任框/更新提示路径）、未识别界面报错、多实例黄字、路径边界（黑名单/盘不存在/深层创建/非 ASCII/UNC）、审计三类行逐条、用户真机手机走查（新建→进度→跳转→收发）。
-- [ ] **六门禁终跑**（cargo fmt/clippy/test 全套 + pnpm check/test/build:mobile）零回归；E2E 两例复跑记录。
-- [ ] Commit → **唯一停点**：向主线交付简报（任务×commit×门禁表 + E2E 实跑数字 + 自裁决清单），评审通过 → 用户真机验收 → 统一 push。
+- [ ] 清单覆盖 spec §7 全部人工项：四家全链（含信任框/更新提示路径）、未识别界面报错、多实例黄字、路径边界（黑名单两表/盘不存在/深层创建/非 ASCII/UNC）、审计三类行逐条、**用户真机手机走查**（新建→进度→跳转→收发）。
+- [ ] **六门禁终跑**：cargo fmt --check / clippy --all-targets -D warnings / cargo test（lib+main+dao+linker+preset_v2 基线口径）/ pnpm check / pnpm test / pnpm build:mobile；E2E 两例（C8/C9）复跑记录。
+- [ ] Commit → **唯一停点**：交付简报（任务×commit×门禁×验收标准达成表 + E2E 实跑数字 + 自裁决清单 + 计划冲突登记）→ 主线评审 → 用户真机验收 → 统一 push。
+
+**验收标准**：① 清单文件覆盖上述全项且每项带「预期/实测/证据」三栏；② 六门禁全绿（preset_v2 恒定 5 败基线除外，沿用既有口径）；③ 简报齐四件套；④ 未 push（`git status` 本地领先 N 提交）。
 
 ---
 
-## Self-Review（2026-10-02 二轮审计后记录）
+## Self-Review（2026-10-02 三轮审计记录）
 
-- **Spec 覆盖**：§2→C6/C10/C11（黄字 activeTools 分层已对齐 spec §5 修订）；§3→C6（phase 列表已同步去掉 validating——同步 400 不产生任务）；§4.1–4.8→C2/C3/C4/C5/C6（4.7 失败不清场=只回执不杀进程；4.8 codex hooks 提示挂 C6 Done detail）；§5→C7；§6→C0；§7→C8/C9/C12。
-- **接口对账**：SpawnSpec 枚举形态/Injector 域/四缝可见性/键域单字符/RFC3339/审计页原样渲染/enabledTools 源——全部与代码实况核对（见文件头「接口对账记录」）。
-- **占位扫描**：`run_pipeline`/`find_tui_pid` 循环体/E2E 体为「语义+断言齐备」的实现填写型骨架，非 TBD；其余步骤均含完整代码或逐字内容。
-- **类型一致性**：`CreateStatus`/`CreateOutcome{status, keys_sent, dialog_log}`/`Params{composed}`/`PathReject.code` 谓词在 C2/C5/C6/C11 间一致；原因码与 spec §2 逐一对应。
+- **二轮修正**：SpawnSpec 枚举事实 / is_sensitive_path home 域语义 / normalize 可见性 / RFC3339 / codex 信任框双形态同槽 / s_CREATE_UPDATE 笔误 / CreateOutcome 统一。
+- **三轮修正（本轮）**：① C2 原测试断言 `C:\Windows\System32` 命中黑名单——实况 `SENSITIVE_DIRS` 无系统目录且语义限主目录内 → 双表设计（凭据表全局扩展声明 + CREATE_SYSTEM_DIRS）+ 对应测试拆两条；② C3 测试补 `#[cfg(windows)]`（CI linux 兼容）+ resume 零回归锚 + `windows_terminal_path` 升可见挂 C3；③ C5 测试辅助改为 RefCell 泄漏式（原 `&dyn Fn` 捕获迭代器不可编译，外部 keys 桥接逻辑有 bug——统一从 `out.keys_sent` 断言）；④ C6 stamp 措辞（stamp_of 自剥签名）/ family_for None 回落 FALLBACK_SPEC 登记；⑤ C7 明确不动 Session 结构体（端点层 Value 打标）；⑥ 每任务补「验收标准」块；⑦ C8/C12 登记 computer-use 可选辅助。
+- **Spec 覆盖**：§2→C6/C10/C11；§3→C6（phase 无 validating 已同步 spec）；§4.1–4.8→C2/C3/C4/C5/C6；§5→C7；§6→C0；§7→C8/C9/C12。
+- **占位扫描**：`run_pipeline` 体内为六条语义齐备的实现填写型骨架；`find_tui_pid` 全码已给；E2E 两例为断言齐备骨架（复用 m9r_e2e 成熟模式）；其余步骤均含完整代码或逐字内容。
+- **类型一致性**：`CreateStatus`/`CreateOutcome{status, keys_sent, dialog_log}`/`Params{composed}`/`PathReject.code`（empty/not_absolute/non_ascii_path/not_local_volume/bad_windows_form/blacklisted）在 C2/C5/C6/C11 间一致；spec §2 原因码一一对应（`mkdir_failed`/`tool_unavailable` 为端点层码）。
