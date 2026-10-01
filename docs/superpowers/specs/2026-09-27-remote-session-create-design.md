@@ -29,7 +29,7 @@
 |---|---|---|
 | `/m/api/v1/create-projects?days=` | GET | 候选项目列表（只读，gate 下） |
 | `/m/api/v1/session-create` | POST | `{tool, projectPath, firstMessage?}` → `{taskId}`；校验失败 400（带原因码）；**全局单飞**——已有创建任务在执行时新请求一律 409 |
-| `/m/api/v1/session-create/status` | GET | `{taskId}` → `{phase, detail?, sessionId?}`；phase ∈ validating / opening_terminal / dialog_handling / injecting_first / waiting_materialize / done / failed |
+| `/m/api/v1/session-create/status` | GET | `{taskId}` → `{phase, detail?, sessionId?}`；phase ∈ opening_terminal / dialog_handling / injecting_first / waiting_materialize / done / failed（**校验是同步 400，不产生任务**——故无 validating 态） |
 
 - **任务态为内存态，不持久化**：MAM 重启丢任务，手机端查不到（404）即引导重试。创建是一次性动作，不值得新表与迁移成本。
 - **并发**：全局同时只允许 **1 个**创建任务在飞（进程发现与弹窗处置互斥语义）；重复提交 409。
@@ -48,12 +48,12 @@
 
 ## 5. 配对不确定门扩展（附带修复项）
 
-发现层暴露「同工具同项目 ≥2 进程」的配对不确定状态到会话数据；远程投递命中该态时回执**附加提示字段（不拦截）**；新建表单黄字复用同一信号。依据：桌面跳转域第四轮实机验收 3c 实证 codex 同项目双开两次静默锁错（issue #48 系），根因是发现层 pid 位置配对可交叉；远程注入路径共享同一 pid 产物且现无守卫（用户裁决 2026-09-27：门装上、提示不拦截）。
+发现层暴露「同工具同项目 ≥2 进程」的配对不确定状态到会话数据；远程投递命中该态时回执**附加提示字段（不拦截）**。**与表单黄字是两个分层信号，不混用**：表单黄字（§2）= 同工具同项目**已有活跃会话（≥1）**，由 create-projects 响应的 `activeTools` 字段携带；配对不确定标记 = **≥2 运行进程**（投递域提示）。依据：桌面跳转域第四轮实机验收 3c 实证 codex 同项目双开两次静默锁错（issue #48 系），根因是发现层 pid 位置配对可交叉；远程注入路径共享同一 pid 产物且现无守卫（用户裁决 2026-09-27：门装上、提示不拦截）。
 
 ## 6. 批次结构
 
 - **Phase P 探测批次（已完成 2026-09-27）**：计划 `docs/superpowers/plans/2026-09-27-remote-session-create-probe.md`。Windows 段 P0–P5 全 PASS、Mac 段 M1–M4 完成（三路屏读可达、Mac 定档锚点式）。定案 SSOT：`research/refs/phase2-消息注入/2026-09-27-新建会话四家探测定案.md`（锚文案逐字 / 键序红线 / 时延 / 物化判据 / 风险登记）。
-- **Phase C 编码批次（探测回传后另立计划）**：宪法 D 裁决落正文 → 锚点账本场景扩展 → 创建状态机 → API + 审计 → 移动端 UI → 配对门扩展 → 门禁 + 实机验收。
+- **Phase C 编码批次（单批一次做成，2026-10-02 用户裁决）**：计划 `docs/superpowers/plans/2026-10-02-remote-session-create-phase-c.md`（C0 宪法 → C1 账本 → C2 路径 → C3 起窗 → C4 进程锚定 → C5 状态机 → C6 API+审计 → C7 配对信号 → C8 四家实机 E2E → C9 HTTP 端到端总测试 → C10/C11 前端 → C12 验收清单+门禁终跑，末尾唯一评审停点）。
 
 ## 7. 验收
 
