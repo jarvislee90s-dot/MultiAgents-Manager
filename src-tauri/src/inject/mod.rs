@@ -88,7 +88,9 @@ pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
 /// 与 session-send / queue / retract 端点审计两处共用，单一出口防词表漂移。
 /// 字段化入参而非 QueueRow：端点侧审计（send/queue/retract）没有整行可传。
 /// action 词表（W5）：send|queue|flush|jump|retract|approve|reject|fail|key|open
-/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。批次乙 T8 追加
+/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。Phase C 追加
+/// `create|dialog`（远程新建会话：create=任务终态行、dialog=弹窗处置逐条留痕）。
+/// 批次乙 T8 追加
 /// `answer`（AskUserQuestion 问答应答，select/toggle/submit/cancel 四动作统一
 /// 记 answer，摘要区分见 question::AnswerAction::audit_label）。批次丙追加
 /// `mode`（T6 模式切换，摘要=「切换模式至 <target>」）。**T9 打断式插队不新增

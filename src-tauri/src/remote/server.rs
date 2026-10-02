@@ -12108,6 +12108,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target);
     }
 
+    /// ①c 黑名单拒绝的定位详情可达消费方（修复批 I1）：400 body 须带 reason
+    /// （命中段 + 所属表），不能只在 create_path 单测里成立。跨平台：.ssh 段
+    /// 双形态（凭据表，读侧同源表全局段匹配）
+    #[tokio::test]
+    async fn create_blacklisted_carries_reason_detail() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6i1", "手机C6i1");
+        let app = router(state.clone());
+        let bad_path = if cfg!(windows) {
+            r"D:\keys\.ssh\k".to_string()
+        } else {
+            "/tmp/x/.ssh/k".to_string()
+        };
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6i1"),
+                Some(&serde_json::json!({"tool": "claude", "projectPath": bad_path}).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["error"], "bad_request");
+        assert_eq!(v["reasonCode"], "blacklisted", "{v}");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains(".ssh"), "reason 应含命中段：{v}");
+        assert!(reason.contains("凭据表"), "reason 应含所属表名：{v}");
+    }
+
     /// ①b 首句入参封顶（C6 评审 I1）：firstMessage 超 MAX_SEND_CHARS → 400
     /// （与 /session-send 同标尺；防无界注入文本进 compose/终端）
     #[tokio::test]
@@ -12126,6 +12164,7 @@ mod tests {
         let td = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("tempdir_in");
         let oversized = "x".repeat(crate::remote::api::MAX_SEND_CHARS + 1);
         let r = app
+            .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-create",
@@ -12144,6 +12183,27 @@ mod tests {
         assert_eq!(r.status(), 400, "超长首句必须 400");
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(v["error"], "bad_request", "{v}");
+
+        // 超长路径 → 400 reasonCode=path_too_long（评审修复⑥，移动端分診可辨）
+        let oversized_path = format!(
+            "E:\\long\\{}",
+            "x".repeat(crate::remote::api::MAX_SEND_CHARS)
+        );
+        let r2 = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6f"),
+                Some(
+                    &serde_json::json!({ "tool": "claude", "projectPath": oversized_path })
+                        .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), 400, "超长路径必须 400");
+        let v2: serde_json::Value = serde_json::from_str(&body_string(r2).await).unwrap();
+        assert_eq!(v2["reasonCode"], "path_too_long", "{v2}");
     }
 
     /// ② 工具门三道：白名单外 / enabledTools 关 / 安装探测 false → 400

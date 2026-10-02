@@ -70,32 +70,61 @@ pub fn validate(path: &str, platform: &str) -> Result<(), PathReject> {
     } else if !p.starts_with('/') {
         return Err(rej("not_absolute", "macOS 路径须为 / 开头绝对路径"));
     }
-    if hits_blacklist(p, platform) {
-        return Err(rej("blacklisted", "路径命中危险目录黑名单"));
+    if let Some(hit) = hits_blacklist(p, platform) {
+        return Err(rej(
+            "blacklisted",
+            &format!(
+                "路径命中危险目录黑名单（命中段「{}」，{}）",
+                hit.segment, hit.table
+            ),
+        ));
     }
     Ok(())
 }
 
+/// 黑名单命中详情（评审修复③）：命中的段名 + 所属表（凭据表/系统目录表）——
+/// 用于 PathReject.message 回显，排障时直接定位命中来源。
+struct BlacklistHit {
+    segment: String,
+    table: &'static str,
+}
+
 /// 黑名单双表命中判定（纯函数）：① 凭据表（SENSITIVE_DIRS）全局段匹配；② create
 /// 专属系统目录表（按平台语义）。归一 = 小写折叠 + `/`→`\`，段匹配与平台无关。
-fn hits_blacklist(p: &str, platform: &str) -> bool {
+/// 命中 → Some((命中段, 所属表))；未命中 → None。
+fn hits_blacklist(p: &str, platform: &str) -> Option<BlacklistHit> {
     let seg_norm = p.to_ascii_lowercase().replace('/', "\\");
-    let seg_hit = crate::remote::files::SENSITIVE_DIRS
-        .iter()
-        .any(|d| seg_contains(&seg_norm, &d.to_ascii_lowercase().replace('/', "\\")));
-    if seg_hit {
-        return true;
+    for d in crate::remote::files::SENSITIVE_DIRS {
+        let d = d.to_ascii_lowercase().replace('/', "\\");
+        if seg_contains(&seg_norm, &d) {
+            return Some(BlacklistHit {
+                segment: d,
+                table: "凭据表",
+            });
+        }
     }
     if platform == "windows" {
-        CREATE_SYSTEM_DIRS_WIN
-            .iter()
-            .any(|d| seg_contains(&seg_norm, &d.to_ascii_lowercase()))
+        for d in CREATE_SYSTEM_DIRS_WIN {
+            let d = d.to_ascii_lowercase();
+            if seg_contains(&seg_norm, &d) {
+                return Some(BlacklistHit {
+                    segment: d,
+                    table: "系统目录表",
+                });
+            }
+        }
     } else {
         let posix = seg_norm.replace('\\', "/");
-        CREATE_SYSTEM_DIRS_MAC
-            .iter()
-            .any(|pfx| posix == *pfx || posix.starts_with(&format!("{pfx}/")))
+        for pfx in CREATE_SYSTEM_DIRS_MAC {
+            if posix == *pfx || posix.starts_with(&format!("{pfx}/")) {
+                return Some(BlacklistHit {
+                    segment: (*pfx).to_string(),
+                    table: "系统目录表",
+                });
+            }
+        }
     }
+    None
 }
 
 /// 段精确命中：`\d\` 出现或 `\d` 收尾（`.ssh2` 这类前缀相似目录不误伤）。
@@ -216,5 +245,29 @@ mod tests {
         );
         // trim 契约（评审 I1）：判定基于 trim 后形态——首尾空白不改变判定结果
         assert!(validate("  /Users/u/proj  ", "macos").is_ok());
+    }
+    #[test]
+    fn blacklisted_message_echoes_segment_and_table() {
+        // 评审修复③：message 回显命中段名与所属表——凭据表 / 系统目录表两源各锁一例
+        let cred = validate(r"D:\keys\.ssh\k", "windows").err().unwrap();
+        assert_eq!(cred.code, "blacklisted");
+        assert!(
+            cred.message.contains(".ssh") && cred.message.contains("凭据表"),
+            "凭据表命中回显：{}",
+            cred.message
+        );
+        let sys = validate(r"C:\Windows\System32\x", "windows").err().unwrap();
+        assert_eq!(sys.code, "blacklisted");
+        assert!(
+            sys.message.contains("windows") && sys.message.contains("系统目录表"),
+            "系统目录表命中回显：{}",
+            sys.message
+        );
+        let mac = validate("/usr/bin", "macos").err().unwrap();
+        assert!(
+            mac.message.contains("/usr") && mac.message.contains("系统目录表"),
+            "mac 前缀命中回显：{}",
+            mac.message
+        );
     }
 }

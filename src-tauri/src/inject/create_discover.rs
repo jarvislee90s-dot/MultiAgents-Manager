@@ -13,8 +13,11 @@
 //!   首行 JSON 的 `payload.cwd` 与目标目录归一匹配才取（rollout 在信任处置时即创建，
 //!   只看 mtime 会假阳——cwd 匹配是第二道；confirm stamp 是最终判据），sid = `payload.id`；
 //! - kimi：`session_index.jsonl` 条目 workDir 归一匹配 + wire.jsonl mtime>since
-//!   （kimi_parser 现成口径；计划原文的 `wd_*` 目录在代码实况中不存在——session_index
-//!   才是索引正源，C6 报告登记）；
+//!   （kimi_parser 现成口径。计划原文「`<root>/sessions/` 下 `wd_*` 目录」实况：
+//!   `wd_*` 会话目录**实存**但并非索引正源——正源是 `session_index.jsonl`（workDir
+//!   指向 wd_* 目录，sessionDir 越界信任边界复刻 resolve_session_dir）；本函数照
+//!   索引正源定位，超窗/无索引条目自然漏配 → materialize_timeout 兜底，彼时会话
+//!   实际可能已上板、仅 done 回执缺失——用户在看板可见，不丢数据）；
 //! - opencode（P4 红线）：**拷 `opencode.db`+`-wal`+`-shm` 三件套到临时目录再查副本**
 //!   （写入进 WAL，主库 mtime 不动——探测首轮 120s 全 miss 的教训）；session 表
 //!   `directory` 归一匹配 + `time_updated` > since。

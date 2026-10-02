@@ -296,6 +296,19 @@ describe("CreateSessionSheet 提交错误分診", () => {
     expect(screen.getByTestId("create-error").textContent).toBe("路径命中危险目录黑名单");
   });
 
+  it("400 + reason 定位详情 → 后端 reason 优先于本地码表（修复批 I1）", async () => {
+    routes.createStatus = 400;
+    routes.createBody = {
+      reasonCode: "blacklisted",
+      reason: "路径命中危险目录黑名单（命中段「.ssh」，凭据表）",
+    };
+    installFetch();
+    await submitWithManualPath();
+    expect(screen.getByTestId("create-error").textContent).toBe(
+      "路径命中危险目录黑名单（命中段「.ssh」，凭据表）"
+    );
+  });
+
   it("400 + reasonCode=non_ascii_path →「v1 路径限纯 ASCII」", async () => {
     routes.createStatus = 400;
     routes.createBody = { reasonCode: "non_ascii_path" };

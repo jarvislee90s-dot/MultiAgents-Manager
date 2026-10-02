@@ -163,9 +163,12 @@ export default function CreateSessionSheet({
         if (r.kind === "conflict") {
           setFormError("已有创建任务进行中");
         } else {
+          // 后端 reason（定位详情，如黑名单命中段+所属表）优先于本地码表——
+          // 修复批 I1：定位信息直达用户，缺省再按码表/兜底（评审建议形态）
           setFormError(
             r.reasonCode
-              ? (CREATE_REJECT_LABELS[r.reasonCode] ??
+              ? (r.reason ??
+                  CREATE_REJECT_LABELS[r.reasonCode] ??
                   `参数校验失败（${r.reasonCode}），请修改后重试`)
               : "参数校验失败，请修改后重试"
           );

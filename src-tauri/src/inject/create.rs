@@ -253,9 +253,6 @@ pub struct CreateDeps<'a> {
 pub const SCREEN_POLL_STEP_MS: u64 = 2000;
 /// 处置键间隔（探测 P3a；**消费契约：C6 send_key 真缝闭包在发键前 sleep 本值**）
 pub const KEY_GAP_MS: u64 = 1500;
-/// 处置后沉降（探测 P3a 处置→idle 1–4.5s；**消费契约：由 C6 屏读闭包步距近似
-/// 承载**——内核无独立沉降点）
-pub const POST_DISPOSAL_SETTLE_MS: u64 = 2500;
 /// 连续未识别轮上限（15 轮 × 2s = 30s 单阶段窗）
 pub const MAX_MISSED_ROUNDS: usize = 15;
 /// 单场景处置尝试上限（C5 评审 I1）：同屏反复在场 = 键可能未生效，无上限会导致

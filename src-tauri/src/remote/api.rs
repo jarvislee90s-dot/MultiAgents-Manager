@@ -7064,6 +7064,17 @@ fn bad_request_reason(reason: &str) -> Response {
     )
 }
 
+/// 400 bad_request + reasonCode + reason（校验链**带定位详情**的失败——黑名单命中
+/// 段与所属表等。修复批 I1：定位信息必须可达消费方（响应体 + 服务端日志双通道），
+/// 不能只存在于单元测试；`reason` 与 403 not_injectable 的 {reason, reasonCode}
+/// 配对形态同族）
+fn bad_request_reason_detail(reason: &str, detail: &str) -> Response {
+    json_no_store(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({ "error": "bad_request", "reasonCode": reason, "reason": detail }),
+    )
+}
+
 /// 工具门第二道：enabledTools 同源判定（host_source 载荷的 enabledTools 数组——
 /// P8d 数据源，与 /host 端点/移动端 chips 同一份）
 fn tool_enabled(st: &Arc<RemoteState>, tool: &str) -> bool {
@@ -7093,6 +7104,7 @@ fn has_active_session_for(st: &Arc<RemoteState>, tool: &str, dir: &str) -> bool 
 ///   → `create_path::validate`（trim 契约：判定与 create_dir_all 与起窗 cwd 全用
 ///   同一 trim 后串，评审 I1）→ `create_dir_all`（mkdir_failed）；
 /// - 首句超 [`MAX_SEND_CHARS`] → 400（与常规发送同一入参封顶标尺，C6 自裁登记）；
+///   路径超长同标尺 → 400 reasonCode="path_too_long"（评审修复⑥，移动端可辨）；
 /// - 全局单飞：存在任一非终态任务 → 409 {error:"conflict"}（终态任务不占额度）；
 /// - 黄字信号：响应附 hasActiveSession（同项目同工具已有活跃会话——**不拦截**）；
 /// - 200 {taskId, hasActiveSession}：任务占单飞后立即返回；管线在 detached
@@ -7118,7 +7130,8 @@ pub async fn session_create(
     // ③ 路径校验链（trim 契约：同一 trim 后串贯穿 validate / create_dir_all / 起窗 cwd）
     let dir = req.project_path.trim().to_string();
     if dir.chars().count() > MAX_SEND_CHARS {
-        return bad_request();
+        // 评审修复⑥：超长路径回 reasonCode（移动端分診可辨），与首句封顶同标尺
+        return bad_request_reason("path_too_long");
     }
     // 首句入参封顶（C6 评审 I1）：与 /session-send 同标尺（10k），防无界注入文本
     if let Some(m) = &req.first_message {
@@ -7127,7 +7140,9 @@ pub async fn session_create(
         }
     }
     if let Err(rej) = crate::inject::create_path::validate(&dir, std::env::consts::OS) {
-        return bad_request_reason(rej.code);
+        // 修复批 I1：定位详情双通道（响应体 reason + 服务端日志），排障主张成立
+        log::warn!("session-create 路径拒绝（{dir}）: {}", rej.message);
+        return bad_request_reason_detail(rej.code, &rej.message);
     }
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("session-create mkdir 失败（{dir}）: {e}");

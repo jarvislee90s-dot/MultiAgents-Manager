@@ -1178,11 +1178,12 @@ export interface CreateSessionAccepted {
 /** 新建会话的**业务失败**（同步校验链拒绝，非异常，C11 分診文案）：
  *  - bad_request（400）：reasonCode ∈ tool_unavailable / empty / not_absolute /
  *    non_ascii_path / not_local_volume / bad_windows_form / blacklisted /
- *    mkdir_failed；裸 bad_request（入参超长等）无该键；
+ *    mkdir_failed；reason 为后端定位详情（黑名单命中段+所属表等，修复批 I1——
+ *    展示层 reason 优先于本地码表）；裸 bad_request（入参超长等）无该二键；
  *  - conflict（409）：全局单飞占用（已有非终态创建任务——终态 done/failed
  *    不占额度）。 */
 export type CreateSessionError =
-  { kind: "bad_request"; reasonCode?: string } | { kind: "conflict" };
+  { kind: "bad_request"; reasonCode?: string; reason?: string } | { kind: "conflict" };
 
 /** 发起远程新建会话任务（异步管线：起窗 → 处置弹窗 → 注入首句 → 等物化；管线
  *  detached 推进，不依赖手机持续在线）。200 → 任务已占单飞并立即回执，进度轮询
@@ -1215,7 +1216,12 @@ export async function createSession(body: {
       /* 非 JSON 错误体（代理注入页等）：reasonCode 缺省 */
     }
     const raw = data?.reasonCode;
-    return { kind: "bad_request", reasonCode: typeof raw === "string" ? raw : undefined };
+    const rawReason = data?.reason;
+    return {
+      kind: "bad_request",
+      reasonCode: typeof raw === "string" ? raw : undefined,
+      reason: typeof rawReason === "string" ? rawReason : undefined,
+    };
   }
   if (r.status === 409) return { kind: "conflict" };
   if (!r.ok) {
