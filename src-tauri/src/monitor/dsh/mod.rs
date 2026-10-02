@@ -100,10 +100,14 @@ pub fn dsh_home_with(home_dir: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|| home_dir.join(".dsh"))
 }
 
-/// dsh 宿主 cmdline 双令牌门（单源，M0 §5）：cmdline 含 "dsh"（精确令牌，
-/// 或 /dsh、\dsh 路径结尾）与 "web"（精确令牌）即视为 dsh 宿主。dsh 宿主是
-/// 前台终端启动的 node 进程，exe 判据不可用——find_dsh_processes（进程发现）
-/// 与 host::tool_host_alive_in（宿主存活判定）共用本口径，防两处判定漂移
+/// dsh 宿主 cmdline 判定门（单源，M0 §5 + H1 桌面端扩展）：两类形态任一命中即宿主——
+/// ① web 宿主：cmdline 含 "dsh"（精确令牌，或 /dsh、\dsh 路径结尾）与 "web"（精确令牌）；
+/// ② 桌面宿主（v0.2.0+）：DeepSeek Harness.exe 内嵌 dsh-desktop-host 进程，无 node 令牌，
+///    特征 = 任一参数含 "dsh-desktop-host"（包路径子串，最强特征）或以
+///    `\.dsh\profiles\desktop` / `/.dsh/profiles/desktop` 结尾（用户数据 profile 路径）；
+///    --expose-internals 为 Electron 通用旗子，单独过弱，不作独立判据。
+/// find_dsh_processes（进程发现）与 host::tool_host_alive_in（宿主存活判定）
+/// 共用本口径，防两处判定漂移
 pub fn cmdline_is_dsh_host(cmd: &[std::ffi::OsString]) -> bool {
     let tokens: Vec<String> = cmd
         .iter()
@@ -113,7 +117,12 @@ pub fn cmdline_is_dsh_host(cmd: &[std::ffi::OsString]) -> bool {
         .iter()
         .any(|t| t == "dsh" || t.ends_with("/dsh") || t.ends_with("\\dsh"));
     let has_web = tokens.iter().any(|t| t == "web");
-    has_dsh && has_web
+    let is_desktop = tokens.iter().any(|t| {
+        t.contains("dsh-desktop-host")
+            || t.ends_with("\\.dsh\\profiles\\desktop")
+            || t.ends_with("/.dsh/profiles/desktop")
+    });
+    (has_dsh && has_web) || is_desktop
 }
 
 /// 进程发现：node 进程且 cmdline 含 "dsh" 与 "web" 令牌（M0 §5：进程名是 node，
@@ -440,6 +449,39 @@ mod cmdline_gate_tests {
             "node",
             "/opt/dsh-web/cli.js",
             "web"
+        ])));
+    }
+
+    #[test]
+    fn desktop_host_tokens_qualify() {
+        // 实测桌面端 cmdline（v0.2.0-rc.2，2026-09-27 取证，spec §3 证据 4）：
+        // "DeepSeek Harness.exe" --expose-internals
+        //   "…\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\index.js"
+        //   "…\app.asar\dsh"  "C:\Users\<u>\.dsh\profiles\desktop"  …
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            r"D:\Program Files\Deepseek-Harness\DeepSeek Harness.exe",
+            "--expose-internals",
+            r"D:\Program Files\Deepseek-Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\index.js",
+            r"D:\Program Files\Deepseek-Harness\resources\app.asar\dsh",
+            r"C:\Users\bunny\.dsh\profiles\desktop",
+            r"D:\Program Files\Deepseek-Harness\resources\runtime\primary-runtime",
+        ])));
+        // POSIX 形态路径同样命中（跨平台口径，macOS 桌面端对齐探测回填前先保口径）
+        assert!(cmdline_is_dsh_host(&cmd(&[
+            "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness",
+            "/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js",
+            "/Users/u/.dsh/profiles/desktop",
+        ])));
+    }
+
+    #[test]
+    fn desktop_tokens_do_not_match_unrelated_electron() {
+        // --expose-internals 是 Electron 通用旗子，不能单独作判据；
+        // 无 dsh-desktop-host / profiles\desktop 特征的进程不命中
+        assert!(!cmdline_is_dsh_host(&cmd(&[
+            r"C:\Apps\SomeElectron.exe",
+            "--expose-internals",
+            r"C:\Apps\some\lib\index.js",
         ])));
     }
 }
