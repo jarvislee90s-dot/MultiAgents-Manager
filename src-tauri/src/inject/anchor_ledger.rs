@@ -87,6 +87,14 @@ pub mod scenario {
     /// 「新建会话」场景专用：识别后走「未识别界面」专属失败码，不尝试自动处置
     /// （spec §4 第 4 步；探测定案 §6）
     pub const CREATE_ONBOARD: &str = "create_onboard";
+    /// **新建会话·MAM hooks 审查框**（codex 0.160.0 实机：`Hooks need review /
+    /// 8 hooks are new or changed`）——「新建会话」场景专用：MAM T5 注册的
+    /// hooks 在 codex 侧待审查时**阻塞 composer**（spec §4.8 原假设其出现在新建
+    /// 成功后不阻塞——实机定案修正，用户在场裁决 2026-10-02：核验式自动信任）。
+    /// 处置见 C5 run_pipeline：codex_hooks_all_ours 核验通过 → '2' 选中 + enter
+    /// 确认（Trust all——实机定案数字键只移动高亮）；混杂/核验失败 → esc
+    /// （屏面明示 `esc skip`，不信任只解锁）
+    pub const CREATE_HOOKS: &str = "create_hooks";
 }
 
 /// 槽位 wire 词（账本 `slot` 字段）：同一场景内的不同位置。
@@ -449,6 +457,24 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "sign in with chatgpt",
         observed_version: "0.156.1",
         evidence: "2026-09-27 新建会话探测定案 §6 登录三选屏（夹具 create-probe/20260927-100552/p3/p3iso-codex-r2-dialog1.txt；需真人不可自动处置 → 「未识别界面」兜底）",
+    },
+    // ----- MAM hooks 审查框（create_hooks；C8 实机捕获——探测批未及，spec §4.8
+    // 阻塞语义实机修正 + 核验式自动信任，用户在场裁决 2026-10-02）-----
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_HOOKS,
+        slot: slot::TITLE,
+        text: "hooks need review",
+        observed_version: "0.160.0",
+        evidence: "C8 实机捕获（~/.mam/create-evidence/20261002-125609-codex.log 屏读原文；codex 0.160.0，MAM T5 注册的 8 hooks 待审查时阻塞 composer）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_HOOKS,
+        slot: slot::CONFIRM,
+        text: "trust all and continue",
+        observed_version: "0.160.0",
+        evidence: "C8 实机捕获（同上；选项行 `› 1. Review hooks / 2. Trust all and continue / 3. Continue without trusting`，屏面明示 `esc skip`——处置键序见 run_pipeline 核验分支）",
     },
 ];
 
@@ -886,6 +912,19 @@ mod tests {
             scenario::CREATE_ONBOARD,
             slot::TITLE,
             "Sign in with ChatGPT"
+        ));
+        // MAM hooks 审查框（C8 实机捕获——核验式自动信任，用户裁决 2026-10-02）
+        assert!(hit(
+            "codex",
+            scenario::CREATE_HOOKS,
+            slot::TITLE,
+            "Hooks need review"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_HOOKS,
+            slot::CONFIRM,
+            "2. Trust all and continue"
         ));
         // 既有场景零影响（append-only 基线）
         assert!(!candidates("codex", scenario::PERMISSION_MENU, slot::TITLE).is_empty());

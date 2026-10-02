@@ -38,11 +38,47 @@ fn freshest_candidate(candidates: &[(u32, u64)], not_before: u64) -> Option<u32>
         .map(|(pid, _)| *pid)
 }
 
-/// 起窗后轮询发现 TUI pid（sysinfo cwd + 进程名 + start_time 新鲜度；超时 Err
-/// 中文回执）。刷新口径与 resume 效果回查同源（with_cmd + with_cwd Always）：
-/// sysinfo 0.32 两参 `refresh_processes` 的默认 `ProcessRefreshKind` 不刷 cwd/cmd，
-/// 必须 specifics 显式刷（见 resume.rs `refresh_cmd_snapshot` 的实测登记；cwd 部分
-/// 与 adapter 主扫描 / m9r_e2e find_wt_target 同款）。
+/// 候选树取根（2026-10-02 冒烟实机定案）：TUI 会派生同名/同名族子进程——
+/// **MCP server 子进程**（node.exe，cwd 继承自 TUI = 目标目录）在「名字 + cwd +
+/// 新鲜度」判据下与 TUI 本体不可区分（冒烟实证：锚到 claude 的 context7-mcp
+/// node → 该进程控制台空 → 屏读 30s 全空行）。取根 = **父进程不是候选**的候选
+/// （TUI 本体的父是 cmd 壳；MCP 子的父是 TUI ∈ 候选 → 被排除）。全被排除（理
+/// 论不可达，父子闭环）时回退全候选。返回 (pid, start_time) 根集（调用方接
+/// [`freshest_candidate`]）。
+fn candidate_roots(candidates: &[(u32, u64, Option<u32>)]) -> Vec<(u32, u64)> {
+    let pids: std::collections::HashSet<u32> = candidates.iter().map(|(pid, _, _)| *pid).collect();
+    let roots: Vec<(u32, u64)> = candidates
+        .iter()
+        .filter(|(_, _, parent)| !parent.is_some_and(|p| pids.contains(&p)))
+        .map(|(pid, st, _)| (*pid, *st))
+        .collect();
+    if roots.is_empty() {
+        candidates.iter().map(|(pid, st, _)| (*pid, *st)).collect()
+    } else {
+        roots
+    }
+}
+
+/// TUI 锚定的**终判 = 控制台有画面**（2026-10-02 冒烟实机三轮定案）：「名字 +
+/// cwd + 新鲜度 + 取根」仍不可区分 TUI 本体与派生进程——冒烟实证两类干扰物：
+/// ① npm bin 的 claude.exe 首进程是**短命蹦床**（拉起真 TUI 后 2-3s 内自退，冒烟
+/// 两次实证：锚定 pid 在首个屏读前已死 → 屏读全 None → 15 轮未识别）；② TUI 的
+/// **MCP server 子进程**（`cmd /c npx` 链的 node.exe，cwd 继承自 TUI = 目标目录，
+/// 父链根也是 cmd 壳）以 `CREATE_NO_WINDOW` 拥有**私有空控制台**——附加成功但
+/// CONOUT$ 全空行。终判：候选的屏幕读**非空行**才算 TUI（TUI 首帧即有画面；
+/// 私有空控制台/已死进程恒空）→ 其余继续轮询。
+fn screen_has_content(pid: u32) -> bool {
+    match crate::inject::windows_console::read_screen_window(pid) {
+        Ok(lines) => lines.iter().any(|l| !l.trim().is_empty()),
+        Err(_) => false, // 附加失败（已死/无控制台）= 非锚定对象
+    }
+}
+
+/// 起窗后轮询发现 TUI pid（sysinfo cwd + 进程名 + start_time 新鲜度 + 候选取根 +
+/// **屏读内容终判**；超时 Err 中文回执）。刷新口径与 resume 效果回查同源
+/// （with_cmd + with_cwd Always）：sysinfo 0.32 两参 `refresh_processes` 的默认
+/// `ProcessRefreshKind` 不刷 cwd/cmd，必须 specifics 显式刷（见 resume.rs
+/// `refresh_cmd_snapshot` 的实测登记；cwd 部分与 adapter 主扫描同款）。
 ///
 /// 陈旧实例防误锚（C4 评审 Important 1）：入口记 `not_before`（UNIX epoch 秒），
 /// 仅认 `start_time + 1 >= not_before` 的候选（见 [`freshest_candidate`]）——同目录
@@ -92,8 +128,9 @@ pub fn find_tui_pid(
                 );
             }
         }
-        // 收集全部判据命中者再取新鲜者——首个命中即返回会撞 HashMap 迭代序不定
-        let mut candidates: Vec<(u32, u64)> = Vec::new();
+        // 收集全部判据命中者（含父 pid）→ 候选树取根（MCP 直子排除）→ 新鲜度过滤
+        // → 屏读内容终判（screen_has_content doc：蹦床/私有空控制台恒无画面）
+        let mut candidates: Vec<(u32, u64, Option<u32>)> = Vec::new();
         for (pid, process) in system.processes() {
             if let Some(cwd) = process.cwd() {
                 if is_tui_candidate(
@@ -102,11 +139,23 @@ pub fn find_tui_pid(
                     &process.name().to_string_lossy(),
                     &want,
                 ) {
-                    candidates.push((pid.as_u32(), process.start_time()));
+                    candidates.push((
+                        pid.as_u32(),
+                        process.start_time(),
+                        process.parent().map(|p| p.as_u32()),
+                    ));
                 }
             }
         }
-        if let Some(pid) = freshest_candidate(&candidates, not_before) {
+        let roots = candidate_roots(&candidates);
+        let mut live: Vec<(u32, u64)> = Vec::new();
+        for (pid, st) in &roots {
+            if *st + 1 >= not_before && screen_has_content(*pid) {
+                live.push((*pid, *st));
+            }
+        }
+        // 多个非空屏（同目录多实例 = 配对不确定域）取最新——freshest 复用并列裁决
+        if let Some(pid) = freshest_candidate(&live, not_before) {
             return Ok(pid);
         }
         if t0.elapsed() >= timeout {
@@ -166,6 +215,13 @@ pub struct Params {
     pub first_message: String,
     /// 实际注入输入框的首句（已带移动端标签）
     pub composed: String,
+    /// codex hooks 审查框的**核验式信任**决策（C8 用户在场裁决 2026-10-02）：
+    /// true = 调用方已核验本机 codex hooks.json 全条目命中 MAM 指纹
+    /// （`monitor::hooks::codex_hooks_all_ours`）→ 遇 create_hooks 框发 '2'
+    /// （Trust all——信任的确是 MAM 自己注册的 hooks，远程创建的状态上报闭环）；
+    /// false = 混杂/核验失败/非 codex 工具 → 发 esc（屏面明示 esc skip，不信任
+    /// 只解锁 composer）。调用方预计算，内核保持纯函数。
+    pub hooks_trust_ok: bool,
 }
 
 /// 管线结果：终态 + 全程实发键流水 + 弹窗处置留痕（`(场景, 实发键序)`；onboard
@@ -205,6 +261,9 @@ pub const MAX_MISSED_ROUNDS: usize = 15;
 /// 单场景处置尝试上限（C5 评审 I1）：同屏反复在场 = 键可能未生效，无上限会导致
 /// 无界发键且 C6 单飞额度被永久占用；超限按 `dialog_stuck` 失败终止
 pub const MAX_DISPOSAL_ATTEMPTS_PER_SCENARIO: usize = 3;
+/// idle 门双读确认轮数（C8 冒烟实机定案，run_pipeline ③ 段 doc 有根因全文）：
+/// claude 启动横幅也带 idle 锚文案，单读命中会在信任框出现前误注入
+pub const IDLE_CONFIRM_ROUNDS: usize = 2;
 /// 物化等待预算（C6）：轮数上限 × [`SCREEN_POLL_STEP_MS`] = 15 × 2s = 30s。预算以
 /// 「轮数 × 步距」表达而非墙钟 deadline——真缝下与 30s 等价，而步距睡眠由真缝闭包
 /// 承载（见 [`SCREEN_POLL_STEP_MS]` 消费契约），测试缝零真实时钟依赖（C6 报告登记）。
@@ -294,13 +353,17 @@ fn onboard_failure(tool: &str) -> (&'static str, String) {
 /// 四家 CONFIRM 行齐备（claude 双选项 / codex 双形态 / kimi `❯ trust this folder`
 /// 带 ❯ 标记锚定选项行——标题行是其超集子串，不带标记会使 TITLE 单独满足合取）。
 fn disposal_scenario(lowered: &[String], tool: &str) -> Option<&'static str> {
-    [scenario::CREATE_UPDATE, scenario::CREATE_TRUST]
-        .iter()
-        .copied()
-        .find(|&sc| {
-            detect(lowered, tool, sc, slot::TITLE).is_some()
-                && detect(lowered, tool, sc, slot::CONFIRM).is_some()
-        })
+    [
+        scenario::CREATE_UPDATE,
+        scenario::CREATE_TRUST,
+        scenario::CREATE_HOOKS,
+    ]
+    .iter()
+    .copied()
+    .find(|&sc| {
+        detect(lowered, tool, sc, slot::TITLE).is_some()
+            && detect(lowered, tool, sc, slot::CONFIRM).is_some()
+    })
 }
 
 /// 「未识别界面」兜底失败（红线：不盲打——keys_sent 只含此前处置已发的键，
@@ -339,12 +402,14 @@ pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome {
     let mut keys_sent: Vec<String> = Vec::new();
     let mut dialog_log: Vec<(String, Vec<String>)> = Vec::new();
     let mut missed = 0usize;
+    let mut idle_streak = 0usize;
     let mut disposal_attempts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     loop {
         // pid 实参为占位 0：缝闭包负责绑定真 pid（C4 find_tui_pid 产物），内核 pid 无关
         let Some(screen) = (deps.screen)(0) else {
             missed += 1;
+            idle_streak = 0; // 读屏失败打断「连续」链（idle 双读确认，见 ③）
             if missed >= MAX_MISSED_ROUNDS {
                 return fail_unrecognized(keys_sent, dialog_log);
             }
@@ -386,10 +451,23 @@ pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome {
                     dialog_log,
                 };
             }
-            let keys: Vec<String> = disposal_keys(&p.tool, sc)
-                .into_iter()
-                .map(String::from)
-                .collect();
+            // hooks 审查框核验式信任（Params.hooks_trust_ok doc 有裁决全文）：
+            // 核验通过 → '2'（选中 Trust all）+ enter（确认——C8 实机定案：该框
+            // 数字键只移动高亮不确认，框上明示「enter confirm」）→ MAM 功能闭环；
+            // 混杂/失败 → esc（屏面明示 esc skip——不信任只解锁，保守不代用户做
+            // 混杂态信任决定）
+            let keys: Vec<String> = if sc == scenario::CREATE_HOOKS {
+                if p.hooks_trust_ok {
+                    vec!["2".to_string(), "enter".to_string()]
+                } else {
+                    vec!["esc".to_string()]
+                }
+            } else {
+                disposal_keys(&p.tool, sc)
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            };
             let mut round_sent: Vec<String> = Vec::new();
             for k in &keys {
                 if let Err(e) = (deps.send_key)(0, k) {
@@ -411,10 +489,19 @@ pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome {
             }
             dialog_log.push((sc.to_string(), keys));
             missed = 0;
+            idle_streak = 0; // 处置轮打断 idle 连击（弹窗在场的屏不算 idle）
             continue; // 本屏消费完毕，继续下一轮读屏
         }
-        // ③ idle 门：见到 idle 锚才注入首句（只发一次）→ 物化等待归 C6
+        // ③ idle 门（**双读确认**，C8 冒烟实机定案）：claude 启动横幅也带 idle 锚
+        // 文案（"? for shortcuts" 提示行）——横幅是瞬态（信任框紧随其后），单读
+        // 命中即注入会把首句打进横幅、撞上随后出现的信任框（首句被吞 + 红线键序
+        // 无法实机复核）。idle 锚**连续两轮**在场才注入：瞬态横幅撑不过两轮，稳态
+        // composer 恒在场；处置/未识别/读屏失败轮清零连击。
         if detect(&lowered, &p.tool, scenario::CREATE_IDLE, slot::PRESENT).is_some() {
+            idle_streak += 1;
+            if idle_streak < IDLE_CONFIRM_ROUNDS {
+                continue; // 首读只记连击——下一轮仍 idle 才注入
+            }
             if let Err(e) = (deps.send_text)(0, &p.composed) {
                 return CreateOutcome {
                     status: CreateStatus::Failed {
@@ -434,6 +521,7 @@ pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome {
         }
         // ④ 未识别轮（含屏读 TITLE-only 半屏形态）
         missed += 1;
+        idle_streak = 0; // 未识别轮打断 idle 连击
         if missed >= MAX_MISSED_ROUNDS {
             return fail_unrecognized(keys_sent, dialog_log);
         }
@@ -515,6 +603,29 @@ mod tests {
     fn freshest_candidate_empty_yields_none() {
         assert_eq!(freshest_candidate(&[], 1_000), None);
     }
+
+    /// 候选树取根（冒烟实机定案）：TUI 本体（父 = cmd 壳，非候选）胜出；
+    /// MCP server 子进程（父 = TUI ∈ 候选）被排除——「名字 + cwd」判据对
+    /// 两者不可区分，父链是唯一判别面。
+    #[test]
+    fn candidate_roots_excludes_tui_children() {
+        // claude.exe(100, 父 cmd=9) + node.exe(200, 父 claude=100)：取根 → 100
+        assert_eq!(
+            candidate_roots(&[(100, 1_005, Some(9)), (200, 1_006, Some(100))]),
+            vec![(100, 1_005)]
+        );
+        // codex node 树：node TUI(300, 父 cmd=9) + node 子(310, 父 300) → 根 300
+        assert_eq!(
+            candidate_roots(&[(300, 1_005, Some(9)), (310, 1_006, Some(300))]),
+            vec![(300, 1_005)]
+        );
+        // 父 pid 未知（None）= 根；父子闭环全排除 → 回退全候选（防御臂）
+        assert_eq!(candidate_roots(&[(400, 1_005, None)]), vec![(400, 1_005)]);
+        assert_eq!(
+            candidate_roots(&[(500, 1_005, Some(500))]),
+            vec![(500, 1_005)]
+        );
+    }
 }
 
 /// 管线主循环语义测试（断言逐字权威——键序红线 ×2、「不盲打」×2、onboard 专属码
@@ -559,6 +670,7 @@ mod pipeline_tests {
             dir: "C:\\t".into(),
             first_message: "hi".into(),
             composed: "hi [mobile test-dev]".into(),
+            hooks_trust_ok: false,
         }
     }
 
@@ -572,6 +684,8 @@ mod pipeline_tests {
                 "❯ No, exit".into(),
             ],
             vec!["Quick safety check".into()],
+            vec!["manual mode on · ? for shortcuts".into()],
+            // idle 双读确认（C8 冒烟定案）：第二读仍 idle 才注入
             vec!["manual mode on · ? for shortcuts".into()],
         ]);
         let out = run_pipeline(&d, &params("claude"));
@@ -601,6 +715,8 @@ mod pipeline_tests {
                 "Trust this folder?".into(),
                 "1. Trust and continue".into(),
             ],
+            vec!["Ask Codex to do anything".into()],
+            // idle 双读确认（C8 冒烟定案）：第二读仍 idle 才注入
             vec!["Ask Codex to do anything".into()],
         ]);
         let out = run_pipeline(&d, &params("codex"));
@@ -696,13 +812,84 @@ mod pipeline_tests {
     /// ——直接注入成功、零键（探测定案 §5：残留横幅不构成 idle 排除条件）。
     #[test]
     fn codex_residual_update_banner_does_not_block_idle() {
-        let d = deps(vec![vec![
-            "Update available".into(),
-            "Ask Codex to do anything".into(),
-        ]]);
+        // 两轮同屏（idle 双读确认——C8 冒烟定案）：残留横幅 TITLE-only 不处置、
+        // 不打断 idle 连击，第二读注入
+        let screen = vec!["Update available".into(), "Ask Codex to do anything".into()];
+        let d = deps(vec![screen.clone(), screen]);
         let out = run_pipeline(&d, &params("codex"));
         assert!(matches!(out.status, CreateStatus::WaitingMaterialize));
         assert!(out.keys_sent.is_empty());
+    }
+
+    /// claude 启动横幅 → 信任框序列（C8 冒烟实机定案）：横幅屏带 idle 锚
+    /// （"? for shortcuts" 提示行）但瞬态——双读确认下横幅单读不注入，
+    /// 信任框随至照常处置（红线键序 down+enter），idle 稳态两读后注入。
+    #[test]
+    fn claude_banner_idle_then_trust_disposes() {
+        let d = deps(vec![
+            // 横幅：idle 锚在场（单读不注入）
+            vec![
+                "▐▛███▛█   Claude Code v2.1.278".into(),
+                "? for shortcuts".into(),
+            ],
+            // 信任框（危险默认 ❯ No, exit）
+            vec![
+                "Quick safety check: Is this a project you created or one you trust?".into(),
+                "❯ No, exit".into(),
+            ],
+            // idle 稳态（两读确认）
+            vec!["manual mode on · ? for shortcuts".into()],
+            vec!["manual mode on · ? for shortcuts".into()],
+        ]);
+        let out = run_pipeline(&d, &params("claude"));
+        assert!(matches!(out.status, CreateStatus::WaitingMaterialize));
+        assert_eq!(out.keys_sent, vec!["down", "enter"]); // 红线键序不变
+    }
+
+    /// codex MAM hooks 审查框（C8 实机定案 + 用户在场裁决 2026-10-02）：
+    /// **核验式自动信任**——hooks_trust_ok=true（调用方核验 hooks.json 全条目
+    /// 我方）→ '2'（Trust all and continue，MAM 状态上报闭环）；false（混杂/
+    /// 核验失败/非 codex）→ esc（屏面明示 esc skip——不信任只解锁，保守）。
+    #[test]
+    fn codex_hooks_dialog_verified_trusts_and_unverified_skips() {
+        let hooks_screen = vec![
+            "Hooks need review".into(),
+            "8 hooks are new or changed.".into(),
+            "› 1. Review hooks".into(),
+            "2. Trust all and continue".into(),
+            "3. Continue without trusting (hooks won't run)".into(),
+            "enter confirm · esc skip".into(),
+        ];
+        // 核验通过 → '2' 选中 + enter 确认（C8 实机定案：数字键只移动高亮）→
+        // 框清 → idle 双读 → 注入
+        let mut p = params("codex");
+        p.hooks_trust_ok = true;
+        let d = deps(vec![
+            hooks_screen.clone(),
+            vec!["Ask Codex to do anything".into()],
+            vec!["Ask Codex to do anything".into()],
+        ]);
+        let out = run_pipeline(&d, &p);
+        assert!(matches!(out.status, CreateStatus::WaitingMaterialize));
+        assert_eq!(out.keys_sent, vec!["2", "enter"]);
+        assert_eq!(
+            out.dialog_log,
+            vec![(
+                scenario::CREATE_HOOKS.to_string(),
+                vec!["2".to_string(), "enter".to_string()]
+            )]
+        );
+        // 核验失败（混杂/缺失）→ esc（不信任只解锁）
+        let mut p2 = params("codex");
+        p2.hooks_trust_ok = false;
+        let d2 = deps(vec![
+            hooks_screen.clone(),
+            vec!["Ask Codex to do anything".into()],
+            vec!["Ask Codex to do anything".into()],
+        ]);
+        let o2 = run_pipeline(&d2, &p2);
+        assert!(matches!(o2.status, CreateStatus::WaitingMaterialize));
+        assert_eq!(o2.keys_sent, vec!["esc"]);
     }
 
     /// 处置尝试上限（C5 评审 I1）：同一弹窗反复在场（键不生效的实机形态）最多处置

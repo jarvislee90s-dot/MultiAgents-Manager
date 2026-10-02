@@ -65,6 +65,13 @@ pub enum SpawnSpec {
         /// 变更）。macOS（MacosApplescript 变体）走 AppleScript 脚本内联 env，
         /// 归 Mac 后补批。
         env: Vec<(String, String)>,
+        /// 新建会话场景专用环境**剥离**前缀（C8 实机定案）：命中前缀的继承变量逐一
+        /// `env_remove`——create 会话是**独立一等会话**，不得继承启动者（MAM 宿主/
+        /// E2E 测试进程）的 Claude 会话管道变量：冒烟实证 `CLAUDE_CODE_CHILD_SESSION`
+        /// 被继承后，起窗的 claude 自认子会话（跳过信任框 + **关闭 transcript 落盘**
+        /// → 会话文件永不物化 +「会话卡上板」全链失真）。resume 场景恒空（零行为
+        /// 变更）。ANTHROPIC_* 不在剥离面（可能是用户真实配置）。
+        env_rm_prefixes: Vec<String>,
         /// CREATE_NEW_CONSOLE 标记：conhost 回退必须自带（0x10）才开新控制台窗；
         /// wt 自开新标签无此需求
         new_console: bool,
@@ -131,6 +138,7 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
             ],
             cwd: cwd.to_string(),
             env: Vec::new(),
+            env_rm_prefixes: Vec::new(),
             new_console: false,
         },
         None => SpawnSpec::Windows {
@@ -138,6 +146,7 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
             args: vec!["cmd".to_string(), "/k".to_string(), resume.to_string()],
             cwd: cwd.to_string(),
             env: Vec::new(),
+            env_rm_prefixes: Vec::new(),
             new_console: true,
         },
     }
@@ -148,10 +157,26 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
 /// 纯载荷构造与 [`build_spawn_command_windows`] 同口径（wt=None → conhost 载荷），
 /// 端点假缝不真 spawn、非 Windows 构建可编译可测；macOS 真 spawn 变体归 Mac 后补批
 /// （脚本内联 `env K=V ` 前缀，Mac 探测 M2 实证）。
+/// create 起窗的会话上下文剥离前缀（C8 冒烟实机定案；`env_rm_prefixes` 字段 doc
+/// 有根因全文）：命中前缀的继承变量在 spawn 时逐一 `env_remove`。只剥 **Claude
+/// 会话管道**变量（子会话标记/入口/SSE/effort 等——都是「本次会话」的上下文，
+/// 对新建会话是污染源）；**ANTHROPIC_* 不剥**（可能是用户真实配置）。
+pub const CREATE_ENV_RM_PREFIXES: &[&str] =
+    &["CLAUDECODE", "CLAUDE_CODE_", "CLAUDE_PID", "CLAUDE_EFFORT"];
+
 pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> SpawnSpec {
     let mut spec = build_spawn_command_windows(wt, cwd, tool);
-    if let SpawnSpec::Windows { env, .. } = &mut spec {
+    if let SpawnSpec::Windows {
+        env,
+        env_rm_prefixes,
+        ..
+    } = &mut spec
+    {
         *env = vec![("DISABLE_AUTOUPDATER".to_string(), "1".to_string())];
+        *env_rm_prefixes = CREATE_ENV_RM_PREFIXES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     }
     spec
 }
@@ -498,6 +523,7 @@ pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
             args,
             cwd,
             env,
+            env_rm_prefixes,
             new_console,
         } => {
             use std::os::windows::process::CommandExt;
@@ -506,6 +532,17 @@ pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
             // 新建会话环境红线（C3，spec §4.2）：DISABLE_AUTOUPDATER=1 等显式注入
             // 子进程环境；resume 规格 env 恒空（空迭代器 no-op，零行为变更）
             cmd.envs(env.iter().map(|(k, v)| (k, v)));
+            // 会话上下文剥离（C8 实机定案，env_rm_prefixes 字段 doc）：命中前缀的
+            // 继承变量逐一 env_remove——create 规格借此切断启动者的 Claude 会话
+            // 管道（CLAUDE_CODE_CHILD_SESSION 等）；resume 恒空 no-op
+            if !env_rm_prefixes.is_empty() {
+                for (k, _) in std::env::vars_os() {
+                    let key = k.to_string_lossy().to_string();
+                    if env_rm_prefixes.iter().any(|p| key.starts_with(p.as_str())) {
+                        cmd.env_remove(&key);
+                    }
+                }
+            }
             // conhost 回退的 cwd 继承点（wt 同设无害：-d 已双保险）
             if !cwd.is_empty() {
                 cmd.current_dir(cwd);
@@ -682,20 +719,28 @@ mod tests {
     }
 
     /// C3：新建会话起窗规格——裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境
-    /// 红线）；resume 既有规格 env 恒空（零回归锚，既有 resume 行为不变）
+    /// 红线）；C8 实机补充：env_rm_prefixes 携带会话上下文剥离面；resume 既有规格
+    /// env/env_rm_prefixes 恒空（零回归锚，既有 resume 行为不变）
     #[cfg(windows)]
     #[test]
     fn create_spawn_spec_carries_env_and_bare_command() {
         let s = build_create_spawn_spec(None, r"C:\proj", "claude");
         match s {
             SpawnSpec::Windows {
-                program, args, env, ..
+                program,
+                args,
+                env,
+                env_rm_prefixes,
+                ..
             } => {
                 assert_eq!(program, "conhost.exe");
                 assert_eq!(args, vec!["cmd", "/k", "claude"]);
                 assert!(env
                     .iter()
                     .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"));
+                // 会话上下文剥离面（C8 冒烟定案）：CLAUDECODE 与 CLAUDE_CODE_ 必在
+                assert!(env_rm_prefixes.contains(&"CLAUDECODE".to_string()));
+                assert!(env_rm_prefixes.contains(&"CLAUDE_CODE_".to_string()));
             }
             _ => panic!("Windows 平台必须是 Windows 变体"),
         }
@@ -709,10 +754,17 @@ mod tests {
             }
             _ => panic!(),
         }
-        // resume 既有规格 env 恒空（零回归锚，wt/conhost 双分支都锁）；
-        // super:: 显式路径防被同名测试遮蔽
+        // resume 既有规格 env / env_rm_prefixes 恒空（零回归锚，wt/conhost 双分支都
+        // 锁）；super:: 显式路径防被同名测试遮蔽
         match super::build_spawn_command_windows(None, r"C:\p", "claude --resume x") {
-            SpawnSpec::Windows { env, .. } => assert!(env.is_empty()),
+            SpawnSpec::Windows {
+                env,
+                env_rm_prefixes,
+                ..
+            } => {
+                assert!(env.is_empty());
+                assert!(env_rm_prefixes.is_empty());
+            }
             _ => panic!(),
         }
         match super::build_spawn_command_windows(
@@ -720,7 +772,14 @@ mod tests {
             r"C:\p",
             "claude --resume x",
         ) {
-            SpawnSpec::Windows { env, .. } => assert!(env.is_empty()),
+            SpawnSpec::Windows {
+                env,
+                env_rm_prefixes,
+                ..
+            } => {
+                assert!(env.is_empty());
+                assert!(env_rm_prefixes.is_empty());
+            }
             _ => panic!(),
         }
     }

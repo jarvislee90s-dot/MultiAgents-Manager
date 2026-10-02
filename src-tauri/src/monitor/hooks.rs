@@ -1110,9 +1110,67 @@ pub fn register_all_hooks() {
     }
 }
 
+/// codex hooks.json 全条目我方核验（C8 用户在场裁决 2026-10-02：**核验式自动
+/// 信任**）。`~/.codex/hooks.json` 存在且**每个 hook 命令都命中我方指纹**（脚本
+/// 路径 / mam-hook-listener，与 [`ours_markers`] × [`command_is_ours`] 同判据）
+/// → true：新建管线遇「Hooks need review」审查框可代发 '2'（Trust all——信任的
+/// 确是 MAM 自己注册的 hooks，远程创建的状态上报功能闭环）；文件缺失/损坏/空
+/// 事件/混有非我方条目 → false：esc 跳过（屏面明示 `esc skip`，不信任只解锁
+/// composer，保守不代用户做混杂态的信任决定）。
+/// 可见性说明：`pub` + doc(hidden) 仅为集成测试（tests/create_e2e.rs）可达——
+/// 对齐 `inject::e2e_support` 先例；crate 内生产调用走 `pub(crate)` 语义即可。
+#[doc(hidden)]
+pub fn codex_hooks_all_ours(home: &std::path::Path) -> bool {
+    let path = home.join(".codex").join("hooks.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(events) = v.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    if events.is_empty() {
+        return false;
+    }
+    let script = home.join(".mam").join("hooks").join("status-hook.sh");
+    let script_str = script.to_string_lossy().to_string();
+    let mut markers = vec![script_str.clone(), script_str.replace('\\', "/")];
+    markers.push("mam-hook-listener".to_string());
+    events.values().all(|entries| {
+        entries
+            .as_array()
+            .map(|arr| {
+                !arr.is_empty()
+                    && arr.iter().all(|e| {
+                        e.get("hooks")
+                            .and_then(|h| h.as_array())
+                            .map(|hs| {
+                                !hs.is_empty()
+                                    && hs.iter().all(|h| {
+                                        // command 必在且我方；commandWindows 缺席合法
+                                        // （非 Windows 形态），在场也须我方
+                                        h.get("command")
+                                            .and_then(|c| c.as_str())
+                                            .map(|s| command_is_ours(s, &markers))
+                                            .unwrap_or(false)
+                                            && h.get("commandWindows")
+                                                .and_then(|c| c.as_str())
+                                                .map(|s| command_is_ours(s, &markers))
+                                                .unwrap_or(true)
+                                    })
+                            })
+                            .unwrap_or(false)
+                    })
+            })
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 mod command_quote_tests {
-    use super::quote_bash_command;
+    use super::{codex_hooks_all_ours, quote_bash_command};
 
     #[test]
     fn no_space_path_becomes_forward_slash_unquoted() {
@@ -1122,6 +1180,40 @@ mod command_quote_tests {
             quote_bash_command(r"C:\Users\bunny\.mam\hooks\status-hook.sh"),
             r"bash C:/Users/bunny/.mam/hooks/status-hook.sh"
         );
+    }
+
+    /// codex hooks 全条目我方核验（C8 核验式自动信任的纯核）：全我方 → true；
+    /// 混入非我方条目 / 文件缺失 → false（esc 跳过保守臂）。fixture 命令必须
+    /// 含 **tempdir 家目录** 的脚本路径——marker 判据按 home 推导
+    #[test]
+    fn codex_hooks_all_ours_verifies_entries() {
+        let td = tempfile::tempdir().unwrap();
+        let cfg = td.path().join(".codex").join("hooks.json");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        let ours_cmd = format!(
+            "bash {}/.mam/hooks/status-hook.sh",
+            td.path().to_string_lossy().replace('\\', "/")
+        );
+        let ours_win = format!(
+            "{}/.mam/bin/mam-hook-listener.exe",
+            td.path().to_string_lossy().replace('\\', "/")
+        );
+        // JSON 夹具用占位符 + replace 组装（format! 的 JSON 花括号转义不可读）
+        let ours_only = r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"__SCRIPT__","commandWindows":"__WIN__"}]}]}}"#
+            .replace("__SCRIPT__", &ours_cmd)
+            .replace("__WIN__", &ours_win);
+        // 全我方（脚本路径 + Windows helper 双形态，实机 hooks.json 同款形态）
+        std::fs::write(&cfg, &ours_only).unwrap();
+        assert!(codex_hooks_all_ours(td.path()));
+        // 混入非我方条目 → false
+        let mixed = r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"__SCRIPT__","commandWindows":"__WIN__"},{"type":"command","command":"node /tmp/other-tool/hook.js"}]}]}}"#
+            .replace("__SCRIPT__", &ours_cmd)
+            .replace("__WIN__", &ours_win);
+        std::fs::write(&cfg, mixed).unwrap();
+        assert!(!codex_hooks_all_ours(td.path()));
+        // 文件缺失 → false
+        std::fs::remove_file(&cfg).unwrap();
+        assert!(!codex_hooks_all_ours(td.path()));
     }
 
     #[test]

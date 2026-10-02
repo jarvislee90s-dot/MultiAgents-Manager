@@ -7316,6 +7316,11 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
         tool: run.tool.clone(),
         dir: std::path::PathBuf::from(&run.dir),
         first_message: String::new(),
+        // codex hooks 审查框核验式信任（C8 用户在场裁决）：读本机 ~/.codex/hooks.json
+        // 全条目我方核验（monitor::hooks 同判据）——混杂/失败 false → 管线 esc 跳过
+        hooks_trust_ok: dirs::home_dir()
+            .map(|h| crate::monitor::hooks::codex_hooks_all_ours(&h))
+            .unwrap_or(false),
         composed: run.composed.clone(),
     };
     let outcome = crate::inject::create::run_pipeline(&deps, &params);

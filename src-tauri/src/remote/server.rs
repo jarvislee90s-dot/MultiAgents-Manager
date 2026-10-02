@@ -11975,6 +11975,7 @@ mod tests {
             injector,
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             create_hub: hub,
+            capability_table: crate::inject::capability::new_table(),
             archive_source: Box::new(move || archive.clone()),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
@@ -12260,8 +12261,11 @@ mod tests {
         let state = create_state(
             std::sync::Arc::new(CreateTaskHub::stub_with(disc)),
             FakeInjector::ok(),
-            // 屏序：直接 idle（idle 锚在场 → 注入首句 → waiting_materialize）
-            vec![vec!["manual mode on · ? for shortcuts".into()]],
+            // 屏序：直接 idle 两轮（双读确认，C8 定案 → 注入首句 → waiting_materialize）
+            vec![
+                vec!["manual mode on · ? for shortcuts".into()],
+                vec!["manual mode on · ? for shortcuts".into()],
+            ],
             create_host_default(),
             vec![],
             vec![],
@@ -12345,12 +12349,13 @@ mod tests {
                 vec!["sid-c6-ok".to_string()]
             }))),
             FakeInjector::ok(),
-            // 屏序：信任框（处置 down,enter）→ idle → 注入首句 → waiting_materialize
+            // 屏序：信任框（处置 down,enter）→ idle 双读确认 → 注入首句 → waiting_materialize
             vec![
                 vec![
                     "Quick safety check: Is this a project you created or one you trust?".into(),
                     "❯ No, exit".into(),
                 ],
+                vec!["manual mode on · ? for shortcuts".into()],
                 vec!["manual mode on · ? for shortcuts".into()],
             ],
             create_host_default(),
@@ -12429,6 +12434,8 @@ mod tests {
                     "❯ No, exit".into(),
                 ],
                 vec!["Quick safety check".into()],
+                vec!["manual mode on · ? for shortcuts".into()],
+                // idle 双读确认（C8 定案）
                 vec!["manual mode on · ? for shortcuts".into()],
             ],
             create_host_default(),

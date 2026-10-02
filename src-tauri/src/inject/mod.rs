@@ -45,9 +45,10 @@ pub mod timing;
 #[cfg(windows)]
 pub mod windows_console;
 
-/// 实机 E2E 专用测试支撑面（M9R–M9R 批次 Task 12，`tests/m9r_e2e.rs` 唯一消费方）。
+/// 实机 E2E 专用测试支撑面（M9R–M9R 批次 Task 12 起，`tests/m9r_e2e.rs` 与
+/// C8 `tests/create_e2e.rs` 两个集成测试目标消费）。
 /// **非公开 API 承诺**：`doc(hidden)` 不进文档；只 re-export Windows 执行层的
-/// spec 感知入口与统计类型（四例 E2E 直调引擎所需的最小面），零新逻辑零转发。
+/// spec 感知入口与统计类型（两例 E2E 直调引擎/屏读所需的最小面），零新逻辑零转发。
 /// 生产代码不得消费本模块——生产注入一律经 `engine::Injector` 缝（`RealInjector`
 /// 装配）与旧薄壳（`locate_and_inject` / `locate_and_send_key`）。
 #[doc(hidden)]
