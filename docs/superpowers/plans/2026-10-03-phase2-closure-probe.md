@@ -420,7 +420,7 @@ Expected: 独立 CLI 版本（对照内嵌 2.115 偏差）与无头 flag 在场�
 
 ### Task 7: PL-B · dsh 写通道源码通读 + 端点实测
 
-- [ ] **Step 1: 源码通读**（本地仓库 `E:\LLMproject\deepseek-harness\deepseek-harness`，零运行时风险）：`packages/host`（桌面 host 的本地 server：端口发现/路由/鉴权）、`packages/api`、`packages/sdk`、`packages/acp`、`packages/webhook`、`packages/jobs` 各自的对外编程面；重点问题：**有没有「向指定会话投递用户消息」的端点或 SDK 方法**。产出 `$EV/pl/dsh-source.md`（含关键文件:行号引文）。
+- [ ] **Step 1: 源码通读**（本地仓库 `E:\LLMproject\deepseek-harness\deepseek-harness`，零运行时风险）。**已核实的入口指针**：① `packages/host/` = web GUI 宿主半边（`webserver/` 具名路由表 + SPA 服务 + open-in-app 路由——桌面端与 web 同核，本地端口 19387 最可能就是这套 webserver 路由，**会话投递端点优先在这里找**）；② `apps/desktop/lib/main.js` = 打包压缩产物（单字母标识符），只用于取证 host 进程的 spawn 参数与端口发现机制，**不做正文通读**，桌面壳源码看 `apps/desktop/` 下有无 src；③ 其余编程面包：`packages/api`、`packages/sdk`、`packages/acp`、`packages/webhook`、`packages/jobs`。重点问题不变：**有没有「向指定会话投递用户消息」的端点或 SDK 方法**。产出 `$EV/pl/dsh-source.md`（含关键文件:行号引文）。
 - [ ] **Step 2: 端点实测**（只读）——对在跑桌面 host 端口（PW 式发现：`Get-NetTCPConnection` 过滤 DeepSeek Harness pid）按源码揭示的路径 GET 健康类/只读端点；**POST 仅当源码证实存在会话投递端点且目标为自建会话时**（先在桌面 APP 用 `$EV/pl-proj` USER-ASSIST 建测试会话）。
 - [ ] **Step 3: 一格结论**——`$EV/pl/dsh.md`：「存在写通道（是/否）+ 依据 + 集成形态草图（host API/ACP/SDK）」。
 
