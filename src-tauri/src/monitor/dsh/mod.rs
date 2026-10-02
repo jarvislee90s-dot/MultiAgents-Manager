@@ -100,11 +100,25 @@ pub fn dsh_home_with(home_dir: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|| home_dir.join(".dsh"))
 }
 
+/// 桌面宿主特征单源（cmdline_is_dsh_host 桌面分支与跳转分派共用）：
+/// 任一参数含 "dsh-desktop-host"（包路径子串，最强特征）或以
+/// `\.dsh\profiles\desktop` / `/.dsh/profiles/desktop` 结尾（用户数据 profile 路径）
+pub fn cmdline_is_dsh_desktop_host(cmd: &[std::ffi::OsString]) -> bool {
+    let tokens: Vec<String> = cmd
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    tokens.iter().any(|t| {
+        t.contains("dsh-desktop-host")
+            || t.ends_with("\\.dsh\\profiles\\desktop")
+            || t.ends_with("/.dsh/profiles/desktop")
+    })
+}
+
 /// dsh 宿主 cmdline 判定门（单源，M0 §5 + H1 桌面端扩展）：两类形态任一命中即宿主——
 /// ① web 宿主：cmdline 含 "dsh"（精确令牌，或 /dsh、\dsh 路径结尾）与 "web"（精确令牌）；
 /// ② 桌面宿主（v0.2.0+）：DeepSeek Harness.exe 内嵌 dsh-desktop-host 进程，无 node 令牌，
-///    特征 = 任一参数含 "dsh-desktop-host"（包路径子串，最强特征）或以
-///    `\.dsh\profiles\desktop` / `/.dsh/profiles/desktop` 结尾（用户数据 profile 路径）；
+///    特征判定复用 cmdline_is_dsh_desktop_host；
 ///    --expose-internals 为 Electron 通用旗子，单独过弱，不作独立判据。
 /// find_dsh_processes（进程发现）与 host::tool_host_alive_in（宿主存活判定）
 /// 共用本口径，防两处判定漂移
@@ -117,12 +131,16 @@ pub fn cmdline_is_dsh_host(cmd: &[std::ffi::OsString]) -> bool {
         .iter()
         .any(|t| t == "dsh" || t.ends_with("/dsh") || t.ends_with("\\dsh"));
     let has_web = tokens.iter().any(|t| t == "web");
-    let is_desktop = tokens.iter().any(|t| {
-        t.contains("dsh-desktop-host")
-            || t.ends_with("\\.dsh\\profiles\\desktop")
-            || t.ends_with("/.dsh/profiles/desktop")
-    });
-    (has_dsh && has_web) || is_desktop
+    (has_dsh && has_web) || cmdline_is_dsh_desktop_host(cmd)
+}
+
+/// 当前桌面上 dsh 桌面端宿主进程 pid（H1 跳转分派用；无则 None → 走 web 宿主路径）
+pub fn find_dsh_desktop_host_pid(system: &sysinfo::System) -> Option<u32> {
+    system
+        .processes()
+        .iter()
+        .find(|(_, p)| !p.cmd().is_empty() && cmdline_is_dsh_desktop_host(p.cmd()))
+        .map(|(pid, _)| pid.as_u32())
 }
 
 /// 进程发现：node 进程且 cmdline 含 "dsh" 与 "web" 令牌（M0 §5：进程名是 node，
@@ -385,7 +403,7 @@ fn projcache_identity_ok(home: &std::path::Path, header: &log::DshHeader, versio
 // ===== 单元测试：宿主 cmdline 双令牌门（C1 终审：host.rs 存活判定同源口径的防漂移锁）=====
 #[cfg(test)]
 mod cmdline_gate_tests {
-    use super::cmdline_is_dsh_host;
+    use super::{cmdline_is_dsh_desktop_host, cmdline_is_dsh_host};
     use std::ffi::OsString;
 
     fn cmd(args: &[&str]) -> Vec<OsString> {
@@ -483,6 +501,18 @@ mod cmdline_gate_tests {
             "--expose-internals",
             r"C:\Apps\some\lib\index.js",
         ])));
+    }
+
+    #[test]
+    fn desktop_kernel_matches_only_desktop() {
+        let desktop = cmd(&[
+            r"D:\Program Files\Deepseek-Harness\DeepSeek Harness.exe",
+            r"...\@deepseek-ai\dsh-desktop-host\lib\index.js",
+            r"C:\Users\bunny\.dsh\profiles\desktop",
+        ]);
+        let web = cmd(&["node", "dsh", "web"]);
+        assert!(cmdline_is_dsh_desktop_host(&desktop));
+        assert!(!cmdline_is_dsh_desktop_host(&web));
     }
 }
 

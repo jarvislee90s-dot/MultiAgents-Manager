@@ -79,6 +79,45 @@ pub fn focus_session(
     form: Option<String>,
     unread: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    // dsh（H1）：桌面端宿主在场 → 聚焦桌面 APP 窗口；不在场才回落 web 宿主路径。
+    // 插入点在平台 cfg 分派之前（跨平台前置）；macOS web 回落路径与 Windows
+    // 无桌面宿主时的行为（现有：无 dsh 跳转 → 维持原样）均不变
+    if agent_type.as_deref() == Some("dsh") {
+        let system = sysinfo::System::new_all();
+        if let Some(pid) = crate::monitor::dsh::find_dsh_desktop_host_pid(&system) {
+            #[cfg(windows)]
+            {
+                match crate::window::win32::focus_window_for_pid(pid) {
+                    Ok(()) => {
+                        mark_read_on_jump(&app, &session_id, &agent_type);
+                        return Ok(serde_json::json!({ "via": "dsh-desktop" }));
+                    }
+                    Err(e) => return Err(format!("无法聚焦 DeepSeek Harness 窗口：{e}")),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager; // cfg 块内导入惯例见文件头注释
+                if let Some(p) = system.process(sysinfo::Pid::from_u32(pid)) {
+                    if let Some(exe) = p.exe().and_then(|e| e.to_str()) {
+                        if let Some(bundle) =
+                            crate::window::app_activation::app_bundle_from_exe(exe)
+                        {
+                            if crate::window::app_activation::activate_app_bundle(&bundle).is_ok() {
+                                mark_read_on_jump(&app, &session_id, &agent_type);
+                                return Ok(serde_json::json!({ "via": "dsh-desktop" }));
+                            }
+                        }
+                    }
+                }
+                // macOS 激活失败 → 落入下方 web 路径（不 return）
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
+            {
+                let _ = pid; // Linux 不支持聚焦（window/mod 既有口径）
+            }
+        }
+    }
     #[cfg(windows)]
     {
         // mut：P2-1 验证轮询/兜底前会在原地刷新进程表（快照不再是一次性照片）
