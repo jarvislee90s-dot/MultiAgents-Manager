@@ -243,8 +243,11 @@ fn discover_opencode(root: &Path, since: SystemTime, dir: &str) -> Vec<String> {
     out
 }
 
-/// 副本查询：session 表 directory 归一匹配 + time_updated > since（毫秒 int，
-/// opencode_parser 同款表/列名）。
+/// 副本查询：会话表 directory 归一匹配 + time_updated > since（毫秒 int）。
+///
+/// **双 schema 分派（D1 同口径）**：2.x 会话表改名 `session_v2`（`session` 冻结，
+/// 新会话只写 `session_v2`——若仍查 `session`，2.x 下 create 物化永远 0 命中）；
+/// 表不存在则回落 1.x 旧表名。探测判据与 `monitor::opencode_parser::Schema::detect` 一致。
 fn query_opencode_copy(copy_db: &Path, since: SystemTime, dir: &str) -> Vec<String> {
     let Some(conn) = crate::monitor::sqlite::open_readonly_with_timeout(copy_db) else {
         return Vec::new();
@@ -253,9 +256,21 @@ fn query_opencode_copy(copy_db: &Path, since: SystemTime, dir: &str) -> Vec<Stri
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let Ok(mut stmt) =
-        conn.prepare("SELECT id, directory, time_updated FROM session ORDER BY time_updated DESC")
-    else {
+    let table = if conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok()
+    {
+        "session_v2"
+    } else {
+        "session"
+    };
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT id, directory, time_updated FROM {table} ORDER BY time_updated DESC"
+    )) else {
         return Vec::new();
     };
     let rows = stmt.query_map([], |row| {
@@ -454,18 +469,24 @@ mod tests {
 
     // ---- opencode ----
 
-    /// opencode 夹具：主库（含 WAL 模拟不必——直接建主库+一行；拷贝逻辑吃同一套）
+    /// opencode 夹具：主库（含 WAL 模拟不必——直接建主库+一行；拷贝逻辑吃同一套）。
+    /// `v2=false` 建 1.x 旧 `session` 表；`v2=true` 建 2.x `session_v2` 表（D1 定案口径）
     fn opencode_fixture(root: &Path, sid: &str, directory: &str, updated_ms: i64) {
+        opencode_fixture_schema(root, sid, directory, updated_ms, false);
+    }
+
+    fn opencode_fixture_schema(root: &Path, sid: &str, directory: &str, updated_ms: i64, v2: bool) {
         std::fs::create_dir_all(root).unwrap();
         let db = root.join("opencode.db");
         let conn = rusqlite::Connection::open(&db).unwrap();
+        let table = if v2 { "session_v2" } else { "session" };
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT, time_updated INTEGER)",
+            &format!("CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT, time_updated INTEGER)"),
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO session (id, project_id, directory, title, time_updated) VALUES (?1,'p1',?2,'t',?3)",
+            &format!("INSERT INTO {table} (id, project_id, directory, title, time_updated) VALUES (?1,'p1',?2,'t',?3)"),
             rusqlite::params![sid, directory, updated_ms],
         )
         .unwrap();
@@ -490,6 +511,56 @@ mod tests {
         // 归一匹配：分隔符/大小写变体同目录
         let norm = discover_opencode(&root, SystemTime::UNIX_EPOCH, r"e:\WORK\P/");
         assert_eq!(norm.len(), 2);
+    }
+
+    /// 2.x 库（`session_v2`）：仍能按 directory 命中——若查冻结的 `session` 表则 0 命中，
+    /// create 物化在 2.x 下会永远超时（D2 修复点）
+    #[test]
+    fn opencode2_copy_probe_dispatches_to_session_v2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".local/share/opencode");
+        let base = chrono::Utc::now().timestamp_millis();
+        opencode_fixture_schema(&root, "oc2-new", r"E:\work\p", base, true);
+        opencode_fixture_schema(&root, "oc2-miss", r"E:\elsewhere", base, true);
+        let since = std::time::SystemTime::UNIX_EPOCH;
+
+        let out = discover_opencode(&root, since, r"E:\work\p");
+        assert_eq!(
+            out,
+            vec!["oc2-new".to_string()],
+            "2.x 库须走 session_v2（旧表名已冻结 → 0 命中）"
+        );
+        // 归一匹配同样成立
+        let norm = discover_opencode(&root, since, r"e:\WORK\P/");
+        assert_eq!(norm.len(), 1);
+    }
+
+    /// 混合库（v1 冻结表 + v2 表并存）：走 v2（D1 分派定案，prefer session_v2）
+    #[test]
+    fn opencode_mixed_db_prefers_v2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".local/share/opencode");
+        let base = chrono::Utc::now().timestamp_millis();
+        // 先建 v1 冻结表并插一条（不该被采）
+        opencode_fixture_schema(&root, "legacy", r"E:\work\p", base, false);
+        // 再建 v2 表并插新会话
+        opencode_fixture_schema(&root, "oc2", r"E:\work\p", base, true);
+        let out = discover_opencode(&root, std::time::SystemTime::UNIX_EPOCH, r"E:\work\p");
+        assert!(
+            out.contains(&"oc2".to_string()),
+            "v2 表在场时须走 v2（含新会话）"
+        );
+    }
+
+    /// 1.x 库（仅旧表）：仍走旧表名，零回归
+    #[test]
+    fn opencode1_copy_probe_uses_legacy_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".local/share/opencode");
+        let base = chrono::Utc::now().timestamp_millis();
+        opencode_fixture(&root, "oc1", r"E:\work\p", base);
+        let out = discover_opencode(&root, std::time::SystemTime::UNIX_EPOCH, r"E:\work\p");
+        assert_eq!(out, vec!["oc1".to_string()], "纯 1.x 库走旧表名");
     }
 
     // ---- root 推导与白名单 ----

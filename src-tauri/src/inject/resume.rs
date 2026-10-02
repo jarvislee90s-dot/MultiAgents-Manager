@@ -152,11 +152,36 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
     }
 }
 
-/// 新建会话起窗规格：裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境红线；
+/// 新建会话起窗命令表（`{tool}` 占位工具 id）。
+///
+/// **与 [`RESUME_TABLE`] 的关键差别**：opencode 在 2.x 下必须加 `--standalone`。
+/// 依据（复验定案 §2 端口竞争陷阱，Mac C 组实证 + Win 同参实测）：
+/// 2.x 默认形态 = 前台 TUI + **独立后台服务**；当已有服务占用默认端口时，裸
+/// `opencode` 不出 TUI，而进 `Starting background server...` 静默重试环——Phase C
+/// create E2E opencode 腿 17:23/17:28 失败（find_tui_pid 30s 超时）的根因即此
+/// （用户常驻服务在场）。`--standalone` = 私有 server，TTY 下必出 TUI、不依赖
+/// 服务/端口。resume 侧不受影响（resume 复用既有服务是期望行为，且 `--session`
+/// 回放已两次实机验证）。
+///
+/// 注：`opencode session list` 在 2.x 是「current project」作用域（D0-3），
+/// 与发现层无关（发现层走 db 直读）。
+const CREATE_COMMAND_TABLE: &[(&str, &str)] = &[("opencode", "opencode --standalone")];
+
+/// 按工具查新建会话的起窗命令（未入表 → 裸 `{tool}`）。目前仅 opencode 需特化。
+pub fn create_command(tool: &str) -> String {
+    CREATE_COMMAND_TABLE
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .map(|(_, cmd)| (*cmd).to_string())
+        .unwrap_or_else(|| tool.to_string())
+}
+
+/// 新建会话起窗规格：工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境红线；
 /// S2 实测 conhost/WT 双宿主 4/4 透传，形态A=spawn 显式设 env）。C6 起**跨平台**：
 /// 纯载荷构造与 [`build_spawn_command_windows`] 同口径（wt=None → conhost 载荷），
 /// 端点假缝不真 spawn、非 Windows 构建可编译可测；macOS 真 spawn 变体归 Mac 后补批
 /// （脚本内联 `env K=V ` 前缀，Mac 探测 M2 实证）。
+/// 起窗命令经 [`create_command`] 取（opencode 走 `--standalone`，见该表 doc）。
 /// create 起窗的会话上下文剥离前缀（C8 冒烟实机定案；`env_rm_prefixes` 字段 doc
 /// 有根因全文）：命中前缀的继承变量在 spawn 时逐一 `env_remove`。只剥 **Claude
 /// 会话管道**变量（子会话标记/入口/SSE/effort 等——都是「本次会话」的上下文，
@@ -165,7 +190,7 @@ pub const CREATE_ENV_RM_PREFIXES: &[&str] =
     &["CLAUDECODE", "CLAUDE_CODE_", "CLAUDE_PID", "CLAUDE_EFFORT"];
 
 pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> SpawnSpec {
-    let mut spec = build_spawn_command_windows(wt, cwd, tool);
+    let mut spec = build_spawn_command_windows(wt, cwd, &create_command(tool));
     if let SpawnSpec::Windows {
         env,
         env_rm_prefixes,
@@ -784,6 +809,33 @@ mod tests {
         }
     }
 
+    /// D2：新建会话起窗命令表——opencode 2.x 必须带 `--standalone`（端口竞争陷阱，
+    /// 复验定案 §2）；其余工具保持裸命令（零回归）
+    #[test]
+    fn create_command_table_pins_standalone_for_opencode() {
+        assert_eq!(create_command("opencode"), "opencode --standalone");
+        // 未入表工具 = 裸工具名（零回归）
+        assert_eq!(create_command("claude"), "claude");
+        assert_eq!(create_command("codex"), "codex");
+        assert_eq!(create_command("kimi"), "kimi");
+        // 起窗载荷确实带上（跨平台构造层，conhost 分支）
+        match build_create_spawn_spec(None, "/tmp/p", "opencode") {
+            SpawnSpec::Windows { args, .. } => {
+                assert_eq!(args, vec!["cmd", "/k", "opencode --standalone"]);
+            }
+            _ => panic!("conhost 分支"),
+        }
+    }
+
+    /// resume 表的 opencode 命令**不带** `--standalone`（复用既有服务是期望行为；
+    /// `--session` 回放已两次实机验证）——防与 create 表混用
+    #[test]
+    fn resume_table_opencode_stays_bare() {
+        assert_eq!(
+            resume_command("opencode", "abc").as_deref(),
+            Some("opencode --session abc")
+        );
+    }
     /// macOS 构造层（跨平台可测）：cd '<cwd>' && <resume> 进脚本 + activate 置前；
     /// 转义路径——反斜杠/双引号经 applescript_escape，内嵌单引号经 POSIX '\'' 转义
     #[test]

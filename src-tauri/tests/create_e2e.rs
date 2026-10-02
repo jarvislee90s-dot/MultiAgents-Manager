@@ -78,12 +78,39 @@
 //!   find_tui_pid 30s 超时（两次复现）：上游自升 2.0.22（服务架构，进程无可附加
 //!   控制台）→ 归 opencode2 复验批（验收清单 #26；1.18.32 线上全链两次实机验证
 //!   在案） | `~/.mam/create-evidence/` |
+//! | 2026-10-02 | e2e_create_matrix_four_tools（**opencode 2.x 适配批 D2 复跑**）
+//!   | claude 28.0s / codex 22.6s / kimi 26.0s / **opencode 23.8s** | PASS
+//!   **四家全过**：opencode 2.0.22 腿 **锚定恢复**（`--standalone` 修端口竞争陷阱：
+//!   TUI pid 2.5s 内到手，取代此前 30s 超时）；keys=[]；首条 user 逐字节；物化
+//!   stamp 命中（`remote/content.rs` v2 派发修复——此前查冻结 `message`/`part`
+//!   表命不中） | `~/.mam/create-evidence/` |
+//! | 2026-10-02 | e2e_create_http_full_chain（D2 复跑） | 全链 46.0s | PASS：
+//!   第二条消息落地后 assistant 2 条 | 同上 |
+//! | 2026-10-02 | e2e_create_single_claude_smoke（D2 复跑） | claude 27.6s | PASS：
+//!   keys ["down","enter"] 红线 | 同上 |
+//! | 2026-10-02 | **D2 全量三例连跑**（单进程 --test-threads=1）| matrix：
+//!   claude 28.0s / codex 22.6s / kimi 26.0s / opencode 22.6s；http 全链；claude
+//!   冒烟 27.6s | **3 passed 0 failed**（opencode 腿 22.6s，与三家同量级）；
+//!   opencode 修复两处根因：① `--standalone` 起窗（端口竞争）；②
+//!   `remote/content.rs` 消息读取 v2 派发（stamp 命中路径） | 同上 |
+//!
 //! | 2026-10-03 | **rebase 至 origin/main(8d756a2) 后全量复跑**（--test-threads=1）
 //!   | matrix：claude 29.4s（信任框红线↓+Enter 实机复核）/ codex 22.6s / kimi
 //!   27.3s（enter）/ **opencode 23.8s（2.x 腿）**；http 全链 15.1s（taskId→
 //!   四态→done→sessionId）；claude 冒烟 27.6s | **3 passed 0 failed**——rebase
 //!   携 main 的 capability_table/AUQ 重构后功能零回归；RemoteState 夹具补
 //!   capability_table 初始化为本轮唯一适配 | `~/.mam/create-evidence/` |
+//! ### D2 修复（opencode 2.x create 腿）
+//! 1. **起窗命令 `--standalone`**（`inject/resume.rs::CREATE_COMMAND_TABLE`）：2.x
+//!    裸 `opencode` 在已有后台服务占默认端口时不出 TUI（`Starting background
+//!    server...` 静默重试环）→ find_tui_pid 30s 超时。`--standalone` = 私有 server，
+//!    TTY 下必出 TUI。
+//! 2. **消息读取 v2 派发**（`remote/content.rs::read_opencode_messages_v2`）：create
+//!    物化用 stamp 命中会话，走 `read_session_messages`——旧路径查冻结的
+//!    `message`/`part` 表 → 新会话「不存在」→ 15 轮物化全 miss。v2 派发后 stamp 命中。
+//! 3. **发现层 v2 派发**（`inject/create_discover.rs::query_opencode_copy`）：候选会话
+//!    查询同源修复（`session` → `session_v2`）。
+//! 4. **卡片文本/尾信号 v2**（`monitor/opencode_parser.rs`，D1）：见 D1 定案。
 //!
 //! ### 实机定案（本轮 E2E 揭示并修复，均登记简报）
 //! 1. npm bin claude.exe 首进程为短命蹦床 + MCP 子进程持私有空控制台 →

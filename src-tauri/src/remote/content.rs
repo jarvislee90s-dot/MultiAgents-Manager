@@ -1770,7 +1770,14 @@ fn is_answered_question_part(part: &serde_json::Value) -> bool {
         return false;
     }
     let state = part.get("state").unwrap_or(&serde_json::Value::Null);
-    let by_name = part.get("tool").and_then(|t| t.as_str()) == Some("question");
+    // 工具名双键（适配批评审 I1 同根因）：v1 键 `tool` / v2 content 元素键 `name`
+    // （D0-1）——同函数上方的 tool_call 名字提取已双键，这里对齐，否则 v2 下
+    // 非标形态问答永不销卡（F-3 回归）
+    let tool_name = part
+        .get("name")
+        .and_then(|t| t.as_str())
+        .or_else(|| part.get("tool").and_then(|t| t.as_str()));
+    let by_name = tool_name == Some("question");
     let by_shape = state
         .pointer("/input/questions")
         .and_then(|q| q.as_array())
@@ -1811,6 +1818,20 @@ fn read_opencode_messages_with(
         .join("opencode.db");
     let conn = crate::monitor::sqlite::open_readonly_with_timeout(&db)
         .ok_or_else(|| "opencode.db 不可读".to_string())?;
+    // schema 分派（D1 定案 §D0-4）：2.x 会话/消息表改名 session_v2/session_message
+    // 且 part 内联进 data.content[]；`session`/`message`/`part` 三表冻结（新消息只进
+    // v2 表）。查旧表会读到迁移前的快照 → 新会话「不存在」/新消息读不到（create 物化
+    // stamp 命不中即此）。表不存在则走 1.x 旧路径（零回归）。
+    let is_v2 = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if is_v2 {
+        return read_opencode_messages_v2(&conn, session_id, limit);
+    }
     let sql = format!(
         "SELECT id, data, time_created FROM message WHERE session_id = ?1 \
          ORDER BY time_created DESC LIMIT {limit}"
@@ -1924,6 +1945,118 @@ fn read_opencode_messages_with(
         }
     }
     // SQLite 查询自带 LIMIT：无「头部截断」语义（truncated 恒 false，Bug 1 契约）
+    Ok(page(out, limit, false))
+}
+
+/// 2.x（`session_v2`/`session_message`）消息读取（D1 定案 §D0-1）。
+///
+/// 与 1.x 路径的形态差异：
+/// - 角色来自 `session_message.type` 列（1.x 是 `message.data.role`）；
+/// - 内容内联在 `data.content[]`（1.x 分 `part` 表）；元素 type = text/reasoning/tool，
+///   **工具名键为 `name`**（1.x 是 `tool`，本函数两键兼容取值）；
+/// - `idle`/`system`/`synthetic` 类型消息**无对话内容**，跳过（与 1.x 的
+///   role 过滤同效）。
+///
+/// 产出的 SessionMessage 种类与 1.x 路径逐一同形（text/thinking/tool_call/
+/// tool-result）——尤其**问答类 tool 的销卡 tool-result 必须继续产出**（丁T1 复评
+/// F-3 根因：该 reader 不产 tool-result 时已答的 opencode 问答卡永不消失）。
+fn read_opencode_messages_v2(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    limit: usize,
+) -> Result<MessagesPage, String> {
+    let sql = format!(
+        "SELECT type, data, time_created FROM session_message WHERE session_id = ?1 \
+         ORDER BY seq DESC LIMIT {limit}"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Err("opencode message 表不可查".to_string());
+    };
+    let rows = stmt.query_map([session_id], |row| {
+        Ok((
+            sqlite_text(row, 0)?,
+            sqlite_text(row, 1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return Err(format!("opencode 查询失败: {session_id}"));
+    };
+    let mut messages: Vec<(String, String, Option<i64>)> = rows.filter_map(|r| r.ok()).collect();
+    if messages.is_empty() {
+        return Err(format!("opencode 会话不存在: {session_id}"));
+    }
+    messages.reverse(); // seq 升序（文件序）
+    let mut out = Vec::new();
+    for (mtype, data, ts) in &messages {
+        // 只有 user/assistant 承载对话内容（idle/system/synthetic 无 content）
+        let role = match mtype.as_str() {
+            "user" | "assistant" => mtype.as_str(),
+            _ => continue,
+        };
+        let Ok(mv) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        // user 消息：文本在 data.text（1.x 同）；assistant：内容在 data.content[]
+        if role == "user" {
+            if let Some(t) = mv.get("text").and_then(|t| t.as_str()) {
+                if !t.trim().is_empty() {
+                    out.push(SessionMessage::text("user", t, *ts));
+                }
+            }
+            continue;
+        }
+        let Some(content) = mv.get("content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for c in content {
+            match c.get("type").and_then(|t| t.as_str()).unwrap_or_default() {
+                "text" => {
+                    let t = c.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                    if !t.trim().is_empty() {
+                        out.push(SessionMessage::text("assistant", t, *ts));
+                    }
+                }
+                "reasoning" => {
+                    let t = c.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                    if !t.trim().is_empty() {
+                        out.push(SessionMessage::text("thinking", t, *ts));
+                    }
+                }
+                "tool" => {
+                    // 2.x 工具名键为 `name`（1.x 为 `tool`）——两键兼容取值
+                    let name = c
+                        .get("name")
+                        .and_then(|t| t.as_str())
+                        .or_else(|| c.get("tool").and_then(|t| t.as_str()));
+                    let args = c
+                        .pointer("/state/input")
+                        .filter(|v| !v.is_null())
+                        .and_then(|v| serde_json::to_string(v).ok());
+                    out.push(SessionMessage::tool_call(
+                        tool_summary(name),
+                        *ts,
+                        name.map(String::from),
+                        args,
+                    ));
+                    // 问答类终态 → 补 tool-result 销卡（与 1.x 路径同判据、同形）
+                    if is_answered_question_part(c) {
+                        let text = c
+                            .pointer("/state/output")
+                            .map(|o| match o {
+                                serde_json::Value::String(s) => s.clone(),
+                                v if !v.is_null() => serde_json::to_string(v).unwrap_or_default(),
+                                _ => String::new(),
+                            })
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| "问题已作答".to_string());
+                        out.push(SessionMessage::text("tool-result", text, *ts));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(page(out, limit, false))
 }
 
@@ -3355,6 +3488,135 @@ mod tests {
             .contains("\"cmd\":\"ls\""));
         // 未知会话 → Err
         assert!(read_session_messages_with(tmp.path(), "opencode", "ses_other", 200).is_err());
+    }
+
+    /// 2.x 派发：`session_v2` 在场 → 走 `session_message`（type 列 + 内联 content[]，
+    /// 工具名键 `name`）。若仍查冻结的 `message`/`part` 表，新会话报「不存在」而
+    /// create 物化 stamp 命不中（D2 E2E 实测根因）
+    #[test]
+    fn opencode2_maps_session_message_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
+                 time_updated INTEGER, version TEXT, time_idle INTEGER, idle_outcome TEXT);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                 time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message VALUES ('m1', ?1, 'user', 1, 100, 100,
+                '{\"time\":{\"created\":100},\"text\":\"看下这个\",\"files\":[],\"agents\":[]}')",
+            [SID],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message VALUES ('m2', ?1, 'assistant', 2, 200, 200,
+                '{\"time\":{\"created\":200},\"agent\":\"build\",\"finish\":\"tool-calls\",\"content\":[\
+                    {\"type\":\"reasoning\",\"text\":\"推演\"},\
+                    {\"type\":\"tool\",\"id\":\"c1\",\"name\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"cmd\":\"ls\"}}},\
+                    {\"type\":\"text\",\"text\":\"结论\"}]}')",
+            [SID],
+        )
+        .unwrap();
+        // 回合收尾的 idle 消息（无 content）——须被跳过，不得产空条
+        conn.execute(
+            "INSERT INTO session_message VALUES ('m3', ?1, 'idle', 3, 300, 300,
+                '{\"time\":{\"created\":300},\"outcome\":\"succeeded\"}')",
+            [SID],
+        )
+        .unwrap();
+
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["user", "thinking", "tool-call", "assistant"],
+            "v2 content[] 三类元素映射；idle 消息跳过"
+        );
+        assert_eq!(msgs[0].content, "看下这个");
+        assert_eq!(msgs[2].tool_name.as_deref(), Some("bash"), "工具名键 name");
+        assert!(msgs[2]
+            .tool_args
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\"cmd\":\"ls\""));
+        assert_eq!(msgs[3].content, "结论");
+    }
+
+    /// 2.x 问答类部件终态 → 补 tool-result 销卡（与 1.x 路径同判据；F-3 兼容）
+    #[test]
+    fn opencode2_question_part_emits_tool_result_when_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
+                 time_updated INTEGER, version TEXT);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                 time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message VALUES ('m1', ?1, 'assistant', 1, 100, 100,
+                '{\"time\":{\"created\":100},\"finish\":\"tool-calls\",\"content\":[\
+                    {\"type\":\"tool\",\"id\":\"c1\",\"name\":\"question\",\"state\":{\
+                        \"status\":\"completed\",\
+                        \"input\":{\"questions\":[{\"header\":\"h\",\"question\":\"q\",\"options\":[{\"label\":\"a\"}]}]},\
+                        \"metadata\":{\"answers\":[[\"a\"]],\"truncated\":false}}}]}')",
+            [SID],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"tool-call") && kinds.contains(&"tool-result"),
+            "已答 question 须补 tool-result 销卡，实际 {kinds:?}"
+        );
+    }
+
+    /// 评审 I1 同根因（content 侧）：**仅 `name` 键、无 T3 形态**的已答 question
+    /// （非标形态问答——v1 证据 13 条里 1 条 multiple 变体）也须补 tool-result
+    /// 销卡；单查 v1 `tool` 键在 v2 下该分支恒 false，卡片永不销（F-3 回归锁）
+    #[test]
+    fn opencode2_question_part_name_key_alone_still_emits_tool_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
+                 time_updated INTEGER, version TEXT);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                 time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .unwrap();
+        // name 键 + 终态 + output，但 input 无 T3 形态（非标：options 缺 label 结构）
+        conn.execute(
+            "INSERT INTO session_message VALUES ('m1', ?1, 'assistant', 1, 100, 100,
+                '{\"time\":{\"created\":100},\"finish\":\"tool-calls\",\"content\":[\
+                    {\"type\":\"tool\",\"id\":\"c1\",\"name\":\"question\",\"state\":{\
+                        \"status\":\"completed\",\
+                        \"input\":{},\
+                        \"output\":\"{\\\"answers\\\":[[\\\"x\\\"]]}\"}}]}')",
+            [SID],
+        )
+        .unwrap();
+        let msgs = read_session_messages_with(tmp.path(), "opencode", SID, 200)
+            .unwrap()
+            .messages;
+        let kinds: Vec<&str> = msgs.iter().map(|m| m.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"tool-result"),
+            "name 键已答 question 须销卡（双键判据），实际 {kinds:?}"
+        );
     }
 
     /// 丁T1 复评 F-3：opencode 问答类部件在**终态**（completed / error）→ 追加一条

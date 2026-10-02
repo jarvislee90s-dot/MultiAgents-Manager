@@ -60,7 +60,7 @@
 
 | # | 项 | 预期 | 实测 | 证据 |
 |---|---|---|---|---|
-| 26 | 四家矩阵 E2E【自动】 | `cargo test --test create_e2e -- --ignored --nocapture --test-threads=1` 全过 | 2026-10-02 13:35 首跑 **2 passed**（四家 27.6/22.4/27.2/24.9s，全过）；17:24 六门禁终跑 **claude/codex/kimi 三家过**、opencode **锚定失败（spawn Ok、find_tui_pid 30s 超时）**——**上游大版本漂移**：opencode 批内自升 1.18.32→2.0.22（服务架构，进程无可附加控制台 err=5/6，启动形态全变），触发 AGENTS.md「工具大版本升级后注入规格复验」条款，归后续探测批（1.18.32 线上全链已两次实机验证）；17:28 复跑同签名再现（非瞬态），同归 opencode2 复验批 | tests/create_e2e.rs 文件头台账；~/.mam/create-evidence/ |
+| 26 | 四家矩阵 E2E【自动】 | `cargo test --test create_e2e -- --ignored --nocapture --test-threads=1` 全过 | 2026-10-02 13:35 首跑 **2 passed**（四家 27.6/22.4/27.2/24.9s，全过）；17:24 六门禁终跑 **claude/codex/kimi 三家过**、opencode **锚定失败（spawn Ok、find_tui_pid 30s 超时）**——**上游大版本漂移**：opencode 批内自升 1.18.32→2.0.22（服务架构，进程无可附加控制台 err=5/6，启动形态全变），触发 AGENTS.md「工具大版本升级后注入规格复验」条款，归后续探测批（1.18.32 线上全链已两次实机验证）；17:28 复跑同签名再现（非瞬态），同归 opencode2 复验批。**2026-10-02 D2 翻案**：opencode 2.x 适配批修复后复跑 **3 passed 0 failed**（matrix 四家 28.0/22.6/26.0/**22.6s** + http 全链 + claude 冒烟；opencode 腿 22.6s 与三家同量级）；修因二处——① 起窗加 `--standalone`（端口竞争陷阱）；② 消息读取 v2 派发（`session_v2`/`session_message`，stamp 命中路径）。探测定案见 `research/refs/phase2-消息注入/2026-10-02-opencode2-复验定案.md` 与本批 D0 定案 | tests/create_e2e.rs 文件头台账；~/.mam/create-evidence/ |
 | 27 | HTTP 全链 E2E【自动】 | POST create → status done → /sessions 新卡 → session-send 第二条 delivered → 审计三类行 | 13:53 首跑 **1 passed**（46.2s）；17:23 终跑复跑 **1 passed**（52.0s，第二条消息落地后 assistant 4 条） | 同上 |
 
 ## 七、用户真机验收（停点后执行）
