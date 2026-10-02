@@ -102,7 +102,7 @@
 - **需求**：无头进程的开启（spawn）与关闭（回收）全程**受控、可见、可中止**；turn 生命周期 = 进程生命周期（裁决 8）。
 - **输出与效果**：
   - **自然路径**：spawn → 流式回执 → 进程自然退出 → 回执终态；
-  - **超时**：watchdog（默认值 PZ/PC 探测回填）到点 kill **进程树**（Windows `taskkill /T`，避免孤儿子进程）+ 分阶段失败回执（stage=timeout）+ 可重试标注；
+  - **超时**：watchdog（**PZ 证据仅短 turn 8s/22s，定值证据不足——建议裁决门议 600s 起讨论**）到点 kill **进程树**（Windows `taskkill /T`，避免孤儿子进程）+ 分阶段失败回执（stage=timeout）+ 可重试标注；
   - **用户中止**：移动端回执卡「取消」按钮（turn 进行中可见）→ 主动 kill 进程树 + 审计 `action=headless_cancel` + 回执终态「已取消」；与 watchdog 互斥（先到者生效，回执注明由谁终止）；
   - **崩溃**：非零退出 → 回执含退出码 + stderr 尾行；**不自动重试**（重发是用户动作，回执卡一键重发按钮）；连续崩溃 N 次后的通道熔断提示（N 探测批建议）；
   - **MAM 退出/重启**：在飞无头进程优雅关闭（各工具对 kill 的落盘行为 = 探测项——重点 zcode SQLite 半 turn 落盘、codex queue 幂等性）；MAM 重启后无孤儿进程残留自检；
@@ -113,7 +113,7 @@
 ### H5 · 无头审批与权限档
 
 - **需求**：无头 turn 不因审批静默卡死（W6 既有「三机制必居其一」承诺沿用）；权限档位用户知情可控。
-- **输出与效果**：**claude** = `--permission-prompt-tool stdio` 双向（control_request → 移动端审批卡 → control_response；进程存活至 turn 结束——裁决 8 特例）；**codex exec / kimi / opencode** = 策略驱动（spawn 时给定 approval policy，turn 不阻塞；拒绝/需批准事件回流回执，可调策略重试）；**zcode** = `--mode` 档位（build/edit/plan/yolo ↔ MAM 展示名映射，PZ 定案；默认收紧档，yolo 显式）；**watchdog 兜底**覆盖全部 spawn 型通道；queue 通道（H8）的投递命令本身即短命进程，超时保护仅覆盖投递阶段，turn 执行阶段归 codex APP 自身（如实标注，不承诺三机制）。
+- **输出与效果**：**claude** = `--permission-prompt-tool stdio` 双向（control_request → 移动端审批卡 → control_response；进程存活至 turn 结束——裁决 8 特例）；**codex exec / kimi / opencode** = 策略驱动（spawn 时给定 approval policy，turn 不阻塞；拒绝/需批准事件回流回执，可调策略重试）；**zcode** = `--mode` 档位（build/edit/plan/yolo ↔ MAM 展示名映射；**PZ 定案：CLI `--prompt` 下默认档为 yolo——MAM 必须显式传收紧档，建议默认 build；plan→yolo 切换现粘滞疑云，yolo 入版本门控复核**）；**watchdog 兜底**覆盖全部 spawn 型通道；queue 通道（H8）的投递命令本身即短命进程，超时保护仅覆盖投递阶段，turn 执行阶段归 codex APP 自身（如实标注，不承诺三机制）。
 - **边界**：codex queue 通道无审批面（H8 边界重申）；本批不做权限档的移动端主动切换（三期 F3.1），仅 spawn 档位选择 + 展示。
 
 ### H6 · 回执、审计与版本门控（横切）
@@ -131,20 +131,20 @@
 - **输入**：session_id（`sess_...`）+ 消息文本 + 设备花名（gate 过闸时记录）；会话所属项目目录（读链路已有）。
 - **输出与效果**：版本门控探针通过后，spawn
   `ELECTRON_RUN_AS_NODE=1 <ZCode.exe> <安装目录>/resources/glm/zcode.cjs --prompt "<文本> [mobile <花名>]" --resume <sess_id> --cwd <项目> --mode <档位> --json`
-  → stdout JSON 解析 → 归一回执（末条 assistant 摘要 + token 用量 + 耗时 + sessionId）→ 移动端回执卡；回执附可见性提示文案「ZCode 应用重启/刷新后可见」（若 PZ 探测到实时/刷新可见即更新文案与路由元数据）。消息落库经读链路自然上板（手机/桌面 MAM 可见）。
-- **边界**：**在册工作区限定**（F2.3/D6——工作区不在册 → 明确回执拒绝，不盲发）；`--mode` 默认收紧档（PZ 定案具体档；yolo 需用户显式选择）；同会话同时至多一个无头 turn（进行中 → 排队回执）；APP 正在同会话跑 turn 时的行为（排队 / 如实报冲突）按 PZ 并发探测结论定案；多行 `\n` 归一与 W4 同口径；斜杠命令放行语义与终端注入一致（PZ 取证）。
+  → stdout JSON 解析 → 归一回执（末条 assistant 摘要 + token 用量 + 耗时 + sessionId）→ 移动端回执卡；回执附可见性提示文案「ZCode 应用重启/刷新后可见」（**PZ 实测：无头会话不自动入 APP 任务列表——提示文案维持，刷新/重启后可见性待三态核验**）。消息落库经读链路自然上板（手机/桌面 MAM 可见）。
+- **边界**：**在册工作区限定**（F2.3/D6——工作区不在册 → 明确回执拒绝，不盲发）；`--mode` 默认收紧档（**PZ 定案建议 build**；CLI 默认 yolo 必须显式覆盖；yolo 需用户显式选择）；同会话同时至多一个无头 turn（进行中 → 排队回执；**PZ 定案：zcode 无头不拒绝并发，串行由 MAM 自建**）；APP 正在同会话跑 turn 时的行为待 APP 端并发核验（USER-ASSIST）；多行 `\n` 归一与 W4 同口径；斜杠命令放行语义与终端注入一致（**PZ 定案：经无头通道不等效——按字面文本进模型，MAM 侧拦截或明示**）。
 
 ### H8 · codex APP 托管会话发消息
 
 - **需求**：手机对 **Codex 桌面 APP 托管**的会话发消息；CLI TUI 托管的会话维持既有终端注入不动（双形态分派）。
-- **输入**：session_id + 文本 + 花名；MAM session id ↔ codex thread id 映射（adapter 层定案，PC 探测回填映射规则）。
+- **输入**：session_id + 文本 + 花名；MAM session id ↔ codex thread id 映射（**PC 预定案：取 rollout 文件名 UUIDv7；session_index.jsonl 滞后 13 天实证不作 id 源**；`--thread` 双形态待夹具实测）。
 - **输出与效果**：主通道 `codex queue --thread <thread_id> --message "<文本> [mobile <花名>]"`——投递回执 = queue 命令退出码与输出（投递成功信号）；**被消费与执行结果信号**按 PC 探测定案（候选：会话文件追加侦测 / queue 输出流 / 心跳）；可见性 = APP 原生排队（预期实时，PC 确认）。daemon 不在场 → 探测定案处置（引导开启 / MAM 侧 `app-server daemon bootstrap` / 如实报错）。兜底通道 `codex exec resume <id> - <文本>`（PC 实测 0.156.1 单写者锁后行为；索引滞后如实提示）。
 - **边界**：不 attach 桌面线程（单写者锁，跟踪 #47193）；APP 内审批 UI 是 codex 自己的（本批不做 APP 会话的审批应答——W6 的 TUI 路径与无头策略路径都不适用于 queue 通道，如实标注）；queue 通道 experimental 状态入版本门控。
 
 ### H9 · WorkBuddy 注入（三路线，PW 探测后定案一条）
 
 - **需求**：手机对 WorkBuddy 会话发消息；通道存续性以探测为准，探不通就如实登记（工具差异如实呈现原则）。
-- **输入**：session_id（心跳 `interactive-<PID>` → codebuddy 会话 id 的映射在 PW 探测定案）+ 文本 + 花名。
+- **输入**：session_id（心跳 `interactive-<PID>` → codebuddy 会话 id 映射待 PW 夹具实测；**PW 已定案：每会话异端口拓扑、settings.json 无 token 键、独立 CLI 2.161.1 无头面全绿**）+ 文本 + 花名。
 - **输出与效果**（三路线）：
   - **路线 A · 内嵌端点**：定位内嵌 codebuddy 配置目录与 serve 端点 token → 调用定案端点（候选 `POST /jobs/:id/reply` 或 openapi 揭示的等价物）投递 → HTTP 响应 + 会话文件追加佐证回执；可见性 = APP 内实时（若端点即宿主运行时）。
   - **路线 B · 独立 CLI 复刻**：npm 独立 `codebuddy`（2.158）指向 WorkBuddy 配置目录，`codebuddy -p --resume <id> "<文本>"` 写入 WB 会话存储；可见性按 PW 实测（预期类判定 F：APP 刷新/重启后）；版本偏差（内嵌 2.115）入版本门控。
@@ -157,7 +157,7 @@
 - **输入**：项目路径（候选列表 = 在册工作区〔zcode recentProjects 口径，F3.8 前置感知〕∪ 看板快照项目 ∪ 手填完整路径——手填校验/黑名单/递归建目录复用 session-create spec §2 同款规则）+ 首句（可选，默认探针 `hi`——会话物化条件 PZ 复核）。
 - **输出与效果**：spawn
   `ELECTRON_RUN_AS_NODE=1 <ZCode.exe> <…>/zcode.cjs --prompt "<首句> [mobile <花名>]" --cwd <项目> [--surface desktop] --mode <档> --json`
-  （`--surface` 与新会话在 APP 任务列表出现条件的关系 = PZ 探测定案）→ 新 `sess_id` 回执 → 会话经读链路自然上板 → 可见性提示（判定 F 或升级态）；同项目已有活跃 zcode 会话 → 黄字提示（复用配对不确定门信号，不拦截）。**移动端入口**：新建表单的工具选择器新增 zcode 分组（本批独立交付；与四家 CLI 新建入口的 UI 融合留 session-create Phase C）。
+  （**PZ 定案：`--surface` desktop/terminal 无差异；无头新会话 35min 0 收录 APP 任务列表（索引存活下实测）——出现条件未复现，风险 10 降级路径候选启用，三态核验待用户**）→ 新 `sess_id` 回执 → 会话经读链路自然上板 → 可见性提示（判定 F 或升级态）；同项目已有活跃 zcode 会话 → 黄字提示（复用配对不确定门信号，不拦截）。**移动端入口**：新建表单的工具选择器新增 zcode 分组（本批独立交付；与四家 CLI 新建入口的 UI 融合留 session-create Phase C）。
 - **边界**：仅 zcode；路径黑名单同源文件预览黑名单（session-create 口径）；不做无头「删除/归档」会话；宪法登记动作见 §13。
 
 ### H11 · claude / kimi / opencode 无头（条件功能点，裁决门 ⑦ 定并入否）
@@ -240,12 +240,12 @@
 | 项 | 等级 | 依据 / 验证点 |
 |---|---|---|
 | dsh 桌面端同源与读侧盲区（H1） | A | 本机实测（v0.2.0-rc.2 运行中：host cmdline 指向 `~/.dsh`、sessions 当天在写、双令牌不匹配不上板）；令牌扩展 = C-P+ 回归测试交付 |
-| dsh 写通道线索（H2） | A- | host 监听 localhost 动态端口本机实测 + 仓库 MIT 开源本机在库（源码通读零障碍）；API 面定案 = PL |
-| OpenClaw 写通道（H2） | D | 无本机证据；PL 出一格结论 |
-| zcode 无头通道（H7/H10） | A- | CLI surface 本机实证（0.16.9 `--help` 全录）+ 判定 F（0.16.5 spike + 用户实机）；全链/并发/新建可见性 = PZ |
-| codex queue（H8） | B+ | 本机 0.156.1 子命令在场 + PR #39092 机制（daemon 同源桌面排队）+ issue 佐证；触达/回执/daemon 前置 = PC |
+| dsh 写通道（H2） | **A** | PL 定案（2026-10-03）：源码级 `session/prompt`（queue/steer+冷会话自动 resume）+ 19387 全 401 只读实测；19387 归属与版本漂移登记复核 |
+| OpenClaw 写通道（H2） | C | 本机未安装不可实测；官方文档级「有条件存在」（Gateway HTTP 默认关 + operator token + session key 路由） |
+| zcode 无头通道（H7/H10） | **A** | PZ 实测（run 20261003-022408）：resume 全链 8s / 并发不拒绝 / 回执 JSON 全集 / `--prompt` 默认 yolo / 斜杠不等效 / APP 任务列表 0 收录；重启可见性待三态核验 |
+| codex queue（H8） | B+ | 本机 0.160.0（漂移，queue 在场复验待夹具）+ PR #39092 机制（daemon 同源桌面排队）+ issue 佐证；**索引滞后 rollout 13 天实证**；触达/回执/daemon 前置 = PC（夹具待用户） |
 | codex exec resume 兜底（H8） | A- | issue #28259 实证；0.155.1+ 单写者锁后行为 = PC |
-| codebuddy CLI/serve（H9） | B | 官方文档（npm/--serve/jobs:reply/--resume/CODEBUDDY_CONFIG_DIR 共存说明）；本机端点实测 = PW |
+| codebuddy CLI/serve（H9） | B+ | 官方文档 + **2.161.1 隔离安装 flag 面实测**（`-p/-r/--serve/--output-format json`，内嵌 2.137.1）；端点实测 = PW（待用户开 APP） |
 | WorkBuddy 端点=serve 假设（H9） | C+ | 心跳 url/endpoint + cwd host-cli + 官方「WB 使用 CodeBuddy 引擎」；API 面 = PW |
 | claude/kimi/opencode 无头（H11） | B/C | 官方 flag 面（旧 spec W7 台账沿用）；并入否 = 裁决门 |
 | 交接导出（M10-a） | B | W9.1 决策表 12 项调研定档（四家 compact 一手核对）；组合模板 = C3 实机验证 |
@@ -291,13 +291,13 @@
 |---|---|---|---|---|
 | Claude Code | ✅ | H11 `-p --resume`（条件） | 注入实时 / 无头读链路可见 | 裁决门 |
 | Codex CLI（TUI 托管） | ✅ | —（不路由无头） | 实时 | ✅ 在产 |
-| Codex APP 托管 | — | H8 queue / exec resume 兜底 | APP 原生排队（预期实时） | 待 PC |
+| Codex APP 托管 | — | H8 queue / exec resume 兜底 | APP 原生排队（预期实时） | ⏳ 索引滞后实证；实测待 PC 夹具（附录 D） |
 | OpenCode | ✅ | H11 `run`（条件） | 官方 web 实时 | 裁决门 |
-| OpenClaw | — | H2 轻探测 | — | 待 PL |
+| OpenClaw | — | H2 轻探测 | — | ✅ PL 定案：写通道有条件存在（默认关，文档级） |
 | Kimi Code | ✅ | H11 `-p -S`（条件） | 刷新后 | 裁决门 |
-| WorkBuddy | — | H9 三路线 | 待 PW | 待 PW |
-| ZCode | — | H7 在册注入 / H10 无头新建 | 判定 F（升级待 PZ） | 待 PZ |
-| dsh | — | H2 探测（源码通读 + 端点实测） | 自带 UI（读侧上板由 H1 保障） | 读侧 H1；写侧待 PL |
+| WorkBuddy | — | H9 三路线 | 待 PW | ⏳ PW-1/4 定案（异端口拓扑 / 独立 CLI 2.161.1）；PW-2/3 待用户开 APP |
+| ZCode | — | H7 在册注入 / H10 无头新建 | APP 列表 0 收录实测（PZ）；重启可见性待核 | ✅ PZ 核心定案（附录 D） |
+| dsh | — | H2 探测（源码通读 + 端点实测） | 自带 UI（读侧上板由 H1 保障） | 读侧 H1 ✅（4c7b004/08ef620）；写侧 ✅ 源码级存在（附录 D） |
 
 ## 附录 B · 功能点进度表（随批次更新）
 
@@ -323,4 +323,23 @@
 | W10 keystroke 应急预案 | M10-c | 文档级不变 |
 | W13 一键 resume（B 兜底发半部） | §7 关账条款 | H7–H9 落地即补全 |
 | 远程新建会话 spec（zcode 排除条款） | H10 | APP 形态新增量；宪法裁决先例见 §13 |
+
+## 附录 D · Phase P+ 探测定案与裁决门议程（2026-10-03 Windows 段，随探测批回填）
+
+> 证据：`~/mam-probe-closure/20261003-022408/`（本地，不入库）；报告：`research/refs/phase2-消息注入/2026-10-03-app-injection-probe-report.md`（本地）。H1 交付：`4c7b004`（宿主判定扩桌面特征）/ `08ef620`（跳转聚焦，web 路径回落）。版本漂移：zcode 0.16.9（无）/ codex 0.160.0（+3.9）/ WB 2.137.1↔独立 2.161.1 / dsh 0.2.0.0。
+
+**定案摘要**（细节见报告与 pz/pc/pw/pl notes）：
+- **zcode**：无头新建零阻断（H10 可行）、resume 全链 8s、回执 JSON 全集可映射 H6、`--prompt` **默认 yolo 必须显式覆盖**、并发不拒绝（串行 MAM 自建）、斜杠不等效（字面进模型）、**无头会话不自动入 APP 任务列表**（索引存活下 35min 0 收录实测）；surface 无差异。
+- **codex**：thread id 取 rollout 文件名 UUIDv7；`session_index.jsonl` 滞后 13 天实证不作 id 源；queue/exec-resume 实测待 PC 夹具。
+- **WorkBuddy**：每会话异端口拓扑；settings.json 无 token；独立 CLI 2.161.1 无头面全绿（路线 B 命令面成立）；端点/投递/映射待 PW 夹具。
+- **OpenClaw**：写通道有条件存在（Gateway HTTP 默认关 + operator token；本机未装不可实测）。
+- **dsh**：写通道源码级存在（`POST /api/session/prompt`，queue/steer + 冷会话自动 resume；ACP stdio 完整）；19387 全 401 实测、归属未定案（版本漂移嫌疑）；集成建议 ACP stdio；POST 验证不可构造（无合法凭据，不做逆向）。
+
+**裁决门四事（待用户裁决）**：
+1. WorkBuddy 路线 A/B/C 定一条（待 PW-2/3 收口；初判：openapi+鉴权可得 → A，否则 B 实测，均不通 → C）；
+2. H11 三家 CLI 无头并入实现批与否；
+3. 验收线与超时定值（zcode 判定 F 增补降级预案——APP 列表 0 收录实测；watchdog 建议自 600s 起议，定值证据不足）；
+4. dsh 写通道结论是否启动 D14 出评（源码级「是」，流程见 §13）。
+
+**USER-ASSIST 待办**（补测后回填本附录与报告）：MAM 桌面 dsh 卡/跳转核验（02:47:59 重启旁证已录）；ZCode APP 三态可见性 + APP 内并发 + 档位佐证；Codex APP `pc-proj` 夹具会话；WorkBuddy `pw-proj` 测试会话。既有失败登记：`tests/preset_v2_test.rs` 5 失败（stash 复现＝先于本批，疑环境依赖）。
 | W11 推送网关 / W12 APK | —（三期收尾） | 裁决 16 不变 |
