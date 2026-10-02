@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Archive, Moon, Power, Sun, Volume2, VolumeX } from "lucide-react";
+import CreateSessionSheet from "./CreateSessionSheet";
 import {
   closeSession,
   connectEvents,
@@ -118,6 +119,9 @@ export default function Board({
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   // 提示音总开关（2026-09-19）：初值从 localStorage 读；只控提示音，不影响横幅/振动
   const [soundOn, setSoundOn] = useState<boolean>(() => getSoundEnabled());
+  // 新建会话面板开关（Phase C C11）：开 = 全屏浮层 CreateSessionSheet（条件渲染，
+  // 挂载即拉目录候选，关闭即卸载停轮询——无常驻成本）
+  const [createOpen, setCreateOpen] = useState(false);
   // 上次实际响铃记录：同会话 5 秒内重复翻转到绿色只响一次（防状态抖动连响）。
   // 口径照抄桌面 useNotification 的 lastNotified——消费者侧 UI 层防抖兜底，
   // 与 SessionWatcher 层的跃迁去重（铁律 4）不冲突：那层去的是「状态边沿」，
@@ -417,6 +421,15 @@ export default function Board({
         <span className="flex items-center gap-2">
           <button
             type="button"
+            data-testid="create-open"
+            onClick={() => setCreateOpen(true)}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+            aria-label="新建会话"
+          >
+            ＋ 新建
+          </button>
+          <button
+            type="button"
             onClick={onOpenHistory}
             className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
             aria-label="历史会话"
@@ -613,6 +626,18 @@ export default function Board({
             </li>
           ))}
         </ul>
+      )}
+
+      {/* 新建会话面板（Phase C C11）：全屏浮层。受管名单（P8d host 载荷）与看板快照
+          透传——done 后等新卡上板即以真实 Session 复用 onOpenSession（App.setSelected）
+          跳详情，不新造路由 */}
+      {createOpen && (
+        <CreateSessionSheet
+          enabledTools={enabledTools}
+          boardSessions={data?.sessions ?? []}
+          onOpenSession={onOpenSession}
+          onClose={() => setCreateOpen(false)}
+        />
       )}
     </div>
   );
