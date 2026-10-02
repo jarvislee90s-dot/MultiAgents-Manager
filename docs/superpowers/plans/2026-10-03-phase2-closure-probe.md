@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为「APP 类消息注入」实现批产出五类探测定案（zcode 七问 / codex 五问 / WorkBuddy 五问 / OpenClaw+dsh 写通道 / Mac 段），并先行交付 H1（dsh 桌面端读侧接入）代码修复。
+**Goal:** 为「APP 类消息注入」实现批产出五类探测定案（zcode 八问 / codex 五问 / WorkBuddy 五问 / OpenClaw+dsh 写通道 / Mac 段），并先行交付 H1（dsh 桌面端读侧接入）代码修复。
 
 **Architecture:** 探测任务零产品代码（证据落盘 `~/mam-probe-closure/<run-id>/`，结论不超证据）；唯一代码任务是 H1——扩展 `monitor/dsh/mod.rs` 的单源宿主判定核 `cmdline_is_dsh_host`（进程发现 + 宿主存活两处共用零漂移），跳转分派复用 `win32::focus_window_for_pid` / `app_activation` 既有基建。
 
@@ -182,8 +182,8 @@ git commit -m "feat(dsh): H1 桌面端宿主判定接入——判定门扩 dsh-d
             r"C:\Users\bunny\.dsh\profiles\desktop",
         ]);
         let web = cmd(&["node", "dsh", "web"]);
-        assert!(super::cmdline_is_dsh_desktop_host(&desktop));
-        assert!(!super::cmdline_is_dsh_desktop_host(&web));
+        assert!(cmdline_is_dsh_desktop_host(&desktop));
+        assert!(!cmdline_is_dsh_desktop_host(&web));
     }
 ```
 
@@ -280,13 +280,13 @@ git commit -m "feat(dsh): H1 桌面端跳转聚焦——win32 按 pid / macOS �
 
 ---
 
-### Task 3: PZ · zcode 七问（探测）
+### Task 3: PZ · zcode 八问（探测）
 
 **Files:** Create: `$EV/pz/`（每个子问一节追加进 `$EV/pz/notes.md` + 原始输出文件）
 
-约定：`ZC()` 展开为 `ELECTRON_RUN_AS_NODE=1 "D:/Program Files/ZCode/ZCode.exe" "D:/Program Files/ZCode/resources/glm/zcode.cjs"`；临时项目 `$EV/pz-proj`（mkdir）。
+约定：`ZC()` 展开为 `ELECTRON_RUN_AS_NODE=1 "D:/Program Files/ZCode/ZCode.exe" "D:/Program Files/ZCode/resources/glm/zcode.cjs"`；临时项目 `$EV/pz-proj`（mkdir）。八问 = ①无头新建出现条件 ②resume 全链 ③可见性三态 ④surface 差异 ⑤并发 ⑥`--json` 回执 ⑦`--mode` ⑧斜杠与版本。
 
-- [ ] **Step 1: PZ-0 夹具**——无头新建会话（同时回答七问之④的「新会话」半问）
+- [ ] **Step 1: PZ-0 夹具 + 问①新建出现条件（H10 依赖）**——无头新建会话
 
 ```bash
 EV=~/mam-probe-closure/<run-id>; mkdir -p $EV/pz $EV/pz-proj
@@ -294,7 +294,7 @@ ELECTRON_RUN_AS_NODE=1 "D:/Program Files/ZCode/ZCode.exe" "D:/Program Files/ZCod
   --prompt "hi [mam-probe]" --cwd "$EV/pz-proj" --mode build --json 2>&1 | tee $EV/pz/pz0-new.json
 ```
 
-Expected: JSON 输出；提取 `sessionId`（`sess_...`）记入 notes.md。若报「工作区不在册/需信任」类错误 → **本身就是定案数据**（新目录不可无头开局的边界），照录。
+Expected: JSON 输出；提取 `sessionId`（`sess_...`）记入 notes.md。若报「工作区不在册/需信任」类错误 → **本身就是问①的定案数据**（新目录不可无头开局的边界，H10 候选列表口径依据），照录。
 
 - [ ] **Step 2: PZ-1 无头 resume 全链**（用 PZ-0 的 sess_id）
 
@@ -303,7 +303,7 @@ ELECTRON_RUN_AS_NODE=1 "D:/Program Files/ZCode/ZCode.exe" "D:/Program Files/ZCod
   --prompt "probe-2 reply in one word [mam-probe]" --resume <sess_id> --cwd "$EV/pz-proj" --mode build --json 2>&1 | tee $EV/pz/pz1-resume.json
 ```
 
-Expected: JSON 含新回合；记注入→落盘时延（对照 `~/.zcode/cli/` 或 v2 库文件 mtime 前后差）。
+Expected: JSON 含新回合；记注入→落盘时延（对照 `~/.zcode/cli/` 或 v2 库文件 mtime 前后差）**与 turn 总时长**（JSON 时长字段或墙钟差——H4 watchdog 默认值的定案数据，裁决门回填）。
 
 - [ ] **Step 3: PZ-2 可见性三态**——APP 运行中，每 2s 采 `~/.zcode/v2/tasks-index.sqlite*` mtime 共 60s：
 
@@ -327,7 +327,13 @@ grep -c "$(date +%Y-%m-%d)" $EV/pz/pz2-mtime.txt
 
 - [ ] **Step 9: PZ-8 版本基线**——P0 已采 CLI 版本；`--version` 与 APP 产品版本对照记入；`--help` 全文存 `$EV/pz/help.txt`（flag 面漂移基线）。
 
-- [ ] **Step 10: 清场**——`powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | ? { $_.CommandLine -match 'zcode.cjs' } | % { Stop-Process -Id $_.ProcessId -Force }"`（只杀探测起的；APP 本体 ZCode.exe 主进程不动）。notes.md 收尾：七问逐条一行结论。
+- [ ] **Step 10: 清场（安全口径：按探测路径过滤，勿按 zcode.cjs 过滤——会误杀 ZCode APP 自身的 app-server 子进程）**
+
+```bash
+powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -match 'mam-probe-closure' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
+```
+
+notes.md 收尾：八问逐条一行结论。
 
 ---
 
@@ -352,9 +358,10 @@ codex queue --thread <session_id> --message "probe-1 [mam-probe]" 2>&1 | tee $EV
 
 Expected: 退出码与输出照录；随后 60s 内每 5s `tail` rollout 是否追加该消息；USER-ASSIST：APP 内是否出现排队消息并执行（记录「APP 原生排队实时性」）。
 
-- [ ] **Step 3: PC-2 回执形态**——`codex queue` 的 stdout 是否有 runId/确认；`codex agents --help` 与 `codex agents`（若在场）能否观测队列状态；结论写「投递成功/被消费信号」定案。
+- [ ] **Step 2b: PC-1b queue 触达（运行态）**——USER-ASSIST：让该 APP 会话跑一个长任务（如 `list the files in this directory one by one, slowly`）；任务进行中 agent 再 queue 一条 `probe-1b [mam-probe]` → 记录行为（排队等待 turn 结束？插队？报错？）与 APP 内呈现，写入 notes.md「空闲/运行态差异」。
+——`codex queue` 的 stdout 是否有 runId/确认；`codex agents --help` 与 `codex agents`（若在场）能否观测队列状态；结论写「投递成功/被消费信号」定案。
 
-- [ ] **Step 4: PC-3 exec resume 兜底**——同一 APP 会话：①APP 开着时 `codex exec resume <id> - "probe-2 [mam-probe]" --skip-git-repo-check -C "$EV/pc-proj" 2>&1 | tee $EV/pc/pc3-exec-open.txt`；②USER-ASSIST 关 APP 后重复一次（pc3-exec-closed.txt）。记录单写者锁报错形态/落盘成功/索引滞后。
+- [ ] **Step 4: PC-3 exec resume 兜底**——同一 APP 会话：①APP 开着时 `codex exec resume <id> - "probe-2 [mam-probe]" --skip-git-repo-check -C "$EV/pc-proj" 2>&1 | tee $EV/pc/pc3-exec-open.txt`；②USER-ASSIST 关 APP 后重复一次（pc3-exec-closed.txt）。记录单写者锁报错形态/落盘成功/索引滞后。flag 形态以 `codex exec resume --help` 实测为准（`-C` 为 codex 全局工作目录 flag）。
 
 - [ ] **Step 5: PC-4 id 映射**——比对三处 id：rollout 文件名 UUID / rollout 首行 session_id / MAM 侧 codex 会话 id（读 `~/.codex/session_index.jsonl` 尾行）；`--thread` 试 UUID 与「会话名」两种形态各一次。写映射规则定案。
 
@@ -467,6 +474,6 @@ git commit -m "docs(spec): Phase P+ 探测定案回填 + 裁决门议程（探�
 
 ## 自审记录（writing-plans Self-Review）
 
-1. **Spec 覆盖**：spec §5 探测任务书 PZ 七问→Task 3（Step 1-9 逐问）；PC 五问→Task 4；PW 五问→Task 5；PL→Task 6/7；Mac 段三部分→Mac-1/2/3；H1 两半→Task 1/2；报告与裁决门→Task 8。H2 的 OpenClaw 半天格与 dsh 源码通读各自独立任务。无缺口。
+1. **Spec 覆盖**：spec §5 探测任务书 PZ 八问→Task 3（新建出现条件 = Step 1，resume/可见性/surface/并发/json/mode/斜杠版本 = Step 2-9）；PC 五问（含空闲+运行态）→Task 4（PC-1b 补运行态）；PW 五问→Task 5；PL→Task 6/7；Mac 段三部分→Mac-1/2/3；H1 两半→Task 1/2；报告与裁决门→Task 8。无缺口。
 2. **占位符扫描**：探测步骤均给出具体命令与期望证据；`<run-id>`/`<sess_id>`/`<session_id>`/`<PORT>`/`<TOK>` 为运行时变量，均标注来源步骤。无 TBD。
 3. **类型/签名一致性**：`cmdline_is_dsh_host(&[OsString]) -> bool`、`cmdline_is_dsh_desktop_host(&[OsString]) -> bool`、`find_dsh_desktop_host_pid(&System) -> Option<u32>`、`focus_window_for_pid(u32)`、`app_bundle_from_exe(&str) -> Option<String>` 与在产签名一致（Task 2 Step 4 引用处参数形态核对过）。

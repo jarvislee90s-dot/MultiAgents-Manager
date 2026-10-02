@@ -74,19 +74,19 @@
 ## 5. 第一部分 · APP 类注入与无头通道（H1–H11，按执行顺序）
 
 > **探测任务书编号**（任务级计划另立文档，纪律沿用 `probe/remote-session-create` 八条总纪律：run-id 临时目录、只碰自建会话、日志追加、结束清场、不修代码、结论不超证据、Windows 段先读 `win-console-inject-probe` 技能、环境变量隔离构造首装态）：
-> **PZ** = zcode 七问 · **PC** = codex 五问 · **PW** = WorkBuddy 五问 · **PL** = OpenClaw + dsh 写通道 · **Mac 段** = ① 三家 APP 在 Mac 的对齐探测（PZ/PW/PC 核心项）② M7 三通道注入终验 ③ session-create Mac 段核心项交叉验证。
+> **PZ** = zcode 八问（resume 全链 / 可见性三态+surface / 并发 / `--json` 回执 / `--mode` / 斜杠 / 版本 / **无头新建会话出现条件**〔H10 依赖〕）· **PC** = codex 五问（queue 触达〔**空闲+运行态各测**〕/ 回执形态 / exec resume 兜底 / id 映射 / daemon 前置）· **PW** = WorkBuddy 五问 · **PL** = OpenClaw + dsh 写通道 · **Mac 段** = ① 三家 APP 在 Mac 的对齐探测（PZ/PW/PC 核心项）② M7 三通道注入终验 ③ session-create Mac 段核心项交叉验证。
 
 ### H1 · dsh 桌面端读侧接入（前置件，裁决 11）
 
 - **需求**：DeepSeek 桌面 harness 的会话照常上板——修复宿主判定对桌面端的盲区（现存问题，与注入无关，先行交付）。
-- **输入**：dsh 进程发现层（`monitor::process` 双令牌门）扩令牌：`--expose-internals` / `dsh-desktop-host` / `\.dsh\profiles\desktop`（任一命中即宿主在场）；会话数据源不变（`~/.dsh` 同源，零迁移）。
+- **输入**：dsh 宿主判定的单源核 `monitor/dsh/mod.rs::cmdline_is_dsh_host`（进程发现与 `host::tool_host_alive_in` 共用，零漂移）扩桌面特征：**任一参数含 `dsh-desktop-host`（包路径子串）或以 `\.dsh\profiles\desktop` / `/.dsh/profiles/desktop` 结尾**即桌面宿主（`--expose-internals` 为 Electron 通用旗子，单独过弱不作独立判据——实测桌面 cmdline 必含前两特征）；会话数据源不变（`~/.dsh` 同源，零迁移）。
 - **输出与效果**：桌面端会话照常上板（projcache + zstd 解析链**零改动复用**）；三色状态/标题预览口径同网页版；跳转 = 聚焦桌面 APP 窗口（复用 `window/` 聚焦链：Windows win32 / macOS 应用激活；网页版的 `dsh_tab` 浏览器路径保留给网页宿主）；带回归测试（网页版 cmdline 夹具 × 桌面端 cmdline 夹具双守卫）。
 - **边界**：只修读侧；写通道归 H2；平台聚焦能力缺失时降级「仅上板不跳转」如实标注；dsh rc 阶段迭代快，令牌与数据格式漂移由风险 11 兜底。
 
 ### H2 · OpenClaw / dsh 写通道探测
 
 - **需求**：探测「有没有可集成写通道」。OpenClaw 半天级只出一格结论；dsh = **源码通读 + 端点实测**（开源仓库本机在库，不用逆向）。
-- **输入**：OpenClaw = sessions CLI / gateway API 面（本地 gateway 在场实测）；dsh = ①直读仓库源码（`packages/host` 桌面 host 的本地 API——动态端口发现机制、路由、鉴权；`api`/`sdk`/`acp`/`webhook`/`jobs` 包的编程面）；②对自建会话相关端点的只读 GET 实测。
+- **输入**：OpenClaw = sessions CLI / gateway API 面（本地 gateway 在场实测）；dsh = ①直读仓库源码（`packages/host` 桌面 host 的本地 API——动态端口发现机制、路由、鉴权；`api`/`sdk`/`acp`/`webhook`/`jobs` 包的编程面）；②对自建会话相关端点的只读 GET 实测（源码证实存在投递端点且目标为自建会话时，可 POST 验证一次）。
 - **输出与效果**：两家各出一格结论「存在写通道（是/否）+ 依据 + 集成形态草图」；dsh 候选形态预填：桌面 host 本地 API（若含会话驱动端点）/ ACP / SDK。「是」→ 追加实现批功能点（届时补需求节），「否」→ 延后表登记复核时机。
 - **边界**：本节只探测不实现；OpenClaw gateway 深做 / dsh 插件生态展开仍属非范围；宪法 D14「dsh 写通道另评」以本探测结论出评（流程见 §13）。
 
@@ -265,7 +265,7 @@
 | 8 | codex queue / codebuddy serve 标 experimental/Beta | 版本门控 + 分阶段失败回执 + issue 跟踪清单（#28259/#47193/#25914/#33556） |
 | 9 | kill 进程树对半 turn 的落盘损伤 | 探测各工具 kill 行为；取消回执提示「可能未完整落盘」 |
 | 10 | zcode 无头新建会话 APP 不显示（surface/scope 条件未知） | PZ 探测出现条件；不满足则 H10 降级「仅手机/桌面 MAM 可见」如实提示 |
-| 11 | dsh rc 阶段迭代快（桌面端令牌/端口/数据格式漂移） | 令牌多特征 OR 匹配兜底（三特征任一命中）；既有版本探针口径沿用；漂移如实登记复核时机 |
+| 11 | dsh rc 阶段迭代快（桌面端令牌/端口/数据格式漂移） | 两强特征 OR 匹配（`dsh-desktop-host` 子串 / `profiles\desktop` 后缀，实测 cmdline 必含其一）；既有版本探针口径沿用；漂移如实登记复核时机 |
 
 ## 13. 宪法与在产代码对照
 
@@ -279,7 +279,7 @@
 | 在产模块 | 现状 | 本批动作 |
 |---|---|---|
 | `inject/routing.rs` | APP 形态一律判不可注入（含测试断言） | C1 改为按工具分派新通道；既有 app() 不可注入测试随批翻转语义 |
-| `monitor::process`（dsh 双令牌门） | 只认 node cmdline `dsh`+`web` | H1 扩三令牌 OR 匹配；网页版夹具保留 + 桌面端夹具新增 |
+| `monitor/dsh/mod.rs::cmdline_is_dsh_host`（单源判定门，进程发现与宿主存活共用） | 只认 node cmdline `dsh`+`web` | H1 扩桌面特征 OR 匹配；网页版夹具保留 + 桌面端夹具新增 |
 | `window/`（聚焦链） | macOS applescript/iterm/terminal/tmux/dsh_tab + Windows win32 | H1 跳转聚焦桌面窗口复用该链；平台缺口降级「仅上板」如实标注 |
 | `inject/queue.rs`（终端队列） | 黄排队/可输入态 flush 语义 | 不动；无头按会话串行为独立层，路由保证同会话单通道族 |
 | `database`（写审计/枚举） | action 枚举在产 | 扩 `headless`/`headless_cancel`（migration 随批） |
