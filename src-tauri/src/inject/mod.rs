@@ -9,6 +9,9 @@ pub mod confirm;
 // 新建会话状态机内核（spec §4，C4 进程锚定段起）：起窗后按「目标目录 cwd + 新进程」
 // 发现 TUI pid；C5 弹窗处置状态机追加于本文件。
 pub mod create;
+// 物化发现（C6）：首句注入后按工具落盘口径产出候选 session id（显式 base 路径参数
+// ——tempdir 可测；opencode 三件套拷贝红线），候选由调用方 confirm 戳终判。
+pub mod create_discover;
 // 新建会话路径校验纯核（spec §2，C2）：只判不建（递归创建在状态机校验段）；黑名单双表
 // ——SENSITIVE_DIRS 凭据表全局段匹配（策略扩展，见模块文档）+ CREATE_SYSTEM_DIRS 系统目录表。
 pub mod create_path;

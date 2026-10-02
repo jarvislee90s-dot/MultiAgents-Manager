@@ -1125,6 +1125,8 @@ mod tests {
             tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（flush 路径不消费配对打标）
+            pairing_counter: Box::new(Vec::new),
             injector,
             confirm_probe,
             // 丁T3：对话框在场探针缝——本模块测试不触控制类注入守卫（恒 None =
@@ -1134,6 +1136,8 @@ mod tests {
             capability_table: crate::inject::capability::new_table(),
             // R5 一键 resume spawn 缝（Task 11）：flush 路径不消费，注 no-op 桩（零真开窗）
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（flush 路径不消费）
+            create_hub: std::sync::Arc::new(crate::remote::server::CreateTaskHub::stub()),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
         }

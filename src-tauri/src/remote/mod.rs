@@ -213,6 +213,21 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
     std::sync::Arc::new(server::RemoteState {
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
+        // C7 配对不确定信号缝（spec §5）：运行进程 (工具, 项目) 表 = sysinfo 全量
+        // 快照 + 桌面跳转门同款收集函数（同一实现单点，桌面门零改动）。非 Windows
+        // 无该收集实现（桌面配对不确定门本就仅 Windows 消费）→ 空表 = 不宣称歧义
+        // （诚实缺省）。端点层据本表计同键 ≥2 判 pairingAmbiguous/pairingHint。
+        pairing_counter: Box::new(|| {
+            #[cfg(windows)]
+            {
+                let system = sysinfo::System::new_all();
+                crate::commands::session::running_projects_from_processes(&system)
+            }
+            #[cfg(not(windows))]
+            {
+                Vec::new()
+            }
+        }),
         store: pairing::DeviceStore::global(),
         // M7 Task 5（方案 A）：注入器生产装配——消费方 flush_one / session-send 直发；
         // Task 6 已接线：api_router 注册 session-send 等路由 + serve() 挂 spawn_flush_loop
@@ -220,6 +235,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // R5 一键 resume spawn 缝（Task 11）：生产 = 真 spawn 终端（wt / conhost /
         // macOS AppleScript）；session-open 端点消费
         resume_spawner: std::sync::Arc::new(crate::inject::resume::spawn_terminal),
+        // C6 远程新建会话任务簿 + create 域缝束：真物化发现（真实家目录）、真 pid
+        // 锚定（30s）、真 PATH 安装探测、真步距睡眠；任务簿内存态
+        create_hub: std::sync::Arc::new(server::CreateTaskHub::production()),
         archive_source: Box::new(crate::database::query_archive_all),
         archive_delete: std::sync::Arc::new(crate::database::delete_archive),
         // A1 写入确认缝（M9R Task 5）：生产 = 会话消息读路径查 24 字符尾戳（与

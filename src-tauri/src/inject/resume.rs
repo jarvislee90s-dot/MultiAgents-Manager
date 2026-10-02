@@ -144,9 +144,10 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
 }
 
 /// 新建会话起窗规格：裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境红线；
-/// S2 实测 conhost/WT 双宿主 4/4 透传，形态A=spawn 显式设 env）。
-/// macOS（MacosApplescript 变体）归 Mac 后补批：脚本内联 `env K=V ` 前缀（Mac 探测 M2 实证）。
-#[cfg(windows)]
+/// S2 实测 conhost/WT 双宿主 4/4 透传，形态A=spawn 显式设 env）。C6 起**跨平台**：
+/// 纯载荷构造与 [`build_spawn_command_windows`] 同口径（wt=None → conhost 载荷），
+/// 端点假缝不真 spawn、非 Windows 构建可编译可测；macOS 真 spawn 变体归 Mac 后补批
+/// （脚本内联 `env K=V ` 前缀，Mac 探测 M2 实证）。
 pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> SpawnSpec {
     let mut spec = build_spawn_command_windows(wt, cwd, tool);
     if let SpawnSpec::Windows { env, .. } = &mut spec {

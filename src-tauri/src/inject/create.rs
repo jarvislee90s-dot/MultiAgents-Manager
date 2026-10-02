@@ -205,6 +205,57 @@ pub const MAX_MISSED_ROUNDS: usize = 15;
 /// 单场景处置尝试上限（C5 评审 I1）：同屏反复在场 = 键可能未生效，无上限会导致
 /// 无界发键且 C6 单飞额度被永久占用；超限按 `dialog_stuck` 失败终止
 pub const MAX_DISPOSAL_ATTEMPTS_PER_SCENARIO: usize = 3;
+/// 物化等待预算（C6）：轮数上限 × [`SCREEN_POLL_STEP_MS`] = 15 × 2s = 30s。预算以
+/// 「轮数 × 步距」表达而非墙钟 deadline——真缝下与 30s 等价，而步距睡眠由真缝闭包
+/// 承载（见 [`SCREEN_POLL_STEP_MS]` 消费契约），测试缝零真实时钟依赖（C6 报告登记）。
+pub const MATERIALIZE_MAX_ROUNDS: usize = 15;
+
+/// 新建会话工具白名单（spec §2：tool ∈ 四家）。工具门第一道与起窗裸命令共用
+/// 同一表——命令是固定白名单裸名、无参数拼接，resume.rs「注入面说明」的
+/// 「cmd /k 元字符解析面不接触远端输入」由此成立。
+pub const CREATE_TOOLS: &[&str] = &["claude", "codex", "kimi", "opencode"];
+
+/// PATH 安装探测（C6 工具门第三道）：Windows 用 `where <tool>`（spec §2 口径
+/// 「安装探测 = PATH 解析（`where <tool>`）」——cmd 按 PATHEXT 解析，npm 全局垫片
+/// 只有 `claude.cmd`/无扩展名壳而无 `.exe`，目录扫描 `<tool>.exe` 会把 claude/
+/// codex/opencode 误判未安装（C6 评审 C1 本机实测：`where claude` 命中
+/// `claude.cmd`）；`where` 与 `cmd /k` 的解析口径一致——探测通过 ⇔ 起窗可起）。
+/// 非 Windows 保持 PATH 目录裸名扫描。进程级 OnceLock 缓存
+/// （`resume::windows_terminal_path` 先例：首调一次探测，四家一并缓存）。白名单外
+/// 工具防御性 false。
+pub fn tool_installed(tool: &str) -> bool {
+    static CACHE: std::sync::OnceLock<std::collections::HashMap<&'static str, bool>> =
+        std::sync::OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        CREATE_TOOLS
+            .iter()
+            .map(|&t| (t, probe_cli_on_path(t)))
+            .collect()
+    });
+    map.get(tool).copied().unwrap_or(false)
+}
+
+/// 单工具探测（无缓存——缓存层在 [`tool_installed`]）。
+fn probe_cli_on_path(tool: &str) -> bool {
+    if cfg!(windows) {
+        std::process::Command::new("where")
+            .arg(tool)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| !l.trim().is_empty())
+            })
+    } else {
+        std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
+    }
+}
 
 /// 处置键序（2026-09-27 探测定案 §4/§5 红线；账本管「认屏」，键序是引擎域常量）：
 /// - claude 信任框默认 ❯ No, exit（危险默认）——直按 Enter=退出，必须 ↓+Enter；
