@@ -60,6 +60,18 @@ pub enum SpawnSpec {
         /// 进程工作目录（生产 spawner 经 `Command::current_dir` 消费——conhost 回退
         /// 无 `-d` 等价物，cwd 靠继承落在项目目录；wt 分支同设无害）
         cwd: String,
+        /// 新建会话场景专用环境变量（C3）：create 显式设 `DISABLE_AUTOUPDATER=1`
+        /// （spec §4.2 环境红线，防工具自更新打断起窗）；resume 场景恒空（零行为
+        /// 变更）。macOS（MacosApplescript 变体）走 AppleScript 脚本内联 env，
+        /// 归 Mac 后补批。
+        env: Vec<(String, String)>,
+        /// 新建会话场景专用环境**剥离**前缀（C8 实机定案）：命中前缀的继承变量逐一
+        /// `env_remove`——create 会话是**独立一等会话**，不得继承启动者（MAM 宿主/
+        /// E2E 测试进程）的 Claude 会话管道变量：冒烟实证 `CLAUDE_CODE_CHILD_SESSION`
+        /// 被继承后，起窗的 claude 自认子会话（跳过信任框 + **关闭 transcript 落盘**
+        /// → 会话文件永不物化 +「会话卡上板」全链失真）。resume 场景恒空（零行为
+        /// 变更）。ANTHROPIC_* 不在剥离面（可能是用户真实配置）。
+        env_rm_prefixes: Vec<String>,
         /// CREATE_NEW_CONSOLE 标记：conhost 回退必须自带（0x10）才开新控制台窗；
         /// wt 自开新标签无此需求
         new_console: bool,
@@ -110,6 +122,9 @@ pub fn resume_command(tool: &str, session_id: &str) -> Option<String> {
 /// spawner 经 current_dir 消费（见 [`spawn_terminal`]）：
 /// - 有 wt：`<wt 路径> -d <cwd> cmd /k <resume>`（wt 自开新标签并落在 cwd）；
 /// - 无 wt：`conhost.exe cmd /k <resume>` + CREATE_NEW_CONSOLE（全新控制台窗）。
+///
+/// C3 起末参亦承接**新建会话的裸工具名**（create 复用本构造后覆写 env，见
+/// [`build_create_spawn_spec`]）——`<resume>` 占位读作「resume 命令或裸工具名」。
 pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) -> SpawnSpec {
     match wt {
         Some(path) => SpawnSpec::Windows {
@@ -122,15 +137,74 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
                 resume.to_string(),
             ],
             cwd: cwd.to_string(),
+            env: Vec::new(),
+            env_rm_prefixes: Vec::new(),
             new_console: false,
         },
         None => SpawnSpec::Windows {
             program: "conhost.exe".to_string(),
             args: vec!["cmd".to_string(), "/k".to_string(), resume.to_string()],
             cwd: cwd.to_string(),
+            env: Vec::new(),
+            env_rm_prefixes: Vec::new(),
             new_console: true,
         },
     }
+}
+
+/// 新建会话起窗命令表（`{tool}` 占位工具 id）。
+///
+/// **与 [`RESUME_TABLE`] 的关键差别**：opencode 在 2.x 下必须加 `--standalone`。
+/// 依据（复验定案 §2 端口竞争陷阱，Mac C 组实证 + Win 同参实测）：
+/// 2.x 默认形态 = 前台 TUI + **独立后台服务**；当已有服务占用默认端口时，裸
+/// `opencode` 不出 TUI，而进 `Starting background server...` 静默重试环——Phase C
+/// create E2E opencode 腿 17:23/17:28 失败（find_tui_pid 30s 超时）的根因即此
+/// （用户常驻服务在场）。`--standalone` = 私有 server，TTY 下必出 TUI、不依赖
+/// 服务/端口。resume 侧不受影响（复验定案 §7，2026-10-03 **常驻服务在场**条件
+/// 取证：裸 `--session` TUI 正常载入目标会话，免疫端口陷阱——与 create 裸命令
+/// 行为不一致属实证事实，机制未探明不做超证据结论）。
+///
+/// 注：`opencode session list` 在 2.x 是「current project」作用域（D0-3），
+/// 与发现层无关（发现层走 db 直读）。
+const CREATE_COMMAND_TABLE: &[(&str, &str)] = &[("opencode", "opencode --standalone")];
+
+/// 按工具查新建会话的起窗命令（未入表 → 裸 `{tool}`）。目前仅 opencode 需特化。
+pub fn create_command(tool: &str) -> String {
+    CREATE_COMMAND_TABLE
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .map(|(_, cmd)| (*cmd).to_string())
+        .unwrap_or_else(|| tool.to_string())
+}
+
+/// 新建会话起窗规格：工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境红线；
+/// S2 实测 conhost/WT 双宿主 4/4 透传，形态A=spawn 显式设 env）。C6 起**跨平台**：
+/// 纯载荷构造与 [`build_spawn_command_windows`] 同口径（wt=None → conhost 载荷），
+/// 端点假缝不真 spawn、非 Windows 构建可编译可测；macOS 真 spawn 变体归 Mac 后补批
+/// （脚本内联 `env K=V ` 前缀，Mac 探测 M2 实证）。
+/// 起窗命令经 [`create_command`] 取（opencode 走 `--standalone`，见该表 doc）。
+/// create 起窗的会话上下文剥离前缀（C8 冒烟实机定案；`env_rm_prefixes` 字段 doc
+/// 有根因全文）：命中前缀的继承变量在 spawn 时逐一 `env_remove`。只剥 **Claude
+/// 会话管道**变量（子会话标记/入口/SSE/effort 等——都是「本次会话」的上下文，
+/// 对新建会话是污染源）；**ANTHROPIC_* 不剥**（可能是用户真实配置）。
+pub const CREATE_ENV_RM_PREFIXES: &[&str] =
+    &["CLAUDECODE", "CLAUDE_CODE_", "CLAUDE_PID", "CLAUDE_EFFORT"];
+
+pub fn build_create_spawn_spec(wt: Option<&str>, cwd: &str, tool: &str) -> SpawnSpec {
+    let mut spec = build_spawn_command_windows(wt, cwd, &create_command(tool));
+    if let SpawnSpec::Windows {
+        env,
+        env_rm_prefixes,
+        ..
+    } = &mut spec
+    {
+        *env = vec![("DISABLE_AUTOUPDATER".to_string(), "1".to_string())];
+        *env_rm_prefixes = CREATE_ENV_RM_PREFIXES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+    spec
 }
 
 /// `where wt` 探测 Windows Terminal（进程级缓存 OnceLock，approve.rs VERSION_CACHE
@@ -139,7 +213,7 @@ pub fn build_spawn_command_windows(wt: Option<&str>, cwd: &str, resume: &str) ->
 /// where 命中的真实 exe 不受影响）。`where.exe` 是 System32 上的真实可执行文件
 /// （非 cmd 内建），裸名直 spawn 即可。
 #[cfg(windows)]
-fn windows_terminal_path() -> Option<String> {
+pub(crate) fn windows_terminal_path() -> Option<String> {
     static WT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     WT.get_or_init(|| {
         std::process::Command::new("where")
@@ -163,8 +237,91 @@ fn windows_terminal_path() -> Option<String> {
 
 /// 非 Windows 平台无 wt 语义（构造层恒 None；该平台走 AppleScript 分支）。
 #[cfg(not(windows))]
-fn windows_terminal_path() -> Option<String> {
+pub(crate) fn windows_terminal_path() -> Option<String> {
     None
+}
+
+/// `where <工具>` 输出选行（纯函数可测，P1-1 安全修复 2026-10-03）：取**绝对
+/// 路径形态（`X:\` 盘符起）且扩展名属 cmd 可执行类**（.exe/.cmd/.bat/.com）的
+/// 首行。两道过滤各有实因：① where 从其自身 cwd 起搜，cwd 命中行是裸文件名
+/// （调用侧已把 where 的 cwd 固定到 SystemRoot，仍只认绝对路径行双保险）；
+/// ② npm 目录同前缀多形态并存（无扩展 sh 脚本 / .cmd / .ps1）——cmd 对
+/// path-qualified 无扩展名不可执行、对 .ps1 不认，跳过这两类行。
+/// 非 Windows 生产面不消费（spawn 臂 cfg 门控；测试两平台都跑）——allow(dead_code)
+/// 防 Linux 构建告警（run_osascript_wait 同款先例）。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pick_where_hit(out: &str) -> Option<String> {
+    out.lines()
+        .map(str::trim)
+        .find(|l| {
+            let lower = l.to_ascii_lowercase();
+            let exec_ext = [".exe", ".cmd", ".bat", ".com"]
+                .iter()
+                .any(|e| lower.ends_with(e));
+            let b = l.as_bytes();
+            let abs_drive = b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && (b[2] == b'\\' || b[2] == b'/');
+            exec_ext && abs_drive
+        })
+        .map(String::from)
+}
+
+/// 工具名 → 安装绝对路径（`where` 解析；仅 Windows，P1-1）。**每次现查不缓存**：
+/// 工具安装/迁移后立即生效（对照 [`windows_terminal_path`] 的 OnceLock 先例——
+/// wt 位置稳定可缓存，工具 bin 会动）。where 的 cwd 固定 SystemRoot：where 从
+/// 自身 cwd 起搜，不固定会把 MAM 进程 cwd 下的同名可执行体当首命中。
+#[cfg(windows)]
+fn resolve_tool_path(name: &str) -> Option<String> {
+    let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    std::process::Command::new("where")
+        .arg(name)
+        .current_dir(sysroot)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| pick_where_hit(&String::from_utf8_lossy(&o.stdout)))
+}
+
+/// `/k` 载荷安全加固（纯函数，resolver 缝注入可测，P1-1）。威胁：`cmd /k claude`
+/// 由 cmd 解析 `claude` 时**当前目录优先于 PATH**，而 spawn 的 current_dir 恰是
+/// 用户项目目录——外部 clone 的仓库带恶意 `claude.cmd` 即可在该目录起会话时执行
+/// 任意代码。修法（在 [`spawn_terminal`] 生产执行层做，纯构造层不变——缝测试保
+/// 持机器无关）：定位 args 中 `/k`（rposition，wt 前缀链唯一），其后载荷分词——
+/// 首 token 为裸名 → resolver（生产 = [`resolve_tool_path`]）解析出的**绝对路径**
+/// 替换并**分体传参**（路径含空格时由 Command 逐参引号包裹；单字符串内嵌引号会
+/// 经 MSVCRT 反斜杠转义，cmd 不认）。首 token 已是路径形态 / resolver 未命中 /
+/// 无 `/k` → 原样返回（配合 spawn 侧 NoDefaultCurrentDirectoryInExePath 兜底）。
+/// 非 Windows 生产面不消费（同 [`pick_where_hit`] 的 cfg_attr 先例）。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn harden_cmd_payload(args: &[String], resolver: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let Some(k) = args.iter().rposition(|a| a.eq_ignore_ascii_case("/k")) else {
+        return args.to_vec();
+    };
+    let Some(payload) = args.get(k + 1) else {
+        return args.to_vec();
+    };
+    let toks: Vec<&str> = payload.split_whitespace().collect();
+    let Some(first) = toks.first().copied() else {
+        return args.to_vec();
+    };
+    let bare_name = !first.contains('\\') && !first.contains('/') && !first.contains(':');
+    if !bare_name {
+        return args.to_vec();
+    }
+    match resolver(first) {
+        Some(abs) => {
+            let mut out = args[..=k].to_vec();
+            out.push(abs);
+            out.extend(toks[1..].iter().map(|s| s.to_string()));
+            out
+        }
+        None => args.to_vec(),
+    }
 }
 
 /// shell 单引号安全包装（macOS cd 参数用）：`'…'` 形态，内嵌单引号按 POSIX `'\''`
@@ -474,11 +631,36 @@ pub fn spawn_terminal(spec: &SpawnSpec) -> Result<(), String> {
             program,
             args,
             cwd,
+            env,
+            env_rm_prefixes,
             new_console,
         } => {
             use std::os::windows::process::CommandExt;
+            // P1-1 安全加固（评审 2026-10-03，在生产执行层做——纯构造层与缝测试
+            // 保持机器无关）：`cmd /k <裸工具名>` 的 cmd 解析**当前目录优先于
+            // PATH**，而 spawn 的 current_dir 恰是用户项目目录——外部仓库携带同名
+            // 恶意 .cmd/.exe 即可劫持起窗载荷。双层防御：
+            // ① 裸名 → `where` 绝对路径替换 + 分体传参（见 harden_cmd_payload doc）；
+            // ② NoDefaultCurrentDirectoryInExePath=1（cmd/CreateProcess 均认）——
+            //    解析失败的裸名也不再落回当前目录，残余路径只剩 PATH
+            let args = harden_cmd_payload(args, resolve_tool_path);
             let mut cmd = std::process::Command::new(program);
-            cmd.args(args);
+            cmd.args(&args);
+            cmd.env("NoDefaultCurrentDirectoryInExePath", "1");
+            // 新建会话环境红线（C3，spec §4.2）：DISABLE_AUTOUPDATER=1 等显式注入
+            // 子进程环境；resume 规格 env 恒空（空迭代器 no-op，零行为变更）
+            cmd.envs(env.iter().map(|(k, v)| (k, v)));
+            // 会话上下文剥离（C8 实机定案，env_rm_prefixes 字段 doc）：命中前缀的
+            // 继承变量逐一 env_remove——create 规格借此切断启动者的 Claude 会话
+            // 管道（CLAUDE_CODE_CHILD_SESSION 等）；resume 恒空 no-op
+            if !env_rm_prefixes.is_empty() {
+                for (k, _) in std::env::vars_os() {
+                    let key = k.to_string_lossy().to_string();
+                    if env_rm_prefixes.iter().any(|p| key.starts_with(p.as_str())) {
+                        cmd.env_remove(&key);
+                    }
+                }
+            }
             // conhost 回退的 cwd 继承点（wt 同设无害：-d 已双保险）
             if !cwd.is_empty() {
                 cmd.current_dir(cwd);
@@ -606,6 +788,7 @@ mod tests {
             args,
             cwd,
             new_console,
+            ..
         } = wt
         else {
             panic!("wt 在场必须构造 Windows 变体");
@@ -634,6 +817,7 @@ mod tests {
             args,
             cwd,
             new_console,
+            ..
         } = conhost
         else {
             panic!("无 wt 必须构造 Windows 变体（conhost）");
@@ -652,6 +836,207 @@ mod tests {
         assert!(new_console, "conhost 必须 CREATE_NEW_CONSOLE 开新窗");
     }
 
+    /// C3：新建会话起窗规格——裸工具命令 + DISABLE_AUTOUPDATER=1（spec §4.2 环境
+    /// 红线）；C8 实机补充：env_rm_prefixes 携带会话上下文剥离面；resume 既有规格
+    /// env/env_rm_prefixes 恒空（零回归锚，既有 resume 行为不变）
+    #[cfg(windows)]
+    #[test]
+    fn create_spawn_spec_carries_env_and_bare_command() {
+        let s = build_create_spawn_spec(None, r"C:\proj", "claude");
+        match s {
+            SpawnSpec::Windows {
+                program,
+                args,
+                env,
+                env_rm_prefixes,
+                ..
+            } => {
+                assert_eq!(program, "conhost.exe");
+                assert_eq!(args, vec!["cmd", "/k", "claude"]);
+                assert!(env
+                    .iter()
+                    .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"));
+                // 会话上下文剥离面（C8 冒烟定案）：CLAUDECODE 与 CLAUDE_CODE_ 必在
+                assert!(env_rm_prefixes.contains(&"CLAUDECODE".to_string()));
+                assert!(env_rm_prefixes.contains(&"CLAUDE_CODE_".to_string()));
+            }
+            _ => panic!("Windows 平台必须是 Windows 变体"),
+        }
+        let w = build_create_spawn_spec(Some(r"C:\wt\wt.exe"), r"C:\proj", "codex");
+        match w {
+            SpawnSpec::Windows { args, env, .. } => {
+                assert_eq!(args, vec!["-d", r"C:\proj", "cmd", "/k", "codex"]);
+                assert!(env
+                    .iter()
+                    .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"));
+            }
+            _ => panic!(),
+        }
+        // resume 既有规格 env / env_rm_prefixes 恒空（零回归锚，wt/conhost 双分支都
+        // 锁）；super:: 显式路径防被同名测试遮蔽
+        match super::build_spawn_command_windows(None, r"C:\p", "claude --resume x") {
+            SpawnSpec::Windows {
+                env,
+                env_rm_prefixes,
+                ..
+            } => {
+                assert!(env.is_empty());
+                assert!(env_rm_prefixes.is_empty());
+            }
+            _ => panic!(),
+        }
+        match super::build_spawn_command_windows(
+            Some(r"C:\wt\wt.exe"),
+            r"C:\p",
+            "claude --resume x",
+        ) {
+            SpawnSpec::Windows {
+                env,
+                env_rm_prefixes,
+                ..
+            } => {
+                assert!(env.is_empty());
+                assert!(env_rm_prefixes.is_empty());
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// D2：新建会话起窗命令表——opencode 2.x 必须带 `--standalone`（端口竞争陷阱，
+    /// 复验定案 §2）；其余工具保持裸命令（零回归）
+    #[test]
+    fn create_command_table_pins_standalone_for_opencode() {
+        assert_eq!(create_command("opencode"), "opencode --standalone");
+        // 未入表工具 = 裸工具名（零回归）
+        assert_eq!(create_command("claude"), "claude");
+        assert_eq!(create_command("codex"), "codex");
+        assert_eq!(create_command("kimi"), "kimi");
+        // 起窗载荷确实带上（跨平台构造层，conhost 分支）
+        match build_create_spawn_spec(None, "/tmp/p", "opencode") {
+            SpawnSpec::Windows { args, .. } => {
+                assert_eq!(args, vec!["cmd", "/k", "opencode --standalone"]);
+            }
+            _ => panic!("conhost 分支"),
+        }
+    }
+
+    /// resume 表的 opencode 命令**不带** `--standalone`（复用既有服务是期望行为；
+    /// `--session` 回放已两次实机验证）——防与 create 表混用
+    #[test]
+    fn resume_table_opencode_stays_bare() {
+        assert_eq!(
+            resume_command("opencode", "abc").as_deref(),
+            Some("opencode --session abc")
+        );
+    }
+
+    /// P1-1：`where` 输出选行——绝对路径 ∧ cmd 可执行扩展名双过滤
+    #[test]
+    fn pick_where_hit_filters_form_and_extension() {
+        // 正序命中：绝对路径 .cmd 首行即取
+        assert_eq!(
+            pick_where_hit("C:\\npm\\claude.cmd\nC:\\npm\\claude.ps1\n"),
+            Some(r"C:\npm\claude.cmd".to_string())
+        );
+        // 裸文件名行（where 从其 cwd 命中的形态）与无扩展 sh 脚本行跳过，
+        // 后续绝对 .exe 行可取
+        assert_eq!(
+            pick_where_hit("claude\nC:\\npm\\claude\nC:\\npm\\claude.exe\n"),
+            Some(r"C:\npm\claude.exe".to_string())
+        );
+        // 全部不可执行形态（.ps1 / 无扩展）→ None
+        assert_eq!(
+            pick_where_hit("C:\\npm\\claude.ps1\nC:\\npm\\claude\n"),
+            None
+        );
+        // 相对路径行不认（双保险：调用侧已固定 where 的 cwd）
+        assert_eq!(pick_where_hit("npm\\claude.cmd\n"), None);
+        assert_eq!(pick_where_hit(""), None);
+    }
+
+    /// P1-1：`/k` 载荷加固——裸名解析为绝对路径并分体传参（含空格路径由
+    /// Command 逐参引号，不经 MSVCRT 内嵌引号转义）
+    #[test]
+    fn harden_cmd_payload_absolutizes_bare_name_and_splats() {
+        let args: Vec<String> = vec!["cmd".into(), "/k".into(), "claude --resume abc".into()];
+        let out = harden_cmd_payload(&args, |n| {
+            (n == "claude").then(|| r"C:\npm dir\claude.cmd".to_string())
+        });
+        assert_eq!(
+            out,
+            vec![
+                "cmd".to_string(),
+                "/k".to_string(),
+                r"C:\npm dir\claude.cmd".to_string(),
+                "--resume".to_string(),
+                "abc".to_string(),
+            ],
+            "裸名 → 绝对路径替换 + 载荷分体传参"
+        );
+        // wt 前缀链：/k 定位不受前缀参数影响
+        let wt: Vec<String> = vec![
+            "-d".into(),
+            r"E:\proj".into(),
+            "cmd".into(),
+            "/k".into(),
+            "opencode --standalone".into(),
+        ];
+        let out = harden_cmd_payload(&wt, |n| {
+            (n == "opencode").then(|| r"C:\bin\opencode.exe".to_string())
+        });
+        assert_eq!(
+            out,
+            vec![
+                "-d".to_string(),
+                r"E:\proj".to_string(),
+                "cmd".to_string(),
+                "/k".to_string(),
+                r"C:\bin\opencode.exe".to_string(),
+                "--standalone".to_string(),
+            ]
+        );
+    }
+
+    /// P1-1：`/k` 载荷加固的原样返回支——已路径形态 / resolver 未命中 / 无 `/k`
+    #[test]
+    fn harden_cmd_payload_leaves_path_forms_unresolved_and_no_k() {
+        // 首 token 已是路径形态（盘符）→ 不改（防二次解析）
+        let path_form: Vec<String> = vec![
+            "cmd".into(),
+            "/k".into(),
+            r"C:\x\claude.cmd --resume a".into(),
+        ];
+        assert_eq!(
+            harden_cmd_payload(&path_form, |_| Some(r"C:\evil\x.cmd".into())),
+            path_form
+        );
+        // resolver 未命中（工具不可解析）→ 原样（残余防线 = 环境变量）
+        let bare: Vec<String> = vec!["cmd".into(), "/k".into(), "claude --resume a".into()];
+        assert_eq!(harden_cmd_payload(&bare, |_| None), bare);
+        // 无 /k / /k 后无载荷 → 原样
+        let no_k: Vec<String> = vec!["-d".into(), r"E:\p".into(), "cmd".into()];
+        assert_eq!(
+            harden_cmd_payload(&no_k, |_| Some(r"C:\x.exe".into())),
+            no_k
+        );
+        let k_tail: Vec<String> = vec!["cmd".into(), "/k".into()];
+        assert_eq!(
+            harden_cmd_payload(&k_tail, |_| Some(r"C:\x.exe".into())),
+            k_tail
+        );
+    }
+
+    /// P1-1 真机锚（仅 Windows）：`where cmd` 必解析出 System32 绝对路径——
+    /// resolve_tool_path 的 IO 链路（cwd 固定 SystemRoot + pick_where_hit）走通
+    #[cfg(windows)]
+    #[test]
+    fn resolve_tool_path_finds_cmd_on_windows() {
+        let hit = resolve_tool_path("cmd").expect("cmd 必在 PATH（System32）");
+        assert!(
+            hit.to_ascii_lowercase().ends_with("cmd.exe"),
+            "解析产物应为 cmd.exe 绝对路径：{hit}"
+        );
+    }
     /// macOS 构造层（跨平台可测）：cd '<cwd>' && <resume> 进脚本 + activate 置前；
     /// 转义路径——反斜杠/双引号经 applescript_escape，内嵌单引号经 POSIX '\'' 转义
     #[test]

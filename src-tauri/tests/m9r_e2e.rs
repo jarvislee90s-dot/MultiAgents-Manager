@@ -1034,6 +1034,9 @@ async fn e2e_http_full_chain() {
         store: DeviceStore::memory(), // 内存库——零接触真实 ~/.mam/mam.db
         injector: Arc::new(multi_agents_manager_lib::inject::engine::RealInjector),
         resume_spawner: Arc::new(|_: &multi_agents_manager_lib::inject::resume::SpawnSpec| Ok(())),
+        // C6：create 缝束（任务簿+发现/pid/工具探测/步距缝）——本 E2E 不触
+        // /session-create，注测试 stub（零真实 FS 零真实睡眠）
+        create_hub: Arc::new(multi_agents_manager_lib::remote::server::CreateTaskHub::stub()),
         // 历史会话区缝（spec 2026-09-20-mobile-archive-history §6.1）：E2E 不触归档
         // 路径，注空桩。本文件 #![cfg(windows)]——macOS 开发机上编译为空，漏补会在
         // Windows 测试构建上 E0063 missing fields（评审 Critical，2026-09-20）
@@ -1062,6 +1065,8 @@ async fn e2e_http_full_chain() {
         tunnel_hosts_source: Box::new(|| Some(Vec::new())),
         via_hosts_source: Box::new(|| None),
         home_source: Box::new(|| None),
+        // C7：配对计数缝——本 E2E 不触配对打标/提示路径，注空表桩（零真实进程扫描）
+        pairing_counter: Box::new(Vec::new),
         // 丁T3：对话框在场探针——实机 E2E 装配**生产同源实现**（真屏读，非假体）；
         // 本用例不触控制类注入守卫，此处只为构造完整性
         dialog_probe: Arc::new(|_sid: &str, pid: u32| {

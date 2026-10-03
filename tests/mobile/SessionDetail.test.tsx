@@ -142,6 +142,7 @@ function installFetch() {
         JSON.stringify({
           host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
           enabledTools: [],
+          installedTools: ["claude", "codex", "kimi", "opencode"],
         }),
         { status: 200 }
       );
@@ -1166,6 +1167,7 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
           JSON.stringify({
             host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
             enabledTools: [],
+            installedTools: ["claude", "codex", "kimi", "opencode"],
           }),
           { status: 200 }
         );
@@ -1878,6 +1880,7 @@ describe("SessionDetail：活状态流（T1）", () => {
             JSON.stringify({
               host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
               enabledTools: ["claude"],
+              installedTools: ["claude", "codex", "kimi", "opencode"],
             }),
             { status: 200 }
           );

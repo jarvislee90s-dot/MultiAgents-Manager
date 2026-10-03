@@ -61,6 +61,9 @@ export interface HostInfo {
 export interface HostPayload {
   host: HostInfo;
   enabledTools: string[];
+  /** 安装探测结果（P1-9，2026-10-03）：新建会话四家中 PATH 探测命中的子集——
+   * 前端「未安装」置灰的数据源（与 enabledTools 分列：受管 ≠ 已安装） */
+  installedTools: string[];
 }
 
 export async function fetchHost<T = HostPayload>(): Promise<T | null> {
@@ -1129,4 +1132,144 @@ export async function unhideSession(sessionId: string): Promise<void> {
     body: sessionActionBody(sessionId),
   });
   if (!r.ok) throw new ApiError(r.status, `session-unhide ${r.status}`);
+}
+
+// ==== Phase C C10：远程新建会话客户端（spec §3/§5；三端点）====
+
+/** 新建会话目标目录候选（GET /create-projects 载荷条目，与 Rust `CreateProjectDto`
+ *  camelCase 序列化逐字段对应，勿漂移）：path = 展示形态（后端已剥尾分隔符、滤除
+ *  非 ASCII 与 create_path 拒绝码命中项——「不给不能用的候选」）；
+ *  lastActiveAt = RFC3339 UTC（秒精度，列表按它降序）；
+ *  tools = 该项目近 N 天出现过的工具 id；
+ *  activeTools = 其中**当前有活跃会话**的子集（C11 黄字「该项目已有该工具的活跃
+ *  会话」判据，≥1 语义，与 pairingAmbiguous 分层） */
+export interface CreateProjectView {
+  path: string;
+  lastActiveAt: string;
+  tools: string[];
+  activeTools: string[];
+}
+
+/** GET /create-projects 载荷 */
+export interface CreateProjectsPayload {
+  projects: CreateProjectView[];
+}
+
+/** 拉取新建会话的目标目录候选（days = 活跃回溯窗，后端 clamp 1–365，缺省 7）。
+ *  403 → null（设备失效回配对页，fetchArchivedSessions 同口径）；其余非 2xx /
+ *  网络异常 → 抛 ApiError（调用方可静默降级为手填路径，不阻塞表单） */
+export async function fetchCreateProjects(days = 7): Promise<CreateProjectsPayload | null> {
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/create-projects?days=${days}`);
+  } catch (e) {
+    throw new ApiError(null, `create-projects 网络异常: ${String(e)}`);
+  }
+  if (r.status === 403) return null; // 设备失效 → 回配对页
+  if (!r.ok) throw new ApiError(r.status, `create-projects ${r.status}`);
+  return r.json() as Promise<CreateProjectsPayload>;
+}
+
+/** POST /session-create 成功回执（200）：taskId = 内存任务簿 id（供
+ *  /session-create/status 轮询；MAM 重启即失效 → 404）；hasActiveSession = 黄字
+ *  信号（同工具同目录已有活跃会话——**不拦截**，C11 据此展示提示） */
+export interface CreateSessionAccepted {
+  taskId: number;
+  hasActiveSession: boolean;
+}
+
+/** 新建会话的**业务失败**（同步校验链拒绝，非异常，C11 分診文案）：
+ *  - bad_request（400）：reasonCode ∈ tool_unavailable / empty / not_absolute /
+ *    non_ascii_path / not_local_volume / bad_windows_form / blacklisted /
+ *    mkdir_failed；reason 为后端定位详情（黑名单命中段+所属表等，修复批 I1——
+ *    展示层 reason 优先于本地码表）；裸 bad_request（入参超长等）无该二键；
+ *  - conflict（409）：全局单飞占用（已有非终态创建任务——终态 done/failed
+ *    不占额度）。 */
+export type CreateSessionError =
+  { kind: "bad_request"; reasonCode?: string; reason?: string } | { kind: "conflict" };
+
+/** 发起远程新建会话任务（异步管线：起窗 → 处置弹窗 → 注入首句 → 等物化；管线
+ *  detached 推进，不依赖手机持续在线）。200 → 任务已占单飞并立即回执，进度轮询
+ *  [`fetchCreateStatus`]；400/409 → **返回类型化结果**（不抛异常）；
+ *  其余非 2xx（403 设备失效 / 5xx）与网络异常 → 抛 ApiError（既有 POST 惯例，
+ *  错误体 JSON 解析进 data）。 */
+export async function createSession(body: {
+  tool: string;
+  projectPath: string;
+  firstMessage?: string;
+}): Promise<CreateSessionAccepted | CreateSessionError> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // firstMessage 缺省时 JSON.stringify 自动省略该键（后端缺省探针 hi）
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-create 网络异常: ${String(e)}`);
+  }
+  if (r.status === 400) {
+    // reasonCode 是 400 的分診依据（工具门/路径码/mkdir）——解析失败则缺省，
+    // 调用方按通用校验失败文案兜底（fetchFile/sessionApprove 惯例）
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理注入页等）：reasonCode 缺省 */
+    }
+    const raw = data?.reasonCode;
+    const rawReason = data?.reason;
+    return {
+      kind: "bad_request",
+      reasonCode: typeof raw === "string" ? raw : undefined,
+      reason: typeof rawReason === "string" ? rawReason : undefined,
+    };
+  }
+  if (r.status === 409) return { kind: "conflict" };
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体：data 保持 null，按状态码兜底 */
+    }
+    throw new ApiError(r.status, `session-create ${r.status}`, data);
+  }
+  return (await r.json()) as CreateSessionAccepted;
+}
+
+/** 新建任务快照（GET /session-create/status 载荷，与 Rust `CreateTaskShared`
+ *  camelCase 序列化逐字段对应，勿漂移）：
+ *  phase ∈ opening_terminal / dialog_handling / injecting_first /
+ *  waiting_materialize / done / failed（终态 done|failed 释放单飞额度）；
+ *  detail = 中文现场/提示（失败原因，或成功终态附带的 codex hooks 信任提示；
+ *  缺省 null）；sessionId 仅成功终态有值；spawnedPid = 起窗后锚定的 TUI pid
+ *  （锚定前 null）。 */
+export interface CreateStatusPayload {
+  phase: string;
+  detail: string | null;
+  sessionId: string | null;
+  spawnedPid: number | null;
+}
+
+/** 任务失效（404 no_task）：MAM 重启丢内存任务簿，或 taskId 非法——C11 文案
+ *  「任务已失效（主机可能重启），请重试」 */
+export type CreateStatusError = { kind: "no_task" };
+
+/** 轮询新建任务进度（2s 节奏由 C11 页面层驱动，本层无状态——
+ *  fetchSessionMessages 同纪律）。404 → {kind:"no_task"}（类型化结果，不抛）；
+ *  其余非 2xx / 网络异常 → 抛 ApiError。 */
+export async function fetchCreateStatus(
+  taskId: number
+): Promise<CreateStatusPayload | CreateStatusError> {
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-create/status?taskId=${taskId}`);
+  } catch (e) {
+    throw new ApiError(null, `session-create/status 网络异常: ${String(e)}`);
+  }
+  if (r.status === 404) return { kind: "no_task" };
+  if (!r.ok) throw new ApiError(r.status, `session-create/status ${r.status}`);
+  return (await r.json()) as CreateStatusPayload;
 }

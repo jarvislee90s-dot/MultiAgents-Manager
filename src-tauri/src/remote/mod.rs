@@ -213,6 +213,21 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
     std::sync::Arc::new(server::RemoteState {
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
+        // C7 配对不确定信号缝（spec §5）：运行进程 (工具, 项目) 表 = sysinfo 全量
+        // 快照 + 桌面跳转门同款收集函数（同一实现单点，桌面门零改动）。非 Windows
+        // 无该收集实现（桌面配对不确定门本就仅 Windows 消费）→ 空表 = 不宣称歧义
+        // （诚实缺省）。端点层据本表计同键 ≥2 判 pairingAmbiguous/pairingHint。
+        pairing_counter: Box::new(|| {
+            #[cfg(windows)]
+            {
+                let system = sysinfo::System::new_all();
+                crate::commands::session::running_projects_from_processes(&system)
+            }
+            #[cfg(not(windows))]
+            {
+                Vec::new()
+            }
+        }),
         store: pairing::DeviceStore::global(),
         // M7 Task 5（方案 A）：注入器生产装配——消费方 flush_one / session-send 直发；
         // Task 6 已接线：api_router 注册 session-send 等路由 + serve() 挂 spawn_flush_loop
@@ -220,6 +235,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // R5 一键 resume spawn 缝（Task 11）：生产 = 真 spawn 终端（wt / conhost /
         // macOS AppleScript）；session-open 端点消费
         resume_spawner: std::sync::Arc::new(crate::inject::resume::spawn_terminal),
+        // C6 远程新建会话任务簿 + create 域缝束：真物化发现（真实家目录）、真 pid
+        // 锚定（30s）、真 PATH 安装探测、真步距睡眠；任务簿内存态
+        create_hub: std::sync::Arc::new(server::CreateTaskHub::production()),
         archive_source: Box::new(crate::database::query_archive_all),
         archive_delete: std::sync::Arc::new(crate::database::delete_archive),
         // A1 写入确认缝（M9R Task 5）：生产 = 会话消息读路径查 24 字符尾戳（与
@@ -809,6 +827,7 @@ pub fn remote_status() -> serde_json::Value {
     let mut st = host_payload(
         || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
         crate::database::dao::agent_tool::enabled_tool_ids,
+        installed_create_tools,
         boot_id(),
     );
     // 原 status 键并入同一返回值（消费方：设置页 RemoteSection + 移动端 /host 直调）
@@ -928,6 +947,7 @@ fn boot_id() -> &'static str {
 fn host_payload(
     saved_name: impl FnOnce() -> Option<String>,
     enabled_tools: impl FnOnce() -> Vec<String>,
+    installed_tools: impl FnOnce() -> Vec<String>,
     boot_id: &str,
 ) -> serde_json::Value {
     let name = display_host_name(saved_name(), sysinfo::System::host_name);
@@ -942,6 +962,10 @@ fn host_payload(
             "bootId": boot_id,
         },
         "enabledTools": enabled_tools(),
+        // 安装探测（P1-9 补实现，2026-10-03 用户裁决）：spec §2「未安装/未启用置灰
+        // （数据源 = enabledTools ∩ 安装探测）」的前端数据源；探测单点 =
+        // inject::create::tool_installed（与 session-create 工具门第三道同源）
+        "installedTools": installed_tools(),
     })
 }
 
@@ -951,8 +975,19 @@ fn host_info() -> serde_json::Value {
     host_payload(
         || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
         crate::database::dao::agent_tool::enabled_tool_ids,
+        installed_create_tools,
         boot_id(),
     )
+}
+
+/// 新建会话四家的安装探测结果（P1-9 补实现；探测单点 tool_installed 与
+/// session-create 工具门第三道同源——两道门不会漂移出不同答案）
+fn installed_create_tools() -> Vec<String> {
+    crate::inject::create::CREATE_TOOLS
+        .iter()
+        .filter(|t| crate::inject::create::tool_installed(t))
+        .map(|t| t.to_string())
+        .collect()
 }
 
 // ============================================================
@@ -3036,6 +3071,7 @@ mod host_tests {
         let st = host_payload(
             || Some("JARVIS-Win".to_string()),
             || vec!["claude".to_string(), "codex".to_string()],
+            || vec!["claude".to_string()],
             "boot-test-1",
         );
         let host = st.get("host").expect("remote_status 应含 host 字段");
@@ -3056,6 +3092,12 @@ mod host_tests {
             st.get("enabledTools").unwrap(),
             &serde_json::json!(["claude", "codex"]),
             "enabledTools 应透传 enabled_tool_ids 的结果（按种子顺序）"
+        );
+        // installedTools（P1-9 补实现）：安装探测结果随载荷透传（前端置灰数据源）
+        assert_eq!(
+            st.get("installedTools").unwrap(),
+            &serde_json::json!(["claude"]),
+            "installedTools 应透传安装探测结果"
         );
         // bootId（书签修复）：随 host 载荷下发，移动端据此守卫「随进程消失」的
         // 客户端态——非空即可（值随机，不锁内容）
