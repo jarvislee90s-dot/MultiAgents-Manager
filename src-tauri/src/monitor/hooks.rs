@@ -546,15 +546,7 @@ fn register_hooks_in_file(
                     let has_ours = entry
                         .get("hooks")
                         .and_then(|h| h.as_array())
-                        .map(|cmds| {
-                            cmds.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .map(|s| command_is_ours(s, &markers))
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false);
+                        .is_some_and(|cmds| cmds.iter().any(|h| hook_command_is_ours(h, &markers)));
                     if has_ours
                         && entry.get("matcher").and_then(|m| m.as_str()) != Some(expected_matcher)
                     {

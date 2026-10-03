@@ -14,6 +14,11 @@
 //!   - **屏面有变化但未翻转**（数字被半消费：焦点动了/勾了别的行）= **异常状态**
 //!     （用户拍板）→ 中止引导人工，不记开关不回退（回退走位会在未知状态上继续发键）
 //!
+//! # 表的所有权
+//!
+//! 表挂在 `RemoteState` 上（per-state，[`Table`]/[`new_table`]）——端点测试各自
+//! 独立表避免并行探测写回互相污染；生产装配共享同一 Arc（全局一份）。
+//!
 //! 与 kimi 的数字禁令（'2'+Enter 误批准实证）不冲突：那是 kimi 批准框场景；本表
 //! 仅 claude 多选 toggle，且每次数字都带翻转核验。
 
@@ -31,29 +36,15 @@ pub enum DigitToggle {
     Unsupported,
 }
 
-/// 生产全局表（应用生命周期共享；测试用 per-state 表隔离——见 new_table）
-static TABLE: Mutex<Option<HashMap<(String, String), DigitToggle>>> = Mutex::new(None);
-
-/// **独立表句柄**（测试隔离用）：per-state 持有，避免端点测试并行共享全局表导致
-/// 探测写回互相污染（2026-10-03 评审实施中发现的不稳定根因）。
+/// 能力开关表句柄：`RemoteState` 持有（per-state；生产装配共享同一 Arc）。
 pub type Table = std::sync::Arc<Mutex<HashMap<(String, String), DigitToggle>>>;
 
-/// 新建独立空表。
+/// 新建空表。
 pub fn new_table() -> Table {
     std::sync::Arc::new(Mutex::new(HashMap::new()))
 }
 
 /// 取当前 (tool, version) 的能力值（无记录 → [`DigitToggle::Unknown`]）。
-pub fn digit_toggle(tool: &str, version: &str) -> DigitToggle {
-    let mut guard = TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    let table = guard.get_or_insert_with(HashMap::new);
-    table
-        .get(&(tool.to_string(), version.to_string()))
-        .copied()
-        .unwrap_or(DigitToggle::Unknown)
-}
-
-/// 表版本：从指定表取（RemoteState 持有 per-state 表；生产装配共享全局表的克隆）。
 pub fn digit_toggle_in(table: &Table, tool: &str, version: &str) -> DigitToggle {
     let guard = table.lock().unwrap_or_else(|e| e.into_inner());
     guard
@@ -62,30 +53,10 @@ pub fn digit_toggle_in(table: &Table, tool: &str, version: &str) -> DigitToggle 
         .unwrap_or(DigitToggle::Unknown)
 }
 
-/// 写回探测/降级结果（全局表——生产入口）。
-pub fn set_digit_toggle(tool: &str, version: &str, cap: DigitToggle) {
-    let mut guard = TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    let table = guard.get_or_insert_with(HashMap::new);
-    table.insert((tool.to_string(), version.to_string()), cap);
-}
-
-/// 表版本：写回指定表。
+/// 写回探测/降级结果。
 pub fn set_digit_toggle_in(table: &Table, tool: &str, version: &str, cap: DigitToggle) {
     let mut guard = table.lock().unwrap_or_else(|e| e.into_inner());
     guard.insert((tool.to_string(), version.to_string()), cap);
-}
-
-/// 清除（降级回 Unknown：Supported 运行中失效时调用，下次重新探测）。
-pub fn clear_digit_toggle(tool: &str, version: &str) {
-    set_digit_toggle(tool, version, DigitToggle::Unknown);
-}
-
-/// **测试专用**：清空整表（端点测试共享进程内全局表——探测写回会跨测试泄漏，
-/// 键序断言需要确定性的起点）
-#[cfg(test)]
-pub fn reset_for_tests() {
-    let mut guard = TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    guard.get_or_insert_with(HashMap::new).clear();
 }
 
 #[cfg(test)]
@@ -94,26 +65,35 @@ mod tests {
 
     #[test]
     fn unknown_default_and_roundtrip() {
-        let key_tool = "claude-test-rt";
-        let key_ver = "9.9.9";
-        assert_eq!(digit_toggle(key_tool, key_ver), DigitToggle::Unknown);
-        set_digit_toggle(key_tool, key_ver, DigitToggle::Supported);
-        assert_eq!(digit_toggle(key_tool, key_ver), DigitToggle::Supported);
-        clear_digit_toggle(key_tool, key_ver);
-        assert_eq!(digit_toggle(key_tool, key_ver), DigitToggle::Unknown);
+        let table = new_table();
+        assert_eq!(
+            digit_toggle_in(&table, "claude-test-rt", "9.9.9"),
+            DigitToggle::Unknown
+        );
+        set_digit_toggle_in(&table, "claude-test-rt", "9.9.9", DigitToggle::Supported);
+        assert_eq!(
+            digit_toggle_in(&table, "claude-test-rt", "9.9.9"),
+            DigitToggle::Supported
+        );
+        set_digit_toggle_in(&table, "claude-test-rt", "9.9.9", DigitToggle::Unknown);
+        assert_eq!(
+            digit_toggle_in(&table, "claude-test-rt", "9.9.9"),
+            DigitToggle::Unknown
+        );
     }
 
     /// 版本进 key：不同版本各自探测各自记（评审设计核心——版本漂移自适应）。
     #[test]
     fn version_keys_are_isolated() {
-        set_digit_toggle("claude-test-iso", "1.0", DigitToggle::Supported);
-        set_digit_toggle("claude-test-iso", "2.0", DigitToggle::Unsupported);
+        let table = new_table();
+        set_digit_toggle_in(&table, "claude-test-iso", "1.0", DigitToggle::Supported);
+        set_digit_toggle_in(&table, "claude-test-iso", "2.0", DigitToggle::Unsupported);
         assert_eq!(
-            digit_toggle("claude-test-iso", "1.0"),
+            digit_toggle_in(&table, "claude-test-iso", "1.0"),
             DigitToggle::Supported
         );
         assert_eq!(
-            digit_toggle("claude-test-iso", "2.0"),
+            digit_toggle_in(&table, "claude-test-iso", "2.0"),
             DigitToggle::Unsupported
         );
     }

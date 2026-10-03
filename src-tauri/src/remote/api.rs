@@ -3277,11 +3277,7 @@ pub async fn session_question(
             tokio::task::spawn_blocking(move || {
                 (st2.screen_probe)(&tool2, pid).and_then(|lines| {
                     if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
-                        return Some(serde_json::json!({
-                            "heading": snap.heading,
-                            "checked": snap.checked,
-                            "freeText": snap.free_text,
-                        }));
+                        return Some(snapshot_to_json(&snap));
                     }
                     matches!(
                         crate::inject::question::probe_review_screen(&lines),
@@ -3473,19 +3469,23 @@ pub async fn session_question_answer(
     // ——且 400 比 200 failed 更符合「参数就不对」的语义）
     let free_text: Option<String> = if action == crate::inject::question::AnswerAction::FreeText {
         let raw = req.text.as_deref().unwrap_or_default();
+        // **清空模式**（2026-10-03）：空文本 + overwrite=true = 只清空不打新字——
+        // 放行（归一后仍为空，编排的 clearing_only 分支接管）；其余空文本维持 400
+        if raw.trim().is_empty() && !overwrite {
+            return bad_request();
+        }
         // **两道判空**（顺序要紧）：
         // ① 原文 trim 后为空 → 用户没输入任何可见字符（含「只敲了回车/空格」）→ 400。
         //    必须先判原文：归一会把换行变成**字面 `\n` 两字符**，只看归一产物的话
         //    「只敲了一个回车」会变成一段「合法的可见文本」被当成答案发出去——
         //    那不是用户的意思。
-        if raw.trim().is_empty() {
-            return bad_request();
-        }
+        // ① 原文空且非清空模式已在上方 400（清空模式 = 空文本 + overwrite）。
         // ② 归一（注入通道唯一出口的安全面）：换行 → 字面 `\n`、剥 C0/DEL/C1。
         //    之后**不加** `[mobile]` 签名——作答文本不是消息。
         let norm = crate::inject::normalize::normalize_newlines(raw);
         // 归一**后**再判一次：纯控制字符输入（如只有 ESC）归一会把它剥光 → 空
-        if norm.trim().is_empty() {
+        //（清空模式放行——同上）
+        if norm.trim().is_empty() && !overwrite {
             return bad_request();
         }
         Some(norm)
@@ -3750,7 +3750,11 @@ pub async fn session_question_answer(
                 }),
             )
         }
-        QuestionDispatch::ToggleDone { checked, verified } => {
+        QuestionDispatch::ToggleDone {
+            checked,
+            verified,
+            screen,
+        } => {
             // 切勾闭环：status=key_sent + checked/verified——前端用 `checked` 同步
             // 本地勾选态（屏读真值，替代「盲翻本地 Set」）；verified=false 表示
             // 键已发出但无法屏读核验（不谎报成功）
@@ -3769,6 +3773,7 @@ pub async fn session_question_answer(
                 "answer",
                 result,
             );
+            let screen_json = screen.as_ref().map(snapshot_to_json);
             json_no_store(
                 StatusCode::OK,
                 serde_json::json!({
@@ -3777,6 +3782,7 @@ pub async fn session_question_answer(
                     "stage": QUESTION_STAGE_TOGGLE,
                     "checked": checked,
                     "verified": verified,
+                    "screen": screen_json,
                 }),
             )
         }
@@ -3803,13 +3809,7 @@ pub async fn session_question_answer(
                 "answer",
                 result,
             );
-            let screen = snapshot.map(|snap| {
-                serde_json::json!({
-                    "heading": snap.heading,
-                    "checked": snap.checked,
-                    "freeText": snap.free_text,
-                })
-            });
+            let screen = snapshot.as_ref().map(snapshot_to_json);
             json_no_store(
                 StatusCode::OK,
                 serde_json::json!({
@@ -3843,6 +3843,28 @@ pub async fn session_question_answer(
                     "stage": QUESTION_STAGE_FREE_TEXT,
                     "text": text,
                     "checked": checked,
+                }),
+            )
+        }
+        QuestionDispatch::SelectDone { screen } => {
+            // 单选 select：数字已发（无核验语义）+ 发后屏读快照随回执
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &format!("{audit_label}::select"),
+                "answer",
+                "ok",
+            );
+            let screen_json = screen.as_ref().map(snapshot_to_json);
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "stage": "select",
+                    "screen": screen_json,
                 }),
             )
         }
@@ -3928,6 +3950,9 @@ enum StagePlan {
     /// 复核）→ 空格 → 屏读校验翻转。`target` = 0 起的模型选项下标（数字路径已被
     /// 用户实机推翻，切勾必须经此编排）
     ClaudeToggle { target: usize },
+    /// **claude 单选 select 编排**（2026-10-03）：前置焦点守卫（光标在自由作答行
+    /// → `↑` 移出再发数字）→ 数字直答。发后语义不变（无核验——自动推进未取证）
+    ClaudeSelect { index: usize },
     /// **claude 多题切题阶段机**（2026-09-24 立项；2026-10-02 重构为 ←/→ 双向
     /// 导航，走位+回车路径退役）：发 `→`/`←` + 读屏分类（题干区变化 / Review）。
     /// `direction` = 导航方向（下一题/上一题）
@@ -3975,6 +4000,11 @@ impl StagePlan {
             (A::FreeText, "claude") if multi_flow || q.multi_select => {
                 Self::ClaudeMultiFreeText { overwrite }
             }
+            // 2026-10-03：claude 单选 select 走前置焦点守卫编排（光标在自由作答行
+            // 时数字会被当文本吃进输入框——用户实测 bug）
+            (A::Select, "claude") => Self::ClaudeSelect {
+                index: index.unwrap_or(0),
+            },
             (A::Submit, _) => Self::Submit {
                 max_down_steps: q.options.len() + 2,
             },
@@ -4001,6 +4031,13 @@ enum QuestionDispatch {
     ToggleDone {
         checked: Option<bool>,
         verified: bool,
+        /// 切勾后整屏快照（2026-10-03 屏读为准——TS 行内容随回执回传）
+        screen: Option<crate::inject::question::QuestionScreenSnapshot>,
+    },
+    /// **claude 单选 select** 的结论：发后整屏快照（纯采集不核验——TS 行内容随
+    /// 回执回传，屏读为准原则的交互后传播面）
+    SelectDone {
+        screen: Option<crate::inject::question::QuestionScreenSnapshot>,
     },
     /// **claude 多题切题闭环**的结论（2026-09-24 立项；2026-10-02 ←/→ 双向）：
     /// `advanced` = 终端已切题（另一题页或 Review 确认屏——前端按 `direction` 移动
@@ -4118,6 +4155,51 @@ where
 /// 反推失败（键序不在预期形态内）→ 用阶段机的首个可能的段名兜底（宁可粗一点，
 /// 也不编一个假的精确位置——文案里的中文说明才是给用户的）。
 #[allow(clippy::too_many_arguments)]
+/// 阶段机臂共用的**屏读探针**构造（同一 probe/terminal/Closures 三件套在 6+ 个
+/// 臂里重复——评审 F2 收口；前缀仅进日志定位）
+fn question_probe<'a>(
+    st: &'a crate::remote::server::RemoteState,
+    tool: &'a str,
+    pid: u32,
+) -> impl Fn(&'static str) -> Option<Vec<String>> + 'a {
+    move |stage: &'static str| {
+        (st.screen_probe)(tool, pid).or_else(|| {
+            log::debug!("问答阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
+            None
+        })
+    }
+}
+
+/// 阶段机臂共用的**终端缝**构造（发键后固定 `SUBMIT_DELAY_MS` 等重绘）。
+#[allow(clippy::type_complexity)] // Closures 三泛型是 mode::Closures 的固有形态
+fn question_terminal<'a>(
+    read: impl FnMut() -> Option<Vec<String>> + 'a,
+    injector: &'a dyn crate::inject::engine::Injector,
+    pid: u32,
+    spec: &'a crate::inject::families::FamilySpec,
+) -> crate::inject::mode::Closures<
+    impl FnMut() -> Option<Vec<String>> + 'a,
+    impl FnMut(&str) -> Result<(), String> + 'a,
+    impl FnMut() + 'a,
+> {
+    crate::inject::mode::Closures {
+        read,
+        send: move |key: &str| {
+            injector.locate_and_send_key_spec(pid, key, spec)?;
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ));
+            Ok(())
+        },
+        settle: || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ))
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // 阶段机臂的缝参数（评审前已 9 个；multi_flow 为本批新增的有语义参数）
 fn dispatch_question_action(
     st: &Arc<RemoteState>,
     tool: &str,
@@ -4130,6 +4212,26 @@ fn dispatch_question_action(
     expected_question: &str,
 ) -> QuestionDispatch {
     match plan {
+        StagePlan::ClaudeSelect { index } => {
+            // 单选 select 前置焦点守卫（2026-10-03）：光标在自由作答行 → ↑ 移出再
+            // 发数字；发后语义不变（KeySent，无核验——自动推进未取证）
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = question_terminal(|| probe("read"), injector, pid, spec);
+            match crate::inject::question::run_select_stages(
+                *index,
+                || poll_question_stage(|| probe("select"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            ) {
+                Ok(_) => {
+                    // **发后纯采集**（不核验——自动推进语义不变）：整屏快照随回执
+                    // 回传（屏读为准原则的交互后传播面）
+                    let snapshot = probe("post")
+                        .and_then(|l| crate::inject::question::question_screen_snapshot(&l));
+                    QuestionDispatch::SelectDone { screen: snapshot }
+                }
+                Err(e) => dispatch_abort(e),
+            }
+        }
         StagePlan::SingleKey => {
             // 逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
             // 前端按 failed{error} 提示用户核对终端状态后重试）
@@ -4143,29 +4245,8 @@ fn dispatch_question_action(
         StagePlan::Submit { max_down_steps } => {
             // 三段（+回执）：提交屏在场 → 闭环走位 → 回车 → Review 屏 → 确认 → 终态。
             // **每段都在发键前屏读**；轮询/读屏全部经 `RemoteState.screen_probe` 缝。
-            let probe = |stage: &'static str| -> Option<Vec<String>> {
-                (st.screen_probe)(tool, pid).or_else(|| {
-                    log::debug!("问答阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
-                    None
-                })
-            };
-            let mut terminal = crate::inject::mode::Closures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = question_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_submit_stages(
                 || poll_question_stage(|| probe("submit-row"), QUESTION_STAGE_POLL_TOTAL_MS),
                 || poll_review_stage(|| probe("review"), QUESTION_STAGE_POLL_TOTAL_MS),
@@ -4261,39 +4342,24 @@ fn dispatch_question_action(
                 }
             };
             match out {
-                Ok(o) => QuestionDispatch::ToggleDone {
-                    checked: o.checked_now,
-                    verified: o.verified,
-                },
+                Ok(o) => {
+                    // **屏读快照**（屏读为准）：切勾后整屏采集——TS 行内容随回执回传
+                    let snapshot = probe("snapshot")
+                        .and_then(|l| crate::inject::question::question_screen_snapshot(&l));
+                    QuestionDispatch::ToggleDone {
+                        checked: o.checked_now,
+                        verified: o.verified,
+                        screen: snapshot,
+                    }
+                }
                 Err(e) => dispatch_abort(e),
             }
         }
         StagePlan::ClaudeAdvance { direction } => {
             // 多题切题（2026-10-02 ←/→ 双向导航）：发 `→`/`←` + 读屏分类
             //（题干区变化 / Review）。
-            let probe = |stage: &'static str| -> Option<Vec<String>> {
-                (st.screen_probe)(tool, pid).or_else(|| {
-                    log::debug!("问答切题阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
-                    None
-                })
-            };
-            let mut terminal = crate::inject::mode::Closures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = question_terminal(|| probe("read"), injector, pid, spec);
             let out = {
                 // 首段轮询三态（2026-10-02 观测面）：接受判据 = advance_stage_screen_ready
                 //（Review 就绪 ∨ 有推进行 ∨ 可解析出题屏——页签栏锚覆盖单选子题）。
@@ -4346,7 +4412,7 @@ fn dispatch_question_action(
                 // 防御：FreeText 计划却没带文本（参数校验已拦 400，不可达）
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4413,7 +4479,7 @@ fn dispatch_question_action(
                 // 防御：FreeText 计划却没带文本（参数校验已拦 400，不可达）
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4457,7 +4523,7 @@ fn dispatch_question_action(
         }
         // ===== 批次戊 E4：kimi 多选/多题提交阶段机 =====
         StagePlan::KimiSubmit => {
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::mode::Closures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4494,7 +4560,7 @@ fn dispatch_question_action(
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4540,7 +4606,7 @@ fn dispatch_question_action(
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4584,7 +4650,7 @@ fn dispatch_question_action(
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4624,7 +4690,7 @@ fn dispatch_question_action(
         }
         // ===== 批次戊 E6：opencode 多选提交阶段机（2026-09-23 接线）=====
         StagePlan::OpencodeSubmit => {
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::mode::Closures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4753,6 +4819,17 @@ where
         probe,
         || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
     ))
+}
+
+/// 快照 → JSON 的**单点序列化**（评审 I8：GET/toggle/advance 三处手写 json 去重
+/// ——字段漂移会让前端类型与后端产出脱节；freeTextPresent 三态判别随行）
+fn snapshot_to_json(snap: &crate::inject::question::QuestionScreenSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "heading": snap.heading,
+        "checked": snap.checked,
+        "freeText": snap.free_text,
+        "freeTextPresent": snap.free_text_present,
+    })
 }
 
 /// 阶段机首段轮询的**三态产物**（2026-10-02 观测面，闸门 2「证据自带失败」）：

@@ -5288,9 +5288,15 @@ mod tests {
     /// 审计 action=answer result=ok content=select#2。
     #[tokio::test]
     async fn question_answer_select_sends_digit() {
-        let fake = FakeInjector::ok();
-        let state = question_state(fake.clone());
-        persist_named_device(&state, "mm", "测试设备");
+        // 2026-10-03：select 走前置焦点守卫编排（ClaudeSelect）→ 需要屏读缝——
+        // stage_rig 脚本屏（焦点在选项行 → 守卫不触发，键序与旧断言一致）
+        let (state, fake, _script) = stage_rig(
+            vec![
+                screen_fixtures::multi_option_focus(),
+                screen_fixtures::multi_option_focus(),
+            ],
+            false,
+        );
         state.store.with(|conn| {
             crate::database::dao::question_wait::mark(
                 conn,
@@ -5344,7 +5350,7 @@ mod tests {
         assert_eq!(audits[0].channel, "fake");
         assert_eq!(audits[0].session_id, "sess_v");
         assert_eq!(
-            audits[0].summary, "select#2",
+            audits[0].summary, "select#2::select",
             "摘要 = 动作#UI编号（从 1 起）"
         );
     }
@@ -5384,6 +5390,12 @@ mod tests {
                 && body.contains("\"verified\":true")
                 && body.contains("\"stage\":\"toggle-row\""),
             "切勾闭环回执 = key_sent + done + checked + verified + stage：{body}"
+        );
+        // **屏读快照**（2026-10-03 屏读为准）：回执带切勾后整屏快照——TS 行内容
+        // 随回执回传（夹具 TS 行 = "4. [ ] Type something" → freeTextPresent:true）
+        assert!(
+            body.contains("\"screen\":{") && body.contains("\"freeTextPresent\":true"),
+            "回执必须携带屏读快照：{body}"
         );
         assert_eq!(
             fake.recorded_keys(),
@@ -6393,6 +6405,68 @@ mod tests {
             inner.recorded_keys()
         );
         assert_eq!(inner.recorded(), vec![(95u32, "新内容".to_string())]);
+    }
+
+    /// **清空请求端到端**（2026-10-03 回归锁）：空文本 + overwrite=true → 走清空
+    /// 模式（right×3 + backspace×3 恢复占位，**零打字零数字**）→ 200 key_sent。
+    /// 还原动作（变异）：删掉 handler 的 overwrite 放行 → 400、本用例先红。
+    #[tokio::test]
+    async fn question_free_text_clear_request_passes_handler() {
+        let (state, inner, _s) = single_tool_scripted_state(
+            crate::session::AgentType::Claude,
+            "sess_t5mfc",
+            95u32,
+            vec![
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 29),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 31),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 33),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 35),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("Type something", false, 37),
+            ],
+        );
+        mark_question(&state, "claude", "sess_t5mfc", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(
+                    r#"{"sessionId":"sess_t5mfc","action":"freeText","text":"","questionIndex":0,"overwrite":true}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "清空请求必须过 handler 放行：{}",
+            body_string(r).await
+        );
+        let keys: Vec<(u32, String)> = inner
+            .recorded_keys()
+            .iter()
+            .filter(|(_, k)| k == "right" || k == "backspace")
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                (95u32, "right".to_string()),
+                (95u32, "right".to_string()),
+                (95u32, "right".to_string()),
+                (95u32, "backspace".to_string()),
+                (95u32, "backspace".to_string()),
+                (95u32, "backspace".to_string()),
+            ],
+            "键序 = right×3 + backspace×3（零打字）：{keys:?}"
+        );
     }
 
     /// **kimi 多选自由作答维持拒绝**（2026-10-02 放行面仅 claude——kimi 多选形态
@@ -7468,7 +7542,9 @@ mod tests {
             messages: vec![user_msg(0), auq_tool_call(1, Q_SINGLE_PAYLOAD)],
             truncated: false,
         };
-        let state = question_state_with_msgs(
+        // 2026-10-03：select 走焦点守卫编排 → 需要屏读缝（焦点在选项行 → 守卫不触发）
+        let probe_screen = screen_fixtures::multi_option_focus();
+        let state = question_state_full(
             fake.clone(),
             Box::new(move |_, sid: &str, _| {
                 if sid == "sess_ai" {
@@ -7477,6 +7553,7 @@ mod tests {
                     Err("无消息".to_string())
                 }
             }),
+            std::sync::Arc::new(move |_, _| Some(probe_screen.clone())),
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());

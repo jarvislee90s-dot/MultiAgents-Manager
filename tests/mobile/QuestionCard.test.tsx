@@ -1021,6 +1021,42 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     expect(screen.queryByTestId("question-sent")).toBeNull();
   });
 
+  it("清空按钮（2026-10-03）：已写入态在场（含只读态），点击发空文本+overwrite，成功后回「发送」初态", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    // 先写入：回执带屏读真值 → 只读 + 编辑钮 + 清空钮（三钮并存，清空独立于编辑解锁）
+    routes.answer = { status: "key_sent", done: true, stage: "free-text", text: "旧内容", checked: true };
+    render(<QuestionCard session={{ id: "sess-clear" }} />);
+    await screen.findByTestId("question-multi-current");
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    fireEvent.change(await screen.findByTestId("question-multi-freetext-input"), {
+      target: { value: "旧内容" },
+    });
+    fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-freetext-edit")).toBeTruthy();
+    // 只读态：清空钮在场（独立动作，不依赖编辑解锁）
+    expect(screen.getByTestId("question-multi-freetext-clear")).toBeTruthy();
+    // 点清空 → 发空文本 + overwrite → 成功后删 mqFreeText 回「发送」初态
+    routes.answer = { status: "key_sent", done: true, stage: "free-text" };
+    fireEvent.click(screen.getByTestId("question-multi-freetext-clear"));
+    await flushAsync();
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies[bodies.length - 1]).toEqual({
+      sessionId: "sess-clear",
+      action: "freeText",
+      text: "",
+      questionIndex: 1,
+      overwrite: true,
+    });
+    const input = screen.getByTestId("question-multi-freetext-input") as HTMLInputElement;
+    expect(input.readOnly).toBe(false);
+    expect(input.value).toBe("");
+    expect(screen.getByTestId("question-multi-freetext-send").textContent).toBe("发送");
+    expect(screen.queryByTestId("question-multi-freetext-edit")).toBeNull();
+  });
+
   it("GET 屏读快照同步（2026-10-03 屏读为准）：mqIndex 对位 + 勾选/输入框纠偏", async () => {
     installFetch();
     const info = twoQuestionInteractive();

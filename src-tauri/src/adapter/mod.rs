@@ -90,7 +90,7 @@ fn expire_stale_wait_marks_by_screen_truth(
             continue; // 屏读不可用：保守保留（不误清真实等待）
         };
         let dialog_present = crate::inject::question::advance_stage_screen_ready(&lines)
-            || crate::inject::dialog::probe_screen_dialog(s.pid).is_some();
+            || crate::inject::dialog::parse_dialog_options(&lines).is_some();
         if dialog_present {
             continue; // 真实等待（题屏/Review/审批对话框仍在屏上）
         }
