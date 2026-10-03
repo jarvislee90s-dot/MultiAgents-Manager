@@ -2796,7 +2796,7 @@ dependencies = [
  "tower",
  "trash",
  "wait-timeout",
- "windows 0.57.0",
+ "windows 0.61.3",
  "winreg 0.52.0",
  "zip",
  "zstd 0.14.0",
