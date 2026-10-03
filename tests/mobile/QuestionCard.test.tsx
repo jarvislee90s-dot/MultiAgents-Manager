@@ -469,7 +469,7 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(screen.queryByTestId("question-freetext-input")).toBeNull();
     expect(screen.queryByTestId("question-freetext-send")).toBeNull();
     expect(screen.getByTestId("question-freeform-hint").textContent).toContain(
-      "多选题请到终端作答"
+      "当前工具的多选题自由作答尚未验证"
     );
     // 零注入：不得有任何应答请求
     expect(answerCalls()).toHaveLength(0);
@@ -616,6 +616,8 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
       source: "mark",
       multiQuestion: true,
       advance: true,
+      navBoth: true,
+      freeText: true,
       questions: [
         {
           header: "A",
@@ -674,7 +676,7 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
       { sessionId: "sess-e4-mq", action: "select", index: 0, questionIndex: 0 },
       { sessionId: "sess-e4-mq", action: "toggle", index: 0, questionIndex: 1 },
       { sessionId: "sess-e4-mq", action: "toggle", index: 1, questionIndex: 1 },
-      { sessionId: "sess-e4-mq", action: "advance" },
+      { sessionId: "sess-e4-mq", action: "advance", direction: "next" },
       { sessionId: "sess-e4-mq", action: "submit" },
     ]);
   });
@@ -719,9 +721,9 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     fireEvent.click(screen.getByTestId("question-multi-option-0"));
     await flushAsync();
     expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
-    // 确认卡上「返回题目修改」再发 advance——把回执翻成 claude「已在 Review 屏」
-    // 形态（advanced:false，零按键）→ **停在确认卡**（claude 的 ← 回退未实测，
-    // 后端不按键，前端也不得谎报回退能力）
+    // 确认卡上「◀ 返回上一题修改」发 advance+prev——把回执翻成 advanced:false
+    // 形态（零按键）→ **停在确认卡**（advanced:false = 后端明确说没切，前端不得
+    // 慌报移动；prev 正常路径回执带 direction:"prev" echo 才移动）
     routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: false };
     fireEvent.click(screen.getByTestId("question-confirm-back"));
     await flushAsync();
@@ -753,7 +755,8 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     await flushAsync();
     expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
     expect(screen.queryByTestId("question-sent")).toBeNull();
-    // 确认卡「返回题目修改」→ advance 回绕到第 1 题
+    // 确认卡「◀ 返回上一题修改」→ advance+prev；回执无 direction echo（opencode
+    // 旧回执形态模拟）→ 维持回绕到第 1 题（claude echo 确认才按 prev 移动）
     fireEvent.click(screen.getByTestId("question-confirm-back"));
     await flushAsync();
     expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
@@ -764,7 +767,206 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
       index: 1,
       questionIndex: 1,
     });
-    expect(bodies[3]).toEqual({ sessionId: "sess-e4-last", action: "advance" });
+    expect(bodies[3]).toEqual({
+      sessionId: "sess-e4-last",
+      action: "advance",
+      direction: "prev",
+    });
+  });
+
+  it("◀/→ 双向导航（2026-10-02）：题卡 ◀ 上一题在 mqIndex=0 隐藏、第 2 题可见且发 prev", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-nav" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 第 1 题：◀ 上一题隐藏
+    expect(screen.queryByTestId("question-nav-prev")).toBeNull();
+    // 第 2 题：◀ 可见 → 发 prev → 回执 echo prev → 回到第 1 题
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    routes.answer = {
+      status: "key_sent",
+      done: true,
+      stage: "advance",
+      advanced: true,
+      direction: "prev",
+    };
+    fireEvent.click(screen.getByTestId("question-nav-prev"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies[1]).toEqual({
+      sessionId: "sess-e4-nav",
+      action: "advance",
+      direction: "prev",
+    });
+  });
+
+  it("确认卡 ◀ 返回上一题修改（2026-10-02）：prev echo → 回到最后一题（不再回绕）", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    // 第 1 题单选答完（自动推进第 2 题）→ 第 2 题多选勾选 → 下一题 → 确认卡（mqIndex=2）
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-navback" }} />);
+    await screen.findByTestId("question-multi-current");
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    routes.answer = {
+      status: "key_sent",
+      done: true,
+      stage: "advance",
+      advanced: true,
+      direction: "next",
+    };
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
+    // ◀ 返回上一题修改 → prev → claude echo → mqIndex 回到最后一题（第 2 题）
+    routes.answer = {
+      status: "key_sent",
+      done: true,
+      stage: "advance",
+      advanced: true,
+      direction: "prev",
+    };
+    fireEvent.click(screen.getByTestId("question-confirm-back"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+  });
+
+  it("单题多选自由作答（2026-10-03）：navBoth+freeText 渲染内联编辑输入框，发送带 questionIndex=0", async () => {
+    installFetch();
+    const info = multiQuestionInfo();
+    // 单题形态（claude 换成逐个提问）：1 题、多选
+    info.questions = [info.questions[0]];
+    info.freeText = true;
+    info.navBoth = true;
+    routes.question = info;
+    routes.answer = { status: "key_sent", done: true, stage: "free-text" };
+    render(<QuestionCard session={{ id: "sess-single-mft" }} />);
+    await screen.findByTestId("question-card");
+    // 多选卡渲染自由作答输入框（内联编辑编排与题数无关）
+    expect(screen.getByTestId("question-multi-freetext-input")).toBeTruthy();
+    fireEvent.change(screen.getByTestId("question-multi-freetext-input"), {
+      target: { value: "内联文字" },
+    });
+    fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
+    await flushAsync();
+    // 发送带 questionIndex=0；不置终态（还要提交勾选）
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies[0]).toEqual({
+      sessionId: "sess-single-mft",
+      action: "freeText",
+      text: "内联文字",
+      questionIndex: 0,
+    });
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    // 提交勾选钮仍可用（主路径不受影响）
+    expect(screen.getByTestId("question-submit")).toBeTruthy();
+  });
+
+  it("多选自由作答（2026-10-02）：输入框渲染、发送带 questionIndex、确认卡清单显示文本", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    routes.answer = { status: "key_sent", done: true, stage: "free-text" };
+    render(<QuestionCard session={{ id: "sess-e4-mft" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 第 1 题（单选）没有自由作答输入框（单选由 select 直答）
+    expect(screen.queryByTestId("question-multi-freetext-input")).toBeNull();
+    // 到第 2 题（多选）→ 输入框出现
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-freetext-input")).toBeTruthy();
+    fireEvent.change(screen.getByTestId("question-multi-freetext-input"), {
+      target: { value: "自定义补充" },
+    });
+    fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
+    await flushAsync();
+    // 已写入提示 + 不置终态（多题卡要继续切题）
+    expect(screen.getByTestId("question-multi-freetext").textContent).toContain("已写入：自定义补充");
+    expect(screen.queryByTestId("question-sent")).toBeNull();
+    // 下一题 → 确认卡 → 清单含自由作答文本
+    routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: true, direction: "next" };
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-answers")).toBeTruthy();
+    expect(screen.getByTestId("question-confirm-answer-1").textContent).toContain("自定义补充");
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies[bodies.length - 2]).toEqual({
+      sessionId: "sess-e4-mft",
+      action: "freeText",
+      text: "自定义补充",
+      questionIndex: 1,
+    });
+  });
+
+  it("自由作答编辑覆盖（2026-10-02）：发送后只读+编辑钮，点编辑解锁，覆盖发送带 overwrite", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    routes.answer = { status: "key_sent", done: true, stage: "free-text" };
+    render(<QuestionCard session={{ id: "sess-e4-edit" }} />);
+    await screen.findByTestId("question-multi-current");
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    // 首次发送
+    fireEvent.change(screen.getByTestId("question-multi-freetext-input"), {
+      target: { value: "第一版" },
+    });
+    fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
+    await flushAsync();
+    // 发送后：输入框只读（含已写入文本）、按钮变「编辑」
+    const input = screen.getByTestId("question-multi-freetext-input") as HTMLInputElement;
+    expect(input.readOnly).toBe(true);
+    expect(input.value).toBe("第一版");
+    expect(screen.getByTestId("question-multi-freetext-edit")).toBeTruthy();
+    expect(screen.queryByTestId("question-multi-freetext-send")).toBeNull();
+    // 点编辑 → 解锁（按钮变回「覆盖写入」）
+    fireEvent.click(screen.getByTestId("question-multi-freetext-edit"));
+    expect((screen.getByTestId("question-multi-freetext-input") as HTMLInputElement).readOnly).toBe(false);
+    // 修改文字 → 覆盖发送（带 overwrite + questionIndex）
+    routes.answer = { status: "key_sent", done: true, stage: "free-text" };
+    fireEvent.change(screen.getByTestId("question-multi-freetext-input"), {
+      target: { value: "第二版" },
+    });
+    fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
+    await flushAsync();
+    const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    expect(bodies[bodies.length - 1]).toEqual({
+      sessionId: "sess-e4-edit",
+      action: "freeText",
+      text: "第二版",
+      questionIndex: 1,
+      overwrite: true,
+    });
+    // 成功后回到只读态 + 文本更新
+    expect((screen.getByTestId("question-multi-freetext-input") as HTMLInputElement).readOnly).toBe(true);
+    expect((screen.getByTestId("question-multi-freetext-input") as HTMLInputElement).value).toBe("第二版");
+  });
+
+  it("确认卡答案清单（2026-10-02）：单选显示选中项、多选显示勾选项、未答显示占位", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-e4-ans" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 第 1 题（单选）选 a2（index 1）→ 自动推进
+    fireEvent.click(screen.getByTestId("question-multi-option-1"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // 第 2 题（多选）勾 b1、b2
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-multi-option-1"));
+    await flushAsync();
+    routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: true, direction: "next" };
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-answer-0").textContent).toContain("a2");
+    expect(screen.getByTestId("question-confirm-answer-1").textContent).toContain("b1、b2");
   });
 
   it("advance 旗标缺省（kimi/codex 形态）→ 多选题不渲染切换钮、渲染终端引导", async () => {

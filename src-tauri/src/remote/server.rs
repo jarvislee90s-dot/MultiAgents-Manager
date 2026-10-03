@@ -6244,24 +6244,25 @@ mod tests {
         }
     }
 
-    /// **丁T5 复评 F6-3（多选卡的自由作答在端点被拒）**：claude（工具支持）但题目是
-    /// **多选** → 409 `tool_readonly` + 零投递。
-    ///
-    /// 依据（实机截图，复评核对）：多选屏的自由作答行渲染为 `4. [ ] Type something`
-    /// （带勾选框；`C-s8-cursor-submit-20260921-015844.png` 第 4 行），而
-    /// `locate_free_text_row` 的判据是「剥编号后以 `Type something` 开头」→ 不匹配 →
-    /// 定位恒失败。**在端点就拒绝**（而不是让用户白等一次必然中止的全链）。
-    ///
-    /// 还原动作：把 `action_supported` 的 FreeText 分支去掉 `free_text_shape_supported`
-    /// 检查 → 本用例先红（会 200 并走到 free-row 段中止）。
+    /// **多选题自由作答全链（2026-10-02 活体取证后升格）**：claude 多选 freeText
+    /// 走 `run_multi_select_free_text_stages`——焦点阶梯走位到 Type something 行
+    ///（方向键，多选屏数字无效）→ 字符通道打字 → 屏读核验「文字入行 + 勾选保持」→
+    /// **零后续键**（回车会取消勾选——活体取证）。
+    /// 还原动作（变异）：编排补发 enter → 键序断言先红。
     #[tokio::test]
-    async fn question_free_text_refused_on_multi_select_question() {
-        // 用多选夹具（Q_MULTI_PAYLOAD）+ **单选题不会触发**——这正是本用例的区分点
+    async fn question_claude_multi_select_free_text_inline_edits() {
         let (state, inner, _s) = single_tool_scripted_state(
             crate::session::AgentType::Claude,
             "sess_t5mft",
             95u32,
-            vec![screen_fixtures::free_row()],
+            vec![
+                crate::inject::question::live_fixtures::q1_multi(), // 首段 + 走位 read（焦点选项1）
+                crate::inject::question::live_fixtures::q1_focus_at(1),
+                crate::inject::question::live_fixtures::q1_focus_at(2),
+                crate::inject::question::live_fixtures::q1_focus_at(3),
+                crate::inject::question::live_fixtures::q1_focus_at(4), // 焦点到 FreeText 行
+                crate::inject::question::live_fixtures::q1_typed_at("hi", true, 37), // 打字后（注入推进一屏）
+            ],
         );
         mark_question(&state, "claude", "sess_t5mft", Q_MULTI_PAYLOAD);
         let app = router(state.clone());
@@ -6270,31 +6271,128 @@ mod tests {
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_t5mft","action":"freeText","text":"hi"}"#),
+                Some(r#"{"sessionId":"sess_t5mft","action":"freeText","text":"hi","questionIndex":0}"#),
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 409, "多选卡的自由作答 → 409（不假装能发）");
+        assert_eq!(r.status(), 200, "claude 多选自由作答放行（2026-10-02）");
         let body = body_string(r).await;
         assert!(
-            body.contains("tool_readonly"),
-            "拒绝码须可程序分诊（细分原因见后端日志与前端分診文案）：{body}"
+            body.contains("\"status\":\"key_sent\"") && body.contains("\"stage\":\"free-text\""),
+            "走完全链的回执：{body}"
         );
-        // 契约说明：409 体**只回错误码**（既有口径——不给存在性预言机、不泄露细节）；
-        // 「多选题的自由作答请到终端完成」这句在 `ActionRefusal` 里，进 debug 日志与
-        // 前端分診（`tool_readonly` → 中文文案），**不进响应体**。本断言锁住这个口径。
-        assert!(
-            inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
-            "拒绝路径零投递：keys={:?} texts={:?}",
+        // 键序 = down×4（走位）+ 文本（字符通道）；**无 enter**（回车会取消勾选）
+        assert_eq!(
             inner.recorded_keys(),
-            inner.recorded()
+            vec![
+                (95u32, "down".to_string()),
+                (95u32, "down".to_string()),
+                (95u32, "down".to_string()),
+                (95u32, "down".to_string()),
+            ],
+            "键序 = down×4（走位到 Type something 行）：{:?}",
+            inner.recorded_keys()
+        );
+        assert_eq!(
+            inner.recorded(),
+            vec![(95u32, "hi".to_string())],
+            "文本走字符通道"
         );
         let audits = state
             .store
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+        // 多选自由作答不做终态回执核验（receipt_seen=None）→ 审计如实记不可验证
+        assert_eq!(audits[0].result, "ok:receipt-unverifiable");
+    }
+
+    /// **多选自由作答·编辑覆盖**（2026-10-02）：overwrite=true 时已有内容行先退格
+    /// 清空（按屏读长度迭代）再打新字 + 勾选兜底。断言键序 = down×4 + backspace×3 +
+    /// text + space（**无 enter**——回车会取消勾选）。
+    #[tokio::test]
+    async fn question_claude_multi_select_free_text_overwrite_edits() {
+        let (state, inner, _s) = single_tool_scripted_state(
+            crate::session::AgentType::Claude,
+            "sess_t5mfo",
+            95u32,
+            vec![
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 29),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 31),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 33),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 35),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("T", false, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("Type something", false, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("新内容", false, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("新内容", true, 37),
+            ],
+        );
+        mark_question(&state, "claude", "sess_t5mfo", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(
+                    r#"{"sessionId":"sess_t5mfo","action":"freeText","text":"新内容","questionIndex":0,"overwrite":true}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
         assert!(
-            audits.is_empty(),
-            "校验失败零审计（approve/question 同口径）"
+            body.contains("\"status\":\"key_sent\""),
+            "编辑覆盖全链：{body}"
+        );
+        assert_eq!(
+            inner.recorded_keys(),
+            vec![
+                (95u32, "down".to_string()),
+                (95u32, "down".to_string()),
+                (95u32, "down".to_string()),
+                (95u32, "down".to_string()),
+                (95u32, "backspace".to_string()),
+                (95u32, "backspace".to_string()),
+                (95u32, "backspace".to_string()),
+                (95u32, "space".to_string()),
+            ],
+            "键序 = down×4 + backspace×3 + space：{:?}",
+            inner.recorded_keys()
+        );
+        assert_eq!(inner.recorded(), vec![(95u32, "新内容".to_string())]);
+    }
+
+    /// **kimi 多选自由作答维持拒绝**（2026-10-02 放行面仅 claude——kimi 多选形态
+    /// 未取证）：409 tool_readonly + 零投递。
+    #[tokio::test]
+    async fn question_free_text_still_refused_on_kimi_multi_select() {
+        let (state, inner, _s) = single_tool_scripted_state(
+            crate::session::AgentType::Kimi,
+            "sess_t5mftk",
+            95u32,
+            vec![screen_fixtures::free_row()],
+        );
+        mark_question(&state, "kimi", "sess_t5mftk", Q_MULTI_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_t5mftk","action":"freeText","text":"hi"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409, "kimi 多选自由作答仍拒（形态未取证）");
+        assert!(
+            body_string(r).await.contains("tool_readonly"),
+            "拒绝码须可程序分诊"
+        );
+        assert!(
+            inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
+            "拒绝路径零投递"
         );
     }
 
@@ -6624,40 +6722,16 @@ mod tests {
         );
     }
 
-    /// claude 多题切题（2026-09-24）：advance 走阶段机——脚本：焦点在选项 1 →
-    /// 逐屏走位（每键推一屏）→ 焦点到 Next 行 → 回车 → 下一题屏（焦点回选项 1）。
-    /// 断言键序 = [down×4, enter]、回执 `advanced:true`。
+    /// claude 多题切题（2026-10-02 ←/→ 双向导航，走位+回车退役）：多选子题发 `→`
+    /// → 下一题屏（题干区变化）。断言键序 = ["right"]、回执 `advanced:true` +
+    /// `direction:"next"` echo。
+    /// 还原动作（变异）：导航分支改回走位+回车 → 键序断言先红。
     #[tokio::test]
     async fn question_claude_advance_walks_to_next_row() {
-        // 焦点阶梯工厂：无焦点基屏 + 把 ❯ 加到指定行（0..2=选项 / 3=Type something /
-        // 4=推进行）。基屏先剥掉夹具默认的 ❯（trim 只去空白，须显式剥标记）
-        let focus_at = |row: usize| {
-            let mut s = screen_fixtures::multi_option_focus();
-            let t = s[4].trim_start();
-            let t = t
-                .strip_prefix('❯')
-                .map(|r| r.trim_start().to_string())
-                .unwrap_or_else(|| t.to_string());
-            s[4] = format!("  {t}");
-            let opt_line = match row {
-                0 => 4,
-                1 => 6,
-                2 => 8,
-                3 => 10,
-                _ => 11,
-            };
-            s[opt_line] = format!(" ❯{}", s[opt_line].trim_start());
-            s
-        };
-        // 走位路径：选项1 →(down)2 →(down)3 →(down)Type something →(down)Next →(enter)下一题
         let (state, fake, _script) = stage_rig(
             vec![
-                focus_at(0),
-                focus_at(1),
-                focus_at(2),
-                focus_at(3),
-                focus_at(4),
-                focus_at(0),
+                crate::inject::question::live_fixtures::q1_multi(),
+                crate::inject::question::live_fixtures::q2_single(),
             ],
             false,
         );
@@ -6668,27 +6742,60 @@ mod tests {
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ab","action":"advance"}"#),
+                Some(r#"{"sessionId":"sess_ab","action":"advance","direction":"next"}"#),
             ))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
         let body = body_string(r).await;
         assert!(
-            body.contains("\"status\":\"key_sent\"") && body.contains("\"advanced\":true"),
-            "切题回执 advanced:true：{body}"
+            body.contains("\"status\":\"key_sent\"")
+                && body.contains("\"advanced\":true")
+                && body.contains("\"direction\":\"next\""),
+            "切题回执 advanced:true + direction echo：{body}"
         );
-        // 走位 4 个 down（选项 1→2→3→Type something→Next）+ 回车
         assert_eq!(
             fake.recorded_keys(),
+            vec![(38u32, "right".to_string())],
+            "键序 = [→]（←/→ 通用导航，零走位）：{:?}",
+            fake.recorded_keys()
+        );
+    }
+
+    /// claude 多题切题·**上一题**（2026-10-02）：Review 确认屏发 `←` 退回上一题页
+    ///（活体取证步骤 2 复刻）——「返回上一题修改」按钮的后端全链。
+    #[tokio::test]
+    async fn question_claude_advance_prev_from_review_returns() {
+        let (state, fake, _script) = stage_rig(
             vec![
-                (38u32, "down".to_string()),
-                (38u32, "down".to_string()),
-                (38u32, "down".to_string()),
-                (38u32, "down".to_string()),
-                (38u32, "enter".to_string()),
+                crate::inject::question::live_fixtures::review_unanswered(),
+                crate::inject::question::live_fixtures::q2_single(),
             ],
-            "键序 = [down×4, enter]（走位到 Next + 回车）：{:?}",
+            false,
+        );
+        mark_question(&state, "claude", "sess_af", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_af","action":"advance","direction":"prev"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\"")
+                && body.contains("\"advanced\":true")
+                && body.contains("\"direction\":\"prev\""),
+            "prev 从 Review 退回：{body}"
+        );
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(42u32, "left".to_string())],
+            "键序 = [←]：{:?}",
             fake.recorded_keys()
         );
     }
@@ -6705,7 +6812,7 @@ mod tests {
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ac","action":"advance"}"#),
+                Some(r#"{"sessionId":"sess_ac","action":"advance","direction":"next"}"#),
             ))
             .await
             .unwrap();
@@ -6718,6 +6825,77 @@ mod tests {
         assert!(
             fake.recorded_keys().is_empty(),
             "不发任何键：{:?}",
+            fake.recorded_keys()
+        );
+    }
+
+    /// claude 多题切题·**单选子题**（2026-10-02 活体批次）：单选子题没有独立
+    /// 推进行 → `→` 切题；末题 `→` 直达 Review 屏（活体取证步骤 1 的端点级复刻，
+    /// 屏面 = live_fixtures 逐字黄金夹具）。
+    /// 还原动作（变异）：单选分支改回「无推进行即中止」→ 本用例先红。
+    #[tokio::test]
+    async fn question_claude_advance_single_select_sends_right() {
+        let (state, fake, _script) = stage_rig(
+            vec![
+                crate::inject::question::live_fixtures::q2_single(),
+                crate::inject::question::live_fixtures::review_unanswered(),
+            ],
+            false,
+        );
+        mark_question(&state, "claude", "sess_ad", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ad","action":"advance","direction":"next"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"key_sent\"") && body.contains("\"advanced\":true"),
+            "单选子题 → 直达 Review → advanced:true：{body}"
+        );
+        let recorded = fake.recorded_keys();
+        let keys: Vec<&str> = recorded.iter().map(|(_, k)| k.as_str()).collect();
+        assert_eq!(keys, vec!["right"], "键序 = [→]：{keys:?}");
+    }
+
+    /// claude 多选切勾落在**单选子题屏**（卡片与终端脱钩的实机形态）→ 身份闸
+    /// 中止（stage=toggle-row、零键）——旧行块解析在这里恒 0 行，误报「读不到问答屏」。
+    #[tokio::test]
+    async fn question_claude_toggle_identity_abort_on_live_single_select() {
+        let (state, fake, _script) = stage_rig(
+            vec![crate::inject::question::live_fixtures::q2_single()],
+            false,
+        );
+        mark_question(&state, "claude", "sess_ae", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ae","action":"toggle","index":0,"questionIndex":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "中止走 200 failed 槽");
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"failed\"") && body.contains("\"aborted\":true"),
+            "身份闸中止：{body}"
+        );
+        assert!(
+            body.contains("手机卡片不一致"),
+            "中止文案点名身份核验：{body}"
+        );
+        assert!(
+            fake.recorded_keys().is_empty(),
+            "零按键：{:?}",
             fake.recorded_keys()
         );
     }

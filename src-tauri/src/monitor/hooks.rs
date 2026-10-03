@@ -125,6 +125,19 @@ fn install_helper_from_to(
             }
         }
     }
+    // **已有安装副本回退**（2026-10-03 事故修复）：源目录没有候选（如无 feature 的
+    // `cargo build` 不产出 helper exe——cargo clean 后必然发生）但 `~/.mam/bin/` 里
+    // 躺着**先前安装的副本**时，返回该副本而非 None。返回 None 会让注册规格回落
+    // bash 形态，启动注册把用户 settings 里**更丰富的 helper 条目原地改写成 bash**
+    //（问答通道的 tool_name/tool_input 全丢——多选题误判审批卡的事故根因）。
+    // 副本版本偏旧可接受：helper 的事件文件协议自 T8 起稳定，比 bash 兜底（零富
+    // 字段）严格更优。
+    for name in names {
+        let dst = dst_dir.join(name);
+        if dst.is_file() {
+            return Some(dst);
+        }
+    }
     None
 }
 
@@ -2891,6 +2904,30 @@ mod helper_install_tests {
         assert_eq!(
             std::fs::read(dst.path().join("mam-hook-listener.exe")).unwrap(),
             b"exe"
+        );
+    }
+
+    /// **已有安装副本回退**（2026-10-03 事故修复回归锁）：源目录无候选 + dst 已有
+    /// 先前安装的副本 → 返回该副本（而非 None → bash 规格回落改写 settings）。
+    /// 还原动作（变异）：删掉 dst 回退循环 → 返回 None、本用例先红。
+    #[test]
+    fn falls_back_to_existing_installed_copy_when_src_absent() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        // src 空（无 feature 构建形态）；dst 有先前安装的副本
+        std::fs::write(dst.path().join("mam-hook-listener.exe"), b"installed").unwrap();
+        let names = ["mam-hook-listener.exe", "mam-hook-listener"];
+        let installed = install_helper_from_to(src.path(), dst.path(), &names)
+            .expect("dst 已有副本必须回退成功");
+        assert_eq!(
+            installed,
+            dst.path().join("mam-hook-listener.exe"),
+            "回退到已有安装副本"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("mam-hook-listener.exe")).unwrap(),
+            b"installed",
+            "回退不覆盖既有副本"
         );
     }
 

@@ -626,6 +626,11 @@ export interface QuestionInfoView {
    *  （tab=前向切页，实测定案）。缺省/旧后端 → 按 false：多选题不渲染「切换题目」钮，
    *  改渲染「请到终端切题」引导（不假装能发）。 */
   advance?: boolean;
+  /** **←/→ 双向导航**（2026-10-02）：仅 claude 的 ←/→ 键序已活体取证（含 Review
+   *  导航环）。true → 题卡渲染 ◀ 上一题/下一题 ▶ 双钮（单选/多选都渲染）、确认卡
+   *  「返回上一题修改」发 prev；false（opencode/旧后端）→ 维持旧单钮 + tab 回绕。
+   *  缺省 → 按 false 处理（前向兼容）。 */
+  navBoth?: boolean;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }
@@ -649,8 +654,8 @@ export async function fetchSessionQuestion(sessionId: string): Promise<QuestionI
  *  submit=多选提交（**阶段机闭环**：屏读确认每段后才推进）；
  *  cancel=取消问题（Esc）；freeText=自由作答（**仅 claude**，阶段机闭环：
  *  定位 `Type something` 行 → 文本 → 回车）；
- *  advance=多题切换题目（opencode=tab 前向切页；claude=走位到尾部推进行
- *  `Next`+回车+读屏分类——均纯导航，不触碰勾选态）。 */
+ *  advance=多题切换题目（opencode=tab 前向切页；claude=**←/→ 双向导航**
+ *  `direction` 指定上一题/下一题——读屏分类题干区变化，均纯导航，不触碰勾选态）。 */
 export type QuestionAnswerAction =
   "select" | "toggle" | "submit" | "cancel" | "freeText" | "advance";
 
@@ -687,10 +692,13 @@ export type QuestionAnswerResult =
       stage?: QuestionAnswerStage;
       verified?: boolean | null;
       checked?: boolean | null;
-      /** claude 切题（2026-09-24）：终端是否已前移。`false` = 已在 Review 确认屏、
-       *  零按键（「返回题目」不可达）——前端**不**推进，停在确认卡。缺省（opencode
-       *  等旧路径）视为已前移（既有行为不变） */
+      /** claude 切题（2026-09-24；2026-10-02 ←/→ 双向）：终端是否已切题。`false` =
+       *  下一题请求但已在 Review 确认屏、零按键（已在终点）——前端**不**推进。
+       *  缺省（opencode 等旧路径）视为已前移（既有行为不变） */
       advanced?: boolean;
+      /** claude 切题（2026-10-02）：方向 echo（prev/next）——前端移动 mqIndex 需
+       *  确认 echo 与请求 direction 一致（opencode 旧回执无此字段 → 维持回绕行为） */
+      direction?: string;
     }
   | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
 
@@ -724,14 +732,19 @@ export async function sessionQuestionAnswer(
   index?: number,
   text?: string,
   /** 批次戊 E4-E6 多题交互：select/toggle 作用在第几题（0 起） */
-  questionIndex?: number
+  questionIndex?: number,
+  /** claude 切题方向（2026-10-02 ←/→ 双向导航；仅 advance 消费，缺省 next） */
+  direction?: "prev" | "next",
+  /** 覆盖写入（2026-10-02 多选自由作答编辑；仅 freeText 消费）：true = 该行已有
+   *  内容时先退格清空再打新字；缺省 false = 已有内容即中止 */
+  overwrite?: boolean
 ): Promise<QuestionAnswerResult> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-question/answer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, action, index, text, questionIndex }),
+      body: JSON.stringify({ sessionId, action, index, text, questionIndex, direction, overwrite }),
     });
   } catch (e) {
     throw new ApiError(null, `session-question/answer 网络异常: ${String(e)}`);
