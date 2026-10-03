@@ -596,11 +596,18 @@ mod tests {
     use crate::monitor::cwd::normalize_cwd_for_match as norm;
     #[test]
     fn tui_candidate_matches_cwd_and_name_case_insensitive() {
+        // cwd 大小写折叠语义在平台层（cwd::normalize 仅 Windows 小写化）——Linux
+        // 用同形双写法（分隔符差异仍归一），Windows 用大小写变体（两平台都真）
+        let (cwd_a, cwd_b) = if cfg!(windows) {
+            (r"E:\proj\demo", "e:/proj/demo")
+        } else {
+            ("/proj/demo", "/proj/demo/")
+        };
         assert!(is_tui_candidate(
             "claude",
-            &norm(r"E:\proj\demo"),
+            &norm(cwd_a),
             "claude.exe",
-            &norm("e:/proj/demo")
+            &norm(cwd_b)
         ));
         assert!(is_tui_candidate(
             "codex",

@@ -12628,14 +12628,19 @@ mod tests {
         assert_eq!(sends[0].result, "ok");
         assert_eq!(sends[0].session_id, "");
         assert_eq!(sends[0].device_name, "手机C6e");
-        // create 行：ok + 物化 session_id + 目录+tool 摘要（不写首句原文）
+        // create 行：ok + 物化 session_id + 目录+tool 摘要（不写首句原文）。
+        // 摘要经 audit 摘要上限截断（Linux runner 的 tempdir 路径超限会带 … 尾）
+        // ——期望值用同一 summarize 算，环境路径长短不改变结论
         let creates = by_action("create");
         assert_eq!(creates.len(), 1, "恰好一条 create 行：{rows:?}");
         assert_eq!(creates[0].result, "ok");
         assert_eq!(creates[0].session_id, "sid-audit-1");
         assert_eq!(
             creates[0].summary,
-            format!("create claude @ {}", dir),
+            crate::inject::normalize::summarize(
+                &format!("create claude @ {}", dir),
+                crate::inject::normalize::AUDIT_SUMMARY_CHARS
+            ),
             "{rows:?}"
         );
         assert!(

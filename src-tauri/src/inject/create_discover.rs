@@ -508,8 +508,14 @@ mod tests {
         // 全量：同目录两行都收，最新在前
         let all = discover_opencode(&root, SystemTime::UNIX_EPOCH, r"E:\work\p");
         assert_eq!(all, vec!["oc-new".to_string(), "oc-old".to_string()]);
-        // 归一匹配：分隔符/大小写变体同目录
-        let norm = discover_opencode(&root, SystemTime::UNIX_EPOCH, r"e:\WORK\P/");
+        // 归一匹配：Windows 走大小写+分隔符变体；Linux 大小写敏感（normalize 的
+        // 平台真源语义），用分隔符/尾斜杠变体——两平台都验「归一后同目录」
+        let norm_query = if cfg!(windows) {
+            r"e:\WORK\P/"
+        } else {
+            r"E:/work/p/"
+        };
+        let norm = discover_opencode(&root, SystemTime::UNIX_EPOCH, norm_query);
         assert_eq!(norm.len(), 2);
     }
 
@@ -530,8 +536,13 @@ mod tests {
             vec!["oc2-new".to_string()],
             "2.x 库须走 session_v2（旧表名已冻结 → 0 命中）"
         );
-        // 归一匹配同样成立
-        let norm = discover_opencode(&root, since, r"e:\WORK\P/");
+        // 归一匹配同样成立（平台变体选择同上：Linux 大小写敏感）
+        let norm_query = if cfg!(windows) {
+            r"e:\WORK\P/"
+        } else {
+            r"E:/work/p/"
+        };
+        let norm = discover_opencode(&root, since, norm_query);
         assert_eq!(norm.len(), 1);
     }
 
