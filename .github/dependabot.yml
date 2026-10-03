@@ -1,18 +1,28 @@
 version: 2
 updates:
+  # 用户裁决（2026-10-04）：季度 → 月度；依赖升级走「月度人工批处理」，
+  # 不启用自动合并（每次合并都需人工知情）。open-pull-requests-limit 提到 10：
+  # 之前 5/5 顶满时被截断的更新不会报错，只在 dependabot 自己的运行日志里可见。
   - package-ecosystem: npm
     directory: /
-    schedule: { interval: quarterly }
-    open-pull-requests-limit: 5
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 10
     labels: [dependencies, frontend]
     groups:
       minor-patch:
         update-types: [minor, patch]
+      # 0.x 的第二段被 semver 视为破坏性（^0.13.3 只允许 0.13.x），
+      # 所以 zstd 0.13→0.14、sha2 0.10→0.11、rand 0.8→0.10、windows 0.57→0.61
+      # 这类会落到 major 组：与其四个 PR 各自冲突/各自跑 CI，不如集中成一个 PR 便于批处理。
+      major:
+        update-types: [major]
   - package-ecosystem: cargo
     directory: /src-tauri/
-    schedule: { interval: quarterly }
-    open-pull-requests-limit: 5
+    schedule: { interval: monthly }
+    open-pull-requests-limit: 10
     labels: [dependencies, backend]
     groups:
       minor-patch:
         update-types: [minor, patch]
+      major:
+        update-types: [major]
