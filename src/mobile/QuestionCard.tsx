@@ -69,6 +69,7 @@ import {
   type QuestionAnswerAction,
   type QuestionAnswerStage,
   type QuestionInfoView,
+  type QuestionView,
 } from "./api";
 
 /** 阶段名 → 用户可读文案（**进行中态与中止回执共用**，两处不会漂移）。
@@ -105,6 +106,42 @@ const MAX_FREE_TEXT_CHARS = 10000;
  *  + 多选标记 + 选项描述的组合摘要。同一问题重复拉取恒等；模型换题或改选项即变。
  *  为何不用 `JSON.stringify(info)` 直接比：载荷里含 `source`（"mark"/"scan"）——
  *  同一问题从标记通道落到扫描通道会翻字符串但问题并未变化，那不该重置终态。 */
+/** 题干归一化（与后端 `screen_question_matches` 的 norm 同规则镜像）：剥空白 +
+ *  控制台读写损失字符（U+FFFD/变体选择符/键帽/星面 emoji）——屏读快照与载荷题干
+ *  的对位判据（卡面状态权威源的对位面） */
+function normalizeQuestionText(s: string): string {
+  return [...s]
+    .filter((c) => {
+      const code = c.codePointAt(0) ?? 0;
+      return (
+        !/\s/.test(c) &&
+        c !== "�" &&
+        !(code >= 0xfe00 && code <= 0xfe0f) &&
+        code !== 0x20e3 &&
+        code < 0x10000
+      );
+    })
+    .join("");
+}
+
+/** 屏读快照的题干 → 载荷题下标（评审 I3 不猜纪律）：归一化后空串跳过、精确相等
+ *  优先、**多个匹配 → null**（放弃同步而不是错跳题） */
+function findQuestionByHeading(questions: QuestionView[], heading: string): number | null {
+  const h = normalizeQuestionText(heading);
+  if (h.length < 4) return null; // 判别力不足（与后端 screen_question_matches 同口径）
+  const exact: number[] = [];
+  const partial: number[] = [];
+  questions.forEach((q, i) => {
+    const pq = normalizeQuestionText(q.question);
+    if (!pq) return;
+    if (pq === h) exact.push(i);
+    else if (pq.includes(h) || h.includes(pq)) partial.push(i);
+  });
+  if (exact.length === 1) return exact[0];
+  if (exact.length === 0 && partial.length === 1) return partial[0];
+  return null; // 0 个或多个匹配 → 不猜
+}
+
 function questionFingerprint(info: QuestionInfoView): string {
   return info.questions
     .map((q) =>
@@ -148,6 +185,8 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [mqFreeText, setMqFreeText] = useState<Record<number, string>>({});
   // 编辑模式（2026-10-02）：已写入后输入框只读；点「编辑」解锁，再发送走覆盖写入
   const [editingFreeText, setEditingFreeText] = useState(false);
+  // 自由作答「已发送但未核验」（评审 I1）：回执无屏读真值时提示，不虚报已写入
+  const [ftUnverified, setFtUnverified] = useState(false);
   // 终态：按键序列已投递（key_sent）——按钮禁用 +「已发送按键」。**toggle 不算终态**
   // （多选点选后仍需「提交」，置终态会锁死提交钮）
   const [sent, setSent] = useState(false);
@@ -172,11 +211,15 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const status = session.status;
   // 上一轮载荷的**内容指纹**（丁T1 复评 F2-1）：用于判定「这一轮拿到的是不是新问题」
   const lastFingerprint = useRef<string | null>(null);
+  // **交互纪元**（评审 I4）：每次应答动作自增——GET 快照落地时纪元已变 = 用户已
+  // 交互，快照是旧时刻的屏面，**跳过应用**（防止晚到的快照把已前进的卡拉回去）
+  const interactionEpoch = useRef(0);
   useEffect(() => {
     let alive = true;
     setReady(false);
     // 重拉时清掉上一轮的错误文案（陈旧「没有待回答的问题」会误导新一轮）
     setError(null);
+    const epochAtFetch = interactionEpoch.current;
     fetchSessionQuestion(session.id)
       .then((v) => {
         if (!alive) return;
@@ -215,6 +258,41 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         }
         if (fp !== "") lastFingerprint.current = fp;
         setInfo(v);
+        // **屏读快照同步**（2026-10-03 卡面状态权威源）：GET 带回终端当前态——
+        // 停在题屏 → 对位到载荷题并纠偏 mqIndex/勾选/输入框（MAM 重启、终端手动
+        // 作答等漂移场景的统一解法）；停在 Review → 直接进确认卡
+        if (v.available && v.screen && interactionEpoch.current === epochAtFetch) {
+          if (v.screen.review) {
+            setMqIndex(v.questions.length);
+          } else if (v.screen.heading) {
+            const qi = findQuestionByHeading(v.questions, v.screen.heading);
+            if (qi !== null) {
+              setMqIndex(qi);
+              const set = new Set<number>();
+              (v.screen.checked ?? []).forEach((c, i) => c === true && set.add(i));
+              // I7：单题卡的勾选渲染走 `checked`（不是 mqChecked）
+              if (v.questions.length === 1) {
+                setChecked(set);
+              } else {
+                setMqChecked((prev) => ({ ...prev, [qi]: set }));
+              }
+              if (v.screen.freeTextPresent) {
+                if (v.screen.freeText !== null && v.screen.freeText !== undefined) {
+                  // 已打字（屏上文本）→ 只读呈现「已写入 + 编辑」（屏读为准）
+                  setMqFreeText((prev) => ({ ...prev, [qi]: v.screen!.freeText as string }));
+                  setEditingFreeText(false);
+                } else {
+                  // 占位 = 终端已无内容 → 清本地残留（评审 I1）
+                  setMqFreeText((prev) => {
+                    const n = { ...prev };
+                    delete n[qi];
+                    return n;
+                  });
+                }
+              }
+            }
+          }
+        }
         setReady(true);
       })
       .catch(() => {
@@ -239,6 +317,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     ) => {
       if (busy || sent) return;
       setBusy(true);
+      const epoch = interactionEpoch.current; // 本动作纪元（中止重拉的新旧判定）
       setError(null);
       setAbortedStage(null);
       // **进行中态**（丁T5）：按动作显示对应的首段文案（toggle 切勾链/advance 切题链/
@@ -306,12 +385,47 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             // 停在确认卡（opencode 的 Confirm 页 tab=回绕第 1 题，回执无该字段且
             // 无 direction → 维持回绕行为）
             if (res.advanced === false) {
+              // 已在 Review 屏（零按键）→ 前端直接进确认卡（评审 C1 前端面）
               setInProgress(null);
-            } else if (direction === "prev" && res.direction === "prev") {
-              // claude echo 确认 = 真的退回了（opencode 旧回执无 echo → 走下方回绕）
-              setMqIndex((prev) => Math.max(0, prev - 1));
+              if (info !== null) setMqIndex(info.questions.length);
             } else {
-              setMqIndex((prev) => (info !== null && prev >= info.questions.length ? 0 : prev + 1));
+              // **目的地计算 + 屏读快照纠偏**（2026-10-03 屏读为准）：prev echo 确认
+              // = 退回上一题；next 沿用既有推进/回绕；快照随回执到达 → 新题的勾选/
+              // 自由作答以屏读为准覆盖本地记忆
+              const dest =
+                direction === "prev" && res.direction === "prev"
+                  ? Math.max(0, mqIndex - 1)
+                  : info !== null && mqIndex >= info.questions.length
+                    ? 0
+                    : mqIndex + 1;
+              setMqIndex(dest);
+              // 评审 I2：快照**归属校验**——heading 必须唯一对位到 dest，且勾选数
+              // 与载荷选项数一致；校验不过 → 跳过应用（本地状态不被部分/异屏读损坏）
+              if (
+                res.screen &&
+                res.screen.heading &&
+                info !== null &&
+                findQuestionByHeading(info.questions, res.screen.heading) === dest &&
+                (res.screen.checked ?? []).length === info.questions[dest]?.options.length
+              ) {
+                const set = new Set<number>();
+                (res.screen.checked ?? []).forEach((c, i) => c === true && set.add(i));
+                setMqChecked((prev) => ({ ...prev, [dest]: set }));
+                if (res.screen.freeTextPresent) {
+                  if (res.screen.freeText !== null && res.screen.freeText !== undefined) {
+                    setMqFreeText((prev) => ({
+                      ...prev,
+                      [dest]: res.screen!.freeText as string,
+                    }));
+                  } else {
+                    setMqFreeText((prev) => {
+                      const n = { ...prev };
+                      delete n[dest];
+                      return n;
+                    });
+                  }
+                }
+              }
             }
           } else if (
             action === "select" &&
@@ -329,9 +443,18 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             // **多题卡的自由作答**（2026-10-02 多选 Type something 内联编辑）：记录
             // 文本进答案清单、**不置终态**（多题卡要继续切题/提交；打字编排零后续键，
             // 焦点留在终端的 Type something 行，切题由 ◀/▶ 接管）
-            setMqFreeText((prev) => ({ ...prev, [questionIndex]: text ?? "" }));
-            setFreeText("");
-            setEditingFreeText(false);
+            // 屏读为准：回执带回该行屏上文本（可能带此前终端侧的残留），以它为准
+            // 屏读为准（评审 I1）：回执 text = 该行屏上文本；null = 收尾读屏失败
+            //（未核验——不把本地发送文本虚报成已写入，保持可编辑可重试）
+            if (res.text !== null && res.text !== undefined) {
+              setMqFreeText((prev) => ({ ...prev, [questionIndex]: res.text as string }));
+              setFreeText("");
+              setEditingFreeText(false);
+              setFtUnverified(false);
+              setFtUnverified(false);
+            } else {
+              setFtUnverified(true);
+            }
             setInProgress(null);
           } else {
             // select（单题）/ submit / cancel：终态
@@ -344,7 +467,46 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         } else {
           // failed：区分「阶段机中止」（aborted+stage）与普通投递失败（可重试）
           setError(res.error);
-          if (res.aborted === true && res.stage) setAbortedStage(res.stage);
+          if (res.aborted === true && res.stage) {
+            setAbortedStage(res.stage);
+            // **中止后重拉**（评审 I6）：键可能在轮询窗尽后才被终端消费——重拉 GET
+            // 用屏读快照把卡面拉回与终端一致（快照对位失败则维持现状）
+            void fetchSessionQuestion(session.id)
+              .then((v2) => {
+                if (interactionEpoch.current !== epoch) return;
+                setInfo(v2);
+                const screen2 = v2.available ? v2.screen : null;
+                if (screen2) {
+                  if (screen2.review) {
+                    setMqIndex(v2.questions.length);
+                  } else if (screen2.heading) {
+                    const qi2 = findQuestionByHeading(v2.questions, screen2.heading);
+                    if (qi2 !== null) {
+                      setMqIndex(qi2);
+                      const set2 = new Set<number>();
+                      (screen2.checked ?? []).forEach((c, i) => c === true && set2.add(i));
+                      if (v2.questions.length === 1) setChecked(set2);
+                      else setMqChecked((prev) => ({ ...prev, [qi2]: set2 }));
+                      if (screen2.freeTextPresent) {
+                        if (screen2.freeText !== null && screen2.freeText !== undefined) {
+                          setMqFreeText((prev) => ({
+                            ...prev,
+                            [qi2]: screen2.freeText as string,
+                          }));
+                        } else {
+                          setMqFreeText((prev) => {
+                            const n = { ...prev };
+                            delete n[qi2];
+                            return n;
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+              })
+              .catch(() => {});
+          }
         }
       } catch (e) {
         if (e instanceof ApiError) {
@@ -359,7 +521,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         setInProgress(null);
       }
     },
-    [busy, sent, session.id, info]
+    [busy, sent, session.id, info, mqIndex]
   );
 
   // 加载中 / 拉取失败 / info 未落地 / 不可用：不渲染（卡自隐）
@@ -483,6 +645,11 @@ export default function QuestionCard({ session }: QuestionCardProps) {
       {mqFreeText[qi] !== undefined && (
         <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
           已写入：{mqFreeText[qi]}
+        </p>
+      )}
+      {ftUnverified && (
+        <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+          已发送但未能屏读核验——请到终端核对该行内容与勾选态后重试
         </p>
       )}
     </div>
@@ -650,7 +817,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     // 2026-10-02：多选题自由作答升格——claude（navBoth）多选屏的 Type something 行
     // **直接打字即内联编辑**（活体取证：勾选自动置上；回车会取消勾选 → 编排零后续
     // 键）。navBoth 作工具面限定：kimi/codex 多选形态未取证，维持不渲染。
-    const multiFreeTextEnabled = info.freeText === true && info.navBoth === true && q.multiSelect;
+    const multiFreeTextEnabled = info.freeText === true && info.navBoth === true;
     return (
       <InteractiveCard
         tone="question"

@@ -126,3 +126,17 @@
 - **前端**：多选题卡自由作答输入框（`freeText && navBoth && multiSelect`；发送带 questionIndex；成功记录 `mqFreeText` 不置终态）；确认卡**已选答案清单**（`mqChecked`/新 `mqSelected`（单选）/`mqFreeText` 三源渲染，未答显示占位，脚注「以终端 Review 页为准」——本地记忆可能与终端漂移的申报）。
 
 **实机验收追加**：多选题输入自由作答 → 发送 → 屏读核验通过（卡面「已写入」）→ 下一题 → 确认卡清单显示文本 → 提交 → Review 页含该答案。
+
+## 9. 屏读快照权威源评审收口（2026-10-03 第二轮评审，本地未推送批次）
+
+评审范围 `697d70c..79e8330`（日志写文件 / 分类轮询 / 快照权威源三批），结论 With fixes：1C/8I/7M。处置：
+
+- **C1 Review 屏误判题屏**：`question_screen_snapshot` 加 Review 前置判定（Ready → None）——anchor B 会把「页签栏+编号确认项」解析成题屏，题干区含答毕回显会错跳题并清勾选态；前端 `advanced:false` → 直接进确认卡。回归锁 ×1。
+- **I1 freeText 三态**：快照加 `free_text_present`（占位/打字/行缺席可分）；GET 占位确认 → 清本地残留；回执 `text:null` = 未核验 → 不虚报「已写入」，琥珀提示 + 保持可编辑。测试 +1。
+- **I2/I3 快照对位校验**：`findQuestionByHeading`（空串跳过/精确优先/多义放弃——不猜纪律）；advance 应用前 heading 必须唯一对位到 dest 且勾选数与载荷选项数一致。
+- **I4 交互纪元**：每次动作自增，晚到的旧快照（纪元已变）不再把已前进的卡拉回去。
+- **I5 freeText 首段三态**：`poll_question_screen`——形态不符中止带屏面摘要（不再误报「读不到问答屏」，观测面教训与 toggle 路径对齐）。
+- **I6 中止后重拉**：aborted → 前端自动重拉 GET（键可能在窗尽后才被消费，快照随 GET 生效）。
+- **I7 单题勾选同步**：GET 快照在单题卡映射进 `setChecked`。
+- **I8**：`snapshot_to_json` 单点去重；快照 Rust 测试 ×2（Review None / 三态判别）。
+- **M 系列择要**：M1 轮询窗真实时长入档（≈2.9s）；M2 Review 标题宽判据起点归类；M3 panic hook 写日志；M4 日志 5MB 轮转；M5 断链/类型修正；M6 AGENTS.md 补申报（单选选中项无屏读标记，mqSelected 仍本地记忆）；M7 advanced=false 跳过读屏。

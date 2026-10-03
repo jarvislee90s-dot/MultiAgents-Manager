@@ -369,6 +369,9 @@ pub struct RemoteState {
     /// 理由见 [`ScreenProbeFn`] 文档）。**测试注入脚本化屏序列**——否则
     /// 「每段屏读复核」这条控制流只有实机能覆盖（本批已多次栽在这上面）。
     pub screen_probe: std::sync::Arc<ScreenProbeFn>,
+    /// **注入能力开关表**（2026-10-03 数字直选自适应）：per-state 持有——端点测试
+    /// 各自独立表避免并行探测写回互相污染；生产装配共享同一 Arc（全局一份）
+    pub capability_table: crate::inject::capability::Table,
     /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
     /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
     /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
@@ -524,6 +527,7 @@ mod tests {
 
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
                 total_count: 7,
@@ -1074,6 +1078,7 @@ mod tests {
     async fn sessions_scan_does_not_stall_async_runtime() {
         // 重建 state 以注入阻塞源（其余注入缝与 test_state 一致：内存库、预发行 token）
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 crate::session::SessionsResponse {
@@ -1457,6 +1462,7 @@ mod tests {
     async fn host_endpoint_is_gated_and_returns_injected_payload() {
         // 重建 state：host_source 注入假载荷（与 sessions_scan_* 重建 state 的先例一致）
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
                 total_count: 0,
@@ -1559,6 +1565,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let cap = captured.clone();
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
                 total_count: 0,
@@ -1769,6 +1776,7 @@ mod tests {
             unread: false,
         };
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -2058,6 +2066,7 @@ mod tests {
         let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let h = hit.clone();
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -2209,6 +2218,7 @@ mod tests {
         let pin_owned: Option<String> = pin.map(|s| s.to_string());
         (
             Arc::new(RemoteState {
+                capability_table: crate::inject::capability::new_table(),
                 session_source: Box::new(|| crate::session::SessionsResponse {
                     sessions: vec![],
                     total_count: 7,
@@ -2771,6 +2781,7 @@ mod tests {
             let now = t.clone();
             (
                 Arc::new(RemoteState {
+                    capability_table: crate::inject::capability::new_table(),
                     session_source: Box::new(|| crate::session::SessionsResponse {
                         sessions: vec![],
                         total_count: 0,
@@ -3084,6 +3095,7 @@ mod tests {
             },
         ];
         Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),
@@ -3300,6 +3312,7 @@ mod tests {
             ),
         ];
         Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),
@@ -5162,6 +5175,7 @@ mod tests {
             ),
         ];
         Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),
@@ -5337,10 +5351,10 @@ mod tests {
 
     /// **2026-09-24 改写**（原「toggle = 单数字」锁被用户实机推翻——claude 2.1.278
     /// 多选屏数字无反应）：toggle 走闭环切勾阶段机（屏读定位 → 空格 → 屏读校验翻转）。
-    /// 脚本：焦点在首选项 → 空格后首项已勾。断言：键序 = `[space]`（**零数字**）；
-    /// 回执 key_sent + done + checked:true + verified:true + stage toggle-row；
-    /// 审计摘要 `toggle#1::toggle-row`、result ok。
-    /// 还原动作：把 Toggle 路由改回静态数字序列 → 键序断言先红（出现 "1"）。
+    /// 切勾闭环（**2026-10-03 数字直选自适应**）：Unknown 首探 → 数字 "1" → 屏读
+    /// 核验翻转成功 → 记 Supported。断言：键序 = `["1"]`（数字直发，零走位零空格）；
+    /// 回执 key_sent + done + checked:true + verified:true + stage toggle-row。
+    /// 还原动作：把 toggle 编排的数字探测段删掉 → 键序断言先红（出现 "space"）。
     #[tokio::test]
     async fn question_answer_toggle_sends_digit() {
         let (state, fake, _script) = stage_rig(
@@ -5373,8 +5387,8 @@ mod tests {
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(33u32, "space".to_string())],
-            "toggle#1 = 空格（焦点已在目标行 → 零走位；数字路径已废止）：{:?}",
+            vec![(33u32, "1".to_string())],
+            "toggle#1 = 数字直发（探测翻转成功 → Supported）：{:?}",
             fake.recorded_keys()
         );
         let audits = state
@@ -5397,6 +5411,15 @@ mod tests {
                 screen_fixtures::multi_option_focus(),
             ],
             false,
+        );
+        // 能力预置 Unsupported（per-state 表；评审实施修正）：数字探测不参与，
+        // 本用例专测「空格翻转未见过 → 中止」的走位路径
+        let ver = crate::inject::approve::cached_cli_version("claude").unwrap_or_default();
+        crate::inject::capability::set_digit_toggle_in(
+            &state.capability_table,
+            "claude",
+            &ver, // 与调用侧同源 key（cached_cli_version）
+            crate::inject::capability::DigitToggle::Unsupported,
         );
         mark_question(&state, "claude", "sess_af", Q_MULTI_PAYLOAD);
         let app = router(state.clone());
@@ -5421,7 +5444,7 @@ mod tests {
         assert_eq!(
             fake.recorded_keys(),
             vec![(42u32, "space".to_string())],
-            "只发过空格（无后续键）：{:?}",
+            "只发过空格（Unsupported 预置 = 零探测；无后续键）：{:?}",
             fake.recorded_keys()
         );
         let audits = state
@@ -6169,6 +6192,7 @@ mod tests {
         });
         let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -6320,8 +6344,12 @@ mod tests {
                 crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 33),
                 crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 35),
                 crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                // right×3（推到行尾，屏不变）——2026-10-03 行首光标 bug 修复
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧内容", true, 37),
                 crate::inject::question::live_fixtures::q1_typed_at("旧", true, 37),
-                crate::inject::question::live_fixtures::q1_typed_at("T", false, 37),
+                crate::inject::question::live_fixtures::q1_typed_at("旧", true, 37),
                 crate::inject::question::live_fixtures::q1_typed_at("Type something", false, 37),
                 crate::inject::question::live_fixtures::q1_typed_at("新内容", false, 37),
                 crate::inject::question::live_fixtures::q1_typed_at("新内容", true, 37),
@@ -6353,12 +6381,15 @@ mod tests {
                 (95u32, "down".to_string()),
                 (95u32, "down".to_string()),
                 (95u32, "down".to_string()),
+                (95u32, "right".to_string()),
+                (95u32, "right".to_string()),
+                (95u32, "right".to_string()),
                 (95u32, "backspace".to_string()),
                 (95u32, "backspace".to_string()),
                 (95u32, "backspace".to_string()),
                 (95u32, "space".to_string()),
             ],
-            "键序 = down×4 + backspace×3 + space：{:?}",
+            "键序 = down×4 + right×3 + backspace×3 + space：{:?}",
             inner.recorded_keys()
         );
         assert_eq!(inner.recorded(), vec![(95u32, "新内容".to_string())]);
@@ -6716,8 +6747,8 @@ mod tests {
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(37u32, "space".to_string())],
-            "键序 = [space]（焦点已在目标行零走位）：{:?}",
+            vec![(37u32, "1".to_string())],
+            "键序 = [数字]（探测翻转成功 → Supported，2026-10-03）：{:?}",
             fake.recorded_keys()
         );
     }
@@ -8768,6 +8799,7 @@ mod tests {
         );
         let sessions = vec![sess_m, sess_n, sess_o];
         Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),
@@ -9772,6 +9804,7 @@ mod tests {
             project_path.to_string_lossy().into_owned()
         };
         Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -10048,6 +10081,7 @@ mod tests {
             crate::session::SessionStatus::Waiting,
         );
         let state2 = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: {
                 let s = codex_sess.clone();
                 Box::new(move || crate::session::SessionsResponse {
@@ -10310,6 +10344,7 @@ mod tests {
         let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -10355,6 +10390,7 @@ mod tests {
         let session = inj_sess(sid, tool, pid, status);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,
@@ -10430,6 +10466,7 @@ mod tests {
         let session = inj_sess(sid, tool, pid, status);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
+            capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
                 total_count: 1,

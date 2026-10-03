@@ -631,6 +631,17 @@ export interface QuestionInfoView {
    *  「返回上一题修改」发 prev；false（opencode/旧后端）→ 维持旧单钮 + tab 回绕。
    *  缺省 → 按 false 处理（前向兼容）。 */
   navBoth?: boolean;
+  /** **屏读快照**（2026-10-03 卡面状态权威源）：GET 时终端若停在题屏 →
+   *  {heading, checked, freeText}（前端据此对位当前题并纠偏 mqIndex/勾选/输入框）；
+   *  停在 Review 确认屏 → {review:true}（前端直接进确认卡）；null = 屏读不可用/
+   *  非题屏（前端维持本地状态）。 */
+  screen?: {
+    review?: boolean;
+    heading?: string;
+    checked?: (boolean | null)[];
+    freeText?: string | null;
+    freeTextPresent?: boolean;
+  } | null;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }
@@ -699,6 +710,18 @@ export type QuestionAnswerResult =
       /** claude 切题（2026-10-02）：方向 echo（prev/next）——前端移动 mqIndex 需
        *  确认 echo 与请求 direction 一致（opencode 旧回执无此字段 → 维持回绕行为） */
       direction?: string;
+      /** claude 切题（2026-10-03 屏读为准）：切题后新题屏的快照（勾选态/自由作答
+       *  /题干）——前端据此纠偏新题的卡面状态 */
+      screen?: {
+        heading: string;
+        checked: (boolean | null)[];
+        freeText: string | null;
+        freeTextPresent?: boolean;
+      };
+      /** claude 多选自由作答（2026-10-03 屏读为准）：该行的屏上文本（勾选态复用
+       *  上方 `checked` 字段——与 toggle 回执同字段同语义）；null = 收尾读屏失败
+       *  （未核验，前端不得虚报已写入） */
+      text?: string | null;
     }
   | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
 

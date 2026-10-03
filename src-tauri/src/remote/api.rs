@@ -3232,13 +3232,14 @@ pub async fn session_question(
             );
         }
     };
-    let (questions, source, tool_id) = match scan {
+    let (questions, source, tool_id, session_pid) = match scan {
         Some((session, hit)) => (
             hit.questions,
             hit.source,
             session.agent_type.tool_id().to_string(),
+            Some(session.pid),
         ),
-        None => (Vec::new(), "", String::new()),
+        None => (Vec::new(), "", String::new(), None),
     };
     // T3：工具键序档（前端据此决定渲染可作答按钮还是只读卡）——
     // `answerable=false` 时前端渲染只读卡 + 引导终端作答（zcode/dsh 等未实测工具；
@@ -3265,6 +3266,36 @@ pub async fn session_question(
     // 渲染 ◀/▶ 双钮（多题卡）+ 多选卡自由作答输入框（单题/多题皆可——内联编辑
     // 编排与题数无关），false 时维持旧单钮（opencode tab，行为零变化）。
     let nav_both = tool_id == "claude";
+    // **屏读快照**（2026-10-03 卡面状态权威源）：终端当前停在题屏 → 回传勾选态/
+    // 自由作答/题干（前端对位到载荷题并纠偏 mqIndex/状态）；停在 Review 确认屏 →
+    // {review:true}（前端直接进确认卡）。claude-only（屏读 Windows 能力 + 解析器
+    // 形态族）；屏读失败/非题屏 → null（前端维持本地状态）。
+    let screen_snapshot = match session_pid {
+        Some(pid) if tool_id == "claude" && !questions.is_empty() => {
+            let st2 = st.clone();
+            let tool2 = tool_id.clone();
+            tokio::task::spawn_blocking(move || {
+                (st2.screen_probe)(&tool2, pid).and_then(|lines| {
+                    if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
+                        return Some(serde_json::json!({
+                            "heading": snap.heading,
+                            "checked": snap.checked,
+                            "freeText": snap.free_text,
+                        }));
+                    }
+                    matches!(
+                        crate::inject::question::probe_review_screen(&lines),
+                        crate::inject::question::ScreenStep::Ready(_)
+                    )
+                    .then(|| serde_json::json!({ "review": true }))
+                })
+            })
+            .await
+            .ok() // JoinError
+            .and_then(|inner| inner) // 屏读/解析失败 → None（前端维持本地状态）
+        }
+        _ => None,
+    };
     json_no_store(
         StatusCode::OK,
         serde_json::json!({
@@ -3278,6 +3309,9 @@ pub async fn session_question(
             "advance": advance,
             // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
             "navBoth": nav_both,
+            // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
+            // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
+            "screen": screen_snapshot,
             "questions": questions
                 .iter()
                 .map(|q| serde_json::json!({
@@ -3564,7 +3598,7 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id))
+        Ok((session, seq, q, tool_id, multi_question))
     })
     .await
     {
@@ -3577,7 +3611,7 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool) = match lookup {
+    let (session, sequence, q_for_plan, q_tool, multi_flow) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -3605,8 +3639,15 @@ pub async fn session_question_answer(
     let pid = session.pid;
     let answer_sid = sid.clone();
     // 阶段机计划（走位上限依赖选项数——在会话扫描之后才有，故在此构造）
-    let stage_plan =
-        StagePlan::for_action(action, req.index, direction, overwrite, &q_for_plan, q_tool);
+    let stage_plan = StagePlan::for_action(
+        action,
+        req.index,
+        direction,
+        overwrite,
+        multi_flow,
+        &q_for_plan,
+        q_tool,
+    );
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
     let tool_for_dispatch = tool.clone();
@@ -3742,10 +3783,11 @@ pub async fn session_question_answer(
         QuestionDispatch::AdvanceDone {
             advanced,
             direction,
+            snapshot,
         } => {
             // 切题闭环：status=key_sent + advanced + direction（false = Next 已在
             // Review 屏零按键——前端**不**推进，停在确认卡；Prev 在 Review 屏会真的
-            // 退回上一题，advanced=true）
+            // 退回上一题，advanced=true）。`screen` = 新题屏读快照（卡面状态权威源）
             let dir_word = match direction {
                 crate::inject::question::NavDirection::Prev => "prev",
                 crate::inject::question::NavDirection::Next => "next",
@@ -3761,6 +3803,13 @@ pub async fn session_question_answer(
                 "answer",
                 result,
             );
+            let screen = snapshot.map(|snap| {
+                serde_json::json!({
+                    "heading": snap.heading,
+                    "checked": snap.checked,
+                    "freeText": snap.free_text,
+                })
+            });
             json_no_store(
                 StatusCode::OK,
                 serde_json::json!({
@@ -3769,6 +3818,31 @@ pub async fn session_question_answer(
                     "stage": QUESTION_STAGE_ADVANCE,
                     "advanced": advanced,
                     "direction": dir_word,
+                    "screen": screen,
+                }),
+            )
+        }
+        QuestionDispatch::MultiFreeTextDone { text, checked } => {
+            // 多选自由作答闭环：回执带**屏读真值**（该行屏上文本 + 勾选态）——前端
+            // 以它为准记录（屏读为准原则），不采用本地发送文本
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                format!("{audit_label}::{}", QUESTION_STAGE_FREE_TEXT).as_str(),
+                "answer",
+                "ok:receipt-unverifiable",
+            );
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": QUESTION_STAGE_FREE_TEXT,
+                    "text": text,
+                    "checked": checked,
                 }),
             )
         }
@@ -3874,6 +3948,7 @@ impl StagePlan {
         index: Option<usize>,
         direction: crate::inject::question::NavDirection,
         overwrite: bool,
+        multi_flow: bool,
         q: &crate::inject::question::Question,
         tool: &str,
     ) -> Self {
@@ -3894,8 +3969,12 @@ impl StagePlan {
             (A::FreeText, "kimi") => Self::KimiFreeText,
             (A::FreeText, "codex") => Self::CodexNotes,
             (A::FreeText, "opencode") => Self::OpencodeOwnAnswer,
-            // 2026-10-02：claude 多选自由作答走勾选框行内联编辑编排
-            (A::FreeText, "claude") if q.multi_select => Self::ClaudeMultiFreeText { overwrite },
+            // 2026-10-02/03：claude 自由作答路由——**多题流子题（含单选）与单题多选**
+            // 走勾选框行内联编辑编排（数字定位在多题/多选屏无效；单选子题勾选兜底
+            // 自动跳过——无勾选框形态）；**单题单选**维持既有数字定位编排（K4-K7 定案）
+            (A::FreeText, "claude") if multi_flow || q.multi_select => {
+                Self::ClaudeMultiFreeText { overwrite }
+            }
             (A::Submit, _) => Self::Submit {
                 max_down_steps: q.options.len() + 2,
             },
@@ -3930,6 +4009,14 @@ enum QuestionDispatch {
     AdvanceDone {
         advanced: bool,
         direction: crate::inject::question::NavDirection,
+        snapshot: Option<crate::inject::question::QuestionScreenSnapshot>,
+    },
+    /// **claude 多选自由作答闭环**的结论（2026-10-03）：`text`/`checked` = 该行的
+    /// **屏读真值**（内联编辑后的屏上文本 + 勾选态）——前端以它为准记录，不用本地
+    /// 发送文本（屏读为准原则）
+    MultiFreeTextDone {
+        text: Option<String>,
+        checked: Option<bool>,
     },
     /// 阶段机**中止**在某一段（`error` 是带段名的中文文案）
     Aborted { stage: &'static str, error: String },
@@ -4134,12 +4221,33 @@ fn dispatch_question_action(
                     QUESTION_STAGE_POLL_TOTAL_MS,
                 ) {
                     QuestionScreenPoll::Ready(lines) => {
-                        crate::inject::question::run_toggle_stages(
+                        // **数字直选能力自适应**（2026-10-03）：按 (tool, cli_version)
+                        // 取开关传入；编排探测/降级后写回（Unknown 首探、Supported 失
+                        // 效降级——见 capability 模块文档）
+                        let ver = crate::inject::approve::cached_cli_version(tool)
+                            .unwrap_or_default();
+                        let digit = crate::inject::capability::digit_toggle_in(
+                            &st.capability_table,
+                            tool,
+                            &ver,
+                        );
+                        let out = crate::inject::question::run_toggle_stages(
                             *target,
                             expected_question,
                             || Ok(Some(lines.clone())),
                             &mut terminal,
-                        )
+                            digit,
+                        );
+                        if let Some(new_cap) = out.as_ref().ok().and_then(|o| o.digit_result)
+                        {
+                            crate::inject::capability::set_digit_toggle_in(
+                                &st.capability_table,
+                                tool,
+                                &ver,
+                                new_cap,
+                            );
+                        }
+                        out
                     }
                     QuestionScreenPoll::NoScreen => Err(crate::inject::question::StageAbort::screen(
                         "读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
@@ -4213,9 +4321,22 @@ fn dispatch_question_action(
                 }
             };
             match out {
+                Ok(o) if o.advanced => {
+                    // **屏读快照**（卡面状态权威源）：切题后新题屏的勾选态/自由作答
+                    // 随回执回传纠偏（fresh read——重绘已由分类段轮询等到）。
+                    // advanced=false（已在 Review 零按键）→ 跳过读屏（M7）
+                    let snapshot = probe("snapshot")
+                        .and_then(|l| crate::inject::question::question_screen_snapshot(&l));
+                    QuestionDispatch::AdvanceDone {
+                        advanced: o.advanced,
+                        direction: *direction,
+                        snapshot,
+                    }
+                }
                 Ok(o) => QuestionDispatch::AdvanceDone {
                     advanced: o.advanced,
                     direction: *direction,
+                    snapshot: None,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -4254,13 +4375,35 @@ fn dispatch_question_action(
             let out = crate::inject::question::run_multi_select_free_text_stages(
                 text,
                 *overwrite,
-                || poll_question_stage(|| probe("free-row"), QUESTION_STAGE_POLL_TOTAL_MS),
+                // 首段轮询三态（评审 I5：二态过滤会把「屏面在但形态不符」重新并进
+                // 「读不到问答屏」——该观测面教训见 toggle 路径的三态改造）。接受判据
+                // = FreeText 行在场；形态不符中止带屏面摘要。
+                || {
+                    match poll_question_screen(
+                        || probe("free-row"),
+                        |l| {
+                            crate::inject::question::parse_question_rows(l)
+                                .iter()
+                                .any(|r| {
+                                    r.kind == crate::inject::question::QuestionRowKind::FreeText
+                                })
+                        },
+                        QUESTION_STAGE_POLL_TOTAL_MS,
+                    ) {
+                        QuestionScreenPoll::Ready(lines) => Ok(Some(lines)),
+                        QuestionScreenPoll::NoScreen => Ok(None),
+                        QuestionScreenPoll::Unparseable(last) => Err(format!(
+                            "自由作答：屏读正常但解析不出「Type something」行——已中止，未发任何键。屏面摘要：{}",
+                            screen_digest(&last)
+                        )),
+                    }
+                },
                 &mut terminal,
             );
             match out {
-                Ok(o) => QuestionDispatch::StageDone {
-                    stage: QUESTION_STAGE_FREE_TEXT,
-                    receipt_seen: o.receipt_seen,
+                Ok(o) => QuestionDispatch::MultiFreeTextDone {
+                    text: o.screen_text,
+                    checked: o.screen_checked,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -6770,6 +6913,7 @@ mod tests {
                 None,
                 crate::inject::question::NavDirection::Next,
                 false,
+                false,
                 &q,
                 "opencode"
             ),
@@ -6781,6 +6925,7 @@ mod tests {
                 crate::inject::question::AnswerAction::Submit,
                 None,
                 crate::inject::question::NavDirection::Next,
+                false,
                 false,
                 &q,
                 "claude"
@@ -6794,6 +6939,7 @@ mod tests {
                 Some(1),
                 crate::inject::question::NavDirection::Next,
                 false,
+                false,
                 &q,
                 "claude"
             ),
@@ -6806,6 +6952,7 @@ mod tests {
                 Some(0),
                 crate::inject::question::NavDirection::Next,
                 false,
+                false,
                 &q,
                 "opencode"
             ),
@@ -6817,6 +6964,7 @@ mod tests {
                 crate::inject::question::AnswerAction::Advance,
                 None,
                 crate::inject::question::NavDirection::Next,
+                false,
                 false,
                 &q,
                 "opencode"
