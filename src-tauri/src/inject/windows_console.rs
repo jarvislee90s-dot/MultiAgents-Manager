@@ -229,7 +229,7 @@ unsafe fn open_conin() -> Result<HANDLE, String> {
         None,
         OPEN_EXISTING,
         FILE_FLAGS_AND_ATTRIBUTES(0),
-        HANDLE(0),
+        None,
     )
     .map_err(|e| format!("打开 CONIN$ 失败（0x{:08X}）", e.code().0 as u32))
 }
@@ -247,7 +247,7 @@ unsafe fn open_conout() -> Result<HANDLE, String> {
         None,
         OPEN_EXISTING,
         FILE_FLAGS_AND_ATTRIBUTES(0),
-        HANDLE(0),
+        None,
     )
     .map_err(|e| format!("打开 CONOUT$ 失败（0x{:08X}）", e.code().0 as u32))
 }
