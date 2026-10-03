@@ -160,12 +160,20 @@ pub fn forbidden_key_reason(key: &str) -> Option<String> {
 /// 输入行残留逐字符删除（A 族写 `\u{0008}`=BS 字符、B 族 VK_BACK 键事件，
 /// 两族语义一致；crossterm 把 ueChar=0x08 解析为 Backspace）。消费方=
 /// `mode::run_codex_permission_stages` 段 0.5（屏读判残留→逐字符删→闭环验证）。
+///
+/// `"space"`（2026-09-24 新增）：claude 多选框切勾键（用户实机取证 2.1.278，见
+/// `research/refs/phase2-消息注入/2026-09-24-claude多选多题键序-用户实机取证.md`）。
+/// VK_SPACE+字符 0x20，与 enter/esc/tab 同形（跨族安全口径）。**全局键域扩展，
+/// 唯一消费方是 `question::run_toggle_stages`**（闭环切勾——发前屏读定位焦点行、
+/// 发后屏读校验勾选态翻转，形态不被消费即干净中止）。命名键而非放行裸 `" "`：
+/// 空格不属 `is_ascii_alphanumeric`，且与既有控制键命名风格一致。
 pub fn control_records(key: &str, layout: &dyn KeyLayout) -> Option<Vec<KeyRecordSpec>> {
     let (vk, ch) = match key {
         "enter" => (0x0Du16, 0x0Du16),     // VK_RETURN
         "esc" => (0x1Bu16, 0x1Bu16),       // VK_ESCAPE
         "tab" => (0x09u16, 0x09u16),       // VK_TAB
         "backspace" => (0x08u16, 0x08u16), // VK_BACK
+        "space" => (0x20u16, 0x20u16),     // VK_SPACE（claude 多选切勾，2026-09-24）
         _ => {
             let mut chars = key.chars();
             match (chars.next(), chars.next()) {
@@ -804,6 +812,21 @@ mod tests {
         assert!(control_records("esc", &FakeLayout).is_some());
         assert!(control_records("tab", &FakeLayout).is_some());
         assert!(control_records("我们", &FakeLayout).is_none()); // 域外 None——域校验（P2-2）
+    }
+
+    /// space 入域（2026-09-24，claude 多选切勾）：VK_SPACE+字符 0x20，与 enter/esc/
+    /// tab/backspace 同形（vk 与 ch 同值、成对 down/up）；裸 " " 仍域外（命名键
+    /// 单一口径，防调用方两种写法漂移）
+    #[test]
+    fn space_key_records_are_vk_form() {
+        let r = control_records("space", &FakeLayout).unwrap();
+        assert_eq!(r.len(), 2, "成对 down/up");
+        assert_eq!((r[0].vk, r[0].ch, r[0].down), (0x20, 0x20, true));
+        assert!(!r[1].down);
+        assert!(
+            control_records(" ", &FakeLayout).is_none(),
+            "裸空格仍域外——只认命名键 \"space\""
+        );
     }
 
     #[test]

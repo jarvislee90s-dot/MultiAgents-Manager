@@ -644,33 +644,54 @@ export async function fetchSessionQuestion(sessionId: string): Promise<QuestionI
   return (await r.json()) as QuestionInfoView;
 }
 
-/** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换；
+/** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换（**claude
+ *  走闭环阶段机**：屏读定位 → 空格 → 屏读校验翻转，2026-09-24 数字路径废止）；
  *  submit=多选提交（**阶段机闭环**：屏读确认每段后才推进）；
  *  cancel=取消问题（Esc）；freeText=自由作答（**仅 claude**，阶段机闭环：
  *  定位 `Type something` 行 → 文本 → 回车）；
- *  advance=多题切换题目（**仅 opencode**，tab 前向切页——纯导航，不触碰勾选态）。 */
+ *  advance=多题切换题目（opencode=tab 前向切页；claude=走位到尾部推进行
+ *  `Next`+回车+读屏分类——均纯导航，不触碰勾选态）。 */
 export type QuestionAnswerAction =
   "select" | "toggle" | "submit" | "cancel" | "freeText" | "advance";
 
 /** 阶段机动作的**段名**（回执 `stage` 字段的取值；与后端
  *  `remote::api::QUESTION_STAGE_*` 常量逐字对应，勿漂移）。
  *  提交链推进序：`submit-row`→`review`→`confirm`→`receipt`；
- *  自由作答：`free-row`→`free-text`。 */
+ *  自由作答：`free-row`→`free-text`；claude 切勾链：`toggle-row`；切题：`advance`。 */
 export type QuestionAnswerStage =
-  "submit-row" | "review" | "confirm" | "receipt" | "free-row" | "free-text";
+  | "submit-row"
+  | "review"
+  | "confirm"
+  | "receipt"
+  | "free-row"
+  | "free-text"
+  | "toggle-row"
+  | "advance";
 
 /** 问答应答回执（POST /session-question/answer 响应，HTTP 200 恒定，语义在 body.status）。
  *
  *  **丁T5 起 status 仍是既有两词**（`key_sent` / `failed`），新增字段全部是**附加**
  *  ——故旧前端（只读 status）行为不变：
  *  - `key_sent`：按键已投递。**单键动作**（select/toggle/cancel）到此为止；
- *    **阶段机动作**（submit/freeText）走完整条闭环时带 `done:true` + `stage`（走完的
- *    段）+ `verified`（终态回执三态：true=屏读到终态锚；false=读到屏但未见锚；
- *    null/缺省=读屏不可用。**false 与 null 都不是「失败」，是「未确认」**）；
+ *    **阶段机动作**（submit/freeText/claude 的 toggle）走完整条闭环时带 `done:true` +
+ *    `stage`（走完的段）+ `verified`（终态回执三态：true=屏读到终态锚；false=读到屏
+ *    但未见锚；null/缺省=读屏不可用。**false 与 null 都不是「失败」，是「未确认」**）；
+ *    **claude 的 toggle** 另带 `checked`（屏读核验到的目标行新勾选态——终端真值，
+ *    卡面以它为准同步；null/缺省=无法核验，卡面回落盲翻）；
  *  - `failed`：投递失败 / in-flight 忙让位 / **阶段机中止**。`aborted:true` + `stage`
  *    标记后者（`error` 是带段名的中文文案，用户可读）。 */
 export type QuestionAnswerResult =
-  | { status: "key_sent"; done?: boolean; stage?: QuestionAnswerStage; verified?: boolean | null }
+  | {
+      status: "key_sent";
+      done?: boolean;
+      stage?: QuestionAnswerStage;
+      verified?: boolean | null;
+      checked?: boolean | null;
+      /** claude 切题（2026-09-24）：终端是否已前移。`false` = 已在 Review 确认屏、
+       *  零按键（「返回题目」不可达）——前端**不**推进，停在确认卡。缺省（opencode
+       *  等旧路径）视为已前移（既有行为不变） */
+      advanced?: boolean;
+    }
   | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
 
 /** 问答应答**错误码 → 用户可读中文文案**（丁T6 复评抽出：卡内与 composer 两条入口

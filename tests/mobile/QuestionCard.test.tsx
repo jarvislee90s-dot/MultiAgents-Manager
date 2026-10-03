@@ -221,6 +221,49 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     ]);
   });
 
+  it("多选：勾选框字形与终端同形（[ ]/[✓]）；toggle 回执带 checked 屏读真值时以它为准同步（不盲翻）", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    // 回执带 checked（claude 切勾闭环的屏读核验真值）
+    routes.answer = { status: "key_sent", done: true, stage: "toggle-row", checked: true };
+    render(<QuestionCard session={{ id: "sess-2b" }} />);
+    const card = await screen.findByTestId("question-card");
+    // 初始：未勾 → 字形 [ ]（与终端多选屏同形，2026-09-24「手机端同步终端操作逻辑」）
+    expect(card.textContent).toContain("[ ]");
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[ ]");
+    // 点选 1：回执 checked=true → 字形 [✓] + data-checked
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    const opt = screen.getByTestId("question-option-0");
+    expect(opt.textContent).toContain("[✓]");
+    expect(opt.getAttribute("data-checked")).toBe("true");
+    // **屏读真值优先于盲翻**：再次点选但回执 checked 仍为 true（终端态没变——
+    // 比如上一击其实没翻转）→ 卡面保持勾选（不翻回），与终端一致
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[✓]");
+    // 回执 checked=false → 卡面如实取消勾选
+    routes.answer = { status: "key_sent", done: true, stage: "toggle-row", checked: false };
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[ ]");
+    expect(screen.getByTestId("question-option-0").getAttribute("data-checked")).toBe(null);
+  });
+
+  it("多选：回执无 checked（旧后端/读屏不可用）→ 回落盲翻（既有行为不变）", async () => {
+    installFetch();
+    routes.question = multiQuestionInfo();
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-2c" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[✓]");
+    fireEvent.click(screen.getByTestId("question-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-option-0").textContent).toContain("[ ]");
+  });
+
   it("取消钮：POST cancel →「已发送按键」终态", async () => {
     installFetch();
     routes.question = singleQuestionInfo();
@@ -654,6 +697,38 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     expect(bodies).toEqual([
       { sessionId: "sess-e4-misalign", action: "toggle", index: 0, questionIndex: 0 },
     ]);
+  });
+
+  it("advance 回执 advanced:false（claude 已在 Review 屏、零按键）→ 前端不推进、停在确认卡（2026-09-24 评审 M6 回归锁）", async () => {
+    installFetch();
+    const mq = twoQuestionInteractive();
+    mq.questions[0].multiSelect = true;
+    mq.questions[1].multiSelect = false;
+    routes.question = mq;
+    // 前半程：advance 正常前移（advanced:true——claude 走位到 Next+回车成功的回执）
+    routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: true };
+    render(<QuestionCard session={{ id: "sess-e4-advfalse" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 第 1 题（多选）勾选 → 切换题目 → 第 2 题
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // 末题单选 → 确认卡
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
+    // 确认卡上「返回题目修改」再发 advance——把回执翻成 claude「已在 Review 屏」
+    // 形态（advanced:false，零按键）→ **停在确认卡**（claude 的 ← 回退未实测，
+    // 后端不按键，前端也不得谎报回退能力）
+    routes.answer = { status: "key_sent", done: true, stage: "advance", advanced: false };
+    fireEvent.click(screen.getByTestId("question-confirm-back"));
+    await flushAsync();
+    expect(
+      screen.getByTestId("question-confirm-hint"),
+      "advanced:false 不得推进（回到题目页=对 claude 谎报能力）"
+    ).toBeTruthy();
   });
 
   it("末题单选答完 → 推进到确认卡（不锁死在终态）", async () => {
