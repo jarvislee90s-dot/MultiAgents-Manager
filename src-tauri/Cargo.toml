@@ -4,6 +4,12 @@ version = "0.5.0-beta.1"
 description = "多 Agent 编程工具统一管理平台"
 authors = ["jarvis"]
 edition = "2021"
+# MSRV：代码实际要求 1.89——src/linker/mod.rs:271 File::unlock（1.89 稳定）、
+# src/services/pet/import.rs:278 u64::is_multiple_of（1.87 稳定）；依赖侧底线更低
+# （sha2 0.11 经 rust-embed-utils 要求 1.85），所以取 1.89。
+# 显式声明后旧工具链会直接报错；同时会激活 clippy::incompatible_msrv，
+# 以后再误用超版 API 会在 CI 直接暴露（本次即由该 lint 发现真实 MSRV 是 1.89 而非 1.85）。
+rust-version = "1.89"
 license = "MIT"
 # src/bin/mam-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
 # 不指定 default-run 时 `cargo run` / `pnpm tauri:dev` 报
