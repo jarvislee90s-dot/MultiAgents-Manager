@@ -68,14 +68,58 @@ fn candidate_roots(candidates: &[(u32, u64, Option<u32>)]) -> Vec<(u32, u64)> {
 /// CONOUT$ 全空行。终判：候选的屏幕读**非空行**才算 TUI（TUI 首帧即有画面；
 /// 私有空控制台/已死进程恒空）→ 其余继续轮询。
 fn screen_has_content(pid: u32) -> bool {
-    match crate::inject::windows_console::read_screen_window(pid) {
-        Ok(lines) => lines.iter().any(|l| !l.trim().is_empty()),
-        Err(_) => false, // 附加失败（已死/无控制台）= 非锚定对象
+    #[cfg(windows)]
+    {
+        match crate::inject::windows_console::read_screen_window(pid) {
+            Ok(lines) => lines.iter().any(|l| !l.trim().is_empty()),
+            Err(_) => false, // 附加失败（已死/无控制台）= 非锚定对象
+        }
+    }
+    // 屏读是 Windows 能力（windows_console 模块 cfg 门控）；非 Windows 无终判手段
+    // → 恒 false = find_tui_pid 必然超时。create 管线本就只装配 Windows（Mac 后补
+    // 批将带 AppleScript 屏读），此分支只为非 Windows 构建（Linux CI）编译不破。
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// 锚定存活复核轮数（评审 P1-3 蹦床竞态，2026-10-03）：npm 短命蹦床（claude.exe
+/// 首进程，拉起真 TUI 后 2–3s 自退）与真 TUI **共享控制台**——屏读非空分不出两
+/// 者；轮询落在「TUI 已绘屏、蹦床未退」窗口会锚到必死 pid → 后续屏读全 None、
+/// 15 轮未识别白等失败。定案：选中后不立即返回，连续 [`ANCHOR_CONFIRM_ROUNDS`]
+/// 轮（1.2s 步距）复核「进程仍在 + 屏读仍非空」才定锚。2 轮 = 2.4s：首锚最早
+/// 发生在 TUI 绘屏（启动 ≈1s 后），1 + 2.4 > 蹦床寿命上限 3s，竞态窗全覆盖。
+const ANCHOR_CONFIRM_ROUNDS: u32 = 2;
+
+/// 复核单步决策（纯函数可测）：`pending` = (候选 pid, 剩余轮数)。进程已死或屏
+/// 读转空 → 弃锚；存活 → 轮数递减；归零 → 定锚返回。
+#[derive(Debug, PartialEq, Eq)]
+enum ConfirmStep {
+    /// 定锚：返回该 pid
+    Return(u32),
+    /// 继续复核（剩余轮数）
+    Keep(u32, u32),
+    /// 弃锚（候选已死/屏空——蹦床自退的典型形态，落回重新发现）
+    Drop,
+}
+
+fn anchor_confirm_step(pending: (u32, u32), alive: bool, screen_ok: bool) -> ConfirmStep {
+    if !alive || !screen_ok {
+        return ConfirmStep::Drop;
+    }
+    let left = pending.1.saturating_sub(1);
+    if left == 0 {
+        ConfirmStep::Return(pending.0)
+    } else {
+        ConfirmStep::Keep(pending.0, left)
     }
 }
 
 /// 起窗后轮询发现 TUI pid（sysinfo cwd + 进程名 + start_time 新鲜度 + 候选取根 +
-/// **屏读内容终判**；超时 Err 中文回执）。刷新口径与 resume 效果回查同源
+/// **屏读内容终判** + **选中后存活复核**（P1-3 蹦床竞态，见 [`ANCHOR_CONFIRM_ROUNDS`]，
+/// 定锚前共多耗 ≈2.4s）；超时 Err 中文回执）。刷新口径与 resume 效果回查同源
 /// （with_cmd + with_cwd Always）：sysinfo 0.32 两参 `refresh_processes` 的默认
 /// `ProcessRefreshKind` 不刷 cwd/cmd，必须 specifics 显式刷（见 resume.rs
 /// `refresh_cmd_snapshot` 的实测登记；cwd 部分与 adapter 主扫描同款）。
@@ -102,6 +146,9 @@ pub fn find_tui_pid(
         .unwrap_or(0);
     let t0 = std::time::Instant::now();
     let mut cwd_self_checked = false;
+    // 存活复核中的候选（P1-3）：Some((pid, 剩余轮数))——选中不即返，见
+    // [`ANCHOR_CONFIRM_ROUNDS`] doc；复核期间不再跑发现（已锚定语义）
+    let mut pending: Option<(u32, u32)> = None;
     loop {
         let mut system = sysinfo::System::new();
         system.refresh_processes_specifics(
@@ -128,35 +175,53 @@ pub fn find_tui_pid(
                 );
             }
         }
-        // 收集全部判据命中者（含父 pid）→ 候选树取根（MCP 直子排除）→ 新鲜度过滤
-        // → 屏读内容终判（screen_has_content doc：蹦床/私有空控制台恒无画面）
-        let mut candidates: Vec<(u32, u64, Option<u32>)> = Vec::new();
-        for (pid, process) in system.processes() {
-            if let Some(cwd) = process.cwd() {
-                if is_tui_candidate(
-                    tool,
-                    &crate::monitor::cwd::normalize_cwd_for_match(&cwd.to_string_lossy()),
-                    &process.name().to_string_lossy(),
-                    &want,
-                ) {
-                    candidates.push((
-                        pid.as_u32(),
-                        process.start_time(),
-                        process.parent().map(|p| p.as_u32()),
-                    ));
+        // 存活复核（P1-3）：上轮选中的候选先过「进程仍在 + 屏读仍非空」——蹦床
+        // 自退在此暴露（进程表已无该 pid → Drop → 本轮落回重新发现，真 TUI 会以
+        // 根候选身份重新入选）；复核通过（Return）才定锚返回
+        let mut confirm_kept = false;
+        if let Some(p) = pending.take() {
+            let alive = system.process(sysinfo::Pid::from_u32(p.0)).is_some();
+            match anchor_confirm_step(p, alive, alive && screen_has_content(p.0)) {
+                ConfirmStep::Return(pid) => return Ok(pid),
+                ConfirmStep::Keep(pid, left) => {
+                    pending = Some((pid, left));
+                    confirm_kept = true;
+                }
+                ConfirmStep::Drop => {}
+            }
+        }
+        if !confirm_kept {
+            // 收集全部判据命中者（含父 pid）→ 候选树取根（MCP 直子排除）→ 新鲜度
+            // 过滤 → 屏读内容终判（screen_has_content doc：蹦床/私有空控制台恒无画面）
+            let mut candidates: Vec<(u32, u64, Option<u32>)> = Vec::new();
+            for (pid, process) in system.processes() {
+                if let Some(cwd) = process.cwd() {
+                    if is_tui_candidate(
+                        tool,
+                        &crate::monitor::cwd::normalize_cwd_for_match(&cwd.to_string_lossy()),
+                        &process.name().to_string_lossy(),
+                        &want,
+                    ) {
+                        candidates.push((
+                            pid.as_u32(),
+                            process.start_time(),
+                            process.parent().map(|p| p.as_u32()),
+                        ));
+                    }
                 }
             }
-        }
-        let roots = candidate_roots(&candidates);
-        let mut live: Vec<(u32, u64)> = Vec::new();
-        for (pid, st) in &roots {
-            if *st + 1 >= not_before && screen_has_content(*pid) {
-                live.push((*pid, *st));
+            let roots = candidate_roots(&candidates);
+            let mut live: Vec<(u32, u64)> = Vec::new();
+            for (pid, st) in &roots {
+                if *st + 1 >= not_before && screen_has_content(*pid) {
+                    live.push((*pid, *st));
+                }
             }
-        }
-        // 多个非空屏（同目录多实例 = 配对不确定域）取最新——freshest 复用并列裁决
-        if let Some(pid) = freshest_candidate(&live, not_before) {
-            return Ok(pid);
+            // 多个非空屏（同目录多实例 = 配对不确定域）取最新——freshest 复用并列
+            // 裁决；选中入复核（P1-3：不即返，先存活复核 ANCHOR_CONFIRM_ROUNDS 轮）
+            if let Some(pid) = freshest_candidate(&live, not_before) {
+                pending = Some((pid, ANCHOR_CONFIRM_ROUNDS));
+            }
         }
         if t0.elapsed() >= timeout {
             return Err(format!(
@@ -621,6 +686,34 @@ mod tests {
         assert_eq!(
             candidate_roots(&[(500, 1_005, Some(500))]),
             vec![(500, 1_005)]
+        );
+    }
+
+    /// 存活复核（P1-3 蹦床竞态）：进程已死 / 屏读转空 → 弃锚（蹦床自退的两形态）
+    #[test]
+    fn anchor_confirm_step_drops_dead_or_empty_screen() {
+        assert_eq!(
+            anchor_confirm_step((9, 2), false, true),
+            ConfirmStep::Drop,
+            "进程已死（蹦床自退）→ 弃锚"
+        );
+        assert_eq!(
+            anchor_confirm_step((9, 2), true, false),
+            ConfirmStep::Drop,
+            "屏读转空 → 弃锚"
+        );
+    }
+
+    /// 存活复核递减链：2 轮起 Keep(1) → 再轮 Return——存活 + 屏非空才走到定锚
+    #[test]
+    fn anchor_confirm_step_decrements_then_returns() {
+        assert_eq!(
+            anchor_confirm_step((9, 2), true, true),
+            ConfirmStep::Keep(9, 1)
+        );
+        assert_eq!(
+            anchor_confirm_step((9, 1), true, true),
+            ConfirmStep::Return(9)
         );
     }
 }

@@ -81,17 +81,24 @@ struct Schema {
     is_v2: bool,
 }
 
+/// 2.x 判据单点（评审 P2 收口，2026-10-03）：`session_v2` 表存在
+/// （`session_message` 与其同生共死）。parser 与 remote::content 的 schema 分派
+/// 共用此函数——双实现漂移会让状态与内容走不同 schema。
+pub(crate) fn schema_is_v2(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 impl Schema {
-    /// 2.x 判据 = `session_v2` 表存在（`session_message` 与其同生共死）
+    /// 2.x 判据 = `session_v2` 表存在（[`schema_is_v2`] 单点）
     fn detect(conn: &Connection) -> Self {
-        let is_v2 = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
-                [],
-                |_| Ok(()),
-            )
-            .is_ok();
-        Schema { is_v2 }
+        Schema {
+            is_v2: schema_is_v2(conn),
+        }
     }
 
     /// 会话表名（列表 / 主查 / 项目兜底三处 SQL 共用）
@@ -631,11 +638,14 @@ fn truncate_display_text(content: &str) -> Option<String> {
     }
 }
 
-/// 会话末条消息（2.x）+ `data.finish`——尾部信号的全部输入。
+/// 会话末条消息（2.x）+ `data.finish` / `data.outcome`——尾部信号的全部输入。
 /// 2.x 无 part 表、无跨表 JOIN：一条 SQL 取末条即得 type/seq/data。
 struct SessionTailV2 {
     message_type: String,
     finish: Option<String>,
+    /// idle 消息的收尾结果（`{"outcome":"succeeded"}` 等，D0-2 定案判据输入）：
+    /// 非 succeeded 的 idle 尾**不是完成**——不得给绿
+    outcome: Option<String>,
     /// 末条 content 元素（待决 question 判据在此元素上跑，与 1.x 同一纯函数）
     tail_content: Option<serde_json::Value>,
 }
@@ -661,6 +671,10 @@ fn get_session_tail_v2(conn: &Connection, session_id: &str) -> Option<SessionTai
             .get("finish")
             .and_then(|f| f.as_str())
             .map(String::from),
+        outcome: data
+            .get("outcome")
+            .and_then(|o| o.as_str())
+            .map(String::from),
         tail_content,
     })
 }
@@ -676,7 +690,11 @@ fn get_last_message_time_v2(conn: &Connection, session_id: &str) -> i64 {
 }
 
 /// v2 尾部信号（D0-1 映射表）：
-/// - 末条消息 `type == "idle"`（`{"outcome":"succeeded"}`）→ TurnDone（回合已收尾）
+/// - 末条消息 `type == "idle"` 且 `data.outcome == "succeeded"`
+///   （`{"outcome":"succeeded"}`）→ TurnDone（回合已收尾）。**D0-2 定案判据**
+///   （评审 P1-4，2026-10-03）：`outcome==succeeded` 才绿——非 succeeded
+///   （failed/…）或缺证 → Fallback 回退启发式，不假绿（失败会话显示为完成的
+///   假绿会把红灯藏掉）；idle 消息无 content，回退即 Fallback
 /// - 末条 content 元素为**待决 question 工具**（丁T1，名字/形态判据同 1.x，
 ///   2.x 工具名键为 `name`）→ WaitingForUser
 /// - 末条 content 元素 `type ∈ {reasoning, tool}` 或末条消息 `type == "user"`
@@ -686,7 +704,8 @@ fn get_last_message_time_v2(conn: &Connection, session_id: &str) -> i64 {
 fn tail_signal_v2(tail: &SessionTailV2) -> TailSignal {
     match tail.message_type.as_str() {
         "user" => return TailSignal::Running,
-        "idle" => return TailSignal::TurnDone,
+        "idle" if tail.outcome.as_deref() == Some("succeeded") => return TailSignal::TurnDone,
+        "idle" => return TailSignal::Fallback,
         _ => {}
     }
     let Some(c) = tail.tail_content.as_ref() else {
@@ -1586,12 +1605,35 @@ mod v2_tests {
         let mk = |mtype: &str, content: Option<&str>, finish: Option<&str>| SessionTailV2 {
             message_type: mtype.to_string(),
             finish: finish.map(String::from),
+            outcome: None,
             tail_content: content.map(|c| serde_json::from_str(c).unwrap()),
         };
-        // 末条 idle 消息 → TurnDone（2.0.22 实证 10 条）
+        // 末条 idle 消息 ∧ outcome=succeeded → TurnDone（2.0.22 实证 10 条）
+        assert_eq!(
+            tail_signal_v2(&SessionTailV2 {
+                message_type: "idle".into(),
+                finish: None,
+                outcome: Some("succeeded".into()),
+                tail_content: None,
+            }),
+            TailSignal::TurnDone
+        );
+        // D0-2 定案判据（评审 P1-4）：idle 非 succeeded / 缺 outcome → 不假绿，
+        // 回退启发式（idle 无 content → Fallback）
+        assert_eq!(
+            tail_signal_v2(&SessionTailV2 {
+                message_type: "idle".into(),
+                finish: None,
+                outcome: Some("failed".into()),
+                tail_content: None,
+            }),
+            TailSignal::Fallback,
+            "failed 收尾不得判 TurnDone（假绿）"
+        );
         assert_eq!(
             tail_signal_v2(&mk("idle", None, None)),
-            TailSignal::TurnDone
+            TailSignal::Fallback,
+            "缺 outcome 证据不足 → 回退启发式，不假绿"
         );
         // 用户尾 → Running（输入刚提交）
         assert_eq!(
@@ -1648,6 +1690,7 @@ mod v2_tests {
         let tail = SessionTailV2 {
             message_type: "assistant".to_string(),
             finish: Some("tool-calls".to_string()),
+            outcome: None,
             tail_content: Some(serde_json::from_str(c).unwrap()),
         };
         assert_eq!(tail_signal_v2(&tail), TailSignal::WaitingForUser);
@@ -1666,6 +1709,7 @@ mod v2_tests {
         let tail = SessionTailV2 {
             message_type: "assistant".to_string(),
             finish: Some("tool-calls".to_string()),
+            outcome: None,
             tail_content: Some(serde_json::from_str(c).unwrap()),
         };
         assert_eq!(tail_signal_v2(&tail), TailSignal::WaitingForUser);

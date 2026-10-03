@@ -340,6 +340,10 @@ pub struct CreateTaskHub {
     /// 屏读步距 / 键间隔 / 物化轮询步距全部经它——内核与管线零真实睡眠（
     /// `SCREEN_POLL_STEP_MS` 的消费契约由本缝 + 管线闭包兑现，C6 报告登记）
     pub pacer: Box<dyn Fn(u64) + Send + Sync>,
+    /// 证据落档目录缝（§4.4 补实现，2026-10-03 用户裁决）：生产 = `~/.mam/
+    /// create-evidence/`；测试 = None（禁用——缝测试驱动 unrecognized_screen 失败
+    /// 臂也不写真实 ~/.mam，零污染红线）。None 时管线跳过落档（不阻塞失败回执）
+    pub evidence_dir: Box<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>,
 }
 
 impl CreateTaskHub {
@@ -363,6 +367,9 @@ impl CreateTaskHub {
             }),
             tool_probe: Box::new(crate::inject::create::tool_installed),
             pacer: Box::new(|ms| std::thread::sleep(std::time::Duration::from_millis(ms))),
+            evidence_dir: Box::new(|| {
+                dirs::home_dir().map(|h| h.join(".mam").join("create-evidence"))
+            }),
         }
     }
 
@@ -386,6 +393,7 @@ impl CreateTaskHub {
             pid_finder: Box::new(|_, _| Ok(4242)),
             tool_probe: Box::new(|_| true),
             pacer: Box::new(|_| {}),
+            evidence_dir: Box::new(|| None),
         }
     }
 
@@ -12106,6 +12114,85 @@ mod tests {
         // 注：不再探测 "name "/" name" 变体——Win32 路径层本就会剥尾部空白，
         // 该探测在 Windows 上恒解析回同一目录，无判别力（C6 报告登记）
         let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// ①d P1-2 canonicalize 真值复核（评审 2026-10-03）：junction 隐藏段名——
+    /// 用户路径本身无任何命中段（第一道 validate 放行），mkdir 后取真值路径命中
+    /// 系统目录表 → 400 blacklisted + reason 回显命中段。8.3 短名（C:\PROGRA~1）
+    /// 同为 canonicalize 解真值机制覆盖，junction 免管理员权限可在测试环境构造，
+    /// 故以 junction 为代表锚。仅 Windows（复核逻辑 cfg windows；mklink /J 亦然）
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn create_rejects_junction_into_blocked_target() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-p12", "手机P12");
+        let app = router(state.clone());
+
+        // 测试自建目录树：<base>\Windows（段名撞系统目录表，仅为复核判据载体，
+        // 非真系统目录）+ junction <base>\lnk → 该目录；用户路径 <base>\lnk 无命中段
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "p12-junction-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let blocked_name_dir = base.join("Windows");
+        std::fs::create_dir_all(&blocked_name_dir).unwrap();
+        let lnk = base.join("lnk");
+        // mklink 是 cmd 内建命令：整串单参数会被 MSVCRT 引号转义打坏（实跑
+        // 「目录名语法不正确」），分体传参由 Command 逐参引号包裹
+        let mk = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&lnk)
+            .arg(&blocked_name_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            mk.status.success(),
+            "mklink /J 失败：{}{}",
+            String::from_utf8_lossy(&mk.stdout),
+            String::from_utf8_lossy(&mk.stderr)
+        );
+
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-p12"),
+                Some(
+                    &serde_json::json!({
+                        "tool": "claude",
+                        "projectPath": lnk.display().to_string()
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "junction 真值命中黑名单必须拒绝");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["reasonCode"], "blacklisted", "{v}");
+        assert!(
+            v["reason"].as_str().is_some_and(|r| r.contains("windows")),
+            "复核命中段须回显（定位详情直达消费方，修复批 I1 同口径）：{v}"
+        );
+
+        // 清场：先删联接点（remove_dir 只摘链接不递归目标），再删整树
+        let _ = std::fs::remove_dir(&lnk);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// ①c 黑名单拒绝的定位详情可达消费方（修复批 I1）：400 body 须带 reason

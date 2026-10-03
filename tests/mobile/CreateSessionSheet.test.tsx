@@ -126,6 +126,7 @@ async function submitWithManualPath(first?: string) {
   render(
     <CreateSessionSheet
       enabledTools={new Set(["claude", "codex", "kimi", "opencode"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
       boardSessions={[]}
       onClose={vi.fn()}
     />
@@ -160,7 +161,8 @@ describe("CreateSessionSheet 表单", () => {
   it("工具四选：enabledTools 之外置灰并标「未启用」", async () => {
     installFetch();
     render(
-      <CreateSessionSheet enabledTools={new Set(["claude"])} boardSessions={[]} onClose={vi.fn()} />
+      <CreateSessionSheet enabledTools={new Set(["claude"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])} boardSessions={[]} onClose={vi.fn()} />
     );
     await advance(0);
     expect(screen.getByTestId("create-tool-claude")).toBeEnabled();
@@ -172,11 +174,32 @@ describe("CreateSessionSheet 表单", () => {
 
   it("enabledTools 未到（null）时不猜：四工具全可点（对齐 Board chips 竞态口径）", async () => {
     installFetch();
-    render(<CreateSessionSheet enabledTools={null} boardSessions={[]} onClose={vi.fn()} />);
+    render(<CreateSessionSheet enabledTools={null}
+      installedTools={null} boardSessions={[]} onClose={vi.fn()} />);
     await advance(0);
     for (const t of ["claude", "codex", "kimi", "opencode"]) {
       expect(screen.getByTestId(`create-tool-${t}`)).toBeEnabled();
     }
+  });
+
+  it("installedTools 之外置灰并标「未安装」（P1-9：spec §2 置灰数据源 = enabledTools ∩ 安装探测）", async () => {
+    installFetch();
+    render(
+      <CreateSessionSheet
+        enabledTools={new Set(["claude", "codex", "kimi", "opencode"])}
+        installedTools={new Set(["claude"])}
+        boardSessions={[]}
+        onClose={vi.fn()}
+      />
+    );
+    await advance(0);
+    expect(screen.getByTestId("create-tool-claude")).toBeEnabled();
+    expect(screen.getByTestId("create-tool-codex")).toBeDisabled();
+    expect(screen.getByTestId("create-tool-codex").textContent).toContain("未安装");
+    expect(screen.getByTestId("create-tool-kimi")).toBeDisabled();
+    expect(screen.getByTestId("create-tool-kimi").textContent).toContain("未安装");
+    expect(screen.getByTestId("create-tool-opencode")).toBeDisabled();
+    expect(screen.getByTestId("create-tool-opencode").textContent).toContain("未安装");
   });
 
   it("目录候选：条目展示 path + 相对时间 + 工具名；点选后回显已选目录", async () => {
@@ -191,6 +214,7 @@ describe("CreateSessionSheet 表单", () => {
     render(
       <CreateSessionSheet
         enabledTools={new Set(["claude", "codex"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[]}
         onClose={vi.fn()}
       />
@@ -209,7 +233,8 @@ describe("CreateSessionSheet 表单", () => {
   it("手填切换：文本输入；Windows 盘符非 X:\\ 形态时前端提示（服务端权威校验）", async () => {
     installFetch();
     render(
-      <CreateSessionSheet enabledTools={new Set(["claude"])} boardSessions={[]} onClose={vi.fn()} />
+      <CreateSessionSheet enabledTools={new Set(["claude"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])} boardSessions={[]} onClose={vi.fn()} />
     );
     await advance(0);
     fireEvent.click(screen.getByTestId("create-manual-toggle"));
@@ -231,6 +256,7 @@ describe("CreateSessionSheet 表单", () => {
     render(
       <CreateSessionSheet
         enabledTools={new Set(["claude", "codex"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[]}
         onClose={vi.fn()}
       />
@@ -317,6 +343,14 @@ describe("CreateSessionSheet 提交错误分診", () => {
     expect(screen.getByTestId("create-error").textContent).toBe("v1 路径限纯 ASCII");
   });
 
+  it("400 + reasonCode=path_too_long → 码表映射「路径超长」（评审 P1-7：端点三码全集补齐）", async () => {
+    routes.createStatus = 400;
+    routes.createBody = { reasonCode: "path_too_long" };
+    installFetch();
+    await submitWithManualPath();
+    expect(screen.getByTestId("create-error").textContent).toBe("路径超长（上限 10000 字符）");
+  });
+
   it("网络/服务异常（ApiError）→ 通用失败文案，仍留表单", async () => {
     routes.createReject = true;
     installFetch();
@@ -338,6 +372,7 @@ describe("CreateSessionSheet 提交错误分診", () => {
     render(
       <CreateSessionSheet
         enabledTools={new Set(["claude", "codex", "kimi", "opencode"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[]}
         onClose={vi.fn()}
       />
@@ -425,6 +460,32 @@ describe("CreateSessionSheet 进度轮询", () => {
     expect(screen.getByTestId("create-phase").textContent).toBe("开终端");
   });
 
+  it("跟踪满 120s 无终态 → 停滞提示亮起且轮询不停（评审 P1-8：主机进程死亡收不到 failed 的场景说破）", async () => {
+    routes.status = { phase: "waiting_materialize", detail: null, sessionId: null, spawnedPid: null };
+    installFetch();
+    await submitWithManualPath();
+    // 119s：预算+裕量内，不提示
+    await advance(119_000);
+    expect(screen.queryByTestId("create-stalled-hint")).not.toBeInTheDocument();
+    // 推过 120s 阈值（下个 2s 拍 >120s）：提示亮起
+    await advance(5_000);
+    expect(screen.getByTestId("create-stalled-hint").textContent).toContain(
+      "创建耗时已超 2 分钟"
+    );
+    // 提示不等于停拍：轮询照旧 2s 推进
+    const calls = statusCalls();
+    await advance(4_000);
+    expect(statusCalls()).toBeGreaterThan(calls);
+  });
+
+  it("终态先到 → 停滞提示永不亮（阈值只作用于非终态跟踪）", async () => {
+    routes.status = { phase: "failed", detail: "现场", sessionId: null, spawnedPid: null };
+    installFetch();
+    await submitWithManualPath();
+    await advance(130_000);
+    expect(screen.queryByTestId("create-stalled-hint")).not.toBeInTheDocument();
+  });
+
   it("404 no_task →「任务已失效（主机可能重启），请重试」，停轮询，返回重试保留已填项", async () => {
     routes.statusStatus = 404;
     installFetch();
@@ -494,6 +555,7 @@ describe("CreateSessionSheet 终态与跳转", () => {
     const view = render(
       <CreateSessionSheet
         enabledTools={new Set(["claude"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[]}
         onOpenSession={onOpenSession}
         onClose={onClose}
@@ -519,6 +581,7 @@ describe("CreateSessionSheet 终态与跳转", () => {
     view.rerender(
       <CreateSessionSheet
         enabledTools={new Set(["claude"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[boardSession({ id: "s9", agentType: "claude" })]}
         onOpenSession={onOpenSession}
         onClose={onClose}
@@ -537,6 +600,7 @@ describe("CreateSessionSheet 终态与跳转", () => {
     const view = render(
       <CreateSessionSheet
         enabledTools={new Set(["claude"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[]}
         onOpenSession={onOpenSession}
         onClose={vi.fn()}
@@ -560,6 +624,7 @@ describe("CreateSessionSheet 终态与跳转", () => {
     view.rerender(
       <CreateSessionSheet
         enabledTools={new Set(["claude"])}
+      installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
         boardSessions={[boardSession({ id: "s9", agentType: "claude" })]}
         onOpenSession={onOpenSession}
         onClose={vi.fn()}
@@ -603,6 +668,7 @@ describe("Board 新建会话入口", () => {
           JSON.stringify({
             host: { name: "JARVIS-Win", platform: "windows", version: "0.5.0" },
             enabledTools: ["claude"],
+            installedTools: ["claude", "codex", "kimi", "opencode"],
           }),
           { status: 200 }
         );

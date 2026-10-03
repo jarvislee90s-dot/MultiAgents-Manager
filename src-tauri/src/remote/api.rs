@@ -7099,6 +7099,24 @@ fn has_active_session_for(st: &Arc<RemoteState>, tool: &str, dir: &str) -> bool 
     })
 }
 
+/// P1-2：mkdir 后 canonicalize 真值复核（仅 Windows，调用点见 session_create ③）。
+/// `\\?\` 前缀剥离（Windows canonicalize 的 NT 路径形态）后交完整校验链——剥离
+/// 后以 `\\` 开头 = 网络卷真身（映射盘/subst），validate 的 not_local_volume 拦。
+/// canonicalize 自身失败 → 拒绝（fail-closed）：安全复核的存在前提是能取到真值，
+/// 取不到（mkdir 刚成功却读不到真值 = 异常态）时放行等于跳过整道复核。
+#[cfg(windows)]
+fn revalidate_canonical_dir(dir: &str) -> Result<(), crate::inject::create_path::PathReject> {
+    let canon = std::fs::canonicalize(dir).map_err(|e| crate::inject::create_path::PathReject {
+        code: "mkdir_failed",
+        message: format!("路径真值解析失败（{dir}）：{e}"),
+    })?;
+    let canon = canon
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    crate::inject::create_path::validate(&canon, std::env::consts::OS)
+}
+
 /// POST /m/api/v1/session-create：新建会话任务（spec §3）。
 /// - 校验链（同步 400 带 reasonCode）：工具门（白名单 ∧ enabledTools ∧ 安装探测）
 ///   → `create_path::validate`（trim 契约：判定与 create_dir_all 与起窗 cwd 全用
@@ -7147,6 +7165,20 @@ pub async fn session_create(
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("session-create mkdir 失败（{dir}）: {e}");
         return bad_request_reason("mkdir_failed");
+    }
+    // P1-2 安全复核（评审 2026-10-03）：文本段黑名单挡不住文件系统层变形——
+    // 8.3 短名（C:\PROGRA~1）、尾点段、junction/符号链接都能以「无害段名」通过
+    // validate，真实落点却在系统/凭据目录。mkdir 后 canonicalize 取**真值路径**
+    // 再过一遍完整校验链（黑名单 + 本地卷 + ASCII：junction 目标任一不达标同拒）。
+    // 仅 Windows：变形向量（8.3/junction）是 Windows 形态；非 Windows 跳过还避开
+    // macOS /tmp→/private 符号链接把合法临时目录误判进 CREATE_SYSTEM_DIRS_MAC。
+    #[cfg(windows)]
+    if let Err(rej) = revalidate_canonical_dir(&dir) {
+        log::warn!(
+            "session-create canonicalize 复核拒绝（{dir}）: {}",
+            rej.message
+        );
+        return bad_request_reason_detail(rej.code, &rej.message);
     }
     // ④ 黄字信号（探测性扫描不占单飞判定——先取数，后原子占位）
     let probe_st = st.clone();
@@ -7225,23 +7257,35 @@ fn create_audit_summary(run: &CreateRun) -> String {
 }
 
 /// 任务置 failed（detail = 中文现场；`window_kept` = 终端窗口在场，追加
-/// 「保留供查看现场」减压指引——失败不自动清场）并落 create 审计行
+/// 「保留供查看现场」减压指引——失败不自动清场）并落 create 审计行。
+/// `evidence`（§4.4 补实现）：unrecognized_screen 失败的证据快照路径——追加到
+/// detail（用户可见排障入口）与审计 result（`failed:<code> evidence=<path>`，
+/// spec「审计行附路径」的落点）
 fn fail_create_task(
     st: &Arc<RemoteState>,
     run: &CreateRun,
     code: &str,
     detail: String,
     window_kept: bool,
+    evidence: Option<&str>,
 ) {
     let detail = if window_kept {
         format!("{detail}（终端窗口保留供查看现场）")
     } else {
         detail
     };
+    let detail = match evidence {
+        Some(p) => format!("{detail}（现场快照：{p}）"),
+        None => detail,
+    };
     st.create_hub.update(run.task_id, |t| {
         t.phase = "failed".to_string();
         t.detail = Some(detail);
     });
+    let result = match evidence {
+        Some(p) => format!("failed:{code} evidence={p}"),
+        None => format!("failed:{code}"),
+    };
     endpoint_audit(
         st,
         &run.device_id,
@@ -7250,8 +7294,37 @@ fn fail_create_task(
         "",
         &create_audit_summary(run),
         "create",
-        &format!("failed:{code}"),
+        &result,
     );
+}
+
+/// §4.4 证据落档（2026-10-03 用户裁决补实现）：`unrecognized_screen` 失败时把
+/// **末次屏读快照**（文本逐行——spec 原文「截图」，落档形态取文本快照：管线
+/// 内已有逐行屏读，文本可 grep 可 diff，PNG 需另起 PrintWindow 通道，排障价值
+/// 不抵增量）写入 `<base>/create-<taskId>-<时间戳>.txt`，返回完整路径。base =
+/// None（测试缝禁用）或建目录/写文件失败 → None：证据落档是尽力而为的辅助
+/// 通道，失败不阻塞失败回执主流程。
+fn write_create_evidence(
+    base: Option<&std::path::Path>,
+    task_id: u64,
+    tool: &str,
+    dir: &str,
+    screen: &[String],
+) -> Option<String> {
+    let base = base?;
+    std::fs::create_dir_all(base).ok()?;
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = base.join(format!("create-{task_id}-{ts}.txt"));
+    let mut body = format!(
+        "MAM 新建会话未识别屏现场快照\n任务 {task_id} · 工具 {tool} · 目录 {dir}\n\
+         采集 {ts}（末次屏读逐行原文）\n----\n"
+    );
+    for line in screen {
+        body.push_str(line);
+        body.push('\n');
+    }
+    std::fs::write(&path, body).ok()?;
+    Some(path.to_string_lossy().to_string())
 }
 
 /// 新建会话管线（C6，spec §4 第 3–5 步；detached spawn_blocking 全程）：
@@ -7282,13 +7355,14 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
             "spawn_failed",
             format!("终端启动失败：{e}"),
             false,
+            None,
         );
         return;
     }
     let pid = match (hub.pid_finder)(&run.tool, std::path::Path::new(&run.dir)) {
         Ok(p) => p,
         Err(e) => {
-            fail_create_task(&st, &run, "tui_not_found", e, true);
+            fail_create_task(&st, &run, "tui_not_found", e, true, None);
             return;
         }
     };
@@ -7304,11 +7378,19 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
         crate::inject::families::FALLBACK_SPEC
     });
     let st_screen = st.clone();
+    // 末次屏读快照（§4.4 证据落档）：screen 缝每次回读顺手留存——unrecognized
+    // 失败时这就是「现场」；Arc<Mutex> 穿 move 闭包
+    let last_screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let screen_sink = last_screen.clone();
     let screen = move |_p: u32| -> Option<Vec<String>> {
         // 步距睡眠在真缝闭包内（SCREEN_POLL_STEP_MS 消费契约；处置→idle 沉降由本
         // 步距近似覆盖——探测口径内，C6 报告登记）
         (st_screen.create_hub.pacer)(crate::inject::create::SCREEN_POLL_STEP_MS);
-        (st_screen.screen_probe)("", pid)
+        let s = (st_screen.screen_probe)("", pid);
+        if let Some(lines) = &s {
+            *screen_sink.lock().unwrap_or_else(|e| e.into_inner()) = lines.clone();
+        }
+        s
     };
     let st_key = st.clone();
     let send_key = move |_p: u32, k: &str| -> Result<(), String> {
@@ -7373,18 +7455,47 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
             );
         }
         crate::inject::create::CreateStatus::Failed { code, message, .. } => {
-            fail_create_task(&st, &run, &code, message, true);
+            // §4.4 证据落档（用户裁决补实现）：未识别屏失败留末屏快照（其他失败码
+            // 无屏读现场或已有结构化原因码，不落档）
+            let evidence = if code == "unrecognized_screen" {
+                let screen = last_screen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                write_create_evidence(
+                    (hub.evidence_dir)().as_deref(),
+                    task_id,
+                    &run.tool,
+                    &run.dir,
+                    &screen,
+                )
+            } else {
+                None
+            };
+            fail_create_task(&st, &run, &code, message, true, evidence.as_deref());
             return;
         }
         // 内核只产出 WaitingMaterialize / Failed 两态（create.rs 模块文档）；防御臂
-        // 按「未知现场」失败收口，不静默吞
+        // 按「未知现场」失败收口，不静默吞（同落末屏快照）
         _ => {
+            let screen = last_screen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let evidence = write_create_evidence(
+                (hub.evidence_dir)().as_deref(),
+                task_id,
+                &run.tool,
+                &run.dir,
+                &screen,
+            );
             fail_create_task(
                 &st,
                 &run,
                 "unrecognized_screen",
                 "状态机返回了非预期的终态".to_string(),
                 true,
+                evidence.as_deref(),
             );
             return;
         }
@@ -7447,6 +7558,7 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
                 / 1000
         ),
         true,
+        None,
     );
 }
 
@@ -7619,6 +7731,34 @@ pub async fn create_projects(
 mod tests {
     use super::*;
     use crate::remote::content::SessionMessage;
+
+    /// §4.4 证据落档（2026-10-03 用户裁决补实现）：tempdir 基座下快照文件落盘、
+    /// 内容带现场头与逐行原文；base=None（测试缝禁用形态）不落档返回 None
+    #[test]
+    fn write_create_evidence_writes_snapshot_and_honors_disabled_base() {
+        let td = tempfile::tempdir().unwrap();
+        let path = write_create_evidence(
+            Some(td.path()),
+            7,
+            "claude",
+            r"E:\proj\demo",
+            &["line 1".to_string(), "".to_string(), "❯ Yes".to_string()],
+        )
+        .expect("tempdir 基座必须落档");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("任务 7"), "头部带任务号：{body}");
+        assert!(body.contains(r"E:\proj\demo"), "头部带目标目录");
+        assert!(
+            body.contains("line 1") && body.contains("❯ Yes"),
+            "屏读逐行原文"
+        );
+        assert!(path.contains("create-7-"), "文件名带任务号（定位）：{path}");
+        // 禁用形态：None 基座（stub 缝）→ 不落档不报错
+        assert_eq!(
+            write_create_evidence(None, 8, "kimi", "/tmp/x", &["a".to_string()]),
+            None
+        );
+    }
 
     /// **E2① 键序档锁**（用户终裁 CL-3 + kimi 数字禁令）：
     /// claude=数字优先+验证回退（渲染等待消除假阴性）；codex=数字直选；

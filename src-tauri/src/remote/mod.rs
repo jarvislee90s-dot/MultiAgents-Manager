@@ -827,6 +827,7 @@ pub fn remote_status() -> serde_json::Value {
     let mut st = host_payload(
         || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
         crate::database::dao::agent_tool::enabled_tool_ids,
+        installed_create_tools,
         boot_id(),
     );
     // 原 status 键并入同一返回值（消费方：设置页 RemoteSection + 移动端 /host 直调）
@@ -946,6 +947,7 @@ fn boot_id() -> &'static str {
 fn host_payload(
     saved_name: impl FnOnce() -> Option<String>,
     enabled_tools: impl FnOnce() -> Vec<String>,
+    installed_tools: impl FnOnce() -> Vec<String>,
     boot_id: &str,
 ) -> serde_json::Value {
     let name = display_host_name(saved_name(), sysinfo::System::host_name);
@@ -960,6 +962,10 @@ fn host_payload(
             "bootId": boot_id,
         },
         "enabledTools": enabled_tools(),
+        // 安装探测（P1-9 补实现，2026-10-03 用户裁决）：spec §2「未安装/未启用置灰
+        // （数据源 = enabledTools ∩ 安装探测）」的前端数据源；探测单点 =
+        // inject::create::tool_installed（与 session-create 工具门第三道同源）
+        "installedTools": installed_tools(),
     })
 }
 
@@ -969,8 +975,19 @@ fn host_info() -> serde_json::Value {
     host_payload(
         || crate::database::dao::settings::get_setting(KEY_HOST_NAME),
         crate::database::dao::agent_tool::enabled_tool_ids,
+        installed_create_tools,
         boot_id(),
     )
+}
+
+/// 新建会话四家的安装探测结果（P1-9 补实现；探测单点 tool_installed 与
+/// session-create 工具门第三道同源——两道门不会漂移出不同答案）
+fn installed_create_tools() -> Vec<String> {
+    crate::inject::create::CREATE_TOOLS
+        .iter()
+        .filter(|t| crate::inject::create::tool_installed(t))
+        .map(|t| t.to_string())
+        .collect()
 }
 
 // ============================================================
@@ -3054,6 +3071,7 @@ mod host_tests {
         let st = host_payload(
             || Some("JARVIS-Win".to_string()),
             || vec!["claude".to_string(), "codex".to_string()],
+            || vec!["claude".to_string()],
             "boot-test-1",
         );
         let host = st.get("host").expect("remote_status 应含 host 字段");
@@ -3074,6 +3092,12 @@ mod host_tests {
             st.get("enabledTools").unwrap(),
             &serde_json::json!(["claude", "codex"]),
             "enabledTools 应透传 enabled_tool_ids 的结果（按种子顺序）"
+        );
+        // installedTools（P1-9 补实现）：安装探测结果随载荷透传（前端置灰数据源）
+        assert_eq!(
+            st.get("installedTools").unwrap(),
+            &serde_json::json!(["claude"]),
+            "installedTools 应透传安装探测结果"
         );
         // bootId（书签修复）：随 host 载荷下发，移动端据此守卫「随进程消失」的
         // 客户端态——非空即可（值随机，不锁内容）

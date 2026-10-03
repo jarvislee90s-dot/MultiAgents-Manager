@@ -104,6 +104,9 @@ export default function Board({
   // P8d 受管工具名单：与 host 同源一次拉取（enabledTools 来自后端 dao::agent_tool）。
   // null = host 未到（竞态窗口）：chips 只显示「全部」，不猜全量八工具
   const [enabledTools, setEnabledTools] = useState<Set<string> | null>(null);
+  // 安装探测名单（P1-9，2026-10-03）：与 host 同源一次拉取（installedTools 来自后端
+  // PATH 探测）。null = host 未到（与 enabledTools 同竞态口径，不猜）
+  const [installedTools, setInstalledTools] = useState<Set<string> | null>(null);
   const [filter, setFilter] = useState<ToolFilter>("all");
   // P8e 多行折叠：chips 内容超一行时折叠为一行 + 展开/收起按钮（无溢出无按钮）。
   // chipsExpanded 跨溢出周期保留（Minor ③ 行为与注释对齐）：溢出消失时按钮隐藏但展开态
@@ -334,8 +337,8 @@ export default function Board({
   }, []);
 
   // 品牌行数据：挂载时拉一次（host 信息不变，无需轮询；失败静默，见 state 注释）。
-  // enabledTools（P8d 受管名单）随同一载荷更新——host 拉取失败时保持 null，
-  // chips 收敛为「全部」，与品牌行同口径静默降级
+  // enabledTools（P8d 受管名单）与 installedTools（P1-9 安装探测）随同一载荷更新
+  // ——host 拉取失败时保持 null，chips 收敛为「全部」，与品牌行同口径静默降级
   useEffect(() => {
     let alive = true;
     void fetchHost<HostPayload>()
@@ -343,6 +346,7 @@ export default function Board({
         if (alive && h !== null) {
           setHost(h.host);
           setEnabledTools(new Set(h.enabledTools));
+          setInstalledTools(new Set(h.installedTools ?? []));
         }
       })
       .catch(() => {
@@ -628,12 +632,13 @@ export default function Board({
         </ul>
       )}
 
-      {/* 新建会话面板（Phase C C11）：全屏浮层。受管名单（P8d host 载荷）与看板快照
-          透传——done 后等新卡上板即以真实 Session 复用 onOpenSession（App.setSelected）
-          跳详情，不新造路由 */}
+      {/* 新建会话面板（Phase C C11）：全屏浮层。受管名单（P8d host 载荷）+ 安装探测
+          名单（P1-9）与看板快照透传——done 后等新卡上板即以真实 Session 复用
+          onOpenSession（App.setSelected）跳详情，不新造路由 */}
       {createOpen && (
         <CreateSessionSheet
           enabledTools={enabledTools}
+          installedTools={installedTools}
           boardSessions={data?.sessions ?? []}
           onOpenSession={onOpenSession}
           onClose={() => setCreateOpen(false)}

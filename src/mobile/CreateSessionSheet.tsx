@@ -21,6 +21,11 @@ const CREATE_TOOLS = ["claude", "codex", "kimi", "opencode"] as const;
 /** 进度轮询节奏（计划权威：2s） */
 const CREATE_POLL_MS = 2000;
 
+/** 停滞提示阈值（评审 P1-8，2026-10-03）：后端管线总预算 90s，前端取 120s
+ * （预算 + 轮询/网络裕量）仍未到终态 → 如实提示「可能异常」；**只提示不停拍**——
+ * 主机进程死亡（非重启）时收不到后端 failed，靠这条把无限轮询的悬置态说破 */
+const CREATE_STALLED_HINT_MS = 120_000;
+
 /** done 后等待看板快照出现新卡的时限：超时不再等，如实提示去看板查看
  *  （不伪造 Session 字段强行跳转——快照没有就不装作有） */
 const WAIT_BOARD_MS = 15_000;
@@ -37,8 +42,8 @@ export const CREATE_PHASE_LABELS: Record<string, string> = {
 };
 
 /** POST /session-create 400 的 reasonCode → 中文分診文案（后端
- *  create_path::PathReject.code + 端点层两码全集，C10 注释登记；码不在表内
- *  → 调用侧通用兜底文案） */
+ *  create_path::PathReject.code + 端点层三码全集（tool_unavailable /
+ *  path_too_long / mkdir_failed），C10 注释登记；码不在表内 → 调用侧通用兜底文案） */
 export const CREATE_REJECT_LABELS: Record<string, string> = {
   tool_unavailable: "工具未启用或未安装",
   empty: "路径为空",
@@ -48,6 +53,7 @@ export const CREATE_REJECT_LABELS: Record<string, string> = {
   bad_windows_form: "Windows 路径须为 X:\\ 形态",
   blacklisted: "路径命中危险目录黑名单",
   mkdir_failed: "目录创建失败",
+  path_too_long: "路径超长（上限 10000 字符）",
 };
 
 /** 黄字（表单与回执共用文案，≥1 语义）：选中/创建的工具在该目录已有活跃会话，
@@ -64,6 +70,10 @@ interface CreateSessionSheetProps {
   /** P8d 受管工具名单（Board host 载荷透传）：null = host 未到（不猜全量，
    *  四工具全可点——对齐 Board chips 的竞态口径） */
   enabledTools: Set<string> | null;
+  /** 安装探测名单（P1-9，2026-10-03）：null = host 未到（同 enabledTools 竞态
+   *  口径不猜）；非 null 时未安装工具置灰并标「未安装」——服务端 400
+   *  tool_unavailable 兜底仍在（两道口径同源 tool_installed，不会漂移） */
+  installedTools: Set<string> | null;
   /** 看板快照（Board data.sessions）：done 后等新卡上板再跳转的数据源；
    *  Board 的 SSE/轮询驱动它更新，本组件零额外轮询 */
   boardSessions: Session[];
@@ -75,6 +85,7 @@ interface CreateSessionSheetProps {
 
 export default function CreateSessionSheet({
   enabledTools,
+  installedTools,
   boardSessions,
   onOpenSession,
   onClose,
@@ -107,6 +118,11 @@ export default function CreateSessionSheet({
   // 如实告知重新配对（此前只依赖 Board 通道判废，面板内无反馈）
   const [deviceInvalid, setDeviceInvalid] = useState(false);
   const [waitHint, setWaitHint] = useState(false);
+  // 停滞提示（评审 P1-8）：跟踪满 CREATE_STALLED_HINT_MS 仍无终态时亮起——
+  // 后端 90s 预算无前端镜像，主机进程死亡场景收不到 failed，靠此提示说破
+  const [stalledHint, setStalledHint] = useState(false);
+  // 本轮任务的跟踪起点（Date.now，提交成功时记）——停滞判定基准
+  const startedAtRef = useRef<number | null>(null);
   // 跳转一次性闩：防 boardSessions 每拍更新期间重复触发 onOpenSession
   const navigatedRef = useRef(false);
 
@@ -182,8 +198,10 @@ export default function CreateSessionSheet({
       setSessionId(null);
       setNoTask(false);
       setWaitHint(false);
+      setStalledHint(false);
       setDeviceInvalid(false);
       navigatedRef.current = false;
+      startedAtRef.current = Date.now();
       setTaskId(r.taskId);
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
@@ -227,6 +245,16 @@ export default function CreateSessionSheet({
         }
         /* 其余单拍失败：下一拍再试（不终止轮询） */
       }
+      // 停滞判定（评审 P1-8）：仍在拍且已过 120s 无终态 → 亮提示（不停拍——
+      // 后端管线 90s 预算 + 裕量；主机进程死亡收不到 failed 的场景靠此说破）
+      if (
+        alive &&
+        scheduleNext &&
+        startedAtRef.current !== null &&
+        Date.now() - startedAtRef.current > CREATE_STALLED_HINT_MS
+      ) {
+        setStalledHint(true);
+      }
       if (alive && scheduleNext) timer = setTimeout(() => void poll(), CREATE_POLL_MS);
     };
     void poll();
@@ -264,6 +292,7 @@ export default function CreateSessionSheet({
     setSessionId(null);
     setNoTask(false);
     setWaitHint(false);
+    setStalledHint(false);
     setDeviceInvalid(false);
     setReceiptYellow(false);
     if (msg !== undefined) {
@@ -318,12 +347,17 @@ export default function CreateSessionSheet({
               </p>
             )}
 
-            {/* 工具四选：受管名单之外置灰并标原因（host.enabledTools，Board P8d 同源） */}
+            {/* 工具四选：受管名单之外置灰标「未启用」（host.enabledTools，Board P8d
+                同源）；安装探测之外置灰标「未安装」（host.installedTools，P1-9）——
+                两名单分列，文案可辨（服务端 400 tool_unavailable 兜底统一覆盖） */}
             <section className="mb-4">
               <h3 className="mb-2 text-sm font-medium">工具</h3>
               <div className="flex flex-wrap gap-2">
                 {CREATE_TOOLS.map((t) => {
-                  const disabled = enabledTools !== null && !enabledTools.has(t);
+                  const notEnabled = enabledTools !== null && !enabledTools.has(t);
+                  const notInstalled = installedTools !== null && !installedTools.has(t);
+                  const disabled = notEnabled || notInstalled;
+                  const disabledLabel = notInstalled ? "未安装" : "未启用";
                   const selected = tool === t;
                   return (
                     <button
@@ -342,7 +376,7 @@ export default function CreateSessionSheet({
                       }
                     >
                       {TOOL_LABELS[t]}
-                      {disabled && <span className="ml-1">未启用</span>}
+                      {disabled && <span className="ml-1">{disabledLabel}</span>}
                     </button>
                   );
                 })}
@@ -594,6 +628,15 @@ export default function CreateSessionSheet({
             {detail && (
               <p data-testid="create-detail" className="mb-3 text-xs text-slate-500">
                 {detail}
+              </p>
+            )}
+            {stalledHint && (
+              <p
+                data-testid="create-stalled-hint"
+                className="mb-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+              >
+                创建耗时已超 2 分钟仍未完成——主机侧可能异常（断连/停摆），可稍后在
+                看板确认结果，或返回重试
               </p>
             )}
             <button

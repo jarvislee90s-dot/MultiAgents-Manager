@@ -886,6 +886,7 @@ async fn e2e_create_http_full_chain() {
     //    - host_source 必须给 enabledTools（session-create 工具门第二道），故非 m9r
     //      的 Null 桩；其余缝照 m9r 最小假体（本链不触归档/看板隐藏/未读/硬杀）。
     let state = Arc::new(RemoteState {
+        capability_table: multi_agents_manager_lib::inject::capability::new_table(),
         session_source: Box::new(multi_agents_manager_lib::adapter::get_all_sessions),
         pairing_counter: Box::new(c9_running_projects),
         store: DeviceStore::memory(),

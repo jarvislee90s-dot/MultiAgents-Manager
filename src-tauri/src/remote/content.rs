@@ -1821,15 +1821,10 @@ fn read_opencode_messages_with(
     // schema 分派（D1 定案 §D0-4）：2.x 会话/消息表改名 session_v2/session_message
     // 且 part 内联进 data.content[]；`session`/`message`/`part` 三表冻结（新消息只进
     // v2 表）。查旧表会读到迁移前的快照 → 新会话「不存在」/新消息读不到（create 物化
-    // stamp 命不中即此）。表不存在则走 1.x 旧路径（零回归）。
-    let is_v2 = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
-            [],
-            |_| Ok(()),
-        )
-        .is_ok();
-    if is_v2 {
+    // stamp 命不中即此）。表不存在则走 1.x 旧路径（零回归）。判据单点 =
+    // monitor::opencode_parser::Schema::detect（评审 P2 收口：parser/content 双实现
+    // 漂移会让状态与内容走不同 schema）
+    if crate::monitor::opencode_parser::schema_is_v2(&conn) {
         return read_opencode_messages_v2(&conn, session_id, limit);
     }
     let sql = format!(

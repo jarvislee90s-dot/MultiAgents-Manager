@@ -61,6 +61,9 @@ export interface HostInfo {
 export interface HostPayload {
   host: HostInfo;
   enabledTools: string[];
+  /** 安装探测结果（P1-9，2026-10-03）：新建会话四家中 PATH 探测命中的子集——
+   * 前端「未安装」置灰的数据源（与 enabledTools 分列：受管 ≠ 已安装） */
+  installedTools: string[];
 }
 
 export async function fetchHost<T = HostPayload>(): Promise<T | null> {
