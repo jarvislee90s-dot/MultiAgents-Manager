@@ -87,10 +87,10 @@ describe("ApproveCard：红卡审批选项卡（M8 Task 12）", () => {
     routes.options = approveOptions();
     const { container } = render(<ApproveCard session={{ id: "sess-1" }} />);
     expect(await screen.findByTestId("approve-option-approve")).toBeTruthy();
-    expect(screen.getByTestId("approve-option-approve").textContent).toBe("允许");
-    expect(screen.getByTestId("approve-option-reject").textContent).toBe("拒绝");
+    expect(screen.getByTestId("approve-option-approve").textContent).toContain("允许");
+    expect(screen.getByTestId("approve-option-reject").textContent).toContain("拒绝");
     expect(screen.getByTestId("approve-card").textContent).toContain("等待批准");
-    // 契约锚点：响应载荷不含 key（键位不外泄 UI），组件仅凭 id/label 完整渲染
+    // 契约锚点：响应载荷不含 key（键位不外泄 UI 语义字段），组件仅凭 id/label 完整渲染
     expect(routes.options.options.every((o) => !("key" in o))).toBe(true);
     // 无漂移时提示条不出现
     expect(container.querySelector("[data-testid='approve-drift']")).toBeNull();
@@ -541,14 +541,18 @@ describe("ApproveCard：裁11 配色 tone 映射", () => {
     expect(btn.className).not.toContain("bg-rose-500/10");
   });
 
-  it("二元审批卡：保留红系 data-tone=approve（裁11 活口注明）", async () => {
+  it("二元审批卡：并入问答同族蓝系 data-tone=question + 纵向列表（2026-09-24 用户裁决「完全并成一套」，裁11 活口收口）；徽标只在 dialog 分支渲染（评审 I2：二元键位各家不同且不外泄，编造序号=谎报）", async () => {
     installFetch();
     routes.options = approveOptions();
     render(<ApproveCard session={{ id: "sess-e7-binary" }} />);
     const card = await screen.findByTestId("approve-card");
-    expect(card.getAttribute("data-tone")).toBe("approve");
-    expect(card.className).toContain("border-rose-500/60");
+    expect(card.getAttribute("data-tone")).toBe("question");
+    expect(card.className).toContain("border-sky-500/60");
     const btn = screen.getByTestId("approve-option-approve");
-    expect(btn.className).toContain("bg-rose-500/10");
+    expect(btn.className).toContain("bg-sky-500/10");
+    expect(btn.className).not.toContain("bg-rose-500/10");
+    // 二元分支不编造编号徽标：按钮文本 = 纯 label（不夹带序号/键名）
+    expect(screen.getByTestId("approve-option-approve").textContent).toBe("允许");
+    expect(screen.getByTestId("approve-option-reject").textContent).toBe("拒绝");
   });
 });

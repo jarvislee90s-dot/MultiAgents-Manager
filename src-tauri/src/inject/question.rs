@@ -216,7 +216,7 @@ pub fn answer_key_sequence(
     q: &Question,
 ) -> Result<Vec<String>, String> {
     match action {
-        AnswerAction::Select | AnswerAction::Toggle => {
+        AnswerAction::Select => {
             let i = index.ok_or_else(|| "缺少选项序号".to_string())?;
             if i >= q.options.len() {
                 return Err(format!("选项序号越界：{i}"));
@@ -225,6 +225,13 @@ pub fn answer_key_sequence(
                 .ok_or_else(|| format!("选项序号超键域：{i}"))
                 .map(|k| vec![k])
         }
+        // 2026-09-24：数字切勾路径**废止**——用户实机取证（claude 2.1.278）证明多选
+        // 屏数字无反应（推翻 K8，档案见 2026-09-24-claude多选多题键序-用户实机取证
+        // §5）。切勾一律走阶段机（空格 + 闭环导航 + 屏读校验翻转），此处显式 Err
+        // 而非删分支：调用方若改回盲发数字会立刻撞上这条判据（同 Submit 分支的理由）
+        AnswerAction::Toggle => Err(
+            "多选切勾必须经阶段机（run_toggle_stages）——数字路径已废止（2026-09-24）".to_string(),
+        ),
         AnswerAction::Submit => {
             if !q.multi_select {
                 return Err("submit 仅用于多选题".to_string());
@@ -244,9 +251,12 @@ pub fn answer_key_sequence(
         AnswerAction::FreeText => {
             Err("自由作答必须经阶段机（run_free_text_stages）——键序依赖屏读定位".to_string())
         }
-        // 切题导航是**多题专用**动作，claude 多题键序未探（spec §1 非目标边界）
-        // → 拒绝（多题载荷在端点已按 multi_questions 只读，这里是直调兜底）
-        AnswerAction::Advance => Err("claude 多题切页键序未实测，不出键".to_string()),
+        // claude 切题是**屏幕驱动**（走位到 Next 行 + 回车 + 读屏分类），无静态键序
+        // ——显式 Err 防调用方盲发（同 Submit/FreeText 分支的理由）。2026-09-24 起
+        // 走阶段机（run_advance_stages；用户实机取证 2.1.278：多题尾部 Next+回车）
+        AnswerAction::Advance => {
+            Err("claude 多题切题必须经阶段机（run_advance_stages）".to_string())
+        }
     }
 }
 
@@ -627,6 +637,7 @@ where
     Ok(SubmitOutcome {
         sent_keys,
         down_steps: 0,
+        up_steps: 0,
         review_confirmed: true,
         receipt_seen,
     })
@@ -703,6 +714,8 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        screen_text: None,
+        screen_checked: None,
     })
 }
 
@@ -807,6 +820,8 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        screen_text: None,
+        screen_checked: None,
     })
 }
 
@@ -950,6 +965,7 @@ where
     Ok(SubmitOutcome {
         sent_keys,
         down_steps: 0,
+        up_steps: 0,
         review_confirmed: true,
         receipt_seen,
     })
@@ -1034,6 +1050,8 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        screen_text: None,
+        screen_checked: None,
     })
 }
 
@@ -1099,8 +1117,23 @@ pub fn parse_opencode_answers(metadata_json: &str) -> Option<Vec<Vec<String>>> {
 pub const SUBMIT_FOCUS_MARKER: char = '\u{276F}';
 
 /// 多选题的提交行文本（实机 `Submit`；claude 二进制 `submitButtonText` 单题时为
-/// `"Submit"`、多题时为 `"Next"`——v1 只对单题卡放行，故此常量即单题形态）。
+/// `"Submit"`）。
 pub const SUBMIT_ROW_LABEL: &str = "Submit";
+
+/// 多题形态下每题尾部的**推进行**文本 `Next`（claude 二进制 `submitButtonText` 多题
+/// 取值；2026-09-24 用户实机取证 2.1.278 屏面实证——三题表单第一题尾部为无编号
+/// `Next` 行，回车进入下一题，见 `research/refs/phase2-消息注入/2026-09-24-claude
+/// 多选多题键序-用户实机取证.md` §3）。
+pub const NEXT_ROW_LABEL: &str = "Next";
+
+/// 推进行标签判定（单题 `Submit` 与多题 `Next` 的**单一判据点**）：
+/// - `Submit` 沿用**前缀匹配**（既有 K10 证据形态，`submit_row_focused` 原口径与
+///   测试锁不动）；
+/// - `Next` 用**精确相等**——它是常见词（正文 "Next steps:" 类行），前缀匹配会把
+///   正文行误判成推进行；实机推进行无行尾装饰（用户截图与丁复审 dump 均为裸词）。
+fn is_advance_label(t: &str) -> bool {
+    t.starts_with(SUBMIT_ROW_LABEL) || t == NEXT_ROW_LABEL
+}
 
 /// Review 确认屏的**标题锚**（实机逐字，见模块文档判据表）。
 ///
@@ -1206,8 +1239,9 @@ pub enum StageAbortKind {
 }
 
 impl StageAbort {
-    /// 屏读形态不符的中止
-    fn screen(message: impl Into<String>) -> Self {
+    /// 屏读形态不符的中止（`pub(crate)`：api.rs 的三态首段轮询直接构造
+    /// 「读不到屏/形态不符」两态中止——段名映射仍单点走 `stage_from_abort`）
+    pub(crate) fn screen(message: impl Into<String>) -> Self {
         Self {
             kind: StageAbortKind::Screen,
             message: message.into(),
@@ -1257,29 +1291,30 @@ pub enum ScreenStep {
     Fatal(String),
 }
 
-/// 一行是否是**带焦点标记**的提交行：剥掉行首空白与 [`SUBMIT_FOCUS_MARKER`] 后，
-/// 剩余文本（trim）以 [`SUBMIT_ROW_LABEL`] 开头。
+/// 一行是否是**带焦点标记**的推进行：剥掉行首空白与 [`SUBMIT_FOCUS_MARKER`] 后，
+/// 剩余文本（trim）命中 [`is_advance_label`]（单题 `Submit` 前缀 / 多题 `Next` 精确）。
 ///
-/// **为什么判「前缀」而不是精确相等**：实机 Submit 行是 `❯   Submit`（标记后有缩进
-/// ——见 `C-s8-cursor-submit-*.png`），且该行**没有编号**（与选项行不同）。前缀匹配
-/// 同时容忍行尾可能的装饰；而「不含编号」这一形态差异正是它与选项行不会混淆的原因。
+/// **为什么 Submit 判「前缀」而不是精确相等**：实机 Submit 行是 `❯   Submit`（标记后
+/// 有缩进——见 `C-s8-cursor-submit-*.png`），且该行**没有编号**（与选项行不同）。前缀
+/// 匹配同时容忍行尾可能的装饰；而「不含编号」这一形态差异正是它与选项行不会混淆
+/// 的原因。`Next` 的口径差异见 [`is_advance_label`]。
 fn submit_row_focused(line: &str) -> bool {
     let t = line.trim_start();
     let Some(rest) = t.strip_prefix(SUBMIT_FOCUS_MARKER) else {
         return false;
     };
-    rest.trim_start().starts_with(SUBMIT_ROW_LABEL)
+    is_advance_label(rest.trim())
 }
 
-/// 屏上是否**存在**提交行（不论焦点在哪）——用于把「没找到提交行」与「提交行在但
+/// 屏上是否**存在**推进行（不论焦点在哪）——用于把「没找到推进行」与「推进行在但
 /// 焦点不在它上面」两种失败分开报告（回执要能说清卡在哪一段）。
 ///
 /// 两种屏上形态都算「在场」（实机两张截图各取其一）：焦点行 `❯   Submit`、
-/// 非焦点行 `    Submit`。
+/// 非焦点行 `    Submit`；多题形态同位换词为 `Next`。
 fn submit_row_present(line: &str) -> bool {
     let t = line.trim_start();
     let t = t.strip_prefix(SUBMIT_FOCUS_MARKER).unwrap_or(t);
-    t.trim_start().starts_with(SUBMIT_ROW_LABEL)
+    is_advance_label(t.trim())
 }
 
 /// **提交屏在场**探测（**测试专用**——生产侧第 1 段轮询只负责「读一屏」，在场判据由
@@ -1382,13 +1417,943 @@ pub(crate) fn probe_answered_receipt(lines: &[String]) -> bool {
         .any(|l| l.to_lowercase().contains(answered_receipt_anchor()))
 }
 
+// ============================================================
+// 2026-09-24 多选闭环切勾（用户实机取证 2.1.278：空格=切勾、数字=无反应）
+// 解析底料 + 闭环导航 + 翻转核验。证据档案：
+// research/refs/phase2-消息注入/2026-09-24-claude多选多题键序-用户实机取证.md
+// ============================================================
+
+/// 问答题屏一行的**类别**（[`parse_question_rows`] 的产物）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuestionRowKind {
+    /// 模型选项行（多选形态带勾选框）
+    Option,
+    /// TUI 自动追加的自由作答行（多选形态带勾选框 `N. [ ] Type something`）
+    FreeText,
+    /// 尾部推进行（单题 `Submit` / 多题 `Next`，无编号）
+    Advance,
+}
+
+/// 问答题屏解析出的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuestionRow {
+    pub kind: QuestionRowKind,
+    /// 屏上编号（TUI 给的；推进行无 → `None`）
+    pub number: Option<u32>,
+    /// 勾选态：无勾选框 → `None`；`[ ]` → `Some(false)`；`[✓]`/`[✔]` → `Some(true)`
+    ///
+    /// **按括号内容语义判**（空=未选/非空=已选），不硬编码字形族——实机证据里已见
+    /// `[✓]`(U+2713)（用户截图）与 `[✔]`(U+2714)（丁复审 dump）两种。
+    pub checked: Option<bool>,
+    /// 焦点（[`SUBMIT_FOCUS_MARKER`]）是否在本行
+    pub focused: bool,
+    /// 剥离编号与勾选框后的文本
+    pub label: String,
+}
+
+/// 分隔线行判定（`─`/`━`（U+2500/U+2501）连串）：问答题屏在推进行与
+/// `Chat about this` 之间的分隔（丁复审 dump + 用户截图同形态）。**线下不在走位
+/// 路径上**（K10 实证走位止于推进行）。只认制表符族、不收 ASCII `-`（评审 Minor-4：
+/// 对话滚回区的 markdown `----` 水平线会提前翻转 below_separator 饿死行块解析）；
+/// 阈值按字符数（`t.len()` 是字节数，对多字节字形不对称）。
+fn is_separator_line(t: &str) -> bool {
+    t.chars().count() >= 4 && t.chars().all(|c| c == '─' || c == '━')
+}
+
+/// 行首编号剥离：`"1. [ ] Apple"` → `(1, "[ ] Apple")`；无 `N. ` 形态 → `None`。
+fn split_leading_number(t: &str) -> Option<(u32, &str)> {
+    let digits_end = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    if digits_end == 0 {
+        return None;
+    }
+    // 编号后必须是 ". "（`5. [ ] Type something` 形态；行尾裸 "5." 不存在——
+    // 每个编号行都有载荷）
+    let after = t[digits_end..].strip_prefix(". ")?;
+    let num: u32 = t[..digits_end].parse().ok()?;
+    Some((num, after))
+}
+
+/// 勾选框剥离：`"[✓] Apple"` → `(Some(true), "Apple")`；`"[ ] Apple"` →
+/// `(Some(false), "Apple")`；无勾选框（单选形态选项）→ `(None, 原文)`。
+/// 括号内**非空即已选**（字形语义判，见 [`QuestionRow::checked`]）。
+fn split_checkbox(rest: &str) -> (Option<bool>, &str) {
+    let Some(after) = rest.strip_prefix('[') else {
+        return (None, rest);
+    };
+    let Some(close) = after.find(']') else {
+        return (None, rest);
+    };
+    let inner = &after[..close];
+    let label = after[close + 1..].trim_start();
+    // 内含 `[`/`]` 的不是勾选框（正文方括号引用）——保守回退「无勾选框」
+    if inner.contains('[') || inner.contains(']') {
+        return (None, rest);
+    }
+    let checked = !inner.trim().is_empty();
+    (Some(checked), label)
+}
+
+/// 单行解析（编号行 / 推进行；正文、描述换行、页签栏、footer 均返回 `None`）。
+fn parse_question_row(line: &str) -> Option<(Option<u32>, Option<bool>, bool, String)> {
+    let t = line.trim_start();
+    let focused = t.starts_with(SUBMIT_FOCUS_MARKER);
+    let t = t.strip_prefix(SUBMIT_FOCUS_MARKER).unwrap_or(t);
+    let t = t.trim_start();
+    if let Some((num, rest)) = split_leading_number(t) {
+        let rest = rest.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        let (checked, label) = split_checkbox(rest);
+        return Some((Some(num), checked, focused, label.trim_end().to_string()));
+    }
+    // 无编号行：只有推进行算（`Submit` 前缀 / `Next` 精确——与 submit 判定同一口径，
+    // 防正文 "Next steps:" 冒充）
+    if is_advance_label(t.trim()) {
+        return Some((None, None, focused, t.trim().to_string()));
+    }
+    None
+}
+
+/// 问答题屏的**行块解析**：双锚设计（2026-10-02 活体事故后重构）。
+///
+/// **锚 A（推进行）**：以**最靠后**的推进行（`Submit`/`Next`）为锚，向上收**编号
+/// 连续递减**的行（选项 1..n + `Type something` n+1），加推进行本身。为什么按连续
+/// 递减收块：屏读窗口含对话滚回区，正文里可能出现编号行（戊探E 的 N5 误纳同型
+/// 风险）；「紧邻推进行、编号 n, n-1, … 连续」这一形态只有题屏自身满足——滚回区
+/// 编号块与题屏块之间必经一次编号跳变（或非编号行），在跳变处停手。为什么取
+/// **最靠后**：题屏是屏上最新的内容（2026-10-02 修正——原来取「第一处」会被
+/// 滚回区正文里的孤立 Submit 样行劫持）。
+///
+/// **闩锁移除（2026-10-02 活体事故根因）**：旧实现见到 ─ 分隔线就把其后所有行
+/// 永久标记「线下」——但滚回区的分隔线（如 claude 多题流 Planning 块的上下边框）
+/// 出现在题屏**上方**，会把整个题屏判死（解析恒 0 行，活体 dump 实证）。分隔线
+/// 排除 `Chat about this` 的职责由锚的选取天然承担：Chat 行在推进行**之后**，向上
+/// 收块摸不到它。
+///
+/// **锚 B（页签栏，2026-10-02 新增）**：多题流的**单选子题**没有独立推进行（活体
+/// 取证：页签栏之后直接是题干+编号选项块，`Type something` 后即分隔线）——以
+/// [`is_question_tab_bar`]（复合签名）为锚，**向下**收「编号连续递增」块，分隔线
+/// 即停。产物**不含** `Advance` 行（调用方按无推进行形态处置）。
+///
+/// 解析失败（两锚皆不成立）→ 空块（调用方按形态不符中止，不猜——与
+/// [`crate::inject::dialog::navigation_anchors`] 的「不猜起点」同纪律）。
+pub(crate) fn parse_question_rows(lines: &[String]) -> Vec<QuestionRow> {
+    // 候选行全量收集（编号行 + 推进行；题干/描述/页签/footer 等非编号行由
+    // parse_question_row 返回 None 天然跳过）
+    let mut parsed: Vec<(Option<u32>, Option<bool>, bool, String)> = Vec::new();
+    for line in lines {
+        if let Some((num, checked, focused, label)) = parse_question_row(line) {
+            parsed.push((num, checked, focused, label));
+        }
+    }
+    // 锚 A：最靠后的无编号行（推进行）。向上收「编号连续递减」块：紧邻锚的编号
+    // 行给起点 k，其上依次要 k-1、k-2…
+    if let Some(anchor) = parsed.iter().rposition(|(num, ..)| num.is_none()) {
+        let mut block: Vec<(u32, Option<bool>, bool, String)> = Vec::new();
+        let mut expect_next: Option<u32> = None;
+        for (num, checked, focused, label) in parsed[..anchor].iter().rev() {
+            let Some(n) = num else {
+                break; // 非编号行（不该出现在锚上方——防御性停手）
+            };
+            if let Some(want) = expect_next {
+                if *n != want {
+                    break; // 编号跳变：滚回区杂行边界，块到此为止
+                }
+            }
+            block.push((*n, *checked, *focused, label.clone()));
+            expect_next = Some(n.saturating_sub(1));
+        }
+        if !block.is_empty() {
+            block.reverse();
+            // FreeText 行判定（2026-10-03 修正）：①label 以占位文本开头（未打字形态
+            // ——**字符串在场，直接按行定位**）；②**块内编号最大的行**（打字后形态
+            // ——占位字符串已被用户文字替换，按 claude TUI 恒定结构定位：自由作答行
+            // 恒为选项列表末尾的追加项，普通选项不可能占据最大编号）。
+            // **不依赖勾选框字形**（2026-10-03 用户批评 + 单选形态实证：单选题打字后
+            // 的行是 `4. 组成一个HTML ✔`——✔ 在行尾无方括号，勾选框判据漏判 → 自由
+            // 作答「解析不出 Type something 行」中止的事故根因）
+            let max_num = block.last().map(|(n, ..)| *n);
+            let mut rows: Vec<QuestionRow> = block
+                .into_iter()
+                .map(|(num, checked, focused, label)| {
+                    let kind = if label.starts_with(FREE_TEXT_ROW_LABEL) || Some(num) == max_num {
+                        QuestionRowKind::FreeText
+                    } else {
+                        QuestionRowKind::Option
+                    };
+                    QuestionRow {
+                        kind,
+                        number: Some(num),
+                        checked,
+                        focused,
+                        label,
+                    }
+                })
+                .collect();
+            let (_, _, focused, label) = &parsed[anchor];
+            rows.push(QuestionRow {
+                kind: QuestionRowKind::Advance,
+                number: None,
+                checked: None,
+                focused: *focused,
+                label: label.clone(),
+            });
+            return rows;
+        }
+        // 锚 A 在但上方收不到块（滚回区杂锚）→ 落锚 B 再试
+    }
+    // 锚 B（页签栏）：单选子题无独立推进行——自页签栏向下收「编号连续递增」块
+    let Some(tab_idx) = lines.iter().position(|l| is_question_tab_bar(l)) else {
+        return Vec::new();
+    };
+    let mut block: Vec<(u32, Option<bool>, bool, String)> = Vec::new();
+    let mut expect_next: Option<u32> = None;
+    for line in &lines[tab_idx + 1..] {
+        // 分隔线即停：`Chat about this`（编号在选项块之后）在线下，天然排除
+        if is_separator_line(line.trim()) {
+            break;
+        }
+        let Some((num, checked, focused, label)) = parse_question_row(line) else {
+            continue; // 题干/描述/空行——容忍跳过（题干区在页签栏与首选项之间）
+        };
+        let Some(n) = num else {
+            break; // 推进行（不该出现在页签栏之下）——防御性停手
+        };
+        if let Some(want) = expect_next {
+            if n != want {
+                break; // 编号跳变：噪声边界，块到此为止
+            }
+        }
+        block.push((n, checked, focused, label));
+        expect_next = Some(n + 1);
+    }
+    if block.is_empty() {
+        return Vec::new();
+    }
+    // FreeText 行判定（与 anchor A 同规则）：占位前缀 ∨ 块内编号最大（单选子题
+    // 打字后 `4. 组成一个HTML ✔` 无勾选框——字形判据漏判的同源修正）
+    let max_num = block.last().map(|(n, ..)| *n);
+    block
+        .into_iter()
+        .map(|(num, checked, focused, label)| {
+            let kind = if label.starts_with(FREE_TEXT_ROW_LABEL) || Some(num) == max_num {
+                QuestionRowKind::FreeText
+            } else {
+                QuestionRowKind::Option
+            };
+            QuestionRow {
+                kind,
+                number: Some(num),
+                checked,
+                focused,
+                label,
+            }
+        })
+        .collect()
+}
+
+/// 页签栏行判定（2026-10-02 活体取证 2.1.278 多题流）：
+/// `←  ☐ 优化范围  ☐ 版本处理  ✔ Submit  →`——复合签名三特征（`←` 开头 + `→`
+/// 结尾 + 含 submit），散文正文不会同时命中三者。多题流**单选子题**没有独立
+/// 推进行，页签栏是题屏唯一结构锚（见 [`parse_question_rows`] 锚 B）。
+fn is_question_tab_bar(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('←') && t.ends_with('→') && t.to_lowercase().contains("submit")
+}
+
+/// 题屏的**题干区原文**（页签栏→首个编号行之间，去空白拼接）——切题分类的
+/// 「换页」信号（与 [`screen_question_matches`] 同一提取面；Review 屏也会给出
+/// 非空值，调用方仅在题屏语境下消费）。
+pub(crate) fn question_heading_of(lines: &[String]) -> String {
+    let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let tab_idx = lines.iter().position(|l| l.contains('←'));
+    let first_option = lines
+        .iter()
+        .position(|l| parse_question_row(l).is_some_and(|(num, ..)| num.is_some()));
+    let Some(first) = first_option else {
+        return String::new();
+    };
+    let start = match tab_idx {
+        Some(t) if t < first => t + 1,
+        _ => first.saturating_sub(4),
+    };
+    lines[start..first].iter().map(|l| norm(l)).collect()
+}
+
+/// **题屏快照**（卡面状态权威源的载体——AGENTS.md「屏读为准」原则）：从一屏
+/// 解析出当前题的可观察状态，供回执回传（交互后核对）与 GET 初始化（重启/重开
+/// 页面后的状态纠偏）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionScreenSnapshot {
+    /// 选项行勾选态（按屏上编号序；`None` = 该行无勾选框——单选形态选项）
+    pub checked: Vec<Option<bool>>,
+    /// 自由作答行内容：已打字 → `Some(屏上文本)`；占位未打字 → `None`
+    /// **三态判别靠 [`Self::free_text_present`] 行在场旗标**（评审 I1：`None` 曾同时
+    /// 表示「占位」与「行缺席」两种态，前端无法区分「终端已清空」与「读不到」）
+    pub free_text: Option<String>,
+    /// 自由作答行**在场**旗标（true = 屏上有 Type something 行——无论占位还是已打字）
+    pub free_text_present: bool,
+    /// 题干区归一化文本（前端据此把快照对位到载荷题）
+    pub heading: String,
+}
+
+/// 剥自由作答行**行尾的选中标记**（` ✔`/` ✓`/` ✅`——单选屏打字后自动选中的
+/// 行尾标记；多选屏的勾选在方括号内不受影响）。展示/回传用——解析器 kind 判定
+/// 与「文字保留」核验仍比对原样 label。
+fn strip_trailing_selection_mark(text: String) -> String {
+    let t = text.trim_end();
+    for mark in ["\u{2705}", "\u{2714}", "\u{2713}"] {
+        if let Some(stripped) = t.strip_suffix(mark) {
+            return stripped.trim_end().to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// 从一屏提取 [`QuestionScreenSnapshot`]。
+///
+/// **Review 确认屏 → `None`**（评审 C1）：Review 屏带页签栏 + 编号确认项
+///（`1. Submit answers`），anchor B 会把它解析成「题屏」——题干区还含答毕回显，
+/// 前端对位会错跳题并清掉勾选态。Review 是更特异的判据（[`probe_review_screen`]），
+/// 先判它；调用方（GET）据 `None` 落到 `{review:true}` 检测。
+pub(crate) fn question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenSnapshot> {
+    if matches!(probe_review_screen(lines), ScreenStep::Ready(_)) {
+        return None; // Review 确认屏不是题屏（C1：更特异判据优先）
+    }
+    let rows = parse_question_rows(lines);
+    if rows.is_empty() {
+        return None;
+    }
+    let checked = rows
+        .iter()
+        .filter(|r| r.kind == QuestionRowKind::Option)
+        .map(|r| r.checked)
+        .collect();
+    let free_row = rows.iter().find(|r| r.kind == QuestionRowKind::FreeText);
+    let free_text_present = free_row.is_some();
+    let free_text = free_row.and_then(|r| {
+        if r.label.starts_with(FREE_TEXT_ROW_LABEL) {
+            None // 占位未打字
+        } else {
+            // 剥行尾选中标记（strip_trailing_selection_mark 文档见上）
+            Some(strip_trailing_selection_mark(r.label.clone()))
+        }
+    });
+    Some(QuestionScreenSnapshot {
+        checked,
+        free_text,
+        free_text_present,
+        heading: question_heading_of(lines),
+    })
+}
+
+/// 行块里**唯一**焦点行的下标（0 或 ≥2 个焦点 → `None`——「不猜起点」）。
+fn unique_focused_row(rows: &[QuestionRow]) -> Option<usize> {
+    let mut hit: Option<usize> = None;
+    for (i, r) in rows.iter().enumerate() {
+        if r.focused {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(i);
+        }
+    }
+    hit
+}
+
+/// 走位方向判定（[`run_submit_stages`] 走位段）：按行块的焦点位与推进行位算
+/// `"up"`/`"down"`（焦点在推进行下方 → `up`；上方 → `down`）。块解析不出或无唯一
+/// 焦点 → `None`（调用方保守回落 `down`——旧口径，上限兜底）。
+fn walk_direction_to_advance(lines: &[String]) -> Option<&'static str> {
+    let rows = parse_question_rows(lines);
+    if rows.is_empty() {
+        return None;
+    }
+    let cur = unique_focused_row(&rows)?;
+    let advance = rows
+        .iter()
+        .position(|r| r.kind == QuestionRowKind::Advance)?;
+    Some(if cur > advance { "up" } else { "down" })
+}
+
+/// 屏上题目与载荷题干的**身份一致性**判定（2026-09-24 评审 I1 修复）：
+/// 取「页签栏（含 `←` 的行）→ 首个编号行」之间的区域（题干渲染区），去空白拼接
+/// 后须**包含**载荷题干的去空白全文。用户实测量到 ←/→ 可手动切题——手机卡的
+/// 题号与终端脱钩后，切勾会作用到**别的题**的选项上（按键效果闭环验得过、目标
+/// 身份却错）；本判据补上身份面：不匹配即中止零按键（不猜）。
+///
+/// 退化与兜底（如实申报）：
+/// - 题干去空白后不足 4 字符 → 恒 `true`（判别力不足，不硬拦——此时仅靠屏读闭环）；
+/// - 页签栏不在可见窗口（窄窗滚出）→ 区域回落为「首个编号行上方至多 4 行」；
+/// - 题干被 TUI 折行/加饰（如多选后缀）→ 去空白包含判据天然覆盖（用户实机形态：
+///   载荷含 `（可多选）` 时屏面逐字同现；载荷不含时屏面是否追加未取证——包含判据
+///   只要求载荷侧是屏面子串，屏面多装饰不影响）。
+fn screen_question_matches(lines: &[String], expected: &str) -> bool {
+    // 归一化（2026-10-03 扩展）：除空白外，**剥离控制台读写损失字符**——题干里的
+    // emoji 装饰（3️⃣/✨ 等：变体选择符 FE0F、组合键帽 20E3、星面字符）在控制台
+    // 缓冲经 ReadConsoleOutputCharacterW 读回时可能变成 U+FFFD 或丢失（活体实证：
+    // 屏面「问题3<FFFD><FFFD>：」vs 载荷「问题3<键帽>：」），逐字比对恒失败 →
+    // 身份核验误中止。两侧同规则剥离后只留 CJK/字母/数字/常规标点——判别力不变。
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| {
+                !c.is_whitespace()
+                    && *c != '\u{FFFD}'
+                    && !('\u{FE00}'..='\u{FE0F}').contains(c)
+                    && *c != '\u{20E3}'
+                    && (*c as u32) < 0x10000
+            })
+            .collect::<String>()
+    };
+    let expected = norm(expected);
+    if expected.chars().count() < 4 {
+        return true; // 判别力不足（超短题干）——不硬拦
+    }
+    let tab_idx = lines.iter().position(|l| l.contains('←'));
+    let first_option = lines
+        .iter()
+        .position(|l| parse_question_row(l).is_some_and(|(num, ..)| num.is_some()));
+    let Some(first) = first_option else {
+        return false; // 连编号行都没有——交给行块解析段报形态不符（此处恒 false 不影响）
+    };
+    let start = match tab_idx {
+        Some(t) if t < first => t + 1,
+        // 页签栏不在窗内：回落为首个编号行上方至多 4 行（题干就在选项区正上方）
+        _ => first.saturating_sub(4),
+    };
+    let region = lines[start..first]
+        .iter()
+        .map(|l| norm(l))
+        .collect::<String>();
+    region.contains(&expected)
+}
+
+/// 目标选项（0 起模型选项下标）→ 行块下标（屏上编号 = 下标+1；找不到 → `None`）。
+fn locate_option_row(rows: &[QuestionRow], target: usize) -> Option<usize> {
+    rows.iter().position(|r| {
+        r.kind == QuestionRowKind::Option && r.number.is_some_and(|n| n as usize == target + 1)
+    })
+}
+
+/// 闭环切勾的编排结果（[`run_toggle_stages`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToggleOutcome {
+    /// 实际发出的键（方向键 + 空格，按发出顺序；中止时含已发出的那部分）
+    pub sent_keys: Vec<String>,
+    /// 空格发出后屏读核验到**勾选态确实翻转**
+    pub verified: bool,
+    /// 翻转后的目标行勾选态（`verified=true` 时必有值；读不到屏无法核验 → `None`）
+    pub checked_now: Option<bool>,
+    /// **能力开关的新值**（2026-10-03 数字直选自适应）：探测/降级发生时携带，调用
+    /// 侧写回 `capability` 表；`None` = 开关无变化（走位路径 / DigitUnsupported）
+    pub digit_result: Option<crate::inject::capability::DigitToggle>,
+}
+
+/// **多选闭环切勾编排**（2026-09-24）：数字路径已被用户实测推翻（2.1.278 多选屏
+/// 数字无反应），切勾一律走「屏读定位 → 题目身份核验 → 方向键走位（每步复核）
+/// → 空格 → 屏读核验翻转」。
+///
+/// # 各段与中止点（每一步都在发键前屏读；任何一段不符即中止且不再发键）
+///
+/// 1. **题屏段**：`poll_screen` 读一屏并解析行块（[`parse_question_rows`]）。
+///    解析不出块 / **屏上题干与载荷题干不一致**（[`screen_question_matches`]——
+///    用户手动 ←/→ 切题后手机卡与终端脱钩，切勾会作用到别的题上）/ 无唯一焦点行 /
+///    目标选项不在块内 → 中止，**零按键**；
+/// 2. **走位段**：焦点已在目标行 → 直接入下一段；否则按方向发一个 `up`/`down`
+///    → `settle()` → 重读复核：焦点**沿目标方向**位移恰 1 行（反向位移同样中止，
+///    评审 Minor-3）。
+///    复核不过（焦点不动 / 块形态崩）→ 中止**不发空格**。步数上限 = 块行数 + 2
+///    （死循环兜底）；
+/// 3. **切勾段**：目标行须带勾选框（多选形态）——无勾选框说明屏是单选形态，
+///    中止。发 `space` → `settle()`；
+/// 4. **核验段**：重读一屏定位目标行——勾选态翻转 → `verified=true`（附新态）；
+///    **未翻转 → 中止**（Err：空格形态可能不被该版本消费，请到终端确认——这正
+///    是对「空格注入形态未实机复验」的兜底）；读不到屏 → `Ok{verified:false,
+///    checked_now:None}`（键已发出、无法核验——与 receipt_seen=None 同口径，
+///    不谎报也不误报失败）。
+///
+/// **焦点守卫共用 helper**（2026-10-03）：光标停在自由作答行（内联编辑态）时，
+/// 数字/任何注入键会被当文本打进输入框——先发 `↑` 移回选项行并双核验（焦点唯一
+/// 且在 Option 行；FreeText 行文字保留）。toggle 数字直选与单选 select 共用。
+/// 返回 `↑` 后的新屏行块（调用方以它为后续判定基准）。
+///
+/// `focus_idx` = 当前屏解析出的唯一焦点行；不在自由作答行 → 原样返回 `rows`。
+fn prelift_focus_from_freetext<T: MenuTerminal>(
+    terminal: &mut T,
+    rows: Vec<QuestionRow>,
+    focus_idx: Option<usize>,
+    sent_keys: &mut Vec<String>,
+    context: &str,
+) -> Result<Vec<QuestionRow>, StageAbort> {
+    if let Some(fi) = focus_idx {
+        if rows[fi].kind == QuestionRowKind::FreeText {
+            let free_label_before = rows[fi].label.clone();
+            terminal
+                .send("up")
+                .map_err(|e| StageAbort::delivery(format!("↑ 投递失败（{e}）")))?;
+            sent_keys.push("up".to_string());
+            terminal.settle();
+            let back = terminal.read().ok_or_else(|| {
+                StageAbort::screen(format!(
+                    "{context}：↑ 后读不到屏幕——已中止，未发数字；请人工核对终端"
+                ))
+            })?;
+            let back_rows = parse_question_rows(&back);
+            let on_option = unique_focused_row(&back_rows)
+                .is_some_and(|i| back_rows[i].kind == QuestionRowKind::Option);
+            if !on_option {
+                return Err(StageAbort::screen(format!(
+                    "{context}：↑ 未把焦点移出自由作答行（形态与预期不符）——已中止，未发数字；请人工核对终端"
+                )));
+            }
+            let free_intact = back_rows
+                .iter()
+                .any(|r| r.kind == QuestionRowKind::FreeText && r.label == free_label_before);
+            if !free_intact {
+                return Err(StageAbort::screen(format!(
+                    "{context}：↑ 离开自由作答行后屏读发现该行内容变化（文字或勾选可能丢失）——已中止，未发数字；请到终端核对"
+                )));
+            }
+            return Ok(back_rows);
+        }
+    }
+    Ok(rows)
+}
+
+pub fn run_toggle_stages<P, T>(
+    target_option: usize,
+    expected_question: &str,
+    mut poll_screen: P,
+    terminal: &mut T,
+    digit: crate::inject::capability::DigitToggle,
+) -> Result<ToggleOutcome, StageAbort>
+where
+    P: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: MenuTerminal,
+{
+    let mut sent_keys: Vec<String> = Vec::new();
+    // ===== 第 1 段：题屏在场 + 行块解析 + 题目身份核验（形态不符即中止，零按键）=====
+    let first = poll_screen().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen("读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端")
+    })?;
+    let mut rows = parse_question_rows(&first);
+    if rows.is_empty() {
+        return Err(StageAbort::screen(
+            "屏上解析不出问答选项块（未见推进行 Submit/Next 或编号块不连续）——已中止，未发任何键；请人工核对终端",
+        ));
+    }
+    // 身份核验（2026-09-24 评审 I1）：屏上题干与载荷题干不一致 = 终端显示的不是
+    // 手机卡当前的题（用户已手动 ←/→ 切题）——切勾会作用到别的题上，必须中止
+    if !screen_question_matches(&first, expected_question) {
+        return Err(StageAbort::screen(
+            "屏幕上的题目与手机卡片不一致（可能已在终端手动切题）——已中止，未发任何键；请在终端回到当前题目后重试",
+        ));
+    }
+    // ===== 数字直选自适应（2026-10-03 用户设计）：先按能力值分流 =====
+    // DigitSupported/Unknown → 先发数字（Unknown = 探测：翻转记 Supported / 全程
+    // 无变化记 Unsupported 并回退走位 / 有变化未翻转 = 数字被半消费 = 异常中止）；
+    // DigitUnsupported → 直接走位。核验翻转的闭环在所有路径都不省。
+    let mut digit_now = digit;
+    // **焦点守卫**（2026-10-03 用户实测 bug）：光标停在 Type something 行（内联
+    // 编辑态）时数字会被当文本打进输入框——先决把焦点移回选项行再发数字。
+    // 解析不出唯一焦点 → 跳过数字分支（走位段的「不猜起点」中止接管，避免重复文案）。
+    let focus_idx = unique_focused_row(&rows);
+    if digit != crate::inject::capability::DigitToggle::Unsupported && focus_idx.is_some() {
+        // **先决**：焦点在自由作答行 → `↑` 移回选项行（共用 helper，含文字保留
+        // 核验）。不先决，数字会被内联编辑态当文本吃掉（活体实证：输入框多出 "13"）。
+        // 先决后以新屏为准。
+        rows = prelift_focus_from_freetext(terminal, rows, focus_idx, &mut sent_keys, "切勾")?;
+        let before_checked = rows[target_option].checked;
+        let attempts = if digit == crate::inject::capability::DigitToggle::Supported {
+            2
+        } else {
+            1
+        }; // Supported 失败重试一次再降级；Unknown 探测只发一发
+        for attempt in 0..attempts {
+            // 数字 = **屏上编号**（1 起；翻转核验也按屏上编号对位——0 起下标只存在于
+            // 载荷/调用侧）
+            let digit_key = (target_option + 1).to_string();
+            terminal
+                .send(&digit_key)
+                .map_err(|e| StageAbort::delivery(format!("数字投递失败（{e}）")))?;
+            sent_keys.push(digit_key);
+            terminal.settle();
+            let after = terminal.read().ok_or_else(|| {
+                StageAbort::screen("切勾：数字发出后读不到屏幕——无法核验；请到终端核对勾选态")
+            })?;
+            let after_rows = parse_question_rows(&after);
+            let after_target = after_rows
+                .iter()
+                .find(|r| r.number == rows[target_option].number);
+            let flipped =
+                after_target.is_some_and(|r| r.checked.is_some() && r.checked != before_checked);
+            if flipped {
+                if digit_now == crate::inject::capability::DigitToggle::Unknown {
+                    digit_now = crate::inject::capability::DigitToggle::Supported;
+                }
+                return Ok(ToggleOutcome {
+                    sent_keys,
+                    verified: true,
+                    checked_now: after_target.and_then(|r| r.checked),
+                    digit_result: Some(digit_now),
+                });
+            }
+            if after_rows != rows {
+                // **数字被半消费**（用户拍板的异常状态）：焦点动了/勾了别的行/形态
+                // 变了——不回退走位（会在未知状态上继续发键），中止引导人工
+                return Err(StageAbort::screen(
+                    "切勾：数字发出后屏面发生变化但目标未翻转（数字被半消费，形态异常）——已中止；请到终端人工核对勾选态",
+                ));
+            }
+            // 完全无变化：
+            if attempt + 1 < attempts {
+                continue; // Supported 的重试
+            }
+            if digit_now == crate::inject::capability::DigitToggle::Unknown {
+                digit_now = crate::inject::capability::DigitToggle::Unsupported;
+            // 探测结论：回退走位
+            } else {
+                digit_now = crate::inject::capability::DigitToggle::Unknown; // 降级：下次重新探测
+            }
+            break; // 回退走位（下方既有编排）
+        }
+    }
+    let mut cur = unique_focused_row(&rows).ok_or_else(|| {
+        StageAbort::screen(
+            "问答屏上解析不到唯一焦点行（❯ 标记缺失或多行）——不猜起点，已中止，未发任何键",
+        )
+    })?;
+    let target = locate_option_row(&rows, target_option).ok_or_else(|| {
+        StageAbort::screen(format!(
+            "屏上选项块里找不到第 {} 个模型选项（编号 {} 行）——已中止，未发任何键",
+            target_option + 1,
+            target_option + 1
+        ))
+    })?;
+    // ===== 第 2 段：走位（方向感知；每步复核沿目标方向位移恰 1 行）=====
+    let max_steps = rows.len() + 2;
+    let mut steps = 0usize;
+    while cur != target {
+        if steps >= max_steps {
+            return Err(StageAbort::screen(format!(
+                "已发 {steps} 个方向键仍未把焦点移到目标选项行（上限 {max_steps}）——已中止，未发空格；请人工核对终端"
+            )));
+        }
+        let key = if target > cur { "down" } else { "up" };
+        terminal
+            .send(key)
+            .map_err(|e| StageAbort::delivery(format!("方向键 {key} 投递失败（{e}）")))?;
+        sent_keys.push(key.to_string());
+        steps += 1;
+        terminal.settle();
+        let lines = terminal.read().ok_or_else(|| {
+            StageAbort::screen(format!(
+                "走位段读不到屏幕（已发 {steps} 个方向键）——已中止，未发空格（不盲切）"
+            ))
+        })?;
+        let next_rows = parse_question_rows(&lines);
+        if next_rows.is_empty() {
+            return Err(StageAbort::screen(
+                "步进后屏上解析不出问答选项块（形态崩）——已中止，未发空格；请人工核对终端",
+            ));
+        }
+        let next_cur = unique_focused_row(&next_rows).ok_or_else(|| {
+            StageAbort::screen("步进后屏上解析不到唯一焦点行——已中止，未发空格；请人工核对终端")
+        })?;
+        // 位移校验（评审 Minor-3）：必须**沿目标方向**恰好 1 行——反向位移（终端
+        // 自行移动了焦点）同样中止，防「乒乓走到上限」的浪费按键路径
+        let expected_move: i64 = if key == "down" { 1 } else { -1 };
+        let moved = next_cur as i64 - cur as i64;
+        if moved != expected_move {
+            return Err(StageAbort::screen(format!(
+                "按一次 {key} 后焦点位移了 {moved} 行（应沿目标方向恰 1 行）——屏幕行序与预期不一致，已中止（未发空格）"
+            )));
+        }
+        rows = next_rows;
+        cur = next_cur;
+    }
+    // ===== 第 3 段：切勾（目标行必须带勾选框——多选形态）=====
+    let before = rows[target].checked.ok_or_else(|| {
+        StageAbort::screen(
+            "目标选项行没有勾选框（屏是单选形态？）——toggle 仅用于多选题，已中止，未发空格",
+        )
+    })?;
+    terminal
+        .send("space")
+        .map_err(|e| StageAbort::delivery(format!("空格投递失败（{e}）")))?;
+    sent_keys.push("space".to_string());
+    terminal.settle();
+    // ===== 第 4 段：核验翻转 =====
+    let Some(after_lines) = terminal.read() else {
+        // 键已发出、读不到屏无法核验——不谎报成功也不误报失败（receipt_seen=None 口径）
+        return Ok(ToggleOutcome {
+            sent_keys,
+            verified: false,
+            checked_now: None,
+            digit_result: (digit_now != digit).then_some(digit_now),
+        });
+    };
+    let after_rows = parse_question_rows(&after_lines);
+    let after = after_rows
+        .iter()
+        .find(|r| r.kind == QuestionRowKind::Option && r.number == rows[target].number)
+        .and_then(|r| r.checked);
+    match after {
+        Some(now) if now != before => Ok(ToggleOutcome {
+            sent_keys,
+            verified: true,
+            checked_now: Some(now),
+            digit_result: (digit_now != digit).then_some(digit_now),
+        }),
+        Some(_) => Err(StageAbort::screen(
+            "空格已发出但屏读未见到勾选态翻转——该版本可能不消费此空格形态；已中止（无后续键）。请到终端确认后重试",
+        )),
+        None => Err(StageAbort::screen(
+            "空格发出后屏上找不到目标选项行（题屏已切换或形态崩）——已中止。请到终端确认当前状态",
+        )),
+    }
+}
+
+/// 切题**方向**（2026-10-02 用户裁决：←/→ 通用对应上一题/下一题，除
+/// `Type something` 行外——该行 ←/→ 归文本编辑光标，发前先 `↑` 回选项行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavDirection {
+    /// 下一题（`→`；末题直达 Review——活体取证）
+    Next,
+    /// 上一题（`←`；从 Review 退回上一题——活体取证）
+    Prev,
+}
+
+/// 多题**切题编排**的结果（[`run_advance_stages`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvanceOutcome {
+    /// 实际发出的键（↑ 先决 + ←/→；中止时含已发出的那部分）
+    pub sent_keys: Vec<String>,
+    /// 终端是否已切题：`true` = 进入另一题页**或** Review 确认屏（前端按方向移动
+    /// mqIndex）；`false` = 已在 Review 屏请求下一题、**零按键**（已在终点）
+    pub advanced: bool,
+}
+
+/// **claude 多题切题编排**（2026-09-24 立项；2026-10-02 活体取证 2.1.278 后重构为
+/// **←/→ 双向导航**，走位+回车路径退役——用户裁决：除 `Type something` 行外
+/// ←/→ 通用对应上一题/下一题，活体取证背书：←/→ 是含 Review 的导航环、末题
+/// `→` 直达 Review、`Type something` 行 ←/→ 归文本编辑光标无效）。
+///
+/// # 各段与中止点（每一步都在发键前屏读；任何一段不符即中止且不再发键）
+///
+/// 1. **读屏段**：`poll_screen` 读一屏。
+///    - **已在 Review 确认屏**：`Next` → `advanced=false` 零按键（已在终点）；
+///      `Prev` → 发 `←` → 分类（退回上一题页 = 题干区变化）；
+///    - 题屏：先决段 → 导航段 → 分类段；
+///    - 两者皆非 → 中止零按键；
+/// 2. **先决段**（仅题屏）：焦点在自由作答行 → 先 `↑` 回选项行并复核（两行例外）；
+/// 3. **导航段**：发 `→`（Next）/ `←`（Prev）；
+/// 4. **分类段**（[`classify_navigation`]）：Review 在场（仅 Next）→ `advanced=true`
+///    （前端进确认卡）；解析出题屏且**题干区变化** → `advanced=true`；键被吞/未
+///    生效（题屏与题干均未变，或 Prev 仍停在 Review）→ 中止（无后续键）。
+///
+/// # 首段轮询的「屏已可行动」判据
+///
+/// [`advance_stage_screen_ready`] 与第 1 段的接受条件同源（Review 就绪 ∨ 可解析出
+/// 题屏）；生产轮询缝（`remote::api.rs`）用它过滤**中绘屏**——读到形态未就绪的屏
+/// 时留在轮询窗里等形态，而不是把它当「第 1 段的屏」交给阶段机立即中止。
+pub fn run_advance_stages<P, T>(
+    mut poll_screen: P,
+    terminal: &mut T,
+    direction: NavDirection,
+) -> Result<AdvanceOutcome, StageAbort>
+where
+    P: FnMut() -> Result<Option<Vec<String>>, String>,
+    T: MenuTerminal,
+{
+    let mut sent_keys: Vec<String> = Vec::new();
+    // ===== 第 1 段：读屏 =====
+    let first = poll_screen().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(
+            "切题前读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
+        )
+    })?;
+    let pre_heading = question_heading_of(&first);
+    // M2：Review **标题在场**即视为确认屏起点——重绘中 probe 可能 NotYet（确认项
+    // 还没画出），此刻按题屏处理会误发导航键
+    let started_on_review = lines_has_review_hint(&first);
+    let rows = parse_question_rows(&first);
+    if started_on_review {
+        // Review 屏：Next = 已在终点（零按键 advanced:false，前端留在确认卡）；
+        // Prev = `←` 退回上一题（活体取证：←/→ 是含 Review 的导航环）。
+        return match direction {
+            NavDirection::Next => Ok(AdvanceOutcome {
+                sent_keys,
+                advanced: false,
+            }),
+            NavDirection::Prev => {
+                terminal
+                    .send("left")
+                    .map_err(|e| StageAbort::delivery(format!("← 投递失败（{e}）")))?;
+                sent_keys.push("left".to_string());
+                terminal.settle();
+                poll_navigation_result(
+                    terminal,
+                    &pre_heading,
+                    direction,
+                    sent_keys,
+                    started_on_review,
+                )
+            }
+        };
+    }
+    if rows.is_empty() {
+        return Err(StageAbort::screen(
+            "切题失败：屏上既无推进行也解析不出题屏（形态不符）——已中止，未发任何键；请人工核对终端",
+        ));
+    }
+    // ===== 题屏：先决（焦点在自由作答行 → `↑` 回选项行，两方向共用）=====
+    // 两行例外（活体复核）：`Type something` 行的 ←/→ 被文本编辑光标消费，发了无效。
+    let cur = unique_focused_row(&rows).ok_or_else(|| {
+        StageAbort::screen(
+            "切题：屏上解析不到唯一焦点行（❯ 标记缺失或多行）——不猜起点，已中止，未发任何键",
+        )
+    })?;
+    if rows[cur].kind == QuestionRowKind::FreeText {
+        // 打过字的自由作答行（2026-10-02 多选自由作答接入后常见）：↑ 前记录行内容，
+        // ↑ 后核验**文字与勾选都还在**——↑ 若有意外副作用（吞字/取消勾选），切题就
+        // 会把半途状态存进去，必须中止引导人工
+        let free_label_before = rows[cur].label.clone();
+        terminal
+            .send("up")
+            .map_err(|e| StageAbort::delivery(format!("↑ 投递失败（{e}）")))?;
+        sent_keys.push("up".to_string());
+        terminal.settle();
+        let back = terminal.read().ok_or_else(|| {
+            StageAbort::screen("切题：↑ 后读不到屏幕——已中止，未发 ←/→；请人工核对终端")
+        })?;
+        let back_rows = parse_question_rows(&back);
+        let on_option = unique_focused_row(&back_rows)
+            .is_some_and(|i| back_rows[i].kind == QuestionRowKind::Option);
+        if !on_option {
+            return Err(StageAbort::screen(
+                "切题：↑ 未把焦点移回选项行（两行例外形态与取证不符）——已中止，未发 ←/→；请人工核对终端",
+            ));
+        }
+        let free_line_intact = back_rows
+            .iter()
+            .any(|r| r.kind == QuestionRowKind::FreeText && r.label == free_label_before);
+        if !free_line_intact {
+            return Err(StageAbort::screen(
+                "切题：↑ 离开自由作答行后屏读发现该行内容变化（文字或勾选可能丢失）——已中止，未发 ←/→；请到终端核对",
+            ));
+        }
+    }
+    // ===== 导航（←/→ 通用：活体取证除 Type something 行外 ←=上一题、→=下一题/
+    // 末题直达 Review）=====
+    let key = match direction {
+        NavDirection::Next => "right",
+        NavDirection::Prev => "left",
+    };
+    terminal.send(key).map_err(|e| {
+        StageAbort::delivery(format!(
+            "{} 投递失败（{e}）",
+            if key == "left" { "←" } else { "→" }
+        ))
+    })?;
+    sent_keys.push(key.to_string());
+    terminal.settle();
+    poll_navigation_result(
+        terminal,
+        &pre_heading,
+        direction,
+        sent_keys,
+        started_on_review,
+    )
+}
+
+/// Review 确认屏的**宽判据**（标题/副题锚任一在场即算——不管确认项是否就绪）。
+/// 用于切题起点的形态归类（M2：重绘中 probe_review_screen 可能 NotYet）。
+fn lines_has_review_hint(lines: &[String]) -> bool {
+    lines.iter().any(|l| {
+        let low = l.to_lowercase();
+        low.contains(review_title_anchor()) || low.contains(review_subtitle_anchor())
+    })
+}
+
+/// 切题分类段（**有界轮询**，2026-10-03 时序修复）：`→`/`←` 之后 TUI 重绘可能
+/// 超过 settle 延迟——单次读屏会把「已切题但还没画完」误判成键被吞（活体事故：
+/// 终端已进下一题、分类段抓到旧屏中止）。窗内轮询（2s 拍数）：
+/// - Review 屏在场且 Next → 已切（末题直达 Review）；Prev → 仍在确认屏 = 还没退回，
+///   继续轮询；
+/// - 解析出题屏且**题干区变化** → 已切；
+/// - 窗尽 → 方向性诚实中止（起点区分「确认屏退回」与「题页切换」两种文案）。
+///
+/// **窗的真实时长**：拍数 × `terminal.settle()`（生产 = `SUBMIT_DELAY_MS`=150ms），
+/// 非拍数 × `POLL_STEP_MS`——20 拍 ≈ 2.9s（比三窗口径长，保守方向；文档如实申报，
+/// 评审 M1）。
+fn poll_navigation_result<T: MenuTerminal>(
+    terminal: &mut T,
+    pre_heading: &str,
+    direction: NavDirection,
+    sent_keys: Vec<String>,
+    started_on_review: bool,
+) -> Result<AdvanceOutcome, StageAbort> {
+    let rounds =
+        crate::inject::timing::poll_rounds(crate::inject::timing::QUESTION_STAGE_POLL_TOTAL_MS)
+            .max(1);
+    for i in 0..rounds {
+        let after = terminal.read().ok_or_else(|| {
+            StageAbort::screen("切题：←/→ 后读不到屏幕——无法确认是否切题；请人工核对终端")
+        })?;
+        let on_review = matches!(probe_review_screen(&after), ScreenStep::Ready(_));
+        match (direction, on_review) {
+            (NavDirection::Next, true) => {
+                return Ok(AdvanceOutcome {
+                    sent_keys,
+                    advanced: true,
+                });
+            }
+            (NavDirection::Prev, true) => {} // ← 未生效（仍在确认屏）：继续轮询
+            _ => {
+                let rows = parse_question_rows(&after);
+                if !rows.is_empty() && question_heading_of(&after) != pre_heading {
+                    return Ok(AdvanceOutcome {
+                        sent_keys,
+                        advanced: true,
+                    });
+                }
+            }
+        }
+        if i + 1 < rounds {
+            terminal.settle();
+        }
+    }
+    Err(StageAbort::screen(match (direction, started_on_review) {
+        (NavDirection::Prev, true) => {
+            "切题：← 未从确认屏退回题目（按键可能被吞）——已中止（无后续键）。请到终端核对当前题目"
+        }
+        (NavDirection::Prev, false) => {
+            "切题：← 未切换题目（可能已是第一题或按键被吞）——已中止（无后续键）。请到终端核对当前题目"
+        }
+        _ => "切题后既未进入下一题页、也未出现 Review 确认屏——已中止（无后续键）。请到终端确认当前状态",
+    }))
+}
+
+/// 切题第 1 段「屏已可行动」判据：Review 屏就绪 ∨ 可解析出题屏（解析器双锚后，
+/// 推进行锚与页签栏锚覆盖多选/单选子题——旧 submit_row_present 分支随走位退役）。
+/// 与 [`run_advance_stages`] 第 1 段的接受条件同源（见该函数文档的「首段轮询判据」），
+/// 供生产轮询缝把中绘屏挡在轮询窗里（等形态，而不是读到什么就用什么）。
+pub(crate) fn advance_stage_screen_ready(lines: &[String]) -> bool {
+    matches!(probe_review_screen(lines), ScreenStep::Ready(_))
+        || !parse_question_rows(lines).is_empty()
+}
+
 /// 多选题提交的**阶段机编排结果**（[`run_submit_stages`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitOutcome {
     /// 各阶段**实际发出**的键序（按发出顺序；中止时含已发出的那部分）
     pub sent_keys: Vec<String>,
-    /// 走位段实际按下的 ↓ 次数（0 = 焦点本来就在 Submit 行）
+    /// 走位段实际按下的 ↓ 次数（0 = 焦点本来就在推进行/无需下移）
     pub down_steps: usize,
+    /// 走位段实际按下的 ↑ 次数（2026-09-24 方向感知走位：焦点在推进行**下方**时上移）
+    pub up_steps: usize,
     /// Review 屏是否屏读确认过（`false` 只可能出现在中止路径上——本字段在成功路径
     /// 恒 `true`；保留它是为了让回执能区分「走完闭环」与「半路停住」）
     pub review_confirmed: bool,
@@ -1452,52 +2417,75 @@ where
             "多选提交屏未出现或读不到屏幕（屏上无 Submit 行）——已中止，未发任何键；请人工核对终端",
         )
     })?;
-    if !first.iter().any(|l| submit_row_present(l)) {
-        return Err(StageAbort::screen(
-            "屏读未见到 Submit 行（多选提交入口）——已中止，未发任何键；请人工核对终端",
-        ));
-    }
-    // ===== 第 2 段：走位（每步复核；到位才停）=====
+    // ===== 第 1.5 段（2026-09-24 多题流）：已在 Review 确认屏 → 跳过走位与回车 =====
+    //
+    // 多题形态下末题的 `Next`+回车已把终端带到 Review 屏（前端确认卡上的「提交答案」
+    // 从这里发起）——此时屏上没有推进行，原判据会误报「未见 Submit 行」中止。判据
+    // 单点复用 [`probe_review_screen`]：Review 在场 → 直接进第 4 段确认（零走位零回车）。
     let mut down_steps = 0usize;
-    loop {
-        let lines = terminal.read().ok_or_else(|| {
-            StageAbort::screen(format!(
-                "走位段读不到屏幕（已发 {down_steps} 个下箭头）——已中止，未发回车（不盲提交）"
-            ))
-        })?;
-        match probe_submit_row(&lines) {
-            ScreenStep::Ready(_) => break, // 焦点已在提交行
-            ScreenStep::NotYet(_) => {}
-            ScreenStep::Fatal(why) => {
-                return Err(StageAbort::screen(format!("{why}；请人工核对终端")))
+    let mut up_steps = 0usize;
+    let review_lines = if let ScreenStep::Ready(l) = probe_review_screen(&first) {
+        l
+    } else {
+        if !first.iter().any(|l| submit_row_present(l)) {
+            return Err(StageAbort::screen(
+                "屏读未见到 Submit 行（多选提交入口）——已中止，未发任何键；请人工核对终端",
+            ));
+        }
+        // ===== 第 2 段：走位（**方向感知**；每步复核；到位才停）=====
+        //
+        // 2026-09-24 起支持向上走位：切勾编排（run_toggle_stages）走完后焦点可能停在
+        // 任意行（含推进行下方的行不可达，但选项区中部/上方都可能）——原实现只发 ↓，
+        // 焦点在推进行上方时仍正确，焦点**高于**目标时永远走不到。方向按行块解析的
+        // 焦点位与推进行位算（解析不出方向时保守回落 ↓——与旧行为一致，上限兜底）。
+        loop {
+            let lines = terminal.read().ok_or_else(|| {
+                StageAbort::screen(format!(
+                    "走位段读不到屏幕（已发 {} 个方向键）——已中止，未发回车（不盲提交）",
+                    down_steps + up_steps
+                ))
+            })?;
+            match probe_submit_row(&lines) {
+                ScreenStep::Ready(_) => break, // 焦点已在推进行
+                ScreenStep::NotYet(_) => {}
+                ScreenStep::Fatal(why) => {
+                    return Err(StageAbort::screen(format!("{why}；请人工核对终端")))
+                }
             }
+            if down_steps + up_steps >= max_down_steps {
+                return Err(StageAbort::screen(format!(
+                    "已发 {} 个方向键仍未把焦点移到推进行（上限 {max_down_steps}）——已中止，未发回车；请人工核对终端",
+                    down_steps + up_steps
+                )));
+            }
+            // 方向判定：行块里焦点位 vs 推进行位（块解析不出 → 回落 ↓，旧口径）
+            let key = walk_direction_to_advance(&lines).unwrap_or("down");
+            terminal
+                .send(key)
+                .map_err(|e| StageAbort::delivery(format!("方向键 {key} 投递失败（{e}）")))?;
+            sent_keys.push(key.to_string());
+            if key == "up" {
+                up_steps += 1;
+            } else {
+                down_steps += 1;
+            }
+            terminal.settle();
         }
-        if down_steps >= max_down_steps {
-            return Err(StageAbort::screen(format!(
-                "已发 {down_steps} 个下箭头仍未把焦点移到 Submit 行（上限 {max_down_steps}）——已中止，未发回车；请人工核对终端"
-            )));
-        }
+        // ===== 第 3 段：提交（焦点已在提交行——唯一的回车点）=====
         terminal
-            .send("down")
-            .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
-        sent_keys.push("down".to_string());
-        down_steps += 1;
+            .send("enter")
+            .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+        sent_keys.push("enter".to_string());
         terminal.settle();
-    }
-    // ===== 第 3 段：提交（焦点已在提交行——唯一的回车点）=====
-    terminal
-        .send("enter")
-        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
-    sent_keys.push("enter".to_string());
-    terminal.settle();
-    // ===== 第 4 段：Review 屏（未见即中止，**不发数字**）=====
-    let review_lines = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
-        StageAbort::screen(format!(
-            "已发回车但屏上未出现 Review 确认屏（未见「{}」/「{}」）——已中止，未发确认键；请人工核对终端",
-            review_title_anchor(),
-            review_subtitle_anchor()
-        ))
-    })?;
+        // ===== 第 4 段：Review 屏（未见即中止，**不发数字**）=====
+        poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
+            StageAbort::screen(format!(
+                "已发回车但屏上未出现 Review 确认屏（未见「{}」/「{}」）——已中止，未发确认键；请人工核对终端",
+                review_title_anchor(),
+                review_subtitle_anchor()
+            ))
+        })?
+    };
     // 复核（轮询拿到的屏再走一次同一判据——轮询闭包与复核用同一份探测器，
     // 不假定「轮询返回的就一定合判据」；形态在两次读之间变化时这里会如实拒）
     if let ScreenStep::NotYet(why) | ScreenStep::Fatal(why) = probe_review_screen(&review_lines) {
@@ -1533,6 +2521,7 @@ where
     Ok(SubmitOutcome {
         sent_keys,
         down_steps,
+        up_steps,
         review_confirmed: true,
         receipt_seen,
     })
@@ -1545,6 +2534,11 @@ pub struct FreeTextOutcome {
     pub sent_keys: Vec<String>,
     /// 是否屏读到终态回执行（`None` = 读不到屏，无法核验）
     pub receipt_seen: Option<bool>,
+    /// **屏读真值**（2026-10-03 卡面状态以屏读为准）：打字后该行的屏上文本
+    ///（内联编辑生效形态；`None` = 单题路径未采集）
+    pub screen_text: Option<String>,
+    /// 屏读真值：该行勾选态（多选路径勾选兜底后恒 `Some(true)`；`None` = 未采集）
+    pub screen_checked: Option<bool>,
 }
 
 /// 屏上的自由作答行（[`locate_free_text_row`] 的产物）。
@@ -1734,7 +2728,318 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        screen_text: None,
+        screen_checked: None,
     })
+}
+
+/// **多选题自由作答编排**（2026-10-02 活体取证 2.1.278 后新增）。
+///
+/// # 实机取证结论（本编排的每一段都由它背书）
+///
+/// - 多选屏的自由作答行是**勾选框行**：`5. [ ] Type something`——焦点在该行时
+///   **直接打字符即进入内联编辑**（无需先按空格/回车进入编辑态，用户实机证实）；
+///   文字替换行内容、勾选框自动置 `[✓]`；
+/// - **打完字按回车 = 取消勾选**（文字保留但 `[ ]`，Review 不保存该答案）——
+///   本编排**绝不发 enter**；
+/// - 正确保存 = 打字后**不发任何键**，勾选保持，切题（←/→）时自然落盘。
+///
+/// # 各段与中止点（每一步发键前屏读；任何一段不符即中止且不再发键）
+///
+/// 1. **定位段**：`parse_question_rows` 找 `kind == FreeText` 行（解析器已剥勾选框，
+///    label 判据与勾选框形态族解耦——闸门 3）。找不到 → 中止零键；
+/// 2. **走位段**：多选屏**数字无反应**（K8 已推翻）——方向键走位（方向感知、每步
+///    复核位移恰 1 行，与 [`run_toggle_stages`] 同纪律）把焦点移到该行；
+/// 3. **打字段**：`send_text`（**字符通道**，同单题自由作答的安全面）；
+/// 4. **核验段**：重读屏——该行 label **不再以 `Type something` 开头**（内联编辑
+///    确实生效）**且勾选态 `Some(true)`**（勾选自动置上）。任一不成立 → 中止
+///    （回执引导用户到终端核对，**不补键**——补键可能踩回车取消勾选的雷）；
+/// 5. **收尾**：零后续键（焦点留在该行；切题由 [`run_advance_stages`] 的 `↑` 先决
+///    接管——↑ 离开本行后 ←/→ 导航恢复）。
+pub fn run_multi_select_free_text_stages<T>(
+    text: &str,
+    overwrite: bool,
+    poll_screen: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+) -> Result<FreeTextOutcome, StageAbort>
+where
+    T: FreeTextTerminal,
+{
+    // **空文本 + overwrite = 清空模式**（2026-10-03 用户需求）：只执行「右移到行
+    // 尾 → 退格清空 → 核验占位恢复」，不打新字；占位恢复后该题的自由作答贡献即
+    // 被清掉。空文本且非 overwrite → 维持参数中止（防误触）。
+    let clearing_only = text.trim().is_empty() && overwrite;
+    if text.trim().is_empty() && !clearing_only {
+        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
+    }
+    let mut sent_keys: Vec<String> = Vec::new();
+    // ===== 第 1 段：定位 FreeText 行 =====
+    let lines = poll_screen().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen(
+            "自由作答：读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
+        )
+    })?;
+    let rows = parse_question_rows(&lines);
+    let free_idx = rows
+        .iter()
+        .position(|r| r.kind == QuestionRowKind::FreeText)
+        .ok_or_else(|| {
+            StageAbort::screen(
+                "自由作答：屏上解析不出「Type something」行（多选形态不符）——已中止，未发任何键；请人工核对终端",
+            )
+        })?;
+    // **防线**（结构定位的误判面收口）：定位到的行若恰为确认项文案（Review 确认
+    // 屏的 Submit answers / Cancel）→ 拒绝动手（不猜纪律）
+    let free_label = rows[free_idx].label.to_lowercase();
+    if free_label.contains("submit answers") || free_label == "cancel" {
+        return Err(StageAbort::screen(
+            "自由作答：定位到的行是确认项（Review 确认屏形态）而非自由作答行——已中止，未发任何键；请人工核对终端",
+        ));
+    }
+    // 该行已有自定义文字：overwrite=false 维持中止（防误触）；true = 编辑模式
+    //（走位后迭代退格清空再打新字——用户实测需求的覆盖写入）
+    let has_existing = !rows[free_idx].label.starts_with(FREE_TEXT_ROW_LABEL);
+    if has_existing && !overwrite {
+        return Err(StageAbort::screen(
+            "自由作答：该行的自由作答已有内容（屏上不再是「Type something」占位）——已中止，未发任何键；请用「编辑」按钮覆盖写入，或到终端修改",
+        ));
+    }
+    let free_num = rows[free_idx].number;
+    // ===== 第 2 段：走位到该行（方向感知；每步复核位移恰 1 行）=====
+    let mut steps = 0usize;
+    loop {
+        let cur_lines = terminal.read().ok_or_else(|| {
+            StageAbort::screen(format!(
+                "自由作答走位段读不到屏幕（已发 {steps} 个方向键）——已中止，未打字"
+            ))
+        })?;
+        let cur_rows = parse_question_rows(&cur_lines);
+        let cur = unique_focused_row(&cur_rows).ok_or_else(|| {
+            StageAbort::screen(
+                "自由作答：屏上解析不到唯一焦点行（❯ 标记缺失或多行）——不猜起点，已中止，未打字",
+            )
+        })?;
+        if cur == free_idx {
+            break;
+        }
+        if steps >= cur_rows.len() + 2 {
+            return Err(StageAbort::screen(format!(
+                "自由作答走位已发 {steps} 个方向键仍未到「Type something」行（上限 {}）——已中止，未打字；请人工核对终端",
+                cur_rows.len() + 2
+            )));
+        }
+        let key = if free_idx > cur { "down" } else { "up" };
+        terminal
+            .send(key)
+            .map_err(|e| StageAbort::delivery(format!("方向键 {key} 投递失败（{e}）")))?;
+        sent_keys.push(key.to_string());
+        steps += 1;
+        terminal.settle();
+        let after_lines = terminal
+            .read()
+            .ok_or_else(|| StageAbort::screen("自由作答走位后读不到屏幕——已中止，未打字"))?;
+        let after_rows = parse_question_rows(&after_lines);
+        let next_cur = unique_focused_row(&after_rows).ok_or_else(|| {
+            StageAbort::screen("自由作答：步进后解析不到唯一焦点行——已中止，未打字")
+        })?;
+        let expected_move: i64 = if key == "down" { 1 } else { -1 };
+        if next_cur as i64 - cur as i64 != expected_move {
+            return Err(StageAbort::screen(format!(
+                "自由作答：按一次 {key} 后焦点位移异常（应沿目标方向恰 1 行）——已中止，未打字"
+            )));
+        }
+    }
+    // ===== 第 2.5 段（编辑模式）：「右移到行尾 → 退格清空」迭代 =====
+    // 每轮：屏读当前行可见长度 L → 先 right×L 把光标推到行尾（焦点切行后在行首，
+    // 退格只删光标前的字符——行首退格全无效，用户实测 bug）→ backspace×L →
+    // settle → 重读核验该行回到「Type something」占位；轮次上限 5 防死循环
+    //（2000 字级长文本按屏宽折算约 3-5 轮）。
+    if has_existing {
+        let mut rounds = 0usize;
+        loop {
+            let cur = terminal
+                .read()
+                .ok_or_else(|| StageAbort::screen("自由作答：退格前读不到屏幕——已中止，未清空"))?;
+            let cur_rows = parse_question_rows(&cur);
+            let cur_label_len = cur_rows
+                .iter()
+                .find(|r| r.number == free_num && r.kind == QuestionRowKind::FreeText)
+                .map(|r| r.label.chars().count())
+                .ok_or_else(|| {
+                    StageAbort::screen("自由作答：退格前解析不到目标行——已中止，未清空")
+                })?;
+            if cur_label_len == 0 {
+                break; // 已是占位（has_existing 才进这里，防御分支）
+            }
+            if rounds >= 5 {
+                let residual = cur_rows
+                    .iter()
+                    .find(|r| r.number == free_num)
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default();
+                return Err(StageAbort::screen(format!(
+                    "自由作答：退格 {rounds} 轮后行内仍有残留（{residual}）——已中止，未打新字；请到终端人工清空"
+                )));
+            }
+            // **先右移到行尾**（2026-10-03 用户实测 bug：焦点切行后光标在行首，
+            // 退格只删光标前的字符——行首退格全无效）；行内 ←/→ 是编辑光标（两行
+            // 例外取证），超出末尾的 right 是无操作，多按无害
+            for _ in 0..cur_label_len {
+                terminal
+                    .send("right")
+                    .map_err(|e| StageAbort::delivery(format!("右移投递失败（{e}）")))?;
+                sent_keys.push("right".to_string());
+            }
+            // 再退格×L（从末尾往回删）
+            for _ in 0..cur_label_len {
+                terminal
+                    .send("backspace")
+                    .map_err(|e| StageAbort::delivery(format!("退格投递失败（{e}）")))?;
+                sent_keys.push("backspace".to_string());
+            }
+            terminal.settle();
+            rounds += 1;
+            let after = terminal.read().ok_or_else(|| {
+                StageAbort::screen("自由作答：退格后读不到屏幕——已中止，未打新字")
+            })?;
+            let cleared = parse_question_rows(&after).iter().any(|r| {
+                r.number == free_num
+                    && r.kind == QuestionRowKind::FreeText
+                    && r.label.starts_with(FREE_TEXT_ROW_LABEL)
+            });
+            if cleared {
+                break;
+            }
+        }
+    }
+    // ===== 第 3 段：打字（字符通道；直接输入即内联编辑——活体取证）=====
+    // 清空模式跳过打字（退格循环已恢复占位；占位行打字核验的 label 翻转规则不适用）
+    if !clearing_only {
+        terminal
+            .send_text(text)
+            .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
+        sent_keys.push(format!("<text:{} chars>", text.chars().count()));
+        terminal.settle();
+    }
+    // ===== 第 4 段：核验（行翻转 + 勾选在；**不发 enter**——回车会取消勾选）=====
+    // 清空模式跳过本段（退格循环的占位恢复核验已足够；翻转/勾选兜底是打字态专属）
+    if clearing_only {
+        return Ok(FreeTextOutcome {
+            sent_keys,
+            receipt_seen: None,
+            screen_text: None,
+            screen_checked: None,
+        });
+    }
+    let after = terminal.read().ok_or_else(|| {
+        StageAbort::screen("自由作答：打字后读不到屏幕——无法核验是否生效；请到终端人工核对")
+    })?;
+    let after_rows = parse_question_rows(&after);
+    // 翻转判据 = label 离开占位（2026-10-02 勾选兜底批：勾选态不参与本判定——
+    // 用户实测打字后默认未勾选，勾选由下方兜底段负责）
+    let flipped = after_rows
+        .iter()
+        .find(|r| r.number == free_num)
+        .is_some_and(|r| !r.label.starts_with(FREE_TEXT_ROW_LABEL));
+    if !flipped {
+        return Err(StageAbort::screen(
+            "自由作答：打字后屏读未确认「文字已入行」——不补任何键（回车会取消勾选）。请到终端人工核对后重试",
+        ));
+    }
+    // ===== 第 4.5 段：勾选兜底（2026-10-02 用户实测：打字后默认未勾选）=====
+    // label 已翻转但 checked == Some(false) → 确认焦点仍在该行后补一个空格 →
+    // 重读核验 Some(true)；已勾选 → 跳过；焦点不在该行 → 中止（空格会 toggle 别的
+    // 行，不盲发）。
+    let after_rows = parse_question_rows(&after);
+    let target_pos = after_rows.iter().position(|r| r.number == free_num);
+    let target_row = target_pos.and_then(|i| after_rows.get(i)).ok_or_else(|| {
+        StageAbort::screen("自由作答：核验阶段解析不到目标行——已中止；请到终端人工核对")
+    })?;
+    if target_row.checked == Some(false) {
+        let focus_on_target = unique_focused_row(&after_rows) == target_pos;
+        if !focus_on_target {
+            return Err(StageAbort::screen(
+                "自由作答：文字已入行但未勾选，且焦点已不在该行——不盲发空格（会勾到别的选项）。请到终端核对该行后手动勾选",
+            ));
+        }
+        terminal
+            .send("space")
+            .map_err(|e| StageAbort::delivery(format!("空格投递失败（{e}）")))?;
+        sent_keys.push("space".to_string());
+        terminal.settle();
+        let recheck = terminal.read().ok_or_else(|| {
+            StageAbort::screen("自由作答：补勾选后读不到屏幕——无法核验；请到终端人工核对勾选态")
+        })?;
+        let rechecked = parse_question_rows(&recheck)
+            .iter()
+            .find(|r| r.number == free_num)
+            .is_some_and(|r| r.checked == Some(true));
+        if !rechecked {
+            return Err(StageAbort::screen(
+                "自由作答：补空格后屏读未确认勾选——不补任何键。请到终端人工核对勾选态",
+            ));
+        }
+    }
+    // checked == None = **单选形态**（2026-10-03 用户需求：多题流的单选子题也有
+    // Type something 行——复用同一编排，无勾选框则勾选兜底自然跳过，label 翻转
+    // 核验已证明文字入行）
+    // ===== 第 5 段前：采集**屏读真值**（该行最终文本 + 勾选态）回传卡面 =====
+    let final_lines = terminal.read().ok_or_else(|| {
+        StageAbort::screen("自由作答：收尾读屏失败——按键已生效，请到终端核对最终状态")
+    })?;
+    let final_row = parse_question_rows(&final_lines)
+        .into_iter()
+        .find(|r| r.number == free_num);
+    let (screen_text, screen_checked) = match final_row {
+        Some(r) if !r.label.starts_with(FREE_TEXT_ROW_LABEL) => (
+            Some(strip_trailing_selection_mark(r.label.clone())),
+            r.checked,
+        ),
+        _ => (None, None),
+    };
+    // ===== 第 5 段：零后续键（切题时自然保存；receipt 语义不适用多题流 → None）=====
+    Ok(FreeTextOutcome {
+        sent_keys,
+        receipt_seen: None,
+        screen_text,
+        screen_checked,
+    })
+}
+
+/// **单选 select 编排**（2026-10-03 用户实测 bug 修复）：claude 单选数字直答
+/// 的前置焦点守卫——光标停在自由作答行（内联编辑态）时数字会被当文本吃进输入框
+///（活体实证：`❯ 5. 3▊`）。守卫复用 [`prelift_focus_from_freetext`]。
+///
+/// **语义边界**：数字发出后**不加屏读核验**——单选「数字即答+终端自动推进」的
+/// 行为契约在 claude 上未完全取证（计划文档申报维持），本编排只修发前焦点安全，
+/// 不改发后行为。数字 = 屏上编号（index 0 起 → 编号 index+1）。
+pub fn run_select_stages<T: MenuTerminal>(
+    index: usize,
+    poll_screen: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+) -> Result<Vec<String>, StageAbort>
+where
+{
+    let mut sent_keys: Vec<String> = Vec::new();
+    let first = poll_screen().map_err(StageAbort::screen)?.ok_or_else(|| {
+        StageAbort::screen("读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端")
+    })?;
+    let rows = parse_question_rows(&first);
+    if rows.is_empty() {
+        return Err(StageAbort::screen(
+            "屏上解析不出问答选项块——已中止，未发任何键；请人工核对终端",
+        ));
+    }
+    let focus_idx = unique_focused_row(&rows);
+    let _rows = prelift_focus_from_freetext(terminal, rows, focus_idx, &mut sent_keys, "单选作答")?;
+    // 数字 = 屏上编号（index 0 起 → 编号 index+1）
+    let digit_key = (index + 1).to_string();
+    terminal
+        .send(&digit_key)
+        .map_err(|e| StageAbort::delivery(format!("数字投递失败（{e}）")))?;
+    sent_keys.push(digit_key);
+    terminal.settle();
+    Ok(sent_keys)
 }
 
 /// 自由作答的**工具支持面**（v1 只对 claude 放行，§2.4）：
@@ -1863,6 +3168,30 @@ pub fn action_supported(
         )));
     }
     match action {
+        // claude 的多题切题（2026-09-24 起）：走阶段机（走位到 Next + 回车 + 分类）。
+        // 其余工具维持既有档（opencode=tab 单键；kimi/codex 未实测 → 拒）
+        AnswerAction::Advance => match question_key_profile(tool) {
+            QuestionKeyProfile::ClaudeFull => Ok(()),
+            _ => answer_key_sequence_for(tool, action, index, q)
+                .map(|_| ())
+                .map_err(ActionRefusal::ToolUnverified),
+        },
+        // 2026-09-24：claude 的多选 Toggle 改走阶段机（run_toggle_stages——数字路径
+        // 被用户实机推翻）。其余工具维持静态键序档（opencode/kimi 的 toggle 仍是
+        // 单键）。单选上的 Toggle 是参数错（与 submit 的口径一致）
+        AnswerAction::Toggle => {
+            if !q.multi_select {
+                return Err(ActionRefusal::BadParameter(
+                    "toggle 仅用于多选题（单选请用 select）".to_string(),
+                ));
+            }
+            match question_key_profile(tool) {
+                QuestionKeyProfile::ClaudeFull => Ok(()),
+                _ => answer_key_sequence_for(tool, action, index, q)
+                    .map(|_| ())
+                    .map_err(ActionRefusal::ToolUnverified),
+            }
+        }
         AnswerAction::Submit => {
             if !q.multi_select {
                 return Err(ActionRefusal::BadParameter(
@@ -1897,8 +3226,12 @@ pub fn action_supported(
             // 归 ToolUnverified（409 tool_readonly）而不是 BadParameter：用户要做的
             // 是「去终端作答」，不是「改个参数重试」。
             // E6：opencode 的 own answer 形态单/多选皆可（戊探A E-A2/E-A3 双形态
-            // 实测）；claude/kimi 维持仅单选（多选行带勾选框/无编号，定位判据不匹配）
-            if tool != "opencode" && !free_text_shape_supported(q) {
+            // 实测）；claude 多选自 2026-10-02 起放行（活体取证：勾选框行直接打字
+            // 即内联编辑 + 勾选自动置上 + 回车会取消勾选——run_multi_select_free_text_
+            // stages 闭环）；kimi/codex 维持仅单选（多选形态未取证）
+            if tool == "claude" {
+                let _ = &q; // 多选形态由编排屏读判定（free-row 解析不出即中止）
+            } else if !free_text_shape_supported(q) {
                 return Err(ActionRefusal::ToolUnverified(
                     "多选题的自由作答请到终端完成（远程入口仅支持单题卡）".to_string(),
                 ));
@@ -1929,6 +3262,10 @@ pub fn action_supported(
 /// 放行，其余（含 claude 多题整体只读、codex 多选未实测）不出键。
 pub fn multi_question_submit_supported(tool: &str) -> Result<(), ActionRefusal> {
     match question_key_profile(tool) {
+        // claude（2026-09-24 多题接入）：run_submit_stages——走位到推进行（多题尾部
+        // 为 Next）→ 回车 → Review 确认屏 → 屏上编号确认；已在 Review 屏则直接确认
+        // （末题 Next 已到确认屏的形态，见该函数第 1.5 段）
+        QuestionKeyProfile::ClaudeFull => Ok(()),
         // kimi：run_kimi_submit_stages（戊探B + K-5 定案）
         QuestionKeyProfile::TwoPhaseSelect => Ok(()),
         // opencode：run_opencode_submit_stages（戊探A ④ 三轮全通；2026-09-23 接线）
@@ -2049,16 +3386,40 @@ mod tests {
         );
     }
 
-    /// 探测 K8：多选点选 = 单个数字键切换勾选（不提交——与单选同键不同义，
-    /// 提交走三段式）
+    /// **2026-09-24 改写**（原 K8 锁「toggle = 单数字」被用户实机推翻——claude 2.1.278
+    /// 多选屏数字无反应，档案 2026-09-24-claude多选多题键序-用户实机取证 §5）：
+    /// toggle 不再产出静态数字序列，必须经 [`run_toggle_stages`] 阶段机（空格 + 闭环
+    /// 导航 + 屏读校验翻转）。还原动作：把 Toggle 分支改回数字 → 本断言先红。
     #[test]
-    fn toggle_sequence_is_single_digit() {
+    fn toggle_sequence_is_no_longer_digit() {
         let q = multi();
-        assert_eq!(
-            answer_key_sequence(AnswerAction::Toggle, Some(0), &q).unwrap(),
-            vec!["1"],
-            "toggle#1 → [\"1\"]（任务书定案序列）"
+        let err = answer_key_sequence(AnswerAction::Toggle, Some(0), &q)
+            .expect_err("Toggle 必须拒绝静态数字序列（改走阶段机）");
+        assert!(
+            err.contains("阶段机") && err.contains("废止"),
+            "拒绝原因须指向阶段机与废止口径（维护者可读）：{err}"
         );
+        // 分发层同结论（claude 档拒绝；opencode 维持单键 enter 切勾——戊探A 定案不受影响）
+        assert!(answer_key_sequence_for("claude", AnswerAction::Toggle, Some(0), &q).is_err());
+        assert_eq!(
+            answer_key_sequence_for("opencode", AnswerAction::Toggle, Some(0), &q).unwrap(),
+            vec!["1".to_string()],
+            "opencode toggle 维持数字/enter 切勾档（本批只改 claude）"
+        );
+    }
+
+    /// action_supported 的 Toggle 门（2026-09-24）：claude 多选 → Ok（阶段机）；
+    /// 单选上的 toggle → BadParameter（与 submit 同口径）；opencode 多选 → Ok（单键）。
+    #[test]
+    fn toggle_action_gate_by_tool_and_shape() {
+        assert!(action_supported("claude", AnswerAction::Toggle, Some(0), &multi()).is_ok());
+        let err = action_supported("claude", AnswerAction::Toggle, Some(0), &single())
+            .expect_err("单选上 toggle 是参数错");
+        assert!(
+            matches!(err, crate::inject::question::ActionRefusal::BadParameter(_)),
+            "单选 toggle → 400 bad_index：{err:?}"
+        );
+        assert!(action_supported("opencode", AnswerAction::Toggle, Some(0), &multi()).is_ok());
     }
 
     /// **丁T5 改写**：多选提交不再产「一次算完的盲发序列」——`answer_key_sequence`
@@ -2432,28 +3793,33 @@ mod tests {
         assert!(answer_key_sequence_for("claude", AnswerAction::Advance, None, &q).is_err());
     }
 
-    /// **2026-09-23 接线回归锁**：可用性门——opencode 的 advance / 多选 submit
-    /// 放行；codex 同档（SingleDigitSubmit）但 advance/多选 submit 不放行；单选题
-    /// submit 防呆保持；多题 submit 专用门不看题目形态（第 1 题是单选的问卷也放行
-    /// kimi/opencode）。
+    /// **2026-09-23 接线回归锁 + 2026-09-24 claude 接入改写**：可用性门——opencode
+    /// 与 claude 的 advance 放行（各自阶段机）；codex 同档（SingleDigitSubmit）但
+    /// advance/多选 submit 不放行；单选题 submit 防呆保持；多题 submit 专用门不看
+    /// 题目形态（第 1 题是单选的问卷也放行 kimi/opencode/claude）。
     #[test]
     fn action_gates_for_opencode_multi_question_line() {
         let m = multi();
         let s = single();
-        // advance：opencode 放行（纯导航，与题目形态无关）；codex 拒
+        // advance：opencode 放行（tab 纯导航）；claude 放行（2026-09-24 起走
+        // run_advance_stages 阶段机）；codex 拒（未实测）
         assert!(action_supported("opencode", AnswerAction::Advance, None, &m).is_ok());
+        assert!(action_supported("claude", AnswerAction::Advance, None, &m).is_ok());
         assert!(action_supported("codex", AnswerAction::Advance, None, &m).is_err());
+        // 静态序列层：claude 的 advance 仍 Err（必须经阶段机——盲发防线）
+        assert!(answer_key_sequence_for("claude", AnswerAction::Advance, None, &m).is_err());
         // opencode 多选 submit：接线后放行（走 run_opencode_submit_stages）
         assert!(action_supported("opencode", AnswerAction::Submit, None, &m).is_ok());
         // codex 多选 submit 仍拒（多选未实测）
         assert!(action_supported("codex", AnswerAction::Submit, None, &m).is_err());
         // 单选题 submit 防呆保持（单选点数字即提交，无独立提交步）
         assert!(action_supported("opencode", AnswerAction::Submit, None, &s).is_err());
-        // 多题 submit 专用门：kimi/opencode 放行、codex/claude 拒
+        // 多题 submit 专用门：kimi/opencode/claude 放行（claude 2026-09-24 接入——
+        // 走位到尾部推进行 Next + 回车 + Review 确认，末题已到 Review 屏则直接确认）
         assert!(multi_question_submit_supported("opencode").is_ok());
         assert!(multi_question_submit_supported("kimi").is_ok());
+        assert!(multi_question_submit_supported("claude").is_ok());
         assert!(multi_question_submit_supported("codex").is_err());
-        assert!(multi_question_submit_supported("claude").is_err());
     }
 
     /// **opencode own answer 阶段机脚本锁（裸打字守卫）**：
@@ -3076,8 +4442,8 @@ mod tests {
         let (r, sent) = run_submit_script(script, 5);
         let err = r.as_ref().unwrap_err();
         assert!(
-            err.message.contains("仍未把焦点移到 Submit 行"),
-            "中止原因须点名走位失败：{err}"
+            err.message.contains("仍未把焦点移到推进行"),
+            "中止原因须点名走位失败（2026-09-24 起走位目标为推进行 Submit/Next）：{err}"
         );
         assert!(
             !sent.iter().any(|k| k == "enter"),
@@ -3556,6 +4922,1346 @@ mod tests {
             "带编号的 Review 确认项不是提交行（两者形态互斥：提交行无编号）"
         );
     }
+
+    // ===== 2026-09-24 多选闭环切勾：Next 标签 / 行块解析 / 闭环编排 =====
+
+    /// 推进行标签集 {Submit, Next}（多题形态 Next——用户实机取证 2.1.278 屏面）：
+    /// `Next` 精确相等防正文 "Next steps:" 冒充；`Submit` 维持前缀口径（既有证据形态）。
+    #[test]
+    fn advance_row_predicate_accepts_next_label() {
+        assert!(submit_row_focused(" ❯   Next"), "多题焦点推进行");
+        assert!(submit_row_present("     Next"), "多题非焦点推进行");
+        assert!(
+            !submit_row_present(" Next steps: refactor the parser"),
+            "正文 Next 短语不得冒充推进行（精确相等口径）"
+        );
+        assert!(
+            !submit_row_present(" 1. Next"),
+            "带编号行不是推进行（与 Submit 的形态互斥口径一致）"
+        );
+        // Review 屏（丁复审 dump 原文）整体不得命中任何推进行判据
+        let review = review_screen_real();
+        assert!(
+            review.iter().all(|l| !submit_row_present(l)),
+            "Review 屏无推进行（其确认项带编号）：{review:?}"
+        );
+    }
+
+    /// 行块解析：单题多选实机夹具（丁复审 dump 形态）——3 选项 + Type something +
+    /// Submit 推进行；焦点在首选项；勾选框按括号内容语义判。
+    #[test]
+    fn parse_rows_single_question_real_dump() {
+        let rows = parse_question_rows(&multi_submit_screen_focus_on_option());
+        assert_eq!(rows.len(), 5, "3 选项 + Type something + Submit：{rows:?}");
+        assert_eq!(rows[0].kind, QuestionRowKind::Option);
+        assert_eq!(rows[0].number, Some(1));
+        assert_eq!(rows[0].checked, Some(true), "实机夹具首项 [✓] 已勾");
+        assert_eq!(rows[0].label, "Apple");
+        assert!(rows[0].focused, "焦点在首选项行");
+        assert_eq!(rows[1].checked, Some(false), "[ ] 未勾");
+        assert_eq!(rows[3].kind, QuestionRowKind::FreeText);
+        assert_eq!(rows[3].number, Some(4), "Type something = 选项数+1");
+        assert!(!rows[3].focused);
+        assert_eq!(rows[4].kind, QuestionRowKind::Advance);
+        assert_eq!(rows[4].number, None);
+        assert_eq!(rows[4].label, "Submit");
+        assert!(!rows[4].focused);
+        assert_eq!(unique_focused_row(&rows), Some(0));
+    }
+
+    /// 行块解析：多题形态（用户实机取证 2026-09-24 截图逐字）——推进行为 `Next`，
+    /// 勾选 `[✓]`×2、焦点在 Type something 行（❯ 前缀）。
+    #[test]
+    fn parse_rows_multi_question_next_row_user_screenshot() {
+        let screen = lines(&[
+            " ← ☒ 修改目标  ☐ 显示问题  ☐ 文件方式  ✔ Submit  →",
+            "",
+            " 这次修改 circle.html 的主要目标？（可多选）",
+            "",
+            " 1. [✓] 设备适配优化",
+            " 尺寸缩放、清晰度、触控体验等",
+            " 2. [✓] 视觉风格调整",
+            " 配色、山/云/海面、角色造型",
+            " 3. [ ] 添加动效",
+            " 4. [ ] 功能扩展",
+            " ❯ 5. [ ] Type something",
+            "     Next",
+            " ──────────────────────────────",
+            " 6. Chat about this",
+            "",
+            " Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]);
+        let rows = parse_question_rows(&screen);
+        assert_eq!(rows.len(), 6, "4 选项 + Type something + Next：{rows:?}");
+        assert_eq!(
+            rows.iter().map(|r| r.checked).collect::<Vec<_>>(),
+            vec![
+                Some(true),
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false),
+                None
+            ],
+            "勾选态按括号内容语义判"
+        );
+        assert_eq!(rows[5].kind, QuestionRowKind::Advance);
+        assert_eq!(rows[5].label, "Next", "多题推进行 = Next（用户实机）");
+        assert_eq!(
+            unique_focused_row(&rows),
+            Some(4),
+            "焦点在 Type something 行"
+        );
+        assert_eq!(rows[4].kind, QuestionRowKind::FreeText);
+        // 分隔线下 Chat 行（编号 6）不在块内
+        assert!(!rows.iter().any(|r| r.label.contains("Chat about")));
+    }
+
+    /// 行块解析：滚回区正文编号行**不得**混进块——锚上方编号跳变处停手
+    /// （正文 1,2 在上、题屏 1..3 在下，中间无分隔也能按连续性切干净）。
+    #[test]
+    fn parse_rows_trims_scrollback_numbered_prose() {
+        let screen = lines(&[
+            " 我建议的方案：",
+            " 1. 重构解析器",
+            " 2. 补测试",
+            " 现在问你：",
+            " ❯ 1. [ ] 甲",
+            " 2. [ ] 乙",
+            " 3. [ ] 丙",
+            "    Submit",
+        ]);
+        let rows = parse_question_rows(&screen);
+        assert_eq!(
+            rows.len(),
+            4,
+            "滚回区 1,2 被编号跳变截断（正文 2 与题屏 3 之间不连续）：{rows:?}"
+        );
+        assert_eq!(rows[0].label, "甲");
+        assert_eq!(rows[3].kind, QuestionRowKind::Advance);
+    }
+
+    /// 行块解析：单选屏（无勾选框、无推进行）→ 空块（toggle 编排按形态不符中止）。
+    #[test]
+    fn parse_rows_single_select_screen_is_empty_block() {
+        let screen = lines(&[
+            " ❯ 1. Tool demo",
+            " 2. Start a task",
+            " 3. Nothing yet",
+            " 4. Type something.",
+            " 5. Chat about this",
+        ]);
+        assert!(
+            parse_question_rows(&screen).is_empty(),
+            "无推进行锚 → 空块（不猜）"
+        );
+    }
+
+    /// 行块解析：勾选字形族——`[✔]`（U+2714，丁复审 dump）与 `[✓]`（U+2713，用户
+    /// 截图）都算已选（括号内容非空即已选，不硬编码字形）。
+    #[test]
+    fn parse_rows_checkbox_glyph_family() {
+        let screen = lines(&[" 1. [✔] Apple", " 2. [ ] Banana", "    Submit"]);
+        let rows = parse_question_rows(&screen);
+        assert_eq!(rows[0].checked, Some(true), "[✔] 重勾形也算已选");
+        assert_eq!(rows[1].checked, Some(false));
+    }
+
+    /// **快照 C1 回归锁（评审 2026-10-03）**：Review 确认屏**不是题屏**——
+    /// question_screen_snapshot 必须返回 None（anchor B 会把「页签栏 + 编号确认项」
+    /// 解析成题屏，题干区还含答毕回显 → 前端对位错跳题并清勾选态），Review 检测
+    /// 照常 Ready（GET 据此发 {review:true}）。
+    /// 还原动作（变异）：删掉快照函数里的 Review 前置判定 → 本用例先红。
+    #[test]
+    fn screen_snapshot_returns_none_on_review_screen() {
+        let review = review_screen_real();
+        assert!(
+            question_screen_snapshot(&review).is_none(),
+            "Review 确认屏不得产出题屏快照"
+        );
+        assert!(matches!(probe_review_screen(&review), ScreenStep::Ready(_)));
+    }
+
+    /// **快照三态判别（评审 I1）**：占位（free_text=None + present=true）与已打字
+    ///（Some(text) + present=true）可分；无 FreeText 行 → present=false。
+    #[test]
+    fn screen_snapshot_distinguishes_freetext_placeholder_and_typed() {
+        // 占位：q1_multi 的 5 行是 [ ] Type something
+        let snap = question_screen_snapshot(&live_fixtures::q1_multi()).expect("题屏必出快照");
+        assert!(snap.free_text_present);
+        assert_eq!(snap.free_text, None, "占位 = None");
+        assert_eq!(
+            snap.checked,
+            vec![Some(false), Some(false), Some(false), Some(false)],
+            "4 个选项行（FreeText 行不进 checked）"
+        );
+        // 已打字：[✔] 内联文字
+        let snap2 = question_screen_snapshot(&live_fixtures::q1_typed("融合优点")).unwrap();
+        assert!(snap2.free_text_present);
+        assert_eq!(snap2.free_text.as_deref(), Some("融合优点"));
+        // 无 FreeText 行（q2 单选子题的 5 行是「Type something.」——带句点前缀匹配
+        // 仍算 FreeText；改用无 FreeText 的形态：Review 已被上一用例覆盖，这里用
+        // 单选子题验证 present 与文本并存）
+        let snap3 = question_screen_snapshot(&live_fixtures::q2_single()).unwrap();
+        assert!(snap3.free_text_present, "单选子题也有 Type something 行");
+        assert_eq!(snap3.checked.len(), 4);
+    }
+
+    /// 切勾脚本驱动器（同 `run_submit_script` 的抽法：读屏/发键全脚本化）。
+    /// 首段轮询 = 题屏在场（行块可解析）。
+    fn run_toggle_script(
+        target: usize,
+        expected_question: &str,
+        screens: Vec<Vec<String>>,
+        digit: crate::inject::capability::DigitToggle,
+    ) -> (Result<ToggleOutcome, StageAbort>, Vec<String>) {
+        use std::cell::{Cell, RefCell};
+        let n = screens.len();
+        let cursor = Cell::new(0usize);
+        let cur = || screens[cursor.get().min(n - 1)].clone();
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let result = run_toggle_stages(
+            target,
+            expected_question,
+            || {
+                let s = cur();
+                if parse_question_rows(&s).is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(s))
+                }
+            },
+            &mut crate::inject::mode::Closures {
+                read: || Some(cur()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    if cursor.get() + 1 < n {
+                        cursor.set(cursor.get() + 1);
+                    }
+                    Ok(())
+                },
+                settle: || {},
+            },
+            digit,
+        );
+        (result, sent.into_inner())
+    }
+
+    /// 切题脚本驱动器（同 `run_toggle_script`）：读屏/发键全脚本化。首段轮询直接
+    /// 给首屏——三态轮询在端点侧，内核契约 = 第 1 段拿到什么屏就判什么形态。
+    fn run_advance_script(
+        screens: Vec<Vec<String>>,
+        direction: NavDirection,
+    ) -> (Result<AdvanceOutcome, StageAbort>, Vec<String>) {
+        use std::cell::{Cell, RefCell};
+        let n = screens.len();
+        let cursor = Cell::new(0usize);
+        let cur = || screens[cursor.get().min(n - 1)].clone();
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let result = run_advance_stages(
+            || Ok(Some(cur())),
+            &mut crate::inject::mode::Closures {
+                read: || Some(cur()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    if cursor.get() + 1 < n {
+                        cursor.set(cursor.get() + 1);
+                    }
+                    Ok(())
+                },
+                settle: || {},
+            },
+            direction,
+        );
+        (result, sent.into_inner())
+    }
+
+    /// 夹具屏的题干原文（multi()/MULTI_JSON 的 question 与屏面第 2 行同文）——
+    /// run_toggle_script 各用例的身份核验输入
+    const FIXTURE_QUESTION: &str = "Which fruits are your favorites? (Select all that apply)";
+
+    /// 夹具工厂：多选题屏、指定焦点行（0=首选项 … 3=Type something、4=Submit 行）
+    /// 与首项勾选态——基于实机夹具形态生成。
+    fn multi_screen_focus_at(focus_row: usize, first_checked: bool) -> Vec<String> {
+        let mark = |i: usize| if i == focus_row { " ❯" } else { "  " };
+        let tick = if first_checked { "[✓]" } else { "[ ]" };
+        lines(&[
+            " ← ☒ Favorite fruits  ✔Submit  →",
+            "",
+            " Which fruits are your favorites? (Select all that apply)",
+            "",
+            &format!("{}1. {} Apple", mark(0), tick),
+            &format!("{}2. [ ] Banana", mark(1)),
+            &format!("{}3. [ ] Peach", mark(2)),
+            &format!("{}4. [ ] Type something", mark(3)),
+            &format!("{}   Submit", mark(4)),
+            " 5. Chat about this",
+        ])
+    }
+
+    /// 场景①：焦点已在目标行 → 单发 `space`，屏读核验翻转（verified + 新态）。
+    #[test]
+    fn toggle_stage_happy_path_focus_on_target() {
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(0, true),
+            ],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let out = r.expect("焦点在目标行，空格必达");
+        assert_eq!(sent, vec!["space".to_string()], "零走位：只有空格");
+        assert!(out.verified, "屏读核验到翻转");
+        assert_eq!(out.checked_now, Some(true), "回执带翻转后的勾选态");
+    }
+
+    /// 场景②：焦点在首选项、目标第 3 项（Peach）→ down×2 走位（每步复核位移）
+    /// + space，键序 = [down, down, space]。
+    #[test]
+    fn toggle_stage_walks_down_then_toggles() {
+        // 末屏表达 Peach 已勾（空格生效后的重绘形态）
+        let after = {
+            let mut s = multi_screen_focus_at(2, false);
+            s[6] = " 3. [✓] Peach".to_string();
+            s
+        };
+        let (r, sent) = run_toggle_script(
+            2,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(1, false),
+                multi_screen_focus_at(2, false),
+                after,
+            ],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let out = r.expect("走位两步 + 空格");
+        assert_eq!(
+            sent,
+            vec!["down".to_string(), "down".to_string(), "space".to_string()],
+            "键序 = [down, down, space]"
+        );
+        assert!(out.verified);
+        assert_eq!(out.checked_now, Some(true));
+    }
+
+    /// 场景③：焦点在 Submit 行、目标第 1 项 → **向上**走位 up×4 + space
+    /// （2026-09-24 方向感知：原只发 down 的实现在此恒中止）。
+    #[test]
+    fn toggle_stage_walks_up_from_advance_row() {
+        let after = {
+            let mut s = multi_screen_focus_at(0, false);
+            s[4] = " ❯ 1. [✓] Apple".to_string();
+            s
+        };
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(4, false),
+                multi_screen_focus_at(3, false),
+                multi_screen_focus_at(2, false),
+                multi_screen_focus_at(1, false),
+                multi_screen_focus_at(0, false),
+                after,
+            ],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let out = r.expect("向上走位四步 + 空格");
+        assert_eq!(sent.len(), 5, "up×4 + space：{sent:?}");
+        assert_eq!(sent[0], "up");
+        assert_eq!(sent[4], "space");
+        assert!(out.verified);
+    }
+
+    /// 场景④：空格发出但勾选态未翻转（版本不消费该形态）→ 中止、报「翻转」、
+    /// 键里只有 space（无后续键可发——本就是最后一步）。
+    #[test]
+    fn toggle_stage_aborts_when_flip_not_seen() {
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(0, false), // 空格后屏无变化
+            ],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("未翻转必须中止");
+        assert!(
+            err.message.contains("翻转"),
+            "中止原因须点名翻转核验：{err}"
+        );
+        assert_eq!(sent, vec!["space".to_string()]);
+        assert_eq!(err.kind, StageAbortKind::Screen);
+    }
+
+    /// 场景⑤：屏上无唯一焦点（❯ 缺失）→ 零键中止（「不猜起点」）。
+    #[test]
+    fn toggle_stage_aborts_without_unique_focus() {
+        let no_focus = {
+            let mut s = multi_screen_focus_at(0, false);
+            s[4] = "  1. [ ] Apple".to_string();
+            s
+        };
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![no_focus],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("无焦点必须中止");
+        assert!(err.message.contains("唯一焦点行"), "{err}");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// 场景⑥：目标选项不在块内（序号越界到屏上没有的编号）→ 零键中止。
+    #[test]
+    fn toggle_stage_aborts_when_target_absent() {
+        let (r, sent) = run_toggle_script(
+            9,
+            FIXTURE_QUESTION,
+            vec![multi_screen_focus_at(0, false)],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("目标不在块内必须中止");
+        assert!(err.message.contains("第 10 个模型选项"), "{err}");
+        assert!(sent.is_empty());
+    }
+
+    /// **身份核验·emoji 容错（2026-10-03 活体事故）**：载荷题干带键帽/变体选择
+    /// emoji，控制台缓冲读回同位置变成 U+FFFD——归一化剥离后必须仍然匹配
+    ///（旧行为：逐字比对恒失败 → 正常作答被「题目不一致」误中止）。
+    /// 还原动作（变异）：norm 去掉 FFFD/FE0F/20E3/星面剥离 → 本用例先红。
+    #[test]
+    fn identity_tolerates_console_lossy_emoji() {
+        let payload = "问题3\u{FE0F}\u{20E3}：优化的重点是哪些方面？ （可多选）";
+        let screen = lines(&[
+            "←  ☐ 优化重点  ✔ Submit  →",
+            "",
+            "问题3\u{FFFD}\u{FFFD}：优化的重点是哪些方面？ （可多选）",
+            "",
+            "❯ 1. [ ] 语言与文笔润色",
+            "  2. [ ] 情感描写",
+            "    Submit",
+        ]);
+        assert!(
+            screen_question_matches(&screen, payload),
+            "emoji 读写损失必须被归一化吸收"
+        );
+    }
+
+    /// **评审 I1 回归锁（2026-09-24）**：屏上题干与载荷题干不一致（用户已手动
+    /// ←/→ 切题、手机卡停在旧题）→ 切勾**零键中止**——闭环验得了按键效果，验不了
+    /// 目标身份；没有本判据，切勾会作用到**别的题**的选项上（翻转验得过、题错了）。
+    /// 还原动作：删掉第 1 段的 screen_question_matches 判据 → 本用例先红。
+    #[test]
+    fn toggle_stage_aborts_on_question_identity_mismatch() {
+        // 屏面仍是「Favorite fruits」题，但载荷当前题是另一道（多题第 2 题）
+        let (r, sent) = run_toggle_script(
+            0,
+            "Which output folder should the build use?",
+            vec![multi_screen_focus_at(0, false)],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("题干不一致必须中止");
+        assert!(
+            err.message.contains("题目与手机卡片不一致"),
+            "中止原因须点名身份核验：{err}"
+        );
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// 评审 I1 的**通过面**：题干一致（含载荷是屏面子串的折行/短文形态）→ 正常
+    /// 切勾——身份判据不得误伤正常路径。
+    #[test]
+    fn toggle_stage_passes_identity_when_payload_is_screen_substr() {
+        // 载荷题干是屏面题干的前缀（短文载荷 / 屏面带装饰后缀的形态）
+        let (r, sent) = run_toggle_script(
+            0,
+            "Which fruits are your favorites?",
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(0, true),
+            ],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let out = r.expect("题干一致（子串形态）必须放行");
+        assert!(out.verified);
+        assert_eq!(sent, vec!["space".to_string()]);
+    }
+
+    /// **评审 Minor-3 回归锁**：走位后焦点**反向**位移（发 down 却向上跳）→ 中止
+    /// 不发空格——原实现只校验位移绝对值，反向位移会乒乓走到上限（仍安全但浪费按键）。
+    #[test]
+    fn toggle_stage_aborts_on_reverse_displacement() {
+        // 屏 1 焦点在选项 1（目标 3 → 方向 down）；发 down 后屏上焦点跳到**上方**
+        // （终端自行移动焦点的形态）→ moved=-1 ≠ +1 → 中止
+        let (r, sent) = run_toggle_script(
+            2,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false),
+                multi_screen_focus_at(0, true), // 任意异屏（焦点仍在行 0，moved=0≠1 同样触发）
+            ],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("反向位移必须中止");
+        assert!(
+            err.message.contains("应沿目标方向恰 1 行"),
+            "中止原因须点名方向校验：{err}"
+        );
+        assert_eq!(sent, vec!["down".to_string()], "只发过一个 down：{sent:?}");
+    }
+
+    // ===== 数字直选自适应（2026-10-03 用户设计）=====
+
+    /// **探测成功**（Unknown + 数字翻转）：键序 = ["2"]（数字直发，无走位无空格）；
+    /// outcome 带 digit_result=Supported（调用侧写回表）。屏序列：数字后目标行翻转
+    ///（脚本同屏翻转——驱动器推进但屏内容按翻转给）。
+    /// 还原动作（变异）：删掉数字探测段 → 键序走 down+space、本用例先红。
+    #[test]
+    fn toggle_digit_probe_supported_on_first_try() {
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false), // 首段：选项 1 未勾
+                multi_screen_focus_at(0, true),  // 数字后：选项 1 翻转（焦点不动）
+            ],
+            crate::inject::capability::DigitToggle::Unknown,
+        );
+        let out = r.expect("数字直选必须成功");
+        assert_eq!(sent, vec!["1".to_string()], "键序 = [数字]：{sent:?}");
+        assert!(out.verified);
+        assert_eq!(
+            out.digit_result,
+            Some(crate::inject::capability::DigitToggle::Supported)
+        );
+    }
+
+    /// **探测失败回退走位**（Unknown + 数字完全无效）：屏面无变化 → 记 Unsupported
+    /// 并回退走位+空格完成本次。键序 = ["2", down, space]。
+    /// 还原动作（变异）：删掉回退段 → 中止、本用例先红。
+    #[test]
+    fn toggle_digit_probe_falls_back_to_walk_on_no_change() {
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false), // idx0 首段
+                multi_screen_focus_at(0, false), // idx1 数字后：完全无变化（无效形态）
+                multi_screen_focus_at(0, true),  // idx2 space → 翻转（焦点本就在选项 1，零走位）
+            ],
+            crate::inject::capability::DigitToggle::Unknown,
+        );
+        let out = r.expect("回退走位必须完成");
+        assert!(out.verified);
+        assert_eq!(
+            out.digit_result,
+            Some(crate::inject::capability::DigitToggle::Unsupported)
+        );
+        assert_eq!(
+            sent,
+            vec!["1".to_string(), "space".to_string()],
+            "键序 = [数字(无效), space]（零走位）：{sent:?}"
+        );
+    }
+
+    /// **数字被半消费 = 异常中止**（用户拍板）：屏面有变化但目标未翻转（这里模拟
+    /// 焦点被移走）→ 中止，不回退走位。
+    #[test]
+    fn toggle_digit_half_consumed_aborts() {
+        let (r, sent) = run_toggle_script(
+            0,
+            FIXTURE_QUESTION,
+            vec![
+                multi_screen_focus_at(0, false), // 首段
+                multi_screen_focus_at(1, false), // 数字后：焦点跳到选项 2（半消费）且选项 1 未翻转
+            ],
+            crate::inject::capability::DigitToggle::Unknown,
+        );
+        let err = r.expect_err("半消费必须中止");
+        assert!(err.message.contains("半消费"), "{err}");
+        assert_eq!(sent, vec!["1".to_string()]);
+    }
+
+    // ===== toggle 数字直选·焦点守卫（2026-10-03 用户实测 bug）=====
+
+    /// **先决生效**：焦点停在 Type something 行（内联编辑态）→ 先 `↑` 移出（核验
+    /// 焦点回选项行 + 文字保留）→ 数字直选翻转。键序 = ["up", "1"]。
+    /// 还原动作（变异）：删掉焦点守卫 → 数字被当文本吃进输入框、本用例先红。
+    #[test]
+    fn toggle_digit_prelifts_from_freetext_focus() {
+        let (r, sent) = run_toggle_script(
+            0,
+            "这次要优化哪几部作品？",
+            vec![
+                // idx0 焦点在 TS 行（已打字）
+                live_fixtures::q1_typed_at("融合优点", false, 37),
+                // idx1 ↑ 后：焦点移回选项 1、TS 行文字保留
+                live_fixtures::q1_typed_at("融合优点", false, 29),
+                // idx2 数字后：选项 1 翻转 [✔]、焦点仍在选项 1、TS 行文字保留
+                live_fixtures::q1_typed_at("融合优点", true, 29)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        if i == 29 {
+                            l.replace("[ ]", "[✔]")
+                        } else {
+                            l
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            ],
+            crate::inject::capability::DigitToggle::Unknown,
+        );
+        let out = r.expect("先决后数字直选必须成功");
+        assert_eq!(
+            sent,
+            vec!["up".to_string(), "1".to_string()],
+            "键序 = [↑, 数字]：{sent:?}"
+        );
+        assert!(out.verified);
+    }
+
+    /// **防御锁**：↑ 后自由作答行内容丢失（文字被弄丢的故障形态）→ 中止不发数字。
+    #[test]
+    fn toggle_digit_prelift_aborts_when_freetext_lost() {
+        let (r, sent) = run_toggle_script(
+            0,
+            "这次要优化哪几部作品？",
+            vec![
+                live_fixtures::q1_typed_at("融合优点", false, 37), // 焦点在 TS 行
+                live_fixtures::q1_focus_at(0), // ↑ 后：文字丢了（占位恢复的故障形态）
+            ],
+            crate::inject::capability::DigitToggle::Unknown,
+        );
+        let err = r.expect_err("文字丢失必须中止");
+        assert!(err.message.contains("内容变化"), "{err}");
+        assert_eq!(sent, vec!["up".to_string()]);
+    }
+
+    // ===== FreeText 定位判据修正（2026-10-03 单选形态实证）=====
+
+    /// **单选打字后行判 FreeText**（用户批评 + 单选形态实证）：`5. 组成一个HTML`
+    ///（✔ 在行尾、无方括号）——「编号最大」结构规则不再依赖勾选框字形。
+    /// 还原动作（变异）：kind 规则加回 `checked.is_some()` → 本用例先红。
+    #[test]
+    fn parse_single_select_typed_row_is_freetext() {
+        // 单选子题屏：选项 1-3 + 打字后的第 4 行（无勾选框、无占位前缀）
+        let screen = lines(&[
+            "←  ☐ 交付方式  ✔ Submit  →",
+            "",
+            "问题4：优化结果怎么交付？（单选）",
+            "",
+            "❯ 1. 另存新文件",
+            "  2. 直接改原文件",
+            "  3. 先审后写",
+            "  4. 组成一个HTML",
+            "    ",
+            "────────────────",
+            "  5. Chat about this",
+        ]);
+        let rows = parse_question_rows(&screen);
+        assert_eq!(
+            rows.len(),
+            4,
+            "4 行块：3 选项 + 打字后的 FreeText：{rows:?}"
+        );
+        assert_eq!(
+            rows[3].kind,
+            QuestionRowKind::FreeText,
+            "编号最大行（打字后形态）= FreeText：{rows:?}"
+        );
+        assert_eq!(rows[3].label, "组成一个HTML");
+    }
+
+    /// **定位稳定**（占位 ↔ 打字同屏切换）：同一结构下两种形态的 FreeText 行位置
+    ///（行块下标）一致——编排的走位/核验按行号回看不漂移。
+    #[test]
+    fn freetext_row_position_stable_across_placeholder_and_typed() {
+        let placeholder = parse_question_rows(&live_fixtures::q2_single());
+        let typed = parse_question_rows(&live_fixtures::q2_typed_single("走温暖路线"));
+        let p_pos = placeholder
+            .iter()
+            .position(|r| r.kind == QuestionRowKind::FreeText);
+        let t_pos = typed
+            .iter()
+            .position(|r| r.kind == QuestionRowKind::FreeText);
+        assert_eq!(p_pos, t_pos, "两种形态的 FreeText 行位置一致");
+        assert_eq!(typed[t_pos.unwrap()].label, "走温暖路线");
+    }
+
+    /// **确认项文案 sanity check**：定位到的行 label 恰为 Review 确认项文案 →
+    /// 中止拒绝动手（结构定位的误判面收口）。
+    #[test]
+    fn multi_free_text_aborts_on_confirm_item_label() {
+        // 屏 = Review 确认屏（编号最大行 = Cancel）——绕过快照前置直接喂编排
+        let (r, sent) =
+            run_multi_free_text_script("文字", false, vec![live_fixtures::review_unanswered()]);
+        let err = r.expect_err("确认项文案必须中止");
+        assert!(err.message.contains("确认项"), "{err}");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    // ===== 单选 select 焦点守卫（2026-10-03 用户实测 bug）=====
+
+    /// **单选 select 驱动器**（守卫→数字，键序断言用）。
+    fn run_select_script(
+        index: usize,
+        screens: Vec<Vec<String>>,
+    ) -> (Result<Vec<String>, StageAbort>, Vec<String>) {
+        use std::cell::{Cell, RefCell};
+        let n = screens.len();
+        let cursor = Cell::new(0usize);
+        let cur = || screens[cursor.get().min(n - 1)].clone();
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let result = run_select_stages(
+            index,
+            || Ok(Some(cur())),
+            &mut crate::inject::mode::Closures {
+                read: || Some(cur()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    if cursor.get() + 1 < n {
+                        cursor.set(cursor.get() + 1);
+                    }
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        (result, sent.into_inner())
+    }
+
+    /// **守卫生效**：焦点停在 Type something 行 → 先 `↑` 移出（文字保留核验）→
+    /// 数字直答。键序 = ["up", "2"]（index=1 → 屏上编号 2）。
+    /// 还原动作（变异）：删掉守卫调用 → 键序只有数字、本用例先红。
+    #[test]
+    fn select_prelifts_from_freetext_focus() {
+        let (r, _sent) = run_select_script(
+            1,
+            vec![
+                // idx0 焦点在 TS 行（已打字）
+                live_fixtures::q1_typed_at("融合优点", false, 37),
+                // idx1 ↑ 后：焦点到选项 2、TS 行文字保留
+                live_fixtures::q1_typed_at("融合优点", false, 31),
+                // idx2 数字后：焦点仍在选项 2、TS 行保留
+                live_fixtures::q1_typed_at("融合优点", false, 31),
+            ],
+        );
+        let keys = r.expect("守卫后数字直答必须成功");
+        assert_eq!(
+            keys,
+            vec!["up".to_string(), "2".to_string()],
+            "键序 = [↑, 数字]：{keys:?}"
+        );
+    }
+
+    /// **焦点不在 TS 行** → 直接数字（守卫不触发，零额外键）。
+    #[test]
+    fn select_no_prelift_when_focus_on_option() {
+        let (r, _sent) = run_select_script(
+            0,
+            vec![
+                live_fixtures::q1_focus_at(0), // 焦点在选项 1
+                live_fixtures::q1_focus_at(0), // 数字后
+            ],
+        );
+        let keys = r.expect("直接数字必须成功");
+        assert_eq!(keys, vec!["1".to_string()], "零额外键：{keys:?}");
+    }
+
+    /// **快照剥行尾选中标记**（2026-10-03 用户实测）：单选屏打字后的行
+    /// `4. 组成一个HTML ✔`——快照 freeText 应为「组成一个HTML」（标记不是文字）。
+    /// 还原动作（变异）：strip_trailing_selection_mark 删掉 → freeText 带尾勾、
+    /// 本用例先红。
+    #[test]
+    fn snapshot_free_text_strips_trailing_selection_mark() {
+        let screen = lines(&[
+            "←  ☐ 交付方式  ✔ Submit  →",
+            "",
+            "问题4：优化结果怎么交付？（单选）",
+            "",
+            "❯ 1. 另存新文件",
+            "  2. 直接改原文件",
+            "  3. 先审后写",
+            "❯ 4. 组成一个HTML ✔",
+            "    ",
+            "────────────────",
+            "  5. Chat about this",
+        ]);
+        let snap = question_screen_snapshot(&screen).expect("题屏必出快照");
+        assert!(snap.free_text_present);
+        assert_eq!(
+            snap.free_text.as_deref(),
+            Some("组成一个HTML"),
+            "行尾选中标记必须剥离"
+        );
+    }
+
+    /// **评审 Minor-4 回归锁**：对话滚回区的 markdown 水平线（ASCII `----`）不是
+    /// 题屏分隔线——制表符判定收紧后，`----` 上方的选项行照常进块（旧谓词会把
+    /// 后续行误判到分隔线下而丢块）。
+    #[test]
+    fn parse_rows_ignores_ascii_markdown_rule_as_separator() {
+        let screen = lines(&[
+            " Some prose above",
+            " ----",
+            " ← ☒ Favorite fruits  ✔Submit  →",
+            "",
+            " Which fruits are your favorites? (Select all that apply)",
+            "",
+            " ❯ 1. [ ] Apple",
+            " 2. [ ] Banana",
+            " 3. [ ] Peach",
+            "    Submit",
+            " ────────────────",
+            " 4. Chat about this",
+        ]);
+        let rows = parse_question_rows(&screen);
+        assert_eq!(
+            rows.len(),
+            4,
+            "ASCII ---- 不触发分隔判定，选项行照常进块：{rows:?}"
+        );
+        assert_eq!(rows[3].kind, QuestionRowKind::Advance);
+        // 真·制表符分隔线（─）依然生效：Chat 行仍在块外
+        assert!(!rows.iter().any(|r| r.label.contains("Chat")));
+        assert!(is_separator_line("────────"));
+        assert!(!is_separator_line("----"), "ASCII 水平线不算题屏分隔线");
+    }
+
+    /// **评审 I2 回归锁（2026-09-26）+ 2026-10-02 活体扩面**：切题首段轮询的「屏已
+    /// 可行动」判据——Review 屏、带推进行的题屏、**单选子题题屏（页签栏锚）**都放行；
+    /// 中绘屏/杂屏不放行（生产轮询缝据此把中绘屏挡在轮询窗里等形态）。
+    /// 还原动作（变异）：删掉任一分支 → 对应断言先红。
+    #[test]
+    fn advance_stage_screen_ready_gates_mid_draw_only() {
+        assert!(
+            advance_stage_screen_ready(&review_screen_real()),
+            "Review 屏 = 已可行动（零按键 advanced:false 的入口）"
+        );
+        assert!(
+            advance_stage_screen_ready(&multi_submit_screen_focus_on_submit()),
+            "带 Submit 推进行的题屏 = 已可行动"
+        );
+        assert!(
+            advance_stage_screen_ready(&live_fixtures::q2_single()),
+            "单选子题题屏（页签栏锚，无推进行）= 已可行动（2026-10-02 活体）"
+        );
+        assert!(
+            !advance_stage_screen_ready(&lines(&["(TUI 重绘中……)", ""])),
+            "中绘屏不放行——留在轮询窗里等形态"
+        );
+    }
+
+    // ===== 2026-10-02 活体黄金夹具内核锁（fixtures = live_fixtures，逐字取证）=====
+
+    /// 活体 q1（多选子题，含滚回区 Planning 分隔线）：**闩锁移除**的回归锁——
+    /// 旧实现见滚回区分隔线即判死其后全部行，解析恒 0（验收事故主根因）。
+    /// 还原动作（变异）：恢复 below_separator 闩锁 → 本用例先红。
+    #[test]
+    fn parse_live_q1_multi_full_block() {
+        let rows = parse_question_rows(&live_fixtures::q1_multi());
+        assert_eq!(
+            rows.len(),
+            6,
+            "6 行块：4 选项 + Type something + Next：{rows:?}"
+        );
+        assert_eq!(rows[0].kind, QuestionRowKind::Option);
+        assert_eq!(rows[0].checked, Some(false), "多选形态带勾选框");
+        assert!(rows[0].focused, "❯ 在选项 1");
+        assert_eq!(rows[4].kind, QuestionRowKind::FreeText);
+        assert_eq!(rows[5].kind, QuestionRowKind::Advance);
+        assert!(
+            !rows.iter().any(|r| r.label.contains("Chat")),
+            "Chat about this 不进块"
+        );
+    }
+
+    /// 活体 q2（**单选子题**，无独立推进行）：页签栏锚 B 的回归锁——旧解析恒 0 行。
+    /// 还原动作（变异）：删掉锚 B → 本用例先红（0 行）。
+    #[test]
+    fn parse_live_q2_single_via_tab_bar_anchor() {
+        let rows = parse_question_rows(&live_fixtures::q2_single());
+        assert_eq!(
+            rows.len(),
+            5,
+            "5 行块：4 选项 + Type something，**无 Advance**：{rows:?}"
+        );
+        assert_eq!(rows[0].number, Some(1));
+        assert_eq!(rows[0].checked, None, "单选形态无勾选框");
+        assert!(rows[0].focused);
+        assert_eq!(rows[4].kind, QuestionRowKind::FreeText);
+        assert!(
+            !rows.iter().any(|r| r.kind == QuestionRowKind::Advance),
+            "单选子题没有推进行——页签栏锚产物不含 Advance"
+        );
+    }
+
+    /// 活体 Review 屏（未答完直达）：行块解析出确认项编号块（1=Submit answers、
+    /// 2=Cancel），且既有 Review 探测照常 Ready——两套判据在同一块真实屏上并存。
+    #[test]
+    fn parse_live_review_and_probe_agree() {
+        let screen = live_fixtures::review_unanswered();
+        let rows = parse_question_rows(&screen);
+        assert_eq!(rows.len(), 2, "确认项 1/2 进块：{rows:?}");
+        assert_eq!(rows[0].label, "Submit answers");
+        assert!(
+            matches!(probe_review_screen(&screen), ScreenStep::Ready(_)),
+            "Review 探测照常 Ready（标题锚 + 确认项恰好一行）"
+        );
+    }
+
+    /// 切勾落在单选子题屏（卡片停在多选 q1、终端在单选 q2 的实机脱钩形态）：
+    /// 身份闸**先**拦下（题干不一致，零键）——而不是「没有勾选框」这种次级中止。
+    #[test]
+    fn toggle_on_live_q2_with_q1_payload_identity_aborts() {
+        let (r, sent) = run_toggle_script(
+            0,
+            "这次要优化哪几部作品？",
+            vec![live_fixtures::q2_single()],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("题干不一致必须中止");
+        assert!(err.message.contains("手机卡片不一致"), "{err}");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// 切勾落在**自己题**的单选子题屏（身份一致）→ 诚实中止「没有勾选框」，
+    /// 零键——toggle 仅适用多选形态。
+    #[test]
+    fn toggle_on_own_single_select_aborts_no_checkbox() {
+        let (r, sent) = run_toggle_script(
+            0,
+            "《末班车》目前有4个版本（原版/优化版/精简版/情感救赎版），如何处理这些版本？",
+            vec![live_fixtures::q2_single()],
+            crate::inject::capability::DigitToggle::Unsupported,
+        );
+        let err = r.expect_err("单选形态必须中止");
+        assert!(err.message.contains("没有勾选框"), "{err}");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// **单选子题切题·末题直达 Review**（活体取证步骤 1 的脚本化复刻）：
+    /// 焦点在选项行 → 发 `→` → Review 屏在场 → advanced=true。键序 = ["right"]。
+    /// 还原动作（变异）：导航分支改回走位+回车 → 键序断言先红。
+    #[test]
+    fn advance_single_select_right_lands_review() {
+        let (r, sent) = run_advance_script(
+            vec![
+                live_fixtures::q2_single(),
+                live_fixtures::review_unanswered(),
+            ],
+            NavDirection::Next,
+        );
+        let out = r.expect("→ 直达 Review 必须判已切");
+        assert!(out.advanced);
+        assert_eq!(sent, vec!["right".to_string()], "键序 = [→]：{sent:?}");
+    }
+
+    /// **单选子题切题·中间题**（`→` 切到另一道单选子题）：题干区变化 → advanced。
+    /// 屏 2 = q2 夹具派生（题干替换为伪 q3；活体只到 2 题，派生已申报）。
+    #[test]
+    fn advance_single_select_right_to_next_question() {
+        let (r, sent) = run_advance_script(
+            vec![live_fixtures::q2_single(), live_fixtures::q3_derived()],
+            NavDirection::Next,
+        );
+        let out = r.expect("题干变化必须判已切");
+        assert!(out.advanced);
+        assert_eq!(sent, vec!["right".to_string()]);
+    }
+
+    /// **单选子题切题·`→` 被吞**（屏面与题干均未变）→ 中止无后续键。
+    #[test]
+    fn advance_single_select_noop_aborts() {
+        let (r, sent) = run_advance_script(
+            vec![live_fixtures::q2_single(), live_fixtures::q2_single()],
+            NavDirection::Next,
+        );
+        let err = r.expect_err("屏面未变必须中止");
+        assert!(err.message.contains("既未进入下一题页"), "{err}");
+        assert_eq!(sent, vec!["right".to_string()], "只发过一个 →：{sent:?}");
+    }
+
+    /// **单选子题切题·焦点在自由作答行**：先 `↑` 回选项行（两行例外先决）再 `→`。
+    /// 屏 1 = q2 派生（❯ 移到 Type something 行）。
+    #[test]
+    fn advance_single_select_prelifts_from_freetext() {
+        let (r, sent) = run_advance_script(
+            vec![
+                live_fixtures::q2_focus_on_freetext(),
+                live_fixtures::q2_single(),
+                live_fixtures::review_unanswered(),
+            ],
+            NavDirection::Next,
+        );
+        let out = r.expect("↑ 先决后 → 必须走通");
+        assert!(out.advanced);
+        assert_eq!(
+            sent,
+            vec!["up".to_string(), "right".to_string()],
+            "{sent:?}"
+        );
+    }
+
+    /// **多选子题 → 单选子题**（验收事故图 2 的实机链路）：q1 发 `→` → q2
+    ///（页签栏锚 + 题干变化）→ advanced=true——←/→ 通用导航（走位+回车退役），
+    /// 旧行块解析在这里恒 0 行中止。
+    /// 还原动作（变异）：恢复闩锁或删锚 B → 分类段中止、本用例先红。
+    #[test]
+    fn advance_next_path_multi_into_single_select() {
+        let (r, sent) = run_advance_script(
+            vec![live_fixtures::q1_multi(), live_fixtures::q2_single()],
+            NavDirection::Next,
+        );
+        let out = r.expect("→ 进单选子题必须判已切");
+        assert!(out.advanced);
+        assert_eq!(sent, vec!["right".to_string()], "键序 = [→]：{sent:?}");
+    }
+
+    /// **上一题·题页间**（用户裁决 ←/→ 通用）：q2 发 `←` → q1（题干区变化）。
+    /// 还原动作（变异）：删掉 Prev 分支 → 本用例先红。
+    #[test]
+    fn advance_prev_question_page_to_previous() {
+        let (r, sent) = run_advance_script(
+            vec![live_fixtures::q2_single(), live_fixtures::q1_multi()],
+            NavDirection::Prev,
+        );
+        let out = r.expect("← 退回上一题必须判已切");
+        assert!(out.advanced);
+        assert_eq!(sent, vec!["left".to_string()], "键序 = [←]：{sent:?}");
+    }
+
+    /// **上一题·从确认屏退回**（活体取证步骤 2 复刻）：Review 屏发 `←` → 退回题页。
+    /// 还原动作（变异）：Prev 在 Review 屏改回零按键 → 本用例先红。
+    #[test]
+    fn advance_prev_from_review_returns_to_question() {
+        let (r, sent) = run_advance_script(
+            vec![
+                live_fixtures::review_unanswered(),
+                live_fixtures::q2_single(),
+            ],
+            NavDirection::Prev,
+        );
+        let out = r.expect("← 从 Review 退回必须判已切");
+        assert!(out.advanced);
+        assert_eq!(sent, vec!["left".to_string()], "键序 = [←]：{sent:?}");
+    }
+
+    /// **上一题·`←` 被吞**（Review 屏仍在）→ 中止无后续键。
+    #[test]
+    fn advance_prev_from_review_swallowed_aborts() {
+        let (r, sent) = run_advance_script(
+            vec![
+                live_fixtures::review_unanswered(),
+                live_fixtures::review_unanswered(),
+            ],
+            NavDirection::Prev,
+        );
+        let err = r.expect_err("← 被吞必须中止");
+        assert!(err.message.contains("未从确认屏退回"), "{err}");
+        assert_eq!(sent, vec!["left".to_string()], "只发过一个 ←：{sent:?}");
+    }
+
+    /// **上一题·题页间被吞/已是第一题**（屏面与题干均未变）→ 中止无后续键。
+    #[test]
+    fn advance_prev_noop_aborts() {
+        let (r, sent) = run_advance_script(
+            vec![live_fixtures::q2_single(), live_fixtures::q2_single()],
+            NavDirection::Prev,
+        );
+        let err = r.expect_err("屏面未变必须中止");
+        assert!(err.message.contains("未切换题目"), "{err}");
+        assert_eq!(sent, vec!["left".to_string()], "只发过一个 ←：{sent:?}");
+    }
+
+    /// **上一题·焦点在自由作答行**：先 `↑` 回选项行（两行例外先决）再 `←`。
+    #[test]
+    fn advance_prev_prelifts_from_freetext() {
+        let (r, sent) = run_advance_script(
+            vec![
+                live_fixtures::q2_focus_on_freetext(),
+                live_fixtures::q2_single(),
+                live_fixtures::q1_multi(),
+            ],
+            NavDirection::Prev,
+        );
+        let out = r.expect("↑ 先决后 ← 必须走通");
+        assert!(out.advanced);
+        assert_eq!(sent, vec!["up".to_string(), "left".to_string()], "{sent:?}");
+    }
+
+    // ===== 多选自由作答编排（2026-10-02 第三批 + 勾选兜底/编辑覆盖批）=====
+
+    /// 多选自由作答脚本驱动器（send/send_text 都推进屏序列）。
+    fn run_multi_free_text_script(
+        text: &str,
+        overwrite: bool,
+        screens: Vec<Vec<String>>,
+    ) -> (Result<FreeTextOutcome, StageAbort>, Vec<String>) {
+        use std::cell::{Cell, RefCell};
+        let n = screens.len();
+        let cursor = Cell::new(0usize);
+        let cur = || screens[cursor.get().min(n - 1)].clone();
+        let sent: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let result = run_multi_select_free_text_stages(
+            text,
+            overwrite,
+            || Ok(Some(cur())),
+            &mut FreeTextClosures {
+                read: || Some(cur()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    if cursor.get() + 1 < n {
+                        cursor.set(cursor.get() + 1);
+                    }
+                    Ok(())
+                },
+                send_text: |t: &str| {
+                    sent.borrow_mut().push(format!("<text:{t}>"));
+                    if cursor.get() + 1 < n {
+                        cursor.set(cursor.get() + 1);
+                    }
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        (result, sent.into_inner())
+    }
+
+    /// **勾选兜底**（用户实测：打字后默认未勾选）：打字后屏 `[ ] hi` → 补 space →
+    /// 核验屏 `[✔] hi`。键序 = down×4 + text + space（**无 enter**）。
+    /// 还原动作（变异）：删掉勾选兜底段 → 键序无 space、本用例先红。
+    #[test]
+    fn multi_free_text_checks_the_box_after_typing() {
+        let (r, sent) = run_multi_free_text_script(
+            "hi",
+            false,
+            vec![
+                live_fixtures::q1_multi(),
+                live_fixtures::q1_focus_at(1),
+                live_fixtures::q1_focus_at(2),
+                live_fixtures::q1_focus_at(3),
+                live_fixtures::q1_focus_at(4),
+                live_fixtures::q1_typed_flagged("hi", false), // 打字后未勾
+                live_fixtures::q1_typed_flagged("hi", true),  // 空格补勾后
+            ],
+        );
+        let out = r.expect("勾选兜底后必须成功");
+        assert_eq!(out.receipt_seen, None);
+        assert_eq!(
+            sent,
+            vec![
+                "down".to_string(),
+                "down".to_string(),
+                "down".to_string(),
+                "down".to_string(),
+                "<text:hi>".to_string(),
+                "space".to_string(),
+            ],
+            "键序 = down×4 + text + space（无 enter）：{sent:?}"
+        );
+    }
+
+    /// **已勾选跳过**：打字后屏直接 `[✔] hi` → 不发 space。
+    #[test]
+    fn multi_free_text_skips_checkbox_when_already_checked() {
+        let (r, sent) = run_multi_free_text_script(
+            "hi",
+            false,
+            vec![
+                live_fixtures::q1_multi(),
+                live_fixtures::q1_focus_at(1),
+                live_fixtures::q1_focus_at(2),
+                live_fixtures::q1_focus_at(3),
+                live_fixtures::q1_focus_at(4),
+                live_fixtures::q1_typed("hi"), // 已勾
+            ],
+        );
+        r.expect("已勾选路径必须成功");
+        assert!(
+            !sent.contains(&"space".to_string()),
+            "已勾选不得补空格：{sent:?}"
+        );
+    }
+
+    /// **清空模式**（空文本 + overwrite）：走位 → 右移×3 + 退格×3 → 占位恢复 →
+    /// **跳过打字**直接成功（不发数字不发 space）。键序 = down×4 + right×3 +
+    /// backspace×3。
+    /// 还原动作（变异）：删掉 clearing_only 早退 → 走打字路径、本用例先红。
+    #[test]
+    fn multi_free_text_clearing_only_mode() {
+        let (r, sent) = run_multi_free_text_script(
+            "",
+            true,
+            vec![
+                live_fixtures::q1_typed_at("旧内容", true, 29), // idx0 首段：已有内容
+                live_fixtures::q1_typed_at("旧内容", true, 31),
+                live_fixtures::q1_typed_at("旧内容", true, 33),
+                live_fixtures::q1_typed_at("旧内容", true, 35),
+                live_fixtures::q1_typed_at("旧内容", true, 37), // 走位到该行；轮1 读 len=3
+                live_fixtures::q1_typed_at("旧内容", true, 37), // right1
+                live_fixtures::q1_typed_at("旧内容", true, 37), // right2
+                live_fixtures::q1_typed_at("旧内容", true, 37), // right3
+                live_fixtures::q1_typed_at("旧", true, 37),     // backspace1
+                live_fixtures::q1_typed_at("旧", true, 37),     // backspace2
+                live_fixtures::q1_typed_at("Type something", false, 37), // backspace3 → 占位 ✓
+            ],
+        );
+        let out = r.expect("清空模式必须成功");
+        assert!(out.receipt_seen.is_none());
+        assert!(
+            !sent.contains(&"<text:0 chars>".to_string()),
+            "清空模式不打字"
+        );
+        assert_eq!(
+            sent.last(),
+            Some(&"backspace".to_string()),
+            "收尾 = 退格（无打字无数字）：{sent:?}"
+        );
+    }
+
+    /// **清空幂等**（行已是占位）：零键成功。
+    #[test]
+    fn multi_free_text_clearing_idempotent_on_placeholder() {
+        // 焦点已在 TS 行（占位）：零走位零清空零打字
+        let (r, sent) = run_multi_free_text_script(
+            "",
+            true,
+            vec![live_fixtures::q1_typed_at("Type something", false, 37)],
+        );
+        let out = r.expect("占位行清空幂等成功");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+        assert!(out.receipt_seen.is_none());
+    }
+
+    /// **单选子题自由作答**（2026-10-03 用户需求：多题流单选子题也有 Type
+    /// something 行——复用同一编排）：q2_single（单选形态，行无勾选框）→ 走位 →
+    /// 打字 → label 翻转核验通过；**勾选兜底跳过**（checked=None = 单选形态）。
+    /// 键序 = down×4 + text，无 space 无 enter。
+    /// 还原动作（变异）：恢复「checked.is_none() 即中止」→ 本用例先红。
+    #[test]
+    fn multi_free_text_on_single_select_subquestion() {
+        let (r, sent) = run_multi_free_text_script(
+            "走温暖路线",
+            false,
+            vec![
+                live_fixtures::q2_single(),                   // idx0 首段：焦点在选项 1
+                live_fixtures::q2_focus_line(32),             // idx1 down → 选项 2
+                live_fixtures::q2_focus_line(34),             // idx2 down → 选项 3
+                live_fixtures::q2_focus_line(36),             // idx3 down → 选项 4
+                live_fixtures::q2_focus_line(38),             // idx4 down → Type something 行
+                live_fixtures::q2_typed_single("走温暖路线"), // idx5 打字后（label 翻转）
+            ],
+        );
+        let out = r.expect("单选子题自由作答必须成功");
+        assert_eq!(out.receipt_seen, None);
+        assert_eq!(
+            sent,
+            vec![
+                "down".to_string(),
+                "down".to_string(),
+                "down".to_string(),
+                "down".to_string(),
+                "<text:走温暖路线>".to_string(),
+            ],
+            "键序 = down×4 + text（无 space——单选形态无勾选框；无 enter）：{sent:?}"
+        );
+    }
+
+    /// **编辑覆盖**（overwrite=true）：已有内容 → 走位 → 退格×3（「旧内容」3 字）→
+    /// 占位屏 → 打新字 → 未勾 → space 兜底。
+    /// 还原动作（变异）：删掉退格段 → 键序无 backspace、本用例先红。
+    #[test]
+    fn multi_free_text_edit_overwrites_with_backspaces() {
+        let (r, sent) = run_multi_free_text_script(
+            "新内容",
+            true,
+            vec![
+                live_fixtures::q1_typed_at("旧内容", true, 29), // idx0 首段：焦点在选项 1
+                live_fixtures::q1_typed_at("旧内容", true, 31), // idx1 down
+                live_fixtures::q1_typed_at("旧内容", true, 33), // idx2 down
+                live_fixtures::q1_typed_at("旧内容", true, 35), // idx3 down
+                live_fixtures::q1_typed_at("旧内容", true, 37), // idx4 down；轮1 读 len=3
+                live_fixtures::q1_typed_at("旧内容", true, 37), // idx5 right1（屏不变）
+                live_fixtures::q1_typed_at("旧内容", true, 37), // idx6 right2（屏不变）
+                live_fixtures::q1_typed_at("旧内容", true, 37), // idx7 right3（光标到行尾）
+                live_fixtures::q1_typed_at("旧", true, 37),     // idx8 backspace1
+                live_fixtures::q1_typed_at("旧", true, 37),     // idx9 backspace2
+                live_fixtures::q1_typed_at("Type something", false, 37), // idx10 backspace3 → 占位 ✓
+                live_fixtures::q1_typed_at("新内容", false, 37),         // idx11 打新字（未勾）
+                live_fixtures::q1_typed_at("新内容", true, 37),          // idx12 space 兜底后
+            ],
+        );
+        r.expect("编辑覆盖必须成功");
+        let backspaces = sent.iter().filter(|k| k == &"backspace").count();
+        assert_eq!(backspaces, 3, "退格数 = 旧行可见长度（3 字）：{sent:?}");
+        assert_eq!(
+            sent.iter().filter(|k| k == &"right").count(),
+            3,
+            "退格前必有等量 right（行首光标 bug 回归锁）：{sent:?}"
+        );
+        assert_eq!(
+            sent.last(),
+            Some(&"space".to_string()),
+            "收尾勾选兜底：{sent:?}"
+        );
+        assert!(!sent.contains(&"enter".to_string()), "绝无 enter：{sent:?}");
+    }
+
+    /// **已有内容 + overwrite=false 维持中止**（防误触，零键）。
+    #[test]
+    fn multi_free_text_existing_content_aborts_without_overwrite() {
+        let (r, sent) =
+            run_multi_free_text_script("hi", false, vec![live_fixtures::q1_typed("旧内容")]);
+        let err = r.expect_err("不覆盖必须中止");
+        assert!(err.message.contains("已有内容"), "{err}");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// **退格轮尽中止**（清不掉 → 5 轮上限，屏面摘要报残留）。
+    #[test]
+    fn multi_free_text_backspace_rounds_exhausted_aborts() {
+        // 每轮退格后屏「顽固地」保持原内容（TUI 不消费退格的故障形态）
+        let stubborn = || live_fixtures::q1_typed_at("旧内容", true, 37);
+        let screens: Vec<Vec<String>> = vec![
+            live_fixtures::q1_typed_at("旧内容", true, 29), // idx0 首段
+            live_fixtures::q1_typed_at("旧内容", true, 31), // idx1
+            live_fixtures::q1_typed_at("旧内容", true, 33), // idx2
+            live_fixtures::q1_typed_at("旧内容", true, 35), // idx3
+            stubborn(), // idx4 走位到该行；轮1 读 len=3 → 退格×3 → idx5,6,7
+            stubborn(), // idx5 轮1 末读 idx7：未清 → 轮2 读 → 退格×3 → idx8,9,9
+            stubborn(), // idx6
+            stubborn(), // idx7
+            stubborn(), // idx8
+            stubborn(), // idx9 轮2-5 反复读到「旧内容」→ 轮尽中止
+        ];
+        let (r, sent) = run_multi_free_text_script("hi", true, screens);
+        let err = r.expect_err("清不掉必须中止");
+        assert!(err.message.contains("残留"), "{err}");
+        assert!(
+            !sent.contains(&"<text:hi>".to_string()),
+            "未打新字：{sent:?}"
+        );
+    }
+
+    /// 已在 Review 屏请求下一题（活体形态）→ 零按键 advanced:false（已在终点）。
+    #[test]
+    fn advance_on_live_review_is_zero_key() {
+        let (r, sent) =
+            run_advance_script(vec![live_fixtures::review_unanswered()], NavDirection::Next);
+        let out = r.expect("已在 Review 屏 = 零按键返回");
+        assert!(!out.advanced);
+        assert!(sent.is_empty());
+    }
 }
 
 /// 丁T2 **实机探测占位**（`#[ignore]`——常规门禁只编译不跑）。
@@ -3582,6 +6288,31 @@ mod tests {
 mod live_probe_tests {
     // 本模块只做前置可满足性检查与探测指引打印（**零注入**）——不消费 `super::*` 的
     // 任何原语，故不引入它（定案后补真断言时再加回）。
+
+    /// **claude 空格注入形态复验占位**（2026-09-24）：用户实机取证（2.1.278，手工
+    /// 键盘）证明了空格**语义**（多选屏切勾），但**注入事件形态**未经取证——实现取
+    /// VK_SPACE(0x20)+字符 0x20（与 enter/esc/tab 同形，跨族安全口径）。若实机验收
+    /// 报「空格已发出但屏读未见到勾选态翻转」中止，按本占位走技能快路径复验
+    /// （候选形态：char 形态 vk=0 纯字符流），≥3 取样定案后改
+    /// `engine::control_records` 的 space 分支一行。
+    #[test]
+    #[ignore = "实机验证：claude 多选屏空格注入形态复验（前置=claude ≥2.1.278 + 多选题触发 + 屏读对账）"]
+    fn claude_space_injection_form_live_probe() {
+        eprintln!(
+            "2026-09-24 实机复验占位（claude 空格注入形态）\n\
+             \n\
+             已实现形态：VK_SPACE(0x20)+字符 0x20 成对 down/up（control_records，\n\
+             与 enter/esc/tab 同形）。语义依据：用户手工实机取证 2.1.278（空格=切勾），\n\
+             档案 research/refs/phase2-消息注入/2026-09-24-claude多选多题键序-\n\
+             用户实机取证.md。手工按键 ≠ 注入事件——形态需实机复验：\n\
+             1. 起一 conhost claude 会话，触发 multiSelect:true 问题；\n\
+             2. 走 MAM 手机端问答卡点选一项（run_toggle_stages 全链）；\n\
+             3. 回执 verified=true → 形态成立（归档一条即可）；\n\
+             4. 回执 failed{{stage:toggle-row, error:翻转}} → 形态不被消费：按技能\n\
+                win-console-inject-probe 快路径补测（候选=char 形态 vk=0），\n\
+                ≥3 取样定案后改 engine.rs control_records 的 space 分支。"
+        );
+    }
 
     #[test]
     #[ignore = "实机验证：codex 多问题（Question n/N）导航序探测——前置=codex 已装 + 人工触发多问题 + 屏读逐屏抄录"]
@@ -3722,5 +6453,299 @@ mod live_probe_t5 {
         eprintln!("前置检查：Windows 屏读能力可用（read_screen_window 存在；无目标 pid 故不调用）");
         #[cfg(not(windows))]
         eprintln!("前置检查：本平台**无屏读能力** → 阶段机各段必然中止（如实回执 + 引导终端）");
+    }
+}
+
+// ============================================================
+// 屏读体检探针（references/screen-read-matrix.md 的落地工具）
+// ============================================================
+
+/// **活体屏读探针**（只读、零注入——不发任何键）。屏读形态矩阵的维护工具：
+/// 对任意活会话 dump 整屏 + 跑全解析器，输出「解析器眼里的屏」。
+///
+/// 用法：
+/// `MAM_PROBE_PID=<pid> cargo test --lib screen_read_probe -- --ignored --nocapture`
+///
+/// pid 用 `Get-CimInstance Win32_Process` 找目标 CLI 进程。纪律同
+/// `references/screen-read-matrix.md`：dump 逐字落档、结论不得超过证据。
+#[cfg(test)]
+#[cfg(windows)] // 探针链路 = windows_console（屏读是 Windows 能力）；非 Windows 无此模块
+mod screen_read_probe {
+    use super::*;
+
+    #[test]
+    #[ignore = "活体探针（字符级）：MAM_PROBE_PID=<pid> cargo test --lib screen_read_probe::dump_raw -- --ignored --nocapture"]
+    fn dump_raw() {
+        let pid: u32 = std::env::var("MAM_PROBE_PID")
+            .expect("MAM_PROBE_PID=<pid>")
+            .parse()
+            .unwrap();
+        let lines = crate::inject::windows_console::read_screen_window(pid).expect("屏读失败");
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("{:02}|{:?}", i, l);
+        }
+    }
+
+    #[test]
+    #[ignore = "活体探针：MAM_PROBE_PID=<pid> cargo test --lib screen_read_probe -- --ignored --nocapture"]
+    fn dump_and_parse() {
+        let pid: u32 = std::env::var("MAM_PROBE_PID").expect(
+            "用法：MAM_PROBE_PID=<pid> cargo test --lib screen_read_probe -- --ignored --nocapture",
+        ).parse().expect("MAM_PROBE_PID 必须是数字 pid");
+        let lines = crate::inject::windows_console::read_screen_window(pid)
+            .unwrap_or_else(|e| panic!("屏读失败 pid={pid}（attach 不上/进程已退出）：{e}"));
+        eprintln!("=== pid={pid} LINES ({}) ===", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("{:02}|{}", i, l);
+        }
+        let rows = parse_question_rows(&lines);
+        eprintln!("=== parse_question_rows: {} rows ===", rows.len());
+        for r in &rows {
+            eprintln!(
+                "  kind={:?} num={:?} checked={:?} focused={} label={:?}",
+                r.kind, r.number, r.checked, r.focused, r.label
+            );
+        }
+        eprintln!(
+            "=== submit_row_present(any): {}",
+            lines.iter().any(|l| submit_row_present(l))
+        );
+        eprintln!("=== review_probe: {:?}", probe_review_screen(&lines));
+        eprintln!(
+            "=== advance_stage_screen_ready: {}",
+            advance_stage_screen_ready(&lines)
+        );
+    }
+}
+
+// ============================================================
+// 活体黄金夹具（2026-10-02 探针逐字 dump，claude 2.1.278 多题流）
+// ============================================================
+
+/// **活体黄金夹具**——逐字取自 2026-10-02 只读探针 dump（证据出处与叙事见
+/// `.agents/skills/win-console-inject-probe/references/screen-read-matrix.md`
+/// 首批实例）。**逐字入档，禁止改写/手造**（闸门 1：样本门槛——手抄/改写即失去
+/// 证据力；本批评审事故正是手抄夹具丢了滚回区分隔线与单选子题形态）。
+/// 焦点位移与伪 q3 变体是**派生**夹具（编排测试的脚本转场需要），基底仍逐字。
+#[cfg(test)]
+pub(crate) mod live_fixtures {
+    const SEP: &str = "───────────────────────────────────────────────────────────────────────────";
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 滚回区（三块活体屏共用 0–20 行）：Planning 块上方的 ─ 分隔线正是旧
+    /// below_separator 闩锁把题屏判死的受害现场
+    fn scrollback() -> Vec<String> {
+        lines(&[
+            "",
+            "● 小左你好！有什么我可以帮你的吗？",
+            "",
+            "✻ Sautéed for 4s · done 16:24",
+            "",
+            "❯ 问我5个问题，以修改优化这个文件夹里面的小说。这个问题应该是一个多选题",
+            "  [mobile matebook-chrome]",
+            "",
+            "  Thought for 3s (ctrl+o to expand)",
+            "",
+            "● 小左你好！我先看看文件夹里有什么内容，然后再针对小说提出有针对性的问题。",
+            "",
+            "  Thought for 2s, searched for 1 pattern, read 1 file (ctrl+o to expand)",
+            "",
+            "● 文件夹里有多部小说文件。我先快速浏览一下主要几部，再提出有针对性的问题。",
+            "",
+            "  Thought for 5s, read 6 files (ctrl+o to expand)",
+            "",
+            "● 文件夹里有两部小说：《末班车》（共4个版本：原版、优化版、精简版、情感救赎",
+            "  版，另有《末班车-重逢》同人番外）和**《她的七点零三》**。以及配套的封面/",
+            "  长图。下面我来问5个多选题，帮助明确优化方向。",
+        ])
+    }
+
+    /// 把 `❯ ` 焦点标记移到 `to` 行（取**最后**一个 ❯ 行为现行焦点——滚回区的
+    /// 提示回显行 `❯ 问我5个问题…` 不是焦点）
+    fn move_focus(screen: &[String], to: usize) -> Vec<String> {
+        let mut out = screen.to_vec();
+        let from = out
+            .iter()
+            .rposition(|l| l.contains('❯'))
+            .expect("基底屏必有焦点行");
+        out[from] = out[from].replacen("❯ ", "", 1);
+        out[to] = format!("❯ {}", out[to].trim_start());
+        out
+    }
+
+    /// q1 多选子题（优化范围）：选项带勾选框 + 独立 `Next` 行（锚 A 形态）。
+    /// 焦点在选项 1。
+    pub(crate) fn q1_multi() -> Vec<String> {
+        let mut v = scrollback();
+        v.extend(lines(&[
+            SEP,
+            "Planning:",
+            "C:\\Users\\bunny\\.claude\\plans\\5-mobile-matebook-chrome-polished-map.md",
+            SEP,
+            "←  ☐ 优化范围  ☐ 版本处理  ✔ Submit  →",
+            "",
+            "这次要优化哪几部作品？",
+            "",
+            "❯ 1. [ ] 末班车系列",
+            "  悬疑版本：原版(26行)、优化版(最长)、精简版、情感救赎版中的某些或全部",
+            "  2. [ ] 末班车-重逢",
+            "  重逢向新故事，高中同学十年后在末班地铁上相遇",
+            "  3. [ ] 她的七点零三",
+            "  温软浪漫短篇：世界时钟停在7:03，只有两人手表还在走",
+            "  4. [ ] 全部作品",
+            "  对文件夹里所有小说统一进行修改优化",
+            "  5. [ ] Type something",
+            "     Next",
+            SEP,
+            "  6. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+            "",
+            "",
+        ]));
+        v
+    }
+
+    /// q1 焦点位移变体：0=选项1 1=选项2 2=选项3 3=选项4 4=Type something 5=Next
+    pub(crate) fn q1_focus_at(row: usize) -> Vec<String> {
+        const FOCUS_LINES: [usize; 6] = [29, 31, 33, 35, 37, 38];
+        move_focus(&q1_multi(), FOCUS_LINES[row])
+    }
+
+    /// q1 打字后形态（派生）：Type something 行 = `❯ 5. [{勾选}] {text}`（内联编辑
+    /// 生效、焦点仍在该行——活体取证 2026-10-02；checked=false = 用户实测的
+    /// 「打字后默认未勾选」形态，勾选兜底的输入）
+    pub(crate) fn q1_typed_flagged(text: &str, checked: bool) -> Vec<String> {
+        q1_typed_at(text, checked, 37)
+    }
+
+    /// q1 打字屏·焦点任意（派生）：37 行 = `5. [{勾}] {text}`（❯ 由 move_focus 唯一
+    /// 落点），29/31/33/35 = 选项行——走位/退格/兜底各段脚本屏的基础夹具
+    pub(crate) fn q1_typed_at(text: &str, checked: bool, focus_line: usize) -> Vec<String> {
+        let box_glyph = if checked { "[✔]" } else { "[ ]" };
+        let base = q1_multi()
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if i == 37 {
+                    format!("5. {box_glyph} {text}")
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>();
+        move_focus(&base, focus_line)
+    }
+
+    /// q1 打字后·已勾选·焦点在 FreeText 行（兼容旧名）
+    pub(crate) fn q1_typed(text: &str) -> Vec<String> {
+        q1_typed_at(text, true, 37)
+    }
+
+    /// q2 **单选子题**（版本处理）：选项无勾选框、**无独立推进行**（页签栏锚 B
+    /// 形态）。焦点在选项 1。
+    pub(crate) fn q2_single() -> Vec<String> {
+        let mut v = scrollback();
+        v.extend(lines(&[
+            SEP,
+            "Planning:",
+            "C:\\Users\\bunny\\.claude\\plans\\5-mobile-matebook-chrome-polished-map.md",
+            SEP,
+            "←  ☐ 优化范围  ☐ 版本处理  ✔ Submit  →",
+            "",
+            "《末班车》目前有4个版本（原版/优化版/精简版/情感救赎版），如何处理这些版本",
+            "？",
+            "",
+            "❯ 1. 选一个最优版本深加工 (Recommended)",
+            "     我帮你对比分析，选定最适合的方向版本继续打磨",
+            "  2. 融合各版优点成新版本",
+            "     例如：悬疑版的张力+情感版的母亲线+优化版的细节描写，整合成一个最终版",
+            "  3. 每个版本独立优化",
+            "     不合并，每个版本独立润色完善",
+            "  4. 淘汰旧版本只留最好",
+            "     对比后删除多余版本",
+            "  5. Type something.",
+            SEP,
+            "  6. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+            "",
+            "",
+        ]));
+        v
+    }
+
+    /// q2 焦点阶梯（派生）：❯ 落到指定行号（30/32/34/36=选项 1-4、38=Type something）
+    pub(crate) fn q2_focus_line(line: usize) -> Vec<String> {
+        move_focus(&q2_single(), line)
+    }
+
+    /// q2 打字后形态（派生）：单选子题的 Type something 行被内联文字替换（无勾选
+    /// 框——单选形态），焦点仍在该行
+    pub(crate) fn q2_typed_single(text: &str) -> Vec<String> {
+        q2_single()
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| match i {
+                29 => l.replacen("❯ ", "", 1),
+                38 => format!("❯ 5. {text}"),
+                _ => l,
+            })
+            .collect()
+    }
+
+    /// q2 焦点在 Type something 行（派生：两行例外先决的转场屏）
+    pub(crate) fn q2_focus_on_freetext() -> Vec<String> {
+        move_focus(&q2_single(), 38)
+    }
+
+    /// 伪 q3（派生：q2 题干替换——活体只有 2 题，中间题 `→` 转场的脚本需要）
+    pub(crate) fn q3_derived() -> Vec<String> {
+        q2_single()
+            .into_iter()
+            .map(|l| {
+                if l.contains("《末班车》目前有4个版本") {
+                    "《她的七点零三》影视化方向怎么选".to_string()
+                } else {
+                    l
+                }
+            })
+            .collect()
+    }
+
+    /// Review 确认屏（未答完直达——`→` 末题直达的落点；活体当时 TUI 重绘后
+    /// Planning 块滚出可见窗）。`⚠ You have not answered all questions` 警告行在场。
+    pub(crate) fn review_unanswered() -> Vec<String> {
+        let mut v = scrollback();
+        v.extend(lines(&[
+            "",
+            SEP,
+            "←  ☐ 优化范围  ☐ 版本处理  ✔ Submit  →",
+            "",
+            "Review your answers",
+            "",
+            "⚠ You have not answered all questions",
+            "",
+            "Ready to submit your answers?",
+            "",
+            "❯ 1. Submit answers",
+            "  2. Cancel",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]));
+        v
     }
 }

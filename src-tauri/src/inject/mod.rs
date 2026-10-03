@@ -4,6 +4,7 @@ pub mod approve;
 // 诊断备注、不参与筛选（裁决理由见模块文档）。起因 = codex 0.156.1 改了菜单 footer
 // 措辞，写死的单句锚失效 → 权限切换整条静默不可用。
 pub mod anchor_ledger;
+pub mod capability;
 pub mod confirm;
 // 通用 N 选项审批对话框屏读解析（批次丙 T5）：纯函数跨平台可测，屏读源在
 // windows_console::read_screen_window（仅 Windows 有屏读 → macOS 自然降级二元卡）。

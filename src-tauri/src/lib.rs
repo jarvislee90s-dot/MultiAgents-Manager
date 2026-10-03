@@ -53,8 +53,54 @@ fn refresh_tray(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .try_init();
+    // 日志**写文件**而非 stderr（2026-10-03 终端污染事故）：debug exe 以分离方式
+    // 启动时没有自己的控制台，AttachConsole 读屏/注入期间其它线程的 stderr 写入
+    // 会落进**被附加的外部终端**（活体实证：claude TUI 表单行被 MAM WARN 日志
+    // 覆盖 → 屏读解析失败 → 自由作答中止）。写 ~/.mam/logs/mam.log 彻底杜绝，
+    // 且日志可回查。文件打不开（权限等）→ 回落 stderr（旧行为）。
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    let opened = dirs::home_dir().and_then(|h| {
+        let dir = h.join(".mam").join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("mam.log");
+        // **5MB 轮转**（评审 M4）：info 级每轮扫描都有行，无上限会无限膨胀——
+        // 超限把当前文件挪去 mam.log.old（单代轮转，够回查）再重新开
+        if let Ok(meta) = std::fs::metadata(&log) {
+            if meta.len() > 5 * 1024 * 1024 {
+                let _ = std::fs::rename(&log, dir.join("mam.log.old"));
+            }
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .ok()
+    });
+    let _ = match opened {
+        Some(file) => builder
+            .target(env_logger::Target::Pipe(Box::new(file)))
+            .try_init(),
+        None => builder.try_init(), // 回落 stderr：终端污染可能复发（M4 申报——可检测）
+    };
+    // **panic 消息也写日志文件**（评审 M3）：默认 panic hook 写 stderr，AttachConsole
+    // 竞态下同样会污染外部终端。包一层：先落文件再交还原 hook。
+    let panic_target = dirs::home_dir().map(|h| h.join(".mam").join("logs").join("mam.log"));
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = &panic_target {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "[PANIC] {info}");
+            }
+        }
+        let hook = std::panic::take_hook();
+        hook(info);
+        // take_hook 后未还——进程即将 abort/unwind，无需复原
+    }));
     database::init();
     // 后台增量导入（仅导入 DB 中不存在的 name）+ 补链，不阻塞启动
     std::thread::spawn(|| {

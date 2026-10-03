@@ -273,6 +273,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
                 None
             }
         }),
+        // **能力开关表**（2026-10-03 数字直选自适应）：生产单例共享（应用生命周期；
+        // 探测一次终身复用，见 inject::capability 模块文档）
+        capability_table: crate::inject::capability::new_table(),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，
