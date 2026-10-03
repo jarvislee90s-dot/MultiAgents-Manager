@@ -189,7 +189,7 @@ pub fn is_online(registry_hit: bool, last_seen_at: i64, now: i64) -> bool {
 /// 不可位置式（生成器消费后复用会让不同设备撞行）
 fn random_hex_16() -> String {
     let mut b = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    rand::fill(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -916,7 +916,7 @@ fn platform_id() -> &'static str {
 /// 不同的 bootId 即自行清空，页面刷新（同一进程）则原样恢复
 static BOOT_ID: Lazy<String> = Lazy::new(|| {
     let mut b = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    rand::fill(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 });
 
