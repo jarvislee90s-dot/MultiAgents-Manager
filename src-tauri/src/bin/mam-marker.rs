@@ -275,8 +275,9 @@ mod tests {
 #[cfg(windows)]
 mod win {
     use std::collections::HashMap;
+    use windows::core::BOOL;
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::System::Console::{
         AttachConsole, FreeConsole, GetConsoleTitleW, SetConsoleTitleW, ATTACH_PARENT_PROCESS,
     };
@@ -373,7 +374,7 @@ mod win {
         let mut buf = [0u16; 256];
         let len = GetWindowTextW(hwnd, &mut buf);
         ctx.out.push((
-            hwnd.0,
+            hwnd.0 as isize,
             String::from_utf16_lossy(&buf[..len.max(0) as usize]),
         ));
         BOOL(1)
@@ -449,7 +450,7 @@ mod win {
             }
             let (hwnd, title) = &wins[0];
             let next = super::title_with_marker(title, marker);
-            let hwnd = HWND(*hwnd);
+            let hwnd = HWND(*hwnd as *mut core::ffi::c_void);
             let ok = unsafe { SetWindowTextW(hwnd, &HSTRING::from(next.as_str())).is_ok() };
             logs.push(format!(
                 "A: 进程 {pid}（{name}）单窗口 SetWindowTextW {}（{:?} → {:?}）",
