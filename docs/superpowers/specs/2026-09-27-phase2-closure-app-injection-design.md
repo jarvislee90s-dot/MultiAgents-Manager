@@ -8,46 +8,42 @@
 
 ## 1. 目标与范围
 
-**目标**：把「手机发消息」从四家终端 TUI 扩展到 APP 形态（ZCode / Codex APP / WorkBuddy），建成无头通道公共底座（含生命周期控制与 zcode 无头新建会话），落地 M10 交接导出（含交接配置方式），补 M7 macOS 终验，修复 dsh 桌面端读侧盲区，使二期进入可收官状态。
+**目标**：把「手机发消息」从四家终端 TUI 扩展到 **APP 形态四家（ZCode / Codex APP / WorkBuddy / dsh 桌面端——dsh 的主形态即桌面 APP，web 宿主作兼容保留）**，建成无头通道公共底座（含生命周期控制与 zcode 无头新建会话），补 M7 macOS 终验，使二期进入可收官状态。
 
-**范围**：H1–H11 全部功能点 + OpenClaw/dsh 写通道探测 + M10 交接导出三件 + M7 Mac 终验 + README/CHANGELOG/发版。
+**范围**：**本期实施计划 = 第一部分 H1–H12（裁决 19）**——C0 前置修复四件 + C1 无头底座与 zcode/codex APP 注入 + C2 WB/dsh 写侧 + H10 无头新建 + C4 三家 CLI 无头；**M10 交接导出（§6）、M7 终验收尾与 README/发版（§7）移出本期，另立后续计划**。
 
 **非范围（不做清单）**：
 - 常驻连接池、zcode/codex app-server attach（三期 F3.3；codex 单写者锁 open issue #47193 跟踪）
 - 切换模型选择器 UI、原生 APP 壳（三期 F3.1 / F3.9；本批仅探测取证斜杠命令等效性）
 - 用户自定义交接模板（三期后，裁决 10；本期只做预设矩阵）
-- OpenClaw gateway 深做 / dsh 插件生态展开（写通道本体探测见 H2，生态扩展不做）
+- OpenClaw gateway 深做 / dsh 插件生态展开（dsh 写通道本体已定案 ACP stdio 集成〔C2〕；生态扩展不做）
 - 任意命令/参数拼接暴露（宪法红线；仅固定 CLI 命令形态）
 - 四家 CLI 的远程新建会话（独立轨道 `probe/remote-session-create`；本批只做 zcode 无头新建——该轨道明确排除的 APP 形态）
 - 推送网关 / APK 壳（三期收尾，裁决 16）
 
-## 2. 裁决记录（2026-09-27 用户对齐，实施不得重议）
+## 2. 裁决记录（2026-09-27 对齐 + 2026-10-04 裁决门/落档补裁，实施不得重议）
 
 | # | 裁决 | 内容 |
 |---|---|---|
-| 1 | 工具范围 | 核心三家 **zcode / codex APP / WorkBuddy** 全链；OpenClaw 半天级轻探测（只判「有没有写通道」）；dsh 探测深度与排法见裁决 11 |
-| 2 | zcode 验收线 | **判定 F 基线**（手机实时回执 + APP 重启/刷新后可见）；`--surface desktop` 等免费升级项探测到即升 |
+| 1 | 工具范围 | **核心四家 APP 形态：ZCode / Codex APP / WorkBuddy / dsh（桌面端为主形态，读写两侧与其他 APP 同权重全链）**；OpenClaw 半天级轻探测（只判「有没有写通道」，文档级结论已出：有条件存在） |
+| 2 | zcode 验收线 | **判定 F 基线**（两端实测细化：已信任工作区 = 重启级可见；未信任 = 仅 MAM 可见——见 H7/H10 与附录 A）；`--surface` 无影响的实测结论已归档 |
 | 3 | codex APP 通道 | **`codex queue` 主通道**（即 app-server 协议 `thread/queue/add` 的 CLI 形态，与桌面 APP 自身排队同机制）+ `exec resume` 兜底；直接 attach 桌面线程不可行（单写者锁，#47193/#25914/#33556 跟踪） |
-| 4 | WorkBuddy 路线 | 三路线定案权在 PW 探测：**A 内嵌端点投递 / B 独立 codebuddy CLI 复刻 / C 如实登记不可注入** |
+| 4 | WorkBuddy 路线 | **A（ACP 内嵌端点）**（定案权原在 PW 探测，已裁——见裁决 12） |
 | 5 | 三期项 | 切换模型 / 原生 APP 维持三期；本批仅加「斜杠命令经无头通道等效性」探测取证。**宪法零改动** |
 | 6 | Mac 段 | 跑 ① 本批 APP 类探测 + ② M7 终验补课；③ session-create Mac 段已在跑不重复，仅交叉验证 1–2 核心格；报告全文回传 |
-| 7 | 实现范围 | **探测完再裁**：M11 三家 CLI 无头（H11）是否并入实现批，等探测报告回传后用户裁决 |
+| 7 | 实现范围 | M11 三家 CLI 无头（H11）并入与否 → **已裁：并入**（裁决 13，C4 正式批次） |
 | 8 | 无头架构 | **方案 A · 一次性进程 per turn**：每条消息 spawn 一次无头命令，回执归一后进程退出；不采纳 AionCore 空闲挂起/重生；claude 审批双向（`--permission-prompt-tool stdio`）为「进程存活至 turn 结束」特例；常驻池留三期 |
 | 9 | 无头开启/关闭语义 | = **进程生命周期控制**（turn 结束即退、watchdog、移动端可中止）+ **zcode 无头新建会话**；**不做**每工具分开关的设置页多级开关 |
 | 10 | 无头通道默认态 | **默认关，显式开启**（设置页远程区单一总开关；理由：无头 = 绕过终端可视确认直接驱动 Agent，风险高于终端注入，zcode `--mode` 审批档需知情选择） |
-| 11 | dsh 桌面端补齐 | **并入本批**：读侧宿主判定盲区修复 = 前置件 H1（随探测批交付，解析链零改动复用）；写侧探测 = 源码通读 + 端点实测（H2，dsh MIT 开源仓库本机在库，不用逆向）；判可写 = D14 出评（经用户确认，见 §13）并追加实现批功能点 |
-
-**2026-10-04 裁决门六裁（Phase P+ 探测报告回传后，探测批关账）**：
-
-| # | 裁决 | 内容 |
-|---|---|---|
-| 12 | WorkBuddy 路线 | **A（ACP 内嵌端点）定案**——`acp/connect` 免鉴权全链；**Win ACP 复验 = C2 开工前置**；B/C 降为备选 |
+| 11 | dsh 桌面端（APP 形态） | **读写两侧全链并入本批，与其他 APP 同权重**：读侧 = H1（宿主判定 + v4 代际 + APP 级跳转）；写侧 = **ACP stdio 集成**（C2 交付；D14 出评已过，见裁决 16；源码级可写 + 鉴权不裸奔，两端 401 互证） |
+| 12 | WorkBuddy 路线 | **A（ACP 内嵌端点）定案**——`acp/connect` 免鉴权全链；**Win 端点启用条件（远程控制开关）= C2 开工前置跟进**；B/C 降为备选 |
 | 13 | H11 三家 CLI 无头 | **并入实现批**（M11 随本批整体关账，C4 转正式批次） |
 | 14 | zcode `--mode` 默认档 | **单一 yolo**（用户裁决；安全面由 H3 总开关默认关 + 知情开启兜底；yolo 粘滞疑云入版本门控复核） |
 | 15 | watchdog 默认值 | **600s**（可配；对齐 M10-b 自总结口径，实测样本 8–23s 留足余量） |
 | 16 | dsh D14 出评 | **出评通过 + 追加 C2 功能点**（集成走 ACP stdio；MASTER-PLAN D14 修订随 C2 落地提请用户） |
 | 17 | L13/L14 缺口排期 | **并入新增 C0 前置小批**（靶向 TTY 修法 + 插队诚实化，先于 C1 交付） |
 | 18 | 补测暴露的两处读侧缺陷（2026-10-04 晚） | **并入 C0 扩容**：① dsh 桌面端 rc.2 起会话日志代际升 `session.v4.jsonl.zstd`，解析器版本门未放行（正文「无消息」/新会话不上板的根因）→ 放宽正则（H1 扩容）；② WB 5.7.3 交互会话心跳废弃（Test2 会话不上板的根因）→ 发现层改 workbuddy.db 双源（新增 H12） |
+| 19 | 实施计划范围（2026-10-04 落档时） | **本期实施计划只覆盖第一部分 H1–H12**（C0 前置修复 + C1 底座与 zcode/codex APP 注入 + C2 WB/dsh 写侧 + H10 无头新建 + C4 三家 CLI 无头）；**M10 交接导出（§6 三件）、M7 终验收尾与 README/发版（§7）移出本期，另立后续计划** |
 
 ## 3. 现状与证据基线（2026-09-27 本机实测与官方调研）
 
@@ -66,33 +62,33 @@
    路由表（W3 扩展：会话宿主形态 × 工具 → 通道 + 可见性预期）
         │
  ┌──────┼──────────────┬─────────────────┐
- │ 终端注入（在产）    │ spawn 型无头（新）│ HTTP 型无头（新，WorkBuddy 路线 A）
- │ claude/codex TUI/   │ zcode.cjs --prompt│ 心跳 url + token →
- │ kimi/opencode TUI   │ codex queue/exec  │ POST /jobs/:id/reply
- │                     │ claude -p / kimi  │ （待 PW 探测定案）
- │                     │ -p / opencode run │
- │                     │ codebuddy -p（B） │
+ │ 终端注入（在产）    │ spawn 型无头（新）│ HTTP 型（新）
+ │ claude/codex TUI/   │ zcode.cjs --prompt│ WB：ACP over HTTP
+ │ kimi/opencode TUI   │ codex queue/exec  │ （acp/connect →
+ │                     │ claude -p / kimi  │  session/prompt）
+ │                     │ -p / opencode run │ dsh：ACP over stdio
+ │                     │ dsh ACP stdio     │ （spawn 子进程讲协议）
  └──────┴──────────────┴─────────────────┘
         │
  通道适配层：统一回执结构 {status, sessionId, lastAssistant, tokens, durationMs, stage?, reason?}
         │
- 公共底座：无头总开关（默认关）· 按会话串行 · watchdog · 取消 · 版本门控 · 审计(action=headless)
+ 公共底座：无头总开关（默认关）· 按会话串行 · watchdog(600s) · 取消 · 版本门控 · 审计(action=headless)
 ```
 
-- **spawn 型**：spawn 命令 → 流式读 stdout（`--json`/stream-json）→ 回执 → 进程退出；
-- **HTTP 型**：端点调用 → 响应归一（同一回执结构）；
+- **spawn 型**：spawn 命令 → 流式读 stdout（`--json`/stream-json）→ 回执 → 进程退出；dsh ACP stdio 同族（spawn 子进程讲 JSON-RPC，turn 结束即退）；
+- **HTTP 型**：WorkBuddy ACP 端点调用 → SSE 流事件归一（同一回执结构）；
 - **终端注入型**：在产四家不动，与无头互不路由到同一会话（W3 既有裁决）。
 
 ## 5. 第一部分 · APP 类注入与无头通道（H1–H11，按执行顺序）
 
-> **探测任务书编号**（任务级计划另立文档，纪律沿用 `probe/remote-session-create` 八条总纪律：run-id 临时目录、只碰自建会话、日志追加、结束清场、不修代码、结论不超证据、Windows 段先读 `win-console-inject-probe` 技能、环境变量隔离构造首装态）：
+> **探测任务书编号**（**✅ 已全部执行完毕，Windows + Mac 两段定案见附录 D**；任务级细节存档于计划书 `2026-10-03-phase2-closure-probe.md` 与 research 本地报告）：
 > **PZ** = zcode 八问（resume 全链 / 可见性三态+surface / 并发 / `--json` 回执 / `--mode` / 斜杠 / 版本 / **无头新建会话出现条件**〔H10 依赖〕）· **PC** = codex 五问（queue 触达〔**空闲+运行态各测**〕/ 回执形态 / exec resume 兜底 / id 映射 / daemon 前置）· **PW** = WorkBuddy 五问 · **PL** = OpenClaw + dsh 写通道 · **Mac 段** = ① 三家 APP 在 Mac 的对齐探测（PZ/PW/PC 核心项）② M7 三通道注入终验 ③ session-create Mac 段核心项交叉验证。
 
 ### H1 · dsh 桌面端读侧接入（前置件，裁决 11）
 
 - **需求**：DeepSeek 桌面 harness 的会话照常上板——修复宿主判定对桌面端的盲区（现存问题，与注入无关，先行交付）。
 - **输入**：dsh 宿主判定的单源核 `monitor/dsh/mod.rs::cmdline_is_dsh_host`（进程发现与 `host::tool_host_alive_in` 共用，零漂移）扩桌面特征：**任一参数含 `dsh-desktop-host`（包路径子串）或以 `\.dsh\profiles\desktop` / `/.dsh/profiles/desktop` 结尾**即桌面宿主（`--expose-internals` 为 Electron 通用旗子，单独过弱不作独立判据——实测桌面 cmdline 必含前两特征）；会话数据源不变（`~/.dsh` 同源，零迁移）。
-- **输出与效果**：桌面端会话照常上板（projcache + zstd 解析链**零改动复用**）；三色状态/标题预览口径同网页版；跳转 = 聚焦桌面 APP 窗口（复用 `window/` 聚焦链：Windows win32 / macOS 应用激活；网页版的 `dsh_tab` 浏览器路径保留给网页宿主）；带回归测试（网页版 cmdline 夹具 × 桌面端 cmdline 夹具双守卫）。
+- **输出与效果**：桌面端会话照常上板（projcache 复用；zstd 解析链**仅放行 v4 代际**——rc.2 起日志代际升级，裁决 18，C0 交付）；三色状态/标题预览口径同网页版；跳转 = 聚焦桌面 APP 窗口（复用 `window/` 聚焦链：Windows win32 / macOS 应用激活；网页版的 `dsh_tab` 浏览器路径保留给网页宿主）；带回归测试（网页版 cmdline 夹具 × 桌面端 cmdline 夹具 × v4 代际夹具三守卫）。
 - **边界**：只修读侧；写通道归 H2；平台聚焦能力缺失时降级「仅上板不跳转」如实标注；dsh rc 阶段迭代快，令牌与数据格式漂移由风险 11 兜底。
 - **2026-10-04 补测收口**：GUI 核验完成——上板 ✓、APP 级跳转 ✓（会话级无深链，3.11.2 时代已证，预期内）；**数据落点未漂移**（当晚新会话仍写 `~/.dsh/sessions/`），但**桌面端 rc.2 起日志代际升级为 `session.v4.jsonl.zstd`**，解析器版本门只认 v0/v2/v3（`log.rs` 注释原文「未来 v4 只需放宽正则」）→ 正文「无消息」与新会话不上板即此因。**修法（裁决 18，落 C0）**：放宽 `parse_generation` 正则认 v4 + 代际测试补用例（取代际最大逻辑天然兼容）。
 
@@ -220,7 +216,7 @@
 | C0 | 前置修复批四件（裁决 17+18）：① L13 注入靶向 **TTY 精确匹配**（agent 进程 TTY ↔ tmux pane_tty / Terminal tab tty / iTerm session tty；取不到 TTY 回退 cwd，多候选**拒绝注入并报错**）② L14 macOS 插队**诚实化**（确认面不可达报中性 `submitted` 不报 `delivered`，比照 codex 范式）③ H1 扩容：dsh 日志代际 **v4 放行**（版本门开正则）④ H12：WB 发现层 **workbuddy.db 双源** | 同 cwd 双开不乱窜（Mac 场景复测）；macOS jump 不再假成功；**dsh 卡正文恢复 + 新会话上板（Windows 实测）**；**WB Test2 类会话上板（Windows 实测）**；A1 分层确认闭环实测 |
 | C1 | 无头底座（H3/H4/H5/H6）+ zcode 注入（H7）+ codex APP 注入（H8） | 手机→zcode 在册会话全链（回执 + 重启级可见性兑现）；codex APP queue 全链；开关默认关实测；取消/watchdog(600s)/审计逐条可查；`#[ignore]` E2E |
 | C2 | WorkBuddy 路线 A（H9；**Win ACP 复验 = 开工前置**）+ dsh 写侧（H2 定案追加，**ACP stdio** 集成；裁决 16） | Win ACP 复验通过后 WB 注入全链实机；dsh ACP stdio 注入全链；两家失败面如实登记 |
-| C3 | zcode 无头新建（H10）+ M10 交接导出（M10-a/b/c） | 无头新建全链；HANDOFF 双档实机（含 APP 会话升级注入自总结档）；交接设置区四项可用 |
+| C3 | zcode 无头新建（H10）+ M10 交接导出（M10-a/b/c）——**M10 三件移出本期计划（裁决 19），随 H10 交付后另立批次** | 无头新建全链（可见性两端定案口径）；M10 部分转入后续计划 |
 | C4 | H11 三家 CLI 无头（**已裁并入**，裁决 13） | W7 口径：三家无头全绿 + claude 审批双向实机 |
 | C5 | 收尾：M7 Mac 终验（L14 相关 FAIL 已在 C0 修复）+ README/CHANGELOG + 发版 | 终验清单绿；矩阵更新；版本发布 |
 
@@ -261,11 +257,11 @@
 | dsh 桌面端同源与读侧盲区（H1） | A | 本机实测（v0.2.0-rc.2 运行中：host cmdline 指向 `~/.dsh`、sessions 当天在写、双令牌不匹配不上板）；令牌扩展 = C-P+ 回归测试交付 |
 | dsh 写通道（H2） | **A** | PL 定案（2026-10-03）：源码级 `session/prompt`（queue/steer+冷会话自动 resume）+ 19387 全 401 只读实测；19387 归属与版本漂移登记复核 |
 | OpenClaw 写通道（H2） | C | 本机未安装不可实测；官方文档级「有条件存在」（Gateway HTTP 默认关 + operator token + session key 路由） |
-| zcode 无头通道（H7/H10） | **A** | PZ 实测（run 20261003-022408）：resume 全链 8s / 并发不拒绝 / 回执 JSON 全集 / `--prompt` 默认 yolo / 斜杠不等效 / APP 任务列表 0 收录；重启可见性待三态核验 |
-| codex queue（H8） | B+ | 本机 0.160.0（漂移，queue 在场复验待夹具）+ PR #39092 机制（daemon 同源桌面排队）+ issue 佐证；**索引滞后 rollout 13 天实证**；触达/回执/daemon 前置 = PC（夹具待用户） |
-| codex exec resume 兜底（H8） | A- | issue #28259 实证；0.155.1+ 单写者锁后行为 = PC |
-| codebuddy CLI/serve（H9） | B+ | 官方文档 + **2.161.1 隔离安装 flag 面实测**（`-p/-r/--serve/--output-format json`，内嵌 2.137.1）；端点实测 = PW（待用户开 APP） |
-| WorkBuddy 端点=serve 假设（H9） | C+ | 心跳 url/endpoint + cwd host-cli + 官方「WB 使用 CodeBuddy 引擎」；API 面 = PW |
+| zcode 无头通道（H7/H10） | **A** | 两端实测闭环：resume 全链（8s/10s）、回执 JSON 全集、并发不拒绝、斜杠字面化、**收录规则两端定案**（未信任永不收录 / 已信任重启收录 / surface 无影响）、工作区争用锁（Mac 排除法定案）、Mac 调用形态分叉 |
+| codex queue（H8） | **A**（两端实测） | Mac 三态主证（未打开滞留/打开空闲 ~20s/忙态回合后投，FIFO 补投）+ Win 抽验（~55s 消费）；回执 = message-id；`codex exec` 会话不进索引不能用 queue；daemon 消费前提定案 |
+| codex exec resume 兜底（H8） | A | issue #28259 实证 + Mac 双态实测（APP 关可用 23s / 开被单写者锁拒 -32600，`-C` 前置） |
+| codebuddy CLI/serve（H9） | B+ | 官方文档 + 2.161.1 隔离安装 flag 面实测（`-p/-r/--serve/--output-format json`，内嵌 2.137.1）；**ACP 通道 Mac 实证打通（路线 A 主案）；Win 端点启用条件 = 风险 16 跟进** |
+| WorkBuddy ACP 通道（H9/H12） | **A-**（Mac） | `acp/connect` 免鉴权 → `session/new`+`session/prompt` 写入实证（转写 44KB/function_call）；已结束会话语义边界；Win 侧待端点启用（5.7.3 无 per-session serve） |
 | claude/kimi/opencode 无头（H11） | B/C | 官方 flag 面（旧 spec W7 台账沿用）；并入否 = 裁决门 |
 | 交接导出（M10-a） | B | W9.1 决策表 12 项调研定档（四家 compact 一手核对）；组合模板 = C3 实机验证 |
 | macOS 三通道（C5） | A-（代码） | 引擎 macOS 执行层在产；实机终验 = Mac 段 ② |
@@ -274,11 +270,11 @@
 
 | # | 风险 / 已知限制 | 处置 |
 |---|---|---|
-| 1 | WorkBuddy 端点无写 API 或 token 不可寻 | 路线 B 兜底 → 路线 C 如实登记 |
-| 2 | codex queue 触达桌面会话无官方保证 | PC 实测；exec resume 兜底；双不通则登记并跟踪 #47193 |
-| 3 | zcode `--mode` 默认 yolo 风险 | PZ 定档；实现默认收紧，yolo 显式选择 |
-| 4 | codebuddy 内嵌 2.115 vs 独立 2.158 偏差 | PW 实测；版本门控拦截不兼容组合 |
-| 5 | codex daemon 前置条件（APP 关闭场景） | PC 探测 bootstrap 可行性；如实报错兜底 |
+| 1 | WorkBuddy 端点无写 API 或 token 不可寻 | **已消解**：ACP `connect` 免鉴权打通（Mac 实证）——token 前提不成立；残余风险 = Win 端点不在场（转风险 16） |
+| 2 | codex queue 触达桌面会话无官方保证 | **已实证**：Mac ~20s / Win ~55s 消费（两端）；「未打开 thread 永久滞留」为已知语义 → H8 前置校验 + 自动改道 |
+| 3 | zcode `--mode` 默认 yolo 风险 | yolo 已裁为默认（裁决 14）；风险面 = H3 总开关默认关 + 知情开启提示兜底；plan→yolo 粘滞疑云入版本门控复核 |
+| 4 | codebuddy 内嵌与独立 CLI 版本偏差 | **降级为备选风险**（路线 B 已非主案）；实测口径：Win 内嵌 2.137.1 / 独立 2.161.1；版本门控沿用 |
+| 5 | codex daemon 前置条件（APP 关闭场景） | **已实证消解**：daemon 由 `codex agents` 自动安装托管；消费前提是「thread 被 APP 打开」而非 daemon 在场（Mac 三态定案） |
 | 6 | 无头与 APP 同会话写冲突 | PZ/PC 并发探测；按会话串行 + 冲突排队回执 |
 | 7 | macOS 行为差异（路径/刷新/端点拓扑） | Mac 段对齐探测；差异如实登记 |
 | 8 | codex queue / codebuddy serve 标 experimental/Beta | 版本门控 + 分阶段失败回执 + issue 跟踪清单（#28259/#47193/#25914/#33556） |
@@ -288,7 +284,7 @@
 | 12 | 同 cwd 多实例注入靶向歧义（写侧无保护，消息可乱窜；读侧上板正确——Mac 实测暴露，平台无关缺口 L13） | TTY 精确匹配修法已端到端验证（tmux pane_tty / Terminal tab tty / iTerm session tty 三家 1:1）；取不到 TTY 回退 cwd 且**多候选拒绝注入并报错**；Windows 等价键待定 |
 | 13 | macOS claude「立即发送插队」假成功（确认面不可达仍报 ok、消息滞留 composer；codex 同平台为诚实失败范式，L14） | 确认不可达时报中性 `submitted` 不报 `delivered`（比照 codex `engine.rs:456` 前置门禁范式）；长期以「会话文件新增该消息」替代屏读判据 |
 | 14 | codex CLI↔APP 版本劈叉（PATH CLI 0.160.0 vs 旧 APP 内嵌 0.155-alpha；历史异常现象的成因） | 版本门控**双坐标**记录：CLI 版本与 APP 内嵌 codex 版本分开探测（APP 改名 `ChatGPT.app`/`com.openai.codex`，按 bundle id 识别） |
-| 15 | WB ACP 对已结束会话 prompt 静默挂（200 + 心跳但回合永不推进——接口语义，非鉴权问题） | H9 语义二分：仅活跃/新建会话投递；已结束会话的复活语义（load 后重启回合）待裁决门后定 |
+| 15 | WB ACP 对已结束会话 prompt 静默挂（200 + 心跳但回合永不推进——接口语义，非鉴权问题） | H9 语义二分：仅活跃/新建会话投递；已结束会话的复活语义（load 后重启回合）C2 实现时定 |
 | 16 | 上游读侧/端点协议漂移（本批已发生三例：dsh 代际 v4；WB 5.7.3 心跳废弃；**WB Windows 无 per-session serve 端点**——3 个监听端口实测均非 CodeBuddy 形态，Mac 可用端点实为「Remote Control」功能服务，Windows 5.7.3 疑未启用） | 读侧版本门 + 双源降级设计（H1/H12）；**WB 端点启用条件（APP 内远程控制开关，USER-ASSIST 30s）= C2 前置复验的第一跟进项**；若 Windows 无此功能 → 路线 A 降级评估（B/C 兜底） |
 
 ## 13. 宪法与在产代码对照
@@ -307,7 +303,7 @@
 | `window/`（聚焦链） | macOS applescript/iterm/terminal/tmux/dsh_tab + Windows win32 | H1 跳转聚焦桌面窗口复用该链；平台缺口降级「仅上板」如实标注 |
 | `inject/queue.rs`（终端队列） | 黄排队/可输入态 flush 语义 | 不动；无头按会话串行为独立层，路由保证同会话单通道族 |
 | `database`（写审计/枚举） | action 枚举在产 | 扩 `headless`/`headless_cancel`（migration 随批） |
-| 各 adapter（zcode/codex/workbuddy/dsh） | 会话发现与读链在产 | 零改动复用（无头落盘经读链自然上板；codex 仅加 thread id 映射） |
+| 各 adapter（zcode/codex/dsh） | 会话发现与读链在产 | zcode/dsh 读链零改动复用（dsh 仅 H1 代际放行 + 宿主判定扩）；**WB 例外：发现层改 db 双源（H12）**；codex 仅加 thread id 映射 |
 
 ## 附录 A · 工具 × 通道矩阵（目标态；「定案」栏探测后回填）
 
@@ -321,22 +317,22 @@
 | Kimi Code | ✅ | H11 `-p -S`（**已裁并入**） | 刷新后 | ✅ 已裁（C4） |
 | WorkBuddy | — | H9 三路线（A 升首选） | ACP 写入 APP 内可见 | ✅ 路线 A 主证：ACP 免鉴权打通（Mac）；**Win ACP 复验 = C2 开工前置**（附录 D Mac 块） |
 | ZCode | — | H7 在册注入 / H10 无头新建 | **重启级**（已信任工作区；未信任 = 仅 MAM 可见） | ✅ 两端定案：收录规则闭环（未信任不收录〔两端互证〕/ 已信任重启收录〔Mac+用户实证〕/ surface 无影响） |
-| dsh | — | H2 探测（源码通读 + 端点实测） | 自带 UI（读侧上板由 H1 保障） | 读侧 H1 ✅（4c7b004/08ef620）；写侧 ✅ 源码级存在（附录 D） |
+| dsh | — | 写侧 **ACP stdio**（C2 交付，裁决 11/16） | 自带 UI（读侧上板由 H1 保障） | 读侧 ✅ H1（宿主判定已交付 `4c7b004`/`08ef620`，v4 代际 C0）；写侧 ✅ 源码级定案 |
 
 ## 附录 B · 功能点进度表（随批次更新）
 
 | 功能点 | 里程碑 | 状态 |
 |---|---|---|
-| H1 dsh 桌面端读侧接入 | C-P+ | ✅ 代码交付（4c7b004/08ef620）；GUI 核验待用户 |
+| H1 dsh 桌面端读侧接入 | C-P+ | ✅ 代码交付（`4c7b004`/`08ef620`）+ GUI 核验通过（上板 + APP 级跳转）；v4 代际放行转 C0 |
 | H2 OpenClaw/dsh 写通道探测 | C-P+ | ✅ 两端定案（D14 已出评，裁决 16） |
 | **C0 · L13 靶向 TTY + L14 诚实化 + dsh v4 + WB 双源（裁决 17+18）** | C0 | ⬜ |
 | H3 无头总开关 / H4 生命周期（600s）/ H5 审批档（yolo）/ H6 横切 | C1 | ⬜ |
 | H7 zcode 注入 / H8 codex APP 注入 | C1 | ⬜ |
 | H9 WorkBuddy 路线 A（Win ACP 复验前置）/ dsh 写侧（ACP stdio） | C2 | ⬜ |
-| H10 zcode 无头新建 / M10-a 双档 / M10-b 配置 / M10-c 文档 | C3 | ⬜ |
+| H10 zcode 无头新建 / ~~M10-a 双档 / M10-b 配置 / M10-c 文档（移出本期，裁决 19）~~ | C3 | ⬜ / 后续计划 |
 | H11 三家 CLI 无头（已裁并入） | C4 | ⬜ |
 | H12 WB 发现双源（v4 同批：H1 扩容） | C0 | ⬜ |
-| M7 Mac 终验 / README / 发版 | C5 | ⬜ |
+| M7 Mac 终验（L14 项已 C0 化）/ README / 发版（移出本期，裁决 19） | C5 | 后续计划 |
 
 ## 附录 C · 与旧 spec W 编号映射
 
@@ -353,6 +349,7 @@
 
 ## 附录 D · Phase P+ 探测定案与裁决门议程（2026-10-03 Windows 段，随探测批回填）
 
+> **防误读注记**：本节为 2026-10-03 Windows 段当时的快照（其中「待夹具/待用户/待裁决」均已有结果）——最终结论以 **D-2（Mac 段并入 + 补测收口）与 §2 裁决 12–19** 为准，保留作时间线留痕。
 > 证据：`~/mam-probe-closure/20261003-022408/`（本地，不入库）；报告：`research/refs/phase2-消息注入/2026-10-03-app-injection-probe-report.md`（本地）。H1 交付：`4c7b004`（宿主判定扩桌面特征）/ `08ef620`（跳转聚焦，web 路径回落）。版本漂移：zcode 0.16.9（无）/ codex 0.160.0（+3.9）/ WB 2.137.1↔独立 2.161.1 / dsh 0.2.0.0。
 
 **定案摘要**（细节见报告与 pz/pc/pw/pl notes）：
