@@ -328,8 +328,8 @@ fn find_wt_target(
     let t0 = Instant::now();
     loop {
         let system = sysinfo::System::new_with_specifics(
-            sysinfo::RefreshKind::new().with_processes(
-                sysinfo::ProcessRefreshKind::new()
+            sysinfo::RefreshKind::nothing().with_processes(
+                sysinfo::ProcessRefreshKind::nothing()
                     .with_cmd(sysinfo::UpdateKind::Always)
                     .with_cwd(sysinfo::UpdateKind::Always)
                     .with_exe(sysinfo::UpdateKind::Always),
@@ -1023,6 +1023,7 @@ async fn e2e_http_full_chain() {
     let sessions = vec![session];
     let total = sessions.len();
     let state = Arc::new(RemoteState {
+        capability_table: multi_agents_manager_lib::inject::capability::new_table(),
         session_source: Box::new(
             move || multi_agents_manager_lib::session::SessionsResponse {
                 sessions: sessions.clone(),

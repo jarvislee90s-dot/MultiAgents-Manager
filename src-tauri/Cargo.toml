@@ -4,6 +4,12 @@ version = "0.5.0-beta.1"
 description = "多 Agent 编程工具统一管理平台"
 authors = ["jarvis"]
 edition = "2021"
+# MSRV：代码实际要求 1.89——src/linker/mod.rs:271 File::unlock（1.89 稳定）、
+# src/services/pet/import.rs:278 u64::is_multiple_of（1.87 稳定）；依赖侧底线更低
+# （sha2 0.11 经 rust-embed-utils 要求 1.85），所以取 1.89。
+# 显式声明后旧工具链会直接报错；同时会激活 clippy::incompatible_msrv，
+# 以后再误用超版 API 会在 CI 直接暴露（本次即由该 lint 发现真实 MSRV 是 1.89 而非 1.85）。
+rust-version = "1.89"
 license = "MIT"
 # src/bin/mam-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
 # 不指定 default-run 时 `cargo run` / `pnpm tauri:dev` 报
@@ -57,18 +63,20 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order（issue #36-5）：Map 用 IndexMap 保序——写回 ~/.claude.json 等
 # JSON 工具配置时不再把整个文件按字母序重排（TOML/JSONC 路径本就保序）
 serde_json = { version = "1", features = ["preserve_order"] }
-sysinfo = "0.32"
-dirs = "5.0"
+# 0.33+ 移除了 RefreshKind::new()/ProcessRefreshKind::new()（改用 nothing()），
+# 0.32 没有 nothing()，故代码迁移必须与本次 bump 同批（见 PR 说明）。
+sysinfo = "0.39"
+dirs = "7.0"
 log = "0.4"
 env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 once_cell = "1.19"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 dashmap = "6"
 tokio = { version = "1", features = ["full"] }
 fs2 = "0.4"
-toml = "0.8"
-toml_edit = "0.22"
+toml = "1.1"
+toml_edit = "0.25"
 trash = "5"
 semver = "1"
 # system-proxy：reqwest 的**默认特性**，被 default-features=false 一并关掉——M4 T1d
@@ -76,17 +84,17 @@ semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
 # M4 T1d：cloudflared 下载完整性校验（固定版本 + release 页 SHA256 表比对；
 # 0.10 本就存在于依赖树，升直依不新增传递项）
-sha2 = "0.10"
-zip = "4"
+sha2 = "0.11"
+zip = "8"
 # dsh 会话日志为多帧拼接的 zstd 容器（M0 F1），解码用
-zstd = "0.13"
+zstd = "0.14"
 tauri-plugin-dialog = "2"
 # M2（远程接入）：主进程内嵌 axum 服务器 + 看板静态资源内嵌
 axum = "0.8"
 # include-exclude：支持 #[exclude = ".gitkeep"]（占位文件不嵌入二进制，终审修复轮）
 rust-embed = { version = "8", features = ["include-exclude"] }
 # 配对码 / deviceId 生成
-rand = "0.8"
+rand = "0.10"
 # M3 Task 6（SSE 端点）：BroadcastStream 把 watcher 的 broadcast::Receiver 适配成
 # Stream（sync feature 即含此包装器）；futures 提供 stream::once / StreamExt::chain
 # 组合首帧快照与增量流
@@ -97,14 +105,14 @@ futures = "0.3"
 wait-timeout = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-junction = "1.2"
+junction = "2.1"
 # Console（AttachConsole/SetConsoleTitle 路线 B）、Diagnostics_ToolHelp + FileSystem
 # （父进程链遍历）为 mam-marker helper（src/bin）所需
 # Win32_UI_Input_KeyboardAndMouse（M9R：VkKeyScanW/MapVirtualKeyW 真实键位布局）；
 # Win32_UI_WindowsAndMessaging：win32（窗口枚举）/ mam-marker（跳转 marker）/
 # deep_link（深链）
-windows = { version = "0.57", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
-winreg = "0.52"
+windows = { version = "0.62", features = ["Win32_Security", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+winreg = "0.55"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -120,7 +128,7 @@ strip = true
 tempfile = "3"
 filetime = "0.2"
 # preset_v2 集成测试直接取家目录（stash 测试用）；与主依赖同版本
-dirs = "5.0"
+dirs = "7.0"
 # M2 axum 集成测试：tower ServiceExt::oneshot + http-body-util 读响应体
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

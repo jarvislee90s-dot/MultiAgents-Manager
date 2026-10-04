@@ -37,7 +37,8 @@ pub(crate) fn collect_ancestor_pids(system: &sysinfo::System, pid: u32) -> Vec<u
     })
 }
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, GWL_EXSTYLE,
@@ -213,7 +214,10 @@ unsafe extern "system" fn enum_all_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let mut buf = [0u16; 256];
     let len = GetWindowTextW(hwnd, &mut buf);
     let title = String::from_utf16_lossy(&buf[..len as usize]);
-    ctx.by_pid.entry(pid).or_default().push((hwnd.0, title));
+    ctx.by_pid
+        .entry(pid)
+        .or_default()
+        .push((hwnd.0 as isize, title));
     BOOL(1)
 }
 
@@ -232,7 +236,7 @@ fn all_windows() -> AllWindows {
 /// 聚焦单个窗口：恢复最小化 → 置前，多级降级
 fn force_foreground(hwnd_val: isize) -> bool {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    let hwnd = HWND(hwnd_val);
+    let hwnd = HWND(hwnd_val as *mut core::ffi::c_void);
     unsafe {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -243,7 +247,7 @@ fn force_foreground(hwnd_val: isize) -> bool {
         // AttachThreadInput 前台强抢：把当前线程挂到前台线程输入队列，取得置前资格。
         // 对症：浮窗 focusable(false) 点击不激活本进程（非前台发起）、目标为提权窗口（ChatGPT 链）
         let fg = GetForegroundWindow();
-        if fg.0 != 0 {
+        if !fg.0.is_null() {
             let fg_tid = GetWindowThreadProcessId(fg, None);
             let cur_tid = GetCurrentThreadId();
             if fg_tid != 0
@@ -472,7 +476,9 @@ fn read_window_text(hwnd_val: isize) -> Option<String> {
         let result = (|| -> Option<String> {
             let automation: IUIAutomation =
                 CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
-            let root: IUIAutomationElement = automation.ElementFromHandle(HWND(hwnd_val)).ok()?;
+            let root: IUIAutomationElement = automation
+                .ElementFromHandle(HWND(hwnd_val as *mut core::ffi::c_void))
+                .ok()?;
 
             let try_text = |el: &IUIAutomationElement| -> Option<String> {
                 let pattern = el
@@ -911,11 +917,11 @@ pub fn verify_foreground_tool(
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
-            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+            sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
         );
         unsafe {
             let hwnd = GetForegroundWindow();
-            if hwnd.0 != 0 {
+            if !hwnd.0.is_null() {
                 let mut pid: u32 = 0;
                 GetWindowThreadProcessId(hwnd, Some(&mut pid));
                 let is_target = pid != 0 && foreground_pid_is_tool(system, pid, tool_id);

@@ -47,6 +47,60 @@ fn approval_mark_should_clear(absent_from_snapshot: bool, now_ms: i64, ts_secs: 
     absent_from_snapshot && now_ms - ts_secs * 1000 > APPROVAL_MARK_ABSENCE_CLEAR_MS
 }
 
+/// 陈旧等待标记的**屏读真值过期**阈值（秒）：标记的清除依赖回合推进事件
+///（PostToolUse 系/Stop），但**被拒绝/中断的工具调用不产生任何清除事件**——
+/// claude 拒答后 idle，approval_wait 停留 26 分钟（活体实证），卡片永挂
+/// 「等待批准」、composer 直发全被拦截 = 整会话不可用。90s > 任何重绘间隙
+///（carry-forward 窗 30s 的 3 倍），真实等待期屏上恒有可行动形态不受影响。
+#[cfg(windows)]
+pub(crate) const WAIT_MARK_STALE_SECS: i64 = 90;
+
+/// 陈旧等待标记的**屏读真值过期**（2026-10-03 卡死事故修复，仅 Windows——
+/// 屏读是 Windows 能力，非 Windows 无真值可依、维持不过期保守语义）。
+///
+/// 对每个「标记已超 [`WAIT_MARK_STALE_SECS`]」的会话做一次屏读复核：
+/// - 终端上**仍有可行动形态**（可解析题屏：页签栏/选项块/Review——`advance_stage_
+///   screen_ready`；**或**审批对话框在场——`probe_screen_dialog`）→ 真实等待，
+///   保留标记；
+/// - 两者皆无（claude 已 idle）→ 等待已终结（拒绝/中断的清除事件缺失）→
+///   **清除审批与问题两类标记**（与会话扫描的清除族同口径）。
+///
+/// 屏读失败（attach 不上/进程退出）→ 不清（保守：宁可红卡残留也不误清真实等待）。
+/// `probe_screen` 缝注入（测试传夹具屏，生产传 `read_screen_window`）。
+#[cfg(windows)]
+fn expire_stale_wait_marks_by_screen_truth(
+    all_sessions: &[Session],
+    wait_marks: &mut std::collections::HashMap<(String, String), i64>,
+    q_marks: &mut std::collections::HashMap<(String, String), i64>,
+    now_ts: i64,
+    probe_screen: impl Fn(u32) -> Option<Vec<String>>,
+) {
+    for s in all_sessions {
+        let tool = s.agent_type.tool_id().to_string();
+        let stale_wait = wait_marks
+            .get(&(tool.clone(), s.id.clone()))
+            .is_some_and(|ts| now_ts - ts > WAIT_MARK_STALE_SECS);
+        let stale_q = q_marks
+            .get(&(tool.clone(), s.id.clone()))
+            .is_some_and(|ts| now_ts - ts > WAIT_MARK_STALE_SECS);
+        if !stale_wait && !stale_q {
+            continue;
+        }
+        let Some(lines) = probe_screen(s.pid) else {
+            continue; // 屏读不可用：保守保留（不误清真实等待）
+        };
+        let dialog_present = crate::inject::question::advance_stage_screen_ready(&lines)
+            || crate::inject::dialog::parse_dialog_options(&lines).is_some();
+        if dialog_present {
+            continue; // 真实等待（题屏/Review/审批对话框仍在屏上）
+        }
+        crate::database::dao::approval_wait::clear_wait(&tool, &s.id);
+        crate::database::dao::question_wait::clear_wait(&tool, &s.id);
+        wait_marks.remove(&(tool.clone(), s.id.clone()));
+        q_marks.remove(&(tool.clone(), s.id.clone()));
+    }
+}
+
 /// 审批等待叠加层（T3 抽出为独立函数，F3② 可测缝）：有等待标记 → 强制 Waiting。
 /// 红=等待审批，**覆盖文件推导**——含污染层② codex 停更 300s 的 Waiting→Idle 强转；
 /// 标记清除后自然回落文件推导（无标记不假红）
@@ -518,8 +572,8 @@ fn get_all_sessions_inner() -> SessionsResponse {
         let system = guard.get_or_insert_with(|| {
             log::debug!("Initializing shared System instance");
             System::new_with_specifics(
-                RefreshKind::new().with_processes(
-                    ProcessRefreshKind::new()
+                RefreshKind::nothing().with_processes(
+                    ProcessRefreshKind::nothing()
                         .with_cmd(sysinfo::UpdateKind::Always)
                         .with_cwd(sysinfo::UpdateKind::Always)
                         // exe 路径是 Windows MSIX 形态判定（classify_form）的关键输入：
@@ -532,7 +586,7 @@ fn get_all_sessions_inner() -> SessionsResponse {
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::new()
+            ProcessRefreshKind::nothing()
                 .with_cmd(sysinfo::UpdateKind::Always)
                 .with_cwd(sysinfo::UpdateKind::Always)
                 .with_exe(sysinfo::UpdateKind::Always)
@@ -634,6 +688,16 @@ fn get_all_sessions_inner() -> SessionsResponse {
             .into_iter()
             .map(|(tool, sid, ts)| ((tool, sid), ts))
             .collect();
+    // 陈旧标记的屏读真值过期（2026-10-03 卡死事故：拒绝/中断的工具调用无清除
+    // 事件，标记永挂 → 卡片死锁 + composer 全拦截；仅 Windows，见函数文档）
+    #[cfg(windows)]
+    expire_stale_wait_marks_by_screen_truth(
+        &all_sessions,
+        &mut wait_marks,
+        &mut q_marks,
+        now_ts,
+        |pid| crate::inject::windows_console::read_screen_window(pid).ok(),
+    );
     for session in &mut all_sessions {
         let tool = session.agent_type.tool_id().to_string();
         let action = match hook_events.get(&session.id) {
@@ -2515,5 +2579,92 @@ mod dsh_registration_tests {
         // 注册表完整：8 个工具
         assert_eq!(all_adapters().len(), 8);
         assert!(TOOL_IDS.contains(&"dsh"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod stale_mark_expiry_tests {
+    use super::*;
+
+    fn sess(id: &str, pid: u32) -> Session {
+        Session {
+            id: id.into(),
+            agent_type: crate::session::AgentType::Claude,
+            project_name: "proj".into(),
+            project_path: "/tmp/proj".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Waiting,
+            last_message: None,
+            last_message_role: None,
+            last_activity_at: "2026-10-03T00:00:00Z".into(),
+            pid,
+            cpu_usage: 0.0,
+            active_subagent_count: 0,
+            form: crate::session::ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        }
+    }
+
+    /// **陈旧标记 + 终端 idle（无任何可行动形态）**→ 清除两类标记（活体事故形态：
+    /// 拒答后 idle，审批标记挂 26 分钟，卡片死锁 + composer 全拦截）。
+    /// 还原动作（变异）：删掉过期清除 → maps 不变、本用例先红。
+    #[test]
+    fn stale_marks_cleared_when_screen_has_no_dialog() {
+        let s = sess("s-stale", 101);
+        let now = 1_000_000i64;
+        let mut wait_marks = HashMap::from([(("claude".into(), "s-stale".into()), now - 300)]);
+        let mut q_marks = HashMap::new();
+        // 终端 idle 屏（无题屏/无对话框）
+        let probe = |_pid: u32| Some(vec!["(terminal idle)".to_string()]);
+        expire_stale_wait_marks_by_screen_truth(&[s], &mut wait_marks, &mut q_marks, now, probe);
+        assert!(wait_marks.is_empty(), "陈旧审批标记必须清除");
+        assert!(q_marks.is_empty());
+    }
+
+    /// **陈旧标记 + 屏上仍有可行动形态**（真实等待）→ 保留。
+    #[test]
+    fn fresh_waiting_keeps_marks_when_question_form_on_screen() {
+        let s = sess("s-wait", 102);
+        let now = 1_000_000i64;
+        let mut wait_marks = HashMap::from([(("claude".into(), "s-wait".into()), now - 300)]);
+        let mut q_marks = HashMap::from([(("claude".into(), "s-wait".into()), now - 300)]);
+        // 活体 AUQ 题屏（页签栏锚可解析）= 真实等待
+        let screen = crate::inject::question::live_fixtures::q2_single();
+        let probe = move |_pid: u32| Some(screen.clone());
+        expire_stale_wait_marks_by_screen_truth(&[s], &mut wait_marks, &mut q_marks, now, probe);
+        assert_eq!(wait_marks.len(), 1, "题屏在场 = 真实等待，保留审批标记");
+        assert_eq!(q_marks.len(), 1);
+    }
+
+    /// **未超窗**（新鲜标记）→ 不做屏读、保留（重绘间隙不误清）。
+    #[test]
+    fn fresh_marks_not_expired() {
+        let s = sess("s-fresh", 103);
+        let now = 1_000_000i64;
+        let mut wait_marks = HashMap::from([(("claude".into(), "s-fresh".into()), now - 10)]);
+        let mut q_marks = HashMap::new();
+        let probed = std::cell::Cell::new(false);
+        let probe = |_pid: u32| {
+            probed.set(true);
+            None
+        };
+        expire_stale_wait_marks_by_screen_truth(&[s], &mut wait_marks, &mut q_marks, now, probe);
+        assert!(!probed.get(), "未超窗不做屏读");
+        assert_eq!(wait_marks.len(), 1);
+    }
+
+    /// **屏读失败**（进程退出/attach 不上）→ 保守保留。
+    #[test]
+    fn screen_read_failure_keeps_marks() {
+        let s = sess("s-dead", 104);
+        let now = 1_000_000i64;
+        let mut wait_marks = HashMap::from([(("claude".into(), "s-dead".into()), now - 300)]);
+        let mut q_marks = HashMap::new();
+        let probe = |_pid: u32| None;
+        expire_stale_wait_marks_by_screen_truth(&[s], &mut wait_marks, &mut q_marks, now, probe);
+        assert_eq!(wait_marks.len(), 1, "屏读失败保守保留");
     }
 }

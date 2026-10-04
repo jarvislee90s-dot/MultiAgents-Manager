@@ -273,19 +273,19 @@ mod win {
     pub fn disk_read() -> Option<u32> {
         unsafe {
             let mut scheme: *mut GUID = std::ptr::null_mut();
-            if PowerGetActiveScheme(None::<&HKEY>, &mut scheme).0 != 0 {
+            if PowerGetActiveScheme(None::<HKEY>, &mut scheme).0 != 0 {
                 return None;
             }
             let mut v = 0u32;
             let code = PowerReadACValueIndex(
-                None::<&HKEY>,
+                None::<HKEY>,
                 Some(scheme as *const GUID),
                 Some(&SUB_DISK),
                 Some(&DISKIDLE),
                 &mut v,
             );
             free_scheme(scheme);
-            (code == 0).then_some(v)
+            (code.0 == 0).then_some(v)
         }
     }
 
@@ -293,17 +293,17 @@ mod win {
     pub fn disk_set(v: u32) {
         unsafe {
             let mut scheme: *mut GUID = std::ptr::null_mut();
-            if PowerGetActiveScheme(None::<&HKEY>, &mut scheme).0 != 0 {
+            if PowerGetActiveScheme(None::<HKEY>, &mut scheme).0 != 0 {
                 return;
             }
             let _ = PowerWriteACValueIndex(
-                None::<&HKEY>,
+                None::<HKEY>,
                 scheme as *const GUID,
                 Some(&SUB_DISK),
                 Some(&DISKIDLE),
                 v,
             );
-            let _ = PowerSetActiveScheme(None::<&HKEY>, Some(scheme as *const GUID));
+            let _ = PowerSetActiveScheme(None::<HKEY>, Some(scheme as *const GUID));
             free_scheme(scheme);
         }
     }
@@ -311,7 +311,7 @@ mod win {
     /// scheme 指针由 API 分配，须 LocalFree 释放（防泄漏）
     unsafe fn free_scheme(scheme: *mut GUID) {
         if !scheme.is_null() {
-            let _ = LocalFree(HLOCAL(scheme.cast()));
+            let _ = LocalFree(Some(HLOCAL(scheme.cast())));
         }
     }
 }

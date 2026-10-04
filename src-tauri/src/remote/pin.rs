@@ -34,7 +34,7 @@ pub fn validate_pin(raw: &str) -> bool {
 /// 随机生成：1000..=9999 均匀随机（4 位不头零——与线稿 randPin 口径一致）。
 /// 注意与自填口径的差异：validate_pin 允许 0000，随机生成永不头零
 pub fn generate_pin() -> String {
-    rand::Rng::gen_range(&mut rand::thread_rng(), 1000..=9999).to_string()
+    rand::random_range(1000..=9999).to_string()
 }
 
 /// 过闸判定结果：Allowed 放行；Locked 直接拒绝并带剩余秒数（供 429 retryAfter 文案）

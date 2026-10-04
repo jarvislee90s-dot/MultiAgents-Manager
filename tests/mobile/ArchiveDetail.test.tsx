@@ -294,6 +294,11 @@ describe("ArchiveDetail 软归档与加载更早（体验批二）", () => {
     fireEvent.click(screen.getByTestId("load-more"));
     expect(await screen.findByText("m400")).toBeTruthy();
     expect(requested).toEqual([200, 400]);
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled(); // 锚定原顶部消息
+    // 锚定在被动 effect 里调度（useEffect [messages]），而 findByText 走 MutationObserver
+    // 微任务可先于 effect flush 解析——同步断言是竞态（CI 慢机红过：run 36207251281）。
+    // 条件等待（同 SessionDetail bookmark-jump 的先例）：等被动 effect 落地再断言。
+    await waitFor(() =>
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled() // 锚定原顶部消息
+    );
   });
 });

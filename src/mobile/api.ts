@@ -626,6 +626,22 @@ export interface QuestionInfoView {
    *  （tab=前向切页，实测定案）。缺省/旧后端 → 按 false：多选题不渲染「切换题目」钮，
    *  改渲染「请到终端切题」引导（不假装能发）。 */
   advance?: boolean;
+  /** **←/→ 双向导航**（2026-10-02）：仅 claude 的 ←/→ 键序已活体取证（含 Review
+   *  导航环）。true → 题卡渲染 ◀ 上一题/下一题 ▶ 双钮（单选/多选都渲染）、确认卡
+   *  「返回上一题修改」发 prev；false（opencode/旧后端）→ 维持旧单钮 + tab 回绕。
+   *  缺省 → 按 false 处理（前向兼容）。 */
+  navBoth?: boolean;
+  /** **屏读快照**（2026-10-03 卡面状态权威源）：GET 时终端若停在题屏 →
+   *  {heading, checked, freeText}（前端据此对位当前题并纠偏 mqIndex/勾选/输入框）；
+   *  停在 Review 确认屏 → {review:true}（前端直接进确认卡）；null = 屏读不可用/
+   *  非题屏（前端维持本地状态）。 */
+  screen?: {
+    review?: boolean;
+    heading?: string;
+    checked?: (boolean | null)[];
+    freeText?: string | null;
+    freeTextPresent?: boolean;
+  } | null;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
 }
@@ -644,33 +660,70 @@ export async function fetchSessionQuestion(sessionId: string): Promise<QuestionI
   return (await r.json()) as QuestionInfoView;
 }
 
-/** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换；
+/** 问答应答动作：select=单选点选项（数字直接提交）；toggle=多选勾选切换（**claude
+ *  走闭环阶段机**：屏读定位 → 空格 → 屏读校验翻转，2026-09-24 数字路径废止）；
  *  submit=多选提交（**阶段机闭环**：屏读确认每段后才推进）；
  *  cancel=取消问题（Esc）；freeText=自由作答（**仅 claude**，阶段机闭环：
  *  定位 `Type something` 行 → 文本 → 回车）；
- *  advance=多题切换题目（**仅 opencode**，tab 前向切页——纯导航，不触碰勾选态）。 */
+ *  advance=多题切换题目（opencode=tab 前向切页；claude=**←/→ 双向导航**
+ *  `direction` 指定上一题/下一题——读屏分类题干区变化，均纯导航，不触碰勾选态）。 */
 export type QuestionAnswerAction =
   "select" | "toggle" | "submit" | "cancel" | "freeText" | "advance";
 
 /** 阶段机动作的**段名**（回执 `stage` 字段的取值；与后端
  *  `remote::api::QUESTION_STAGE_*` 常量逐字对应，勿漂移）。
  *  提交链推进序：`submit-row`→`review`→`confirm`→`receipt`；
- *  自由作答：`free-row`→`free-text`。 */
+ *  自由作答：`free-row`→`free-text`；claude 切勾链：`toggle-row`；切题：`advance`。 */
 export type QuestionAnswerStage =
-  "submit-row" | "review" | "confirm" | "receipt" | "free-row" | "free-text";
+  | "submit-row"
+  | "review"
+  | "confirm"
+  | "receipt"
+  | "free-row"
+  | "free-text"
+  | "toggle-row"
+  | "advance"
+  | "select";
 
 /** 问答应答回执（POST /session-question/answer 响应，HTTP 200 恒定，语义在 body.status）。
  *
  *  **丁T5 起 status 仍是既有两词**（`key_sent` / `failed`），新增字段全部是**附加**
  *  ——故旧前端（只读 status）行为不变：
  *  - `key_sent`：按键已投递。**单键动作**（select/toggle/cancel）到此为止；
- *    **阶段机动作**（submit/freeText）走完整条闭环时带 `done:true` + `stage`（走完的
- *    段）+ `verified`（终态回执三态：true=屏读到终态锚；false=读到屏但未见锚；
- *    null/缺省=读屏不可用。**false 与 null 都不是「失败」，是「未确认」**）；
+ *    **阶段机动作**（submit/freeText/claude 的 toggle）走完整条闭环时带 `done:true` +
+ *    `stage`（走完的段）+ `verified`（终态回执三态：true=屏读到终态锚；false=读到屏
+ *    但未见锚；null/缺省=读屏不可用。**false 与 null 都不是「失败」，是「未确认」**）；
+ *    **claude 的 toggle** 另带 `checked`（屏读核验到的目标行新勾选态——终端真值，
+ *    卡面以它为准同步；null/缺省=无法核验，卡面回落盲翻）；
  *  - `failed`：投递失败 / in-flight 忙让位 / **阶段机中止**。`aborted:true` + `stage`
  *    标记后者（`error` 是带段名的中文文案，用户可读）。 */
 export type QuestionAnswerResult =
-  | { status: "key_sent"; done?: boolean; stage?: QuestionAnswerStage; verified?: boolean | null }
+  | {
+      status: "key_sent";
+      done?: boolean;
+      stage?: QuestionAnswerStage;
+      verified?: boolean | null;
+      checked?: boolean | null;
+      /** claude 切题（2026-09-24；2026-10-02 ←/→ 双向）：终端是否已切题。`false` =
+       *  下一题请求但已在 Review 确认屏、零按键（已在终点）——前端**不**推进。
+       *  缺省（opencode 等旧路径）视为已前移（既有行为不变） */
+      advanced?: boolean;
+      /** claude 切题（2026-10-02）：方向 echo（prev/next）——前端移动 mqIndex 需
+       *  确认 echo 与请求 direction 一致（opencode 旧回执无此字段 → 维持回绕行为） */
+      direction?: string;
+      /** claude 交互回执的**屏读快照**（2026-10-03 屏读为准）：toggle=切勾后整屏、
+       *  select=发后整屏、advance=新题屏——TS 行内容/勾选态随回执回传（交互后核对） */
+      screen?: {
+        heading: string;
+        checked: (boolean | null)[];
+        freeText: string | null;
+        freeTextPresent?: boolean;
+      };
+      /** claude 多选自由作答（2026-10-03 屏读为准）：该行的屏上文本（勾选态复用
+       *  上方 `checked` 字段——与 toggle 回执同字段同语义）；null = 收尾读屏失败
+       *  （未核验，前端不得虚报已写入） */
+      text?: string | null;
+    }
   | { status: "failed"; error: string; aborted?: boolean; stage?: QuestionAnswerStage };
 
 /** 问答应答**错误码 → 用户可读中文文案**（丁T6 复评抽出：卡内与 composer 两条入口
@@ -703,14 +756,19 @@ export async function sessionQuestionAnswer(
   index?: number,
   text?: string,
   /** 批次戊 E4-E6 多题交互：select/toggle 作用在第几题（0 起） */
-  questionIndex?: number
+  questionIndex?: number,
+  /** claude 切题方向（2026-10-02 ←/→ 双向导航；仅 advance 消费，缺省 next） */
+  direction?: "prev" | "next",
+  /** 覆盖写入（2026-10-02 多选自由作答编辑；仅 freeText 消费）：true = 该行已有
+   *  内容时先退格清空再打新字；缺省 false = 已有内容即中止 */
+  overwrite?: boolean
 ): Promise<QuestionAnswerResult> {
   let r: Response;
   try {
     r = await fetch("/m/api/v1/session-question/answer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, action, index, text, questionIndex }),
+      body: JSON.stringify({ sessionId, action, index, text, questionIndex, direction, overwrite }),
     });
   } catch (e) {
     throw new ApiError(null, `session-question/answer 网络异常: ${String(e)}`);

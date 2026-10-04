@@ -52,6 +52,21 @@ jobs:
               - "rust-toolchain.toml"
               - ".github/workflows/**"
 
+  # tauri 版本对齐门禁：tauri CLI 的同一条检查藏在 pnpm tauri build 内部，
+  # 要等 apt-get + Rust 工具链 + 编译才失败（PR #86/#91 各跑了约 2.5 分钟才吐一行 mismatch）。
+  # 本 job 只读两个锁文件，约 10 秒失败并直接指名哪几对不一致。
+  parity:
+    name: Tauri version parity
+    runs-on: ubuntu-latest
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-tauri-parity.mjs
+
   frontend:
     name: Frontend Checks
     runs-on: ubuntu-latest

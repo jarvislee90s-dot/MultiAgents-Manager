@@ -189,7 +189,7 @@ pub fn is_online(registry_hit: bool, last_seen_at: i64, now: i64) -> bool {
 /// 不可位置式（生成器消费后复用会让不同设备撞行）
 fn random_hex_16() -> String {
     let mut b = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    rand::fill(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -273,6 +273,9 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
                 None
             }
         }),
+        // **能力开关表**（2026-10-03 数字直选自适应）：生产单例共享（应用生命周期；
+        // 探测一次终身复用，见 inject::capability 模块文档）
+        capability_table: crate::inject::capability::new_table(),
         // M3 Task 1：host 载荷同源直调（P8b 读 settings + enabledTools 读 DB，注入缝供测试）
         host_source: Box::new(host_info),
         // M3 Task 7：会话内容同源直调（八工具统一出口 content::read_session_messages，
@@ -913,7 +916,7 @@ fn platform_id() -> &'static str {
 /// 不同的 bootId 即自行清空，页面刷新（同一进程）则原样恢复
 static BOOT_ID: Lazy<String> = Lazy::new(|| {
     let mut b = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    rand::fill(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 });
 

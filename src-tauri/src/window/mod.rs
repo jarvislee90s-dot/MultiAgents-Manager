@@ -108,7 +108,7 @@ pub fn activate_agent_app(
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+        ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
     );
 
     // pid 存活时先提取其 .app bundle（深度链接前置条件判定 + 阶段 2 复用）

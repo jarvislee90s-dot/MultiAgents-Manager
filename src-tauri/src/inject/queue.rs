@@ -1131,6 +1131,7 @@ mod tests {
             // 无法判定；语义见 remote::server::DialogProbeFn）
             dialog_probe: std::sync::Arc::new(|_, _| None),
             screen_probe: std::sync::Arc::new(|_, _| None),
+            capability_table: crate::inject::capability::new_table(),
             // R5 一键 resume spawn 缝（Task 11）：flush 路径不消费，注 no-op 桩（零真开窗）
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
             archive_source: Box::new(Vec::new),

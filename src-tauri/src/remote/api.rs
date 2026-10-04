@@ -3232,13 +3232,14 @@ pub async fn session_question(
             );
         }
     };
-    let (questions, source, tool_id) = match scan {
+    let (questions, source, tool_id, session_pid) = match scan {
         Some((session, hit)) => (
             hit.questions,
             hit.source,
             session.agent_type.tool_id().to_string(),
+            Some(session.pid),
         ),
-        None => (Vec::new(), "", String::new()),
+        None => (Vec::new(), "", String::new(), None),
     };
     // T3：工具键序档（前端据此决定渲染可作答按钮还是只读卡）——
     // `answerable=false` 时前端渲染只读卡 + 引导终端作答（zcode/dsh 等未实测工具；
@@ -3250,13 +3251,47 @@ pub async fn session_question(
     // 独立于 `answerable` 的理由：codex/opencode 的**点选**已实测（answerable=true）
     // 但**自由作答**未定案——两者是不同的能力面，不能用一个布尔表示。
     let free_text_supported = crate::inject::question::free_text_supported(&tool_id);
-    // **批次戊 E4-E6**：多题交互能力（kimi K-5 / codex Tab 备注 / opencode tab 切页
-    // ——三家键序已实机定案）；claude 多题未探（spec §1 非目标边界）保持只读。
-    let multi_question = matches!(tool_id.as_str(), "kimi" | "codex" | "opencode");
-    // **切换题目**（2026-09-23 错位修复）：多题卡多选题的显式切页动作——仅 opencode
-    // （tab=前向切页，戊探A ①定案）。kimi/codex 的多题切页键未验 → 旗标 false，前端
-    // 对这两家的多选题渲染「请到终端切题」引导而不是切换按钮。单题卡无页可切，恒 false。
-    let advance = tool_id == "opencode" && questions.len() > 1;
+    // **批次戊 E4-E6 + 2026-09-24**：多题交互能力（kimi K-5 / codex Tab 备注 /
+    // opencode tab 切页 / claude Next+回车切题——用户实机取证 2.1.278）。
+    let multi_question = matches!(tool_id.as_str(), "kimi" | "codex" | "opencode" | "claude");
+    // **切换题目**（2026-09-23 错位修复 + 2026-09-24 claude 接入）：多题卡多选题的
+    // 显式切页动作——opencode（tab=前向切页，戊探A ①定案）与 claude（走位到尾部
+    // 推进行 `Next` + 回车 + 读屏分类，阶段机 run_advance_stages）。kimi/codex 的
+    // 多题切页键未验 → 旗标 false，前端对这两家的多选题渲染「请到终端切题」引导。
+    // 单题卡无页可切，恒 false。
+    let advance = matches!(tool_id.as_str(), "opencode" | "claude") && questions.len() > 1;
+    // **←/→ 双向导航 + 多选自由作答**（2026-10-02/03，用户裁决 ←/→ 通用对应上一题/
+    // 下一题）：仅 claude 的 ←/→ 键序已活体取证（含 Review 导航环）。opencode 的切页
+    // 是 tab **前向**（会回绕），prev 语义不成立——前端据本旗标分流：navBoth=true
+    // 渲染 ◀/▶ 双钮（多题卡）+ 多选卡自由作答输入框（单题/多题皆可——内联编辑
+    // 编排与题数无关），false 时维持旧单钮（opencode tab，行为零变化）。
+    let nav_both = tool_id == "claude";
+    // **屏读快照**（2026-10-03 卡面状态权威源）：终端当前停在题屏 → 回传勾选态/
+    // 自由作答/题干（前端对位到载荷题并纠偏 mqIndex/状态）；停在 Review 确认屏 →
+    // {review:true}（前端直接进确认卡）。claude-only（屏读 Windows 能力 + 解析器
+    // 形态族）；屏读失败/非题屏 → null（前端维持本地状态）。
+    let screen_snapshot = match session_pid {
+        Some(pid) if tool_id == "claude" && !questions.is_empty() => {
+            let st2 = st.clone();
+            let tool2 = tool_id.clone();
+            tokio::task::spawn_blocking(move || {
+                (st2.screen_probe)(&tool2, pid).and_then(|lines| {
+                    if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
+                        return Some(snapshot_to_json(&snap));
+                    }
+                    matches!(
+                        crate::inject::question::probe_review_screen(&lines),
+                        crate::inject::question::ScreenStep::Ready(_)
+                    )
+                    .then(|| serde_json::json!({ "review": true }))
+                })
+            })
+            .await
+            .ok() // JoinError
+            .and_then(|inner| inner) // 屏读/解析失败 → None（前端维持本地状态）
+        }
+        _ => None,
+    };
     json_no_store(
         StatusCode::OK,
         serde_json::json!({
@@ -3268,6 +3303,11 @@ pub async fn session_question(
             "multiQuestion": multi_question,
             // 切换题目能力旗标（缺省按 false → 不渲染切换钮，旧后端前向兼容）
             "advance": advance,
+            // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
+            "navBoth": nav_both,
+            // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
+            // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
+            "screen": screen_snapshot,
             "questions": questions
                 .iter()
                 .map(|q| serde_json::json!({
@@ -3317,6 +3357,16 @@ pub struct SessionQuestionAnswerReq {
     /// 零破坏）；越界 → 400 bad_index。
     #[serde(default)]
     pub question_index: Option<usize>,
+    /// **切题方向**（2026-10-02 ←/→ 双向导航；仅 action="advance" 消费）：`"prev"`
+    /// = 模拟 `←` 上一题（Review 屏上退回上一题修改），`"next"` = 模拟 `→` 下一题
+    /// （末题直达 Review）。缺省 `"next"`（旧客户端零破坏）；非法值 → 400。
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// **覆盖写入**（2026-10-02 多选自由作答编辑；仅 action="freeText" 消费）：
+    /// true = 该行已有内容时先退格清空再打新字（「编辑」按钮的覆盖语义）；
+    /// 缺省 false = 已有内容即中止（防误触，旧客户端零破坏）。
+    #[serde(default)]
+    pub overwrite: Option<bool>,
 }
 
 /// 问答阶段机的**阶段名**（回执里回报「走到哪一段停住」，前端据此显示进度/中止原因）。
@@ -3332,6 +3382,12 @@ pub const QUESTION_STAGE_RECEIPT: &str = "receipt";
 pub const QUESTION_STAGE_FREE_ROW: &str = "free-row";
 /// 见 [`QUESTION_STAGE_SUBMIT_ROW`]
 pub const QUESTION_STAGE_FREE_TEXT: &str = "free-text";
+/// claude 多选**闭环切勾**段的段名（2026-09-24：`run_toggle_stages` 的中止段名——
+/// 前端 `QUESTION_STAGE_LABELS` 同步收词）。命名对齐既有「-row」走位段风格。
+pub const QUESTION_STAGE_TOGGLE: &str = "toggle-row";
+/// claude 多题**切题**段的段名（2026-09-24：`run_advance_stages` 的段名——前端
+/// `QUESTION_STAGE_LABELS` 同步收词）。
+pub const QUESTION_STAGE_ADVANCE: &str = "advance";
 
 /// 屏读轮询步长（毫秒）——D20 起五路共用一处（原名 `MENU_POLL_STEP_MS`，已随常量族迁移）
 use crate::inject::timing::POLL_STEP_MS;
@@ -3392,6 +3448,14 @@ pub async fn session_question_answer(
         Some(a) => a,
         None => return bad_request(),
     };
+    // 切题方向（2026-10-02 ←/→ 双向导航）：仅 advance 消费；非法值 400；缺省 next
+    // （旧客户端零破坏）
+    let direction = match req.direction.as_deref() {
+        None | Some("next") => crate::inject::question::NavDirection::Next,
+        Some("prev") => crate::inject::question::NavDirection::Prev,
+        Some(_) => return bad_request(),
+    };
+    let overwrite = req.overwrite.unwrap_or(false);
     // select/toggle 必带序号；freeText 必带非空文本；submit/cancel 不消费附加参数
     if matches!(
         action,
@@ -3405,19 +3469,23 @@ pub async fn session_question_answer(
     // ——且 400 比 200 failed 更符合「参数就不对」的语义）
     let free_text: Option<String> = if action == crate::inject::question::AnswerAction::FreeText {
         let raw = req.text.as_deref().unwrap_or_default();
+        // **清空模式**（2026-10-03）：空文本 + overwrite=true = 只清空不打新字——
+        // 放行（归一后仍为空，编排的 clearing_only 分支接管）；其余空文本维持 400
+        if raw.trim().is_empty() && !overwrite {
+            return bad_request();
+        }
         // **两道判空**（顺序要紧）：
         // ① 原文 trim 后为空 → 用户没输入任何可见字符（含「只敲了回车/空格」）→ 400。
         //    必须先判原文：归一会把换行变成**字面 `\n` 两字符**，只看归一产物的话
         //    「只敲了一个回车」会变成一段「合法的可见文本」被当成答案发出去——
         //    那不是用户的意思。
-        if raw.trim().is_empty() {
-            return bad_request();
-        }
+        // ① 原文空且非清空模式已在上方 400（清空模式 = 空文本 + overwrite）。
         // ② 归一（注入通道唯一出口的安全面）：换行 → 字面 `\n`、剥 C0/DEL/C1。
         //    之后**不加** `[mobile]` 签名——作答文本不是消息。
         let norm = crate::inject::normalize::normalize_newlines(raw);
         // 归一**后**再判一次：纯控制字符输入（如只有 ESC）归一会把它剥光 → 空
-        if norm.trim().is_empty() {
+        //（清空模式放行——同上）
+        if norm.trim().is_empty() && !overwrite {
             return bad_request();
         }
         Some(norm)
@@ -3438,13 +3506,22 @@ pub async fn session_question_answer(
             return Err("no_question");
         };
         let tool_id = session.agent_type.tool_id();
-        // 「结论不超证据」→ 批次戊 E4-E6 更新：kimi（K-5 数字直选+自动推进+Review
-        // 汇总屏）/ codex（数字即答+Tab 备注+末题 submit all）/ opencode（tab 切页+
-        // Confirm 页提交）的多题形态已实机定案 → **交互放行**；claude 多题键序未探
-        // （spec §1 非目标边界）与其余工具维持只读（本分支是直调 API 的兜底防线）
+        // 「结论不超证据」→ 批次戊 E4-E6 + 2026-09-24 更新：kimi（K-5 数字直选+自动
+        // 推进+Review 汇总屏）/ codex（数字即答+Tab 备注+末题 submit all）/ opencode
+        // （tab 切页+Confirm 页提交）/ claude（空格切勾+Next 回车切题——用户实机取证
+        // 2.1.278）的多题形态定案 → **交互放行**；其余工具维持只读（本分支是直调
+        // API 的兜底防线）
         let multi_question = hit.questions.len() > 1;
-        if multi_question && !matches!(tool_id, "kimi" | "codex" | "opencode") {
+        if multi_question && !matches!(tool_id, "kimi" | "codex" | "opencode" | "claude") {
             return Err("multi_questions");
+        }
+        // claude 的切题动作（2026-09-24）：阶段机（走位到 Next+回车+分类），只对
+        // 多题载荷有意义——单题载荷上的 advance 是参数错（400，防误触走位提交）
+        if action == crate::inject::question::AnswerAction::Advance
+            && tool_id == "claude"
+            && !multi_question
+        {
+            return Err("bad_request");
         }
         // 多题：select/toggle 作用在 `questionIndex` 指定的题（0 起缺省 0；越界 400）
         let q_idx = req.question_index.unwrap_or(0);
@@ -3491,13 +3568,18 @@ pub async fn session_question_answer(
                 },
             )?;
         }
-        // 单键动作才取静态序列；阶段机动作（submit/freeText）序列留空（由编排产生）。
+        // 单键动作才取静态序列；阶段机动作（submit/freeText/**claude 的 toggle 与
+        // advance**）序列留空（由编排产生）。claude toggle 的静态数字路径 2026-09-24
+        // 废止（用户实机推翻 K8）——切勾走 run_toggle_stages（空格 + 闭环 + 屏读校验）；
+        // claude advance 走 run_advance_stages（走位到 Next + 回车 + 分类）。
         // **E4② kimi 多题 DigitAdvance**（A3 禁令）：多题形态的 Select = `[数字]`
         // （直选+自动推进下一题，**禁尾 Enter**——Enter 会误作用下一题），
         // 不走单题的两段式 `[数字, enter]`
         let seq = match action {
             crate::inject::question::AnswerAction::Submit
             | crate::inject::question::AnswerAction::FreeText => Vec::new(),
+            crate::inject::question::AnswerAction::Toggle if tool_id == "claude" => Vec::new(),
+            crate::inject::question::AnswerAction::Advance if tool_id == "claude" => Vec::new(),
             crate::inject::question::AnswerAction::Select
                 if tool_id == "kimi" && multi_question =>
             {
@@ -3516,7 +3598,7 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id))
+        Ok((session, seq, q, tool_id, multi_question))
     })
     .await
     {
@@ -3529,7 +3611,7 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool) = match lookup {
+    let (session, sequence, q_for_plan, q_tool, multi_flow) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -3538,7 +3620,9 @@ pub async fn session_question_answer(
             // - multi_questions（409）：多问题只读（探测未测面不出手）
             // - tool_readonly（409，T3）：该工具问答键序未实测（zcode/dsh 等）→ 只读卡
             // - bad_index（400）：select/toggle 序号越界 / submit 用在单选题
-            let status = if code == "bad_index" {
+            // - bad_request（400）：域外用法（claude 单题载荷上的 advance——切题只对
+            //   多题有意义，防误触走位提交）
+            let status = if code == "bad_index" || code == "bad_request" {
                 StatusCode::BAD_REQUEST
             } else {
                 StatusCode::CONFLICT
@@ -3555,10 +3639,21 @@ pub async fn session_question_answer(
     let pid = session.pid;
     let answer_sid = sid.clone();
     // 阶段机计划（走位上限依赖选项数——在会话扫描之后才有，故在此构造）
-    let stage_plan = StagePlan::for_action(action, &q_for_plan, q_tool);
+    let stage_plan = StagePlan::for_action(
+        action,
+        req.index,
+        direction,
+        overwrite,
+        multi_flow,
+        &q_for_plan,
+        q_tool,
+    );
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
     let tool_for_dispatch = tool.clone();
+    // 切勾目标身份核验的题干（评审 I1）：多题卡当前题的 question 文本，随计划
+    // 传给分派器（run_toggle_stages 第 1 段与屏面题干比对，不一致=已手动切题→中止）
+    let expected_question = q_for_plan.question.clone();
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
     // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
     let attempt = tokio::task::spawn_blocking(move || {
@@ -3572,6 +3667,7 @@ pub async fn session_question_answer(
             &sequence,
             free_text.as_deref(),
             &stage_plan,
+            &expected_question,
         ))
     })
     .await;
@@ -3654,6 +3750,124 @@ pub async fn session_question_answer(
                 }),
             )
         }
+        QuestionDispatch::ToggleDone {
+            checked,
+            verified,
+            screen,
+        } => {
+            // 切勾闭环：status=key_sent + checked/verified——前端用 `checked` 同步
+            // 本地勾选态（屏读真值，替代「盲翻本地 Set」）；verified=false 表示
+            // 键已发出但无法屏读核验（不谎报成功）
+            let result = if verified {
+                "ok"
+            } else {
+                "ok:toggle-unverified"
+            };
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                format!("{audit_label}::{}", QUESTION_STAGE_TOGGLE).as_str(),
+                "answer",
+                result,
+            );
+            let screen_json = screen.as_ref().map(snapshot_to_json);
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": QUESTION_STAGE_TOGGLE,
+                    "checked": checked,
+                    "verified": verified,
+                    "screen": screen_json,
+                }),
+            )
+        }
+        QuestionDispatch::AdvanceDone {
+            advanced,
+            direction,
+            snapshot,
+        } => {
+            // 切题闭环：status=key_sent + advanced + direction（false = Next 已在
+            // Review 屏零按键——前端**不**推进，停在确认卡；Prev 在 Review 屏会真的
+            // 退回上一题，advanced=true）。`screen` = 新题屏读快照（卡面状态权威源）
+            let dir_word = match direction {
+                crate::inject::question::NavDirection::Prev => "prev",
+                crate::inject::question::NavDirection::Next => "next",
+            };
+            let result = if advanced { "ok" } else { "ok:already-review" };
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                format!("{audit_label}::{}:{dir_word}", QUESTION_STAGE_ADVANCE).as_str(),
+                "answer",
+                result,
+            );
+            let screen = snapshot.as_ref().map(snapshot_to_json);
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": QUESTION_STAGE_ADVANCE,
+                    "advanced": advanced,
+                    "direction": dir_word,
+                    "screen": screen,
+                }),
+            )
+        }
+        QuestionDispatch::MultiFreeTextDone { text, checked } => {
+            // 多选自由作答闭环：回执带**屏读真值**（该行屏上文本 + 勾选态）——前端
+            // 以它为准记录（屏读为准原则），不采用本地发送文本
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                format!("{audit_label}::{}", QUESTION_STAGE_FREE_TEXT).as_str(),
+                "answer",
+                "ok:receipt-unverifiable",
+            );
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "done": true,
+                    "stage": QUESTION_STAGE_FREE_TEXT,
+                    "text": text,
+                    "checked": checked,
+                }),
+            )
+        }
+        QuestionDispatch::SelectDone { screen } => {
+            // 单选 select：数字已发（无核验语义）+ 发后屏读快照随回执
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &format!("{audit_label}::select"),
+                "answer",
+                "ok",
+            );
+            let screen_json = screen.as_ref().map(snapshot_to_json);
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "key_sent",
+                    "stage": "select",
+                    "screen": screen_json,
+                }),
+            )
+        }
         QuestionDispatch::Aborted { stage, error } => {
             // **中止**：与 failed 同槽（status=failed），但带 aborted/stage——前端能
             // 精确渲染「进行到哪一段停住」，旧前端按 failed 的 error 文案走（不变）
@@ -3711,8 +3925,12 @@ enum StagePlan {
     SingleKey,
     /// 多选提交阶段机；`max_down_steps` = 走位上限（选项数 + 2）
     Submit { max_down_steps: usize },
-    /// 自由作答阶段机
+    /// 自由作答阶段机（单题形态）
     FreeText,
+    /// **claude 多选题自由作答阶段机**（2026-10-02 活体取证）：走位到勾选框
+    /// 「Type something」行 → 字符通道打字（内联编辑）→ 屏读核验「文字入行 + 勾选
+    /// 保持」→ **零后续键**（回车会取消勾选；切题时自然保存）
+    ClaudeMultiFreeText { overwrite: bool },
     /// **kimi 多选/多题提交阶段机**（批次戊 E4）：Review 在场判读 → tab →
     /// Review 汇总屏 → 屏上编号确认 → 终态
     KimiSubmit,
@@ -3728,6 +3946,19 @@ enum StagePlan {
     /// **opencode 多选提交阶段机**（批次戊 E6，2026-09-23 接线）：首段屏读
     /// 「Confirm 已在场则跳过 tab」→（不在场才 tab）→ Confirm 页 → enter 提交
     OpencodeSubmit,
+    /// **claude 多选闭环切勾阶段机**（2026-09-24）：屏读定位 → 方向键走位（每步
+    /// 复核）→ 空格 → 屏读校验翻转。`target` = 0 起的模型选项下标（数字路径已被
+    /// 用户实机推翻，切勾必须经此编排）
+    ClaudeToggle { target: usize },
+    /// **claude 单选 select 编排**（2026-10-03）：前置焦点守卫（光标在自由作答行
+    /// → `↑` 移出再发数字）→ 数字直答。发后语义不变（无核验——自动推进未取证）
+    ClaudeSelect { index: usize },
+    /// **claude 多题切题阶段机**（2026-09-24 立项；2026-10-02 重构为 ←/→ 双向
+    /// 导航，走位+回车路径退役）：发 `→`/`←` + 读屏分类（题干区变化 / Review）。
+    /// `direction` = 导航方向（下一题/上一题）
+    ClaudeAdvance {
+        direction: crate::inject::question::NavDirection,
+    },
 }
 
 impl StagePlan {
@@ -3739,11 +3970,22 @@ impl StagePlan {
     /// 未生效的情形不会白跑——上限只是**死循环兜底**，正常路径在每步复核里提前停手）。
     fn for_action(
         action: crate::inject::question::AnswerAction,
+        index: Option<usize>,
+        direction: crate::inject::question::NavDirection,
+        overwrite: bool,
+        multi_flow: bool,
         q: &crate::inject::question::Question,
         tool: &str,
     ) -> Self {
         use crate::inject::question::AnswerAction as A;
         match (action, tool) {
+            // 2026-09-24：claude 多选切勾走阶段机（数字路径废止）——target 由请求
+            // 的 index 给（参数校验已保证 toggle 必带 index，此处兜底 0 不可达）
+            (A::Toggle, "claude") => Self::ClaudeToggle {
+                target: index.unwrap_or(0),
+            },
+            // 2026-10-02：claude 多题切题 = ←/→ 双向导航（走位+回车路径退役）
+            (A::Advance, "claude") => Self::ClaudeAdvance { direction },
             // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
             (A::Submit, "kimi") => Self::KimiSubmit,
             // E6：opencode 多选提交阶段机（2026-09-23 接线——此前 opencode 的 Submit
@@ -3752,6 +3994,17 @@ impl StagePlan {
             (A::FreeText, "kimi") => Self::KimiFreeText,
             (A::FreeText, "codex") => Self::CodexNotes,
             (A::FreeText, "opencode") => Self::OpencodeOwnAnswer,
+            // 2026-10-02/03：claude 自由作答路由——**多题流子题（含单选）与单题多选**
+            // 走勾选框行内联编辑编排（数字定位在多题/多选屏无效；单选子题勾选兜底
+            // 自动跳过——无勾选框形态）；**单题单选**维持既有数字定位编排（K4-K7 定案）
+            (A::FreeText, "claude") if multi_flow || q.multi_select => {
+                Self::ClaudeMultiFreeText { overwrite }
+            }
+            // 2026-10-03：claude 单选 select 走前置焦点守卫编排（光标在自由作答行
+            // 时数字会被当文本吃进输入框——用户实测 bug）
+            (A::Select, "claude") => Self::ClaudeSelect {
+                index: index.unwrap_or(0),
+            },
             (A::Submit, _) => Self::Submit {
                 max_down_steps: q.options.len() + 2,
             },
@@ -3771,6 +4024,36 @@ enum QuestionDispatch {
     StageDone {
         stage: &'static str,
         receipt_seen: Option<bool>,
+    },
+    /// **claude 多选切勾闭环**的结论（2026-09-24）：`checked` = 屏读核验到的目标行
+    /// 新勾选态（`None` = 键已发出但读不到屏无法核验——不谎报也不误报失败）；
+    /// `verified` = 勾选态确实翻转
+    ToggleDone {
+        checked: Option<bool>,
+        verified: bool,
+        /// 切勾后整屏快照（2026-10-03 屏读为准——TS 行内容随回执回传）
+        screen: Option<crate::inject::question::QuestionScreenSnapshot>,
+    },
+    /// **claude 单选 select** 的结论：发后整屏快照（纯采集不核验——TS 行内容随
+    /// 回执回传，屏读为准原则的交互后传播面）
+    SelectDone {
+        screen: Option<crate::inject::question::QuestionScreenSnapshot>,
+    },
+    /// **claude 多题切题闭环**的结论（2026-09-24 立项；2026-10-02 ←/→ 双向）：
+    /// `advanced` = 终端已切题（另一题页或 Review 确认屏——前端按 `direction` 移动
+    /// mqIndex）；`false` = Next 请求但已在 Review 屏、零按键（已在终点）。
+    /// `direction` = echo（前端本就知道发了什么，回带用于审计与调试）
+    AdvanceDone {
+        advanced: bool,
+        direction: crate::inject::question::NavDirection,
+        snapshot: Option<crate::inject::question::QuestionScreenSnapshot>,
+    },
+    /// **claude 多选自由作答闭环**的结论（2026-10-03）：`text`/`checked` = 该行的
+    /// **屏读真值**（内联编辑后的屏上文本 + 勾选态）——前端以它为准记录，不用本地
+    /// 发送文本（屏读为准原则）
+    MultiFreeTextDone {
+        text: Option<String>,
+        checked: Option<bool>,
     },
     /// 阶段机**中止**在某一段（`error` 是带段名的中文文案）
     Aborted { stage: &'static str, error: String },
@@ -3872,6 +4155,51 @@ where
 /// 反推失败（键序不在预期形态内）→ 用阶段机的首个可能的段名兜底（宁可粗一点，
 /// 也不编一个假的精确位置——文案里的中文说明才是给用户的）。
 #[allow(clippy::too_many_arguments)]
+/// 阶段机臂共用的**屏读探针**构造（同一 probe/terminal/Closures 三件套在 6+ 个
+/// 臂里重复——评审 F2 收口；前缀仅进日志定位）
+fn question_probe<'a>(
+    st: &'a crate::remote::server::RemoteState,
+    tool: &'a str,
+    pid: u32,
+) -> impl Fn(&'static str) -> Option<Vec<String>> + 'a {
+    move |stage: &'static str| {
+        (st.screen_probe)(tool, pid).or_else(|| {
+            log::debug!("问答阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
+            None
+        })
+    }
+}
+
+/// 阶段机臂共用的**终端缝**构造（发键后固定 `SUBMIT_DELAY_MS` 等重绘）。
+#[allow(clippy::type_complexity)] // Closures 三泛型是 mode::Closures 的固有形态
+fn question_terminal<'a>(
+    read: impl FnMut() -> Option<Vec<String>> + 'a,
+    injector: &'a dyn crate::inject::engine::Injector,
+    pid: u32,
+    spec: &'a crate::inject::families::FamilySpec,
+) -> crate::inject::mode::Closures<
+    impl FnMut() -> Option<Vec<String>> + 'a,
+    impl FnMut(&str) -> Result<(), String> + 'a,
+    impl FnMut() + 'a,
+> {
+    crate::inject::mode::Closures {
+        read,
+        send: move |key: &str| {
+            injector.locate_and_send_key_spec(pid, key, spec)?;
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ));
+            Ok(())
+        },
+        settle: || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ))
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // 阶段机臂的缝参数（评审前已 9 个；multi_flow 为本批新增的有语义参数）
 fn dispatch_question_action(
     st: &Arc<RemoteState>,
     tool: &str,
@@ -3881,8 +4209,29 @@ fn dispatch_question_action(
     sequence: &[String],
     free_text: Option<&str>,
     plan: &StagePlan,
+    expected_question: &str,
 ) -> QuestionDispatch {
     match plan {
+        StagePlan::ClaudeSelect { index } => {
+            // 单选 select 前置焦点守卫（2026-10-03）：光标在自由作答行 → ↑ 移出再
+            // 发数字；发后语义不变（KeySent，无核验——自动推进未取证）
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = question_terminal(|| probe("read"), injector, pid, spec);
+            match crate::inject::question::run_select_stages(
+                *index,
+                || poll_question_stage(|| probe("select"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            ) {
+                Ok(_) => {
+                    // **发后纯采集**（不核验——自动推进语义不变）：整屏快照随回执
+                    // 回传（屏读为准原则的交互后传播面）
+                    let snapshot = probe("post")
+                        .and_then(|l| crate::inject::question::question_screen_snapshot(&l));
+                    QuestionDispatch::SelectDone { screen: snapshot }
+                }
+                Err(e) => dispatch_abort(e),
+            }
+        }
         StagePlan::SingleKey => {
             // 逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
             // 前端按 failed{error} 提示用户核对终端状态后重试）
@@ -3896,9 +4245,32 @@ fn dispatch_question_action(
         StagePlan::Submit { max_down_steps } => {
             // 三段（+回执）：提交屏在场 → 闭环走位 → 回车 → Review 屏 → 确认 → 终态。
             // **每段都在发键前屏读**；轮询/读屏全部经 `RemoteState.screen_probe` 缝。
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = question_terminal(|| probe("read"), injector, pid, spec);
+            let out = crate::inject::question::run_submit_stages(
+                || poll_question_stage(|| probe("submit-row"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_review_stage(|| probe("review"), QUESTION_STAGE_POLL_TOTAL_MS),
+                || poll_receipt_stage(|| probe("receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+                *max_down_steps,
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_RECEIPT,
+                    receipt_seen: o.receipt_seen,
+                },
+                // **中止分类**（复评 F6-2）：屏读形态不符 → Aborted（带段名）；
+                // 投递失败 → Failed（**不带** aborted——语义等同批次丙的投递失败，
+                // 用户要做的是查通道而不是查终端形态）
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        StagePlan::ClaudeToggle { target } => {
+            // 闭环切勾：题屏在场 → 方向键走位（每步复核）→ 空格 → 屏读校验翻转。
+            // 轮询/读屏全部经 `RemoteState.screen_probe` 缝（与 Submit 段同装配）。
             let probe = |stage: &'static str| -> Option<Vec<String>> {
                 (st.screen_probe)(tool, pid).or_else(|| {
-                    log::debug!("问答阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
+                    log::debug!("问答切勾阶段机：{stage} 段屏读不可用（tool={tool} pid={pid}）");
                     None
                 })
             };
@@ -3919,21 +4291,186 @@ fn dispatch_question_action(
                     ))
                 },
             };
-            let out = crate::inject::question::run_submit_stages(
-                || poll_question_stage(|| probe("submit-row"), QUESTION_STAGE_POLL_TOTAL_MS),
-                || poll_review_stage(|| probe("review"), QUESTION_STAGE_POLL_TOTAL_MS),
-                || poll_receipt_stage(|| probe("receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
+            let out = {
+                // 首段轮询三态（2026-10-02 观测面）：「整窗读不到屏」与「屏在但形态
+                // 不符」分开报——后者带屏面摘要回执（证据自带失败，闸门 2）。接受判据 =
+                // 题屏形态可解析（页签栏锚覆盖单选子题）；题目身份不在过滤面：手动切题
+                // 后表单同样可解析，须由阶段机内的身份闸拦下。
+                match poll_question_screen(
+                    || probe("toggle-row"),
+                    |l| !crate::inject::question::parse_question_rows(l).is_empty(),
+                    QUESTION_STAGE_POLL_TOTAL_MS,
+                ) {
+                    QuestionScreenPoll::Ready(lines) => {
+                        // **数字直选能力自适应**（2026-10-03）：按 (tool, cli_version)
+                        // 取开关传入；编排探测/降级后写回（Unknown 首探、Supported 失
+                        // 效降级——见 capability 模块文档）
+                        let ver = crate::inject::approve::cached_cli_version(tool)
+                            .unwrap_or_default();
+                        let digit = crate::inject::capability::digit_toggle_in(
+                            &st.capability_table,
+                            tool,
+                            &ver,
+                        );
+                        let out = crate::inject::question::run_toggle_stages(
+                            *target,
+                            expected_question,
+                            || Ok(Some(lines.clone())),
+                            &mut terminal,
+                            digit,
+                        );
+                        if let Some(new_cap) = out.as_ref().ok().and_then(|o| o.digit_result)
+                        {
+                            crate::inject::capability::set_digit_toggle_in(
+                                &st.capability_table,
+                                tool,
+                                &ver,
+                                new_cap,
+                            );
+                        }
+                        out
+                    }
+                    QuestionScreenPoll::NoScreen => Err(crate::inject::question::StageAbort::screen(
+                        "读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
+                    )),
+                    QuestionScreenPoll::Unparseable(last) => {
+                        Err(crate::inject::question::StageAbort::screen(format!(
+                            "屏读正常但解析不出问答选项块（屏面形态与已知题屏不符）——已中止，未发任何键；请人工核对终端。屏面摘要：{}",
+                            screen_digest(&last)
+                        )))
+                    }
+                }
+            };
+            match out {
+                Ok(o) => {
+                    // **屏读快照**（屏读为准）：切勾后整屏采集——TS 行内容随回执回传
+                    let snapshot = probe("snapshot")
+                        .and_then(|l| crate::inject::question::question_screen_snapshot(&l));
+                    QuestionDispatch::ToggleDone {
+                        checked: o.checked_now,
+                        verified: o.verified,
+                        screen: snapshot,
+                    }
+                }
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        StagePlan::ClaudeAdvance { direction } => {
+            // 多题切题（2026-10-02 ←/→ 双向导航）：发 `→`/`←` + 读屏分类
+            //（题干区变化 / Review）。
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = question_terminal(|| probe("read"), injector, pid, spec);
+            let out = {
+                // 首段轮询三态（2026-10-02 观测面）：接受判据 = advance_stage_screen_ready
+                //（Review 就绪 ∨ 有推进行 ∨ 可解析出题屏——页签栏锚覆盖单选子题）。
+                match poll_question_screen(
+                    || probe("advance"),
+                    crate::inject::question::advance_stage_screen_ready,
+                    QUESTION_STAGE_POLL_TOTAL_MS,
+                ) {
+                    QuestionScreenPoll::Ready(lines) => {
+                        crate::inject::question::run_advance_stages(
+                            || Ok(Some(lines.clone())),
+                            &mut terminal,
+                            *direction,
+                        )
+                    }
+                    QuestionScreenPoll::NoScreen => Err(crate::inject::question::StageAbort::screen(
+                        "切题前读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
+                    )),
+                    QuestionScreenPoll::Unparseable(last) => {
+                        Err(crate::inject::question::StageAbort::screen(format!(
+                            "切题前屏读正常但无可行动形态（无推进行、非题屏、非 Review）——已中止，未发任何键；请人工核对终端。屏面摘要：{}",
+                            screen_digest(&last)
+                        )))
+                    }
+                }
+            };
+            match out {
+                Ok(o) if o.advanced => {
+                    // **屏读快照**（卡面状态权威源）：切题后新题屏的勾选态/自由作答
+                    // 随回执回传纠偏（fresh read——重绘已由分类段轮询等到）。
+                    // advanced=false（已在 Review 零按键）→ 跳过读屏（M7）
+                    let snapshot = probe("snapshot")
+                        .and_then(|l| crate::inject::question::question_screen_snapshot(&l));
+                    QuestionDispatch::AdvanceDone {
+                        advanced: o.advanced,
+                        direction: *direction,
+                        snapshot,
+                    }
+                }
+                Ok(o) => QuestionDispatch::AdvanceDone {
+                    advanced: o.advanced,
+                    direction: *direction,
+                    snapshot: None,
+                },
+                Err(e) => dispatch_abort(e),
+            }
+        }
+        StagePlan::ClaudeMultiFreeText { overwrite } => {
+            let Some(text) = free_text else {
+                // 防御：FreeText 计划却没带文本（参数校验已拦 400，不可达）
+                return QuestionDispatch::Failed("自由作答缺少文本".to_string());
+            };
+            let probe = question_probe(st, tool, pid);
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: || probe("read"),
+                send: |key: &str| {
+                    let r = injector.locate_and_send_key_spec(pid, key, spec);
+                    if r.is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    }
+                    r
+                },
+                // 文本走字符通道（同单题自由作答的安全面：用户文本绝不进键通道）
+                send_text: |t: &str| {
+                    injector.locate_and_inject_spec(pid, t, spec)?;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    Ok(())
+                },
+                settle: || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ))
+                },
+            };
+            let out = crate::inject::question::run_multi_select_free_text_stages(
+                text,
+                *overwrite,
+                // 首段轮询三态（评审 I5：二态过滤会把「屏面在但形态不符」重新并进
+                // 「读不到问答屏」——该观测面教训见 toggle 路径的三态改造）。接受判据
+                // = FreeText 行在场；形态不符中止带屏面摘要。
+                || {
+                    match poll_question_screen(
+                        || probe("free-row"),
+                        |l| {
+                            crate::inject::question::parse_question_rows(l)
+                                .iter()
+                                .any(|r| {
+                                    r.kind == crate::inject::question::QuestionRowKind::FreeText
+                                })
+                        },
+                        QUESTION_STAGE_POLL_TOTAL_MS,
+                    ) {
+                        QuestionScreenPoll::Ready(lines) => Ok(Some(lines)),
+                        QuestionScreenPoll::NoScreen => Ok(None),
+                        QuestionScreenPoll::Unparseable(last) => Err(format!(
+                            "自由作答：屏读正常但解析不出「Type something」行——已中止，未发任何键。屏面摘要：{}",
+                            screen_digest(&last)
+                        )),
+                    }
+                },
                 &mut terminal,
-                *max_down_steps,
             );
             match out {
-                Ok(o) => QuestionDispatch::StageDone {
-                    stage: QUESTION_STAGE_RECEIPT,
-                    receipt_seen: o.receipt_seen,
+                Ok(o) => QuestionDispatch::MultiFreeTextDone {
+                    text: o.screen_text,
+                    checked: o.screen_checked,
                 },
-                // **中止分类**（复评 F6-2）：屏读形态不符 → Aborted（带段名）；
-                // 投递失败 → Failed（**不带** aborted——语义等同批次丙的投递失败，
-                // 用户要做的是查通道而不是查终端形态）
                 Err(e) => dispatch_abort(e),
             }
         }
@@ -3942,7 +4479,7 @@ fn dispatch_question_action(
                 // 防御：FreeText 计划却没带文本（参数校验已拦 400，不可达）
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -3986,7 +4523,7 @@ fn dispatch_question_action(
         }
         // ===== 批次戊 E4：kimi 多选/多题提交阶段机 =====
         StagePlan::KimiSubmit => {
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::mode::Closures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4023,7 +4560,7 @@ fn dispatch_question_action(
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4069,7 +4606,7 @@ fn dispatch_question_action(
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4113,7 +4650,7 @@ fn dispatch_question_action(
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4153,7 +4690,7 @@ fn dispatch_question_action(
         }
         // ===== 批次戊 E6：opencode 多选提交阶段机（2026-09-23 接线）=====
         StagePlan::OpencodeSubmit => {
-            let probe = |_: &'static str| -> Option<Vec<String>> { (st.screen_probe)(tool, pid) };
+            let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::mode::Closures {
                 read: || probe("read"),
                 send: |key: &str| {
@@ -4212,6 +4749,26 @@ fn dispatch_abort(e: crate::inject::question::StageAbort) -> QuestionDispatch {
 /// 区分不出来）。反推不出 → 用 `submit-row`/`free-row` 这类**最靠前的段**兜底
 /// （宁可粗，不编假精度）。
 fn stage_from_abort(err: &str) -> &'static str {
+    // 身份核验中止（2026-09-26 评审 I1 回执面）：文案里的「手动切题」是在描述用户的
+    // 操作、不是中止发生在切题段——必须先于切题臂匹配，否则切勾失败被误标 advance。
+    if err.contains("手机卡片不一致") {
+        return QUESTION_STAGE_TOGGLE;
+    }
+    // 切题路径（2026-09-24，先于其余路径匹配——切题的走位/分类文案须归 advance 段）
+    if err.contains("切题") || err.contains("下一题") {
+        return QUESTION_STAGE_ADVANCE;
+    }
+    // 切勾路径（2026-09-24，先于提交路径匹配——「仍未把焦点移到目标选项行」会被
+    // 下方 Submit 行臂误收，切勾的走位目标是选项行不是推进行）
+    if err.contains("选项块")
+        || err.contains("问答屏")
+        || err.contains("目标选项行")
+        || err.contains("勾选")
+        || err.contains("空格")
+        || err.contains("唯一焦点行")
+    {
+        return QUESTION_STAGE_TOGGLE;
+    }
     // 提交路径（按「中止点从后往前」匹配：越靠后的段越具体）
     // E4：kimi 的 Review 汇总屏中止文案先于通用「确认项」词匹配（否则被 confirm 段误收）
     if err.contains("Review 汇总屏") || err.contains("未出现 Review 确认屏") {
@@ -4262,6 +4819,75 @@ where
         probe,
         || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
     ))
+}
+
+/// 快照 → JSON 的**单点序列化**（评审 I8：GET/toggle/advance 三处手写 json 去重
+/// ——字段漂移会让前端类型与后端产出脱节；freeTextPresent 三态判别随行）
+fn snapshot_to_json(snap: &crate::inject::question::QuestionScreenSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "heading": snap.heading,
+        "checked": snap.checked,
+        "freeText": snap.free_text,
+        "freeTextPresent": snap.free_text_present,
+    })
+}
+
+/// 阶段机首段轮询的**三态产物**（2026-10-02 观测面，闸门 2「证据自带失败」）：
+/// `Ready` = 形态可行动；`NoScreen` = 整窗一次都没读到屏；`Unparseable` = 读到过屏
+/// 但形态始终不符（载荷 = 最后一次读到的屏，供 [`screen_digest`] 生成回执摘要）。
+/// 旧二态实现把后两种合并成 `None` → 「屏在但形态不符」误报成「读不到问答屏」
+/// （claude 2.1.278 验收事故的观测面教训）。
+enum QuestionScreenPoll {
+    Ready(Vec<String>),
+    NoScreen,
+    Unparseable(Vec<String>),
+}
+
+/// 三态首段轮询：读屏直到 `accept` 放行；窗尽时按「是否读到过屏」分流
+/// [`QuestionScreenPoll::NoScreen`] / [`QuestionScreenPoll::Unparseable`]。
+/// 窗与步长与 [`poll_question_stage`] 同口径（[`poll_rounds`] × [`POLL_STEP_MS`]）。
+fn poll_question_screen<P, F>(probe: P, accept: F, total_ms: u64) -> QuestionScreenPoll
+where
+    P: Fn() -> Option<Vec<String>>,
+    F: Fn(&[String]) -> bool,
+{
+    let rounds = crate::inject::timing::poll_rounds(total_ms).max(1);
+    let mut last_seen: Option<Vec<String>> = None;
+    for i in 0..rounds {
+        if let Some(lines) = probe() {
+            if accept(&lines) {
+                return QuestionScreenPoll::Ready(lines);
+            }
+            last_seen = Some(lines);
+        }
+        if i + 1 < rounds {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS));
+        }
+    }
+    match last_seen {
+        Some(last) => QuestionScreenPoll::Unparseable(last),
+        None => QuestionScreenPoll::NoScreen,
+    }
+}
+
+/// **屏面摘要**（回执 `error` 字段用；证据自带失败——闸门 2）：取最后若干非空行
+/// 拼接截断，让用户在手机上直接看到「MAM 眼里的屏」，无需来回截图。
+fn screen_digest(lines: &[String]) -> String {
+    let tail: Vec<&str> = lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let mut s = tail.join(" ⏎ ");
+    if s.chars().count() > 240 {
+        s = s.chars().take(240).collect::<String>() + "…";
+    }
+    s
 }
 
 /// **Review 屏轮询**：窗内等到**该屏形态可行动**（`inject::question::probe_review_screen`
@@ -6361,6 +6987,10 @@ mod tests {
         assert_eq!(
             StagePlan::for_action(
                 crate::inject::question::AnswerAction::Submit,
+                None,
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
                 &q,
                 "opencode"
             ),
@@ -6368,13 +6998,51 @@ mod tests {
             "opencode 多选 submit 走 OpencodeSubmit 阶段机"
         );
         assert_eq!(
-            StagePlan::for_action(crate::inject::question::AnswerAction::Submit, &q, "claude"),
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Submit,
+                None,
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
+                &q,
+                "claude"
+            ),
             StagePlan::Submit { max_down_steps: 4 },
             "claude 多选 submit 维持 Submit 行走位形态（选项 2 + 2）"
         );
         assert_eq!(
             StagePlan::for_action(
+                crate::inject::question::AnswerAction::Toggle,
+                Some(1),
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
+                &q,
+                "claude"
+            ),
+            StagePlan::ClaudeToggle { target: 1 },
+            "claude 多选 toggle 走闭环切勾阶段机（2026-09-24 数字路径废止）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Toggle,
+                Some(0),
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
+                &q,
+                "opencode"
+            ),
+            StagePlan::SingleKey,
+            "opencode toggle 维持单键（enter 切勾，戊探A 定案）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
                 crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
                 &q,
                 "opencode"
             ),
@@ -7036,6 +7704,109 @@ mod tests {
         let (verified, hint) = receipt_and_verdict(None, true, serde_json::Value::Null, "只读");
         assert!(verified, "无屏读时回执核验不参与，交给档位回读");
         assert!(hint.is_null());
+    }
+
+    /// **`stage_from_abort` 段名表锁**（2026-09-26 评审：切勾身份核验的中止文案含
+    /// 「手动切题」，被切题臂先收 → 切勾失败误标 `advance`）。逐条抄自三个阶段机的
+    /// 实际中止文案（`run_toggle_stages` / `run_advance_stages` / `run_submit_stages`）——
+    /// 文案改词时本表先红，逼着同步这里（关键词耦合的显式代价，取代隐式漂移）。
+    /// 还原动作（变异）：删掉「手机卡片不一致」前置臂 → 第 1 行先红。
+    #[test]
+    fn stage_from_abort_maps_each_orchestrator_literal() {
+        let cases: &[(&str, &str)] = &[
+            // 切勾（toggle）——含身份核验（文案带「切题」但在描述用户行为，不是切题段）
+            (
+                "屏幕上的题目与手机卡片不一致（可能已在终端手动切题）——已中止，未发任何键；请在终端回到当前题目后重试",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            (
+                "读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            (
+                "已发 3 个方向键仍未把焦点移到目标选项行（上限 7）——已中止，未发空格；请人工核对终端",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            (
+                "按一次 down 后焦点位移了 -1 行（应沿目标方向恰 1 行）——屏幕行序与预期不一致，已中止（未发空格）",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            (
+                "空格已发出但屏读未见到勾选态翻转——该版本可能不消费此空格形态；已中止（无后续键）。请到终端确认后重试",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            // 切题（advance）——「切题前读不到问答屏」同时含「问答屏」（切勾臂词）与
+            // 「切题」（切题臂词）：切题臂在前是**有意的段归属**（切题编排的中止归切题段）
+            (
+                "切题前读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题后既未进入下一题页、也未出现 Review 确认屏——已中止（无后续键）。请到终端确认当前状态",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题失败：屏上既无推进行也解析不出题屏（形态不符）——已中止，未发任何键；请人工核对终端",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题：屏上解析不到唯一焦点行（❯ 标记缺失或多行）——不猜起点，已中止，未发任何键",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            // 2026-10-02 ←/→ 双向导航（走位+回车路径退役，其文案随之删除）
+            (
+                "切题：←/→ 后读不到屏幕——无法确认是否切题；请人工核对终端",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题：↑ 后读不到屏幕——已中止，未发 ←/→；请人工核对终端",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题：↑ 未把焦点移回选项行（两行例外形态与取证不符）——已中止，未发 ←/→；请人工核对终端",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题：← 未切换题目（可能已是第一题或按键被吞）——已中止（无后续键）。请到终端核对当前题目",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题：← 未从确认屏退回题目（按键可能被吞）——已中止（无后续键）。请到终端核对当前题目",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题：← 后读不到屏幕——无法确认是否退回；请人工核对终端",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "切题前屏读正常但无可行动形态（无推进行、非题屏、非 Review）——已中止，未发任何键；请人工核对终端。屏面摘要：题屏 ⏎ 摘要",
+                QUESTION_STAGE_ADVANCE,
+            ),
+            (
+                "屏读正常但解析不出问答选项块（屏面形态与已知题屏不符）——已中止，未发任何键；请人工核对终端。屏面摘要：题屏 ⏎ 摘要",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            (
+                "目标选项行没有勾选框（屏是单选形态？）——toggle 仅用于多选题，已中止，未发空格",
+                QUESTION_STAGE_TOGGLE,
+            ),
+            // 提交（submit-row / review）——「推进行」目标区分于切勾的「目标选项行」
+            (
+                "已发 3 个方向键仍未把焦点移到推进行（上限 5）——已中止，未发回车；请人工核对终端",
+                QUESTION_STAGE_SUBMIT_ROW,
+            ),
+            (
+                "已发回车但屏上未出现 Review 确认屏（未见「Submit」/「Next」）——已中止，未发确认键；请人工核对终端",
+                QUESTION_STAGE_REVIEW,
+            ),
+        ];
+        for (msg, want) in cases {
+            assert_eq!(
+                stage_from_abort(msg),
+                *want,
+                "中止文案段名反推：{msg:?} 应归 {want} 段"
+            );
+        }
     }
 }
 
