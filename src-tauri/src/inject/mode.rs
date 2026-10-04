@@ -5776,7 +5776,7 @@ mod tests {
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            sysinfo::ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always),
+            sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
         );
         let pids: Vec<u32> = system
             .processes()

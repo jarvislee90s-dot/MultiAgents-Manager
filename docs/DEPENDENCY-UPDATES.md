@@ -79,6 +79,11 @@ gh workflow run ci.yml --ref main
 
 > 组 PR 里想"先拿一部分"：对不打算现在做的包逐个 `@dependabot ignore <依赖名> major version`，dependabot 会重开一个不含它们的 PR。
 
+> ⚠️ **0.x 包的陷阱**：semver 里 `0.x` 的 major 就是 `0`，所以对 0.x 依赖发
+> `@dependabot ignore <包> major version` 等于**忽略该依赖的全部更新**（不只是当前这个次版本）。
+> 只想忽略某个次版本（例如 `sysinfo 0.39`）应当用 `@dependabot ignore <包> minor version`。
+> 已经这样忽略过的，等对应升级自己落地后记得 `@dependabot unignore <包>` 恢复提醒。
+
 ## 6. 环境下限（不要凭感觉写）
 
 | 下限 | 声明位置 | 为什么是这个值 |
@@ -92,6 +97,17 @@ gh workflow run ci.yml --ref main
 ## 7. 批次记录
 
 - **2026-10-03**：季度改月度 + 加 `Tauri version parity` 门禁 + 删自动合并工作流（PR #101）；#86+#91（tauri 2.12 两半）成对合并；#87 zstd / #88 sha2 / #92 @types/node / #93 eslint / #94 react-i18next / #95 jsdom 逐个合并；#89 rand 与 #90 windows 因需迁移代码，改由 #99 / #100 带迁移重做后合并。当日 main 五项门禁全绿。
+- **2026-10-04（同日续）**：把 dependabot 改成"单一多生态组"（PR #107）后，配置改动**立刻**触发了重新分组：原先的
+  #102–#105 被自动关闭，改开成一个跨生态的组 PR——**实测证明了结构性修复有效**（组 PR 里 tauri 两半同批，
+  `Tauri version parity` 直接绿，不再出现"两半拆分、单独必红"）。该组 PR 的处置链：
+  ① `typescript 7.x` 被 upstream（typescript-eslint）卡住 → ignore；
+  ② 组 PR 三处红的真正根因是 `tsconfig.json` 的 `baseUrl`（TS 6 弃用 TS5101 / TS 7 移除）→ 单独 PR #109 修掉；
+  ③ 前端工具链 9 个 major（TS 6、vite 8、vitest 5、msw 3、jest-dom 7、@vitejs/plugin-react 6、@eslint/js 10 等）
+  **无需改代码**即通过；
+  ④ cargo 侧 9 个 major 里 8 个（windows 0.62 / rusqlite 0.40 / zip 8 / toml 1.1 / toml_edit 0.25 / dirs 7 /
+  winreg 0.55 / junction 2.1）同样无需改代码；
+  ⑤ 只有 `sysinfo 0.32→0.39` 需要迁移（0.33+ 删除 `RefreshKind::new`/`ProcessRefreshKind::new`）→ 因 **0.32 没有
+  `nothing()`**，无法"先迁移后 bump"，故按 #99/#100 的模式拆成独立 PR #111（bump + 6 文件 9 处改名同批）。
 - **待办**：见 §8。
 
 ## 8. 已知缺口
@@ -100,3 +116,7 @@ gh workflow run ci.yml --ref main
 - **majors 无法再用 PR 隔离**：多生态组把大版本与小版本放进同一个 PR（换来"两半天然同批"）。代价用 §5 的 ignore 命令补偿；若将来想把 majors 拆回独立 PR，需要先验证"同一 ecosystem+directory 拆两条条目 + 条目级 `exclude-patterns`"是否被 GitHub 侧校验接受（当前无公开先例）。
 - **安全更新不参与分组与节奏**，需要随时单独处理。
 - 本仓库不使用自动合并（`allow_auto_merge: false`，每次合并都需人工知情）。
+- 组 PR 里若含当天吃不下的大版本，**会把同批的小版本一起压住**（一个更新只能属于一个组）；用 §5 的 ignore 命令裁剪，
+  或在月度会话里直接排期迁移。
+- `sysinfo` 曾被以 `ignore ... major version` 忽略（对 0.x 等于全忽略）；它的迁移由 PR #111 落地后，
+  应在对应 PR 下 `@dependabot unignore sysinfo` 恢复后续更新提醒。

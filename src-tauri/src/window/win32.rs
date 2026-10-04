@@ -917,7 +917,7 @@ pub fn verify_foreground_tool(
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
             true,
-            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+            sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
         );
         unsafe {
             let hwnd = GetForegroundWindow();

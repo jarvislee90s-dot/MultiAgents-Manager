@@ -410,7 +410,7 @@ fn refresh_cmd_snapshot(sys: &mut sysinfo::System) -> Vec<String> {
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::new().with_cmd(UpdateKind::Always),
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
     sys.processes()
         .values()
