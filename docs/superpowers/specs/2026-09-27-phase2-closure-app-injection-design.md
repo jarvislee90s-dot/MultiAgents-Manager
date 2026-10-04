@@ -111,7 +111,7 @@
 - **需求**：无头进程的开启（spawn）与关闭（回收）全程**受控、可见、可中止**；turn 生命周期 = 进程生命周期（裁决 8）。
 - **输出与效果**：
   - **自然路径**：spawn → 流式回执 → 进程自然退出 → 回执终态；
-  - **超时**：watchdog（**默认 600s 可配——2026-10-04 裁决 15 定值**；两端实测 turn 仅 8–23s，600s 对齐 M10-b 口径留足余量）到点 kill **进程树**（Windows `taskkill /T`，避免孤儿子进程）+ 分阶段失败回执（stage=timeout）+ 可重试标注；
+  - **超时**：watchdog（**默认 600s 可配——2026-10-04 裁决 15 定值**；两端实测 turn 仅 8–23s，600s 对齐 M10-b 口径留足余量）到点 kill **进程树**（Windows `taskkill /T`，避免孤儿子进程；**升级候选 = Windows Job Object 整树收编**〔CREATE_SUSPENDED + KILL_ON_JOB_CLOSE + TerminateJobObject 热终止〕——AionCore 生产用法，见附录 E-⑥）+ 分阶段失败回执（stage=timeout）+ 可重试标注；
   - **用户中止**：移动端回执卡「取消」按钮（turn 进行中可见）→ 主动 kill 进程树 + 审计 `action=headless_cancel` + 回执终态「已取消」；与 watchdog 互斥（先到者生效，回执注明由谁终止）；
   - **崩溃**：非零退出 → 回执含退出码 + stderr 尾行；**不自动重试**（重发是用户动作，回执卡一键重发按钮）；连续崩溃 N 次后的通道熔断提示（N 探测批建议）；
   - **MAM 退出/重启**：在飞无头进程优雅关闭（各工具对 kill 的落盘行为 = 探测项——重点 zcode SQLite 半 turn 落盘、codex queue 幂等性）；MAM 重启后无孤儿进程残留自检；
@@ -264,6 +264,7 @@
 | WorkBuddy ACP 通道（H9/H12） | **A-**（Mac） | `acp/connect` 免鉴权 → `session/new`+`session/prompt` 写入实证（转写 44KB/function_call）；已结束会话语义边界；Win 侧待端点启用（5.7.3 无 per-session serve） |
 | claude/kimi/opencode 无头（H11） | B/C | 官方 flag 面（旧 spec W7 台账沿用）；并入否 = 裁决门 |
 | 交接导出（M10-a） | B | W9.1 决策表 12 项调研定档（四家 compact 一手核对）；组合模板 = C3 实机验证 |
+| AionUi/AionCore 参考实现（H4–H6/H8/C4） | B（强参照） | 双纪要：`research/refs/phase2-消息注入/2026-10-04-aionui-study.md`（web 层）+ `2026-10-04-aioncore-source-study.md`（源码级，文件:行号）——claude wire 实机档案 / agy per-turn 先例 / codex 重放面 / Job Object 进程治理（附录 E） |
 | macOS 三通道（C5） | A-（代码） | 引擎 macOS 执行层在产；实机终验 = Mac 段 ② |
 
 ## 12. 风险与已知限制（预登记）
@@ -394,3 +395,25 @@
 - ⏸ **WB ACP 复验：端点不在场（如实登记）**——WB 5.7.3（Windows，比 Mac 5.4.7 新）无 per-session 服务进程（3 个监听端口实测均非 CodeBuddy serve 形态）、交互会话无心跳（连 prewarm 心跳文件也会话结束即清理）；Mac 可用端点实为「Remote Control」功能服务 → **启用条件（APP 内远程控制开关，USER-ASSIST 30s）= C2 前置复验第一跟进项**（风险 16）；Test2 会话在 workbuddy.db 中（H12 素材已取）。
 
 **落档判定：✅ 设计阶段关账**——探测两端完成 + 裁决门六裁 + 裁决 18 + 补测收口（WB 端点启用条件为 C2 前置活账，不阻塞落档）；本 spec 定稿，下一步 = C0 实施计划（writing-plans 另立文档）。
+
+## 附录 E · 参考实现借鉴登记（AionUi / AionCore，2026-10-04 双调研）
+
+> 纪要：`research/refs/phase2-消息注入/2026-10-04-aionui-study.md`（web 层全景 + 借鉴映射表）＋ `2026-10-04-aioncore-source-study.md`（源码级精读，结论全部带 文件:行号；本地克隆 `E:\LLMproject\Github\AionUi\AionCore` @ `4a707fc`）。
+> 定位：**强参照（B 级）**——实现批的规格素材库，不改变本 spec 任何裁决；与宪法无冲突（AionCore 权威源 = wire 回执，用于 MAM 无头管线；MAM 屏读核对面为宪法独有，互不替代）。
+
+**实现批直接采用的素材**（按 H 节索引）：
+
+| # | 素材 | 出处 | 落点 |
+|---|---|---|---|
+| ① | **claude 无头 spawn argv 全集**：`--print --input-format/output-format stream-json --verbose --include-partial-messages --replay-user-messages --permission-prompt-tool stdio` + **恒带 `--permission-mode`（fail-closed：省略 = bypassPermissions，LIVE-PROBED）**；`--resume` 与 `--session-id` 互斥；fork = `--resume --fork-session`（不可配 id） | claude_conn.rs:154-269 / adapter/claude.rs:1073-1126 | H11/C4 规格 |
+| ② | **claude 审批应答构造器**：allow 必带 `updatedInput`（原 input 原样回显，缺 = ZodError → 工具永不执行）；AskUserQuestion 答案按**题面文本**为键注入 `updatedInput.answers`（多选 = JSON 数组）；**弃卡必须 deny**（allow 会静默丢题）；2.1.178–2.1.227 实机标定 | claude_conn.rs:1474-1580 `build_control_response` | H5 审批卡 wire 规格 |
+| ③ | **问答卡纪律**：多题一次提交、全答才可提交（claude 静默丢未答题）、Other 自由文本行、decline = 显式 deny | MessageQuestion.tsx + ② 同源 | 移动端问答卡（既有卡面纪律互证） |
+| ④ | **codex 首启/续接全量重放**：`thread/resume` params = `thread/start` params 全量 + threadId（裸 resume 丢 MCP、approvalPolicy 重置回 on-request，0.144.1 实测）；固定 `-c shell_environment_policy.inherit=all -c shell_environment_policy.include_only=[]` | codex_conn.rs:593-603 / 47-60 | H8（app-server 路线的后续升级）与 queue/exec 的 env 注入 |
+| ⑤ | **agy per-turn 先例**：`agy -p` 一次性进程 + `--conversation <id>` 续接 + `--print-timeout 1h` 退出期墙钟（CLI 自带墙钟与 watchdog 的归一关系）+ 宿主层审批闸 | backend/antigravity/argv.rs:81-135 | **裁决 8 一次性进程架构的同构生产先例**（H4/H11 对照） |
+| ⑥ | **Windows 进程治理**：CREATE_SUSPENDED + **Job Object（KILL_ON_JOB_CLOSE）** 整树收编 + TerminateJobObject 热终止（优于事后 taskkill /T：孙子进程不可达问题 I-9）；孤儿回收四闸（锁/machine/epoch/liveness）+ 杀前身份再验 | process_registry / job object 模块（纪要 §6） | H4 生命周期（kill 序列升级候选） |
+| ⑦ | **版本门控探测法**：`claude --version` 每二进制一次探测 + 缓存 + verified floor（`--fork-session` 门槛实测 2.1.191）；cli_version 漂移监控（claude 2.1.280 / codex 0.151.0 跳 0.147.0） | claude_flags.rs 等（纪要 §7） | H6 版本门控探针 |
+| ⑧ | **事件归一纪律**：SessionEvent 开放枚举（45 变体）+ `AdapterSpecific{tag,payload}` 逃逸舱「未知帧不猜」+ 全量快照广播（非增量） | reducer.rs / orchestrator.rs（纪要 §5） | H6 回执归一（与「快照对位失败→放弃同步」同源互证） |
+| ⑨ | **ACP 通用层规格**：initialize 能力协商、`session/new·load·prompt` 全参数、`session/request_permission`（options 真回显）、`set_config_option`/config_options 读取（mode/model 档位元数据） | acp_conn.rs（纪要 §4） | H9 WB/dsh ACP 接入规格 |
+| ⑩ | **OnceCell 单 spawn / 进程注册表持久化 / 崩溃恒归 Idle** | task_manager.rs / process_registry.rs | H4 防重复初始化与孤儿自检 |
+
+**边界**：AionCore 的常驻+空闲休眠模型**不采纳**（裁决 8 维持——其 wake=respawn+resume 与 per-turn 同构，无引入必要）；其 ACP 仅 stdio（MAM 的 WB HTTP ACP 为自研探测成果，无对应物可抄）。
