@@ -7,6 +7,7 @@
 - **未经用户在场明确同意，任何人（含任何 AI agent）不得修改 `docs/MASTER-PLAN.md`**
 - 发现实现或下层文档与宪法冲突时：停下，向用户报告冲突点，由用户裁决"改宪法"还是"改实现"，不得自行处置
 - 调研资料与三期参考库索引：`research/README.md`（持续跟踪外部依赖版本）
+- 依赖升级与月度批处理流程：`docs/DEPENDENCY-UPDATES.md`（dependabot 节奏、`Tauri version parity` 门禁、红灯处置表、ignore 命令表）
 
 ## 语言规范
 - 本项目所有设计文档、规格说明、计划文档、任务列表均使用中文撰写
