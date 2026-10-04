@@ -472,6 +472,25 @@ git commit -m "docs(spec): Phase P+ 探测定案回填 + 裁决门议程（探�
 
 ---
 
+## Windows 段补测清单（GUI USER-ASSIST 待办，2026-10-03 探测执行后落账）
+
+> 用户统一补测时逐项做；每项完成后把结果（成/败/现象）回给主线，主线补录证据档 `~/mam-probe-closure/20261003-022408/` 对应 notes。
+
+1. **H1 实机核验**：MAM（带 `08ef620` 重启）确认桌面 dsh 会话卡上板 + 点卡跳转聚焦 DeepSeek Harness 窗口。
+2. **ZCode APP 三态定案**：查 `sess_7e371afd`——不刷新 / 手动刷新 / 重启 APP 三态分别记录（**重点：无头会话 35 分钟 0 收录之后重启是否收录**，判定 F 兑现层级定案）；APP 内打开同会话与无头并发一次；`--mode` 档位在 APP 内的呈现。
+3. **Codex APP 夹具（PC-0）→ 触发 PC-1/PC-3 补测**：以 `~/mam-probe-closure/20261003-022408/pc-proj` 建会话发 `hi` 置空闲 + 告知主线哪个 codex 进程是 APP → 主线补 PC-1（空闲+运行态 queue 投递）与 PC-3（exec resume 兜底，APP 开/关两态）。
+4. **WorkBuddy 夹具（PW-2/3）**：启动 WorkBuddy 以 `~/mam-probe-closure/20261003-022408/pw-proj` 建测试会话 → 主线补 GET openapi.json 面 + `jobs/reply` 投递实测（WorkBuddy 路线终裁素材）。
+5. **遗留登记**：preset_v2_test 5 个既有失败（疑环境依赖，独立排查）；codex 0.160.0 queue flag 面复验；dsh 19387 端口归属与版本漂移；本机 sqlite3 CLI 缺失（python 已代偿）。
+
+## Mac 段补充注意事项（基于 Windows 段结果，2026-10-03）
+
+- **zcode**：Windows 实测无头会话 **35 分钟未被 APP 任务列表收录**（索引存活下）——Mac 的「重启后是否收录」格升级为判定 F 兑现层级的**关键定案格**；`--surface desktop` 对收录的影响 Windows 未定案，Mac 必测；Mac 调用形态（宿主二进制路径 + `ELECTRON_RUN_AS_NODE`）必录（spec §5 表脚注回填）。
+- **codex**：Windows 侧 PC 实测因缺夹具未完成——Mac 若装有 Codex APP，PC-1（空闲+运行态 queue）升级为**主证格**（Windows 缺口 Mac 先出）；开工先记 `codex --version` 并复验 queue flag 面（Windows 遗留 0.160.0 疑云）。
+- **WorkBuddy**：Windows 未定位到 serve 凭据（settings.json 无 token）——Mac 增查 **Keychain** 与配置目录（Electron 凭据在 macOS 常入 Keychain）；心跳 url 拓扑对齐照旧。
+- **dsh 桌面端（若 Mac 装有）**：19387→401 现象交叉验证（归属未定案，版本漂移嫌疑）；Mac 桌面端版本与 Windows rc.2 对照。
+- **M7 终验与 Mac-3 交叉验证任务不变，优先级最高**。
+- 清场过滤串注意：Mac 的探测目录是 `mam-closure-probe`（Windows 是 `mam-probe-closure`，目录名不同，kill 过滤串别照抄）。
+
 ## 自审记录（writing-plans Self-Review）
 
 1. **Spec 覆盖**：spec §5 探测任务书 PZ 八问→Task 3（新建出现条件 = Step 1，resume/可见性/surface/并发/json/mode/斜杠版本 = Step 2-9）；PC 五问（含空闲+运行态）→Task 4（PC-1b 补运行态）；PW 五问→Task 5；PL→Task 6/7；Mac 段三部分→Mac-1/2/3；H1 两半→Task 1/2；报告与裁决门→Task 8。无缺口。
