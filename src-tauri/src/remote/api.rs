@@ -750,6 +750,30 @@ fn find_session_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<crate::s
         .find(|s| s.id == session_id)
 }
 
+/// **H3 无头总开关门（单一落点）**：无头绑定会话 + 开关关闭 ⇒ `Some(关闭态文案)`，
+/// 否则 `None`。两个消费点共用本函数，**杜绝单侧改判据造成的口径漂移**：
+/// - `session_send`：`Some` ⇒ `403 {"error":"headless_disabled"}`（门在路由判定之前）；
+/// - `session_send_info`：`Some(reason)` ⇒ `injectable:false` + `reasonCode` +
+///   `reason`（移动端发送入口置灰标因，spec H3 输出与效果）。
+///
+/// 判据 = `routing::is_headless_bound`（过渡期谓词，Task 7 换真路由，义务清单见其
+/// 文档）+ `KEY_HEADLESS`（缺键 = 默认关），开关经 `st.store` 缝读取——生产 =
+/// `DeviceStore::Global` 全局 DB 同锁同连接，测试 = 内存库（零接触真实 ~/.mam）。
+/// **边界**：终端注入四家 `is_headless_bound` 恒 false，完全不经此门。
+fn headless_blocked(
+    st: &Arc<RemoteState>,
+    tool: &str,
+    form: crate::session::ProcessForm,
+) -> Option<&'static str> {
+    if crate::inject::routing::is_headless_bound(tool, form)
+        && !st.store.with(super::headless_enabled_conn)
+    {
+        Some(super::HEADLESS_DISABLED_REASON)
+    } else {
+        None
+    }
+}
+
 /// 端点审计 action 选择（丁T3 裁2，**单点**）：`/` 开头消息记 `slash`，其余按投递
 /// 路径记 `send` / `queue`。
 ///
@@ -837,8 +861,19 @@ pub async fn session_send(
             serde_json::json!({ "error": "no_session" }),
         );
     };
-    // ④ 路由判定（W3 纯核；platform = 本机 OS）。不可注入 → 403（带原因），不入队
+    // ④ H3 无头通道总开关（spec H3 / 裁决 9-10：**默认关，显式开启**；**门在最前**
+    //    ——无头绑定会话先看开关，再看路由判据）。判据单点在 [`headless_blocked`]
+    //    （谓词 + 开关；开关经 st.store 缝读取——生产 = 全局 DB 同锁同连接，测试 =
+    //    内存库）。**边界**：终端注入四家（claude/kimi/opencode/codex CLI）恒不受本门
+    //    影响；远程总开关关闭时无头入口自然一并不可达（gate 在前）
     let tool = session.agent_type.tool_id().to_string();
+    if headless_blocked(&st, &tool, session.form).is_some() {
+        return json_no_store(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({ "error": "headless_disabled" }),
+        );
+    }
+    // ⑤ 路由判定（W3 纯核；platform = 本机 OS）。不可注入 → 403（带原因），不入队
     if let crate::inject::routing::RouteOutcome::NotInjectable {
         reason_code,
         reason,
@@ -853,7 +888,7 @@ pub async fn session_send(
             }),
         );
     }
-    // ⑤ 组装（裁决 6 归一在入队时一次完成）+ 入队（FIFO 保序）。
+    // ⑥ 组装（裁决 6 归一在入队时一次完成）+ 入队（FIFO 保序）。
     //
     // 丁T3 裁2：compose_injection 内部**按内容分流**——普通消息 = `{正文} [mobile 设备名]`
     // （签名**后置**），`/` 开头消息 = **裸注入无签名**（前后缀都会破坏命令与参数，问题 8
@@ -862,8 +897,8 @@ pub async fn session_send(
     // 审计 action 由同一判据（`is_slash_message`）给出 slash，见下方
     // [`audit_action_for`] 的职责划分。
     let content = crate::inject::normalize::compose_injection(&device_name, &req.text);
-    // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
-    // 注释），入队与 ⑦ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
+    // D6 修改重发：queueOnly=true 只跳过 ⑦ 的直发尝试（语义见 SessionSendReq::queue_only
+    // 注释），入队与 ⑧ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
     // queueOnly 项与普通队列项同权（转闲按序自动放行），队列存储不携带该标志
     let queue_only = req.queue_only.unwrap_or(false);
     let now = chrono::Utc::now().timestamp_millis();
@@ -893,12 +928,12 @@ pub async fn session_send(
         "itemId": item_id,
         "position": position,
     });
-    // ⑥ 可输入态 → 直发（flush_one 投递内核，jump=false；in-flight 守卫与 flush 循环共用，
+    // ⑦ 可输入态 → 直发（flush_one 投递内核，jump=false；in-flight 守卫与 flush 循环共用，
     //    防同会话并发双投）。守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush
     //    循环事件臂同款，F1 断连双投修复）——handler 断连（弱网/隧道掐断慢投递）不再
     //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位。
     //    D6：queueOnly=true 时整个分支不触达（in-flight 守卫取用、五态回执映射、
-    //    send/unconfirmed/failed 直发审计全部跳过），直接落 ⑦ 入队路径
+    //    send/unconfirmed/failed 直发审计全部跳过），直接落 ⑧ 入队路径
     if !queue_only && crate::inject::queue::is_input_ready(&session.status) {
         let flush_st = st.clone();
         let flush_sid = sid.clone();
@@ -1049,7 +1084,7 @@ pub async fn session_send(
             }
         };
     }
-    // ⑦ 运行中（黄灯）→ 留队等下一可输入态（D6：queueOnly=true 的可输入态会话
+    // ⑧ 运行中（黄灯）→ 留队等下一可输入态（D6：queueOnly=true 的可输入态会话
     //    也落此臂——审计 action=queue 与「运行中留队」同口径，回执同 queued{itemId,position}）
     endpoint_audit(
         &st,
@@ -1117,6 +1152,21 @@ pub async fn session_send_info(
         );
     };
     let tool = session.agent_type.tool_id().to_string();
+    // H3：无头总开关关闭 → 无头绑定会话 `injectable:false` + **标因**（spec H3 输出与
+    // 效果：移动端发送入口置灰 + 「无头通道未开启，请在电脑端 MAM 设置中开启」）。
+    // 移动端输入区（MessageComposer）据本载荷的 injectable/reason 渲染禁用态与原因，
+    // 故标因落在本端点即完成置灰——不需要移动端改动。判据与 session-send 的 H3 门
+    // **同一函数**（[`headless_blocked`]），两个端点的口径不可能漂移
+    if let Some(reason) = headless_blocked(&st, &tool, session.form) {
+        return json_no_store(
+            StatusCode::OK,
+            serde_json::json!({
+                "injectable": false,
+                "reasonCode": "headless_disabled",
+                "reason": reason,
+            }),
+        );
+    }
     let body =
         match crate::inject::routing::route(&tool, session.form, session.pid, std::env::consts::OS)
         {

@@ -274,7 +274,11 @@
       "tunnelErrorToast": "外部通道: {{error}}",
       "addrCopiedToast": "已复制远程地址",
       "toggleFailedTitle": "MAM 远程开关失败",
-      "toggleFailedToast": "远程开关失败: {{error}}"
+      "toggleFailedToast": "远程开关失败: {{error}}",
+      "groupHeadless": "④ 无头注入（绕过终端可视确认）",
+      "headlessTitle": "无头注入",
+      "headlessHint": "默认关闭。关闭时，手机端无法向无头通道会话（ZCode / Codex APP / WorkBuddy）发消息；终端注入四家不受影响。",
+      "headlessConfirm": "无头注入将在不经过终端可视确认的情况下直接驱动 Agent 执行消息（含工具调用）。zcode 通道默认 yolo 档（不弹审批）。开启即表示知悉。"
     },
     "audit": {
       "title": "注入审计",

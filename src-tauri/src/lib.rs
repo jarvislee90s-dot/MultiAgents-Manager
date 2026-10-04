@@ -283,6 +283,8 @@ pub fn run() {
         remote::remote_rename_device,
         // M5 A5：三通道独立开关（旧 remote_set_channel 单值三选一已随之下线）
         remote::remote_toggle_channel,
+        // H3（二期收尾 Task 5）：无头注入总开关——默认关，翻转写审计 + 广播状态
+        remote::remote_toggle_headless,
         // M7 W5：桌面端写审计查看（最近 N 条，只读）
         inject::inject_list_audit,
     ]);
