@@ -328,8 +328,8 @@ fn find_wt_target(
     let t0 = Instant::now();
     loop {
         let system = sysinfo::System::new_with_specifics(
-            sysinfo::RefreshKind::new().with_processes(
-                sysinfo::ProcessRefreshKind::new()
+            sysinfo::RefreshKind::nothing().with_processes(
+                sysinfo::ProcessRefreshKind::nothing()
                     .with_cmd(sysinfo::UpdateKind::Always)
                     .with_cwd(sysinfo::UpdateKind::Always)
                     .with_exe(sysinfo::UpdateKind::Always),

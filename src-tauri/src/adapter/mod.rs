@@ -572,8 +572,8 @@ fn get_all_sessions_inner() -> SessionsResponse {
         let system = guard.get_or_insert_with(|| {
             log::debug!("Initializing shared System instance");
             System::new_with_specifics(
-                RefreshKind::new().with_processes(
-                    ProcessRefreshKind::new()
+                RefreshKind::nothing().with_processes(
+                    ProcessRefreshKind::nothing()
                         .with_cmd(sysinfo::UpdateKind::Always)
                         .with_cwd(sysinfo::UpdateKind::Always)
                         // exe 路径是 Windows MSIX 形态判定（classify_form）的关键输入：
@@ -586,7 +586,7 @@ fn get_all_sessions_inner() -> SessionsResponse {
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::new()
+            ProcessRefreshKind::nothing()
                 .with_cmd(sysinfo::UpdateKind::Always)
                 .with_cwd(sysinfo::UpdateKind::Always)
                 .with_exe(sysinfo::UpdateKind::Always)
