@@ -361,7 +361,7 @@ Expected: 退出码与输出照录；随后 60s 内每 5s `tail` rollout 是否�
 - [ ] **Step 2b: PC-1b queue 触达（运行态）**——USER-ASSIST：让该 APP 会话跑一个长任务（如 `list the files in this directory one by one, slowly`）；任务进行中 agent 再 queue 一条 `probe-1b [mam-probe]` → 记录行为（排队等待 turn 结束？插队？报错？）与 APP 内呈现，写入 notes.md「空闲/运行态差异」。
 ——`codex queue` 的 stdout 是否有 runId/确认；`codex agents --help` 与 `codex agents`（若在场）能否观测队列状态；结论写「投递成功/被消费信号」定案。
 
-- [ ] **Step 4: PC-3 exec resume 兜底**——同一 APP 会话：①APP 开着时 `codex exec resume <id> - "probe-2 [mam-probe]" --skip-git-repo-check -C "$EV/pc-proj" 2>&1 | tee $EV/pc/pc3-exec-open.txt`；②USER-ASSIST 关 APP 后重复一次（pc3-exec-closed.txt）。记录单写者锁报错形态/落盘成功/索引滞后。flag 形态以 `codex exec resume --help` 实测为准（`-C` 为 codex 全局工作目录 flag）。
+- [ ] **Step 4: PC-3 exec resume 兜底**——同一 APP 会话：①APP 开着时 `codex -C "$EV/pc-proj" exec resume <id> "probe-2 [mam-probe]" --skip-git-repo-check 2>&1 | tee $EV/pc/pc3-exec-open.txt`；②USER-ASSIST 关 APP 后重复一次（pc3-exec-closed.txt）。记录单写者锁报错形态/落盘成功/索引滞后。**flag 形态（Mac 段实测纠正，L10 回填）**：`-C` 是 codex 全局 flag，**必须置于子命令之前**——置于 `exec resume` 之后会 exit 2（`unexpected argument '-C' found`）。
 
 - [ ] **Step 5: PC-4 id 映射**——比对三处 id：rollout 文件名 UUID / rollout 首行 session_id / MAM 侧 codex 会话 id（读 `~/.codex/session_index.jsonl` 尾行）；`--thread` 试 UUID 与「会话名」两种形态各一次。写映射规则定案。
 
