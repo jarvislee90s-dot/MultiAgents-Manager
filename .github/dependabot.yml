@@ -1,28 +1,36 @@
 version: 2
+
+# 依赖升级策略（2026-10-04 用户裁决）：
+#   * 月度节奏（monthly = 每月 1 日）；改动本文件会立刻触发一次检查
+#   * npm 与 cargo 放进同一个多生态组 → 每次运行只开 1 个 PR，含两个生态的全部更新
+#   * 不启用自动合并（仓库 allow_auto_merge = false，每次合并都需人工知情）
+#
+# 为什么必须跨生态分组：tauri 的 Rust crate 与 @tauri-apps/* NPM 包被 tauri-cli 要求
+# major.minor 严格相等（门禁见 scripts/check-tauri-parity.mjs）。若两个生态各自成 PR，
+# 同一批升级会被拆成互斥的两半，单独合任何一个都必红——2026-10 实测发生过两次
+# （#86/#91、#102/#103）。同组之后两半天然在同一次变更里。
+#
+# 注意：本组只作用于 version updates；**安全更新不受此节奏与分组影响**，会随时单独开 PR。
+multi-ecosystem-groups:
+  deps:
+    schedule: { interval: monthly }
+    labels: [dependencies]
+
 updates:
-  # 用户裁决（2026-10-04）：季度 → 月度；依赖升级走「月度人工批处理」，
-  # 不启用自动合并（每次合并都需人工知情）。open-pull-requests-limit 提到 10：
-  # 之前 5/5 顶满时被截断的更新不会报错，只在 dependabot 自己的运行日志里可见。
   - package-ecosystem: npm
     directory: /
-    schedule: { interval: monthly }
-    open-pull-requests-limit: 10
-    labels: [dependencies, frontend]
-    groups:
-      minor-patch:
-        update-types: [minor, patch]
-      # 0.x 的第二段被 semver 视为破坏性（^0.13.3 只允许 0.13.x），
-      # 所以 zstd 0.13→0.14、sha2 0.10→0.11、rand 0.8→0.10、windows 0.57→0.61
-      # 这类会落到 major 组：与其四个 PR 各自冲突/各自跑 CI，不如集中成一个 PR 便于批处理。
-      major:
-        update-types: [major]
+    patterns: ["*"]
+    multi-ecosystem-group: deps
+    labels: [frontend]
+
   - package-ecosystem: cargo
     directory: /src-tauri/
-    schedule: { interval: monthly }
-    open-pull-requests-limit: 10
-    labels: [dependencies, backend]
-    groups:
-      minor-patch:
-        update-types: [minor, patch]
-      major:
-        update-types: [major]
+    patterns: ["*"]
+    multi-ecosystem-group: deps
+    labels: [backend]
+
+# 大版本不再单列分组：一个更新只能属于一个组。若某次不打算吃下某个 major，
+# 在组 PR 里对该依赖发 `@dependabot ignore <依赖名> major version`，dependabot 会重开
+# 一个不含它的 PR（命令表见 docs/DEPENDENCY-UPDATES.md §5）。
+# 也不再设 open-pull-requests-limit：组 PR 每次运行只出 1 个，限额无意义；此前 5/5 顶满
+# 造成的静默截断正是多出 #102/#103 的原因之一。
