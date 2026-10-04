@@ -108,6 +108,10 @@ gh workflow run ci.yml --ref main
   winreg 0.55 / junction 2.1）同样无需改代码；
   ⑤ 只有 `sysinfo 0.32→0.39` 需要迁移（0.33+ 删除 `RefreshKind::new`/`ProcessRefreshKind::new`）→ 因 **0.32 没有
   `nothing()`**，无法"先迁移后 bump"，故按 #99/#100 的模式拆成独立 PR #111（bump + 6 文件 9 处改名同批）。
+- **2026-10-04（收口）**：组 PR #110 在处置链后与 main 冲突，且 dependabot 对其 rebase/recreate **连续 35 分钟无响应**
+  （PR 停在 `dirty`）→ 按其内容在当前 main 上重建为 **PR #112** 并合并（cargo 8 个 major + 前端 13 项），#110 随后关闭。
+  当日最终态：`Tauri version parity` 门禁在组 PR 上直接绿（两半同批），前端与 cargo 的 major 全部落地，
+  tsconfig 的 `baseUrl` 已移除（为 TS 7 铺路），sysinfo 迁移随 #111 落地。
 - **待办**：见 §8。
 
 ## 8. 已知缺口
