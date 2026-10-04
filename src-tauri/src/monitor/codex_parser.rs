@@ -22,8 +22,11 @@ use std::time::SystemTime;
 /// L2/L3 会话扫描流水线（monitor::session_scan；codex 是唯一无界历史扫描者，三层全接）
 const CODEX_SCAN: SessionFileScan = SessionFileScan::new("codex-digest");
 
-/// rollout 文件命名判据（collect 的 accept 闭包）
-fn is_rollout_file(p: &Path) -> bool {
+/// rollout 文件命名判据（collect 的 accept 闭包）。
+/// **`pub(crate)`（Task 9）**：H8 的 rollout 文件名 → thread UUID 解析
+/// （`inject::headless::codex::thread_id_of`）必须与扫描器**同一份**命名判据——
+/// 别处再抄一份就会出现「扫描认得出、解析认不出」的双轨
+pub(crate) fn is_rollout_file(p: &Path) -> bool {
     p.file_name()
         .and_then(|n| n.to_str())
         .map(|n| n.starts_with("rollout") && n.ends_with(".jsonl"))
