@@ -120,6 +120,10 @@ gh workflow run ci.yml --ref main
 - **majors 无法再用 PR 隔离**：多生态组把大版本与小版本放进同一个 PR（换来"两半天然同批"）。代价用 §5 的 ignore 命令补偿；若将来想把 majors 拆回独立 PR，需要先验证"同一 ecosystem+directory 拆两条条目 + 条目级 `exclude-patterns`"是否被 GitHub 侧校验接受（当前无公开先例）。
 - **安全更新不参与分组与节奏**，需要随时单独处理。
 - 本仓库不使用自动合并（`allow_auto_merge: false`，每次合并都需人工知情）。
+- **已知 flaky 测试**：`tests/mobile/SessionDetail.test.tsx` 的「点加载更早后保持阅读位置（顶部插入量补偿）」
+  在新前端工具链（vitest 5 / @vitejs/plugin-react 6 / jest-dom 7）下**偶发失败**：
+  `AssertionError: expected 8000 to be 4000`（同一份代码重跑即绿；2026-10-04 实测同一 sha 一次失败、一次通过）。
+  碰到时先 `gh run rerun <run-id> --failed` 再判断，别急着回滚依赖；根治方向是让滚动补偿的 effect 幂等。
 - 组 PR 里若含当天吃不下的大版本，**会把同批的小版本一起压住**（一个更新只能属于一个组）；用 §5 的 ignore 命令裁剪，
   或在月度会话里直接排期迁移。
 - `sysinfo` 曾被以 `ignore ... major version` 忽略（对 0.x 等于全忽略）；它的迁移由 PR #111 落地后，
