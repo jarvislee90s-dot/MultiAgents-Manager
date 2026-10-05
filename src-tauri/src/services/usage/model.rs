@@ -129,7 +129,13 @@ pub struct UsageRow {
     pub buckets: UsageBuckets,
     pub metrics: UsageMetrics,
     pub source_kind: SourceKind,
-    pub is_subagent: bool,
+    /// D17 计数分层标记（`Some(true)` = 该组**只由子代理会话贡献**）。**可空**（契约 §2，
+    /// 2026-10-03 用户裁决）：`None` = **本档位算不出**（日档与记录页卡内行——两者的行维度
+    /// 都不含 `session_id`）；**「不知道」不得写成 `false`**（那等于谎称「不含子代理」，
+    /// 与 `userEst` 的 R1 同一逻辑）。
+    /// `Option` 且**不加** `skip_serializing_if`：契约写 `T | null` → 必须序列化出显式 `null`
+    /// （见模块头 2-5 行的两条 `Option` 用法之分）。
+    pub is_subagent: Option<bool>,
 }
 
 /// 可得性条目可覆盖的指标（契约 §2 的**完整**枚举，共 12 值）。

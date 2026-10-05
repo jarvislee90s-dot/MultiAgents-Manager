@@ -37,11 +37,9 @@
 //!   供应商 × 模型」）⇒ 日档里任何**按会话**的判定都**不可得**。本层按 GC 7 的处理：
 //!   **`recentSession` 日档直接给 `null`**（契约里该块本身可空；**不得**再聚合出空集，否则 UI 会
 //!   显示「本会话 **0**」这个**看起来像真实测量值的 0**，`miniBarRange = last7d` 时可见）；
-//!   **分组行的 `is_subagent` 恒 `false`**（**已知妥协**：契约 §2 把 `UsageRow.isSubagent` 定为
-//!   **非空** `boolean`，本层无权造 `null`（那要改契约），故只能如实标注「此位在日档不可得」；
-//!   小时档（浮窗默认「今日 / 近 5 小时」）不受影响）。**候选修法**（需 ①→② 裁决）：给
-//!   `UsageRow.isSubagent` 开可空、或日档改从明细表按会话取数（受保留期限制）——两条都动
-//!   契约/口径，不在执行侧。
+//!   **分组行的 `is_subagent` 按档位分叉**（**已按 2026-10-03 用户裁决落地**：契约 §2 现为
+//!   `boolean | null`）：**日档给 `None`**（不可得）、**小时档给 `Some(true/false)`**（真值）。
+//!   「不知道」**不得**写成 `false`——那等于谎称「不含子代理」（与 `userEst` 的 R1 同一逻辑）。
 //! * **kimi 的模型/供应商兜底**（W-44）：真机 23/82 个文件通篇无 `usage.record`，其 model/provider
 //!   来自**同轮其它文件**，落库 `provider_kind = measured` 是**兜底猜出来的**（不是实测）——本层只透传该列。
 //! * **kimi 明细行数口径**（W-45）：84（含 28 空模型行）→ 59 → **58**。
@@ -61,9 +59,9 @@
 //! * **记录页 `records`**（W6/D6/D7）：`groupBy` **只接受 `tool` | `project`**——它只驱动**卡片**维度，
 //!   卡内行**恒为「供应商 / 模型」**（供应商不可得时只呈现模型名，§8.3）。传 `provider` / `model`
 //!   一律结构化错误 `usage-groupby-invalid`；**守卫在总开关之前**（关闭态也报错，锁在用例里）。
-//!   卡内行的 `isSubagent` 按任务书**写死 `false`**：该字段的语义是 D17 的计数分层，而这一层的行
-//!   维度是「供应商 / 模型」；小时档本可算、日档算不出（日聚合不带 `session_id`）——**如实登记**
-//!   （与 Task 18 日档 `is_subagent` 恒 `false` 同族，见报告偏差申报）。
+//!   卡内行的 `isSubagent` **恒 `None`**（契约 §2 用户裁决）：该字段的语义是 D17 的计数分层，
+//!   而这一层的行维度是「供应商 / 模型」、**不含 `session_id`** → 本档位算不出
+//!   （**小时档也一样**；与小时档**分组行**的真值不是同一层，别写混）——不得写真 `false`。
 //! * **CSV `export_csv`**（契约 §3）：**只导结构化账本列**（11 列 = 表头常量 `CSV_HEADER`），
 //!   零会话正文（GC 10 白名单）：会话标题、`project_path_raw` / `project_realpath`（原始路径）
 //!   一律**不进**任何输出（有哨兵用例锁住）。列值纪律：`userEst` 不可得 = **空单元格**（不是 0，
@@ -99,8 +97,8 @@ pub(crate) struct LedgerRow {
     /// **日档恒为空串**：日聚合的粒度是「日 × 源 × 项目 × 供应商 × 模型」，**不带会话 id**
     /// ⇒ 日档里任何**按会话**的判定都不可得。本层两个消费点的处理（GC 7 / 评审判决 A）：
     /// * `recent_session_with` → 日档直接返回 `None`（不可得给 `null`，**不给 0**）；
-    /// * 分组行的 `is_subagent` → 契约把该字段定为**非空**，只能恒 `false`（**已知妥协**，
-    ///   见模块文档「已知口径差异」1.2 与报告偏差申报；改它属契约变更）。
+    /// * 分组行的 `is_subagent` → 日档 `None`（不可得 = `null`，**不是 `false`**；契约 §2
+    ///   2026-10-03 用户裁决），小时档才有真值 `Some(bool)`。
     pub session_id: String,
     pub project_key: String,
     pub project_label: String,
@@ -453,17 +451,21 @@ pub fn dashboard_with_conn(
             let kind = aggregate_source_kind(&rs);
             // 该组是否只由子代理会话贡献（供 UI「单列一层可展开」，D17）。
             //
-            // **日档的已知妥协（契约限制，登记 ①→②）**：日档的行来自日聚合表、`session_id` 恒为空串
-            // （见 `LedgerRow::session_id`），`subs` 必然查不到 → 此位**恒 `false`（不可得）**。
-            // 契约 §2 把 `UsageRow.isSubagent` 定为**非空** `boolean`，本层无权造 `null`（那要改契约）；
-            // 按 GC 7「不得用假值冒充测量值」的原则，此处只能**如实标注为不可得**并写进模块文档与
-            // 偏差申报，由 ①→② 裁决是否改契约。小时档（浮窗默认「今日 / 近 5 小时」）不受影响。
-            let is_sub = !rs.is_empty()
-                && rs.iter().all(|r| {
-                    subs.get(&(r.source_id.clone(), r.session_id.clone()))
-                        .copied()
-                        .unwrap_or(false)
-                });
+            // **按档位分叉**（契约 §2，2026-10-03 用户裁决：`boolean | null`）：
+            // * **小时档**：明细行带 `session_id`，能真算 → `Some(true/false)`；
+            // * **日档**：日聚合不带 `session_id`（见 `LedgerRow::session_id`），`subs` 必然查不到
+            //   → 该位**不可得** = `None`（**不是 `Some(false)`**：那等于谎称「不含子代理」）。
+            let is_sub = match resolved.cur.granularity {
+                RangeGranularity::Hour => Some(
+                    !rs.is_empty()
+                        && rs.iter().all(|r| {
+                            subs.get(&(r.source_id.clone(), r.session_id.clone()))
+                                .copied()
+                                .unwrap_or(false)
+                        }),
+                ),
+                RangeGranularity::Day => None,
+            };
             UsageRow {
                 key,
                 label,
@@ -637,8 +639,9 @@ pub fn records_with_conn(
             let (buckets, metrics) = aggregate(&rs);
             // 卡内行**恒为「供应商 / 模型」**（D6）：键取这一对，避免同供应商的多个模型互相吃掉；
             // 供应商不可得（workbuddy）时只呈现模型名（§8.3：归因不到就只按模型维度呈现）。
-            // `is_subagent` 按任务书写死 `false`：该字段的语义是 D17 的计数分层，而这一层的行维度
-            // 是「供应商 / 模型」（小时档本可算、日档算不出）——**已知妥协**，见模块文档与偏差申报。
+            // `is_subagent` **恒 `None`**（契约 §2，2026-10-03 用户裁决）：该字段的语义是 D17 的
+            // 计数分层，而这一层的行维度是「供应商 / 模型」、**不含 `session_id`**
+            // → 本档位算不出（**小时档也一样**：档位判定不落在这一层），不得写真 `false`。
             let mut inner: BTreeMap<String, (String, Vec<LedgerRow>)> = BTreeMap::new();
             for r in &rs {
                 let (k, label) = if r.provider.is_empty() {
@@ -666,7 +669,7 @@ pub fn records_with_conn(
                         buckets: b,
                         metrics: m,
                         source_kind: kind,
-                        is_subagent: false,
+                        is_subagent: None,
                     }
                 })
                 .collect();
@@ -1326,14 +1329,17 @@ mod tests {
         assert_eq!(d.rows.len(), 2);
         assert_eq!(d.rows[0].key, "claude");
         assert_eq!(d.rows[1].key, "codex");
-        // D17：该组是否**只由子代理会话贡献**（供 UI 单列一层可展开）
-        assert!(
-            !d.rows[0].is_subagent,
-            "claude 组含父会话 s1 → 不是「只由子代理贡献」"
+        // D17：该组是否**只由子代理会话贡献**（供 UI 单列一层可展开）。
+        // 本用例是**小时档**（Today → 小时桶）→ 该位有真值 `Some(bool)`（契约 §2 2026-10-03 裁决）
+        assert_eq!(
+            d.rows[0].is_subagent,
+            Some(false),
+            "小时档：claude 组含父会话 s1 → 不是「只由子代理贡献」"
         );
-        assert!(
+        assert_eq!(
             d.rows[1].is_subagent,
-            "codex 组只有子代理 s2 → D17 分层标记必须为真"
+            Some(true),
+            "小时档：codex 组只有子代理 s2 → D17 分层标记必须为真"
         );
         // D17：会话数分层（s2 是子代理，不计入）
         assert_eq!(d.work_summary.sessions, Some(1));
@@ -1498,10 +1504,12 @@ mod tests {
         // token 总量**含子代理**（不受分层影响）
         assert_eq!(d.totals_buckets.input_fresh, 100 + 500 + 10);
         // 分层标记也要跟着变：该组现在同时含父会话 s3 → 不再是「只由子代理贡献」
+        // （本用例是小时档 → 有真值；契约 §2 2026-10-03 裁决）
         let codex = d.rows.iter().find(|r| r.key == "codex").unwrap();
-        assert!(
-            !codex.is_subagent,
-            "R3 只改计数类；codex 组含父会话 s3 → is_subagent=false"
+        assert_eq!(
+            codex.is_subagent,
+            Some(false),
+            "R3 只改计数类；codex 组含父会话 s3 → Some(false)"
         );
     }
 
@@ -2187,9 +2195,9 @@ mod tests {
     }
 
     /// 评审判决 A 的第三半（**outcome 断言**，非根因断言）：行级 `is_subagent` 的**分叉结果**——
-    /// 小时档能分层（codex 组只由子代理 s2 贡献 → `true`），**日档不可得 → 恒 `false`**
-    /// （契约把该字段定为非空 `boolean`，属**已知妥协**）。本断言让妥协**可见**：
-    /// 若 ② 裁决改契约（例如允许 `null`、或日档补会话级取数），它会立刻变红。
+    /// 小时档能分层（codex 组只由子代理 s2 贡献 → `true`），**日档不可得 → `null`**
+    /// （契约 §2 2026-10-03 用户裁决：`boolean | null`；「不知道」**不得**写成 `false`）。
+    /// 本断言让口径**可见**：日档若回退成 `false`（`Some(false)`）会立刻变红。
     #[test]
     fn subagent_flag_is_only_meaningful_in_the_hour_tier() {
         let conn = mem_with_rows(); // codex 的 s2 是子代理；claude 的 s1 是父会话
@@ -2202,11 +2210,16 @@ mod tests {
         )
         .unwrap();
         let hsub = |k: &str| hour.rows.iter().find(|r| r.key == k).unwrap().is_subagent;
-        assert!(
+        assert_eq!(
             hsub("codex"),
-            "小时档：codex 组只由子代理会话贡献 → true（D17 分层的依据可用）"
+            Some(true),
+            "小时档：codex 组只由子代理会话贡献 → Some(true)（D17 分层的依据可用）"
         );
-        assert!(!hsub("claude"), "小时档：claude 组含父会话 s1 → false");
+        assert_eq!(
+            hsub("claude"),
+            Some(false),
+            "小时档：claude 组含父会话 s1 → Some(false)"
+        );
         let day = dashboard_with_conn(
             &conn,
             &range(UsageRangePreset::Last7d),
@@ -2220,12 +2233,38 @@ mod tests {
             "前提：日档必须有 codex 组"
         );
         let dsub = |k: &str| day.rows.iter().find(|r| r.key == k).unwrap().is_subagent;
-        assert!(
-            !dsub("codex"),
-            "日档：日聚合不带 session_id → 该位**不可得**；契约定为非空故只能恒 false\
-             （已知妥协，见模块文档「已知口径差异」1.2 与报告偏差申报 F-1）"
+        assert_eq!(
+            dsub("codex"),
+            None,
+            "日档：日聚合不带 session_id → 该位**不可得** = None，**不是 false**\
+             （2026-10-03 用户裁决；契约 §2 已改 `boolean | null`）"
         );
-        assert!(!dsub("claude"));
+        assert_eq!(dsub("claude"), None, "日档：不可得 ≠ 「非子代理」");
+
+        // —— 新口径锁（契约 §2 2026-10-03 用户裁决：日档 `null`，不是 `false`）——
+        // 变异敏感性：把日档分支改回 `Some(false)` → 下面第一条断言真红（MA-1）。
+        let dv = serde_json::to_value(&day).unwrap();
+        let di = day.rows.iter().position(|r| r.key == "codex").unwrap();
+        assert!(
+            dv["rows"][di]
+                .as_object()
+                .unwrap()
+                .contains_key("isSubagent"),
+            "isSubagent 键必须在（`null` 也要出现，不得被 skip_serializing_if 省略）"
+        );
+        assert!(
+            dv["rows"][di]["isSubagent"].is_null(),
+            "日档：日聚合不带 session_id → 该位**不可得** = null（不是 false）；\
+             契约 §2 已改 `boolean | null`"
+        );
+        // 反向对照：小时档在 wire 上是**真布尔**（`Option` 只在 `None` 时出 `null`）
+        let hv = serde_json::to_value(&hour).unwrap();
+        let hi = hour.rows.iter().position(|r| r.key == "codex").unwrap();
+        assert_eq!(
+            hv["rows"][hi]["isSubagent"],
+            serde_json::json!(true),
+            "小时档在 wire 上必须是真布尔 true（不得被可空化牵连）"
+        );
     }
 
     /// D19 的**数值锁**（评审 Important #2）：`longestTurnPerTool` 的 p50 与 max。
@@ -3704,8 +3743,8 @@ mod tests {
     /// **两档取数路径锁**：小时档读 `usage_detail`、日档读 `usage_daily`——两张表各只写一行
     /// （只明细 / 只日聚合），两个档位必须各自只认自己那张表（若日档走明细或反之，真红）。
     /// 顺带：窗口外的日聚合行不得被 `BETWEEN` 带进来。
-    /// 并把**已知妥协**钉成可见断言：卡内行 `is_subagent` 在**两档**都是任务书写死的 `false`
-    /// （行维度是「供应商 / 模型」；D17 分层语义不落在这一层，见报告偏差申报 F-3）。
+    /// 并把**新口径**钉成可见断言：卡内行 `is_subagent` 在**两档**都必须是 `None`（不可得 = `null`）
+    /// ——行维度是「供应商 / 模型」、不含 `session_id`（契约 §2 2026-10-03 用户裁决），不得写真 `false`。
     #[test]
     fn records_hour_tier_reads_detail_and_day_tier_reads_daily() {
         let conn = mem_empty();
@@ -3803,15 +3842,31 @@ mod tests {
             !csv_hour.contains("codex"),
             "CSV 小时档不得混入日聚合独有的行：{csv_hour}"
         );
-        // 已知妥协的可见化（两档都写死 false；若 ② 改契约或补会话级取数，这两条会红）
+        // 契约 §2（2026-10-03 用户裁决）的可见化：卡内行**两档都是 `None`**（行维度是
+        // 「供应商 / 模型」、不含 `session_id` → 本档位算不出）；若回退成 `Some(false)` 这两条会红。
         assert!(day
             .cards
             .iter()
-            .all(|c| c.rows.iter().all(|x| !x.is_subagent)));
+            .all(|c| c.rows.iter().all(|x| x.is_subagent.is_none())));
         assert!(hour
             .cards
             .iter()
-            .all(|c| c.rows.iter().all(|x| !x.is_subagent)));
+            .all(|c| c.rows.iter().all(|x| x.is_subagent.is_none())));
+
+        // —— 新口径锁（契约 §2 2026-10-03 用户裁决：记录页卡内行 `null`，不是 `false`）——
+        // 变异敏感性：把卡内行改回 `Some(false)` → 下面的断言真红（MA-2）。
+        // 卡内行的行维度是「供应商 / 模型」、**不含 `session_id`** ⇒ 该位在本层算不出（两档一致）。
+        for (tier, rec) in [("日档", &day), ("小时档", &hour)] {
+            let rv = serde_json::to_value(rec).unwrap();
+            for c in rv["cards"].as_array().unwrap() {
+                for r in c["rows"].as_array().unwrap() {
+                    assert!(
+                        r["isSubagent"].is_null(),
+                        "{tier}：记录页卡内行不含 session_id → isSubagent 必须是 null（不是 false）"
+                    );
+                }
+            }
+        }
     }
 
     /// **总开关的门 + 错误传播**：关闭 → `records` 出空卡、`collectedAt` 是 **0 哨兵**
@@ -4357,7 +4412,7 @@ mod tests {
             for row in d.rows.iter().take(10) {
                 println!(
                     "  - {} / {} : buckets={:?} request_total={} requests={} user_est={:?} \
-                     kind={:?} is_subagent={}",
+                     kind={:?} is_subagent={:?}",
                     row.key,
                     row.label,
                     row.buckets,

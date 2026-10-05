@@ -374,8 +374,13 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     case "usage_dashboard": {
       const buckets = { inputFresh: 120000, cacheRead: 880000, cacheWrite: 0, output: 45000 };
       const metrics = { requestTotal: 1000000, cacheHitRate: 0.88, userEst: 12345, requests: 321 };
+      const range = (args as { range?: { preset?: string } })?.range ?? { preset: "today" };
+      // `isSubagent` 是 `boolean | null`（契约 §2 用户裁决）：**按请求档位分档**——
+      // 小时档（last5h / today）给真值，日档（last7d / last30d / custom）该位不可得 → `null`。
+      // mock 不按档位分档就会与真机 wire 分叉（真机日档恒 null，见计划① §3.2.4）。
+      const hourTier = range.preset === "last5h" || range.preset === "today";
       return Promise.resolve({
-        range: (args as { range?: unknown })?.range ?? { preset: "today" },
+        range,
         groupBy: (args as { groupBy?: string })?.groupBy ?? "tool",
         rows: [
           {
@@ -384,7 +389,7 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
             buckets,
             metrics,
             sourceKind: "inferred",
-            isSubagent: false,
+            isSubagent: hourTier ? false : null,
           },
           {
             key: "codex",
@@ -392,7 +397,7 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
             buckets,
             metrics,
             sourceKind: "inferred",
-            isSubagent: false,
+            isSubagent: hourTier ? false : null,
           },
         ],
         totals: metrics,
@@ -445,13 +450,15 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
             buckets,
             metrics,
             rows: [
+              // 卡内行**一律 `null`**（契约 §2 用户裁决）：这一层行维度是「供应商 / 模型」、
+              // 不带 `session_id` → 与真机一致（`query.rs` 卡内行恒 `None`，两档都是），不得写真 `false`。
               {
                 key: "volcengine / deepseek-v4.1-flash",
                 label: "volcengine / deepseek-v4.1-flash",
                 buckets,
                 metrics,
                 sourceKind: "measured",
-                isSubagent: false,
+                isSubagent: null,
               },
               {
                 key: "hy3",
@@ -459,7 +466,7 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
                 buckets,
                 metrics,
                 sourceKind: "unknown",
-                isSubagent: false,
+                isSubagent: null,
               },
             ],
           },

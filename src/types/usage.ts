@@ -38,7 +38,13 @@ export interface UsageRow {
   buckets: UsageBuckets;
   metrics: UsageMetrics;
   sourceKind: UsageSourceKind;
-  isSubagent: boolean;
+  /**
+   * D17 计数分层标记：`true` = 该组**只由子代理会话贡献**、`false` = 含父会话
+   * （以上两者只在**小时档**成立）；`null` = **本档位算不出**（日档与记录页卡内行——
+   * 两者的行维度都不含 `session_id`，见契约 §2 2026-10-03 裁决）。
+   * 遇 `null` **不显示**子代理标记，**不得**回退成 `false` 的「非子代理」语义。
+   */
+  isSubagent: boolean | null;
 }
 export type UsageMetric =
   | "sessions"

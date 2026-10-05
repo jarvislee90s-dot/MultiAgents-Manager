@@ -487,7 +487,8 @@ mod tests {
             buckets,
             metrics,
             source_kind: SourceKind::Inferred,
-            is_subagent: false,
+            // **算不出**该位（日档 / 记录页卡内行）→ `None`：wire 上必须是显式 `null`
+            is_subagent: None,
         };
         let rv = obj(row);
         assert_eq!(
@@ -503,9 +504,29 @@ mod tests {
             "UsageRow 的键名/大小写逐字冻结（去掉 rename_all 会全变 snake_case）"
         );
         assert_eq!(rv["sourceKind"], "inferred", "三态序列化形态");
+        // —— 新口径锁（契约 §2 2026-10-03 用户裁决：`T | null` 必须序列化出显式 null）——
+        // 变异敏感性：构造处改回 `Some(false)` 或加上 `skip_serializing_if` → 下面的断言真红。
+        assert!(
+            rv.get("isSubagent").is_some(),
+            "isSubagent 必须出现（缺键 = 前端 undefined）"
+        );
+        assert!(
+            rv["isSubagent"].is_null(),
+            "不可得必须序列化成 null（GC 7 同族；不得 skip、不得填 false）"
+        );
+        // 反向对照（同一用例内）：`Some(true)` 在 wire 上是**真布尔**，不得被可空化牵连成 null
+        let row_true = UsageRow {
+            key: "codex".into(),
+            label: "codex".into(),
+            buckets,
+            metrics,
+            source_kind: SourceKind::Inferred,
+            is_subagent: Some(true),
+        };
         assert_eq!(
-            rv["isSubagent"], false,
-            "isSubagent 必须是 camelCase 且为真布尔"
+            obj(row_true)["isSubagent"],
+            serde_json::json!(true),
+            "Some(true) 必须是真布尔 true（`Option` 只在 None 时出 null）"
         );
 
         let avail = UsageAvailability {

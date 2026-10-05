@@ -137,7 +137,11 @@ function assertRow(r: UsageRow) {
     keysOf<UsageRow>(["key", "label", "buckets", "metrics", "sourceKind", "isSubagent"])
   );
   expect(["measured", "inferred", "unknown"]).toContain(r.sourceKind);
-  expect(typeof r.isSubagent).toBe("boolean");
+  // isSubagent 是 `boolean | null`（契约 §2 2026-10-03 裁决：日档 / 记录页卡内行**算不出** → null）。
+  // `null` 同样必须**在场**（`undefined`/缺键会让下面两式都判假）——与紧邻 `assertMetrics` 的
+  // `userEst` 同款写法；**不得**把 `null` 当 `false`（「不知道」≠「非子代理」）。
+  expect("isSubagent" in r).toBe(true);
+  expect(r.isSubagent === null || typeof r.isSubagent === "boolean").toBe(true);
   assertBuckets(r.buckets);
   assertMetrics(r.metrics);
 }
