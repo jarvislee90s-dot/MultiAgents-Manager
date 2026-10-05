@@ -385,6 +385,15 @@ export function UsageStatusSection() {
           ) : null}
         </div>
         <p className="text-muted-foreground text-xs">{t("settings.usageStatus.exportHint")}</p>
+        {/* **C-3（用户裁决：保持现状 + 补一条前端提示）**：CSV **不受**总开关门控（不改代码），
+            但关闭态下必须说清导出的是什么——「**已采集的历史账本**」。否则用户会以为导出的是
+            「关闭后的空账本」，或以为要先打开开关才能导出。按钮本身**保留可点**：关掉采集后
+            仍要能备份自己的历史账本（那才是真正的数据可用性损失），隐私风险不因开关变化。 */}
+        {switchEnabled === false ? (
+          <p className="text-xs text-amber-500" data-testid="usage-status-export-disabled-hint">
+            {t("settings.usageStatus.exportHintDisabled")}
+          </p>
+        ) : null}
       </div>
     </div>
   );

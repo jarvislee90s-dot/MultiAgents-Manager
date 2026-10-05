@@ -325,6 +325,38 @@ describe("UsageStatusSection 总开关关闭 / 不可得（Task 24）", () => {
     expect(screen.queryByTestId("usage-today-buckets")).toBeNull();
   });
 
+  // **C-3（用户裁决：保持现状 + 补一条前端提示）**：CSV 不受总开关门控**不改代码**，
+  // 但关闭态下必须说清「导出的是**已采集的历史账本**」——否则用户会以为导出的是「关闭后的
+  // 空账本」，或以为要先打开开关才能导出。导出按钮**保留**：关掉采集后仍要能备份/导出自己的
+  // 历史账本（那才是真正的数据可用性损失），而导出的隐私风险不因开关变化（都要用户主动点）。
+  it("关闭态下导出按钮**保留**且注明「导出的是已采集的历史账本」（C-3）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "usage_dashboard") return disabledDashboard();
+      if (cmd === "usage_get_settings") return { enabled: false };
+      return null;
+    });
+    render(<UsageStatusSection />);
+    await screen.findByTestId("usage-status-disabled");
+    // ① 导出按钮仍在、仍可点（**不得**因总开关关闭而隐藏或禁用）
+    const btn = screen.getByTestId("usage-status-export") as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    // ② 必须注明导出的是**已采集的历史账本**（两句都要在：历史账本 + 关闭期间不再采集新数据）
+    const hint = screen.getByTestId("usage-status-export-disabled-hint");
+    expect(hint.textContent ?? "").toMatch(/already-collected historical ledger/i);
+    expect(hint.textContent ?? "").toMatch(/nothing new is collected/i);
+  });
+
+  it("打开态**不**显示关闭态导出提示（不得误报「已关闭」）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "usage_dashboard") return dashboard();
+      if (cmd === "usage_get_settings") return { enabled: true };
+      return null;
+    });
+    render(<UsageStatusSection />);
+    await screen.findByTestId("usage-status-export");
+    expect(screen.queryByTestId("usage-status-export-disabled-hint")).toBeNull();
+  });
+
   it("总开关打开（enabled=true）+ 真的没数据 → 不显示关闭提示，空态说「今天没跑」", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "usage_dashboard") return emptyDashboard();
