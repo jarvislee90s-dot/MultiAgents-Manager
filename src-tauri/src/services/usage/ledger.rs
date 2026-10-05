@@ -399,6 +399,7 @@ pub fn cutoff_day(retention_days: i64, now_ms: i64) -> String {
     crate::services::usage::range::day_key_of_host(ts)
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,3 +725,4 @@ mod tests {
         );
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

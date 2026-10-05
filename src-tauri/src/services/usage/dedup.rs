@@ -99,6 +99,7 @@ pub fn turn_key(source_id: &str, session_id: &str, turn_id: &str) -> DedupKey {
     }
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,3 +215,4 @@ mod tests {
         assert_eq!(admitted, 2_308, "去重后应恰好是 2,308 个 turn");
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

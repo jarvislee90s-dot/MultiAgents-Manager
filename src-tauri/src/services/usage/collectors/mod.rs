@@ -381,6 +381,7 @@ impl PendingTools {
     }
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,3 +542,4 @@ mod tests {
         assert_eq!(t.finish_oldest(6_000), None, "空表 → None（不得 panic）");
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

@@ -487,6 +487,7 @@ pub fn spawn_initial_collection() {
     });
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,106 +1311,27 @@ mod tests {
         );
     }
 
-    /// 源码自省锁的输入（**第三轮复审后收尾修正 / P1-1 实证漏报后收紧 / 最后一批复审再收紧**）。
+    /// **判据面由共享实现给出**（第 5 轮：用**显式哨兵标记**，删掉全部「结构推断」）。
     ///
-    /// ① **先剥注释，再定锚点**——旧判据是「先按**字面量** `#[cfg(test)]` 截断、再剥注释」，
-    ///    于是 `collectors/mod.rs` 里注释写着的 `#[cfg(test)]`（原文「且只在 `#[cfg(test)]`
-    ///    下存在」）把**整段生产代码**变成盲区（`error.rs` 的「**不是** `#[cfg(test)]`」同型）。
-    ///    那正是本锁文档写着要防的假绿（「把禁项抄进注释就能骗过反向锁」），却由它自己制造。
-    /// ② 锚点 = **真正的测试模块**（`#[cfg(test)]` + `mod tests`），不是任意 `#[cfg(test)]` 项
-    ///    ——旧判据停在 `collect.rs:70` 的 `#[cfg(test)] fn default_rules_override()`（一个**测试
-    ///    专用函数**），而 `CollectContext` / `collect_source` / `run_collection` / `collect`
-    ///    **全在它后面** ⇒ 该文件只扫 **2.0%**（`collectors/mod.rs` 11.5% / `error.rs` 11.1% /
-    ///    `settings.rs` 60.9%）。第三轮收尾后这四个文件都扫到「真测试模块前一行」= 生产半边
-    ///    **100%**；**最后一批复审再收紧 ③④ 之后**，`collect.rs` 因自身测试模块里的字符串字面量
-    ///    含裸 `{`（深度残差 2）**退回整文件扫描**（多扫方向）——**逐文件实测口径见下面锁的
-    ///    「扫描面」那一行**（16 个截断 / 8 个整文件）。找不到测试模块 → **整文件扫描**（不截断）。
-    /// ③ **锚点行必须精确匹配**（`mod tests` / `mod tests {`，**不是前缀**）——最后一批复审实测
-    ///    （P1-1 弱点①）：前缀匹配把 `#[cfg(test)] mod tests_of_line_splitting {…}` 也当锚点，
-    ///    而旧判据取**第一个**命中点 ⇒ 该点之后的一切（含生产代码）**静默变盲区**（假绿，且能过
-    ///    `cargo fmt`）。
-    /// ④ **锚点必须收口于文件末尾**（P1-1 弱点②）——命中锚点后校验该块的大括号**首次回到深度 0
-    ///    处之后不得再有代码行**（中途跌破 0 亦判否）；不满足就**继续找**，全不满足 → **整文件
-    ///    扫描**。这条同时堵掉「生产半边的多行字符串里写着 `#[cfg(test)]` / `mod tests {`」型
-    ///    假锚点（EXP-9 实测：改前绿、改后红）。
-    /// ⑤ `#[cfg(test)]` 的**非模块项**（`collect.rs` 的测试专用函数、`collectors/mod.rs` 的 W-13
-    ///    计数器、`settings.rs` 的注入静态量）**仍留在扫描面内**——这是**有意**的：禁项藏在
-    ///    这类项里同样要抓。**本判据抓不到的回归**（反例）见下面锁的「扫描面 / 判据层级 / 反例」。
+    /// 历史与完整理由见 `crate::services::usage::self_lock` 的模块文档；这里只留**本锁**要用的：
+    /// * 判据面 = `self_lock::scan_face(文件名, 源码)` = 文件头 → **排除区 BEGIN** 之前，
+    ///   **加上** END 之后 → 文件尾（去行内空白、剥**整行** `//` 注释）；
+    /// * 24 个文件**每个都必须恰好一对标记**：19 个有测试模块的文件把标记**包住测试模块**
+    ///   （BEGIN 在 `#[cfg(test)]` 前一行、END 在测试模块收口 `}` 之后）；5 个**无测试模块**的文件
+    ///   （`caps.rs` / `delta.rs` / `mod.rs` / `model.rs` / `settings.rs`）把两行**相邻**放在文件
+    ///   末尾 ⇒ 排除区为空、**整文件都在面内**；
+    /// * 标记缺失 / 重复 / 顺序反了 / 面为空 ⇒ `scan_face` **panic**（响亮失败，不许静默退化）。
+    ///
+    /// **为什么不再用「锚点 + 大括号配平到 EOF」**：那是**用文本启发式推断 Rust 结构**，五轮里
+    /// 每一轮都被更早的假锚点骗过——前缀命中的 `mod tests_of_line_splitting`、多行字符串里的
+    /// `#[cfg(test)]` / `mod tests {`、**块注释里的同款两行**；而且**盲区永远是 `[锚点, EOF)`**：
+    /// 「收口校验」管不到锚点与收口点之间装了什么，而**生产代码可以写在测试模块之后**（Rust 不看
+    /// 声明顺序）。第 4 轮判据正是在那里漏掉两条构造（回归追加在文件末尾 ⇒ 落在面外 ⇒ 假绿）。
     ///
     /// 注意：`commands/usage.rs` / `commands/export.rs` 里同名的 `prod_only` 仍按**首个
-    /// `#[cfg(test)]` 字面量**截断（**本轮按指令未改**，见台账 C-【Important-1】第 3 行）——
+    /// `#[cfg(test)]` 字面量**截断（**两轮均按指令未改**，见台账 C-【Important-1】第 3 行）——
     /// 那两个文件的首个 `#[cfg(test)]` **就是**紧邻 `mod tests` 的真属性 ⇒ 截断区等于生产半边
-    /// 全部、当下无盲区；但 ③④ 这两条弱点在那里**依然存在**（同族风险未消除、只是当前无实例）。
-    fn code_lines(src: &str) -> Vec<String> {
-        src.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .map(|l| l.chars().filter(|c| !c.is_whitespace()).collect())
-            .collect()
-    }
-
-    /// 锚点行判据（**精确**，P1-1 弱点①）：`mod tests` / `mod tests {` 本身，**不是前缀**。
-    ///
-    /// 精确匹配同时把 `mod tests;`（外部文件模块声明）挡在外面——那种形态**不该**截断本文件
-    /// （测试在别的文件里，本文件整篇都是生产代码），退化为整文件扫描是**多扫**方向。
-    ///
-    /// 开括号**写成字节值 `123`**：本判据的源码本身也在扫描面内（`collect.rs` 是 24 个文件之一），
-    /// 源码里出现**裸 `{` 的字符串字面量**会污染 `closes_at_eof` 的大括号计数——`concat!("mod",
-    /// "tests{")` 曾让本文件与 `collectors/opencode.rs` 的深度残差各 +1，把**真锚点**误判成
-    /// 「不配平」⇒ 两个文件退化为整文件扫描（`opencode.rs` 的自省锁当场变红）。判据必须**对
-    /// 自己免疫**：凡在本判据源码里出现的括号字符，一律成对出现（如 `'{'` / `'}'` 字符字面量）。
-    fn is_test_module_anchor(line: &str) -> bool {
-        line == concat!("mod", "tests")
-            || (line.starts_with(concat!("mod", "tests")) && line.as_bytes().get(8) == Some(&123))
-    }
-
-    /// 该块是否**收口于文件末尾**（P1-1 弱点②）：大括号深度**首次回到 0** 之后不得再有代码行。
-    ///
-    /// 只看大括号（不看字符串/字符字面量里的括号）⇒ 这是**启发式**：字符串里含裸 `{` 的文件
-    /// 深度可能**永不回到 0**，此时判据按「不配平」处理 → **整文件扫描**（多扫、不漏扫）。
-    /// 实测（最后一批复审）：24 个文件里 16 个被真锚点截断、8 个退化为整文件（5 个无测试模块
-    /// + `collect.rs` 残差 2 / `collectors/workbuddy.rs` 残差 3 / `provider.rs` 残差 1）。
-    fn closes_at_eof(lines: &[String]) -> bool {
-        let mut depth: i64 = 0;
-        let mut closed: Option<usize> = None;
-        for (i, l) in lines.iter().enumerate() {
-            for c in l.chars() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth < 0 {
-                            return false;
-                        }
-                        if depth == 0 && closed.is_none() {
-                            closed = Some(i);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        closed.is_some_and(|i| lines[i + 1..].iter().all(|l| l.is_empty()))
-    }
-
-    /// 生产半边的代码行：截到**真正的测试模块**（紧邻 `#[cfg(test)]` 的精确 `mod tests`，
-    /// 且收口于文件末尾）之前；找不到 → 整文件。
-    fn prod_code_lines(src: &str) -> Vec<String> {
-        let lines = code_lines(src);
-        for i in 0..lines.len() {
-            if !is_test_module_anchor(&lines[i]) {
-                continue;
-            }
-            let prev = lines[..i].iter().rev().find(|l| !l.is_empty());
-            if !prev.is_some_and(|l| l.starts_with(concat!("#[cfg", "(test)]"))) {
-                continue;
-            }
-            if closes_at_eof(&lines[i..]) {
-                return lines[..i].to_vec();
-            }
-        }
-        lines
-    }
-
+    /// 全部、当下无盲区；但那套启发式的弱点在那里**依然存在**（同族风险未消除、只是当前无实例）。
     /// **实现纪律的源码级自省锁（spec §P6 改写后 / Q-4 裁决 / A-1）**：`services/usage/` 的
     /// **生产半边**里，**没有任何地方把源时区喂进键函数**，且命名时区机器**不得回到本域**。
     ///
@@ -1419,53 +1341,65 @@ mod tests {
     /// codex 的用例。本锁把裁决的**结构面**钉死：键函数**只有宿主本地单参形态**。
     ///
     /// **能变红**（三支）：
-    /// ① 任一生产半边写回 `SourceTz` / `chrono_tz` / `from_name(` → 反向断言红；
+    /// ① 判据面里写回 `SourceTz` / `chrono_tz` / `from_name(` → 反向断言红；
     /// ② 重造带参键函数（出现 `hour_key_of(` / `day_key_of(` 而非 `…_host(`）→ 反向断言红
-    ///    （**这就是「把源时区喂进键函数」的唯一可行形态**：宿主本地入口是单参的）；
+    ///    （这是「把源时区喂进键函数」**最省事的可行形态**；换名成 `bucket_of(ts, tz)` 同样可行，
+    ///    见反例①——故此处**不写"唯一"**：本判据是名字级，只认名字形态）；
     /// ③ 把宿主本地键入口删光 → 正向断言红（防「本域压根没有键函数」时反向全绿的假绿）。
     ///
     /// 针一律 `concat!` 拆开写：否则本用例自己的字面量就会命中自己（恒真/恒假）。
     ///
     /// **扫描面 / 判据层级 / 反例**（台账 C-【Important-1】的登记原文，此处为权威副本；
-    /// 最后一批复审后按**实测口径**补全）：
-    /// * **扫描面** = `USAGE_SOURCES`（`services/usage/**/*.rs` 全部 **24** 个文件；与磁盘逐一
-    ///   对账见 `usage_source_scan_covers_every_file_on_disk`）的**判据面**（`prod_code_lines`：
-    ///   剥**整行**注释 → 锚点 = 精确 `mod tests` / `mod tests {` 且**收口于文件最后一条非空
-    ///   代码行** → 取锚点之前的部分）。**实测（24 个文件逐一对账）**：**16 个 = 生产半边**
-    ///   （截断在真测试模块前一行）；**8 个 = 整文件**（多扫方向）：① 5 个**无测试模块**
-    ///   （`caps.rs` / `delta.rs` / `mod.rs` / `model.rs` / `settings.rs`）；② 3 个测试模块体内
-    ///   **字符串字面量含裸 `{`** ⇒ 大括号深度**永不回到 0** ⇒ 判据按「不配平」处理：
-    ///   `collect.rs`（残差 2）、`collectors/workbuddy.rs`（残差 3；`"{}\n{{notjson\n{}\n"`）、
-    ///   `provider.rs`（残差 1）。⇒ 对那 16 个文件「生产半边 **100%**」成立；对 8 个整文件扫描
-    ///   的文件，**其测试代码也在面内** ⇒ 将来在这些文件的 `#[cfg(test)]` 项 / 字符串里写出针的
-    ///   字面量会**假阳性**（见「反例（会误报）」⑤）；**这是刻意保留的方向**（响亮、安全）。
+    /// **第 5 轮按「显式哨兵」口径重写**）：
+    /// * **扫描面** = `USAGE_SOURCES` 全部 **24** 个文件（与磁盘**逐一相等**见
+    ///   `usage_source_scan_covers_every_file_on_disk`）的**判据面**（`self_lock::scan_face`：
+    ///   文件头 → BEGIN 之前 **∪** END 之后 → 文件尾；去行内空白、剥**整行** `//` 注释）。
+    ///   **实测（24 个文件逐一对账）**：19 个有测试模块的文件 = **生产半边**（标记包住测试模块）、
+    ///   5 个无测试模块的文件 = **整文件**（两行标记相邻于末尾 ⇒ 排除区为空）；
+    ///   判据面合计 = **6804 行 / 146908 字符**（第 4 轮口径曾报 191434 字符：那 8 个「整文件扫描」
+    ///   的文件把测试代码也算进去了。本轮的"面"更小但**更准**——19 个文件 = 生产半边、5 个无测试
+    ///   模块的文件 = 整文件，且 **END 之后追加的生产代码也在面内**。数字同步写进本批 commit
+    ///   message 与 `FINAL-FIX-report.md`）。
+    /// * **枚举口径**（B-1）：`usage_source_scan_covers_every_file_on_disk` 递归枚举该目录下的
+    ///   `.rs`（**大小写不敏感** —— 本机 `rustc` 能从 `foo.RS` 编译 `mod foo;`）。**不在枚举面内**
+    ///   的承载形态：`include!` 的 `.inc`、`include_str!` 引入的外部文本。
     /// * **判据层级** = **名字级**（针是 API 名 / 函数名形态，**不是行为性质**）。
+    /// * **正向断言的作用域 = 24 个文件判据面的拼接串（并集语义，B-4）**：`hour_key_of_host(` /
+    ///   `day_key_of_host(` / `tz_name` 只要**任一**文件面内有即过 ⇒「删掉某个文件的全部调用点」
+    ///   **不会变红**（单文件级存在性没有被钉住；要钉得分文件断言——本批按现状**只登记不改**）。
     /// * **反例（抓不到的回归）** = ①换名字重造带 tz 的键函数（如 `bucket_of(ts, tz)`）；
-    ///   ②用**行尾注释**、**块注释**（`code_lines` 只剥**整行** `//` 注释；`/* */` 与行尾注释
-    ///   一律**不剥**）或字符串拼接绕过针；
-    ///   ③把键计算挪进 `#[cfg(test)]` 项 / **真测试模块之后**（判据面**故意**含 `#[cfg(test)]`
-    ///   非模块项，但真测试模块内部及其后不在面内）；
-    ///   ④**更早的假锚点**（本轮 P1-1，修完**应消失**）——最后一批复审的三种构造（ARM B 的
-    ///   `mod tests_of_line_splitting`、EXP-9 的不配平多行字符串、以及未列出的**自平衡**多行
-    ///   字符串变体）都已实测**改前绿 / 改后红**（见 `FINAL-FIX-report.md`）；**仍抓不到**的残留
-    ///   形态：某文件**唯一**的候选锚点由生产代码里一段**形如完整模块且恰好收口于 EOF** 的文本
-    ///   伪造（`#[cfg(test)]` 上一行 + `mod tests {` 一行 + 其后到 EOF 收支平衡）——判据只认文本
-    ///   形态，认不出"这不是模块"，属**判据层级的固有上限**（登记，不修）。
-    /// * **反例（会误报的情形）** = ⑤上列 **8 个整文件扫描**的文件里，测试专用项 / 字符串含针
-    ///   ⇒ **假阳性**（生产零改动也红；B-3 实测：`settings.rs` 里写一句含 `hour_key_of(` 的
-    ///   `#[cfg(test)]` 说明即红）。**不改**：假阳性响亮且安全，假阴性才要命。
-    /// * ⑥ **边界事实（属 `opencode` 那把锁的 5 行窗口，此处一并登记）**：窗口 = `prod[i..i+5]`；
-    ///   **整行注释不占槽**（被 `code_lines` 剥掉）、**空行占槽** ⇒ `collectors/opencode.rs:320`
-    ///   的调用点距 `ProbeFailed` 为 4/5，**在其后插一个空行即假红**（不改窗口大小）。
-    /// * **真正的性质级保证仍是**（最重要的一句，保留）：
+    ///   ②**行尾注释**里写针（只剥**整行** `//` 注释；`/* */` 块注释与行尾注释一律**不剥**）
+    ///   或用字符串拼接绕过针；③把键计算挪进**排除区内的测试代码**（判据面**故意**含
+    ///   `#[cfg(test)]` **非模块项**，但被标记包住的测试模块内部不在面内）；
+    ///   ④**蓄意改写锁面标记**——把 BEGIN 上移 / 把 END 下移（排除区扩大、盖住生产代码）：
+    ///   见 `self_lock` 的威胁模型声明，**本锁防的是顺手回归与无意的习惯性改回，不防这个**。
+    /// * **第 4 轮的四条致盲构造在哨兵判据下「按构造已失效」**：`R4_FAKE`（块注释假锚点）/
+    ///   `R4b_FAKE_STR`（多行字符串假锚点）/ `R8_COLLECT`（**零注入** + EOF 追加回归）/
+    ///   `R8_STREAM`（测试函数体内 `let stray_json = "{"` + EOF 追加回归）——假锚点如今只是**普通
+    ///   文本**（判据不再认任何锚点），EOF 追加落在「**END 之后**」⇒ **在面内**；「收口」这个概念
+    ///   本身已被删除，所以「把收口推迟到 EOF」也无从谈起。实测：四条**旧判据 ok（假绿）→ 新判据
+    ///   FAILED**（见 `FINAL-FIX-report.md`「第 5 轮」）。
+    /// * **R9（注释切针 = fmt 自毁）**：`pub fn day_key_of/**/(ts_ms: i64, tz_name: &str)` 这种把针
+    ///   从中间切开、用空注释隔断的写法，**本判据抓不到**（`day_key_of/**/(` 里没有 `day_key_of(`），
+    ///   但 `cargo fmt` 会把注释并回去 ⇒ **活不过一次格式化**（复审实测：探针 ok、`cargo fmt --check`
+    ///   报 1）。登记它有两层意思：既不假装判据能抓它，也不依赖 fmt 当兜底。
+    /// * **反例（会误报的情形）** = ⑤**排除区外**的测试专用项 / 字符串里的针 ⇒ **假阳性**
+    ///   （生产零改动也红；**响亮且安全**，刻意保留）；⑥`opencode` 那把锁的 5 行窗口
+    ///   （整行注释不占槽、**空行占槽**）另见该处登记。
+    /// * **结论句**：真正的**性质级**保证是**行为锁**
     ///   `collectors::codex::tests::detail_hour_key_is_host_local_even_when_source_timezone_is_present`
-    ///   （26 小时差的跨时区**行为锁**）——**不要把本锁当它的替代品**。
+    ///   （26 小时差的跨时区行为锁）。本锁只是「**结构面 + 名字级机械纪律**」——防**顺手改回去**、
+    ///   防**新增文件逃逸**；**不要把本锁当它的替代品**。
     #[test]
     fn no_source_timezone_is_fed_into_any_key_function() {
-        let files = USAGE_SOURCES;
-        let code: String = files
+        let code: String = USAGE_SOURCES
             .iter()
-            .map(|(_, src)| prod_code_lines(src).concat())
+            .map(|(name, src)| {
+                crate::services::usage::self_lock::scan_face(name, src)
+                    .into_iter()
+                    .map(|(_, line)| line)
+                    .collect::<String>()
+            })
             .collect();
         // 反向 ①：命名时区机器不得回来（A-1 已把它与 `chrono-tz` 依赖一起移除）
         for forbidden in [
@@ -1551,7 +1485,9 @@ mod tests {
     /// 判据：`CARGO_MANIFEST_DIR/src/services/usage` 下递归枚举全部 `.rs`，与 `USAGE_SOURCES`
     /// 的**名字集合必须相等**（不是包含关系）。**能变红**：往该目录放一个新 `.rs`（不改任何
     /// 生产代码）→ 本用例红；新增的源文件必须同时进 `USAGE_SOURCES` 并确认其生产半边无禁项。
-    /// **反例**：只枚举 `.rs`（非 `.rs` 的承载形态，如 `include!` 的 `.inc`，不在扫描面内）。
+    /// **反例（枚举面之外）**：①`include!` 的 `.inc`、`include_str!` 引入的外部文本
+    /// ②**大小写变体以外的**非 `.rs` 名字（B-1 修后 `.RS` / `.Rs` **已进面**：本机 `rustc`
+    /// 能从 `foo.RS` 编译 `mod foo;`，故扩展名比较改为 `eq_ignore_ascii_case("rs")`）。
     #[test]
     fn usage_source_scan_covers_every_file_on_disk() {
         fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
@@ -1559,7 +1495,10 @@ mod tests {
                 let path = entry.expect("目录项必须可读").path();
                 if path.is_dir() {
                     walk(&path, root, out);
-                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                } else if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+                {
                     out.push(
                         path.strip_prefix(root)
                             .expect("枚举根必须是 CARGO_MANIFEST_DIR 下的 usage 目录")
@@ -1586,3 +1525,4 @@ mod tests {
         );
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

@@ -658,6 +658,7 @@ fn scan_v2_messages(
     new_rows
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,75 +1216,14 @@ mod tests {
         }
     }
 
-    /// 生产半边的代码行：`(源码行号, 去注释去行内空白的行)`，截到**真正的测试模块**之前
-    /// —— 与 `collect::tests::prod_code_lines` **同款判据**（两个**复制件**，改一处必须改另一处）。
-    /// 判据要点（最后一批复审 P1-1 后收紧，逐条与 `collect.rs` 对齐）：
-    /// ① 先剥**整行**注释，再定锚点（注释里的 `#[cfg(test)]` 不得截断扫描面）；
-    /// ② 锚点 = **真的测试模块**（`#[cfg(test)]` + **精确** `mod tests` / `mod tests {`）：
-    ///    不是任意 `#[cfg(test)]` 项，也**不是前缀**（`mod tests_of_line_splitting` 不算）；
-    /// ③ 锚点必须**收口于文件末尾**（大括号首次回到 0 之后不得再有代码行）；
-    /// ④ 不满足 → 继续找，全不满足 → **整文件扫描**（多扫、不漏扫）。
-    /// 本文件实测落点：锚点 = `#[cfg(test)] mod tests`（源码 `:661/:662`）⇒ **生产半边 100%**。
-    /// 这里多带**源码行号**，好让失败信息指向源码行，而不是"第 N 条代码行"。
-    fn prod_code_lines(src: &str) -> Vec<(usize, String)> {
-        let lines: Vec<(usize, String)> = src
-            .lines()
-            .enumerate()
-            .filter(|(_, l)| !l.trim_start().starts_with("//"))
-            .map(|(i, l)| {
-                (
-                    i + 1,
-                    l.chars().filter(|c| !c.is_whitespace()).collect::<String>(),
-                )
-            })
-            .collect();
-        for i in 0..lines.len() {
-            // ② 精确匹配（**不是前缀**）；开括号用**字节值 123** 而非字面量——同款判据的源码
-            //    自身也在扫描面内，裸 `{` 字符串会污染 `closes_at_eof` 的计数（见 collect.rs 注释）
-            if !(lines[i].1 == concat!("mod", "tests")
-                || (lines[i].1.starts_with(concat!("mod", "tests"))
-                    && lines[i].1.as_bytes().get(8) == Some(&123)))
-            {
-                continue;
-            }
-            let prev = lines[..i].iter().rev().find(|(_, l)| !l.is_empty());
-            if !prev.is_some_and(|(_, l)| l.starts_with(concat!("#[cfg", "(test)]"))) {
-                continue;
-            }
-            // ③ 收口于文件末尾（启发式：只看大括号；字符串里的裸 `{` 会让深度永不归零 ⇒ 整文件扫描）
-            if closes_at_eof(&lines[i..]) {
-                return lines[..i].to_vec();
-            }
-        }
-        lines
-    }
-
-    /// 该块是否**收口于文件末尾**：大括号深度首次回到 0 之后不得再有代码行（跌破 0 亦判否）。
-    /// 与 `collect::tests::closes_at_eof` 同款（复制件）。
-    fn closes_at_eof(lines: &[(usize, String)]) -> bool {
-        let mut depth: i64 = 0;
-        let mut closed: Option<usize> = None;
-        for (i, (_, l)) in lines.iter().enumerate() {
-            for c in l.chars() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth < 0 {
-                            return false;
-                        }
-                        if depth == 0 && closed.is_none() {
-                            closed = Some(i);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        closed.is_some_and(|i| lines[i + 1..].iter().all(|(_, l)| l.is_empty()))
-    }
-
-    /// **第三轮评审必改 P1 的源码级自省锁**：本文件的**生产半边**不得再把三态表探测压回 bool。
+    /// **判据面由共享实现给出**（第 5 轮：显式哨兵标记，删掉全部「结构推断」；两份手抄判据
+    /// 一并下岗 —— 见 `crate::services::usage::self_lock`）。
+    ///
+    /// 面 = `self_lock::scan_face("collectors/opencode.rs", include_str!("opencode.rs"))`
+    /// = 文件头 → 排除区 BEGIN 之前 **∪** END 之后 → 文件尾（去行内空白、剥**整行** `//` 注释）。
+    /// 本文件的标记**包住测试模块**（BEGIN 在 `#[cfg(test)]` 前一行、END 在测试模块收口 `}` 之后）
+    /// ⇒ 面 = **生产半边**，且**测试模块之后追加的生产代码也在面内**（第 4 轮「收口于 EOF」判据
+    /// 正是在那里漏掉 `R8` 型构造）。带**源码行号**是为了让失败信息指向源码行。
     ///
     /// `TableState` 的 doc 明文写着「调用方必须显式处理 `ProbeFailed`（响亮），不得再压回 bool」，
     /// 而修前有一支布尔便捷形态 `table_exists`（`ProbeFailed → false`）、**三处调用点全走它**
@@ -1305,9 +1245,10 @@ mod tests {
     ///    防「零调用点 / 只留一个」时 ② 退化成恒真。
     ///
     /// **扫描面 / 判据层级 / 反例**（台账 C-【Important-1】的登记原文；最后一批复审后补全）：
-    /// * **扫描面** = 本文件的**生产半边**（`prod_code_lines`：先剥整行注释 → 精确 `mod tests` /
-    ///   `mod tests {` 且**收口于文件末尾** → 取锚点之前）。实测锚点 = 源码 `:661/:662`
-    ///   ⇒ 生产半边 **100%**（本文件不属"整文件扫描"的 8 个文件）。
+    /// * **扫描面** = 本文件的**生产半边**，由**显式哨兵标记**划出（`self_lock::scan_face`：
+    ///   文件头 → BEGIN 之前 **∪** END 之后 → 文件尾；去行内空白、剥**整行** `//` 注释）。
+    ///   **第 5 轮起不再有任何结构推断**（旧「精确 `mod tests` + 大括号配口于 EOF」判据已删）——
+    ///   随之消失的致盲形态见 `self_lock` 模块文档与台账 C-【Important-1】。
     /// * **判据层级** = **形态级但非语义级**：只要求调用点附近**指名** `ProbeFailed`；
     ///   **不校验**该分支真的告警、也**不校验** 5 行窗口里的 `ProbeFailed` 属于同一个 match。
     /// * **反例（抓不到的回归）** = ①写一个**点名 `ProbeFailed` 却不告警**的包装（如
@@ -1317,8 +1258,14 @@ mod tests {
     ///   ③**行尾注释**或字符串里写字面量形态（`code_lines` 只剥**整行**注释）；
     ///   ④在 5 行窗口**之外**（>5 行）另起折叠逻辑。反向地，`_ => false` 这类 catch-all 折叠
     ///   在本判据下**是红的**（窗口里没有 `ProbeFailed` 这个名字）。
-    /// * **反例（会误报的情形）** = ⑤窗口里出现 `ProbeFailed` 但与之无关（名字在场即算数）；
-    ///   ⑥**名字级普查的过计**：任何含 `table_state` 字样、后一个字符又不是标识符字符的**非调用
+    ///   ⑤**窗口内有无关的 `ProbeFailed` 文本**（R7 实测）：只要 5 行窗口里**任意一处**出现
+    ///   `TableState::ProbeFailed` 字样（**哪怕在字符串里**、哪怕属于另一个 `match`），静默折叠就
+    ///   **不会被判红** ⇒ 这是**过松（假阴性）**方向，**不是**误报方向（第 4 轮登记把它标反了，
+    ///   第 5 轮按复审实测更正）。构造：把 `:78-88` 的三态 `match` 换成
+    ///   `let has_v2 = matches!(table_state(&conn, "session_v2"), TableState::Present);`
+    ///   **并在其后 5 行内塞一句含 `ProbeFailed` 的字符串**（如 `log::warn!("{e} ProbeFailed")`）
+    ///   ⇒ 本锁全绿，而 `ProbeFailed` 事实上已被折叠掉。**判据层级 = 形态级，改窗口解决不了**。
+    /// * **反例（会误报的情形）** = ⑥**名字级普查的过计**：任何含 `table_state` 字样、后一个字符又不是标识符字符的**非调用
     ///   形态**（`use …::table_state;`、类型别名、非整行注释里的说明）都会被当成一户 ⇒ 它附近
     ///   5 行内没有 `ProbeFailed` 就**假红**（响亮、安全方向；`x_table_state` / `table_stateful`
     ///   由词边界挡住，不算户）；
@@ -1330,7 +1277,10 @@ mod tests {
     /// ——注释里为说明历史确实写了旧形态的名字，不看注释才谈得上机械纪律。
     #[test]
     fn production_half_never_folds_the_table_probe_back_to_bool() {
-        let prod = prod_code_lines(include_str!("opencode.rs"));
+        let prod = crate::services::usage::self_lock::scan_face(
+            "collectors/opencode.rs",
+            include_str!("opencode.rs"),
+        );
         let code: String = prod.iter().map(|(_, l)| l.as_str()).collect();
         // ① 名字级：布尔便捷形态不得存在（它正是「压回 bool」的载体）
         let forbidden = concat!("table_", "exists(");
@@ -1778,3 +1728,4 @@ mod tests {
         );
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

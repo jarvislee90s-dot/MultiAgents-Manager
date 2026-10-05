@@ -154,6 +154,7 @@ fn read_incremental_impl(
     })
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,3 +673,4 @@ mod tests {
         assert_eq!(n2, 3);
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

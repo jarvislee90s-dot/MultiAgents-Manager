@@ -192,6 +192,7 @@ pub fn user_est_of(text: &str) -> i64 {
     cjk + words
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,3 +513,4 @@ mod tests {
         assert_eq!(user_est_of("修复 bug 并跑 test"), 6); // 修复(2) + bug + 并(1) + 跑(1) + test
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

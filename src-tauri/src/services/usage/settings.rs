@@ -126,3 +126,5 @@ pub fn save(s: &UsageSettings) -> Result<(), UsageError> {
     }
     Ok(())
 }
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====

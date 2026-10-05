@@ -118,6 +118,7 @@ pub fn needs_rescan(path: &Path, prev: &CursorDelta) -> std::io::Result<bool> {
     Ok(fingerprint_mismatch(&now_fp, prev))
 }
 
+// ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,3 +300,4 @@ mod tests {
         assert!(shorter_than_watermark(0, &cursor_of(1, "")));
     }
 }
+// ==== usage 自省锁：排除区结束，勿删勿复制 ====
