@@ -5,6 +5,7 @@ pub mod claude;
 pub mod codex;
 pub mod kimi;
 pub mod opencode;
+pub mod workbuddy;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -29,6 +30,7 @@ pub fn all() -> Vec<Box<dyn UsageCollector>> {
         Box::new(codex::CodexCollector),
         Box::new(kimi::KimiCollector),
         Box::new(opencode::OpenCodeCollector),
+        Box::new(workbuddy::WorkBuddyCollector),
     ]
 }
 
@@ -343,6 +345,21 @@ impl PendingTools {
         let (start, name) = self.open.remove(call_id)?;
         Some(((ts_ms - start).max(0), name))
     }
+
+    /// **无配对键**型回执的兜底（workbuddy：`function_call_result` 不带任何键时）：
+    /// 取**最早**（按调用时间戳）一个未配对调用收尾（时间戳配对，真机 69/71）。
+    ///
+    /// **为什么不是 `self.open.keys().next()`**：`open` 是 `BTreeMap<String, _>`，
+    /// 键序是 **call id 的字典序**——直接取首键会配到一个可能**更晚**的调用上，
+    /// 耗时算错（甚至被 `.max(0)` 夹成 0）。判据与 `evict_overflow` 的「丢最早」同一条时间序。
+    pub fn finish_oldest(&mut self, ts_ms: i64) -> Option<(i64, String)> {
+        let id = self
+            .open
+            .iter()
+            .min_by_key(|(_, (ts, _))| *ts)
+            .map(|(k, _)| k.clone())?;
+        self.finish(&id, ts_ms)
+    }
 }
 
 #[cfg(test)]
@@ -479,5 +496,29 @@ mod tests {
         }
         assert_eq!(t3.open.len(), PENDING_TOOLS_CAP);
         assert_eq!(t3.dropped, 1);
+    }
+
+    /// **`finish_oldest` 的时间序**（Task 15 新增；workbuddy 的无键型回执兜底）：
+    /// 必须取**最早**（按调用时间戳）一个未配对调用——`open` 是 `BTreeMap<String, _>`，
+    /// 键序是 **call id 的字典序**，`keys().next()` 会配到一个可能更晚的调用上
+    /// （耗时算错，甚至被 `.max(0)` 夹成 0）。
+    #[test]
+    fn finish_oldest_pairs_the_earliest_call_not_the_smallest_id() {
+        let mut t = PendingTools::default();
+        t.start("z_early", 1_000, "Bash");
+        t.start("a_late", 5_000, "Read");
+        // 前提断言（防假绿）：字典序最小的**不是**最早的那个（否则本用例不可伪证）
+        assert_eq!(t.open.keys().next().map(String::as_str), Some("a_late"));
+        assert_eq!(
+            t.finish_oldest(6_000),
+            Some((5_000, "Bash".into())),
+            "最早 = ts 最小（不是 id 字典序最小）"
+        );
+        assert_eq!(
+            t.finish_oldest(6_000),
+            Some((1_000, "Read".into())),
+            "剩下的那一个"
+        );
+        assert_eq!(t.finish_oldest(6_000), None, "空表 → None（不得 panic）");
     }
 }
