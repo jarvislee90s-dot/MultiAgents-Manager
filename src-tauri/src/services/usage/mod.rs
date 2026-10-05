@@ -8,6 +8,8 @@ pub mod delta;
 pub mod error;
 pub mod ledger;
 pub mod model;
+pub mod project;
+pub mod provider;
 pub mod semantics;
 
 pub use error::UsageError;
