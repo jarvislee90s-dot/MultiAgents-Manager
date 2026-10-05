@@ -97,7 +97,6 @@ pub fn focus_session(
             }
             #[cfg(target_os = "macos")]
             {
-                use tauri::Manager; // cfg 块内导入惯例见文件头注释
                 if let Some(p) = system.process(sysinfo::Pid::from_u32(pid)) {
                     if let Some(exe) = p.exe().and_then(|e| e.to_str()) {
                         if let Some(bundle) =
