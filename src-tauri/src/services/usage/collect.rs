@@ -1316,10 +1316,11 @@ mod tests {
     /// 历史与完整理由见 `crate::services::usage::self_lock` 的模块文档；这里只留**本锁**要用的：
     /// * 判据面 = `self_lock::scan_face(文件名, 源码)` = 文件头 → **排除区 BEGIN** 之前，
     ///   **加上** END 之后 → 文件尾（去行内空白、剥**整行** `//` 注释）；
-    /// * 24 个文件**每个都必须恰好一对标记**：19 个有测试模块的文件把标记**包住测试模块**
-    ///   （BEGIN 在 `#[cfg(test)]` 前一行、END 在测试模块收口 `}` 之后）；5 个**无测试模块**的文件
-    ///   （`caps.rs` / `delta.rs` / `mod.rs` / `model.rs` / `settings.rs`）把两行**相邻**放在文件
-    ///   末尾 ⇒ 排除区为空、**整文件都在面内**；
+    /// * 24 个文件**每个都必须恰好一对标记**：**20 个有测试模块**的文件把标记**包住测试模块**
+    ///   （BEGIN 在 `#[cfg(test)]` 前一行、END 在测试模块收口 `}` 之后）；**4 个无测试模块**的文件
+    ///   （`caps.rs` / `delta.rs` / `model.rs` / `settings.rs`）把两行**相邻**放在文件
+    ///   末尾 ⇒ 排除区为空、**整文件都在面内**（第 6 轮：`mod.rs` 因新增 `self_lock_tests`
+    ///   由空区转为测试模块区）；**分类由 `usage_source_scan_covers_every_file_on_disk` 机械钉住（20/4）**；
     /// * 标记缺失 / 重复 / 顺序反了 / 面为空 ⇒ `scan_face` **panic**（响亮失败，不许静默退化）。
     ///
     /// **为什么不再用「锚点 + 大括号配平到 EOF」**：那是**用文本启发式推断 Rust 结构**，五轮里
@@ -1354,15 +1355,17 @@ mod tests {
     /// * **扫描面** = `USAGE_SOURCES` 全部 **24** 个文件（与磁盘**逐一相等**见
     ///   `usage_source_scan_covers_every_file_on_disk`）的**判据面**（`self_lock::scan_face`：
     ///   文件头 → BEGIN 之前 **∪** END 之后 → 文件尾；去行内空白、剥**整行** `//` 注释）。
-    ///   **实测（24 个文件逐一对账）**：19 个有测试模块的文件 = **生产半边**（标记包住测试模块）、
-    ///   5 个无测试模块的文件 = **整文件**（两行标记相邻于末尾 ⇒ 排除区为空）；
+    ///   **实测（24 个文件逐一对账）**：20 个有测试模块的文件 = **生产半边**（标记包住测试模块）、
+    ///   4 个无测试模块的文件 = **整文件**（两行标记相邻于末尾 ⇒ 排除区为空）；
     ///   判据面合计 = **6804 行 / 146908 字符**（第 4 轮口径曾报 191434 字符：那 8 个「整文件扫描」
-    ///   的文件把测试代码也算进去了。本轮的"面"更小但**更准**——19 个文件 = 生产半边、5 个无测试
+    ///   的文件把测试代码也算进去了。本轮的"面"更小但**更准**——20 个文件 = 生产半边、4 个无测试
     ///   模块的文件 = 整文件，且 **END 之后追加的生产代码也在面内**。数字同步写进本批 commit
     ///   message 与 `FINAL-FIX-report.md`）。
     /// * **枚举口径**（B-1）：`usage_source_scan_covers_every_file_on_disk` 递归枚举该目录下的
     ///   `.rs`（**大小写不敏感** —— 本机 `rustc` 能从 `foo.RS` 编译 `mod foo;`）。**不在枚举面内**
-    ///   的承载形态：`include!` 的 `.inc`、`include_str!` 引入的外部文本。
+    ///   的承载形态：`include!` 的 `.inc`、`include_str!` 引入的外部文本，以及 **`#[path = "…"]`
+    ///   把生产代码挂到 `services/usage/**` 之外**（B-2：与 `include!` 同族，**只登记不解析**——
+    ///   真去解析 `#[path]` 会引出无穷的逃逸面）。
     /// * **判据层级** = **名字级**（针是 API 名 / 函数名形态，**不是行为性质**）。
     /// * **正向断言的作用域 = 24 个文件判据面的拼接串（并集语义，B-4）**：`hour_key_of_host(` /
     ///   `day_key_of_host(` / `tz_name` 只要**任一**文件面内有即过 ⇒「删掉某个文件的全部调用点」
@@ -1416,12 +1419,22 @@ mod tests {
             );
         }
         // 反向 ②：键函数**只有宿主本地单参形态**——出现带参形态即有人在给键函数喂时区
-        for forbidden in [concat!("hour_key", "_of("), concat!("day_key", "_of(")] {
+        for forbidden in [concat!("hour_key", "_of"), concat!("day_key", "_of")] {
+            // **针不带括号**（第 6 轮 B-1）：带括号只能抓**调用**形态，别名 / 函数指针
+            // （`let f: fn(i64, &str) -> String = day_key_of; f(0, ..)`）会整个漏掉。
+            // 去掉括号 + 词边界后：`hour_key_of_host(` 自动豁免（其后一字符是 `_`）——那正是
+            // **允许**的宿主本地形态；而 `day_key_of(` / `day_key_of;` / `day_key_of/**/(` 全部命中。
+            let hit = code.match_indices(forbidden).find(|(at, _)| {
+                let after = code[(at + forbidden.len())..].chars().next();
+                !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
             assert!(
-                !code.contains(forbidden),
-                "生产半边出现了 `{forbidden}`：键函数只允许**宿主本地单参**形态\
-                 （`hour_key_of_host` / `day_key_of_host`）——带 tz 参数的键函数就是\
-                 「源时区参与键计算」，会重造窗口键与落库键的两套时钟（R-32/W-14 已随裁决消除）"
+                hit.is_none(),
+                "生产半边出现了 `{forbidden}`（判据面第 {} 字节起）：键函数只允许**宿主本地单参**\
+                 形态（`hour_key_of_host` / `day_key_of_host`）——带 tz 参数的键函数就是\
+                 「源时区参与键计算」，会重造窗口键与落库键的两套时钟（R-32/W-14 已随裁决消除）。\
+                 针**不带括号**：别名 / 函数指针（`let f = day_key_of;`）同样命中",
+                hit.map(|(at, _)| at).unwrap_or(0)
             );
         }
         // 正向：宿主本地入口必须在场（否则上面两条会因为「本域压根没有键函数」而假绿）
@@ -1485,7 +1498,8 @@ mod tests {
     /// 判据：`CARGO_MANIFEST_DIR/src/services/usage` 下递归枚举全部 `.rs`，与 `USAGE_SOURCES`
     /// 的**名字集合必须相等**（不是包含关系）。**能变红**：往该目录放一个新 `.rs`（不改任何
     /// 生产代码）→ 本用例红；新增的源文件必须同时进 `USAGE_SOURCES` 并确认其生产半边无禁项。
-    /// **反例（枚举面之外）**：①`include!` 的 `.inc`、`include_str!` 引入的外部文本
+    /// **反例（枚举面之外）**：①`include!` 的 `.inc`、`include_str!` 引入的外部文本、
+    /// **`#[path = "…"] pub mod x;`**（代码可落在本目录之外）
     /// ②**大小写变体以外的**非 `.rs` 名字（B-1 修后 `.RS` / `.Rs` **已进面**：本机 `rustc`
     /// 能从 `foo.RS` 编译 `mod foo;`，故扩展名比较改为 `eq_ignore_ascii_case("rs")`）。
     #[test]
@@ -1517,6 +1531,19 @@ mod tests {
             .map(|(name, _)| (*name).to_string())
             .collect();
         listed.sort();
+        // **B-3（第 6 轮）**：把「20 个测试模块区 / 4 个空区」这个分类**机械钉住**——
+        // 只在注释/文档里写分类会静默失真（给空区文件加个测试模块 ⇒ 文档过期而用例全绿）。
+        let empty = USAGE_SOURCES
+            .iter()
+            .filter(|(name, src)| crate::services::usage::self_lock::exclusion_is_empty(name, src))
+            .count();
+        assert_eq!(
+            (USAGE_SOURCES.len() - empty, empty),
+            (20, 4),
+            "排除区分类应为 **20 个测试模块区 / 4 个空区**（空区 = `caps.rs` / `delta.rs` / \
+             `model.rs` / `settings.rs`）。改动某文件的排除区形态（加测试模块 / 改成空区）时，\
+             必须**同步**本断言、`self_lock` 的文档与两处锁的声明"
+        );
         assert_eq!(
             listed, on_disk,
             "自省锁的扫描面必须与磁盘**逐一相等**：`services/usage/**/*.rs` 新增文件后必须同时\
