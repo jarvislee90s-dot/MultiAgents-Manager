@@ -472,6 +472,11 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
       return Promise.resolve(
         "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\nclaude,claude,120000,880000,0,45000,1000000,0.880000,321,12345,inferred\n"
       );
+    // 导出落盘（计划① Task 21，契约 §3 新增 2 条）
+    case "export_save_text":
+    case "export_save_bytes":
+      // 真实命令返回落盘绝对路径（string）；mock 返回同形字符串，前端提示语可正常渲染
+      return Promise.resolve("/Users/jarvis/.mam/exports/mock-export.csv");
     case "usage_get_settings":
       return Promise.resolve({
         enabled: true,

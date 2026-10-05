@@ -294,6 +294,9 @@ pub fn run() {
         commands::usage::usage_export_csv,
         commands::usage::usage_get_settings,
         commands::usage::usage_set_settings,
+        // 导出落盘（计划①，契约 §3 新增）：文本/二进制写 ~/.mam/exports/
+        commands::export::export_save_text,
+        commands::export::export_save_bytes,
     ]);
 
     #[cfg(not(debug_assertions))]

@@ -1,6 +1,8 @@
 // Tauri IPC 命令 - 按功能域拆分到子模块
 
 pub mod data_management;
+// 导出落盘（计划① Task 21，契约 §3 新增 2 条命令；按字母序排在 data_management 之后）
+pub mod export;
 pub mod manifest;
 pub mod mcp;
 pub mod notification;
