@@ -78,7 +78,15 @@ pub fn tail_fingerprint(path: &Path, up_to: u64) -> std::io::Result<String> {
     f.take(up_to - start).read_to_end(&mut buf)?;
     let mut hasher = Sha256::new();
     hasher.update(&buf);
-    Ok(format!("{:x}", hasher.finalize()))
+    // 逐字节自己拼十六进制，**不要**用 `format!("{:x}", finalize())`：
+    // `digest::Digest::finalize()` 在 sha2 0.10 返回 `generic_array::GenericArray`（实现了 `LowerHex`），
+    // 在 sha2 0.11 返回 `hybrid_array::Array`（**没有** `LowerHex`）⇒ 后者编译不过（CI E0277）。
+    // 本仓 `remote/tunnel.rs` 与 `remote/pairing.rs` 已是这个写法，此处照它对齐，两个版本都成立。
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// (mtime,size) 未变 → 文件内容未变（L2 内容摘要缓存同款语义）→ 整文件跳过。
