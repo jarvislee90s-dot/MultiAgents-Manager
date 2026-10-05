@@ -55,6 +55,26 @@
 //!
 //! 本层**不做任何口径发明**（GC 6）：命中率与 hero 走 `semantics` 的两个纯函数，
 //! 其余只是把 DAO 读回的行按组/按桶重新聚合。
+//!
+//! ## 记录页与 CSV（Task 19）
+//!
+//! * **记录页 `records`**（W6/D6/D7）：`groupBy` **只接受 `tool` | `project`**——它只驱动**卡片**维度，
+//!   卡内行**恒为「供应商 / 模型」**（供应商不可得时只呈现模型名，§8.3）。传 `provider` / `model`
+//!   一律结构化错误 `usage-groupby-invalid`；**守卫在总开关之前**（关闭态也报错，锁在用例里）。
+//!   卡内行的 `isSubagent` 按任务书**写死 `false`**：该字段的语义是 D17 的计数分层，而这一层的行
+//!   维度是「供应商 / 模型」；小时档本可算、日档算不出（日聚合不带 `session_id`）——**如实登记**
+//!   （与 Task 18 日档 `is_subagent` 恒 `false` 同族，见报告偏差申报）。
+//! * **CSV `export_csv`**（契约 §3）：**只导结构化账本列**（11 列 = 表头常量 `CSV_HEADER`），
+//!   零会话正文（GC 10 白名单）：会话标题、`project_path_raw` / `project_realpath`（原始路径）
+//!   一律**不进**任何输出（有哨兵用例锁住）。列值纪律：`userEst` 不可得 = **空单元格**（不是 0，
+//!   GC 7 的两面）、命中率 `{:.6}`（避免 `0.30000000000000004` 这类浮点尾巴）、`sourceKind` 用
+//!   落库字面值（`measured` / `inferred` / `unknown`）。W5：供应商不可得时 `label` 列**留空**
+//!   ——CSV 是导出文件、不落 i18n 键（UI 侧才 `t(label)`）。
+//!   **本层只出文本、不带 BOM**：BOM 是 Task 21 落盘命令（`export_save_text`）的职责。
+//! * 两条入口都**先持 `DB` 锁、guard 存活期间只调 `collect::cached_result()`**（W-26 的唯一安全形式：
+//!   它只碰 `LAST_RESULT`、不碰飞行锁；持锁调采集会构成 ABBA 死锁）。
+//! * **`collectedAt` 的 0 哨兵**（契约把该字段定为非空 `number`）：由 `cached_result()` 给，
+//!   从未采集过即 0；关闭态走早退分支恒 0（确定性可断言）。与 Task 18 同一口径，登记 ①→②。
 
 use std::collections::BTreeMap;
 
@@ -99,10 +119,14 @@ pub(crate) fn load_ledger_rows_with(
 
 /// 全局连接包装（**只读**；锁中毒 → 空表 + 由调用方 `dashboard` 判错，绝不静默写）
 ///
-/// `#[allow(dead_code)]`：消费者（`usage_dashboard` / `usage_records` / `usage_export_csv`
-/// 三条 IPC 命令）落在 Task 19/20，本任务只交付查询层、不接线——而 `pub(crate)` 无人调用
-/// 会触发 dead_code，在门禁 `-D warnings` 下是 error。**接口形状与可见性一字未改**
-/// （与 D-05/D-18/D-25 同族：计划代码不总是能过本仓自己的门禁）。
+/// `#[allow(dead_code)]`：**到 Task 19 为止仍然没有消费者**（实测证据见报告 §7 偏差申报 F-4：
+/// 把本行删掉后 `cargo clippy --all-targets -- -D warnings` 立刻报
+/// `error: function load_ledger_rows is never used --> src/services/usage/query.rs:126:15`）。
+/// 原因：三条 IPC 入口（`usage_dashboard` / `usage_records` / `usage_export_csv`）**各自持 `DB` 锁**
+/// 后调 `*_with_conn` / `load_ledger_rows_with`（W-26 的安全形式），**不经过本函数**；
+/// 本函数只有在「已经拿到 `ResolvedRange` 且愿意再取一次 DB 锁」的调用方那里才有意义。
+/// **接口形状与可见性一字未改**（与 D-05/D-18/D-25 同族：计划代码不总是能过本仓自己的门禁）。
+/// 若 Task 20/22 或 ①→② 复核确认无人需要它，应当**整体删除**而不是长期留 allow。
 #[allow(dead_code)]
 pub(crate) fn load_ledger_rows(resolved: &ResolvedRange) -> Vec<LedgerRow> {
     match DB.lock() {
@@ -210,6 +234,40 @@ pub(crate) fn session_subagent_flags(
         .collect()
 }
 
+/// 过滤器（契约 §2 `UsageFilters`）：工具 / 项目 / 供应商 / 模型 + 子代理模式。
+/// `parentsOnly` 把子代理会话的行**整体剔除**（含 token；页脚口径文案相应改「不含子代理」）；
+/// `include`（默认）只影响计数分层。
+/// 语义细节（**都有用例锁**）：**空列表 = 不过滤**（`Some(vec![])` 与 `None` 同义）、
+/// 多维度之间是 **AND**、表里查不到的 `(源, 会话)` 对按**非子代理**处理（`unwrap_or(false)`）。
+/// 注：`projects` / `providers` / `models` 三个筛选**仅供 CSV 导出与内部查询**——
+/// 记录页 UI 不暴露它们（说明书 §6 P3【默认裁定】：维度已由卡片分组与卡内行直接可见）。
+pub(crate) fn apply_filters(
+    rows: Vec<LedgerRow>,
+    filters: &UsageFilters,
+    subs: &std::collections::HashMap<(String, String), bool>,
+) -> Vec<LedgerRow> {
+    let hit = |list: &Option<Vec<String>>, v: &str| match list {
+        Some(l) if !l.is_empty() => l.iter().any(|x| x == v),
+        _ => true,
+    };
+    let parents_only = matches!(filters.subagent_mode, Some(SubagentMode::ParentsOnly));
+    rows.into_iter()
+        .filter(|r| hit(&filters.tool_ids, &r.source_id))
+        .filter(|r| hit(&filters.projects, &r.project_key))
+        .filter(|r| hit(&filters.providers, &r.provider))
+        .filter(|r| hit(&filters.models, &r.model))
+        .filter(|r| {
+            if !parents_only {
+                return true;
+            }
+            !subs
+                .get(&(r.source_id.clone(), r.session_id.clone()))
+                .copied()
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// 分组键/标签/三态（D21：项目键 = 小写 projectName，标签 = projectName 原文）。
 /// 供应商不可得（空串）时标签回 **i18n 键** `UNKNOWN_PROVIDER_LABEL_KEY`（W5：不得硬编码中文，
 /// 前端 `t(label)` 渲染；CSV 是导出文件、由 Task 19 把该键还原成空串）。
@@ -270,6 +328,20 @@ pub(crate) fn aggregate(rows: &[LedgerRow]) -> (UsageBuckets, UsageMetrics) {
             requests,
         },
     )
+}
+
+/// 组级 / 行级三态折叠（**单一实现，三处共用**）：取组内所有行的**最强**三态
+/// （measured > inferred > unknown，`SourceKind::strongest`）。
+///
+/// **为什么必须是折叠、不能是「首行胜出」**（评审 Minor #2）：`UsageRow.sourceKind` 与 CSV 的
+/// `sourceKind` 列是**同一个契约字段**的三个出口（看板分组行 / 记录页卡内行 / CSV 分组行）。
+/// 「首行胜出」会**依赖 DAO 返回序**——混合三态时同一份数据换个行序就可能显示更弱甚至 `unknown`
+/// 的状态，而 §4.3 要求三态必须**可见地区分**（弱态冒充强态是**静默错标**，正是 GC 7 要防的那类）。
+/// 折叠后三处口径一致，且**与行序无关**（有用例把「较弱的那行排在前面」当夹具，三处一起锁）。
+pub(crate) fn aggregate_source_kind(rows: &[LedgerRow]) -> SourceKind {
+    rows.iter()
+        .map(|r| r.provider_kind)
+        .fold(SourceKind::Unknown, |a, b| a.strongest(b))
 }
 
 /// 逐源可得性表（D15/D16/D19：不可得写 false + reason，绝不填 0）。
@@ -377,19 +449,22 @@ pub fn dashboard_with_conn(
     let (totals_buckets, totals) = aggregate(&rows);
     let subs = session_subagent_flags(conn);
     // 分组行（全量返回；折叠交 UI）
-    let mut groups: BTreeMap<String, (String, SourceKind, Vec<LedgerRow>)> = BTreeMap::new();
+    let mut groups: BTreeMap<String, (String, Vec<LedgerRow>)> = BTreeMap::new();
     for r in &rows {
-        let (k, label, kind) = group_of(r, group_by);
+        let (k, label, _kind) = group_of(r, group_by);
         groups
             .entry(k)
-            .or_insert_with(|| (label, kind, Vec::new()))
-            .2
+            .or_insert_with(|| (label, Vec::new()))
+            .1
             .push(r.clone());
     }
     let mut out_rows: Vec<UsageRow> = groups
         .into_iter()
-        .map(|(key, (label, kind, rs))| {
+        .map(|(key, (label, rs))| {
             let (b, m) = aggregate(&rs);
+            // 组级三态 = 组内所有行的**最强**三态（与记录页卡内行 / CSV 分组行同一折叠，
+            // 评审 Minor #2；**不得**首行胜出——那会依赖 DAO 返回序）
+            let kind = aggregate_source_kind(&rs);
             // 该组是否只由子代理会话贡献（供 UI「单列一层可展开」，D17）。
             //
             // **日档的已知妥协（契约限制，登记 ①→②）**：日档的行来自日聚合表、`session_id` 恒为空串
@@ -489,6 +564,251 @@ fn empty_dashboard(range: &UsageRange, group_by: UsageGroupBy) -> UsageDashboard
         work_summary: WorkSummary::default(),
         availability: availability_table(),
         collected_at: 0,
+    }
+}
+
+/// 记录页（契约 §3；D6/D7/W6）：**卡片**维度由 `groupBy` 决定（`tool` → 每工具一卡、
+/// `project` → 每项目一卡），**卡内行恒为「供应商 / 模型」**（供应商不可得时只呈现模型名，§8.3）。
+/// `groupBy` 传 `provider` / `model` → `usage-groupby-invalid`（契约：记录页只接受这两值）。
+/// `UsageCard.tool_id` / `tool_label` 承载**卡片分组键与显示名**（字段名沿用契约；
+/// `groupBy=project` 时它们是项目键与项目名——② 按 `groupBy` 决定怎么渲染卡片标题）。
+///
+/// **W-26**：本入口先持 `DB` 锁，guard 存活期间只调 `collect::cached_result()`（它只碰 `LAST_RESULT`、
+/// 不碰飞行锁）；**绝不在持锁期间调采集入口**（`collect` 与 `run_collection` 都只能在没有持有 `DB`
+/// 时调用，否则与在飞扫描的「飞行锁 → DB」构成 ABBA 死锁）。
+/// 注：上面的措辞刻意**不写函数调用的括号形态**——本文件的
+/// `query_layer_never_calls_collection_and_reads_only_cached_result` 是**源码级自省锁**，
+/// 它会扫描整份源码（含注释）里有没有采集入口的调用形态。
+pub fn records(
+    range: &UsageRange,
+    group_by: UsageGroupBy,
+    filters: &UsageFilters,
+    now_ms: i64,
+) -> Result<UsageRecords, UsageError> {
+    let conn = DB
+        .lock()
+        .map_err(|_| UsageError::new("usage-db-failed", "DB 锁中毒"))?;
+    records_with_conn(&conn, range, group_by, filters, now_ms)
+}
+
+/// 连接注入版（单测直连内存库）
+pub fn records_with_conn(
+    conn: &rusqlite::Connection,
+    range: &UsageRange,
+    group_by: UsageGroupBy,
+    filters: &UsageFilters,
+    now_ms: i64,
+) -> Result<UsageRecords, UsageError> {
+    // W6：记录页只接受 tool | project（其余维度由大看板的分组切换承担）。
+    // **守卫刻意在总开关之前**：关闭态下非法维度也必须报结构化错误码（有用例锁）。
+    if !matches!(group_by, UsageGroupBy::Tool | UsageGroupBy::Project) {
+        return Err(UsageError::new(
+            "usage-groupby-invalid",
+            format!("记录页的 groupBy 只接受 tool | project，收到 {group_by:?}"),
+        ));
+    }
+    if !super::settings::load_from_conn(conn).enabled {
+        // 总开关关闭：不采集不落库 → 查询出空态（零扫描、零行）。
+        // 用连接注入版读设置：单测直连内存库时不触碰真实 `~/.mam/mam.db`（W-24：
+        // 单测**不得**调进程级 `settings::load()`，那会被别的模块注入的值串味）。
+        // `collected_at` 取 **0 哨兵**（契约把该字段定为非空 `number`，没有 null 可选）。
+        return Ok(UsageRecords {
+            range: range.clone(),
+            group_by,
+            cards: Vec::new(),
+            availability: availability_table(),
+            collected_at: 0,
+        });
+    }
+    let resolved = resolve_range(range, now_ms)?;
+    let subs = session_subagent_flags(conn);
+    let rows = apply_filters(load_ledger_rows_with(conn, &resolved), filters, &subs);
+    // 卡片分组键/显示名：tool → 工具 id；project → 项目键 + 标签字典给出的原文
+    let mut cards: BTreeMap<String, (String, Vec<LedgerRow>)> = BTreeMap::new();
+    for r in &rows {
+        let (key, label) = match group_by {
+            UsageGroupBy::Project => (
+                r.project_key.clone(),
+                if r.project_label.is_empty() {
+                    r.project_key.clone()
+                } else {
+                    r.project_label.clone()
+                },
+            ),
+            UsageGroupBy::Tool => (r.source_id.clone(), r.source_id.clone()),
+            // 守卫在函数开头，这里不可能到达；显式写出来，避免「悄悄当成 tool」
+            other => unreachable!("records 的 groupBy 已在入口校验，不接受 {other:?}"),
+        };
+        cards
+            .entry(key)
+            .or_insert_with(|| (label, Vec::new()))
+            .1
+            .push(r.clone());
+    }
+    let mut out: Vec<UsageCard> = cards
+        .into_iter()
+        .map(|(group_key, (group_label, rs))| {
+            let (buckets, metrics) = aggregate(&rs);
+            // 卡内行**恒为「供应商 / 模型」**（D6）：键取这一对，避免同供应商的多个模型互相吃掉；
+            // 供应商不可得（workbuddy）时只呈现模型名（§8.3：归因不到就只按模型维度呈现）。
+            // `is_subagent` 按任务书写死 `false`：该字段的语义是 D17 的计数分层，而这一层的行维度
+            // 是「供应商 / 模型」（小时档本可算、日档算不出）——**已知妥协**，见模块文档与偏差申报。
+            let mut inner: BTreeMap<String, (String, Vec<LedgerRow>)> = BTreeMap::new();
+            for r in &rs {
+                let (k, label) = if r.provider.is_empty() {
+                    (r.model.clone(), r.model.clone())
+                } else {
+                    (
+                        format!("{} / {}", r.provider, r.model),
+                        format!("{} / {}", r.provider, r.model),
+                    )
+                };
+                inner
+                    .entry(k)
+                    .or_insert_with(|| (label, Vec::new()))
+                    .1
+                    .push(r.clone());
+            }
+            let mut inner_rows: Vec<UsageRow> = inner
+                .into_iter()
+                .map(|(key, (label, rs))| {
+                    let (b, m) = aggregate(&rs);
+                    let kind = aggregate_source_kind(&rs);
+                    UsageRow {
+                        key,
+                        label,
+                        buckets: b,
+                        metrics: m,
+                        source_kind: kind,
+                        is_subagent: false,
+                    }
+                })
+                .collect();
+            // `sort_by_key(Reverse(..))` 与 `sort_by(|a, b| b.x.cmp(&a.x))` 语义相同（都是稳定排序），
+            // 改写只为过门禁 `clippy::unnecessary_sort_by`（`-D warnings` 下是 error，D-05/D-18/D-25 同族）
+            inner_rows.sort_by_key(|r| std::cmp::Reverse(r.metrics.request_total));
+            UsageCard {
+                tool_id: group_key,
+                tool_label: group_label, // 展示名由前端解析（工具走 AGENT_BADGE；项目用本字段原文）
+                buckets,
+                metrics,
+                rows: inner_rows,
+            }
+        })
+        .collect();
+    out.sort_by_key(|c| std::cmp::Reverse(c.metrics.request_total)); // 同上：过 `unnecessary_sort_by`
+    Ok(UsageRecords {
+        range: range.clone(),
+        group_by,
+        cards: out,
+        availability: availability_table(),
+        // W-26 安全形式：guard 存活期间只调 `cached_result()`（不碰飞行锁）。
+        // 契约把 `collectedAt` 定为非空 `number` → 从未采集过给 **0 哨兵**（不是 null），登记 ①→②
+        collected_at: collect::cached_result()
+            .map(|r| r.collected_at)
+            .unwrap_or(0),
+    })
+}
+
+/// CSV 表头（**列顺序是冻结形态**：11 列；改它必须按契约变更纪律回写契约 / spec §9.7）。
+/// 前四列是四桶、中间四列是派生口径、末列是供应商三态（落库字面值）。
+const CSV_HEADER: &str = "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\n";
+
+/// CSV 导出（契约 §3）：**只导结构化账本列**，零会话正文（GC 10 隐私白名单）。
+/// 前端拿到文本后经 `export_save_text` 落盘（该命令负责加 BOM 与路径校验）——
+/// 因此**本层输出的文本不带 BOM**（否则落盘会再前置一次 → 双 BOM，有用例锁）。
+/// 列值纪律：`userEst` 不可得 = **空单元格**（不是 0）、命中率 `{:.6}`、`sourceKind` 用落库字面值。
+///
+/// **W-26**：与 `records` 同一安全形式（先持 `DB` 锁，guard 存活期间只调 `cached_result()`）。
+pub fn export_csv(
+    range: &UsageRange,
+    group_by: UsageGroupBy,
+    filters: &UsageFilters,
+    now_ms: i64,
+) -> Result<String, UsageError> {
+    let conn = DB
+        .lock()
+        .map_err(|_| UsageError::new("usage-db-failed", "DB 锁中毒"))?;
+    csv_with_conn(&conn, range, group_by, filters, now_ms)
+}
+
+/// 连接注入版（单测直连内存库）。`groupBy` **四值都接受**（契约 §3：只有记录页限 `tool | project`）。
+///
+/// **如实登记（登记 ①→②）**：本函数**不判总开关**（任务书代码如此），与 `dashboard` / `records`
+/// 的 `enabled` 早退**不对称**——关闭态下 CSV 仍会导出账本里的历史数据。用例
+/// `master_switch_gates_records_and_csv_behavior_is_registered_as_is` 把这一现状钉住。
+pub fn csv_with_conn(
+    conn: &rusqlite::Connection,
+    range: &UsageRange,
+    group_by: UsageGroupBy,
+    filters: &UsageFilters,
+    now_ms: i64,
+) -> Result<String, UsageError> {
+    let resolved = resolve_range(range, now_ms)?;
+    let subs = session_subagent_flags(conn);
+    let rows = apply_filters(load_ledger_rows_with(conn, &resolved), filters, &subs);
+    let mut groups: BTreeMap<String, (String, Vec<LedgerRow>)> = BTreeMap::new();
+    for r in &rows {
+        let (k, label, _kind) = group_of(r, group_by);
+        // W5：CSV 是导出文件、不落 i18n 键——供应商不可得时该列留空（UI 侧才显示 t(label)）
+        let label = if label == crate::services::usage::UNKNOWN_PROVIDER_LABEL_KEY {
+            String::new()
+        } else {
+            label
+        };
+        groups
+            .entry(k)
+            .or_insert_with(|| (label, Vec::new()))
+            .1
+            .push(r.clone());
+    }
+    let mut out = String::from(CSV_HEADER);
+    let mut lines: Vec<(i64, String)> = groups
+        .into_iter()
+        .map(|(key, (label, rs))| {
+            let (b, m) = aggregate(&rs);
+            // 组级三态 = 组内所有行的**最强**三态（与看板分组行 / 记录页卡内行同一折叠，
+            // 评审 Minor #2；**不得**首行胜出——那会依赖 DAO 返回序）
+            let kind = aggregate_source_kind(&rs);
+            (
+                m.request_total,
+                format!(
+                    "{},{},{},{},{},{},{},{:.6},{},{},{}",
+                    csv_escape(&key),
+                    csv_escape(&label),
+                    b.input_fresh,
+                    b.cache_read,
+                    b.cache_write,
+                    b.output,
+                    m.request_total,
+                    m.cache_hit_rate,
+                    m.requests,
+                    // GC 7：不可得 = **空单元格**（`unwrap_or_default()`），**不是 0**——
+                    // 真的是 0 的 `Some(0)` 会照常出 `0`（两态在 CSV 里可区分）
+                    m.user_est.map(|v| v.to_string()).unwrap_or_default(),
+                    kind.as_db(),
+                ),
+            )
+        })
+        .collect();
+    lines.sort_by_key(|l| std::cmp::Reverse(l.0)); // 同上：过 `unnecessary_sort_by`
+    for (_, l) in lines {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// CSV 字段转义（RFC 4180）：含 `,` `"` `\n` `\r` 时用双引号包裹，并把 `"` 翻倍。
+///
+/// **对任务书代码的最小偏离（F-1，已申报）**：多判一个 `\r`。RFC 4180 里 **CR 也是记录分隔符**，
+/// 只判 `\n` 时「含孤立 CR 的字段」会以裸形态导出 → 一条记录被 Excel 劈成两条（静默错行）。
+/// `\r\n` 本就会因 `\n` 命中，所以这条只影响孤立 CR；判据与期望值**一字未改**，回退面 1 行。
+pub(crate) fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
 }
 
@@ -739,6 +1059,9 @@ mod tests {
         user_est: Option<i64>,
         model: String,
         provider: String,
+        /// 供应商三态（Task 19 补的字段：CSV 的 `sourceKind` 列与卡内行的「最强三态」
+        /// 都需要逐值可控；默认值与 `add_spec` 原先写死的 `Inferred` 一致，既有用例零影响）
+        kind: SourceKind,
     }
 
     impl Default for RowSpec {
@@ -751,7 +1074,37 @@ mod tests {
                 user_est: None,
                 model: "m".into(),
                 provider: "p".into(),
+                kind: SourceKind::Inferred,
             }
+        }
+    }
+
+    /// 行描述 → 明细 delta（`add_spec` / 「只写明细」/「只写日聚合」三个夹具共用）
+    fn delta_of(
+        source: &str,
+        session: &str,
+        project: &str,
+        hour: &str,
+        spec: RowSpec,
+    ) -> DetailDelta {
+        DetailDelta {
+            source_id: source.into(),
+            provider_kind: spec.kind,
+            key: DetailKey {
+                session_id: session.into(),
+                hour_key: hour.into(),
+                day_key: hour[..10].into(),
+                project_key: project.into(),
+                model: spec.model,
+                provider: spec.provider,
+            },
+            buckets: spec.buckets,
+            request_total: spec.request_total,
+            requests: spec.requests,
+            user_est: spec.user_est,
+            cache_semantics: crate::services::usage::semantics::CacheSemantics::Exclusive,
+            counters: spec.counters,
+            ts_ms: 1,
         }
     }
 
@@ -763,28 +1116,57 @@ mod tests {
         hour: &str,
         spec: RowSpec,
     ) {
-        write_pair(
-            conn,
-            DetailDelta {
-                source_id: source.into(),
-                provider_kind: SourceKind::Inferred,
-                key: DetailKey {
-                    session_id: session.into(),
-                    hour_key: hour.into(),
-                    day_key: hour[..10].into(),
-                    project_key: project.into(),
-                    model: spec.model,
-                    provider: spec.provider,
-                },
-                buckets: spec.buckets,
-                request_total: spec.request_total,
-                requests: spec.requests,
-                user_est: spec.user_est,
-                cache_semantics: crate::services::usage::semantics::CacheSemantics::Exclusive,
-                counters: spec.counters,
-                ts_ms: 1,
+        write_pair(conn, delta_of(source, session, project, hour, spec));
+    }
+
+    /// **只写明细**（不折叠日聚合）：用于锁「小时档读 `usage_detail`」这条取数路径
+    /// ——若实现把小时档改成读日聚合，用例会真红（`write_pair` 会把两张表都写满，锁不住）。
+    fn write_detail_only(conn: &rusqlite::Connection, d: DetailDelta) {
+        assert_eq!(
+            crate::database::dao::usage::upsert_detail_conn(conn, &[d], 1),
+            1,
+            "只写明细应写入 1 行"
+        );
+    }
+
+    /// **只写日聚合**（不写明细）：用于锁「日档读 `usage_daily`」这条取数路径
+    /// （真实路径是 `ledger::apply_delta`；这里复用它的折叠函数 `daily_rows_of`，不另造口径）
+    fn write_daily_only(conn: &rusqlite::Connection, d: DetailDelta) {
+        // 先取出 source_id（`daily_rows_of` 借它 + 同时要 move `d` → 不能同时借用同一结构体）
+        let source = d.source_id.clone();
+        let daily = crate::services::usage::ledger::daily_rows_of(
+            &source,
+            &crate::services::usage::delta::SourceDelta {
+                details: vec![d],
+                ..Default::default()
             },
         );
+        assert_eq!(
+            crate::database::dao::usage::upsert_daily_conn(conn, &daily, 1),
+            1,
+            "只写日聚合应写入 1 行（明细不写）"
+        );
+    }
+
+    /// 直接构造一行账（`apply_filters` 这类纯函数用例用；**不走库**，所以不受去重/累加影响）
+    fn lrow(source: &str, session: &str, project: &str, provider: &str, model: &str) -> LedgerRow {
+        LedgerRow {
+            bucket_key: "2026-10-03T10".into(),
+            source_id: source.into(),
+            session_id: session.into(),
+            project_key: project.into(),
+            project_label: project.to_uppercase(),
+            provider: provider.into(),
+            provider_kind: SourceKind::Inferred,
+            model: model.into(),
+            buckets: UsageBuckets {
+                input_fresh: 1,
+                ..Default::default()
+            },
+            request_total: 1,
+            requests: 1,
+            user_est: None,
+        }
     }
 
     /// 简版：只给 `input_fresh`（其余桶为 0）——任务书 Step 1 那张 fixture 表用的形态。
@@ -2211,6 +2593,1690 @@ mod tests {
         // 对照：当期确实无数据 → 总量为 0（`compare` 的 None 语义只针对**上一周期**）
         assert_eq!(d.totals_buckets.total(), 0);
         assert_eq!(d.totals.requests, 0);
+    }
+
+    /// 记录页（W6/D6/D7）：`groupBy` **只接受 `tool` | `project`**（决定**卡片**维度），
+    /// 卡内行**恒为「供应商 / 模型」**；`provider` / `model` 入参必须报 `usage-groupby-invalid`
+    #[test]
+    fn records_groupby_accepts_only_tool_and_project() {
+        let conn = mem_with_rows();
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 3, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let range = UsageRange {
+            preset: UsageRangePreset::Today,
+            from: None,
+            to: None,
+        };
+        for bad in [UsageGroupBy::Provider, UsageGroupBy::Model] {
+            let e =
+                records_with_conn(&conn, &range, bad, &UsageFilters::default(), now).unwrap_err();
+            assert_eq!(e.code, "usage-groupby-invalid", "记录页不接受 {bad:?}");
+        }
+        // 两值都必须能用
+        for ok in [UsageGroupBy::Tool, UsageGroupBy::Project] {
+            assert!(records_with_conn(&conn, &range, ok, &UsageFilters::default(), now).is_ok());
+        }
+    }
+
+    #[test]
+    fn records_make_one_card_per_group_with_provider_model_rows() {
+        let conn = mem_with_rows();
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 3, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let range = UsageRange {
+            preset: UsageRangePreset::Today,
+            from: None,
+            to: None,
+        };
+        // tool：每工具一卡；卡内行恒为「供应商 / 模型」（D6）
+        let r = records_with_conn(
+            &conn,
+            &range,
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 2, "每工具一个卡片（D6）");
+        let claude = r.cards.iter().find(|c| c.tool_id == "claude").unwrap();
+        assert_eq!(claude.rows.len(), 1);
+        assert_eq!(
+            claude.rows[0].key, "p / m",
+            "卡内行的键 = 供应商/模型对（不是只有供应商）"
+        );
+        assert_eq!(claude.rows[0].label, "p / m");
+        assert_eq!(claude.buckets.input_fresh, 100);
+        // project：每项目一卡（D7：记录页卡片分组），卡内行仍是「供应商 / 模型」
+        let rp = records_with_conn(
+            &conn,
+            &range,
+            UsageGroupBy::Project,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(rp.cards.len(), 1, "本 fixture 全部落同一项目 → 一张卡");
+        assert_eq!(
+            rp.cards[0].tool_id, "proj",
+            "groupBy=project 时 toolId 承载卡片分组键（契约字段名不变）"
+        );
+        assert_eq!(rp.cards[0].tool_label, "Proj");
+        assert_eq!(
+            rp.cards[0].rows.len(),
+            1,
+            "两工具的 (p, m) 对相同 → 合并成一行"
+        );
+        assert_eq!(rp.cards[0].buckets.input_fresh, 600, "100 + 500");
+        // 筛选：只看 codex → 只剩一张卡
+        let only = UsageFilters {
+            tool_ids: Some(vec!["codex".into()]),
+            ..Default::default()
+        };
+        let r2 = records_with_conn(&conn, &range, UsageGroupBy::Tool, &only, now).unwrap();
+        assert_eq!(r2.cards.len(), 1);
+        // parentsOnly：s2 是子代理 → 它的 token 一并剔除
+        let po = UsageFilters {
+            subagent_mode: Some(SubagentMode::ParentsOnly),
+            ..Default::default()
+        };
+        let r3 = records_with_conn(&conn, &range, UsageGroupBy::Tool, &po, now).unwrap();
+        assert!(
+            r3.cards.iter().all(|c| c.tool_id != "codex"),
+            "子代理会话整卡剔除"
+        );
+    }
+
+    #[test]
+    fn csv_has_stable_columns_and_escapes() {
+        let conn = mem_with_rows();
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 3, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let csv = csv_with_conn(
+            &conn,
+            &UsageRange {
+                preset: UsageRangePreset::Today,
+                from: None,
+                to: None,
+            },
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind");
+        assert!(lines.len() >= 3);
+        assert!(lines[1].starts_with("claude,"), "按 requestTotal 倒序");
+        assert!(csv.ends_with('\n'), "行尾必须有换行（Excel 兼容）");
+        // 含逗号的标签必须被引号包裹（CSV 转义）
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
+    }
+
+    /// W5：CSV 是**导出文件**（给 Excel 看），不落 i18n 键——
+    /// 供应商不可得时 label 列留空（UI 侧才用 `usage.label.unknownProvider`）
+    ///
+    /// **任务书勘误（已申报 F-2）**：原 fixture 用 `add_detail`（其默认 `provider = "p"`）造 workbuddy 行
+    /// ——**根本没造出「供应商不可得」形态**，`group_of(Provider)` 的键会是 `"p"`，
+    /// 于是 `find(starts_with("workbuddy"))` **取不到行、用例只能 panic**（它想锁的 W5 行为一次都没走到）。
+    /// 判据（「CSV 不含 i18n 键」「不可得供应商的 label 列留空」）**一字未改**，只把夹具换成
+    /// 真的不可得形态（`provider` 空串），并把整行逐字钉住（顺带成为一处数值锁）。
+    #[test]
+    fn csv_keeps_i18n_keys_out_of_the_export() {
+        let conn = mem_with_rows();
+        add_spec(
+            &conn,
+            "workbuddy",
+            "w1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                provider: String::new(), // GC 7：不可得 = 空串（不是 "unknown"、不是 i18n 键）
+                buckets: UsageBuckets {
+                    input_fresh: 5,
+                    ..Default::default()
+                },
+                request_total: 5,
+                ..Default::default()
+            },
+        );
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 3, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let csv = csv_with_conn(
+            &conn,
+            &UsageRange {
+                preset: UsageRangePreset::Today,
+                from: None,
+                to: None,
+            },
+            UsageGroupBy::Provider,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            !csv.contains(crate::services::usage::UNKNOWN_PROVIDER_LABEL_KEY),
+            "CSV 不得出现 i18n 键：{csv}"
+        );
+        // 前提断言：库里真有一行 provider = ''（否则「没出现 i18n 键」只是因为没走到那条分支）
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_detail WHERE provider = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "前提：必须真有一行「供应商不可得」");
+        let row = csv
+            .lines()
+            .find(|l| l.starts_with(",,"))
+            .unwrap_or_else(|| panic!("必须有空分组键（供应商不可得）的行：{csv}"));
+        assert!(
+            row.starts_with(",,5,"),
+            "不可得供应商的 label 列留空：{row}"
+        );
+        assert_eq!(
+            row, ",,5,0,0,0,5,0.000000,1,,inferred",
+            "整行逐字（groupKey 与 label 都空 + 三态照出）：{row}"
+        );
+        // 反向对照（防「label 列恒空」的退化实现）：有供应商的那组必须照旧出 `p,p,...`
+        let p_row = csv
+            .lines()
+            .find(|l| l.starts_with("p,p,"))
+            .unwrap_or_else(|| panic!("有供应商的行丢了：{csv}"));
+        assert_eq!(
+            p_row, "p,p,600,800,0,120,1400,0.571429,2,7,inferred",
+            "同一份 CSV 里正常供应商行不得被牵连置空"
+        );
+    }
+
+    /// **CSV 的逐列数值锁**：整段文本逐字断言（表头 + 两行），把
+    /// ① 表头与**列顺序**（11 列）② 每个数值列的取值 ③ 命中率 `{:.6}` 形态
+    /// ④ `userEst` 不可得 = **空单元格**（不是 0）⑤ 行尾换行 ⑥ **无 BOM**（BOM 属 Task 21 落盘）
+    /// 一次全锁住——任一列改序 / 漏列 / 换格式化 / 把 null 填 0 / 少一个换行，都会真红。
+    #[test]
+    fn csv_rows_carry_every_numeric_column_in_contract_order() {
+        let conn = mem_with_rows();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            csv,
+            "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\n\
+             claude,claude,100,800,0,20,900,0.888889,1,7,inferred\n\
+             codex,codex,500,0,0,100,500,0.000000,1,,inferred\n",
+            "CSV 文本逐字锁：列顺序 / 逐列数值 / {{:.6}} 命中率 / null→空 / 行尾换行"
+        );
+        // BOM 是 Task 21（落盘命令）的事：本层文本**不得**带（否则落盘会再前置一次 → 双 BOM）
+        assert!(
+            !csv.starts_with('\u{feff}'),
+            "CSV 文本本层不得带 BOM（落盘时才加）"
+        );
+        assert!(!csv.contains('\u{feff}'));
+    }
+
+    /// GC 7 的 CSV 侧边界：`userEst` **不可得 = 空单元格**，**真的是 0 = `0`**，有值 = 数值本身。
+    /// 三者必须可区分（把 null 填 0、或把 0 也留空、或整列恒空，都会真红）。
+    #[test]
+    fn csv_user_est_cell_distinguishes_unavailable_from_a_real_zero() {
+        let conn = mem_empty();
+        for (src, input, ue) in [
+            ("claude", 10i64, None),
+            ("codex", 20, Some(0)),
+            ("kimi", 30, Some(12)),
+        ] {
+            add_spec(
+                &conn,
+                src,
+                "s1",
+                "proj",
+                "2026-10-03T10",
+                RowSpec {
+                    buckets: UsageBuckets {
+                        input_fresh: input,
+                        ..Default::default()
+                    },
+                    request_total: input,
+                    user_est: ue,
+                    ..Default::default()
+                },
+            );
+        }
+        // 前提断言（防假绿）：库里真的是「NULL / 0 / 12」三种形态（ORDER BY source_id = claude, codex, kimi）
+        let cells: Vec<Option<i64>> = {
+            let mut stmt = conn
+                .prepare("SELECT user_est FROM usage_detail ORDER BY source_id")
+                .unwrap();
+            let rows = stmt.query_map([], |x| x.get(0)).unwrap();
+            rows.map(|v| v.unwrap()).collect()
+        };
+        assert_eq!(
+            cells,
+            vec![None, Some(0), Some(12)],
+            "前提：NULL / 0 / 12 三种形态都要真在库里"
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let cell_of = |k: &str| {
+            csv.lines()
+                .find(|l| l.starts_with(&format!("{k},")))
+                .unwrap_or_else(|| panic!("缺 {k} 行：{csv}"))
+                .split(',')
+                .nth(9)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(cell_of("claude"), "", "不可得 → **空单元格**（不是 0）");
+        assert_eq!(
+            cell_of("codex"),
+            "0",
+            "真的是 0 → 出 `0`（在场的 0 是数据）"
+        );
+        assert_eq!(cell_of("kimi"), "12");
+    }
+
+    /// **转义真能变红**：`groupKey`/`label` 含 `,` / `"` / 换行时，必须按 RFC 4180 引号包裹 + 双写引号；
+    /// 不含特殊字符时**不得**包裹（防「一律加引号」的退化实现）；超长值**不得截断**。
+    #[test]
+    fn csv_escapes_commas_quotes_and_newlines_from_labels() {
+        let conn = mem_empty();
+        // 五个项目（requestTotal 递减 → 行序确定）：逗号 / 引号 / 换行 / 无特殊字符 / 超长
+        let long_label = format!("{},tail", "L".repeat(5000));
+        for (key, label, input) in [
+            ("alpha", "A, B", 40i64),
+            ("beta", "q\"uote", 30),
+            ("gamma", "multi\nline", 20),
+            ("delta", "plain", 10),
+            ("longkey", long_label.as_str(), 5),
+        ] {
+            add_spec(
+                &conn,
+                "claude",
+                key,
+                key,
+                "2026-10-03T10",
+                RowSpec {
+                    buckets: UsageBuckets {
+                        input_fresh: input,
+                        ..Default::default()
+                    },
+                    request_total: input,
+                    ..Default::default()
+                },
+            );
+            add_session(&conn, "claude", key, key, label);
+        }
+        // 前提：标签字典真的把四个特殊原文交了出来（否则下面只是「标签都等于键」的假绿）
+        let dict = key_label_dict(&conn);
+        assert_eq!(dict.get("alpha").map(String::as_str), Some("A, B"));
+        assert_eq!(dict.get("beta").map(String::as_str), Some("q\"uote"));
+        assert_eq!(dict.get("gamma").map(String::as_str), Some("multi\nline"));
+        assert_eq!(dict.get("delta").map(String::as_str), Some("plain"));
+        assert_eq!(
+            dict.get("longkey").map(String::as_str),
+            Some(long_label.as_str())
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Project,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(csv.contains("alpha,\"A, B\",40,"), "逗号 → 引号包裹：{csv}");
+        assert!(csv.contains("beta,\"q\"\"uote\",30,"), "引号 → 双写：{csv}");
+        assert!(
+            csv.contains("gamma,\"multi\nline\",20,"),
+            "换行 → 引号包裹（仍是一条记录）：{csv}"
+        );
+        assert!(
+            csv.contains("delta,plain,10,"),
+            "无特殊字符 → **不得**加引号：{csv}"
+        );
+        assert!(
+            csv.contains(&format!("longkey,\"{long_label}\",5,")),
+            "超长标签必须逐字透传（本层不截断、不省略）"
+        );
+        // `csv_escape` 自身的边界（含空串；**CR 也是记录分隔符**——见报告偏差申报 F-1）
+        assert_eq!(csv_escape(""), "");
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_escape("a\nb"), "\"a\nb\"");
+        assert_eq!(
+            csv_escape("a\rb"),
+            "\"a\rb\"",
+            "CR 不包裹会把一条记录劈成两条"
+        );
+    }
+
+    /// `apply_filters` 的**逐维度**锁（任务书只通过 records 间接考到 `tool_ids` 与 `parentsOnly`）：
+    /// 五个维度逐个可断言、组合是 AND、**空列表 = 不过滤**（不是「全滤掉」）、
+    /// `parentsOnly` 只剔**真为子代理**的 `(源, 会话)` 对（表里查不到的一律按 false 保留）。
+    #[test]
+    fn apply_filters_covers_every_dimension_and_empty_list_means_no_filter() {
+        let rows = vec![
+            lrow("claude", "s1", "alpha", "p1", "m1"),
+            lrow("claude", "s2", "beta", "p2", "m2"),
+            lrow("codex", "s3", "alpha", "p1", "m2"),
+            lrow("dsh", "s4", "beta", "p2", "m1"),
+        ];
+        let subs: std::collections::HashMap<(String, String), bool> =
+            [(("claude".to_string(), "s2".to_string()), true)]
+                .into_iter()
+                .collect();
+        let ids = |rs: &[LedgerRow]| {
+            rs.iter()
+                .map(|r| format!("{}/{}", r.source_id, r.session_id))
+                .collect::<Vec<_>>()
+        };
+        let f = |filters: UsageFilters| apply_filters(rows.clone(), &filters, &subs);
+        assert_eq!(ids(&f(UsageFilters::default())).len(), 4, "无筛选 → 全保留");
+        assert_eq!(
+            ids(&f(UsageFilters {
+                tool_ids: Some(vec!["codex".into()]),
+                ..Default::default()
+            })),
+            vec!["codex/s3"],
+            "tool_ids"
+        );
+        assert_eq!(
+            ids(&f(UsageFilters {
+                projects: Some(vec!["beta".into()]),
+                ..Default::default()
+            })),
+            vec!["claude/s2", "dsh/s4"],
+            "projects"
+        );
+        assert_eq!(
+            ids(&f(UsageFilters {
+                providers: Some(vec!["p1".into()]),
+                ..Default::default()
+            })),
+            vec!["claude/s1", "codex/s3"],
+            "providers"
+        );
+        assert_eq!(
+            ids(&f(UsageFilters {
+                models: Some(vec!["m2".into()]),
+                ..Default::default()
+            })),
+            vec!["claude/s2", "codex/s3"],
+            "models"
+        );
+        assert_eq!(
+            ids(&f(UsageFilters {
+                tool_ids: Some(vec!["claude".into()]),
+                models: Some(vec!["m2".into()]),
+                ..Default::default()
+            })),
+            vec!["claude/s2"],
+            "多维度是 AND"
+        );
+        // **空列表 = 不过滤**（`Some(vec![])` 与 `None` 同义）：写成 `Some(l) => l.iter().any(..)`
+        // 会把全部行滤掉 → 这条真红。`include` 同样不得过滤任何行。
+        assert_eq!(
+            ids(&f(UsageFilters {
+                tool_ids: Some(vec![]),
+                projects: Some(vec![]),
+                providers: Some(vec![]),
+                models: Some(vec![]),
+                subagent_mode: Some(SubagentMode::Include),
+            }))
+            .len(),
+            4,
+            "空列表与 include 都不得过滤"
+        );
+        assert!(
+            f(UsageFilters {
+                tool_ids: Some(vec!["nope".into()]),
+                ..Default::default()
+            })
+            .is_empty(),
+            "未知取值 → 空集（不是「忽略该筛选」）"
+        );
+        assert_eq!(
+            ids(&f(UsageFilters {
+                subagent_mode: Some(SubagentMode::ParentsOnly),
+                ..Default::default()
+            })),
+            vec!["claude/s1", "codex/s3", "dsh/s4"],
+            "parentsOnly：只剔真为子代理的 (源, 会话) 对；表里没有的对按 false 保留"
+        );
+    }
+
+    /// `session_subagent_flags` 的键是 **(源, 会话) 对**（契约 §4 的会话维度主键就是二元组），
+    /// 不是会话 id 单键。夹具刻意让 `claude/s2` 是父会话、`codex/s2` 是子代理：
+    /// **只按 session_id 建表的实现会把 claude/s2 误判成子代理** → D17 分层静默出错。
+    #[test]
+    fn session_subagent_flags_keys_by_source_and_session() {
+        let conn = mem_empty();
+        add_session(&conn, "claude", "s2", "alpha", "Alpha"); // 父会话
+        add_session_at(&conn, "codex", "s2", "alpha", "Alpha", 1, None, true); // 子代理（同名会话）
+        add_session_at(
+            &conn,
+            "dsh",
+            "s9",
+            "beta",
+            "Beta",
+            1,
+            Some("t".into()),
+            true,
+        );
+        let flags = session_subagent_flags(&conn);
+        assert_eq!(flags.len(), 3, "三个会话三行");
+        assert_eq!(
+            flags.get(&("claude".to_string(), "s2".to_string())),
+            Some(&false),
+            "只按 session_id 建表会在这里假真（两个源可以有同名会话）"
+        );
+        assert_eq!(
+            flags.get(&("codex".to_string(), "s2".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            flags.get(&("dsh".to_string(), "s9".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            flags.get(&("dsh".to_string(), "s2".to_string())),
+            None,
+            "不存在的对必须查不到（不是 false）"
+        );
+    }
+
+    /// **卡片聚合与排序的数值锁**（任务书只断言了 `inputFresh` 一个桶）：
+    /// 卡的四桶 / 四口径必须是**卡内行的聚合**（不是首行、不是全局总量），
+    /// 卡与卡内行都按 `requestTotal` 降序（并列时按分组键 = BTreeMap 序 → 确定性）。
+    #[test]
+    fn records_card_aggregates_and_sorting_are_locked() {
+        let conn = mem_empty();
+        // 三个工具，requestTotal 刻意**非单调**插入：codex 500 / claude 900 / dsh 700
+        add_spec(
+            &conn,
+            "codex",
+            "s2",
+            "proj",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 500,
+                    output: 100,
+                    ..Default::default()
+                },
+                request_total: 500,
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "claude",
+            "s1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 100,
+                    cache_read: 800,
+                    output: 20,
+                    ..Default::default()
+                },
+                request_total: 900,
+                requests: 2,
+                user_est: Some(7),
+                ..Default::default()
+            },
+        );
+        // dsh 一卡两行（两个「供应商 / 模型」对）：p2/m2 = 200、p1/m1 = 500
+        add_spec(
+            &conn,
+            "dsh",
+            "s3",
+            "proj",
+            "2026-10-03T09",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 200,
+                    ..Default::default()
+                },
+                request_total: 200,
+                model: "m2".into(),
+                provider: "p2".into(),
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "dsh",
+            "s3",
+            "proj",
+            "2026-10-03T09",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 500,
+                    cache_write: 30,
+                    output: 50,
+                    ..Default::default()
+                },
+                request_total: 500,
+                requests: 3,
+                model: "m1".into(),
+                provider: "p1".into(),
+                ..Default::default()
+            },
+        );
+        add_session(&conn, "dsh", "s3", "proj", "Proj");
+        // 前提断言：dsh 的两行键不同、必须真落成两行（否则「卡内两行」根本没被考到）
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_detail WHERE source_id = 'dsh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "前提：dsh 的两行必须是两行（model/provider 不同）");
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let keys: Vec<&str> = r.cards.iter().map(|c| c.tool_id.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["claude", "dsh", "codex"],
+            "卡片按 requestTotal 降序（900 / 700 / 500）"
+        );
+        let dsh = r.cards.iter().find(|c| c.tool_id == "dsh").unwrap();
+        assert_eq!(
+            dsh.buckets,
+            UsageBuckets {
+                input_fresh: 700,
+                cache_read: 0,
+                cache_write: 30,
+                output: 50
+            },
+            "卡四桶 = 卡内行之和"
+        );
+        assert_eq!(dsh.metrics.request_total, 700);
+        assert_eq!(dsh.metrics.requests, 4, "1 + 3");
+        assert_eq!(
+            dsh.metrics.user_est, None,
+            "两行都不可得 → 卡也是 null（不是 0）"
+        );
+        assert!(
+            dsh.metrics.cache_hit_rate.abs() < 1e-12,
+            "cache_read = 0 → 0.0（§4.3 分母为 0 记 0）"
+        );
+        let inner: Vec<(&str, i64)> = dsh
+            .rows
+            .iter()
+            .map(|x| (x.key.as_str(), x.metrics.request_total))
+            .collect();
+        assert_eq!(
+            inner,
+            vec![("p1 / m1", 500), ("p2 / m2", 200)],
+            "卡内行按 requestTotal 降序"
+        );
+        let claude = r.cards.iter().find(|c| c.tool_id == "claude").unwrap();
+        assert!(
+            (claude.metrics.cache_hit_rate - 800.0 / 900.0).abs() < 1e-9,
+            "卡级命中率与逐行同一条纯函数（semantics::cache_hit_rate）"
+        );
+        assert_eq!(claude.metrics.user_est, Some(7));
+        // **卡内行级**的口径断言（评审 Minor #4）：卡级断言用的是同一个 `aggregate`，抓不到
+        // 「只改内层」的定向改写 → 这里把内层行的 `userEst` / `cacheHitRate` 直接钉住
+        // （GC 7 在记录页内层行的静默假值落点：不可得不得变 0、有值源不得被填 0 牵连）
+        assert_eq!(
+            dsh.rows[0].metrics.user_est, None,
+            "卡内行级 userEst：不可得就是 null（不是 0）"
+        );
+        assert_eq!(dsh.rows[1].metrics.user_est, None, "另一内层行同样是 null");
+        assert!(
+            (claude.rows[0].metrics.cache_hit_rate - 800.0 / 900.0).abs() < 1e-9,
+            "**卡内行级**命中率（只改内层的定向变异在这里红）"
+        );
+        assert_eq!(
+            claude.rows[0].metrics.user_est,
+            Some(7),
+            "**卡内行级** userEst 出真值"
+        );
+        // 一致性不变量：卡 == 卡内行之和（改任一行的聚合口径都会红）；且不得出现空卡
+        for c in &r.cards {
+            let mut b = UsageBuckets::default();
+            let (mut rt, mut req) = (0i64, 0i64);
+            for x in &c.rows {
+                b.add(&x.buckets);
+                rt += x.metrics.request_total;
+                req += x.metrics.requests;
+            }
+            assert_eq!(b, c.buckets, "卡 {} 的四桶必须等于卡内行之和", c.tool_id);
+            assert_eq!(
+                (rt, req),
+                (c.metrics.request_total, c.metrics.requests),
+                "卡 {} 的请求输入/次数必须等于卡内行之和",
+                c.tool_id
+            );
+            assert!(!c.rows.is_empty(), "不得出现空卡（某源无行就不出卡）");
+        }
+    }
+
+    /// `groupBy = project`（D7）的数值锁：卡 = 项目（`toolId` 承载项目键、`toolLabel` 是原文），
+    /// 卡内行仍是「供应商 / 模型」——**跨工具同 (供应商, 模型) 必须合并成一行**，
+    /// 且卡的四桶/四口径是**合并值**（任务书那条只断言了 `inputFresh` 一个桶）。
+    #[test]
+    fn records_project_cards_merge_tools_within_one_project() {
+        let conn = mem_empty();
+        add_spec(
+            &conn,
+            "claude",
+            "s1",
+            "alpha",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 100,
+                    cache_read: 800,
+                    output: 20,
+                    ..Default::default()
+                },
+                request_total: 900,
+                user_est: Some(7),
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "codex",
+            "s2",
+            "alpha",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 500,
+                    output: 100,
+                    ..Default::default()
+                },
+                request_total: 500,
+                requests: 2,
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "dsh",
+            "s3",
+            "beta",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 77,
+                    ..Default::default()
+                },
+                request_total: 77,
+                model: "m2".into(),
+                ..Default::default()
+            },
+        );
+        add_session(&conn, "claude", "s1", "alpha", "Alpha");
+        add_session(&conn, "dsh", "s3", "beta", "Beta");
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Project,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let keys: Vec<(&str, &str)> = r
+            .cards
+            .iter()
+            .map(|c| (c.tool_id.as_str(), c.tool_label.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![("alpha", "Alpha"), ("beta", "Beta")],
+            "卡 = 项目（按 requestTotal 降序），toolLabel 是项目原文（D21）"
+        );
+        let alpha = &r.cards[0];
+        assert_eq!(alpha.rows.len(), 1, "跨工具同 (供应商, 模型) 合并成一行");
+        assert_eq!(alpha.rows[0].key, "p / m");
+        assert_eq!(
+            alpha.buckets,
+            UsageBuckets {
+                input_fresh: 600,
+                cache_read: 800,
+                cache_write: 0,
+                output: 120
+            }
+        );
+        assert_eq!(alpha.metrics.request_total, 1400);
+        assert_eq!(alpha.metrics.requests, 3, "1 + 2");
+        assert_eq!(
+            alpha.metrics.user_est,
+            Some(7),
+            "只有 claude 有值 → 合并后是 7（不可得的源不贡献 0）"
+        );
+        assert!((alpha.metrics.cache_hit_rate - 800.0 / 1400.0).abs() < 1e-9);
+        assert_eq!(
+            r.cards[1].rows[0].key, "p / m2",
+            "另一项目的行照常按「供应商 / 模型」"
+        );
+    }
+
+    /// **三处 `sourceKind` 折叠口径统一**（评审 Minor #2 / 裁决 A）：同一个契约字段的三个出口
+    /// （看板分组行 / 记录页卡内行 / CSV 分组行）**都必须取组内最强三态**，不得「首行胜出」。
+    /// 夹具刻意让**较弱**的那行**排在前面**（先插入；`query_detail_conn` 无 `ORDER BY` → 按 rowid 序返回）
+    /// —— 这一点用**前提断言**钉住，否则「首行恰好是强态」会让用例变成假绿。
+    #[test]
+    fn source_kind_folding_is_strongest_in_all_three_exits() {
+        let conn = mem_empty();
+        // 先插弱态（unknown）、后插强态（measured）：同一 source / 同一 (供应商, 模型) → 三处都合成一组
+        add_spec(
+            &conn,
+            "claude",
+            "s1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                kind: SourceKind::Unknown,
+                buckets: UsageBuckets {
+                    input_fresh: 1,
+                    ..Default::default()
+                },
+                request_total: 1,
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "claude",
+            "s2",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                kind: SourceKind::Measured,
+                buckets: UsageBuckets {
+                    input_fresh: 2,
+                    ..Default::default()
+                },
+                request_total: 2,
+                ..Default::default()
+            },
+        );
+        // 前提断言：DAO 返回序真的是「弱在前」（不是 → 夹具失效，用例必须响亮地红）
+        let raw =
+            crate::database::dao::usage::query_detail_conn(&conn, "2026-10-03T00", "2026-10-03T23");
+        assert_eq!(raw.len(), 2, "前提：两行明细都在时间窗内");
+        assert_eq!(
+            (raw[0].provider_kind, raw[1].provider_kind),
+            (SourceKind::Unknown, SourceKind::Measured),
+            "前提：**较弱的那行排在最前**（否则「首行胜出」的退化实现也会绿 = 假绿）"
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let today = range(UsageRangePreset::Today);
+        // ① 看板分组行（Task 18 的 dashboard_with_conn）
+        let d = dashboard_with_conn(&conn, &today, UsageGroupBy::Tool, now).unwrap();
+        assert_eq!(d.rows.len(), 1, "前提：两行合成一组");
+        assert_eq!(
+            d.rows[0].source_kind,
+            SourceKind::Measured,
+            "看板分组行：取最强"
+        );
+        // ② 记录页卡内行
+        let r = records_with_conn(
+            &conn,
+            &today,
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 1);
+        assert_eq!(r.cards[0].rows.len(), 1, "前提：卡内合成一行");
+        assert_eq!(
+            r.cards[0].rows[0].source_kind,
+            SourceKind::Measured,
+            "记录页卡内行：取最强"
+        );
+        // ③ CSV 分组行
+        let csv = csv_with_conn(
+            &conn,
+            &today,
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            csv.lines().nth(1).unwrap().rsplit(',').next().unwrap(),
+            "measured",
+            "CSV 分组行：取最强：{csv}"
+        );
+        // 对照（防「三态恒 measured」的退化实现）：只有弱态时必须是 unknown
+        let conn2 = mem_empty();
+        add_spec(
+            &conn2,
+            "claude",
+            "s1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                kind: SourceKind::Unknown,
+                buckets: UsageBuckets {
+                    input_fresh: 1,
+                    ..Default::default()
+                },
+                request_total: 1,
+                ..Default::default()
+            },
+        );
+        let d2 = dashboard_with_conn(&conn2, &today, UsageGroupBy::Tool, now).unwrap();
+        assert_eq!(
+            d2.rows[0].source_kind,
+            SourceKind::Unknown,
+            "只有弱态 → unknown（不得恒 measured）"
+        );
+    }
+
+    /// **D-43 的披露扩到记录页的强制卡内行**（评审 Minor #3 / 裁决 C）：dsh 真机 **63/170** 个投影文件
+    /// **结构性**无 `modelSelection`，采集侧按 D-43 **保留** `model=""` 行（「数据 > 分组整洁」）。
+    /// 而记录页的卡内行维度**恒为「供应商 / 模型」** → 这些行产出 **key / label 双空**的卡内行
+    /// （② 会渲染成一行空白）。契约把 `key` / `label` 定为**非空 `string`**，GC 7 的 `null` 在此**不可表达**；
+    /// locale 里只有 `usage.label.unknownProvider`、**没有** `unknownModel` → 本层**不改契约、不发明 i18n 键**，
+    /// 只把现状钉住（② 若要兜底文案，须按契约变更纪律先回写）。
+    /// 另一形态（**防御性写清，真机当前不可达**）：`provider` 非空 + `model` 空 → `"p / "` **尾分隔符**标签。
+    #[test]
+    fn records_inner_row_keeps_structurally_model_less_rows_as_empty_labels() {
+        let conn = mem_empty();
+        // dsh：结构性无模型（连供应商也不可得）
+        add_spec(
+            &conn,
+            "dsh",
+            "s1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                provider: String::new(),
+                model: String::new(),
+                kind: SourceKind::Unknown,
+                buckets: UsageBuckets {
+                    input_fresh: 10,
+                    ..Default::default()
+                },
+                request_total: 10,
+                ..Default::default()
+            },
+        );
+        // codex：供应商在、模型空（防御性形态）
+        add_spec(
+            &conn,
+            "codex",
+            "s2",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                provider: "p".into(),
+                model: String::new(),
+                buckets: UsageBuckets {
+                    input_fresh: 20,
+                    ..Default::default()
+                },
+                request_total: 20,
+                ..Default::default()
+            },
+        );
+        // 前提断言：两条**空模型**明细真落库了（否则下面只是「没有这种行」的假绿）
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_detail WHERE model = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "前提：两行空模型必须真在库里（D-43 的形态）");
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let dsh = r.cards.iter().find(|c| c.tool_id == "dsh").unwrap();
+        assert_eq!(
+            dsh.rows[0].key, "",
+            "结构性无模型 → 卡内行键为空串（契约非空 string，null 不可表达）"
+        );
+        assert_eq!(
+            dsh.rows[0].label, "",
+            "标签同样为空串（locale 无 unknownModel；本层不发明键）"
+        );
+        assert_eq!(
+            dsh.rows[0].source_kind,
+            SourceKind::Unknown,
+            "三态照实给 unknown"
+        );
+        assert_eq!(
+            dsh.rows[0].buckets.input_fresh, 10,
+            "四桶照实呈现（D-43：数据 > 分组整洁）"
+        );
+        let codex = r.cards.iter().find(|c| c.tool_id == "codex").unwrap();
+        assert_eq!(
+            codex.rows[0].key, "p / ",
+            "provider 非空 + model 空 → **尾分隔符**标签（真机当前不可达，防御性钉住）"
+        );
+        // CSV 侧同一形态：`Model` 分组下两行都落空键组（组级三态取最强 = inferred）
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Model,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            csv.contains("\n,,30,0,0,0,30,0.000000,2,,inferred\n"),
+            "CSV 的空模型组：groupKey 与 label 双空、三态仍如实出：{csv}"
+        );
+    }
+
+    /// §8.3：供应商不可得（空串）时，**卡内行只呈现模型名**（键与标签都是模型名），
+    /// 且**不得**落 i18n 键（i18n 键是 dashboard 分组标签的用法；这一行的维度是模型）。
+    #[test]
+    fn records_inner_row_falls_back_to_model_name_when_provider_is_unavailable() {
+        let conn = mem_empty();
+        add_spec(
+            &conn,
+            "workbuddy",
+            "w1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                provider: String::new(),
+                model: "hy3".into(),
+                kind: SourceKind::Unknown,
+                buckets: UsageBuckets {
+                    input_fresh: 5,
+                    ..Default::default()
+                },
+                request_total: 5,
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 1);
+        assert_eq!(r.cards[0].rows[0].key, "hy3", "供应商不可得 → 键就是模型名");
+        assert_eq!(r.cards[0].rows[0].label, "hy3");
+        assert_ne!(
+            r.cards[0].rows[0].label,
+            crate::services::usage::UNKNOWN_PROVIDER_LABEL_KEY,
+            "记录页这一行不是 i18n 键的载体"
+        );
+        assert_eq!(
+            r.cards[0].rows[0].source_kind,
+            SourceKind::Unknown,
+            "三态照实传"
+        );
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains(crate::services::usage::UNKNOWN_PROVIDER_LABEL_KEY),
+            "记录页卡内行不得落 i18n 键：{json}"
+        );
+    }
+
+    /// 卡内行的 `sourceKind` 是**该行所有记录的「最强」三态**（measured > inferred > unknown）：
+    /// 同一 (供应商, 模型) 由不同会话给出不同三态时取最强——**不得只取首行/末行**。
+    #[test]
+    fn records_inner_row_source_kind_takes_the_strongest_state() {
+        let conn = mem_empty();
+        for (sess, kind, input) in [
+            ("s1", SourceKind::Unknown, 1i64),
+            ("s2", SourceKind::Measured, 2),
+            ("s3", SourceKind::Inferred, 4),
+        ] {
+            add_spec(
+                &conn,
+                "claude",
+                sess,
+                "proj",
+                "2026-10-03T10",
+                RowSpec {
+                    kind,
+                    buckets: UsageBuckets {
+                        input_fresh: input,
+                        ..Default::default()
+                    },
+                    request_total: input,
+                    ..Default::default()
+                },
+            );
+        }
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 1);
+        assert_eq!(
+            r.cards[0].rows.len(),
+            1,
+            "前提：三条记录同 (供应商, 模型) → 合并成一行"
+        );
+        assert_eq!(
+            r.cards[0].rows[0].source_kind,
+            SourceKind::Measured,
+            "取最强三态"
+        );
+        assert_eq!(r.cards[0].rows[0].buckets.input_fresh, 7, "1 + 2 + 4");
+    }
+
+    /// **两档取数路径锁**：小时档读 `usage_detail`、日档读 `usage_daily`——两张表各只写一行
+    /// （只明细 / 只日聚合），两个档位必须各自只认自己那张表（若日档走明细或反之，真红）。
+    /// 顺带：窗口外的日聚合行不得被 `BETWEEN` 带进来。
+    /// 并把**已知妥协**钉成可见断言：卡内行 `is_subagent` 在**两档**都是任务书写死的 `false`
+    /// （行维度是「供应商 / 模型」；D17 分层语义不落在这一层，见报告偏差申报 F-3）。
+    #[test]
+    fn records_hour_tier_reads_detail_and_day_tier_reads_daily() {
+        let conn = mem_empty();
+        let spec = |input: i64| RowSpec {
+            buckets: UsageBuckets {
+                input_fresh: input,
+                ..Default::default()
+            },
+            request_total: input,
+            ..Default::default()
+        };
+        write_detail_only(
+            &conn,
+            delta_of("claude", "s1", "proj", "2026-10-03T10", spec(100)),
+        );
+        write_daily_only(
+            &conn,
+            delta_of("codex", "s2", "proj", "2026-10-03T10", spec(500)),
+        );
+        write_daily_only(
+            &conn,
+            delta_of("dsh", "s3", "proj", "2026-08-01T10", spec(999)),
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let hour = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let h: Vec<(&str, i64)> = hour
+            .cards
+            .iter()
+            .map(|c| (c.tool_id.as_str(), c.buckets.input_fresh))
+            .collect();
+        assert_eq!(
+            h,
+            vec![("claude", 100)],
+            "小时档只认明细表：日聚合独有的 codex 不得出现，窗口外的 dsh 也不得出现"
+        );
+        let day = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let d: Vec<(&str, i64)> = day
+            .cards
+            .iter()
+            .map(|c| (c.tool_id.as_str(), c.buckets.input_fresh))
+            .collect();
+        assert_eq!(
+            d,
+            vec![("codex", 500)],
+            "日档只认日聚合表：明细独有的 claude 不得出现"
+        );
+        // CSV 走同一条 `load_ledger_rows_with`：两档各自只认自己那张表
+        let csv_day = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            csv_day.contains("codex,codex,500,"),
+            "CSV 日档同样读日聚合：{csv_day}"
+        );
+        assert!(
+            !csv_day.contains("claude"),
+            "CSV 日档不得混入明细独有的行：{csv_day}"
+        );
+        assert!(
+            !csv_day.contains("dsh"),
+            "窗口外的日聚合行不得出现：{csv_day}"
+        );
+        let csv_hour = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            csv_hour.contains("claude,claude,100,"),
+            "CSV 小时档读明细：{csv_hour}"
+        );
+        assert!(
+            !csv_hour.contains("codex"),
+            "CSV 小时档不得混入日聚合独有的行：{csv_hour}"
+        );
+        // 已知妥协的可见化（两档都写死 false；若 ② 改契约或补会话级取数，这两条会红）
+        assert!(day
+            .cards
+            .iter()
+            .all(|c| c.rows.iter().all(|x| !x.is_subagent)));
+        assert!(hour
+            .cards
+            .iter()
+            .all(|c| c.rows.iter().all(|x| !x.is_subagent)));
+    }
+
+    /// **总开关的门 + 错误传播**：关闭 → `records` 出空卡、`collectedAt` 是 **0 哨兵**
+    /// （确定性可断言）；重开 → 同一库数据回来（防「空是因为夹具本来就空」的假绿）；
+    /// 非法 `groupBy` 与非法区间都必须回结构化错误码（不得静默出空表）。
+    /// 另：CSV **不受总开关门控**（任务书代码如此：`csv_with_conn` 无 `enabled` 早退）——
+    /// 本层**如实锁住现状**并登记 ①→②（与 `dashboard` / `records` 的门控不对称）。
+    #[test]
+    fn master_switch_gates_records_and_csv_behavior_is_registered_as_is() {
+        use crate::services::usage::settings::SETTINGS_KEY;
+        let conn = mem_with_rows();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 2, "前提：打开态有 2 张卡");
+        assert_eq!(
+            r.range.preset,
+            UsageRangePreset::Today,
+            "入参回显（契约字段）"
+        );
+        let off = serde_json::to_string(&UsageSettings {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::database::dao::settings::set_setting_conn(&conn, SETTINGS_KEY, &off);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(r.cards.is_empty(), "总开关关闭 → 零卡");
+        assert_eq!(
+            r.availability.len(),
+            8,
+            "可得性说明照常返回（与 Task 18 同口径）"
+        );
+        assert_eq!(
+            r.collected_at, 0,
+            "关闭态走早退分支：`collectedAt` 是 **0 哨兵**（契约只有非空 number，没有 null）"
+        );
+        assert_eq!(r.group_by, UsageGroupBy::Tool, "入参回显不受门控影响");
+        // 顺序：W6 的 groupBy 守卫在总开关**之前** → 关闭态下非法维度仍必须报错
+        let e = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Provider,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.code, "usage-groupby-invalid",
+            "关闭态也必须报 W6 的结构化错误码"
+        );
+        // CSV：任务书未给它总开关门 —— 如实锁住现状（将来要改口径必须是有意为之）
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            csv.contains("claude,claude,100,"),
+            "现状：CSV 不看总开关（登记 ①→② 的不对称）：{csv}"
+        );
+        // 对照：重新打开 → 卡回来
+        let on = serde_json::to_string(&UsageSettings {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::database::dao::settings::set_setting_conn(&conn, SETTINGS_KEY, &on);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 2, "重开 → 同一库必须出 2 张卡");
+        // 打开态：非法区间 → 结构化错误码（两条新入口都要传，不得静默出空表）
+        let bad = UsageRange {
+            preset: UsageRangePreset::Custom,
+            from: None,
+            to: None,
+        };
+        assert_eq!(
+            records_with_conn(
+                &conn,
+                &bad,
+                UsageGroupBy::Tool,
+                &UsageFilters::default(),
+                now
+            )
+            .unwrap_err()
+            .code,
+            "usage-range-invalid",
+            "记录页必须上抛区间错误"
+        );
+        assert_eq!(
+            csv_with_conn(
+                &conn,
+                &bad,
+                UsageGroupBy::Tool,
+                &UsageFilters::default(),
+                now
+            )
+            .unwrap_err()
+            .code,
+            "usage-range-invalid",
+            "CSV 必须上抛区间错误"
+        );
+    }
+
+    /// **0 值行不得被丢**（W-35「真空回合保留」/ W-39「如实呈现」在本层的落点）：
+    /// 四桶全 0、0 次请求、`userEst = Some(0)` 的行在记录页与 CSV 里都必须各占一行/一条卡内行
+    /// ——「看起来像空行就跳过」会让源如实上报的零值回合静默消失（正是 GC 7 要防的那类）。
+    #[test]
+    fn all_zero_rows_are_still_rendered_in_records_and_csv() {
+        let conn = mem_empty();
+        add_spec(
+            &conn,
+            "opencode",
+            "z1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets::default(),
+                request_total: 0,
+                requests: 0,
+                user_est: Some(0),
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.cards.len(), 1, "0 值行必须出卡（不得跳过）");
+        assert_eq!(r.cards[0].tool_id, "opencode");
+        assert_eq!(r.cards[0].buckets, UsageBuckets::default());
+        assert_eq!(r.cards[0].metrics.request_total, 0);
+        assert_eq!(r.cards[0].metrics.requests, 0);
+        assert_eq!(
+            r.cards[0].metrics.user_est,
+            Some(0),
+            "在场且为 0 的 userEst 是**数据**（GC 7 的两面）"
+        );
+        assert_eq!(r.cards[0].rows.len(), 1, "卡内行同样不得被跳过");
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            csv,
+            "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\n\
+             opencode,opencode,0,0,0,0,0,0.000000,0,0,inferred\n",
+            "0 值行必须逐列如实出（含 userEst=0 与命中率 0.000000）"
+        );
+    }
+
+    /// CSV `sourceKind` 列的三态（契约 §2 的 `measured | inferred | unknown`，落库列 `provider_kind`）：
+    /// 逐源单行 → 三行必须出三个**不同**的字面值（用 Rust `Debug` 的 `Measured`、或恒 `unknown`，真红）。
+    /// 同时锁：`usage_export_csv` 接受 **provider / model**（契约 §3：只有记录页限两值）。
+    #[test]
+    fn csv_source_kind_column_keeps_the_three_states() {
+        let conn = mem_empty();
+        for (src, kind, input) in [
+            ("claude", SourceKind::Measured, 30i64),
+            ("codex", SourceKind::Inferred, 20),
+            ("workbuddy", SourceKind::Unknown, 10),
+        ] {
+            add_spec(
+                &conn,
+                src,
+                "s1",
+                "proj",
+                "2026-10-03T10",
+                RowSpec {
+                    kind,
+                    buckets: UsageBuckets {
+                        input_fresh: input,
+                        ..Default::default()
+                    },
+                    request_total: input,
+                    provider: if kind == SourceKind::Unknown {
+                        String::new()
+                    } else {
+                        "p".into()
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let kinds: Vec<&str> = csv
+            .lines()
+            .skip(1)
+            .map(|l| l.rsplit(',').next().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["measured", "inferred", "unknown"],
+            "三态逐字（不是 Debug 形态）：{csv}"
+        );
+        for g in [UsageGroupBy::Provider, UsageGroupBy::Model] {
+            assert!(
+                csv_with_conn(
+                    &conn,
+                    &range(UsageRangePreset::Today),
+                    g,
+                    &UsageFilters::default(),
+                    now
+                )
+                .is_ok(),
+                "CSV 必须接受 {g:?}（契约 §3：只有记录页限 tool|project）"
+            );
+        }
+        // 供应商不可得分组：groupKey 与 label 留空（W5）但三态仍如实出 unknown
+        let byp = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Provider,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            byp.contains(",,10,0,0,0,10,0.000000,1,,unknown"),
+            "不可得供应商：groupKey+label 留空、三态照出：{byp}"
+        );
+    }
+
+    /// **CSV 侧也要过筛**（任务书只测了 records 的筛选）：五个筛选维度在 CSV 路径上都真生效
+    /// （若 CSV 忘了 `apply_filters`，全红）。
+    #[test]
+    fn csv_applies_every_filter_dimension() {
+        let conn = mem_with_rows(); // claude/s1（父，proj，p/m）+ codex/s2（子代理，proj，p/m）
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let today = range(UsageRangePreset::Today);
+        let csv =
+            |f: UsageFilters| csv_with_conn(&conn, &today, UsageGroupBy::Tool, &f, now).unwrap();
+        let base = csv(UsageFilters::default());
+        assert!(
+            base.contains("claude,claude,100,") && base.contains("codex,codex,500,"),
+            "前提：两源都在：{base}"
+        );
+        let only = csv(UsageFilters {
+            tool_ids: Some(vec!["codex".into()]),
+            ..Default::default()
+        });
+        assert!(
+            only.contains("codex,codex,500,") && !only.contains("claude,claude,"),
+            "tool_ids 生效：{only}"
+        );
+        assert_eq!(only.lines().count(), 2, "表头 + 1 行");
+        let po = csv(UsageFilters {
+            subagent_mode: Some(SubagentMode::ParentsOnly),
+            ..Default::default()
+        });
+        assert!(
+            !po.contains("codex,codex,"),
+            "parentsOnly：子代理会话整行剔除（token 一并剔）：{po}"
+        );
+        assert!(po.contains("claude,claude,100,"));
+        assert_eq!(
+            csv(UsageFilters {
+                projects: Some(vec!["nope".into()]),
+                ..Default::default()
+            })
+            .lines()
+            .count(),
+            1,
+            "projects 不匹配 → 只剩表头"
+        );
+        assert_eq!(
+            csv(UsageFilters {
+                providers: Some(vec!["p".into()]),
+                ..Default::default()
+            })
+            .lines()
+            .count(),
+            3,
+            "providers 匹配 → 两行都在"
+        );
+        assert_eq!(
+            csv(UsageFilters {
+                models: Some(vec!["nope".into()]),
+                ..Default::default()
+            })
+            .lines()
+            .count(),
+            1,
+            "models 不匹配 → 只剩表头"
+        );
+    }
+
+    /// 空账本边界：CSV 只出表头 + 行尾换行（**不是空串、不是没有表头**）；
+    /// 记录页零卡但照常出可得性说明（8 条）——「账本空」与「总开关关」是两种空态。
+    #[test]
+    fn empty_ledger_csv_is_header_only_and_records_have_no_cards() {
+        let conn = mem_empty();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            csv, "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\n",
+            "空账本也要出表头（Excel 打开是一张只有表头的表）"
+        );
+        assert_eq!(csv.lines().count(), 1);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(r.cards.is_empty());
+        assert_eq!(r.availability.len(), 8);
+    }
+
+    /// **GC 10 隐私白名单的可执行断言**：记录页与 CSV 的输出**只允许**契约给的结构化数字与静态文本。
+    /// 会话标题、`project_path_raw`、`project_realpath`（原始路径）**一律不得出现**——用哨兵串验证。
+    /// 先断言哨兵**真的在库里**（否则「没出现」只是因为夹具里没有 = 假绿），
+    /// 再断言契约允许的字段**真的在**（否则「输出恒空」也是假绿）。
+    #[test]
+    fn records_and_csv_never_leak_session_text_or_raw_paths() {
+        const TITLE: &str = "PROMPT_SENTINEL_DO_NOT_LEAK";
+        const RAW_PATH: &str = "/Users/secret/SECRET_PATH_SENTINEL";
+        let conn = mem_empty();
+        add_spec(
+            &conn,
+            "claude",
+            "s1",
+            "sentinelproj",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 42,
+                    ..Default::default()
+                },
+                request_total: 42,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            crate::database::dao::usage::upsert_session_conn(
+                &conn,
+                "claude",
+                &[SessionDimDelta {
+                    session_id: "s1".into(),
+                    project_key: "sentinelproj".into(),
+                    project_label: "SentinelProj".into(),
+                    project_path_raw: RAW_PATH.into(),
+                    project_realpath: RAW_PATH.into(),
+                    title: Some(TITLE.into()),
+                    is_subagent: false,
+                    parent_session_id: None,
+                    originator: None,
+                    last_seen_at: 1,
+                }],
+                1
+            ),
+            1
+        );
+        // 前提断言：哨兵真的落库了
+        let (t, p): (String, String) = conn
+            .query_row(
+                "SELECT title, project_path_raw FROM usage_session WHERE session_id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (t.as_str(), p.as_str()),
+            (TITLE, RAW_PATH),
+            "前提：哨兵必须在库里"
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let r = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Project,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&r).unwrap();
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Project,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        for out in [&json, &csv] {
+            for forbidden in [TITLE, RAW_PATH, "SECRET_PATH_SENTINEL"] {
+                assert!(
+                    !out.contains(forbidden),
+                    "GC 10：{forbidden} 不得出现在查询输出里：{out}"
+                );
+            }
+        }
+        // 反向对照（防「输出恒空」的假绿）：契约允许的字段必须真的在
+        assert!(
+            json.contains("SentinelProj"),
+            "契约允许的项目显示名必须在：{json}"
+        );
+        assert!(json.contains("sentinelproj"), "分组键必须在：{json}");
+        assert!(
+            csv.contains("sentinelproj,SentinelProj,42,"),
+            "CSV 同样只出契约列：{csv}"
+        );
     }
 
     /// **真机账本冒烟**（`#[ignore]`，需开发机 `~/.mam/mam.db` 已有真机数据）：
