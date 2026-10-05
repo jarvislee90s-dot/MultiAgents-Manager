@@ -42,16 +42,16 @@ export const TOOL_LABELS: Record<AgentType, string> = {
  *  图标底色系不同源——brief 拍板的口径优先）。Record<AgentType, string> 穷尽守卫
  *  （对齐 AGENT_TYPE_RECORD 模式）：AgentType 增删值时此处编译报错，chips 不会静默缺色 */
 export const TOOL_BRAND_COLORS: Record<AgentType, string> = {
-  // 以桌面端 ToolIcon.tsx SVG 图标底色为准（2026-09-15 用户裁决）；
-  // 渐变取首 stop 色
-  claude: "#6445A2", // 桌面 ClaudeIcon L29
-  codex: "#16A34A", // 桌面 CodexIcon L55
-  opencode: "#EA580C", // 桌面 OpenCodeIcon L78
-  openclaw: "#6366F1", // 桌面 OpenClawIcon L107
-  kimi: "#0B0E1A", // 桌面 KimiIcon L127（深夜蓝底+白色月牙）
-  workbuddy: "#4AD06A", // 桌面 WorkBuddyIcon 渐变首色 L147
-  zcode: "#3B5BFD", // 桌面 ZCodeIcon 渐变首色 L179
-  dsh: "#4D6BFE", // 桌面 DshIcon L201（不变）
+  // 2026-10-05 UI 改版：以配色台账 docs/design/tool-color-ledger.md「颜色矩阵」
+  // 的「识别檐色」列为准（官方经典配色重映射，用户逐项裁决）
+  claude: "#D97757", // 台账：官方 Crail 橙
+  codex: "#10A37F", // 台账：OpenAI 黑白系的唯一点缀绿
+  opencode: "#6B6B6B", // 台账：终端灰度美学 → 墨灰檐
+  openclaw: "#D2453C", // 台账：龙虾暖系回归 → 猩红（黄 #E5A83B 备选）
+  kimi: "#0B0E1A", // 台账：蓝黑底白月牙（不变）
+  workbuddy: "#4AD06A", // 台账：猫绿渐变首色（不变）
+  zcode: "#141413", // 台账：纯黑底白 Z（蓝紫渐变退役）
+  dsh: "#4D6BFE", // 台账：DeepSeek 蓝（不变）
 };
 
 // Bug 4（M3 验收）：暗色态 chip 文字色。P8f 的对比度结论做在 P8e 改色之前无人
@@ -60,14 +60,16 @@ export const TOOL_BRAND_COLORS: Record<AgentType, string> = {
 // 下表为逐工具暗色文字色（vs #0f172a 实测对比度入注释），保留蓝紫色调、
 // 不机械提白成灰；codex(5.41)/opencode(5.01)/workbuddy(8.94) 原色达标沿用
 export const TOOL_BRAND_COLORS_DARK: Record<AgentType, string> = {
-  claude: "#8B74B9", // 4.50
-  codex: "#16A34A", // 5.41（原色达标）
-  opencode: "#EA580C", // 5.01（原色达标）
-  openclaw: "#7375F2", // 4.72
-  kimi: "#A5B4CE", // 8.52
-  workbuddy: "#4AD06A", // 8.94（原色达标）
-  zcode: "#5874FD", // 4.53
-  dsh: "#5F7AFE", // 4.85
+  // 2026-10-05 台账「夜间皮肤处理规则」：黑系檐色夜间提亮为灰阶（kimi/zcode/
+  // opencode），彩色系提亮至夜卡底对比达标；数值与台账矩阵一致
+  claude: "#E08A66", // 橙提亮（原紫提亮值 #8B74B9 退役）
+  codex: "#10A37F", // 点缀绿夜卡底达标
+  opencode: "#8C8C88", // 台账：墨灰 → 中灰
+  openclaw: "#E06A5E", // 台账：猩红夜间提亮
+  kimi: "#8A94A6", // 台账：蓝黑 → 蓝灰
+  workbuddy: "#4AD06A", // 原色达标
+  zcode: "#A39C8C", // 台账：纯黑 → 暖灰
+  dsh: "#4D6BFE", // 原色达标
 };
 
 // 排序优先级：等待(0) → 运行(1) → 空闲(2)，数字越小越靠前
@@ -127,28 +129,10 @@ export function filterEnabledTools(tools: string[], enabled: Set<string>): strin
   return tools.filter((t) => enabled.has(t));
 }
 
-// ---- P8f chip 浅色态配色（Task 4）----
-// 问题：品牌色原值直接当文字色在浅底上对比度不足。白底 + 12% 品牌底实测
-// 1.96–3.84（openclaw 1.96 / opencode 2.27 / claude 2.76…），低于 WCAG AA 小字 4.5。
-// 深底（slate-950）上同色为 4.10–8.13，故仅浅色态压暗文字色，暗色态保持 Task 3 原口径。
-
-/** 浅色态 chip 文字色压暗系数：品牌色各通道乘 0.6 后，八色在白底+12%品牌底上
- *  对比度 4.93–8.00（最低 openclaw 4.93），全部达 AA。系数即该口径的单一来源 */
-export const CHIP_LIGHT_TEXT_FACTOR = 0.6;
-
-/** 按系数压暗 6 位 hex（#RRGGBB）：chip 浅色态文字色的唯一变换，
- *  纯函数、不改入参。入参非法时返回原值（防御：不产出 NaN 色） */
-export function darkenHex(hex: string, factor: number): string {
-  const m = /^#([0-9a-fA-F]{6})$/.exec(hex);
-  if (!m) return hex;
-  const toHex = (v: number) =>
-    Math.min(255, Math.max(0, Math.round(v)))
-      .toString(16)
-      .padStart(2, "0");
-  const n = parseInt(m[1], 16);
-  const [r, g, b] = [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
-  return `#${toHex(r * factor)}${toHex(g * factor)}${toHex(b * factor)}`;
-}
+// ---- chip 配色（2026-10-05 中性化）----
+// chips 不再使用品牌色文字/实底（旧 P8f 压暗方案随 darkenHex 一并退役）：
+// 未选中 = 卡底 + 描边 + 弱文字，选中 = 近黑主控（--btnp/--btnpt），见 Board.tsx。
+// 品牌识别色只保留卡片檐用途（TOOL_BRAND_COLORS / TOOL_BRAND_COLORS_DARK）。
 
 // 状态 → 圆点颜色，三色语义与桌面 StatusLight 一致：
 // 红=待处理（waiting）/ 黄=正在运行（processing/thinking/compacting）/ 绿=已完成（idle/finished）

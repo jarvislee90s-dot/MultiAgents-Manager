@@ -48,16 +48,21 @@
   --ring: oklch(0.708 0 0);
   --radius: 0.625rem;
 
-  /* 工具品牌图标底色（Bug 4，M3 验收）：ToolIcon SVG 经 style var() 引用，
-   * 浅色=原色；暗色表见 .dark（kimi 反色、claude 提亮，其余=原色） */
-  --tool-claude-bg: #6445a2;
-  --tool-codex-bg: #16a34a;
-  --tool-opencode-bg: #ea580c;
-  --tool-openclaw-bg: #6366f1;
+  /* 工具品牌图标双态变量（2026-10-05 台账重映射，docs/design/tool-color-ledger.md）：
+   * ToolIcon SVG 经 style var() 引用，桌面+移动共用一份语义 */
+  --tool-claude-bg: #d97757;
+  --tool-codex-bg: #ffffff;
+  --tool-codex-fg: #111111;
+  --tool-codex-rim: #1a1a1a;
+  --tool-opencode-bg: #ffffff;
+  --tool-opencode-fg: #111111;
+  --tool-opencode-rim: #2b2b28;
+  --tool-openclaw-bg: #d2453c;
   --tool-kimi-bg: #0b0e1a;
   --tool-kimi-fg: #ffffff;
   --tool-workbuddy-bg: #4ad06a;
-  --tool-zcode-bg: #3b5bfd;
+  --tool-zcode-bg: #141413;
+  --tool-zcode-rim: transparent;
   --tool-dsh-bg: #4d6bfe;
 }
 
@@ -82,17 +87,21 @@
   --input: oklch(0.269 0 0);
   --ring: oklch(0.439 0 0);
 
-  /* 工具品牌图标底色暗色表（Bug 4，M3 验收）：深夜蓝/原紫在深色卡底上融底
-   * （kimi #0B0E1A 对比度 1.08）——kimi 反色（浅底+深夜蓝月牙）、claude 提亮；
-   * 其余六工具原色在深底达标，变量值=原色不动 */
-  --tool-claude-bg: #8b74b9;
-  --tool-codex-bg: #16a34a;
-  --tool-opencode-bg: #ea580c;
-  --tool-openclaw-bg: #6366f1;
+  /* 工具品牌图标夜间表（2026-10-05 台账夜间规则）：黑系图标反形/亮描边，
+   * 彩色系提亮至夜卡底对比达标；数值与 mobile.css 同源 */
+  --tool-claude-bg: #e08a66;
+  --tool-codex-bg: #1a1a1a;
+  --tool-codex-fg: #f5f5f5;
+  --tool-codex-rim: #ece9e2;
+  --tool-opencode-bg: #1a1a1a;
+  --tool-opencode-fg: #ffffff;
+  --tool-opencode-rim: #ece9e2;
+  --tool-openclaw-bg: #e06a5e;
   --tool-kimi-bg: #e8edf8;
   --tool-kimi-fg: #0b0e1a;
   --tool-workbuddy-bg: #4ad06a;
-  --tool-zcode-bg: #3b5bfd;
+  --tool-zcode-bg: #141413;
+  --tool-zcode-rim: #ece9e2;
   --tool-dsh-bg: #4d6bfe;
 }
 

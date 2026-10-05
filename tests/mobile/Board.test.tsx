@@ -278,21 +278,22 @@ describe("Board 跃迁提醒（SSE transition）", () => {
     );
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
-    // 初始：processing → 状态点为黄
-    const dot = () => {
+    // 初始：processing → 状态徽标黄（淡底彩字 pill，参考稿 01）
+    const badge = () => {
       const card = screen.getByText("mam").closest("li") as HTMLElement;
-      return card.querySelector("span.rounded-full:last-of-type") as HTMLElement;
+      return card.querySelector("span.mt-2") as HTMLElement;
     };
-    expect(dot().className).toContain("bg-yellow-500");
+    expect(badge().className).toContain("bg-[#FBF3D9]");
 
     emitFrame(
       "transition",
       transitionEvent({ sessionId: "s1", from: "processing", to: "waiting", projectName: "mam" })
     );
     await advance(0);
-    // 跃迁后：waiting → 状态点转红且挂呼吸动画（卡片随 SSE 实时变化，无需等下一拍）
-    expect(dot().className).toContain("bg-red-500");
-    expect(dot().className).toContain("animate-pulse");
+    // 跃迁后：waiting → 徽标转红且圆点挂呼吸动画（卡片随 SSE 实时变化，无需等下一拍）
+    expect(badge().className).toContain("bg-[#FEE9E5]");
+    expect(badge().textContent).toContain("等待操作");
+    expect(badge().querySelector("span.animate-pulse")).toBeTruthy();
   });
 
   it("同 sessionId 的连续跃迁：横幅覆盖为最新一条（展示层防叠），不同会话可并存", async () => {
@@ -690,7 +691,7 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     expect(chipLabels()).toEqual(["全部", "ZCode", "Claude"]);
   });
 
-  it("选中 chip 用工具品牌色底色（内联 style）", async () => {
+  it("选中 chip 近黑主控实底、未选中中性描边（2026-10-05 中性化，品牌色移交卡片檐）", async () => {
     installSse(
       sessionsWith([
         chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
@@ -702,17 +703,18 @@ describe("Board 工具 chips（P8d/P8e）", () => {
     );
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
-    // 默认选中「全部」：Claude chip 未选中，无品牌紫实底
+    // 默认选中「全部」：Claude chip 未选中 = 中性描边 + 弱文字，无实底主控色
     const claudeChip = () =>
       within(screen.getByTestId("tool-chips")).getByText("Claude").closest("button") as HTMLElement;
-    expect(getComputedStyle(claudeChip()).backgroundColor).not.toBe("rgb(100, 69, 162)");
-    // 点 Claude 后底色为品牌紫 #6445A2（jsdom 可能归一化为 rgb 形式，两种都接受）
+    expect(claudeChip().className).toContain("text-[var(--mut)]");
+    expect(claudeChip().className).not.toContain("bg-[var(--btnp)]");
+    // 点 Claude 后 = 近黑主控实底（--btnp/--btnpt），不再使用品牌色内联样式
     fireEvent.click(claudeChip());
-    const bg = getComputedStyle(claudeChip()).backgroundColor;
-    expect(["#6445A2", "rgb(100, 69, 162)", "rgb(100,69,162)"]).toContain(bg);
+    expect(claudeChip().className).toContain("bg-[var(--btnp)]");
+    expect(claudeChip().className).toContain("text-[var(--btnpt)]");
   });
 
-  it("未选中 chip 文字色随主题：浅色态用压暗色（AA 达标），暗色态查暗色表（Bug 4）", async () => {
+  it("chips 整体不出现品牌色内联样式（识别色只保留卡片檐用途）", async () => {
     installSse(
       sessionsWith([
         chipSession({ id: "c", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
@@ -722,36 +724,12 @@ describe("Board 工具 chips（P8d/P8e）", () => {
       "fetch",
       vi.fn(async (url: string) => (url === "/m/api/v1/host" ? okHost(["claude"]) : okSessions(0)))
     );
-    // 浅色态起手（系统浅色偏好）；jsdom 无 matchMedia，本用例内安装并在末尾还原，
-    // 防 shim 泄漏到后续用例改变其主题初值
-    const prevMatchMedia = window.matchMedia;
-    window.matchMedia = ((query: string) => ({
-      matches: true, // 系统浅色偏好
-      media: query,
-      onchange: null,
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    })) as unknown as typeof window.matchMedia;
-    try {
-      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
-      await advance(0);
-      const claudeChip = () =>
-        within(screen.getByTestId("tool-chips"))
-          .getByText("Claude")
-          .closest("button") as HTMLElement;
-      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#3c2961|rgb\(60, 41, 97\))$/);
-      // 切到暗色：文字色查暗色表 TOOL_BRAND_COLORS_DARK（Bug 4 修复——旧实现回
-      // 品牌原色 #6445A2，在深色卡底 #0f172a 上对比度 2.48 融底）
-      fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
-      expect(getComputedStyle(claudeChip()).color).toMatch(/^(#8B74B9|rgb\(139, 116, 185\))$/);
-    } finally {
-      window.matchMedia = prevMatchMedia;
-      localStorage.clear();
-      document.documentElement.classList.remove("dark");
-    }
+    render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+    await advance(0);
+    // 台账 Claude 檐色 #D97757 与旧紫 #6445A2 都不得出现在 chips 区域
+    const html = screen.getByTestId("tool-chips").innerHTML;
+    expect(html).not.toContain("#D97757");
+    expect(html).not.toContain("#6445A2");
   });
 
   it("多行折叠：无溢出时不出现展开/收起按钮，容器无折叠裁剪样式", async () => {
@@ -985,21 +963,22 @@ describe("Board 主题切换（P8f）", () => {
     );
     const { container } = render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
-    // 看板根容器：双态类同时存在，浅色态不再是黑底（P8f 浅色模式整体可读性的最小锁）
+    // 2026-10-05 Token 化：底色双态由语义变量 --pg/--cbg 承载（mobile.css 六皮肤表），
+    // 组件不再写死 bg-white/dark: 前缀。最小锁 = 根容器与卡片消费 Token 类
     const root = container.querySelector("div.min-h-screen") as HTMLElement;
-    expect(root.className).toContain("bg-white");
-    expect(root.className).toContain("dark:bg-slate-950");
-    // 卡片同理：浅色底 + dark 前缀深色底
+    expect(root.className).toContain("bg-[var(--pg)]");
+    expect(root.className).toContain("[font-family:var(--font-ui)]");
+    // 卡片同理：卡底 Token + 台账圆角档位
     const card = container.querySelector("ul > li") as HTMLElement;
-    expect(card.className).toContain("bg-slate-100");
-    expect(card.className).toContain("dark:bg-slate-900");
+    expect(card.className).toContain("bg-[var(--cbg)]");
+    expect(card.className).toContain("rounded-[var(--rr)]");
   });
 });
 
-// 2026-09-16 用户裁决：暗色卡与背景几乎同色（dark:border-transparent + 深底），
-// 加带灰度的白色边框区分层次
-describe("Board 卡片暗色边框（2026-09-16 用户裁决）", () => {
-  it("暗色态卡片有可见白灰边框，且不再用 transparent 消边", async () => {
+// 2026-10-05 Token 化：卡片边框走 --cb（夜间皮肤=台账亮边 #55432A/#3A3A3A/#2C4A3E），
+// 柔影走 --sh；transparent 消边不复存在
+describe("Board 卡片边框与阴影 Token（2026-10-05 改版）", () => {
+  it("卡片边框消费 --cb 变量（夜间亮边），带 --sh 柔影与品牌檐", async () => {
     installSse(
       sessionsWith([
         chipSession({ id: "s1", agentType: "claude", lastActivityAt: "2026-09-15T10:00:00Z" }),
@@ -1012,13 +991,16 @@ describe("Board 卡片暗色边框（2026-09-16 用户裁决）", () => {
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
     // 「Claude」在 chip 与卡片两处出现 → 从卡片列表（ul）内取
-    const cardList = document.querySelector("ul.space-y-2") as HTMLElement;
+    const cardList = document.querySelector("ul.space-y-2\\.5") as HTMLElement;
     const card = cardList.querySelector("li") as HTMLElement;
     expect(card).toBeTruthy();
-    const cls = card.className;
-    // 暗色边框类存在（白系或灰系 + 透明度分级），transparent 消边已移除
-    expect(cls).toMatch(/dark:border-(white|slate)(-\d+)?\/\d+/);
-    expect(cls).not.toContain("dark:border-transparent");
+    expect(card.style.borderColor).toBe("var(--cb)");
+    expect(card.style.boxShadow).toBe("var(--sh)");
+    // 品牌檐：jsdom 无 matchMedia → theme.ts 默认夜间，查 TOOL_BRAND_COLORS_DARK
+    // （claude = 台账夜间提亮橙 #E08A66；白天表 #D97757 由 board-logic.test 值锁覆盖）
+    const edge = card.querySelector("span[aria-hidden]") as HTMLElement;
+    // jsdom 会把内联样式归一化为 rgb 形式
+    expect(["#E08A66", "rgb(224, 138, 102)", "rgb(224,138,102)"]).toContain(edge.style.background);
   });
 });
 

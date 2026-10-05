@@ -4,13 +4,16 @@ import { ToolIcon } from "@/components/common/ToolIcon";
 
 // ZCode 图标专项（新文件，不触碰既有 toolIcon.test.tsx）——与 workbuddy 专项同款模式
 describe("ToolIcon zcode", () => {
-  it("renders the brand blue-violet gradient instead of falling back to Claude", () => {
+  it("renders solid black with night-rim var（2026-10-05 台账：纯黑底白 Z，蓝紫渐变退役）", () => {
     const { container } = render(<ToolIcon toolId="zcode" />);
     const html = container.innerHTML;
-    // 官方图标几何重绘（蓝紫渐变 #3B5BFD→#8A4FF5），不得回退为 Claude 的紫色 "C"
-    expect(html).toContain("#3B5BFD");
-    expect(html).toContain("#8A4FF5");
-    expect(html).not.toContain("#6445A2");
+    // 台账纯黑 #141413（回退值同源）+ 夜间亮描边变量（白天 transparent）
+    expect(html).toContain("#141413");
+    expect(html).toContain("--tool-zcode-rim");
+    expect(html).not.toContain("#3B5BFD");
+    expect(html).not.toContain("#8A4FF5");
+    // 不得回退为 Claude 的橙色 "C"
+    expect(html).not.toContain("#D97757");
   });
 
   it("zcode icon renders an svg glyph without crashing", () => {

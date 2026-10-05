@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_TYPES,
-  CHIP_LIGHT_TEXT_FACTOR,
   STATUS_DOT_COLOR,
   STATUS_LABELS,
   TOOL_BRAND_COLORS,
   TOOL_BRAND_COLORS_DARK,
   TOOL_LABELS,
   applyTransition,
-  darkenHex,
   filterByAgent,
   filterEnabledTools,
   formatRelativeTime,
@@ -346,112 +344,34 @@ describe("board-logic 相对时长（now 由调用方注入，可测）", () => 
   });
 });
 
-// P8f chip 浅色态配色（Task 4）：品牌原色当文字在浅底上对比度不足（实测 1.96–3.84），
-// 压暗到 AA 后交付。本组测试把「系数口径」与「八色全达标」锁进 CI——
-// 未来有人替换品牌色/放大系数导致不达标时立刻变红。
-describe("P8f chip 浅色态文字色（darkenHex + 对比度）", () => {
-  // WCAG 相对亮度与对比度（2.0 版公式，与实现文档中的实测口径一致）
-  function luminance(hex: string): number {
-    const [r, g, b] = [1, 3, 5]
-      .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
-      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  }
-  function contrast(a: string, b: string): number {
-    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-    return (hi + 0.05) / (lo + 0.05);
-  }
-  // 12% 品牌色淡底（chip 未选中态背景；白底 alpha 合成）
-  function blendedBackground(brand: string): string {
-    const rgb = [1, 3, 5].map((i) => parseInt(brand.slice(i, i + 2), 16));
-    return (
-      "#" +
-      rgb
-        .map((v) =>
-          Math.round(v * 0.12 + 255 * 0.88)
-            .toString(16)
-            .padStart(2, "0")
-        )
-        .join("")
-    );
-  }
-
-  it("darkenHex：各通道乘系数并取整（含进位/截断边界）", () => {
-    expect(darkenHex("#ffffff", 0.6)).toBe("#999999");
-    expect(darkenHex("#000000", 0.6)).toBe("#000000");
-    expect(darkenHex("#D97757", 0.6)).toBe("#824734");
-    // 四舍五入边界：0.6 × 255 = 153 → 99(h)
-    expect(darkenHex("#ff0000", 0.5)).toBe("#800000"); // 0.5×255=127.5 → 128
+// 2026-10-05 UI 改版：chips 中性化后，旧 P8f 压暗方案（CHIP_LIGHT_TEXT_FACTOR /
+// darkenHex）退役删除；品牌识别色只保留「卡片檐」装饰用途。本组测试锁台账
+// 「颜色矩阵」的檐色两表（白天表 + 夜间提亮表），数值漂移即变红。
+describe("台账檐色两表（TOOL_BRAND_COLORS / TOOL_BRAND_COLORS_DARK）", () => {
+  it("白天表关键值精确匹配（docs/design/tool-color-ledger.md 颜色矩阵）", () => {
+    expect(TOOL_BRAND_COLORS.claude).toBe("#D97757"); // 官方 Crail 橙
+    expect(TOOL_BRAND_COLORS.codex).toBe("#10A37F"); // OpenAI 唯一点缀绿
+    expect(TOOL_BRAND_COLORS.opencode).toBe("#6B6B6B"); // 终端灰度 → 墨灰
+    expect(TOOL_BRAND_COLORS.openclaw).toBe("#D2453C"); // 龙虾猩红
+    expect(TOOL_BRAND_COLORS.kimi).toBe("#0B0E1A"); // 蓝黑（不变）
+    expect(TOOL_BRAND_COLORS.workbuddy).toBe("#4AD06A"); // 猫绿（不变）
+    expect(TOOL_BRAND_COLORS.zcode).toBe("#141413"); // 纯黑（渐变退役）
+    expect(TOOL_BRAND_COLORS.dsh).toBe("#4D6BFE"); // DeepSeek 蓝（不变）
   });
-
-  it("darkenHex：非法入参原样返回（不产出 NaN 色）", () => {
-    expect(darkenHex("not-a-color", 0.6)).toBe("not-a-color");
-    expect(darkenHex("#fff", 0.6)).toBe("#fff"); // 3 位简写不接受，避免歧义
-    expect(darkenHex("", 0.6)).toBe("");
-  });
-
-  it("八工具品牌色压暗后，在白底 + 12% 品牌底上对比度全部 ≥ 4.5（WCAG AA 小字）", () => {
-    for (const brand of Object.values(TOOL_BRAND_COLORS)) {
-      const text = darkenHex(brand, CHIP_LIGHT_TEXT_FACTOR);
-      const bg = blendedBackground(brand);
-      const c = contrast(text, bg);
-      expect(
-        c,
-        `品牌色 ${brand} 压暗后 ${text} 在 ${bg} 上对比度仅 ${c.toFixed(2)}`
-      ).toBeGreaterThanOrEqual(4.5);
-    }
-  });
-
-  it("回归锁：品牌原色在浅底上确实不达标（证明压暗不是多余变换）", () => {
-    const failures = Object.values(TOOL_BRAND_COLORS).filter(
-      (brand) => contrast(brand, blendedBackground(brand)) < 4.5
-    );
-    // 2026-09-15 品牌色改为桌面 SVG 底色后：claude #6445A2(6.01) 与 kimi #0B0E1A(14.87)
-    // 已达标，其余六色不达标——压暗逻辑仍必要但不再全量覆盖。
-    // 若未来整体换深色系致 failures=0，可移除压暗逻辑
-    expect(failures).toHaveLength(6);
-  });
-});
-
-// Bug 4（M3 验收）：暗色态品牌色融底修复。P8f 的对比度结论做在 P8e 改色之前，
-// 改色后无人复算——实测（深色卡底 #0f172a）：kimi 1.08 / claude 2.48 / zcode 3.49 /
-// openclaw 4.00 / dsh 4.12，均低于文字线 4.5。修复=逐工具暗色文字色表（Board dark
-// 分支查表），本组测试把「表穷尽 + 关键五值 + 全表达标」锁进 CI
-describe("Bug 4：暗色 chip 文字色（TOOL_BRAND_COLORS_DARK，vs 深色卡底 #0f172a）", () => {
-  function luminance(hex: string): number {
-    const [r, g, b] = [1, 3, 5]
-      .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
-      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  }
-  function contrast(a: string, b: string): number {
-    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-    return (hi + 0.05) / (lo + 0.05);
-  }
 
   it("键集穷尽 AgentType 八值（Record 守卫，增删 AgentType 时此断言同步修正）", () => {
     expect(Object.keys(TOOL_BRAND_COLORS_DARK).sort()).toEqual([...AGENT_TYPES].sort());
   });
 
-  it("关键五值精确匹配（实测对比度选色，不得漂移；codex/opencode/workbuddy 用原色）", () => {
-    expect(TOOL_BRAND_COLORS_DARK.kimi).toBe("#A5B4CE"); // 8.52
-    expect(TOOL_BRAND_COLORS_DARK.claude).toBe("#8B74B9"); // 4.50
-    expect(TOOL_BRAND_COLORS_DARK.zcode).toBe("#5874FD"); // 4.53
-    expect(TOOL_BRAND_COLORS_DARK.openclaw).toBe("#7375F2"); // 4.72
-    expect(TOOL_BRAND_COLORS_DARK.dsh).toBe("#5F7AFE"); // 4.85
+  it("夜间表关键值精确匹配（台账「夜间皮肤处理规则」：黑系提亮为灰阶）", () => {
+    expect(TOOL_BRAND_COLORS_DARK.kimi).toBe("#8A94A6"); // 蓝黑 → 蓝灰
+    expect(TOOL_BRAND_COLORS_DARK.zcode).toBe("#A39C8C"); // 纯黑 → 暖灰
+    expect(TOOL_BRAND_COLORS_DARK.opencode).toBe("#8C8C88"); // 墨灰 → 中灰
+    expect(TOOL_BRAND_COLORS_DARK.claude).toBe("#E08A66"); // 橙提亮
+    expect(TOOL_BRAND_COLORS_DARK.openclaw).toBe("#E06A5E"); // 猩红提亮
+    // 彩色系夜卡底达标的原色不动
     expect(TOOL_BRAND_COLORS_DARK.codex).toBe(TOOL_BRAND_COLORS.codex);
-    expect(TOOL_BRAND_COLORS_DARK.opencode).toBe(TOOL_BRAND_COLORS.opencode);
     expect(TOOL_BRAND_COLORS_DARK.workbuddy).toBe(TOOL_BRAND_COLORS.workbuddy);
-  });
-
-  it("八色 vs #0f172a 对比度全部 ≥ 4.5（WCAG AA 小字，锁暗色回归）", () => {
-    const darkCard = "#0f172a";
-    for (const [tool, color] of Object.entries(TOOL_BRAND_COLORS_DARK)) {
-      const c = contrast(color, darkCard);
-      expect(
-        c,
-        `暗色文字色 ${tool} ${color} 在深色卡底上对比度仅 ${c.toFixed(2)}`
-      ).toBeGreaterThanOrEqual(4.5);
-    }
+    expect(TOOL_BRAND_COLORS_DARK.dsh).toBe(TOOL_BRAND_COLORS.dsh);
   });
 });
