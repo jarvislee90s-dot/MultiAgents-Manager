@@ -189,24 +189,21 @@ describe("QuestionCard：问答卡渲染与应答（批次乙 T8）", () => {
     expect(card.getAttribute("data-mode")).toBe("multi");
     // 未勾选：提交钮禁用（防空提交）
     expect((screen.getByTestId("question-submit") as HTMLButtonElement).disabled).toBe(true);
-    // 点选 1：POST toggle{index:0}，勾选态点亮，提交钮解锁
+    // 点选 1：POST toggle{index:0}，勾选态点亮（data-checked + 近黑描边），提交钮解锁
     fireEvent.click(screen.getByTestId("question-option-0"));
     await flushAsync();
-    expect(
-      screen.getByTestId("question-option-0").getAttribute("class")!.includes("bg-sky-500/20")
-    ).toBe(true);
+    expect(screen.getByTestId("question-option-0").getAttribute("data-checked")).toBe("true");
+    expect(screen.getByTestId("question-option-0").getAttribute("class")!).toContain(
+      "ring-[var(--btnp)]"
+    );
     expect((screen.getByTestId("question-submit") as HTMLButtonElement).disabled).toBe(false);
     // 点选 2 再勾一个；再点 1 取消勾选（本地态翻转）
     fireEvent.click(screen.getByTestId("question-option-2"));
     await flushAsync();
     fireEvent.click(screen.getByTestId("question-option-0"));
     await flushAsync();
-    expect(
-      screen.getByTestId("question-option-0").getAttribute("class")!.includes("bg-sky-500/20")
-    ).toBe(false);
-    expect(
-      screen.getByTestId("question-option-2").getAttribute("class")!.includes("bg-sky-500/20")
-    ).toBe(true);
+    expect(screen.getByTestId("question-option-0").getAttribute("data-checked")).toBeNull();
+    expect(screen.getByTestId("question-option-2").getAttribute("data-checked")).toBe("true");
     // toggle 不置终态：卡片仍可交互
     expect(screen.queryByTestId("question-sent")).toBeNull();
     // 提交：POST submit（后端三段式注入，前端不自行拼键）

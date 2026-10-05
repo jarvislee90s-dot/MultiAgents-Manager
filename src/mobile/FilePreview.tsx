@@ -225,9 +225,9 @@ export default function FilePreview({
       data-testid="file-preview"
       data-mode={mode}
       aria-label={`文件预览 ${baseName}`}
-      className="flex h-full min-h-0 flex-col bg-white dark:bg-slate-950"
+      className="flex h-full min-h-0 flex-col bg-[var(--pg)]"
     >
-      <header className="flex shrink-0 items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+      <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
         {/* 返回文件列表（M3+）：仅从面板进入时出现 */}
         {onBack && (
           <button
@@ -235,12 +235,12 @@ export default function FilePreview({
             data-testid="preview-back-list"
             aria-label="返回文件列表"
             onClick={onBack}
-            className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+            className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
           >
             <ArrowLeft size={16} />
           </button>
         )}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-200">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--tx)]">
           {baseName}
         </span>
         {state.phase === "error" && (
@@ -248,7 +248,7 @@ export default function FilePreview({
             type="button"
             data-testid="preview-retry"
             onClick={() => setRetryTick((t) => t + 1)}
-            className="shrink-0 rounded-md bg-slate-200 px-2 py-1 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+            className="shrink-0 rounded-md bg-[var(--cb)] px-2 py-1 text-xs text-[var(--tx)]"
           >
             重试
           </button>
@@ -265,7 +265,7 @@ export default function FilePreview({
             role="group"
             aria-label="源码/渲染切换"
             data-testid="preview-seg"
-            className="flex shrink-0 overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700"
+            className="flex shrink-0 overflow-hidden rounded-lg border border-[var(--cb)]"
           >
             <button
               type="button"
@@ -274,8 +274,8 @@ export default function FilePreview({
               onClick={() => setView("source")}
               className={`px-2.5 py-1 text-xs ${
                 view === "source"
-                  ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900"
-                  : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                  ? "bg-[var(--btnp)] text-[var(--btnpt)]"
+                  : "text-[var(--mut)] hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
               }`}
             >
               源码
@@ -287,8 +287,8 @@ export default function FilePreview({
               onClick={() => setView("render")}
               className={`px-2.5 py-1 text-xs ${
                 view === "render"
-                  ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900"
-                  : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                  ? "bg-[var(--btnp)] text-[var(--btnpt)]"
+                  : "text-[var(--mut)] hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
               }`}
             >
               渲染
@@ -301,14 +301,14 @@ export default function FilePreview({
             role="group"
             aria-label="渲染缩放"
             data-testid="preview-zoom"
-            className="flex shrink-0 items-center overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700"
+            className="flex shrink-0 items-center overflow-hidden rounded-lg border border-[var(--cb)]"
           >
             <button
               type="button"
               data-testid="preview-zoom-out"
               aria-label="缩小"
               onClick={() => bumpZoom(-1)}
-              className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="px-2 py-1 text-xs text-[var(--mut)] hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
             >
               −
             </button>
@@ -317,7 +317,7 @@ export default function FilePreview({
               data-testid="preview-zoom-reset"
               aria-label="重置缩放"
               onClick={() => setZoom(1)}
-              className="border-x border-slate-300 px-1.5 py-1 text-[10px] text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="border-x border-[var(--cb)] px-1.5 py-1 text-[10px] text-[var(--mut)] hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
             >
               {Math.round(zoom * 100)}%
             </button>
@@ -326,7 +326,7 @@ export default function FilePreview({
               data-testid="preview-zoom-in"
               aria-label="放大"
               onClick={() => bumpZoom(1)}
-              className="px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="px-2 py-1 text-xs text-[var(--mut)] hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
             >
               ＋
             </button>
@@ -337,7 +337,7 @@ export default function FilePreview({
           data-testid="preview-close"
           aria-label="关闭预览"
           onClick={onClose}
-          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
         >
           <X size={16} />
         </button>
@@ -347,9 +347,7 @@ export default function FilePreview({
         data-font-scale={fontScale}
         className="min-h-0 flex-1 overflow-auto p-3"
       >
-        {state.phase === "loading" && (
-          <p className="text-sm text-slate-500 dark:text-slate-400">加载中…</p>
-        )}
+        {state.phase === "loading" && <p className="text-sm text-[var(--mut)]">加载中…</p>}
         {state.phase === "error" && (
           <p data-testid="preview-error" className="text-sm text-rose-600 dark:text-rose-400">
             {/* M5 P2-a：403 带后端结构化原因码，按原因分診排障文案（已过闸设备可见） */}
@@ -376,11 +374,11 @@ export default function FilePreview({
             srcDoc={`<style>html{zoom:${zoom}}</style>${
               state.phase === "ok" && state.payload.kind === "text" ? state.payload.content : ""
             }`}
-            className="h-full min-h-[320px] w-full rounded-lg border border-slate-200 bg-white dark:border-slate-700"
+            className="h-full min-h-[320px] w-full rounded-lg border border-[var(--cb)] bg-[var(--cbg)]"
           />
         )}
         {showMarkdown && (
-          <div data-testid="preview-markdown" className="md-body text-sm dark:text-slate-200">
+          <div data-testid="preview-markdown" className="md-body text-sm">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {state.phase === "ok" && state.payload.kind === "text" ? state.payload.content : ""}
             </ReactMarkdown>
@@ -396,8 +394,8 @@ export default function FilePreview({
                 // 源码档软换行（M5 P2-b）：文档类（md/txt）自动换行不影响阅读；
                 // 代码类保持不换行（横向滚动，保逻辑关系与缩进层级）
                 docSource
-                  ? "rounded-lg bg-slate-100 p-3 text-xs break-words whitespace-pre-wrap dark:bg-slate-900"
-                  : "overflow-auto rounded-lg bg-slate-100 p-3 text-xs dark:bg-slate-900"
+                  ? "rounded-lg bg-[var(--cbg)] p-3 text-xs break-words whitespace-pre-wrap"
+                  : "overflow-auto rounded-lg bg-[var(--cbg)] p-3 text-xs"
               }
             >
               {highlighted ? (

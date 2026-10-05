@@ -10,34 +10,146 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ============================================================
- * 工具品牌图标底色双态变量（Bug 4，M3 验收）：桌面共用组件 ToolIcon 的 SVG
- * 经 style var() 引用这些变量。浅色=原色（回退值同源）；.dark 下 kimi 反色
- * （深夜蓝方底在深色卡底 #0f172a 上对比度 1.08 即隐形）、claude 提亮，
- * 其余六工具原色达标不动。.dark 类策略与上方 @custom-variant 同一挂载点
- * （documentElement），桌面表见 src/index.css 同名变量
+ * 工具品牌图标双态变量（2026-10-05 台账重映射）：桌面共用组件 ToolIcon 的
+ * SVG 经 style var() 引用。值以 docs/design/tool-color-ledger.md 颜色矩阵为准；
+ * codex/opencode 反形（白底深符）与 zcode 夜间亮描边通过 fg/rim 变量表达，
+ * 桌面表见 src/index.css 同名变量
  * ============================================================ */
 :root {
-  --tool-claude-bg: #6445a2;
-  --tool-codex-bg: #16a34a;
-  --tool-opencode-bg: #ea580c;
-  --tool-openclaw-bg: #6366f1;
+  --tool-claude-bg: #d97757;
+  --tool-codex-bg: #ffffff;
+  --tool-codex-fg: #111111;
+  --tool-codex-rim: #1a1a1a;
+  --tool-opencode-bg: #ffffff;
+  --tool-opencode-fg: #111111;
+  --tool-opencode-rim: #2b2b28;
+  --tool-openclaw-bg: #d2453c;
   --tool-kimi-bg: #0b0e1a;
   --tool-kimi-fg: #ffffff;
   --tool-workbuddy-bg: #4ad06a;
-  --tool-zcode-bg: #3b5bfd;
+  --tool-zcode-bg: #141413;
+  --tool-zcode-rim: transparent;
   --tool-dsh-bg: #4d6bfe;
 }
 
 .dark {
-  --tool-claude-bg: #8b74b9;
-  --tool-codex-bg: #16a34a;
-  --tool-opencode-bg: #ea580c;
-  --tool-openclaw-bg: #6366f1;
+  --tool-claude-bg: #e08a66;
+  --tool-codex-bg: #1a1a1a;
+  --tool-codex-fg: #f5f5f5;
+  --tool-codex-rim: #ece9e2;
+  --tool-opencode-bg: #1a1a1a;
+  --tool-opencode-fg: #ffffff;
+  --tool-opencode-rim: #ece9e2;
+  --tool-openclaw-bg: #e06a5e;
   --tool-kimi-bg: #e8edf8;
   --tool-kimi-fg: #0b0e1a;
   --tool-workbuddy-bg: #4ad06a;
-  --tool-zcode-bg: #3b5bfd;
+  --tool-zcode-bg: #141413;
+  --tool-zcode-rim: #ece9e2;
   --tool-dsh-bg: #4d6bfe;
+}
+
+/* ============================================================
+ * 远程端语义 Token（2026-10-05 UI 改版，spec §3.1）：
+ * 组件禁止硬编码颜色/圆角/字体，一律消费本组变量。
+ * 默认白天 = 暖白纸感、夜间 = 暖黑纸感；用户经桌面外观配置器选择的
+ * 皮肤/字体/圆角通过 documentElement 的 data-skin / data-font-theme /
+ * data-radius 属性覆盖（值由 ui-config 下发，mobile.html 防闪脚本首帧前应用）。
+ * 六张皮肤完整定稿值见参考稿 docs/design/remote-ui/04-外观配置-设置节-定稿.html
+ * ============================================================ */
+:root {
+  --pg: #f8f3e9;
+  --cbg: #fffdf8;
+  --cb: #eae2cf;
+  --tx: #2b2417;
+  --mut: #97907e;
+  --sh: 0 1px 2px rgba(80, 60, 20, 0.06), 0 3px 10px rgba(80, 60, 20, 0.05);
+  --bub: #efe8d8;
+  --btnp: #1a1915;
+  --btnpt: #ffffff;
+  --rr: 12px;
+  --font-ui: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.dark {
+  /* 2026-10-05 夜间对比度修订（真机反馈：卡/气泡与底相融）：卡底/亮边/气泡整体
+   * 提亮一档（台账「夜间皮肤处理规则」同步更新） */
+  --pg: #271d0f;
+  --cbg: #3a2c1a;
+  --cb: #6e5836;
+  --tx: #f0e9dc;
+  --mut: #b0a896;
+  --sh: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --bub: #564427;
+  --btnp: #efe9dc;
+  --btnpt: #241b0e;
+}
+
+/* 白天备选皮肤（仅非 .dark 生效） */
+html[data-skin="lpure"] {
+  --pg: #ffffff;
+  --cbg: #ffffff;
+  --cb: #e3e3e1;
+  --tx: #141414;
+  --mut: #8f8f8b;
+  --sh: none;
+  --bub: #f0f0ee;
+}
+html[data-skin="lmist"] {
+  --pg: #eff3f2;
+  --cbg: #ffffff;
+  --cb: #dfe7e5;
+  --tx: #1d2422;
+  --mut: #87928f;
+  --sh: 0 1px 2px rgba(30, 60, 55, 0.05), 0 3px 10px rgba(30, 60, 55, 0.04);
+  --bub: #e2ebe8;
+}
+
+/* 夜间备选皮肤（仅 .dark 生效） */
+html.dark[data-skin="npure"] {
+  --pg: #0a0a0a;
+  --cbg: #1c1c1c;
+  --cb: #4d4d4d;
+  --tx: #f5f5f5;
+  --mut: #9a9a9a;
+  --sh: none;
+  --bub: #2e2e2e;
+  --btnp: #f5f5f5;
+  --btnpt: #111111;
+}
+html.dark[data-skin="ndeep"] {
+  --pg: #0c201b;
+  --cbg: #173229;
+  --cb: #3b6353;
+  --tx: #e8f0ec;
+  --mut: #8aa39a;
+  --sh: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --bub: #24453a;
+  --btnp: #ddebe3;
+  --btnpt: #0c1a14;
+}
+
+/* 字体气质（双层字体制度：--font-ui 随档位，--font-mono 恒定） */
+html[data-font-theme="term"] {
+  --font-ui: ui-monospace, "SF Mono", Menlo, monospace;
+}
+html[data-font-theme="round"] {
+  --font-ui: ui-rounded, "Yuanti SC", "PingFang SC", sans-serif;
+}
+html[data-font-theme="serif"] {
+  --font-ui: ui-serif, "New York", "Songti SC", "STSong", serif;
+}
+
+/* 卡片圆角档位（默认 12px 在 :root） */
+html[data-radius="8"] {
+  --rr: 8px;
+}
+html[data-radius="18"] {
+  --rr: 18px;
+}
+html[data-radius="22"] {
+  --rr: 22px;
 }
 
 /* ============================================================
@@ -92,7 +204,7 @@
   font-weight: 600;
   line-height: 1.3;
   margin: 1.25em 0 0.5em;
-  color: #0f172a;
+  color: var(--tx, #0f172a);
 }
 .md-body h1 {
   font-size: 1.5em;
@@ -132,8 +244,8 @@
 .md-body blockquote {
   margin: 0.75em 0;
   padding: 0.25em 0.875em;
-  border-left: 3px solid #cbd5e1;
-  color: #64748b;
+  border-left: 3px solid var(--cb, #cbd5e1);
+  color: var(--mut, #64748b);
 }
 .md-body table {
   border-collapse: collapse;
@@ -143,24 +255,24 @@
 }
 .md-body th,
 .md-body td {
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--cb, #cbd5e1);
   padding: 0.375em 0.625em;
   text-align: left;
 }
 .md-body th {
-  background: #f1f5f9;
+  background: var(--cbg, #f1f5f9);
   font-weight: 600;
 }
 /* 行内 code（代码块由 .hljs 主题着色，不得双层底色） */
 .md-body code:not(pre code) {
-  background: #e2e8f0;
+  background: var(--cb, #e2e8f0);
   border-radius: 4px;
   padding: 0.125em 0.375em;
   font-size: 0.875em;
 }
 .md-body hr {
   border: 0;
-  border-top: 1px solid #cbd5e1;
+  border-top: 1px solid var(--cb, #cbd5e1);
   margin: 1.25em 0;
 }
 .dark .md-body h1,
@@ -169,24 +281,24 @@
 .dark .md-body h4,
 .dark .md-body h5,
 .dark .md-body h6 {
-  color: #e2e8f0;
+  color: var(--tx);
 }
 .dark .md-body blockquote {
-  border-left-color: #475569;
-  color: #94a3b8;
+  border-left-color: var(--cb);
+  color: var(--mut);
 }
 .dark .md-body th,
 .dark .md-body td {
-  border-color: #475569;
+  border-color: var(--cb);
 }
 .dark .md-body th {
-  background: #1e293b;
+  background: var(--cb);
 }
 .dark .md-body code:not(pre code) {
-  background: #334155;
+  background: var(--cb);
 }
 .dark .md-body hr {
-  border-top-color: #475569;
+  border-top-color: var(--cb);
 }
 
 /* ============================================================
@@ -200,7 +312,8 @@
  * ============================================================ */
 .hljs {
   color: #1f2328;
-  background: #f6f8fa;
+  /* 2026-10-05：底色随主题卡底（原 github 灰白/深夜蓝是冷色补丁），语法色保留官方口径 */
+  background: #faf7f1;
 }
 .hljs-comment,
 .hljs-code,
@@ -258,7 +371,7 @@
 
 .dark .hljs {
   color: #e6edf3;
-  background: #0d1117;
+  background: transparent;
 }
 .dark .hljs-comment,
 .dark .hljs-code,

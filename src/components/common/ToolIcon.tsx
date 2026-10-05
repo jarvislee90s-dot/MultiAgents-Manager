@@ -47,7 +47,8 @@ function ClaudeIcon({ size }: { size: number }) {
   );
 }
 
-// Codex CLI — green terminal prompt
+// Codex — 白底黑终端提示符 + 绿下划线点缀（台账 2026-10-05：OpenAI 黑白单色系，
+// 唯一点缀绿 #10A37F；提示符为自绘，不仿官方花结规避侵权）。夜间反转深底白符
 function CodexIcon({ size }: { size: number }) {
   return (
     <svg
@@ -57,20 +58,30 @@ function CodexIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-codex-bg, #16A34A)" }} />
+      <rect
+        width="20"
+        height="20"
+        rx="5"
+        style={{
+          fill: "var(--tool-codex-bg, #ffffff)",
+          stroke: "var(--tool-codex-rim, #1a1a1a)",
+          strokeWidth: 1.3,
+        }}
+      />
       <path
         d="M5.5 12.5L9 9L5.5 5.5"
-        stroke="white"
+        style={{ stroke: "var(--tool-codex-fg, #111111)" }}
         strokeWidth="1.8"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path d="M11 13H14.5" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M11 13H14.5" stroke="#10A37F" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
 
-// OpenCode — orange angle brackets
+// OpenCode — 白底黑括号反形（台账 2026-10-05：终端灰度美学；夜间反转深底白符
+// + 亮描边）。原橙底退役，橙归 Claude 独占
 function OpenCodeIcon({ size }: { size: number }) {
   return (
     <svg
@@ -80,17 +91,26 @@ function OpenCodeIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect width="20" height="20" rx="5" style={{ fill: "var(--tool-opencode-bg, #EA580C)" }} />
+      <rect
+        width="20"
+        height="20"
+        rx="5"
+        style={{
+          fill: "var(--tool-opencode-bg, #ffffff)",
+          stroke: "var(--tool-opencode-rim, #2b2b28)",
+          strokeWidth: 1.3,
+        }}
+      />
       <path
         d="M7 6L4 10L7 14"
-        stroke="white"
+        style={{ stroke: "var(--tool-opencode-fg, #111111)" }}
         strokeWidth="1.8"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
         d="M13 6L16 10L13 14"
-        stroke="white"
+        style={{ stroke: "var(--tool-opencode-fg, #111111)" }}
         strokeWidth="1.8"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -171,9 +191,8 @@ function WorkBuddyIcon({ size }: { size: number }) {
   );
 }
 
-// ZCode — 官方图标几何重绘（P2-10 同款模式）：智谱品牌蓝紫渐变圆角方块 + 白色
-// 字母 Z 折线（ZCode 桌面 APP 图标为蓝紫底 "Z" 字标，本机无 icns 取样条件，
-// 按品牌色 #3B5BFD→#8A4FF5 重绘；配色与 kimi 天蓝/codex 紫均拉开色相距离）
+// ZCode — 纯黑底白 Z（台账 2026-10-05：用户指定「黑底白字」，蓝紫渐变退役；
+// 夜间深色卡上加亮描边防融化——rim 变量夜间为 #ECE9E2、白天透明）
 function ZCodeIcon({ size }: { size: number }) {
   return (
     <svg
@@ -183,14 +202,16 @@ function ZCodeIcon({ size }: { size: number }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <defs>
-        <linearGradient id="zc-g" x1="3" y1="2" x2="17" y2="18" gradientUnits="userSpaceOnUse">
-          <stop style={{ stopColor: "var(--tool-zcode-bg, #3B5BFD)" }} />
-          <stop offset="1" stopColor="#8A4FF5" />
-        </linearGradient>
-      </defs>
-      {/* 圆角方块底 */}
-      <rect width="20" height="20" rx="5" fill="url(#zc-g)" />
+      <rect
+        width="20"
+        height="20"
+        rx="5"
+        style={{
+          fill: "var(--tool-zcode-bg, #141413)",
+          stroke: "var(--tool-zcode-rim, transparent)",
+          strokeWidth: 1.4,
+        }}
+      />
       {/* 字母 Z 折线（横-斜-横一笔成型） */}
       <path
         d="M5.5 5.5h9L6.5 14.5h9"
@@ -203,15 +224,22 @@ function ZCodeIcon({ size }: { size: number }) {
   );
 }
 
-// dsh（DeepSeek harness）— 品牌深蓝圆角方块 + 白色字母 D（本机无图标取样条件，几何近似）
+// dsh（DeepSeek harness）— 品牌深蓝圆角方块 + 白色鲸鱼（台账 2026-10-05：
+// 鲸鱼为 DeepSeek 主导 logo 特征，字形由字母 D 演化——平直竖笔为 D 之竖、
+// 弧形身躯为 D 之碗，加尾鳍与眼点；纯自绘规避侵权）
 function DshIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <rect width="24" height="24" rx="5" style={{ fill: "var(--tool-dsh-bg, #4D6BFE)" }} />
+      <rect width="24" height="24" rx="6" style={{ fill: "var(--tool-dsh-bg, #4D6BFE)" }} />
       <path
-        d="M8 7h4.2c2.6 0 4.3 1.7 4.3 5s-1.7 5-4.3 5H8V7zm2.3 2v6h1.8c1.4 0 2.2-1 2.2-3s-.8-3-2.2-3h-1.8z"
+        d="M6.8 5.5h3.4c5 0 8.3 3 8.3 6.7 0 .6-.1 1.2-.3 1.7-1 3-4.3 5.1-8 5.1H6.8c-.7 0-1.3-.6-1.3-1.3V6.8c0-.7.6-1.3 1.3-1.3z"
         fill="#fff"
       />
+      <path
+        d="M17.9 8.7c1.6-.6 2.8-1.6 3.6-3.2.1 1.5-.3 2.7-1.1 3.6.8 1 1.2 2.1 1.1 3.6-.8-1.6-2-2.6-3.6-3.2z"
+        fill="#fff"
+      />
+      <circle cx="7.9" cy="11.5" r="1" style={{ fill: "var(--tool-dsh-bg, #4D6BFE)" }} />
     </svg>
   );
 }

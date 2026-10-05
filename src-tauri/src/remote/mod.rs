@@ -211,6 +211,9 @@ static SERVER_HANDLE: Lazy<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> 
 /// 共享状态单例：服务器任务与 tauri 命令共用同一份 pairing / 会话源 / 设备存储
 static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
     std::sync::Arc::new(server::RemoteState {
+        // 远程端外观配置读源（2026-10-05 UI 改版）：生产 = settings KV 单行 JSON
+        //（桌面外观配置器经 set_setting 命令写入）；未配置 → None → 端点回落默认值
+        ui_config_source: Box::new(|| crate::database::get_setting("remote_ui_config")),
         // P8 数据同源：直调唯一聚合口（R3 单飞护栏保护第三消费者），禁止复制聚合逻辑
         session_source: Box::new(crate::adapter::get_all_sessions),
         store: pairing::DeviceStore::global(),

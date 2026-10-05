@@ -58,11 +58,11 @@ function PlanBody({ plan }: { plan: { content: string; isFile: boolean } }) {
         data-testid="approve-plan"
         data-plan-file={plan.isFile ? "true" : "false"}
         data-collapsed={collapsed ? "true" : "false"}
-        className={`mt-2 rounded-lg border border-sky-500/30 bg-white/60 p-2 text-xs text-slate-800 dark:border-sky-400/30 dark:bg-slate-900/60 dark:text-slate-200 ${
+        className={`mt-2 rounded-lg border border-[var(--btnp)] bg-[var(--cbg)]/60 p-2 text-xs text-[var(--tx)] ${
           collapsed ? "max-h-24 overflow-hidden" : "max-h-64 overflow-y-auto"
         }`}
       >
-        <p className="mb-1 text-[11px] font-medium tracking-wide text-sky-700/80 uppercase dark:text-sky-400/80">
+        <p className="mb-1 text-[11px] font-medium tracking-wide text-[var(--tx)]/80 uppercase">
           {plan.isFile ? "计划文件" : "计划内容"}
         </p>
         {plan.isFile ? (
@@ -80,7 +80,7 @@ function PlanBody({ plan }: { plan: { content: string; isFile: boolean } }) {
           type="button"
           data-testid="approve-plan-toggle"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-[11px] font-medium text-sky-700/80 underline dark:text-sky-400/80"
+          className="mt-1 text-[11px] font-medium text-[var(--tx)]/80 underline"
         >
           {expanded ? "收起计划" : "展开全文"}
         </button>
@@ -227,7 +227,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
               data-testid="approve-plan-check"
               disabled={checking}
               onClick={handleCheck}
-              className="mt-2 rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+              className="mt-2 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
             >
               {checking ? "检查中…" : "检查终端对话框"}
             </button>
@@ -249,10 +249,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
             改为下方脚注的「未读到」明示 + 检查钮可再试。用户注入下一条消息后，
             消息尾部判据（`isPlanPending`）会让整张卡不再挂载 = 预期态彻底清除。 */}
         {!checkMissed && (
-          <p
-            data-testid="approve-plan-pending"
-            className="mt-1 text-xs text-sky-700/80 dark:text-sky-400/80"
-          >
+          <p data-testid="approve-plan-pending" className="mt-1 text-xs text-[var(--tx)]/80">
             终端正在等待这个计划的确认——请到终端对话框选择，或点下方按钮读取选项
           </p>
         )}
@@ -325,10 +322,7 @@ export default function ApproveCard({ session }: ApproveCardProps) {
       }
     >
       {options.dialog && (
-        <p
-          data-testid="approve-dialog-label"
-          className="mt-1 text-xs text-sky-700/80 dark:text-sky-400/80"
-        >
+        <p data-testid="approve-dialog-label" className="mt-1 text-xs text-[var(--tx)]/80">
           以下选项读自终端对话框，点按即代你按对应数字键
         </p>
       )}

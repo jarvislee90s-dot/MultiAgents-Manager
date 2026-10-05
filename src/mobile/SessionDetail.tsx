@@ -171,7 +171,7 @@ function MessageScrollArea({
           aria-label="跳到顶部"
           title="跳到顶部"
           onClick={onJumpTop}
-          className="absolute top-3 right-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+          className="absolute top-3 right-3 z-10 rounded-full border border-[var(--cb)] bg-[var(--cbg)] p-2 text-[var(--mut)] shadow-md hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
         >
           <ArrowUpToLine size={16} />
         </button>
@@ -183,7 +183,7 @@ function MessageScrollArea({
           aria-label="跳到最新消息"
           title="跳到最新消息"
           onClick={onJump}
-          className="absolute right-3 bottom-3 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+          className="absolute right-3 bottom-3 z-10 rounded-full border border-[var(--cb)] bg-[var(--cbg)] p-2 text-[var(--mut)] shadow-md hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
         >
           <ArrowDownToLine size={16} />
         </button>
@@ -584,7 +584,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 <button
                   type="button"
                   data-testid="file-link"
-                  className="inline text-left break-all text-sky-700 underline underline-offset-2 dark:text-sky-400"
+                  className="inline text-left break-all text-[var(--tx)] underline underline-offset-2"
                   onClick={() => openFile(p)}
                 >
                   {children}
@@ -616,7 +616,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             key={i}
             type="button"
             data-testid="file-link"
-            className="break-all text-sky-700 underline underline-offset-2 dark:text-sky-400"
+            className="break-all text-[var(--tx)] underline underline-offset-2"
             onClick={() => openFile(seg.value)}
           >
             {seg.value}
@@ -635,13 +635,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           return <div className="md-body text-sm">{renderMarkdown(m.content)}</div>;
         case "thinking":
           return (
-            <div className="text-xs break-words whitespace-pre-wrap text-slate-500 dark:text-slate-400">
+            <div className="text-xs break-words whitespace-pre-wrap text-[var(--mut)]">
               {renderLinkifiedText(m.content)}
             </div>
           );
         case "tool-result":
           return (
-            <pre className="overflow-x-auto rounded-lg bg-slate-100 p-2 text-xs break-words whitespace-pre-wrap text-slate-700 dark:bg-slate-900 dark:text-slate-300">
+            <pre className="overflow-x-auto rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 text-xs break-words whitespace-pre-wrap text-[var(--tx)]">
               {renderLinkifiedText(m.content)}
             </pre>
           );
@@ -653,9 +653,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           return (
             <div
               data-testid={`plan-${m.seq}`}
-              className="rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
+              className="rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 text-xs text-[var(--tx)]"
             >
-              <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
+              <p className="mb-1 text-[11px] font-medium tracking-wide text-[var(--mut)] uppercase">
                 计划
               </p>
               {/* 丁T5 修复（问题 11 的真实断点）：计划卡此前**漏挂** `.md-body` 排版层
@@ -692,7 +692,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               <div className="flex items-center gap-2">
                 <span
                   data-testid={`plan-file-name-${m.seq}`}
-                  className="min-w-0 flex-1 truncate font-mono text-slate-700 dark:text-slate-300"
+                  className="min-w-0 flex-1 truncate font-mono text-[var(--tx)]"
                   title={full}
                 >
                   {name}
@@ -715,13 +715,13 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           const planBody = m.toolArgs ? extractPlanBody(m.toolArgs) : null;
           return (
             <div className="space-y-1">
-              <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
+              <p className="text-xs font-medium text-[var(--tx)]">
                 {m.toolName ? `调用 ${m.toolName}` : "工具调用"}
               </p>
               {m.toolArgs && planBody === null && (
                 <pre
                   data-testid={`tool-args-${m.seq}`}
-                  className="overflow-x-auto rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                  className="overflow-x-auto rounded-lg bg-[var(--cbg)] p-2 text-xs text-[var(--tx)]"
                 >
                   {m.toolArgs}
                 </pre>
@@ -729,9 +729,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               {planBody !== null && (
                 <div
                   data-testid={`tool-args-${m.seq}`}
-                  className="rounded-lg bg-slate-100 p-2 text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                  className="rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 text-xs text-[var(--tx)]"
                 >
-                  <p className="mb-1 text-[11px] font-medium tracking-wide text-slate-400 uppercase dark:text-slate-500">
+                  <p className="mb-1 text-[11px] font-medium tracking-wide text-[var(--mut)] uppercase">
                     计划
                   </p>
                   {/* 丁T5 复评 F6-1：本支（**工具参数升格**——claude 的 ExitPlanMode 走这
@@ -1006,7 +1006,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       {isSummary && toggleableMessages.length > 0 && (
         <div
           data-testid="summary-banner"
-          className="mb-2 flex items-center gap-2 rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
+          className="mb-2 flex items-center gap-2 rounded-lg bg-[var(--btnp)]/10 px-3 py-2 text-xs text-[var(--tx)]"
         >
           <span>总结模式 · 已折叠 {collapsedCount} 条过程消息</span>
           <span className="ml-auto flex shrink-0 gap-1">
@@ -1015,7 +1015,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 type="button"
                 data-testid="expand-all"
                 onClick={expandAll}
-                className="rounded-full bg-sky-500/20 px-2 py-0.5 text-xs text-sky-700 dark:bg-sky-400/20 dark:text-sky-300"
+                className="rounded-full bg-[var(--btnp)]/20 px-2 py-0.5 text-xs text-[var(--tx)]"
               >
                 展开全部
               </button>
@@ -1025,7 +1025,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                 type="button"
                 data-testid="collapse-all"
                 onClick={collapseAll}
-                className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-xs text-[var(--mut)]"
               >
                 收起全部
               </button>
@@ -1034,7 +1034,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </div>
       )}
       {loading && messages === null && (
-        <p className="py-16 text-center text-sm text-slate-500">加载中…</p>
+        <p className="py-16 text-center text-sm text-[var(--mut)]">加载中…</p>
       )}
       {error && (
         <div className="py-16 text-center">
@@ -1045,20 +1045,20 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             type="button"
             data-testid="detail-retry"
             onClick={retry}
-            className="rounded-full bg-slate-200 px-4 py-1.5 text-sm text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+            className="rounded-full bg-[var(--cb)] px-4 py-1.5 text-sm text-[var(--tx)]"
           >
             重试
           </button>
         </div>
       )}
       {messages !== null && !error && messages.length === 0 && (
-        <p className="py-16 text-center text-sm text-slate-500">暂无消息</p>
+        <p className="py-16 text-center text-sm text-[var(--mut)]">暂无消息</p>
       )}
       {/* 书签跳转：自动加载中提示（M5 P3-c）与到顶未命中 miss 提示（M3+） */}
       {jumpLoading && (
         <p
           data-testid="bookmark-jump-loading"
-          className="mb-2 rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-300"
+          className="mb-2 rounded-lg bg-[var(--btnp)]/10 px-3 py-2 text-xs text-[var(--tx)]"
         >
           正在加载更早消息以定位书签…
         </p>
@@ -1086,7 +1086,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               }
               setLimit((l) => Math.min(l + PAGE_LIMIT, MAX_LIMIT));
             }}
-            className="rounded-full bg-slate-200 px-4 py-1.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+            className="rounded-full bg-[var(--cb)] px-4 py-1.5 text-xs text-[var(--tx)]"
           >
             {loading ? "加载中…" : "加载更早消息"}
           </button>
@@ -1114,15 +1114,15 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                   <span
                     data-testid={`msg-bookmark-${m.seq}`}
                     title={`书签：${msgBookmark.preview}`}
-                    className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full ring-2 ring-white dark:ring-slate-950"
+                    className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full ring-2 ring-[var(--pg)]"
                     style={{ backgroundColor: msgBookmark.color }}
                   />
                 )}
                 <div
                   className={
                     isUser
-                      ? "max-w-[85%] rounded-2xl rounded-br-sm bg-sky-500/10 px-3 py-2"
-                      : "w-full rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2 dark:bg-slate-900"
+                      ? "max-w-[85%] rounded-2xl rounded-br-sm border border-[var(--cb)] bg-[var(--bub)] px-3 py-2"
+                      : "w-full rounded-2xl rounded-bl-sm border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2"
                   }
                 >
                   {toggleable ? (
@@ -1132,7 +1132,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
                         data-testid={`msg-${m.seq}-toggle`}
                         aria-expanded={!collapsed}
                         onClick={() => toggleCollapsed(m)}
-                        className="-mx-1 flex w-[calc(100%+8px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left text-xs text-slate-500 hover:bg-slate-200/60 dark:text-slate-400 dark:hover:bg-slate-800"
+                        className="-mx-1 flex w-[calc(100%+8px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left text-xs text-[var(--mut)] hover:bg-[var(--cb)]/60 dark:hover:bg-[var(--btnp)]"
                       >
                         {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
                         <span className="truncate">{collapsedLabel(m)}</span>
@@ -1152,22 +1152,22 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   );
 
   return (
-    <div className="flex h-dvh flex-col bg-white text-slate-800 dark:bg-slate-950 dark:text-slate-200">
-      <header className="flex shrink-0 items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+    <div className="flex h-dvh flex-col bg-[var(--pg)] text-[var(--tx)]">
+      <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
         <button
           type="button"
           data-testid="detail-back"
           aria-label="返回看板"
           onClick={onBack}
-          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
         >
           <ArrowLeft size={18} />
         </button>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
+          <span className="block truncate text-sm font-semibold text-[var(--tx)]">
             {session.projectName}
           </span>
-          <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
+          <span className="block truncate text-xs text-[var(--mut)]">
             {TOOL_LABELS[session.agentType]}
             {session.title ? ` · ${session.title}` : ""}
           </span>
@@ -1189,8 +1189,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           onClick={togglePanel}
           className={`shrink-0 rounded-full p-1 ${
             panelOpen
-              ? "bg-slate-200 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
-              : "text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+              ? "bg-[var(--cb)] text-[var(--tx)]"
+              : "text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
           }`}
         >
           <PanelLeft size={16} />
@@ -1202,7 +1202,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           title="正文字号"
           value={String(fontScale)}
           onChange={(e) => setFontScale(Number(e.target.value))}
-          className="shrink-0 rounded-md border border-slate-200 bg-transparent px-1 py-0.5 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+          className="shrink-0 rounded-md border border-[var(--cb)] bg-transparent px-1 py-0.5 text-xs text-[var(--mut)]"
         >
           {FONT_SCALES.map((v) => (
             <option key={v} value={String(v)}>
@@ -1217,7 +1217,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           data-testid="detail-refresh"
           aria-label="刷新消息"
           onClick={retry}
-          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
         >
           <RotateCw size={15} />
         </button>
@@ -1377,7 +1377,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
 
       {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——列表状态由本组件持有） */}
       {preview?.mode === "fullscreen" && (
-        <div className="fixed inset-0 z-50 bg-white dark:bg-slate-950">
+        <div className="fixed inset-0 z-50 bg-[var(--cbg)]">
           <div
             data-testid="preview-shell"
             data-view={preview.view}

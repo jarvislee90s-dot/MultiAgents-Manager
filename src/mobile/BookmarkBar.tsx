@@ -47,7 +47,7 @@ export default function BookmarkBar({
   const usedColors = new Set(bookmarks.map((b) => b.color));
 
   return (
-    <div className="relative shrink-0 border-b border-slate-200 px-3 py-1.5 dark:border-slate-800">
+    <div className="relative shrink-0 border-b border-[var(--cb)] px-3 py-1.5">
       <div className="flex items-center gap-2">
         {/* 打标签入口 */}
         <button
@@ -60,8 +60,8 @@ export default function BookmarkBar({
           onClick={() => setPaletteOpen((v) => !v)}
           className={`flex shrink-0 items-center gap-0.5 rounded-full px-2 py-0.5 text-xs ${
             atLimit
-              ? "cursor-not-allowed text-slate-400 dark:text-slate-600"
-              : "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"
+              ? "cursor-not-allowed text-[var(--mut)]"
+              : "text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
           }`}
         >
           <Plus size={13} />
@@ -78,8 +78,8 @@ export default function BookmarkBar({
           onClick={() => setManaging((v) => !v)}
           className={`shrink-0 rounded-full p-1 text-xs ${
             managing
-              ? "bg-slate-200 text-slate-900 dark:bg-slate-800 dark:text-slate-100"
-              : "text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+              ? "bg-[var(--cb)] text-[var(--tx)]"
+              : "text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
           }`}
         >
           {managing ? "完成" : <Settings2 size={14} />}
@@ -137,8 +137,8 @@ export default function BookmarkBar({
             onClick={processToggle.onToggle}
             className={`flex shrink-0 items-center gap-0.5 rounded-full px-2 py-0.5 text-xs ${
               processToggle.allCollapsed
-                ? "text-slate-600 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"
-                : "bg-slate-200 text-slate-600 hover:bg-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                ? "text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
+                : "bg-[var(--cb)] text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--cb)]"
             }`}
           >
             {processToggle.allCollapsed ? <UnfoldVertical size={13} /> : <FoldVertical size={13} />}
@@ -153,7 +153,7 @@ export default function BookmarkBar({
           data-testid="bookmark-palette"
           role="dialog"
           aria-label="选择书签颜色"
-          className="absolute top-full left-3 z-10 mt-1 flex flex-wrap gap-1.5 rounded-lg border border-slate-300 bg-white p-2 shadow-lg dark:border-slate-700 dark:bg-slate-900"
+          className="absolute top-full left-3 z-10 mt-1 flex flex-wrap gap-1.5 rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 shadow-lg"
         >
           {BOOKMARK_COLORS.map((c) => {
             const used = usedColors.has(c);

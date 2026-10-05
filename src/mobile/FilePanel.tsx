@@ -135,12 +135,10 @@ export default function FilePanel({
     <section
       data-testid="file-panel"
       aria-label="文件面板"
-      className="flex h-full min-h-0 flex-col bg-white dark:bg-slate-950"
+      className="flex h-full min-h-0 flex-col bg-[var(--cbg)]"
     >
-      <header className="flex shrink-0 items-center gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
-        <span className="shrink-0 text-sm font-medium text-slate-800 dark:text-slate-200">
-          文件
-        </span>
+      <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
+        <span className="shrink-0 text-sm font-medium text-[var(--tx)]">文件</span>
         {/* 类型过滤 chips（用户裁决 5） */}
         <span role="group" aria-label="文件类型过滤" className="flex items-center gap-1">
           {chips.map((c) => (
@@ -152,8 +150,8 @@ export default function FilePanel({
               onClick={() => setKind(c.key)}
               className={`rounded-full px-2 py-0.5 text-xs ${
                 kind === c.key
-                  ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900"
-                  : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                  ? "bg-[var(--btnp)] text-[var(--btnpt)]"
+                  : "bg-[var(--cb)] text-[var(--mut)]"
               }`}
             >
               {c.label}
@@ -166,19 +164,19 @@ export default function FilePanel({
           data-testid="panel-close"
           aria-label="关闭文件面板"
           onClick={onClose}
-          className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
         >
           <X size={16} />
         </button>
       </header>
 
       {/* 档位卡片（用户裁决 3）：三档常显、当前高亮 */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
+      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cb)] px-3 py-2">
         {/* 单位注释（2026-09-16 用户裁决）：200/500/1000 指**消息条数** */}
-        <span className="text-xs text-slate-500 dark:text-slate-400">追溯范围</span>
+        <span className="text-xs text-[var(--mut)]">追溯范围</span>
         <span
           data-testid="file-scope-hint"
-          className="text-[10px] text-slate-400 dark:text-slate-500"
+          className="text-[10px] text-[var(--mut)]"
           title="按最近的消息条数统计：user / assistant / 思考 / 工具调用 / 工具结果 各算 1 条"
         >
           （消息条数）
@@ -192,15 +190,15 @@ export default function FilePanel({
             onClick={() => onScopeChange(s)}
             className={`rounded-full px-2 py-0.5 text-xs ${
               scope === s
-                ? "bg-sky-500/20 text-sky-700 dark:text-sky-300"
-                : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                ? "bg-[var(--btnp)]/20 text-[var(--tx)]"
+                : "bg-[var(--cb)] text-[var(--mut)]"
             }`}
           >
             {s}
           </button>
         ))}
         {/* 来源筛选（M5 决策 10 / 线稿三池）：全部来源 / 我上传的 / 工具读取 / 工具读写 */}
-        <span className="text-slate-300 dark:text-slate-600">|</span>
+        <span className="text-[var(--mut)]">|</span>
         <span role="group" aria-label="文件来源过滤" className="flex items-center gap-1">
           {originChips.map((c) => (
             <button
@@ -211,8 +209,8 @@ export default function FilePanel({
               onClick={() => setOrigin(c.key)}
               className={`rounded-full px-2 py-0.5 text-xs ${
                 origin === c.key
-                  ? "bg-violet-600 text-white dark:bg-violet-400 dark:text-slate-900"
-                  : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                  ? "bg-violet-600 text-white dark:bg-violet-400"
+                  : "bg-[var(--cb)] text-[var(--mut)]"
               }`}
             >
               {c.label}
@@ -235,17 +233,17 @@ export default function FilePanel({
             placeholder="按文件名搜索"
             data-testid="file-search-input"
             aria-label="按文件名搜索"
-            className="w-28 rounded-l-lg border border-r-0 border-slate-300 bg-white px-2 py-1 text-xs outline-none focus:border-slate-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+            className="w-28 rounded-l-lg border border-r-0 border-[var(--cb)] bg-[var(--cbg)] px-2 py-1 text-xs outline-none focus:border-[var(--cb)]"
           />
           <button
             type="submit"
             data-testid="file-search-run"
-            className="rounded-r-lg border border-slate-300 bg-slate-100 px-2 py-1 text-xs text-slate-600 hover:bg-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+            className="rounded-r-lg border border-[var(--cb)] bg-[var(--cbg)] px-2 py-1 text-xs text-[var(--mut)] hover:bg-[var(--cb)]"
           >
             搜索
           </button>
         </form>
-        {loading && <span className="text-xs text-slate-400">加载中…</span>}
+        {loading && <span className="text-xs text-[var(--mut)]">加载中…</span>}
       </div>
 
       <div
@@ -254,7 +252,7 @@ export default function FilePanel({
         className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
       >
         {visible.length === 0 && !loading && (
-          <p data-testid="panel-empty" className="py-12 text-center text-sm text-slate-500">
+          <p data-testid="panel-empty" className="py-12 text-center text-sm text-[var(--mut)]">
             {activeSearch || origin !== "all" ? "无匹配文件" : "该范围内未发现文件"}
           </p>
         )}
@@ -263,17 +261,15 @@ export default function FilePanel({
             <li
               key={`${e.path}-${i}`}
               data-testid={`file-row-${i}`}
-              className="rounded-lg px-2 py-1.5 hover:bg-slate-100 dark:hover:bg-slate-900"
+              className="rounded-lg px-2 py-1.5 hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
             >
               {/* 主行 = 末段文件名（加粗，即超链接）；次行 = 目录 + 时间 */}
               <button
                 type="button"
                 data-testid={`file-row-${i}-open`}
                 onClick={() => onOpenFile(e.path)}
-                className={`block w-full truncate text-left text-sm font-medium hover:underline ${
-                  e.modified
-                    ? "text-sky-700 dark:text-sky-400"
-                    : "text-slate-700 dark:text-slate-300"
+                className={`block w-full truncate text-left text-sm hover:underline ${
+                  e.modified ? "font-semibold text-[var(--tx)]" : "font-medium text-[var(--mut)]"
                 }`}
               >
                 {fileKindOf(e.path) === "image" ? (
@@ -283,12 +279,12 @@ export default function FilePanel({
                 )}
                 {fileBaseName(e.path)}
               </button>
-              <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <div className="flex items-center gap-2 text-xs text-[var(--mut)]">
                 {/* 来源徽标（M5 线稿 .from pill）：undefined（旧载荷）不渲染 */}
                 {e.origin && (
                   <span
                     data-testid={`file-row-${i}-origin`}
-                    className="flex-none rounded-full border border-slate-200 px-1.5 py-px text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400"
+                    className="flex-none rounded-full border border-[var(--cb)] px-1.5 py-px text-[10px] text-[var(--mut)]"
                   >
                     {originLabel[e.origin] ?? e.origin}
                   </span>
@@ -304,7 +300,7 @@ export default function FilePanel({
                         p === fileDirPrefix(e.path) ? null : fileDirPrefix(e.path)
                       )
                     }
-                    className="min-w-0 flex-1 truncate text-left hover:text-slate-700 hover:underline dark:hover:text-slate-200"
+                    className="min-w-0 flex-1 truncate text-left hover:text-[var(--tx)] hover:underline dark:hover:text-[var(--mut)]"
                   >
                     {fileDirPrefix(e.path)}
                   </button>
@@ -327,17 +323,15 @@ export default function FilePanel({
             data-testid="path-popover"
             role="dialog"
             aria-label="完整路径"
-            className="sticky bottom-0 mt-2 flex items-start gap-2 rounded-lg border border-slate-300 bg-white p-2 shadow-lg dark:border-slate-700 dark:bg-slate-900"
+            className="sticky bottom-0 mt-2 flex items-start gap-2 rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 shadow-lg"
           >
-            <code className="min-w-0 flex-1 text-xs break-all text-slate-700 dark:text-slate-200">
-              {pathPopover}
-            </code>
+            <code className="min-w-0 flex-1 text-xs break-all text-[var(--tx)]">{pathPopover}</code>
             <button
               type="button"
               data-testid="path-popover-close"
               aria-label="关闭路径浮窗"
               onClick={() => setPathPopover(null)}
-              className="shrink-0 rounded-full p-0.5 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="shrink-0 rounded-full p-0.5 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
             >
               <X size={14} />
             </button>
@@ -355,7 +349,7 @@ export default function FilePanel({
         {/* 可预览说明（M5 P2-a：类型与上限前置告知，配合 403 原因细分排障） */}
         <p
           data-testid="panel-preview-help"
-          className="mt-3 border-t border-slate-100 pt-2 text-[10px] leading-relaxed text-slate-400 dark:border-slate-800 dark:text-slate-500"
+          className="mt-3 border-t border-[var(--cb)] pt-2 text-[10px] leading-relaxed text-[var(--mut)]"
         >
           可预览：文本 / 代码 ≤500KB（md/html 支持渲染切换），图片 ≤5MB
           （png/jpg/jpeg/gif/webp/svg/bmp）；敏感目录不可预览，其余原因见报错提示。

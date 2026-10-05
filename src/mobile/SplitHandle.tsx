@@ -145,8 +145,8 @@ export default function SplitHandle({
       className={
         (className ? className + " " : "") +
         (orientation === "horizontal"
-          ? "w-1.5 shrink-0 cursor-col-resize bg-slate-200 hover:bg-sky-400/60 dark:bg-slate-800 dark:hover:bg-sky-500/60"
-          : "h-1.5 shrink-0 cursor-row-resize bg-slate-200 hover:bg-sky-400/60 dark:bg-slate-800 dark:hover:bg-sky-500/60")
+          ? "w-1.5 shrink-0 cursor-col-resize bg-[var(--cb)] hover:bg-[var(--btnp)] dark:hover:bg-[var(--btnp)]/60"
+          : "h-1.5 shrink-0 cursor-row-resize bg-[var(--cb)] hover:bg-[var(--btnp)] dark:hover:bg-[var(--btnp)]/60")
       }
     />
   );

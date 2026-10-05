@@ -8,17 +8,15 @@ import {
   hideSession,
   type HostPayload,
 } from "./api";
-import { getInitialTheme, toggleTheme, type Theme } from "./theme";
+import { currentAccent, getInitialTheme, toggleTheme, type Theme } from "./theme";
 import { getSoundEnabled, playCompletionChime, toggleSoundEnabled } from "./sound";
 import {
-  CHIP_LIGHT_TEXT_FACTOR,
   STATUS_COLOR_KIND,
-  STATUS_DOT_COLOR,
+  STATUS_LABELS,
   TOOL_BRAND_COLORS,
   TOOL_BRAND_COLORS_DARK,
   TOOL_LABELS,
   applyTransition,
-  darkenHex,
   filterByAgent,
   filterEnabledTools,
   formatRelativeTime,
@@ -31,6 +29,14 @@ import { ToolIcon } from "@/components/common/ToolIcon";
 import type { AgentType, Session, SessionsResponse, TransitionEvent } from "@/types/session";
 
 const POLL_MS = 3000;
+
+/** 状态徽标淡底彩字（参考稿 01，2026-10-05 改版）：三色语义与 STATUS_COLOR_KIND
+ *  同源（红=等待操作 / 黄=运行·思考·压缩 / 绿=完成·空闲），裸圆点退役 */
+const BADGE_CLASS: Record<"red" | "yellow" | "green", string> = {
+  red: "bg-[#FEE9E5] text-[#B3261E]",
+  yellow: "bg-[#FBF3D9] text-[#8A6D00]",
+  green: "bg-[#E3F2E7] text-[#1E7B34]",
+};
 /** SSE 模式低频对账周期（评审修复 R1）：transition 只更新已存在卡，新会话成员资格
  *  靠本周期一次全量拉取兜底。30s = 成员资格变化的最大可见延迟，远低于实时性要求，
  *  又不会对服务端构成轮询压力 */
@@ -350,6 +356,13 @@ export default function Board({
   }, []);
 
   const sessions = data ? sortSessions(filterByAgent(data.sessions, filter)) : [];
+  // 品牌点缀方式（外观配置器，spec §5）：edge/top/tint/none；无配置 → edge
+  const accent = currentAccent();
+  // chips 选中/未选中的两态类（全部钮与工具钮共用同一套口径）
+  const chipCls = (on: boolean) =>
+    on
+      ? "shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1 text-xs font-medium text-[var(--btnpt)]"
+      : "shrink-0 rounded-full border border-[var(--cb)] bg-[var(--cbg)] px-3 py-1 text-xs text-[var(--mut)]";
   // 过滤后无卡但总量不为 0 时，提示归因于过滤条件而非"真的没会话"
   const filteredOut = data !== null && data.totalCount > 0 && sessions.length === 0;
 
@@ -398,14 +411,14 @@ export default function Board({
   }, [chipsSignature]);
 
   return (
-    <div className="min-h-screen bg-white px-4 py-4 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+    <div className="min-h-screen bg-[var(--pg)] px-4 py-4 [font-family:var(--font-ui)] text-[var(--tx)]">
       {/* 品牌行（P8a+P8b）：MAM + 版本号 + 本机名（右侧，双机双子域辨识）；
           host 未拉到时整行隐藏（静默降级，见上方 state 注释）。
           内层不再加 px-4（M3 Task 2 顺手修）：容器已有 px-4，双层内边距导致品牌行偏右 */}
       {host && (
         <header className="flex items-center gap-2 pt-4 pb-2">
           <span className="text-lg font-bold">MAM</span>
-          <span className="text-xs text-slate-500 dark:text-slate-400">v{host.version}</span>
+          <span className="font-mono text-xs text-[var(--mut)]">v{host.version}</span>
           <span className="ml-auto text-sm">{host.name}</span>
         </header>
       )}
@@ -413,17 +426,17 @@ export default function Board({
           图标 + 可达名描述「点下去切到什么」，aria-label 供测试与无障碍精确定位。
           会话计数在窄屏会让位（主题/音效两个按钮优先）——计数是信息、按钮是操作 */}
       <header className="mb-3 flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">会话看板</h1>
+        <h1 className="text-lg font-semibold text-[var(--tx)]">会话看板</h1>
         <span className="flex items-center gap-2">
           <button
             type="button"
             onClick={onOpenHistory}
-            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+            className="rounded-full border border-[var(--cb)] bg-[var(--cbg)] px-2.5 py-1 text-xs text-[var(--mut)]"
             aria-label="历史会话"
           >
-            🕘 历史
+            历史
           </button>
-          <span className="hidden text-xs text-slate-500 sm:inline">
+          <span className="hidden text-xs text-[var(--mut)] sm:inline">
             {data ? `${data.totalCount} 个会话` : "加载中…"}
           </span>
           <button
@@ -433,17 +446,17 @@ export default function Board({
             aria-label={soundOn ? "关闭完成提示音" : "开启完成提示音"}
             aria-pressed={soundOn}
             title={soundOn ? "完成提示音：开" : "完成提示音：关"}
-            className="rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+            className="rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-1.5 text-[var(--mut)]"
           >
-            {soundOn ? <Volume2 size={16} /> : <VolumeX size={16} />}
+            {soundOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
           </button>
           <button
             type="button"
             onClick={() => setTheme(toggleTheme())}
             aria-label={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
-            className="rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-800"
+            className="rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-1.5 text-[var(--mut)]"
           >
-            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
           </button>
         </span>
       </header>
@@ -463,7 +476,7 @@ export default function Board({
           {banners.map((b) => (
             <li
               key={b.key}
-              className="truncate rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
+              className="truncate rounded-lg border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-xs text-[var(--mut)]"
             >
               {b.text}
             </li>
@@ -491,58 +504,27 @@ export default function Board({
             type="button"
             aria-pressed={filter === "all"}
             onClick={() => setFilter("all")}
-            className={
-              filter === "all"
-                ? "shrink-0 rounded-full bg-slate-800 px-3 py-1 text-xs font-medium text-white dark:bg-slate-100 dark:text-slate-900"
-                : "shrink-0 rounded-full bg-slate-200 px-3 py-1 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400"
-            }
+            className={chipCls(filter === "all")}
           >
             全部
           </button>
-          {sortedCardTools.map((tool) => {
-            // 品牌色 chip：选中态 = 品牌色实底 + 白字；未选中态 = 品牌色 12% 透明度
-            // 淡化底（8 位 hex 追加 1F alpha）+ 品牌色字。
-            // P8f 浅色态修正：品牌原色当字在浅底上仅 1.96–3.84（不足 WCAG AA 4.5），
-            // 故浅色态文字色压暗（darkenHex 系数 0.6 → 4.93–8.00 全达标）。
-            // Bug 4（M3 验收）：暗色态原样用原色实测 1.08–5.41（kimi/claude/zcode/
-            // openclaw/dsh 融底），文字色改查暗色表 TOOL_BRAND_COLORS_DARK；选中态
-            // chip 在暗色下加白色轮廓——kimi 原色 #0B0E1A 作选中实底与深色卡底
-            // #0f172a 几乎同色（1.08），八色统一轮廓解决深底融边
-            const brand = TOOL_BRAND_COLORS[tool];
-            const selected = filter === tool;
-            const chipTextColor =
-              theme === "dark"
-                ? TOOL_BRAND_COLORS_DARK[tool]
-                : darkenHex(brand, CHIP_LIGHT_TEXT_FACTOR);
-            return (
-              <button
-                key={tool}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => setFilter(tool)}
-                className="shrink-0 rounded-full px-3 py-1 text-xs"
-                style={
-                  selected
-                    ? {
-                        backgroundColor: brand,
-                        color: "#ffffff",
-                        ...(theme === "dark"
-                          ? { boxShadow: "0 0 0 1px rgba(255,255,255,0.35)" }
-                          : {}),
-                      }
-                    : { backgroundColor: `${brand}1F`, color: chipTextColor }
-                }
-              >
-                {TOOL_LABELS[tool]}
-              </button>
-            );
-          })}
+          {sortedCardTools.map((tool) => (
+            <button
+              key={tool}
+              type="button"
+              aria-pressed={filter === tool}
+              onClick={() => setFilter(tool)}
+              className={chipCls(filter === tool)}
+            >
+              {TOOL_LABELS[tool]}
+            </button>
+          ))}
         </div>
         {chipsOverflow && (
           <button
             type="button"
             onClick={() => setChipsExpanded((v) => !v)}
-            className="shrink-0 rounded-full bg-slate-200 px-3 py-1 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+            className="shrink-0 rounded-full border border-[var(--cb)] bg-[var(--cbg)] px-3 py-1 text-xs text-[var(--mut)]"
           >
             {chipsExpanded ? "收起" : "展开"}
           </button>
@@ -550,68 +532,96 @@ export default function Board({
       </div>
 
       {sessions.length === 0 ? (
-        <p className="py-16 text-center text-sm text-slate-500">
+        <p className="py-16 text-center text-sm text-[var(--mut)]">
           {filteredOut ? "该工具暂无会话" : "暂无会话"}
         </p>
       ) : (
-        <ul className="space-y-2">
-          {sessions.map((s) => (
-            <li
-              key={`${s.agentType}-${s.id}`}
-              onClick={onOpenSession ? () => onOpenSession(s) : undefined}
-              className={`rounded-xl border border-slate-200 bg-slate-100 p-3 dark:border-white/15 dark:bg-slate-900 ${
-                onOpenSession ? "cursor-pointer" : ""
-              }`}
-            >
-              {/* 主行（P8c 定稿）：工具图标+工具名+项目名 … 相对时长+状态点（右端）。
-                  相对时长保留在主行右端（状态点左边）：时间/状态属卡片级元数据，
-                  一眼可读，且沿用旧版"时长在右"的视觉惯性 */}
-              <div className="flex items-center gap-2">
-                {/* 桌面组件但零 Tauri 依赖，移动 bundle 可直接 import（控制者裁决） */}
-                <ToolIcon toolId={s.agentType} size={16} className="shrink-0" />
-                <span className="shrink-0 text-sm font-medium text-slate-900 dark:text-slate-100">
-                  {TOOL_LABELS[s.agentType]}
-                </span>
-                <span className="truncate text-sm text-slate-600 dark:text-slate-400">
-                  {s.projectName}
-                </span>
-                <span className="ml-auto shrink-0 text-xs text-slate-600 dark:text-slate-500">
-                  {formatRelativeTime(s.lastActivityAt, now)}
-                </span>
-                {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
+        <ul className="space-y-2.5">
+          {sessions.map((s) => {
+            const edge =
+              theme === "dark"
+                ? TOOL_BRAND_COLORS_DARK[s.agentType]
+                : TOOL_BRAND_COLORS[s.agentType];
+            return (
+              <li
+                key={`${s.agentType}-${s.id}`}
+                onClick={onOpenSession ? () => onOpenSession(s) : undefined}
+                className={`relative overflow-hidden rounded-[var(--rr)] border bg-[var(--cbg)] p-3 ${
+                  accent === "edge" ? "pl-4" : ""
+                } ${onOpenSession ? "cursor-pointer" : ""}`}
+                style={{
+                  borderColor:
+                    accent === "tint" ? `color-mix(in srgb, ${edge} 28%, var(--cb))` : "var(--cb)",
+                  background:
+                    accent === "tint" ? `color-mix(in srgb, ${edge} 7%, var(--cbg))` : "var(--cbg)",
+                  boxShadow: "var(--sh)",
+                }}
+              >
+                {/* 品牌点缀（外观配置器四式，spec §5）：左彩檐（默认）/ 顶部细线 /
+                  淡底渲染（上两行 style）/ 无檐。识别色查台账两表（夜间黑系自动
+                  切换为提亮灰阶，见台账「夜间皮肤处理规则」） */}
+                {accent === "edge" && (
+                  <span
+                    aria-hidden
+                    className="absolute inset-y-0 left-0 w-1"
+                    style={{ background: edge }}
+                  />
+                )}
+                {accent === "top" && (
+                  <span
+                    aria-hidden
+                    className="absolute inset-x-0 top-0 h-[2.5px]"
+                    style={{ background: edge }}
+                  />
+                )}
+                {/* 主行（P8c 定稿）：工具图标+工具名+项目名 … 相对时长（mono）+ 关闭/归档开关。
+                  状态从行尾裸圆点升级为标题行下的「点+文字」淡底徽标 */}
+                <div className="flex items-center gap-2">
+                  {/* 桌面组件但零 Tauri 依赖，移动 bundle 可直接 import（控制者裁决） */}
+                  <ToolIcon toolId={s.agentType} size={18} className="shrink-0" />
+                  <span className="shrink-0 text-sm font-semibold">{TOOL_LABELS[s.agentType]}</span>
+                  <span className="truncate text-xs text-[var(--mut)]">{s.projectName}</span>
+                  <span className="ml-auto shrink-0 font-mono text-[11px] text-[var(--mut)]">
+                    {formatRelativeTime(s.lastActivityAt, now)}
+                  </span>
+                  {/* 关闭/归档开关（体验批二，状态点左侧）：CLI=关闭终端（硬杀进历史）；
                     APP=软归档（等同桌面端叉掉：任意状态可归档、不自动回归，可从
                     历史页移回）。stopPropagation 防触发卡片点击进详情 */}
-                <button
-                  type="button"
-                  data-testid={`card-close-${s.id}`}
-                  aria-label={s.form === "cli" ? "关闭终端" : "归档会话"}
-                  title={s.form === "cli" ? "关闭终端" : "归档会话"}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleCardClose(s);
-                  }}
-                  className="shrink-0 rounded-full p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-                >
-                  {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
-                </button>
-                {/* 三色圆点：与桌面 StatusLight 同语义（waiting 附加呼吸动画） */}
+                  <button
+                    type="button"
+                    data-testid={`card-close-${s.id}`}
+                    aria-label={s.form === "cli" ? "关闭终端" : "归档会话"}
+                    title={s.form === "cli" ? "关闭终端" : "归档会话"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCardClose(s);
+                    }}
+                    className="shrink-0 rounded-full p-1 text-[var(--mut)] transition-opacity hover:opacity-70"
+                  >
+                    {s.form === "cli" ? <Power size={13} /> : <Archive size={13} />}
+                  </button>
+                </div>
+                {/* 副行（P8c 定稿）：标题+最新消息预览（现有数据重新排布，无新 API） */}
+                <p className="mt-1 truncate text-sm font-semibold">{s.title ?? "（无标题）"}</p>
+                {s.lastMessage && (
+                  <p className="mt-0.5 truncate text-xs text-[var(--mut)]">{s.lastMessage}</p>
+                )}
                 <span
-                  className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT_COLOR[s.status]} ${
-                    s.status === "waiting" ? "animate-pulse" : ""
+                  className={`mt-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                    BADGE_CLASS[STATUS_COLOR_KIND[s.status]]
                   }`}
-                />
-              </div>
-              {/* 副行（P8c 定稿）：标题+最新消息预览（现有数据重新排布，无新 API） */}
-              <p className="mt-1 truncate text-sm text-slate-700 dark:text-slate-300">
-                {s.title ?? "（无标题）"}
-              </p>
-              {s.lastMessage && (
-                <p className="mt-0.5 truncate text-xs text-slate-600 dark:text-slate-500">
-                  {s.lastMessage}
-                </p>
-              )}
-            </li>
-          ))}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full bg-current ${
+                      s.status === "waiting" ? "animate-pulse" : ""
+                    }`}
+                  />
+                  {STATUS_LABELS[s.status]}
+                  {s.unread ? " · 未读" : ""}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

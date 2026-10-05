@@ -44,6 +44,92 @@ export function applyInitialTheme(theme: Theme = getInitialTheme()): void {
   document.documentElement.classList.toggle("dark", theme === "dark");
 }
 
+// ============================================================
+// 远程端外观配置（2026-10-05 UI 改版，spec §5/§6.2）：桌面外观配置器保存后经
+// /m/api/v1/ui-config 下发；本模块把它应用到 documentElement 的 data 属性
+// （mobile.css 六皮肤/字体/圆角表按属性切换），并维护 localStorage 镜像
+// （mobile.html 防闪脚本首帧前读取同款值——服务器/镜像/默认三级回退）。
+// 双层字体制度：这里只切 --font-ui 档位；--font-mono 恒定不随档位（见台账）
+// ============================================================
+
+export interface UiConfig {
+  /** 白天皮肤（lpaper | lpure | lmist） */
+  daySkin: string;
+  /** 夜间皮肤（npaper | npure | ndeep） */
+  nightSkin: string;
+  /** 字体气质（std | term | round | serif） */
+  font: string;
+  /** 卡片圆角档位（8 | 12 | 18 | 22） */
+  radius: number;
+  /** 品牌点缀（edge | top | tint | none） */
+  accent: string;
+}
+
+const UI_KEY = "mam-ui-config";
+
+// 当前生效配置（null = 无配置 → data 属性缺省 = mobile.css 默认纸感对/标准/12px）
+let activeUiConfig: UiConfig | null = null;
+
+/** 按当前日夜模式把配置写到 documentElement 的 data 属性。日夜切换（toggleTheme）
+ *  后必须重跑——白天/夜间用的是配置里的两张不同皮肤表 */
+function applyUiAttrs(dark: boolean): void {
+  const cfg = activeUiConfig;
+  if (!cfg) return;
+  const el = document.documentElement;
+  el.dataset.skin = dark ? cfg.nightSkin : cfg.daySkin;
+  el.dataset.fontTheme = cfg.font;
+  el.dataset.radius = String(cfg.radius);
+}
+
+/** 读取 localStorage 镜像（防闪脚本同 key 严格一致）；解析失败/结构非法 → null。
+ *  Partial 校验：daySkin/nightSkin 缺失即视为无效（镜像不完整宁用默认，不猜） */
+function readSavedUiConfig(): UiConfig | null {
+  try {
+    const raw = localStorage.getItem(UI_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<UiConfig>;
+    if (typeof v.daySkin !== "string" || typeof v.nightSkin !== "string") return null;
+    return {
+      daySkin: v.daySkin,
+      nightSkin: v.nightSkin,
+      font: typeof v.font === "string" ? v.font : "std",
+      radius: typeof v.radius === "number" ? v.radius : 12,
+      accent: typeof v.accent === "string" ? v.accent : "edge",
+    };
+  } catch {
+    return null; // 隐私模式/坏 JSON：与主题同口径，按「无镜像」处理
+  }
+}
+
+/** 应用配置（服务器值或镜像）：写镜像 + 记 active + 按当前模式设属性。幂等。
+ *  cfg=null（服务器 403/失败回退口径）：清 active、保留现状属性——不闪变不假清 */
+export function applyUiConfig(cfg: UiConfig | null): void {
+  if (!cfg) {
+    activeUiConfig = null;
+    return;
+  }
+  activeUiConfig = cfg;
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify(cfg));
+  } catch {
+    // 隐私模式/配额：持久化放弃，本会话仍生效（与主题 toggle 同口径）
+  }
+  applyUiAttrs(document.documentElement.classList.contains("dark"));
+}
+
+/** 初始应用：mobile.html 防闪脚本已按镜像先行（首帧前）；此处为权威应用点
+ *  （与 applyInitialTheme 同刻执行），随后 main 流程用服务器值覆写 */
+export function applyInitialUiConfig(): void {
+  const saved = readSavedUiConfig();
+  if (saved) applyUiConfig(saved);
+}
+
+/** 品牌点缀方式（Board 消费）：edge=左彩檐 / top=顶部细线 / tint=淡底渲染 /
+ *  none=无檐。无配置 → edge（默认口径） */
+export function currentAccent(): string {
+  return activeUiConfig?.accent ?? "edge";
+}
+
 /** 翻转主题：写 localStorage 持久化 + 切换 documentElement 的 dark 类 + 返回新主题 */
 export function toggleTheme(): Theme {
   // next 从**当前生效态**推导（终审 Important 3）：旧实现从 getInitialTheme() 推导，
@@ -57,5 +143,7 @@ export function toggleTheme(): Theme {
     // localStorage 回读——本次会话内仍可继续往返切换，仅刷新后回落系统偏好
   }
   document.documentElement.classList.toggle("dark", next === "dark");
+  // 日夜切换后重设皮肤属性：白天/夜间消费配置里的两张不同皮肤表
+  applyUiAttrs(next === "dark");
   return next;
 }
