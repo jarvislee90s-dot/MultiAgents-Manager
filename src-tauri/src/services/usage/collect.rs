@@ -1357,10 +1357,10 @@ mod tests {
     ///   文件头 → BEGIN 之前 **∪** END 之后 → 文件尾；去行内空白、剥**整行** `//` 注释）。
     ///   **实测（24 个文件逐一对账）**：20 个有测试模块的文件 = **生产半边**（标记包住测试模块）、
     ///   4 个无测试模块的文件 = **整文件**（两行标记相邻于末尾 ⇒ 排除区为空）；
-    ///   判据面合计 = **6804 行 / 146908 字符**（第 4 轮口径曾报 191434 字符：那 8 个「整文件扫描」
+    ///   判据面合计 = **6866 行 / 148387 字符**（第 4 轮口径曾报 191434 字符：那 8 个「整文件扫描」
     ///   的文件把测试代码也算进去了。本轮的"面"更小但**更准**——20 个文件 = 生产半边、4 个无测试
     ///   模块的文件 = 整文件，且 **END 之后追加的生产代码也在面内**。数字同步写进本批 commit
-    ///   message 与 `FINAL-FIX-report.md`）。
+    ///   message 与 `FINAL-FIX-report.md`，并由 `scan_face_size_is_pinned` **逐字钉住**）。
     /// * **枚举口径**（B-1）：`usage_source_scan_covers_every_file_on_disk` 递归枚举该目录下的
     ///   `.rs`（**大小写不敏感** —— 本机 `rustc` 能从 `foo.RS` 编译 `mod foo;`）。**不在枚举面内**
     ///   的承载形态：`include!` 的 `.inc`、`include_str!` 引入的外部文本，以及 **`#[path = "…"]`
@@ -1374,7 +1374,9 @@ mod tests {
     ///   ②**行尾注释**里写针（只剥**整行** `//` 注释；`/* */` 块注释与行尾注释一律**不剥**）
     ///   或用字符串拼接绕过针；③把键计算挪进**排除区内的测试代码**（判据面**故意**含
     ///   `#[cfg(test)]` **非模块项**，但被标记包住的测试模块内部不在面内）；
-    ///   ④**蓄意改写锁面标记**——把 BEGIN 上移 / 把 END 下移（排除区扩大、盖住生产代码）：
+    ///   ④**「同名加参」**（P1-1：把 `day_key_of_host(ts_ms)` 改成 `day_key_of_host(ts_ms, tz)`）
+    ///   ——第 7 轮已修：**元数断言 + 签名逐字钉**（见 `arity_sites` 与签名断言）；
+    ///   ⑤**蓄意改写锁面标记**——把 BEGIN 上移 / 把 END 下移（排除区扩大、盖住生产代码）：
     ///   见 `self_lock` 的威胁模型声明，**本锁防的是顺手回归与无意的习惯性改回，不防这个**。
     /// * **第 4 轮的四条致盲构造在哨兵判据下「按构造已失效」**：`R4_FAKE`（块注释假锚点）/
     ///   `R4b_FAKE_STR`（多行字符串假锚点）/ `R8_COLLECT`（**零注入** + EOF 追加回归）/
@@ -1386,8 +1388,8 @@ mod tests {
     ///   从中间切开、用空注释隔断的写法，**本判据抓不到**（`day_key_of/**/(` 里没有 `day_key_of(`），
     ///   但 `cargo fmt` 会把注释并回去 ⇒ **活不过一次格式化**（复审实测：探针 ok、`cargo fmt --check`
     ///   报 1）。登记它有两层意思：既不假装判据能抓它，也不依赖 fmt 当兜底。
-    /// * **反例（会误报的情形）** = ⑤**排除区外**的测试专用项 / 字符串里的针 ⇒ **假阳性**
-    ///   （生产零改动也红；**响亮且安全**，刻意保留）；⑥`opencode` 那把锁的 5 行窗口
+    /// * **反例（会误报的情形）** = ⑥**排除区外**的测试专用项 / 字符串里的针 ⇒ **假阳性**
+    ///   （生产零改动也红；**响亮且安全**，刻意保留）；⑦`opencode` 那把锁的 5 行窗口
     ///   （整行注释不占槽、**空行占槽**）另见该处登记。
     /// * **结论句**：真正的**性质级**保证是**行为锁**
     ///   `collectors::codex::tests::detail_hour_key_is_host_local_even_when_source_timezone_is_present`
@@ -1448,6 +1450,62 @@ mod tests {
                  缺了它上面两条反向断言就退化成恒真"
             );
         }
+        // ── P1-1（第 7 轮）：`*_of_host` 家族**只允许宿主本地单参形态** ──
+        // 反向 ② 的「去括号 + 词边界」只看后一字符 ⇒ `day_key_of_host(ts, tz)` 的后一字符是 `_`，
+        // 被当标识符字符**豁免** ⇒「**同名加参**」整个免疫（复审实测：改一个已有函数的签名、加一个
+        // tz 参数，锁全绿）；而「改一个已有函数的签名」恰恰是本锁立项时要防的「后来者修回去」
+        // **最省事**的形态。下面两条把它钉死：**参数元数** + **签名逐字**。
+        let mut arity_sites = 0usize;
+        for name in [
+            concat!("hour_key_of", "_host("),
+            concat!("day_key_of", "_host("),
+        ] {
+            for (at, _) in code.match_indices(name) {
+                let args_at = at + name.len();
+                let mut depth = 1i32;
+                let mut j = args_at;
+                while j < code.len() && depth > 0 {
+                    match code.as_bytes()[j] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                assert!(
+                    depth == 0,
+                    "`{name}` 在判据面里找不到配对括号（判据面第 {} 字节起）——签名/调用被写坏了，\
+                     直接红，不许猜",
+                    at
+                );
+                let args = &code[args_at..j - 1];
+                arity_sites += 1;
+                assert!(
+                    !args.contains(','),
+                    "`{name}` **只允许宿主本地单参形态**；出现第二个参数 = 有人把源时区喂进了\
+                     键函数（P1-1「同名加参」）。命中：`{name}{args})`。\
+                     修法：键函数只吃时间戳（宿主本地时钟），源时区**可读入备查、不得参与键计算**"
+                );
+            }
+        }
+        assert!(
+            arity_sites >= 2,
+            "判据面只找到 {arity_sites} 处 `*_of_host(`（应 ≥ 2：`hour_key_of_host` 与 \
+             `day_key_of_host` 的定义各一处）——元数断言在「零命中」时会退化成恒真"
+        );
+        // 签名**逐字**钉住（P1-1 ③）：只钉「名字在场」时，改签名（加参数）照样能过；把签名本身
+        // 写进判据面，才有「宿主本地单参」这句话的机械版本。
+        for sig in [
+            concat!("pubfn", "hour_key_of_host(ts_ms:i64)->String{"),
+            concat!("pubfn", "day_key_of_host(ts_ms:i64)->String{"),
+        ] {
+            assert!(
+                code.contains(sig),
+                "判据面必须逐字含 `{sig}`：键函数的定义只允许这**一个**签名（宿主本地单参）——\
+                 签名变了（加 tz 参数 / 改返回类型）就是「源时区参与键计算」（P1-1），\
+                 或有人在绕过本锁的名字级判据"
+            );
+        }
         // 正向（spec §P6「可读入备查」的另一半，不得被顺手删掉）：codex 仍必须把源时区
         // 读进续读状态——删掉它就把「可读入备查」也一起做没了（与反向 ① 互为约束）。
         assert!(
@@ -1491,6 +1549,30 @@ mod tests {
         ("settings.rs", include_str!("settings.rs")),
         ("stream.rs", include_str!("stream.rs")),
     ];
+
+    /// **面尺寸钉子（第 7 轮 C-1）**：把「判据面 = N 行 / M 字符」这个数字**逐字钉住**。
+    ///
+    /// 只在注释里写数字 ⇒ 每轮都会腐烂（第 5 轮写的 6804 行 / 146908 字符，到第 6 轮加完
+    /// `self_lock` 就陈旧了，且**没有任何用例会发现**）。数字变了 = **判据面变了**，
+    /// 必须同步本常量、锁注释、台账与报告 —— 这是「**声明 = 实际**」的机械版。
+    /// 口径：`chars().count()`（**Unicode 标量 / 字符**，不是字节；与历次报告口径一致）。
+    #[test]
+    fn scan_face_size_is_pinned() {
+        let (mut lines, mut chars) = (0usize, 0usize);
+        for (name, src) in USAGE_SOURCES {
+            let face = crate::services::usage::self_lock::scan_face(name, src);
+            lines += face.len();
+            chars += face.iter().map(|(_, l)| l.chars().count()).sum::<usize>();
+        }
+        assert_eq!(
+            (lines, chars),
+            (6866, 148387),
+            "判据面尺寸变了（实测 {lines} 行 / {chars} 字符）：本用例是**声明 = 实际**的钉子——\
+             先弄清面为什么变（新增文件？改了排除区标记？动了生产代码？），再同步本常量、\
+             `no_source_timezone_is_fed_into_any_key_function` 的锁注释、`KNOWN-PLAN-DEFECTS.md` \
+             与 `FINAL-FIX-report.md`"
+        );
+    }
 
     /// **A 段第 2 条（P1-1 收尾）**：硬编码的扫描面数组必须与磁盘**逐一对账**——
     /// 防第 25 个 `.rs` 文件（新增模块 / 新增子目录）静默逃逸自省锁。
