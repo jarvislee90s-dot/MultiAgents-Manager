@@ -2170,7 +2170,7 @@ mod tests {
             onlyday.iter().all(|r| r.session_id.is_empty()),
             "**根因前提**（不是对输出的背认）：日聚合行不带会话 id ⇒ 日档任何按会话的判定都不可得；\
              它对输出的两个后果由 `recent_session_is_the_most_recently_seen_session`（日档 → null）\
-             与 `subagent_flag_is_only_meaningful_in_the_hour_tier`（日档 → 恒 false）正向锁定"
+             与 `subagent_flag_is_only_meaningful_in_the_hour_tier`（日档 → `None`）正向锁定"
         );
         // **日档也要有非连续键集**（否则 Day 分支的 `keys.contains` 过滤同样是零覆盖：
         // 单日键集时 `BETWEEN 2026-10-03..2026-10-03` 恰好只覆盖那一天，删掉过滤也抓不住）。
