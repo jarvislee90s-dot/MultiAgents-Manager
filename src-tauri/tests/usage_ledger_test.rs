@@ -611,7 +611,8 @@ fn claude_provider_kind_is_persisted_to_usage_detail() {
     ledger::apply_delta_conn(&mut conn, UsageSourceId::Claude, &delta).unwrap();
 
     // 明细回读用**全时段哨兵窗口**：本用例的 hour_key 由 fixture 的记录时间戳
-    // （`"timestamp":"2026-10-03T09:00:00Z"`）经 `hour_key_of(ts, &TZ)`（`TZ = HostLocal`）换算，
+    // （`"timestamp":"2026-10-03T09:00:00Z"`）经 `hour_key_of_host(ts)` 换算（**A-1：一律宿主本地**，
+    // `SourceTz` 类型已从全仓删除、带 tz 参数的 `hour_key_of(ts, &TZ)` 形态不存在），
     // 键值随宿主时区漂（UTC+8 → `2026-10-03T17`）。字面量窗口 `2026-10-03T00..T23` 只在
     // UTC-9..+14 的宿主上同代，UTC-10 以西就滑到前一天 → `.expect` 假红。
     // 哨兵窗口与宿主时区无关，**永远不可能再漂**（§3.2.3 FIX-3 同类）。
@@ -688,8 +689,9 @@ fn kimi_provider_kind_measured_is_persisted() {
     ledger::apply_delta_conn(&mut conn, UsageSourceId::Kimi, &delta).unwrap();
 
     // **回读窗口必须与 fixture 同代**：本用例的明细 `hour_key` 由 fixture 的记录时间戳
-    // （`"time":1699996400000` = `T0 - 1h` = 2023-11-14T21:13:20Z）经 `hour_key_of(ts, &TZ)`
-    // （`TZ = SourceTz::HostLocal`）换算得到 → **2023-11-15T05**（UTC+8）。
+    // （`"time":1699996400000` = `T0 - 1h` = 2023-11-14T21:13:20Z）经 `hour_key_of_host(ts)`
+    // 换算得到（**A-1：一律宿主本地**；`TZ = SourceTz::HostLocal` 这种写法已不存在——`SourceTz`
+    // 类型随 Q-4 裁决删除） → **2023-11-15T05**（UTC+8）。
     // 用全时段哨兵窗口（本文件 Task 23B 的既有写法）而不是字面量月份：字面量窗口
     // （旧正文写的是 `"2026-10-01T00".."2026-10-31T23"`）与 fixture 不同代 → SQL
     // `WHERE hour_key BETWEEN ?1 AND ?2` 命中空集 → 下面的 `.expect("kimi 明细必须落库")` panic。

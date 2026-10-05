@@ -1319,12 +1319,11 @@ mod tests {
         let ts: i64 = 1_700_000_000_000; // 2023-11-14T22:13:20Z（两源时区相差 26h）
         let r = iso_ms(ts);
         // 除 timezone 外逐字段对称：同模型、同桶、同时间戳、同结构
-        let mut paths = Vec::new();
         for (sid, tz_name) in [
             ("sess-tz-a", "Pacific/Kiritimati"), // UTC+14
             ("sess-tz-b", "Etc/GMT+12"),         // UTC−12
         ] {
-            paths.push(rollout(
+            rollout(
                 dir.path(),
                 &format!("rollout-{sid}.jsonl"),
                 vec![
@@ -1333,7 +1332,7 @@ mod tests {
                            "payload":{"model":"gpt-5-codex","timezone": tz_name}}),
                     token_count_at(&r, 100, 0, 0, 10, 110),
                 ],
-            ));
+            );
         }
         let no_cursors = HashMap::new();
         let ctx = CollectContext::new(dir.path(), ts, &no_cursors);
@@ -1394,8 +1393,15 @@ mod tests {
                 "各源自带时区必须仍被读入备查（{sid}）"
             );
         }
-        // 前提：两份夹具真的被扫到了（文件路径在场）
-        assert_eq!(paths.len(), 2);
+        // 前提（**真实产物**，P2-4 / B-4）：两份夹具真的被**扫描**到了。
+        // `parsed_files` 是采集器自己数的「本轮真读到的文件数」（`b.parsed_files += 1`），
+        // 不是本用例 `push` 出来的局部清单长度——旧断言 `paths.len() == 2` 由循环**无条件 push
+        // 两次**得到，**不可能失败**，证不了"被扫到"（真正的承担者一直是上面的
+        // `delta.details.len() == 2`；这里补一条与扫描结果直接相关的产物断言）。
+        assert_eq!(
+            delta.parsed_files, 2,
+            "前提：两份 rollout 夹具真的被扫到了（parsed_files 是采集器自己数的文件数）"
+        );
     }
 
     /// **W-06 / D-24 回归（响亮失败，不得只 `log::warn!`）**：`stat_of` 在 mtime 不可得 /

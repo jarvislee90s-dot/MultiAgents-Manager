@@ -4102,6 +4102,19 @@ mod tests {
         })
         .unwrap();
         crate::database::dao::settings::set_setting_conn(&conn, SETTINGS_KEY, &off);
+        // **前提回读（P2-3 / B-3，第三轮复审后收尾修正）**：`set_setting_conn` 是 **`let _ =` 吞错**
+        // （`dao/settings.rs:27-32`），而下面的守卫**在总开关之前** ⇒ **开/关返回同一个码**
+        // ⇒ 「前提没建立」时这一段**照样绿**（W-56 登记的潜在假绿）。这里回读一次，把
+        // 「关闭态」变成**本用例自证**（不再只靠 `:1942` / `:3963` 的套件级跨用例背书）。
+        let stored = crate::database::dao::settings::get_setting_conn(&conn, SETTINGS_KEY)
+            .expect("关闭态前提：设置必须真的落库（set_setting_conn 吞错，不回读就可能假绿）");
+        let stored: UsageSettings = serde_json::from_str(&stored)
+            .expect("关闭态前提：落库的值必须能反序列化回 UsageSettings");
+        assert!(
+            !stored.enabled,
+            "关闭态前提未建立（回读 enabled = {}）：本段断言对开/关无判别力，必须先把前提钉住",
+            stored.enabled
+        );
         let e = records_with_conn(
             &conn,
             &day_ranges[0],

@@ -1310,25 +1310,45 @@ mod tests {
         );
     }
 
-    /// 源码自省锁的输入：**生产半边**（首个 `#[cfg(test)]` 之前）+ 去掉注释行与空白后的骨架。
-    /// 与 `commands/usage.rs` 的 `prod_only` / `code_only` 同款——只看代码、不看注释，
-    /// 否则把禁项抄进文档注释就能骗过反向锁（假绿）。
-    fn prod_only(src: &str) -> &str {
-        let marker = concat!("#[cfg", "(test)]");
-        match src.find(marker) {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn code_only(src: &str) -> String {
+    /// 源码自省锁的输入（**第三轮复审后收尾修正 / P1-1 实证漏报后收紧**）。
+    ///
+    /// ① **先剥注释，再定锚点**——旧判据是「先按**字面量** `#[cfg(test)]` 截断、再剥注释」，
+    ///    于是 `collectors/mod.rs` 里注释写着的 `#[cfg(test)]`（原文「且只在 `#[cfg(test)]`
+    ///    下存在」）把**整段生产代码**变成盲区（`error.rs` 的「**不是** `#[cfg(test)]`」同型）。
+    ///    那正是本锁文档写着要防的假绿（「把禁项抄进注释就能骗过反向锁」），却由它自己制造。
+    /// ② 锚点 = **真正的测试模块**（`#[cfg(test)]` + `mod tests`），不是任意 `#[cfg(test)]` 项
+    ///    ——旧判据停在 `collect.rs:70` 的 `#[cfg(test)] fn default_rules_override()`（一个**测试
+    ///    专用函数**），而 `CollectContext` / `collect_source` / `run_collection` / `collect`
+    ///    **全在它后面** ⇒ 该文件只扫 **2.0%**（`collectors/mod.rs` 11.5% / `error.rs` 11.1% /
+    ///    `settings.rs` 60.9%）。现在这四个文件都扫到「真测试模块前一行」= 生产半边 **100%**。
+    ///    找不到测试模块 → **整文件扫描**（不截断）。
+    /// ③ `#[cfg(test)]` 的**非模块项**（`collect.rs` 的测试专用函数、`collectors/mod.rs` 的 W-13
+    ///    计数器、`settings.rs` 的注入静态量）**仍留在扫描面内**——这是**有意**的：禁项藏在
+    ///    这类项里同样要抓。**本判据抓不到的回归**（反例）见台账 C-【Important-1】登记。
+    ///
+    /// 注意：`commands/usage.rs` / `commands/export.rs` 里同名的 `prod_only` 仍按字面量截断，
+    /// 但那两个文件的首个 `#[cfg(test)]` **就是**紧邻 `mod tests` 的真属性 ⇒ 截断区等于生产
+    /// 半边全部，无盲区（第三轮复审后收尾修正已逐一核实，故**未改**）。
+    fn code_lines(src: &str) -> Vec<String> {
         src.lines()
             .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .filter(|c| !c.is_whitespace())
+            .map(|l| l.chars().filter(|c| !c.is_whitespace()).collect())
             .collect()
+    }
+
+    /// 生产半边的代码行：截到**真正的测试模块**（紧邻 `#[cfg(test)]` 的 `mod tests`）之前。
+    fn prod_code_lines(src: &str) -> Vec<String> {
+        let lines = code_lines(src);
+        for i in 0..lines.len() {
+            if !lines[i].starts_with(concat!("mod", "tests")) {
+                continue;
+            }
+            let prev = lines[..i].iter().rev().find(|l| !l.is_empty());
+            if prev.is_some_and(|l| l.starts_with(concat!("#[cfg", "(test)]"))) {
+                return lines[..i].to_vec();
+            }
+        }
+        lines
     }
 
     /// **实现纪律的源码级自省锁（spec §P6 改写后 / Q-4 裁决 / A-1）**：`services/usage/` 的
@@ -1346,45 +1366,22 @@ mod tests {
     /// ③ 把宿主本地键入口删光 → 正向断言红（防「本域压根没有键函数」时反向全绿的假绿）。
     ///
     /// 针一律 `concat!` 拆开写：否则本用例自己的字面量就会命中自己（恒真/恒假）。
-    /// 「生产半边」= 首个 `#[cfg(test)]` 之前：`collect.rs` 在中段就有 `#[cfg(test)] fn`，
-    /// 故它只被截到该处；**键计算全在 `collectors/*` 与 `range.rs` 的生产半边**，判别力不受影响。
+    ///
+    /// **扫描面 / 判据层级 / 反例**（台账 C-【Important-1】的登记原文，此处保留指针）：
+    /// * 扫描面 = `USAGE_SOURCES`（`services/usage/**/*.rs` 全部 24 个文件；与磁盘逐一对账见
+    ///   `usage_source_scan_covers_every_file_on_disk`）的**生产半边**（判据 `prod_code_lines`）；
+    /// * 判据层级 = **名字级**（针是 API 名 / 函数名形态，不是行为性质）；
+    /// * 反例（抓不到的回归）= ①换名字重造带 tz 的键函数（如 `bucket_of(ts, tz)`）；
+    ///   ②用**行尾注释**（`code_lines` 只剥**整行**注释）或字符串拼接绕过针；
+    ///   ③把键计算挪进 `#[cfg(test)]` 项 / `mod tests`。**真正的性质级保证仍是**
+    ///   `collectors::codex::tests::detail_hour_key_is_host_local_even_when_source_timezone_is_present`
+    ///   （26 小时差的跨时区**行为锁**）——不要把本锁当它的替代品。
     #[test]
     fn no_source_timezone_is_fed_into_any_key_function() {
-        let files: [(&str, &str); 24] = [
-            ("caps.rs", include_str!("caps.rs")),
-            ("collect.rs", include_str!("collect.rs")),
-            ("collectors/claude.rs", include_str!("collectors/claude.rs")),
-            ("collectors/codex.rs", include_str!("collectors/codex.rs")),
-            ("collectors/dsh.rs", include_str!("collectors/dsh.rs")),
-            ("collectors/kimi.rs", include_str!("collectors/kimi.rs")),
-            ("collectors/mod.rs", include_str!("collectors/mod.rs")),
-            (
-                "collectors/opencode.rs",
-                include_str!("collectors/opencode.rs"),
-            ),
-            (
-                "collectors/workbuddy.rs",
-                include_str!("collectors/workbuddy.rs"),
-            ),
-            ("collectors/zcode.rs", include_str!("collectors/zcode.rs")),
-            ("cursor.rs", include_str!("cursor.rs")),
-            ("dedup.rs", include_str!("dedup.rs")),
-            ("delta.rs", include_str!("delta.rs")),
-            ("error.rs", include_str!("error.rs")),
-            ("ledger.rs", include_str!("ledger.rs")),
-            ("mod.rs", include_str!("mod.rs")),
-            ("model.rs", include_str!("model.rs")),
-            ("project.rs", include_str!("project.rs")),
-            ("provider.rs", include_str!("provider.rs")),
-            ("query.rs", include_str!("query.rs")),
-            ("range.rs", include_str!("range.rs")),
-            ("semantics.rs", include_str!("semantics.rs")),
-            ("settings.rs", include_str!("settings.rs")),
-            ("stream.rs", include_str!("stream.rs")),
-        ];
+        let files = USAGE_SOURCES;
         let code: String = files
             .iter()
-            .map(|(_, src)| code_only(prod_only(src)))
+            .map(|(_, src)| prod_code_lines(src).concat())
             .collect();
         // 反向 ①：命名时区机器不得回来（A-1 已把它与 `chrono-tz` 依赖一起移除）
         for forbidden in [
@@ -1426,6 +1423,82 @@ mod tests {
             code.contains(concat!("tz_", "name")),
             "codex 生产半边必须仍把 `turn_context.timezone` 读进续读状态备查\
              （spec §P6：可读入备查**但**不得参与键计算；两半都要在）"
+        );
+    }
+
+    /// 自省锁的**扫描面**：`services/usage/**/*.rs` **全部 24 个文件**。
+    /// 与磁盘**逐一对账**见 `usage_source_scan_covers_every_file_on_disk`（防第 25 个文件静默逃逸）。
+    const USAGE_SOURCES: [(&str, &str); 24] = [
+        ("caps.rs", include_str!("caps.rs")),
+        ("collect.rs", include_str!("collect.rs")),
+        ("collectors/claude.rs", include_str!("collectors/claude.rs")),
+        ("collectors/codex.rs", include_str!("collectors/codex.rs")),
+        ("collectors/dsh.rs", include_str!("collectors/dsh.rs")),
+        ("collectors/kimi.rs", include_str!("collectors/kimi.rs")),
+        ("collectors/mod.rs", include_str!("collectors/mod.rs")),
+        (
+            "collectors/opencode.rs",
+            include_str!("collectors/opencode.rs"),
+        ),
+        (
+            "collectors/workbuddy.rs",
+            include_str!("collectors/workbuddy.rs"),
+        ),
+        ("collectors/zcode.rs", include_str!("collectors/zcode.rs")),
+        ("cursor.rs", include_str!("cursor.rs")),
+        ("dedup.rs", include_str!("dedup.rs")),
+        ("delta.rs", include_str!("delta.rs")),
+        ("error.rs", include_str!("error.rs")),
+        ("ledger.rs", include_str!("ledger.rs")),
+        ("mod.rs", include_str!("mod.rs")),
+        ("model.rs", include_str!("model.rs")),
+        ("project.rs", include_str!("project.rs")),
+        ("provider.rs", include_str!("provider.rs")),
+        ("query.rs", include_str!("query.rs")),
+        ("range.rs", include_str!("range.rs")),
+        ("semantics.rs", include_str!("semantics.rs")),
+        ("settings.rs", include_str!("settings.rs")),
+        ("stream.rs", include_str!("stream.rs")),
+    ];
+
+    /// **A 段第 2 条（P1-1 收尾）**：硬编码的扫描面数组必须与磁盘**逐一对账**——
+    /// 防第 25 个 `.rs` 文件（新增模块 / 新增子目录）静默逃逸自省锁。
+    ///
+    /// 判据：`CARGO_MANIFEST_DIR/src/services/usage` 下递归枚举全部 `.rs`，与 `USAGE_SOURCES`
+    /// 的**名字集合必须相等**（不是包含关系）。**能变红**：往该目录放一个新 `.rs`（不改任何
+    /// 生产代码）→ 本用例红；新增的源文件必须同时进 `USAGE_SOURCES` 并确认其生产半边无禁项。
+    /// **反例**：只枚举 `.rs`（非 `.rs` 的承载形态，如 `include!` 的 `.inc`，不在扫描面内）。
+    #[test]
+    fn usage_source_scan_covers_every_file_on_disk() {
+        fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("扫描面根目录必须可读") {
+                let path = entry.expect("目录项必须可读").path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(
+                        path.strip_prefix(root)
+                            .expect("枚举根必须是 CARGO_MANIFEST_DIR 下的 usage 目录")
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/usage");
+        let mut on_disk: Vec<String> = Vec::new();
+        walk(&root, &root, &mut on_disk);
+        on_disk.sort();
+        let mut listed: Vec<String> = USAGE_SOURCES
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed, on_disk,
+            "自省锁的扫描面必须与磁盘**逐一相等**：`services/usage/**/*.rs` 新增文件后必须同时\
+             加进 `USAGE_SOURCES`（并确认新文件的生产半边不含禁项），否则第 25 个文件会静默\
+             逃逸反向锁——这正是 P1-1 抓到的「覆盖声明 > 实际判据」同族"
         );
     }
 }
