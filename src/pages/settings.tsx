@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import RemoteAppearanceSection from "@/components/settings/RemoteAppearanceSection";
 import { emit } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -523,47 +524,68 @@ export default function SettingsPage() {
                 </p>
               </div>
 
-              <div className="space-y-0">
-                <div className="flex items-center justify-between py-2.5">
-                  <label className="text-sm font-medium">{t("settings.appearance.theme")}</label>
-                  <div className="flex gap-2">
-                    <Button
-                      variant={theme === "light" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setTheme("light")}
-                      className="flex items-center gap-1.5"
-                    >
-                      <Sun className="h-3.5 w-3.5" />
-                      {t("settings.appearance.light")}
-                    </Button>
-                    <Button
-                      variant={theme === "dark" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setTheme("dark")}
-                      className="flex items-center gap-1.5"
-                    >
-                      <Moon className="h-3.5 w-3.5" />
-                      {t("settings.appearance.dark")}
-                    </Button>
-                    <Button
-                      variant={theme === "system" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setTheme("system")}
-                      className="flex items-center gap-1.5"
-                    >
-                      <Monitor className="h-3.5 w-3.5" />
-                      {t("settings.appearance.system")}
-                    </Button>
+              {/* 框一 · 桌面端外观（即点即生效，本期维持现状） */}
+              <div className="overflow-hidden rounded-xl border">
+                <div className="bg-muted/40 flex items-baseline gap-2 border-b px-4 py-2.5">
+                  <span className="text-sm font-semibold">{t("settings.appearance.title")}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {t("settings.remoteAppearance.desktopHint")}
+                  </span>
+                  <span className="ml-auto rounded-full bg-emerald-600/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                    {t("settings.remoteAppearance.localOnly")}
+                  </span>
+                </div>
+                <div className="px-4 py-1">
+                  <div className="space-y-0">
+                    <div className="flex items-center justify-between py-2.5">
+                      <label className="text-sm font-medium">
+                        {t("settings.appearance.theme")}
+                      </label>
+                      <div className="flex gap-2">
+                        <Button
+                          variant={theme === "light" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => setTheme("light")}
+                          className="flex items-center gap-1.5"
+                        >
+                          <Sun className="h-3.5 w-3.5" />
+                          {t("settings.appearance.light")}
+                        </Button>
+                        <Button
+                          variant={theme === "dark" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => setTheme("dark")}
+                          className="flex items-center gap-1.5"
+                        >
+                          <Moon className="h-3.5 w-3.5" />
+                          {t("settings.appearance.dark")}
+                        </Button>
+                        <Button
+                          variant={theme === "system" ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => setTheme("system")}
+                          className="flex items-center gap-1.5"
+                        >
+                          <Monitor className="h-3.5 w-3.5" />
+                          {t("settings.appearance.system")}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="border-t" />
+
+                    <div className="flex items-center justify-between py-2.5">
+                      <label className="text-sm font-medium">
+                        {t("settings.appearance.language")}
+                      </label>
+                      <LanguageToggle />
+                    </div>
                   </div>
                 </div>
-
-                <div className="border-t" />
-
-                <div className="flex items-center justify-between py-2.5">
-                  <label className="text-sm font-medium">{t("settings.appearance.language")}</label>
-                  <LanguageToggle />
-                </div>
               </div>
+
+              {/* 框二 · 远程端外观（保存后下发；折叠配置器，spec §5） */}
+              <RemoteAppearanceSection />
             </div>
           )}
 

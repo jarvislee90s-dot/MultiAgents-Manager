@@ -69,6 +69,33 @@ export async function fetchHost<T = HostPayload>(): Promise<T | null> {
   return r.json() as Promise<T>;
 }
 
+import type { UiConfig } from "./theme";
+
+// ==== 2026-10-05 UI 改版：远程端外观配置（spec §6.2）====
+// 载荷结构 UiConfig 定义在 theme.ts（配置应用与镜像同域），此处仅消费
+
+/** 拉取远程端外观配置。403（设备失效）→ null（与 fetchHost 同口径）；
+ *  其余非 2xx / 网络异常 → 抛 ApiError，调用方静默保留现有属性（外观是增强
+ *  能力，任何失败都不阻塞看板——spec §6.2 回退口径） */
+export async function fetchUiConfig(): Promise<UiConfig | null> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/ui-config");
+  } catch (e) {
+    throw new ApiError(null, `ui-config 网络异常: ${String(e)}`);
+  }
+  if (r.status === 403) return null;
+  if (!r.ok) throw new ApiError(r.status, `ui-config ${r.status}`);
+  const j = (await r.json()) as Partial<UiConfig>;
+  return {
+    daySkin: String(j.daySkin ?? "lpaper"),
+    nightSkin: String(j.nightSkin ?? "npaper"),
+    font: String(j.font ?? "std"),
+    radius: typeof j.radius === "number" ? j.radius : 12,
+    accent: String(j.accent ?? "edge"),
+  };
+}
+
 // ==== M3 Task 8：会话详情（ZCode 式对话视图）+ 文件预览 ====
 
 /** 统一消息条目 — 与 Rust `remote::content::SessionMessage`（camelCase 序列化）逐字段

@@ -1102,6 +1102,7 @@ mod tests {
         confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
     ) -> crate::remote::server::RemoteState {
         crate::remote::server::RemoteState {
+            ui_config_source: Box::new(|| None),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),

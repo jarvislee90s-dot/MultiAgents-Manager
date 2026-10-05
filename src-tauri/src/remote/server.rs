@@ -376,6 +376,12 @@ pub struct RemoteState {
     /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
     /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
     pub home_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    /// 远程端外观配置读源（2026-10-05 UI 改版，spec §6.2）：生产 =
+    /// `database::get_setting("remote_ui_config")`（settings KV 单行 JSON：
+    /// daySkin/nightSkin/font/radius/accent）；测试 = `|| None`（端点回落默认值，
+    /// ui-config 专用用例就地覆盖）。**只读缝**——写走桌面 tauri 命令 set_setting
+    /// 直写 KV，不经 axum（移动端只 GET，改外观是桌面端职责）
+    pub ui_config_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 /// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -385,6 +391,9 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
     Router::new()
         .route("/sessions", get(api::sessions))
         .route("/host", get(api::host))
+        // /ui-config（2026-10-05 UI 改版）：远程端外观配置下发（settings KV 只读缝；
+        // PIN 门禁内层 gate 结构性覆盖——新端点不需要各自鉴权代码）
+        .route("/ui-config", get(api::ui_config))
         // /events（M3 Task 6）：SSE 长连接，gate 由本子路由的 layer 结构性覆盖
         // （与其余端点同一内层 gate，不需要额外 middleware）
         .route("/events", get(api::events))
@@ -527,6 +536,7 @@ mod tests {
 
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
@@ -737,6 +747,69 @@ mod tests {
         let status = r.status().as_u16();
         let has_cookie = r.headers().contains_key("set-cookie");
         (status, body_string(r).await, has_cookie)
+    }
+
+    // ==== 2026-10-05 UI 改版：/m/api/v1/ui-config（外观配置下发，spec §6.2）====
+
+    /// 注册一台活跃设备并返回其 gate cookie（paired_at = now，TTL 窗口内即过闸）
+    fn paired_cookie(state: &Arc<RemoteState>, id: &str) -> String {
+        let now = chrono::Utc::now().timestamp_millis();
+        let dev = crate::remote::pairing::NewDevice {
+            id: id.into(),
+            name: String::new(),
+            ua: format!("ua-{id}"),
+            origin_ip: format!("ip-{id}"),
+            via: String::new(),
+            paired_at: now,
+        };
+        state
+            .store
+            .with(|c| crate::remote::pairing::persist_device(c, &dev).unwrap());
+        format!("mam_device={id}")
+    }
+
+    #[tokio::test]
+    async fn ui_config_returns_defaults_when_unset() {
+        // test_state 的 ui_config_source = || None：KV 未配置 → 回落默认值
+        let state = test_state();
+        let cookie = paired_cookie(&state, "ui-dev-1");
+        let r = router(state)
+            .oneshot(req("GET", "/m/api/v1/ui-config", Some(&cookie), None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["daySkin"], "lpaper");
+        assert_eq!(v["nightSkin"], "npaper");
+        assert_eq!(v["font"], "std");
+        assert_eq!(v["radius"], 12);
+        assert_eq!(v["accent"], "edge");
+    }
+
+    #[tokio::test]
+    async fn ui_config_returns_saved_value() {
+        let mut state = test_state();
+        // 就地覆盖读缝：桌面外观配置器保存过的自定义配置（KV 里的 JSON 原样透传）
+        if let Some(s) = Arc::get_mut(&mut state) {
+            s.ui_config_source = Box::new(|| {
+                Some(
+                    r#"{"daySkin":"lpure","nightSkin":"npure","font":"term","radius":18,"accent":"tint"}"#
+                        .to_string(),
+                )
+            });
+        }
+        let cookie = paired_cookie(&state, "ui-dev-2");
+        let r = router(state)
+            .oneshot(req("GET", "/m/api/v1/ui-config", Some(&cookie), None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["daySkin"], "lpure");
+        assert_eq!(v["nightSkin"], "npure");
+        assert_eq!(v["font"], "term");
+        assert_eq!(v["radius"], 18);
+        assert_eq!(v["accent"], "tint");
     }
 
     /// gate 的滑动 TTL：超窗设备拒绝、活跃设备过闸即刷新 last_seen
@@ -1078,6 +1151,7 @@ mod tests {
     async fn sessions_scan_does_not_stall_async_runtime() {
         // 重建 state 以注入阻塞源（其余注入缝与 test_state 一致：内存库、预发行 token）
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| {
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1462,6 +1536,7 @@ mod tests {
     async fn host_endpoint_is_gated_and_returns_injected_payload() {
         // 重建 state：host_source 注入假载荷（与 sessions_scan_* 重建 state 的先例一致）
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
@@ -1565,6 +1640,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let cap = captured.clone();
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
@@ -1776,6 +1852,7 @@ mod tests {
             unread: false,
         };
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -2066,6 +2143,7 @@ mod tests {
         let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let h = hit.clone();
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -2218,6 +2296,7 @@ mod tests {
         let pin_owned: Option<String> = pin.map(|s| s.to_string());
         (
             Arc::new(RemoteState {
+                ui_config_source: Box::new(|| None),
                 capability_table: crate::inject::capability::new_table(),
                 session_source: Box::new(|| crate::session::SessionsResponse {
                     sessions: vec![],
@@ -2781,6 +2860,7 @@ mod tests {
             let now = t.clone();
             (
                 Arc::new(RemoteState {
+                    ui_config_source: Box::new(|| None),
                     capability_table: crate::inject::capability::new_table(),
                     session_source: Box::new(|| crate::session::SessionsResponse {
                         sessions: vec![],
@@ -3095,6 +3175,7 @@ mod tests {
             },
         ];
         Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -3312,6 +3393,7 @@ mod tests {
             ),
         ];
         Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -5175,6 +5257,7 @@ mod tests {
             ),
         ];
         Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -6204,6 +6287,7 @@ mod tests {
         });
         let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -8876,6 +8960,7 @@ mod tests {
         );
         let sessions = vec![sess_m, sess_n, sess_o];
         Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -9881,6 +9966,7 @@ mod tests {
             project_path.to_string_lossy().into_owned()
         };
         Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -10158,6 +10244,7 @@ mod tests {
             crate::session::SessionStatus::Waiting,
         );
         let state2 = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: {
                 let s = codex_sess.clone();
@@ -10421,6 +10508,7 @@ mod tests {
         let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -10467,6 +10555,7 @@ mod tests {
         let session = inj_sess(sid, tool, pid, status);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -10543,6 +10632,7 @@ mod tests {
         let session = inj_sess(sid, tool, pid, status);
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],

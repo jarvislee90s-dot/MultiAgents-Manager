@@ -241,7 +241,7 @@ describe("mobile theme：mobile.html 内联脚本与 mobile.css 策略一致性"
     spy.mockRestore();
   });
 
-  it("body 底色双态：浅色底 + dark: 前缀深色底（不留硬编码黑底）", () => {
-    expect(html).toContain('class="bg-white dark:bg-slate-950"');
+  it("body 底色双态：消费语义 Token --pg（2026-10-05 改版，不再硬编码 slate 黑底）", () => {
+    expect(html).toContain('class="bg-[var(--pg)]"');
   });
 });

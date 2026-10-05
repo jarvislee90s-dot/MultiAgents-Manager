@@ -326,6 +326,36 @@ pub async fn host(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
         .into_response()
 }
 
+/// GET /m/api/v1/ui-config（2026-10-05 UI 改版，spec §6.2）：远程端外观配置下发。
+/// 载荷 `{daySkin, nightSkin, font, radius, accent}`（camelCase，与 TS `UiConfig`
+/// 逐字段对应）。KV 未配置 / JSON 解析失败 / 非对象 → 回落默认值（纸感对 + 标准
+/// 字体 + 12px 圆角 + 左彩檐）——外观是增强能力，任何失败都不阻塞看板、不给 4xx。
+/// no-store 同 host 口径：桌面保存后刷新 PWA 必须立刻拿到新值
+pub async fn ui_config(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
+    let cfg = (st.ui_config_source)()
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(ui_config_defaults);
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(cfg),
+    )
+        .into_response()
+}
+
+/// 外观配置默认值（单一来源）：白天/夜间各纸感、标准字体、12px 圆角、左彩檐。
+/// 与前端 mobile.css `:root`/`.dark` 默认值及参考稿 04 的 SKINS 初始选择一致
+fn ui_config_defaults() -> serde_json::Value {
+    serde_json::json!({
+        "daySkin": "lpaper",
+        "nightSkin": "npaper",
+        "font": "std",
+        "radius": 12,
+        "accent": "edge",
+    })
+}
+
 /// GET /m/api/v1/session-files?agent_type=&session_id=（M3 Task 8）
 /// GET /m/api/v1/session-files?agent_type=&session_id=&limit=（M3 Task 8 / M3+ 富化）
 /// 该会话工具调用涉及的文件表：`{files: [{path, lastSeq, lastTs, hits}], truncated}`
