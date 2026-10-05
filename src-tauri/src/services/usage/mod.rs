@@ -10,6 +10,7 @@ pub mod ledger;
 pub mod model;
 pub mod project;
 pub mod provider;
+pub mod range;
 pub mod semantics;
 
 pub use error::UsageError;

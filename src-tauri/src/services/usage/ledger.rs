@@ -388,24 +388,15 @@ pub fn purge_expired_conn(conn: &Connection, retention_days: i64, now_ms: i64) -
 
 /// 保留期边界日键（本地时区）：早于该日的明细可删
 ///
-/// 口径 = Task 8 的 `range::day_key_of_host`：本地时区整日 `YYYY-MM-DD`。
-/// **本处暂时内联**（Task 4 早于 Task 8，`range.rs` 尚未创建，直接调用是 E0433）；
-/// Task 8 落地后应把这两行换成 `crate::services::usage::range::day_key_of_host(ts)`，
-/// 行为完全一致（同一 `Local.timestamp_millis_opt`）。
+/// 口径 = `range::day_key_of_host`（Task 8）：本地时区整日 `YYYY-MM-DD`。
+/// **本处不再自算**（GC 6「口径层唯一」）：Task 4 落地时 `range.rs` 尚不存在，曾内联一份等价实现；
+/// Task 8 已把那次内联副本删掉、改为直接调用，避免仓里长期存有两份本地日实现。
+/// 降级行为一致：时间戳超出可表示范围时 `range::day_key_of_host` 同样给空串
+/// （锁：本文件 `cutoff_day_delegates_to_range_day_key_of_host`）。
 pub fn cutoff_day(retention_days: i64, now_ms: i64) -> String {
     let days = retention_days.max(1);
     let ts = now_ms - days * 24 * 3600 * 1000;
-    host_day_key(ts)
-}
-
-/// 宿主本地时区的日键（`YYYY-MM-DD`）；时间戳超出可表示范围时给空串（与 Task 8 同款降级）
-fn host_day_key(ts_ms: i64) -> String {
-    use chrono::{Datelike, TimeZone};
-    chrono::Local
-        .timestamp_millis_opt(ts_ms)
-        .single()
-        .map(|t| format!("{:04}-{:02}-{:02}", t.year(), t.month(), t.day()))
-        .unwrap_or_default()
+    crate::services::usage::range::day_key_of_host(ts)
 }
 
 #[cfg(test)]
@@ -676,9 +667,10 @@ mod tests {
     /// `cutoff_day` = **本地时区**边界日键（早于该日可删）；`retention_days < 1` 按 1 处理
     /// （纵深防御：0 天 = 删到今天，绝不允许）。
     ///
-    /// 注：Task 4 早于 Task 8 —— `range::day_key_of_host` 此刻还不存在（`range.rs` 由 Task 8 创建），
-    /// 故本文件的本地日换算暂为内联实现；Task 8 落地后 `cutoff_day` 应改为直接调
-    /// `range::day_key_of_host`（语义相同：`Local.timestamp_millis_opt` → `YYYY-MM-DD`）。
+    /// 注：Task 4 落地时 `range::day_key_of_host` 还不存在（`range.rs` 由 Task 8 创建），
+    /// 故当时本文件的本地日换算为内联实现；**Task 8 已按 D-13 删掉那份内联副本**、
+    /// 改为直接调 `range::day_key_of_host`（见 `cutoff_day_delegates_to_range_day_key_of_host`
+    /// 这条结构锁：两处一旦分叉即红）。
     #[test]
     fn cutoff_day_is_the_local_day_key_floored_at_one_day() {
         use chrono::TimeZone;
@@ -694,5 +686,41 @@ mod tests {
         assert_eq!(cutoff_day(-7, t), "2026-10-02");
         // 天数越大边界越早（日键字典序 = 时间序）
         assert!(cutoff_day(30, t) < cutoff_day(1, t));
+    }
+
+    /// **口径层唯一**（GC 6 / D-13）：`cutoff_day` 必须**就是** `range::day_key_of_host`，
+    /// 不是「又一份等价的本地日实现」。逐值对照 + 越界降级对齐（两处都给空串）——
+    /// 谁把内联副本改回来并写歪一格，这条即红。
+    ///
+    /// **探针时刻刻意取本地 00:30 / 正午 / 23:30**：本地正午探针**抓不住**「用 UTC 日界替代
+    /// 本地日界」这种口径分叉（UTC+8 的正午 = 04:00Z，两侧日期相同，变异测试实证过这条假绿），
+    /// 故必须取**贴着本地日界**的时刻（东时区 00:30 分叉、西时区 23:30 分叉）；
+    /// 日期 2026-05-10 当天全球各时区均无夏令时切换。
+    #[test]
+    fn cutoff_day_delegates_to_range_day_key_of_host() {
+        use crate::services::usage::range::day_key_of_host;
+        use chrono::TimeZone;
+        let probe = |h, min| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 5, 10, h, min, 0)
+                .single()
+                .expect("构造本地时间 2026-05-10 失败（该日全球无夏令时切换）")
+                .timestamp_millis()
+        };
+        for t in [probe(0, 30), probe(12, 0), probe(23, 30)] {
+            for days in [1_i64, 7, 30, 90, 365] {
+                assert_eq!(
+                    cutoff_day(days, t),
+                    day_key_of_host(t - days * 24 * 3600 * 1000),
+                    "cutoff_day({days}) 必须等于 range::day_key_of_host（口径层唯一）"
+                );
+            }
+        }
+        // 越界时间戳：两处降级形态必须一致（都为空串，不是 panic、不是回落当日）
+        assert_eq!(cutoff_day(1, i64::MAX), "");
+        assert_eq!(
+            cutoff_day(1, i64::MAX),
+            day_key_of_host(i64::MAX - 24 * 3600 * 1000)
+        );
     }
 }

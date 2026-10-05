@@ -103,6 +103,7 @@ futures = "0.3"
 # M9R 灰1（Task 7）：CLI 版本探测的有界等待——`--version` 子进程挂死时 3s 超时
 # kill+收尸，不再无限等待拖垮端点（wait_timeout::ChildExt::wait_timeout）
 wait-timeout = "0.2"
+chrono-tz = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 junction = "2.1"
