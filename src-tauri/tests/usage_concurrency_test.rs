@@ -49,12 +49,18 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 /// 串行锁 + 环境重定向（Task 17 `dsh.rs` / Task 20 `usage_ipc_test.rs` 先例）。
 /// `MutexGuard` 必须绑到具名变量（绑 `_` 会立刻 drop，锁形同虚设——`clippy::let_underscore_lock`）。
+///
+/// **Minor 3（fix round 1）**：**先取锁、再改 env**。env 是进程级全局量，
+/// `remove_var` 必须在临界区**内**——原版先 `remove_var` 后取锁，等于「它要保护的东西全在锁外」，
+/// 与 `support::setup()` 的 `set_var` 也可能和别的用例并发。锁内顺序由
+/// `every_test_in_this_file_takes_the_serial_lock` 的结构断言钉住（变异回旧顺序 → 真红）。
 fn serial() -> MutexGuard<'static, ()> {
+    let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     support::setup();
     // 生产语义里这两个变量是「宿主指定的数据根」；测试里一律摘掉，让所有源只看临时 home
     std::env::remove_var("DSH_HOME");
     std::env::remove_var("KIMI_CODE_HOME");
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    guard
 }
 
 /// 大批量明细夹具：`n` 条都落在同一小时 + 64 个会话行键上（与任务书给的夹具逐字同形）。
@@ -332,6 +338,13 @@ fn polling_lock_wait_stays_bounded_while_writing() {
         max_batch_rows <= LEDGER_BATCH_ROWS,
         "前提：写库侧单批行数受限（实际 {max_batch_rows}）"
     );
+    // **Minor 4（fix round 1）**：`writer_hold_ms` 原来只打印不断言（「采集了却从不断言」）。
+    // 它是「写库侧确实持锁了一段时间」的直接证据；恒 0 说明批次根本没占住锁窗口
+    // （变异：把写库侧的 `fetch_max` 恒置 0 → 本断言真红）。
+    assert!(
+        writer_hold_ms > 0,
+        "前提：写库侧单批持锁上限必须可测（> 0 ms；实际 {writer_hold_ms}）——恒 0 说明写库没占住锁窗口"
+    );
     assert!(
         probe.locked_by_other > 0,
         "前提：轮询窗口内必须观察到「写库正持 DB 锁」（try_lock 全程零 WouldBlock = 两边根本没并发，本用例的计时断言无意义）"
@@ -365,11 +378,16 @@ fn session_poll_never_triggers_collection() {
     let before = collect::collect_calls();
     let resp = adapter::get_all_sessions();
     let after = collect::collect_calls();
-    // 前提 2：会话扫描**真的跑完并产出了合法响应**（否则「计数没涨」可能只是没走到扫描）
+    // **Minor 2（fix round 1）：这里原来写作「前提：扫描真的跑完」，是错的。**
+    // 空临时 home 下响应必然是 0 会话（本仓 L1「零进程零解析」在编排层就短路，
+    // 各 adapter 的 `find_sessions` **根本不会被调用**）→ `0 == 0` 是空洞断言，
+    // 不能拿来当「扫描真的跑完」的前提。改成**结构自洽性检查**（不断言「跑完」），
+    // 并把「L1 逃逸面」（往某个 adapter 的 `find_sessions` 塞采集入口，行为式断言抓不到）
+    // 交给静态锁 `adapter_layer_never_references_collection_entries` 去堵。
     assert_eq!(
         resp.total_count,
         resp.sessions.len(),
-        "前提：会话扫描必须产出结构合法的响应（totalCount 与 sessions 一致）"
+        "响应必须结构自洽（totalCount == sessions.len()）——注意：空 home 下这是 0==0，不构成「扫描真的跑完」的证据"
     );
     assert_eq!(after, 0, "get_all_sessions 不得触发用量采集（字面上的 0）");
     assert_eq!(before, after, "get_all_sessions 不得触发用量采集");
@@ -575,8 +593,29 @@ fn every_test_in_this_file_takes_the_serial_lock() {
         checked += 1;
     }
     assert_eq!(
-        checked, 7,
-        "本文件应有 7 条用例（含 2 条 #[ignore] 测量与 2 条自省用例）；新增用例必须同步持有 serial()"
+        checked, 8,
+        "本文件应有 8 条用例（含 2 条 #[ignore] 测量与 3 条自省/静态锁）；新增用例必须同步持有 serial()"
+    );
+
+    // **Minor 3（fix round 1）的结构锁**：`serial()` 内部必须**先取锁、再改 env**
+    // （env 是进程级全局量，`remove_var` 落在临界区外就等于「它要保护的东西在锁外」）。
+    // 变异：把 `let guard = SERIAL.lock()` 挪回函数最后一行 → 本断言真红。
+    let fn_at = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("fn serial()"))
+        .expect("前提：本文件必须有 serial() 定义");
+    let body = &lines[fn_at..(fn_at + 16).min(lines.len())];
+    let lock_at = body
+        .iter()
+        .position(|l| l.contains("SERIAL.lock()"))
+        .expect("前提：serial() 必须取 SERIAL 串行锁");
+    let env_at = body
+        .iter()
+        .position(|l| l.contains("remove_var"))
+        .expect("前提：serial() 必须摘掉 DSH_HOME / KIMI_CODE_HOME");
+    assert!(
+        lock_at < env_at,
+        "`serial()` 必须先取 SERIAL 串行锁（相对第 {lock_at} 行）、再改进程级 env（相对第 {env_at} 行）——Minor 3"
     );
 }
 
@@ -610,5 +649,68 @@ fn this_file_never_calls_collection_entries() {
             "本文件不得出现 `{forbidden}`：持 DB 锁时调采集入口 = ABBA 死锁（W-26），\
              且会毁掉「字面上的 0」前提（W-22）"
         );
+    }
+}
+
+/// **Minor 2（fix round 1）的补洞半边**：`adapter` 层是 3 秒轮询的**内核**
+/// （`adapter/mod.rs:547-555` 逐个调各 adapter 的 `find_sessions`），而本仓 L1「零进程零解析」
+/// 是**按源**判定的：某源此刻**没有运行进程** → 编排层直接给空表、**根本不调它的 `find_sessions`**
+/// （与 home 里有没有夹具无关）→ **「往该 adapter 的 `find_sessions` 里塞一行采集入口」会逃逸**。
+/// 本用例把它变成**静态机械锁**：`src/adapter/**/*.rs` 一律不得引用采集入口。
+///
+/// 变异实测（fix round 1）：
+/// * 往 **`kimi.rs`** 的 `find_sessions` 插一行 `collect::collect(false)`（本机**没有** kimi 进程
+///   → L1 在编排层跳过它）→ **本用例真红**，而 `session_poll_never_triggers_collection`
+///   **仍是绿的**（1 passed）——逃逸面被当场复现，这就是本用例存在的理由；
+/// * 对照：同一个变异放到 **`claude.rs`**（本机**有** claude 进程 → `find_sessions` 真被调用）
+///   → 行为式用例能抓到（RED）。
+///
+/// ⇒ 「行为式断言够不够」取决于**该源此刻有没有运行进程**，所以必须有静态锁兜住全部 adapter。
+#[test]
+fn adapter_layer_never_references_collection_entries() {
+    let _g = serial();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+    assert!(
+        dir.is_dir(),
+        "前提：{} 必须存在（静态锁依赖仓内路径，缺失即误红）",
+        dir.display()
+    );
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("读取 src/adapter 必须成功") {
+        let path = entry.expect("目录项必须可读").path();
+        if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            let name = path
+                .file_name()
+                .expect("文件名必须可解析")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&path).expect("adapter 源文件必须可读");
+            files.push((name, text));
+        }
+    }
+    // 正向前提：被检查清单必须非空且含**编排层**（轮询内核的入口所在）
+    assert!(
+        files.len() >= 9,
+        "前提：src/adapter 至少 9 个 .rs（实际 {}）——清单为空/缩水时本锁会静默失效",
+        files.len()
+    );
+    assert!(
+        files.iter().any(|(n, _)| n == "mod.rs"),
+        "前提：mod.rs（`get_all_sessions` 编排层 = 轮询内核）必须在被检查清单内"
+    );
+    for (name, text) in &files {
+        for forbidden in [
+            concat!("services::", "usage::collect"),
+            concat!("usage", "_collect"),
+            concat!("collect::", "collect("),
+            concat!("collect::", "collect", "_with("),
+            concat!("run", "_collection("),
+            concat!("spawn_initial", "_collection"),
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "src/adapter/{name} 不得引用采集入口 `{forbidden}`：adapter 层是 3 秒轮询内核（GC 3 / W-22）"
+            );
+        }
     }
 }
