@@ -918,6 +918,7 @@ async fn e2e_create_http_full_chain() {
         capability_table: multi_agents_manager_lib::inject::capability::new_table(),
         session_source: Box::new(multi_agents_manager_lib::adapter::get_all_sessions),
         pairing_counter: Box::new(c9_running_projects),
+        ui_config_source: Box::new(|| None),
         store: DeviceStore::memory(),
         injector: Arc::new(RealInjector),
         resume_spawner: Arc::new(multi_agents_manager_lib::inject::resume::spawn_terminal),

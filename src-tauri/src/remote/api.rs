@@ -1014,7 +1014,16 @@ pub async fn session_send(
     // 产物（flush 层无需再判一次，也就不会有「入队形态与投递形态不一致」的漂移面）。
     // 审计 action 由同一判据（`is_slash_message`）给出 slash，见下方
     // [`audit_action_for`] 的职责划分。
-    let content = crate::inject::normalize::compose_injection(&device_name, &req.text);
+    // 签名开关（2026-10-05 用户裁决）：设置「远程消息带设备签名」默认关（省 token；
+    // 溯源真源在注入审计页）。经 store.with 走会话自己的库（测试内存库零污染）
+    let signature_on = st.store.with(|conn| {
+        crate::inject::normalize::message_signature_enabled_conn(conn)
+    });
+    let content = crate::inject::normalize::compose_injection_flagged(
+        &device_name,
+        &req.text,
+        signature_on,
+    );
     // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
     // 注释），入队与 ⑦ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
     // queueOnly 项与普通队列项同权（转闲按序自动放行），队列存储不携带该标志
@@ -4002,27 +4011,93 @@ pub async fn session_question(
     let nav_both = tool_id == "claude";
     // **屏读快照**（2026-10-03 卡面状态权威源）：终端当前停在题屏 → 回传勾选态/
     // 自由作答/题干（前端对位到载荷题并纠偏 mqIndex/状态）；停在 Review 确认屏 →
-    // {review:true}（前端直接进确认卡）。claude-only（屏读 Windows 能力 + 解析器
-    // 形态族）；屏读失败/非题屏 → null（前端维持本地状态）。
+    // {review:true}（前端直接进确认卡）。工具面（2026-10-05 推广批 F3/F6）：按
+    // **取证状态**开放——claude（全链标杆）/ opencode（题页锚 `enter toggle` 方言
+    // 解析）必有；kimi/codex 未取证不给（「未取证不出手」）。屏读失败/非题屏 →
+    // null（前端维持本地状态）。
     let screen_snapshot = match session_pid {
-        Some(pid) if tool_id == "claude" && !questions.is_empty() => {
-            let st2 = st.clone();
-            let tool2 = tool_id.clone();
-            tokio::task::spawn_blocking(move || {
-                (st2.screen_probe)(&tool2, pid).and_then(|lines| {
-                    if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
-                        return Some(snapshot_to_json(&snap));
-                    }
-                    matches!(
-                        crate::inject::question::probe_review_screen(&lines),
-                        crate::inject::question::ScreenStep::Ready(_)
-                    )
-                    .then(|| serde_json::json!({ "review": true }))
+        Some(pid) if !questions.is_empty() => {
+            let snapshot_supported =
+                matches!(tool_id.as_str(), "claude" | "opencode" | "kimi");
+            if !snapshot_supported {
+                None
+            } else {
+                let st2 = st.clone();
+                let tool2 = tool_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    (st2.screen_probe)(&tool2, pid).and_then(|lines| {
+                        // opencode 方言解析（题页锚 `enter toggle`；Confirm 页 → review）
+                        if tool2 == "opencode" {
+                            // **闸门 2「证据自带失败」**（2026-10-06）：单选页同步断链
+                            // 排障——GET 屏读链路每一步自报结果（读不行/解析不行/
+                            // 解析命中），未知形态第一次出现就自带证据，不再靠猜。
+                            // GET 只在挂载/跃迁触发，INFO 量级安全。
+                            if crate::inject::question::opencode_confirm_present(&lines) {
+                                log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → Review 页",
+                                    lines.len()
+                                );
+                                return Some(serde_json::json!({ "review": true }));
+                            }
+                            let snap = crate::inject::question_screen_oc::
+                                opencode_question_screen_snapshot(&lines);
+                            match &snap {
+                                Some(s) => log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → 快照命中: \
+                                     heading={}字 checked={}项 free_text={}",
+                                    lines.len(),
+                                    s.heading.chars().count(),
+                                    s.checked.len(),
+                                    match &s.free_text {
+                                        Some(t) =>
+                                            format!("{}字", t.chars().count()),
+                                        None => "无".to_string(),
+                                    }
+                                ),
+                                None => {
+                                    let head = lines
+                                        .iter()
+                                        .find(|l| !l.trim().is_empty())
+                                        .map(|l| l.chars().take(40).collect::<String>())
+                                        .unwrap_or_default();
+                                    let tail = lines
+                                        .iter()
+                                        .rev()
+                                        .find(|l| !l.trim().is_empty())
+                                        .map(|l| l.chars().take(40).collect::<String>())
+                                        .unwrap_or_default();
+                                    log::info!(
+                                        "[question-screen] GET pid={pid} rows={} → 解析失败\
+                                         （多选锚/单选结构判据均未命中）head={head:?} tail={tail:?}",
+                                        lines.len()
+                                    );
+                                }
+                            }
+                            return snap.map(|s| snapshot_to_json(&s));
+                        }
+                        // kimi 多选页（探测批 K 形态：勾选标记 + Other 行 + footer
+                        // `tab switch`）——快照同步勾选态与 Other 残留（2026-10-05
+                        // 屏读标准补齐批 4）；单选页形态未取证 → 解析 None 保守降级
+                        if tool2 == "kimi" {
+                            return crate::inject::question_screen_oc::kimi_question_screen_snapshot(
+                                &lines,
+                            )
+                            .map(|snap| snapshot_to_json(&snap));
+                        }
+                        if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
+                            return Some(snapshot_to_json(&snap));
+                        }
+                        matches!(
+                            crate::inject::question::probe_review_screen(&lines),
+                            crate::inject::question::ScreenStep::Ready(_)
+                        )
+                        .then(|| serde_json::json!({ "review": true }))
+                    })
                 })
-            })
-            .await
-            .ok() // JoinError
-            .and_then(|inner| inner) // 屏读/解析失败 → None（前端维持本地状态）
+                .await
+                .ok() // JoinError
+                .and_then(|inner| inner) // 屏读/解析失败 → None（前端维持本地状态）
+            }
         }
         _ => None,
     };
@@ -4039,6 +4114,20 @@ pub async fn session_question(
             "advance": advance,
             // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
             "navBoth": nav_both,
+            // **多选卡自由作答**旗标（缺省 false → 旧后端前向兼容）。claude 此前经
+            // navBoth 间接点亮，本旗标为显式能力位（前端判 `navBoth ∨ multiFreeText`，
+            // 两旗任一即可）。2026-10-05 codex 实测点亮（Space 选中 + Tab notes 在
+            // 多选题全链实证——探测批 C）；kimi 多选形态未定案（探测批 K），恒 false
+            "multiFreeText": matches!(tool_id.as_str(), "claude" | "opencode" | "codex"),
+            // **覆盖写入/清空能力位**（2026-10-05 深夜）：这两个按钮的键序语义须逐
+            // 工具实机取证才可出手——opencode 已取证（enter 探针走位 + 退格清空闭环，
+            // 本机自建会话活体验证）；codex 的 notes 覆盖语义未取证、kimi 多选自由
+            // 作答未接入 → false（前端对这两家**不渲染**覆盖写入/清空按钮——「未取证
+            // 不出手」）。缺省 false（旧后端前向兼容）
+            // 覆盖写入/清空能力位（2026-10-06 扩 codex）：opencode=多选回删语义
+            // （1754 行）；codex=Tab 清空备注（footer 活体明文「tab or esc to
+            // clear note」）。kimi 多选 Other 未点亮（multiFreeText=false 无面）
+            "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "codex"),
             // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
             // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
             "screen": screen_snapshot,
@@ -4262,6 +4351,7 @@ pub async fn session_question_answer(
         if q_idx >= hit.questions.len() {
             return Err("bad_index");
         }
+        let pages = hit.questions.len() + 1; // 题目数 + Submit 页（opencode prev 用）
         let q = hit.questions.into_iter().nth(q_idx).unwrap_or_else(|| {
             // unreachable（上面已判界内），防御性占位——序列构造会因选项越界拒绝
             crate::inject::question::Question {
@@ -4332,7 +4422,7 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id, multi_question))
+        Ok((session, seq, q, tool_id, multi_question, pages))
     })
     .await
     {
@@ -4345,7 +4435,7 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool, multi_flow) = match lookup {
+    let (session, sequence, q_for_plan, q_tool, multi_flow, pages) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -4381,6 +4471,7 @@ pub async fn session_question_answer(
         multi_flow,
         &q_for_plan,
         q_tool,
+        pages,
     );
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
@@ -4657,6 +4748,34 @@ pub async fn session_question_answer(
 enum StagePlan {
     /// 单键动作（select/toggle/cancel）：一次投递一个键，无后续阶段
     SingleKey,
+    /// **opencode 切题**（2026-10-05 ◀/▶ 双向）：tab×tabs 前向循环（next=1 /
+    /// prev=pages-1 等效回退；逐键 settle）+ 前后读屏到达验证（屏相同 = tab 未
+    /// 生效 → Failed 可重试），回执 AdvanceDone 带到达后快照
+    OpencodeAdvance {
+        tabs: usize,
+        direction: crate::inject::question::NavDirection,
+    },
+    /// **kimi 多选 toggle 标记验证**（2026-10-05 屏读标准补齐）：数字发出前后
+    /// 各读一屏（kimi 多选页快照，K2 标记 `[ ]`/`[?]`）→ 目标选项标记翻转 =
+    /// verified；Other 行内容变化（数字被打进 Other 编辑态）→ 退格 + `↑` 重试
+    KimiToggle { index: usize },
+    /// **codex 多选 toggle 高亮定位**（2026-10-05 屏读标准补齐）：`? ` 前缀
+    /// （C7 定案唯一可读高亮）定位当前行 → ↓/↑ 逐步走位（每步重读验证）→
+    /// 到达目标行 → Space（C2：选中不前进）。notes 编辑态在场 → 拒绝
+    CodexToggle { target: usize },
+    /// **焦点守卫版单键**（2026-10-05，opencode 专属）：own 行（编辑中或已保存）
+    /// 持焦时数字被吃进该行——先确认焦点移出（opencode_ensure_focus_off_edit_row）
+    /// 再逐键投递。`own_pos` = own 行的屏上编号（选项数 + 1）。
+    /// `verify_flip`（2026-10-05 屏读标准补齐）= Toggle 专属：数字后读屏核对目标
+    /// 行勾选翻转，回执 `ToggleDone { checked, verified, screen }`（对齐 claude）；
+    /// Select 单选即答无翻转语义，保持 KeySent。`index` = 目标选项下标（0 起）。
+    DigitKey {
+        own_pos: usize,
+        index: Option<usize>,
+        verify_flip: bool,
+        /// Select 单选即答（成功 = own 行消失/页面推进；否则 Toggle 翻转语义）
+        advance_success: bool,
+    },
     /// 多选提交阶段机；`max_down_steps` = 走位上限（选项数 + 2）
     Submit { max_down_steps: usize },
     /// 自由作答阶段机（单题形态）
@@ -4672,11 +4791,16 @@ enum StagePlan {
     /// → Review 汇总屏 → 确认
     KimiFreeText,
     /// **codex Tab 备注阶段机**（批次戊 E5）：弹窗 footer 锚判读 → Tab → 打字 →
-    /// Enter 提交（当前高亮项+备注）→ 终态
-    CodexNotes,
+    /// Enter 提交（当前高亮项+备注）→ 终态。`overwrite` = 已在备注态时**再按
+    /// Tab 清空旧备注**（footer 活体明文「tab or esc to clear note」）→ 重打
+    /// 全文；text 空 = 纯清空（清空路径不发 Enter——codex Enter=提交整卷，
+    /// 空备注提交未取证，提交走卡面提交按钮）
+    CodexNotes { overwrite: bool },
     /// **opencode own answer 阶段机**（批次戊 E6）：行序定位 → enter 开行 →
     /// 裸打字守卫（屏读确认占位行）→ 打字 → enter 提交
-    OpencodeOwnAnswer,
+    /// opencode own answer（2026-10-04 toggle 双段语义重写）：overwrite = 已存内容时
+    // 先退格清空再打字（用户实测光标在末尾）
+    OpencodeOwnAnswer { overwrite: bool },
     /// **opencode 多选提交阶段机**（批次戊 E6，2026-09-23 接线）：首段屏读
     /// 「Confirm 已在场则跳过 tab」→（不在场才 tab）→ Confirm 页 → enter 提交
     OpencodeSubmit,
@@ -4702,6 +4826,7 @@ impl StagePlan {
     /// TUI 追加的 `Type something` 行（第 n+1 行）→ `Submit` 行（第 n+2 行）。
     /// 从第 1 行最多需要 n+1 次 ↓ 到 Submit 行；再加 1 次容错（重绘竞态下一次按键
     /// 未生效的情形不会白跑——上限只是**死循环兜底**，正常路径在每步复核里提前停手）。
+    #[allow(clippy::too_many_arguments)] // 方向/覆盖/单选旗标/页数均为独立语义位
     fn for_action(
         action: crate::inject::question::AnswerAction,
         index: Option<usize>,
@@ -4710,6 +4835,7 @@ impl StagePlan {
         multi_flow: bool,
         q: &crate::inject::question::Question,
         tool: &str,
+        pages: usize,
     ) -> Self {
         use crate::inject::question::AnswerAction as A;
         match (action, tool) {
@@ -4726,8 +4852,8 @@ impl StagePlan {
             // 误落下面的 claude Submit 行走位形态，屏读判据在 opencode 屏上必失败）
             (A::Submit, "opencode") => Self::OpencodeSubmit,
             (A::FreeText, "kimi") => Self::KimiFreeText,
-            (A::FreeText, "codex") => Self::CodexNotes,
-            (A::FreeText, "opencode") => Self::OpencodeOwnAnswer,
+            (A::FreeText, "codex") => Self::CodexNotes { overwrite },
+            (A::FreeText, "opencode") => Self::OpencodeOwnAnswer { overwrite },
             // 2026-10-02/03：claude 自由作答路由——**多题流子题（含单选）与单题多选**
             // 走勾选框行内联编辑编排（数字定位在多题/多选屏无效；单选子题勾选兜底
             // 自动跳过——无勾选框形态）；**单题单选**维持既有数字定位编排（K4-K7 定案）
@@ -4744,6 +4870,42 @@ impl StagePlan {
             },
             (A::FreeText, _) => Self::FreeText,
             // Advance 是单键纯导航（tab），与 select/toggle/cancel 同通道
+            // **kimi 多选 toggle**（2026-10-05 屏读标准补齐）：数字直选行 toggle
+            // （K3 定案，与高亮无关）+ 标记验证（K2：[?] 已选标记可读）
+            (A::Toggle, "kimi") => Self::KimiToggle {
+                index: index.unwrap_or(0),
+            },
+            // **codex 多选 toggle**（2026-10-05 屏读标准补齐）：`? ` 高亮定位 +
+            // Space（C2/C7 定案）
+            (A::Toggle, "codex") => Self::CodexToggle {
+                target: index.unwrap_or(0) + 1,
+            },
+            // **opencode 数字动作走焦点守卫版单键**（2026-10-05 用户实机语义：
+            // 光标停在 own answer 行时数字被吃进该行——发键前先移出）。
+            // Toggle 额外带**后置翻转校验**（2026-10-05 屏读标准补齐：数字直发
+            // 后读屏核对目标行勾选翻转，对齐 claude toggle 契约）
+            (A::Select | A::Toggle, "opencode") => {
+                Self::DigitKey {
+                    own_pos: q.options.len() + 1,
+                    index,
+                    verify_flip: action == A::Toggle,
+                    // 单选 Select = 选即提交（成功判据为推进而非翻转）
+                    advance_success: action == A::Select && !q.multi_select,
+                }
+            }
+            // **opencode 切题 = tab 前向循环**（2026-10-05 用户需求 ◀/▶ 双向 +
+            // 屏读标准补齐：next=tab×1；prev=tab×(pages-1) 前向循环等效回退——
+            // opencode 实测只有 tab 前向键、shift+tab 无效；页序固定
+            // 题目…→Submit→回绕，任意页前向 pages-1 步必达前页）。两向统一走
+            // OpencodeAdvance 臂做**前后读屏到达验证**。
+            (A::Advance, "opencode") => Self::OpencodeAdvance {
+                tabs: if direction == crate::inject::question::NavDirection::Prev {
+                    pages.saturating_sub(1).max(1)
+                } else {
+                    1
+                },
+                direction,
+            },
             (A::Advance | A::Select | A::Toggle | A::Cancel, _) => Self::SingleKey,
         }
     }
@@ -5000,12 +5162,388 @@ fn dispatch_question_action(
                 Err(e) => dispatch_abort(e),
             }
         }
+        StagePlan::DigitKey {
+            own_pos,
+            index,
+            verify_flip,
+            advance_success,
+        } => {
+            // **反应式切换**（2026-10-05 用户设计：动作键即探针——删除前置焦点
+            // 守卫，其探针回车是「每次点选项闪烁两次/点击次数不对」回归的根因）。
+            //
+            // 常态（焦点在列表行）：数字按**编号**精准切换目标行，一次直达、
+            // 零闪烁（opencode 2.0.22 实测：数字与高亮无关）。
+            // 异常态（焦点在 own 行）：数字被吃进文字行 → 前后差分检出 →
+            // 退格清掉 → 退出键按字段余量分派（空→enter / 有残留→↑，
+            // 2026-10-06 用户实测细化；无条件 ↑ 会让空字段永不退出=写入/
+            // 删除死循环）→ 重试（有界 own_pos+2，含回绕全覆盖）。
+            // 走满 → Toggle: checked=None/verified=false；Select: Failed（诚实）。
+            let probe = question_probe(st, tool, pid);
+            let target_row = index.unwrap_or(0) + 1;
+            let d = match crate::inject::dialect::own_answer_dialect("opencode") {
+                Some(d) => d,
+                None => {
+                    return QuestionDispatch::Failed("方言表缺 opencode 条目".to_string());
+                }
+            };
+            // 污染处置的**等待拍长**（2026-10-06 用户实机定位：SUBMIT_DELAY_MS=150ms
+            // 后屏读仍见旧态——删除/退出后 150ms 读屏 = 读旧屏，污染判据与退出键
+            // 分派全部失真 → 「写入2删除2」循环。删完/退出后各等 250ms 再读再发）
+            const POLLUTION_SETTLE_MS: u64 = 250;
+            for _round in 0..=(own_pos + 2) {
+                let before = probe("base");
+                let before_target = before
+                    .as_ref()
+                    .and_then(|l| {
+                        crate::inject::question::opencode_option_checked_at(
+                            l,
+                            target_row,
+                            &d,
+                        )
+                    });
+                let before_own = before.as_ref().and_then(|l| {
+                    crate::inject::question::opencode_single_own_row_content_at(l, *own_pos)
+                });
+                let _ = &before_own;
+                for key in sequence {
+                    if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
+                        return QuestionDispatch::Failed(e);
+                    }
+                    // **逐键 settle**（2026-10-05 用户实机定位：无等待读屏=读旧屏
+                    // ——翻转/污染全检不出，重试分支永不触发）
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                }
+                // 读屏前最后 settle（TUI 重绘竞态窗口）
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+                let after = probe("post");
+                let Some(after_lines) = after else {
+                    break; // 读不到屏：键已发出，无法核验 → 走诚实回执
+                };
+                let after_target = crate::inject::question::opencode_option_checked_at(
+                    &after_lines,
+                    target_row,
+                    &d,
+                );
+                // **翻页成功判定**（2026-10-06 18:27 事故定案，必须在污染判定
+                // 之前）：单选 select **即交推进**——数字命中后终端停在下一题/
+                // Review，before/after 题干不同 = 数字已生效。跨页后 before_own/
+                // after_own 属于**不同题**，污染比较全是噪声（18:27 round0 误报
+                // 污染 → 退位键落在新题页 → 下一轮数字误选新题 = 「只选第一题
+                // 第二题也被选」）。
+                let before_head = before
+                    .as_ref()
+                    .and_then(|l| {
+                        crate::inject::question_screen_oc::opencode_question_screen_snapshot(l)
+                    })
+                    .map(|s| s.heading);
+                let after_snap =
+                    crate::inject::question_screen_oc::opencode_question_screen_snapshot(
+                        &after_lines,
+                    );
+                let after_head = after_snap.as_ref().map(|s| s.heading.clone());
+                let page_changed =
+                    matches!((&before_head, &after_head), (Some(b), Some(a)) if b != a);
+                if *advance_success && page_changed {
+                    return QuestionDispatch::SelectDone { screen: after_snap };
+                }
+                // Toggle 翻转判定（目标行勾选态前后变化）
+                if matches!((before_target, after_target), (Some(b), Some(a)) if b != a) {
+                    let screen = crate::inject::question_screen_oc::opencode_question_screen_snapshot(&after_lines);
+                    if *verify_flip {
+                        return QuestionDispatch::ToggleDone {
+                            checked: after_target,
+                            verified: true,
+                            screen,
+                        };
+                    }
+                    if *advance_success {
+                        return QuestionDispatch::SelectDone { screen };
+                    }
+                    return QuestionDispatch::KeySent { stage: None };
+                }
+                // **Select 单选推进判定**：own 行消失（选即提交，弹窗关闭/翻页）
+                if *advance_success {
+                    let own_before = before
+                        .as_ref()
+                        .and_then(|l| {
+                            crate::inject::question::opencode_single_own_row(l)
+                        })
+                        .is_some();
+                    let own_after = crate::inject::question::opencode_single_own_row(
+                        &after_lines,
+                    )
+                    .is_some();
+                    if own_before && !own_after {
+                        let screen = crate::inject::question_screen_oc::opencode_question_screen_snapshot(&after_lines);
+                        return QuestionDispatch::SelectDone { screen };
+                    }
+                }
+                // **翻页但未按成功收兵**（toggle/未分类）——跨页续发键序全是
+                // 噪声，诚实收兵不再发键：toggle=未验证，其他=已发键
+                if page_changed {
+                    if *verify_flip {
+                        return QuestionDispatch::ToggleDone {
+                            checked: None,
+                            verified: false,
+                            screen: None,
+                        };
+                    }
+                    return QuestionDispatch::KeySent { stage: None };
+                }
+                // **own 行污染判定**：own 行内容变化（数字被吃进文字行）→ 退格清掉
+                let after_own = crate::inject::question::opencode_single_own_row_content_at(
+                    &after_lines,
+                    *own_pos,
+                );
+                let before_own = before.as_ref().and_then(|l| {
+                    crate::inject::question::opencode_single_own_row_content_at(l, *own_pos)
+                });
+                let mut polluted = false;
+                if let (Some(b), Some(a)) = (&before_own, &after_own) {
+                    if b != a {
+                        polluted = true;
+                        let added = a.chars().count().saturating_sub(b.chars().count()).max(1);
+                        for _ in 0..added {
+                            if let Err(e) =
+                                injector.locate_and_send_key_spec(pid, "backspace", spec)
+                            {
+                                return QuestionDispatch::Failed(e);
+                            }
+                        }
+                        // 删完等一拍再退（250ms；150ms 实机读旧屏——见上等待拍长注）
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            POLLUTION_SETTLE_MS,
+                        ));
+                    }
+                }
+                // 退出/换位键按**字段余量分派**（2026-10-06 用户实测细化——
+                // 「写入2删除2循环」根因：退格后字段已空，单纯 ↑ 不保存不退出
+                // → 下一轮数字再被吃 → 原无条件 ↑ 重试永不收敛）：
+                // 污染且退格后字段**空**（打前是占位/空）→ **enter** 提交空=
+                // 退出文字行（空字段 enter 无内容即交连锁）；字段有**残留**
+                // （打前已有内容，退格只清了新增）→ **↑** 保存+退出（残留
+                // 原样保留）。无污染（数字未进字段）→ ↑ 维持换位语义。
+                let exit_key = if polluted {
+                    match &before_own {
+                        Some(b) if !b.to_lowercase().contains(d.label) => "up",
+                        _ => "enter",
+                    }
+                } else {
+                    "up"
+                };
+                // **逐轮自报**（闸门 2）：own 行整串 + 污染判定 + 退出键——
+                // 「写入2删除2」类循环的每一轮直接可读，不再盲猜
+                log::info!(
+                    "[digit-guard] own={own_pos} target={target_row} polluted={polluted} \
+                     exit={exit_key} before_own={before:?} after_own={after:?}",
+                    before = before_own.as_deref().unwrap_or("(无行)"),
+                    after = after_own.as_deref().unwrap_or("(无行)"),
+                );
+                if let Err(e) = injector.locate_and_send_key_spec(pid, exit_key, spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(
+                    POLLUTION_SETTLE_MS,
+                ));
+            }
+            if *verify_flip {
+                // 键已发出但未能核验翻转——不谎报（同 claude toggle 读屏失败语义）
+                return QuestionDispatch::ToggleDone {
+                    checked: None,
+                    verified: false,
+                    screen: None,
+                };
+            }
+            if *advance_success {
+                return QuestionDispatch::SelectDone { screen: None };
+            }
+            QuestionDispatch::KeySent { stage: None }
+        }
+
+        StagePlan::KimiToggle { index } => {
+            // **kimi 多选 toggle 标记验证**（2026-10-05 屏读标准补齐，K2/K3 定案）：
+            // 数字直选行 toggle（与高亮无关）→ 前后各读一屏（kimi 多选页快照，
+            // K2 标记 `[ ]`/`[?]`）→ 目标选项标记翻转 = verified。
+            // **Other 编辑态污染防护**（K4：Other 编辑态下数字会打进文本）：
+            // Other 行内容变化（free_text 出现/变化）→ 退格清掉 → `↑` 移出 → 重试
+            // （有界 4 轮 = Other 编辑行上下可达范围）；走满 → 不谎报。
+            let probe = question_probe(st, tool, pid);
+            let digit = format!("{}", index + 1);
+            let before = probe("pre").and_then(|l| {
+                crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
+            });
+            for _round in 0..=4 {
+                // 发数字（kimi 数字直选 = 编号行 toggle，与高亮无关）
+                if let Err(e) = injector.locate_and_send_key_spec(pid, &digit, spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+                let after = probe("post").and_then(|l| {
+                    crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
+                });
+                // Other 行污染（K4：Other 编辑态下数字会打进文本）：free_text 出现/变化 → 退格清掉
+                if let (Some(b), Some(a)) = (&before, &after) {
+                    if b.free_text != a.free_text {
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "backspace", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "up", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        continue;
+                    }
+                }
+                // 目标选项标记翻转 → 完成
+                if let (Some(b), Some(a)) = (&before, &after) {
+                    let bt = b.checked.get(*index);
+                    let at = a.checked.get(*index);
+                    if bt == at && bt != Some(&Some(true)) {
+                        // 未翻转且非刚勾上 → ↓ 换位重试（有界）
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "down", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        continue;
+                    }
+                    let screen = after.as_ref().map(|_| ());
+                    let _ = screen;
+                    return QuestionDispatch::ToggleDone {
+                        checked: at.copied().flatten(),
+                        verified: bt != at,
+                        screen: None, // kimi 多选页快照经 ToggleDone.screen 契约回传（QuestionScreenSnapshot 类型另批统一）
+                    };
+                }
+                break; // 快照不可读 → 走不谎报回执
+            }
+            QuestionDispatch::ToggleDone {
+                checked: None,
+                verified: false,
+                screen: None,
+            }
+        }
+        StagePlan::CodexToggle { target } => {
+            // **codex 多选 toggle 高亮定位 + Space**（2026-10-05 屏读标准补齐，
+            // C7：`? ` 前缀 = 唯一可读高亮；C2：Space = 选中不前进）：
+            // 读当前高亮行 → ↓/↑ 逐步走位（每步重读验证到位）→ 到达目标行 →
+            // Space。notes 编辑态在场 → 拒绝（会污染备注）。
+            let probe = question_probe(st, tool, pid);
+            if let Some(lines) = probe("pre") {
+                let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+                if lower
+                    .iter()
+                    .any(|l| l.contains(crate::inject::question::CODEX_NOTES_OPENED_FOOTER))
+                {
+                    return QuestionDispatch::Failed(
+                        "备注编辑器仍开启（footer「tab or esc to clear notes」在场）——请先在终端完成（enter 提交）或清除（esc）备注后再作答选项".to_string(),
+                    );
+                }
+            }
+            for _round in 0..=20 {
+                let cur = probe("hl").and_then(|l| {
+                    crate::inject::question::codex_highlight_row(&l)
+                });
+                match cur {
+                    Some(hl) if hl == *target => {
+                        // 到达目标行 → Space 选中
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "space", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        return QuestionDispatch::KeySent { stage: None };
+                    }
+                    Some(hl) if hl < *target => {
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "down", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                    }
+                    Some(_) => {
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "up", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                    }
+                    None => {
+                        return QuestionDispatch::Failed(
+                            "读不到高亮行（`? ` 前缀缺席）——已中止；请人工核对终端".to_string(),
+                        );
+                    }
+                }
+            }
+            QuestionDispatch::Failed(
+                "高亮定位走满预算仍未到达目标选项——已中止；请人工核对终端".to_string(),
+            )
+        }
+        StagePlan::OpencodeAdvance { tabs, direction } => {
+            // **切题到达验证**（2026-10-05 屏读标准补齐）：tab 前后各读一屏——
+            // 完全相同 = tab 未生效（键被吞/焦点异常）→ Failed 可重试；有变化 =
+            // 到达 → AdvanceDone 带到达后快照（确认卡摘要同步终端真相的通道）。
+            // 读不到屏 → 保持既有盲发行为（不误报）。
+            let probe = question_probe(st, tool, pid);
+            let before = probe("adv-pre");
+            for _ in 0..*tabs {
+                if let Err(e) = injector.locate_and_send_key_spec(pid, "tab", spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+            }
+            let after = probe("adv-post");
+            if let (Some(b), Some(a)) = (&before, &after) {
+                if b == a {
+                    return QuestionDispatch::Failed(
+                        "tab 未生效（屏面未变化）——请人工核对终端后重试".to_string(),
+                    );
+                }
+            }
+            let snapshot = after
+                .as_ref()
+                .and_then(|l| crate::inject::question_screen_oc::opencode_question_screen_snapshot(l));
+            QuestionDispatch::AdvanceDone {
+                advanced: true,
+                direction: *direction,
+                snapshot,
+            }
+        }
         StagePlan::SingleKey => {
+            // **codex 备注编辑器守卫**（2026-10-05）：codex 的 SingleKey 只剩单选
+            // select（数字直选即交）——备注编辑器开启时数字会写进备注，检出即拒。
+            if tool == "codex" {
+                let probe = question_probe(st, tool, pid);
+                if let Err(e) =
+                    crate::inject::question::codex_ensure_notes_closed(probe("guard"))
+                {
+                    return dispatch_abort(e);
+                }
+            }
+            // **后置屏读到达验证**（2026-10-05 屏读标准补齐——kimi/codex select）：
+            // kimi 数字+enter 后终端推进到 Review 汇总屏；codex 数字即答后弹窗
+            // 推进。前后各读一屏——完全相同 = 按键未生效 → Failed 可重试。
+            // 读不到屏 → 保持既有盲发行为（不误报）。
+            let pre_select = if tool == "kimi" || tool == "codex" {
+                let probe = question_probe(st, tool, pid);
+                probe("pre-select")
+            } else {
+                None
+            };
             // 逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
             // 前端按 failed{error} 提示用户核对终端状态后重试）
             for key in sequence {
                 if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
                     return QuestionDispatch::Failed(e);
+                }
+            }
+            if (tool == "kimi" || tool == "codex") && !sequence.is_empty() {
+                let probe = question_probe(st, tool, pid);
+                if let (Some(pre), Some(post)) = (&pre_select, probe("post-select")) {
+                    if pre == &post {
+                        return QuestionDispatch::Failed(
+                            "按键未生效（屏面未变化）——请人工核对终端后重试".to_string(),
+                        );
+                    }
                 }
             }
             QuestionDispatch::KeySent { stage: None }
@@ -5370,7 +5908,7 @@ fn dispatch_question_action(
             }
         }
         // ===== 批次戊 E5：codex Tab 备注阶段机 =====
-        StagePlan::CodexNotes => {
+        StagePlan::CodexNotes { overwrite } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
@@ -5401,6 +5939,7 @@ fn dispatch_question_action(
             };
             let out = crate::inject::question::run_codex_notes_stages(
                 text,
+                *overwrite,
                 || probe("codex-notes"),
                 || poll_receipt_stage(|| probe("codex-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
@@ -5414,7 +5953,7 @@ fn dispatch_question_action(
             }
         }
         // ===== 批次戊 E6：opencode own answer 阶段机 =====
-        StagePlan::OpencodeOwnAnswer => {
+        StagePlan::OpencodeOwnAnswer { overwrite } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
@@ -5445,13 +5984,16 @@ fn dispatch_question_action(
             };
             let out = crate::inject::question::run_opencode_own_answer_stages(
                 text,
+                *overwrite,
                 || poll_receipt_stage(|| probe("oc-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
             match out {
-                Ok(o) => QuestionDispatch::StageDone {
-                    stage: QUESTION_STAGE_FREE_TEXT,
-                    receipt_seen: o.receipt_seen,
+                // 2026-10-05 F3：回执带**屏读真值**（该行屏上文本+勾选态——卡面权威
+                // 源=屏读，与 claude 多选自由作答同形；前端零改动消费）
+                Ok(o) => QuestionDispatch::MultiFreeTextDone {
+                    text: o.screen_text,
+                    checked: o.screen_checked,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -5525,6 +6067,23 @@ fn stage_from_abort(err: &str) -> &'static str {
     // 切题路径（2026-09-24，先于其余路径匹配——切题的走位/分类文案须归 advance 段）
     if err.contains("切题") || err.contains("下一题") {
         return QUESTION_STAGE_ADVANCE;
+    }
+    // opencode own answer 编辑态守卫中止（2026-10-05：先于切勾臂匹配——中止文案含
+    // 「勾选翻转」字样会被下方 toggle 关键词误收成「定位选项行并切勾」；本中止发生
+    // 在 enter 开编辑之后、打字之前，归 free-row 段）
+    if err.contains("编辑态未开启") || err.contains("输入行未开启") || err.contains("编辑态似乎已开启")
+    {
+        return QUESTION_STAGE_FREE_ROW;
+    }
+    // 单选作答「终端不在题目页」中止（2026-10-05）：盲走/打字发生在 Submit 总结
+    // 页在场时——引导返回题目页，归 free-row 段（先于守卫臂与兜底）
+    if err.contains("终端不在题目页") {
+        return QUESTION_STAGE_FREE_ROW;
+    }
+    // 发数字前置焦点守卫中止（2026-10-05）：守卫服务 select/toggle 的数字路径，
+    // 归 select 段（先于切勾臂——守卫文案含「勾选/翻转」字样会被误收）
+    if err.contains("焦点守卫") {
+        return "select";
     }
     // 切勾路径（2026-09-24，先于提交路径匹配——「仍未把焦点移到目标选项行」会被
     // 下方 Submit 行臂误收，切勾的走位目标是选项行不是推进行）
@@ -7897,7 +8456,14 @@ pub async fn session_create(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| CREATE_DEFAULT_FIRST_MESSAGE.to_string());
-    let composed = crate::inject::normalize::compose_injection(&device_name, &text);
+    let signature_on = st.store.with(|conn| {
+        crate::inject::normalize::message_signature_enabled_conn(conn)
+    });
+    let composed = crate::inject::normalize::compose_injection_flagged(
+        &device_name,
+        &text,
+        signature_on,
+    );
     let run = CreateRun {
         task_id,
         tool,
@@ -8494,7 +9060,8 @@ mod tests {
                 false,
                 false,
                 &q,
-                "opencode"
+                "opencode",
+                4,
             ),
             StagePlan::OpencodeSubmit,
             "opencode 多选 submit 走 OpencodeSubmit 阶段机"
@@ -8507,7 +9074,8 @@ mod tests {
                 false,
                 false,
                 &q,
-                "claude"
+                "claude",
+                4,
             ),
             StagePlan::Submit { max_down_steps: 4 },
             "claude 多选 submit 维持 Submit 行走位形态（选项 2 + 2）"
@@ -8520,7 +9088,8 @@ mod tests {
                 false,
                 false,
                 &q,
-                "claude"
+                "claude",
+                4,
             ),
             StagePlan::ClaudeToggle { target: 1 },
             "claude 多选 toggle 走闭环切勾阶段机（2026-09-24 数字路径废止）"
@@ -8533,10 +9102,33 @@ mod tests {
                 false,
                 false,
                 &q,
-                "opencode"
+                "opencode",
+                4,
             ),
-            StagePlan::SingleKey,
-            "opencode toggle 维持单键（enter 切勾，戊探A 定案）"
+            StagePlan::DigitKey {
+                own_pos: 3,
+                index: Some(0),
+                verify_flip: true,
+                advance_success: false,
+            },
+            "opencode toggle 走焦点守卫版单键（2026-10-05：编辑行持焦时数字被吃进该行）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Prev,
+                false,
+                false,
+                &q,
+                "opencode",
+                4,
+            ),
+            StagePlan::OpencodeAdvance {
+                tabs: 3,
+                direction: crate::inject::question::NavDirection::Prev,
+            },
+            "opencode 上一题 = tab×(总页数-1) 前向循环等效回退（2026-10-05 用户需求）"
         );
         assert_eq!(
             StagePlan::for_action(
@@ -8546,10 +9138,31 @@ mod tests {
                 false,
                 false,
                 &q,
-                "opencode"
+                "opencode",
+                4,
             ),
-            StagePlan::SingleKey,
-            "advance 是单键纯导航（tab），与 select/toggle/cancel 同通道"
+            StagePlan::OpencodeAdvance {
+                tabs: 1,
+                direction: crate::inject::question::NavDirection::Next,
+            },
+            "opencode 下一题 = tab×1（前后读屏到达验证在 OpencodeAdvance 臂）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
+                &q,
+                "opencode",
+                4,
+            ),
+            StagePlan::OpencodeAdvance {
+                tabs: 1,
+                direction: crate::inject::question::NavDirection::Next,
+            },
+            "opencode advance 走切题臂（前后读屏到达验证，2026-10-05 屏读标准补齐）"
         );
     }
 

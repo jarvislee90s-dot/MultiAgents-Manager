@@ -742,15 +742,14 @@ export type PlanFeedbackAction = "type" | "clear";
 /** 计划反馈回执：editor_ready = 反馈编辑态已进入（start）；done = 动作已投递
  *  （type/clear）；failed = 投递失败 / 状态不符（error 为后端中文文案，可重试） */
 export type PlanFeedbackResult =
-  | { status: "editor_ready" | "done" }
-  | { status: "failed"; error: string };
+  { status: "editor_ready" | "done" } | { status: "failed"; error: string };
 
 /** 计划反馈（POST /session-plan-feedback）。非 2xx 抛 ApiError（错误码在 data.error，
  *  调用方分診中文文案——not_waiting / no_session 等，与 sessionApprove 同惯例） */
 export async function sessionPlanFeedback(
   sessionId: string,
   action: PlanFeedbackAction,
-  opts: { text?: string; submit?: boolean } = {},
+  opts: { text?: string; submit?: boolean } = {}
 ): Promise<PlanFeedbackResult> {
   let r: Response;
   try {
@@ -820,6 +819,14 @@ export interface QuestionInfoView {
    *  「返回上一题修改」发 prev；false（opencode/旧后端）→ 维持旧单钮 + tab 回绕。
    *  缺省 → 按 false 处理（前向兼容）。 */
   navBoth?: boolean;
+  /** **多选卡自由作答**（2026-10-04 opencode own answer 接入）：claude/opencode =
+   *  true（opencode 的 toggle 双 enter 语义编排已定案）；kimi/codex 未取证恒 false。
+   *  缺省 → 按 false 处理（旧后端前向兼容）。 */
+  multiFreeText?: boolean;
+  /** **覆盖写入/清空能力位**（2026-10-05 深夜）：键序语义逐工具实机取证后才渲染
+   *  这两个按钮——opencode 已取证（enter 探针走位 + 退格清空闭环）；codex notes
+   *  覆盖语义未取证、kimi 多选自由作答未接入 → false（缺省 false，旧后端兼容） */
+  freeTextOverwrite?: boolean;
   /** **屏读快照**（2026-10-03 卡面状态权威源）：GET 时终端若停在题屏 →
    *  {heading, checked, freeText}（前端据此对位当前题并纠偏 mqIndex/勾选/输入框）；
    *  停在 Review 确认屏 → {review:true}（前端直接进确认卡）；null = 屏读不可用/

@@ -113,12 +113,18 @@ export default function PlanFeedbackBar({
         className="mt-1.5 min-h-0 w-full resize-none rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-sky-500/40 focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
       />
       {error !== null && (
-        <p data-testid="plan-feedback-error" className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+        <p
+          data-testid="plan-feedback-error"
+          className="mt-1 text-xs text-rose-600 dark:text-rose-400"
+        >
           {error}
         </p>
       )}
       {sentDone && (
-        <p data-testid="plan-feedback-sent" className="mt-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+        <p
+          data-testid="plan-feedback-sent"
+          className="mt-1 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+        >
           已发送，Claude 正在修改计划…
         </p>
       )}

@@ -6,6 +6,10 @@ pub mod approve;
 pub mod anchor_ledger;
 pub mod capability;
 pub mod confirm;
+// 问答交互方言表（2026-10-05 推广批 F1）：四家交互差异=数据——新工具接入=填表
+// +账本加行+探测定案，不新写阶段机。claude 六机不进表（活体参照语义，用户裁决）。
+pub mod dialect;
+pub mod question_screen_oc;
 // 新建会话状态机内核（spec §4，C4 进程锚定段起）：起窗后按「目标目录 cwd + 新进程」
 // 发现 TUI pid；C5 弹窗处置状态机追加于本文件。
 pub mod create;

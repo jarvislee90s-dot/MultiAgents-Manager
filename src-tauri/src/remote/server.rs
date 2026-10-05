@@ -4126,6 +4126,16 @@ mod tests {
                     crate::session::SessionStatus::Waiting,
                 )
             },
+            {
+                // 签名开关测试独占（守卫 id 立规，2026-10-05）：send_composes_signature_
+                // when_setting_on 专用 Waiting 会话（pid 26）
+                inj_sess(
+                    "sess_sig",
+                    crate::session::AgentType::Claude,
+                    26,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
         ];
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
@@ -4413,6 +4423,45 @@ mod tests {
         })
     }
 
+    /// **签名开关开**（2026-10-05 用户裁决的另一半）：settings KV
+    /// `remote_message_signature=on` → compose 产物带尾部 `[mobile 测试设备]` 签名。
+    /// 经 store.with 走本测自己的内存库（零污染；开关读取单点的接线验证）。
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn send_composes_signature_when_setting_on() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::settings::set_setting_conn(
+                conn,
+                "remote_message_signature",
+                "on",
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_sig","text":"带签名的一句话"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(
+            fake.recorded()
+                .iter()
+                .any(|(_, t)| t.ends_with(" [mobile 测试设备]")),
+            "开关开 → 注入文本带尾部设备签名：{:?}",
+            fake.recorded()
+        );
+    }
+
     /// 直发可输入态（Waiting）：200 delivered + 注入器收到 compose 产物（裁决 6 归一）
     /// + 审计 action=send result=ok channel=fake + 队列无 pending 残留
     #[tokio::test]
@@ -4448,12 +4497,13 @@ mod tests {
             body.contains("\"status\":\"delivered\""),
             "可输入态直发应 delivered：{body}"
         );
-        // 注入器收到 (pid=11, "你好\n继续 [mobile 测试设备]")——真实换行归一为字面 \n
-        //（裁决 6）+ 丁T3 裁2 签名**后置**
+        // 注入器收到 (pid=11, "你好\n继续")——真实换行归一为字面 \n（裁决 6）。
+        // 签名默认关（2026-10-05 用户裁决，KV 未设 = off）→ 裸正文；开关开的形态
+        // 由 send_composes_signature_when_setting_on 专测覆盖
         assert_eq!(
             fake.recorded(),
-            vec![(11u32, "你好\\n继续 [mobile 测试设备]".to_string())],
-            "直发必须携带 W1 来源标记与归一正文"
+            vec![(11u32, "你好\\n继续".to_string())],
+            "直发必须携带归一正文（签名默认关=裸注入）"
         );
         // 审计：最新一条 action=send result=ok channel=fake
         //（flush_one 落账并行写的 action=flush 审计紧随其后——Task 6 最小演进：直发终态
@@ -4742,7 +4792,7 @@ mod tests {
         let body = body_string(r).await;
         assert!(
             body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("排队消息 [mobile 测试设备]")
+                && body.contains("排队消息")
                 && body.contains("\"position\":1")
                 && body.contains("\"enqueuedAt\":"),
             "排队视图应含 id/content/enqueuedAt/position，实际 {body}"
@@ -4802,7 +4852,7 @@ mod tests {
         let body = body_string(r).await;
         assert!(
             body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("修改后重发 [mobile 测试设备]"),
+                && body.contains("修改后重发"),
             "queueOnly 条目应留在队列等自动放行：{body}"
         );
     }
@@ -4835,7 +4885,7 @@ mod tests {
         );
         assert_eq!(
             fake.recorded(),
-            vec![(11u32, "普通发送 [mobile 测试设备]".to_string())],
+            vec![(11u32, "普通发送".to_string())],
             "queueOnly=false 直发行为不得漂移"
         );
     }
@@ -5225,7 +5275,7 @@ mod tests {
         // 注入器收到的是插队目标（第二条）的 compose 产物
         assert_eq!(
             fake.recorded(),
-            vec![(12u32, "第二条 [mobile 测试设备]".to_string())],
+            vec![(12u32, "第二条".to_string())],
             "插队必须照发目标条目（运行中 TUI 把消息放进自身输入缓冲）"
         );
         // 审计 action=jump（settle 落账写入；此刻 retract 尚未发生，最新一条即 jump）
@@ -5574,6 +5624,9 @@ mod tests {
     /// 审批默认表 marker 命中句（DEFAULT_MAPPINGS_JSON claude.prompt_markers 含
     /// "do you want to proceed"——M9R 评审 F3/D4 收紧后句式）
     const APPROVE_HIT_MSG: &str = "Do you want to proceed?";
+
+    /// opencode 多选题载荷（GET 快照用例；引号直接写——raw string 内不需转义）
+    const PAYLOAD_OC_MULTI: &str = r#"{"questions":[{"header":"优化重点","multiSelect":true,"question":"你希望这次优化重点放在哪些方面？","options":[{"label":"画面美感与细节"},{"label":"性能与兼容性"}]}]}"#;
 
     /// 审批选项（可批）：sess_a Waiting + last_message 命中 → 200 available=true +
     /// options 恰为 允许/拒绝 两项（**无 key 字段**——键位不外泄给 UI）+
@@ -6154,6 +6207,32 @@ mod tests {
             sess("sess_z", 36, crate::session::SessionStatus::Waiting),
             sess("sess_aa", 37, crate::session::SessionStatus::Waiting),
             sess("sess_ab", 38, crate::session::SessionStatus::Waiting),
+            {
+                // opencode toggle 翻转校验独占会话（守卫 id 立规，2026-10-05）
+                inj_sess(
+                    "sess_ocflip",
+                    crate::session::AgentType::OpenCode,
+                    48,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
+            {
+                // opencode 切题到达验证独占会话 ×2（守卫 id 立规，2026-10-05）
+                inj_sess(
+                    "sess_ocadv",
+                    crate::session::AgentType::OpenCode,
+                    49,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
+            {
+                inj_sess(
+                    "sess_ocadv2",
+                    crate::session::AgentType::OpenCode,
+                    50,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
             sess("sess_ac", 39, crate::session::SessionStatus::Waiting),
             sess("sess_ad", 40, crate::session::SessionStatus::Waiting),
             // 守卫 id 立规补正（2026-10-07 存量红清理）：**问题投递**类用例各自独占 id。
@@ -6200,6 +6279,25 @@ mod tests {
                 s.last_message = Some("Which folder should hold build output?".to_string());
                 s
             },
+            // 2026-10-05 推广批 T8：kimi 能力位契约独占会话（multiFreeText=false——
+            // 多选形态未定案，探测批 K）
+            {
+                let mut s = inj_sess(
+                    "sess_ao",
+                    crate::session::AgentType::Kimi,
+                    49,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("Which fruits do you like?".to_string());
+                s
+            },
+            // 2026-10-05 推广批 T9：sess_ad 守卫竞争根治——advance/submit 两测试
+            // 迁到全测试集未占用的 sess_av/sess_aw（守卫 id 立规；pid 断言同步 53/54）
+            sess("sess_av", 53, crate::session::SessionStatus::Waiting),
+            sess("sess_aw", 54, crate::session::SessionStatus::Waiting),
+            // 2026-10-05 推广批 T9：sess_ad 守卫竞争根治——advance/submit/审批标记
+            // 三测试各得独占会话（守卫 id 立规；并行 POST 互抢 INFLIGHT 致偶发
+            // 「投递进行中」假红，连续多轮全量命中后按立规根治；pid 顺延 50-52）
             // 丁T1 复评 F-2 独占会话（全测试集唯一 id）：**最强对照形态**——问题待决
             // 的语义红 + last_message **恰为审批 marker 命中句**（模型把问题写成审批
             // 措辞的自然形态）。这正是 F-2 要拦的场景：detect 纯文本命中会误出审批卡，
@@ -8058,6 +8156,171 @@ mod tests {
         assert!(fake.recorded_keys().is_empty(), "多问题零注入");
     }
 
+    /// **能力位契约逐工具断言**（2026-10-05 推广批 T8/F6）：GET 载荷的
+    /// `multiFreeText` / `screen` 按取证状态给值——codex 点亮（探测批 C 实证）且
+    /// 无快照（解析器留位）；kimi 全关（探测批 K：多选自由作答未定案）；快照失败
+    /// 保守 None。
+    #[tokio::test]
+    async fn question_capability_flags_by_tool() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let payload = r#"{"questions":[{"header":"h","multiSelect":true,"question":"q?","options":[{"label":"a"},{"label":"b"}]}]}"#;
+        for (tool, sid) in [("codex", "sess_al"), ("kimi", "sess_ao")] {
+            state.store.with(|conn| {
+                crate::database::dao::question_wait::mark(
+                    conn,
+                    tool,
+                    sid,
+                    1_000,
+                    "等待回答",
+                    Some(payload),
+                )
+            });
+        }
+        let app = router(state.clone());
+        // (sid, multiFreeText, freeTextOverwrite)：覆盖写入/清空能力位逐工具断言
+        // （2026-10-05 深夜；2026-10-06 扩 codex）——opencode=多选回删语义实证；
+        // codex=Tab 清空备注（footer 活体明文「tab or esc to clear note」）；
+        // kimi 多选自由作答未接入 → false
+        for (sid, expect_mft, expect_ovw) in
+            [("sess_al", true, true), ("sess_an", false, false)]
+        {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-question?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(
+                v["multiFreeText"], expect_mft,
+                "{sid} multiFreeText 按取证状态"
+            );
+            assert_eq!(
+                v["freeTextOverwrite"], expect_ovw,
+                "{sid} freeTextOverwrite 按取证状态"
+            );
+            assert_eq!(
+                v["screen"],
+                serde_json::Value::Null,
+                "{sid} 快照解析器留位 → null（前端维持本地状态）"
+            );
+        }
+    }
+
+    /// **opencode 屏读快照**（2026-10-05 推广批 F3）：opencode 会话 + 屏读探针返回
+    /// 题页夹具（用户实测屏面形态）→ GET 载荷带 `screen.checked`（勾选态按屏上序）
+    /// + `multiFreeText=true` 旗标；Confirm 页形态 → `screen.review=true`。
+    #[tokio::test]
+    async fn question_get_carries_opencode_screen_snapshot() {
+        let fake = FakeInjector::ok();
+        let oc_page = vec![
+            "OC | 优化重点: 你想加的动效".to_string(),
+            "你希望这次优化重点放在哪些方面？（可多选）".to_string(),
+            "1. [ ] 画面美感与细节".to_string(),
+            "2. [v] 性能与兼容性".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let probe_page = oc_page.clone();
+        let state = question_state_full(
+            fake.clone(),
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            std::sync::Arc::new(move |tool: &str, _pid: u32| -> Option<Vec<String>> {
+                if tool == "opencode" {
+                    Some(probe_page.clone())
+                } else {
+                    None
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let payload1 = PAYLOAD_OC_MULTI.to_string();
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "opencode",
+                "sess_am",
+                1_000,
+                "等待回答",
+                Some(payload1.as_str()),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_am",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["multiFreeText"], true, "opencode 多选自由作答能力位");
+        let screen = &v["screen"];
+        assert!(screen.is_object(), "题页必须回快照：{v}");
+        assert_eq!(
+            screen["checked"],
+            serde_json::json!([false, true, false]),
+            "勾选态按屏上序"
+        );
+        assert_eq!(screen["freeTextPresent"], true);
+        assert_eq!(
+            screen["freeText"],
+            serde_json::Value::Null,
+            "鲜态无已存文本"
+        );
+
+        // Confirm 页形态 → review:true（前端直接进确认卡）
+        let probe_confirm = vec![
+            "Questions".to_string(),
+            "⇆ tab  enter submit  esc dismiss".to_string(),
+        ];
+        let state2 = question_state_full(
+            fake,
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            std::sync::Arc::new(move |tool: &str, _pid: u32| -> Option<Vec<String>> {
+                if tool == "opencode" {
+                    Some(probe_confirm.clone())
+                } else {
+                    None
+                }
+            }),
+        );
+        persist_named_device(&state2, "mm", "测试设备");
+        let payload2 = PAYLOAD_OC_MULTI.to_string();
+        state2.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "opencode",
+                "sess_am",
+                1_000,
+                "等待回答",
+                Some(payload2.as_str()),
+            )
+        });
+        let app2 = router(state2);
+        let r2 = app2
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_am",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&body_string(r2).await).unwrap();
+        assert_eq!(v2["screen"]["review"], true, "Confirm 页 → review 快照");
+    }
+
     /// **claude 多题接入**（2026-09-24）：GET 旗标（multiQuestion=true + advance=true）
     /// + 多题 toggle 走闭环切勾阶段机（脚本：焦点在首选项 → 空格后已勾）。
     /// 还原动作：把 GET 闸门里的 claude 摘掉 → 前两句断言先红。
@@ -8306,6 +8569,7 @@ mod tests {
         mark_question(&state, "claude", "sess_qsub", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
         let app = router(state.clone());
         let r = app
+            .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
@@ -8315,7 +8579,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = body_string(r).await;
+        let mut body = body_string(r).await;
+        // INFLIGHT 守卫按裸 id 全局占用（守卫 id 立规注）：并行测试偶尔让位 →
+        // 「投递进行中」是良性可重试态（2026-10-05 起连续全量命中的已知 flaky
+        // 根治——仅测试侧重试，生产语义零改动）
+        if body.contains("投递进行中") {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-question/answer",
+                    Some("mam_device=mm"),
+                    Some(r#"{"sessionId":"sess_qsub","action":"submit"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            body = body_string(r).await;
+        }
         assert!(
             body.contains("\"status\":\"key_sent\"") && body.contains("\"verified\":true"),
             "已在 Review 屏 → 直接确认并核验终态：{body}"
@@ -8326,6 +8607,118 @@ mod tests {
             "键序 = ['1']（抄屏上编号；零走位零回车）：{:?}",
             fake.recorded_keys()
         );
+    }
+
+    /// **opencode toggle 后置翻转校验**（2026-10-05 屏读标准补齐）：数字发出后
+    /// 读屏核对目标行勾选翻转 → 回执 checked=Some(true)/verified=true。
+    /// 屏剧本：f0（目标行未勾）→ 守卫探针翻+还原 → 数字落（目标行勾上）。
+    /// 守卫 id 立规：sess_ocflip 独占。
+    #[tokio::test]
+    async fn opencode_toggle_flip_verified_by_screen() {
+        let page = |mark: &str| {
+            vec![
+                format!("1. {mark} alpha"),
+                "2. [ ] bravo".to_string(),
+                "3. [ ] charlie".to_string(),
+                "4. [ ] delta".to_string(),
+                "5. [ ] echo".to_string(),
+                "6. [ ] Type your own answer".to_string(),
+                "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+            ]
+        };
+        let (state, _fake, _script) = stage_rig(
+            vec![page("[ ]"), page("[✓]"), page("[ ]"), page("[✓]")],
+            false,
+        );
+        mark_question(
+            &state,
+            "opencode",
+            "sess_ocflip",
+            r#"{"questions":[{"header":"h","multiSelect":true,"question":"q?","options":[{"label":"a"},{"label":"b"},{"label":"c"},{"label":"d"},{"label":"e"},{"label":"f"}]}]}"#,
+        );
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ocflip","action":"toggle","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"checked\":true") && body.contains("\"verified\":true"),
+            "翻转校验必须实证回传：{body}"
+        );
+    }
+
+    /// **opencode 切题到达验证**（2026-10-05 屏读标准补齐）：tab 前后各读一屏——
+    /// ① 屏变化 = 到达 → AdvanceDone（advanced:true + 到达后快照）；
+    /// ② 屏相同 = tab 未生效 → Failed「tab 未生效」可重试。
+    /// 守卫 id 立规：sess_ocadv / sess_ocadv2 独占。
+    #[tokio::test]
+    async fn opencode_advance_arrival_verified_by_screen() {
+        let q1_page = vec![
+            "优化重点".to_string(),
+            "你希望这次优化重点放在哪些方面？（可多选）".to_string(),
+            "1. [ ] 画面美感与细节".to_string(),
+            "2. [ ] 交互动效".to_string(),
+            "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let q2_page = vec![
+            "想加的动效".to_string(),
+            "如果加动效，你希望加哪些？".to_string(),
+            "1. [ ] 角色动态".to_string(),
+            "2. [ ] 海面与云动效".to_string(),
+            "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+        ];
+        // ① tab 生效：pre=q1 页 → post=q2 页（屏变化）
+        let (state, _fake, _script) = stage_rig(vec![q1_page.clone(), q2_page.clone()], false);
+        mark_question(
+            &state,
+            "opencode",
+            "sess_ocadv",
+            r#"{"questions":[{"header":"优化重点","multiSelect":true,"question":"你希望这次优化重点放在哪些方面？","options":[{"label":"画面美感与细节"},{"label":"交互动效"}]},{"header":"想加的动效","multiSelect":true,"question":"如果加动效，你希望加哪些？","options":[{"label":"角色动态"},{"label":"海面与云动效"}]}]}"#,
+        );
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ocadv","action":"advance","direction":"next"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"advanced\":true") && body.contains("想加的动效"),
+            "到达验证必须回传 advanced+到达后快照：{body}"
+        );
+
+        // ② tab 未生效：前后屏相同 → Failed
+        let (state2, _fake2, _script2) = stage_rig(vec![q1_page.clone(), q1_page], false);
+        mark_question(
+            &state2,
+            "opencode",
+            "sess_ocadv2",
+            r#"{"questions":[{"header":"优化重点","multiSelect":true,"question":"你希望这次优化重点放在哪些方面？","options":[{"label":"画面美感与细节"},{"label":"交互动效"}]}]}"#,
+        );
+        let app2 = router(state2.clone());
+        let r2 = app2
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ocadv2","action":"advance","direction":"next"}"#),
+            ))
+            .await
+            .unwrap();
+        let body2 = body_string(r2).await;
+        assert!(body2.contains("tab 未生效"), "{body2}");
     }
 
     /// guard 矩阵：缺 index / 域外 action / 空 sessionId → 400 bad_request；越界
@@ -13099,6 +13492,7 @@ mod tests {
             home_source: Box::new(|| None),
             // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
             pairing_counter: Box::new(Vec::new),
+            ui_config_source: Box::new(|| None),
         })
     }
 
@@ -13714,10 +14108,10 @@ mod tests {
         assert_eq!(dialogs[0].session_id, "", "物化前 dialog 行 sid 为空");
         assert_eq!(dialogs[0].device_name, "手机C6e");
         assert_eq!(dialogs[0].agent_type, "claude");
-        // send 行：content = composed 原文（默认探针 hi + 移动端签名），sid=""
+        // send 行：content = composed 原文（默认探针 hi；签名默认关=裸正文，2026-10-05），sid=""
         let sends = by_action("send");
         assert_eq!(sends.len(), 1, "恰好一条 send 行（首句）：{rows:?}");
-        assert_eq!(sends[0].summary, "hi [mobile 手机C6e]", "{rows:?}");
+        assert_eq!(sends[0].summary, "hi", "{rows:?}");
         assert_eq!(sends[0].result, "ok");
         assert_eq!(sends[0].session_id, "");
         assert_eq!(sends[0].device_name, "手机C6e");

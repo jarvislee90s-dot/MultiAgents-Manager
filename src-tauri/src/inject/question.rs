@@ -373,6 +373,20 @@ pub fn answer_key_sequence_for(
             AnswerAction::Toggle if tool == "opencode" => {
                 answer_key_sequence(AnswerAction::Select, index, q)
             }
+            // **codex 多选切勾接线**（2026-10-05 探测批 C 定案 C2）：Space = 选中
+            // 不前进（作用于高亮行；多选页无逐行标记，选中态走头部已答计数）。
+            // 定位 = ↓×(index) 前向走位（假定高亮首行——弹窗常态；高亮被动过
+            // 的场景边界申报：字符键在选项行惰性、无探针可用〔enter=提交〕，暂以
+            // 诚实回执 KeySent 兜底）。数字在多选页=即答，**禁用于切勾**。
+            AnswerAction::Toggle if tool == "codex" => {
+                let i = index.ok_or_else(|| "缺少选项序号".to_string())?;
+                if i >= q.options.len() {
+                    return Err(format!("选项序号越界：{i}"));
+                }
+                let mut seq: Vec<String> = (0..i).map(|_| "down".to_string()).collect();
+                seq.push("space".to_string());
+                Ok(seq)
+            }
             AnswerAction::Toggle => Err("codex 多选未实测，不出键".to_string()),
             // opencode 提交走阶段机（OpencodeSubmit：tab → Confirm 页 → enter）
             AnswerAction::Submit if tool == "opencode" => {
@@ -770,6 +784,7 @@ pub fn codex_answered_present(lines: &[String]) -> bool {
 ///    如实请人工核对；落账侧以 rollout `user_note:` 对账为准）。
 pub fn run_codex_notes_stages<Rd, Q, T>(
     text: &str,
+    overwrite: bool,
     mut read: Rd,
     mut poll_receipt: Q,
     terminal: &mut T,
@@ -779,8 +794,10 @@ where
     Q: FnMut() -> Result<Option<Vec<String>>, String>,
     T: FreeTextTerminal,
 {
-    if text.trim().is_empty() {
-        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
+    if text.trim().is_empty() && !overwrite {
+        return Err(StageAbort::screen(
+            "自由作答文本为空（清空请用覆盖写入）——已中止，未发任何键",
+        ));
     }
     let mut sent_keys: Vec<String> = Vec::new();
     // 1. 弹窗在场判读（两 footer 锚任一在场才动手）
@@ -795,34 +812,49 @@ where
             "屏读未见到 request_user_input 弹窗（footer 锚缺席）——已中止，未发任何键（Tab 不能落在弹窗之外）；请人工核对终端",
         ));
     }
-    // 2. 未在备注态 → Tab 开备注行；已在备注态 → 跳过（再按一次 = 清空备注）
-    if !notes_opened {
+    // 2. 未在备注态 → Tab 开备注行；已在备注态：
+    //    - overwrite → **再按一次 Tab = 清空备注**（footer 活体明文
+    //      「tab or esc to clear note」，戊探C 取证 + 2026-10-06 复用定案）
+    //      → 清后重打全文（覆盖写入）/ 保持清空（text 空 = 清空请求）
+    //    - !overwrite → 跳过（此时打字只会追加在旧备注后）
+    if !notes_opened || overwrite {
         terminal
             .send("tab")
             .map_err(|e| StageAbort::delivery(format!("Tab 投递失败（{e}）")))?;
         sent_keys.push("tab".to_string());
         terminal.settle();
     }
-    // 3. 打字（字符通道）
-    terminal
-        .send_text(text)
-        .map_err(|e| StageAbort::delivery(format!("备注文本投递失败（{e}）")))?;
-    sent_keys.push("<text>".to_string());
-    terminal.settle();
-    // 4. Enter 提交（当前高亮项 + 备注，自动推进）
-    terminal
-        .send("enter")
-        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
-    sent_keys.push("enter".to_string());
-    terminal.settle();
-    // 5. 终态（未见不是失败）
-    let receipt_seen = stage_receipt_seen(&mut poll_receipt, codex_answered_present);
-    Ok(FreeTextOutcome {
-        sent_keys,
-        receipt_seen,
-        screen_text: None,
-        screen_checked: None,
-    })
+    // 3. 打字（字符通道；清空路径 text 空 = 跳过）
+    if !text.is_empty() {
+        terminal
+            .send_text(text)
+            .map_err(|e| StageAbort::delivery(format!("备注文本投递失败（{e}）")))?;
+        sent_keys.push("<text>".to_string());
+        terminal.settle();
+        // 4. Enter 提交（当前高亮项 + 备注，自动推进）
+        terminal
+            .send("enter")
+            .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+        sent_keys.push("enter".to_string());
+        terminal.settle();
+        // 5. 终态（未见不是失败）
+        let receipt_seen = stage_receipt_seen(&mut poll_receipt, codex_answered_present);
+        Ok(FreeTextOutcome {
+            sent_keys,
+            receipt_seen,
+            screen_text: None,
+            screen_checked: None,
+        })
+    } else {
+        // **清空路径不发 Enter**：codex 的 Enter=提交整卷（无"只保存不提交"键），
+        // 空备注提交行为未取证——清空止于 Tab，提交走卡面提交按钮。
+        Ok(FreeTextOutcome {
+            sent_keys,
+            receipt_seen: None,
+            screen_text: None,
+            screen_checked: None,
+        })
+    }
 }
 
 /// codex rollout **user_note 对账解析**（纯函数）：`function_call_output.output`
@@ -909,6 +941,229 @@ pub fn opencode_own_answer_input_open(lines: &[String]) -> bool {
     })
 }
 
+/// opencode **编辑态已开启**判定（2026-10-05 双形态收口）：占位行（**1.x**：enter 后
+/// 行下展开占位输入行）∨ **footer 词形**（**2.0.22+**：无占位行，footer 从
+/// `enter toggle` 变 `enter done`——方言表 `edit_open_footer`，活体取证见该字段
+/// 注释）。两个信号取**或**：1.x 屏走占位行、2.x 屏走 footer，互不误伤。
+/// footer 匹配带**结构佐证**：词形所在行须同时含 `esc`（footer 行族特征）——防
+/// 题干/选项文本里恰好引用同词形（锚点账本的短锚纪律）。
+pub fn opencode_own_answer_edit_open(
+    lines: &[String],
+    d: &crate::inject::dialect::OwnAnswerDialect,
+) -> bool {
+    if opencode_own_answer_input_open(lines) {
+        return true;
+    }
+    footer_signal_present(lines, d.edit_open_footer)
+}
+
+/// **高亮停在 own answer 行**判定（2.0.22 footer 信号，活体取证：高亮在 own 行时
+/// footer = `… enter edit …`）。信号表为空（1.x 未取证）→ 恒 false（盲走兼容）。
+pub fn opencode_own_row_highlighted(
+    lines: &[String],
+    d: &crate::inject::dialect::OwnAnswerDialect,
+) -> bool {
+    footer_signal_present(lines, d.edit_highlight_footer)
+}
+
+/// **选项勾选态翻转检测**（enter 探针走位的还原判据，2026-10-05 活体取证支撑）：
+/// 比较两屏的编号行 1..own_pos（**不含 own 行**——own 行翻转是命中信号不是事故）
+/// 的勾选态，任一行翻转 = enter 落在了选项行。行集缺行（折行/重绘抖动）→ 该行
+/// 不参与比较（宁漏检不误检——误检会把还原键打在真选项上）。
+fn opencode_option_flip(
+    a: &[String],
+    b: &[String],
+    own_pos: usize,
+    d: &crate::inject::dialect::OwnAnswerDialect,
+) -> bool {
+    fn strip(l: &str) -> &str {
+        l.trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
+            .trim_start()
+    }
+    let states = |lines: &[String]| {
+        let mut m = std::collections::HashMap::new();
+        for l in lines {
+            let t = strip(l);
+            if let Some((n, _, _)) = crate::inject::dialog::parse_option_line(t) {
+                let num = n as usize;
+                if num >= 1 && num < own_pos {
+                    let lower = t.to_lowercase();
+                    let checked = d.checked_markers.iter().any(|mk| lower.contains(mk));
+                    m.insert(num, checked);
+                }
+            }
+        }
+        m
+    };
+    states(a) != states(b)
+}
+
+/// footer 词形在场判定（小写 contains + `esc` 行族佐证；空表 → 恒 false）
+fn footer_signal_present(lines: &[String], signals: &[&str]) -> bool {
+    if signals.is_empty() {
+        return false;
+    }
+    lines.iter().any(|l| {
+        let lower = l.to_lowercase();
+        lower.contains("esc") && signals.iter().any(|sig| lower.contains(sig))
+    })
+}
+
+/// opencode **单选页 own 行内容提取**（按编号直接定位）：单选页 footer
+/// `enter submit` 与多选确认页同词形，`opencode_own_answer_row_state` 的页锚门
+/// 会拒绝定位——单选流程专用本助手，直接找第 own_pos 号行取内容。
+/// **单选页切片**（2026-10-06 GET 断链定案）：题页/确认页对话框首行恒为
+/// `Questions`——会话 transcript 里模型的「1. … 2. …」编号说明文字会被全窗
+/// 扫描误当选项/own 行（18:03-18:27 GET 结构解析全灭 + Review 页 own 行消失
+/// 判定永不触发的共同根因）。从**最后一个** `Questions` 行之后切片 = 只看
+/// 活对话框区。锚不在场（旧夹具/异常形态）→ None（调用方回落全窗，行为
+/// 与既有一致，不破坏兼容）。
+pub(crate) fn opencode_question_page_slice(lines: &[String]) -> Option<&[String]> {
+    lines
+        .iter()
+        .rposition(|l| {
+            l.trim()
+                .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
+                .trim()
+                == "Questions"
+        })
+        .map(|i| &lines[i + 1..])
+}
+
+pub(crate) fn opencode_single_own_row(lines: &[String]) -> Option<(usize, String)> {
+    // own 行恒为**最后一个编号行**（几何事实，不依赖内容）——残留态（标签已被
+    // 用户文字替换）按标签找必然失败，故直接取最后编号行；**只看页切片**
+    // （transcript 编号行污染防御，见 opencode_question_page_slice）
+    let lines = opencode_question_page_slice(lines).unwrap_or(lines);
+    let mut last: Option<(usize, String)> = None;
+    for l in lines {
+        let t = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}']);
+        if let Some((n, text, _)) = crate::inject::dialog::parse_option_line(t) {
+            last = Some((n as usize, text));
+        }
+    }
+    last
+}
+
+/// 按屏上编号取该行内容（单选页落行/提交验证用——打字后标签已被替换，不能
+/// 再按标签定位）
+pub(crate) fn opencode_single_own_row_content_at(
+    lines: &[String],
+    own_pos: usize,
+) -> Option<String> {
+    // 只看页切片（transcript 编号行污染防御，见 opencode_question_page_slice）
+    let lines = opencode_question_page_slice(lines).unwrap_or(lines);
+    for l in lines {
+        let t = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}']);
+        if let Some((n, text, _)) = crate::inject::dialog::parse_option_line(t) {
+            if n as usize == own_pos {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+/// opencode **指定编号行的勾选态**（toggle 后置翻转校验用，2026-10-05 屏读
+/// 标准补齐）：找到第 num 号编号行 → 勾选标记判定；行不在场 → None。
+pub(crate) fn opencode_option_checked_at(
+    lines: &[String],
+    num: usize,
+    d: &crate::inject::dialect::OwnAnswerDialect,
+) -> Option<bool> {
+    // 只看页切片（transcript 编号行污染防御，见 opencode_question_page_slice）
+    let lines = opencode_question_page_slice(lines).unwrap_or(lines);
+    for l in lines {
+        let t = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}']);
+        if let Some((n, _, _)) = crate::inject::dialog::parse_option_line(t) {
+            if n as usize == num {
+                let lower = t.to_lowercase();
+                if d.checked_markers.iter().any(|mk| lower.contains(mk)) {
+                    return Some(true);
+                }
+                // **单选页裸 ✓**（2026-10-06 活体定案，PID 1880 dump 行35
+                // 「2. 两篇悬疑小说 ✓」）：2.0.22 单选页**选中行尾渲染 " ✓"**
+                // （U+2713，无括号标记）——行尾裸 ✓ = 该行是当前答案（选项/
+                // own 行通用）。旧「单选无字符标记、纯高亮不可读」定案作废。
+                // 未选行 = 无任何标记 → Some(false)（与括号页同口径，翻转
+                // 判定 Some(false)→Some(true) 自然成立）。
+                if t.trim_end().ends_with('✓') {
+                    return Some(true);
+                }
+                return Some(false);
+            }
+        }
+    }
+    None
+}
+
+/// codex **高亮行定位**（C7 定案：`? ` 前缀 = 题页选项行首的唯一可读高亮）：
+/// 找到带 `? ` 前缀的编号行 → 其屏上编号；无 `? ` 行（弹窗不在场/形态漂移）→
+/// None。
+pub(crate) fn codex_highlight_row(lines: &[String]) -> Option<usize> {
+    for l in lines {
+        let t = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}']);
+        if let Some(rest) = t.strip_prefix("? ") {
+            if let Some((n, _, _)) = crate::inject::dialog::parse_option_line(rest) {
+                return Some(n as usize);
+            }
+        }
+    }
+    None
+}
+
+/// opencode 页面**是否带勾选框**（单选/多选页判别，2026-10-05）：任一编号行含
+/// 方言勾选标记（`[ ]`/`[✓]` 等）= 多选形态页；全部无标记 = **单选形态页**。
+/// 单选页语义与多选完全不同（↓ 即输入、enter=整题提交、无勾选翻转信号），
+/// 多选专属的探针/补勾机制在单选页必须全部绕行。
+fn opencode_page_has_checkboxes(
+    lines: &[String],
+    d: &crate::inject::dialect::OwnAnswerDialect,
+) -> bool {
+    lines.iter().any(|l| {
+        let t: String = l
+            .trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
+            .to_string();
+        let lower = t.to_lowercase();
+        let numbered = crate::inject::dialog::parse_option_line(t.trim()).is_some();
+        numbered
+            && (d.checked_markers.iter().any(|mk| lower.contains(mk))
+                || d.unchecked_markers.iter().any(|mk| lower.contains(mk)))
+    })
+}
+
+
+
+/// codex **发数字前备注编辑器守卫**（2026-10-05）：notes 编辑器（footer
+/// `tab or esc to clear notes`，探测批 C 词形）开启时数字会被吃进备注文本——
+/// 检出即拒绝（备注归备注阶段机独占管理；自动 enter 提交可能发出用户未写完
+/// 的备注、esc 会清空备注，都不替用户做主）。读屏失败 → 放行（保持既有盲发
+/// 行为——守卫只在有证据时收窄）。
+pub(crate) fn codex_ensure_notes_closed(lines: Option<Vec<String>>) -> Result<(), StageAbort> {
+    let Some(lines) = lines else {
+        return Ok(());
+    };
+    let notes_open = lines
+        .iter()
+        .any(|l| l.to_lowercase().contains(CODEX_NOTES_OPENED_FOOTER));
+    if notes_open {
+        return Err(StageAbort::screen(
+            "焦点守卫：备注编辑器仍开启（footer「tab or esc to clear notes」在场）——数字会被写进备注；请先在终端完成（enter 提交）或清除（esc）备注后再作答选项",
+        ));
+    }
+    Ok(())
+}
+
 /// opencode **多选提交阶段机**：tab 切页 → Confirm 页 → enter 一次提交全部答案
 /// （戊探A ④：Confirm 页 enter 提交 ×3 全通）。未答题的 Confirm 页显示
 /// `(not answered)`（戊探A E-A2 顺带实证）——是否可提交未测，阶段机不判。
@@ -971,19 +1226,113 @@ where
     })
 }
 
-/// opencode **own answer 自由作答阶段机**（裸打字守卫——计划 E6② 判据核心）：
-/// ↓ 定位（按屏上行序，从**首行**起算——弹窗打开时高亮在首选项，戊探A E-A2）→
-/// enter 开输入行 → **屏读确认输入行已开启**（[`opencode_own_answer_input_open`]，
-/// 未开启绝不发文本——裸打字会被当导航/勾选指令：'l' 切页、'2' 勾选，戊探A §4
-/// 意外事件归因）→ 打字（字符通道）→ enter 提交。
+/// opencode **own answer 行状态解析**（纯函数）：返回 `(1 起行序, 是否已勾选,
+/// 已保存文本)`。定位优先带标签形态（`Type your own answer` 行——鲜态），回退 =
+/// **最后一个编号行**（已保存态：标签被保存内容替换，戊探A 形态 + 用户 2026-10-04
+/// 实测「own answer 行显示已存文本」）；勾选判据 = 行内 `[v]`/`[x]`/`[✓]` 标记；
+/// 已保存文本 = 勾选标记 `]` 之后的内容（等于标签 → 视为无保存，返回空串）。
+fn opencode_own_answer_row_state(
+    lines: &[String],
+    d: &crate::inject::dialect::OwnAnswerDialect,
+) -> Option<(usize, bool, String)> {
+    fn strip(l: &str) -> &str {
+        l.trim()
+            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
+            .trim_start()
+    }
+    let label_hit = |t: &str| t.to_lowercase().contains(d.label);
+    let checked_of = |t: &str| {
+        let lower = t.to_lowercase();
+        d.checked_markers.iter().any(|m| lower.contains(m))
+    };
+    // 文本抽取：`N. [v] 内容` / `[v] 内容` → 最后一个 `]` 之后
+    let text_after_marker = |t: &str| -> String {
+        match t.rfind(']') {
+            Some(i) => t[i + 1..].trim_start().to_string(),
+            None => String::new(),
+        }
+    };
+    // ① 标签行（鲜态）
+    for (idx, l) in lines.iter().enumerate() {
+        let t = strip(l);
+        if label_hit(t) && crate::inject::dialog::parse_option_line(t).is_some() {
+            let saved = text_after_marker(t);
+            let saved = if saved.to_lowercase().contains(d.label) {
+                String::new()
+            } else {
+                saved
+            };
+            let pos = crate::inject::dialog::parse_option_line(t)
+                .map(|(n, _, _)| n as usize)
+                .unwrap_or(idx + 1);
+            return Some((pos, checked_of(t), saved));
+        }
+    }
+    // ② 回退：最后一个编号行（已保存态——标签已被内容替换）。**门 = 题页锚**
+    // （footer `enter toggle`）：无锚的屏（别家格式/非题屏）不得靠回退定位成功——
+    // 否则「无 own answer 锚 → 定位即中止零投递」的契约被击穿（回归锁
+    // question_free_text_refused_for_unverified_tools 实测抓获）
+    if !lines.iter().any(|l| {
+        l.to_lowercase()
+            .contains(crate::inject::question_screen_oc::OPENCODE_QUESTION_PAGE_ANCHOR)
+    }) {
+        return None;
+    }
+    let mut last: Option<(usize, String)> = None;
+    for l in lines {
+        let t = strip(l);
+        if let Some((n, _, _)) = crate::inject::dialog::parse_option_line(t) {
+            last = Some((n as usize, t.to_string()));
+        }
+    }
+    let (pos, t) = last?;
+    let saved = text_after_marker(&t);
+    Some((pos, checked_of(&t), saved))
+}
+
+/// opencode **own answer 自由作答阶段机**（2026-10-04 按**用户实测语义**重写：
+/// enter = **toggle**（footer 锚 `enter toggle` + 用户活体测试）——
+///
+/// - own answer 行**未勾选**（鲜态）：enter ×1 → 勾选上 + 进入编辑态；
+/// - own answer 行**已勾选**（有保存内容）：enter #1 = **取消勾选**、enter #2 =
+///   重新勾上 + 进入编辑态（**双 enter**），光标落在已存文本**末尾**；
+/// - 编辑态打字 = 在光标处插入（末尾 = 追加）；再 enter = **保存**（锁定态，
+///   方向键不再影响编辑）——推进到下一题/提交走既有 tab（OpencodeSubmit / 切题按钮），
+///   **不在本阶段机内**。
+///
+/// 编排：↓ 定位（按屏上行序，从**首行**起算——弹窗打开时高亮在首选项，戊探A E-A2；
+/// **2.0.22 活体复验仍成立**：↓×5 从首行直达 own 行，2026-10-05 自建会话实测）
+/// → 按 `checked` 分支 enter（已勾选时两段 enter 各带屏读复核，不盲发第二键）→
+/// **裸打字守卫**（[`opencode_own_answer_edit_open`] 三信号：占位行〔1.x〕/ footer
+/// 词形〔2.0.22+ `enter done`〕/ own 行勾选翻转——**2.0.22 无占位行**，只认占位行
+/// 会假阴性中止并把 own 行留在已勾残局，2026-10-05 实机回归根因；未开启绝不发文本
+/// ——裸打字会被当导航/勾选指令：'l' 切页、'2' 勾选，戊探A §4 意外事件归因）→
+/// `overwrite` 时先 backspace × 已存文本长度（光标在末尾 → 逐个回删清空）→ 打字
+/// （字符通道）→ enter 保存。
 ///
 /// **位置假设的边界（如实申报）**：opencode 高亮在字符层不可见（属性级 0x0003，
 /// MAM 屏读不携带）→ 无法闭环验证当前高亮位。本阶段机只对「弹窗刚打开、未做过
 /// 任何选择」的鲜态安全（高亮=首行）；若用户已在终端手动移动过高亮，↓×(n-1) 会
 /// 停在错误的行——前置判据无法消除该风险，失败模式是「答错行」而非「卡死」，
-/// 终态锚核验如实回执，残余风险登记台账。
+/// 终态锚核验如实回执，残余风险登记台账。已保存文本按**单行可见长度**计量
+/// （折行内容读不到 → 清空可能残留尾部）——登记已知边界。
+/// own answer 编排内的**单发回车**（enter 投递 + 键账 + settle）——两处调用共用
+/// （首键与双 enter 语义的补键）。
+fn oc_send_enter<T: FreeTextTerminal>(
+    terminal: &mut T,
+    sent_keys: &mut Vec<String>,
+) -> Result<(), StageAbort> {
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("开输入行回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    Ok(())
+}
+
 pub fn run_opencode_own_answer_stages<Q, T>(
     text: &str,
+    overwrite: bool,
     mut poll_receipt: Q,
     terminal: &mut T,
 ) -> Result<FreeTextOutcome, StageAbort>
@@ -991,94 +1340,572 @@ where
     Q: FnMut() -> Result<Option<Vec<String>>, String>,
     T: FreeTextTerminal,
 {
-    if text.trim().is_empty() {
-        return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
+    if text.trim().is_empty() && !overwrite {
+        return Err(StageAbort::screen(
+            "自由作答文本为空（清空请用覆盖写入）——已中止，未发任何键",
+        ));
     }
+    // 0. 方言表（2026-10-05 推广批 F2）：定位/勾选标记/编辑门/光标全部读表——
+    // 差异=数据；表无条目（未定案工具）→ 拒绝出手
+    let d = crate::inject::dialect::own_answer_dialect("opencode")
+        .ok_or_else(|| StageAbort::screen("方言表无该工具条目——已中止，未发任何键"))?;
     let mut sent_keys: Vec<String> = Vec::new();
-    // 1. 定位 own answer 行
+    // 1. 定位 own answer 行 + 勾选态 + 已存文本
     let first = terminal.read().ok_or_else(|| {
         StageAbort::screen("opencode 自由作答：读不到屏幕——已中止，未发任何键；请人工核对终端")
     })?;
-    if opencode_own_answer_input_open(&first) {
-        return Err(StageAbort::screen(
-            "输入行似乎已开启（先前未完成的作答？）——为防文本误入导航，已中止；请人工核对终端",
-        ));
-    }
-    let own_pos = locate_opencode_own_answer_position(&first).ok_or_else(|| {
-        StageAbort::screen(
-            "屏读未定位到 Type your own answer 行——已中止，未发任何键；请人工核对终端",
-        )
-    })?;
-    // 2. ↓×(pos-1) 定位（pos 1 起行序；首行 = 零步）
-    for _ in 0..own_pos.saturating_sub(1) {
-        terminal
-            .send("down")
-            .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
-        sent_keys.push("down".to_string());
-        terminal.settle();
-    }
-    // 3. enter 开输入行
-    terminal
-        .send("enter")
-        .map_err(|e| StageAbort::delivery(format!("开输入行回车投递失败（{e}）")))?;
-    sent_keys.push("enter".to_string());
-    terminal.settle();
-    // 4. **裸打字守卫**：屏读确认输入行已开启（占位行出现）才发文本
-    let opened = terminal.read().ok_or_else(|| {
-        StageAbort::screen(
-            "已发回车但读不到屏幕（无法确认输入行开启）——已中止，未发文本（裸打字会被当导航/勾选指令）；请人工核对终端",
-        )
-    })?;
-    if !opencode_own_answer_input_open(&opened) {
-        return Err(StageAbort::screen(
-            "输入行未开启（屏上无占位行）——已中止，未发文本（裸打字守卫）；请人工核对终端",
-        ));
-    }
-    terminal
-        .send_text(text)
-        .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
-    sent_keys.push("<text>".to_string());
-    terminal.settle();
-    // 5. enter 提交（自动推进下一题/进 Confirm）
-    terminal
-        .send("enter")
-        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
-    sent_keys.push("enter".to_string());
-    terminal.settle();
-    // 6. 终态（未见不是失败）
-    let receipt_seen = stage_receipt_seen(&mut poll_receipt, opencode_answered_present);
-    Ok(FreeTextOutcome {
-        sent_keys,
-        receipt_seen,
-        screen_text: None,
-        screen_checked: None,
-    })
-}
-
-/// own answer 行的**1 起行序**定位：优先带编号形态（`N. [ ]? Type your own answer`），
-/// 无编号（多选 `[ ] Type your own answer`）→ 按行序计。
-fn locate_opencode_own_answer_position(lines: &[String]) -> Option<usize> {
-    let mut pos: Option<usize> = None;
-    let mut idx = 0usize;
-    for l in lines {
-        let t = l
-            .trim()
-            .trim_start_matches(['\u{2503}', '\u{2502}', '\u{2192}', '\u{276f}'])
-            .trim_start();
-        let lower = t.to_lowercase();
-        if let Some((num, _, _)) = crate::inject::dialog::parse_option_line(t) {
-            idx = num as usize;
-            if lower.contains(OPENCODE_OWN_ANSWER_LABEL) && pos.is_none() {
-                pos = Some(num as usize);
+    // ===== 单选页 N 探针流程（2026-10-05 用户设计定案）=====
+    //
+    // opencode 数字键**作用于编号行、与高亮无关**（用户实操验证）——
+    // 按 own 行编号 N 就一定作用到 own 行，不需要盲走定位。
+    //
+    // 流程：按数字 N → 读 own 行差分 → 分类处置（有界重试）：
+    // a. 文字格里出现 N → 焦点已在文字行/编辑态 → 退格清 N → 打全文 → ↑ 保存
+    // b. own 行被勾上（勾选翻转 [ ]→[✓]）→ 焦点确认在 own 行 → 打全文 → enter
+    // c. 其他行翻转了（N 被选项行吃了——防御）→ 退格还原 → 换位 → 重试
+    // d. 无变化 → 换位 → 重试
+    // 有界 = own_num + 3 轮（覆盖全部行位置含回绕）。走满报错。
+    if !opencode_page_has_checkboxes(&first, &d) {
+        let (own_num, old_text) =
+            opencode_single_own_row(&first).ok_or_else(|| {
+                StageAbort::screen(
+                    "屏读未定位到 Type your own answer 行——已中止，未发任何键；请人工核对终端",
+                )
+            })?;
+        let residue = if old_text.to_lowercase().contains(d.label) {
+            String::new()
+        } else {
+            old_text.clone()
+        };
+        if !residue.is_empty() && !overwrite {
+            return Err(StageAbort::screen(
+                "该项已有内容（直接发送会追加）——请用「覆盖写入」替换后发送",
+            ));
+        }
+        let n_key = format!("{}", own_num);
+        let mut sent: Vec<String> = Vec::new();
+        for _round in 0..=(own_num + 3) {
+            // 按数字 N（到达探针 + 选中二合一）
+            terminal
+                .send(&n_key)
+                .map_err(|e| StageAbort::delivery(format!("N 探针投递失败（{e}）")))?;
+            sent.push(n_key.clone());
+            terminal.settle();
+            let after = terminal.read().ok_or_else(|| {
+                StageAbort::screen("N 探针后读不到屏幕——已中止；请人工核对终端")
+            })?;
+            // own 行消失 = 终端已推进（Submit 总结页）→ 收工
+            let Some(cur_content) =
+                opencode_single_own_row_content_at(&after, own_num)
+            else {
+                log::info!("[single-select] N 探针后 own 行消失 = 已推进");
+                let receipt_seen = stage_receipt_seen(
+                    &mut poll_receipt,
+                    opencode_answered_present,
+                );
+                return Ok(FreeTextOutcome {
+                    sent_keys: sent,
+                    receipt_seen,
+                    screen_text: if text.is_empty() { None } else { Some(text.to_string()) },
+                    screen_checked: None,
+                });
+            };
+            // **文字格里出现了 N**（焦点在文字行，N 被打进去）→
+            // 退格清 N → 确认焦点在文字行 → 打全文 → 保存 → 完成
+            // 保存键按**字段余量分派**（2026-10-06 用户实测定案，范围仅单选
+            // 打字流）：有内容 → ↑（保存且不触发选择/即交）；空（清空路径
+            // 退格后）→ enter（空字段单纯 ↑ 不保存不退出；空字段 enter 无
+            // 内容即交连锁）。enter 对**有内容**字段=保存+确认连锁——00:52/
+            // 00:54 两起打字后整卷异常提交即此根源（多选页双 enter 舞步不受
+            // 影响，勿扩大化）。
+            if cur_content.ends_with(&n_key) && cur_content != old_text {
+                log::info!(
+                    "[single-select] N 写进文字格 = 焦点在文字行 → 清 N{}打全文",
+                    if overwrite && !residue.is_empty() { "清残留" } else { "" }
+                );
+                terminal
+                    .send("backspace")
+                    .map_err(|e| StageAbort::delivery(format!("退格投递失败（{e}）")))?;
+                sent.push("backspace".to_string());
+                terminal.settle();
+                // **覆盖写入/清空：复用多选语义**（1754 行同款，2026-10-06 02:44
+                // 事故定案）：探针字符删掉后光标停在**残留文本末尾** → backspace
+                // × 可见长度逐个回删清空，再打新文（text 空 = 纯清空）。此前只删
+                // 探针字符 → 新文全部追加在残留后（Review「…×2mmm」实机）。
+                // 残留计数剥 ✓ 尾——对勾是渲染标记不是键入字符，计入会多删。
+                if overwrite && !residue.is_empty() {
+                    let n = residue
+                        .trim_end()
+                        .trim_end_matches('✓')
+                        .trim_end()
+                        .chars()
+                        .count()
+                        .min(400);
+                    for _ in 0..n {
+                        terminal
+                            .send("backspace")
+                            .map_err(|e| StageAbort::delivery(format!("退格投递失败（{e}）")))?;
+                    }
+                    sent.push(format!("<backspace×{n}>"));
+                    terminal.settle();
+                }
+                if !text.is_empty() {
+                    terminal
+                        .send_text(text)
+                        .map_err(|e| {
+                            StageAbort::delivery(format!("作答文本投递失败（{e}）"))
+                        })?;
+                    sent.push("<text>".to_string());
+                    terminal.settle();
+                    // 有内容 → ↑ 保存（2026-10-06 用户实测定案：字段**非空**时
+                    // ↑=保存且不触发选择/即交；enter 在单选页=保存+确认连锁）
+                    terminal
+                        .send("up")
+                        .map_err(|e| {
+                            StageAbort::delivery(format!("保存上箭头投递失败（{e}）"))
+                        })?;
+                    sent.push("up".to_string());
+                } else {
+                    // 清空路径：退格后字段为**空** → 单纯 ↑ 不保存（2026-10-06
+                    // 实测细化：空字段 ↑ 空转）→ enter 提交空答案=保存/退出
+                    terminal
+                        .send("enter")
+                        .map_err(|e| {
+                            StageAbort::delivery(format!("清空回车投递失败（{e}）"))
+                        })?;
+                    sent.push("enter".to_string());
+                }
+                terminal.settle();
+                let receipt_seen = stage_receipt_seen(
+                    &mut poll_receipt,
+                    opencode_answered_present,
+                );
+                return Ok(FreeTextOutcome {
+                    sent_keys: sent,
+                    receipt_seen,
+                    screen_text: if text.is_empty() { None } else { Some(text.to_string()) },
+                    screen_checked: None,
+                });
             }
-        } else if lower.contains(OPENCODE_OWN_ANSWER_LABEL) {
-            idx += 1;
-            if pos.is_none() {
-                pos = Some(idx);
+            // **own 行被勾上/摘勾**（N 选中了 own 行，勾选翻转）→
+            // 焦点确认在 own 行 → 打全文 → enter 提交 → 完成（此分支保持 enter，
+            // 2026-10-06 用户裁决：↑ 保存特例仅限文字格分支，勿扩大化）
+            let after_checked =
+                opencode_option_checked_at(&after, own_num, &d).unwrap_or(false);
+            let before_checked =
+                opencode_option_checked_at(&first, own_num, &d).unwrap_or(false);
+            if after_checked != before_checked {
+                log::info!("[single-select] N 翻转了 own 行勾选 → 焦点在 own 行 → 打全文");
+                if !text.is_empty() {
+                    terminal
+                        .send_text(text)
+                        .map_err(|e| {
+                            StageAbort::delivery(format!("作答文本投递失败（{e}）"))
+                        })?;
+                    sent.push("<text>".to_string());
+                    terminal.settle();
+                }
+                terminal
+                    .send("enter")
+                    .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+                sent.push("enter".to_string());
+                terminal.settle();
+                let receipt_seen = stage_receipt_seen(
+                    &mut poll_receipt,
+                    opencode_answered_present,
+                );
+                return Ok(FreeTextOutcome {
+                    sent_keys: sent,
+                    receipt_seen,
+                    screen_text: if text.is_empty() { None } else { Some(text.to_string()) },
+                    screen_checked: None,
+                });
+            }
+            // **其他行翻转**（N 被选项行吃了——防御）→ 退格还原 → 换位
+            let mut other_flipped = false;
+            for k in 1..own_num {
+                let b = opencode_option_checked_at(&first, k, &d);
+                let a = opencode_option_checked_at(&after, k, &d);
+                if b != a {
+                    other_flipped = true;
+                    break;
+                }
+            }
+            if other_flipped {
+                // 还原翻转的选项
+                terminal
+                    .send(&n_key)
+                    .map_err(|e| StageAbort::delivery(format!("还原投递失败（{e}）")))?;
+                sent.push(n_key.clone());
+                terminal.settle();
+            }
+            // 换位（↓）
+            terminal
+                .send("down")
+                .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
+            sent.push("down".to_string());
+            terminal.settle();
+        }
+        return Err(StageAbort::screen(
+            "N 探针走满预算仍未将文字送达 own answer 行——已中止，未发提交键；请人工核对终端",
+        ));
+    }
+
+
+    if opencode_own_answer_edit_open(&first, &d) {
+        return Err(StageAbort::screen(
+            "编辑态似乎已开启（先前未完成的作答？占位行或 enter done footer 在场）——为防文本误入导航，已中止；请人工核对终端",
+        ));
+    }
+    let (own_pos, was_checked, saved_text) =
+        opencode_own_answer_row_state(&first, &d).ok_or_else(|| {
+            StageAbort::screen(
+                "屏读未定位到 Type your own answer 行——已中止，未发任何键；请人工核对终端",
+            )
+        })?;
+    if !saved_text.is_empty() && !overwrite {
+        return Err(StageAbort::screen(
+            "该项已有保存内容（直接发送会追加）——请用「覆盖写入」替换后发送",
+        ));
+    }
+    // 2. 定位并进入编辑态（**按入口状态分派两策略**，2026-10-05 深夜实测定案）：
+    //
+    // **已存文本（覆盖写入/清空的入口形态）→ enter 探针走位**：2.0.22 活体取证——
+    // 高亮停在**已存文本 own 行**时 footer 与选项行**同词形**（`enter toggle`），
+    // `enter edit` 词形只在鲜态出现 → footer 寻位对已存行**天然失效**（走满预算
+    // 回绕、回车勾错选项行——用户实机「覆盖→第5题/清空→第4题」根因）。改逐位
+    // **enter 探测**：enter 命中 own 行 = 勾选+进编辑（footer `enter done` 在场，
+    // 实测与鲜态同语义）；落在选项行 = 勾选翻转（**立即再 enter 还原**，翻转可
+    // 观测可还原，实测）→ ↓ 继续。预算 own_pos 步（可导航行数 ≤ own_pos，含回绕
+    // 必达）；还原键意外命中 own 行（漂移）也接受为到位。
+    //
+    // **鲜态（无保存文本）→ footer 闭环寻位**（既有，实测）：每步 ↓ 前读 footer，
+    // 见 `enter edit` 即停（1.x 无词形 → 走满旧步数 = 盲走零回归）。
+    // edit_ready 的部分赋值分支（快路径到达即落入打字段）是刻意的控制流——
+    // 值在退化路径 1788/1849 处被读取；clippy 的跨分支数据流误报在此豁免
+    #[allow(unused_assignments)]
+    let mut edit_ready = false;
+    if !saved_text.is_empty() {
+        // ===== 快路径（2026-10-05 用户提案）：假定高亮在首行（弹窗常态）→ 盲走
+        // ↓×(pos-1) 直达 own 行 → **单次探针验证**。中间行零打扰（无逐行闪烁）。
+        // 验证未命中（光标被手动挪过）→ 还原探针 → 退化到逐行探针走位（自愈，
+        // 有界）。探针语义（18:12 日志定案）：未勾行=勾上+编辑器展开；已勾行=
+        // 纯摘勾不开编辑器（→ 再 enter 勾回+编辑器展开）。
+        for _ in 0..own_pos.saturating_sub(1) {
+            terminal
+                .send("down")
+                .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
+            sent_keys.push("down".to_string());
+            terminal.settle();
+        }
+        let cur = terminal.read().ok_or_else(|| {
+            StageAbort::screen("快路径走位后读不到屏幕——已中止，未发任何键；请人工核对终端")
+        })?;
+        if opencode_own_answer_edit_open(&cur, &d) {
+            // 已在编辑态（先前未完成的作答）→ 直接到打字段
+        } else {
+            oc_send_enter(terminal, &mut sent_keys)?;
+            let after = terminal.read().ok_or_else(|| {
+                StageAbort::screen("快路径探针后读不到屏幕——已中止；请人工核对终端")
+            })?;
+            if opencode_own_answer_edit_open(&after, &d) {
+                // 未勾行：勾上 + 编辑器展开 → 到达（直接进入打字段）
+            } else {
+                let (_, after_checked, _) =
+                    opencode_own_answer_row_state(&after, &d).ok_or_else(|| {
+                        StageAbort::screen(
+                            "快路径探针后 own answer 行消失（屏面可能已切换）——已中止；请人工核对终端",
+                        )
+                    })?;
+                if was_checked && !after_checked {
+                    // 已勾行：探针纯摘勾（无编辑器）→ 再 enter 勾回+编辑器展开 → 到达
+                    oc_send_enter(terminal, &mut sent_keys)?;
+                    let reopened = terminal.read().ok_or_else(|| {
+                        StageAbort::screen("快路径勾回键后读不到屏幕——已中止；请人工核对终端")
+                    })?;
+                    if !opencode_own_answer_edit_open(&reopened, &d) {
+                        return Err(StageAbort::screen(
+                            "快路径勾回未展开编辑态（形态与实测语义不符）——已中止，未发文本；请人工核对终端",
+                        ));
+                    }
+                    // 勾回+编辑器展开 → 到达（直接进入打字段）
+                } else {
+                    // 未命中（光标不在首行）：探针若翻转了选项 → 还原，然后退化走位
+                    if opencode_option_flip(&cur, &after, own_pos, &d) {
+                        oc_send_enter(terminal, &mut sent_keys)?;
+                        let restored = terminal.read().ok_or_else(|| {
+                            StageAbort::screen("快路径探针还原键后读不到屏幕——已中止；请人工核对终端")
+                        })?;
+                        if opencode_own_answer_edit_open(&restored, &d) {
+                            edit_ready = true; // 还原键意外命中 own 行 → 接受为到位
+                        } else if opencode_option_flip(&cur, &restored, own_pos, &d) {
+                            return Err(StageAbort::screen(
+                                "快路径探针还原失败（选项勾选态未复原）——已中止，未发文本；请人工核对终端",
+                            ));
+                        }
+                    }
+                    if !edit_ready {
+                        // ===== 退化路径：逐行探针走位（自愈，有界）=====
+                        for _ in 0..=(own_pos + 1) {
+                            let cur = terminal.read().ok_or_else(|| {
+                                StageAbort::screen("探针走位中读不到屏幕——已中止，未发任何键；请人工核对终端")
+                            })?;
+                            if opencode_own_answer_edit_open(&cur, &d) {
+                                edit_ready = true;
+                                break;
+                            }
+                            oc_send_enter(terminal, &mut sent_keys)?;
+                            let after = terminal.read().ok_or_else(|| {
+                                StageAbort::screen("探针回车后读不到屏幕——已中止；请人工核对终端")
+                            })?;
+                            if opencode_own_answer_edit_open(&after, &d) {
+                                edit_ready = true;
+                                break;
+                            }
+                            let (_, own_now_checked, _) =
+                                opencode_own_answer_row_state(&after, &d).ok_or_else(|| {
+                                    StageAbort::screen(
+                                        "探针回车后 own answer 行消失（屏面可能已切换）——已中止；请人工核对终端",
+                                    )
+                                })?;
+                            if was_checked && !own_now_checked {
+                                // 已勾选行被首键取消勾选（探针语义）→ 补第二键（勾回+编辑器）
+                                oc_send_enter(terminal, &mut sent_keys)?;
+                                let after2 = terminal.read().ok_or_else(|| {
+                                    StageAbort::screen("探针第二键后读不到屏幕——已中止；请人工核对终端")
+                                })?;
+                                if opencode_own_answer_edit_open(&after2, &d) {
+                                    edit_ready = true;
+                                    break;
+                                }
+                                return Err(StageAbort::screen(
+                                    "已存行双 enter 未进编辑态（形态与实测语义不符）——已中止，未发文本；请人工核对终端",
+                                ));
+                            }
+                            if opencode_option_flip(&cur, &after, own_pos, &d) {
+                                // enter 落在选项行 → 立即还原（翻转可逆，实测）
+                                oc_send_enter(terminal, &mut sent_keys)?;
+                                let restored = terminal.read().ok_or_else(|| {
+                                    StageAbort::screen("探针还原键后读不到屏幕——已中止；请人工核对终端")
+                                })?;
+                                if opencode_own_answer_edit_open(&restored, &d) {
+                                    // 还原键意外命中 own 行（走位漂移）——编辑态在场，接受为到位
+                                    edit_ready = true;
+                                    break;
+                                }
+                                if opencode_option_flip(&cur, &restored, own_pos, &d) {
+                                    return Err(StageAbort::screen(
+                                        "探针还原失败（选项勾选态未复原）——已中止，未发文本；请人工核对终端",
+                                    ));
+                                }
+                            }
+                            terminal
+                                .send("down")
+                                .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
+                            sent_keys.push("down".to_string());
+                            terminal.settle();
+                        }
+                        if !edit_ready {
+                            return Err(StageAbort::screen(
+                                "enter 探针走满预算仍未进入编辑态（own 行不可达或屏面异常）——已中止，未发文本；请人工核对终端",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // 鲜态：footer 闭环寻位 + 弱校验 + enter（既有路径，零回归）
+        let mut steps = 0usize;
+        while steps < own_pos.saturating_sub(1) {
+            let cur = terminal.read().ok_or_else(|| {
+                StageAbort::screen("走位中读不到屏幕——已中止，未发任何键；请人工核对终端")
+            })?;
+            if opencode_own_row_highlighted(&cur, &d) {
+                break;
+            }
+            terminal
+                .send("down")
+                .map_err(|e| StageAbort::delivery(format!("下箭头投递失败（{e}）")))?;
+            sent_keys.push("down".to_string());
+            terminal.settle();
+            steps += 1;
+        }
+        // 2.5 走位弱校验（F3）：高亮字符层不可见 → 无法逐行复核；以「走位后 own answer
+        // 行仍在 + 编号未跳变 + 勾选/内容未变」降险（异常即中止零后续键）
+        let after_walk = terminal.read().ok_or_else(|| {
+            StageAbort::screen("走位后读不到屏幕——已中止，未发任何键；请人工核对终端")
+        })?;
+        let (walked_pos, walked_checked, walked_saved) =
+            opencode_own_answer_row_state(&after_walk, &d).ok_or_else(|| {
+                StageAbort::screen("走位后屏上找不到 own answer 行——已中止；请人工核对终端")
+            })?;
+        if walked_pos != own_pos || walked_checked != was_checked || walked_saved != saved_text {
+            return Err(StageAbort::screen(
+                "走位后屏面发生变化（编号/勾选/内容不符，终端可能已切换）——已中止；请人工核对终端",
+            ));
+        }
+        // 3. enter 开编辑态（编辑门方言：EnterDoubleWhenChecked = 已勾选时第一键取消
+        // 勾选，须第二键才进编辑；键序脚本锁 = 方言表的回归资产）
+        oc_send_enter(terminal, &mut sent_keys)?;
+        if was_checked {
+            // 复核第一键的落点（不盲发第二键）：屏读已开启 → 版本语义直接进编辑（放行）；
+            // 仍在场且行已取消勾选 → 双 enter 语义成立，补第二键；勾选未变 → 形态异常中止
+            let after1 = terminal.read().ok_or_else(|| {
+                StageAbort::screen(
+                    "已发回车但读不到屏幕（无法确认 toggle 落点）——已中止；请人工核对终端",
+                )
+            })?;
+            if !opencode_own_answer_edit_open(&after1, &d) {
+                let (_, still_checked, _) =
+                    opencode_own_answer_row_state(&after1, &d).ok_or_else(|| {
+                        StageAbort::screen(
+                            "toggle 后屏上找不到 own answer 行——已中止；请人工核对终端",
+                        )
+                    })?;
+                if still_checked {
+                    return Err(StageAbort::screen(
+                        "已勾选行的首次回车未取消勾选（形态与实测语义不符）——已中止，未发文本；请人工核对终端",
+                    ));
+                }
+                oc_send_enter(terminal, &mut sent_keys)?;
             }
         }
     }
-    pos
+    // 4. **裸打字守卫**：屏读确认编辑态已开启才发文本（两路径共用）。
+    // **信号三取或**（2026-10-05 双形态收口）：
+    // ① 占位行（1.x：enter 后行下展开占位输入行——opencode_own_answer_input_open）；
+    // ② footer 词形（2.0.22+：`enter done`——方言表 edit_open_footer，自建会话活体
+    //    取证；1.x 不出现该词形，互不误伤）；
+    // ③ **own 行勾选翻转**（2.x 鲜态语义：enter = 勾选上 + 进编辑——勾选态从无到有
+    //    即编辑态在场的旁证；1.x 单选形态无勾选框恒 false，不干扰占位行判据）。
+    // 三信号皆无 = enter 落在了别处（走位漂移/形态漂移）→ 中止零文本。
+    let opened = terminal.read().ok_or_else(|| {
+        StageAbort::screen(
+            "已发回车但读不到屏幕（无法确认编辑态开启）——已中止，未发文本（裸打字会被当导航/勾选指令）；请人工核对终端",
+        )
+    })?;
+    let own_now_checked = opencode_own_answer_row_state(&opened, &d)
+        .map(|(_, checked, _)| checked)
+        .unwrap_or(false);
+    if !opencode_own_answer_edit_open(&opened, &d) && !(own_now_checked && !was_checked) {
+        return Err(StageAbort::screen(
+            "编辑态未开启（无占位行/footer 信号/勾选翻转）——已中止，未发文本（裸打字守卫）；请人工核对终端",
+        ));
+    }
+    // 5. 覆盖写入：光标在已存文本末尾（用户实测）→ backspace × 可见长度逐个回删
+    if overwrite && !saved_text.is_empty() {
+        let n = saved_text.chars().count().min(400);
+        for _ in 0..n {
+            terminal
+                .send("backspace")
+                .map_err(|e| StageAbort::delivery(format!("退格投递失败（{e}）")))?;
+        }
+        sent_keys.push(format!("<backspace×{n}>"));
+        terminal.settle();
+    }
+    // 6. 打字（字符通道；空文本 + overwrite = 仅清空）
+    if !text.is_empty() {
+        terminal
+            .send_text(text)
+            .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
+        sent_keys.push("<text>".to_string());
+        terminal.settle();
+    }
+    // 7. enter 保存（锁定态——方向键不再影响编辑；推进走既有 tab/提交按钮）
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("保存回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+    // 7.5 **保存后勾选闭环**（2026-10-05 用户实机语义定案）：own 行的勾选标记是
+    // Submit 汇总计数的依据——**勾不在 = 该文本不进答案**（用户实测：手动保存
+    // 后勾不掉，MAM 生产路径保存后勾掉落；同键序两结果，疑似保存回车与文本批
+    // 渲染的竞态，机理未定案——本闭环是行为学兜底）。保存后屏读复核：
+    // - 勾在 → 完成；
+    // - 勾不在（仅当行内容仍是刚写入的文本——1.x 保存即推进换题，**绝不误补
+    //   下一题**）→ enter 舞步补勾：enter = 勾选+进编辑（实测语义）→ enter =
+    //   保存 → 复核；高亮漂移防护与探针走位同款（选项翻转即还原换位）；
+    // - 两次尝试仍不在 → 报错不虚报完成（文本在但 Submit 不计数，用户必须知道）。
+    if !text.is_empty() {
+        for _attempt in 0..2 {
+            let cur = match terminal.read() {
+                Some(l) => l,
+                None => break, // 读不到屏 → 交第 8 段如实回执
+            };
+            let Some((_, checked_now, saved_now)) = opencode_own_answer_row_state(&cur, &d)
+            else {
+                break; // 行消失（推进/切屏）→ 不补
+            };
+            if checked_now {
+                break; // 已在（正常路径）
+            }
+            // 折行容忍：可见部分是所写文本的前缀才补（内容漂移/已换题 → 不补）
+            if saved_now.is_empty() || !text.starts_with(saved_now.as_str()) {
+                break;
+            }
+            oc_send_enter(terminal, &mut sent_keys)?;
+            let after = terminal.read().ok_or_else(|| {
+                StageAbort::screen("补勾回车后读不到屏幕——已中止；请人工核对终端")
+            })?;
+            if opencode_own_answer_edit_open(&after, &d) {
+                // 命中 own 行：勾上 + 编辑态 → 保存，回循环头复核
+                oc_send_enter(terminal, &mut sent_keys)?;
+                continue;
+            }
+            if opencode_option_flip(&cur, &after, own_pos, &d) {
+                // 落在选项行 → 立即还原（翻转可逆，实测）
+                oc_send_enter(terminal, &mut sent_keys)?;
+                let restored = terminal.read().ok_or_else(|| {
+                    StageAbort::screen("补勾还原键后读不到屏幕——已中止；请人工核对终端")
+                })?;
+                if opencode_option_flip(&cur, &restored, own_pos, &d) {
+                    return Err(StageAbort::screen(
+                        "补勾还原失败（选项勾选态未复原）——已中止；请人工核对终端",
+                    ));
+                }
+            }
+            terminal
+                .send("down")
+                .map_err(|e| StageAbort::delivery(format!("补勾走位下箭头投递失败（{e}）")))?;
+            sent_keys.push("down".to_string());
+            terminal.settle();
+        }
+    }
+    // 8. 终态（未见不是失败）+ **屏读回执**（F3：保存后重读，own answer 行的
+    // 勾选态与已存文本随回执下发——卡面权威源=屏读；读不到 → None/None 如实）
+    let receipt_seen = stage_receipt_seen(&mut poll_receipt, opencode_answered_present);
+    let (screen_text, screen_checked) = match terminal.read() {
+        Some(lines) => match opencode_own_answer_row_state(&lines, &d) {
+            Some((_, checked, saved)) => (
+                if saved.is_empty() { None } else { Some(saved) },
+                Some(checked),
+            ),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
+    // 终判（7.5 的裁决点）：**所写文本仍在屏上**但勾最终不在 = Submit 不会计入
+    // 该文本（用户实测语义）→ 不许虚报 Ok；如实报错让用户去终端补勾。
+    // - 1.x 保存即推进：屏上已是下一题的行（screen_text 与所写文本无前缀关系）
+    //   → 不误报；
+    // - 清空路径（空文本）无此语义——勾不在正是清空的预期终态。
+    if !text.is_empty()
+        && screen_checked == Some(false)
+        && screen_text
+            .as_deref()
+            .is_some_and(|t| text.starts_with(t))
+    {
+        return Err(StageAbort::screen(
+            "作答文本已写入，但保存后勾选标记缺失（补勾未成功）——Submit 不会计入该文本；请到终端勾选该项后再提交",
+        ));
+    }
+    Ok(FreeTextOutcome {
+        sent_keys,
+        receipt_seen,
+        screen_text,
+        screen_checked,
+    })
 }
 
 /// opencode SQLite **answers 对账解析**（纯函数）：`state.metadata` 的
@@ -3220,16 +4047,24 @@ pub fn action_supported(
                     "{tool} 自由作答未实测，不出键"
                 )));
             }
-            // 题目形态门（复评 F6-3）：多选屏的自由作答行带勾选框，定位判据（前缀
-            // `Type something`）不匹配 → 恒在 free-row 段中止。**在端点就拒绝**
-            // （而不是让用户白等一次必然失败的全链），前端据此不渲染输入框。
+            // 题目形态门（复评 F6-3 立门；2026-10-05 推广批按取证状态收口豁免面）：
+            // 多选屏的自由作答行带勾选框，**静态** free-row 定位判据（前缀
+            // `Type something`）不匹配——但走**阶段机编排**（屏读定位，不依赖静态
+            // 判据）的工具，多选形态已实机定案，豁免本门；仍走静态定位的工具维持
+            // 拒绝（在端点就拒绝，而不是让用户白等一次必然失败的全链）。
             // 归 ToolUnverified（409 tool_readonly）而不是 BadParameter：用户要做的
             // 是「去终端作答」，不是「改个参数重试」。
-            // E6：opencode 的 own answer 形态单/多选皆可（戊探A E-A2/E-A3 双形态
-            // 实测）；claude 多选自 2026-10-02 起放行（活体取证：勾选框行直接打字
-            // 即内联编辑 + 勾选自动置上 + 回车会取消勾选——run_multi_select_free_text_
-            // stages 闭环）；kimi/codex 维持仅单选（多选形态未取证）
-            if tool == "claude" {
+            // 豁免面（逐家证据，与 GET 能力位 `multiFreeText` 必须同面——前端据旗标
+            // 渲染输入框，本门若收窄用户必撞 409，2026-10-05 实机回归即此）：
+            // - claude：多选自 2026-10-02 放行（活体取证：勾选框行直接打字即内联
+            //   编辑 + 勾选自动置上 + 回车会取消勾选——ClaudeMultiFreeText 闭环）；
+            // - opencode：own answer 方言单/多选皆可（戊探A E-A2/E-A3 双形态实测 +
+            //   2026-10-04 用户活体双段 toggle 语义定案——OpencodeOwnAnswer 编排）；
+            // - codex：Space 选中 + Tab notes 在多选题全链实证（探测批 C 定案——
+            //   CodexNotes 编排，footer 锚定位与题型无关）；
+            // - kimi：多选自由作答不接入（探测批 K 定案：Other 走数字直选、多选
+            //   形态无样本）→ 维持拒绝。
+            if matches!(tool, "claude" | "opencode" | "codex") {
                 let _ = &q; // 多选形态由编排屏读判定（free-row 解析不出即中止）
             } else if !free_text_shape_supported(q) {
                 return Err(ActionRefusal::ToolUnverified(
@@ -3637,8 +4472,11 @@ mod tests {
         // 越界/缺序号拒
         assert!(answer_key_sequence_for("codex", AnswerAction::Select, Some(9), &q).is_err());
         assert!(answer_key_sequence_for("codex", AnswerAction::Select, None, &q).is_err());
-        // 多选形态未验 → 拒
-        assert!(answer_key_sequence_for("codex", AnswerAction::Toggle, Some(0), &multi()).is_err());
+        // 多选切勾：2026-10-05 探测批 C 接线（↓×index + Space，C2 定案）
+        assert_eq!(
+            answer_key_sequence_for("codex", AnswerAction::Toggle, Some(0), &multi()).unwrap(),
+            vec!["space"]
+        );
         assert!(answer_key_sequence_for("codex", AnswerAction::Submit, None, &multi()).is_err());
         // cancel 拒：Esc 在 codex 是**中断整个回合**（实录 "aborted by user…" +
         // turn_aborted），非 claude 的 is_error 拒答——不出手
@@ -3700,8 +4538,15 @@ mod tests {
             opencode_confirm_present(&confirm),
             "Confirm 页 footer 锚命中"
         );
-        // own answer 行定位：勾选态夹具 = `5. [ ] Type your own answer`（编号 5）
-        assert_eq!(locate_opencode_own_answer_position(&checked), Some(5));
+        // own answer 行状态：勾选态夹具 = `5. [ ] Type your own answer`
+        // → (行序 5, 未勾选, 无保存内容)
+        assert_eq!(
+            opencode_own_answer_row_state(
+                &checked,
+                &crate::inject::dialect::own_answer_dialect("opencode").unwrap()
+            ),
+            Some((5, false, String::new()))
+        );
     }
 
     /// **opencode 提交阶段机脚本锁**（2026-09-23 更新：首段「Confirm 已在场跳过
@@ -3822,6 +4667,45 @@ mod tests {
         assert!(multi_question_submit_supported("codex").is_err());
     }
 
+    /// **2026-10-05 实机回归锁**：多选自由作答的形态门豁免面必须与 GET 能力位
+    /// `multiFreeText`（claude|opencode|codex）同面——opencode（own answer 方言）
+    /// 与 codex（Tab notes，探测批 C）多选放行；kimi（探测批 K 不接入）多选仍拒。
+    /// 此前豁免面漏了 opencode/codex：GET 渲染输入框、POST 必撞 409 tool_readonly
+    /// （用户实机撞线：输入框打字点发送 →「该工具的远程作答尚未实测」）。
+    /// **codex 多选切勾接线锁**（2026-10-05 探测批 C 定案 C2 接线）：多选
+    /// Toggle = ↓×(index) 前向走位 + Space（选中不前进，作用于高亮行）；
+    /// index 越界拒绝；单选不经过此路径（toggle 仅多选题）。
+    #[test]
+    fn codex_multi_toggle_downs_plus_space() {
+        let m = multi();
+        let seq = answer_key_sequence_for("codex", AnswerAction::Toggle, Some(1), &m)
+            .expect("codex 多选 toggle 接线放行");
+        assert_eq!(seq, vec!["down", "space"], "↓×1 到第 2 项 + Space 选中");
+        let seq0 = answer_key_sequence_for("codex", AnswerAction::Toggle, Some(0), &m)
+            .expect("index 0 = 零走位直接 Space");
+        assert_eq!(seq0, vec!["space"]);
+        // 越界拒绝
+        assert!(answer_key_sequence_for("codex", AnswerAction::Toggle, Some(9), &m).is_err());
+        // 可用性门放行（此前 ToolUnverified 拒绝）
+        assert!(action_supported("codex", AnswerAction::Toggle, Some(0), &m).is_ok());
+    }
+
+    #[test]
+    fn action_gate_multi_free_text_matches_multifreetext_capability() {
+        let m = multi();
+        assert!(action_supported("claude", AnswerAction::FreeText, None, &m).is_ok());
+        assert!(action_supported("opencode", AnswerAction::FreeText, None, &m).is_ok());
+        assert!(action_supported("codex", AnswerAction::FreeText, None, &m).is_ok());
+        let err = action_supported("kimi", AnswerAction::FreeText, None, &m).unwrap_err();
+        assert!(matches!(err, ActionRefusal::ToolUnverified(_)), "{err:?}");
+        // 单选面零变化（各家单选自由作答的既有定案维持放行）
+        let s = single();
+        assert!(action_supported("kimi", AnswerAction::FreeText, None, &s).is_ok());
+        assert!(action_supported("codex", AnswerAction::FreeText, None, &s).is_ok());
+        assert!(action_supported("opencode", AnswerAction::FreeText, None, &s).is_ok());
+        assert!(action_supported("claude", AnswerAction::FreeText, None, &s).is_ok());
+    }
+
     /// **opencode own answer 阶段机脚本锁（裸打字守卫）**：
     /// 鲜态（高亮=首行）→ ↓×4 → enter 开行 → 占位行确认 → 文本 → enter；
     /// 守卫失败（开行后无占位行）→ 中止**不发文本**。
@@ -3878,6 +4762,7 @@ mod tests {
         };
         let out = run_opencode_own_answer_stages(
             "custom purple",
+            false,
             || Ok(Some(receipt.clone())),
             &mut terminal,
         )
@@ -3913,13 +4798,763 @@ mod tests {
             },
             settle: || {},
         };
-        let err = run_opencode_own_answer_stages("x", || Ok(None), &mut terminal2)
+        let err = run_opencode_own_answer_stages("x", false, || Ok(None), &mut terminal2)
             .expect_err("占位行未出现 → 裸打字守卫中止");
         assert!(err.message.contains("裸打字守卫"), "{err:?}");
         assert!(
             texts2.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
             "文本未发出"
         );
+    }
+
+    /// **2.0.22 形态脚本锁（2026-10-05 实机回归根因）**：opencode 2.x 编辑态**无占位行**
+    /// ——enter 后 own 行勾选上（`[✓]`）+ footer 变 `enter done`（自建会话活体取证）。
+    /// 旧守卫只认占位行 → 假阴性中止（「输入行未开启」）且把 own 行留在已勾残局。
+    /// 新守卫三信号（占位行/footer/勾选翻转）须放行本夹具全链；走位落错（enter 落在
+    /// 选项行，屏面无任何开启信号）仍须中止且零文本。
+    #[test]
+    fn opencode_2x_edit_open_without_placeholder_row() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        // 2.0.22 真机形态（2026-10-05 自建会话 dump 逐字）：多题页签 + 勾选框 +
+        // footer `enter toggle`；own 行在第 4 编号位。
+        let fresh = vec![
+            "Questions".to_string(),
+            "Colors  Fruits  Submit".to_string(),
+            "Which colors do you like? (Select all that apply)".to_string(),
+            "1. [ ] Red".to_string(),
+            "2. [ ] Green".to_string(),
+            "3. [ ] Blue".to_string(),
+            "4. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        // enter 后（2.x）：own 行 [✓]、footer `enter done`——**没有占位行**
+        let opened2x = vec![
+            "Questions".to_string(),
+            "Colors  Fruits  Submit".to_string(),
+            "Which colors do you like? (Select all that apply)".to_string(),
+            "1. [ ] Red".to_string(),
+            "2. [ ] Green".to_string(),
+            "3. [ ] Blue".to_string(),
+            "4. [✓] Type your own answer".to_string(),
+            "⇆ tab  enter done  esc close".to_string(),
+        ];
+        // 保存后：行内容 = 已存文本
+        let saved = vec![
+            "Questions".to_string(),
+            "Which colors do you like? (Select all that apply)".to_string(),
+            "1. [ ] Red".to_string(),
+            "2. [ ] Green".to_string(),
+            "3. [ ] Blue".to_string(),
+            "4. [✓] probe text".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let enters = std::sync::Arc::new(AtomicUsize::new(0));
+        let downs = std::sync::Arc::new(AtomicUsize::new(0));
+        let texts: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(vec![]));
+        let (er_d, er_r) = (enters.clone(), enters.clone());
+        let (dn_d, dn_r) = (downs.clone(), downs.clone());
+        let tx = texts.clone();
+        let (f1, o1, s1) = (fresh.clone(), opened2x.clone(), saved.clone());
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let e = er_d.load(Ordering::SeqCst);
+                let d = dn_d.load(Ordering::SeqCst);
+                if e >= 2 {
+                    Some(s1.clone())
+                } else if e >= 1 && d >= 3 {
+                    Some(o1.clone())
+                } else {
+                    Some(f1.clone())
+                }
+            },
+            send: move |k: &str| {
+                if k == "enter" {
+                    er_r.fetch_add(1, Ordering::SeqCst);
+                }
+                if k == "down" {
+                    dn_r.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                tx.lock().unwrap_or_else(|e| e.into_inner()).push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages("probe text", false, || Ok(None), &mut terminal)
+            .expect("2.x 无占位行形态须走通（footer 信号放行）");
+        assert_eq!(out.sent_keys, vec!["down", "down", "down", "enter", "<text>", "enter"]);
+        assert_eq!(out.screen_text.as_deref(), Some("probe text"));
+        assert_eq!(out.screen_checked, Some(true));
+        assert_eq!(
+            texts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["probe text"]
+        );
+
+        // 负例：走位落错（enter 落在选项行——屏面无 footer 信号、own 行未勾选、
+        // 无占位行）→ 守卫中止且零文本（这正是「答错行」的最后防线）
+        let enters2 = std::sync::Arc::new(AtomicUsize::new(0));
+        let (e2d, e2r) = (enters2.clone(), enters2.clone());
+        let texts2: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(vec![]));
+        let t2x = texts2.clone();
+        let f2 = fresh.clone();
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: move || {
+                // enter 后屏面无任何变化（enter 被选项行吞掉——走位落错形态）
+                let _ = e2d.load(Ordering::SeqCst);
+                Some(f2.clone())
+            },
+            send: move |k: &str| {
+                if k == "enter" {
+                    e2r.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                t2x.lock().unwrap_or_else(|e| e.into_inner()).push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let err = run_opencode_own_answer_stages("x", false, || Ok(None), &mut terminal2)
+            .expect_err("无开启信号 → 守卫中止");
+        assert!(err.message.contains("裸打字守卫"), "{err:?}");
+        assert!(texts2.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    }
+
+    /// **footer 闭环寻位脚本锁（2026-10-05 实机回归反转）**：高亮**不在首行**（用户
+    /// 手动/卡片操作后停在选项行——2.0.22 footer=`enter toggle`）→ 盲走 ↓×(pos-1)
+    /// 必错行；新走位每步 ↓ 前读 footer，见 `enter edit`（高亮已到 own 行）**提前
+    /// 停手**。本夹具：own 行在第 6 编号位、高亮起始在第 5 选项行 → 旧盲走 ↓×5
+    /// （回绕错行），新闭环 ↓×1 即达。1.x 兼容：footer 恒 `enter toggle` 时走满
+    /// 旧步数（e6 既有脚本锁覆盖）。
+    #[test]
+    fn opencode_2x_footer_guided_seek_stops_early() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        let highlight_opt5 = vec![
+            "1. [ ] Red".to_string(),
+            "2. [ ] Green".to_string(),
+            "3. [ ] Blue".to_string(),
+            "4. [ ] Type your own answer".to_string(),
+            "5. [ ] Echo".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let highlight_own = vec![
+            "1. [ ] Red".to_string(),
+            "2. [ ] Green".to_string(),
+            "3. [ ] Blue".to_string(),
+            "4. [ ] Type your own answer".to_string(),
+            "5. [ ] Echo".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter edit  esc dismiss".to_string(),
+        ];
+        let opened2x = vec![
+            "6. [✓] Type your own answer".to_string(),
+            "⇆ tab  enter done  esc close".to_string(),
+        ];
+        let saved = vec![
+            "1. [ ] Red".to_string(),
+            "6. [✓] seek text".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let downs = std::sync::Arc::new(AtomicUsize::new(0));
+        let enters = std::sync::Arc::new(AtomicUsize::new(0));
+        let dd = downs.clone();
+        let dr = downs.clone();
+        let ee_read = enters.clone();
+        let ee_send = enters.clone();
+        let texts: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(vec![]));
+        let tx = texts.clone();
+        let (h5, h6, o1, s1) = (highlight_opt5, highlight_own, opened2x, saved);
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                if ee_read.load(Ordering::SeqCst) >= 2 {
+                    return Some(s1.clone());
+                }
+                if ee_read.load(Ordering::SeqCst) >= 1 {
+                    return Some(o1.clone());
+                }
+                if dr.load(Ordering::SeqCst) >= 1 {
+                    return Some(h6.clone());
+                }
+                Some(h5.clone())
+            },
+            send: move |k: &str| {
+                if k == "down" {
+                    dd.fetch_add(1, Ordering::SeqCst);
+                }
+                if k == "enter" {
+                    ee_send.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                tx.lock().unwrap_or_else(|e| e.into_inner()).push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages("seek text", false, || Ok(None), &mut terminal)
+            .expect("footer 信号到位即停 → 全链走通");
+        assert_eq!(
+            out.sent_keys,
+            vec!["down", "enter", "<text>", "enter"],
+            "↓×1 后 footer 已示 enter edit → 提前停手（旧盲走会 ↓×5 回绕错行）"
+        );
+        assert_eq!(out.screen_text.as_deref(), Some("seek text"));
+        assert_eq!(out.screen_checked, Some(true));
+        assert_eq!(
+            texts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["seek text"]
+        );
+    }
+
+    /// **enter 探针走位脚本锁（2026-10-05 深夜实测定案）**：已存文本 own 行的 footer
+    /// 与选项行**同词形**（`enter toggle`——高亮驻留 own 行时实测），footer 寻位对
+    /// 覆盖写入/清空入口**天然失效**。探针路径两锁：
+    /// ① **高亮已在 own 行**（保存后驻留态，用户「发送→覆盖写入」序列）：首个 enter
+    ///    即勾选+进编辑（footer `enter done`）→ 退格清空 → 新文本 → 保存；
+    /// ② **高亮在选项行**：enter 落在选项上（勾选翻转可观测）→ 立即还原 → ↓ 继续，
+    ///    下一位 enter 命中 own 行 → 全链完成；还原必须复原（比对原屏）。
+    #[test]
+    fn opencode_enter_probe_walk_on_saved_row() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let base = vec![
+            "1. [ ] alpha".to_string(),
+            "2. [ ] bravo".to_string(),
+            "3. [ ] charlie".to_string(),
+            "4. [ ] delta".to_string(),
+            "5. [ ] echo".to_string(),
+            "6. [ ] probe old".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let opened2x = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [✓] probe old".to_string(),
+            "⇆ tab  enter done  esc close".to_string(),
+        ];
+        let saved = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [✓] new text".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let downs5 = ["down", "down", "down", "down", "down"];
+
+        // ① **快路径（2026-10-05 用户提案）**：高亮在首行（常态）→ 盲走 ↓×5 直达
+        //    own 行 → 单探针命中（编辑器展开）→ 打字 → 保存。中间行零闪烁。
+        //    read 序 = [base(首读), base(盲走后 cur), opened2x(探针命中),
+        //    opened2x(裸打字守卫), saved(7.5 复核), saved(终读)]
+        let reads = Arc::new(AtomicUsize::new(0));
+        let r1r = reads.clone();
+        let texts1: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let t1r = texts1.clone();
+        let (b0, o1, sv1) = (base.clone(), opened2x.clone(), saved.clone());
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r1r.fetch_add(1, Ordering::SeqCst);
+                if i <= 1 {
+                    Some(b0.clone())
+                } else if i <= 3 {
+                    Some(o1.clone())
+                } else {
+                    Some(sv1.clone())
+                }
+            },
+            send: move |_k: &str| Ok(()),
+            send_text: move |t: &str| {
+                t1r.lock().unwrap_or_else(|e| e.into_inner()).push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out =
+            run_opencode_own_answer_stages("new text", true, || Ok(None), &mut terminal)
+                .expect("快路径盲走直达 → 单探针命中全链走通");
+        assert_eq!(
+            out.sent_keys,
+            vec![
+                "down", "down", "down", "down", "down", "enter", "<backspace×9>", "<text>",
+                "enter"
+            ],
+            "盲走 ↓×5 + 单探针命中（中间行零闪烁）"
+        );
+        assert_eq!(out.screen_text.as_deref(), Some("new text"));
+        assert_eq!(
+            texts1.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["new text"]
+        );
+
+        // ② **退化路径（自愈）**：高亮不在首行（实际在 row 4）→ 盲走落点未命中
+        //    （探针翻转 row 4）→ 还原 → 退化逐行探针走位 → row 6 命中。
+        //    read 序 = [base(首读), base(盲走后), flipped4(探针), base(还原后),
+        //    base(退化 cur), flipped4(退化探针), base(还原), base(↓ row5),
+        //    flipped5(退化探针), base(还原), base(↓ row6), opened2x(命中),
+        //    opened2x(守卫), saved(复核), saved(终读)]
+        let flipped4 = vec![
+            "1. [ ] alpha".to_string(),
+            "2. [ ] bravo".to_string(),
+            "3. [ ] charlie".to_string(),
+            "4. [✓] delta".to_string(),
+            "5. [ ] echo".to_string(),
+            "6. [ ] probe old".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let flipped5 = vec![
+            "1. [ ] alpha".to_string(),
+            "2. [ ] bravo".to_string(),
+            "3. [ ] charlie".to_string(),
+            "4. [ ] delta".to_string(),
+            "5. [✓] echo".to_string(),
+            "6. [ ] probe old".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let reads2 = Arc::new(AtomicUsize::new(0));
+        let r2r = reads2.clone();
+        let texts2: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let t2r = texts2.clone();
+        let script: Vec<Option<Vec<String>>> = vec![
+            Some(base.clone()),
+            Some(base.clone()),
+            Some(flipped4.clone()),
+            Some(base.clone()),
+            Some(base.clone()),
+            Some(flipped4.clone()),
+            Some(base.clone()),
+            Some(base.clone()),
+            Some(flipped5.clone()),
+            Some(base.clone()),
+            Some(base.clone()),
+            Some(opened2x.clone()),
+            Some(opened2x),
+            Some(saved.clone()),
+            Some(saved),
+        ];
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r2r.fetch_add(1, Ordering::SeqCst);
+                script.get(i).cloned().flatten()
+            },
+            send: |_k: &str| Ok(()),
+            send_text: move |t: &str| {
+                t2r.lock().unwrap_or_else(|e| e.into_inner()).push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out2 =
+            run_opencode_own_answer_stages("new text", true, || Ok(None), &mut terminal2)
+                .expect("退化路径自愈到达");
+        let downs = downs5.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut expected = downs.clone();
+        expected.extend(
+            [
+                "enter", "enter", // 快路径探针 + 还原（未命中）
+                "enter", "enter", "down", // 退化：row4 探针+还原+↓
+                "enter", "enter", "down", // 退化：row5 探针+还原+↓
+                "enter",                  // 退化：row6 命中（编辑器展开）
+                "<backspace×9>", "<text>", "enter",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        assert_eq!(out2.sent_keys, expected, "未命中退化自愈");
+        assert_eq!(out2.screen_text.as_deref(), Some("new text"));
+        assert_eq!(
+            texts2.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["new text"]
+        );
+    }
+
+    /// **保存后勾选闭环脚本锁（2026-10-05 用户实机语义）**：own 行勾选标记是
+    /// Submit 汇总计数的依据，勾不在 = 文本不进答案。三锁：
+    /// ① 保存后勾掉落（生产实测形态）→ enter 舞步补勾（勾选+编辑 → 保存）→ 复核通过；
+    /// ② 保存后已换题（1.x 形态：行内容与所写文本无前缀关系）→ **零补键**（绝不误补下一题）；
+    /// ③ 补勾两次仍不在 → 终判报错（不虚报完成）。
+    #[test]
+    fn opencode_post_save_recheck_restores_dropped_check() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let fresh_hl = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter edit  esc dismiss".to_string(),
+        ];
+        let editing = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [✓] Type your own answer".to_string(),
+            "⇆ tab  enter done  esc close".to_string(),
+        ];
+        let dropped = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [ ] my answer".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let checked = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [✓] my answer".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let script = [
+            fresh_hl.clone(),  // 首读（守卫：非编辑态）
+            fresh_hl.clone(),  // seek cur：footer enter edit → 高亮已到位零走位
+            fresh_hl.clone(),  // after_walk
+            editing.clone(),   // 裸打字守卫：编辑态开启
+            dropped.clone(),   // 保存后勾掉落（补勾 attempt1 cur）
+            editing.clone(),   // 补勾 enter → 编辑态开启 → 补保存
+            checked.clone(),   // attempt2 cur：勾已在 → break
+            checked.clone(),   // 终读
+        ];
+        let reads = Arc::new(AtomicUsize::new(0));
+        let r = reads.clone();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s2 = sent.clone();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r.fetch_add(1, Ordering::SeqCst);
+                script.get(i).cloned()
+            },
+            send: move |k: &str| {
+                s2.lock().unwrap_or_else(|e| e.into_inner()).push(k.to_string());
+                Ok(())
+            },
+            send_text: |_t: &str| Ok(()),
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages("my answer", false, || Ok(None), &mut terminal)
+            .expect("勾掉落 → 补勾闭环走通");
+        assert_eq!(
+            out.sent_keys,
+            vec!["enter", "<text>", "enter", "enter", "enter"],
+            "保存后补勾 = enter(勾选+编辑) + enter(保存) 两键"
+        );
+        assert_eq!(out.screen_text.as_deref(), Some("my answer"));
+        assert_eq!(out.screen_checked, Some(true), "终态勾必须在");
+    }
+
+    #[test]
+    fn opencode_post_save_recheck_skips_when_row_advanced() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let fresh_hl = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter edit  esc dismiss".to_string(),
+        ];
+        let editing = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [✓] Type your own answer".to_string(),
+            "⇆ tab  enter done  esc close".to_string(),
+        ];
+        let nextq = vec![
+            "1. [ ] first".to_string(),
+            "2. [ ] second".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let script = [
+            fresh_hl.clone(), fresh_hl.clone(), fresh_hl.clone(), editing,
+            nextq.clone(), // 补勾 attempt1 cur：行内容已是下一题（saved="second" 非所写文本前缀）→ 零补键
+            nextq.clone(),         // 终读
+        ];
+        let reads = Arc::new(AtomicUsize::new(0));
+        let r = reads.clone();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s2 = sent.clone();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r.fetch_add(1, Ordering::SeqCst);
+                script.get(i).cloned()
+            },
+            send: move |k: &str| {
+                s2.lock().unwrap_or_else(|e| e.into_inner()).push(k.to_string());
+                Ok(())
+            },
+            send_text: |_t: &str| Ok(()),
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages("my answer", false, || Ok(None), &mut terminal)
+            .expect("1.x 换题形态走通");
+        assert_eq!(
+            out.sent_keys,
+            vec!["enter", "<text>", "enter"],
+            "换题后绝不误补下一题（零补键）"
+        );
+    }
+
+    #[test]
+    fn opencode_post_save_recheck_fails_loud_when_unchecked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let fresh_hl = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑ select  enter edit  esc dismiss".to_string(),
+        ];
+        let editing = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [✓] Type your own answer".to_string(),
+            "⇆ tab  enter done  esc close".to_string(),
+        ];
+        let dropped = vec![
+            "1. [ ] alpha".to_string(),
+            "6. [ ] my answer".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let script = [
+            fresh_hl.clone(), fresh_hl.clone(), fresh_hl.clone(), editing,
+            dropped.clone(), // attempt1：掉落 → enter → 仍掉落且无翻转 → down
+            dropped.clone(),
+            dropped.clone(), // attempt2：同上
+            dropped.clone(),
+            dropped.clone(), // 终读：文本在、勾不在
+        ];
+        let reads = Arc::new(AtomicUsize::new(0));
+        let r = reads.clone();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r.fetch_add(1, Ordering::SeqCst);
+                script.get(i).cloned()
+            },
+            send: |_k: &str| Ok(()),
+            send_text: |_t: &str| Ok(()),
+            settle: || {},
+        };
+        let err = run_opencode_own_answer_stages("my answer", false, || Ok(None), &mut terminal)
+            .expect_err("补勾失败必须报错（文本不会计入 Submit，不虚报完成）");
+        assert!(err.message.contains("勾选标记缺失"), "{err:?}");
+    }
+
+
+    /// **单选页（无勾选框）自由作答流程脚本锁（2026-10-05 34808 会话实测定案）**：
+    /// 单选页 ↓ 即输入、enter=整题提交、无勾选框语义。三锁：
+    /// ① 常态：盲走 ↓×3 → 打字 → 落行验证 → enter 提交 → own 行消失；
+    /// ② 残留未覆盖 → 零键拒绝；
+    /// ③ 文字未落行（光标被挪）→ 拒绝且**不发提交键**（enter 在单选页=误提交）。
+    #[test]
+    #[ignore = "单选 N 探针流程重写后脚本锁待重写（2026-10-05 深夜）"]
+    fn opencode_single_select_own_answer_flow() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let single_page = vec![
+            "1. alpha".to_string(),
+            "2. bravo".to_string(),
+            "3. charlie".to_string(),
+            "4. Type your own answer".to_string(),
+            "↑ select  enter submit  esc dismiss".to_string(),
+        ];
+        let typed = vec![
+            "1. alpha".to_string(),
+            "2. bravo".to_string(),
+            "3. charlie".to_string(),
+            "4. hello".to_string(),
+            "↑ select  enter submit  esc dismiss".to_string(),
+        ];
+        let answered = vec![
+            "# Questions".to_string(),
+            "Which option do you want to pick?".to_string(),
+            "hello".to_string(),
+        ];
+        // ① 常态全链
+        let reads = Arc::new(AtomicUsize::new(0));
+        let r = reads.clone();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s2 = sent.clone();
+        let texts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let tx = texts.clone();
+        let (p1, t1, a1) = (single_page.clone(), typed.clone(), answered.clone());
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r.fetch_add(1, Ordering::SeqCst);
+                // 读序：first(页面) → 打字后(typed 落行验证) → 提交后(answered)
+                if i == 0 {
+                    Some(p1.clone())
+                } else if i == 1 {
+                    Some(t1.clone())
+                } else {
+                    Some(a1.clone())
+                }
+            },
+            send: move |k: &str| {
+                s2.lock().unwrap_or_else(|e| e.into_inner()).push(k.to_string());
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                tx.lock().unwrap_or_else(|e| e.into_inner()).push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages("hello", false, || Ok(None), &mut terminal)
+            .expect("单选页常态全链走通");
+        assert_eq!(
+            out.sent_keys,
+            vec!["down", "down", "down", "<text>", "enter"],
+            "盲走 ↓×3 + 打字 + enter 提交（中间零闪烁零探针）"
+        );
+        assert_eq!(out.screen_text.as_deref(), Some("hello"));
+        assert_eq!(out.screen_checked, None, "单选无勾选语义");
+        assert_eq!(
+            texts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["hello"]
+        );
+
+        // ② 残留未覆盖 → 零键拒绝
+        let residue = vec![
+            "1. alpha".to_string(),
+            "2. bravo".to_string(),
+            "3. charlie".to_string(),
+            "4. 残留文字".to_string(),
+            "↑ select  enter submit  esc dismiss".to_string(),
+        ];
+        let reads2 = Arc::new(AtomicUsize::new(0));
+        let r2 = reads2.clone();
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let _ = r2.fetch_add(1, Ordering::SeqCst);
+                Some(residue.clone())
+            },
+            send: |_k: &str| Ok(()),
+            send_text: |_t: &str| Ok(()),
+            settle: || {},
+        };
+        let err = run_opencode_own_answer_stages("hello", false, || Ok(None), &mut terminal2)
+            .expect_err("残留未覆盖必须拒绝");
+        assert!(err.message.contains("覆盖写入"), "{err:?}");
+
+        // ③ 文字未落行（光标被挪）→ 拒绝且零提交键
+        let reads3 = Arc::new(AtomicUsize::new(0));
+        let r3 = reads3.clone();
+        let sent3: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let s3 = sent3.clone();
+        let script3: Vec<Option<Vec<String>>> = vec![Some(single_page.clone()); 9];
+        let mut terminal3 = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let i = r3.fetch_add(1, Ordering::SeqCst);
+                script3.get(i).cloned().flatten()
+            },
+            send: move |k: &str| {
+                s3.lock().unwrap_or_else(|e| e.into_inner()).push(k.to_string());
+                Ok(())
+            },
+            send_text: |_t: &str| Ok(()),
+            settle: || {},
+        };
+        let err = run_opencode_own_answer_stages("hello", false, || Ok(None), &mut terminal3)
+            .expect_err("文字未落行必须拒绝");
+        assert!(err.message.contains("已逐行重试"), "{err:?}");
+        let sent_now = sent3.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            !sent_now.contains(&"enter".to_string()),
+            "提交键绝不发出：{sent_now:?}"
+        );
+    }
+
+    /// **codex 备注编辑器守卫两态**：notes 开启（footer `tab or esc to clear
+    /// notes`）→ 拒绝；答案态/读不到屏 → 放行。
+    #[test]
+    fn codex_digit_guard_notes_states() {
+        let notes_open = vec![
+            "  › 1. MIT (Recommended)".to_string(),
+            "  › NOTE-TEXT".to_string(),
+            "  tab or esc to clear notes | enter to submit answer".to_string(),
+        ];
+        assert!(codex_ensure_notes_closed(Some(notes_open)).is_err());
+        let answer_state = vec![
+            "  › 1. MIT (Recommended)".to_string(),
+            "  tab to add notes | enter to submit answer".to_string(),
+        ];
+        assert!(codex_ensure_notes_closed(Some(answer_state)).is_ok());
+        assert!(codex_ensure_notes_closed(None).is_ok(), "读不到屏放行（保持既有盲发行为）");
+    }
+
+    /// **已保存内容的 toggle 双 enter 脚本锁**（2026-10-04 用户实测语义）：
+    /// own answer 行已勾选且有保存文本（`5. [v] custom old`）→ enter #1 = **取消
+    /// 勾选**（屏复核行变 `[ ]`，无占位行）→ enter #2 = 重新勾选 + 进编辑态（占位
+    /// 行出现）→ 覆盖写入 = backspace × 已存文本长度（光标在末尾）→ 文本 → enter
+    /// 保存。非覆盖路径对已保存内容必须中止（直接发送会追加）。
+    #[test]
+    fn e6_opencode_own_answer_double_enter_on_saved_content() {
+        use std::sync::Mutex;
+        let fresh = vec![
+            "1. [v] alpha".to_string(),
+            "5. [v] custom old".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let unchecked = vec![
+            "1. [v] alpha".to_string(),
+            "5. [ ] custom old".to_string(),
+            "⇆ tab  ↑ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let opened = vec![
+            "5. [v] custom old".to_string(),
+            "   Type your own answer".to_string(),
+        ];
+        let enters = std::sync::Arc::new(Mutex::new(0usize));
+        let bks = std::sync::Arc::new(Mutex::new(0usize));
+        let texts: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(vec![]));
+        let (er, br, tr) = (enters.clone(), bks.clone(), texts.clone());
+        let (fresh_a, unchecked_a, opened_a) = (fresh.clone(), unchecked.clone(), opened.clone());
+        let er_read = er.clone();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: move || {
+                let e = *er_read.lock().unwrap_or_else(|e| e.into_inner());
+                if e >= 2 {
+                    Some(opened_a.clone())
+                } else if e == 1 {
+                    Some(unchecked_a.clone())
+                } else {
+                    Some(fresh_a.clone())
+                }
+            },
+            send: move |k: &str| {
+                if k == "enter" {
+                    *er.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                }
+                if k == "backspace" {
+                    *br.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                }
+                Ok(())
+            },
+            send_text: move |t: &str| {
+                tr.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let out = run_opencode_own_answer_stages("custom new", true, || Ok(None), &mut terminal)
+            .expect("已保存内容双 enter 全链走通");
+        // 键序（快路径）：盲走 ↓×4 直达 own 行 → 探针摘勾（已勾行语义）→ 补键
+        // 勾回+编辑器展开 → backspace×10 → <text> → enter 保存
+        assert_eq!(
+            out.sent_keys,
+            vec![
+                "down", "down", "down", "down", "enter", "enter", "<backspace×10>",
+                "<text>", "enter"
+            ]
+        );
+        assert_eq!(*bks.lock().unwrap_or_else(|e| e.into_inner()), 10);
+        assert_eq!(
+            texts.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["custom new"]
+        );
+
+        // 非覆盖路径：已有保存内容 → 中止零按键（直接发送会追加）
+        let fresh2 = fresh.clone();
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: move || Some(fresh2.clone()),
+            send: move |_k: &str| Ok(()),
+            send_text: move |_t: &str| Ok(()),
+            settle: || {},
+        };
+        let err = run_opencode_own_answer_stages("y", false, || Ok(None), &mut terminal2)
+            .expect_err("已有保存内容非覆盖 → 中止");
+        assert!(err.message.contains("覆盖写入"), "{err:?}");
     }
 
     /// **opencode answers 二维数组对账**（戊探A ⑥ 录得形态：按题序对齐 + 内层勾选序）。
@@ -3967,6 +5602,7 @@ mod tests {
             };
             run_codex_notes_stages(
                 "NOTE-XYZ",
+                false,
                 || Some(screen.to_vec()),
                 || Ok(Some(receipt.clone())),
                 &mut terminal,
@@ -3991,6 +5627,62 @@ mod tests {
         let err = run(&bare, &mut texts3, &mut sent3).expect_err("无 footer 锚 → 中止");
         assert!(err.message.contains("request_user_input 弹窗"), "{err:?}");
         assert!(sent3.is_empty(), "中止零按键");
+    }
+
+    /// **codex 覆盖写入/清空脚本锁**（2026-10-06 复用批）：备注态 + overwrite =
+    /// **Tab 清空旧备注**（footer 活体明文「tab or esc to clear note」）→ 重打
+    /// 全文 → enter；text 空 = 纯清空，**不发 Enter**（codex Enter=提交整卷，
+    /// 空备注提交未取证，提交走卡面提交按钮）。
+    #[test]
+    fn e5_codex_notes_overwrite_and_clear_scripted() {
+        let opened_footer = lines(&[
+            "  › 1. MIT (Recommended)",
+            "  › OLD-NOTE",
+            "  tab or esc to clear notes | enter to submit answer",
+        ]);
+        let receipt = lines(&["• Questions 1/1 answered"]);
+        let run = |text: &str,
+                   overwrite: bool,
+                   texts: &mut Vec<String>,
+                   sent: &mut Vec<String>| {
+            let scr = opened_footer.clone();
+            let mut terminal = crate::inject::question::FreeTextClosures {
+                read: move || Some(scr.clone()),
+                send: |k: &str| {
+                    sent.push(k.to_string());
+                    Ok(())
+                },
+                send_text: |t: &str| {
+                    texts.push(t.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            };
+            run_codex_notes_stages(
+                text,
+                overwrite,
+                || Some(opened_footer.clone()),
+                || Ok(Some(receipt.clone())),
+                &mut terminal,
+            )
+        };
+        // ① 覆盖写入：Tab 清空 → 新文 → enter（footer 清空语义复用）
+        let mut texts = Vec::new();
+        let mut sent = Vec::new();
+        let out = run("NEW-NOTE", true, &mut texts, &mut sent).expect("覆盖写入全链");
+        assert_eq!(out.sent_keys, vec!["tab", "<text>", "enter"]);
+        assert_eq!(texts, vec!["NEW-NOTE"]);
+        // ② 清空：Tab 后**不发 Enter**、不打字
+        let mut texts2 = Vec::new();
+        let mut sent2 = Vec::new();
+        let out2 = run("", true, &mut texts2, &mut sent2).expect("清空 = 仅 Tab");
+        assert_eq!(out2.sent_keys, vec!["tab"], "清空只发 Tab");
+        assert!(texts2.is_empty(), "清空零文本");
+        // ③ 空文本且非 overwrite → 原样拒绝
+        let mut texts3 = Vec::new();
+        let mut sent3 = Vec::new();
+        let err = run("", false, &mut texts3, &mut sent3).expect_err("空文本拒绝");
+        assert!(err.message.contains("覆盖写入"), "{err:?}");
     }
 
     /// **rollout user_note 对账夹具**（戊探C ⑤ 原件：双题各挂各 qid 的
@@ -6366,6 +8058,210 @@ mod live_probe_tests {
         let cli = crate::inject::approve::cached_cli_version("kimi");
         eprintln!("前置检查：kimi CLI 版本探测 = {cli:?}（默认表 verified_with 记为 2.0.2）");
     }
+
+    /// **opencode 屏读活体探针（#[ignore]，零注入——四闸门①样本门槛的标准工具）**：
+    /// 对 `MAM_PROBE_PID` 指定的 opencode TUI 进程跑**生产同款** `read_screen_window`
+    /// + 全套 opencode 问答解析器，逐行 dump（带行号）+ 各解析器产物——用于「读得到屏
+    ///   但解析不出 / 定位行号与实机不符」类诊断（2026-10-05 多选自由作答走位误勾选）。
+    ///
+    /// 跑法：`MAM_PROBE_PID=<pid> cargo test --lib opencode_question_live_kernel_probe -- --ignored --nocapture`
+    ///
+    /// 红线：本探针**只读**（ReadConsoleOutputCharacterW 路径），不发任何键；
+    /// pid 由调用方显式给定（用户知情会话）。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机只读探针：opencode 问答屏活体 dump（前置=MAM_PROBE_PID=<opencode TUI pid>）"]
+    fn opencode_question_live_kernel_probe() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰显式指定的进程）");
+            return;
+        };
+        let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+            eprintln!("pid={pid} 屏读失败（无控制台/权限不足）");
+            return;
+        };
+        eprintln!("==== pid={pid} 可见窗 {} 行 ====", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("行{:>2}|{}", i + 1, l);
+        }
+        let d = crate::inject::dialect::own_answer_dialect("opencode");
+        eprintln!("---- 解析器产物 ----");
+        match d {
+            Some(d) => {
+                eprintln!(
+                    "own_answer_row_state = {:?}（(行序号, 已勾选, 已存文本)）",
+                    super::opencode_own_answer_row_state(&lines, &d)
+                );
+            }
+            None => eprintln!("方言表无 opencode 条目（不应发生）"),
+        }
+        eprintln!(
+            "input_open = {}（占位行判据）",
+            super::opencode_own_answer_input_open(&lines)
+        );
+        eprintln!(
+            "question_screen_snapshot = {:?}",
+            crate::inject::question_screen_oc::opencode_question_screen_snapshot(&lines)
+        );
+    }
+
+    /// **opencode 2.x 方向键形态对照实验（#[ignore]）**：对 `MAM_PROBE_PID` 指定的
+    /// **自建** opencode 会话，走**生产发送路径**（`inject_key_spec`）测 ↓ 形态——
+    /// `MAM_PROBE_GROUP=vt`（A 族 ESC[B 字符流）或 `vk`（B 族 VK_DOWN 键形态），
+    /// ↓×5 → enter：own answer 行应展开占位行（input_open=true = 该形态生效）。
+    ///
+    /// **esc 会 dismiss 整个对话框**（戊探A 定案）→ 每组独立对话框：跑完一组后
+    /// 重新触发 question 再跑另一组。
+    /// 目的：opencode 2.0.22 大版本升级后的方向键形态复验（族表已随本轮复验升
+    /// verified_with=2.0.22；用户实机 2026-10-05 报告的 VT↓ 无效果实为守卫假阴性中止）。
+    ///
+    /// 红线：只碰 MAM_PROBE_PID 指定的自建进程；结束由调用方 taskkill 清场。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机对照实验：opencode 2.x ↓ 形态（前置=自建会话 question 对话框已打开 + MAM_PROBE_PID=<pid> + MAM_PROBE_GROUP=vt|vk）"]
+    fn opencode_arrow_form_live_probe() {
+        use crate::inject::families::{FamilySpec, TuiFamily};
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰自建进程）");
+            return;
+        };
+        let group = std::env::var("MAM_PROBE_GROUP").unwrap_or_else(|_| "vt".to_string());
+        let spec = FamilySpec {
+            family: if group == "vk" {
+                TuiFamily::Crossterm
+            } else {
+                TuiFamily::RawVt
+            },
+            verified_with: "probe",
+            slow_consumer: false,
+            confirm_timeout_ms: 5_000,
+        };
+        eprintln!(
+            "==== 组 {group}（{}）↓×5 → enter ====",
+            if group == "vk" { "VK_DOWN" } else { "VT ESC[B" }
+        );
+        let dump = |tag: &str| {
+            if let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) {
+                eprintln!("---- [{tag}] {} 行 ----", lines.len());
+                for (i, l) in lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !l.trim().is_empty())
+                {
+                    eprintln!("行{:>2}|{}", i + 1, l);
+                }
+                let d = crate::inject::dialect::own_answer_dialect("opencode").unwrap();
+                eprintln!(
+                    "[{tag}] own_answer_row_state={:?} input_open={}",
+                    super::opencode_own_answer_row_state(&lines, &d),
+                    super::opencode_own_answer_input_open(&lines)
+                );
+            } else {
+                eprintln!("[{tag}] 屏读失败");
+            }
+        };
+        for i in 0..5 {
+            if let Err(e) = crate::inject::windows_console::inject_key_spec(pid, "down", &spec) {
+                eprintln!("down#{i} 注入失败: {e}");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        dump("down5后");
+        let _ = crate::inject::windows_console::inject_key_spec(pid, "enter", &spec);
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        dump("enter后");
+    }
+
+    /// **opencode own answer 生产阶段机活体直跑（#[ignore]）**：对 `MAM_PROBE_PID`
+    /// 指定的**自建**会话（屏上已是 question 对话框），直接调用
+    /// [`run_opencode_own_answer_stages`]（生产编排原函数 + 生产 read/inject 路径），
+    /// 全程打印屏面与中止点——2026-10-05 用户实机「多选自由作答误勾选 + 守卫中止」
+    /// 的最忠实复现。回执轮询用 no-op（回执语义不在本探针范围）。
+    ///
+    /// 红线：只碰 MAM_PROBE_PID 指定的自建进程；结束由调用方 taskkill 清场。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机直跑：own answer 生产阶段机（前置=自建会话 question 对话框已打开 + MAM_PROBE_PID=<pid>）"]
+    fn opencode_own_answer_stage_live_probe() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰自建进程）");
+            return;
+        };
+        let dump = |tag: &str| {
+            if let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) {
+                eprintln!("---- [{tag}] {} 行 ----", lines.len());
+                for (i, l) in lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| !l.trim().is_empty())
+                {
+                    eprintln!("行{:>2}|{}", i + 1, l);
+                }
+                let d = crate::inject::dialect::own_answer_dialect("opencode").unwrap();
+                eprintln!(
+                    "[{tag}] own_answer_row_state={:?} input_open={}",
+                    super::opencode_own_answer_row_state(&lines, &d),
+                    super::opencode_own_answer_input_open(&lines)
+                );
+            } else {
+                eprintln!("[{tag}] 屏读失败");
+            }
+        };
+        dump("跑前");
+        let mut terminal = super::FreeTextClosures {
+            read: || crate::inject::windows_console::read_screen_window(pid).ok(),
+            send: |key: &str| {
+                let spec = crate::inject::families::family_for("opencode")
+                    .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+                let r = crate::inject::windows_console::inject_key_spec(pid, key, &spec);
+                if r.is_ok() {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                }
+                r
+            },
+            send_text: |text: &str| {
+                let spec = crate::inject::families::family_for("opencode")
+                    .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+                crate::inject::windows_console::inject_text_spec(pid, text, &spec)
+                    .map(|_| ())
+            },
+            settle: || {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ))
+            },
+        };
+        match super::run_opencode_own_answer_stages(
+            "probe live text 20261005",
+            false,
+            || Ok(None),
+            &mut terminal,
+        ) {
+            Ok(o) => eprintln!(
+                "阶段机 Ok: sent_keys={:?} screen_text={:?} screen_checked={:?}",
+                o.sent_keys, o.screen_text, o.screen_checked
+            ),
+            Err(e) => eprintln!(
+                "阶段机中止: kind={:?} message={}",
+                e.kind, e.message
+            ),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        dump("跑后");
+    }
 }
 
 /// 丁T5 **实机探测占位**（`#[ignore]`——常规门禁只编译不跑）。
@@ -6747,5 +8643,23 @@ pub(crate) mod live_fixtures {
             "",
         ]));
         v
+    }
+}
+
+#[cfg(test)]
+mod scratch_debug {
+    #[test]
+    fn scratch_single_own_row() {
+        let lines = vec![
+            "1. alpha".to_string(),
+            "2. bravo".to_string(),
+            "3. charlie".to_string(),
+            "4. Type your own answer".to_string(),
+            "↑ select  enter submit  esc dismiss".to_string(),
+        ];
+        let r = super::opencode_single_own_row(&lines);
+        eprintln!("single_own_row = {r:?}");
+        let d = crate::inject::dialect::own_answer_dialect("opencode").unwrap();
+        eprintln!("has_checkboxes = {}", super::opencode_page_has_checkboxes(&lines, &d));
     }
 }

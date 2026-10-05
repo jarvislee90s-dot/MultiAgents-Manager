@@ -23,12 +23,7 @@ import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import InteractiveCard, { type InteractiveCardTone } from "./InteractiveCard";
-import {
-  ApiError,
-  fetchApproveOptions,
-  sessionApprove,
-  type ApproveOptionsView,
-} from "./api";
+import { ApiError, fetchApproveOptions, sessionApprove, type ApproveOptionsView } from "./api";
 
 interface ApproveCardProps {
   /** 会话（本组件消费 id 与 status；结构化类型，完整 Session 可直接传入）。
@@ -109,6 +104,17 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
   const [busy, setBusy] = useState(false);
   // 终态：按键已投递（key_sent）——按钮禁用 +「已发送按键」
   const [sent, setSent] = useState(false);
+  // 使命完成自隐（2026-10-04 用户裁决 + 2026-10-05 宽限修正）：按键已投递且会话
+  // 已离开 waiting（执行已开始）→ 宽限 2.5s 展示「已发送按键」回执后收卡——
+  // 不宽限会让回执闪没（测试与可感知性），不收卡则像卡死。status 缺省（旧调用
+  // 方）→ 不启用。
+  const [hideAfterSent, setHideAfterSent] = useState(false);
+  const leftWaiting = session.status !== undefined && session.status !== "waiting";
+  useEffect(() => {
+    if (!(sent && leftWaiting)) return;
+    const t = window.setTimeout(() => setHideAfterSent(true), 2500);
+    return () => window.clearTimeout(t);
+  }, [sent, leftWaiting]);
   // 失败文案（failed{error} 回执 / ApiError 分診）——非 null 展示，按钮保持可点（可重试）
   const [error, setError] = useState<string | null>(null);
   // 丁T2：「检查终端对话框」进行中（防连点）+ 检查后仍未读到选项的降级提示
@@ -246,10 +252,9 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
     );
   }
 
-  // 使命完成自隐（2026-10-04 用户裁决）：按键已投递（sent）且会话已离开 waiting
-  // （终端执行已开始）→ 本卡收起——「已发送按键」卡长期挂在运行中的会话上会被
-  // 误读为卡死。status 缺省（旧调用方/状态未知）→ 不启用（行为同旧版）。
-  if (sent && session.status !== undefined && session.status !== "waiting") {
+  // 使命完成自隐（2026-10-04 用户裁决，2026-10-05 宽限修正）：见顶部 hideAfterSent
+  // 的宽限期注释——回执先展示 2.5s，随后整卡收起。
+  if (hideAfterSent) {
     return null;
   }
 
@@ -324,11 +329,7 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
       testId="approve-card"
       mode={options.dialog ? (options.planDialog ? "plan-dialog" : "dialog") : "binary"}
       title={
-        options.dialog
-          ? options.planDialog
-            ? "计划批准"
-            : "等待批准（终端对话框）"
-          : "等待批准"
+        options.dialog ? (options.planDialog ? "计划批准" : "等待批准（终端对话框）") : "等待批准"
       }
       footer={
         <>

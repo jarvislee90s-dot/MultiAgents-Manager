@@ -146,7 +146,10 @@ function findQuestionByHeading(questions: QuestionView[], heading: string): numb
 
 /** 屏读快照的勾选/自由作答 → 卡面状态回填内核（review 三态与 freeTextPresent
  *  三态的判定单点）：`qi` = 已对位的题下标。单题卡勾选走 `checked`，多题卡走
- *  `mqChecked`（I7）。返回该题的勾选 Set。 */
+ *  `mqChecked`（I7）。`multiSelect` = 该题是否多选——**单选题的屏上选中态
+ *  （行尾 ✓）经 checked 通道到达后回写 mqSelected**（卡面单选选项的选中渲染
+ *  源，2026-10-06 活体定案）；屏上无选中 → 清本地 mqSelected（屏读为准）。
+ *  返回该题的勾选 Set。 */
 function writeSnapshotState(
   screen: {
     checked?: (boolean | null)[];
@@ -161,7 +164,9 @@ function writeSnapshotState(
       updater: (prev: Record<number, Set<number>>) => Record<number, Set<number>>
     ) => void;
     setMqFreeText: (updater: (prev: Record<number, string>) => Record<number, string>) => void;
-  }
+    setMqSelected: (updater: (prev: Record<number, number>) => Record<number, number>) => void;
+  },
+  multiSelect = true
 ): Set<number> {
   const set = new Set<number>();
   (screen.checked ?? []).forEach((c, i) => c === true && set.add(i));
@@ -170,6 +175,19 @@ function writeSnapshotState(
     setters.setChecked(set);
   } else {
     setters.setMqChecked((prev) => ({ ...prev, [qi]: set }));
+  }
+  // 单选：屏上 ✓ 行 → mqSelected；屏上无选中 → 清（权威源=屏读）
+  if (!multiSelect) {
+    const picked = [...set][0];
+    setters.setMqSelected((prev) => {
+      if (picked !== undefined) {
+        return prev[qi] === picked ? prev : { ...prev, [qi]: picked };
+      }
+      if (!(qi in prev)) return prev;
+      const n = { ...prev };
+      delete n[qi];
+      return n;
+    });
   }
   if (screen.freeTextPresent) {
     if (screen.freeText !== null && screen.freeText !== undefined) {
@@ -201,9 +219,11 @@ function applyInteractionScreen(
       updater: (prev: Record<number, Set<number>>) => Record<number, Set<number>>
     ) => void;
     setMqFreeText: (updater: (prev: Record<number, string>) => Record<number, string>) => void;
-  }
+    setMqSelected: (updater: (prev: Record<number, number>) => Record<number, number>) => void;
+  },
+  multiSelect = true
 ): void {
-  writeSnapshotState(screen, questionIndex, false, setters);
+  writeSnapshotState(screen, questionIndex, false, setters, multiSelect);
 }
 
 function questionFingerprint(info: QuestionInfoView): string {
@@ -288,11 +308,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
       const qi = findQuestionByHeading(v.questions, v.screen.heading);
       if (qi === null) return;
       setMqIndex(qi);
-      writeSnapshotState(v.screen, qi, v.questions.length === 1, {
-        setChecked,
-        setMqChecked,
-        setMqFreeText,
-      });
+      writeSnapshotState(
+        v.screen,
+        qi,
+        v.questions.length === 1,
+        { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+        v.questions[qi]?.multiSelect ?? true
+      );
     },
     [info]
   );
@@ -357,6 +379,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 setChecked,
                 setMqChecked,
                 setMqFreeText,
+                setMqSelected,
               });
               // 已打字（屏上文本）→ 只读呈现「已写入 + 编辑」（屏读为准）
               if (v.screen.freeText !== null && v.screen.freeText !== undefined) {
@@ -449,11 +472,12 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               // **交互后屏读核对**（2026-10-03 屏读为准）：回执带整屏快照时，
               // 勾选/TS 行内容以屏读为准（覆盖上面的 applyChecked 近似）
               if (res.screen) {
-                applyInteractionScreen(res.screen, questionIndex, {
-                  setChecked,
-                  setMqChecked,
-                  setMqFreeText,
-                });
+                applyInteractionScreen(
+                  res.screen,
+                  questionIndex,
+                  { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+                  info?.questions[questionIndex]?.multiSelect ?? true
+                );
               }
             } else {
               // 单题卡勾选切换：成功回执后同步本地位（下轮渲染高亮）；不置终态
@@ -489,11 +513,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 findQuestionByHeading(info.questions, res.screen.heading) === dest &&
                 (res.screen.checked ?? []).length === info.questions[dest]?.options.length
               ) {
-                writeSnapshotState(res.screen, dest, info.questions.length === 1, {
-                  setChecked,
-                  setMqChecked,
-                  setMqFreeText,
-                });
+                writeSnapshotState(
+                  res.screen,
+                  dest,
+                  info.questions.length === 1,
+                  { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+                  info.questions[dest]?.multiSelect ?? true
+                );
               }
             }
           } else if (
@@ -511,11 +537,33 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             // **交互后屏读核对**（2026-10-03 屏读为准）：select 回执带发后快照——
             // TS 行内容回填当前题的 mqFreeText（卡面「已写入」态以屏读为准）
             if (res.screen) {
-              applyInteractionScreen(res.screen, questionIndex, {
-                setChecked,
-                setMqChecked,
-                setMqFreeText,
-              });
+              // **屏读归属按 heading 对位**（2026-10-06 修复）：快照拍的是发键后
+              // **到达页**——推进工具 landed=qi+1；**停留工具**（opencode 2.0.22
+              // 单选选中不推进，✓ 标记在原页，2026-10-06 活体定案）landed=qi。
+              // 旧实现盲目归属 questionIndex 且无条件 mqIndex+1——到达题的占位态
+              // 写进本题（清掉已存文字）、停留被误当推进（卡面漂移到确认卡）。
+              // 对位失败（无 heading/多义）→ 维持旧归属（不猜纪律）。
+              const landed =
+                res.screen.heading != null
+                  ? findQuestionByHeading(info.questions, res.screen.heading)
+                  : null;
+              if (landed !== null) {
+                writeSnapshotState(
+                  res.screen,
+                  landed,
+                  info.questions.length === 1,
+                  { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+                  info.questions[landed]?.multiSelect ?? true
+                );
+                setMqIndex(landed);
+              } else {
+                applyInteractionScreen(
+                  res.screen,
+                  questionIndex,
+                  { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+                  info.questions[questionIndex]?.multiSelect ?? true
+                );
+              }
             }
           } else if (action === "freeText" && typeof questionIndex === "number") {
             // **多题卡的自由作答**（2026-10-02 多选 Type something 内联编辑）：记录
@@ -540,6 +588,16 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               setFreeText("");
               setEditingFreeText(false);
               setFtUnverified(false);
+              // **单选题推进**（2026-10-05 用户需求）：单选打字+enter = 选即提交，
+              // 终端已推进到下一题/确认页——卡面同步推进（与数字 select 一致）。
+              // 多选不推进（需显式切题保存）。
+              if (
+                info !== null &&
+                questionIndex < info.questions.length &&
+                !info.questions[questionIndex].multiSelect
+              ) {
+                setMqIndex(questionIndex + 1);
+              }
             } else {
               setFtUnverified(true);
             }
@@ -663,7 +721,14 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] bg-[var(--cbg)] px-2 py-1.5 text-xs text-[var(--tx)] placeholder:text-[var(--mut)] focus:border-[var(--btnp)] focus:outline-none disabled:opacity-60"
           placeholder="输入内容后点发送（勿在终端按回车）"
         />
-        {mqFreeText[qi] !== undefined && !editingFreeText ? (
+        {/* 覆盖写入/编辑/清空按能力位门控（2026-10-05 深夜）：键序语义逐工具取证——
+            opencode 已取证渲染全套；codex/kimi 等未取证工具已写入后只读 + 终端引导
+            （「未取证不出手」——发送过一次的覆盖语义未验证，盲发会追加/破坏已存内容） */}
+        {mqFreeText[qi] !== undefined && info.freeTextOverwrite !== true ? (
+          <p className="mt-1.5 rounded-lg bg-slate-500/10 px-2 py-1.5 text-xs text-slate-600 dark:bg-slate-400/10 dark:text-slate-300">
+            已写入。该工具的卡内覆盖/清空尚未实机验证——修改请到终端完成
+          </p>
+        ) : mqFreeText[qi] !== undefined && !editingFreeText ? (
           <button
             type="button"
             data-testid="question-multi-freetext-edit"
@@ -696,8 +761,8 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             {mqFreeText[qi] !== undefined ? "覆盖写入" : "发送"}
           </button>
         )}
-        {/* 清空（独立动作，不依赖编辑解锁）：已写入态与编辑态都在场 */}
-        {mqFreeText[qi] !== undefined && (
+        {/* 清空（独立动作，不依赖编辑解锁）：已写入态与编辑态都在场；按能力位门控 */}
+        {mqFreeText[qi] !== undefined && info.freeTextOverwrite === true && (
           <button
             type="button"
             data-testid="question-multi-freetext-clear"
@@ -851,14 +916,10 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 type="button"
                 data-testid="question-confirm-back"
                 disabled={busy}
-                onClick={() =>
-                  info.navBoth === true
-                    ? handleAnswer("advance", undefined, undefined, undefined, "prev")
-                    : handleAnswer("advance")
-                }
+                onClick={() => handleAnswer("advance", undefined, undefined, undefined, "prev")}
                 className="w-full rounded-full bg-[var(--btnp)]/10 px-3 py-1.5 text-xs text-[var(--tx)] hover:bg-[var(--btnp)]/20 disabled:opacity-40"
               >
-                {info.navBoth === true ? "◀ 返回上一题修改" : "返回题目修改"}
+                ◀ 返回上一题修改
               </button>
               <button
                 type="button"
@@ -877,8 +938,10 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     const q = questions[mqIndex];
     // 2026-10-02：多选题自由作答升格——claude（navBoth）多选屏的 Type something 行
     // **直接打字即内联编辑**（活体取证：勾选自动置上；回车会取消勾选 → 编排零后续
-    // 键）。navBoth 作工具面限定：kimi/codex 多选形态未取证，维持不渲染。
-    const multiFreeTextEnabled = info.freeText === true && info.navBoth === true;
+    // 键）。2026-10-04 起 opencode 以显式能力位 multiFreeText 点亮（own answer
+    // toggle 双 enter 语义编排定案）；kimi/codex 多选形态未取证，两旗皆缺 → 不渲染。
+    const multiFreeTextEnabled =
+      info.freeText === true && (info.navBoth === true || info.multiFreeText === true);
     return (
       <InteractiveCard
         tone="question"
@@ -906,20 +969,24 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         </p>
         <div className="mt-1.5 space-y-1">
           {q.options.map((o, i) => {
-            // 多选题的勾选高亮：按题记忆（mqChecked），仅在 toggle 成功回执后变化
+            // 多选题的勾选高亮：按题记忆（mqChecked），仅在 toggle 成功回执后变化；
+            // **单选题的选中标记**（2026-10-06 活体定案）：终端 ✓ 经快照 checked
+            // 通道回写 mqSelected（writeSnapshotState），此处渲染 ✓+高亮
             const checkedHere = q.multiSelect && (mqChecked[mqIndex]?.has(i) ?? false);
+            const selectedHere = !q.multiSelect && mqSelected[mqIndex] === i;
+            const activeHere = checkedHere || selectedHere;
             return (
               <button
                 key={`mq-${mqIndex}-${i}`}
                 type="button"
                 data-testid={`question-multi-option-${i}`}
-                data-checked={checkedHere ? "true" : undefined}
+                data-checked={activeHere ? "true" : undefined}
                 disabled={busy || sent}
                 onClick={() =>
                   handleAnswer(q.multiSelect ? "toggle" : "select", i, undefined, mqIndex)
                 }
                 className={`w-full rounded-lg px-2 py-1.5 text-left text-xs hover:bg-[var(--btnp)]/20 disabled:opacity-40 dark:hover:bg-[var(--btnp)] ${
-                  checkedHere
+                  activeHere
                     ? "bg-[var(--btnp)]/25 text-[var(--tx)]"
                     : "bg-[var(--btnp)]/10 text-[var(--tx)]"
                 }`}
@@ -931,6 +998,11 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                   <span className="mr-1 font-mono text-[10px]">{checkedHere ? "[✓]" : "[ ]"}</span>
                 )}
                 {o.label}
+                {!q.multiSelect && selectedHere && (
+                  <span className="ml-1 font-mono text-[10px] text-emerald-600 dark:text-emerald-400">
+                    ✓
+                  </span>
+                )}
                 {o.description !== "" && (
                   <span className="ml-1 text-[10px] text-[var(--mut)]">{o.description}</span>
                 )}
@@ -938,12 +1010,12 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             );
           })}
         </div>
-        {/* **◀/→ 切题导航**（2026-10-02 ←/→ 双向）：prev/next 都模拟方向键——
-            除 `Type something` 行外 ←/→ 通用对应上一题/下一题（活体取证），第 1 题
-            隐藏上一题。单选题同样渲染（终端不自动推进时用户可显式切题——正是
-            「进入第 2 题后回不去」痛点的解法）；`advance` 旗标未下发的工具
+        {/* **◀/→ 切题导航**（2026-10-02 ←/→ 双向；2026-10-05 opencode 接入）：
+            prev/next 都发方向语义——claude=←/→ 方向键；opencode=tab 前向循环
+            （next=tab×1；prev=tab×(总页数-1) 前向循环等效回退，全部已验证键）。
+            第 1 题隐藏上一题、确认页隐藏下一题。`advance` 旗标未下发的工具
             （kimi/codex 切页键未验）不渲染按钮、改渲染终端引导——不假装能发。 */}
-        {!sent && info.navBoth === true && info.advance === true && (
+        {!sent && info.advance === true && (
           <div className="mt-2 flex gap-1.5">
             {mqIndex > 0 && (
               <button
@@ -970,17 +1042,6 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         {/* **多选自由作答**（2026-10-02）：内联编辑编排——打字 → 屏读核验勾选保持 →
             零后续键（回车会取消勾选）。发送后卡面记录文本，切题时终端自然保存。 */}
         {multiFreeTextEnabled && !sent && renderMultiFreeText(mqIndex)}
-        {!sent && info.navBoth !== true && q.multiSelect && info.advance === true && (
-          <button
-            type="button"
-            data-testid="question-multi-advance"
-            disabled={busy}
-            onClick={() => handleAnswer("advance")}
-            className="mt-2 w-full rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
-          >
-            切换题目{mqIndex < questions.length - 1 ? "" : "（进入确认页）"}
-          </button>
-        )}
         {!sent && info.advance !== true && (
           <p
             data-testid="question-multi-advance-unavailable"
@@ -1007,8 +1068,12 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   // `free_text_supported(tool) && free_text_shape_supported(q)`。
   const freeTextEnabled = info.freeText === true && !q.multiSelect;
   // 2026-10-03：单题**多选**卡同样提供自由作答（内联编辑编排与题数无关——活体
-  // 取证补齐）；navBoth=claude 能力面（kimi/codex 多选形态未取证不渲染）
-  const multiFreeTextEnabled = info.freeText === true && info.navBoth === true && q.multiSelect;
+  // 取证补齐）；能力位 = navBoth（claude）∨ multiFreeText（2026-10-04 起 opencode
+  // own answer toggle 双 enter 编排定案；kimi/codex 多选形态未取证两旗皆缺不渲染）
+  const multiFreeTextEnabled =
+    info.freeText === true &&
+    q.multiSelect &&
+    (info.navBoth === true || info.multiFreeText === true);
 
   return (
     <InteractiveCard

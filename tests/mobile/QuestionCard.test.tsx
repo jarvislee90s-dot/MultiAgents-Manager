@@ -615,6 +615,7 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
       advance: true,
       navBoth: true,
       freeText: true,
+      freeTextOverwrite: true,
       questions: [
         {
           header: "A",
@@ -1172,5 +1173,36 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     render(<QuestionCard session={{ id: "sess-e4-ro" }} />);
     expect(await screen.findByTestId("question-readonly-hint")).toBeTruthy();
     expect(screen.queryByTestId("question-multi-option-0")).toBeNull();
+  });
+
+  it("覆盖写入/清空按能力位门控（2026-10-05 深夜）：freeTextOverwrite=false（codex 形态）已写入后不渲染覆盖/清空/编辑，只读提示 + 终端引导", async () => {
+    installFetch();
+    const info = twoQuestionInteractive();
+    // codex/kimi 形态：覆盖语义未取证——navBoth/multiFreeText 两旗皆清（渲染门）+
+    // freeTextOverwrite=false（按钮门）
+    info.navBoth = false;
+    info.multiFreeText = true;
+    info.freeTextOverwrite = false;
+    routes.question = info;
+    // 回执带屏读真值 text → 前端记 mqFreeText（「已写入」态，触发按钮门）
+    routes.answer = {
+      status: "key_sent",
+      done: true,
+      stage: "free-text",
+      text: "先发一次",
+      checked: true,
+    };
+    render(<QuestionCard session={{ id: "sess-ovw-gate" }} />);
+    await screen.findByTestId("question-card");
+    fireEvent.change(screen.getByTestId("question-multi-freetext-input"), {
+      target: { value: "先发一次" },
+    });
+    fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
+    await flushAsync();
+    // 回执成功 → mqFreeText 已记录；freeTextOverwrite=false → 不渲染覆盖/清空/编辑
+    expect(screen.queryByTestId("question-multi-freetext-edit")).toBeNull();
+    expect(screen.queryByTestId("question-multi-freetext-clear")).toBeNull();
+    expect(screen.queryByText("覆盖写入")).toBeNull();
+    expect(screen.getByText(/该工具的卡内覆盖\/清空尚未实机验证/)).toBeTruthy();
   });
 });
