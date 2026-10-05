@@ -3,6 +3,7 @@
 // semantics / dedup / project / provider / range 五个纯函数模块里（采集器只上报原始字段）。
 // 模块声明随任务增量补齐（每个任务在 Files 里写明自己要 append 的那一行），
 // 避免出现「声明了但文件还没建」的中间态编译失败。
+pub mod cursor;
 pub mod dedup;
 pub mod delta;
 pub mod error;
@@ -12,6 +13,7 @@ pub mod project;
 pub mod provider;
 pub mod range;
 pub mod semantics;
+pub mod stream;
 
 pub use error::UsageError;
 pub use model::*;
