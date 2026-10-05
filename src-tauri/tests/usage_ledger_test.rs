@@ -574,12 +574,15 @@ fn claude_provider_kind_is_persisted_to_usage_detail() {
     // 账本库：**本用例私有**（不用全局 DB —— 见 Global Constraints 19 / §3.2.2 阻塞 2）
     let mut conn = support::open_ledger_db("claude_provider_kind");
     // claude 没有供应商字段（矩阵：❌ 无字段 → 推断）→ 配一条用户规则，期望判定为 Inferred
+    // Task 20 fix round 1（裁决 F）：`settings::save` 现在返回 `Result`（写后回读校验），
+    // 此处是本任务之外的唯一调用点（Task 11 的用例夹具）→ 显式 `expect`，不让夹具静默失败。
     multi_agents_manager_lib::services::usage::settings::save(
         &multi_agents_manager_lib::services::usage::model::UsageSettings {
             provider_map_rules: r#"{"rules":[{"prefix":"claude-","provider":"anthropic"}]}"#.into(),
             ..Default::default()
         },
-    );
+    )
+    .expect("测试夹具：写入用量设置必须成功");
     let home = tempfile::tempdir().unwrap();
     let proj = home.path().join(".claude/projects/-p-A");
     std::fs::create_dir_all(&proj).unwrap();

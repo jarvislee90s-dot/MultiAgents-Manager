@@ -11,6 +11,16 @@ pub struct UsageError {
 
 impl UsageError {
     pub fn new(code: &str, detail: impl Into<String>) -> Self {
+        // **码表是硬约束**（Task 20 fix round 1 / 评审 Minor 3）：本函数是**生产码的唯一入口**，
+        // 而三处一致性断言只比对「USAGE_CODES ↔ 前端码表 ↔ locale」——新增一个**没进表**的
+        // 生产码时那三处全绿，前端 `usageErrMsg` 却会把它静默收敛成 `usage-internal`
+        // （用户只看到通用错误，正是本任务点名的那一类静默失效）。
+        // 故在 debug/dev 构建里直接硬失败；release 不 panic（不把开发期笔误升级成线上崩溃），
+        // 同一份表的生产可见性 + 自省用例仍守着它。
+        debug_assert!(
+            USAGE_CODES.contains(&code),
+            "错误码 `{code}` 未登记进 USAGE_CODES（三处登记：Rust 表 / 前端 KNOWN_USAGE_CODES / zh+en locale）"
+        );
         Self {
             code: code.into(),
             detail: detail.into(),
@@ -24,7 +34,10 @@ impl UsageError {
 
 /// 全量错误码单一清单（**三处登记之一**：Rust 常量表 / 前端 `KNOWN_USAGE_CODES` /
 /// zh.json+en.json 的 `usage.rpc.*`）。新增码必须同时改三处，下面的测试负责锁住两侧不漂移。
-#[cfg(test)]
+///
+/// **不是 `#[cfg(test)]`**（Task 20 fix round 1 / 评审 Minor 3）：它必须被 `UsageError::new`
+/// 在生产代码里引用，否则「生产码字面量」这一侧根本没有锁——`#[cfg(test)]` 下新增一个
+/// 没进表的生产码，三处断言全绿（评审实测）。
 pub const USAGE_CODES: &[&str] = &[
     "usage-db-failed",        // 账本库读写失败
     "usage-source-io",        // 源文件读取失败（该源本轮判失败，其余源继续）
@@ -54,6 +67,14 @@ mod tests {
         let e = UsageError::internal("disk on fire".into());
         assert_eq!(e.code, "usage-internal");
         assert_eq!(e.detail, "disk on fire");
+    }
+
+    /// Minor 3 的**承重证明**：生产码没进表 → `UsageError::new` 必须**硬失败**（debug 构建）。
+    /// 去掉 `debug_assert` 或把表还原成 `#[cfg(test)]` → 本用例真红（不再 panic）。
+    #[test]
+    #[should_panic(expected = "未登记进 USAGE_CODES")]
+    fn new_rejects_code_missing_from_the_table() {
+        let _ = UsageError::new("usage-not-registered", "未登记的生产码");
     }
 
     /// 契约 §2 逐字：sourceId 的序列化形态是小写工具 id（**不是 camelCase**）

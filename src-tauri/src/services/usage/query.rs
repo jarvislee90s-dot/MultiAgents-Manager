@@ -75,6 +75,10 @@
 //!   它只碰 `LAST_RESULT`、不碰飞行锁；持锁调采集会构成 ABBA 死锁）。
 //! * **`collectedAt` 的 0 哨兵**（契约把该字段定为非空 `number`）：由 `cached_result()` 给，
 //!   从未采集过即 0；关闭态走早退分支恒 0（确定性可断言）。与 Task 18 同一口径，登记 ①→②。
+//! * **`load_ledger_rows()` 已删除**（Task 20 执行 Task 19 的裁定）：它 `pub(crate)` 且
+//!   **内部自取 `DB` 锁**，而唯一可能的接线位置（三条 IPC 入口）**都在已持锁路径内** →
+//!   `std::sync::Mutex` 不可重入 → **自死锁**；自省锁只禁 ABBA 族、管不到重入。
+//!   属**接口变更**（Task 18 brief:13 声明的接口），详见 `task-20-report.md` 偏差申报。
 
 use std::collections::BTreeMap;
 
@@ -115,24 +119,6 @@ pub(crate) fn load_ledger_rows_with(
     resolved: &ResolvedRange,
 ) -> Vec<LedgerRow> {
     load_rows_for_keys(conn, resolved.cur.granularity, &resolved.cur.keys)
-}
-
-/// 全局连接包装（**只读**；锁中毒 → 空表 + 由调用方 `dashboard` 判错，绝不静默写）
-///
-/// `#[allow(dead_code)]`：**到 Task 19 为止仍然没有消费者**（实测证据见报告 §7 偏差申报 F-4：
-/// 把本行删掉后 `cargo clippy --all-targets -- -D warnings` 立刻报
-/// `error: function load_ledger_rows is never used --> src/services/usage/query.rs:126:15`）。
-/// 原因：三条 IPC 入口（`usage_dashboard` / `usage_records` / `usage_export_csv`）**各自持 `DB` 锁**
-/// 后调 `*_with_conn` / `load_ledger_rows_with`（W-26 的安全形式），**不经过本函数**；
-/// 本函数只有在「已经拿到 `ResolvedRange` 且愿意再取一次 DB 锁」的调用方那里才有意义。
-/// **接口形状与可见性一字未改**（与 D-05/D-18/D-25 同族：计划代码不总是能过本仓自己的门禁）。
-/// 若 Task 20/22 或 ①→② 复核确认无人需要它，应当**整体删除**而不是长期留 allow。
-#[allow(dead_code)]
-pub(crate) fn load_ledger_rows(resolved: &ResolvedRange) -> Vec<LedgerRow> {
-    match DB.lock() {
-        Ok(conn) => load_ledger_rows_with(&conn, resolved),
-        Err(_) => Vec::new(),
-    }
 }
 
 /// 按「粒度 + 桶键集合」取数（当期与上一周期共用同一条取数路径，保证口径一致）。

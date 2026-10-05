@@ -347,6 +347,159 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // spawner 缝，无需在此模拟）
     case "session_open":
       return Promise.resolve(undefined);
+    // —— 用量域（计划① Task 20）：6 条命令的 mock，形状与契约 §2 值对象逐字一致，
+    // 并与 src/tauri-mock.ts 的同一段保持**逐字同形**（tests/usage/usageMockParity.test.ts
+    // 用同一份断言跑两端）——
+    case "usage_collect":
+      return Promise.resolve({
+        collectedAt: Date.now(),
+        durationMs: 4321,
+        totalNewRecords: 128,
+        sources: [
+          { sourceId: "claude", ok: true, parsedFiles: 17, newRecords: 42 },
+          { sourceId: "codex", ok: true, parsedFiles: 425, newRecords: 61 },
+          { sourceId: "kimi", ok: true, parsedFiles: 82, newRecords: 12 },
+          { sourceId: "opencode", ok: true, parsedFiles: 21, newRecords: 8 },
+          { sourceId: "workbuddy", ok: true, parsedFiles: 3, newRecords: 2 },
+          {
+            sourceId: "zcode",
+            ok: false,
+            parsedFiles: 0,
+            newRecords: 0,
+            errorCode: "usage-source-db-open",
+          },
+          { sourceId: "dsh", ok: true, parsedFiles: 99, newRecords: 3 },
+        ],
+      });
+    case "usage_dashboard": {
+      const buckets = { inputFresh: 120000, cacheRead: 880000, cacheWrite: 0, output: 45000 };
+      const metrics = { requestTotal: 1000000, cacheHitRate: 0.88, userEst: 12345, requests: 321 };
+      return Promise.resolve({
+        range: (args as { range?: unknown })?.range ?? { preset: "today" },
+        groupBy: (args as { groupBy?: string })?.groupBy ?? "tool",
+        rows: [
+          {
+            key: "claude",
+            label: "claude",
+            buckets,
+            metrics,
+            sourceKind: "inferred",
+            isSubagent: false,
+          },
+          {
+            key: "codex",
+            label: "codex",
+            buckets,
+            metrics,
+            sourceKind: "inferred",
+            isSubagent: false,
+          },
+        ],
+        totals: metrics,
+        totalsBuckets: buckets,
+        hero: metrics.requestTotal + buckets.output,
+        trend: [
+          { key: "2026-10-03T09", label: "09:00", buckets, metrics },
+          { key: "2026-10-03T10", label: "10:00", buckets, metrics },
+        ],
+        compare: null,
+        recentSession: {
+          sourceId: "claude",
+          sessionId: "mock-session",
+          title: "mock 会话",
+          buckets,
+          metrics,
+        },
+        workSummary: {
+          sessions: 3,
+          turnsPerTool: { claude: 12, codex: 8, workbuddy: null },
+          errorModel: 1,
+          errorTurn: 0,
+          errorTool: 4,
+          interrupted: 2,
+          toolCalls: 57,
+          toolAvgMs: 1180,
+          topTool: { name: "Bash", count: 21 },
+          topToolMs: { name: "Bash", ms: 40200 },
+          longestTurnPerTool: { claude: { p50: 24000, max: 4247097 }, workbuddy: null },
+        },
+        availability: [
+          { metric: "turn", available: true, perSource: { workbuddy: false } },
+          { metric: "userEst", available: true, perSource: { zcode: false } },
+        ],
+        collectedAt: Date.now(),
+      });
+    }
+    case "usage_records": {
+      // W6：只接受 tool | project（决定卡片维度）；卡内行恒为「供应商 / 模型」
+      // （本 case 自带 const：上方 usage_dashboard 的 buckets/metrics 在它自己的块作用域里）
+      const buckets = { inputFresh: 120000, cacheRead: 880000, cacheWrite: 0, output: 45000 };
+      const metrics = { requestTotal: 1000000, cacheHitRate: 0.88, userEst: 12345, requests: 321 };
+      return Promise.resolve({
+        range: (args as { range?: unknown })?.range ?? { preset: "today" },
+        groupBy: (args as { groupBy?: string })?.groupBy ?? "tool",
+        cards: [
+          {
+            toolId: "claude",
+            toolLabel: "claude",
+            buckets,
+            metrics,
+            rows: [
+              {
+                key: "volcengine / deepseek-v4.1-flash",
+                label: "volcengine / deepseek-v4.1-flash",
+                buckets,
+                metrics,
+                sourceKind: "measured",
+                isSubagent: false,
+              },
+              {
+                key: "hy3",
+                label: "hy3",
+                buckets,
+                metrics,
+                sourceKind: "unknown",
+                isSubagent: false,
+              },
+            ],
+          },
+        ],
+        availability: [{ metric: "userEst", available: true, perSource: { workbuddy: false } }],
+        collectedAt: Date.now(),
+      });
+    }
+    case "usage_export_csv":
+      return Promise.resolve(
+        "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\nclaude,claude,120000,880000,0,45000,1000000,0.880000,321,12345,inferred\n"
+      );
+    case "usage_get_settings":
+      return Promise.resolve({
+        enabled: true,
+        miniBarRange: "today",
+        miniBarToolRows: 3,
+        detailRetentionDays: 90,
+        collectIntervalMin: 10,
+        providerMapRules: "",
+        exportQuote: "",
+        exportPose: "random",
+      });
+    case "usage_set_settings": {
+      const patch = ((args as { patch?: Record<string, unknown> })?.patch ?? {}) as Record<
+        string,
+        unknown
+      >;
+      return Promise.resolve({
+        enabled: true,
+        miniBarRange: "today",
+        miniBarToolRows: 3,
+        detailRetentionDays: 90,
+        collectIntervalMin: 10,
+        providerMapRules: "",
+        exportQuote: "",
+        exportPose: "random",
+        ...patch,
+      });
+    }
     default:
       return Promise.resolve(undefined);
   }

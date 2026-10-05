@@ -105,8 +105,24 @@ pub fn load_from_conn(conn: &rusqlite::Connection) -> UsageSettings {
     parse_settings(crate::database::dao::settings::get_setting_conn(conn, SETTINGS_KEY).as_deref())
 }
 
-pub fn save(s: &UsageSettings) {
-    if let Ok(json) = serde_json::to_string(s) {
-        set_setting(SETTINGS_KEY, &json);
+/// 写设置（**Task 20 fix round 1 / 裁决 F：返回 `Result` + 写后回读**）。
+///
+/// 为什么不能只 `set_setting` 了事：DAO 的 `set_setting_conn`（Task 1 的
+/// `dao/settings.rs:27-32`）把 `conn.execute` 的错误丢进 `let _ =` → **写失败会被报成成功**，
+/// 用户看到新值、重启回旧值（`usage_set_settings` 正是这条静默丢失的用户可见入口）。
+/// 本层的最小修复**不改 DAO**（不越界改 Task 1/2 的文件）：写后**回读**同一 key，
+/// 与本次写入不一致即以**契约里已有的** `usage-db-failed` 报错（不新造码）。
+/// 锁：`usage_ipc_test::set_settings_reports_persist_failure_instead_of_success`
+/// （用 `settings` 表上的 RAISE(ABORT) 触发器造真实写失败）。
+pub fn save(s: &UsageSettings) -> Result<(), UsageError> {
+    let json = serde_json::to_string(s)
+        .map_err(|e| UsageError::new("usage-db-failed", format!("用量设置序列化失败: {e}")))?;
+    set_setting(SETTINGS_KEY, &json);
+    if get_setting(SETTINGS_KEY).as_deref() != Some(json.as_str()) {
+        return Err(UsageError::new(
+            "usage-db-failed",
+            format!("用量设置未能落库（写后回读不一致）：key={SETTINGS_KEY}"),
+        ));
     }
+    Ok(())
 }
