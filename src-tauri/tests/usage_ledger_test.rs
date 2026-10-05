@@ -633,3 +633,86 @@ fn claude_provider_kind_is_persisted_to_usage_detail() {
         "日聚合必须带三态（B6）：{daily:?}"
     );
 }
+
+/// **B6 回归（第二态，Task 13 Step 5）**：kimi 的供应商内嵌在模型名前缀里
+/// （`ollama-cloud/glm-5.3-flash` 实测）→ `provider_kind` 必须是 **Measured**（直接字段/前缀），
+/// 并且要真的落进 `usage_detail`。claude 用用户规则得 `Inferred`、kimi 靠前缀得 `Measured`
+/// ——两态都锁住，才说明 `DeltaBuilder::provider_of` 真的在写 `kind_by_provider`
+/// （绕过它的实现两态都退化成 `Unknown`）。
+#[test]
+fn kimi_provider_kind_measured_is_persisted() {
+    // 全局设置库：**集成构建**下采集器经 `ctx.provider_rules()` 回落到 `settings::load()`
+    // → 读**全局 DB**，因此必须先重定向 HOME/MAM_HOME（否则读/首次创建开发机真实
+    // `~/.mam/mam.db`）。lib 单测构建不读设置库（§3.2.3 FIX-6）。
+    support::setup();
+    // 账本库：**本用例私有**（Global Constraints 19 / §3.2.2 阻塞 2）
+    let mut conn = support::open_ledger_db("kimi_provider_kind");
+    let home = tempfile::tempdir().unwrap();
+    let wire_dir = home
+        .path()
+        .join(".kimi-code/sessions/wd_p/session_k/agents/main");
+    std::fs::create_dir_all(&wire_dir).unwrap();
+    std::fs::write(
+        wire_dir.join("wire.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"usage.record","model":"ollama-cloud/glm-5.3-flash",
+                "usageScope":"turn",
+                "usage":{"inputOther":100,"output":10,"inputCacheRead":0,"inputCacheCreation":0},
+                "time":1699996400000i64})
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".kimi-code/session_index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"sessionId":"session_k","sessionDir":"sessions/wd_p/session_k",
+                "workDir":"/p/Kimi"})
+        ),
+    )
+    .unwrap();
+    let cursors = std::collections::HashMap::new();
+    let ctx = multi_agents_manager_lib::services::usage::collect::CollectContext::new(
+        home.path(),
+        1_700_000_000_000,
+        &cursors,
+    );
+    use multi_agents_manager_lib::services::usage::collect::UsageCollector;
+    let delta = multi_agents_manager_lib::services::usage::collectors::kimi::KimiCollector
+        .collect(&ctx)
+        .unwrap();
+    ledger::apply_delta_conn(&mut conn, UsageSourceId::Kimi, &delta).unwrap();
+
+    // **回读窗口必须与 fixture 同代**：本用例的明细 `hour_key` 由 fixture 的记录时间戳
+    // （`"time":1699996400000` = `T0 - 1h` = 2023-11-14T21:13:20Z）经 `hour_key_of(ts, &TZ)`
+    // （`TZ = SourceTz::HostLocal`）换算得到 → **2023-11-15T05**（UTC+8）。
+    // 用全时段哨兵窗口（本文件 Task 23B 的既有写法）而不是字面量月份：字面量窗口
+    // （旧正文写的是 `"2026-10-01T00".."2026-10-31T23"`）与 fixture 不同代 → SQL
+    // `WHERE hour_key BETWEEN ?1 AND ?2` 命中空集 → 下面的 `.expect("kimi 明细必须落库")` panic。
+    // 哨兵窗口与 fixture 的时间戳**永远不可能再漂**（§3.2.3 FIX-3）。
+    let rows = dao::query_detail_conn(&conn, "0000-00-00T00", "9999-99-99T99");
+    let row = rows
+        .iter()
+        .find(|r| r.session_id == "session_k")
+        .expect("kimi 明细必须落库");
+    assert_eq!(row.provider, "ollama-cloud");
+    assert_eq!(row.model, "glm-5.3-flash", "D9：模型名去掉结构性前缀");
+    assert_eq!(
+        row.provider_kind,
+        SourceKind::Measured,
+        "模型名前缀 = 实测（B6）"
+    );
+    // **把上面那句"逐值推演"变成运行期锁**：明细的 hour_key 必须由 fixture 的记录时间戳
+    // （1699996400000）在**宿主时区**下换算而来。用同一个函数现算，所以断言与宿主时区无关，
+    // 但一旦有人把 fixture 的时间戳改掉、或让 hour_key 走了别的输入（如 ctx.now_ms =
+    // 1700000000000，差 1 小时 → 键就不同），这里立刻红（§3.2.3 FIX-3）。
+    assert_eq!(
+        row.hour_key,
+        multi_agents_manager_lib::services::usage::range::hour_key_of(
+            1_699_996_400_000,
+            &multi_agents_manager_lib::services::usage::range::SourceTz::HostLocal,
+        ),
+        "明细小时桶必须由 fixture 的记录时间戳换算（不得取自 ctx.now_ms / 不得换时区口径）"
+    );
+}

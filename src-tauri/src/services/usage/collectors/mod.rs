@@ -3,6 +3,7 @@
 //! 在同一遍里把四桶/turn/工具/报错/时长一起算出来，只上报原始字段（口径计算在 semantics 等模块）。
 pub mod claude;
 pub mod codex;
+pub mod kimi;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -25,6 +26,7 @@ pub fn all() -> Vec<Box<dyn UsageCollector>> {
     vec![
         Box::new(claude::ClaudeCollector),
         Box::new(codex::CodexCollector),
+        Box::new(kimi::KimiCollector),
     ]
 }
 
