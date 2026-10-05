@@ -865,6 +865,21 @@
       "finalize-scan-failed": "导入落地后读取宠物信息失败"
     }
   },
+  "usage": {
+    "rpc": {
+      "usage-db-failed": "用量账本读写失败：{{err}}",
+      "usage-source-io": "读取用量源文件失败：{{err}}",
+      "usage-source-db-open": "无法只读打开用量数据库：{{err}}",
+      "usage-range-invalid": "时间范围非法：{{err}}",
+      "usage-groupby-invalid": "分组维度非法：记录页只支持按工具或按项目分组",
+      "usage-settings-invalid": "用量设置非法：{{err}}",
+      "usage-disabled": "用量统计已关闭",
+      "usage-internal": "用量操作失败：{{err}}"
+    },
+    "label": {
+      "unknownProvider": "未知"
+    }
+  },
   "errors": {
     "toolDisabled": "工具 {{tools}} 未启用，请先在设置-工具管理中开启",
     "applyInProgress": "工具设置正在保存中，请稍候",

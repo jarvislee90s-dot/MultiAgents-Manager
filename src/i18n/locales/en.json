@@ -865,6 +865,21 @@
       "finalize-scan-failed": "Failed to read pet info after finalize"
     }
   },
+  "usage": {
+    "rpc": {
+      "usage-db-failed": "Usage ledger read/write failed: {{err}}",
+      "usage-source-io": "Failed to read usage source file: {{err}}",
+      "usage-source-db-open": "Cannot open usage database read-only: {{err}}",
+      "usage-range-invalid": "Invalid time range: {{err}}",
+      "usage-groupby-invalid": "Invalid grouping dimension: the records page supports tool or project only",
+      "usage-settings-invalid": "Invalid usage settings: {{err}}",
+      "usage-disabled": "Usage statistics is disabled",
+      "usage-internal": "Usage operation failed: {{err}}"
+    },
+    "label": {
+      "unknownProvider": "Unknown"
+    }
+  },
   "errors": {
     "toolDisabled": "Tool {{tools}} is disabled — enable it in Settings → Tool Management first",
     "applyInProgress": "A tool settings save is already in progress",
