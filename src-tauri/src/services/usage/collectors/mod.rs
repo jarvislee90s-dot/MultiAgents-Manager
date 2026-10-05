@@ -6,6 +6,7 @@ pub mod codex;
 pub mod kimi;
 pub mod opencode;
 pub mod workbuddy;
+pub mod zcode;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -31,6 +32,7 @@ pub fn all() -> Vec<Box<dyn UsageCollector>> {
         Box::new(kimi::KimiCollector),
         Box::new(opencode::OpenCodeCollector),
         Box::new(workbuddy::WorkBuddyCollector),
+        Box::new(zcode::ZCodeCollector),
     ]
 }
 
